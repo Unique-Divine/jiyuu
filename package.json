@@ -1,0 +1,162 @@
+{
+  "name": "markdown-toc",
+  "description": "Generate a markdown table of contents (TOC).",
+  "version": "0.1.0",
+  "homepage": "https://github.com/Unique-Divine/markdown-toc",
+  "author": "Unique Divine (https://github.com/Unique-Divine)",
+  "contributors": [
+    "Jon Schlinkert (http://twitter.com/jonschlinkert)",
+    "=^._.^= (http://maxogden.com)",
+    "Andrés (http://angrykoala.github.io)",
+    "Benjamin Schmitz (https://github.com/Vortex375)",
+    "Christian Raunitschka (raunitschka.de)",
+    "Daniel Chen (http://chendaniely.github.io)",
+    "Daniel Mietchen (http://about.me/daniel.mietchen)",
+    "David Mohl (https://dvcrn.github.io)",
+    "Federico Soave (https://github.com/Feder1co5oave)",
+    "Gary Green (https://github.com/garygreen)",
+    "Josh Duff (https://tehshrike.github.io)",
+    "Matt Ellis (http://sticklebackplastic.com)",
+    "Nicolas Morel (https://github.com/Marsup)",
+    "Rafael Steil (http://rafaelsteil.com)",
+    "Richard Bradley (https://github.com/RichardBradley)",
+    "Seth Vincent (https://sethvincent.com)",
+    "Stefan Walther (http://qliksite.io)",
+    "Tao Wang (https://github.com/twang2218)",
+    "(https://github.com/lu22do)",
+    "Zeke Sikelianos (http://zeke.sikelianos.com)"
+  ],
+  "repository": "Unique-Divine/markdown-toc",
+  "bugs": {
+    "url": "https://github.com/Unique-Divine/markdown-toc/issues"
+  },
+  "license": "MIT",
+  "files": [
+    "src/cli.ts",
+    "src/index.ts",
+    "lib"
+  ],
+  "main": "src/index.ts",
+  "bin": {
+    "markdown-toc": "cli.ts"
+  },
+  "engines": {
+    "node": ">=0.10.0"
+  },
+  "scripts": {
+    "test": "bun test"
+  },
+  "dependencies": {
+    "concat-stream": "^1.5.2",
+    "diacritics-map": "^0.1.0",
+    "gray-matter": "^3.1.1",
+    "lazy-cache": "^2.0.2",
+    "list-item": "^1.1.1",
+    "markdown-link": "^0.1.1",
+    "minimist": "^1.2.0",
+    "mixin-deep": "^1.1.3",
+    "object.pick": "^1.2.0",
+    "remarkable": "^2.0.1",
+    "repeat-string": "^1.6.1",
+    "strip-color": "^0.1.0"
+  },
+  "devDependencies": {
+    "bun": "^1.0.3",
+    "bun-types": "^1.0.3",
+    "eslint": "^8.50.0",
+    "eslint-config-airbnb": "^19.0.4",
+    "eslint-config-airbnb-base": "^15.0.0",
+    "eslint-config-prettier": "^9.0.0",
+    "eslint-import-resolver-typescript": "^3.6.1",
+    "eslint-plugin-import": "^2.28.1",
+    "eslint-plugin-jest": "^27.4.0",
+    "eslint-plugin-jsx-a11y": "^6.7.1",
+    "gulp-format-md": "^2.0.0",
+    "jest": "^29.7.0"
+  },
+  "keywords": [
+    "anchor",
+    "API documentation",
+    "code documentation",
+    "commonmark",
+    "content navigation",
+    "content organization",
+    "developer tools",
+    "docs",
+    "document structure",
+    "document",
+    "documentation tool",
+    "documentation",
+    "glossary",
+    "heading",
+    "headings",
+    "index",
+    "javascript",
+    "links",
+    "markdown parser",
+    "markdown tools",
+    "Markdown-based",
+    "markdown-toc",
+    "markdown",
+    "markup language",
+    "md files",
+    "md parser",
+    "md-toc",
+    "md",
+    "node.js",
+    "npm",
+    "open-source",
+    "outline",
+    "package.json",
+    "plugin",
+    "README tool",
+    "readme",
+    "reference",
+    "remarkable",
+    "remarkableplugin",
+    "render",
+    "renderer",
+    "structure",
+    "table of contents",
+    "table-of-contents",
+    "table",
+    "toc-generator",
+    "toc",
+    "write"
+  ],
+  "verb": {
+    "run": true,
+    "toc": true,
+    "layout": "default",
+    "tasks": [
+      "readme"
+    ],
+    "plugins": [
+      "gulp-format-md"
+    ],
+    "related": {
+      "list": [
+        "gfm-code-blocks",
+        "markdown-link",
+        "markdown-utils",
+        "pretty-remarkable",
+        "remarkable"
+      ]
+    },
+    "reflinks": [
+      "gfm-code-blocks",
+      "markdown-link",
+      "markdown-utils",
+      "pretty-remarkable",
+      "remarkable",
+      "verb",
+      "verb-readme-generator"
+    ],
+    "lint": {
+      "reflinks": true
+    }
+  },
+  "directories": {
+    "test": "test"
+  }
+}
