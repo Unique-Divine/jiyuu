@@ -1,5 +1,5 @@
-import { Token, generate } from "./generate";
-import { RemarkablePlus } from "./remarkable";
+import { Token, generate } from "./generate"
+import { RemarkablePlus } from "./remarkable"
 
 /**
  * Generates a table of contents (TOC) from markdown headings.
@@ -7,11 +7,9 @@ import { RemarkablePlus } from "./remarkable";
  * @param {string} markdown - Markdown string to generate TOC from
  * @returns {TocResult} TOC result
  */
-export const toc = (markdown: string, options?: any): TocResult => {
-  return new RemarkablePlus({ options })
-    .use(generate(options))
-    .render(markdown) as unknown as TocResult;
-};
+export const toc = (markdown: string, options?: any): TocResult => new RemarkablePlus({ options })
+  .use(generate(options))
+  .render(markdown) as unknown as TocResult
 
 /** Table of contents (TOC) result */
 export interface TocResult {

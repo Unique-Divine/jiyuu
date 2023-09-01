@@ -1,5 +1,4 @@
-import { Remarkable } from "remarkable";
-import { TocResult } from "./toc";
+import { Remarkable } from "remarkable"
 
 export interface IRemarkable extends RemarkableComponents {
   // constructor(preset?: string, options?: RemarkableOptions): IRemarkable;
@@ -110,7 +109,7 @@ interface RemarkablePresets {
 }
 
 export class RemarkablePlus implements IRemarkable, RemarkableComponents {
-  core: Remarkable;
+  core: Remarkable
 
   constructor({
     preset,
@@ -119,56 +118,48 @@ export class RemarkablePlus implements IRemarkable, RemarkableComponents {
     preset?: string;
     options?: RemarkableOptions;
   }) {
-    const core = new Remarkable(preset ?? "default", options);
-    this.core = core;
+    const core = new Remarkable(preset ?? "default", options)
+    this.core = core
   }
 
   set = (options: RemarkableOptions): void => {
-    this.core.set(options);
-  };
+    this.core.set(options)
+  }
 
   configure = (presets: RemarkablePresets): void => {
-    this.core.configure(presets);
-  };
+    this.core.configure(presets)
+  }
 
   use = (plugin: Function, options?: RemarkableOptions): IRemarkable => {
-    this.core.use(plugin, options);
-    return this; // Return `this` to allow for chaining.
-  };
+    this.core.use(plugin, options)
+    return this // Return `this` to allow for chaining.
+  }
 
-  parse = (str: string, env?: RemarkableEnv): any[] => {
-    return this.core.parse(str, env);
-  };
+  parse = (str: string, env?: RemarkableEnv): any[] => this.core.parse(str, env)
 
-  render = (str: string, env?: RemarkableEnv): string => {
-    return this.core.render(str, env);
-  };
+  render = (str: string, env?: RemarkableEnv): string => this.core.render(str, env)
 
-  parseInline = (str: string, env?: RemarkableEnv): any[] => {
-    return this.core.parseInline(str, env);
-  };
+  parseInline = (str: string, env?: RemarkableEnv): any[] => this.core.parseInline(str, env)
 
-  renderInline = (str: string, env?: RemarkableEnv): string => {
-    return this.core.renderInline(str, env);
-  };
+  renderInline = (str: string, env?: RemarkableEnv): string => this.core.renderInline(str, env)
 
   get inline(): any {
-    return this.core.inline;
+    return this.core.inline
   }
 
   get block(): any {
-    return this.core.block;
+    return this.core.block
   }
 
   get renderer(): any {
-    return this.core.renderer;
+    return this.core.renderer
   }
 
   get ruler(): any {
-    return this.core.ruler;
+    return this.core.ruler
   }
 
   get options(): RemarkableOptions {
-    return this.core.options;
+    return this.core.options
   }
 }
