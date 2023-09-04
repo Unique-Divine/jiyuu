@@ -156,7 +156,9 @@ describe("options: custom functions:", () => {
   test("should allow a `filter` function to filter out unwanted bullets:", () => {
     const actual = toc(read("test/fixtures/filter.md"), {
       filter(str: string, _ele: any, _arr: any) {
-        return str.indexOf("...") === -1
+        // When first appearance of substring "..." occurs at position -1
+        // TODO: Q: What does this mean?
+        return str.indexOf("...") === -1 ? str : ""
       },
     })
     expect(actual.content).toEqual(
