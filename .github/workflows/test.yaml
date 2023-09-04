@@ -1,0 +1,52 @@
+name: "⚡Tests"
+
+on:
+  pull_request:
+    branches: ["main", "release/*"]
+    paths: ["**.js", "**.ts", "**.tsx", "**.json"]
+  push:
+    branches: ["main", "release/*"]
+    paths: ["**.js", "**.ts", "**.tsx", "**.json"]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: "Check out the repo"
+        uses: actions/checkout@v3
+      - name: "Install bun" 
+        # For running things and for package management "
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: 1.0.0 # Values: latest, <sha>, 1.2.3, canary
+        # Outputs: 
+        # - cache-hit    : Whether the executable was read from cache. Ex. "true"
+        # - bun-version  : The output from running `bun-version`. Ex. "1.0.0"
+        # - bun-revision : The output from running `bun-revision`.
+      - name: "Include dependencies"
+        run: |
+          bun install
+      - name: "Run tests"
+        run: |
+          bun test
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: "Check out the repo"
+        uses: actions/checkout@v3
+      - name: "Install bun" 
+        # For running things and for package management "
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: 1.0.0 # Values: latest, <sha>, 1.2.3, canary
+        # Outputs: 
+        # - cache-hit    : Whether the executable was read from cache. Ex. "true"
+        # - bun-version  : The output from running `bun-version`. Ex. "1.0.0"
+        # - bun-revision : The output from running `bun-revision`.
+      - name: "Include dependencies"
+        run: |
+          bun install
+      - name: "Run tests"
+        run: |
+          bun run fmt

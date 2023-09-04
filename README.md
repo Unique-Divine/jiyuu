@@ -5,8 +5,8 @@ Loading...
 ## Sprint List
 
 - [ ] epic: Publish a v0.1 that works.
-  - [ ] ci: Linting GH workflow
-  - [ ] ci: Tests GH workflow
+  - [x] ci: Tests GH workflow
+  - [x] ci: Linting GH workflow
   - [ ] test: fix all tests from the legacy version
   - [ ] docs: Document the README.
   - [ ] refactor: Move CLI into TypeScript.
