@@ -141,7 +141,8 @@ export function generate(options?: GenerateOptions): any {
       res.tokens = copiedTokens
 
       if (stripFirst) result = result.slice(1)
-      res.content = bullets(result, opts)
+      const { out, bList } = bullets(result, opts)
+      res.content = out
       if (opts.append) res.content += opts.append
       return res
     }
@@ -183,7 +184,7 @@ const newListitemFn = (
  * @param  {GenerateOptions} `options`
  * @return {String}
  */
-export function bullets(arr: Token[], options?: GenerateOptions): string {
+export function bullets(arr: Token[], options?: GenerateOptions): { out: string, bList: BulletList } {
   const opts = {
     indent: "  ",
     ...options,
@@ -191,37 +192,131 @@ export function bullets(arr: Token[], options?: GenerateOptions): string {
 
   opts.chars = opts.chars || opts.bullets || ["-", "*", "+"]
 
-  const unindent = opts.firsth1 === false ? 1 : 0
-
-  // const li =  =>
-  //   listitem(opts);
-
   const fn = typeof opts.filter === "function" ? opts.filter : null
   const li: ListItemFn = newListitemFn(opts, fn)
 
-  const res: string[] = []
+  const includeFirstH1 = opts.firsth1 === true
+  return new BulletsParser(arr).bullets(includeFirstH1, fn, li, opts)
+}
 
-  for (let i = 0; i < arr.length; i++) {
-    const ele = arr[i]
-    ele.lvl -= unindent
+interface IBulletState {
+  firstIsH1: null | boolean,
+  numH1s: number
+  noTokens: boolean
+  soloToken: boolean
+  tokens: Token[]
+}
 
-    if (fn && !fn(ele.content, ele, arr)) {
-      continue
-    }
+type BulletList = { bullet: string, lvl: number, content: string }[]
 
-    const maxDepth = opts.maxdepth ?? 3
-    if (ele.lvl > maxDepth) {
-      continue
-    }
+export class BulletsParser implements IBulletState {
+  firstIsH1: null | boolean
+  numH1s: number
+  noTokens: boolean
+  soloToken: boolean
+  tokens: Token[]
+  hs: { lvl: number, content: string }[]
 
-    const lvl = ele.lvl - opts.highest
-    const out = li(lvl, ele.content)
-
-    res.push(out)
+  constructor(tokens: Token[]) {
+    this.noTokens = tokens.length === 0
+    this.soloToken = tokens.length === 1
+    this.firstIsH1 = null
+    this.numH1s = 0
+    this.tokens = tokens
+    this.hs = []
+    if (tokens.length < 2) return
+    this.parseTokens()
   }
 
-  return res.join("\n")
+  parseTokens = (): void => {
+    console.debug("DEBUG parseTokens: %o", this.tokens)
+    this.tokens.forEach((token, idx) => {
+      const isH1 = token.lvl === 1
+      if (isH1) this.numH1s += 1
+      if (idx === 0) {
+        this.firstIsH1 = isH1
+      }
+
+    })
+  }
+
+  otherH1sPresent = (): boolean => {
+    if (this.numH1s === 0) return false
+    else if (this.firstIsH1 && this.numH1s > 1) return true
+    else if (!this.firstIsH1 && this.numH1s > 0) return true
+    return false
+  }
+
+  bulletList = (includeFirstH1: boolean, fn: FilterFn, li: ListItemFn, opts?: GenerateOptions): BulletList => {
+    const indent: boolean = this.indent(includeFirstH1)
+    const unindent: number = !this.indent(includeFirstH1) ? 1 : 0
+    console.debug("DEBUG obj: %o", { includeFirstH1, unindent, indent })
+    const bList: BulletList = []
+    this.tokens.forEach((ele) => {
+      ele.lvl -= unindent
+
+      if (fn && !fn(ele.content, ele, this.tokens)) {
+        return
+      }
+
+      const maxDepth = opts.maxdepth ?? 3
+      // console.debug("DEBUG obj: %o", { opts, maxDepth, tokens: this.tokens })
+      if (ele.lvl > maxDepth) {
+        return
+      }
+
+      const lvl = ele.lvl - opts.highest
+      const { content } = ele
+      bList.push({ bullet: li(lvl, content), lvl, content })
+
+    })
+    return bList
+  }
+
+  bullets = (includeFirstH1: boolean, fn: FilterFn, li: ListItemFn, opts?: GenerateOptions): { out: string, bList: BulletList } => {
+    const bList = this.bulletList(includeFirstH1, fn, li, opts)
+    return {
+      out: bList.map(item => item.bullet).join("\n"),
+      bList,
+    }
+  }
+
+  // assume arr.length >=  2   -> 2 headings
+  //
+  // case: h1, h2, ..., h1, ... -> indent 
+  // "first is h1" AND "other h1s present"
+  //
+  // case: h2, h2, ... -> unindent  
+  // NOT "first is h1" AND NOT "other h1s present"
+  //
+  // case: h1, h2, ... -> if includeFirstH1 ? indent : unindent  
+  // "first is h1" AND NOT "other h1s present"
+  // 
+  // case: h2, ..., h1, ...  -> indent
+  // NOT "first is h1" AND "other h1s present"
+  //
+  // case: arr.length = 0   -> error
+  // case: arr.length = 1   -> unindent
+  indent = (includeFirstH1: boolean): boolean => {
+    const { firstIsH1 } = this
+    const otherH1sPresent = this.otherH1sPresent()
+
+    console.debug("DEBUG obj: %o", { otherH1sPresent, firstIsH1 })
+
+    if (firstIsH1 && otherH1sPresent) return true
+    else if (firstIsH1 && !otherH1sPresent) return includeFirstH1 ? true : false
+    else if (!firstIsH1 && otherH1sPresent) return true
+    else if (!firstIsH1 && !otherH1sPresent) return true
+    else return false
+    // if (this.soloToken) return false
+    // if (this.noTokens) return false
+  }
+
 }
+
+
+
+
 
 /**
  * Get the highest heading level in the array, so

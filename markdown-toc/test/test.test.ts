@@ -284,6 +284,7 @@ describe("toc", () => {
   })
 
   test("should remove the first H1 when `firsth1` is false:", () => {
+    console.debug("DEBUG TC")
     expect(toc("# AAA\n## BBB\n### CCC", { firsth1: false }).content).toEqual(
       ["- [BBB](#bbb)", "  * [CCC](#ccc)"].join("\n"),
     )
