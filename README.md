@@ -1,19 +1,26 @@
-# markdown-toc
+# Unique-Divine/自由 (jiyuu)
 
-Loading...
 
-## Sprint List
+## ⚡jiyuu  
 
-- [ ] epic: Publish a v0.1 that works.
-  - [x] ci: Tests GH workflow
-  - [x] ci: Linting GH workflow
-  - [ ] test: fix all tests from the legacy version
-  - [ ] docs: Document the README.
-  - [ ] refactor: Move CLI into TypeScript.
-  - [ ] feat: Restore CLI functionality
-  - [ ] docs: Write function docs for everything that's not obvious. 
-  - [ ] fix: Fix the max depth bug and make note of that in the old repo. 
+├── 📂 [markdown-toc](./markdown-toc): Markdown table of contents (TOC) generator  
+├── 📂 evm-nibi: Loading ... 🏗️   
+├── 📂 discord-nibiru  #  
+└── 📦 scripts         # Scripts crate in Rust.  
+├── justfile     # Runs project-specific commands  
+└── README.md  
+<!-- └── 📂 packages        # Other Rust packages -->
+<!-- ├── Cargo.toml    -->
 
-- [ ] epic: Other
-  - [ ] fix: Provide better type safety for `Remarkable`, or considering
-    absorbing it into this repo for type support.
+## Hacking
+
+Install `just` to run project-specific commands.
+```bash
+cargo install just
+```
+
+You can view the list of available development commands with `just -ls`.
+
+Ref: [github.com/casey/just](https://github.com/casey/just)
+
+<!-- └── 📂 shifter       # [description]. -->
