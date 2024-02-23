@@ -36,16 +36,15 @@
     "src/index.ts",
     "lib"
   ],
-  "main": "src/index.ts",
+  "main": "src/cli.ts",
   "bin": {
-    "markdown-toc": "cli.ts"
+    "markdown-toc": "src/cli.ts"
   },
   "engines": {
     "node": ">=0.10.0"
   },
+  "type": "module",
   "scripts": {
-    "fmt": "eslint --fix src && eslint --fix test",
-    "lint": "bun run fmt",
     "test": "bun test"
   },
   "dependencies": {
@@ -63,19 +62,9 @@
     "strip-color": "^0.1.0"
   },
   "devDependencies": {
-    "@typescript-eslint/eslint-plugin": "^6.7.0",
-    "@typescript-eslint/parser": "^6.7.0",
     "bun": "^1.0.3",
     "bun-types": "^1.0.3",
-    "eslint": "^8.50.0",
-    "eslint-config-airbnb": "^19.0.4",
-    "eslint-config-airbnb-base": "^15.0.0",
-    "eslint-config-prettier": "^9.0.0",
-    "eslint-import-resolver-typescript": "^3.6.1",
-    "eslint-plugin-import": "^2.28.1",
-    "eslint-plugin-jest": "^27.4.0",
-    "eslint-plugin-jsx-a11y": "^6.7.1",
-    "eslint-plugin-prettier": "^5.0.0",
+    "globals": "^15.4.0",
     "gulp-format-md": "^2.0.0",
     "jest": "^29.7.0",
     "prettier": "^3.0.3",
