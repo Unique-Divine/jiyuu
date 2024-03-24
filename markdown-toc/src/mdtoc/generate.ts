@@ -21,19 +21,19 @@ export { insert }
 export { slugify }
 
 interface GenerateOptions extends SlugifyOptions {
-  firsth1?: boolean;
-  maxdepth?: number;
-  linkify?: boolean | LinkifyFn;
-  num?: number;
-  strip?: boolean | string[] | StripFn;
-  titleize?: boolean | TitleizeFn;
+  firsth1?: boolean
+  maxdepth?: number
+  linkify?: boolean | LinkifyFn
+  num?: number
+  strip?: boolean | string[] | StripFn
+  titleize?: boolean | TitleizeFn
   // Add other possible options here...
-  hLevel?: number;
-  bullets?: string[];
-  chars?: string[];
-  filter?: FilterFn;
-  append?: string;
-  highest?: number;
+  hLevel?: number
+  bullets?: string[]
+  chars?: string[]
+  filter?: FilterFn
+  append?: string
+  highest?: number
 }
 
 type LinkifyFn = (
@@ -41,33 +41,33 @@ type LinkifyFn = (
   text: string,
   slug: string,
   options: GenerateOptions,
-) => string;
+) => string
 
-type StripFn = (str: string, opts?: GenerateOptions) => string;
+type StripFn = (str: string, opts?: GenerateOptions) => string
 
-type TitleizeFn = (str: string, options?: GenerateOptions) => string;
+type TitleizeFn = (str: string, options?: GenerateOptions) => string
 
 /** Returns a boolean indicating whether to filter the item */
-type FilterFn = (content: string, ele: Token, arr: Token[]) => boolean;
+type FilterFn = (content: string, ele: Token, arr: Token[]) => boolean
 
 export interface Token {
-  content: string;
-  type?: string;
-  lvl: number;
-  hLevel: number;
-  i?: number;
-  seen?: number;
-  slug?: string;
-  children?: Token[];
-  lines: number[];
+  content: string
+  type?: string
+  lvl: number
+  hLevel: number
+  i?: number
+  seen?: number
+  slug?: string
+  children?: Token[]
+  lines: number[]
 }
 
 export interface JsonToken {
-  content: string;
-  slug: string;
-  lvl: number;
-  i: number;
-  seen: number;
+  content: string
+  slug: string
+  lvl: number
+  i: number
+  seen: number
 }
 
 export function generate(options?: GenerateOptions): any {
@@ -75,17 +75,17 @@ export function generate(options?: GenerateOptions): any {
   const stripFirst = opts.firsth1 === false
   if (opts.linkify === undefined) opts.linkify = true
 
-  return function(md: RemarkablePlus) {
-    md.renderer.render = function(tokens: Token[]) {
+  return function (md: RemarkablePlus) {
+    md.renderer.render = function (tokens: Token[]) {
       const copiedTokens = [...tokens]
       const seen: { [key: string]: number } = {}
       let tocstart = -1
       const arr: Token[] = []
       const res: {
-        json?: JsonToken[];
-        highest?: number;
-        tokens?: Token[];
-        content?: string;
+        json?: JsonToken[]
+        highest?: number
+        tokens?: Token[]
+        content?: string
       } = {}
 
       for (let i = 0; i < copiedTokens.length; i++) {
@@ -150,7 +150,7 @@ export function generate(options?: GenerateOptions): any {
 }
 
 /** Func that creates a single markdown list item for the Toc. */
-type ListItemFn = (level: number, content: string) => string;
+type ListItemFn = (level: number, content: string) => string
 
 const isListItemFn = (fn: any): fn is ListItemFn => {
   if (typeof fn !== "function") {
@@ -184,7 +184,10 @@ const newListitemFn = (
  * @param  {GenerateOptions} `options`
  * @return {String}
  */
-export function bullets(arr: Token[], options?: GenerateOptions): { out: string, bList: BulletList } {
+export function bullets(
+  arr: Token[],
+  options?: GenerateOptions,
+): { out: string; bList: BulletList } {
   const opts = {
     indent: "  ",
     ...options,
@@ -200,14 +203,14 @@ export function bullets(arr: Token[], options?: GenerateOptions): { out: string,
 }
 
 interface IBulletState {
-  firstIsH1: null | boolean,
+  firstIsH1: null | boolean
   numH1s: number
   noTokens: boolean
   soloToken: boolean
   tokens: Token[]
 }
 
-type BulletList = { bullet: string, lvl: number, content: string }[]
+type BulletList = { bullet: string; lvl: number; content: string }[]
 
 export class BulletsParser implements IBulletState {
   firstIsH1: null | boolean
@@ -215,7 +218,7 @@ export class BulletsParser implements IBulletState {
   noTokens: boolean
   soloToken: boolean
   tokens: Token[]
-  hs: { lvl: number, content: string }[]
+  hs: { lvl: number; content: string }[]
 
   constructor(tokens: Token[]) {
     this.noTokens = tokens.length === 0
@@ -236,7 +239,6 @@ export class BulletsParser implements IBulletState {
       if (idx === 0) {
         this.firstIsH1 = isH1
       }
-
     })
   }
 
@@ -247,7 +249,12 @@ export class BulletsParser implements IBulletState {
     return false
   }
 
-  bulletList = (includeFirstH1: boolean, fn: FilterFn, li: ListItemFn, opts?: GenerateOptions): BulletList => {
+  bulletList = (
+    includeFirstH1: boolean,
+    fn: FilterFn,
+    li: ListItemFn,
+    opts?: GenerateOptions,
+  ): BulletList => {
     const indent: boolean = this.indent(includeFirstH1)
     const unindent: number = !this.indent(includeFirstH1) ? 1 : 0
     console.debug("DEBUG obj: %o", { includeFirstH1, unindent, indent })
@@ -268,30 +275,34 @@ export class BulletsParser implements IBulletState {
       const lvl = ele.lvl - opts.highest
       const { content } = ele
       bList.push({ bullet: li(lvl, content), lvl, content })
-
     })
     return bList
   }
 
-  bullets = (includeFirstH1: boolean, fn: FilterFn, li: ListItemFn, opts?: GenerateOptions): { out: string, bList: BulletList } => {
+  bullets = (
+    includeFirstH1: boolean,
+    fn: FilterFn,
+    li: ListItemFn,
+    opts?: GenerateOptions,
+  ): { out: string; bList: BulletList } => {
     const bList = this.bulletList(includeFirstH1, fn, li, opts)
     return {
-      out: bList.map(item => item.bullet).join("\n"),
+      out: bList.map((item) => item.bullet).join("\n"),
       bList,
     }
   }
 
   // assume arr.length >=  2   -> 2 headings
   //
-  // case: h1, h2, ..., h1, ... -> indent 
+  // case: h1, h2, ..., h1, ... -> indent
   // "first is h1" AND "other h1s present"
   //
-  // case: h2, h2, ... -> unindent  
+  // case: h2, h2, ... -> unindent
   // NOT "first is h1" AND NOT "other h1s present"
   //
-  // case: h1, h2, ... -> if includeFirstH1 ? indent : unindent  
+  // case: h1, h2, ... -> if includeFirstH1 ? indent : unindent
   // "first is h1" AND NOT "other h1s present"
-  // 
+  //
   // case: h2, ..., h1, ...  -> indent
   // NOT "first is h1" AND "other h1s present"
   //
@@ -311,12 +322,7 @@ export class BulletsParser implements IBulletState {
     // if (this.soloToken) return false
     // if (this.noTokens) return false
   }
-
 }
-
-
-
-
 
 /**
  * Get the highest heading level in the array, so
@@ -344,7 +350,8 @@ export function linkify(tok: Token, options?: GenerateOptions): Token {
     const escapedSlug = (querystring as any).escape(slug)
 
     // console.debug("DEBUG linkfiy: %o", { escapedSlug, opts, tok, text, slug, })
-    let linkifyFunc: LinkifyFn = (_tok, text, escapedSlug, _opts) => markdownLink(text, `#${escapedSlug}`)
+    let linkifyFunc: LinkifyFn = (_tok, text, escapedSlug, _opts) =>
+      markdownLink(text, `#${escapedSlug}`)
     if (opts && typeof opts.linkify === "function") {
       linkifyFunc = opts.linkify
     }

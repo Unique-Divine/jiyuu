@@ -12,18 +12,18 @@ function trim(str: string) {
 
 interface InsertOptions extends SlugifyOptions {
   /**  Regex to find toc insertion points  */
-  regex?: RegExp;
+  regex?: RegExp
 
   /** Opening tag for toc */
-  open?: string;
+  open?: string
 
   /** Closing tag for toc */
-  close?: string;
+  close?: string
 
   /** Custom toc content to insert */
-  toc?: string;
+  toc?: string
 
-  linkify?: boolean;
+  linkify?: boolean
 }
 
 const defaultInsertOptions: InsertOptions = {
@@ -46,7 +46,8 @@ const defaultInsertOptions: InsertOptions = {
 export function insert(str: string, options?: InsertOptions): string {
   options = { ...defaultInsertOptions, ...options }
 
-  let { regex, open, close } = options
+  let { close } = options
+  const { regex, open } = options
   if (!close) close = defaultInsertOptions.close!
 
   let newlines = ""
@@ -76,7 +77,7 @@ export function insert(str: string, options?: InsertOptions): string {
   }
 
   if (sections.length === 2) {
-    sections.splice(1, 0, `${open + toc(last, options).content  }\n\n${  close}`)
+    sections.splice(1, 0, `${open + toc(last, options).content}\n\n${close}`)
   }
 
   const resultString = sections.join("\n\n") + newlines
@@ -97,25 +98,25 @@ const grayMatter = (
  */
 export interface MatterFile {
   /** Parsed front matter data */
-  data: { [key: string]: any };
+  data: { [key: string]: any }
 
   /** Content string without front matter */
-  content: string;
+  content: string
 
   /** Excerpt extracted from content */
-  excerpt: string;
+  excerpt: string
 
   /** Original unmodified input */
-  orig: string;
+  orig: string
 
   /** Language defined in front matter */
-  language?: string;
+  language?: string
 
   /** Raw front matter string */
-  matter?: string;
+  matter?: string
 
   /** File path if read from the file system */
-  path?: string;
+  path?: string
 }
 
 // function split(str, re) {

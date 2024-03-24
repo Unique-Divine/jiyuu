@@ -6,12 +6,12 @@ import diacritics from "diacritics-map"
 
 export { getTitle, replaceDiacritics, slugify, defaultOptions }
 export interface SlugifyOptions {
-  slugify?: SlugifyFn | boolean;
-  stripHeadingTags?: boolean;
-  num?: number;
+  slugify?: SlugifyFn | boolean
+  stripHeadingTags?: boolean
+  num?: number
 }
 
-export type SlugifyFn = (str: string, options: SlugifyOptions) => string;
+export type SlugifyFn = (str: string, options: SlugifyOptions) => string
 
 /**
  * Get the "title" from a markdown link
@@ -63,7 +63,7 @@ function slugify(str: string, options?: SlugifyOptions): string {
     .join("")
   str = replaceDiacritics(str)
   if (options.num) {
-    str += `-${  options.num}`
+    str += `-${options.num}`
   }
   return str
 }
