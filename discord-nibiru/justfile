@@ -1,0 +1,15 @@
+workspaces := "./packages"
+# workspaces := "./packages ./core"
+
+# Displays available recipes by running `just -l`.
+setup:
+  #!/usr/bin/env bash
+  just -l
+
+install:
+  bun install
+
+dev:
+  bun run src/main.ts
+
+alias start := dev

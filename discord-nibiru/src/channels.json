@@ -1,0 +1,1438 @@
+[
+  {
+    "name": "━━━ 🌎 Community ━━━",
+    "id": "947911972341579897",
+    "type": "GuildCategory"
+  },
+  {
+    "name": "💬︲general",
+    "id": "947911972341579899",
+    "type": "GuildText"
+  },
+  {
+    "name": "👋︲welcome",
+    "id": "947912808664801322",
+    "type": "GuildText"
+  },
+  {
+    "name": "🐸︲memes-and-off-topic",
+    "id": "947912839841054730",
+    "type": "GuildText"
+  },
+  {
+    "name": "🌅︲gm-gn",
+    "id": "947913912014233621",
+    "type": "GuildText"
+  },
+  {
+    "name": "📜︲rules",
+    "id": "947914252574920744",
+    "type": "GuildText"
+  },
+  {
+    "name": "━━━ Private ━━━",
+    "id": "947915473998192670",
+    "type": "GuildCategory"
+  },
+  {
+    "name": "⛓🧪︲mods",
+    "id": "947917268040425583",
+    "type": "GuildText"
+  },
+  {
+    "name": "━━━ TESTNET ━━━",
+    "id": "984839853151760414",
+    "type": "GuildCategory"
+  },
+  {
+    "name": "🫶︲feedback",
+    "id": "984839976615305276",
+    "type": "GuildText"
+  },
+  {
+    "name": "💦︲faucet",
+    "id": "984840062871175219",
+    "type": "GuildText"
+  },
+  {
+    "name": "🔗︲official-links",
+    "id": "1016938126763114517",
+    "type": "GuildText"
+  },
+  {
+    "name": "📢︲announcements",
+    "id": "1017155496026841118",
+    "type": "GuildNews"
+  },
+  {
+    "name": "🎧︲listening-reccs",
+    "id": "1020067964759855265",
+    "type": "GuildText"
+  },
+  {
+    "name": "━━━ INFO ━━━",
+    "id": "1020073144486215731",
+    "type": "GuildCategory"
+  },
+  {
+    "name": "🌏︲nibiru-中文",
+    "id": "1036141044607242291",
+    "type": "GuildText"
+  },
+  {
+    "name": "🌏︲nibiru-русский",
+    "id": "1037090097264336976",
+    "type": "GuildText"
+  },
+  {
+    "name": "International",
+    "id": "1037570626933772388",
+    "type": "GuildCategory"
+  },
+  {
+    "name": "🌏︲nibiru-turkish",
+    "id": "1037785182838738954",
+    "type": "GuildText"
+  },
+  {
+    "name": "debugging-thunderdome",
+    "id": "1038140045237964830",
+    "type": "GuildText"
+  },
+  {
+    "name": "validator-role-request",
+    "id": "1038228331474190387",
+    "type": "GuildText"
+  },
+  {
+    "name": "balance",
+    "id": "1055132694540976200",
+    "type": "GuildText"
+  },
+  {
+    "name": "🌏︲nibiru-indonesia",
+    "id": "1055291771409682433",
+    "type": "GuildText"
+  },
+  {
+    "name": "🔪︲report-spam",
+    "id": "1056251480321036289",
+    "type": "GuildText"
+  },
+  {
+    "name": "validator-announcement",
+    "id": "1057790701649272892",
+    "type": "GuildNews"
+  },
+  {
+    "name": "🌌︲ambassador-q-and-a",
+    "id": "1075646988219072543",
+    "type": "GuildForum"
+  },
+  {
+    "name": "faq-private-test",
+    "id": "1080906785994571858",
+    "type": "GuildForum"
+  },
+  {
+    "name": "ama-questions",
+    "id": "1083475931747864628",
+    "type": "GuildText"
+  },
+  {
+    "name": "⛓︲testnet-forum",
+    "id": "1084723343892168794",
+    "type": "GuildForum"
+  },
+  {
+    "name": "Amatjabis#2364",
+    "id": "1078617367699017768",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "交流区",
+    "id": "1083647050203275276",
+    "type": "GuildPrivateThread"
+  },
+  {
+    "name": "msg guild Nibiru Chain",
+    "id": "1084758984310919188",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Mobile browser tx error",
+    "id": "1079975659549499442",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "My validator transactions not showing in explorer.",
+    "id": "1080412315343663114",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Good day I can t get tokens in the",
+    "id": "1081278247637094400",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "can t get list to redelegate staking",
+    "id": "1081288197109207070",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Sheeesh",
+    "id": "1083102304376475658",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": ".",
+    "id": "1038052675532632174",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "request",
+    "id": "1057579130373292103",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "космовизор запустил а от ноду чет никак",
+    "id": "1080231929254781048",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Initial questions",
+    "id": "1075647584137400371",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "complements",
+    "id": "1076465984942133329",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "How can I be a part of ambassadors?",
+    "id": "1077247022094090240",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "hello",
+    "id": "1077429377962356776",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Ready for",
+    "id": "1077519801892732988",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "greetings",
+    "id": "1077592566758912131",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Iranian Ambassador",
+    "id": "1077594526996246529",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Will more ambassadors be required as the community grows or there is only one shot at it?",
+    "id": "1077623964152635443",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "GRAPHICS AND UI",
+    "id": "1078031374310711356",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "when will the ambasaddor start sir?",
+    "id": "1078205253914210335",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "I'm ready to be ambassador.",
+    "id": "1078399502945357954",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "how to join as an ambassador to this project ?",
+    "id": "1079811433702883433",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Aprove",
+    "id": "1080026825905934376",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Ambassador program application",
+    "id": "1080178097158094890",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Видео гайд по прохождению тестнета!",
+    "id": "1080254016589680731",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Feedback",
+    "id": "1080430426931335229",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "mod or ambassador",
+    "id": "1080487206101209121",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "where to confirm TX's",
+    "id": "1081699316260950096",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Nibiru Incentivized Testnet Registration - failed address",
+    "id": "1082075250453397604",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Ambassador Program",
+    "id": "1082275384042717244",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Ambassador Programme",
+    "id": "1082301362878021772",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Ambassador Programme",
+    "id": "1082339771138986064",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Ambassador",
+    "id": "1082630875553992745",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "node error",
+    "id": "1084505624873803796",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Ambassador Program",
+    "id": "1084693148749537360",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Voice Channels",
+    "id": "1081531620152070195",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Support",
+    "id": "1081532350145495070",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Nibiru Community",
+    "id": "1081533843179307119",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Nibiru Info",
+    "id": "1081534310408011867",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Welcome",
+    "id": "1081535057241579530",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Node is trying to connect to peers",
+    "id": "1084729577152196659",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "State Sync (NIT-1)",
+    "id": "1084729591240859658",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Can't start a node",
+    "id": "1084783338172190841",
+    "type": "GuildPublicThread"
+  }
+][
+  {
+    "name": "━━━ 🌎 Community ━━━",
+    "id": "947911972341579897",
+    "type": "GuildCategory"
+  },
+  {
+    "name": "💬︲general",
+    "id": "947911972341579899",
+    "type": "GuildText"
+  },
+  {
+    "name": "🐸︲memes",
+    "id": "947912839841054730",
+    "type": "GuildText"
+  },
+  {
+    "name": "🌅︲gm-gn",
+    "id": "947913912014233621",
+    "type": "GuildText"
+  },
+  {
+    "name": "📜︲rules",
+    "id": "947914252574920744",
+    "type": "GuildText"
+  },
+  {
+    "name": "━━━ Private ━━━",
+    "id": "947915473998192670",
+    "type": "GuildCategory"
+  },
+  {
+    "name": "⛓🧪︲mods",
+    "id": "947917268040425583",
+    "type": "GuildText"
+  },
+  {
+    "name": "━━━ TESTNET ━━━",
+    "id": "984839853151760414",
+    "type": "GuildCategory"
+  },
+  {
+    "name": "🫶︲feedback",
+    "id": "984839976615305276",
+    "type": "GuildText"
+  },
+  {
+    "name": "💦︲faucet",
+    "id": "984840062871175219",
+    "type": "GuildText"
+  },
+  {
+    "name": "🔗︲official-links",
+    "id": "1016938126763114517",
+    "type": "GuildText"
+  },
+  {
+    "name": "📢︲announcements",
+    "id": "1017155496026841118",
+    "type": "GuildNews"
+  },
+  {
+    "name": "🎧︲listening-reccs",
+    "id": "1020067964759855265",
+    "type": "GuildText"
+  },
+  {
+    "name": "━━━ INFO ━━━",
+    "id": "1020073144486215731",
+    "type": "GuildCategory"
+  },
+  {
+    "name": "🌏︲nibiru-中文",
+    "id": "1036141044607242291",
+    "type": "GuildText"
+  },
+  {
+    "name": "🌏︲nibiru-русский",
+    "id": "1037090097264336976",
+    "type": "GuildText"
+  },
+  {
+    "name": "International",
+    "id": "1037570626933772388",
+    "type": "GuildCategory"
+  },
+  {
+    "name": "🌏︲nibiru-turkish",
+    "id": "1037785182838738954",
+    "type": "GuildText"
+  },
+  {
+    "name": "validator-role-request",
+    "id": "1038228331474190387",
+    "type": "GuildText"
+  },
+  {
+    "name": "balance",
+    "id": "1055132694540976200",
+    "type": "GuildText"
+  },
+  {
+    "name": "🌏︲nibiru-indonesia",
+    "id": "1055291771409682433",
+    "type": "GuildText"
+  },
+  {
+    "name": "🔪︲report-spam",
+    "id": "1056251480321036289",
+    "type": "GuildText"
+  },
+  {
+    "name": "🌌︲ambassador-forum",
+    "id": "1075646988219072543",
+    "type": "GuildForum"
+  },
+  {
+    "name": "︲ama-questions",
+    "id": "1083475931747864628",
+    "type": "GuildText"
+  },
+  {
+    "name": "⛓︲testnet-forum",
+    "id": "1084723343892168794",
+    "type": "GuildForum"
+  },
+  {
+    "name": "📊 SERVER STATS 📊",
+    "id": "1085342867310002198",
+    "type": "GuildCategory"
+  },
+  {
+    "name": "members-76382",
+    "id": "1085343135862894612",
+    "type": "GuildText"
+  },
+  {
+    "name": "faq",
+    "id": "1086024397569142876",
+    "type": "GuildForum"
+  },
+  {
+    "name": "🎓︲nibiru-academy",
+    "id": "1088179386789920838",
+    "type": "GuildNews"
+  },
+  {
+    "name": "🎨︲content",
+    "id": "1088575073687961671",
+    "type": "GuildText"
+  },
+  {
+    "name": "ambassadors-only",
+    "id": "1088611877153677343",
+    "type": "GuildText"
+  },
+  {
+    "name": "Logo medit kit",
+    "id": "1083852399686451302",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "交流区",
+    "id": "1083647050203275276",
+    "type": "GuildPrivateThread"
+  },
+  {
+    "name": "환영",
+    "id": "1087024129716260894",
+    "type": "GuildPrivateThread"
+  },
+  {
+    "name": "msg guild Nibiru Chain",
+    "id": "1084758984310919188",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Mobile browser tx error",
+    "id": "1079975659549499442",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "My validator transactions not showing in explorer.",
+    "id": "1080412315343663114",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Good day I can t get tokens in the",
+    "id": "1081278247637094400",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "can t get list to redelegate staking",
+    "id": "1081288197109207070",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Sheeesh",
+    "id": "1083102304376475658",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": ".",
+    "id": "1038052675532632174",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "$request nibi1zm2lpj90u86v9mu2xth57w6jqjqzac2qk6fn55",
+    "id": "1040895402221781033",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "космовизор запустил а от ноду чет никак",
+    "id": "1080231929254781048",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Initial questions",
+    "id": "1075647584137400371",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "How can I be a part of ambassadors?",
+    "id": "1077247022094090240",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "hello",
+    "id": "1077429377962356776",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "how to join as an ambassador to this project ?",
+    "id": "1079811433702883433",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Ambassador program application",
+    "id": "1080178097158094890",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Видео гайд по прохождению тестнета!",
+    "id": "1080254016589680731",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Feedback",
+    "id": "1080430426931335229",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Nibiru Incentivized Testnet Registration - failed address",
+    "id": "1082075250453397604",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Ambassador Program",
+    "id": "1082275384042717244",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Ambassador Programme",
+    "id": "1082301362878021772",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Ambassador Programme",
+    "id": "1082339771138986064",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Ambassador Program",
+    "id": "1084693148749537360",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "I have error when Im trying to create validator, please help",
+    "id": "1085575243122360401",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Amb program",
+    "id": "1085910624246190160",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Collaboration & Listings Purposes",
+    "id": "1086525347341807716",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Nibiru Chain ambassador in Poland",
+    "id": "1086575866613616670",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Have A problem",
+    "id": "1086282794281468034",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "validatör role",
+    "id": "1088062914474295337",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Node Not Sync to the testnet network",
+    "id": "1086188727048613908",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "faucet not working",
+    "id": "1087424439643291699",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Do we have a list of all commands?",
+    "id": "1087968700407222373",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "parse error: Invalid numeric literal at line 1, column 6",
+    "id": "1086929626410012762",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "nibiru-0",
+    "id": "1088403534795526215",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "wallet connect",
+    "id": "1087454520897982464",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Balance of token Decimal is missing it considered as whole number in perps kindly check this",
+    "id": "1089523206274166905",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "(7) Failed to connect to localhost port 26657: Connection refused",
+    "id": "1088176686476054629",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "stacking not working",
+    "id": "1089866894309347428",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "#staking app refresh",
+    "id": "1085708809445572759",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "stke page  validators not showing",
+    "id": "1090062048106401792",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Node Not Sync",
+    "id": "1086068997801394196",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Timed Out messages",
+    "id": "1088106395066449950",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Redelegation in dashboard -> \"Transaction failed\"",
+    "id": "1085918861678891078",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Failed with result 'exit-code'.",
+    "id": "1085854171841953822",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Failed to connect to localhost port 26657: Connection refused",
+    "id": "1086235988617089114",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Valoper address",
+    "id": "1086582302076842094",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Trying to run my Node...5 days and on going.. Let's do this with Appieshabie",
+    "id": "1085894064668418048",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "TEST NIBIRU",
+    "id": "1086730142098931802",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "sed: -e expression #1, char 40: unterminated `s' command",
+    "id": "1088757941001257061",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "feedback testnet",
+    "id": "1089663657094426727",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "passphrase problem...",
+    "id": "1086655439934070824",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "how can I check my logs",
+    "id": "1086324308483260526",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "I tested the site everything is fine Wallet: nibi1ckljtj3ujdj3xuk7yajcq53d9kg5jhuz7t86vp",
+    "id": "1086682667870855280",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Node logging configuration",
+    "id": "1087310375730552894",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "wallet not connect",
+    "id": "1088382365904158781",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "joined to pool",
+    "id": "1089680963572875375",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Good morning. I'm trying to sync since Sunday but it didn't finished yet. Is it normal?",
+    "id": "1086205701602422846",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "which version of Cosmos SDK is used by Niburu ?",
+    "id": "1085899442705674240",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "node is not getting on Delegations",
+    "id": "1089217276504457380",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "TESTED NIBIRU",
+    "id": "1086713218715623517",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Today's Errors/Issues - Part 1",
+    "id": "1089788831231905842",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "why the node is not synchronized ?",
+    "id": "1085955191318261780",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Node check",
+    "id": "1087748305913643159",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "could not get latest height",
+    "id": "1087425762195419198",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "ERROR DASHBOARD",
+    "id": "1087374997561016320",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Error: invalid shares amount after re-delegate command",
+    "id": "1086656335833219122",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "peer",
+    "id": "1089964559047065680",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Failed to start nibiru.service: Unit nibiru.service not found.",
+    "id": "1087519764508844133",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Please, automate the process of closing this window",
+    "id": "1086224878253907998",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Stake error Popup",
+    "id": "1085875491484999680",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Error with creating validator",
+    "id": "1085950833524486174",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Creating Validator",
+    "id": "1086061757799350292",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "cryptoaddict itn",
+    "id": "1086306398708715591",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "synchronization issue",
+    "id": "1087817232479965224",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "can’t deal with synchronising",
+    "id": "1085925209640546344",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "I set up a pricefeeder with inactive validator and getting such logs:",
+    "id": "1085637911321522218",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Can I change the address I submitted to GLEAM?",
+    "id": "1085947694251524116",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "# macarico#7266  nibi1zkw45ucav84lp4dtj743e9t56knxpshrqs0lm9",
+    "id": "1087015959883153448",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Checking synchronization",
+    "id": "1086779236020387931",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Validator stops validating?",
+    "id": "1085895019401060422",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Having this error",
+    "id": "1086058264594239688",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "My Testnet Issues",
+    "id": "1089379428947206237",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "can't get faucet",
+    "id": "1087807949159792680",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "site that does not sync",
+    "id": "1086369393614790697",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Create Validator error",
+    "id": "1085615699583582428",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "validator key's",
+    "id": "1088118073472593980",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "help me, pricefeeder start error",
+    "id": "1090470794309673013",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "I lost my wallet",
+    "id": "1087983008100909076",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "windows",
+    "id": "1089801080671571988",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "State Sync (NIT-1)",
+    "id": "1084729591240859658",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "tell me where to insert the validator and what exactly to insert??",
+    "id": "1087827663990837339",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "my nodes have been returning true when i try to check synchronization. Does my log look good?",
+    "id": "1086513097570799736",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "running the node for weeks now but still have not synced",
+    "id": "1090445291737583757",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Failed to synchronize nodes after receiving test coins",
+    "id": "1089413378285502596",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "please how do I stake to an oracle",
+    "id": "1085613067875921920",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "I recently tested your stake Testnet on the app.nibiru.fi platform and wanted to share my feedback",
+    "id": "1085894894108803183",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Node not syncing",
+    "id": "1087470937399627816",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Tesnet working good",
+    "id": "1086299640070164561",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Error after deleting log file",
+    "id": "1085549382830669874",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "feedback  testnet",
+    "id": "1089640793616158860",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Always true",
+    "id": "1090232058976153640",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "i run a full node, which commands to see the log?",
+    "id": "1085749473042513930",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Can't Sync",
+    "id": "1086296169950486651",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Node not synced since 23h",
+    "id": "1086055783474667540",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "CHange Nibiru Ports",
+    "id": "1089255515353264258",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Can you help me.",
+    "id": "1087042446833238127",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Not able to connect my Keplr wallet",
+    "id": "1087424926820085783",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "I can't proceed due to lack of validators.",
+    "id": "1089340403494440991",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "It is Imposible to connect kepler to the network ¿Whats happen?",
+    "id": "1088180036655399064",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "which is keyring passphrase?",
+    "id": "1089735876919177276",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Node synchronization.",
+    "id": "1086600908567228518",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "wallet address for Gleam form",
+    "id": "1085648762669641910",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "The app doesn't work, I can't participate in the test",
+    "id": "1087789739924521051",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "can't delegate or redelegate",
+    "id": "1086032547621908561",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "A lot of mistakes.",
+    "id": "1089944237677744228",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Node Problem",
+    "id": "1090351477630976120",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "My node not synching.",
+    "id": "1085881864713154601",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "help",
+    "id": "1087811927998205952",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Stake",
+    "id": "1089162769485529148",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Can't start a node",
+    "id": "1084783338172190841",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Moniker and Wallet Name",
+    "id": "1086071907192946719",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Tokens do not arrive",
+    "id": "1085882999435960350",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Help Me",
+    "id": "1086975511730856046",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "I can't get test tokens for further work. Error.",
+    "id": "1090274536513089576",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Today's Errors/Issues - Part 2",
+    "id": "1089789048526213251",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Can not connect wallet for faucet",
+    "id": "1088119915174711417",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "How do we restart the node on terminal?",
+    "id": "1087407974198288415",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "I can't take faucet",
+    "id": "1085611863221473340",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "My node seems stuck at a specific block",
+    "id": "1087420257523728505",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Putty faucet",
+    "id": "1087690972051279912",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "why is my node inactive? please help",
+    "id": "1086916219174653952",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Nibiru chain site work well and fast. I haven't got any problems last two days. I tested everything",
+    "id": "1086580876026056744",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "problem nibid balances",
+    "id": "1088472960127471636",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "ledger wallet keep rejecting anything in testnet",
+    "id": "1090287504319594617",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "error rpc",
+    "id": "1085886919566704712",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Vote in at least 10000 VotePeriods",
+    "id": "1086725381693902939",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Delete Wallet",
+    "id": "1086433370399068160",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Node is trying to connect to peers",
+    "id": "1084729577152196659",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "fault finding - Why jailed?",
+    "id": "1087109916436742154",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "i got this error when i Send a create-validator transaction",
+    "id": "1085308757107540151",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Response",
+    "id": "1089212064528093327",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Testnet and ledger",
+    "id": "1085613055565635721",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "DOES NOT CREATE A VALIDATOR!",
+    "id": "1085966197297791056",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "account sequence mismatch, expected 1, got 0: incorrect account sequence'",
+    "id": "1086727410243883170",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Why not active?  Tell me please",
+    "id": "1088807852354846811",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Block height stuck at 11",
+    "id": "1086353688995561512",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Testnet",
+    "id": "1085902346019668018",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Wonderful Nibiru",
+    "id": "1089617525911851190",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "tokens",
+    "id": "1088488044904058950",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "sync problem.",
+    "id": "1089539300154167347",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Oracle",
+    "id": "1085622238310568006",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "How do I become a validator?",
+    "id": "1085610183927013407",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "tesnet nibiru",
+    "id": "1086712101445312534",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Cant see Token balance after giving command and error",
+    "id": "1085897509295104131",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "not getting validator role after 5 days of submission",
+    "id": "1087787464669802619",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "How do you get the node to show up in the dashboard?",
+    "id": "1084888518037348394",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "@! Appieasahbie !#3292 node is not synchronizing",
+    "id": "1089615623388156015",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "my node is always stuck at certain block and stop syncing any more",
+    "id": "1087696238079655956",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "What command can I use to view the validator keys?",
+    "id": "1086739496768376942",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Node Working, But not Validator...",
+    "id": "1086744621205434449",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "All transaction work!",
+    "id": "1086295037094150186",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "rpc error!!!",
+    "id": "1087030560901312642",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Stake not working. No validators",
+    "id": "1089531973581680740",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Failed to connect to bus: Host is down",
+    "id": "1086673596967047322",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "I tested the site everything is fine Wallet: nibi1fqzjd2yk0x34m26swm89sfdfpmg35jrs6czdpy",
+    "id": "1086657775892955196",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "[Survey] Preferred Video Platform",
+    "id": "1085818565812301945",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "nose",
+    "id": "1086741670818754602",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "nibid.service: Failed with result 'exit-code",
+    "id": "1087892503937699960",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Unstake but not transfer to wallet",
+    "id": "1085741884024045630",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "can't edit validator",
+    "id": "1085492348953296976",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "test net problem",
+    "id": "1087043368233750659",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Bug? When I unstaked from my validator, I can't delegate for it again.",
+    "id": "1085835637392941086",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "tell me where to insert the validator and what exactly to insert??",
+    "id": "1087825948507910294",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Site work https://app.nibiru.fi/stake",
+    "id": "1089945121493090344",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "validator problems",
+    "id": "1085998310973780089",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Failed to initialize database , file missing",
+    "id": "1087491632154284052",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Can't synchronize my node",
+    "id": "1089138970828492801",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "feedback testnet",
+    "id": "1090337054459691058",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "Failed to start Nibiru Code",
+    "id": "1086331211695271986",
+    "type": "GuildPublicThread"
+  },
+  {
+    "name": "nibiru",
+    "id": "1087808417961365524",
+    "type": "GuildPrivateThread"
+  },
+  {
+    "name": "аа",
+    "id": "1088407822481502228",
+    "type": "GuildPrivateThread"
+  },
+  {
+    "name": "Ravi6666#8052",
+    "id": "1089609831033339914",
+    "type": "GuildPrivateThread"
+  }
+]
