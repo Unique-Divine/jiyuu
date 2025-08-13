@@ -1,0 +1,82 @@
+# Displays available recipes by running `just -l`.
+setup:
+  #!/usr/bin/env bash
+  just -l
+
+# Locally install the "ud" binary
+install: 
+  just build-rs
+  go install
+  ud
+
+alias i := install
+
+# Build the Go binary.
+build: 
+  go build ./...
+
+# TODO: Build the Rust executable(s)
+build-rs: 
+  cargo build --release --bin run_bash
+  cp ../target/release/run_bash run-bash-bin
+
+build-update:
+  #!/usr/bin/env bash
+  cargo update
+  cargo build
+  just build
+
+# Cleans the Go cache, modcache, and testcashe
+clean-cache:
+  go clean -cache -testcache -modcache
+  cargo clean
+
+lint-go: 
+  #!/usr/bin/env bash
+  source contrib/bashlib.sh
+  if ! which_ok golangci-lint; then
+    log_info "Installing golangci-lint"
+    curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin v1.55.2
+  fi
+
+  golangci-lint run --allow-parallel-runners --fix
+
+lint-rs: 
+  cargo clippy --fix --allow-dirty --allow-staged
+
+lint-rs-check:
+  cargo clippy
+
+# Build protobuf types (Rust)
+proto-rs:
+  bash proto/buf.gen.rs.sh
+
+
+# Stops any `nibid` processes, even if they're running in the background.
+stop: 
+  kill $(pgrep -x nibid) || true
+
+# Runs formatter in Golang (gofumpt) and Rust (rustfmt)
+fmt:
+  cargo fmt --all
+  echo "Install command: gofumpt"
+  echo "go install mvdan.cc/gofumpt@latest"
+  gofumpt -w .
+
+# Runs rustfmt without updating
+fmt-check:
+  cargo fmt --all -- --check 
+
+# Format and lint
+tidy: 
+  #!/usr/bin/env bash
+  go mod tidy
+  just lint-rs
+  just lint-go
+  just fmt
+  just clippy
+
+# Run Go tests (short mode)
+test-unit:
+  go test ./... -short
+  cargo test
