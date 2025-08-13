@@ -1,7 +1,7 @@
-//! run_sh.rs: Implements a script for piping shell outputs in other programs.
+//! run_bash.rs: Implements a script for piping shell outputs in other programs.
 use std::env;
 
-use run_sh::bash;
+use run_bash::bash;
 
 pub fn main() -> anyhow::Result<()> {
     let args: Vec<String> = env::args().collect();

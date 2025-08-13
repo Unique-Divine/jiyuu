@@ -1,13 +1,13 @@
 [package]
-name = "run-sh"
+name = "run-bash"
 version = "0.1.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [[bin]]
-name  = "run_sh"
-path = "src/run_sh.rs"
+name  = "run_bash"
+path = "src/run_bash.rs"
 
 [[bin]]
 name  = "mycli"
