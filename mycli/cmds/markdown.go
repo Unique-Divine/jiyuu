@@ -8,7 +8,6 @@ import (
 
 // CmdMarkdown: Markdown subcommand
 func CmdMarkdown() *cli.Command {
-
 	return &cli.Command{
 		Name:        "md",
 		Aliases:     []string{},
@@ -25,13 +24,9 @@ func CmdMarkdown() *cli.Command {
 				Name:  "show",
 				Usage: "Show markdown preview in browser",
 				Action: func(ctx *cli.Context) error {
-					in := "markdown-preview"
-					out, err := ExecCommand(in)
-					fmt.Printf("%s", out)
-					if err != nil {
-						return fmt.Errorf(`%w: install with "bun install -g @mryhryki/markdown-preview"`, err)
-					}
-					return err
+					fmt.Println(`Use command: markdown-preview`)
+					fmt.Println(`install with "bun install -g @mryhryki/markdown-preview"`)
+					return nil
 				},
 			},
 		},

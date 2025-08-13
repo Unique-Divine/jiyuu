@@ -69,41 +69,33 @@ func cmdNibiCfg() *cli.Command {
 			{
 				Name:  "local",
 				Usage: "Local network (localnet)",
-				Action: func(*cli.Context) error {
-					in := `cfg_nibi_local`
-					out, err := ExecCommand(in)
-					fmt.Printf("%s", out)
-					return err
+				Action: func(*cli.Context) (err error) {
+					fmt.Println(`Run "cfg_nibi_local"`)
+					return
 				},
 			},
 			{
 				Name:    "prod",
 				Aliases: []string{"mainnet"},
 				Usage:   "Mainnet (cataclysm-1)",
-				Action: func(*cli.Context) error {
-					in := `cfg_nibi`
-					out, err := ExecCommand(in)
-					fmt.Printf("%s", out)
+				Action: func(*cli.Context) (err error) {
+					fmt.Println(`Run "cfg_nibi"`)
 					return err
 				},
 			},
 			{
 				Name:  "test",
 				Usage: "Test network (testnet)",
-				Action: func(*cli.Context) error {
-					in := `cfg_nibi_test`
-					out, err := ExecCommand(in)
-					fmt.Printf("%s", out)
+				Action: func(*cli.Context) (err error) {
+					fmt.Println(`Run "cfg_nibi_test"`)
 					return err
 				},
 			},
 			{
 				Name:  "dev",
 				Usage: "Development network (devnet)",
-				Action: func(*cli.Context) error {
-					in := `cfg_nibi_dev`
-					out, err := ExecCommand(in)
-					fmt.Printf("%s", out)
+				Action: func(*cli.Context) (err error) {
+					fmt.Println(`Run "cfg_nibi_dev"`)
 					return err
 				},
 			},

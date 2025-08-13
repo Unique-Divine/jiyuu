@@ -33,7 +33,6 @@ func runShowCmdFlag(
 }
 
 func CmdGo() *cli.Command {
-
 	return &cli.Command{
 		Name:        "go",
 		Aliases:     []string{},
