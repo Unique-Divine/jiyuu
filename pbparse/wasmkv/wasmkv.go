@@ -1,0 +1,160 @@
+package wasmkv
+
+import (
+	"encoding/base64"
+	"encoding/hex"
+	"fmt"
+)
+
+// WasmRawKV decodes a key-value pair from hex and base64 encoded strings.
+//
+// Parameters:
+//   - k: the hex-encoded string representing the key.
+//   - v: the base64-encoded string representing the value.
+//
+// Returns:
+//   - key: the decoded key as a string.
+//   - val: the decoded value as a string.
+//   - err: any error encountered during decoding.
+func parseWasmRawKV(k, v string) (key, val string, err error) {
+	bz, _ := hex.DecodeString(k)
+	bz2, _ := base64.RawStdEncoding.DecodeString(v)
+	return string(bz), string(bz2), nil
+}
+
+const EXAMPLE_VAL = "eyJjcmVhdGVkX2Jsb2NrIjo5NywidHBfbGFzdF91cGRhdGVkX2Jsb2NrIjo5Nywic2xfbGFzdF91cGRhdGVkX2Jsb2NrIjo5NywibWF4X3NsaXBwYWdlX3AiOiIxIiwibGFzdF9vaV91cGRhdGVfdHMiOiIxNzI4NTc5NzU5Mzk0MTYyMDAwIiwiY29sbGF0ZXJhbF9wcmljZV91c2QiOiIxIn0="
+
+func foo() {
+
+	str := "000B74726164655F696E666F73002B6E696269317A616176767A78657A30656C756E64746E3332716E6B396C6B6D386B6D63737A34346737786C0000000000000000"
+
+	k, v, _ := parseWasmRawKV(str, EXAMPLE_VAL)
+
+	fmt.Printf("k: %s\n", k)
+	fmt.Printf("v: %s\n", v)
+}
+
+/*
+
+{
+  "models": [
+    {
+      "key": "0004666565730000",
+      "value": "eyJvcGVuX2ZlZV9wIjoiMC4wMiIsImNsb3NlX2ZlZV9wIjoiMC4wMTUiLCJ0cmlnZ2VyX29yZGVyX2ZlZV9wIjoiMC4wMyIsIm1pbl9wb3NpdGlvbl9zaXplX3VzZCI6IjEifQ=="
+    },
+    {
+      "key": "000570616972730000",
+      "value": "eyJiYXNlIjoiVG9rZW5JbmRleCgyKSIsInF1b3RlIjoiVG9rZW5JbmRleCgwKSIsInNwcmVhZF9wIjoiMCIsImdyb3VwX2luZGV4IjoiR3JvdXBJbmRleCgwKSIsImZlZV9pbmRleCI6IkZlZUluZGV4KDApIn0="
+    },
+    {
+      "key": "000570616972730001",
+      "value": "eyJiYXNlIjoiVG9rZW5JbmRleCgzKSIsInF1b3RlIjoiVG9rZW5JbmRleCgwKSIsInNwcmVhZF9wIjoiMCIsImdyb3VwX2luZGV4IjoiR3JvdXBJbmRleCgwKSIsImZlZV9pbmRleCI6IkZlZUluZGV4KDApIn0="
+    },
+    {
+      "key": "000667726F7570730000",
+      "value": "eyJuYW1lIjoiZGVmYXVsdCIsIm1pbl9sZXZlcmFnZSI6IjEiLCJtYXhfbGV2ZXJhZ2UiOiIxMDAifQ=="
+    },
+    {
+      "key": "0006747261646573002B6E696269317A616176767A78657A30656C756E64746E3332716E6B396C6B6D386B6D63737A34346737786C0000000000000000",
+      "value": "eyJ1c2VyIjoibmliaTF6YWF2dnp4ZXowZWx1bmR0bjMycW5rOWxrbThrbWNzejQ0Zzd4bCIsInBhaXJfaW5kZXgiOiJQYWlySW5kZXgoMCkiLCJpbmRleCI6IlRyYWRlSW5kZXgoMCkiLCJsZXZlcmFnZSI6IjEwIiwibG9uZyI6dHJ1ZSwiaXNfb3BlbiI6dHJ1ZSwiY29sbGF0ZXJhbF9pbmRleCI6IlRva2VuSW5kZXgoMSkiLCJ0cmFkZV90eXBlIjoidHJhZGUiLCJjb2xsYXRlcmFsX2Ftb3VudCI6IjMwMCIsIm9wZW5fcHJpY2UiOiI2OTAwMCIsInRwIjoiNzAwMDAiLCJzbCI6IjY4MDAwIn0="
+    },
+    {
+      "key": "000777696E646F777300080000000000001C2000020000000000000003A9D0",
+      "value": "eyJvaV9sb25nX3VzZCI6IjMwMDAiLCJvaV9zaG9ydF91c2QiOiIwIn0="
+    },
+    {
+      "key": "0008706169725F6F6973000200010000",
+      "value": "eyJsb25nIjoiMzAwMCIsInNob3J0IjoiMCIsIm1heCI6IjEwMDAwMDAifQ=="
+    },
+    {
+      "key": "000967726F75705F6F6973000200010000",
+      "value": "eyJsb25nIjoiMzAwMCIsInNob3J0IjoiMCIsIm1heCI6IjEwMDAwMDAifQ=="
+    },
+    {
+      "key": "000B636F6C6C61746572616C730001",
+      "value": "eyJuYW1lIjoidW51c2QiLCJhZGRyZXNzIjoidW51c2QiLCJpc19hY3RpdmUiOnRydWUsImRlbm9tIjoidW51c2QifQ=="
+    },
+    {
+      "key": "000B706169725F6465707468730000",
+      "value": "eyJvbmVfcGVyY2VudF9kZXB0aF9hYm92ZV91c2QiOiIwIiwib25lX3BlcmNlbnRfZGVwdGhfYmVsb3dfdXNkIjoiMCJ9"
+    },
+    {
+      "key": "000B74726164655F696E666F73002B6E696269317A616176767A78657A30656C756E64746E3332716E6B396C6B6D386B6D63737A34346737786C0000000000000000",
+      "value": "eyJjcmVhdGVkX2Jsb2NrIjo5NywidHBfbGFzdF91cGRhdGVkX2Jsb2NrIjo5Nywic2xfbGFzdF91cGRhdGVkX2Jsb2NrIjo5NywibWF4X3NsaXBwYWdlX3AiOiIxIiwibGFzdF9vaV91cGRhdGVfdHMiOiIxNzI4NTc5NzU5Mzk0MTYyMDAwIiwiY29sbGF0ZXJhbF9wcmljZV91c2QiOiIxIn0="
+    },
+    {
+      "key": "000C7472616465725F696E666F736E696269317A616176767A78657A30656C756E64746E3332716E6B396C6B6D386B6D63737A34346737786C",
+      "value": "eyJsYXN0X2RheV91cGRhdGVkIjoyMDAwNiwidHJhaWxpbmdfcG9pbnRzIjoiMCJ9"
+    },
+    {
+      "key": "000D7472616465725F73746F7265646E696269317A616176767A78657A30656C756E64746E3332716E6B396C6B6D386B6D63737A34346737786C",
+      "value": "dHJ1ZQ=="
+    },
+    {
+      "key": "000D757365725F636F756E746572736E696269317A616176767A78657A30656C756E64746E3332716E6B396C6B6D386B6D63737A34346737786C",
+      "value": "MQ=="
+    },
+    {
+      "key": "0010696E697469616C5F6163635F6665657300020001002B6E696269317A616176767A78657A30656C756E64746E3332716E6B396C6B6D386B6D63737A34346737786C0000000000000000",
+      "value": "eyJhY2NfcGFpcl9mZWUiOiIwIiwiYWNjX2dyb3VwX2ZlZSI6IjAiLCJibG9jayI6OTd9"
+    },
+    {
+      "key": "001070656E64696E675F676F765F666565730001",
+      "value": "IjIwMCI="
+    },
+    {
+      "key": "00127472616465725F6461696C795F696E666F736E696269317A616176767A78657A30656C756E64746E3332716E6B396C6B6D386B6D63737A34346737786C",
+      "value": "eyIyMDAwNiI6eyJmZWVfbXVsdGlwbGllcl9jYWNoZSI6IjEiLCJwb2ludHMiOiIxMDAwMCJ9fQ=="
+    },
+    {
+      "key": "0012757365725F74726164655F636F756E7465726E696269317A616176767A78657A30656C756E64746E3332716E6B396C6B6D386B6D63737A34346737786C",
+      "value": "IlRyYWRlSW5kZXgoMSki"
+    },
+    {
+      "key": "001470616972735F626F72726F77696E675F64617461000200010000",
+      "value": "eyJmZWVfcGVyX2Jsb2NrIjoiMC4wMSIsImFjY19mZWVfbG9uZyI6IjAiLCJhY2NfZmVlX3Nob3J0IjoiMCIsImFjY19sYXN0X3VwZGF0ZWRfYmxvY2siOjk3LCJmZWVfZXhwb25lbnQiOiIxIn0="
+    },
+    {
+      "key": "001567726F7570735F626F72726F77696E675F64617461000200010000",
+      "value": "eyJmZWVfcGVyX2Jsb2NrIjoiMC4wMSIsImFjY19mZWVfbG9uZyI6IjAiLCJhY2NfZmVlX3Nob3J0IjoiMCIsImFjY19sYXN0X3VwZGF0ZWRfYmxvY2siOjk3LCJmZWVfZXhwb25lbnQiOiIxIn0="
+    },
+    {
+      "key": "001874726164655F70726963655F696D706163745F696E666F73002B6E696269317A616176767A78657A30656C756E64746E3332716E6B396C6B6D386B6D63737A34346737786C0000000000000000",
+      "value": "IjMwMDAi"
+    },
+    {
+      "key": "636F6E74726163745F696E666F",
+      "value": "eyJjb250cmFjdCI6ImNyYXRlcy5pbzpwZXJwIiwidmVyc2lvbiI6IjAuMS4wIn0="
+    },
+    {
+      "key": "6665655F7469657273",
+      "value": "W3siZmVlX211bHRpcGxpZXIiOiIwLjk3NSIsInBvaW50c190cmVzaG9sZCI6IjYwMDAwMDAifSx7ImZlZV9tdWx0aXBsaWVyIjoiMC45NSIsInBvaW50c190cmVzaG9sZCI6IjIwMDAwMDAwIn0seyJmZWVfbXVsdGlwbGllciI6IjAuOTI1IiwicG9pbnRzX3RyZXNob2xkIjoiNTAwMDAwMDAifSx7ImZlZV9tdWx0aXBsaWVyIjoiMC45IiwicG9pbnRzX3RyZXNob2xkIjoiMTAwMDAwMDAwIn0seyJmZWVfbXVsdGlwbGllciI6IjAuODUiLCJwb2ludHNfdHJlc2hvbGQiOiIyNTAwMDAwMDAifSx7ImZlZV9tdWx0aXBsaWVyIjoiMC44IiwicG9pbnRzX3RyZXNob2xkIjoiNDAwMDAwMDAwIn0seyJmZWVfbXVsdGlwbGllciI6IjAuNyIsInBvaW50c190cmVzaG9sZCI6IjEwMDAwMDAwMDAifSx7ImZlZV9tdWx0aXBsaWVyIjoiMC42IiwicG9pbnRzX3RyZXNob2xkIjoiMjAwMDAwMDAwMCJ9XQ=="
+    },
+    {
+      "key": "6F695F77696E646F77735F73657474696E6773",
+      "value": "eyJzdGFydF90cyI6MCwid2luZG93c19kdXJhdGlvbiI6IldpbmRvd0R1cmF0aW9uKDcyMDApIiwid2luZG93c19jb3VudCI6M30="
+    },
+    {
+      "key": "6F7261636C655F61646472657373",
+      "value": "Im5pYmkxOGNzemx2bTZwemUweDlzejMycW5qcTR2dGQ0NXhlaHFzOGRxN2N3eTh5aHEzNXdmbm4zcW0wMnhxaCI="
+    },
+    {
+      "key": "6F776E657273686970",
+      "value": "eyJvd25lciI6Im5pYmkxemFhdnZ6eGV6MGVsdW5kdG4zMnFuazlsa204a21jc3o0NGc3eGwiLCJwZW5kaW5nX293bmVyIjpudWxsLCJwZW5kaW5nX2V4cGlyeSI6bnVsbH0="
+    },
+    {
+      "key": "7374616B696E675F61646472657373",
+      "value": "Im5pYmkxemFhdnZ6eGV6MGVsdW5kdG4zMnFuazlsa204a21jc3o0NGc3eGwi"
+    },
+    {
+      "key": "74726164696E675F616374697661746564",
+      "value": "ImFjdGl2YXRlZCI="
+    }
+  ],
+  "pagination": {
+    "next_key": null,
+    "total": "0"
+  }
+}
+
+*/

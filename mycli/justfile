@@ -1,0 +1,16 @@
+# Displays available recipes by running `just -l`.
+setup:
+  #!/usr/bin/env bash
+  just -l
+
+# Locally install the "ud" binary
+install: 
+  #!/usr/bin/env bash
+  source ud.sh
+  ud --help
+
+alias i := install
+
+# Stops any `nibid` processes, even if they're running in the background.
+stop: 
+  kill $(pgrep -x nibid) || true

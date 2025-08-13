@@ -1,0 +1,17 @@
+{
+  "name": "@uniquedivine/bash",
+  "version": "0.0.1",
+  "description": "Bash runner to write scripts in TypeScript with the Bun Shell.",
+  "module": "index.ts",
+  "type": "module",
+  "private": false,
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "bun": "^1.2.5"
+  }
+}

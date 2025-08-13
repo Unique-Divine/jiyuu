@@ -8,6 +8,6 @@ const config = {
   semi: false,
   singleQuote: false,
   arrowParens: "always",
-};
+}
 
-export default config;
+export default config
