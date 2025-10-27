@@ -2,17 +2,16 @@
 
 ## ⚡jiyuu
 
-├── 📂 [gocovmerge](./gocovmerge/README.md): Go coverage profile merger with modern CLI features
-├── 📂 [markdown-toc](./markdown-toc/README.md): Markdown table of contents (TOC) generator  
-├── 📂 [mycli](./mycli/README.md): Language-agnostic "ud" CLI tool for personal use.
-├── 📂 winfixtext: Text encoding fixer for Windows Unicode character issues
-├── 📂 discord-nibiru #  
-└── 📦 scripts # Scripts crate in Rust.  
-├── justfile # Runs project-specific commands  
-└── README.md
-
-<!-- └── 📂 packages        # Other Rust packages -->
-<!-- ├── Cargo.toml    -->
+| Path | Description |
+| ---- | ----------- |
+| 📂 [gocovmerge](./gocovmerge/README.md)     | Go coverage profile merger with modern CLI features |
+| 📂 [markdown-toc](./markdown-toc/README.md) | Markdown table of contents (TOC) generator |
+| 📂 [mycli](./mycli/README.md)               | Language-agnostic “ud” CLI tool for personal use |
+| 📂 [winfixtext](./winfixtext/README.md)     | Text encoding fixer for Windows Unicode character issues |
+| 📂 discord-nibiru | |
+| 📦 scripts | Scripts crate in Rust |
+| ├── justfile | Runs project-specific commands |
+| └── README.md  | |
 
 ## Hacking
 
