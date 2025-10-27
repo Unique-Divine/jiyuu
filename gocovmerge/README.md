@@ -95,5 +95,4 @@ The original [wadey/gocovmerge](https://github.com/wadey/gocovmerge) hasn't been
 
 ## License
 
-BSD 2, permissive license. See [Unique-Divine/jiyuu/gocovmerge/LICENSE.md](https://github.com/Unique-Divine/jiyuu/blob/main/gocovmerge/LICENSE.md)
-MIT License - see original [wadey/gocovmerge](https://github.com/wadey/gocovmerge) for attribution.
+BSD 2-Clause License (permissive). See [Unique-Divine/jiyuu/gocovmerge/LICENSE.md](https://github.com/Unique-Divine/jiyuu/blob/main/gocovmerge/LICENSE.md)
