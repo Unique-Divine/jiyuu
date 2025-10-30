@@ -539,3 +539,32 @@ from some hash of a key is constant time on average.
 
 Map is the mathematical term from mapping one element from one set uniquely to
 another.
+
+- o - Two Sum
+Use a hash map from value → index to find complements in O(n) time.
+
+- o - Contains Duplicate / Contains Duplicate II / III
+Basic set / map use: track what you’ve seen, or use a map from value → last index.
+
+- o - Valid Anagram
+Use a `map[byte]int` (or `[26]int`) to count characters.
+
+- o - Group Anagrams
+    Key idea: hash words by some canonical representation:
+    - sort the string, or
+    - count characters and use that as a key.
+
+- o - Happy Number
+Use a set to detect cycles in repeated transformations.
+
+- o - Two Sum variants / 3Sum-closest-style helpers
+Many can be viewed through “store something in a map as you scan” patterns.
+
+- o - Subarray Sum Equals K
+Use hashing on prefix sums: map from prefix_sum → count, detect ranges summing to K.
+
+- o - Longest Substring Without Repeating Characters
+Sliding window with a map[byte]int or map[rune]int for last seen indices.
+
+- o - Top K Frequent Elements / Sort Characters by Frequency
+Use a map[key]count, then bucket or sort.
