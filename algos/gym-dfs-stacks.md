@@ -1,13 +1,14 @@
 # Depth-First Search (DFS)
 
 - [Q: Is this bottom statement syntactically correct? If not, describe why and how to](#q-is-this-bottom-statement-syntactically-correct-if-not-describe-why-and-how-to)
-- [Mondai 0: Fill Image Pixels](#mondai-0-fill-image-pixels)
-- [Mondai 1: Graph Traversal without Grid](#mondai-1-graph-traversal-without-grid)
-- [Mondai 2: Number of Islands](#mondai-2-number-of-islands)
-- [Mondai 3: Path Exists in Maze](#mondai-3-path-exists-in-maze)
-- [Mondai 4: Count Connected Components in an Undirected Graph](#mondai-4-count-connected-components-in-an-undirected-graph)
-- [Mondai 5: Image Fill in a 2D Grid](#mondai-5-image-fill-in-a-2d-grid)
+- [Ex 0: Fill Image Pixels](#ex-0-fill-image-pixels)
+- [Ex 1: Graph Traversal without Grid](#ex-1-graph-traversal-without-grid)
+- [Ex 2: Number of Islands](#ex-2-number-of-islands)
+- [Ex 3: Path Exists in Maze](#ex-3-path-exists-in-maze)
+- [Ex 4: Count Connected Components in an Undirected Graph](#ex-4-count-connected-components-in-an-undirected-graph)
+- [Ex 5: Image Fill in a 2D Grid](#ex-5-image-fill-in-a-2d-grid)
 - [25-11-04](#25-11-04)
+
 
 ## Q: Is this bottom statement syntactically correct? If not, describe why and how to
 fix it.
@@ -31,7 +32,7 @@ foo(1)
 
 x: Set = set([1, 2, 3])
 
-## Mondai 0: Fill Image Pixels
+## Ex 0: Fill Image Pixels
 
 Source Info:
 - This is [Leetcode 733: Flood Fill](https://leetcode.com/problems/flood-fill/description/)
@@ -313,7 +314,7 @@ func Sol0_RecursiveDFS(img [][]int, newColor int, startPixel Point) [][]int {
 }
 ```
 
-## Mondai 1: Graph Traversal without Grid
+## Ex 1: Graph Traversal without Grid
 
 You are given a directed graph represented as an adjacency list. Each key in the graph is a unique node identifier (a string), and the corresponding value is a list of nodes that it directly connects to (its neighbors).
 
@@ -404,7 +405,7 @@ Q: In Python, how do you add to a `deque`?
 
 `deque.append`
 
-## Mondai 2: Number of Islands
+## Ex 2: Number of Islands
 
 You are given a 2D grid of '1's (land) and '0's (water). An island is formed by connecting adjacent lands horizontally or vertically. You may assume all four edges of the grid are surrounded by water.
 
@@ -431,11 +432,14 @@ Output: 3
 
 
 
-## Mondai 3: Path Exists in Maze
+## Ex 3: Path Exists in Maze
 
-You are given a 2D grid representing a maze. Each cell is either open (0) or blocked (1). You are also given a start position and an end position.
+You are given a 2D grid representing a maze. Each cell is either open (0) or
+blocked (1). You are also given a start position and an end position.
 
-Write a function that returns True if there exists a path from the start to the end position using only up, down, left, or right moves without crossing any blocked cells.
+Write a function that returns True if there exists a path from the start to the
+end position using only up, down, left, or right moves without crossing any
+blocked cells.
 
 Example 
 Input
@@ -473,7 +477,7 @@ DFS(up, left, down, right)
 
 
 
-## Mondai 4: Count Connected Components in an Undirected Graph
+## Ex 4: Count Connected Components in an Undirected Graph
 
 You are given an undirected graph represented as an adjacency list. Each key in the graph is a node (string), and the value is a list of nodes that it is directly connected to.
 
@@ -497,7 +501,7 @@ Constraints:
 - The graph may be disconnected.
 - It is undirected: if A connects to B, then B connects to A.
 
-## Mondai 5: Image Fill in a 2D Grid
+## Ex 5: Image Fill in a 2D Grid
 
 You are given a 2D array image of integers representing pixel values in a bitmap. Each pixel is identified by its row and column index.
 
