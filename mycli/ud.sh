@@ -28,15 +28,15 @@ _ud_go() {
   local sub="${1:-help}"
   case "$sub" in
     test-short|ts)
-      _ud_go_run "go test ./... -short -cover 2>&1 | grep -v 'no test' | grep -v 'no statement'" "$@" ;;
+      _ud_go_run "go test ./... -short 2>&1 | grep -Ev 'no test|no statement'" "$@" ;;
     test-int|ti)
-      _ud_go_run "go test ./... -run Integration -cover 2>&1 | grep -v 'no test' | grep -v 'no statement'" "$@" ;;
+      _ud_go_run "go test ./... -run Integration 2>&1 | grep -Ev 'no test|no statement'" "$@" ;;
     test|t)
-      _ud_go_run "go test ./... -cover 2>&1 | grep -v 'no test' | grep -v 'no statement'" "$@" ;;
+      _ud_go_run "go test ./... 2>&1 | grep -Ev 'no test|no statement'" "$@" ;;
     lint)
       _ud_go_run "golangci-lint run --allow-parallel-runners --fix" "$@" ;;
     cover-short|cs)
-      _ud_go_cover "go test ./... -short -cover -coverprofile='temp.out' 2>&1 | grep -v 'no test' | grep -v 'no statement'" ;;
+      _ud_go_cover "go test ./... -short -cover -coverprofile='temp.out' 2>&1 | grep -Ev 'no test|no statement'" ;;
     cover|c)
       _ud_go_cover "go test ./... -cover -coverprofile='temp.out' 2>&1 | grep -v 'no test' | grep -v 'no statement'" ;;
     help|-h|--help|"")
@@ -46,8 +46,8 @@ USAGE:
    ud go [command] [--cmd]
 
 COMMANDS:
-   test-short, ts     Run Golang unit tests with coverage report
-   test-int, ti       Run Golang integration tests with coverage report
+   test-short, ts     Run Golang unit tests
+   test-int, ti       Run Golang integration tests
    test, t            Run Golang tests
    lint               Run golangci-lint
    cover-short, cs    Run short tests and view coverage
