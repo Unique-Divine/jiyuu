@@ -90,6 +90,12 @@ _ud_go_cover() {
 _ud_quick() {
   local sub="${1:-help}"
   case "$sub" in
+    notes)
+      _ud_go_run "notes" "$@" ;;
+    todos)
+      _ud_go_run "todos" "$@" ;;
+    out)
+      _ud_go_run "nvim $HOME/ki/out.txt" "$@" ;;
     help|-h|--help|"")
       local help_text
       help_text=$(cat <<EOF
@@ -103,11 +109,15 @@ DESCRIPTION:
 COMMANDS:
    cfg_nvim     Edit nvim (Neovim) config
    cfg_tmux     Edit tmux config
-   myrc         Edit your zshrc config
-   music        Opens the Windows file explorer to your music files
    dotf         Edit your dotfiles
-   notes        Edit your notes workspace
+   music        Opens the Windows file explorer to your music files
+   myrc         Edit your zshrc config
+   notes        Edit your notes workspac
+   out          Edit temporary file at \$HOME/ki/out.txt
    todos        Edit your notes workspace with your text-based TODO-list open
+
+FLAGS:
+   --help, -h         Help docs for the this command
 EOF
 )
       echo "$help_text"
