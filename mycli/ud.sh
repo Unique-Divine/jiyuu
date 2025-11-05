@@ -24,6 +24,7 @@ EOF
   echo "$help_text"
 }
 
+# Command: "ud go"
 _ud_go() {
   local sub="${1:-help}"
   case "$sub" in
@@ -55,6 +56,7 @@ COMMANDS:
 
 FLAGS:
    --cmd              Print the underlying command
+   --help, -h         Show help for the this command
 EOF
 )
       echo "$help_text"
@@ -87,6 +89,7 @@ _ud_go_cover() {
 
 # ------------ Subcommand: ud quick 
 
+# Command: "ud quick"
 _ud_quick() {
   local sub="${1:-help}"
   case "$sub" in
@@ -117,7 +120,7 @@ COMMANDS:
    todos        Edit your notes workspace with your text-based TODO-list open
 
 FLAGS:
-   --help, -h         Help docs for the this command
+   --help, -h         Show help for the this command
 EOF
 )
       echo "$help_text"
@@ -132,6 +135,7 @@ EOF
 
 # ------------ Subcommand: ud rs
 
+# Command: "ud rs"
 _ud_rs() {
   local sub="${1:-help}"
   case "$sub" in
@@ -185,7 +189,8 @@ COMMANDS:
    clippy-check        Run linter in check-only mode
 
 FLAGS:
-   --cmd               Print the underlying command
+   --cmd              Print the underlying command
+   --help, -h         Show help for the this command
 EOF
 )
       echo "$help_text"
@@ -210,6 +215,7 @@ _ud_rs_run() {
 
 # ------------ Subcommand: ud md
 
+# Command: "ud md"
 _ud_md() {
   local sub="${1:-help}"
   case "$sub" in
@@ -232,6 +238,9 @@ COMMANDS:
 
 NOTES:
    To install the preview tool: bun install -g @mryhryki/markdown-preview
+
+FLAGS:
+   --help, -h         Show help for the this command
 EOF
 )
       echo "$help_text"
@@ -281,6 +290,9 @@ COMMANDS:
    cfg               Set CLI config to target a network
    addrs             Show common Nibiru addresses used in testing
    get-nibid, gn     Install nibid binary (via curl)
+
+FLAGS:
+   --help, -h         Show help for the this command
 EOF
 )
       echo "$help_text"
@@ -293,44 +305,6 @@ EOF
       ;;
   esac
 }
-
-_ud_nibi_cfg() {
-  local sub="${1:-help}"
-  case "$sub" in
-    local)
-      cfg_nibi_local ;;
-    prod|mainnet)
-      cfg_nibi ;;
-    test)
-      cfg_nibi_test ;;
-    dev)
-      cfg_nibi_dev ;;
-    help|-h|--help|"")
-      local help_text
-      help_text=$(cat <<EOF
-USAGE:
-   ud nibi cfg [network]
-
-DESCRIPTION:
-   Set Nibiru CLI config to a specific network.
-
-COMMANDS:
-   local       Local network (localnet)
-   prod        Mainnet (cataclysm-1)
-   test        Test network (testnet)
-   dev         Development network (devnet)
-EOF
-)
-      echo "$help_text"
-      ;;
-    *)
-      echo "Unknown cfg subcommand: $sub"
-      _ud_nibi_cfg help
-      return 1
-      ;;
-  esac
-}
-
 
 # ------------ main entry point
 
