@@ -75,8 +75,8 @@ export function generate(options?: GenerateOptions): any {
   const stripFirst = opts.firsth1 === false
   if (opts.linkify === undefined) opts.linkify = true
 
-  return function(md: RemarkablePlus) {
-    md.renderer.render = function(tokens: Token[]) {
+  return function (md: RemarkablePlus) {
+    md.renderer.render = function (tokens: Token[]) {
       const copiedTokens = [...tokens]
       const seen: { [key: string]: number } = {}
       let tocstart = -1

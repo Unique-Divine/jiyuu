@@ -13,3 +13,6 @@ t:
 
 fmt: 
   bun run prettier --write src
+
+run *ARGS:
+  bun run src/cli.ts {{ARGS}}
