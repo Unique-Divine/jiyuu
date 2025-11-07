@@ -1,6 +1,10 @@
 {
   "compilerOptions": {
-    "types": ["bun-types"]
+    "types": [
+      "bun-types"
+    ],
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true
     // "lib": ["ESNext"],
     // "module": "esnext",
     // "target": "esnext"
