@@ -2,11 +2,8 @@ name: "⚡Tests"
 
 on:
   pull_request:
-    branches: ["main", "release/*"]
-    paths: ["**.js", "**.ts", "**.tsx", "**.json"]
   push:
     branches: ["main", "release/*"]
-    paths: ["**.js", "**.ts", "**.tsx", "**.json"]
 
 jobs:
   test:
