@@ -12,7 +12,21 @@ import {
 import { CLIENT } from "./client"
 import { instanceOfTextChannel } from "./typing"
 
-export function addRoleToMember(member: GuildMember, role: Role) {
+export const logModerationAction = (
+  action: string,
+  payload: Record<string, unknown>,
+) => {
+  console.info(`[mod-action] ${action}`, payload)
+}
+
+export const addRoleToMember = (member: GuildMember, role: Role, dryRun = false) => {
+  logModerationAction("add-role", {
+    memberId: member.id,
+    roleId: role.id,
+    roleName: role.name,
+    dryRun,
+  })
+  if (dryRun) return
   member.roles.add(role)
 }
 
@@ -40,6 +54,7 @@ export function deleteMsgs(args: { msgIds: string[]; channelId: string }) {
   const channel = CLIENT.channels.cache.get(channelId) as TextChannel
   msgIds.forEach((msgId) => {
     console.debug("DEBUG msgId:", msgId)
+    logModerationAction("delete-message", { channelId, msgId })
     channel.messages
       .fetch(msgId)
       .then((msg) => {

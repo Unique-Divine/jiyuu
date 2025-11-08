@@ -6,7 +6,7 @@ import {
   Message,
   Role,
 } from "discord.js"
-import { addRoleToMember, roleFromName } from "../discord"
+import { addRoleToMember, logModerationAction, roleFromName } from "../discord"
 import { instanceOfTextChannel } from "../typing"
 import { CmdResult, ICmd, MappedChannelMsg, UsageCmd } from "./interfaces"
 import { saveJson } from "./utils"
@@ -40,10 +40,27 @@ export class CmdGrantRoles implements ICmd {
 
     console.debug("DEBUG Assigning roles for role: ", this.role?.name)
 
+    if (!this.role) {
+      return {
+        reply: "grant-roles: target role not found; aborting",
+        help: "Ensure the OG validator role exists before running this command.",
+      }
+    }
+
+    const execute = msg.content.includes("--execute")
+    const dryRun = !execute
+    if (dryRun) {
+      logModerationAction("grant-roles-dry-run", { requestedBy: msg.author.id })
+    }
+
     const channel: Channel | undefined = msg.guild.client.channels.cache.get(
       this.roleChannel.id,
     )
-    if (!channel) return
+    if (!channel) {
+      return {
+        reply: `grant-roles: channel ${this.roleChannel.name} (${this.roleChannel.id}) not found`,
+      }
+    }
 
     console.debug("DEBUG PAGE 0:")
     const mappedChannelMsgs: MappedChannelMsg[] = []
@@ -51,10 +68,12 @@ export class CmdGrantRoles implements ICmd {
 
     if (!instanceOfTextChannel(channel)) return
 
-    let channelMsgs = await channel.messages.fetch({ limit: 100 }).then((msgPage) => {
-      console.debug("DEBUG msgPage.size:", msgPage.size)
-      return msgPage.size == pageSize ? msgPage.at(0) : null
-    })
+    let channelMsgs = await channel.messages
+      .fetch({ limit: pageSize })
+      .then((msgPage) => {
+        console.debug("DEBUG msgPage.size:", msgPage.size)
+        return msgPage.size == pageSize ? msgPage.at(0) : null
+      })
 
     console.debug("DEBUG PAGE 1:")
     let page = 1
@@ -73,8 +92,8 @@ export class CmdGrantRoles implements ICmd {
               console.debug("DEBUG channelMsg:", channelMsg.content)
               console.debug("DEBUG member.displayName:", member?.displayName)
               mappedChannelMsgs.push({ content, createdTimestamp, memberId: member?.id })
-              if (member && this.role) {
-                addRoleToMember(member, this.role)
+              if (member) {
+                addRoleToMember(member, this.role!, dryRun)
               }
             }
           })
@@ -82,20 +101,44 @@ export class CmdGrantRoles implements ICmd {
         })
     }
 
-    saveJson({
-      obj: mappedChannelMsgs.filter((msgsElem) => (msgsElem !== null ? true : false)),
+    const filteredMsgs = mappedChannelMsgs.filter((msgsElem) =>
+      msgsElem !== null ? true : false,
+    )
+    const dumpPath = "grant-roles.json"
+    const outputFile = saveJson({
+      obj: filteredMsgs,
+      fName: dumpPath,
+      debugMsg: "DEBUG grant-roles matched messages",
+      timestamped: true,
     })
 
-    return
+    logModerationAction("grant-roles-summary", {
+      requestedBy: msg.author.id,
+      matchedMessages: filteredMsgs.length,
+      roleId: this.role.id,
+      dryRun,
+      outputFile,
+    })
+
+    return {
+      reply: `grant-roles: processed ${filteredMsgs.length} messages; saved details to ${outputFile}. ${
+        dryRun
+          ? "Dry run; pass --execute to apply roles."
+          : "Roles applied to matching members."
+      }`,
+    }
   }
 
   getRole = (): Role | undefined => {
     const roleChannel = this.roleChannel
     const roleName: string = "☄️ OG-Validator"
     const role = roleFromName({ name: roleName, guild: this.guild! })
-    console.error(
-      "unable to find role for channel: " + JSON.stringify({ roleName, roleChannel }),
-    )
+    if (!role) {
+      console.warn(
+        "grant-roles: unable to find role for channel: " +
+          JSON.stringify({ roleName, roleChannel }),
+      )
+    }
     return role
   }
 }

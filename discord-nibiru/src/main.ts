@@ -13,7 +13,7 @@ import {
 import { loadDiscordToken } from "./config"
 import {
   cmdBan,
-  ICmd,
+  type ICmd,
   CmdAllRoles,
   CmdAllChannels,
   CmdBanInChannel,
