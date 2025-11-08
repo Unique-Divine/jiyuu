@@ -10,10 +10,10 @@ Loading...
   - [x] ci: Linting GH workflow
   - [ ] test: fix all tests from the legacy version
   - [ ] docs: Document the README.
-  - [ ] refactor: Move CLI into TypeScript.
-  - [ ] feat: Restore CLI functionality
+  - [x] refactor: Move CLI into TypeScript.
+  - [x] feat: Restore CLI functionality
   - [ ] docs: Write function docs for everything that's not obvious.
-  - [ ] fix: Fix the max depth bug and make note of that in the old repo.
+  - [x] fix: Fix the max depth bug and make note of that in the old repo.
 
 - [ ] epic: Other
   - [ ] fix: Provide better type safety for `Remarkable`, or considering
