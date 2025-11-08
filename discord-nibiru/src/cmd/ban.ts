@@ -185,8 +185,7 @@ export class CmdBanInChannel implements ICmd {
         }
 
         // All messages have been fetched
-        console.log(
-          `Fetched ${allMessages.size} messages in total`)
+        console.log(`Fetched ${allMessages.size} messages in total`)
         deleteMsgsFiltered({
           msgs: allMessages,
           channel,

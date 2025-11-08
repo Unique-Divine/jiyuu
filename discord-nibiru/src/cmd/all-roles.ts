@@ -54,8 +54,8 @@ export class CmdAllChannels implements ICmd {
       return { name, id, type: channelType }
     })
     const fName = "channels.json"
-    saveJson({ obj: this.channels, fName: "channels.json" })
-    return { reply: `channels: saved channels to ${fName}` }
+    const outputFile = saveJson({ obj: this.channels, fName })
+    return { reply: `all-channels: saved channel list to ${outputFile}` }
   }
 
   isAsync = false

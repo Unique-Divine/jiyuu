@@ -1,33 +1,35 @@
 # jiyuu/discord
 
-Implements a Discord bot with powerful moderation commands.
+Discord moderation helpers for the Nibiru community, written in TypeScript on top
+of `discord.js`.
 
-### Main List
+## Setup
 
-- [ ] Cmd: To delete all messages containing a string or list of strings
-- [ ] Cmd: To view all counts of messages including a string or list of strings
- - [ ] And save the message info to a local JSON
-  
+1. Copy the environment template and add your bot token.
+   ```bash
+   cp .env.example .env
+   ```
+2. Install dependencies (Bun is the default runtime/tooling).
+   ```bash
+   bun install
+   ```
+3. Start the bot.
+   ```bash
+   bun run src/main.ts
+   # or
+   just dev
+   ```
 
-### Project: Adding validator roles. [Complete] 
+Runtime artifacts (channel/member dumps, etc.) are written to `.tmp/`, which is
+ignored by Git.
 
-Objective: Give a `role` to all users that submitted a `message` in `channel` containing a certain `condition`.
+## Commands & Status
 
-- [x] Setup a connection to the Nibiru Chain Discord using discord.js
-- [ ] Query message history of `channel`
-- [ ] Filter the message history for users that meet the `condition` criterion.
-- [ ] Save the array of users | json.dump
-- [ ] Use the Discord webhook to send a message the adds a role.
-  - [ ] Connect to the webhook to send a "hello world" message using a command.
+- `all-roles`: list guild roles (writes to `.tmp/saveJson.json`).
+- `all-channels`: list guild channels.
+- `grant-roles`: experimental flow to grant validator roles based on channel
+  history.
+- `members`: paginate guild members for inspection.
+- `echo`: simple echo helper for testing.
 
-- [ ] (discord): Grant roles to all testnet-1 complainers
-  - [x] Document prior work.
-  - [x] Add more type hints if possible.
-  - [x] get the list of channels
-  - [x] get the messages from the specific channel
-  - [x] get the list of roles in the server
-  - [ ] grant a role to a single account with a command 
-  - [ ] grant a role to a list of accounts
-
-  - [ ] Create an `add_role` command that adds a `role` to some `user` (`addRoleToMember`).
-  - [ ] Call `addRoleToMember` on all that should receive the role.
+See `plan.md` for the latest clean-up roadmap and remaining TODOs.
