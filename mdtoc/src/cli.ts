@@ -1,6 +1,7 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 
 import * as fs from "fs"
+import { Readable } from "stream"
 import { toc, minimist, concat, Toc } from "./mdtoc"
 import { TocResult } from "./mdtoc/toc"
 // const utils = require("./lib/utils")
@@ -44,7 +45,7 @@ type CmdRootArgs = {
 // If the number of positional arguments is not exactly 1, the script exits with
 // a failure status code and prints to stderr.
 if (args._.length !== 1) {
-  console.error(
+  console.info(
     [
       "Usage: markdown-toc [options] <input> ",
       "",
@@ -87,11 +88,16 @@ if (args.i && args._[0] === "-") {
   process.exit(1)
 }
 
-let input = process.stdin
+/**
+ * `process.stdin` is a `tty.ReadStream` and `fs.createReadStream` returns an
+ * `fs.ReadStream`, but both extend `stream.Readable`, so we type the variable
+ * with the shared base class.
+ * */
+let input: Readable = process.stdin
 if (args._[0] !== "-") input = fs.createReadStream(args._[0])
 
 input.pipe(
-  concat((input) => {
+  concat((input: Buffer) => {
     if (args.i) {
       const newMarkdown = Toc.insert(input.toString(), args)
       fs.writeFileSync(args._[0], newMarkdown)

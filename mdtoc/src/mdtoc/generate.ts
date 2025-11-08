@@ -232,7 +232,8 @@ export class BulletsParser implements IBulletState {
   }
 
   parseTokens = (): void => {
-    console.debug("DEBUG parseTokens: %o", this.tokens)
+    // TODO: Useful debug for feature development
+    // console.debug("DEBUG parseTokens: %o", this.tokens)
     this.tokens.forEach((token, idx) => {
       const isH1 = token.lvl === 1
       if (isH1) this.numH1s += 1
@@ -255,9 +256,10 @@ export class BulletsParser implements IBulletState {
     li: ListItemFn,
     opts?: GenerateOptions,
   ): BulletList => {
-    const indent: boolean = this.indent(includeFirstH1)
+    // TODO: Useful debug for feature development
+    // const indent: boolean = this.indent(includeFirstH1)
     const unindent: number = !this.indent(includeFirstH1) ? 1 : 0
-    console.debug("DEBUG obj: %o", { includeFirstH1, unindent, indent })
+    // console.debug("DEBUG obj: %o", { includeFirstH1, unindent, indent })
     const bList: BulletList = []
     this.tokens.forEach((ele) => {
       ele.lvl -= unindent
@@ -312,7 +314,8 @@ export class BulletsParser implements IBulletState {
     const { firstIsH1 } = this
     const otherH1sPresent = this.otherH1sPresent()
 
-    console.debug("DEBUG obj: %o", { otherH1sPresent, firstIsH1 })
+    // TODO: Useful debug for feature development
+    // console.debug("DEBUG obj: %o", { otherH1sPresent, firstIsH1 })
 
     if (firstIsH1 && otherH1sPresent) return true
     else if (firstIsH1 && !otherH1sPresent) return includeFirstH1 ? true : false
