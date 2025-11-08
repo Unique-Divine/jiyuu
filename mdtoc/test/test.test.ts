@@ -2,13 +2,27 @@ import { describe, test, expect } from "bun:test" // eslint-disable-line import/
 import { readFileSync } from "fs"
 import { RemarkablePlus } from "../src/mdtoc/remarkable"
 import { toc, Toc } from "../src/mdtoc"
+import { join } from "path"
 
-function strip(str: string) {
+function strTrim(str: string) {
   return str.trim()
 }
 
-function read(fp: PathOrFileDescriptor) {
-  return strip(readFileSync(fp, "utf8"))
+const testCfg = {
+  fixturesDir: join(__dirname, "fixtures"),
+  expectedDir: join(__dirname, "expected"),
+}
+
+/** Reads one of the test fixture files */
+const readFixture = (fname: string): string => {
+  const fpath = join(testCfg.fixturesDir, fname)
+  return strTrim(readFileSync(fpath, "utf8"))
+}
+
+/** Reads one of the expected test outputs from a fixture */
+const readExpected = (fname: string): string => {
+  const fpath = join(testCfg.expectedDir, fname)
+  return strTrim(readFileSync(fpath, "utf8"))
 }
 
 interface WantGot {
@@ -36,7 +50,7 @@ describe("plugin", () => {
       return REMARK.render(str, options)
     }
 
-    const inMd: string = read("test/fixtures/strip-words.md")
+    const inMd: string = readFixture("strip-words.md")
 
     const options = {
       slugify: false,
@@ -59,7 +73,7 @@ describe("plugin", () => {
 
 describe("options: custom functions:", () => {
   test("should allow a custom `strip` function to strip words from heading text:", () => {
-    const actual = toc(read("test/fixtures/strip-words.md"), {
+    const actual = toc(readFixture("strip-words.md"), {
       slugify: false,
       strip(str: string) {
         return `~${str.slice(4)}~`
@@ -155,7 +169,7 @@ describe("options: custom functions:", () => {
   })
 
   test("should allow a `filter` function to filter out unwanted bullets:", () => {
-    const actual = toc(read("test/fixtures/filter.md"), {
+    const actual = toc(readFixture("filter.md"), {
       filter(str: string, _ele: any, _arr: any) {
         // When first appearance of substring "..." occurs at position -1
         // TODO: Q: What does this mean?
@@ -224,7 +238,7 @@ describe("toc", () => {
   })
 
   test("should use a different bullet for each level", () => {
-    expect(toc(read("test/fixtures/levels.md")).content).toEqual(
+    expect(toc(readFixture("levels.md")).content).toEqual(
       [
         "- [AAA](#aaa)",
         "  * [a.1](#a1)",
@@ -235,7 +249,7 @@ describe("toc", () => {
   })
 
   test("should use a different bullet for each level", () => {
-    expect(toc(read("test/fixtures/repeat-bullets.md")).content).toEqual(
+    expect(toc(readFixture("repeat-bullets.md")).content).toEqual(
       [
         "- [AAA](#aaa)",
         "  * [a.1](#a1)",
@@ -247,7 +261,7 @@ describe("toc", () => {
   })
 
   test("should handle mixed heading levels:", () => {
-    expect(toc(read("test/fixtures/mixed.md")).content).toEqual(
+    expect(toc(readFixture("mixed.md")).content).toEqual(
       [
         "- [AAA](#aaa)",
         "  * [a.1](#a1)",
@@ -263,7 +277,7 @@ describe("toc", () => {
   })
 
   test("should ignore headings in fenced code blocks.", () => {
-    expect(toc(read("test/fixtures/fenced-code-blocks.md")).content).toEqual(
+    expect(toc(readFixture("fenced-code-blocks.md")).content).toEqual(
       [
         "- [AAA](#aaa)",
         "  * [a.1](#a1)",
@@ -329,12 +343,12 @@ describe("toc", () => {
   })
 
   test("should rotate bullets when there are more levels than bullets defined:", () => {
-    const actual = toc(read("test/fixtures/repeated-headings.md")).content
-    expect(actual).toEqual(read("test/expected/repeated-headings.md"))
+    const actual = toc(readFixture("repeated-headings.md")).content
+    expect(actual).toEqual(readExpected("repeated-headings.md"))
   })
 
   test("should wrap around the bullet point array", () => {
-    const actual = toc(read("test/fixtures/heading-levels.md"), {
+    const actual = toc(readFixture("heading-levels.md"), {
       bullets: ["*", "-"],
     })
 
@@ -354,7 +368,7 @@ describe("toc", () => {
   })
 
   test("should allow custom bullet points at different depths", () => {
-    const actual = toc(read("test/fixtures/heading-levels.md"), {
+    const actual = toc(readFixture("heading-levels.md"), {
       bullets: ["*", "1.", "-"],
     })
 
@@ -374,7 +388,7 @@ describe("toc", () => {
   })
 
   test("should remove diacritics from the links", () => {
-    const actual = toc(read("test/fixtures/diacritics.md"))
+    const actual = toc(readFixture("diacritics.md"))
 
     expect(actual.content).toEqual(
       [
@@ -385,7 +399,7 @@ describe("toc", () => {
   })
 
   test("should strip words from heading text, but not from urls:", () => {
-    const actual = toc(read("test/fixtures/strip-words.md"), {
+    const actual = toc(readFixture("strip-words.md"), {
       strip: ["foo", "bar", "baz", "fez"],
     })
 
@@ -448,65 +462,66 @@ describe("json property", () => {
 
 describe("toc.insert", () => {
   test("should retain trailing newlines in the given string", () => {
-    const str = readFileSync("test/fixtures/newline.md", "utf8")
-    expect(Toc.insert(str)).toEqual(
-      readFileSync("test/expected/newline.md", "utf8"),
-    )
+    const str = readFixture("newline.md")
+    expect(Toc.insert(str)).toEqual(readExpected("newline.md"))
   })
 
   test("should insert a markdown TOC beneath a `<!-- toc -->` comment.", () => {
-    const str = read("test/fixtures/insert.md")
-    const got = strip(Toc.insert(str))
-    const want = read("test/expected/insert.md")
+    const str = readFixture("insert.md")
+    const got = strTrim(Toc.insert(str))
+    const want = readExpected("insert.md")
     expect(got).toEqual(want)
   })
 
   test("should replace an old TOC between `<!-- toc -->...<!-- tocstop -->` comments.", () => {
-    const md: string = read("test/fixtures/replace-existing.md")
+    const md: string = readFixture("replace-existing.md")
     const [got, want] = [
-      strip(Toc.insert(md)),
-      read("test/expected/replace-existing.md"),
+      strTrim(Toc.insert(md)),
+      readExpected("replace-existing.md"),
     ]
     expect(got).toEqual(want)
   })
 
   test("should insert the toc passed on the options.", () => {
-    const md: string = read("test/fixtures/replace-existing.md")
+    const md: string = readFixture("replace-existing.md")
     const testCases: WantGot[] = [
       {
-        want: read("test/expected/replace-existing.md"),
-        got: strip(Toc.insert(md, { toc: toc(md).content })),
+        want: readExpected("replace-existing.md"),
+        got: strTrim(Toc.insert(md, { toc: toc(md).content })),
       },
       {
-        want: read("test/expected/foo.md"),
-        got: strip(Toc.insert(md, { toc: "- Foo" })),
+        want: readExpected("foo.md"),
+        got: strTrim(Toc.insert(md, { toc: "- Foo" })),
       },
     ]
     testCases.forEach((tc) => expect(tc.got).toEqual(tc.want))
   })
 
   test("should accept options", () => {
-    const md: string = read("test/fixtures/insert.md")
+    const md: string = readFixture("insert.md")
     const actual = Toc.insert(md, {
       slugify(text: string) {
         return text.toLowerCase()
       },
     })
 
-    expect(strip(actual)).toEqual(read("test/expected/insert-options.md"))
+    expect(strTrim(actual)).toEqual(readExpected("insert-options.md"))
   })
 
   test("should accept no links option", () => {
-    const md: string = read("test/fixtures/insert.md")
+    const md: string = readFixture("insert.md")
     const testCases: WantGot[] = [
-      { want: read("test/expected/insert.md"), got: strip(Toc.insert(md, {})) },
       {
-        want: read("test/expected/insert.md"),
-        got: strip(Toc.insert(md, { linkify: true })),
+        want: readExpected("insert.md"),
+        got: strTrim(Toc.insert(md, {})),
       },
       {
-        want: read("test/expected/insert-no-links.md"),
-        got: strip(Toc.insert(md, { linkify: false })),
+        want: readExpected("insert.md"),
+        got: strTrim(Toc.insert(md, { linkify: true })),
+      },
+      {
+        want: readExpected("insert-no-links.md"),
+        got: strTrim(Toc.insert(md, { linkify: false })),
       },
     ]
     testCases.forEach((tc) => expect(tc.got).toEqual(tc.want))
