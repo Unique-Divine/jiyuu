@@ -15,8 +15,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - name: "Check out the repo"
-        uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - name: "Install bun" # For running things and TS package management"
         uses: oven-sh/setup-bun@v1
         with:
@@ -26,6 +25,37 @@ jobs:
         # - bun-version  : The output from running `bun-version`. Ex. "1.0.0"
         # - bun-revision : The output from running `bun-revision`.
       - run: |
+          echo "Placeholder for later"
+
+  mdtoc-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: "Check for relevant changes"
+        id: check_changes
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            check_changes:
+              - "mdtoc/**/*"
+
+      - if: steps.check_changes.outputs.check_changes == 'true'
+        name: "Install bun" # For running things and TS package management"
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: 1.2.22 # Values: latest, <sha>, 1.2.3, canary
+        # Outputs:
+        # - cache-hit    : Whether the executable was read from cache. Ex. "true"
+        # - bun-version  : The output from running `bun-version`. Ex. "1.0.0"
+        # - bun-revision : The output from running `bun-revision`.
+
+      - if: steps.check_changes.outputs.check_changes == 'true'
+        run: |
           bun install
-      - run: |
+        working-directory: mdtoc
+
+      - if: steps.check_changes.outputs.check_changes == 'true'
+        run: |
           bun test
+        working-directory: mdtoc
