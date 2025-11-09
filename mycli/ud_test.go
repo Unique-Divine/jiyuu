@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 // getScriptPath returns the absolute path to ud.sh
@@ -98,8 +100,5 @@ func TestGoTestShortCmd(t *testing.T) {
 func TestNibiCfgProd(t *testing.T) {
 	bashCmd := "ud nibi cfg prod"
 	output := runUdCommand(t, bashCmd)
-	if !strings.Contains(output, "nibid config") {
-		fail(t, bashCmd)
-	}
-	pass(t, bashCmd)
+	require.Contains(t, output, "ud nibi cfg")
 }
