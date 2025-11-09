@@ -256,25 +256,20 @@ EOF
 
 # ------------ Subcommand: ud nibi
 
+RPC_NIBI_LOCAL="http://localhost:26657"
+RPC_NIBI_TEST="https://rpc.archive.testnet-2.nibiru.fi:443"  # load balanced between nodes
+RPC_NIBI_PROD="https://rpc.archive.nibiru.fi:443"
+RPC_NIBI_DEV="https://rpc.devnet-3.nibiru.fi:443"
+# RPC_NIBI_TEST="https://rpc.testnet-2.nibiru.fi:443"  # load balanced between nodes
+# RPC_NIBI_PROD="https://rpc.nibiru.fi:443"
+# ITN_RPC="https://rpc-1.itn-1.nibiru.fi:443"   # individual node
+
 # Command: "ud nibi cfg"
 _ud_nibi_cfg() {
   local sub="${1:-help}"
+  echo "Usage: ud nibi cfg [local | prod | test | dev]"
+  echo "Sets the Nibiru CLI config to one of the Nibiru blockchain networks."
   case "$sub" in
-    local)
-      cfg_nibi_local ;;
-    prod|mainnet)
-      cfg_nibi ;;
-    test)
-      local rpc_url="$RPC_TESTNET"
-      local chain_id="nibiru-testnet-2"
-      nibid config node "$rpc_url"
-      nibid config chain-id "$chain_id"
-      nibid config broadcast-mode sync
-      nibid config
-      export RPC="$rpc_url" ;;
-      # cfg_nibi_test ;;
-    dev)
-      cfg_nibi_dev ;;
     help|-h|--help|"")
       local help_text
       help_text=$(cat <<EOF
@@ -295,6 +290,40 @@ FLAGS:
 EOF
 )
       echo "$help_text"
+      ;;
+    local)
+      local rpc_url="$RPC_NIBI_LOCAL"
+      local chain_id="nibiru-localnet-0"
+      nibid config node $rpc_url
+      nibid config chain-id "$chain_id"
+      nibid config broadcast-mode sync
+      nibid config
+      export RPC="$rpc_url"
+      ;;
+    prod)
+      local rpc_url="$RPC_NIBI_PROD"
+      nibid config node "$rpc_url"
+      nibid config chain-id cataclysm-1
+      nibid config broadcast-mode sync
+      nibid config
+      export RPC="$rpc_url"
+      ;;
+    test)
+      local rpc_url="$RPC_NIBI_TEST"
+      local chain_id="nibiru-testnet-2"
+      nibid config node $rpc_url
+      nibid config chain-id "$chain_id"
+      nibid config broadcast-mode sync
+      nibid config
+      export RPC="$rpc_url"
+      ;;
+    dev)
+      local rpc_url="$RPC_NIBI_DEV"
+      nibid config node $rpc_url
+      nibid config chain-id nibiru-devnet-3
+      nibid config broadcast-mode sync
+      nibid config
+      export RPC="$rpc_url"
       ;;
     *)
       echo "Unknown cfg subcommand: $sub"
@@ -322,7 +351,7 @@ _ud_nibi() {
       ;;
 
     get-nibid|gn)
-      local cmd='curl -s https://get.nibiru.fi/@v0.19.2! | bash'
+      local cmd='curl -s https://get.nibiru.fi/@v2.9.0! | bash'
       echo "$cmd"
       eval "$cmd"
       ;;
