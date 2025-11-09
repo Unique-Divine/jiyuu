@@ -256,6 +256,56 @@ EOF
 
 # ------------ Subcommand: ud nibi
 
+# Command: "ud nibi cfg"
+_ud_nibi_cfg() {
+  local sub="${1:-help}"
+  case "$sub" in
+    local)
+      cfg_nibi_local ;;
+    prod|mainnet)
+      cfg_nibi ;;
+    test)
+      local rpc_url="$RPC_TESTNET"
+      local chain_id="nibiru-testnet-2"
+      nibid config node "$rpc_url"
+      nibid config chain-id "$chain_id"
+      nibid config broadcast-mode sync
+      nibid config
+      export RPC="$rpc_url" ;;
+      # cfg_nibi_test ;;
+    dev)
+      cfg_nibi_dev ;;
+    help|-h|--help|"")
+      local help_text
+      help_text=$(cat <<EOF
+USAGE:
+   ud nibi cfg [network]
+
+DESCRIPTION:
+   Set Nibiru CLI config to a specific network.
+
+COMMANDS:
+   local       Local network (localnet)
+   prod        Mainnet (cataclysm-1)
+   test        Test network (testnet)
+   dev         Development network (devnet)
+
+FLAGS:
+   --help, -h         Show help for the this command
+EOF
+)
+      echo "$help_text"
+      ;;
+    *)
+      echo "Unknown cfg subcommand: $sub"
+      _ud_nibi_cfg help
+      return 1
+      ;;
+  esac
+}
+
+
+# Command: "ud nibi"
 _ud_nibi() {
   local sub="${1:-help}"
   case "$sub" in

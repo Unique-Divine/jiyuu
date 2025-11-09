@@ -3,13 +3,18 @@ setup:
   #!/usr/bin/env bash
   just -l
 
-# Locally install the "ud" binary
+# Locally install the "ud" script
 install: 
   #!/usr/bin/env bash
   source ud.sh
   ud --help
 
 alias i := install
+
+# Run tests for "ud" script
+test:
+  #!/usr/bin/env bash
+  go test ./...
 
 # Stops any `nibid` processes, even if they're running in the background.
 stop: 
