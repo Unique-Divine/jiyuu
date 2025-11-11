@@ -1,9 +1,9 @@
 package algos
 
-// You're given an image represented as a 2D grid of integers. Each cell contains a
-// color value. You're also given a starting pixel `(sr, sc)` and a `newColor`. The
-// task is to recolor the entire connected region (4-directionally connected) that
-// shares the original color of the starting pixel with the new color.
+// You're given an image represented as a 2D grid of integers. Each cell contains
+// a color value. You're also given a starting pixel `(sr, sc)` and a `newColor`.
+// The task is to recolor the entire connected region (4-directionally connected)
+// that shares the original color of the starting pixel with the new color.
 //
 // Example:
 // ```
