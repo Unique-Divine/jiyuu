@@ -18,6 +18,7 @@ package algos
 // This changes all 1s connected to (1, 1) into 2s.
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/suite"
@@ -194,11 +195,19 @@ func (s *S) TestFillImg() {
 		},
 	}
 
+	cloneGrid := func(img [][]int) [][]int {
+		out := make([][]int, len(img))
+		for i := range img {
+			out[i] = slices.Clone(img[i])
+		}
+		return out
+	}
+
 	for _, tc := range tests {
 		s.Run(tc.name, func() {
-			got := Sol0_RecursiveDFS(tc.imgIn, tc.newColor, tc.start)
+			got := Sol0_RecursiveDFS(cloneGrid(tc.imgIn), tc.newColor, tc.start)
 			s.Require().Equal(tc.want, got)
-			got = Sol0_IterDFS(tc.imgIn, tc.newColor, tc.start)
+			got = Sol0_IterDFS(cloneGrid(tc.imgIn), tc.newColor, tc.start)
 			s.Require().Equal(tc.want, got)
 		})
 	}

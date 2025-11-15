@@ -40,8 +40,8 @@ package algos
 //   - k: Count of non-"val" elements in nums.
 func Sol2(nums []int, val int) int {
 	var (
-		k        int = 0 // Count of non-val elements
-		writeIdx int = 0 // Idx for the earliest spot we can place
+		k        = 0 // Count of non-val elements
+		writeIdx = 0 // Idx for the earliest spot we can place
 	)
 
 	for idx, num := range nums {
