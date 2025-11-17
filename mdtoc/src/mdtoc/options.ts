@@ -1,5 +1,5 @@
 /**
- * src/options.ts
+ * src/mdtoc/options.ts
  */
 import stripColor from "strip-color"
 import diacritics from "diacritics-map"
