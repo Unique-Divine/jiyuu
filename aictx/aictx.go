@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -67,6 +68,10 @@ func runCliApp(c *cli.Context) error {
 		}
 		return cli.Exit("", 1)
 	}
+	// TODO: impl lang flag feature for addition of ignore patterns.
+	lang := c.String("lang")
+	if len(lang) != 0 {
+	}
 
 	argPaths, err := ExpandGlobs(rawCmdArgs)
 	if err != nil {
@@ -76,8 +81,22 @@ func runCliApp(c *cli.Context) error {
 		return cli.Exit("no paths matched", 1)
 	}
 
+	rc := NewRunCtx()
+
+	// Load ignore lines from repo .gitignore based on cwd
+	err = rc.LoadIgnoreLines()
+	if err != nil {
+		return err
+	}
+
+	// Add custom ignore patterns specified by user.
+	var userIgnoreLines []string
+	rc.BuildIgnorer(userIgnoreLines...)
+
 	var buf bytes.Buffer
-	if err := stitchPaths(&buf, argPaths); err != nil {
+	rcBz, _ := json.MarshalIndent(rc, "", "  ")
+	fmt.Fprintf(&buf, "\nRunCtx: %+s\n", rcBz)
+	if err := stitchPaths(rc, &buf, argPaths); err != nil {
 		return err
 	}
 	data := buf.Bytes()
@@ -122,8 +141,7 @@ func copyToClipboard(data []byte) error {
 	return cmd.Run()
 }
 
-func stitchPaths(w io.Writer, paths []string) error {
-	rc := NewRunCtx()
+func stitchPaths(rc *RunCtx, w io.Writer, paths []string) error {
 	for _, p := range paths {
 		absP, err := filepath.Abs(p)
 		if err != nil {
@@ -148,6 +166,18 @@ func (rc *RunCtx) stitchPath(w io.Writer, pathRoot string) error {
 		return err
 	}
 
+	absP, err := filepath.Abs(pathRoot)
+	if err != nil {
+		return err
+	}
+	// Skip processing the file if we've already done so.
+	if _, isSeen := rc.seenAbsPaths[absP]; isSeen {
+		return nil
+	}
+	if rc.ShouldIgnore(absP) {
+		return nil
+	}
+
 	if info.IsDir() {
 		return filepath.WalkDir(
 			pathRoot,
@@ -166,10 +196,15 @@ func (rc *RunCtx) stitchPath(w io.Writer, pathRoot string) error {
 				}
 
 				rc.seenAbsPaths[absP] = struct{}{}
+				if rc.ShouldIgnore(absP) {
+					return nil
+				}
 				return rc.stitchFile(w, path)
 			},
 		)
 	}
+
+	rc.seenAbsPaths[absP] = struct{}{}
 	return rc.stitchFile(w, pathRoot)
 }
 
@@ -217,17 +252,97 @@ func FindGitRepo(path string) (isRepo bool, repoPath string, err error) {
 	return true, string(bz), nil
 }
 
+// LoadIgnoreLines checks if the current working directory is a git repo and then
+// returns the lines from its .gitignore file if one is present.
+func (rc *RunCtx) LoadIgnoreLines() error {
+	// Load ignore lines from CWD
+	cwd, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+
+	ok, repoRoot, err := FindGitRepo(cwd)
+	if ok && err == nil {
+		repoRoot = strings.TrimSpace(repoRoot)
+	}
+
+	rc.Cwd = cwd
+	rc.CwdRepoRoot = repoRoot
+	giPath := filepath.Join(repoRoot, ".gitignore")
+	if _, err := os.Stat(giPath); err == nil {
+		bz, err := os.ReadFile(giPath)
+		if err != nil {
+			return err
+		}
+		rc.CwdRepoGitIgnore = giPath
+		lines := strings.Split(string(bz), "\n")
+		rc.ignoreLines = append(rc.ignoreLines, lines...)
+	}
+
+	// Global ignore lines
+
+	return nil
+}
+
 type RunCtx struct {
-	Ignorer      gitignore.GitIgnore
+	Cwd              string
+	CwdRepoRoot      string
+	CwdRepoGitIgnore string
+
+	ignorer      *gitignore.GitIgnore
 	ignoreLines  []string
-	ignoreFiles  map[string]struct{}
 	seenAbsPaths map[string]struct{}
 }
 
 func NewRunCtx() *RunCtx {
 	return &RunCtx{
-		Ignorer:      gitignore.GitIgnore{},
+		ignorer:      nil,
 		seenAbsPaths: make(map[string]struct{}),
-		ignoreFiles:  make(map[string]struct{}),
 	}
+}
+
+// BuildIgnorer compiles rc.ignoreLines plus any extra lines (e.g., from flags)
+// into a single GitIgnore object.
+func (rc *RunCtx) BuildIgnorer(extraLines ...string) {
+	all := make([]string, 0, len(rc.ignoreLines)+len(extraLines))
+	all = append(all, rc.ignoreLines...)
+	all = append(all, extraLines...)
+
+	if len(all) == 0 {
+		rc.ignorer = nil
+		return
+	}
+
+	rc.ignorer = gitignore.CompileIgnoreLines(all...)
+}
+
+func (rc RunCtx) ShouldIgnore(absPath string) bool {
+	if rc.ignorer == nil {
+		return false
+	}
+
+	var (
+		// Path to the root of the repo for the gitignore
+		root = rc.CwdRepoRoot
+		// Gitignore semantics expect relative paths based on teh git
+		// repo that contains them. Absolue paths won't work.
+		rel string
+	)
+
+	if root == "" {
+		root = rc.Cwd // fallback if no repo
+	}
+
+	// Convert to a relative path so .gitignore rules work correctly.
+	rel, err := filepath.Rel(root, absPath)
+	if err != nil {
+		// If something weird happens, just treat as not ignored.
+		return false
+	}
+
+	// Gitignore library expects forward slashes. We have to call
+	// filepath.ToSlash here to account for Windows backslashes.
+	rel = filepath.ToSlash(rel)
+
+	return rc.ignorer.MatchesPath(rel)
 }
