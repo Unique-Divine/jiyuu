@@ -22,7 +22,7 @@ const (
 func writeFileToTestDir(fname, content string) {
 	testDirPath := "." + string(filepath.Separator) + TEST_DIR
 	testFilePath := testDirPath + string(filepath.Separator) + fname
-	_ = os.MkdirAll(testDirPath, 0755)
+	_ = os.MkdirAll(testDirPath, 0o755)
 	_ = os.WriteFile(testFilePath, []byte(content), os.ModePerm)
 }
 
@@ -165,7 +165,6 @@ file.txt
 	assert.Equal(t, true, object.MatchesPath("file.txt"), "file.txt should match")
 	assert.Equal(t, true, object.MatchesPath("a/file.txt"), "a/file.txt should match")
 	assert.Equal(t, false, object.MatchesPath("file2.txt"), "file2.txt should not match")
-
 }
 
 // Validate the correct handling matching files only within a given folder

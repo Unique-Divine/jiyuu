@@ -39,23 +39,6 @@ func (s *S) TestFindGitRepo() {
 			s.Require().NoErrorf(err, "repoPath: %q", repoPath)
 		})
 	}
-
-}
-
-func (s *S) TesPathRelativeDepth() {
-	for tcIdx, tc := range []struct {
-		path      string
-		wantDepth int
-	}{
-		{"a/b/../c", 2}, // "a/c"
-		{"./x/y", 2},    // "a/c"
-		{"/../x", 2},    // "/x"
-	} {
-		s.Run(fmt.Sprintf("tc %d", tcIdx), func() {
-			gotDepth := PathRelativeDepth(tc.path)
-			s.Require().Equalf(tc.wantDepth, gotDepth, "tc: %#v", tc)
-		})
-	}
 }
 
 // TestShouldIgnore_UsesRepoRootAndGitignore verifies that ShouldIgnore applies
@@ -155,4 +138,36 @@ func (s *S) TestStitchPath_RespectsGitignoreForDirs() {
 	out := buf.String()
 	s.Contains(out, srcFile)
 	s.NotContains(out, distFile)
+}
+
+func (s *S) TestDepthWithinRoot() {
+	type TC struct {
+		root string
+		path string
+		want int
+	}
+
+	tests := []TC{
+		// Same directory
+		{root: "/a/b", path: "/a/b", want: 0},
+
+		// Direct children
+		{root: "/a/b", path: "/a/b/c", want: 1},
+		{root: "/a/b/", path: "/a/b/c", want: 1}, // trailing slash on root
+
+		// Grandchildren
+		{root: "/a/b", path: "/a/b/c/d", want: 2},
+
+		// Sibling directory (depth becomes zero or negative depending on path shape)
+		// In this case:
+		//   root="/a/b" has 2 slashes, path="/a/x" also has 2 slashes → depth = 0
+		{root: "/a/b", path: "/a/x", want: 0},
+	}
+
+	for i, tc := range tests {
+		s.Run(fmt.Sprintf("tc %d (%s -> %s)", i, tc.root, tc.path), func() {
+			got := depthWithinRoot(tc.root, tc.path)
+			s.Equalf(tc.want, got, "root=%q path=%q", tc.root, tc.path)
+		})
+	}
 }

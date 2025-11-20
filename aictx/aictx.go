@@ -17,13 +17,21 @@ import (
 func main() {
 	cliApp := &cli.App{
 		Name:      "aictx",
-		Usage:     "Combine files into a single LLM-friendly output and copy it to the clipboard",
+		Usage:     "Combine files into a single LLM-friendly output",
 		ArgsUsage: "<path> [path2 ...]",
 		Flags: []cli.Flag{
 			&cli.StringFlag{
 				Name:    "output",
 				Aliases: []string{"o"},
-				Usage:   "write result to file in addition to copying it to the clipboard",
+				Usage:   "Write result to file",
+			},
+			&cli.IntFlag{
+				Name:        "level",
+				Aliases:     []string{"L"},
+				Usage:       `Limit the depth of recursion`,
+				Required:    false,
+				DefaultText: "-1",
+				Value:       -1,
 			},
 			&cli.StringFlag{
 				Name:  "lang",
@@ -55,7 +63,8 @@ func main() {
 }
 
 func runCliApp(c *cli.Context) error {
-	outputPath := c.String("output")
+	opts := new(FlagOpts)
+	opts.Output = c.String("output")
 	rawCmdArgs := c.Args().Slice()
 	if len(rawCmdArgs) == 0 {
 		_, err := os.Stderr.WriteString("aictx requires at least one path (file, directory, or glob)\n\n")
@@ -82,6 +91,7 @@ func runCliApp(c *cli.Context) error {
 	}
 
 	rc := NewRunCtx()
+	rc.Opts = opts
 
 	// Load ignore lines from repo .gitignore based on cwd
 	err = rc.LoadIgnoreLines()
@@ -101,19 +111,20 @@ func runCliApp(c *cli.Context) error {
 	}
 	data := buf.Bytes()
 
-	if outputPath != "" {
-		if err := os.WriteFile(outputPath, data, 0o644); err != nil {
+	if len(opts.Output) != 0 {
+		if err := os.WriteFile(opts.Output, data, 0o644); err != nil {
 			return err
 		}
-	}
-
-	if err := copyToClipboard(data); err != nil {
-		return err
 	}
 
 	// Print to stdout so you can see the stitched result in the terminal.
 	_, err = os.Stdout.Write(data)
 	return err
+}
+
+type FlagOpts struct {
+	Level  int    // Limit the depth of recursion. -1 means unset.
+	Output string // Output file to write. Uses stdout by default (output="").
 }
 
 // ExpandGlobs returns the collection of individual paths made by expanding any
@@ -133,12 +144,6 @@ func ExpandGlobs(args []string) ([]string, error) {
 		}
 	}
 	return out, nil
-}
-
-func copyToClipboard(data []byte) error {
-	cmd := exec.Command("pbcopy")
-	cmd.Stdin = bytes.NewReader(data)
-	return cmd.Run()
 }
 
 func stitchPaths(rc *RunCtx, w io.Writer, paths []string) error {
@@ -214,7 +219,6 @@ const (
 )
 
 func (rc *RunCtx) stitchFile(w io.Writer, path string) error {
-
 	// Header format can be tuned for LLM prompts.
 	if _, err := fmt.Fprintf(
 		w,
@@ -289,6 +293,7 @@ type RunCtx struct {
 	CwdRepoRoot      string
 	CwdRepoGitIgnore string
 
+	Opts         *FlagOpts
 	ignorer      *gitignore.GitIgnore
 	ignoreLines  []string
 	seenAbsPaths map[string]struct{}
@@ -345,4 +350,25 @@ func (rc RunCtx) ShouldIgnore(absPath string) bool {
 	rel = filepath.ToSlash(rel)
 
 	return rc.ignorer.MatchesPath(rel)
+}
+
+// depthWithinRoot returns how many path segments "path" is below "root".
+// root and path should both be absolute paths.
+func depthWithinRoot(root, path string) int {
+	root = filepath.Clean(root)
+	path = filepath.Clean(path)
+
+	root = filepath.ToSlash(root)
+	path = filepath.ToSlash(path)
+
+	fmt.Printf("DEBUG root: %v\n", root)
+	fmt.Printf("DEBUG path: %v\n", path)
+
+	if root == path {
+		return 0
+	}
+
+	rootCount := strings.Count(root, "/")
+	pathCount := strings.Count(path, "/")
+	return pathCount - rootCount
 }

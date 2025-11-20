@@ -141,7 +141,7 @@ func getPatternFromLine(line string) (*regexp.Regexp, bool) {
 	line = strings.Replace(line, magicStar, "*", -1)
 
 	// Temporary regex
-	var expr = ""
+	expr := ""
 	if strings.HasSuffix(line, "/") {
 		expr = line + "(|.*)$"
 	} else {
