@@ -64,7 +64,11 @@ func main() {
 
 func runCliApp(c *cli.Context) error {
 	opts := new(FlagOpts)
+
+	// Flag --level
 	opts.Output = c.String("output")
+
+	// Core Args: root paths to traverse with recursion.
 	rawCmdArgs := c.Args().Slice()
 	if len(rawCmdArgs) == 0 {
 		_, err := os.Stderr.WriteString("aictx requires at least one path (file, directory, or glob)\n\n")
@@ -77,6 +81,13 @@ func runCliApp(c *cli.Context) error {
 		}
 		return cli.Exit("", 1)
 	}
+
+	// Flag --level
+	opts.Level = c.Int("level")
+	if opts.Level < 0 {
+		opts.Level = -1
+	}
+
 	// TODO: impl lang flag feature for addition of ignore patterns.
 	lang := c.String("lang")
 	if len(lang) != 0 {
@@ -165,43 +176,68 @@ func stitchPaths(rc *RunCtx, w io.Writer, paths []string) error {
 	return nil
 }
 
-func (rc *RunCtx) stitchPath(w io.Writer, pathRoot string) error {
-	info, err := os.Stat(pathRoot)
+func (rc *RunCtx) stitchPath(w io.Writer, rootPath string) error {
+	info, err := os.Stat(rootPath)
 	if err != nil {
 		return err
 	}
 
-	absP, err := filepath.Abs(pathRoot)
+	absRootP, err := filepath.Abs(rootPath)
 	if err != nil {
 		return err
 	}
 	// Skip processing the file if we've already done so.
-	if _, isSeen := rc.seenAbsPaths[absP]; isSeen {
+	if _, isSeen := rc.seenAbsPaths[absRootP]; isSeen {
 		return nil
 	}
-	if rc.ShouldIgnore(absP) {
+	rc.seenAbsPaths[absRootP] = struct{}{}
+
+	if rc.ShouldIgnore(absRootP) {
 		return nil
 	}
 
 	if info.IsDir() {
+		maxRelDepth := -1 // maximum relative depth from rootPath
+		if rc.Opts != nil && rc.Opts.Level >= 0 {
+			maxRelDepth = rc.Opts.Level
+		}
+
 		return filepath.WalkDir(
-			pathRoot,
+			rootPath,
 			func(path string, d os.DirEntry, err error) error {
 				absP, err := filepath.Abs(path)
 				if err != nil {
 					return err
 				}
-				// Skip processing the file if we've already done so.
+				// Skip if we've already processed this path.
 				if _, isSeen := rc.seenAbsPaths[absP]; isSeen {
 					return nil
 				}
 
+				rc.seenAbsPaths[absP] = struct{}{}
+
+				// Enforce max depth if set
+				if maxRelDepth >= 0 {
+					depth := depthWithinRoot(absRootP, absP)
+					if depth > maxRelDepth {
+						if d.IsDir() {
+							return filepath.SkipDir // Prune this subtree
+						}
+						return nil // Skip this file.
+					}
+				}
+
+				// Directory handling
+				shouldIgnore := rc.ShouldIgnore(absP)
 				if d.IsDir() {
+					if shouldIgnore {
+						return filepath.SkipDir
+					}
 					return nil
 				}
 
-				rc.seenAbsPaths[absP] = struct{}{}
-				if rc.ShouldIgnore(absP) {
+				// File handling
+				if shouldIgnore {
 					return nil
 				}
 				return rc.stitchFile(w, path)
@@ -209,8 +245,7 @@ func (rc *RunCtx) stitchPath(w io.Writer, pathRoot string) error {
 		)
 	}
 
-	rc.seenAbsPaths[absP] = struct{}{}
-	return rc.stitchFile(w, pathRoot)
+	return rc.stitchFile(w, rootPath) // Case: If the root path is a file.
 }
 
 const (
@@ -356,13 +391,10 @@ func (rc RunCtx) ShouldIgnore(absPath string) bool {
 // root and path should both be absolute paths.
 func depthWithinRoot(root, path string) int {
 	root = filepath.Clean(root)
-	path = filepath.Clean(path)
-
 	root = filepath.ToSlash(root)
-	path = filepath.ToSlash(path)
 
-	fmt.Printf("DEBUG root: %v\n", root)
-	fmt.Printf("DEBUG path: %v\n", path)
+	path = filepath.Clean(path)
+	path = filepath.ToSlash(path)
 
 	if root == path {
 		return 0
