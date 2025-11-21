@@ -171,3 +171,84 @@ func (s *S) TestDepthWithinRoot() {
 		})
 	}
 }
+
+func (s *S) TestStitchPath_RespectsLevelLimit() {
+	tmp := s.T().TempDir()
+	root := filepath.Join(tmp, "rootpath")
+	s.Require().NoError(os.MkdirAll(root, 0o755))
+
+	// Tree:
+	//   root/
+	//     a.txt             (depth 1)
+	//     sub/b.txt         (depth 2)
+	//     sub/deeper/c.txt  (depth 3)
+	aFile := filepath.Join(root, "a.txt")
+	subDir := filepath.Join(root, "sub")
+	bFile := filepath.Join(subDir, "b.txt")
+	deeperDir := filepath.Join(subDir, "deeper")
+	cFile := filepath.Join(deeperDir, "c.txt")
+
+	for _, p := range []string{aFile, bFile, cFile} {
+		s.Require().NoError(os.MkdirAll(filepath.Dir(p), 0o755))
+		s.Require().NoError(os.WriteFile(p, []byte("x"), 0o644))
+	}
+
+	// Helper to run stitchPath with a given level and return output as string.
+	runWithLevel := func(level int) string {
+		rc := NewRunCtx()
+		rc.Cwd = root
+		rc.CwdRepoRoot = root
+		rc.Opts = &FlagOpts{Level: level}
+
+		var buf bytes.Buffer
+		s.Require().NoError(rc.stitchPath(&buf, root))
+		return buf.String()
+	}
+
+	type TC struct {
+		level          int
+		name           string
+		wantContains   []string
+		wantNotContain []string
+	}
+
+	tests := []TC{
+		{
+			name:         "unlimited_-1",
+			level:        -1,
+			wantContains: []string{aFile, bFile, cFile},
+		},
+		{
+			name:  "level_0_no_files_under_root",
+			level: 0,
+			// We don't expect any files printed, since all are below the root dir.
+			wantNotContain: []string{aFile, bFile, cFile},
+		},
+		{
+			name:           "level_1_only_direct_children",
+			level:          1,
+			wantContains:   []string{aFile},
+			wantNotContain: []string{bFile, cFile},
+		},
+		{
+			name:           "level_2_children_and_grandchildren",
+			level:          2,
+			wantContains:   []string{aFile, bFile},
+			wantNotContain: []string{cFile},
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		s.Run(tc.name, func() {
+			out := runWithLevel(tc.level)
+
+			for _, p := range tc.wantContains {
+				s.Contains(out, p, "expected %q to be included for level=%d", p, tc.level)
+			}
+			for _, p := range tc.wantNotContain {
+				s.NotContains(out, p, "expected %q to be excluded for level=%d", p, tc.level)
+			}
+		})
+	}
+}
