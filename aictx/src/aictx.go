@@ -66,15 +66,13 @@ func runCliApp(c *cli.Context) error {
 	// Core Args: root paths to traverse with recursion.
 	rawCmdArgs := c.Args().Slice()
 	if len(rawCmdArgs) == 0 {
-		_, err := os.Stderr.WriteString("aictx requires at least one path (file, directory, or glob)\n\n")
+		_, err := c.App.ErrWriter.Write(
+			[]byte("aictx requires at least one path (file, directory, or glob)\n\n"),
+		)
 		if err != nil {
 			return err
 		}
-		err = cli.ShowAppHelp(c)
-		if err != nil {
-			return err
-		}
-		return cli.Exit("", 1)
+		return cli.ShowAppHelp(c)
 	}
 
 	// Flag --level
@@ -115,16 +113,16 @@ func runCliApp(c *cli.Context) error {
 	if err := stitchPaths(rc, &buf, argPaths); err != nil {
 		return err
 	}
-	data := buf.Bytes()
+	bufBz := buf.Bytes()
 
 	if len(opts.Output) != 0 {
-		if err := os.WriteFile(opts.Output, data, 0o644); err != nil {
+		if err := os.WriteFile(opts.Output, bufBz, 0o644); err != nil {
 			return err
 		}
 	}
 
 	// Print to stdout so you can see the stitched result in the terminal.
-	_, err = os.Stdout.Write(data)
+	_, err = c.App.Writer.Write(bufBz)
 	return err
 }
 
