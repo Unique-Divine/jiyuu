@@ -1,4 +1,4 @@
-package main
+package aictx
 
 import (
 	"bytes"
@@ -10,12 +10,12 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/Unique-Divine/jiyuu/aictx/gitignore"
+	"github.com/Unique-Divine/jiyuu/aictx/src/gitignore"
 	cli "github.com/urfave/cli/v2"
 )
 
-func main() {
-	cliApp := &cli.App{
+func NewCliApp() *cli.App {
+	return &cli.App{
 		Name:      "aictx",
 		Usage:     "Combine files into a single LLM-friendly output",
 		ArgsUsage: "<path> [path2 ...]",
@@ -54,11 +54,6 @@ func main() {
 				Action: runCliApp,
 			},
 		},
-	}
-
-	if err := cliApp.Run(os.Args); err != nil {
-		fmt.Fprintln(os.Stderr, "error:", err)
-		os.Exit(1)
 	}
 }
 
