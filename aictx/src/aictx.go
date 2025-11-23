@@ -2,6 +2,7 @@ package aictx
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,11 +12,11 @@ import (
 	"strings"
 
 	"github.com/Unique-Divine/jiyuu/aictx/src/gitignore"
-	cli "github.com/urfave/cli/v2"
+	cli "github.com/urfave/cli/v3"
 )
 
-func NewCliApp() *cli.App {
-	return &cli.App{
+func NewAppCmd() *cli.Command {
+	return &cli.Command{
 		Name:      "aictx",
 		Usage:     "Combine files into a single LLM-friendly output",
 		ArgsUsage: "<path> [path2 ...]",
@@ -38,7 +39,7 @@ func NewCliApp() *cli.App {
 				Usage: `Select default language ignore presets. Ex. "go", "ts", "py", "rust"].`,
 			},
 		},
-		Action: runCliApp,
+		Action: actionFunc,
 		Commands: []*cli.Command{
 			{
 				Name:      "cat",
@@ -51,13 +52,16 @@ func NewCliApp() *cli.App {
 						Usage:   "write result to file in addition to copying it to the clipboard",
 					},
 				},
-				Action: runCliApp,
+				Action: actionFunc,
 			},
 		},
 	}
 }
 
-func runCliApp(c *cli.Context) error {
+var _ cli.ActionFunc = actionFunc
+
+// actionFunc is the action to execute when no subcommands are specified
+func actionFunc(goCtx context.Context, c *cli.Command) error {
 	opts := new(FlagOpts)
 
 	// Flag --level
@@ -66,7 +70,7 @@ func runCliApp(c *cli.Context) error {
 	// Core Args: root paths to traverse with recursion.
 	rawCmdArgs := c.Args().Slice()
 	if len(rawCmdArgs) == 0 {
-		_, err := c.App.ErrWriter.Write(
+		_, err := c.ErrWriter.Write(
 			[]byte("aictx requires at least one path (file, directory, or glob)\n\n"),
 		)
 		if err != nil {
@@ -122,7 +126,7 @@ func runCliApp(c *cli.Context) error {
 	}
 
 	// Print to stdout so you can see the stitched result in the terminal.
-	_, err = c.App.Writer.Write(bufBz)
+	_, err = c.Writer.Write(bufBz)
 	return err
 }
 
@@ -242,18 +246,15 @@ func (rc *RunCtx) stitchPath(w io.Writer, rootPath string) error {
 }
 
 const (
-	fileSeparatorLines string = "========================================================"
-	codeMarkerDepth4   string = "````"
+	codeMarkerDepth4 string = "````"
 )
 
 func (rc *RunCtx) stitchFile(w io.Writer, path string) error {
 	// Header format can be tuned for LLM prompts.
 	if _, err := fmt.Fprintf(
 		w,
-		"\n%v\nFILE: %s\n%v\n",
-		fileSeparatorLines,
+		"\n\n### FILE: %s\n",
 		path,
-		fileSeparatorLines,
 	); err != nil {
 		return err
 	}

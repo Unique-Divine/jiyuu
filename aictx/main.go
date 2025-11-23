@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 
@@ -8,9 +9,9 @@ import (
 )
 
 func main() {
-	cliApp := aictx.NewCliApp()
-	if err := cliApp.Run(os.Args); err != nil {
-		fmt.Fprintln(os.Stderr, "error: ", err)
+	appCmd := aictx.NewAppCmd()
+	if err := appCmd.Run(context.Background(), os.Args); err != nil {
+		fmt.Fprintln(appCmd.ErrWriter, "error: ", err)
 		os.Exit(1)
 	}
 }

@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/suite"
-	cli "github.com/urfave/cli/v2"
+	cli "github.com/urfave/cli/v3"
 )
 
 func TestAictx(t *testing.T) {
@@ -20,7 +20,7 @@ type S struct {
 }
 
 func NewTestingCLI() (cliApp *cli.App, out, err *bytes.Buffer) {
-	cliApp = NewCliApp()
+	cliApp = NewAppCmd()
 	out, err = new(bytes.Buffer), new(bytes.Buffer)
 	cliApp.Writer = out
 	cliApp.ErrWriter = err
@@ -186,16 +186,14 @@ func (s *S) TestStitchPath_RespectsLevelLimit() {
 	root := filepath.Join(tmp, "rootpath")
 	s.Require().NoError(os.MkdirAll(root, 0o755))
 
-	// Tree:
-	//   root/
-	//     a.txt             (depth 1)
-	//     sub/b.txt         (depth 2)
-	//     sub/deeper/c.txt  (depth 3)
+	s.T().Log(`Tree:
+  root/
+	 a.txt             (depth 1)
+	 sub/b.txt         (depth 2)
+	 sub/deeper/c.txt  (depth 3)`)
 	aFile := filepath.Join(root, "a.txt")
-	subDir := filepath.Join(root, "sub")
-	bFile := filepath.Join(subDir, "b.txt")
-	deeperDir := filepath.Join(subDir, "deeper")
-	cFile := filepath.Join(deeperDir, "c.txt")
+	bFile := filepath.Join(root, "sub", "b.txt")
+	cFile := filepath.Join(root, "sub", "deeper", "c.txt")
 
 	for _, p := range []string{aFile, bFile, cFile} {
 		s.Require().NoError(os.MkdirAll(filepath.Dir(p), 0o755))
