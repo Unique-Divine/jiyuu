@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/suite"
+	cli "github.com/urfave/cli/v2"
 )
 
 func TestAictx(t *testing.T) {
@@ -16,6 +17,14 @@ func TestAictx(t *testing.T) {
 
 type S struct {
 	suite.Suite
+}
+
+func NewTestingCLI() (cliApp *cli.App, out, err *bytes.Buffer) {
+	cliApp = NewCliApp()
+	out, err = new(bytes.Buffer), new(bytes.Buffer)
+	cliApp.Writer = out
+	cliApp.ErrWriter = err
+	return cliApp, out, err
 }
 
 func (s *S) TestFindGitRepo() {
@@ -251,4 +260,50 @@ func (s *S) TestStitchPath_RespectsLevelLimit() {
 			}
 		})
 	}
+}
+
+func (s *S) TestCLI_LevelLimitIntegration() {
+	tmp := s.T().TempDir()
+
+	// Build a small tree under tmp.
+	root := filepath.Join(tmp, "root")
+	s.Require().NoError(os.MkdirAll(root, 0o755))
+
+	aFile := filepath.Join(root, "a.txt")
+	bFile := filepath.Join(root, "sub", "b.txt")
+	cFile := filepath.Join(root, "sub", "deeper", "c.txt")
+
+	for _, p := range []string{aFile, bFile, cFile} {
+		s.Require().NoError(os.MkdirAll(filepath.Dir(p), 0o755))
+		s.Require().NoError(os.WriteFile(p, []byte("x"), 0o644))
+	}
+
+	app, outBuf, errBuf := NewTestingCLI()
+
+	// Call the CLI as if from the shell:
+	// aictx --level 1 <root>
+	args := []string{
+		"aictx",     // argv[0] – binary name
+		"--level=1", // global flag
+		root,        // positional arg
+	}
+
+	err := app.Run(args)
+	s.Require().NoErrorf(err, "stderr: %s", errBuf)
+
+	out := outBuf.String()
+
+	// Level 1: only files directly under root.
+	s.Contains(out, aFile)
+	s.NotContains(out, bFile)
+	s.NotContains(out, cFile)
+}
+
+func (s *S) TestCLI_NoArgs_ShowsError() {
+	app, outBuf, errBuf := NewTestingCLI()
+
+	err := app.Run([]string{"aictx"})
+	s.Require().NoErrorf(err, "stderr: %s", errBuf) // from cli.Exit
+	s.Contains(errBuf.String(), "requires at least one path")
+	s.Contains(outBuf.String(), "Combine files into a single LLM-friendly output")
 }
