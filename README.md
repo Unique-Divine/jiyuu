@@ -1,22 +1,22 @@
 # Unique-Divine/自由 (jiyuu)
 
-CLI utilities monorepo solving concrete dev problems: Go coverage merging, Windows↔Linux encoding fixes, language-agnostic dev commands, Markdown TOC generation, and LLM context parsing. Built primarily in Go with TypeScript components.
+(1) Rigorous notes and solutions for core algorithms and computing fundamentals broken down for deliberate practice with Anki. (2) A monorepo of libraries and CLI tools I use regularly as a software engineer.
 
 ## ⚡jiyuu
 
 | Path | Description |
 | ---- | ----------- |
-| 📂 [gocovmerge](./gocovmerge/README.md)     | Go coverage profile merger with modern CLI features |
-| 📂 [mdtoc](./mdtoc/README.md) | Markdown table of contents (TOC) generator |
-| 📂 [mycli](./mycli/README.md)               | Language-agnostic "ud" CLI tool for personal use |
-| 📂 [winfixtext](./winfixtext/README.md)     | Fixes Windows encoding issues and corrupted LLM text outputs |
-| 📂 [aictx](./aictx/)                        | CLI tool for parsing files into LLM-compatible context |
-| 📂 [bash-ts](./bash-ts/README.md)           | Production TypeScript scripting library (bun install `@uniquedivine/bash`) for robust scripts with Bun runtime |
-| 📂 [ud-jiyuu](./ud-jiyuu/README.md)         | TypeScript package mimicking Rust/Go functionality |
-| 📂 [discord-nibiru](./discord-nibiru/README.md) | Discord moderation bot for Nibiru community |
-| 📦 scripts | Scripts crate in Rust |
-| ├── justfile | Runs project-specific commands |
-| └── README.md  | |
+| <span style="white-space: nowrap;">📂 [algos](./algos/algos-notes.md)</span> | Algorithm practice problems with Go implementations and Anki-formatted notes for deliberate practice |
+| <span style="white-space: nowrap;">📂 [aictx](./aictx/README.md)</span> | File to context convertor for pasing files to feed LLMs. Similar to `cat` and `bat`. |
+| <span style="white-space: nowrap;">📂 [gocovmerge](./gocovmerge/README.md)</span> | Go coverage profile merger with modern CLI features |
+| <span style="white-space: nowrap;">📂 [mdtoc](./mdtoc/README.md)</span> | Markdown table of contents (TOC) generator |
+| <span style="white-space: nowrap;">📂 [winfixtext](./winfixtext/README.md)</span> | Fixes Windows encoding issues and corrupted LLM text outputs |
+| <span style="white-space: nowrap;">📂 [bash-ts](./bash-ts/README.md)</span> | Production TypeScript scripting library (bun install `@uniquedivine/bash`) for robust scripts with Bun runtime |
+| <span style="white-space: nowrap;">📂 [ud-jiyuu](./ud-jiyuu/README.md)</span> | TypeScript package mimicking Rust/Go functionality |
+| <span style="white-space: nowrap;">📂 [discord-nibiru](./discord-nibiru/README.md)</span> | Discord moderation bot for Nibiru community |
+| <span style="white-space: nowrap;">📦 scripts</span> | Scripts crate in Rust |
+| <span style="white-space: nowrap;">├── justfile</span> | Runs project-specific commands |
+<!-- | <span style="white-space: nowrap;">└── README.md</span>  | ... | -->
 
 ## Hacking
 
@@ -29,10 +29,3 @@ cargo install just
 You can view the list of available development commands with `just -ls`.
 
 Ref: [github.com/casey/just](https://github.com/casey/just)
-
-## Work In Progress
-
-Some tools are experimental or under active development:
-
-- **aictx**: Not yet implemented - planned CLI for LLM context file parsing
-- **mdtoc**: Functional but still has open TODOs in sprint list
