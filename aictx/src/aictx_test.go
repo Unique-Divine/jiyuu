@@ -2,6 +2,7 @@ package aictx
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -19,12 +20,12 @@ type S struct {
 	suite.Suite
 }
 
-func NewTestingCLI() (cliApp *cli.App, out, err *bytes.Buffer) {
-	cliApp = NewAppCmd()
+func NewTestingCLI() (appCmd *cli.Command, out, err *bytes.Buffer) {
+	appCmd = NewAppCmd()
 	out, err = new(bytes.Buffer), new(bytes.Buffer)
-	cliApp.Writer = out
-	cliApp.ErrWriter = err
-	return cliApp, out, err
+	appCmd.Writer = out
+	appCmd.ErrWriter = err
+	return appCmd, out, err
 }
 
 func (s *S) TestFindGitRepo() {
@@ -286,7 +287,7 @@ func (s *S) TestCLI_LevelLimitIntegration() {
 		root,        // positional arg
 	}
 
-	err := app.Run(args)
+	err := app.Run(context.Background(), args)
 	s.Require().NoErrorf(err, "stderr: %s", errBuf)
 
 	out := outBuf.String()
@@ -300,7 +301,7 @@ func (s *S) TestCLI_LevelLimitIntegration() {
 func (s *S) TestCLI_NoArgs_ShowsError() {
 	app, outBuf, errBuf := NewTestingCLI()
 
-	err := app.Run([]string{"aictx"})
+	err := app.Run(context.Background(), []string{"aictx"})
 	s.Require().NoErrorf(err, "stderr: %s", errBuf) // from cli.Exit
 	s.Contains(errBuf.String(), "requires at least one path")
 	s.Contains(outBuf.String(), "Combine files into a single LLM-friendly output")

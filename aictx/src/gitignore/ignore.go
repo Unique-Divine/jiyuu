@@ -136,9 +136,9 @@ func getPatternFromLine(line string) (*regexp.Regexp, bool) {
 	line = regexp.MustCompile(`\*`).ReplaceAllString(line, `([^/]*)`)
 
 	// Handle escaping the "?" char
-	line = strings.Replace(line, "?", `\?`, -1)
+	line = strings.ReplaceAll(line, "?", `\?`)
 
-	line = strings.Replace(line, magicStar, "*", -1)
+	line = strings.ReplaceAll(line, magicStar, "*")
 
 	// Temporary regex
 	expr := ""
@@ -227,7 +227,7 @@ func (gi *GitIgnore) MatchesPath(f string) bool {
 // The IgnorePattern has the Line, LineNo fields.
 func (gi *GitIgnore) MatchesPathHow(f string) (bool, *IgnorePattern) {
 	// Replace OS-specific path separator.
-	f = strings.Replace(f, string(os.PathSeparator), "/", -1)
+	f = strings.ReplaceAll(f, string(os.PathSeparator), "/")
 
 	matchesPath := false
 	var mip *IgnorePattern

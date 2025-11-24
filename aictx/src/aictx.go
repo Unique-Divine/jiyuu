@@ -39,22 +39,8 @@ func NewAppCmd() *cli.Command {
 				Usage: `Select default language ignore presets. Ex. "go", "ts", "py", "rust"].`,
 			},
 		},
-		Action: actionFunc,
-		Commands: []*cli.Command{
-			{
-				Name:      "cat",
-				Usage:     "stitch one or more paths (files, directories, or globs)",
-				ArgsUsage: "<path> [path2 ...]",
-				Flags: []cli.Flag{
-					&cli.StringFlag{
-						Name:    "output",
-						Aliases: []string{"o"},
-						Usage:   "write result to file in addition to copying it to the clipboard",
-					},
-				},
-				Action: actionFunc,
-			},
-		},
+		Action:   actionFunc,
+		Commands: []*cli.Command{},
 	}
 }
 
