@@ -92,7 +92,7 @@ func (s *S) TestShouldIgnore_UsesRepoRootAndGitignore() {
 	rc.Cwd = repoRoot
 	rc.CwdRepoRoot = repoRoot
 	s.Require().NoError(rc.LoadIgnoreLines())
-	rc.BuildIgnorer()
+	rc.BuildLocalIgnorer()
 
 	s.True(rc.ShouldIgnore(distFile), "dist should be ignored")
 	s.True(rc.ShouldIgnore(logFile), "log should be ignored")
@@ -140,7 +140,7 @@ func (s *S) TestStitchPath_RespectsGitignoreForDirs() {
 	rc.Cwd = repoRoot
 	rc.CwdRepoRoot = repoRoot
 	s.Require().NoError(rc.LoadIgnoreLines())
-	rc.BuildIgnorer()
+	rc.BuildLocalIgnorer()
 
 	var buf bytes.Buffer
 	s.Require().NoError(rc.stitchPath(&buf, repoRoot))

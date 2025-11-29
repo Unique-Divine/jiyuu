@@ -95,7 +95,10 @@ func actionFunc(goCtx context.Context, c *cli.Command) error {
 
 	// Add custom ignore patterns specified by user.
 	var userIgnoreLines []string
-	rc.BuildIgnorer(userIgnoreLines...)
+	rc.ignorerGlobal = *gitignore.CompileIgnoreLines(
+		append(globalIgnoreLines, userIgnoreLines...)...,
+	)
+	rc.BuildLocalIgnorer()
 
 	var buf bytes.Buffer
 	rcBz, _ := json.MarshalIndent(rc, "", "  ")
@@ -231,10 +234,6 @@ func (rc *RunCtx) stitchPath(w io.Writer, rootPath string) error {
 	return rc.stitchFile(w, rootPath) // Case: If the root path is a file.
 }
 
-const (
-	codeMarkerDepth4 string = "````"
-)
-
 func (rc *RunCtx) stitchFile(w io.Writer, path string) error {
 	// Header format can be tuned for LLM prompts.
 	if _, err := fmt.Fprintf(
@@ -308,39 +307,36 @@ type RunCtx struct {
 	CwdRepoRoot      string
 	CwdRepoGitIgnore string
 
-	Opts         *FlagOpts
-	ignorer      *gitignore.GitIgnore
-	ignoreLines  []string
-	seenAbsPaths map[string]struct{}
+	Opts          *FlagOpts
+	ignorerLocal  *gitignore.GitIgnore
+	ignorerGlobal gitignore.GitIgnore
+	ignoreLines   []string
+	seenAbsPaths  map[string]struct{}
 }
 
 func NewRunCtx() *RunCtx {
 	return &RunCtx{
-		ignorer:      nil,
+		ignorerLocal: nil,
 		seenAbsPaths: make(map[string]struct{}),
 	}
 }
 
-// BuildIgnorer compiles rc.ignoreLines plus any extra lines (e.g., from flags)
-// into a single GitIgnore object.
-func (rc *RunCtx) BuildIgnorer(extraLines ...string) {
+// BuildLocalIgnorer compiles rc.ignoreLines plus any extra lines (e.g., from
+// flags) into a single GitIgnore object.
+func (rc *RunCtx) BuildLocalIgnorer(extraLines ...string) {
 	all := make([]string, 0, len(rc.ignoreLines)+len(extraLines))
 	all = append(all, rc.ignoreLines...)
 	all = append(all, extraLines...)
 
 	if len(all) == 0 {
-		rc.ignorer = nil
+		rc.ignorerLocal = nil
 		return
 	}
 
-	rc.ignorer = gitignore.CompileIgnoreLines(all...)
+	rc.ignorerLocal = gitignore.CompileIgnoreLines(all...)
 }
 
 func (rc RunCtx) ShouldIgnore(absPath string) bool {
-	if rc.ignorer == nil {
-		return false
-	}
-
 	var (
 		// Path to the root of the repo for the gitignore
 		root = rc.CwdRepoRoot
@@ -364,7 +360,15 @@ func (rc RunCtx) ShouldIgnore(absPath string) bool {
 	// filepath.ToSlash here to account for Windows backslashes.
 	rel = filepath.ToSlash(rel)
 
-	return rc.ignorer.MatchesPath(rel)
+	if rc.ignorerGlobal.MatchesPath(rel) {
+		return true
+	}
+
+	if rc.ignorerLocal == nil {
+		return false
+	}
+
+	return rc.ignorerLocal.MatchesPath(rel)
 }
 
 // depthWithinRoot returns how many path segments "path" is below "root".
