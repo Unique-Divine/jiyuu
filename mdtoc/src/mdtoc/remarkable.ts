@@ -1,3 +1,6 @@
+/**
+ * src/mdtoc/remarkable.ts
+ */
 import { Remarkable } from "remarkable"
 
 export interface IRemarkable extends RemarkableComponents {
@@ -82,7 +85,7 @@ export interface IRemarkable extends RemarkableComponents {
   options: RemarkableOptions
 }
 
-interface RemarkableOptions {
+export interface RemarkableOptions {
   html?: boolean
   xhtmlOut?: boolean
   breaks?: boolean

@@ -1,7 +1,7 @@
-/*!
- * lib/generate.ts
+/**
+ * src/mdtoc/generate.ts
  *
- * markdown-toc <https://github.com/Unique-Divine/markdown-toc>
+ * markdown-toc <https://github.com/Unique-Divine/jiyuu/mdtoc>
  *
  * Forked from legacy code:
  * - markdown-toc <https://github.com/jonschlinkert/markdown-toc>
@@ -20,7 +20,7 @@ export { insert }
 
 export { slugify }
 
-interface GenerateOptions extends SlugifyOptions {
+export interface GenerateOptions extends SlugifyOptions {
   firsth1?: boolean
   maxdepth?: number
   linkify?: boolean | LinkifyFn
@@ -31,6 +31,11 @@ interface GenerateOptions extends SlugifyOptions {
   hLevel?: number
   bullets?: string[]
   chars?: string[]
+
+  /**
+   * filter (`FilterFn`): returns truthy to include the item, falsy to exclude it.
+   * The return value is checked for truthiness, not used as a replacement.
+   * */
   filter?: FilterFn
   append?: string
   highest?: number
@@ -47,8 +52,11 @@ type StripFn = (str: string, opts?: GenerateOptions) => string
 
 type TitleizeFn = (str: string, options?: GenerateOptions) => string
 
-/** Returns a boolean indicating whether to filter the item */
-type FilterFn = (content: string, ele: Token, arr: Token[]) => boolean
+/**
+ * FilterFn: returns truthy to include the item, falsy to exclude it.
+ * The return value is checked for truthiness, not used as a replacement.
+ * */
+export type FilterFn = (content: string, ele: Token, arr: Token[]) => string
 
 export interface Token {
   content: string
@@ -136,12 +144,12 @@ export function generate(options?: GenerateOptions): any {
         }
       }
 
+      if (stripFirst) result = result.slice(1)
       opts.highest = highest(result)
       res.highest = opts.highest
       res.tokens = copiedTokens
 
-      if (stripFirst) result = result.slice(1)
-      const { out, bList } = bullets(result, opts)
+      const { out, bList: _bList } = bullets(result, opts)
       res.content = out
       if (opts.append) res.content += opts.append
       return res
@@ -149,7 +157,7 @@ export function generate(options?: GenerateOptions): any {
   }
 }
 
-/** Func that creates a single markdown list item for the Toc. */
+/** ListItemFn: Func that creates a single markdown list item for the Toc. */
 type ListItemFn = (level: number, content: string) => string
 
 const isListItemFn = (fn: any): fn is ListItemFn => {
@@ -180,9 +188,11 @@ const newListitemFn = (
 /**
  * Render markdown list bullets
  *
- * @param  {Array} `arr` Array of listitem objects
+ * @param  {Array} `arr` Array of Toc `Token` items
  * @param  {GenerateOptions} `options`
- * @return {String}
+ * @return  {Object} `{ out: string; bList: BulletList }`, where
+ *   - `out` is the Toc output string with bullets
+ *   - `bList`: Structured object version of `out`. Great for debugging.
  */
 export function bullets(
   arr: Token[],
@@ -328,8 +338,9 @@ export class BulletsParser implements IBulletState {
 }
 
 /**
- * Get the highest heading level in the array, so
- * we can un-indent the proper number of levels.
+ * Get the highest heading level in the array, so we can un-indent the proper
+ * number of levels. For example, a document with an "h1" heading has highest=1.
+ * If the topmost heading is an h2, then highest is 2.
  *
  * @param {Array} `arr` Array of tokens
  * @return {Number} Highest level
@@ -349,8 +360,7 @@ export function linkify(tok: Token, options?: GenerateOptions): Token {
     opts.num = tok.seen
     const text = titleize(tok.content, opts)
     const slug = slugify(tok.content, opts)
-    // const escapedSlug = querystringEscape(slug)
-    const escapedSlug = (querystring as any).escape(slug)
+    const escapedSlug = querystring.escape(slug)
 
     // console.debug("DEBUG linkfiy: %o", { escapedSlug, opts, tok, text, slug, })
     let linkifyFunc: LinkifyFn = (_tok, text, escapedSlug, _opts) =>

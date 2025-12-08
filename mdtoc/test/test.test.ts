@@ -30,10 +30,6 @@ interface WantGot {
   got: any
 }
 
-interface NamedWantGot extends WantGot {
-  name: string
-}
-
 test("new works", () => {
   const remark = new RemarkablePlus({ options: undefined })
   expect(remark).toBeDefined()
@@ -170,9 +166,8 @@ describe("options: custom functions:", () => {
 
   test("should allow a `filter` function to filter out unwanted bullets:", () => {
     const actual = toc(readFixture("filter.md"), {
-      filter(str: string, _ele: any, _arr: any) {
+      filter(str: string, _ele: any, _arr: any): string {
         // When first appearance of substring "..." occurs at position -1
-        // TODO: Q: What does this mean?
         return str.indexOf("...") === -1 ? str : ""
       },
     })
@@ -300,11 +295,12 @@ describe("toc", () => {
 
   // TODO: implement the firsth1 removal functionality. Prefer removal of the
   // first h1 by default.
-  test.skip("should remove the first H1 when `firsth1` is false:", () => {
+  // test.skip("should remove the first H1 when `firsth1` is false:", () => {
+  test("should remove the first H1 when `firsth1` is false:", () => {
     console.debug("DEBUG TC")
-    expect(toc("# AAA\n## BBB\n### CCC", { firsth1: false }).content).toEqual(
-      ["- [BBB](#bbb)", "  * [CCC](#ccc)"].join("\n"),
-    )
+    expect(
+      toc("# AAA\n## BBB\n### CCC", { firsth1: false, bullets: ["-"] }).content,
+    ).toEqual(["- [BBB](#bbb)", "  - [CCC](#ccc)"].join("\n"))
   })
 
   // TODO: implement the firsth1 removal functionality. Prefer removal of the
@@ -431,7 +427,8 @@ describe("toc tokens", () => {
   })
 
   test("should return an array of tokens:", () => {
-    expect(Array.isArray(toc("# AAA\n## BBB\n### CCC").tokens)).toBeDefined()
+    const got = toc("# AAA\n## BBB\n### CCC")
+    expect(Array.isArray(got.tokens)).toBeTrue()
   })
 
   test("should expose the `lvl` property on headings tokens:", () => {

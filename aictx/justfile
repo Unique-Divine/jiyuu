@@ -1,0 +1,33 @@
+# Displays available recipes by running `just -l`.
+setup:
+  #!/usr/bin/env bash
+  just -l
+
+# Build and install the tool
+install:
+  #!/usr/bin/env bash
+  go install
+
+alias i := install
+alias b := install
+
+# Format
+fmt:
+  gofumpt -w . 
+
+# Run Go linter (golangci-lint)
+lint: 
+  golangci-lint run -v --fix 2>&1 
+
+# Run before commits
+tidy:
+  #!/usr/bin/env bash
+  go mod tidy
+  just lint
+  just fmt
+
+# Run tests
+test:
+  go test ./...
+
+alias t := test
