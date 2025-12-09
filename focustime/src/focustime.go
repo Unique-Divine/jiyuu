@@ -15,9 +15,14 @@ type AreasChange struct {
 }
 
 var (
+	// ErrAreasMissingForYear is returned when no AreasChange entry exists
+	// for the year corresponding to the requested time.
 	ErrAreasMissingForYear = errors.New("focustime: areas missing for requested year")
 )
 
+// GetAreasOfWeekForTime returns the AreasChange that applies to the ISO week
+// containing t, choosing the latest StartFrom in the same year whose week is
+// less than or equal to that week.
 func GetAreasOfWeekForTime(
 	changes []AreasChange,
 	t time.Time,
@@ -41,6 +46,8 @@ func GetAreasOfWeekForTime(
 	return &changes[latestAreasIdx], nil
 }
 
+// LoadAreasFile loads the areas.json file from the focustime data directory,
+// creating the directory and file if they do not already exist.
 func LoadAreasFile() ([]AreasChange, error) {
 	var changes []AreasChange
 	xdgDataHome := XdgDataHome()
@@ -107,6 +114,8 @@ func CreateFocuseTimeDir() error {
 	return err
 }
 
+// XdgConfigHome returns the XDG configuration directory, falling back
+// to $HOME/.config when XDG_CONFIG_HOME is not set.
 func XdgConfigHome() string {
 	if v := os.Getenv("XDG_CONFIG_HOME"); v != "" {
 		return v
@@ -115,6 +124,8 @@ func XdgConfigHome() string {
 	return filepath.Join(home, ".config")
 }
 
+// XdgDataHome returns the XDG data directory, falling back to
+// $HOME/.local/share when XDG_DATA_HOME is not set.
 func XdgDataHome() string {
 	if v := os.Getenv("XDG_DATA_HOME"); v != "" {
 		return v
@@ -123,6 +134,8 @@ func XdgDataHome() string {
 	return filepath.Join(home, ".local", "share")
 }
 
+// XdgStateHome returns the XDG state directory, falling back to
+// $HOME/.local/state when XDG_STATE_HOME is not set.
 func XdgStateHome() string {
 	if v := os.Getenv("XDG_STATE_HOME"); v != "" {
 		return v
@@ -131,6 +144,8 @@ func XdgStateHome() string {
 	return filepath.Join(home, ".local", "state")
 }
 
+// XdgCacheHome returns the XDG cache directory, falling back to
+// $HOME/.cache when XDG_CACHE_HOME is not set.
 func XdgCacheHome() string {
 	if v := os.Getenv("XDG_CACHE_HOME"); v != "" {
 		return v
@@ -139,12 +154,14 @@ func XdgCacheHome() string {
 	return filepath.Join(home, ".cache")
 }
 
+// WoY represents an ISO week-of-year, identified by its year and week number.
 type WoY struct {
 	Year int
 	Week int
 }
 
-// TODO: fn that converts a time into a week of the year.
+// TimeToWoY converts t to its ISO week-of-year in UTC and returns the
+// corresponding WoY value.
 func TimeToWoY(t time.Time) WoY {
 	t = t.UTC()
 	year, weekOfYear := t.ISOWeek()
