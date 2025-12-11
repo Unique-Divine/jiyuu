@@ -11,8 +11,8 @@
 | <span style="white-space: nowrap;">📂 [gocovmerge](./gocovmerge/README.md)</span> | Go coverage profile merger with modern CLI features |
 | <span style="white-space: nowrap;">📂 [mdtoc](./mdtoc/README.md)</span> | Markdown table of contents (TOC) generator |
 | <span style="white-space: nowrap;">📂 [winfixtext](./winfixtext/README.md)</span> | Fixes Windows encoding issues and corrupted LLM text outputs |
-| <span style="white-space: nowrap;">📂 [bash-ts](./bash-ts/README.md)</span> | Production TypeScript scripting library (bun install `@uniquedivine/bash`) for robust scripts with Bun runtime |
-| <span style="white-space: nowrap;">📂 [ud-jiyuu](./ud-jiyuu/README.md)</span> | TypeScript package mimicking Rust/Go functionality |
+| <span style="white-space: nowrap;">📂 [ts-pkg/bash](./ts-pkg/bash/README.md)</span> | Production TypeScript scripting library (bun install `@uniquedivine/bash`) for robust scripts with Bun runtime |
+| <span style="white-space: nowrap;">📂 [ts-pkg/jiyuu](./ts-pkg/jiyuu/README.md)</span> | TypeScript package mimicking Rust/Go functionality |
 | <span style="white-space: nowrap;">📂 [discord-nibiru](./discord-nibiru/README.md)</span> | Discord moderation bot for Nibiru community |
 | <span style="white-space: nowrap;">📦 scripts</span> | Scripts crate in Rust |
 | <span style="white-space: nowrap;">├── justfile</span> | Runs project-specific commands |
