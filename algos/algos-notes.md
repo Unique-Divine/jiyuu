@@ -337,13 +337,12 @@ func Sol0_RecursiveDFS(img [][]int, newColor int, startPixel Point) [][]int {
 }
 ```
 
-## ANKI LINE ------------------------
-
 ## E1: Enqueue and Dequeue (Basic Ops in Go)
 
 Practice Problem: 
 
-Implement a simple FIFO queue in Go using a slice. Your queue must support `Enqueue(x)` and `Dequeue()` methods. What are the time complexities of each (amortized)?
+Implement a simple queue `struct` in Go using a slice. Your queue must support
+`Enqueue` and `Dequeue` methods. 
 
 ```go
 // Fill in the methods.
@@ -355,7 +354,7 @@ func (q *Queue[T]) Enqueue(x T) {
     // TODO
 }
 
-func (q *Queue[T]) Dequeue() (T, bool) {
+func (q *Queue[T]) Dequeue() (elem T, ok bool) {
     // TODO
 }
 ```
@@ -367,12 +366,13 @@ type Queue[T any] struct {
     data []T
 }
 
+// Enqueue is the "[en]ter [queue]" operation (mnemonic).
+// Amortized O(1): append to end of slice.
 func (q *Queue[T]) Enqueue(x T) {
-    // Amortized O(1): append to end of slice.
     q.data = append(q.data, x)
 }
 
-func (q *Queue[T]) Dequeue() (T, bool) {
+func (q *Queue[T]) Dequeue() (elem T, ok bool) {
     var zero T
     if len(q.data) == 0 {
         return zero, false
@@ -380,9 +380,8 @@ func (q *Queue[T]) Dequeue() (T, bool) {
 
     // Oldest element is at the front.
     x := q.data[0]
-
-    // Optional GC hygiene if T is a reference type:
-    // q.data[0] = zero
+     
+    q.data[0] = zero // Optional GC hygiene if T is a reference type:
 
     // Move the slice window forward. O(1).
     q.data = q.data[1:]
@@ -401,15 +400,18 @@ Q: What is the time complexity of `Dequeue` in this implementation (ignoring GC 
 A:
 O(1), because re-slicing (`q.data = q.data[1:]`) only adjusts the slice header.
 
-Q: In Python, `list.pop(0)` is O(n) because elements are shifted. Why is `q = q[1:]` in Go not O(n)?
+Q: In Python, `list.pop(0)` is O(n) because elements are shifted. 
+What is the complexity of `q = q[1:]` if `q` is some slice, and why?
 
 A:
 A Go slice is a small header (`pointer`, `len`, `cap`) pointing at an underlying array. Re-slicing changes the header's pointer and length; it does not move elements in memory.
 
 Q: What subtle issue can happen if we only do `q.data = q.data[1:]` when `T` is a reference type (e.g., `*MyStruct`, `[]byte`)?
 
-A:
-The underlying array still holds references to old elements, so they may not be garbage collected. The slice no longer "sees" them, but the GC does until the array itself is released.
+A: 
+The underlying array still holds references to old elements, so they may not
+be garbage collected. The slice no longer "sees" them, but the GC does until the
+array itself is released.
 
 Q: How can you make dequeued elements eligible for GC sooner?
 
@@ -417,77 +419,56 @@ A:
 Before re-slicing, overwrite the element with the zero value:
 
 ```go
-x := q.data[0]
-q.data[0] = zero
-q.data = q.data[1:]
+var q []T
+var defVal T
+x := q[0]        // if len(q) > 0
+q = q[1:]
+q[0] = defVal
 ```
 
----
-
-## E2: O(1) vs O(n) Trap (Bad Queue Implementation in Go)
-
-Q: What is the time complexity of `Dequeue` in this (bad) queue implementation?
+When you slice a queue forward with:
 
 ```go
-type BadQueue[T any] struct {
-    data []T
-}
-
-func (q *BadQueue[T]) Enqueue(x T) {
-    q.data = append(q.data, x)
-}
-
-func (q *BadQueue[T]) Dequeue() (T, bool) {
-    var zero T
-    if len(q.data) == 0 {
-        return zero, false
-    }
-
-    // Take the front element.
-    v := q.data[0]
-
-    // Shift all remaining elements one step to the left.
-    copy(q.data[0:], q.data[1:])          // <-- suspicious line
-    q.data[len(q.data)-1] = zero          // optional GC hygiene
-    q.data = q.data[:len(q.data)-1]
-
-    return v, true
-}
+q = q[1:]
 ```
 
-A:
-* `copy` shifts all remaining elements on every `Dequeue`.
-* If there are `n` elements, that `copy` is O(n) in the worst case.
-* So a single `Dequeue` is O(n).
-* Doing `n` dequeues makes the total cost O(n²).
+the **backing array** is still on the heap. Its slot at index 0 still contains
+whatever pointer value was stored there. Even though the slice length changed,
+the GC still sees the backing array and all pointer-bearing elements inside it.
+If `T` is a reference type, that stale pointer keeps the old object alive.
 
-**Question (Follow-up):**
-Rewrite `Dequeue` so that both `Enqueue` and `Dequeue` are O(1) amortized.
-
-A:
+If instead you overwrite the slot:
 
 ```go
-func (q *BadQueue[T]) Dequeue() (T, bool) {
-    var zero T
-    if len(q.data) == 0 {
-        return zero, false
-    }
-
-    v := q.data[0]
-
-    // Optional GC hygiene.
-    q.data[0] = zero
-
-    // Just re-slice, do not copy.
-    q.data = q.data[1:]
-
-    return v, true
-}
+var zero T
+q[0] = zero
+q = q[1:]
 ```
 
-Now:
-* `Enqueue` is amortized O(1) via `append`.
-* `Dequeue` is O(1) via re-slicing.
+you remove that pointer from memory. For reference types, the zero value is `nil`
+(or a struct whose pointer fields are nil), so the GC stops seeing the old object
+through this element. If no other references point to it, it becomes collectible.
+
+Examples:
+
+**If `T` is a pointer (`*Node`):**
+`zero` is `nil`. Assigning it erases the pointer to the original `Node`.
+
+**If `T` is a slice (`[]byte`):**
+`zero` is a nil slice header. Assigning it removes the link to the old slice’s backing array.
+
+**If `T` is a map:**
+`zero` is a nil map. Removing it drops the reference to the map’s internal hash table.
+
+**If `T` has no pointer fields (e.g., `int`, `float64`, or a fully value-only struct):**
+Zeroing has no GC effect. These don’t reference other heap objects.
+
+In short: the GC follows *actual pointers in memory*. Zeroing replaces a
+pointer-bearing element with `nil`, removing that link. The slice re-slicing
+alone doesn’t clear those pointers; writing the zero value does.
+
+
+## ANKI LINE ------------------------
 
 Q: In Go, when do you need to worry about the cost of `copy` with slices?
 
@@ -545,8 +526,7 @@ Loop over all nodes in the graph; for each node that is not yet visited, run BFS
 
 ### Full BFS Implementation in Go
 
-**Question:**
-Implement BFS traversal on this graph type:
+Q: Implement BFS traversal on this graph type:
 
 ```go
 type Graph map[string][]string
@@ -557,8 +537,7 @@ func bfs(g Graph, start string) map[string]bool {
 }
 ```
 
-**Answer:**
-
+A:
 ```go
 type Graph map[string][]string
 
@@ -597,15 +576,20 @@ Q: In this BFS, where is the queue's "dequeue" operation?
 A:
 `node := q[0]; q = q[1:]` at the start of the loop.
 
-Q: Why do we check `if visited[node] { continue }` after popping from the queue, instead of before pushing neighbors?
+Q: Why do we check `if visited[node] { continue }` after popping from the queue,
+instead of before pushing neighbors?
 
 A:
-This pattern lets us freely enqueue neighbors multiple times without worrying about duplicates at enqueue time. We centralize the "already processed?" check at the point of dequeue. It's a common and simple pattern.
+This pattern lets us freely enqueue neighbors multiple times without worrying
+about duplicates at enqueue time. We centralize the "already processed?" check at
+the point of dequeue. It's a common and simple pattern.
 
-Q: What is the time complexity of BFS on a graph with `V` vertices and `E` edges using the slice-based queue?
+Q: What is the time complexity of BFS on a graph with `V` vertices and `E` edges
+using the slice-based queue?
 
 A:
-O(V + E). Each vertex is enqueued/dequeued at most once, and each edge is examined at most twice (for undirected graphs).
+O(V + E). Each vertex is enqueued/dequeued at most once, and each edge is
+examined at most twice (for undirected graphs).
 
 ---
 
@@ -626,7 +610,6 @@ A:
 Q: Python: `deque.popleft()` returns and removes the oldest item. What is the Go idiom?
 
 A:
-
 
 ```go
 x := q[0]
