@@ -11,8 +11,8 @@ func Sol5(nums []int) int {
 	}
 
 	var (
-		nextOpenIdx int = 1       // Next idx that to write
-		lastVal     int = nums[0] // Value for uniqueness comparison
+		nextOpenIdx = 1       // Next idx that to write
+		lastVal     = nums[0] // Value for uniqueness comparison
 	)
 
 	for idx := 1; idx < len(nums); idx++ {
