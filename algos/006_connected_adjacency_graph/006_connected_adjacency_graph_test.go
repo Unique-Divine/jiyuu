@@ -1,5 +1,11 @@
 package algos
 
+import (
+	"testing"
+
+	"github.com/stretchr/testify/suite"
+)
+
 func Sol6Recursive(graph map[string][]string) int {
 	islands := 0
 	nodesSeen := make(map[string]struct{})
@@ -197,4 +203,10 @@ func (s *S) TestSol6() {
 			s.Require().Equal(tc.want, got, "iterative")
 		})
 	}
+}
+
+type S struct{ suite.Suite }
+
+func Test(t *testing.T) {
+	suite.Run(t, new(S))
 }

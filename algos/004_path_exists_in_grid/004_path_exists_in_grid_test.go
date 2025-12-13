@@ -1,6 +1,11 @@
 package algos
 
-import "fmt"
+import (
+	"fmt"
+	"testing"
+
+	"github.com/stretchr/testify/suite"
+)
 
 // You are given a 2D grid representing a maze. Each cell is either open (0) or
 // blocked (1). You are also given a start position and an end position.
@@ -234,4 +239,10 @@ func (s *S) TestSol4() {
 		})
 	}
 
+}
+
+type S struct{ suite.Suite }
+
+func Test(t *testing.T) {
+	suite.Run(t, new(S))
 }

@@ -1,5 +1,10 @@
 package algos
 
+import (
+	"github.com/stretchr/testify/suite"
+	"testing"
+)
+
 // Given an array of integers `nums` and an integer `target`, return indices of
 // the two numbers such that they add up to `target`.
 //
@@ -41,6 +46,12 @@ func Sol1(nums []int, target int) [2]int {
 	}
 
 	return [2]int{-1, -1}
+}
+
+type S struct{ suite.Suite }
+
+func Test(t *testing.T) {
+	suite.Run(t, new(S))
 }
 
 func (s *S) Test1_TwoSum() {

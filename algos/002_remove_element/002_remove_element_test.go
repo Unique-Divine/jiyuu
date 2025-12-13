@@ -1,5 +1,11 @@
 package algos
 
+import (
+	"testing"
+
+	"github.com/stretchr/testify/suite"
+)
+
 // Given an integer array `nums` and an integer `val`, remove all occurrences of
 // `val` in `nums` in-place. The order of the elements may be changed. Then return
 // the number of elements in nums which are not equal to `val`.
@@ -28,6 +34,12 @@ package algos
 // }
 // ```
 // If all assertions pass, then your solution will be accepted.
+
+type S struct{ suite.Suite }
+
+func Test(t *testing.T) {
+	suite.Run(t, new(S))
+}
 
 // Sol2: Pushes all "val" elements to the back of "nums".
 //

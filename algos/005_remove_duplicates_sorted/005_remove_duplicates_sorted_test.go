@@ -1,5 +1,11 @@
 package algos
 
+import (
+	"testing"
+
+	"github.com/stretchr/testify/suite"
+)
+
 // Returns the number of unique integers and moves these unique elements to the
 // front of the slice.
 //
@@ -24,4 +30,10 @@ func Sol5(nums []int) int {
 		}
 	}
 	return nextOpenIdx
+}
+
+type S struct{ suite.Suite }
+
+func Test(t *testing.T) {
+	suite.Run(t, new(S))
 }
