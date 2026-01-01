@@ -2,102 +2,78 @@ package src
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"time"
 )
 
-type AreasChange struct {
-	StartFrom WoY
-	Areas     []string
+type StartCfg struct {
+	HomeDir string
 }
 
-var (
-	// ErrAreasMissingForYear is returned when no AreasChange entry exists
-	// for the year corresponding to the requested time.
-	ErrAreasMissingForYear = errors.New("focustime: areas missing for requested year")
-)
-
-// GetAreasOfWeekForTime returns the AreasChange that applies to the ISO week
-// containing t, choosing the latest StartFrom in the same year whose week is
-// less than or equal to that week.
-func GetAreasOfWeekForTime(
-	changes []AreasChange,
-	t time.Time,
-) (areas *AreasChange, err error) {
-	woy := TimeToWoY(t)
-
-	latestAreasIdx := -1
-	for changeIdx, change := range changes {
-		if change.StartFrom.Year != woy.Year {
-			continue
-		}
-		if change.StartFrom.Week <= woy.Week {
-			latestAreasIdx = changeIdx
-		}
-	}
-
-	if latestAreasIdx == -1 {
-		return nil, fmt.Errorf("%w: { year: %d, woy: %d }", ErrAreasMissingForYear, woy.Year, woy.Week)
-	}
-
-	return &changes[latestAreasIdx], nil
+type FocusAreas struct {
+	Areas                   []string `json:"areas"`
+	AreaLayouts             [][]int  `json:"area_layouts"`
+	LastUsedAreaLayoutIndex uint8    `json:"last_used_area_layout_index"`
 }
 
 // LoadAreasFile loads the areas.json file from the focustime data directory,
 // creating the directory and file if they do not already exist.
-func LoadAreasFile() ([]AreasChange, error) {
-	var changes []AreasChange
-	xdgDataHome := XdgDataHome()
+func LoadAreasFile(cfg StartCfg) (FocusAreas, error) {
+	fresh := FocusAreas{
+		Areas:                   []string{},
+		AreaLayouts:             [][]int{},
+		LastUsedAreaLayoutIndex: 0,
+	}
+	xdgDataHome := XdgDataHome(cfg)
 	fileInfo, err := os.Stat(xdgDataHome)
 	if err != nil && os.IsNotExist(err) {
-		err := os.MkdirAll(xdgDataHome, 0o644)
-		return changes, err
+		err := os.MkdirAll(xdgDataHome, 0o755)
+		return fresh, err
 	} else if err != nil {
-		return changes, err
+		return fresh, err
 	}
 
 	if !fileInfo.IsDir() {
-		return changes, fmt.Errorf("file exists in place of expected directory at %s", xdgDataHome)
+		return fresh, fmt.Errorf("file exists in place of expected directory at %s", xdgDataHome)
 	}
 
-	err = CreateFocuseTimeDir()
+	err = CreateFocusTimeDir(cfg)
 	if err != nil {
-		return changes, err
+		return fresh, err
 	}
 
-	fp := filepath.Join("focustime", "areas.json")
+	fp := filepath.Join(DirFTData(cfg), "areas.json")
 	fileInfo, err = os.Stat(fp)
 	switch {
 	case err != nil && os.IsNotExist(err):
 
-		jsonBz, _ := json.MarshalIndent(changes, "", "  ")
+		jsonBz, _ := json.MarshalIndent(fresh, "", "  ")
 		err = os.WriteFile(fp, jsonBz, 0o644)
-		return changes, err
+		return fresh, err
 	case err != nil:
-		return changes, err
+		return fresh, err
 	}
 
 	fileBz, err := os.ReadFile(fp)
 	if err != nil {
-		return changes, err
+		return fresh, err
 	}
 
-	err = json.Unmarshal(fileBz, &changes)
+	var reg FocusAreas
+	err = json.Unmarshal(fileBz, &reg)
 	if err != nil {
-		return changes, err
+		return fresh, err
 	}
 
-	return changes, nil
+	return reg, nil
 }
 
-// CreateFocuseTimeDir: Creates the primary data directory if it does not already
+// CreateFocusTimeDir: Creates the primary data directory if it does not already
 // exist. Otherwise, does nothing.
-func CreateFocuseTimeDir() error {
-	xdgDataHome := XdgDataHome()
-	ftDir := filepath.Join(xdgDataHome, "focustime")
+func CreateFocusTimeDir(cfg StartCfg) error {
+	ftDir := DirFTData(cfg)
 	info, err := os.Stat(ftDir)
 	switch {
 	case err == nil && info.IsDir():
@@ -110,48 +86,57 @@ func CreateFocuseTimeDir() error {
 		return err // Something strange happened
 	}
 
-	err = os.MkdirAll(ftDir, 0o644)
+	err = os.MkdirAll(ftDir, 0o755)
 	return err
 }
 
 // XdgConfigHome returns the XDG configuration directory, falling back
 // to $HOME/.config when XDG_CONFIG_HOME is not set.
-func XdgConfigHome() string {
+func XdgConfigHome(cfg StartCfg) string {
 	if v := os.Getenv("XDG_CONFIG_HOME"); v != "" {
 		return v
 	}
-	home, _ := os.UserHomeDir()
+	home := cfg.HomeDir
 	return filepath.Join(home, ".config")
 }
 
 // XdgDataHome returns the XDG data directory, falling back to
 // $HOME/.local/share when XDG_DATA_HOME is not set.
-func XdgDataHome() string {
+// Data holds persistent downloaded assets.
+func XdgDataHome(cfg StartCfg) string {
 	if v := os.Getenv("XDG_DATA_HOME"); v != "" {
 		return v
 	}
-	home, _ := os.UserHomeDir()
+	home := cfg.HomeDir
 	return filepath.Join(home, ".local", "share")
 }
 
 // XdgStateHome returns the XDG state directory, falling back to
 // $HOME/.local/state when XDG_STATE_HOME is not set.
-func XdgStateHome() string {
+// State in the XDG spec is runtime info that persists but is not user-editable.
+// It typically holds session state like logs and runtime history.
+func XdgStateHome(cfg StartCfg) string {
 	if v := os.Getenv("XDG_STATE_HOME"); v != "" {
 		return v
 	}
-	home, _ := os.UserHomeDir()
+	home := cfg.HomeDir
 	return filepath.Join(home, ".local", "state")
 }
 
-// XdgCacheHome returns the XDG cache directory, falling back to
-// $HOME/.cache when XDG_CACHE_HOME is not set.
-func XdgCacheHome() string {
+// XdgCacheHome returns the XDG cache directory, falling back to $HOME/.cache
+// when XDG_CACHE_HOME is not set. Cache is used for ephemeral speed-ups. Cache
+// is meant to be safe to delete at all times.
+func XdgCacheHome(cfg StartCfg) string {
 	if v := os.Getenv("XDG_CACHE_HOME"); v != "" {
 		return v
 	}
-	home, _ := os.UserHomeDir()
+	home := cfg.HomeDir
 	return filepath.Join(home, ".cache")
+}
+
+// DirFTData returns the "$XDG_DATA_HOME/focustime" directory.
+func DirFTData(cfg StartCfg) string {
+	return filepath.Join(XdgDataHome(cfg), "focustime")
 }
 
 // WoY represents an ISO week-of-year, identified by its year and week number.

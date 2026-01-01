@@ -1,8 +1,9 @@
 package src
 
 import (
-	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -42,82 +43,41 @@ func (s *S) TestTimeToWeek() {
 	// Week 1 of 2024
 }
 
-// TestGetAreasOfWeekForTime_FindsLatestChangeInSameYear
-// ensures we pick the latest StartFrom within the same year whose week
-// is <= the target week.
-func (s *S) TestGetAreasOfWeekForTime_FindsLatestChangeInSameYear() {
-	changes := []AreasChange{
-		{
-			StartFrom: WoY{Year: 2025, Week: 1},
-			Areas:     []string{"a", "b"},
-		},
-		{
-			StartFrom: WoY{Year: 2025, Week: 10},
-			Areas:     []string{"c", "d"},
-		},
-		{
-			StartFrom: WoY{Year: 2025, Week: 20},
-			Areas:     []string{"e", "f"},
-		},
+func (s *S) TestCreateFocusTimeDir() {
+	newHome := s.T().TempDir()
+	s.T().Setenv("XDG_DATA_HOME", newHome)
+	cfg := StartCfg{
+		HomeDir: newHome,
 	}
 
-	// Pick a date that falls in ISO week 15 of 2025.
-	// We don't care about the exact calendar mapping in this test; we just
-	// want a week that is >= 10 and < 20 so the second change wins.
-	t := time.Date(2025, 4, 7, 0, 0, 0, 0, time.UTC) // somewhere in spring 2025
+	ftDir := DirFTData(cfg)
+	_, err := os.Stat(ftDir)
+	s.True(os.IsNotExist(err), "expect focustime data dir to not exist yet")
 
-	got, err := GetAreasOfWeekForTime(changes, t)
-	s.Require().NoError(err)
+	err = CreateFocusTimeDir(cfg)
+	s.NoError(err)
 
-	s.Equal(WoY{Year: 2025, Week: 10}, got.StartFrom)
-	s.Equal([]string{"c", "d"}, got.Areas)
+	info, err := os.Stat(ftDir)
+	s.NoError(err)
+	s.True(info.IsDir(), "focustime dir should now exist.")
 }
 
-// TestGetAreasOfWeekForTime_IgnoresOtherYears ensures entries from other
-// years are ignored even if their weeks would otherwise match.
-func (s *S) TestGetAreasOfWeekForTime_IgnoresOtherYears() {
-	changes := []AreasChange{
-		{
-			StartFrom: WoY{Year: 2024, Week: 1},
-			Areas:     []string{"old"},
-		},
-		{
-			StartFrom: WoY{Year: 2025, Week: 5},
-			Areas:     []string{"new"},
-		},
-	}
+func (s *S) TestLoadAreasFile() {
+	newHome := s.T().TempDir()
+	s.T().Setenv("XDG_DATA_HOME", newHome)
+	cfg := StartCfg{HomeDir: newHome}
 
-	t := time.Date(2025, 2, 1, 0, 0, 0, 0, time.UTC)
+	areasPath := filepath.Join(DirFTData(cfg), "areas.json")
+	_, err := os.Stat(areasPath)
+	s.True(os.IsNotExist(err), "areas.json should not exist yet")
 
-	got, err := GetAreasOfWeekForTime(changes, t)
-	s.Require().NoError(err)
+	got, err := LoadAreasFile(cfg)
+	s.NoError(err)
+	s.Empty(got.Areas)
+	s.Empty(got.AreaLayouts)
+	s.Equal(uint8(0), got.LastUsedAreaLayoutIndex)
 
-	s.Equal(WoY{Year: 2025, Week: 5}, got.StartFrom)
-	s.Equal([]string{"new"}, got.Areas)
-}
-
-// TestGetAreasOfWeekForTime_NoAreasForYear ensures we get the sentinel
-// ErrAreasMissingForYear when no change entry exists for the target year.
-func (s *S) TestGetAreasOfWeekForTime_NoAreasForYear() {
-	changes := []AreasChange{
-		{
-			StartFrom: WoY{Year: 2023, Week: 10},
-			Areas:     []string{"legacy"},
-		},
-		{
-			StartFrom: WoY{Year: 2024, Week: 10},
-			Areas:     []string{"still-legacy"},
-		},
-	}
-
-	t := time.Date(2025, 3, 1, 0, 0, 0, 0, time.UTC)
-
-	got, err := GetAreasOfWeekForTime(changes, t)
-	s.Nil(got, "expected nil areas when year data is missing")
-	s.Require().Error(err)
-	s.True(
-		errors.Is(err, ErrAreasMissingForYear),
-		"fmt error should wrap ErrAreasMissingForYear, got: %v",
-		err,
-	)
+	info, err := os.Stat(areasPath)
+	s.NoError(err)
+	s.False(info.IsDir(), "areas.json should be a file, not a directory")
 }
