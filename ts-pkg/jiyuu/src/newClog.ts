@@ -7,10 +7,10 @@
  * Example: Intended Usage
  * ```
  * const { clog, cerr, clogCmd } = newClog(
- *     import.meta.url.includes("/")
- *         ? import.meta.url.split("/").pop()!
- *         : import.meta.url,
- * );
+ *   import.meta.url.includes("/")
+ *     ? import.meta.url.split("/").pop()!
+ *     : import.meta.url,
+ * )
  * ```
  *
  * clog: Short for [c]onsole [log] wrapper.

@@ -7,7 +7,7 @@ import { TocResult } from "./mdtoc/toc"
 // const utils = require("./lib/utils")
 
 /**
- * Parse command-line arguments (`process.argv`) fomr index 2 into `args` using the
+ * Parse command-line arguments (`process.argv`) from index 2 into `args` using the
  * `minimist` package. Depending on the command-line args, the script outputs
  * the generated table of contents or JSON representation to stdout. If the -i
  * flag is specified, the modified Markdown content is written back to the input
