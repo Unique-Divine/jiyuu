@@ -70,6 +70,71 @@ func LoadAreasFile(cfg StartCfg) (FocusAreas, error) {
 	return reg, nil
 }
 
+// SaveAreasFile writes reg to areas.json atomically (write to temp, rename).
+func SaveAreasFile(cfg StartCfg, reg FocusAreas) error {
+	if err := CreateFocusTimeDir(cfg); err != nil {
+		return err
+	}
+	dir := DirFTData(cfg)
+	jsonBz, err := json.MarshalIndent(reg, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmpPath := filepath.Join(dir, fmt.Sprintf("areas.json.%d.tmp", os.Getpid()))
+	if err := os.WriteFile(tmpPath, jsonBz, 0o644); err != nil {
+		return err
+	}
+	destPath := filepath.Join(dir, "areas.json")
+	return os.Rename(tmpPath, destPath)
+}
+
+// AddArea appends name to reg.Areas and returns the updated registry (no I/O).
+func AddArea(reg FocusAreas, name string) FocusAreas {
+	reg.Areas = append(reg.Areas, name)
+	return reg
+}
+
+// RemoveArea removes the area at index from reg.Areas, updates area_layouts
+// (removes the ID and decrements IDs > index), and adjusts last_used_area_layout_index.
+// Returns error if index is out of range.
+func RemoveArea(reg FocusAreas, index int) (FocusAreas, error) {
+	n := len(reg.Areas)
+	if index < 0 || index >= n {
+		return reg, fmt.Errorf("area index %d out of range [0, %d)", index, n)
+	}
+	newAreas := make([]string, 0, n-1)
+	newAreas = append(newAreas, reg.Areas[:index]...)
+	newAreas = append(newAreas, reg.Areas[index+1:]...)
+	reg.Areas = newAreas
+
+	// Update area_layouts: remove index, decrement IDs > index; drop empty layouts
+	var newLayouts [][]int
+	for _, layout := range reg.AreaLayouts {
+		var updated []int
+		for _, id := range layout {
+			if id == index {
+				continue
+			}
+			if id > index {
+				updated = append(updated, id-1)
+			} else {
+				updated = append(updated, id)
+			}
+		}
+		if len(updated) > 0 {
+			newLayouts = append(newLayouts, updated)
+		}
+	}
+	reg.AreaLayouts = newLayouts
+
+	// Adjust last_used_area_layout_index
+	lu := int(reg.LastUsedAreaLayoutIndex)
+	if lu >= len(reg.AreaLayouts) {
+		reg.LastUsedAreaLayoutIndex = 0
+	}
+	return reg, nil
+}
+
 // CreateFocusTimeDir: Creates the primary data directory if it does not already
 // exist. Otherwise, does nothing.
 func CreateFocusTimeDir(cfg StartCfg) error {

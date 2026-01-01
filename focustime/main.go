@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -9,19 +10,14 @@ import (
 )
 
 func main() {
-	fmt.Println("focustime main.go")
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		log.Fatal(err)
 	}
-	cfg := src.StartCfg{
-		HomeDir: homeDir,
+	cfg := src.StartCfg{HomeDir: homeDir}
+	appCmd := src.NewAppCmd(cfg)
+	if err := appCmd.Run(context.Background(), os.Args); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
 	}
-
-	err = src.CreateFocusTimeDir(cfg)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	// src.LoadAreasFile()
 }
