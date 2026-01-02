@@ -4,14 +4,21 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 )
 
+// StartCfg holds startup configuration. HomeDir is used for XDG fallbacks
+// when env vars (e.g. XDG_DATA_HOME) are unset.
 type StartCfg struct {
 	HomeDir string
 }
 
+// FocusAreas is the areas.json schema: display names, saved layouts,
+// and the last-used layout index for new weeks.
 type FocusAreas struct {
 	Areas                   []string `json:"areas"`
 	AreaLayouts             [][]int  `json:"area_layouts"`
@@ -88,7 +95,8 @@ func SaveAreasFile(cfg StartCfg, reg FocusAreas) error {
 	return os.Rename(tmpPath, destPath)
 }
 
-// AddArea appends name to reg.Areas and returns the updated registry (no I/O).
+// AddArea appends name to reg.Areas and returns the updated registry.
+// No I/O; caller must save.
 func AddArea(reg FocusAreas, name string) FocusAreas {
 	reg.Areas = append(reg.Areas, name)
 	return reg
@@ -204,10 +212,57 @@ func DirFTData(cfg StartCfg) string {
 	return filepath.Join(XdgDataHome(cfg), "focustime")
 }
 
-// WoY represents an ISO week-of-year, identified by its year and week number.
+// WeekValues holds one week's data. Areas is the ordered list of area IDs
+// (rows). Values is [areaIdx][dayIdx], Mon=0..Sun=6; nil = unset.
+type WeekValues struct {
+	Areas  []int    `json:"areas"`
+	Values [][]*int `json:"values"`
+}
+
+// YearFile holds time-series data for one calendar year.
+// Weeks index i (0-based) = ISO week i+1; nil = no data.
+type YearFile struct {
+	Year    int            `json:"year"`
+	Version int            `json:"version"`
+	Weeks   [53]*WeekValues `json:"weeks"`
+}
+
+// WoY identifies an ISO week by year and week number (1-53).
 type WoY struct {
 	Year int
 	Week int
+}
+
+// FormatYYYYWW returns "YYYY-WW" (e.g. "2025-10") for display.
+func (w WoY) FormatYYYYWW() string {
+	return fmt.Sprintf("%d-%02d", w.Year, w.Week)
+}
+
+// WeekIndex returns the 0-based index into YearFile.Weeks (week - 1).
+func (w WoY) WeekIndex() int {
+	return w.Week - 1
+}
+
+// ParseYearWWeek parses "{year}w{week}" (e.g. "2026w1") into year and week.
+// Week must be 1-53. Case-insensitive for the "w".
+func ParseYearWWeek(s string) (year, week int, err error) {
+	lower := strings.ToLower(s)
+	i := strings.Index(lower, "w")
+	if i < 1 || i >= len(s)-1 {
+		return 0, 0, fmt.Errorf("invalid YYYYwWW format: %q (expected e.g. 2026w1)", s)
+	}
+	year, err = strconv.Atoi(s[:i])
+	if err != nil {
+		return 0, 0, fmt.Errorf("invalid year in %q: %w", s, err)
+	}
+	week, err = strconv.Atoi(s[i+1:])
+	if err != nil {
+		return 0, 0, fmt.Errorf("invalid week in %q: %w", s, err)
+	}
+	if week < 1 || week > 53 {
+		return 0, 0, fmt.Errorf("week must be 1-53, got %d", week)
+	}
+	return year, week, nil
 }
 
 // TimeToWoY converts t to its ISO week-of-year in UTC and returns the
@@ -219,4 +274,213 @@ func TimeToWoY(t time.Time) WoY {
 		Year: year,
 		Week: weekOfYear,
 	}
+}
+
+// LoadYearFile loads the year file (e.g. 2025.json) from the data dir.
+// If missing, returns an empty YearFile for that year.
+func LoadYearFile(cfg StartCfg, year int) (YearFile, error) {
+	fresh := emptyYearFile(year)
+	if err := CreateFocusTimeDir(cfg); err != nil {
+		return fresh, err
+	}
+	fp := filepath.Join(DirFTData(cfg), fmt.Sprintf("%d.json", year))
+	fileBz, err := os.ReadFile(fp)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fresh, nil
+		}
+		return fresh, err
+	}
+	var yf YearFile
+	if err := json.Unmarshal(fileBz, &yf); err != nil {
+		return fresh, err
+	}
+	return yf, nil
+}
+
+// emptyYearFile returns a zeroed YearFile for the given year.
+func emptyYearFile(year int) YearFile {
+	return YearFile{
+		Year:    year,
+		Version: 1,
+		Weeks:   [53]*WeekValues{},
+	}
+}
+
+// SaveYearFile writes the year file atomically (temp + rename).
+func SaveYearFile(cfg StartCfg, yf YearFile) error {
+	if err := CreateFocusTimeDir(cfg); err != nil {
+		return err
+	}
+	dir := DirFTData(cfg)
+	jsonBz, err := json.MarshalIndent(yf, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmpPath := filepath.Join(dir, fmt.Sprintf("%d.json.%d.tmp", yf.Year, os.Getpid()))
+	if err := os.WriteFile(tmpPath, jsonBz, 0o644); err != nil {
+		return err
+	}
+	destPath := filepath.Join(dir, fmt.Sprintf("%d.json", yf.Year))
+	return os.Rename(tmpPath, destPath)
+}
+
+// GetDefaultAreaLayout returns the default area IDs for a new week.
+// Precedence: last_used layout → most recent week's areas → error.
+// TODO: implement full logic.
+func GetDefaultAreaLayout(cfg StartCfg, reg FocusAreas, yearFile *YearFile) ([]int, error) {
+	return nil, fmt.Errorf("TODO: GetDefaultAreaLayout")
+}
+
+// FindOrCreateWeek finds the week at weekIndex in yf, or creates it with
+// defaultAreas and an empty values grid.
+func FindOrCreateWeek(yf *YearFile, weekIndex int, defaultAreas []int) (*WeekValues, error) {
+	if weekIndex < 0 || weekIndex >= 53 {
+		return nil, fmt.Errorf("week index %d out of range [0, 53)", weekIndex)
+	}
+	if yf.Weeks[weekIndex] != nil {
+		return yf.Weeks[weekIndex], nil
+	}
+	// Create empty values grid: one row per area, 7 columns
+	values := make([][]*int, len(defaultAreas))
+	for i := range values {
+		values[i] = make([]*int, 7)
+	}
+	week := &WeekValues{
+		Areas:  append([]int(nil), defaultAreas...),
+		Values: values,
+	}
+	yf.Weeks[weekIndex] = week
+	return week, nil
+}
+
+// RenderWeekBuffer produces the week view text format per spec §4.1.
+// TODO: implement full format (comments, header, aligned rows).
+func RenderWeekBuffer(week WeekValues, areaNames []string, year, weekIndex int,
+	weekStart time.Time) string {
+	return "# TODO: RenderWeekBuffer\n# Year: " + fmt.Sprint(year) +
+		" Week: " + fmt.Sprint(weekIndex+1) + "\n"
+}
+
+// ParseWeekBuffer parses the edited buffer back into WeekValues.
+// TODO: implement parsing logic.
+func ParseWeekBuffer(buf []byte, areaNames []string) (WeekValues, error) {
+	return WeekValues{}, fmt.Errorf("TODO: ParseWeekBuffer")
+}
+
+// ResolveEditor returns the editor command: FOCUSTIME_EDITOR → EDITOR → "vi".
+func ResolveEditor() string {
+	if v := os.Getenv("FOCUSTIME_EDITOR"); v != "" {
+		return v
+	}
+	if v := os.Getenv("EDITOR"); v != "" {
+		return v
+	}
+	return "vi"
+}
+
+// LaunchEditor runs the resolved editor on tempPath, attaching stdio.
+// Handles editor strings like "vim -f" by splitting on first space.
+func LaunchEditor(tempPath string) error {
+	raw := ResolveEditor()
+	parts := strings.SplitN(raw, " ", 2)
+	cmdName := parts[0]
+	var args []string
+	if len(parts) > 1 {
+		args = append(strings.Fields(parts[1]), tempPath)
+	} else {
+		args = []string{tempPath}
+	}
+	cmd := exec.Command(cmdName, args...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+// WeekEdit loads the week, opens it in $EDITOR, and saves after parse.
+// Requires at least 3 areas and a resolvable default layout.
+func WeekEdit(cfg StartCfg, woy WoY) error {
+	// 1. Bootstrap
+	reg, err := LoadAreasFile(cfg)
+	if err != nil {
+		return err
+	}
+	// 2. Guardrail: >= 3 areas
+	if len(reg.Areas) < 3 {
+		return fmt.Errorf("no areas defined. Add at least three areas first: " +
+			"focustime areas add \"Deep Work\" (etc.)")
+	}
+	// 3. Load year file
+	yf, err := LoadYearFile(cfg, woy.Year)
+	if err != nil {
+		return err
+	}
+	// 4. Default area layout
+	defaultAreas, err := GetDefaultAreaLayout(cfg, reg, &yf) // TODO: implement
+	if err != nil {
+		return err
+	}
+	// 5. Find or create week
+	week, err := FindOrCreateWeek(&yf, woy.WeekIndex(), defaultAreas)
+	if err != nil {
+		return err
+	}
+	// 6. Resolve area names
+	areaNames := make([]string, len(week.Areas))
+	for i, id := range week.Areas {
+		if id < len(reg.Areas) {
+			areaNames[i] = reg.Areas[id]
+		} else {
+			areaNames[i] = fmt.Sprintf("Area %d", id)
+		}
+	}
+	// 7. Compute week start (Monday of that ISO week)
+	weekStart := weekStartFor(woy.Year, woy.Week)
+	// 8. Render buffer
+	buf := RenderWeekBuffer(*week, areaNames, woy.Year, woy.WeekIndex(), weekStart)
+	// 9. Create temp file, write buf
+	tmp, err := os.CreateTemp("", "focustime-week-*")
+	if err != nil {
+		return err
+	}
+	tempPath := tmp.Name()
+	defer os.Remove(tempPath)
+	if _, err := tmp.WriteString(buf); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	// 10. Launch editor
+	if err := LaunchEditor(tempPath); err != nil {
+		return fmt.Errorf("editor exited with error: %w", err)
+	}
+	// 11. Parse file
+	fileBz, err := os.ReadFile(tempPath)
+	if err != nil {
+		return err
+	}
+	parsed, err := ParseWeekBuffer(fileBz, areaNames) // TODO: implement
+	if err != nil {
+		return err
+	}
+	// 12. Update yf.Weeks, SaveYearFile
+	yf.Weeks[woy.WeekIndex()] = &parsed
+	return SaveYearFile(cfg, yf)
+}
+
+// weekStartFor returns the Monday of the given ISO week in UTC.
+// Uses the rule that Jan 4 is always in week 1.
+func weekStartFor(year, week int) time.Time {
+	// Jan 4 is always in week 1
+	jan4 := time.Date(year, 1, 4, 0, 0, 0, 0, time.UTC)
+	weekday := int(jan4.Weekday())
+	if weekday == 0 {
+		weekday = 7 // Sunday = 7
+	}
+	// Monday of week 1
+	monday1 := jan4.AddDate(0, 0, 1-weekday)
+	return monday1.AddDate(0, 0, 7*(week-1))
 }

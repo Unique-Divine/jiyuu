@@ -4,16 +4,23 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"time"
 
 	cli "github.com/urfave/cli/v3"
 )
 
-// NewAppCmd returns the root CLI command with areas subcommands.
+// NewAppCmd returns the root focustime CLI with edit and areas subcommands.
 func NewAppCmd(cfg StartCfg) *cli.Command {
 	return &cli.Command{
 		Name:  "focustime",
 		Usage: "Track focus time by areas",
 		Commands: []*cli.Command{
+			{
+				Name:      "edit",
+				Usage:     "Edit focus time for a week (opens editor)",
+				ArgsUsage: "[YYYYwWW]",
+				Action:    editAction(cfg),
+			},
 			{
 				Name:  "areas",
 				Usage: "Manage focus areas",
@@ -105,5 +112,23 @@ func areasListAction(cfg StartCfg) cli.ActionFunc {
 			fmt.Fprintf(c.Writer, "%d → %s\n", i, name)
 		}
 		return nil
+	}
+}
+
+// editAction runs WeekEdit; arg is optional YYYYwWW (e.g. 2026w1).
+func editAction(cfg StartCfg) cli.ActionFunc {
+	return func(ctx context.Context, c *cli.Command) error {
+		arg := c.Args().First()
+		var woy WoY
+		if arg == "" {
+			woy = TimeToWoY(time.Now().UTC())
+		} else {
+			year, week, err := ParseYearWWeek(arg)
+			if err != nil {
+				return err
+			}
+			woy = WoY{Year: year, Week: week}
+		}
+		return WeekEdit(cfg, woy)
 	}
 }
