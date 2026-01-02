@@ -9,6 +9,14 @@ import (
 	cli "github.com/urfave/cli/v3"
 )
 
+func rootHelpAction(ctx context.Context, c *cli.Command) error {
+	return cli.ShowAppHelp(c)
+}
+
+func subcommandHelpAction(ctx context.Context, c *cli.Command) error {
+	return cli.ShowSubcommandHelp(c)
+}
+
 // NewAppCmd returns the root focustime CLI with edit and areas subcommands.
 func NewAppCmd(cfg StartCfg) *cli.Command {
 	return &cli.Command{
@@ -43,10 +51,10 @@ func NewAppCmd(cfg StartCfg) *cli.Command {
 						Action: areasListAction(cfg),
 					},
 				},
-				Action: areasListAction(cfg),
+				Action: subcommandHelpAction,
 			},
 		},
-		Action: areasListAction(cfg),
+		Action: rootHelpAction,
 	}
 }
 

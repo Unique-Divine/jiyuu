@@ -326,10 +326,41 @@ func SaveYearFile(cfg StartCfg, yf YearFile) error {
 }
 
 // GetDefaultAreaLayout returns the default area IDs for a new week.
-// Precedence: last_used layout → most recent week's areas → error.
-// TODO: implement full logic.
+// Precedence: last_used layout → most recent week's areas → bootstrap fallback → error.
 func GetDefaultAreaLayout(cfg StartCfg, reg FocusAreas, yearFile *YearFile) ([]int, error) {
-	return nil, fmt.Errorf("TODO: GetDefaultAreaLayout")
+	// 1. last_used_area_layout_index
+	idx := int(reg.LastUsedAreaLayoutIndex)
+	if idx >= 0 && idx < len(reg.AreaLayouts) {
+		layout := reg.AreaLayouts[idx]
+		if len(layout) > 0 && validAreaLayout(layout, len(reg.Areas)) {
+			return append([]int(nil), layout...), nil
+		}
+	}
+	// 2. Most recent week in yearFile
+	for i := 52; i >= 0; i-- {
+		if yearFile != nil && yearFile.Weeks[i] != nil {
+			areas := yearFile.Weeks[i].Areas
+			if len(areas) > 0 {
+				return append([]int(nil), areas...), nil
+			}
+		}
+	}
+	// 3. Bootstrap fallback: first 3 areas when 3+ exist
+	if len(reg.Areas) >= 3 {
+		return []int{0, 1, 2}, nil
+	}
+	// 4. Error
+	return nil, fmt.Errorf("no area layout. Add at least 3 areas and run: focustime area-layout save 0 1 2")
+}
+
+// validAreaLayout returns true if all IDs in layout are in range [0, nAreas).
+func validAreaLayout(layout []int, nAreas int) bool {
+	for _, id := range layout {
+		if id < 0 || id >= nAreas {
+			return false
+		}
+	}
+	return true
 }
 
 // FindOrCreateWeek finds the week at weekIndex in yf, or creates it with
@@ -355,26 +386,133 @@ func FindOrCreateWeek(yf *YearFile, weekIndex int, defaultAreas []int) (*WeekVal
 }
 
 // RenderWeekBuffer produces the week view text format per spec §4.1.
-// TODO: implement full format (comments, header, aligned rows).
 func RenderWeekBuffer(week WeekValues, areaNames []string, year, weekIndex int,
 	weekStart time.Time) string {
-	return "# TODO: RenderWeekBuffer\n# Year: " + fmt.Sprint(year) +
-		" Week: " + fmt.Sprint(weekIndex+1) + "\n"
+	areaIDs := make([]string, len(week.Areas))
+	for i, id := range week.Areas {
+		areaIDs[i] = fmt.Sprint(id)
+	}
+	areaIDList := strings.Join(areaIDs, ", ")
+	weekNum := weekIndex + 1
+
+	var b strings.Builder
+	b.WriteString("# focustime week view\n")
+	b.WriteString("# Year: " + fmt.Sprint(year) + "\n")
+	b.WriteString("# Week index: " + fmt.Sprint(weekNum) + "\n")
+	b.WriteString("# Week starting: " + weekStart.Format("2006-01-02") + "\n")
+	b.WriteString("# Areas (row order): " + areaIDList + "\n")
+	b.WriteString("# Units: minutes\n")
+	b.WriteString("#\n")
+	b.WriteString("# Edit numeric cells only. Empty = unset.\n")
+	b.WriteString("#\n")
+	b.WriteString("# Columns: Area | Mon | Tue | Wed | Thu | Fri | Sat | Sun\n")
+
+	maxNameLen := 0
+	for _, name := range areaNames {
+		if n := len(name); n > maxNameLen {
+			maxNameLen = n
+		}
+	}
+	const numWidth = 4
+	for row := 0; row < len(areaNames); row++ {
+		name := areaNames[row]
+		rowStr := padRight(name, maxNameLen) + " |"
+		vals := week.Values[row]
+		for d := 0; d < 7; d++ {
+			rowStr += " "
+			if d < len(vals) && vals[d] != nil {
+				rowStr += fmt.Sprintf("%*d", numWidth, *vals[d])
+			} else {
+				rowStr += strings.Repeat(" ", numWidth)
+			}
+			if d < 6 {
+				rowStr += " |"
+			}
+		}
+		b.WriteString(rowStr + "\n")
+	}
+	return b.String()
+}
+
+// padRight pads s to at least width with spaces on the right.
+func padRight(s string, width int) string {
+	if len(s) >= width {
+		return s
+	}
+	return s + strings.Repeat(" ", width-len(s))
 }
 
 // ParseWeekBuffer parses the edited buffer back into WeekValues.
-// TODO: implement parsing logic.
-func ParseWeekBuffer(buf []byte, areaNames []string) (WeekValues, error) {
-	return WeekValues{}, fmt.Errorf("TODO: ParseWeekBuffer")
+// areaNames and areaIDs give the expected row order (display name and ID per row).
+func ParseWeekBuffer(buf []byte, areaNames []string, areaIDs []int) (WeekValues, error) {
+	lines := strings.Split(string(buf), "\n")
+	seenHeader := false
+	var dataRows [][]string
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		parts := splitRow(line)
+		if len(parts) < 8 {
+			continue
+		}
+		if !seenHeader && strings.Contains(parts[0], "Columns") {
+			seenHeader = true
+			continue
+		}
+		dataRows = append(dataRows, parts)
+	}
+	if len(dataRows) != len(areaNames) {
+		return WeekValues{}, fmt.Errorf("expected %d rows, got %d", len(areaNames), len(dataRows))
+	}
+	values := make([][]*int, len(areaNames))
+	for i, parts := range dataRows {
+		areaName := strings.TrimSpace(parts[0])
+		if areaName != areaNames[i] {
+			return WeekValues{}, fmt.Errorf("row %d: expected area %q, got %q", i+1, areaNames[i], areaName)
+		}
+		row := make([]*int, 7)
+		for d := 0; d < 7; d++ {
+			cell := strings.TrimSpace(parts[d+1])
+			if cell == "" {
+				row[d] = nil
+				continue
+			}
+			v, err := strconv.Atoi(cell)
+			if err != nil {
+				return WeekValues{}, fmt.Errorf("row %d day %d: invalid number %q: %w", i+1, d+1, cell, err)
+			}
+			row[d] = &v
+		}
+		values[i] = row
+	}
+	return WeekValues{
+		Areas:  append([]int(nil), areaIDs...),
+		Values: values,
+	}, nil
 }
 
-// ResolveEditor returns the editor command: FOCUSTIME_EDITOR → EDITOR → "vi".
-func ResolveEditor() string {
-	if v := os.Getenv("FOCUSTIME_EDITOR"); v != "" {
-		return v
+// splitRow splits a table row by | and returns the fields.
+func splitRow(line string) []string {
+	var parts []string
+	start := 0
+	for i := 0; i <= len(line); i++ {
+		if i == len(line) || line[i] == '|' {
+			parts = append(parts, strings.TrimSpace(line[start:i]))
+			start = i + 1
+		}
 	}
+	return parts
+}
+
+// ResolveEditor returns the editor command: EDITOR → nvim (if in PATH) → vi.
+func ResolveEditor() string {
 	if v := os.Getenv("EDITOR"); v != "" {
 		return v
+	}
+	if _, err := exec.LookPath("nvim"); err == nil {
+		return "nvim"
 	}
 	return "vi"
 }
@@ -417,7 +555,7 @@ func WeekEdit(cfg StartCfg, woy WoY) error {
 		return err
 	}
 	// 4. Default area layout
-	defaultAreas, err := GetDefaultAreaLayout(cfg, reg, &yf) // TODO: implement
+	defaultAreas, err := GetDefaultAreaLayout(cfg, reg, &yf)
 	if err != nil {
 		return err
 	}
@@ -462,7 +600,7 @@ func WeekEdit(cfg StartCfg, woy WoY) error {
 	if err != nil {
 		return err
 	}
-	parsed, err := ParseWeekBuffer(fileBz, areaNames) // TODO: implement
+	parsed, err := ParseWeekBuffer(fileBz, areaNames, week.Areas)
 	if err != nil {
 		return err
 	}
