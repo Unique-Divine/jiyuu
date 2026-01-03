@@ -397,9 +397,7 @@ func RenderWeekBuffer(week WeekValues, areaNames []string, year, weekIndex int,
 
 	var b strings.Builder
 	b.WriteString("# focustime week view\n")
-	b.WriteString("# Year: " + fmt.Sprint(year) + "\n")
-	b.WriteString("# Week index: " + fmt.Sprint(weekNum) + "\n")
-	b.WriteString("# Week starting: " + weekStart.Format("2006-01-02") + "\n")
+	b.WriteString("# Week index: " + fmt.Sprintf("%dw%d", year, weekNum) + " (Week starting: " + weekStart.Format("2006-01-02") + ")\n")
 	b.WriteString("# Areas (row order): " + areaIDList + "\n")
 	b.WriteString("# Units: minutes\n")
 	b.WriteString("#\n")
@@ -578,7 +576,8 @@ func WeekEdit(cfg StartCfg, woy WoY) error {
 	// 8. Render buffer
 	buf := RenderWeekBuffer(*week, areaNames, woy.Year, woy.WeekIndex(), weekStart)
 	// 9. Create temp file, write buf
-	tmp, err := os.CreateTemp("", "focustime-week-*")
+	pattern := fmt.Sprintf("focustime-%dw%d_*", woy.Year, woy.Week)
+	tmp, err := os.CreateTemp("", pattern)
 	if err != nil {
 		return err
 	}

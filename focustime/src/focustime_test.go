@@ -231,9 +231,7 @@ func (s *S) TestRenderWeekBuffer() {
 	weekStart := time.Date(2025, 3, 3, 0, 0, 0, 0, time.UTC)
 	got := RenderWeekBuffer(week, areaNames, 2025, 9, weekStart)
 	s.Contains(got, "# focustime week view")
-	s.Contains(got, "# Year: 2025")
-	s.Contains(got, "# Week index: 10")
-	s.Contains(got, "# Week starting: 2025-03-03")
+	s.Contains(got, "# Week index: 2025w10 (Week starting: 2025-03-03)")
 	s.Contains(got, "# Columns: Area | Mon | Tue | Wed | Thu | Fri | Sat | Sun")
 	s.Contains(got, "Deep Work |")
 	s.Contains(got, "120")
@@ -243,8 +241,7 @@ func (s *S) TestRenderWeekBuffer() {
 
 func (s *S) TestParseWeekBuffer() {
 	buf := `# focustime week view
-# Year: 2025
-# Week index: 10
+# Week index: 2025w10 (Week starting: 2025-03-03)
 # Columns: Area | Mon | Tue | Wed | Thu | Fri | Sat | Sun
 
 Deep Work | 120 |  90 |  60 |   0 |   0 |     |
