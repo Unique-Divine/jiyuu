@@ -222,8 +222,8 @@ type WeekValues struct {
 // YearFile holds time-series data for one calendar year.
 // Weeks index i (0-based) = ISO week i+1; nil = no data.
 type YearFile struct {
-	Year    int            `json:"year"`
-	Version int            `json:"version"`
+	Year    int             `json:"year"`
+	Version int             `json:"version"`
 	Weeks   [53]*WeekValues `json:"weeks"`
 }
 
@@ -276,6 +276,26 @@ func TimeToWoY(t time.Time) WoY {
 	}
 }
 
+// ParseDurationToMinutes parses durations like "2h", "45m", "1.5h"
+// and returns whole minutes.
+func ParseDurationToMinutes(s string) (int, error) {
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0, fmt.Errorf("invalid duration %q: %w", s, err)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("duration must be positive, got %q", s)
+	}
+	if d%time.Minute != 0 {
+		return 0, fmt.Errorf("duration must be in whole minutes, got %q", s)
+	}
+	return int(d / time.Minute), nil
+}
+
+// WeekdayToDayIndex maps a Go weekday to Mon=0..Sun=6.
+func WeekdayToDayIndex(wd time.Weekday) int {
+	return (int(wd) + 6) % 7
+}
 // LoadYearFile loads the year file (e.g. 2025.json) from the data dir.
 // If missing, returns an empty YearFile for that year.
 func LoadYearFile(cfg StartCfg, year int) (YearFile, error) {

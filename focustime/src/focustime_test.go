@@ -220,7 +220,7 @@ func (s *S) TestGetDefaultAreaLayout() {
 func (s *S) TestRenderWeekBuffer() {
 	v120, v90, v60 := 120, 90, 60
 	week := WeekValues{
-		Areas:  []int{0, 1, 2},
+		Areas: []int{0, 1, 2},
 		Values: [][]*int{
 			{&v120, &v90, &v60, nil, nil, nil, nil},
 			{nil, nil, nil, nil, nil, nil, nil},
@@ -279,7 +279,7 @@ Area | 120 | x | 60 | 0 | 0 | 0 | 0
 func (s *S) TestRenderParseRoundtrip() {
 	v120, v90, v0 := 120, 90, 0
 	week := WeekValues{
-		Areas:  []int{0, 1, 2},
+		Areas: []int{0, 1, 2},
 		Values: [][]*int{
 			{&v120, &v90, nil, &v0, nil, nil, nil},
 			{&v0, nil, nil, nil, nil, nil, nil},
@@ -302,5 +302,28 @@ func (s *S) TestRenderParseRoundtrip() {
 				s.Equal(*week.Values[row][d], *parsed.Values[row][d])
 			}
 		}
+	}
+}
+
+func (s *S) TestParseDurationToMinutes() {
+	type TC struct {
+		in      string
+		wantMin int
+		wantErr bool
+	}
+	for _, tc := range []TC{
+		{in: "2h", wantMin: 120},
+		{in: "45m", wantMin: 45},
+		{in: "1.5h", wantMin: 90},
+		{in: "30s", wantErr: true},
+		{in: "bad", wantErr: true},
+	} {
+		got, err := ParseDurationToMinutes(tc.in)
+		if tc.wantErr {
+			s.Error(err)
+			continue
+		}
+		s.NoError(err)
+		s.Equal(tc.wantMin, got)
 	}
 }
