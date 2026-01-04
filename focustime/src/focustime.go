@@ -367,6 +367,76 @@ func LogTime(cfg StartCfg, durationStr string, areaID int) (int, error) {
 	}
 	return minutes, nil
 }
+
+// CurrentWeekReport returns a table for the current week.
+func CurrentWeekReport(cfg StartCfg, now time.Time) (string, error) {
+	reg, err := LoadAreasFile(cfg)
+	if err != nil {
+		return "", err
+	}
+	now = now.UTC()
+	woy := TimeToWoY(now)
+	yf, err := LoadYearFile(cfg, woy.Year)
+	if err != nil {
+		return "", err
+	}
+	week := yf.Weeks[woy.WeekIndex()]
+	if week == nil {
+		return fmt.Sprintf("No data for week %dw%d.\n", woy.Year, woy.Week),
+			nil
+	}
+	areaNames := resolveAreaNames(reg, week.Areas)
+	weekStart := weekStartFor(woy.Year, woy.Week)
+	return RenderWeekBuffer(*week, areaNames, woy.Year, woy.WeekIndex(),
+		weekStart), nil
+}
+
+// TodayReport returns today's logged values by area for the current week.
+func TodayReport(cfg StartCfg, now time.Time) (string, error) {
+	reg, err := LoadAreasFile(cfg)
+	if err != nil {
+		return "", err
+	}
+	now = now.UTC()
+	woy := TimeToWoY(now)
+	yf, err := LoadYearFile(cfg, woy.Year)
+	if err != nil {
+		return "", err
+	}
+	week := yf.Weeks[woy.WeekIndex()]
+	dayIdx := WeekdayToDayIndex(now.Weekday())
+	dayLabel := now.Weekday().String()
+	dateLabel := now.Format("2006-01-02")
+	if week == nil {
+		return fmt.Sprintf("Today (%s, %s): no data yet.\n",
+			dateLabel, dayLabel), nil
+	}
+	areaNames := resolveAreaNames(reg, week.Areas)
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("Today (%s, %s)\n", dateLabel, dayLabel))
+	hasData := false
+	total := 0
+	for row := range week.Areas {
+		if row >= len(week.Values) || dayIdx >= len(week.Values[row]) {
+			continue
+		}
+		v := week.Values[row][dayIdx]
+		if v == nil {
+			continue
+		}
+		hasData = true
+		total += *v
+		b.WriteString(fmt.Sprintf("%d → %s: %dm\n",
+			week.Areas[row], areaNames[row], *v))
+	}
+	if !hasData {
+		b.WriteString("No data logged for today.\n")
+		return b.String(), nil
+	}
+	b.WriteString(fmt.Sprintf("Total: %dm\n", total))
+	return b.String(), nil
+}
+
 // LoadYearFile loads the year file (e.g. 2025.json) from the data dir.
 // If missing, returns an empty YearFile for that year.
 func LoadYearFile(cfg StartCfg, year int) (YearFile, error) {

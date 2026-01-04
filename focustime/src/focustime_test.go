@@ -376,3 +376,196 @@ func (s *S) TestLogTime() {
 	s.NotNil(week2.Values[row2][day])
 	s.Equal(60, *week2.Values[row2][day])
 }
+
+func (s *S) TestTodayReportNoWeekData() {
+	newHome := s.T().TempDir()
+	s.T().Setenv("XDG_DATA_HOME", newHome)
+	cfg := StartCfg{HomeDir: newHome}
+
+	reg := FocusAreas{
+		Areas:       []string{"A", "B", "C"},
+		AreaLayouts: [][]int{{0, 1, 2}},
+	}
+	err := SaveAreasFile(cfg, reg)
+	s.NoError(err)
+
+	now := time.Date(2026, 3, 3, 12, 0, 0, 0, time.UTC)
+	out, err := TodayReport(cfg, now)
+	s.NoError(err)
+	s.Contains(out, "Today (2026-03-03, Tuesday): no data yet.")
+}
+
+func (s *S) TestTodayReportWeekExistsButNoTodayData() {
+	newHome := s.T().TempDir()
+	s.T().Setenv("XDG_DATA_HOME", newHome)
+	cfg := StartCfg{HomeDir: newHome}
+
+	reg := FocusAreas{
+		Areas:       []string{"A", "B", "C"},
+		AreaLayouts: [][]int{{0, 1, 2}},
+	}
+	err := SaveAreasFile(cfg, reg)
+	s.NoError(err)
+
+	now := time.Date(2026, 3, 3, 12, 0, 0, 0, time.UTC) // Tuesday
+	woy := TimeToWoY(now)
+	yf := emptyYearFile(woy.Year)
+	week := &WeekValues{
+		Areas: []int{0, 1, 2},
+		Values: [][]*int{
+			make([]*int, 7),
+			make([]*int, 7),
+			make([]*int, 7),
+		},
+	}
+	v := 60
+	week.Values[0][WeekdayToDayIndex(time.Monday)] = &v // not today
+	yf.Weeks[woy.WeekIndex()] = week
+	err = SaveYearFile(cfg, yf)
+	s.NoError(err)
+
+	out, err := TodayReport(cfg, now)
+	s.NoError(err)
+	s.Contains(out, "Today (2026-03-03, Tuesday)")
+	s.Contains(out, "No data logged for today.")
+}
+
+func (s *S) TestTodayReportWithValuesAndTotal() {
+	newHome := s.T().TempDir()
+	s.T().Setenv("XDG_DATA_HOME", newHome)
+	cfg := StartCfg{HomeDir: newHome}
+
+	reg := FocusAreas{
+		Areas:       []string{"A", "B", "C"},
+		AreaLayouts: [][]int{{0, 1, 2}},
+	}
+	err := SaveAreasFile(cfg, reg)
+	s.NoError(err)
+
+	now := time.Date(2026, 3, 3, 12, 0, 0, 0, time.UTC) // Tuesday
+	woy := TimeToWoY(now)
+	yf := emptyYearFile(woy.Year)
+	week := &WeekValues{
+		Areas: []int{0, 1, 2},
+		Values: [][]*int{
+			make([]*int, 7),
+			make([]*int, 7),
+			make([]*int, 7),
+		},
+	}
+	dayIdx := WeekdayToDayIndex(now.Weekday())
+	v1, v2 := 30, 45
+	week.Values[0][dayIdx] = &v1
+	week.Values[2][dayIdx] = &v2
+	yf.Weeks[woy.WeekIndex()] = week
+	err = SaveYearFile(cfg, yf)
+	s.NoError(err)
+
+	out, err := TodayReport(cfg, now)
+	s.NoError(err)
+	s.Contains(out, "Today (2026-03-03, Tuesday)")
+	s.Contains(out, "0 → A: 30m")
+	s.Contains(out, "2 → C: 45m")
+	s.Contains(out, "Total: 75m")
+}
+
+func (s *S) TestCurrentWeekReportNoWeekData() {
+	newHome := s.T().TempDir()
+	s.T().Setenv("XDG_DATA_HOME", newHome)
+	cfg := StartCfg{HomeDir: newHome}
+
+	reg := FocusAreas{
+		Areas:       []string{"A", "B", "C"},
+		AreaLayouts: [][]int{{0, 1, 2}},
+	}
+	err := SaveAreasFile(cfg, reg)
+	s.NoError(err)
+
+	now := time.Date(2026, 3, 3, 12, 0, 0, 0, time.UTC)
+	out, err := CurrentWeekReport(cfg, now)
+	s.NoError(err)
+	s.Contains(out, "No data for week")
+}
+
+func (s *S) TestCurrentWeekReportWithWeekData() {
+	newHome := s.T().TempDir()
+	s.T().Setenv("XDG_DATA_HOME", newHome)
+	cfg := StartCfg{HomeDir: newHome}
+
+	reg := FocusAreas{
+		Areas:       []string{"A", "B", "C"},
+		AreaLayouts: [][]int{{0, 1, 2}},
+	}
+	err := SaveAreasFile(cfg, reg)
+	s.NoError(err)
+
+	now := time.Date(2026, 3, 3, 12, 0, 0, 0, time.UTC)
+	woy := TimeToWoY(now)
+	yf := emptyYearFile(woy.Year)
+	week := &WeekValues{
+		Areas: []int{0, 1, 2},
+		Values: [][]*int{
+			make([]*int, 7),
+			make([]*int, 7),
+			make([]*int, 7),
+		},
+	}
+	dayIdx := WeekdayToDayIndex(now.Weekday())
+	v := 50
+	week.Values[1][dayIdx] = &v
+	yf.Weeks[woy.WeekIndex()] = week
+	err = SaveYearFile(cfg, yf)
+	s.NoError(err)
+
+	out, err := CurrentWeekReport(cfg, now)
+	s.NoError(err)
+	s.Contains(out, "# focustime week view")
+	s.Contains(out, "# Week index:")
+	s.Contains(out, "A |")
+	s.Contains(out, "B |")
+	s.Contains(out, "C |")
+	s.Contains(out, "50")
+}
+
+func (s *S) TestLogTimeErrors() {
+	newHome := s.T().TempDir()
+	s.T().Setenv("XDG_DATA_HOME", newHome)
+	cfg := StartCfg{HomeDir: newHome}
+
+	// Invalid area index paths
+	reg := FocusAreas{
+		Areas:       []string{"A", "B", "C"},
+		AreaLayouts: [][]int{{0, 1, 2}},
+	}
+	err := SaveAreasFile(cfg, reg)
+	s.NoError(err)
+
+	_, err = LogTime(cfg, "45m", -1)
+	s.Error(err)
+	_, err = LogTime(cfg, "45m", 99)
+	s.Error(err)
+
+	// Invalid duration paths
+	_, err = LogTime(cfg, "bad", 1)
+	s.Error(err)
+	_, err = LogTime(cfg, "30s", 1)
+	s.Error(err)
+}
+
+func (s *S) TestLogTimeBootstrapFailure() {
+	newHome := s.T().TempDir()
+	s.T().Setenv("XDG_DATA_HOME", newHome)
+	cfg := StartCfg{HomeDir: newHome}
+
+	// Fewer than 3 areas and no layouts/weeks -> GetDefaultAreaLayout error
+	reg := FocusAreas{
+		Areas:       []string{"A", "B"},
+		AreaLayouts: [][]int{},
+	}
+	err := SaveAreasFile(cfg, reg)
+	s.NoError(err)
+
+	_, err = LogTime(cfg, "45m", 1)
+	s.Error(err)
+	s.Contains(err.Error(), "no area layout")
+}
