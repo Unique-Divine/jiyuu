@@ -327,3 +327,52 @@ func (s *S) TestParseDurationToMinutes() {
 		s.Equal(tc.wantMin, got)
 	}
 }
+
+func (s *S) TestWeekdayToDayIndex() {
+	s.Equal(0, WeekdayToDayIndex(time.Monday))
+	s.Equal(1, WeekdayToDayIndex(time.Tuesday))
+	s.Equal(2, WeekdayToDayIndex(time.Wednesday))
+	s.Equal(3, WeekdayToDayIndex(time.Thursday))
+	s.Equal(4, WeekdayToDayIndex(time.Friday))
+	s.Equal(5, WeekdayToDayIndex(time.Saturday))
+	s.Equal(6, WeekdayToDayIndex(time.Sunday))
+}
+
+func (s *S) TestLogTime() {
+	newHome := s.T().TempDir()
+	s.T().Setenv("XDG_DATA_HOME", newHome)
+	cfg := StartCfg{HomeDir: newHome}
+
+	reg := FocusAreas{
+		Areas:       []string{"A", "B", "C"},
+		AreaLayouts: [][]int{},
+	}
+	err := SaveAreasFile(cfg, reg)
+	s.NoError(err)
+
+	logged, err := LogTime(cfg, "45m", 1)
+	s.NoError(err)
+	s.Equal(45, logged)
+
+	now := time.Now().UTC()
+	woy := TimeToWoY(now)
+	yf, err := LoadYearFile(cfg, woy.Year)
+	s.NoError(err)
+	week := yf.Weeks[woy.WeekIndex()]
+	s.NotNil(week)
+	row := findAreaRowIndex(week, 1)
+	s.NotEqual(-1, row)
+	day := WeekdayToDayIndex(now.Weekday())
+	s.NotNil(week.Values[row][day])
+	s.Equal(45, *week.Values[row][day])
+
+	// second log accumulates
+	_, err = LogTime(cfg, "15m", 1)
+	s.NoError(err)
+	yf2, err := LoadYearFile(cfg, woy.Year)
+	s.NoError(err)
+	week2 := yf2.Weeks[woy.WeekIndex()]
+	row2 := findAreaRowIndex(week2, 1)
+	s.NotNil(week2.Values[row2][day])
+	s.Equal(60, *week2.Values[row2][day])
+}

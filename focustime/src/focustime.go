@@ -296,6 +296,77 @@ func ParseDurationToMinutes(s string) (int, error) {
 func WeekdayToDayIndex(wd time.Weekday) int {
 	return (int(wd) + 6) % 7
 }
+
+func resolveAreaNames(reg FocusAreas, areaIDs []int) []string {
+	areaNames := make([]string, len(areaIDs))
+	for i, id := range areaIDs {
+		if id >= 0 && id < len(reg.Areas) {
+			areaNames[i] = reg.Areas[id]
+		} else {
+			areaNames[i] = fmt.Sprintf("Area %d", id)
+		}
+	}
+	return areaNames
+}
+
+func findAreaRowIndex(week *WeekValues, areaID int) int {
+	for i, id := range week.Areas {
+		if id == areaID {
+			return i
+		}
+	}
+	return -1
+}
+
+func ensureAreaRow(week *WeekValues, areaID int) int {
+	row := findAreaRowIndex(week, areaID)
+	if row >= 0 {
+		return row
+	}
+	week.Areas = append(week.Areas, areaID)
+	week.Values = append(week.Values, make([]*int, 7))
+	return len(week.Areas) - 1
+}
+
+// LogTime adds minutes to today's cell for areaID in the current week.
+func LogTime(cfg StartCfg, durationStr string, areaID int) (int, error) {
+	minutes, err := ParseDurationToMinutes(durationStr)
+	if err != nil {
+		return 0, err
+	}
+	reg, err := LoadAreasFile(cfg)
+	if err != nil {
+		return 0, err
+	}
+	if areaID < 0 || areaID >= len(reg.Areas) {
+		return 0, fmt.Errorf("area index %d out of range [0, %d)",
+			areaID, len(reg.Areas))
+	}
+	now := time.Now().UTC()
+	woy := TimeToWoY(now)
+	yf, err := LoadYearFile(cfg, woy.Year)
+	if err != nil {
+		return 0, err
+	}
+	defaultAreas, err := GetDefaultAreaLayout(cfg, reg, &yf)
+	if err != nil {
+		return 0, err
+	}
+	week, err := FindOrCreateWeek(&yf, woy.WeekIndex(), defaultAreas)
+	if err != nil {
+		return 0, err
+	}
+	row := ensureAreaRow(week, areaID)
+	dayIdx := WeekdayToDayIndex(now.Weekday())
+	if week.Values[row][dayIdx] == nil {
+		week.Values[row][dayIdx] = new(int)
+	}
+	*week.Values[row][dayIdx] += minutes
+	if err := SaveYearFile(cfg, yf); err != nil {
+		return 0, err
+	}
+	return minutes, nil
+}
 // LoadYearFile loads the year file (e.g. 2025.json) from the data dir.
 // If missing, returns an empty YearFile for that year.
 func LoadYearFile(cfg StartCfg, year int) (YearFile, error) {
