@@ -30,6 +30,22 @@ func NewAppCmd(cfg StartCfg) *cli.Command {
 				Action:    editAction(cfg),
 			},
 			{
+				Name:   "today",
+				Usage:  "Show today's logged values by area",
+				Action: todayAction(cfg),
+			},
+			{
+				Name:   "week",
+				Usage:  "Show current week breakdown",
+				Action: weekAction(cfg),
+			},
+			{
+				Name:      "log",
+				Usage:     "Log time to an area for today",
+				ArgsUsage: "<time_amt> <area_idx>",
+				Action:    logAction(cfg),
+			},
+			{
 				Name:  "areas",
 				Usage: "Manage focus areas",
 				Commands: []*cli.Command{
@@ -138,5 +154,50 @@ func editAction(cfg StartCfg) cli.ActionFunc {
 			woy = WoY{Year: year, Week: week}
 		}
 		return WeekEdit(cfg, woy)
+	}
+}
+
+func todayAction(cfg StartCfg) cli.ActionFunc {
+	return func(ctx context.Context, c *cli.Command) error {
+		out, err := TodayReport(cfg, time.Now().UTC())
+		if err != nil {
+			return err
+		}
+		fmt.Fprint(c.Writer, out)
+		return nil
+	}
+}
+
+func weekAction(cfg StartCfg) cli.ActionFunc {
+	return func(ctx context.Context, c *cli.Command) error {
+		out, err := CurrentWeekReport(cfg, time.Now().UTC())
+		if err != nil {
+			return err
+		}
+		fmt.Fprint(c.Writer, out)
+		return nil
+	}
+}
+
+func logAction(cfg StartCfg) cli.ActionFunc {
+	return func(ctx context.Context, c *cli.Command) error {
+		if c.Args().Len() < 2 {
+			_, _ = c.ErrWriter.Write(
+				[]byte("focustime log: requires <time_amt> <area_idx>\n"),
+			)
+			return cli.ShowAppHelp(c)
+		}
+		timeAmt := c.Args().Get(0)
+		areaArg := c.Args().Get(1)
+		areaID, err := strconv.Atoi(areaArg)
+		if err != nil {
+			return fmt.Errorf("invalid area id %q: %w", areaArg, err)
+		}
+		minutes, err := LogTime(cfg, timeAmt, areaID)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(c.Writer, "Logged %dm to area %d\n", minutes, areaID)
+		return nil
 	}
 }
