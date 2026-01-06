@@ -4,9 +4,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/mattn/go-runewidth"
 	"github.com/stretchr/testify/suite"
 )
 
@@ -215,6 +217,29 @@ func (s *S) TestGetDefaultAreaLayout() {
 	yf4 := emptyYearFile(2025)
 	_, err = GetDefaultAreaLayout(cfg, reg4, &yf4)
 	s.Error(err)
+	s.Contains(err.Error(), "focustime areas save-layout")
+}
+
+func (s *S) TestSaveCurrentAreasAsLayout() {
+	reg := FocusAreas{
+		Areas:       []string{"A", "B", "C", "D"},
+		AreaLayouts: [][]int{{0, 1, 2}},
+	}
+	got, idx, err := SaveCurrentAreasAsLayout(reg)
+	s.NoError(err)
+	s.Equal(1, idx)
+	s.Equal([][]int{{0, 1, 2}, {0, 1, 2, 3}}, got.AreaLayouts)
+	s.Equal(uint8(1), got.LastUsedAreaLayoutIndex)
+}
+
+func (s *S) TestSaveCurrentAreasAsLayoutNeedsThreeAreas() {
+	reg := FocusAreas{
+		Areas:       []string{"A", "B"},
+		AreaLayouts: [][]int{},
+	}
+	_, _, err := SaveCurrentAreasAsLayout(reg)
+	s.Error(err)
+	s.Contains(err.Error(), "at least 3 areas")
 }
 
 func (s *S) TestRenderWeekBuffer() {
@@ -233,10 +258,64 @@ func (s *S) TestRenderWeekBuffer() {
 	s.Contains(got, "# focustime week view")
 	s.Contains(got, "# Week index: 2025w10 (Week starting: 2025-03-03)")
 	s.Contains(got, "# Columns: Area | Mon | Tue | Wed | Thu | Fri | Sat | Sun")
-	s.Contains(got, "Deep Work |")
+	s.Contains(got, "Deep Work  |")
 	s.Contains(got, "120")
 	s.Contains(got, "90")
 	s.Contains(got, "Exercise")
+}
+
+func (s *S) TestRenderWeekBufferFixedAreaColumnWidth() {
+	week := WeekValues{
+		Areas: []int{0, 1},
+		Values: [][]*int{
+			make([]*int, 7),
+			make([]*int, 7),
+		},
+	}
+	areaNames := []string{"A", "運動"}
+	weekStart := time.Date(2025, 3, 3, 0, 0, 0, 0, time.UTC)
+	got := RenderWeekBuffer(week, areaNames, 2025, 9, weekStart)
+	expectedWidth := runewidth.StringWidth("運動") + 1
+
+	for _, line := range strings.Split(got, "\n") {
+		if strings.HasPrefix(line, "A ") || strings.HasPrefix(line, "運動") {
+			left := strings.SplitN(line, "|", 2)[0]
+			s.Equal(expectedWidth+1, runewidth.StringWidth(left))
+		}
+	}
+}
+
+func (s *S) TestRenderWeekBufferAlignsUsingLongestAreaName() {
+	week := WeekValues{
+		Areas: []int{0, 1, 2},
+		Values: [][]*int{
+			make([]*int, 7),
+			make([]*int, 7),
+			make([]*int, 7),
+		},
+	}
+	areaNames := []string{
+		"短い",
+		"かなり長いエリア名です",
+		"mid",
+	}
+	weekStart := time.Date(2025, 3, 3, 0, 0, 0, 0, time.UTC)
+	got := RenderWeekBuffer(week, areaNames, 2025, 9, weekStart)
+	expectedAreaColWidth := runewidth.StringWidth("かなり長いエリア名です") + 1
+
+	var widths []int
+	for _, line := range strings.Split(got, "\n") {
+		if strings.HasPrefix(line, "短い") ||
+			strings.HasPrefix(line, "かなり長いエリア名です") ||
+			strings.HasPrefix(line, "mid") {
+			left := strings.SplitN(line, "|", 2)[0]
+			widths = append(widths, runewidth.StringWidth(left))
+		}
+	}
+	s.Len(widths, 3)
+	s.Equal(widths[0], widths[1])
+	s.Equal(widths[1], widths[2])
+	s.Equal(expectedAreaColWidth+1, widths[0]) // +1 for " " before "|"
 }
 
 func (s *S) TestParseWeekBuffer() {
@@ -561,9 +640,9 @@ func (s *S) TestCurrentWeekReportWithWeekData() {
 	s.NoError(err)
 	s.Contains(out, "# focustime week view")
 	s.Contains(out, "# Week index:")
-	s.Contains(out, "A |")
-	s.Contains(out, "B |")
-	s.Contains(out, "C |")
+	s.Contains(out, "A  |")
+	s.Contains(out, "B  |")
+	s.Contains(out, "C  |")
 	s.Contains(out, "50")
 }
 

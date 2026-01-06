@@ -50,6 +50,11 @@ func NewAppCmd(cfg StartCfg) *cli.Command {
 				Usage: "Manage focus areas",
 				Commands: []*cli.Command{
 					{
+						Name:   "save-layout",
+						Usage:  "Save current areas order as default layout",
+						Action: areasSaveLayoutAction(cfg),
+					},
+					{
 						Name:   "edit",
 						Usage:  "Edit all areas in your editor",
 						Action: areasEditAction(cfg),
@@ -154,6 +159,25 @@ func areasEditAction(cfg StartCfg) cli.ActionFunc {
 			return err
 		}
 		fmt.Fprintf(c.Writer, "Updated %d areas\n", len(reg.Areas))
+		return nil
+	}
+}
+
+func areasSaveLayoutAction(cfg StartCfg) cli.ActionFunc {
+	return func(ctx context.Context, c *cli.Command) error {
+		reg, err := LoadAreasFile(cfg)
+		if err != nil {
+			return err
+		}
+		reg, idx, err := SaveCurrentAreasAsLayout(reg)
+		if err != nil {
+			return err
+		}
+		if err := SaveAreasFile(cfg, reg); err != nil {
+			return err
+		}
+		fmt.Fprintf(c.Writer, "Saved layout %d with %d areas and set as last used\n",
+			idx, len(reg.Areas))
 		return nil
 	}
 }

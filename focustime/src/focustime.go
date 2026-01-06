@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/mattn/go-runewidth"
 )
 
 // StartCfg holds startup configuration. HomeDir is used for XDG fallbacks
@@ -100,6 +102,22 @@ func SaveAreasFile(cfg StartCfg, reg FocusAreas) error {
 func AddArea(reg FocusAreas, name string) FocusAreas {
 	reg.Areas = append(reg.Areas, name)
 	return reg
+}
+
+// SaveCurrentAreasAsLayout appends the current areas order (0..n-1) as a saved
+// layout and marks it as last used. Requires at least 3 areas.
+func SaveCurrentAreasAsLayout(reg FocusAreas) (FocusAreas, int, error) {
+	if len(reg.Areas) < 3 {
+		return reg, -1, fmt.Errorf("need at least 3 areas to save layout")
+	}
+	layout := make([]int, len(reg.Areas))
+	for i := range reg.Areas {
+		layout[i] = i
+	}
+	reg.AreaLayouts = append(reg.AreaLayouts, layout)
+	newIndex := len(reg.AreaLayouts) - 1
+	reg.LastUsedAreaLayoutIndex = uint8(newIndex)
+	return reg, newIndex, nil
 }
 
 // RemoveArea removes the area at index from reg.Areas, updates area_layouts
@@ -511,7 +529,7 @@ func GetDefaultAreaLayout(cfg StartCfg, reg FocusAreas, yearFile *YearFile) ([]i
 		return []int{0, 1, 2}, nil
 	}
 	// 4. Error
-	return nil, fmt.Errorf("no area layout. Add at least 3 areas and run: focustime area-layout save 0 1 2")
+	return nil, fmt.Errorf("no area layout. Add at least 3 areas and run: focustime areas save-layout")
 }
 
 // validAreaLayout returns true if all IDs in layout are in range [0, nAreas).
@@ -566,16 +584,17 @@ func RenderWeekBuffer(week WeekValues, areaNames []string, year, weekIndex int,
 	b.WriteString("#\n")
 	b.WriteString("# Columns: Area | Mon | Tue | Wed | Thu | Fri | Sat | Sun\n")
 
-	maxNameLen := 0
+	maxAreaWidth := 0
 	for _, name := range areaNames {
-		if n := len(name); n > maxNameLen {
-			maxNameLen = n
+		if w := runewidth.StringWidth(name); w > maxAreaWidth {
+			maxAreaWidth = w
 		}
 	}
+	areaColWidth := maxAreaWidth + 1
 	const numWidth = 4
 	for row := 0; row < len(areaNames); row++ {
 		name := areaNames[row]
-		rowStr := padRight(name, maxNameLen) + " |"
+		rowStr := padRightDisplayWidth(name, areaColWidth) + " |"
 		vals := week.Values[row]
 		for d := 0; d < 7; d++ {
 			rowStr += " "
@@ -593,12 +612,13 @@ func RenderWeekBuffer(week WeekValues, areaNames []string, year, weekIndex int,
 	return b.String()
 }
 
-// padRight pads s to at least width with spaces on the right.
-func padRight(s string, width int) string {
-	if len(s) >= width {
+// padRightDisplayWidth pads s to at least width display cells with spaces.
+func padRightDisplayWidth(s string, width int) string {
+	w := runewidth.StringWidth(s)
+	if w >= width {
 		return s
 	}
-	return s + strings.Repeat(" ", width-len(s))
+	return s + strings.Repeat(" ", width-w)
 }
 
 // ParseWeekBuffer parses the edited buffer back into WeekValues.

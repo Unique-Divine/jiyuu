@@ -95,7 +95,7 @@ func TestCLIWeekActionWritesReport(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, stdout.String(), "# focustime week view")
 	require.Contains(t, stdout.String(), "# Columns: Area | Mon | Tue | Wed | Thu | Fri | Sat | Sun")
-	require.Contains(t, stdout.String(), "C |")
+	require.Contains(t, stdout.String(), "C  |")
 }
 
 // TestCLIAreasEditActionUpdatesAreas verifies end-to-end CLI behavior for
@@ -127,4 +127,18 @@ func TestCLIAreasEditActionUpdatesAreas(t *testing.T) {
 	reg, err := LoadAreasFile(cfg)
 	require.NoError(t, err)
 	require.Equal(t, []string{"Deep Work", "Code Review", "Exercise"}, reg.Areas)
+}
+
+func TestCLIAreasSaveLayoutActionSavesAndSetsLastUsed(t *testing.T) {
+	cfg, stdout, _, app := setupCLIApp(t)
+	err := app.Run(context.Background(), []string{"focustime", "areas", "save-layout"})
+	require.NoError(t, err)
+	require.Contains(t, stdout.String(), "Saved layout")
+	require.Contains(t, stdout.String(), "with 3 areas")
+
+	reg, err := LoadAreasFile(cfg)
+	require.NoError(t, err)
+	require.Len(t, reg.AreaLayouts, 2)
+	require.Equal(t, []int{0, 1, 2}, reg.AreaLayouts[1])
+	require.Equal(t, uint8(1), reg.LastUsedAreaLayoutIndex)
 }
