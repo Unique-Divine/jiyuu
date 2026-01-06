@@ -305,6 +305,46 @@ func (s *S) TestRenderParseRoundtrip() {
 	}
 }
 
+// TestParseAreasEditBuffer protects the loose edit UX contract:
+// users can write one area per line with optional commas, comments,
+// and wrapper lines while preserving area order after parse.
+func (s *S) TestParseAreasEditBuffer() {
+	buf := `# focustime areas edit
+[
+  Deep Work,
+Coding
+
+# ignored comment
+ Exercise  ,
+]
+`
+	got, err := ParseAreasEditBuffer([]byte(buf))
+	s.NoError(err)
+	s.Equal([]string{"Deep Work", "Coding", "Exercise"}, got)
+}
+
+// TestParseAreasEditBufferEmptyItem enforces that blank entries are rejected
+// so edits never silently create empty area names in areas.json.
+func (s *S) TestParseAreasEditBufferEmptyItem() {
+	buf := `[
+Deep Work,
+  ,
+Coding
+]`
+	_, err := ParseAreasEditBuffer([]byte(buf))
+	s.Error(err)
+	s.Contains(err.Error(), "area name cannot be empty")
+}
+
+func (s *S) TestRenderAreasEditBuffer() {
+	got := RenderAreasEditBuffer([]string{"A", "B"})
+	s.Contains(got, "# focustime areas edit")
+	s.Contains(got, "[")
+	s.Contains(got, "A,")
+	s.Contains(got, "B,")
+	s.Contains(got, "]")
+}
+
 func (s *S) TestParseDurationToMinutes() {
 	type TC struct {
 		in      string

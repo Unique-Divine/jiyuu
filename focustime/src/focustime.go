@@ -695,6 +695,84 @@ func LaunchEditor(tempPath string) error {
 	return cmd.Run()
 }
 
+// RenderAreasEditBuffer renders areas as a loose array-like format.
+func RenderAreasEditBuffer(areas []string) string {
+	var b strings.Builder
+	b.WriteString("# focustime areas edit\n")
+	b.WriteString("# Edit area names (one per line). Spaces are allowed.\n")
+	b.WriteString("# Lines starting with # are ignored.\n")
+	b.WriteString("# Keep [ and ] wrapper lines; trailing commas are optional.\n")
+	b.WriteString("[\n")
+	for _, area := range areas {
+		b.WriteString(area + ",\n")
+	}
+	b.WriteString("]\n")
+	b.WriteString("# Example:\n")
+	b.WriteString("# Deep Work,\n")
+	b.WriteString("# Admin\n")
+	return b.String()
+}
+
+// ParseAreasEditBuffer parses a loose array-like list of area names.
+func ParseAreasEditBuffer(buf []byte) ([]string, error) {
+	lines := strings.Split(string(buf), "\n")
+	areas := make([]string, 0, len(lines))
+	for i, raw := range lines {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if line == "[" || line == "]" {
+			continue
+		}
+		if strings.HasSuffix(line, ",") {
+			line = strings.TrimSpace(strings.TrimSuffix(line, ","))
+		}
+		if line == "" {
+			return nil, fmt.Errorf("line %d: area name cannot be empty", i+1)
+		}
+		areas = append(areas, line)
+	}
+	return areas, nil
+}
+
+// AreasEdit opens areas.json areas in editor and saves edited values.
+func AreasEdit(cfg StartCfg) error {
+	reg, err := LoadAreasFile(cfg)
+	if err != nil {
+		return err
+	}
+	buf := RenderAreasEditBuffer(reg.Areas)
+
+	tmp, err := os.CreateTemp("", "focustime-areas_*")
+	if err != nil {
+		return err
+	}
+	tempPath := tmp.Name()
+	defer os.Remove(tempPath)
+
+	if _, err := tmp.WriteString(buf); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := LaunchEditor(tempPath); err != nil {
+		return fmt.Errorf("editor exited with error: %w", err)
+	}
+	fileBz, err := os.ReadFile(tempPath)
+	if err != nil {
+		return err
+	}
+	areas, err := ParseAreasEditBuffer(fileBz)
+	if err != nil {
+		return err
+	}
+	reg.Areas = areas
+	return SaveAreasFile(cfg, reg)
+}
+
 // WeekEdit loads the week, opens it in $EDITOR, and saves after parse.
 // Requires at least 3 areas and a resolvable default layout.
 func WeekEdit(cfg StartCfg, woy WoY) error {

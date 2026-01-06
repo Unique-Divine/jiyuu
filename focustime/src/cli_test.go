@@ -3,6 +3,9 @@ package src
 import (
 	"bytes"
 	"context"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -93,4 +96,35 @@ func TestCLIWeekActionWritesReport(t *testing.T) {
 	require.Contains(t, stdout.String(), "# focustime week view")
 	require.Contains(t, stdout.String(), "# Columns: Area | Mon | Tue | Wed | Thu | Fri | Sat | Sun")
 	require.Contains(t, stdout.String(), "C |")
+}
+
+// TestCLIAreasEditActionUpdatesAreas verifies end-to-end CLI behavior for
+// `areas edit`: the command launches the editor path, parses loose input, trims
+// values, and persists the resulting ordered areas list.
+func TestCLIAreasEditActionUpdatesAreas(t *testing.T) {
+	cfg, stdout, _, app := setupCLIApp(t)
+	editorScript := filepath.Join(t.TempDir(), "fake-editor.sh")
+	script := strings.Join([]string{
+		"#!/usr/bin/env bash",
+		"cat <<'EOF' > \"$1\"",
+		"# focustime areas edit",
+		"[",
+		"Deep Work,",
+		" Code Review  ,",
+		"# notes",
+		"Exercise",
+		"]",
+		"EOF",
+		"",
+	}, "\n")
+	require.NoError(t, os.WriteFile(editorScript, []byte(script), 0o755))
+	t.Setenv("EDITOR", editorScript)
+
+	err := app.Run(context.Background(), []string{"focustime", "areas", "edit"})
+	require.NoError(t, err)
+	require.Contains(t, stdout.String(), "Updated 3 areas")
+
+	reg, err := LoadAreasFile(cfg)
+	require.NoError(t, err)
+	require.Equal(t, []string{"Deep Work", "Code Review", "Exercise"}, reg.Areas)
 }

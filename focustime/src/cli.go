@@ -50,6 +50,11 @@ func NewAppCmd(cfg StartCfg) *cli.Command {
 				Usage: "Manage focus areas",
 				Commands: []*cli.Command{
 					{
+						Name:   "edit",
+						Usage:  "Edit all areas in your editor",
+						Action: areasEditAction(cfg),
+					},
+					{
 						Name:      "add",
 						Usage:     "Add an area",
 						ArgsUsage: "<name>",
@@ -135,6 +140,20 @@ func areasListAction(cfg StartCfg) cli.ActionFunc {
 		for i, name := range reg.Areas {
 			fmt.Fprintf(c.Writer, "%d → %s\n", i, name)
 		}
+		return nil
+	}
+}
+
+func areasEditAction(cfg StartCfg) cli.ActionFunc {
+	return func(ctx context.Context, c *cli.Command) error {
+		if err := AreasEdit(cfg); err != nil {
+			return err
+		}
+		reg, err := LoadAreasFile(cfg)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(c.Writer, "Updated %d areas\n", len(reg.Areas))
 		return nil
 	}
 }
