@@ -231,7 +231,7 @@ func DirFTData(cfg StartCfg) string {
 }
 
 // WeekValues holds one week's data. Areas is the ordered list of area IDs
-// (rows). Values is [areaIdx][dayIdx], Mon=0..Sun=6; nil = unset.
+// (rows). Values is [areaIdx][dayIdx], Sun=0..Sat=6; nil = unset.
 type WeekValues struct {
 	Areas  []int    `json:"areas"`
 	Values [][]*int `json:"values"`
@@ -310,9 +310,11 @@ func ParseDurationToMinutes(s string) (int, error) {
 	return int(d / time.Minute), nil
 }
 
-// WeekdayToDayIndex maps a Go weekday to Mon=0..Sun=6.
+var weekdayLabelsJP = [7]string{"日", "月", "火", "水", "木", "金", "土"}
+
+// WeekdayToDayIndex maps a Go weekday to Sun=0..Sat=6.
 func WeekdayToDayIndex(wd time.Weekday) int {
-	return (int(wd) + 6) % 7
+	return int(wd)
 }
 
 func resolveAreaNames(reg FocusAreas, areaIDs []int) []string {
@@ -574,17 +576,7 @@ func RenderWeekBuffer(week WeekValues, areaNames []string, year, weekIndex int,
 	areaIDList := strings.Join(areaIDs, ", ")
 	weekNum := weekIndex + 1
 
-	var b strings.Builder
-	b.WriteString("# focustime week view\n")
-	b.WriteString("# Week index: " + fmt.Sprintf("%dw%d", year, weekNum) + " (Week starting: " + weekStart.Format("2006-01-02") + ")\n")
-	b.WriteString("# Areas (row order): " + areaIDList + "\n")
-	b.WriteString("# Units: minutes\n")
-	b.WriteString("#\n")
-	b.WriteString("# Edit numeric cells only. Empty = unset.\n")
-	b.WriteString("#\n")
-	b.WriteString("# Columns: Area | Mon | Tue | Wed | Thu | Fri | Sat | Sun\n")
-
-	maxAreaWidth := 0
+	maxAreaWidth := runewidth.StringWidth("Area")
 	for _, name := range areaNames {
 		if w := runewidth.StringWidth(name); w > maxAreaWidth {
 			maxAreaWidth = w
@@ -592,11 +584,36 @@ func RenderWeekBuffer(week WeekValues, areaNames []string, year, weekIndex int,
 	}
 	areaColWidth := maxAreaWidth + 1
 	const numWidth = 4
+
+	var b strings.Builder
+	b.WriteString("# focustime week view\n")
+	b.WriteString("# Week index: " + fmt.Sprintf("%dw%d", year, weekNum) + " (Week starting: " + weekStart.Format("2006-01-02") + ")\n")
+	b.WriteString("# Areas (row order): " + areaIDList + "\n")
+	b.WriteString("# Units: minutes\n")
+	b.WriteString("# Edit numeric cells only. Empty = unset.\n")
+	b.WriteString("#\n")
+	const headerPrefix = "# "
+	b.WriteString(headerPrefix)
+	headerAreaColWidth := areaColWidth - runewidth.StringWidth(headerPrefix)
+	if headerAreaColWidth < runewidth.StringWidth("Area") {
+		headerAreaColWidth = runewidth.StringWidth("Area")
+	}
+	b.WriteString(padRightDisplayWidth("Area", headerAreaColWidth))
+	b.WriteString(" |")
+	for i, day := range weekdayLabelsJP {
+		b.WriteString(" ")
+		b.WriteString(padLeftDisplayWidth(day, numWidth))
+		if i < len(weekdayLabelsJP)-1 {
+			b.WriteString(" |")
+		}
+	}
+	b.WriteString("\n")
+
 	for row := 0; row < len(areaNames); row++ {
 		name := areaNames[row]
 		rowStr := padRightDisplayWidth(name, areaColWidth) + " |"
 		vals := week.Values[row]
-		for d := 0; d < 7; d++ {
+		for d := 0; d < len(weekdayLabelsJP); d++ {
 			rowStr += " "
 			if d < len(vals) && vals[d] != nil {
 				rowStr += fmt.Sprintf("%*d", numWidth, *vals[d])
@@ -619,6 +636,15 @@ func padRightDisplayWidth(s string, width int) string {
 		return s
 	}
 	return s + strings.Repeat(" ", width-w)
+}
+
+// padLeftDisplayWidth pads s on the left to at least width display cells.
+func padLeftDisplayWidth(s string, width int) string {
+	w := runewidth.StringWidth(s)
+	if w >= width {
+		return s
+	}
+	return strings.Repeat(" ", width-w) + s
 }
 
 // ParseWeekBuffer parses the edited buffer back into WeekValues.
@@ -651,8 +677,8 @@ func ParseWeekBuffer(buf []byte, areaNames []string, areaIDs []int) (WeekValues,
 		if areaName != areaNames[i] {
 			return WeekValues{}, fmt.Errorf("row %d: expected area %q, got %q", i+1, areaNames[i], areaName)
 		}
-		row := make([]*int, 7)
-		for d := 0; d < 7; d++ {
+		row := make([]*int, len(weekdayLabelsJP))
+		for d := 0; d < len(weekdayLabelsJP); d++ {
 			cell := strings.TrimSpace(parts[d+1])
 			if cell == "" {
 				row[d] = nil
