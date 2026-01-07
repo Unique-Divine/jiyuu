@@ -94,8 +94,9 @@ func TestCLIWeekActionWritesReport(t *testing.T) {
 	err = app.Run(context.Background(), []string{"focustime", "week"})
 	require.NoError(t, err)
 	require.Contains(t, stdout.String(), "# focustime week view")
-	require.Contains(t, stdout.String(), "# Columns: Area | Mon | Tue | Wed | Thu | Fri | Sat | Sun")
-	require.Contains(t, stdout.String(), "C  |")
+	require.Contains(t, stdout.String(), "# Area")
+	require.Contains(t, stdout.String(), "|   日 |   月 |   火 |   水 |   木 |   金 |   土")
+	require.Contains(t, stdout.String(), "C     |")
 }
 
 // TestCLIAreasEditActionUpdatesAreas verifies end-to-end CLI behavior for

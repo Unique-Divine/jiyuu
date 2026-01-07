@@ -257,7 +257,8 @@ func (s *S) TestRenderWeekBuffer() {
 	got := RenderWeekBuffer(week, areaNames, 2025, 9, weekStart)
 	s.Contains(got, "# focustime week view")
 	s.Contains(got, "# Week index: 2025w10 (Week starting: 2025-03-03)")
-	s.Contains(got, "# Columns: Area | Mon | Tue | Wed | Thu | Fri | Sat | Sun")
+	s.Contains(got, "# Area")
+	s.Contains(got, "|   日 |   月 |   火 |   水 |   木 |   金 |   土")
 	s.Contains(got, "Deep Work  |")
 	s.Contains(got, "120")
 	s.Contains(got, "90")
@@ -304,24 +305,43 @@ func (s *S) TestRenderWeekBufferAlignsUsingLongestAreaName() {
 	expectedAreaColWidth := runewidth.StringWidth("かなり長いエリア名です") + 1
 
 	var widths []int
+	var headerPipeWidths []int
+	var rowPipeWidths []int
+	pipeDisplayWidths := func(line string) []int {
+		widths := []int{}
+		for i := 0; i < len(line); i++ {
+			if line[i] == '|' {
+				widths = append(widths, runewidth.StringWidth(line[:i]))
+			}
+		}
+		return widths
+	}
 	for _, line := range strings.Split(got, "\n") {
+		if strings.HasPrefix(line, "# ") &&
+			strings.Contains(line, "|   日 |   月 |   火 |   水 |   木 |   金 |   土") {
+			headerPipeWidths = pipeDisplayWidths(line)
+		}
 		if strings.HasPrefix(line, "短い") ||
 			strings.HasPrefix(line, "かなり長いエリア名です") ||
 			strings.HasPrefix(line, "mid") {
 			left := strings.SplitN(line, "|", 2)[0]
 			widths = append(widths, runewidth.StringWidth(left))
+			if len(rowPipeWidths) == 0 {
+				rowPipeWidths = pipeDisplayWidths(line)
+			}
 		}
 	}
 	s.Len(widths, 3)
 	s.Equal(widths[0], widths[1])
 	s.Equal(widths[1], widths[2])
 	s.Equal(expectedAreaColWidth+1, widths[0]) // +1 for " " before "|"
+	s.Equal(rowPipeWidths, headerPipeWidths)
 }
 
 func (s *S) TestParseWeekBuffer() {
 	buf := `# focustime week view
 # Week index: 2025w10 (Week starting: 2025-03-03)
-# Columns: Area | Mon | Tue | Wed | Thu | Fri | Sat | Sun
+# Columns: Area | 日 | 月 | 火 | 水 | 木 | 金 | 土
 
 Deep Work | 120 |  90 |  60 |   0 |   0 |     |
 Coding    |  30 |  30 |  45 |     |   0 |     |
@@ -448,13 +468,13 @@ func (s *S) TestParseDurationToMinutes() {
 }
 
 func (s *S) TestWeekdayToDayIndex() {
-	s.Equal(0, WeekdayToDayIndex(time.Monday))
-	s.Equal(1, WeekdayToDayIndex(time.Tuesday))
-	s.Equal(2, WeekdayToDayIndex(time.Wednesday))
-	s.Equal(3, WeekdayToDayIndex(time.Thursday))
-	s.Equal(4, WeekdayToDayIndex(time.Friday))
-	s.Equal(5, WeekdayToDayIndex(time.Saturday))
-	s.Equal(6, WeekdayToDayIndex(time.Sunday))
+	s.Equal(0, WeekdayToDayIndex(time.Sunday))
+	s.Equal(1, WeekdayToDayIndex(time.Monday))
+	s.Equal(2, WeekdayToDayIndex(time.Tuesday))
+	s.Equal(3, WeekdayToDayIndex(time.Wednesday))
+	s.Equal(4, WeekdayToDayIndex(time.Thursday))
+	s.Equal(5, WeekdayToDayIndex(time.Friday))
+	s.Equal(6, WeekdayToDayIndex(time.Saturday))
 }
 
 func (s *S) TestLogTime() {
@@ -640,9 +660,9 @@ func (s *S) TestCurrentWeekReportWithWeekData() {
 	s.NoError(err)
 	s.Contains(out, "# focustime week view")
 	s.Contains(out, "# Week index:")
-	s.Contains(out, "A  |")
-	s.Contains(out, "B  |")
-	s.Contains(out, "C  |")
+	s.Contains(out, "A     |")
+	s.Contains(out, "B     |")
+	s.Contains(out, "C     |")
 	s.Contains(out, "50")
 }
 
