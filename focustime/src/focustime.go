@@ -407,8 +407,9 @@ func CurrentWeekReport(cfg StartCfg, now time.Time) (string, error) {
 	}
 	areaNames := resolveAreaNames(reg, week.Areas)
 	weekStart := weekStartFor(woy.Year, woy.Week)
+	nowLocal := now.In(time.Local)
 	return RenderWeekBuffer(*week, areaNames, woy.Year, woy.WeekIndex(),
-		weekStart), nil
+		weekStart, nowLocal), nil
 }
 
 // TodayReport returns today's logged values by area for the current week.
@@ -568,7 +569,7 @@ func FindOrCreateWeek(yf *YearFile, weekIndex int, defaultAreas []int) (*WeekVal
 
 // RenderWeekBuffer produces the week view text format per spec §4.1.
 func RenderWeekBuffer(week WeekValues, areaNames []string, year, weekIndex int,
-	weekStart time.Time) string {
+	weekStart time.Time, nowLocal time.Time) string {
 	areaIDs := make([]string, len(week.Areas))
 	for i, id := range week.Areas {
 		areaIDs[i] = fmt.Sprint(id)
@@ -600,9 +601,14 @@ func RenderWeekBuffer(week WeekValues, areaNames []string, year, weekIndex int,
 	}
 	b.WriteString(padRightDisplayWidth("Area", headerAreaColWidth))
 	b.WriteString(" |")
+	todayIdx, hasTodayMarker := headerTodayMarkerDayIndex(year, weekIndex, nowLocal)
 	for i, day := range weekdayLabelsJP {
+		label := day
+		if hasTodayMarker && i == todayIdx {
+			label = "🟢" + day
+		}
 		b.WriteString(" ")
-		b.WriteString(padLeftDisplayWidth(day, numWidth))
+		b.WriteString(padLeftDisplayWidth(label, numWidth))
 		if i < len(weekdayLabelsJP)-1 {
 			b.WriteString(" |")
 		}
@@ -627,6 +633,17 @@ func RenderWeekBuffer(week WeekValues, areaNames []string, year, weekIndex int,
 		b.WriteString(rowStr + "\n")
 	}
 	return b.String()
+}
+
+func headerTodayMarkerDayIndex(year int, weekIndex int, nowLocal time.Time) (int, bool) {
+	if nowLocal.IsZero() {
+		return 0, false
+	}
+	nowYear, nowWeek := nowLocal.ISOWeek()
+	if nowYear != year || nowWeek != weekIndex+1 {
+		return 0, false
+	}
+	return WeekdayToDayIndex(nowLocal.Weekday()), true
 }
 
 // padRightDisplayWidth pads s to at least width display cells with spaces.
@@ -858,8 +875,10 @@ func WeekEdit(cfg StartCfg, woy WoY) error {
 	}
 	// 7. Compute week start (Monday of that ISO week)
 	weekStart := weekStartFor(woy.Year, woy.Week)
+	nowLocal := time.Now().In(time.Local)
 	// 8. Render buffer
-	buf := RenderWeekBuffer(*week, areaNames, woy.Year, woy.WeekIndex(), weekStart)
+	buf := RenderWeekBuffer(*week, areaNames, woy.Year, woy.WeekIndex(), weekStart,
+		nowLocal)
 	// 9. Create temp file, write buf
 	pattern := fmt.Sprintf("focustime-%dw%d_*", woy.Year, woy.Week)
 	tmp, err := os.CreateTemp("", pattern)

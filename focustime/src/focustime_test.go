@@ -254,7 +254,7 @@ func (s *S) TestRenderWeekBuffer() {
 	}
 	areaNames := []string{"Deep Work", "Coding", "Exercise"}
 	weekStart := time.Date(2025, 3, 3, 0, 0, 0, 0, time.UTC)
-	got := RenderWeekBuffer(week, areaNames, 2025, 9, weekStart)
+	got := RenderWeekBuffer(week, areaNames, 2025, 9, weekStart, time.Time{})
 	s.Contains(got, "# focustime week view")
 	s.Contains(got, "# Week index: 2025w10 (Week starting: 2025-03-03)")
 	s.Contains(got, "# Area")
@@ -263,6 +263,42 @@ func (s *S) TestRenderWeekBuffer() {
 	s.Contains(got, "120")
 	s.Contains(got, "90")
 	s.Contains(got, "Exercise")
+}
+
+func (s *S) TestRenderWeekBufferMarksTodayColumnForMatchingWeek() {
+	week := WeekValues{
+		Areas: []int{0},
+		Values: [][]*int{
+			make([]*int, 7),
+		},
+	}
+	areaNames := []string{"Deep Work"}
+	// 2026-03-25 is Wednesday in JST; ISO week 13 of 2026.
+	jst := time.FixedZone("JST", 9*60*60)
+	nowLocal := time.Date(2026, 3, 25, 12, 0, 0, 0, jst)
+	year, weekNum := nowLocal.ISOWeek()
+	weekStart := weekStartFor(year, weekNum)
+	got := RenderWeekBuffer(week, areaNames, year, weekNum-1, weekStart, nowLocal)
+
+	s.Contains(got, "🟢水")
+	s.Equal(1, strings.Count(got, "🟢"))
+	// Marker replaces one left-padding space without shifting separators.
+	s.Contains(got, "|   日 |   月 |   火 | 🟢水 |   木 |   金 |   土")
+}
+
+func (s *S) TestRenderWeekBufferNoTodayMarkerForNonCurrentWeek() {
+	week := WeekValues{
+		Areas: []int{0},
+		Values: [][]*int{
+			make([]*int, 7),
+		},
+	}
+	areaNames := []string{"Deep Work"}
+	nowLocal := time.Date(2026, 3, 25, 12, 0, 0, 0, time.FixedZone("JST", 9*60*60))
+	weekStart := weekStartFor(2026, 12)
+	got := RenderWeekBuffer(week, areaNames, 2026, 11, weekStart, nowLocal)
+
+	s.NotContains(got, "🟢")
 }
 
 func (s *S) TestRenderWeekBufferFixedAreaColumnWidth() {
@@ -275,7 +311,7 @@ func (s *S) TestRenderWeekBufferFixedAreaColumnWidth() {
 	}
 	areaNames := []string{"A", "運動"}
 	weekStart := time.Date(2025, 3, 3, 0, 0, 0, 0, time.UTC)
-	got := RenderWeekBuffer(week, areaNames, 2025, 9, weekStart)
+	got := RenderWeekBuffer(week, areaNames, 2025, 9, weekStart, time.Time{})
 	expectedWidth := runewidth.StringWidth("運動") + 1
 
 	for _, line := range strings.Split(got, "\n") {
@@ -301,7 +337,7 @@ func (s *S) TestRenderWeekBufferAlignsUsingLongestAreaName() {
 		"mid",
 	}
 	weekStart := time.Date(2025, 3, 3, 0, 0, 0, 0, time.UTC)
-	got := RenderWeekBuffer(week, areaNames, 2025, 9, weekStart)
+	got := RenderWeekBuffer(week, areaNames, 2025, 9, weekStart, time.Time{})
 	expectedAreaColWidth := runewidth.StringWidth("かなり長いエリア名です") + 1
 
 	var widths []int
@@ -387,7 +423,7 @@ func (s *S) TestRenderParseRoundtrip() {
 	}
 	areaNames := []string{"Deep Work", "Coding", "Exercise"}
 	weekStart := time.Date(2025, 3, 3, 0, 0, 0, 0, time.UTC)
-	buf := RenderWeekBuffer(week, areaNames, 2025, 9, weekStart)
+	buf := RenderWeekBuffer(week, areaNames, 2025, 9, weekStart, time.Time{})
 	parsed, err := ParseWeekBuffer([]byte(buf), areaNames, week.Areas)
 	s.NoError(err)
 	s.Equal(week.Areas, parsed.Areas)

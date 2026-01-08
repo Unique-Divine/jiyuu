@@ -95,7 +95,13 @@ func TestCLIWeekActionWritesReport(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, stdout.String(), "# focustime week view")
 	require.Contains(t, stdout.String(), "# Area")
-	require.Contains(t, stdout.String(), "|   日 |   月 |   火 |   水 |   木 |   金 |   土")
+	require.Contains(t, stdout.String(), "日")
+	require.Contains(t, stdout.String(), "月")
+	require.Contains(t, stdout.String(), "火")
+	require.Contains(t, stdout.String(), "水")
+	require.Contains(t, stdout.String(), "木")
+	require.Contains(t, stdout.String(), "金")
+	require.Contains(t, stdout.String(), "土")
 	require.Contains(t, stdout.String(), "C     |")
 }
 
