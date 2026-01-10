@@ -20,6 +20,39 @@ type S struct {
 	suite.Suite
 }
 
+func (s *S) TestResolveStartCfgNoFileUsesChicago() {
+	newHome := s.T().TempDir()
+	s.T().Setenv("XDG_CONFIG_HOME", filepath.Join(newHome, "cfg"))
+	cfg, err := ResolveStartCfg(StartCfg{HomeDir: newHome})
+	s.NoError(err)
+	s.Equal("America/Chicago", cfg.Timezone)
+	s.NotNil(cfg.Loc)
+}
+
+func (s *S) TestResolveStartCfgInvalidConfigJSON() {
+	newHome := s.T().TempDir()
+	xdg := filepath.Join(newHome, "cfg")
+	s.T().Setenv("XDG_CONFIG_HOME", xdg)
+	s.NoError(os.MkdirAll(filepath.Join(xdg, "focustime"), 0o755))
+	path := filepath.Join(xdg, "focustime", "config.json")
+	s.NoError(os.WriteFile(path, []byte("{not json"), 0o644))
+	_, err := ResolveStartCfg(StartCfg{HomeDir: newHome})
+	s.Error(err)
+	s.Contains(err.Error(), "config file")
+}
+
+func (s *S) TestResolveStartCfgTimezoneFieldSkipsFile() {
+	newHome := s.T().TempDir()
+	xdg := filepath.Join(newHome, "cfg")
+	s.T().Setenv("XDG_CONFIG_HOME", xdg)
+	s.NoError(os.MkdirAll(filepath.Join(xdg, "focustime"), 0o755))
+	path := filepath.Join(xdg, "focustime", "config.json")
+	s.NoError(os.WriteFile(path, []byte(`{"timezone":"America/New_York"}`), 0o644))
+	cfg, err := ResolveStartCfg(StartCfg{HomeDir: newHome, Timezone: "UTC"})
+	s.NoError(err)
+	s.Equal("UTC", cfg.Timezone)
+}
+
 func (s *S) TestTimeToWeek() {
 	type TC struct {
 		t    time.Time
@@ -38,7 +71,7 @@ func (s *S) TestTimeToWeek() {
 		},
 	} {
 		s.Run(fmt.Sprintf("tc %d, %#v", tcIdx, tc), func() {
-			got := TimeToWoY(tc.t)
+			got := TimeToWoY(tc.t, time.UTC)
 			s.Equal(tc.want, got)
 		})
 	}
@@ -52,8 +85,9 @@ func (s *S) TestCreateFocusTimeDir() {
 		HomeDir: newHome,
 	}
 
-	ftDir := DirFTData(cfg)
-	_, err := os.Stat(ftDir)
+	ftDir, err := DirFTData(cfg)
+	s.NoError(err)
+	_, err = os.Stat(ftDir)
 	s.True(os.IsNotExist(err), "expect focustime data dir to not exist yet")
 
 	err = CreateFocusTimeDir(cfg)
@@ -69,8 +103,10 @@ func (s *S) TestLoadAreasFile() {
 	s.T().Setenv("XDG_DATA_HOME", newHome)
 	cfg := StartCfg{HomeDir: newHome}
 
-	areasPath := filepath.Join(DirFTData(cfg), "areas.json")
-	_, err := os.Stat(areasPath)
+	dir, err := DirFTData(cfg)
+	s.NoError(err)
+	areasPath := filepath.Join(dir, "areas.json")
+	_, err = os.Stat(areasPath)
 	s.True(os.IsNotExist(err), "areas.json should not exist yet")
 
 	got, err := LoadAreasFile(cfg)
@@ -97,7 +133,9 @@ func (s *S) TestSaveAreasFile() {
 	err := SaveAreasFile(cfg, reg)
 	s.NoError(err)
 
-	areasPath := filepath.Join(DirFTData(cfg), "areas.json")
+	dir, err := DirFTData(cfg)
+	s.NoError(err)
+	areasPath := filepath.Join(dir, "areas.json")
 	info, err := os.Stat(areasPath)
 	s.NoError(err)
 	s.False(info.IsDir(), "areas.json should be a file")
@@ -530,7 +568,7 @@ func (s *S) TestLogTime() {
 	s.Equal(45, logged)
 
 	now := time.Now().UTC()
-	woy := TimeToWoY(now)
+	woy := TimeToWoY(now, time.UTC)
 	yf, err := LoadYearFile(cfg, woy.Year)
 	s.NoError(err)
 	week := yf.Weeks[woy.WeekIndex()]
@@ -567,7 +605,7 @@ func (s *S) TestTodayReportNoWeekData() {
 	now := time.Date(2026, 3, 3, 12, 0, 0, 0, time.UTC)
 	out, err := TodayReport(cfg, now)
 	s.NoError(err)
-	s.Contains(out, "Today (2026-03-03, Tuesday): no data yet.")
+	s.Contains(out, "Today (2026-03-03, Tuesday, 12:00:00 UTC): no data yet.")
 }
 
 func (s *S) TestTodayReportWeekExistsButNoTodayData() {
@@ -583,7 +621,7 @@ func (s *S) TestTodayReportWeekExistsButNoTodayData() {
 	s.NoError(err)
 
 	now := time.Date(2026, 3, 3, 12, 0, 0, 0, time.UTC) // Tuesday
-	woy := TimeToWoY(now)
+	woy := TimeToWoY(now, time.UTC)
 	yf := emptyYearFile(woy.Year)
 	week := &WeekValues{
 		Areas: []int{0, 1, 2},
@@ -601,7 +639,7 @@ func (s *S) TestTodayReportWeekExistsButNoTodayData() {
 
 	out, err := TodayReport(cfg, now)
 	s.NoError(err)
-	s.Contains(out, "Today (2026-03-03, Tuesday)")
+	s.Contains(out, "Today (2026-03-03, Tuesday, 12:00:00 UTC)")
 	s.Contains(out, "No data logged for today.")
 }
 
@@ -618,7 +656,7 @@ func (s *S) TestTodayReportWithValuesAndTotal() {
 	s.NoError(err)
 
 	now := time.Date(2026, 3, 3, 12, 0, 0, 0, time.UTC) // Tuesday
-	woy := TimeToWoY(now)
+	woy := TimeToWoY(now, time.UTC)
 	yf := emptyYearFile(woy.Year)
 	week := &WeekValues{
 		Areas: []int{0, 1, 2},
@@ -638,7 +676,7 @@ func (s *S) TestTodayReportWithValuesAndTotal() {
 
 	out, err := TodayReport(cfg, now)
 	s.NoError(err)
-	s.Contains(out, "Today (2026-03-03, Tuesday)")
+	s.Contains(out, "Today (2026-03-03, Tuesday, 12:00:00 UTC)")
 	s.Contains(out, "0 → A: 30m")
 	s.Contains(out, "2 → C: 45m")
 	s.Contains(out, "Total: 75m")
@@ -675,7 +713,7 @@ func (s *S) TestCurrentWeekReportWithWeekData() {
 	s.NoError(err)
 
 	now := time.Date(2026, 3, 3, 12, 0, 0, 0, time.UTC)
-	woy := TimeToWoY(now)
+	woy := TimeToWoY(now, time.UTC)
 	yf := emptyYearFile(woy.Year)
 	week := &WeekValues{
 		Areas: []int{0, 1, 2},
