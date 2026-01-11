@@ -1,4 +1,4 @@
-module github.com/Unique-Divine/jiyuu/aictx
+module github.com/Unique-Divine/jiyuu/ctxcat
 
 go 1.22.12
 

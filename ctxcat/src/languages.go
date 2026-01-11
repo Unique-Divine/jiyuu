@@ -1,4 +1,4 @@
-package aictx
+package ctxcat
 
 import (
 	"path/filepath"

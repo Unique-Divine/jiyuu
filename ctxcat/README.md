@@ -1,4 +1,4 @@
-# aictx
+# ctxcat
 
 File to context converter for passing files to feed LLMs. Combines multiple files into a single, well-formatted context with proper syntax highlighting.
 
@@ -6,24 +6,24 @@ File to context converter for passing files to feed LLMs. Combines multiple file
 
 ```bash
 # Process current directory
-aictx .
+ctxcat .
 
 # Process specific files
-aictx main.go src/lib.rs README.md
+ctxcat main.go src/lib.rs README.md
 
 # Use glob patterns
-aictx "src/*.go" "**/*.md"
+ctxcat "src/*.go" "**/*.md"
 
 # Limit recursion depth
-aictx --level 2 .
+ctxcat --level 2 .
 
 # Output to file
-aictx --output context.md src/
+ctxcat --output context.md src/
 ```
 
 ## Key Concepts
 
-**Recursive Processing**: By default, `aictx` walks entire directory trees. Use `--level` to limit depth.
+**Recursive Processing**: By default, `ctxcat` walks entire directory trees. Use `--level` to limit depth.
 
 **Gitignore Respect**: Automatically finds and applies `.gitignore` rules from your repo root. No need to manually exclude `node_modules`, `target/`, etc.
 
@@ -35,25 +35,25 @@ aictx --output context.md src/
 
 ```bash
 # Get full project context for an LLM
-aictx . --output full-context.md
+ctxcat . --output full-context.md
 
 # Just the source code, skip deep nesting
-aictx src/ --level 3
+ctxcat src/ --level 3
 
 # Specific file patterns across the project
-aictx "*.go" "*.md" "Dockerfile*"
+ctxcat "*.go" "*.md" "Dockerfile*"
 
 # Multiple directories with different purposes
-aictx src/ docs/ scripts/ --output project-overview.md
+ctxcat src/ docs/ scripts/ --output project-overview.md
 ```
 
 ## Installation
 
 ```bash
-go install github.com/Unique-Divine/jiyuu/aictx@latest
+go install github.com/Unique-Divine/jiyuu/ctxcat@latest
 
 # Or build from source
-cd jiyuu/aictx && just install
+cd jiyuu/ctxcat && just install
 ```
 
 ## Flags
@@ -63,11 +63,11 @@ cd jiyuu/aictx && just install
 
 ```bash
 # Save context to a file for later use
-aictx . -o project-context.md
+ctxcat . -o project-context.md
 
 # Only traverse 2 levels deep in directories
-aictx src/ --level 2
+ctxcat src/ --level 2
 
 # Combine both: shallow traversal saved to file
-aictx . --level 1 --output overview.md
+ctxcat . --level 1 --output overview.md
 ```

@@ -1,4 +1,4 @@
-package aictx
+package ctxcat
 
 import (
 	"bytes"
@@ -11,13 +11,13 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/Unique-Divine/jiyuu/aictx/src/gitignore"
+	"github.com/Unique-Divine/jiyuu/ctxcat/src/gitignore"
 	cli "github.com/urfave/cli/v3"
 )
 
 func NewAppCmd() *cli.Command {
 	return &cli.Command{
-		Name:      "aictx",
+		Name:      "ctxcat",
 		Usage:     "Combine files into a single LLM-friendly output",
 		ArgsUsage: "<path> [path2 ...]",
 		Flags: []cli.Flag{
@@ -57,7 +57,7 @@ func actionFunc(goCtx context.Context, c *cli.Command) error {
 	rawCmdArgs := c.Args().Slice()
 	if len(rawCmdArgs) == 0 {
 		_, err := c.ErrWriter.Write(
-			[]byte("aictx requires at least one path (file, directory, or glob)\n\n"),
+			[]byte("ctxcat requires at least one path (file, directory, or glob)\n\n"),
 		)
 		if err != nil {
 			return err
