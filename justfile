@@ -16,3 +16,18 @@ install:
 # Format with prettier
 fmt:
   bun run prettier --write .
+
+# Sync repo ai-skills into ~/.cursor/skills. Flags: --force, --dry-run
+skills-pull *args:
+  #!/usr/bin/env bash
+  bash scripts/skills-pull.sh {{args}}
+
+# Sync ~/.cursor/skills into repo ai-skills. Flags: --force, --dry-run
+skills-push *args:
+  #!/usr/bin/env bash
+  bash scripts/skills-push.sh {{args}}
+
+# Show the diff between repo ai-skills and ~/.cursor/skills
+skills-diff *args:
+  #!/usr/bin/env bash
+  bash scripts/skills-diff.sh {{args}}
