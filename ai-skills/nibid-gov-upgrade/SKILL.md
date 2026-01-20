@@ -5,23 +5,25 @@ description: Queries Nibiru governance proposals (including software-upgrade pro
 
 # Nibid Gov + Upgrade (Nibiru mainnet)
 
-If the user asks for the current status of a proposal, default to a fuller
-proposal-status report rather than only returning raw `proposal` or `tally`
-JSON.
+## Workflow: How to Use this Skill
 
-That report should usually include:
+Start with the canonical query bundle in
+[`Quick start (mainnet)`](#quick-start-mainnet). That is the default first step
+when the user asks about a proposal and you need the core governance state.
 
-- proposal metadata from `nibid q gov proposal "$ID"` such as status, title,
-  summary, proposer, submit time, and voting window
-- the current tally from `nibid q gov tally "$ID"`
-- governance thresholds from `nibid q gov params`
-- bonded voting power from `nibid q staking pool`
-- derived quorum / threshold / veto percentages, using the quorum math in
-  [`reference.md#quorum-threshold-and-veto`](./reference.md#quorum-threshold-and-veto)
+After that, choose the recipe that matches the user's question:
 
-If the proposal is a software upgrade, also include the upgrade plan fields that
-matter most, especially `plan.name`, `plan.height`, and parsed binaries from
-`plan.info` when available.
+1. For a live proposal's voting properties, use
+   [`Recipe: Show voting and quorum info for a live proposal`](#recipe-show-voting-and-quorum-info-for-a-live-proposal).
+   This is the fast path when the user wants a voting and quorum summary instead
+   of only raw `proposal` or `tally` JSON.
+2. For governance thresholds in the same output, use
+   [`reference.md#explorer-style-quorum-report`](./reference.md#explorer-style-quorum-report).
+3. If the proposal is a software upgrade, use
+   [`Software-upgrade proposal: extract plan (name/height/info/binaries)`](#software-upgrade-proposal-extract-plan-nameheightinfobinaries)
+   to inspect `plan.name`, `plan.height`, and parsed binaries from `plan.info`.
+4. If the user wants validator-only participation rather than all voters, use
+   [`Validator votes (filter votes to validator set)`](#validator-votes-filter-votes-to-validator-set).
 
 ## Additional resources
 
@@ -112,7 +114,7 @@ nibid q gov proposal "$ID" | jq -r '
 '
 ```
 
-## Example: Show voting and quorum info for a live proposal
+## Recipe: Show voting and quorum info for a live proposal
 
 Quick command:  
 
