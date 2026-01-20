@@ -96,7 +96,7 @@ nibid q gov proposal "$ID" | jq -r '
 '
 ```
 
-### Compute quorum / threshold / veto like explorers
+### Quorum, threshold, and veto
 
 Conceptually:
 
@@ -104,27 +104,74 @@ Conceptually:
 - **Threshold**: \(yes / (yes+no+veto)\) (abstain excluded)
 - **Veto%**: \(veto / (yes+no+veto)\) (abstain excluded)
 
-Copy/paste:
+Inputs:
+
+- `nibid q gov tally "$ID"` gives the current vote weights:
+  `yes_count`, `no_count`, `abstain_count`, `no_with_veto_count`
+- `nibid q gov params` gives the governance thresholds:
+  `quorum`, `threshold`, `veto_threshold`
+- `nibid q staking pool` gives `bonded_tokens`, the quorum denominator
+
+### Explorer-style quorum report
 
 ```bash
-jq -s '
-  .[0] as $t
-  | .[1] as $p
-  | ($p.bonded_tokens|tonumber) as $bonded
-  | ($t.yes_count|tonumber) as $yes
-  | ($t.no_count|tonumber) as $no
-  | ($t.abstain_count|tonumber) as $abstain
-  | ($t.no_with_veto_count|tonumber) as $veto
+TALLY="$(nibid q gov tally "$ID")"
+PARAMS="$(nibid q gov params)"
+POOL="$(nibid q staking pool)"
+
+jq -n \
+  --argjson tally "$TALLY" \
+  --argjson params "$PARAMS" \
+  --argjson pool "$POOL" '
+  ($tally.yes_count|tonumber) as $yes
+  | ($tally.no_count|tonumber) as $no
+  | ($tally.abstain_count|tonumber) as $abstain
+  | ($tally.no_with_veto_count|tonumber) as $veto
+  | ($pool.bonded_tokens|tonumber) as $bonded
   | ($yes+$no+$abstain+$veto) as $total
   | {
-      bonded_tokens: $bonded,
+      tally: $tally,
+      bonded_tokens: $pool.bonded_tokens,
+      quorum_required_pct: (($params.tally_params.quorum|tonumber) * 100),
+      threshold_required_pct: (($params.tally_params.threshold|tonumber) * 100),
+      veto_threshold_pct: (($params.tally_params.veto_threshold|tonumber) * 100),
       total_voted_tokens: $total,
       quorum_pct: (if $bonded==0 then null else ($total / $bonded * 100) end),
-      yes_pct_of_non_abstain: (if ($yes+$no+$veto)==0 then null else ($yes / ($yes+$no+$veto) * 100) end),
-      veto_pct_of_non_abstain: (if ($yes+$no+$veto)==0 then null else ($veto / ($yes+$no+$veto) * 100) end)
-    }
-' <(nibid q gov tally "$ID") <(nibid q staking pool)
+      yes_pct_of_non_abstain: (
+        if ($yes+$no+$veto)==0 then null
+        else ($yes / ($yes+$no+$veto) * 100)
+        end
+      ),
+      veto_pct_of_non_abstain: (
+        if ($yes+$no+$veto)==0 then null
+        else ($veto / ($yes+$no+$veto) * 100)
+        end
+      )
+    }'
 ```
+
+### Field meanings
+
+- `tally`: raw output copied from `nibid q gov tally "$ID"`
+- `bonded_tokens`: raw output copied from `nibid q staking pool`
+- `quorum_required_pct`: derived from `nibid q gov params` by converting
+  `.tally_params.quorum` from a decimal fraction to percent
+- `threshold_required_pct`: derived from `nibid q gov params` by converting
+  `.tally_params.threshold` from a decimal fraction to percent
+- `veto_threshold_pct`: derived from `nibid q gov params` by converting
+  `.tally_params.veto_threshold` from a decimal fraction to percent
+- `total_voted_tokens`: `yes + no + abstain + veto`
+- `quorum_pct`: `total_voted_tokens / bonded_tokens * 100`
+- `yes_pct_of_non_abstain`: `yes / (yes + no + veto) * 100`
+- `veto_pct_of_non_abstain`: `veto / (yes + no + veto) * 100`
+
+Notes:
+
+- `abstain` counts toward quorum participation, so it is included in
+  `total_voted_tokens`.
+- `abstain` is excluded from `yes_pct_of_non_abstain` and
+  `veto_pct_of_non_abstain` to match governance threshold semantics and typical
+  explorer displays.
 
 ### Pagination patterns (votes, deposits, validators)
 
