@@ -1,13 +1,34 @@
 ---
 name: nibid-gov-upgrade
-description: Queries Nibiru governance proposals (including software-upgrade proposals) using the `nibid` CLI, maps explorer UI fields to on-chain queries, computes quorum/threshold/veto metrics, and correlates validator votes using staking queries. Use when the user mentions `nibid q gov`, governance proposals, software upgrades, votes, deposits, tally, quorum/threshold, validators, or `nibid tx gov`.
+description: Queries Nibiru governance proposals (including software-upgrade proposals) using the `nibid` CLI, maps explorer UI fields to on-chain queries, computes quorum/threshold/veto metrics, and correlates validator votes using staking queries. Use when the user mentions `nibid q gov`, governance proposals, software upgrades, votes, deposits, tally, quorum/threshold, validators, proposal status, or `nibid tx gov`.
 ---
 
 # Nibid Gov + Upgrade (Nibiru mainnet)
 
+If the user asks for the current status of a proposal, default to a fuller
+proposal-status report rather than only returning raw `proposal` or `tally`
+JSON.
+
+That report should usually include:
+
+- proposal metadata from `nibid q gov proposal "$ID"` such as status, title,
+  summary, proposer, submit time, and voting window
+- the current tally from `nibid q gov tally "$ID"`
+- governance thresholds from `nibid q gov params`
+- bonded voting power from `nibid q staking pool`
+- derived quorum / threshold / veto percentages, using the quorum math in
+  [`reference.md#quorum-threshold-and-veto`](./reference.md#quorum-threshold-and-veto)
+
+If the proposal is a software upgrade, also include the upgrade plan fields that
+matter most, especially `plan.name`, `plan.height`, and parsed binaries from
+`plan.info` when available.
+
 ## Additional resources
 
-- Full reference and longer recipes: [`reference.md`](./reference.md)
+- Quorum, threshold, and veto:
+  [`reference.md#quorum-threshold-and-veto`](./reference.md#quorum-threshold-and-veto)
+- Explorer-style quorum report:
+  [`reference.md#explorer-style-quorum-report`](./reference.md#explorer-style-quorum-report)
 
 ## Quick start (mainnet)
 
@@ -91,9 +112,9 @@ nibid q gov proposal "$ID" | jq -r '
 '
 ```
 
-## Compute quorum / threshold like the explorer
+## Example: Show voting and quorum info for a live proposal
 
-Given `tally` counts (in `unibi`) and `bonded_tokens`:
+Quick command:  
 
 ```bash
 jq -s '
@@ -109,11 +130,29 @@ jq -s '
       bonded_tokens: $bonded,
       total_voted_tokens: $total,
       quorum_pct: (if $bonded==0 then null else ($total / $bonded * 100) end),
-      yes_pct_of_non_abstain: (if ($yes+$no+$veto)==0 then null else ($yes / ($yes+$no+$veto) * 100) end),
-      veto_pct_of_non_abstain: (if ($yes+$no+$veto)==0 then null else ($veto / ($yes+$no+$veto) * 100) end)
+      yes_pct_of_non_abstain: (
+        if ($yes+$no+$veto)==0 then null
+        else ($yes / ($yes+$no+$veto) * 100)
+        end
+      ),
+      veto_pct_of_non_abstain: (
+        if ($yes+$no+$veto)==0 then null
+        else ($veto / ($yes+$no+$veto) * 100)
+        end
+      )
     }
 ' <(nibid q gov tally "$ID") <(nibid q staking pool)
 ```
+
+Raw sources:
+
+- `nibid q gov tally "$ID"` for current vote weights
+- `nibid q gov params` for quorum / threshold / veto parameters
+- `nibid q staking pool` for `bonded_tokens`
+
+For a fuller report with governance thresholds and field notes, see
+[`reference.md#explorer-style-quorum-report`](./reference.md#explorer-style-quorum-report)
+and [`reference.md#field-meanings`](./reference.md#field-meanings).
 
 ## Validator votes (filter votes to validator set)
 
@@ -184,4 +223,3 @@ nibid tx gov submit-legacy-proposal software-upgrade v2.11.0 \
 
 - `nibid q upgrade plan` only works once an upgrade is scheduled in `x/upgrade`.
   Before then, it can return "no upgrade scheduled".
-
