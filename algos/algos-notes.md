@@ -8,6 +8,14 @@ software like Anki.
 
 - [Contents](#contents)
 - [Ex 0: Fill Image Pixels](#ex-0-fill-image-pixels)
+- [Contents](#contents)
+  - [Ex 0: Fill Image Pixels](#ex-0-fill-image-pixels)
+- [ANKI LINE ------------------------](#anki-line-------------------------)
+- [E1: Enqueue and Dequeue (Basic Ops in Go)](#e1-enqueue-and-dequeue-basic-ops-in-go)
+- [E2: O(1) vs O(n) Trap (Bad Queue Implementation in Go)](#e2-o1-vs-on-trap-bad-queue-implementation-in-go)
+- [005: Breadth First Search (BFS) Intro](#005-breadth-first-search-bfs-intro)
+  - [Full BFS Implementation in Go](#full-bfs-implementation-in-go)
+  - [Go Equivalents of Python Deque Ops (for Anki-style recall)](#go-equivalents-of-python-deque-ops-for-anki-style-recall)
 
 ### Ex 0: Fill Image Pixels
 
@@ -15,7 +23,7 @@ Source Info:
 - This is [Leetcode 733: Flood Fill](https://leetcode.com/problems/flood-fill/description/)
 - Full Impls: Reference code for questions. `000_dfs_test.go`
 
-問題文:
+Practice Problem:
 
 You're given an image represented as a 2D grid of integers. Each cell contains a
 color value. You're also given a starting pixel `(sr, sc)` and a `newColor`. The
@@ -329,5 +337,287 @@ func Sol0_RecursiveDFS(img [][]int, newColor int, startPixel Point) [][]int {
 }
 ```
 
-ANKI LINE ------------------------------------------------------------
+## E1: Enqueue and Dequeue (Basic Ops in Go)
+
+Practice Problem: 
+
+Implement a simple queue `struct` in Go using a slice. Your queue must support
+`Enqueue` and `Dequeue` methods. 
+
+```go
+// Fill in the methods.
+type Queue[T any] struct {
+    data []T
+}
+
+func (q *Queue[T]) Enqueue(x T) {
+    // TODO
+}
+
+func (q *Queue[T]) Dequeue() (elem T, ok bool) {
+    // TODO
+}
+```
+
+A:
+
+```go
+type Queue[T any] struct {
+    data []T
+}
+
+// Enqueue is the "[en]ter [queue]" operation (mnemonic).
+// Amortized O(1): append to end of slice.
+func (q *Queue[T]) Enqueue(x T) {
+    q.data = append(q.data, x)
+}
+
+func (q *Queue[T]) Dequeue() (elem T, ok bool) {
+    var zero T
+    if len(q.data) == 0 {
+        return zero, false
+    }
+
+    // Oldest element is at the front.
+    x := q.data[0]
+     
+    q.data[0] = zero // Optional GC hygiene if T is a reference type:
+
+    // Move the slice window forward. O(1).
+    q.data = q.data[1:]
+
+    return x, true
+}
+```
+
+Q: What is the amortized time complexity of `Enqueue` in this implementation?
+
+A:
+Amortized O(1), because `append` is amortized O(1) for slices.
+
+Q: What is the time complexity of `Dequeue` in this implementation (ignoring GC details)?
+
+A:
+O(1), because re-slicing (`q.data = q.data[1:]`) only adjusts the slice header.
+
+Q: In Python, `list.pop(0)` is O(n) because elements are shifted. 
+What is the complexity of `q = q[1:]` if `q` is some slice, and why?
+
+A:
+A Go slice is a small header (`pointer`, `len`, `cap`) pointing at an underlying array. Re-slicing changes the header's pointer and length; it does not move elements in memory.
+
+Q: What subtle issue can happen if we only do `q.data = q.data[1:]` when `T` is a reference type (e.g., `*MyStruct`, `[]byte`)?
+
+A: 
+The underlying array still holds references to old elements, so they may not
+be garbage collected. The slice no longer "sees" them, but the GC does until the
+array itself is released.
+
+Q: How can you make dequeued elements eligible for GC sooner?
+
+A:
+Before re-slicing, overwrite the element with the zero value:
+
+```go
+var q []T
+var defVal T
+x := q[0]        // if len(q) > 0
+q = q[1:]
+q[0] = defVal
+```
+
+When you slice a queue forward with:
+
+```go
+q = q[1:]
+```
+
+the **backing array** is still on the heap. Its slot at index 0 still contains
+whatever pointer value was stored there. Even though the slice length changed,
+the GC still sees the backing array and all pointer-bearing elements inside it.
+If `T` is a reference type, that stale pointer keeps the old object alive.
+
+If instead you overwrite the slot:
+
+```go
+var zero T
+q[0] = zero
+q = q[1:]
+```
+
+you remove that pointer from memory. For reference types, the zero value is `nil`
+(or a struct whose pointer fields are nil), so the GC stops seeing the old object
+through this element. If no other references point to it, it becomes collectible.
+
+Examples:
+
+**If `T` is a pointer (`*Node`):**
+`zero` is `nil`. Assigning it erases the pointer to the original `Node`.
+
+**If `T` is a slice (`[]byte`):**
+`zero` is a nil slice header. Assigning it removes the link to the old slice’s backing array.
+
+**If `T` is a map:**
+`zero` is a nil map. Removing it drops the reference to the map’s internal hash table.
+
+**If `T` has no pointer fields (e.g., `int`, `float64`, or a fully value-only struct):**
+Zeroing has no GC effect. These don’t reference other heap objects.
+
+In short: the GC follows *actual pointers in memory*. Zeroing replaces a
+pointer-bearing element with `nil`, removing that link. The slice re-slicing
+alone doesn’t clear those pointers; writing the zero value does.
+
+
+## ANKI LINE ------------------------
+
+Q: In Go, when do you need to worry about the cost of `copy` with slices?
+
+A:
+Whenever you shift or duplicate large portions of the slice on each operation; repeated `copy` calls can turn what "should" be O(n) overall into O(n²).
+
+Q: What standard library type in Go can also be used as a double-ended queue?
+
+A:
+`container/list.List`, a doubly linked list that gives O(1) `PushFront`, `PushBack`, and removal given a node pointer.
+
+Q: Why is a slice-based queue preferred over `container/list` in many Go codebases?
+
+A:
+Slices are simpler, cache-friendly, and idiomatic. `container/list` is useful in niche cases (frequent middle removals, LRU lists), but slices are usually enough for queues.
+
+---
+
+## 005: Breadth First Search (BFS) Intro
+
+Practice Problem:
+
+You have an unweighted graph where each node is a string. The graph is stored as an adjacency list.
+
+Q: If the nodes have type `string`, what is the standard Go type to represent the graph?
+
+A:
+```go
+type Graph map[string][]string
+```
+
+Q: How do you initialize the queue for BFS, given a starting node `start` of type `string`?
+
+A:
+```go
+q := []string{start}
+```
+
+Q: Do you need a visited set (or map) in BFS? Why?
+
+A:
+Yes. You need a visited map to avoid infinite loops in graphs with cycles and to avoid revisiting nodes unnecessarily.
+
+Q: Will `BFS(graph, start)` visit nodes that are disconnected from `start`?
+
+A:
+No. BFS from `start` only visits nodes reachable from `start` via edges in the graph.
+
+Q: How can you guarantee you've traversed the entire graph if it may be disconnected?
+
+A:
+Loop over all nodes in the graph; for each node that is not yet visited, run BFS from that node.
+
+---
+
+### Full BFS Implementation in Go
+
+Q: Implement BFS traversal on this graph type:
+
+```go
+type Graph map[string][]string
+
+// bfs returns all nodes reachable from start.
+func bfs(g Graph, start string) map[string]bool {
+    // TODO: implement
+}
+```
+
+A:
+```go
+type Graph map[string][]string
+
+// bfs returns all nodes reachable from start, including start itself.
+func bfs(g Graph, start string) map[string]bool {
+    visited := make(map[string]bool)
+    q := []string{start}
+
+    for len(q) > 0 {
+        // Dequeue
+        node := q[0]
+        q = q[1:]
+
+        if visited[node] {
+            continue
+        }
+
+        visited[node] = true
+
+        // Enqueue neighbors.
+        neighbors := g[node]
+        q = append(q, neighbors...)
+    }
+
+    return visited
+}
+```
+
+Q: In this BFS, where is the queue's "enqueue" operation?
+
+A:
+`q = append(q, neighbors...)` at the end of the loop.
+
+Q: In this BFS, where is the queue's "dequeue" operation?
+
+A:
+`node := q[0]; q = q[1:]` at the start of the loop.
+
+Q: Why do we check `if visited[node] { continue }` after popping from the queue,
+instead of before pushing neighbors?
+
+A:
+This pattern lets us freely enqueue neighbors multiple times without worrying
+about duplicates at enqueue time. We centralize the "already processed?" check at
+the point of dequeue. It's a common and simple pattern.
+
+Q: What is the time complexity of BFS on a graph with `V` vertices and `E` edges
+using the slice-based queue?
+
+A:
+O(V + E). Each vertex is enqueued/dequeued at most once, and each edge is
+examined at most twice (for undirected graphs).
+
+---
+
+### Go Equivalents of Python Deque Ops (for Anki-style recall)
+
+Use these as small flashcards.
+
+Q: Python: `deque.append(x)` adds an item to the right. What is the closest Go idiom for queue enqueue?
+
+A:
+`q = append(q, x)` where `q` is a slice.
+
+Q: Python: `deque.extend(iterable)` adds multiple items. What is the Go idiom?
+
+A:
+`q = append(q, items...)` where `items` is a slice.
+
+Q: Python: `deque.popleft()` returns and removes the oldest item. What is the Go idiom?
+
+A:
+
+```go
+x := q[0]
+q = q[1:]
+```
+
+(or the variant that zeroes `q[0]` first for GC safety).
+
+
+
 

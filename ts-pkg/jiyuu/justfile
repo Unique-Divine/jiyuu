@@ -1,0 +1,34 @@
+# Use this justfile by
+# (1) installing with "cargo install just"
+# (2) running the "just" command.
+
+# Displays available recipes by running `just -l`.
+setup:
+  #!/usr/bin/env bash
+  just -l
+
+# Install all dependencies
+install:
+  bun i --no-cache
+
+# Format with prettier
+fmt:
+  bun run prettier --write .
+
+# Check npm pacakge compatibility with linter
+lint:
+  #!/usr/bin/env bash
+  npx publint # https://publint.dev/docs/
+
+build:
+  #!/usr/bin/env bash
+  set -x
+  echo "Build complete. (No op)"
+
+# Publish the package on npm based on "dist" and "package.json"
+publish: 
+  just lint
+  just build
+  just fmt
+  npm publish --access public
+
