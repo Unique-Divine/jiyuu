@@ -42,32 +42,36 @@ Output **one subject line**, plus an optional body when it helps explain "why".
 
 Subject format:
 
-`type(scope): imperative summary`
+`type(scope): Imperative summary`
 
 - **type**: prefer one of `feat`, `fix`, `docs`, `refactor`, `test`, `chore`, `build`, `ci`
-- **scope**: optional, short (e.g. `sai`, `indexer`, `scripts`, `docs`)
-- **imperative**: "add", "fix", "remove", "refactor" (not past tense)
-- **length**: keep subject <= 72 chars; no trailing period
-- **breaking changes**: add `!` after type/scope when clearly breaking (`feat!: …`, `feat(api)!: …`)
+- **scope**: Optional, short (e.g. `sai`, `indexer`, `scripts`, `docs`)
+- **imperative** (subject): "Add", "Fix", "Remove", "Refactor" (not past tense)
+- **length**: Keep subject <= 80 chars. No trailing period
+- **breaking changes**: Add `!` after type/scope when clearly breaking (`feat!: …`, `feat(api)!: …`)
 
 Body (optional):
 
 - Blank line after subject
 - 1–3 bullets focusing on **why** and any non-obvious behavior changes
+- Be clear, cogent, concise.
 
 ### Examples
 
+- Break "conventional commit" pattern slightly to use this preferred format,
+where the summary is capitalized.
+
 ```
-feat(sai): add vault OI query helpers
+feat(sai): Add vault OI query helpers
 ```
 
 ```
-fix(indexer): query staking data via staking container
+fix(indexer): Query staking data via staking container
 
 - Avoid deprecated root-level fields
 - Clarify amount units (unibi) in output
 ```
 
 ```
-chore(scripts): align tx query output formatting
+chore(scripts): Align tx query output format
 ```
