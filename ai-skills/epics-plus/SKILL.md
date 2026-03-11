@@ -16,7 +16,7 @@ Navigate, interpret, and manage Epics+ docs in the boku repository. Use this ski
    ```
 3. **Verify/Scan**: To see all epics with frontmatter or validate them:
    ```bash
-   cd /home/realu/ki/boku/epics && just epics-plus scan --only-with-frontmatter --strict
+   cd /home/realu/ki/boku/epics && just epics-plus scan --fm-only --strict
    ```
 
 ## Interpreting Epics+ Frontmatter (Reader View)
@@ -53,7 +53,7 @@ Run from `/home/realu/ki/boku/epics`:
   - `--dry-run`: Print to stdout instead.
   - `--all-statuses`: Include inactive/done/archived epics.
 - `just epics-plus scan`: List epics.
-  - `--only-with-frontmatter`: Skip files without Epics+ YAML.
+  - `--fm-only`: Skip files without Epics+ YAML.
   - `--strict`: Exit non-zero if validation fails.
   - `--format ndjson`: Useful for batch processing.
 
