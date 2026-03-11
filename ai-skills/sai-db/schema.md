@@ -1,6 +1,7 @@
 # Sai DB Schema Reference
 
-This document provides a detailed breakdown of the tables and types in the `sai-keeper` database.
+This document provides a detailed breakdown of the tables and types in the
+`sai-keeper` database.
 
 ## 1. Common (001_common.sql)
 
@@ -80,44 +81,59 @@ This document provides a detailed breakdown of the tables and types in the `sai-
   - `acc_fees_long`, `acc_fees_short`: float8
   - `oi_long`, `oi_short`, `oi_max`: bigint
   - `fee_per_block`, `fee_exponent`: float8
-  - `acc_last_updated_block`, `last_updated_block`, `last_updated_tx_index`, `last_updated_event_index`: bigint
-- **perp_borrowing**: Borrowing rate metrics for a specific market and collateral.
-  - Same fields as `perp_borrowing_group` plus `perp_market_id`, `borrowing_group_id`.
+  - `acc_last_updated_block`, `last_updated_block`, `last_updated_tx_index`,
+    `last_updated_event_index`: bigint
+- **perp_borrowing**: Borrowing rate metrics for a specific market and
+  collateral.
+  - Same fields as `perp_borrowing_group` plus `perp_market_id`,
+    `borrowing_group_id`.
 - **perp_trade**: Current state of open and pending trades.
   - `trader`: text, `id`: bigint (Composite PK)
-  - `trade_type`: perp_trade_type, `perp_market_id`: bigint, `collateral_id`: bigint
+  - `trade_type`: perp_trade_type, `perp_market_id`: bigint, `collateral_id`:
+    bigint
   - `collateral_amount`, `open_collateral_amount`: bigint
-  - `is_long`, `is_open`: boolean, `leverage`, `open_price`, `close_price`: float8
+  - `is_long`, `is_open`: boolean, `leverage`, `open_price`, `close_price`:
+    float8
   - `tp`, `sl`: float8, `referral_code`: text
   - `open_block`, `close_block`: bigint, `last_updated_*`: bigint
-- **perp_trade_history**: Event log of trade changes (opens, closes, liquidations).
+- **perp_trade_history**: Event log of trade changes (opens, closes,
+  liquidations).
   - `id`: bigserial (PK)
-  - `trader`: text, `trade_id`: bigint, `trade_change_type`: perp_trade_change_type
+  - `trader`: text, `trade_id`: bigint, `trade_change_type`:
+    perp_trade_change_type
   - `realized_pnl_pct`: float8, `block`, `tx_index`, `event_index`: bigint
 - **perp_trade_state**: Derived trade metrics (real-time PnL, liq price).
   - `trader`: text, `id`: bigint (Composite PK)
-  - `pnl_pct`, `pnl_collateral`, `borrowing_fee_*`, `closing_fee_*`, `pnl_collateral_after_fees`: float8
+  - `pnl_pct`, `pnl_collateral`, `borrowing_fee_*`, `closing_fee_*`,
+    `pnl_collateral_after_fees`: float8
   - `remaining_collateral_after_fees`, `liquidation_price`: float8
 - **perp_trade_trigger_history**: History of limit/stop order executions.
   - `id`: bigserial (PK)
   - `trader`: text, `trade_id`: bigint, `executor`: text
   - `trigger_type`: perp_trade_trigger_type
   - `trade_trigger_price`, `market_price`: float8
-  - `trigger_execution_block`, `trigger_executed_block`: bigint, `is_success`: boolean, `error_msg`: text
+  - `trigger_execution_block`, `trigger_executed_block`: bigint, `is_success`:
+    boolean, `error_msg`: text
 - **perp_fee**: Fee configuration.
-  - `id`: bigint (PK), `open_fee_p`, `close_fee_p`, `trigger_order_fee_p`: float8, `min_position_size_usd`: bigint
+  - `id`: bigint (PK), `open_fee_p`, `close_fee_p`, `trigger_order_fee_p`:
+    float8, `min_position_size_usd`: bigint
 - **perp_fee_charged_history**: Detailed breakdown of fees paid per trade event.
   - `id`: bigserial (PK)
   - `trader`: text, `trade_id`: bigint, `fee_type`: perp_fee_type
-  - `total_fee_charged`, `vault_fee`, `trigger_fee`, `gov_fee`, `net_gov_fee`, `referrer_allocation`: bigint
-  - `fee_multiplier`: float8, `catalyst_address`: text, `collateral_left`, `bad_debt`: bigint
-  - `open_fee_component`, `trigger_fee_component`, `triggerer_reward`, `final_closing_fee`: bigint
+  - `total_fee_charged`, `vault_fee`, `trigger_fee`, `gov_fee`, `net_gov_fee`,
+    `referrer_allocation`: bigint
+  - `fee_multiplier`: float8, `catalyst_address`: text, `collateral_left`,
+    `bad_debt`: bigint
+  - `open_fee_component`, `trigger_fee_component`, `triggerer_reward`,
+    `final_closing_fee`: bigint
   - `block`, `tx_index`, `event_index`: bigint
 - **perp_open_interest_history**: Time-series of OI per market/group.
-  - `id`: bigint, `id_type`: perp_id_type, `collateral_id`: bigint, `block`, `tx_index`, `event_index` (Composite PK)
+  - `id`: bigint, `id_type`: perp_id_type, `collateral_id`: bigint, `block`,
+    `tx_index`, `event_index` (Composite PK)
   - `oi_long`, `oi_short`: bigint
 - **perp_pending_acc_fees_history**: Time-series of accumulated fees.
-  - `id`: bigint, `id_type`: perp_id_type, `collateral_id`: bigint, `block`, `tx_index`, `event_index` (Composite PK)
+  - `id`: bigint, `id_type`: perp_id_type, `collateral_id`: bigint, `block`,
+    `tx_index`, `event_index` (Composite PK)
   - `acc_fee_long`, `acc_fee_short`: float8
 - **perp_balance_history**: History of contract balances.
   - `block`: bigint, `denom`: text (Composite PK), `balance`: bigint
@@ -127,8 +143,12 @@ This document provides a detailed breakdown of the tables and types in the `sai-
 ### Types
 - **perp_id_type**: `market`, `group`
 - **perp_trade_type**: `trade`, `stop`, `limit`
-- **perp_trade_change_type**: `position_opened`, `limit_order_created`, `stop_order_created`, `order_triggered`, `position_closed_tp`, `position_closed_sl`, `position_liquidated`, `position_closed_user`, `order_closed_user`, `tp_updated`, `sl_updated`, `leverage_updated`
-- **perp_trade_trigger_type**: `limit_open`, `stop_open`, `tp_close`, `sl_close`, `liq_close`
+- **perp_trade_change_type**: `position_opened`, `limit_order_created`,
+  `stop_order_created`, `order_triggered`, `position_closed_tp`,
+  `position_closed_sl`, `position_liquidated`, `position_closed_user`,
+  `order_closed_user`, `tp_updated`, `sl_updated`, `leverage_updated`
+- **perp_trade_trigger_type**: `limit_open`, `stop_open`, `tp_close`,
+  `sl_close`, `liq_close`
 - **perp_fee_type**: `opening`, `closing`
 
 ---
@@ -138,8 +158,11 @@ This document provides a detailed breakdown of the tables and types in the `sai-
 ### Tables
 - **lp_vault**: Current state of SLP vaults.
   - `address`: text (PK)
-  - `shares_denom`, `shares_erc20`, `collateral_denom`, `collateral_erc20`: text
-  - `collateral_id`, `available_assets`, `tvl`, `net_profit`, `rewards`, `closed_pnl`, `liabilities`, `current_epoch_positive_open_pnl`, `current_epoch`, `epoch_start`: bigint
+  - `shares_denom`, `shares_erc20`, `collateral_denom`, `collateral_erc20`:
+    text
+  - `collateral_id`, `available_assets`, `tvl`, `net_profit`, `rewards`,
+    `closed_pnl`, `liabilities`, `current_epoch_positive_open_pnl`,
+    `current_epoch`, `epoch_start`: bigint
   - `share_price`: float8
 - **lp_vault_history**: Historical snapshot of vault metrics.
   - `vault`: text, `block`: bigint (Composite PK)
@@ -148,19 +171,24 @@ This document provides a detailed breakdown of the tables and types in the `sai-
   - `id`: bigserial (PK)
   - `action`: lp_action_type, `depositor`: text, `vault`: text
   - `amount`, `shares`: bigint, `block`, `tx_index`, `event_index`: bigint
-- **lp_vault_assets_received_history**: External asset transfers to vaults (fees, etc).
-  - `vault`: text, `block`: bigint, `tx_index`: bigint, `event_index`: bigint (Composite PK)
+- **lp_vault_assets_received_history**: External asset transfers to vaults
+  (fees, etc).
+  - `vault`: text, `block`: bigint, `tx_index`: bigint, `event_index`: bigint
+    (Composite PK)
   - `sender`: text, `denom`: text, `amount`, `assets_less_deplete`: bigint
 - **lp_vault_pnl_history**: History of PnL changes and distribution to LPs.
-  - `vault`: text, `block`: bigint, `tx_index`: bigint, `event_index`: bigint (Composite PK)
-  - `current_epoch`, `prev_positive_open_pnl`, `new_positive_open_pnl`, `current_epoch_positive_open_pnl`: bigint
+  - `vault`: text, `block`: bigint, `tx_index`: bigint, `event_index`: bigint
+    (Composite PK)
+  - `current_epoch`, `prev_positive_open_pnl`, `new_positive_open_pnl`,
+    `current_epoch_positive_open_pnl`: bigint
   - `acc_pnl_per_token_used`: float8
 - **lp_withdraw_request**: Pending user withdrawal requests.
   - `depositor`: text, `vault`: text, `unlock_epoch`: bigint (Composite PK)
   - `shares`: bigint, `auto_redeem`: boolean
 
 ### Types
-- **lp_action_type**: `deposit`, `create_withdraw_request`, `cancel_withdraw_request`, `redeem`
+- **lp_action_type**: `deposit`, `create_withdraw_request`,
+  `cancel_withdraw_request`, `redeem`
 
 ---
 
@@ -168,13 +196,18 @@ This document provides a detailed breakdown of the tables and types in the `sai-
 
 ### Tables
 - **referral_code**: Registered referral codes.
-  - `code`: text (PK), `referrer`: text, `description`: text, `created_block`: bigint, `is_active`: boolean
+  - `code`: text (PK), `referrer`: text, `description`: text, `created_block`:
+    bigint, `is_active`: boolean
 - **referral_code_creation_history**: Log of code creation.
-  - `id`: bigserial (PK), `code`, `referrer`, `description`: text, `block`, `tx_index`, `event_index`: bigint
+  - `id`: bigserial (PK), `code`, `referrer`, `description`: text, `block`,
+    `tx_index`, `event_index`: bigint
 - **referral_redeem_history**: Log of users redeeming codes.
-  - `id`: bigserial (PK), `trader`, `code`, `referrer`: text, `block`, `tx_index`, `event_index`: bigint
+  - `id`: bigserial (PK), `trader`, `code`, `referrer`: text, `block`,
+    `tx_index`, `event_index`: bigint
 - **referral_claim_history**: History of referral commission claims.
-  - `id`: bigserial (PK), `referrer`: text, `amount`: bigint, `denom`: text, `coin_breakdown`: jsonb, `chain`: text, `block`, `tx_index`, `event_index`: bigint
+  - `id`: bigserial (PK), `referrer`: text, `amount`: bigint, `denom`: text,
+    `coin_breakdown`: jsonb, `chain`: text, `block`, `tx_index`, `event_index`:
+    bigint
 
 ---
 
@@ -185,7 +218,8 @@ Maps time buckets to block ranges.
 ```bash
 psql -d sai_keeper_2 -X -P pager=off -c "\d stats_block_ranges"
 ```
-- `granularity` (stats_granularity): Bucket size (`1m`, `1h`, `1d`, etc); part of composite PK.
+- `granularity` (stats_granularity): Bucket size (`1m`, `1h`, `1d`, etc); part
+  of composite PK.
 - `ts` (timestamptz): Bucket timestamp; part of composite PK.
 - `start_block` (bigint): First chain block included in the bucket.
 - `end_block` (bigint): Last chain block included in the bucket.
@@ -195,7 +229,8 @@ Aggregated oracle prices over time.
 ```bash
 psql -d sai_keeper_2 -X -P pager=off -c "\d stats_oracle_price"
 ```
-- `granularity` (stats_granularity): Aggregation interval; part of composite PK.
+- `granularity` (stats_granularity): Aggregation interval; part of composite
+  PK.
 - `ts` (timestamptz): Bucket timestamp; part of composite PK.
 - `oracle_token_id` (bigint): Oracle token ID; part of composite PK.
 - `avg_price_usd` (float8): Average token price in USD for the bucket.
@@ -219,8 +254,10 @@ psql -d sai_keeper_2 -X -P pager=off -c "\d stats_cache"
 - `total_users_all_time` (bigint): Cumulative distinct users.
 - `total_open_positions` (bigint): Count of currently open positions.
 - `tvl` (numeric): Total value locked in USD.
-- `accrued_trading_fees_24h` (numeric): Rolling 24h accrued trading fees in USD.
-- `accrued_trading_fees_all_time` (numeric): Cumulative accrued trading fees in USD.
+- `accrued_trading_fees_24h` (numeric): Rolling 24h accrued trading fees in
+  USD.
+- `accrued_trading_fees_all_time` (numeric): Cumulative accrued trading fees in
+  USD.
 - `last_updated` (timestamptz): Last cache refresh timestamp.
 
 ### stats_perp_by_user
@@ -252,7 +289,8 @@ psql -d sai_keeper_2 -X -P pager=off -c "\d stats_perp_liq_daily"
 - `trades_count_short` (bigint): Number of liquidated short positions.
 - `volume_long_usd` (numeric): Liquidated long notional volume in USD.
 - `volume_short_usd` (numeric): Liquidated short notional volume in USD.
-- `total_fee_charged_usd` (numeric): Total liquidation-related fees charged in USD.
+- `total_fee_charged_usd` (numeric): Total liquidation-related fees charged in
+  USD.
 - `updated_at` (timestamptz): Timestamp of the last record refresh.
 
 ### stats_perp_oi_daily
@@ -277,8 +315,10 @@ psql -d sai_keeper_2 -X -P pager=off -c "\d stats_slp_deposit_by_user"
 - `vault` (text): SLP vault address; part of composite PK.
 - `amount_deposited_usd` (numeric): USD value deposited during this day.
 - `amount_withdrawn_usd` (numeric): USD value withdrawn during this day.
-- `cumulative_amount_deposited_usd` (numeric): Running cumulative deposited USD for user/vault.
-- `cumulative_amount_withdrawn_usd` (numeric): Running cumulative withdrawn USD for user/vault.
+- `cumulative_amount_deposited_usd` (numeric): Running cumulative deposited USD
+  for user/vault.
+- `cumulative_amount_withdrawn_usd` (numeric): Running cumulative withdrawn USD
+  for user/vault.
 - `updated_at` (timestamptz): Timestamp of the last record refresh.
 
 ### stats_perp_sl_tp_daily
@@ -291,12 +331,17 @@ psql -d sai_keeper_2 -X -P pager=off -c "\d stats_perp_sl_tp_daily"
 - `collateral_id` (bigint): Collateral token ID; part of composite PK.
 - `sl_trades_count_long` (bigint): Number of long trades closed via stop-loss.
 - `sl_trades_count_short` (bigint): Number of short trades closed via stop-loss.
-- `sl_losses_prevented_long_usd` (numeric): Estimated long-side losses prevented by stop-loss in USD.
-- `sl_losses_prevented_short_usd` (numeric): Estimated short-side losses prevented by stop-loss in USD.
+- `sl_losses_prevented_long_usd` (numeric): Estimated long-side losses prevented
+  by stop-loss in USD.
+- `sl_losses_prevented_short_usd` (numeric): Estimated short-side losses
+  prevented by stop-loss in USD.
 - `tp_trades_count_long` (bigint): Number of long trades closed via take-profit.
-- `tp_trades_count_short` (bigint): Number of short trades closed via take-profit.
-- `tp_profit_realized_long_usd` (numeric): Realized long-side take-profit in USD.
-- `tp_profit_realized_short_usd` (numeric): Realized short-side take-profit in USD.
+- `tp_trades_count_short` (bigint): Number of short trades closed via
+  take-profit.
+- `tp_profit_realized_long_usd` (numeric): Realized long-side take-profit in
+  USD.
+- `tp_profit_realized_short_usd` (numeric): Realized short-side take-profit in
+  USD.
 - `updated_at` (timestamptz): Timestamp of the last record refresh.
 
 ### stats_perp_fee_daily
@@ -310,23 +355,31 @@ psql -d sai_keeper_2 -X -P pager=off -c "\d stats_perp_fee_daily"
 - `opening_fee_count` (integer): Count of opening-fee events.
 - `opening_fee_total` (bigint): Total opening fees in base collateral units.
 - `opening_fee_total_usd` (float8): Total opening fees in USD.
-- `opening_vault_fee` (bigint): Opening-fee portion allocated to vaults (base units).
-- `opening_vault_fee_usd` (float8): Opening-fee portion allocated to vaults (USD).
+- `opening_vault_fee` (bigint): Opening-fee portion allocated to vaults (base
+  units).
+- `opening_vault_fee_usd` (float8): Opening-fee portion allocated to vaults
+  (USD).
 - `opening_trigger_fee` (bigint): Opening trigger-order fees (base units).
 - `opening_trigger_fee_usd` (float8): Opening trigger-order fees (USD).
-- `opening_gov_fee` (bigint): Opening-fee protocol/governance allocation (base units).
-- `opening_gov_fee_usd` (float8): Opening-fee protocol/governance allocation (USD).
+- `opening_gov_fee` (bigint): Opening-fee protocol/governance allocation (base
+  units).
+- `opening_gov_fee_usd` (float8): Opening-fee protocol/governance allocation
+  (USD).
 - `opening_referrer_fee` (bigint): Opening-fee referrer allocation (base units).
 - `opening_referrer_fee_usd` (float8): Opening-fee referrer allocation (USD).
 - `closing_fee_count` (integer): Count of closing-fee events.
 - `closing_fee_total` (bigint): Total closing fees in base collateral units.
 - `closing_fee_total_usd` (float8): Total closing fees in USD.
-- `closing_vault_fee` (bigint): Closing-fee portion allocated to vaults (base units).
-- `closing_vault_fee_usd` (float8): Closing-fee portion allocated to vaults (USD).
+- `closing_vault_fee` (bigint): Closing-fee portion allocated to vaults (base
+  units).
+- `closing_vault_fee_usd` (float8): Closing-fee portion allocated to vaults
+  (USD).
 - `closing_trigger_fee` (bigint): Closing trigger-order fees (base units).
 - `closing_trigger_fee_usd` (float8): Closing trigger-order fees (USD).
-- `closing_gov_fee` (bigint): Closing-fee protocol/governance allocation (base units).
-- `closing_gov_fee_usd` (float8): Closing-fee protocol/governance allocation (USD).
+- `closing_gov_fee` (bigint): Closing-fee protocol/governance allocation (base
+  units).
+- `closing_gov_fee_usd` (float8): Closing-fee protocol/governance allocation
+  (USD).
 - `closing_referrer_fee` (bigint): Closing-fee referrer allocation (base units).
 - `closing_referrer_fee_usd` (float8): Closing-fee referrer allocation (USD).
 - `total_bad_debt` (bigint): Aggregate bad debt amount in base collateral units.
@@ -354,9 +407,11 @@ psql -d sai_keeper_2 -X -P pager=off -c "\d stats_slp_vault"
 - `vault` (text): SLP vault address; part of composite PK.
 - `share_price` (float8): Vault share price at snapshot time.
 - `apy` (float8): Annual percentage yield estimate.
-- `deposits` (float8): Deposited collateral amount in token units for the bucket.
+- `deposits` (float8): Deposited collateral amount in token units for the
+  bucket.
 - `deposits_usd` (float8): Deposited amount converted to USD.
-- `withdrawals` (float8): Withdrawn collateral amount in token units for the bucket.
+- `withdrawals` (float8): Withdrawn collateral amount in token units for the
+  bucket.
 - `withdrawals_usd` (float8): Withdrawn amount converted to USD.
 - `volume` (float8): Total vault activity volume in token units.
 - `volume_usd` (float8): Total vault activity volume in USD.
@@ -388,12 +443,15 @@ Time-series of user PnL and volume.
 ```bash
 psql -d sai_keeper_2 -X -P pager=off -c "\d stats_user_portfolio"
 ```
-- `granularity` (stats_granularity): Aggregation interval; part of composite PK.
+- `granularity` (stats_granularity): Aggregation interval; part of composite
+  PK.
 - `ts` (timestamptz): Bucket timestamp; part of composite PK.
 - `user_address` (text): User wallet address; part of composite PK.
 - `realized_pnl_usd` (float8): Realized PnL in USD in this bucket.
-- `realized_pnl_usd_cumulative` (float8): Running cumulative realized PnL in USD.
-- `pending_pnl_usd_cumulative` (float8): Running cumulative unrealized (pending) PnL in USD.
+- `realized_pnl_usd_cumulative` (float8): Running cumulative realized PnL in
+  USD.
+- `pending_pnl_usd_cumulative` (float8): Running cumulative unrealized (pending)
+  PnL in USD.
 - `volume_usd` (float8): Trading volume in USD in this bucket.
 - `volume_usd_cumulative` (float8): Running cumulative trading volume in USD.
 - `trades_count` (bigint): Number of trades in this bucket.
@@ -418,7 +476,8 @@ psql -d sai_keeper_2 -X -P pager=off -c "\d volume_leaderboard"
 - `trader` (text): Trader address (PK).
 - `volume_usd` (numeric): Cumulative trading volume in USD for ranking.
 - `last_tracked_block` (bigint): Last block included in refresh.
-- `threshold_block` (bigint): Optional lower-bound block used for scoped volume windows.
+- `threshold_block` (bigint): Optional lower-bound block used for scoped volume
+  windows.
 
 ### statsig_last_tracked_block
 Tracks progress of stats refreshers.
@@ -429,4 +488,5 @@ psql -d sai_keeper_2 -X -P pager=off -c "\d statsig_last_tracked_block"
 - `last_tracked_block` (bigint): Latest processed block for that event type.
 
 ### Types
-- **stats_granularity**: `1s`, `1m`, `5m`, `15m`, `1h`, `4h`, `6h`, `12h`, `1d`, `1w`, `1mo`
+- **stats_granularity**: `1s`, `1m`, `5m`, `15m`, `1h`, `4h`, `6h`, `12h`,
+  `1d`, `1w`, `1mo`
