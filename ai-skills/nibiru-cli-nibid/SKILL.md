@@ -162,6 +162,27 @@ Rules of thumb:
 - Reuse a known-good query message shape from the relevant repo or skill when
   the exact message is not obvious.
 
+#### Discover query variants without source
+
+If you do not have the contract source or schema, probe with an unknown query
+key. Many CosmWasm contracts return a serde enum error listing the accepted
+query enum variants.
+
+```bash
+CONTRACT_ADDR="nibi1..."
+nibid q wasm contract-state smart "$CONTRACT_ADDR" \
+  '{"_key_probe":{}}'
+```
+
+Example error:
+
+```text
+unknown variant `_key_probe`, expected one of `config`, `state`, ...
+```
+
+This is a discovery hint, not a full schema; enum variants may still need
+required fields.
+
 ### Tx Wasm
 
 ```bash
