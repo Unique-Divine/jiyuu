@@ -36,7 +36,6 @@ nibid tx bank send \
   "$AMOUNT" \
   --note "$MEMO" \
   --chain-id "cataclysm-1" \
-  --node "https://rpc.archive.nibiru.fi:443" \
   --fees "5000unibi" \
   --gas auto \
   --gas-adjustment 1.3 \
