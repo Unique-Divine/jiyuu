@@ -2,7 +2,7 @@
 name: sai-perps-query
 description: >-
   Run read-only queries against Sai mainnet CosmWasm contracts (Perp, Oracle,
-  Vault) using Nibiru CLI (nibid) or the Nibiru TypeScript SDK. Use when the user
+  SLP Vault) using Nibiru CLI (nibid) or the Nibiru TypeScript SDK. Use when the user
   asks to query Sai perp contracts, inspect open interest, check OI limits, look up
   MarketIndex/TokenIndex/GroupIndex, run get_borrowing_group_oi or
   get_borrowing_pair_oi, call queryContractSmart, or inspect Sai markets and
@@ -26,10 +26,10 @@ Full validated CLI notes: `$HOME/ki/boku/epics/epic-sai/26-02-10-sai-mainnet-que
 |----------|---------|
 | **Perp** | `nibi1ntmw2dfvd0qnw5fnwdu9pev2hsnqfdj9ny9n0nzh2a5u8v0scflq930mph` |
 | **Oracle** | `nibi1xfwyfwtdame6645lgcs4xvf4u0hpsuvxrcelfwtztu0pv7n4l6hqw5a8gj` |
-| Vault — Group 0 / USDC | `nibi193m2a00pmdsvkcvugrfewqzhtq6k0srkjzvxp2sk357vlpspx5vqxu8d7p` |
-| Vault — Group 0 / stNIBI | `nibi1mrplvu3scplnrgns96kg0j8pk3l2p9c7eaz0qdedx0kt3vmcujyqrjkfej` |
-| Vault — Group 1 / USDC | `nibi1waf5c8z55qvjay4de8wkm9cxyt6wa8zdnrvlexjrq77lqgqf258q3yn7l8` |
-| Vault — Group 1 / stNIBI | `nibi1pgurgas0za436c3fm2km99zkzutfx0jwpn7meespv6szv8c8g39qjz2tvj` |
+| SLP-USDC Vault — Group 0 | `nibi193m2a00pmdsvkcvugrfewqzhtq6k0srkjzvxp2sk357vlpspx5vqxu8d7p` |
+| SLP-stNIBI Vault — Group 0 | `nibi1mrplvu3scplnrgns96kg0j8pk3l2p9c7eaz0qdedx0kt3vmcujyqrjkfej` |
+| SLP-USDC Vault — Group 1 | `nibi1waf5c8z55qvjay4de8wkm9cxyt6wa8zdnrvlexjrq77lqgqf258q3yn7l8` |
+| SLP-stNIBI Vault — Group 1 | `nibi1pgurgas0za436c3fm2km99zkzutfx0jwpn7meespv6szv8c8g39qjz2tvj` |
 
 Source: `$HOME/ki/sai-website/webapp/config/env.ts` (`SaiContractsMainnet`).
 
@@ -45,15 +45,18 @@ queries.
 GraphQL reads from this DB. Use when you need schema details, migrations info, to debug indexer logic, or to design and edit queries over indexed data.
 - `sai-rest-api`: Broad interface for aggregated stats, yield. For quick metric
 inspection on different dates.
+- `nibiru-cli-nibid`: Use to run the actual `nibid query wasm contract-state <raw|smart>`
+  commands, configure nodes, inspect keys/config, and query transactions. This
+  skill provides Sai-specific contract addresses and query payloads; the Nibiru
+  CLI skill provides the execution mechanics.
 
 ## CLI setup
 
 ```bash
 PERP="nibi1ntmw2dfvd0qnw5fnwdu9pev2hsnqfdj9ny9n0nzh2a5u8v0scflq930mph"
 ORACLE="nibi1xfwyfwtdame6645lgcs4xvf4u0hpsuvxrcelfwtztu0pv7n4l6hqw5a8gj"
-NODE="https://rpc.archive.nibiru.fi:443"
 # helper alias
-sai_perps_q() { nibid query wasm contract-state smart "$1" "$2" --node "$NODE" --output json; }
+sai_perps_q() { nibid query wasm contract-state smart "$1" "$2"; }
 ```
 
 ## Rules of thumb
@@ -145,7 +148,12 @@ Recorded mainnet snapshot (Group 0 + USDC): pair max = 10,000,000 USDC, group ma
 
 Query message JSON templates, organized by contract. Source: `easy.tsx` `QUERY_CONFIG`.
 
-### Perp contract
+## Perp contract
+
+Below are smart query request payloads for the Sai perp contract. 
+You can use the `/nibiru-cli-nibid` skill to pull any of this information.
+
+- Source: sai-perps repo contracts/perp for the Rust logic
 
 ```json
 {"list_markets":{}}
@@ -183,7 +191,76 @@ Query message JSON templates, organized by contract. Source: `easy.tsx` `QUERY_C
 {"list_user_deposits":{"user":"nibi1..."}}
 ```
 
-### Oracle contract
+## SLP Vault contract
+
+For SLP Vault operations, health accounting, reward distribution, raw state keys,
+and mainnet runbooks, see [slp-vaults.md](./slp-vaults.md).
+
+You can use the `/nibiru-cli-nibid` skill to pull any of this information.
+
+- Source: sai-perps repo contracts/vault for the Rust logic
+
+### SLP Vault Smart Queries
+
+- `{"tvl":{}}` - Notional SLP Vault value using total supply and 
+  `1 + acc_rewards_per_token`. Returns a `Uint128` collateral base-unit amount.
+- `{"available_assets":{}}` - Current accounting value available at 
+  `share_to_assets_price`. Returns a `Uint128` collateral base-unit amount.
+- `{"market_cap":{}}` - SLP share market-cap style value, 
+  `total_supply * share_to_assets_price`. Returns a `Uint128` collateral base-unit amount.
+- `{"current_epoch":{}}` - Current SLP Vault epoch number. Returns a `u64`.
+- `{"get_current_epoch_start":{}}` - Current epoch start timestamp. 
+  Returns a `Timestamp` encoded as a nanosecond string in JSON.
+- `{"config":{}}` - SLP Vault addresses and risk parameters. 
+  Returns `ConfigResponse` with manager/admin addresses, perp/oracle/feed
+  addresses, PnL limits, daily supply cap, discount params, withdrawal thresholds,
+  and `min_lock_duration`.
+- `{"vault_snapshot":{}}` - One-call operator health snapshot. Returns
+  `VaultSnapshotResponse` with `tvl`, `market_cap`, `share_price`,
+  `collateralization_p`, `total_supply`, `total_liability`, `total_rewards`,
+  `epoch`, and `epoch_start`.
+- `{"get_revenue_info":{}}` - Revenue and PnL accounting summary. 
+  Returns `RevenueInfo` with `net_profit`, `rewards`, `closed_pnl`, `liabilities`, and `current_epoch_positive_open_pnl`.
+- `{"collateralization_p":{}}` - Policy health ratio for the SLP Vault. 
+  Returns a `Decimal`; values below `1.0` mean the SLP Vault is below target by contract accounting.
+- `{"withdraw_epochs_timelock":{}}` - Number of epochs a new withdrawal request
+  must wait at current collateralization. Returns a `u64`.
+- `{"get_vault_share_denom":{}}` - Native denom for the SLP share token. Returns
+  a `String`.
+- `{"get_collateral_denom":{}}` - Native collateral denom accepted by the SLP
+  Vault. Returns a `String`.
+- `{"max_mint":{}}` - Maximum SLP shares that can be minted right now under the
+  supply cap. Returns a `Uint128` share base-unit amount, or `u128::MAX` when
+  uncapped.
+- `{"max_deposit":{}}` - Maximum collateral that can be deposited right now.
+  Returns a `Uint128` collateral base-unit amount, or `u128::MAX` when uncapped.
+- `{"max_redeem":{"depositor":"nibi1..."}}` - Maximum SLP shares a depositor can
+  currently redeem from matured withdrawal requests. Returns a `Uint128` share
+  base-unit amount.
+- `{"max_withdraw":{"depositor":"nibi1..."}}` - Maximum collateral a depositor
+  can currently withdraw from matured withdrawal requests. Returns a `Uint128`
+  collateral base-unit amount.
+- `{"total_shares_being_withdrawn":{"depositor":"nibi1..."}}` - Total SLP shares
+  currently recorded in withdrawal requests for a depositor. Returns a `Uint128`
+  share base-unit amount.
+- `{"user_withdraw_requests":{"user":"nibi1..."}}` - Withdrawal requests for a
+  user. Returns `UserWithdrawRequestsResponse` with `requests: [{ shares, unlock_epoch, auto_redeem }]`.
+- `{"get_locked_deposit":{"deposit_id":0}}` - Locked deposit details by ID.
+  Returns `LockedDeposit` with depositor, shares, deposited assets, discount,
+  timestamp, and lock duration.
+- `{"all_locked_deposits":{"start_after":null,"limit":null}}` - Paginated locked 
+  deposit list. Returns `locked_deposits: [(deposit_id, LockedDeposit)]` (type
+`AllLockedDepositsResponse`)
+- `{"user_locked_deposits":{"user":"nibi1..."}}` - Locked deposits owned by a user. Returns `UserLockedDepositsResponse` with `locked_deposits: [(deposit_id, LockedDeposit)]`.
+- `{"lock_discount_p":{"collat_p":"1.0","lock_duration":0}}` - Simulated lock discount for a collateralization ratio and lock duration. Returns a `Decimal` discount percentage.
+- `{"user_vault_state":{"user":"nibi1..."}}` - User-level SLP Vault state bundle. Returns `UserVaultStateResponse` with share balance, estimated assets, pending withdrawals, locked deposits, and max redeem/withdraw values.
+
+## Oracle contract
+
+Below are smart query request payloads for the Sai oracle contract.
+You can use the `/nibiru-cli-nibid` skill to pull any of this information.
+
+- Source: sai-perps repo contracts/oracle for the Rust logic
 
 ```json
 {"list_tokens":{"start_after":null,"limit":null}}
@@ -195,34 +272,6 @@ Query message JSON templates, organized by contract. Source: `easy.tsx` `QUERY_C
 {"list_permission_groups":{"start_after":null,"limit":null}}
 {"expiration_time":{}}
 {"ownership":{}}
-```
-
-### Vault contract
-
-```json
-{"tvl":{}}
-{"available_assets":{}}
-{"market_cap":{}}
-{"current_epoch":{}}
-{"get_current_epoch_start":{}}
-{"config":{}}
-{"vault_snapshot":{}}
-{"get_revenue_info":{}}
-{"collateralization_p":{}}
-{"withdraw_epochs_timelock":{}}
-{"get_vault_share_denom":{}}
-{"get_collateral_denom":{}}
-{"max_mint":{}}
-{"max_deposit":{}}
-{"max_redeem":{"depositor":"nibi1..."}}
-{"max_withdraw":{"depositor":"nibi1..."}}
-{"total_shares_being_withdrawn":{"depositor":"nibi1..."}}
-{"user_withdraw_requests":{"user":"nibi1..."}}
-{"get_locked_deposit":{"deposit_id":0}}
-{"all_locked_deposits":{"start_after":null,"limit":null}}
-{"user_locked_deposits":{"user":"nibi1..."}}
-{"lock_discount_p":{"collat_p":"1.0","lock_duration":0}}
-{"user_vault_state":{"user":"nibi1..."}}
 ```
 
 ## TypeScript (NibiruQuerier) alternative
