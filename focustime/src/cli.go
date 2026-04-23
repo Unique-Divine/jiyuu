@@ -13,6 +13,27 @@ func rootHelpAction(ctx context.Context, c *cli.Command) error {
 	return cli.ShowAppHelp(c)
 }
 
+func configShowAction(cfg StartCfg) cli.ActionFunc {
+	return func(ctx context.Context, c *cli.Command) error {
+		b, err := EffectiveConfigJSON(cfg)
+		if err != nil {
+			return err
+		}
+		_, err = c.Writer.Write(append(b, '\n'))
+		return err
+	}
+}
+
+func configEditAction(cfg StartCfg) cli.ActionFunc {
+	return func(ctx context.Context, c *cli.Command) error {
+		if err := ConfigEdit(cfg); err != nil {
+			return err
+		}
+		fmt.Fprintln(c.Writer, "Saved config.")
+		return nil
+	}
+}
+
 func subcommandHelpAction(ctx context.Context, c *cli.Command) error {
 	return cli.ShowSubcommandHelp(c)
 }
@@ -44,6 +65,18 @@ func NewAppCmd(cfg StartCfg) *cli.Command {
 				Usage:     "Log time to an area for today",
 				ArgsUsage: "<time_amt> <area_idx>",
 				Action:    logAction(cfg),
+			},
+			{
+				Name:  "config",
+				Usage: "Show or edit focustime JSON config (timezone)",
+				Commands: []*cli.Command{
+					{
+						Name:   "edit",
+						Usage:  "Edit config.json in your editor",
+						Action: configEditAction(cfg),
+					},
+				},
+				Action: configShowAction(cfg),
 			},
 			{
 				Name:  "areas",
@@ -188,7 +221,7 @@ func editAction(cfg StartCfg) cli.ActionFunc {
 		arg := c.Args().First()
 		var woy WoY
 		if arg == "" {
-			woy = TimeToWoY(time.Now().UTC())
+			woy = TimeToWoY(time.Now(), cfg.Location())
 		} else {
 			year, week, err := ParseYearWWeek(arg)
 			if err != nil {
@@ -202,7 +235,7 @@ func editAction(cfg StartCfg) cli.ActionFunc {
 
 func todayAction(cfg StartCfg) cli.ActionFunc {
 	return func(ctx context.Context, c *cli.Command) error {
-		out, err := TodayReport(cfg, time.Now().UTC())
+		out, err := TodayReport(cfg, time.Now())
 		if err != nil {
 			return err
 		}
@@ -213,7 +246,7 @@ func todayAction(cfg StartCfg) cli.ActionFunc {
 
 func weekAction(cfg StartCfg) cli.ActionFunc {
 	return func(ctx context.Context, c *cli.Command) error {
-		out, err := CurrentWeekReport(cfg, time.Now().UTC())
+		out, err := CurrentWeekReport(cfg, time.Now())
 		if err != nil {
 			return err
 		}

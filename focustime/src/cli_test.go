@@ -17,7 +17,14 @@ func setupCLIApp(t *testing.T) (StartCfg, *bytes.Buffer, *bytes.Buffer, *cli.Com
 	t.Helper()
 	newHome := t.TempDir()
 	t.Setenv("XDG_DATA_HOME", newHome)
-	cfg := StartCfg{HomeDir: newHome}
+	xdgCfg := filepath.Join(newHome, "xdg_config")
+	t.Setenv("XDG_CONFIG_HOME", xdgCfg)
+	require.NoError(t, os.MkdirAll(filepath.Join(xdgCfg, "focustime"), 0o755))
+	cfgPath := filepath.Join(xdgCfg, "focustime", "config.json")
+	require.NoError(t, os.WriteFile(cfgPath, []byte(`{"timezone":"UTC"}`+"\n"), 0o644))
+
+	cfg, err := ResolveStartCfg(StartCfg{HomeDir: newHome})
+	require.NoError(t, err)
 
 	reg := FocusAreas{
 		Areas:       []string{"A", "B", "C"},
@@ -46,8 +53,8 @@ func TestCLILogActionSuccess(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, stdout.String(), "Logged 45m to area 1")
 
-	now := time.Now().UTC()
-	woy := TimeToWoY(now)
+	now := time.Now().In(cfg.Location())
+	woy := TimeToWoY(now, cfg.Location())
 	yf, err := LoadYearFile(cfg, woy.Year)
 	require.NoError(t, err)
 	week := yf.Weeks[woy.WeekIndex()]
@@ -81,6 +88,7 @@ func TestCLITodayActionWritesReport(t *testing.T) {
 	err = app.Run(context.Background(), []string{"focustime", "today"})
 	require.NoError(t, err)
 	require.Contains(t, stdout.String(), "Today (")
+	require.Contains(t, stdout.String(), " UTC)")
 	require.Contains(t, stdout.String(), "0 → A: 30m")
 	require.Contains(t, stdout.String(), "Total: 30m")
 }
@@ -94,8 +102,15 @@ func TestCLIWeekActionWritesReport(t *testing.T) {
 	err = app.Run(context.Background(), []string{"focustime", "week"})
 	require.NoError(t, err)
 	require.Contains(t, stdout.String(), "# focustime week view")
-	require.Contains(t, stdout.String(), "# Columns: Area | Mon | Tue | Wed | Thu | Fri | Sat | Sun")
-	require.Contains(t, stdout.String(), "C  |")
+	require.Contains(t, stdout.String(), "# Area")
+	require.Contains(t, stdout.String(), "日")
+	require.Contains(t, stdout.String(), "月")
+	require.Contains(t, stdout.String(), "火")
+	require.Contains(t, stdout.String(), "水")
+	require.Contains(t, stdout.String(), "木")
+	require.Contains(t, stdout.String(), "金")
+	require.Contains(t, stdout.String(), "土")
+	require.Contains(t, stdout.String(), "C     |")
 }
 
 // TestCLIAreasEditActionUpdatesAreas verifies end-to-end CLI behavior for
@@ -127,6 +142,26 @@ func TestCLIAreasEditActionUpdatesAreas(t *testing.T) {
 	reg, err := LoadAreasFile(cfg)
 	require.NoError(t, err)
 	require.Equal(t, []string{"Deep Work", "Code Review", "Exercise"}, reg.Areas)
+}
+
+func TestCLIConfigShowPrintsJSON(t *testing.T) {
+	_, stdout, _, app := setupCLIApp(t)
+	err := app.Run(context.Background(), []string{"focustime", "config"})
+	require.NoError(t, err)
+	require.Contains(t, stdout.String(), `"timezone"`)
+	require.Contains(t, stdout.String(), "UTC")
+}
+
+func TestCLIConfigEditRejectsInvalidTimezone(t *testing.T) {
+	_, _, _, app := setupCLIApp(t)
+	editorScript := filepath.Join(t.TempDir(), "fake-editor.sh")
+	script := "#!/usr/bin/env bash\ncat <<'EOF' > \"$1\"\n{\"timezone\":\"NotA/RealZone\"}\nEOF\n"
+	require.NoError(t, os.WriteFile(editorScript, []byte(script), 0o755))
+	t.Setenv("EDITOR", editorScript)
+
+	err := app.Run(context.Background(), []string{"focustime", "config", "edit"})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "NotA/RealZone")
 }
 
 func TestCLIAreasSaveLayoutActionSavesAndSetsLastUsed(t *testing.T) {

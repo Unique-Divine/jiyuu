@@ -20,6 +20,39 @@ type S struct {
 	suite.Suite
 }
 
+func (s *S) TestResolveStartCfgNoFileUsesChicago() {
+	newHome := s.T().TempDir()
+	s.T().Setenv("XDG_CONFIG_HOME", filepath.Join(newHome, "cfg"))
+	cfg, err := ResolveStartCfg(StartCfg{HomeDir: newHome})
+	s.NoError(err)
+	s.Equal("America/Chicago", cfg.Timezone)
+	s.NotNil(cfg.Loc)
+}
+
+func (s *S) TestResolveStartCfgInvalidConfigJSON() {
+	newHome := s.T().TempDir()
+	xdg := filepath.Join(newHome, "cfg")
+	s.T().Setenv("XDG_CONFIG_HOME", xdg)
+	s.NoError(os.MkdirAll(filepath.Join(xdg, "focustime"), 0o755))
+	path := filepath.Join(xdg, "focustime", "config.json")
+	s.NoError(os.WriteFile(path, []byte("{not json"), 0o644))
+	_, err := ResolveStartCfg(StartCfg{HomeDir: newHome})
+	s.Error(err)
+	s.Contains(err.Error(), "config file")
+}
+
+func (s *S) TestResolveStartCfgTimezoneFieldSkipsFile() {
+	newHome := s.T().TempDir()
+	xdg := filepath.Join(newHome, "cfg")
+	s.T().Setenv("XDG_CONFIG_HOME", xdg)
+	s.NoError(os.MkdirAll(filepath.Join(xdg, "focustime"), 0o755))
+	path := filepath.Join(xdg, "focustime", "config.json")
+	s.NoError(os.WriteFile(path, []byte(`{"timezone":"America/New_York"}`), 0o644))
+	cfg, err := ResolveStartCfg(StartCfg{HomeDir: newHome, Timezone: "UTC"})
+	s.NoError(err)
+	s.Equal("UTC", cfg.Timezone)
+}
+
 func (s *S) TestTimeToWeek() {
 	type TC struct {
 		t    time.Time
@@ -38,7 +71,7 @@ func (s *S) TestTimeToWeek() {
 		},
 	} {
 		s.Run(fmt.Sprintf("tc %d, %#v", tcIdx, tc), func() {
-			got := TimeToWoY(tc.t)
+			got := TimeToWoY(tc.t, time.UTC)
 			s.Equal(tc.want, got)
 		})
 	}
@@ -52,8 +85,9 @@ func (s *S) TestCreateFocusTimeDir() {
 		HomeDir: newHome,
 	}
 
-	ftDir := DirFTData(cfg)
-	_, err := os.Stat(ftDir)
+	ftDir, err := DirFTData(cfg)
+	s.NoError(err)
+	_, err = os.Stat(ftDir)
 	s.True(os.IsNotExist(err), "expect focustime data dir to not exist yet")
 
 	err = CreateFocusTimeDir(cfg)
@@ -69,8 +103,10 @@ func (s *S) TestLoadAreasFile() {
 	s.T().Setenv("XDG_DATA_HOME", newHome)
 	cfg := StartCfg{HomeDir: newHome}
 
-	areasPath := filepath.Join(DirFTData(cfg), "areas.json")
-	_, err := os.Stat(areasPath)
+	dir, err := DirFTData(cfg)
+	s.NoError(err)
+	areasPath := filepath.Join(dir, "areas.json")
+	_, err = os.Stat(areasPath)
 	s.True(os.IsNotExist(err), "areas.json should not exist yet")
 
 	got, err := LoadAreasFile(cfg)
@@ -97,7 +133,9 @@ func (s *S) TestSaveAreasFile() {
 	err := SaveAreasFile(cfg, reg)
 	s.NoError(err)
 
-	areasPath := filepath.Join(DirFTData(cfg), "areas.json")
+	dir, err := DirFTData(cfg)
+	s.NoError(err)
+	areasPath := filepath.Join(dir, "areas.json")
 	info, err := os.Stat(areasPath)
 	s.NoError(err)
 	s.False(info.IsDir(), "areas.json should be a file")
@@ -254,14 +292,51 @@ func (s *S) TestRenderWeekBuffer() {
 	}
 	areaNames := []string{"Deep Work", "Coding", "Exercise"}
 	weekStart := time.Date(2025, 3, 3, 0, 0, 0, 0, time.UTC)
-	got := RenderWeekBuffer(week, areaNames, 2025, 9, weekStart)
+	got := RenderWeekBuffer(week, areaNames, 2025, 9, weekStart, time.Time{})
 	s.Contains(got, "# focustime week view")
 	s.Contains(got, "# Week index: 2025w10 (Week starting: 2025-03-03)")
-	s.Contains(got, "# Columns: Area | Mon | Tue | Wed | Thu | Fri | Sat | Sun")
+	s.Contains(got, "# Area")
+	s.Contains(got, "|   日 |   月 |   火 |   水 |   木 |   金 |   土")
 	s.Contains(got, "Deep Work  |")
 	s.Contains(got, "120")
 	s.Contains(got, "90")
 	s.Contains(got, "Exercise")
+}
+
+func (s *S) TestRenderWeekBufferMarksTodayColumnForMatchingWeek() {
+	week := WeekValues{
+		Areas: []int{0},
+		Values: [][]*int{
+			make([]*int, 7),
+		},
+	}
+	areaNames := []string{"Deep Work"}
+	// 2026-03-25 is Wednesday in JST; ISO week 13 of 2026.
+	jst := time.FixedZone("JST", 9*60*60)
+	nowLocal := time.Date(2026, 3, 25, 12, 0, 0, 0, jst)
+	year, weekNum := nowLocal.ISOWeek()
+	weekStart := weekStartFor(year, weekNum)
+	got := RenderWeekBuffer(week, areaNames, year, weekNum-1, weekStart, nowLocal)
+
+	s.Contains(got, "🟢水")
+	s.Equal(1, strings.Count(got, "🟢"))
+	// Marker replaces one left-padding space without shifting separators.
+	s.Contains(got, "|   日 |   月 |   火 | 🟢水 |   木 |   金 |   土")
+}
+
+func (s *S) TestRenderWeekBufferNoTodayMarkerForNonCurrentWeek() {
+	week := WeekValues{
+		Areas: []int{0},
+		Values: [][]*int{
+			make([]*int, 7),
+		},
+	}
+	areaNames := []string{"Deep Work"}
+	nowLocal := time.Date(2026, 3, 25, 12, 0, 0, 0, time.FixedZone("JST", 9*60*60))
+	weekStart := weekStartFor(2026, 12)
+	got := RenderWeekBuffer(week, areaNames, 2026, 11, weekStart, nowLocal)
+
+	s.NotContains(got, "🟢")
 }
 
 func (s *S) TestRenderWeekBufferFixedAreaColumnWidth() {
@@ -274,7 +349,7 @@ func (s *S) TestRenderWeekBufferFixedAreaColumnWidth() {
 	}
 	areaNames := []string{"A", "運動"}
 	weekStart := time.Date(2025, 3, 3, 0, 0, 0, 0, time.UTC)
-	got := RenderWeekBuffer(week, areaNames, 2025, 9, weekStart)
+	got := RenderWeekBuffer(week, areaNames, 2025, 9, weekStart, time.Time{})
 	expectedWidth := runewidth.StringWidth("運動") + 1
 
 	for _, line := range strings.Split(got, "\n") {
@@ -300,28 +375,47 @@ func (s *S) TestRenderWeekBufferAlignsUsingLongestAreaName() {
 		"mid",
 	}
 	weekStart := time.Date(2025, 3, 3, 0, 0, 0, 0, time.UTC)
-	got := RenderWeekBuffer(week, areaNames, 2025, 9, weekStart)
+	got := RenderWeekBuffer(week, areaNames, 2025, 9, weekStart, time.Time{})
 	expectedAreaColWidth := runewidth.StringWidth("かなり長いエリア名です") + 1
 
 	var widths []int
+	var headerPipeWidths []int
+	var rowPipeWidths []int
+	pipeDisplayWidths := func(line string) []int {
+		widths := []int{}
+		for i := 0; i < len(line); i++ {
+			if line[i] == '|' {
+				widths = append(widths, runewidth.StringWidth(line[:i]))
+			}
+		}
+		return widths
+	}
 	for _, line := range strings.Split(got, "\n") {
+		if strings.HasPrefix(line, "# ") &&
+			strings.Contains(line, "|   日 |   月 |   火 |   水 |   木 |   金 |   土") {
+			headerPipeWidths = pipeDisplayWidths(line)
+		}
 		if strings.HasPrefix(line, "短い") ||
 			strings.HasPrefix(line, "かなり長いエリア名です") ||
 			strings.HasPrefix(line, "mid") {
 			left := strings.SplitN(line, "|", 2)[0]
 			widths = append(widths, runewidth.StringWidth(left))
+			if len(rowPipeWidths) == 0 {
+				rowPipeWidths = pipeDisplayWidths(line)
+			}
 		}
 	}
 	s.Len(widths, 3)
 	s.Equal(widths[0], widths[1])
 	s.Equal(widths[1], widths[2])
 	s.Equal(expectedAreaColWidth+1, widths[0]) // +1 for " " before "|"
+	s.Equal(rowPipeWidths, headerPipeWidths)
 }
 
 func (s *S) TestParseWeekBuffer() {
 	buf := `# focustime week view
 # Week index: 2025w10 (Week starting: 2025-03-03)
-# Columns: Area | Mon | Tue | Wed | Thu | Fri | Sat | Sun
+# Columns: Area | 日 | 月 | 火 | 水 | 木 | 金 | 土
 
 Deep Work | 120 |  90 |  60 |   0 |   0 |     |
 Coding    |  30 |  30 |  45 |     |   0 |     |
@@ -367,7 +461,7 @@ func (s *S) TestRenderParseRoundtrip() {
 	}
 	areaNames := []string{"Deep Work", "Coding", "Exercise"}
 	weekStart := time.Date(2025, 3, 3, 0, 0, 0, 0, time.UTC)
-	buf := RenderWeekBuffer(week, areaNames, 2025, 9, weekStart)
+	buf := RenderWeekBuffer(week, areaNames, 2025, 9, weekStart, time.Time{})
 	parsed, err := ParseWeekBuffer([]byte(buf), areaNames, week.Areas)
 	s.NoError(err)
 	s.Equal(week.Areas, parsed.Areas)
@@ -448,13 +542,13 @@ func (s *S) TestParseDurationToMinutes() {
 }
 
 func (s *S) TestWeekdayToDayIndex() {
-	s.Equal(0, WeekdayToDayIndex(time.Monday))
-	s.Equal(1, WeekdayToDayIndex(time.Tuesday))
-	s.Equal(2, WeekdayToDayIndex(time.Wednesday))
-	s.Equal(3, WeekdayToDayIndex(time.Thursday))
-	s.Equal(4, WeekdayToDayIndex(time.Friday))
-	s.Equal(5, WeekdayToDayIndex(time.Saturday))
-	s.Equal(6, WeekdayToDayIndex(time.Sunday))
+	s.Equal(0, WeekdayToDayIndex(time.Sunday))
+	s.Equal(1, WeekdayToDayIndex(time.Monday))
+	s.Equal(2, WeekdayToDayIndex(time.Tuesday))
+	s.Equal(3, WeekdayToDayIndex(time.Wednesday))
+	s.Equal(4, WeekdayToDayIndex(time.Thursday))
+	s.Equal(5, WeekdayToDayIndex(time.Friday))
+	s.Equal(6, WeekdayToDayIndex(time.Saturday))
 }
 
 func (s *S) TestLogTime() {
@@ -474,7 +568,7 @@ func (s *S) TestLogTime() {
 	s.Equal(45, logged)
 
 	now := time.Now().UTC()
-	woy := TimeToWoY(now)
+	woy := TimeToWoY(now, time.UTC)
 	yf, err := LoadYearFile(cfg, woy.Year)
 	s.NoError(err)
 	week := yf.Weeks[woy.WeekIndex()]
@@ -511,7 +605,7 @@ func (s *S) TestTodayReportNoWeekData() {
 	now := time.Date(2026, 3, 3, 12, 0, 0, 0, time.UTC)
 	out, err := TodayReport(cfg, now)
 	s.NoError(err)
-	s.Contains(out, "Today (2026-03-03, Tuesday): no data yet.")
+	s.Contains(out, "Today (2026-03-03, Tuesday, 12:00:00 UTC): no data yet.")
 }
 
 func (s *S) TestTodayReportWeekExistsButNoTodayData() {
@@ -527,7 +621,7 @@ func (s *S) TestTodayReportWeekExistsButNoTodayData() {
 	s.NoError(err)
 
 	now := time.Date(2026, 3, 3, 12, 0, 0, 0, time.UTC) // Tuesday
-	woy := TimeToWoY(now)
+	woy := TimeToWoY(now, time.UTC)
 	yf := emptyYearFile(woy.Year)
 	week := &WeekValues{
 		Areas: []int{0, 1, 2},
@@ -545,7 +639,7 @@ func (s *S) TestTodayReportWeekExistsButNoTodayData() {
 
 	out, err := TodayReport(cfg, now)
 	s.NoError(err)
-	s.Contains(out, "Today (2026-03-03, Tuesday)")
+	s.Contains(out, "Today (2026-03-03, Tuesday, 12:00:00 UTC)")
 	s.Contains(out, "No data logged for today.")
 }
 
@@ -562,7 +656,7 @@ func (s *S) TestTodayReportWithValuesAndTotal() {
 	s.NoError(err)
 
 	now := time.Date(2026, 3, 3, 12, 0, 0, 0, time.UTC) // Tuesday
-	woy := TimeToWoY(now)
+	woy := TimeToWoY(now, time.UTC)
 	yf := emptyYearFile(woy.Year)
 	week := &WeekValues{
 		Areas: []int{0, 1, 2},
@@ -582,7 +676,7 @@ func (s *S) TestTodayReportWithValuesAndTotal() {
 
 	out, err := TodayReport(cfg, now)
 	s.NoError(err)
-	s.Contains(out, "Today (2026-03-03, Tuesday)")
+	s.Contains(out, "Today (2026-03-03, Tuesday, 12:00:00 UTC)")
 	s.Contains(out, "0 → A: 30m")
 	s.Contains(out, "2 → C: 45m")
 	s.Contains(out, "Total: 75m")
@@ -619,7 +713,7 @@ func (s *S) TestCurrentWeekReportWithWeekData() {
 	s.NoError(err)
 
 	now := time.Date(2026, 3, 3, 12, 0, 0, 0, time.UTC)
-	woy := TimeToWoY(now)
+	woy := TimeToWoY(now, time.UTC)
 	yf := emptyYearFile(woy.Year)
 	week := &WeekValues{
 		Areas: []int{0, 1, 2},
@@ -640,9 +734,9 @@ func (s *S) TestCurrentWeekReportWithWeekData() {
 	s.NoError(err)
 	s.Contains(out, "# focustime week view")
 	s.Contains(out, "# Week index:")
-	s.Contains(out, "A  |")
-	s.Contains(out, "B  |")
-	s.Contains(out, "C  |")
+	s.Contains(out, "A     |")
+	s.Contains(out, "B     |")
+	s.Contains(out, "C     |")
 	s.Contains(out, "50")
 }
 

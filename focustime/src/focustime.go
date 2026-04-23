@@ -13,10 +13,233 @@ import (
 	"github.com/mattn/go-runewidth"
 )
 
-// StartCfg holds startup configuration. HomeDir is used for XDG fallbacks
-// when env vars (e.g. XDG_DATA_HOME) are unset.
+// StartCfg holds startup configuration. HomeDir is optional: when empty,
+// os.UserHomeDir is used for XDG fallbacks. Timezone is an IANA name
+// (persisted in config.json). Loc is derived from Timezone for runtime; if set
+// with Loc != nil, ResolveStartCfg skips file/timezone resolution (tests).
 type StartCfg struct {
-	HomeDir string
+	HomeDir  string         `json:"-"`
+	Timezone string         `json:"timezone"`
+	Loc      *time.Location `json:"-"`
+}
+
+// EffectiveHomeDir returns HomeDir or os.UserHomeDir when HomeDir is empty.
+func EffectiveHomeDir(cfg StartCfg) (string, error) {
+	if cfg.HomeDir != "" {
+		return cfg.HomeDir, nil
+	}
+	return os.UserHomeDir()
+}
+
+func fillEffectiveHomeDir(cfg *StartCfg) error {
+	if cfg.HomeDir != "" {
+		return nil
+	}
+	h, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("resolve home directory: %w", err)
+	}
+	cfg.HomeDir = h
+	return nil
+}
+
+// MergeTimezone returns raw if non-empty, else America/Chicago.
+func MergeTimezone(raw string) string {
+	if raw != "" {
+		return raw
+	}
+	return "America/Chicago"
+}
+
+// ValidateAndLocateTimezone loads an IANA timezone name.
+func ValidateAndLocateTimezone(tz string) (*time.Location, error) {
+	if tz == "" {
+		return nil, fmt.Errorf("timezone is empty")
+	}
+	loc, err := time.LoadLocation(tz)
+	if err != nil {
+		return nil, err
+	}
+	return loc, nil
+}
+
+// ConfigFilePath returns the path to focustime config.json under XDG_CONFIG_HOME.
+func ConfigFilePath(cfg StartCfg) (string, error) {
+	c := cfg
+	if err := fillEffectiveHomeDir(&c); err != nil {
+		return "", err
+	}
+	xdg, err := XdgConfigHome(c)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(xdg, "focustime", "config.json"), nil
+}
+
+// readMergedTimezoneFromDisk returns the effective timezone string from
+// config.json or default. Missing file is not an error.
+func readMergedTimezoneFromDisk(cfg StartCfg) (string, error) {
+	path, err := ConfigFilePath(cfg)
+	if err != nil {
+		return "", err
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return MergeTimezone(""), nil
+		}
+		return "", err
+	}
+	var s StartCfg
+	if err := json.Unmarshal(b, &s); err != nil {
+		return "", fmt.Errorf("config file: invalid JSON: %w", err)
+	}
+	return MergeTimezone(s.Timezone), nil
+}
+
+// ResolveStartCfg fills HomeDir when empty, then resolves Loc from Loc (passthrough),
+// Timezone (caller override), or config.json / default Chicago.
+func ResolveStartCfg(base StartCfg) (StartCfg, error) {
+	copy := base
+	if err := fillEffectiveHomeDir(&copy); err != nil {
+		return StartCfg{}, err
+	}
+	if copy.Loc != nil {
+		return copy, nil
+	}
+	if copy.Timezone != "" {
+		loc, err := ValidateAndLocateTimezone(copy.Timezone)
+		if err != nil {
+			return StartCfg{}, fmt.Errorf("timezone %q: %w", copy.Timezone, err)
+		}
+		return StartCfg{
+			HomeDir:  copy.HomeDir,
+			Timezone: copy.Timezone,
+			Loc:      loc,
+		}, nil
+	}
+	tz, err := readMergedTimezoneFromDisk(copy)
+	if err != nil {
+		return StartCfg{}, err
+	}
+	loc, err := ValidateAndLocateTimezone(tz)
+	if err != nil {
+		return StartCfg{}, fmt.Errorf("config timezone %q: %w", tz, err)
+	}
+	return StartCfg{
+		HomeDir:  copy.HomeDir,
+		Timezone: tz,
+		Loc:      loc,
+	}, nil
+}
+
+// EffectiveConfigJSON returns the on-disk or default timezone as pretty JSON
+// for `focustime config` (merged effective values only).
+func EffectiveConfigJSON(cfg StartCfg) ([]byte, error) {
+	c := cfg
+	if err := fillEffectiveHomeDir(&c); err != nil {
+		return nil, err
+	}
+	tz, err := readMergedTimezoneFromDisk(c)
+	if err != nil {
+		return nil, err
+	}
+	out := StartCfg{Timezone: tz}
+	return json.MarshalIndent(out, "", "  ")
+}
+
+// SaveStartCfgFile writes timezone to config.json atomically after validation.
+func SaveStartCfgFile(cfg StartCfg, toSave StartCfg) error {
+	tz := MergeTimezone(toSave.Timezone)
+	if _, err := ValidateAndLocateTimezone(tz); err != nil {
+		return fmt.Errorf("invalid timezone %q: %w", tz, err)
+	}
+	path, err := ConfigFilePath(cfg)
+	if err != nil {
+		return err
+	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	payload := StartCfg{Timezone: tz}
+	jsonBz, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmpPath := filepath.Join(dir, fmt.Sprintf("config.json.%d.tmp", os.Getpid()))
+	if err := os.WriteFile(tmpPath, jsonBz, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, path)
+}
+
+// ConfigEdit opens config.json in $EDITOR; only valid JSON and timezone persist.
+func ConfigEdit(cfg StartCfg) error {
+	c := cfg
+	if err := fillEffectiveHomeDir(&c); err != nil {
+		return err
+	}
+	path, err := ConfigFilePath(c)
+	if err != nil {
+		return err
+	}
+	var seed []byte
+	if b, err := os.ReadFile(path); err == nil {
+		var s StartCfg
+		if json.Unmarshal(b, &s) == nil {
+			s.Timezone = MergeTimezone(s.Timezone)
+			seed, err = json.MarshalIndent(StartCfg{Timezone: s.Timezone}, "", "  ")
+			if err != nil {
+				return err
+			}
+			seed = append(seed, '\n')
+		} else {
+			seed = append([]byte(nil), b...)
+		}
+	} else if os.IsNotExist(err) {
+		seed, err = json.MarshalIndent(StartCfg{Timezone: MergeTimezone("")}, "", "  ")
+		if err != nil {
+			return err
+		}
+		seed = append(seed, '\n')
+	} else {
+		return err
+	}
+
+	tmp, err := os.CreateTemp("", "focustime-config_*")
+	if err != nil {
+		return err
+	}
+	tempPath := tmp.Name()
+	defer os.Remove(tempPath)
+	if _, err := tmp.Write(seed); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := LaunchEditor(tempPath); err != nil {
+		return fmt.Errorf("editor exited with error: %w", err)
+	}
+	fileBz, err := os.ReadFile(tempPath)
+	if err != nil {
+		return err
+	}
+	var parsed StartCfg
+	if err := json.Unmarshal(fileBz, &parsed); err != nil {
+		return fmt.Errorf("invalid JSON: %w", err)
+	}
+	return SaveStartCfgFile(c, parsed)
+}
+
+// Location returns Loc or UTC when Loc is nil.
+func (c StartCfg) Location() *time.Location {
+	if c.Loc != nil {
+		return c.Loc
+	}
+	return time.UTC
 }
 
 // FocusAreas is the areas.json schema: display names, saved layouts,
@@ -35,7 +258,10 @@ func LoadAreasFile(cfg StartCfg) (FocusAreas, error) {
 		AreaLayouts:             [][]int{},
 		LastUsedAreaLayoutIndex: 0,
 	}
-	xdgDataHome := XdgDataHome(cfg)
+	xdgDataHome, err := XdgDataHome(cfg)
+	if err != nil {
+		return fresh, err
+	}
 	fileInfo, err := os.Stat(xdgDataHome)
 	if err != nil && os.IsNotExist(err) {
 		err := os.MkdirAll(xdgDataHome, 0o755)
@@ -53,7 +279,11 @@ func LoadAreasFile(cfg StartCfg) (FocusAreas, error) {
 		return fresh, err
 	}
 
-	fp := filepath.Join(DirFTData(cfg), "areas.json")
+	dir, err := DirFTData(cfg)
+	if err != nil {
+		return fresh, err
+	}
+	fp := filepath.Join(dir, "areas.json")
 	fileInfo, err = os.Stat(fp)
 	switch {
 	case err != nil && os.IsNotExist(err):
@@ -84,7 +314,10 @@ func SaveAreasFile(cfg StartCfg, reg FocusAreas) error {
 	if err := CreateFocusTimeDir(cfg); err != nil {
 		return err
 	}
-	dir := DirFTData(cfg)
+	dir, err := DirFTData(cfg)
+	if err != nil {
+		return err
+	}
 	jsonBz, err := json.MarshalIndent(reg, "", "  ")
 	if err != nil {
 		return err
@@ -164,7 +397,10 @@ func RemoveArea(reg FocusAreas, index int) (FocusAreas, error) {
 // CreateFocusTimeDir: Creates the primary data directory if it does not already
 // exist. Otherwise, does nothing.
 func CreateFocusTimeDir(cfg StartCfg) error {
-	ftDir := DirFTData(cfg)
+	ftDir, err := DirFTData(cfg)
+	if err != nil {
+		return err
+	}
 	info, err := os.Stat(ftDir)
 	switch {
 	case err == nil && info.IsDir():
@@ -183,55 +419,71 @@ func CreateFocusTimeDir(cfg StartCfg) error {
 
 // XdgConfigHome returns the XDG configuration directory, falling back
 // to $HOME/.config when XDG_CONFIG_HOME is not set.
-func XdgConfigHome(cfg StartCfg) string {
+func XdgConfigHome(cfg StartCfg) (string, error) {
 	if v := os.Getenv("XDG_CONFIG_HOME"); v != "" {
-		return v
+		return v, nil
 	}
-	home := cfg.HomeDir
-	return filepath.Join(home, ".config")
+	home, err := EffectiveHomeDir(cfg)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".config"), nil
 }
 
 // XdgDataHome returns the XDG data directory, falling back to
 // $HOME/.local/share when XDG_DATA_HOME is not set.
 // Data holds persistent downloaded assets.
-func XdgDataHome(cfg StartCfg) string {
+func XdgDataHome(cfg StartCfg) (string, error) {
 	if v := os.Getenv("XDG_DATA_HOME"); v != "" {
-		return v
+		return v, nil
 	}
-	home := cfg.HomeDir
-	return filepath.Join(home, ".local", "share")
+	home, err := EffectiveHomeDir(cfg)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".local", "share"), nil
 }
 
 // XdgStateHome returns the XDG state directory, falling back to
 // $HOME/.local/state when XDG_STATE_HOME is not set.
 // State in the XDG spec is runtime info that persists but is not user-editable.
 // It typically holds session state like logs and runtime history.
-func XdgStateHome(cfg StartCfg) string {
+func XdgStateHome(cfg StartCfg) (string, error) {
 	if v := os.Getenv("XDG_STATE_HOME"); v != "" {
-		return v
+		return v, nil
 	}
-	home := cfg.HomeDir
-	return filepath.Join(home, ".local", "state")
+	home, err := EffectiveHomeDir(cfg)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".local", "state"), nil
 }
 
 // XdgCacheHome returns the XDG cache directory, falling back to $HOME/.cache
 // when XDG_CACHE_HOME is not set. Cache is used for ephemeral speed-ups. Cache
 // is meant to be safe to delete at all times.
-func XdgCacheHome(cfg StartCfg) string {
+func XdgCacheHome(cfg StartCfg) (string, error) {
 	if v := os.Getenv("XDG_CACHE_HOME"); v != "" {
-		return v
+		return v, nil
 	}
-	home := cfg.HomeDir
-	return filepath.Join(home, ".cache")
+	home, err := EffectiveHomeDir(cfg)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".cache"), nil
 }
 
 // DirFTData returns the "$XDG_DATA_HOME/focustime" directory.
-func DirFTData(cfg StartCfg) string {
-	return filepath.Join(XdgDataHome(cfg), "focustime")
+func DirFTData(cfg StartCfg) (string, error) {
+	d, err := XdgDataHome(cfg)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(d, "focustime"), nil
 }
 
 // WeekValues holds one week's data. Areas is the ordered list of area IDs
-// (rows). Values is [areaIdx][dayIdx], Mon=0..Sun=6; nil = unset.
+// (rows). Values is [areaIdx][dayIdx], Sun=0..Sat=6; nil = unset.
 type WeekValues struct {
 	Areas  []int    `json:"areas"`
 	Values [][]*int `json:"values"`
@@ -283,10 +535,13 @@ func ParseYearWWeek(s string) (year, week int, err error) {
 	return year, week, nil
 }
 
-// TimeToWoY converts t to its ISO week-of-year in UTC and returns the
-// corresponding WoY value.
-func TimeToWoY(t time.Time) WoY {
-	t = t.UTC()
+// TimeToWoY converts t to its ISO week-of-year in loc and returns the
+// corresponding WoY value. A nil loc is treated as UTC.
+func TimeToWoY(t time.Time, loc *time.Location) WoY {
+	if loc == nil {
+		loc = time.UTC
+	}
+	t = t.In(loc)
 	year, weekOfYear := t.ISOWeek()
 	return WoY{
 		Year: year,
@@ -310,9 +565,11 @@ func ParseDurationToMinutes(s string) (int, error) {
 	return int(d / time.Minute), nil
 }
 
-// WeekdayToDayIndex maps a Go weekday to Mon=0..Sun=6.
+var weekdayLabelsJP = [7]string{"日", "月", "火", "水", "木", "金", "土"}
+
+// WeekdayToDayIndex maps a Go weekday to Sun=0..Sat=6.
 func WeekdayToDayIndex(wd time.Weekday) int {
-	return (int(wd) + 6) % 7
+	return int(wd)
 }
 
 func resolveAreaNames(reg FocusAreas, areaIDs []int) []string {
@@ -360,8 +617,9 @@ func LogTime(cfg StartCfg, durationStr string, areaID int) (int, error) {
 		return 0, fmt.Errorf("area index %d out of range [0, %d)",
 			areaID, len(reg.Areas))
 	}
-	now := time.Now().UTC()
-	woy := TimeToWoY(now)
+	loc := cfg.Location()
+	now := time.Now().In(loc)
+	woy := TimeToWoY(now, loc)
 	yf, err := LoadYearFile(cfg, woy.Year)
 	if err != nil {
 		return 0, err
@@ -392,8 +650,8 @@ func CurrentWeekReport(cfg StartCfg, now time.Time) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	now = now.UTC()
-	woy := TimeToWoY(now)
+	now = now.In(cfg.Location())
+	woy := TimeToWoY(now, cfg.Location())
 	yf, err := LoadYearFile(cfg, woy.Year)
 	if err != nil {
 		return "", err
@@ -406,7 +664,7 @@ func CurrentWeekReport(cfg StartCfg, now time.Time) (string, error) {
 	areaNames := resolveAreaNames(reg, week.Areas)
 	weekStart := weekStartFor(woy.Year, woy.Week)
 	return RenderWeekBuffer(*week, areaNames, woy.Year, woy.WeekIndex(),
-		weekStart), nil
+		weekStart, now), nil
 }
 
 // TodayReport returns today's logged values by area for the current week.
@@ -415,8 +673,8 @@ func TodayReport(cfg StartCfg, now time.Time) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	now = now.UTC()
-	woy := TimeToWoY(now)
+	now = now.In(cfg.Location())
+	woy := TimeToWoY(now, cfg.Location())
 	yf, err := LoadYearFile(cfg, woy.Year)
 	if err != nil {
 		return "", err
@@ -425,13 +683,14 @@ func TodayReport(cfg StartCfg, now time.Time) (string, error) {
 	dayIdx := WeekdayToDayIndex(now.Weekday())
 	dayLabel := now.Weekday().String()
 	dateLabel := now.Format("2006-01-02")
+	timeLabel := now.Format("15:04:05 MST")
 	if week == nil {
-		return fmt.Sprintf("Today (%s, %s): no data yet.\n",
-			dateLabel, dayLabel), nil
+		return fmt.Sprintf("Today (%s, %s, %s): no data yet.\n",
+			dateLabel, dayLabel, timeLabel), nil
 	}
 	areaNames := resolveAreaNames(reg, week.Areas)
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("Today (%s, %s)\n", dateLabel, dayLabel))
+	b.WriteString(fmt.Sprintf("Today (%s, %s, %s)\n", dateLabel, dayLabel, timeLabel))
 	hasData := false
 	total := 0
 	for row := range week.Areas {
@@ -462,7 +721,11 @@ func LoadYearFile(cfg StartCfg, year int) (YearFile, error) {
 	if err := CreateFocusTimeDir(cfg); err != nil {
 		return fresh, err
 	}
-	fp := filepath.Join(DirFTData(cfg), fmt.Sprintf("%d.json", year))
+	dir, err := DirFTData(cfg)
+	if err != nil {
+		return fresh, err
+	}
+	fp := filepath.Join(dir, fmt.Sprintf("%d.json", year))
 	fileBz, err := os.ReadFile(fp)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -491,7 +754,10 @@ func SaveYearFile(cfg StartCfg, yf YearFile) error {
 	if err := CreateFocusTimeDir(cfg); err != nil {
 		return err
 	}
-	dir := DirFTData(cfg)
+	dir, err := DirFTData(cfg)
+	if err != nil {
+		return err
+	}
 	jsonBz, err := json.MarshalIndent(yf, "", "  ")
 	if err != nil {
 		return err
@@ -566,7 +832,7 @@ func FindOrCreateWeek(yf *YearFile, weekIndex int, defaultAreas []int) (*WeekVal
 
 // RenderWeekBuffer produces the week view text format per spec §4.1.
 func RenderWeekBuffer(week WeekValues, areaNames []string, year, weekIndex int,
-	weekStart time.Time) string {
+	weekStart time.Time, nowLocal time.Time) string {
 	areaIDs := make([]string, len(week.Areas))
 	for i, id := range week.Areas {
 		areaIDs[i] = fmt.Sprint(id)
@@ -574,17 +840,7 @@ func RenderWeekBuffer(week WeekValues, areaNames []string, year, weekIndex int,
 	areaIDList := strings.Join(areaIDs, ", ")
 	weekNum := weekIndex + 1
 
-	var b strings.Builder
-	b.WriteString("# focustime week view\n")
-	b.WriteString("# Week index: " + fmt.Sprintf("%dw%d", year, weekNum) + " (Week starting: " + weekStart.Format("2006-01-02") + ")\n")
-	b.WriteString("# Areas (row order): " + areaIDList + "\n")
-	b.WriteString("# Units: minutes\n")
-	b.WriteString("#\n")
-	b.WriteString("# Edit numeric cells only. Empty = unset.\n")
-	b.WriteString("#\n")
-	b.WriteString("# Columns: Area | Mon | Tue | Wed | Thu | Fri | Sat | Sun\n")
-
-	maxAreaWidth := 0
+	maxAreaWidth := runewidth.StringWidth("Area")
 	for _, name := range areaNames {
 		if w := runewidth.StringWidth(name); w > maxAreaWidth {
 			maxAreaWidth = w
@@ -592,11 +848,41 @@ func RenderWeekBuffer(week WeekValues, areaNames []string, year, weekIndex int,
 	}
 	areaColWidth := maxAreaWidth + 1
 	const numWidth = 4
+
+	var b strings.Builder
+	b.WriteString("# focustime week view\n")
+	b.WriteString("# Week index: " + fmt.Sprintf("%dw%d", year, weekNum) + " (Week starting: " + weekStart.Format("2006-01-02") + ")\n")
+	b.WriteString("# Areas (row order): " + areaIDList + "\n")
+	b.WriteString("# Units: minutes\n")
+	b.WriteString("# Edit numeric cells only. Empty = unset.\n")
+	b.WriteString("#\n")
+	const headerPrefix = "# "
+	b.WriteString(headerPrefix)
+	headerAreaColWidth := areaColWidth - runewidth.StringWidth(headerPrefix)
+	if headerAreaColWidth < runewidth.StringWidth("Area") {
+		headerAreaColWidth = runewidth.StringWidth("Area")
+	}
+	b.WriteString(padRightDisplayWidth("Area", headerAreaColWidth))
+	b.WriteString(" |")
+	todayIdx, hasTodayMarker := headerTodayMarkerDayIndex(year, weekIndex, nowLocal)
+	for i, day := range weekdayLabelsJP {
+		label := day
+		if hasTodayMarker && i == todayIdx {
+			label = "🟢" + day
+		}
+		b.WriteString(" ")
+		b.WriteString(padLeftDisplayWidth(label, numWidth))
+		if i < len(weekdayLabelsJP)-1 {
+			b.WriteString(" |")
+		}
+	}
+	b.WriteString("\n")
+
 	for row := 0; row < len(areaNames); row++ {
 		name := areaNames[row]
 		rowStr := padRightDisplayWidth(name, areaColWidth) + " |"
 		vals := week.Values[row]
-		for d := 0; d < 7; d++ {
+		for d := 0; d < len(weekdayLabelsJP); d++ {
 			rowStr += " "
 			if d < len(vals) && vals[d] != nil {
 				rowStr += fmt.Sprintf("%*d", numWidth, *vals[d])
@@ -612,6 +898,17 @@ func RenderWeekBuffer(week WeekValues, areaNames []string, year, weekIndex int,
 	return b.String()
 }
 
+func headerTodayMarkerDayIndex(year int, weekIndex int, nowLocal time.Time) (int, bool) {
+	if nowLocal.IsZero() {
+		return 0, false
+	}
+	nowYear, nowWeek := nowLocal.ISOWeek()
+	if nowYear != year || nowWeek != weekIndex+1 {
+		return 0, false
+	}
+	return WeekdayToDayIndex(nowLocal.Weekday()), true
+}
+
 // padRightDisplayWidth pads s to at least width display cells with spaces.
 func padRightDisplayWidth(s string, width int) string {
 	w := runewidth.StringWidth(s)
@@ -619,6 +916,15 @@ func padRightDisplayWidth(s string, width int) string {
 		return s
 	}
 	return s + strings.Repeat(" ", width-w)
+}
+
+// padLeftDisplayWidth pads s on the left to at least width display cells.
+func padLeftDisplayWidth(s string, width int) string {
+	w := runewidth.StringWidth(s)
+	if w >= width {
+		return s
+	}
+	return strings.Repeat(" ", width-w) + s
 }
 
 // ParseWeekBuffer parses the edited buffer back into WeekValues.
@@ -651,8 +957,8 @@ func ParseWeekBuffer(buf []byte, areaNames []string, areaIDs []int) (WeekValues,
 		if areaName != areaNames[i] {
 			return WeekValues{}, fmt.Errorf("row %d: expected area %q, got %q", i+1, areaNames[i], areaName)
 		}
-		row := make([]*int, 7)
-		for d := 0; d < 7; d++ {
+		row := make([]*int, len(weekdayLabelsJP))
+		for d := 0; d < len(weekdayLabelsJP); d++ {
 			cell := strings.TrimSpace(parts[d+1])
 			if cell == "" {
 				row[d] = nil
@@ -832,8 +1138,10 @@ func WeekEdit(cfg StartCfg, woy WoY) error {
 	}
 	// 7. Compute week start (Monday of that ISO week)
 	weekStart := weekStartFor(woy.Year, woy.Week)
+	nowInLoc := time.Now().In(cfg.Location())
 	// 8. Render buffer
-	buf := RenderWeekBuffer(*week, areaNames, woy.Year, woy.WeekIndex(), weekStart)
+	buf := RenderWeekBuffer(*week, areaNames, woy.Year, woy.WeekIndex(), weekStart,
+		nowInLoc)
 	// 9. Create temp file, write buf
 	pattern := fmt.Sprintf("focustime-%dw%d_*", woy.Year, woy.Week)
 	tmp, err := os.CreateTemp("", pattern)
