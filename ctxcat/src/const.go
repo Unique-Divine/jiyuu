@@ -1,4 +1,4 @@
-package aictx
+package ctxcat
 
 const (
 	codeMarkerDepth4 string = "````"

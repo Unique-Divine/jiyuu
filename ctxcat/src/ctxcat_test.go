@@ -1,4 +1,4 @@
-package aictx
+package ctxcat
 
 import (
 	"bytes"
@@ -280,9 +280,9 @@ func (s *S) TestCLI_LevelLimitIntegration() {
 	app, outBuf, errBuf := NewTestingCLI()
 
 	// Call the CLI as if from the shell:
-	// aictx --level 1 <root>
+	// ctxcat --level 1 <root>
 	args := []string{
-		"aictx",     // argv[0] – binary name
+		"ctxcat",     // argv[0] – binary name
 		"--level=1", // global flag
 		root,        // positional arg
 	}
@@ -301,7 +301,7 @@ func (s *S) TestCLI_LevelLimitIntegration() {
 func (s *S) TestCLI_NoArgs_ShowsError() {
 	app, outBuf, errBuf := NewTestingCLI()
 
-	err := app.Run(context.Background(), []string{"aictx"})
+	err := app.Run(context.Background(), []string{"ctxcat"})
 	s.Require().NoErrorf(err, "stderr: %s", errBuf) // from cli.Exit
 	s.Contains(errBuf.String(), "requires at least one path")
 	s.Contains(outBuf.String(), "Combine files into a single LLM-friendly output")

@@ -7,7 +7,7 @@
 | Path | Description |
 | ---- | ----------- |
 | <span style="white-space: nowrap;">📂 [algos](./algos/algos-notes.md)</span> | Algorithm practice problems with Go implementations and Anki-formatted notes for deliberate practice |
-| <span style="white-space: nowrap;">📂 [aictx](./aictx/README.md)</span> | File to context convertor for pasing files to feed LLMs. Similar to `cat` and `bat`. |
+| <span style="white-space: nowrap;">📂 [ctxcat](./ctxcat/README.md)</span> | File to context convertor for pasing files to feed LLMs. Similar to `cat` and `bat`. |
 | <span style="white-space: nowrap;">📂 [gocovmerge](./gocovmerge/README.md)</span> | Go coverage profile merger with modern CLI features |
 | <span style="white-space: nowrap;">📂 [mdtoc](./mdtoc/README.md)</span> | Markdown table of contents (TOC) generator |
 | <span style="white-space: nowrap;">📂 [winfixtext](./winfixtext/README.md)</span> | Fixes Windows encoding issues and corrupted LLM text outputs |
