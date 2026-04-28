@@ -6,6 +6,7 @@
 
 | Path | Description |
 | ---- | ----------- |
+| <span style="white-space: nowrap;">📂 [ai-skills](./ai-skills/)</span> | Cursor/LLM agent skills for recurring workflows, repo navigation, PRs, chain queries, and data lookups |
 | <span style="white-space: nowrap;">📂 [algos](./algos/algos-notes.md)</span> | Algorithm practice problems with Go implementations and Anki-formatted notes for deliberate practice |
 | <span style="white-space: nowrap;">📂 [ctxcat](./ctxcat/README.md)</span> | File to context convertor for pasing files to feed LLMs. Similar to `cat` and `bat`. |
 | <span style="white-space: nowrap;">📂 [gocovmerge](./gocovmerge/README.md)</span> | Go coverage profile merger with modern CLI features |
@@ -17,6 +18,24 @@
 | <span style="white-space: nowrap;">📦 scripts</span> | Scripts crate in Rust |
 | <span style="white-space: nowrap;">├── justfile</span> | Runs project-specific commands |
 <!-- | <span style="white-space: nowrap;">└── README.md</span>  | ... | -->
+
+## `ai-skills`
+
+`ai-skills/` contains reusable agent skills for Cursor/LLM workflows. Each
+skill is a small, task-focused directory with a `SKILL.md` entrypoint and, when
+needed, supporting docs like `reference.md`, `REFERENCE.md`, `examples.md`, or
+schema notes.
+
+Current skills cover workflows such as:
+
+- writing commit messages and PR summaries
+- routing work across related repos
+- querying Nibiru via `nibid` or EVM RPC
+- querying indexer, Sai GraphQL, REST, and Postgres-backed data sources
+- checking governance proposals and upgrade status
+
+In practice, this directory is the repo's library of operational playbooks for
+repeatable AI-assisted tasks.
 
 ## Hacking
 
