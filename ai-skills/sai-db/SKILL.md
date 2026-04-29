@@ -147,6 +147,102 @@ ORDER BY volume_30d_usd DESC
 LIMIT 50;
 ```
 
+### 7) Get average price of Oracle token for a specific day
+Should always be used instead of tabls `oracle_price_history` which is too heavy
+```sql
+SELECT
+    sop.oracle_token_id,
+    sop.avg_price_usd
+FROM stats_oracle_price sop
+WHERE
+    sop.ts <= '2026-04-01'
+    AND oracle_token_id = 1
+LIMIT 1;
+```
+
+### 8) Trades information
+Base query for building various trade stats.
+
+```sql
+SELECT
+    pt.trader,
+    pt.id AS trade_id,
+    pt.is_long,
+    pt.is_open,
+    leverage,
+    ot.base as market_token,
+    otc.base as collateral_token,
+    pt.collateral_amount * coll_price_open.avg_price_usd / 1e6 AS collateral_amount_usd,
+    pt.collateral_amount * pt.leverage * coll_price_open.avg_price_usd / 1e6 AS size_usd,
+    pt.open_price,
+    pt.close_price,
+    pth.realized_pnl_pct,
+    pth.realized_pnl_pct * pt.collateral_amount * coll_price_close.avg_price_usd / 1e6 AS realized_pnl_usd,
+    pt.open_block,
+    bop.block_ts as open_ts,
+    pt.close_block,
+    bcl.block_ts as close_ts,
+    pt.referral_code
+FROM perp_trade pt
+LEFT JOIN perp_trade_history pth -- to track realized pnl
+    ON pth.trader = pt.trader
+           AND pth.trade_id = pt.id
+           AND pth.trade_change_type IN (
+             'position_closed_tp',
+             'position_closed_sl',
+             'position_closed_user',
+             'position_liquidated'
+          )
+JOIN oracle_token otc on otc.id = pt.collateral_id
+JOIN perp_market pm on pm.id = pt.perp_market_id
+JOIN oracle_token ot on ot.id = pm.base_token_id
+JOIN block bop ON bop.block = pt.open_block
+JOIN block bcl ON bcl.block = pt.close_block
+LEFT JOIN LATERAL ( -- get collateral price at trade open
+    SELECT
+        sop.oracle_token_id,
+        sop.avg_price_usd
+    FROM stats_oracle_price sop
+    WHERE
+        sop.oracle_token_id = pt.collateral_id
+        AND sop.ts <= bop.block_ts
+    LIMIT 1
+) coll_price_open ON TRUE
+LEFT JOIN LATERAL ( -- get collateral price at trade close
+    SELECT
+        sop.oracle_token_id,
+        sop.avg_price_usd
+    FROM stats_oracle_price sop
+    WHERE
+        sop.oracle_token_id = pt.collateral_id
+        AND sop.ts <= bcl.block_ts
+    LIMIT 1
+) coll_price_close ON TRUE
+ORDER BY pt.close_block DESC, pt.open_block DESC;
+```
+
+### 9) Perp markets detailed info
+```sql
+SELECT
+    pm.id,
+    type,
+    symbol,
+    description,
+    visible,
+    is_open,
+    LEAST(pm.max_leverage, pmg.max_leverage) AS max_leverage,
+    pf.open_fee_p,
+    pf.close_fee_p,
+    ts.name AS trading_schedule_name
+FROM perp_market pm
+JOIN perp_market_group pmg ON pmg.id = pm.perp_market_group_id
+JOIN perp_market_visibility pm_vis ON pm_vis.perp_market_id = pm.id
+JOIN perp_fee pf ON pm.perp_fee_id = pf.id
+JOIN oracle_token_info oti ON oti.oracle_token_id = pm.base_token_id
+LEFT JOIN trading_schedule ts ON ts.id = oti.trading_schedule_id
+ORDER BY type, pm.id
+```
+
 ## Known Pitfalls / Interpretation Notes
 
 - `open_positions` and `open_interest` can diverge:
