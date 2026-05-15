@@ -5,6 +5,12 @@ description: Interview the user relentlessly about a plan, spec, or design until
 
 Interview me relentlessly about every aspect of this plan until we reach a shared understanding. Walk down each branch of the design tree, resolving dependencies between decisions one-by-one. For each question, provide your recommended answer.
 
-Ask the questions one at a time.
+1. Ask the questions one at a time.
 
-If a question can be answered by exploring the codebase, explore the codebase instead.
+2. If a question can be answered by exploring the codebase, explore the codebase instead.
+
+3. Record decisions as the discussion progresses. If the user is working from an
+existing spec, plan, issue, or design document, write the resolved answers back
+into that document iteratively. If there is no obvious document, create or
+propose a short notes/spec file and use it to capture decisions, open questions,
+and rationale so the drill does not remain only in chat.

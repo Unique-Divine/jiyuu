@@ -13,6 +13,38 @@ authoritative chain view or wants to submit a transaction with `nibid`.
 - EVM account, FunToken, and unit notes: [`reference.md`](./reference.md)
 - Copy-paste examples: [`examples.md`](./examples.md)
 
+## Installing `nibid`
+
+Nibiru publishes a bash installer at `https://get.nibiru.fi/`. The URL behaves
+like a small package installer:
+
+```bash
+# Recommended: install the default/latest generated release onto PATH.
+curl -s https://get.nibiru.fi/! | bash
+
+# Install a specific release into the current directory as ./nibid.
+curl -s https://get.nibiru.fi/@v2.12.0-p1 | bash
+
+# Install a specific release onto PATH at /usr/local/bin/nibid.
+# The trailing ! makes the generated script set OUT_DIR="/usr/local/bin" and
+# may ask for sudo.
+curl -s https://get.nibiru.fi/@v2.12.0-p1! | bash
+```
+
+Rules of thumb:
+
+- The `@version` segment selects the release tag used in the generated GitHub
+  asset URLs.
+- Prefer the trailing `!` form for the default install command so `nibid` lands
+  at `/usr/local/bin/nibid`.
+- Without `!`, the generated script uses `OUT_DIR="$(pwd)"` and writes
+  `./nibid`.
+- With trailing `!`, the generated script uses `OUT_DIR="/usr/local/bin"` so
+  `nibid` is available on PATH.
+- `https://get.nibiru.fi/?type=script` is useful for reading the generated
+  script logic, not for specifying versions.
+- After installing, verify with `which nibid` and `nibid version`.
+
 ## Quick start
 
 1. Select the chain config with your `ud` wrapper:

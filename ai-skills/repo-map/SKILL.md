@@ -61,3 +61,25 @@ frontend and API integrations. This uses the "sai-keeper" GraphQL interface.
   content in `src/content/post/` (schema in `src/content/config.ts`). Site config
   `src/config.yaml`, nav `src/navigation.js`. Run `just dev`, build `just b`,
   deploy `just deploy`.
+
+## GitHub Remotes and Git Cloning
+
+### Repos with Prefix "sai-" or "nibi-" (`$HOME/ki`)
+
+Nibiru work lives under org **`NibiruChain`**. Local directory names often **differ** from the repository slug (e.g. clone `nibiru` into **`nibi-chain`**, `web-app` into **`sai-website`**). **`gh repo list NibiruChain`** lists canonical slugs for your account.
+
+| Local folder | Remote |
+|--------------|--------|
+| `nibi-chain` | `git@github.com:NibiruChain/nibiru.git` |
+| `nibi-geth` | `git@github.com:NibiruChain/go-ethereum.git` |
+| `nibi-go-hm` | `git@github.com:NibiruChain/heart-monitor.git` |
+| `nibi-ts-sdk` | `git@github.com:NibiruChain/ts-sdk.git` |
+| `sai-website` | `git@github.com:NibiruChain/web-app.git` |
+| `sai-perps` | `git@github.com:NibiruChain/sai-perps.git` |
+| `sai-keeper` | `git@github.com:NibiruChain/sai-keeper.git` |
+| `sai-docs` | `git@github.com:NibiruChain/sai-docs.git` |
+| `nibi-iac` | `git@github.com:NibiruChain/iac.git` |
+
+Other entries in this map: **`wasm-cosmwasm`** → `git@github.com:CosmWasm/cosmwasm.git`; **`wasm-go-wasmvm`** → `git@github.com:CosmWasm/wasmvm.git`; **`boku`** → `git@github.com:Unique-Divine/boku.git` (personal).
+
+Copy-paste **`git clone`** commands, optional idempotent **`clone`** helper function, and notes on discovering org repos: [cloning.md](./cloning.md).
