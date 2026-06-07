@@ -1,0 +1,41 @@
+{
+  "name": "@uniquedivine/tg-sai",
+  "version": "0.1.0",
+  "type": "module",
+  "private": false,
+  "description": "Sai Telegram admin audit and bootstrap CLI",
+  "engines": {
+    "bun": ">=1.0.0"
+  },
+  "bin": {
+    "tg-sai": "./main.ts"
+  },
+  "scripts": {
+    "start": "bun main.ts",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "py-test": "uv run pytest session_string_generator_test.py"
+  },
+  "files": [
+    "*.ts",
+    "!*.test.ts",
+    "!adminCheck.ts",
+    "!testdata.ts",
+    "*.py",
+    "!*_test.py",
+    "pyproject.toml",
+    "uv.lock",
+    "README.md",
+    "RUNBOOK.md"
+  ],
+  "license": "UNLICENSED",
+  "devDependencies": {
+    "@types/bun": "^1.3.14",
+    "typescript": "^6.0.3"
+  },
+  "dependencies": {
+    "@mtcute/bun": "^0.30.1",
+    "@mtcute/convert": "^0.30.1",
+    "commander": "^15.0.0"
+  }
+}

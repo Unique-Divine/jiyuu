@@ -1,0 +1,48 @@
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Python build and package artifacts
+.Python
+build/
+dist/
+*.egg-info/
+*.egg
+MANIFEST
+
+# Test and coverage artifacts
+.venv/
+.pytest_cache/
+.coverage
+.coverage.*
+.cache/
+htmlcov/
+coverage.xml
+*.cover
+*.py,cover
+
+# Local env and dependency environments
+.env
+node_modules/
+env/
+venv/
+ENV/
+__pypackages__/
+
+# Static analysis caches
+.mypy_cache/
+.pyre/
+.pytype/
+.ruff_cache/
+
+# Telegram session files and local logs
+*.session
+*.session-journal
+*.session.sql
+*.session.sql-journal
+*.log
+*.tmp
+
+# npm pack output
+*.tgz
