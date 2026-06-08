@@ -3,10 +3,11 @@ name: repo-map
 description: >-
   Maps and routes between key repositories on my machine (boku, nibi-chain,
   nibi-geth, nibi-go-hm, nibi-ts-sdk, sai-website, sai-perps, nibi-iac,
-  gh-io-ud, wasm-cosmwasm, wasm-go-wasmvm). Use when the user asks which repo to look at,
-  where a feature lives, how repos connect, how services are deployed
-  (Terraform/IaC), when a task spans chain, EVM, indexer, SDK, and frontend, or
-  when the user asks about the personal site, blog posts, or Astro/gh-pages.
+  nibi-home-site, gh-io-ud, wasm-cosmwasm, wasm-go-wasmvm). Use when the user
+  asks which repo to look at, where a feature lives, how repos connect, how
+  services are deployed (Terraform/IaC), when a task spans chain, EVM, indexer,
+  SDK, frontend, and docs, or when the user asks about the personal site, blog
+  posts, official Nibiru docs, or Astro/gh-pages.
 ---
 
 # Repo Map — Nibiru and Personal Repos
@@ -47,6 +48,11 @@ frontend and API integrations. This uses the "sai-keeper" GraphQL interface.
 - `$HOME/ki/sai-docs`: Public-facing user documentation for Sai. Great conceptual
   resource.
 
+### Nibiru Public Site and Docs
+- `$HOME/ki/nibi-home-site`: **Nibiru official website, blog, and public docs**.
+  Official Nibiru docs live in `docs-nibiru/` and publish to `nibiru.fi/docs`.
+  Use this repo for docs content, site/blog changes, and docs navigation.
+
 ### Infrastructure (IaC)
 - `$HOME/ki/nibi-iac`: **Infrastructure as code (Terraform)**. Source of truth for live deployments,
   DNS, and endpoints. Provisions GKE clusters, RPC/archive endpoints, indexer (Heart Monitor) GraphQL,
@@ -74,7 +80,8 @@ Nibiru work lives under org **`NibiruChain`**. Local directory names often **dif
 | `nibi-geth` | `git@github.com:NibiruChain/go-ethereum.git` |
 | `nibi-go-hm` | `git@github.com:NibiruChain/heart-monitor.git` |
 | `nibi-ts-sdk` | `git@github.com:NibiruChain/ts-sdk.git` |
-| `sai-website` | `git@github.com:NibiruChain/web-app.git` |
+| `nibi-home-site` | `git@github.com:NibiruChain/home-site.git` |
+| `sai-website` | `git@github.com:NibiruChain/sai-website.git` |
 | `sai-perps` | `git@github.com:NibiruChain/sai-perps.git` |
 | `sai-keeper` | `git@github.com:NibiruChain/sai-keeper.git` |
 | `sai-docs` | `git@github.com:NibiruChain/sai-docs.git` |
