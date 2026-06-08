@@ -51,6 +51,71 @@ With `--offline`, the CLI only normalizes the address forms. It does not query
 live chain state, so `balance_wei` and `code_hash` come back empty and `nonce`
 defaults to `0`.
 
+### `nibid q evm balance`
+
+This is the workhorse command for checking USDC balances on Nibiru, especially
+for Sai operations where USDC is the primary currency. It queries token balances
+in Nibiru's multi-VM context and returns both ERC20 and Bank representations
+when available.
+
+It accepts either address format for the account argument:
+
+- EVM hex address, e.g. `0x8fB11A655B6cb989085c8B21AB044Ec19685942D`
+- Bech32 address, e.g. `nibi137c35e2mdjucjzzu3vs6kpzwcxtgt9pdnvj5ll`
+
+It accepts either token format for the token argument:
+
+- ERC20 address, e.g. mainnet USDC `0x0829F361A05D993d5CEb035cA6DF3446b060970b`
+- Bank denom, e.g. `erc20/0x0829F361A05D993d5CEb035cA6DF3446b060970b`
+- Native bank denom, e.g. `unibi`
+
+Mainnet Sai USDC reference:
+
+```bash
+USDC_ERC20="0x0829F361A05D993d5CEb035cA6DF3446b060970b"
+USDC_BANK="erc20/0x0829F361A05D993d5CEb035cA6DF3446b060970b"
+```
+
+The examples from `nibid q evm balance --help` are the canonical quick-start:
+
+```bash
+# USDC on Nibiru mainnet
+addr="0xYourAddr" token="0x0829F361A05D993d5CEb035cA6DF3446b060970b"
+nibid query evm balance "$addr" "$token"
+
+# NIBI via bank denom
+addr="0xYourAddr" token="unibi"  # Bank coin denom works
+nibid query evm balance "$addr" "$token"
+
+# NIBI via canonical WNIBI ERC20
+addr="0xYourAddr" token="0x0CaCF669f8446BeCA826913a3c6B96aCD4b02a97" # ERC20 addr works
+nibid query evm balance "$addr" "$token"
+```
+
+For a Bech32 keyring address, use the key address directly:
+
+```bash
+ADDR="$(nibid keys show sai-perp-admin -a)"
+TOKEN="0x0829F361A05D993d5CEb035cA6DF3446b060970b"
+nibid q evm balance "$ADDR" "$TOKEN" | jq .
+```
+
+Useful output fields:
+
+- `addr_evm` and `addr_bech32`: normalized account address forms.
+- `erc20_balance_human` / `erc20_balance_base`: ERC20 balance.
+- `bank_balance_human` / `bank_balance_base`: Bank coin balance for the mapped
+  denom.
+- `bank_coin_denom`: bank denom corresponding to the ERC20 token.
+- `erc20_decimals` / `bank_decimals`: decimal metadata for display conversion.
+
+Rule of thumb:
+
+- Prefer `nibid q evm balance "$ADDR" "$USDC_ERC20"` for Sai USDC balance
+  checks because it shows both EVM/ERC20 and Bank-side holdings in one response.
+- Use `nibid q bank balances "$ADDR" --denom "$USDC_BANK"` only when you
+  specifically need the Bank module view.
+
 ### `balance_wei` and bank `unibi`
 
 `balance_wei` from `nibid q evm account` and bank `unibi` from `nibid q bank balances`
