@@ -1,6 +1,6 @@
 {
   "name": "@uniquedivine/jiyuu",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "TypeScript utils that mimic functionality from Rust and Golang",
   "module": "index.ts",
   "type": "module",
