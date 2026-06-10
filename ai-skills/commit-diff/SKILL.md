@@ -2,12 +2,56 @@
 name: commit-diff
 description: >-
   Generate a clear, cogent, concise, and conventional-like commit message from
-  the relevant git diff. Default is staged changes (what will be committed). Use
-  when the user asks for a commit message, says "save/commit", or asks to
+  the relevant git diff, with optional flags like --add, --line, --copy,
+  --no-diff, and --subagent. Default is staged changes (what will be committed).
+  Use when the user asks for a commit message, says "save/commit", or asks to
   summarize staged, working tree, or last commit changes.
 ---
 
 # Commit Diff
+
+## Usage
+
+Invoke this skill when the user asks for a commit message or uses
+`/commit-diff`. The user may include flags anywhere in the request:
+
+`/commit-diff [--add] [--line] [--copy] [--no-diff] [--subagent] [diff target]`
+
+Flags:
+
+- `--add`: Stage the relevant changed files before reading the commit diff, so
+  the suggested message is based on exactly what would be committed. Use `git
+  status` first, stage only files relevant to the current task, and avoid
+  staging secrets or unrelated user changes. If relevance is unclear, ask before
+  staging.
+- `--line`: Return only one commit subject line. Do not include a body,
+  explanation, or extra commentary. It is okay for the line to be longer and
+  more specific than the normal 80-character target.
+- `--copy`: Copy the recommended one-line commit subject to the clipboard with
+  `pbcopy`. This implies `--line`: generate only the subject line, pipe exactly
+  that line to `pbcopy`, and keep the user-facing response concise. If `pbcopy`
+  is unavailable, say so and still return the one-line subject.
+- `--no-diff`: Suggest the commit message from recent chat context without
+  reading the diff. This is for cases where the agent just made the changes and
+  already knows the intent. If the context is insufficient, say so briefly and
+  ask whether to read the diff.
+- `--subagent`: Use a `composer-2.5-fast` subagent to inspect the relevant diff
+  and propose the commit message instead of analyzing the diff directly. Give
+  the subagent the selected diff target and any flags that affect output format.
+
+Flag interactions:
+
+- `--line` can combine with any other flag and controls only the final output
+  shape.
+- `--copy` can combine with any other flag. It implies `--line`, so the final
+  commit recommendation must be a single subject line.
+- `--add` can combine with normal diff reading or `--subagent`; stage first,
+  then inspect `git diff --staged`.
+- `--no-diff` conflicts with `--subagent` because one avoids reading the diff
+  and the other delegates diff inspection. If both are present, ask the user
+  which behavior they want.
+- `--no-diff --add` is allowed only when the relevant files are obvious from
+  the current chat. Stage those files, but still do not read the diff.
 
 ## When to Apply
 
@@ -55,6 +99,16 @@ Body (optional):
 - Blank line after subject
 - 1–3 bullets focusing on **why** and any non-obvious behavior changes
 - Be clear, cogent, concise.
+
+When `--copy` is present, copy the final subject line after choosing it:
+
+```bash
+printf '%s' 'type(scope): Imperative summary' | pbcopy
+```
+
+Replace the example string with the actual final subject. Do not copy a body,
+explanation, Markdown fence, or trailing commentary. If `pbcopy` fails or is not
+installed, tell the user the copy step failed and show the subject line.
 
 ### Examples
 
