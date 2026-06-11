@@ -28,15 +28,15 @@ VAULT_G1_USDC="nibi1waf5c8z55qvjay4de8wkm9cxyt6wa8zdnrvlexjrq77lqgqf258q3yn7l8"
 VAULT_G1_STNIBI="nibi1pgurgas0za436c3fm2km99zkzutfx0jwpn7meespv6szv8c8g39qjz2tvj"
 
 sai_q() {
-  nibid query wasm contract-state smart "$1" "$2" --output json
+  nibid query wasm contract-state smart "$1" "$2"
 }
 
 raw_item() {
   contract="$1"
   key="$2"
   hex=$(printf '%s' "$key" | xxd -p -c 256)
-  nibid query wasm contract-state raw "$contract" "$hex" \
-    --output json | jq -r '.data // empty' | base64 -d
+  nibid query wasm contract-state raw "$contract" "$hex" |
+    jq -r '.data // empty' | base64 -d
   echo
 }
 ```
@@ -103,6 +103,45 @@ do
 done
 ```
 
+### Daily Risk Params
+
+Use SLP Vault smart query `{"risk_params":{}}` as the main operator view for
+daily payout limits and daily PnL throttle state.
+
+```bash
+sai_q "$VAULT_G0_USDC" '{"risk_params":{}}' | jq '.data'
+```
+
+Important response fields:
+
+| Field | Meaning |
+| --- | --- |
+| `collateral_denom` | Native collateral denom accepted by the SLP Vault. |
+| `balance_now` | Current bank balance of the SLP Vault contract for `collateral_denom`, in base units. |
+| `daily_balance_snapshot` | Bank balance captured at the most recent daily reset. The balance-based daily payout cap uses this snapshot, not `balance_now`. |
+| `max_daily_balance_loss_pct` | Configured maximum fraction of `daily_balance_snapshot` that can be paid out through trader-profit settlement in one daily window. |
+| `daily_payout_cap` | Maximum collateral amount that can be paid out in the current daily window: `daily_balance_snapshot * max_daily_balance_loss_pct`. |
+| `daily_payout_used` | Collateral already paid out through the capped settlement path in the current daily window. |
+| `daily_payout_remaining` | Remaining collateral payout capacity for the current daily window, floored at zero. |
+| `last_daily_acc_pnl_delta_reset` | Timestamp of the most recent daily reset, encoded as nanoseconds in JSON. The next reset is eligible after this timestamp plus 86,400 seconds. |
+| `max_daily_acc_pnl_delta` | Daily cap on positive realized PnL movement, expressed per share as a decimal. |
+| `daily_acc_pnl_delta` | Accumulated realized PnL movement for the current daily window, expressed per share as a signed decimal. |
+| `max_acc_open_pnl_delta` | Per-epoch cap on positive open PnL movement used by the open-trades PnL feed. |
+| `acc_pnl_per_token` | Raw cumulative PnL accumulator per SLP share. |
+| `acc_pnl_per_token_used` | Policy-applied PnL accumulator per SLP share. This value drives `share_to_assets_price` and `collateralization_p`. |
+| `acc_rewards_per_token` | Cumulative distributed reward accumulator per SLP share. |
+| `max_acc_pnl_per_token` | Maximum PnL accumulator allowed by rewards: `1 + acc_rewards_per_token`. |
+| `share_to_assets_price` | Current collateral-per-share price used for mint and redeem accounting. |
+
+Daily resets are lazy. Passing the `last_daily_acc_pnl_delta_reset + 86,400`
+timestamp does not update storage by itself. The contract refreshes
+`daily_acc_pnl_delta`, `daily_balance_snapshot`, `daily_payout_used`, and
+`last_daily_acc_pnl_delta_reset` when an eligible execution path calls the daily
+reset helper, such as SLP Vault settlement function `send_assets` or
+`receive_assets`. SLP Vault execute message `{"distribute_reward":{}}` increases
+`balance_now`, `total_rewards`, and `acc_rewards_per_token`, but it does not
+refresh `daily_balance_snapshot`.
+
 ### Deposit Cap State
 
 Large SLP deposits can fail even when the user has enough collateral. The cap is
@@ -146,6 +185,65 @@ sai_q "$VAULT_G0_USDC" '{"current_epoch":{}}'
 sai_q "$VAULT_G0_USDC" '{"get_current_epoch_start":{}}'
 sai_q "$VAULT_G0_USDC" '{"withdraw_epochs_timelock":{}}'
 sai_q "$VAULT_G0_USDC" '{"config":{}}'
+```
+
+#### Check Epoch and Daily Reset Distance
+
+Use this when asking "when is the next SLP reset?" or "how far away is the
+epoch time?". It compares the current machine time from `date` against on-chain
+vault timestamps.
+
+```bash
+VAULT="$VAULT_G0_USDC" # or any SLP vault address
+
+epoch_ns="$(sai_q "$VAULT" '{"get_current_epoch_start":{}}' \
+  | jq -r '.data')"
+current_epoch="$(sai_q "$VAULT" '{"current_epoch":{}}' | jq -r '.data')"
+
+raw_json_item() {
+  contract="$1"
+  key="$2"
+  hex="$(printf '%s' "$key" | xxd -p -c 256)"
+  nibid query wasm contract-state raw "$contract" "$hex" |
+    jq -r '.data // empty' | base64 -d | jq -r .
+}
+
+daily_reset_ns="$(raw_json_item "$VAULT" last_daily_acc_pnl_delta_reset)"
+supply_update_ns="$(raw_json_item "$VAULT" last_max_supply_update)"
+
+python3 - "$current_epoch" "$epoch_ns" "$daily_reset_ns" "$supply_update_ns" <<'PY'
+import sys, time
+from datetime import datetime, timezone
+
+current_epoch = sys.argv[1]
+epoch_ns = int(sys.argv[2])
+daily_ns = int(sys.argv[3])
+supply_ns = int(sys.argv[4])
+now = int(time.time())
+
+def fmt(ns):
+    return datetime.fromtimestamp(ns // 1_000_000_000, tz=timezone.utc)
+
+def away(sec):
+    delta = sec - now
+    suffix = "away" if delta >= 0 else "ago"
+    delta = abs(delta)
+    return f"{delta // 3600}h {(delta % 3600) // 60}m {delta % 60}s {suffix}"
+
+rows = [
+    ("current_epoch", current_epoch, None),
+    ("epoch_start", fmt(epoch_ns), epoch_ns // 1_000_000_000),
+    ("withdraw_open_ends", fmt(epoch_ns + 48 * 3600 * 1_000_000_000), (epoch_ns // 1_000_000_000) + 48 * 3600),
+    ("next_epoch_boundary", fmt(epoch_ns + 72 * 3600 * 1_000_000_000), (epoch_ns // 1_000_000_000) + 72 * 3600),
+    ("next_daily_pnl_reset_eligible", fmt(daily_ns + 86400 * 1_000_000_000), (daily_ns // 1_000_000_000) + 86400),
+    ("next_supply_cap_refresh_eligible", fmt(supply_ns + 86400 * 1_000_000_000), (supply_ns // 1_000_000_000) + 86400),
+]
+
+print("local_now:", datetime.now().astimezone())
+print("utc_now:", datetime.now(timezone.utc))
+for label, value, sec in rows:
+    print(f"{label}: {value}" + (f" ({away(sec)})" if sec else ""))
+PY
 ```
 
 ### Reward Funding State
@@ -315,8 +413,8 @@ raw_item() {
   contract="$1"
   key="$2"
   hex=$(printf '%s' "$key" | xxd -p -c 256)
-  nibid query wasm contract-state raw "$contract" "$hex" \
-    --output json | jq -r '.data // empty' | base64 -d
+  nibid query wasm contract-state raw "$contract" "$hex" |
+    jq -r '.data // empty' | base64 -d
   echo
 }
 
@@ -373,8 +471,8 @@ raw_pending_gov_fees() {
   idx_hex=$(printf '%04x' "$idx")
   hex_key="${ns_len_hex}${ns_hex}${idx_hex}"
 
-  nibid query wasm contract-state raw "$PERP" "$hex_key" \
-    --output json | jq -r '.data // empty' | base64 -d
+  nibid query wasm contract-state raw "$PERP" "$hex_key" |
+    jq -r '.data // empty' | base64 -d
   echo
 }
 

@@ -5,7 +5,8 @@ description: >-
   SLP Vault) using Nibiru CLI (nibid) or the Nibiru TypeScript SDK. Use when the user
   asks to query Sai perp contracts, inspect open interest, check OI limits, look up
   MarketIndex/TokenIndex/GroupIndex, run get_borrowing_group_oi or
-  get_borrowing_pair_oi, call queryContractSmart, or inspect Sai markets and
+  get_borrowing_pair_oi, validate on-chain fee config (get_fees, get_fee_tiers,
+  get_trader_fee_multiplier), call queryContractSmart, or inspect Sai markets and
   collaterals.
 metadata:
   tags: ["sai-perps", "sai-website"]
@@ -18,7 +19,7 @@ metadata:
 # Sai Perps: Contract Query Playbook
 
 Source of truth for query message shapes: `$HOME/ki/sai-website/webapp/pages/easy.tsx` (`QUERY_CONFIG`).
-Full validated CLI notes: `$HOME/ki/boku/epics/epic-sai/26-02-10-sai-mainnet-query.md`.
+Full validated CLI notes: `$HOME/ki/boku/epics/sai/26-02-10-sai-mainnet-query.md`.
 
 ## Mainnet addresses
 
@@ -33,7 +34,20 @@ Full validated CLI notes: `$HOME/ki/boku/epics/epic-sai/26-02-10-sai-mainnet-que
 
 Source: `$HOME/ki/sai-website/webapp/config/env.ts` (`SaiContractsMainnet`).
 
-Group 0 = main crypto markets (BTC, ETH, SOL, …). Group 1 = Real Estate (Coded Estate).
+Group meanings:
+- `GroupIndex(0)` = crypto assets
+- `GroupIndex(1)` = real estate
+- `GroupIndex(2)` = exotic
+- `GroupIndex(3)` = watch assets
+- `GroupIndex(4)` = equities and commodities
+
+Vault mappings are shared across some groups. Query `get_vault_address` for the
+exact group/collateral pair when in doubt. Mainnet currently maps:
+- Group 0: USDC vault `nibi193m2a00pmdsvkcvugrfewqzhtq6k0srkjzvxp2sk357vlpspx5vqxu8d7p`; stNIBI vault `nibi1mrplvu3scplnrgns96kg0j8pk3l2p9c7eaz0qdedx0kt3vmcujyqrjkfej`
+- Group 1: USDC vault `nibi1waf5c8z55qvjay4de8wkm9cxyt6wa8zdnrvlexjrq77lqgqf258q3yn7l8`; stNIBI vault `nibi1pgurgas0za436c3fm2km99zkzutfx0jwpn7meespv6szv8c8g39qjz2tvj`
+- Group 2: USDC vault `nibi193m2a00pmdsvkcvugrfewqzhtq6k0srkjzvxp2sk357vlpspx5vqxu8d7p`; stNIBI vault `nibi1pgurgas0za436c3fm2km99zkzutfx0jwpn7meespv6szv8c8g39qjz2tvj`
+- Group 3: USDC vault `nibi1waf5c8z55qvjay4de8wkm9cxyt6wa8zdnrvlexjrq77lqgqf258q3yn7l8`; stNIBI vault `nibi1pgurgas0za436c3fm2km99zkzutfx0jwpn7meespv6szv8c8g39qjz2tvj`
+- Group 4: USDC vault `nibi193m2a00pmdsvkcvugrfewqzhtq6k0srkjzvxp2sk357vlpspx5vqxu8d7p`; stNIBI vault `nibi1mrplvu3scplnrgns96kg0j8pk3l2p9c7eaz0qdedx0kt3vmcujyqrjkfej`
 
 ## Strongly Related Skills
 
@@ -125,8 +139,15 @@ sai_perps_q "$ORACLE" '{"get_exchange_rate":{"base":2,"quote":1}}'
 | 18 | SUI |
 | 29 | BNB |
 | 48 | NIBI |
+| 49 | POKEMON |
+| 53 | AUDEMARS |
+| 1001 | SPY |
+| 1002 | NVDA |
+| 1006 | AAPL |
 
-Full list: all markets belong to `GroupIndex(0)` except real-estate markets (2–12) which belong to `GroupIndex(1)`.
+Full list: read `reference.md` in this skill. Do not assume all non-real-estate
+markets are `GroupIndex(0)`; mainnet also has exotic, watch, and
+equities/commodities groups.
 
 ## OI queries
 
@@ -143,6 +164,16 @@ sai_perps_q "$PERP" '{"get_borrowing_group_oi":{"collateral_index":1,"group_inde
 ```
 
 Recorded mainnet snapshot (Group 0 + USDC): pair max = 10,000,000 USDC, group max = 10,000 USDC. Group is usually the binding constraint.
+
+## Fee config validation
+
+Validate deployed fee parameters with on-chain queries (`get_fees`,
+`get_fee_tiers`, `get_trader_fee_multiplier`, `get_pending_gov_fees`). Expected
+defaults, tier table, validation checklist, and settings that are **not**
+queryable on-chain are in [reference.md § Fee config validation](./reference.md#fee-config-validation).
+
+Fee semantics (what fees mean, distribution, code paths):
+`/epics/sai/26-05-26-sai-perpetuals-fee-analysis.md`.
 
 ## Curated query reference
 
@@ -171,7 +202,7 @@ You can use the `/nibiru-cli-nibid` skill to pull any of this information.
 {"get_borrowing_group_oi":{"collateral_index":1,"group_index":0}}
 {"get_vault_address":{"group_index":"GroupIndex(0)","collateral_index":"TokenIndex(1)"}}
 {"get_trade":{"trader":"nibi1...","index":0}}
-{"get_trades":{"trader":"nibi1..."}}
+{"get_trades":[["nibi1...",0],["nibi1...",1]]}
 {"get_trade_info":{"trader":"nibi1...","index":0}}
 {"get_trade_infos":{"trader":"nibi1..."}}
 {"get_trade_data":{"trader":"nibi1...","index":0}}
@@ -191,10 +222,19 @@ You can use the `/nibiru-cli-nibid` skill to pull any of this information.
 {"list_user_deposits":{"user":"nibi1..."}}
 ```
 
+`get_trades` is the batch form of `get_trade_data`: it preserves input order
+and duplicate keys, returns `null` for missing keys, and returns
+`Vec<Option<TradeData>>` for present keys. Each `TradeData` includes `trade`,
+`trade_info`, `initial_acc_fees`, `liquidation_price`, and optional
+`needs_after_hours_trigger`, so it is suitable for keeper batch trade refreshes
+that need open/close metadata and fee snapshots.
+
 ## SLP Vault contract
 
 For SLP Vault operations, health accounting, reward distribution, raw state keys,
 and mainnet runbooks, see [slp-vaults.md](./slp-vaults.md).
+For epoch and reset timing, see
+[Check Epoch and Daily Reset Distance](./slp-vaults.md#check-epoch-and-daily-reset-distance).
 
 You can use the `/nibiru-cli-nibid` skill to pull any of this information.
 
@@ -215,6 +255,11 @@ You can use the `/nibiru-cli-nibid` skill to pull any of this information.
   Returns `ConfigResponse` with manager/admin addresses, perp/oracle/feed
   addresses, PnL limits, daily supply cap, discount params, withdrawal thresholds,
   and `min_lock_duration`.
+- `{"risk_params":{}}` - SLP Vault daily risk and payout-cap state. Returns
+  `RiskParamsResponse` with current collateral balance, daily balance snapshot,
+  daily payout cap and remaining amount, daily PnL throttle state, PnL
+  accumulators, and share price. See
+  [Daily Risk Params](./slp-vaults.md#daily-risk-params).
 - `{"vault_snapshot":{}}` - One-call operator health snapshot. Returns
   `VaultSnapshotResponse` with `tvl`, `market_cap`, `share_price`,
   `collateralization_p`, `total_supply`, `total_liability`, `total_rewards`,
