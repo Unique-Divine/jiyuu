@@ -8,6 +8,7 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises"
+import { createRequire } from "node:module"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Command } from "commander"
@@ -20,13 +21,14 @@ import type {
   ProposedAction,
 } from "./adminAudit"
 import { planAdminBootstrap } from "./adminAudit"
-import { saiBot, uniqueDivine } from "./cfg"
+import { saiBot, USERS } from "./cfg"
 import { runHealthCheck } from "./health"
 import {
   addTargetToChat,
   createMtcuteClient,
   fetchChatAuditInput,
   findSaiChats,
+  normalizeUser,
   promoteTargetAdmin,
   transferTargetOwnership,
 } from "./mtcuteAdapter"
@@ -51,7 +53,10 @@ import type {
   TelegramCredentialValues,
 } from "./profiles"
 
-const DEFAULT_USER_TARGET_ID = uniqueDivine.id
+const require = createRequire(import.meta.url)
+const packageJson = require("./package.json") as { version: string }
+
+const DEFAULT_USER_TARGET_ID = USERS.uniqueDivine.id
 const DEFAULT_BOT_TARGET_ID = saiBot.id
 const DEFAULT_BOT_TARGET_PEER = saiBot.handle
 
@@ -211,6 +216,17 @@ function actionExecutorDeps(logger: BatchLogger = consoleBatchLogger) {
   }
 }
 
+function actorBatchLogger(actorUsername: string): BatchLogger {
+  return {
+    event(event) {
+      emitJsonObject({
+        ...event,
+        actorUsername,
+      })
+    },
+  }
+}
+
 /**
  * Emits one command-level JSON event to stdout.
  */
@@ -267,6 +283,14 @@ async function getTelegramEnv(profileName?: string): Promise<TelegramEnv> {
     session: credentials.sessionString,
     password: process.env.TELEGRAM_PASSWORD ?? profile?.password ?? null,
   }
+}
+
+async function selectedProfileName(profileName?: string): Promise<string | null> {
+  if (profileName) {
+    return profileName
+  }
+  const config = await readConfig()
+  return config.activeProfile
 }
 
 function parsePeer(value: string): number | string {
@@ -565,6 +589,7 @@ async function runSaiFind(options: SaiFindOptions): Promise<void> {
 async function applyTargetPlan(params: {
   client: Awaited<ReturnType<typeof createMtcuteClient>>
   chat: ChatInput
+  actorUsername: string
   targetUserId: number | string
   targetPeer: number | string
   rights: Record<string, boolean>
@@ -580,6 +605,7 @@ async function applyTargetPlan(params: {
   printJsonEvent("target_plan", {
     chatId: params.chat.chatId,
     title: params.chat.title,
+    actorUsername: params.actorUsername,
     targetUserId: params.targetUserId,
     actionPrefix: params.actionPrefix,
     run: params.run,
@@ -591,6 +617,7 @@ async function applyTargetPlan(params: {
   if (!beforePlan.actorCanApply) {
     printJsonEvent("target_skip", {
       chatId: params.chat.chatId,
+      actorUsername: params.actorUsername,
       actionPrefix: params.actionPrefix,
       reason: "actor_lacks_owner_or_add_admins_right",
     })
@@ -601,7 +628,7 @@ async function applyTargetPlan(params: {
     return
   }
 
-  const deps = actionExecutorDeps()
+  const deps = actionExecutorDeps(actorBatchLogger(params.actorUsername))
   if (shouldRunAction(beforePlan.proposedActions, "add target user")) {
     await withFloodWaitRetry(
       {
@@ -647,6 +674,7 @@ async function maybeTransferOwner(params: {
   client: Awaited<ReturnType<typeof createMtcuteClient>>
   env: TelegramEnv
   chat: ChatInput
+  actorUsername: string
   targetUser: number | string
   enabled: boolean
   run: boolean
@@ -664,6 +692,7 @@ async function maybeTransferOwner(params: {
   if (!plan.actorCanTransferOwnership) {
     printJsonEvent("ownership_skip", {
       chatId: params.chat.chatId,
+      actorUsername: params.actorUsername,
       reason: "actor_not_owner",
     })
     return
@@ -671,6 +700,7 @@ async function maybeTransferOwner(params: {
   if (!plan.targetCanReceiveOwnership) {
     printJsonEvent("ownership_skip", {
       chatId: params.chat.chatId,
+      actorUsername: params.actorUsername,
       reason: "target_not_eligible",
     })
     return
@@ -678,6 +708,7 @@ async function maybeTransferOwner(params: {
   if (params.env.password === null) {
     printJsonEvent("ownership_skip", {
       chatId: params.chat.chatId,
+      actorUsername: params.actorUsername,
       reason: "missing_telegram_password",
     })
     return
@@ -685,6 +716,7 @@ async function maybeTransferOwner(params: {
   if (!params.run) {
     printJsonEvent("ownership_plan", {
       chatId: params.chat.chatId,
+      actorUsername: params.actorUsername,
       action: "transfer_owner",
     })
     return
@@ -701,7 +733,7 @@ async function maybeTransferOwner(params: {
         targetPeer: params.targetUser,
         password: params.env.password ?? "",
       }),
-    actionExecutorDeps(),
+    actionExecutorDeps(actorBatchLogger(params.actorUsername)),
   )
 }
 
@@ -727,18 +759,23 @@ async function runSaiBootstrap(options: SaiBootstrapOptions): Promise<void> {
 
   await withClient(options.profile, async (client, env) => {
     activeJsonLogPath = logPath
+    const actor = normalizeUser(await client.getMe())
+    const actorUsername = actor.username ?? ""
+    const profileName = await selectedProfileName(options.profile)
     const ownershipTransferEnabled =
       options.transferOwner !== false && env.password !== null
     console.log(`wrote_run_log: ${logPath}`)
     printJsonEvent("run_start", {
       file: options.file,
       logPath,
+      profileName,
+      actor,
       chatCount: chats.length,
       run: options.run === true,
       transferOwner: ownershipTransferEnabled,
       passwordAvailable: env.password !== null,
       delayMs,
-      targetUser: uniqueDivine.id,
+      targetUser: USERS.uniqueDivine.id,
       targetBot: saiBot.id,
     })
 
@@ -749,12 +786,14 @@ async function runSaiBootstrap(options: SaiBootstrapOptions): Promise<void> {
           total: chats.length,
           chatId: chat.chatId,
           title: chat.title,
+          actorUsername,
         })
 
         try {
           await applyTargetPlan({
             client,
             chat,
+            actorUsername,
             targetUserId: saiBot.id,
             targetPeer: saiBot.handle,
             rights: saiBotAdminRights,
@@ -764,8 +803,9 @@ async function runSaiBootstrap(options: SaiBootstrapOptions): Promise<void> {
           await applyTargetPlan({
             client,
             chat,
-            targetUserId: uniqueDivine.id,
-            targetPeer: uniqueDivine.handle,
+            actorUsername,
+            targetUserId: USERS.uniqueDivine.id,
+            targetPeer: USERS.uniqueDivine.handle,
             rights: ownerTargetAdminRights,
             actionPrefix: "owner_target",
             run: options.run === true,
@@ -774,16 +814,19 @@ async function runSaiBootstrap(options: SaiBootstrapOptions): Promise<void> {
             client,
             env,
             chat,
-            targetUser: uniqueDivine.handle,
+            actorUsername,
+            targetUser: USERS.uniqueDivine.handle,
             enabled: ownershipTransferEnabled,
             run: options.run === true,
           })
           printJsonEvent("chat_complete", {
             chatId: chat.chatId,
+            actorUsername,
           })
         } catch (error) {
           printJsonEvent("chat_error", {
             chatId: chat.chatId,
+            actorUsername,
             errorName: error instanceof Error ? error.name : "UnknownError",
             errorMessage:
               error instanceof Error ? error.message : String(error),
@@ -793,6 +836,7 @@ async function runSaiBootstrap(options: SaiBootstrapOptions): Promise<void> {
         if (delayMs > 0 && i < chats.length - 1) {
           printJsonEvent("chat_delay", {
             chatId: chat.chatId,
+            actorUsername,
             delayMs,
           })
           await sleep(delayMs)
@@ -1087,7 +1131,7 @@ export function createProgram(): Command {
   program
     .name("tg-sai")
     .description("Audit and manage Sai Telegram chat admin state")
-    .version("0.1.0")
+    .version(packageJson.version)
     .helpOption("--help", "display help for command")
 
   program.action(() => {

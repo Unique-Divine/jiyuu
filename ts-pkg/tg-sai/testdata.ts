@@ -4,13 +4,7 @@ import type {
   TestData,
   UserData,
 } from "./adminAudit"
-import { saiBot, uniqueDivine } from "./cfg"
-
-const corinne = {
-  id: 7930936303,
-  handle: "corinnebernett",
-  displayName: "Corinne Bernett [NEW]",
-}
+import { saiBot, USERS } from "./cfg"
 
 /**
  * Example Telegram basic-group chat ID used for captured admin-audit fixtures.
@@ -26,13 +20,13 @@ export const exampleChatId = -5064008855
  */
 export const chatNibiruInternalId = -1002094035214
 
-export const uniqueDivineUserId = uniqueDivine.id
+export const uniqueDivineUserId = USERS.uniqueDivine.id
 
-export const corinneUserId = corinne.id
+export const corinneUserId = USERS.corinne.id
 
 export const saiBotUserId = saiBot.id
 
-export const corinneAntoniaUserId = 8274304175
+export const corinneAntoniaUserId = USERS.corinneAlt.id
 
 export const corinneAntoniaUser: TestData<UserData> = {
   goldReq: "resolve_username('corinneantonia')",
@@ -40,8 +34,8 @@ export const corinneAntoniaUser: TestData<UserData> = {
     "PoC target user for the target-chat owner transfer flow. This fixture records the concrete target account resolved for the experiment.",
   data: {
     id: corinneAntoniaUserId,
-    username: "corinneantonia",
-    displayName: "Corinne Bernett",
+    username: USERS.corinneAlt.handle,
+    displayName: USERS.corinneAlt.displayName,
     isBot: false,
     rawType: "user",
   },
@@ -52,7 +46,7 @@ export const getMe: TestData<UserData> = {
   notes: "Live mtcute result for the authenticated Telegram session.",
   data: {
     id: uniqueDivineUserId,
-    username: uniqueDivine.handle,
+    username: USERS.uniqueDivine.handle,
     displayName: "Unique (NIBIRU) 🇺🇸🩵",
     isBot: false,
     rawType: "user",
@@ -72,8 +66,8 @@ export const getMe_asOwner: TestData<UserData> = {
     "Fixture for a chat owner account. This models the happy path where the authenticated session is the chat creator.",
   data: {
     id: corinneUserId,
-    username: corinne.handle,
-    displayName: corinne.displayName,
+    username: USERS.corinne.handle,
+    displayName: USERS.corinne.displayName,
     isBot: false,
     rawType: "user",
   },
@@ -89,8 +83,8 @@ export const getChatMember_asMember: TestData<ChatMemberData> = {
     title: null,
     invitedBy: {
       id: corinneUserId,
-      username: corinne.handle,
-      displayName: corinne.displayName,
+      username: USERS.corinne.handle,
+      displayName: USERS.corinne.displayName,
       isBot: false,
       rawType: "user",
     },
