@@ -146,6 +146,39 @@ describe("tg-sai profile CLI", () => {
     })
   })
 
+  test("adds a password to an existing profile without clearing credentials", async () => {
+    await withTempConfig(async (dir) => {
+      const aliceArgsWithoutPassword = addAliceArgs.filter(
+        (arg) => arg !== "--password" && arg !== "password-alice",
+      )
+      const addAlice = runCli(
+        aliceArgsWithoutPassword,
+        dir,
+      )
+      expect(addAlice.exitCode).toBe(0)
+
+      const addPassword = runCli(
+        ["profile", "add", "--name", "alice", "--password", "password-alice"],
+        dir,
+      )
+      expect(addPassword.exitCode).toBe(0)
+      expect(addPassword.stdout).toContain("profile_active: alice")
+      expect(addPassword.stdout).toContain("telegram_password: stored")
+
+      const show = runCli(["profile", "show", "alice"], dir)
+      expect(show.exitCode).toBe(0)
+      expect(show.stdout).toContain('"apiId": 123')
+      expect(show.stdout).toContain('"apiHash": "[redacted]"')
+      expect(show.stdout).toContain('"sessionString": "[redacted]"')
+      expect(show.stdout).toContain('"password": "[redacted]"')
+      expect(show.stdout).toContain('"handle": "alice_handle"')
+      expect(show.stdout).toContain('"userId": 111')
+      expect(show.stdout).toContain('"displayName": "Alice Example"')
+      expect(show.stdout).not.toContain("session-alice")
+      expect(show.stdout).not.toContain("password-alice")
+    })
+  })
+
   test("adds a draft profile with blank values", async () => {
     await withTempConfig(async (dir) => {
       const result = runCli(["profile", "add", "--name", "draft"], dir)

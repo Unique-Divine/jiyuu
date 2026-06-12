@@ -291,9 +291,14 @@ export async function addProfile(
   const previous = config.profiles[input.name]
   const timestamp = now.toISOString()
   config.profiles[input.name] = {
-    ...previous,
-    ...input,
+    name: input.name,
+    apiId: input.apiId ?? previous?.apiId ?? null,
+    apiHash: input.apiHash || previous?.apiHash || "",
+    sessionString: input.sessionString || previous?.sessionString || "",
     password: input.password || previous?.password || "",
+    handle: input.handle ?? previous?.handle ?? null,
+    userId: input.userId ?? previous?.userId ?? null,
+    displayName: input.displayName || previous?.displayName || "",
     createdAt: previous?.createdAt ?? timestamp,
     updatedAt: timestamp,
   }
