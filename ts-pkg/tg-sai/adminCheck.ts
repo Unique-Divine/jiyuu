@@ -1,10 +1,10 @@
 import type { ChatMemberData } from "./adminAudit";
 import { planAdminBootstrap } from "./adminAudit";
-import { uniqueDivine } from "./cfg";
+import { USERS } from "./cfg";
 import { createMtcuteClient, fetchChatAuditInput } from "./mtcuteAdapter";
 
 const DEFAULT_CHAT_ID = -5064008855;
-const DEFAULT_TARGET_USER_ID = uniqueDivine.id;
+const DEFAULT_TARGET_USER_ID = USERS.uniqueDivine.id;
 
 interface Config {
   apiId: number;
@@ -91,7 +91,7 @@ async function main() {
   console.log(
     `target_can_receive_ownership: ${audit.targetCanReceiveOwnership}`,
   );
-  console.log(`proposed_actions: ${audit.proposedActions.join("; ")}`);
+  console.log(`proposed_actions: ${JSON.stringify(audit.proposedActions)}`);
 
   await client.disconnect();
 }

@@ -173,7 +173,7 @@ describe("tg-sai health", () => {
       expect(result.lines).toContain(
         'session_user: 7930936303 corinnebernett "Corinne Bernett"',
       )
-      expect(result.lines).toContain("password_status: present")
+      expect(result.lines).toContain("✅🔥 password_status: present")
       expect(result.lines).not.toContain("suggested_fixes:")
       expect(result.lines).toContain(
         `latest_sai_find: ${join(dir, "logs", "sai-find-00.jsonl")}`,

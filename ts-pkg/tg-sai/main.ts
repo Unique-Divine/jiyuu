@@ -334,7 +334,7 @@ function printAudit(input: ChatAuditInput) {
   console.log(
     `target_can_receive_ownership: ${audit.targetCanReceiveOwnership}`,
   )
-  console.log(`proposed_actions: ${audit.proposedActions.join("; ")}`)
+  console.log(`proposed_actions: ${formatActionList(audit.proposedActions)}`)
 }
 
 function shouldRunAction(
@@ -342,6 +342,10 @@ function shouldRunAction(
   action: ProposedAction,
 ): boolean {
   return proposedActions.includes(action)
+}
+
+function formatActionList(actions: ProposedAction[]): string {
+  return JSON.stringify(actions)
 }
 
 async function withClient<T>(
@@ -404,7 +408,9 @@ async function runAddBot(options: AddBotOptions): Promise<void> {
     console.log(`target_peer: ${options.targetPeer}`)
     console.log(`actor_role: ${beforePlan.actorRole}`)
     console.log(`target_role_before: ${beforePlan.targetRole}`)
-    console.log(`proposed_actions: ${beforePlan.proposedActions.join("; ")}`)
+    console.log(
+      `proposed_actions: ${formatActionList(beforePlan.proposedActions)}`,
+    )
 
     if (options.run !== true) {
       console.log("dry_run: pass --run to add/promote the bot")
@@ -451,7 +457,9 @@ async function runAddBot(options: AddBotOptions): Promise<void> {
 
     console.log(`target_role_after: ${afterPlan.targetRole}`)
     console.log(`target_is_admin_after: ${afterPlan.targetIsAdmin}`)
-    console.log(`remaining_actions: ${afterPlan.proposedActions.join("; ")}`)
+    console.log(
+      `remaining_actions: ${formatActionList(afterPlan.proposedActions)}`,
+    )
   })
 }
 
@@ -472,7 +480,9 @@ async function runAddOwner(options: AddOwnerOptions): Promise<void> {
     console.log(
       `target_can_receive_ownership_before: ${beforePlan.targetCanReceiveOwnership}`,
     )
-    console.log(`proposed_actions: ${beforePlan.proposedActions.join("; ")}`)
+    console.log(
+      `proposed_actions: ${formatActionList(beforePlan.proposedActions)}`,
+    )
 
     if (options.run !== true) {
       console.log("dry_run: pass --run to add/promote the target user")
@@ -522,7 +532,9 @@ async function runAddOwner(options: AddOwnerOptions): Promise<void> {
     console.log(
       `target_can_receive_ownership_after: ${afterPlan.targetCanReceiveOwnership}`,
     )
-    console.log(`remaining_actions: ${afterPlan.proposedActions.join("; ")}`)
+    console.log(
+      `remaining_actions: ${formatActionList(afterPlan.proposedActions)}`,
+    )
 
     if (!afterPlan.actorCanTransferOwnership) {
       console.log("ownership_transfer: skipped_actor_not_owner")
@@ -1131,7 +1143,7 @@ export function createProgram(): Command {
   program
     .name("tg-sai")
     .description("Audit and manage Sai Telegram chat admin state")
-    .version(packageJson.version)
+    .version(packageJson.version, "--version", "output the version number")
     .helpOption("--help", "display help for command")
 
   program.action(() => {

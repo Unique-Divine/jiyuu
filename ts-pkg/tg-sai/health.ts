@@ -297,7 +297,7 @@ function checkPassword(
   profile: TgSaiProfile | null,
 ): void {
   if (env.TELEGRAM_PASSWORD || profile?.password) {
-    info(collector, "password_status: present")
+    good(collector, "password_status: present")
     return
   }
   warning(
