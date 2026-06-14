@@ -5,6 +5,7 @@ import { describe, expect, test } from "bun:test"
 
 import {
   configDir,
+  configPath,
   credentialsFromKnownFiles,
   credentialsFromText,
   discoveryPaths,
@@ -13,6 +14,7 @@ import {
   parseCredentialLine,
   parseCredentialValueAfterKey,
   platformKind,
+  readConfig,
 } from "./profiles"
 
 async function withTempHome<T>(fn: (home: string) => Promise<T>): Promise<T> {
@@ -41,6 +43,58 @@ describe("tg-sai profile discovery", () => {
       expect(configDir({ HOME: home, TG_SAI_DIR: "/tmp/tg-sai" })).toBe(
         "/tmp/tg-sai",
       )
+    })
+  })
+
+  test("migrates legacy record config to ordered profiles", async () => {
+    await withTempHome(async (home) => {
+      const dir = join(home, ".tg-sai")
+      await mkdir(dir, { recursive: true })
+      await writeFile(
+        configPath({ HOME: home, TG_SAI_DIR: dir }),
+        `${JSON.stringify(
+          {
+            activeProfile: "bob",
+            profiles: {
+              alice: {
+                name: "alice",
+                apiId: 1,
+                apiHash: "alice-hash",
+                sessionString: "alice-session",
+                password: "",
+                handle: "alice_handle",
+                userId: 111,
+                displayName: "Alice",
+                createdAt: "2026-06-30T00:00:00.000Z",
+                updatedAt: "2026-06-30T00:00:00.000Z",
+              },
+              bob: {
+                name: "bob",
+                apiId: 2,
+                apiHash: "bob-hash",
+                sessionString: "bob-session",
+                password: "",
+                handle: "bob_handle",
+                userId: 222,
+                displayName: "Bob",
+                createdAt: "2026-06-30T00:00:00.000Z",
+                updatedAt: "2026-06-30T00:00:00.000Z",
+              },
+            },
+          },
+          null,
+          2,
+        )}\n`,
+        "utf8",
+      )
+
+      const config = await readConfig({ HOME: home, TG_SAI_DIR: dir })
+
+      expect(config.profiles.map((profile) => profile.name)).toEqual([
+        "bob",
+        "alice",
+      ])
+      expect(config.profiles[0]?.handle).toBe("bob_handle")
     })
   })
 
