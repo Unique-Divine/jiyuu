@@ -189,6 +189,7 @@ def test_parse_args_accepts_session_output_and_no_env_write(monkeypatch):
     assert args.qr is True
     assert args.session_output == "/tmp/session.txt"
     assert args.no_env_write is True
+    assert session_string_generator._is_wrapper_mode(args) is True
 
 
 def test_parse_args_without_flags_keeps_interactive_login_choice(monkeypatch):
@@ -198,6 +199,7 @@ def test_parse_args_without_flags_keeps_interactive_login_choice(monkeypatch):
 
     assert args.qr is False
     assert args.phone is False
+    assert session_string_generator._is_wrapper_mode(args) is False
 
 
 def test_parse_args_rejects_conflicting_login_modes(monkeypatch):
