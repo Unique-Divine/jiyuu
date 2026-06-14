@@ -36,7 +36,10 @@ Credential profile behavior:
 - Command `tg-sai profile find` reports discovered Telegram credential sources
   without writing profile state.
 - Command `tg-sai profile add` stores a local profile from explicit flags,
-  process environment variables, or one unambiguous discovered source.
+  process environment variables, or automatically merged non-conflicting
+  discovered sources.
+- Command `tg-sai profile add --qr` or `tg-sai profile add --phone` generates a
+  missing Telegram session string.
 - Commands `tg-sai profile list`, `tg-sai profile show`, `tg-sai profile use`,
   and `tg-sai profile remove` manage local session profiles.
 
@@ -102,11 +105,12 @@ cd /path/to/tg-sai
 uv sync
 ```
 
-Create file `.env` in the `tg-sai` directory with Telegram app
-credentials:
+Create user-local file `~/.tg-sai/.env` with Telegram app credentials:
 
 ```bash
-cat > .env <<'EOF'
+mkdir -p ~/.tg-sai
+chmod 700 ~/.tg-sai
+cat > ~/.tg-sai/.env <<'EOF'
 TELEGRAM_API_ID=<api id from https://my.telegram.org/apps>
 TELEGRAM_API_HASH=<api hash from https://my.telegram.org/apps>
 EOF
@@ -121,7 +125,7 @@ The session string is generated after QR login.
 Generate the session string and save it directly into a `tg-sai` profile:
 
 ```bash
-tg-sai profile add --name operator --src 1 --login --qr
+tg-sai profile add --qr
 ```
 
 Scan the QR code in Telegram with **Settings > Devices > Link Desktop Device**.
@@ -132,7 +136,6 @@ If you generated the session string manually, save it with explicit flags:
 
 ```bash
 tg-sai profile add \
-  --name operator \
   --api-id <api id> \
   --api-hash <api hash> \
   --session-string '<session string>'
@@ -142,7 +145,7 @@ Store the Telegram 2FA password in the same profile when ownership transfer is
 needed:
 
 ```bash
-tg-sai profile add --name operator --password '<password>'
+tg-sai profile add --password '<password>'
 ```
 
 Check the local setup:
@@ -169,7 +172,7 @@ Add a local profile from a numbered source shown by command
 `tg-sai profile find`:
 
 ```bash
-tg-sai profile add --name operator --src 1
+tg-sai profile add --src 1
 ```
 
 Command `tg-sai profile add` can store the Telegram 2FA password with flag
@@ -179,7 +182,7 @@ Command `tg-sai profile add` can store the Telegram 2FA password with flag
 Create a blank draft profile for onboarding:
 
 ```bash
-tg-sai profile add --name operator
+tg-sai profile add
 ```
 
 Blank or partial profiles are useful while collecting `apiId`, `apiHash`, and
@@ -190,7 +193,6 @@ Add a local profile from explicit values:
 
 ```bash
 tg-sai profile add \
-  --name operator \
   --handle <telegram-handle> \
   --user-id <telegram-user-id> \
   --display-name "<display name>"
@@ -308,10 +310,10 @@ different user is the creator.
 
 ## Suggested workflow
 
-1. Run command `just tg-sai profile find` to inspect available Telegram
+1. Run command `tg-sai profile find` to inspect available Telegram
    credential sources.
-2. Run command `just tg-sai profile add --name <name> --src <number>` to
-   save a local profile from discovery output.
+2. Run command `tg-sai profile add --qr` to save a local profile and generate a
+   missing session string.
 3. Run command `tg-sai audit --chat <id>` before writes.
 4. Run command `tg-sai add-bot --chat <id>` or command
    `tg-sai add-owner --chat <id> --target-user <user>` as a dry-run.
