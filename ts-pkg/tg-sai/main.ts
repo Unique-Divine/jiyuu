@@ -14,7 +14,6 @@ import { join } from "node:path"
 import { stdin as input, stdout as output } from "node:process"
 import { createInterface } from "node:readline/promises"
 import { Command } from "commander"
-
 import type { BatchLogger } from "./actionExecutor"
 import { withFloodWaitRetry } from "./actionExecutor"
 import type {
@@ -41,8 +40,8 @@ import {
   configDir,
   discoveryReport,
   getProfile,
-  profileLabel,
   profileInputFromUser,
+  profileLabel,
   readConfig,
   redactedProfile,
   removeProfile,
@@ -289,7 +288,9 @@ async function getTelegramEnv(profileName?: string): Promise<TelegramEnv> {
   }
 }
 
-async function selectedProfileName(profileName?: string): Promise<string | null> {
+async function selectedProfileName(
+  profileName?: string,
+): Promise<string | null> {
   if (profileName) {
     return profileName
   }
@@ -902,7 +903,9 @@ function profileFieldsFromCredentialValues(values: TelegramCredentialValues) {
   }
 }
 
-type ProfileCredentialFields = ReturnType<typeof profileFieldsFromCredentialValues>
+type ProfileCredentialFields = ReturnType<
+  typeof profileFieldsFromCredentialValues
+>
 
 function mergeCredentialValues(
   ...valuesList: Array<TelegramCredentialValues | null>
@@ -941,7 +944,10 @@ function mergeDiscoveredValues(
 ): TelegramCredentialValues {
   const merged: TelegramCredentialValues = {}
   const origins: Partial<
-    Record<keyof TelegramCredentialValues, DiscoveryReport["candidates"][number]>
+    Record<
+      keyof TelegramCredentialValues,
+      DiscoveryReport["candidates"][number]
+    >
   > = {}
 
   for (const candidate of candidates) {
@@ -1118,9 +1124,7 @@ async function promptForMissingProfileFields(
       !options.login
     ) {
       const value = (
-        await rl.question(
-          "Generate a Telegram session now? [Y=QR/n/phone]: ",
-        )
+        await rl.question("Generate a Telegram session now? [Y=QR/n/phone]: ")
       )
         .trim()
         .toLowerCase()
@@ -1334,11 +1338,7 @@ export function createProgram(): Command {
     .command("audit")
     .description("Read-only audit for one chat and target user")
     .option("--profile <name>", "Profile name to use for Telegram credentials")
-    .requiredOption(
-      "--chat <id>",
-      "Telegram chat ID or username",
-      parsePeer,
-    )
+    .requiredOption("--chat <id>", "Telegram chat ID or username", parsePeer)
     .option(
       "--target-user <id>",
       "Target user ID or username",
@@ -1361,11 +1361,7 @@ Examples:
     .command("add-bot")
     .description("Add SaiTeam_bot and promote it to admin when possible")
     .option("--profile <name>", "Profile name to use for Telegram credentials")
-    .requiredOption(
-      "--chat <id>",
-      "Telegram chat ID or username",
-      parsePeer,
-    )
+    .requiredOption("--chat <id>", "Telegram chat ID or username", parsePeer)
     .option(
       "--target-user <id>",
       "Bot user ID used for membership audit",
@@ -1387,11 +1383,7 @@ Examples:
     .command("add-owner")
     .description("Add a target user as owner if possible, otherwise admin")
     .option("--profile <name>", "Profile name to use for Telegram credentials")
-    .requiredOption(
-      "--chat <id>",
-      "Telegram chat ID or username",
-      parsePeer,
-    )
+    .requiredOption("--chat <id>", "Telegram chat ID or username", parsePeer)
     .requiredOption(
       "--target-user <peer>",
       "Target user ID or username",
@@ -1472,7 +1464,10 @@ Examples:
       "Telegram 2FA password for ownership transfer",
     )
     .option("--src <number>", "Use a numbered source from profile find")
-    .option("--login", "Generate a session string when missing (defaults to QR)")
+    .option(
+      "--login",
+      "Generate a session string when missing (defaults to QR)",
+    )
     .option("--qr", "Generate a session string with QR login")
     .option("--phone", "Generate a session string with phone login")
     .option("-i, --interactive", "Prompt for missing profile values")
@@ -1500,7 +1495,11 @@ If apiId/apiHash are missing, create a Telegram API app at:
   profile
     .command("show")
     .description("Show one configured profile")
-    .argument("[selector]", "Profile index, handle, user ID, or legacy name", "0")
+    .argument(
+      "[selector]",
+      "Profile index, handle, user ID, or legacy name",
+      "0",
+    )
     .action(async (selector: string) => {
       await runProfileShow(selector)
     })

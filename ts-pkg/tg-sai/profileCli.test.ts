@@ -159,10 +159,7 @@ describe("tg-sai profile CLI", () => {
       const aliceArgsWithoutPassword = addAliceArgs.filter(
         (arg) => arg !== "--password" && arg !== "password-alice",
       )
-      const addAlice = runCli(
-        aliceArgsWithoutPassword,
-        dir,
-      )
+      const addAlice = runCli(aliceArgsWithoutPassword, dir)
       expect(addAlice.exitCode).toBe(0)
 
       const addPassword = runCli(

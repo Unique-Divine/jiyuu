@@ -8,54 +8,54 @@
 export type BatchActionEvent =
   | {
       /** Operation attempt started. */
-      type: "action_start";
+      type: "action_start"
       /** Telegram chat ID or peer for the attempted action. */
-      chatId: number | string;
+      chatId: number | string
       /** Stable action name, for example `bot_add`. */
-      action: string;
+      action: string
       /** One-based attempt number for this action. */
-      attempt: number;
+      attempt: number
     }
   | {
       /** Telegram returned `FLOOD_WAIT_X` and the executor will retry later. */
-      type: "flood_wait";
+      type: "flood_wait"
       /** Telegram chat ID or peer for the rate-limited action. */
-      chatId: number | string;
+      chatId: number | string
       /** Stable action name, for example `bot_promote_admin`. */
-      action: string;
+      action: string
       /** One-based attempt number that received the flood-wait error. */
-      attempt: number;
+      attempt: number
       /** Seconds Telegram requested in `FLOOD_WAIT_X`. */
-      waitSeconds: number;
+      waitSeconds: number
       /** Milliseconds the executor sleeps, including configured buffer. */
-      sleepMs: number;
+      sleepMs: number
     }
   | {
       /** Operation completed successfully. */
-      type: "action_success";
+      type: "action_success"
       /** Telegram chat ID or peer for the successful action. */
-      chatId: number | string;
+      chatId: number | string
       /** Stable action name, for example `owner_target_add`. */
-      action: string;
+      action: string
       /** Number of attempts required before success. */
-      attempts: number;
+      attempts: number
       /** Elapsed milliseconds from first attempt to success. */
-      elapsedMs: number;
+      elapsedMs: number
     }
   | {
       /** Operation failed with a non-retryable error or exhausted retries. */
-      type: "action_error";
+      type: "action_error"
       /** Telegram chat ID or peer for the failed action. */
-      chatId: number | string;
+      chatId: number | string
       /** Stable action name, for example `transfer_owner`. */
-      action: string;
+      action: string
       /** One-based attempt number that produced the final error. */
-      attempt: number;
+      attempt: number
       /** Error name normalized for logs. */
-      errorName: string;
+      errorName: string
       /** Error message normalized for logs. */
-      errorMessage: string;
-    };
+      errorMessage: string
+    }
 
 /**
  * Receives structured batch action events.
@@ -64,7 +64,7 @@ export type BatchActionEvent =
  * Tests can use `MemoryBatchLogger` to inspect event order without parsing text.
  */
 export interface BatchLogger {
-  event(event: BatchActionEvent): void | Promise<void>;
+  event(event: BatchActionEvent): void | Promise<void>
 }
 
 /**
@@ -72,9 +72,9 @@ export interface BatchLogger {
  */
 export interface TelegramActionContext {
   /** Telegram chat ID or resolvable chat peer for the action. */
-  chatId: number | string;
+  chatId: number | string
   /** Stable action name such as `bot_add` or `owner_target_promote_admin`. */
-  action: string;
+  action: string
 }
 
 /**
@@ -85,28 +85,28 @@ export interface TelegramActionContext {
  */
 export interface TelegramActionExecutorDeps {
   /** Event sink for action start, success, error, and flood-wait events. */
-  logger: BatchLogger;
+  logger: BatchLogger
   /** Sleep function used after Telegram returns `FLOOD_WAIT_X`. */
-  sleep: (ms: number) => Promise<void>;
+  sleep: (ms: number) => Promise<void>
   /** Clock function used to compute elapsed action time. */
-  now: () => number;
+  now: () => number
   /** Number of retries after the first failed attempt. */
-  maxRetries: number;
+  maxRetries: number
   /** Extra milliseconds added to Telegram's required flood-wait duration. */
-  bufferMs: number;
+  bufferMs: number
 }
 
 /**
  * Test logger that stores every event in insertion order.
  */
 export class MemoryBatchLogger implements BatchLogger {
-  readonly events: BatchActionEvent[] = [];
+  readonly events: BatchActionEvent[] = []
 
   /**
    * Appends an event to the in-memory event list.
    */
   event(event: BatchActionEvent): void {
-    this.events.push(event);
+    this.events.push(event)
   }
 }
 
@@ -120,16 +120,16 @@ export class MemoryBatchLogger implements BatchLogger {
  */
 export function parseFloodWaitSeconds(error: unknown): number | null {
   if (!(error instanceof Error)) {
-    return null;
+    return null
   }
 
-  const haystack = `${error.name} ${error.message}`;
-  const match = haystack.match(/FLOOD_WAIT_(\d+)/);
+  const haystack = `${error.name} ${error.message}`
+  const match = haystack.match(/FLOOD_WAIT_(\d+)/)
   if (!match) {
-    return null;
+    return null
   }
 
-  return Number(match[1]);
+  return Number(match[1])
 }
 
 /**
@@ -137,9 +137,9 @@ export function parseFloodWaitSeconds(error: unknown): number | null {
  */
 export function errorName(error: unknown): string {
   if (error instanceof Error && error.name) {
-    return error.name;
+    return error.name
   }
-  return "UnknownError";
+  return "UnknownError"
 }
 
 /**
@@ -147,9 +147,9 @@ export function errorName(error: unknown): string {
  */
 export function errorMessage(error: unknown): string {
   if (error instanceof Error) {
-    return error.message;
+    return error.message
   }
-  return String(error);
+  return String(error)
 }
 
 /**
@@ -165,8 +165,8 @@ export async function withFloodWaitRetry<T>(
   operation: () => Promise<T>,
   deps: TelegramActionExecutorDeps,
 ): Promise<T> {
-  const startedAt = deps.now();
-  const maxAttempts = deps.maxRetries + 1;
+  const startedAt = deps.now()
+  const maxAttempts = deps.maxRetries + 1
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     await deps.logger.event({
@@ -174,21 +174,21 @@ export async function withFloodWaitRetry<T>(
       chatId: context.chatId,
       action: context.action,
       attempt,
-    });
+    })
 
     try {
-      const result = await operation();
+      const result = await operation()
       await deps.logger.event({
         type: "action_success",
         chatId: context.chatId,
         action: context.action,
         attempts: attempt,
         elapsedMs: deps.now() - startedAt,
-      });
-      return result;
+      })
+      return result
     } catch (error) {
-      const waitSeconds = parseFloodWaitSeconds(error);
-      const canRetry = waitSeconds !== null && attempt < maxAttempts;
+      const waitSeconds = parseFloodWaitSeconds(error)
+      const canRetry = waitSeconds !== null && attempt < maxAttempts
 
       if (!canRetry) {
         await deps.logger.event({
@@ -198,11 +198,11 @@ export async function withFloodWaitRetry<T>(
           attempt,
           errorName: errorName(error),
           errorMessage: errorMessage(error),
-        });
-        throw error;
+        })
+        throw error
       }
 
-      const sleepMs = waitSeconds * 1000 + deps.bufferMs;
+      const sleepMs = waitSeconds * 1000 + deps.bufferMs
       await deps.logger.event({
         type: "flood_wait",
         chatId: context.chatId,
@@ -210,10 +210,10 @@ export async function withFloodWaitRetry<T>(
         attempt,
         waitSeconds,
         sleepMs,
-      });
-      await deps.sleep(sleepMs);
+      })
+      await deps.sleep(sleepMs)
     }
   }
 
-  throw new Error(`unreachable action executor state: ${context.action}`);
+  throw new Error(`unreachable action executor state: ${context.action}`)
 }

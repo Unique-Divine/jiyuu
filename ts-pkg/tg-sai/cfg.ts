@@ -70,4 +70,3 @@ export const nibiruInternal = {
   title: "Nibiru | Internal",
   kind: "channel",
 } satisfies TelegramChatIdentity
-

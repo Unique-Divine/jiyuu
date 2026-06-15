@@ -1,7 +1,6 @@
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises"
 import { homedir, platform as osPlatform } from "node:os"
 import { dirname, join } from "node:path"
-
 import type { UserData } from "./adminAudit"
 
 const TG_SAI_DIR_ENV = "TG_SAI_DIR"

@@ -1,7 +1,6 @@
 import { constants } from "node:fs"
 import { access, mkdir, readdir, readFile, stat } from "node:fs/promises"
 import { join } from "node:path"
-
 import { configDir, configPath, profileLabel, readConfig } from "./profiles"
 import type {
   ProfileStoreEnv,
@@ -393,7 +392,9 @@ export async function runHealthCheck(params: {
 
   const config = await readConfig(env)
   const activeProfile = config.profiles[0] ?? null
-  const activeProfileLabel = activeProfile ? profileLabel(activeProfile, 0) : null
+  const activeProfileLabel = activeProfile
+    ? profileLabel(activeProfile, 0)
+    : null
   const missingFields = activeProfile ? missingProfileFields(activeProfile) : []
 
   if (!activeProfile) {

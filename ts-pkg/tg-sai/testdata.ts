@@ -115,42 +115,43 @@ export const getChatMember_asOwner: TestData<ChatMemberData> = {
   },
 }
 
-export const getChatMember_sessionOwnerNibiruInternal: TestData<ChatMemberData> = {
-  goldReq: 'getChatMember(client, { chatId, userId: "self" })',
-  notes:
-    "Target-chat supergroup membership for the session user; the active session is the chat creator with invite and add-admin rights.",
-  data: {
-    user: sessionUserUnique.data,
-    status: "creator",
-    title: null,
-    invitedBy: null,
-    promotedBy: null,
-    restrictedBy: null,
-    restrictions: null,
-    isMember: true,
-    permissions: {
-      _: "chatAdminRights",
-      changeInfo: true,
-      postMessages: true,
-      editMessages: true,
-      deleteMessages: true,
-      banUsers: true,
-      inviteUsers: true,
-      pinMessages: true,
-      addAdmins: true,
-      anonymous: false,
-      manageCall: true,
-      other: true,
-      manageTopics: true,
-      postStories: true,
-      editStories: true,
-      deleteStories: true,
-      manageDirectMessages: true,
-      manageRanks: true,
+export const getChatMember_sessionOwnerNibiruInternal: TestData<ChatMemberData> =
+  {
+    goldReq: 'getChatMember(client, { chatId, userId: "self" })',
+    notes:
+      "Target-chat supergroup membership for the session user; the active session is the chat creator with invite and add-admin rights.",
+    data: {
+      user: sessionUserUnique.data,
+      status: "creator",
+      title: null,
+      invitedBy: null,
+      promotedBy: null,
+      restrictedBy: null,
+      restrictions: null,
+      isMember: true,
+      permissions: {
+        _: "chatAdminRights",
+        changeInfo: true,
+        postMessages: true,
+        editMessages: true,
+        deleteMessages: true,
+        banUsers: true,
+        inviteUsers: true,
+        pinMessages: true,
+        addAdmins: true,
+        anonymous: false,
+        manageCall: true,
+        other: true,
+        manageTopics: true,
+        postStories: true,
+        editStories: true,
+        deleteStories: true,
+        manageDirectMessages: true,
+        manageRanks: true,
+      },
+      rawType: "channelParticipantCreator",
     },
-    rawType: "channelParticipantCreator",
-  },
-}
+  }
 
 export const getChatMember_targetAsMember: TestData<ChatMemberData> = {
   goldReq: "getChatMember(client, { chatId, userId: uniqueDivineUserId })",
@@ -240,62 +241,63 @@ export const getChatMember_botAdminNibiruInternal: TestData<ChatMemberData> = {
   },
 }
 
-export const getChatMember_ownerTargetMemberNibiruInternal: TestData<ChatMemberData> = {
-  goldReq:
-    "modeled from add-owner checkpoint target_role_after_add=member",
-  notes:
-    "Modeled target-chat midpoint after the target user is added but before admin promotion. The live add-owner run printed target_role_after_add=member, then promoted before a full normalized capture.",
-  data: {
-    user: corinneAntoniaUser.data,
-    status: "member",
-    title: null,
-    invitedBy: sessionUserUnique.data,
-    promotedBy: null,
-    restrictedBy: null,
-    restrictions: null,
-    isMember: true,
-    permissions: null,
-    rawType: "channelParticipant",
-  },
-}
-
-export const getChatMember_ownerTargetAdminNibiruInternal: TestData<ChatMemberData> = {
-  goldReq:
-    "getChatMember(client, { chatId: chatNibiruInternalId, userId: corinneAntoniaUserId })",
-  notes:
-    "Live target-chat result after the target user was promoted to admin by the session user.",
-  data: {
-    user: corinneAntoniaUser.data,
-    status: "admin",
-    title: null,
-    invitedBy: null,
-    promotedBy: sessionUserUnique.data,
-    restrictedBy: null,
-    restrictions: null,
-    isMember: true,
-    permissions: {
-      _: "chatAdminRights",
-      changeInfo: true,
-      postMessages: false,
-      editMessages: false,
-      deleteMessages: true,
-      banUsers: true,
-      inviteUsers: true,
-      pinMessages: true,
-      addAdmins: true,
-      anonymous: false,
-      manageCall: true,
-      other: true,
-      manageTopics: true,
-      postStories: false,
-      editStories: false,
-      deleteStories: false,
-      manageDirectMessages: false,
-      manageRanks: true,
+export const getChatMember_ownerTargetMemberNibiruInternal: TestData<ChatMemberData> =
+  {
+    goldReq: "modeled from add-owner checkpoint target_role_after_add=member",
+    notes:
+      "Modeled target-chat midpoint after the target user is added but before admin promotion. The live add-owner run printed target_role_after_add=member, then promoted before a full normalized capture.",
+    data: {
+      user: corinneAntoniaUser.data,
+      status: "member",
+      title: null,
+      invitedBy: sessionUserUnique.data,
+      promotedBy: null,
+      restrictedBy: null,
+      restrictions: null,
+      isMember: true,
+      permissions: null,
+      rawType: "channelParticipant",
     },
-    rawType: "channelParticipantAdmin",
-  },
-}
+  }
+
+export const getChatMember_ownerTargetAdminNibiruInternal: TestData<ChatMemberData> =
+  {
+    goldReq:
+      "getChatMember(client, { chatId: chatNibiruInternalId, userId: corinneAntoniaUserId })",
+    notes:
+      "Live target-chat result after the target user was promoted to admin by the session user.",
+    data: {
+      user: corinneAntoniaUser.data,
+      status: "admin",
+      title: null,
+      invitedBy: null,
+      promotedBy: sessionUserUnique.data,
+      restrictedBy: null,
+      restrictions: null,
+      isMember: true,
+      permissions: {
+        _: "chatAdminRights",
+        changeInfo: true,
+        postMessages: false,
+        editMessages: false,
+        deleteMessages: true,
+        banUsers: true,
+        inviteUsers: true,
+        pinMessages: true,
+        addAdmins: true,
+        anonymous: false,
+        manageCall: true,
+        other: true,
+        manageTopics: true,
+        postStories: false,
+        editStories: false,
+        deleteStories: false,
+        manageDirectMessages: false,
+        manageRanks: true,
+      },
+      rawType: "channelParticipantAdmin",
+    },
+  }
 
 export const adminCheck_asMember: TestData<ChatAuditInput> = {
   goldReq: "bun run adminCheck.ts",
@@ -336,33 +338,35 @@ export const adminCheck_asOwnerWithTargetAdmin: TestData<ChatAuditInput> = {
   },
 }
 
-export const adminCheck_botSessionOwnerTargetAbsent: TestData<ChatAuditInput> = {
-  goldReq:
-    "TELEGRAM_CHAT_ID=-1002094035214 TELEGRAM_TARGET_USER_ID=8983431101 bun run adminCheck.ts",
-  notes:
-    "Target chat before add-bot: the session user is the owner and the target bot is not present in the chat.",
-  data: {
-    chatId: chatNibiruInternalId,
-    targetUserId: saiBotUserId,
-    self: sessionUserUnique.data,
-    actor: getChatMember_sessionOwnerNibiruInternal.data,
-    target: null,
-  },
-}
+export const adminCheck_botSessionOwnerTargetAbsent: TestData<ChatAuditInput> =
+  {
+    goldReq:
+      "TELEGRAM_CHAT_ID=-1002094035214 TELEGRAM_TARGET_USER_ID=8983431101 bun run adminCheck.ts",
+    notes:
+      "Target chat before add-bot: the session user is the owner and the target bot is not present in the chat.",
+    data: {
+      chatId: chatNibiruInternalId,
+      targetUserId: saiBotUserId,
+      self: sessionUserUnique.data,
+      actor: getChatMember_sessionOwnerNibiruInternal.data,
+      target: null,
+    },
+  }
 
-export const adminCheck_botSessionOwnerTargetMember: TestData<ChatAuditInput> = {
-  goldReq:
-    "TELEGRAM_CHAT_ID=-1002094035214 TELEGRAM_TARGET_USER_ID=8983431101 bun run adminCheck.ts",
-  notes:
-    "Target-chat midpoint model: the session user is the owner and the target bot is present as a non-admin member.",
-  data: {
-    chatId: chatNibiruInternalId,
-    targetUserId: saiBotUserId,
-    self: sessionUserUnique.data,
-    actor: getChatMember_sessionOwnerNibiruInternal.data,
-    target: getChatMember_botMemberNibiruInternal.data,
-  },
-}
+export const adminCheck_botSessionOwnerTargetMember: TestData<ChatAuditInput> =
+  {
+    goldReq:
+      "TELEGRAM_CHAT_ID=-1002094035214 TELEGRAM_TARGET_USER_ID=8983431101 bun run adminCheck.ts",
+    notes:
+      "Target-chat midpoint model: the session user is the owner and the target bot is present as a non-admin member.",
+    data: {
+      chatId: chatNibiruInternalId,
+      targetUserId: saiBotUserId,
+      self: sessionUserUnique.data,
+      actor: getChatMember_sessionOwnerNibiruInternal.data,
+      target: getChatMember_botMemberNibiruInternal.data,
+    },
+  }
 
 export const adminCheck_botSessionOwnerTargetAdmin: TestData<ChatAuditInput> = {
   goldReq:
@@ -378,44 +382,45 @@ export const adminCheck_botSessionOwnerTargetAdmin: TestData<ChatAuditInput> = {
   },
 }
 
-export const adminCheck_ownerSessionTargetUserAbsent: TestData<ChatAuditInput> = {
-  goldReq:
-    "just tg-sai add-owner --chat -1002094035214 --target-user @corinneantonia",
-  notes:
-    "Target chat before add-owner: the session user is the owner and the target user is not present in the chat.",
-  data: {
-    chatId: chatNibiruInternalId,
-    targetUserId: corinneAntoniaUserId,
-    self: sessionUserUnique.data,
-    actor: getChatMember_sessionOwnerNibiruInternal.data,
-    target: null,
-  },
-}
+export const adminCheck_ownerSessionTargetUserAbsent: TestData<ChatAuditInput> =
+  {
+    goldReq:
+      "just tg-sai add-owner --chat -1002094035214 --target-user @corinneantonia",
+    notes:
+      "Target chat before add-owner: the session user is the owner and the target user is not present in the chat.",
+    data: {
+      chatId: chatNibiruInternalId,
+      targetUserId: corinneAntoniaUserId,
+      self: sessionUserUnique.data,
+      actor: getChatMember_sessionOwnerNibiruInternal.data,
+      target: null,
+    },
+  }
 
-export const adminCheck_ownerSessionTargetUserMember: TestData<ChatAuditInput> = {
-  goldReq:
-    "modeled from add-owner checkpoint target_role_after_add=member",
-  notes:
-    "Target-chat midpoint model: the session user is the owner and the target user is present as a non-admin member.",
-  data: {
-    chatId: chatNibiruInternalId,
-    targetUserId: corinneAntoniaUserId,
-    self: sessionUserUnique.data,
-    actor: getChatMember_sessionOwnerNibiruInternal.data,
-    target: getChatMember_ownerTargetMemberNibiruInternal.data,
-  },
-}
+export const adminCheck_ownerSessionTargetUserMember: TestData<ChatAuditInput> =
+  {
+    goldReq: "modeled from add-owner checkpoint target_role_after_add=member",
+    notes:
+      "Target-chat midpoint model: the session user is the owner and the target user is present as a non-admin member.",
+    data: {
+      chatId: chatNibiruInternalId,
+      targetUserId: corinneAntoniaUserId,
+      self: sessionUserUnique.data,
+      actor: getChatMember_sessionOwnerNibiruInternal.data,
+      target: getChatMember_ownerTargetMemberNibiruInternal.data,
+    },
+  }
 
-export const adminCheck_ownerSessionTargetUserAdmin: TestData<ChatAuditInput> = {
-  goldReq:
-    "just tg-sai audit --chat -1002094035214 --target-user 8274304175",
-  notes:
-    "Target chat after add-owner admin promotion: the session user is the owner and the target user is admin, making ownership transfer eligible.",
-  data: {
-    chatId: chatNibiruInternalId,
-    targetUserId: corinneAntoniaUserId,
-    self: sessionUserUnique.data,
-    actor: getChatMember_sessionOwnerNibiruInternal.data,
-    target: getChatMember_ownerTargetAdminNibiruInternal.data,
-  },
-}
+export const adminCheck_ownerSessionTargetUserAdmin: TestData<ChatAuditInput> =
+  {
+    goldReq: "just tg-sai audit --chat -1002094035214 --target-user 8274304175",
+    notes:
+      "Target chat after add-owner admin promotion: the session user is the owner and the target user is admin, making ownership transfer eligible.",
+    data: {
+      chatId: chatNibiruInternalId,
+      targetUserId: corinneAntoniaUserId,
+      self: sessionUserUnique.data,
+      actor: getChatMember_sessionOwnerNibiruInternal.data,
+      target: getChatMember_ownerTargetAdminNibiruInternal.data,
+    },
+  }
