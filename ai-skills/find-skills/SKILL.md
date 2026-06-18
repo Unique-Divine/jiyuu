@@ -5,7 +5,8 @@ description: Helps users discover and install agent skills when they ask questio
 
 # Find Skills
 
-This skill helps you discover and install skills from the open agent skills ecosystem.
+This skill helps you discover and install skills from the open agent skills
+ecosystem.
 
 ## When to Use This Skill
 
