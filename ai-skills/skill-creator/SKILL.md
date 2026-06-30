@@ -307,8 +307,29 @@ explain why the new version should trigger better.
 ### Validate
 
 If you need a quick structural check, run `scripts/quick_validate.py` against the
-skill directory. This only validates `SKILL.md` frontmatter; it does not judge
-whether the skill is useful.
+skill directory through `uv`. This avoids relying on whatever packages happen to
+be installed in the user's global Python environment.
+
+First check whether `uv` is available:
+
+```bash
+command -v uv
+```
+
+If `uv` is missing and the user is on macOS, Linux, or WSL, install it with:
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+Then validate the skill:
+
+```bash
+uv run --with pyyaml python "$HOME/.cursor/skills/skill-creator/scripts/quick_validate.py" /path/to/skill-directory
+```
+
+This only validates `SKILL.md` frontmatter; it does not judge whether the skill
+is useful.
 
 ---
 

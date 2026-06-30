@@ -24,7 +24,7 @@ When using this skill:
 2. Write a pull request description that explains the rationale behind the
    changes, not just the file-by-file edits.
 3. Keep the writing concise and non-repetitive.
-4. Save the final output to a markdown file named `pull-request.md`.
+4. Save the final output to a markdown file named `gh-pr.md`.
 
 ## Output format
 
@@ -37,8 +37,8 @@ Use this structure:
 
 ## Key Changes
 
-- <Important change with rationale>
-- <Important change with rationale>
+1. <Important change with rationale>
+1. <Important change with rationale>
 
 ## Appendix
 
@@ -51,4 +51,6 @@ if it does not add value.>
 - Prefer clarity over cleverness.
 - Do not repeat the same point in multiple sections.
 - Explain rationale wherever it is useful.
+- Use numbered lists for the `## Key Changes` section, writing each item with
+  `1.` so the markdown source is easy to reorder.
 - Keep the description easy to scan.

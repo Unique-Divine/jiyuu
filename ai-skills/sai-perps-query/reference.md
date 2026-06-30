@@ -11,6 +11,7 @@ This file is the **full lookup** companion to `SKILL.md`.
 - [Collaterals (mainnet)](#collaterals-mainnet)
 - [TokenIndex reference (mainnet)](#tokenindex-reference-mainnet)
 - [MarketIndex reference (mainnet)](#marketindex-reference-mainnet)
+- [Fee config validation](#fee-config-validation)
 
 ## Mainnet addresses
 
@@ -22,10 +23,19 @@ This file is the **full lookup** companion to `SKILL.md`.
 | SLP-stNIBI Vault, Group 0 | `nibi1mrplvu3scplnrgns96kg0j8pk3l2p9c7eaz0qdedx0kt3vmcujyqrjkfej` |
 | SLP-USDC Vault, Group 1 | `nibi1waf5c8z55qvjay4de8wkm9cxyt6wa8zdnrvlexjrq77lqgqf258q3yn7l8` |
 | SLP-stNIBI Vault, Group 1 | `nibi1pgurgas0za436c3fm2km99zkzutfx0jwpn7meespv6szv8c8g39qjz2tvj` |
+| SLP-USDC Vault, Group 2 | `nibi193m2a00pmdsvkcvugrfewqzhtq6k0srkjzvxp2sk357vlpspx5vqxu8d7p` |
+| SLP-stNIBI Vault, Group 2 | `nibi1pgurgas0za436c3fm2km99zkzutfx0jwpn7meespv6szv8c8g39qjz2tvj` |
+| SLP-USDC Vault, Group 3 | `nibi1waf5c8z55qvjay4de8wkm9cxyt6wa8zdnrvlexjrq77lqgqf258q3yn7l8` |
+| SLP-stNIBI Vault, Group 3 | `nibi1pgurgas0za436c3fm2km99zkzutfx0jwpn7meespv6szv8c8g39qjz2tvj` |
+| SLP-USDC Vault, Group 4 | `nibi193m2a00pmdsvkcvugrfewqzhtq6k0srkjzvxp2sk357vlpspx5vqxu8d7p` |
+| SLP-stNIBI Vault, Group 4 | `nibi1mrplvu3scplnrgns96kg0j8pk3l2p9c7eaz0qdedx0kt3vmcujyqrjkfej` |
 
 **Group meanings (Perp `GroupIndex`):**
 - `GroupIndex(0)` = main crypto markets
 - `GroupIndex(1)` = real estate (coded estate)
+- `GroupIndex(2)` = exotic
+- `GroupIndex(3)` = watch assets
+- `GroupIndex(4)` = equities and commodities
 
 ## Collaterals (mainnet)
 
@@ -97,13 +107,47 @@ present in Oracle (`get_token_by_id` returns "token id 0 does not exist").
 | 48 | `fartcoin` | 2 |
 | 49 | `nibi` | 2 |
 | 50 | `pokemon-card-index` | 1 |
+| 51 | `watch-index` | 1 |
+| 52 | `rolex` | 1 |
+| 53 | `patek-phillippe` | 1 |
+| 54 | `audemars-piguet` | 1 |
+| 55 | `omega` | 1 |
+| 56 | `cartier` | 1 |
+| 57 | `breitling` | 1 |
+| 58 | `tudor` | 1 |
+| 59 | `qqq` | 1 |
+| 60 | `spy` | 1 |
+| 61 | `nvda` | 1 |
+| 62 | `amd` | 1 |
+| 63 | `intc` | 1 |
+| 64 | `msft` | 1 |
+| 65 | `aapl` | 1 |
+| 66 | `googl` | 1 |
+| 67 | `amzn` | 1 |
+| 68 | `meta` | 1 |
+| 69 | `avgo` | 1 |
+| 70 | `tsla` | 1 |
+| 71 | `brk-b` | 1 |
+| 72 | `coin` | 1 |
+| 73 | `jpm` | 1 |
+| 74 | `pltr` | 1 |
+| 75 | `qbts` | 1 |
+| 76 | `qubt` | 1 |
+| 77 | `xau-usd` | 1 |
+| 78 | `xag-usd` | 1 |
+| 79 | `xpt-usd` | 1 |
+| 80 | `xpd-usd` | 1 |
+| 81 | `wti-usd` | 1 |
+| 82 | `xbr-usd` | 1 |
+| 83 | `ng-usd` | 1 |
+| 84 | `gme` | 1 |
 
 ## MarketIndex reference (mainnet)
 
 Every market has the following fields.
 - `quote: TokenIndex(0)` (USD placeholder)
 - `spread_p: 0`
-- `fee_index: FeeIndex(0)`
+- `fee_index` varies by market
 
 Each market has base, quote (always TokenIndex(0) = USD), spread_p, group_index,
 fee_index. Base token names resolved via [TokenIndex
@@ -166,3 +210,120 @@ All markets have `MarketInfo.quote=TokenIndex(0)` (USD).
 | 43 | 44 | `hype`        | 0 | `GroupIndex(0)` | `FeeIndex(0)` |
 | 44 | 45 | `zec`         | 0 | `GroupIndex(0)` | `FeeIndex(0)` |
 | 48 | 49 | `nibi`        | 0 | `GroupIndex(0)` | `FeeIndex(0)` |
+| 49 | 50 | `pokemon-card-index` | 0 | `GroupIndex(2)` | `FeeIndex(1)` |
+| 50 | 51 | `watch-index` | 0 | `GroupIndex(3)` | `FeeIndex(1)` |
+| 51 | 52 | `rolex` | 0 | `GroupIndex(3)` | `FeeIndex(1)` |
+| 52 | 53 | `patek-phillippe` | 0 | `GroupIndex(3)` | `FeeIndex(1)` |
+| 53 | 54 | `audemars-piguet` | 0 | `GroupIndex(3)` | `FeeIndex(1)` |
+| 54 | 55 | `omega` | 0 | `GroupIndex(3)` | `FeeIndex(1)` |
+| 55 | 56 | `cartier` | 0 | `GroupIndex(3)` | `FeeIndex(1)` |
+| 56 | 57 | `breitling` | 0 | `GroupIndex(3)` | `FeeIndex(1)` |
+| 57 | 58 | `tudor` | 0 | `GroupIndex(3)` | `FeeIndex(1)` |
+| 1000 | 59 | `qqq` | 0 | `GroupIndex(4)` | `FeeIndex(0)` |
+| 1001 | 60 | `spy` | 0 | `GroupIndex(4)` | `FeeIndex(0)` |
+| 1002 | 61 | `nvda` | 0 | `GroupIndex(4)` | `FeeIndex(0)` |
+| 1003 | 62 | `amd` | 0 | `GroupIndex(4)` | `FeeIndex(0)` |
+| 1004 | 63 | `intc` | 0 | `GroupIndex(4)` | `FeeIndex(0)` |
+| 1005 | 64 | `msft` | 0 | `GroupIndex(4)` | `FeeIndex(0)` |
+| 1006 | 65 | `aapl` | 0 | `GroupIndex(4)` | `FeeIndex(0)` |
+| 1007 | 66 | `googl` | 0 | `GroupIndex(4)` | `FeeIndex(0)` |
+| 1008 | 67 | `amzn` | 0 | `GroupIndex(4)` | `FeeIndex(0)` |
+| 1009 | 68 | `meta` | 0 | `GroupIndex(4)` | `FeeIndex(0)` |
+| 1010 | 69 | `avgo` | 0 | `GroupIndex(4)` | `FeeIndex(0)` |
+| 1011 | 70 | `tsla` | 0 | `GroupIndex(4)` | `FeeIndex(0)` |
+| 1012 | 71 | `brk-b` | 0 | `GroupIndex(4)` | `FeeIndex(0)` |
+| 1013 | 72 | `coin` | 0 | `GroupIndex(4)` | `FeeIndex(0)` |
+| 1014 | 73 | `jpm` | 0 | `GroupIndex(4)` | `FeeIndex(0)` |
+| 1015 | 74 | `pltr` | 0 | `GroupIndex(4)` | `FeeIndex(0)` |
+| 1016 | 75 | `qbts` | 0 | `GroupIndex(4)` | `FeeIndex(0)` |
+| 1017 | 76 | `qubt` | 0 | `GroupIndex(4)` | `FeeIndex(0)` |
+| 1018 | 77 | `xau-usd` | 0 | `GroupIndex(4)` | `FeeIndex(0)` |
+| 1019 | 78 | `xag-usd` | 0 | `GroupIndex(4)` | `FeeIndex(0)` |
+| 1020 | 79 | `xpt-usd` | 0 | `GroupIndex(4)` | `FeeIndex(0)` |
+| 1021 | 80 | `xpd-usd` | 0 | `GroupIndex(4)` | `FeeIndex(0)` |
+| 1022 | 81 | `wti-usd` | 0 | `GroupIndex(4)` | `FeeIndex(0)` |
+| 1023 | 82 | `xbr-usd` | 0 | `GroupIndex(4)` | `FeeIndex(0)` |
+| 1024 | 83 | `ng-usd` | 0 | `GroupIndex(4)` | `FeeIndex(0)` |
+| 1025 | 84 | `gme` | 0 | `GroupIndex(4)` | `FeeIndex(0)` |
+
+---
+
+## Fee config validation
+
+Use on-chain smart queries to verify deployed fee parameters. For fee
+**semantics** (what each fee means, distribution splits, code paths), see
+`/epics/sai/26-05-26-sai-perpetuals-fee-analysis.md`.
+
+Use `sai_perps_q` from `SKILL.md`. Index wrappers must match mainnet:
+`"MarketIndex(0)"`, `"FeeIndex(0)"`, not `{"0": 0}`.
+
+### Effective fee formula
+
+```txt
+effective_fee = base_fee × min(tier_multiplier, referral_discount_multiplier)
+```
+
+Query `get_trader_fee_multiplier` for the combined result for a specific trader.
+
+### Default base fees (`FeeIndex(0)`)
+
+| Field | Expected default |
+|---|---|
+| `open_fee_p` | `"0.02"` (2.0%) |
+| `close_fee_p` | `"0.015"` (1.5%) |
+| `trigger_order_fee_p` | `"0.03"` (3.0%) |
+| `min_position_size_usd` | `"1"` |
+
+Resolve the fee index from the market first:
+
+```bash
+sai_perps_q "$PERP" '{"get_market":{"index":"MarketIndex(0)"}}'
+# → fee_index: "FeeIndex(0)" (most markets)
+
+sai_perps_q "$PERP" '{"get_fees":{"index":"FeeIndex(0)"}}'
+```
+
+### Default fee tiers (`get_fee_tiers`)
+
+Eight tiers; multipliers decrease as point thresholds increase:
+
+| Tier | `points_treshold` | `fee_multiplier` |
+|---:|---:|---:|
+| 0 | 6_000_000 | 0.975 |
+| 1 | 20_000_000 | 0.950 |
+| 2 | 50_000_000 | 0.925 |
+| 3 | 100_000_000 | 0.900 |
+| 4 | 250_000_000 | 0.850 |
+| 5 | 400_000_000 | 0.800 |
+| 6 | 1_000_000_000 | 0.700 |
+| 7 | 2_000_000_000 | 0.600 |
+
+```bash
+sai_perps_q "$PERP" '{"get_fee_tiers":{}}'
+sai_perps_q "$PERP" '{"get_trader_fee_multiplier":{"trader":"nibi1..."}}'
+# → "1.0" (no discount), "0.95" (referral), or lower (tier)
+sai_perps_q "$PERP" '{"get_pending_gov_fees":{"index":1}}'  # USDC
+```
+
+### Validation checklist
+
+- [ ] **Base fees:** `get_fees` for each distinct `fee_index` in use
+  (`FeeIndex(0)` crypto/equities, `FeeIndex(1)` exotic/watch).
+- [ ] **Fee tiers:** `get_fee_tiers` returns 8 tiers with expected defaults.
+- [ ] **Trader multipliers:** `get_trader_fee_multiplier` for a new trader
+  (`1.0`), referred trader (`< 1.0`), and high-volume trader (tier discount).
+- [ ] **Market wiring:** each `get_market` response has a valid `fee_index`.
+
+### Not queryable on-chain (workarounds)
+
+These live in contract state but have no smart query today. Infer from code
+defaults, admin events, or controlled test trades.
+
+| Setting | Storage key | Default | Workaround |
+|---|---|---|---|
+| Vault closing fee % | `VAULT_CLOSING_FEE_P` | 4.2% of closing-fee component | Close a trade; compare vault reward to closing fee charged |
+| Referrer fee tiers | `REFERRER_FEE_PERCENTAGE` | 5%, 10%, 15%, 50% | Code default in `contracts/perp/src/fees/state.rs` |
+| Referee discount | `REFERREE_BASE_FEE_MULTIPLIER` | 5% off base (`0.95` effective) | Compare `get_trader_fee_multiplier` with/without referrer |
+| Referrer maps | `USER_REFERRERS`, `REFERRER_FEE_TIER`, `REFERRER_FEES` | — | Use `get_trader_fee_multiplier`; referral GraphQL via `sai-keeper-graphql` |
+
+See also `slp-vaults.md` for `get_pending_gov_fees` and vault reward routing.

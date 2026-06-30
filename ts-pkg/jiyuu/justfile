@@ -11,6 +11,8 @@ setup:
 install:
   bun i --no-cache
 
+alias i := install
+
 # Format with prettier
 fmt:
   bun run prettier --write .
@@ -25,10 +27,30 @@ build:
   set -x
   echo "Build complete. (No op)"
 
+alias b := build
+
 # Publish the package on npm based on "dist" and "package.json"
 publish: 
+  #!/usr/bin/env bash
+  set -euo pipefail
+
+  if ! npm whoami >/dev/null 2>&1; then
+    echo "Not authenticated with npm. Run: npm login"
+    exit 1
+  fi
+
+  package_name="$(npm pkg get name | tr -d '"')"
+  package_version="$(npm pkg get version | tr -d '"')"
+  package="${package_name}@${package_version}"
+
+  if npm view "${package}" version >/dev/null 2>&1; then
+    echo "${package} is already published"
+    exit 1
+  fi
+
   just lint
   just build
   just fmt
+
   npm publish --access public
 

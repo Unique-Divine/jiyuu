@@ -1,0 +1,84 @@
+# Use this justfile by
+# (1) installing with "cargo install just"
+# (2) running the "just" command.
+
+# Displays available recipes by running `just -l`.
+setup:
+  #!/usr/bin/env bash
+  just -l
+
+# Install all dependencies
+install:
+  bun i --no-cache
+
+alias i := install
+
+# Run TypeScript tests
+test:
+  bun test
+
+# Typecheck without emitting JavaScript
+typecheck:
+  bun run typecheck
+
+# Run Python session generator tests
+py-test:
+  uv run pytest session_string_generator_test.py
+
+# Check npm package compatibility with linter
+lint:
+  #!/usr/bin/env bash
+  npx publint
+
+build:
+  #!/usr/bin/env bash
+  set -x
+  echo "Build complete. (No op)"
+
+alias b := build
+
+# Pack, global-install the tarball, and smoke-test the CLI
+smoke-test:
+  #!/usr/bin/env bash
+  set -euo pipefail
+
+  package_version="$(npm pkg get version | tr -d '"')"
+  tarball="uniquedivine-tg-sai-${package_version}.tgz"
+
+  rm -f ./*.tgz
+  bun pm pack
+  packed="$(ls -1 ./*.tgz | head -1)"
+  if [[ "$(basename "${packed}")" != "${tarball}" ]]; then
+    echo "unexpected tarball name: ${packed} (expected ${tarball})"
+    exit 1
+  fi
+
+  npm install -g --force "./${tarball}"
+  tg-sai --help
+  tg-sai health
+
+# Publish the package to the npm registry
+publish:
+  #!/usr/bin/env bash
+  set -euo pipefail
+
+  if ! npm whoami >/dev/null 2>&1; then
+    echo "Not authenticated with the npm registry. Run: npm login"
+    exit 1
+  fi
+
+  package_name="$(npm pkg get name | tr -d '"')"
+  package_version="$(npm pkg get version | tr -d '"')"
+  package="${package_name}@${package_version}"
+
+  if npm view "${package}" version >/dev/null 2>&1; then
+    echo "${package} is already published"
+    exit 1
+  fi
+
+  just lint
+  just test
+  just typecheck
+  just build
+
+  bun publish --access public

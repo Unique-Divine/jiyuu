@@ -1,6 +1,6 @@
 ---
 name: nibiru-cli-nibid
-description: Query Nibiru chain state and submit transactions with the `nibid` CLI, including setup via `ud`, config inspection, key discovery with `nibid keys list`, bank transfers, bank balance queries, wasm contract queries, wasm execute/instantiate flows, and transaction lookups by hash. Use when the user mentions `nibid`, Nibiru CLI, `nibid keys list`, `--from`, `nibid tx bank`, `nibid tx wasm`, `nibid q bank`, `nibid q wasm`, `nibid q tx`, balances, contract-state smart, or tx hashes.
+description: Query Nibiru chain state and submit transactions with the `nibid` CLI, including setup via `ud`, config inspection, key discovery with `nibid keys list`, bank transfers, bank balance queries, EVM multi-VM balance checks such as `nibid q evm balance` for Sai USDC, wasm contract queries, wasm execute/instantiate flows, and transaction lookups by hash. Use when the user mentions `nibid`, Nibiru CLI, `nibid keys list`, `--from`, `nibid tx bank`, `nibid tx wasm`, `nibid q bank`, `nibid q evm balance`, `nibid q wasm`, `nibid q tx`, balances, contract-state smart, or tx hashes.
 ---
 
 # Nibiru CLI (`nibid`)
@@ -10,7 +10,12 @@ authoritative chain view or wants to submit a transaction with `nibid`.
 
 ## Additional resources
 
-- EVM account, FunToken, and unit notes: [`reference.md`](./reference.md)
+- EVM account, multi-VM balance, FunToken, and unit notes: [`reference.md`](./reference.md)
+  - [`nibid q evm account`](./reference.md#nibid-q-evm-account): normalize EVM/Bech32 addresses and check native EVM gas balance.
+  - [`nibid q evm balance`](./reference.md#nibid-q-evm-balance): workhorse for Sai USDC balance checks across ERC20 and Bank representations.
+  - [`balance_wei` and bank `unibi`](./reference.md#balance_wei-and-bank-unibi): convert between EVM wei and Cosmos bank units.
+  - [`nibid q evm funtoken`](./reference.md#nibid-q-evm-funtoken): inspect bank denom and ERC20 mappings.
+  - [`nibid tx evm` scope](./reference.md#nibid-tx-evm-scope): understand conversion commands versus generic EVM transactions.
 - Copy-paste examples: [`examples.md`](./examples.md)
 
 ## Installing `nibid`
@@ -73,6 +78,7 @@ Example - Mainnet.
 3. Assume JSON output by default. 
 All default `nibid` configs use `nibid config output json`, so commands inherit
 JSON output unless the user says otherwise.
+Do not include `--output json` in `nibid` commands unless it is needed.
 
 ```bash
 ADDR="nibi1..."
@@ -118,13 +124,59 @@ Rules of thumb:
 
 If the user asks about:
 
-- **Wallet balances** -> use `nibid q bank ...`
+- **Sai USDC balances** -> use `nibid q evm balance "$ADDR" "$USDC_ERC20"`
+  so one query shows both ERC20 and Bank-side holdings. Mainnet USDC is
+  `0x0829F361A05D993d5CEb035cA6DF3446b060970b`; details and examples are in
+  [`reference.md#nibid-q-evm-balance`](./reference.md#nibid-q-evm-balance).
+- **Multi-VM token balances** -> use `nibid q evm balance "$ADDR" "$TOKEN"`.
+  The account arg can be `0x...` or `nibi1...`; the token arg can be an ERC20
+  address, bank denom, or native denom like `unibi`.
+- **EVM account/native gas balance or address normalization** -> use
+  `nibid q evm account "$ADDR"`.
+- **Bank-only wallet balances** -> use `nibid q bank balances ...` when you
+  specifically need the Cosmos Bank module view.
+- **Bank denom / ERC20 mapping** -> use `nibid q evm funtoken "$TOKEN_OR_DENOM"`.
 - **Wasm contract state** -> use `nibid q wasm ...`
+- **Wasm smart queries** -> use
+  `nibid q wasm contract-state smart "$CONTRACT" "$QUERY_MSG"` for app-level
+  query messages.
+- **Wasm raw storage queries** -> use
+  `nibid q wasm contract-state raw "$CONTRACT" "$HEX_KEY"` when you need exact
+  storage item reads. Convert ASCII storage keys with `printf '%s' "$KEY" | xxd -p -c 256`.
 - **A tx hash** -> use `nibid q tx "$TX"`
 - **Sending funds** -> use `nibid tx bank ...`
 - **Executing or instantiating a contract** -> use `nibid tx wasm ...`
 
 ## Golden paths
+
+### Query EVM Balance
+
+Use this as the default path for Sai USDC balances. It accepts either `0x...` or
+`nibi1...` account addresses and token identifiers as ERC20 addresses, bank
+denoms, or native denoms.
+
+```bash
+# Sai USDC on Nibiru mainnet
+ADDR="nibi1..."
+USDC_ERC20="0x0829F361A05D993d5CEb035cA6DF3446b060970b"
+nibid q evm balance "$ADDR" "$USDC_ERC20" | jq .
+
+# Same query with the bank denom form
+USDC_BANK="erc20/0x0829F361A05D993d5CEb035cA6DF3446b060970b"
+nibid q evm balance "$ADDR" "$USDC_BANK" | jq .
+
+# Native NIBI also works by bank denom
+nibid q evm balance "$ADDR" "unibi" | jq .
+```
+
+Notes:
+
+- Prefer this over `q bank balances` for Sai USDC checks because it shows both
+  ERC20 and Bank balances in one response.
+- Use `erc20_balance_human` and `bank_balance_human` for quick reads; use the
+  `*_base` fields when building exact tx amounts.
+- See [`reference.md#nibid-q-evm-balance`](./reference.md#nibid-q-evm-balance)
+  for the full help-derived examples and output field meanings.
 
 ### Query Bank
 
@@ -185,14 +237,42 @@ nibid q wasm list-contract-by-code "$CODE_ID"
 # raw smart query
 QUERY_MSG='{"get_config":{}}'
 nibid q wasm contract-state smart "$CONTRACT_ADDR" "$QUERY_MSG"
+
+# raw storage query by hex key
+KEY="config"
+HEX_KEY="$(printf '%s' "$KEY" | xxd -p -c 256)"
+nibid q wasm contract-state raw "$CONTRACT_ADDR" "$HEX_KEY"
 ```
 
 Rules of thumb:
 
 - `contract-state smart` is the main path for app-level contract queries.
+- `contract-state raw` reads storage directly and expects a hex-encoded key,
+  not JSON. The response data is usually base64-encoded storage bytes.
 - Query JSON keys are contract-specific and usually `snake_case`.
 - Reuse a known-good query message shape from the relevant repo or skill when
   the exact message is not obvious.
+
+#### Decode raw storage values
+
+For raw string keys, this helper is the usual pattern:
+
+```bash
+raw_item() {
+  contract="$1"
+  key="$2"
+  hex="$(printf '%s' "$key" | xxd -p -c 256)"
+  nibid q wasm contract-state raw "$contract" "$hex" |
+    jq -r '.data // empty' | base64 -d
+  echo
+}
+
+raw_item "$CONTRACT_ADDR" config
+```
+
+Raw queries are useful when validating exact storage state or when a contract has
+no smart query for a known storage item. Prefer smart queries for normal
+operator/user-facing contract state.
 
 #### Discover query variants without source
 
@@ -264,6 +344,23 @@ Rules of thumb:
 - Start with `q tx` when the user gives a Cosmos-style tx hash.
 - If the user gives an EVM tx hash and wants receipt/trace semantics, use the
   `evm-rpc` skill instead.
+
+### Creating a new Random Wallet
+
+```bash
+nibid keys add demo-practice-key --dry-run --keyring-backend test
+```
+
+Response shape:
+```
+# {
+#   "name": "demo-practice-key",
+#   "type": "local",
+#   "address": "nibi1**************************************",
+#   "pubkey": "{\"@type\":\"/cosmos.crypto.secp256k1.PubKey\",\"key\":\"***\"}",
+#   "mnemonic": "***"
+# }
+```
 
 ## Working conventions
 

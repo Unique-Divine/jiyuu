@@ -157,6 +157,132 @@ curl -s "$TM_RPC/consensus_params?height=$HEIGHT" | jq
 
 Use when EVM and Cosmos observations appear inconsistent.
 
+### 5 - Check Deployed Bytecode for an ABI Mismatch
+
+Use this when a transaction reverts very early, the trace only shows a top-level
+`execution reverted`, and the calldata targets a function that may not exist in
+the deployed runtime bytecode. This catches frontend ABI or artifact drift, such
+as calling a newly added function against an older deployed contract.
+
+The method is:
+
+1. Compute the 4-byte selector from the canonical function signature.
+2. Fetch runtime bytecode with `eth_getCode`.
+3. Search the runtime bytecode for the selector without the `0x` prefix.
+4. Compare against known selectors that should exist on the same contract.
+
+```bash
+CONTRACT_ADDR="0xCONTRACT_ADDR"
+FUNCTION_SIG="claimReferrerRewardsToEvm(uint256[])"
+EVM_RPC="https://evm-rpc.archive.nibiru.fi"
+BLOCK_TAG="latest" # or a hex block number like "0x273e1fa"
+
+bun - <<'TS'
+import { id } from "ethers"
+
+const contractAddr = process.env.CONTRACT_ADDR
+const functionSig = process.env.FUNCTION_SIG
+const rpc = process.env.EVM_RPC
+const blockTag = process.env.BLOCK_TAG ?? "latest"
+
+if (!contractAddr || !functionSig || !rpc) {
+  throw new Error("set CONTRACT_ADDR, FUNCTION_SIG, and EVM_RPC")
+}
+
+const selector = id(functionSig).slice(0, 10)
+const resp = await fetch(rpc, {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    jsonrpc: "2.0",
+    method: "eth_getCode",
+    params: [contractAddr, blockTag],
+    id: 1,
+  }),
+})
+const json = await resp.json()
+if (json.error) {
+  throw new Error(JSON.stringify(json.error))
+}
+
+const code = String(json.result ?? "0x").toLowerCase()
+const selectorNoPrefix = selector.slice(2).toLowerCase()
+console.log({
+  contractAddr,
+  blockTag,
+  functionSig,
+  selector,
+  byteLength: Math.max(0, (code.length - 2) / 2),
+  selectorPresent: code.includes(selectorNoPrefix),
+})
+TS
+```
+
+To compare multiple selectors, use the same runtime bytecode and check a list.
+This is useful when one new selector is missing but older selectors are present.
+
+```bash
+CONTRACT_ADDR="0xCONTRACT_ADDR"
+EVM_RPC="https://evm-rpc.archive.nibiru.fi"
+BLOCK_TAG="latest"
+
+bun - <<'TS'
+import { id } from "ethers"
+
+const contractAddr = process.env.CONTRACT_ADDR
+const rpc = process.env.EVM_RPC
+const blockTag = process.env.BLOCK_TAG ?? "latest"
+const signatures = [
+  "claimReferrerRewardsToEvm(uint256[])",
+  "executeSimpleFunctions(bytes)",
+  "getDenomOfCollateralIndex(uint256)",
+]
+
+if (!contractAddr || !rpc) {
+  throw new Error("set CONTRACT_ADDR and EVM_RPC")
+}
+
+const resp = await fetch(rpc, {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    jsonrpc: "2.0",
+    method: "eth_getCode",
+    params: [contractAddr, blockTag],
+    id: 1,
+  }),
+})
+const json = await resp.json()
+if (json.error) {
+  throw new Error(JSON.stringify(json.error))
+}
+
+const code = String(json.result ?? "0x").toLowerCase()
+for (const sig of signatures) {
+  const selector = id(sig).slice(0, 10)
+  console.log({
+    sig,
+    selector,
+    present: code.includes(selector.slice(2).toLowerCase()),
+  })
+}
+TS
+```
+
+Interpretation:
+
+- `selectorPresent: true`: The runtime bytecode likely has a dispatcher entry
+  for that function. Continue debugging arguments, require checks, internal
+  calls, and traces.
+- `selectorPresent: false` while older selectors are present: The deployed
+  contract likely does not implement the ABI function being called. Update the
+  address, deploy the newer contract, or call an older available function.
+- Very low `gasUsed` with `status: "0x0"` and a missing selector often means
+  the call hit the dispatcher fallback/revert before meaningful contract logic.
+- For proxies, minimal proxies, diamonds, or custom fallback dispatchers, the
+  selector may be absent from the proxy runtime bytecode. Check the implementation
+  address or facet bytecode instead.
+
 ## Receipt and Trace Rules of Thumb
 
 - **Receipt status is the authoritative EVM truth** for success vs. failure.

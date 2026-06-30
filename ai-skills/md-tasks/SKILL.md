@@ -23,7 +23,11 @@ Denote open tasks or TODOs with standard checkbox notation:
 
 Indentation defines subtasks: extra leading spaces nest bullets under a parent item.
 
-Often add ordinary sub-bullets for status or context beneath a task, for example:
+In planning/spec documents, default every actionable item at every nesting level
+to checkbox notation. Do not hide implementation work in ordinary bullets.
+
+Often add ordinary sub-bullets for status or context beneath a task, but only
+when the bullet is not itself work to do. For example:
 
 ```markdown
 - [ ] Some task
@@ -34,6 +38,34 @@ Often add ordinary sub-bullets for status or context beneath a task, for example
 
 This keeps review tight: unfinished work sorts visually to checklist lines while
 still allowing narrative detail.
+
+### Actionable sub-bullets
+
+If a sub-bullet describes work to do, a decision to resolve, behavior to
+implement, a file to create, a test to add, or an acceptance criterion to verify,
+write it as a checkbox task too:
+
+```markdown
+- [ ] Implement tx archive CLI.
+  - [ ] Keep Bash responsible for chain config, keyring preflight, and broadcast.
+  - [ ] Make TypeScript responsible for txhash parsing and Markdown formatting.
+  - Rationale: TypeScript is easier to test for JSON, filenames, and CLI args.
+```
+
+Use ordinary nested bullets only for non-actionable context, rationale, status,
+examples, or notes. When unsure whether a sub-bullet is actionable, prefer
+`- [ ]`.
+
+### Task Questions
+
+Sometimes we'll pose a question or frame a resolve decision as a task. That can
+look like this.
+
+```markdown
+- [ ] Q: Some open question?
+  A: An answer on what to do. The question task is complete when each of the
+  potential subtasks is completed or the answer, "A: ..." is implemented.
+```
 
 ### Finding tasks in the terminal
 
