@@ -136,6 +136,14 @@ describe("tg-sai profile CLI", () => {
       expect(show.stdout).not.toContain("session-alice")
       expect(show.stdout).not.toContain("password-alice")
 
+      const showByHandle = runCli(["profile", "show", "alice_handle"], dir)
+      expect(showByHandle.exitCode).toBe(0)
+      expect(showByHandle.stdout).toContain('"name": "alice"')
+
+      const showByUserId = runCli(["profile", "show", "111"], dir)
+      expect(showByUserId.exitCode).toBe(0)
+      expect(showByUserId.stdout).toContain('"name": "alice"')
+
       const useBob = runCli(["profile", "use", "bob"], dir)
       expect(useBob.exitCode).toBe(0)
       expect(useBob.stdout).toContain("active_profile: bob_handle")

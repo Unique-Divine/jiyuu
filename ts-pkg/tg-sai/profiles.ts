@@ -417,16 +417,21 @@ export function findProfileIndex(
   config: TgSaiConfig,
   selector: string,
 ): number {
-  const asIndex = Number(selector)
-  if (Number.isInteger(asIndex) && asIndex >= 0) {
-    return asIndex < config.profiles.length ? asIndex : -1
-  }
-  return config.profiles.findIndex(
+  const exactMatch = config.profiles.findIndex(
     (profile) =>
       profile.name === selector ||
       profile.handle === selector ||
       String(profile.userId) === selector,
   )
+  if (exactMatch !== -1) {
+    return exactMatch
+  }
+
+  const asIndex = Number(selector)
+  if (Number.isInteger(asIndex) && asIndex >= 0) {
+    return asIndex < config.profiles.length ? asIndex : -1
+  }
+  return -1
 }
 
 export function profileLabel(profile: TgSaiProfile, index: number): string {
