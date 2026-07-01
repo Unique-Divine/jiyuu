@@ -1,7 +1,6 @@
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises"
 import { homedir, platform as osPlatform } from "node:os"
 import { dirname, join } from "node:path"
-
 import type { UserData } from "./adminAudit"
 
 const TG_SAI_DIR_ENV = "TG_SAI_DIR"
@@ -44,12 +43,16 @@ export interface TgSaiProfile {
 }
 
 export interface TgSaiConfig {
+  profiles: TgSaiProfile[]
+}
+
+export interface LegacyTgSaiConfig {
   activeProfile: string | null
   profiles: Record<string, TgSaiProfile>
 }
 
 export interface ProfileAddInput {
-  name: string
+  name?: string
   apiId: number | null
   apiHash: string
   sessionString: string
@@ -139,8 +142,7 @@ export const WINDOWS_DISCOVERY_PATHS = [
 ] as const
 
 export const emptyConfig = (): TgSaiConfig => ({
-  activeProfile: null,
-  profiles: {},
+  profiles: [],
 })
 
 export function homeDir(env: ProfileStoreEnv = process.env): string {
@@ -236,11 +238,12 @@ export async function readConfig(
 ): Promise<TgSaiConfig> {
   try {
     const raw = await readFile(configPath(env), "utf8")
-    const parsed = JSON.parse(raw) as TgSaiConfig
-    for (const profile of Object.values(parsed.profiles)) {
+    const parsed = JSON.parse(raw) as TgSaiConfig | LegacyTgSaiConfig
+    const config = normalizeConfig(parsed)
+    for (const profile of config.profiles) {
       profile.password = profile.password ?? ""
     }
-    return parsed
+    return config
   } catch (error) {
     if (
       error instanceof Error &&
@@ -250,6 +253,44 @@ export async function readConfig(
       return emptyConfig()
     }
     throw error
+  }
+}
+
+export function normalizeConfig(
+  config: TgSaiConfig | LegacyTgSaiConfig,
+): TgSaiConfig {
+  if (Array.isArray(config.profiles)) {
+    return {
+      profiles: config.profiles.map((profile, index) =>
+        normalizeProfile(profile, index),
+      ),
+    }
+  }
+
+  const legacyConfig = config as LegacyTgSaiConfig
+  const legacyProfiles = Object.entries(legacyConfig.profiles)
+  const orderedNames = [
+    ...(legacyConfig.activeProfile &&
+    legacyConfig.profiles[legacyConfig.activeProfile]
+      ? [legacyConfig.activeProfile]
+      : []),
+    ...legacyProfiles
+      .map(([name]) => name)
+      .filter((name) => name !== legacyConfig.activeProfile),
+  ]
+
+  return {
+    profiles: orderedNames.map((name, index) =>
+      normalizeProfile({ ...legacyConfig.profiles[name]!, name }, index),
+    ),
+  }
+}
+
+function normalizeProfile(profile: TgSaiProfile, index: number): TgSaiProfile {
+  return {
+    ...profile,
+    name: profile.name || profile.handle || `profile-${index}`,
+    password: profile.password ?? "",
   }
 }
 
@@ -273,13 +314,24 @@ export async function clearConfig(
 export function profileFromInput(
   input: ProfileAddInput,
   now = new Date(),
+  index = 0,
 ): TgSaiProfile {
   const timestamp = now.toISOString()
   return {
     ...input,
+    name: profileNameFromInput(input, index),
     createdAt: timestamp,
     updatedAt: timestamp,
   }
+}
+
+function profileNameFromInput(input: ProfileAddInput, index: number): string {
+  return (
+    input.name ??
+    input.handle ??
+    (input.userId !== null ? String(input.userId) : null) ??
+    `profile-${index}`
+  )
 }
 
 export async function addProfile(
@@ -288,19 +340,32 @@ export async function addProfile(
   now = new Date(),
 ): Promise<TgSaiConfig> {
   const config = await readConfig(env)
-  const previous = config.profiles[input.name]
+  const index =
+    input.name !== undefined
+      ? findProfileIndex(config, input.name)
+      : config.profiles.length > 0
+        ? 0
+        : -1
+  const targetIndex = index >= 0 ? index : config.profiles.length
+  const previous = index >= 0 ? config.profiles[index] : undefined
   const timestamp = now.toISOString()
-  config.profiles[input.name] = {
-    ...previous,
-    ...input,
+  const nextProfile: TgSaiProfile = {
+    name: profileNameFromInput(input, targetIndex),
+    apiId: input.apiId ?? previous?.apiId ?? null,
+    apiHash: input.apiHash || previous?.apiHash || "",
+    sessionString: input.sessionString || previous?.sessionString || "",
     password: input.password || previous?.password || "",
+    handle: input.handle ?? previous?.handle ?? null,
+    userId: input.userId ?? previous?.userId ?? null,
+    displayName: input.displayName || previous?.displayName || "",
     createdAt: previous?.createdAt ?? timestamp,
     updatedAt: timestamp,
   }
 
-  const profileCount = Object.keys(config.profiles).length
-  if (config.activeProfile === null || profileCount === 1) {
-    config.activeProfile = input.name
+  if (index >= 0) {
+    config.profiles[index] = nextProfile
+  } else {
+    config.profiles.push(nextProfile)
   }
 
   await writeConfig(config, env)
@@ -308,40 +373,69 @@ export async function addProfile(
 }
 
 export async function removeProfile(
-  name: string,
+  selector: string,
   env: ProfileStoreEnv = process.env,
 ): Promise<TgSaiConfig> {
   const config = await readConfig(env)
-  delete config.profiles[name]
-
-  if (config.activeProfile === name) {
-    const remaining = Object.keys(config.profiles)
-    config.activeProfile = remaining.length === 1 ? remaining[0]! : null
+  const index = findProfileIndex(config, selector)
+  if (index === -1) {
+    throw new Error(`Unknown profile: ${selector}`)
   }
+  config.profiles.splice(index, 1)
 
   await writeConfig(config, env)
   return config
 }
 
 export async function setActiveProfile(
-  name: string,
+  selector: string,
   env: ProfileStoreEnv = process.env,
 ): Promise<TgSaiConfig> {
   const config = await readConfig(env)
-  if (!config.profiles[name]) {
-    throw new Error(`Unknown profile: ${name}`)
+  const index = findProfileIndex(config, selector)
+  if (index === -1) {
+    throw new Error(`Unknown profile: ${selector}`)
   }
-  config.activeProfile = name
+  const [profile] = config.profiles.splice(index, 1)
+  config.profiles.unshift(profile!)
   await writeConfig(config, env)
   return config
 }
 
 export function getProfile(
   config: TgSaiConfig,
-  name: string | undefined,
+  selector: string | undefined,
 ): TgSaiProfile | null {
-  const profileName = name ?? config.activeProfile
-  return profileName ? (config.profiles[profileName] ?? null) : null
+  if (selector === undefined) {
+    return config.profiles[0] ?? null
+  }
+  const index = findProfileIndex(config, selector)
+  return index === -1 ? null : config.profiles[index]!
+}
+
+export function findProfileIndex(
+  config: TgSaiConfig,
+  selector: string,
+): number {
+  const exactMatch = config.profiles.findIndex(
+    (profile) =>
+      profile.name === selector ||
+      profile.handle === selector ||
+      String(profile.userId) === selector,
+  )
+  if (exactMatch !== -1) {
+    return exactMatch
+  }
+
+  const asIndex = Number(selector)
+  if (Number.isInteger(asIndex) && asIndex >= 0) {
+    return asIndex < config.profiles.length ? asIndex : -1
+  }
+  return -1
+}
+
+export function profileLabel(profile: TgSaiProfile, index: number): string {
+  return profile.handle ?? profile.name ?? `profile-${index}`
 }
 
 export function redactedProfile(profile: TgSaiProfile) {
@@ -708,7 +802,7 @@ export async function resolveTelegramCredentials(
 }
 
 export function profileInputFromUser(
-  name: string,
+  name: string | undefined,
   credentials: TelegramCredentials,
   user: UserData,
   password = "",

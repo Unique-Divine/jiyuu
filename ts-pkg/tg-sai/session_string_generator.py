@@ -69,6 +69,11 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _is_wrapper_mode(args: argparse.Namespace) -> bool:
+    """Return True when tg-sai is calling this helper internally."""
+    return bool(args.session_output and args.no_env_write)
+
+
 def _render_qr(qr) -> None:
     import qrcode
 
@@ -149,6 +154,7 @@ def _phone_login(client: TelegramClient) -> None:
 
 def main() -> None:
     args = _parse_args()
+    wrapper_mode = _is_wrapper_mode(args)
 
     api_id = os.getenv("TELEGRAM_API_ID")
     api_hash = os.getenv("TELEGRAM_API_HASH")
@@ -164,16 +170,20 @@ def main() -> None:
         print("Error: TELEGRAM_API_ID must be an integer")
         sys.exit(1)
 
-    print("\n----- Telegram Session String Generator -----\n")
-    print("This script will generate a session string for your Telegram account.")
-    print("The generated session string can be added to your tg-sai profile.")
-    print("\nYour credentials are only used for local Telegram authentication.\n")
+    if not wrapper_mode:
+        print("\n----- Telegram Session String Generator -----\n")
+        print("This script will generate a session string for your Telegram account.")
+        print("The generated session string can be added to your tg-sai profile.")
+        print("\nYour credentials are only used for local Telegram authentication.\n")
 
-    label = (
-        input("Account label (optional, e.g. 'work', 'personal'; leave empty for default): ")
-        .strip()
-        .lower()
-    )
+    if wrapper_mode:
+        label = ""
+    else:
+        label = (
+            input("Account label (optional, e.g. 'work', 'personal'; leave empty for default): ")
+            .strip()
+            .lower()
+        )
 
     if args.qr:
         method = "1"
@@ -207,24 +217,26 @@ def main() -> None:
         else:
             env_var = "TELEGRAM_SESSION_STRING"
 
-        print("\nAuthentication successful!")
-        print("\n----- Your Session String -----")
-        print(f"\n{session_string}\n")
-        print("Save this in tg-sai with:")
-        print(
-            "just tg-sai profile add "
-            "--name <name> "
-            f"--api-id {api_id_int} "
-            f"--api-hash {api_hash} "
-            "--session-string '<session string>'"
-        )
-        print("\nOr add this to an .env file as:")
-        print(f"{env_var}={session_string}")
-        print("\nIMPORTANT: Keep this string private and never share it with anyone!")
-
         if args.session_output:
             with open(args.session_output, "w", encoding="utf-8") as file:
                 file.write(f"{session_string}\n")
+
+        if wrapper_mode:
+            print("\nAuthentication successful. Session captured by tg-sai.")
+        else:
+            print("\nAuthentication successful!")
+            print("\n----- Your Session String -----")
+            print(f"\n{session_string}\n")
+            print("Save this in tg-sai with:")
+            print(
+                "tg-sai profile add "
+                f"--api-id {api_id_int} "
+                f"--api-hash {api_hash} "
+                "--session-string '<session string>'"
+            )
+            print("\nOr add this to an .env file as:")
+            print(f"{env_var}={session_string}")
+            print("\nIMPORTANT: Keep this string private and never share it with anyone!")
 
         if args.no_env_write:
             choice = "n"

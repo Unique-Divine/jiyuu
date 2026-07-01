@@ -1,8 +1,7 @@
 import { constants } from "node:fs"
 import { access, mkdir, readdir, readFile, stat } from "node:fs/promises"
 import { join } from "node:path"
-
-import { configDir, configPath, readConfig } from "./profiles"
+import { configDir, configPath, profileLabel, readConfig } from "./profiles"
 import type {
   ProfileStoreEnv,
   TelegramCredentials,
@@ -110,45 +109,43 @@ function directoryFix(path: string): string[] {
   ]
 }
 
-function missingProfileFix(profileName?: string): string[] {
-  const addCommand = profileName
-    ? `tg-sai profile add --name ${profileName} --src <number>`
-    : "tg-sai profile add --name <name> --src <number>"
+function missingProfileFix(): string[] {
   return [
     "Find a Telegram credential source and save it as a tg-sai profile.",
     "tg-sai profile find",
-    addCommand,
+    "tg-sai profile add",
+    "If apiId/apiHash are missing, create a Telegram API app at https://my.telegram.org/apps",
+    "Then run: tg-sai profile add --qr",
   ]
 }
 
-function incompleteProfileFix(profileName: string, fields: string[]): string[] {
+function incompleteProfileFix(selector: string, fields: string[]): string[] {
   return [
     `Fill missing profile field(s): ${fields.join(",")}`,
     "Check the redacted active profile:",
-    `tg-sai profile show ${profileName}`,
-    "Then refresh it from a complete credential source:",
+    `tg-sai profile show ${selector}`,
+    "Then refresh it from detected values or generate a session:",
     "tg-sai profile find",
-    `tg-sai profile add --name ${profileName} --src <number>`,
+    "tg-sai profile add",
+    "tg-sai profile add --qr",
   ]
 }
 
-function connectionFix(profileName: string): string[] {
+function connectionFix(selector: string): string[] {
   return [
     "Check the active profile API credentials and Telegram session string.",
-    `tg-sai profile show ${profileName}`,
+    `tg-sai profile show ${selector}`,
     "If apiId, apiHash, or sessionString are stale, refresh from a known-good source:",
     "tg-sai profile find",
-    `tg-sai profile add --name ${profileName} --src <number>`,
+    "tg-sai profile add",
+    "tg-sai profile add --qr",
   ]
 }
 
-function passwordFix(profileName?: string): string[] {
-  const saveCommand = profileName
-    ? `tg-sai profile add --name ${profileName} --password '<password>'`
-    : "tg-sai profile add --name <name> --password '<password>'"
+function passwordFix(): string[] {
   return [
     "Save the Telegram 2FA password in the active tg-sai profile:",
-    saveCommand,
+    "tg-sai profile add --password '<password>'",
     "You can also override it for one command with TELEGRAM_PASSWORD.",
   ]
 }
@@ -250,7 +247,7 @@ async function checkTelegramConnection(params: {
       collector,
       "telegram_connection",
       "telegram_connection: skipped because active profile is incomplete",
-      incompleteProfileFix(profile.name, missingFields),
+      incompleteProfileFix("0", missingFields),
     )
     return
   }
@@ -273,7 +270,7 @@ async function checkTelegramConnection(params: {
           "Use a Telegram user-account session for tg-sai admin operations.",
           "Switch to a user profile:",
           "tg-sai profile list",
-          "tg-sai profile use <user-profile-name>",
+          "tg-sai profile use <index-or-handle-or-user-id>",
         ],
       )
     }
@@ -282,7 +279,7 @@ async function checkTelegramConnection(params: {
       collector,
       "telegram_connection",
       `telegram_connection: failed ${errorMessage(caught)}`,
-      connectionFix(profile.name),
+      connectionFix("0"),
     )
   } finally {
     if (client) {
@@ -297,14 +294,14 @@ function checkPassword(
   profile: TgSaiProfile | null,
 ): void {
   if (env.TELEGRAM_PASSWORD || profile?.password) {
-    info(collector, "password_status: present")
+    good(collector, "password_status: present")
     return
   }
   warning(
     collector,
     "password_status",
     "password_status: missing",
-    passwordFix(profile?.name),
+    passwordFix(),
   )
   info(
     collector,
@@ -394,13 +391,13 @@ export async function runHealthCheck(params: {
   }
 
   const config = await readConfig(env)
-  const activeProfileName = config.activeProfile
-  const activeProfile = activeProfileName
-    ? (config.profiles[activeProfileName] ?? null)
+  const activeProfile = config.profiles[0] ?? null
+  const activeProfileLabel = activeProfile
+    ? profileLabel(activeProfile, 0)
     : null
   const missingFields = activeProfile ? missingProfileFields(activeProfile) : []
 
-  if (!activeProfileName) {
+  if (!activeProfile) {
     error(
       collector,
       "active_profile",
@@ -413,33 +410,20 @@ export async function runHealthCheck(params: {
       "profile_status: missing",
       missingProfileFix(),
     )
-  } else if (!activeProfile) {
-    error(
-      collector,
-      "active_profile",
-      `active_profile: ${activeProfileName}`,
-      missingProfileFix(activeProfileName),
-    )
-    error(
-      collector,
-      "profile_status",
-      "profile_status: missing",
-      missingProfileFix(activeProfileName),
-    )
   } else {
-    info(collector, `active_profile: ${activeProfile.name}`)
+    info(collector, `active_profile: ${activeProfileLabel}`)
     if (missingFields.length > 0) {
       error(
         collector,
         "profile_status",
         "profile_status: incomplete",
-        incompleteProfileFix(activeProfile.name, missingFields),
+        incompleteProfileFix("0", missingFields),
       )
       error(
         collector,
         "missing_fields",
         `missing_fields: ${missingFields.join(",")}`,
-        incompleteProfileFix(activeProfile.name, missingFields),
+        incompleteProfileFix("0", missingFields),
       )
     } else {
       good(collector, "profile_status: complete")
@@ -457,14 +441,11 @@ export async function runHealthCheck(params: {
     await checkLogs(collector, logsPath)
   }
 
-  if (!activeProfileName) {
+  if (!activeProfile) {
     info(collector, "next: tg-sai profile find")
-    info(collector, "next: tg-sai profile add --name <name> --src <number>")
-  } else if (!activeProfile || missingFields.length > 0) {
-    info(
-      collector,
-      `next: tg-sai profile add --name ${activeProfileName} --src <number>`,
-    )
+    info(collector, "next: tg-sai profile add --qr")
+  } else if (missingFields.length > 0) {
+    info(collector, "next: tg-sai profile add --qr")
   }
 
   renderSuggestedFixes(collector)

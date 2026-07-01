@@ -8,10 +8,12 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises"
+import { createRequire } from "node:module"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { stdin as input, stdout as output } from "node:process"
+import { createInterface } from "node:readline/promises"
 import { Command } from "commander"
-
 import type { BatchLogger } from "./actionExecutor"
 import { withFloodWaitRetry } from "./actionExecutor"
 import type {
@@ -20,13 +22,14 @@ import type {
   ProposedAction,
 } from "./adminAudit"
 import { planAdminBootstrap } from "./adminAudit"
-import { saiBot, uniqueDivine } from "./cfg"
+import { saiBot, USERS } from "./cfg"
 import { runHealthCheck } from "./health"
 import {
   addTargetToChat,
   createMtcuteClient,
   fetchChatAuditInput,
   findSaiChats,
+  normalizeUser,
   promoteTargetAdmin,
   transferTargetOwnership,
 } from "./mtcuteAdapter"
@@ -38,6 +41,7 @@ import {
   discoveryReport,
   getProfile,
   profileInputFromUser,
+  profileLabel,
   readConfig,
   redactedProfile,
   removeProfile,
@@ -51,7 +55,10 @@ import type {
   TelegramCredentialValues,
 } from "./profiles"
 
-const DEFAULT_USER_TARGET_ID = uniqueDivine.id
+const require = createRequire(import.meta.url)
+const packageJson = require("./package.json") as { version: string }
+
+const DEFAULT_USER_TARGET_ID = USERS.uniqueDivine.id
 const DEFAULT_BOT_TARGET_ID = saiBot.id
 const DEFAULT_BOT_TARGET_PEER = saiBot.handle
 
@@ -111,7 +118,7 @@ interface TelegramEnv {
 }
 
 interface ProfileAddOptions {
-  name: string
+  name?: string
   apiId?: string
   apiHash?: string
   sessionString?: string
@@ -123,6 +130,7 @@ interface ProfileAddOptions {
   login?: boolean
   qr?: boolean
   phone?: boolean
+  interactive?: boolean
 }
 
 const saiBotAdminRights = {
@@ -211,6 +219,17 @@ function actionExecutorDeps(logger: BatchLogger = consoleBatchLogger) {
   }
 }
 
+function actorBatchLogger(actorUsername: string): BatchLogger {
+  return {
+    event(event) {
+      emitJsonObject({
+        ...event,
+        actorUsername,
+      })
+    },
+  }
+}
+
 /**
  * Emits one command-level JSON event to stdout.
  */
@@ -269,6 +288,17 @@ async function getTelegramEnv(profileName?: string): Promise<TelegramEnv> {
   }
 }
 
+async function selectedProfileName(
+  profileName?: string,
+): Promise<string | null> {
+  if (profileName) {
+    return profileName
+  }
+  const config = await readConfig()
+  const profile = config.profiles[0]
+  return profile ? profileLabel(profile, 0) : null
+}
+
 function parsePeer(value: string): number | string {
   const normalized = value.startsWith("@") ? value.slice(1) : value
   const asNumber = Number(normalized)
@@ -310,7 +340,7 @@ function printAudit(input: ChatAuditInput) {
   console.log(
     `target_can_receive_ownership: ${audit.targetCanReceiveOwnership}`,
   )
-  console.log(`proposed_actions: ${audit.proposedActions.join("; ")}`)
+  console.log(`proposed_actions: ${formatActionList(audit.proposedActions)}`)
 }
 
 function shouldRunAction(
@@ -318,6 +348,10 @@ function shouldRunAction(
   action: ProposedAction,
 ): boolean {
   return proposedActions.includes(action)
+}
+
+function formatActionList(actions: ProposedAction[]): string {
+  return JSON.stringify(actions)
 }
 
 async function withClient<T>(
@@ -380,7 +414,9 @@ async function runAddBot(options: AddBotOptions): Promise<void> {
     console.log(`target_peer: ${options.targetPeer}`)
     console.log(`actor_role: ${beforePlan.actorRole}`)
     console.log(`target_role_before: ${beforePlan.targetRole}`)
-    console.log(`proposed_actions: ${beforePlan.proposedActions.join("; ")}`)
+    console.log(
+      `proposed_actions: ${formatActionList(beforePlan.proposedActions)}`,
+    )
 
     if (options.run !== true) {
       console.log("dry_run: pass --run to add/promote the bot")
@@ -427,7 +463,9 @@ async function runAddBot(options: AddBotOptions): Promise<void> {
 
     console.log(`target_role_after: ${afterPlan.targetRole}`)
     console.log(`target_is_admin_after: ${afterPlan.targetIsAdmin}`)
-    console.log(`remaining_actions: ${afterPlan.proposedActions.join("; ")}`)
+    console.log(
+      `remaining_actions: ${formatActionList(afterPlan.proposedActions)}`,
+    )
   })
 }
 
@@ -448,7 +486,9 @@ async function runAddOwner(options: AddOwnerOptions): Promise<void> {
     console.log(
       `target_can_receive_ownership_before: ${beforePlan.targetCanReceiveOwnership}`,
     )
-    console.log(`proposed_actions: ${beforePlan.proposedActions.join("; ")}`)
+    console.log(
+      `proposed_actions: ${formatActionList(beforePlan.proposedActions)}`,
+    )
 
     if (options.run !== true) {
       console.log("dry_run: pass --run to add/promote the target user")
@@ -498,7 +538,9 @@ async function runAddOwner(options: AddOwnerOptions): Promise<void> {
     console.log(
       `target_can_receive_ownership_after: ${afterPlan.targetCanReceiveOwnership}`,
     )
-    console.log(`remaining_actions: ${afterPlan.proposedActions.join("; ")}`)
+    console.log(
+      `remaining_actions: ${formatActionList(afterPlan.proposedActions)}`,
+    )
 
     if (!afterPlan.actorCanTransferOwnership) {
       console.log("ownership_transfer: skipped_actor_not_owner")
@@ -565,6 +607,7 @@ async function runSaiFind(options: SaiFindOptions): Promise<void> {
 async function applyTargetPlan(params: {
   client: Awaited<ReturnType<typeof createMtcuteClient>>
   chat: ChatInput
+  actorUsername: string
   targetUserId: number | string
   targetPeer: number | string
   rights: Record<string, boolean>
@@ -580,6 +623,7 @@ async function applyTargetPlan(params: {
   printJsonEvent("target_plan", {
     chatId: params.chat.chatId,
     title: params.chat.title,
+    actorUsername: params.actorUsername,
     targetUserId: params.targetUserId,
     actionPrefix: params.actionPrefix,
     run: params.run,
@@ -591,6 +635,7 @@ async function applyTargetPlan(params: {
   if (!beforePlan.actorCanApply) {
     printJsonEvent("target_skip", {
       chatId: params.chat.chatId,
+      actorUsername: params.actorUsername,
       actionPrefix: params.actionPrefix,
       reason: "actor_lacks_owner_or_add_admins_right",
     })
@@ -601,7 +646,7 @@ async function applyTargetPlan(params: {
     return
   }
 
-  const deps = actionExecutorDeps()
+  const deps = actionExecutorDeps(actorBatchLogger(params.actorUsername))
   if (shouldRunAction(beforePlan.proposedActions, "add target user")) {
     await withFloodWaitRetry(
       {
@@ -647,6 +692,7 @@ async function maybeTransferOwner(params: {
   client: Awaited<ReturnType<typeof createMtcuteClient>>
   env: TelegramEnv
   chat: ChatInput
+  actorUsername: string
   targetUser: number | string
   enabled: boolean
   run: boolean
@@ -664,6 +710,7 @@ async function maybeTransferOwner(params: {
   if (!plan.actorCanTransferOwnership) {
     printJsonEvent("ownership_skip", {
       chatId: params.chat.chatId,
+      actorUsername: params.actorUsername,
       reason: "actor_not_owner",
     })
     return
@@ -671,6 +718,7 @@ async function maybeTransferOwner(params: {
   if (!plan.targetCanReceiveOwnership) {
     printJsonEvent("ownership_skip", {
       chatId: params.chat.chatId,
+      actorUsername: params.actorUsername,
       reason: "target_not_eligible",
     })
     return
@@ -678,6 +726,7 @@ async function maybeTransferOwner(params: {
   if (params.env.password === null) {
     printJsonEvent("ownership_skip", {
       chatId: params.chat.chatId,
+      actorUsername: params.actorUsername,
       reason: "missing_telegram_password",
     })
     return
@@ -685,6 +734,7 @@ async function maybeTransferOwner(params: {
   if (!params.run) {
     printJsonEvent("ownership_plan", {
       chatId: params.chat.chatId,
+      actorUsername: params.actorUsername,
       action: "transfer_owner",
     })
     return
@@ -701,7 +751,7 @@ async function maybeTransferOwner(params: {
         targetPeer: params.targetUser,
         password: params.env.password ?? "",
       }),
-    actionExecutorDeps(),
+    actionExecutorDeps(actorBatchLogger(params.actorUsername)),
   )
 }
 
@@ -727,18 +777,23 @@ async function runSaiBootstrap(options: SaiBootstrapOptions): Promise<void> {
 
   await withClient(options.profile, async (client, env) => {
     activeJsonLogPath = logPath
+    const actor = normalizeUser(await client.getMe())
+    const actorUsername = actor.username ?? ""
+    const profileName = await selectedProfileName(options.profile)
     const ownershipTransferEnabled =
       options.transferOwner !== false && env.password !== null
     console.log(`wrote_run_log: ${logPath}`)
     printJsonEvent("run_start", {
       file: options.file,
       logPath,
+      profileName,
+      actor,
       chatCount: chats.length,
       run: options.run === true,
       transferOwner: ownershipTransferEnabled,
       passwordAvailable: env.password !== null,
       delayMs,
-      targetUser: uniqueDivine.id,
+      targetUser: USERS.uniqueDivine.id,
       targetBot: saiBot.id,
     })
 
@@ -749,12 +804,14 @@ async function runSaiBootstrap(options: SaiBootstrapOptions): Promise<void> {
           total: chats.length,
           chatId: chat.chatId,
           title: chat.title,
+          actorUsername,
         })
 
         try {
           await applyTargetPlan({
             client,
             chat,
+            actorUsername,
             targetUserId: saiBot.id,
             targetPeer: saiBot.handle,
             rights: saiBotAdminRights,
@@ -764,8 +821,9 @@ async function runSaiBootstrap(options: SaiBootstrapOptions): Promise<void> {
           await applyTargetPlan({
             client,
             chat,
-            targetUserId: uniqueDivine.id,
-            targetPeer: uniqueDivine.handle,
+            actorUsername,
+            targetUserId: USERS.uniqueDivine.id,
+            targetPeer: USERS.uniqueDivine.handle,
             rights: ownerTargetAdminRights,
             actionPrefix: "owner_target",
             run: options.run === true,
@@ -774,16 +832,19 @@ async function runSaiBootstrap(options: SaiBootstrapOptions): Promise<void> {
             client,
             env,
             chat,
-            targetUser: uniqueDivine.handle,
+            actorUsername,
+            targetUser: USERS.uniqueDivine.handle,
             enabled: ownershipTransferEnabled,
             run: options.run === true,
           })
           printJsonEvent("chat_complete", {
             chatId: chat.chatId,
+            actorUsername,
           })
         } catch (error) {
           printJsonEvent("chat_error", {
             chatId: chat.chatId,
+            actorUsername,
             errorName: error instanceof Error ? error.name : "UnknownError",
             errorMessage:
               error instanceof Error ? error.message : String(error),
@@ -793,6 +854,7 @@ async function runSaiBootstrap(options: SaiBootstrapOptions): Promise<void> {
         if (delayMs > 0 && i < chats.length - 1) {
           printJsonEvent("chat_delay", {
             chatId: chat.chatId,
+            actorUsername,
             delayMs,
           })
           await sleep(delayMs)
@@ -810,19 +872,6 @@ async function runSaiBootstrap(options: SaiBootstrapOptions): Promise<void> {
   })
 }
 
-function getCredentialsFromProfileAddOptions(
-  options: ProfileAddOptions,
-): TelegramCredentials | null {
-  if (options.apiId && options.apiHash && options.sessionString) {
-    return {
-      apiId: Number(options.apiId),
-      apiHash: options.apiHash,
-      sessionString: options.sessionString,
-    }
-  }
-  return null
-}
-
 function credentialValuesFromProfileAddOptions(
   options: ProfileAddOptions,
 ): TelegramCredentialValues {
@@ -834,6 +883,17 @@ function credentialValuesFromProfileAddOptions(
   }
 }
 
+function credentialValuesFromEnv(
+  env: NodeJS.ProcessEnv = process.env,
+): TelegramCredentialValues {
+  return {
+    TELEGRAM_API_ID: env.TELEGRAM_API_ID,
+    TELEGRAM_API_HASH: env.TELEGRAM_API_HASH,
+    TELEGRAM_SESSION_STRING: env.TELEGRAM_SESSION_STRING,
+    TELEGRAM_PASSWORD: env.TELEGRAM_PASSWORD,
+  }
+}
+
 function profileFieldsFromCredentialValues(values: TelegramCredentialValues) {
   return {
     apiId: values.TELEGRAM_API_ID ? Number(values.TELEGRAM_API_ID) : null,
@@ -842,6 +902,10 @@ function profileFieldsFromCredentialValues(values: TelegramCredentialValues) {
     password: values.TELEGRAM_PASSWORD ?? "",
   }
 }
+
+type ProfileCredentialFields = ReturnType<
+  typeof profileFieldsFromCredentialValues
+>
 
 function mergeCredentialValues(
   ...valuesList: Array<TelegramCredentialValues | null>
@@ -858,6 +922,95 @@ function mergeCredentialValues(
     }
   }
   return merged
+}
+
+function redactedCredentialValue(key: string, value: string): string {
+  if (
+    key === "TELEGRAM_API_HASH" ||
+    key === "TELEGRAM_SESSION_STRING" ||
+    key === "TELEGRAM_PASSWORD"
+  ) {
+    return value ? "[redacted]" : ""
+  }
+  return value
+}
+
+function sourceLabel(candidate: DiscoveryReport["candidates"][number]): string {
+  return `${candidate.name} ${candidate.path} ${candidate.objectPath}`
+}
+
+function mergeDiscoveredValues(
+  candidates: DiscoveryReport["candidates"],
+): TelegramCredentialValues {
+  const merged: TelegramCredentialValues = {}
+  const origins: Partial<
+    Record<
+      keyof TelegramCredentialValues,
+      DiscoveryReport["candidates"][number]
+    >
+  > = {}
+
+  for (const candidate of candidates) {
+    for (const [key, value] of Object.entries(candidate.values)) {
+      if (value === undefined || value === "") {
+        continue
+      }
+      const typedKey = key as keyof TelegramCredentialValues
+      const previous = merged[typedKey]
+      if (previous !== undefined && previous !== value) {
+        const previousOrigin = origins[typedKey]!
+        throw new Error(
+          [
+            `Conflicting Telegram credential values for ${key}.`,
+            `- ${sourceLabel(previousOrigin)}: ${redactedCredentialValue(
+              key,
+              previous,
+            )}`,
+            `- ${sourceLabel(candidate)}: ${redactedCredentialValue(
+              key,
+              value,
+            )}`,
+            "Run `tg-sai profile find` and choose one source with `--src <number>`.",
+          ].join("\n"),
+        )
+      }
+      merged[typedKey] = value
+      origins[typedKey] = candidate
+    }
+  }
+
+  return merged
+}
+
+function assertNoExplicitSourceConflicts(params: {
+  sourceValues: TelegramCredentialValues
+  higherPrecedenceValues: TelegramCredentialValues
+  sourceDescription: string
+}): void {
+  for (const [key, value] of Object.entries(params.sourceValues)) {
+    if (value === undefined || value === "") {
+      continue
+    }
+    const higherValue =
+      params.higherPrecedenceValues[key as keyof TelegramCredentialValues]
+    if (
+      higherValue !== undefined &&
+      higherValue !== "" &&
+      higherValue !== value
+    ) {
+      throw new Error(
+        [
+          `Conflicting Telegram credential values for ${key}.`,
+          `- ${params.sourceDescription}: ${redactedCredentialValue(
+            key,
+            value,
+          )}`,
+          `- CLI/env: ${redactedCredentialValue(key, higherValue)}`,
+          "Remove the conflicting flag/env var or choose a different `--src`.",
+        ].join("\n"),
+      )
+    }
+  }
 }
 
 function validateLoginOptions(options: ProfileAddOptions): void {
@@ -909,49 +1062,110 @@ async function generateSessionString(params: {
   }
 }
 
-async function getCredentialValuesFromSourceOption(
+async function discoveredValuesForProfileAdd(
   options: ProfileAddOptions,
-): Promise<TelegramCredentialValues | null> {
-  if (!options.src) {
-    return null
-  }
-  const index = Number(options.src)
-  if (!Number.isInteger(index) || index < 1) {
-    throw new Error("--src must be a 1-based source number")
+): Promise<{
+  values: TelegramCredentialValues | null
+  sourceDescription: string | null
+  explicit: boolean
+}> {
+  if (options.src) {
+    const index = Number(options.src)
+    if (!Number.isInteger(index) || index < 1) {
+      throw new Error("--src must be a 1-based source number")
+    }
+
+    const report = await discoveryReport()
+    const candidate = report.candidates[index - 1]
+    if (!candidate) {
+      throw new Error(`Unknown discovery source: ${options.src}`)
+    }
+    return {
+      values: candidate.values,
+      sourceDescription: sourceLabel(candidate),
+      explicit: true,
+    }
   }
 
   const report = await discoveryReport()
-  const candidate = report.candidates[index - 1]
-  if (!candidate) {
-    throw new Error(`Unknown discovery source: ${options.src}`)
+  return {
+    values: mergeDiscoveredValues(report.candidates),
+    sourceDescription: null,
+    explicit: false,
   }
-  return candidate.values
+}
+
+async function promptForMissingProfileFields(
+  profileFields: ProfileCredentialFields,
+  options: ProfileAddOptions,
+): Promise<void> {
+  if (!options.interactive) {
+    return
+  }
+
+  const rl = createInterface({ input, output })
+  try {
+    if (!profileFields.apiId) {
+      const value = (await rl.question("Telegram API ID: ")).trim()
+      if (value) {
+        profileFields.apiId = Number(value)
+      }
+    }
+    if (!profileFields.apiHash) {
+      const value = (await rl.question("Telegram API hash: ")).trim()
+      if (value) {
+        profileFields.apiHash = value
+      }
+    }
+    if (
+      !profileFields.sessionString &&
+      !options.qr &&
+      !options.phone &&
+      !options.login
+    ) {
+      const value = (
+        await rl.question("Generate a Telegram session now? [Y=QR/n/phone]: ")
+      )
+        .trim()
+        .toLowerCase()
+      if (value === "phone" || value === "p") {
+        options.phone = true
+      } else if (value === "" || value === "y" || value === "yes") {
+        options.qr = true
+      }
+    }
+  } finally {
+    rl.close()
+  }
 }
 
 async function inputFromProfileAddOptions(
   options: ProfileAddOptions,
 ): Promise<ProfileAddInput> {
   validateLoginOptions(options)
-  const credentials = getCredentialsFromProfileAddOptions(options)
-  const sourceValues = credentials
-    ? null
-    : await getCredentialValuesFromSourceOption(options)
   const optionValues = credentialValuesFromProfileAddOptions(options)
-  const profileFields = credentials
-    ? {
-        apiId: credentials.apiId,
-        apiHash: credentials.apiHash,
-        sessionString: credentials.sessionString,
-        password: optionValues.TELEGRAM_PASSWORD ?? "",
-      }
-    : profileFieldsFromCredentialValues(
-        mergeCredentialValues(sourceValues, optionValues),
-      )
+  const envValues = credentialValuesFromEnv()
+  const discovery = await discoveredValuesForProfileAdd(options)
+  const higherPrecedenceValues = mergeCredentialValues(envValues, optionValues)
+  if (discovery.explicit && discovery.values && discovery.sourceDescription) {
+    assertNoExplicitSourceConflicts({
+      sourceValues: discovery.values,
+      higherPrecedenceValues,
+      sourceDescription: discovery.sourceDescription,
+    })
+  }
+  const profileFields = profileFieldsFromCredentialValues(
+    mergeCredentialValues(discovery.values, envValues, optionValues),
+  )
+  await promptForMissingProfileFields(profileFields, options)
 
-  if (options.login && !profileFields.sessionString) {
+  if (
+    (options.login || options.qr || options.phone) &&
+    !profileFields.sessionString
+  ) {
     if (!profileFields.apiId || !profileFields.apiHash) {
       throw new Error(
-        "--login requires apiId and apiHash from flags, --src, env, or .env discovery",
+        "Session generation requires apiId and apiHash from flags, env, or discovery",
       )
     }
     profileFields.sessionString = await generateSessionString({
@@ -1016,24 +1230,23 @@ async function inputFromProfileAddOptions(
 
 async function runProfileList(): Promise<void> {
   const config = await readConfig()
-  const profiles = Object.values(config.profiles)
-  if (profiles.length === 0) {
+  if (config.profiles.length === 0) {
     console.log("No profiles configured.")
     return
   }
-  for (const profile of profiles) {
-    const active = config.activeProfile === profile.name ? "*" : " "
+  for (const [index, profile] of config.profiles.entries()) {
+    const active = index === 0 ? "*" : " "
     console.log(
-      `${active} ${profile.name}\t${profile.handle ?? ""}\t${profile.userId}\t${profile.displayName}`,
+      `${active} ${index}\t${profileLabel(profile, index)}\t${profile.userId}\t${profile.displayName}`,
     )
   }
 }
 
-async function runProfileShow(name: string): Promise<void> {
+async function runProfileShow(selector = "0"): Promise<void> {
   const config = await readConfig()
-  const profile = getProfile(config, name)
+  const profile = getProfile(config, selector)
   if (!profile) {
-    throw new Error(`Unknown profile: ${name}`)
+    throw new Error(`Unknown profile: ${selector}`)
   }
   console.log(JSON.stringify(redactedProfile(profile), null, 2))
 }
@@ -1041,8 +1254,12 @@ async function runProfileShow(name: string): Promise<void> {
 async function runProfileAdd(options: ProfileAddOptions): Promise<void> {
   const input = await inputFromProfileAddOptions(options)
   const config = await addProfile(input)
-  const active = config.activeProfile === input.name ? "active" : "saved"
-  console.log(`profile_${active}: ${input.name}`)
+  const profile = getProfile(config, input.name)
+  const index = profile ? config.profiles.indexOf(profile) : 0
+  const savedProfile = profile ?? config.profiles[0]!
+  const active = index === 0 ? "default" : "saved"
+  console.log(`profile_${active}: ${profileLabel(savedProfile, index)}`)
+  console.log(`profile_index: ${index}`)
   console.log(`user_id: ${input.userId}`)
   console.log(`handle: ${input.handle ?? ""}`)
   console.log(`telegram_password: ${input.password ? "stored" : "missing"}`)
@@ -1078,7 +1295,23 @@ function printDiscoveryReport(report: DiscoveryReport): void {
     )
   }
   console.log("next:")
-  console.log("  tg-sai profile add --name <name> --src <number>")
+  try {
+    const values = mergeDiscoveredValues(report.candidates)
+    if (Object.keys(values).length === 0) {
+      console.log("  tg-sai profile add")
+      return
+    }
+    console.log("  tg-sai profile add")
+    if (!values.TELEGRAM_SESSION_STRING) {
+      console.log("  tg-sai profile add --qr")
+      console.log("  tg-sai profile add --phone")
+    }
+  } catch (error) {
+    console.log(
+      `  conflict: ${error instanceof Error ? error.message : String(error)}`,
+    )
+    console.log("  tg-sai profile add --src <number>")
+  }
 }
 
 export function createProgram(): Command {
@@ -1087,7 +1320,7 @@ export function createProgram(): Command {
   program
     .name("tg-sai")
     .description("Audit and manage Sai Telegram chat admin state")
-    .version("0.1.0")
+    .version(packageJson.version, "--version", "output the version number")
     .helpOption("--help", "display help for command")
 
   program.action(() => {
@@ -1105,11 +1338,7 @@ export function createProgram(): Command {
     .command("audit")
     .description("Read-only audit for one chat and target user")
     .option("--profile <name>", "Profile name to use for Telegram credentials")
-    .requiredOption(
-      "--chat <id>",
-      "Telegram chat ID or username",
-      parsePeer,
-    )
+    .requiredOption("--chat <id>", "Telegram chat ID or username", parsePeer)
     .option(
       "--target-user <id>",
       "Target user ID or username",
@@ -1132,11 +1361,7 @@ Examples:
     .command("add-bot")
     .description("Add SaiTeam_bot and promote it to admin when possible")
     .option("--profile <name>", "Profile name to use for Telegram credentials")
-    .requiredOption(
-      "--chat <id>",
-      "Telegram chat ID or username",
-      parsePeer,
-    )
+    .requiredOption("--chat <id>", "Telegram chat ID or username", parsePeer)
     .option(
       "--target-user <id>",
       "Bot user ID used for membership audit",
@@ -1158,11 +1383,7 @@ Examples:
     .command("add-owner")
     .description("Add a target user as owner if possible, otherwise admin")
     .option("--profile <name>", "Profile name to use for Telegram credentials")
-    .requiredOption(
-      "--chat <id>",
-      "Telegram chat ID or username",
-      parsePeer,
-    )
+    .requiredOption("--chat <id>", "Telegram chat ID or username", parsePeer)
     .requiredOption(
       "--target-user <peer>",
       "Target user ID or username",
@@ -1234,7 +1455,7 @@ Examples:
   profile
     .command("add")
     .description("Add or update a Telegram session profile")
-    .requiredOption("--name <name>", "Profile name")
+    .option("--name <name>", "Legacy profile name")
     .option("--api-id <id>", "Telegram API ID")
     .option("--api-hash <hash>", "Telegram API hash")
     .option("--session-string <value>", "Telegram session string")
@@ -1243,12 +1464,30 @@ Examples:
       "Telegram 2FA password for ownership transfer",
     )
     .option("--src <number>", "Use a numbered source from profile find")
-    .option("--login", "Generate a session string when missing")
-    .option("--qr", "Use QR login with --login")
-    .option("--phone", "Use phone login with --login")
+    .option(
+      "--login",
+      "Generate a session string when missing (defaults to QR)",
+    )
+    .option("--qr", "Generate a session string with QR login")
+    .option("--phone", "Generate a session string with phone login")
+    .option("-i, --interactive", "Prompt for missing profile values")
     .option("--handle <handle>", "Resolved Telegram handle")
     .option("--user-id <id>", "Resolved Telegram user ID")
     .option("--display-name <name>", "Resolved Telegram display name")
+    .addHelpText(
+      "after",
+      `
+Examples:
+  tg-sai profile add
+  tg-sai profile add --qr
+  tg-sai profile add --phone
+  tg-sai profile add --src 1
+  tg-sai profile add --password '<password>'
+
+If apiId/apiHash are missing, create a Telegram API app at:
+  https://my.telegram.org/apps
+`,
+    )
     .action(async (options: ProfileAddOptions) => {
       await runProfileAdd(options)
     })
@@ -1256,27 +1495,32 @@ Examples:
   profile
     .command("show")
     .description("Show one configured profile")
-    .argument("<name>", "Profile name")
-    .action(async (name: string) => {
-      await runProfileShow(name)
+    .argument(
+      "[selector]",
+      "Profile index, handle, user ID, or legacy name",
+      "0",
+    )
+    .action(async (selector: string) => {
+      await runProfileShow(selector)
     })
 
   profile
     .command("use")
     .description("Set the active profile")
-    .argument("<name>", "Profile name")
-    .action(async (name: string) => {
-      await setActiveProfile(name)
-      console.log(`active_profile: ${name}`)
+    .argument("<selector>", "Profile index, handle, user ID, or legacy name")
+    .action(async (selector: string) => {
+      const config = await setActiveProfile(selector)
+      const active = config.profiles[0]!
+      console.log(`active_profile: ${profileLabel(active, 0)}`)
     })
 
   profile
     .command("remove")
     .description("Remove one configured profile")
-    .argument("<name>", "Profile name")
-    .action(async (name: string) => {
-      await removeProfile(name)
-      console.log(`removed_profile: ${name}`)
+    .argument("<selector>", "Profile index, handle, user ID, or legacy name")
+    .action(async (selector: string) => {
+      await removeProfile(selector)
+      console.log(`removed_profile: ${selector}`)
     })
 
   return program

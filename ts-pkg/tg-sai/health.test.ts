@@ -2,7 +2,6 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, test } from "bun:test"
-
 import { runHealthCheck } from "./health"
 import type { HealthClientFactory } from "./health"
 
@@ -93,9 +92,8 @@ describe("tg-sai health", () => {
       )
       expect(result.lines).toContain("suggested_fixes:")
       expect(result.lines).toContain("  tg-sai profile find")
-      expect(result.lines).toContain(
-        "  tg-sai profile add --name <name> --src <number>",
-      )
+      expect(result.lines).toContain("  tg-sai profile add")
+      expect(result.lines).toContain("  Then run: tg-sai profile add --qr")
       expect(result.lines).toContain("next: tg-sai profile find")
 
       await writeFile(join(dir, "logs", "write-check.txt"), "ok", "utf8")
@@ -132,10 +130,8 @@ describe("tg-sai health", () => {
       expect(result.lines).toContain(
         "  Fill missing profile field(s): sessionString",
       )
-      expect(result.lines).toContain("  tg-sai profile show corinne")
-      expect(result.lines).toContain(
-        "next: tg-sai profile add --name corinne --src <number>",
-      )
+      expect(result.lines).toContain("  tg-sai profile show 0")
+      expect(result.lines).toContain("next: tg-sai profile add --qr")
     })
   })
 
@@ -173,7 +169,7 @@ describe("tg-sai health", () => {
       expect(result.lines).toContain(
         'session_user: 7930936303 corinnebernett "Corinne Bernett"',
       )
-      expect(result.lines).toContain("password_status: present")
+      expect(result.lines).toContain("✅🔥 password_status: present")
       expect(result.lines).not.toContain("suggested_fixes:")
       expect(result.lines).toContain(
         `latest_sai_find: ${join(dir, "logs", "sai-find-00.jsonl")}`,
@@ -212,10 +208,10 @@ describe("tg-sai health", () => {
       expect(result.lines).toContain(
         "  Check the active profile API credentials and Telegram session string.",
       )
-      expect(result.lines).toContain("  tg-sai profile show corinne")
+      expect(result.lines).toContain("  tg-sai profile show 0")
       expect(result.lines).toContain("- password_status (warning):")
       expect(result.lines).toContain(
-        "  tg-sai profile add --name corinne --password '<password>'",
+        "  tg-sai profile add --password '<password>'",
       )
     })
   })
