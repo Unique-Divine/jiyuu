@@ -6,13 +6,11 @@ name: Test
 > This is a test!
 
 <!-- toc -->
-
 - Quickstart
 - Options
 - Usage examples
 - Contributing
 - Author
-
 <!-- tocstop -->
 
 ## Quickstart

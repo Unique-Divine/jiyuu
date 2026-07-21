@@ -3,12 +3,10 @@
 > This is a block quote
 
 <!-- toc -->
-
 - [AAA](#aaa)
 - [BBB](#bbb)
 - [CCC](#ccc)
 - [DDD](#ddd)
-
 <!-- tocstop -->
 
 ## AAA

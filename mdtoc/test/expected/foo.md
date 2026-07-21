@@ -6,9 +6,7 @@ name: Test
 > This is a test!
 
 <!-- toc -->
-
 - Foo
-
 <!-- tocstop -->
 
 ## Quickstart

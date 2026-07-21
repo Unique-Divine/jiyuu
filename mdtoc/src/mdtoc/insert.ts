@@ -28,7 +28,7 @@ interface InsertOptions extends SlugifyOptions {
 
 const defaultInsertOptions: InsertOptions = {
   regex: /(?:<!-- toc(?:\s*stop)? -->)/g,
-  open: "<!-- toc -->\n\n",
+  open: "<!-- toc -->\n",
   close: "<!-- tocstop -->",
 }
 
@@ -71,13 +71,14 @@ export function insert(str: string, options?: InsertOptions): string {
   }
 
   const last = sections[sections.length - 1]
-  if (sections.length === 3) {
-    sections.splice(1, 1, open + (options.toc || toc(last, options).content))
-    sections.splice(2, 0, close)
-  }
-
-  if (sections.length === 2) {
-    sections.splice(1, 0, `${open + toc(last, options).content}\n\n${close}`)
+  if (sections.length === 3 || sections.length === 2) {
+    const body = options.toc || toc(last, options).content
+    const block = `${open}${body}\n${close}`
+    if (sections.length === 3) {
+      sections.splice(1, 1, block)
+    } else {
+      sections.splice(1, 0, block)
+    }
   }
 
   const resultString = sections.join("\n\n") + newlines
