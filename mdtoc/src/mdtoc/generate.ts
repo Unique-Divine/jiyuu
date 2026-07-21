@@ -144,7 +144,10 @@ export function generate(options?: GenerateOptions): any {
         }
       }
 
-      if (stripFirst) result = result.slice(1)
+      if (stripFirst && result.length > 0 && result[0].lvl === 1) {
+        result = result.slice(1)
+        res.json = res.json.slice(1)
+      }
       opts.highest = highest(result)
       res.highest = opts.highest
       res.tokens = copiedTokens

@@ -66,7 +66,7 @@ if (args._.length !== 1) {
       "  --maxdepth:   Use headings whose depth is at most maxdepth",
       "                (Default is 6.)",
       "",
-      "  --no-firsth1: Include the first h1-level heading in a file",
+      "  --no-firsth1: Omit the first h1-level heading from the TOC",
       "",
       "  --no-stripHeadingTags: Do not strip extraneous HTML tags from heading",
       "                         text before slugifying",
