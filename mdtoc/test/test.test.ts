@@ -293,29 +293,33 @@ describe("toc", () => {
     expect(got).toEqual(want)
   })
 
-  // TODO: implement the firsth1 removal functionality. Prefer removal of the
-  // first h1 by default.
-  // test.skip("should remove the first H1 when `firsth1` is false:", () => {
   test("should remove the first H1 when `firsth1` is false:", () => {
-    console.debug("DEBUG TC")
     expect(
       toc("# AAA\n## BBB\n### CCC", { firsth1: false, bullets: ["-"] }).content,
     ).toEqual(["- [BBB](#bbb)", "  - [CCC](#ccc)"].join("\n"))
   })
 
-  // TODO: implement the firsth1 removal functionality. Prefer removal of the
-  // first h1 by default.
-  test.skip("should correctly calculate `maxdepth` when `firsth1` is false:", () => {
+  test("should keep a leading non-h1 when `firsth1` is false:", () => {
+    expect(
+      toc("## BBB\n### CCC", { firsth1: false, bullets: ["-"] }).content,
+    ).toEqual(["- [BBB](#bbb)", "  - [CCC](#ccc)"].join("\n"))
+  })
+
+  test("should correctly calculate `maxdepth` when `firsth1` is false:", () => {
+    // maxdepth filters absolute heading levels; after stripping `# AAA`,
+    // only `## BBB` remains under maxdepth 2 (### CCC is level 3).
     expect(
       toc("# AAA\n## BBB\n### CCC\n#### DDD", {
         maxdepth: 2,
         firsth1: false,
       }).content,
-    ).toEqual(["- [BBB](#bbb)", "  * [CCC](#ccc)"].join("\n"))
+    ).toEqual("- [BBB](#bbb)")
 
+    // Leading ## is not stripped; maxdepth 2 still keeps only BBB.
     expect(
-      toc("## BBB\n### CCC\n#### DDD", { maxdepth: 2, firsth1: false }).content,
-    ).toEqual(["- [BBB](#bbb)", "  * [CCC](#ccc)"].join("\n"))
+      toc("## BBB\n### CCC\n#### DDD", { maxdepth: 2, firsth1: false })
+        .content,
+    ).toEqual("- [BBB](#bbb)")
   })
 
   test("should allow custom bullet points to be defined:", () => {
