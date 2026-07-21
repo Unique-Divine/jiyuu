@@ -1,11 +1,200 @@
-# Sai DB Schema Reference
+# Sai database queries and schema
+
+Use this reference for the `sai-keeper` Postgres schema, migrations, tables,
+columns, SQL types, units, API surfacing, and aggregate freshness. It is a
+read/query snapshot. For direct Tailscale access, primary/replica routing, or
+write operations, use the private agent skill `sai-db` rather than treating this
+reference as the live operator runbook.
+
+## How to use this reference
+
+1. **Look up tables and columns**: See [schema reference](#schema-reference) for a domain-by-domain breakdown of Oracle, Perp, LP, Referral, and Stats data.
+2. **Understand data patterns**: See [database conventions](#database-conventions) for coordinates, units, and partitioning.
+3. **Find where data surfaces**: See [API surfacing](#api-surfacing) for mappings between database tables and API endpoints.
+
+### Direct database access (`psql`)
+
+Use direct SQL when validating endpoint behavior, unit semantics, and aggregate freshness.
+
+Before connecting to Sai Keeper Postgres, verify that the workstation is on the
+company private network. The database host is reachable through Tailscale/VPN.
+
+```bash
+tailscale status
+```
+
+If Tailscale is not active or the expected private nodes are unavailable, stop
+and report that direct database access is blocked by network connectivity.
+
+For operator DB checks on the Tailscale network, prefer local `psql` database
+names over repository runtime environment variables.
+
+Credentials are expected to be available through the workstation's local
+Postgres configuration, such as file `~/.pgpass`. Do not read or print secret
+files. If direct `psql` connection fails, report the connectivity or database
+selection issue to the user instead of searching for credentials or environment
+variables.
+
+```bash
+SAI_DB="sai_keeper" # or "sai_keeper_2" depending on time
+```
+
+- **Local default DB name**: `sai_keeper` (override as needed) OR `sai_keeper_2`
+  if specified by user.
+- **Preferred connect order**:
+  - `psql -d sai_keeper_2 -X -P pager=off -c "SELECT current_database(), current_user;"`
+  - `psql -d sai_keeper -X -P pager=off -c "SELECT current_database(), current_user;"`
+- **Basic connect**: `psql -d sai_keeper`
+- **Run one query inline**: `psql -d sai_keeper -c "SELECT 1 AS ok;"`
+- **List available databases when ambient `psql` connects to the wrong database**:
+  `psql -X -P pager=off -c "SELECT datname FROM pg_database WHERE datistemplate = false ORDER BY datname;"`
+
+Useful flags:
+
+- `-X`: do not read `~/.psqlrc` (reproducible output)
+- `-P pager=off`: disable pager for long results
+- `-A -t -F ','`: script-friendly unaligned output
+- `-c "<sql>"`: execute a SQL command non-interactively
+
+Suggested debugging workflow:
+
+1. Verify row freshness first (`MAX(ts)`, `COUNT(*) WHERE ts=current_date`).
+2. Compare API metric source table to a live recompute query.
+3. Break totals by `collateral_id`/`market_id` to locate outliers quickly.
+
+## Connections to APIs
+
+This database powers two primary APIs. For usage instructions and query patterns, see their respective skills:
+
+- **[sai-graphql.md](sai-graphql.md)**: Most tables are exposed via GraphQL queries and subscriptions.
+- **[sai-rest.md](sai-rest.md)**: High-level metrics (volume, OI, TVL) are served via REST primarily from `stats_*` table queries (with `stats_cache` as legacy/auxiliary context).
+
+## Quick start
+
+Use [schema reference](#schema-reference) to see all available
+tables with explanations for each column.
+
+
+### Data source
+
+The **sai-keeper** database schema is the source of truth for the Sai exchange's indexed data. The schema is defined by SQL migrations in the `sai-keeper` repository.
+
+- **Schema Location**: `$HOME/ki/sai-keeper/models/migrations/`
+- **Routines/Stored Procs**: `$HOME/ki/sai-keeper/models/routines/` (maintains stats/aggregates)
+
+## High-value SQL snippets
+
+### 1) Open positions vs current-day OI snapshot
+
+```sql
+SELECT
+  (SELECT COUNT(*) FROM perp_trade WHERE is_open = true AND trade_type = 'trade') AS open_positions,
+  (SELECT COALESCE(SUM(oi_long_usd + oi_short_usd), 0) FROM stats_perp_oi_daily WHERE ts = current_date) AS oi_today_usd;
+```
+
+### 2) Check daily OI freshness
+
+```sql
+SELECT
+  current_date AS today,
+  MAX(ts) AS latest_oi_day,
+  COUNT(*) FILTER (WHERE ts = current_date) AS rows_for_today
+FROM stats_perp_oi_daily;
+```
+
+### 3) Compare "today only" vs latest available OI
+
+```sql
+SELECT
+  COALESCE((
+    SELECT SUM(oi_long_usd + oi_short_usd)
+    FROM stats_perp_oi_daily
+    WHERE ts = current_date
+  ), 0) AS oi_today_usd,
+  COALESCE((
+    SELECT SUM(oi_long_usd + oi_short_usd)
+    FROM stats_perp_oi_daily
+    WHERE ts = (SELECT MAX(ts) FROM stats_perp_oi_daily WHERE ts <= current_date)
+  ), 0) AS oi_latest_available_usd;
+```
+
+### 4) OI by collateral on latest day
+
+```sql
+WITH d AS (
+  SELECT MAX(ts) AS ts
+  FROM stats_perp_oi_daily
+  WHERE ts <= current_date
+)
+SELECT
+  s.ts,
+  s.collateral_id,
+  ot.base AS collateral_symbol,
+  SUM(s.oi_long_usd + s.oi_short_usd) AS oi_usd
+FROM stats_perp_oi_daily s
+JOIN d ON s.ts = d.ts
+LEFT JOIN oracle_token ot ON ot.id = s.collateral_id
+GROUP BY s.ts, s.collateral_id, ot.base
+ORDER BY oi_usd DESC;
+```
+
+### 5) Top users by cumulative volume
+
+```sql
+SELECT
+  user_address,
+  SUM(volume_usd_long + volume_usd_short) AS cumulative_volume_usd
+FROM stats_perp_by_user
+GROUP BY user_address
+ORDER BY cumulative_volume_usd DESC
+LIMIT 50;
+```
+
+### 6) Top users by 30-day volume
+
+```sql
+SELECT
+  user_address,
+  SUM(volume_usd_long + volume_usd_short) AS volume_30d_usd
+FROM stats_perp_by_user
+WHERE ts >= current_date - INTERVAL '30 days'
+GROUP BY user_address
+ORDER BY volume_30d_usd DESC
+LIMIT 50;
+```
+
+## Known pitfalls and interpretation notes
+
+- `open_positions` and `open_interest` can diverge:
+  - `open_positions` is live from `perp_trade`
+  - `open_interest` in REST stats comes from daily snapshots (`stats_perp_oi_daily`)
+  - If current day rows are missing, `open_interest` can read as `0` while open positions are non-zero.
+- Unit semantics:
+  - Base units are `bigint` (`collateral_amount`, `tvl`, etc).
+  - USD metrics require conversion: `base_units / 1e6 * price_usd` (this codebase currently assumes 6 decimals in several routines).
+- OI spikes can come from snapshot inclusion semantics:
+  - Daily OI procedure logic can include positions opened and closed on the same day.
+  - That inflates daily OI vs strict end-of-day "still open" interpretation.
+- `perp_borrowing` OI and `stats_perp_oi_daily` OI are related but not guaranteed identical at any instant; they are populated by different paths and timings.
+
+## Playbook for user questions
+
+- **"What fields are in the perp_trade table?"** -> Consult `schema.md#perp_trade`.
+- **"How is volume calculated?"** -> Consult `conventions.md#units` and `surfacing.md#rest-api` (derived from `stats_perp_by_user`).
+- **"What fields are in the stats_perp_by_user table?"** -> Consult `schema.md#stats_perp_by_user`. Includes volume, PnL, and trade counts per user/market/collateral.
+- **"Where are liquidations stored?"** -> Liquidations are records in `perp_trade_history` with `trade_change_type = 'position_liquidated'`. See `schema.md#perp_trade_history`.
+
+
+---
+
+## Schema reference
 
 This document provides a detailed breakdown of the tables and types in the
 `sai-keeper` database.
 
-## 1. Common (001_common.sql)
+### Common (`001_common.sql`)
 
-### Tables
+#### Tables
 - **schema_version**: Tracks the current migration version.
   - `version`: bigint (PK)
 - **historical_sync**: Tracks blocks synced during historical indexing.
@@ -27,15 +216,15 @@ This document provides a detailed breakdown of the tables and types in the
   - `block`: bigint, `tx_index`: bigint (Composite PK)
   - `tx_hash`: text, `evm_hash`: text
 
-### Types
+#### Types
 - **string_pair**: (key1 text, key2 text)
 - **exchange_status**: `active`, `paused`, `close_only`
 
 ---
 
-## 2. Oracle (002_oracle.sql)
+### Oracle (`002_oracle.sql`)
 
-### Tables
+#### Tables
 - **oracle_token**: Metadata for assets tracked by the oracle.
   - `id`: bigint (PK)
   - `base`: text, `permission_group`: bigint
@@ -55,9 +244,9 @@ This document provides a detailed breakdown of the tables and types in the
 
 ---
 
-## 3. Perpetuals (003_perp.sql)
+### Perpetuals (`003_perp.sql`)
 
-### Tables
+#### Tables
 - **perp_collateral**: Supported collateral assets.
   - `oracle_token_id`: bigint (PK), `is_active`: boolean
 - **perp_market**: Trading pairs (e.g. BTC/USDC).
@@ -140,7 +329,7 @@ This document provides a detailed breakdown of the tables and types in the
 - **perp_blacklist**: Blacklisted traders.
   - `trader`: text (PK), `blacklisted_ts`: timestamptz, `reason`: text
 
-### Types
+#### Types
 - **perp_id_type**: `market`, `group`
 - **perp_trade_type**: `trade`, `stop`, `limit`
 - **perp_trade_change_type**: `position_opened`, `limit_order_created`,
@@ -153,9 +342,9 @@ This document provides a detailed breakdown of the tables and types in the
 
 ---
 
-## 4. LP (004_lp.sql)
+### LP (`004_lp.sql`)
 
-### Tables
+#### Tables
 - **lp_vault**: Current state of SLP vaults.
   - `address`: text (PK)
   - `shares_denom`, `shares_erc20`, `collateral_denom`, `collateral_erc20`:
@@ -186,15 +375,15 @@ This document provides a detailed breakdown of the tables and types in the
   - `depositor`: text, `vault`: text, `unlock_epoch`: bigint (Composite PK)
   - `shares`: bigint, `auto_redeem`: boolean
 
-### Types
+#### Types
 - **lp_action_type**: `deposit`, `create_withdraw_request`,
   `cancel_withdraw_request`, `redeem`
 
 ---
 
-## 5. Referral (005_referral.sql)
+### Referral (`005_referral.sql`)
 
-### Tables
+#### Tables
 - **referral_code**: Registered referral codes.
   - `code`: text (PK), `referrer`: text, `description`: text, `created_block`:
     bigint, `is_active`: boolean
@@ -211,9 +400,9 @@ This document provides a detailed breakdown of the tables and types in the
 
 ---
 
-## 6. Stats (006_stats.sql)
+### Stats (`006_stats.sql`)
 
-### stats_block_ranges
+#### table `stats_block_ranges`
 Maps time buckets to block ranges.
 ```bash
 psql -d sai_keeper_2 -X -P pager=off -c "\d stats_block_ranges"
@@ -224,7 +413,7 @@ psql -d sai_keeper_2 -X -P pager=off -c "\d stats_block_ranges"
 - `start_block` (bigint): First chain block included in the bucket.
 - `end_block` (bigint): Last chain block included in the bucket.
 
-### stats_oracle_price
+#### table `stats_oracle_price`
 Aggregated oracle prices over time.
 ```bash
 psql -d sai_keeper_2 -X -P pager=off -c "\d stats_oracle_price"
@@ -239,7 +428,7 @@ psql -d sai_keeper_2 -X -P pager=off -c "\d stats_oracle_price"
 - `open_price_usd` (float8): First observed token price in USD for the bucket.
 - `close_price_usd` (float8): Last observed token price in USD for the bucket.
 
-### stats_cache
+#### table `stats_cache`
 Singleton cache for global exchange metrics.
 ```bash
 psql -d sai_keeper_2 -X -P pager=off -c "\d stats_cache"
@@ -260,7 +449,7 @@ psql -d sai_keeper_2 -X -P pager=off -c "\d stats_cache"
   USD.
 - `last_updated` (timestamptz): Last cache refresh timestamp.
 
-### stats_perp_by_user
+#### table `stats_perp_by_user`
 User-level trading stats (daily).
 ```bash
 psql -d sai_keeper_2 -X -P pager=off -c "\d stats_perp_by_user"
@@ -277,7 +466,7 @@ psql -d sai_keeper_2 -X -P pager=off -c "\d stats_perp_by_user"
 - `trades_count_short` (bigint): Total count of short trades.
 - `updated_at` (timestamptz): Timestamp of the last record refresh.
 
-### stats_perp_liq_daily
+#### table `stats_perp_liq_daily`
 Daily liquidation volume and counts per market.
 ```bash
 psql -d sai_keeper_2 -X -P pager=off -c "\d stats_perp_liq_daily"
@@ -293,7 +482,7 @@ psql -d sai_keeper_2 -X -P pager=off -c "\d stats_perp_liq_daily"
   USD.
 - `updated_at` (timestamptz): Timestamp of the last record refresh.
 
-### stats_perp_oi_daily
+#### table `stats_perp_oi_daily`
 Daily Open Interest snapshots per market.
 ```bash
 psql -d sai_keeper_2 -X -P pager=off -c "\d stats_perp_oi_daily"
@@ -305,7 +494,7 @@ psql -d sai_keeper_2 -X -P pager=off -c "\d stats_perp_oi_daily"
 - `oi_short_usd` (numeric): Short-side open interest in USD.
 - `updated_at` (timestamptz): Timestamp of the last record refresh.
 
-### stats_slp_deposit_by_user
+#### table `stats_slp_deposit_by_user`
 User LP stats (daily).
 ```bash
 psql -d sai_keeper_2 -X -P pager=off -c "\d stats_slp_deposit_by_user"
@@ -321,7 +510,7 @@ psql -d sai_keeper_2 -X -P pager=off -c "\d stats_slp_deposit_by_user"
   for user/vault.
 - `updated_at` (timestamptz): Timestamp of the last record refresh.
 
-### stats_perp_sl_tp_daily
+#### table `stats_perp_sl_tp_daily`
 Daily SL/TP execution stats.
 ```bash
 psql -d sai_keeper_2 -X -P pager=off -c "\d stats_perp_sl_tp_daily"
@@ -344,7 +533,7 @@ psql -d sai_keeper_2 -X -P pager=off -c "\d stats_perp_sl_tp_daily"
   USD.
 - `updated_at` (timestamptz): Timestamp of the last record refresh.
 
-### stats_perp_fee_daily
+#### table `stats_perp_fee_daily`
 Daily fee breakdown per market.
 ```bash
 psql -d sai_keeper_2 -X -P pager=off -c "\d stats_perp_fee_daily"
@@ -385,7 +574,7 @@ psql -d sai_keeper_2 -X -P pager=off -c "\d stats_perp_fee_daily"
 - `total_bad_debt` (bigint): Aggregate bad debt amount in base collateral units.
 - `updated_at` (timestamptz): Timestamp of the last record refresh.
 
-### stats_referrals_daily
+#### table `stats_referrals_daily`
 Daily referrer earnings and volume.
 ```bash
 psql -d sai_keeper_2 -X -P pager=off -c "\d stats_referrals_daily"
@@ -397,7 +586,7 @@ psql -d sai_keeper_2 -X -P pager=off -c "\d stats_referrals_daily"
 - `volume_usd` (float8): Referred trading volume in USD for the day.
 - `updated_at` (timestamptz): Timestamp of the last record refresh.
 
-### stats_slp_vault
+#### table `stats_slp_vault`
 Aggregated SLP vault metrics (APY, TVL, volume).
 ```bash
 psql -d sai_keeper_2 -X -P pager=off -c "\d stats_slp_vault"
@@ -422,7 +611,7 @@ psql -d sai_keeper_2 -X -P pager=off -c "\d stats_slp_vault"
 - `liabilities` (float8): Vault liabilities in USD.
 - `updated_at` (timestamptz): Timestamp of the last record refresh.
 
-### stats_perp_trade_snapshots
+#### table `stats_perp_trade_snapshots`
 Snapshots of active trades for PnL tracking.
 ```bash
 psql -d sai_keeper_2 -X -P pager=off -c "\d stats_perp_trade_snapshots"
@@ -438,7 +627,7 @@ psql -d sai_keeper_2 -X -P pager=off -c "\d stats_perp_trade_snapshots"
 - `opened_in_period` (boolean): True if position opened during this interval.
 - `closed_in_period` (boolean): True if position closed during this interval.
 
-### stats_user_portfolio
+#### table `stats_user_portfolio`
 Time-series of user PnL and volume.
 ```bash
 psql -d sai_keeper_2 -X -P pager=off -c "\d stats_user_portfolio"
@@ -457,7 +646,7 @@ psql -d sai_keeper_2 -X -P pager=off -c "\d stats_user_portfolio"
 - `trades_count` (bigint): Number of trades in this bucket.
 - `trades_count_cumulative` (bigint): Running cumulative trade count.
 
-### leaderboard
+#### table `leaderboard`
 Global PnL and volume leaderboard.
 ```bash
 psql -d sai_keeper_2 -X -P pager=off -c "\d leaderboard"
@@ -468,7 +657,7 @@ psql -d sai_keeper_2 -X -P pager=off -c "\d leaderboard"
 - `collateral_used_usd` (numeric): Cumulative collateral usage in USD.
 - `last_tracked_block` (bigint): Last block included in leaderboard refresh.
 
-### volume_leaderboard
+#### table `volume_leaderboard`
 Volume-only leaderboard.
 ```bash
 psql -d sai_keeper_2 -X -P pager=off -c "\d volume_leaderboard"
@@ -479,7 +668,7 @@ psql -d sai_keeper_2 -X -P pager=off -c "\d volume_leaderboard"
 - `threshold_block` (bigint): Optional lower-bound block used for scoped volume
   windows.
 
-### statsig_last_tracked_block
+#### table `statsig_last_tracked_block`
 Tracks progress of stats refreshers.
 ```bash
 psql -d sai_keeper_2 -X -P pager=off -c "\d statsig_last_tracked_block"
@@ -487,6 +676,103 @@ psql -d sai_keeper_2 -X -P pager=off -c "\d statsig_last_tracked_block"
 - `event_type` (text): Stats event/process identifier (PK).
 - `last_tracked_block` (bigint): Latest processed block for that event type.
 
-### Types
+#### Types
 - **stats_granularity**: `1s`, `1m`, `5m`, `15m`, `1h`, `4h`, `6h`, `12h`,
   `1d`, `1w`, `1mo`
+
+
+---
+
+## Database conventions
+
+This document explains common patterns and semantics used across the `sai-keeper` database tables.
+
+### Event coordinates
+Most historical tables (ending in `_history`) use a set of coordinates to uniquely identify an on-chain event:
+- **block**: The block height.
+- **tx_index**: The index of the transaction within the block.
+- **event_index**: The index of the event within the transaction.
+
+Together, `(block, tx_index, event_index)` provide a stable order and ensure uniqueness for indexed events.
+
+### Timestamps and dates
+- **timestamptz**: Used for real-world time (e.g., `block_ts` in the `block` table).
+- **date**: Used in `stats_*` tables for daily buckets (e.g., `ts` in `stats_perp_by_user`).
+- **block**: Often used as a proxy for time in `_history` tables.
+
+### History and state tables
+- **State Tables** (e.g., `perp_trade`, `lp_vault`): Store the *current* state of an entity. They are updated in place as new events arrive.
+- **History Tables** (e.g., `perp_trade_history`, `lp_deposit_history`): Store an immutable log of changes. Each row represents a specific action or event.
+
+### Units and decimals
+- **Base Units (Int/Bigint)**: Fields like `collateral_amount`, `tvl`, and `available_assets` are stored in base units (e.g., 6 decimals for USDC, 18 for some EVM tokens).
+- **USD Values (Float8/Numeric)**: Fields like `price_usd`, `volume_usd`, and `realized_pnl_usd` are human-readable floats or high-precision numerics already scaled to USD.
+- **Percentages (Float8)**: Fields like `pnl_pct` or `spread_p` are stored as decimals (e.g., `0.01` for 1%).
+
+### Partitioning
+The `oracle_price_history` table is partitioned by `block` range using the `pg_partman` extension. This ensures that queries over historical prices remain performant as the dataset grows. 
+
+Migrations for partitioned tables usually include a call to `partman.create_parent`:
+```sql
+SELECT partman.create_parent(
+   p_parent_table => 'public.oracle_price_history',
+   p_control => 'block',
+   p_type => 'native',
+   p_interval => '100000',
+   ...
+);
+```
+
+### Identifiers
+- **IDs**: Many protocol entities use `bigint` IDs assigned by the smart contracts (e.g., `perp_market_id`, `trade_id`).
+- **Addresses**: Trader and vault addresses are stored as `text` (e.g., Bech32 `nibi1...` or hex `0x...`).
+
+
+---
+
+## API surfacing
+
+This document maps database tables to their respective API exposures in GraphQL and REST.
+
+### GraphQL surfacing
+The **sai-keeper-graphql** skill covers the API usage. Most DB tables map directly to GraphQL types.
+
+| DB Table | GraphQL Type / Root Field | Domain |
+|----------|---------------------------|--------|
+| `perp_trade` | `Trade` / `trade`, `trades` | Perp |
+| `perp_trade_history` | `TradeHistory` / `tradeHistory` | Perp |
+| `perp_borrowing` | `Borrowing` / `borrowing`, `borrowings` | Perp |
+| `lp_vault` | `Vault` / `vaults` | LP |
+| `lp_deposit_history` | `DepositHistory` / `depositHistory` | LP |
+| `oracle_price` | `TokenPriceUsd` / `tokenPricesUsd` | Oracle |
+| `perp_fee_charged_history` | `FeeTransaction` / `feeTransactions` | Fee |
+| `referral_code` | `ReferralCode` / `referralCodes` | Referral |
+
+**Note**: For live updates (Subscriptions), GraphQL watchers monitor these tables and push updates when rows change or are added.
+
+### REST API surfacing
+The **sai-rest-api** skill covers high-level metrics. In current code paths, `/dexpal/v1/stats` and `/dexpal/v1/metrics` are derived primarily from `stats_*` table queries in the API service layer.
+
+| DB Table | REST Endpoint | Metric(s) |
+|----------|---------------|-----------|
+| `stats_perp_by_user` | `/dexpal/v1/stats`, `/dexpal/v1/metrics` (indirect) | 24h/all-time volume, trades, users |
+| `stats_perp_oi_daily` | `/dexpal/v1/stats`, `/dexpal/v1/metrics` | Open interest (daily snapshot sum) |
+| `stats_perp_fee_daily` | `/dexpal/v1/stats`, `/dexpal/v1/metrics` | 24h/all-time accrued trading fees |
+| `lp_vault` + `stats_oracle_price` | `/dexpal/v1/stats`, `/dexpal/v1/metrics` | TVL (vault units converted to USD) |
+| `stats_slp_vault` | `/dexpal/v1/yield` | Vault APY, TVL, and descriptions |
+| `volume_leaderboard` | `/dexpal/v1/leaderboard` (if active) | Top traders by volume |
+| `stats_cache` | Legacy/auxiliary | Global cached metrics (not primary path for current stats endpoint implementation) |
+
+### Data refreshers
+Aggregated tables in the `stats` domain are maintained by stored procedures in `models/routines/`. These procs run periodically (e.g., via `statsig`) to pull data from "State" and "History" tables into the "Stats" tables.
+
+Key Procs:
+- `proc_update_stats_perp_by_user`: Aggregates trades into daily user stats.
+- `update_stats_perp_oi_daily`: Computes daily open interest snapshots in USD.
+- `proc_update_stats_perp_fee_daily`: Aggregates fee history into daily USD fees.
+- `proc_update_volume_leaderboard`: Maintains the leaderboard from trade history.
+- `func_refresh_stats_cache`: Updates `stats_cache` (legacy/auxiliary path).
+
+### See also
+- [sai-graphql.md](sai-graphql.md)
+- [sai-rest.md](sai-rest.md)

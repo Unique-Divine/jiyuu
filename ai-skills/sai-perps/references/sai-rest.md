@@ -1,9 +1,11 @@
----
-name: sai-rest-api
-description: Query the Sai REST API (DexPal) for aggregated metrics, stats, yield, markets, referrals, and health checks. Use when working with Sai REST endpoints, /dexpal/v1/*, sai-api.nibiru.fi, or when needing quick stats instead of full GraphQL.
----
+# Sai REST and DexPal queries
 
-# Sai: REST API Notes
+Use this reference for public DexPal REST endpoints—`/dexpal/v1/*`,
+`sai-api.nibiru.fi`, and health checks—when quick aggregate statistics, markets,
+yield, referrals, date-window metrics, or service status are preferable to
+GraphQL.
+
+## REST API guide
 
 This guide covers the **REST API** — DexPal aggregated metrics and feeds (`/dexpal/v1/*`, `/health`, `/`). Use it for quick stats and health checks.
 
@@ -21,7 +23,7 @@ This guide covers the **REST API** — DexPal aggregated metrics and feeds (`/de
   - [GET /health](#get-health)
 - [References](#references)
 
-## Selecting the Right API
+## Selecting the right API
 
 The **GraphQL API** is the canonical, comprehensive Sai API (perp, lp, oracle, fee, subscriptions). Use GraphQL for the full API.
 
@@ -34,7 +36,7 @@ The **GraphQL API** is the canonical, comprehensive Sai API (perp, lp, oracle, f
 
 **Related skill**: For the full Sai API (perp trades, LP positions, oracle prices, fees, subscriptions), use the **sai-keeper-graphql** skill.
 
-## Available Endpoints
+## Available endpoints
 
 | Path | Description |
 |------|-------------|
@@ -47,12 +49,12 @@ The **GraphQL API** is the canonical, comprehensive Sai API (perp, lp, oracle, f
 | [/dexpal/v1/metrics](#get-dexpalv1metrics) | DexPal aggregate metrics |
 | [/health](#get-health) | Health check |
 
-### 24h Time Window Semantics
+### 24-hour time-window semantics
 
 - **`/dexpal/v1/stats`** (optimized path): 24h window = `NOW() - 24h` (wall clock at cache refresh)
 - **`/dexpal/v1/markets/details`**: 24h window = latest block timestamp - 24h (blockchain time)
 
-## Usage Examples
+## Usage examples
 
 Examples use `curl -s`; the `-s` (silent) flag suppresses curl progress output so piping to `jq` works cleanly.
 
@@ -91,7 +93,7 @@ curl -s https://sai-api.nibiru.fi/dexpal/v1/stats | jq .
 curl -s "https://sai-api.nibiru.fi/dexpal/v1/stats?date=2026-02-25" | jq .
 ```
 
-**Query Parameters:**
+**Query parameters:**
 - `date` (optional): The date for which to retrieve statistics in `YYYY-MM-DD` format (UTC).
   - Omitted or `date=today`: Returns live exchange statistics.
   - Past date: Returns historical aggregate statistics for that specific day.

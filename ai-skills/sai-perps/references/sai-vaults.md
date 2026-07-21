@@ -1,9 +1,15 @@
-# Sai SLP Vaults Query Reference
+# Sai SLP Vault queries
 
-Use this reference when inspecting Sai SLP Vault health, deposit caps, rewards,
-or raw SLP Vault accounting state on Nibiru mainnet.
+Use this reference for read-only Sai SLP Vault diagnostics: health,
+collateralization, share price, deposit caps, rewards, daily risk parameters,
+epochs, withdrawals, raw state, and pending governance fees. Some sections
+mention execute messages such as `distribute_reward` only to explain accounting;
+use agent skill `sai-ops` to broadcast messages or follow private operator
+procedures.
 
-## Mainnet SLP Vault Addresses
+## Mainnet SLP Vault reference
+
+## Mainnet SLP Vault addresses
 
 | SLP Vault | Address |
 | --- | --- |
@@ -41,14 +47,14 @@ raw_item() {
 }
 ```
 
-## SLP Vault State Overview
+## SLP Vault state overview
 
 This section defines the SLP Vault terms and storage values used in health,
 deposit-cap, reward, and raw-state investigations. Use smart queries for the
 normal operator view, and raw state only when validating exact storage items or
 debugging query surfaces.
 
-### Core Terms
+### Core terms
 
 | Term | Meaning | Where to query |
 | --- | --- | --- |
@@ -61,7 +67,7 @@ debugging query surfaces.
 | Market cap / available assets | Current redeemable/accounting value using total supply and `share_to_assets_price`. These queries currently return the same value. | `{"market_cap":{}}`, `{"available_assets":{}}` |
 | Net profit | Derived operator metric: `total_rewards - total_closed_pnl - total_liability + current_epoch_positive_open_pnl`. Negative values indicate the SLP Vault is underwater by this accounting view. | `{"get_revenue_info":{}}` |
 
-### Health and PnL State
+### Health and PnL state
 
 These variables explain why an SLP Vault is healthy or stressed. They are the
 main raw items to check when `collateralization_p`, `share_price`, or deposit
@@ -103,7 +109,7 @@ do
 done
 ```
 
-### Daily Risk Params
+### Daily risk parameters
 
 Use SLP Vault smart query `{"risk_params":{}}` as the main operator view for
 daily payout limits and daily PnL throttle state.
@@ -142,7 +148,7 @@ reset helper, such as SLP Vault settlement function `send_assets` or
 `balance_now`, `total_rewards`, and `acc_rewards_per_token`, but it does not
 refresh `daily_balance_snapshot`.
 
-### Deposit Cap State
+### Deposit cap state
 
 Large SLP deposits can fail even when the user has enough collateral. The cap is
 active when `acc_pnl_per_token_used > 0`. In that state, the SLP Vault limits new
@@ -166,7 +172,7 @@ raw_item "$VAULT_G0_USDC" current_max_supply
 raw_item "$VAULT_G0_USDC" last_max_supply_update
 ```
 
-### Epoch and Withdrawal State
+### Epoch and withdrawal state
 
 Epoch state affects withdrawal request timing and the open/locked window for
 withdrawals. Epoch starts are stored as nanosecond timestamps.
@@ -187,7 +193,7 @@ sai_q "$VAULT_G0_USDC" '{"withdraw_epochs_timelock":{}}'
 sai_q "$VAULT_G0_USDC" '{"config":{}}'
 ```
 
-#### Check Epoch and Daily Reset Distance
+#### Check epoch and daily reset distance
 
 Use this when asking "when is the next SLP reset?" or "how far away is the
 epoch time?". It compares the current machine time from `date` against on-chain
@@ -246,7 +252,7 @@ for label, value, sec in rows:
 PY
 ```
 
-### Reward Funding State
+### Reward funding state
 
 There is no separate pending SLP Vault reward queue. Rewards become SLP Vault
 accounting only when collateral is sent with `{"distribute_reward":{}}`.
@@ -268,7 +274,7 @@ sai_q "$PERP" '{"get_pending_gov_fees":{"index":2}}' # stNIBI
 sai_q "$PERP" '{"get_vault_address":{"group_index":"GroupIndex(0)","collateral_index":"TokenIndex(1)"}}'
 ```
 
-### Config and Denom State
+### Configuration and denom state
 
 Use these values to interpret units, risk limits, and which collateral must be
 attached to executes.
@@ -293,7 +299,7 @@ sai_q "$VAULT_G0_USDC" '{"get_collateral_denom":{}}'
 sai_q "$VAULT_G0_USDC" '{"get_vault_share_denom":{}}'
 ```
 
-## Health Snapshot
+## Health snapshot
 
 Start here when diagnosing whether an SLP Vault is healthy or why LP deposits are
 blocked.
@@ -324,7 +330,7 @@ Important fields:
 net_profit = rewards - closed_pnl - liabilities + current_epoch_positive_open_pnl
 ```
 
-## Deposit Caps
+## Deposit caps
 
 Use these when users report that large SLP deposits are failing.
 
@@ -348,28 +354,19 @@ current_max_supply = total_supply * (1 + max_supply_increase_daily_p)
 When `acc_pnl_per_token_used <= 0`, `max_mint` and `max_deposit` return
 `u128::MAX`, meaning this cap is effectively off.
 
-## Rewards and Collateralization
+## Rewards and collateralization
 
-Do not plain-send collateral to the SLP Vault address when trying to improve health.
-A bank transfer can increase the contract's balance, but it will not update
-SLP Vault accounting.
+Do not plain-send collateral to the SLP Vault address when trying to improve
+health. A bank transfer can increase the contract's balance, but it will not
+update SLP Vault accounting.
 
-To intentionally increase `acc_rewards_per_token`, `total_rewards`,
-`share_price`, and `collateralization_p`, execute `distribute_reward` with the
-SLP Vault's collateral denom:
+The state-changing path is SLP Vault execute message `distribute_reward` with
+the vault collateral denom. That operator flow belongs in agent skill `sai-ops`;
+use this reference to understand and inspect the accounting impact.
 
-```bash
-USDC_DENOM="erc20/0x0829F361A05D993d5CEb035cA6DF3446b060970b"
-
-nibid tx wasm execute "$VAULT_G0_USDC" \
-  '{"distribute_reward":{}}' \
-  --amount "1000000000$USDC_DENOM" \
-  --from <your-key> \
-  --gas 300000
-```
-
-The example above distributes `1,000` USDC to all SLP holders. This does not mint
-new shares. It raises the per-share reward accumulator.
+Conceptually, a successful reward distribution does not mint new shares. It
+raises accumulator `acc_rewards_per_token`, total `total_rewards`, share price
+`share_price`, and collateralization ratio `collateralization_p`.
 
 To estimate the reward needed for a target collateralization:
 
@@ -384,7 +381,7 @@ target_reward_amount = target_reward_per_share * total_supply
 
 This formula assumes `acc_pnl_per_token_used` is positive.
 
-## Pending Governance Fees
+## Pending governance fees
 
 Perp-side `pending_gov_fees` are not automatically SLP rewards. They are
 admin-controlled accounting on the perp contract. The admin can claim them to a
@@ -404,7 +401,7 @@ sai_q "$PERP" '{"get_collateral":{"index":2}}'
 Do not use `UpdatePendingGovFees` as a funding mechanism. It is an admin state
 update and does not transfer funds into the SLP Vault.
 
-## Raw SLP Vault State
+## Raw SLP Vault state
 
 SLP Vault `Item` keys are raw ASCII key hex without a namespace length prefix.
 
@@ -446,7 +443,7 @@ Useful raw keys:
 | `acc_pnl_per_token_used` | Policy-applied PnL per share |
 | `share_to_assets_price` | Collateral per share for mint/redeem |
 
-## Raw Pending Gov Fees
+## Raw pending governance fees
 
 `PENDING_GOV_FEES` is a perp contract map:
 
@@ -480,7 +477,7 @@ raw_pending_gov_fees 1 # USDC
 raw_pending_gov_fees 2 # stNIBI
 ```
 
-## Epoch and Withdrawal Timing
+## Epoch and withdrawal timing
 
 ```bash
 sai_q "$VAULT_G0_USDC" '{"current_epoch":{}}'

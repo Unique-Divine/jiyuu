@@ -35,6 +35,8 @@ Use this structure:
 
 <One short synopsis paragraph explaining the change and why it exists.>
 
+- Closes <gh-issue-link> (If applicable, not all PRs pertain to issues)
+
 ## Key Changes
 
 1. <Important change with rationale>

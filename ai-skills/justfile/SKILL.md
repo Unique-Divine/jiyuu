@@ -47,6 +47,7 @@ Common recipe names to check first: `setup`, `install`, `build`, `test`, `lint`,
 - Do not assume `.env` exists, and do not print secrets just because a
   `justfile` uses `dotenv-load` or exported variables.
 - Treat destructive or confirmation-gated recipes cautiously.
+- Test-like shebang recipes (`test`, `test-*`, etc.) should use `#!/usr/bin/env bash` and `set -euo pipefail` so failures propagate instead of being masked by later commands.
 
 ## Common Failure Modes
 

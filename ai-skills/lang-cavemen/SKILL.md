@@ -5,6 +5,7 @@ description: >-
   filler, articles, and pleasantries while keeping full technical accuracy.
   Use when user says "caveman mode", "talk like caveman", "use caveman language",
   "less tokens", "be brief", or invokes /lang-caveman.
+disable-model-invocation: true
 ---
 
 Respond terse like smart caveman. All technical substance stay. Only fluff die.

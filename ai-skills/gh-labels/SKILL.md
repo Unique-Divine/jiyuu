@@ -2,10 +2,10 @@
 name: gh-labels
 description: >-
   Reference for what GitHub issue/PR labels mean in this workspace (S-triage,
-  S-needs-scope, S-impl, and others under My Labels). Use when the user asks what a
-  label means, which label to apply, or how to add missing labels to a repo
-  with `gh label create --force`. Secondary: bootstrap labels on a new repo that
-  does not have them yet.
+  S-needs-scope, S-impl, prio-p0-critical, A-dev-tools, and others under My
+  Labels). Use when the user asks what a label means, which label to apply, or
+  how to add missing labels to a repo with `gh label create --force`.
+  Secondary: bootstrap labels on a new repo that does not have them yet.
 ---
 
 # GitHub labels
@@ -15,14 +15,35 @@ have them yet.
 
 ## My Labels
 
+Prefix convention:
+- `S-*` labels describe issue status.
+- `prio-p*` labels describe issue priority.
+- `A-*` labels describe product or engineering areas.
+
+#### Status (S) Labels
 - `S-triage`: (#F9D0C4) | Status: This issue is waiting on initial triage. More Info: https://tinyurl.com/25uty9w5
-- `S-needs-scope`: (#ec605a) | Needs someone to work further on the design for the feature or fix. NOT YET accepted.
+- `S-needs-scope`: (#f08583) | Needs someone to work further on the design for the feature or fix. NOT YET accepted.
 - `S-impl`: (#04d0e4) | Status: Implementation-ready. Clear and fully specificed
-- `S-blocked`: (#ed6c6a) | Status: 🧱 Blocked by an external dependency or unresolved decision.
-- `S-someday-maybe`: (#ed6c6a) | Status: 🤔 Intentionally paused. Currently on hold or out of scope.
+- `S-blocked`: (#f08583) | Status: 🧱 Blocked by an external dependency or unresolved decision.
+- `S-someday-maybe`: (#f08583) | Status: 🤔 Intentionally paused. Currently on hold or out of scope.
+
+#### Priority Labels
+- `prio-p0-critical`: (#aaeaec) | Priority: Critical or super urgent
+- `prio-p1-high`: (#aaeaec) | Priority: High
+- `prio-p2-normal`: (#aaeaec) | Priority: Normal
+- `prio-p3-low`: (#aaeaec) | Priority: Low. Please focus on p2 or higher for now.
+
+#### Area (A) Labels
+- `A-dev-tools`: (#eab6cb) | Area: Tools and changes for external developers and builders. NOT end users
+  - Use for issues that improve SDKs, CLIs, examples, docs, codegen, APIs, or
+  other tooling for external devs. NOT repo contributors. 
+  - Do not use for purely internal CI or repo automation.
+  - You should rarely be using this label because we don't work on external
+  dev tooling often. Most tool development is internal for employees and team
+  members in the org.
 
 When the user adds a standard label, append a bullet here with the same format:
-`` `name`: (RRGGBB) | <description> `` — keep their description text verbatim.
+`` `<name>`: (#<RRGGBB>) | <description> `` - Keep their description text verbatim.
 
 ## Add labels to a repo
 
@@ -62,7 +83,7 @@ gh label create "S-triage" \
 
 gh label create "S-needs-scope" \
   --description "Needs someone to work further on the design for the feature or fix. NOT YET accepted." \
-  --color ec605a \
+  --color f08583 \
   --force
 
 gh label create "S-impl" \
@@ -72,12 +93,22 @@ gh label create "S-impl" \
 
 gh label create "S-blocked" \
   --description "Status: 🧱 Blocked by an external dependency or unresolved decision." \
-  --color ed6c6a \
+  --color f08583 \
   --force
 
 gh label create "S-someday-maybe" \
   --description "Status: 🤔 Intentionally paused. Currently on hold or out of scope." \
-  --color ed6c6a \
+  --color f08583 \
+  --force
+
+gh label create "prio-p2-normal" \
+  --description "Priority: Normal" \
+  --color aaeaec \
+  --force
+
+gh label create "A-dev-tools" \
+  --description "Area: Tools and changes for external developers and builders. NOT end users" \
+  --color eab6cb \
   --force
 ```
 
