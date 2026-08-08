@@ -74,6 +74,11 @@ The watcher discovers panes through command `tmux list-panes`, recognizes
 foreground commands `agent` and `codex`, and samples command
 `tmux capture-pane`. Captured bytes remain in process memory only.
 
+User-controlled session names, window names, and pane titles use tmux-quoted
+fields and are decoded without relying on tab delimiters. A pane dimension
+change resets its capture baseline without reporting the resulting reflow as
+screen activity.
+
 The watcher publishes user option `@agent_watch_summary` on each tmux window:
 
 ```text
@@ -136,12 +141,27 @@ notifications. Neither interface should publish pane captures; remote output
 also needs filtering for titles and names, authentication, and host/server
 identity.
 
+## Validation
+
+Run command `just lint` and command `just test` before committing changes. The
+test suite compiles local synthetic programs named `agent` and `codex`, then
+exercises discovery, changing-to-static transitions, snapshots, tmux summaries,
+pane removal, singleton startup, child-tool identity, and tmux server shutdown.
+It does not invoke an external agent service or consume model tokens.
+
+A short local probe completed one observation cycle in 0.05–0.06 seconds at 1,
+6, 12, and 20 static panes. At the default 500 ms interval, three-second watcher
+runs used 0.05–0.07 seconds of CPU time and about 4.4 MiB maximum resident
+memory. Treat these values as a local baseline, not a capacity guarantee.
+
 ## Known gaps
 
 - A visually static agent may still be waiting on a model, network request, or
   quiet subprocess.
-- Spinners, statuslines, human typing, editor redraw, and pane resizing can
-  produce visible changes that are not autonomous agent work.
+- Spinners, statuslines, human typing, and editor redraw can produce visible
+  changes that are not autonomous agent work.
+- Synthetic child-tool behavior is covered, but real Cursor CLI and Codex CLI
+  lifecycle behavior still needs a broader sample.
 - Focus behavior has only been characterized for one attached tmux client.
 - tmux pane IDs identify panes only within the lifetime of one tmux server.
 - The prototype has no network listener, remote publisher, orchestration, or
