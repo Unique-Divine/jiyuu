@@ -11,6 +11,7 @@
 | <span style="white-space: nowrap;">📂 [ctxcat](./ctxcat/README.md)</span> | File to context convertor for pasing files to feed LLMs. Similar to `cat` and `bat`. |
 | <span style="white-space: nowrap;">📂 [gocovmerge](./gocovmerge/README.md)</span> | Go coverage profile merger with modern CLI features |
 | <span style="white-space: nowrap;">📂 [mdtoc](./mdtoc/README.md)</span> | Markdown table of contents (TOC) generator |
+| <span style="white-space: nowrap;">📂 [tmux-agent-watch](./tmux-agent-watch/README.md)</span> | Rust observer for visible Cursor CLI and Codex CLI activity in tmux panes |
 | <span style="white-space: nowrap;">📂 [winfixtext](./winfixtext/README.md)</span> | Fixes Windows encoding issues and corrupted LLM text outputs |
 | <span style="white-space: nowrap;">📂 [ts-pkg/bash](./ts-pkg/bash/README.md)</span> | Production TypeScript scripting library (bun install `@uniquedivine/bash`) for robust scripts with Bun runtime |
 | <span style="white-space: nowrap;">📂 [ts-pkg/jiyuu](./ts-pkg/jiyuu/README.md)</span> | TypeScript package mimicking Rust/Go functionality |
