@@ -5,14 +5,13 @@ use anyhow::{Context, Result, bail};
 
 use crate::model::PaneInfo;
 
-const FIELD_SEPARATOR: char = '\t';
 const PANE_FORMAT: &str = concat!(
-    "#{session_id}\t#{session_name}\t",
-    "#{window_id}\t#{window_index}\t#{window_name}\t",
-    "#{pane_id}\t#{pane_index}\t#{pane_tty}\t",
-    "#{pane_pid}\t#{pane_current_command}\t",
-    "#{window_active}\t#{pane_active}\t",
-    "#{pane_width}\t#{pane_height}\t#{pane_title}",
+    "#{session_id} #{q:session_name} ",
+    "#{window_id} #{window_index} #{q:window_name} ",
+    "#{pane_id} #{pane_index} #{q:pane_tty} ",
+    "#{pane_pid} #{q:pane_current_command} ",
+    "#{window_active} #{pane_active} ",
+    "#{pane_width} #{pane_height} #{q:pane_title}",
 );
 pub const WINDOW_SUMMARY_FORMAT: &str = "#{@agent_watch_summary}";
 pub const WINDOW_SUMMARY_OPTION: &str = "@agent_watch_summary";
@@ -54,7 +53,7 @@ impl TmuxClient {
         let output = self.run_checked(&[
             "display-message",
             "-p",
-            "#{socket_path}\t#{pid}",
+            "#{q:socket_path} #{pid}",
         ])?;
         parse_server_identity(&String::from_utf8_lossy(&output.stdout))
     }
@@ -142,13 +141,17 @@ impl TmuxClient {
 }
 
 fn parse_server_identity(output: &str) -> Result<ServerIdentity> {
-    let line = output.trim_end();
-    let (socket_path, pid) = line
-        .split_once(FIELD_SEPARATOR)
-        .context("tmux server identity did not contain socket path and PID")?;
-    let pid: u32 = parse_number(pid, "tmux server PID")?;
+    let fields = parse_fields(output.trim_end())?;
+    if fields.len() != 2 {
+        bail!(
+            "tmux server identity expected 2 fields, got {}",
+            fields.len()
+        );
+    }
+    let socket_path = decode_tmux_escapes(&fields[0])?;
+    let pid: u32 = parse_number(&fields[1], "tmux server PID")?;
     Ok(ServerIdentity {
-        socket_path: Path::new(socket_path).to_path_buf(),
+        socket_path: Path::new(&socket_path).to_path_buf(),
         pid,
         id: format!("server-{pid}"),
     })
@@ -163,7 +166,7 @@ pub fn parse_panes(output: &str) -> Result<Vec<PaneInfo>> {
 }
 
 fn parse_pane(line: &str) -> Result<PaneInfo> {
-    let fields: Vec<&str> = line.split(FIELD_SEPARATOR).collect();
+    let fields = parse_fields(line)?;
     if fields.len() != 15 {
         bail!(
             "expected 15 tmux pane fields, got {} in {:?}",
@@ -173,22 +176,69 @@ fn parse_pane(line: &str) -> Result<PaneInfo> {
     }
 
     Ok(PaneInfo {
-        session_id: fields[0].to_owned(),
-        session_name: fields[1].to_owned(),
-        window_id: fields[2].to_owned(),
-        window_index: parse_number(fields[3], "window index")?,
-        window_name: fields[4].to_owned(),
-        pane_id: fields[5].to_owned(),
-        pane_index: parse_number(fields[6], "pane index")?,
-        pane_tty: fields[7].to_owned(),
-        pane_pid: parse_number(fields[8], "pane PID")?,
-        current_command: fields[9].to_owned(),
-        window_active: parse_bool(fields[10], "window_active")?,
-        pane_active: parse_bool(fields[11], "pane_active")?,
-        width: parse_number(fields[12], "pane width")?,
-        height: parse_number(fields[13], "pane height")?,
-        title: fields[14].to_owned(),
+        session_id: fields[0].clone(),
+        session_name: decode_tmux_escapes(&fields[1])?,
+        window_id: fields[2].clone(),
+        window_index: parse_number(&fields[3], "window index")?,
+        window_name: decode_tmux_escapes(&fields[4])?,
+        pane_id: fields[5].clone(),
+        pane_index: parse_number(&fields[6], "pane index")?,
+        pane_tty: decode_tmux_escapes(&fields[7])?,
+        pane_pid: parse_number(&fields[8], "pane PID")?,
+        current_command: decode_tmux_escapes(&fields[9])?,
+        window_active: parse_bool(&fields[10], "window_active")?,
+        pane_active: parse_bool(&fields[11], "pane_active")?,
+        width: parse_number(&fields[12], "pane width")?,
+        height: parse_number(&fields[13], "pane height")?,
+        title: decode_tmux_escapes(&fields[14])?,
     })
+}
+
+fn parse_fields(line: &str) -> Result<Vec<String>> {
+    shell_words::split(line)
+        .with_context(|| format!("invalid tmux quoted fields in {line:?}"))
+}
+
+fn decode_tmux_escapes(value: &str) -> Result<String> {
+    let mut decoded = String::with_capacity(value.len());
+    let mut characters = value.chars().peekable();
+    while let Some(character) = characters.next() {
+        if character != '\\' {
+            decoded.push(character);
+            continue;
+        }
+
+        let Some(escaped) = characters.next() else {
+            bail!("tmux quoted field ended with an incomplete escape");
+        };
+        match escaped {
+            '\\' => decoded.push('\\'),
+            'n' => decoded.push('\n'),
+            'r' => decoded.push('\r'),
+            't' => decoded.push('\t'),
+            '0'..='7' => {
+                let mut octal = String::from(escaped);
+                for _ in 0..2 {
+                    if matches!(characters.peek(), Some('0'..='7')) {
+                        octal.push(
+                            characters
+                                .next()
+                                .expect("peeked octal digit should exist"),
+                        );
+                    }
+                }
+                let byte = u8::from_str_radix(&octal, 8).with_context(|| {
+                    format!("invalid tmux octal escape \\{octal}")
+                })?;
+                decoded.push(char::from(byte));
+            }
+            other => {
+                decoded.push('\\');
+                decoded.push(other);
+            }
+        }
+    }
+    Ok(decoded)
 }
 
 fn parse_number<T>(value: &str, field: &str) -> Result<T>
@@ -215,13 +265,12 @@ mod tests {
 
     #[test]
     fn parses_tmux_pane_record() {
-        let separator = FIELD_SEPARATOR;
         let record = [
             "$0",
-            "dev",
+            r"dev\ session",
             "@2",
             "3",
-            "work",
+            r"work\\tqueue",
             "%12",
             "1",
             "/dev/pts/4",
@@ -231,33 +280,50 @@ mod tests {
             "1",
             "90",
             "40",
-            "Agent title",
+            r"Agent\ title\\tready",
         ]
-        .join(&separator.to_string());
+        .join(" ");
 
         let panes = parse_panes(&record).expect("pane should parse");
         assert_eq!(panes.len(), 1);
         assert_eq!(panes[0].pane_id, "%12");
         assert_eq!(panes[0].window_id, "@2");
-        assert_eq!(panes[0].title, "Agent title");
+        assert_eq!(panes[0].session_name, "dev session");
+        assert_eq!(panes[0].window_name, "work\tqueue");
+        assert_eq!(panes[0].title, "Agent title\tready");
         assert!(panes[0].selected());
     }
 
     #[test]
     fn rejects_incomplete_tmux_record() {
-        let error = parse_panes("$0\tdev").expect_err("record should fail");
+        let error = parse_panes("$0 dev").expect_err("record should fail");
         assert!(error.to_string().contains("expected 15"));
     }
 
     #[test]
     fn parses_server_socket_and_pid_identity() {
-        let identity = parse_server_identity("/tmp/tmux-1000/default\t3047\n")
-            .expect("identity should parse");
+        let identity =
+            parse_server_identity("/tmp/tmux-1000/socket\\ name 3047\n")
+                .expect("identity should parse");
         assert_eq!(
             identity.socket_path,
-            PathBuf::from("/tmp/tmux-1000/default")
+            PathBuf::from("/tmp/tmux-1000/socket name")
         );
         assert_eq!(identity.pid, 3047);
         assert_eq!(identity.id, "server-3047");
+    }
+
+    #[test]
+    fn decodes_tmux_control_and_literal_backslash_escapes() {
+        assert_eq!(
+            decode_tmux_escapes(r"tab\tnewline\nslash\\literal\\t")
+                .expect("escapes should decode"),
+            "tab\tnewline\nslash\\literal\\t"
+        );
+        assert_eq!(
+            decode_tmux_escapes(r"escape\033")
+                .expect("octal escape should decode"),
+            "escape\u{1b}"
+        );
     }
 }

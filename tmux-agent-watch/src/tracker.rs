@@ -8,6 +8,8 @@ struct PaneRuntime {
     previous_capture: Vec<u8>,
     last_change_at: Instant,
     activity: Activity,
+    width: u16,
+    height: u16,
 }
 
 #[derive(Debug)]
@@ -46,11 +48,19 @@ impl Tracker {
                         previous_capture: capture.clone(),
                         last_change_at: now,
                         activity: Activity::Changing,
+                        width: pane.width,
+                        height: pane.height,
                     }
                 });
 
+            let resized =
+                runtime.width != pane.width || runtime.height != pane.height;
             let changed = runtime.previous_capture != capture;
-            if changed {
+            if resized {
+                runtime.previous_capture = capture;
+                runtime.width = pane.width;
+                runtime.height = pane.height;
+            } else if changed {
                 runtime.previous_capture = capture;
                 runtime.last_change_at = now;
                 runtime.activity = Activity::Changing;
@@ -202,6 +212,46 @@ mod tests {
             vec![(pane("%1", true), b"second".to_vec())],
         );
         assert_eq!(selected.panes[0].activity, Activity::Static);
+    }
+
+    #[test]
+    fn resize_resets_capture_baseline_without_reporting_activity() {
+        let start = Instant::now();
+        let mut tracker = Tracker::new(Duration::from_secs(1));
+        tracker.observe(
+            start,
+            1,
+            "test".to_owned(),
+            vec![(pane("%1", false), b"before resize".to_vec())],
+        );
+        let static_snapshot = tracker.observe(
+            start + Duration::from_secs(2),
+            2,
+            "test".to_owned(),
+            vec![(pane("%1", false), b"before resize".to_vec())],
+        );
+        assert_eq!(static_snapshot.panes[0].activity, Activity::Static);
+
+        let mut resized_pane = pane("%1", false);
+        resized_pane.width = 120;
+        let resized_snapshot = tracker.observe(
+            start + Duration::from_secs(3),
+            3,
+            "test".to_owned(),
+            vec![(resized_pane, b"reflowed capture".to_vec())],
+        );
+        assert_eq!(resized_snapshot.panes[0].activity, Activity::Static);
+        assert_eq!(resized_snapshot.panes[0].quiet_ms, 3_000);
+
+        let mut stable_pane = pane("%1", false);
+        stable_pane.width = 120;
+        let stable_snapshot = tracker.observe(
+            start + Duration::from_secs(4),
+            4,
+            "test".to_owned(),
+            vec![(stable_pane, b"reflowed capture".to_vec())],
+        );
+        assert_eq!(stable_snapshot.panes[0].activity, Activity::Static);
     }
 
     #[test]

@@ -1,12 +1,15 @@
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use tmux_agent_watch::model::{
     DEFAULT_CHANGING_SYMBOL, DEFAULT_STATIC_SYMBOL, DEFAULT_TMUX_LABEL,
     DEFAULT_TMUX_SEPARATOR, WindowSummary,
 };
 use tmux_agent_watch::tmux::{TmuxClient, WINDOW_SUMMARY_FORMAT};
+
+static NEXT_SERVER: AtomicU64 = AtomicU64::new(1);
 
 struct TestServer {
     socket: String,
@@ -15,11 +18,9 @@ struct TestServer {
 
 impl TestServer {
     fn start() -> Self {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("time should be valid")
-            .as_nanos();
-        let socket = format!("agent-watch-test-{}-{nonce}", std::process::id());
+        let sequence = NEXT_SERVER.fetch_add(1, Ordering::Relaxed);
+        let socket =
+            format!("agent-watch-test-{}-{sequence}", std::process::id());
         run_tmux(&socket, &["new-session", "-d", "-s", "test", "sleep 30"]);
         Self {
             socket,
@@ -97,6 +98,26 @@ fn run_tmux(socket: &str, args: &[&str]) -> String {
         .expect("tmux output should be UTF-8")
         .trim_end()
         .to_owned()
+}
+
+#[test]
+fn preserves_quoted_tmux_names_with_delimiters() {
+    let server = TestServer::start();
+    let client = TmuxClient::new(Some(server.socket.clone()));
+    let pane = client
+        .list_panes()
+        .expect("initial pane should list")
+        .remove(0);
+
+    server.run(&["rename-session", "-t", "test", "test space"]);
+    server.run(&["rename-window", "-t", &pane.window_id, "work\tqueue"]);
+
+    let renamed = client
+        .list_panes()
+        .expect("renamed pane should list")
+        .remove(0);
+    assert_eq!(renamed.session_name, "test space");
+    assert_eq!(renamed.window_name, "work\tqueue");
 }
 
 #[test]
