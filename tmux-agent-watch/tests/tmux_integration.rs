@@ -1,15 +1,58 @@
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::Duration;
 
 use tmux_agent_watch::model::{
-    DEFAULT_CHANGING_SYMBOL, DEFAULT_STATIC_SYMBOL, DEFAULT_TMUX_LABEL,
-    DEFAULT_TMUX_SEPARATOR, WindowSummary,
+    Activity, DEFAULT_CHANGING_SYMBOL, DEFAULT_STATIC_SYMBOL,
+    DEFAULT_TMUX_LABEL, DEFAULT_TMUX_SEPARATOR, Snapshot, WindowSummary,
 };
+use tmux_agent_watch::snapshot::read_snapshot;
 use tmux_agent_watch::tmux::{TmuxClient, WINDOW_SUMMARY_FORMAT};
 
 static NEXT_SERVER: AtomicU64 = AtomicU64::new(1);
+
+struct FixtureDirectory {
+    path: PathBuf,
+}
+
+impl FixtureDirectory {
+    fn create() -> Self {
+        let sequence = NEXT_SERVER.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "tmux-agent-watch-fixture-{}-{sequence}",
+            std::process::id()
+        ));
+        fs::create_dir(&path).expect("fixture directory should be created");
+        Self { path }
+    }
+
+    fn compile_agent(&self, name: &str) -> PathBuf {
+        let destination = self.path.join(name);
+        let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/synthetic_agent.rs");
+        let output = Command::new("rustc")
+            .arg(source)
+            .args(["-o"])
+            .arg(&destination)
+            .output()
+            .expect("rustc should compile synthetic agent");
+        assert!(
+            output.status.success(),
+            "synthetic agent compilation failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        destination
+    }
+}
+
+impl Drop for FixtureDirectory {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
 
 struct TestServer {
     socket: String,
@@ -51,15 +94,13 @@ impl Drop for TestServer {
 }
 
 fn spawn_watcher(socket: &str) -> Child {
+    spawn_watcher_with_args(socket, &["--no-tmux-status", "--interval-ms", "50"])
+}
+
+fn spawn_watcher_with_args(socket: &str, args: &[&str]) -> Child {
     Command::new(env!("CARGO_BIN_EXE_tmux-agent-watch"))
-        .args([
-            "--socket",
-            socket,
-            "watch",
-            "--no-tmux-status",
-            "--interval-ms",
-            "50",
-        ])
+        .args(["--socket", socket, "watch"])
+        .args(args)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -98,6 +139,156 @@ fn run_tmux(socket: &str, args: &[&str]) -> String {
         .expect("tmux output should be UTF-8")
         .trim_end()
         .to_owned()
+}
+
+fn path_text(path: &Path) -> &str {
+    path.to_str().expect("fixture path should be UTF-8")
+}
+
+fn wait_for_snapshot(
+    client: &TmuxClient,
+    predicate: impl Fn(&Snapshot) -> bool,
+) -> Snapshot {
+    let identity = client
+        .server_identity()
+        .expect("server identity should resolve");
+    for _ in 0..80 {
+        if let Ok(snapshot) = read_snapshot(&identity.id)
+            && predicate(&snapshot)
+        {
+            return snapshot;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    panic!("watcher snapshot did not reach expected state");
+}
+
+fn wait_for_window_summary(
+    server: &TestServer,
+    window_id: &str,
+    expected: &str,
+) {
+    for _ in 0..40 {
+        let actual = server.run(&[
+            "display-message",
+            "-p",
+            "-t",
+            window_id,
+            WINDOW_SUMMARY_FORMAT,
+        ]);
+        if actual == expected {
+            return;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    panic!("window summary did not become {expected:?}");
+}
+
+#[test]
+fn foreground_child_preserves_agent_command() {
+    let fixtures = FixtureDirectory::create();
+    let agent = fixtures.compile_agent("agent");
+    let server = TestServer::start();
+    let client = TmuxClient::new(Some(server.socket.clone()));
+    let pane_id = server.run(&[
+        "split-window",
+        "-d",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "-t",
+        "test",
+        &format!("exec {} child", path_text(&agent)),
+    ]);
+    thread::sleep(Duration::from_millis(100));
+
+    let pane = client
+        .list_panes()
+        .expect("agent child pane should list")
+        .into_iter()
+        .find(|pane| pane.pane_id == pane_id)
+        .expect("agent child pane should exist");
+    assert_eq!(pane.current_command, "agent");
+}
+
+#[test]
+fn watcher_observes_synthetic_agents_end_to_end() {
+    let fixtures = FixtureDirectory::create();
+    let agent = fixtures.compile_agent("agent");
+    let codex = fixtures.compile_agent("codex");
+    let mut server = TestServer::start();
+    let client = TmuxClient::new(Some(server.socket.clone()));
+    let initial = client
+        .list_panes()
+        .expect("initial pane should list")
+        .remove(0);
+    let agent_id = server.run(&[
+        "split-window",
+        "-d",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "-t",
+        &initial.window_id,
+        &format!("exec {} static", path_text(&agent)),
+    ]);
+    let codex_id = server.run(&[
+        "split-window",
+        "-d",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "-t",
+        &initial.window_id,
+        &format!("exec {} changing", path_text(&codex)),
+    ]);
+    let mut watcher = spawn_watcher_with_args(
+        &server.socket,
+        &["--interval-ms", "50", "--static-after-ms", "200"],
+    );
+
+    let snapshot = wait_for_snapshot(&client, |snapshot| {
+        snapshot.panes.iter().any(|pane| {
+            pane.pane_id == agent_id && pane.activity == Activity::Static
+        }) && snapshot.panes.iter().any(|pane| {
+            pane.pane_id == codex_id && pane.activity == Activity::Changing
+        })
+    });
+    assert_eq!(snapshot.panes.len(), 2);
+
+    let mixed_summary = WindowSummary {
+        changing: 1,
+        static_count: 1,
+    }
+    .render_tmux_segment(
+        DEFAULT_TMUX_LABEL,
+        DEFAULT_TMUX_SEPARATOR,
+        DEFAULT_CHANGING_SYMBOL,
+        DEFAULT_STATIC_SYMBOL,
+    );
+    wait_for_window_summary(&server, &initial.window_id, &mixed_summary);
+
+    server.run(&["kill-pane", "-t", &codex_id]);
+    let snapshot = wait_for_snapshot(&client, |snapshot| {
+        snapshot.panes.len() == 1
+            && snapshot.panes[0].pane_id == agent_id
+            && snapshot.panes[0].activity == Activity::Static
+    });
+    assert_eq!(snapshot.panes[0].pane_id, agent_id);
+    let static_summary = WindowSummary {
+        changing: 0,
+        static_count: 1,
+    }
+    .render_tmux_segment(
+        DEFAULT_TMUX_LABEL,
+        DEFAULT_TMUX_SEPARATOR,
+        DEFAULT_CHANGING_SYMBOL,
+        DEFAULT_STATIC_SYMBOL,
+    );
+    wait_for_window_summary(&server, &initial.window_id, &static_summary);
+
+    server.kill();
+    wait_for_exit(&mut watcher);
 }
 
 #[test]
