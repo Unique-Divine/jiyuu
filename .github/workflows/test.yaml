@@ -59,3 +59,41 @@ jobs:
         run: |
           bun test
         working-directory: mdtoc
+
+  tmux-agent-watch-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: "Check for relevant changes"
+        id: watcher_changes
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            watcher:
+              - "tmux-agent-watch/**/*"
+              - ".github/workflows/test.yaml"
+
+      - if: steps.watcher_changes.outputs.watcher == 'true'
+        name: "Install Rust"
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+
+      - if: steps.watcher_changes.outputs.watcher == 'true'
+        name: "Install just"
+        uses: extractions/setup-just@v3
+
+      - if: steps.watcher_changes.outputs.watcher == 'true'
+        name: "Install tmux"
+        run: sudo apt-get update && sudo apt-get install --yes tmux
+
+      - if: steps.watcher_changes.outputs.watcher == 'true'
+        name: "Lint"
+        run: just lint
+        working-directory: tmux-agent-watch
+
+      - if: steps.watcher_changes.outputs.watcher == 'true'
+        name: "Test"
+        run: just test
+        working-directory: tmux-agent-watch
