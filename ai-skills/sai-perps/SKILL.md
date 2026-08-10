@@ -39,7 +39,7 @@ configuration or environment variables.
 
 | Surface | Use when | Reference |
 | --- | --- | --- |
-| Live contracts | Protocol state, contract configuration, markets, collaterals, OI limits, fees, vault mappings, deposits, referral ownership, and credit balances. | [`sai-contracts.md`](references/sai-contracts.md) |
+| Live contracts | Protocol state, contract configuration, markets, collaterals, OI limits, fees, vault mappings, deposits, affiliate claimable rewards, and credit balances. | [`sai-contracts.md`](references/sai-contracts.md) |
 | SLP Vault contracts | Vault health, collateralization, share price, deposit caps, daily risk state, epochs, withdrawal timing, raw vault state, pending gov fees. | [`sai-vaults.md`](references/sai-vaults.md) |
 | Sai Keeper GraphQL | Indexed trades and LP history, app-visible oracle prices, fees, referral history, subscriptions, and user-facing entities. | [`sai-graphql.md`](references/sai-graphql.md) |
 | DexPal REST | Public product aggregates, stats, markets, yield, health checks, and date-window metrics. | [`sai-rest.md`](references/sai-rest.md) |

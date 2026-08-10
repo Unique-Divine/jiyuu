@@ -117,7 +117,7 @@ Rules of thumb:
 - Pipe to `jq` for nested fields when needed.
 - Use specialized skills for deeper workflows:
   - `nibid-gov-upgrade` for governance and software upgrades
-  - `sai-perps-query` for Sai contract query recipes
+  - `sai-perps` for Sai contract query recipes and reconciliation
   - `evm-rpc` for `eth_*` / `debug_*` EVM tracing rather than Cosmos CLI
 
 ## Query routing
