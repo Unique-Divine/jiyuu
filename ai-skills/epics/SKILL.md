@@ -1,6 +1,6 @@
 ---
-name: epics-plus
-description: Discover, read, and manage Epics+ markdown documents in the boku repository. Use when asked about active tasks, priorities, epics for specific repos or tags, or when needing to regenerate the epic index (INDEX.md) using the epics-plus CLI.
+name: epics
+description: Discover, read, create, edit, normalize, and synthesize Epics+ markdown documents in the boku repository. Use for active tasks, priorities, epics for specific repos or tags, durable epic/spec handoffs, or regenerating INDEX.md with the epics-plus CLI.
 ---
 
 # Epics+ Management
@@ -29,8 +29,89 @@ When reading an epic doc, look at the YAML frontmatter at line 1 for context:
 - **tags**: Broad themes (e.g., `sai`, `evm`, `slashing`). Use for "related work" queries.
 - **repos**: Which codebase this epic targets (e.g., `nibi-chain`, `sai-keeper`).
   These use the conventional repo names from the `/repo-map` skill.
-- **related_context**: Links to other epics (`/epics/...`). Follow these to understand dependencies.
+- **related_context**: Links to other epics (`/epics/...`). Follow these for
+  relevant parent, child, and peer context.
 - **agent_skills**: Cursor skill IDs relevant to this epic. Suggest using them when working on the task.
+
+## Epic Structure and Creation
+
+Epics+ metadata stays flat. Frontmatter identifies a Markdown document as an
+epic; its path indicates whether it is standalone, a parent, or a child:
+
+- The unqualified term **epic** may refer to any of these three forms. An
+  **epic document** is any Markdown file with valid Epics+ frontmatter,
+  including a parent `README.md` or a child epic file. Do not assume that every
+  request for an epic means one standalone file; infer a file or directory from
+  the number of cohesive outcomes and related files involved.
+- A **standalone epic** is one frontmatter-bearing Markdown file directly under
+  `epics/`.
+- A **parent epic** is the frontmatter-bearing `README.md` at the root of an
+  epic directory. It is the canonical entry point and indexes the child epics.
+- A **child epic** is a frontmatter-bearing Markdown file within an epic
+  directory. It represents an independently trackable outcome within the
+  parent epic.
+- Other files may live beside the epic documents. Without Epics+ frontmatter,
+  treat them as context, artifacts, or implementation material rather than
+  additional epics.
+
+Do not add hierarchy fields such as `epic_role`, `parent_epic`, or
+`depends_on`. Use field `related_context` for lightweight relationships and
+follow the file layout for parent-child context.
+
+### Choosing a file or directory
+
+- Use a standalone file when one document can describe one cohesive outcome.
+- Use a directory when the work benefits from multiple independently trackable
+  child epics or needs related files.
+- For a directory, create `README.md` as the parent epic and list each child
+  epic with a short statement of the outcome it owns.
+- Name child epics with stable numeric prefixes such as `01-...md`,
+  `02-...md`, and `03-...md`. The numbers define reading and display order;
+  they do not require completion in that sequence.
+
+### Epics, tasks, and subtasks
+
+An epic document describes an outcome. Track actionable work inside it with
+standard Markdown checkboxes:
+
+- Use `- [ ]` for open tasks and `- [x]` for completed tasks.
+- Indent checkbox items beneath a task to represent subtasks.
+- Use ordinary bullets only for non-actionable context, rationale, status,
+  examples, or notes.
+- If an item describes work to perform or an acceptance criterion to verify,
+  write it as a checkbox rather than hiding it in an ordinary bullet.
+
+When creating or restructuring task lists, follow agent skill `md-tasks`.
+
+### Spec synthesis and handoff
+
+For a design-heavy epic, use agent skill `drill-spec` to resolve material
+decisions and write them back as the discussion progresses. Once the design
+stabilizes for an implementation sequence, synthesize the epic before calling
+that scope ready for implementation:
+
+- Preserve useful context, evidence, rationale, caveats, and settled decisions.
+  Do not reduce the drill history to a bare checklist.
+- Follow agent skill `md-tasks` for a final normalization pass. Keep settled
+  decisions distinct from the open implementation, validation, rollout, or
+  deferred tasks that follow from them.
+- Place executable and verifiable work in one or more top-level `## Impl`,
+  `## Impl N: ...`, validation, rollout, or deferred sections. Multiple
+  top-level implementation sections are useful when the work has distinct
+  sequences or outcomes; preserve an epic's useful existing structure.
+- Explicitly defer non-blocking questions. A stable implementation sequence may
+  proceed without implying that every later sequence is fully specified.
+- Add concise logical or ASCII flows when they materially clarify execution,
+  but do not require them mechanically.
+
+Before presenting an epic or implementation sequence as ready, check that:
+
+- No material open question is presented as settled.
+- Settled decisions retain their rationale and are not mistaken for completed
+  implementation.
+- Each actionable consequence is an open implementation, validation, rollout,
+  or explicitly deferred task.
+- No actionable work remains hidden in ordinary prose or bullets.
 
 ## Commands Reference
 
@@ -56,8 +137,8 @@ the path for an epic.
 
 Example invocations:
 ```
-/epics-plus Find me the recent epic on publishing my Go release on npm
-/epics-plus Search for the epic on creating new markets on Sai
+/epics Find me the recent epic on publishing my Go release on npm
+/epics Search for the epic on creating new markets on Sai
 ```
 
 ### Procedure
@@ -159,4 +240,15 @@ When assigned to an epic, open the file and:
 
 ### 3. Maintenance
 Regenerate the index after any frontmatter changes so the dashboard stays accurate.
+
+## Operator note: managed agent skills
+
+Directory `$HOME/.cursor/skills` is the canonical runtime location for Cursor
+agent skills. Repository `$HOME/ki/boku/dotfiles` manages copies of those
+skills for other agent environments and boku backups.
+
+After changing a runtime skill, run command `just skills-sync --run` from the
+dotfiles repository. The sync updates `$HOME/.agents/skills` for Codex CLI and
+the boku public/private skill backups. Run command `just health` from that
+repository to check skills-sync drift without writing changes.
 
