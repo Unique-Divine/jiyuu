@@ -317,8 +317,7 @@ describe("toc", () => {
 
     // Leading ## is not stripped; maxdepth 2 still keeps only BBB.
     expect(
-      toc("## BBB\n### CCC\n#### DDD", { maxdepth: 2, firsth1: false })
-        .content,
+      toc("## BBB\n### CCC\n#### DDD", { maxdepth: 2, firsth1: false }).content,
     ).toEqual("- [BBB](#bbb)")
   })
 
