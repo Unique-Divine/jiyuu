@@ -11,6 +11,7 @@ description: >-
 metadata:
   tags: ["sai-perps", "sai-keeper", "sai-app"]
   agent_skills:
+    - nibiru-gql
     - nibiru-cli-nibid
     - postgresql-psql
     - sai-ops
@@ -34,6 +35,11 @@ For a Sai Keeper Postgres schema, SQL semantics, or freshness question, read
 access, Tailscale/primary-replica routing, or any write operation, also use the
 private agent skill `sai-db`; do not infer connection details from repository
 configuration or environment variables.
+
+For Heart Monitor GraphQL transaction messages, custom Wasm events, and ordinary
+chain-indexed wallet evidence, use agent skill `nibiru-gql`. Heart Monitor event
+proof establishes the upstream chain input; it does not by itself prove the Sai
+Keeper derived-state row or the Sai app-visible balance.
 
 ## Reference router
 

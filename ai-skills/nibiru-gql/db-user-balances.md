@@ -1,5 +1,32 @@
 # Nibiru Indexer (Heart Monitor) — User Balances Schema Reference
 
+## Quick guide
+
+Use this reference for Heart Monitor account data, token balances, and GraphQL
+fields `user` and `users`.
+
+- Mainnet endpoint: `https://hm-graphql.nibiru.fi/query`.
+- Testnet endpoint: `https://hm-graphql.itn-2.nibiru.fi/query`.
+- GraphQL fields `user` and `users` are root-level fields, unlike container
+  field `staking`.
+- GraphQL input field `where.address` accepts either a Bech32 `nibi1...`
+  account or an EVM `0x...` address; returned user addresses are Bech32.
+- Prefer GraphQL field `all_balances` over legacy field `balances`. It includes
+  a `Balance` row with `TokenInfo` metadata and is the safer default for EVM
+  and enriched token balances.
+- Balance amounts are string base units. Use `token_info.decimals` for display
+  and arithmetic.
+- The TypeScript SDK exposes the queries through `HeartMonitor.user` and
+  `HeartMonitor.users`.
+
+### Query routing
+
+| Need | Preferred source |
+| --- | --- |
+| Current indexed wallet balances | Heart Monitor |
+| Strictly consistent chain balances | `nibid` chain query or RPC |
+| Sai internal deposits or trading credits | Sai Perp contract and Sai Keeper |
+
 This document describes the Nibiru indexer (Heart Monitor) and the **user** / **users** / **Token** portion of its GraphQL schema: what the indexer is, how the TypeScript SDK exposes it, and the types and fields available for user balance queries.
 
 - [1. Repo and indexer context](#1-repo-and-indexer-context)
