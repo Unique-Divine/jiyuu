@@ -129,6 +129,7 @@ Run from `/home/realu/ki/boku/epics`:
 
 ## Additional Resources
 - Full schema and semantics: [epics/26-02-24-epics-plus.md](/home/realu/ki/boku/epics/26-02-24-epics-plus.md)
+- Codex runtime skill discovery: [references/codex-skill-discovery.md](./references/codex-skill-discovery.md)
 
 ## Mode: Finding or Searching for Epics
 
@@ -251,4 +252,3 @@ After changing a runtime skill, run command `just skills-sync --run` from the
 dotfiles repository. The sync updates `$HOME/.agents/skills` for Codex CLI and
 the boku public/private skill backups. Run command `just health` from that
 repository to check skills-sync drift without writing changes.
-
