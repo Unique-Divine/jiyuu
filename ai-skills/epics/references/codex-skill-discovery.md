@@ -47,11 +47,10 @@ fully local prompt renderer like command `codex debug prompt-input`.
 
 ## Managed skill synchronization
 
-Directory `$HOME/.cursor/skills` is the canonical runtime source for managed
-skills in this environment. After changing a runtime skill, run command
-`just skills-sync --run` from repository `boku/dotfiles`. The sync copies the
-runtime skill directories to Codex directory `$HOME/.agents/skills` and updates
-the public or private boku backups according to the skill's frontmatter.
+Public skills live in `jiyuu/ai-skills` and private skills in
+`boku/priv-skills`. The runtime Cursor and Codex skill directories both link to
+the flat `priv-skills` union, so edits apply to the canonical repository files
+immediately. Run `just skills-sync --run` only to repair the managed links.
 
 After syncing, run the relevant Codex or Cursor Agent discovery probe from a
 representative target repository. That final check verifies discovery from the

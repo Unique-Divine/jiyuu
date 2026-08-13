@@ -244,11 +244,8 @@ Regenerate the index after any frontmatter changes so the dashboard stays accura
 
 ## Operator note: managed agent skills
 
-Directory `$HOME/.cursor/skills` is the canonical runtime location for Cursor
-agent skills. Repository `$HOME/ki/boku/dotfiles` manages copies of those
-skills for other agent environments and boku backups.
-
-After changing a runtime skill, run command `just skills-sync --run` from the
-dotfiles repository. The sync updates `$HOME/.agents/skills` for Codex CLI and
-the boku public/private skill backups. Run command `just health` from that
-repository to check skills-sync drift without writing changes.
+Public skills live in `jiyuu/ai-skills`; private skills live in
+`boku/priv-skills`. Cursor and Codex both resolve their runtime directories to
+the combined `priv-skills` directory, so runtime edits update the repositories
+immediately. Run `just health` from `boku/dotfiles` to check the public/private
+union and both runtime links without writing changes.
