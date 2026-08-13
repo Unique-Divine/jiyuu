@@ -14,16 +14,34 @@ use serde::{Deserialize, Serialize};
 
 const STATE_FILE: &str = "state.toml";
 const LOCK_FILE: &str = ".gh-rev.lock";
+const APP_VERSION: &str = env!("GH_REV_BUILD_VERSION");
+const APP_GIT_COMMIT: &str = env!("GH_REV_BUILD_COMMIT");
+const APP_GIT_DIRTY: &str = env!("GH_REV_BUILD_DIRTY");
 
 #[derive(Parser)]
-#[command(about = "Persistent local review ledger")]
+#[command(
+    about = "Persistent local review ledger",
+    disable_version_flag = true,
+    arg_required_else_help = true
+)]
 struct Cli {
     /// Override the default ~/gh workspace root.
     #[arg(long, global = true, env = "GH_REV_HOME")]
     home: Option<PathBuf>,
 
+    /// Print build/package provenance as machine-readable JSON.
+    #[arg(long, global = true)]
+    version: bool,
+
     #[command(subcommand)]
-    command: CommandName,
+    command: Option<CommandName>,
+}
+
+#[derive(Serialize)]
+struct VersionOutput {
+    version: &'static str,
+    commit: &'static str,
+    dirty: bool,
 }
 
 #[derive(Subcommand)]
@@ -165,8 +183,12 @@ fn main() {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
+    if cli.version {
+        return print_version();
+    }
     let home = review_home(cli.home)?;
-    match cli.command {
+    let command = cli.command.with_context(|| "missing command")?;
+    match command {
         CommandName::Register { path } => register(&home, &path),
         CommandName::Open {
             repo,
@@ -193,6 +215,18 @@ fn run() -> Result<()> {
             state_path: home.join(STATE_FILE),
             home,
         }),
+    }
+}
+
+fn print_version() -> Result<()> {
+    print_json(&version_output())
+}
+
+fn version_output() -> VersionOutput {
+    VersionOutput {
+        version: APP_VERSION,
+        commit: APP_GIT_COMMIT,
+        dirty: APP_GIT_DIRTY == "true",
     }
 }
 
@@ -792,6 +826,24 @@ mod tests {
     }
 
     #[test]
+    fn direct_next_allocation_starts_at_one_when_no_reviews_exist() {
+        let fixture = test_fixture("next-no-reviews");
+
+        next(
+            &fixture.home,
+            &fixture.slug,
+            Some(fixture.branch.clone()),
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert!(fixture.target_path.join("rev-1.md").is_file());
+        assert_eq!(branch_target(&fixture).next_review_number, 2);
+        fixture.remove();
+    }
+
+    #[test]
     fn stale_counter_is_advanced_past_the_highest_review_artifact() {
         let fixture = test_fixture("stale-counter");
         write_review(&fixture.target_path, 1);
@@ -833,6 +885,37 @@ mod tests {
     }
 
     #[test]
+    fn many_sparse_review_files_reconcile_to_next_review_number() {
+        let fixture = test_fixture("many-reviews");
+        for number in [9, 1, 12, 3, 5, 7, 11, 2, 4, 6, 8, 10]
+            .into_iter()
+        {
+            write_review(&fixture.target_path, number);
+        }
+
+        // Add common noise that should be ignored by parsing logic.
+        fs::write(fixture.target_path.join("rev-12.md.bak"), "noise\n").unwrap();
+        fs::write(fixture.target_path.join("rev-x.md"), "noise\n").unwrap();
+        fs::write(fixture.target_path.join("review-99.md"), "noise\n").unwrap();
+        fs::write(fixture.target_path.join("rev-0.md"), "noise\n").unwrap();
+        fs::create_dir(fixture.target_path.join("rev-99.md")).unwrap();
+
+        next(
+            &fixture.home,
+            &fixture.slug,
+            Some(fixture.branch.clone()),
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert!(fixture.target_path.join("rev-13.md").is_file());
+        assert!(!fixture.target_path.join("rev-14.md").exists());
+        assert_eq!(branch_target(&fixture).next_review_number, 14);
+        fixture.remove();
+    }
+
+    #[test]
     fn unrelated_filenames_do_not_affect_review_allocation() {
         let fixture = test_fixture("unrelated-files");
         write_review(&fixture.target_path, 1);
@@ -853,6 +936,30 @@ mod tests {
 
         assert!(fixture.target_path.join("rev-2.md").is_file());
         fixture.remove();
+    }
+
+    #[test]
+    fn version_flag_parses_without_subcommand() {
+        let cli = Cli::parse_from(["gh-rev", "--version"]);
+        assert!(cli.version);
+        assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn version_output_is_json_with_expected_fields() {
+        let output = version_output();
+        let json = serde_json::to_string_pretty(&output).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            value["version"].as_str().unwrap(),
+            APP_VERSION,
+            "version should reflect build metadata"
+        );
+        assert_eq!(
+            value["commit"].as_str().map(|value| !value.is_empty()),
+            Some(true)
+        );
+        assert!(value["dirty"].as_bool().is_some(), "dirty must be boolean");
     }
 
     struct TestFixture {
