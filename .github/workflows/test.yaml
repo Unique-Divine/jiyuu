@@ -12,6 +12,7 @@ concurrency:
   cancel-in-progress: ${{ ! (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/')) }}
 
 jobs:
+  # Reserved workspace-level hook for checks that eventually span multiple tools.
   test:
     runs-on: ubuntu-latest
     steps:
@@ -27,6 +28,7 @@ jobs:
       - run: |
           echo "Placeholder for later"
 
+  # Runs Bun tests only when Markdown TOC sources or their workflow change.
   mdtoc-test:
     runs-on: ubuntu-latest
     steps:
@@ -60,7 +62,8 @@ jobs:
           bun test
         working-directory: mdtoc
 
-  tmux-agent-watch-test:
+  # Exercises the tmux observer only when its Rust project or CI definition changes.
+  tmux-agent-watch:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -86,7 +89,7 @@ jobs:
 
       - if: steps.watcher_changes.outputs.watcher == 'true'
         name: "Install tmux"
-        run: sudo apt-get update && sudo apt-get install --yes tmux
+        run: sudo apt-get install --yes --no-install-recommends tmux
 
       - if: steps.watcher_changes.outputs.watcher == 'true'
         name: "Lint"
@@ -98,7 +101,8 @@ jobs:
         run: just test
         working-directory: tmux-agent-watch
 
-  gh-rev-test:
+  # Verifies the standalone review-ledger CLI only when its implementation changes.
+  gh-rev:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
