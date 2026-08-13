@@ -48,6 +48,10 @@ Common recipe names to check first: `setup`, `install`, `build`, `test`, `lint`,
   `justfile` uses `dotenv-load` or exported variables.
 - Treat destructive or confirmation-gated recipes cautiously.
 - Test-like shebang recipes (`test`, `test-*`, etc.) should use `#!/usr/bin/env bash` and `set -euo pipefail` so failures propagate instead of being masked by later commands.
+- Recipe doc comments must be **exactly one** `# ...` line immediately above
+  the recipe name. `just` / `just --list` use only that adjacent comment as the
+  recipe description; a second `#` line replaces or truncates the intended
+  preview text.
 
 ## Common Failure Modes
 
@@ -84,6 +88,32 @@ Behavior can change based on settings such as:
 If a recipe works differently in CI, in a subdirectory, or in the terminal,
 check these settings before changing the command.
 
+### Multi-line Recipe Doc Comments
+
+`just` treats only the single `#` comment immediately above a recipe as its
+documentation for `just --list` and similar previews. If you write two or more
+comment lines above a recipe, the intended summary is dropped or replaced and
+the preview shows incomplete or misleading help text.
+
+Wrong:
+
+```just
+# Install root workspace tooling + webapp deps, then restore extension caches
+# (`just install`; CI: `just install CI=true` requires GH_TOKEN).
+install CI="false":
+```
+
+Right:
+
+```just
+# Install webapp deps and restore extension caches (`just install`; CI: `just install CI=true` requires GH_TOKEN).
+install CI="false":
+```
+
+After editing recipe comments, run `just --list` (or plain `just` when that
+lists recipes) and confirm each public recipe shows the full intended
+one-line description.
+
 ### Confirmation Gates
 
 Recipes marked with `[confirm]` may block or fail in non-interactive contexts.
@@ -104,7 +134,9 @@ production deploy flows.
 
 ## Notes
 
-- Comments above recipes become descriptions in `just --list`.
+- Only **one** `#` comment line immediately above a recipe becomes its
+  description in `just --list` / recipe previews. Extra comment lines above the
+  recipe break or replace that documentation; keep the doc as a single line.
 - Each recipe line runs in a separate shell unless the recipe is a shebang
   script.
 - Large repos may use `just` as a command hub over other toolchains rather than

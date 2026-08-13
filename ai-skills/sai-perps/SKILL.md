@@ -11,6 +11,7 @@ description: >-
 metadata:
   tags: ["sai-perps", "sai-keeper", "sai-app"]
   agent_skills:
+    - nibiru-gql
     - nibiru-cli-nibid
     - postgresql-psql
     - sai-ops
@@ -35,11 +36,16 @@ access, Tailscale/primary-replica routing, or any write operation, also use the
 private agent skill `sai-db`; do not infer connection details from repository
 configuration or environment variables.
 
+For Heart Monitor GraphQL transaction messages, custom Wasm events, and ordinary
+chain-indexed wallet evidence, use agent skill `nibiru-gql`. Heart Monitor event
+proof establishes the upstream chain input; it does not by itself prove the Sai
+Keeper derived-state row or the Sai app-visible balance.
+
 ## Reference router
 
 | Surface | Use when | Reference |
 | --- | --- | --- |
-| Live contracts | Protocol state, contract configuration, markets, collaterals, OI limits, fees, vault mappings, deposits, referral ownership, and credit balances. | [`sai-contracts.md`](references/sai-contracts.md) |
+| Live contracts | Protocol state, contract configuration, markets, collaterals, OI limits, fees, vault mappings, deposits, affiliate claimable rewards, and credit balances. | [`sai-contracts.md`](references/sai-contracts.md) |
 | SLP Vault contracts | Vault health, collateralization, share price, deposit caps, daily risk state, epochs, withdrawal timing, raw vault state, pending gov fees. | [`sai-vaults.md`](references/sai-vaults.md) |
 | Sai Keeper GraphQL | Indexed trades and LP history, app-visible oracle prices, fees, referral history, subscriptions, and user-facing entities. | [`sai-graphql.md`](references/sai-graphql.md) |
 | DexPal REST | Public product aggregates, stats, markets, yield, health checks, and date-window metrics. | [`sai-rest.md`](references/sai-rest.md) |

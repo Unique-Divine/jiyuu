@@ -1,5 +1,40 @@
 # Nibiru Indexer (Heart Monitor) — Staking Schema Reference
 
+## Quick guide
+
+Use this reference for the Heart Monitor GraphQL staking schema: validators,
+delegations, redelegations, unbondings, and staking history.
+
+- Mainnet endpoint: `https://hm-graphql.nibiru.fi/query`.
+- Testnet endpoint: `https://hm-graphql.itn-2.nibiru.fi/query`.
+- Use GraphQL container `staking`; root-level fields such as `validators` and
+  `delegations` are deprecated.
+- The NIBI staking denom is `unibi`, or micro NIBI. GraphQL amounts are base
+  units; divide by `10^6` for NIBI.
+- A validator has account (`nibi1...`), operator (`nibivaloper1...`), and
+  consensus (`nibivalcons1...`) addresses. Staking filters use the operator
+  address.
+- Delegation `amount` is an indexed token snapshot, not the canonical shares.
+  Use a height-specific chain query for slashing or compensation calculations.
+- Delegator rewards belong to the chain distribution module. Query them with
+  `nibid query distribution`, not Heart Monitor.
+- The TypeScript SDK exposes the GraphQL surface through `HeartMonitor.staking`.
+
+### Data lineage
+
+The chain stores delegation shares. Heart Monitor indexes chain queries and
+persists token-balance snapshots; its GraphQL schema exposes those indexed
+amounts. The TypeScript SDK generates typed query builders over that schema.
+
+### Query routing
+
+| Need | Preferred source |
+| --- | --- |
+| Current delegator balance or staking history | Heart Monitor |
+| Delegator rewards | Chain distribution module |
+| Historical shares, slashing, or compensation | Height-specific chain state |
+| Validator status and uptime | Heart Monitor unless strict real-time state is required |
+
 This document describes the Nibiru indexer (Heart Monitor) and the staking portion of its GraphQL schema: what the indexer is, how the TypeScript SDK exposes it, the lineage of data from the chain, and the types/fields available for staking queries.
 
 - [Repo Definitions](#repo-definitions)

@@ -29,11 +29,12 @@ and report that direct database access is blocked by network connectivity.
 For operator DB checks on the Tailscale network, prefer local `psql` database
 names over repository runtime environment variables.
 
-Credentials are expected to be available through the workstation's local
-Postgres configuration, such as file `~/.pgpass`. Do not read or print secret
-files. If direct `psql` connection fails, report the connectivity or database
-selection issue to the user instead of searching for credentials or environment
-variables.
+Credentials are expected to already work via the workstation's local Postgres
+setup. **Do not read or print** password files such as `~/.pgpass`, and do not
+search for credentials or dump secret environment values. If direct `psql`
+connection fails, report the connectivity or database selection issue to the
+user (for testnet vs mainnet, see private skill `sai-db` on ambient
+`PGPASSWORD` override).
 
 ```bash
 SAI_DB="sai_keeper" # or "sai_keeper_2" depending on time
@@ -735,23 +736,26 @@ SELECT partman.create_parent(
 This document maps database tables to their respective API exposures in GraphQL and REST.
 
 ### GraphQL surfacing
-The **sai-keeper-graphql** skill covers the API usage. Most DB tables map directly to GraphQL types.
+[`sai-graphql.md`](sai-graphql.md) covers API usage. Most DB tables map to a
+GraphQL type, but query fields are grouped below the root domain objects
+`perp`, `lp`, `oracle`, and `referral`.
 
 | DB Table | GraphQL Type / Root Field | Domain |
 |----------|---------------------------|--------|
-| `perp_trade` | `Trade` / `trade`, `trades` | Perp |
-| `perp_trade_history` | `TradeHistory` / `tradeHistory` | Perp |
-| `perp_borrowing` | `Borrowing` / `borrowing`, `borrowings` | Perp |
-| `lp_vault` | `Vault` / `vaults` | LP |
-| `lp_deposit_history` | `DepositHistory` / `depositHistory` | LP |
+| `perp_trade` | `PerpTrade` / `perp.trade`, `perp.trades` | Perp |
+| `perp_trade_history` | `PerpTradeHistoryItem` / `perp.tradeHistory` | Perp |
+| `perp_borrowing` | `PerpBorrowing` / `perp.borrowing`, `perp.borrowings` | Perp |
+| `lp_vault` | `LpVault` / `lp.vaults` | LP |
+| `lp_deposit_history` | `LpDepositHistoryItem` / `lp.depositHistory` | LP |
 | `oracle_price` | `TokenPriceUsd` / `tokenPricesUsd` | Oracle |
-| `perp_fee_charged_history` | `FeeTransaction` / `feeTransactions` | Fee |
-| `referral_code` | `ReferralCode` / `referralCodes` | Referral |
+| `referral_code` | `ReferralCode` / `referral.referralCodes` | Referral |
 
 **Note**: For live updates (Subscriptions), GraphQL watchers monitor these tables and push updates when rows change or are added.
 
 ### REST API surfacing
-The **sai-rest-api** skill covers high-level metrics. In current code paths, `/dexpal/v1/stats` and `/dexpal/v1/metrics` are derived primarily from `stats_*` table queries in the API service layer.
+[`sai-rest.md`](sai-rest.md) covers high-level metrics. In current code paths,
+`/dexpal/v1/stats` and `/dexpal/v1/metrics` are derived primarily from
+`stats_*` table queries in the API service layer.
 
 | DB Table | REST Endpoint | Metric(s) |
 |----------|---------------|-----------|

@@ -8,7 +8,10 @@ trading credits. Use agent skill `nibiru-cli-nibid` for CLI mechanics.
 
 ## Contract query playbook
 
-Source of truth for query message shapes: `$HOME/ki/sai-website/webapp/pages/easy.tsx` (`QUERY_CONFIG`).
+Source of truth for deployed query examples: file
+`$HOME/ki/sai-website/webapp/pages/debug.tsx` (`QUERY_CONFIG`). The Rust
+`QueryMsg` enums in the contract repositories are authoritative for the
+supported message names and response types.
 Full validated CLI notes: `$HOME/ki/boku/epics/26-02-10-sai-mainnet-query.md`.
 
 ### Mainnet addresses
@@ -39,20 +42,18 @@ exact group/collateral pair when in doubt. Mainnet currently maps:
 - Group 3: USDC vault `nibi1waf5c8z55qvjay4de8wkm9cxyt6wa8zdnrvlexjrq77lqgqf258q3yn7l8`; stNIBI vault `nibi1pgurgas0za436c3fm2km99zkzutfx0jwpn7meespv6szv8c8g39qjz2tvj`
 - Group 4: USDC vault `nibi193m2a00pmdsvkcvugrfewqzhtq6k0srkjzvxp2sk357vlpspx5vqxu8d7p`; stNIBI vault `nibi1mrplvu3scplnrgns96kg0j8pk3l2p9c7eaz0qdedx0kt3vmcujyqrjkfej`
 
-## Related skills
+## Related references and skills
 
-- `sai-keeper-graphql`: Same domain (Sai exchange) except via GraphQL. Use when
-you need indexed data on perp trades, SLP vaults, oracle prices, or any
-information used in the end user application. Instead of live smart contract
-queries.
-- `sai-db`: Explains how Sai data ends up in Postgres. The sai-keeper repo
-GraphQL reads from this DB. Use when you need schema details, migrations info, to debug indexer logic, or to design and edit queries over indexed data.
-- `sai-rest-api`: Broad interface for aggregated stats, yield. For quick metric
-inspection on different dates.
-- `nibiru-cli-nibid`: Use to run the actual `nibid query wasm contract-state <raw|smart>`
-  commands, configure nodes, inspect keys/config, and query transactions. This
-  skill provides Sai-specific contract addresses and query payloads; the Nibiru
-  CLI skill provides the execution mechanics.
+- [`sai-graphql.md`](sai-graphql.md): indexed, app-facing trades, vaults,
+  prices, referrals, and subscriptions; use it instead of contract queries when
+  the question is what Sai Keeper exposes.
+- Agent skill `sai-db`: private database connectivity, primary/replica routing,
+  and write workflows. This bundle's [`sai-db.md`](sai-db.md) covers static
+  schema and query semantics.
+- [`sai-rest.md`](sai-rest.md): public aggregate metrics and health checks.
+- Agent skill `nibiru-cli-nibid`: command mechanics for
+  `nibid query wasm contract-state <raw|smart>`. This reference supplies Sai
+  addresses and payloads.
 
 ## CLI setup
 
@@ -69,7 +70,7 @@ sai_perps_q() { nibid query wasm contract-state smart "$1" "$2"; }
 - Some args use **wrapped string indices**: `"index": "MarketIndex(0)"`, `"index": "GroupIndex(0)"`, `"group_index": "GroupIndex(1)"`, `"collateral_index": "TokenIndex(1)"`.
 - Some args use **plain integers**: `collateral_index: 1`, `market_index: 0`, `group_index: 0`.
   - When both arg names are plain integers, use integers. When the field name takes a typed index (e.g. `get_vault_address`), use the wrapped string form.
-  - Check `QUERY_CONFIG` in `easy.tsx` for the exact template for each query.
+  - Check `QUERY_CONFIG` in file `pages/debug.tsx` for deployed examples.
 - **Never use `collateral_index: 0`**. On mainnet `TokenIndex(0)` is the quote/USD placeholder — not a collateral. Valid collaterals are `TokenIndex(1)` (USDC) and `TokenIndex(2)` (stNIBI). Confirm first with `list_collaterals`.
 - OI values (`long`, `short`, `max`) are in **collateral token base units** and represent **position size (margin × leverage)**, not margin only. USDC and stNIBI both have 6 decimals → divide by `1e6` to get human units.
 
@@ -135,7 +136,8 @@ sai_perps_q "$ORACLE" '{"get_exchange_rate":{"base":2,"quote":1}}'
 | 1002 | NVDA |
 | 1006 | AAPL |
 
-Full list: read `reference.md` in this skill. Do not assume all non-real-estate
+The full `TokenIndex` and `MarketIndex` lookup appears later in this file under
+"Mainnet tokens and markets reference." Do not assume all non-real-estate
 markets are `GroupIndex(0)`; mainnet also has exotic, watch, and
 equities/commodities groups.
 
@@ -168,7 +170,9 @@ Fee semantics (what fees mean, distribution, code paths):
 
 ## Curated query reference
 
-Query message JSON templates, organized by contract. Source: `easy.tsx` `QUERY_CONFIG`.
+Query message JSON templates, organized by contract. Validate against the
+contract `QueryMsg` enum when the web-app catalog and a deployed contract could
+be on different release cadences.
 
 ## Perp contract
 
@@ -186,6 +190,9 @@ You can use the `/nibiru-cli-nibid` skill to pull any of this information.
 {"get_collateral":{"index":1}}
 {"get_fees":{"index":"FeeIndex(0)"}}
 {"get_pair_custom_max_leverage":{"index":0}}
+{"get_after_hours_leverage":{}}
+{"is_after_hours_market":{"market_index":"MarketIndex(0)"}}
+{"list_after_hours_markets":{}}
 {"get_borrowing_pair":{"collateral_index":1,"market_index":0}}
 {"get_borrowing_pair_oi":{"collateral_index":1,"market_index":0}}
 {"get_borrowing_pair_group":{"collateral_index":1,"market_index":0}}
@@ -193,19 +200,28 @@ You can use the `/nibiru-cli-nibid` skill to pull any of this information.
 {"get_borrowing_group_oi":{"collateral_index":1,"group_index":0}}
 {"get_vault_address":{"group_index":"GroupIndex(0)","collateral_index":"TokenIndex(1)"}}
 {"get_trade":{"trader":"nibi1...","index":0}}
+{"get_trade_raw":{"trader":"nibi1...","index":0}}
 {"get_trades":[["nibi1...",0],["nibi1...",1]]}
+{"list_trades_for_user":{"trader":"nibi1...","show_closed":false,"show_conditional":false,"scan_limit":100,"start_idx":null}}
 {"get_trade_info":{"trader":"nibi1...","index":0}}
 {"get_trade_infos":{"trader":"nibi1..."}}
-{"get_trade_data":{"trader":"nibi1...","index":0}}
 {"get_trade_pnl":{"trader":"nibi1...","index":0}}
 {"get_liquidation_price":{"trade_id":"UserTradeIndex(0)","trader":"nibi1...","include_borrowing_fees":true}}
 {"get_perp_prices":{"market_index":"MarketIndex(1)","collateral_index":"TokenIndex(1)"}}
 {"get_trader_fee_multiplier":{"trader":"nibi1..."}}
 {"is_trader_stored":{"trader":"nibi1..."}}
 {"get_fee_tiers":{}}
+{"get_fee_tier_min_hold_blocks":{}}
+{"get_short_lived_penalty_curve":{}}
+{"get_short_lived_penalty_rate":{"market_index":0,"hold_blocks":0}}
+{"get_short_lived_penalty_f0_for_market":{"market_index":0}}
 {"get_pending_gov_fees":{"index":0}}
 {"get_oracle_address":{}}
 {"get_trading_activated":{}}
+{"get_market_trading_state":{"market_index":"MarketIndex(0)"}}
+{"get_collateral_price":{"collateral_index":"TokenIndex(1)","vault_address":null}}
+{"get_trading_credit_params":{}}
+{"get_affiliate_claimable_rewards":{"address":"nibi1..."}}
 {"get_oi_windows_settings":{}}
 {"get_windows":{"windows_duration":3600,"market_index":0,"current_window_id":0}}
 {"get_pair_depth":{"index":0}}
@@ -213,7 +229,8 @@ You can use the `/nibiru-cli-nibid` skill to pull any of this information.
 {"list_user_deposits":{"user":"nibi1..."}}
 ```
 
-`get_trades` is the batch form of `get_trade_data`: it preserves input order
+`get_trade` returns a complete `TradeData` record. `get_trade_raw` returns only
+the stored `Trade`. `get_trades` is the batch form of `get_trade`: it preserves input order
 and duplicate keys, returns `null` for missing keys, and returns
 `Vec<Option<TradeData>>` for present keys. Each `TradeData` includes `trade`,
 `trade_info`, `initial_acc_fees`, `liquidation_price`, and optional
@@ -649,6 +666,6 @@ defaults, admin events, or controlled test trades.
 | Vault closing fee % | `VAULT_CLOSING_FEE_P` | 4.2% of closing-fee component | Close a trade; compare vault reward to closing fee charged |
 | Referrer fee tiers | `REFERRER_FEE_PERCENTAGE` | 5%, 10%, 15%, 50% | Code default in `contracts/perp/src/fees/state.rs` |
 | Referee discount | `REFERREE_BASE_FEE_MULTIPLIER` | 5% off base (`0.95` effective) | Compare `get_trader_fee_multiplier` with/without referrer |
-| Referrer maps | `USER_REFERRERS`, `REFERRER_FEE_TIER`, `REFERRER_FEES` | — | Use `get_trader_fee_multiplier`; referral GraphQL via `sai-keeper-graphql` |
+| Referrer maps | `USER_REFERRERS`, `REFERRER_FEE_TIER`, `REFERRER_FEES` | — | Use `get_trader_fee_multiplier`; indexed referral history via [`sai-graphql.md`](sai-graphql.md) |
 
 See also `slp-vaults.md` for `get_pending_gov_fees` and vault reward routing.

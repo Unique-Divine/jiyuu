@@ -39,12 +39,30 @@ touched by that fix.
      `run-<id>-<job>.log` as useful.
    - Tell the user the final log directory path.
 
-3. Check status:
-   - Run `gh pr checks`.
-   - If checks are pending, queued, in progress, or running, wait and poll
-     again.
+3. Check status with short, visible poll turns:
+   - Run `gh pr checks` and save output under the log directory.
    - Default poll interval: 20 seconds.
    - Default timeout: 30 minutes unless the user specifies otherwise.
+   - **Do not** put the entire watch in one long shell loop with a huge
+     `block_until_ms` / sleep budget. Cursor only surfaces that command's
+     output when the shell finishes or is interrupted, so the chat looks idle
+     while CI is still running.
+   - Preferred pattern (multi-turn foreground):
+     1. One Shell call: `gh pr checks` (and optional JSON rollup).
+     2. If still pending: briefly tell the user which checks are pending vs
+        done, then Shell `sleep 20` (or `AwaitShell` with ~20s), then poll
+        again in the next turn.
+     3. Repeat until green, failed, or timeout. Track elapsed time across
+        turns.
+   - Optional background pattern (only if the user asks for background
+     monitoring): start a poller with `block_until_ms: 0` that appends to
+     `checks.txt` and prints clear terminal lines such as `CI_STATUS green`,
+     `CI_STATUS failed`, or `CI_STATUS timeout`. Use `notify_on_output` for
+     those markers so the agent is woken when the watch ends. Still give an
+     immediate first status in chat after starting it.
+   - Between polls, keep chat updates short: pending count / names, any newly
+     finished checks, elapsed time. Do not dump full check tables every turn
+     unless something changed meaningfully.
 
 4. On failure:
    - Identify failed workflow runs and jobs.
@@ -87,8 +105,11 @@ touched by that fix.
 - Do not push commits.
 - Do not rerun, cancel, approve, merge, or mutate GitHub state unless the user
   explicitly asks.
-- Prefer foreground monitoring. Do not start a background shell unless the user
-  explicitly asks for background monitoring.
+- Prefer multi-turn foreground monitoring so each poll can surface in chat.
+  Do not start a background shell unless the user explicitly asks for
+  background monitoring.
+- Never rely on a single foreground shell that sleeps/polls for many minutes
+  without returning; that hides progress from the user.
 - If GitHub CLI auth is missing or `gh` fails, stop and report the blocker.
 - If checks remain pending at timeout, report current status and log directory.
 
