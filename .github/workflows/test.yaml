@@ -12,6 +12,7 @@ concurrency:
   cancel-in-progress: ${{ ! (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/')) }}
 
 jobs:
+  # Reserved workspace-level hook for checks that eventually span multiple tools.
   test:
     runs-on: ubuntu-latest
     steps:
@@ -27,6 +28,7 @@ jobs:
       - run: |
           echo "Placeholder for later"
 
+  # Runs Bun tests only when Markdown TOC sources or their workflow change.
   mdtoc-test:
     runs-on: ubuntu-latest
     steps:
@@ -59,3 +61,72 @@ jobs:
         run: |
           bun test
         working-directory: mdtoc
+
+  # Exercises the tmux observer only when its Rust project or CI definition changes.
+  tmux-agent-watch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: "Check for relevant changes"
+        id: watcher_changes
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            watcher:
+              - "tmux-agent-watch/**/*"
+              - ".github/workflows/test.yaml"
+
+      - if: steps.watcher_changes.outputs.watcher == 'true'
+        name: "Install Rust"
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+
+      - if: steps.watcher_changes.outputs.watcher == 'true'
+        name: "Install just"
+        uses: extractions/setup-just@v3
+
+      - if: steps.watcher_changes.outputs.watcher == 'true'
+        name: "Install tmux"
+        run: sudo apt-get install --yes --no-install-recommends tmux
+
+      - if: steps.watcher_changes.outputs.watcher == 'true'
+        name: "Lint"
+        run: just lint
+        working-directory: tmux-agent-watch
+
+      - if: steps.watcher_changes.outputs.watcher == 'true'
+        name: "Test"
+        run: just test
+        working-directory: tmux-agent-watch
+
+  # Verifies the standalone review-ledger CLI only when its implementation changes.
+  gh-rev:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: "Check for relevant changes"
+        id: gh_rev_changes
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            gh_rev:
+              - "gh-rev/**/*"
+              - ".github/workflows/test.yaml"
+
+      - if: steps.gh_rev_changes.outputs.gh_rev == 'true'
+        name: "Install Rust"
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+
+      - if: steps.gh_rev_changes.outputs.gh_rev == 'true'
+        name: "Install just"
+        uses: extractions/setup-just@v3
+
+      - if: steps.gh_rev_changes.outputs.gh_rev == 'true'
+        name: "Check"
+        run: just check
+        working-directory: gh-rev

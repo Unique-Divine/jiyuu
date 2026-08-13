@@ -1,9 +1,9 @@
 ---
-name: skill-creator
+name: new-skills
 description: Create new skills, modify and improve existing skills, and run lightweight review loops. Use when users want to create a skill from scratch, edit an existing skill, try realistic test prompts, or improve when and how a skill should trigger.
 ---
 
-# Skill Creator
+# New Skill Creator
 
 A skill for creating new skills and iteratively improving them.
 
@@ -27,8 +27,6 @@ Of course, you should always be flexible and if the user is like "I don't need t
 Then after the skill is done, you can help tune the skill description so it
 triggers in the right situations. Keep this lightweight unless the user
 explicitly asks for a deeper review loop.
-
-Cool? Cool.
 
 ## Communicating with the user
 

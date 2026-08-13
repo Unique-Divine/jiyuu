@@ -10,9 +10,12 @@ changelog notes, switch to agent skill `sai-ops`.
 
 ## Source-of-truth model
 
-1. On-chain Sai perp contract state is truth for current referral code ownership,
+1. On-chain Sai perp contract storage owns referral-code ownership,
    code-specific discounts, current referral relationships, and Sai internal
-   user deposit or trading-credit balances.
+   user deposit or trading-credit balances. The current Perp smart-query API
+   does not expose a general referral-code ownership lookup; do not claim a
+   smart-query result for an arbitrary code without a verified raw-storage or
+   operator procedure.
 2. Sai Keeper GraphQL and the `sai-keeper` Postgres database are truth for
    indexed historical analytics such as redemptions, trades, volume, earnings,
    and claims.
@@ -51,7 +54,9 @@ When asked about an existing code, address, or partner:
 
 1. Search the sheet or epic for exact code/address matches and likely human
    metadata matches.
-2. Cross-check on-chain ownership through the Sai perp contract.
+2. Use GraphQL referral code and redemption records for indexed ownership and
+   history. Escalate to a verified raw-state/operator procedure only when the
+   question specifically requires contract storage as the deciding layer.
 3. Normalize EVM and Bech32 address pairs with command `nibid q evm account`.
 4. Check code-specific discount state if fee terms matter.
 5. Use Sai Keeper GraphQL for indexed history or analytics: redemptions, referred
@@ -64,7 +69,8 @@ When asked about an existing code, address, or partner:
 ## Related query surfaces
 
 - Contract query payloads and constants: [`sai-contracts.md`](sai-contracts.md)
-- GraphQL fields `referralInfo`, `referralCodes`, and `referralRedemption`:
+- GraphQL fields `referral.referralCodes`, `referral.referralRedemption`, and
+  `referral.referralRedemptionTrader`:
   [`sai-graphql.md`](sai-graphql.md)
 - REST endpoint `GET /dexpal/v1/referrals`: [`sai-rest.md`](sai-rest.md)
 - DB referral tables and API surfacing: [`sai-db.md`](sai-db.md)

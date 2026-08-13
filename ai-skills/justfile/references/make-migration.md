@@ -50,8 +50,9 @@ check:
 
 ### Documentation
 
-`make` often needs a custom help target. In `just`, comments above recipes are
-already used by `just --list`.
+`make` often needs a custom help target. In `just`, the single `#` comment
+immediately above a recipe is used by `just --list`. Keep that documentation as
+**one line**; a second comment line above the recipe breaks the preview text.
 
 ```just
 [private]
@@ -78,7 +79,7 @@ recreate resource:
 2. Keep both files during migration if the repo still depends on `make`.
 3. Convert variables, then recipes, then dependencies.
 4. Replace `$$` shell variables with `$`.
-5. Use comments above recipes so `just --list` stays useful.
+5. Use a single-line comment above each recipe so `just --list` stays useful.
 6. Add `[confirm]` to destructive recipes if the old flow relied on manual care.
 7. Verify migrated commands with `just --show <recipe>` and targeted dry runs.
 

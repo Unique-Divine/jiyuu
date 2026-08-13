@@ -63,9 +63,31 @@ look like this.
 
 ```markdown
 - [ ] Q: Some open question?
-  A: An answer on what to do. The question task is complete when each of the
-  potential subtasks is completed or the answer, "A: ..." is implemented.
+  A: Record the answer once resolved, mark this decision task complete, and
+  create separate open tasks for its actionable consequences.
 ```
+
+### Decision and implementation tasks
+
+Deciding what to do and implementing that decision are different task
+lifecycles. During specification, track an unresolved decision as an open task.
+Once resolved, preserve the decision and rationale as settled context or a
+completed decision task, then derive separate open tasks for implementation,
+validation, rollout, or deferred follow-up:
+
+```markdown
+- [x] Decide how referral fees are keyed.
+  - Decision: Key fees by market and referral code.
+  - Rationale: Code ownership can change without moving accrued state.
+- [ ] Change the fee map to use the new key.
+- [ ] Migrate existing balances.
+- [ ] Test ownership transfer with accrued fees.
+```
+
+A completed decision checkbox does not mean its implementation is complete.
+When editing an epic or durable spec, follow agent skill `epics` for section
+placement and handoff organization. Use agent skill `drill-spec` when material
+design questions still need resolution.
 
 ### Finding tasks in the terminal
 

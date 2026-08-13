@@ -1,0 +1,30 @@
+# Run the watcher against the current tmux server.
+run *args:
+  cargo run -- watch {{args}}
+
+# Run unit and isolated tmux integration tests.
+test:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  cargo test
+
+# Format Rust source files.
+fmt:
+  cargo fmt --all
+
+# Check formatting and run Clippy with warnings denied.
+lint:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  cargo fmt --all -- --check
+  cargo clippy --all-targets --all-features -- -D warnings
+
+# Build an optimized binary.
+build:
+  cargo build --release
+
+# Install the watcher at ~/.local/bin/tmux-agent-watch.
+install:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  cargo install --path . --root "$HOME/.local" --force

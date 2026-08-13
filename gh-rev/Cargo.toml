@@ -1,8 +1,12 @@
 [package]
 name = "gh-rev"
 version = "0.1.0"
+authors = ["Unique Divine <realuniquedivine@gmail.com>"]
 edition = "2024"
 description = "Persistent local review ledger for GitHub branches and pull requests"
+repository = "https://github.com/Unique-Divine/jiyuu"
+homepage = "https://github.com/Unique-Divine/jiyuu"
+documentation = "https://github.com/Unique-Divine/jiyuu/tree/main/gh-rev"
 
 [dependencies]
 anyhow = "1.0.104"

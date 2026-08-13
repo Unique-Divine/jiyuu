@@ -25,7 +25,9 @@ This guide covers the **REST API** — DexPal aggregated metrics and feeds (`/de
 
 ## Selecting the right API
 
-The **GraphQL API** is the canonical, comprehensive Sai API (perp, lp, oracle, fee, subscriptions). Use GraphQL for the full API.
+Use GraphQL for indexed entity history and subscriptions. Use this REST API for
+the aggregate response that its endpoint owns; neither interface is a
+replacement for live contract state.
 
 | Environment | URL |
 | ----------- | --- |
@@ -34,7 +36,8 @@ The **GraphQL API** is the canonical, comprehensive Sai API (perp, lp, oracle, f
 | **Mainnet** | https://sai-api.nibiru.fi |
 | **Testnet** | https://sai-api.testnet-2.nibiru.fi |
 
-**Related skill**: For the full Sai API (perp trades, LP positions, oracle prices, fees, subscriptions), use the **sai-keeper-graphql** skill.
+For indexed trades, LP history, Oracle prices, referrals, and subscriptions,
+read [`sai-graphql.md`](sai-graphql.md).
 
 ## Available endpoints
 
@@ -51,8 +54,13 @@ The **GraphQL API** is the canonical, comprehensive Sai API (perp, lp, oracle, f
 
 ### 24-hour time-window semantics
 
-- **`/dexpal/v1/stats`** (optimized path): 24h window = `NOW() - 24h` (wall clock at cache refresh)
-- **`/dexpal/v1/markets/details`**: 24h window = latest block timestamp - 24h (blockchain time)
+- **`/dexpal/v1/stats`**: live metrics use daily aggregate tables. The Keeper
+  query implementation selects recent date buckets (for example,
+  `current_date - 1` for several 24-hour aggregates) and caches the assembled
+  response for two minutes. It is not a rolling wall-clock window.
+- **`/dexpal/v1/markets/details`**: its service calculates a separate
+  24-hour market view. Read the handler/service when a precise comparison to
+  `/stats` matters; do not assume a shared anchor.
 
 ## Usage examples
 
@@ -68,7 +76,7 @@ curl -s https://sai-api.nibiru.fi/ | jq .
 **Response shape:**
 ```json
 {
-  "service": "SAI Keeper Statistics API",
+  "service": "Sai: Stats API",
   "version": "1.0.0",
   "endpoints": {
     "/dexpal/v1/markets": "GET - DexPal markets feed",
@@ -116,7 +124,9 @@ curl -s "https://sai-api.nibiru.fi/dexpal/v1/stats?date=2026-02-25" | jq .
   "accrued_trading_fees_all_time": 1949.43
 }
 ```
-*(Note: For historical dates, `tvl` and `total_open_positions` may be `null` as they are not currently tracked in daily snapshots.)*
+For a historical `date`, the handler returns historical aggregates; `tvl` and
+`total_open_positions` are absent or `null` because the historical calculator
+does not populate them.
 
 ### GET /dexpal/v1/metrics
 
@@ -151,7 +161,7 @@ curl -s https://sai-api.nibiru.fi/dexpal/v1/referrals | jq .
   "reports": null
 }
 ```
-(`reports` can be null or an array of report objects when data exists.)
+The `reports` field can be `null` or an array of report objects.
 
 ### GET /dexpal/v1/markets
 
@@ -181,7 +191,8 @@ curl -s https://sai-api.nibiru.fi/dexpal/v1/markets/details | jq .
   "markets": null
 }
 ```
-(`markets` can be null or an array of market objects with base_currency, quote_currency, trading_volume_24h_longs, trading_volume_24h_shorts, open_interest, etc.)
+The `markets` field can be `null` or an array. Treat the displayed values as
+illustrative shapes, not current market data.
 
 ### GET /dexpal/v1/yield
 
