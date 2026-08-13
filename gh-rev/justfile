@@ -1,0 +1,26 @@
+# List gh-rev development and installation commands.
+default:
+  @just --list
+
+# Check Rust formatting without changing files.
+fmt-check:
+  cargo fmt --check
+
+# Reject compiler and Clippy warnings across all targets.
+lint:
+  cargo clippy --all-targets --all-features -- -D warnings
+
+# Run all gh-rev tests.
+test:
+  cargo test --all-targets
+
+# Run every local and CI quality check.
+check: fmt-check lint test
+
+# Build and install gh-rev at the executable currently used on PATH.
+install-local destination="${HOME}/.local/bin/gh-rev":
+  #!/usr/bin/env bash
+  set -euo pipefail
+  cargo build --release --locked
+  install -Dm755 target/release/gh-rev "{{destination}}"
+  "{{destination}}" --version

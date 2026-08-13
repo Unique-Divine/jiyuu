@@ -41,7 +41,7 @@ struct Cli {
 struct VersionOutput {
     version: &'static str,
     commit: &'static str,
-    dirty: bool,
+    dirty: Option<bool>,
 }
 
 #[derive(Subcommand)]
@@ -226,7 +226,11 @@ fn version_output() -> VersionOutput {
     VersionOutput {
         version: APP_VERSION,
         commit: APP_GIT_COMMIT,
-        dirty: APP_GIT_DIRTY == "true",
+        dirty: match APP_GIT_DIRTY {
+            "true" => Some(true),
+            "false" => Some(false),
+            _ => None,
+        },
     }
 }
 
@@ -248,15 +252,25 @@ fn register(home: &Path, requested_path: &Path) -> Result<()> {
 
     let _lock = lock(home)?;
     let mut state = read_state(home)?;
-    state.repos.insert(
-        slug.clone(),
-        Repo {
-            path: path.clone(),
-            remote: remote.clone(),
-            branches: BTreeMap::new(),
-            pull_requests: BTreeMap::new(),
-        },
-    );
+    if let Some(repo) = state.repos.get_mut(&slug) {
+        if !repo.remote.eq_ignore_ascii_case(&remote) {
+            bail!(
+                "repository slug {slug} is already registered for {}, not {remote}",
+                repo.remote
+            );
+        }
+        repo.path = path.clone();
+    } else {
+        state.repos.insert(
+            slug.clone(),
+            Repo {
+                path: path.clone(),
+                remote: remote.clone(),
+                branches: BTreeMap::new(),
+                pull_requests: BTreeMap::new(),
+            },
+        );
+    }
     write_state(home, &state)?;
     print_json(&RegisterOutput {
         slug: &slug,
@@ -279,10 +293,11 @@ fn open(
         format!("unknown repository {slug}; run register first")
     })?;
     let repo_path = repo.path.clone();
-    let (target_name, target) =
-        resolve_or_create_target(repo, branch, pr, base)?;
+    let (target_name, head_sha, target) =
+        resolve_or_create_target(home, slug, repo, branch, pr, base)?;
     report_reconciled_target(home, slug, &target_name, target)?;
-    let output = target_output(home, slug, &repo_path, &target_name, target)?;
+    let output =
+        target_output(home, slug, &repo_path, &target_name, target, &head_sha)?;
     write_state(home, &state)?;
     print_json(&output)
 }
@@ -300,8 +315,8 @@ fn next(
         format!("unknown repository {slug}; run register first")
     })?;
     let repo_path = repo.path.clone();
-    let (target_name, target) =
-        resolve_or_create_target(repo, branch, pr, "main")?;
+    let (target_name, head_sha, target) =
+        resolve_or_create_target(home, slug, repo, branch, pr, "main")?;
     report_reconciled_target(home, slug, &target_name, target)?;
     let number = target.next_review_number;
     target.next_review_number = target
@@ -311,16 +326,36 @@ fn next(
     let target_path = home.join(slug).join(&target.directory);
     fs::create_dir_all(&target_path)?;
     let review_path = target_path.join(format!("rev-{number}.md"));
-    if review_path.exists() {
-        bail!("review already exists: {}", review_path.display());
-    }
-    fs::write(
-        &review_path,
-        review_template(&target_name, target, number, label.as_deref()),
-    )
-    .with_context(|| format!("failed to create {}", review_path.display()))?;
+    let mut review_file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&review_path)
+        .with_context(|| {
+            format!("failed to exclusively create {}", review_path.display())
+        })?;
+    review_file
+        .write_all(
+            review_template(
+                &target_name,
+                target,
+                &head_sha,
+                number,
+                label.as_deref(),
+            )
+            .as_bytes(),
+        )
+        .with_context(|| format!("failed to write {}", review_path.display()))?;
+    review_file.sync_all()?;
+    target.last_reviewed_head_sha = head_sha.clone();
     let output = NextOutput {
-        target: target_output(home, slug, &repo_path, &target_name, target)?,
+        target: target_output(
+            home,
+            slug,
+            &repo_path,
+            &target_name,
+            target,
+            &head_sha,
+        )?,
         review_path,
     };
     write_state(home, &state)?;
@@ -339,10 +374,11 @@ fn context(
         format!("unknown repository {slug}; run register first")
     })?;
     let repo_path = repo.path.clone();
-    let (target_name, target) =
-        resolve_or_create_target(repo, branch, pr, "main")?;
+    let (target_name, head_sha, target) =
+        resolve_or_create_target(home, slug, repo, branch, pr, "main")?;
     report_reconciled_target(home, slug, &target_name, target)?;
-    let output = target_output(home, slug, &repo_path, &target_name, target)?;
+    let output =
+        target_output(home, slug, &repo_path, &target_name, target, &head_sha)?;
     write_state(home, &state)?;
     print_json(
         &serde_json::json!({"context_path": output.context_path, "target": output}),
@@ -386,14 +422,12 @@ fn report_reconciled_target(
 
 fn status(
     home: &Path,
-    filter: Option<String>,
-    repo_filter: Option<String>,
+    first: Option<String>,
+    second: Option<String>,
     branch: Option<String>,
     pr: Option<u64>,
 ) -> Result<()> {
-    if filter.as_deref().is_some_and(|value| value != "todo") {
-        bail!("status filter must be `todo`");
-    }
+    let (todo_only, repo_filter) = parse_status_positionals(first, second)?;
     if branch.is_some() && pr.is_some() {
         bail!("use either --branch or --pr");
     }
@@ -426,7 +460,7 @@ fn status(
             }
         }
     }
-    if filter.as_deref() == Some("todo") {
+    if todo_only {
         targets.retain(|target| target.todo > 0);
     }
     let total = targets.iter().map(|target| target.total).sum();
@@ -440,32 +474,54 @@ fn status(
     })
 }
 
+fn parse_status_positionals(
+    first: Option<String>,
+    second: Option<String>,
+) -> Result<(bool, Option<String>)> {
+    match (first, second) {
+        (None, None) => Ok((false, None)),
+        (Some(value), None) if value == "todo" => Ok((true, None)),
+        (Some(repo), None) => Ok((false, Some(repo))),
+        (Some(filter), Some(repo)) if filter == "todo" => Ok((true, Some(repo))),
+        (Some(filter), Some(_)) => {
+            bail!("unknown status filter `{filter}`; expected `todo`")
+        }
+        (None, Some(_)) => bail!("repository requires a preceding filter"),
+    }
+}
+
 fn resolve_or_create_target<'a>(
+    home: &Path,
+    slug: &str,
     repo: &'a mut Repo,
     branch: Option<String>,
     pr: Option<u64>,
     base: &str,
-) -> Result<(String, &'a mut Target)> {
+) -> Result<(String, String, &'a mut Target)> {
     match (branch, pr) {
         (Some(branch), None) => {
             let head_sha = git(&repo.path, ["rev-parse", &branch])?;
             let base_sha = git(&repo.path, ["rev-parse", base])?;
-            let sanitized = sanitize_component(&branch);
+            let directory = branch_directory(home, slug, repo, &branch)?;
             let target =
                 repo.branches
                     .entry(branch.clone())
                     .or_insert_with(|| Target {
-                        directory: format!("br-{sanitized}"),
+                        directory,
                         base_ref: base.to_owned(),
                         base_sha: base_sha.clone(),
-                        last_reviewed_head_sha: head_sha,
+                        last_reviewed_head_sha: head_sha.clone(),
                         next_review_number: 1,
                     });
-            Ok((format!("branch:{branch}"), target))
+            Ok((format!("branch:{branch}"), head_sha, target))
         }
         (None, Some(number)) => {
             let target = repo.pull_requests.get_mut(&number).with_context(|| format!("PR {number} is unknown; run sync or open the branch first"))?;
-            Ok((format!("pr:{number}"), target))
+            Ok((
+                format!("pr:{number}"),
+                target.last_reviewed_head_sha.clone(),
+                target,
+            ))
         }
         _ => bail!("supply exactly one of --branch or --pr"),
     }
@@ -477,6 +533,7 @@ fn target_output(
     repo_path: &Path,
     target_name: &str,
     target: &Target,
+    head_sha: &str,
 ) -> Result<TargetOutput> {
     let target_path = home.join(slug).join(&target.directory);
     fs::create_dir_all(&target_path)?;
@@ -488,7 +545,6 @@ fn target_output(
         )?;
     }
     let reviews = review_paths(&target_path)?;
-    let head_sha = git(repo_path, ["rev-parse", "HEAD"])?;
     Ok(TargetOutput {
         repo: slug.to_owned(),
         repo_path: repo_path.to_owned(),
@@ -497,7 +553,7 @@ fn target_output(
         context_path,
         base_ref: target.base_ref.clone(),
         base_sha: target.base_sha.clone(),
-        head_sha,
+        head_sha: head_sha.to_owned(),
         reviews,
     })
 }
@@ -505,6 +561,7 @@ fn target_output(
 fn review_template(
     target: &str,
     target_state: &Target,
+    head_sha: &str,
     number: u64,
     label: Option<&str>,
 ) -> String {
@@ -513,7 +570,7 @@ fn review_template(
         .unwrap_or_default();
     format!(
         "---\nreview: {number}\n{label}target: {target}\nbase_sha: {}\nhead_sha: {}\n---\n\n# Review: {target}\n\n## Scope\n\n## Summary\n\n## Findings\n\n- [ ] rev: P1 — Describe an actionable finding.\n\n## Recommendation\n",
-        target_state.base_sha, target_state.last_reviewed_head_sha
+        target_state.base_sha, head_sha
     )
 }
 
@@ -539,9 +596,6 @@ fn highest_review_number(target_path: &Path) -> Result<Option<u64>> {
     let mut highest = None;
     for entry in fs::read_dir(target_path)? {
         let entry = entry?;
-        if !entry.file_type()?.is_file() {
-            continue;
-        }
         if let Some(number) =
             entry.file_name().to_str().and_then(review_number_from_name)
         {
@@ -598,6 +652,61 @@ fn target_status(
         todo: todo_findings.len(),
         todo_findings,
     })
+}
+
+fn branch_directory(
+    home: &Path,
+    slug: &str,
+    repo: &Repo,
+    branch: &str,
+) -> Result<String> {
+    if let Some(target) = repo.branches.get(branch) {
+        return Ok(target.directory.clone());
+    }
+
+    let canonical = format!("br-{}", encode_component(branch));
+    let legacy = format!("br-{}", sanitize_component(branch));
+    if legacy == canonical
+        || repo
+            .branches
+            .iter()
+            .any(|(name, target)| name != branch && target.directory == legacy)
+    {
+        return Ok(canonical);
+    }
+
+    let legacy_path = home.join(slug).join(&legacy);
+    if !legacy_path.is_dir() {
+        return Ok(canonical);
+    }
+    let reviews = review_paths(&legacy_path)?;
+    if reviews.is_empty() {
+        return Ok(canonical);
+    }
+
+    let expected_target = format!("target: branch:{branch}");
+    let belongs_to_branch = reviews.iter().all(|review| {
+        fs::read_to_string(review)
+            .map(|text| text.lines().any(|line| line == expected_target))
+            .unwrap_or(false)
+    });
+    if belongs_to_branch {
+        Ok(legacy)
+    } else {
+        Ok(canonical)
+    }
+}
+
+fn encode_component(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.') {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
 }
 
 fn sanitize_component(value: &str) -> String {
@@ -887,9 +996,7 @@ mod tests {
     #[test]
     fn many_sparse_review_files_reconcile_to_next_review_number() {
         let fixture = test_fixture("many-reviews");
-        for number in [9, 1, 12, 3, 5, 7, 11, 2, 4, 6, 8, 10]
-            .into_iter()
-        {
+        for number in [9, 1, 12, 3, 5, 7, 11, 2, 4, 6, 8, 10].into_iter() {
             write_review(&fixture.target_path, number);
         }
 
@@ -898,7 +1005,6 @@ mod tests {
         fs::write(fixture.target_path.join("rev-x.md"), "noise\n").unwrap();
         fs::write(fixture.target_path.join("review-99.md"), "noise\n").unwrap();
         fs::write(fixture.target_path.join("rev-0.md"), "noise\n").unwrap();
-        fs::create_dir(fixture.target_path.join("rev-99.md")).unwrap();
 
         next(
             &fixture.home,
@@ -923,7 +1029,6 @@ mod tests {
         fs::write(fixture.target_path.join("rev-x.md"), "").unwrap();
         fs::write(fixture.target_path.join("review-99.md"), "").unwrap();
         fs::write(fixture.target_path.join("rev-0.md"), "").unwrap();
-        fs::create_dir(fixture.target_path.join("rev-99.md")).unwrap();
 
         next(
             &fixture.home,
@@ -935,6 +1040,190 @@ mod tests {
         .unwrap();
 
         assert!(fixture.target_path.join("rev-2.md").is_file());
+        fixture.remove();
+    }
+
+    #[test]
+    fn occupied_review_directory_advances_allocation() {
+        let fixture = test_fixture("occupied-directory");
+        fs::create_dir(fixture.target_path.join("rev-1.md")).unwrap();
+
+        next(
+            &fixture.home,
+            &fixture.slug,
+            Some(fixture.branch.clone()),
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert!(fixture.target_path.join("rev-2.md").is_file());
+        assert_eq!(branch_target(&fixture).next_review_number, 3);
+        fixture.remove();
+    }
+
+    #[test]
+    fn colliding_legacy_branch_names_use_distinct_directories() {
+        let fixture = test_fixture("branch-collision");
+        let other_branch = "feature-reconcile".to_owned();
+        run_git(&fixture.worktree, ["branch", &other_branch]);
+
+        open(
+            &fixture.home,
+            &fixture.slug,
+            Some(fixture.branch.clone()),
+            None,
+            "main",
+        )
+        .unwrap();
+        open(
+            &fixture.home,
+            &fixture.slug,
+            Some(other_branch.clone()),
+            None,
+            "main",
+        )
+        .unwrap();
+
+        let mut state = read_state(&fixture.home).unwrap();
+        let repo = state.repos.get_mut(&fixture.slug).unwrap();
+        let first = repo.branches.remove(&fixture.branch).unwrap();
+        let second = repo.branches.remove(&other_branch).unwrap();
+        assert_ne!(first.directory, second.directory);
+        assert!(first.directory.contains("%2F"));
+        fixture.remove();
+    }
+
+    #[test]
+    fn legacy_directory_is_adopted_only_for_its_recorded_branch() {
+        let fixture = test_fixture("legacy-directory");
+        let legacy_path = fixture
+            .home
+            .join(&fixture.slug)
+            .join(format!("br-{}", sanitize_component(&fixture.branch)));
+        fs::create_dir_all(&legacy_path).unwrap();
+        fs::write(
+            legacy_path.join("rev-1.md"),
+            format!("---\nreview: 1\ntarget: branch:{}\n---\n", fixture.branch),
+        )
+        .unwrap();
+
+        open(
+            &fixture.home,
+            &fixture.slug,
+            Some(fixture.branch.clone()),
+            None,
+            "main",
+        )
+        .unwrap();
+
+        assert_eq!(
+            branch_target(&fixture).directory,
+            legacy_path.file_name().unwrap().to_str().unwrap()
+        );
+        fixture.remove();
+    }
+
+    #[test]
+    fn review_uses_named_branch_sha_when_worktree_is_elsewhere() {
+        let fixture = test_fixture("branch-head");
+        run_git(&fixture.worktree, ["checkout", &fixture.branch]);
+        fs::write(fixture.worktree.join("branch.txt"), "first\n").unwrap();
+        run_git(&fixture.worktree, ["add", "branch.txt"]);
+        commit_test_change(&fixture.worktree, "first branch commit");
+        let first_head =
+            git(&fixture.worktree, ["rev-parse", &fixture.branch]).unwrap();
+        run_git(&fixture.worktree, ["checkout", "main"]);
+
+        next(
+            &fixture.home,
+            &fixture.slug,
+            Some(fixture.branch.clone()),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let first_review =
+            fs::read_to_string(fixture.target_path.join("rev-1.md")).unwrap();
+        assert!(first_review.contains(&format!("head_sha: {first_head}")));
+        assert_eq!(branch_target(&fixture).last_reviewed_head_sha, first_head);
+
+        run_git(&fixture.worktree, ["checkout", &fixture.branch]);
+        fs::write(fixture.worktree.join("branch.txt"), "second\n").unwrap();
+        run_git(&fixture.worktree, ["add", "branch.txt"]);
+        commit_test_change(&fixture.worktree, "second branch commit");
+        let second_head =
+            git(&fixture.worktree, ["rev-parse", &fixture.branch]).unwrap();
+        run_git(&fixture.worktree, ["checkout", "main"]);
+
+        next(
+            &fixture.home,
+            &fixture.slug,
+            Some(fixture.branch.clone()),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let second_review =
+            fs::read_to_string(fixture.target_path.join("rev-2.md")).unwrap();
+        assert!(second_review.contains(&format!("head_sha: {second_head}")));
+        assert_eq!(branch_target(&fixture).last_reviewed_head_sha, second_head);
+        fixture.remove();
+    }
+
+    #[test]
+    fn parses_status_repo_and_todo_forms() {
+        assert_eq!(parse_status_positionals(None, None).unwrap(), (false, None));
+        assert_eq!(
+            parse_status_positionals(Some("example__reviews".into()), None)
+                .unwrap(),
+            (false, Some("example__reviews".into()))
+        );
+        assert_eq!(
+            parse_status_positionals(
+                Some("todo".into()),
+                Some("example__reviews".into())
+            )
+            .unwrap(),
+            (true, Some("example__reviews".into()))
+        );
+        assert!(
+            parse_status_positionals(
+                Some("invalid".into()),
+                Some("example__reviews".into())
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn repeated_registration_preserves_review_targets() {
+        let fixture = test_fixture("repeat-register");
+        run_git(
+            &fixture.worktree,
+            [
+                "remote",
+                "add",
+                "origin",
+                "git@github.com:example/reviews.git",
+            ],
+        );
+        insert_branch_target(&fixture, 4);
+
+        register(&fixture.home, &fixture.worktree).unwrap();
+
+        let state = read_state(&fixture.home).unwrap();
+        let repo = state.repos.get(&fixture.slug).unwrap();
+        assert_eq!(repo.branches.len(), 1);
+        assert_eq!(
+            repo.branches
+                .get(&fixture.branch)
+                .unwrap()
+                .next_review_number,
+            4
+        );
         fixture.remove();
     }
 
@@ -959,7 +1248,20 @@ mod tests {
             value["commit"].as_str().map(|value| !value.is_empty()),
             Some(true)
         );
-        assert!(value["dirty"].as_bool().is_some(), "dirty must be boolean");
+        assert!(
+            value["dirty"].as_bool().is_some() || value["dirty"].is_null(),
+            "dirty must be boolean or null when Git metadata is unavailable"
+        );
+        if APP_GIT_COMMIT != "unknown" {
+            assert_eq!(
+                APP_GIT_COMMIT,
+                git(
+                    Path::new(env!("CARGO_MANIFEST_DIR")),
+                    ["rev-parse", "HEAD"]
+                )
+                .unwrap()
+            );
+        }
     }
 
     struct TestFixture {
@@ -1002,7 +1304,7 @@ mod tests {
 
         let target_path = home
             .join(&slug)
-            .join(format!("br-{}", sanitize_component(&branch)));
+            .join(format!("br-{}", encode_component(&branch)));
         fs::create_dir_all(&target_path).unwrap();
         let mut state = State::default();
         state.repos.insert(
@@ -1076,6 +1378,21 @@ mod tests {
             output.status.success(),
             "git failed: {}",
             String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn commit_test_change(worktree: &Path, message: &str) {
+        run_git(
+            worktree,
+            [
+                "-c",
+                "user.email=test@example.com",
+                "-c",
+                "user.name=Test User",
+                "commit",
+                "-m",
+                message,
+            ],
         );
     }
 

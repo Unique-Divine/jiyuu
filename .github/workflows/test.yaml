@@ -97,3 +97,32 @@ jobs:
         name: "Test"
         run: just test
         working-directory: tmux-agent-watch
+
+  gh-rev-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: "Check for relevant changes"
+        id: gh_rev_changes
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            gh_rev:
+              - "gh-rev/**/*"
+              - ".github/workflows/test.yaml"
+
+      - if: steps.gh_rev_changes.outputs.gh_rev == 'true'
+        name: "Install Rust"
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+
+      - if: steps.gh_rev_changes.outputs.gh_rev == 'true'
+        name: "Install just"
+        uses: extractions/setup-just@v3
+
+      - if: steps.gh_rev_changes.outputs.gh_rev == 'true'
+        name: "Check"
+        run: just check
+        working-directory: gh-rev
