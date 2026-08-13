@@ -30,25 +30,36 @@ When using this skill:
    changes, not just the file-by-file edits. State what was broken or
    incomplete, why the chosen boundary or data contract is correct, and which
    existing semantics intentionally remain unchanged.
-4. For changes with non-obvious behavior, cross-system effects, accounting,
-   migrations, or several related fixes, include a dedicated `## Rationale`
-   section and one or more descriptive sections that explain the relevant
-   logic. Name these for the subject—for example `## Partial-close behavior`,
-   `## Borrowing settlement`, or `## Historical compatibility`—rather than
-   forcing an implementation-oriented heading.
-5. For migrations, accounting changes, data-contract cutovers, or asynchronous
-   authority/fallback behavior, lead the explanatory sections with a compact
-   ASCII flow or field map. Use prose afterward only for the rationale the flow
-   cannot convey. Do not use Mermaid.
-6. Keep the writing concise and non-repetitive, but do not omit the reasoning
+4. Put reviewer context in this order: the PR title and synopsis, `## Rationale`,
+   `## Key Changes`, then any additional behavior-oriented sections. Keep
+   `Rationale` and `Key Changes` unnumbered. Number only the additional topic
+   headings as `## 1 - ...`, `## 2 - ...`, and so forth. The numbering improves
+   scanning across distinct topics; it does not imply implementation order or
+   runtime sequence.
+5. For changes with non-obvious behavior, cross-system effects, accounting,
+   migrations, or several related fixes, use the additional sections to explain
+   the relevant logic. Name them for the subject—for example
+   `## 1 - Partial-close behavior`, `## 2 - Borrowing settlement`, or
+   `## 3 - Historical compatibility`—rather than using implementation-oriented
+   headings.
+6. For migrations, accounting changes, data-contract cutovers, or asynchronous
+   authority/fallback behavior, lead the relevant additional section with a
+   compact ASCII flow or field map. Use prose afterward only for the rationale
+   the flow cannot convey. Do not use Mermaid.
+7. Do not add a dedicated `Validation`, `Testing`, or similarly named section,
+   and do not enumerate routine test, lint, build, formatting, or check runs.
+   Mention test strategy or coverage only when it materially changes or creates
+   a reviewer-relevant risk; place that context in the most relevant
+   behavior-oriented section.
+8. Keep the writing concise and non-repetitive, but do not omit the reasoning
    that a reviewer needs to validate the design.
-7. Save the final output to a markdown file named `gh-pr.md`.
+9. Save the final output to a markdown file named `gh-pr.md`.
 
 ## Output format
 
 Use this structure:
 
-```markdown
+````markdown
 # <Short PR title>
 
 <One short synopsis paragraph explaining the change and why it exists.>
@@ -60,28 +71,29 @@ Use this structure:
 <What was inconsistent, missing, or unsafe? Why is this event/data/model
 boundary the right fix? Which related semantics deliberately do not change?>
 
-## API cutover or behavior flow
+## Key Changes
+
+1. <Important change with rationale>
+1. <Important change with rationale>
+
+## 1 - <Behavior or logic topic>
 
 ```text
 old source / behavior  -> replacement
 authority source       -> fallback when unavailable
 ```
 
-<Use a compact ASCII field map, lifecycle, or state flow when the change has
-multiple data sources, transitions, or compatibility boundaries.>
-
-## <Behavior or logic topic>
-
 <Explain the important behavior, invariants, compatibility boundary, and
-decision-making context. Add more topic-specific sections when the PR fixes
-more than one distinct behavior.>
+decision-making context. When useful, lead with a compact ASCII field map,
+lifecycle, or state flow.>
 
-## Key Changes
+## 2 - <Another behavior or logic topic>
 
-1. <Important change with rationale>
-1. <Important change with rationale>
+<Add numbered topic-specific sections only when the PR has more than one
+distinct behavior reviewers need to understand. The numbers aid scanning; they
+do not describe implementation or runtime sequence.>
 
-```
+````
 
 ## Style
 
@@ -93,11 +105,18 @@ more than one distinct behavior.>
   but a legacy fallback remains for historical data; a total intentionally
   excludes a separate accounting component; or an operation preserves a
   state-transition event while moving fee details to a normal receipt.
+- Always place `## Key Changes` immediately after `## Rationale`.
 - Use numbered lists for the `## Key Changes` section, writing each item with
   `1.` so the markdown source is easy to reorder.
 - Keep the description easy to scan with short paragraphs and direct headings.
-  Prefer behavior-oriented sections over a chronological implementation diary;
-  use as many sections as the distinct fixes need.
+  Prefer behavior-oriented sections over a chronological implementation diary.
+  Keep `Rationale` and `Key Changes` unnumbered, and number only subsequent
+  topic headings as `## 1 - ...`, `## 2 - ...`, and so forth. This numbering is
+  for scanning, not sequencing; use only as many sections as the distinct fixes
+  need.
 - For multi-source, lifecycle, migration, or fallback behavior, prefer compact
   ASCII diagrams and review invariants over prose-only explanations. Do not use
   Mermaid.
+- Exclude routine validation logs. Do not create dedicated validation or
+  testing sections, and mention test strategy or coverage only when it is a
+  meaningful change or reviewer risk.
