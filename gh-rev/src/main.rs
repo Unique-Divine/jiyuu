@@ -12,7 +12,12 @@ use clap::{Parser, Subcommand};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
+/// Stores the fast, tool-owned registry that points commands at durable review
+/// artifacts. Markdown remains the source of review truth and can repair this
+/// index after state loss.
 const STATE_FILE: &str = "state.toml";
+/// Serializes state replacement and review-number allocation so concurrent
+/// agents cannot assign the same artifact name or lose registry updates.
 const LOCK_FILE: &str = ".gh-rev.lock";
 const APP_VERSION: &str = env!("GH_REV_BUILD_VERSION");
 const APP_GIT_COMMIT: &str = env!("GH_REV_BUILD_COMMIT");
@@ -90,12 +95,21 @@ enum CommandName {
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
+/// The persisted top-level registry under `~/gh`.
+///
+/// It maps stable remote-derived slugs to local checkouts and their review
+/// targets. It is an index for quick lookup, not the authoritative finding
+/// store.
 struct State {
     #[serde(default)]
     repos: BTreeMap<String, Repo>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+/// One registered remote identity and the local checkout currently used for it.
+///
+/// Branch and pull-request maps preserve the connection from a review target
+/// to its ledger directory when a checkout path changes.
 struct Repo {
     path: PathBuf,
     remote: String,
@@ -106,6 +120,10 @@ struct Repo {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+/// The persisted allocation and revision boundary for one review target.
+///
+/// The directory links this target to durable Markdown artifacts; SHA fields
+/// make the reviewed range explicit; the counter avoids reusing review names.
 struct Target {
     directory: String,
     base_ref: String,
@@ -115,6 +133,7 @@ struct Target {
 }
 
 #[derive(Serialize)]
+/// JSON response confirming that a local checkout was registered.
 struct RegisterOutput<'a> {
     slug: &'a str,
     path: &'a Path,
@@ -123,12 +142,17 @@ struct RegisterOutput<'a> {
 }
 
 #[derive(Serialize)]
+/// JSON response locating the shared review workspace and its state index.
 struct PathsOutput {
     home: PathBuf,
     state_path: PathBuf,
 }
 
 #[derive(Serialize)]
+/// Common JSON context for target-oriented commands.
+///
+/// It exposes paths and the exact revision range so agents need not infer
+/// ledger locations or accidentally review a different checkout HEAD.
 struct TargetOutput {
     repo: String,
     repo_path: PathBuf,
@@ -142,6 +166,7 @@ struct TargetOutput {
 }
 
 #[derive(Serialize)]
+/// JSON response from allocation, extending target context with the new file.
 struct NextOutput {
     #[serde(flatten)]
     target: TargetOutput,
@@ -149,6 +174,7 @@ struct NextOutput {
 }
 
 #[derive(Serialize)]
+/// One unresolved Markdown finding located while scanning review artifacts.
 struct FindingOutput {
     review_path: PathBuf,
     line: usize,
@@ -156,6 +182,7 @@ struct FindingOutput {
 }
 
 #[derive(Serialize)]
+/// Aggregate JSON summary across the selected review targets.
 struct StatusOutput {
     targets: Vec<TargetStatus>,
     total: usize,
@@ -164,6 +191,7 @@ struct StatusOutput {
 }
 
 #[derive(Serialize)]
+/// Per-target counts and unresolved finding locations within a status response.
 struct TargetStatus {
     repo: String,
     target: String,

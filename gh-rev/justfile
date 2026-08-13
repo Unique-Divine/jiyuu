@@ -24,3 +24,5 @@ install-local destination="${HOME}/.local/bin/gh-rev":
   cargo build --release --locked
   install -Dm755 target/release/gh-rev "{{destination}}"
   "{{destination}}" --version
+
+alias i := install-local
