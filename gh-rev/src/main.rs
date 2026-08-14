@@ -5,9 +5,11 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     process::Command,
+    thread,
+    time::Duration,
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
@@ -19,6 +21,8 @@ const STATE_FILE: &str = "state.toml";
 /// Serializes state replacement and review-number allocation so concurrent
 /// agents cannot assign the same artifact name or lose registry updates.
 const LOCK_FILE: &str = ".gh-rev.lock";
+const LOCK_RETRY_ATTEMPTS: usize = 50;
+const LOCK_RETRY_DELAY: Duration = Duration::from_millis(5);
 const APP_VERSION: &str = env!("GH_REV_BUILD_VERSION");
 const APP_GIT_COMMIT: &str = env!("GH_REV_BUILD_COMMIT");
 const APP_GIT_DIRTY: &str = env!("GH_REV_BUILD_DIRTY");
@@ -38,8 +42,23 @@ struct Cli {
     #[arg(long, global = true)]
     version: bool,
 
+    /// Run the command as if invoked from a different path.
+    #[arg(short = 'C', long, global = true)]
+    path: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Option<CommandName>,
+}
+
+#[derive(Debug)]
+struct RepoDiscovery {
+    source: String,
+    worktree_root: PathBuf,
+    git_common_dir: PathBuf,
+    branch: Option<String>,
+    remote_name: String,
+    remote: String,
+    remote_source: String,
 }
 
 #[derive(Serialize)]
@@ -55,27 +74,45 @@ enum CommandName {
     Register { path: PathBuf },
     /// Resolve or create a local branch review target.
     Open {
-        repo: String,
+        repo: Option<String>,
+        #[arg(long)]
+        remote: Option<String>,
         #[arg(long, conflicts_with = "pr")]
         branch: Option<String>,
         #[arg(long)]
         pr: Option<u64>,
         #[arg(long, default_value = "main")]
         base: String,
+        /// Use the local branch head when an adopted PR has diverged.
+        #[arg(long, value_enum)]
+        head: Option<HeadPolicy>,
     },
     /// Allocate the next review template for a branch or pull-request target.
     Next {
-        repo: String,
+        repo: Option<String>,
+        #[arg(long)]
+        remote: Option<String>,
         #[arg(long, conflicts_with = "pr")]
         branch: Option<String>,
         #[arg(long)]
         pr: Option<u64>,
         #[arg(long)]
         label: Option<String>,
+        /// Use the local branch head when an adopted PR has diverged.
+        #[arg(long, value_enum)]
+        head: Option<HeadPolicy>,
+    },
+    /// Repair counters and discover/adopt matching open pull requests.
+    Sync {
+        repo: Option<String>,
+        #[arg(long)]
+        remote: Option<String>,
     },
     /// Print or create the human-authored context file for a target.
     Context {
-        repo: String,
+        repo: Option<String>,
+        #[arg(long)]
+        remote: Option<String>,
         #[arg(long, conflicts_with = "pr")]
         branch: Option<String>,
         #[arg(long)]
@@ -85,6 +122,8 @@ enum CommandName {
     Status {
         filter: Option<String>,
         repo: Option<String>,
+        #[arg(long)]
+        remote: Option<String>,
         #[arg(long, conflicts_with = "pr")]
         branch: Option<String>,
         #[arg(long)]
@@ -92,6 +131,19 @@ enum CommandName {
     },
     /// Display the persistent workspace root and state-file path.
     Paths,
+}
+
+#[derive(Clone, Copy, Debug, clap::ValueEnum, PartialEq, Eq)]
+enum HeadPolicy {
+    Local,
+}
+
+struct TargetRequest<'a> {
+    branch: Option<String>,
+    pr: Option<u64>,
+    base: &'a str,
+    head_policy: Option<HeadPolicy>,
+    prefetched_pr: Option<&'a PrMetadata>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -105,7 +157,7 @@ struct State {
     repos: BTreeMap<String, Repo>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 /// One registered remote identity and the local checkout currently used for it.
 ///
 /// Branch and pull-request maps preserve the connection from a review target
@@ -116,10 +168,17 @@ struct Repo {
     #[serde(default)]
     branches: BTreeMap<String, Target>,
     #[serde(default)]
-    pull_requests: BTreeMap<u64, Target>,
+    pull_requests: BTreeMap<u64, PrAlias>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+enum PrAlias {
+    Branch(String),
+    Legacy(Box<Target>),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 /// The persisted allocation and revision boundary for one review target.
 ///
 /// The directory links this target to durable Markdown artifacts; SHA fields
@@ -130,6 +189,46 @@ struct Target {
     base_sha: String,
     last_reviewed_head_sha: String,
     next_review_number: u64,
+    #[serde(default)]
+    pending: Option<ReviewSnapshot>,
+    #[serde(default)]
+    pull_request_head_sha: Option<String>,
+    #[serde(default)]
+    pull_request_base_sha: Option<String>,
+    #[serde(default)]
+    pull_request_base_ref: Option<String>,
+    #[serde(default)]
+    local_branch_head_sha: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct ReviewSnapshot {
+    head_sha: String,
+    base_sha: String,
+    authority: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct PrMetadata {
+    number: u64,
+    state: String,
+    head_ref_name: String,
+    head_ref_oid: String,
+    head_repository_owner: RepositoryOwner,
+    head_repository: RepositoryName,
+    base_ref_name: String,
+    base_ref_oid: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+struct RepositoryOwner {
+    login: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+struct RepositoryName {
+    name: String,
 }
 
 #[derive(Serialize)]
@@ -155,6 +254,7 @@ struct PathsOutput {
 /// ledger locations or accidentally review a different checkout HEAD.
 struct TargetOutput {
     repo: String,
+    discovery: Option<DiscoveryMetadata>,
     repo_path: PathBuf,
     target: String,
     target_path: PathBuf,
@@ -162,6 +262,11 @@ struct TargetOutput {
     base_ref: String,
     base_sha: String,
     head_sha: String,
+    head_authority: String,
+    local_branch_sha: Option<String>,
+    origin_branch_sha: Option<String>,
+    pr_head_sha: Option<String>,
+    divergence: bool,
     reviews: Vec<PathBuf>,
 }
 
@@ -171,6 +276,45 @@ struct NextOutput {
     #[serde(flatten)]
     target: TargetOutput,
     review_path: PathBuf,
+}
+
+#[derive(Debug, Serialize)]
+struct SyncOutput {
+    repo: String,
+    local_repaired: Vec<RepairOutput>,
+    recovered: Vec<RecoveryOutput>,
+    adopted: Vec<u64>,
+    merged: BTreeMap<u64, BTreeMap<u64, u64>>,
+    unchanged: Vec<u64>,
+    skipped_zero: Vec<String>,
+    skipped_ambiguous: BTreeMap<String, Vec<u64>>,
+}
+
+#[derive(Debug, Serialize)]
+struct RepairOutput {
+    branch: String,
+    from: u64,
+    to: u64,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+struct RecoveryOutput {
+    pull_request: u64,
+    action: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum AdoptionKind {
+    Adopted,
+    Merged,
+    Unchanged,
+}
+
+#[derive(Debug)]
+struct AdoptionResult {
+    kind: AdoptionKind,
+    review_mapping: BTreeMap<u64, u64>,
+    backup_created: bool,
 }
 
 #[derive(Serialize)]
@@ -202,6 +346,17 @@ struct TargetStatus {
     todo_findings: Vec<FindingOutput>,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+struct DiscoveryMetadata {
+    discovered_repo: String,
+    worktree_root: PathBuf,
+    git_common_dir: PathBuf,
+    selected_branch: Option<String>,
+    selected_remote: String,
+    discovery_source: String,
+}
+
 fn main() {
     if let Err(error) = run() {
         eprintln!("gh-rev: {error:#}");
@@ -215,6 +370,7 @@ fn run() -> Result<()> {
         return print_version();
     }
     let home = review_home(cli.home)?;
+    let path = cli.path.as_deref();
     let command = cli.command.with_context(|| "missing command")?;
     match command {
         CommandName::Register { path } => register(&home, &path),
@@ -223,22 +379,63 @@ fn run() -> Result<()> {
             branch,
             pr,
             base,
-        } => open(&home, &repo, branch, pr, &base),
+            head,
+            remote,
+        } => open_with_head(
+            &home,
+            repo.as_deref(),
+            path,
+            remote.as_deref(),
+            branch,
+            pr,
+            &base,
+            head,
+        ),
         CommandName::Next {
             repo,
             branch,
             pr,
             label,
-        } => next(&home, &repo, branch, pr, label),
-        CommandName::Context { repo, branch, pr } => {
-            context(&home, &repo, branch, pr)
+            head,
+            remote,
+        } => next_with_head(
+            &home,
+            repo.as_deref(),
+            path,
+            remote.as_deref(),
+            branch,
+            pr,
+            label,
+            head,
+        ),
+        CommandName::Sync { repo, remote } => sync(
+            &home,
+            repo.as_deref(),
+            path,
+            remote.as_deref(),
+        ),
+        CommandName::Context {
+            repo,
+            branch,
+            pr,
+            remote,
+        } => {
+            context(
+                &home,
+                repo.as_deref(),
+                path,
+                remote.as_deref(),
+                branch,
+                pr,
+            )
         }
         CommandName::Status {
             filter,
             repo,
+            remote,
             branch,
             pr,
-        } => status(&home, filter, repo, branch, pr),
+        } => status(&home, filter, repo, remote, branch, pr, path),
         CommandName::Paths => print_json(&PathsOutput {
             state_path: home.join(STATE_FILE),
             home,
@@ -308,6 +505,110 @@ fn register(home: &Path, requested_path: &Path) -> Result<()> {
     })
 }
 
+fn discovery_metadata(discovery: &Option<RepoDiscovery>) -> Option<DiscoveryMetadata> {
+    discovery.as_ref().map(|value| DiscoveryMetadata {
+        discovered_repo: value.slug.clone(),
+        worktree_root: value.worktree_root.clone(),
+        git_common_dir: value.git_common_dir.clone(),
+        selected_branch: value.branch.clone(),
+        selected_remote: value.remote_name.clone(),
+        discovery_source: value.source.clone(),
+    })
+}
+
+fn open_with_head(
+    home: &Path,
+    repo: Option<&str>,
+    path_override: Option<&Path>,
+    remote_override: Option<&str>,
+    branch: Option<String>,
+    pr: Option<u64>,
+    base: &str,
+    head_policy: Option<HeadPolicy>,
+) -> Result<()> {
+    let discovery = if repo.is_none() {
+        Some(discover_repository(path_override, remote_override)?)
+    } else {
+        None
+    };
+    let branch = branch.or_else(|| discovery.as_ref().and_then(|value| value.branch.clone()));
+    let slug = match repo {
+        Some(value) => value.to_owned(),
+        None => discovery
+            .as_ref()
+            .context("failed to discover repository")?
+            .slug
+            .to_owned(),
+    };
+    validate_head_policy(branch.as_deref(), pr, head_policy)?;
+    let prefetched_pr = if let Some(number) = pr {
+        if let Some(discovery) = &discovery {
+            Some((
+                discovery.remote.clone(),
+                gh_pr(&discovery.remote, number).with_context(|| {
+                    format!("failed to fetch PR #{number}")
+                })?,
+            ))
+        } else {
+            fetch_targeted_pr_without_lock(home, &slug, Some(number))?
+        }
+    } else {
+        None
+    };
+    let _lock = if prefetched_pr.is_some() {
+        try_lock(home)?
+    } else {
+        lock(home)?
+    };
+    let mut state = read_state(home)?;
+    let (repo, seeded) =
+        ensure_repo_from_discovery(&mut state, &slug, discovery.as_ref())?;
+    if seeded {
+        write_state(home, &state)?;
+    }
+    validate_prefetched_remote(repo, prefetched_pr.as_ref())?;
+    let repo_path = discovery
+        .as_ref()
+        .map(|value| value.worktree_root.clone())
+        .unwrap_or_else(|| repo.path.clone());
+    let (target_name, branch_name, head_sha, cleanup_pr, target) =
+        resolve_or_create_target(
+            home,
+            &slug,
+            repo,
+            &repo_path,
+            TargetRequest {
+                branch,
+                pr,
+                base,
+                head_policy,
+                prefetched_pr: prefetched_pr
+                    .as_ref()
+                    .map(|(_, metadata)| metadata),
+            },
+        )?;
+    report_reconciled_target(home, &slug, &target_name, target)?;
+    target.pending = Some(ReviewSnapshot {
+        head_sha: head_sha.clone(),
+        base_sha: target.base_sha.clone(),
+        authority: target_authority(&target_name),
+    });
+    let output = target_output(
+        home,
+        &slug,
+        discovery_metadata(&discovery),
+        &repo_path,
+        &target_name,
+        &branch_name,
+        target,
+        &head_sha,
+    )?;
+    write_state(home, &state)?;
+    cleanup_adoption_backups(home, &slug, cleanup_pr)?;
+    print_json(&output)
+}
+
+#[cfg(test)]
 fn open(
     home: &Path,
     slug: &str,
@@ -315,43 +616,102 @@ fn open(
     pr: Option<u64>,
     base: &str,
 ) -> Result<()> {
-    let _lock = lock(home)?;
-    let mut state = read_state(home)?;
-    let repo = state.repos.get_mut(slug).with_context(|| {
-        format!("unknown repository {slug}; run register first")
-    })?;
-    let repo_path = repo.path.clone();
-    let (target_name, head_sha, target) =
-        resolve_or_create_target(home, slug, repo, branch, pr, base)?;
-    report_reconciled_target(home, slug, &target_name, target)?;
-    let output =
-        target_output(home, slug, &repo_path, &target_name, target, &head_sha)?;
-    write_state(home, &state)?;
-    print_json(&output)
+    open_with_head(
+        home,
+        Some(slug),
+        None,
+        None,
+        branch,
+        pr,
+        base,
+        None,
+    )
 }
 
-fn next(
+fn next_with_head(
     home: &Path,
-    slug: &str,
+    repo: Option<&str>,
+    path_override: Option<&Path>,
+    remote_override: Option<&str>,
     branch: Option<String>,
     pr: Option<u64>,
     label: Option<String>,
+    head_policy: Option<HeadPolicy>,
 ) -> Result<()> {
-    let _lock = lock(home)?;
+    let discovery = if repo.is_none() {
+        Some(discover_repository(path_override, remote_override)?)
+    } else {
+        None
+    };
+    let branch = branch.or_else(|| discovery.as_ref().and_then(|value| value.branch.clone()));
+    let slug = match repo {
+        Some(value) => value.to_owned(),
+        None => discovery
+            .as_ref()
+            .context("failed to discover repository")?
+            .slug
+            .to_owned(),
+    };
+    validate_head_policy(branch.as_deref(), pr, head_policy)?;
+    let prefetched_pr = if let Some(number) = pr {
+        if let Some(discovery) = &discovery {
+            Some((
+                discovery.remote.clone(),
+                gh_pr(&discovery.remote, number).with_context(|| {
+                    format!("failed to fetch PR #{number}")
+                })?,
+            ))
+        } else {
+            fetch_targeted_pr_without_lock(home, &slug, Some(number))?
+        }
+    } else {
+        None
+    };
+    let _lock = if prefetched_pr.is_some() {
+        try_lock(home)?
+    } else {
+        lock(home)?
+    };
     let mut state = read_state(home)?;
-    let repo = state.repos.get_mut(slug).with_context(|| {
-        format!("unknown repository {slug}; run register first")
-    })?;
-    let repo_path = repo.path.clone();
-    let (target_name, head_sha, target) =
-        resolve_or_create_target(home, slug, repo, branch, pr, "main")?;
-    report_reconciled_target(home, slug, &target_name, target)?;
+    let (repo, seeded) =
+        ensure_repo_from_discovery(&mut state, &slug, discovery.as_ref())?;
+    if seeded {
+        write_state(home, &state)?;
+    }
+    validate_prefetched_remote(repo, prefetched_pr.as_ref())?;
+    let repo_path = discovery
+        .as_ref()
+        .map(|value| value.worktree_root.clone())
+        .unwrap_or_else(|| repo.path.clone());
+    let base = branch
+        .as_ref()
+        .and_then(|name| repo.branches.get(name))
+        .map_or_else(|| "main".to_owned(), |target| target.base_ref.clone());
+    let (target_name, branch_name, head_sha, cleanup_pr, target) =
+        resolve_or_create_target(
+            home,
+            &slug,
+            repo,
+            &repo_path,
+            TargetRequest {
+                branch,
+                pr,
+                base: &base,
+                head_policy,
+                prefetched_pr: prefetched_pr
+                    .as_ref()
+                    .map(|(_, metadata)| metadata),
+            },
+        )?;
+    report_reconciled_target(home, &slug, &target_name, target)?;
+    let authority = target_authority(&target_name);
+    validate_pending_snapshot(target, &authority, &head_sha)?;
     let number = target.next_review_number;
     target.next_review_number = target
         .next_review_number
         .checked_add(1)
         .context("review number overflow; operator repair is required")?;
-    let target_path = home.join(slug).join(&target.directory);
+    let target_path = home.join(&slug).join(&target.directory);
     fs::create_dir_all(&target_path)?;
     let review_path = target_path.join(format!("rev-{number}.md"));
     let mut review_file = OpenOptions::new()
@@ -375,39 +735,122 @@ fn next(
         .with_context(|| format!("failed to write {}", review_path.display()))?;
     review_file.sync_all()?;
     target.last_reviewed_head_sha = head_sha.clone();
+    target.pending = None;
     let output = NextOutput {
         target: target_output(
             home,
-            slug,
+            &slug,
+            discovery_metadata(&discovery),
             &repo_path,
             &target_name,
+            &branch_name,
             target,
             &head_sha,
         )?,
         review_path,
     };
     write_state(home, &state)?;
+    cleanup_adoption_backups(home, &slug, cleanup_pr)?;
     print_json(&output)
 }
 
-fn context(
+#[cfg(test)]
+fn next(
     home: &Path,
     slug: &str,
     branch: Option<String>,
     pr: Option<u64>,
+    label: Option<String>,
 ) -> Result<()> {
-    let _lock = lock(home)?;
+    next_with_head(home, Some(slug), None, None, branch, pr, label, None)
+}
+
+fn context(
+    home: &Path,
+    repo: Option<&str>,
+    path_override: Option<&Path>,
+    remote_override: Option<&str>,
+    branch: Option<String>,
+    pr: Option<u64>,
+) -> Result<()> {
+    let discovery = if repo.is_none() {
+        Some(discover_repository(path_override, remote_override)?)
+    } else {
+        None
+    };
+    let branch = branch.or_else(|| discovery.as_ref().and_then(|value| value.branch.clone()));
+    let slug = match repo {
+        Some(value) => value.to_owned(),
+        None => discovery
+            .as_ref()
+            .context("failed to discover repository")?
+            .slug
+            .to_owned(),
+    };
+    let prefetched_pr = if let Some(number) = pr {
+        if let Some(discovery) = &discovery {
+            Some((
+                discovery.remote.clone(),
+                gh_pr(&discovery.remote, number).with_context(|| {
+                    format!("failed to fetch PR #{number}")
+                })?,
+            ))
+        } else {
+            fetch_targeted_pr_without_lock(home, &slug, Some(number))?
+        }
+    } else {
+        None
+    };
+    let _lock = if prefetched_pr.is_some() {
+        try_lock(home)?
+    } else {
+        lock(home)?
+    };
     let mut state = read_state(home)?;
-    let repo = state.repos.get_mut(slug).with_context(|| {
-        format!("unknown repository {slug}; run register first")
-    })?;
-    let repo_path = repo.path.clone();
-    let (target_name, head_sha, target) =
-        resolve_or_create_target(home, slug, repo, branch, pr, "main")?;
-    report_reconciled_target(home, slug, &target_name, target)?;
-    let output =
-        target_output(home, slug, &repo_path, &target_name, target, &head_sha)?;
+    let (repo, seeded) =
+        ensure_repo_from_discovery(&mut state, &slug, discovery.as_ref())?;
+    if seeded {
+        write_state(home, &state)?;
+    }
+    validate_prefetched_remote(repo, prefetched_pr.as_ref())?;
+    let repo_path = discovery
+        .as_ref()
+        .map(|value| value.worktree_root.clone())
+        .unwrap_or_else(|| repo.path.clone());
+    let base = branch
+        .as_ref()
+        .and_then(|name| repo.branches.get(name))
+        .map_or_else(|| "main".to_owned(), |target| target.base_ref.clone());
+    let head_policy = branch.as_ref().map(|_| HeadPolicy::Local);
+    let (target_name, branch_name, head_sha, cleanup_pr, target) =
+        resolve_or_create_target(
+            home,
+            &slug,
+            repo,
+            &repo_path,
+            TargetRequest {
+                branch,
+                pr,
+                base: &base,
+                head_policy,
+                prefetched_pr: prefetched_pr
+                    .as_ref()
+                    .map(|(_, metadata)| metadata),
+            },
+        )?;
+    report_reconciled_target(home, &slug, &target_name, target)?;
+    let output = target_output(
+        home,
+        &slug,
+        discovery_metadata(&discovery),
+        &repo_path,
+        &target_name,
+        &branch_name,
+        target,
+        &head_sha,
+    )?;
     write_state(home, &state)?;
+    cleanup_adoption_backups(home, &slug, cleanup_pr)?;
     print_json(
         &serde_json::json!({"context_path": output.context_path, "target": output}),
     )
@@ -460,34 +903,13 @@ fn status(
         bail!("use either --branch or --pr");
     }
     let state = read_state(home)?;
-    let mut targets = Vec::new();
-    for (slug, repo) in &state.repos {
-        if repo_filter.as_deref().is_some_and(|value| value != slug) {
-            continue;
-        }
-        for (branch_name, target) in &repo.branches {
-            if pr.is_none()
-                && branch.as_deref().is_none_or(|value| value == branch_name)
-            {
-                targets.push(target_status(
-                    home,
-                    slug,
-                    format!("branch:{branch_name}"),
-                    target,
-                )?);
-            }
-        }
-        for (number, target) in &repo.pull_requests {
-            if branch.is_none() && pr.is_none_or(|value| value == *number) {
-                targets.push(target_status(
-                    home,
-                    slug,
-                    format!("pr:{number}"),
-                    target,
-                )?);
-            }
-        }
-    }
+    let mut targets = collect_status_targets(
+        home,
+        &state,
+        repo_filter.as_deref(),
+        branch,
+        pr,
+    )?;
     if todo_only {
         targets.retain(|target| target.todo > 0);
     }
@@ -500,6 +922,46 @@ fn status(
         resolved,
         todo,
     })
+}
+
+fn collect_status_targets(
+    home: &Path,
+    state: &State,
+    repo_filter: Option<&str>,
+    branch: Option<String>,
+    pr: Option<u64>,
+) -> Result<Vec<TargetStatus>> {
+    let mut targets = Vec::new();
+    for (slug, repo) in &state.repos {
+        if repo_filter.is_some_and(|value| value != slug) {
+            continue;
+        }
+        let selected_branch = if let Some(number) = pr {
+            let Some(alias) = repo.pull_requests.get(&number) else {
+                if repo_filter.is_some() {
+                    bail!("PR {number} is unknown in repository {slug}");
+                }
+                continue;
+            };
+            Some(alias_branch(alias, number)?.to_owned())
+        } else {
+            branch.clone()
+        };
+        for (branch_name, target) in &repo.branches {
+            if selected_branch
+                .as_deref()
+                .is_some_and(|value| value != branch_name)
+            {
+                continue;
+            }
+            let target_name = pr.map_or_else(
+                || format!("branch:{branch_name}"),
+                |number| format!("pr:{number}"),
+            );
+            targets.push(target_status(home, slug, target_name, target)?);
+        }
+    }
+    Ok(targets)
 }
 
 fn parse_status_positionals(
@@ -518,41 +980,1024 @@ fn parse_status_positionals(
     }
 }
 
+fn fetch_targeted_pr_without_lock(
+    home: &Path,
+    slug: &str,
+    number: Option<u64>,
+) -> Result<Option<(String, PrMetadata)>> {
+    fetch_targeted_pr_without_lock_with(home, slug, number, gh_pr)
+}
+
+fn fetch_targeted_pr_without_lock_with<F>(
+    home: &Path,
+    slug: &str,
+    number: Option<u64>,
+    fetch: F,
+) -> Result<Option<(String, PrMetadata)>>
+where
+    F: FnOnce(&Repo, u64) -> Result<PrMetadata>,
+{
+    let Some(number) = number else {
+        return Ok(None);
+    };
+    let repo_snapshot = {
+        let snapshot_lock = try_lock(home)?;
+        let state = read_state(home)?;
+        let snapshot = state
+            .repos
+            .get(slug)
+            .with_context(|| {
+                format!("unknown repository {slug}; run register first")
+            })?
+            .clone();
+        drop(snapshot_lock);
+        snapshot
+    };
+    let metadata = fetch(&repo_snapshot, number)?;
+    Ok(Some((repo_snapshot.remote, metadata)))
+}
+
+fn validate_prefetched_remote(
+    repo: &Repo,
+    prefetched: Option<&(String, PrMetadata)>,
+) -> Result<()> {
+    if let Some((remote, _)) = prefetched
+        && &repo.remote != remote
+    {
+        bail!(
+            "repository changed remote identity while fetching GitHub PR metadata; rerun the command"
+        );
+    }
+    Ok(())
+}
+
 fn resolve_or_create_target<'a>(
     home: &Path,
     slug: &str,
     repo: &'a mut Repo,
-    branch: Option<String>,
-    pr: Option<u64>,
-    base: &str,
-) -> Result<(String, String, &'a mut Target)> {
+    request: TargetRequest<'_>,
+) -> Result<(String, String, String, Option<u64>, &'a mut Target)> {
+    let TargetRequest {
+        branch,
+        pr,
+        base,
+        head_policy,
+        prefetched_pr,
+    } = request;
     match (branch, pr) {
         (Some(branch), None) => {
-            let head_sha = git(&repo.path, ["rev-parse", &branch])?;
-            let base_sha = git(&repo.path, ["rev-parse", base])?;
+            let head_sha = exact_branch_sha(&repo.path, &branch)?;
+            let base_sha = exact_branch_sha(&repo.path, base)?;
             let directory = branch_directory(home, slug, repo, &branch)?;
+            let has_pr = repo
+                .pull_requests
+                .values()
+                .any(|alias| matches!(alias, PrAlias::Branch(value) if value == &branch));
             let target =
-                repo.branches
-                    .entry(branch.clone())
-                    .or_insert_with(|| Target {
-                        directory,
-                        base_ref: base.to_owned(),
-                        base_sha: base_sha.clone(),
-                        last_reviewed_head_sha: head_sha.clone(),
-                        next_review_number: 1,
-                    });
-            Ok((format!("branch:{branch}"), head_sha, target))
+                repo.branches.entry(branch.clone()).or_insert_with(|| {
+                    new_target(directory, base, &base_sha, &head_sha)
+                });
+            if has_pr
+                && target
+                    .pull_request_head_sha
+                    .as_deref()
+                    .is_some_and(|github| github != head_sha)
+                && head_policy != Some(HeadPolicy::Local)
+            {
+                bail!(
+                    "local branch {branch} diverges from its adopted PR head; \
+                     pass --head local to review the local head"
+                );
+            }
+            target.base_ref = base.to_owned();
+            target.base_sha = base_sha;
+            target.local_branch_head_sha = Some(head_sha.clone());
+            Ok((format!("branch:{branch}"), branch, head_sha, None, target))
         }
         (None, Some(number)) => {
-            let target = repo.pull_requests.get_mut(&number).with_context(|| format!("PR {number} is unknown; run sync or open the branch first"))?;
-            Ok((
-                format!("pr:{number}"),
-                target.last_reviewed_head_sha.clone(),
-                target,
-            ))
+            let metadata = prefetched_pr.with_context(|| {
+                format!("PR {number} metadata was not fetched before locking")
+            })?;
+            if metadata.number != number {
+                bail!(
+                    "fetched PR {} metadata while resolving PR {number}",
+                    metadata.number
+                );
+            }
+            let (branch, head_sha, adoption) =
+                apply_targeted_pr_metadata(home, slug, repo, metadata)?;
+            let target = repo.branches.get_mut(&branch).unwrap();
+            let cleanup = adoption.backup_created.then_some(metadata.number);
+            Ok((format!("pr:{number}"), branch, head_sha, cleanup, target))
         }
         _ => bail!("supply exactly one of --branch or --pr"),
     }
+}
+
+fn validate_head_policy(
+    branch: Option<&str>,
+    pr: Option<u64>,
+    policy: Option<HeadPolicy>,
+) -> Result<()> {
+    if policy.is_some() && (branch.is_none() || pr.is_some()) {
+        bail!("--head local is only valid with --branch");
+    }
+    Ok(())
+}
+
+fn target_authority(target_name: &str) -> String {
+    target_name
+        .split_once(':')
+        .map_or("branch", |(kind, _)| kind)
+        .to_owned()
+}
+
+fn validate_pending_snapshot(
+    target: &Target,
+    authority: &str,
+    head_sha: &str,
+) -> Result<()> {
+    if let Some(pending) = &target.pending
+        && (pending.head_sha != head_sha
+            || pending.base_sha != target.base_sha
+            || pending.authority != authority)
+    {
+        bail!(
+            "selected review snapshot changed after open: authority {} range \
+             {}..{} is now authority {} range {}..{}; reopen to re-resolve",
+            pending.authority,
+            pending.base_sha,
+            pending.head_sha,
+            authority,
+            target.base_sha,
+            head_sha
+        );
+    }
+    Ok(())
+}
+
+fn apply_targeted_pr_metadata(
+    home: &Path,
+    slug: &str,
+    repo: &mut Repo,
+    metadata: &PrMetadata,
+) -> Result<(String, String, AdoptionResult)> {
+    validate_pr_repository(repo, metadata)?;
+    let branch = metadata.head_ref_name.clone();
+    let local_head = exact_branch_sha(&repo.path, &branch)?;
+    let mut legacy = take_legacy_pr_target(repo, metadata)?;
+    if !repo.branches.contains_key(&branch) {
+        let target = if let Some(target) = legacy.take() {
+            target
+        } else {
+            let directory = branch_directory(home, slug, repo, &branch)?;
+            new_target(
+                directory,
+                &metadata.base_ref_name,
+                &metadata.base_ref_oid,
+                &metadata.head_ref_oid,
+            )
+        };
+        repo.branches.insert(branch.clone(), target);
+    }
+    apply_pr_metadata(home, slug, repo, metadata, Some(local_head), legacy)
+}
+
+fn apply_pr_metadata(
+    home: &Path,
+    slug: &str,
+    repo: &mut Repo,
+    metadata: &PrMetadata,
+    known_local_head: Option<String>,
+    legacy: Option<Target>,
+) -> Result<(String, String, AdoptionResult)> {
+    let legacy = legacy.or(take_legacy_pr_target(repo, metadata)?);
+    let branch = matching_branch(repo, metadata)?;
+    let local_head = known_local_head
+        .map(Ok)
+        .unwrap_or_else(|| exact_branch_sha(&repo.path, &branch))?;
+    let adoption =
+        adopt_pull_request(home, slug, repo, metadata.number, &branch)?;
+    let target = repo.branches.get_mut(&branch).unwrap();
+    if let Some(legacy) = legacy {
+        target.next_review_number =
+            target.next_review_number.max(legacy.next_review_number);
+        if adoption.kind == AdoptionKind::Merged {
+            target.last_reviewed_head_sha = legacy.last_reviewed_head_sha;
+        }
+    }
+    target.local_branch_head_sha = Some(local_head);
+    target.pull_request_head_sha = Some(metadata.head_ref_oid.clone());
+    target.pull_request_base_sha = Some(metadata.base_ref_oid.clone());
+    target.pull_request_base_ref = Some(metadata.base_ref_name.clone());
+    target.base_ref = metadata.base_ref_name.clone();
+    target.base_sha = metadata.base_ref_oid.clone();
+    Ok((branch, metadata.head_ref_oid.clone(), adoption))
+}
+
+fn take_legacy_pr_target(
+    repo: &mut Repo,
+    metadata: &PrMetadata,
+) -> Result<Option<Target>> {
+    let Some(alias) = repo.pull_requests.remove(&metadata.number) else {
+        return Ok(None);
+    };
+    match alias {
+        PrAlias::Branch(branch) => {
+            repo.pull_requests
+                .insert(metadata.number, PrAlias::Branch(branch));
+            Ok(None)
+        }
+        PrAlias::Legacy(target) => {
+            let canonical = format!("pr-{}", metadata.number);
+            if target.directory != canonical {
+                repo.pull_requests
+                    .insert(metadata.number, PrAlias::Legacy(target));
+                bail!(
+                    "legacy PR {} uses directory other than {}; \
+                     repair that mapping before synchronization",
+                    metadata.number,
+                    canonical
+                );
+            }
+            Ok(Some(*target))
+        }
+    }
+}
+
+fn new_target(
+    directory: String,
+    base_ref: &str,
+    base_sha: &str,
+    head_sha: &str,
+) -> Target {
+    Target {
+        directory,
+        base_ref: base_ref.to_owned(),
+        base_sha: base_sha.to_owned(),
+        last_reviewed_head_sha: head_sha.to_owned(),
+        next_review_number: 1,
+        pending: None,
+        pull_request_head_sha: None,
+        pull_request_base_sha: None,
+        pull_request_base_ref: None,
+        local_branch_head_sha: Some(head_sha.to_owned()),
+    }
+}
+
+fn exact_branch_sha(worktree: &Path, branch: &str) -> Result<String> {
+    let revision = format!("refs/heads/{branch}^{{commit}}");
+    git(worktree, ["rev-parse", "--verify", &revision]).with_context(|| {
+        format!("local branch {branch} does not resolve to a commit")
+    })
+}
+
+fn alias_branch(alias: &PrAlias, number: u64) -> Result<&str> {
+    match alias {
+        PrAlias::Branch(branch) => Ok(branch),
+        PrAlias::Legacy(target) => bail!(
+            "legacy PR {number} contains target data for {}; refusing to \
+             silently discard it; migrate or recover this record explicitly",
+            target.directory
+        ),
+    }
+}
+
+fn repository_identity(repo: &Repo) -> Result<(&str, &str)> {
+    let mut parts = repo.remote.split('/');
+    let _host = parts.next();
+    let owner = parts.next().context("registered remote has no owner")?;
+    let name = parts
+        .next()
+        .context("registered remote has no repository")?;
+    Ok((owner, name))
+}
+
+fn matching_branch(repo: &Repo, metadata: &PrMetadata) -> Result<String> {
+    validate_pr_repository(repo, metadata)?;
+    if repo.branches.contains_key(&metadata.head_ref_name) {
+        Ok(metadata.head_ref_name.clone())
+    } else {
+        bail!(
+            "PR {} head branch {} is not registered",
+            metadata.number,
+            metadata.head_ref_name
+        )
+    }
+}
+
+fn validate_pr_repository(repo: &Repo, metadata: &PrMetadata) -> Result<()> {
+    if metadata.state != "OPEN" {
+        bail!("PR {} is not open", metadata.number);
+    }
+    let (owner, name) = repository_identity(repo)?;
+    if !metadata
+        .head_repository_owner
+        .login
+        .eq_ignore_ascii_case(owner)
+        || !metadata.head_repository.name.eq_ignore_ascii_case(name)
+    {
+        bail!(
+            "PR {} head is from fork {}/{}; expected {owner}/{name}",
+            metadata.number,
+            metadata.head_repository_owner.login,
+            metadata.head_repository.name
+        );
+    }
+    Ok(())
+}
+
+fn gh_pr(repo: &Repo, number: u64) -> Result<PrMetadata> {
+    let (owner, name) = repository_identity(repo)?;
+    let repository = format!("{owner}/{name}");
+    let number = number.to_string();
+    let output = Command::new("gh")
+        .args([
+            "pr",
+            "view",
+            &number,
+            "--repo",
+            &repository,
+            "--json",
+            "number,state,headRefName,headRefOid,headRepositoryOwner,\
+             headRepository,baseRefName,baseRefOid",
+        ])
+        .output()
+        .context("failed to invoke gh")?;
+    if !output.status.success() {
+        bail!(
+            "gh pr view failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    serde_json::from_slice(&output.stdout).context("invalid gh PR metadata")
+}
+
+fn gh_open_prs(repo: &Repo) -> Result<Vec<PrMetadata>> {
+    let (owner, name) = repository_identity(repo)?;
+    let repository = format!("{owner}/{name}");
+    let output = Command::new("gh")
+        .args([
+            "pr",
+            "list",
+            "--repo",
+            &repository,
+            "--state",
+            "open",
+            "--limit",
+            "1000",
+            "--json",
+            "number,state,headRefName,headRefOid,headRepositoryOwner,\
+             headRepository,baseRefName,baseRefOid",
+        ])
+        .output()
+        .context("failed to invoke gh")?;
+    if !output.status.success() {
+        bail!(
+            "gh pr list failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    serde_json::from_slice(&output.stdout).context("invalid gh PR metadata")
+}
+
+fn sync(home: &Path, slug: &str) -> Result<()> {
+    let output = sync_with_fetch(home, slug, gh_open_prs)?;
+    print_json(&output)
+}
+
+fn sync_with_fetch<F>(home: &Path, slug: &str, fetch: F) -> Result<SyncOutput>
+where
+    F: FnOnce(&Repo) -> Result<Vec<PrMetadata>>,
+{
+    // Network access must not hold the ledger lock. Snapshot only the stable
+    // repository identity needed by `gh`, then reacquire the lock and reread
+    // state before applying anything.
+    let repo_snapshot = {
+        let snapshot_lock = try_lock(home)?;
+        let state = read_state(home)?;
+        let snapshot = state
+            .repos
+            .get(slug)
+            .with_context(|| {
+                format!("unknown repository {slug}; run register first")
+            })?
+            .clone();
+        drop(snapshot_lock);
+        snapshot
+    };
+    let metadata_result = fetch(&repo_snapshot);
+
+    let _lock = try_lock(home)?;
+    let mut state = read_state(home)?;
+    let repo = state.repos.get_mut(slug).with_context(|| {
+        format!("unknown repository {slug}; run register first")
+    })?;
+    if repo.remote != repo_snapshot.remote {
+        bail!(
+            "repository {slug} changed remote identity while sync fetched GitHub metadata; rerun sync"
+        );
+    }
+    let metadata = match metadata_result {
+        Ok(value) => value,
+        Err(error) => {
+            let recovered = recover_incomplete_adoptions(home, slug, repo, &[])?;
+            let local_repaired = reconcile_repo_targets(home, slug, repo)?;
+            write_state(home, &state)?;
+            if !recovered.is_empty() || !local_repaired.is_empty() {
+                eprintln!(
+                    "gh-rev: persisted local recovery before GitHub sync failed"
+                );
+            }
+            bail!("github: unavailable: {error:#}");
+        }
+    };
+    let recovered = recover_incomplete_adoptions(home, slug, repo, &metadata)?;
+    let local_repaired = reconcile_repo_targets(home, slug, repo)?;
+
+    let mut by_branch: BTreeMap<String, Vec<PrMetadata>> = repo
+        .branches
+        .keys()
+        .map(|branch| (branch.clone(), Vec::new()))
+        .collect();
+    for item in metadata {
+        if let Ok(branch) = matching_branch(repo, &item) {
+            by_branch.entry(branch).or_default().push(item);
+        }
+    }
+    let mut adopted = Vec::new();
+    let mut merged = BTreeMap::new();
+    let mut unchanged = Vec::new();
+    let mut skipped_zero = Vec::new();
+    let mut skipped_ambiguous = BTreeMap::new();
+    let mut cleanup_numbers = Vec::new();
+    for (branch, matches) in by_branch {
+        if matches.is_empty() {
+            skipped_zero.push(branch);
+            continue;
+        }
+        if matches.len() > 1 {
+            skipped_ambiguous.insert(
+                branch,
+                matches.iter().map(|item| item.number).collect(),
+            );
+            continue;
+        }
+        let item = &matches[0];
+        if let Some(PrAlias::Branch(existing)) =
+            repo.pull_requests.get(&item.number)
+            && existing != &branch
+        {
+            skipped_ambiguous.insert(branch, vec![item.number]);
+            continue;
+        }
+        let (_, _, outcome) =
+            apply_pr_metadata(home, slug, repo, item, None, None)?;
+        if outcome.backup_created {
+            cleanup_numbers.push(item.number);
+        }
+        match outcome.kind {
+            AdoptionKind::Adopted => adopted.push(item.number),
+            AdoptionKind::Merged => {
+                merged.insert(item.number, outcome.review_mapping);
+            }
+            AdoptionKind::Unchanged => unchanged.push(item.number),
+        }
+    }
+    write_state(home, &state)?;
+    cleanup_adoption_backups(home, slug, cleanup_numbers)?;
+    Ok(SyncOutput {
+        repo: slug.to_owned(),
+        local_repaired,
+        recovered,
+        adopted,
+        merged,
+        unchanged,
+        skipped_zero,
+        skipped_ambiguous,
+    })
+}
+
+fn reconcile_repo_targets(
+    home: &Path,
+    slug: &str,
+    repo: &mut Repo,
+) -> Result<Vec<RepairOutput>> {
+    let mut local_repaired = Vec::new();
+    for (branch, target) in &mut repo.branches {
+        let before = target.next_review_number;
+        report_reconciled_target(
+            home,
+            slug,
+            &format!("branch:{branch}"),
+            target,
+        )?;
+        if before != target.next_review_number {
+            local_repaired.push(RepairOutput {
+                branch: branch.clone(),
+                from: before,
+                to: target.next_review_number,
+            });
+        }
+    }
+    Ok(local_repaired)
+}
+
+#[derive(Default)]
+struct AdoptionArtifacts {
+    stages: Vec<PathBuf>,
+    branch_backup: Option<PathBuf>,
+    pr_backup: Option<PathBuf>,
+}
+
+fn recover_incomplete_adoptions(
+    home: &Path,
+    slug: &str,
+    repo: &Repo,
+    metadata: &[PrMetadata],
+) -> Result<Vec<RecoveryOutput>> {
+    let repo_home = home.join(slug);
+    if !repo_home.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut branch_by_number = BTreeMap::new();
+    for (number, alias) in &repo.pull_requests {
+        if let PrAlias::Branch(branch) = alias {
+            branch_by_number.insert(*number, branch.clone());
+        }
+    }
+    for item in metadata {
+        if let Ok(branch) = matching_branch(repo, item) {
+            branch_by_number.entry(item.number).or_insert(branch);
+        }
+    }
+
+    let mut artifacts: BTreeMap<u64, AdoptionArtifacts> = BTreeMap::new();
+    for entry in fs::read_dir(&repo_home)? {
+        let entry = entry?;
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let Some(rest) = name.strip_prefix(".adopt-pr-") else {
+            continue;
+        };
+        let (number, suffix) = rest.split_once('-').with_context(|| {
+            format!("unrecognized interrupted-adoption artifact {name}")
+        })?;
+        let number = number.parse::<u64>().with_context(|| {
+            format!("unrecognized interrupted-adoption artifact {name}")
+        })?;
+        if !entry.file_type()?.is_dir() {
+            bail!(
+                "interrupted-adoption artifact {} is not a directory; it was preserved",
+                entry.path().display()
+            );
+        }
+        let item = artifacts.entry(number).or_default();
+        match suffix {
+            "branch-backup" => item.branch_backup = Some(entry.path()),
+            "pr-backup" => item.pr_backup = Some(entry.path()),
+            value
+                if value.strip_prefix("stage-").is_some_and(|pid| {
+                    !pid.is_empty()
+                        && pid.bytes().all(|byte| byte.is_ascii_digit())
+                }) =>
+            {
+                item.stages.push(entry.path());
+            }
+            _ => {
+                bail!("unrecognized interrupted-adoption artifact {name}");
+            }
+        }
+    }
+
+    let mut recovered = Vec::new();
+    for (number, item) in artifacts {
+        let branch = branch_by_number.get(&number).with_context(|| {
+            format!(
+                "unfinished PR {number} adoption has no current branch alias or matching open-PR metadata; artifacts were preserved"
+            )
+        })?;
+        let canonical_name = format!("pr-{number}");
+        let canonical_path = repo_home.join(&canonical_name);
+        let committed = matches!(
+            repo.pull_requests.get(&number),
+            Some(PrAlias::Branch(value)) if value == branch
+        ) && repo
+            .branches
+            .get(branch)
+            .is_some_and(|target| target.directory == canonical_name);
+
+        if committed {
+            if !canonical_path.is_dir() {
+                bail!(
+                    "unfinished PR {number} adoption is ambiguous: state points to {} but that directory is missing",
+                    canonical_path.display()
+                );
+            }
+            remove_recovery_paths(&item.stages)?;
+            remove_optional_recovery_path(item.branch_backup.as_deref())?;
+            remove_optional_recovery_path(item.pr_backup.as_deref())?;
+            recovered.push(RecoveryOutput {
+                pull_request: number,
+                action: "finalized persisted adoption".to_owned(),
+            });
+            continue;
+        }
+
+        let target = repo.branches.get(branch).with_context(|| {
+            format!(
+                "unfinished PR {number} adoption is ambiguous: branch {branch} has no target"
+            )
+        })?;
+        let branch_path = repo_home.join(&target.directory);
+        match (item.branch_backup.as_deref(), item.pr_backup.as_deref()) {
+            (Some(branch_backup), pr_backup) => {
+                if branch_path.exists() {
+                    bail!(
+                        "unfinished PR {number} adoption is ambiguous: both branch target {} and backup {} exist",
+                        branch_path.display(),
+                        branch_backup.display()
+                    );
+                }
+                if pr_backup.is_none()
+                    && !item.stages.is_empty()
+                    && !canonical_path.is_dir()
+                {
+                    bail!(
+                        "unfinished PR {number} adoption is ambiguous: merge staging and branch backup exist but canonical PR source {} is missing; artifacts were preserved",
+                        canonical_path.display()
+                    );
+                }
+                if let Some(pr_backup) = pr_backup {
+                    if canonical_path.exists() {
+                        fs::remove_dir_all(&canonical_path)?;
+                    }
+                    // Keep the PR backup as a durable rollback discriminator
+                    // until the branch is restored too. A crash while copying
+                    // can then safely retry from the untouched backup.
+                    copy_directory(pr_backup, &canonical_path)?;
+                } else if item.stages.is_empty()
+                    && !matches!(
+                        repo.pull_requests.get(&number),
+                        Some(PrAlias::Legacy(_))
+                    )
+                    && canonical_path.exists()
+                {
+                    // Branch-only adoption copied this directory before state
+                    // persistence. A merge stage or legacy PR mapping means
+                    // the canonical directory predates adoption and must be
+                    // preserved.
+                    fs::remove_dir_all(&canonical_path)?;
+                }
+                fs::rename(branch_backup, &branch_path)?;
+                remove_optional_recovery_path(pr_backup)?;
+                remove_recovery_paths(&item.stages)?;
+                recovered.push(RecoveryOutput {
+                    pull_request: number,
+                    action: "rolled back unpersisted adoption".to_owned(),
+                });
+            }
+            (None, Some(pr_backup)) => {
+                if branch_path.is_dir() && canonical_path.is_dir() {
+                    // A previous recovery restored both sources and crashed
+                    // before deleting its final PR backup.
+                    remove_optional_recovery_path(Some(pr_backup))?;
+                    remove_recovery_paths(&item.stages)?;
+                    recovered.push(RecoveryOutput {
+                        pull_request: number,
+                        action: "completed interrupted rollback".to_owned(),
+                    });
+                } else {
+                    bail!(
+                        "unfinished PR {number} adoption is ambiguous: PR backup {} exists without a branch backup",
+                        pr_backup.display()
+                    );
+                }
+            }
+            (None, None) if !item.stages.is_empty() => {
+                if !branch_path.is_dir() || !canonical_path.is_dir() {
+                    bail!(
+                        "unfinished PR {number} adoption is ambiguous: abandoned merge staging exists but source directories {} and {} are not both authoritative",
+                        branch_path.display(),
+                        canonical_path.display()
+                    );
+                }
+                remove_recovery_paths(&item.stages)?;
+                recovered.push(RecoveryOutput {
+                    pull_request: number,
+                    action: "discarded abandoned staging".to_owned(),
+                });
+            }
+            (None, None) => {}
+        }
+    }
+    Ok(recovered)
+}
+
+fn remove_recovery_paths(paths: &[PathBuf]) -> Result<()> {
+    for path in paths {
+        if path.exists() {
+            fs::remove_dir_all(path)?;
+        }
+    }
+    Ok(())
+}
+
+fn remove_optional_recovery_path(path: Option<&Path>) -> Result<()> {
+    if let Some(path) = path
+        && path.exists()
+    {
+        fs::remove_dir_all(path)?;
+    }
+    Ok(())
+}
+
+fn adopt_pull_request(
+    home: &Path,
+    slug: &str,
+    repo: &mut Repo,
+    number: u64,
+    branch: &str,
+) -> Result<AdoptionResult> {
+    if let Some(alias) = repo.pull_requests.get(&number) {
+        let existing = alias_branch(alias, number)?;
+        if existing != branch {
+            bail!("PR {number} already aliases branch {existing}");
+        }
+    }
+    let target = repo
+        .branches
+        .get_mut(branch)
+        .with_context(|| format!("cannot adopt missing branch {branch}"))?;
+    let repo_home = home.join(slug);
+    let branch_path = repo_home.join(&target.directory);
+    let canonical_name = format!("pr-{number}");
+    let canonical_path = repo_home.join(&canonical_name);
+    let mut result = AdoptionResult {
+        kind: AdoptionKind::Unchanged,
+        review_mapping: BTreeMap::new(),
+        backup_created: false,
+    };
+    if target.directory != canonical_name {
+        if branch_path.exists() && canonical_path.exists() {
+            result.review_mapping = merge_review_directories(
+                &repo_home,
+                &branch_path,
+                &canonical_path,
+                number,
+            )?;
+            result.kind = AdoptionKind::Merged;
+            result.backup_created = true;
+        } else if branch_path.exists() {
+            backup_and_copy_branch_directory(
+                &repo_home,
+                &branch_path,
+                &canonical_path,
+                number,
+            )?;
+            result.kind = AdoptionKind::Adopted;
+            result.backup_created = true;
+        } else {
+            fs::create_dir_all(&canonical_path)?;
+            result.kind = AdoptionKind::Adopted;
+        }
+        target.directory = canonical_name;
+    }
+    repo.pull_requests
+        .insert(number, PrAlias::Branch(branch.to_owned()));
+    report_reconciled_target(home, slug, &format!("pr:{number}"), target)?;
+    Ok(result)
+}
+
+fn backup_and_copy_branch_directory(
+    repo_home: &Path,
+    branch_path: &Path,
+    canonical_path: &Path,
+    number: u64,
+) -> Result<()> {
+    let backup = repo_home.join(format!(".adopt-pr-{number}-branch-backup"));
+    if backup.exists() || canonical_path.exists() {
+        bail!(
+            "unfinished PR {number} adoption exists; recover its backup \
+             before retrying"
+        );
+    }
+    fs::rename(branch_path, &backup)?;
+    if let Err(error) = copy_directory(&backup, canonical_path) {
+        let _ = fs::remove_dir_all(canonical_path);
+        let _ = fs::rename(&backup, branch_path);
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn copy_directory(source: &Path, destination: &Path) -> Result<()> {
+    fs::create_dir(destination)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let target = destination.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_directory(&entry.path(), &target)?;
+        } else {
+            fs::copy(entry.path(), target)?;
+        }
+    }
+    Ok(())
+}
+
+fn merge_review_directories(
+    repo_home: &Path,
+    branch_path: &Path,
+    pr_path: &Path,
+    number: u64,
+) -> Result<BTreeMap<u64, u64>> {
+    let stage = repo_home
+        .join(format!(".adopt-pr-{number}-stage-{}", std::process::id()));
+    let branch_backup =
+        repo_home.join(format!(".adopt-pr-{number}-branch-backup"));
+    let pr_backup = repo_home.join(format!(".adopt-pr-{number}-pr-backup"));
+    if stage.exists() || branch_backup.exists() || pr_backup.exists() {
+        bail!(
+            "unfinished PR {number} adoption exists; recover the .adopt-pr-* \
+             directories before retrying"
+        );
+    }
+    fs::create_dir(&stage)?;
+    let mapping = match prepare_merged_directory(branch_path, pr_path, &stage) {
+        Ok(mapping) => mapping,
+        Err(error) => {
+            let _ = fs::remove_dir_all(&stage);
+            return Err(error);
+        }
+    };
+    fs::rename(branch_path, &branch_backup)?;
+    if let Err(error) = fs::rename(pr_path, &pr_backup) {
+        let _ = fs::rename(&branch_backup, branch_path);
+        let _ = fs::remove_dir_all(&stage);
+        return Err(error.into());
+    }
+    if let Err(error) = fs::rename(&stage, pr_path) {
+        let _ = fs::rename(&pr_backup, pr_path);
+        let _ = fs::rename(&branch_backup, branch_path);
+        let _ = fs::remove_dir_all(&stage);
+        return Err(error.into());
+    }
+    Ok(mapping)
+}
+
+fn prepare_merged_directory(
+    branch_path: &Path,
+    pr_path: &Path,
+    stage: &Path,
+) -> Result<BTreeMap<u64, u64>> {
+    copy_directory_contents(branch_path, stage)?;
+    let mut next = highest_review_number(stage)?.unwrap_or(0);
+    let mut pr_reviews = review_paths(pr_path)?;
+    pr_reviews.sort_by_key(|path| {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .and_then(review_number_from_name)
+            .unwrap_or(u64::MAX)
+    });
+    let mut mapping = BTreeMap::new();
+    for source in pr_reviews {
+        let old_number = source
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(review_number_from_name)
+            .context("PR review has invalid file name")?;
+        next = next.checked_add(1).context("review number overflow")?;
+        let text = fs::read_to_string(&source)?;
+        let rewritten = rewrite_review_number(&text, next)?;
+        fs::write(stage.join(format!("rev-{next}.md")), rewritten)?;
+        mapping.insert(old_number, next);
+    }
+    copy_pr_non_reviews(pr_path, stage)?;
+    merge_context_files(branch_path, pr_path, stage)?;
+    Ok(mapping)
+}
+
+fn copy_directory_contents(source: &Path, destination: &Path) -> Result<()> {
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        copy_entry(&entry.path(), &destination.join(entry.file_name()))?;
+    }
+    Ok(())
+}
+
+fn copy_pr_non_reviews(source: &Path, destination: &Path) -> Result<()> {
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name_text = name.to_string_lossy();
+        if name_text == "context.md"
+            || (entry.file_type()?.is_file()
+                && review_number_from_name(&name_text).is_some())
+        {
+            continue;
+        }
+        let mut output = destination.join(&name);
+        if output.exists() {
+            output = destination.join(format!("pr-source-{name_text}"));
+            if output.exists() {
+                bail!(
+                    "cannot preserve colliding PR entry {name_text}; \
+                     destination {} also exists",
+                    output.display()
+                );
+            }
+        }
+        copy_entry(&entry.path(), &output)?;
+    }
+    Ok(())
+}
+
+fn copy_entry(source: &Path, destination: &Path) -> Result<()> {
+    if source.is_dir() {
+        copy_directory(source, destination)
+    } else {
+        fs::copy(source, destination)?;
+        Ok(())
+    }
+}
+
+fn rewrite_review_number(text: &str, number: u64) -> Result<String> {
+    let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
+    let end = lines
+        .iter()
+        .skip(1)
+        .position(|line| line == "---")
+        .map(|index| index + 1)
+        .context("review has no YAML front matter")?;
+    let review = lines[..end]
+        .iter()
+        .position(|line| line.starts_with("review:"))
+        .context("review YAML has no review field")?;
+    lines[review] = format!("review: {number}");
+    let mut output = lines.join("\n");
+    if text.ends_with('\n') {
+        output.push('\n');
+    }
+    Ok(output)
+}
+
+fn merge_context_files(
+    branch_path: &Path,
+    pr_path: &Path,
+    stage: &Path,
+) -> Result<()> {
+    let branch = read_optional(branch_path.join("context.md"))?;
+    let pr = read_optional(pr_path.join("context.md"))?;
+    let content = match (branch, pr) {
+        (Some(branch), Some(pr)) if branch == pr => branch,
+        (Some(branch), Some(pr)) => combined_context(&branch, &pr),
+        (Some(value), None) | (None, Some(value)) => value,
+        (None, None) => return Ok(()),
+    };
+    fs::write(stage.join("context.md"), content)?;
+    Ok(())
+}
+
+fn combined_context(branch: &str, pr: &str) -> String {
+    let mut output =
+        String::from("# Combined review context\n\n## Branch source\n\n");
+    output.push_str(branch);
+    if !branch.ends_with('\n') {
+        output.push('\n');
+    }
+    output.push_str("\n## PR source\n\n");
+    output.push_str(pr);
+    if !pr.ends_with('\n') {
+        output.push('\n');
+    }
+    output
+}
+
+fn read_optional(path: PathBuf) -> Result<Option<String>> {
+    match fs::read_to_string(&path) {
+        Ok(value) => Ok(Some(value)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error)
+            .with_context(|| format!("failed to read {}", path.display())),
+    }
+}
+
+fn cleanup_adoption_backups(
+    home: &Path,
+    slug: &str,
+    numbers: impl IntoIterator<Item = u64>,
+) -> Result<()> {
+    let repo_home = home.join(slug);
+    for number in numbers {
+        for suffix in ["branch-backup", "pr-backup"] {
+            let backup = repo_home.join(format!(".adopt-pr-{number}-{suffix}"));
+            if backup.exists() {
+                fs::remove_dir_all(backup)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn target_output(
@@ -560,6 +2005,7 @@ fn target_output(
     slug: &str,
     repo_path: &Path,
     target_name: &str,
+    branch_name: &str,
     target: &Target,
     head_sha: &str,
 ) -> Result<TargetOutput> {
@@ -573,6 +2019,17 @@ fn target_output(
         )?;
     }
     let reviews = review_paths(&target_path)?;
+    let local_branch_sha =
+        optional_exact_ref(repo_path, &format!("refs/heads/{branch_name}"));
+    let origin_branch_sha = optional_exact_ref(
+        repo_path,
+        &format!("refs/remotes/origin/{branch_name}"),
+    );
+    let pr_head_sha = target.pull_request_head_sha.clone();
+    let divergence = pr_head_sha
+        .as_deref()
+        .zip(local_branch_sha.as_deref())
+        .is_some_and(|(github, local)| github != local);
     Ok(TargetOutput {
         repo: slug.to_owned(),
         repo_path: repo_path.to_owned(),
@@ -582,8 +2039,28 @@ fn target_output(
         base_ref: target.base_ref.clone(),
         base_sha: target.base_sha.clone(),
         head_sha: head_sha.to_owned(),
+        head_authority: target_authority(target_name),
+        local_branch_sha,
+        origin_branch_sha,
+        pr_head_sha,
+        divergence,
         reviews,
     })
+}
+
+fn optional_exact_ref(worktree: &Path, reference: &str) -> Option<String> {
+    let revision = format!("{reference}^{{commit}}");
+    let output = Command::new("git")
+        .args(["rev-parse", "--verify", &revision])
+        .current_dir(worktree)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout)
+        .ok()
+        .map(|value| value.trim().to_owned())
 }
 
 fn review_template(
@@ -692,7 +2169,7 @@ fn branch_directory(
         return Ok(target.directory.clone());
     }
 
-    let canonical = format!("br-{}", encode_component(branch));
+    let canonical = format!("br-v2-{}", encode_component(branch));
     let legacy = format!("br-{}", sanitize_component(branch));
     if legacy == canonical
         || repo
@@ -803,6 +2280,41 @@ fn slug_from_remote(remote: &str) -> Result<String> {
 }
 
 fn lock(home: &Path) -> Result<File> {
+    let (file, lock_path) = open_lock_file(home)?;
+    file.lock_exclusive()
+        .with_context(|| format!("failed to lock {}", lock_path.display()))?;
+    Ok(file)
+}
+
+fn try_lock(home: &Path) -> Result<File> {
+    let (file, lock_path) = open_lock_file(home)?;
+    for attempt in 0..LOCK_RETRY_ATTEMPTS {
+        match file.try_lock_exclusive() {
+            Ok(()) => return Ok(file),
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock
+                    && attempt + 1 < LOCK_RETRY_ATTEMPTS =>
+            {
+                thread::sleep(LOCK_RETRY_DELAY);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                return Err(anyhow!(
+                    "ledger is busy; another gh-rev operation is in progress (lock {})",
+                    lock_path.display()
+                ));
+            }
+            Err(error) => {
+                return Err(anyhow!(
+                    "failed to lock {}: {error}",
+                    lock_path.display()
+                ));
+            }
+        }
+    }
+    unreachable!("lock retry loop has at least one attempt")
+}
+
+fn open_lock_file(home: &Path) -> Result<(File, PathBuf)> {
     fs::create_dir_all(home)
         .with_context(|| format!("failed to create {}", home.display()))?;
     let lock_path = home.join(LOCK_FILE);
@@ -813,22 +2325,23 @@ fn lock(home: &Path) -> Result<File> {
         .truncate(false)
         .open(&lock_path)
         .with_context(|| format!("failed to open {}", lock_path.display()))?;
-    file.lock_exclusive()
-        .with_context(|| format!("failed to lock {}", lock_path.display()))?;
-    Ok(file)
+    Ok((file, lock_path))
 }
 
 fn read_state(home: &Path) -> Result<State> {
     let path = home.join(STATE_FILE);
-    match fs::read_to_string(&path) {
+    let state = match fs::read_to_string(&path) {
         Ok(text) => toml::from_str(&text)
-            .with_context(|| format!("invalid {}", path.display())),
+            .with_context(|| format!("invalid {}", path.display()))?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            Ok(State::default())
+            State::default()
         }
-        Err(error) => Err(error)
-            .with_context(|| format!("failed to read {}", path.display())),
-    }
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to read {}", path.display()));
+        }
+    };
+    Ok(state)
 }
 
 fn write_state(home: &Path, state: &State) -> Result<()> {
@@ -1153,6 +2666,52 @@ mod tests {
     }
 
     #[test]
+    fn encoded_name_does_not_steal_sanitized_legacy_directory() {
+        let fixture = test_fixture("encoded-sanitized-owner");
+        let encoded_branch = "feature-reconcile".to_owned();
+        run_git(&fixture.worktree, ["branch", &encoded_branch]);
+        let legacy_path = fixture
+            .home
+            .join(&fixture.slug)
+            .join("br-feature-reconcile");
+        fs::create_dir_all(&legacy_path).unwrap();
+        fs::write(
+            legacy_path.join("rev-1.md"),
+            format!("---\nreview: 1\ntarget: branch:{}\n---\n", fixture.branch),
+        )
+        .unwrap();
+
+        open(
+            &fixture.home,
+            &fixture.slug,
+            Some(encoded_branch.clone()),
+            None,
+            "main",
+        )
+        .unwrap();
+        open(
+            &fixture.home,
+            &fixture.slug,
+            Some(fixture.branch.clone()),
+            None,
+            "main",
+        )
+        .unwrap();
+
+        let state = read_state(&fixture.home).unwrap();
+        let repo = state.repos.get(&fixture.slug).unwrap();
+        assert_eq!(
+            repo.branches.get(&fixture.branch).unwrap().directory,
+            "br-feature-reconcile"
+        );
+        assert_eq!(
+            repo.branches.get(&encoded_branch).unwrap().directory,
+            "br-v2-feature-reconcile"
+        );
+        fixture.remove();
+    }
+
+    #[test]
     fn review_uses_named_branch_sha_when_worktree_is_elsewhere() {
         let fixture = test_fixture("branch-head");
         run_git(&fixture.worktree, ["checkout", &fixture.branch]);
@@ -1292,6 +2851,898 @@ mod tests {
         }
     }
 
+    #[test]
+    fn exact_branch_resolution_ignores_same_named_tag() {
+        let fixture = test_fixture("branch-tag");
+        run_git(&fixture.worktree, ["tag", &fixture.branch]);
+        run_git(&fixture.worktree, ["checkout", &fixture.branch]);
+        fs::write(fixture.worktree.join("branch-only.txt"), "branch\n").unwrap();
+        run_git(&fixture.worktree, ["add", "branch-only.txt"]);
+        commit_test_change(&fixture.worktree, "advance branch");
+        let expected = git(&fixture.worktree, ["rev-parse", "HEAD"]).unwrap();
+        assert_eq!(
+            exact_branch_sha(&fixture.worktree, &fixture.branch).unwrap(),
+            expected
+        );
+        fixture.remove();
+    }
+
+    #[test]
+    fn branch_only_pr_adoption_renames_directory_and_aliases_target() {
+        let fixture = test_fixture("branch-only-adoption");
+        write_review_yaml(&fixture.target_path, 1, "branch:evidence");
+        insert_branch_target(&fixture, 2);
+        let metadata = pr_metadata(&fixture, 1153, "github-head");
+        let mut state = read_state(&fixture.home).unwrap();
+        let repo = state.repos.get_mut(&fixture.slug).unwrap();
+
+        apply_pr_metadata(
+            &fixture.home,
+            &fixture.slug,
+            repo,
+            &metadata,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let canonical = fixture.home.join(&fixture.slug).join("pr-1153");
+        assert!(canonical.join("rev-1.md").is_file());
+        assert!(!fixture.target_path.exists());
+        assert_eq!(
+            alias_branch(repo.pull_requests.get(&1153).unwrap(), 1153).unwrap(),
+            fixture.branch
+        );
+        assert_eq!(
+            repo.branches.get(&fixture.branch).unwrap().directory,
+            "pr-1153"
+        );
+        fixture.remove();
+    }
+
+    #[test]
+    fn dual_history_merge_preserves_branch_numbers_and_appends_pr_reviews() {
+        let fixture = test_fixture("dual-adoption");
+        write_review_yaml(&fixture.target_path, 1, "branch:evidence");
+        write_review_yaml(&fixture.target_path, 3, "branch:evidence");
+        let branch_attachment = fixture.target_path.join("attachments");
+        fs::create_dir(&branch_attachment).unwrap();
+        fs::write(branch_attachment.join("branch.txt"), "branch\n").unwrap();
+        fs::write(fixture.target_path.join("context.md"), "branch context\n")
+            .unwrap();
+        insert_branch_target(&fixture, 4);
+        let pr_path = fixture.home.join(&fixture.slug).join("pr-1153");
+        fs::create_dir_all(&pr_path).unwrap();
+        write_review_yaml(&pr_path, 1, "pr:1153");
+        write_review_yaml(&pr_path, 2, "pr:1153");
+        let pr_attachment = pr_path.join("pr-attachments");
+        fs::create_dir(&pr_attachment).unwrap();
+        fs::write(pr_attachment.join("pr.txt"), "pr\n").unwrap();
+        fs::write(pr_path.join("context.md"), "PR context\n").unwrap();
+        let metadata = pr_metadata(&fixture, 1153, "07");
+        let mut state = read_state(&fixture.home).unwrap();
+        let repo = state.repos.get_mut(&fixture.slug).unwrap();
+
+        let (_, _, merged) = apply_pr_metadata(
+            &fixture.home,
+            &fixture.slug,
+            repo,
+            &metadata,
+            None,
+            None,
+        )
+        .unwrap();
+        let (_, _, repeated) = apply_pr_metadata(
+            &fixture.home,
+            &fixture.slug,
+            repo,
+            &metadata,
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(merged.kind, AdoptionKind::Merged);
+        assert_eq!(merged.review_mapping.get(&1), Some(&4));
+        assert_eq!(merged.review_mapping.get(&2), Some(&5));
+        assert_eq!(repeated.kind, AdoptionKind::Unchanged);
+        for number in [1, 3, 4, 5] {
+            assert!(pr_path.join(format!("rev-{number}.md")).is_file());
+        }
+        assert!(!pr_path.join("rev-2.md").exists());
+        assert!(
+            fs::read_to_string(pr_path.join("rev-4.md"))
+                .unwrap()
+                .contains("review: 4")
+        );
+        let target = repo.branches.get(&fixture.branch).unwrap();
+        assert_eq!(target.next_review_number, 6);
+        let context = fs::read_to_string(pr_path.join("context.md")).unwrap();
+        assert!(context.contains("## Branch source"));
+        assert!(context.contains("## PR source"));
+        assert!(pr_path.join("attachments/branch.txt").is_file());
+        assert!(pr_path.join("pr-attachments/pr.txt").is_file());
+        fixture.remove();
+    }
+
+    #[test]
+    fn pr_matching_rejects_forks_and_unregistered_branches() {
+        let fixture = test_fixture("pr-matching");
+        insert_branch_target(&fixture, 1);
+        let state = read_state(&fixture.home).unwrap();
+        let repo = state.repos.get(&fixture.slug).unwrap();
+        let exact = pr_metadata(&fixture, 7, "head");
+        assert_eq!(matching_branch(repo, &exact).unwrap(), fixture.branch);
+        let mut fork = exact.clone();
+        fork.head_repository_owner.login = "fork-owner".to_owned();
+        assert!(matching_branch(repo, &fork).is_err());
+        let mut zero = exact;
+        zero.head_ref_name = "missing".to_owned();
+        assert!(matching_branch(repo, &zero).is_err());
+        fixture.remove();
+    }
+
+    #[test]
+    fn adopted_pr_divergence_requires_explicit_local_branch_policy() {
+        let fixture = test_fixture("divergence-1153");
+        insert_branch_target(&fixture, 372);
+        let metadata = pr_metadata(&fixture, 1153, "07");
+        let mut state = read_state(&fixture.home).unwrap();
+        let repo = state.repos.get_mut(&fixture.slug).unwrap();
+        apply_pr_metadata(
+            &fixture.home,
+            &fixture.slug,
+            repo,
+            &metadata,
+            None,
+            None,
+        )
+        .unwrap();
+        write_state(&fixture.home, &state).unwrap();
+
+        assert!(
+            open_with_head(
+                &fixture.home,
+                &fixture.slug,
+                Some(fixture.branch.clone()),
+                None,
+                "main",
+                None,
+            )
+            .is_err()
+        );
+        open_with_head(
+            &fixture.home,
+            &fixture.slug,
+            Some(fixture.branch.clone()),
+            None,
+            "main",
+            Some(HeadPolicy::Local),
+        )
+        .unwrap();
+        fixture.remove();
+    }
+
+    #[test]
+    fn next_rejects_branch_head_movement_after_open() {
+        let fixture = test_fixture("pending-movement");
+        open(
+            &fixture.home,
+            &fixture.slug,
+            Some(fixture.branch.clone()),
+            None,
+            "main",
+        )
+        .unwrap();
+        run_git(&fixture.worktree, ["checkout", &fixture.branch]);
+        fs::write(fixture.worktree.join("moved.txt"), "moved\n").unwrap();
+        run_git(&fixture.worktree, ["add", "moved.txt"]);
+        commit_test_change(&fixture.worktree, "move selected ref");
+
+        let result = next(
+            &fixture.home,
+            &fixture.slug,
+            Some(fixture.branch.clone()),
+            None,
+            None,
+        );
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("reopen to re-resolve")
+        );
+        assert!(!fixture.target_path.join("rev-1.md").exists());
+        fixture.remove();
+    }
+
+    #[test]
+    fn github_failure_still_persists_local_counter_repairs() {
+        let fixture = test_fixture("offline-repair");
+        write_review(&fixture.target_path, 5);
+        insert_branch_target(&fixture, 2);
+
+        let result = sync_with_fetch(&fixture.home, &fixture.slug, |_| {
+            Err(anyhow::anyhow!("gh unavailable"))
+        });
+
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "github: unavailable: gh unavailable"
+        );
+        assert_eq!(branch_target(&fixture).next_review_number, 6);
+        fixture.remove();
+    }
+
+    #[test]
+    fn sync_fetches_github_metadata_without_holding_the_ledger_lock() {
+        let fixture = test_fixture("fetch-outside-lock");
+        insert_branch_target(&fixture, 1);
+        let mut acquired = false;
+
+        sync_with_fetch(&fixture.home, &fixture.slug, |_| {
+            let probe = try_lock(&fixture.home)?;
+            acquired = true;
+            drop(probe);
+            Ok(Vec::new())
+        })
+        .unwrap();
+
+        assert!(acquired);
+        fixture.remove();
+    }
+
+    #[test]
+    fn targeted_pr_fetches_metadata_without_holding_the_ledger_lock() {
+        let fixture = test_fixture("targeted-fetch-outside-lock");
+        let metadata = pr_metadata(&fixture, 1153, "head");
+        let mut acquired = false;
+
+        let output = fetch_targeted_pr_without_lock_with(
+            &fixture.home,
+            &fixture.slug,
+            Some(1153),
+            |_, number| {
+                let probe = try_lock(&fixture.home)?;
+                acquired = true;
+                drop(probe);
+                assert_eq!(number, 1153);
+                Ok(metadata)
+            },
+        )
+        .unwrap();
+
+        assert!(acquired);
+        assert_eq!(output.unwrap().1.number, 1153);
+        fixture.remove();
+    }
+
+    #[test]
+    fn sync_reports_live_lock_contention_without_running_fetch() {
+        let fixture = test_fixture("sync-contention");
+        let held = lock(&fixture.home).unwrap();
+        let mut fetched = false;
+
+        let error = sync_with_fetch(&fixture.home, &fixture.slug, |_| {
+            fetched = true;
+            Ok(Vec::new())
+        })
+        .unwrap_err();
+
+        assert!(error.to_string().contains("ledger is busy"));
+        assert!(!fetched);
+        drop(held);
+        fixture.remove();
+    }
+
+    #[test]
+    fn sync_discards_abandoned_stage_before_adoption() {
+        let fixture = test_fixture("recover-stage");
+        write_review_yaml(&fixture.target_path, 1, "branch:evidence");
+        insert_branch_target(&fixture, 1);
+        let canonical = fixture.home.join(&fixture.slug).join("pr-1153");
+        fs::create_dir(&canonical).unwrap();
+        write_review_yaml(&canonical, 1, "pr:1153");
+        let stage = fixture
+            .home
+            .join(&fixture.slug)
+            .join(".adopt-pr-1153-stage-999");
+        fs::create_dir(&stage).unwrap();
+        fs::write(stage.join("partial"), "partial\n").unwrap();
+        let metadata = pr_metadata(&fixture, 1153, "head");
+
+        let output = sync_with_fetch(&fixture.home, &fixture.slug, |_| {
+            Ok(vec![metadata])
+        })
+        .unwrap();
+
+        assert_eq!(
+            output.recovered,
+            vec![RecoveryOutput {
+                pull_request: 1153,
+                action: "discarded abandoned staging".to_owned(),
+            }]
+        );
+        assert!(!stage.exists());
+        assert_eq!(output.merged.get(&1153).unwrap().get(&1), Some(&2));
+        fixture.remove();
+    }
+
+    #[test]
+    fn sync_preserves_pr_history_after_crash_between_backup_renames() {
+        let fixture = test_fixture("recover-mid-merge");
+        write_review_yaml(&fixture.target_path, 1, "branch:evidence");
+        insert_branch_target(&fixture, 2);
+        let repo_home = fixture.home.join(&fixture.slug);
+        let canonical = repo_home.join("pr-1153");
+        fs::create_dir(&canonical).unwrap();
+        write_review_yaml(&canonical, 1, "pr:1153");
+        let stage = repo_home.join(".adopt-pr-1153-stage-999");
+        fs::create_dir(&stage).unwrap();
+        prepare_merged_directory(&fixture.target_path, &canonical, &stage)
+            .unwrap();
+        let branch_backup = repo_home.join(".adopt-pr-1153-branch-backup");
+        fs::rename(&fixture.target_path, &branch_backup).unwrap();
+        let original_pr =
+            fs::read_to_string(canonical.join("rev-1.md")).unwrap();
+        let metadata = pr_metadata(&fixture, 1153, "head");
+
+        let output = sync_with_fetch(&fixture.home, &fixture.slug, |_| {
+            Ok(vec![metadata])
+        })
+        .unwrap();
+
+        assert_eq!(
+            output.recovered,
+            vec![RecoveryOutput {
+                pull_request: 1153,
+                action: "rolled back unpersisted adoption".to_owned(),
+            }]
+        );
+        assert_eq!(
+            fs::read_to_string(canonical.join("rev-2.md")).unwrap(),
+            rewrite_review_number(&original_pr, 2).unwrap()
+        );
+        assert!(canonical.join("rev-1.md").is_file());
+        assert!(!branch_backup.exists());
+        fixture.remove();
+    }
+
+    #[test]
+    fn sync_rolls_back_unpersisted_adoption_before_retrying() {
+        let fixture = test_fixture("recover-rollback");
+        write_review_yaml(&fixture.target_path, 1, "branch:evidence");
+        insert_branch_target(&fixture, 2);
+        let canonical = fixture.home.join(&fixture.slug).join("pr-1153");
+        backup_and_copy_branch_directory(
+            &fixture.home.join(&fixture.slug),
+            &fixture.target_path,
+            &canonical,
+            1153,
+        )
+        .unwrap();
+        let metadata = pr_metadata(&fixture, 1153, "head");
+
+        let output = sync_with_fetch(&fixture.home, &fixture.slug, |_| {
+            Ok(vec![metadata])
+        })
+        .unwrap();
+
+        assert_eq!(
+            output.recovered,
+            vec![RecoveryOutput {
+                pull_request: 1153,
+                action: "rolled back unpersisted adoption".to_owned(),
+            }]
+        );
+        assert_eq!(output.adopted, vec![1153]);
+        assert!(canonical.join("rev-1.md").is_file());
+        assert!(
+            !fixture
+                .home
+                .join(&fixture.slug)
+                .join(".adopt-pr-1153-branch-backup")
+                .exists()
+        );
+        fixture.remove();
+    }
+
+    #[test]
+    fn sync_completes_rollback_after_sources_were_restored() {
+        let fixture = test_fixture("recover-complete-rollback");
+        write_review_yaml(&fixture.target_path, 1, "branch:evidence");
+        insert_branch_target(&fixture, 2);
+        let repo_home = fixture.home.join(&fixture.slug);
+        let canonical = repo_home.join("pr-1153");
+        fs::create_dir(&canonical).unwrap();
+        write_review_yaml(&canonical, 1, "pr:1153");
+        let pr_backup = repo_home.join(".adopt-pr-1153-pr-backup");
+        copy_directory(&canonical, &pr_backup).unwrap();
+        let metadata = pr_metadata(&fixture, 1153, "head");
+
+        let output = sync_with_fetch(&fixture.home, &fixture.slug, |_| {
+            Ok(vec![metadata])
+        })
+        .unwrap();
+
+        assert_eq!(
+            output.recovered,
+            vec![RecoveryOutput {
+                pull_request: 1153,
+                action: "completed interrupted rollback".to_owned(),
+            }]
+        );
+        assert!(!pr_backup.exists());
+        assert_eq!(output.merged.get(&1153).unwrap().get(&1), Some(&2));
+        assert!(canonical.join("rev-1.md").is_file());
+        assert!(canonical.join("rev-2.md").is_file());
+        fixture.remove();
+    }
+
+    #[test]
+    fn sync_finalizes_persisted_adoption_cleanup() {
+        let fixture = test_fixture("recover-finalize");
+        write_review_yaml(&fixture.target_path, 1, "branch:evidence");
+        insert_branch_target(&fixture, 2);
+        let metadata = pr_metadata(&fixture, 1153, "head");
+        let mut state = read_state(&fixture.home).unwrap();
+        apply_pr_metadata(
+            &fixture.home,
+            &fixture.slug,
+            state.repos.get_mut(&fixture.slug).unwrap(),
+            &metadata,
+            None,
+            None,
+        )
+        .unwrap();
+        write_state(&fixture.home, &state).unwrap();
+        let backup = fixture
+            .home
+            .join(&fixture.slug)
+            .join(".adopt-pr-1153-branch-backup");
+        assert!(backup.is_dir());
+
+        let output = sync_with_fetch(&fixture.home, &fixture.slug, |_| {
+            Ok(vec![metadata.clone()])
+        })
+        .unwrap();
+
+        assert_eq!(
+            output.recovered,
+            vec![RecoveryOutput {
+                pull_request: 1153,
+                action: "finalized persisted adoption".to_owned(),
+            }]
+        );
+        assert!(!backup.exists());
+        assert_eq!(output.unchanged, vec![1153]);
+        fixture.remove();
+    }
+
+    #[test]
+    fn sync_refuses_ambiguous_interrupted_adoption() {
+        let fixture = test_fixture("recover-ambiguous");
+        insert_branch_target(&fixture, 1);
+        let pr_backup = fixture
+            .home
+            .join(&fixture.slug)
+            .join(".adopt-pr-1153-pr-backup");
+        fs::create_dir(&pr_backup).unwrap();
+        let metadata = pr_metadata(&fixture, 1153, "head");
+
+        let error = sync_with_fetch(&fixture.home, &fixture.slug, |_| {
+            Ok(vec![metadata])
+        })
+        .unwrap_err();
+
+        assert!(error.to_string().contains("ambiguous"));
+        assert!(pr_backup.is_dir());
+        fixture.remove();
+    }
+
+    #[test]
+    fn sync_preserves_stage_when_a_merge_source_is_missing() {
+        let fixture = test_fixture("recover-stage-missing-source");
+        insert_branch_target(&fixture, 1);
+        let stage = fixture
+            .home
+            .join(&fixture.slug)
+            .join(".adopt-pr-1153-stage-999");
+        fs::create_dir(&stage).unwrap();
+        fs::write(stage.join("only-pr-copy"), "evidence\n").unwrap();
+        let metadata = pr_metadata(&fixture, 1153, "head");
+
+        let error = sync_with_fetch(&fixture.home, &fixture.slug, |_| {
+            Ok(vec![metadata])
+        })
+        .unwrap_err();
+
+        assert!(error.to_string().contains("not both authoritative"));
+        assert!(stage.join("only-pr-copy").is_file());
+        fixture.remove();
+    }
+
+    #[test]
+    fn sync_preserves_mid_merge_artifacts_when_pr_source_is_missing() {
+        let fixture = test_fixture("recover-mid-merge-missing-pr");
+        insert_branch_target(&fixture, 1);
+        let repo_home = fixture.home.join(&fixture.slug);
+        let stage = repo_home.join(".adopt-pr-1153-stage-999");
+        fs::create_dir(&stage).unwrap();
+        fs::write(stage.join("only-pr-copy"), "evidence\n").unwrap();
+        let branch_backup = repo_home.join(".adopt-pr-1153-branch-backup");
+        fs::rename(&fixture.target_path, &branch_backup).unwrap();
+        let metadata = pr_metadata(&fixture, 1153, "head");
+
+        let error = sync_with_fetch(&fixture.home, &fixture.slug, |_| {
+            Ok(vec![metadata])
+        })
+        .unwrap_err();
+
+        assert!(error.to_string().contains("canonical PR source"));
+        assert!(stage.join("only-pr-copy").is_file());
+        assert!(branch_backup.is_dir());
+        assert!(!fixture.target_path.exists());
+        fixture.remove();
+    }
+
+    #[test]
+    fn sync_refuses_unrecognized_recovery_artifact() {
+        let fixture = test_fixture("recover-unrecognized");
+        insert_branch_target(&fixture, 1);
+        let artifact = fixture
+            .home
+            .join(&fixture.slug)
+            .join(".adopt-pr-1153-mystery");
+        fs::create_dir(&artifact).unwrap();
+
+        let error =
+            sync_with_fetch(&fixture.home, &fixture.slug, |_| Ok(Vec::new()))
+                .unwrap_err();
+
+        assert!(error.to_string().contains("unrecognized"));
+        assert!(artifact.is_dir());
+        fixture.remove();
+    }
+
+    #[test]
+    fn sync_refuses_non_directory_recovery_artifact() {
+        let fixture = test_fixture("recover-file");
+        insert_branch_target(&fixture, 1);
+        let artifact = fixture
+            .home
+            .join(&fixture.slug)
+            .join(".adopt-pr-1153-branch-backup");
+        fs::write(&artifact, "not a directory\n").unwrap();
+        let metadata = pr_metadata(&fixture, 1153, "head");
+
+        let error = sync_with_fetch(&fixture.home, &fixture.slug, |_| {
+            Ok(vec![metadata])
+        })
+        .unwrap_err();
+
+        assert!(error.to_string().contains("not a directory"));
+        assert!(artifact.is_file());
+        fixture.remove();
+    }
+
+    #[test]
+    fn sync_refuses_malformed_stage_name() {
+        let fixture = test_fixture("recover-stage-name");
+        insert_branch_target(&fixture, 1);
+        let artifact = fixture
+            .home
+            .join(&fixture.slug)
+            .join(".adopt-pr-1153-stage-not-a-pid");
+        fs::create_dir(&artifact).unwrap();
+
+        let error =
+            sync_with_fetch(&fixture.home, &fixture.slug, |_| Ok(Vec::new()))
+                .unwrap_err();
+
+        assert!(error.to_string().contains("unrecognized"));
+        assert!(artifact.is_dir());
+        fixture.remove();
+    }
+
+    #[test]
+    fn targeted_pr_creates_missing_branch_owned_target() {
+        let fixture = test_fixture("targeted-new-pr");
+        let metadata = pr_metadata(&fixture, 1153, "github-head");
+        let mut state = read_state(&fixture.home).unwrap();
+        let repo = state.repos.get_mut(&fixture.slug).unwrap();
+        assert!(repo.branches.is_empty());
+
+        let (branch, head, outcome) = apply_targeted_pr_metadata(
+            &fixture.home,
+            &fixture.slug,
+            repo,
+            &metadata,
+        )
+        .unwrap();
+
+        assert_eq!(branch, fixture.branch);
+        assert_eq!(head, "github-head");
+        assert_eq!(outcome.kind, AdoptionKind::Adopted);
+        let target = repo.branches.get(&fixture.branch).unwrap();
+        assert_eq!(target.directory, "pr-1153");
+        assert_eq!(
+            alias_branch(repo.pull_requests.get(&1153).unwrap(), 1153).unwrap(),
+            fixture.branch
+        );
+        assert!(
+            fixture
+                .home
+                .join(&fixture.slug)
+                .join(".adopt-pr-1153-branch-backup")
+                .is_dir()
+        );
+        fixture.remove();
+    }
+
+    #[test]
+    fn ambiguous_sync_persists_repairs_and_reports_skip() {
+        let fixture = test_fixture("ambiguous-repair");
+        write_review(&fixture.target_path, 5);
+        insert_branch_target(&fixture, 2);
+        let first = pr_metadata(&fixture, 10, "head-a");
+        let second = pr_metadata(&fixture, 11, "head-b");
+
+        let output = sync_with_fetch(&fixture.home, &fixture.slug, |_| {
+            Ok(vec![first, second])
+        })
+        .unwrap();
+
+        assert_eq!(branch_target(&fixture).next_review_number, 6);
+        assert_eq!(output.local_repaired.len(), 1);
+        assert_eq!(
+            output.skipped_ambiguous.get(&fixture.branch),
+            Some(&vec![10, 11])
+        );
+        assert!(output.adopted.is_empty());
+        fixture.remove();
+    }
+
+    #[test]
+    fn sync_migrates_legacy_pr_target_and_merges_its_history() {
+        let fixture = test_fixture("legacy-pr-target");
+        write_review_yaml(&fixture.target_path, 1, "branch:evidence");
+        insert_branch_target(&fixture, 2);
+        let pr_path = fixture.home.join(&fixture.slug).join("pr-1153");
+        fs::create_dir_all(&pr_path).unwrap();
+        write_review_yaml(&pr_path, 1, "pr:1153");
+        let mut state = read_state(&fixture.home).unwrap();
+        state
+            .repos
+            .get_mut(&fixture.slug)
+            .unwrap()
+            .pull_requests
+            .insert(
+                1153,
+                PrAlias::Legacy(Box::new(new_target(
+                    "pr-1153".to_owned(),
+                    "main",
+                    "base",
+                    "legacy-head",
+                ))),
+            );
+        write_state(&fixture.home, &state).unwrap();
+
+        let metadata = pr_metadata(&fixture, 1153, "github-head");
+        let output = sync_with_fetch(&fixture.home, &fixture.slug, |_| {
+            Ok(vec![metadata])
+        })
+        .unwrap();
+
+        assert_eq!(output.merged.get(&1153).unwrap().get(&1), Some(&2));
+        let state = read_state(&fixture.home).unwrap();
+        let repo = state.repos.get(&fixture.slug).unwrap();
+        assert_eq!(
+            alias_branch(repo.pull_requests.get(&1153).unwrap(), 1153).unwrap(),
+            fixture.branch
+        );
+        assert!(pr_path.join("rev-1.md").is_file());
+        assert!(pr_path.join("rev-2.md").is_file());
+        fixture.remove();
+    }
+
+    #[test]
+    fn sync_reports_known_branch_with_zero_matching_prs() {
+        let fixture = test_fixture("zero-match");
+        insert_branch_target(&fixture, 1);
+
+        let output =
+            sync_with_fetch(&fixture.home, &fixture.slug, |_| Ok(Vec::new()))
+                .unwrap();
+
+        assert_eq!(output.skipped_zero, vec![fixture.branch.clone()]);
+        assert!(output.adopted.is_empty());
+        fixture.remove();
+    }
+
+    #[test]
+    fn sync_does_not_adopt_deleted_local_branch() {
+        let fixture = test_fixture("deleted-branch");
+        write_review_yaml(&fixture.target_path, 1, "branch:evidence");
+        insert_branch_target(&fixture, 2);
+        run_git(&fixture.worktree, ["branch", "-D", &fixture.branch]);
+        let metadata = pr_metadata(&fixture, 1153, "github-head");
+
+        let result = sync_with_fetch(&fixture.home, &fixture.slug, |_| {
+            Ok(vec![metadata])
+        });
+
+        assert!(result.is_err());
+        assert!(fixture.target_path.join("rev-1.md").is_file());
+        assert!(!fixture.home.join(&fixture.slug).join("pr-1153").exists());
+        fixture.remove();
+    }
+
+    #[test]
+    fn sync_preserves_and_reports_unknown_backup() {
+        let fixture = test_fixture("scoped-cleanup");
+        insert_branch_target(&fixture, 1);
+        let unrelated = fixture
+            .home
+            .join(&fixture.slug)
+            .join(".adopt-pr-999-branch-backup");
+        fs::create_dir_all(&unrelated).unwrap();
+        let metadata = pr_metadata(&fixture, 1153, "head");
+
+        let error = sync_with_fetch(&fixture.home, &fixture.slug, |_| {
+            Ok(vec![metadata])
+        })
+        .unwrap_err();
+
+        assert!(error.to_string().contains("artifacts were preserved"));
+        assert!(unrelated.is_dir());
+        assert!(!fixture.home.join(&fixture.slug).join("pr-1153").exists());
+        fixture.remove();
+    }
+
+    #[test]
+    fn pending_snapshot_rejects_authority_change_with_same_shas() {
+        let fixture = test_fixture("authority-change");
+        let sha = exact_branch_sha(&fixture.worktree, &fixture.branch).unwrap();
+        let base = exact_branch_sha(&fixture.worktree, "main").unwrap();
+        let mut target = new_target("unused".to_owned(), "main", &base, &sha);
+        target.pending = Some(ReviewSnapshot {
+            head_sha: sha.clone(),
+            base_sha: base,
+            authority: "branch".to_owned(),
+        });
+
+        let error = validate_pending_snapshot(&target, "pr", &sha).unwrap_err();
+
+        assert!(error.to_string().contains("reopen to re-resolve"));
+        fixture.remove();
+    }
+
+    #[test]
+    fn combined_context_preserves_markdown_significant_whitespace() {
+        let branch = "    indented code\nline with break  \n";
+        let pr = "\n    PR code\n";
+
+        let combined = combined_context(branch, pr);
+
+        assert!(combined.contains(branch));
+        assert!(combined.contains(pr));
+    }
+
+    #[test]
+    fn target_output_includes_authority_and_head_diagnostics() {
+        let fixture = test_fixture("output-diagnostics");
+        insert_branch_target(&fixture, 1);
+        let metadata = pr_metadata(&fixture, 1153, "github-head");
+        let mut state = read_state(&fixture.home).unwrap();
+        let repo = state.repos.get_mut(&fixture.slug).unwrap();
+        apply_pr_metadata(
+            &fixture.home,
+            &fixture.slug,
+            repo,
+            &metadata,
+            None,
+            None,
+        )
+        .unwrap();
+        let target = repo.branches.get(&fixture.branch).unwrap();
+
+        let output = target_output(
+            &fixture.home,
+            &fixture.slug,
+            &fixture.worktree,
+            "pr:1153",
+            &fixture.branch,
+            target,
+            "github-head",
+        )
+        .unwrap();
+
+        assert_eq!(output.head_authority, "pr");
+        assert!(output.local_branch_sha.is_some());
+        assert_eq!(output.pr_head_sha.as_deref(), Some("github-head"));
+        assert!(output.divergence);
+        assert!(output.origin_branch_sha.is_none());
+        fixture.remove();
+    }
+
+    #[test]
+    fn local_head_policy_is_rejected_for_pr_selector() {
+        assert!(
+            validate_head_policy(None, Some(1153), Some(HeadPolicy::Local))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn status_counts_branch_and_pr_alias_once() {
+        let fixture = test_fixture("status-dedupe");
+        write_review_yaml(&fixture.target_path, 1, "branch:evidence");
+        fs::write(
+            fixture.target_path.join("rev-2.md"),
+            "- [ ] rev: P1 — shared finding\n",
+        )
+        .unwrap();
+        insert_branch_target(&fixture, 3);
+        let metadata = pr_metadata(&fixture, 1153, "head");
+        let mut state = read_state(&fixture.home).unwrap();
+        apply_pr_metadata(
+            &fixture.home,
+            &fixture.slug,
+            state.repos.get_mut(&fixture.slug).unwrap(),
+            &metadata,
+            None,
+            None,
+        )
+        .unwrap();
+        state.repos.insert(
+            "aaa__without-pr".to_owned(),
+            Repo {
+                path: fixture.worktree.clone(),
+                remote: "github.com/example/without-pr".to_owned(),
+                branches: BTreeMap::new(),
+                pull_requests: BTreeMap::new(),
+            },
+        );
+        let all = collect_status_targets(
+            &fixture.home,
+            &state,
+            Some(&fixture.slug),
+            None,
+            None,
+        )
+        .unwrap();
+        let by_branch = collect_status_targets(
+            &fixture.home,
+            &state,
+            Some(&fixture.slug),
+            Some(fixture.branch.clone()),
+            None,
+        )
+        .unwrap();
+        let by_pr = collect_status_targets(
+            &fixture.home,
+            &state,
+            Some(&fixture.slug),
+            None,
+            Some(1153),
+        )
+        .unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].todo, 1);
+        assert_eq!(by_branch[0].target_path, by_pr[0].target_path);
+        let global_by_pr = collect_status_targets(
+            &fixture.home,
+            &state,
+            None,
+            None,
+            Some(1153),
+        )
+        .unwrap();
+        assert_eq!(global_by_pr.len(), 1);
+        fixture.remove();
+    }
+
     struct TestFixture {
         home: PathBuf,
         worktree: PathBuf,
@@ -1332,7 +3783,7 @@ mod tests {
 
         let target_path = home
             .join(&slug)
-            .join(format!("br-{}", encode_component(&branch)));
+            .join(format!("br-v2-{}", encode_component(&branch)));
         fs::create_dir_all(&target_path).unwrap();
         let mut state = State::default();
         state.repos.insert(
@@ -1360,28 +3811,59 @@ mod tests {
             .unwrap();
     }
 
+    fn write_review_yaml(target_path: &Path, number: u64, target: &str) {
+        fs::write(
+            target_path.join(format!("rev-{number}.md")),
+            format!(
+                "---\nreview: {number}\ntarget: {target}\n\
+                 base_sha: base\nhead_sha: head\n---\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    fn pr_metadata(
+        fixture: &TestFixture,
+        number: u64,
+        head_sha: &str,
+    ) -> PrMetadata {
+        PrMetadata {
+            number,
+            state: "OPEN".to_owned(),
+            head_ref_name: fixture.branch.clone(),
+            head_ref_oid: head_sha.to_owned(),
+            head_repository_owner: RepositoryOwner {
+                login: "example".to_owned(),
+            },
+            head_repository: RepositoryName {
+                name: "reviews".to_owned(),
+            },
+            base_ref_name: "main".to_owned(),
+            base_ref_oid: git(&fixture.worktree, ["rev-parse", "main"]).unwrap(),
+        }
+    }
+
     fn insert_branch_target(fixture: &TestFixture, next_review_number: u64) {
         let mut state = read_state(&fixture.home).unwrap();
-        state.repos.get_mut(&fixture.slug).unwrap().branches.insert(
-            fixture.branch.clone(),
-            Target {
-                directory: fixture
-                    .target_path
-                    .file_name()
-                    .unwrap()
-                    .to_str()
-                    .unwrap()
-                    .to_owned(),
-                base_ref: "main".to_owned(),
-                base_sha: git(&fixture.worktree, ["rev-parse", "main"]).unwrap(),
-                last_reviewed_head_sha: git(
-                    &fixture.worktree,
-                    ["rev-parse", &fixture.branch],
-                )
-                .unwrap(),
-                next_review_number,
-            },
+        let mut target = new_target(
+            fixture
+                .target_path
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_owned(),
+            "main",
+            &git(&fixture.worktree, ["rev-parse", "main"]).unwrap(),
+            &git(&fixture.worktree, ["rev-parse", &fixture.branch]).unwrap(),
         );
+        target.next_review_number = next_review_number;
+        state
+            .repos
+            .get_mut(&fixture.slug)
+            .unwrap()
+            .branches
+            .insert(fixture.branch.clone(), target);
         write_state(&fixture.home, &state).unwrap();
     }
 

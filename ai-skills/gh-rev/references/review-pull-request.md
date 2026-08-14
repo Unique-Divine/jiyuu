@@ -47,10 +47,11 @@ For a request such as "Review PR #1153 with gh-rev":
 PR mode uses the GitHub PR head as authority. Do not use `--head local` with
 `--pr`, and do not silently review extra local commits.
 
-## Compatibility when remote-only synchronization is unavailable
+## Local branch prerequisite
 
-An older installed binary may require an exact local branch before it can
-allocate a PR revision. In that case:
+The current PR adoption model requires an exact local branch matching the
+GitHub head branch, even though the GitHub PR head SHA remains authoritative
+for the review. In that case:
 
 - Still complete the requested online review from immutable GitHub base/head
   evidence; lack of a source checkout is not a reason to skip review.

@@ -19,9 +19,12 @@ Read only the reference matching the user's task:
   [references/review-local-branch.md](references/review-local-branch.md).
 - "Review the published PR for this branch" or "Review PR #1153." Read
   [references/review-pull-request.md](references/review-pull-request.md).
-- "Read the revisions and fix their feedback," "Are there unresolved
-  reviews?" or "Resolve the requested changes." Read
+- "Are there unresolved reviews?", "What feedback remains?", or "Resolve this
+  finding after verification." Read
   [references/work-revisions.md](references/work-revisions.md).
+- "Implement the submitted reviews," "Address the review feedback," or
+  "Automatically fix clear findings while implementing this slice." Read
+  [references/implement-review-feedback.md](references/implement-review-feedback.md).
 - For another independent review pass, use the applicable local-branch or PR
   reference. A new pass receives a new revision; addressing an existing pass
   does not.

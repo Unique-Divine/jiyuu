@@ -32,11 +32,29 @@ This workstation keeps public and private skills in different repositories:
 
 - Public: `/home/realu/ki/boku/jiyuu/ai-skills/<name>`
 - Private: `/home/realu/ki/boku/priv-skills/<name>`
+- Repository-owned: `/home/realu/ki/<repo>/ai-skills/<name>`
 
 Directories `~/.agents/skills` and `~/.cursor/skills` are managed symlinked views
 of the combined skill set. Editing through either view changes the canonical
 repository file immediately, but resolve the path before reporting which
 repository owns the skill.
+
+Use a repository-owned skill for practitioner guidance that teammates should
+receive with the source repository. Keep one canonical directory under
+`ai-skills/`, and expose it inside that repository through relative link
+`.agents/skills -> ../ai-skills`. When the local skill union is configured to
+include the repository source, it links to the same canonical files; do not
+copy the skill into the public or private skill repository.
+
+Record repository provenance with a string metadata field:
+
+```yaml
+metadata:
+  repository: NibiruChain/example
+```
+
+This custom field documents ownership. Git access and the repository-local
+discovery link control availability; metadata does not.
 
 Use a private skill for personal data, private operations, credentials-adjacent
 workflows, or instructions that should not be published. Mark it explicitly:
