@@ -677,6 +677,43 @@ fn open_with_head(
     base: &str,
     head_policy: Option<HeadPolicy>,
 ) -> Result<()> {
+    open_with_head_with_discovered_pr_fetch(
+        home,
+        repo,
+        path_override,
+        remote_override,
+        branch,
+        pr,
+        base,
+        head_policy,
+        fetch_discovered_pr,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+/// Opens a discovered or explicitly selected target after resolving a matching
+/// PR through the supplied discovery fetch function.
+///
+/// The injected function keeps command behavior testable without making a
+/// network request. A single discovered PR becomes the canonical target;
+/// otherwise the selected branch remains the target.
+fn open_with_head_with_discovered_pr_fetch<F>(
+    home: &Path,
+    repo: Option<&str>,
+    path_override: Option<&Path>,
+    remote_override: Option<&str>,
+    branch: Option<String>,
+    pr: Option<u64>,
+    base: &str,
+    head_policy: Option<HeadPolicy>,
+    fetch_discovered: F,
+) -> Result<()>
+where
+    F: FnOnce(
+        &RepoDiscovery,
+        Option<&str>,
+    ) -> Result<Option<(String, PrMetadata)>>,
+{
     let discovery = if repo.is_none() {
         Some(discover_repository(path_override, remote_override)?)
     } else {
@@ -692,7 +729,6 @@ fn open_with_head(
             .slug
             .to_owned(),
     };
-    validate_head_policy(branch.as_deref(), pr, head_policy)?;
     let prefetched_pr = if let Some(number) = pr {
         if let Some(discovery) = &discovery {
             Some((
@@ -703,9 +739,16 @@ fn open_with_head(
         } else {
             fetch_targeted_pr_without_lock(home, &slug, Some(number))?
         }
+    } else if let Some(discovery) = &discovery {
+        fetch_discovered(discovery, branch.as_deref())?
     } else {
         None
     };
+    let pr = prefetched_pr
+        .as_ref()
+        .map(|(_, metadata)| metadata.number)
+        .or(pr);
+    validate_head_policy(branch.as_deref(), pr, head_policy)?;
     let _lock = if prefetched_pr.is_some() {
         try_lock(home)?
     } else {
@@ -726,7 +769,7 @@ fn open_with_head(
             repo,
             &repo_path,
             TargetRequest {
-                branch,
+                branch: if pr.is_some() { None } else { branch },
                 pr,
                 base,
                 head_policy,
@@ -778,6 +821,42 @@ fn next_with_head(
     label: Option<String>,
     head_policy: Option<HeadPolicy>,
 ) -> Result<()> {
+    next_with_head_with_discovered_pr_fetch(
+        home,
+        repo,
+        path_override,
+        remote_override,
+        branch,
+        pr,
+        label,
+        head_policy,
+        fetch_discovered_pr,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+/// Allocates the next review for a discovered or explicit target after the
+/// supplied function resolves any matching open PR.
+///
+/// This function preserves `open`'s target-selection rule so the pending
+/// snapshot and allocated revision use the same branch or canonical PR ledger.
+fn next_with_head_with_discovered_pr_fetch<F>(
+    home: &Path,
+    repo: Option<&str>,
+    path_override: Option<&Path>,
+    remote_override: Option<&str>,
+    branch: Option<String>,
+    pr: Option<u64>,
+    label: Option<String>,
+    head_policy: Option<HeadPolicy>,
+    fetch_discovered: F,
+) -> Result<()>
+where
+    F: FnOnce(
+        &RepoDiscovery,
+        Option<&str>,
+    ) -> Result<Option<(String, PrMetadata)>>,
+{
     let discovery = if repo.is_none() {
         Some(discover_repository(path_override, remote_override)?)
     } else {
@@ -793,7 +872,6 @@ fn next_with_head(
             .slug
             .to_owned(),
     };
-    validate_head_policy(branch.as_deref(), pr, head_policy)?;
     let prefetched_pr = if let Some(number) = pr {
         if let Some(discovery) = &discovery {
             Some((
@@ -804,9 +882,16 @@ fn next_with_head(
         } else {
             fetch_targeted_pr_without_lock(home, &slug, Some(number))?
         }
+    } else if let Some(discovery) = &discovery {
+        fetch_discovered(discovery, branch.as_deref())?
     } else {
         None
     };
+    let pr = prefetched_pr
+        .as_ref()
+        .map(|(_, metadata)| metadata.number)
+        .or(pr);
+    validate_head_policy(branch.as_deref(), pr, head_policy)?;
     let _lock = if prefetched_pr.is_some() {
         try_lock(home)?
     } else {
@@ -831,7 +916,7 @@ fn next_with_head(
             repo,
             &repo_path,
             TargetRequest {
-                branch,
+                branch: if pr.is_some() { None } else { branch },
                 pr,
                 base: &base,
                 head_policy,
@@ -910,6 +995,37 @@ fn context(
     branch: Option<String>,
     pr: Option<u64>,
 ) -> Result<()> {
+    context_with_discovered_pr_fetch(
+        home,
+        repo,
+        path_override,
+        remote_override,
+        branch,
+        pr,
+        fetch_discovered_pr,
+    )
+}
+
+/// Reads or creates context for a discovered target after resolving a matching
+/// PR through the supplied discovery fetch function.
+///
+/// Context follows the same canonical-history selection as `open` and `next`
+/// without allocating a revision.
+fn context_with_discovered_pr_fetch<F>(
+    home: &Path,
+    repo: Option<&str>,
+    path_override: Option<&Path>,
+    remote_override: Option<&str>,
+    branch: Option<String>,
+    pr: Option<u64>,
+    fetch_discovered: F,
+) -> Result<()>
+where
+    F: FnOnce(
+        &RepoDiscovery,
+        Option<&str>,
+    ) -> Result<Option<(String, PrMetadata)>>,
+{
     let discovery = if repo.is_none() {
         Some(discover_repository(path_override, remote_override)?)
     } else {
@@ -935,9 +1051,15 @@ fn context(
         } else {
             fetch_targeted_pr_without_lock(home, &slug, Some(number))?
         }
+    } else if let Some(discovery) = &discovery {
+        fetch_discovered(discovery, branch.as_deref())?
     } else {
         None
     };
+    let pr = prefetched_pr
+        .as_ref()
+        .map(|(_, metadata)| metadata.number)
+        .or(pr);
     let _lock = if prefetched_pr.is_some() {
         try_lock(home)?
     } else {
@@ -963,7 +1085,7 @@ fn context(
             repo,
             &repo_path,
             TargetRequest {
-                branch,
+                branch: if pr.is_some() { None } else { branch },
                 pr,
                 base: &base,
                 head_policy,
@@ -1512,17 +1634,39 @@ fn gh_pr_for_remote(remote: &str, number: u64) -> Result<PrMetadata> {
 
 fn gh_open_prs(repo: &Repo) -> Result<Vec<PrMetadata>> {
     let (owner, name) = repository_identity(repo)?;
+    gh_open_prs_for_remote(&format!("github.com/{owner}/{name}"), None)
+}
+
+/// Lists open pull requests in one repository, optionally restricted to an
+/// exact head-branch name.
+///
+/// The `remote` argument is the normalized configured repository identity,
+/// such as `github.com/owner/repository`, rather than a Git remote name.
+fn gh_open_prs_for_remote(
+    remote: &str,
+    branch: Option<&str>,
+) -> Result<Vec<PrMetadata>> {
+    let (owner, name) = remote
+        .split_once('/')
+        .and_then(|(_, path)| path.split_once('/'))
+        .context("remote must have host/owner/repository form")?;
     let repository = format!("{owner}/{name}");
-    let output = Command::new("gh")
+    let mut command = Command::new("gh");
+    command.args([
+        "pr",
+        "list",
+        "--repo",
+        &repository,
+        "--state",
+        "open",
+        "--limit",
+        "1000",
+    ]);
+    if let Some(branch) = branch {
+        command.args(["--head", branch]);
+    }
+    let output = command
         .args([
-            "pr",
-            "list",
-            "--repo",
-            &repository,
-            "--state",
-            "open",
-            "--limit",
-            "1000",
             "--json",
             "number,state,headRefName,headRefOid,headRepositoryOwner,\
              headRepository,baseRefName,baseRefOid",
@@ -1536,6 +1680,47 @@ fn gh_open_prs(repo: &Repo) -> Result<Vec<PrMetadata>> {
         );
     }
     serde_json::from_slice(&output.stdout).context("invalid gh PR metadata")
+}
+
+/// Fetches the one open PR whose head branch matches the discovered worktree.
+///
+/// A detached worktree has no branch and therefore no automatic PR target.
+fn fetch_discovered_pr(
+    discovery: &RepoDiscovery,
+    branch: Option<&str>,
+) -> Result<Option<(String, PrMetadata)>> {
+    fetch_discovered_pr_with(discovery, branch, gh_open_prs_for_remote)
+}
+
+/// Selects one exact head-branch match from a discovery-scoped PR query.
+///
+/// Zero matches preserve branch history. More than one match is ambiguous and
+/// fails before the caller obtains a ledger lock or mutates ledger state.
+fn fetch_discovered_pr_with<F>(
+    discovery: &RepoDiscovery,
+    branch: Option<&str>,
+    fetch: F,
+) -> Result<Option<(String, PrMetadata)>>
+where
+    F: FnOnce(&str, Option<&str>) -> Result<Vec<PrMetadata>>,
+{
+    let Some(branch) = branch else {
+        return Ok(None);
+    };
+    let matches: Vec<_> = fetch(&discovery.remote, Some(branch))?
+        .into_iter()
+        .filter(|metadata| metadata.head_ref_name == branch)
+        .collect();
+    match matches.len() {
+        0 => Ok(None),
+        1 => Ok(Some((
+            discovery.remote.clone(),
+            matches.into_iter().next().unwrap(),
+        ))),
+        _ => bail!(
+            "multiple open pull requests match current branch {branch}; pass --pr to select one"
+        ),
+    }
 }
 
 fn sync(
@@ -2891,7 +3076,7 @@ mod tests {
         );
         run_git(&fixture.worktree, ["checkout", &fixture.branch]);
 
-        open_with_head(
+        open_with_head_with_discovered_pr_fetch(
             &fixture.home,
             None,
             Some(&fixture.worktree),
@@ -2900,9 +3085,10 @@ mod tests {
             None,
             "main",
             None,
+            |_, _| Ok(None),
         )
         .unwrap();
-        open_with_head(
+        open_with_head_with_discovered_pr_fetch(
             &fixture.home,
             None,
             Some(&fixture.worktree),
@@ -2911,6 +3097,7 @@ mod tests {
             None,
             "main",
             None,
+            |_, _| Ok(None),
         )
         .unwrap();
         let state = read_state(&fixture.home).unwrap();
@@ -2918,6 +3105,81 @@ mod tests {
         assert_eq!(repo.path, fixture.worktree);
         assert!(repo.branches.contains_key(&fixture.branch));
         assert_eq!(state.repos.len(), 1);
+        fixture.remove();
+    }
+
+    #[test]
+    fn open_from_discovered_worktree_adopts_matching_pr_history() {
+        let fixture = unregistered_fixture("open-discovery-pr");
+        run_git(
+            &fixture.worktree,
+            [
+                "remote",
+                "add",
+                "origin",
+                "git@github.com:example/reviews.git",
+            ],
+        );
+        run_git(&fixture.worktree, ["checkout", &fixture.branch]);
+        let head =
+            git(&fixture.worktree, ["rev-parse", &fixture.branch]).unwrap();
+        let metadata = pr_metadata(&fixture, 1153, &head);
+
+        open_with_head_with_discovered_pr_fetch(
+            &fixture.home,
+            None,
+            Some(&fixture.worktree),
+            None,
+            None,
+            None,
+            "main",
+            None,
+            |discovery, branch| {
+                assert_eq!(discovery.remote, "github.com/example/reviews");
+                assert_eq!(branch, Some(fixture.branch.as_str()));
+                Ok(Some((discovery.remote.clone(), metadata)))
+            },
+        )
+        .unwrap();
+
+        let state = read_state(&fixture.home).unwrap();
+        let repo = state.repos.get(&fixture.slug).unwrap();
+        assert_eq!(
+            alias_branch(repo.pull_requests.get(&1153).unwrap(), 1153).unwrap(),
+            fixture.branch
+        );
+        assert_eq!(repo.branches[&fixture.branch].directory, "pr-1153");
+        assert!(fixture.home.join(&fixture.slug).join("pr-1153").is_dir());
+        fixture.remove();
+    }
+
+    #[test]
+    fn discovered_pr_lookup_rejects_multiple_exact_matches() {
+        let fixture = unregistered_fixture("discovery-pr-ambiguous");
+        run_git(
+            &fixture.worktree,
+            [
+                "remote",
+                "add",
+                "origin",
+                "git@github.com:example/reviews.git",
+            ],
+        );
+        run_git(&fixture.worktree, ["checkout", &fixture.branch]);
+        let discovery =
+            discover_repository(Some(&fixture.worktree), None).unwrap();
+        let head =
+            git(&fixture.worktree, ["rev-parse", &fixture.branch]).unwrap();
+        let first = pr_metadata(&fixture, 1153, &head);
+        let second = pr_metadata(&fixture, 1154, &head);
+
+        let error = fetch_discovered_pr_with(
+            &discovery,
+            Some(&fixture.branch),
+            |_, _| Ok(vec![first, second]),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("multiple open pull requests"));
         fixture.remove();
     }
 
@@ -2934,7 +3196,7 @@ mod tests {
             ],
         );
         run_git(&fixture.worktree, ["checkout", &fixture.branch]);
-        next_with_head(
+        next_with_head_with_discovered_pr_fetch(
             &fixture.home,
             None,
             Some(&fixture.worktree),
@@ -2943,6 +3205,7 @@ mod tests {
             None,
             None,
             None,
+            |_, _| Ok(None),
         )
         .unwrap();
         let state = read_state(&fixture.home).unwrap();
@@ -2971,13 +3234,14 @@ mod tests {
             ],
         );
         run_git(&fixture.worktree, ["checkout", &fixture.branch]);
-        context(
+        context_with_discovered_pr_fetch(
             &fixture.home,
             None,
             Some(&fixture.worktree),
             None,
             None,
             None,
+            |_, _| Ok(None),
         )
         .unwrap();
         let state = read_state(&fixture.home).unwrap();

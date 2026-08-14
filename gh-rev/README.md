@@ -16,6 +16,12 @@ gh-rev status todo
 gh-rev sync
 ```
 
+When the current branch has exactly one open pull request in the checkout's
+repository, `open`, `next`, and `context` adopt or reuse that PR's canonical
+`pr-N` history automatically. No `register`, `sync`, or `--pr` selector is
+needed. With no matching PR, the commands continue in branch history; an
+ambiguous match fails and asks for an explicit `--pr` selection.
+
 Use explicit selectors when discovery is not desired:
 
 ```bash
@@ -30,10 +36,11 @@ base/head snapshot. `next` refreshes the same authority and refuses allocation
 if either commit moved. A direct `next` performs selection and allocation while
 holding the workspace lock.
 
-`-C <path>` discovers another worktree. `--remote <name>` selects the only
-remote that discovery should use when multiple remotes are configured.
+`-C <path>` discovers another worktree.
 
-Discover open pull requests and repair every local review counter:
+Use `sync` to repair counters, recover interrupted adoption, and reconcile
+existing branch histories in bulk. It is not required before ordinary review
+creation:
 
 ```bash
 gh-rev sync owner__repo
@@ -42,10 +49,9 @@ gh-rev next owner__repo --pr 1153
 ```
 
 GitHub metadata is read through the authenticated `gh` executable. Adoption
-requires an open PR whose head owner and repository match the registered
-checkout and whose exact local head branch exists. Targeted `--pr` operations
-may create the branch-owned ledger when none exists, then refresh that PR
-directly without rediscovering its alias. Fork PRs are rejected.
+requires an open PR whose head owner and repository match the checkout and
+whose exact local head branch exists. Targeted `--pr` operations remain
+available for an explicit published-PR review. Fork PRs are rejected.
 
 `register` remains available for migration and explicit offline workflows, but
 automatic discovery makes it optional for normal command usage.
