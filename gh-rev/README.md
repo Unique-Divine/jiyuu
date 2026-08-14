@@ -6,12 +6,22 @@ repositories.
 
 ## Command contract
 
-Register a checkout once, then open or allocate against an exact local branch:
+Run directly from the current worktree (or a discovered checkout with `-C`):
 
 ```bash
-gh-rev register /path/to/checkout
+cd /path/to/worktree
+gh-rev open
+gh-rev next --label follow-up
+gh-rev status todo
+gh-rev sync
+```
+
+Use explicit selectors when discovery is not desired:
+
+```bash
 gh-rev open owner__repo --branch feature/name --base main
 gh-rev next owner__repo --branch feature/name --label follow-up
+gh-rev context owner__repo --pr 1153
 ```
 
 Branch and base names resolve only through `refs/heads/<name>^{commit}`. A tag
@@ -19,6 +29,9 @@ with the same name cannot select the review range. `open` saves the selected
 base/head snapshot. `next` refreshes the same authority and refuses allocation
 if either commit moved. A direct `next` performs selection and allocation while
 holding the workspace lock.
+
+`-C <path>` discovers another worktree. `--remote <name>` selects the only
+remote that discovery should use when multiple remotes are configured.
 
 Discover open pull requests and repair every local review counter:
 
@@ -33,6 +46,9 @@ requires an open PR whose head owner and repository match the registered
 checkout and whose exact local head branch exists. Targeted `--pr` operations
 may create the branch-owned ledger when none exists, then refresh that PR
 directly without rediscovering its alias. Fork PRs are rejected.
+
+`register` remains available for migration and explicit offline workflows, but
+automatic discovery makes it optional for normal command usage.
 
 `sync` snapshots repository identity under a short lock, releases it before
 invoking `gh`, then reacquires it and rereads current state before any ledger

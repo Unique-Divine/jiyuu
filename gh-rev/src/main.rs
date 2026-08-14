@@ -339,6 +339,7 @@ struct StatusOutput {
 /// Per-target counts and unresolved finding locations within a status response.
 struct TargetStatus {
     repo: String,
+    discovery: Option<DiscoveryMetadata>,
     target: String,
     target_path: PathBuf,
     total: usize,
@@ -347,7 +348,7 @@ struct TargetStatus {
     todo_findings: Vec<FindingOutput>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 #[serde(rename_all = "snake_case")]
 struct DiscoveryMetadata {
     discovered_repo: String,
@@ -525,8 +526,13 @@ fn discover_repository(
         None => env::current_dir()
             .context("failed to determine current directory")?,
     };
-    let worktree_root =
+    let listed_worktrees = parse_worktree_list(&requested)?;
+    let detected_root =
         PathBuf::from(git(&requested, ["rev-parse", "--show-toplevel"])?);
+    let worktree_root = listed_worktrees
+        .into_iter()
+        .find(|path| requested.starts_with(path))
+        .unwrap_or(detected_root);
     let common_dir =
         PathBuf::from(git(&worktree_root, ["rev-parse", "--git-common-dir"])?);
     let git_common_dir = if common_dir.is_absolute() {
@@ -544,6 +550,11 @@ fn discover_repository(
         .filter(|name| !name.is_empty())
         .map(str::to_owned)
         .collect();
+    let available_remotes = if remotes.is_empty() {
+        "<none>".to_owned()
+    } else {
+        remotes.join(", ")
+    };
     let configured_upstream = branch.as_ref().and_then(|name| {
         git_dynamic(
             &worktree_root,
@@ -567,11 +578,14 @@ fn discover_repository(
                 .then(|| "origin".to_owned())
         })
         .or_else(|| (remotes.len() == 1).then(|| remotes[0].clone()))
-        .context("could not select a Git remote; pass --remote <name>")?;
+        .with_context(|| {
+            format!(
+                "could not select a Git remote; available remotes: {available_remotes}; pass --remote <name>"
+            )
+        })?;
     if !remotes.iter().any(|name| name == &remote_name) {
         bail!(
-            "selected remote {remote_name} is not configured; available remotes: {}",
-            remotes.join(", ")
+            "selected remote {remote_name} is not configured; available remotes: {available_remotes}; pass --remote <name>"
         );
     }
     let remote_url =
@@ -593,6 +607,25 @@ fn discover_repository(
             "configured".to_owned()
         },
     })
+}
+
+fn parse_worktree_list(requested: &Path) -> Result<Vec<PathBuf>> {
+    let output = git(requested, ["worktree", "list", "--porcelain"]).ok();
+    let Some(raw) = output else {
+        return Ok(Vec::new());
+    };
+    let mut worktrees = Vec::new();
+    for line in raw.lines() {
+        if let Some(path) = line.strip_prefix("worktree ") {
+            let candidate = PathBuf::from(path);
+            if let Ok(canonical) = fs::canonicalize(&candidate) {
+                worktrees.push(canonical);
+            } else {
+                worktrees.push(candidate);
+            }
+        }
+    }
+    Ok(worktrees)
 }
 
 fn ensure_repo_from_discovery<'a>(
@@ -1019,6 +1052,7 @@ fn status(
         .or_else(|| discovery.as_ref().and_then(|value| value.branch.clone()));
     let _lock = lock(home)?;
     let mut state = read_state(home)?;
+    let discovery_output = discovery_metadata(&discovery);
     if let Some(discovery) = discovery.as_ref() {
         let (_, changed) = ensure_repo_from_discovery(
             &mut state,
@@ -1035,6 +1069,7 @@ fn status(
         repo_filter.as_deref(),
         branch,
         pr,
+        discovery_output,
     )?;
     if todo_only {
         targets.retain(|target| target.todo > 0);
@@ -1056,6 +1091,7 @@ fn collect_status_targets(
     repo_filter: Option<&str>,
     branch: Option<String>,
     pr: Option<u64>,
+    discovery: Option<DiscoveryMetadata>,
 ) -> Result<Vec<TargetStatus>> {
     let mut targets = Vec::new();
     for (slug, repo) in &state.repos {
@@ -1084,7 +1120,13 @@ fn collect_status_targets(
                 || format!("branch:{branch_name}"),
                 |number| format!("pr:{number}"),
             );
-            targets.push(target_status(home, slug, target_name, target)?);
+            targets.push(target_status(
+                home,
+                slug,
+                target_name,
+                target,
+                discovery.clone(),
+            )?);
         }
     }
     Ok(targets)
@@ -1502,6 +1544,21 @@ fn sync(
     path_override: Option<&Path>,
     remote_override: Option<&str>,
 ) -> Result<()> {
+    let output =
+        sync_with(home, repo, path_override, remote_override, gh_open_prs)?;
+    print_json(&output)
+}
+
+fn sync_with<F>(
+    home: &Path,
+    repo: Option<&str>,
+    path_override: Option<&Path>,
+    remote_override: Option<&str>,
+    fetch: F,
+) -> Result<SyncOutput>
+where
+    F: FnOnce(&Repo) -> Result<Vec<PrMetadata>>,
+{
     let discovery = if repo.is_none() {
         Some(discover_repository(path_override, remote_override)?)
     } else {
@@ -1520,8 +1577,7 @@ fn sync(
             write_state(home, &state)?;
         }
     }
-    let output = sync_with_fetch(home, &slug, gh_open_prs)?;
-    print_json(&output)
+    sync_with_fetch(home, &slug, fetch)
 }
 
 fn sync_with_fetch<F>(home: &Path, slug: &str, fetch: F) -> Result<SyncOutput>
@@ -2181,10 +2237,13 @@ fn target_output(
     let reviews = review_paths(&target_path)?;
     let local_branch_sha =
         optional_exact_ref(repo_path, &format!("refs/heads/{branch_name}"));
-    let origin_branch_sha = optional_exact_ref(
-        repo_path,
-        &format!("refs/remotes/origin/{branch_name}"),
-    );
+    let origin_ref = discovery
+        .as_ref()
+        .map(|value| {
+            format!("refs/remotes/{}/{}", value.selected_remote, branch_name)
+        })
+        .unwrap_or_else(|| format!("refs/remotes/origin/{branch_name}"));
+    let origin_branch_sha = optional_exact_ref(repo_path, &origin_ref);
     let pr_head_sha = target.pull_request_head_sha.clone();
     let divergence = pr_head_sha
         .as_deref()
@@ -2286,6 +2345,7 @@ fn target_status(
     slug: &str,
     target: String,
     state: &Target,
+    discovery: Option<DiscoveryMetadata>,
 ) -> Result<TargetStatus> {
     let target_path = home.join(slug).join(&state.directory);
     let mut total = 0;
@@ -2311,6 +2371,7 @@ fn target_status(
     }
     Ok(TargetStatus {
         repo: slug.to_owned(),
+        discovery,
         target,
         target_path,
         total,
@@ -2615,8 +2676,210 @@ mod tests {
     }
 
     #[test]
+    fn discovery_prefers_cwd_when_no_explicit_path() {
+        let fixture = unregistered_fixture("discovery-cwd");
+        run_git(
+            &fixture.worktree,
+            [
+                "remote",
+                "add",
+                "origin",
+                "git@github.com:example/reviews.git",
+            ],
+        );
+        run_git(&fixture.worktree, ["checkout", &fixture.branch]);
+        let original = env::current_dir().unwrap();
+        env::set_current_dir(&fixture.worktree).unwrap();
+        let discovery = discover_repository(None, None).unwrap();
+        env::set_current_dir(original).unwrap();
+        assert_eq!(discovery.slug, fixture.slug);
+        assert_eq!(discovery.source, "cwd");
+        fixture.remove();
+    }
+
+    #[test]
+    fn discover_fails_cleanly_from_non_git_path() {
+        let path = temp_home("not-git");
+        fs::create_dir_all(&path).unwrap();
+        let error = discover_repository(Some(&path), None).unwrap_err();
+        assert!(
+            error.to_string().contains("not a git repository")
+                || error.to_string().contains("fatal")
+        );
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn discovery_works_from_detached_head() {
+        let fixture = unregistered_fixture("discovery-detached");
+        run_git(
+            &fixture.worktree,
+            [
+                "remote",
+                "add",
+                "origin",
+                "git@github.com:example/reviews.git",
+            ],
+        );
+        let head = git(&fixture.worktree, ["rev-parse", "HEAD"]).unwrap();
+        run_git(&fixture.worktree, ["checkout", "--detach", &head]);
+        let discovery =
+            discover_repository(Some(&fixture.worktree), None).unwrap();
+        assert!(discovery.branch.is_none());
+        assert_eq!(discovery.remote_name, "origin");
+        fixture.remove();
+    }
+
+    #[test]
+    fn discover_remote_precedence_upstream_before_push_default() {
+        let fixture = unregistered_fixture("remote-precedence-upstream");
+        run_git(
+            &fixture.worktree,
+            [
+                "remote",
+                "add",
+                "origin",
+                "git@github.com:example/origin.git",
+            ],
+        );
+        run_git(
+            &fixture.worktree,
+            [
+                "remote",
+                "add",
+                "upstream",
+                "git@github.com:example/upstream.git",
+            ],
+        );
+        run_git(
+            &fixture.worktree,
+            [
+                "remote",
+                "add",
+                "mirror",
+                "git@github.com:example/mirror.git",
+            ],
+        );
+        run_git(&fixture.worktree, ["checkout", &fixture.branch]);
+        run_git(
+            &fixture.worktree,
+            [
+                "config",
+                &format!("branch.{}.remote", fixture.branch),
+                "upstream",
+            ],
+        );
+        run_git(
+            &fixture.worktree,
+            ["config", "remote.pushDefault", "mirror"],
+        );
+        let discovery =
+            discover_repository(Some(&fixture.worktree), None).unwrap();
+        assert_eq!(discovery.remote_name, "upstream");
+        fixture.remove();
+    }
+
+    #[test]
+    fn discover_remote_precedence_push_default_before_origin_and_sole() {
+        let fixture = unregistered_fixture("remote-precedence-pushdefault");
+        run_git(
+            &fixture.worktree,
+            [
+                "remote",
+                "add",
+                "origin",
+                "git@github.com:example/origin.git",
+            ],
+        );
+        run_git(
+            &fixture.worktree,
+            [
+                "remote",
+                "add",
+                "mirror",
+                "git@github.com:example/mirror.git",
+            ],
+        );
+        run_git(&fixture.worktree, ["checkout", &fixture.branch]);
+        run_git(
+            &fixture.worktree,
+            ["config", "remote.pushDefault", "mirror"],
+        );
+        let discovery =
+            discover_repository(Some(&fixture.worktree), None).unwrap();
+        assert_eq!(discovery.remote_name, "mirror");
+        run_git(
+            &fixture.worktree,
+            ["config", "--unset", "remote.pushDefault"],
+        );
+        run_git(&fixture.worktree, ["remote", "remove", "origin"]);
+        let discovery =
+            discover_repository(Some(&fixture.worktree), None).unwrap();
+        assert_eq!(discovery.remote_name, "mirror");
+        fixture.remove();
+    }
+
+    #[test]
+    fn discover_remote_selection_rejects_ambiguous_remote_sets() {
+        let fixture = unregistered_fixture("remote-ambiguous");
+        run_git(
+            &fixture.worktree,
+            ["remote", "add", "first", "git@github.com:example/first.git"],
+        );
+        run_git(
+            &fixture.worktree,
+            [
+                "remote",
+                "add",
+                "second",
+                "git@github.com:example/second.git",
+            ],
+        );
+        let error =
+            discover_repository(Some(&fixture.worktree), None).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("could not select a Git remote"));
+        assert!(message.contains("pass --remote <name>"));
+        assert!(message.contains("first"));
+        assert!(message.contains("second"));
+        fixture.remove();
+    }
+
+    #[test]
+    fn explicit_remote_override_ignores_unrelated_remote_config() {
+        let fixture = unregistered_fixture("remote-override");
+        run_git(
+            &fixture.worktree,
+            [
+                "remote",
+                "add",
+                "origin",
+                "git@github.com:example/origin.git",
+            ],
+        );
+        run_git(
+            &fixture.worktree,
+            ["remote", "add", "alternate", "noremote"],
+        );
+        run_git(&fixture.worktree, ["checkout", &fixture.branch]);
+        run_git(
+            &fixture.worktree,
+            [
+                "config",
+                &format!("branch.{}.remote", fixture.branch),
+                "alternate",
+            ],
+        );
+        let discovery =
+            discover_repository(Some(&fixture.worktree), Some("origin"))
+                .unwrap();
+        assert_eq!(discovery.remote_name, "origin");
+        fixture.remove();
+    }
+
+    #[test]
     fn open_discovers_a_worktree_without_prior_registration() {
-        let fixture = test_fixture("open-discovery");
+        let fixture = unregistered_fixture("open-discovery");
         run_git(
             &fixture.worktree,
             [
@@ -2639,15 +2902,175 @@ mod tests {
             None,
         )
         .unwrap();
+        open_with_head(
+            &fixture.home,
+            None,
+            Some(&fixture.worktree),
+            None,
+            None,
+            None,
+            "main",
+            None,
+        )
+        .unwrap();
+        let state = read_state(&fixture.home).unwrap();
+        let repo = state.repos.get(&fixture.slug).unwrap();
+        assert_eq!(repo.path, fixture.worktree);
+        assert!(repo.branches.contains_key(&fixture.branch));
+        assert_eq!(state.repos.len(), 1);
+        fixture.remove();
+    }
 
+    #[test]
+    fn next_discovers_a_worktree_without_prior_registration() {
+        let fixture = unregistered_fixture("next-discovery");
+        run_git(
+            &fixture.worktree,
+            [
+                "remote",
+                "add",
+                "origin",
+                "git@github.com:example/reviews.git",
+            ],
+        );
+        run_git(&fixture.worktree, ["checkout", &fixture.branch]);
+        next_with_head(
+            &fixture.home,
+            None,
+            Some(&fixture.worktree),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let state = read_state(&fixture.home).unwrap();
+        assert!(state.repos.contains_key(&fixture.slug));
         assert!(
-            read_state(&fixture.home)
-                .unwrap()
+            state
                 .repos
                 .get(&fixture.slug)
                 .unwrap()
                 .branches
                 .contains_key(&fixture.branch)
+        );
+        fixture.remove();
+    }
+
+    #[test]
+    fn context_discovers_a_worktree_without_prior_registration() {
+        let fixture = unregistered_fixture("context-discovery");
+        run_git(
+            &fixture.worktree,
+            [
+                "remote",
+                "add",
+                "origin",
+                "git@github.com:example/reviews.git",
+            ],
+        );
+        run_git(&fixture.worktree, ["checkout", &fixture.branch]);
+        context(
+            &fixture.home,
+            None,
+            Some(&fixture.worktree),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let state = read_state(&fixture.home).unwrap();
+        assert!(state.repos.contains_key(&fixture.slug));
+        assert!(
+            state
+                .repos
+                .get(&fixture.slug)
+                .unwrap()
+                .branches
+                .contains_key(&fixture.branch)
+        );
+        fixture.remove();
+    }
+
+    #[test]
+    fn status_discovers_a_worktree_without_prior_registration() {
+        let fixture = unregistered_fixture("status-discovery");
+        run_git(
+            &fixture.worktree,
+            [
+                "remote",
+                "add",
+                "origin",
+                "git@github.com:example/reviews.git",
+            ],
+        );
+        status(
+            &fixture.home,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&fixture.worktree),
+        )
+        .unwrap();
+        let state = read_state(&fixture.home).unwrap();
+        assert!(state.repos.contains_key(&fixture.slug));
+        fixture.remove();
+    }
+
+    #[test]
+    fn sync_discovers_a_worktree_without_prior_registration() {
+        let fixture = unregistered_fixture("sync-discovery");
+        run_git(
+            &fixture.worktree,
+            [
+                "remote",
+                "add",
+                "origin",
+                "git@github.com:example/reviews.git",
+            ],
+        );
+        run_git(&fixture.worktree, ["checkout", &fixture.branch]);
+        sync_with(&fixture.home, None, Some(&fixture.worktree), None, |_| {
+            Ok(Vec::new())
+        })
+        .unwrap();
+        let state = read_state(&fixture.home).unwrap();
+        assert!(state.repos.contains_key(&fixture.slug));
+        fixture.remove();
+    }
+
+    #[test]
+    fn explicit_repo_argument_uses_existing_registration() {
+        let fixture = test_fixture("explicit-repo-compatible");
+        run_git(
+            &fixture.worktree,
+            [
+                "remote",
+                "add",
+                "origin",
+                "git@github.com:example/reviews.git",
+            ],
+        );
+        run_git(&fixture.worktree, ["checkout", &fixture.branch]);
+        open_with_head(
+            &fixture.home,
+            Some(&fixture.slug),
+            None,
+            None,
+            Some(fixture.branch.clone()),
+            None,
+            "main",
+            None,
+        )
+        .unwrap();
+        assert!(
+            read_state(&fixture.home)
+                .unwrap()
+                .repos
+                .contains_key(&fixture.slug)
         );
         fixture.remove();
     }
@@ -3968,6 +4391,7 @@ mod tests {
             Some(&fixture.slug),
             None,
             None,
+            None,
         )
         .unwrap();
         let by_branch = collect_status_targets(
@@ -3975,6 +4399,7 @@ mod tests {
             &state,
             Some(&fixture.slug),
             Some(fixture.branch.clone()),
+            None,
             None,
         )
         .unwrap();
@@ -3984,6 +4409,7 @@ mod tests {
             Some(&fixture.slug),
             None,
             Some(1153),
+            None,
         )
         .unwrap();
         assert_eq!(all.len(), 1);
@@ -3995,6 +4421,7 @@ mod tests {
             None,
             None,
             Some(1153),
+            None,
         )
         .unwrap();
         assert_eq!(global_by_pr.len(), 1);
@@ -4055,6 +4482,41 @@ mod tests {
         );
         fs::create_dir_all(&home).unwrap();
         write_state(&home, &state).unwrap();
+        TestFixture {
+            home,
+            worktree,
+            slug,
+            branch,
+            target_path,
+        }
+    }
+
+    fn unregistered_fixture(label: &str) -> TestFixture {
+        let home = temp_home(label);
+        let worktree = temp_home(&format!("{label}-worktree"));
+        let slug = "example__reviews".to_owned();
+        let branch = "feature/reconcile".to_owned();
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&worktree).unwrap();
+        run_git(&worktree, ["init", "--initial-branch=main"]);
+        fs::write(worktree.join("README.md"), "test\n").unwrap();
+        run_git(&worktree, ["add", "README.md"]);
+        run_git(
+            &worktree,
+            [
+                "-c",
+                "user.email=test@example.com",
+                "-c",
+                "user.name=Test User",
+                "commit",
+                "-m",
+                "initial",
+            ],
+        );
+        run_git(&worktree, ["branch", &branch]);
+        let target_path = home
+            .join(&slug)
+            .join(format!("br-v2-{}", encode_component(&branch)));
         TestFixture {
             home,
             worktree,
