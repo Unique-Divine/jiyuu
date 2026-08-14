@@ -1,11 +1,8 @@
-#!/usr/bin/env python3
-"""
-Quick validation script for skills - minimal version
-"""
+#!/usr/bin/env -S uv run --with pyyaml python
+"""Validate agent skill frontmatter."""
 
-import sys
-import os
 import re
+import sys
 import yaml
 from pathlib import Path
 
@@ -39,7 +36,7 @@ def validate_skill(skill_path):
         return False, f"Invalid YAML in frontmatter: {e}"
 
     # Define allowed properties
-    ALLOWED_PROPERTIES = {'name', 'description', 'license', 'allowed-tools', 'metadata', 'compatibility'}
+    ALLOWED_PROPERTIES = {'name', 'description', 'license', 'metadata', 'compatibility'}
 
     # Check for unexpected properties (excluding nested keys under metadata)
     unexpected_keys = set(frontmatter.keys()) - ALLOWED_PROPERTIES
@@ -54,6 +51,35 @@ def validate_skill(skill_path):
         return False, "Missing 'name' in frontmatter"
     if 'description' not in frontmatter:
         return False, "Missing 'description' in frontmatter"
+
+    # Private skills are canonical real directories beneath boku/priv-skills.
+    # Public skills live in jiyuu/ai-skills and omit metadata.private.
+    metadata = frontmatter.get('metadata', {})
+    if not isinstance(metadata, dict):
+        return False, "Metadata must be a YAML dictionary"
+    unexpected_metadata = set(metadata.keys()) - {'private'}
+    if unexpected_metadata:
+        return False, (
+            f"Unexpected metadata key(s): {', '.join(sorted(unexpected_metadata))}. "
+            "Allowed metadata properties are: private"
+        )
+    private = metadata.get('private')
+    if private is not None and not isinstance(private, bool):
+        return False, "metadata.private must be a boolean"
+
+    resolved_parts = skill_path.resolve().parts
+    canonical_private = (
+        'boku' in resolved_parts and 'priv-skills' in resolved_parts
+    )
+    canonical_public = (
+        'boku' in resolved_parts
+        and 'jiyuu' in resolved_parts
+        and 'ai-skills' in resolved_parts
+    )
+    if canonical_private and private is not True:
+        return False, "Skills in boku/priv-skills require metadata.private: true"
+    if canonical_public and private is not None:
+        return False, "Public skills in jiyuu/ai-skills must omit metadata.private"
 
     # Extract name for validation
     name = frontmatter.get('name', '')
@@ -91,7 +117,7 @@ def validate_skill(skill_path):
         if len(compatibility) > 500:
             return False, f"Compatibility is too long ({len(compatibility)} characters). Maximum is 500 characters."
 
-    return True, "Skill is valid!"
+    return True, "Skill frontmatter is valid."
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:
