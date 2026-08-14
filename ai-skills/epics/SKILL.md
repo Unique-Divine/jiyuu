@@ -31,7 +31,8 @@ When reading an epic doc, look at the YAML frontmatter at line 1 for context:
   These use the conventional repo names from the `/repo-map` skill.
 - **related_context**: Links to other epics (`/epics/...`). Follow these for
   relevant parent, child, and peer context.
-- **agent_skills**: Cursor skill IDs relevant to this epic. Suggest using them when working on the task.
+- **agent_skills**: Agent skill names relevant to this epic. Suggest using them
+  when working on the task.
 
 ## Epic Structure and Creation
 
@@ -129,7 +130,7 @@ Run from `/home/realu/ki/boku/epics`:
 
 ## Additional Resources
 - Full schema and semantics: [epics/26-02-24-epics-plus.md](/home/realu/ki/boku/epics/26-02-24-epics-plus.md)
-- Codex runtime skill discovery: [references/codex-skill-discovery.md](./references/codex-skill-discovery.md)
+- Agent skill discovery: [references/codex-skill-discovery.md](./references/codex-skill-discovery.md)
 
 ## Mode: Finding or Searching for Epics
 
