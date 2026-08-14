@@ -52,6 +52,7 @@ struct Cli {
 
 #[derive(Debug)]
 struct RepoDiscovery {
+    slug: String,
     source: String,
     worktree_root: PathBuf,
     git_common_dir: PathBuf,
@@ -354,6 +355,7 @@ struct DiscoveryMetadata {
     git_common_dir: PathBuf,
     selected_branch: Option<String>,
     selected_remote: String,
+    selected_remote_source: String,
     discovery_source: String,
 }
 
@@ -408,26 +410,16 @@ fn run() -> Result<()> {
             label,
             head,
         ),
-        CommandName::Sync { repo, remote } => sync(
-            &home,
-            repo.as_deref(),
-            path,
-            remote.as_deref(),
-        ),
+        CommandName::Sync { repo, remote } => {
+            sync(&home, repo.as_deref(), path, remote.as_deref())
+        }
         CommandName::Context {
             repo,
             branch,
             pr,
             remote,
         } => {
-            context(
-                &home,
-                repo.as_deref(),
-                path,
-                remote.as_deref(),
-                branch,
-                pr,
-            )
+            context(&home, repo.as_deref(), path, remote.as_deref(), branch, pr)
         }
         CommandName::Status {
             filter,
@@ -505,17 +497,143 @@ fn register(home: &Path, requested_path: &Path) -> Result<()> {
     })
 }
 
-fn discovery_metadata(discovery: &Option<RepoDiscovery>) -> Option<DiscoveryMetadata> {
+fn discovery_metadata(
+    discovery: &Option<RepoDiscovery>,
+) -> Option<DiscoveryMetadata> {
     discovery.as_ref().map(|value| DiscoveryMetadata {
         discovered_repo: value.slug.clone(),
         worktree_root: value.worktree_root.clone(),
         git_common_dir: value.git_common_dir.clone(),
         selected_branch: value.branch.clone(),
         selected_remote: value.remote_name.clone(),
+        selected_remote_source: value.remote_source.clone(),
         discovery_source: value.source.clone(),
     })
 }
 
+/// Discover the repository selected by the caller's current directory (or
+/// `-C`) and choose exactly one remote. The checkout location is runtime
+/// evidence; the normalized remote-derived slug remains the ledger identity.
+fn discover_repository(
+    path_override: Option<&Path>,
+    remote_override: Option<&str>,
+) -> Result<RepoDiscovery> {
+    let requested = match path_override {
+        Some(path) => fs::canonicalize(path).with_context(|| {
+            format!("failed to resolve worktree {}", path.display())
+        })?,
+        None => env::current_dir()
+            .context("failed to determine current directory")?,
+    };
+    let worktree_root =
+        PathBuf::from(git(&requested, ["rev-parse", "--show-toplevel"])?);
+    let common_dir =
+        PathBuf::from(git(&worktree_root, ["rev-parse", "--git-common-dir"])?);
+    let git_common_dir = if common_dir.is_absolute() {
+        common_dir
+    } else {
+        fs::canonicalize(worktree_root.join(common_dir))
+            .context("failed to resolve Git common directory")?
+    };
+    let branch = match git(&worktree_root, ["branch", "--show-current"])? {
+        value if value.is_empty() => None,
+        value => Some(value),
+    };
+    let remotes: Vec<String> = git(&worktree_root, ["remote"])?
+        .lines()
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .collect();
+    let configured_upstream = branch.as_ref().and_then(|name| {
+        git_dynamic(
+            &worktree_root,
+            ["config", "--get", &format!("branch.{name}.remote")],
+        )
+        .ok()
+        .filter(|value| !value.is_empty())
+    });
+    let push_default =
+        git(&worktree_root, ["config", "--get", "remote.pushDefault"])
+            .ok()
+            .filter(|value| !value.is_empty());
+    let remote_name = remote_override
+        .map(str::to_owned)
+        .or(configured_upstream)
+        .or(push_default)
+        .or_else(|| {
+            remotes
+                .iter()
+                .any(|name| name == "origin")
+                .then(|| "origin".to_owned())
+        })
+        .or_else(|| (remotes.len() == 1).then(|| remotes[0].clone()))
+        .context("could not select a Git remote; pass --remote <name>")?;
+    if !remotes.iter().any(|name| name == &remote_name) {
+        bail!(
+            "selected remote {remote_name} is not configured; available remotes: {}",
+            remotes.join(", ")
+        );
+    }
+    let remote_url =
+        git_dynamic(&worktree_root, ["remote", "get-url", &remote_name])?;
+    let remote = normalize_remote(&remote_url)?;
+    let slug = slug_from_remote(&remote)?;
+    Ok(RepoDiscovery {
+        slug,
+        source: path_override
+            .map_or_else(|| "cwd".to_owned(), |_| "-C".to_owned()),
+        worktree_root,
+        git_common_dir,
+        branch,
+        remote_name,
+        remote,
+        remote_source: if remote_override.is_some() {
+            "explicit".to_owned()
+        } else {
+            "configured".to_owned()
+        },
+    })
+}
+
+fn ensure_repo_from_discovery<'a>(
+    state: &'a mut State,
+    slug: &str,
+    discovery: Option<&RepoDiscovery>,
+) -> Result<(&'a mut Repo, bool)> {
+    match discovery {
+        Some(discovery) => match state.repos.entry(slug.to_owned()) {
+            std::collections::btree_map::Entry::Occupied(entry) => {
+                let repo = entry.into_mut();
+                if !repo.remote.eq_ignore_ascii_case(&discovery.remote) {
+                    bail!(
+                        "repository slug {slug} is already registered for {}, not {}",
+                        repo.remote,
+                        discovery.remote
+                    );
+                }
+                let changed = repo.path != discovery.worktree_root;
+                repo.path = discovery.worktree_root.clone();
+                Ok((repo, changed))
+            }
+            std::collections::btree_map::Entry::Vacant(entry) => Ok((
+                entry.insert(Repo {
+                    path: discovery.worktree_root.clone(),
+                    remote: discovery.remote.clone(),
+                    branches: BTreeMap::new(),
+                    pull_requests: BTreeMap::new(),
+                }),
+                true,
+            )),
+        },
+        None => state
+            .repos
+            .get_mut(slug)
+            .map(|repo| (repo, false))
+            .with_context(|| format!("unknown repository {slug}; run from its worktree or register it")),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn open_with_head(
     home: &Path,
     repo: Option<&str>,
@@ -531,7 +649,8 @@ fn open_with_head(
     } else {
         None
     };
-    let branch = branch.or_else(|| discovery.as_ref().and_then(|value| value.branch.clone()));
+    let branch = branch
+        .or_else(|| discovery.as_ref().and_then(|value| value.branch.clone()));
     let slug = match repo {
         Some(value) => value.to_owned(),
         None => discovery
@@ -545,9 +664,8 @@ fn open_with_head(
         if let Some(discovery) = &discovery {
             Some((
                 discovery.remote.clone(),
-                gh_pr(&discovery.remote, number).with_context(|| {
-                    format!("failed to fetch PR #{number}")
-                })?,
+                gh_pr_for_remote(&discovery.remote, number)
+                    .with_context(|| format!("failed to fetch PR #{number}"))?,
             ))
         } else {
             fetch_targeted_pr_without_lock(home, &slug, Some(number))?
@@ -561,11 +679,8 @@ fn open_with_head(
         lock(home)?
     };
     let mut state = read_state(home)?;
-    let (repo, seeded) =
+    let (repo, _) =
         ensure_repo_from_discovery(&mut state, &slug, discovery.as_ref())?;
-    if seeded {
-        write_state(home, &state)?;
-    }
     validate_prefetched_remote(repo, prefetched_pr.as_ref())?;
     let repo_path = discovery
         .as_ref()
@@ -616,18 +731,10 @@ fn open(
     pr: Option<u64>,
     base: &str,
 ) -> Result<()> {
-    open_with_head(
-        home,
-        Some(slug),
-        None,
-        None,
-        branch,
-        pr,
-        base,
-        None,
-    )
+    open_with_head(home, Some(slug), None, None, branch, pr, base, None)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn next_with_head(
     home: &Path,
     repo: Option<&str>,
@@ -643,7 +750,8 @@ fn next_with_head(
     } else {
         None
     };
-    let branch = branch.or_else(|| discovery.as_ref().and_then(|value| value.branch.clone()));
+    let branch = branch
+        .or_else(|| discovery.as_ref().and_then(|value| value.branch.clone()));
     let slug = match repo {
         Some(value) => value.to_owned(),
         None => discovery
@@ -657,9 +765,8 @@ fn next_with_head(
         if let Some(discovery) = &discovery {
             Some((
                 discovery.remote.clone(),
-                gh_pr(&discovery.remote, number).with_context(|| {
-                    format!("failed to fetch PR #{number}")
-                })?,
+                gh_pr_for_remote(&discovery.remote, number)
+                    .with_context(|| format!("failed to fetch PR #{number}"))?,
             ))
         } else {
             fetch_targeted_pr_without_lock(home, &slug, Some(number))?
@@ -673,11 +780,8 @@ fn next_with_head(
         lock(home)?
     };
     let mut state = read_state(home)?;
-    let (repo, seeded) =
+    let (repo, _) =
         ensure_repo_from_discovery(&mut state, &slug, discovery.as_ref())?;
-    if seeded {
-        write_state(home, &state)?;
-    }
     validate_prefetched_remote(repo, prefetched_pr.as_ref())?;
     let repo_path = discovery
         .as_ref()
@@ -778,7 +882,8 @@ fn context(
     } else {
         None
     };
-    let branch = branch.or_else(|| discovery.as_ref().and_then(|value| value.branch.clone()));
+    let branch = branch
+        .or_else(|| discovery.as_ref().and_then(|value| value.branch.clone()));
     let slug = match repo {
         Some(value) => value.to_owned(),
         None => discovery
@@ -791,9 +896,8 @@ fn context(
         if let Some(discovery) = &discovery {
             Some((
                 discovery.remote.clone(),
-                gh_pr(&discovery.remote, number).with_context(|| {
-                    format!("failed to fetch PR #{number}")
-                })?,
+                gh_pr_for_remote(&discovery.remote, number)
+                    .with_context(|| format!("failed to fetch PR #{number}"))?,
             ))
         } else {
             fetch_targeted_pr_without_lock(home, &slug, Some(number))?
@@ -807,11 +911,8 @@ fn context(
         lock(home)?
     };
     let mut state = read_state(home)?;
-    let (repo, seeded) =
+    let (repo, _) =
         ensure_repo_from_discovery(&mut state, &slug, discovery.as_ref())?;
-    if seeded {
-        write_state(home, &state)?;
-    }
     validate_prefetched_remote(repo, prefetched_pr.as_ref())?;
     let repo_path = discovery
         .as_ref()
@@ -895,14 +996,39 @@ fn status(
     home: &Path,
     first: Option<String>,
     second: Option<String>,
+    remote_override: Option<String>,
     branch: Option<String>,
     pr: Option<u64>,
+    path_override: Option<&Path>,
 ) -> Result<()> {
     let (todo_only, repo_filter) = parse_status_positionals(first, second)?;
     if branch.is_some() && pr.is_some() {
         bail!("use either --branch or --pr");
     }
-    let state = read_state(home)?;
+    let discovery = if repo_filter.is_none() {
+        Some(discover_repository(
+            path_override,
+            remote_override.as_deref(),
+        )?)
+    } else {
+        None
+    };
+    let repo_filter = repo_filter
+        .or_else(|| discovery.as_ref().map(|value| value.slug.clone()));
+    let branch = branch
+        .or_else(|| discovery.as_ref().and_then(|value| value.branch.clone()));
+    let _lock = lock(home)?;
+    let mut state = read_state(home)?;
+    if let Some(discovery) = discovery.as_ref() {
+        let (_, changed) = ensure_repo_from_discovery(
+            &mut state,
+            repo_filter.as_deref().expect("discovery supplies a slug"),
+            Some(discovery),
+        )?;
+        if changed {
+            write_state(home, &state)?;
+        }
+    }
     let mut targets = collect_status_targets(
         home,
         &state,
@@ -1035,6 +1161,7 @@ fn resolve_or_create_target<'a>(
     home: &Path,
     slug: &str,
     repo: &'a mut Repo,
+    repo_path: &Path,
     request: TargetRequest<'_>,
 ) -> Result<(String, String, String, Option<u64>, &'a mut Target)> {
     let TargetRequest {
@@ -1046,8 +1173,8 @@ fn resolve_or_create_target<'a>(
     } = request;
     match (branch, pr) {
         (Some(branch), None) => {
-            let head_sha = exact_branch_sha(&repo.path, &branch)?;
-            let base_sha = exact_branch_sha(&repo.path, base)?;
+            let head_sha = exact_branch_sha(repo_path, &branch)?;
+            let base_sha = exact_branch_sha(repo_path, base)?;
             let directory = branch_directory(home, slug, repo, &branch)?;
             let has_pr = repo
                 .pull_requests
@@ -1309,6 +1436,14 @@ fn validate_pr_repository(repo: &Repo, metadata: &PrMetadata) -> Result<()> {
 
 fn gh_pr(repo: &Repo, number: u64) -> Result<PrMetadata> {
     let (owner, name) = repository_identity(repo)?;
+    gh_pr_for_remote(&format!("github.com/{owner}/{name}"), number)
+}
+
+fn gh_pr_for_remote(remote: &str, number: u64) -> Result<PrMetadata> {
+    let (owner, name) = remote
+        .split_once('/')
+        .and_then(|(_, path)| path.split_once('/'))
+        .context("remote must have host/owner/repository form")?;
     let repository = format!("{owner}/{name}");
     let number = number.to_string();
     let output = Command::new("gh")
@@ -1361,8 +1496,31 @@ fn gh_open_prs(repo: &Repo) -> Result<Vec<PrMetadata>> {
     serde_json::from_slice(&output.stdout).context("invalid gh PR metadata")
 }
 
-fn sync(home: &Path, slug: &str) -> Result<()> {
-    let output = sync_with_fetch(home, slug, gh_open_prs)?;
+fn sync(
+    home: &Path,
+    repo: Option<&str>,
+    path_override: Option<&Path>,
+    remote_override: Option<&str>,
+) -> Result<()> {
+    let discovery = if repo.is_none() {
+        Some(discover_repository(path_override, remote_override)?)
+    } else {
+        None
+    };
+    let slug = repo
+        .map(str::to_owned)
+        .or_else(|| discovery.as_ref().map(|value| value.slug.clone()))
+        .context("failed to discover repository")?;
+    if let Some(discovery) = discovery.as_ref() {
+        let _lock = lock(home)?;
+        let mut state = read_state(home)?;
+        let (_, changed) =
+            ensure_repo_from_discovery(&mut state, &slug, Some(discovery))?;
+        if changed {
+            write_state(home, &state)?;
+        }
+    }
+    let output = sync_with_fetch(home, &slug, gh_open_prs)?;
     print_json(&output)
 }
 
@@ -2000,9 +2158,11 @@ fn cleanup_adoption_backups(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn target_output(
     home: &Path,
     slug: &str,
+    discovery: Option<DiscoveryMetadata>,
     repo_path: &Path,
     target_name: &str,
     branch_name: &str,
@@ -2032,6 +2192,7 @@ fn target_output(
         .is_some_and(|(github, local)| github != local);
     Ok(TargetOutput {
         repo: slug.to_owned(),
+        discovery,
         repo_path: repo_path.to_owned(),
         target: target_name.to_owned(),
         target_path,
@@ -2248,6 +2409,29 @@ fn git<const N: usize>(worktree: &Path, arguments: [&str; N]) -> Result<String> 
         .to_owned())
 }
 
+fn git_dynamic<'a>(
+    worktree: &Path,
+    arguments: impl IntoIterator<Item = &'a str>,
+) -> Result<String> {
+    let arguments: Vec<_> = arguments.into_iter().collect();
+    let output = Command::new("git")
+        .args(&arguments)
+        .current_dir(worktree)
+        .output()
+        .context("failed to invoke git")?;
+    if !output.status.success() {
+        bail!(
+            "git {} failed: {}",
+            arguments.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8(output.stdout)
+        .context("git output was not UTF-8")?
+        .trim()
+        .to_owned())
+}
+
 fn normalize_remote(input: &str) -> Result<String> {
     let input = input.trim().trim_end_matches(".git");
     let path = if let Some(value) = input.strip_prefix("git@") {
@@ -2397,6 +2581,75 @@ mod tests {
             slug_from_remote("github.com/NibiruChain/sai-website").unwrap(),
             "nibiruchain__sai-website"
         );
+    }
+
+    #[test]
+    fn discovery_uses_selected_worktree_and_branch_remote() {
+        let fixture = test_fixture("discovery");
+        run_git(
+            &fixture.worktree,
+            [
+                "remote",
+                "add",
+                "origin",
+                "git@github.com:example/reviews.git",
+            ],
+        );
+        run_git(&fixture.worktree, ["checkout", &fixture.branch]);
+        run_git(
+            &fixture.worktree,
+            [
+                "config",
+                &format!("branch.{}.remote", fixture.branch),
+                "origin",
+            ],
+        );
+        let discovery =
+            discover_repository(Some(&fixture.worktree), None).unwrap();
+        assert_eq!(discovery.slug, fixture.slug);
+        assert_eq!(discovery.branch.as_deref(), Some(fixture.branch.as_str()));
+        assert_eq!(discovery.remote_name, "origin");
+        assert_eq!(discovery.source, "-C");
+        assert_eq!(discovery.worktree_root, fixture.worktree);
+        fixture.remove();
+    }
+
+    #[test]
+    fn open_discovers_a_worktree_without_prior_registration() {
+        let fixture = test_fixture("open-discovery");
+        run_git(
+            &fixture.worktree,
+            [
+                "remote",
+                "add",
+                "origin",
+                "git@github.com:example/reviews.git",
+            ],
+        );
+        run_git(&fixture.worktree, ["checkout", &fixture.branch]);
+
+        open_with_head(
+            &fixture.home,
+            None,
+            Some(&fixture.worktree),
+            None,
+            None,
+            None,
+            "main",
+            None,
+        )
+        .unwrap();
+
+        assert!(
+            read_state(&fixture.home)
+                .unwrap()
+                .repos
+                .get(&fixture.slug)
+                .unwrap()
+                .branches
+                .contains_key(&fixture.branch)
+        );
+        fixture.remove();
     }
 
     #[test]
@@ -3003,7 +3256,9 @@ mod tests {
         assert!(
             open_with_head(
                 &fixture.home,
-                &fixture.slug,
+                Some(&fixture.slug),
+                None,
+                None,
                 Some(fixture.branch.clone()),
                 None,
                 "main",
@@ -3013,7 +3268,9 @@ mod tests {
         );
         open_with_head(
             &fixture.home,
-            &fixture.slug,
+            Some(&fixture.slug),
+            None,
+            None,
             Some(fixture.branch.clone()),
             None,
             "main",
@@ -3650,6 +3907,7 @@ mod tests {
         let output = target_output(
             &fixture.home,
             &fixture.slug,
+            None,
             &fixture.worktree,
             "pr:1153",
             &fixture.branch,
