@@ -1,7 +1,7 @@
+import { describe, expect, test } from "bun:test"
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { describe, expect, test } from "bun:test"
 import { runHealthCheck } from "./health"
 import type { HealthClientFactory } from "./health"
 
