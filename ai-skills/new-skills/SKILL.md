@@ -1,6 +1,6 @@
 ---
 name: new-skills
-description: Create or revise agent skills, organize SKILL.md content with progressive disclosure, choose the correct public or private canonical location, and validate skill frontmatter. Use when the user wants to create, restructure, simplify, or improve a skill or its trigger description. Do not start an evaluation or test-prompt loop unless the user explicitly requests one.
+description: Create or revise agent skills, organize SKILL.md content with progressive disclosure, choose the correct public or private canonical location, and validate skill frontmatter. Public skills are distributed from Unique-Divine/jiyuu under jiyuu/ai-skills. Private skills are real directories in boku/priv-skills and must set metadata.private. Use when the user wants to create, restructure, simplify, or improve a skill or its trigger description. Do not start an evaluation or test-prompt loop unless the user explicitly requests one.
 ---
 
 # New skills
@@ -28,47 +28,59 @@ frontmatter field `name` unless the user explicitly requests a rename.
 
 ## Choose the canonical location
 
-This workstation keeps public and private skills in different repositories:
+Repository Unique-Divine/jiyuu is the public skill distribution location.
+Write public skills here:
 
-- Public: `/home/realu/ki/boku/jiyuu/ai-skills/<name>`
-- Private: `/home/realu/ki/boku/priv-skills/<name>`
-- Repository-owned: `/home/realu/ki/<repo>/ai-skills/<name>`
-
-Directories `~/.agents/skills` and `~/.cursor/skills` are managed symlinked views
-of the combined skill set. Editing through either view changes the canonical
-repository file immediately, but resolve the path before reporting which
-repository owns the skill.
-
-Use a repository-owned skill for practitioner guidance that teammates should
-receive with the source repository. Keep one canonical directory under
-`ai-skills/`, and expose it inside that repository through relative link
-`.agents/skills -> ../ai-skills`. When the local skill union is configured to
-include the repository source, it links to the same canonical files; do not
-copy the skill into the public or private skill repository.
-
-Record repository provenance with a string metadata field:
-
-```yaml
-metadata:
-  repository: NibiruChain/example
+```text
+/home/realu/ki/boku/jiyuu/ai-skills/<name>
 ```
 
-This custom field documents ownership. Git access and the repository-local
-discovery link control availability; metadata does not.
+A public skill stays in `jiyuu/ai-skills` even when its CLI or library lives
+in a jiyuu package. Do not create `jiyuu/<package>/ai-skills/<name>`. Example:
+command `gh-rev` lives in `jiyuu/gh-rev`; agent skill `gh-rev` lives in
+`jiyuu/ai-skills/gh-rev`.
 
-Use a private skill for personal data, private operations, credentials-adjacent
-workflows, or instructions that should not be published. Mark it explicitly:
+Classify ownership from the resolved path, not from the runtime view.
+Directories `~/.agents/skills` and `~/.cursor/skills` both link to
+`boku/priv-skills`, which is the flat union. Public skills appear there as
+symlinks into `jiyuu/ai-skills`. Editing through the union still writes the
+jiyuu file. A union or `$HOME` skill path is not proof that the skill is
+private.
+
+- Resolved under `jiyuu/ai-skills` → public. Omit `metadata.private`.
+- Real directory under `boku/priv-skills` → private. Require:
 
 ```yaml
 metadata:
   private: true
 ```
 
-Public skills omit `metadata.private` rather than setting it to `false`.
+Use a private skill for personal data, private operations,
+credentials-adjacent workflows, or instructions that should not be
+published. Do not set `metadata.private` to `false` on a public skill, and
+do not replace a public union symlink with a real directory in
+`priv-skills`.
+
+Repository-owned skills are the exception: a Nibiru or other team checkout
+that must ship a practitioner skill with the source repository, such as
+`sai-keeper/ai-skills/sai-keeper`. Use that layout only when the user asks
+for a repo-local skill or the skill is useless outside that repository.
+Keep one canonical directory under that repo's `ai-skills/`, expose it with
+relative link `.agents/skills -> ../ai-skills`, and record:
+
+```yaml
+metadata:
+  repository: NibiruChain/example
+```
+
+Do not copy a repository-owned skill into `jiyuu/ai-skills` or
+`priv-skills`. Add the repo as a `skills-sync` linked source instead. Field
+`metadata.repository` documents ownership; Git access and the discovery
+link control availability.
 
 Command `just skills-sync --run` from repository `boku/dotfiles` repairs the
-managed union and runtime links. It is not a required post-edit copy step when
-the links are already healthy.
+managed union and runtime links. It is not a required post-edit copy step
+when the links are already healthy.
 
 ## Write the skill
 

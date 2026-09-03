@@ -22,10 +22,11 @@
 
 ## `ai-skills`
 
-`ai-skills/` contains reusable agent skills for Cursor/LLM workflows. Each
-skill is a small, task-focused directory with a `SKILL.md` entrypoint and, when
-needed, supporting docs like `reference.md`, `REFERENCE.md`, `examples.md`, or
-schema notes.
+`ai-skills/` is the public skill distribution location for this repository.
+Each skill is a small, task-focused directory with a `SKILL.md` entrypoint
+and, when needed, supporting docs like `reference.md`, `REFERENCE.md`,
+`examples.md`, or schema notes. Public skills omit `metadata.private`. Do
+not nest a public skill under a jiyuu package directory.
 
 Current skills cover workflows such as:
 

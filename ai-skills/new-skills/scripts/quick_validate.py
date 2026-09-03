@@ -52,8 +52,11 @@ def validate_skill(skill_path):
     if 'description' not in frontmatter:
         return False, "Missing 'description' in frontmatter"
 
-    # Private skills are canonical real directories beneath boku/priv-skills.
-    # Public skills live in jiyuu/ai-skills and omit metadata.private.
+    # Classify from the resolved path. Public skills are distributed from
+    # Unique-Divine/jiyuu under jiyuu/ai-skills and omit metadata.private.
+    # Private skills are real directories beneath boku/priv-skills.
+    # Runtime views (~/.agents/skills, ~/.cursor/skills, priv-skills
+    # symlinks) follow to those canonical locations.
     metadata = frontmatter.get('metadata', {})
     if not isinstance(metadata, dict):
         return False, "Metadata must be a YAML dictionary"
