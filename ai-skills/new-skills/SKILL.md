@@ -61,26 +61,32 @@ published. Do not set `metadata.private` to `false` on a public skill, and
 do not replace a public union symlink with a real directory in
 `priv-skills`.
 
-Repository-owned skills are the exception: a Nibiru or other team checkout
-that must ship a practitioner skill with the source repository, such as
-`sai-keeper/ai-skills/sai-keeper`. Use that layout only when the user asks
-for a repo-local skill or the skill is useless outside that repository.
-Keep one canonical directory under that repo's `ai-skills/`, expose it with
-relative link `.agents/skills -> ../ai-skills`, and record:
+Some private skills are also shared through a private team repository. Keep the
+canonical skill as a real directory in `boku/priv-skills`, then record its
+GitHub repository:
 
 ```yaml
 metadata:
-  repository: NibiruChain/example
+  private: true
+  gh-repo: NibiruChain/example
 ```
 
-Do not copy a repository-owned skill into `jiyuu/ai-skills` or
-`priv-skills`. Add the repo as a `skills-sync` linked source instead. Field
-`metadata.repository` documents ownership; Git access and the discovery
-link control availability.
+Command `just skills-sync --run` from repository `boku/dotfiles` copies that
+skill to `$REPO/example/ai-skills/<name>` when the checkout exists. It also
+maintains relative link `.agents/skills -> ../ai-skills` for repository-local
+discovery. If the local checkout uses another path beneath `$REPO`, add field
+`repo-dir`:
 
-Command `just skills-sync --run` from repository `boku/dotfiles` repairs the
-managed union and runtime links. It is not a required post-edit copy step
-when the links are already healthy.
+```yaml
+metadata:
+  private: true
+  gh-repo: NibiruChain/example
+  repo-dir: teams/example-local
+```
+
+The private directory remains authoritative. Do not edit the exported copy as
+the next sync replaces its complete contents. A missing team checkout is
+optional and does not block sync or health checks.
 
 ## Write the skill
 

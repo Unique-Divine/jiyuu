@@ -60,25 +60,40 @@ def validate_skill(skill_path):
     metadata = frontmatter.get('metadata', {})
     if not isinstance(metadata, dict):
         return False, "Metadata must be a YAML dictionary"
-    unexpected_metadata = set(metadata.keys()) - {'private', 'repository'}
+    unexpected_metadata = set(metadata.keys()) - {
+        'private', 'gh-repo', 'repo-dir'
+    }
     if unexpected_metadata:
         return False, (
             f"Unexpected metadata key(s): {', '.join(sorted(unexpected_metadata))}. "
-            "Allowed metadata properties are: private, repository"
+            "Allowed metadata properties are: private, gh-repo, repo-dir"
         )
     private = metadata.get('private')
     if private is not None and not isinstance(private, bool):
         return False, "metadata.private must be a boolean"
-    repository = metadata.get('repository')
-    if repository is not None and not isinstance(repository, str):
-        return False, "metadata.repository must be a string"
-    if repository is not None and not repository.strip():
-        return False, "metadata.repository must not be empty"
-    if private is True and repository is not None:
-        return False, (
-            "Private skills must not declare metadata.repository; "
-            "repository-owned skills follow repository access"
-        )
+    gh_repo = metadata.get('gh-repo')
+    if gh_repo is not None:
+        if not isinstance(gh_repo, str):
+            return False, "metadata.gh-repo must be a string"
+        if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', gh_repo):
+            return False, "metadata.gh-repo must use owner/repository form"
+        if private is not True:
+            return False, (
+                "Skills with metadata.gh-repo must set metadata.private: true"
+            )
+    repo_dir = metadata.get('repo-dir')
+    if repo_dir is not None:
+        if not isinstance(repo_dir, str) or not repo_dir.strip():
+            return False, "metadata.repo-dir must be a non-empty string"
+        if gh_repo is None:
+            return False, "metadata.repo-dir requires metadata.gh-repo"
+        repo_dir_path = Path(repo_dir)
+        if (
+            repo_dir_path.is_absolute()
+            or repo_dir_path == Path('.')
+            or '..' in repo_dir_path.parts
+        ):
+            return False, "metadata.repo-dir must resolve beneath REPO"
 
     resolved_parts = skill_path.resolve().parts
     canonical_private = (
