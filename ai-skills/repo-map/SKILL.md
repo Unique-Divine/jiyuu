@@ -2,7 +2,7 @@
 name: repo-map
 description: >-
   Maps and routes between key repositories on my machine (boku, nibi-chain,
-  nibi-geth, nibi-go-hm, nibi-ts-sdk, sai-website, sai-perps, nibi-iac,
+  nibi-geth, nibi-go-hm, nibi-ts-sdk, sai-web, sai-perps, nibi-iac,
   nibi-home-site, gh-io-ud, wasm-cosmwasm, wasm-go-wasmvm). Use when the user
   asks which repo to look at, where a feature lives, how repos connect, how
   services are deployed (Terraform/IaC), when a task spans chain, EVM, indexer,
@@ -40,7 +40,7 @@ Indexer (HeartMonitor) client. Look for `HeartMonitor`, generated `GQL*` types,
 and query builders.
 
 ### Sai Exchange
-- `$HOME/ki/sai-website/webapp`: **Sai: web app** (lives in monorepo). Web
+- `$HOME/ki/sai-web/webapp`: **Sai: web app** (lives in monorepo). Web
 frontend and API integrations. This uses the "sai-keeper" GraphQL interface.
 - `$HOME/ki/sai-perps`: **Official Sai protocol contracts** (EVM + Wasm). This repo defines what gets deployed onchain; the web app and sai-keeper both talk to these contracts. Used by trading tools and integrations.
 - `$HOME/ki/sai-keeper`: Defines the "sai-keeper" GraphQL interface for Sai.
@@ -62,7 +62,7 @@ frontend and API integrations. This uses the "sai-keeper" GraphQL interface.
   `go-hm-graphql`, `heart-monitor`)
 
 ### Personal, Blog, Boku Workspace
-- `$HOME/ki/boku`: **Personal knowledge base and project hub.** Monorepo for sandboxing, backups, and external brain. Use when working on epics, specs, Nibiru notes, focustime, or scripts that span nibi-chain, sai-perps, sai-website. Contains: `epics/`, `nibi/` (addr-book, cook), `free/` (todos, journal), `sde/`, `jiyuu/` (focustime, mdtoc), `scripts/`. Bun/TS + Go + Rust. Run `just test`, `just install`.
+- `$HOME/ki/boku`: **Personal knowledge base and project hub.** Monorepo for sandboxing, backups, and external brain. Use when working on epics, specs, Nibiru notes, focustime, or scripts that span nibi-chain, sai-perps, sai-web. Contains: `epics/`, `nibi/` (addr-book, cook), `free/` (todos, journal), `sde/`, `jiyuu/` (focustime, mdtoc), `scripts/`. Bun/TS + Go + Rust. Run `just test`, `just install`.
 - `$HOME/ki/gh-io-ud`: **Personal site (GitHub Pages).** Astro 4 + Tailwind. Blog
   content in `src/content/post/` (schema in `src/content/config.ts`). Site config
   `src/config.yaml`, nav `src/navigation.js`. Run `just dev`, build `just b`,
@@ -72,7 +72,7 @@ frontend and API integrations. This uses the "sai-keeper" GraphQL interface.
 
 ### Repos with Prefix "sai-" or "nibi-" (`$HOME/ki`)
 
-Nibiru work lives under org **`NibiruChain`**. Local directory names often **differ** from the repository slug (e.g. clone `nibiru` into **`nibi-chain`**, `web-app` into **`sai-website`**). **`gh repo list NibiruChain`** lists canonical slugs for your account.
+Nibiru work lives under org **`NibiruChain`**. Local directory names often **differ** from the repository slug (e.g. clone `nibiru` into **`nibi-chain`**). **`gh repo list NibiruChain`** lists canonical slugs for your account.
 
 | Local folder | Remote |
 |--------------|--------|
@@ -81,7 +81,7 @@ Nibiru work lives under org **`NibiruChain`**. Local directory names often **dif
 | `nibi-go-hm` | `git@github.com:NibiruChain/heart-monitor.git` |
 | `nibi-ts-sdk` | `git@github.com:NibiruChain/ts-sdk.git` |
 | `nibi-home-site` | `git@github.com:NibiruChain/home-site.git` |
-| `sai-website` | `git@github.com:NibiruChain/sai-website.git` |
+| `sai-web` | `git@github.com:NibiruChain/sai-web.git` |
 | `sai-perps` | `git@github.com:NibiruChain/sai-perps.git` |
 | `sai-keeper` | `git@github.com:NibiruChain/sai-keeper.git` |
 | `sai-docs` | `git@github.com:NibiruChain/sai-docs.git` |

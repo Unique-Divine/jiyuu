@@ -23,7 +23,7 @@ git clone git@github.com:NibiruChain/go-ethereum.git nibi-geth
 git clone git@github.com:NibiruChain/heart-monitor.git nibi-go-hm
 git clone git@github.com:NibiruChain/ts-sdk.git nibi-ts-sdk
 git clone git@github.com:NibiruChain/home-site.git nibi-home-site
-git clone git@github.com:NibiruChain/web-app.git sai-website
+git clone git@github.com:NibiruChain/sai-web.git sai-web
 git clone git@github.com:NibiruChain/sai-perps.git sai-perps
 git clone git@github.com:NibiruChain/sai-keeper.git sai-keeper
 git clone git@github.com:NibiruChain/sai-docs.git sai-docs
@@ -79,7 +79,7 @@ clone_nibiruchain_ki() {
     clone_into heart-monitor         nibi-go-hm
     clone_into ts-sdk                nibi-ts-sdk
     clone_into home-site             nibi-home-site
-    clone_into web-app               sai-website
+    clone_into sai-web               sai-web
     clone_into sai-perps             sai-perps
     clone_into sai-keeper            sai-keeper
     clone_into sai-docs              sai-docs
@@ -93,7 +93,7 @@ Then **`clone_nibiruchain_ki`**.
 ## Remote check (one-liner)
 
 ```bash
-for d in nibi-chain nibi-geth nibi-go-hm nibi-ts-sdk nibi-home-site sai-website sai-perps sai-keeper sai-docs nibi-iac; do
+for d in nibi-chain nibi-geth nibi-go-hm nibi-ts-sdk nibi-home-site sai-web sai-perps sai-keeper sai-docs nibi-iac; do
   printf '%s: ' "$d"
   git -C "$HOME/ki/$d" remote get-url origin 2>/dev/null || echo "(missing)"
 done
