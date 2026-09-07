@@ -24,6 +24,22 @@ their tailnet through command `tailscale serve`. The common mental model is:
 The target URL is local to the machine running command `tailscale serve`; it is
 not the URL that the phone or remote device should open.
 
+## Machine administration
+
+Manage tailnet machines at:
+
+```text
+https://login.tailscale.com/admin/machines
+```
+
+To open it from WSL, use `wslview`, not macOS's `open` command:
+
+```shell
+wslview 'https://login.tailscale.com/admin/machines'
+```
+
+To revoke a machine's access, use its `...` menu and choose **Remove**.
+
 ## Admin console prerequisites
 
 Check these before spending time on the web app:
