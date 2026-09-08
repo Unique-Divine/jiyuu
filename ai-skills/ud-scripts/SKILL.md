@@ -27,7 +27,8 @@ Neither Python nor Bun is the default. Choose per script:
   Linux distros, and those runners, but not on slim or Alpine container
   images. The standard library covers most needs: `argparse`, `json`,
   `pathlib`, `subprocess`, `sqlite3`, `tomllib`, and `urllib`. Type hints
-  need a separate checker (pyright, mypy, or ty).
+  need a separate checker. Follow the [Python skill](../python/SKILL.md) for
+  the preferred type-checking and lint commands.
 - **Bash** for a few lines that run commands in order, with no loops over
   data, no JSON, and little branching. Justfile recipes count. Once a script
   needs an `if` with real logic, a data loop, or JSON, Python or Bun is
