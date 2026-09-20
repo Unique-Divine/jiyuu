@@ -9,7 +9,7 @@ description: Writes clear pull request descriptions from the current branch diff
 
 Create a clear, logical pull request description for the current branch diff
 against a base branch. A good PR body explains the problem, the decisions that
-shape the implementation, and the resulting behavior—not merely the changed
+shape the implementation, and the resulting behavior, not merely the changed
 files.
 
 ## Instructions
@@ -26,34 +26,48 @@ When using this skill:
 2. Read any linked issue, epic, journal, design, or acceptance criteria before
    drafting. Treat agreed decisions and accounting/event semantics in those
    documents as source material for the body.
-3. Write a pull request description that explains the rationale behind the
+3. Resolve the local output path before drafting:
+   - Use `gh repo view --json nameWithOwner` to get the repository's owner and
+     name.
+   - Convert `<owner>/<repo>` to `<owner>__<repo>` and sanitize it to lowercase
+     letters, numbers, dots, underscores, and hyphens.
+   - Use `${TMPDIR:-/tmp}/<owner>__<repo>/` as the repository directory.
+   - Create the directory if it does not exist.
+   - Use `${TMPDIR:-/tmp}/<owner>__<repo>/gh-pr.md` as the output path.
+   - If that file already exists, read it before drafting its replacement.
+   - When a task refers to `gh-pr.md`, read it from this path. Do not create,
+     read, or stage `./gh-pr.md` in the repository root.
+   - If the repository identity cannot be determined, report the blocker
+     instead of falling back to the repository root.
+4. Write a pull request description that explains the rationale behind the
    changes, not just the file-by-file edits. State what was broken or
    incomplete, why the chosen boundary or data contract is correct, and which
    existing semantics intentionally remain unchanged.
-4. Put reviewer context in this order: the PR title and synopsis, `## Rationale`,
+5. Put reviewer context in this order: the PR title and synopsis, `## Rationale`,
    `## Key Changes`, then any additional behavior-oriented sections. Keep
    `Rationale` and `Key Changes` unnumbered. Number only the additional topic
    headings as `## 1 - ...`, `## 2 - ...`, and so forth. The numbering improves
    scanning across distinct topics; it does not imply implementation order or
    runtime sequence.
-5. For changes with non-obvious behavior, cross-system effects, accounting,
+6. For changes with non-obvious behavior, cross-system effects, accounting,
    migrations, or several related fixes, use the additional sections to explain
-   the relevant logic. Name them for the subject—for example
+   the relevant logic. Name them for the subject, for example
    `## 1 - Partial-close behavior`, `## 2 - Borrowing settlement`, or
-   `## 3 - Historical compatibility`—rather than using implementation-oriented
+   `## 3 - Historical compatibility`, rather than using implementation-oriented
    headings.
-6. For migrations, accounting changes, data-contract cutovers, or asynchronous
+7. For migrations, accounting changes, data-contract cutovers, or asynchronous
    authority/fallback behavior, lead the relevant additional section with a
    compact ASCII flow or field map. Use prose afterward only for the rationale
    the flow cannot convey. Do not use Mermaid.
-7. Do not add a dedicated `Validation`, `Testing`, or similarly named section,
+8. Do not add a dedicated `Validation`, `Testing`, or similarly named section,
    and do not enumerate routine test, lint, build, formatting, or check runs.
    Mention test strategy or coverage only when it materially changes or creates
    a reviewer-relevant risk; place that context in the most relevant
    behavior-oriented section.
-8. Keep the writing concise and non-repetitive, but do not omit the reasoning
+9. Keep the writing concise and non-repetitive, but do not omit the reasoning
    that a reviewer needs to validate the design.
-9. Save the final output to a markdown file named `gh-pr.md`.
+10. Save the final output to `${TMPDIR:-/tmp}/<owner>__<repo>/gh-pr.md` and
+    tell the user that path.
 
 ## Output format
 
