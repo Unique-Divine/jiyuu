@@ -1,20 +1,10 @@
 ---
 name: sai-perps
 description: >-
-  Query and reconcile Sai perps data across live Perp, Oracle, and SLP Vault
-  contracts; Sai Keeper GraphQL; DexPal REST; sai-keeper Postgres; and referral
-  records. Use for markets, open interest, fees, trades, vault health, oracle
-  prices, REST statistics, database-backed metrics, referral ownership or
-  history, trading-credit balances, app/indexer behavior, or mismatches between
-  chain, APIs, databases, sheets, and operator records. Keep mutations and
-  private operator workflows in sai-ops.
-metadata:
-  tags: ["sai-perps", "sai-keeper", "sai-app"]
-  agent_skills:
-    - nibiru-gql
-    - nibiru-cli-nibid
-    - postgresql-psql
-    - sai-ops
+  Query and reconcile Sai Perps data from live contracts, Sai Keeper GraphQL
+  and Postgres, and DexPal REST. Use for markets, trades, fees, open interest,
+  vaults, balances, referrals, or disagreements between on-chain and indexed
+  data. Use agent skill `sai-ops` for mutations.
 ---
 
 # Sai Perps

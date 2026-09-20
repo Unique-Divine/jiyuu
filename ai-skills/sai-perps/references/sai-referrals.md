@@ -24,9 +24,9 @@ changelog notes, switch to agent skill `sai-ops`.
 
 ## Important paths
 
-- Sai referrals epic: `/home/realu/ki/boku/epics/tools/sai-deal-desk`
-- Sheet helper script: `/home/realu/ki/boku/epics/tools/sai-deal-desk/cli.ts`
-- Sai perp repo: `/home/realu/ki/sai-perps`
+- Sai referrals epic: `$HOME/ki/boku/epics/tools/sai-deal-desk`
+- Deal Desk command: `sai-deal-desk`
+- Sai perp repo: `$HOME/ki/sai-perps`
 - Mainnet perp contract: `nibi1ntmw2dfvd0qnw5fnwdu9pev2hsnqfdj9ny9n0nzh2a5u8v0scflq930mph`
 
 ## Referral Directory sheet
@@ -100,6 +100,9 @@ Point `nibid` at Testnet2 and verify before querying:
 ud nibi cfg test
 nibid config
 ```
+
+This recipe reads current EVM and Wasm state. Keep the default, non-archive
+testnet RPC; do not add `--archive`.
 
 Expected chain:
 
