@@ -32,7 +32,7 @@ Repository Unique-Divine/jiyuu is the public skill distribution location.
 Write public skills here:
 
 ```text
-/home/realu/ki/boku/jiyuu/ai-skills/<name>
+$HOME/ki/boku/jiyuu/ai-skills/<name>
 ```
 
 A public skill stays in `jiyuu/ai-skills` even when its CLI or library lives
@@ -106,6 +106,15 @@ claimed scope.
 Write the body in imperative language and explain enough rationale for an agent
 to apply the guidance outside the initial example. Prefer concrete workflows and
 examples over a glossary of commands.
+
+Use portable paths in skill prose and examples. Never hard-code a user's home
+directory such as `/home/alice`. Use `$HOME` for home-relative paths,
+`$DOTFILES` for paths in the dotfiles checkout, and quoted expansions such as
+`cd "$HOME/ki/project"` in shell examples. Use repository-relative Markdown
+links for files in the same repository. For files in sibling checkouts, write a
+code-formatted path such as `$HOME/ki/project/README.md` instead of a local
+Markdown link. In remote SSH commands, pass a literal `$HOME` through a quoted
+remote command so the remote shell expands it.
 
 ### Apply progressive disclosure
 
