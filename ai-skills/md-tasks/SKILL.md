@@ -63,31 +63,34 @@ look like this.
 
 ```markdown
 - [ ] Q: Some open question?
-  A: Record the answer once resolved, mark this decision task complete, and
-  create separate open tasks for its actionable consequences.
+  A: Once resolved, replace this question with a plain decision note and open
+  tasks for its actionable consequences.
 ```
 
-### Decision and implementation tasks
+### Decisions and implementation tasks
 
-Deciding what to do and implementing that decision are different task
-lifecycles. During specification, track an unresolved decision as an open task.
-Once resolved, preserve the decision and rationale as settled context or a
-completed decision task, then derive separate open tasks for implementation,
-validation, rollout, or deferred follow-up:
+Deciding what to do and doing it are different things. During specification, an
+unresolved decision may be an open task. Once resolved, replace that task with
+a plain decision note. Put its concrete consequences immediately beneath it as
+unchecked tasks. Do not mark a decision `[x]` merely because the user answered
+the question.
 
 ```markdown
-- [x] Decide how referral fees are keyed.
-  - Decision: Key fees by market and referral code.
-  - Rationale: Code ownership can change without moving accrued state.
+## Impl 1: referral fee storage
+
+Fees are keyed by market and referral code. Code ownership can change without
+moving accrued state.
+
 - [ ] Change the fee map to use the new key.
 - [ ] Migrate existing balances.
 - [ ] Test ownership transfer with accrued fees.
 ```
 
-A completed decision checkbox does not mean its implementation is complete.
-When editing an epic or durable spec, follow agent skill `epics` for section
-placement and handoff organization. Use agent skill `drill-spec` when material
-design questions still need resolution.
+Use numbered `## Impl N` sections for implementation-bearing specs. Start with
+`## Impl 1` even when there is one sequence. The numbers organize the document;
+they do not impose an implementation order. When editing an epic or durable
+spec, follow agent skill `epics` for placement and handoff organization. Use
+agent skill `drill-spec` when material design questions still need resolution.
 
 ### Finding tasks in the terminal
 
