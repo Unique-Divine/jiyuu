@@ -78,7 +78,7 @@ Nibiru work lives under org **`NibiruChain`**. Local directory names often **dif
 |--------------|--------|
 | `nibi-chain` | `git@github.com:NibiruChain/nibiru.git` |
 | `nibi-geth` | `git@github.com:NibiruChain/go-ethereum.git` |
-| `nibi-go-hm` | `git@github.com:NibiruChain/heart-monitor.git` |
+| `nibi-go-hm` | `git@github.com:NibiruChain/go-heartmonitor.git` |
 | `nibi-ts-sdk` | `git@github.com:NibiruChain/ts-sdk.git` |
 | `nibi-home-site` | `git@github.com:NibiruChain/home-site.git` |
 | `sai-web` | `git@github.com:NibiruChain/sai-web.git` |

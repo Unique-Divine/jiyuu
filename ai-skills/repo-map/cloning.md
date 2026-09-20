@@ -20,7 +20,7 @@ cd "$HOME/ki"
 
 git clone git@github.com:NibiruChain/nibiru.git nibi-chain
 git clone git@github.com:NibiruChain/go-ethereum.git nibi-geth
-git clone git@github.com:NibiruChain/heart-monitor.git nibi-go-hm
+git clone git@github.com:NibiruChain/go-heartmonitor.git nibi-go-hm
 git clone git@github.com:NibiruChain/ts-sdk.git nibi-ts-sdk
 git clone git@github.com:NibiruChain/home-site.git nibi-home-site
 git clone git@github.com:NibiruChain/sai-web.git sai-web
@@ -76,7 +76,7 @@ clone_nibiruchain_ki() {
     }
     clone_into nibiru               nibi-chain
     clone_into go-ethereum           nibi-geth
-    clone_into heart-monitor         nibi-go-hm
+    clone_into go-heartmonitor       nibi-go-hm
     clone_into ts-sdk                nibi-ts-sdk
     clone_into home-site             nibi-home-site
     clone_into sai-web               sai-web
