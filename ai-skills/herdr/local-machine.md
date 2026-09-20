@@ -6,7 +6,7 @@ commands, or behavior. Prefer direct evidence over remembered defaults.
 ## Evidence order
 
 1. For the user's effective configuration, read managed file
-   `/home/realu/ki/boku/dotfiles/herdr/config.toml`. The file is intentionally
+   `$DOTFILES/herdr/config.toml`. The file is intentionally
    self-documenting: comments preserve the meaning of available settings, and
    uncommented values are deliberate overrides. It is linked to runtime path
    `~/.config/herdr/config.toml`.
@@ -14,7 +14,7 @@ commands, or behavior. Prefer direct evidence over remembered defaults.
    command `herdr --default-config`, command `herdr --help`, or the relevant
    nonmutating command-group help.
 3. For implementation details and fuller documentation, inspect source checkout
-   `/home/realu/ki/boku/dotfiles/lib-herdr`.
+   `$DOTFILES/lib-herdr`.
 4. Reconcile versions before applying source-checkout findings to the installed
    binary. Draft source and documentation may describe unreleased behavior.
 
@@ -25,19 +25,19 @@ a Herdr-managed pane, as described in `SKILL.md`.
 ## Local paths
 
 - Managed config:
-  `/home/realu/ki/boku/dotfiles/herdr/config.toml`
+  `$DOTFILES/herdr/config.toml`
 - Local config notes:
-  `/home/realu/ki/boku/dotfiles/herdr/README.md`
+  `$DOTFILES/herdr/README.md`
 - Herdr source checkout:
-  `/home/realu/ki/boku/dotfiles/lib-herdr`
+  `$DOTFILES/lib-herdr`
 - Config data model and defaults:
-  `/home/realu/ki/boku/dotfiles/lib-herdr/src/config/model.rs`
+  `$DOTFILES/lib-herdr/src/config/model.rs`
 - Commented default-config template:
-  `/home/realu/ki/boku/dotfiles/lib-herdr/src/main.rs`
+  `$DOTFILES/lib-herdr/src/main.rs`
 - Unreleased English documentation:
-  `/home/realu/ki/boku/dotfiles/lib-herdr/docs/next/website/src/content/docs`
+  `$DOTFILES/lib-herdr/docs/next/website/src/content/docs`
 - Published version documentation:
-  `/home/realu/ki/boku/dotfiles/lib-herdr/docs/versions`
+  `$DOTFILES/lib-herdr/docs/versions`
 
 For guided config documentation, begin with file `configuration.mdx`. For the
 generated key catalog, use file `config-reference.mdx` together with the config
@@ -46,11 +46,11 @@ model and command `herdr --default-config`.
 ## Configuration changes
 
 When the user requests a local configuration change, edit managed file
-`/home/realu/ki/boku/dotfiles/herdr/config.toml`, preserve its explanatory
+`$DOTFILES/herdr/config.toml`, preserve its explanatory
 comment style, and validate it with:
 
 ```bash
-HERDR_CONFIG_PATH="/home/realu/ki/boku/dotfiles/herdr/config.toml" \
+HERDR_CONFIG_PATH="$DOTFILES/herdr/config.toml" \
   herdr config check
 ```
 
