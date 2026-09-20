@@ -5,8 +5,11 @@ longer and optimized for “copy/paste” and quick lookup.
 
 ## Assumptions
 
-- **Network**: mainnet via `ud nibi cfg prod`
-- **Output**: `ud nibi cfg prod` sets `nibid config output json`, so examples
+- **Network**: mainnet via `ud nibi cfg prod`, which selects the default,
+  non-archive RPC
+- **Archive**: use `ud nibi cfg prod --archive` only for historical read-only
+  data that the standard RPC has pruned, then restore `ud nibi cfg prod`
+- **Output**: `ud nibi cfg prod` runs `nibid config output json`, so examples
   omit `-o json`
 - **Tools**: `jq` installed
 
@@ -296,4 +299,3 @@ So: treat the proposal as the source of truth while voting is ongoing.
 - Nibiru governance lifecycle: `https://nibiru.fi/docs/community/governance.html`
 - Nibiru submitting proposals: `https://nibiru.fi/docs/community/submitting-proposals.html`
 - Cosmos SDK upgrade module: `https://docs.cosmos.network/v0.53/build/modules/upgrade`
-

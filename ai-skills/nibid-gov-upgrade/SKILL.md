@@ -41,6 +41,11 @@ ud nibi cfg prod
 nibid config
 ```
 
+This selects the default, non-archive mainnet RPC and JSON output. Keep the
+default RPC for current proposal state. Use `ud nibi cfg prod --archive` only
+for a read-only historical query whose data has been pruned, then restore the
+default RPC with `ud nibi cfg prod`.
+
 2. Pick a proposal id:
 
 ```bash
@@ -190,6 +195,9 @@ echo "$VALS_JSON" \
 ```
 
 ## Governance transactions (tx)
+
+Run `ud nibi cfg prod` before any governance transaction. Do not broadcast
+through an archive RPC.
 
 - **Vote**:
 
