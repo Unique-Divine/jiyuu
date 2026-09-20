@@ -12,8 +12,9 @@ ud nibi cfg prod
 nibid config
 ```
 
-Assume the active CLI config is already set to JSON output unless the user says
-otherwise.
+This selects the default, non-archive mainnet RPC and JSON output. The commands
+in this reference read current EVM state, so do not add `--archive`. Assume the
+active CLI config is already set to JSON output unless the user says otherwise.
 
 ### `nibid q evm account`
 

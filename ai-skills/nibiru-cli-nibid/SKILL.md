@@ -58,6 +58,9 @@ Rules of thumb:
 ud nibi cfg prod
 ```
 
+This selects the default, non-archive mainnet RPC and sets the chain ID, sync
+broadcast mode, and JSON output.
+
 2. Confirm what `nibid` is pointed at:
 
 ```bash
@@ -70,15 +73,15 @@ Example - Mainnet.
 	"chain-id": "cataclysm-1",
 	"keyring-backend": "test",
 	"output": "json",
-	"node": "https://rpc.archive.nibiru.fi:443",
+	"node": "https://rpc.nibiru.fi:443",
 	"broadcast-mode": "sync"
 }
 ```
 
-3. Assume JSON output by default. 
-All default `nibid` configs use `nibid config output json`, so commands inherit
-JSON output unless the user says otherwise.
-Do not include `--output json` in `nibid` commands unless it is needed.
+3. Assume JSON output after using `ud nibi cfg`. The wrapper runs command
+`nibid config output json`, so commands inherit JSON output unless the user
+says otherwise. Do not include `--output json` in individual `nibid` commands
+unless needed.
 
 ```bash
 ADDR="nibi1..."
@@ -105,13 +108,36 @@ Rules of thumb:
 - If the user says "use the `validator-6900` key", prefer `--from
   validator-6900` when that name appears in `nibid keys list`.
 
+## RPC selection
+
+Commands `ud nibi cfg prod` and `ud nibi cfg test` select non-archive RPCs by
+default. Use the default RPC for every transaction broadcast and for current
+Wasm or EVM state from commands `nibid q wasm` and `nibid q evm`.
+
+Flag `--archive` is a temporary setting for read-only historical Cosmos or
+Comet queries when the standard RPC has pruned the required data:
+
+```bash
+ud nibi cfg prod --archive
+nibid q tx "$OLD_TX"
+ud nibi cfg prod
+```
+
+The selected RPC persists in the `nibid` configuration. Restore the default
+RPC after the historical read, and always restore it before a transaction or a
+current Wasm or EVM query. Command `ud nibi cfg local --archive` succeeds but
+continues to use `http://localhost:26657`.
+
 ## Core mental model
 
 - `nibid q ...` / `nibid query ...` reads chain state.
 - `nibid tx ...` builds and broadcasts transactions.
 - `nibid config` shows the current CLI configuration and is the first check when
   a result looks wrong for the expected network.
-- Use `ud nibi cfg ...` to switch networks before querying or sending.
+- Use `ud nibi cfg ...` without `--archive` before current-state queries or
+  transactions.
+- Use `--archive` only for historical read-only queries, then restore the
+  default RPC.
 - Use `nibid keys list | jq` to discover available `--from` values before
   proposing or running a transaction.
 - Pipe to `jq` for nested fields when needed.
