@@ -16,11 +16,14 @@ cases. For each question, provide your recommended answer.
 3. Record decisions as the discussion progresses. If the user is working from an
    existing spec, plan, issue, or design document, write resolved answers back
    into that document iteratively. If there is no obvious document, create or
-   propose a short notes/spec file.
+   propose a short notes/spec file. Follow agent skill `md-tasks` whenever the
+   document contains tasks.
 
-4. When recording implementation decisions, add or update one or more top-level
-   `## Impl` sections. Use concise logical flows where they make the design
-   easier to execute:
+4. Put implementation-bearing decisions in numbered top-level sections:
+   `## Impl 1: ...`, `## Impl 2: ...`, and so on. Start with `## Impl 1` even
+   when the document has one implementation sequence. The numbers make the
+   document easy to navigate. They do not impose delivery order. Use concise
+   logical flows where they make the design easier to execute:
 
    ```text
    input or trigger
@@ -30,10 +33,21 @@ cases. For each question, provide your recommended answer.
    ```
 
 5. When recording an answer, capture the decision, rationale, relevant codebase
-   or operational context, and important caveats. Use open checkbox sub-bullets
-   only for unresolved work, decisions, or tests. A resolved decision may remain
-   as a completed decision task or become settled prose, following agent skill
-   `md-tasks`.
+   or operational context, and important caveats. Write a resolved decision as
+   ordinary prose under its relevant `## Impl N` section. Put each actionable
+   consequence directly beneath it as an unchecked implementation, validation,
+   rollout, communication, or deferred task. Never mark a decision `[x]` just
+   because the user made it. Mark `[x]` only after the work itself is complete
+   and evidence is recorded.
+
+   ```markdown
+   ## Impl 1: stNIBI withdrawal
+
+   Withdrawals go to Sai L1 only. Bridging is out of scope.
+
+   - [ ] Extend the Withdraw modal to support stNIBI deposits.
+   - [ ] Test a successful Sai L1 stNIBI withdrawal.
+   ```
 
 6. Continue drilling while material design ambiguity remains for the
    implementation sequence being handed off. Answered questions alone do not
@@ -43,7 +57,7 @@ cases. For each question, provide your recommended answer.
      implementation, validation, rollout, or deferred tasks.
    - Check that no actionable consequence remains hidden in narrative prose.
    - If the artifact is an epic, follow agent skill `epics` for placement,
-     structure, and handoff synthesis, including multiple top-level `## Impl`
-     sections when they help separate implementation sequences.
-   - Explicitly defer non-blocking questions so one stable `## Impl` sequence
+     structure, and handoff synthesis. Keep the numbered `## Impl N` sections
+     created during the drill, adding more when they improve navigation.
+   - Explicitly defer non-blocking questions so one stable `## Impl N` sequence
      can proceed without implying that every later sequence is fully specified.
