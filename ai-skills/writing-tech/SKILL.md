@@ -107,7 +107,7 @@ When editing technical docs:
 ## Reference
 
 Long-form source reference:
-`/home/realu/ki/boku/epics/writing-tech/SKILL.md`
+`$HOME/ki/boku/epics/writing-tech/SKILL.md`
 
 Additional style resources:
 `resources.md`
