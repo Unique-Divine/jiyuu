@@ -1,17 +1,10 @@
 ---
 name: nibiru-gql
 description: >-
-  Query and investigate Nibiru's Heart Monitor (HM) GraphQL API and its indexed
-  database evidence. Use for HM, Nibiru GraphQL, user or token balances,
-  staking, validators, delegations, transaction hashes, Cosmos messages, custom
-  Wasm events, indexing checks, or reconciliation between Heart Monitor and Sai
-  Keeper. Read the relevant child reference before querying.
-metadata:
-  tags: ["nibiru", "heart-monitor", "graphql", "indexer"]
-  agent_skills:
-    - nibiru-cli-nibid
-    - sai-db
-    - sai-perps
+  Query the Nibiru Heart Monitor GraphQL API and its indexed chain data. Use for
+  wallet balances, staking, validators, delegations, Cosmos transaction
+  messages, Wasm events, indexing gaps, or comparisons with Sai Keeper. Read
+  the matching reference before querying.
 ---
 
 # Nibiru GraphQL and Heart Monitor
