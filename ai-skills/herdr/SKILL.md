@@ -14,11 +14,11 @@ evidence instead of relying on memory. Read `local-machine.md` for the evidence
 order and paths.
 
 Start configuration questions with the commented managed file
-`$DOTFILES/herdr/config.toml`. It backs
+`$DOTFILES/herdr-cfg/config.toml`. It backs
 `~/.config/herdr/config.toml` and documents the user's intentional overrides.
 Use `herdr --default-config` for the installed version's complete default
 configuration. For deeper behavior or documentation questions, inspect the
-local source checkout at `$DOTFILES/lib-herdr`.
+local source checkout at `$DOTFILES/herdr`.
 
 The source checkout may be ahead of the installed binary. Verify the relevant
 version before claiming that source or draft documentation describes installed
