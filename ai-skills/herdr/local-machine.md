@@ -57,6 +57,31 @@ HERDR_CONFIG_PATH="$DOTFILES/herdr/config.toml" \
 Reloading the running server with command `herdr server reload-config` is a live
 session-control action. Perform the `HERDR_ENV=1` check first.
 
+## Installed fork and Codex
+
+The vendored v0.9.3 fork keeps zero-based tab shortcuts and labels. Build it
+with command `just herdr-install` from directory `$DOTFILES`. Command
+`herdr update` replaces the custom binary with an upstream release. Check
+command `herdr status server` separately from command `herdr --version`, since
+installing a binary does not replace a running server.
+
+The managed Codex defaults set configuration key `tui.alternate_screen` to
+`"never"`. Codex reads this setting when its process starts and renders inline
+so Herdr copy mode can scroll its output. Inline rendering works independently
+of daemon mode.
+
+Herdr's managed starts and restores, and the Zsh function `codex` for manual
+launches, pass flag `--no-daemon` to keep session hooks tied to the launching
+pane. See file `$DOTFILES/herdr/README.md` for applying these settings and
+performing a server handoff.
+
+Existing Codex processes survive live handoff with their original settings.
+A shared Codex daemon can also retain another pane's inherited caller context.
+When investigating that case, compare environment variable `CODEX_THREAD_ID` with live
+API field `agent_session.value` before choosing a pane; do not infer identity from cwd
+or recency alone. Use the verified explicit pane ID rather than a stale
+`--current` context.
+
 Do not edit the `lib-herdr` source checkout merely to answer a configuration or
 behavior question. Modify that checkout only when the user explicitly requests
 Herdr source or documentation work.
