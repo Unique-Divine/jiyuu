@@ -41,8 +41,12 @@ mkdir -p "$HOME/ki"
 cd "$HOME/ki"
 
 git clone git@github.com:CosmWasm/cosmwasm.git wasm-cosmwasm
-git clone git@github.com:CosmWasm/wasmvm.git wasm-go-wasmvm
 ```
+
+Nibiru's maintained WasmVM, Rust VM, Wasmer runtime, and contracts are already
+inside the `nibi-chain` checkout. Do not recreate the retired `wasm-go-wasmvm`
+or `nibi-wasm` checkouts for maintained Nibiru work. The standalone Nibiru forks
+are public archives; use them only when historical source or releases are needed.
 
 ## Personal repos (examples)
 

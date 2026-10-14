@@ -3,7 +3,7 @@ name: repo-map
 description: >-
   Maps and routes between key repositories on my machine (boku, nibi-chain,
   nibi-geth, nibi-go-hm, nibi-ts-sdk, sai-web, sai-perps, nibi-iac,
-  nibi-home-site, gh-io-ud, wasm-cosmwasm, wasm-go-wasmvm). Use when the user
+  nibi-home-site, gh-io-ud, and the in-tree Wasm runtime and Rust contracts). Use when the user
   asks which repo to look at, where a feature lives, how repos connect, how
   services are deployed (Terraform/IaC), when a task spans chain, EVM, indexer,
   SDK, frontend, and docs, or when the user asks about the personal site, blog
@@ -17,19 +17,28 @@ Use this skill to quickly route questions/tasks to the correct repo(s) under pat
 ## Quick routing
 
 ### Blockchain and EVM Impl
-- `$HOME/ki/nibi-chain`: **Chain logic, modules, and Nibiru CLI (`nibid`)**. This repo
-defines the logic, and you can run `nibid tx`, `nibid query`, or other commands in
+- `$HOME/ki/nibi-chain`: **Chain logic, modules, and Nibiru CLI (`nibiru`)**. This repo
+defines the logic, and you can run `nibiru tx`, `nibiru query`, or other commands in
 the terminal to inspect exact functionality. Core L1 chain (Go). App wiring +
 custom modules. Includes `cmd/nibid`. | `x/`, `app/`, `proto/`, `cmd/nibid/`
 - `$HOME/ki/nibi-chain/x/evm`: **Nibiru EVM execution and precompiles live here.**. RPC is standard for the EVM.
 - `$HOME/ki/nibi-geth`: **EVM state transition internals that do not involve precompiles; go-ethereum logic**
-- `$HOME/ki/wasm-cosmwasm`: **CosmWasm repo**. Official GitHub name "CosmWasm/cosmwasm".
-Defines the Wasmer version used via `cosmwasm-vm`'s `Cargo.toml`.
-- `$HOME/ki/wasm-go-wasmvm`: **WasmVM repo**. Official GitHub name "CosmWasm/wasmvm".
-Nibiru connects to this repo via the `github.com/CosmWasm/wasmvm` dependency in
-`nibi-chain/go.mod` (currently version 1.5.9). `libwasmvm` depends on `cosmwasm`
-transitively to pull in `wasmer`. The relationship is: `nibi-chain` -> `wasmvm`
--> `cosmwasm` -> `wasmer`.
+- `$HOME/ki/nibi-chain/lib/wasmvm`: **Nibiru's maintained Go WasmVM bindings and Rust FFI runtime**.
+The Go types live in `wvm/`, and the Rust crate lives in `libwasmvm/`.
+Follow this directory's `README.md` for builds and releases.
+- `$HOME/ki/nibi-chain/lib/cosmwasm-vm` and `$HOME/ki/nibi-chain/lib/wasmer`:
+**Nibiru's maintained Rust VM and patched Wasmer runtime**. Dependency paths
+connect these in-tree directories to `lib/wasmvm/libwasmvm`.
+- `$HOME/ki/nibi-chain/wasm-contracts` and Rust packages under `$HOME/ki/nibi-chain/lib`:
+**Nibiru's maintained CosmWasm contracts and reusable Rust crates**, including
+`nibiru-std` and `nibiru-ownable`. Read `nibi-chain/spec/04-rust-contract-workspace.md`
+for the root Cargo workspace and `just rs` commands.
+- **Archived standalone forks**: `NibiruChain/go-wasmvm` and
+`NibiruChain/nibiru-wasm` are public archives. Their former local checkouts
+`wasm-go-wasmvm` and `nibi-wasm` were removed. Route maintained work to the
+in-tree directories above; consult archived tags and releases only for history.
+- `$HOME/ki/wasm-cosmwasm`: **Upstream CosmWasm reference checkout**,
+`CosmWasm/cosmwasm`. Nibiru's maintained VM implementation lives in the monorepo.
 
 ### Nibiru Indexer and TypeScript SDK
 - `$HOME/ki/nibi-go-hm`: 
@@ -87,6 +96,8 @@ Nibiru work lives under org **`NibiruChain`**. Local directory names often **dif
 | `sai-docs` | `git@github.com:NibiruChain/sai-docs.git` |
 | `nibi-iac` | `git@github.com:NibiruChain/iac.git` |
 
-Other entries in this map: **`wasm-cosmwasm`** → `git@github.com:CosmWasm/cosmwasm.git`; **`wasm-go-wasmvm`** → `git@github.com:CosmWasm/wasmvm.git`; **`boku`** → `git@github.com:Unique-Divine/boku.git` (personal).
+Other entries in this map: **`wasm-cosmwasm`** → `git@github.com:CosmWasm/cosmwasm.git`; **`boku`** → `git@github.com:Unique-Divine/boku.git` (personal).
+The archived Nibiru forks are `NibiruChain/go-wasmvm` and `NibiruChain/nibiru-wasm`;
+cloning `NibiruChain/nibiru` provides their maintained replacements.
 
 Copy-paste **`git clone`** commands, optional idempotent **`clone`** helper function, and notes on discovering org repos: [cloning.md](./cloning.md).
