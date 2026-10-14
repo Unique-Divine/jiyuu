@@ -67,7 +67,7 @@ frontend and API integrations. This uses the "sai-keeper" GraphQL interface.
 - Legacy names `nibi-home-site`, `home-site`, and `nibi-webapp` route maintained
   work to `nibi-web`, or `nibi-web/app` for app features. Existing old worktrees
   remain available for user branches and history. Do not delete or repurpose them.
-- `NibiruChain/nibi-webapp` retains historical app PR discussions and releases.
+- Archived `NibiruChain/nibi-webapp` retains historical app PR discussions and releases.
   New app PRs belong in `NibiruChain/nibi-web`.
 
 ### Infrastructure (IaC)
