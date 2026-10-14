@@ -3,7 +3,7 @@ name: repo-map
 description: >-
   Maps and routes between key repositories on my machine (boku, nibi-chain,
   nibi-geth, nibi-go-hm, nibi-ts-sdk, sai-web, sai-perps, nibi-iac,
-  nibi-home-site, gh-io-ud, and the in-tree Wasm runtime and Rust contracts). Use when the user
+  nibi-web, gh-io-ud, and the in-tree Wasm runtime and Rust contracts). Use when the user
   asks which repo to look at, where a feature lives, how repos connect, how
   services are deployed (Terraform/IaC), when a task spans chain, EVM, indexer,
   SDK, frontend, and docs, or when the user asks about the personal site, blog
@@ -57,10 +57,18 @@ frontend and API integrations. This uses the "sai-keeper" GraphQL interface.
 - `$HOME/ki/sai-docs`: Public-facing user documentation for Sai. Great conceptual
   resource.
 
-### Nibiru Public Site and Docs
-- `$HOME/ki/nibi-home-site`: **Nibiru official website, blog, and public docs**.
-  Official Nibiru docs live in `docs-nibiru/` and publish to `nibiru.fi/docs`.
-  Use this repo for docs content, site/blog changes, and docs navigation.
+### Nibiru public site, docs, and wallet app
+- `$HOME/ki/nibi-web`: **Combined Nibiru website**, `NibiruChain/nibi-web`.
+  Astro marketing and blog source lives in `src/`. VitePress docs live in
+  `docs-v2/`, with content synced from `nibi-chain/docs`. React wallet app source
+  lives in `app/`. One Bun workspace builds `/`, `/docs`, and `/app` into `dist`
+  for a shared Firebase release. Use root `just dev`, `just build`, and
+  `just preview`; focused app commands remain available.
+- Legacy names `nibi-home-site`, `home-site`, and `nibi-webapp` route maintained
+  work to `nibi-web`, or `nibi-web/app` for app features. Existing old worktrees
+  remain available for user branches and history. Do not delete or repurpose them.
+- `NibiruChain/nibi-webapp` retains historical app PR discussions and releases.
+  New app PRs belong in `NibiruChain/nibi-web`.
 
 ### Infrastructure (IaC)
 - `$HOME/ki/nibi-iac`: **Infrastructure as code (Terraform)**. Source of truth for live deployments,
@@ -89,7 +97,7 @@ Nibiru work lives under org **`NibiruChain`**. Local directory names often **dif
 | `nibi-geth` | `git@github.com:NibiruChain/go-ethereum.git` |
 | `nibi-go-hm` | `git@github.com:NibiruChain/go-heartmonitor.git` |
 | `nibi-ts-sdk` | `git@github.com:NibiruChain/ts-sdk.git` |
-| `nibi-home-site` | `git@github.com:NibiruChain/home-site.git` |
+| `nibi-web` | `git@github.com:NibiruChain/nibi-web.git` |
 | `sai-web` | `git@github.com:NibiruChain/sai-web.git` |
 | `sai-perps` | `git@github.com:NibiruChain/sai-perps.git` |
 | `sai-keeper` | `git@github.com:NibiruChain/sai-keeper.git` |
