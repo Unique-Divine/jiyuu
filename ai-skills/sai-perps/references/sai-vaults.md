@@ -23,7 +23,7 @@ Estate group. USDC and stNIBI both use 6 decimal base units on Sai.
 
 ## Setup
 
-Use the `/nibiru-cli-nibid` skill since this behavior relies heavily on using the
+Use the `/nibiru-cli` skill since this behavior relies heavily on using the
 CLI properly.
 
 ```bash
@@ -34,14 +34,14 @@ VAULT_G1_USDC="nibi1waf5c8z55qvjay4de8wkm9cxyt6wa8zdnrvlexjrq77lqgqf258q3yn7l8"
 VAULT_G1_STNIBI="nibi1pgurgas0za436c3fm2km99zkzutfx0jwpn7meespv6szv8c8g39qjz2tvj"
 
 sai_q() {
-  nibid query wasm contract-state smart "$1" "$2"
+  nibiru query wasm contract-state smart "$1" "$2"
 }
 
 raw_item() {
   contract="$1"
   key="$2"
   hex=$(printf '%s' "$key" | xxd -p -c 256)
-  nibid query wasm contract-state raw "$contract" "$hex" |
+  nibiru query wasm contract-state raw "$contract" "$hex" |
     jq -r '.data // empty' | base64 -d
   echo
 }
@@ -210,7 +210,7 @@ raw_json_item() {
   contract="$1"
   key="$2"
   hex="$(printf '%s' "$key" | xxd -p -c 256)"
-  nibid query wasm contract-state raw "$contract" "$hex" |
+  nibiru query wasm contract-state raw "$contract" "$hex" |
     jq -r '.data // empty' | base64 -d | jq -r .
 }
 
@@ -410,7 +410,7 @@ raw_item() {
   contract="$1"
   key="$2"
   hex=$(printf '%s' "$key" | xxd -p -c 256)
-  nibid query wasm contract-state raw "$contract" "$hex" |
+  nibiru query wasm contract-state raw "$contract" "$hex" |
     jq -r '.data // empty' | base64 -d
   echo
 }
@@ -468,7 +468,7 @@ raw_pending_gov_fees() {
   idx_hex=$(printf '%04x' "$idx")
   hex_key="${ns_len_hex}${ns_hex}${idx_hex}"
 
-  nibid query wasm contract-state raw "$PERP" "$hex_key" |
+  nibiru query wasm contract-state raw "$PERP" "$hex_key" |
     jq -r '.data // empty' | base64 -d
   echo
 }

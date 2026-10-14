@@ -1,6 +1,6 @@
-# `nibid` Reference Notes
+# `nibiru` Reference Notes
 
-## EVM via `nibid`
+## EVM via `nibiru`
 
 Use these commands when the user wants EVM-related state through the Nibiru CLI
 rather than Ethereum JSON-RPC.
@@ -9,14 +9,14 @@ Start on the intended network first:
 
 ```bash
 ud nibi cfg prod
-nibid config
+nibiru config
 ```
 
 This selects the default, non-archive mainnet RPC and JSON output. The commands
 in this reference read current EVM state, so do not add `--archive`. Assume the
 active CLI config is already set to JSON output unless the user says otherwise.
 
-### `nibid q evm account`
+### `nibiru q evm account`
 
 This is the fastest CLI check for an EVM account's native gas balance on Nibiru.
 It accepts either a hex `0x...` address or a Bech32 `nibi1...` address and
@@ -25,8 +25,8 @@ returns both forms in the response.
 ```bash
 ADDR_HEX="0x7027d536380F0474B7Ec119c2c5250821902e6dC"
 ADDR_BECH32="nibi1wqna2d3cpuz8fdlvzxwzc5jssgvs9ekufm3uj2"
-nibid q evm account "$ADDR_HEX"
-nibid q evm account "$ADDR_BECH32"
+nibiru q evm account "$ADDR_HEX"
+nibiru q evm account "$ADDR_BECH32"
 ```
 
 Returned fields:
@@ -45,14 +45,14 @@ Offline normalization only:
 
 ```bash
 ADDR="0x7027d536380F0474B7Ec119c2c5250821902e6dC"
-nibid q evm account "$ADDR" --offline
+nibiru q evm account "$ADDR" --offline
 ```
 
 With `--offline`, the CLI only normalizes the address forms. It does not query
 live chain state, so `balance_wei` and `code_hash` come back empty and `nonce`
 defaults to `0`.
 
-### `nibid q evm balance`
+### `nibiru q evm balance`
 
 This is the workhorse command for checking USDC balances on Nibiru, especially
 for Sai operations where USDC is the primary currency. It queries token balances
@@ -77,28 +77,28 @@ USDC_ERC20="0x0829F361A05D993d5CEb035cA6DF3446b060970b"
 USDC_BANK="erc20/0x0829F361A05D993d5CEb035cA6DF3446b060970b"
 ```
 
-The examples from `nibid q evm balance --help` are the canonical quick-start:
+The examples from `nibiru q evm balance --help` are the canonical quick-start:
 
 ```bash
 # USDC on Nibiru mainnet
 addr="0xYourAddr" token="0x0829F361A05D993d5CEb035cA6DF3446b060970b"
-nibid query evm balance "$addr" "$token"
+nibiru query evm balance "$addr" "$token"
 
 # NIBI via bank denom
 addr="0xYourAddr" token="unibi"  # Bank coin denom works
-nibid query evm balance "$addr" "$token"
+nibiru query evm balance "$addr" "$token"
 
 # NIBI via canonical WNIBI ERC20
 addr="0xYourAddr" token="0x0CaCF669f8446BeCA826913a3c6B96aCD4b02a97" # ERC20 addr works
-nibid query evm balance "$addr" "$token"
+nibiru query evm balance "$addr" "$token"
 ```
 
 For a Bech32 keyring address, use the key address directly:
 
 ```bash
-ADDR="$(nibid keys show sai-perp-admin -a)"
+ADDR="$(nibiru keys show sai-perp-admin -a)"
 TOKEN="0x0829F361A05D993d5CEb035cA6DF3446b060970b"
-nibid q evm balance "$ADDR" "$TOKEN" | jq .
+nibiru q evm balance "$ADDR" "$TOKEN" | jq .
 ```
 
 Useful output fields:
@@ -112,14 +112,14 @@ Useful output fields:
 
 Rule of thumb:
 
-- Prefer `nibid q evm balance "$ADDR" "$USDC_ERC20"` for Sai USDC balance
+- Prefer `nibiru q evm balance "$ADDR" "$USDC_ERC20"` for Sai USDC balance
   checks because it shows both EVM/ERC20 and Bank-side holdings in one response.
-- Use `nibid q bank balances "$ADDR" --denom "$USDC_BANK"` only when you
+- Use `nibiru q bank balances "$ADDR" --denom "$USDC_BANK"` only when you
   specifically need the Bank module view.
 
 ### `balance_wei` and bank `unibi`
 
-`balance_wei` from `nibid q evm account` and bank `unibi` from `nibid q bank balances`
+`balance_wei` from `nibiru q evm account` and bank `unibi` from `nibiru q bank balances`
 represent the same native NIBI balance, just at different granularities.
 
 - `unibi` means micro NIBI (`μ NIBI`)
@@ -132,8 +132,8 @@ Examples:
 ```bash
 ADDR="nibi1wqna2d3cpuz8fdlvzxwzc5jssgvs9ekufm3uj2"
 DENOM="unibi"
-nibid q evm account "$ADDR"
-nibid q bank balances "$ADDR" --denom "$DENOM"
+nibiru q evm account "$ADDR"
+nibiru q bank balances "$ADDR" --denom "$DENOM"
 ```
 
 Rule of thumb:
@@ -141,31 +141,31 @@ Rule of thumb:
 - Use `q evm account` when the user thinks in EVM/native-gas terms or has a `0x...` address.
 - Use `q bank balances --denom unibi` when the user wants the Cosmos bank representation.
 
-### `nibid q evm funtoken`
+### `nibiru q evm funtoken`
 
 Use this to query the mapping between a bank denom and its ERC20 representation.
 
 ```bash
 COIN_OR_ERC20="unibi"
-nibid q evm funtoken "$COIN_OR_ERC20"
+nibiru q evm funtoken "$COIN_OR_ERC20"
 
 COIN_OR_ERC20="0x7D4B7B8CA7E1a24928Bb96D59249c7a5bd1DfBe6"
-nibid q evm funtoken "$COIN_OR_ERC20"
+nibiru q evm funtoken "$COIN_OR_ERC20"
 ```
 
-## `nibid tx evm` scope
+## `nibiru tx evm` scope
 
-On this CLI build, `nibid tx evm` is for FunToken and bank/ERC20 conversion
+On this CLI build, `nibiru tx evm` is for FunToken and bank/ERC20 conversion
 flows, not generic Ethereum wallet-like transactions.
 
 Available commands:
 
-- `nibid tx evm convert-coin-to-evm`
-- `nibid tx evm convert-evm-to-coin`
-- `nibid tx evm create-funtoken`
+- `nibiru tx evm convert-coin-to-evm`
+- `nibiru tx evm convert-evm-to-coin`
+- `nibiru tx evm create-funtoken`
 
 Use other surfaces when appropriate:
 
-- `nibid tx bank` for native bank sends
-- `nibid tx wasm` for CosmWasm contract execution and instantiation
+- `nibiru tx bank` for native bank sends
+- `nibiru tx wasm` for CosmWasm contract execution and instantiation
 - `evm-rpc` for receipts, traces, and `eth_*` / `debug_*` RPC workflows

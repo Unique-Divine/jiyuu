@@ -1,4 +1,4 @@
-# `nibid` Examples
+# `nibiru` Examples
 
 Concrete copy-paste examples for [`SKILL.md`](./SKILL.md).
 
@@ -13,7 +13,7 @@ TO_ADDR="nibi1recipient..."
 MEMO="2097215673"
 AMOUNT="1000000unibi"
 
-nibid tx bank send \
+nibiru tx bank send \
   "$FROM" \
   "$TO_ADDR" \
   "$AMOUNT" \
@@ -30,7 +30,7 @@ TO_ADDR="nibi1recipient..."
 MEMO="2097215673"
 AMOUNT="1000000unibi"
 
-nibid tx bank send \
+nibiru tx bank send \
   "$FROM" \
   "$TO_ADDR" \
   "$AMOUNT" \

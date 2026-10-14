@@ -55,7 +55,7 @@ row. Finally, query the Sai Keeper GraphQL API to verify app-visible data.
 
 ## Routing boundaries
 
-- Use agent skill `nibiru-cli-nibid` for authoritative chain state, address
+- Use agent skill `nibiru-cli` for authoritative chain state, address
   normalization, and transaction lookup.
 - Use agent skill `sai-perps` for Perp contract state and reconciliation across
   contracts, Sai Keeper GraphQL, REST, and operator records.

@@ -24,7 +24,7 @@ fields `user` and `users`.
 | Need | Preferred source |
 | --- | --- |
 | Current indexed wallet balances | Heart Monitor |
-| Strictly consistent chain balances | `nibid` chain query or RPC |
+| Strictly consistent chain balances | `nibiru` chain query or RPC |
 | Sai internal deposits or trading credits | Sai Perp contract and Sai Keeper |
 
 This document describes the Nibiru indexer (Heart Monitor) and the **user** / **users** / **Token** portion of its GraphQL schema: what the indexer is, how the TypeScript SDK exposes it, and the types and fields available for user balance queries.
@@ -314,8 +314,8 @@ Generated types **GQLUser**, **GQLToken**, **GQLUserFilter**, **GQLUsersFilter**
 
 ## 8. Gotchas
 
-- **`balances` vs `all_balances`**: Do not assume **`balances`** is complete. If it is empty but the wallet holds tokens on chain, query **`all_balances`** with **`token_info`** (and compare with **`nibid query bank balances`** / EVM **`balanceOf`** if needed).
-- **Indexer lag**: The indexer indexes blocks asynchronously. Data may be a few seconds behind the chain. For strict consistency, use the chain (e.g. `nibid query bank balances <address>`).
+- **`balances` vs `all_balances`**: Do not assume **`balances`** is complete. If it is empty but the wallet holds tokens on chain, query **`all_balances`** with **`token_info`** (and compare with **`nibiru query bank balances`** / EVM **`balanceOf`** if needed).
+- **Indexer lag**: The indexer indexes blocks asynchronously. Data may be a few seconds behind the chain. For strict consistency, use the chain (e.g. `nibiru query bank balances <address>`).
 - **Token.amount and Balance.amount are String**: Parse for display or arithmetic. Use **TokenInfo.decimals** for **all_balances** rows when present.
 - **user(where) returns nullable User**: If no user exists for the given address, **user** can return null. **users** always returns an array (possibly empty).
 - **is_blocked**: Optional; when true, the account is blocked in the indexer.

@@ -17,7 +17,7 @@ delegations, redelegations, unbondings, and staking history.
 - Delegation `amount` is an indexed token snapshot, not the canonical shares.
   Use a height-specific chain query for slashing or compensation calculations.
 - Delegator rewards belong to the chain distribution module. Query them with
-  `nibid query distribution`, not Heart Monitor.
+  `nibiru query distribution`, not Heart Monitor.
 - The TypeScript SDK exposes the GraphQL surface through `HeartMonitor.staking`.
 
 ### Data lineage
@@ -55,7 +55,7 @@ This document describes the Nibiru indexer (Heart Monitor) and the staking porti
   - [The Lineage](#the-lineage)
   - [Key Chain Types (internal/cosmos-sdk)](#key-chain-types-internalcosmos-sdk)
   - [Key Indexer Types (nibi-go-hm models)](#key-indexer-types-nibi-go-hm-models)
-- [8. CLI Mapping (nibid Γåö Indexer)](#8-cli-mapping-nibid-%E2%86%94-indexer)
+- [8. CLI Mapping (nibiru Γåö Indexer)](#8-cli-mapping-nibiru-%E2%86%94-indexer)
   - [Validator addresses (valoper)](#validator-addresses-valoper)
 - [9. GraphQL Schema Types (Heart Monitor)](#9-graphql-schema-types-heart-monitor)
   - [Validator](#validator)
@@ -89,7 +89,7 @@ changes, SDK client code, chain logic, and how they connect.
 - **Implementation**: The server is implemented in the `nibi-go-hm` repo.
 - **Endpoint**: Clients send POST requests to the GraphQL endpoint at path `/query`. **Production URLs**: Mainnet `https://hm-graphql.nibiru.fi/query`; testnet `https://hm-graphql.itn-2.nibiru.fi/query`. **Env** is the hostname segment that identifies the network: omit it for mainnet; use `itn-2` for testnet. Generic form: `https://hm-graphql.<env>.nibiru.fi/query` (for mainnet, use `hm-graphql.nibiru.fi` with no `<env>.` segment). The playground is at `/graphql` on the same host.
 - **Scope**: Staking (validators, delegations, redelegations, unbondings, history) is one module. The same API serves governance, oracle, inflation, user balances, IBC, wasm, and more.
-- **Rewards**: **Rewards for a delegator are NOT from the indexer**; they come from the chain’s distribution module. Use the Nibiru CLI: `nibid query distribution` (e.g. `rewards`) and `nibid tx distribution`.
+- **Rewards**: **Rewards for a delegator are NOT from the indexer**; they come from the chain’s distribution module. Use the Nibiru CLI: `nibiru query distribution` (e.g. `rewards`) and `nibiru tx distribution`.
 
 ---
 
@@ -271,9 +271,9 @@ type Validator struct {
 
 ---
 
-## 8. CLI Mapping (nibid ↔ Indexer)
+## 8. CLI Mapping (nibiru ↔ Indexer)
 
-| CLI command (`nibid q staking ...`) | Chain Query | Indexer Equivalent |
+| CLI command (`nibiru q staking ...`) | Chain Query | Indexer Equivalent |
 |------------------------------------|-------------|--------------------|
 | `validator <valoper>` | `Validator` | `staking { validators(where: { operator_address }) }` |
 | `delegations-to <valoper>` | `ValidatorDelegations` | `staking { delegations(where: { validator_address }) }` |
@@ -293,10 +293,10 @@ type Validator struct {
 Validators have **three** valid Bech32 address types for the same logical validator:
 
 - **Account** — `nibi1...` — The validator's wallet/account address.
-- **Operator (valoper)** — `nibivaloper1...` — Used for staking identity, indexer filters, and CLI (e.g. `nibid q staking validator <valoper>`).
+- **Operator (valoper)** — `nibivaloper1...` — Used for staking identity, indexer filters, and CLI (e.g. `nibiru q staking validator <valoper>`).
 - **Consensus** — `nibivalcons1...` — Used in consensus messages, block signing, and oracle/slashing logs.
 
-Use `nibid debug addr <address>` to convert between forms; it shows Bech32 Acc, Val, and Con for any of the three. See e.g. validator incident/slashing docs for examples of all three per validator (e.g. Cogwheel, Roomit).
+Use `nibiru debug addr <address>` to convert between forms; it shows Bech32 Acc, Val, and Con for any of the three. See e.g. validator incident/slashing docs for examples of all three per validator (e.g. Cogwheel, Roomit).
 
 ---
 
@@ -405,7 +405,7 @@ Common metadata for a specific block height.
 - **Shares required**: Compensation formulas need `delegation.shares` and `validator.delegator_shares`. 
 - **Indexer Limit**: The indexer has `amount` (balance), not shares. You cannot derive shares from amount because the exchange rate changes with slashing. 
 - **Snapshot accuracy**: Indexer can lag chain state. For reproducible compensation at a specific slash height, use chain queries with `--height`.
-- **Bond Denom**: The staking token denomination is **unibi** — micro NIBI (μ NIBI), where "u" comes from "μ" (mu). Check `nibid query staking params` to confirm on-chain.
+- **Bond Denom**: The staking token denomination is **unibi** — micro NIBI (μ NIBI), where "u" comes from "μ" (mu). Check `nibiru query staking params` to confirm on-chain.
 
 ### Migration
 - **Blocked entries**: In-flight `redelegations` and `unbondings` can block forced migrations.

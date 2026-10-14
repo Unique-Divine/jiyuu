@@ -32,7 +32,7 @@ Prefer:
 - GraphQL field `volume`
 - GraphQL type `PerpBorrowing`
 - function `Delegation`
-- agent skill `nibiru-cli-nibid`
+- agent skill `nibiru-cli`
 - command `just fmt`
 - REST endpoint `GET /dexpal/v1/stats`
 - file `graphql/graph/perp.graphqls`
@@ -42,14 +42,14 @@ Avoid bare references when the entity type is not obvious:
 
 - `stats_perp_by_user` refreshes
 - `Delegation` handles this
-- use `nibiru-cli-nibid`
+- use `nibiru-cli`
 - run `just fmt`
 
 Better:
 
 - table `stats_perp_by_user` refreshes
 - function `Delegation` handles this
-- use agent skill `nibiru-cli-nibid`
+- use agent skill `nibiru-cli`
 - run command `just fmt`
 
 ## How strict to be
