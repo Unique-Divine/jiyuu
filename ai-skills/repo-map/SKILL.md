@@ -66,7 +66,9 @@ frontend and API integrations. This uses the "sai-keeper" GraphQL interface.
   `just preview`; focused app commands remain available.
 - Legacy names `nibi-home-site`, `home-site`, and `nibi-webapp` route maintained
   work to `nibi-web`, or `nibi-web/app` for app features. Existing old worktrees
-  remain available for user branches and history. Do not delete or repurpose them.
+  use `nibi-web-*` names when retained for user branches and history. The main
+  checkout is `$HOME/ki/nibi-web`; linked worktrees share its Git directory.
+  Do not delete or repurpose worktrees with unique work.
 - Archived `NibiruChain/nibi-webapp` retains historical app PR discussions and releases.
   New app PRs belong in `NibiruChain/nibi-web`.
 
