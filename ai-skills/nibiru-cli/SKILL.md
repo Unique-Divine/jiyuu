@@ -212,14 +212,13 @@ Notes:
 FROM_KEY="<from-key-or-addr>"
 TO_ADDR="nibi1recipient..."
 AMOUNT="1000000unibi"
-nibiru tx bank send "$FROM_KEY" "$TO_ADDR" "$AMOUNT"
+nibiru tx bank send "$FROM_KEY" "$TO_ADDR" "$AMOUNT" --gas auto
 ```
 
-Common flags to add when needed:
-
-```bash
---from <key-or-addr> --gas auto --gas-adjustment 1.3 --fees 10000unibi
-```
+Use `--gas auto` as the default for transactions. Nibiru estimates gas and
+calculates the fee automatically. Do not add `--gas-adjustment`, `--fees`, or
+`--gas-prices` unless the user requests an override or a specific flow requires
+one. Other flags, such as a memo or contract admin, depend on the transaction.
 
 Rule of thumb:
 
@@ -309,19 +308,19 @@ required fields.
 CONTRACT_ADDR="nibi1..."
 EXECUTE_MSG='{"claim":{}}'
 FROM_KEY="<key-or-addr>"
-nibiru tx wasm execute "$CONTRACT_ADDR" "$EXECUTE_MSG" --from "$FROM_KEY"
+nibiru tx wasm execute "$CONTRACT_ADDR" "$EXECUTE_MSG" --from "$FROM_KEY" --gas auto
 
 # instantiate a contract from a code id
 CODE_ID="123"
 INIT_MSG='{"count":0}'
 LABEL="my-contract"
-nibiru tx wasm instantiate "$CODE_ID" "$INIT_MSG" --label "$LABEL" --from "$FROM_KEY"
+nibiru tx wasm instantiate "$CODE_ID" "$INIT_MSG" --label "$LABEL" --from "$FROM_KEY" --gas auto
 ```
 
 Common additions:
 
 ```bash
---admin <nibi1...> --amount 1000000unibi --gas auto --gas-adjustment 1.5 --fees 10000unibi
+--admin <nibi1...> --amount 1000000unibi
 ```
 
 Rules of thumb:

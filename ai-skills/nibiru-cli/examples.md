@@ -18,8 +18,7 @@ nibiru tx bank send \
   "$TO_ADDR" \
   "$AMOUNT" \
   --note "$MEMO" \
-  --fees "5000unibi" \
-  -y
+  --gas auto
 ```
 
 Safer pre-flight variant:
@@ -36,14 +35,14 @@ nibiru tx bank send \
   "$AMOUNT" \
   --note "$MEMO" \
   --chain-id "cataclysm-1" \
-  --fees "5000unibi" \
   --gas auto \
-  --gas-adjustment 1.3 \
   --dry-run
 ```
 
 Notes:
 
+- Use `--gas auto` for automatic gas estimation and fee calculation. Add fee or
+  gas-adjustment overrides only when requested or required by a specific flow.
 - Use `--note`, not a guessed memo flag.
 - Keep the amount in base units such as `unibi` unless the user explicitly wants
   a human-unit conversion.
