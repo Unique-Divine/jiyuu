@@ -1,6 +1,6 @@
-import { ChannelType, GuildBasedChannel, Message, Role } from "discord.js"
+import { ChannelType, type GuildBasedChannel, Message, Role } from "discord.js"
 import { saveJson } from "./utils"
-import { CmdResult, ICmd, UsageCmd } from "./interfaces"
+import { type CmdResult, type ICmd, UsageCmd } from "./interfaces"
 
 /** CmdAllRoles: displays all of the guild roles. */
 export class CmdAllRoles implements ICmd {

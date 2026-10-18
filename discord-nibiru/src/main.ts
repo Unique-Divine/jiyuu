@@ -18,7 +18,7 @@ import {
   CmdAllChannels,
   CmdBanInChannel,
   CmdGrantRoles,
-  CmdResult,
+  type CmdResult,
   CmdHelp,
   instanceOfICmdAsync,
   instanceOfICmdSync,

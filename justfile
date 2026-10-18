@@ -27,7 +27,9 @@ install:
     fi
 
     bun install
-    (cd mdtoc; bun install)
+    for project in mdtoc discord-nibiru ts-pkg/bash ts-pkg/jiyuu ts-pkg/tg-sai; do
+      (cd "$project" && bun install)
+    done
   )
 
 alias i := install
@@ -35,3 +37,7 @@ alias i := install
 # Format with prettier
 fmt:
   bun run prettier --write .
+
+# Check all TypeScript projects
+typecheck:
+  bun check

@@ -40,7 +40,7 @@ export interface IRemarkable extends RemarkableComponents {
    * @param  {Object} `options`
    * @return {Object} `Remarkable` for chaining
    */
-  use(plugin: Function, options?: RemarkableOptions): IRemarkable
+  use(plugin: Remarkable.Plugin, options?: RemarkableOptions): IRemarkable
 
   /**
    * Parse the input `string` and return a tokens array.
@@ -103,26 +103,23 @@ interface RemarkableComponents {
   inline: any
 }
 
-type RemarkableEnv = Object
+type RemarkableEnv = Remarkable.Env
 
-interface RemarkablePresets {
-  default: any
-  full: any
-  commonmark: any
-}
+type RemarkablePresets = Remarkable.Presets
 
 export class RemarkablePlus implements IRemarkable, RemarkableComponents {
-  core: Remarkable
+  // Remarkable exposes these fields at runtime, but @types/remarkable omits them.
+  core: Remarkable & { ruler: unknown; options: RemarkableOptions }
 
   constructor({
     preset,
     options,
   }: {
-    preset?: string
+    preset?: "default" | "full" | "commonmark"
     options?: RemarkableOptions
   }) {
     const core = new Remarkable(preset ?? "default", options)
-    this.core = core
+    this.core = core as typeof this.core
   }
 
   set = (options: RemarkableOptions): void => {
@@ -133,18 +130,18 @@ export class RemarkablePlus implements IRemarkable, RemarkableComponents {
     this.core.configure(presets)
   }
 
-  use = (plugin: Function, options?: RemarkableOptions): IRemarkable => {
+  use = (plugin: Remarkable.Plugin, options?: RemarkableOptions): IRemarkable => {
     this.core.use(plugin, options)
     return this // Return `this` to allow for chaining.
   }
 
-  parse = (str: string, env?: RemarkableEnv): any[] => this.core.parse(str, env)
+  parse = (str: string, env?: RemarkableEnv): any[] => this.core.parse(str, env ?? {})
 
   render = (str: string, env?: RemarkableEnv): string =>
     this.core.render(str, env)
 
   parseInline = (str: string, env?: RemarkableEnv): any[] =>
-    this.core.parseInline(str, env)
+    this.core.parseInline(str, env ?? {})
 
   renderInline = (str: string, env?: RemarkableEnv): string =>
     this.core.renderInline(str, env)

@@ -1,8 +1,8 @@
 import {
-  Channel,
+  type Channel,
   Collection,
-  FetchMembersOptions,
-  FetchMessagesOptions,
+  type FetchMembersOptions,
+  type FetchMessagesOptions,
   Guild,
   GuildMember,
   Message,
