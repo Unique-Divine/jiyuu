@@ -1,7 +1,7 @@
 import {
-  Channel,
+  type Channel,
   Collection,
-  FetchMessagesOptions,
+  type FetchMessagesOptions,
   GuildMember,
   Message,
   TextChannel,
@@ -9,7 +9,7 @@ import {
 import { CHANNEL_KEY_MAP } from "../channels"
 import { deleteMsgs, iterMsgs, PAGE_SIZE } from "../discord"
 import { instanceOfTextChannel } from "../typing"
-import { ChannelKey, ICmd, MappedChannelMsg, UsageCmd } from "./interfaces"
+import { type ChannelKey, type ICmd, type MappedChannelMsg, UsageCmd } from "./interfaces"
 
 export function cmdBan(
   msg: Message,

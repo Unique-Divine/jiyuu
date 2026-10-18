@@ -1,5 +1,5 @@
 import matter from "gray-matter"
-import { SlugifyOptions } from "./options"
+import { type SlugifyOptions } from "./options"
 import { toc } from "./toc"
 
 function split(str: string, re: RegExp) {

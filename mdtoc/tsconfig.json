@@ -1,10 +1,7 @@
 {
-  "compilerOptions": {
-    "types": ["bun-types"],
-    "esModuleInterop": true,
-    "allowSyntheticDefaultImports": true
-    // "lib": ["ESNext"],
-    // "module": "esnext",
-    // "target": "esnext"
-  }
+  "extends": "../tsconfig.json",
+  "include": [
+    "src/**/*.ts",
+    "test/**/*.ts"
+  ]
 }

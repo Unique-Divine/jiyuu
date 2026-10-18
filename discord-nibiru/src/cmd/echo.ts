@@ -1,5 +1,5 @@
 import { Message } from "discord.js"
-import { CmdResult, ICmd, UsageCmd } from "./interfaces"
+import { type CmdResult, type ICmd, UsageCmd } from "./interfaces"
 
 /** CmdEcho: Bot command that replies back with whatever was sent. */
 export class CmdEcho implements ICmd {

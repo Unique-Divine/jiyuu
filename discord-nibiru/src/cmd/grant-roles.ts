@@ -1,14 +1,14 @@
 import {
-  Channel,
+  type Channel,
   Guild,
-  GuildBasedChannel,
+  type GuildBasedChannel,
   GuildMember,
   Message,
   Role,
 } from "discord.js"
 import { addRoleToMember, logModerationAction, roleFromName } from "../discord"
 import { instanceOfTextChannel } from "../typing"
-import { CmdResult, ICmd, MappedChannelMsg, UsageCmd } from "./interfaces"
+import { type CmdResult, type ICmd, type MappedChannelMsg, UsageCmd } from "./interfaces"
 import { saveJson } from "./utils"
 
 /** CmdGrantRoles: Searches the "validator-role-request" channel and adds

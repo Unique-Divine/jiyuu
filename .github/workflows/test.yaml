@@ -12,7 +12,7 @@ concurrency:
   cancel-in-progress: ${{ ! (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/')) }}
 
 jobs:
-  # Reserved workspace-level hook for checks that eventually span multiple tools.
+  # Check every TypeScript project with its own configuration.
   test:
     runs-on: ubuntu-latest
     steps:
@@ -20,13 +20,18 @@ jobs:
       - name: "Install bun" # For running things and TS package management"
         uses: oven-sh/setup-bun@v1
         with:
-          bun-version: 1.2.22 # Values: latest, <sha>, 1.2.3, canary
+          bun-version: 1.4.3 # Values: latest, <sha>, 1.2.3, canary
         # Outputs:
         # - cache-hit    : Whether the executable was read from cache. Ex. "true"
         # - bun-version  : The output from running `bun-version`. Ex. "1.0.0"
         # - bun-revision : The output from running `bun-revision`.
-      - run: |
-          echo "Placeholder for later"
+      - name: Install TypeScript project dependencies
+        run: |
+          for project in . mdtoc discord-nibiru ts-pkg/bash ts-pkg/jiyuu ts-pkg/tg-sai; do
+            (cd "$project" && bun install --frozen-lockfile)
+          done
+      - name: Typecheck TypeScript projects
+        run: bun check
 
   # Runs Bun tests only when Markdown TOC sources or their workflow change.
   mdtoc-test:
@@ -46,7 +51,7 @@ jobs:
         name: "Install bun" # For running things and TS package management"
         uses: oven-sh/setup-bun@v1
         with:
-          bun-version: 1.2.22 # Values: latest, <sha>, 1.2.3, canary
+          bun-version: 1.4.3 # Values: latest, <sha>, 1.2.3, canary
         # Outputs:
         # - cache-hit    : Whether the executable was read from cache. Ex. "true"
         # - bun-version  : The output from running `bun-version`. Ex. "1.0.0"

@@ -1,4 +1,4 @@
-import { GenerateOptions, Token, generate } from "./generate"
+import { type GenerateOptions, type Token, generate } from "./generate"
 import { RemarkablePlus } from "./remarkable"
 
 /**
