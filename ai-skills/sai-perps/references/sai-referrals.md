@@ -57,7 +57,7 @@ When asked about an existing code, address, or partner:
 2. Use GraphQL referral code and redemption records for indexed ownership and
    history. Escalate to a verified raw-state/operator procedure only when the
    question specifically requires contract storage as the deciding layer.
-3. Normalize EVM and Bech32 address pairs with command `nibid q evm account`.
+3. Normalize EVM and Bech32 address pairs with command `nibiru q evm account`.
 4. Check code-specific discount state if fee terms matter.
 5. Use Sai Keeper GraphQL for indexed history or analytics: redemptions, referred
    trades, volume, earnings, stats, or claims.
@@ -88,17 +88,17 @@ Sai trading credits. Keep the report scoped to local keyring names with the
 
 This is a read-only workflow. It checks:
 
-- Wallet USDC via `nibid q evm balance`.
+- Wallet USDC via `nibiru q evm balance`.
 - Sai internal withdrawable deposits via `list_user_deposits`.
 - Sai internal non-withdrawable credits via `list_user_deposits`.
 
 #### Network and constants
 
-Point `nibid` at Testnet2 and verify before querying:
+Point `nibiru` at Testnet2 and verify before querying:
 
 ```bash
 ud nibi cfg test
-nibid config
+nibiru config
 ```
 
 This recipe reads current EVM and Wasm state. Keep the default, non-archive
@@ -118,12 +118,12 @@ USDC="tf/nibi1pc2mmwcqhvzn9vsm0umpu40yzl6gfy6nucwn7g/usdc"
 ```
 
 `USDC` is the canonical Sai testnet USDC token-factory denom. Use the base-unit
-fields from `nibid q evm balance`; on testnet, token metadata can make human
+fields from `nibiru q evm balance`; on testnet, token metadata can make human
 fields misleading.
 
 #### Summary command
 
-Run this from any directory with `nibid`, `jq`, and `python3` on `PATH`:
+Run this from any directory with `nibiru`, `jq`, and `python3` on `PATH`:
 
 ```bash
 set -euo pipefail
@@ -134,16 +134,16 @@ USDC="tf/nibi1pc2mmwcqhvzn9vsm0umpu40yzl6gfy6nucwn7g/usdc"
 printf "%-24s %14s %14s %16s %16s\n" \
   "KEY" "BANK_USDC" "ERC20_USDC" "SAI_DEPOSIT" "SAI_CREDITS"
 
-nibid keys list |
+nibiru keys list |
   jq -r '.[] | select(.type == "local" and (.name | startswith("test-"))) |
     [.name, .address] | @tsv' |
   while IFS="$(printf '\t')" read -r name bech32; do
-    bal=$(nibid q evm balance "$bech32" "$USDC")
+    bal=$(nibiru q evm balance "$bech32" "$USDC")
     bank_base=$(echo "$bal" | jq -r '.bank_balance_base // "0"')
     erc20_base=$(echo "$bal" | jq -r '.erc20_balance_base // "0"')
 
     query='{"list_user_deposits":{"user":"'"$bech32"'"}}'
-    deposits=$(nibid q wasm contract-state smart "$PERP" "$query")
+    deposits=$(nibiru q wasm contract-state smart "$PERP" "$query")
     sai_deposit=$(echo "$deposits" |
       jq -r '[.data[]? | (.amount // "0" | tonumber)] | add // 0')
     sai_credits=$(echo "$deposits" |
@@ -180,12 +180,12 @@ For any nonzero row, verify the raw wallet and Sai contract state directly:
 ```bash
 BECH32="nibi1..."
 
-nibid q evm balance "$BECH32" "$USDC" | jq '{
+nibiru q evm balance "$BECH32" "$USDC" | jq '{
   bank_balance_base,
   erc20_balance_base
 }'
 
-nibid q wasm contract-state smart "$PERP" \
+nibiru q wasm contract-state smart "$PERP" \
   '{"list_user_deposits":{"user":"'"$BECH32"'"}}' |
   jq '.data'
 ```
@@ -193,7 +193,7 @@ nibid q wasm contract-state smart "$PERP" \
 If the operator asks for account normalization, use:
 
 ```bash
-nibid q evm account "$BECH32" | jq '{
+nibiru q evm account "$BECH32" | jq '{
   bech32_address,
   eth_address,
   balance_wei

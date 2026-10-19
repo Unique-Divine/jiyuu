@@ -26,5 +26,5 @@ runbook.
 - "run the trigger-trades admin flow for this keeper batch" -> use `sai-ops`.
 - "edit the Referral Identity Directory and fill missing `shareUrl` cells" -> use `sai-ops` or sheet-specific tooling.
 - "write a public user doc explaining how to open a trade on Sai" -> use writing/docs context, not this operator query skill by default.
-- "debug a raw Nibiru EVM tx receipt unrelated to Sai contracts" -> use `evm-rpc` or `nibiru-cli-nibid`.
+- "debug a raw Nibiru EVM tx receipt unrelated to Sai contracts" -> use `evm-rpc` or `nibiru-cli`.
 - "query a normal Nibiru wallet balance for staking rewards" -> use Nibiru/indexer balance or staking skills.

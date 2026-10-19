@@ -13,6 +13,9 @@ On this machine, answer configuration and behavior questions from local
 evidence instead of relying on memory. Read `local-machine.md` for the evidence
 order and paths.
 
+For requests to flatten tabs or put one agent per tab, use the tested local
+command described in [local-machine.md](local-machine.md#flatten-agent-tabs).
+
 Start configuration questions with the commented managed file
 `$DOTFILES/herdr-cfg/config.toml`. It backs
 `~/.config/herdr/config.toml` and documents the user's intentional overrides.

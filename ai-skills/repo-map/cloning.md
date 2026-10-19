@@ -22,7 +22,7 @@ git clone git@github.com:NibiruChain/nibiru.git nibi-chain
 git clone git@github.com:NibiruChain/go-ethereum.git nibi-geth
 git clone git@github.com:NibiruChain/go-heartmonitor.git nibi-go-hm
 git clone git@github.com:NibiruChain/ts-sdk.git nibi-ts-sdk
-git clone git@github.com:NibiruChain/home-site.git nibi-home-site
+git clone git@github.com:NibiruChain/nibi-web.git nibi-web
 git clone git@github.com:NibiruChain/sai-web.git sai-web
 git clone git@github.com:NibiruChain/sai-perps.git sai-perps
 git clone git@github.com:NibiruChain/sai-keeper.git sai-keeper
@@ -41,8 +41,12 @@ mkdir -p "$HOME/ki"
 cd "$HOME/ki"
 
 git clone git@github.com:CosmWasm/cosmwasm.git wasm-cosmwasm
-git clone git@github.com:CosmWasm/wasmvm.git wasm-go-wasmvm
 ```
+
+Nibiru's maintained WasmVM, Rust VM, Wasmer runtime, and contracts are already
+inside the `nibi-chain` checkout. Do not recreate the retired `wasm-go-wasmvm`
+or `nibi-wasm` checkouts for maintained Nibiru work. The standalone Nibiru forks
+are public archives; use them only when historical source or releases are needed.
 
 ## Personal repos (examples)
 
@@ -78,7 +82,7 @@ clone_nibiruchain_ki() {
     clone_into go-ethereum           nibi-geth
     clone_into go-heartmonitor       nibi-go-hm
     clone_into ts-sdk                nibi-ts-sdk
-    clone_into home-site             nibi-home-site
+    clone_into nibi-web              nibi-web
     clone_into sai-web               sai-web
     clone_into sai-perps             sai-perps
     clone_into sai-keeper            sai-keeper
@@ -93,7 +97,7 @@ Then **`clone_nibiruchain_ki`**.
 ## Remote check (one-liner)
 
 ```bash
-for d in nibi-chain nibi-geth nibi-go-hm nibi-ts-sdk nibi-home-site sai-web sai-perps sai-keeper sai-docs nibi-iac; do
+for d in nibi-chain nibi-geth nibi-go-hm nibi-ts-sdk nibi-web sai-web sai-perps sai-keeper sai-docs nibi-iac; do
   printf '%s: ' "$d"
   git -C "$HOME/ki/$d" remote get-url origin 2>/dev/null || echo "(missing)"
 done

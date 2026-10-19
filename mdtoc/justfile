@@ -1,7 +1,8 @@
-# Displays available recipes by running `just -l`.
-setup:
+# Displays available recipes when running `just` or `just list`.
+[private]
+list:
   #!/usr/bin/env bash
-  just -l
+  just --list
 
 # install
 i: 

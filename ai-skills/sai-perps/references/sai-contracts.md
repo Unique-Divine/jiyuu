@@ -1,10 +1,10 @@
 # Sai contract queries
 
 Use this reference for read-only live queries of Sai mainnet Perp, Oracle, and
-SLP Vault contracts through `nibid` or the TypeScript SDK. It covers markets,
+SLP Vault contracts through `nibiru` or the TypeScript SDK. It covers markets,
 collaterals, `MarketIndex`, `TokenIndex`, `GroupIndex`, open interest and
 limits, fee configuration, vault mappings, referral ownership, deposits, and
-trading credits. Use agent skill `nibiru-cli-nibid` for CLI mechanics.
+trading credits. Use agent skill `nibiru-cli` for CLI mechanics.
 
 ## Contract query playbook
 
@@ -51,8 +51,8 @@ exact group/collateral pair when in doubt. Mainnet currently maps:
   and write workflows. This bundle's [`sai-db.md`](sai-db.md) covers static
   schema and query semantics.
 - [`sai-rest.md`](sai-rest.md): public aggregate metrics and health checks.
-- Agent skill `nibiru-cli-nibid`: command mechanics for
-  `nibid query wasm contract-state <raw|smart>`. This reference supplies Sai
+- Agent skill `nibiru-cli`: command mechanics for
+  `nibiru query wasm contract-state <raw|smart>`. This reference supplies Sai
   addresses and payloads.
 
 ## CLI setup
@@ -61,7 +61,7 @@ exact group/collateral pair when in doubt. Mainnet currently maps:
 PERP="nibi1ntmw2dfvd0qnw5fnwdu9pev2hsnqfdj9ny9n0nzh2a5u8v0scflq930mph"
 ORACLE="nibi1xfwyfwtdame6645lgcs4xvf4u0hpsuvxrcelfwtztu0pv7n4l6hqw5a8gj"
 # helper alias
-sai_perps_q() { nibid query wasm contract-state smart "$1" "$2"; }
+sai_perps_q() { nibiru query wasm contract-state smart "$1" "$2"; }
 ```
 
 ## Rules of thumb
@@ -177,7 +177,7 @@ be on different release cadences.
 ## Perp contract
 
 Below are smart query request payloads for the Sai perp contract. 
-You can use the `/nibiru-cli-nibid` skill to pull any of this information.
+You can use the `/nibiru-cli` skill to pull any of this information.
 
 - Source: sai-perps repo contracts/perp for the Rust logic
 
@@ -244,7 +244,7 @@ and mainnet runbooks, see [sai-vaults.md](sai-vaults.md).
 For epoch and reset timing, see
 [Check Epoch and Daily Reset Distance](sai-vaults.md#check-epoch-and-daily-reset-distance).
 
-You can use the `/nibiru-cli-nibid` skill to pull any of this information.
+You can use the `/nibiru-cli` skill to pull any of this information.
 
 - Source: sai-perps repo contracts/vault for the Rust logic
 
@@ -311,7 +311,7 @@ You can use the `/nibiru-cli-nibid` skill to pull any of this information.
 ## Oracle contract
 
 Below are smart query request payloads for the Sai oracle contract.
-You can use the `/nibiru-cli-nibid` skill to pull any of this information.
+You can use the `/nibiru-cli` skill to pull any of this information.
 
 - Source: sai-perps repo contracts/oracle for the Rust logic
 

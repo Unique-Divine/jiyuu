@@ -1,54 +1,35 @@
 ---
-name: nibiru-cli-nibid
-description: Query Nibiru chain state and submit transactions with the `nibid` CLI, including setup via `ud`, config inspection, key discovery with `nibid keys list`, bank transfers, bank balance queries, EVM multi-VM balance checks such as `nibid q evm balance` for Sai USDC, wasm contract queries, wasm execute/instantiate flows, and transaction lookups by hash. Use when the user mentions `nibid`, Nibiru CLI, `nibid keys list`, `--from`, `nibid tx bank`, `nibid tx wasm`, `nibid q bank`, `nibid q evm balance`, `nibid q wasm`, `nibid q tx`, balances, contract-state smart, or tx hashes.
+name: nibiru-cli
+description: Query Nibiru chain state and submit transactions with the `nibiru` CLI, including setup via `ud`, config inspection, key discovery with `nibiru keys list`, bank transfers, bank balance queries, EVM multi-VM balance checks such as `nibiru q evm balance` for Sai USDC, wasm contract queries, wasm execute/instantiate flows, and transaction lookups by hash. Use when the user mentions `nibiru`, Nibiru CLI, `nibiru keys list`, `--from`, `nibiru tx bank`, `nibiru tx wasm`, `nibiru q bank`, `nibiru q evm balance`, `nibiru q wasm`, `nibiru q tx`, balances, contract-state smart, or tx hashes.
 ---
 
-# Nibiru CLI (`nibid`)
+# Nibiru CLI
 
 Use this skill for general Nibiru CLI work. Prefer it when the user wants the
-authoritative chain view or wants to submit a transaction with `nibid`.
+authoritative chain view or wants to submit a transaction with `nibiru`.
 
 ## Additional resources
 
 - EVM account, multi-VM balance, FunToken, and unit notes: [`reference.md`](./reference.md)
-  - [`nibid q evm account`](./reference.md#nibid-q-evm-account): normalize EVM/Bech32 addresses and check native EVM gas balance.
-  - [`nibid q evm balance`](./reference.md#nibid-q-evm-balance): workhorse for Sai USDC balance checks across ERC20 and Bank representations.
+  - [`nibiru q evm account`](./reference.md#nibiru-q-evm-account): normalize EVM/Bech32 addresses and check native EVM gas balance.
+  - [`nibiru q evm balance`](./reference.md#nibiru-q-evm-balance): workhorse for Sai USDC balance checks across ERC20 and Bank representations.
   - [`balance_wei` and bank `unibi`](./reference.md#balance_wei-and-bank-unibi): convert between EVM wei and Cosmos bank units.
-  - [`nibid q evm funtoken`](./reference.md#nibid-q-evm-funtoken): inspect bank denom and ERC20 mappings.
-  - [`nibid tx evm` scope](./reference.md#nibid-tx-evm-scope): understand conversion commands versus generic EVM transactions.
+  - [`nibiru q evm funtoken`](./reference.md#nibiru-q-evm-funtoken): inspect bank denom and ERC20 mappings.
+  - [`nibiru tx evm` scope](./reference.md#nibiru-tx-evm-scope): understand conversion commands versus generic EVM transactions.
 - Copy-paste examples: [`examples.md`](./examples.md)
 
-## Installing `nibid`
+## Install the CLI
 
-Nibiru publishes a bash installer at `https://get.nibiru.fi/`. The URL behaves
-like a small package installer:
+Prefer published binaries through Bun:
 
 ```bash
-# Recommended: install the default/latest generated release onto PATH.
-curl -s https://get.nibiru.fi/! | bash
-
-# Install a specific release into the current directory as ./nibid.
-curl -s https://get.nibiru.fi/@v2.12.0-p1 | bash
-
-# Install a specific release onto PATH at /usr/local/bin/nibid.
-# The trailing ! makes the generated script set OUT_DIR="/usr/local/bin" and
-# may ask for sudo.
-curl -s https://get.nibiru.fi/@v2.12.0-p1! | bash
+bun install --global @nibiruchain/nibiru
+nibiru version
 ```
 
-Rules of thumb:
-
-- The `@version` segment selects the release tag used in the generated GitHub
-  asset URLs.
-- Prefer the trailing `!` form for the default install command so `nibid` lands
-  at `/usr/local/bin/nibid`.
-- Without `!`, the generated script uses `OUT_DIR="$(pwd)"` and writes
-  `./nibid`.
-- With trailing `!`, the generated script uses `OUT_DIR="/usr/local/bin"` so
-  `nibid` is available on PATH.
-- `https://get.nibiru.fi/?type=script` is useful for reading the generated
-  script logic, not for specifying versions.
-- After installing, verify with `which nibid` and `nibid version`.
+Use command `nibiru` for CLI calls. Directory `.nibid` remains the default
+configuration and keyring location. The npm launcher still runs an internal
+native binary named `nibid`; do not remove that package file.
 
 ## Quick start
 
@@ -61,10 +42,10 @@ ud nibi cfg prod
 This selects the default, non-archive mainnet RPC and sets the chain ID, sync
 broadcast mode, and JSON output.
 
-2. Confirm what `nibid` is pointed at:
+2. Confirm what `nibiru` is pointed at:
 
 ```bash
-nibid config
+nibiru config
 ```
 
 Example - Mainnet.
@@ -79,22 +60,22 @@ Example - Mainnet.
 ```
 
 3. Assume JSON output after using `ud nibi cfg`. The wrapper runs command
-`nibid config output json`, so commands inherit JSON output unless the user
-says otherwise. Do not include `--output json` in individual `nibid` commands
+`nibiru config output json`, so commands inherit JSON output unless the user
+says otherwise. Do not include `--output json` in individual `nibiru` commands
 unless needed.
 
 ```bash
 ADDR="nibi1..."
-nibid q bank balances "$ADDR"
+nibiru q bank balances "$ADDR"
 ```
 
 4. Discover which local keys are available for `--from`:
 
 ```bash
-nibid keys list | jq
+nibiru keys list | jq
 
 # names that are usually valid for direct signing
-nibid keys list | jq -r '.[] | select(.type=="local") | .name'
+nibiru keys list | jq -r '.[] | select(.type=="local") | .name'
 ```
 
 Rules of thumb:
@@ -106,43 +87,43 @@ Rules of thumb:
 - `type == "multi"` is a multisig identity and usually needs a multisig flow,
   not a simple single-signer `--from`.
 - If the user says "use the `validator-6900` key", prefer `--from
-  validator-6900` when that name appears in `nibid keys list`.
+  validator-6900` when that name appears in `nibiru keys list`.
 
 ## RPC selection
 
 Commands `ud nibi cfg prod` and `ud nibi cfg test` select non-archive RPCs by
 default. Use the default RPC for every transaction broadcast and for current
-Wasm or EVM state from commands `nibid q wasm` and `nibid q evm`.
+Wasm or EVM state from commands `nibiru q wasm` and `nibiru q evm`.
 
 Flag `--archive` is a temporary setting for read-only historical Cosmos or
 Comet queries when the standard RPC has pruned the required data:
 
 ```bash
 ud nibi cfg prod --archive
-nibid q tx "$OLD_TX"
+nibiru q tx "$OLD_TX"
 ud nibi cfg prod
 ```
 
-The selected RPC persists in the `nibid` configuration. Restore the default
+The selected RPC persists in the `nibiru` configuration. Restore the default
 RPC after the historical read, and always restore it before a transaction or a
 current Wasm or EVM query. Command `ud nibi cfg local --archive` succeeds but
 continues to use `http://localhost:26657`.
 
 ## Core mental model
 
-- `nibid q ...` / `nibid query ...` reads chain state.
-- `nibid tx ...` builds and broadcasts transactions.
-- `nibid config` shows the current CLI configuration and is the first check when
+- `nibiru q ...` / `nibiru query ...` reads chain state.
+- `nibiru tx ...` builds and broadcasts transactions.
+- `nibiru config` shows the current CLI configuration and is the first check when
   a result looks wrong for the expected network.
 - Use `ud nibi cfg ...` without `--archive` before current-state queries or
   transactions.
 - Use `--archive` only for historical read-only queries, then restore the
   default RPC.
-- Use `nibid keys list | jq` to discover available `--from` values before
+- Use `nibiru keys list | jq` to discover available `--from` values before
   proposing or running a transaction.
 - Pipe to `jq` for nested fields when needed.
 - Use specialized skills for deeper workflows:
-  - `nibid-gov-upgrade` for governance and software upgrades
+  - `nibiru-gov-upgrade` for governance and software upgrades
   - `sai-perps` for Sai contract query recipes and reconciliation
   - `evm-rpc` for `eth_*` / `debug_*` EVM tracing rather than Cosmos CLI
 
@@ -150,28 +131,28 @@ continues to use `http://localhost:26657`.
 
 If the user asks about:
 
-- **Sai USDC balances** -> use `nibid q evm balance "$ADDR" "$USDC_ERC20"`
+- **Sai USDC balances** -> use `nibiru q evm balance "$ADDR" "$USDC_ERC20"`
   so one query shows both ERC20 and Bank-side holdings. Mainnet USDC is
   `0x0829F361A05D993d5CEb035cA6DF3446b060970b`; details and examples are in
-  [`reference.md#nibid-q-evm-balance`](./reference.md#nibid-q-evm-balance).
-- **Multi-VM token balances** -> use `nibid q evm balance "$ADDR" "$TOKEN"`.
+  [`reference.md#nibiru-q-evm-balance`](./reference.md#nibiru-q-evm-balance).
+- **Multi-VM token balances** -> use `nibiru q evm balance "$ADDR" "$TOKEN"`.
   The account arg can be `0x...` or `nibi1...`; the token arg can be an ERC20
   address, bank denom, or native denom like `unibi`.
 - **EVM account/native gas balance or address normalization** -> use
-  `nibid q evm account "$ADDR"`.
-- **Bank-only wallet balances** -> use `nibid q bank balances ...` when you
+  `nibiru q evm account "$ADDR"`.
+- **Bank-only wallet balances** -> use `nibiru q bank balances ...` when you
   specifically need the Cosmos Bank module view.
-- **Bank denom / ERC20 mapping** -> use `nibid q evm funtoken "$TOKEN_OR_DENOM"`.
-- **Wasm contract state** -> use `nibid q wasm ...`
+- **Bank denom / ERC20 mapping** -> use `nibiru q evm funtoken "$TOKEN_OR_DENOM"`.
+- **Wasm contract state** -> use `nibiru q wasm ...`
 - **Wasm smart queries** -> use
-  `nibid q wasm contract-state smart "$CONTRACT" "$QUERY_MSG"` for app-level
+  `nibiru q wasm contract-state smart "$CONTRACT" "$QUERY_MSG"` for app-level
   query messages.
 - **Wasm raw storage queries** -> use
-  `nibid q wasm contract-state raw "$CONTRACT" "$HEX_KEY"` when you need exact
+  `nibiru q wasm contract-state raw "$CONTRACT" "$HEX_KEY"` when you need exact
   storage item reads. Convert ASCII storage keys with `printf '%s' "$KEY" | xxd -p -c 256`.
-- **A tx hash** -> use `nibid q tx "$TX"`
-- **Sending funds** -> use `nibid tx bank ...`
-- **Executing or instantiating a contract** -> use `nibid tx wasm ...`
+- **A tx hash** -> use `nibiru q tx "$TX"`
+- **Sending funds** -> use `nibiru tx bank ...`
+- **Executing or instantiating a contract** -> use `nibiru tx wasm ...`
 
 ## Golden paths
 
@@ -185,14 +166,14 @@ denoms, or native denoms.
 # Sai USDC on Nibiru mainnet
 ADDR="nibi1..."
 USDC_ERC20="0x0829F361A05D993d5CEb035cA6DF3446b060970b"
-nibid q evm balance "$ADDR" "$USDC_ERC20" | jq .
+nibiru q evm balance "$ADDR" "$USDC_ERC20" | jq .
 
 # Same query with the bank denom form
 USDC_BANK="erc20/0x0829F361A05D993d5CEb035cA6DF3446b060970b"
-nibid q evm balance "$ADDR" "$USDC_BANK" | jq .
+nibiru q evm balance "$ADDR" "$USDC_BANK" | jq .
 
 # Native NIBI also works by bank denom
-nibid q evm balance "$ADDR" "unibi" | jq .
+nibiru q evm balance "$ADDR" "unibi" | jq .
 ```
 
 Notes:
@@ -201,7 +182,7 @@ Notes:
   ERC20 and Bank balances in one response.
 - Use `erc20_balance_human` and `bank_balance_human` for quick reads; use the
   `*_base` fields when building exact tx amounts.
-- See [`reference.md#nibid-q-evm-balance`](./reference.md#nibid-q-evm-balance)
+- See [`reference.md#nibiru-q-evm-balance`](./reference.md#nibiru-q-evm-balance)
   for the full help-derived examples and output field meanings.
 
 ### Query Bank
@@ -209,14 +190,14 @@ Notes:
 ```bash
 # all balances for an account
 ADDR="nibi1..."
-nibid q bank balances "$ADDR"
+nibiru q bank balances "$ADDR"
 
 # one denom balance
 DENOM="unibi"
-nibid q bank balances "$ADDR" --denom "$DENOM"
+nibiru q bank balances "$ADDR" --denom "$DENOM"
 
 # total supply for a denom
-nibid q bank total "$DENOM"
+nibiru q bank total "$DENOM"
 ```
 
 Notes:
@@ -231,22 +212,21 @@ Notes:
 FROM_KEY="<from-key-or-addr>"
 TO_ADDR="nibi1recipient..."
 AMOUNT="1000000unibi"
-nibid tx bank send "$FROM_KEY" "$TO_ADDR" "$AMOUNT"
+nibiru tx bank send "$FROM_KEY" "$TO_ADDR" "$AMOUNT" --gas auto
 ```
 
-Common flags to add when needed:
-
-```bash
---from <key-or-addr> --gas auto --gas-adjustment 1.3 --fees 10000unibi
-```
+Use `--gas auto` as the default for transactions. Nibiru estimates gas and
+calculates the fee automatically. Do not add `--gas-adjustment`, `--fees`, or
+`--gas-prices` unless the user requests an override or a specific flow requires
+one. Other flags, such as a memo or contract admin, depend on the transaction.
 
 Rule of thumb:
 
 - Use `tx bank send` for simple transfers.
-- Prefer a key name from `nibid keys list` for `--from`, for example `--from
+- Prefer a key name from `nibiru keys list` for `--from`, for example `--from
   validator-6900`.
 - Use `--note` when the receiving flow needs a memo or exchange-style reference.
-- Confirm the active network with `nibid config` before sending anything.
+- Confirm the active network with `nibiru config` before sending anything.
 - See [`examples.md`](./examples.md) for a copy-paste bank send with memo.
 
 ### Query Wasm 
@@ -254,20 +234,20 @@ Rule of thumb:
 ```bash
 # contract metadata
 CONTRACT_ADDR="nibi1..."
-nibid q wasm contract "$CONTRACT_ADDR"
+nibiru q wasm contract "$CONTRACT_ADDR"
 
 # list contracts by code id
 CODE_ID="123"
-nibid q wasm list-contract-by-code "$CODE_ID"
+nibiru q wasm list-contract-by-code "$CODE_ID"
 
 # raw smart query
 QUERY_MSG='{"get_config":{}}'
-nibid q wasm contract-state smart "$CONTRACT_ADDR" "$QUERY_MSG"
+nibiru q wasm contract-state smart "$CONTRACT_ADDR" "$QUERY_MSG"
 
 # raw storage query by hex key
 KEY="config"
 HEX_KEY="$(printf '%s' "$KEY" | xxd -p -c 256)"
-nibid q wasm contract-state raw "$CONTRACT_ADDR" "$HEX_KEY"
+nibiru q wasm contract-state raw "$CONTRACT_ADDR" "$HEX_KEY"
 ```
 
 Rules of thumb:
@@ -288,7 +268,7 @@ raw_item() {
   contract="$1"
   key="$2"
   hex="$(printf '%s' "$key" | xxd -p -c 256)"
-  nibid q wasm contract-state raw "$contract" "$hex" |
+  nibiru q wasm contract-state raw "$contract" "$hex" |
     jq -r '.data // empty' | base64 -d
   echo
 }
@@ -308,7 +288,7 @@ query enum variants.
 
 ```bash
 CONTRACT_ADDR="nibi1..."
-nibid q wasm contract-state smart "$CONTRACT_ADDR" \
+nibiru q wasm contract-state smart "$CONTRACT_ADDR" \
   '{"_key_probe":{}}'
 ```
 
@@ -328,25 +308,25 @@ required fields.
 CONTRACT_ADDR="nibi1..."
 EXECUTE_MSG='{"claim":{}}'
 FROM_KEY="<key-or-addr>"
-nibid tx wasm execute "$CONTRACT_ADDR" "$EXECUTE_MSG" --from "$FROM_KEY"
+nibiru tx wasm execute "$CONTRACT_ADDR" "$EXECUTE_MSG" --from "$FROM_KEY" --gas auto
 
 # instantiate a contract from a code id
 CODE_ID="123"
 INIT_MSG='{"count":0}'
 LABEL="my-contract"
-nibid tx wasm instantiate "$CODE_ID" "$INIT_MSG" --label "$LABEL" --from "$FROM_KEY"
+nibiru tx wasm instantiate "$CODE_ID" "$INIT_MSG" --label "$LABEL" --from "$FROM_KEY" --gas auto
 ```
 
 Common additions:
 
 ```bash
---admin <nibi1...> --amount 1000000unibi --gas auto --gas-adjustment 1.5 --fees 10000unibi
+--admin <nibi1...> --amount 1000000unibi
 ```
 
 Rules of thumb:
 
 - `execute` changes state and usually needs `--from`.
-- Prefer a key name from `nibid keys list` for `--from`, not a guessed alias.
+- Prefer a key name from `nibiru keys list` for `--from`, not a guessed alias.
 - `instantiate` creates a new contract instance from uploaded code.
 - If funds must be sent alongside execution or instantiation, use `--amount`.
 - Keep the JSON message exact; contract query/execute schemas are not inferred by
@@ -356,13 +336,13 @@ Rules of thumb:
 
 ```bash
 TX="ABCD1234..."
-nibid q tx "$TX"
+nibiru q tx "$TX"
 ```
 
 Useful follow-up:
 
 ```bash
-nibid q tx "$TX" | jq .
+nibiru q tx "$TX" | jq .
 ```
 
 Rules of thumb:
@@ -374,7 +354,7 @@ Rules of thumb:
 ### Creating a new Random Wallet
 
 ```bash
-nibid keys add demo-practice-key --dry-run --keyring-backend test
+nibiru keys add demo-practice-key --dry-run --keyring-backend test
 ```
 
 Response shape:
@@ -395,14 +375,14 @@ different instances of the Nibiru blockchain.
 
 ```bash
 ud nibi cfg prod
-nibid config
+nibiru config
 ```
 
 2. Before any signing flow, list the keyring and pick an explicit `--from` value:
 
 ```bash
-nibid keys list | jq
-nibid keys list | jq -r '.[] | select(.type=="local") | .name'
+nibiru keys list | jq
+nibiru keys list | jq -r '.[] | select(.type=="local") | .name'
 ```
 
   - This is useful for debugging, as it can bring to light a missing signer or be
@@ -415,7 +395,24 @@ nibid keys list | jq -r '.[] | select(.type=="local") | .name'
 ## Common pitfalls
 
 - Wrong network selected in the CLI config.
-- Guessing a `--from` value instead of checking `nibid keys list`.
+- Guessing a `--from` value instead of checking `nibiru keys list`.
 - Using human units instead of base units like `unibi`.
-- Treating EVM JSON-RPC questions as `nibid` questions.
+- Treating EVM JSON-RPC questions as `nibiru` questions.
 - Guessing Wasm query message shapes instead of checking the contract or app code.
+
+## Check mainnet Wasm upload permission
+
+Query module `x/sudo` and match role `wasm_deployer` against local key addresses:
+
+```bash
+nibiru q sudo state --node https://rpc.nibiru.fi:443 \
+  --chain-id cataclysm-1
+nibiru keys list --keyring-backend test
+nibiru q wasm params --node https://rpc.nibiru.fi:443 \
+  --chain-id cataclysm-1
+```
+
+The mainnet guard accepts the sudo root or a member of role `wasm_deployer`.
+Normal Wasm upload permissions still apply. Role membership does not bypass
+contract-admin checks for migrations. List keys and query permissions before
+selecting a signer; do not infer authorization from a key name.

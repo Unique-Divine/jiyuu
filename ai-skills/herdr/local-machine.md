@@ -55,6 +55,45 @@ HERDR_CONFIG_PATH="$DOTFILES/herdr-cfg/config.toml" \
 Reloading the running server with command `herdr server reload-config` is a live
 session-control action. Perform the `HERDR_ENV=1` check first.
 
+## Flatten agent tabs
+
+For requests such as "flatten my tabs" or "one agent per tab", use the
+dotfiles command instead of selecting panes and destination tabs manually.
+Run it inside Herdr, after the environment check in `SKILL.md`:
+
+```bash
+just --justfile "$DOTFILES/justfile" herdr-flatten
+just --justfile "$DOTFILES/justfile" herdr-flatten --run
+```
+
+The first command previews moves in the calling pane's live workspace. The
+second applies them. When the user requests flattening, run the preview,
+inspect the plan, and apply it within that authorization. A request to inspect
+or preview the layout authorizes only the first command.
+
+The command keeps one recognized agent per existing tab, preferring the
+focused agent, and moves each extra agent directly into a new tab with
+`pane move --new-tab --no-focus`. These moves preserve running processes and
+avoid creating placeholder shells. Repeating the command after flattening
+plans no further moves.
+
+Non-agent panes stay where they are and appear in the report. Tabs containing
+shells may therefore still have multiple panes. Do not close those panes as
+part of flattening. If the user requests exactly one pane per tab, explain
+which non-agent panes remain before arranging any further changes.
+
+The command refreshes the layout before each move and stops on a failed move
+or a changed pane identity. Earlier successful moves remain applied. Inspect
+the layout and rerun the preview before retrying; the command replans from
+live state. It does not lock the layout against concurrent changes.
+
+Implementation: `$DOTFILES/herdr-cfg/flatten.ts`. Run its tests with:
+
+```bash
+cd "$DOTFILES"
+bun test herdr-cfg/flatten.test.ts
+```
+
 ## Installed fork and Codex
 
 The vendored v0.9.3 fork keeps zero-based tab shortcuts and labels. Build it

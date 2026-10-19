@@ -32,7 +32,7 @@ Current skills cover workflows such as:
 
 - writing commit messages and PR summaries
 - routing work across related repos
-- querying Nibiru via `nibid` or EVM RPC
+- querying Nibiru via `nibiru` or EVM RPC
 - querying indexer, Sai GraphQL, REST, and Postgres-backed data sources
 - checking governance proposals and upgrade status
 

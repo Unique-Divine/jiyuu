@@ -1,9 +1,9 @@
 ---
-name: nibid-gov-upgrade
-description: Queries Nibiru governance proposals (including software-upgrade proposals) using the `nibid` CLI, maps explorer UI fields to on-chain queries, computes quorum/threshold/veto metrics, and correlates validator votes using staking queries. Use when the user mentions `nibid q gov`, governance proposals, software upgrades, votes, deposits, tally, quorum/threshold, validators, proposal status, or `nibid tx gov`.
+name: nibiru-gov-upgrade
+description: Queries Nibiru governance proposals (including software-upgrade proposals) using the `nibiru` CLI, maps explorer UI fields to on-chain queries, computes quorum/threshold/veto metrics, and correlates validator votes using staking queries. Use when the user mentions `nibiru q gov`, governance proposals, software upgrades, votes, deposits, tally, quorum/threshold, validators, proposal status, or `nibiru tx gov`.
 ---
 
-# Nibid Gov + Upgrade (Nibiru mainnet)
+# Nibiru governance and upgrades
 
 ## Workflow: How to Use this Skill
 
@@ -38,7 +38,7 @@ After that, choose the recipe that matches the user's question:
 
 ```bash
 ud nibi cfg prod
-nibid config
+nibiru config
 ```
 
 This selects the default, non-archive mainnet RPC and JSON output. Keep the
@@ -55,37 +55,37 @@ ID=27
 3. Run the canonical set of queries (JSON output):
 
 ```bash
-nibid q gov proposal "$ID"
-nibid q gov votes "$ID" --limit 1000
-nibid q gov tally "$ID"
-nibid q gov deposits "$ID"
-nibid q gov params
+nibiru q gov proposal "$ID"
+nibiru q gov votes "$ID" --limit 1000
+nibiru q gov tally "$ID"
+nibiru q gov deposits "$ID"
+nibiru q gov params
 
-nibid q staking pool
-nibid q staking validators --limit 1000
+nibiru q staking pool
+nibiru q staking validators --limit 1000
 ```
 
 ## Mapping: "Proposal #27" explorer fields → on-chain queries
 
 - **Proposal metadata (status, times, title/summary, total_deposit, proposer)**:
-  - `nibid q gov proposal "$ID"`
+  - `nibiru q gov proposal "$ID"`
   - Example fields: `.status`, `.submit_time`, `.voting_end_time`, `.title`,
     `.summary`, `.total_deposit`, `.proposer`
 
 - **Deposits table**:
-  - `nibid q gov deposits "$ID"`
+  - `nibiru q gov deposits "$ID"`
 
 - **Votes table (all votes, incl. weighted)**:
-  - `nibid q gov votes "$ID" --limit 1000`
+  - `nibiru q gov votes "$ID" --limit 1000`
 
 - **Current tally (yes/no/veto/abstain counts)**:
-  - `nibid q gov tally "$ID"`
+  - `nibiru q gov tally "$ID"`
 
 - **Quorum/threshold/veto thresholds**:
-  - `nibid q gov params` (or `nibid q gov param voting|deposit|tallying`)
+  - `nibiru q gov params` (or `nibiru q gov param voting|deposit|tallying`)
 
 - **Bonded voting power denominator (for quorum math)**:
-  - `nibid q staking pool` (use `.bonded_tokens`)
+  - `nibiru q staking pool` (use `.bonded_tokens`)
 
 ## Software-upgrade proposal: extract `plan` (name/height/info/binaries)
 
@@ -96,7 +96,7 @@ executes legacy content (you'll typically see `MsgExecLegacyContent` wrapping a
 Extract the upgrade plan:
 
 ```bash
-nibid q gov proposal "$ID" | jq '
+nibiru q gov proposal "$ID" | jq '
   .messages[]
   | select(."@type" == "/cosmos.gov.v1.MsgExecLegacyContent")
   | .content
@@ -108,7 +108,7 @@ nibid q gov proposal "$ID" | jq '
 Parse the `binaries` object out of `plan.info` (it's a JSON string):
 
 ```bash
-nibid q gov proposal "$ID" | jq -r '
+nibiru q gov proposal "$ID" | jq -r '
   .messages[]
   | select(."@type" == "/cosmos.gov.v1.MsgExecLegacyContent")
   | .content
@@ -148,14 +148,14 @@ jq -s '
         end
       )
     }
-' <(nibid q gov tally "$ID") <(nibid q staking pool)
+' <(nibiru q gov tally "$ID") <(nibiru q staking pool)
 ```
 
 Raw sources:
 
-- `nibid q gov tally "$ID"` for current vote weights
-- `nibid q gov params` for quorum / threshold / veto parameters
-- `nibid q staking pool` for `bonded_tokens`
+- `nibiru q gov tally "$ID"` for current vote weights
+- `nibiru q gov params` for quorum / threshold / veto parameters
+- `nibiru q staking pool` for `bonded_tokens`
 
 For a fuller report with governance thresholds and field notes, see
 [`reference.md#explorer-style-quorum-report`](./reference.md#explorer-style-quorum-report)
@@ -163,7 +163,7 @@ and [`reference.md#field-meanings`](./reference.md#field-meanings).
 
 ## Validator votes (filter votes to validator set)
 
-`nibid q gov votes` includes **all** voters (delegators + validators). To match
+`nibiru q gov votes` includes **all** voters (delegators + validators). To match
 "Validators Votes" UIs, filter to validator accounts by converting each
 validator's `nibivaloper...` to its corresponding `nibi...` address.
 
@@ -171,20 +171,20 @@ Helpers:
 
 ```bash
 # Shows both Bech32 Acc (nibi...) and Bech32 Val (nibivaloper...)
-nibid debug addr nibi1ah8gqrtjllhc5ld4rxgl4uglvwl93ag0sh6e6v
+nibiru debug addr nibi1ah8gqrtjllhc5ld4rxgl4uglvwl93ag0sh6e6v
 ```
 
 Example report (bonded validators who voted on `$ID`):
 
 ```bash
 ID=27
-VOTES_JSON="$(nibid q gov votes "$ID" --limit 1000)"
-VALS_JSON="$(nibid q staking validators --limit 2000)"
+VOTES_JSON="$(nibiru q gov votes "$ID" --limit 1000)"
+VALS_JSON="$(nibiru q staking validators --limit 2000)"
 
 echo "$VALS_JSON" \
   | jq -r '.validators[] | select(.status=="BOND_STATUS_BONDED") | .operator_address' \
   | while read -r valoper; do
-      acc="$(nibid debug addr "$valoper" | sed -n 's/^Bech32 Acc: //p')"
+      acc="$(nibiru debug addr "$valoper" | sed -n 's/^Bech32 Acc: //p')"
       vote="$(echo "$VOTES_JSON" | jq -c --arg acc "$acc" '.votes[] | select(.voter==$acc) | {voter, options}')"
       if [[ -n "$vote" ]]; then
         moniker="$(echo "$VALS_JSON" | jq -r --arg valoper "$valoper" '.validators[] | select(.operator_address==$valoper) | .description.moniker')"
@@ -202,25 +202,25 @@ through an archive RPC.
 - **Vote**:
 
 ```bash
-nibid tx gov vote "$ID" yes --from <key-or-addr>
+nibiru tx gov vote "$ID" yes --from <key-or-addr>
 ```
 
 - **Weighted vote**:
 
 ```bash
-nibid tx gov weighted-vote "$ID" yes=0.6,no=0.3,abstain=0.1 --from <key-or-addr>
+nibiru tx gov weighted-vote "$ID" yes=0.6,no=0.3,abstain=0.1 --from <key-or-addr>
 ```
 
 - **Deposit**:
 
 ```bash
-nibid tx gov deposit "$ID" 1000000unibi --from <key-or-addr>
+nibiru tx gov deposit "$ID" 1000000unibi --from <key-or-addr>
 ```
 
 - **Submit a software-upgrade proposal (legacy content path)**:
 
 ```bash
-nibid tx gov submit-legacy-proposal software-upgrade v2.11.0 \
+nibiru tx gov submit-legacy-proposal software-upgrade v2.11.0 \
   --title "v2.11.0" \
   --description "Upgrade to v2.11.0" \
   --deposit 20000000000unibi \
@@ -231,5 +231,5 @@ nibid tx gov submit-legacy-proposal software-upgrade v2.11.0 \
 
 ## Upgrade module queries (after a proposal passes)
 
-- `nibid q upgrade plan` only works once an upgrade is scheduled in `x/upgrade`.
+- `nibiru q upgrade plan` only works once an upgrade is scheduled in `x/upgrade`.
   Before then, it can return "no upgrade scheduled".
