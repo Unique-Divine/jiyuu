@@ -1,6 +1,6 @@
 import { Message } from "discord.js"
 import { iterGuildMembers } from "../discord"
-import { CmdResult, ICmd, UsageCmd } from "./interfaces"
+import { type CmdResult, type ICmd, UsageCmd } from "./interfaces"
 
 /** CmdMembers: TODO */
 export class CmdMembers implements ICmd {

@@ -13,7 +13,7 @@ import * as querystring from "querystring" // NOTE querystring API is deprecated
 import markdownLink from "markdown-link"
 import listitem from "list-item"
 import { RemarkablePlus } from "./remarkable"
-import { slugify, SlugifyOptions, getTitle } from "./options"
+import { slugify, type SlugifyOptions, getTitle } from "./options"
 import { insert } from "./insert"
 
 export { insert }
@@ -29,8 +29,8 @@ export interface GenerateOptions extends SlugifyOptions {
   titleize?: boolean | TitleizeFn
   // Add other possible options here...
   hLevel?: number
-  bullets?: string[]
-  chars?: string[]
+  bullets?: string | string[]
+  chars?: string | string[]
 
   /**
    * filter (`FilterFn`): returns truthy to include the item, falsy to exclude it.
@@ -74,7 +74,7 @@ export interface JsonToken {
   content: string
   slug: string
   lvl: number
-  i: number
+  i?: number
   seen: number
 }
 
@@ -265,9 +265,9 @@ export class BulletsParser implements IBulletState {
 
   bulletList = (
     includeFirstH1: boolean,
-    fn: FilterFn,
+    fn: FilterFn | null,
     li: ListItemFn,
-    opts?: GenerateOptions,
+    opts: GenerateOptions,
   ): BulletList => {
     // TODO: Useful debug for feature development
     // const indent: boolean = this.indent(includeFirstH1)
@@ -287,7 +287,8 @@ export class BulletsParser implements IBulletState {
         return
       }
 
-      const lvl = ele.lvl - opts.highest
+      // generate() sets highest before rendering the bullet list.
+      const lvl = ele.lvl - opts.highest!
       const { content } = ele
       bList.push({ bullet: li(lvl, content), lvl, content })
     })
@@ -296,9 +297,9 @@ export class BulletsParser implements IBulletState {
 
   bullets = (
     includeFirstH1: boolean,
-    fn: FilterFn,
+    fn: FilterFn | null,
     li: ListItemFn,
-    opts?: GenerateOptions,
+    opts: GenerateOptions,
   ): { out: string; bList: BulletList } => {
     const bList = this.bulletList(includeFirstH1, fn, li, opts)
     return {

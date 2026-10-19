@@ -45,7 +45,8 @@
   },
   "type": "module",
   "scripts": {
-    "test": "bun test"
+    "test": "bun test",
+    "typecheck": "bun check"
   },
   "dependencies": {
     "concat-stream": "^1.5.2",
@@ -62,9 +63,11 @@
     "strip-color": "^0.1.0"
   },
   "devDependencies": {
+    "@types/bun": "^1.4.3",
     "@types/concat-stream": "^2.0.3",
-    "bun": "^1.0.3",
-    "bun-types": "^1.0.3",
+    "@types/minimist": "^1.2.5",
+    "@types/remarkable": "^2.0.8",
+    "@types/strip-color": "^0.1.2",
     "globals": "^15.4.0",
     "gulp-format-md": "^2.0.0",
     "jest": "^29.7.0",

@@ -1,5 +1,5 @@
 import { Message } from "discord.js"
-import { CmdResult, ICmd, UsageCmd } from "./interfaces"
+import { type CmdResult, type ICmd, UsageCmd } from "./interfaces"
 
 /** CmdAllRoles: displays all of the guild roles. */
 export class CmdHelp implements ICmd {

@@ -13,7 +13,7 @@
   "scripts": {
     "start": "bun main.ts",
     "test": "bun test",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "bun check",
     "py-test": "uv run pytest session_string_generator_test.py"
   },
   "files": [
@@ -30,7 +30,7 @@
   ],
   "license": "UNLICENSED",
   "devDependencies": {
-    "@types/bun": "^1.3.14",
+    "@types/bun": "^1.4.3",
     "typescript": "^6.0.3"
   },
   "dependencies": {

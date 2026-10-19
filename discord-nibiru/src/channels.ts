@@ -1,4 +1,4 @@
-import { ChannelKey } from "./cmd/interfaces"
+import { type ChannelKey } from "./cmd/interfaces"
 
 export const CHANNEL_KEY_MAP: { [key: string]: ChannelKey } = {
   welcome: {

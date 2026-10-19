@@ -1,4 +1,4 @@
-import { Channel, Collection, Message, TextChannel } from "discord.js"
+import { type Channel, Collection, Message, TextChannel } from "discord.js"
 
 interface IToDelete {
   [channelId: string]: string[]
@@ -31,7 +31,6 @@ class BanChannelHandler {
 
     const initToDelete = { [this.channelKey.name]: [] }
     this.toDelete = toDelete ? { ...toDelete, ...initToDelete } : initToDelete
-    this.channelMsgs = this.setupChannelMsgs()
   }
 
   setupChannelMsgs = async (channel: TextChannel, pageSize = 100) => {

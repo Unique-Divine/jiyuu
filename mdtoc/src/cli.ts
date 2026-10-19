@@ -3,7 +3,7 @@
 import * as fs from "fs"
 import { Readable } from "stream"
 import { toc, minimist, concat, Toc } from "./mdtoc"
-import { TocResult } from "./mdtoc/toc"
+import { type TocResult } from "./mdtoc/toc"
 // const utils = require("./lib/utils")
 
 /**
@@ -12,7 +12,7 @@ import { TocResult } from "./mdtoc/toc"
  * the generated table of contents or JSON representation to stdout. If the -i
  * flag is specified, the modified Markdown content is written back to the input
  * file inplace. */
-const args: CmdRootArgs = minimist(process.argv.slice(2), {
+const args = minimist(process.argv.slice(2), {
   // boolean flags: "-i", "--json", ...
   boolean: ["i", "json", "firsth1", "stripHeadingTags"],
   // string flags: Flags that take string args
@@ -22,7 +22,7 @@ const args: CmdRootArgs = minimist(process.argv.slice(2), {
     firsth1: true,
     stripHeadingTags: true,
   },
-})
+}) as CmdRootArgs
 
 type CmdRootArgs = {
   /** i: Toggles whether to write back to the input file in-place. Cannot be used
@@ -37,7 +37,7 @@ type CmdRootArgs = {
   stripHeadingTags: boolean
   append: string
   /** bullets: The character to use for bullet points. Defaults to "*". */
-  bullets: string
+  bullets: string | string[]
   indent: string
   _: string[]
 }

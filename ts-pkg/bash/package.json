@@ -6,12 +6,13 @@
   "type": "module",
   "private": false,
   "devDependencies": {
-    "@types/bun": "latest"
+    "@types/bun": "^1.4.3"
   },
   "peerDependencies": {
     "typescript": "^5.0.0"
   },
-  "dependencies": {
-    "bun": "^1.2.5"
+  "dependencies": {},
+  "scripts": {
+    "typecheck": "bun check"
   }
 }
