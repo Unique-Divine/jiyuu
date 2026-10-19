@@ -7,10 +7,11 @@ description: >-
   writing scripts, managing transactions, and using advanced psql features for
   database administration and development.
 license: PostgreSQL
-version: 1.0.0
 ---
 
 # PostgreSQL psql Skill
+
+Version: 1.0.0.
 
 PostgreSQL psql (PostgreSQL interactive terminal) is the primary command-line client for interacting with PostgreSQL databases. It provides both interactive query execution and powerful scripting capabilities for database management and administration.
 
