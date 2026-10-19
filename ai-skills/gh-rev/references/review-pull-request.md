@@ -10,26 +10,23 @@ For a request such as "Review PR #1153 with gh-rev":
 
 1. Resolve the repository, PR number, issue, PR description, prior GitHub
    comments, base/head refs, and immutable base/head SHAs with `gh`.
-2. Review `gh-rev --help` for remote-aware `sync` and PR selectors.
-3. When supported, register a suitable repository checkout if the repository is
-   unknown, then synchronize and open the PR ledger:
+2. Inspect the installed CLI as described in [cli.md](cli.md).
+3. Use a suitable repository checkout, discovered from the command directory
+   or selected with `-C`, and open the PR ledger:
 
    ```bash
-   gh-rev sync owner__repo
    gh-rev open owner__repo --pr 1153
    ```
 
-   Read the returned context and all prior revisions. `sync` may adopt a branch
-   ledger into the canonical PR history; do not duplicate the adopted reviews.
-   GitHub lookup runs outside the ledger lock. If `sync` reports that the
-   ledger is busy, another writer is active—retry after it exits rather than
-   bypassing the lock. A later `sync` automatically resolves a recognized
-   interrupted adoption from its staging/backups and persisted state, but
-   preserves ambiguous artifacts for explicit inspection.
-4. Use `gh-pr-review` to review the GitHub PR head against its GitHub base. Use
-   `gh pr diff`, surrounding source from GitHub, and available repository
-   context. Materialize or update a local checkout when tests, generated files,
-   cross-file searches, or implementation work make that useful.
+   Read the returned context and all prior revisions. Opening the PR may adopt
+   branch history into its canonical ledger; do not duplicate adopted reviews.
+   Use `sync` for bulk reconciliation or interrupted-adoption recovery, not as
+   a prerequisite for each review.
+4. Use the `gh-pr-review` skill to review the GitHub PR head against its GitHub
+   base. Use `gh pr diff`, surrounding source from GitHub, and available
+   repository context. Materialize or update a local checkout when tests,
+   generated files, cross-file searches, or implementation work make that
+   useful.
 5. Confirm the `gh-rev open` head SHA matches the PR head reviewed. Then
    allocate and fill the revision:
 
@@ -60,7 +57,7 @@ for the review. In that case:
 - If the user also asks for implementation or local verification, materialize
   the branch through the repository's normal checkout/worktree workflow.
 - Otherwise, report that the review could not yet be recorded in `gh-rev` and
-  identify the missing remote-sync capability. Do not fabricate a branch
+  identify the missing local branch prerequisite. Do not fabricate a branch
   ledger, substitute a different SHA, or claim a revision was submitted.
 
 ## Another independent review

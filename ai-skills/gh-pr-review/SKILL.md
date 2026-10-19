@@ -118,16 +118,23 @@ provides git and injected PR metadata.
 
 2. **Investigate, don't guess** - When uncertain whether a checklist item
    applies, inspect surrounding code or spawn a sub-agent to gather context.
+   Treat the stated rationale as a claim to examine. Seek evidence in code,
+   history, and documentation that challenges its assumptions. Consult
+   external sources when a concrete question warrants it.
 3. **Review the design, not just the implementation** - Question hidden state,
    side-channel behavior, unclear ownership, fragile ordering, and missing
-   interface contracts.
+   interface contracts. Assess whether the proposed change solves the intended
+   problem and whether its tradeoffs make sense for this repository, even when
+   the implementation is correct.
 5. **Everything reported should matter** - Avoid nits. If it is worth writing
    down, it should affect correctness, maintainability, security, performance,
    compatibility, or reviewability.
 6. **Be specific and actionable** - Reference file paths and line numbers.
    Name the function, module, pattern, or API the author should use.
 7. **Match the immediate context** - Read how similar behavior is already
-   implemented nearby before flagging or accepting a pattern.
+   implemented nearby and consult documented conventions. Consider whether a
+   departure is intentional and justified, improves the convention, or is an
+   unexplained inconsistency. A difference alone is not a finding.
 8. **Assume competence** - Explain only the context needed to make the requested
    change clear.
 9. **No repetition** - Each observation appears in exactly one section.
@@ -149,21 +156,28 @@ re-read the relevant code or ask a sub-agent to verify it as **valid**,
 
 Before reviewing, build a clear picture of what changed and why:
 
-1. Identify the purpose of the change from title, description, linked issue, and
-   commit messages.
+1. Seek the purpose of the change from the PR title and body, commit messages,
+   linked issues, and relevant repository docs, even when the request supplies
+   only a diff or review target. Follow references that could materially affect
+   the assessment. When rationale is missing, investigate before inferring it;
+   distinguish documented intent from your reconstruction and surface
+   uncertainty when it materially affects the review.
 2. Group changes by type: product behavior, API, data model, tests, docs,
    configuration, build, or deployment.
 3. Note the size and risk profile: changed files, touched subsystems, public
    interfaces, persisted data, and production paths.
 4. Read surrounding code for significantly changed files to understand existing
-   patterns.
-5. Review prior comments so you do not duplicate feedback or miss existing
-   reviewer concerns.
+   patterns and the reasons behind them. Compare the approach with nearby
+   implementations and documented conventions.
+5. Read prior review discussions for rationale, settled decisions, and open
+   questions, as well as concerns already reported. Check their claims against
+   the change rather than accepting them as conclusions.
 
 ### Step 2: Deep Review
 
 Evaluate each meaningful changed line against the checklist below. Prioritize
-bugs and risks over style preferences.
+bugs and risks over style preferences. Use the wider context to examine the
+change's assumptions, fit, and tradeoffs as well as its implementation.
 
 ### Step 3: Check Backward Compatibility
 
@@ -191,7 +205,10 @@ When unsure, ask:
 ### Step 4: Formulate Review
 
 Write findings as concrete requests. Each finding should include the affected
-file or behavior, why it matters, and what change would resolve it.
+file or behavior, why it matters, and what change would resolve it. Use the
+context gathered to substantiate concerns that matter to the change. Omit a
+running account of the investigation; broad investigation should still yield
+selective findings.
 
 ### Step 5: Final Recommendation
 

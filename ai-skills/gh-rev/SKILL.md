@@ -1,19 +1,31 @@
 ---
 name: gh-rev
-description: Use gh-rev's persistent Markdown review ledger to review local branches or online pull requests, inspect prior revisions, work recorded findings, resolve findings with evidence, or continue an independent review pass. Trigger when the user names gh-rev, asks to save or submit a durable review, asks whether a branch or PR has reviews, wants existing review feedback implemented, or needs branch review history adopted into a PR. Pair with gh-pr-review for the substance and quality of a code review; do not use this skill for a generic one-off review when no durable ledger workflow is wanted.
+description: Use the gh-rev CLI to maintain a persistent Markdown review ledger for local branches and pull requests. Trigger when the user names gh-rev, asks to save or submit a durable review, inspect or implement existing findings, continue an independent review pass, or adopt branch history into a PR. Use the gh-pr-review skill for review content and judgment. Do not use this skill for a one-off review without a durable ledger.
 ---
 
 # gh-rev
 
-Use `gh-rev` as the durable workflow and identity layer around code review.
-It records Markdown revisions outside source repositories, normally under
-`~/gh`. Use `gh-pr-review` alongside it whenever judging code: that skill owns
-review depth, categories, evidence, and the final recommendation. This skill
-owns target selection, history, revision allocation, and finding lifecycle.
+Command `gh-rev` is a CLI tool that records Markdown review revisions outside
+source repositories, normally under `~/gh`. This skill explains how to use that
+tool to select targets, read history, allocate revisions, and resolve findings.
+
+## Compose with the gh-pr-review skill
+
+Read and use the `gh-pr-review` skill whenever evaluating code or filling in a
+review. It supplies the review criteria, investigation standards, evidence,
+actionable findings, and recommendation. Apply it to the exact review range
+selected by the CLI.
+
+Record that review in the template allocated by `gh-rev next`. Keep the ledger
+sections and exact finding markers described below; use the `gh-pr-review`
+skill to determine their content rather than copying its standalone output
+format over the ledger template. The CLI manages review records; it does not
+perform the code review.
 
 ## Choose the workflow
 
-Read only the reference matching the user's task:
+Read [references/cli.md](references/cli.md) for CLI discovery, installation,
+command purposes, and target selection. Then read the task reference:
 
 - "Review my current branch with gh-rev; it is not a PR yet." Read
   [references/review-local-branch.md](references/review-local-branch.md).
@@ -40,11 +52,9 @@ Do not silently substitute one for the other when their heads diverge.
 
 ## Start with capability and context
 
-Run `command -v gh-rev` and inspect `gh-rev --help` before choosing commands.
-The installed binary can lag the source documentation. Use `sync`, `--pr`, and
-`--head local` only when help advertises them. Prefer the current command
-contract when present; follow the compatibility behavior in the relevant
-reference otherwise.
+Use the installed CLI's help as the command contract. If it lacks a required
+capability, report that limit rather than substituting a different review
+target. See the CLI reference for discovery and update commands.
 
 Before creating a new revision:
 
@@ -68,13 +78,13 @@ generated template without replacing its YAML evidence.
 Record each actionable finding on a line beginning in column zero:
 
 ```markdown
-- [ ] rev: P1 — Explain the concrete problem, impact, location, and resolution.
+- [ ] rev: P1: Explain the concrete problem, impact, location, and resolution.
 ```
 
 Resolve that same line in its originating revision after verification:
 
 ```markdown
-- [x] rev: P1 — Explain the concrete problem, impact, location, and resolution.
+- [x] rev: P1: Explain the concrete problem, impact, location, and resolution.
   - Resolved: Describe the fix or why no change was appropriate, with evidence.
 ```
 
@@ -85,7 +95,8 @@ disagreement may be resolved with a note explaining the decision.
 
 Keep `## Scope`, `## Summary`, `## Findings`, and `## Recommendation`. An
 approval still gets a complete revision, but has no placeholder finding and no
-`rev:` checkbox. Use the recommendation vocabulary from `gh-pr-review`.
+`rev:` checkbox. Use the recommendation vocabulary from the `gh-pr-review`
+skill.
 
 ## Publishing boundary
 
