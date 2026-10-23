@@ -57,6 +57,10 @@ Prefix convention:
   - Use for solutions to friction users encounter in apps, wallets, or other
     flows, and for work geared toward user acquisition or activation, referrals,
     and retention.
+- `A-security`: (#eab6cb) | Area: Security hardening, advisories, and upstream-sourced fixes
+  - Use for advisories, vulnerability fixes, hardening, and tickets sourced
+    from upstream repos by agent skill `upstream-watch`. Track mainnet-risk
+    findings in private NibiruChain/sai-perps issues.
 
 When the user adds a standard label, append a bullet here with the same format:
 `` `<name>`: (#<RRGGBB>) | <description> `` - Keep their description text verbatim.
@@ -147,6 +151,11 @@ gh label create "A-ops" \
 
 gh label create "A-ux" \
   --description "Area: Solve friction in apps and wallets; improve acquisition, activation, referrals, and retention" \
+  --color eab6cb \
+  --force
+
+gh label create "A-security" \
+  --description "Area: Security hardening, advisories, and upstream-sourced fixes" \
   --color eab6cb \
   --force
 ```
