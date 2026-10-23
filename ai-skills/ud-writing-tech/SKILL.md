@@ -73,6 +73,7 @@ Better:
   fields, config keys, HTTP methods, and status codes.
 - Use bold for UI elements and run-in labels, not as a substitute for code font.
 - Use sentence case for headings.
+- In Markdown, capitalize the first prose word after a label colon or separating dash, even when the label is lowercase; preserve literal code, identifiers, URLs, and paths.
 - Use standard American spelling and punctuation.
 - Use serial commas.
 - Avoid underlining except for links.
