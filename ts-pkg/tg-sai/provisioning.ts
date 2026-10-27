@@ -55,6 +55,7 @@ export interface Progress {
   binding?: Binding
   receipt?: unknown
   error?: string
+  creationRejected?: boolean
 }
 export interface ProvisionCloud {
   view(requestId: string): Promise<Setup>
@@ -380,12 +381,12 @@ export async function provisionSetup(params: {
     try {
       chatId = await telegram.create(setup.title, creationMarker(setup))
     } catch (error) {
+      const rejected = definiteCreateRejection(error)
       await save({
-        state: definiteCreateRejection(error)
-          ? "incomplete"
-          : "creation_unknown",
+        state: rejected ? "incomplete" : "creation_unknown",
         binding,
         error: safeProvisionError(error),
+        ...(rejected ? { creationRejected: true } : {}),
       })
       throw new Error(
         "Group creation failed; inspect authoritative setup state before resuming",

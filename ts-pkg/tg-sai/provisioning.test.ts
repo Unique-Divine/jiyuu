@@ -148,6 +148,9 @@ describe("custody provisioning", () => {
     expect(BOT_BASELINE_RIGHTS.addAdmins).toBe(false)
     expect(BOT_BASELINE_RIGHTS.deleteMessages).toBe(false)
     expect(f.setup.dealIds).toEqual(["deal-a", "deal-b"])
+    expect((f.setup.receipt as { chatId: string }).chatId).toBe(
+      String(f.setup.chatId),
+    )
   })
   test("stale prepared claim replay cannot recreate a group after authoritative creation", async () => {
     const f = fixture()
@@ -192,6 +195,7 @@ describe("custody provisioning", () => {
     }
     await expect(f.run()).rejects.toThrow("Group creation failed")
     expect(f.setup.state).toBe("creation_unknown")
+    expect(f.setup).not.toHaveProperty("creationRejected")
     expect(await f.run()).toEqual({
       state: "creation_unknown",
       candidates: [-100123],
@@ -307,6 +311,9 @@ describe("custody provisioning", () => {
     }
     await expect(f.run()).rejects.toThrow("Group creation failed")
     expect(f.setup.state).toBe("incomplete")
+    expect(
+      (f.setup as Setup & { creationRejected?: boolean }).creationRejected,
+    ).toBe(true)
     f.telegram.create = create
     expect((await f.run()).state).toBe("ready")
     expect(f.events.filter((e) => e === "create")).toHaveLength(1)
@@ -422,11 +429,14 @@ describe("account and cloud boundaries", () => {
     ])
     expect(result.binding).toEqual({ participants: [21, 22], admins: [22] })
     await cloud.progress(requestValue.requestId, "token", {
-      state: "creating",
+      state: "incomplete",
       binding: result.binding,
+      creationRejected: true,
+      error: "FLOOD_WAIT_40",
     })
     expect(calls[1]?.input.resolvedParticipants).toEqual(["21", "22"])
     expect(calls[1]?.input).not.toHaveProperty("binding")
+    expect(calls[1]?.input.creationRejected).toBe(true)
   })
   test("request validator rejects privilege profiles and duplicate deals", () => {
     expect(() =>
