@@ -14,6 +14,7 @@ import { join } from "node:path"
 import { stdin as input, stdout as output } from "node:process"
 import { createInterface } from "node:readline/promises"
 import { Command } from "commander"
+import { addProvisionCommands } from "./provisioningCli"
 import type { BatchLogger } from "./actionExecutor"
 import { withFloodWaitRetry } from "./actionExecutor"
 import type {
@@ -1523,6 +1524,7 @@ If apiId/apiHash are missing, create a Telegram API app at:
       console.log(`removed_profile: ${selector}`)
     })
 
+  addProvisionCommands(program)
   return program
 }
 

@@ -818,3 +818,18 @@ export function profileInputFromUser(
     displayName: user.displayName,
   }
 }
+
+/** Provisioning must never inherit another account from environment or discovery. */
+export async function strictProfileCredentials(
+  selector: string,
+  expectedUserId: number,
+  env: ProfileStoreEnv = process.env,
+): Promise<TelegramCredentials> {
+  if (!selector?.trim()) throw new Error("Explicit custody profile required")
+  const profile = getProfile(await readConfig(env), selector)
+  if (!profile) throw new Error("Custody profile is not configured")
+  if (profile.userId !== expectedUserId) throw new Error("Custody profile user ID mismatch")
+  const credentials = credentialsFromProfileRecord(profile)
+  if (!credentials) throw new Error("Custody profile is incomplete")
+  return credentials
+}
