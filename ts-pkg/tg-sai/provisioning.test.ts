@@ -278,6 +278,23 @@ describe("custody provisioning", () => {
     expect((await f.run()).state).toBe("ready")
     expect(f.events).not.toContain("cloud:incomplete")
   })
+  test("binding preserves cloud counts and requires listed admins to be participants", async () => {
+    const f = fixture()
+    f.setup = { ...f.setup, participants: ["alice"] }
+    await expect(f.run()).rejects.toThrow("Invalid account binding")
+    expect(f.events).not.toContain("create")
+  })
+  test("binding rejects two handles for the same user and custody-account participants", async () => {
+    for (const participants of [
+      ["alice", 21],
+      [10, 22],
+    ]) {
+      const f = fixture()
+      f.setup = { ...f.setup, participants, admins: [] }
+      await expect(f.run()).rejects.toThrow("Invalid account binding")
+      expect(f.events).not.toContain("create")
+    }
+  })
   test("an explicit flood rejection permits creation retry without duplicating a successful group", async () => {
     const f = fixture()
     const create = f.telegram.create
@@ -393,6 +410,13 @@ describe("account and cloud boundaries", () => {
     })
     const result = await cloud.prepare(requestValue)
     expect(calls[0]?.input.expectedUserId).toBe("10")
+    expect(
+      cloudRequest({
+        ...requestValue,
+        state: "prepared",
+        claimToken: "secret",
+      } as ProvisionRequest),
+    ).not.toHaveProperty("claimToken")
     expect(calls[0]?.input.admins).toEqual([
       { userId: "22", rightsProfile: "team" },
     ])
@@ -421,5 +445,14 @@ describe("account and cloud boundaries", () => {
       } as unknown as ProvisionRequest),
     ).toThrow("admins")
     expect(creationMarker(request())).not.toContain("deal-a")
+    expect(() =>
+      validateRequest({ ...request(), requestId: "not.allowed" }),
+    ).toThrow("requestId")
+    expect(() =>
+      validateRequest({ ...request(), participants: ["four"] }),
+    ).toThrow("participants")
+    expect(() =>
+      validateRequest({ ...request(), title: "x".repeat(129) }),
+    ).toThrow("title")
   })
 })

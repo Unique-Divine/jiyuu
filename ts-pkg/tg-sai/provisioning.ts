@@ -110,9 +110,13 @@ export const TEAM_ADMIN_RIGHTS = {
 }
 
 export function validateRequest(value: ProvisionRequest): ProvisionRequest {
-  if (!value || !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(value.requestId))
+  if (!value || !/^[A-Za-z0-9:_-]{1,128}$/.test(value.requestId))
     throw new Error("Invalid requestId")
-  if (typeof value.custodyProfile !== "string" || !value.custodyProfile.trim())
+  if (
+    typeof value.custodyProfile !== "string" ||
+    !value.custodyProfile.trim() ||
+    value.custodyProfile.length > 64
+  )
     throw new Error("Explicit custodyProfile required")
   if (
     !Number.isSafeInteger(value.expectedUserId) ||
@@ -120,11 +124,16 @@ export function validateRequest(value: ProvisionRequest): ProvisionRequest {
     value.expectedUserId === PROVISIONING_BOT_ID
   )
     throw new Error("Invalid expectedUserId")
-  if (typeof value.title !== "string" || !value.title.trim())
+  if (
+    typeof value.title !== "string" ||
+    !value.title.trim() ||
+    Array.from(value.title).length > 128
+  )
     throw new Error("Nonblank title required")
   for (const key of ["participants", "admins"] as const) {
     if (
       !Array.isArray(value[key]) ||
+      value[key].length > (key === "participants" ? 100 : 30) ||
       value[key].some((entry) => {
         const peer =
           key === "admins"
@@ -138,7 +147,7 @@ export function validateRequest(value: ProvisionRequest): ProvisionRequest {
         return typeof peer === "number"
           ? !Number.isSafeInteger(peer) || peer <= 0
           : typeof peer !== "string" ||
-              !/^(?:[1-9][0-9]*|@?[A-Za-z][A-Za-z0-9_]{3,31})$/.test(peer)
+              !/^(?:[1-9][0-9]*|@?[A-Za-z][A-Za-z0-9_]{4,31})$/.test(peer)
       })
     )
       throw new Error(`Invalid ${key}`)
@@ -147,6 +156,7 @@ export function validateRequest(value: ProvisionRequest): ProvisionRequest {
     throw new Error("Unknown botRightsProfile; use baseline")
   if (
     !Array.isArray(value.dealIds) ||
+    value.dealIds.length > 50 ||
     value.dealIds.some((id) => typeof id !== "string" || !id.trim()) ||
     new Set(value.dealIds).size !== value.dealIds.length
   )
@@ -218,17 +228,8 @@ export async function bindRequest(
       )
     ids.set(peer, resolved.id)
   }
-  const admins = [
-    ...new Set(request.admins.map((admin) => ids.get(admin.userId)!)),
-  ].filter((id) => id !== request.expectedUserId)
-  const participants = [
-    ...new Set(
-      [
-        ...request.participants,
-        ...request.admins.map((admin) => admin.userId),
-      ].map((peer) => ids.get(peer)!),
-    ),
-  ].filter((id) => id !== request.expectedUserId)
+  const admins = request.admins.map((admin) => ids.get(admin.userId)!)
+  const participants = request.participants.map((peer) => ids.get(peer)!)
   const binding = { participants, admins }
   if (!validBinding(binding, request.expectedUserId))
     throw new Error("Invalid account binding")

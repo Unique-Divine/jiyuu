@@ -24,7 +24,11 @@ export function cloudRequest(
 ): Record<string, unknown> {
   validateRequest(request)
   return {
-    ...request,
+    requestId: request.requestId,
+    custodyProfile: request.custodyProfile,
+    title: request.title,
+    botRightsProfile: request.botRightsProfile,
+    dealIds: request.dealIds,
     expectedUserId: String(request.expectedUserId),
     participants: request.participants.map(String),
     admins: request.admins.map((admin) => ({
