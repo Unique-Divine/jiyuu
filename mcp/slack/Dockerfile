@@ -1,3 +1,5 @@
+# Legacy upstream Node image. Use the Bun source installation in README.md.
+# Conversion of this deployment artifact is tracked in the ingestion epic.
 # Slack MCP Server
 # Deterministic image build from repository source for release-tag parity.
 #

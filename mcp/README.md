@@ -5,7 +5,7 @@ accounts; sending messages and other writes require explicit authorization.
 
 | Directory | Runtime | Commands |
 | --- | --- | --- |
-| [slack](slack/README.md) | Bun 1.4.3 locally; Node 20+ entrypoints retained | `just install`, `just test`, `just check`, `just run` |
+| [slack](slack/README.md) | Bun 1.4.3+ | `just install`, `just test`, `just check`, `just run` |
 | [telegram](telegram/README.md) | Python 3.13 and uv | `just install`, `just test`, `just check`, `just run` |
 
 Run the listed commands inside the component directory. From the repository
@@ -27,5 +27,6 @@ fork and immutable comparison baselines. Compare against these commits rather
 than treating the import date as a completed upstream review.
 
 The first import preserves existing functionality, including Slack's optional
-web and hosted-service code. Removing commercial features, making Bun the
-explicit Slack runtime, and migrating Slack to TypeScript are separate work.
+web and hosted-service code. Bun is the explicit Slack runtime, including executable shebangs and native
+`bun:test` tests. Removing commercial features and migrating Slack to TypeScript
+remain separate work.

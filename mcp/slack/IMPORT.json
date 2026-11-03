@@ -36,5 +36,5 @@
     "CLAUDE.md"
   ],
   "license": "MIT",
-  "localModifications": "Jiyuu documentation and source metadata; package publishing disabled. Runtime and hosted-service features preserved."
+  "localModifications": "Jiyuu documentation and source metadata; package publishing disabled. Bun executable shebangs, package scripts and native bun:test/expect suite. Hosted-service features preserved; legacy upstream Docker image remains deferred."
 }

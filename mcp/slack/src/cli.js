@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 /**
  * slack-mcp package entrypoint dispatcher.
  *

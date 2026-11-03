@@ -23,20 +23,15 @@ jobs:
         working-directory: mcp/slack
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: '1.4.3'
       - name: Install locked dependencies
         run: bun install --frozen-lockfile
-      - name: Test Bun compatibility
+      - name: Run bun:test suite
         run: bun test ./test
-      - name: Test retained Node compatibility
-        run: node --test
       - name: Check entrypoint imports
-        run: bun build --target node --packages external ./src/cli.js ./src/server.js ./src/server-http.js ./src/web-server.js --outdir ./node_modules/.cache/mcp-check
+        run: bun build --target bun --packages external ./src/cli.js ./src/server.js ./src/server-http.js ./src/web-server.js --outdir ./node_modules/.cache/mcp-check
 
   telegram:
     runs-on: ubuntu-latest

@@ -6,9 +6,8 @@ part of Jiyuu. It preserves the imported stdio, HTTP and web entrypoints.
 
 ## Install
 
-Requirements: Git and Bun 1.4.3. The JavaScript entrypoints also retain their
-Node 20+ interfaces. This workstation's `node` executable delegates to Bun;
-the commands below invoke Bun explicitly.
+Requirements: Git and Bun 1.4.3 or newer. Linked executables, package scripts,
+tests and CI use Bun directly; no Node installation or `node` shim is needed.
 
 ```sh
 git clone https://github.com/Unique-Divine/jiyuu.git
@@ -18,9 +17,8 @@ just --justfile mcp/slack/justfile install
 
 Without Just, run `bun install --frozen-lockfile` inside `mcp/slack`.
 To make the existing command names available, run `just link` in that directory.
-This uses `bun link` and points them at this source checkout. Linked commands
-need Node 20+ or a `node` shim such as the one on this workstation. A direct
-`bun src/cli.js` launch does not need that shim.
+This uses `bun link` and points them at this source checkout. The executable
+shebangs launch Bun directly.
 
 ## Authenticate
 
@@ -61,10 +59,14 @@ just check
 just run
 ```
 
-Run these commands from `mcp/slack`. Tests cover tool/handler parity, rich
+Run these commands from `mcp/slack`. The native `bun:test` suite uses `expect`
+matchers and covers tool/handler parity, rich
 message fields and authentication-error handling without sending Slack messages.
 `check` builds the entrypoints to an ignored cache to catch import and syntax
 errors. TypeScript conversion and native `bun check` coverage are follow-ups.
+
+The inherited Dockerfile still describes the upstream Node image and is not
+the supported Jiyuu installation. Its conversion is tracked separately.
 
 HTTP and web modes remain available through `bun src/cli.js http` and
 `bun src/cli.js web`. The inherited hosted-service, pricing and marketing code

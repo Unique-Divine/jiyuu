@@ -13,33 +13,33 @@
     "slack-mcp-setup": "scripts/setup-wizard.js"
   },
   "scripts": {
-    "test": "node --test",
-    "start": "node src/server.js",
-    "http": "node src/server-http.js",
-    "web": "node src/web-server.js",
-    "setup": "node scripts/setup-wizard.js --setup",
+    "test": "bun test ./test",
+    "start": "bun src/server.js",
+    "http": "bun src/server-http.js",
+    "web": "bun src/web-server.js",
+    "setup": "bun scripts/setup-wizard.js --setup",
     "hooks:setup": "bash scripts/setup-git-hooks.sh",
     "verify:owner-attribution": "bash scripts/check-owner-attribution.sh",
-    "tokens:status": "node scripts/token-cli.js status",
-    "tokens:refresh": "node scripts/token-cli.js refresh",
-    "tokens:auto": "node scripts/token-cli.js auto",
-    "tokens:clear": "node scripts/token-cli.js clear",
-    "screenshot": "node scripts/capture-screenshots.js",
-    "build:social-preview": "node scripts/build-social-preview.js",
-    "build:public-pages": "node scripts/generate-public-pages.js",
-    "build:demo-mobile": "node scripts/build-mobile-demo.js",
-    "build:demo-mobile:gif": "node scripts/build-mobile-demo.js --gif",
-    "record-demo": "node scripts/record-demo.js",
-    "social-preview:update": "node scripts/update-github-social-preview.js --headed",
-    "bookmarklet": "node scripts/generate-bookmarklet.js",
-    "cf:browser": "node scripts/cloudflare-browser-tool.js",
-    "verify:attribution-guardrail": "node scripts/verify-attribution-guardrail.js",
-    "verify:public-pages": "node scripts/verify-generated-public-pages.js",
-    "verify:version-parity": "node scripts/check-version-parity.js",
-    "verify:public-surface": "node scripts/check-public-surface-integrity.js",
-    "verify:release-dry-run": "node scripts/release-preflight.js",
-    "smoke:browser": "node scripts/browser-smoke.js",
-    "smoke:browser:live": "node scripts/browser-smoke.js --mode live"
+    "tokens:status": "bun scripts/token-cli.js status",
+    "tokens:refresh": "bun scripts/token-cli.js refresh",
+    "tokens:auto": "bun scripts/token-cli.js auto",
+    "tokens:clear": "bun scripts/token-cli.js clear",
+    "screenshot": "bun scripts/capture-screenshots.js",
+    "build:social-preview": "bun scripts/build-social-preview.js",
+    "build:public-pages": "bun scripts/generate-public-pages.js",
+    "build:demo-mobile": "bun scripts/build-mobile-demo.js",
+    "build:demo-mobile:gif": "bun scripts/build-mobile-demo.js --gif",
+    "record-demo": "bun scripts/record-demo.js",
+    "social-preview:update": "bun scripts/update-github-social-preview.js --headed",
+    "bookmarklet": "bun scripts/generate-bookmarklet.js",
+    "cf:browser": "bun scripts/cloudflare-browser-tool.js",
+    "verify:attribution-guardrail": "bun scripts/verify-attribution-guardrail.js",
+    "verify:public-pages": "bun scripts/verify-generated-public-pages.js",
+    "verify:version-parity": "bun scripts/check-version-parity.js",
+    "verify:public-surface": "bun scripts/check-public-surface-integrity.js",
+    "verify:release-dry-run": "bun scripts/release-preflight.js",
+    "smoke:browser": "bun scripts/browser-smoke.js",
+    "smoke:browser:live": "bun scripts/browser-smoke.js --mode live"
   },
   "keywords": [
     "claude",
@@ -88,7 +88,7 @@
     "url": "https://github.com/Unique-Divine/jiyuu/issues"
   },
   "engines": {
-    "node": ">=20.0.0"
+    "bun": ">=1.4.3"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.0",
@@ -120,5 +120,6 @@
   "overrides": {
     "ip-address": "^10.1.1"
   },
-  "private": true
+  "private": true,
+  "packageManager": "bun@1.4.3"
 }
