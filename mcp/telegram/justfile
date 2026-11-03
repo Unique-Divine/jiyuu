@@ -1,0 +1,16 @@
+# Install the locked Python environment and development tools.
+install:
+    uv sync --frozen --group dev
+
+# Run isolated regression tests without a Telegram connection.
+test:
+    uv run --frozen pytest -q
+
+# Check Python syntax and formatting.
+check:
+    uv run --frozen python -m compileall -q main.py sanitize.py session_string_generator.py telegram_mcp
+    uv run --frozen black --check main.py sanitize.py session_string_generator.py telegram_mcp tests
+
+# Launch Telegram MCP over stdio with private environment credentials.
+run:
+    uv run --frozen main.py

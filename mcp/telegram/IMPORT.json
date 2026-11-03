@@ -7,6 +7,9 @@
   "excludedSourceFiles": [
     ".github/workflows/docker-build.yml",
     ".github/workflows/python-lint-format.yml",
-    ".github/workflows/tests.yml"
-  ]
+    ".github/workflows/tests.yml",
+    "claude_desktop_config.json"
+  ],
+  "license": "Apache-2.0",
+  "localModifications": "Connection recovery, participant pagination and regression tests; Jiyuu documentation and source metadata."
 }

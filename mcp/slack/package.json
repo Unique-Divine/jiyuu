@@ -2,7 +2,7 @@
   "name": "@jtalk22/slack-mcp",
   "mcpName": "io.github.jtalk22/slack-mcp-server",
   "version": "4.4.3",
-  "description": "Slack MCP without OAuth \u2014 21 tools, session-based, local-first. Free OSS + hosted tier from $19/mo.",
+  "description": "Slack MCP server maintained in Jiyuu",
   "type": "module",
   "main": "src/server.js",
   "bin": {
@@ -80,11 +80,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/jtalk22/slack-mcp-server.git"
+    "url": "git+https://github.com/Unique-Divine/jiyuu.git",
+    "directory": "mcp/slack"
   },
-  "homepage": "https://mcp.revasserlabs.com",
+  "homepage": "https://github.com/Unique-Divine/jiyuu/tree/main/mcp/slack",
   "bugs": {
-    "url": "https://github.com/jtalk22/slack-mcp-server/issues"
+    "url": "https://github.com/Unique-Divine/jiyuu/issues"
   },
   "engines": {
     "node": ">=20.0.0"
@@ -118,5 +119,6 @@
   },
   "overrides": {
     "ip-address": "^10.1.1"
-  }
+  },
+  "private": true
 }

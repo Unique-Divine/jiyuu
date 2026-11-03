@@ -1,3 +1,4 @@
+# Modified by Unique Divine in 2026: Jiyuu source installation metadata.
 [build-system]
 requires = ["setuptools>=42", "wheel"]
 build-backend = "setuptools.build_meta"
@@ -5,12 +6,13 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "telegram-mcp"
 version = "2.0.1"
-description = "Telegram integration for Claude via the Model Context Protocol"
+description = "Telegram MCP server maintained in Jiyuu"
 readme = "README.md"
 authors = [
     {name = "chigwell"},
     {name = "l1v0n1"}
 ]
+maintainers = [{name = "Unique Divine"}]
 license = {text = "Apache-2.0"}
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -40,8 +42,9 @@ proxy = [
 ]
 
 [project.urls]
-"Homepage" = "https://github.com/chigwell/telegram-mcp"
-"Bug Tracker" = "https://github.com/chigwell/telegram-mcp/issues"
+"Homepage" = "https://github.com/Unique-Divine/jiyuu/tree/main/mcp/telegram"
+"Bug Tracker" = "https://github.com/Unique-Divine/jiyuu/issues"
+"Upstream" = "https://github.com/chigwell/telegram-mcp"
 
 [tool.setuptools]
 py-modules = ["main", "sanitize", "session_string_generator"]

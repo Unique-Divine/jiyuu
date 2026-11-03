@@ -1,0 +1,19 @@
+# Install the locked JavaScript dependencies.
+install:
+    bun install --frozen-lockfile
+
+# Link the existing Slack MCP command names to this checkout.
+link:
+    bun link
+
+# Run the existing JavaScript tests with Bun.
+test:
+    bun test ./test
+
+# Validate entrypoint imports and syntax in an ignored build cache.
+check:
+    bun build --target node --packages external ./src/cli.js ./src/server.js ./src/server-http.js ./src/web-server.js --outdir ./node_modules/.cache/mcp-check
+
+# Launch the existing stdio server without changing its tool surface.
+run:
+    bun ./src/cli.js

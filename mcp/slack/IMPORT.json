@@ -34,5 +34,7 @@
     ".github/workflows/live-browser-smoke.yml",
     ".github/workflows/publish.yml",
     "CLAUDE.md"
-  ]
+  ],
+  "license": "MIT",
+  "localModifications": "Jiyuu documentation and source metadata; package publishing disabled. Runtime and hosted-service features preserved."
 }
