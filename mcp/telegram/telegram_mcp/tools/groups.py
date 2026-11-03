@@ -1,3 +1,4 @@
+# Modified by Unique Divine in 2026: connection recovery and participant pagination fixes.
 """Groups MCP tools."""
 
 from telegram_mcp.runtime import *
@@ -243,12 +244,15 @@ async def get_participants(
         cl = get_client(account)
         await ensure_connected(cl)
 
-        # Use iter_participants with offset to fetch only the needed slice,
-        # avoiding O(N) fetching on later pages.
+        # Telethon's iter_participants has no offset argument. Bound the iterator
+        # to the end of the requested page and skip earlier entries locally.
         offset = (page - 1) * page_size
         participants = []
-        async for participant in cl.iter_participants(chat_id, limit=page_size, offset=offset):
-            participants.append(participant)
+        seen = 0
+        async for participant in cl.iter_participants(chat_id, limit=offset + page_size):
+            if seen >= offset:
+                participants.append(participant)
+            seen += 1
 
         if not participants:
             return format_tool_result([])

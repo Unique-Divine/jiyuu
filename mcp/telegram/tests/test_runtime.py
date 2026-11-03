@@ -1,3 +1,4 @@
+# Modified by Unique Divine in 2026: connection recovery and participant pagination fixes.
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -346,13 +347,62 @@ class _ConnectivityClient:
 
 @pytest.mark.asyncio
 async def test_ensure_connected_reconnects_disconnected_client(monkeypatch):
-    client = _ConnectivityClient(connected=False, authorized=False)
+    client = _ConnectivityClient(connected=False, authorized=True)
     monkeypatch.setattr(runtime, "_last_conn_verified", {})
 
     await runtime.ensure_connected(client)
 
-    assert client.calls == ["is_connected", "disconnect", "connect", "is_user_authorized", "start"]
+    assert client.calls == ["is_connected", "disconnect", "connect", "is_user_authorized"]
     assert runtime._last_conn_verified[id(client)] > 0
+
+
+@pytest.mark.asyncio
+async def test_reconnect_never_prompts_for_interactive_login(monkeypatch):
+    client = _ConnectivityClient(connected=False, authorized=False)
+    monkeypatch.setattr(runtime, "_last_conn_verified", {})
+
+    with pytest.raises(RuntimeError, match="Interactive login is disabled"):
+        await runtime.ensure_connected(client)
+
+    assert "start" not in client.calls
+    assert id(client) not in runtime._last_conn_verified
+
+
+@pytest.mark.asyncio
+async def test_profile_lookup_recovers_stale_transport_once(monkeypatch):
+    class Client(_ConnectivityClient):
+        async def get_me(self):
+            self.calls.append("get_me")
+            if self.calls.count("get_me") == 1:
+                raise ConnectionError("stale transport")
+            return SimpleNamespace(id=123)
+
+    client = Client()
+    monkeypatch.setattr(runtime, "_last_conn_verified", {id(client): runtime.time.time()})
+
+    me = await runtime.read_account_profile(client)
+
+    assert me.id == 123
+    assert client.calls.count("get_me") == 2
+    assert client.calls.count("connect") == 1
+
+
+@pytest.mark.asyncio
+async def test_profile_lookup_times_out_after_one_read_only_retry(monkeypatch):
+    class Client(_ConnectivityClient):
+        async def get_me(self):
+            self.calls.append("get_me")
+            await runtime.asyncio.Event().wait()
+
+    client = Client()
+    monkeypatch.setattr(runtime, "_PROFILE_READ_TIMEOUT", 0.01)
+    monkeypatch.setattr(runtime, "_last_conn_verified", {id(client): runtime.time.time()})
+
+    with pytest.raises(runtime.asyncio.TimeoutError):
+        await runtime.asyncio.wait_for(runtime.read_account_profile(client), timeout=1)
+
+    assert client.calls.count("get_me") == 2
+    assert client.calls.count("connect") == 1
 
 
 @pytest.mark.asyncio

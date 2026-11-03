@@ -1,3 +1,4 @@
+# Modified by Unique Divine in 2026: connection recovery and participant pagination fixes.
 import argparse
 import os
 import sys
@@ -389,6 +390,7 @@ def with_account(readonly=False):
 
 _last_conn_verified: dict[int, float] = {}
 _CONN_VERIFY_INTERVAL: float = 30.0  # seconds between live pings
+_PROFILE_READ_TIMEOUT: float = 10.0
 
 
 async def _force_reconnect(cl: TelegramClient):
@@ -396,13 +398,15 @@ async def _force_reconnect(cl: TelegramClient):
     reconnect_logger = logging.getLogger("telegram_mcp")
     reconnect_logger.warning("Forcing reconnect...")
     try:
-        await cl.disconnect()
+        await asyncio.wait_for(cl.disconnect(), timeout=3.0)
     except Exception:
         pass
-    await cl.connect()
-    if not await cl.is_user_authorized():
-        reconnect_logger.warning("Client not authorized after reconnect, calling start()...")
-        await cl.start()
+    await asyncio.wait_for(cl.connect(), timeout=10.0)
+    if not await asyncio.wait_for(cl.is_user_authorized(), timeout=5.0):
+        raise RuntimeError(
+            "Telegram session is not authorized. Interactive login is disabled for MCP; "
+            "regenerate the session outside the server and reconnect the MCP client."
+        )
     _last_conn_verified[id(cl)] = time.time()
     reconnect_logger.warning("Forced reconnect successful")
 
@@ -440,6 +444,16 @@ async def ensure_connected(cl: TelegramClient = None):
         _last_conn_verified[key] = now
     except (ConnectionError, OSError, asyncio.TimeoutError, Exception):
         await _force_reconnect(cl)
+
+
+async def read_account_profile(cl: TelegramClient):
+    """Recover a stale connection once and bound this read-only profile lookup."""
+    await ensure_connected(cl)
+    try:
+        return await asyncio.wait_for(cl.get_me(), timeout=_PROFILE_READ_TIMEOUT)
+    except (ConnectionError, OSError, asyncio.TimeoutError):
+        await _force_reconnect(cl)
+        return await asyncio.wait_for(cl.get_me(), timeout=_PROFILE_READ_TIMEOUT)
 
 
 # Setup robust logging with both file and console output

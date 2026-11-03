@@ -1,3 +1,4 @@
+# Modified by Unique Divine in 2026: connection recovery and participant pagination fixes.
 """Accounts MCP tools."""
 
 from telegram_mcp.runtime import *
@@ -13,7 +14,7 @@ async def list_accounts() -> str:
     lines = []
     for label, cl in clients.items():
         try:
-            me = await cl.get_me()
+            me = await asyncio.wait_for(read_account_profile(cl), timeout=30.0)
             raw_name = f"{me.first_name or ''} {me.last_name or ''}".strip() or "Unknown"
             name = sanitize_name(raw_name)
             phone = me.phone or "N/A"

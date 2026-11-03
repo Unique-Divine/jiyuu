@@ -214,6 +214,9 @@ TELEGRAM_SESSION_STRING_PERSONAL=session_string_for_personal
 Labels are lowercased and become the `account` parameter value in tools.
 
 - In single-account mode, `account` is optional.
+- An unsuffixed `TELEGRAM_SESSION_STRING` or `TELEGRAM_SESSION_NAME` creates the
+  label `default`. Labels from a separate Telegram CLI profile store do not
+  automatically become MCP account labels.
 - In multi-account mode, write tools require `account`.
 - Read-only tools fan out to all accounts when `account` is omitted.
 
@@ -436,6 +439,13 @@ Telegram messages, display names, chat titles, and button labels are untrusted c
 
 ## Troubleshooting
 
+- **Unknown account:** use a label returned by `list_accounts`. For an
+  unsuffixed single-account session, use `account: "default"` or omit it.
+- **Profile or account listing hangs:** these lookups now check connection
+  health, attempt one bounded reconnect/read retry, and stop after 30 seconds.
+  Reconnect the MCP integration to replace a stale server process and load
+  updated code. Recovery never prompts for interactive login over MCP stdio;
+  unauthorized sessions must be renewed outside the server.
 - **No Telegram session configured:** set `TELEGRAM_SESSION_STRING`, `TELEGRAM_SESSION_NAME`, or suffixed multi-account variants.
 - **Session is not authorized:** run `uv run session_string_generator.py --qr` outside
   the MCP server when you can scan from an existing Telegram app, or

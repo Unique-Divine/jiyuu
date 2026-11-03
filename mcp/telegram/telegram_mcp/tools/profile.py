@@ -1,3 +1,4 @@
+# Modified by Unique Divine in 2026: connection recovery and participant pagination fixes.
 """Profile MCP tools."""
 
 from telegram_mcp.runtime import *
@@ -11,8 +12,7 @@ async def get_me(account: str = None) -> str:
     """
     try:
         cl = get_client(account)
-        await ensure_connected(cl)
-        me = await cl.get_me()
+        me = await asyncio.wait_for(read_account_profile(cl), timeout=30.0)
         return json.dumps(format_entity(me), indent=2)
     except Exception as e:
         return log_and_format_error("get_me", e)
