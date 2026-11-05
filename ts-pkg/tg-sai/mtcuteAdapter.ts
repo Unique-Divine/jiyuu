@@ -1,4 +1,5 @@
 import { TelegramClient } from "@mtcute/bun"
+import { createTelegramCryptoProvider } from "./telegramRuntime"
 import {
   addChatMembers,
   editAdminRights,
@@ -89,17 +90,25 @@ function isPeerNotFound(error: unknown): boolean {
   )
 }
 
+/** Shared constructor used by offline readiness and authenticated operations. */
+export function createMtcuteRuntimeClient(
+  config: Omit<MtcuteClientConfig, "session">,
+): TelegramClient {
+  return new TelegramClient({
+    crypto: createTelegramCryptoProvider(),
+    apiId: config.apiId,
+    apiHash: config.apiHash,
+    storage: config.storage ?? "sai-telegram-admin-check.session",
+  })
+}
+
 /**
  * Creates and authenticates a mtcute client from a Telethon session string.
  */
 export async function createMtcuteClient(
   config: MtcuteClientConfig,
 ): Promise<TelegramClient> {
-  const client = new TelegramClient({
-    apiId: config.apiId,
-    apiHash: config.apiHash,
-    storage: config.storage ?? "sai-telegram-admin-check.session",
-  })
+  const client = createMtcuteRuntimeClient(config)
 
   await client.importSession(convertFromTelethonSession(config.session), true)
   return client

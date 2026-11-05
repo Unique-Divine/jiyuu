@@ -26,6 +26,7 @@ import type {
 import { planAdminBootstrap } from "./adminAudit"
 import { saiBot, USERS } from "./cfg"
 import { runHealthCheck } from "./health"
+import { addRuntimeHealthCommands } from "./runtimeHealthCli"
 import {
   addTargetToChat,
   createMtcuteClient,
@@ -1453,12 +1454,7 @@ export function createProgram(): Command {
     program.help({ error: false })
   })
 
-  program
-    .command("health")
-    .description("Read-only preflight for the local tg-sai setup")
-    .action(async () => {
-      await runHealth()
-    })
+  addRuntimeHealthCommands(program, runHealth)
 
   program
     .command("audit")
