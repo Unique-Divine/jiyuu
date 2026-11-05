@@ -422,3 +422,35 @@ fixed team defaults must verify the expected numeric ID before any invitation.
 The source bot configuration starts with admission in `observe` mode. Check
 `~/ki/boku/epics/comms/telegram-bot.md` and its dated rollout evidence for
 the actual deployed state before testing bot commands.
+
+
+## Runtime Health and Deployment Readiness
+
+`tg-sai health` now defaults to offline runtime checks. It verifies both bundled
+WASM assets, crypto and compression operations, and actual Telegram client
+preparation with a temporary SQLite store. It does not read profiles or contact
+Telegram. `--json` provides a machine-readable result and failures exit nonzero.
+
+```sh
+tg-sai health --offline --json
+tg-sai health --online --custody-profile SaiTeam_AI --json
+```
+
+Online mode additionally strict-loads custody user `8274304175`, acquires the
+same account lock used by provisioning, and performs bounded `getMe` validation.
+It cannot fall back to a personal account and does not create or modify chats.
+An account-lock conflict fails the check; run it while the worker is stopped or
+idle. The earlier active-profile/workstation diagnostics remain available with
+`tg-sai health --local` and are separate from custody-worker readiness.
+
+The deployed executable includes a worker command and the same health commands.
+A release candidate must pass offline health as the worker Unix user before
+installation selects it. The worker systemd unit runs offline and online checks
+before starting the queue loop. A service being alive, `--help`, or an empty
+queue preview does not prove Telegram client initialization.
+
+From the Boku Deal Desk source directory, `just bot-health` checks the deployed
+runtime under its service sandbox. `just bot-health --online` also validates
+custody identity. These are operator probes, not the API's `/health` endpoint.
+That endpoint reports API health and whether bot ingress is configured; it does
+not certify Telegram custody readiness.
