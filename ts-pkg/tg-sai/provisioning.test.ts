@@ -152,6 +152,72 @@ describe("custody provisioning", () => {
       String(f.setup.chatId),
     )
   })
+  test("privacy-blocked optional member remains pending with a controlled link while required admins verify", async () => {
+    const f = fixture()
+    f.setup = { ...f.setup, optionalParticipants: ["alice"] }
+    const add = f.telegram.add
+    f.telegram.add = async (chat, id) => {
+      if (id === 21) throw { text: "USER_PRIVACY_RESTRICTED" }
+      return add(chat, id)
+    }
+    let links = 0
+    f.telegram.inviteLink = async () => {
+      links++
+      return {
+        inviteLink: "https://t.me/+fixtureLink",
+        expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+      }
+    }
+    const result = await f.run()
+    expect(result.state).toBe("ready")
+    expect(links).toBe(1)
+    const receipt = f.setup.receipt as {
+      pendingInvitations: { userId: string }[]
+      participants: { userId: string; role: string }[]
+    }
+    expect(receipt.pendingInvitations[0]?.userId).toBe("21")
+    expect(
+      receipt.participants.find((member) => member.userId === "21")?.role,
+    ).toBe("absent")
+    expect(f.members.get(22)?.role).toBe("admin")
+    expect(f.events.filter((event) => event === "create")).toHaveLength(1)
+  })
+  test("optional invitation never masks a flood wait or failed required admin", async () => {
+    for (const error of [
+      { text: "FLOOD_WAIT_30", code: 420 },
+      { text: "USER_PRIVACY_RESTRICTED" },
+    ]) {
+      const f = fixture()
+      f.setup = { ...f.setup, optionalParticipants: ["alice"] }
+      f.telegram.add = async (_chat, id) => {
+        if (id === 22) throw error
+        f.members.set(id, { role: "member", rights: {} })
+      }
+      f.telegram.inviteLink = async () => {
+        throw new Error("must not create a link for required admin")
+      }
+      await expect(f.run()).rejects.toThrow("Setup incomplete")
+      expect(f.setup.state).toBe("incomplete")
+      expect(f.setup.chatId).toBe(-100123)
+      if (error.text === "FLOOD_WAIT_30")
+        expect(Date.parse(f.setup.retryAt!)).toBeGreaterThan(Date.now())
+    }
+  })
+  test("ready setup rechecks live custody owner and bot/admin rights", async () => {
+    const f = fixture()
+    await f.run()
+    f.members.set(PROVISIONING_BOT_ID, { role: "member", rights: {} })
+    await expect(f.run()).rejects.toThrow("rights changed")
+    expect(f.events.filter((event) => event === "create")).toHaveLength(1)
+  })
+  test("optional participants cannot include admins or arbitrary outsiders", () => {
+    expect(() =>
+      validateRequest({ ...request(), optionalParticipants: [22] }),
+    ).toThrow("Optional participants")
+    expect(() =>
+      validateRequest({ ...request(), optionalParticipants: [99] }),
+    ).toThrow("Optional participants")
+  })
   test("stale prepared claim replay cannot recreate a group after authoritative creation", async () => {
     const f = fixture()
     const original = { ...f.setup, claimToken: "claim" }
@@ -378,6 +444,44 @@ describe("account and cloud boundaries", () => {
       })
       await withAccountLock(one.lock, async () => {})
     } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+  test("kernel custody lock is released after an executor process is killed", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tg-provision-crash-"))
+    const lock = accountPaths(root, 10).lock
+    const script = `import {withAccountLock} from ${JSON.stringify(join(import.meta.dir, "provisioningRuntime.ts"))}; await withAccountLock(${JSON.stringify(lock)}, async()=>{console.log("held"); await new Promise(()=>{})})`
+    const child = Bun.spawn([process.execPath, "-e", script], {
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+    try {
+      const reader = child.stdout.getReader()
+      const first = await reader.read()
+      reader.releaseLock()
+      expect(new TextDecoder().decode(first.value).trim()).toBe("held")
+      await expect(withAccountLock(lock, async () => {})).rejects.toThrow(
+        "locked",
+      )
+      child.kill("SIGKILL")
+      await child.exited
+      // The guard subprocess observes stdin EOF after the parent dies.
+      let acquired = false
+      for (let i = 0; i < 30 && !acquired; i++) {
+        try {
+          await withAccountLock(lock, async () => {
+            acquired = true
+          })
+        } catch {
+          await new Promise((resolve) => setTimeout(resolve, 10))
+        }
+      }
+      expect(acquired).toBe(true)
+    } finally {
+      if (child.exitCode === null) {
+        child.kill("SIGKILL")
+        await child.exited
+      }
       await rm(root, { recursive: true, force: true })
     }
   })

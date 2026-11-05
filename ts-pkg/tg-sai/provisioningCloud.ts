@@ -11,6 +11,7 @@ export type CloudOperation =
   | "prepare"
   | "view"
   | "list"
+  | "pending"
   | "claim"
   | "progress"
   | "resolve"
@@ -31,6 +32,9 @@ export function cloudRequest(
     dealIds: request.dealIds,
     expectedUserId: String(request.expectedUserId),
     participants: request.participants.map(String),
+    ...(request.optionalParticipants === undefined
+      ? {}
+      : { optionalParticipants: request.optionalParticipants.map(String) }),
     admins: request.admins.map((admin) => ({
       userId: String(admin.userId),
       rightsProfile: admin.rightsProfile,
@@ -65,6 +69,13 @@ export function setupFromCloud(raw: unknown): Setup {
     setup.binding = {
       participants: value.resolvedParticipants.map(numericId),
       admins: value.resolvedAdmins.map(numericId),
+      ...(value.resolvedOptionalParticipants == null
+        ? {}
+        : {
+            optionalParticipants: (
+              value.resolvedOptionalParticipants as unknown[]
+            ).map(numericId),
+          }),
     }
   }
   validateRequest(setup)
@@ -84,6 +95,23 @@ export function setupFromCloud(raw: unknown): Setup {
 }
 export class CliProvisionCloud implements ProvisionCloud {
   constructor(private call: CloudCall = callDealDesk) {}
+  async pending(input: {
+    expectedUserId: number
+    workerId: string
+    limit: number
+    after?: string
+  }): Promise<{ requests: Setup[]; nextAfter: string | null }> {
+    const raw = (await this.call("pending", {
+      ...input,
+      expectedUserId: String(input.expectedUserId),
+    })) as { requests: unknown[]; nextAfter?: string | null }
+    if (!Array.isArray(raw?.requests))
+      throw new Error("Cloud returned invalid pending queue")
+    return {
+      requests: raw.requests.map(setupFromCloud),
+      nextAfter: raw.nextAfter ?? null,
+    }
+  }
   async prepare(request: ProvisionRequest): Promise<Setup> {
     return setupFromCloud(await this.call("prepare", cloudRequest(request)))
   }
@@ -111,6 +139,12 @@ export class CliProvisionCloud implements ProvisionCloud {
           ? {
               resolvedParticipants: binding.participants.map(String),
               resolvedAdmins: binding.admins.map(String),
+              ...(binding.optionalParticipants === undefined
+                ? {}
+                : {
+                    resolvedOptionalParticipants:
+                      binding.optionalParticipants.map(String),
+                  }),
             }
           : {}),
       }),
@@ -134,7 +168,7 @@ export async function callDealDesk(
 ): Promise<unknown> {
   const key = `tg-provision:${createHash("sha256").update(JSON.stringify({ operation, input })).digest("hex")}`
   const command = ["sai-deal-desk", "chat-setups", operation, "--json-stdin"]
-  if (operation !== "view" && operation !== "list")
+  if (operation !== "view" && operation !== "list" && operation !== "pending")
     command.push("--request-key", key)
   const child = Bun.spawn(command, {
     stdin: "pipe",

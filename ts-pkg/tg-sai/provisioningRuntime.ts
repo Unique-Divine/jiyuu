@@ -3,6 +3,7 @@ import { mkdir, open, readFile, rename, rm } from "node:fs/promises"
 import { dirname, isAbsolute, join, resolve } from "node:path"
 import {
   addChatMembers,
+  createInviteLink,
   createSupergroup,
   getChatMember,
   iterDialogs,
@@ -39,23 +40,39 @@ export async function withAccountLock<T>(
   if (!isAbsolute(lockPath))
     throw new Error("Absolute account lock path required")
   await mkdir(dirname(lockPath), { recursive: true, mode: 0o700 })
-  let lock
-  try {
-    lock = await open(lockPath, "wx", 0o600)
-  } catch {
-    throw new Error(
-      "Custody account is locked; inspect the worker lock before retrying",
-    )
+  // The kernel releases flock when this process dies. Persistent lock metadata
+  // never authorizes deleting a live executor's lock or retrying group creation.
+  if (!Bun.which("flock"))
+    throw new Error("Custody worker requires the Linux flock utility")
+  const guard = Bun.spawn(
+    [
+      "flock",
+      "--exclusive",
+      "--nonblock",
+      lockPath,
+      "sh",
+      "-c",
+      "printf 'locked\\n'; cat >/dev/null",
+    ],
+    {
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  )
+  const reader = guard.stdout.getReader()
+  const first = await reader.read()
+  reader.releaseLock()
+  if (first.done || new TextDecoder().decode(first.value).trim() !== "locked") {
+    guard.stdin.end()
+    await guard.exited
+    throw new Error("Custody account is locked; another executor is active")
   }
   try {
-    await lock.writeFile(
-      JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }),
-    )
-    await lock.sync()
     return await operation()
   } finally {
-    await lock.close()
-    await rm(lockPath, { force: true })
+    guard.stdin.end()
+    await guard.exited
   }
 }
 
@@ -183,9 +200,30 @@ export async function withProvisionTelegram<T>(
             forwardCount: 0,
           })
           if (missing.length)
+            throw Object.assign(new Error("Participant privacy restriction"), {
+              text: "USER_PRIVACY_RESTRICTED",
+            })
+        },
+        inviteLink: async (chatId) => {
+          const expires = new Date(Date.now() + 24 * 60 * 60 * 1000)
+          const link = await createInviteLink(client, chatId, {
+            expires,
+            withApproval: true,
+          })
+          if (
+            !link.isMyLink ||
+            link.isRevoked ||
+            !link.approvalNeeded ||
+            !link.endDate
+          ) {
             throw new Error(
-              "Participant privacy restrictions prevented invitation",
+              "Controlled invitation properties were not confirmed",
             )
+          }
+          return {
+            inviteLink: link.link,
+            expiresAt: link.endDate.toISOString(),
+          }
         },
         promote: async (chatId, userId, rights) =>
           promoteTargetAdmin(client, { chatId, targetPeer: userId, rights }),

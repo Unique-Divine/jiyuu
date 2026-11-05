@@ -8,6 +8,7 @@ export interface ProvisionRequest {
   expectedUserId: number
   title: string
   participants: Peer[]
+  optionalParticipants?: Peer[]
   admins: { userId: Peer; rightsProfile: "team" }[]
   botRightsProfile: "baseline"
   dealIds: string[]
@@ -23,6 +24,7 @@ export type ProvisionState =
 export interface Binding {
   participants: number[]
   admins: number[]
+  optionalParticipants?: number[]
 }
 export interface Setup extends ProvisionRequest {
   state: ProvisionState
@@ -30,6 +32,7 @@ export interface Setup extends ProvisionRequest {
   binding?: Binding
   claimToken?: string
   receipt?: unknown
+  retryAt?: string | null
 }
 export interface Member {
   role: "creator" | "admin" | "member" | "absent"
@@ -41,6 +44,10 @@ export interface TelegramProvisioner {
   create(title: string, marker: string): Promise<number>
   member(chatId: number, userId: number): Promise<Member>
   add(chatId: number, userId: number): Promise<void>
+  inviteLink?(
+    chatId: number,
+    userId: number,
+  ): Promise<{ inviteLink: string; expiresAt: string }>
   promote(
     chatId: number,
     userId: number,
@@ -56,6 +63,7 @@ export interface Progress {
   receipt?: unknown
   error?: string
   creationRejected?: boolean
+  retryAt?: string | null
 }
 export interface ProvisionCloud {
   view(requestId: string): Promise<Setup>
@@ -73,6 +81,13 @@ export interface JournalRecord {
   chatId?: number
   binding?: Binding
   workerId?: string
+  pendingInvitations?: PendingInvitation[]
+}
+export interface PendingInvitation {
+  userId: string
+  inviteLink: string
+  expiresAt: string
+  reason: string
 }
 export interface ProvisionJournal {
   read(requestId: string): Promise<JournalRecord | null>
@@ -153,6 +168,21 @@ export function validateRequest(value: ProvisionRequest): ProvisionRequest {
     )
       throw new Error(`Invalid ${key}`)
   }
+  if (
+    value.optionalParticipants !== undefined &&
+    (!Array.isArray(value.optionalParticipants) ||
+      value.optionalParticipants.length > 100 ||
+      new Set(value.optionalParticipants.map(String)).size !==
+        value.optionalParticipants.length ||
+      value.optionalParticipants.some(
+        (peer) =>
+          !value.participants.some((p) => String(p) === String(peer)) ||
+          value.admins.some((a) => String(a.userId) === String(peer)),
+      ))
+  )
+    throw new Error(
+      "Optional participants must be distinct ordinary requested members",
+    )
   if (value.botRightsProfile !== "baseline")
     throw new Error("Unknown botRightsProfile; use baseline")
   if (
@@ -174,6 +204,9 @@ export function requestFingerprint(request: ProvisionRequest): string {
         expectedUserId: value.expectedUserId,
         title: value.title,
         participants: value.participants,
+        ...(value.optionalParticipants === undefined
+          ? {}
+          : { optionalParticipants: value.optionalParticipants }),
         admins: value.admins,
         botRightsProfile: value.botRightsProfile,
         dealIds: value.dealIds,
@@ -196,6 +229,14 @@ function validBinding(binding: Binding, ownerId: number): boolean {
         id !== ownerId,
     ) &&
     binding.admins.every((id) => binding.participants.includes(id)) &&
+    (binding.optionalParticipants === undefined ||
+      (Array.isArray(binding.optionalParticipants) &&
+        binding.optionalParticipants.every(
+          (id) =>
+            binding.participants.includes(id) && !binding.admins.includes(id),
+        ) &&
+        new Set(binding.optionalParticipants).size ===
+          binding.optionalParticipants.length)) &&
     new Set(binding.participants).size === binding.participants.length &&
     new Set(binding.admins).size === binding.admins.length
   )
@@ -231,7 +272,17 @@ export async function bindRequest(
   }
   const admins = request.admins.map((admin) => ids.get(admin.userId)!)
   const participants = request.participants.map((peer) => ids.get(peer)!)
-  const binding = { participants, admins }
+  const binding = {
+    participants,
+    admins,
+    ...(request.optionalParticipants === undefined
+      ? {}
+      : {
+          optionalParticipants: request.optionalParticipants.map(
+            (peer) => ids.get(peer)!,
+          ),
+        }),
+  }
   if (!validBinding(binding, request.expectedUserId))
     throw new Error("Invalid account binding")
   return binding
@@ -263,6 +314,29 @@ export function safeProvisionError(error: unknown): string {
     : "provisioning_step_failed"
 }
 
+export function isPrivacyRestriction(error: unknown): boolean {
+  const e = error as { text?: string; errorMessage?: string; code?: number }
+  return [e?.text, e?.errorMessage].some(
+    (value) =>
+      typeof value === "string" &&
+      /^(USER_PRIVACY_RESTRICTED|USER_NOT_MUTUAL_CONTACT|USER_NOT_MUTUAL_CONTACTS)$/.test(
+        value,
+      ),
+  )
+}
+export function provisionRetryAt(
+  error: unknown,
+  now = Date.now(),
+): string | null {
+  const e = error as { text?: string; errorMessage?: string; seconds?: number }
+  const code = e?.text ?? e?.errorMessage ?? ""
+  const match = /^FLOOD_WAIT_(\d+|%d)$/.exec(code)
+  const seconds = match ? Number(match[1] === "%d" ? e.seconds : match[1]) : NaN
+  return Number.isSafeInteger(seconds) && seconds > 0 && seconds <= 31_536_000
+    ? new Date(now + seconds * 1000).toISOString()
+    : null
+}
+
 /** The cloud is authoritative. The journal only recovers a result not yet acknowledged by cloud. */
 export async function provisionSetup(params: {
   setup: Setup
@@ -280,7 +354,25 @@ export async function provisionSetup(params: {
   const local = await journal.read(setup.requestId)
   if (local && local.fingerprint !== fingerprint)
     throw new Error("Local receipt fingerprint conflicts with cloud request")
-  if (setup.state === "ready") return setup
+  if (setup.state === "ready") {
+    if (
+      !setup.chatId ||
+      !(await telegram.verifyMarker(setup.chatId, creationMarker(setup)))
+    )
+      throw new Error("Ready setup owner or marker changed")
+    const owner = await telegram.member(setup.chatId, setup.expectedUserId)
+    const bot = await telegram.member(setup.chatId, PROVISIONING_BOT_ID)
+    if (owner.role !== "creator" || !hasRights(bot, BOT_BASELINE_RIGHTS))
+      throw new Error("Ready setup rights changed")
+    if (setup.binding)
+      for (const id of setup.binding.admins)
+        if (
+          !hasRights(await telegram.member(setup.chatId, id), TEAM_ADMIN_RIGHTS)
+        )
+          throw new Error("Ready setup admin rights changed")
+    return setup
+  }
+  let pendingInvitations = local?.pendingInvitations ?? []
   const workerId = local?.workerId ?? params.workerId
   if (
     !setup.chatId &&
@@ -315,6 +407,7 @@ export async function provisionSetup(params: {
     chatId: setup.chatId,
     binding: setup.binding,
     workerId,
+    pendingInvitations,
   })
   const claimed = await cloud.claim(setup.requestId, workerId)
   if (requestFingerprint(claimed) !== fingerprint || !claimed.claimToken)
@@ -349,6 +442,7 @@ export async function provisionSetup(params: {
       chatId: progress.chatId ?? setup.chatId,
       binding: progress.binding ?? setup.binding,
       workerId,
+      pendingInvitations,
     })
     setup = {
       ...(await cloud.progress(setup.requestId, claimToken, progress)),
@@ -387,6 +481,7 @@ export async function provisionSetup(params: {
         binding,
         error: safeProvisionError(error),
         ...(rejected ? { creationRejected: true } : {}),
+        retryAt: provisionRetryAt(error),
       })
       throw new Error(
         "Group creation failed; inspect authoritative setup state before resuming",
@@ -399,6 +494,7 @@ export async function provisionSetup(params: {
       chatId,
       binding,
       workerId,
+      pendingInvitations,
     })
     await save({ state: "configuring", chatId, binding })
   }
@@ -409,9 +505,49 @@ export async function provisionSetup(params: {
     await save({ state: "configuring", chatId, binding })
     for (const userId of [...binding.participants, PROVISIONING_BOT_ID]) {
       const member = await telegram.member(chatId, userId)
-      if (member.role === "absent") await telegram.add(chatId, userId)
-      if ((await telegram.member(chatId, userId)).role === "absent")
-        throw new Error("Participant invitation incomplete")
+      if (member.role !== "absent") {
+        pendingInvitations = pendingInvitations.filter(
+          (invite) => invite.userId !== String(userId),
+        )
+        continue
+      }
+      try {
+        await telegram.add(chatId, userId)
+        if ((await telegram.member(chatId, userId)).role === "absent")
+          throw new Error("Participant invitation incomplete")
+      } catch (error) {
+        if (
+          !binding.optionalParticipants?.includes(userId) ||
+          !isPrivacyRestriction(error) ||
+          !telegram.inviteLink
+        )
+          throw error
+        let invite = pendingInvitations.find(
+          (i) =>
+            i.userId === String(userId) && Date.parse(i.expiresAt) > Date.now(),
+        )
+        if (!invite) {
+          const link = await telegram.inviteLink(chatId, userId)
+          if (
+            !/^https:\/\/t\.me\/(?:\+|joinchat\/)[A-Za-z0-9_-]+$/.test(
+              link.inviteLink,
+            ) ||
+            !Number.isFinite(Date.parse(link.expiresAt)) ||
+            Date.parse(link.expiresAt) <= Date.now()
+          )
+            throw new Error("Invalid controlled invitation link")
+          invite = {
+            userId: String(userId),
+            ...link,
+            reason: "privacy_restricted",
+          }
+          pendingInvitations = [
+            ...pendingInvitations.filter((i) => i.userId !== invite!.userId),
+            invite,
+          ]
+          await save({ state: "configuring", chatId, binding })
+        }
+      }
     }
     for (const userId of binding.admins) {
       if (!hasRights(await telegram.member(chatId, userId), TEAM_ADMIN_RIGHTS))
@@ -437,7 +573,16 @@ export async function provisionSetup(params: {
       participants.some((member) =>
         binding.admins.includes(member.userId)
           ? !hasRights(member, TEAM_ADMIN_RIGHTS)
-          : member.role !== "member",
+          : member.role !== "member" &&
+            !(
+              binding.optionalParticipants?.includes(member.userId) &&
+              member.role === "absent" &&
+              pendingInvitations.some(
+                (invite) =>
+                  invite.userId === String(member.userId) &&
+                  Date.parse(invite.expiresAt) > Date.now(),
+              )
+            ),
       ) ||
       !hasRights(bot, BOT_BASELINE_RIGHTS)
     )
@@ -451,8 +596,9 @@ export async function provisionSetup(params: {
       })),
       bot: { ...bot, userId: String(PROVISIONING_BOT_ID) },
       verifiedAt: new Date().toISOString(),
+      ...(pendingInvitations.length ? { pendingInvitations } : {}),
     }
-    await save({ state: "ready", chatId, binding, receipt })
+    await save({ state: "ready", chatId, binding, receipt, retryAt: null })
     return setup
   } catch (error) {
     // Never discard known chat identity after partial setup or an ambiguous cloud commit.
@@ -463,6 +609,7 @@ export async function provisionSetup(params: {
       chatId,
       binding,
       error: safeProvisionError(error),
+      retryAt: provisionRetryAt(error),
     })
     throw new Error(
       "Setup incomplete; inspect status and resume the same request",

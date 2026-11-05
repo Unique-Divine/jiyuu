@@ -15,6 +15,7 @@ import { stdin as input, stdout as output } from "node:process"
 import { createInterface } from "node:readline/promises"
 import { Command } from "commander"
 import { addProvisionCommands } from "./provisioningCli"
+import { addCustodyWorkerCommands } from "./custodyWorkerCli"
 import type { BatchLogger } from "./actionExecutor"
 import { withFloodWaitRetry } from "./actionExecutor"
 import type {
@@ -1666,6 +1667,7 @@ If apiId/apiHash are missing, create a Telegram API app at:
     })
 
   addProvisionCommands(program)
+  addCustodyWorkerCommands(program)
   return program
 }
 
