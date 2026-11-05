@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test"
+import { describe, expect, setSystemTime, test } from "bun:test"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -131,6 +131,23 @@ function fixture() {
 }
 
 describe("custody provisioning", () => {
+  test("receipt verification time precedes completion link reads", async () => {
+    const f = fixture()
+    const auditTime = new Date("2026-11-05T05:00:00.000Z")
+    try {
+      setSystemTime(auditTime)
+      f.telegram.completionLinks = async () => {
+        setSystemTime(new Date(auditTime.getTime() + 10_000))
+        return {}
+      }
+      expect((await f.run()).state).toBe("ready")
+      expect((f.setup.receipt as { verifiedAt: string }).verifiedAt).toBe(
+        auditTime.toISOString(),
+      )
+    } finally {
+      setSystemTime()
+    }
+  })
   test("completion links are saved after verification and ready jobs are not rewritten", async () => {
     const f = fixture()
     let reads = 0

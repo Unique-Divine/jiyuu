@@ -637,6 +637,7 @@ export async function provisionSetup(params: {
       !hasRights(bot, BOT_BASELINE_RIGHTS)
     )
       throw new Error("Final membership or rights audit failed")
+    const verifiedAt = new Date().toISOString()
     // Link retrieval is presentation metadata, not a membership requirement.
     // Preserve readiness even when Telegram temporarily refuses these reads.
     const links = await telegram.completionLinks?.(chatId).catch(() => ({}))
@@ -648,7 +649,7 @@ export async function provisionSetup(params: {
         userId: String(member.userId),
       })),
       bot: { ...bot, userId: String(PROVISIONING_BOT_ID) },
-      verifiedAt: new Date().toISOString(),
+      verifiedAt,
       ...(pendingInvitations.length ? { pendingInvitations } : {}),
       ...links,
     }
