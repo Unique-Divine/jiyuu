@@ -419,6 +419,14 @@ blocked by privacy settings can remain pending with a 24-hour, approval-required
 invite link. A link does not mean the person joined. Handle-based resolution of
 fixed team defaults must verify the expected numeric ID before any invitation.
 
+New ready receipts include an `openGroupUrl` anchored to a message actually
+observed in the group and the existing `primaryInviteLink`, when available.
+These read-only lookups run together with a 10-second limit each. A missing link
+does not undo verified setup. Existing primary invitations are never rotated or
+created by this step, and privacy-blocked members keep their separate controlled
+invitations. The bot displays the saved links in its completion reply and
+`/chatstatus`. Completed requests are not rewritten to refresh missing links.
+
 The source bot configuration starts with admission in `observe` mode. Check
 `~/ki/boku/epics/comms/telegram-bot.md` and its dated rollout evidence for
 the actual deployed state before testing bot commands.

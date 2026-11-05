@@ -131,6 +131,41 @@ function fixture() {
 }
 
 describe("custody provisioning", () => {
+  test("completion links are saved after verification and ready jobs are not rewritten", async () => {
+    const f = fixture()
+    let reads = 0
+    f.telegram.completionLinks = async (chatId) => {
+      reads++
+      expect(chatId).toBe(Number(f.setup.chatId))
+      expect(f.members.get(22)?.role).toBe("admin")
+      return {
+        openGroupUrl: "https://t.me/c/123/47",
+        primaryInviteLink: "https://t.me/+fixturePrimary",
+      }
+    }
+    const first = await f.run()
+    expect(f.setup.receipt).toMatchObject({
+      openGroupUrl: "https://t.me/c/123/47",
+      primaryInviteLink: "https://t.me/+fixturePrimary",
+    })
+    const receipt = structuredClone(f.setup.receipt)
+    await f.run()
+    expect(f.setup.receipt).toEqual(receipt)
+    expect(reads).toBe(1)
+    expect(f.events.filter((event) => event === "create")).toHaveLength(1)
+  })
+  test("link failure does not fail verified setup or trigger another group", async () => {
+    const f = fixture()
+    f.telegram.completionLinks = async () => {
+      throw { text: "FLOOD_WAIT_500", code: 420 }
+    }
+    const first = await f.run()
+    expect(first.state).toBe("ready")
+    expect(f.setup.receipt).not.toHaveProperty("openGroupUrl")
+    expect(f.setup.receipt).not.toHaveProperty("primaryInviteLink")
+    expect((await f.run()).state).toBe("ready")
+    expect(f.events.filter((event) => event === "create")).toHaveLength(1)
+  })
   test("a creation retry after explicit flood rejection writes a new creating transition before Telegram", async () => {
     const f = fixture()
     f.setup = {

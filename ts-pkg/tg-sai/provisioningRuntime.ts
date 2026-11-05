@@ -7,6 +7,7 @@ import {
   createInviteLink,
   createSupergroup,
   getChatMember,
+  getPrimaryInviteLink,
   iterDialogs,
 } from "@mtcute/bun/methods.js"
 import { saiBot } from "./cfg"
@@ -18,8 +19,80 @@ import type {
   Member,
   ProvisionJournal,
   ProvisionRequest,
+  ProvisioningLinks,
   TelegramProvisioner,
 } from "./provisioning"
+
+interface PrimaryInvite {
+  link: string
+  isPrimary: boolean
+  isRevoked: boolean
+  isMyLink: boolean
+  endDate: Date | null
+}
+const COMPLETION_LINK_TIMEOUT_MS = 10_000
+
+/** Fetch completion links without creating invitations or sending messages. */
+export async function readProvisioningLinks(
+  chatId: number,
+  reader: {
+    history(
+      signal: AbortSignal,
+    ): Promise<readonly { id: number; chat: { id: number } }[]>
+    primaryInvite(signal: AbortSignal): Promise<PrimaryInvite>
+  },
+  timeoutMs = COMPLETION_LINK_TIMEOUT_MS,
+): Promise<ProvisioningLinks> {
+  // Bot API supergroup IDs encode the channel ID as -(10^12 + channel ID).
+  const channelId = -chatId - 1_000_000_000_000
+  if (!Number.isSafeInteger(chatId) || channelId <= 0) return {}
+  const bounded = async <T>(
+    read: (signal: AbortSignal) => Promise<T>,
+  ): Promise<T> => {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const controller = new AbortController()
+    try {
+      return await Promise.race([
+        Promise.resolve().then(() => read(controller.signal)),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            controller.abort()
+            reject(new Error("Completion link read timed out"))
+          }, timeoutMs)
+        }),
+      ])
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+  const [history, invite] = await Promise.allSettled([
+    bounded(reader.history),
+    bounded(reader.primaryInvite),
+  ])
+  const result: ProvisioningLinks = {}
+  if (history.status === "fulfilled") {
+    const message = history.value.find(
+      (value) =>
+        value.chat.id === chatId &&
+        Number.isSafeInteger(value.id) &&
+        value.id > 0 &&
+        value.id <= 2_147_483_647,
+    )
+    if (message) result.openGroupUrl = `https://t.me/c/${channelId}/${message.id}`
+  }
+  if (invite.status === "fulfilled") {
+    const link = invite.value
+    if (
+      link.isPrimary &&
+      link.isMyLink &&
+      !link.isRevoked &&
+      (!link.endDate || link.endDate.getTime() > Date.now()) &&
+      /^https:\/\/t\.me\/(?:\+|joinchat\/)[A-Za-z0-9_-]{5,128}$/.test(link.link)
+    )
+      result.primaryInviteLink = link.link
+  }
+  return result
+}
 
 // Fresh custody sessions do not have access hashes for numeric user IDs yet.
 // Handles discover the peer, but only the pinned numeric ID establishes identity.
@@ -222,6 +295,12 @@ export async function withProvisionTelegram<T>(
           chat.bio === marker
         )
       }
+      const linkClient = (abortSignal: AbortSignal) => client.withParams({
+        abortSignal,
+        timeout: COMPLETION_LINK_TIMEOUT_MS,
+        floodSleepThreshold: 0,
+        maxRetryCount: 0,
+      })
       const adapter: TelegramProvisioner = {
         self: async () => (await client.getMe()).id,
         resolve: (peer) =>
@@ -265,6 +344,13 @@ export async function withProvisionTelegram<T>(
             expiresAt: link.endDate.toISOString(),
           }
         },
+        completionLinks: (chatId) =>
+          readProvisioningLinks(chatId, {
+            history: (abortSignal) =>
+              linkClient(abortSignal).getHistory(chatId, { limit: 1 }),
+            primaryInvite: (abortSignal) =>
+              getPrimaryInviteLink(linkClient(abortSignal), chatId),
+          }),
         promote: async (chatId, userId, rights) =>
           promoteTargetAdmin(client, { chatId, targetPeer: userId, rights }),
         verifyMarker,

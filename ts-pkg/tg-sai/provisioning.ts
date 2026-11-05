@@ -38,6 +38,10 @@ export interface Member {
   role: "creator" | "admin" | "member" | "absent"
   rights: Record<string, boolean>
 }
+export interface ProvisioningLinks {
+  openGroupUrl?: string
+  primaryInviteLink?: string
+}
 export interface TelegramProvisioner {
   self(): Promise<number>
   resolve(peer: Peer): Promise<{ id: number; isBot: boolean }>
@@ -48,6 +52,8 @@ export interface TelegramProvisioner {
     chatId: number,
     userId: number,
   ): Promise<{ inviteLink: string; expiresAt: string }>
+  /** Read existing links only. Failure must not invalidate verified setup. */
+  completionLinks?(chatId: number): Promise<ProvisioningLinks>
   promote(
     chatId: number,
     userId: number,
@@ -631,6 +637,9 @@ export async function provisionSetup(params: {
       !hasRights(bot, BOT_BASELINE_RIGHTS)
     )
       throw new Error("Final membership or rights audit failed")
+    // Link retrieval is presentation metadata, not a membership requirement.
+    // Preserve readiness even when Telegram temporarily refuses these reads.
+    const links = await telegram.completionLinks?.(chatId).catch(() => ({}))
     const receipt = {
       chatId: String(chatId),
       ownerId: String(setup.expectedUserId),
@@ -641,6 +650,7 @@ export async function provisionSetup(params: {
       bot: { ...bot, userId: String(PROVISIONING_BOT_ID) },
       verifiedAt: new Date().toISOString(),
       ...(pendingInvitations.length ? { pendingInvitations } : {}),
+      ...links,
     }
     step = "save_ready"
     await save({ state: "ready", chatId, binding, receipt, retryAt: null })
