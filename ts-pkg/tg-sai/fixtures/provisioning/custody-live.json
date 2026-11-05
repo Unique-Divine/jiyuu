@@ -1,0 +1,128 @@
+{
+  "format": "tg-sai-provisioning-golden/v1",
+  "provenance": {
+    "kind": "live-readback",
+    "capturedAt": "2026-11-05T03:46:45.525Z"
+  },
+  "chat": {
+    "chatType": "supergroup",
+    "isForum": false,
+    "isCreator": true,
+    "markerMatches": true
+  },
+  "members": [
+    {
+      "subject": "custody",
+      "value": {
+        "status": "creator",
+        "isMember": true,
+        "permissions": {
+          "_": "chatAdminRights",
+          "changeInfo": true,
+          "postMessages": true,
+          "editMessages": true,
+          "deleteMessages": true,
+          "banUsers": true,
+          "inviteUsers": true,
+          "pinMessages": true,
+          "addAdmins": true,
+          "anonymous": false,
+          "manageCall": true,
+          "other": true,
+          "manageTopics": true,
+          "postStories": true,
+          "editStories": true,
+          "deleteStories": true,
+          "manageDirectMessages": true,
+          "manageRanks": true
+        }
+      }
+    },
+    {
+      "subject": "bot",
+      "value": {
+        "status": "admin",
+        "isMember": true,
+        "permissions": {
+          "_": "chatAdminRights",
+          "changeInfo": false,
+          "postMessages": false,
+          "editMessages": false,
+          "deleteMessages": false,
+          "banUsers": false,
+          "inviteUsers": true,
+          "pinMessages": true,
+          "addAdmins": false,
+          "anonymous": false,
+          "manageCall": false,
+          "other": true,
+          "manageTopics": false,
+          "postStories": false,
+          "editStories": false,
+          "deleteStories": false,
+          "manageDirectMessages": false,
+          "manageRanks": false
+        }
+      }
+    },
+    {
+      "subject": "required_admin_0",
+      "value": {
+        "status": "admin",
+        "isMember": true,
+        "permissions": {
+          "_": "chatAdminRights",
+          "changeInfo": true,
+          "postMessages": false,
+          "editMessages": false,
+          "deleteMessages": false,
+          "banUsers": false,
+          "inviteUsers": true,
+          "pinMessages": true,
+          "addAdmins": false,
+          "anonymous": false,
+          "manageCall": false,
+          "other": true,
+          "manageTopics": false,
+          "postStories": false,
+          "editStories": false,
+          "deleteStories": false,
+          "manageDirectMessages": false,
+          "manageRanks": false
+        }
+      }
+    },
+    {
+      "subject": "ordinary_1",
+      "value": {
+        "status": "member",
+        "isMember": true,
+        "permissions": null
+      }
+    },
+    {
+      "subject": "ordinary_2",
+      "value": {
+        "status": "member",
+        "isMember": true,
+        "permissions": null
+      }
+    }
+  ],
+  "invitations": {
+    "limit": 100,
+    "mayHaveMore": false,
+    "entries": [
+      {
+        "isMyLink": true,
+        "isRevoked": false,
+        "approvalNeeded": false,
+        "isPrimary": true,
+        "expiresAt": null,
+        "usageLimit": null,
+        "usage": 0,
+        "pendingApprovals": 0
+      }
+    ]
+  }
+}
