@@ -23,7 +23,11 @@ import type {
   Setup,
   TelegramProvisioner,
 } from "./provisioning"
-import { CliProvisionCloud, cloudRequest } from "./provisioningCloud"
+import {
+  CliProvisionCloud,
+  cloudRequest,
+  dealDeskRequestKey,
+} from "./provisioningCloud"
 import {
   accountPaths,
   FileProvisionJournal,
@@ -127,6 +131,155 @@ function fixture() {
 }
 
 describe("custody provisioning", () => {
+  test("a creation retry after explicit flood rejection writes a new creating transition before Telegram", async () => {
+    const f = fixture()
+    f.setup = {
+      ...f.setup,
+      participants: ["alice", "22"],
+      admins: [{ userId: "22", rightsProfile: "team" }],
+    }
+    const receipts = new Map<string, unknown>()
+    const creatingKeys: string[] = []
+    const wire = () => ({
+      ...cloudRequest(f.setup),
+      state: f.setup.state,
+      chatId: f.setup.chatId ? String(f.setup.chatId) : null,
+      claimToken: "current-token",
+      resolvedParticipants: f.setup.binding?.participants.map(String),
+      resolvedAdmins: f.setup.binding?.admins.map(String),
+    })
+    const cloud = new CliProvisionCloud(async (operation, input) => {
+      if (operation === "view") return wire()
+      const key = dealDeskRequestKey(operation, input)
+      if (operation === "progress" && input.state === "creating")
+        creatingKeys.push(key)
+      if (receipts.has(key)) return structuredClone(receipts.get(key))
+      if (operation === "progress") {
+        if (
+          input.state === "configuring" &&
+          !f.setup.chatId &&
+          f.setup.state !== "creating"
+        )
+          throw new Error("Configuring requires authoritative creating intent")
+        f.setup = {
+          ...f.setup,
+          state: input.state as Setup["state"],
+          ...(input.chatId ? { chatId: Number(input.chatId) } : {}),
+          ...(Array.isArray(input.resolvedParticipants)
+            ? {
+                binding: {
+                  participants: input.resolvedParticipants.map(Number),
+                  admins: (input.resolvedAdmins as string[]).map(Number),
+                },
+              }
+            : {}),
+        }
+      } else if (operation !== "claim") throw new Error("Unexpected operation")
+      const output = wire()
+      receipts.set(key, structuredClone(output))
+      return output
+    })
+    let attempts = 0
+    const create = f.telegram.create
+    f.telegram.create = async (...args) => {
+      // This assertion detects a replayed receipt that did not update the DB.
+      expect(f.setup.state).toBe("creating")
+      if (++attempts === 1) throw { text: "FLOOD_WAIT_1", code: 420 }
+      return create(...args)
+    }
+    const run = () =>
+      provisionSetup({
+        setup: f.setup,
+        telegram: f.telegram,
+        cloud,
+        journal: f.journal,
+        workerId: "worker-one",
+      })
+    await expect(run()).rejects.toThrow("Group creation failed")
+    expect(f.setup.state).toBe("incomplete")
+    expect(f.setup.chatId).toBeUndefined()
+    expect((await run()).state).toBe("ready")
+    expect(creatingKeys).toHaveLength(2)
+    expect(new Set(creatingKeys).size).toBe(2)
+    expect(attempts).toBe(2)
+    expect(f.events.filter((event) => event === "create")).toHaveLength(1)
+    expect(f.setup.chatId).toBe(-100123)
+  })
+  test("recovered claim reacquires a current token for the same journal worker without creating another chat", async () => {
+    const f = fixture()
+    const binding = { participants: [21, 22], admins: [22] }
+    f.setup = {
+      ...f.setup,
+      participants: ["alice", "22"],
+      admins: [{ userId: "22", rightsProfile: "team" }],
+      state: "configuring",
+      chatId: -100123,
+      binding,
+    }
+    f.local = {
+      fingerprint: requestFingerprint(f.setup),
+      state: "configuring",
+      chatId: -100123,
+      binding,
+      workerId: "original-worker",
+    }
+    let token: string | undefined
+    let epoch = 0
+    const receipts = new Map<string, unknown>()
+    const claimKeys: string[] = []
+    const wire = () => ({
+      ...cloudRequest(f.setup),
+      state: f.setup.state,
+      chatId: String(f.setup.chatId),
+      claimToken: token,
+      resolvedParticipants: binding.participants.map(String),
+      resolvedAdmins: binding.admins.map(String),
+    })
+    const cloud = new CliProvisionCloud(async (operation, input) => {
+      if (operation === "view") return wire()
+      const key = dealDeskRequestKey(operation, input)
+      if (operation === "claim") claimKeys.push(key)
+      if (receipts.has(key)) return structuredClone(receipts.get(key))
+      if (operation === "claim") {
+        expect(input.workerId).toBe("original-worker")
+        token ??= `current-token-${++epoch}`
+      } else if (operation === "progress") {
+        if (input.claimToken !== token) throw new Error("Claim no longer valid")
+        f.setup = { ...f.setup, state: input.state as Setup["state"] }
+      } else throw new Error("Unexpected operation")
+      const output = wire()
+      receipts.set(key, structuredClone(output))
+      return output
+    })
+    const first = await cloud.claim(f.setup.requestId, "original-worker")
+    expect(first.claimToken).toBe("current-token-1")
+    // Operator recovery revokes the old claim while preserving the known chat.
+    token = undefined
+    const result = await provisionSetup({
+      setup: f.setup,
+      telegram: f.telegram,
+      cloud,
+      journal: f.journal,
+      workerId: "new-process-worker",
+    })
+    expect(result.state).toBe("ready")
+    expect(claimKeys).toHaveLength(2)
+    expect(new Set(claimKeys).size).toBe(2)
+    expect(String(token)).toBe("current-token-2")
+    expect(f.events.filter((event) => event === "create")).toHaveLength(0)
+    expect(f.setup.chatId).toBe(-100123)
+    const progress = {
+      requestId: "id",
+      claimToken: "token",
+      state: "configuring",
+    }
+    expect(dealDeskRequestKey("progress", progress)).not.toBe(
+      dealDeskRequestKey("progress", progress),
+    )
+    expect(dealDeskRequestKey("prepare", { requestId: "id" })).toBe(
+      dealDeskRequestKey("prepare", { requestId: "id" }),
+    )
+  })
   test("Telegram's implicit other admin right passes the final membership audit", async () => {
     const f = fixture()
     f.telegram.promote = async (_chatId, userId, rights) => {

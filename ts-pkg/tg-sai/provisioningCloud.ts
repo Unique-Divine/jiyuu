@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto"
+import { createHash, randomUUID } from "node:crypto"
 import type {
   Progress,
   ProvisionCloud,
@@ -170,12 +170,23 @@ export class CliProvisionCloud implements ProvisionCloud {
   }
 }
 
+export function dealDeskRequestKey(
+  operation: CloudOperation,
+  input: Record<string, unknown>,
+): string {
+  // The same payload can be a new intent after operator recovery or an explicit
+  // creation rejection. Receipts must only deduplicate one invocation.
+  if (operation === "claim" || operation === "progress")
+    return `tg-provision:${operation}:${randomUUID()}`
+  return `tg-provision:${createHash("sha256").update(JSON.stringify({ operation, input })).digest("hex")}`
+}
+
 /** Spawn argv directly; credentials stay in the existing Deal Desk client environment. */
 export async function callDealDesk(
   operation: CloudOperation,
   input: Record<string, unknown>,
 ): Promise<unknown> {
-  const key = `tg-provision:${createHash("sha256").update(JSON.stringify({ operation, input })).digest("hex")}`
+  const key = dealDeskRequestKey(operation, input)
   const command = ["sai-deal-desk", "chat-setups", operation, "--json-stdin"]
   if (operation !== "view" && operation !== "list" && operation !== "pending")
     command.push("--request-key", key)
