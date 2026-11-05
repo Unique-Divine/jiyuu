@@ -365,3 +365,53 @@ list regular members as admins. This tool uses per-member lookups
 - Emit a reviewable table or JSON artifact for batch dry-runs.
 - Add named rights profiles for bot admin and owner-target admin promotion.
 - Add fixtures for a completed ownership transfer.
+
+## Custody Chat Provisioning
+
+SaiTeam_bot's private `/newdealchat` flow submits an approved request to the
+Deal Desk API. A separate worker creates the private supergroup as custody
+user `8274304175`, profile `SaiTeam_AI`. The bot, Unique, and the requester
+become admins. August and Erick are ordinary default members. The deployed bot
+configuration controls the requester allowlist and defaults.
+
+For explicit CLI requests, prepare a JSON file with a stable `requestId`,
+`custodyProfile`, `expectedUserId`, `title`, `participants`, `admins`,
+`botRightsProfile`, and `dealIds`. Each admin uses `rightsProfile: "team"`;
+the bot uses `botRightsProfile: "baseline"`. `optionalParticipants` must be a
+subset of ordinary participants. `dealIds: []` registers a chat without
+creating or linking a commercial deal.
+
+```sh
+tg-sai chat provision prepare --file request.json
+tg-sai chat provision prepare --file request.json --run
+tg-sai chat provision run --request-id <request-id>
+tg-sai chat provision run --request-id <request-id> --run
+tg-sai chat provision status --request-id <request-id>
+```
+
+The cloud CLI credential needs the corresponding chat workflow capabilities.
+The background worker uses a dedicated read-only record credential with only
+`chats:work` granted for workflow writes. The worker service gets only the
+custody profile, without personal sessions or ownership-transfer passwords.
+
+```sh
+tg-sai worker --custody-profile SaiTeam_AI --once
+tg-sai worker --custody-profile SaiTeam_AI --once --run
+tg-sai worker --custody-profile SaiTeam_AI --run --interval-ms 5000
+```
+
+Without `--run`, the worker reads one queue page and does not connect to
+Telegram. Execution uses a durable worker identity, account lock, and local
+receipts. Never delete these files to force a retry. An uncertain creation
+blocks further creation until an operator reconciles the original request.
+Use `chat provision resolve --help` to adopt a verified group with its original
+creation marker. Known-group partial setup resumes against that same group.
+
+Required admins must be members before setup becomes ready. An ordinary member
+blocked by privacy settings can remain pending with a 24-hour, approval-required
+invite link. A link does not mean the person joined. Handle-based resolution of
+fixed team defaults must verify the expected numeric ID before any invitation.
+
+The source bot configuration starts with admission in `observe` mode. Check
+`~/ki/boku/epics/comms/telegram-bot.md` and its dated rollout evidence for
+the actual deployed state before testing bot commands.

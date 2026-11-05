@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto"
 import { mkdir, open, readFile, rename, rm } from "node:fs/promises"
 import { dirname, isAbsolute, join, resolve } from "node:path"
+import type { ChatMember } from "@mtcute/bun"
 import {
   addChatMembers,
   createInviteLink,
@@ -19,6 +20,67 @@ import type {
   ProvisionRequest,
   TelegramProvisioner,
 } from "./provisioning"
+
+// Fresh custody sessions do not have access hashes for numeric user IDs yet.
+// Handles discover the peer, but only the pinned numeric ID establishes identity.
+const DEFAULT_MEMBER_HANDLES = new Map<number, string>([
+  [1912700300, "uniquedivine"],
+  [5965882418, "lilnaptime"],
+  [472528179, "erickpinos"],
+])
+
+export async function resolveProvisioningPeer(
+  getUser: (peer: string | number) => Promise<{ id: number; isBot: boolean }>,
+  peer: string | number,
+): Promise<{ id: number; isBot: boolean }> {
+  const normalized = typeof peer === "string" ? peer.replace(/^@/, "") : peer
+  const numeric =
+    typeof normalized === "number"
+      ? normalized
+      : /^[0-9]+$/.test(normalized)
+        ? Number(normalized)
+        : undefined
+  const expectedId =
+    numeric ??
+    [...DEFAULT_MEMBER_HANDLES].find(
+      ([, handle]) => handle.toLowerCase() === String(normalized).toLowerCase(),
+    )?.[0]
+  const lookup =
+    expectedId === undefined
+      ? normalized
+      : (DEFAULT_MEMBER_HANDLES.get(expectedId) ?? expectedId)
+  const user = await getUser(lookup)
+  if (expectedId !== undefined && user.id !== expectedId)
+    throw new Error("Provisioning participant identity mismatch")
+  if (
+    expectedId !== undefined &&
+    DEFAULT_MEMBER_HANDLES.has(expectedId) &&
+    user.isBot
+  )
+    throw new Error("Default provisioning participant must be a user account")
+  return { id: user.id, isBot: user.isBot }
+}
+
+export function normalizeProvisioningMember(
+  value: Pick<ChatMember, "status" | "isMember" | "permissions"> | null,
+): Member {
+  const role =
+    value?.status === "creator"
+      ? "creator"
+      : value?.status === "admin"
+        ? "admin"
+        : value?.isMember
+          ? "member"
+          : "absent"
+  return {
+    role,
+    rights: Object.fromEntries(
+      Object.entries(value?.permissions ?? {}).filter(
+        (entry): entry is [string, boolean] => typeof entry[1] === "boolean",
+      ),
+    ),
+  }
+}
 
 /** Separate files and a process lock prevent account/session crossover. */
 export function accountPaths(
@@ -143,24 +205,9 @@ export async function withProvisionTelegram<T>(
         chatId: number,
         userId: number,
       ): Promise<Member> => {
-        const value = await getChatMember(client, { chatId, userId })
-        const role =
-          value?.status === "creator"
-            ? "creator"
-            : value?.status === "admin"
-              ? "admin"
-              : value?.isMember
-                ? "member"
-                : "absent"
-        return {
-          role,
-          rights: Object.fromEntries(
-            Object.entries(value?.permissions ?? {}).filter(
-              (entry): entry is [string, boolean] =>
-                typeof entry[1] === "boolean",
-            ),
-          ),
-        }
+        return normalizeProvisioningMember(
+          await getChatMember(client, { chatId, userId }),
+        )
       }
       const verifyMarker = async (
         chatId: number,
@@ -176,16 +223,8 @@ export async function withProvisionTelegram<T>(
       }
       const adapter: TelegramProvisioner = {
         self: async () => (await client.getMe()).id,
-        resolve: async (peer) => {
-          const user = await client.getUser(
-            typeof peer === "string"
-              ? /^[0-9]+$/.test(peer)
-                ? Number(peer)
-                : peer.replace(/^@/, "")
-              : peer,
-          )
-          return { id: user.id, isBot: user.isBot }
-        },
+        resolve: (peer) =>
+          resolveProvisioningPeer((value) => client.getUser(value), peer),
         create: async (title, marker) =>
           (
             await createSupergroup(client, {
