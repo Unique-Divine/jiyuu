@@ -31,3 +31,8 @@ The tests pass captured member shapes through the actual runtime normalizer,
 compare every configured permission, and explicitly reject extra bot powers.
 Synthetic tests separately cover absent and restricted members because those
 states did not occur in this live snapshot.
+
+`custody-ready.json` is a second independent Telegram readback after the same
+request resumed successfully and the cloud setup reached `ready`. No new group
+was created during recovery. It verifies the final group state without relying
+on the worker's original receipt.
