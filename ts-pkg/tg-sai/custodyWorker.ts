@@ -24,7 +24,11 @@ export interface PendingQueue {
     workerId: string
     limit: number
     after?: string
-  }): Promise<{ requests: Setup[]; nextAfter: string | null }>
+  }): Promise<{
+    requests: Setup[]
+    nextAfter: string | null
+    blocked?: { requestId: string; state: string; reason: string }[]
+  }>
 }
 export interface WorkerResult {
   requestId: string
@@ -93,7 +97,16 @@ export async function runWorkerOnce(
   })
   if (page.requests.length > limit)
     throw new Error("Pending queue exceeded requested bound")
-  const results: WorkerResult[] = []
+  if (
+    !Array.isArray(page.blocked ?? []) ||
+    (page.blocked?.length ?? 0) + page.requests.length > limit
+  )
+    throw new Error("Pending queue blocked results exceeded requested bound")
+  const results: WorkerResult[] = (page.blocked ?? []).map((row) => ({
+    requestId: row.requestId,
+    state: "blocked",
+    error: row.reason,
+  }))
   for (const selected of page.requests) {
     const setup = await deps.cloud.view(selected.requestId)
     if (

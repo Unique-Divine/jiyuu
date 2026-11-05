@@ -198,3 +198,22 @@ test("worker command defaults to one-page preview and requires explicit --run fo
     expect(input?.intervalMs).toBe(5000)
   }
 })
+
+test("worker surfaces revoked or missing-config job blocks without claims", async () => {
+  const f = fixture()
+  f.cloud.pending = async () => ({
+    requests: [],
+    nextAfter: null,
+    blocked: [
+      { requestId: "revoked", state: "prepared", reason: "operator_revoked" },
+    ],
+  })
+  const result = await runWorkerOnce(
+    { custodyProfile: "custody", workerId: "stable", run: true },
+    f,
+  )
+  expect(result.results).toEqual([
+    { requestId: "revoked", state: "blocked", error: "operator_revoked" },
+  ])
+  expect(f.calls).toEqual([])
+})

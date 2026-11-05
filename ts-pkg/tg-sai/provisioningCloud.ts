@@ -100,16 +100,25 @@ export class CliProvisionCloud implements ProvisionCloud {
     workerId: string
     limit: number
     after?: string
-  }): Promise<{ requests: Setup[]; nextAfter: string | null }> {
+  }): Promise<{
+    requests: Setup[]
+    nextAfter: string | null
+    blocked: { requestId: string; state: string; reason: string }[]
+  }> {
     const raw = (await this.call("pending", {
       ...input,
       expectedUserId: String(input.expectedUserId),
-    })) as { requests: unknown[]; nextAfter?: string | null }
+    })) as {
+      requests: unknown[]
+      nextAfter?: string | null
+      blocked?: { requestId: string; state: string; reason: string }[]
+    }
     if (!Array.isArray(raw?.requests))
       throw new Error("Cloud returned invalid pending queue")
     return {
       requests: raw.requests.map(setupFromCloud),
       nextAfter: raw.nextAfter ?? null,
+      blocked: raw.blocked ?? [],
     }
   }
   async prepare(request: ProvisionRequest): Promise<Setup> {
