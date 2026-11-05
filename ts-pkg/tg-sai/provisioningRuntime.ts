@@ -25,6 +25,7 @@ import type {
 // Handles discover the peer, but only the pinned numeric ID establishes identity.
 const DEFAULT_MEMBER_HANDLES = new Map<number, string>([
   [1912700300, "uniquedivine"],
+  [7930936303, "corinnebernett"],
   [5965882418, "lilnaptime"],
   [472528179, "erickpinos"],
 ])

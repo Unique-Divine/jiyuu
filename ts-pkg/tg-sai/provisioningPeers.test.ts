@@ -4,6 +4,7 @@ import { resolveProvisioningPeer } from "./provisioningRuntime"
 describe("custody participant resolution with a fresh session", () => {
   for (const [id, handle] of [
     [1912700300, "uniquedivine"],
+    [7930936303, "corinnebernett"],
     [5965882418, "lilnaptime"],
     [472528179, "erickpinos"],
   ] as const) {

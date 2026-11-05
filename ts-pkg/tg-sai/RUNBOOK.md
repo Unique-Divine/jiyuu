@@ -374,6 +374,13 @@ user `8274304175`, profile `SaiTeam_AI`. The bot, Unique, and the requester
 become admins. August and Erick are ordinary default members. The deployed bot
 configuration controls the requester allowlist and defaults.
 
+When adding an operator, configure their numeric Telegram user ID in the bot
+allowlist. A fresh custody session may not know that ID's access hash. Add a
+verified handle alias in `provisioningRuntime.ts` for new team operators and
+deploy the worker with it. Resolve the handle through the custody account first
+and verify the exact numeric ID and that it is a user account. The runtime
+rejects handles that later resolve to a different account.
+
 For explicit CLI requests, prepare a JSON file with a stable `requestId`,
 `custodyProfile`, `expectedUserId`, `title`, `participants`, `admins`,
 `botRightsProfile`, and `dealIds`. Each admin uses `rightsProfile: "team"`;
