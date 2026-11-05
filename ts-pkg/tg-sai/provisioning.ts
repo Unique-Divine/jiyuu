@@ -115,11 +115,14 @@ const rightsOff = {
 }
 export const BOT_BASELINE_RIGHTS = {
   ...rightsOff,
+  // Telegram enables basic chat management for every administrator.
+  other: true,
   inviteUsers: true,
   pinMessages: true,
 }
 export const TEAM_ADMIN_RIGHTS = {
   ...rightsOff,
+  other: true,
   changeInfo: true,
   inviteUsers: true,
   pinMessages: true,
@@ -309,9 +312,34 @@ export function safeProvisionError(error: unknown): string {
           String(Number.isSafeInteger(e.seconds) ? e.seconds : "UNKNOWN"),
         )
       : ""
-  return /^[A-Z][A-Z0-9_]+$/.test(normalized)
+  return /^(?:FLOOD(?:_PREMIUM)?_WAIT_(?:\d{1,10}|UNKNOWN)|USER_PRIVACY_RESTRICTED|USER_NOT_MUTUAL_CONTACTS?|USER_NOT_PARTICIPANT|USER_CHANNELS_TOO_MUCH|USER_BOT|USER_ID_INVALID|PEER_ID_INVALID|CHAT_ID_INVALID|CHANNEL_INVALID|CHANNEL_PRIVATE|CHAT_ADMIN_REQUIRED|CHAT_WRITE_FORBIDDEN|USER_ADMIN_INVALID|USER_CREATOR|ADMINS_TOO_MUCH|BOTS_TOO_MUCH|BOT_GROUPS_BLOCKED|RIGHT_FORBIDDEN|USER_RESTRICTED|USER_DEACTIVATED|INPUT_USER_DEACTIVATED|CHANNELS_TOO_MUCH|USERS_TOO_MUCH|AUTH_KEY_UNREGISTERED|SESSION_REVOKED|INVITE_HASH_EXPIRED|INVITE_HASH_INVALID|INVITE_REQUEST_SENT)$/.test(
+    normalized,
+  )
     ? normalized
     : "provisioning_step_failed"
+}
+
+type ProvisionStep =
+  | "verify_marker"
+  | "save_configuring"
+  | "read_member"
+  | "add_member"
+  | "verify_added_member"
+  | "create_invitation"
+  | "save_invitation"
+  | "read_admin"
+  | "promote_admin"
+  | "read_bot"
+  | "promote_bot"
+  | "audit_membership"
+  | "save_ready"
+
+/** Fixed operation names add context without copying Telegram response bodies. */
+export function safeProvisionDiagnostic(
+  error: unknown,
+  step: ProvisionStep,
+): string {
+  return `${step}:${safeProvisionError(error)}`
 }
 
 export function isPrivacyRestriction(error: unknown): boolean {
@@ -499,11 +527,14 @@ export async function provisionSetup(params: {
     await save({ state: "configuring", chatId, binding })
   }
   const chatId = setup.chatId!
+  let step: ProvisionStep = "verify_marker"
   try {
     if (!(await telegram.verifyMarker(chatId, creationMarker(setup))))
       throw new Error("Chat marker or custody owner verification failed")
+    step = "save_configuring"
     await save({ state: "configuring", chatId, binding })
     for (const userId of [...binding.participants, PROVISIONING_BOT_ID]) {
+      step = "read_member"
       const member = await telegram.member(chatId, userId)
       if (member.role !== "absent") {
         pendingInvitations = pendingInvitations.filter(
@@ -512,7 +543,9 @@ export async function provisionSetup(params: {
         continue
       }
       try {
+        step = "add_member"
         await telegram.add(chatId, userId)
+        step = "verify_added_member"
         if ((await telegram.member(chatId, userId)).role === "absent")
           throw new Error("Participant invitation incomplete")
       } catch (error) {
@@ -527,6 +560,7 @@ export async function provisionSetup(params: {
             i.userId === String(userId) && Date.parse(i.expiresAt) > Date.now(),
         )
         if (!invite) {
+          step = "create_invitation"
           const link = await telegram.inviteLink(chatId, userId)
           if (
             !/^https:\/\/t\.me\/(?:\+|joinchat\/)[A-Za-z0-9_-]+$/.test(
@@ -545,21 +579,31 @@ export async function provisionSetup(params: {
             ...pendingInvitations.filter((i) => i.userId !== invite!.userId),
             invite,
           ]
+          step = "save_invitation"
           await save({ state: "configuring", chatId, binding })
         }
       }
     }
     for (const userId of binding.admins) {
-      if (!hasRights(await telegram.member(chatId, userId), TEAM_ADMIN_RIGHTS))
+      step = "read_admin"
+      if (
+        !hasRights(await telegram.member(chatId, userId), TEAM_ADMIN_RIGHTS)
+      ) {
+        step = "promote_admin"
         await telegram.promote(chatId, userId, TEAM_ADMIN_RIGHTS)
+      }
     }
+    step = "read_bot"
     if (
       !hasRights(
         await telegram.member(chatId, PROVISIONING_BOT_ID),
         BOT_BASELINE_RIGHTS,
       )
-    )
+    ) {
+      step = "promote_bot"
       await telegram.promote(chatId, PROVISIONING_BOT_ID, BOT_BASELINE_RIGHTS)
+    }
+    step = "audit_membership"
     const owner = await telegram.member(chatId, setup.expectedUserId)
     const participants = await Promise.all(
       binding.participants.map(async (userId) => ({
@@ -598,6 +642,7 @@ export async function provisionSetup(params: {
       verifiedAt: new Date().toISOString(),
       ...(pendingInvitations.length ? { pendingInvitations } : {}),
     }
+    step = "save_ready"
     await save({ state: "ready", chatId, binding, receipt, retryAt: null })
     return setup
   } catch (error) {
@@ -608,7 +653,7 @@ export async function provisionSetup(params: {
       state: "incomplete",
       chatId,
       binding,
-      error: safeProvisionError(error),
+      error: safeProvisionDiagnostic(error, step),
       retryAt: provisionRetryAt(error),
     })
     throw new Error(

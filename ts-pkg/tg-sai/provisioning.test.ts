@@ -27,6 +27,7 @@ import { CliProvisionCloud, cloudRequest } from "./provisioningCloud"
 import {
   accountPaths,
   FileProvisionJournal,
+  normalizeProvisioningMember,
   withAccountLock,
 } from "./provisioningRuntime"
 
@@ -126,6 +127,26 @@ function fixture() {
 }
 
 describe("custody provisioning", () => {
+  test("Telegram's implicit other admin right passes the final membership audit", async () => {
+    const f = fixture()
+    f.telegram.promote = async (_chatId, userId, rights) => {
+      // Captured mtcute permissions include this true flag for every admin.
+      f.members.set(
+        userId,
+        normalizeProvisioningMember({
+          status: "admin",
+          isMember: true,
+          permissions: { _: "chatAdminRights", ...rights, other: true },
+        }),
+      )
+    }
+    expect((await f.run()).state).toBe("ready")
+    expect(BOT_BASELINE_RIGHTS.other).toBe(true)
+    expect(TEAM_ADMIN_RIGHTS.other).toBe(true)
+    expect(BOT_BASELINE_RIGHTS.addAdmins).toBe(false)
+    expect(BOT_BASELINE_RIGHTS.deleteMessages).toBe(false)
+    expect(BOT_BASELINE_RIGHTS.banUsers).toBe(false)
+  })
   test("flushes creation intent before RPC, records identity immediately, and verifies exact privileges", async () => {
     const f = fixture()
     const result = await f.run()
@@ -321,9 +342,37 @@ describe("custody provisioning", () => {
     }
     await expect(f.run()).rejects.toThrow("incomplete")
     expect(f.setup.state).toBe("incomplete")
-    expect((f.setup as Setup & { error: string }).error).toBe("FLOOD_WAIT_40")
+    expect((f.setup as Setup & { error: string }).error).toBe(
+      "add_member:FLOOD_WAIT_40",
+    )
     expect(safeProvisionError(new Error("session string"))).toBe(
       "provisioning_step_failed",
+    )
+  })
+  test("failed setup records the exact operation without copying private error bodies", async () => {
+    const cases = [
+      ["verify_marker", "verifyMarker"],
+      ["read_member", "member"],
+      ["add_member", "add"],
+      ["promote_admin", "promote"],
+    ] as const
+    for (const [step, method] of cases) {
+      const f = fixture()
+      f.telegram[method] = async () => {
+        throw new Error("private-session-and-link")
+      }
+      await expect(f.run()).rejects.toThrow("incomplete")
+      expect((f.setup as Setup & { error: string }).error).toBe(
+        `${step}:provisioning_step_failed`,
+      )
+      expect(f.setup.chatId).toBe(-100123)
+      expect(f.events.filter((event) => event === "create")).toHaveLength(1)
+    }
+    expect(safeProvisionError({ text: "SECRET_SESSION_VALUE" })).toBe(
+      "provisioning_step_failed",
+    )
+    expect(safeProvisionError({ text: "USER_NOT_PARTICIPANT" })).toBe(
+      "USER_NOT_PARTICIPANT",
     )
   })
   test("missing privileges prevent readiness", async () => {
