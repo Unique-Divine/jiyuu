@@ -348,6 +348,9 @@ export async function addProfile(
         : -1
   const targetIndex = index >= 0 ? index : config.profiles.length
   const previous = index >= 0 ? config.profiles[index] : undefined
+  if (previous?.userId != null && input.userId != null && input.userId !== previous.userId) {
+    throw new Error("Cannot replace a saved profile's account identity. Use a new profile name or explicitly remove the old profile first.")
+  }
   const timestamp = now.toISOString()
   const nextProfile: TgSaiProfile = {
     name: profileNameFromInput(input, targetIndex),

@@ -40,6 +40,7 @@ import {
   addProfile,
   configDir,
   discoveryReport,
+  findProfileIndex,
   getProfile,
   profileInputFromUser,
   profileLabel,
@@ -1018,6 +1019,19 @@ function validateLoginOptions(options: ProfileAddOptions): void {
   if (options.qr && options.phone) {
     throw new Error("--qr and --phone are mutually exclusive")
   }
+  if ((options.login || options.qr || options.phone) && options.sessionString) {
+    throw new Error("Fresh login cannot be combined with --session-string")
+  }
+}
+
+/** A new login can reuse app credentials, never another account's session or 2FA. */
+function profileLoginValues(
+  values: TelegramCredentialValues | null,
+  options: ProfileAddOptions,
+): TelegramCredentialValues {
+  if (!(options.login || options.qr || options.phone)) return values ?? {}
+  const { TELEGRAM_SESSION_STRING: _session, TELEGRAM_PASSWORD: _password, ...app } = values ?? {}
+  return app
 }
 
 async function generateSessionString(params: {
@@ -1082,7 +1096,7 @@ async function discoveredValuesForProfileAdd(
       throw new Error(`Unknown discovery source: ${options.src}`)
     }
     return {
-      values: candidate.values,
+      values: profileLoginValues(candidate.values, options),
       sourceDescription: sourceLabel(candidate),
       explicit: true,
     }
@@ -1090,7 +1104,9 @@ async function discoveredValuesForProfileAdd(
 
   const report = await discoveryReport()
   return {
-    values: mergeDiscoveredValues(report.candidates),
+    values: mergeDiscoveredValues(report.candidates.map((candidate) => ({
+      ...candidate, values: profileLoginValues(candidate.values, options),
+    }))),
     sourceDescription: null,
     explicit: false,
   }
@@ -1144,8 +1160,35 @@ async function inputFromProfileAddOptions(
   options: ProfileAddOptions,
 ): Promise<ProfileAddInput> {
   validateLoginOptions(options)
+  const saved = getProfile(await readConfig(), options.name)
+  const enrollsAccount = Boolean(
+    options.login || options.qr || options.phone || options.src || options.sessionString,
+  )
+  if (saved && !enrollsAccount) {
+    // Resolve the saved target before discovery. A password/app metadata edit
+    // must never authenticate another discovered account and overwrite this one.
+    if (
+      (options.userId !== undefined && Number(options.userId) !== saved.userId) ||
+      (options.handle !== undefined && options.handle !== saved.handle)
+    ) {
+      throw new Error("Changing a saved account identity requires an explicit fresh login or session import")
+    }
+    return {
+      name: saved.name,
+      apiId: options.apiId === undefined ? saved.apiId : Number(options.apiId),
+      apiHash: options.apiHash ?? saved.apiHash,
+      sessionString: saved.sessionString,
+      password: options.password ?? saved.password,
+      handle: saved.handle,
+      userId: saved.userId,
+      displayName: options.displayName ?? saved.displayName,
+    }
+  }
+  if (!saved && options.password !== undefined && !enrollsAccount) {
+    throw new Error(`Unknown configured profile: ${options.name ?? "active profile"}. Use tg-sai profile list and select it with --name; --src selects credential discovery sources.`)
+  }
   const optionValues = credentialValuesFromProfileAddOptions(options)
-  const envValues = credentialValuesFromEnv()
+  const envValues = profileLoginValues(credentialValuesFromEnv(), options)
   const discovery = await discoveredValuesForProfileAdd(options)
   const higherPrecedenceValues = mergeCredentialValues(envValues, optionValues)
   if (discovery.explicit && discovery.values && discovery.sourceDescription) {
@@ -1252,8 +1295,89 @@ async function runProfileShow(selector = "0"): Promise<void> {
   console.log(JSON.stringify(redactedProfile(profile), null, 2))
 }
 
+async function printConfiguredProfiles(): Promise<void> {
+  console.log("\nConfigured local profiles (* marks the active/default profile):")
+  await runProfileList()
+}
+
+async function printProfileAddHelp(command: Command): Promise<void> {
+  command.outputHelp()
+  console.log(
+    "\nNo profile is saved and no Telegram login starts without explicit options.",
+  )
+  console.log(
+    "Use a new --name to add a separate account. Without --name, explicit options update the active profile.",
+  )
+  console.log("\nFresh QR login for a separate custody account:")
+  console.log(
+    "  tg-sai profile add --name sai-custody --login --qr --interactive",
+  )
+  console.log(
+    "Scan while signed into the intended Telegram account, then inspect it with:",
+  )
+  console.log("  tg-sai profile show sai-custody")
+  await printConfiguredProfiles()
+  console.log("\nInspect an existing profile with tg-sai profile show <selector>.")
+  console.log("Update a saved password with --name <saved-name-or-handle-or-index> --password '<password>'.")
+  console.log("--src selects a numbered credential source from profile find, not a saved profile index.")
+}
+
+async function printProfileRemoveHelp(command: Command): Promise<void> {
+  command.outputHelp()
+  console.log(
+    "\nRemoves a saved local profile, not the Telegram account or its chat memberships.",
+  )
+  console.log("Removing a profile does not revoke its Telegram sessions.")
+  console.log("No profile is removed without an explicit selector.")
+  const config = await readConfig()
+  if (config.profiles.length === 0) {
+    console.log("\nNo saved profiles are available to remove.")
+    console.log(
+      "Add an account with: tg-sai profile add --login --qr --interactive",
+    )
+    return
+  }
+
+  console.log("\nRunnable examples for saved profiles:")
+  let examples = 0
+  for (const [index, saved] of config.profiles.entries()) {
+    // Handles and names can overlap. Emit only selectors that resolve to this row.
+    const selector = [
+      saved.handle,
+      saved.name,
+      saved.userId?.toString(),
+      String(index),
+    ].find(
+      (candidate) =>
+        candidate != null && findProfileIndex(config, candidate) === index,
+    )
+    if (selector == null) continue
+    const argument = /^[A-Za-z0-9_@./:-]+$/.test(selector)
+      ? selector
+      : `'${selector.replaceAll("'", "'\\''")}'`
+    const label = JSON.stringify(profileLabel(saved, index))
+    console.log(
+      `  tg-sai profile remove -- ${argument}  # ${label}${index === 0 ? " [active]" : ""}`,
+    )
+    examples++
+  }
+  if (examples < config.profiles.length) {
+    console.log(
+      "Some profiles have ambiguous selectors; inspect tg-sai profile list before removing them.",
+    )
+  }
+  console.log(
+    "\nExamples use the current profile configuration. Run tg-sai profile list to inspect it.",
+  )
+}
+
 async function runProfileAdd(options: ProfileAddOptions): Promise<void> {
+  const previous = getProfile(await readConfig(), options.name)
   const input = await inputFromProfileAddOptions(options)
+  if (previous?.userId != null && input.userId !== previous.userId) {
+    throw new Error("Login or import does not match the saved account. Use a new --name for another account, or explicitly remove the old profile before replacing it.")
+  }
+  if (previous) input.name = previous.name
   const config = await addProfile(input)
   const profile = getProfile(config, input.name)
   const index = profile ? config.profiles.indexOf(profile) : 0
@@ -1438,6 +1562,10 @@ Examples:
   const profile = program
     .command("profile")
     .description("Manage local Telegram session profiles")
+    .action(async () => {
+      profile.outputHelp()
+      await printConfiguredProfiles()
+    })
 
   profile
     .command("find")
@@ -1453,10 +1581,13 @@ Examples:
       await runProfileList()
     })
 
-  profile
+  const addProfileCommand = profile
     .command("add")
     .description("Add or update a Telegram session profile")
-    .option("--name <name>", "Legacy profile name")
+    .option(
+      "--name <name>",
+      "Local profile name; use a distinct name for another account",
+    )
     .option("--api-id <id>", "Telegram API ID")
     .option("--api-hash <hash>", "Telegram API hash")
     .option("--session-string <value>", "Telegram session string")
@@ -1464,10 +1595,10 @@ Examples:
       "--password <value>",
       "Telegram 2FA password for ownership transfer",
     )
-    .option("--src <number>", "Use a numbered source from profile find")
+    .option("--src <number>", "Import a numbered credential source from profile find, not a saved profile")
     .option(
       "--login",
-      "Generate a session string when missing (defaults to QR)",
+      "Start a fresh account login, ignoring discovered sessions (defaults to QR)",
     )
     .option("--qr", "Generate a session string with QR login")
     .option("--phone", "Generate a session string with phone login")
@@ -1479,17 +1610,20 @@ Examples:
       "after",
       `
 Examples:
-  tg-sai profile add
-  tg-sai profile add --qr
-  tg-sai profile add --phone
-  tg-sai profile add --src 1
-  tg-sai profile add --password '<password>'
+  tg-sai profile add --name sai-custody --login --qr --interactive
+  tg-sai profile add --name another-account --phone --interactive
+  tg-sai profile add --name another-account --src 1
+  tg-sai profile add --name existing-profile --password '<password>'
 
 If apiId/apiHash are missing, create a Telegram API app at:
   https://my.telegram.org/apps
 `,
     )
     .action(async (options: ProfileAddOptions) => {
+      if (Object.keys(options).length === 0) {
+        await printProfileAddHelp(addProfileCommand)
+        return
+      }
       await runProfileAdd(options)
     })
 
@@ -1515,11 +1649,18 @@ If apiId/apiHash are missing, create a Telegram API app at:
       console.log(`active_profile: ${profileLabel(active, 0)}`)
     })
 
-  profile
+  const removeProfileCommand = profile
     .command("remove")
     .description("Remove one configured profile")
-    .argument("<selector>", "Profile index, handle, user ID, or legacy name")
-    .action(async (selector: string) => {
+    .argument(
+      "[selector]",
+      "Profile index, handle, user ID, or legacy name; omit for examples",
+    )
+    .action(async (selector: string | undefined) => {
+      if (selector === undefined) {
+        await printProfileRemoveHelp(removeProfileCommand)
+        return
+      }
       await removeProfile(selector)
       console.log(`removed_profile: ${selector}`)
     })

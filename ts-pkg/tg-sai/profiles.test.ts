@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test"
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import {
+  addProfile,
   configDir,
   configPath,
   credentialsFromKnownFiles,
@@ -31,6 +32,21 @@ async function writeJson(path: string, value: unknown): Promise<void> {
 }
 
 describe("tg-sai profile discovery", () => {
+  test("profile persistence rejects replacement of a known account before writing", async () => {
+    await withTempHome(async (home) => {
+      const env = { HOME: home }
+      const original = { name: "custody", apiId: 456, apiHash: "custody-hash",
+        sessionString: "custody-session", password: "", handle: "custody_handle",
+        userId: 222, displayName: "Custody fixture" }
+      await addProfile(original, env)
+      const path = configPath(env)
+      const before = await readFile(path, "utf8")
+      await expect(addProfile({ ...original, userId: 111, sessionString: "personal-session" }, env))
+        .rejects.toThrow("Cannot replace a saved profile's account identity")
+      expect(await readFile(path, "utf8")).toBe(before)
+    })
+  })
+
   test("uses ~/.tg-sai as the default tool directory", async () => {
     await withTempHome(async (home) => {
       expect(configDir({ HOME: home })).toBe(join(home, ".tg-sai"))

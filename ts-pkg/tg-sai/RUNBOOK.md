@@ -35,11 +35,15 @@ Credential profile behavior:
 
 - Command `tg-sai profile find` reports discovered Telegram credential sources
   without writing profile state.
-- Command `tg-sai profile add` stores a local profile from explicit flags,
-  process environment variables, or automatically merged non-conflicting
-  discovered sources.
-- Command `tg-sai profile add --qr` or `tg-sai profile add --phone` generates a
-  missing Telegram session string.
+- Bare commands `tg-sai profile` and `tg-sai profile add` show help and configured
+  profiles without saving state or connecting to Telegram.
+- Command `tg-sai profile add` with explicit options stores a local profile from
+  flags, process environment variables, or merged non-conflicting discovered
+  sources. Use a distinct `--name` for another account; without it, explicit
+  options update the active/default profile.
+- Explicit `--qr`, `--phone`, or `--login` starts a fresh account login and
+  ignores discovered/environment sessions and account passwords. App credentials
+  can still come from discovery, environment, or interactive input.
 - Commands `tg-sai profile list`, `tg-sai profile show`, `tg-sai profile use`,
   and `tg-sai profile remove` manage local session profiles.
 
@@ -125,17 +129,20 @@ The session string is generated after QR login.
 Generate the session string and save it directly into a `tg-sai` profile:
 
 ```bash
-tg-sai profile add --qr
+tg-sai profile add --name sai-custody --login --qr --interactive
 ```
 
 Scan the QR code in Telegram with **Settings > Devices > Link Desktop Device**.
-After login succeeds, command `tg-sai profile add` saves the generated
-`sessionString` into profile `operator`.
+Scan while signed into the intended account. After login succeeds, this command
+saves its verified identity and session in the separate `sai-custody` profile.
+The existing active profile stays selected. Inspect the result with command
+`tg-sai profile show sai-custody`.
 
 If you generated the session string manually, save it with explicit flags:
 
 ```bash
 tg-sai profile add \
+  --name sai-custody \
   --api-id <api id> \
   --api-hash <api hash> \
   --session-string '<session string>'
@@ -145,7 +152,7 @@ Store the Telegram 2FA password in the same profile when ownership transfer is
 needed:
 
 ```bash
-tg-sai profile add --password '<password>'
+tg-sai profile add --name sai-custody --password '<password>'
 ```
 
 Check the local setup:
@@ -172,17 +179,26 @@ Add a local profile from a numbered source shown by command
 `tg-sai profile find`:
 
 ```bash
-tg-sai profile add --src 1
+tg-sai profile add --name another-account --src 1
 ```
 
 Command `tg-sai profile add` can store the Telegram 2FA password with flag
 `--password`. Command `tg-sai profile show` redacts stored `apiHash`,
 `sessionString`, and `password`.
 
+For password or metadata updates, `--name` selects an existing saved profile by
+name, handle, numeric user ID, or saved-list index. The update preserves that
+profile's account identity and session without importing environment or discovered
+credentials. An unknown password-update selector fails instead of creating a
+profile. Explicit login/import cannot replace a known profile with a different
+account; use a new name for another account, or remove the old profile first.
+Flag `--src` selects a credential source numbered by `tg-sai profile find`, not
+the saved-profile index printed by `tg-sai profile list`.
+
 Create a blank draft profile for onboarding:
 
 ```bash
-tg-sai profile add
+tg-sai profile add --name draft
 ```
 
 Blank or partial profiles are useful while collecting `apiId`, `apiHash`, and
@@ -193,6 +209,7 @@ Add a local profile from explicit values:
 
 ```bash
 tg-sai profile add \
+  --name another-account \
   --handle <telegram-handle> \
   --user-id <telegram-user-id> \
   --display-name "<display name>"
@@ -203,6 +220,11 @@ List local profiles:
 ```bash
 tg-sai profile list
 ```
+
+Command `tg-sai profile` also shows configured profiles beneath its command
+list. Bare command `tg-sai profile add` explains fresh QR enrollment and how
+named accounts differ from updates to the active profile. Neither changes the
+saved configuration.
 
 Find Sai-related chats visible to the active Telegram session:
 
