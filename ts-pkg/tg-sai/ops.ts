@@ -1,3 +1,5 @@
+import { USERS } from "./cfg"
+
 /**
  * One chat entry consumed by command `tg-sai ops sai-bootstrap`.
  *
@@ -102,4 +104,14 @@ export function parseChatInputFile(contents: string): ChatInput[] {
  */
 export function formatSaiChatJsonLine(record: SaiChatRecord): string {
   return JSON.stringify(record)
+}
+
+/**
+ * Resolves the owner target for `ops sai-bootstrap`. Defaults to the Sai
+ * custody account so a bare run never hands chats to a personal account.
+ */
+export function resolveBootstrapTarget(
+  targetUser: number | string | undefined,
+): number | string {
+  return targetUser ?? USERS.saiCustody.id
 }

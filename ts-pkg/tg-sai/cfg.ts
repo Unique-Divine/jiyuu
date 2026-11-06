@@ -59,6 +59,18 @@ export const USERS = {
     displayName: "Corinne Antonia",
     kind: "user",
   },
+
+  /**
+   * Sai custody account: the intended owner of every Sai deal chat. Same
+   * numeric ID as `corinneAlt`, renamed and verified through `getMe` on
+   * 2026-11-05. Default ownership target for `ops sai-bootstrap`.
+   */
+  saiCustody: {
+    id: 8274304175,
+    handle: "SaiTeam_AI",
+    displayName: "Sai AI Automation",
+    kind: "user",
+  },
 } satisfies Record<string, TelegramIdentity>
 
 /**
