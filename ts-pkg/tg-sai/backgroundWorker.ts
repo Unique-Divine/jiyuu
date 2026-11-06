@@ -83,9 +83,12 @@ function inviteHoldUntil(
  * One background add, when one is due, the daily cap allows, and no invite
  * hold is active. Success marks the row `added`; a privacy refusal gets an
  * invite link and `invited`; a per-user refusal is `failed`. A flood or
- * hold leaves the row pending until it ends, and other errors retry after a
- * gap up to `MAX_BACKGROUND_ATTEMPTS`. Every call paces the remaining rows
- * by one jittered gap. Throws only when the queue itself fails.
+ * hold leaves the row pending until it ends, and other errors from the add
+ * call retry after a gap up to `MAX_BACKGROUND_ATTEMPTS`. Errors before or
+ * around the call (session, connect, identity checks, shutdown) defer the
+ * row one gap without counting an attempt. Every call paces the remaining
+ * rows by one jittered gap. Does nothing once `signal` is aborted. Throws
+ * only when the queue itself fails.
  */
 export async function drainBackgroundOnce(params: {
   queue: BackgroundQueue
@@ -97,8 +100,11 @@ export async function drainBackgroundOnce(params: {
   ) => Promise<T>
   nowMs?: number
   random?: () => number
+  /** Worker shutdown: no drain starts, and a cut-off call is not counted. */
+  signal?: AbortSignal
 }): Promise<DrainResult> {
   const { queue, pacing } = params
+  if (params.signal?.aborted) return { state: "idle" }
   const nowMs = params.nowMs ?? Date.now()
   const row = queue.next(nowMs)
   if (!row) return { state: "idle" }
@@ -114,15 +120,25 @@ export async function drainBackgroundOnce(params: {
     return { state: "held", ...at, nextAtMs: held }
   }
   const paced = nowMs + jitteredGapMs(pacing, params.random)
+  // Set only by an error the add or link call itself threw.
+  let callError: { error: unknown } | null = null
   const outcome = await params
     .telegram(async (telegram) => {
       try {
-        await telegram.add(row.chatId, row.userId)
-        return { state: "added" as const }
+        try {
+          await telegram.add(row.chatId, row.userId)
+          return { state: "added" as const }
+        } catch (error) {
+          if (!isPrivacyRestriction(error) || !telegram.inviteLink) throw error
+          await telegram.inviteLink(row.chatId, row.userId)
+          return {
+            state: "invited" as const,
+            error: safeProvisionError(error),
+          }
+        }
       } catch (error) {
-        if (!isPrivacyRestriction(error) || !telegram.inviteLink) throw error
-        await telegram.inviteLink(row.chatId, row.userId)
-        return { state: "invited" as const, error: safeProvisionError(error) }
+        callError = { error }
+        throw error
       }
     })
     .catch((error: unknown) => ({ state: "error" as const, error }))
@@ -143,10 +159,19 @@ export async function drainBackgroundOnce(params: {
     }
   }
   const code = safeProvisionError(outcome.error)
+  const fromCall =
+    (callError as { error: unknown } | null)?.error === outcome.error
+  if (!fromCall || params.signal?.aborted) {
+    // The member was never at fault: retry after one gap, uncounted.
+    queue.defer(row.chatId, row.userId, paced, code, nowMs, false)
+    queue.pace(paced)
+    return { state: "deferred", ...at, error: code, nextAtMs: paced }
+  }
   const retryAt = provisionRetryAt(outcome.error, nowMs)
   if (retryAt) {
     const until = Math.max(Date.parse(retryAt), paced)
-    queue.defer(row.chatId, row.userId, until, code, nowMs)
+    // A flood or hold is the account's limit, not the member's failure.
+    queue.defer(row.chatId, row.userId, until, code, nowMs, false)
     queue.pace(until)
     return { state: "deferred", ...at, error: code, nextAtMs: until }
   }

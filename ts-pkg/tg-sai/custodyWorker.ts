@@ -451,6 +451,7 @@ export async function runCustodyWorker(options: {
                   options.signal,
                 ),
               ),
+            ...(options.signal ? { signal: options.signal } : {}),
           })
       : undefined
     const reporter = queue

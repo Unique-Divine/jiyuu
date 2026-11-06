@@ -12,7 +12,14 @@ const ACCOUNT = 8274304175
 const NOW = Date.UTC(2026, 10, 6, 5)
 const PACING: BackgroundPacing = { gapMs: 1_200_000, dailyMax: 6, jitter: 0.3 }
 
-function fixture(options: { add?: (userId: number) => Promise<void> } = {}) {
+function fixture(
+  options: {
+    add?: (userId: number) => Promise<void>
+    /** Runs before the operation, like connect and identity checks. */
+    connect?: () => Promise<void>
+    signal?: AbortSignal
+  } = {},
+) {
   const db = openStateDb(":memory:")
   const queue = new BackgroundQueue(db)
   const holds = HoldStore.fromDb(db)
@@ -40,8 +47,10 @@ function fixture(options: { add?: (userId: number) => Promise<void> } = {}) {
       random,
       telegram: async (operation) => {
         calls.push("connect")
+        await options.connect?.()
         return operation(telegram)
       },
+      ...(options.signal ? { signal: options.signal } : {}),
     })
   const enqueue = (userIds: number[], notBeforeMs = NOW) =>
     queue.enqueue({ requestId: "r1", chatId: -100, userIds, notBeforeMs })
@@ -171,6 +180,66 @@ describe("background drain", () => {
       "deferred",
       "failed",
     ])
+  })
+  test("errors before the add call defer one gap without an attempt", async () => {
+    for (const error of [
+      new Error("Custody account identity mismatch"),
+      new Error("connect ETIMEDOUT"),
+    ]) {
+      const f = fixture({
+        connect: async () => {
+          throw error
+        },
+      })
+      f.enqueue([1, 2])
+      let now = NOW
+      for (let i = 0; i < 8; i++) {
+        const result = await f.drain(now)
+        expect(result).toMatchObject({ state: "deferred", userId: 1 })
+        expect(result.nextAtMs).toBe(now + 1_200_000)
+        now = result.nextAtMs!
+      }
+      expect(f.calls).not.toContain("add:1")
+      expect(f.queue.forChat(-100)[0]).toMatchObject({
+        state: "pending",
+        attempts: 0,
+        notBeforeMs: now,
+      })
+      expect(f.queue.addsToday(now)).toBe(0)
+    }
+  })
+  test("shutdown skips the drain and never counts a cut-off call", async () => {
+    const aborted = new AbortController()
+    aborted.abort()
+    const idle = fixture({ signal: aborted.signal })
+    idle.enqueue([1])
+    expect(await idle.drain()).toEqual({ state: "idle" })
+    expect(idle.calls).toEqual([])
+
+    const controller = new AbortController()
+    const cut = fixture({
+      signal: controller.signal,
+      add: async () => {
+        controller.abort()
+        throw new Error("client destroyed")
+      },
+    })
+    cut.enqueue([1])
+    expect((await cut.drain()).state).toBe("deferred")
+    expect(cut.queue.forChat(-100)[0]).toMatchObject({
+      state: "pending",
+      attempts: 0,
+    })
+  })
+  test("a flood from the add call does not count an attempt", async () => {
+    const f = fixture({
+      add: async () => {
+        throw { text: "FLOOD_WAIT_%d", seconds: 60, code: 420 }
+      },
+    })
+    f.enqueue([1])
+    await f.drain()
+    expect(f.queue.forChat(-100)[0]!.attempts).toBe(0)
   })
   test("enqueue adapter starts rows one jittered gap out", () => {
     const f = fixture()

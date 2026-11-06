@@ -186,19 +186,23 @@ export class BackgroundQueue {
     )
   }
 
-  /** Keeps a row pending until `notBeforeMs`, counting one attempt. */
+  /**
+   * Keeps a row pending until `notBeforeMs`. Counts one attempt unless
+   * `countAttempt` is false (the add call never ran or was not at fault).
+   */
   defer(
     chatId: number,
     userId: number,
     notBeforeMs: number,
     error: string | null,
     nowMs: number,
+    countAttempt = true,
   ): void {
     this.db.run(
       "UPDATE background_add SET not_before_ms = ?, last_error = ?, " +
-        "attempts = attempts + 1, updated_ms = ? " +
+        "attempts = attempts + ?, updated_ms = ? " +
         "WHERE chat_id = ? AND user_id = ? AND state = 'pending'",
-      [notBeforeMs, error, nowMs, chatId, userId],
+      [notBeforeMs, error, countAttempt ? 1 : 0, nowMs, chatId, userId],
     )
   }
 
