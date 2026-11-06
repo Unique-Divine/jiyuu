@@ -53,7 +53,7 @@ export interface DrainResult {
     | "capped"
     | "held"
     | "added"
-    | "invited"
+    | "privacy"
     | "failed"
     | "deferred"
     | "error"
@@ -81,8 +81,10 @@ function inviteHoldUntil(
 
 /**
  * One background add, when one is due, the daily cap allows, and no invite
- * hold is active. Success marks the row `added`; a privacy refusal gets an
- * invite link and `invited`; a per-user refusal is `failed`. A flood or
+ * hold is active. Success marks the row `added`; a privacy refusal marks it
+ * `privacy` and makes no link, since the ready receipt's shared
+ * `background_queue` link already covers the member, and does not count
+ * toward the daily cap; another per-user refusal is `failed`. A flood or
  * hold leaves the row pending until it ends, and other errors from the add
  * call retry after a gap up to `MAX_BACKGROUND_ATTEMPTS`. Errors before or
  * around the call (session, connect, identity checks, shutdown) defer the
@@ -120,23 +122,19 @@ export async function drainBackgroundOnce(params: {
     return { state: "held", ...at, nextAtMs: held }
   }
   const paced = nowMs + jitteredGapMs(pacing, params.random)
-  // Set only by an error the add or link call itself threw.
+  // Set only by an error the add call itself threw.
   let callError: { error: unknown } | null = null
   const outcome = await params
     .telegram(async (telegram) => {
       try {
-        try {
-          await telegram.add(row.chatId, row.userId)
-          return { state: "added" as const }
-        } catch (error) {
-          if (!isPrivacyRestriction(error) || !telegram.inviteLink) throw error
-          await telegram.inviteLink(row.chatId, row.userId)
+        await telegram.add(row.chatId, row.userId)
+        return { state: "added" as const }
+      } catch (error) {
+        if (isPrivacyRestriction(error))
           return {
-            state: "invited" as const,
+            state: "privacy" as const,
             error: safeProvisionError(error),
           }
-        }
-      } catch (error) {
         callError = { error }
         throw error
       }
@@ -147,14 +145,14 @@ export async function drainBackgroundOnce(params: {
       row.chatId,
       row.userId,
       outcome.state,
-      outcome.state === "invited" ? outcome.error : null,
+      outcome.state === "privacy" ? outcome.error : null,
       nowMs,
     )
     queue.pace(paced)
     return {
       state: outcome.state,
       ...at,
-      ...(outcome.state === "invited" ? { error: outcome.error } : {}),
+      ...(outcome.state === "privacy" ? { error: outcome.error } : {}),
       nextAtMs: paced,
     }
   }

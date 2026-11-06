@@ -112,7 +112,7 @@ describe("background drain", () => {
     expect(f.calls).toEqual([])
     expect(f.queue.summary().nextAtMs).toBe(NOW + 3_600_000)
   })
-  test("a privacy refusal creates an invite link and marks the row invited", async () => {
+  test("a privacy refusal makes no link, ends privacy, and skips the cap", async () => {
     const f = fixture({
       add: async () => {
         throw { text: "USER_PRIVACY_RESTRICTED", code: 403 }
@@ -120,14 +120,16 @@ describe("background drain", () => {
     })
     f.enqueue([1])
     expect(await f.drain()).toMatchObject({
-      state: "invited",
+      state: "privacy",
       error: "USER_PRIVACY_RESTRICTED",
     })
-    expect(f.calls).toEqual(["connect", "add:1", "link:1"])
+    expect(f.calls).toEqual(["connect", "add:1"])
     expect(f.queue.forChat(-100)[0]).toMatchObject({
-      state: "invited",
+      state: "privacy",
       attempts: 1,
+      lastError: "USER_PRIVACY_RESTRICTED",
     })
+    expect(f.queue.addsToday(NOW)).toBe(0)
   })
   test("a flood or hold leaves the row pending until it ends", async () => {
     for (const error of [

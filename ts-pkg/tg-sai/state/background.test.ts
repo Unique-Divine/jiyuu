@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite"
 import { describe, expect, test } from "bun:test"
 
 import {
@@ -9,7 +10,8 @@ import {
   nextUtcDayMs,
   utcDayStartMs,
 } from "./background.ts"
-import { openStateDb } from "./db.ts"
+import { openStateDb, STATE_MIGRATIONS } from "./db.ts"
+import { applyMigrations } from "../telemetry/db.ts"
 
 const DAY = Date.UTC(2026, 10, 6)
 
@@ -102,10 +104,31 @@ describe("background queue", () => {
     const q = queue()
     q.enqueue({ requestId: "a", chatId: -1, userIds: [1, 2, 3, 4], notBeforeMs: 0 })
     q.finish(-1, 1, "added", null, DAY - 1)
-    q.finish(-1, 2, "invited", "USER_PRIVACY_RESTRICTED", DAY + 1)
+    q.finish(-1, 2, "privacy", "USER_PRIVACY_RESTRICTED", DAY + 1)
     q.finish(-1, 3, "failed", "USER_KICKED", DAY + 2)
     q.defer(-1, 4, DAY + 9, "FLOOD_WAIT_1", DAY + 3)
-    expect(q.addsToday(DAY + 10)).toBe(2)
+    expect(q.addsToday(DAY + 10)).toBe(1)
     expect(q.summary()).toEqual({ pending: 1, nextAtMs: DAY + 9 })
+  })
+  test("0003 turns 0002 'invited' rows into 'privacy' and keeps the rest", () => {
+    const db = new Database(":memory:", { strict: true })
+    applyMigrations(db, STATE_MIGRATIONS.slice(0, 2))
+    db.run(
+      "INSERT INTO background_add VALUES " +
+        "('a', -1, 1, 'member', 5, 1, 'invited', 'USER_PRIVACY_RESTRICTED', 1, 2), " +
+        "('a', -1, 2, 'member', 7, 0, 'pending', NULL, 1, 1)",
+    )
+    applyMigrations(db, STATE_MIGRATIONS)
+    const q = new BackgroundQueue(db)
+    expect(q.forChat(-1).map((r) => [r.userId, r.state, r.attempts])).toEqual([
+      [1, "privacy", 1],
+      [2, "pending", 0],
+    ])
+    expect(() =>
+      db.run(
+        "INSERT INTO background_add VALUES " +
+          "('a', -1, 3, 'member', 0, 0, 'invited', NULL, 0, 0)",
+      ),
+    ).toThrow()
   })
 })

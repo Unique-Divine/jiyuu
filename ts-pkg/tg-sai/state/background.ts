@@ -2,8 +2,11 @@ import type { Database } from "bun:sqlite"
 
 import type { ProfileStoreEnv } from "../profiles.ts"
 
-/** States of a `background_add` row. */
-export type BackgroundState = "pending" | "added" | "invited" | "failed"
+/**
+ * States of a `background_add` row. `privacy` is a privacy refusal: the
+ * member joins through the receipt's shared link and costs no daily cap.
+ */
+export type BackgroundState = "pending" | "added" | "privacy" | "failed"
 
 /** One row of `background_add`, in camelCase. */
 export interface BackgroundMember {
@@ -114,12 +117,15 @@ function fromRow(row: BackgroundRow): BackgroundMember {
   }
 }
 
-/** Rows that cost an add call: their `updated_ms` is when it finished. */
-const FINISHED = "state IN ('added', 'invited', 'failed')"
+/**
+ * Rows that count toward the daily cap: their `updated_ms` is when the add
+ * call finished. A privacy refusal invited nobody, so it does not count.
+ */
+const FINISHED = "state IN ('added', 'failed')"
 
 /**
  * The `background_add` queue in `state.db`. Rows start `pending` and end
- * `added`, `invited` (privacy; an invite link was made), or `failed`.
+ * `added`, `privacy` (refused; the shared link covers it), or `failed`.
  */
 export class BackgroundQueue {
   constructor(private db: Database) {}

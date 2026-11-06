@@ -76,7 +76,9 @@ at a time, only on a tick with no setup job to run and no invite hold:
 | `TG_SAI_BACKGROUND_GAP_MS` | `1200000` (20 min) | Gap between adds, ±30 % |
 | `TG_SAI_BACKGROUND_DAILY_MAX` | `6` | Adds per UTC day; `0` stops them |
 
-A privacy refusal gets an invite link instead. The worker reports holds,
+A privacy refusal ends the row as `privacy` with no new link; the member
+joins through the shared link, and the refusal does not count toward the
+daily cap. The worker reports holds,
 adds today, and the queue to Deal Desk (`chat-setups custody-status`) when
 they change and every 5 minutes.
 
