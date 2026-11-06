@@ -1,9 +1,12 @@
+import { HOLD_ACCOUNT_UNKNOWN, holdErrorSeconds } from "./state/guard"
+import { parseWaitSeconds, rpcErrorText } from "./telemetry/middleware"
+
 /**
- * Structured event emitted by the batch action executor.
+ * Structured progress event emitted by the batch action executor.
  *
- * These objects are the source of truth for both test assertions and production
- * JSONL logs. Keep event payloads stable enough that a failed or interrupted
- * operator run can be inspected after the fact.
+ * These events are on-screen CLI progress (and copied to the run log). They do
+ * not retry: mtcute's flood waiter is the only retry layer, and every Telegram
+ * request, attempt, and flood wait is recorded by telemetry instead.
  */
 export type BatchActionEvent =
   | {
@@ -13,22 +16,6 @@ export type BatchActionEvent =
       chatId: number | string
       /** Stable action name, for example `bot_add`. */
       action: string
-      /** One-based attempt number for this action. */
-      attempt: number
-    }
-  | {
-      /** Telegram returned `FLOOD_WAIT_X` and the executor will retry later. */
-      type: "flood_wait"
-      /** Telegram chat ID or peer for the rate-limited action. */
-      chatId: number | string
-      /** Stable action name, for example `bot_promote_admin`. */
-      action: string
-      /** One-based attempt number that received the flood-wait error. */
-      attempt: number
-      /** Seconds Telegram requested in `FLOOD_WAIT_X`. */
-      waitSeconds: number
-      /** Milliseconds the executor sleeps, including configured buffer. */
-      sleepMs: number
     }
   | {
       /** Operation completed successfully. */
@@ -37,20 +24,16 @@ export type BatchActionEvent =
       chatId: number | string
       /** Stable action name, for example `owner_target_add`. */
       action: string
-      /** Number of attempts required before success. */
-      attempts: number
-      /** Elapsed milliseconds from first attempt to success. */
+      /** Elapsed milliseconds from start to success, flood sleeps included. */
       elapsedMs: number
     }
   | {
-      /** Operation failed with a non-retryable error or exhausted retries. */
+      /** Operation failed; mtcute already retried any short flood wait. */
       type: "action_error"
       /** Telegram chat ID or peer for the failed action. */
       chatId: number | string
       /** Stable action name, for example `transfer_owner`. */
       action: string
-      /** One-based attempt number that produced the final error. */
-      attempt: number
       /** Error name normalized for logs. */
       errorName: string
       /** Error message normalized for logs. */
@@ -78,22 +61,14 @@ export interface TelegramActionContext {
 }
 
 /**
- * Runtime dependencies for `withFloodWaitRetry`.
- *
- * Passing these in keeps retry behavior deterministic in tests: sleep, time, and
- * logging can all be faked without importing mtcute or touching Telegram.
+ * Runtime dependencies for `runTelegramAction`. Passing these in keeps event
+ * output deterministic in tests.
  */
 export interface TelegramActionExecutorDeps {
-  /** Event sink for action start, success, error, and flood-wait events. */
+  /** Event sink for action start, success, and error events. */
   logger: BatchLogger
-  /** Sleep function used after Telegram returns `FLOOD_WAIT_X`. */
-  sleep: (ms: number) => Promise<void>
   /** Clock function used to compute elapsed action time. */
   now: () => number
-  /** Number of retries after the first failed attempt. */
-  maxRetries: number
-  /** Extra milliseconds added to Telegram's required flood-wait duration. */
-  bufferMs: number
 }
 
 /**
@@ -108,28 +83,6 @@ export class MemoryBatchLogger implements BatchLogger {
   event(event: BatchActionEvent): void {
     this.events.push(event)
   }
-}
-
-/**
- * Extracts the wait duration from Telegram-style `FLOOD_WAIT_X` errors.
- *
- * mtcute and related libraries may expose the Telegram error string in the error
- * name, message, or both. This helper checks both fields and returns `null` for
- * non-flood errors so callers can distinguish retryable rate limits from normal
- * failures.
- */
-export function parseFloodWaitSeconds(error: unknown): number | null {
-  if (!(error instanceof Error)) {
-    return null
-  }
-
-  const haystack = `${error.name} ${error.message}`
-  const match = haystack.match(/FLOOD_WAIT_(\d+)/)
-  if (!match) {
-    return null
-  }
-
-  return Number(match[1])
 }
 
 /**
@@ -153,67 +106,166 @@ export function errorMessage(error: unknown): string {
 }
 
 /**
- * Runs one Telegram operation with `FLOOD_WAIT_X` retry handling.
+ * Runs one Telegram operation once and reports start, success, or error.
  *
- * The operation is passed as a thunk so the executor can call the exact same
- * Telegram action after waiting. Non-flood errors and exhausted retry attempts
- * are logged as `action_error` and then rethrown for the batch runner to record
- * at the chat level.
+ * There is no retry here: short `FLOOD_WAIT_X` waits are slept through by
+ * mtcute's flood waiter, and longer ones surface as errors. Errors are logged
+ * as `action_error` and rethrown for the batch runner to record per chat.
  */
-export async function withFloodWaitRetry<T>(
+export async function runTelegramAction<T>(
   context: TelegramActionContext,
   operation: () => Promise<T>,
   deps: TelegramActionExecutorDeps,
 ): Promise<T> {
   const startedAt = deps.now()
-  const maxAttempts = deps.maxRetries + 1
-
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+  await deps.logger.event({
+    type: "action_start",
+    chatId: context.chatId,
+    action: context.action,
+  })
+  try {
+    const result = await operation()
     await deps.logger.event({
-      type: "action_start",
+      type: "action_success",
       chatId: context.chatId,
       action: context.action,
-      attempt,
+      elapsedMs: deps.now() - startedAt,
     })
+    return result
+  } catch (error) {
+    await deps.logger.event({
+      type: "action_error",
+      chatId: context.chatId,
+      action: context.action,
+      errorName: errorName(error),
+      errorMessage: errorMessage(error),
+    })
+    throw error
+  }
+}
 
-    try {
-      const result = await operation()
-      await deps.logger.event({
-        type: "action_success",
-        chatId: context.chatId,
-        action: context.action,
-        attempts: attempt,
-        elapsedMs: deps.now() - startedAt,
-      })
-      return result
-    } catch (error) {
-      const waitSeconds = parseFloodWaitSeconds(error)
-      const canRetry = waitSeconds !== null && attempt < maxAttempts
+/** Text of `HoldStoreUnavailableError` (state/holds.ts). */
+const HOLD_STATE_UNAVAILABLE = "TG_SAI_HOLD_STATE_UNAVAILABLE"
 
-      if (!canRetry) {
-        await deps.logger.event({
-          type: "action_error",
-          chatId: context.chatId,
-          action: context.action,
-          attempt,
-          errorName: errorName(error),
-          errorMessage: errorMessage(error),
-        })
-        throw error
-      }
+/** Why a batch stopped early on a Telegram rate limit. */
+export interface FloodStop {
+  /**
+   * Telegram error code, e.g. `FLOOD_WAIT_15382` or `PEER_FLOOD`, or the
+   * local guard's `TG_SAI_HOLD_<s>`, `TG_SAI_HOLD_STATE_UNAVAILABLE`, or
+   * `TG_SAI_HOLD_ACCOUNT_UNKNOWN`.
+   */
+  code: string
+  /** Wait Telegram asked for; `null` for `PEER_FLOOD` and unreadable holds. */
+  waitS: number | null
+  /** When the wait ends (ISO); `null` when no time is known. */
+  resumeAt: string | null
+  /**
+   * The local guard refused before sending (a saved hold, or holds that
+   * cannot be checked). Such stops exit 75; Telegram's own errors exit 1.
+   */
+  hold: boolean
+}
 
-      const sleepMs = waitSeconds * 1000 + deps.bufferMs
-      await deps.logger.event({
-        type: "flood_wait",
-        chatId: context.chatId,
-        action: context.action,
-        attempt,
-        waitSeconds,
-        sleepMs,
-      })
-      await deps.sleep(sleepMs)
+function holdUntilMs(error: unknown): number | null {
+  const untilMs = (error as { untilMs?: unknown } | null)?.untilMs
+  return typeof untilMs === "number" && Number.isFinite(untilMs)
+    ? untilMs
+    : null
+}
+
+/**
+ * Returns a stop when `error` means the rest of a batch would only hit the
+ * same limit: any `PEER_FLOOD`, a `FLOOD_WAIT_X` (and premium/test-phone
+ * variants) longer than `maxWaitMs`, which mtcute did not sleep through, or
+ * a refusal by the local flood guard (`TG_SAI_HOLD_<s>`, unreadable hold
+ * state, unknown session account). `SLOWMODE_WAIT_X` is per chat, so it
+ * returns `null` and the batch goes on.
+ */
+export function floodStopFor(
+  error: unknown,
+  maxWaitMs: number,
+  nowMs: number,
+): FloodStop | null {
+  const code = rpcErrorText(error)
+  if (code === null) return null
+  if (code === HOLD_STATE_UNAVAILABLE || code === HOLD_ACCOUNT_UNKNOWN) {
+    return { code, waitS: null, resumeAt: null, hold: true }
+  }
+  const holdS = holdErrorSeconds(code)
+  if (holdS !== null) {
+    const untilMs = holdUntilMs(error) ?? nowMs + holdS * 1000
+    return {
+      code,
+      waitS: holdS,
+      resumeAt: new Date(untilMs).toISOString(),
+      hold: true,
     }
   }
+  if (code === "PEER_FLOOD") {
+    return { code, waitS: null, resumeAt: null, hold: false }
+  }
+  if (code.startsWith("SLOWMODE_WAIT_")) return null
+  const waitS = parseWaitSeconds(code)
+  if (waitS === null || waitS * 1000 <= maxWaitMs) return null
+  return {
+    code,
+    waitS,
+    resumeAt: new Date(nowMs + waitS * 1000).toISOString(),
+    hold: false,
+  }
+}
 
-  throw new Error(`unreachable action executor state: ${context.action}`)
+/** A flood stop plus where in the batch it happened. */
+export interface BatchStop<T> extends FloodStop {
+  item: T
+  /** Zero-based index of the item that hit the limit. */
+  index: number
+  /** Items after it that were not started. */
+  remaining: number
+}
+
+export interface ChatBatchOptions<T> {
+  /** Runs one item; a throw is reported to `onItemError`. */
+  processItem: (item: T, index: number) => Promise<void>
+  /** Records a per-item failure; the batch continues unless it stops. */
+  onItemError: (item: T, error: unknown, index: number) => void | Promise<void>
+  /** Runs between items (e.g. the inter-chat delay), not after the last. */
+  betweenItems?: (item: T, index: number) => void | Promise<void>
+  /** Flood waits longer than this stop the batch. */
+  maxWaitMs: number
+  now?: () => number
+}
+
+/**
+ * Processes `items` in order, isolating per-item errors, and stops at the
+ * first error `floodStopFor` treats as batch-wide.
+ */
+export async function runChatBatch<T>(
+  items: readonly T[],
+  options: ChatBatchOptions<T>,
+): Promise<{ processed: number; floodStop: BatchStop<T> | null }> {
+  const now = options.now ?? Date.now
+  let processed = 0
+  for (const [index, item] of items.entries()) {
+    processed += 1
+    try {
+      await options.processItem(item, index)
+    } catch (error) {
+      await options.onItemError(item, error, index)
+      const stop = floodStopFor(error, options.maxWaitMs, now())
+      if (stop) {
+        return {
+          processed,
+          floodStop: {
+            ...stop,
+            item,
+            index,
+            remaining: items.length - index - 1,
+          },
+        }
+      }
+    }
+    if (index < items.length - 1) await options.betweenItems?.(item, index)
+  }
+  return { processed, floodStop: null }
 }

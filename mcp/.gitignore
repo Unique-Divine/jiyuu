@@ -1,0 +1,21 @@
+# Account credentials and local runtime state stay outside source control.
+.env
+.env.*
+!.env.example
+*.session
+*.session-*
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.log
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+node_modules/
+downloads/
+coverage/

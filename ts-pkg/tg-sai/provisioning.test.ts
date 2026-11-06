@@ -1,0 +1,1098 @@
+import { describe, expect, setSystemTime, test } from "bun:test"
+import { mkdtemp, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { holdExitFor } from "./main"
+import { addProfile, strictProfileCredentials } from "./profiles"
+import {
+  BOT_BASELINE_RIGHTS,
+  cloudRetryAt,
+  creationMarker,
+  definiteCreateRejection,
+  isPerUserAddError,
+  MIN_CLOUD_RETRY_MS,
+  PROVISIONING_BOT_ID,
+  provisionRetryAt,
+  provisionSetup,
+  requestFingerprint,
+  safeProvisionError,
+  TEAM_ADMIN_RIGHTS,
+  validateRequest,
+} from "./provisioning"
+import type {
+  JournalRecord,
+  Member,
+  Progress,
+  ProvisionCloud,
+  ProvisionJournal,
+  ProvisionRequest,
+  Setup,
+  TelegramProvisioner,
+} from "./provisioning"
+import {
+  CliProvisionCloud,
+  cloudRequest,
+  dealDeskRequestKey,
+} from "./provisioningCloud"
+import { HoldError } from "./state/guard"
+import { holdUntil, HoldStoreUnavailableError } from "./state/holds"
+import {
+  accountPaths,
+  FileProvisionJournal,
+  normalizeProvisioningMember,
+  withAccountLock,
+} from "./provisioningRuntime"
+
+function request(): ProvisionRequest {
+  return {
+    requestId: "test-setup-1",
+    custodyProfile: "custody",
+    expectedUserId: 10,
+    title: "Sai test",
+    participants: ["alice", 22],
+    admins: [{ userId: 22, rightsProfile: "team" }],
+    botRightsProfile: "baseline",
+    dealIds: ["deal-a", "deal-b"],
+  }
+}
+function fixture() {
+  let setup: Setup = { ...request(), state: "prepared" }
+  let local: JournalRecord | null = null
+  const events: string[] = []
+  const members = new Map<number, Member>([
+    [10, { role: "creator", rights: {} }],
+  ])
+  const cloud: ProvisionCloud = {
+    view: async () => structuredClone(setup),
+    claim: async (_id, workerId) => {
+      events.push(`claim:${workerId}`)
+      setup = { ...setup, claimToken: "claim" }
+      return structuredClone(setup)
+    },
+    progress: async (_id, _token, progress) => {
+      events.push(`cloud:${progress.state}`)
+      setup = { ...setup, ...progress }
+      return structuredClone(setup)
+    },
+    resolve: async (_id, chatId) => {
+      setup = { ...setup, state: "configuring", chatId }
+      return structuredClone(setup)
+    },
+  }
+  const journal: ProvisionJournal = {
+    read: async () => structuredClone(local),
+    write: async (_id, record) => {
+      events.push(`local:${record.state}:${record.chatId ?? "none"}`)
+      local = structuredClone(record)
+    },
+  }
+  const telegram: TelegramProvisioner = {
+    self: async () => 10,
+    resolve: async (peer) => ({
+      id: peer === "alice" ? 21 : Number(peer),
+      isBot: false,
+    }),
+    create: async () => {
+      events.push("create")
+      return -100123
+    },
+    member: async (_chat, id) =>
+      members.get(id) ?? { role: "absent", rights: {} },
+    add: async (_chat, id) => {
+      events.push(`add:${id}`)
+      members.set(id, { role: "member", rights: {} })
+    },
+    promote: async (_chat, id, rights) => {
+      events.push(`promote:${id}`)
+      members.set(id, { role: "admin", rights })
+    },
+    candidates: async () => [-100123],
+    verifyMarker: async () => true,
+  }
+  return {
+    cloud,
+    journal,
+    telegram,
+    events,
+    members,
+    get setup() {
+      return setup
+    },
+    set setup(value: Setup) {
+      setup = value
+    },
+    get local() {
+      return local
+    },
+    set local(value: JournalRecord | null) {
+      local = value
+    },
+    run: () =>
+      provisionSetup({
+        setup,
+        cloud,
+        journal,
+        telegram,
+        workerId: "worker-one",
+      }),
+  }
+}
+
+describe("custody provisioning", () => {
+  test("receipt verification time precedes completion link reads", async () => {
+    const f = fixture()
+    const auditTime = new Date("2026-11-05T05:00:00.000Z")
+    try {
+      setSystemTime(auditTime)
+      f.telegram.completionLinks = async () => {
+        setSystemTime(new Date(auditTime.getTime() + 10_000))
+        return {}
+      }
+      expect((await f.run()).state).toBe("ready")
+      expect((f.setup.receipt as { verifiedAt: string }).verifiedAt).toBe(
+        auditTime.toISOString(),
+      )
+    } finally {
+      setSystemTime()
+    }
+  })
+  test("completion links are saved after verification and ready jobs are not rewritten", async () => {
+    const f = fixture()
+    let reads = 0
+    f.telegram.completionLinks = async (chatId) => {
+      reads++
+      expect(chatId).toBe(Number(f.setup.chatId))
+      expect(f.members.get(22)?.role).toBe("admin")
+      return {
+        openGroupUrl: "https://t.me/c/123/47",
+        primaryInviteLink: "https://t.me/+fixturePrimary",
+      }
+    }
+    const first = await f.run()
+    expect(f.setup.receipt).toMatchObject({
+      openGroupUrl: "https://t.me/c/123/47",
+      primaryInviteLink: "https://t.me/+fixturePrimary",
+    })
+    const receipt = structuredClone(f.setup.receipt)
+    await f.run()
+    expect(f.setup.receipt).toEqual(receipt)
+    expect(reads).toBe(1)
+    expect(f.events.filter((event) => event === "create")).toHaveLength(1)
+  })
+  test("link failure does not fail verified setup or trigger another group", async () => {
+    const f = fixture()
+    f.telegram.completionLinks = async () => {
+      throw { text: "FLOOD_WAIT_500", code: 420 }
+    }
+    const first = await f.run()
+    expect(first.state).toBe("ready")
+    expect(f.setup.receipt).not.toHaveProperty("openGroupUrl")
+    expect(f.setup.receipt).not.toHaveProperty("primaryInviteLink")
+    expect((await f.run()).state).toBe("ready")
+    expect(f.events.filter((event) => event === "create")).toHaveLength(1)
+  })
+  test("a creation retry after explicit flood rejection writes a new creating transition before Telegram", async () => {
+    const f = fixture()
+    f.setup = {
+      ...f.setup,
+      participants: ["alice", "22"],
+      admins: [{ userId: "22", rightsProfile: "team" }],
+    }
+    const receipts = new Map<string, unknown>()
+    const creatingKeys: string[] = []
+    const wire = () => ({
+      ...cloudRequest(f.setup),
+      state: f.setup.state,
+      chatId: f.setup.chatId ? String(f.setup.chatId) : null,
+      claimToken: "current-token",
+      resolvedParticipants: f.setup.binding?.participants.map(String),
+      resolvedAdmins: f.setup.binding?.admins.map(String),
+    })
+    const cloud = new CliProvisionCloud(async (operation, input) => {
+      if (operation === "view") return wire()
+      const key = dealDeskRequestKey(operation, input)
+      if (operation === "progress" && input.state === "creating")
+        creatingKeys.push(key)
+      if (receipts.has(key)) return structuredClone(receipts.get(key))
+      if (operation === "progress") {
+        if (
+          input.state === "configuring" &&
+          !f.setup.chatId &&
+          f.setup.state !== "creating"
+        )
+          throw new Error("Configuring requires authoritative creating intent")
+        f.setup = {
+          ...f.setup,
+          state: input.state as Setup["state"],
+          ...(input.chatId ? { chatId: Number(input.chatId) } : {}),
+          ...(Array.isArray(input.resolvedParticipants)
+            ? {
+                binding: {
+                  participants: input.resolvedParticipants.map(Number),
+                  admins: (input.resolvedAdmins as string[]).map(Number),
+                },
+              }
+            : {}),
+        }
+      } else if (operation !== "claim") throw new Error("Unexpected operation")
+      const output = wire()
+      receipts.set(key, structuredClone(output))
+      return output
+    })
+    let attempts = 0
+    const create = f.telegram.create
+    f.telegram.create = async (...args) => {
+      // This assertion detects a replayed receipt that did not update the DB.
+      expect(f.setup.state).toBe("creating")
+      if (++attempts === 1) throw { text: "FLOOD_WAIT_1", code: 420 }
+      return create(...args)
+    }
+    const run = () =>
+      provisionSetup({
+        setup: f.setup,
+        telegram: f.telegram,
+        cloud,
+        journal: f.journal,
+        workerId: "worker-one",
+      })
+    await expect(run()).rejects.toThrow("Group creation failed")
+    expect(f.setup.state).toBe("incomplete")
+    expect(f.setup.chatId).toBeUndefined()
+    expect((await run()).state).toBe("ready")
+    expect(creatingKeys).toHaveLength(2)
+    expect(new Set(creatingKeys).size).toBe(2)
+    expect(attempts).toBe(2)
+    expect(f.events.filter((event) => event === "create")).toHaveLength(1)
+    expect(f.setup.chatId).toBe(-100123)
+  })
+  test("recovered claim reacquires a current token for the same journal worker without creating another chat", async () => {
+    const f = fixture()
+    const binding = { participants: [21, 22], admins: [22] }
+    f.setup = {
+      ...f.setup,
+      participants: ["alice", "22"],
+      admins: [{ userId: "22", rightsProfile: "team" }],
+      state: "configuring",
+      chatId: -100123,
+      binding,
+    }
+    f.local = {
+      fingerprint: requestFingerprint(f.setup),
+      state: "configuring",
+      chatId: -100123,
+      binding,
+      workerId: "original-worker",
+    }
+    let token: string | undefined
+    let epoch = 0
+    const receipts = new Map<string, unknown>()
+    const claimKeys: string[] = []
+    const wire = () => ({
+      ...cloudRequest(f.setup),
+      state: f.setup.state,
+      chatId: String(f.setup.chatId),
+      claimToken: token,
+      resolvedParticipants: binding.participants.map(String),
+      resolvedAdmins: binding.admins.map(String),
+    })
+    const cloud = new CliProvisionCloud(async (operation, input) => {
+      if (operation === "view") return wire()
+      const key = dealDeskRequestKey(operation, input)
+      if (operation === "claim") claimKeys.push(key)
+      if (receipts.has(key)) return structuredClone(receipts.get(key))
+      if (operation === "claim") {
+        expect(input.workerId).toBe("original-worker")
+        token ??= `current-token-${++epoch}`
+      } else if (operation === "progress") {
+        if (input.claimToken !== token) throw new Error("Claim no longer valid")
+        f.setup = { ...f.setup, state: input.state as Setup["state"] }
+      } else throw new Error("Unexpected operation")
+      const output = wire()
+      receipts.set(key, structuredClone(output))
+      return output
+    })
+    const first = await cloud.claim(f.setup.requestId, "original-worker")
+    expect(first.claimToken).toBe("current-token-1")
+    // Operator recovery revokes the old claim while preserving the known chat.
+    token = undefined
+    const result = await provisionSetup({
+      setup: f.setup,
+      telegram: f.telegram,
+      cloud,
+      journal: f.journal,
+      workerId: "new-process-worker",
+    })
+    expect(result.state).toBe("ready")
+    expect(claimKeys).toHaveLength(2)
+    expect(new Set(claimKeys).size).toBe(2)
+    expect(String(token)).toBe("current-token-2")
+    expect(f.events.filter((event) => event === "create")).toHaveLength(0)
+    expect(f.setup.chatId).toBe(-100123)
+    const progress = {
+      requestId: "id",
+      claimToken: "token",
+      state: "configuring",
+    }
+    expect(dealDeskRequestKey("progress", progress)).not.toBe(
+      dealDeskRequestKey("progress", progress),
+    )
+    expect(dealDeskRequestKey("prepare", { requestId: "id" })).toBe(
+      dealDeskRequestKey("prepare", { requestId: "id" }),
+    )
+  })
+  test("Telegram's implicit other admin right passes the final membership audit", async () => {
+    const f = fixture()
+    f.telegram.promote = async (_chatId, userId, rights) => {
+      // Captured mtcute permissions include this true flag for every admin.
+      f.members.set(
+        userId,
+        normalizeProvisioningMember({
+          status: "admin",
+          isMember: true,
+          permissions: { _: "chatAdminRights", ...rights, other: true },
+        }),
+      )
+    }
+    expect((await f.run()).state).toBe("ready")
+    expect(BOT_BASELINE_RIGHTS.other).toBe(true)
+    expect(TEAM_ADMIN_RIGHTS.other).toBe(true)
+    expect(BOT_BASELINE_RIGHTS.addAdmins).toBe(false)
+    expect(BOT_BASELINE_RIGHTS.deleteMessages).toBe(false)
+    expect(BOT_BASELINE_RIGHTS.banUsers).toBe(false)
+  })
+  test("flushes creation intent before RPC, records identity immediately, and verifies exact privileges", async () => {
+    const f = fixture()
+    const result = await f.run()
+    expect(result.state).toBe("ready")
+    expect(f.events.indexOf("local:creating:none")).toBeLessThan(
+      f.events.indexOf("create"),
+    )
+    expect(f.events[f.events.indexOf("create") + 1]).toBe(
+      "local:configuring:-100123",
+    )
+    expect(f.members.get(21)?.role).toBe("member")
+    expect(f.members.get(22)).toEqual({
+      role: "admin",
+      rights: TEAM_ADMIN_RIGHTS,
+    })
+    expect(f.members.get(PROVISIONING_BOT_ID)).toEqual({
+      role: "admin",
+      rights: BOT_BASELINE_RIGHTS,
+    })
+    expect(BOT_BASELINE_RIGHTS.addAdmins).toBe(false)
+    expect(BOT_BASELINE_RIGHTS.deleteMessages).toBe(false)
+    expect(f.setup.dealIds).toEqual(["deal-a", "deal-b"])
+    expect((f.setup.receipt as { chatId: string }).chatId).toBe(
+      String(f.setup.chatId),
+    )
+  })
+  test("privacy-blocked optional member remains pending with a controlled link while required admins verify", async () => {
+    const f = fixture()
+    f.setup = { ...f.setup, optionalParticipants: ["alice"] }
+    const add = f.telegram.add
+    f.telegram.add = async (chat, id) => {
+      if (id === 21) throw { text: "USER_PRIVACY_RESTRICTED" }
+      return add(chat, id)
+    }
+    let links = 0
+    f.telegram.inviteLink = async () => {
+      links++
+      return {
+        inviteLink: "https://t.me/+fixtureLink",
+        expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+      }
+    }
+    const result = await f.run()
+    expect(result.state).toBe("ready")
+    expect(links).toBe(1)
+    const receipt = f.setup.receipt as {
+      pendingInvitations: { userId: string }[]
+      participants: { userId: string; role: string }[]
+    }
+    expect(receipt.pendingInvitations[0]?.userId).toBe("21")
+    expect(
+      receipt.participants.find((member) => member.userId === "21")?.role,
+    ).toBe("absent")
+    expect(f.members.get(22)?.role).toBe("admin")
+    expect(f.events.filter((event) => event === "create")).toHaveLength(1)
+  })
+  test("optional invitation never masks a flood wait or failed required admin", async () => {
+    for (const error of [
+      { text: "FLOOD_WAIT_30", code: 420 },
+      { text: "USER_PRIVACY_RESTRICTED" },
+    ]) {
+      const f = fixture()
+      f.setup = { ...f.setup, optionalParticipants: ["alice"] }
+      f.telegram.add = async (_chat, id) => {
+        if (id === 22) throw error
+        f.members.set(id, { role: "member", rights: {} })
+      }
+      f.telegram.inviteLink = async () => {
+        throw new Error("must not create a link for required admin")
+      }
+      await expect(f.run()).rejects.toThrow("Setup incomplete")
+      expect(f.setup.state).toBe("incomplete")
+      expect(f.setup.chatId).toBe(-100123)
+      if (error.text === "FLOOD_WAIT_30")
+        expect(Date.parse(f.setup.retryAt!)).toBeGreaterThan(Date.now())
+    }
+  })
+  test("ready setup rechecks live custody owner and bot/admin rights", async () => {
+    const f = fixture()
+    await f.run()
+    f.members.set(PROVISIONING_BOT_ID, { role: "member", rights: {} })
+    await expect(f.run()).rejects.toThrow("rights changed")
+    expect(f.events.filter((event) => event === "create")).toHaveLength(1)
+  })
+  test("optional participants cannot include admins or arbitrary outsiders", () => {
+    expect(() =>
+      validateRequest({ ...request(), optionalParticipants: [22] }),
+    ).toThrow("Optional participants")
+    expect(() =>
+      validateRequest({ ...request(), optionalParticipants: [99] }),
+    ).toThrow("Optional participants")
+  })
+  test("stale prepared claim replay cannot recreate a group after authoritative creation", async () => {
+    const f = fixture()
+    const original = { ...f.setup, claimToken: "claim" }
+    f.cloud.claim = async () => {
+      f.setup = {
+        ...f.setup,
+        state: "configuring",
+        chatId: -100123,
+        binding: { participants: [21, 22], admins: [22] },
+      }
+      return original
+    }
+    expect((await f.run()).state).toBe("ready")
+    expect(f.events).not.toContain("create")
+  })
+  test("stale claim replay with creating cloud state becomes unknown without creating", async () => {
+    const f = fixture()
+    const original = { ...f.setup, claimToken: "claim" }
+    f.cloud.claim = async () => {
+      f.setup = { ...f.setup, state: "creating" }
+      return original
+    }
+    expect(await f.run()).toEqual({
+      state: "creation_unknown",
+      candidates: [-100123],
+    })
+    expect(f.setup.state).toBe("creation_unknown")
+    expect(f.events).not.toContain("create")
+  })
+  test("wrong account aborts before claims or Telegram writes", async () => {
+    const f = fixture()
+    f.telegram.self = async () => 99
+    await expect(f.run()).rejects.toThrow("identity mismatch")
+    expect(f.events).toEqual([])
+  })
+  test("transport timeout leaves unknown creation and never creates on resume", async () => {
+    const f = fixture()
+    f.telegram.create = async () => {
+      f.events.push("create")
+      throw new Error("network timeout")
+    }
+    await expect(f.run()).rejects.toThrow("Group creation failed")
+    expect(f.setup.state).toBe("creation_unknown")
+    expect(f.setup).not.toHaveProperty("creationRejected")
+    expect(await f.run()).toEqual({
+      state: "creation_unknown",
+      candidates: [-100123],
+    })
+    expect(f.events.filter((e) => e === "create")).toHaveLength(1)
+  })
+  test("a process crash during creating becomes unknown, with known private result as candidate", async () => {
+    const f = fixture()
+    f.setup = {
+      ...f.setup,
+      state: "creating",
+      binding: { participants: [21, 22], admins: [22] },
+    }
+    f.local = {
+      fingerprint: requestFingerprint(f.setup),
+      state: "configuring",
+      chatId: -100123,
+      workerId: "original",
+    }
+    expect(await f.run()).toEqual({
+      state: "creation_unknown",
+      candidates: [-100123],
+    })
+    expect(f.setup.state).toBe("creation_unknown")
+    expect(f.events).not.toContain("create")
+  })
+  test("privacy failures retain group and frozen IDs; resume does not re-resolve handles", async () => {
+    const f = fixture()
+    const add = f.telegram.add
+    f.telegram.add = async (chat, id) => {
+      if (id === 22) throw new Error("privacy")
+      await add(chat, id)
+    }
+    await expect(f.run()).rejects.toThrow("incomplete")
+    expect(f.setup.state).toBe("incomplete")
+    expect(f.setup.chatId).toBe(-100123)
+    f.telegram.add = add
+    f.telegram.resolve = async () => {
+      throw new Error("must use bound identity")
+    }
+    expect((await f.run()).state).toBe("ready")
+    expect(f.events.filter((e) => e === "create")).toHaveLength(1)
+    expect(f.events.filter((e) => e === "add:21")).toHaveLength(1)
+    expect(f.events.filter((e) => e.startsWith("claim:"))).toEqual([
+      "claim:worker-one",
+      "claim:worker-one",
+    ])
+  })
+  test("flood waits preserve incomplete state and sanitized retry duration", async () => {
+    const f = fixture()
+    f.telegram.add = async () => {
+      throw Object.assign(new Error("unsafe context"), {
+        text: "FLOOD_WAIT_%d",
+        seconds: 40,
+        code: 420,
+      })
+    }
+    await expect(f.run()).rejects.toThrow("incomplete")
+    expect(f.setup.state).toBe("incomplete")
+    expect((f.setup as Setup & { error: string }).error).toBe(
+      "add_member:FLOOD_WAIT_40",
+    )
+    expect(safeProvisionError(new Error("session string"))).toBe(
+      "provisioning_step_failed",
+    )
+  })
+  test("failed setup records the exact operation without copying private error bodies", async () => {
+    const cases = [
+      ["verify_marker", "verifyMarker"],
+      ["read_member", "member"],
+      ["add_member", "add"],
+      ["promote_admin", "promote"],
+    ] as const
+    for (const [step, method] of cases) {
+      const f = fixture()
+      f.telegram[method] = async () => {
+        throw new Error("private-session-and-link")
+      }
+      await expect(f.run()).rejects.toThrow("incomplete")
+      expect((f.setup as Setup & { error: string }).error).toBe(
+        `${step}:provisioning_step_failed`,
+      )
+      expect(f.setup.chatId).toBe(-100123)
+      expect(f.events.filter((event) => event === "create")).toHaveLength(1)
+    }
+    expect(safeProvisionError({ text: "SECRET_SESSION_VALUE" })).toBe(
+      "provisioning_step_failed",
+    )
+    expect(safeProvisionError({ text: "USER_NOT_PARTICIPANT" })).toBe(
+      "USER_NOT_PARTICIPANT",
+    )
+  })
+  test("missing privileges prevent readiness", async () => {
+    const f = fixture()
+    f.telegram.promote = async () => {}
+    await expect(f.run()).rejects.toThrow("incomplete")
+    expect(f.setup.state).toBe("incomplete")
+  })
+  test("unexpected admin on an ordinary participant prevents readiness", async () => {
+    const f = fixture()
+    f.members.set(21, { role: "admin", rights: TEAM_ADMIN_RIGHTS })
+    await expect(f.run()).rejects.toThrow("incomplete")
+  })
+  test("ambiguous ready response reads authoritative committed result without regression", async () => {
+    const f = fixture()
+    const progress = f.cloud.progress
+    f.cloud.progress = async (id, token, value) => {
+      const result = await progress(id, token, value)
+      if (value.state === "ready") throw new Error("lost response")
+      return result
+    }
+    expect((await f.run()).state).toBe("ready")
+    expect(f.events).not.toContain("cloud:incomplete")
+  })
+  test("binding preserves cloud counts and requires listed admins to be participants", async () => {
+    const f = fixture()
+    f.setup = { ...f.setup, participants: ["alice"] }
+    await expect(f.run()).rejects.toThrow("Invalid account binding")
+    expect(f.events).not.toContain("create")
+  })
+  test("binding rejects two handles for the same user and custody-account participants", async () => {
+    for (const participants of [
+      ["alice", 21],
+      [10, 22],
+    ]) {
+      const f = fixture()
+      f.setup = { ...f.setup, participants, admins: [] }
+      await expect(f.run()).rejects.toThrow("Invalid account binding")
+      expect(f.events).not.toContain("create")
+    }
+  })
+  test("an explicit flood rejection permits creation retry without duplicating a successful group", async () => {
+    const f = fixture()
+    const create = f.telegram.create
+    f.telegram.create = async () => {
+      throw Object.assign(new Error("rate limit"), {
+        code: 420,
+        text: "FLOOD_WAIT_%d",
+        seconds: 1,
+      })
+    }
+    await expect(f.run()).rejects.toThrow("Group creation failed")
+    expect(f.setup.state).toBe("incomplete")
+    expect(
+      (f.setup as Setup & { creationRejected?: boolean }).creationRejected,
+    ).toBe(true)
+    f.telegram.create = create
+    expect((await f.run()).state).toBe("ready")
+    expect(f.events.filter((e) => e === "create")).toHaveLength(1)
+  })
+  test("invalid bot participant fails before creation", async () => {
+    const f = fixture()
+    f.telegram.resolve = async () => ({ id: PROVISIONING_BOT_ID, isBot: true })
+    await expect(f.run()).rejects.toThrow("user accounts")
+    expect(f.events).not.toContain("create")
+  })
+})
+
+describe("account and cloud boundaries", () => {
+  test("strict profile ignores complete environment fallback and rejects unknown IDs", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tg-provision-profile-"))
+    const env = {
+      TG_SAI_DIR: root,
+      TELEGRAM_API_ID: "999",
+      TELEGRAM_API_HASH: "environment-hash",
+      TELEGRAM_SESSION_STRING: "environment-session",
+    }
+    try {
+      await addProfile(
+        {
+          name: "custody",
+          apiId: 123,
+          apiHash: "profile-hash",
+          sessionString: "profile-session",
+          password: "",
+          handle: "custody",
+          userId: 10,
+          displayName: "Custody",
+        },
+        env,
+      )
+      expect(await strictProfileCredentials("custody", 10, env)).toEqual({
+        apiId: 123,
+        apiHash: "profile-hash",
+        sessionString: "profile-session",
+      })
+      await expect(
+        strictProfileCredentials("missing", 10, env),
+      ).rejects.toThrow("not configured")
+      await expect(
+        strictProfileCredentials("custody", 99, env),
+      ).rejects.toThrow("mismatch")
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+  test("account paths isolate sessions and lock excludes concurrent workers", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tg-provision-lock-"))
+    try {
+      const one = accountPaths(root, 10),
+        two = accountPaths(root, 20)
+      expect(one.storage).not.toBe(two.storage)
+      await withAccountLock(one.lock, async () => {
+        await expect(withAccountLock(one.lock, async () => {})).rejects.toThrow(
+          "locked",
+        )
+        await withAccountLock(two.lock, async () => {})
+      })
+      await withAccountLock(one.lock, async () => {})
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+  test("kernel custody lock is released after an executor process is killed", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tg-provision-crash-"))
+    const lock = accountPaths(root, 10).lock
+    const script = `import {withAccountLock} from ${JSON.stringify(join(import.meta.dir, "provisioningRuntime.ts"))}; await withAccountLock(${JSON.stringify(lock)}, async()=>{console.log("held"); await new Promise(()=>{})})`
+    const child = Bun.spawn([process.execPath, "-e", script], {
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+    try {
+      const reader = child.stdout.getReader()
+      const first = await reader.read()
+      reader.releaseLock()
+      expect(new TextDecoder().decode(first.value).trim()).toBe("held")
+      await expect(withAccountLock(lock, async () => {})).rejects.toThrow(
+        "locked",
+      )
+      child.kill("SIGKILL")
+      await child.exited
+      // The guard subprocess observes stdin EOF after the parent dies.
+      let acquired = false
+      for (let i = 0; i < 30 && !acquired; i++) {
+        try {
+          await withAccountLock(lock, async () => {
+            acquired = true
+          })
+        } catch {
+          await new Promise((resolve) => setTimeout(resolve, 10))
+        }
+      }
+      expect(acquired).toBe(true)
+    } finally {
+      if (child.exitCode === null) {
+        child.kill("SIGKILL")
+        await child.exited
+      }
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+  test("journal safely replaces private recovery receipts", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tg-provision-journal-"))
+    try {
+      const journal = new FileProvisionJournal(root)
+      expect(await journal.read("new")).toBeNull()
+      await journal.write("new", { fingerprint: "fp", state: "creating" })
+      await journal.write("new", {
+        fingerprint: "fp",
+        state: "configuring",
+        chatId: -100123,
+      })
+      expect(await journal.read("new")).toEqual({
+        fingerprint: "fp",
+        state: "configuring",
+        chatId: -100123,
+      })
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+  test("cloud adapter binds numeric strings and emits exact typed contract", async () => {
+    const calls: { operation: string; input: Record<string, unknown> }[] = []
+    const requestValue = request()
+    const cloud = new CliProvisionCloud(async (operation, input) => {
+      calls.push({ operation, input })
+      return {
+        ...cloudRequest(requestValue),
+        state: operation === "progress" ? input.state : "prepared",
+        chatId: null,
+        resolvedParticipants: ["21", "22"],
+        resolvedAdmins: ["22"],
+        claimToken: "token",
+      }
+    })
+    const result = await cloud.prepare(requestValue)
+    expect(calls[0]?.input.expectedUserId).toBe("10")
+    expect(
+      cloudRequest({
+        ...requestValue,
+        state: "prepared",
+        claimToken: "secret",
+      } as ProvisionRequest),
+    ).not.toHaveProperty("claimToken")
+    expect(calls[0]?.input.admins).toEqual([
+      { userId: "22", rightsProfile: "team" },
+    ])
+    expect(result.binding).toEqual({ participants: [21, 22], admins: [22] })
+    await cloud.progress(requestValue.requestId, "token", {
+      state: "incomplete",
+      binding: result.binding,
+      creationRejected: true,
+      error: "FLOOD_WAIT_40",
+    })
+    expect(calls[1]?.input.resolvedParticipants).toEqual(["21", "22"])
+    expect(calls[1]?.input).not.toHaveProperty("binding")
+    expect(calls[1]?.input.creationRejected).toBe(true)
+  })
+  test("request validator rejects privilege profiles and duplicate deals", () => {
+    expect(() =>
+      validateRequest({
+        ...request(),
+        botRightsProfile: "broad",
+      } as unknown as ProvisionRequest),
+    ).toThrow("botRightsProfile")
+    expect(() =>
+      validateRequest({ ...request(), dealIds: ["same", "same"] }),
+    ).toThrow("duplicate")
+    expect(() =>
+      validateRequest({
+        ...request(),
+        admins: [{ userId: 22, rightsProfile: "owner" }],
+      } as unknown as ProvisionRequest),
+    ).toThrow("admins")
+    expect(creationMarker(request())).not.toContain("deal-a")
+    expect(() =>
+      validateRequest({ ...request(), requestId: "not.allowed" }),
+    ).toThrow("requestId")
+    expect(() =>
+      validateRequest({ ...request(), participants: ["four"] }),
+    ).toThrow("participants")
+    expect(() =>
+      validateRequest({ ...request(), title: "x".repeat(129) }),
+    ).toThrow("title")
+  })
+})
+
+describe("flood and hold retry times", () => {
+  const now = Date.parse("2026-11-06T00:00:00Z")
+  const after = (ms: number) => new Date(now + ms).toISOString()
+  test("Telegram floods and local holds map to retryAt", () => {
+    const hold = new HoldError(now + 90_500, "create", now)
+    expect(hold.text).toBe("TG_SAI_HOLD_91")
+    const cases: [unknown, string | null][] = [
+      // Telegram waits get the local hold's margin: max(10 s, 1 %).
+      [{ text: "FLOOD_WAIT_30", code: 420 }, after(40_000)],
+      [{ text: "FLOOD_WAIT_%d", seconds: 40, code: 420 }, after(50_000)],
+      [{ text: "FLOOD_WAIT_3600", code: 420 }, after(3_636_000)],
+      // 12 s + 10 s margin is under the 30 s floor.
+      [{ text: "FLOOD_PREMIUM_WAIT_12", code: 420 }, after(30_000)],
+      [{ text: "PEER_FLOOD", code: 400 }, after(24 * 3_600_000 * 1.01)],
+      // The hold's exact end wins over its rounded seconds.
+      [hold, after(90_500)],
+      [{ text: "TG_SAI_HOLD_45", code: 420 }, after(45_000)],
+      // A hold about to end still gets the 30 s floor.
+      [new HoldError(now + 2_000, "create", now), after(30_000)],
+      [{ text: "TG_SAI_HOLD_1", code: 420 }, after(30_000)],
+      [new HoldStoreUnavailableError("locked"), after(5 * 60_000)],
+      [{ text: "USER_PRIVACY_RESTRICTED", code: 403 }, null],
+      [{ text: "FLOOD_WAIT_0", code: 420 }, null],
+      [new Error("FLOOD_WAIT_30"), null],
+    ]
+    for (const [error, expected] of cases)
+      expect(provisionRetryAt(error, now)).toBe(expected)
+  })
+  test("cloudRetryAt never precedes the local hold or now + 30 s", () => {
+    expect(cloudRetryAt(now + 90_000, now)).toBe(after(90_000))
+    expect(cloudRetryAt(now + 29_999, now)).toBe(after(30_000))
+    expect(cloudRetryAt(now - 5_000, now)).toBe(after(30_000))
+    expect(cloudRetryAt(now + 400.2, now)).toBe(after(30_000))
+    expect(cloudRetryAt(now + 2 * 31_536_000_000, now)).toBeNull()
+    expect(cloudRetryAt(Number.NaN, now)).toBeNull()
+    // A saved Telegram wait: the cloud time is the local hold's end or later.
+    for (const waitS of [1, 30, 400, 15_382, 86_400]) {
+      const retryAt = Date.parse(
+        provisionRetryAt({ text: `FLOOD_WAIT_${waitS}`, code: 420 }, now)!,
+      )
+      expect(retryAt).toBeGreaterThanOrEqual(holdUntil(now, waitS))
+      expect(retryAt).toBeGreaterThanOrEqual(now + MIN_CLOUD_RETRY_MS)
+    }
+  })
+  test("error codes stay code-only and holds count as definite rejections", () => {
+    const hold = new HoldError(now + 90_000, "create", now)
+    const unavailable = new HoldStoreUnavailableError("/private/path/state.db")
+    expect(safeProvisionError(hold)).toBe("TG_SAI_HOLD_90")
+    expect(safeProvisionError(unavailable)).toBe(
+      "TG_SAI_HOLD_STATE_UNAVAILABLE",
+    )
+    expect(safeProvisionError({ text: "PEER_FLOOD" })).toBe("PEER_FLOOD")
+    expect(safeProvisionError({ text: "FLOOD_PREMIUM_WAIT_7" })).toBe(
+      "FLOOD_PREMIUM_WAIT_7",
+    )
+    expect(safeProvisionError({ text: "TG_SAI_HOLD_x" })).toBe(
+      "provisioning_step_failed",
+    )
+    for (const error of [
+      hold,
+      unavailable,
+      { text: "PEER_FLOOD", code: 400 },
+      { text: "FLOOD_PREMIUM_WAIT_7", code: 420 },
+    ])
+      expect(definiteCreateRejection(error)).toBe(true)
+    // A hold text without the guard's code is not proof of a refusal.
+    expect(definiteCreateRejection({ text: "TG_SAI_HOLD_9", code: 500 })).toBe(
+      false,
+    )
+    expect(
+      definiteCreateRejection({
+        text: "TG_SAI_HOLD_STATE_UNAVAILABLE",
+        code: 420,
+      }),
+    ).toBe(false)
+  })
+  test("a held creation is rejected with the hold's end as retryAt", async () => {
+    const f = fixture()
+    const untilMs = Date.now() + 120_000
+    f.telegram.create = async () => {
+      throw new HoldError(untilMs, "create")
+    }
+    const error = await f.run().catch((e: unknown) => e)
+    expect(error).toBeInstanceOf(Error)
+    expect((error as Error).message).toContain("Group creation failed")
+    // The cause survives the rethrow, so `provision run` exits 75.
+    expect((error as Error).cause).toBeInstanceOf(HoldError)
+    expect(holdExitFor(error)?.exitCode).toBe(75)
+    expect(f.setup.state).toBe("incomplete")
+    expect(f.setup.retryAt).toBe(new Date(untilMs).toISOString())
+    expect((f.setup as Setup & { error: string }).error).toMatch(
+      /^TG_SAI_HOLD_\d+$/,
+    )
+    expect(
+      (f.setup as Setup & { creationRejected?: boolean }).creationRejected,
+    ).toBe(true)
+  })
+})
+
+describe("batched member adds", () => {
+  function batched(f: ReturnType<typeof fixture>) {
+    const batches: number[][] = []
+    f.setup = { ...f.setup, optionalParticipants: ["alice"] }
+    f.telegram.inviteLink = async (_chat, userId) => {
+      f.events.push(`link:${userId}`)
+      return {
+        inviteLink: "https://t.me/+fixtureLink",
+        expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+      }
+    }
+    return batches
+  }
+  test("one add call covers every absent user; a missing optional user gets a link", async () => {
+    const f = fixture()
+    const batches = batched(f)
+    f.telegram.addMany = async (_chat, ids) => {
+      batches.push(ids)
+      for (const id of ids)
+        if (id !== 21) f.members.set(id, { role: "member", rights: {} })
+      return [21]
+    }
+    f.telegram.add = async () => {
+      throw new Error("must batch")
+    }
+    expect((await f.run()).state).toBe("ready")
+    expect(batches).toEqual([[21, 22, PROVISIONING_BOT_ID]])
+    expect(f.events.filter((e) => e.startsWith("link:"))).toEqual(["link:21"])
+    const receipt = f.setup.receipt as {
+      pendingInvitations: Record<string, string>[]
+      participants: { userId: string; role: string }[]
+    }
+    expect(receipt.pendingInvitations).toEqual([
+      {
+        userId: "21",
+        inviteLink: "https://t.me/+fixtureLink",
+        expiresAt: expect.any(String),
+        reason: "privacy_restricted",
+      },
+    ])
+    expect(receipt.participants.map((p) => [p.userId, p.role])).toEqual([
+      ["21", "absent"],
+      ["22", "admin"],
+    ])
+  })
+  test("a privacy error on the batch falls back to per-user adds", async () => {
+    const f = fixture()
+    const batches = batched(f)
+    f.telegram.addMany = async (_chat, ids) => {
+      batches.push(ids)
+      throw { text: "USER_NOT_MUTUAL_CONTACT", code: 400 }
+    }
+    const add = f.telegram.add
+    f.telegram.add = async (chat, id) => {
+      if (id === 21) throw { text: "USER_PRIVACY_RESTRICTED", code: 403 }
+      return add(chat, id)
+    }
+    expect((await f.run()).state).toBe("ready")
+    expect(batches).toHaveLength(1)
+    expect(f.events.filter((e) => /^(add|link):/.test(e))).toEqual([
+      `add:22`,
+      `add:${PROVISIONING_BOT_ID}`,
+      "link:21",
+    ])
+  })
+  test("a per-user 400 on the batch falls back to per-user adds", async () => {
+    const f = fixture()
+    const batches = batched(f)
+    f.telegram.addMany = async (_chat, ids) => {
+      batches.push(ids)
+      throw { text: "USER_CHANNELS_TOO_MUCH", code: 400 }
+    }
+    const add = f.telegram.add
+    f.telegram.add = async (chat, id) => {
+      if (id === 21) throw { text: "USER_CHANNELS_TOO_MUCH", code: 400 }
+      return add(chat, id)
+    }
+    const error = await f.run().catch((e: unknown) => e)
+    expect((error as Error).message).toContain("Setup incomplete")
+    expect(batches).toHaveLength(1)
+    // The other users are still added; the refused one is not retried.
+    expect(f.events.filter((e) => /^(add|link):/.test(e))).toEqual([
+      `add:22`,
+      `add:${PROVISIONING_BOT_ID}`,
+    ])
+    expect((f.setup as Setup & { error: string }).error).toBe(
+      "add_member:USER_CHANNELS_TOO_MUCH",
+    )
+    expect(f.setup.retryAt).toBeNull()
+  })
+  test("per-user add errors: USER_*, CHAT_*, BOT_GROUPS_BLOCKED, privacy", () => {
+    for (const text of [
+      "USER_CHANNELS_TOO_MUCH",
+      "USER_BANNED_IN_CHANNEL",
+      "USER_KICKED",
+      "CHAT_MEMBER_ADD_FAILED",
+      "BOT_GROUPS_BLOCKED",
+    ])
+      expect(isPerUserAddError({ text, code: 400 })).toBe(true)
+    expect(isPerUserAddError({ text: "USER_PRIVACY_RESTRICTED", code: 403 }))
+      .toBe(true)
+    for (const error of [
+      { text: "FLOOD_WAIT_30", code: 420 },
+      { text: "PEER_FLOOD", code: 400 },
+      { text: "USER_CHANNELS_TOO_MUCH", code: 403 },
+      { text: "CHANNELS_TOO_MUCH", code: 400 },
+      new HoldError(Date.now() + 5_000, "invite"),
+      new HoldStoreUnavailableError("locked"),
+      new Error("USER_KICKED"),
+    ])
+      expect(isPerUserAddError(error)).toBe(false)
+  })
+  test("a required user's privacy refusal still adds the others, then fails", async () => {
+    const f = fixture()
+    batched(f)
+    f.telegram.addMany = async (_chat, ids) => {
+      for (const id of ids)
+        if (id !== 22) f.members.set(id, { role: "member", rights: {} })
+      return [22]
+    }
+    await expect(f.run()).rejects.toThrow("Setup incomplete")
+    expect(f.members.get(21)?.role).toBe("member")
+    expect(f.members.get(PROVISIONING_BOT_ID)?.role).toBe("member")
+    expect((f.setup as Setup & { error: string }).error).toBe(
+      "add_member:USER_PRIVACY_RESTRICTED",
+    )
+    expect(f.setup.retryAt).toBeNull()
+  })
+  test("a flood or hold on the batch propagates its retry time without per-user adds", async () => {
+    for (const error of [
+      { text: "FLOOD_WAIT_%d", seconds: 50, code: 420 },
+      new HoldError(Date.now() + 50_000, "invite"),
+    ]) {
+      const f = fixture()
+      batched(f)
+      f.telegram.addMany = async () => {
+        throw error
+      }
+      f.telegram.add = async () => {
+        throw new Error("must not retry per user")
+      }
+      await expect(f.run()).rejects.toThrow("Setup incomplete")
+      expect(f.setup.state).toBe("incomplete")
+      expect(Date.parse(f.setup.retryAt!)).toBeGreaterThan(Date.now() + 40_000)
+      expect((f.setup as Setup & { error: string }).error).toMatch(
+        /^add_member:(?:FLOOD_WAIT_50|TG_SAI_HOLD_\d+)$/,
+      )
+      expect(f.events.filter((e) => e.startsWith("link:"))).toEqual([])
+    }
+  })
+  test("members already present are not added again", async () => {
+    const f = fixture()
+    const batches = batched(f)
+    f.members.set(21, { role: "member", rights: {} })
+    f.telegram.addMany = async (_chat, ids) => {
+      batches.push(ids)
+      for (const id of ids) f.members.set(id, { role: "member", rights: {} })
+      return []
+    }
+    expect((await f.run()).state).toBe("ready")
+    expect(batches).toEqual([[22, PROVISIONING_BOT_ID]])
+    expect(f.setup.receipt).not.toHaveProperty("pendingInvitations")
+  })
+})

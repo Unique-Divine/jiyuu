@@ -1,0 +1,6 @@
+name = "slack-browser-ops"
+main = "index.js"
+compatibility_date = "2026-02-26"
+compatibility_flags = ["nodejs_compat"]
+
+browser = { binding = "BROWSER" }

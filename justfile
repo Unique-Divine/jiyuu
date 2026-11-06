@@ -42,3 +42,18 @@ fmt:
 # Check all TypeScript projects
 typecheck:
   bun check
+
+# Install both maintained MCP servers.
+mcp-install:
+  just --justfile mcp/slack/justfile install
+  just --justfile mcp/telegram/justfile install
+
+# Run both MCP regression suites.
+mcp-test:
+  just --justfile mcp/slack/justfile test
+  just --justfile mcp/telegram/justfile test
+
+# Check both MCP source trees.
+mcp-check:
+  just --justfile mcp/slack/justfile check
+  just --justfile mcp/telegram/justfile check

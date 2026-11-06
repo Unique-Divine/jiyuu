@@ -1,0 +1,766 @@
+/**
+ * Slack MCP Server - Cloudflare Worker
+ *
+ * Exposes MCP tools via Streamable HTTP transport for Smithery/hosted deployments.
+ * User credentials passed via headers or session.
+ */
+
+// MCP Prompts
+const PROMPTS = [
+  {
+    name: "search-recent",
+    description: "Search workspace for messages from the past week",
+    arguments: [{ name: "query", description: "Search terms to look for", required: true }]
+  },
+  {
+    name: "summarize-channel",
+    description: "Get recent activity from a channel for summarization",
+    arguments: [
+      { name: "channel_id", description: "Channel ID to summarize", required: true },
+      { name: "days", description: "Number of days to look back (default 7)", required: false }
+    ]
+  },
+  {
+    name: "find-messages-from",
+    description: "Find all messages from a specific user",
+    arguments: [{ name: "username", description: "Username or display name to search for", required: true }]
+  }
+];
+
+// MCP Resources
+const RESOURCES = [
+  {
+    uri: "slack://workspace/info",
+    name: "Workspace Info",
+    description: "Current workspace name, team, and authenticated user",
+    mimeType: "application/json"
+  },
+  {
+    uri: "slack://conversations/list",
+    name: "Conversations",
+    description: "List of available channels and DMs",
+    mimeType: "application/json"
+  }
+];
+
+const TOOLS = [
+  {
+    name: "slack_token_status",
+    description: "Check token health, age, and auto-refresh status",
+    inputSchema: { type: "object", properties: {} },
+    annotations: { title: "Token Status", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+  },
+  {
+    name: "slack_health_check",
+    description: "Check if Slack API connection is working and show workspace info",
+    inputSchema: { type: "object", properties: {} },
+    annotations: { title: "Health Check", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
+  },
+  {
+    name: "slack_refresh_tokens",
+    description: "Not supported in hosted worker mode; provided for tool contract compatibility",
+    inputSchema: { type: "object", properties: {} },
+    annotations: { title: "Refresh Tokens", readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+  },
+  {
+    name: "slack_list_conversations",
+    description: "List all DMs and channels with user names resolved",
+    inputSchema: {
+      type: "object",
+      properties: {
+        types: { type: "string", description: "Comma-separated: public_channel,private_channel,mpim,im", default: "im,mpim" },
+        limit: { type: "number", description: "Max results (default 100)" },
+        discover_dms: { type: "boolean", description: "Actively discover all DMs (slower but complete)" }
+      }
+    },
+    annotations: { title: "List Conversations", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
+  },
+  {
+    name: "slack_conversations_history",
+    description: "Get messages from a channel or DM with user names resolved",
+    inputSchema: {
+      type: "object",
+      properties: {
+        channel_id: { type: "string", description: "Channel or DM ID (e.g., D063M4403MW)" },
+        limit: { type: "number", description: "Messages to fetch (max 100, default 50)" },
+        oldest: { type: "string", description: "Unix timestamp - get messages after this time" },
+        latest: { type: "string", description: "Unix timestamp - get messages before this time" }
+      },
+      required: ["channel_id"]
+    },
+    annotations: { title: "Conversation History", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
+  },
+  {
+    name: "slack_get_full_conversation",
+    description: "Export full conversation history with all messages, threads, and user names",
+    inputSchema: {
+      type: "object",
+      properties: {
+        channel_id: { type: "string", description: "Channel or DM ID" },
+        oldest: { type: "string", description: "Unix timestamp start" },
+        latest: { type: "string", description: "Unix timestamp end" },
+        max_messages: { type: "number", description: "Maximum messages (default 2000, max 10000)" },
+        include_threads: { type: "boolean", description: "Fetch thread replies (default true)" }
+      },
+      required: ["channel_id"]
+    },
+    annotations: { title: "Full Conversation Export", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
+  },
+  {
+    name: "slack_search_messages",
+    description: "Search messages across the Slack workspace",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Search query (supports from:@user, in:#channel)" },
+        count: { type: "number", description: "Number of results (max 100, default 20)" }
+      },
+      required: ["query"]
+    },
+    annotations: { title: "Search Messages", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
+  },
+  {
+    name: "slack_send_message",
+    description: "Send a message to a channel or DM",
+    inputSchema: {
+      type: "object",
+      properties: {
+        channel_id: { type: "string", description: "Channel or DM ID to send to" },
+        text: { type: "string", description: "Message text (supports Slack markdown)" },
+        thread_ts: { type: "string", description: "Thread timestamp to reply to (optional)" }
+      },
+      required: ["channel_id", "text"]
+    },
+    annotations: { title: "Send Message", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }
+  },
+  {
+    name: "slack_get_thread",
+    description: "Get all replies in a message thread",
+    inputSchema: {
+      type: "object",
+      properties: {
+        channel_id: { type: "string", description: "Channel or DM ID" },
+        thread_ts: { type: "string", description: "Thread parent message timestamp" }
+      },
+      required: ["channel_id", "thread_ts"]
+    },
+    annotations: { title: "Get Thread", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
+  },
+  {
+    name: "slack_users_info",
+    description: "Get detailed information about a Slack user",
+    inputSchema: {
+      type: "object",
+      properties: {
+        user_id: { type: "string", description: "Slack user ID" }
+      },
+      required: ["user_id"]
+    },
+    annotations: { title: "User Info", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
+  },
+  {
+    name: "slack_list_users",
+    description: "List all users in the workspace with pagination support",
+    inputSchema: {
+      type: "object",
+      properties: {
+        limit: { type: "number", description: "Maximum users to return (default 500)" }
+      }
+    },
+    annotations: { title: "List Users", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
+  },
+  {
+    name: "slack_add_reaction",
+    description: "Add an emoji reaction to a message",
+    inputSchema: {
+      type: "object",
+      properties: {
+        channel_id: { type: "string", description: "Channel or DM ID containing the message" },
+        timestamp: { type: "string", description: "Timestamp of the message to react to" },
+        reaction: { type: "string", description: "Emoji name without colons (e.g., thumbsup)" }
+      },
+      required: ["channel_id", "timestamp", "reaction"]
+    },
+    annotations: { title: "Add Reaction", readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true }
+  },
+  {
+    name: "slack_remove_reaction",
+    description: "Remove an emoji reaction from a message",
+    inputSchema: {
+      type: "object",
+      properties: {
+        channel_id: { type: "string", description: "Channel or DM ID containing the message" },
+        timestamp: { type: "string", description: "Timestamp of the message" },
+        reaction: { type: "string", description: "Emoji name without colons (e.g., thumbsup)" }
+      },
+      required: ["channel_id", "timestamp", "reaction"]
+    },
+    annotations: { title: "Remove Reaction", readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true }
+  },
+  {
+    name: "slack_conversations_mark",
+    description: "Mark a conversation as read up to a given message timestamp",
+    inputSchema: {
+      type: "object",
+      properties: {
+        channel_id: { type: "string", description: "Channel or DM ID" },
+        timestamp: { type: "string", description: "Timestamp of the last read message" }
+      },
+      required: ["channel_id", "timestamp"]
+    },
+    annotations: { title: "Mark Read", readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true }
+  },
+  {
+    name: "slack_conversations_unreads",
+    description: "Get channels and DMs with unread messages, sorted by priority",
+    inputSchema: {
+      type: "object",
+      properties: {
+        types: { type: "string", description: "Comma-separated types: im, mpim, public_channel, private_channel (default all)", default: "im,mpim,public_channel,private_channel" },
+        limit: { type: "number", description: "Maximum conversations to return (default 50)" }
+      }
+    },
+    annotations: { title: "Unreads", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
+  },
+  {
+    name: "slack_users_search",
+    description: "Search workspace users by name, display name, or email",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Search query (name, display name, or email)" },
+        limit: { type: "number", description: "Maximum results (default 20)" }
+      },
+      required: ["query"]
+    },
+    annotations: { title: "Search Users", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true }
+  }
+];
+
+// Slack API methods that require form-encoded params instead of JSON.
+const FORM_ENCODED_METHODS = new Set([
+  "conversations.replies",
+  "search.messages",
+  "search.all",
+  "search.files",
+  "users.info",
+  "reactions.add",
+  "reactions.remove",
+  "conversations.mark",
+]);
+
+// Slack API wrapper
+async function slackApi(method, params, token, cookie) {
+  const url = `https://slack.com/api/${method}`;
+  const useForm = FORM_ENCODED_METHODS.has(method);
+  const headers = {
+    "Authorization": `Bearer ${token}`,
+    "Cookie": `d=${cookie}`,
+  };
+
+  let body;
+  if (useForm) {
+    const safeParams = {};
+    for (const [key, value] of Object.entries(params || {})) {
+      safeParams[key] = (typeof value === "object" && value !== null)
+        ? JSON.stringify(value)
+        : String(value);
+    }
+    headers["Content-Type"] = "application/x-www-form-urlencoded; charset=utf-8";
+    body = new URLSearchParams(safeParams).toString();
+  } else {
+    headers["Content-Type"] = "application/json; charset=utf-8";
+    body = JSON.stringify(params || {});
+  }
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers,
+    body,
+  });
+  return response.json();
+}
+
+// Handle tool calls
+async function handleToolCall(name, args, env, queryParams) {
+  // Accept tokens from query params (Smithery) or env vars
+  const token = queryParams?.slackToken || env.SLACK_TOKEN;
+  const cookie = queryParams?.slackCookie || env.SLACK_COOKIE;
+
+  if (!token || !cookie) {
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify({
+          status: "error",
+          code: "missing_credentials",
+          message: "Missing SLACK_TOKEN or SLACK_COOKIE for hosted worker execution.",
+          next_action: "Configure slackToken/slackCookie connector values or worker secrets."
+        }, null, 2)
+      }],
+      isError: true
+    };
+  }
+
+  try {
+    switch (name) {
+      case "slack_token_status": {
+        return { content: [{ type: "text", text: JSON.stringify({ status: "ok", note: "Token status check - tokens provided via query params" }, null, 2) }] };
+      }
+      case "slack_health_check": {
+        const result = await slackApi('auth.test', {}, token, cookie);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+      }
+      case "slack_refresh_tokens": {
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              status: "error",
+              code: "unsupported_in_hosted_worker",
+              message: "Token refresh from Chrome is only available in local runtime mode.",
+              next_action: "Provide valid SLACK_TOKEN and SLACK_COOKIE via connector configuration."
+            }, null, 2)
+          }],
+          isError: true
+        };
+      }
+      case "slack_list_conversations": {
+        const result = await slackApi('conversations.list', {
+          types: args.types || 'public_channel,private_channel,mpim,im',
+          limit: args.limit || 100
+        }, token, cookie);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+      }
+      case "slack_conversations_history": {
+        const channelId = args.channel_id || args.channel;
+        const result = await slackApi('conversations.history', {
+          channel: channelId,
+          limit: args.limit || 50
+        }, token, cookie);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+      }
+      case "slack_get_full_conversation": {
+        // Fetch conversation history with pagination
+        const channelId = args.channel_id || args.channel;
+        const messages = [];
+        let cursor;
+        const maxMessages = args.max_messages || 2000;
+        do {
+          const result = await slackApi('conversations.history', {
+            channel: channelId,
+            limit: Math.min(100, maxMessages - messages.length),
+            oldest: args.oldest,
+            latest: args.latest,
+            cursor
+          }, token, cookie);
+          if (result.messages) messages.push(...result.messages);
+          cursor = result.response_metadata?.next_cursor;
+        } while (cursor && messages.length < maxMessages);
+        return { content: [{ type: "text", text: JSON.stringify({ messages, count: messages.length }, null, 2) }] };
+      }
+      case "slack_search_messages": {
+        const result = await slackApi('search.messages', {
+          query: args.query,
+          count: args.count || 20
+        }, token, cookie);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+      }
+      case "slack_send_message": {
+        const channelId = args.channel_id || args.channel;
+        const result = await slackApi('chat.postMessage', {
+          channel: channelId,
+          text: args.text,
+          thread_ts: args.thread_ts
+        }, token, cookie);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+      }
+      case "slack_get_thread": {
+        const channelId = args.channel_id || args.channel;
+        const result = await slackApi('conversations.replies', {
+          channel: channelId,
+          ts: args.thread_ts
+        }, token, cookie);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+      }
+      case "slack_users_info": {
+        const userId = args.user_id || args.user;
+        const result = await slackApi('users.info', { user: userId }, token, cookie);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+      }
+      case "slack_list_users": {
+        const result = await slackApi('users.list', { limit: args.limit || 100 }, token, cookie);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+      }
+      case "slack_add_reaction": {
+        const result = await slackApi('reactions.add', {
+          channel: args.channel_id,
+          timestamp: args.timestamp,
+          name: args.reaction
+        }, token, cookie);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+      }
+      case "slack_remove_reaction": {
+        const result = await slackApi('reactions.remove', {
+          channel: args.channel_id,
+          timestamp: args.timestamp,
+          name: args.reaction
+        }, token, cookie);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+      }
+      case "slack_conversations_mark": {
+        const result = await slackApi('conversations.mark', {
+          channel: args.channel_id,
+          ts: args.timestamp
+        }, token, cookie);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+      }
+      case "slack_conversations_unreads": {
+        // Mirrors the stdio implementation (lib/handlers.js
+        // handleConversationsUnreads): list conversations, keep the ones
+        // with unreads, resolve DM display names, sort by unread count
+        // descending, and honor `limit`.
+        const types = args.types || "im,mpim,public_channel,private_channel";
+        const limit = args.limit || 50;
+        const result = await slackApi('conversations.list', {
+          types,
+          limit: 200,
+          exclude_archived: true
+        }, token, cookie);
+        if (!result.ok) {
+          return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+        }
+
+        // Per-request users.info cache for DM display-name resolution
+        const userNameCache = new Map();
+        const resolveUserName = async (userId) => {
+          if (userNameCache.has(userId)) return userNameCache.get(userId);
+          let name = userId;
+          try {
+            const info = await slackApi('users.info', { user: userId }, token, cookie);
+            if (info.ok && info.user) {
+              name = info.user.real_name || info.user.name || userId;
+            }
+          } catch (e) {
+            // Fall back to the raw user ID on lookup failure
+          }
+          userNameCache.set(userId, name);
+          return name;
+        };
+
+        const withUnreads = (result.channels || []).filter(
+          (c) => (c.unread_count_display || c.unread_count || 0) > 0
+        );
+
+        // Resolve DM display names concurrently (deduped) — sequential awaits here
+        // would add one Slack round-trip of latency per unread DM.
+        const dmUserIds = [...new Set(withUnreads.filter((c) => c.is_im && c.user).map((c) => c.user))];
+        const nameEntries = await Promise.all(
+          dmUserIds.map(async (userId) => [userId, await resolveUserName(userId)])
+        );
+        const dmNames = new Map(nameEntries);
+
+        const unreads = withUnreads.map((c) => ({
+          id: c.id,
+          name: c.is_im && c.user ? (dmNames.get(c.user) || c.name) : c.name,
+          type: c.is_im ? "dm" : c.is_mpim ? "group_dm" : c.is_private ? "private_channel" : "public_channel",
+          unread_count: c.unread_count_display || c.unread_count || 0,
+          latest_ts: c.latest?.ts || null
+        }));
+
+        unreads.sort((a, b) => b.unread_count - a.unread_count);
+
+        return { content: [{ type: "text", text: JSON.stringify({
+          total_unread_conversations: unreads.length,
+          conversations: unreads.slice(0, limit)
+        }, null, 2) }] };
+      }
+      case "slack_users_search": {
+        // Mirrors the stdio implementation (lib/handlers.js
+        // handleUsersSearch): paginate users.list, filter client-side,
+        // explicit scan cap + truncated flag, slice to `limit`
+        //.
+        const rawQuery = typeof args.query === "string" ? args.query : "";
+        const query = rawQuery.trim().toLowerCase();
+        const limit = args.limit || 20;
+
+        if (!query) {
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                status: "error",
+                code: "invalid_arguments",
+                message: "query must be a non-empty string (an empty query would match all users).",
+                next_action: "Provide a name, display name, real name, or email fragment to search for."
+              }, null, 2)
+            }],
+            isError: true
+          };
+        }
+
+        const MAX_SCANNED_USERS = 1000;
+        const matches = [];
+        let cursor;
+        let scannedUsers = 0;
+        let truncated = false;
+
+        do {
+          const result = await slackApi('users.list', { limit: 200, cursor }, token, cookie);
+          if (!result.ok) {
+            return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+          }
+
+          for (const u of (result.members || [])) {
+            scannedUsers++;
+            if (u.deleted || u.is_bot || u.id === "USLACKBOT") continue;
+
+            const searchFields = [
+              u.name,
+              u.real_name,
+              u.profile?.display_name,
+              u.profile?.email
+            ].filter(Boolean).map(s => s.toLowerCase());
+
+            if (searchFields.some(f => f.includes(query))) {
+              matches.push({
+                id: u.id,
+                name: u.name,
+                real_name: u.real_name,
+                display_name: u.profile?.display_name,
+                email: u.profile?.email,
+                title: u.profile?.title,
+                is_admin: u.is_admin
+              });
+            }
+          }
+
+          cursor = result.response_metadata?.next_cursor;
+          if (cursor && scannedUsers >= MAX_SCANNED_USERS) {
+            truncated = true;
+            break;
+          }
+          if (cursor) await new Promise(resolve => setTimeout(resolve, 100));
+        } while (cursor);
+
+        return { content: [{ type: "text", text: JSON.stringify({
+          query: args.query,
+          count: Math.min(matches.length, limit),
+          total_matches: matches.length,
+          truncated,
+          users: matches.slice(0, limit)
+        }, null, 2) }] };
+      }
+      default:
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              status: "error",
+              code: "unknown_tool",
+              message: `Unknown tool: ${name}`,
+              next_action: "Call tools/list to inspect available tool names."
+            }, null, 2)
+          }],
+          isError: true
+        };
+    }
+  } catch (error) {
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify({
+          status: "error",
+          code: "tool_call_failed",
+          message: String(error?.message || error),
+          next_action: "Retry with validated tool arguments."
+        }, null, 2)
+      }],
+      isError: true
+    };
+  }
+}
+
+// Handle MCP JSON-RPC requests
+async function handleMcpRequest(request, env, queryParams) {
+  const body = await request.json();
+
+  // JSON-RPC 2.0 response helper
+  const jsonRpcResponse = (id, result) => ({
+    jsonrpc: "2.0",
+    id,
+    result
+  });
+
+  const jsonRpcError = (id, code, message) => ({
+    jsonrpc: "2.0",
+    id,
+    error: { code, message }
+  });
+
+  // Handle batch or single request
+  const requests = Array.isArray(body) ? body : [body];
+  const responses = [];
+
+  for (const req of requests) {
+    const { method, params, id } = req;
+
+    switch (method) {
+      case "initialize":
+        responses.push(jsonRpcResponse(id, {
+          protocolVersion: "2024-11-05",
+          capabilities: { tools: {}, prompts: {}, resources: {} },
+          serverInfo: { name: "slack-mcp-server", version: "4.0.0" }
+        }));
+        break;
+
+      case "tools/list":
+        responses.push(jsonRpcResponse(id, { tools: TOOLS }));
+        break;
+
+      case "tools/call":
+        const result = await handleToolCall(params.name, params.arguments || {}, env, queryParams);
+        responses.push(jsonRpcResponse(id, result));
+        break;
+
+      case "prompts/list":
+        responses.push(jsonRpcResponse(id, { prompts: PROMPTS }));
+        break;
+
+      case "prompts/get": {
+        const promptName = params.name;
+        const promptArgs = params.arguments || {};
+        let messages = [];
+        if (promptName === "search-recent") {
+          const query = promptArgs.query || "";
+          messages = [{ role: "user", content: { type: "text", text: `Search Slack for "${query}" from the past week.` }}];
+        } else if (promptName === "summarize-channel") {
+          messages = [{ role: "user", content: { type: "text", text: `Get recent messages from channel ${promptArgs.channel_id} and summarize.` }}];
+        } else if (promptName === "find-messages-from") {
+          messages = [{ role: "user", content: { type: "text", text: `Find messages from ${promptArgs.username}.` }}];
+        }
+        responses.push(jsonRpcResponse(id, { messages }));
+        break;
+      }
+
+      case "resources/list":
+        responses.push(jsonRpcResponse(id, { resources: RESOURCES }));
+        break;
+
+      case "resources/read": {
+        const uri = params.uri;
+        let contents = [];
+        if (uri === "slack://workspace/info") {
+          contents = [{ uri, mimeType: "application/json", text: JSON.stringify({ note: "Use slack_health_check tool for live data" }) }];
+        } else if (uri === "slack://conversations/list") {
+          contents = [{ uri, mimeType: "application/json", text: JSON.stringify({ note: "Use slack_list_conversations tool for live data" }) }];
+        }
+        responses.push(jsonRpcResponse(id, { contents }));
+        break;
+      }
+
+      case "notifications/initialized":
+        // No response needed for notifications
+        break;
+
+      default:
+        responses.push(jsonRpcError(id, -32601, `Method not found: ${method}`));
+    }
+  }
+
+  return Array.isArray(body) ? responses : responses[0];
+}
+
+export default {
+  async fetch(request, env) {
+    const url = new URL(request.url);
+
+    // CORS headers
+    const corsHeaders = {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type, mcp-session-id, Authorization'
+    };
+
+    if (request.method === 'OPTIONS') {
+      return new Response(null, { status: 204, headers: corsHeaders });
+    }
+
+    // Health check
+    if (url.pathname === '/health') {
+      return Response.json(
+        { status: 'ok', server: 'slack-mcp-server', version: '4.0.0' },
+        { headers: corsHeaders }
+      );
+    }
+
+    // Smithery server card endpoint (static metadata)
+    if (url.pathname === '/.well-known/mcp/server-card.json') {
+      return Response.json({
+        serverInfo: {
+          name: "Slack MCP",
+          version: "4.0.0"
+        },
+        authentication: {
+          required: false
+        },
+        tools: TOOLS,
+        resources: RESOURCES,
+        prompts: PROMPTS
+      }, { headers: corsHeaders });
+    }
+
+    // Smithery config schema endpoint
+    if (url.pathname === '/.well-known/mcp-config') {
+      return Response.json({
+        configSchema: {
+          type: "object",
+          required: [],
+          properties: {
+            slackToken: {
+              type: "string",
+              title: "Slack Token",
+              description: "Your xoxc- token from browser session. Optional on macOS (auto-extracted from Chrome).",
+              pattern: "^xoxc-.*$",
+              default: ""
+            },
+            slackCookie: {
+              type: "string",
+              title: "Slack Cookie",
+              description: "Your xoxd- cookie from browser session. Optional on macOS (auto-extracted from Chrome).",
+              pattern: "^xoxd-.*$",
+              default: ""
+            },
+            autoRefresh: {
+              type: "boolean",
+              title: "Auto Refresh",
+              description: "Enable automatic token refresh from Chrome (macOS only)",
+              default: true
+            }
+          },
+          additionalProperties: false
+        }
+      }, { headers: corsHeaders });
+    }
+
+    // MCP endpoint
+    if ((url.pathname === '/mcp' || url.pathname === '/') && request.method === 'POST') {
+      try {
+        // Extract query params for Smithery-style token passing
+        const queryParams = {
+          slackToken: url.searchParams.get('slackToken'),
+          slackCookie: url.searchParams.get('slackCookie')
+        };
+        const result = await handleMcpRequest(request, env, queryParams);
+        return Response.json(result, { headers: corsHeaders });
+      } catch (error) {
+        return Response.json(
+          { jsonrpc: "2.0", error: { code: -32700, message: error.message } },
+          { status: 400, headers: corsHeaders }
+        );
+      }
+    }
+
+    return new Response('Not found', { status: 404, headers: corsHeaders });
+  }
+};

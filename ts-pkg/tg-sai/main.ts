@@ -1,5 +1,4 @@
 #!/usr/bin/env bun
-import { appendFileSync } from "node:fs"
 import {
   mkdir,
   mkdtemp,
@@ -8,14 +7,15 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises"
-import { createRequire } from "node:module"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { stdin as input, stdout as output } from "node:process"
 import { createInterface } from "node:readline/promises"
 import { Command } from "commander"
+import { addProvisionCommands } from "./provisioningCli"
+import { addCustodyWorkerCommands } from "./custodyWorkerCli"
 import type { BatchLogger } from "./actionExecutor"
-import { withFloodWaitRetry } from "./actionExecutor"
+import { runChatBatch, runTelegramAction } from "./actionExecutor"
 import type {
   ChatAuditInput,
   ChatMemberData,
@@ -24,6 +24,18 @@ import type {
 import { planAdminBootstrap } from "./adminAudit"
 import { saiBot, USERS } from "./cfg"
 import { runHealthCheck } from "./health"
+import { addRuntimeHealthCommands } from "./runtimeHealthCli"
+import { HOLD_ACCOUNT_UNKNOWN, holdErrorSeconds } from "./state/guard"
+import { stateDbPath } from "./state/db"
+import { registerEventsCommand } from "./telemetry/cli"
+import { registerHoldsCommand } from "./state/cli"
+import type { TelemetrySubsystem } from "./telemetry/db"
+import {
+  activeTelemetryRun,
+  BOOTSTRAP_FLOOD_MAX_WAIT_MS,
+  floodMaxWaitMs,
+  startTelemetryRun,
+} from "./telemetry/run"
 import {
   addTargetToChat,
   createMtcuteClient,
@@ -33,19 +45,24 @@ import {
   promoteTargetAdmin,
   transferTargetOwnership,
 } from "./mtcuteAdapter"
-import { formatSaiChatJsonLine, parseChatInputFile } from "./ops"
+import {
+  formatSaiChatJsonLine,
+  parseChatInputFile,
+  resolveBootstrapTarget,
+} from "./ops"
 import type { ChatInput } from "./ops"
 import {
   addProfile,
   configDir,
   discoveryReport,
+  findProfileIndex,
   getProfile,
   profileInputFromUser,
   profileLabel,
   readConfig,
   redactedProfile,
   removeProfile,
-  resolveTelegramCredentials,
+  resolveTelegramCredentialSource,
   setActiveProfile,
 } from "./profiles"
 import type {
@@ -54,9 +71,8 @@ import type {
   TelegramCredentials,
   TelegramCredentialValues,
 } from "./profiles"
-
-const require = createRequire(import.meta.url)
-const packageJson = require("./package.json") as { version: string }
+// Static import so `bun build --compile` embeds the version in the worker.
+import packageJson from "./package.json" with { type: "json" }
 
 const DEFAULT_USER_TARGET_ID = USERS.uniqueDivine.id
 const DEFAULT_BOT_TARGET_ID = saiBot.id
@@ -108,6 +124,8 @@ interface SaiBootstrapOptions {
   run?: boolean
   /** Attempt ownership transfer when the Telegram password is available. */
   transferOwner?: boolean
+  /** Owner target: user ID or username. Defaults to the Sai custody account. */
+  targetUser?: number | string
 }
 
 interface TelegramEnv {
@@ -115,6 +133,10 @@ interface TelegramEnv {
   apiHash: string
   session: string
   password: string | null
+  /** Saved account user ID, when the profile records one. */
+  userId: number | null
+  /** Selected profile label, for telemetry. */
+  profileName: string | null
 }
 
 interface ProfileAddOptions {
@@ -174,17 +196,14 @@ const ownerTargetAdminRights = {
 }
 
 const DEFAULT_INTER_CHAT_DELAY_MS = 1000
-let activeJsonLogPath: string | null = null
 
 /**
- * Emits one structured JSON object to stdout and the active JSONL log, if set.
+ * Emits one structured JSON object to stdout. Durable records live in the
+ * telemetry DB (`tg-sai events`); stdout is for the operator.
  */
 function emitJsonObject(fields: Record<string, unknown>): void {
-  const line = JSON.stringify({ ts: new Date().toISOString(), ...fields })
-  console.log(line)
-  if (activeJsonLogPath) {
-    appendFileSync(activeJsonLogPath, `${line}\n`, "utf8")
-  }
+  const object = { ts: new Date().toISOString(), ...fields }
+  console.log(JSON.stringify(object))
 }
 
 /**
@@ -207,15 +226,13 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
- * Builds the default retry dependencies for live Telegram actions.
+ * Progress-logging dependencies for live Telegram actions. Flood waits are
+ * handled by mtcute's flood waiter, not here.
  */
 function actionExecutorDeps(logger: BatchLogger = consoleBatchLogger) {
   return {
     logger,
-    sleep,
     now: () => Date.now(),
-    maxRetries: 3,
-    bufferMs: 2000,
   }
 }
 
@@ -238,19 +255,21 @@ function printJsonEvent(type: string, fields: Record<string, unknown>): void {
 }
 
 /**
- * Returns the directory for durable tg-sai run and discovery logs.
+ * Directory for `ops sai-find` chat files. These are command output (chat
+ * lists for `ops sai-bootstrap --file`), not logs; logs live in the
+ * telemetry DB.
  */
-function logsDir(): string {
+function chatFilesDir(): string {
   return join(configDir(), "logs")
 }
 
 /**
- * Chooses the next numbered JSONL log path for a named command prefix.
+ * Chooses the next numbered chat file path for a named command prefix.
  *
  * Example output paths are `sai-find-00.jsonl`, `sai-find-01.jsonl`, and so on.
  */
-async function nextJsonlLogPath(prefix: string): Promise<string> {
-  const dir = logsDir()
+async function nextChatFilePath(prefix: string): Promise<string> {
+  const dir = chatFilesDir()
   await mkdir(dir, { recursive: true, mode: 0o700 })
 
   const files = await readdir(dir).catch((error) => {
@@ -277,7 +296,8 @@ async function nextJsonlLogPath(prefix: string): Promise<string> {
 }
 
 async function getTelegramEnv(profileName?: string): Promise<TelegramEnv> {
-  const credentials = await resolveTelegramCredentials(profileName)
+  const { credentials, source } =
+    await resolveTelegramCredentialSource(profileName)
   const config = await readConfig()
   const profile = getProfile(config, profileName)
   return {
@@ -285,7 +305,18 @@ async function getTelegramEnv(profileName?: string): Promise<TelegramEnv> {
     apiHash: credentials.apiHash,
     session: credentials.sessionString,
     password: process.env.TELEGRAM_PASSWORD ?? profile?.password ?? null,
+    // TELEGRAM_* or credential-file sessions may act as another account.
+    userId: source === "profile" ? (profile?.userId ?? null) : null,
+    profileName: profile?.name || profileName || null,
   }
+}
+
+/** Telegram telemetry for the current CLI run, if one was started. */
+function cliTelemetry(identity: {
+  accountId?: number | null
+  profile?: string | null
+} = {}) {
+  return activeTelemetryRun()?.client(identity)
 }
 
 async function selectedProfileName(
@@ -362,11 +393,16 @@ async function withClient<T>(
   ) => Promise<T>,
 ): Promise<T> {
   const env = await getTelegramEnv(profileName)
-  const client = await createMtcuteClient({
-    apiId: env.apiId,
-    apiHash: env.apiHash,
-    session: env.session,
-  })
+  // No `accountId`: the flood guard keys holds by the account this session's
+  // own getMe reports, never by profile metadata.
+  const client = await createMtcuteClient(
+    {
+      apiId: env.apiId,
+      apiHash: env.apiHash,
+      session: env.session,
+    },
+    cliTelemetry({ accountId: env.userId, profile: env.profileName }),
+  )
 
   try {
     return await fn(client, env)
@@ -386,13 +422,19 @@ async function runAudit(options: BaseCliOptions): Promise<void> {
 }
 
 async function runHealth(): Promise<void> {
+  // runHealthCheck connects as the active (first) profile. Its saved
+  // userId only labels telemetry; the flood guard keys by the session's getMe.
+  const accountId = (await readConfig()).profiles[0]?.userId ?? null
   const result = await runHealthCheck({
     createClient: async (credentials) =>
-      createMtcuteClient({
-        apiId: credentials.apiId,
-        apiHash: credentials.apiHash,
-        session: credentials.sessionString,
-      }),
+      createMtcuteClient(
+        {
+          apiId: credentials.apiId,
+          apiHash: credentials.apiHash,
+          session: credentials.sessionString,
+        },
+        cliTelemetry({ accountId }),
+      ),
   })
   for (const line of result.lines) {
     console.log(line)
@@ -580,13 +622,13 @@ async function runSaiFind(options: SaiFindOptions): Promise<void> {
     })
     const lines = records.map(formatSaiChatJsonLine)
     const contents = `${lines.join("\n")}\n`
-    const logPath = await nextJsonlLogPath("sai-find")
+    const chatFilePath = await nextChatFilePath("sai-find")
 
-    await writeFile(logPath, contents, {
+    await writeFile(chatFilePath, contents, {
       encoding: "utf8",
       mode: 0o600,
     })
-    console.log(`wrote_chat_file: ${logPath}`)
+    console.log(`wrote_chat_file: ${chatFilePath}`)
     if (options.out) {
       await writeFile(options.out, contents, {
         encoding: "utf8",
@@ -648,7 +690,7 @@ async function applyTargetPlan(params: {
 
   const deps = actionExecutorDeps(actorBatchLogger(params.actorUsername))
   if (shouldRunAction(beforePlan.proposedActions, "add target user")) {
-    await withFloodWaitRetry(
+    await runTelegramAction(
       {
         chatId: params.chat.chatId,
         action: `${params.actionPrefix}_add`,
@@ -665,7 +707,7 @@ async function applyTargetPlan(params: {
   if (
     shouldRunAction(beforePlan.proposedActions, "promote target user admin")
   ) {
-    await withFloodWaitRetry(
+    await runTelegramAction(
       {
         chatId: params.chat.chatId,
         action: `${params.actionPrefix}_promote_admin`,
@@ -740,7 +782,7 @@ async function maybeTransferOwner(params: {
     return
   }
 
-  await withFloodWaitRetry(
+  await runTelegramAction(
     {
       chatId: params.chat.chatId,
       action: "transfer_owner",
@@ -760,7 +802,11 @@ async function maybeTransferOwner(params: {
  *
  * The command is dry-run by default. In execution mode, it applies the Sai bot
  * update and owner-target update for each chat, logs per-chat failures, and
- * continues to the next chat.
+ * continues to the next chat. A `PEER_FLOOD` or a flood wait longer than the
+ * run's threshold stops the batch with a `flood_stop` event and exit code 1.
+ * A refusal by the local flood guard (a saved hold, unreadable hold state,
+ * or an unverified session account) stops it the same way with exit 75.
+ * `SLOWMODE_WAIT_X` only fails that chat.
  */
 async function runSaiBootstrap(options: SaiBootstrapOptions): Promise<void> {
   const contents = await readFile(options.file, "utf8")
@@ -769,23 +815,20 @@ async function runSaiBootstrap(options: SaiBootstrapOptions): Promise<void> {
   if (!Number.isFinite(delayMs) || delayMs < 0) {
     throw new Error("--delay-ms must be a non-negative number")
   }
-  const logPath = await nextJsonlLogPath("sai-bootstrap")
-  await writeFile(logPath, "", {
-    encoding: "utf8",
-    mode: 0o600,
-  })
+  // Telegram calls are in the telemetry DB under this run id.
+  const runId = activeTelemetryRun()?.context.runId ?? null
 
   await withClient(options.profile, async (client, env) => {
-    activeJsonLogPath = logPath
     const actor = normalizeUser(await client.getMe())
     const actorUsername = actor.username ?? ""
     const profileName = await selectedProfileName(options.profile)
+    const ownerTarget = resolveBootstrapTarget(options.targetUser)
     const ownershipTransferEnabled =
       options.transferOwner !== false && env.password !== null
-    console.log(`wrote_run_log: ${logPath}`)
+    if (runId) console.log(`telemetry_run_id: ${runId}`)
     printJsonEvent("run_start", {
       file: options.file,
-      logPath,
+      runId,
       profileName,
       actor,
       chatCount: chats.length,
@@ -793,12 +836,16 @@ async function runSaiBootstrap(options: SaiBootstrapOptions): Promise<void> {
       transferOwner: ownershipTransferEnabled,
       passwordAvailable: env.password !== null,
       delayMs,
-      targetUser: USERS.uniqueDivine.id,
+      targetUser: ownerTarget,
       targetBot: saiBot.id,
     })
 
-    try {
-      for (const [i, chat] of chats.entries()) {
+    const maxWaitMs =
+      activeTelemetryRun()?.floodMaxWaitMs ??
+      floodMaxWaitMs("cli", process.env, BOOTSTRAP_FLOOD_MAX_WAIT_MS)
+    const { floodStop } = await runChatBatch(chats, {
+      maxWaitMs,
+      processItem: async (chat, i) => {
         printJsonEvent("chat_start", {
           index: i + 1,
           total: chats.length,
@@ -806,69 +853,84 @@ async function runSaiBootstrap(options: SaiBootstrapOptions): Promise<void> {
           title: chat.title,
           actorUsername,
         })
+        await applyTargetPlan({
+          client,
+          chat,
+          actorUsername,
+          targetUserId: saiBot.id,
+          targetPeer: saiBot.handle,
+          rights: saiBotAdminRights,
+          actionPrefix: "bot",
+          run: options.run === true,
+        })
+        await applyTargetPlan({
+          client,
+          chat,
+          actorUsername,
+          targetUserId: ownerTarget,
+          targetPeer: ownerTarget,
+          rights: ownerTargetAdminRights,
+          actionPrefix: "owner_target",
+          run: options.run === true,
+        })
+        await maybeTransferOwner({
+          client,
+          env,
+          chat,
+          actorUsername,
+          targetUser: ownerTarget,
+          enabled: ownershipTransferEnabled,
+          run: options.run === true,
+        })
+        printJsonEvent("chat_complete", {
+          chatId: chat.chatId,
+          actorUsername,
+        })
+      },
+      onItemError: (chat, error) => {
+        printJsonEvent("chat_error", {
+          chatId: chat.chatId,
+          actorUsername,
+          errorName: error instanceof Error ? error.name : "UnknownError",
+          errorMessage:
+            error instanceof Error ? error.message : String(error),
+        })
+      },
+      betweenItems: async (chat) => {
+        if (delayMs <= 0) return
+        printJsonEvent("chat_delay", {
+          chatId: chat.chatId,
+          actorUsername,
+          delayMs,
+        })
+        await sleep(delayMs)
+      },
+    })
 
-        try {
-          await applyTargetPlan({
-            client,
-            chat,
-            actorUsername,
-            targetUserId: saiBot.id,
-            targetPeer: saiBot.handle,
-            rights: saiBotAdminRights,
-            actionPrefix: "bot",
-            run: options.run === true,
-          })
-          await applyTargetPlan({
-            client,
-            chat,
-            actorUsername,
-            targetUserId: USERS.uniqueDivine.id,
-            targetPeer: USERS.uniqueDivine.handle,
-            rights: ownerTargetAdminRights,
-            actionPrefix: "owner_target",
-            run: options.run === true,
-          })
-          await maybeTransferOwner({
-            client,
-            env,
-            chat,
-            actorUsername,
-            targetUser: USERS.uniqueDivine.handle,
-            enabled: ownershipTransferEnabled,
-            run: options.run === true,
-          })
-          printJsonEvent("chat_complete", {
-            chatId: chat.chatId,
-            actorUsername,
-          })
-        } catch (error) {
-          printJsonEvent("chat_error", {
-            chatId: chat.chatId,
-            actorUsername,
-            errorName: error instanceof Error ? error.name : "UnknownError",
-            errorMessage:
-              error instanceof Error ? error.message : String(error),
-          })
-        }
-
-        if (delayMs > 0 && i < chats.length - 1) {
-          printJsonEvent("chat_delay", {
-            chatId: chat.chatId,
-            actorUsername,
-            delayMs,
-          })
-          await sleep(delayMs)
-        }
-      }
-
-      printJsonEvent("run_complete", {
-        file: options.file,
-        logPath,
-        chatCount: chats.length,
+    if (floodStop) {
+      // The rest of the batch would hit the same account-wide limit.
+      printJsonEvent("flood_stop", {
+        chatId: floodStop.item.chatId,
+        actorUsername,
+        index: floodStop.index + 1,
+        total: chats.length,
+        remaining: floodStop.remaining,
+        code: floodStop.code,
+        waitS: floodStop.waitS,
+        resumeAt: floodStop.resumeAt,
+        hold: floodStop.hold,
       })
-    } finally {
-      activeJsonLogPath = null
+      // A saved hold is a retry-later stop (75); Telegram's own long wait
+      // or PEER_FLOOD keeps exit 1.
+      process.exitCode = floodStop.hold ? HOLD_EXIT_CODE : 1
+      return
     }
+
+    printJsonEvent("run_complete", {
+      file: options.file,
+      runId,
+      chatCount: chats.length,
+    })
   })
 }
 
@@ -1017,6 +1079,19 @@ function validateLoginOptions(options: ProfileAddOptions): void {
   if (options.qr && options.phone) {
     throw new Error("--qr and --phone are mutually exclusive")
   }
+  if ((options.login || options.qr || options.phone) && options.sessionString) {
+    throw new Error("Fresh login cannot be combined with --session-string")
+  }
+}
+
+/** A new login can reuse app credentials, never another account's session or 2FA. */
+function profileLoginValues(
+  values: TelegramCredentialValues | null,
+  options: ProfileAddOptions,
+): TelegramCredentialValues {
+  if (!(options.login || options.qr || options.phone)) return values ?? {}
+  const { TELEGRAM_SESSION_STRING: _session, TELEGRAM_PASSWORD: _password, ...app } = values ?? {}
+  return app
 }
 
 async function generateSessionString(params: {
@@ -1081,7 +1156,7 @@ async function discoveredValuesForProfileAdd(
       throw new Error(`Unknown discovery source: ${options.src}`)
     }
     return {
-      values: candidate.values,
+      values: profileLoginValues(candidate.values, options),
       sourceDescription: sourceLabel(candidate),
       explicit: true,
     }
@@ -1089,7 +1164,9 @@ async function discoveredValuesForProfileAdd(
 
   const report = await discoveryReport()
   return {
-    values: mergeDiscoveredValues(report.candidates),
+    values: mergeDiscoveredValues(report.candidates.map((candidate) => ({
+      ...candidate, values: profileLoginValues(candidate.values, options),
+    }))),
     sourceDescription: null,
     explicit: false,
   }
@@ -1143,8 +1220,35 @@ async function inputFromProfileAddOptions(
   options: ProfileAddOptions,
 ): Promise<ProfileAddInput> {
   validateLoginOptions(options)
+  const saved = getProfile(await readConfig(), options.name)
+  const enrollsAccount = Boolean(
+    options.login || options.qr || options.phone || options.src || options.sessionString,
+  )
+  if (saved && !enrollsAccount) {
+    // Resolve the saved target before discovery. A password/app metadata edit
+    // must never authenticate another discovered account and overwrite this one.
+    if (
+      (options.userId !== undefined && Number(options.userId) !== saved.userId) ||
+      (options.handle !== undefined && options.handle !== saved.handle)
+    ) {
+      throw new Error("Changing a saved account identity requires an explicit fresh login or session import")
+    }
+    return {
+      name: saved.name,
+      apiId: options.apiId === undefined ? saved.apiId : Number(options.apiId),
+      apiHash: options.apiHash ?? saved.apiHash,
+      sessionString: saved.sessionString,
+      password: options.password ?? saved.password,
+      handle: saved.handle,
+      userId: saved.userId,
+      displayName: options.displayName ?? saved.displayName,
+    }
+  }
+  if (!saved && options.password !== undefined && !enrollsAccount) {
+    throw new Error(`Unknown configured profile: ${options.name ?? "active profile"}. Use tg-sai profile list and select it with --name; --src selects credential discovery sources.`)
+  }
   const optionValues = credentialValuesFromProfileAddOptions(options)
-  const envValues = credentialValuesFromEnv()
+  const envValues = profileLoginValues(credentialValuesFromEnv(), options)
   const discovery = await discoveredValuesForProfileAdd(options)
   const higherPrecedenceValues = mergeCredentialValues(envValues, optionValues)
   if (discovery.explicit && discovery.values && discovery.sourceDescription) {
@@ -1199,16 +1303,24 @@ async function inputFromProfileAddOptions(
     }
   }
 
+  const knownUserId =
+    options.userId && /^\d+$/.test(options.userId)
+      ? Number(options.userId)
+      : undefined
   const completeProfileFields: TelegramCredentials = {
     apiId: profileFields.apiId,
     apiHash: profileFields.apiHash,
     sessionString: profileFields.sessionString,
   }
-  const client = await createMtcuteClient({
-    apiId: completeProfileFields.apiId,
-    apiHash: completeProfileFields.apiHash,
-    session: completeProfileFields.sessionString,
-  })
+  const client = await createMtcuteClient(
+    {
+      apiId: completeProfileFields.apiId,
+      apiHash: completeProfileFields.apiHash,
+      session: completeProfileFields.sessionString,
+      // --user-id is unverified, so the guard keys by the session's getMe.
+    },
+    cliTelemetry({ accountId: knownUserId ?? null, profile: options.name ?? null }),
+  )
   try {
     const self = await client.getMe()
     return profileInputFromUser(
@@ -1251,8 +1363,89 @@ async function runProfileShow(selector = "0"): Promise<void> {
   console.log(JSON.stringify(redactedProfile(profile), null, 2))
 }
 
+async function printConfiguredProfiles(): Promise<void> {
+  console.log("\nConfigured local profiles (* marks the active/default profile):")
+  await runProfileList()
+}
+
+async function printProfileAddHelp(command: Command): Promise<void> {
+  command.outputHelp()
+  console.log(
+    "\nNo profile is saved and no Telegram login starts without explicit options.",
+  )
+  console.log(
+    "Use a new --name to add a separate account. Without --name, explicit options update the active profile.",
+  )
+  console.log("\nFresh QR login for a separate custody account:")
+  console.log(
+    "  tg-sai profile add --name sai-custody --login --qr --interactive",
+  )
+  console.log(
+    "Scan while signed into the intended Telegram account, then inspect it with:",
+  )
+  console.log("  tg-sai profile show sai-custody")
+  await printConfiguredProfiles()
+  console.log("\nInspect an existing profile with tg-sai profile show <selector>.")
+  console.log("Update a saved password with --name <saved-name-or-handle-or-index> --password '<password>'.")
+  console.log("--src selects a numbered credential source from profile find, not a saved profile index.")
+}
+
+async function printProfileRemoveHelp(command: Command): Promise<void> {
+  command.outputHelp()
+  console.log(
+    "\nRemoves a saved local profile, not the Telegram account or its chat memberships.",
+  )
+  console.log("Removing a profile does not revoke its Telegram sessions.")
+  console.log("No profile is removed without an explicit selector.")
+  const config = await readConfig()
+  if (config.profiles.length === 0) {
+    console.log("\nNo saved profiles are available to remove.")
+    console.log(
+      "Add an account with: tg-sai profile add --login --qr --interactive",
+    )
+    return
+  }
+
+  console.log("\nRunnable examples for saved profiles:")
+  let examples = 0
+  for (const [index, saved] of config.profiles.entries()) {
+    // Handles and names can overlap. Emit only selectors that resolve to this row.
+    const selector = [
+      saved.handle,
+      saved.name,
+      saved.userId?.toString(),
+      String(index),
+    ].find(
+      (candidate) =>
+        candidate != null && findProfileIndex(config, candidate) === index,
+    )
+    if (selector == null) continue
+    const argument = /^[A-Za-z0-9_@./:-]+$/.test(selector)
+      ? selector
+      : `'${selector.replaceAll("'", "'\\''")}'`
+    const label = JSON.stringify(profileLabel(saved, index))
+    console.log(
+      `  tg-sai profile remove -- ${argument}  # ${label}${index === 0 ? " [active]" : ""}`,
+    )
+    examples++
+  }
+  if (examples < config.profiles.length) {
+    console.log(
+      "Some profiles have ambiguous selectors; inspect tg-sai profile list before removing them.",
+    )
+  }
+  console.log(
+    "\nExamples use the current profile configuration. Run tg-sai profile list to inspect it.",
+  )
+}
+
 async function runProfileAdd(options: ProfileAddOptions): Promise<void> {
+  const previous = getProfile(await readConfig(), options.name)
   const input = await inputFromProfileAddOptions(options)
+  if (previous?.userId != null && input.userId !== previous.userId) {
+    throw new Error("Login or import does not match the saved account. Use a new --name for another account, or explicitly remove the old profile before replacing it.")
+  }
+  if (previous) input.name = previous.name
   const config = await addProfile(input)
   const profile = getProfile(config, input.name)
   const index = profile ? config.profiles.indexOf(profile) : 0
@@ -1327,12 +1520,11 @@ export function createProgram(): Command {
     program.help({ error: false })
   })
 
-  program
-    .command("health")
-    .description("Read-only preflight for the local tg-sai setup")
-    .action(async () => {
-      await runHealth()
-    })
+  program.hook("preAction", (_root, actionCommand) => {
+    startCliTelemetryRun(actionCommand)
+  })
+
+  addRuntimeHealthCommands(program, runHealth)
 
   program
     .command("audit")
@@ -1430,6 +1622,11 @@ Examples:
       "--no-transfer-owner",
       "Skip ownership transfer even when TELEGRAM_PASSWORD is available",
     )
+    .option(
+      "--target-user <peer>",
+      "Owner target user ID or username; default is the Sai custody account",
+      parsePeer,
+    )
     .action(async (options: SaiBootstrapOptions) => {
       await runSaiBootstrap(options)
     })
@@ -1437,6 +1634,10 @@ Examples:
   const profile = program
     .command("profile")
     .description("Manage local Telegram session profiles")
+    .action(async () => {
+      profile.outputHelp()
+      await printConfiguredProfiles()
+    })
 
   profile
     .command("find")
@@ -1452,10 +1653,13 @@ Examples:
       await runProfileList()
     })
 
-  profile
+  const addProfileCommand = profile
     .command("add")
     .description("Add or update a Telegram session profile")
-    .option("--name <name>", "Legacy profile name")
+    .option(
+      "--name <name>",
+      "Local profile name; use a distinct name for another account",
+    )
     .option("--api-id <id>", "Telegram API ID")
     .option("--api-hash <hash>", "Telegram API hash")
     .option("--session-string <value>", "Telegram session string")
@@ -1463,10 +1667,10 @@ Examples:
       "--password <value>",
       "Telegram 2FA password for ownership transfer",
     )
-    .option("--src <number>", "Use a numbered source from profile find")
+    .option("--src <number>", "Import a numbered credential source from profile find, not a saved profile")
     .option(
       "--login",
-      "Generate a session string when missing (defaults to QR)",
+      "Start a fresh account login, ignoring discovered sessions (defaults to QR)",
     )
     .option("--qr", "Generate a session string with QR login")
     .option("--phone", "Generate a session string with phone login")
@@ -1478,17 +1682,20 @@ Examples:
       "after",
       `
 Examples:
-  tg-sai profile add
-  tg-sai profile add --qr
-  tg-sai profile add --phone
-  tg-sai profile add --src 1
-  tg-sai profile add --password '<password>'
+  tg-sai profile add --name sai-custody --login --qr --interactive
+  tg-sai profile add --name another-account --phone --interactive
+  tg-sai profile add --name another-account --src 1
+  tg-sai profile add --name existing-profile --password '<password>'
 
 If apiId/apiHash are missing, create a Telegram API app at:
   https://my.telegram.org/apps
 `,
     )
     .action(async (options: ProfileAddOptions) => {
+      if (Object.keys(options).length === 0) {
+        await printProfileAddHelp(addProfileCommand)
+        return
+      }
       await runProfileAdd(options)
     })
 
@@ -1514,21 +1721,275 @@ If apiId/apiHash are missing, create a Telegram API app at:
       console.log(`active_profile: ${profileLabel(active, 0)}`)
     })
 
-  profile
+  const removeProfileCommand = profile
     .command("remove")
     .description("Remove one configured profile")
-    .argument("<selector>", "Profile index, handle, user ID, or legacy name")
-    .action(async (selector: string) => {
+    .argument(
+      "[selector]",
+      "Profile index, handle, user ID, or legacy name; omit for examples",
+    )
+    .action(async (selector: string | undefined) => {
+      if (selector === undefined) {
+        await printProfileRemoveHelp(removeProfileCommand)
+        return
+      }
       await removeProfile(selector)
       console.log(`removed_profile: ${selector}`)
     })
 
+  addProvisionCommands(program)
+  addCustodyWorkerCommands(program)
+  registerEventsCommand(program)
+  registerHoldsCommand(program)
+  installBareHelp(program)
   return program
 }
 
-createProgram()
-  .parseAsync()
-  .catch((error) => {
-    console.error(error)
-    process.exit(1)
+/** Space-joined subcommand path below the root, e.g. `ops sai-find`. */
+function commandPath(command: Command): string {
+  const names: string[] = []
+  for (let c: Command | null = command; c?.parent; c = c.parent) {
+    names.unshift(c.name())
+  }
+  return names.join(" ")
+}
+
+/** Telemetry subsystem for a subcommand path. */
+function subsystemFor(path: string): TelemetrySubsystem {
+  if (path === "worker") return "worker"
+  if (path === "health") return "health"
+  return "cli"
+}
+
+/** Commands that only read telemetry; they do not record runs of their own. */
+function skipsTelemetry(path: string): boolean {
+  return path === "" || path === "events" || path.startsWith("events ")
+}
+
+/** Exit code for a run stopped by SIGINT/SIGTERM (128 + SIGINT). */
+const SIGNAL_EXIT_CODE = 130
+
+/**
+ * Ends the run as aborted on the first SIGINT/SIGTERM, then exits. The
+ * `worker` command installs its own handlers for a graceful stop.
+ */
+function endRunOnSignal(path: string): void {
+  if (path === "worker") return
+  const onSignal = () => {
+    process.removeListener("SIGINT", onSignal)
+    process.removeListener("SIGTERM", onSignal)
+    activeTelemetryRun()?.end({
+      exitCode: SIGNAL_EXIT_CODE,
+      outcome: "aborted",
+    })
+    process.exit(SIGNAL_EXIT_CODE)
+  }
+  process.once("SIGINT", onSignal)
+  process.once("SIGTERM", onSignal)
+}
+
+function startCliTelemetryRun(actionCommand: Command): void {
+  const path = commandPath(actionCommand)
+  if (helpOnlyCommands.has(actionCommand)) return
+  if (skipsTelemetry(path) || activeTelemetryRun()) return
+  startTelemetryRun({
+    subsystem: subsystemFor(path),
+    command: path,
+    argv: process.argv.slice(2),
+    version: packageJson.version,
+    ...(path === "ops sai-bootstrap"
+      ? { floodMaxWaitMs: BOOTSTRAP_FLOOD_MAX_WAIT_MS }
+      : {}),
   })
+  endRunOnSignal(path)
+}
+
+// ---------------------------------------------------------------------------
+// Bare commands print help
+
+/** Groups whose only action prints help; they record no telemetry run. */
+const helpOnlyCommands = new WeakSet<Command>()
+
+/** Commander keeps the action handler private; read it without casting. */
+function hasAction(command: Command): boolean {
+  return (command as unknown as { _actionHandler?: unknown })._actionHandler
+    ? true
+    : false
+}
+
+/**
+ * Makes every command group without an action print its help when called
+ * bare, with exit code 0 (commander's default is help on stderr, exit 1).
+ */
+export function installBareHelp(command: Command): void {
+  for (const sub of command.commands) installBareHelp(sub)
+  if (command.commands.length === 0 || hasAction(command)) return
+  helpOnlyCommands.add(command)
+  command.action(() => {
+    command.help({ error: false })
+  })
+}
+
+/** True when the command has a required argument or mandatory option. */
+export function hasRequiredInput(command: Command): boolean {
+  return (
+    command.registeredArguments.some((arg) => arg.required) ||
+    command.options.some((option) => option.mandatory)
+  )
+}
+
+/**
+ * The leaf command `args` name when it has required input and `args` hold
+ * nothing past its name, e.g. `tg-sai audit`. Such a call prints that
+ * command's help instead of a missing-option error. Any extra token, even a
+ * wrong one, returns null so commander reports the usual error.
+ */
+export function bareHelpTarget(
+  program: Command,
+  args: readonly string[],
+): Command | null {
+  let command = program
+  for (const arg of args) {
+    const next = command.commands.find(
+      (sub) => sub.name() === arg || sub.aliases().includes(arg),
+    )
+    if (!next) return null
+    command = next
+  }
+  if (command === program || command.commands.length > 0) return null
+  return hasRequiredInput(command) ? command : null
+}
+
+// ---------------------------------------------------------------------------
+// Exit codes
+
+/** `EX_TEMPFAIL`: retry later. Used while Telegram limits the account. */
+export const HOLD_EXIT_CODE = 75
+const HOLD_STATE_UNAVAILABLE = "TG_SAI_HOLD_STATE_UNAVAILABLE"
+
+export interface HoldExit {
+  exitCode: typeof HOLD_EXIT_CODE
+  /** One line for stderr. */
+  message: string
+}
+
+interface HoldLike {
+  code?: unknown
+  text?: unknown
+  message?: unknown
+  untilMs?: unknown
+  grp?: unknown
+  cause?: unknown
+}
+
+function holdText(error: HoldLike): string | null {
+  if (typeof error.text === "string") return error.text
+  if (typeof error.message === "string") return error.message
+  return null
+}
+
+function holdLike(value: unknown): HoldLike | null {
+  return typeof value === "object" && value !== null
+    ? (value as HoldLike)
+    : null
+}
+
+/** UTC timestamp without milliseconds, e.g. `2026-11-06T16:20:05Z`. */
+function utcSeconds(ms: number): string {
+  return new Date(ms).toISOString().replace(/\.\d{3}Z$/, "Z")
+}
+
+/** `4h 16m`, `12m 5s`, or `40s`. */
+export function shortDuration(totalS: number): string {
+  const s = Math.max(0, Math.round(totalS))
+  const h = Math.floor(s / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  if (h > 0) return `${h}h ${m}m`
+  if (m > 0) return `${m}m ${s % 60}s`
+  return `${s}s`
+}
+
+/**
+ * Maps a saved flood hold (`HoldError`, `TG_SAI_HOLD_<s>`, code 420), an
+ * unreadable `state.db` (`TG_SAI_HOLD_STATE_UNAVAILABLE`), or an unverified
+ * session account (`TG_SAI_HOLD_ACCOUNT_UNKNOWN`) to exit 75 with a
+ * one-line message. Looks through `error.cause` chains. Returns null for
+ * every other error.
+ */
+export function holdExitFor(
+  error: unknown,
+  nowMs: number = Date.now(),
+): HoldExit | null {
+  let current = holdLike(error)
+  for (let depth = 0; current && depth < 8; depth += 1) {
+    const text = holdText(current)
+    if (text === HOLD_STATE_UNAVAILABLE) {
+      return {
+        exitCode: HOLD_EXIT_CODE,
+        message:
+          "tg-sai: cannot read saved Telegram limits in " +
+          `${stateDbPath()}; invite/create calls stay blocked and nothing ` +
+          "was sent. Fix the file, then retry.",
+      }
+    }
+    if (text === HOLD_ACCOUNT_UNKNOWN) {
+      return {
+        exitCode: HOLD_EXIT_CODE,
+        message:
+          "tg-sai: could not confirm which Telegram account this session " +
+          "acts as, so its saved limits cannot be checked; invite/create " +
+          "calls stay blocked and nothing was sent. Retry once getMe works.",
+      }
+    }
+    const seconds = holdErrorSeconds(text)
+    const codeOk = current.code === undefined || current.code === 420
+    if (seconds !== null && codeOk) {
+      const untilMs =
+        typeof current.untilMs === "number" && Number.isFinite(current.untilMs)
+          ? current.untilMs
+          : nowMs + seconds * 1000
+      const grp = typeof current.grp === "string" ? current.grp : "this"
+      const waitS = Math.max(0, Math.ceil((untilMs - nowMs) / 1000))
+      return {
+        exitCode: HOLD_EXIT_CODE,
+        message:
+          `tg-sai: Telegram is limiting ${grp} calls for this account; ` +
+          `nothing was sent. Resume after ${utcSeconds(untilMs)} ` +
+          `(in ${shortDuration(waitS)}).`,
+      }
+    }
+    current = holdLike(current.cause)
+  }
+  return null
+}
+
+// ---------------------------------------------------------------------------
+// Entry point
+
+/**
+ * Run the tg-sai CLI on process.argv. Exported so the compiled custody worker
+ * (sai-deal-desk deploy/botService.ts) runs the same program, including
+ * telemetry runs, hold exit codes, and bare-command help.
+ */
+export async function runCli(): Promise<void> {
+  const program = createProgram()
+  const args = process.argv.slice(2)
+  const helpTarget = bareHelpTarget(program, args)
+  if (helpTarget) {
+    helpTarget.outputHelp()
+    return
+  }
+  try {
+    await program.parseAsync()
+  } catch (error) {
+    const hold = holdExitFor(error)
+    const exitCode = hold?.exitCode ?? 1
+    activeTelemetryRun()?.end({ exitCode, error })
+    if (hold) console.error(hold.message)
+    else console.error(error)
+    process.exit(exitCode)
+  }
+  activeTelemetryRun()?.end({ exitCode: Number(process.exitCode ?? 0) })
+}
+
+if (import.meta.main) await runCli()

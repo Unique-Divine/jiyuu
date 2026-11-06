@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test"
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import {
+  addProfile,
   configDir,
   configPath,
   credentialsFromKnownFiles,
@@ -14,6 +15,7 @@ import {
   parseCredentialValueAfterKey,
   platformKind,
   readConfig,
+  resolveTelegramCredentialSource,
 } from "./profiles"
 
 async function withTempHome<T>(fn: (home: string) => Promise<T>): Promise<T> {
@@ -31,6 +33,21 @@ async function writeJson(path: string, value: unknown): Promise<void> {
 }
 
 describe("tg-sai profile discovery", () => {
+  test("profile persistence rejects replacement of a known account before writing", async () => {
+    await withTempHome(async (home) => {
+      const env = { HOME: home }
+      const original = { name: "custody", apiId: 456, apiHash: "custody-hash",
+        sessionString: "custody-session", password: "", handle: "custody_handle",
+        userId: 222, displayName: "Custody fixture" }
+      await addProfile(original, env)
+      const path = configPath(env)
+      const before = await readFile(path, "utf8")
+      await expect(addProfile({ ...original, userId: 111, sessionString: "personal-session" }, env))
+        .rejects.toThrow("Cannot replace a saved profile's account identity")
+      expect(await readFile(path, "utf8")).toBe(before)
+    })
+  })
+
   test("uses ~/.tg-sai as the default tool directory", async () => {
     await withTempHome(async (home) => {
       expect(configDir({ HOME: home })).toBe(join(home, ".tg-sai"))
@@ -422,6 +439,64 @@ describe("tg-sai profile discovery", () => {
         apiHash: "line-hash",
         sessionString: "line-session",
       })
+    })
+  })
+})
+
+describe("resolveTelegramCredentialSource", () => {
+  test("reports env, profile, and known-file credentials", async () => {
+    await withTempHome(async (home) => {
+      const env = { HOME: home, TG_SAI_REPO_DIR: join(home, "no-repo") }
+      await addProfile(
+        {
+          name: "custody",
+          apiId: 456,
+          apiHash: "custody-hash",
+          sessionString: "custody-session",
+          password: "",
+          handle: "custody_handle",
+          userId: 222,
+          displayName: "Custody fixture",
+        },
+        env,
+      )
+      expect(await resolveTelegramCredentialSource("custody", env)).toEqual({
+        credentials: {
+          apiId: 456,
+          apiHash: "custody-hash",
+          sessionString: "custody-session",
+        },
+        source: "profile",
+      })
+
+      // TELEGRAM_* wins over the selected profile: its userId does not apply.
+      const fromEnv = await resolveTelegramCredentialSource("custody", {
+        ...env,
+        TELEGRAM_API_ID: "999",
+        TELEGRAM_API_HASH: "env-hash",
+        TELEGRAM_SESSION_STRING: "env-session",
+      })
+      expect(fromEnv.source).toBe("env")
+      expect(fromEnv.credentials.sessionString).toBe("env-session")
+    })
+
+    await withTempHome(async (home) => {
+      const file = join(home, "creds.env")
+      await writeFile(
+        file,
+        [
+          "TELEGRAM_API_ID=123",
+          "TELEGRAM_API_HASH=file-hash",
+          "TELEGRAM_SESSION_STRING=file-session",
+        ].join("\n"),
+        "utf8",
+      )
+      const found = await resolveTelegramCredentialSource(undefined, {
+        HOME: home,
+        TG_SAI_DISCOVERY_FILE: file,
+      })
+      expect(found.source).toBe("known_file")
+      expect(found.credentials.sessionString).toBe("file-session")
     })
   })
 })

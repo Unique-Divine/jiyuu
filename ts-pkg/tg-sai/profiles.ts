@@ -348,6 +348,9 @@ export async function addProfile(
         : -1
   const targetIndex = index >= 0 ? index : config.profiles.length
   const previous = index >= 0 ? config.profiles[index] : undefined
+  if (previous?.userId != null && input.userId != null && input.userId !== previous.userId) {
+    throw new Error("Cannot replace a saved profile's account identity. Use a new profile name or explicitly remove the old profile first.")
+  }
   const timestamp = now.toISOString()
   const nextProfile: TgSaiProfile = {
     name: profileNameFromInput(input, targetIndex),
@@ -768,13 +771,24 @@ export async function credentialsFromProfile(
   return credentialsFromProfileRecord(profile)
 }
 
-export async function resolveTelegramCredentials(
+/** Where `resolveTelegramCredentialSource` found the credentials. */
+export type TelegramCredentialSource = "env" | "profile" | "known_file"
+
+/**
+ * Credentials for `profileName` and where they came from: `TELEGRAM_*`
+ * environment variables, the selected profile, or a known credential file.
+ * Only `profile` credentials match the profile's saved `userId`.
+ */
+export async function resolveTelegramCredentialSource(
   profileName: string | undefined,
   env: ProfileStoreEnv = process.env,
-): Promise<TelegramCredentials> {
+): Promise<{
+  credentials: TelegramCredentials
+  source: TelegramCredentialSource
+}> {
   const envCredentials = credentialsFromEnv(env)
   if (envCredentials) {
-    return envCredentials
+    return { credentials: envCredentials, source: "env" }
   }
 
   const config = await readConfig(env)
@@ -783,7 +797,7 @@ export async function resolveTelegramCredentials(
     ? credentialsFromProfileRecord(selectedProfile)
     : null
   if (profileCredentials) {
-    return profileCredentials
+    return { credentials: profileCredentials, source: "profile" }
   }
   if (selectedProfile) {
     throw new Error(
@@ -793,12 +807,19 @@ export async function resolveTelegramCredentials(
 
   const knownFileCredentials = await credentialsFromKnownFiles(env)
   if (knownFileCredentials) {
-    return knownFileCredentials
+    return { credentials: knownFileCredentials, source: "known_file" }
   }
 
   throw new Error(
     "Missing Telegram credentials. Set TELEGRAM_API_ID, TELEGRAM_API_HASH, and TELEGRAM_SESSION_STRING or run `tg-sai profile add`.",
   )
+}
+
+export async function resolveTelegramCredentials(
+  profileName: string | undefined,
+  env: ProfileStoreEnv = process.env,
+): Promise<TelegramCredentials> {
+  return (await resolveTelegramCredentialSource(profileName, env)).credentials
 }
 
 export function profileInputFromUser(
@@ -817,4 +838,19 @@ export function profileInputFromUser(
     userId: user.id,
     displayName: user.displayName,
   }
+}
+
+/** Provisioning must never inherit another account from environment or discovery. */
+export async function strictProfileCredentials(
+  selector: string,
+  expectedUserId: number,
+  env: ProfileStoreEnv = process.env,
+): Promise<TelegramCredentials> {
+  if (!selector?.trim()) throw new Error("Explicit custody profile required")
+  const profile = getProfile(await readConfig(env), selector)
+  if (!profile) throw new Error("Custody profile is not configured")
+  if (profile.userId !== expectedUserId) throw new Error("Custody profile user ID mismatch")
+  const credentials = credentialsFromProfileRecord(profile)
+  if (!credentials) throw new Error("Custody profile is incomplete")
+  return credentials
 }

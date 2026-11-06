@@ -1,0 +1,49 @@
+name: MCP Servers
+
+on:
+  pull_request:
+    paths:
+      - 'mcp/**'
+      - '.github/workflows/mcp.yaml'
+  push:
+    branches: [main]
+    paths:
+      - 'mcp/**'
+      - '.github/workflows/mcp.yaml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  slack:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mcp/slack
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.3'
+      - name: Install locked dependencies
+        run: bun install --frozen-lockfile
+      - name: Run bun:test suite
+        run: bun test ./test
+      - name: Check entrypoint imports
+        run: bun build --target bun --packages external ./src/cli.js ./src/server.js ./src/server-http.js ./src/web-server.js --outdir ./node_modules/.cache/mcp-check
+
+  telegram:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mcp/telegram
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Install locked environment
+        run: uv sync --frozen --group dev
+      - name: Test
+        run: uv run --frozen pytest -q
+      - name: Check formatting
+        run: uv run --frozen black --check main.py sanitize.py session_string_generator.py telegram_mcp tests

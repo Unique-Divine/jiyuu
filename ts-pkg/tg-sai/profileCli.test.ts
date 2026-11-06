@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -21,7 +21,7 @@ async function withTempConfig<T>(fn: (dir: string) => Promise<T>): Promise<T> {
   }
 }
 
-function runCli(args: string[], configDir: string): RunResult {
+function runCli(args: readonly string[], configDir: string, extraEnv: Record<string, string> = {}): RunResult {
   const result = Bun.spawnSync({
     cmd: ["bun", cliPath, ...args],
     cwd: packageRoot,
@@ -34,6 +34,7 @@ function runCli(args: string[], configDir: string): RunResult {
       TELEGRAM_API_HASH: "",
       TELEGRAM_SESSION_STRING: "",
       TELEGRAM_PASSWORD: "",
+      ...extraEnv,
     },
     stdout: "pipe",
     stderr: "pipe",
@@ -87,6 +88,101 @@ const addBobArgs = [
 ]
 
 describe("tg-sai profile CLI", () => {
+  test.each([{ args: ["profile"] }, { args: ["profile", "add"] }])("bare %j displays help and empty profiles without saving or discovering credentials", async ({ args }) => {
+    await withTempConfig(async (dir) => {
+      await mkdir(join(dir, "home", ".cursor"), { recursive: true })
+      await writeFile(join(dir, "home", ".cursor", "mcp.json"), "not valid JSON")
+      const result = runCli(args, dir)
+      expect(result.exitCode).toBe(0)
+      expect(result.stderr).toBe("")
+      expect(result.stdout).toContain(`Usage: tg-sai ${args.join(" ")}`)
+      expect(result.stdout).toContain("Configured local profiles")
+      expect(result.stdout).toContain("No profiles configured.")
+      expect(await Bun.file(join(dir, "profiles.json")).exists()).toBe(false)
+      if (args.length === 2) {
+        expect(result.stdout).toContain("tg-sai profile add --name sai-custody --login --qr --interactive")
+        expect(result.stdout).toContain("No profile is saved and no Telegram login starts without explicit options.")
+      } else {
+        expect(result.stdout.indexOf("Commands:")).toBeLessThan(result.stdout.indexOf("Configured local profiles"))
+      }
+    })
+  })
+
+  test.each([{ args: ["profile"] }, { args: ["profile", "add"] }])("bare %j lists existing profiles with no mutation or credential output", async ({ args }) => {
+    await withTempConfig(async (dir) => {
+      expect(runCli(addAliceArgs, dir).exitCode).toBe(0)
+      expect(runCli(addBobArgs, dir).exitCode).toBe(0)
+      const before = await readFile(join(dir, "profiles.json"), "utf8")
+      const result = runCli(args, dir)
+      expect(result.exitCode).toBe(0)
+      expect(result.stderr).toBe("")
+      expect(result.stdout).toContain("alice_handle")
+      expect(result.stdout).toContain("bob_handle")
+      expect(result.stdout).toContain("active/default")
+      expect(await readFile(join(dir, "profiles.json"), "utf8")).toBe(before)
+      for (const secret of ["hash-alice", "hash-bob", "session-alice", "session-bob", "password-alice"]) {
+        expect(result.stdout).not.toContain(secret)
+        expect(result.stderr).not.toContain(secret)
+      }
+      if (args.length === 2) {
+        expect(result.stdout).toContain("Use a new --name to add a separate account.")
+        expect(result.stdout).toContain("explicit options update the active profile.")
+        expect(result.stdout).toContain("tg-sai profile show <selector>")
+      }
+    })
+  })
+
+  test.each(["--qr", "--phone", "--login"])("%s enrolls a fresh session without inheriting discovered account credentials", async (flag) => {
+    await withTempConfig(async (dir) => {
+      expect(runCli(addAliceArgs, dir).exitCode).toBe(0)
+      const home = join(dir, "home")
+      await mkdir(join(home, ".cursor"), { recursive: true })
+      await writeFile(join(home, ".cursor", "mcp.json"), JSON.stringify({
+        mcpServers: Object.fromEntries(["personal", "other"].map((name) => [name, {
+          env: { TELEGRAM_API_ID: "123", TELEGRAM_API_HASH: "app-hash",
+            TELEGRAM_SESSION_STRING: `${name}-session`, TELEGRAM_PASSWORD: `${name}-password` },
+        }])),
+      }))
+      const bin = join(dir, "bin")
+      await mkdir(bin)
+      await writeFile(join(bin, "uv"), `#!/usr/bin/env bun
+const args = process.argv.slice(2)
+await Bun.write(args[args.indexOf("--session-output") + 1], "fresh-session")
+await Bun.write(${JSON.stringify(join(dir, "generator-mode"))}, args.includes("--phone") ? "phone" : "qr")
+`, { mode: 0o700 })
+      const result = Bun.spawnSync({
+        cmd: ["bun", cliPath, "profile", "add", "--name", "custody", flag,
+          "--user-id", "666", "--display-name", "Custody fixture"],
+        cwd: packageRoot,
+        env: { ...process.env, HOME: home, TG_SAI_DIR: dir,
+          TG_SAI_REPO_DIR: join(dir, "repo"), PATH: `${bin}:${process.env.PATH}`,
+          TELEGRAM_API_ID: "", TELEGRAM_API_HASH: "",
+          TELEGRAM_SESSION_STRING: "environment-personal-session",
+          TELEGRAM_PASSWORD: "environment-personal-password" },
+        stdout: "pipe", stderr: "pipe",
+      })
+      expect(result.exitCode).toBe(0)
+      expect(await readFile(join(dir, "generator-mode"), "utf8")).toBe(flag === "--phone" ? "phone" : "qr")
+      const config = JSON.parse(await readFile(join(dir, "profiles.json"), "utf8"))
+      expect(config.profiles[0].name).toBe("alice")
+      const custody = config.profiles.find((p: { name: string }) => p.name === "custody")
+      expect(custody.sessionString).toBe("fresh-session")
+      expect(custody.password).toBe("")
+      expect(config.profiles[0].sessionString).toBe("session-alice")
+      expect(result.stdout.toString()).not.toContain("fresh-session")
+      expect(result.stderr.toString()).not.toContain("personal-session")
+    })
+  })
+
+  test("fresh login rejects an explicitly supplied session", async () => {
+    await withTempConfig(async (dir) => {
+      const result = runCli([...addAliceArgs, "--qr"], dir)
+      expect(result.exitCode).not.toBe(0)
+      expect(result.stderr).toContain("Fresh login cannot be combined with --session-string")
+      expect(runCli(["profile", "list"], dir).stdout).toContain("No profiles configured")
+    })
+  })
+
   test("prints help with exit code 0 when called without args", async () => {
     await withTempConfig(async (dir) => {
       const result = runCli([], dir)
@@ -103,6 +199,83 @@ describe("tg-sai profile CLI", () => {
 
       expect(result.exitCode).toBe(0)
       expect(result.stdout).toContain("No profiles configured.")
+    })
+  })
+
+  test("profile remove without a selector shows empty-state help without creating a config", async () => {
+    await withTempConfig(async (dir) => {
+      const result = runCli(["profile", "remove"], dir)
+      expect(result.exitCode).toBe(0)
+      expect(result.stderr).toBe("")
+      expect(result.stdout).toContain("Usage: tg-sai profile remove")
+      expect(result.stdout).toContain("No saved profiles are available to remove.")
+      expect(result.stdout).toContain("No profile is removed without an explicit selector.")
+      expect(result.stdout).not.toContain("tg-sai profile remove -- ")
+      expect(await Bun.file(join(dir, "profiles.json")).exists()).toBe(false)
+    })
+  })
+
+  test("profile remove help generates executable examples for saved accounts and drafts without exposing credentials", async () => {
+    await withTempConfig(async (dir) => {
+      expect(runCli(addAliceArgs, dir).exitCode).toBe(0)
+      expect(runCli(addBobArgs, dir).exitCode).toBe(0)
+      expect(runCli(["profile", "add", "--name", "draft"], dir).exitCode).toBe(0)
+      const before = await readFile(join(dir, "profiles.json"), "utf8")
+      const result = runCli(["profile", "remove"], dir)
+      expect(result.exitCode).toBe(0)
+      expect(result.stderr).toBe("")
+      expect(await readFile(join(dir, "profiles.json"), "utf8")).toBe(before)
+      expect(result.stdout).toContain("not the Telegram account or its chat memberships")
+      expect(result.stdout).toContain('tg-sai profile remove -- alice_handle  # "alice_handle" [active]')
+      expect(result.stdout).toContain("tg-sai profile remove -- bob_handle")
+      expect(result.stdout).toContain("tg-sai profile remove -- draft")
+      for (const secret of ["hash-alice", "hash-bob", "session-alice", "session-bob", "password-alice"]) {
+        expect(result.stdout).not.toContain(secret)
+        expect(result.stderr).not.toContain(secret)
+      }
+      const selectors = [...result.stdout.matchAll(/^  tg-sai profile remove -- (\S+)  #/gm)].map((match) => match[1]!)
+      expect(selectors).toEqual(["alice_handle", "bob_handle", "draft"])
+      for (const [index, selector] of selectors.entries()) {
+        await withTempConfig(async (copy) => {
+          await writeFile(join(copy, "profiles.json"), before)
+          const removed = runCli(["profile", "remove", "--", selector], copy)
+          expect(removed.exitCode).toBe(0)
+          const after = JSON.parse(await readFile(join(copy, "profiles.json"), "utf8"))
+          expect(after.profiles.map((p: { name: string }) => p.name)).toEqual(
+            ["alice", "bob", "draft"].filter((_, i) => i !== index),
+          )
+        })
+      }
+    })
+  })
+
+  test("profile remove examples resolve handle collisions and quote option-looking legacy names", async () => {
+    await withTempConfig(async (dir) => {
+      expect(runCli(addAliceArgs, dir).exitCode).toBe(0)
+      expect(runCli(addBobArgs, dir).exitCode).toBe(0)
+      const path = join(dir, "profiles.json")
+      const config = JSON.parse(await readFile(path, "utf8"))
+      config.profiles[1].handle = "alice_handle"
+      const unusualName = "--old '$(touch SHOULD_NOT_EXIST)' profile"
+      config.profiles.push({ ...config.profiles[0], name: unusualName, handle: null, userId: null })
+      await writeFile(path, JSON.stringify(config))
+      const before = await readFile(path, "utf8")
+      const result = runCli(["profile", "remove"], dir)
+      expect(result.exitCode).toBe(0)
+      expect(result.stdout).toContain("tg-sai profile remove -- bob  #")
+      const example = result.stdout.split("\n").find((line) => line.startsWith("  tg-sai profile remove -- '--old"))!
+      expect(example).toBeDefined()
+      expect(await readFile(path, "utf8")).toBe(before)
+      const removed = Bun.spawnSync({
+        cmd: ["sh", "-c", example.trim().replace(/^tg-sai /, "bun main.ts ")],
+        cwd: packageRoot,
+        env: { ...process.env, TG_SAI_DIR: dir },
+        stdout: "pipe", stderr: "pipe",
+      })
+      expect(removed.exitCode).toBe(0)
+      const after = JSON.parse(await readFile(path, "utf8"))
+      expect(after.profiles.map((p: { name: string }) => p.name)).toEqual(["alice", "bob"])
+      expect(await Bun.file(join(packageRoot, "SHOULD_NOT_EXIST")).exists()).toBe(false)
     })
   })
 
@@ -159,6 +332,93 @@ describe("tg-sai profile CLI", () => {
       const listAfterRemove = runCli(["profile", "list"], dir)
       expect(listAfterRemove.stdout).toContain("* 0\talice_handle")
       expect(listAfterRemove.stdout).not.toContain("bob_handle")
+    })
+  })
+
+  test.each(["bob", "bob_handle", "222", "1"])("password update by %s preserves a second account despite personal credential discovery", async (selector) => {
+    await withTempConfig(async (dir) => {
+      expect(runCli(addAliceArgs, dir).exitCode).toBe(0)
+      expect(runCli(addBobArgs, dir).exitCode).toBe(0)
+      const path = join(dir, "profiles.json")
+      const before = JSON.parse(await readFile(path, "utf8"))
+      const cursor = join(dir, "home", ".cursor")
+      await mkdir(cursor, { recursive: true })
+      await writeFile(join(cursor, "mcp.json"), JSON.stringify({ mcpServers: {
+        first: { env: { TELEGRAM_API_ID: "123", TELEGRAM_API_HASH: "hash-alice", TELEGRAM_SESSION_STRING: "session-alice" } },
+        second: { env: { TELEGRAM_API_ID: "987", TELEGRAM_API_HASH: "conflicting-hash", TELEGRAM_SESSION_STRING: "conflicting-session" } },
+      } }))
+      const result = runCli(["profile", "add", "--name", selector, "--password", "new-custody-password"], dir, {
+        TELEGRAM_API_ID: "123", TELEGRAM_API_HASH: "hash-alice",
+        TELEGRAM_SESSION_STRING: "session-alice", TELEGRAM_PASSWORD: "environment-password",
+      })
+      expect(result.exitCode).toBe(0)
+      expect(result.stdout).toContain("profile_saved: bob_handle")
+      expect(result.stdout).toContain("user_id: 222")
+      const after = JSON.parse(await readFile(path, "utf8"))
+      expect(after.profiles.length).toBe(2)
+      expect(after.profiles[0]).toEqual(before.profiles[0])
+      expect(after.profiles[1]).toEqual({ ...before.profiles[1], password: "new-custody-password", updatedAt: after.profiles[1].updatedAt })
+      for (const secret of ["new-custody-password", "session-alice", "session-bob", "hash-alice", "hash-bob"]) {
+        expect(result.stdout).not.toContain(secret)
+        expect(result.stderr).not.toContain(secret)
+      }
+    })
+  })
+
+  test("password-only update of an unknown saved selector fails without importing another account", async () => {
+    await withTempConfig(async (dir) => {
+      expect(runCli(addAliceArgs, dir).exitCode).toBe(0)
+      const path = join(dir, "profiles.json")
+      const before = await readFile(path, "utf8")
+      const result = runCli(["profile", "add", "--name", "missing-custody", "--password", "new-password"], dir, {
+        TELEGRAM_API_ID: "123", TELEGRAM_API_HASH: "hash-alice", TELEGRAM_SESSION_STRING: "session-alice",
+      })
+      expect(result.exitCode).not.toBe(0)
+      expect(result.stderr).toContain("Unknown configured profile")
+      expect(await readFile(path, "utf8")).toBe(before)
+    })
+  })
+
+  test("metadata updates keep saved identity and reject identity replacement without login", async () => {
+    await withTempConfig(async (dir) => {
+      expect(runCli(addAliceArgs, dir).exitCode).toBe(0)
+      expect(runCli(addBobArgs, dir).exitCode).toBe(0)
+      const path = join(dir, "profiles.json")
+      const before = JSON.parse(await readFile(path, "utf8"))
+      expect(runCli(["profile", "add", "--name", "bob_handle", "--display-name", "Updated label"], dir, {
+        TELEGRAM_SESSION_STRING: "session-alice", TELEGRAM_API_ID: "123", TELEGRAM_API_HASH: "hash-alice",
+      }).exitCode).toBe(0)
+      const updated = JSON.parse(await readFile(path, "utf8"))
+      expect(updated.profiles[0]).toEqual(before.profiles[0])
+      expect(updated.profiles[1]).toEqual({ ...before.profiles[1], displayName: "Updated label", updatedAt: updated.profiles[1].updatedAt })
+      const raw = await readFile(path, "utf8")
+      const denied = runCli(["profile", "add", "--name", "bob", "--user-id", "111"], dir)
+      expect(denied.exitCode).not.toBe(0)
+      expect(denied.stderr).toContain("Changing a saved account identity requires")
+      expect(await readFile(path, "utf8")).toBe(raw)
+    })
+  })
+
+  test("session import cannot replace a known account and same-account refresh preserves its saved name", async () => {
+    await withTempConfig(async (dir) => {
+      expect(runCli(addAliceArgs, dir).exitCode).toBe(0)
+      expect(runCli(addBobArgs, dir).exitCode).toBe(0)
+      const path = join(dir, "profiles.json")
+      const before = await readFile(path, "utf8")
+      const imports = ["profile", "add", "--name", "bob_handle", "--api-id", "123", "--api-hash", "hash-alice",
+        "--session-string", "session-alice", "--user-id", "111", "--display-name", "Alice Example"]
+      const denied = runCli(imports, dir)
+      expect(denied.exitCode).not.toBe(0)
+      expect(denied.stderr).toContain("Login or import does not match the saved account")
+      expect(await readFile(path, "utf8")).toBe(before)
+      const refreshed = runCli(["profile", "add", "--name", "bob_handle", "--api-id", "456", "--api-hash", "hash-bob",
+        "--session-string", "refreshed-bob-session", "--user-id", "222", "--display-name", "Bob Example"], dir)
+      expect(refreshed.exitCode).toBe(0)
+      const after = JSON.parse(await readFile(path, "utf8"))
+      expect(after.profiles[0]).toEqual(JSON.parse(before).profiles[0])
+      expect(after.profiles[1].name).toBe("bob")
+      expect(after.profiles[1].userId).toBe(222)
+      expect(after.profiles[1].sessionString).toBe("refreshed-bob-session")
     })
   })
 
@@ -414,7 +674,7 @@ describe("tg-sai profile CLI", () => {
       )
 
       const result = Bun.spawnSync({
-        cmd: ["bun", cliPath, "profile", "add"],
+        cmd: ["bun", cliPath, "profile", "add", "--name", "conflict-test"],
         cwd: packageRoot,
         env: {
           ...process.env,

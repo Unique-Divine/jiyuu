@@ -1,0 +1,15 @@
+{
+  "sourceRepository": "https://github.com/chigwell/telegram-mcp",
+  "originalUpstream": "https://github.com/chigwell/telegram-mcp",
+  "sourceCommit": "0d7b7e3630397ff931624fee7e4b0f33a134c513",
+  "importedAt": "2026-11-03",
+  "historyImported": false,
+  "excludedSourceFiles": [
+    ".github/workflows/docker-build.yml",
+    ".github/workflows/python-lint-format.yml",
+    ".github/workflows/tests.yml",
+    "claude_desktop_config.json"
+  ],
+  "license": "Apache-2.0",
+  "localModifications": "Connection recovery, participant pagination and regression tests; Jiyuu documentation and source metadata."
+}

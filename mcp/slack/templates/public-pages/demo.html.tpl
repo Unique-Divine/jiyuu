@@ -1,0 +1,1195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Slack MCP Server — Interactive Demo</title>
+  <link rel="canonical" href="{{GITHUB_PAGES_ROOT}}/public/demo.html">
+
+  <!-- Open Graph / Social Sharing -->
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="{{GITHUB_PAGES_ROOT}}/public/demo.html">
+  <meta property="og:title" content="Slack MCP Server — Interactive Demo">
+  <meta property="og:description" content="Give Claude your Slack. {{SELF_HOSTED_TOOL_COUNT}} self-hosted tools for channels, search, replies, reactions, unread triage, and user search.">
+  <meta property="og:image" content="{{SOCIAL_IMAGE_URL}}">
+
+  <!-- Twitter Card -->
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Slack MCP Server — Interactive Demo">
+  <meta name="twitter:description" content="Give Claude your Slack. {{SELF_HOSTED_TOOL_COUNT}} self-hosted tools for channels, search, replies, reactions, unread triage, and user search.">
+  <meta name="twitter:image" content="{{SOCIAL_IMAGE_URL}}">
+  <link rel="icon" href="{{ICON_URL}}" type="image/png">
+
+  <!-- SEO -->
+  <meta name="description" content="Give Claude your Slack. {{SELF_HOSTED_TOOL_COUNT}} self-hosted tools for channels, search, replies, reactions, unread triage, and user search. Interactive demo.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --font-heading: "Space Grotesk", "Avenir Next", "Segoe UI", sans-serif;
+      --font-body: "IBM Plex Sans", "Inter", "Segoe UI", sans-serif;
+      --bg-primary: #0f0f1a;
+      --bg-secondary: #1a1a2e;
+      --bg-tertiary: #16213e;
+      --bg-input: #0f3460;
+      --accent: #4ecdc4;
+      --accent-hover: #45b7aa;
+      --accent-glow: rgba(78, 205, 196, 0.3);
+      --danger: #e94560;
+      --claude-orange: #da7756;
+      --claude-bg: #2d2a24;
+      --text-primary: #ffffff;
+      --text-secondary: rgba(255, 255, 255, 0.7);
+      --text-muted: rgba(255, 255, 255, 0.5);
+      --border-radius: 12px;
+      --transition: all 0.2s ease;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: var(--font-body);
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      min-height: 100vh;
+      line-height: 1.5;
+    }
+
+    /* Preview Banner */
+    .preview-banner {
+      background: linear-gradient(135deg, var(--danger), #ff8c00);
+      color: white;
+      padding: 12px 20px;
+      text-align: center;
+      font-size: 14px;
+      font-weight: 500;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+    .preview-banner code {
+      background: rgba(0,0,0,0.2);
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-family: monospace;
+    }
+    .preview-banner a {
+      color: white;
+      text-decoration: underline;
+    }
+    .cta-strip {
+      background: rgba(15, 52, 96, 0.9);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+      padding: 10px 16px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+      font-size: 13px;
+    }
+    .cta-links {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .cta-links a {
+      color: #d8efff;
+      text-decoration: none;
+      padding: 4px 8px;
+      border: 1px solid rgba(255, 255, 255, 0.25);
+      border-radius: 999px;
+    }
+    .cta-links a:hover {
+      background: rgba(255, 255, 255, 0.1);
+    }
+    .cta-note {
+      color: rgba(255, 255, 255, 0.75);
+    }
+    .cta-note a {
+      color: #9ee7ff;
+      text-decoration: underline;
+    }
+
+    /* Main Layout */
+    .split-container {
+      display: grid;
+      grid-template-columns: 420px 1fr;
+      height: calc(100vh - 88px);
+      overflow: hidden;
+    }
+
+    /* ========== LEFT PANEL: CLAUDE CHAT ========== */
+    .claude-panel {
+      background: var(--claude-bg);
+      border-right: 1px solid rgba(255,255,255,0.1);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .claude-header {
+      padding: 16px 20px;
+      border-bottom: 1px solid rgba(255,255,255,0.1);
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .claude-logo {
+      width: 36px;
+      height: 36px;
+      background: linear-gradient(135deg, var(--claude-orange), #c4694a);
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 700;
+      font-size: 18px;
+      color: white;
+    }
+
+    .claude-header h2 {
+      font-size: 16px;
+      font-weight: 600;
+      color: var(--text-primary);
+      font-family: var(--font-heading);
+    }
+    .claude-header .subtitle {
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+
+    .reset-btn {
+      margin-left: auto;
+      padding: 6px 14px;
+      background: rgba(255,255,255,0.1);
+      border: 1px solid rgba(255,255,255,0.2);
+      border-radius: 6px;
+      color: var(--text-secondary);
+      cursor: pointer;
+      font-size: 12px;
+      font-family: inherit;
+      transition: var(--transition);
+    }
+    .reset-btn:hover {
+      background: rgba(233, 69, 96, 0.2);
+      border-color: var(--danger);
+      color: var(--danger);
+    }
+
+    .claude-chat {
+      flex: 1;
+      overflow-y: auto;
+      padding: 20px;
+      scroll-behavior: smooth;
+    }
+
+    .chat-message {
+      margin-bottom: 20px;
+      animation: fadeIn 0.3s ease;
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(10px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .chat-message.user {
+      text-align: right;
+    }
+
+    .chat-message.user .bubble {
+      background: var(--bg-input);
+      display: inline-block;
+      text-align: left;
+    }
+
+    .chat-message .bubble {
+      background: rgba(255,255,255,0.05);
+      padding: 14px 18px;
+      border-radius: 16px;
+      max-width: 90%;
+      font-size: 14px;
+      line-height: 1.6;
+    }
+
+    .chat-message.claude .bubble {
+      border-top-left-radius: 4px;
+    }
+
+    .chat-message.user .bubble {
+      border-top-right-radius: 4px;
+    }
+
+    /* Tool call styling */
+    .tool-call {
+      background: rgba(78, 205, 196, 0.1);
+      border: 1px solid rgba(78, 205, 196, 0.3);
+      border-radius: 8px;
+      padding: 12px;
+      margin: 10px 0;
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      font-size: 12px;
+    }
+
+    .tool-call .tool-name {
+      color: var(--accent);
+      font-weight: 600;
+    }
+
+    .tool-call .tool-params {
+      color: var(--text-muted);
+      margin-top: 4px;
+    }
+
+    /* Typing indicator */
+    .typing-indicator {
+      display: flex;
+      gap: 4px;
+      padding: 8px 0;
+    }
+
+    .typing-indicator span {
+      width: 8px;
+      height: 8px;
+      background: var(--claude-orange);
+      border-radius: 50%;
+      animation: bounce 1.4s infinite ease-in-out;
+    }
+
+    .typing-indicator span:nth-child(1) { animation-delay: 0s; }
+    .typing-indicator span:nth-child(2) { animation-delay: 0.2s; }
+    .typing-indicator span:nth-child(3) { animation-delay: 0.4s; }
+
+    @keyframes bounce {
+      0%, 80%, 100% { transform: scale(0.6); opacity: 0.4; }
+      40% { transform: scale(1); opacity: 1; }
+    }
+
+    /* Try It Buttons */
+    .try-buttons {
+      padding: 16px 20px;
+      border-top: 1px solid rgba(255,255,255,0.1);
+      background: rgba(0,0,0,0.2);
+    }
+
+    .try-buttons h4 {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: var(--text-muted);
+      margin-bottom: 12px;
+      font-family: var(--font-heading);
+    }
+
+    .try-buttons .scenarios {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .scenario-btn {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 16px;
+      background: rgba(255,255,255,0.05);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 10px;
+      color: var(--text-primary);
+      cursor: pointer;
+      transition: var(--transition);
+      text-align: left;
+    }
+
+    .scenario-btn:hover {
+      background: rgba(78, 205, 196, 0.1);
+      border-color: var(--accent);
+    }
+
+    .scenario-btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .scenario-btn .icon {
+      font-size: 20px;
+    }
+
+    .scenario-btn .text {
+      flex: 1;
+    }
+
+    .scenario-btn .title {
+      font-weight: 600;
+      font-size: 13px;
+    }
+
+    .scenario-btn .desc {
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+
+    /* ========== RIGHT PANEL: SLACK DASHBOARD ========== */
+    .dashboard-panel {
+      background: var(--bg-primary);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .dashboard-header {
+      padding: 16px 24px;
+      border-bottom: 1px solid rgba(255,255,255,0.1);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: var(--bg-secondary);
+    }
+
+    .dashboard-title {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .dashboard-title h2 {
+      font-size: 18px;
+      font-weight: 600;
+      font-family: var(--font-heading);
+    }
+
+    .status-badge {
+      background: rgba(34, 197, 94, 0.2);
+      color: #22c55e;
+      padding: 4px 12px;
+      border-radius: 20px;
+      font-size: 12px;
+      font-weight: 500;
+    }
+
+    .dashboard-content {
+      flex: 1;
+      display: grid;
+      grid-template-columns: 280px 1fr;
+      overflow: hidden;
+    }
+
+    /* Sidebar */
+    .sidebar {
+      background: var(--bg-secondary);
+      border-right: 1px solid rgba(255,255,255,0.05);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .sidebar-section {
+      padding: 16px;
+      border-bottom: 1px solid rgba(255,255,255,0.05);
+    }
+
+    .sidebar-section h3 {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: var(--text-muted);
+      margin-bottom: 12px;
+    }
+
+    .conversation-list {
+      list-style: none;
+      flex: 1;
+      overflow-y: auto;
+      padding: 8px;
+    }
+
+    .conversation-item {
+      padding: 12px 14px;
+      border-radius: 8px;
+      cursor: pointer;
+      margin-bottom: 4px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      transition: var(--transition);
+    }
+
+    .conversation-item:hover {
+      background: rgba(255,255,255,0.05);
+    }
+
+    .conversation-item.active {
+      background: linear-gradient(135deg, var(--accent), #3b82f6);
+    }
+
+    .conversation-item.active .conv-name,
+    .conversation-item.active .conv-preview {
+      color: var(--bg-primary);
+    }
+
+    .conversation-item.highlight {
+      background: rgba(78, 205, 196, 0.2);
+      border: 1px solid var(--accent);
+      animation: pulse-highlight 1s ease-in-out;
+    }
+
+    @keyframes pulse-highlight {
+      0%, 100% { box-shadow: 0 0 0 0 var(--accent-glow); }
+      50% { box-shadow: 0 0 20px 5px var(--accent-glow); }
+    }
+
+    .avatar {
+      width: 36px;
+      height: 36px;
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 600;
+      font-size: 13px;
+      flex-shrink: 0;
+    }
+
+    .avatar.dm { background: linear-gradient(135deg, #8b5cf6, #ec4899); }
+    .avatar.channel { background: linear-gradient(135deg, #3b82f6, #06b6d4); }
+
+    .conv-info { flex: 1; min-width: 0; }
+    .conv-name { font-weight: 500; font-size: 14px; }
+    .conv-preview { font-size: 12px; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+    /* Main Content Area */
+    .main-area {
+      background: var(--bg-tertiary);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .main-header {
+      padding: 16px 24px;
+      border-bottom: 1px solid rgba(255,255,255,0.05);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .main-header h3 {
+      font-size: 16px;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-family: var(--font-heading);
+    }
+
+    .online-dot {
+      width: 8px;
+      height: 8px;
+      background: #22c55e;
+      border-radius: 50%;
+    }
+
+    .messages-container {
+      flex: 1;
+      overflow-y: auto;
+      padding: 20px 24px;
+    }
+
+    .mobile-scenario-rail {
+      display: none;
+      padding: 14px 16px;
+      background: rgba(15, 52, 96, 0.55);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    }
+
+    .mobile-rail-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+
+    .mobile-rail-head h4 {
+      font-size: 12px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      font-family: var(--font-heading);
+    }
+
+    .mobile-scenario-buttons {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .mobile-scenario-btn {
+      background: rgba(255, 255, 255, 0.06);
+      color: var(--text-primary);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 10px;
+      padding: 10px 8px;
+      font-size: 12px;
+      font-weight: 600;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 3px;
+      cursor: pointer;
+      transition: var(--transition);
+      text-align: center;
+      font-family: var(--font-body);
+    }
+
+    .mobile-scenario-btn:hover {
+      border-color: var(--accent);
+      background: rgba(78, 205, 196, 0.15);
+    }
+
+    .mobile-scenario-btn .icon {
+      font-size: 16px;
+      line-height: 1;
+    }
+
+    .mobile-cta {
+      margin-top: 10px;
+      font-size: 12px;
+      color: var(--text-secondary);
+    }
+
+    .mobile-reset {
+      padding: 4px 10px;
+      font-size: 11px;
+    }
+
+    .message {
+      display: flex;
+      gap: 14px;
+      padding: 12px;
+      border-radius: 10px;
+      margin-bottom: 8px;
+      transition: var(--transition);
+    }
+
+    .message:hover {
+      background: rgba(255,255,255,0.03);
+    }
+
+    .message.highlight {
+      background: rgba(78, 205, 196, 0.15);
+      border: 1px solid rgba(78, 205, 196, 0.4);
+    }
+
+    .message-avatar {
+      width: 40px;
+      height: 40px;
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 600;
+      flex-shrink: 0;
+    }
+
+    .message-content { flex: 1; }
+    .message-header { display: flex; align-items: baseline; gap: 10px; margin-bottom: 4px; }
+    .message-user { font-weight: 600; font-size: 14px; color: var(--accent); }
+    .message-time { font-size: 12px; color: var(--text-muted); }
+    .message-text { font-size: 14px; color: var(--text-secondary); line-height: 1.5; }
+
+    .message-text code {
+      background: rgba(0,0,0,0.3);
+      padding: 2px 6px;
+      border-radius: 4px;
+      color: #f472b6;
+      font-family: monospace;
+    }
+
+    /* User Profile Card */
+    .user-card {
+      background: var(--bg-secondary);
+      border-radius: 12px;
+      padding: 24px;
+      text-align: center;
+      max-width: 300px;
+      margin: 40px auto;
+      border: 1px solid rgba(255,255,255,0.1);
+      display: none;
+    }
+
+    .user-card.visible {
+      display: block;
+      animation: fadeIn 0.4s ease;
+    }
+
+    .user-card .profile-avatar {
+      width: 80px;
+      height: 80px;
+      border-radius: 20px;
+      margin: 0 auto 16px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 32px;
+      font-weight: 700;
+      background: linear-gradient(135deg, #8b5cf6, #ec4899);
+    }
+
+    .user-card h4 {
+      font-size: 20px;
+      margin-bottom: 4px;
+    }
+
+    .user-card .title {
+      color: var(--text-muted);
+      font-size: 14px;
+      margin-bottom: 16px;
+    }
+
+    .user-card .stats {
+      display: flex;
+      justify-content: center;
+      gap: 24px;
+      padding-top: 16px;
+      border-top: 1px solid rgba(255,255,255,0.1);
+    }
+
+    .user-card .stat {
+      text-align: center;
+    }
+
+    .user-card .stat-value {
+      font-size: 20px;
+      font-weight: 700;
+      color: var(--accent);
+    }
+
+    .user-card .stat-label {
+      font-size: 11px;
+      color: var(--text-muted);
+      text-transform: uppercase;
+    }
+
+    /* Empty State */
+    .empty-state {
+      text-align: center;
+      padding: 60px 20px;
+      color: var(--text-muted);
+    }
+
+    .empty-state .icon {
+      font-size: 48px;
+      margin-bottom: 16px;
+    }
+
+    /* Mobile */
+    @media (max-width: 1000px) {
+      .split-container {
+        grid-template-columns: 1fr;
+        height: auto;
+        min-height: calc(100vh - 88px);
+      }
+      .claude-panel {
+        display: none;
+      }
+      .mobile-scenario-rail {
+        display: block;
+      }
+      .dashboard-content {
+        grid-template-columns: 1fr;
+      }
+      .sidebar {
+        display: none;
+      }
+      .main-header {
+        padding: 14px 16px;
+      }
+      .messages-container {
+        padding: 16px;
+      }
+    }
+
+    @media (max-width: 640px) {
+      .cta-strip {
+        gap: 8px;
+        padding: 10px 12px;
+      }
+      .mobile-scenario-buttons {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+      .mobile-scenario-btn {
+        padding: 10px 6px;
+      }
+      .dashboard-header {
+        padding: 14px 12px;
+      }
+      .dashboard-title h2 {
+        font-size: 16px;
+      }
+      .status-badge {
+        font-size: 11px;
+        padding: 3px 10px;
+      }
+      .messages-container {
+        min-height: 48vh;
+      }
+    }
+  </style>
+</head>
+<body>
+  <!-- Preview Banner -->
+  <div class="preview-banner">
+    INTERACTIVE DEMO — simulated data. Run <code>npm run web</code> for your live workspace, or try <a href="{{CANONICAL_SITE_URL}}" style="color:#f0c246;font-weight:600">Hosted</a> — free tier (no card) live; Pro $19/mo unlocks unlimited AI tools and permanent OAuth.
+  </div>
+  <div class="cta-strip">
+    <div class="cta-links">
+{{DEMO_LINKS}}
+    </div>
+    <div class="cta-note">
+      {{DEMO_NOTE}}
+    </div>
+  </div>
+
+  <div class="split-container">
+    <!-- LEFT: Claude Chat Panel -->
+    <div class="claude-panel">
+      <div class="claude-header">
+        <div class="claude-logo">C</div>
+        <div>
+          <h2>Claude</h2>
+          <div class="subtitle">with Slack MCP tools</div>
+        </div>
+        <button class="reset-btn" onclick="resetDemo()">Reset Demo</button>
+      </div>
+
+      <div class="claude-chat" id="claudeChat">
+        <div class="chat-message claude">
+          <div class="bubble">
+            Hi! I have access to your Slack workspace through MCP tools. I can search messages, list conversations, look up users, and more.
+            <br><br>
+            Try one of the scenarios below to see how it works!
+          </div>
+        </div>
+      </div>
+
+      <div class="try-buttons">
+        <h4>Try a Scenario</h4>
+        <div class="scenarios">
+          <button class="scenario-btn" onclick="runScenario('findKey')" id="btn-findKey">
+            <span class="icon">🔑</span>
+            <div class="text">
+              <div class="title">Find the API Key</div>
+              <div class="desc">Search DMs for sensitive information</div>
+            </div>
+          </button>
+          <button class="scenario-btn" onclick="runScenario('listChannels')" id="btn-listChannels">
+            <span class="icon">📋</span>
+            <div class="text">
+              <div class="title">List Channels</div>
+              <div class="desc">Get all workspace channels</div>
+            </div>
+          </button>
+          <button class="scenario-btn" onclick="runScenario('whoIsAlex')" id="btn-whoIsAlex">
+            <span class="icon">👤</span>
+            <div class="text">
+              <div class="title">Who is Alex?</div>
+              <div class="desc">Look up user profile and activity</div>
+            </div>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- RIGHT: Slack Dashboard -->
+    <div class="dashboard-panel">
+      <div class="dashboard-header">
+        <div class="dashboard-title">
+          <h2>Slack Dashboard</h2>
+          <span class="status-badge">Connected</span>
+        </div>
+        <div style="color: var(--text-muted); font-size: 13px;">
+          alex.chen @ Acme Corp
+        </div>
+      </div>
+
+      <div class="mobile-scenario-rail" aria-label="Scenario shortcuts">
+        <div class="mobile-rail-head">
+          <h4>Try a Scenario</h4>
+          <button class="reset-btn mobile-reset" onclick="resetDemo()">Reset Demo</button>
+        </div>
+        <div class="mobile-scenario-buttons">
+          <button class="mobile-scenario-btn" onclick="runScenario('findKey')">
+            <span class="icon">🔑</span>
+            <span>Find Key</span>
+          </button>
+          <button class="mobile-scenario-btn" onclick="runScenario('listChannels')">
+            <span class="icon">📋</span>
+            <span>Channels</span>
+          </button>
+          <button class="mobile-scenario-btn" onclick="runScenario('whoIsAlex')">
+            <span class="icon">👤</span>
+            <span>Who is Alex?</span>
+          </button>
+        </div>
+        <p class="mobile-cta">Tap a scenario to drive the live preview with one click.</p>
+      </div>
+
+      <div class="dashboard-content">
+        <aside class="sidebar">
+          <div class="sidebar-section">
+            <h3>Conversations</h3>
+          </div>
+          <ul class="conversation-list" id="conversationList">
+            <!-- Populated by JS -->
+          </ul>
+        </aside>
+
+        <main class="main-area">
+          <div class="main-header">
+            <h3 id="mainTitle"><span class="online-dot"></span> Select a conversation</h3>
+          </div>
+          <div class="messages-container" id="messagesContainer">
+            <div class="empty-state">
+              <div class="icon">💬</div>
+              <div>Click a scenario to see Claude interact with your Slack data</div>
+            </div>
+          </div>
+        </main>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // ========== MOCK DATA ==========
+    const mockData = {
+      dms: [
+        { id: 'D001', name: 'Sarah Johnson', initials: 'SJ', preview: 'The API key is sk-abc123...', type: 'dm' },
+        { id: 'D002', name: 'Mike Chen', initials: 'MC', preview: 'Are we still on for 2pm?', type: 'dm' },
+        { id: 'D003', name: 'Alex Chen', initials: 'AC', preview: 'I pushed the fix to main', type: 'dm' },
+        { id: 'D004', name: 'Emily Davis', initials: 'ED', preview: 'Thanks for the review!', type: 'dm' },
+      ],
+      channels: [
+        { id: 'C001', name: '#engineering', initials: '#', preview: 'Deploy complete', type: 'channel' },
+        { id: 'C002', name: '#product', initials: '#', preview: 'Q4 roadmap finalized', type: 'channel' },
+        { id: 'C003', name: '#random', initials: '#', preview: 'Anyone up for lunch?', type: 'channel' },
+        { id: 'C004', name: '#incidents', initials: '#', preview: 'All clear', type: 'channel' },
+        { id: 'C005', name: '#design', initials: '#', preview: 'New mockups ready', type: 'channel' },
+      ],
+      messages: {
+        'D001': [
+          { user: 'Sarah Johnson', initials: 'SJ', time: '2:32 PM', text: 'Hey, can you send me the API key for the staging environment?' },
+          { user: 'You', initials: 'AC', time: '2:35 PM', text: 'Sure, one sec...' },
+          { user: 'You', initials: 'AC', time: '2:36 PM', text: 'Here it is: <code>sk-abc123-staging-key-xyz789</code>', highlight: true },
+          { user: 'Sarah Johnson', initials: 'SJ', time: '2:37 PM', text: 'Got it, thanks!' },
+        ],
+        'D003': [
+          { user: 'Alex Chen', initials: 'AC', time: '11:20 AM', text: 'I pushed the fix to main' },
+          { user: 'You', initials: 'YO', time: '11:22 AM', text: 'Nice! I\'ll review it after lunch' },
+          { user: 'Alex Chen', initials: 'AC', time: '11:23 AM', text: 'Sounds good. Let me know if you have questions' },
+        ]
+      },
+      users: {
+        'alex': {
+          name: 'Alex Chen',
+          initials: 'AC',
+          title: 'Senior Engineer',
+          messages: 847,
+          channels: 12
+        }
+      }
+    };
+
+    let isRunning = false;
+
+    // ========== RENDERING ==========
+    function renderConversations(list, highlightId = null) {
+      const container = document.getElementById('conversationList');
+      container.innerHTML = list.map(c => `
+        <li class="conversation-item ${c.id === highlightId ? 'highlight active' : ''}" data-id="${c.id}">
+          <div class="avatar ${c.type}">${c.initials}</div>
+          <div class="conv-info">
+            <div class="conv-name">${c.name}</div>
+            <div class="conv-preview">${c.preview}</div>
+          </div>
+        </li>
+      `).join('');
+    }
+
+    function renderMessages(channelId, highlightIndex = -1) {
+      const container = document.getElementById('messagesContainer');
+      const messages = mockData.messages[channelId] || [];
+
+      if (messages.length === 0) {
+        container.innerHTML = '<div class="empty-state"><div class="icon">💬</div><div>No messages</div></div>';
+        return;
+      }
+
+      container.innerHTML = messages.map((m, i) => `
+        <div class="message ${m.highlight || i === highlightIndex ? 'highlight' : ''}">
+          <div class="message-avatar" style="background: linear-gradient(135deg, ${getColor(m.initials)})">${m.initials}</div>
+          <div class="message-content">
+            <div class="message-header">
+              <span class="message-user">${m.user}</span>
+              <span class="message-time">${m.time}</span>
+            </div>
+            <div class="message-text">${m.text}</div>
+          </div>
+        </div>
+      `).join('');
+    }
+
+    function showUserCard(userId) {
+      const user = mockData.users[userId];
+      if (!user) return;
+
+      // Render the user card directly into the container
+      document.getElementById('messagesContainer').innerHTML = `
+        <div class="user-card visible">
+          <div class="profile-avatar">${user.initials}</div>
+          <h4>${user.name}</h4>
+          <div class="title">${user.title}</div>
+          <div class="stats">
+            <div class="stat">
+              <div class="stat-value">${user.messages}</div>
+              <div class="stat-label">Messages</div>
+            </div>
+            <div class="stat">
+              <div class="stat-value">${user.channels}</div>
+              <div class="stat-label">Channels</div>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function getColor(initials) {
+      const colors = [
+        '#8b5cf6, #ec4899',
+        '#3b82f6, #06b6d4',
+        '#f59e0b, #ef4444',
+        '#10b981, #3b82f6'
+      ];
+      return colors[initials.charCodeAt(0) % colors.length];
+    }
+
+    // ========== CLAUDE CHAT ==========
+    function addUserMessage(text) {
+      const chat = document.getElementById('claudeChat');
+      chat.innerHTML += `
+        <div class="chat-message user">
+          <div class="bubble">${text}</div>
+        </div>
+      `;
+      chat.scrollTop = chat.scrollHeight;
+    }
+
+    function addClaudeMessage(html) {
+      const chat = document.getElementById('claudeChat');
+      chat.innerHTML += `
+        <div class="chat-message claude">
+          <div class="bubble">${html}</div>
+        </div>
+      `;
+      chat.scrollTop = chat.scrollHeight;
+    }
+
+    function addToolCall(toolName, params) {
+      const chat = document.getElementById('claudeChat');
+      chat.innerHTML += `
+        <div class="chat-message claude">
+          <div class="bubble">
+            <div class="tool-call">
+              <div class="tool-name">${toolName}</div>
+              <div class="tool-params">${params}</div>
+            </div>
+          </div>
+        </div>
+      `;
+      chat.scrollTop = chat.scrollHeight;
+    }
+
+    function showTyping() {
+      const chat = document.getElementById('claudeChat');
+      const id = 'typing-' + Date.now();
+      chat.innerHTML += `
+        <div class="chat-message claude" id="${id}">
+          <div class="bubble">
+            <div class="typing-indicator">
+              <span></span><span></span><span></span>
+            </div>
+          </div>
+        </div>
+      `;
+      chat.scrollTop = chat.scrollHeight;
+      return id;
+    }
+
+    function removeTyping(id) {
+      const el = document.getElementById(id);
+      if (el) el.remove();
+    }
+
+    // ========== SCENARIOS ==========
+    async function runScenario(scenario) {
+      if (isRunning) return;
+      isRunning = true;
+
+      // Disable all buttons
+      document.querySelectorAll('.scenario-btn').forEach(btn => btn.disabled = true);
+
+      switch (scenario) {
+        case 'findKey':
+          await scenarioFindKey();
+          break;
+        case 'listChannels':
+          await scenarioListChannels();
+          break;
+        case 'whoIsAlex':
+          await scenarioWhoIsAlex();
+          break;
+      }
+
+      // Re-enable buttons
+      document.querySelectorAll('.scenario-btn').forEach(btn => btn.disabled = false);
+      isRunning = false;
+    }
+
+    async function scenarioFindKey() {
+      // User asks
+      addUserMessage("Can you find the API key that Sarah sent me?");
+      await delay(500);
+
+      // Claude thinks
+      const typing1 = showTyping();
+      await delay(600);
+      removeTyping(typing1);
+
+      // Tool call
+      addToolCall('slack_search_messages', '{ query: "API key", count: 10 }');
+      await delay(900);
+
+      // Dashboard updates - show DMs with Sarah highlighted
+      renderConversations(mockData.dms, 'D001');
+      document.getElementById('mainTitle').innerHTML = '<span class="online-dot"></span> Sarah Johnson';
+      await delay(300);
+
+      // Show messages with the key highlighted
+      renderMessages('D001');
+      await delay(600);
+
+      // Claude responds
+      const typing2 = showTyping();
+      await delay(500);
+      removeTyping(typing2);
+
+      addClaudeMessage(`Found it! Sarah asked for the staging API key on your DM. You sent her:<br><br><code>sk-abc123-staging-key-xyz789</code><br><br>This was shared at 2:36 PM today.`);
+    }
+
+    async function scenarioListChannels() {
+      addUserMessage("What channels am I in?");
+      await delay(500);
+
+      const typing1 = showTyping();
+      await delay(600);
+      removeTyping(typing1);
+
+      addToolCall('slack_list_conversations', '{ types: "public_channel,private_channel" }');
+      await delay(900);
+
+      // Dashboard updates to show channels
+      renderConversations(mockData.channels);
+      document.getElementById('mainTitle').innerHTML = 'Channels';
+      document.getElementById('messagesContainer').innerHTML = `
+        <div class="empty-state">
+          <div class="icon">📋</div>
+          <div>5 channels loaded</div>
+        </div>
+      `;
+      await delay(500);
+
+      const typing2 = showTyping();
+      await delay(600);
+      removeTyping(typing2);
+
+      addClaudeMessage(`You're a member of <strong>5 channels</strong>:<br><br>
+        • <strong>#engineering</strong> - Latest: "Deploy complete"<br>
+        • <strong>#product</strong> - Q4 roadmap discussions<br>
+        • <strong>#random</strong> - Social chat<br>
+        • <strong>#incidents</strong> - On-call alerts<br>
+        • <strong>#design</strong> - Design team updates<br><br>
+        The most active appears to be #engineering.`);
+    }
+
+    async function scenarioWhoIsAlex() {
+      addUserMessage("Who is Alex? What does he do here?");
+      await delay(500);
+
+      const typing1 = showTyping();
+      await delay(600);
+      removeTyping(typing1);
+
+      addToolCall('slack_users_info', '{ user_id: "U_ALEX" }');
+      await delay(600);
+
+      // Highlight Alex in DMs
+      renderConversations(mockData.dms, 'D003');
+      await delay(300);
+
+      addToolCall('slack_search_messages', '{ query: "from:alex", count: 50 }');
+      await delay(900);
+
+      // Show user profile card
+      document.getElementById('mainTitle').innerHTML = '<span class="online-dot"></span> User Profile';
+      showUserCard('alex');
+      await delay(500);
+
+      const typing2 = showTyping();
+      await delay(700);
+      removeTyping(typing2);
+
+      addClaudeMessage(`<strong>Alex Chen</strong> is a Senior Engineer on your team.<br><br>
+        📊 <strong>Activity:</strong> 847 messages across 12 channels<br>
+        💬 <strong>Most active in:</strong> #engineering, #incidents<br>
+        🕐 <strong>Recent:</strong> Pushed a fix to main branch today<br><br>
+        Based on his messages, he focuses on backend infrastructure and is often involved in incident response.`);
+    }
+
+    function delay(ms) {
+      return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    function resetDemo() {
+      // Reset chat to initial state
+      document.getElementById('claudeChat').innerHTML = `
+        <div class="chat-message claude">
+          <div class="bubble">
+            Hi! I have access to your Slack workspace through MCP tools. I can search messages, list conversations, look up users, and more.
+            <br><br>
+            Try one of the scenarios below to see how it works!
+          </div>
+        </div>
+      `;
+
+      // Reset dashboard
+      renderConversations(mockData.dms);
+      document.getElementById('mainTitle').innerHTML = '<span class="online-dot"></span> Select a conversation';
+      document.getElementById('messagesContainer').innerHTML = `
+        <div class="empty-state">
+          <div class="icon">💬</div>
+          <div>Click a scenario to see Claude interact with your Slack data</div>
+        </div>
+      `;
+
+      isRunning = false;
+    }
+
+    // ========== INIT ==========
+    renderConversations(mockData.dms);
+  </script>
+</body>
+</html>

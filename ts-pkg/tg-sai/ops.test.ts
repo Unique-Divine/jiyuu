@@ -4,7 +4,9 @@ import {
   isSaiChatTitle,
   parseChatInputFile,
   parseChatInputLine,
+  resolveBootstrapTarget,
 } from "./ops"
+import { USERS } from "./cfg"
 
 describe("parseChatInputLine", () => {
   test("parses plain chat ID lines", () => {
@@ -89,5 +91,17 @@ describe("formatSaiChatJsonLine", () => {
     ).toBe(
       '{"chatId":-5257835121,"title":"Sai <> Adevar Labs","type":"Group (Basic)","username":null}',
     )
+  })
+})
+
+describe("resolveBootstrapTarget", () => {
+  test("defaults to the Sai custody account, never a personal account", () => {
+    expect(resolveBootstrapTarget(undefined)).toBe(USERS.saiCustody.id)
+    expect(resolveBootstrapTarget(undefined)).not.toBe(USERS.uniqueDivine.id)
+  })
+
+  test("uses an explicit target when given", () => {
+    expect(resolveBootstrapTarget("SaiTeam_AI")).toBe("SaiTeam_AI")
+    expect(resolveBootstrapTarget(1912700300)).toBe(1912700300)
   })
 })

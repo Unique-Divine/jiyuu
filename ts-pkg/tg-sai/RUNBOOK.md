@@ -35,11 +35,15 @@ Credential profile behavior:
 
 - Command `tg-sai profile find` reports discovered Telegram credential sources
   without writing profile state.
-- Command `tg-sai profile add` stores a local profile from explicit flags,
-  process environment variables, or automatically merged non-conflicting
-  discovered sources.
-- Command `tg-sai profile add --qr` or `tg-sai profile add --phone` generates a
-  missing Telegram session string.
+- Bare commands `tg-sai profile` and `tg-sai profile add` show help and configured
+  profiles without saving state or connecting to Telegram.
+- Command `tg-sai profile add` with explicit options stores a local profile from
+  flags, process environment variables, or merged non-conflicting discovered
+  sources. Use a distinct `--name` for another account; without it, explicit
+  options update the active/default profile.
+- Explicit `--qr`, `--phone`, or `--login` starts a fresh account login and
+  ignores discovered/environment sessions and account passwords. App credentials
+  can still come from discovery, environment, or interactive input.
 - Commands `tg-sai profile list`, `tg-sai profile show`, `tg-sai profile use`,
   and `tg-sai profile remove` manage local session profiles.
 
@@ -125,17 +129,20 @@ The session string is generated after QR login.
 Generate the session string and save it directly into a `tg-sai` profile:
 
 ```bash
-tg-sai profile add --qr
+tg-sai profile add --name sai-custody --login --qr --interactive
 ```
 
 Scan the QR code in Telegram with **Settings > Devices > Link Desktop Device**.
-After login succeeds, command `tg-sai profile add` saves the generated
-`sessionString` into profile `operator`.
+Scan while signed into the intended account. After login succeeds, this command
+saves its verified identity and session in the separate `sai-custody` profile.
+The existing active profile stays selected. Inspect the result with command
+`tg-sai profile show sai-custody`.
 
 If you generated the session string manually, save it with explicit flags:
 
 ```bash
 tg-sai profile add \
+  --name sai-custody \
   --api-id <api id> \
   --api-hash <api hash> \
   --session-string '<session string>'
@@ -145,7 +152,7 @@ Store the Telegram 2FA password in the same profile when ownership transfer is
 needed:
 
 ```bash
-tg-sai profile add --password '<password>'
+tg-sai profile add --name sai-custody --password '<password>'
 ```
 
 Check the local setup:
@@ -172,17 +179,26 @@ Add a local profile from a numbered source shown by command
 `tg-sai profile find`:
 
 ```bash
-tg-sai profile add --src 1
+tg-sai profile add --name another-account --src 1
 ```
 
 Command `tg-sai profile add` can store the Telegram 2FA password with flag
 `--password`. Command `tg-sai profile show` redacts stored `apiHash`,
 `sessionString`, and `password`.
 
+For password or metadata updates, `--name` selects an existing saved profile by
+name, handle, numeric user ID, or saved-list index. The update preserves that
+profile's account identity and session without importing environment or discovered
+credentials. An unknown password-update selector fails instead of creating a
+profile. Explicit login/import cannot replace a known profile with a different
+account; use a new name for another account, or remove the old profile first.
+Flag `--src` selects a credential source numbered by `tg-sai profile find`, not
+the saved-profile index printed by `tg-sai profile list`.
+
 Create a blank draft profile for onboarding:
 
 ```bash
-tg-sai profile add
+tg-sai profile add --name draft
 ```
 
 Blank or partial profiles are useful while collecting `apiId`, `apiHash`, and
@@ -193,6 +209,7 @@ Add a local profile from explicit values:
 
 ```bash
 tg-sai profile add \
+  --name another-account \
   --handle <telegram-handle> \
   --user-id <telegram-user-id> \
   --display-name "<display name>"
@@ -204,16 +221,22 @@ List local profiles:
 tg-sai profile list
 ```
 
+Command `tg-sai profile` also shows configured profiles beneath its command
+list. Bare command `tg-sai profile add` explains fresh QR enrollment and how
+named accounts differ from updates to the active profile. Neither changes the
+saved configuration.
+
 Find Sai-related chats visible to the active Telegram session:
 
 ```bash
 tg-sai ops sai-find
 ```
 
-Command `tg-sai ops sai-find` always writes a JSONL file under directory
-`~/.tg-sai/logs/`, using the next available filename such as
-`sai-find-00.jsonl` or `sai-find-01.jsonl`. Use flag `--out <path>` to also
-write a copy somewhere else.
+Command `tg-sai ops sai-find` always writes its chat list as a JSONL file
+under directory `~/.tg-sai/logs/`, using the next available filename such as
+`sai-find-00.jsonl` or `sai-find-01.jsonl`. This file is command output for
+`ops sai-bootstrap --file`, not a log. Use flag `--out <path>` to also write a
+copy somewhere else.
 
 Dry-run Sai bot and owner-target updates from a reviewed chat file:
 
@@ -221,12 +244,18 @@ Dry-run Sai bot and owner-target updates from a reviewed chat file:
 tg-sai ops sai-bootstrap --file ~/.tg-sai/logs/sai-find-00.jsonl
 ```
 
-Command `tg-sai ops sai-bootstrap` always writes a JSONL run log under directory
-`~/.tg-sai/logs/`, using the next available filename such as
-`sai-bootstrap-00.jsonl` or `sai-bootstrap-01.jsonl`. The command waits one
-second between chats by default. Use flag `--delay-ms <ms>` to change that
+Command `tg-sai ops sai-bootstrap` prints one JSON event per line on stdout
+and its `telemetry_run_id`; redirect stdout if you want a copy. Its Telegram
+calls are in the telemetry database: `tg-sai events show <run_id>`. The
+command waits one second between chats by default. Use flag `--delay-ms <ms>` to change that
 delay. When environment variable `TELEGRAM_PASSWORD` is available, execution
 mode attempts ownership transfer by default for eligible chats.
+
+The command sleeps through flood waits up to five minutes (environment
+variable `TG_SAI_FLOOD_MAX_WAIT_MS` overrides). A longer `FLOOD_WAIT_X` or any
+`PEER_FLOOD` stops the remaining chats: stdout gets a `flood_stop` event with
+the chat, the remaining count, the code, and `resumeAt`, and the command exits
+with code 1. A `SLOWMODE_WAIT_X` fails only that chat.
 
 Run a live read-only audit:
 
@@ -277,6 +306,58 @@ TELEGRAM_PASSWORD="<2fa password>" tg-sai add-owner \
   --target-user <target-user> \
   --run
 ```
+
+## Logs, Telemetry, and Flood Holds
+
+tg-sai writes no JSONL run logs. Earlier versions wrote
+`~/.tg-sai/logs/<command>-NN.jsonl` and `sai-bootstrap-NN.jsonl`; those files
+stay readable but nothing new is added. Each process records into SQLite file
+`~/.tg-sai/telemetry.db` (`$TG_SAI_DIR/telemetry.db`):
+
+- `run.start` and `run.end` rows with the sanitized argv and exit code.
+- `tg.rpc.call`, `tg.rpc.attempt`, and `tg.flood.wait` rows for Telegram
+  calls, with summarized request and response shapes.
+- App log rows: a `level` (`debug`, `info`, `warn`, `error`), a short fixed
+  `msg`, and summarized `attrs`. Their `event` is `log.<subsystem>` or a
+  dotted name such as `worker.job.held`.
+
+Read it with `tg-sai events`. Output is TOON; add `--json` for JSON.
+
+```bash
+tg-sai events logs --since 24h --level warn --subsystem worker
+tg-sai events logs --run <run_id> --limit 200
+tg-sai events show <run_id|job_id|request_id>   # calls and log rows
+tg-sai events runs
+tg-sai events floods --since 7d
+tg-sai events stats                             # rows, log rows by level
+```
+
+Saved flood waits live in a separate file, `~/.tg-sai/state.db`. Every tg-sai
+process checks it before invite, create, resolve, and send calls. While a
+hold is active, a CLI command exits with code 75 and one stderr line naming
+the held call group and the UTC time to retry. If `state.db` cannot be read,
+invite and create calls are blocked, and the command also exits 75. The
+hold check keys by the account the session's own `getMe` reports, not by the
+profile's saved user ID; until that is known, invite and create calls are
+blocked the same way (`TG_SAI_HOLD_ACCOUNT_UNKNOWN`, exit 75).
+
+`ops sai-bootstrap` stops the batch with a `flood_stop` event on any of
+these refusals and exits 75. A `PEER_FLOOD` or a Telegram flood wait longer
+than the run's threshold also stops it, with exit 1.
+
+Inspect and override holds with `tg-sai holds`. `set` and `clear` are dry
+runs without `--run`; `clear --run` on an active hold also needs `--force`.
+Each write adds a `holds.set` or `holds.clear` row to `telemetry.db`. A
+`--run` refuses a `state.db` owned by another user, so on the custody VM
+run the worker's binary as the worker user:
+
+```bash
+sudo -u sai-custody-worker env TG_SAI_DIR=/var/lib/sai-custody-worker HOME=/var/lib/sai-custody-worker /opt/sai-custody-worker/current/tg-sai-worker holds list
+```
+
+`TG_SAI_TELEMETRY=off` disables `telemetry.db` writes only. Flood holds in
+`state.db` still apply, and `tg-sai events` reads whatever was recorded
+before.
 
 ## File roles
 
@@ -343,3 +424,100 @@ list regular members as admins. This tool uses per-member lookups
 - Emit a reviewable table or JSON artifact for batch dry-runs.
 - Add named rights profiles for bot admin and owner-target admin promotion.
 - Add fixtures for a completed ownership transfer.
+
+## Custody Chat Provisioning
+
+SaiTeam_bot's private `/newdealchat` flow submits an approved request to the
+Deal Desk API. A separate worker creates the private supergroup as custody
+user `8274304175`, profile `SaiTeam_AI`. The bot, Unique, and the requester
+become admins. August and Erick are ordinary default members. The deployed bot
+configuration controls the requester allowlist and defaults.
+
+When adding an operator, configure their numeric Telegram user ID in the bot
+allowlist. A fresh custody session may not know that ID's access hash. Add a
+verified handle alias in `provisioningRuntime.ts` for new team operators and
+deploy the worker with it. Resolve the handle through the custody account first
+and verify the exact numeric ID and that it is a user account. The runtime
+rejects handles that later resolve to a different account.
+
+For explicit CLI requests, prepare a JSON file with a stable `requestId`,
+`custodyProfile`, `expectedUserId`, `title`, `participants`, `admins`,
+`botRightsProfile`, and `dealIds`. Each admin uses `rightsProfile: "team"`;
+the bot uses `botRightsProfile: "baseline"`. `optionalParticipants` must be a
+subset of ordinary participants. `dealIds: []` registers a chat without
+creating or linking a commercial deal.
+
+```sh
+tg-sai chat provision prepare --file request.json
+tg-sai chat provision prepare --file request.json --run
+tg-sai chat provision run --request-id <request-id>
+tg-sai chat provision run --request-id <request-id> --run
+tg-sai chat provision status --request-id <request-id>
+```
+
+The cloud CLI credential needs the corresponding chat workflow capabilities.
+The background worker uses a dedicated read-only record credential with only
+`chats:work` granted for workflow writes. The worker service gets only the
+custody profile, without personal sessions or ownership-transfer passwords.
+
+```sh
+tg-sai worker --custody-profile SaiTeam_AI --once
+tg-sai worker --custody-profile SaiTeam_AI --once --run
+tg-sai worker --custody-profile SaiTeam_AI --run --interval-ms 5000
+```
+
+Without `--run`, the worker reads one queue page and does not connect to
+Telegram. Execution uses a durable worker identity, account lock, and local
+receipts. Never delete these files to force a retry. An uncertain creation
+blocks further creation until an operator reconciles the original request.
+Use `chat provision resolve --help` to adopt a verified group with its original
+creation marker. Known-group partial setup resumes against that same group.
+
+Required admins must be members before setup becomes ready. An ordinary member
+blocked by privacy settings can remain pending with a 24-hour, approval-required
+invite link. A link does not mean the person joined. Handle-based resolution of
+fixed team defaults must verify the expected numeric ID before any invitation.
+
+New ready receipts include an `openGroupUrl` anchored to a message actually
+observed in the group and the existing `primaryInviteLink`, when available.
+These read-only lookups run together with a 10-second limit each. A missing link
+does not undo verified setup. Existing primary invitations are never rotated or
+created by this step, and privacy-blocked members keep their separate controlled
+invitations. The bot displays the saved links in its completion reply and
+`/chatstatus`. Completed requests are not rewritten to refresh missing links.
+
+The source bot configuration starts with admission in `observe` mode. Check
+`~/ki/boku/epics/comms/telegram-bot.md` and its dated rollout evidence for
+the actual deployed state before testing bot commands.
+
+
+## Runtime Health and Deployment Readiness
+
+`tg-sai health` now defaults to offline runtime checks. It verifies both bundled
+WASM assets, crypto and compression operations, and actual Telegram client
+preparation with a temporary SQLite store. It does not read profiles or contact
+Telegram. `--json` provides a machine-readable result and failures exit nonzero.
+
+```sh
+tg-sai health --offline --json
+tg-sai health --online --custody-profile SaiTeam_AI --json
+```
+
+Online mode additionally strict-loads custody user `8274304175`, acquires the
+same account lock used by provisioning, and performs bounded `getMe` validation.
+It cannot fall back to a personal account and does not create or modify chats.
+An account-lock conflict fails the check; run it while the worker is stopped or
+idle. The earlier active-profile/workstation diagnostics remain available with
+`tg-sai health --local` and are separate from custody-worker readiness.
+
+The deployed executable includes a worker command and the same health commands.
+A release candidate must pass offline health as the worker Unix user before
+installation selects it. The worker systemd unit runs offline and online checks
+before starting the queue loop. A service being alive, `--help`, or an empty
+queue preview does not prove Telegram client initialization.
+
+From the Boku Deal Desk source directory, `just bot-health` checks the deployed
+runtime under its service sandbox. `just bot-health --online` also validates
+custody identity. These are operator probes, not the API's `/health` endpoint.
+That endpoint reports API health and whether bot ingress is configured; it does
+not certify Telegram custody readiness.

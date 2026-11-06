@@ -29,7 +29,8 @@ py-test:
 # Check npm package compatibility with linter
 lint:
   #!/usr/bin/env bash
-  npx publint
+  set -euo pipefail
+  bunx publint
 
 build:
   #!/usr/bin/env bash
@@ -43,7 +44,7 @@ smoke-test:
   #!/usr/bin/env bash
   set -euo pipefail
 
-  package_version="$(npm pkg get version | tr -d '"')"
+  package_version="$(jq -r .version package.json)"
   tarball="uniquedivine-tg-sai-${package_version}.tgz"
 
   rm -f ./*.tgz
@@ -54,32 +55,45 @@ smoke-test:
     exit 1
   fi
 
-  npm install -g --force "./${tarball}"
+  bun add -g "./${tarball}"
   tg-sai --help
   tg-sai health
 
-# Publish the package to the npm registry
+# Pinned npm for every registry step; newer npm changed validation and web auth, so bump only after testing.
+npm := "bunx npm@12.2.0"
+
+# Validate the package exactly as npm will publish it; fails on any npm warning
+publish-check:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  out="$({{npm}} publish --dry-run --access public 2>&1)"
+  if echo "$out" | grep -E 'npm (warn|error)'; then echo "Fix the npm warnings above before publishing."; exit 1; fi
+  echo "$out" | grep -E 'name:|version:|total files:'
+
+# Full pre-release validation (lint, tests, typecheck, npm dry run); run before `just publish`.
+validate: lint test typecheck publish-check
+
+# Publish fast: check npm login, unpublished version, and package validity, then upload (run `just validate` first).
 publish:
   #!/usr/bin/env bash
   set -euo pipefail
 
-  if ! npm whoami >/dev/null 2>&1; then
-    echo "Not authenticated with the npm registry. Run: npm login"
+  echo "[1/4] npm login"
+  if ! user="$({{npm}} whoami 2>/dev/null)"; then
+    echo "Not logged in to npm. Run: bunx npm@12.2.0 login --auth-type=web"
+    exit 1
+  fi
+  echo "      logged in as ${user}"
+
+  package="$(jq -r '.name + "@" + .version' package.json)"
+  echo "[2/4] ${package} not yet on npm"
+  if {{npm}} view "${package}" version >/dev/null 2>&1; then
+    echo "${package} is already published; bump the version"
     exit 1
   fi
 
-  package_name="$(npm pkg get name | tr -d '"')"
-  package_version="$(npm pkg get version | tr -d '"')"
-  package="${package_name}@${package_version}"
+  echo "[3/4] npm package validation"
+  just publish-check
 
-  if npm view "${package}" version >/dev/null 2>&1; then
-    echo "${package} is already published"
-    exit 1
-  fi
-
-  just lint
-  just test
-  just typecheck
-  just build
-
-  bun publish --access public
+  echo "[4/4] publishing; open the printed URL and choose 'remember me for 5 minutes'"
+  BROWSER=true {{npm}} publish --access public

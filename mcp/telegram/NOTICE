@@ -1,0 +1,14 @@
+Telegram MCP
+Original project: https://github.com/chigwell/telegram-mcp
+Original maintainers named by the imported README: chigwell and l1v0n1.
+Original author metadata is retained in pyproject.toml.
+
+Imported into Unique-Divine/jiyuu from commit
+0d7b7e3630397ff931624fee7e4b0f33a134c513 without Git history.
+Modified by Unique Divine in 2026. Changes include bounded connection recovery,
+participant pagination, regression tests, installation metadata and documentation.
+Modified Python and metadata files carry modification notices.
+
+The original Apache License 2.0 is reproduced in LICENSE. See IMPORT.json for
+snapshot provenance and exclusions. The Jiyuu root MIT license does not replace
+this component's license. This import does not imply upstream endorsement.

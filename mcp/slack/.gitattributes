@@ -1,0 +1,4 @@
+# Fix GitHub language detection — mark HTML pages as non-source
+*.html linguist-documentation
+index.html linguist-vendored
+public/*.html linguist-documentation
