@@ -1968,7 +1968,12 @@ export function holdExitFor(
 // ---------------------------------------------------------------------------
 // Entry point
 
-async function main(): Promise<void> {
+/**
+ * Run the tg-sai CLI on process.argv. Exported so the compiled custody worker
+ * (sai-deal-desk deploy/botService.ts) runs the same program, including
+ * telemetry runs, hold exit codes, and bare-command help.
+ */
+export async function runCli(): Promise<void> {
   const program = createProgram()
   const args = process.argv.slice(2)
   const helpTarget = bareHelpTarget(program, args)
@@ -1989,4 +1994,4 @@ async function main(): Promise<void> {
   activeTelemetryRun()?.end({ exitCode: Number(process.exitCode ?? 0) })
 }
 
-if (import.meta.main) await main()
+if (import.meta.main) await runCli()
