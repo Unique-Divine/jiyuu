@@ -184,17 +184,27 @@ describe("custody status cadence", () => {
     expect(calls).toEqual([["custody-status", { ...report }]])
   })
   test("unknown-op detection reads clap and GraphQL refusals", () => {
-    expect(
-      isUnknownOperationOutput(
-        "custody-status",
-        "error: invalid value 'custody-status' for '<ACTION>'\n",
-      ),
-    ).toBe(true)
-    expect(
-      isUnknownOperationOutput("custody-status", "Unknown field chatSetupCustodyStatus"),
-    ).toBe(true)
+    for (const stderr of [
+      "error: invalid value 'custody-status' for '<ACTION>'\n",
+      "Unknown field chatSetupCustodyStatus",
+      'Unknown field "chatSetupCustodyStatus" on type "MutationRoot"',
+      'Cannot query field "chatSetupCustodyStatus" on type "Mutation"',
+    ])
+      expect(isUnknownOperationOutput("custody-status", stderr)).toBe(true)
     expect(
       isUnknownOperationOutput("custody-status", "error: capability denied"),
     ).toBe(false)
+  })
+  test("an unknown field in the report is a send failure, not an old desk", () => {
+    for (const stderr of [
+      // serde `deny_unknown_fields` on the report or a child.
+      "Error: unknown field `extra`, expected one of `accountId`, `holds`",
+      // GraphQL input validation, prefixed by the mutation path.
+      '[chatSetupCustodyStatus] Invalid value for argument "input", ' +
+        'unknown field "extra" of type "CustodyStatusReport"',
+      // An unknown field on another operation's mutation.
+      'Unknown field "chatSetupProgress" on type "MutationRoot"',
+    ])
+      expect(isUnknownOperationOutput("custody-status", stderr)).toBe(false)
   })
 })

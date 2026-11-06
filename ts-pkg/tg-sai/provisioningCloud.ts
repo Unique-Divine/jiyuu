@@ -191,19 +191,34 @@ export class UnknownCloudOperationError extends Error {
   }
 }
 
+/** GraphQL mutation field Deal Desk sends for each mutating operation. */
+export const CLOUD_MUTATION_FIELDS: Partial<Record<CloudOperation, string>> =
+  {
+    prepare: "chatSetupPrepare",
+    claim: "chatSetupClaim",
+    progress: "chatSetupProgress",
+    resolve: "chatSetupResolve",
+    "custody-status": "chatSetupCustodyStatus",
+  }
+
 /**
- * Whether Deal Desk's stderr says it does not know `operation`: clap's
- * `invalid value '<op>' for '<ACTION>'` or `unrecognized subcommand`, or a
- * GraphQL server without the field.
+ * Whether Deal Desk's stderr says it does not know `operation` itself:
+ * clap's `invalid value '<op>'` (an older CLI), or a GraphQL server that has
+ * no such mutation (`Unknown field` or `Cannot query field` naming the
+ * mutation field). An unknown field inside the input, such as a
+ * `deny_unknown_fields` or input validation refusal, is a normal failure.
  */
 export function isUnknownOperationOutput(
   operation: CloudOperation,
   stderr: string,
 ): boolean {
-  return (
-    stderr.includes(`invalid value '${operation}'`) ||
-    /unrecognized subcommand|unknown field|cannot query field/i.test(stderr)
-  )
+  if (stderr.includes(`invalid value '${operation}'`)) return true
+  const field = CLOUD_MUTATION_FIELDS[operation]
+  if (!field) return false
+  return new RegExp(
+    `(?:unknown field|cannot query field)\\s*["'\`]?${field}\\b`,
+    "i",
+  ).test(stderr)
 }
 
 export function dealDeskRequestKey(
