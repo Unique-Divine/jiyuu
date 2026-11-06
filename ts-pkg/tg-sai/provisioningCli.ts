@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto"
 import { readFile } from "node:fs/promises"
 import { hostname } from "node:os"
 import type { Command } from "commander"
+import { backgroundEnqueue, openBackgroundQueue } from "./backgroundWorker"
 import {
   creationMarker,
   provisionSetup,
@@ -93,6 +94,10 @@ export function addProvisionCommands(program: Command): void {
               cloud,
               journal: new FileProvisionJournal(),
               workerId: `${hostname()}:${process.pid}:${randomUUID()}`,
+              // The worker adds queued optional members later.
+              ...(setup.optionalParticipants?.length
+                ? { background: backgroundEnqueue(openBackgroundQueue()) }
+                : {}),
             }),
             cliTelemetry(),
           ),

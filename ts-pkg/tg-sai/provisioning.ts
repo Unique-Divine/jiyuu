@@ -67,6 +67,11 @@ export interface TelegramProvisioner {
     rights: Record<string, boolean>,
   ): Promise<void>
   candidates(marker: string): Promise<number[]>
+  /**
+   * Every participant in one listing, keyed by user ID. Absent users are
+   * missing from the map.
+   */
+  members?(chatId: number): Promise<Map<number, Member>>
   verifyMarker(chatId: number, marker: string): Promise<boolean>
 }
 export interface Progress {
@@ -102,6 +107,18 @@ export interface PendingInvitation {
   expiresAt: string
   reason: string
 }
+/** Where optional members of a verified chat wait to be added. */
+export interface BackgroundEnqueue {
+  enqueue(input: {
+    requestId: string
+    chatId: number
+    userIds: number[]
+  }): void | Promise<void>
+}
+/** `reason` of the shared invitation recorded for background members. */
+export const BACKGROUND_INVITATION_REASON = "background_queue"
+/** A saved invitation is reused only while it has this much time left. */
+const MIN_INVITATION_LEAD_MS = 10 * 60 * 1000
 export interface ProvisionJournal {
   read(requestId: string): Promise<JournalRecord | null>
   write(requestId: string, record: JournalRecord): Promise<void>
@@ -352,6 +369,7 @@ type ProvisionStep =
   | "read_bot"
   | "promote_bot"
   | "audit_membership"
+  | "enqueue_background"
   | "save_ready"
 
 /** Fixed operation names add context without copying Telegram response bodies. */
@@ -454,13 +472,20 @@ export function provisionRetryAt(
   return after(seconds)
 }
 
-/** The cloud is authoritative. The journal only recovers a result not yet acknowledged by cloud. */
+/**
+ * The cloud is authoritative. The journal only recovers a result not yet
+ * acknowledged by cloud. Requester first: the job adds required participants
+ * and the bot, promotes, verifies, and reports ready; optional participants
+ * still absent go to `background` and share one pending invitation.
+ */
 export async function provisionSetup(params: {
   setup: Setup
   telegram: TelegramProvisioner
   cloud: ProvisionCloud
   journal: ProvisionJournal
   workerId: string
+  /** Queue for optional members; required when the request has any. */
+  background?: BackgroundEnqueue
 }): Promise<Setup | { state: "creation_unknown"; candidates: number[] }> {
   const { telegram, cloud, journal } = params
   let setup = params.setup
@@ -489,6 +514,9 @@ export async function provisionSetup(params: {
           throw new Error("Ready setup admin rights changed")
     return setup
   }
+  // Checked before any write, so a chat is never created without one.
+  if (setup.optionalParticipants?.length && !params.background)
+    throw new Error("Background member queue required")
   let pendingInvitations = local?.pendingInvitations ?? []
   const workerId = local?.workerId ?? params.workerId
   if (
@@ -586,6 +614,7 @@ export async function provisionSetup(params: {
       )
     await save({ state: "configuring", chatId: local.chatId, binding })
   }
+  let createdNow = false
   if (!setup.chatId) {
     await save({ state: "creating", binding })
     let chatId: number
@@ -606,6 +635,7 @@ export async function provisionSetup(params: {
         { cause: error },
       )
     }
+    createdNow = true
     // Persist immediately, before another network call or cloud acknowledgement.
     await journal.write(setup.requestId, {
       fingerprint,
@@ -624,18 +654,24 @@ export async function provisionSetup(params: {
       throw new Error("Chat marker or custody owner verification failed")
     step = "save_configuring"
     await save({ state: "configuring", chatId, binding })
-    // One membership read per user, then one batched add for everyone absent.
+    // Requester first: only required participants (the requester and team
+    // admins) and the bot join in this job. Optional members go to the
+    // background queue once the chat verifies.
+    const optional = new Set(binding.optionalParticipants ?? [])
+    const required = binding.participants.filter((id) => !optional.has(id))
     const absent: number[] = []
-    for (const userId of [...binding.participants, PROVISIONING_BOT_ID]) {
-      step = "read_member"
-      const member = await telegram.member(chatId, userId)
-      if (member.role !== "absent") {
-        pendingInvitations = pendingInvitations.filter(
-          (invite) => invite.userId !== String(userId),
-        )
-        continue
+    if (createdNow) {
+      // The worker just created this chat: only the custody account is in
+      // it, so no membership read comes before the add.
+      absent.push(...required, PROVISIONING_BOT_ID)
+    } else {
+      // A resumed job reads each user once, then adds everyone absent.
+      for (const userId of [...required, PROVISIONING_BOT_ID]) {
+        step = "read_member"
+        const member = await telegram.member(chatId, userId)
+        if (member.role !== "absent") continue
+        absent.push(userId)
       }
-      absent.push(userId)
     }
     // Per-user refusals (privacy, USER_*/CHAT_* 400s) never stop the other
     // users: a refused batch falls back to one add per user. Flood and hold
@@ -667,62 +703,28 @@ export async function provisionSetup(params: {
         await addEach(absent)
       }
     } else await addEach(absent)
-    for (const userId of absent) {
-      if (failures.has(userId)) continue
-      step = "verify_added_member"
-      if ((await telegram.member(chatId, userId)).role === "absent")
-        failures.set(userId, {
-          error: new Error("Participant invitation incomplete"),
-          step: "verify_added_member",
-        })
-    }
-    let fatal: { error: unknown; step: ProvisionStep } | undefined
+    // With a participant listing, the final audit verifies the adds.
+    const listed = createdNow && Boolean(telegram.members)
+    if (!listed)
+      for (const userId of absent) {
+        if (failures.has(userId)) continue
+        step = "verify_added_member"
+        if ((await telegram.member(chatId, userId)).role === "absent")
+          failures.set(userId, {
+            error: new Error("Participant invitation incomplete"),
+            step: "verify_added_member",
+          })
+      }
     for (const userId of absent) {
       const failure = failures.get(userId)
       if (!failure) continue
-      if (
-        !binding.optionalParticipants?.includes(userId) ||
-        !isPrivacyRestriction(failure.error) ||
-        !telegram.inviteLink
-      ) {
-        fatal ??= failure
-        continue
-      }
-      let invite = pendingInvitations.find(
-        (i) =>
-          i.userId === String(userId) && Date.parse(i.expiresAt) > Date.now(),
-      )
-      if (!invite) {
-        step = "create_invitation"
-        const link = await telegram.inviteLink(chatId, userId)
-        if (
-          !/^https:\/\/t\.me\/(?:\+|joinchat\/)[A-Za-z0-9_-]+$/.test(
-            link.inviteLink,
-          ) ||
-          !Number.isFinite(Date.parse(link.expiresAt)) ||
-          Date.parse(link.expiresAt) <= Date.now()
-        )
-          throw new Error("Invalid controlled invitation link")
-        invite = {
-          userId: String(userId),
-          ...link,
-          reason: "privacy_restricted",
-        }
-        pendingInvitations = [
-          ...pendingInvitations.filter((i) => i.userId !== invite!.userId),
-          invite,
-        ]
-        step = "save_invitation"
-        await save({ state: "configuring", chatId, binding })
-      }
-    }
-    if (fatal) {
-      step = fatal.step
-      throw fatal.error
+      step = failure.step
+      throw failure.error
     }
     for (const userId of binding.admins) {
       step = "read_admin"
       if (
+        listed ||
         !hasRights(await telegram.member(chatId, userId), TEAM_ADMIN_RIGHTS)
       ) {
         step = "promote_admin"
@@ -731,6 +733,7 @@ export async function provisionSetup(params: {
     }
     step = "read_bot"
     if (
+      listed ||
       !hasRights(
         await telegram.member(chatId, PROVISIONING_BOT_ID),
         BOT_BASELINE_RIGHTS,
@@ -740,33 +743,82 @@ export async function provisionSetup(params: {
       await telegram.promote(chatId, PROVISIONING_BOT_ID, BOT_BASELINE_RIGHTS)
     }
     step = "audit_membership"
-    const owner = await telegram.member(chatId, setup.expectedUserId)
-    const participants = await Promise.all(
-      binding.participants.map(async (userId) => ({
-        userId,
-        ...(await telegram.member(chatId, userId)),
-      })),
-    )
-    const bot = await telegram.member(chatId, PROVISIONING_BOT_ID)
+    // One participant listing when the adapter has one; else one read each.
+    const roster = telegram.members ? await telegram.members(chatId) : null
+    const memberOf = async (userId: number): Promise<Member> =>
+      roster
+        ? (roster.get(userId) ?? { role: "absent", rights: {} })
+        : telegram.member(chatId, userId)
+    const owner = await memberOf(setup.expectedUserId)
+    const participants: (Member & { userId: number })[] = []
+    for (const userId of binding.participants)
+      participants.push({ userId, ...(await memberOf(userId)) })
+    const bot = await memberOf(PROVISIONING_BOT_ID)
+    const backgroundIds = participants
+      .filter((m) => optional.has(m.userId) && m.role === "absent")
+      .map((m) => m.userId)
     if (
       owner.role !== "creator" ||
       participants.some((member) =>
         binding.admins.includes(member.userId)
           ? !hasRights(member, TEAM_ADMIN_RIGHTS)
-          : member.role !== "member" &&
-            !(
-              binding.optionalParticipants?.includes(member.userId) &&
-              member.role === "absent" &&
-              pendingInvitations.some(
-                (invite) =>
-                  invite.userId === String(member.userId) &&
-                  Date.parse(invite.expiresAt) > Date.now(),
-              )
-            ),
+          : member.role !== "member" && !backgroundIds.includes(member.userId),
       ) ||
       !hasRights(bot, BOT_BASELINE_RIGHTS)
     )
       throw new Error("Final membership or rights audit failed")
+    if (backgroundIds.length) {
+      step = "enqueue_background"
+      if (!params.background)
+        throw new Error("Background member queue required")
+      await params.background.enqueue({
+        requestId: setup.requestId,
+        chatId,
+        userIds: backgroundIds,
+      })
+      // Deal Desk accepts an absent optional member only with a pending
+      // invitation, so every queued member shares one controlled link.
+      let link = pendingInvitations.find(
+        (i) =>
+          i.reason === BACKGROUND_INVITATION_REASON &&
+          Date.parse(i.expiresAt) > Date.now() + MIN_INVITATION_LEAD_MS,
+      )
+      if (!link) {
+        step = "create_invitation"
+        if (!telegram.inviteLink)
+          throw new Error("Invitation links required for background members")
+        const created = await telegram.inviteLink(chatId, backgroundIds[0]!)
+        if (
+          !/^https:\/\/t\.me\/(?:\+|joinchat\/)[A-Za-z0-9_-]+$/.test(
+            created.inviteLink,
+          ) ||
+          !Number.isFinite(Date.parse(created.expiresAt)) ||
+          Date.parse(created.expiresAt) <= Date.now()
+        )
+          throw new Error("Invalid controlled invitation link")
+        link = {
+          userId: String(backgroundIds[0]),
+          ...created,
+          reason: BACKGROUND_INVITATION_REASON,
+        }
+      }
+      const shared = link
+      pendingInvitations = backgroundIds.map((userId) => ({
+        userId: String(userId),
+        inviteLink: shared.inviteLink,
+        expiresAt: shared.expiresAt,
+        reason: BACKGROUND_INVITATION_REASON,
+      }))
+      step = "save_invitation"
+      await journal.write(setup.requestId, {
+        fingerprint,
+        state: "configuring",
+        chatId,
+        binding,
+        workerId,
+        pendingInvitations,
+      })
+    } else pendingInvitations = []
     const verifiedAt = new Date().toISOString()
     // Link retrieval is presentation metadata, not a membership requirement.
     // Preserve readiness even when Telegram temporarily refuses these reads.
@@ -781,6 +833,14 @@ export async function provisionSetup(params: {
       bot: { ...bot, userId: String(PROVISIONING_BOT_ID) },
       verifiedAt,
       ...(pendingInvitations.length ? { pendingInvitations } : {}),
+      ...(backgroundIds.length
+        ? {
+            backgroundMembers: backgroundIds.map((userId) => ({
+              userId: String(userId),
+              state: "pending" as const,
+            })),
+          }
+        : {}),
       ...links,
     }
     step = "save_ready"

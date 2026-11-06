@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto"
 import { mkdir, open, readFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
+import { backgroundEnqueue, openBackgroundQueue } from "./backgroundWorker"
 import { configDir } from "./profiles"
 import {
   closeProcessHoldStores,
@@ -14,6 +15,7 @@ import {
   safeProvisionError,
 } from "./provisioning"
 import type {
+  BackgroundEnqueue,
   ProvisionCloud,
   ProvisionJournal,
   Setup,
@@ -25,6 +27,7 @@ import {
   withAccountLock,
   withProvisionTelegram,
 } from "./provisioningRuntime"
+import type { BackgroundQueue } from "./state/background"
 import type { HoldStoreSource } from "./state/guard"
 import { HoldStore, remainingSeconds } from "./state/holds"
 import type { HoldGroup } from "./state/holds"
@@ -148,6 +151,8 @@ export async function runWorkerOnce(
       setup: Setup,
       operation: (adapter: TelegramProvisioner) => Promise<T>,
     ) => Promise<T>
+    /** Queue for optional members of chats this tick makes ready. */
+    background?: BackgroundEnqueue
   },
 ): Promise<{
   dryRun: boolean
@@ -253,6 +258,7 @@ export async function runWorkerOnce(
           cloud: deps.cloud,
           journal: deps.journal,
           workerId: options.workerId,
+          ...(deps.background ? { background: deps.background } : {}),
         }),
       )
       results.push({
@@ -379,6 +385,15 @@ export async function runCustodyWorker(options: {
     const holds: HoldStoreSource = options.run
       ? () => processHoldStore()
       : HoldStore.unavailable("preview")
+    // Setups need the queue for their optional members; without state.db
+    // such a setup fails before any Telegram write and retries later.
+    let queue: BackgroundQueue | null = null
+    if (options.run)
+      try {
+        queue = openBackgroundQueue()
+      } catch {
+        queue = null
+      }
     let after: string | undefined
     try {
       do {
@@ -391,6 +406,7 @@ export async function runCustodyWorker(options: {
               journal: new FileProvisionJournal(root),
               holds,
               telegram,
+              ...(queue ? { background: backgroundEnqueue(queue) } : {}),
             },
           )
           after = result.nextAfter ?? undefined
@@ -419,6 +435,7 @@ export async function runCustodyWorker(options: {
         })
       } while (!options.signal?.aborted)
     } finally {
+      queue?.close()
       if (options.run) closeProcessHoldStores()
     }
   }

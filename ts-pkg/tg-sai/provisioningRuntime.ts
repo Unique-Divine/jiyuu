@@ -7,6 +7,7 @@ import {
   createInviteLink,
   createSupergroup,
   getChatMember,
+  getChatMembers,
   getPrimaryInviteLink,
   iterDialogs,
 } from "@mtcute/bun/methods.js"
@@ -156,6 +157,20 @@ export function normalizeProvisioningMember(
       ),
     ),
   }
+}
+
+/** A participant listing keyed by user ID; members that left are skipped. */
+export function provisioningRoster(
+  listed: readonly (Pick<ChatMember, "status" | "isMember" | "permissions"> & {
+    user: { id: number }
+  })[],
+): Map<number, Member> {
+  const roster = new Map<number, Member>()
+  for (const value of listed) {
+    const member = normalizeProvisioningMember(value)
+    if (member.role !== "absent") roster.set(value.user.id, member)
+  }
+  return roster
 }
 
 /** Separate files and a process lock prevent account/session crossover. */
@@ -388,6 +403,14 @@ export async function withProvisionTelegram<T>(
             { chatId, targetPeer: userId, rights },
             {},
           ),
+        members: async (chatId) => {
+          // Deal chats stay far below Telegram's 200-member listing cap.
+          const listed = await getChatMembers(client, chatId, {
+            limit: 200,
+            type: "recent",
+          })
+          return provisioningRoster(listed)
+        },
         verifyMarker,
         candidates: async (marker) => {
           const candidates: number[] = []

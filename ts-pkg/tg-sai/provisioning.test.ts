@@ -20,6 +20,7 @@ import {
   validateRequest,
 } from "./provisioning"
 import type {
+  BackgroundEnqueue,
   JournalRecord,
   Member,
   Progress,
@@ -40,6 +41,7 @@ import {
   accountPaths,
   FileProvisionJournal,
   normalizeProvisioningMember,
+  provisioningRoster,
   withAccountLock,
 } from "./provisioningRuntime"
 
@@ -59,6 +61,14 @@ function fixture() {
   let setup: Setup = { ...request(), state: "prepared" }
   let local: JournalRecord | null = null
   const events: string[] = []
+  const queued: { requestId: string; chatId: number; userIds: number[] }[] =
+    []
+  const background: BackgroundEnqueue = {
+    enqueue: (input) => {
+      events.push(`queue:${input.userIds.join(",")}`)
+      queued.push(structuredClone(input))
+    },
+  }
   const members = new Map<number, Member>([
     [10, { role: "creator", rights: {} }],
   ])
@@ -100,7 +110,7 @@ function fixture() {
       members.get(id) ?? { role: "absent", rights: {} },
     add: async (_chat, id) => {
       events.push(`add:${id}`)
-      members.set(id, { role: "member", rights: {} })
+      if (!members.has(id)) members.set(id, { role: "member", rights: {} })
     },
     promote: async (_chat, id, rights) => {
       events.push(`promote:${id}`)
@@ -115,6 +125,8 @@ function fixture() {
     telegram,
     events,
     members,
+    queued,
+    background,
     get setup() {
       return setup
     },
@@ -134,6 +146,7 @@ function fixture() {
         journal,
         telegram,
         workerId: "worker-one",
+        background,
       }),
   }
 }
@@ -563,9 +576,10 @@ describe("custody provisioning", () => {
     )
   })
   test("failed setup records the exact operation without copying private error bodies", async () => {
+    // A fresh chat reads no member before the add.
     const cases = [
       ["verify_marker", "verifyMarker"],
-      ["read_member", "member"],
+      ["verify_added_member", "member"],
       ["add_member", "add"],
       ["promote_admin", "promote"],
     ] as const
@@ -945,20 +959,19 @@ describe("batched member adds", () => {
     }
     return batches
   }
-  test("one add call covers every absent user; a missing optional user gets a link", async () => {
+  test("one add call covers required users and the bot; optional users are queued with a link", async () => {
     const f = fixture()
     const batches = batched(f)
     f.telegram.addMany = async (_chat, ids) => {
       batches.push(ids)
-      for (const id of ids)
-        if (id !== 21) f.members.set(id, { role: "member", rights: {} })
-      return [21]
+      for (const id of ids) f.members.set(id, { role: "member", rights: {} })
+      return []
     }
     f.telegram.add = async () => {
       throw new Error("must batch")
     }
     expect((await f.run()).state).toBe("ready")
-    expect(batches).toEqual([[21, 22, PROVISIONING_BOT_ID]])
+    expect(batches).toEqual([[22, PROVISIONING_BOT_ID]])
     expect(f.events.filter((e) => e.startsWith("link:"))).toEqual(["link:21"])
     const receipt = f.setup.receipt as {
       pendingInvitations: Record<string, string>[]
@@ -969,7 +982,7 @@ describe("batched member adds", () => {
         userId: "21",
         inviteLink: "https://t.me/+fixtureLink",
         expiresAt: expect.any(String),
-        reason: "privacy_restricted",
+        reason: "background_queue",
       },
     ])
     expect(receipt.participants.map((p) => [p.userId, p.role])).toEqual([
@@ -1006,7 +1019,7 @@ describe("batched member adds", () => {
     }
     const add = f.telegram.add
     f.telegram.add = async (chat, id) => {
-      if (id === 21) throw { text: "USER_CHANNELS_TOO_MUCH", code: 400 }
+      if (id === 22) throw { text: "USER_CHANNELS_TOO_MUCH", code: 400 }
       return add(chat, id)
     }
     const error = await f.run().catch((e: unknown) => e)
@@ -1014,9 +1027,9 @@ describe("batched member adds", () => {
     expect(batches).toHaveLength(1)
     // The other users are still added; the refused one is not retried.
     expect(f.events.filter((e) => /^(add|link):/.test(e))).toEqual([
-      `add:22`,
       `add:${PROVISIONING_BOT_ID}`,
     ])
+    expect(f.queued).toEqual([])
     expect((f.setup as Setup & { error: string }).error).toBe(
       "add_member:USER_CHANNELS_TOO_MUCH",
     )
@@ -1053,8 +1066,9 @@ describe("batched member adds", () => {
       return [22]
     }
     await expect(f.run()).rejects.toThrow("Setup incomplete")
-    expect(f.members.get(21)?.role).toBe("member")
+    expect(f.members.get(21)).toBeUndefined()
     expect(f.members.get(PROVISIONING_BOT_ID)?.role).toBe("member")
+    expect(f.queued).toEqual([])
     expect((f.setup as Setup & { error: string }).error).toBe(
       "add_member:USER_PRIVACY_RESTRICTED",
     )
@@ -1095,4 +1109,147 @@ describe("batched member adds", () => {
     expect(batches).toEqual([[22, PROVISIONING_BOT_ID]])
     expect(f.setup.receipt).not.toHaveProperty("pendingInvitations")
   })
+})
+
+describe("requester-first setup", () => {
+  function withOptional(f: ReturnType<typeof fixture>) {
+    f.setup = {
+      ...f.setup,
+      participants: ["alice", 22, 33],
+      optionalParticipants: ["alice", 33],
+    }
+    let links = 0
+    f.telegram.inviteLink = async (_chat, userId) => {
+      links++
+      f.events.push(`link:${userId}`)
+      return {
+        inviteLink: "https://t.me/+sharedLink",
+        expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+      }
+    }
+    f.telegram.members = async () => {
+      f.events.push("list")
+      return new Map(f.members)
+    }
+    const member = f.telegram.member
+    f.telegram.member = async (chat, id) => {
+      f.events.push(`read:${id}`)
+      return member(chat, id)
+    }
+    return { links: () => links }
+  }
+  test("adds only required users and the bot, then reports ready with queued members", async () => {
+    const f = fixture()
+    const counts = withOptional(f)
+    expect((await f.run()).state).toBe("ready")
+    const writes = f.events.filter((e) =>
+      /^(add|promote|queue|link|list|cloud:ready)/.test(e),
+    )
+    expect(writes).toEqual([
+      "add:22",
+      `add:${PROVISIONING_BOT_ID}`,
+      "promote:22",
+      `promote:${PROVISIONING_BOT_ID}`,
+      "list",
+      "queue:21,33",
+      "link:21",
+      "cloud:ready",
+    ])
+    expect(counts.links()).toBe(1)
+    expect(f.queued).toEqual([
+      { requestId: "test-setup-1", chatId: -100123, userIds: [21, 33] },
+    ])
+    const receipt = f.setup.receipt as {
+      pendingInvitations: { userId: string; inviteLink: string; reason: string }[]
+      backgroundMembers: { userId: string; state: string }[]
+    }
+    expect(receipt.backgroundMembers).toEqual([
+      { userId: "21", state: "pending" },
+      { userId: "33", state: "pending" },
+    ])
+    expect(receipt.pendingInvitations.map((i) => [i.userId, i.inviteLink, i.reason]))
+      .toEqual([
+        ["21", "https://t.me/+sharedLink", "background_queue"],
+        ["33", "https://t.me/+sharedLink", "background_queue"],
+      ])
+  })
+  test("a fresh chat reads no member before the add and verifies with one listing", async () => {
+    const f = fixture()
+    withOptional(f)
+    expect((await f.run()).state).toBe("ready")
+    expect(f.events.filter((e) => e.startsWith("read:"))).toEqual([])
+    expect(f.events.filter((e) => e === "list")).toHaveLength(1)
+  })
+  test("a resumed job reads each required user before adding", async () => {
+    const f = fixture()
+    withOptional(f)
+    f.setup = {
+      ...f.setup,
+      state: "configuring",
+      chatId: -100123,
+      binding: { participants: [21, 22, 33], admins: [22], optionalParticipants: [21, 33] },
+    }
+    f.members.set(22, { role: "member", rights: {} })
+    expect((await f.run()).state).toBe("ready")
+    expect(f.events).not.toContain("create")
+    const order = f.events.filter((e) => /^(read|add):/.test(e))
+    expect(order.slice(0, 3)).toEqual([
+      "read:22",
+      `read:${PROVISIONING_BOT_ID}`,
+      `add:${PROVISIONING_BOT_ID}`,
+    ])
+    expect(order).not.toContain("add:22")
+    expect(order).not.toContain("add:21")
+  })
+  test("an optional member already in the chat is neither queued nor pending", async () => {
+    const f = fixture()
+    withOptional(f)
+    f.members.set(33, { role: "member", rights: {} })
+    expect((await f.run()).state).toBe("ready")
+    expect(f.queued[0]?.userIds).toEqual([21])
+    const receipt = f.setup.receipt as {
+      pendingInvitations: { userId: string }[]
+      backgroundMembers: { userId: string }[]
+    }
+    expect(receipt.pendingInvitations.map((i) => i.userId)).toEqual(["21"])
+    expect(receipt.backgroundMembers.map((m) => m.userId)).toEqual(["21"])
+  })
+  test("optional participants without a background queue fail before any write", async () => {
+    const f = fixture()
+    withOptional(f)
+    await expect(
+      provisionSetup({
+        setup: f.setup,
+        cloud: f.cloud,
+        journal: f.journal,
+        telegram: f.telegram,
+        workerId: "worker-one",
+      }),
+    ).rejects.toThrow("Background member queue required")
+    expect(f.events).toEqual([])
+  })
+  test("a request without optional members writes no background fields", async () => {
+    const f = fixture()
+    expect((await f.run()).state).toBe("ready")
+    expect(f.queued).toEqual([])
+    expect(f.setup.receipt).not.toHaveProperty("backgroundMembers")
+    expect(f.setup.receipt).not.toHaveProperty("pendingInvitations")
+  })
+})
+
+test("participant listing keys members by user and skips users who left", () => {
+  const roster = provisioningRoster([
+    { user: { id: 10 }, status: "creator", isMember: true, permissions: null },
+    {
+      user: { id: 22 },
+      status: "admin",
+      isMember: true,
+      permissions: { _: "chatAdminRights", inviteUsers: true } as never,
+    },
+    { user: { id: 21 }, status: "member", isMember: true, permissions: null },
+    { user: { id: 40 }, status: "left", isMember: false, permissions: null },
+  ])
+  expect([...roster.keys()]).toEqual([10, 22, 21])
+  expect(roster.get(22)).toEqual({ role: "admin", rights: { inviteUsers: true } })
+  expect(roster.get(21)?.role).toBe("member")
 })

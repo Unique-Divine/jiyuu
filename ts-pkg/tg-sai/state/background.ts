@@ -234,6 +234,15 @@ export class BackgroundQueue {
     return { pending: row?.n ?? 0, nextAtMs: row?.next ?? null }
   }
 
+  /** Closes the database. */
+  close(): void {
+    try {
+      this.db.close(true)
+    } catch {
+      // Already closed.
+    }
+  }
+
   /** Every row for `chatId`, by user. */
   forChat(chatId: number): BackgroundMember[] {
     return this.db
