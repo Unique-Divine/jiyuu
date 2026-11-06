@@ -167,8 +167,9 @@ export async function runWorkerOnce(
     /** Queue for optional members of chats this tick makes ready. */
     background?: BackgroundEnqueue
     /**
-     * One background add; runs only on a `run` tick where no setup job
-     * reached Telegram and no further queue page is waiting.
+     * One background add; runs only on a `run` tick where no setup job is
+     * runnable or waiting (on its `retryAt` or a saved hold) and no further
+     * queue page is waiting. Blocked and terminal jobs do not stop it.
      */
     drain?: () => Promise<DrainResult>
   },
@@ -201,8 +202,9 @@ export async function runWorkerOnce(
     state: "blocked",
     error: row.reason,
   }))
-  // Requester jobs go first: a tick that runs one makes no background add.
-  let ranJob = false
+  // Requester jobs go first: while one is runnable or waiting for this
+  // account, no background add runs. Its flood could hold the requester.
+  let requesterWork = false
   for (const selected of page.requests) {
     if (options.signal?.aborted) break
     const setup = await deps.cloud.view(selected.requestId)
@@ -241,6 +243,7 @@ export async function runWorkerOnce(
       })
       continue
     }
+    requesterWork = true
     if (
       setup.retryAt &&
       Date.parse(setup.retryAt) > (options.now ?? Date.now())
@@ -271,7 +274,6 @@ export async function runWorkerOnce(
       results.push(await reportHold(deps.cloud, setup, hold, nowMs))
       continue
     }
-    ranJob = true
     try {
       const result = await deps.telegram(setup, (telegram) =>
         provisionSetup({
@@ -305,7 +307,7 @@ export async function runWorkerOnce(
   if (
     options.run &&
     deps.drain &&
-    !ranJob &&
+    !requesterWork &&
     page.nextAfter === null &&
     !options.signal?.aborted
   ) {
