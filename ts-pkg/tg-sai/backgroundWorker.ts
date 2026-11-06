@@ -247,13 +247,15 @@ export async function drainBackgroundOnce(params: {
     isPerUserAddError(outcome.error) ||
     row.attempts + 1 >= MAX_BACKGROUND_ATTEMPTS
   ) {
-    queue.recordAdds({
-      source: "background",
-      outcome: "refused",
-      chatId: row.chatId,
-      userIds: [row.userId],
-      nowMs,
-    })
+    // Only a per-user refusal is known to have reached Telegram.
+    if (isPerUserAddError(outcome.error))
+      queue.recordAdds({
+        source: "background",
+        outcome: "refused",
+        chatId: row.chatId,
+        userIds: [row.userId],
+        nowMs,
+      })
     queue.finish(row.chatId, row.userId, "failed", code, nowMs)
     queue.pace(paced)
     return { state: "failed", ...at, error: code, nextAtMs: paced }

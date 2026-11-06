@@ -201,6 +201,9 @@ describe("background drain", () => {
       "deferred",
       "failed",
     ])
+    // A generic error is not a per-user refusal: no add counted.
+    expect(flaky.queue.addsToday(now)).toBe(0)
+    expect(refused.queue.addsToday(NOW)).toBe(1)
   })
   test("errors before the add call defer one gap without an attempt", async () => {
     for (const error of [
