@@ -6,7 +6,7 @@ import {
   SqliteTelemetrySink,
   openTelemetryDb,
   type TelemetryEvent,
-} from "./db.ts"
+} from "./db"
 
 /** Fixed clock for tests: 2026-11-06T12:00:00Z. */
 export const NOW_MS = Date.UTC(2026, 10, 6, 12, 0, 0)

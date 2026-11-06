@@ -1,17 +1,28 @@
 import { Database, type Statement } from "bun:sqlite"
 import { createHash } from "node:crypto"
-import { mkdirSync } from "node:fs"
+import { chmodSync, mkdirSync } from "node:fs"
 import { hostname } from "node:os"
 import { dirname, join } from "node:path"
 
-import { configDir, type ProfileStoreEnv } from "../profiles.ts"
+import { configDir, type ProfileStoreEnv } from "../profiles"
 // Embedded at bundle/run time so the published package carries the schema.
 import eventMigrationSql from "./migrations/0001-event.sql" with {
+  type: "text",
+}
+import eventJobIndexSql from "./migrations/0002-event-job-index.sql" with {
   type: "text",
 }
 
 export const TELEMETRY_DB_FILE = "telemetry.db"
 export const TELEMETRY_ENV = "TG_SAI_TELEMETRY"
+
+/** Values of the `event` column. */
+export const CALL_EVENT = "tg.rpc.call"
+export const ATTEMPT_EVENT = "tg.rpc.attempt"
+export const FLOOD_WAIT_EVENT = "tg.flood.wait"
+export const RUN_START_EVENT = "run.start"
+export const RUN_END_EVENT = "run.end"
+export const WORKER_TICK_EVENT = "worker.tick"
 
 export type TelemetryOutcome =
   | "started"
@@ -89,6 +100,7 @@ export interface MigrationResult {
 
 export const MIGRATIONS: readonly Migration[] = [
   { filename: "0001-event.sql", sql: eventMigrationSql },
+  { filename: "0002-event-job-index.sql", sql: eventJobIndexSql },
 ]
 
 const HISTORY_SQL = `CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -248,15 +260,29 @@ export function openTelemetryDb(
   path: string,
   migrations: readonly Migration[] = MIGRATIONS,
 ): Database {
-  if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true })
+  if (path !== ":memory:") {
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
+  }
   const db = new Database(path, { create: true, strict: true })
   try {
     applyPragmas(db)
     applyMigrations(db, migrations)
+    if (path !== ":memory:") restrictToOwner(path)
     return db
   } catch (error) {
     db.close()
     throw error
+  }
+}
+
+/** Makes the DB and its WAL files owner-only; best effort. */
+function restrictToOwner(path: string): void {
+  for (const file of [path, `${path}-wal`, `${path}-shm`]) {
+    try {
+      chmodSync(file, 0o600)
+    } catch {
+      // Missing WAL files or a read-only filesystem are fine.
+    }
   }
 }
 

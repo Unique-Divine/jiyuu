@@ -6,8 +6,8 @@ import type { Database } from "bun:sqlite"
 import type { Command } from "commander"
 import { existsSync, statSync } from "node:fs"
 
-import type { ProfileStoreEnv } from "../profiles.ts"
-import { telemetryDbPath, type EventRow } from "./db.ts"
+import type { ProfileStoreEnv } from "../profiles"
+import { telemetryDbPath, type EventRow } from "./db"
 import {
   countEvents,
   eventStats,
@@ -20,7 +20,7 @@ import {
   tailEvents,
   uncertainCalls,
   type CountLayer,
-} from "./queries.ts"
+} from "./queries"
 
 // ---------------------------------------------------------------------------
 // Durations and option parsing

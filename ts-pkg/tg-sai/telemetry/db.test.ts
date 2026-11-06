@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite"
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -17,7 +17,7 @@ import {
   uuidv7,
   type EventRow,
   type TelemetryEvent,
-} from "./db.ts"
+} from "./db"
 
 let dir = ""
 
@@ -102,7 +102,7 @@ describe("migrations", () => {
     ).get()
     expect(fk?.foreign_keys).toBe(1)
     expect(applyMigrations(db)).toEqual({
-      applied: ["0001-event.sql"],
+      applied: ["0001-event.sql", "0002-event-job-index.sql"],
       pending: [],
     })
     db.close()
@@ -117,6 +117,10 @@ describe("migrations", () => {
         filename: "0001-event.sql",
         checksum: migrationChecksum(MIGRATIONS[0]!.sql),
       },
+      {
+        filename: "0002-event-job-index.sql",
+        checksum: migrationChecksum(MIGRATIONS[1]!.sql),
+      },
     ])
     const indexes = again
       .query<{ name: string }, []>(
@@ -127,11 +131,19 @@ describe("migrations", () => {
       .map((row) => row.name)
     expect(indexes).toEqual([
       "event_account_method_event_ts",
+      "event_job_id",
       "event_request_id",
       "event_run_id",
       "event_ts_ms",
     ])
     again.close()
+  })
+
+  test("creates an owner-only parent dir and database file", () => {
+    const path = join(dir, "nested", "telemetry.db")
+    openTelemetryDb(path).close()
+    expect(statSync(join(dir, "nested")).mode & 0o777).toBe(0o700)
+    expect(statSync(path).mode & 0o777).toBe(0o600)
   })
 
   test("opens an in-memory database without WAL", () => {
@@ -159,7 +171,7 @@ describe("migrations", () => {
     const path = join(dir, "t.db")
     const broken = [
       ...MIGRATIONS,
-      { filename: "0002-bad.sql", sql: "CREATE TABLE x (a INT); NOPE;" },
+      { filename: "0003-bad.sql", sql: "CREATE TABLE x (a INT); NOPE;" },
     ]
     expect(() => openTelemetryDb(path, broken)).toThrow()
     const db = new Database(path)
@@ -364,7 +376,7 @@ describe("concurrency", () => {
     const migrations = db.query<{ n: number }, []>(
       "SELECT count(*) AS n FROM schema_migrations",
     ).get()
-    expect(migrations?.n).toBe(1)
+    expect(migrations?.n).toBe(MIGRATIONS.length)
     db.close()
   }, 30_000)
 })

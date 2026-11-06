@@ -6,27 +6,31 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
-import { createMtcuteRuntimeClient } from "../mtcuteAdapter.ts"
+import { MtPeerNotFoundError, MtTimeoutError, tl } from "@mtcute/bun"
+
+import { createMtcuteRuntimeClient } from "../mtcuteAdapter"
 import {
   openTelemetryDb,
   SqliteTelemetrySink,
   type EventRow,
   type TelemetryEvent,
   type TelemetrySink,
-} from "./db.ts"
+} from "./db"
 import {
   createTelemetryMiddlewares,
   parseWaitSeconds,
+  rpcErrorText,
+  safeErrorText,
   type ClientTelemetry,
   withTelemetryJob,
   type TelemetryContext,
-} from "./middleware.ts"
+} from "./middleware"
 import {
   floodMaxWaitMs,
   sanitizeArgv,
   startTelemetryRun,
   REDACTED,
-} from "./run.ts"
+} from "./run"
 
 /** In-memory sink: a real array of the events it was given. */
 class MemorySink implements TelemetrySink {
@@ -206,7 +210,7 @@ describe("createTelemetryMiddlewares", () => {
     await expect(nm.call({ _: "help.getConfig" })).rejects.toBe(boom)
     expect(sink.of("tg.rpc.attempt")[0]).toMatchObject({
       outcome: "error",
-      err: "Error: connection reset",
+      err: "Error",
     })
     expect(sink.of("tg.rpc.call").at(-1)).toMatchObject({ outcome: "error" })
   })
@@ -215,12 +219,39 @@ describe("createTelemetryMiddlewares", () => {
     const sink = new MemorySink()
     const { nm } = build([], sink)
     nm._call = async () => {
-      throw Object.assign(new Error("Request timed out"), {
-        name: "MtTimeoutError",
-      })
+      throw new MtTimeoutError()
     }
     await expect(nm.call({ _: "help.getConfig" })).rejects.toThrow()
-    expect(sink.of("tg.rpc.call").at(-1)?.outcome).toBe("timeout")
+    expect(sink.of("tg.rpc.call").at(-1)).toMatchObject({
+      outcome: "timeout",
+      err: "MtTimeoutError",
+    })
+  })
+
+  test("a message that mentions a timeout is still an error", async () => {
+    const sink = new MemorySink()
+    const { nm } = build([], sink)
+    nm._call = async () => {
+      throw new Error("chat title: timed out waiting")
+    }
+    await expect(nm.call({ _: "help.getConfig" })).rejects.toThrow()
+    expect(sink.of("tg.rpc.call").at(-1)).toMatchObject({
+      outcome: "error",
+      err: "Error",
+    })
+  })
+
+  test("calls cut short by client shutdown are aborted", async () => {
+    const sink = new MemorySink()
+    const { nm } = build([], sink)
+    const controller = new AbortController()
+    nm.params.stopSignal = controller.signal
+    nm._call = async () => {
+      controller.abort()
+      throw new Error("connection closed")
+    }
+    await expect(nm.call({ _: "help.getConfig" })).rejects.toThrow()
+    expect(sink.of("tg.rpc.call").at(-1)?.outcome).toBe("aborted")
   })
 
   test("a throwing sink changes neither result nor error", async () => {
@@ -267,6 +298,61 @@ describe("createTelemetryMiddlewares", () => {
   })
 })
 
+describe("safeErrorText", () => {
+  const rpc = (errorCode: number, errorMessage: string) =>
+    tl.RpcError.fromTl({ _: "mt_rpc_error", errorCode, errorMessage })
+
+  test("keeps the class and Telegram code, drops free text", () => {
+    const cases: [unknown, string][] = [
+      [rpc(420, "FLOOD_WAIT_400"), "RpcError [420 FLOOD_WAIT_400]"],
+      [rpc(400, "PEER_FLOOD"), "RpcError [400 PEER_FLOOD]"],
+      [rpc(420, "SLOWMODE_WAIT_30"), "RpcError [420 SLOWMODE_WAIT_30]"],
+      [
+        new Error("Missing chatId in JSONL input line: t.me/+abc"),
+        "Error",
+      ],
+      [new MtPeerNotFoundError("Peer @alice not found"), "MtPeerNotFoundError"],
+      [new MtTimeoutError(), "MtTimeoutError"],
+      [new Error("Unknown profile: x"), "Error"],
+      [new TypeError("bad @alice"), "TypeError"],
+      [
+        Object.assign(new Error("Participant privacy restriction"), {
+          text: "USER_PRIVACY_RESTRICTED",
+        }),
+        "Error [USER_PRIVACY_RESTRICTED]",
+      ],
+      [new DOMException("stopped", "AbortError"), "AbortError"],
+      ["free text", "string"],
+      [null, "object"],
+    ]
+    for (const [error, text] of cases) {
+      expect(safeErrorText(error)).toBe(text)
+    }
+  })
+
+  test("rpcErrorText reads codes from text, seconds, or the message", () => {
+    expect(rpcErrorText(rpc(420, "FLOOD_WAIT_7"))).toBe("FLOOD_WAIT_7")
+    expect(rpcErrorText(new Error("Telegram API error 400: CHAT_INVALID")))
+      .toBe("CHAT_INVALID")
+    expect(rpcErrorText("FLOOD_WAIT_9")).toBe("FLOOD_WAIT_9")
+    expect(rpcErrorText(new Error("flood wait 9"))).toBeNull()
+  })
+
+  test("a thrown RpcError row carries only the code", async () => {
+    const sink = new MemorySink()
+    const { nm } = build([], sink)
+    nm._call = async () => {
+      throw rpc(400, "CHAT_ADMIN_REQUIRED")
+    }
+    await expect(nm.call({ _: "help.getConfig" })).rejects.toThrow()
+    expect(sink.of("tg.rpc.call").at(-1)).toMatchObject({
+      outcome: "error",
+      errorCode: 400,
+      err: "RpcError [400 CHAT_ADMIN_REQUIRED]",
+    })
+  })
+})
+
 describe("parseWaitSeconds", () => {
   test("reads flood and slowmode waits only", () => {
     expect(parseWaitSeconds("FLOOD_WAIT_37")).toBe(37)
@@ -278,7 +364,7 @@ describe("parseWaitSeconds", () => {
 })
 
 describe("run helpers", () => {
-  test("sanitizeArgv drops secret values", () => {
+  test("sanitizeArgv redacts credential values", () => {
     expect(
       sanitizeArgv([
         "profile",
@@ -301,7 +387,7 @@ describe("run helpers", () => {
       "--session-string",
       REDACTED,
       "--name",
-      "custody",
+      REDACTED,
       REDACTED,
     ])
   })

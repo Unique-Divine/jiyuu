@@ -7,7 +7,9 @@ import {
   CUSTODY_USER_ID,
   recordWorkerTick,
   runWorkerOnce,
+  shouldRecordTick,
   stableWorkerId,
+  TICK_HEARTBEAT_MS,
 } from "./custodyWorker"
 import type { TelemetryEvent } from "./telemetry/db"
 import { addCustodyWorkerCommands } from "./custodyWorkerCli"
@@ -279,4 +281,63 @@ test("worker.tick rows summarize the page and never throw", () => {
       custodyProfile: "custody",
     }),
   ).not.toThrow()
+})
+
+test("an aborted signal starts no new jobs", async () => {
+  const f = fixture()
+  const controller = new AbortController()
+  controller.abort()
+  expect(
+    await runWorkerOnce(
+      {
+        custodyProfile: "custody",
+        workerId: "stable",
+        run: true,
+        signal: controller.signal,
+      },
+      f,
+    ),
+  ).toEqual({ dryRun: false, results: [], nextAfter: null })
+  expect(f.calls).toEqual([`pending:${CUSTODY_USER_ID}:stable:10:`])
+})
+
+test("shouldRecordTick skips idle polls between heartbeats", () => {
+  const tick = (states: string[]) => ({
+    dryRun: false,
+    nextAfter: null,
+    results: states.map((state, i) => ({ requestId: `r${i}`, state })),
+  })
+  const t0 = 1_000_000
+  const cases: [Parameters<typeof shouldRecordTick>[0], boolean][] = [
+    [{ result: tick([]), nowMs: t0, lastRecordedMs: null }, true],
+    [{ result: tick([]), nowMs: t0 + 5000, lastRecordedMs: t0 }, false],
+    [
+      {
+        result: tick(["waiting", "blocked"]),
+        nowMs: t0 + 5000,
+        lastRecordedMs: t0,
+      },
+      false,
+    ],
+    [
+      {
+        result: tick(["waiting", "ready"]),
+        nowMs: t0 + 5000,
+        lastRecordedMs: t0,
+      },
+      true,
+    ],
+    [{ error: new Error("x"), nowMs: t0 + 1, lastRecordedMs: t0 }, true],
+    [
+      {
+        result: tick(["waiting"]),
+        nowMs: t0 + TICK_HEARTBEAT_MS,
+        lastRecordedMs: t0,
+      },
+      true,
+    ],
+  ]
+  for (const [input, expected] of cases) {
+    expect(shouldRecordTick(input)).toBe(expected)
+  }
 })

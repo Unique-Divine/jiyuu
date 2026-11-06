@@ -255,11 +255,18 @@ export class FileProvisionJournal implements ProvisionJournal {
   }
 }
 
+/**
+ * Runs `operation` with a provisioning adapter for the custody account.
+ * When `signal` aborts, the client is destroyed: mtcute aborts its
+ * `stopSignal`, which ends in-flight calls and flood-wait sleeps.
+ */
 export async function withProvisionTelegram<T>(
   request: ProvisionRequest,
   operation: (telegram: TelegramProvisioner) => Promise<T>,
   telemetry?: ClientTelemetry,
+  signal?: AbortSignal,
 ): Promise<T> {
+  signal?.throwIfAborted()
   const credentials = await strictProfileCredentials(
     request.custodyProfile,
     request.expectedUserId,
@@ -275,7 +282,13 @@ export async function withProvisionTelegram<T>(
       accountId: request.expectedUserId,
       profile: request.custodyProfile,
     }))
+    let destroying: Promise<void> | null = null
+    const destroy = () => {
+      destroying ??= client.destroy().catch(() => {})
+    }
+    signal?.addEventListener("abort", destroy, { once: true })
     try {
+      signal?.throwIfAborted()
       if ((await client.getMe()).id !== request.expectedUserId)
         throw new Error("Custody account identity mismatch")
       const bot = await client.getUser(saiBot.handle)
@@ -380,7 +393,9 @@ export async function withProvisionTelegram<T>(
       }
       return await operation(adapter)
     } finally {
-      await client.disconnect()
+      signal?.removeEventListener("abort", destroy)
+      if (destroying) await destroying
+      else await client.disconnect()
     }
   })
 }

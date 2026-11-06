@@ -7,7 +7,7 @@ import {
   summarizeRequest,
   summarizeTl,
   type Summary,
-} from "./summarize.ts"
+} from "./summarize"
 
 // Distinct values that must never reach a summary. Each is long enough that
 // an accidental substring match is impossible.

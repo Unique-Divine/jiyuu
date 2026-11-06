@@ -5,14 +5,15 @@
  */
 import { Database } from "bun:sqlite"
 
-import type { EventRow } from "./db.ts"
-
-export const CALL_EVENT = "tg.rpc.call"
-export const ATTEMPT_EVENT = "tg.rpc.attempt"
-export const FLOOD_EVENT = "tg.flood.wait"
-export const RUN_START_EVENT = "run.start"
-export const RUN_END_EVENT = "run.end"
-export const WORKER_TICK_EVENT = "worker.tick"
+import {
+  ATTEMPT_EVENT,
+  CALL_EVENT,
+  FLOOD_WAIT_EVENT,
+  RUN_END_EVENT,
+  RUN_START_EVENT,
+  WORKER_TICK_EVENT,
+} from "./db"
+import type { EventRow } from "./db"
 
 /** Outcomes that count as failures. */
 export const ERROR_OUTCOMES = ["error", "timeout", "aborted"] as const
@@ -58,7 +59,8 @@ export function filterClauses(filter: EventFilter): WhereParts {
   }
   if (filter.errorsOnly) {
     clauses.push(
-      `(e.outcome IN (${ERROR_OUTCOMES_SQL}) OR e.event = '${FLOOD_EVENT}')`,
+      `(e.outcome IN (${ERROR_OUTCOMES_SQL}) ` +
+        `OR e.event = '${FLOOD_WAIT_EVENT}')`,
     )
   }
   return { clauses, params }
@@ -87,7 +89,7 @@ export interface TailOptions extends EventFilter {
 export function tailEvents(db: Database, options: TailOptions): EventRow[] {
   const { clauses, params } = filterClauses(options)
   const sql = `SELECT e.* FROM event e
-WHERE e.event IN ('${CALL_EVENT}', '${ATTEMPT_EVENT}', '${FLOOD_EVENT}')
+WHERE e.event IN ('${CALL_EVENT}', '${ATTEMPT_EVENT}', '${FLOOD_WAIT_EVENT}')
   AND NOT (e.event = '${CALL_EVENT}' AND e.outcome = 'started'
     AND ${HAS_COMPLETION_SQL})${andAll(clauses)}
 ORDER BY e.ts_ms DESC, e.event_id DESC
@@ -217,7 +219,7 @@ export interface FloodOptions {
 }
 
 /** Flood waits: mtcute sleeps and attempts that returned a wait. */
-const FLOOD_ROWS_SQL = `(e.event = '${FLOOD_EVENT}'
+const FLOOD_ROWS_SQL = `(e.event = '${FLOOD_WAIT_EVENT}'
   OR (e.event = '${ATTEMPT_EVENT}' AND e.wait_s IS NOT NULL))`
 
 /**

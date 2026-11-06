@@ -1,19 +1,19 @@
 import { AsyncLocalStorage } from "node:async_hooks"
-import { networkMiddlewares } from "@mtcute/bun"
+import { MtTimeoutError, networkMiddlewares } from "@mtcute/bun"
 import type {
   FloodWaiterOptions,
   RpcCallMiddleware,
   RpcCallMiddlewareContext,
 } from "@mtcute/bun"
 
-import { uuidv7 } from "./db.ts"
+import { ATTEMPT_EVENT, CALL_EVENT, FLOOD_WAIT_EVENT, uuidv7 } from "./db"
 import type {
   TelemetryEvent,
   TelemetryOutcome,
   TelemetrySink,
   TelemetrySubsystem,
-} from "./db.ts"
-import { summarizeRequest, summarizeTl } from "./summarize.ts"
+} from "./db"
+import { summarizeRequest, summarizeTl } from "./summarize"
 
 /** Identity stamped on every row a client writes. */
 export interface TelemetryContext {
@@ -36,10 +36,6 @@ export interface ClientTelemetry {
   context: TelemetryContextProvider
   floodWaiter?: FloodWaiterOptions
 }
-
-export const CALL_EVENT = "tg.rpc.call"
-export const ATTEMPT_EVENT = "tg.rpc.attempt"
-export const FLOOD_WAIT_EVENT = "tg.flood.wait"
 
 const jobStorage = new AsyncLocalStorage<string>()
 
@@ -78,31 +74,122 @@ export function parseWaitSeconds(
   return match ? Number(match[1]) : null
 }
 
-const MAX_ERR_CHARS = 500
+/** Telegram error codes such as `FLOOD_WAIT_400` or `PEER_FLOOD`. */
+const ERROR_CODE_TEXT = /^[A-Z][A-Z0-9_]{1,63}$/
+const API_ERROR_MESSAGE = /^Telegram API error -?\d+: ([A-Z][A-Z0-9_]{1,63})$/
+const SAFE_CLASS_NAME = /^[A-Za-z_$][A-Za-z0-9_$]{0,63}$/
 
-function errorText(error: unknown): string {
-  let text: string
+/**
+ * Telegram error code of a thrown value, e.g. `FLOOD_WAIT_400`, read from
+ * mtcute's `RpcError.text` (with `%d` filled from `.seconds`) or a message
+ * that is only a code. `null` when the value carries no such code.
+ */
+export function rpcErrorText(error: unknown): string | null {
   try {
-    text =
-      error instanceof Error
-        ? `${error.name}: ${error.message}`
-        : String(error)
+    const fields = (error ?? {}) as {
+      text?: unknown
+      seconds?: unknown
+      message?: unknown
+    }
+    const candidates: string[] = []
+    if (typeof fields.text === "string") {
+      candidates.push(
+        typeof fields.seconds === "number"
+          ? fields.text.replace("%d", String(fields.seconds))
+          : fields.text,
+      )
+    }
+    const message =
+      typeof error === "string"
+        ? error
+        : typeof fields.message === "string"
+          ? fields.message
+          : null
+    if (message !== null) {
+      const api = message.match(API_ERROR_MESSAGE)
+      if (api?.[1]) candidates.push(api[1])
+      candidates.push(message)
+    }
+    return candidates.find((text) => ERROR_CODE_TEXT.test(text)) ?? null
   } catch {
-    text = "unprintable error"
+    return null
   }
-  return text.length > MAX_ERR_CHARS ? `${text.slice(0, MAX_ERR_CHARS)}…` : text
 }
 
-/** Classifies a thrown error from the transport or an aborted call. */
+/**
+ * Class of a thrown value. mtcute errors do not set `name`, so this reads
+ * `constructor.name`, falling back to `name` for plain `Error` and
+ * `DOMException` (e.g. `AbortError`).
+ */
+export function errorClassName(error: unknown): string {
+  try {
+    if (typeof error !== "object" || error === null) return typeof error
+    const ctor = (error as { constructor?: { name?: unknown } }).constructor
+    const ctorName = typeof ctor?.name === "string" ? ctor.name : ""
+    const name = (error as { name?: unknown }).name
+    if (
+      (ctorName === "" || ctorName === "Error" || ctorName === "DOMException") &&
+      typeof name === "string" &&
+      SAFE_CLASS_NAME.test(name)
+    ) {
+      return name
+    }
+    return SAFE_CLASS_NAME.test(ctorName) ? ctorName : "Object"
+  } catch {
+    return "unknown"
+  }
+}
+
+/**
+ * Error text for telemetry rows: the class name plus, for Telegram errors,
+ * the numeric code and error code, e.g. `RpcError [420 FLOOD_WAIT_400]`.
+ * Free-form messages (which can hold chat links, names, or input lines)
+ * are left out; stderr still shows them.
+ */
+export function safeErrorText(error: unknown): string {
+  const className = errorClassName(error)
+  const text = rpcErrorText(error)
+  if (text === null) return className
+  const code = (error as { code?: unknown } | null)?.code
+  return typeof code === "number"
+    ? `${className} [${code} ${text}]`
+    : `${className} [${text}]`
+}
+
+function stopSignalOf(
+  ctx: RpcCallMiddlewareContext | undefined,
+): AbortSignal | undefined {
+  try {
+    const manager = ctx?.manager as unknown as {
+      params?: { stopSignal?: AbortSignal }
+    }
+    return manager?.params?.stopSignal
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Classifies a thrown error from the transport or an aborted call. A call
+ * cut short by `client.destroy()` (its `stopSignal`) counts as aborted.
+ */
 export function thrownOutcome(
   error: unknown,
   ctx?: RpcCallMiddlewareContext,
 ): TelemetryOutcome {
-  const name = error instanceof Error ? error.name : ""
-  if (name === "AbortError" || ctx?.params?.abortSignal?.aborted) {
+  const className = errorClassName(error)
+  if (
+    className === "AbortError" ||
+    ctx?.params?.abortSignal?.aborted ||
+    stopSignalOf(ctx)?.aborted
+  ) {
     return "aborted"
   }
-  if (/timeout/i.test(name) || /timed? ?out/i.test(errorText(error))) {
+  if (
+    error instanceof MtTimeoutError ||
+    className === "MtTimeoutError" ||
+    className === "TimeoutError"
+  ) {
     return "timeout"
   }
   return "error"
@@ -120,7 +207,7 @@ function resultFields(result: unknown): ResultFields {
     return {
       outcome: "error",
       errorCode: typeof result.errorCode === "number" ? result.errorCode : null,
-      err: String(result.errorMessage),
+      err: rpcErrorText(result.errorMessage) ?? "RpcError",
       waitS: parseWaitSeconds(result.errorMessage),
     }
   }
@@ -132,14 +219,11 @@ function thrownFields(
   ctx: RpcCallMiddlewareContext,
 ): ResultFields {
   const code = (error as { code?: unknown } | null)?.code
-  const err = errorText(error)
   return {
     outcome: thrownOutcome(error, ctx),
     errorCode: typeof code === "number" ? code : null,
-    err,
-    waitS: parseWaitSeconds(
-      (error as { text?: unknown } | null)?.text as string | undefined,
-    ),
+    err: safeErrorText(error),
+    waitS: parseWaitSeconds(rpcErrorText(error)),
   }
 }
 

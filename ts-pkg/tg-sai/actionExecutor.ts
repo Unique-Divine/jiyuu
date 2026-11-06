@@ -1,3 +1,5 @@
+import { parseWaitSeconds, rpcErrorText } from "./telemetry/middleware"
+
 /**
  * Structured progress event emitted by the batch action executor.
  *
@@ -13,8 +15,6 @@ export type BatchActionEvent =
       chatId: number | string
       /** Stable action name, for example `bot_add`. */
       action: string
-      /** One-based attempt number for this action. */
-      attempt: number
     }
   | {
       /** Operation completed successfully. */
@@ -23,9 +23,7 @@ export type BatchActionEvent =
       chatId: number | string
       /** Stable action name, for example `owner_target_add`. */
       action: string
-      /** Number of attempts required before success. */
-      attempts: number
-      /** Elapsed milliseconds from first attempt to success. */
+      /** Elapsed milliseconds from start to success, flood sleeps included. */
       elapsedMs: number
     }
   | {
@@ -35,8 +33,6 @@ export type BatchActionEvent =
       chatId: number | string
       /** Stable action name, for example `transfer_owner`. */
       action: string
-      /** One-based attempt number that produced the final error. */
-      attempt: number
       /** Error name normalized for logs. */
       errorName: string
       /** Error message normalized for logs. */
@@ -89,28 +85,6 @@ export class MemoryBatchLogger implements BatchLogger {
 }
 
 /**
- * Extracts the wait duration from Telegram-style `FLOOD_WAIT_X` errors.
- *
- * mtcute and related libraries may expose the Telegram error string in the error
- * name, message, or both. This helper checks both fields and returns `null` for
- * non-flood errors so callers can distinguish retryable rate limits from normal
- * failures.
- */
-export function parseFloodWaitSeconds(error: unknown): number | null {
-  if (!(error instanceof Error)) {
-    return null
-  }
-
-  const haystack = `${error.name} ${error.message}`
-  const match = haystack.match(/FLOOD_WAIT_(\d+)/)
-  if (!match) {
-    return null
-  }
-
-  return Number(match[1])
-}
-
-/**
  * Returns a stable display name for unknown thrown values.
  */
 export function errorName(error: unknown): string {
@@ -147,7 +121,6 @@ export async function runTelegramAction<T>(
     type: "action_start",
     chatId: context.chatId,
     action: context.action,
-    attempt: 1,
   })
   try {
     const result = await operation()
@@ -155,7 +128,6 @@ export async function runTelegramAction<T>(
       type: "action_success",
       chatId: context.chatId,
       action: context.action,
-      attempts: 1,
       elapsedMs: deps.now() - startedAt,
     })
     return result
@@ -164,10 +136,98 @@ export async function runTelegramAction<T>(
       type: "action_error",
       chatId: context.chatId,
       action: context.action,
-      attempt: 1,
       errorName: errorName(error),
       errorMessage: errorMessage(error),
     })
     throw error
   }
+}
+
+/** Why a batch stopped early on a Telegram rate limit. */
+export interface FloodStop {
+  /** Telegram error code, e.g. `FLOOD_WAIT_15382` or `PEER_FLOOD`. */
+  code: string
+  /** Wait Telegram asked for; `null` for `PEER_FLOOD`. */
+  waitS: number | null
+  /** When the wait ends (ISO); `null` when Telegram gives no time. */
+  resumeAt: string | null
+}
+
+/**
+ * Returns a stop when `error` means the rest of a batch would only hit the
+ * same limit: any `PEER_FLOOD`, or a `FLOOD_WAIT_X` (and premium/test-phone
+ * variants) longer than `maxWaitMs`, which mtcute did not sleep through.
+ * `SLOWMODE_WAIT_X` is per chat, so it returns `null` and the batch goes on.
+ */
+export function floodStopFor(
+  error: unknown,
+  maxWaitMs: number,
+  nowMs: number,
+): FloodStop | null {
+  const code = rpcErrorText(error)
+  if (code === null) return null
+  if (code === "PEER_FLOOD") return { code, waitS: null, resumeAt: null }
+  if (code.startsWith("SLOWMODE_WAIT_")) return null
+  const waitS = parseWaitSeconds(code)
+  if (waitS === null || waitS * 1000 <= maxWaitMs) return null
+  return {
+    code,
+    waitS,
+    resumeAt: new Date(nowMs + waitS * 1000).toISOString(),
+  }
+}
+
+/** A flood stop plus where in the batch it happened. */
+export interface BatchStop<T> extends FloodStop {
+  item: T
+  /** Zero-based index of the item that hit the limit. */
+  index: number
+  /** Items after it that were not started. */
+  remaining: number
+}
+
+export interface ChatBatchOptions<T> {
+  /** Runs one item; a throw is reported to `onItemError`. */
+  processItem: (item: T, index: number) => Promise<void>
+  /** Records a per-item failure; the batch continues unless it stops. */
+  onItemError: (item: T, error: unknown, index: number) => void | Promise<void>
+  /** Runs between items (e.g. the inter-chat delay), not after the last. */
+  betweenItems?: (item: T, index: number) => void | Promise<void>
+  /** Flood waits longer than this stop the batch. */
+  maxWaitMs: number
+  now?: () => number
+}
+
+/**
+ * Processes `items` in order, isolating per-item errors, and stops at the
+ * first error `floodStopFor` treats as batch-wide.
+ */
+export async function runChatBatch<T>(
+  items: readonly T[],
+  options: ChatBatchOptions<T>,
+): Promise<{ processed: number; floodStop: BatchStop<T> | null }> {
+  const now = options.now ?? Date.now
+  let processed = 0
+  for (const [index, item] of items.entries()) {
+    processed += 1
+    try {
+      await options.processItem(item, index)
+    } catch (error) {
+      await options.onItemError(item, error, index)
+      const stop = floodStopFor(error, options.maxWaitMs, now())
+      if (stop) {
+        return {
+          processed,
+          floodStop: {
+            ...stop,
+            item,
+            index,
+            remaining: items.length - index - 1,
+          },
+        }
+      }
+    }
+    if (index < items.length - 1) await options.betweenItems?.(item, index)
+  }
+  return { processed, floodStop: null }
 }

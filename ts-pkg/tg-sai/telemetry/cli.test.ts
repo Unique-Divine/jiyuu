@@ -15,15 +15,15 @@ import {
   toonObject,
   toonTable,
   toonValue,
-} from "./cli.ts"
-import { SqliteTelemetrySink, openTelemetryDb, telemetryDbPath } from "./db.ts"
+} from "./cli"
+import { SqliteTelemetrySink, openTelemetryDb, telemetryDbPath } from "./db"
 import {
   CUSTODY_ACCOUNT,
   IDS,
   NOW_MS,
   seedEvents,
   writeSeedDb,
-} from "./testEvents.ts"
+} from "./testEvents"
 
 let dir = ""
 let dbPath = ""

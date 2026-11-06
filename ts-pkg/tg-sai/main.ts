@@ -17,7 +17,7 @@ import { Command } from "commander"
 import { addProvisionCommands } from "./provisioningCli"
 import { addCustodyWorkerCommands } from "./custodyWorkerCli"
 import type { BatchLogger } from "./actionExecutor"
-import { runTelegramAction } from "./actionExecutor"
+import { runChatBatch, runTelegramAction } from "./actionExecutor"
 import type {
   ChatAuditInput,
   ChatMemberData,
@@ -29,7 +29,12 @@ import { runHealthCheck } from "./health"
 import { addRuntimeHealthCommands } from "./runtimeHealthCli"
 import { registerEventsCommand } from "./telemetry/cli"
 import type { TelemetrySubsystem } from "./telemetry/db"
-import { activeTelemetryRun, startTelemetryRun } from "./telemetry/run"
+import {
+  activeTelemetryRun,
+  BOOTSTRAP_FLOOD_MAX_WAIT_MS,
+  floodMaxWaitMs,
+  startTelemetryRun,
+} from "./telemetry/run"
 import {
   addTargetToChat,
   createMtcuteClient,
@@ -122,7 +127,6 @@ interface SaiBootstrapOptions {
   /** Owner target: user ID or username. Defaults to the Sai custody account. */
   targetUser?: number | string
 }
-
 
 interface TelegramEnv {
   apiId: number
@@ -306,7 +310,7 @@ async function getTelegramEnv(profileName?: string): Promise<TelegramEnv> {
     session: credentials.sessionString,
     password: process.env.TELEGRAM_PASSWORD ?? profile?.password ?? null,
     userId: profile?.userId ?? null,
-    profileName: profile?.handle ?? profile?.name ?? profileName ?? null,
+    profileName: profile?.name || profileName || null,
   }
 }
 
@@ -796,7 +800,9 @@ async function maybeTransferOwner(params: {
  *
  * The command is dry-run by default. In execution mode, it applies the Sai bot
  * update and owner-target update for each chat, logs per-chat failures, and
- * continues to the next chat.
+ * continues to the next chat. A `PEER_FLOOD` or a flood wait longer than the
+ * run's threshold stops the batch with a `flood_stop` event and exit code 1;
+ * `SLOWMODE_WAIT_X` only fails that chat.
  */
 async function runSaiBootstrap(options: SaiBootstrapOptions): Promise<void> {
   const contents = await readFile(options.file, "utf8")
@@ -838,17 +844,20 @@ async function runSaiBootstrap(options: SaiBootstrapOptions): Promise<void> {
       targetBot: saiBot.id,
     })
 
+    const maxWaitMs =
+      activeTelemetryRun()?.floodMaxWaitMs ??
+      floodMaxWaitMs("cli", process.env, BOOTSTRAP_FLOOD_MAX_WAIT_MS)
     try {
-      for (const [i, chat] of chats.entries()) {
-        printJsonEvent("chat_start", {
-          index: i + 1,
-          total: chats.length,
-          chatId: chat.chatId,
-          title: chat.title,
-          actorUsername,
-        })
-
-        try {
+      const { floodStop } = await runChatBatch(chats, {
+        maxWaitMs,
+        processItem: async (chat, i) => {
+          printJsonEvent("chat_start", {
+            index: i + 1,
+            total: chats.length,
+            chatId: chat.chatId,
+            title: chat.title,
+            actorUsername,
+          })
           await applyTargetPlan({
             client,
             chat,
@@ -882,7 +891,8 @@ async function runSaiBootstrap(options: SaiBootstrapOptions): Promise<void> {
             chatId: chat.chatId,
             actorUsername,
           })
-        } catch (error) {
+        },
+        onItemError: (chat, error) => {
           printJsonEvent("chat_error", {
             chatId: chat.chatId,
             actorUsername,
@@ -890,16 +900,32 @@ async function runSaiBootstrap(options: SaiBootstrapOptions): Promise<void> {
             errorMessage:
               error instanceof Error ? error.message : String(error),
           })
-        }
-
-        if (delayMs > 0 && i < chats.length - 1) {
+        },
+        betweenItems: async (chat) => {
+          if (delayMs <= 0) return
           printJsonEvent("chat_delay", {
             chatId: chat.chatId,
             actorUsername,
             delayMs,
           })
           await sleep(delayMs)
-        }
+        },
+      })
+
+      if (floodStop) {
+        // The rest of the batch would hit the same account-wide limit.
+        printJsonEvent("flood_stop", {
+          chatId: floodStop.item.chatId,
+          actorUsername,
+          index: floodStop.index + 1,
+          total: chats.length,
+          remaining: floodStop.remaining,
+          code: floodStop.code,
+          waitS: floodStop.waitS,
+          resumeAt: floodStop.resumeAt,
+        })
+        process.exitCode = 1
+        return
       }
 
       printJsonEvent("run_complete", {
@@ -1748,6 +1774,28 @@ function skipsTelemetry(path: string): boolean {
   return path === "" || path === "events" || path.startsWith("events ")
 }
 
+/** Exit code for a run stopped by SIGINT/SIGTERM (128 + SIGINT). */
+const SIGNAL_EXIT_CODE = 130
+
+/**
+ * Ends the run as aborted on the first SIGINT/SIGTERM, then exits. The
+ * `worker` command installs its own handlers for a graceful stop.
+ */
+function endRunOnSignal(path: string): void {
+  if (path === "worker") return
+  const onSignal = () => {
+    process.removeListener("SIGINT", onSignal)
+    process.removeListener("SIGTERM", onSignal)
+    activeTelemetryRun()?.end({
+      exitCode: SIGNAL_EXIT_CODE,
+      outcome: "aborted",
+    })
+    process.exit(SIGNAL_EXIT_CODE)
+  }
+  process.once("SIGINT", onSignal)
+  process.once("SIGTERM", onSignal)
+}
+
 function startCliTelemetryRun(actionCommand: Command): void {
   const path = commandPath(actionCommand)
   if (skipsTelemetry(path) || activeTelemetryRun()) return
@@ -1757,8 +1805,12 @@ function startCliTelemetryRun(actionCommand: Command): void {
     argv: process.argv.slice(2),
     version: packageJson.version,
     logPrefix: runLogPrefix(path),
+    ...(path === "ops sai-bootstrap"
+      ? { floodMaxWaitMs: BOOTSTRAP_FLOOD_MAX_WAIT_MS }
+      : {}),
   })
   activeJsonLogPath = run.jsonlPath
+  endRunOnSignal(path)
 }
 
 createProgram()

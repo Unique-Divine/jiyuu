@@ -250,6 +250,12 @@ second between chats by default. Use flag `--delay-ms <ms>` to change that
 delay. When environment variable `TELEGRAM_PASSWORD` is available, execution
 mode attempts ownership transfer by default for eligible chats.
 
+The command sleeps through flood waits up to five minutes (environment
+variable `TG_SAI_FLOOD_MAX_WAIT_MS` overrides). A longer `FLOOD_WAIT_X` or any
+`PEER_FLOOD` stops the remaining chats: the log gets a `flood_stop` event with
+the chat, the remaining count, the code, and `resumeAt`, and the command exits
+with code 1. A `SLOWMODE_WAIT_X` fails only that chat.
+
 Run a live read-only audit:
 
 ```bash

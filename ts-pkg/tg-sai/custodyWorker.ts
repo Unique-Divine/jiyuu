@@ -15,6 +15,7 @@ import {
   withAccountLock,
   withProvisionTelegram,
 } from "./provisioningRuntime"
+import { WORKER_TICK_EVENT } from "./telemetry/db"
 import { withTelemetryJob } from "./telemetry/middleware"
 import type { TelemetryRun } from "./telemetry/run"
 
@@ -46,6 +47,8 @@ export interface WorkerOptions {
   run?: boolean
   now?: number
   after?: string
+  /** Once aborted, no new job starts; the running one is cut short. */
+  signal?: AbortSignal
 }
 /** Persistent random identity retains ownership of sticky cloud claims after restart. */
 export async function stableWorkerId(root = configDir()): Promise<string> {
@@ -110,6 +113,7 @@ export async function runWorkerOnce(
     error: row.reason,
   }))
   for (const selected of page.requests) {
+    if (options.signal?.aborted) break
     const setup = await deps.cloud.view(selected.requestId)
     if (
       setup.expectedUserId !== CUSTODY_USER_ID ||
@@ -227,8 +231,31 @@ export async function runCustodyWorker(options: {
     operation: (adapter: TelegramProvisioner) => Promise<T>,
   ): Promise<T> =>
     withTelemetryJob(setup.requestId, () =>
-      withProvisionTelegram(setup, operation, clientTelemetry),
+      withProvisionTelegram(setup, operation, clientTelemetry, options.signal),
     )
+  let lastTickRecordedMs: number | null = null
+  const recordTick = (tick: {
+    startedAt: number
+    result?: Awaited<ReturnType<typeof runWorkerOnce>>
+    error?: unknown
+  }) => {
+    if (!telemetry) return
+    const nowMs = Date.now()
+    if (
+      !shouldRecordTick({
+        ...tick,
+        nowMs,
+        lastRecordedMs: lastTickRecordedMs,
+      })
+    ) {
+      return
+    }
+    lastTickRecordedMs = nowMs
+    recordWorkerTick(telemetry, {
+      ...tick,
+      custodyProfile: options.custodyProfile,
+    })
+  }
   const execute = async () => {
     const cloud = new CliProvisionCloud()
     let after: string | undefined
@@ -246,22 +273,10 @@ export async function runCustodyWorker(options: {
         after = result.nextAfter ?? undefined
         const line = { ...result, observedAt: new Date().toISOString() }
         console.log(JSON.stringify(line))
-        if (telemetry) {
-          recordWorkerTick(telemetry, {
-            startedAt: tickStartedAt,
-            custodyProfile: options.custodyProfile,
-            result,
-          })
-          telemetry.appendJsonl({ type: "worker_tick", ...line })
-        }
+        recordTick({ startedAt: tickStartedAt, result })
+        telemetry?.appendJsonl({ type: "worker_tick", ...line })
       } catch (error) {
-        if (telemetry) {
-          recordWorkerTick(telemetry, {
-            startedAt: tickStartedAt,
-            custodyProfile: options.custodyProfile,
-            error,
-          })
-        }
+        recordTick({ startedAt: tickStartedAt, error })
         if (options.once) throw error
         const line = {
           state: "worker_tick_failed",
@@ -299,6 +314,30 @@ export function countStates(results: WorkerResult[]): Record<string, number> {
   return counts
 }
 
+/** Idle ticks still write a `worker.tick` row this often, as a heartbeat. */
+export const TICK_HEARTBEAT_MS = 5 * 60 * 1000
+
+/** Job states that mean the tick did no work. */
+const IDLE_STATES = new Set(["waiting", "blocked"])
+
+/**
+ * Whether a tick earns a `worker.tick` row: it threw, a job did something
+ * (any result not `waiting`/`blocked`), it is the first tick, or the last
+ * recorded tick is `TICK_HEARTBEAT_MS` old. Idle polls are otherwise skipped
+ * so a 5s interval does not write ~17k rows a day.
+ */
+export function shouldRecordTick(tick: {
+  result?: Awaited<ReturnType<typeof runWorkerOnce>>
+  error?: unknown
+  nowMs: number
+  lastRecordedMs: number | null
+}): boolean {
+  if (tick.error !== undefined) return true
+  if (tick.result?.results.some((r) => !IDLE_STATES.has(r.state))) return true
+  if (tick.lastRecordedMs === null) return true
+  return tick.nowMs - tick.lastRecordedMs >= TICK_HEARTBEAT_MS
+}
+
 /** Writes one `worker.tick` row; never throws. */
 export function recordWorkerTick(
   telemetry: Pick<TelemetryRun, "sink" | "context">,
@@ -318,7 +357,7 @@ export function recordWorkerTick(
       version: context.version,
       accountId: CUSTODY_USER_ID,
       profile: tick.custodyProfile,
-      event: "worker.tick",
+      event: WORKER_TICK_EVENT,
       outcome: tick.error === undefined ? "ok" : "error",
       durationMs: Date.now() - tick.startedAt,
       err:

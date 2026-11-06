@@ -15,7 +15,7 @@ import {
   showTimeline,
   tailEvents,
   uncertainCalls,
-} from "./queries.ts"
+} from "./queries"
 import {
   CUSTODY_ACCOUNT,
   IDS,
@@ -23,7 +23,7 @@ import {
   PERSONAL_ACCOUNT,
   seedEvents,
   writeSeedDb,
-} from "./testEvents.ts"
+} from "./testEvents"
 
 const DAY = 86_400_000
 let dir = ""

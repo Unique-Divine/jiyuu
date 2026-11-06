@@ -1,69 +1,198 @@
 import { appendFileSync, mkdirSync, readdirSync } from "node:fs"
-import { join } from "node:path"
+import { basename, join } from "node:path"
 
-import { configDir, type ProfileStoreEnv } from "../profiles.ts"
-import { openTelemetrySink, uuidv7 } from "./db.ts"
+import { configDir, type ProfileStoreEnv } from "../profiles"
+import {
+  openTelemetrySink,
+  RUN_END_EVENT,
+  RUN_START_EVENT,
+  uuidv7,
+} from "./db"
 import type {
   TelemetryEvent,
   TelemetryOutcome,
   TelemetrySink,
   TelemetrySubsystem,
-} from "./db.ts"
-import type { ClientTelemetry, TelemetryContext } from "./middleware.ts"
+} from "./db"
+import { safeErrorText } from "./middleware"
+import type { ClientTelemetry, TelemetryContext } from "./middleware"
 
 export const FLOOD_MAX_WAIT_ENV = "TG_SAI_FLOOD_MAX_WAIT_MS"
 /** mtcute's own default; CLI commands sleep through waits up to this. */
 export const CLI_FLOOD_MAX_WAIT_MS = 10_000
 /** The worker is unattended, so it rides out somewhat longer waits. */
 export const WORKER_FLOOD_MAX_WAIT_MS = 30_000
+/**
+ * `ops sai-bootstrap` walks a reviewed batch; sleeping up to five minutes
+ * beats stopping the batch. Longer waits stop it (see `floodStopFor`).
+ */
+export const BOOTSTRAP_FLOOD_MAX_WAIT_MS = 300_000
 
 /**
  * Flood-wait sleep threshold for this process: `TG_SAI_FLOOD_MAX_WAIT_MS`
- * when it is a non-negative integer, else the subsystem default.
+ * when it is a non-negative integer, else `fallback`, else the subsystem
+ * default.
  */
 export function floodMaxWaitMs(
   subsystem: TelemetrySubsystem,
   env: ProfileStoreEnv = process.env,
+  fallback?: number,
 ): number {
   const raw = env[FLOOD_MAX_WAIT_ENV]?.trim()
   if (raw && /^\d+$/.test(raw)) return Number(raw)
+  if (fallback !== undefined) return fallback
   return subsystem === "worker"
     ? WORKER_FLOOD_MAX_WAIT_MS
     : CLI_FLOOD_MAX_WAIT_MS
 }
 
-const SECRET_FLAG = /pass|secret|token|session|hash|key|phone|code|auth/i
-const SECRET_VALUE = /^[A-Za-z0-9+/=_-]{32,}$/
 export const REDACTED = "[redacted]"
 
+/** Subcommand words kept as-is when they lead argv. */
+const COMMAND_WORDS = new Set([
+  "add",
+  "add-bot",
+  "add-owner",
+  "audit",
+  "chat",
+  "counts",
+  "events",
+  "export",
+  "find",
+  "floods",
+  "health",
+  "list",
+  "ops",
+  "prepare",
+  "profile",
+  "provision",
+  "remove",
+  "resolve",
+  "runs",
+  "sai-bootstrap",
+  "sai-find",
+  "show",
+  "stats",
+  "status",
+  "tail",
+  "uncertain",
+  "use",
+  "worker",
+])
+
+/** Flags that take no value; kept as-is. */
+const BOOLEAN_FLAGS = new Set([
+  "--dry-run",
+  "--errors",
+  "--help",
+  "--interactive",
+  "--json",
+  "--local",
+  "--login",
+  "--no-env-write",
+  "--no-transfer-owner",
+  "--offline",
+  "--once",
+  "--online",
+  "--phone",
+  "--qr",
+  "--run",
+  "--session-output",
+  "--version",
+  "-i",
+])
+
+const NUMBER = /^\d+$/
+const CHAT_ID = /^-?\d+$/
+/** Durations (`15m`) and ISO-like timestamps; no free text. */
+const SINCE = /^\d[0-9A-Za-z:.+-]{0,39}$/
+
+/** Value flags whose values are kept when they have the expected shape. */
+const SAFE_VALUE_FLAGS: Record<string, (value: string) => string | null> = {
+  "--limit": (v) => (NUMBER.test(v) ? v : null),
+  "--interval-ms": (v) => (NUMBER.test(v) ? v : null),
+  "--delay-ms": (v) => (NUMBER.test(v) ? v : null),
+  "--timeout-ms": (v) => (NUMBER.test(v) ? v : null),
+  "--since": (v) => (SINCE.test(v) ? v : null),
+  "--chat": (v) => (CHAT_ID.test(v) ? v : null),
+  "--chat-id": (v) => (CHAT_ID.test(v) ? v : null),
+  "--file": (v) => basename(v) || null,
+}
+
 /**
- * Drops secret values from argv: the value after (or `=`-joined to) any
- * secret-looking flag, and any long token-shaped positional.
+ * Value-taking flags whose values are always redacted. The next token is
+ * their value even when it starts with `-` (e.g. `--password -hunter2`).
+ */
+const REDACTED_VALUE_FLAGS = new Set([
+  "--account",
+  "--api-hash",
+  "--api-id",
+  "--archived",
+  "--by",
+  "--custody-profile",
+  "--display-name",
+  "--handle",
+  "--layer",
+  "--method",
+  "--name",
+  "--out",
+  "--password",
+  "--profile",
+  "--reason",
+  "--request-id",
+  "--session-string",
+  "--src",
+  "--target-peer",
+  "--target-user",
+  "--user-id",
+])
+
+function isFlag(arg: string): boolean {
+  return arg.startsWith("--") || /^-[A-Za-z]$/.test(arg)
+}
+
+/** Kept value for `flag`, or `REDACTED`. */
+function flagValue(flag: string, value: string): string {
+  const keep = SAFE_VALUE_FLAGS[flag]
+  return (keep ? keep(value) : null) ?? REDACTED
+}
+
+/**
+ * Allowlist view of argv for telemetry rows. Keeps leading subcommand words,
+ * flag names, boolean flags, and the values of a few known flags whose
+ * values have a safe shape (numbers, durations, numeric chat IDs, the
+ * `--file` basename). Every other value and positional becomes `[redacted]`.
  */
 export function sanitizeArgv(argv: readonly string[]): string[] {
   const out: string[] = []
+  let leading = true
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i] ?? ""
-    if (arg.startsWith("--") || /^-[A-Za-z]$/.test(arg)) {
-      const eq = arg.indexOf("=")
-      const flag = eq === -1 ? arg : arg.slice(0, eq)
-      if (!SECRET_FLAG.test(flag)) {
-        out.push(arg)
-        continue
-      }
-      if (eq !== -1) {
-        out.push(`${flag}=${REDACTED}`)
-        continue
-      }
-      out.push(flag)
-      const next = argv[i + 1]
-      if (next !== undefined && !next.startsWith("-")) {
-        out.push(REDACTED)
-        i += 1
-      }
+    if (arg === "--") {
+      out.push(arg, ...argv.slice(i + 1).map(() => REDACTED))
+      break
+    }
+    if (!isFlag(arg)) {
+      const keep = leading && COMMAND_WORDS.has(arg)
+      if (!keep) leading = false
+      out.push(keep ? arg : REDACTED)
       continue
     }
-    out.push(SECRET_VALUE.test(arg) ? REDACTED : arg)
+    leading = false
+    const eq = arg.indexOf("=")
+    const flag = eq === -1 ? arg : arg.slice(0, eq)
+    if (eq !== -1) {
+      out.push(`${flag}=${flagValue(flag, arg.slice(eq + 1))}`)
+      continue
+    }
+    out.push(flag)
+    if (BOOLEAN_FLAGS.has(flag)) continue
+    const takesValue = flag in SAFE_VALUE_FLAGS || REDACTED_VALUE_FLAGS.has(flag)
+    const next = argv[i + 1]
+    // Unknown flags: a following positional is redacted on its own pass.
+    if (!takesValue || next === undefined) continue
+    out.push(flagValue(flag, next))
+    i += 1
   }
   return out
 }
@@ -205,6 +334,8 @@ export interface StartRunOptions {
   argv: readonly string[]
   version: string
   env?: ProfileStoreEnv
+  /** Flood-wait threshold when `TG_SAI_FLOOD_MAX_WAIT_MS` is unset. */
+  floodMaxWaitMs?: number
   /** Run log file prefix; `null` disables the JSONL run log. */
   logPrefix?: string | null
   logsDir?: string
@@ -215,19 +346,18 @@ export interface StartRunOptions {
 
 let activeRun: TelemetryRun | null = null
 
-/** The run started by this process's entry point, if any. */
-export function activeTelemetryRun(): TelemetryRun | null {
-  return activeRun
-}
-
-function errorText(error: unknown): string {
+/** Full error text for the operator's terminal (not for telemetry rows). */
+function stderrText(error: unknown): string {
   try {
-    const text =
-      error instanceof Error ? `${error.name}: ${error.message}` : String(error)
-    return text.length > 500 ? `${text.slice(0, 500)}…` : text
+    return error instanceof Error ? error.message : String(error)
   } catch {
     return "unprintable error"
   }
+}
+
+/** The run started by this process's entry point, if any. */
+export function activeTelemetryRun(): TelemetryRun | null {
+  return activeRun
 }
 
 /**
@@ -260,13 +390,17 @@ export function startTelemetryRun(options: StartRunOptions): TelemetryRun {
         options.logPrefix ?? (options.command ?? "run").replace(/\s+/g, "-"),
       )
     } catch (error) {
-      stderr(`tg-sai telemetry: run log disabled: ${errorText(error)}`)
+      stderr(`tg-sai telemetry: run log disabled: ${stderrText(error)}`)
     }
   }
   const dbSink =
     options.sink ?? openTelemetrySink(env, { version: options.version, stderr })
   const sink = teeSink(dbSink, () => jsonlPath)
-  const maxWait = floodMaxWaitMs(options.subsystem, env)
+  const maxWait = floodMaxWaitMs(
+    options.subsystem,
+    env,
+    options.floodMaxWaitMs,
+  )
   const startedAt = Date.now()
   let ended = false
   let aborted = false
@@ -280,7 +414,7 @@ export function startTelemetryRun(options: StartRunOptions): TelemetryRun {
 
   sink.record({
     ...base(),
-    event: "run.start",
+    event: RUN_START_EVENT,
     outcome: "started",
     req: {
       argv: sanitizeArgv(options.argv),
@@ -320,12 +454,12 @@ export function startTelemetryRun(options: StartRunOptions): TelemetryRun {
         (aborted ? "aborted" : input.exitCode === 0 ? "ok" : "error")
       sink.record({
         ...base(),
-        event: "run.end",
+        event: RUN_END_EVENT,
         outcome,
         durationMs: Date.now() - startedAt,
         // Process exit code; read by `tg-sai events runs`.
         errorCode: input.exitCode,
-        err: input.error === undefined ? null : errorText(input.error),
+        err: input.error === undefined ? null : safeErrorText(input.error),
         res: { exitCode: input.exitCode, dropped: dbSink.dropped() },
       })
       sink.close()
