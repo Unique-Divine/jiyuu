@@ -63,6 +63,28 @@ While a wait is active, avoid adding members from the custody account in the
 Telegram app: it can extend the wait, and tg-sai cannot see app actions.
 Limits are per account, so your own account is unaffected.
 
+### Background Members
+
+The worker sets up a new chat with the requester, the required admins, and
+the bot, then marks it ready. Optional members (team defaults and extras)
+wait in the `background_add` table of `state.db`, and each gets the chat's
+shared approval link in the ready receipt. The worker adds one queued member
+at a time, only on a tick with no setup job runnable or waiting and no
+invite hold:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `TG_SAI_BACKGROUND_GAP_MS` | `1200000` (20 min) | Gap between adds, ±30 % |
+| `TG_SAI_BACKGROUND_DAILY_MAX` | `10` | Daily cap on member adds; `0` stops background adds |
+
+A privacy refusal ends the row as `privacy` with no new link; the member
+joins through the shared link, and the refusal does not count toward the
+daily cap. The cap counts every member add the custody account made this
+UTC day, setup adds included: background adds stop once that total reaches
+it. The worker reports holds, adds today (the same total), and the queue to
+Deal Desk (`chat-setups custody-status`) when they change and every 5
+minutes.
+
 ## Logs
 
 tg-sai writes no log files. Each run records its Telegram calls, retries,

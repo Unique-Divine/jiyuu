@@ -1,6 +1,19 @@
 import { randomUUID } from "node:crypto"
 import { mkdir, open, readFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
+import {
+  backgroundEnqueue,
+  drainBackgroundOnce,
+  openBackgroundQueue,
+  recordingMemberAdds,
+} from "./backgroundWorker"
+import type { DrainResult } from "./backgroundWorker"
+import {
+  buildCustodyStatus,
+  CustodyStatusReporter,
+} from "./custodyStatus"
+// Static import so `bun build --compile` embeds the version.
+import packageJson from "./package.json" with { type: "json" }
 import { configDir } from "./profiles"
 import {
   closeProcessHoldStores,
@@ -14,6 +27,7 @@ import {
   safeProvisionError,
 } from "./provisioning"
 import type {
+  BackgroundEnqueue,
   ProvisionCloud,
   ProvisionJournal,
   Setup,
@@ -25,11 +39,14 @@ import {
   withAccountLock,
   withProvisionTelegram,
 } from "./provisioningRuntime"
+import { backgroundPacing } from "./state/background"
+import type { BackgroundQueue } from "./state/background"
 import type { HoldStoreSource } from "./state/guard"
 import { HoldStore, remainingSeconds } from "./state/holds"
 import type { HoldGroup } from "./state/holds"
 import { WORKER_TICK_EVENT } from "./telemetry/db"
 import { withTelemetryJob } from "./telemetry/middleware"
+import { recordLog } from "./telemetry/run"
 import type { TelemetryRun } from "./telemetry/run"
 
 export const CUSTODY_USER_ID = 8274304175
@@ -62,6 +79,11 @@ export interface WorkerOptions {
   after?: string
   /** Once aborted, no new job starts; the running one is cut short. */
   signal?: AbortSignal
+  /**
+   * An earlier page of this pass (same walk of `after` cursors) had a
+   * runnable or waiting requester job, so this page must not drain.
+   */
+  requesterWorkSeen?: boolean
 }
 /** Persistent random identity retains ownership of sticky cloud claims after restart. */
 export async function stableWorkerId(root = configDir()): Promise<string> {
@@ -148,11 +170,22 @@ export async function runWorkerOnce(
       setup: Setup,
       operation: (adapter: TelegramProvisioner) => Promise<T>,
     ) => Promise<T>
+    /** Queue for optional members of chats this tick makes ready. */
+    background?: BackgroundEnqueue
+    /**
+     * One background add; runs only on a `run` tick where no setup job is
+     * runnable or waiting (on its `retryAt` or a saved hold) and no further
+     * queue page is waiting. Blocked and terminal jobs do not stop it.
+     */
+    drain?: () => Promise<DrainResult>
   },
 ): Promise<{
   dryRun: boolean
   results: WorkerResult[]
   nextAfter: string | null
+  background?: DrainResult
+  /** This page or an earlier one in the pass had requester work. */
+  requesterWork: boolean
 }> {
   if (!options.custodyProfile.trim() || !options.workerId.trim())
     throw new Error("Explicit custody profile and stable worker ID required")
@@ -177,6 +210,9 @@ export async function runWorkerOnce(
     state: "blocked",
     error: row.reason,
   }))
+  // Requester jobs go first: while one is runnable or waiting for this
+  // account, no background add runs. Its flood could hold the requester.
+  let requesterWork = options.requesterWorkSeen ?? false
   for (const selected of page.requests) {
     if (options.signal?.aborted) break
     const setup = await deps.cloud.view(selected.requestId)
@@ -215,6 +251,7 @@ export async function runWorkerOnce(
       })
       continue
     }
+    requesterWork = true
     if (
       setup.retryAt &&
       Date.parse(setup.retryAt) > (options.now ?? Date.now())
@@ -253,6 +290,7 @@ export async function runWorkerOnce(
           cloud: deps.cloud,
           journal: deps.journal,
           workerId: options.workerId,
+          ...(deps.background ? { background: deps.background } : {}),
         }),
       )
       results.push({
@@ -274,7 +312,33 @@ export async function runWorkerOnce(
       })
     }
   }
-  return { dryRun: !options.run, results, nextAfter: page.nextAfter }
+  if (
+    options.run &&
+    deps.drain &&
+    !requesterWork &&
+    page.nextAfter === null &&
+    !options.signal?.aborted
+  ) {
+    let background: DrainResult
+    try {
+      background = await deps.drain()
+    } catch (error) {
+      background = { state: "error", error: safeProvisionError(error) }
+    }
+    return {
+      dryRun: false,
+      results,
+      nextAfter: page.nextAfter,
+      background,
+      requesterWork,
+    }
+  }
+  return {
+    dryRun: !options.run,
+    results,
+    nextAfter: page.nextAfter,
+    requesterWork,
+  }
 }
 
 /**
@@ -379,21 +443,96 @@ export async function runCustodyWorker(options: {
     const holds: HoldStoreSource = options.run
       ? () => processHoldStore()
       : HoldStore.unavailable("preview")
+    // Setups need the queue for their optional members; without state.db
+    // such a setup fails before any Telegram write and retries later.
+    let queue: BackgroundQueue | null = null
+    if (options.run)
+      try {
+        queue = openBackgroundQueue()
+      } catch {
+        queue = null
+      }
+    // Setup adds count toward the account's adds today and the daily cap.
+    const setupTelegram = <T>(
+      setup: Setup,
+      operation: (adapter: TelegramProvisioner) => Promise<T>,
+    ): Promise<T> =>
+      telegram(setup, (adapter) =>
+        operation(queue ? recordingMemberAdds(adapter, queue) : adapter),
+      )
+    const pacing = backgroundPacing()
+    const drain = queue
+      ? () =>
+          drainBackgroundOnce({
+            queue: queue!,
+            holds,
+            accountId: CUSTODY_USER_ID,
+            pacing,
+            telegram: (operation) =>
+              withTelemetryJob("background-add", () =>
+                withProvisionTelegram(
+                  {
+                    custodyProfile: options.custodyProfile,
+                    expectedUserId: CUSTODY_USER_ID,
+                  },
+                  operation,
+                  clientTelemetry,
+                  options.signal,
+                ),
+              ),
+            ...(options.signal ? { signal: options.signal } : {}),
+          })
+      : undefined
+    const reporter = queue
+      ? new CustodyStatusReporter({
+          build: (nowMs) =>
+            buildCustodyStatus({
+              accountId: CUSTODY_USER_ID,
+              workerVersion: packageJson.version,
+              holds: processHoldStore(),
+              queue: queue!,
+              nowMs,
+            }),
+          send: (report) => cloud.custodyStatus(report),
+          log: (level, msg, attrs) => {
+            if (telemetry)
+              recordLog(
+                telemetry.sink,
+                telemetry.context,
+                level,
+                "worker.custody_status",
+                msg,
+                attrs,
+                { accountId: CUSTODY_USER_ID, profile: options.custodyProfile },
+              )
+          },
+        })
+      : null
     let after: string | undefined
+    // Requester work seen on earlier pages of the current cursor walk.
+    let passWork = false
     try {
       do {
         const tickStartedAt = Date.now()
         try {
           const result = await runWorkerOnce(
-            { ...options, workerId, after },
+            {
+              ...options,
+              workerId,
+              after,
+              requesterWorkSeen: after !== undefined && passWork,
+            },
             {
               cloud,
               journal: new FileProvisionJournal(root),
               holds,
-              telegram,
+              telegram: setupTelegram,
+              ...(queue ? { background: backgroundEnqueue(queue) } : {}),
+              ...(drain ? { drain } : {}),
             },
           )
           after = result.nextAfter ?? undefined
+          passWork = result.requesterWork
           const line = { ...result, observedAt: new Date().toISOString() }
           console.log(JSON.stringify(line))
           recordTick({ startedAt: tickStartedAt, result })
@@ -407,6 +546,8 @@ export async function runCustodyWorker(options: {
           }
           console.error(JSON.stringify(line))
         }
+        // Never throws; a failed report waits for the next change or interval.
+        await reporter?.tick()
         if (options.once || options.signal?.aborted) break
         await new Promise<void>((resolve) => {
           const done = () => {
@@ -419,6 +560,7 @@ export async function runCustodyWorker(options: {
         })
       } while (!options.signal?.aborted)
     } finally {
+      queue?.close()
       if (options.run) closeProcessHoldStores()
     }
   }
@@ -441,6 +583,9 @@ export function countStates(results: WorkerResult[]): Record<string, number> {
 /** Idle ticks still write a `worker.tick` row this often, as a heartbeat. */
 export const TICK_HEARTBEAT_MS = 5 * 60 * 1000
 
+/** Background drain states that made no Telegram call. */
+const IDLE_BACKGROUND_STATES = new Set(["idle", "capped", "held"])
+
 /** Job states that mean the tick did no work. */
 const IDLE_STATES = new Set(["waiting", "blocked"])
 
@@ -458,6 +603,8 @@ export function shouldRecordTick(tick: {
 }): boolean {
   if (tick.error !== undefined) return true
   if (tick.result?.results.some((r) => !IDLE_STATES.has(r.state))) return true
+  const background = tick.result?.background?.state
+  if (background && !IDLE_BACKGROUND_STATES.has(background)) return true
   if (tick.lastRecordedMs === null) return true
   return tick.nowMs - tick.lastRecordedMs >= TICK_HEARTBEAT_MS
 }
@@ -492,6 +639,9 @@ export function recordWorkerTick(
             jobs: tick.result.results.length,
             states: countStates(tick.result.results),
             more: tick.result.nextAfter !== null,
+            ...(tick.result.background
+              ? { background: tick.result.background.state }
+              : {}),
           }
         : null,
     })

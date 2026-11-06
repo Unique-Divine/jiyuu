@@ -3,6 +3,12 @@ import { readFile } from "node:fs/promises"
 import { hostname } from "node:os"
 import type { Command } from "commander"
 import {
+  backgroundEnqueue,
+  openBackgroundQueue,
+  recordingMemberAdds,
+} from "./backgroundWorker"
+import type { BackgroundQueue } from "./state/background"
+import {
   creationMarker,
   provisionSetup,
   requestFingerprint,
@@ -85,18 +91,38 @@ export function addProvisionCommands(program: Command): void {
             setup,
             next: "Pass --run to execute this request with its explicit custody profile",
           })
-        print(
-          await withProvisionTelegram(setup, (telegram) =>
-            provisionSetup({
-              setup,
-              telegram,
-              cloud,
-              journal: new FileProvisionJournal(),
-              workerId: `${hostname()}:${process.pid}:${randomUUID()}`,
-            }),
-            cliTelemetry(),
-          ),
-        )
+        // Optional members need the queue; without them it only logs
+        // this run's adds toward the account's adds today, best effort.
+        let queue: BackgroundQueue | null = null
+        if (setup.optionalParticipants?.length) queue = openBackgroundQueue()
+        else
+          try {
+            queue = openBackgroundQueue()
+          } catch {
+            queue = null
+          }
+        try {
+          print(
+            await withProvisionTelegram(setup, (telegram) =>
+              provisionSetup({
+                setup,
+                telegram: queue
+                  ? recordingMemberAdds(telegram, queue)
+                  : telegram,
+                cloud,
+                journal: new FileProvisionJournal(),
+                workerId: `${hostname()}:${process.pid}:${randomUUID()}`,
+                // The worker adds queued optional members later.
+                ...(queue && setup.optionalParticipants?.length
+                  ? { background: backgroundEnqueue(queue) }
+                  : {}),
+              }),
+              cliTelemetry(),
+            ),
+          )
+        } finally {
+          queue?.close()
+        }
       })
   }
   provision

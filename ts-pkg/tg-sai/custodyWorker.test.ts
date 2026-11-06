@@ -95,6 +95,7 @@ test("one-page preview is bounded and invokes no Telegram or claim", async () =>
     dryRun: true,
     results: [{ requestId: "worker-test", state: "prepared" }],
     nextAfter: null,
+    requesterWork: true,
   })
   expect(f.calls).toEqual([`pending:${CUSTODY_USER_ID}:stable:3:old`])
 })
@@ -260,6 +261,7 @@ test("worker.tick rows summarize the page and never throw", () => {
     result: {
       dryRun: false,
       nextAfter: null,
+      requesterWork: true,
       results: [
         { requestId: "a", state: "ready" },
         { requestId: "b", state: "ready" },
@@ -308,7 +310,12 @@ test("an aborted signal starts no new jobs", async () => {
       },
       f,
     ),
-  ).toEqual({ dryRun: false, results: [], nextAfter: null })
+  ).toEqual({
+    dryRun: false,
+    results: [],
+    nextAfter: null,
+    requesterWork: false,
+  })
   expect(f.calls).toEqual([`pending:${CUSTODY_USER_ID}:stable:10:`])
 })
 
@@ -316,6 +323,7 @@ test("shouldRecordTick skips idle polls between heartbeats", () => {
   const tick = (states: string[]) => ({
     dryRun: false,
     nextAfter: null,
+    requesterWork: false,
     results: states.map((state, i) => ({ requestId: `r${i}`, state })),
   })
   const t0 = 1_000_000
@@ -590,4 +598,123 @@ test("a hold store provider is asked on each tick, so it can recover", async () 
     deps,
   )
   expect(f.calls).toContain("telegram")
+})
+test("a runnable or waiting requester job goes ahead of the background drain", async () => {
+  const f = fixture()
+  let drains = 0
+  const drain = async () => {
+    drains++
+    return { state: "added" as const, chatId: -1, userId: 2 }
+  }
+  // The fixture's setup job is runnable: no drain this tick.
+  const busy = await runWorkerOnce(
+    { custodyProfile: "custody", workerId: "stable", run: true },
+    { ...f, drain },
+  )
+  expect(f.calls).toContain("telegram")
+  expect(busy.background).toBeUndefined()
+  expect(drains).toBe(0)
+  // An empty queue page drains one background add.
+  const idle = fixture()
+  idle.cloud.pending = async () => ({ requests: [], nextAfter: null })
+  const result = await runWorkerOnce(
+    { custodyProfile: "custody", workerId: "stable", run: true },
+    { ...idle, drain },
+  )
+  expect(result.background).toEqual({ state: "added", chatId: -1, userId: 2 })
+  expect(drains).toBe(1)
+  // More pages waiting or a preview: still no drain.
+  const more = fixture()
+  more.cloud.pending = async () =>
+    ({ requests: [], nextAfter: "next" }) as never
+  await runWorkerOnce(
+    { custodyProfile: "custody", workerId: "stable", run: true },
+    { ...more, drain },
+  )
+  await runWorkerOnce(
+    { custodyProfile: "custody", workerId: "stable" },
+    { ...idle, drain },
+  )
+  expect(drains).toBe(1)
+  // A job waiting on its retryAt or on any saved hold group blocks the
+  // drain too: a flood from the add would hold the requester.
+  const waiting = fixture()
+  waiting.setup = { ...waiting.setup, retryAt: "2100-01-01T00:00:00Z" }
+  const retrying = await runWorkerOnce(
+    { custodyProfile: "custody", workerId: "stable", run: true },
+    { ...waiting, drain },
+  )
+  expect(retrying.results[0]?.state).toBe("waiting")
+  expect(retrying.background).toBeUndefined()
+  const now = Date.parse("2026-11-06T00:00:00Z")
+  for (const grp of ["create", "resolve", "invite"] as const) {
+    const heldOff = fixture()
+    hold(heldOff.holds, grp, now + 600_000)
+    const result = await runWorkerOnce(
+      { custodyProfile: "custody", workerId: "stable", run: true, now },
+      { ...heldOff, drain },
+    )
+    expect(result.results[0]?.state).toBe("waiting")
+    expect(result.background).toBeUndefined()
+    expect(heldOff.calls).not.toContain("telegram")
+  }
+  expect(drains).toBe(1)
+  // Blocked or terminal jobs do not hold up the drain.
+  const blocked = fixture()
+  blocked.setup = { ...blocked.setup, state: "incomplete" }
+  const ready = fixture()
+  ready.setup = { ...ready.setup, state: "ready" }
+  for (const f2 of [blocked, ready]) {
+    const result = await runWorkerOnce(
+      { custodyProfile: "custody", workerId: "stable", run: true },
+      { ...f2, drain },
+    )
+    expect(result.background?.state).toBe("added")
+  }
+  expect(drains).toBe(3)
+  // A waiting job on an earlier page of the pass blocks the last page too.
+  const lastPage = fixture()
+  lastPage.cloud.pending = async () => ({ requests: [], nextAfter: null })
+  const carried = await runWorkerOnce(
+    {
+      custodyProfile: "custody",
+      workerId: "stable",
+      run: true,
+      after: "page-2",
+      requesterWorkSeen: true,
+    },
+    { ...lastPage, drain },
+  )
+  expect(carried.background).toBeUndefined()
+  expect(carried.requesterWork).toBe(true)
+  expect(drains).toBe(3)
+  expect(retrying.requesterWork).toBe(true)
+  expect(result.requesterWork).toBe(false)
+})
+test("a failing drain is reported in the tick, never thrown", async () => {
+  const f = fixture()
+  f.cloud.pending = async () => ({ requests: [], nextAfter: null })
+  const result = await runWorkerOnce(
+    { custodyProfile: "custody", workerId: "stable", run: true },
+    {
+      ...f,
+      drain: async () => {
+        throw new Error("database is locked: /private/path")
+      },
+    },
+  )
+  expect(result.background).toEqual({
+    state: "error",
+    error: "provisioning_step_failed",
+  })
+  expect(
+    shouldRecordTick({ result, nowMs: 1, lastRecordedMs: 0 }),
+  ).toBe(true)
+  expect(
+    shouldRecordTick({
+      result: { ...result, background: { state: "idle" } },
+      nowMs: 1,
+      lastRecordedMs: 0,
+    }),
+  ).toBe(false)
 })
