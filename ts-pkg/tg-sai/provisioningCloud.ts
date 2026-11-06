@@ -6,6 +6,7 @@ import type {
   Setup,
 } from "./provisioning"
 import { validateRequest } from "./provisioning"
+import type { CustodyStatusReport } from "./custodyStatus"
 
 export type CloudOperation =
   | "prepare"
@@ -15,6 +16,7 @@ export type CloudOperation =
   | "claim"
   | "progress"
   | "resolve"
+  | "custody-status"
 export type CloudCall = (
   operation: CloudOperation,
   input: Record<string, unknown>,
@@ -159,6 +161,10 @@ export class CliProvisionCloud implements ProvisionCloud {
       }),
     )
   }
+  /** Sends one custody status report; resolves to Deal Desk's reply. */
+  async custodyStatus(report: CustodyStatusReport): Promise<unknown> {
+    return this.call("custody-status", { ...report })
+  }
   async resolve(
     requestId: string,
     chatId: number,
@@ -168,6 +174,36 @@ export class CliProvisionCloud implements ProvisionCloud {
       await this.call("resolve", { requestId, chatId: String(chatId), reason }),
     )
   }
+}
+
+/** Code of `UnknownCloudOperationError`. */
+export const UNKNOWN_CLOUD_OPERATION = "UNKNOWN_CLOUD_OPERATION"
+
+/**
+ * Deal Desk does not know the operation yet (older CLI or server), as
+ * opposed to refusing its input. Carries no CLI output.
+ */
+export class UnknownCloudOperationError extends Error {
+  readonly code = UNKNOWN_CLOUD_OPERATION
+  constructor(readonly operation: CloudOperation) {
+    super(`Deal Desk does not support chat-setups ${operation} yet`)
+    this.name = "UnknownCloudOperationError"
+  }
+}
+
+/**
+ * Whether Deal Desk's stderr says it does not know `operation`: clap's
+ * `invalid value '<op>' for '<ACTION>'` or `unrecognized subcommand`, or a
+ * GraphQL server without the field.
+ */
+export function isUnknownOperationOutput(
+  operation: CloudOperation,
+  stderr: string,
+): boolean {
+  return (
+    stderr.includes(`invalid value '${operation}'`) ||
+    /unrecognized subcommand|unknown field|cannot query field/i.test(stderr)
+  )
 }
 
 export function dealDeskRequestKey(
@@ -197,11 +233,13 @@ export async function callDealDesk(
   })
   child.stdin.write(JSON.stringify(input))
   child.stdin.end()
-  const [stdout, , exit] = await Promise.all([
+  const [stdout, stderr, exit] = await Promise.all([
     new Response(child.stdout).text(),
     new Response(child.stderr).text(),
     child.exited,
   ])
+  if (exit !== 0 && isUnknownOperationOutput(operation, stderr))
+    throw new UnknownCloudOperationError(operation)
   if (exit !== 0)
     throw new Error(
       `Deal Desk chat-setups ${operation} failed; inspect its operator status separately`,

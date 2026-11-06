@@ -276,7 +276,7 @@ export class FileProvisionJournal implements ProvisionJournal {
  * `stopSignal`, which ends in-flight calls and flood-wait sleeps.
  */
 export async function withProvisionTelegram<T>(
-  request: ProvisionRequest,
+  request: Pick<ProvisionRequest, "custodyProfile" | "expectedUserId">,
   operation: (telegram: TelegramProvisioner) => Promise<T>,
   telemetry?: ClientTelemetry,
   signal?: AbortSignal,

@@ -1,7 +1,18 @@
 import { randomUUID } from "node:crypto"
 import { mkdir, open, readFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
-import { backgroundEnqueue, openBackgroundQueue } from "./backgroundWorker"
+import {
+  backgroundEnqueue,
+  drainBackgroundOnce,
+  openBackgroundQueue,
+} from "./backgroundWorker"
+import type { DrainResult } from "./backgroundWorker"
+import {
+  buildCustodyStatus,
+  CustodyStatusReporter,
+} from "./custodyStatus"
+// Static import so `bun build --compile` embeds the version.
+import packageJson from "./package.json" with { type: "json" }
 import { configDir } from "./profiles"
 import {
   closeProcessHoldStores,
@@ -27,12 +38,14 @@ import {
   withAccountLock,
   withProvisionTelegram,
 } from "./provisioningRuntime"
+import { backgroundPacing } from "./state/background"
 import type { BackgroundQueue } from "./state/background"
 import type { HoldStoreSource } from "./state/guard"
 import { HoldStore, remainingSeconds } from "./state/holds"
 import type { HoldGroup } from "./state/holds"
 import { WORKER_TICK_EVENT } from "./telemetry/db"
 import { withTelemetryJob } from "./telemetry/middleware"
+import { recordLog } from "./telemetry/run"
 import type { TelemetryRun } from "./telemetry/run"
 
 export const CUSTODY_USER_ID = 8274304175
@@ -153,11 +166,17 @@ export async function runWorkerOnce(
     ) => Promise<T>
     /** Queue for optional members of chats this tick makes ready. */
     background?: BackgroundEnqueue
+    /**
+     * One background add; runs only on a `run` tick where no setup job
+     * reached Telegram and no further queue page is waiting.
+     */
+    drain?: () => Promise<DrainResult>
   },
 ): Promise<{
   dryRun: boolean
   results: WorkerResult[]
   nextAfter: string | null
+  background?: DrainResult
 }> {
   if (!options.custodyProfile.trim() || !options.workerId.trim())
     throw new Error("Explicit custody profile and stable worker ID required")
@@ -182,6 +201,8 @@ export async function runWorkerOnce(
     state: "blocked",
     error: row.reason,
   }))
+  // Requester jobs go first: a tick that runs one makes no background add.
+  let ranJob = false
   for (const selected of page.requests) {
     if (options.signal?.aborted) break
     const setup = await deps.cloud.view(selected.requestId)
@@ -250,6 +271,7 @@ export async function runWorkerOnce(
       results.push(await reportHold(deps.cloud, setup, hold, nowMs))
       continue
     }
+    ranJob = true
     try {
       const result = await deps.telegram(setup, (telegram) =>
         provisionSetup({
@@ -279,6 +301,21 @@ export async function runWorkerOnce(
         error: safeProvisionError(error),
       })
     }
+  }
+  if (
+    options.run &&
+    deps.drain &&
+    !ranJob &&
+    page.nextAfter === null &&
+    !options.signal?.aborted
+  ) {
+    let background: DrainResult
+    try {
+      background = await deps.drain()
+    } catch (error) {
+      background = { state: "error", error: safeProvisionError(error) }
+    }
+    return { dryRun: false, results, nextAfter: page.nextAfter, background }
   }
   return { dryRun: !options.run, results, nextAfter: page.nextAfter }
 }
@@ -394,6 +431,53 @@ export async function runCustodyWorker(options: {
       } catch {
         queue = null
       }
+    const pacing = backgroundPacing()
+    const drain = queue
+      ? () =>
+          drainBackgroundOnce({
+            queue: queue!,
+            holds,
+            accountId: CUSTODY_USER_ID,
+            pacing,
+            telegram: (operation) =>
+              withTelemetryJob("background-add", () =>
+                withProvisionTelegram(
+                  {
+                    custodyProfile: options.custodyProfile,
+                    expectedUserId: CUSTODY_USER_ID,
+                  },
+                  operation,
+                  clientTelemetry,
+                  options.signal,
+                ),
+              ),
+          })
+      : undefined
+    const reporter = queue
+      ? new CustodyStatusReporter({
+          build: (nowMs) =>
+            buildCustodyStatus({
+              accountId: CUSTODY_USER_ID,
+              workerVersion: packageJson.version,
+              holds: processHoldStore(),
+              queue: queue!,
+              nowMs,
+            }),
+          send: (report) => cloud.custodyStatus(report),
+          log: (level, msg, attrs) => {
+            if (telemetry)
+              recordLog(
+                telemetry.sink,
+                telemetry.context,
+                level,
+                "worker.custody_status",
+                msg,
+                attrs,
+                { accountId: CUSTODY_USER_ID, profile: options.custodyProfile },
+              )
+          },
+        })
+      : null
     let after: string | undefined
     try {
       do {
@@ -407,6 +491,7 @@ export async function runCustodyWorker(options: {
               holds,
               telegram,
               ...(queue ? { background: backgroundEnqueue(queue) } : {}),
+              ...(drain ? { drain } : {}),
             },
           )
           after = result.nextAfter ?? undefined
@@ -423,6 +508,8 @@ export async function runCustodyWorker(options: {
           }
           console.error(JSON.stringify(line))
         }
+        // Never throws; a failed report waits for the next change or interval.
+        await reporter?.tick()
         if (options.once || options.signal?.aborted) break
         await new Promise<void>((resolve) => {
           const done = () => {
@@ -458,6 +545,9 @@ export function countStates(results: WorkerResult[]): Record<string, number> {
 /** Idle ticks still write a `worker.tick` row this often, as a heartbeat. */
 export const TICK_HEARTBEAT_MS = 5 * 60 * 1000
 
+/** Background drain states that made no Telegram call. */
+const IDLE_BACKGROUND_STATES = new Set(["idle", "capped", "held"])
+
 /** Job states that mean the tick did no work. */
 const IDLE_STATES = new Set(["waiting", "blocked"])
 
@@ -475,6 +565,8 @@ export function shouldRecordTick(tick: {
 }): boolean {
   if (tick.error !== undefined) return true
   if (tick.result?.results.some((r) => !IDLE_STATES.has(r.state))) return true
+  const background = tick.result?.background?.state
+  if (background && !IDLE_BACKGROUND_STATES.has(background)) return true
   if (tick.lastRecordedMs === null) return true
   return tick.nowMs - tick.lastRecordedMs >= TICK_HEARTBEAT_MS
 }
@@ -509,6 +601,9 @@ export function recordWorkerTick(
             jobs: tick.result.results.length,
             states: countStates(tick.result.results),
             more: tick.result.nextAfter !== null,
+            ...(tick.result.background
+              ? { background: tick.result.background.state }
+              : {}),
           }
         : null,
     })

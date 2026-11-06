@@ -56,6 +56,7 @@ export interface DrainResult {
     | "invited"
     | "failed"
     | "deferred"
+    | "error"
   chatId?: number
   userId?: number
   error?: string

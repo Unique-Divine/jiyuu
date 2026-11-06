@@ -591,3 +591,77 @@ test("a hold store provider is asked on each tick, so it can recover", async () 
   )
   expect(f.calls).toContain("telegram")
 })
+test("a runnable requester job goes ahead of the background drain", async () => {
+  const f = fixture()
+  let drains = 0
+  const drain = async () => {
+    drains++
+    return { state: "added" as const, chatId: -1, userId: 2 }
+  }
+  // The fixture's setup job is runnable: no drain this tick.
+  const busy = await runWorkerOnce(
+    { custodyProfile: "custody", workerId: "stable", run: true },
+    { ...f, drain },
+  )
+  expect(f.calls).toContain("telegram")
+  expect(busy.background).toBeUndefined()
+  expect(drains).toBe(0)
+  // An empty queue page drains one background add.
+  const idle = fixture()
+  idle.cloud.pending = async () => ({ requests: [], nextAfter: null })
+  const result = await runWorkerOnce(
+    { custodyProfile: "custody", workerId: "stable", run: true },
+    { ...idle, drain },
+  )
+  expect(result.background).toEqual({ state: "added", chatId: -1, userId: 2 })
+  expect(drains).toBe(1)
+  // More pages waiting, a preview, or a job held off: still no drain for
+  // the first two; a waiting job is not runnable.
+  const more = fixture()
+  more.cloud.pending = async () =>
+    ({ requests: [], nextAfter: "next" }) as never
+  await runWorkerOnce(
+    { custodyProfile: "custody", workerId: "stable", run: true },
+    { ...more, drain },
+  )
+  await runWorkerOnce(
+    { custodyProfile: "custody", workerId: "stable" },
+    { ...idle, drain },
+  )
+  expect(drains).toBe(1)
+  const waiting = fixture()
+  waiting.setup = { ...waiting.setup, retryAt: "2100-01-01T00:00:00Z" }
+  const held = await runWorkerOnce(
+    { custodyProfile: "custody", workerId: "stable", run: true },
+    { ...waiting, drain },
+  )
+  expect(held.results[0]?.state).toBe("waiting")
+  expect(drains).toBe(2)
+})
+test("a failing drain is reported in the tick, never thrown", async () => {
+  const f = fixture()
+  f.cloud.pending = async () => ({ requests: [], nextAfter: null })
+  const result = await runWorkerOnce(
+    { custodyProfile: "custody", workerId: "stable", run: true },
+    {
+      ...f,
+      drain: async () => {
+        throw new Error("database is locked: /private/path")
+      },
+    },
+  )
+  expect(result.background).toEqual({
+    state: "error",
+    error: "provisioning_step_failed",
+  })
+  expect(
+    shouldRecordTick({ result, nowMs: 1, lastRecordedMs: 0 }),
+  ).toBe(true)
+  expect(
+    shouldRecordTick({
+      result: { ...result, background: { state: "idle" } },
+      nowMs: 1,
+      lastRecordedMs: 0,
+    }),
+  ).toBe(false)
+})
