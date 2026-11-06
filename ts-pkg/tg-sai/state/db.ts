@@ -12,6 +12,9 @@ import {
 import floodHoldMigrationSql from "./migrations/0001-flood-hold.sql" with {
   type: "text",
 }
+import backgroundAddMigrationSql from "./migrations/0002-background-add.sql" with {
+  type: "text",
+}
 
 export const STATE_DB_FILE = "state.db"
 export const STATE_DIR_MODE = 0o700
@@ -23,6 +26,7 @@ export const STATE_FILE_MODE = 0o600
  */
 export const STATE_MIGRATIONS: readonly Migration[] = [
   { filename: "0001-flood-hold.sql", sql: floodHoldMigrationSql },
+  { filename: "0002-background-add.sql", sql: backgroundAddMigrationSql },
 ]
 
 export function stateDbPath(env: ProfileStoreEnv = process.env): string {
