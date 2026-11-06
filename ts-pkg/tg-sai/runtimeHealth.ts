@@ -7,6 +7,8 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { configDir, strictProfileCredentials } from "./profiles"
 import { accountPaths, withAccountLock } from "./provisioningRuntime"
+import { withTelemetryIdentity } from "./telemetry/middleware"
+import type { ClientTelemetry } from "./telemetry/middleware"
 
 export const HEALTH_CUSTODY_USER_ID = 8274304175
 export interface RuntimeHealthCheck {
@@ -24,6 +26,8 @@ export interface RuntimeHealthOptions {
   online?: boolean
   custodyProfile?: string
   timeoutMs?: number
+  /** Records the online getMe; identity is filled in for the custody user. */
+  telemetry?: ClientTelemetry
 }
 
 async function bounded<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
@@ -104,7 +108,9 @@ export async function checkTelegramRuntimeHealth(
     const paths = accountPaths(configDir(), HEALTH_CUSTODY_USER_ID)
     await withAccountLock(paths.lock, async () => {
       const client = await createMtcuteClient({ apiId: credentials.apiId,
-        apiHash: credentials.apiHash, session: credentials.sessionString, storage: paths.storage })
+        apiHash: credentials.apiHash, session: credentials.sessionString, storage: paths.storage },
+        withTelemetryIdentity(options.telemetry, {
+          accountId: HEALTH_CUSTODY_USER_ID, profile: options.custodyProfile }))
       try {
         const me = await bounded(client.getMe(), timeoutMs)
         if (me.id !== HEALTH_CUSTODY_USER_ID || me.isBot)

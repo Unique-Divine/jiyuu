@@ -1,5 +1,6 @@
 import type { Command } from "commander"
 import { checkTelegramRuntimeHealth } from "./runtimeHealth"
+import { activeTelemetryRun } from "./telemetry/run"
 
 export function addRuntimeHealthCommands(program: Command, legacyLocal?: () => Promise<void>): void {
   const health = program.command("health")
@@ -33,7 +34,8 @@ Online mode checks the custody account only and refuses personal-profile fallbac
     if (options.custodyProfile && !options.online)
       throw new Error("--custody-profile requires explicit --online")
     const result = await checkTelegramRuntimeHealth({ online: options.online,
-      custodyProfile: options.custodyProfile, timeoutMs: Number(options.timeoutMs) })
+      custodyProfile: options.custodyProfile, timeoutMs: Number(options.timeoutMs),
+      telemetry: activeTelemetryRun()?.client() })
     if (options.json) console.log(JSON.stringify(result))
     else {
       console.log(`mode: ${result.mode}`)

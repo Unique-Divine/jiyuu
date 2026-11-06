@@ -15,6 +15,8 @@ import {
   withAccountLock,
   withProvisionTelegram,
 } from "./provisioningRuntime"
+import { withTelemetryJob } from "./telemetry/middleware"
+import type { TelemetryRun } from "./telemetry/run"
 
 export const CUSTODY_USER_ID = 8274304175
 export const REQUIRED_UNIQUE_ADMIN_ID = 1912700300
@@ -202,6 +204,8 @@ export async function runCustodyWorker(options: {
   limit?: number
   intervalMs?: number
   signal?: AbortSignal
+  /** Process run: worker.tick rows, per-job telemetry, and the run log. */
+  telemetry?: Pick<TelemetryRun, "sink" | "context" | "client" | "appendJsonl">
 }): Promise<void> {
   const interval = options.intervalMs ?? 5000
   if (!Number.isSafeInteger(interval) || interval < 1000 || interval > 60000)
@@ -212,32 +216,60 @@ export async function runCustodyWorker(options: {
     )
   const root = configDir()
   const workerId = await stableWorkerId(root)
+  const telemetry = options.telemetry
+  const clientTelemetry = telemetry?.client({
+    accountId: CUSTODY_USER_ID,
+    profile: options.custodyProfile,
+  })
+  // Each job's Telegram calls carry its setup ID as job_id.
+  const telegram = <T>(
+    setup: Setup,
+    operation: (adapter: TelegramProvisioner) => Promise<T>,
+  ): Promise<T> =>
+    withTelemetryJob(setup.requestId, () =>
+      withProvisionTelegram(setup, operation, clientTelemetry),
+    )
   const execute = async () => {
     const cloud = new CliProvisionCloud()
     let after: string | undefined
     do {
+      const tickStartedAt = Date.now()
       try {
         const result = await runWorkerOnce(
           { ...options, workerId, after },
           {
             cloud,
             journal: new FileProvisionJournal(root),
-            telegram: withProvisionTelegram,
+            telegram,
           },
         )
         after = result.nextAfter ?? undefined
-        console.log(
-          JSON.stringify({ ...result, observedAt: new Date().toISOString() }),
-        )
+        const line = { ...result, observedAt: new Date().toISOString() }
+        console.log(JSON.stringify(line))
+        if (telemetry) {
+          recordWorkerTick(telemetry, {
+            startedAt: tickStartedAt,
+            custodyProfile: options.custodyProfile,
+            result,
+          })
+          telemetry.appendJsonl({ type: "worker_tick", ...line })
+        }
       } catch (error) {
+        if (telemetry) {
+          recordWorkerTick(telemetry, {
+            startedAt: tickStartedAt,
+            custodyProfile: options.custodyProfile,
+            error,
+          })
+        }
         if (options.once) throw error
-        console.error(
-          JSON.stringify({
-            state: "worker_tick_failed",
-            observedAt: new Date().toISOString(),
-            retryInMs: interval,
-          }),
-        )
+        const line = {
+          state: "worker_tick_failed",
+          observedAt: new Date().toISOString(),
+          retryInMs: interval,
+        }
+        console.error(JSON.stringify(line))
+        telemetry?.appendJsonl({ type: "worker_tick_failed", ...line })
       }
       if (options.once || options.signal?.aborted) break
       await new Promise<void>((resolve) => {
@@ -256,4 +288,51 @@ export async function runCustodyWorker(options: {
     join(root, "provisioning", "worker-service.lock"),
     execute,
   )
+}
+
+/** Counts results per state, e.g. `{ ready: 2, waiting: 1 }`. */
+export function countStates(results: WorkerResult[]): Record<string, number> {
+  const counts: Record<string, number> = {}
+  for (const result of results) {
+    counts[result.state] = (counts[result.state] ?? 0) + 1
+  }
+  return counts
+}
+
+/** Writes one `worker.tick` row; never throws. */
+export function recordWorkerTick(
+  telemetry: Pick<TelemetryRun, "sink" | "context">,
+  tick: {
+    startedAt: number
+    custodyProfile: string
+    result?: Awaited<ReturnType<typeof runWorkerOnce>>
+    error?: unknown
+  },
+): void {
+  try {
+    const { context } = telemetry
+    telemetry.sink.record({
+      runId: context.runId,
+      subsystem: context.subsystem,
+      command: context.command,
+      version: context.version,
+      accountId: CUSTODY_USER_ID,
+      profile: tick.custodyProfile,
+      event: "worker.tick",
+      outcome: tick.error === undefined ? "ok" : "error",
+      durationMs: Date.now() - tick.startedAt,
+      err:
+        tick.error === undefined ? null : safeProvisionError(tick.error),
+      res: tick.result
+        ? {
+            dryRun: tick.result.dryRun,
+            jobs: tick.result.results.length,
+            states: countStates(tick.result.results),
+            more: tick.result.nextAfter !== null,
+          }
+        : null,
+    })
+  } catch {
+    // Telemetry never stops the worker.
+  }
 }

@@ -3,7 +3,13 @@ import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Command } from "commander"
-import { CUSTODY_USER_ID, runWorkerOnce, stableWorkerId } from "./custodyWorker"
+import {
+  CUSTODY_USER_ID,
+  recordWorkerTick,
+  runWorkerOnce,
+  stableWorkerId,
+} from "./custodyWorker"
+import type { TelemetryEvent } from "./telemetry/db"
 import { addCustodyWorkerCommands } from "./custodyWorkerCli"
 import type { Progress, Setup, TelegramProvisioner } from "./provisioning"
 import { CliProvisionCloud } from "./provisioningCloud"
@@ -216,4 +222,61 @@ test("worker surfaces revoked or missing-config job blocks without claims", asyn
     { requestId: "revoked", state: "blocked", error: "operator_revoked" },
   ])
   expect(f.calls).toEqual([])
+})
+
+test("worker.tick rows summarize the page and never throw", () => {
+  const events: TelemetryEvent[] = []
+  const telemetry = {
+    context: {
+      runId: "run-w",
+      subsystem: "worker" as const,
+      command: "worker",
+      version: "0.0.0-test",
+    },
+    sink: {
+      record: (event: TelemetryEvent) => {
+        events.push(event)
+      },
+      dropped: () => 0,
+      close: () => {},
+    },
+  }
+  recordWorkerTick(telemetry, {
+    startedAt: Date.now(),
+    custodyProfile: "custody",
+    result: {
+      dryRun: false,
+      nextAfter: null,
+      results: [
+        { requestId: "a", state: "ready" },
+        { requestId: "b", state: "ready" },
+        { requestId: "c", state: "waiting" },
+      ],
+    },
+  })
+  recordWorkerTick(telemetry, {
+    startedAt: Date.now(),
+    custodyProfile: "custody",
+    error: { text: "FLOOD_WAIT_120" },
+  })
+  expect(events).toMatchObject([
+    {
+      event: "worker.tick",
+      runId: "run-w",
+      accountId: CUSTODY_USER_ID,
+      outcome: "ok",
+      res: { jobs: 3, states: { ready: 2, waiting: 1 }, more: false },
+    },
+    { event: "worker.tick", outcome: "error", err: "FLOOD_WAIT_120" },
+  ])
+  const throwing = {
+    ...telemetry,
+    sink: { ...telemetry.sink, record: () => { throw new Error("x") } },
+  }
+  expect(() =>
+    recordWorkerTick(throwing, {
+      startedAt: 0,
+      custodyProfile: "custody",
+    }),
+  ).not.toThrow()
 })

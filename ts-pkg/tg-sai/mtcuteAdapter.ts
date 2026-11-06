@@ -1,4 +1,5 @@
-import { TelegramClient } from "@mtcute/bun"
+import { networkMiddlewares, TelegramClient } from "@mtcute/bun"
+import type { FloodWaiterOptions, RpcCallMiddleware } from "@mtcute/bun"
 import { createTelegramCryptoProvider } from "./telegramRuntime"
 import {
   addChatMembers,
@@ -11,6 +12,8 @@ import { convertFromTelethonSession } from "@mtcute/convert"
 import type { ChatAuditInput, ChatMemberData, UserData } from "./adminAudit"
 import type { SaiChatRecord } from "./ops"
 import { isSaiChatTitle } from "./ops"
+import { createTelemetryMiddlewares } from "./telemetry/middleware"
+import type { ClientTelemetry } from "./telemetry/middleware"
 
 /**
  * Connection settings used to create a mtcute Telegram client.
@@ -24,6 +27,11 @@ export interface MtcuteClientConfig {
   session: string
   /** Optional local mtcute storage path. */
   storage?: string
+  /**
+   * Flood-wait settings for mtcute's flood waiter, the only flood retry
+   * layer. Ignored when `telemetry.floodWaiter` is set.
+   */
+  floodWaiter?: FloodWaiterOptions
 }
 
 /**
@@ -90,15 +98,42 @@ function isPeerNotFound(error: unknown): boolean {
   )
 }
 
-/** Shared constructor used by offline readiness and authenticated operations. */
+/**
+ * Network middlewares for a client, or `undefined` to keep mtcute's
+ * defaults. Passing middlewares replaces mtcute's defaults, so both branches
+ * include `networkMiddlewares.basic()` (flood waiter and 5xx retry).
+ */
+export function clientMiddlewares(
+  floodWaiter: FloodWaiterOptions | undefined,
+  telemetry: ClientTelemetry | undefined,
+): RpcCallMiddleware[] | undefined {
+  if (telemetry) {
+    return createTelemetryMiddlewares(
+      telemetry.sink,
+      telemetry.context,
+      telemetry.floodWaiter ?? floodWaiter,
+    )
+  }
+  if (floodWaiter) return networkMiddlewares.basic({ floodWaiter })
+  return undefined
+}
+
+/**
+ * Shared constructor used by offline readiness and authenticated operations.
+ * With `telemetry`, every RPC call, wire attempt, and flood wait is recorded;
+ * without it (and without `floodWaiter`) the client uses mtcute defaults.
+ */
 export function createMtcuteRuntimeClient(
   config: Omit<MtcuteClientConfig, "session">,
+  telemetry?: ClientTelemetry,
 ): TelegramClient {
+  const middlewares = clientMiddlewares(config.floodWaiter, telemetry)
   return new TelegramClient({
     crypto: createTelegramCryptoProvider(),
     apiId: config.apiId,
     apiHash: config.apiHash,
     storage: config.storage ?? "sai-telegram-admin-check.session",
+    ...(middlewares ? { network: { middlewares } } : {}),
   })
 }
 
@@ -107,8 +142,9 @@ export function createMtcuteRuntimeClient(
  */
 export async function createMtcuteClient(
   config: MtcuteClientConfig,
+  telemetry?: ClientTelemetry,
 ): Promise<TelegramClient> {
-  const client = createMtcuteRuntimeClient(config)
+  const client = createMtcuteRuntimeClient(config, telemetry)
 
   await client.importSession(convertFromTelethonSession(config.session), true)
   return client

@@ -14,6 +14,8 @@ import { saiBot } from "./cfg"
 import { createMtcuteClient, promoteTargetAdmin } from "./mtcuteAdapter"
 import { configDir, strictProfileCredentials } from "./profiles"
 import { PROVISIONING_BOT_ID } from "./provisioning"
+import { withTelemetryIdentity } from "./telemetry/middleware"
+import type { ClientTelemetry } from "./telemetry/middleware"
 import type {
   JournalRecord,
   Member,
@@ -256,6 +258,7 @@ export class FileProvisionJournal implements ProvisionJournal {
 export async function withProvisionTelegram<T>(
   request: ProvisionRequest,
   operation: (telegram: TelegramProvisioner) => Promise<T>,
+  telemetry?: ClientTelemetry,
 ): Promise<T> {
   const credentials = await strictProfileCredentials(
     request.custodyProfile,
@@ -268,7 +271,10 @@ export async function withProvisionTelegram<T>(
       apiHash: credentials.apiHash,
       session: credentials.sessionString,
       storage: paths.storage,
-    })
+    }, withTelemetryIdentity(telemetry, {
+      accountId: request.expectedUserId,
+      profile: request.custodyProfile,
+    }))
     try {
       if ((await client.getMe()).id !== request.expectedUserId)
         throw new Error("Custody account identity mismatch")

@@ -14,6 +14,12 @@ import {
   FileProvisionJournal,
   withProvisionTelegram,
 } from "./provisioningRuntime"
+import { activeTelemetryRun } from "./telemetry/run"
+
+/** Telegram telemetry for this CLI run, if the entry point started one. */
+function cliTelemetry() {
+  return activeTelemetryRun()?.client()
+}
 
 function print(value: unknown): void {
   console.log(
@@ -88,6 +94,7 @@ export function addProvisionCommands(program: Command): void {
               journal: new FileProvisionJournal(),
               workerId: `${hostname()}:${process.pid}:${randomUUID()}`,
             }),
+            cliTelemetry(),
           ),
         )
       })
@@ -133,7 +140,7 @@ export function addProvisionCommands(program: Command): void {
                 "Resolution chat does not match custody owner and request marker",
               )
             return cloud.resolve(setup.requestId, options.chat, options.reason)
-          }),
+          }, cliTelemetry()),
         )
       },
     )

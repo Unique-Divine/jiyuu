@@ -1,6 +1,6 @@
 {
   "name": "@uniquedivine/tg-sai",
-  "version": "0.0.5",
+  "version": "0.0.6",
   "type": "module",
   "private": false,
   "description": "Sai Telegram admin audit and bootstrap CLI",
@@ -8,7 +8,7 @@
     "bun": ">=1.0.0"
   },
   "bin": {
-    "tg-sai": "./main.ts"
+    "tg-sai": "main.ts"
   },
   "scripts": {
     "start": "bun main.ts",
@@ -21,6 +21,10 @@
     "!*.test.ts",
     "!adminCheck.ts",
     "!testdata.ts",
+    "telemetry/*.ts",
+    "!telemetry/*.test.ts",
+    "!telemetry/testEvents.ts",
+    "telemetry/migrations/*.sql",
     "*.py",
     "!*_test.py",
     "pyproject.toml",

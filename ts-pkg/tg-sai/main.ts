@@ -17,7 +17,7 @@ import { Command } from "commander"
 import { addProvisionCommands } from "./provisioningCli"
 import { addCustodyWorkerCommands } from "./custodyWorkerCli"
 import type { BatchLogger } from "./actionExecutor"
-import { withFloodWaitRetry } from "./actionExecutor"
+import { runTelegramAction } from "./actionExecutor"
 import type {
   ChatAuditInput,
   ChatMemberData,
@@ -27,6 +27,9 @@ import { planAdminBootstrap } from "./adminAudit"
 import { saiBot, USERS } from "./cfg"
 import { runHealthCheck } from "./health"
 import { addRuntimeHealthCommands } from "./runtimeHealthCli"
+import { registerEventsCommand } from "./telemetry/cli"
+import type { TelemetrySubsystem } from "./telemetry/db"
+import { activeTelemetryRun, startTelemetryRun } from "./telemetry/run"
 import {
   addTargetToChat,
   createMtcuteClient,
@@ -36,7 +39,11 @@ import {
   promoteTargetAdmin,
   transferTargetOwnership,
 } from "./mtcuteAdapter"
-import { formatSaiChatJsonLine, parseChatInputFile } from "./ops"
+import {
+  formatSaiChatJsonLine,
+  parseChatInputFile,
+  resolveBootstrapTarget,
+} from "./ops"
 import type { ChatInput } from "./ops"
 import {
   addProfile,
@@ -112,13 +119,20 @@ interface SaiBootstrapOptions {
   run?: boolean
   /** Attempt ownership transfer when the Telegram password is available. */
   transferOwner?: boolean
+  /** Owner target: user ID or username. Defaults to the Sai custody account. */
+  targetUser?: number | string
 }
+
 
 interface TelegramEnv {
   apiId: number
   apiHash: string
   session: string
   password: string | null
+  /** Saved account user ID, when the profile records one. */
+  userId: number | null
+  /** Selected profile label, for telemetry. */
+  profileName: string | null
 }
 
 interface ProfileAddOptions {
@@ -181,13 +195,17 @@ const DEFAULT_INTER_CHAT_DELAY_MS = 1000
 let activeJsonLogPath: string | null = null
 
 /**
- * Emits one structured JSON object to stdout and the active JSONL log, if set.
+ * Emits one structured JSON object to stdout and the run's JSONL log. The
+ * log copy also carries `run_id` so it lines up with telemetry rows.
  */
 function emitJsonObject(fields: Record<string, unknown>): void {
-  const line = JSON.stringify({ ts: new Date().toISOString(), ...fields })
-  console.log(line)
-  if (activeJsonLogPath) {
-    appendFileSync(activeJsonLogPath, `${line}\n`, "utf8")
+  const object = { ts: new Date().toISOString(), ...fields }
+  console.log(JSON.stringify(object))
+  const run = activeTelemetryRun()
+  if (run?.jsonlPath && run.jsonlPath === activeJsonLogPath) {
+    run.appendJsonl(object)
+  } else if (activeJsonLogPath) {
+    appendFileSync(activeJsonLogPath, `${JSON.stringify(object)}\n`, "utf8")
   }
 }
 
@@ -211,15 +229,13 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
- * Builds the default retry dependencies for live Telegram actions.
+ * Progress-logging dependencies for live Telegram actions. Flood waits are
+ * handled by mtcute's flood waiter, not here.
  */
 function actionExecutorDeps(logger: BatchLogger = consoleBatchLogger) {
   return {
     logger,
-    sleep,
     now: () => Date.now(),
-    maxRetries: 3,
-    bufferMs: 2000,
   }
 }
 
@@ -289,7 +305,17 @@ async function getTelegramEnv(profileName?: string): Promise<TelegramEnv> {
     apiHash: credentials.apiHash,
     session: credentials.sessionString,
     password: process.env.TELEGRAM_PASSWORD ?? profile?.password ?? null,
+    userId: profile?.userId ?? null,
+    profileName: profile?.handle ?? profile?.name ?? profileName ?? null,
   }
+}
+
+/** Telegram telemetry for the current CLI run, if one was started. */
+function cliTelemetry(identity: {
+  accountId?: number | null
+  profile?: string | null
+} = {}) {
+  return activeTelemetryRun()?.client(identity)
 }
 
 async function selectedProfileName(
@@ -366,11 +392,14 @@ async function withClient<T>(
   ) => Promise<T>,
 ): Promise<T> {
   const env = await getTelegramEnv(profileName)
-  const client = await createMtcuteClient({
-    apiId: env.apiId,
-    apiHash: env.apiHash,
-    session: env.session,
-  })
+  const client = await createMtcuteClient(
+    {
+      apiId: env.apiId,
+      apiHash: env.apiHash,
+      session: env.session,
+    },
+    cliTelemetry({ accountId: env.userId, profile: env.profileName }),
+  )
 
   try {
     return await fn(client, env)
@@ -392,11 +421,14 @@ async function runAudit(options: BaseCliOptions): Promise<void> {
 async function runHealth(): Promise<void> {
   const result = await runHealthCheck({
     createClient: async (credentials) =>
-      createMtcuteClient({
-        apiId: credentials.apiId,
-        apiHash: credentials.apiHash,
-        session: credentials.sessionString,
-      }),
+      createMtcuteClient(
+        {
+          apiId: credentials.apiId,
+          apiHash: credentials.apiHash,
+          session: credentials.sessionString,
+        },
+        cliTelemetry(),
+      ),
   })
   for (const line of result.lines) {
     console.log(line)
@@ -652,7 +684,7 @@ async function applyTargetPlan(params: {
 
   const deps = actionExecutorDeps(actorBatchLogger(params.actorUsername))
   if (shouldRunAction(beforePlan.proposedActions, "add target user")) {
-    await withFloodWaitRetry(
+    await runTelegramAction(
       {
         chatId: params.chat.chatId,
         action: `${params.actionPrefix}_add`,
@@ -669,7 +701,7 @@ async function applyTargetPlan(params: {
   if (
     shouldRunAction(beforePlan.proposedActions, "promote target user admin")
   ) {
-    await withFloodWaitRetry(
+    await runTelegramAction(
       {
         chatId: params.chat.chatId,
         action: `${params.actionPrefix}_promote_admin`,
@@ -744,7 +776,7 @@ async function maybeTransferOwner(params: {
     return
   }
 
-  await withFloodWaitRetry(
+  await runTelegramAction(
     {
       chatId: params.chat.chatId,
       action: "transfer_owner",
@@ -773,17 +805,22 @@ async function runSaiBootstrap(options: SaiBootstrapOptions): Promise<void> {
   if (!Number.isFinite(delayMs) || delayMs < 0) {
     throw new Error("--delay-ms must be a non-negative number")
   }
-  const logPath = await nextJsonlLogPath("sai-bootstrap")
-  await writeFile(logPath, "", {
-    encoding: "utf8",
-    mode: 0o600,
-  })
+  // The run log (sai-bootstrap-NN.jsonl) already holds run.start; reuse it.
+  const runLogPath = activeTelemetryRun()?.jsonlPath ?? null
+  const logPath = runLogPath ?? (await nextJsonlLogPath("sai-bootstrap"))
+  if (!runLogPath) {
+    await writeFile(logPath, "", {
+      encoding: "utf8",
+      mode: 0o600,
+    })
+  }
 
   await withClient(options.profile, async (client, env) => {
     activeJsonLogPath = logPath
     const actor = normalizeUser(await client.getMe())
     const actorUsername = actor.username ?? ""
     const profileName = await selectedProfileName(options.profile)
+    const ownerTarget = resolveBootstrapTarget(options.targetUser)
     const ownershipTransferEnabled =
       options.transferOwner !== false && env.password !== null
     console.log(`wrote_run_log: ${logPath}`)
@@ -797,7 +834,7 @@ async function runSaiBootstrap(options: SaiBootstrapOptions): Promise<void> {
       transferOwner: ownershipTransferEnabled,
       passwordAvailable: env.password !== null,
       delayMs,
-      targetUser: USERS.uniqueDivine.id,
+      targetUser: ownerTarget,
       targetBot: saiBot.id,
     })
 
@@ -826,8 +863,8 @@ async function runSaiBootstrap(options: SaiBootstrapOptions): Promise<void> {
             client,
             chat,
             actorUsername,
-            targetUserId: USERS.uniqueDivine.id,
-            targetPeer: USERS.uniqueDivine.handle,
+            targetUserId: ownerTarget,
+            targetPeer: ownerTarget,
             rights: ownerTargetAdminRights,
             actionPrefix: "owner_target",
             run: options.run === true,
@@ -837,7 +874,7 @@ async function runSaiBootstrap(options: SaiBootstrapOptions): Promise<void> {
             env,
             chat,
             actorUsername,
-            targetUser: USERS.uniqueDivine.handle,
+            targetUser: ownerTarget,
             enabled: ownershipTransferEnabled,
             run: options.run === true,
           })
@@ -871,7 +908,7 @@ async function runSaiBootstrap(options: SaiBootstrapOptions): Promise<void> {
         chatCount: chats.length,
       })
     } finally {
-      activeJsonLogPath = null
+      activeJsonLogPath = runLogPath
     }
   })
 }
@@ -1250,11 +1287,14 @@ async function inputFromProfileAddOptions(
     apiHash: profileFields.apiHash,
     sessionString: profileFields.sessionString,
   }
-  const client = await createMtcuteClient({
-    apiId: completeProfileFields.apiId,
-    apiHash: completeProfileFields.apiHash,
-    session: completeProfileFields.sessionString,
-  })
+  const client = await createMtcuteClient(
+    {
+      apiId: completeProfileFields.apiId,
+      apiHash: completeProfileFields.apiHash,
+      session: completeProfileFields.sessionString,
+    },
+    cliTelemetry({ profile: options.name ?? null }),
+  )
   try {
     const self = await client.getMe()
     return profileInputFromUser(
@@ -1454,6 +1494,10 @@ export function createProgram(): Command {
     program.help({ error: false })
   })
 
+  program.hook("preAction", (_root, actionCommand) => {
+    startCliTelemetryRun(actionCommand)
+  })
+
   addRuntimeHealthCommands(program, runHealth)
 
   program
@@ -1551,6 +1595,11 @@ Examples:
     .option(
       "--no-transfer-owner",
       "Skip ownership transfer even when TELEGRAM_PASSWORD is available",
+    )
+    .option(
+      "--target-user <peer>",
+      "Owner target user ID or username; default is the Sai custody account",
+      parsePeer,
     )
     .action(async (options: SaiBootstrapOptions) => {
       await runSaiBootstrap(options)
@@ -1664,12 +1713,65 @@ If apiId/apiHash are missing, create a Telegram API app at:
 
   addProvisionCommands(program)
   addCustodyWorkerCommands(program)
+  registerEventsCommand(program)
   return program
+}
+
+/** Space-joined subcommand path below the root, e.g. `ops sai-find`. */
+function commandPath(command: Command): string {
+  const names: string[] = []
+  for (let c: Command | null = command; c?.parent; c = c.parent) {
+    names.unshift(c.name())
+  }
+  return names.join(" ")
+}
+
+/** Telemetry subsystem for a subcommand path. */
+function subsystemFor(path: string): TelemetrySubsystem {
+  if (path === "worker") return "worker"
+  if (path === "health") return "health"
+  return "cli"
+}
+
+/**
+ * Run log prefix: the path with dashes, except `sai-bootstrap`, which keeps
+ * its historical `sai-bootstrap-NN.jsonl` name. `ops sai-find` becomes
+ * `ops-sai-find`, which never collides with its `sai-find-NN.jsonl` chat file.
+ */
+function runLogPrefix(path: string): string {
+  if (path === "ops sai-bootstrap") return "sai-bootstrap"
+  return path.replace(/\s+/g, "-")
+}
+
+/** Commands that only read telemetry; they do not record runs of their own. */
+function skipsTelemetry(path: string): boolean {
+  return path === "" || path === "events" || path.startsWith("events ")
+}
+
+function startCliTelemetryRun(actionCommand: Command): void {
+  const path = commandPath(actionCommand)
+  if (skipsTelemetry(path) || activeTelemetryRun()) return
+  const run = startTelemetryRun({
+    subsystem: subsystemFor(path),
+    command: path,
+    argv: process.argv.slice(2),
+    version: packageJson.version,
+    logPrefix: runLogPrefix(path),
+  })
+  activeJsonLogPath = run.jsonlPath
 }
 
 createProgram()
   .parseAsync()
-  .catch((error) => {
-    console.error(error)
-    process.exit(1)
-  })
+  .then(
+    () => {
+      activeTelemetryRun()?.end({
+        exitCode: Number(process.exitCode ?? 0),
+      })
+    },
+    (error) => {
+      activeTelemetryRun()?.end({ exitCode: 1, error })
+      console.error(error)
+      process.exit(1)
+    },
+  )

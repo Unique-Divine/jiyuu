@@ -1,5 +1,6 @@
 import type { Command } from "commander"
 import { runCustodyWorker } from "./custodyWorker"
+import { activeTelemetryRun } from "./telemetry/run"
 
 /** Root main.ts calls this once beside addProvisionCommands. No MCP is involved. */
 export function addCustodyWorkerCommands(
@@ -32,7 +33,11 @@ export function addCustodyWorkerCommands(
         intervalMs: string
       }) => {
         const controller = new AbortController()
-        const stop = () => controller.abort()
+        const telemetry = activeTelemetryRun() ?? undefined
+        const stop = () => {
+          telemetry?.markAborted()
+          controller.abort()
+        }
         process.once("SIGTERM", stop)
         process.once("SIGINT", stop)
         try {
@@ -42,6 +47,7 @@ export function addCustodyWorkerCommands(
             limit: Number(options.limit),
             intervalMs: Number(options.intervalMs),
             signal: controller.signal,
+            ...(telemetry ? { telemetry } : {}),
           })
         } finally {
           process.removeListener("SIGTERM", stop)

@@ -1,9 +1,9 @@
 /**
- * Structured event emitted by the batch action executor.
+ * Structured progress event emitted by the batch action executor.
  *
- * These objects are the source of truth for both test assertions and production
- * JSONL logs. Keep event payloads stable enough that a failed or interrupted
- * operator run can be inspected after the fact.
+ * These events are on-screen CLI progress (and copied to the run log). They do
+ * not retry: mtcute's flood waiter is the only retry layer, and every Telegram
+ * request, attempt, and flood wait is recorded by telemetry instead.
  */
 export type BatchActionEvent =
   | {
@@ -15,20 +15,6 @@ export type BatchActionEvent =
       action: string
       /** One-based attempt number for this action. */
       attempt: number
-    }
-  | {
-      /** Telegram returned `FLOOD_WAIT_X` and the executor will retry later. */
-      type: "flood_wait"
-      /** Telegram chat ID or peer for the rate-limited action. */
-      chatId: number | string
-      /** Stable action name, for example `bot_promote_admin`. */
-      action: string
-      /** One-based attempt number that received the flood-wait error. */
-      attempt: number
-      /** Seconds Telegram requested in `FLOOD_WAIT_X`. */
-      waitSeconds: number
-      /** Milliseconds the executor sleeps, including configured buffer. */
-      sleepMs: number
     }
   | {
       /** Operation completed successfully. */
@@ -43,7 +29,7 @@ export type BatchActionEvent =
       elapsedMs: number
     }
   | {
-      /** Operation failed with a non-retryable error or exhausted retries. */
+      /** Operation failed; mtcute already retried any short flood wait. */
       type: "action_error"
       /** Telegram chat ID or peer for the failed action. */
       chatId: number | string
@@ -78,22 +64,14 @@ export interface TelegramActionContext {
 }
 
 /**
- * Runtime dependencies for `withFloodWaitRetry`.
- *
- * Passing these in keeps retry behavior deterministic in tests: sleep, time, and
- * logging can all be faked without importing mtcute or touching Telegram.
+ * Runtime dependencies for `runTelegramAction`. Passing these in keeps event
+ * output deterministic in tests.
  */
 export interface TelegramActionExecutorDeps {
-  /** Event sink for action start, success, error, and flood-wait events. */
+  /** Event sink for action start, success, and error events. */
   logger: BatchLogger
-  /** Sleep function used after Telegram returns `FLOOD_WAIT_X`. */
-  sleep: (ms: number) => Promise<void>
   /** Clock function used to compute elapsed action time. */
   now: () => number
-  /** Number of retries after the first failed attempt. */
-  maxRetries: number
-  /** Extra milliseconds added to Telegram's required flood-wait duration. */
-  bufferMs: number
 }
 
 /**
@@ -153,67 +131,43 @@ export function errorMessage(error: unknown): string {
 }
 
 /**
- * Runs one Telegram operation with `FLOOD_WAIT_X` retry handling.
+ * Runs one Telegram operation once and reports start, success, or error.
  *
- * The operation is passed as a thunk so the executor can call the exact same
- * Telegram action after waiting. Non-flood errors and exhausted retry attempts
- * are logged as `action_error` and then rethrown for the batch runner to record
- * at the chat level.
+ * There is no retry here: short `FLOOD_WAIT_X` waits are slept through by
+ * mtcute's flood waiter, and longer ones surface as errors. Errors are logged
+ * as `action_error` and rethrown for the batch runner to record per chat.
  */
-export async function withFloodWaitRetry<T>(
+export async function runTelegramAction<T>(
   context: TelegramActionContext,
   operation: () => Promise<T>,
   deps: TelegramActionExecutorDeps,
 ): Promise<T> {
   const startedAt = deps.now()
-  const maxAttempts = deps.maxRetries + 1
-
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+  await deps.logger.event({
+    type: "action_start",
+    chatId: context.chatId,
+    action: context.action,
+    attempt: 1,
+  })
+  try {
+    const result = await operation()
     await deps.logger.event({
-      type: "action_start",
+      type: "action_success",
       chatId: context.chatId,
       action: context.action,
-      attempt,
+      attempts: 1,
+      elapsedMs: deps.now() - startedAt,
     })
-
-    try {
-      const result = await operation()
-      await deps.logger.event({
-        type: "action_success",
-        chatId: context.chatId,
-        action: context.action,
-        attempts: attempt,
-        elapsedMs: deps.now() - startedAt,
-      })
-      return result
-    } catch (error) {
-      const waitSeconds = parseFloodWaitSeconds(error)
-      const canRetry = waitSeconds !== null && attempt < maxAttempts
-
-      if (!canRetry) {
-        await deps.logger.event({
-          type: "action_error",
-          chatId: context.chatId,
-          action: context.action,
-          attempt,
-          errorName: errorName(error),
-          errorMessage: errorMessage(error),
-        })
-        throw error
-      }
-
-      const sleepMs = waitSeconds * 1000 + deps.bufferMs
-      await deps.logger.event({
-        type: "flood_wait",
-        chatId: context.chatId,
-        action: context.action,
-        attempt,
-        waitSeconds,
-        sleepMs,
-      })
-      await deps.sleep(sleepMs)
-    }
+    return result
+  } catch (error) {
+    await deps.logger.event({
+      type: "action_error",
+      chatId: context.chatId,
+      action: context.action,
+      attempt: 1,
+      errorName: errorName(error),
+      errorMessage: errorMessage(error),
+    })
+    throw error
   }
-
-  throw new Error(`unreachable action executor state: ${context.action}`)
 }
