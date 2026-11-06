@@ -48,6 +48,11 @@ export interface TelegramProvisioner {
   create(title: string, marker: string): Promise<number>
   member(chatId: number, userId: number): Promise<Member>
   add(chatId: number, userId: number): Promise<void>
+  /**
+   * Adds several users in one call. Resolves to the IDs Telegram reports as
+   * not invited (privacy); throws for errors that refuse the whole call.
+   */
+  addMany?(chatId: number, userIds: number[]): Promise<number[]>
   inviteLink?(
     chatId: number,
     userId: number,
@@ -300,10 +305,17 @@ export async function bindRequest(
 /** Only explicit server rejection proves creation did not happen. Transport failures remain unknown. */
 export function definiteCreateRejection(error: unknown): boolean {
   const e = error as { text?: string; code?: number }
+  if (typeof e?.text !== "string") return false
+  // The local hold guard refuses before sending, so the call never reached
+  // Telegram: a hold (420) or an unreadable hold store (500).
+  if (
+    (e.code === 420 && /^TG_SAI_HOLD_\d+$/.test(e.text)) ||
+    (e.code === 500 && e.text === HOLD_STATE_UNAVAILABLE)
+  )
+    return true
   return (
-    [400, 401, 403, 420].includes(e?.code ?? 0) &&
-    typeof e.text === "string" &&
-    /^(?:FLOOD_WAIT|CHANNELS_TOO_MUCH|USER_RESTRICTED|CHAT_TITLE_EMPTY|CHAT_ABOUT_TOO_LONG|AUTH_KEY_UNREGISTERED|SESSION_REVOKED)(?:_%d|_\d+)?$/.test(
+    [400, 401, 403, 420].includes(e.code ?? 0) &&
+    /^(?:FLOOD_WAIT|FLOOD_PREMIUM_WAIT|PEER_FLOOD|CHANNELS_TOO_MUCH|USER_RESTRICTED|CHAT_TITLE_EMPTY|CHAT_ABOUT_TOO_LONG|AUTH_KEY_UNREGISTERED|SESSION_REVOKED)(?:_%d|_\d+)?$/.test(
       e.text,
     )
   )
@@ -318,7 +330,7 @@ export function safeProvisionError(error: unknown): string {
           String(Number.isSafeInteger(e.seconds) ? e.seconds : "UNKNOWN"),
         )
       : ""
-  return /^(?:FLOOD(?:_PREMIUM)?_WAIT_(?:\d{1,10}|UNKNOWN)|USER_PRIVACY_RESTRICTED|USER_NOT_MUTUAL_CONTACTS?|USER_NOT_PARTICIPANT|USER_CHANNELS_TOO_MUCH|USER_BOT|USER_ID_INVALID|PEER_ID_INVALID|CHAT_ID_INVALID|CHANNEL_INVALID|CHANNEL_PRIVATE|CHAT_ADMIN_REQUIRED|CHAT_WRITE_FORBIDDEN|USER_ADMIN_INVALID|USER_CREATOR|ADMINS_TOO_MUCH|BOTS_TOO_MUCH|BOT_GROUPS_BLOCKED|RIGHT_FORBIDDEN|USER_RESTRICTED|USER_DEACTIVATED|INPUT_USER_DEACTIVATED|CHANNELS_TOO_MUCH|USERS_TOO_MUCH|AUTH_KEY_UNREGISTERED|SESSION_REVOKED|INVITE_HASH_EXPIRED|INVITE_HASH_INVALID|INVITE_REQUEST_SENT)$/.test(
+  return /^(?:FLOOD(?:_PREMIUM)?_WAIT_(?:\d{1,10}|UNKNOWN)|PEER_FLOOD|TG_SAI_HOLD_\d{1,10}|TG_SAI_HOLD_STATE_UNAVAILABLE|USER_PRIVACY_RESTRICTED|USER_NOT_MUTUAL_CONTACTS?|USER_NOT_PARTICIPANT|USER_CHANNELS_TOO_MUCH|USER_BOT|USER_ID_INVALID|PEER_ID_INVALID|CHAT_ID_INVALID|CHANNEL_INVALID|CHANNEL_PRIVATE|CHAT_ADMIN_REQUIRED|CHAT_WRITE_FORBIDDEN|USER_ADMIN_INVALID|USER_CREATOR|ADMINS_TOO_MUCH|BOTS_TOO_MUCH|BOT_GROUPS_BLOCKED|RIGHT_FORBIDDEN|USER_RESTRICTED|USER_DEACTIVATED|INPUT_USER_DEACTIVATED|CHANNELS_TOO_MUCH|USERS_TOO_MUCH|AUTH_KEY_UNREGISTERED|SESSION_REVOKED|INVITE_HASH_EXPIRED|INVITE_HASH_INVALID|INVITE_REQUEST_SENT)$/.test(
     normalized,
   )
     ? normalized
@@ -358,17 +370,46 @@ export function isPrivacyRestriction(error: unknown): boolean {
       ),
   )
 }
+/** Text of `HoldStoreUnavailableError` (state/holds.ts). */
+export const HOLD_STATE_UNAVAILABLE = "TG_SAI_HOLD_STATE_UNAVAILABLE"
+/** Retry delay while the hold store cannot be read. */
+export const HOLD_STATE_UNAVAILABLE_RETRY_MS = 5 * 60 * 1000
+/** Telegram gives no duration for `PEER_FLOOD`; holds use 24 h. */
+export const PEER_FLOOD_RETRY_MS = 24 * 60 * 60 * 1000
+const MAX_RETRY_MS = 31_536_000 * 1000
+
+/**
+ * When a flood or hold error allows an unattended retry: `FLOOD_WAIT_N`
+ * (also mtcute's `FLOOD_WAIT_%d` with `seconds`), `FLOOD_PREMIUM_WAIT_N`,
+ * `PEER_FLOOD` (24 h), `TG_SAI_HOLD_N` (the hold's `untilMs` when present),
+ * and `TG_SAI_HOLD_STATE_UNAVAILABLE` (5 min). `null` for anything else.
+ */
 export function provisionRetryAt(
   error: unknown,
   now = Date.now(),
 ): string | null {
-  const e = error as { text?: string; errorMessage?: string; seconds?: number }
+  const e = error as {
+    text?: string
+    errorMessage?: string
+    seconds?: number
+    untilMs?: number
+  }
   const code = e?.text ?? e?.errorMessage ?? ""
-  const match = /^FLOOD_WAIT_(\d+|%d)$/.exec(code)
+  const at = (delayMs: number): string | null =>
+    Number.isSafeInteger(delayMs) && delayMs > 0 && delayMs <= MAX_RETRY_MS
+      ? new Date(now + delayMs).toISOString()
+      : null
+  if (code === "PEER_FLOOD") return at(PEER_FLOOD_RETRY_MS)
+  if (code === HOLD_STATE_UNAVAILABLE) return at(HOLD_STATE_UNAVAILABLE_RETRY_MS)
+  const hold = /^TG_SAI_HOLD_(\d+)$/.exec(code)
+  if (hold) {
+    if (Number.isSafeInteger(e.untilMs) && e.untilMs! > now)
+      return at(e.untilMs! - now)
+    return at(Number(hold[1]) * 1000)
+  }
+  const match = /^FLOOD(?:_PREMIUM)?_WAIT_(\d+|%d)$/.exec(code)
   const seconds = match ? Number(match[1] === "%d" ? e.seconds : match[1]) : NaN
-  return Number.isSafeInteger(seconds) && seconds > 0 && seconds <= 31_536_000
-    ? new Date(now + seconds * 1000).toISOString()
-    : null
+  return Number.isSafeInteger(seconds) ? at(seconds * 1000) : null
 }
 
 /** The cloud is authoritative. The journal only recovers a result not yet acknowledged by cloud. */
@@ -539,6 +580,8 @@ export async function provisionSetup(params: {
       throw new Error("Chat marker or custody owner verification failed")
     step = "save_configuring"
     await save({ state: "configuring", chatId, binding })
+    // One membership read per user, then one batched add for everyone absent.
+    const absent: number[] = []
     for (const userId of [...binding.participants, PROVISIONING_BOT_ID]) {
       step = "read_member"
       const member = await telegram.member(chatId, userId)
@@ -548,47 +591,89 @@ export async function provisionSetup(params: {
         )
         continue
       }
-      try {
-        step = "add_member"
-        await telegram.add(chatId, userId)
-        step = "verify_added_member"
-        if ((await telegram.member(chatId, userId)).role === "absent")
-          throw new Error("Participant invitation incomplete")
-      } catch (error) {
-        if (
-          !binding.optionalParticipants?.includes(userId) ||
-          !isPrivacyRestriction(error) ||
-          !telegram.inviteLink
-        )
-          throw error
-        let invite = pendingInvitations.find(
-          (i) =>
-            i.userId === String(userId) && Date.parse(i.expiresAt) > Date.now(),
-        )
-        if (!invite) {
-          step = "create_invitation"
-          const link = await telegram.inviteLink(chatId, userId)
-          if (
-            !/^https:\/\/t\.me\/(?:\+|joinchat\/)[A-Za-z0-9_-]+$/.test(
-              link.inviteLink,
-            ) ||
-            !Number.isFinite(Date.parse(link.expiresAt)) ||
-            Date.parse(link.expiresAt) <= Date.now()
-          )
-            throw new Error("Invalid controlled invitation link")
-          invite = {
-            userId: String(userId),
-            ...link,
-            reason: "privacy_restricted",
-          }
-          pendingInvitations = [
-            ...pendingInvitations.filter((i) => i.userId !== invite!.userId),
-            invite,
-          ]
-          step = "save_invitation"
-          await save({ state: "configuring", chatId, binding })
+      absent.push(userId)
+    }
+    // Per-user privacy refusals never stop the other users; flood and hold
+    // errors refuse the whole batch and propagate with their retry time.
+    const failures = new Map<number, { error: unknown; step: ProvisionStep }>()
+    const addEach = async (userIds: number[]): Promise<void> => {
+      for (const userId of userIds) {
+        try {
+          step = "add_member"
+          await telegram.add(chatId, userId)
+        } catch (error) {
+          if (!isPrivacyRestriction(error)) throw error
+          failures.set(userId, { error, step: "add_member" })
         }
       }
+    }
+    if (absent.length && telegram.addMany) {
+      step = "add_member"
+      try {
+        const missing = new Set(await telegram.addMany(chatId, absent))
+        for (const userId of absent)
+          if (missing.has(userId))
+            failures.set(userId, {
+              error: { text: "USER_PRIVACY_RESTRICTED" },
+              step: "add_member",
+            })
+      } catch (error) {
+        if (!isPrivacyRestriction(error)) throw error
+        await addEach(absent)
+      }
+    } else await addEach(absent)
+    for (const userId of absent) {
+      if (failures.has(userId)) continue
+      step = "verify_added_member"
+      if ((await telegram.member(chatId, userId)).role === "absent")
+        failures.set(userId, {
+          error: new Error("Participant invitation incomplete"),
+          step: "verify_added_member",
+        })
+    }
+    let fatal: { error: unknown; step: ProvisionStep } | undefined
+    for (const userId of absent) {
+      const failure = failures.get(userId)
+      if (!failure) continue
+      if (
+        !binding.optionalParticipants?.includes(userId) ||
+        !isPrivacyRestriction(failure.error) ||
+        !telegram.inviteLink
+      ) {
+        fatal ??= failure
+        continue
+      }
+      let invite = pendingInvitations.find(
+        (i) =>
+          i.userId === String(userId) && Date.parse(i.expiresAt) > Date.now(),
+      )
+      if (!invite) {
+        step = "create_invitation"
+        const link = await telegram.inviteLink(chatId, userId)
+        if (
+          !/^https:\/\/t\.me\/(?:\+|joinchat\/)[A-Za-z0-9_-]+$/.test(
+            link.inviteLink,
+          ) ||
+          !Number.isFinite(Date.parse(link.expiresAt)) ||
+          Date.parse(link.expiresAt) <= Date.now()
+        )
+          throw new Error("Invalid controlled invitation link")
+        invite = {
+          userId: String(userId),
+          ...link,
+          reason: "privacy_restricted",
+        }
+        pendingInvitations = [
+          ...pendingInvitations.filter((i) => i.userId !== invite!.userId),
+          invite,
+        ]
+        step = "save_invitation"
+        await save({ state: "configuring", chatId, binding })
+      }
+    }
+    if (fatal) {
+      step = fatal.step
+      throw fatal.error
     }
     for (const userId of binding.admins) {
       step = "read_admin"

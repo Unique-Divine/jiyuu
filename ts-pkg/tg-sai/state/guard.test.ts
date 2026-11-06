@@ -271,6 +271,104 @@ describe("createFloodGuard", () => {
   })
 })
 
+describe("sleepThresholdMs", () => {
+  function thresholdGuard(sleepThresholdMs: number): FloodGuard {
+    return createFloodGuard(store, () => 42, {
+      now: () => nowMs,
+      sleepThresholdMs,
+    })
+  }
+
+  function ctxWith(
+    method: string,
+    params: Record<string, unknown>,
+  ): RpcCallMiddlewareContext {
+    return {
+      request: { _: method },
+      params,
+      manager: {},
+    } as unknown as RpcCallMiddlewareContext
+  }
+
+  test("a wait mtcute sleeps through is not saved", async () => {
+    const guard = thresholdGuard(10_000)
+    await call(guard, new FakeWire([floodWait(3)]), "messages.sendMessage")
+    await call(guard, new FakeWire([floodWait(10)]), "users.getFullUser")
+    expect(store.activeHolds(42, nowMs)).toEqual([])
+  })
+
+  test("a wait over the threshold is saved", async () => {
+    const guard = thresholdGuard(10_000)
+    await call(guard, new FakeWire([floodWait(11)]), "messages.sendMessage")
+    expect(store.activeHold(42, "send", nowMs)?.waitS).toBe(11)
+  })
+
+  test("invite and create are saved at any wait", async () => {
+    const guard = thresholdGuard(10_000)
+    await call(guard, new FakeWire([floodWait(1)]), "messages.addChatUser")
+    await call(guard, new FakeWire([floodWait(2)]), "messages.createChat")
+    expect(store.activeHold(42, "invite", nowMs)?.waitS).toBe(1)
+    expect(store.activeHold(42, "create", nowMs)?.waitS).toBe(2)
+  })
+
+  test("PEER_FLOOD is saved on any group", async () => {
+    const guard = thresholdGuard(10_000)
+    const wire = new FakeWire([
+      { _: "mt_rpc_error", errorCode: 400, errorMessage: "PEER_FLOOD" },
+    ])
+    await call(guard, wire, "messages.sendMessage")
+    expect(store.activeHold(42, "send", nowMs)?.source).toBe("peer_flood")
+  })
+
+  test("a per-call floodSleepThreshold of 0 saves a short wait", async () => {
+    const guard = thresholdGuard(10_000)
+    const wire = new FakeWire([floodWait(3)])
+    const ctx = ctxWith("messages.sendMessage", { floodSleepThreshold: 0 })
+    await guard.check(ctx, (c) => guard.record(c, wire.next))
+    expect(store.activeHold(42, "send", nowMs)?.waitS).toBe(3)
+  })
+
+  test("a per-call floodSleepThreshold above the wait skips it", async () => {
+    const guard = thresholdGuard(0)
+    const wire = new FakeWire([floodWait(30)])
+    const ctx = ctxWith("messages.sendMessage", {
+      floodSleepThreshold: 60_000,
+    })
+    await guard.check(ctx, (c) => guard.record(c, wire.next))
+    expect(store.activeHolds(42, nowMs)).toEqual([])
+  })
+})
+
+describe("store provider", () => {
+  test("is not called for calls without an account", async () => {
+    let opened = 0
+    const guard = createFloodGuard(
+      () => {
+        opened += 1
+        return store
+      },
+      () => null,
+    )
+    await call(guard, new FakeWire([floodWait(100)]), "messages.createChat")
+    expect(opened).toBe(0)
+  })
+
+  test("a throwing provider fails closed on invite/create", async () => {
+    const guard = createFloodGuard(
+      () => {
+        throw new Error("no home")
+      },
+      () => 42,
+    )
+    const wire = new FakeWire()
+    await expect(
+      call(guard, wire, "channels.createChannel"),
+    ).rejects.toBeInstanceOf(HoldStoreUnavailableError)
+    await call(guard, wire, "messages.sendMessage")
+    expect(wire.calls).toEqual(["messages.sendMessage"])
+  })
+})
+
 describe("HoldError", () => {
   test("message is TG_SAI_HOLD_<remaining seconds>, at least 1", () => {
     expect(new HoldError(T0 + 1500, "send", T0).message).toBe(

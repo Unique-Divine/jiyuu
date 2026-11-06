@@ -7,10 +7,14 @@ import {
   CUSTODY_USER_ID,
   recordWorkerTick,
   runWorkerOnce,
+  setupHoldUntil,
   shouldRecordTick,
   stableWorkerId,
   TICK_HEARTBEAT_MS,
 } from "./custodyWorker"
+import { openStateDb } from "./state/db"
+import { HoldStore } from "./state/holds"
+import type { HoldGroup } from "./state/holds"
 import type { TelemetryEvent } from "./telemetry/db"
 import { addCustodyWorkerCommands } from "./custodyWorkerCli"
 import type { Progress, Setup, TelegramProvisioner } from "./provisioning"
@@ -29,6 +33,7 @@ function fixture() {
     state: "prepared",
   }
   const calls: string[] = []
+  const progressed: Progress[] = []
   const cloud = {
     pending: async (input: {
       expectedUserId: number
@@ -46,7 +51,9 @@ function fixture() {
       calls.push("claim")
       return { ...setup, claimToken: "private-token" }
     },
-    progress: async (_id: string, _token: string, progress: Progress) => {
+    progress: async (_id: string, token: string, progress: Progress) => {
+      calls.push(`progress:${token}`)
+      progressed.push(progress)
       setup = { ...setup, ...progress }
       return structuredClone(setup)
     },
@@ -54,8 +61,10 @@ function fixture() {
   }
   return {
     calls,
+    progressed,
     cloud,
     journal: { read: async () => null, write: async () => {} },
+    holds: HoldStore.fromDb(openStateDb(":memory:")),
     telegram: async <T>(
       _setup: Setup,
       operation: (adapter: TelegramProvisioner) => Promise<T>,
@@ -340,4 +349,141 @@ test("shouldRecordTick skips idle polls between heartbeats", () => {
   for (const [input, expected] of cases) {
     expect(shouldRecordTick(input)).toBe(expected)
   }
+})
+
+function hold(
+  holds: HoldStore,
+  grp: HoldGroup,
+  untilMs: number,
+  accountId: number = CUSTODY_USER_ID,
+) {
+  holds.recordHold({
+    accountId,
+    grp,
+    method: "test.method",
+    source: "flood_wait",
+    untilMs,
+    // recordHold caps holds at one year after nowMs.
+    nowMs: untilMs - 1,
+  })
+}
+
+test("an active create, invite, or resolve hold blocks claim and Telegram", async () => {
+  const now = Date.parse("2026-11-06T00:00:00Z")
+  for (const grp of ["create", "invite", "resolve"] as const) {
+    const f = fixture()
+    hold(f.holds, grp, now + 60_000)
+    // The latest hold across the setup groups decides the retry time.
+    hold(f.holds, "invite", now + 3_600_000)
+    const result = await runWorkerOnce(
+      { custodyProfile: "custody", workerId: "stable", run: true, now },
+      f,
+    )
+    expect(result.results).toEqual([
+      {
+        requestId: "worker-test",
+        state: "waiting",
+        retryAt: new Date(now + 3_600_000).toISOString(),
+        error: "TG_SAI_HOLD_3600",
+      },
+    ])
+    expect(f.calls).not.toContain("claim")
+    expect(f.calls).not.toContain("telegram")
+    // An unclaimed prepared setup has no claim token to report with.
+    expect(f.progressed).toEqual([])
+  }
+})
+
+test("holds on other groups or accounts do not block setup work", async () => {
+  const now = Date.parse("2026-11-06T00:00:00Z")
+  const f = fixture()
+  hold(f.holds, "send", now + 60_000)
+  hold(f.holds, "create", now + 60_000, 42)
+  hold(f.holds, "invite", now - 1)
+  expect(setupHoldUntil(f.holds, CUSTODY_USER_ID, now)).toBeNull()
+  await runWorkerOnce(
+    { custodyProfile: "custody", workerId: "stable", run: true, now },
+    f,
+  )
+  expect(f.calls).toContain("telegram")
+})
+
+test("a held incomplete setup reports the hold as its cloud retryAt and resumes after it", async () => {
+  const now = Date.parse("2026-11-06T00:00:00Z")
+  const untilMs = now + 600_000
+  const f = fixture()
+  const binding = { participants: [1912700300], admins: [1912700300] }
+  f.setup = {
+    ...f.setup,
+    state: "incomplete",
+    chatId: -100123,
+    binding,
+    claimToken: "private-token",
+    retryAt: new Date(now - 1000).toISOString(),
+  }
+  hold(f.holds, "invite", untilMs)
+  const held = await runWorkerOnce(
+    { custodyProfile: "custody", workerId: "stable", run: true, now },
+    f,
+  )
+  const retryAt = new Date(untilMs).toISOString()
+  expect(held.results).toEqual([
+    {
+      requestId: "worker-test",
+      state: "waiting",
+      chatId: -100123,
+      retryAt,
+      error: "TG_SAI_HOLD_600",
+    },
+  ])
+  expect(f.progressed).toEqual([
+    {
+      state: "incomplete",
+      chatId: -100123,
+      binding,
+      error: "TG_SAI_HOLD_600",
+      retryAt,
+    },
+  ])
+  expect(f.calls).not.toContain("claim")
+  expect(f.calls).not.toContain("telegram")
+  expect(f.setup.retryAt).toBe(retryAt)
+  // Before the hold ends the saved retryAt alone keeps the job waiting.
+  const early = await runWorkerOnce(
+    { custodyProfile: "custody", workerId: "stable", run: true, now: now + 1 },
+    f,
+  )
+  expect(early.results[0]?.state).toBe("waiting")
+  expect(f.progressed).toHaveLength(1)
+  expect(f.calls).not.toContain("telegram")
+  await runWorkerOnce(
+    {
+      custodyProfile: "custody",
+      workerId: "stable",
+      run: true,
+      now: untilMs + 1,
+    },
+    f,
+  )
+  expect(f.calls).toContain("telegram")
+})
+
+test("an unavailable hold store waits five minutes without claim or Telegram", async () => {
+  const now = Date.parse("2026-11-06T00:00:00Z")
+  const f = fixture()
+  f.holds = HoldStore.unavailable("disk full")
+  const result = await runWorkerOnce(
+    { custodyProfile: "custody", workerId: "stable", run: true, now },
+    f,
+  )
+  expect(result.results).toEqual([
+    {
+      requestId: "worker-test",
+      state: "waiting",
+      retryAt: new Date(now + 5 * 60_000).toISOString(),
+      error: "TG_SAI_HOLD_STATE_UNAVAILABLE",
+    },
+  ])
+  expect(f.calls).not.toContain("claim")
+  expect(f.calls).not.toContain("telegram")
 })

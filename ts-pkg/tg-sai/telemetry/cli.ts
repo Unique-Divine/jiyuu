@@ -7,12 +7,18 @@ import type { Command } from "commander"
 import { existsSync, statSync } from "node:fs"
 
 import type { ProfileStoreEnv } from "../profiles"
-import { telemetryDbPath, type EventRow } from "./db"
+import {
+  LOG_LEVELS,
+  telemetryDbPath,
+  type EventRow,
+  type LogLevel,
+} from "./db"
 import {
   countEvents,
   eventStats,
   exportEvents,
   floodReport,
+  logEvents,
   openTelemetryReadOnly,
   parseCountBy,
   recentRuns,
@@ -71,6 +77,16 @@ export function parseAccountId(value: string): number {
     throw new Error(`--account must be a numeric Telegram user id: "${value}"`)
   }
   return n
+}
+
+export function parseLevel(value: string): LogLevel {
+  const level = value.trim().toLowerCase()
+  if ((LOG_LEVELS as readonly string[]).includes(level)) {
+    return level as LogLevel
+  }
+  throw new Error(
+    `--level must be one of ${LOG_LEVELS.join(", ")}, got "${value}"`,
+  )
 }
 
 export function parseLayer(value: string): CountLayer {
@@ -199,8 +215,11 @@ export const SHOW_FIELDS = [
   "wait_s",
   "request_id",
   "job_id",
+  "level",
+  "msg",
   "req",
   "res",
+  "attrs",
 ] as const
 
 export function showProjection(row: EventRow): Record<string, Cell> {
@@ -208,6 +227,8 @@ export function showProjection(row: EventRow): Record<string, Cell> {
     ts: isoTime(row.ts_ms),
     event: row.event,
     outcome: row.outcome,
+    level: row.level ?? null,
+    msg: row.msg ?? null,
     method: row.method,
     attempt: row.attempt,
     duration_ms: row.duration_ms,
@@ -218,6 +239,33 @@ export function showProjection(row: EventRow): Record<string, Cell> {
     job_id: row.job_id,
     req: parseJsonColumn(row.req) as Cell,
     res: parseJsonColumn(row.res) as Cell,
+    attrs: parseJsonColumn(row.attrs ?? null) as Cell,
+  }
+}
+
+export const LOG_FIELDS = [
+  "ts",
+  "level",
+  "event",
+  "subsystem",
+  "msg",
+  "attrs",
+  "account_id",
+  "job_id",
+  "run_id",
+] as const
+
+export function logProjection(row: EventRow): Record<string, Cell> {
+  return {
+    ts: isoTime(row.ts_ms),
+    level: row.level,
+    event: row.event,
+    subsystem: row.subsystem,
+    msg: row.msg,
+    attrs: parseJsonColumn(row.attrs) as Cell,
+    account_id: row.account_id,
+    job_id: row.job_id,
+    run_id: row.run_id,
   }
 }
 
@@ -336,6 +384,16 @@ interface TailCliOptions {
   json?: boolean
 }
 
+interface LogsCliOptions {
+  since: string
+  level?: string
+  subsystem?: string
+  run?: string
+  job?: string
+  limit: string
+  json?: boolean
+}
+
 interface SinceCliOptions {
   since: string
   account?: string
@@ -359,13 +417,15 @@ export function registerEventsCommand(
   const events = program
     .command("events")
     .description(
-      "Read the local Telegram call telemetry database (read-only)",
+      "Read the local telemetry database: Telegram calls and app logs " +
+        "(read-only)",
     )
     .addHelpText(
       "after",
       `
 Examples:
   tg-sai events tail --account 8274304175 --errors
+  tg-sai events logs --since 24h --level warn --subsystem worker
   tg-sai events show <request_id|run_id|job_id>
   tg-sai events counts --since 24h --by method,outcome
   tg-sai events floods --since 7d
@@ -407,6 +467,35 @@ Output is TOON by default; add --json for JSON. Durations: 30m, 24h, 7d.
       withReadOnlyDb(ctx, (db) => {
         const rows = tailEvents(db, filter).map(tailProjection)
         emit(ctx, options.json, "events", TAIL_FIELDS, rows)
+      })
+    })
+
+  events
+    .command("logs")
+    .description("Newest app log rows (rows with a level), one per line")
+    .option("--since <duration>", "Window, e.g. 24h", "24h")
+    .option(
+      "--level <level>",
+      "Minimum level: debug, info, warn, or error",
+    )
+    .option("--subsystem <name>", "Only this subsystem: worker, health, cli")
+    .option("--run <run_id>", "Only rows from this run")
+    .option("--job <job_id>", "Only rows for this job (setup request id)")
+    .option("--limit <n>", "Maximum rows", "100")
+    .option("--json", "Print JSON")
+    .action((options: LogsCliOptions) => {
+      const query = {
+        limit: parsePositiveInt(options.limit, "--limit"),
+        sinceMs: sinceCutoff(options.since, ctx.now()),
+        minLevel:
+          options.level === undefined ? undefined : parseLevel(options.level),
+        subsystem: options.subsystem,
+        runId: options.run,
+        jobId: options.job,
+      }
+      withReadOnlyDb(ctx, (db) => {
+        const rows = logEvents(db, query).map(logProjection)
+        emit(ctx, options.json, "logs", LOG_FIELDS, rows)
       })
     })
 
@@ -549,16 +638,25 @@ Output is TOON by default; add --json for JSON. Durations: 30m, 24h, 7d.
           size_bytes: fileSize(ctx.path),
           wal_bytes: fileSize(`${ctx.path}-wal`),
           rows: stats.rows,
+          log_rows: stats.log_rows,
           oldest: isoTime(stats.oldest_ms),
           newest: isoTime(stats.newest_ms),
         }
         if (options.json) {
-          ctx.out(JSON.stringify({ ...summary, kinds: stats.kinds }, null, 2))
+          ctx.out(
+            JSON.stringify(
+              { ...summary, kinds: stats.kinds, levels: stats.levels },
+              null,
+              2,
+            ),
+          )
           return
         }
         ctx.out(toonObject(summary))
         const kinds = stats.kinds.map((k) => ({ event: k.event, rows: k.rows }))
         ctx.out(toonTable("kinds", ["event", "rows"], kinds))
+        const levels = stats.levels.map((l) => ({ level: l.level, rows: l.rows }))
+        ctx.out(toonTable("levels", ["level", "rows"], levels))
       })
     })
 
@@ -580,7 +678,14 @@ Output is TOON by default; add --json for JSON. Durations: 30m, 24h, 7d.
 
 /** Full row with `req`/`res` parsed back to JSON values. */
 export function exportProjection(row: EventRow): Record<string, unknown> {
-  return { ...row, req: parseJsonColumn(row.req), res: parseJsonColumn(row.res) }
+  return {
+    ...row,
+    req: parseJsonColumn(row.req),
+    res: parseJsonColumn(row.res),
+    ...(row.attrs === undefined
+      ? {}
+      : { attrs: parseJsonColumn(row.attrs) }),
+  }
 }
 
 /** File size in bytes, or 0 when the file does not exist. */

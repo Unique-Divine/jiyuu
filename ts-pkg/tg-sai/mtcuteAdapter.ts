@@ -12,6 +12,11 @@ import { convertFromTelethonSession } from "@mtcute/convert"
 import type { ChatAuditInput, ChatMemberData, UserData } from "./adminAudit"
 import type { SaiChatRecord } from "./ops"
 import { isSaiChatTitle } from "./ops"
+import type { ProfileStoreEnv } from "./profiles"
+import { stateDbPath } from "./state/db"
+import { createFloodGuard } from "./state/guard"
+import type { HoldAccountProvider, HoldStoreSource } from "./state/guard"
+import { HoldStore } from "./state/holds"
 import { createTelemetryMiddlewares } from "./telemetry/middleware"
 import type { ClientTelemetry } from "./telemetry/middleware"
 
@@ -32,6 +37,12 @@ export interface MtcuteClientConfig {
    * layer. Ignored when `telemetry.floodWaiter` is set.
    */
   floodWaiter?: FloodWaiterOptions
+  /**
+   * Telegram user ID the session acts as; keys the client's saved flood
+   * holds. Falls back to the telemetry context's `accountId`. Without
+   * either, the flood guard passes every call through.
+   */
+  accountId?: number
 }
 
 /**
@@ -98,42 +109,111 @@ function isPeerNotFound(error: unknown): boolean {
   )
 }
 
+/** mtcute's `floodWaiter` default `maxWait`. */
+export const MTCUTE_DEFAULT_FLOOD_MAX_WAIT_MS = 10_000
+
+const holdStores = new Map<string, HoldStore>()
+
 /**
- * Network middlewares for a client, or `undefined` to keep mtcute's
- * defaults. Passing middlewares replaces mtcute's defaults, so both branches
- * include `networkMiddlewares.basic()` (flood waiter and 5xx retry).
+ * The process's `HoldStore` for `state.db` under `env`'s config dir, opened
+ * on first use and then shared by every client. Never throws: a store that
+ * cannot open reports `unavailable`, so the guard fails closed.
+ */
+export function processHoldStore(
+  env: ProfileStoreEnv = process.env,
+): HoldStore {
+  let path: string
+  try {
+    path = stateDbPath(env)
+  } catch (error) {
+    return HoldStore.unavailable(
+      error instanceof Error ? error.message : String(error),
+    )
+  }
+  let store = holdStores.get(path)
+  if (!store) {
+    store = HoldStore.open(path)
+    holdStores.set(path, store)
+  }
+  return store
+}
+
+/** Closes every store `processHoldStore` opened; the next use reopens. */
+export function closeProcessHoldStores(): void {
+  for (const store of holdStores.values()) store.close()
+  holdStores.clear()
+}
+
+/** Options for `clientMiddlewares` beyond the flood waiter and telemetry. */
+export interface ClientMiddlewareOptions {
+  /** Account for the flood guard; else the telemetry context's. */
+  accountId?: number
+  /** Hold store; default `processHoldStore()`, opened on first use. */
+  holdStore?: HoldStoreSource
+}
+
+/**
+ * Network middlewares for a client. Passing middlewares replaces mtcute's
+ * defaults, so both branches include `networkMiddlewares.basic()` (flood
+ * waiter and 5xx retry) with the same options, wrapped by the flood guard:
+ *
+ * - without telemetry: `[check, ...basic({ floodWaiter }), record]`
+ * - with telemetry: `[outer, check, ...basic(), inner, record]`
+ *
+ * The guard saves waits longer than the flood waiter's `maxWait` (and all
+ * invite/create waits and `PEER_FLOOD`) and refuses held calls in every
+ * process. It does nothing for a client with no account ID.
  */
 export function clientMiddlewares(
   floodWaiter: FloodWaiterOptions | undefined,
   telemetry: ClientTelemetry | undefined,
-): RpcCallMiddleware[] | undefined {
+  options: ClientMiddlewareOptions = {},
+): RpcCallMiddleware[] {
+  const waiter = telemetry?.floodWaiter ?? floodWaiter
+  const accountProvider: HoldAccountProvider = () =>
+    options.accountId ?? telemetry?.context().accountId
+  const guardOptions = {
+    sleepThresholdMs: waiter?.maxWait ?? MTCUTE_DEFAULT_FLOOD_MAX_WAIT_MS,
+  }
+  const store: HoldStoreSource = options.holdStore ?? (() => processHoldStore())
   if (telemetry) {
     return createTelemetryMiddlewares(
       telemetry.sink,
       telemetry.context,
-      telemetry.floodWaiter ?? floodWaiter,
+      waiter,
+      (requestIdOf) =>
+        createFloodGuard(store, accountProvider, {
+          ...guardOptions,
+          requestIdOf,
+        }),
     )
   }
-  if (floodWaiter) return networkMiddlewares.basic({ floodWaiter })
-  return undefined
+  const guard = createFloodGuard(store, accountProvider, guardOptions)
+  return [
+    guard.check,
+    ...networkMiddlewares.basic(waiter ? { floodWaiter: waiter } : undefined),
+    guard.record,
+  ]
 }
 
 /**
  * Shared constructor used by offline readiness and authenticated operations.
- * With `telemetry`, every RPC call, wire attempt, and flood wait is recorded;
- * without it (and without `floodWaiter`) the client uses mtcute defaults.
+ * Every client gets the flood guard (see `clientMiddlewares`). With
+ * `telemetry`, every RPC call, wire attempt, and flood wait is recorded.
  */
 export function createMtcuteRuntimeClient(
   config: Omit<MtcuteClientConfig, "session">,
   telemetry?: ClientTelemetry,
 ): TelegramClient {
-  const middlewares = clientMiddlewares(config.floodWaiter, telemetry)
+  const middlewares = clientMiddlewares(config.floodWaiter, telemetry, {
+    accountId: config.accountId,
+  })
   return new TelegramClient({
     crypto: createTelegramCryptoProvider(),
     apiId: config.apiId,
     apiHash: config.apiHash,
     storage: config.storage ?? "sai-telegram-admin-check.session",
-    ...(middlewares ? { network: { middlewares } } : {}),
+    network: { middlewares },
   })
 }
 

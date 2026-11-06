@@ -1,14 +1,16 @@
-import { appendFileSync, mkdirSync, readdirSync } from "node:fs"
-import { basename, join } from "node:path"
+import { basename } from "node:path"
 
-import { configDir, type ProfileStoreEnv } from "../profiles"
+import type { ProfileStoreEnv } from "../profiles"
 import {
+  LOG_EVENT_PREFIX,
+  LOG_LEVELS,
   openTelemetrySink,
   RUN_END_EVENT,
   RUN_START_EVENT,
   uuidv7,
 } from "./db"
 import type {
+  LogLevel,
   TelemetryEvent,
   TelemetryOutcome,
   TelemetrySink,
@@ -16,6 +18,7 @@ import type {
 } from "./db"
 import { safeErrorText } from "./middleware"
 import type { ClientTelemetry, TelemetryContext } from "./middleware"
+import { summarizeTl } from "./summarize"
 
 export const FLOOD_MAX_WAIT_ENV = "TG_SAI_FLOOD_MAX_WAIT_MS"
 /** mtcute's own default; CLI commands sleep through waits up to this. */
@@ -197,109 +200,152 @@ export function sanitizeArgv(argv: readonly string[]): string[] {
   return out
 }
 
-/** Picks `<prefix>-NN.jsonl`, one past the highest existing index. */
-export function nextJsonlName(files: readonly string[], prefix: string): string {
-  const escaped = prefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
-  const matcher = new RegExp(`^${escaped}-(\\d+)\\.jsonl$`)
-  const maxIndex = files.reduce((max, file) => {
-    const match = file.match(matcher)
-    return match ? Math.max(max, Number(match[1])) : max
-  }, -1)
-  return `${prefix}-${String(maxIndex + 1).padStart(2, "0")}.jsonl`
+/** Longest `msg` stored on a log row; longer text is cut. */
+export const LOG_MSG_MAX_CHARS = 120
+
+/** Event names reserved for Telegram call and run rows. */
+const RESERVED_EVENT = /^(?:tg|run)\./
+/** Dotted lowercase names such as `log.worker` or `worker.job.claimed`. */
+const LOG_EVENT_NAME = /^[a-z][a-z0-9_]*(?:\.[a-z0-9_-]+)+$/
+
+/** Optional row fields a log line may carry besides its run context. */
+export interface LogFields {
+  jobId?: string | null
+  requestId?: string | null
+  accountId?: number | null
+  profile?: string | null
+  method?: string | null
+  durationMs?: number | null
+  tsMs?: number
 }
 
-/** Creates the logs dir if needed and returns the next run log path. */
-export function nextJsonlLogPathSync(dir: string, prefix: string): string {
-  mkdirSync(dir, { recursive: true, mode: 0o700 })
-  return join(dir, nextJsonlName(readdirSync(dir), prefix))
-}
+/** Writes one app log row; see `logEventFor` for the rules. */
+export type LogFn = (
+  level: LogLevel,
+  event: string,
+  msg: string,
+  attrs?: unknown,
+  fields?: LogFields,
+) => void
 
-/** Appends one JSON line; returns false instead of throwing. */
-export function appendJsonlLine(
-  path: string,
-  fields: Record<string, unknown>,
-): boolean {
-  try {
-    appendFileSync(path, `${JSON.stringify(fields)}\n`, {
-      encoding: "utf8",
-      mode: 0o600,
-    })
-    return true
-  } catch {
-    return false
-  }
-}
-
-const SNAKE_FIELDS: [keyof TelemetryEvent, string][] = [
-  ["eventId", "event_id"],
-  ["requestId", "request_id"],
-  ["runId", "run_id"],
-  ["jobId", "job_id"],
-  ["tsMs", "ts_ms"],
-  ["durationMs", "duration_ms"],
-  ["event", "event"],
-  ["subsystem", "subsystem"],
-  ["command", "command"],
-  ["accountId", "account_id"],
-  ["profile", "profile"],
-  ["method", "method"],
-  ["attempt", "attempt"],
-  ["outcome", "outcome"],
-  ["errorCode", "error_code"],
-  ["err", "err"],
-  ["waitS", "wait_s"],
-  ["req", "req"],
-  ["res", "res"],
-  ["version", "version"],
-]
-
-/** JSONL shape of a telemetry event: the DB column names, nulls dropped. */
-export function telemetryJsonlFields(
-  event: TelemetryEvent,
-): Record<string, unknown> {
-  const tsMs = event.tsMs ?? Date.now()
-  const fields: Record<string, unknown> = {
-    ts: new Date(tsMs).toISOString(),
-    type: "telemetry",
-  }
-  for (const [key, column] of SNAKE_FIELDS) {
-    const value = event[key]
-    if (value !== undefined && value !== null) fields[column] = value
-  }
-  return fields
+function isLogLevel(value: unknown): value is LogLevel {
+  return (LOG_LEVELS as readonly unknown[]).includes(value)
 }
 
 /**
- * Sink that assigns `eventId`/`tsMs` once, then records the event in `sink`
- * and, when `jsonlPath` is set, appends it to the run log with the same ids.
+ * `event` when it is a dotted lowercase name outside the reserved `tg.*` and
+ * `run.*` namespaces; otherwise `log.<subsystem>`.
  */
-export function teeSink(
-  sink: TelemetrySink,
-  jsonlPath: () => string | null,
-): TelemetrySink {
+export function logEventName(event: string, subsystem: string): string {
+  if (LOG_EVENT_NAME.test(event) && !RESERVED_EVENT.test(event)) return event
+  return `${LOG_EVENT_PREFIX}${subsystem}`
+}
+
+/** Strips control characters and caps the length at `LOG_MSG_MAX_CHARS`. */
+export function cleanLogMsg(msg: string): string {
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping them
+  const text = String(msg).replace(/[\u0000-\u001f\u007f]+/g, " ").trim()
+  return text.length > LOG_MSG_MAX_CHARS
+    ? text.slice(0, LOG_MSG_MAX_CHARS)
+    : text
+}
+
+/**
+ * Builds one app log row for the `event` table.
+ *
+ * - `msg` must be a short constant written in tg-sai code, such as
+ *   `"setup held for flood wait"`. Never interpolate user data, chat titles,
+ *   usernames, message text, or error messages into it; put values in
+ *   `attrs` instead.
+ * - `attrs` pass through `summarizeTl`: numbers, booleans, and `_`
+ *   constructor names survive, every string becomes its length, and
+ *   secret-looking keys are dropped.
+ * - `outcome` is `error` at error level and `ok` otherwise.
+ */
+export function logEventFor(
+  context: TelemetryContext,
+  level: LogLevel,
+  event: string,
+  msg: string,
+  attrs?: unknown,
+  fields: LogFields = {},
+): TelemetryEvent {
+  const safeLevel: LogLevel = isLogLevel(level) ? level : "info"
   return {
-    record(event) {
-      let full = event
-      try {
-        const tsMs = event.tsMs ?? Date.now()
-        full = { ...event, tsMs, eventId: event.eventId ?? uuidv7(tsMs) }
-      } catch {
-        // Fall through with the original event.
-      }
-      try {
-        sink.record(full)
-      } catch {
-        // Sinks should not throw; tolerate one that does.
-      }
-      try {
-        const path = jsonlPath()
-        if (path) appendJsonlLine(path, telemetryJsonlFields(full))
-      } catch {
-        // Ignore.
-      }
-    },
-    dropped: () => sink.dropped(),
-    close: () => sink.close(),
+    runId: context.runId,
+    subsystem: context.subsystem,
+    command: context.command,
+    version: context.version,
+    accountId: fields.accountId ?? context.accountId ?? null,
+    profile: fields.profile ?? context.profile ?? null,
+    jobId: fields.jobId ?? null,
+    requestId: fields.requestId ?? null,
+    method: fields.method ?? null,
+    durationMs: fields.durationMs ?? null,
+    ...(fields.tsMs === undefined ? {} : { tsMs: fields.tsMs }),
+    event: logEventName(event, context.subsystem),
+    outcome: safeLevel === "error" ? "error" : "ok",
+    level: safeLevel,
+    msg: cleanLogMsg(msg),
+    attrs: attrs === undefined ? null : summarizeTl(attrs),
+  }
+}
+
+/** Records one log row in `sink`; never throws. */
+export function recordLog(
+  sink: TelemetrySink,
+  context: TelemetryContext,
+  ...args: Parameters<LogFn>
+): void {
+  try {
+    sink.record(logEventFor(context, ...args))
+  } catch {
+    // Logging must not break the caller.
+  }
+}
+
+export interface StandaloneLogOptions {
+  env?: ProfileStoreEnv
+  subsystem?: TelemetrySubsystem
+  command?: string | null
+  version?: string
+  /** Test seam; defaults to `openTelemetrySink(env)`, closed after use. */
+  sink?: TelemetrySink
+}
+
+/**
+ * Writes one app log row from anywhere. Uses the active run when this
+ * process has one; otherwise opens the telemetry DB for this one row under a
+ * fresh `run_id`. Honors `TG_SAI_TELEMETRY=off`. Never throws.
+ */
+export function log(
+  level: LogLevel,
+  event: string,
+  msg: string,
+  attrs?: unknown,
+  fields?: LogFields,
+  options: StandaloneLogOptions = {},
+): void {
+  const run = options.sink ? null : activeRun
+  if (run) {
+    run.log(level, event, msg, attrs, fields)
+    return
+  }
+  try {
+    const version = options.version ?? "unknown"
+    const sink =
+      options.sink ??
+      openTelemetrySink(options.env ?? process.env, { version })
+    const context: TelemetryContext = {
+      runId: uuidv7(),
+      subsystem: options.subsystem ?? "cli",
+      command: options.command ?? null,
+      version,
+    }
+    recordLog(sink, context, level, event, msg, attrs, fields)
+    if (!options.sink) sink.close()
+  } catch {
+    // Logging must not break the caller.
   }
 }
 
@@ -309,19 +355,18 @@ export interface RunEndInput {
   outcome?: TelemetryOutcome
 }
 
-/** One process-level run: identity, sink, run log, and flood threshold. */
+/** One process-level run: identity, sink, and flood threshold. */
 export interface TelemetryRun {
   readonly context: TelemetryContext
   readonly sink: TelemetrySink
-  readonly jsonlPath: string | null
   readonly floodMaxWaitMs: number
   /** Telemetry for one client; `overrides` add account and profile. */
   client(overrides?: {
     accountId?: number | null
     profile?: string | null
   }): ClientTelemetry
-  /** Appends a non-telemetry line to the run log, stamped with run_id. */
-  appendJsonl(fields: Record<string, unknown>): void
+  /** Writes one app log row for this run; see `logEventFor`. */
+  log: LogFn
   /** Records the run as aborted (signal) when it ends. */
   markAborted(): void
   /** Writes `run.end` and closes the sink. Idempotent. */
@@ -336,9 +381,6 @@ export interface StartRunOptions {
   env?: ProfileStoreEnv
   /** Flood-wait threshold when `TG_SAI_FLOOD_MAX_WAIT_MS` is unset. */
   floodMaxWaitMs?: number
-  /** Run log file prefix; `null` disables the JSONL run log. */
-  logPrefix?: string | null
-  logsDir?: string
   /** Test seam; defaults to `openTelemetrySink(env, {version})`. */
   sink?: TelemetrySink
   stderr?: (line: string) => void
@@ -346,23 +388,14 @@ export interface StartRunOptions {
 
 let activeRun: TelemetryRun | null = null
 
-/** Full error text for the operator's terminal (not for telemetry rows). */
-function stderrText(error: unknown): string {
-  try {
-    return error instanceof Error ? error.message : String(error)
-  } catch {
-    return "unprintable error"
-  }
-}
-
 /** The run started by this process's entry point, if any. */
 export function activeTelemetryRun(): TelemetryRun | null {
   return activeRun
 }
 
 /**
- * Opens the sink once, creates the JSONL run log, and writes `run.start`.
- * Never throws: a log or DB failure only drops that output.
+ * Opens the sink once and writes `run.start`. Never throws: a DB failure
+ * only drops telemetry.
  */
 export function startTelemetryRun(options: StartRunOptions): TelemetryRun {
   const env = options.env ?? process.env
@@ -382,20 +415,8 @@ export function startTelemetryRun(options: StartRunOptions): TelemetryRun {
     command: options.command,
     version: options.version,
   }
-  let jsonlPath: string | null = null
-  if (options.logPrefix !== null) {
-    try {
-      jsonlPath = nextJsonlLogPathSync(
-        options.logsDir ?? join(configDir(env), "logs"),
-        options.logPrefix ?? (options.command ?? "run").replace(/\s+/g, "-"),
-      )
-    } catch (error) {
-      stderr(`tg-sai telemetry: run log disabled: ${stderrText(error)}`)
-    }
-  }
-  const dbSink =
+  const sink =
     options.sink ?? openTelemetrySink(env, { version: options.version, stderr })
-  const sink = teeSink(dbSink, () => jsonlPath)
   const maxWait = floodMaxWaitMs(
     options.subsystem,
     env,
@@ -419,14 +440,12 @@ export function startTelemetryRun(options: StartRunOptions): TelemetryRun {
     req: {
       argv: sanitizeArgv(options.argv),
       floodMaxWaitMs: maxWait,
-      ...(jsonlPath ? { jsonlPath } : {}),
     },
   })
 
   const run: TelemetryRun = {
     context,
     sink,
-    jsonlPath,
     floodMaxWaitMs: maxWait,
     client(overrides = {}) {
       const clientContext: TelemetryContext = {
@@ -440,8 +459,9 @@ export function startTelemetryRun(options: StartRunOptions): TelemetryRun {
         floodWaiter: { maxWait },
       }
     },
-    appendJsonl(fields) {
-      if (jsonlPath) appendJsonlLine(jsonlPath, { ...fields, run_id: runId })
+    log(level, event, msg, attrs, fields) {
+      if (ended) return
+      recordLog(sink, context, level, event, msg, attrs, fields)
     },
     markAborted() {
       aborted = true
@@ -460,7 +480,7 @@ export function startTelemetryRun(options: StartRunOptions): TelemetryRun {
         // Process exit code; read by `tg-sai events runs`.
         errorCode: input.exitCode,
         err: input.error === undefined ? null : safeErrorText(input.error),
-        res: { exitCode: input.exitCode, dropped: dbSink.dropped() },
+        res: { exitCode: input.exitCode, dropped: sink.dropped() },
       })
       sink.close()
       if (activeRun === run) activeRun = null

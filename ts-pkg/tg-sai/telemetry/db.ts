@@ -12,6 +12,9 @@ import eventMigrationSql from "./migrations/0001-event.sql" with {
 import eventJobIndexSql from "./migrations/0002-event-job-index.sql" with {
   type: "text",
 }
+import eventLogSql from "./migrations/0003-event-log.sql" with {
+  type: "text",
+}
 
 export const TELEMETRY_DB_FILE = "telemetry.db"
 export const TELEMETRY_ENV = "TG_SAI_TELEMETRY"
@@ -23,6 +26,12 @@ export const FLOOD_WAIT_EVENT = "tg.flood.wait"
 export const RUN_START_EVENT = "run.start"
 export const RUN_END_EVENT = "run.end"
 export const WORKER_TICK_EVENT = "worker.tick"
+/** Default prefix for app log rows: `log.<subsystem>`. */
+export const LOG_EVENT_PREFIX = "log."
+
+/** Values of the `level` column; only app log rows set it. */
+export const LOG_LEVELS = ["debug", "info", "warn", "error"] as const
+export type LogLevel = (typeof LOG_LEVELS)[number]
 
 export type TelemetryOutcome =
   | "started"
@@ -60,6 +69,12 @@ export interface TelemetryEvent {
   host?: string | null
   pid?: number | null
   version?: string | null
+  /** Set only on app log rows (see `run.ts` `log`). */
+  level?: LogLevel | null
+  /** Short constant text written by tg-sai code; never user data. */
+  msg?: string | null
+  /** Log attributes; must already be a summary, like `req`/`res`. */
+  attrs?: unknown
 }
 
 /** Row shape as stored in the `event` table. */
@@ -86,6 +101,9 @@ export interface EventRow {
   host: string | null
   pid: number | null
   version: string | null
+  level: LogLevel | null
+  msg: string | null
+  attrs: string | null
 }
 
 export interface Migration {
@@ -101,6 +119,7 @@ export interface MigrationResult {
 export const MIGRATIONS: readonly Migration[] = [
   { filename: "0001-event.sql", sql: eventMigrationSql },
   { filename: "0002-event-job-index.sql", sql: eventJobIndexSql },
+  { filename: "0003-event-log.sql", sql: eventLogSql },
 ]
 
 const HISTORY_SQL = `CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -344,14 +363,19 @@ export function eventToParams(
     event.host ?? defaults.host ?? null,
     event.pid ?? defaults.pid ?? null,
     event.version ?? defaults.version ?? null,
+    event.level ?? null,
+    event.msg ?? null,
+    jsonOrNull(event.attrs),
   ]
 }
 
 const INSERT_SQL = `INSERT INTO event (
   event_id, request_id, run_id, job_id, ts_ms, duration_ms, event, subsystem,
   command, account_id, profile, method, attempt, outcome, error_code, err,
-  wait_s, req, res, host, pid, version
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  wait_s, req, res, host, pid, version, level, msg, attrs
+) VALUES (
+  ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+)`
 
 export class SqliteTelemetrySink implements TelemetrySink {
   private droppedCount = 0

@@ -29,6 +29,23 @@ target defaults to the Sai custody account,
 [@SaiTeam_AI](https://t.me/SaiTeam_AI) (user 8274304175), and the bot is
 [@SaiTeam_bot](https://t.me/SaiTeam_bot). `--target-user` overrides the owner.
 
+## Logs
+
+tg-sai writes no log files. Every run records Telegram calls and app log
+rows in the SQLite file `~/.tg-sai/telemetry.db` (`$TG_SAI_DIR` overrides
+`~/.tg-sai`). Read them with `tg-sai events`:
+
+```bash
+tg-sai events logs --since 24h --level warn --subsystem worker
+tg-sai events show <run_id|job_id|request_id>
+tg-sai events runs
+```
+
+Saved Telegram flood waits live in `~/.tg-sai/state.db`. While one is
+active, a CLI command that would send the held call exits with code 75 and
+prints when to retry. `TG_SAI_TELEMETRY=off` turns off `telemetry.db` only;
+`state.db` and its holds still apply.
+
 ## Development
 
 ```bash

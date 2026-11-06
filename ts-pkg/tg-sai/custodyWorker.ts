@@ -2,7 +2,12 @@ import { randomUUID } from "node:crypto"
 import { mkdir, open, readFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import { configDir } from "./profiles"
-import { provisionSetup, safeProvisionError } from "./provisioning"
+import {
+  HOLD_STATE_UNAVAILABLE,
+  HOLD_STATE_UNAVAILABLE_RETRY_MS,
+  provisionSetup,
+  safeProvisionError,
+} from "./provisioning"
 import type {
   ProvisionCloud,
   ProvisionJournal,
@@ -15,6 +20,9 @@ import {
   withAccountLock,
   withProvisionTelegram,
 } from "./provisioningRuntime"
+import { stateDbPath } from "./state/db"
+import { HoldStore, remainingSeconds } from "./state/holds"
+import type { HoldGroup } from "./state/holds"
 import { WORKER_TICK_EVENT } from "./telemetry/db"
 import { withTelemetryJob } from "./telemetry/middleware"
 import type { TelemetryRun } from "./telemetry/run"
@@ -73,12 +81,49 @@ export async function stableWorkerId(root = configDir()): Promise<string> {
   return id
 }
 
+/** Hold groups a setup job uses: resolve handles, create, add members. */
+export const SETUP_HOLD_GROUPS: readonly HoldGroup[] = [
+  "create",
+  "invite",
+  "resolve",
+]
+
+/**
+ * When the custody account's saved flood holds allow setup work again:
+ * the latest `untilMs` of its create, invite, and resolve holds, or
+ * `HOLD_STATE_UNAVAILABLE_RETRY_MS` from now when the store cannot be read.
+ * `null` when no hold applies. Never throws.
+ */
+export function setupHoldUntil(
+  holds: HoldStore,
+  accountId: number,
+  nowMs: number,
+): { untilMs: number; code: string } | null {
+  try {
+    let untilMs = 0
+    for (const grp of SETUP_HOLD_GROUPS) {
+      const hold = holds.activeHold(accountId, grp, nowMs)
+      if (hold && hold.untilMs > untilMs) untilMs = hold.untilMs
+    }
+    return untilMs > nowMs
+      ? { untilMs, code: `TG_SAI_HOLD_${remainingSeconds(untilMs, nowMs)}` }
+      : null
+  } catch {
+    return {
+      untilMs: nowMs + HOLD_STATE_UNAVAILABLE_RETRY_MS,
+      code: HOLD_STATE_UNAVAILABLE,
+    }
+  }
+}
+
 /** One bounded page per tick; authoritative queue and local checks both scope jobs. */
 export async function runWorkerOnce(
   options: WorkerOptions,
   deps: {
     cloud: ProvisionCloud & PendingQueue
     journal: ProvisionJournal
+    /** Saved flood holds; a held account is neither claimed nor contacted. */
+    holds: HoldStore
     telegram: <T>(
       setup: Setup,
       operation: (adapter: TelegramProvisioner) => Promise<T>,
@@ -169,6 +214,12 @@ export async function runWorkerOnce(
       })
       continue
     }
+    const nowMs = options.now ?? Date.now()
+    const hold = setupHoldUntil(deps.holds, setup.expectedUserId, nowMs)
+    if (hold) {
+      results.push(await reportHold(deps.cloud, setup, hold))
+      continue
+    }
     try {
       const result = await deps.telegram(setup, (telegram) =>
         provisionSetup({
@@ -201,6 +252,41 @@ export async function runWorkerOnce(
   return { dryRun: !options.run, results, nextAfter: page.nextAfter }
 }
 
+/**
+ * Waiting result for a held account. An incomplete setup this worker already
+ * holds the claim for gets the hold's end as its cloud `retryAt`, through the
+ * same `progress` call a flood retry uses, so Deal Desk shows the time. Other
+ * setups are not claimed; Deal Desk cannot store a `retryAt` for them.
+ */
+async function reportHold(
+  cloud: ProvisionCloud,
+  setup: Setup,
+  hold: { untilMs: number; code: string },
+): Promise<WorkerResult> {
+  const retryAt = new Date(hold.untilMs).toISOString()
+  const result: WorkerResult = {
+    requestId: setup.requestId,
+    state: "waiting",
+    ...(setup.chatId ? { chatId: setup.chatId } : {}),
+    retryAt,
+    error: hold.code,
+  }
+  if (setup.state !== "incomplete" || !setup.claimToken) return result
+  try {
+    await cloud.progress(setup.requestId, setup.claimToken, {
+      state: "incomplete",
+      ...(setup.chatId ? { chatId: setup.chatId } : {}),
+      ...(setup.binding ? { binding: setup.binding } : {}),
+      error: hold.code,
+      retryAt,
+    })
+  } catch (error) {
+    // The local hold still keeps the job waiting; the cloud may lag.
+    return { ...result, error: `${hold.code}:${safeProvisionError(error)}` }
+  }
+  return result
+}
+
 export async function runCustodyWorker(options: {
   custodyProfile: string
   once?: boolean
@@ -208,8 +294,8 @@ export async function runCustodyWorker(options: {
   limit?: number
   intervalMs?: number
   signal?: AbortSignal
-  /** Process run: worker.tick rows, per-job telemetry, and the run log. */
-  telemetry?: Pick<TelemetryRun, "sink" | "context" | "client" | "appendJsonl">
+  /** Process run: worker.tick rows and per-job telemetry. */
+  telemetry?: Pick<TelemetryRun, "sink" | "context" | "client">
 }): Promise<void> {
   const interval = options.intervalMs ?? 5000
   if (!Number.isSafeInteger(interval) || interval < 1000 || interval > 60000)
@@ -258,45 +344,52 @@ export async function runCustodyWorker(options: {
   }
   const execute = async () => {
     const cloud = new CliProvisionCloud()
+    // Preview never reaches the hold check, so it opens no state file.
+    const holds = options.run
+      ? HoldStore.open(stateDbPath())
+      : HoldStore.unavailable("preview")
     let after: string | undefined
-    do {
-      const tickStartedAt = Date.now()
-      try {
-        const result = await runWorkerOnce(
-          { ...options, workerId, after },
-          {
-            cloud,
-            journal: new FileProvisionJournal(root),
-            telegram,
-          },
-        )
-        after = result.nextAfter ?? undefined
-        const line = { ...result, observedAt: new Date().toISOString() }
-        console.log(JSON.stringify(line))
-        recordTick({ startedAt: tickStartedAt, result })
-        telemetry?.appendJsonl({ type: "worker_tick", ...line })
-      } catch (error) {
-        recordTick({ startedAt: tickStartedAt, error })
-        if (options.once) throw error
-        const line = {
-          state: "worker_tick_failed",
-          observedAt: new Date().toISOString(),
-          retryInMs: interval,
+    try {
+      do {
+        const tickStartedAt = Date.now()
+        try {
+          const result = await runWorkerOnce(
+            { ...options, workerId, after },
+            {
+              cloud,
+              journal: new FileProvisionJournal(root),
+              holds,
+              telegram,
+            },
+          )
+          after = result.nextAfter ?? undefined
+          const line = { ...result, observedAt: new Date().toISOString() }
+          console.log(JSON.stringify(line))
+          recordTick({ startedAt: tickStartedAt, result })
+        } catch (error) {
+          recordTick({ startedAt: tickStartedAt, error })
+          if (options.once) throw error
+          const line = {
+            state: "worker_tick_failed",
+            observedAt: new Date().toISOString(),
+            retryInMs: interval,
+          }
+          console.error(JSON.stringify(line))
         }
-        console.error(JSON.stringify(line))
-        telemetry?.appendJsonl({ type: "worker_tick_failed", ...line })
-      }
-      if (options.once || options.signal?.aborted) break
-      await new Promise<void>((resolve) => {
-        const done = () => {
-          clearTimeout(timer)
-          options.signal?.removeEventListener("abort", done)
-          resolve()
-        }
-        const timer = setTimeout(done, interval)
-        options.signal?.addEventListener("abort", done, { once: true })
-      })
-    } while (!options.signal?.aborted)
+        if (options.once || options.signal?.aborted) break
+        await new Promise<void>((resolve) => {
+          const done = () => {
+            clearTimeout(timer)
+            options.signal?.removeEventListener("abort", done)
+            resolve()
+          }
+          const timer = setTimeout(done, interval)
+          options.signal?.addEventListener("abort", done, { once: true })
+        })
+      } while (!options.signal?.aborted)
+    } finally {
+      holds.close()
+    }
   }
   if (!options.run) return execute()
   await withAccountLock(

@@ -9,6 +9,7 @@ import {
   parseAccountId,
   parseDuration,
   parseLayer,
+  parseLevel,
   parsePositiveInt,
   registerEventsCommand,
   sinceCutoff,
@@ -22,7 +23,9 @@ import {
   IDS,
   NOW_MS,
   seedEvents,
+  seedLogEvents,
   writeSeedDb,
+  writeSeedDbWithLogs,
 } from "./testEvents"
 
 let dir = ""
@@ -364,6 +367,77 @@ describe("events stats", () => {
     expect(out[0]).toContain(`path: ${dbPath}`)
     expect(out[0]).toContain(`rows: ${seedEvents().length}`)
     expect(out[1]?.startsWith("kinds[6]{event,rows}:")).toBe(true)
+  })
+})
+
+describe("events logs", () => {
+  let logPath = ""
+
+  beforeAll(() => {
+    logPath = join(dir, "logs.db")
+    writeSeedDbWithLogs(logPath)
+  })
+
+  test("parseLevel accepts the four levels only", () => {
+    expect(parseLevel("WARN")).toBe("warn")
+    expect(() => parseLevel("fatal")).toThrow(/--level/)
+  })
+
+  test("TOON lists log rows from the last 24h, newest first", async () => {
+    const { out } = await runEvents(["logs"], logPath)
+    const lines = (out[0] ?? "").split("\n")
+    expect(lines[0]).toBe(
+      "logs[4]{ts,level,event,subsystem,msg,attrs,account_id,job_id,run_id}:",
+    )
+    expect(lines[1]).toContain("error,log.worker,worker,worker tick failed")
+    expect(lines[2]).toContain('"{\\"retryInS\\":15382}"')
+  })
+
+  test("filters by level, subsystem, run, and limit", async () => {
+    const parse = async (args: string[]) =>
+      JSON.parse(
+        (await runEvents(["logs", ...args, "--json"], logPath)).out[0] ?? "[]",
+      ) as Record<string, unknown>[]
+    const warn = await parse(["--level", "warn", "--subsystem", "worker"])
+    expect(warn.map((r) => r.msg)).toEqual([
+      "worker tick failed",
+      "setup held for flood wait",
+    ])
+    expect(warn[1]?.attrs).toEqual({ retryInS: 15_382 })
+    const cli = await parse(["--subsystem", "cli", "--since", "30d"])
+    expect(cli).toHaveLength(2)
+    const run = await parse(["--run", IDS.runWorker])
+    expect(run).toHaveLength(3)
+    expect(await parse(["--limit", "1"])).toHaveLength(1)
+    const job = await parse(["--job", IDS.jobWorker])
+    expect(job.map((r) => r.event)).toEqual([
+      "worker.job.held",
+      "worker.job.claimed",
+    ])
+  })
+
+  test("show includes log rows in a job timeline", async () => {
+    const { out } = await runEvents(
+      ["show", IDS.jobWorker, "--json"],
+      logPath,
+    )
+    const rows = JSON.parse(out[0] ?? "[]") as Record<string, unknown>[]
+    const held = rows.find((r) => r.event === "worker.job.held")
+    expect(held).toMatchObject({
+      level: "warn",
+      msg: "setup held for flood wait",
+      attrs: { retryInS: 15_382 },
+    })
+  })
+
+  test("stats count log rows and levels", async () => {
+    const { out } = await runEvents(["stats", "--json"], logPath)
+    const stats = JSON.parse(out[0] ?? "{}") as Record<string, unknown>
+    expect(stats.log_rows).toBe(seedLogEvents().length)
+    expect(stats.levels).toContainEqual({ level: "warn", rows: 2 })
+    const toon = await runEvents(["stats"], logPath)
+    expect(toon.out[0]).toContain(`log_rows: ${seedLogEvents().length}`)
+    expect(toon.out[2]?.startsWith("levels[4]{level,rows}:")).toBe(true)
   })
 })
 

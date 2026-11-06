@@ -218,3 +218,67 @@ export function writeSeedDb(path: string, nowMs: number = NOW_MS): number {
   if (dropped > 0) throw new Error(`seed dropped ${dropped} events`)
   return events.length
 }
+
+/**
+ * App log rows for the seeded runs: worker info/warn/error lines on the
+ * worker job, one CLI debug line, and one 10-day-old warn line.
+ */
+export function seedLogEvents(nowMs: number = NOW_MS): TelemetryEvent[] {
+  let seq = 0
+  const id = (): string => `log-${String(seq++).padStart(4, "0")}`
+  const logs: TelemetryEvent[] = [
+    cliEvent({
+      event: "log.cli",
+      tsMs: nowMs - 2 * HOUR + 2000,
+      level: "debug",
+      msg: "dialogs page read",
+      attrs: { count: 100 },
+    }),
+    workerEvent({
+      event: "worker.job.claimed",
+      tsMs: nowMs - 30 * MIN + 30_000,
+      level: "info",
+      msg: "setup claimed",
+      attrs: { attempt: 1 },
+    }),
+    workerEvent({
+      event: "worker.job.held",
+      tsMs: nowMs - 20 * MIN + 2000,
+      level: "warn",
+      msg: "setup held for flood wait",
+      attrs: { retryInS: 15_382 },
+    }),
+    workerEvent({
+      event: "log.worker",
+      jobId: null,
+      tsMs: nowMs - 10 * MIN,
+      outcome: "error",
+      level: "error",
+      msg: "worker tick failed",
+    }),
+    cliEvent({
+      runId: "run-old",
+      event: "log.cli",
+      tsMs: nowMs - 10 * 24 * HOUR + 1,
+      level: "warn",
+      msg: "old warning",
+    }),
+  ]
+  return logs.map((event) => ({ ...event, eventId: id() }))
+}
+
+/** Writes `seedEvents()` plus `seedLogEvents()` into a new database. */
+export function writeSeedDbWithLogs(
+  path: string,
+  nowMs: number = NOW_MS,
+): number {
+  const count = writeSeedDb(path, nowMs)
+  const db = openTelemetryDb(path)
+  const sink = new SqliteTelemetrySink(db, {}, () => {})
+  const logs = seedLogEvents(nowMs)
+  for (const event of logs) sink.record(event)
+  const dropped = sink.dropped()
+  sink.close()
+  if (dropped > 0) throw new Error(`log seed dropped ${dropped} events`)
+  return count + logs.length
+}

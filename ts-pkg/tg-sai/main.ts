@@ -1,5 +1,4 @@
 #!/usr/bin/env bun
-import { appendFileSync } from "node:fs"
 import {
   mkdir,
   mkdtemp,
@@ -27,7 +26,10 @@ import { planAdminBootstrap } from "./adminAudit"
 import { saiBot, USERS } from "./cfg"
 import { runHealthCheck } from "./health"
 import { addRuntimeHealthCommands } from "./runtimeHealthCli"
+import { holdErrorSeconds } from "./state/guard"
+import { stateDbPath } from "./state/db"
 import { registerEventsCommand } from "./telemetry/cli"
+import { registerHoldsCommand } from "./state/cli"
 import type { TelemetrySubsystem } from "./telemetry/db"
 import {
   activeTelemetryRun,
@@ -196,21 +198,14 @@ const ownerTargetAdminRights = {
 }
 
 const DEFAULT_INTER_CHAT_DELAY_MS = 1000
-let activeJsonLogPath: string | null = null
 
 /**
- * Emits one structured JSON object to stdout and the run's JSONL log. The
- * log copy also carries `run_id` so it lines up with telemetry rows.
+ * Emits one structured JSON object to stdout. Durable records live in the
+ * telemetry DB (`tg-sai events`); stdout is for the operator.
  */
 function emitJsonObject(fields: Record<string, unknown>): void {
   const object = { ts: new Date().toISOString(), ...fields }
   console.log(JSON.stringify(object))
-  const run = activeTelemetryRun()
-  if (run?.jsonlPath && run.jsonlPath === activeJsonLogPath) {
-    run.appendJsonl(object)
-  } else if (activeJsonLogPath) {
-    appendFileSync(activeJsonLogPath, `${JSON.stringify(object)}\n`, "utf8")
-  }
 }
 
 /**
@@ -262,19 +257,21 @@ function printJsonEvent(type: string, fields: Record<string, unknown>): void {
 }
 
 /**
- * Returns the directory for durable tg-sai run and discovery logs.
+ * Directory for `ops sai-find` chat files. These are command output (chat
+ * lists for `ops sai-bootstrap --file`), not logs; logs live in the
+ * telemetry DB.
  */
-function logsDir(): string {
+function chatFilesDir(): string {
   return join(configDir(), "logs")
 }
 
 /**
- * Chooses the next numbered JSONL log path for a named command prefix.
+ * Chooses the next numbered chat file path for a named command prefix.
  *
  * Example output paths are `sai-find-00.jsonl`, `sai-find-01.jsonl`, and so on.
  */
-async function nextJsonlLogPath(prefix: string): Promise<string> {
-  const dir = logsDir()
+async function nextChatFilePath(prefix: string): Promise<string> {
+  const dir = chatFilesDir()
   await mkdir(dir, { recursive: true, mode: 0o700 })
 
   const files = await readdir(dir).catch((error) => {
@@ -401,6 +398,7 @@ async function withClient<T>(
       apiId: env.apiId,
       apiHash: env.apiHash,
       session: env.session,
+      ...(env.userId === null ? {} : { accountId: env.userId }),
     },
     cliTelemetry({ accountId: env.userId, profile: env.profileName }),
   )
@@ -423,6 +421,8 @@ async function runAudit(options: BaseCliOptions): Promise<void> {
 }
 
 async function runHealth(): Promise<void> {
+  // runHealthCheck connects as the active (first) profile.
+  const accountId = (await readConfig()).profiles[0]?.userId ?? null
   const result = await runHealthCheck({
     createClient: async (credentials) =>
       createMtcuteClient(
@@ -430,8 +430,9 @@ async function runHealth(): Promise<void> {
           apiId: credentials.apiId,
           apiHash: credentials.apiHash,
           session: credentials.sessionString,
+          ...(accountId === null ? {} : { accountId }),
         },
-        cliTelemetry(),
+        cliTelemetry({ accountId }),
       ),
   })
   for (const line of result.lines) {
@@ -620,13 +621,13 @@ async function runSaiFind(options: SaiFindOptions): Promise<void> {
     })
     const lines = records.map(formatSaiChatJsonLine)
     const contents = `${lines.join("\n")}\n`
-    const logPath = await nextJsonlLogPath("sai-find")
+    const chatFilePath = await nextChatFilePath("sai-find")
 
-    await writeFile(logPath, contents, {
+    await writeFile(chatFilePath, contents, {
       encoding: "utf8",
       mode: 0o600,
     })
-    console.log(`wrote_chat_file: ${logPath}`)
+    console.log(`wrote_chat_file: ${chatFilePath}`)
     if (options.out) {
       await writeFile(options.out, contents, {
         encoding: "utf8",
@@ -811,28 +812,20 @@ async function runSaiBootstrap(options: SaiBootstrapOptions): Promise<void> {
   if (!Number.isFinite(delayMs) || delayMs < 0) {
     throw new Error("--delay-ms must be a non-negative number")
   }
-  // The run log (sai-bootstrap-NN.jsonl) already holds run.start; reuse it.
-  const runLogPath = activeTelemetryRun()?.jsonlPath ?? null
-  const logPath = runLogPath ?? (await nextJsonlLogPath("sai-bootstrap"))
-  if (!runLogPath) {
-    await writeFile(logPath, "", {
-      encoding: "utf8",
-      mode: 0o600,
-    })
-  }
+  // Telegram calls are in the telemetry DB under this run id.
+  const runId = activeTelemetryRun()?.context.runId ?? null
 
   await withClient(options.profile, async (client, env) => {
-    activeJsonLogPath = logPath
     const actor = normalizeUser(await client.getMe())
     const actorUsername = actor.username ?? ""
     const profileName = await selectedProfileName(options.profile)
     const ownerTarget = resolveBootstrapTarget(options.targetUser)
     const ownershipTransferEnabled =
       options.transferOwner !== false && env.password !== null
-    console.log(`wrote_run_log: ${logPath}`)
+    if (runId) console.log(`telemetry_run_id: ${runId}`)
     printJsonEvent("run_start", {
       file: options.file,
-      logPath,
+      runId,
       profileName,
       actor,
       chatCount: chats.length,
@@ -847,95 +840,91 @@ async function runSaiBootstrap(options: SaiBootstrapOptions): Promise<void> {
     const maxWaitMs =
       activeTelemetryRun()?.floodMaxWaitMs ??
       floodMaxWaitMs("cli", process.env, BOOTSTRAP_FLOOD_MAX_WAIT_MS)
-    try {
-      const { floodStop } = await runChatBatch(chats, {
-        maxWaitMs,
-        processItem: async (chat, i) => {
-          printJsonEvent("chat_start", {
-            index: i + 1,
-            total: chats.length,
-            chatId: chat.chatId,
-            title: chat.title,
-            actorUsername,
-          })
-          await applyTargetPlan({
-            client,
-            chat,
-            actorUsername,
-            targetUserId: saiBot.id,
-            targetPeer: saiBot.handle,
-            rights: saiBotAdminRights,
-            actionPrefix: "bot",
-            run: options.run === true,
-          })
-          await applyTargetPlan({
-            client,
-            chat,
-            actorUsername,
-            targetUserId: ownerTarget,
-            targetPeer: ownerTarget,
-            rights: ownerTargetAdminRights,
-            actionPrefix: "owner_target",
-            run: options.run === true,
-          })
-          await maybeTransferOwner({
-            client,
-            env,
-            chat,
-            actorUsername,
-            targetUser: ownerTarget,
-            enabled: ownershipTransferEnabled,
-            run: options.run === true,
-          })
-          printJsonEvent("chat_complete", {
-            chatId: chat.chatId,
-            actorUsername,
-          })
-        },
-        onItemError: (chat, error) => {
-          printJsonEvent("chat_error", {
-            chatId: chat.chatId,
-            actorUsername,
-            errorName: error instanceof Error ? error.name : "UnknownError",
-            errorMessage:
-              error instanceof Error ? error.message : String(error),
-          })
-        },
-        betweenItems: async (chat) => {
-          if (delayMs <= 0) return
-          printJsonEvent("chat_delay", {
-            chatId: chat.chatId,
-            actorUsername,
-            delayMs,
-          })
-          await sleep(delayMs)
-        },
-      })
-
-      if (floodStop) {
-        // The rest of the batch would hit the same account-wide limit.
-        printJsonEvent("flood_stop", {
-          chatId: floodStop.item.chatId,
-          actorUsername,
-          index: floodStop.index + 1,
+    const { floodStop } = await runChatBatch(chats, {
+      maxWaitMs,
+      processItem: async (chat, i) => {
+        printJsonEvent("chat_start", {
+          index: i + 1,
           total: chats.length,
-          remaining: floodStop.remaining,
-          code: floodStop.code,
-          waitS: floodStop.waitS,
-          resumeAt: floodStop.resumeAt,
+          chatId: chat.chatId,
+          title: chat.title,
+          actorUsername,
         })
-        process.exitCode = 1
-        return
-      }
+        await applyTargetPlan({
+          client,
+          chat,
+          actorUsername,
+          targetUserId: saiBot.id,
+          targetPeer: saiBot.handle,
+          rights: saiBotAdminRights,
+          actionPrefix: "bot",
+          run: options.run === true,
+        })
+        await applyTargetPlan({
+          client,
+          chat,
+          actorUsername,
+          targetUserId: ownerTarget,
+          targetPeer: ownerTarget,
+          rights: ownerTargetAdminRights,
+          actionPrefix: "owner_target",
+          run: options.run === true,
+        })
+        await maybeTransferOwner({
+          client,
+          env,
+          chat,
+          actorUsername,
+          targetUser: ownerTarget,
+          enabled: ownershipTransferEnabled,
+          run: options.run === true,
+        })
+        printJsonEvent("chat_complete", {
+          chatId: chat.chatId,
+          actorUsername,
+        })
+      },
+      onItemError: (chat, error) => {
+        printJsonEvent("chat_error", {
+          chatId: chat.chatId,
+          actorUsername,
+          errorName: error instanceof Error ? error.name : "UnknownError",
+          errorMessage:
+            error instanceof Error ? error.message : String(error),
+        })
+      },
+      betweenItems: async (chat) => {
+        if (delayMs <= 0) return
+        printJsonEvent("chat_delay", {
+          chatId: chat.chatId,
+          actorUsername,
+          delayMs,
+        })
+        await sleep(delayMs)
+      },
+    })
 
-      printJsonEvent("run_complete", {
-        file: options.file,
-        logPath,
-        chatCount: chats.length,
+    if (floodStop) {
+      // The rest of the batch would hit the same account-wide limit.
+      printJsonEvent("flood_stop", {
+        chatId: floodStop.item.chatId,
+        actorUsername,
+        index: floodStop.index + 1,
+        total: chats.length,
+        remaining: floodStop.remaining,
+        code: floodStop.code,
+        waitS: floodStop.waitS,
+        resumeAt: floodStop.resumeAt,
       })
-    } finally {
-      activeJsonLogPath = runLogPath
+      process.exitCode = 1
+      return
     }
+
+    printJsonEvent("run_complete", {
+      file: options.file,
+      runId,
+      chatCount: chats.length,
+    })
   })
 }
 
@@ -1308,6 +1297,10 @@ async function inputFromProfileAddOptions(
     }
   }
 
+  const knownUserId =
+    options.userId && /^\d+$/.test(options.userId)
+      ? Number(options.userId)
+      : undefined
   const completeProfileFields: TelegramCredentials = {
     apiId: profileFields.apiId,
     apiHash: profileFields.apiHash,
@@ -1318,8 +1311,10 @@ async function inputFromProfileAddOptions(
       apiId: completeProfileFields.apiId,
       apiHash: completeProfileFields.apiHash,
       session: completeProfileFields.sessionString,
+      // Known only when --user-id was given; getMe itself is never held.
+      ...(knownUserId === undefined ? {} : { accountId: knownUserId }),
     },
-    cliTelemetry({ profile: options.name ?? null }),
+    cliTelemetry({ accountId: knownUserId ?? null, profile: options.name ?? null }),
   )
   try {
     const self = await client.getMe()
@@ -1740,6 +1735,8 @@ If apiId/apiHash are missing, create a Telegram API app at:
   addProvisionCommands(program)
   addCustodyWorkerCommands(program)
   registerEventsCommand(program)
+  registerHoldsCommand(program)
+  installBareHelp(program)
   return program
 }
 
@@ -1757,16 +1754,6 @@ function subsystemFor(path: string): TelemetrySubsystem {
   if (path === "worker") return "worker"
   if (path === "health") return "health"
   return "cli"
-}
-
-/**
- * Run log prefix: the path with dashes, except `sai-bootstrap`, which keeps
- * its historical `sai-bootstrap-NN.jsonl` name. `ops sai-find` becomes
- * `ops-sai-find`, which never collides with its `sai-find-NN.jsonl` chat file.
- */
-function runLogPrefix(path: string): string {
-  if (path === "ops sai-bootstrap") return "sai-bootstrap"
-  return path.replace(/\s+/g, "-")
 }
 
 /** Commands that only read telemetry; they do not record runs of their own. */
@@ -1798,32 +1785,191 @@ function endRunOnSignal(path: string): void {
 
 function startCliTelemetryRun(actionCommand: Command): void {
   const path = commandPath(actionCommand)
+  if (helpOnlyCommands.has(actionCommand)) return
   if (skipsTelemetry(path) || activeTelemetryRun()) return
-  const run = startTelemetryRun({
+  startTelemetryRun({
     subsystem: subsystemFor(path),
     command: path,
     argv: process.argv.slice(2),
     version: packageJson.version,
-    logPrefix: runLogPrefix(path),
     ...(path === "ops sai-bootstrap"
       ? { floodMaxWaitMs: BOOTSTRAP_FLOOD_MAX_WAIT_MS }
       : {}),
   })
-  activeJsonLogPath = run.jsonlPath
   endRunOnSignal(path)
 }
 
-createProgram()
-  .parseAsync()
-  .then(
-    () => {
-      activeTelemetryRun()?.end({
-        exitCode: Number(process.exitCode ?? 0),
-      })
-    },
-    (error) => {
-      activeTelemetryRun()?.end({ exitCode: 1, error })
-      console.error(error)
-      process.exit(1)
-    },
+// ---------------------------------------------------------------------------
+// Bare commands print help
+
+/** Groups whose only action prints help; they record no telemetry run. */
+const helpOnlyCommands = new WeakSet<Command>()
+
+/** Commander keeps the action handler private; read it without casting. */
+function hasAction(command: Command): boolean {
+  return (command as unknown as { _actionHandler?: unknown })._actionHandler
+    ? true
+    : false
+}
+
+/**
+ * Makes every command group without an action print its help when called
+ * bare, with exit code 0 (commander's default is help on stderr, exit 1).
+ */
+export function installBareHelp(command: Command): void {
+  for (const sub of command.commands) installBareHelp(sub)
+  if (command.commands.length === 0 || hasAction(command)) return
+  helpOnlyCommands.add(command)
+  command.action(() => {
+    command.help({ error: false })
+  })
+}
+
+/** True when the command has a required argument or mandatory option. */
+export function hasRequiredInput(command: Command): boolean {
+  return (
+    command.registeredArguments.some((arg) => arg.required) ||
+    command.options.some((option) => option.mandatory)
   )
+}
+
+/**
+ * The leaf command `args` name when it has required input and `args` hold
+ * nothing past its name, e.g. `tg-sai audit`. Such a call prints that
+ * command's help instead of a missing-option error. Any extra token, even a
+ * wrong one, returns null so commander reports the usual error.
+ */
+export function bareHelpTarget(
+  program: Command,
+  args: readonly string[],
+): Command | null {
+  let command = program
+  for (const arg of args) {
+    const next = command.commands.find(
+      (sub) => sub.name() === arg || sub.aliases().includes(arg),
+    )
+    if (!next) return null
+    command = next
+  }
+  if (command === program || command.commands.length > 0) return null
+  return hasRequiredInput(command) ? command : null
+}
+
+// ---------------------------------------------------------------------------
+// Exit codes
+
+/** `EX_TEMPFAIL`: retry later. Used while Telegram limits the account. */
+export const HOLD_EXIT_CODE = 75
+const HOLD_STATE_UNAVAILABLE = "TG_SAI_HOLD_STATE_UNAVAILABLE"
+
+export interface HoldExit {
+  exitCode: typeof HOLD_EXIT_CODE
+  /** One line for stderr. */
+  message: string
+}
+
+interface HoldLike {
+  code?: unknown
+  text?: unknown
+  message?: unknown
+  untilMs?: unknown
+  grp?: unknown
+  cause?: unknown
+}
+
+function holdText(error: HoldLike): string | null {
+  if (typeof error.text === "string") return error.text
+  if (typeof error.message === "string") return error.message
+  return null
+}
+
+function holdLike(value: unknown): HoldLike | null {
+  return typeof value === "object" && value !== null
+    ? (value as HoldLike)
+    : null
+}
+
+/** UTC timestamp without milliseconds, e.g. `2026-11-06T16:20:05Z`. */
+function utcSeconds(ms: number): string {
+  return new Date(ms).toISOString().replace(/\.\d{3}Z$/, "Z")
+}
+
+/** `4h 16m`, `12m 5s`, or `40s`. */
+export function shortDuration(totalS: number): string {
+  const s = Math.max(0, Math.round(totalS))
+  const h = Math.floor(s / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  if (h > 0) return `${h}h ${m}m`
+  if (m > 0) return `${m}m ${s % 60}s`
+  return `${s}s`
+}
+
+/**
+ * Maps a saved flood hold (`HoldError`, `TG_SAI_HOLD_<s>`, code 420) or an
+ * unreadable `state.db` (`TG_SAI_HOLD_STATE_UNAVAILABLE`) to exit 75 with a
+ * one-line message. Looks through `error.cause` chains. Returns null for
+ * every other error.
+ */
+export function holdExitFor(
+  error: unknown,
+  nowMs: number = Date.now(),
+): HoldExit | null {
+  let current = holdLike(error)
+  for (let depth = 0; current && depth < 8; depth += 1) {
+    const text = holdText(current)
+    if (text === HOLD_STATE_UNAVAILABLE) {
+      return {
+        exitCode: HOLD_EXIT_CODE,
+        message:
+          "tg-sai: cannot read saved Telegram limits in " +
+          `${stateDbPath()}; invite/create calls stay blocked and nothing ` +
+          "was sent. Fix the file, then retry.",
+      }
+    }
+    const seconds = holdErrorSeconds(text)
+    const codeOk = current.code === undefined || current.code === 420
+    if (seconds !== null && codeOk) {
+      const untilMs =
+        typeof current.untilMs === "number" && Number.isFinite(current.untilMs)
+          ? current.untilMs
+          : nowMs + seconds * 1000
+      const grp = typeof current.grp === "string" ? current.grp : "this"
+      const waitS = Math.max(0, Math.ceil((untilMs - nowMs) / 1000))
+      return {
+        exitCode: HOLD_EXIT_CODE,
+        message:
+          `tg-sai: Telegram is limiting ${grp} calls for this account; ` +
+          `nothing was sent. Resume after ${utcSeconds(untilMs)} ` +
+          `(in ${shortDuration(waitS)}).`,
+      }
+    }
+    current = holdLike(current.cause)
+  }
+  return null
+}
+
+// ---------------------------------------------------------------------------
+// Entry point
+
+async function main(): Promise<void> {
+  const program = createProgram()
+  const args = process.argv.slice(2)
+  const helpTarget = bareHelpTarget(program, args)
+  if (helpTarget) {
+    helpTarget.outputHelp()
+    return
+  }
+  try {
+    await program.parseAsync()
+  } catch (error) {
+    const hold = holdExitFor(error)
+    const exitCode = hold?.exitCode ?? 1
+    activeTelemetryRun()?.end({ exitCode, error })
+    if (hold) console.error(hold.message)
+    else console.error(error)
+    process.exit(exitCode)
+  }
+  activeTelemetryRun()?.end({ exitCode: Number(process.exitCode ?? 0) })
+}
+
+if (import.meta.main) await main()

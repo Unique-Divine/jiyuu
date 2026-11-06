@@ -278,6 +278,8 @@ export async function withProvisionTelegram<T>(
       apiHash: credentials.apiHash,
       session: credentials.sessionString,
       storage: paths.storage,
+      // Keys the saved flood-hold guard to the custody account.
+      accountId: request.expectedUserId,
     }, withTelemetryIdentity(telemetry, {
       accountId: request.expectedUserId,
       profile: request.custodyProfile,
@@ -320,13 +322,16 @@ export async function withProvisionTelegram<T>(
         floodSleepThreshold: 0,
         maxRetryCount: 0,
       })
+      // Create and add never sleep through a flood wait: the error reaches
+      // provisioning, which saves its retry time and releases the worker.
+      const writeClient = client.withParams({ floodSleepThreshold: 0 })
       const adapter: TelegramProvisioner = {
         self: async () => (await client.getMe()).id,
         resolve: (peer) =>
           resolveProvisioningPeer((value) => client.getUser(value), peer),
         create: async (title, marker) =>
           (
-            await createSupergroup(client, {
+            await createSupergroup(writeClient, {
               title,
               description: marker,
               forum: false,
@@ -334,7 +339,7 @@ export async function withProvisionTelegram<T>(
           ).id,
         member,
         add: async (chatId, userId) => {
-          const missing = await addChatMembers(client, chatId, userId, {
+          const missing = await addChatMembers(writeClient, chatId, userId, {
             forwardCount: 0,
           })
           if (missing.length)
@@ -342,6 +347,12 @@ export async function withProvisionTelegram<T>(
               text: "USER_PRIVACY_RESTRICTED",
             })
         },
+        addMany: async (chatId, userIds) =>
+          (
+            await addChatMembers(writeClient, chatId, userIds, {
+              forwardCount: 0,
+            })
+          ).map((invitee) => invitee.userId),
         inviteLink: async (chatId) => {
           const expires = new Date(Date.now() + 24 * 60 * 60 * 1000)
           const link = await createInviteLink(client, chatId, {

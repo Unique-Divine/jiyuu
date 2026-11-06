@@ -108,7 +108,8 @@ export async function checkTelegramRuntimeHealth(
     const paths = accountPaths(configDir(), HEALTH_CUSTODY_USER_ID)
     await withAccountLock(paths.lock, async () => {
       const client = await createMtcuteClient({ apiId: credentials.apiId,
-        apiHash: credentials.apiHash, session: credentials.sessionString, storage: paths.storage },
+        apiHash: credentials.apiHash, session: credentials.sessionString, storage: paths.storage,
+        accountId: HEALTH_CUSTODY_USER_ID },
         withTelemetryIdentity(options.telemetry, {
           accountId: HEALTH_CUSTODY_USER_ID, profile: options.custodyProfile }))
       try {

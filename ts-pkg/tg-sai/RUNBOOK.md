@@ -232,10 +232,11 @@ Find Sai-related chats visible to the active Telegram session:
 tg-sai ops sai-find
 ```
 
-Command `tg-sai ops sai-find` always writes a JSONL file under directory
-`~/.tg-sai/logs/`, using the next available filename such as
-`sai-find-00.jsonl` or `sai-find-01.jsonl`. Use flag `--out <path>` to also
-write a copy somewhere else.
+Command `tg-sai ops sai-find` always writes its chat list as a JSONL file
+under directory `~/.tg-sai/logs/`, using the next available filename such as
+`sai-find-00.jsonl` or `sai-find-01.jsonl`. This file is command output for
+`ops sai-bootstrap --file`, not a log. Use flag `--out <path>` to also write a
+copy somewhere else.
 
 Dry-run Sai bot and owner-target updates from a reviewed chat file:
 
@@ -243,16 +244,16 @@ Dry-run Sai bot and owner-target updates from a reviewed chat file:
 tg-sai ops sai-bootstrap --file ~/.tg-sai/logs/sai-find-00.jsonl
 ```
 
-Command `tg-sai ops sai-bootstrap` always writes a JSONL run log under directory
-`~/.tg-sai/logs/`, using the next available filename such as
-`sai-bootstrap-00.jsonl` or `sai-bootstrap-01.jsonl`. The command waits one
-second between chats by default. Use flag `--delay-ms <ms>` to change that
+Command `tg-sai ops sai-bootstrap` prints one JSON event per line on stdout
+and its `telemetry_run_id`; redirect stdout if you want a copy. Its Telegram
+calls are in the telemetry database: `tg-sai events show <run_id>`. The
+command waits one second between chats by default. Use flag `--delay-ms <ms>` to change that
 delay. When environment variable `TELEGRAM_PASSWORD` is available, execution
 mode attempts ownership transfer by default for eligible chats.
 
 The command sleeps through flood waits up to five minutes (environment
 variable `TG_SAI_FLOOD_MAX_WAIT_MS` overrides). A longer `FLOOD_WAIT_X` or any
-`PEER_FLOOD` stops the remaining chats: the log gets a `flood_stop` event with
+`PEER_FLOOD` stops the remaining chats: stdout gets a `flood_stop` event with
 the chat, the remaining count, the code, and `resumeAt`, and the command exits
 with code 1. A `SLOWMODE_WAIT_X` fails only that chat.
 
@@ -305,6 +306,41 @@ TELEGRAM_PASSWORD="<2fa password>" tg-sai add-owner \
   --target-user <target-user> \
   --run
 ```
+
+## Logs, Telemetry, and Flood Holds
+
+tg-sai writes no JSONL run logs. Earlier versions wrote
+`~/.tg-sai/logs/<command>-NN.jsonl` and `sai-bootstrap-NN.jsonl`; those files
+stay readable but nothing new is added. Each process records into SQLite file
+`~/.tg-sai/telemetry.db` (`$TG_SAI_DIR/telemetry.db`):
+
+- `run.start` and `run.end` rows with the sanitized argv and exit code.
+- `tg.rpc.call`, `tg.rpc.attempt`, and `tg.flood.wait` rows for Telegram
+  calls, with summarized request and response shapes.
+- App log rows: a `level` (`debug`, `info`, `warn`, `error`), a short fixed
+  `msg`, and summarized `attrs`. Their `event` is `log.<subsystem>` or a
+  dotted name such as `worker.job.held`.
+
+Read it with `tg-sai events`. Output is TOON; add `--json` for JSON.
+
+```bash
+tg-sai events logs --since 24h --level warn --subsystem worker
+tg-sai events logs --run <run_id> --limit 200
+tg-sai events show <run_id|job_id|request_id>   # calls and log rows
+tg-sai events runs
+tg-sai events floods --since 7d
+tg-sai events stats                             # rows, log rows by level
+```
+
+Saved flood waits live in a separate file, `~/.tg-sai/state.db`. Every tg-sai
+process checks it before invite, create, resolve, and send calls. While a
+hold is active, a CLI command exits with code 75 and one stderr line naming
+the held call group and the UTC time to retry. If `state.db` cannot be read,
+invite and create calls are blocked, and the command also exits 75.
+
+`TG_SAI_TELEMETRY=off` disables `telemetry.db` writes only. Flood holds in
+`state.db` still apply, and `tg-sai events` reads whatever was recorded
+before.
 
 ## File roles
 

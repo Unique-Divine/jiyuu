@@ -102,7 +102,11 @@ describe("migrations", () => {
     ).get()
     expect(fk?.foreign_keys).toBe(1)
     expect(applyMigrations(db)).toEqual({
-      applied: ["0001-event.sql", "0002-event-job-index.sql"],
+      applied: [
+        "0001-event.sql",
+        "0002-event-job-index.sql",
+        "0003-event-log.sql",
+      ],
       pending: [],
     })
     db.close()
@@ -121,6 +125,10 @@ describe("migrations", () => {
         filename: "0002-event-job-index.sql",
         checksum: migrationChecksum(MIGRATIONS[1]!.sql),
       },
+      {
+        filename: "0003-event-log.sql",
+        checksum: migrationChecksum(MIGRATIONS[2]!.sql),
+      },
     ])
     const indexes = again
       .query<{ name: string }, []>(
@@ -132,6 +140,7 @@ describe("migrations", () => {
     expect(indexes).toEqual([
       "event_account_method_event_ts",
       "event_job_id",
+      "event_level_ts_ms",
       "event_request_id",
       "event_run_id",
       "event_ts_ms",
@@ -171,7 +180,7 @@ describe("migrations", () => {
     const path = join(dir, "t.db")
     const broken = [
       ...MIGRATIONS,
-      { filename: "0003-bad.sql", sql: "CREATE TABLE x (a INT); NOPE;" },
+      { filename: "0004-bad.sql", sql: "CREATE TABLE x (a INT); NOPE;" },
     ]
     expect(() => openTelemetryDb(path, broken)).toThrow()
     const db = new Database(path)
@@ -202,7 +211,48 @@ describe("migrations", () => {
         [uuidv7()],
       ),
     ).toThrow()
+    const insertLog = (level: string, attrs: string | null) =>
+      db.run(
+        "INSERT INTO event (event_id, run_id, ts_ms, event, subsystem, " +
+          "outcome, level, attrs) VALUES (?, 'r', 1, 'log.cli', 'cli', " +
+          "'ok', ?, ?)",
+        [uuidv7(), level, attrs],
+      )
+    expect(() => insertLog("info", '{"n":1}')).not.toThrow()
+    expect(() => insertLog("fatal", null)).toThrow()
+    expect(() => insertLog("info", "{not json")).toThrow()
     db.close()
+  })
+
+  test("0003 applies on a database that has 0001 and 0002", () => {
+    const path = join(dir, "old.db")
+    const old = openTelemetryDb(path, MIGRATIONS.slice(0, 2))
+    old.run(
+      "INSERT INTO event (event_id, run_id, ts_ms, event, subsystem, " +
+        "outcome) VALUES ('old-row', 'r', 1, 'tg.rpc.call', 'cli', 'ok')",
+    )
+    old.close()
+
+    const db = openTelemetryDb(path)
+    const history = db
+      .query<{ filename: string; checksum: string }, []>(
+        "SELECT filename, checksum FROM schema_migrations ORDER BY filename",
+      )
+      .all()
+    expect(history).toEqual(
+      MIGRATIONS.map((m) => ({
+        filename: m.filename,
+        checksum: migrationChecksum(m.sql),
+      })),
+    )
+    const row = db
+      .query<EventRow, []>("SELECT * FROM event WHERE event_id = 'old-row'")
+      .get()
+    expect(row).toMatchObject({ level: null, msg: null, attrs: null })
+    expect(applyMigrations(db).pending).toEqual([])
+    db.close()
+    // Reopening verifies every stored checksum again.
+    expect(() => openTelemetryDb(path).close()).not.toThrow()
   })
 })
 
@@ -243,6 +293,33 @@ describe("SqliteTelemetrySink", () => {
       host: "test-host",
       pid: 4242,
       version: "0.0.6",
+      level: null,
+      msg: null,
+      attrs: null,
+    })
+    sink.close()
+  })
+
+  test("log rows round-trip level, msg, and attrs", () => {
+    const db = openTelemetryDb(join(dir, "t.db"))
+    const sink = new SqliteTelemetrySink(db, {}, () => {})
+    sink.record({
+      runId: "r",
+      event: "log.worker",
+      subsystem: "worker",
+      outcome: "ok",
+      level: "warn",
+      msg: "setup held",
+      attrs: { retryInS: 60 },
+    })
+    expect(sink.dropped()).toBe(0)
+    const row = db
+      .query<EventRow, []>("SELECT * FROM event WHERE event = 'log.worker'")
+      .get()
+    expect(row).toMatchObject({
+      level: "warn",
+      msg: "setup held",
+      attrs: '{"retryInS":60}',
     })
     sink.close()
   })

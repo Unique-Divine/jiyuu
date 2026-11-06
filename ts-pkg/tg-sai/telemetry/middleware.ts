@@ -14,6 +14,18 @@ import type {
   TelemetrySubsystem,
 } from "./db"
 import { summarizeRequest, summarizeTl } from "./summarize"
+import type { FloodGuard } from "../state/guard"
+
+/** Request ID of a call in flight, for rows written outside telemetry. */
+export type RequestIdOf = (ctx: RpcCallMiddlewareContext) => string | null
+
+/**
+ * A flood guard, or a factory given telemetry's `RequestIdOf` so saved
+ * holds carry the request ID of the call that hit the wait.
+ */
+export type TelemetryFloodGuard =
+  | FloodGuard
+  | ((requestIdOf: RequestIdOf) => FloodGuard)
 
 /** Identity stamped on every row a client writes. */
 export interface TelemetryContext {
@@ -261,11 +273,14 @@ function defaultWaitWarning(
 
 /**
  * Builds the full network middleware list for a telemetry-enabled client:
- * `[outer, ...basic({ floodWaiter }), inner]`.
+ * `[outer, ...basic({ floodWaiter }), inner]`, or with `guard`
+ * `[outer, check, ...basic({ floodWaiter }), inner, record]`.
  *
  * - outer: one `tg.rpc.call` row when a call starts and one when it ends.
  * - inner: one `tg.rpc.attempt` row per request that reaches the wire.
  * - `onBeforeWait`: one `tg.flood.wait` row each time mtcute sleeps.
+ * - check: refuses held calls before `basic()`, so outer logs them as
+ *   errors with 0 attempts; record saves holds from wire results only.
  *
  * Logging never throws and never changes the call's result.
  */
@@ -273,8 +288,12 @@ export function createTelemetryMiddlewares(
   sink: TelemetrySink,
   ctxProvider: TelemetryContextProvider,
   floodOpts: FloodWaiterOptions = {},
+  guard?: TelemetryFloodGuard,
 ): RpcCallMiddleware[] {
   const calls = new WeakMap<object, CallState>()
+  const requestIdOf: RequestIdOf = (ctx) => calls.get(ctx)?.requestId ?? null
+  const floodGuard =
+    typeof guard === "function" ? guard(requestIdOf) : guard
 
   const record = (
     state: CallState | undefined,
@@ -436,13 +455,11 @@ export function createTelemetryMiddlewares(
     }
   }
 
-  return [
-    outer,
-    ...networkMiddlewares.basic({
-      floodWaiter: { ...floodOpts, onBeforeWait },
-    }),
-    inner,
-  ]
+  const basic = networkMiddlewares.basic({
+    floodWaiter: { ...floodOpts, onBeforeWait },
+  })
+  if (!floodGuard) return [outer, ...basic, inner]
+  return [outer, floodGuard.check, ...basic, inner, floodGuard.record]
 }
 
 /** Same telemetry with the account and profile filled in. */

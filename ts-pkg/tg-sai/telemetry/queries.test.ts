@@ -1,14 +1,18 @@
-import type { Database } from "bun:sqlite"
+import { Database } from "bun:sqlite"
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
+import { MIGRATIONS, openTelemetryDb } from "./db"
 import {
   countEvents,
   eventStats,
   exportEvents,
   floodReport,
+  hasLogColumns,
+  levelsAtOrAbove,
+  logEvents,
   openTelemetryReadOnly,
   parseCountBy,
   recentRuns,
@@ -22,8 +26,11 @@ import {
   NOW_MS,
   PERSONAL_ACCOUNT,
   seedEvents,
+  seedLogEvents,
   writeSeedDb,
+  writeSeedDbWithLogs,
 } from "./testEvents"
+
 
 const DAY = 86_400_000
 let dir = ""
@@ -279,6 +286,7 @@ describe("eventStats and exportEvents", () => {
     const seeded = seedEvents()
     const stats = eventStats(db)
     expect(stats.rows).toBe(seeded.length)
+    expect(stats.log_rows).toBe(0)
     expect(stats.oldest_ms).toBe(NOW_MS - 10 * DAY)
     expect(stats.newest_ms).toBe(NOW_MS - 20 * 60_000 + 1005)
     const byKind = Object.fromEntries(
@@ -302,5 +310,79 @@ describe("eventStats and exportEvents", () => {
     expect(week).toHaveLength(all.length - 1)
     const ts = week.map((r) => r.ts_ms)
     expect(ts).toEqual([...ts].sort((a, b) => a - b))
+  })
+})
+
+describe("log rows", () => {
+  let logDir = ""
+  let logDb: Database
+
+  beforeAll(() => {
+    logDir = mkdtempSync(join(tmpdir(), "tg-sai-logs-"))
+    const logPath = join(logDir, "telemetry.db")
+    writeSeedDbWithLogs(logPath)
+    logDb = openTelemetryReadOnly(logPath)
+  })
+
+  afterAll(() => {
+    logDb.close()
+    rmSync(logDir, { recursive: true, force: true })
+  })
+
+  test("levelsAtOrAbove orders debug < info < warn < error", () => {
+    expect(levelsAtOrAbove("warn")).toEqual(["warn", "error"])
+    expect(levelsAtOrAbove("debug")).toHaveLength(4)
+  })
+
+  test("logEvents returns only log rows, newest first", () => {
+    const rows = logEvents(logDb, { limit: 50 })
+    expect(rows.map((r) => r.msg)).toEqual([
+      "worker tick failed",
+      "setup held for flood wait",
+      "setup claimed",
+      "dialogs page read",
+      "old warning",
+    ])
+    expect(rows.every((r) => r.level !== null)).toBe(true)
+    expect(rows[1]?.attrs).toBe('{"retryInS":15382}')
+  })
+
+  test("logEvents filters by level, subsystem, run, window, and limit", () => {
+    const warn = logEvents(logDb, {
+      limit: 50,
+      minLevel: "warn",
+      sinceMs: NOW_MS - DAY,
+    })
+    expect(warn.map((r) => r.level)).toEqual(["error", "warn"])
+    const cli = logEvents(logDb, { limit: 50, subsystem: "cli" })
+    expect(cli.map((r) => r.event)).toEqual(["log.cli", "log.cli"])
+    const run = logEvents(logDb, { limit: 50, runId: IDS.runWorker })
+    expect(run).toHaveLength(3)
+    expect(logEvents(logDb, { limit: 1 })).toHaveLength(1)
+  })
+
+  test("show timelines include log rows", () => {
+    const job = showTimeline(logDb, IDS.jobWorker)
+    expect(job.map((r) => r.event)).toContain("worker.job.held")
+    const run = showTimeline(logDb, IDS.runWorker)
+    expect(run.filter((r) => r.level !== null)).toHaveLength(3)
+  })
+
+  test("stats count log rows by level", () => {
+    const stats = eventStats(logDb)
+    expect(stats.rows).toBe(seedEvents().length + seedLogEvents().length)
+    expect(stats.log_rows).toBe(seedLogEvents().length)
+    expect(Object.fromEntries(stats.levels.map((l) => [l.level, l.rows])))
+      .toEqual({ debug: 1, info: 1, warn: 2, error: 1 })
+  })
+
+  test("a pre-0003 database reads as having no log rows", () => {
+    const oldPath = join(logDir, "old.db")
+    openTelemetryDb(oldPath, MIGRATIONS.slice(0, 2)).close()
+    const old = new Database(oldPath, { readonly: true })
+    expect(hasLogColumns(old)).toBe(false)
+    expect(logEvents(old, { limit: 10 })).toEqual([])
+    expect(eventStats(old)).toMatchObject({ log_rows: 0, levels: [] })
+    old.close()
   })
 })

@@ -1,14 +1,21 @@
 // No Telegram connection anywhere: a real client builds its real mtcute
 // NetworkManager with our middlewares, and its private `_call` (the hop to
 // the DC) is replaced with a queue of canned results, as in the #42 spike.
-import { describe, expect, test } from "bun:test"
-import { mkdtempSync, readFileSync, rmSync } from "node:fs"
+import { afterEach, beforeEach, describe, expect, test } from "bun:test"
+import { mkdtempSync, readdirSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import { MtPeerNotFoundError, MtTimeoutError, tl } from "@mtcute/bun"
 
-import { createMtcuteRuntimeClient } from "../mtcuteAdapter"
+import {
+  clientMiddlewares,
+  closeProcessHoldStores,
+  createMtcuteRuntimeClient,
+} from "../mtcuteAdapter"
+import { HoldError } from "../state/guard"
+import { HoldStore } from "../state/holds"
+import { stateDbPath } from "../state/db"
 import {
   openTelemetryDb,
   SqliteTelemetrySink,
@@ -31,6 +38,25 @@ import {
   startTelemetryRun,
   REDACTED,
 } from "./run"
+
+// Every client now carries the flood guard, whose store is `state.db` under
+// TG_SAI_DIR. Each test gets its own directory so holds never leak between
+// tests or into the real config dir.
+const savedTgSaiDir = process.env.TG_SAI_DIR
+let stateDir: string
+
+beforeEach(() => {
+  closeProcessHoldStores()
+  stateDir = mkdtempSync(join(tmpdir(), "tg-sai-mw-state-"))
+  process.env.TG_SAI_DIR = stateDir
+})
+
+afterEach(() => {
+  closeProcessHoldStores()
+  if (savedTgSaiDir === undefined) delete process.env.TG_SAI_DIR
+  else process.env.TG_SAI_DIR = savedTgSaiDir
+  rmSync(stateDir, { recursive: true, force: true })
+})
 
 /** In-memory sink: a real array of the events it was given. */
 class MemorySink implements TelemetrySink {
@@ -182,8 +208,12 @@ describe("createTelemetryMiddlewares", () => {
   })
 
   test("stored flood: synthetic error with zero attempts", async () => {
+    // No account: the guard passes through, so mtcute's stored wait answers.
     const sink = new MemorySink()
-    const { nm, transport } = build([flood(15382)], sink)
+    const { nm, transport } = makeNetwork(
+      { sink, context: () => ({ ...CONTEXT, accountId: null }) },
+      [flood(15382)],
+    )
     await nm.call({ _: "channels.inviteToChannel" })
     sink.events.length = 0
 
@@ -405,7 +435,7 @@ describe("run helpers", () => {
 })
 
 describe("createMtcuteRuntimeClient with telemetry", () => {
-  test("rows land in a temp DB and the JSONL run log share ids", async () => {
+  test("rows land in a temp DB with one run id", async () => {
     const dir = mkdtempSync(join(tmpdir(), "tg-sai-telemetry-client-"))
     try {
       const db = openTelemetryDb(join(dir, "telemetry.db"))
@@ -450,26 +480,143 @@ describe("createMtcuteRuntimeClient with telemetry", () => {
       expect(rows[1]).toMatchObject({ account_id: 99, profile: "p" })
       expect(rows[4]).toMatchObject({ outcome: "ok", error_code: 0 })
 
-      const lines = readFileSync(run.jsonlPath!, "utf8")
-        .trim()
-        .split("\n")
-        .map((line) => JSON.parse(line))
-      expect(run.jsonlPath).toBe(join(dir, "logs", "audit-00.jsonl"))
-      expect(lines.map((l) => l.event_id)).toEqual(
-        rows.map((r) => r.event_id),
-      )
-      expect(lines[1].request_id).toBe(rows[1]?.request_id)
+      // JSONL run logs were removed; the DB is the only record.
+      expect(readdirSync(dir)).not.toContain("logs")
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
   })
 
-  test("without telemetry the client keeps mtcute's default middlewares", () => {
+  test("without telemetry the client gets the guard around basic()", () => {
     const client: any = createMtcuteRuntimeClient({
       apiId: 1,
       apiHash: "0".repeat(32),
       storage: ":memory:",
     })
-    expect(client._client.mt.network.params.middlewares).toBeUndefined()
+    // check + floodWaiter + internalErrorsHandler + record
+    expect(client._client.mt.network.params.middlewares).toHaveLength(4)
+    expect(clientMiddlewares(undefined, undefined)).toHaveLength(4)
+    // With telemetry: outer + check + 2 basic + inner + record
+    expect(
+      clientMiddlewares(undefined, {
+        sink: new MemorySink(),
+        context: () => CONTEXT,
+      }),
+    ).toHaveLength(6)
+  })
+})
+
+/** Real client whose transport answers from `results`; no telemetry. */
+function plainNetwork(results: unknown[], accountId?: number) {
+  const client: any = createMtcuteRuntimeClient({
+    apiId: 1,
+    apiHash: "0".repeat(32),
+    storage: ":memory:",
+    ...(accountId === undefined ? {} : { accountId }),
+  })
+  const nm = client._client.mt.network
+  const transport: unknown[] = []
+  nm._call = async (request: unknown) => {
+    transport.push(request)
+    return results.length > 1 ? results.shift() : results[0]
+  }
+  return { nm, transport }
+}
+
+const INVITE = { _: "channels.inviteToChannel" }
+
+function savedHolds(): ReturnType<HoldStore["activeHolds"]> {
+  const store = HoldStore.open(stateDbPath())
+  try {
+    return store.activeHolds()
+  } finally {
+    store.close()
+  }
+}
+
+describe("flood guard through a real NetworkManager", () => {
+  test("a saved FLOOD_WAIT_400 refuses the call in a new client", async () => {
+    const first = build([flood(400)])
+    expect(await first.nm.call(INVITE)).toEqual(flood(400))
+    expect(first.transport).toHaveLength(1)
+    const holds = savedHolds()
+    expect(holds).toHaveLength(1)
+    expect(holds[0]).toMatchObject({
+      accountId: "42",
+      grp: "invite",
+      method: "channels.inviteToChannel",
+      waitS: 400,
+      source: "flood_wait",
+    })
+    const startedId = (first.sink as MemorySink).of("tg.rpc.call")[0]
+      ?.requestId
+    expect(holds[0]?.requestId).toBe(startedId!)
+
+    // Like a restart: drop the open store; the next client reopens state.db.
+    closeProcessHoldStores()
+    const sink = new MemorySink()
+    const second = build([{ _: "updates" }], sink)
+    const error = await second.nm.call(INVITE).catch((e: unknown) => e)
+    expect(error).toBeInstanceOf(HoldError)
+    expect((error as HoldError).message).toMatch(/^TG_SAI_HOLD_\d+$/)
+    expect((error as HoldError).seconds).toBeGreaterThan(400)
+    expect(second.transport).toEqual([])
+
+    expect(sink.of("tg.rpc.attempt")).toEqual([])
+    const done = sink.of("tg.rpc.call").at(-1)
+    expect(done).toMatchObject({
+      outcome: "error",
+      attempt: 0,
+      errorCode: 420,
+      method: "channels.inviteToChannel",
+    })
+    expect(done?.err).toMatch(/^HoldError \[420 TG_SAI_HOLD_\d+\]$/)
+  })
+
+  test("a short FLOOD_WAIT_3 on sendMessage is slept, not saved", async () => {
+    const { nm, transport, waits } = build([flood(3), { _: "updates" }])
+    expect(await nm.call({ _: "messages.sendMessage" })).toEqual({
+      _: "updates",
+    })
+    expect(waits).toEqual([3])
+    expect(transport).toHaveLength(2)
+    expect(savedHolds()).toEqual([])
+  }, 8000)
+
+  test("works without telemetry, keyed by config.accountId", async () => {
+    const first = plainNetwork([flood(400)], 7)
+    expect(await first.nm.call(INVITE)).toEqual(flood(400))
+    expect(savedHolds()).toMatchObject([
+      { accountId: "7", grp: "invite", requestId: null },
+    ])
+
+    closeProcessHoldStores()
+    const second = plainNetwork([{ _: "updates" }], 7)
+    await expect(second.nm.call(INVITE)).rejects.toBeInstanceOf(HoldError)
+    expect(second.transport).toEqual([])
+
+    // Another account, and a client with no account, still go through.
+    const other = plainNetwork([{ _: "updates" }], 8)
+    expect(await other.nm.call(INVITE)).toEqual({ _: "updates" })
+    const anonymous = plainNetwork([{ _: "updates" }])
+    expect(await anonymous.nm.call(INVITE)).toEqual({ _: "updates" })
+  })
+
+  test("config.accountId wins over the telemetry context", async () => {
+    const sink = new MemorySink()
+    const client: any = createMtcuteRuntimeClient(
+      { apiId: 1, apiHash: "0".repeat(32), storage: ":memory:", accountId: 5 },
+      { sink, context: () => CONTEXT },
+    )
+    const nm = client._client.mt.network
+    nm._call = async () => flood(400)
+    await nm.call(INVITE)
+    expect(savedHolds().map((h) => h.accountId)).toEqual(["5"])
+  })
+
+  test("a client with no account never creates state.db", async () => {
+    const { nm } = plainNetwork([flood(400)])
+    await nm.call(INVITE)
+    expect(readdirSync(stateDir)).toEqual([])
   })
 })

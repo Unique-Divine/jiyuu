@@ -7,13 +7,14 @@ import { Database } from "bun:sqlite"
 
 import {
   ATTEMPT_EVENT,
+  LOG_LEVELS,
   CALL_EVENT,
   FLOOD_WAIT_EVENT,
   RUN_END_EVENT,
   RUN_START_EVENT,
   WORKER_TICK_EVENT,
 } from "./db"
-import type { EventRow } from "./db"
+import type { EventRow, LogLevel } from "./db"
 
 /** Outcomes that count as failures. */
 export const ERROR_OUTCOMES = ["error", "timeout", "aborted"] as const
@@ -335,6 +336,67 @@ LIMIT ?`,
     .all(limit)
 }
 
+/**
+ * True when the `event` table has the 0003 log columns. Read-only opens skip
+ * migrations, so an old database may lack them.
+ */
+export function hasLogColumns(db: Database): boolean {
+  const columns = db
+    .query<{ name: string }, []>("PRAGMA table_info(event)")
+    .all()
+    .map((row) => row.name)
+  return columns.includes("level")
+}
+
+/** `level` and every more severe level, e.g. `warn` → `warn`, `error`. */
+export function levelsAtOrAbove(level: LogLevel): LogLevel[] {
+  const index = LOG_LEVELS.indexOf(level)
+  if (index === -1) throw new Error(`Unknown log level: ${level}`)
+  return LOG_LEVELS.slice(index)
+}
+
+export interface LogQuery {
+  limit: number
+  sinceMs?: number
+  /** Minimum level; rows at this level or more severe. */
+  minLevel?: LogLevel
+  subsystem?: string
+  runId?: string
+  jobId?: string
+}
+
+/** Newest-first app log rows (`level IS NOT NULL`). */
+export function logEvents(db: Database, options: LogQuery): EventRow[] {
+  if (!hasLogColumns(db)) return []
+  const { clauses, params } = filterClauses({
+    sinceMs: options.sinceMs,
+    runId: options.runId,
+  })
+  if (options.minLevel !== undefined) {
+    const levels = levelsAtOrAbove(options.minLevel)
+    clauses.push(`e.level IN (${levels.map(() => "?").join(", ")})`)
+    params.push(...levels)
+  }
+  if (options.subsystem !== undefined) {
+    clauses.push("e.subsystem = ?")
+    params.push(options.subsystem)
+  }
+  if (options.jobId !== undefined) {
+    clauses.push("e.job_id = ?")
+    params.push(options.jobId)
+  }
+  const sql = `SELECT e.* FROM event e
+WHERE e.level IS NOT NULL${andAll(clauses)}
+ORDER BY e.ts_ms DESC, e.event_id DESC
+LIMIT ?`
+  return db.query<EventRow, SqlParam[]>(sql).all(...params, options.limit)
+}
+
+export interface LevelCount {
+  level: LogLevel
+  rows: number
+}
+
 export interface KindCount {
   event: string
   rows: number
@@ -344,7 +406,10 @@ export interface EventStats {
   rows: number
   oldest_ms: number | null
   newest_ms: number | null
+  /** App log rows (`level IS NOT NULL`). */
+  log_rows: number
   kinds: KindCount[]
+  levels: LevelCount[]
 }
 
 export function eventStats(db: Database): EventStats {
@@ -363,11 +428,21 @@ export function eventStats(db: Database): EventStats {
         "ORDER BY rows DESC, event",
     )
     .all()
+  const levels = hasLogColumns(db)
+    ? db
+        .query<LevelCount, []>(
+          "SELECT level, COUNT(*) AS rows FROM event " +
+            "WHERE level IS NOT NULL GROUP BY level ORDER BY rows DESC, level",
+        )
+        .all()
+    : []
   return {
     rows: totals?.rows ?? 0,
     oldest_ms: totals?.oldest_ms ?? null,
     newest_ms: totals?.newest_ms ?? null,
+    log_rows: levels.reduce((sum, row) => sum + row.rows, 0),
     kinds,
+    levels,
   }
 }
 

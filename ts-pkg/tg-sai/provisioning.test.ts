@@ -6,7 +6,9 @@ import { addProfile, strictProfileCredentials } from "./profiles"
 import {
   BOT_BASELINE_RIGHTS,
   creationMarker,
+  definiteCreateRejection,
   PROVISIONING_BOT_ID,
+  provisionRetryAt,
   provisionSetup,
   requestFingerprint,
   safeProvisionError,
@@ -28,6 +30,8 @@ import {
   cloudRequest,
   dealDeskRequestKey,
 } from "./provisioningCloud"
+import { HoldError } from "./state/guard"
+import { HoldStoreUnavailableError } from "./state/holds"
 import {
   accountPaths,
   FileProvisionJournal,
@@ -822,5 +826,195 @@ describe("account and cloud boundaries", () => {
     expect(() =>
       validateRequest({ ...request(), title: "x".repeat(129) }),
     ).toThrow("title")
+  })
+})
+
+describe("flood and hold retry times", () => {
+  const now = Date.parse("2026-11-06T00:00:00Z")
+  const after = (ms: number) => new Date(now + ms).toISOString()
+  test("Telegram floods and local holds map to retryAt", () => {
+    const hold = new HoldError(now + 90_500, "create", now)
+    expect(hold.text).toBe("TG_SAI_HOLD_91")
+    const cases: [unknown, string | null][] = [
+      [{ text: "FLOOD_WAIT_30", code: 420 }, after(30_000)],
+      [{ text: "FLOOD_WAIT_%d", seconds: 40, code: 420 }, after(40_000)],
+      [{ text: "FLOOD_PREMIUM_WAIT_12", code: 420 }, after(12_000)],
+      [{ text: "PEER_FLOOD", code: 400 }, after(24 * 3_600_000)],
+      // The hold's exact end wins over its rounded seconds.
+      [hold, after(90_500)],
+      [{ text: "TG_SAI_HOLD_45", code: 420 }, after(45_000)],
+      [new HoldStoreUnavailableError("locked"), after(5 * 60_000)],
+      [{ text: "USER_PRIVACY_RESTRICTED", code: 403 }, null],
+      [{ text: "FLOOD_WAIT_0", code: 420 }, null],
+      [new Error("FLOOD_WAIT_30"), null],
+    ]
+    for (const [error, expected] of cases)
+      expect(provisionRetryAt(error, now)).toBe(expected)
+  })
+  test("error codes stay code-only and holds count as definite rejections", () => {
+    const hold = new HoldError(now + 90_000, "create", now)
+    const unavailable = new HoldStoreUnavailableError("/private/path/state.db")
+    expect(safeProvisionError(hold)).toBe("TG_SAI_HOLD_90")
+    expect(safeProvisionError(unavailable)).toBe(
+      "TG_SAI_HOLD_STATE_UNAVAILABLE",
+    )
+    expect(safeProvisionError({ text: "PEER_FLOOD" })).toBe("PEER_FLOOD")
+    expect(safeProvisionError({ text: "FLOOD_PREMIUM_WAIT_7" })).toBe(
+      "FLOOD_PREMIUM_WAIT_7",
+    )
+    expect(safeProvisionError({ text: "TG_SAI_HOLD_x" })).toBe(
+      "provisioning_step_failed",
+    )
+    for (const error of [
+      hold,
+      unavailable,
+      { text: "PEER_FLOOD", code: 400 },
+      { text: "FLOOD_PREMIUM_WAIT_7", code: 420 },
+    ])
+      expect(definiteCreateRejection(error)).toBe(true)
+    // A hold text without the guard's code is not proof of a refusal.
+    expect(definiteCreateRejection({ text: "TG_SAI_HOLD_9", code: 500 })).toBe(
+      false,
+    )
+    expect(
+      definiteCreateRejection({
+        text: "TG_SAI_HOLD_STATE_UNAVAILABLE",
+        code: 420,
+      }),
+    ).toBe(false)
+  })
+  test("a held creation is rejected with the hold's end as retryAt", async () => {
+    const f = fixture()
+    const untilMs = Date.now() + 120_000
+    f.telegram.create = async () => {
+      throw new HoldError(untilMs, "create")
+    }
+    await expect(f.run()).rejects.toThrow("Group creation failed")
+    expect(f.setup.state).toBe("incomplete")
+    expect(f.setup.retryAt).toBe(new Date(untilMs).toISOString())
+    expect((f.setup as Setup & { error: string }).error).toMatch(
+      /^TG_SAI_HOLD_\d+$/,
+    )
+    expect(
+      (f.setup as Setup & { creationRejected?: boolean }).creationRejected,
+    ).toBe(true)
+  })
+})
+
+describe("batched member adds", () => {
+  function batched(f: ReturnType<typeof fixture>) {
+    const batches: number[][] = []
+    f.setup = { ...f.setup, optionalParticipants: ["alice"] }
+    f.telegram.inviteLink = async (_chat, userId) => {
+      f.events.push(`link:${userId}`)
+      return {
+        inviteLink: "https://t.me/+fixtureLink",
+        expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+      }
+    }
+    return batches
+  }
+  test("one add call covers every absent user; a missing optional user gets a link", async () => {
+    const f = fixture()
+    const batches = batched(f)
+    f.telegram.addMany = async (_chat, ids) => {
+      batches.push(ids)
+      for (const id of ids)
+        if (id !== 21) f.members.set(id, { role: "member", rights: {} })
+      return [21]
+    }
+    f.telegram.add = async () => {
+      throw new Error("must batch")
+    }
+    expect((await f.run()).state).toBe("ready")
+    expect(batches).toEqual([[21, 22, PROVISIONING_BOT_ID]])
+    expect(f.events.filter((e) => e.startsWith("link:"))).toEqual(["link:21"])
+    const receipt = f.setup.receipt as {
+      pendingInvitations: Record<string, string>[]
+      participants: { userId: string; role: string }[]
+    }
+    expect(receipt.pendingInvitations).toEqual([
+      {
+        userId: "21",
+        inviteLink: "https://t.me/+fixtureLink",
+        expiresAt: expect.any(String),
+        reason: "privacy_restricted",
+      },
+    ])
+    expect(receipt.participants.map((p) => [p.userId, p.role])).toEqual([
+      ["21", "absent"],
+      ["22", "admin"],
+    ])
+  })
+  test("a privacy error on the batch falls back to per-user adds", async () => {
+    const f = fixture()
+    const batches = batched(f)
+    f.telegram.addMany = async (_chat, ids) => {
+      batches.push(ids)
+      throw { text: "USER_NOT_MUTUAL_CONTACT", code: 400 }
+    }
+    const add = f.telegram.add
+    f.telegram.add = async (chat, id) => {
+      if (id === 21) throw { text: "USER_PRIVACY_RESTRICTED", code: 403 }
+      return add(chat, id)
+    }
+    expect((await f.run()).state).toBe("ready")
+    expect(batches).toHaveLength(1)
+    expect(f.events.filter((e) => /^(add|link):/.test(e))).toEqual([
+      `add:22`,
+      `add:${PROVISIONING_BOT_ID}`,
+      "link:21",
+    ])
+  })
+  test("a required user's privacy refusal still adds the others, then fails", async () => {
+    const f = fixture()
+    batched(f)
+    f.telegram.addMany = async (_chat, ids) => {
+      for (const id of ids)
+        if (id !== 22) f.members.set(id, { role: "member", rights: {} })
+      return [22]
+    }
+    await expect(f.run()).rejects.toThrow("Setup incomplete")
+    expect(f.members.get(21)?.role).toBe("member")
+    expect(f.members.get(PROVISIONING_BOT_ID)?.role).toBe("member")
+    expect((f.setup as Setup & { error: string }).error).toBe(
+      "add_member:USER_PRIVACY_RESTRICTED",
+    )
+    expect(f.setup.retryAt).toBeNull()
+  })
+  test("a flood or hold on the batch propagates its retry time without per-user adds", async () => {
+    for (const error of [
+      { text: "FLOOD_WAIT_%d", seconds: 50, code: 420 },
+      new HoldError(Date.now() + 50_000, "invite"),
+    ]) {
+      const f = fixture()
+      batched(f)
+      f.telegram.addMany = async () => {
+        throw error
+      }
+      f.telegram.add = async () => {
+        throw new Error("must not retry per user")
+      }
+      await expect(f.run()).rejects.toThrow("Setup incomplete")
+      expect(f.setup.state).toBe("incomplete")
+      expect(Date.parse(f.setup.retryAt!)).toBeGreaterThan(Date.now() + 40_000)
+      expect((f.setup as Setup & { error: string }).error).toMatch(
+        /^add_member:(?:FLOOD_WAIT_50|TG_SAI_HOLD_\d+)$/,
+      )
+      expect(f.events.filter((e) => e.startsWith("link:"))).toEqual([])
+    }
+  })
+  test("members already present are not added again", async () => {
+    const f = fixture()
+    const batches = batched(f)
+    f.members.set(21, { role: "member", rights: {} })
+    f.telegram.addMany = async (_chat, ids) => {
+      batches.push(ids)
+      for (const id of ids) f.members.set(id, { role: "member", rights: {} })
+      return []
+    }
+    expect((await f.run()).state).toBe("ready")
+    expect(batches).toEqual([[22, PROVISIONING_BOT_ID]])
+    expect(f.setup.receipt).not.toHaveProperty("pendingInvitations")
   })
 })
