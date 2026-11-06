@@ -38,7 +38,7 @@ export interface BackgroundPacing {
 export const BACKGROUND_GAP_ENV = "TG_SAI_BACKGROUND_GAP_MS"
 export const BACKGROUND_DAILY_MAX_ENV = "TG_SAI_BACKGROUND_DAILY_MAX"
 export const DEFAULT_BACKGROUND_GAP_MS = 20 * 60 * 1000
-export const DEFAULT_BACKGROUND_DAILY_MAX = 6
+export const DEFAULT_BACKGROUND_DAILY_MAX = 10
 export const BACKGROUND_JITTER = 0.3
 /** Attempts after which an unexplained error marks a row failed. */
 export const MAX_BACKGROUND_ATTEMPTS = 5
@@ -56,7 +56,7 @@ function envInt(
 
 /**
  * Pacing from `TG_SAI_BACKGROUND_GAP_MS` (default 20 min, at least 1000)
- * and `TG_SAI_BACKGROUND_DAILY_MAX` (default 6, 0 stops background adds).
+ * and `TG_SAI_BACKGROUND_DAILY_MAX` (default 10, 0 stops background adds).
  * Invalid values fall back to the defaults.
  */
 export function backgroundPacing(

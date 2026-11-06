@@ -75,7 +75,7 @@ invite hold:
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `TG_SAI_BACKGROUND_GAP_MS` | `1200000` (20 min) | Gap between adds, ±30 % |
-| `TG_SAI_BACKGROUND_DAILY_MAX` | `6` | Daily cap on member adds; `0` stops background adds |
+| `TG_SAI_BACKGROUND_DAILY_MAX` | `10` | Daily cap on member adds; `0` stops background adds |
 
 A privacy refusal ends the row as `privacy` with no new link; the member
 joins through the shared link, and the refusal does not count toward the

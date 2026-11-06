@@ -27,7 +27,7 @@ describe("background pacing", () => {
       jitter: 0.3,
     })
     expect(DEFAULT_BACKGROUND_GAP_MS).toBe(20 * 60 * 1000)
-    expect(DEFAULT_BACKGROUND_DAILY_MAX).toBe(6)
+    expect(DEFAULT_BACKGROUND_DAILY_MAX).toBe(10)
     expect(
       backgroundPacing({
         TG_SAI_BACKGROUND_GAP_MS: "60000",
