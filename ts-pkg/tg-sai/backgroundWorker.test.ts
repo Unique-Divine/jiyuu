@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test"
 
-import { backgroundEnqueue, drainBackgroundOnce } from "./backgroundWorker"
+import {
+  backgroundEnqueue,
+  drainBackgroundOnce,
+  recordingMemberAdds,
+} from "./backgroundWorker"
 import type { TelegramProvisioner } from "./provisioning"
 import { HoldError } from "./state/guard"
 import { BackgroundQueue, nextUtcDayMs } from "./state/background"
@@ -72,6 +76,14 @@ describe("background drain", () => {
     expect(f.queue.summary()).toEqual({ pending: 1, nextAtMs: NOW + 1_200_000 })
     expect((await f.drain(NOW + 1_200_000)).userId).toBe(2)
     expect(f.queue.addsToday(NOW + 1_200_000)).toBe(2)
+    f.queue.recordAdds({
+      source: "setup",
+      outcome: "added",
+      chatId: -300,
+      userIds: [8],
+      nowMs: NOW,
+    })
+    expect(f.queue.addsToday(NOW + 1_200_000)).toBe(3)
   })
   test("gap jitter stays within ±30 %", async () => {
     for (const [r, gap] of [
@@ -86,8 +98,15 @@ describe("background drain", () => {
   })
   test("the daily cap stops adds until the next UTC day", async () => {
     const f = fixture()
-    f.enqueue([1, 2, 3, 4, 5, 6, 7])
-    for (let i = 0; i < 6; i++) f.queue.finish(-100, i + 1, "added", null, NOW)
+    f.enqueue([7])
+    // Setup adds alone can reach the cap: it counts the account's total.
+    f.queue.recordAdds({
+      source: "setup",
+      outcome: "added",
+      chatId: -300,
+      userIds: [1, 2, 3, 4, 5, 6],
+      nowMs: NOW,
+    })
     const result = await f.drain(NOW + 1)
     expect(result).toMatchObject({ state: "capped", userId: 7 })
     expect(result.nextAtMs).toBe(nextUtcDayMs(NOW))
@@ -242,6 +261,39 @@ describe("background drain", () => {
     f.enqueue([1])
     await f.drain()
     expect(f.queue.forChat(-100)[0]!.attempts).toBe(0)
+  })
+  test("setup adds log each user added or refused alone, never privacy", async () => {
+    const f = fixture()
+    let now = NOW
+    const base = {
+      add: async (_chat: number, userId: number) => {
+        if (userId === 2) throw { text: "USER_PRIVACY_RESTRICTED", code: 403 }
+        if (userId === 3) throw { text: "USER_CHANNELS_TOO_MUCH", code: 400 }
+        if (userId === 4) throw { text: "FLOOD_WAIT_%d", seconds: 60, code: 420 }
+      },
+      addMany: async (_chat: number, userIds: number[]) =>
+        userIds.filter((id) => id === 12),
+    } as unknown as TelegramProvisioner
+    const adapter = recordingMemberAdds(base, f.queue, () => now)
+    await adapter.add(-1, 1)
+    for (const userId of [2, 3, 4])
+      await adapter.add(-1, userId).catch(() => {})
+    expect(await adapter.addMany!(-1, [11, 12, 13])).toEqual([12])
+    expect(f.queue.addsToday(NOW)).toBe(4)
+    now = nextUtcDayMs(NOW)
+    await adapter.add(-1, 5)
+    expect(f.queue.addsToday(now)).toBe(1)
+  })
+  test("a background add and a per-user refusal both count", async () => {
+    const f = fixture({
+      add: async (userId) => {
+        if (userId === 2) throw { text: "USER_CHANNELS_TOO_MUCH", code: 400 }
+      },
+    })
+    f.enqueue([1, 2])
+    await f.drain()
+    await f.drain(NOW + 1_200_000)
+    expect(f.queue.addsToday(NOW + 1_200_000)).toBe(2)
   })
   test("enqueue adapter starts rows one jittered gap out", () => {
     const f = fixture()

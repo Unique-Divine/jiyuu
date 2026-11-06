@@ -5,6 +5,7 @@ import {
   backgroundEnqueue,
   drainBackgroundOnce,
   openBackgroundQueue,
+  recordingMemberAdds,
 } from "./backgroundWorker"
 import type { DrainResult } from "./backgroundWorker"
 import {
@@ -433,6 +434,14 @@ export async function runCustodyWorker(options: {
       } catch {
         queue = null
       }
+    // Setup adds count toward the account's adds today and the daily cap.
+    const setupTelegram = <T>(
+      setup: Setup,
+      operation: (adapter: TelegramProvisioner) => Promise<T>,
+    ): Promise<T> =>
+      telegram(setup, (adapter) =>
+        operation(queue ? recordingMemberAdds(adapter, queue) : adapter),
+      )
     const pacing = backgroundPacing()
     const drain = queue
       ? () =>
@@ -492,7 +501,7 @@ export async function runCustodyWorker(options: {
               cloud,
               journal: new FileProvisionJournal(root),
               holds,
-              telegram,
+              telegram: setupTelegram,
               ...(queue ? { background: backgroundEnqueue(queue) } : {}),
               ...(drain ? { drain } : {}),
             },

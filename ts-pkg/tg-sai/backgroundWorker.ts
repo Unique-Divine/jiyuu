@@ -46,6 +46,66 @@ export function backgroundEnqueue(
   }
 }
 
+/**
+ * `adapter` with `add` and `addMany` logging each user Telegram added, or
+ * refused for that user alone, to `queue` as `setup` adds. Privacy
+ * refusals and whole-call errors (floods, holds) log nothing. A failed
+ * log write never fails the add.
+ */
+export function recordingMemberAdds(
+  adapter: TelegramProvisioner,
+  queue: Pick<BackgroundQueue, "recordAdds">,
+  now: () => number = Date.now,
+): TelegramProvisioner {
+  const record = (
+    chatId: number,
+    userIds: number[],
+    outcome: "added" | "refused",
+  ) => {
+    if (!userIds.length) return
+    try {
+      queue.recordAdds({
+        source: "setup",
+        outcome,
+        chatId,
+        userIds,
+        nowMs: now(),
+      })
+    } catch {
+      // The add happened; a missed count only undercounts today.
+    }
+  }
+  const addMany = adapter.addMany?.bind(adapter)
+  return {
+    ...adapter,
+    add: async (chatId, userId) => {
+      try {
+        await adapter.add(chatId, userId)
+      } catch (error) {
+        if (isPerUserAddError(error) && !isPrivacyRestriction(error))
+          record(chatId, [userId], "refused")
+        throw error
+      }
+      record(chatId, [userId], "added")
+    },
+    ...(addMany
+      ? {
+          // A refused batch falls back to `add` per user, which logs.
+          addMany: async (chatId: number, userIds: number[]) => {
+            const missing = await addMany(chatId, userIds)
+            const skipped = new Set(missing)
+            record(
+              chatId,
+              userIds.filter((id) => !skipped.has(id)),
+              "added",
+            )
+            return missing
+          },
+        }
+      : {}),
+  }
+}
+
 /** What one drain step did. */
 export interface DrainResult {
   state:
@@ -81,7 +141,9 @@ function inviteHoldUntil(
 
 /**
  * One background add, when one is due, the daily cap allows, and no invite
- * hold is active. Success marks the row `added`; a privacy refusal marks it
+ * hold is active. The cap counts every member add the account made today
+ * (`BackgroundQueue.addsToday`, setup adds included), so background adds
+ * stop once the total reaches `dailyMax`. Success marks the row `added`; a privacy refusal marks it
  * `privacy` and makes no link, since the ready receipt's shared
  * `background_queue` link already covers the member, and does not count
  * toward the daily cap; another per-user refusal is `failed`. A flood or
@@ -141,6 +203,14 @@ export async function drainBackgroundOnce(params: {
     })
     .catch((error: unknown) => ({ state: "error" as const, error }))
   if (outcome.state !== "error") {
+    if (outcome.state === "added")
+      queue.recordAdds({
+        source: "background",
+        outcome: "added",
+        chatId: row.chatId,
+        userIds: [row.userId],
+        nowMs,
+      })
     queue.finish(
       row.chatId,
       row.userId,
@@ -177,6 +247,13 @@ export async function drainBackgroundOnce(params: {
     isPerUserAddError(outcome.error) ||
     row.attempts + 1 >= MAX_BACKGROUND_ATTEMPTS
   ) {
+    queue.recordAdds({
+      source: "background",
+      outcome: "refused",
+      chatId: row.chatId,
+      userIds: [row.userId],
+      nowMs,
+    })
     queue.finish(row.chatId, row.userId, "failed", code, nowMs)
     queue.pace(paced)
     return { state: "failed", ...at, error: code, nextAtMs: paced }

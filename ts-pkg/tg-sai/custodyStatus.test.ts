@@ -43,6 +43,21 @@ describe("custody status report", () => {
       notBeforeMs: NOW + 1_200_000,
     })
     queue.finish(-100, 4, "added", null, NOW)
+    // One background add and two setup adds: the account's adds today.
+    queue.recordAdds({
+      source: "background",
+      outcome: "added",
+      chatId: -100,
+      userIds: [4],
+      nowMs: NOW,
+    })
+    queue.recordAdds({
+      source: "setup",
+      outcome: "added",
+      chatId: -200,
+      userIds: [7, 8],
+      nowMs: NOW,
+    })
     const report = buildCustodyStatus({
       accountId: ACCOUNT,
       workerVersion: packageJson.version,
@@ -63,7 +78,7 @@ describe("custody status report", () => {
           waitS: 15382,
         },
       ],
-      addsToday: 1,
+      addsToday: 3,
       background: { pending: 3, nextAt: "2026-11-06T05:20:00.000Z" },
     })
     expect(report.holds[0]!.untilMs).toBeGreaterThan(NOW + 15382 * 1000)

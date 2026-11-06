@@ -100,14 +100,32 @@ describe("background queue", () => {
     expect(row.attempts).toBe(1)
     expect(row.lastError).toBe("FLOOD_WAIT_40")
   })
-  test("addsToday counts finished rows in the current UTC day", () => {
+  test("addsToday counts setup and background adds in the current UTC day", () => {
     const q = queue()
-    q.enqueue({ requestId: "a", chatId: -1, userIds: [1, 2, 3, 4], notBeforeMs: 0 })
-    q.finish(-1, 1, "added", null, DAY - 1)
+    const add = (
+      source: "setup" | "background",
+      outcome: "added" | "refused",
+      userIds: number[],
+      nowMs: number,
+    ) => q.recordAdds({ source, outcome, chatId: -1, userIds, nowMs })
+    add("background", "added", [1], DAY - 1)
+    add("setup", "added", [5, 6, 7], DAY + 1)
+    add("background", "refused", [3], DAY + 2)
+    add("background", "added", [2], DAY + 3)
+    expect(q.addsToday(DAY + 10)).toBe(5)
+    // Rows two days before the current UTC day are pruned on write.
+    add("setup", "added", [9], DAY + 2 * 86_400_000)
+    const rows = (
+      q as unknown as { db: Database }
+    ).db.query<{ n: number }, []>("SELECT count(*) AS n FROM member_add").get()
+    expect(rows?.n).toBe(6)
+  })
+  test("finished rows leave the pending summary", () => {
+    const q = queue()
+    q.enqueue({ requestId: "a", chatId: -1, userIds: [1, 2, 3], notBeforeMs: 0 })
+    q.finish(-1, 1, "added", null, DAY)
     q.finish(-1, 2, "privacy", "USER_PRIVACY_RESTRICTED", DAY + 1)
-    q.finish(-1, 3, "failed", "USER_KICKED", DAY + 2)
-    q.defer(-1, 4, DAY + 9, "FLOOD_WAIT_1", DAY + 3)
-    expect(q.addsToday(DAY + 10)).toBe(1)
+    q.defer(-1, 3, DAY + 9, "FLOOD_WAIT_1", DAY + 3)
     expect(q.summary()).toEqual({ pending: 1, nextAtMs: DAY + 9 })
   })
   test("0003 turns 0002 'invited' rows into 'privacy' and keeps the rest", () => {
@@ -130,5 +148,18 @@ describe("background queue", () => {
           "('a', -1, 3, 'member', 0, 0, 'invited', NULL, 0, 0)",
       ),
     ).toThrow()
+  })
+  test("0004 seeds today's adds from finished background rows", () => {
+    const db = new Database(":memory:", { strict: true })
+    applyMigrations(db, STATE_MIGRATIONS.slice(0, 3))
+    db.run(
+      "INSERT INTO background_add VALUES " +
+        `('a', -1, 1, 'member', 0, 1, 'added', NULL, 0, ${DAY + 1}), ` +
+        `('a', -1, 2, 'member', 0, 1, 'failed', 'USER_KICKED', 0, ${DAY + 2}), ` +
+        `('a', -1, 3, 'member', 0, 1, 'privacy', NULL, 0, ${DAY + 3}), ` +
+        "('a', -1, 4, 'member', 0, 0, 'pending', NULL, 0, 0)",
+    )
+    applyMigrations(db, STATE_MIGRATIONS)
+    expect(new BackgroundQueue(db).addsToday(DAY + 10)).toBe(2)
   })
 })

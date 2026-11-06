@@ -26,7 +26,10 @@ export interface BackgroundMember {
 export interface BackgroundPacing {
   /** Base gap between two adds. */
   gapMs: number
-  /** Most adds (finished rows) per UTC day. */
+  /**
+   * Background adds stop once the custody account's member adds today
+   * (setup and background, see `BackgroundQueue.addsToday`) reach this.
+   */
   dailyMax: number
   /** Fraction of `gapMs` each gap may vary by, either way. */
   jitter: number
@@ -117,11 +120,17 @@ function fromRow(row: BackgroundRow): BackgroundMember {
   }
 }
 
+/** Who made a member add: a setup job or the background drain. */
+export type MemberAddSource = "setup" | "background"
+
 /**
- * Rows that count toward the daily cap: their `updated_ms` is when the add
- * call finished. A privacy refusal invited nobody, so it does not count.
+ * A member add Telegram ran: `added`, or `refused` for one user (such as
+ * `USER_CHANNELS_TOO_MUCH`). Privacy refusals and floods get no row.
  */
-const FINISHED = "state IN ('added', 'failed')"
+export type MemberAddOutcome = "added" | "refused"
+
+/** `member_add` rows older than this are pruned on write. */
+const MEMBER_ADD_KEEP_MS = 2 * DAY_MS
 
 /**
  * The `background_add` queue in `state.db`. Rows start `pending` and end
@@ -221,13 +230,47 @@ export class BackgroundQueue {
     )
   }
 
-  /** Rows that finished an add call since the UTC day began. */
+  /**
+   * Logs one `member_add` row per user and prunes rows older than two
+   * days. Setup adds come from `recordingMemberAdds`; background adds from
+   * the drain.
+   */
+  recordAdds(input: {
+    source: MemberAddSource
+    outcome: MemberAddOutcome
+    chatId: number
+    userIds: readonly number[]
+    nowMs: number
+  }): void {
+    const insert = this.db.prepare(
+      "INSERT INTO member_add (source, outcome, chat_id, user_id, at_ms) " +
+        "VALUES (?, ?, ?, ?, ?)",
+    )
+    this.db.transaction(() => {
+      for (const userId of input.userIds)
+        insert.run(
+          input.source,
+          input.outcome,
+          input.chatId,
+          userId,
+          input.nowMs,
+        )
+      this.db.run("DELETE FROM member_add WHERE at_ms < ?", [
+        utcDayStartMs(input.nowMs) - MEMBER_ADD_KEEP_MS,
+      ])
+    })()
+  }
+
+  /**
+   * Member adds the custody account made since the UTC day began: setup
+   * and background, added or refused per user. Privacy refusals and floods
+   * do not count.
+   */
   addsToday(nowMs: number): number {
     return (
       this.db
         .query<{ n: number }, [number]>(
-          `SELECT count(*) AS n FROM background_add WHERE ${FINISHED} ` +
-            "AND updated_ms >= ?",
+          "SELECT count(*) AS n FROM member_add WHERE at_ms >= ?",
         )
         .get(utcDayStartMs(nowMs))?.n ?? 0
     )

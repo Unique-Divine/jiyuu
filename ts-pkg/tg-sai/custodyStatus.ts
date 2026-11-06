@@ -15,6 +15,7 @@ export interface CustodyStatusReport {
     method: string
     waitS: number | null
   }[]
+  /** Member adds the account made this UTC day: setup and background. */
   addsToday: number
   background: { pending: number; nextAt: string | null }
 }
