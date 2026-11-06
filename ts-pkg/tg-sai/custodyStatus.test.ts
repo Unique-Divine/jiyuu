@@ -204,6 +204,8 @@ describe("custody status cadence", () => {
       "Unknown field chatSetupCustodyStatus",
       'Unknown field "chatSetupCustodyStatus" on type "MutationRoot"',
       'Cannot query field "chatSetupCustodyStatus" on type "Mutation"',
+      // Deal Desk's JSON error output escapes the quotes.
+      '{"error":"Unknown field \\"chatSetupCustodyStatus\\" on type \\"MutationRoot\\""}',
     ])
       expect(isUnknownOperationOutput("custody-status", stderr)).toBe(true)
     expect(

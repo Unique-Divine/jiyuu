@@ -216,7 +216,8 @@ export function isUnknownOperationOutput(
   const field = CLOUD_MUTATION_FIELDS[operation]
   if (!field) return false
   return new RegExp(
-    `(?:unknown field|cannot query field)\\s*["'\`]?${field}\\b`,
+    // Deal Desk prints errors as JSON, so a quote may be escaped.
+    `(?:unknown field|cannot query field)\\s*\\\\?["'\`]?${field}\\b`,
     "i",
   ).test(stderr)
 }
