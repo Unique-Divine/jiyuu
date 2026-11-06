@@ -79,6 +79,11 @@ export interface WorkerOptions {
   after?: string
   /** Once aborted, no new job starts; the running one is cut short. */
   signal?: AbortSignal
+  /**
+   * An earlier page of this pass (same walk of `after` cursors) had a
+   * runnable or waiting requester job, so this page must not drain.
+   */
+  requesterWorkSeen?: boolean
 }
 /** Persistent random identity retains ownership of sticky cloud claims after restart. */
 export async function stableWorkerId(root = configDir()): Promise<string> {
@@ -179,6 +184,8 @@ export async function runWorkerOnce(
   results: WorkerResult[]
   nextAfter: string | null
   background?: DrainResult
+  /** This page or an earlier one in the pass had requester work. */
+  requesterWork: boolean
 }> {
   if (!options.custodyProfile.trim() || !options.workerId.trim())
     throw new Error("Explicit custody profile and stable worker ID required")
@@ -205,7 +212,7 @@ export async function runWorkerOnce(
   }))
   // Requester jobs go first: while one is runnable or waiting for this
   // account, no background add runs. Its flood could hold the requester.
-  let requesterWork = false
+  let requesterWork = options.requesterWorkSeen ?? false
   for (const selected of page.requests) {
     if (options.signal?.aborted) break
     const setup = await deps.cloud.view(selected.requestId)
@@ -318,9 +325,20 @@ export async function runWorkerOnce(
     } catch (error) {
       background = { state: "error", error: safeProvisionError(error) }
     }
-    return { dryRun: false, results, nextAfter: page.nextAfter, background }
+    return {
+      dryRun: false,
+      results,
+      nextAfter: page.nextAfter,
+      background,
+      requesterWork,
+    }
   }
-  return { dryRun: !options.run, results, nextAfter: page.nextAfter }
+  return {
+    dryRun: !options.run,
+    results,
+    nextAfter: page.nextAfter,
+    requesterWork,
+  }
 }
 
 /**
@@ -491,12 +509,19 @@ export async function runCustodyWorker(options: {
         })
       : null
     let after: string | undefined
+    // Requester work seen on earlier pages of the current cursor walk.
+    let passWork = false
     try {
       do {
         const tickStartedAt = Date.now()
         try {
           const result = await runWorkerOnce(
-            { ...options, workerId, after },
+            {
+              ...options,
+              workerId,
+              after,
+              requesterWorkSeen: after !== undefined && passWork,
+            },
             {
               cloud,
               journal: new FileProvisionJournal(root),
@@ -507,6 +532,7 @@ export async function runCustodyWorker(options: {
             },
           )
           after = result.nextAfter ?? undefined
+          passWork = result.requesterWork
           const line = { ...result, observedAt: new Date().toISOString() }
           console.log(JSON.stringify(line))
           recordTick({ startedAt: tickStartedAt, result })

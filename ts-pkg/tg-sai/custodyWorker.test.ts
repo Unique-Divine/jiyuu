@@ -95,6 +95,7 @@ test("one-page preview is bounded and invokes no Telegram or claim", async () =>
     dryRun: true,
     results: [{ requestId: "worker-test", state: "prepared" }],
     nextAfter: null,
+    requesterWork: true,
   })
   expect(f.calls).toEqual([`pending:${CUSTODY_USER_ID}:stable:3:old`])
 })
@@ -260,6 +261,7 @@ test("worker.tick rows summarize the page and never throw", () => {
     result: {
       dryRun: false,
       nextAfter: null,
+      requesterWork: true,
       results: [
         { requestId: "a", state: "ready" },
         { requestId: "b", state: "ready" },
@@ -308,7 +310,12 @@ test("an aborted signal starts no new jobs", async () => {
       },
       f,
     ),
-  ).toEqual({ dryRun: false, results: [], nextAfter: null })
+  ).toEqual({
+    dryRun: false,
+    results: [],
+    nextAfter: null,
+    requesterWork: false,
+  })
   expect(f.calls).toEqual([`pending:${CUSTODY_USER_ID}:stable:10:`])
 })
 
@@ -316,6 +323,7 @@ test("shouldRecordTick skips idle polls between heartbeats", () => {
   const tick = (states: string[]) => ({
     dryRun: false,
     nextAfter: null,
+    requesterWork: false,
     results: states.map((state, i) => ({ requestId: `r${i}`, state })),
   })
   const t0 = 1_000_000
@@ -664,6 +672,24 @@ test("a runnable or waiting requester job goes ahead of the background drain", a
     expect(result.background?.state).toBe("added")
   }
   expect(drains).toBe(3)
+  // A waiting job on an earlier page of the pass blocks the last page too.
+  const lastPage = fixture()
+  lastPage.cloud.pending = async () => ({ requests: [], nextAfter: null })
+  const carried = await runWorkerOnce(
+    {
+      custodyProfile: "custody",
+      workerId: "stable",
+      run: true,
+      after: "page-2",
+      requesterWorkSeen: true,
+    },
+    { ...lastPage, drain },
+  )
+  expect(carried.background).toBeUndefined()
+  expect(carried.requesterWork).toBe(true)
+  expect(drains).toBe(3)
+  expect(retrying.requesterWork).toBe(true)
+  expect(result.requesterWork).toBe(false)
 })
 test("a failing drain is reported in the tick, never thrown", async () => {
   const f = fixture()
