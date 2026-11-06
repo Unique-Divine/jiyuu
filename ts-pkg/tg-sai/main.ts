@@ -7,7 +7,6 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises"
-import { createRequire } from "node:module"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { stdin as input, stdout as output } from "node:process"
@@ -72,9 +71,8 @@ import type {
   TelegramCredentials,
   TelegramCredentialValues,
 } from "./profiles"
-
-const require = createRequire(import.meta.url)
-const packageJson = require("./package.json") as { version: string }
+// Static import so `bun build --compile` embeds the version in the worker.
+import packageJson from "./package.json" with { type: "json" }
 
 const DEFAULT_USER_TARGET_ID = USERS.uniqueDivine.id
 const DEFAULT_BOT_TARGET_ID = saiBot.id
