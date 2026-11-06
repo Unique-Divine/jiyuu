@@ -381,8 +381,13 @@ export async function withProvisionTelegram<T>(
             primaryInvite: (abortSignal) =>
               getPrimaryInviteLink(linkClient(abortSignal), chatId),
           }),
+        // Promotion keeps mtcute's flood sleep, as before.
         promote: async (chatId, userId, rights) =>
-          promoteTargetAdmin(client, { chatId, targetPeer: userId, rights }),
+          promoteTargetAdmin(
+            client,
+            { chatId, targetPeer: userId, rights },
+            {},
+          ),
         verifyMarker,
         candidates: async (marker) => {
           const candidates: number[] = []

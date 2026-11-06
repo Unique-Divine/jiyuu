@@ -1,3 +1,4 @@
+import { HOLD_ACCOUNT_UNKNOWN, holdErrorSeconds } from "./state/guard"
 import { parseWaitSeconds, rpcErrorText } from "./telemetry/middleware"
 
 /**
@@ -143,21 +144,42 @@ export async function runTelegramAction<T>(
   }
 }
 
+/** Text of `HoldStoreUnavailableError` (state/holds.ts). */
+const HOLD_STATE_UNAVAILABLE = "TG_SAI_HOLD_STATE_UNAVAILABLE"
+
 /** Why a batch stopped early on a Telegram rate limit. */
 export interface FloodStop {
-  /** Telegram error code, e.g. `FLOOD_WAIT_15382` or `PEER_FLOOD`. */
+  /**
+   * Telegram error code, e.g. `FLOOD_WAIT_15382` or `PEER_FLOOD`, or the
+   * local guard's `TG_SAI_HOLD_<s>`, `TG_SAI_HOLD_STATE_UNAVAILABLE`, or
+   * `TG_SAI_HOLD_ACCOUNT_UNKNOWN`.
+   */
   code: string
-  /** Wait Telegram asked for; `null` for `PEER_FLOOD`. */
+  /** Wait Telegram asked for; `null` for `PEER_FLOOD` and unreadable holds. */
   waitS: number | null
-  /** When the wait ends (ISO); `null` when Telegram gives no time. */
+  /** When the wait ends (ISO); `null` when no time is known. */
   resumeAt: string | null
+  /**
+   * The local guard refused before sending (a saved hold, or holds that
+   * cannot be checked). Such stops exit 75; Telegram's own errors exit 1.
+   */
+  hold: boolean
+}
+
+function holdUntilMs(error: unknown): number | null {
+  const untilMs = (error as { untilMs?: unknown } | null)?.untilMs
+  return typeof untilMs === "number" && Number.isFinite(untilMs)
+    ? untilMs
+    : null
 }
 
 /**
  * Returns a stop when `error` means the rest of a batch would only hit the
- * same limit: any `PEER_FLOOD`, or a `FLOOD_WAIT_X` (and premium/test-phone
- * variants) longer than `maxWaitMs`, which mtcute did not sleep through.
- * `SLOWMODE_WAIT_X` is per chat, so it returns `null` and the batch goes on.
+ * same limit: any `PEER_FLOOD`, a `FLOOD_WAIT_X` (and premium/test-phone
+ * variants) longer than `maxWaitMs`, which mtcute did not sleep through, or
+ * a refusal by the local flood guard (`TG_SAI_HOLD_<s>`, unreadable hold
+ * state, unknown session account). `SLOWMODE_WAIT_X` is per chat, so it
+ * returns `null` and the batch goes on.
  */
 export function floodStopFor(
   error: unknown,
@@ -166,7 +188,22 @@ export function floodStopFor(
 ): FloodStop | null {
   const code = rpcErrorText(error)
   if (code === null) return null
-  if (code === "PEER_FLOOD") return { code, waitS: null, resumeAt: null }
+  if (code === HOLD_STATE_UNAVAILABLE || code === HOLD_ACCOUNT_UNKNOWN) {
+    return { code, waitS: null, resumeAt: null, hold: true }
+  }
+  const holdS = holdErrorSeconds(code)
+  if (holdS !== null) {
+    const untilMs = holdUntilMs(error) ?? nowMs + holdS * 1000
+    return {
+      code,
+      waitS: holdS,
+      resumeAt: new Date(untilMs).toISOString(),
+      hold: true,
+    }
+  }
+  if (code === "PEER_FLOOD") {
+    return { code, waitS: null, resumeAt: null, hold: false }
+  }
   if (code.startsWith("SLOWMODE_WAIT_")) return null
   const waitS = parseWaitSeconds(code)
   if (waitS === null || waitS * 1000 <= maxWaitMs) return null
@@ -174,6 +211,7 @@ export function floodStopFor(
     code,
     waitS,
     resumeAt: new Date(nowMs + waitS * 1000).toISOString(),
+    hold: false,
   }
 }
 

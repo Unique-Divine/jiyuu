@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto"
 
+import { holdUntil, PEER_FLOOD_WAIT_S } from "./state/holds"
+
 export const PROVISIONING_BOT_ID = 8983431101
 export type Peer = number | string
 export interface ProvisionRequest {
@@ -360,6 +362,24 @@ export function safeProvisionDiagnostic(
   return `${step}:${safeProvisionError(error)}`
 }
 
+/**
+ * Whether a refused add concerns only the user(s) being added, so the other
+ * users can still be tried one by one: privacy refusals, and 400 errors
+ * named `USER_*`, `CHAT_*`, or `BOT_GROUPS_BLOCKED` (e.g.
+ * `USER_CHANNELS_TOO_MUCH`). Flood waits, `PEER_FLOOD`, and local holds
+ * are never per-user.
+ */
+export function isPerUserAddError(error: unknown): boolean {
+  if (isPrivacyRestriction(error)) return true
+  const e = error as { text?: unknown; errorMessage?: unknown; code?: unknown }
+  const text = typeof e?.text === "string" ? e.text : e?.errorMessage
+  return (
+    e?.code === 400 &&
+    typeof text === "string" &&
+    /^(?:USER_[A-Z0-9_]+|CHAT_[A-Z0-9_]+|BOT_GROUPS_BLOCKED)$/.test(text)
+  )
+}
+
 export function isPrivacyRestriction(error: unknown): boolean {
   const e = error as { text?: string; errorMessage?: string; code?: number }
   return [e?.text, e?.errorMessage].some(
@@ -375,14 +395,32 @@ export const HOLD_STATE_UNAVAILABLE = "TG_SAI_HOLD_STATE_UNAVAILABLE"
 /** Retry delay while the hold store cannot be read. */
 export const HOLD_STATE_UNAVAILABLE_RETRY_MS = 5 * 60 * 1000
 /** Telegram gives no duration for `PEER_FLOOD`; holds use 24 h. */
-export const PEER_FLOOD_RETRY_MS = 24 * 60 * 60 * 1000
+export const PEER_FLOOD_RETRY_MS = PEER_FLOOD_WAIT_S * 1000
+/**
+ * Least lead a cloud `retryAt` gets over now, so Deal Desk never rejects
+ * it as not in the future after clock skew or a slow request.
+ */
+export const MIN_CLOUD_RETRY_MS = 30_000
 const MAX_RETRY_MS = 31_536_000 * 1000
+
+/**
+ * Cloud `retryAt` for a local hold ending at `untilMs`: that time, or
+ * `MIN_CLOUD_RETRY_MS` from now when later. Never before the hold ends.
+ * `null` when the time is not finite or more than a year out.
+ */
+export function cloudRetryAt(untilMs: number, now = Date.now()): string | null {
+  if (!Number.isFinite(untilMs)) return null
+  const at = Math.max(Math.ceil(untilMs), now + MIN_CLOUD_RETRY_MS)
+  return at - now <= MAX_RETRY_MS ? new Date(at).toISOString() : null
+}
 
 /**
  * When a flood or hold error allows an unattended retry: `FLOOD_WAIT_N`
  * (also mtcute's `FLOOD_WAIT_%d` with `seconds`), `FLOOD_PREMIUM_WAIT_N`,
  * `PEER_FLOOD` (24 h), `TG_SAI_HOLD_N` (the hold's `untilMs` when present),
- * and `TG_SAI_HOLD_STATE_UNAVAILABLE` (5 min). `null` for anything else.
+ * and `TG_SAI_HOLD_STATE_UNAVAILABLE` (5 min). Telegram waits get the same
+ * margin as the local hold (`holdUntil`), and every time is at least
+ * `MIN_CLOUD_RETRY_MS` out (`cloudRetryAt`). `null` for anything else.
  */
 export function provisionRetryAt(
   error: unknown,
@@ -395,21 +433,25 @@ export function provisionRetryAt(
     untilMs?: number
   }
   const code = e?.text ?? e?.errorMessage ?? ""
-  const at = (delayMs: number): string | null =>
-    Number.isSafeInteger(delayMs) && delayMs > 0 && delayMs <= MAX_RETRY_MS
-      ? new Date(now + delayMs).toISOString()
+  const after = (waitS: number): string | null =>
+    Number.isSafeInteger(waitS) && waitS > 0
+      ? cloudRetryAt(holdUntil(now, waitS), now)
       : null
-  if (code === "PEER_FLOOD") return at(PEER_FLOOD_RETRY_MS)
-  if (code === HOLD_STATE_UNAVAILABLE) return at(HOLD_STATE_UNAVAILABLE_RETRY_MS)
+  if (code === "PEER_FLOOD") return after(PEER_FLOOD_WAIT_S)
+  if (code === HOLD_STATE_UNAVAILABLE)
+    return cloudRetryAt(now + HOLD_STATE_UNAVAILABLE_RETRY_MS, now)
   const hold = /^TG_SAI_HOLD_(\d+)$/.exec(code)
   if (hold) {
     if (Number.isSafeInteger(e.untilMs) && e.untilMs! > now)
-      return at(e.untilMs! - now)
-    return at(Number(hold[1]) * 1000)
+      return cloudRetryAt(e.untilMs!, now)
+    const seconds = Number(hold[1])
+    return Number.isSafeInteger(seconds) && seconds > 0
+      ? cloudRetryAt(now + seconds * 1000, now)
+      : null
   }
   const match = /^FLOOD(?:_PREMIUM)?_WAIT_(\d+|%d)$/.exec(code)
   const seconds = match ? Number(match[1] === "%d" ? e.seconds : match[1]) : NaN
-  return Number.isSafeInteger(seconds) ? at(seconds * 1000) : null
+  return after(seconds)
 }
 
 /** The cloud is authoritative. The journal only recovers a result not yet acknowledged by cloud. */
@@ -558,8 +600,10 @@ export async function provisionSetup(params: {
         ...(rejected ? { creationRejected: true } : {}),
         retryAt: provisionRetryAt(error),
       })
+      // `cause` lets the CLI map a hold refusal to exit 75.
       throw new Error(
         "Group creation failed; inspect authoritative setup state before resuming",
+        { cause: error },
       )
     }
     // Persist immediately, before another network call or cloud acknowledgement.
@@ -593,7 +637,8 @@ export async function provisionSetup(params: {
       }
       absent.push(userId)
     }
-    // Per-user privacy refusals never stop the other users; flood and hold
+    // Per-user refusals (privacy, USER_*/CHAT_* 400s) never stop the other
+    // users: a refused batch falls back to one add per user. Flood and hold
     // errors refuse the whole batch and propagate with their retry time.
     const failures = new Map<number, { error: unknown; step: ProvisionStep }>()
     const addEach = async (userIds: number[]): Promise<void> => {
@@ -602,7 +647,7 @@ export async function provisionSetup(params: {
           step = "add_member"
           await telegram.add(chatId, userId)
         } catch (error) {
-          if (!isPrivacyRestriction(error)) throw error
+          if (!isPerUserAddError(error)) throw error
           failures.set(userId, { error, step: "add_member" })
         }
       }
@@ -618,7 +663,7 @@ export async function provisionSetup(params: {
               step: "add_member",
             })
       } catch (error) {
-        if (!isPrivacyRestriction(error)) throw error
+        if (!isPerUserAddError(error)) throw error
         await addEach(absent)
       }
     } else await addEach(absent)
@@ -754,6 +799,7 @@ export async function provisionSetup(params: {
     })
     throw new Error(
       "Setup incomplete; inspect status and resume the same request",
+      { cause: error },
     )
   }
 }

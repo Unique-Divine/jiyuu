@@ -26,7 +26,7 @@ import { planAdminBootstrap } from "./adminAudit"
 import { saiBot, USERS } from "./cfg"
 import { runHealthCheck } from "./health"
 import { addRuntimeHealthCommands } from "./runtimeHealthCli"
-import { holdErrorSeconds } from "./state/guard"
+import { HOLD_ACCOUNT_UNKNOWN, holdErrorSeconds } from "./state/guard"
 import { stateDbPath } from "./state/db"
 import { registerEventsCommand } from "./telemetry/cli"
 import { registerHoldsCommand } from "./state/cli"
@@ -63,7 +63,7 @@ import {
   readConfig,
   redactedProfile,
   removeProfile,
-  resolveTelegramCredentials,
+  resolveTelegramCredentialSource,
   setActiveProfile,
 } from "./profiles"
 import type {
@@ -298,7 +298,8 @@ async function nextChatFilePath(prefix: string): Promise<string> {
 }
 
 async function getTelegramEnv(profileName?: string): Promise<TelegramEnv> {
-  const credentials = await resolveTelegramCredentials(profileName)
+  const { credentials, source } =
+    await resolveTelegramCredentialSource(profileName)
   const config = await readConfig()
   const profile = getProfile(config, profileName)
   return {
@@ -306,7 +307,8 @@ async function getTelegramEnv(profileName?: string): Promise<TelegramEnv> {
     apiHash: credentials.apiHash,
     session: credentials.sessionString,
     password: process.env.TELEGRAM_PASSWORD ?? profile?.password ?? null,
-    userId: profile?.userId ?? null,
+    // TELEGRAM_* or credential-file sessions may act as another account.
+    userId: source === "profile" ? (profile?.userId ?? null) : null,
     profileName: profile?.name || profileName || null,
   }
 }
@@ -393,12 +395,13 @@ async function withClient<T>(
   ) => Promise<T>,
 ): Promise<T> {
   const env = await getTelegramEnv(profileName)
+  // No `accountId`: the flood guard keys holds by the account this session's
+  // own getMe reports, never by profile metadata.
   const client = await createMtcuteClient(
     {
       apiId: env.apiId,
       apiHash: env.apiHash,
       session: env.session,
-      ...(env.userId === null ? {} : { accountId: env.userId }),
     },
     cliTelemetry({ accountId: env.userId, profile: env.profileName }),
   )
@@ -421,7 +424,8 @@ async function runAudit(options: BaseCliOptions): Promise<void> {
 }
 
 async function runHealth(): Promise<void> {
-  // runHealthCheck connects as the active (first) profile.
+  // runHealthCheck connects as the active (first) profile. Its saved
+  // userId only labels telemetry; the flood guard keys by the session's getMe.
   const accountId = (await readConfig()).profiles[0]?.userId ?? null
   const result = await runHealthCheck({
     createClient: async (credentials) =>
@@ -430,7 +434,6 @@ async function runHealth(): Promise<void> {
           apiId: credentials.apiId,
           apiHash: credentials.apiHash,
           session: credentials.sessionString,
-          ...(accountId === null ? {} : { accountId }),
         },
         cliTelemetry({ accountId }),
       ),
@@ -802,7 +805,9 @@ async function maybeTransferOwner(params: {
  * The command is dry-run by default. In execution mode, it applies the Sai bot
  * update and owner-target update for each chat, logs per-chat failures, and
  * continues to the next chat. A `PEER_FLOOD` or a flood wait longer than the
- * run's threshold stops the batch with a `flood_stop` event and exit code 1;
+ * run's threshold stops the batch with a `flood_stop` event and exit code 1.
+ * A refusal by the local flood guard (a saved hold, unreadable hold state,
+ * or an unverified session account) stops it the same way with exit 75.
  * `SLOWMODE_WAIT_X` only fails that chat.
  */
 async function runSaiBootstrap(options: SaiBootstrapOptions): Promise<void> {
@@ -915,8 +920,11 @@ async function runSaiBootstrap(options: SaiBootstrapOptions): Promise<void> {
         code: floodStop.code,
         waitS: floodStop.waitS,
         resumeAt: floodStop.resumeAt,
+        hold: floodStop.hold,
       })
-      process.exitCode = 1
+      // A saved hold is a retry-later stop (75); Telegram's own long wait
+      // or PEER_FLOOD keeps exit 1.
+      process.exitCode = floodStop.hold ? HOLD_EXIT_CODE : 1
       return
     }
 
@@ -1311,8 +1319,7 @@ async function inputFromProfileAddOptions(
       apiId: completeProfileFields.apiId,
       apiHash: completeProfileFields.apiHash,
       session: completeProfileFields.sessionString,
-      // Known only when --user-id was given; getMe itself is never held.
-      ...(knownUserId === undefined ? {} : { accountId: knownUserId }),
+      // --user-id is unverified, so the guard keys by the session's getMe.
     },
     cliTelemetry({ accountId: knownUserId ?? null, profile: options.name ?? null }),
   )
@@ -1905,8 +1912,9 @@ export function shortDuration(totalS: number): string {
 }
 
 /**
- * Maps a saved flood hold (`HoldError`, `TG_SAI_HOLD_<s>`, code 420) or an
- * unreadable `state.db` (`TG_SAI_HOLD_STATE_UNAVAILABLE`) to exit 75 with a
+ * Maps a saved flood hold (`HoldError`, `TG_SAI_HOLD_<s>`, code 420), an
+ * unreadable `state.db` (`TG_SAI_HOLD_STATE_UNAVAILABLE`), or an unverified
+ * session account (`TG_SAI_HOLD_ACCOUNT_UNKNOWN`) to exit 75 with a
  * one-line message. Looks through `error.cause` chains. Returns null for
  * every other error.
  */
@@ -1924,6 +1932,15 @@ export function holdExitFor(
           "tg-sai: cannot read saved Telegram limits in " +
           `${stateDbPath()}; invite/create calls stay blocked and nothing ` +
           "was sent. Fix the file, then retry.",
+      }
+    }
+    if (text === HOLD_ACCOUNT_UNKNOWN) {
+      return {
+        exitCode: HOLD_EXIT_CODE,
+        message:
+          "tg-sai: could not confirm which Telegram account this session " +
+          "acts as, so its saved limits cannot be checked; invite/create " +
+          "calls stay blocked and nothing was sent. Retry once getMe works.",
       }
     }
     const seconds = holdErrorSeconds(text)

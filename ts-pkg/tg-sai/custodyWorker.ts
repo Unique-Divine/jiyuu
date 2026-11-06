@@ -3,6 +3,11 @@ import { mkdir, open, readFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import { configDir } from "./profiles"
 import {
+  closeProcessHoldStores,
+  processHoldStore,
+} from "./mtcuteAdapter"
+import {
+  cloudRetryAt,
   HOLD_STATE_UNAVAILABLE,
   HOLD_STATE_UNAVAILABLE_RETRY_MS,
   provisionSetup,
@@ -20,7 +25,7 @@ import {
   withAccountLock,
   withProvisionTelegram,
 } from "./provisioningRuntime"
-import { stateDbPath } from "./state/db"
+import type { HoldStoreSource } from "./state/guard"
 import { HoldStore, remainingSeconds } from "./state/holds"
 import type { HoldGroup } from "./state/holds"
 import { WORKER_TICK_EVENT } from "./telemetry/db"
@@ -88,21 +93,33 @@ export const SETUP_HOLD_GROUPS: readonly HoldGroup[] = [
   "resolve",
 ]
 
+/** Groups a setup that already has its chat still uses: no create. */
+export const CONFIGURE_HOLD_GROUPS: readonly HoldGroup[] = ["invite", "resolve"]
+
+/** Hold groups that block `setup`: create only matters before its chat. */
+export function setupHoldGroups(
+  setup: Pick<Setup, "chatId">,
+): readonly HoldGroup[] {
+  return setup.chatId ? CONFIGURE_HOLD_GROUPS : SETUP_HOLD_GROUPS
+}
+
 /**
  * When the custody account's saved flood holds allow setup work again:
- * the latest `untilMs` of its create, invite, and resolve holds, or
- * `HOLD_STATE_UNAVAILABLE_RETRY_MS` from now when the store cannot be read.
- * `null` when no hold applies. Never throws.
+ * the latest `untilMs` of its holds on `groups` (default create, invite,
+ * and resolve), or `HOLD_STATE_UNAVAILABLE_RETRY_MS` from now when the
+ * store cannot be read. `null` when no hold applies. Never throws.
  */
 export function setupHoldUntil(
-  holds: HoldStore,
+  holds: HoldStoreSource,
   accountId: number,
   nowMs: number,
+  groups: readonly HoldGroup[] = SETUP_HOLD_GROUPS,
 ): { untilMs: number; code: string } | null {
   try {
+    const store = typeof holds === "function" ? holds() : holds
     let untilMs = 0
-    for (const grp of SETUP_HOLD_GROUPS) {
-      const hold = holds.activeHold(accountId, grp, nowMs)
+    for (const grp of groups) {
+      const hold = store.activeHold(accountId, grp, nowMs)
       if (hold && hold.untilMs > untilMs) untilMs = hold.untilMs
     }
     return untilMs > nowMs
@@ -122,8 +139,11 @@ export async function runWorkerOnce(
   deps: {
     cloud: ProvisionCloud & PendingQueue
     journal: ProvisionJournal
-    /** Saved flood holds; a held account is neither claimed nor contacted. */
-    holds: HoldStore
+    /**
+     * Saved flood holds; a held account is neither claimed nor contacted.
+     * A provider is called each time, so an unavailable store can reopen.
+     */
+    holds: HoldStoreSource
     telegram: <T>(
       setup: Setup,
       operation: (adapter: TelegramProvisioner) => Promise<T>,
@@ -215,9 +235,14 @@ export async function runWorkerOnce(
       continue
     }
     const nowMs = options.now ?? Date.now()
-    const hold = setupHoldUntil(deps.holds, setup.expectedUserId, nowMs)
+    const hold = setupHoldUntil(
+      deps.holds,
+      setup.expectedUserId,
+      nowMs,
+      setupHoldGroups(setup),
+    )
     if (hold) {
-      results.push(await reportHold(deps.cloud, setup, hold))
+      results.push(await reportHold(deps.cloud, setup, hold, nowMs))
       continue
     }
     try {
@@ -254,7 +279,8 @@ export async function runWorkerOnce(
 
 /**
  * Waiting result for a held account. An incomplete setup this worker already
- * holds the claim for gets the hold's end as its cloud `retryAt`, through the
+ * holds the claim for gets `cloudRetryAt` of the hold's end as its cloud
+ * `retryAt`, through the
  * same `progress` call a flood retry uses, so Deal Desk shows the time. Other
  * setups are not claimed; Deal Desk cannot store a `retryAt` for them.
  */
@@ -262,8 +288,12 @@ async function reportHold(
   cloud: ProvisionCloud,
   setup: Setup,
   hold: { untilMs: number; code: string },
+  nowMs: number,
 ): Promise<WorkerResult> {
-  const retryAt = new Date(hold.untilMs).toISOString()
+  // Same value provisioning saves for a hold, so the cloud time never ends
+  // before the local hold and the next tick does not report it again.
+  const retryAt =
+    cloudRetryAt(hold.untilMs, nowMs) ?? new Date(hold.untilMs).toISOString()
   const result: WorkerResult = {
     requestId: setup.requestId,
     state: "waiting",
@@ -344,9 +374,10 @@ export async function runCustodyWorker(options: {
   }
   const execute = async () => {
     const cloud = new CliProvisionCloud()
-    // Preview never reaches the hold check, so it opens no state file.
-    const holds = options.run
-      ? HoldStore.open(stateDbPath())
+    // Preview never reaches the hold check, so it opens no state file. A
+    // run shares the guard's store, which reopens after a failed open.
+    const holds: HoldStoreSource = options.run
+      ? () => processHoldStore()
       : HoldStore.unavailable("preview")
     let after: string | undefined
     try {
@@ -388,7 +419,7 @@ export async function runCustodyWorker(options: {
         })
       } while (!options.signal?.aborted)
     } finally {
-      holds.close()
+      if (options.run) closeProcessHoldStores()
     }
   }
   if (!options.run) return execute()

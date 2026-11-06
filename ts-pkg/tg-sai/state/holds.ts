@@ -293,6 +293,11 @@ export class HoldStore {
     return result.changes > 0
   }
 
+  /** Whether `close` was called (as opposed to a failed open). */
+  get closed(): boolean {
+    return this.db === null && this.reason === "closed"
+  }
+
   /** Closes the database; the store then reports `unavailable`. */
   close(): void {
     const db = this.db
@@ -307,5 +312,70 @@ export class HoldStore {
     }
     this.upsert = null
     this.active = null
+  }
+}
+
+/** Least time between attempts to reopen a store that failed to open. */
+export const HOLD_STORE_REOPEN_MS = 30_000
+
+export interface ReopeningHoldStoreOptions {
+  /** Opens the store; default `HoldStore.open(path)`. */
+  open?: (path: string) => HoldStore
+  now?: () => number
+  /** Default `HOLD_STORE_REOPEN_MS`. */
+  reopenMs?: number
+}
+
+/**
+ * Hands out one open `HoldStore` for `path`. An open that fails is not
+ * kept: the unavailable store is returned (so callers fail closed) and the
+ * next call at least `reopenMs` later tries again. A store closed by its
+ * user is reopened on the next call.
+ */
+export class ReopeningHoldStore {
+  private store: HoldStore | null = null
+  private attemptMs = -Infinity
+  private readonly openStore: (path: string) => HoldStore
+  private readonly now: () => number
+  private readonly reopenMs: number
+
+  constructor(
+    readonly path: string,
+    options: ReopeningHoldStoreOptions = {},
+  ) {
+    this.openStore = options.open ?? ((p) => HoldStore.open(p))
+    this.now = options.now ?? Date.now
+    this.reopenMs = options.reopenMs ?? HOLD_STORE_REOPEN_MS
+  }
+
+  /** The open store, or the last unavailable one inside the backoff. */
+  get(nowMs: number = this.now()): HoldStore {
+    const current = this.store
+    if (current && !current.unavailable) return current
+    if (
+      current &&
+      !current.closed &&
+      nowMs - this.attemptMs < this.reopenMs
+    ) {
+      return current
+    }
+    this.attemptMs = nowMs
+    let next: HoldStore
+    try {
+      next = this.openStore(this.path)
+    } catch (error) {
+      next = HoldStore.unavailable(
+        error instanceof Error ? error.message : String(error),
+      )
+    }
+    this.store = next
+    return next
+  }
+
+  /** Closes the store; the next `get` reopens it. */
+  close(): void {
+    this.store?.close()
+    this.store = null
+    this.attemptMs = -Infinity
   }
 }

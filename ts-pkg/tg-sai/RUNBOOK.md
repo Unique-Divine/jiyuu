@@ -336,7 +336,24 @@ Saved flood waits live in a separate file, `~/.tg-sai/state.db`. Every tg-sai
 process checks it before invite, create, resolve, and send calls. While a
 hold is active, a CLI command exits with code 75 and one stderr line naming
 the held call group and the UTC time to retry. If `state.db` cannot be read,
-invite and create calls are blocked, and the command also exits 75.
+invite and create calls are blocked, and the command also exits 75. The
+hold check keys by the account the session's own `getMe` reports, not by the
+profile's saved user ID; until that is known, invite and create calls are
+blocked the same way (`TG_SAI_HOLD_ACCOUNT_UNKNOWN`, exit 75).
+
+`ops sai-bootstrap` stops the batch with a `flood_stop` event on any of
+these refusals and exits 75. A `PEER_FLOOD` or a Telegram flood wait longer
+than the run's threshold also stops it, with exit 1.
+
+Inspect and override holds with `tg-sai holds`. `set` and `clear` are dry
+runs without `--run`; `clear --run` on an active hold also needs `--force`.
+Each write adds a `holds.set` or `holds.clear` row to `telemetry.db`. A
+`--run` refuses a `state.db` owned by another user, so on the custody VM
+run the worker's binary as the worker user:
+
+```bash
+sudo -u sai-custody-worker env TG_SAI_DIR=/var/lib/sai-custody-worker HOME=/var/lib/sai-custody-worker /opt/sai-custody-worker/current/tg-sai-worker holds list
+```
 
 `TG_SAI_TELEMETRY=off` disables `telemetry.db` writes only. Flood holds in
 `state.db` still apply, and `tg-sai events` reads whatever was recorded

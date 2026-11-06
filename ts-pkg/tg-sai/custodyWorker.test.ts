@@ -7,6 +7,7 @@ import {
   CUSTODY_USER_ID,
   recordWorkerTick,
   runWorkerOnce,
+  setupHoldGroups,
   setupHoldUntil,
   shouldRecordTick,
   stableWorkerId,
@@ -17,6 +18,7 @@ import { HoldStore } from "./state/holds"
 import type { HoldGroup } from "./state/holds"
 import type { TelemetryEvent } from "./telemetry/db"
 import { addCustodyWorkerCommands } from "./custodyWorkerCli"
+import { MIN_CLOUD_RETRY_MS } from "./provisioning"
 import type { Progress, Setup, TelegramProvisioner } from "./provisioning"
 import { CliProvisionCloud } from "./provisioningCloud"
 
@@ -486,4 +488,106 @@ test("an unavailable hold store waits five minutes without claim or Telegram", a
   ])
   expect(f.calls).not.toContain("claim")
   expect(f.calls).not.toContain("telegram")
+})
+
+test("a setup that already has its chat ignores create holds", async () => {
+  const now = Date.parse("2026-11-06T00:00:00Z")
+  expect(setupHoldGroups({})).toEqual(["create", "invite", "resolve"])
+  expect(setupHoldGroups({ chatId: -100123 })).toEqual(["invite", "resolve"])
+
+  const configuring = () => {
+    const f = fixture()
+    f.setup = {
+      ...f.setup,
+      state: "configuring",
+      chatId: -100123,
+      binding: { participants: [1912700300], admins: [1912700300] },
+    }
+    return f
+  }
+  const created = configuring()
+  hold(created.holds, "create", now + 3_600_000)
+  await runWorkerOnce(
+    { custodyProfile: "custody", workerId: "stable", run: true, now },
+    created,
+  )
+  expect(created.calls).toContain("telegram")
+
+  for (const grp of ["invite", "resolve"] as const) {
+    const f = configuring()
+    hold(f.holds, "create", now + 7_200_000)
+    hold(f.holds, grp, now + 60_000)
+    const result = await runWorkerOnce(
+      { custodyProfile: "custody", workerId: "stable", run: true, now },
+      f,
+    )
+    // Only the invite/resolve hold sets the time, not the longer create one.
+    expect(result.results).toEqual([
+      {
+        requestId: "worker-test",
+        state: "waiting",
+        chatId: -100123,
+        retryAt: new Date(now + 60_000).toISOString(),
+        error: "TG_SAI_HOLD_60",
+      },
+    ])
+    expect(f.calls).not.toContain("telegram")
+  }
+})
+
+test("a hold about to end reports retryAt at least 30 s out, once", async () => {
+  const now = Date.parse("2026-11-06T00:00:00Z")
+  const f = fixture()
+  f.setup = {
+    ...f.setup,
+    state: "incomplete",
+    chatId: -100123,
+    binding: { participants: [1912700300], admins: [1912700300] },
+    claimToken: "private-token",
+    retryAt: new Date(now - 1000).toISOString(),
+  }
+  hold(f.holds, "invite", now + 5_000)
+  const held = await runWorkerOnce(
+    { custodyProfile: "custody", workerId: "stable", run: true, now },
+    f,
+  )
+  const retryAt = new Date(now + MIN_CLOUD_RETRY_MS).toISOString()
+  expect(held.results[0]).toMatchObject({ state: "waiting", retryAt })
+  expect(f.progressed.map((p) => p.retryAt)).toEqual([retryAt])
+  // The hold has ended but the cloud time has not: no second report.
+  const later = await runWorkerOnce(
+    {
+      custodyProfile: "custody",
+      workerId: "stable",
+      run: true,
+      now: now + 10_000,
+    },
+    f,
+  )
+  expect(later.results[0]?.state).toBe("waiting")
+  expect(f.progressed).toHaveLength(1)
+  expect(f.calls).not.toContain("telegram")
+})
+
+test("a hold store provider is asked on each tick, so it can recover", async () => {
+  const now = Date.parse("2026-11-06T00:00:00Z")
+  const f = fixture()
+  const open = f.holds
+  let current = HoldStore.unavailable("disk I/O error")
+  const deps = { ...f, holds: () => current }
+  const first = await runWorkerOnce(
+    { custodyProfile: "custody", workerId: "stable", run: true, now },
+    deps,
+  )
+  expect(first.results[0]).toMatchObject({
+    state: "waiting",
+    error: "TG_SAI_HOLD_STATE_UNAVAILABLE",
+  })
+  expect(f.calls).not.toContain("telegram")
+  current = open
+  await runWorkerOnce(
+    { custodyProfile: "custody", workerId: "stable", run: true, now },
+    deps,
+  )
+  expect(f.calls).toContain("telegram")
 })

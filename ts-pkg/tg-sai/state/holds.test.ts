@@ -3,8 +3,13 @@ import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
+import {
+  closeProcessHoldStores,
+  processHoldStore,
+} from "../mtcuteAdapter.ts"
 import { STATE_MIGRATIONS, openStateDb, stateDbPath } from "./db.ts"
 import {
+  HOLD_STORE_REOPEN_MS,
   HoldStore,
   HoldStoreUnavailableError,
   MAX_HOLD_MS,
@@ -12,6 +17,7 @@ import {
   holdUntil,
   methodGroup,
   parseHoldError,
+  ReopeningHoldStore,
 } from "./holds.ts"
 
 let dir: string
@@ -316,5 +322,104 @@ store.close()
     expect(hold?.untilMs).toBe(holdUntil(T0, 399))
     expect(hold?.waitS).toBe(399)
     store.close()
+  })
+})
+
+describe("ReopeningHoldStore", () => {
+  /** A config dir blocked by a plain file, then freed. */
+  function blockedPath(): { path: string; unblock: () => void } {
+    const blocker = join(dir, "blocked")
+    writeFileSync(blocker, "not a dir")
+    return {
+      path: join(blocker, "state.db"),
+      unblock: () => rmSync(blocker),
+    }
+  }
+
+  test("a failed open is retried after the backoff, not cached", () => {
+    let nowMs = T0
+    const blocked = blockedPath()
+    const handle = new ReopeningHoldStore(blocked.path, { now: () => nowMs })
+    const first = handle.get()
+    expect(first.unavailable).toBe(true)
+
+    // Fixed, but inside the 30 s backoff: the unavailable store is kept.
+    blocked.unblock()
+    nowMs += HOLD_STORE_REOPEN_MS - 1
+    expect(handle.get()).toBe(first)
+
+    nowMs += 1
+    const reopened = handle.get()
+    expect(reopened.unavailable).toBe(false)
+    reopened.recordHold({
+      accountId: 1,
+      grp: "invite",
+      method: "channels.inviteToChannel",
+      source: "flood_wait",
+      waitS: 60,
+      nowMs,
+    })
+    // An open store is shared, whatever the clock says.
+    nowMs += 10 * HOLD_STORE_REOPEN_MS
+    expect(handle.get()).toBe(reopened)
+    expect(handle.get().activeHold(1, "invite", nowMs - 1)).toBeNull()
+    handle.close()
+  })
+
+  test("attempts while unavailable are at most one per backoff", () => {
+    let nowMs = T0
+    let opens = 0
+    const handle = new ReopeningHoldStore(path, {
+      now: () => nowMs,
+      open: () => {
+        opens += 1
+        return HoldStore.unavailable("disk I/O error")
+      },
+    })
+    for (let i = 0; i < 10; i += 1) {
+      expect(handle.get().unavailable).toBe(true)
+      nowMs += 1_000
+    }
+    expect(opens).toBe(1)
+    nowMs = T0 + HOLD_STORE_REOPEN_MS
+    handle.get()
+    expect(opens).toBe(2)
+  })
+
+  test("a throwing opener counts as unavailable", () => {
+    const handle = new ReopeningHoldStore(path, {
+      open: () => {
+        throw new Error("boom")
+      },
+    })
+    expect(handle.get().unavailableReason).toBe("boom")
+  })
+
+  test("a store closed by its user reopens on the next get", () => {
+    const handle = new ReopeningHoldStore(path, { now: () => T0 })
+    const first = handle.get()
+    first.close()
+    expect(first.closed).toBe(true)
+    const second = handle.get()
+    expect(second).not.toBe(first)
+    expect(second.unavailable).toBe(false)
+    handle.close()
+  })
+})
+
+describe("processHoldStore", () => {
+  afterEach(() => closeProcessHoldStores())
+
+  test("reopens a state.db that could not be opened earlier", () => {
+    const blocker = join(dir, "cfg")
+    writeFileSync(blocker, "not a dir")
+    const env = { TG_SAI_DIR: blocker }
+    expect(processHoldStore(env, T0).unavailable).toBe(true)
+    rmSync(blocker)
+    expect(processHoldStore(env, T0 + 1_000).unavailable).toBe(true)
+    const store = processHoldStore(env, T0 + HOLD_STORE_REOPEN_MS)
+    expect(store.unavailable).toBe(false)
+    expect(processHoldStore(env, T0 + HOLD_STORE_REOPEN_MS + 1)).toBe(store)
+    expect(statSync(stateDbPath(env)).isFile()).toBe(true)
   })
 })

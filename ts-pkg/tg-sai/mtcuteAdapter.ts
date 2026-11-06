@@ -1,5 +1,9 @@
 import { networkMiddlewares, TelegramClient } from "@mtcute/bun"
-import type { FloodWaiterOptions, RpcCallMiddleware } from "@mtcute/bun"
+import type {
+  FloodWaiterOptions,
+  RpcCallMiddleware,
+  RpcCallOptions,
+} from "@mtcute/bun"
 import { createTelegramCryptoProvider } from "./telegramRuntime"
 import {
   addChatMembers,
@@ -15,8 +19,12 @@ import { isSaiChatTitle } from "./ops"
 import type { ProfileStoreEnv } from "./profiles"
 import { stateDbPath } from "./state/db"
 import { createFloodGuard } from "./state/guard"
-import type { HoldAccountProvider, HoldStoreSource } from "./state/guard"
-import { HoldStore } from "./state/holds"
+import type {
+  FloodGuard,
+  HoldAccountProvider,
+  HoldStoreSource,
+} from "./state/guard"
+import { HoldStore, ReopeningHoldStore } from "./state/holds"
 import { createTelemetryMiddlewares } from "./telemetry/middleware"
 import type { ClientTelemetry } from "./telemetry/middleware"
 
@@ -38,9 +46,9 @@ export interface MtcuteClientConfig {
    */
   floodWaiter?: FloodWaiterOptions
   /**
-   * Telegram user ID the session acts as; keys the client's saved flood
-   * holds. Falls back to the telemetry context's `accountId`. Without
-   * either, the flood guard passes every call through.
+   * Verified Telegram user ID the session acts as (checked against
+   * `getMe` by the caller); keys the client's saved flood holds. Unset: the
+   * guard keys holds by the account the session's own `getMe` reports.
    */
   accountId?: number
 }
@@ -112,15 +120,17 @@ function isPeerNotFound(error: unknown): boolean {
 /** mtcute's `floodWaiter` default `maxWait`. */
 export const MTCUTE_DEFAULT_FLOOD_MAX_WAIT_MS = 10_000
 
-const holdStores = new Map<string, HoldStore>()
+const holdStores = new Map<string, ReopeningHoldStore>()
 
 /**
- * The process's `HoldStore` for `state.db` under `env`'s config dir, opened
- * on first use and then shared by every client. Never throws: a store that
- * cannot open reports `unavailable`, so the guard fails closed.
+ * The process's `HoldStore` for `state.db` under `env`'s config dir, shared
+ * by every client. Never throws: a store that cannot open reports
+ * `unavailable`, so the guard fails closed, and a later call tries the
+ * open again at most every `HOLD_STORE_REOPEN_MS`.
  */
 export function processHoldStore(
   env: ProfileStoreEnv = process.env,
+  nowMs: number = Date.now(),
 ): HoldStore {
   let path: string
   try {
@@ -130,26 +140,90 @@ export function processHoldStore(
       error instanceof Error ? error.message : String(error),
     )
   }
-  let store = holdStores.get(path)
-  if (!store) {
-    store = HoldStore.open(path)
-    holdStores.set(path, store)
+  let handle = holdStores.get(path)
+  if (!handle) {
+    handle = new ReopeningHoldStore(path)
+    holdStores.set(path, handle)
   }
-  return store
+  return handle.get(nowMs)
 }
 
 /** Closes every store `processHoldStore` opened; the next use reopens. */
 export function closeProcessHoldStores(): void {
-  for (const store of holdStores.values()) store.close()
+  for (const handle of holdStores.values()) handle.close()
   holdStores.clear()
+}
+
+/**
+ * Telegram user a client's session acts as, learned from the session's own
+ * `getMe` (a `users.getUsers` call for `inputUserSelf`). mtcute's stored
+ * self is not used: the shared storage file can carry another session's.
+ */
+export interface SessionAccount {
+  id: number | null
 }
 
 /** Options for `clientMiddlewares` beyond the flood waiter and telemetry. */
 export interface ClientMiddlewareOptions {
-  /** Account for the flood guard; else the telemetry context's. */
+  /**
+   * Verified account for the flood guard (e.g. provisioning's
+   * `expectedUserId`, checked against `getMe`). Unset: the guard keys by
+   * `sessionAccount`.
+   */
   accountId?: number
+  /** Filled from the session's `getMe` results; default a fresh cell. */
+  sessionAccount?: SessionAccount
+  /** Runs `getMe` so `sessionAccount` is known before invite/create. */
+  resolveSessionAccount?: () => Promise<unknown>
   /** Hold store; default `processHoldStore()`, opened on first use. */
   holdStore?: HoldStoreSource
+}
+
+interface SelfRequest {
+  _?: unknown
+  id?: unknown
+}
+
+/** Whether `request` is `getMe`'s `users.getUsers([inputUserSelf])`. */
+export function isGetMeRequest(request: unknown): boolean {
+  const value = request as SelfRequest | null
+  return (
+    value?._ === "users.getUsers" &&
+    Array.isArray(value.id) &&
+    value.id.length === 1 &&
+    (value.id[0] as { _?: unknown } | null)?._ === "inputUserSelf"
+  )
+}
+
+/** Innermost: saves the user ID from each `getMe` result in `account`. */
+function captureSessionAccount(account: SessionAccount): RpcCallMiddleware {
+  return async (ctx, next) => {
+    const result = await next(ctx)
+    try {
+      if (isGetMeRequest(ctx.request) && Array.isArray(result)) {
+        const user = result[0] as { _?: unknown; id?: unknown } | undefined
+        if (
+          user?._ === "user" &&
+          typeof user.id === "number" &&
+          Number.isSafeInteger(user.id) &&
+          user.id > 0
+        ) {
+          account.id = user.id
+        }
+      }
+    } catch {
+      // Capturing must never change the call's result.
+    }
+    return result
+  }
+}
+
+/** `outer` runs first and hands `inner` the rest of the chain. */
+function chainMiddleware(
+  outer: RpcCallMiddleware,
+  inner: RpcCallMiddleware,
+): RpcCallMiddleware {
+  return (ctx, next) => outer(ctx, (c) => inner(c, next))
 }
 
 /**
@@ -162,7 +236,10 @@ export interface ClientMiddlewareOptions {
  *
  * The guard saves waits longer than the flood waiter's `maxWait` (and all
  * invite/create waits and `PEER_FLOOD`) and refuses held calls in every
- * process. It does nothing for a client with no account ID.
+ * process. It keys holds by `accountId` when given, else by the account
+ * the session's own `getMe` reports. Until that is known, invite/create
+ * calls first run `resolveSessionAccount` and are refused with
+ * `HoldAccountUnknownError` if it fails; other calls pass unguarded.
  */
 export function clientMiddlewares(
   floodWaiter: FloodWaiterOptions | undefined,
@@ -170,30 +247,58 @@ export function clientMiddlewares(
   options: ClientMiddlewareOptions = {},
 ): RpcCallMiddleware[] {
   const waiter = telemetry?.floodWaiter ?? floodWaiter
-  const accountProvider: HoldAccountProvider = () =>
-    options.accountId ?? telemetry?.context().accountId
+  const session = options.sessionAccount ?? { id: null }
+  const verified = options.accountId
+  const accountProvider: HoldAccountProvider = () => verified ?? session.id
   const guardOptions = {
     sleepThresholdMs: waiter?.maxWait ?? MTCUTE_DEFAULT_FLOOD_MAX_WAIT_MS,
+    ...(verified === undefined
+      ? {
+          requireAccount: true,
+          ...(options.resolveSessionAccount
+            ? { resolveAccount: options.resolveSessionAccount }
+            : {}),
+        }
+      : {}),
   }
   const store: HoldStoreSource = options.holdStore ?? (() => processHoldStore())
+  const capture = captureSessionAccount(session)
+  const withCapture = (guard: FloodGuard): FloodGuard => ({
+    check: guard.check,
+    record: chainMiddleware(guard.record, capture),
+  })
   if (telemetry) {
     return createTelemetryMiddlewares(
       telemetry.sink,
       telemetry.context,
       waiter,
       (requestIdOf) =>
-        createFloodGuard(store, accountProvider, {
-          ...guardOptions,
-          requestIdOf,
-        }),
+        withCapture(
+          createFloodGuard(store, accountProvider, {
+            ...guardOptions,
+            requestIdOf,
+          }),
+        ),
     )
   }
-  const guard = createFloodGuard(store, accountProvider, guardOptions)
+  const guard = withCapture(
+    createFloodGuard(store, accountProvider, guardOptions),
+  )
   return [
     guard.check,
     ...networkMiddlewares.basic(waiter ? { floodWaiter: waiter } : undefined),
     guard.record,
   ]
+}
+
+const sessionAccounts = new WeakMap<TelegramClient, SessionAccount>()
+
+/**
+ * The account a client's session acts as, once its `getMe` has run; `null`
+ * before that, and for clients not made by `createMtcuteRuntimeClient`.
+ */
+export function sessionAccountId(client: TelegramClient): number | null {
+  return sessionAccounts.get(client)?.id ?? null
 }
 
 /**
@@ -205,16 +310,25 @@ export function createMtcuteRuntimeClient(
   config: Omit<MtcuteClientConfig, "session">,
   telemetry?: ClientTelemetry,
 ): TelegramClient {
+  const sessionAccount: SessionAccount = { id: null }
+  let client: TelegramClient | null = null
   const middlewares = clientMiddlewares(config.floodWaiter, telemetry, {
     accountId: config.accountId,
+    sessionAccount,
+    resolveSessionAccount: async () => {
+      if (!client) throw new Error("client not constructed")
+      return client.getMe()
+    },
   })
-  return new TelegramClient({
+  client = new TelegramClient({
     crypto: createTelegramCryptoProvider(),
     apiId: config.apiId,
     apiHash: config.apiHash,
     storage: config.storage ?? "sai-telegram-admin-check.session",
     network: { middlewares },
   })
+  sessionAccounts.set(client, sessionAccount)
+  return client
 }
 
 /**
@@ -350,23 +464,41 @@ export async function findSaiChats(
 }
 
 /**
- * Adds a user or bot peer to a Telegram chat.
+ * Call options for writes that may hit an account-wide limit: mtcute never
+ * sleeps through a flood wait and resends, so a wait reaches the caller
+ * and the flood guard saves it as a hold.
+ */
+export const NO_FLOOD_SLEEP: Readonly<RpcCallOptions> = {
+  floodSleepThreshold: 0,
+}
+
+/**
+ * Adds a user or bot peer to a Telegram chat. Never sleeps through a flood
+ * wait (`NO_FLOOD_SLEEP`).
  */
 export async function addTargetToChat(
   client: TelegramClient,
   params: TargetWriteParams,
 ): Promise<void> {
-  await addChatMembers(client, params.chatId, params.targetPeer, {})
+  await addChatMembers(
+    client.withParams(NO_FLOOD_SLEEP),
+    params.chatId,
+    params.targetPeer,
+    {},
+  )
 }
 
 /**
  * Promotes a user or bot peer using the supplied admin-rights profile.
+ * Promoting a non-member also adds them, so by default the call never
+ * sleeps through a flood wait; pass `{}` for mtcute's usual flood sleep.
  */
 export async function promoteTargetAdmin(
   client: TelegramClient,
   params: PromoteTargetParams,
+  callParams: RpcCallOptions = NO_FLOOD_SLEEP,
 ): Promise<void> {
-  await editAdminRights(client, {
+  await editAdminRights(client.withParams(callParams), {
     chatId: params.chatId,
     userId: params.targetPeer,
     rights: params.rights,

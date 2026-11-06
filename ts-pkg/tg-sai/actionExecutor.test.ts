@@ -7,6 +7,8 @@ import {
   runChatBatch,
   runTelegramAction,
 } from "./actionExecutor"
+import { HoldAccountUnknownError, HoldError } from "./state/guard"
+import { HoldStoreUnavailableError } from "./state/holds"
 
 /** The error mtcute throws for a Telegram RPC error reply. */
 function rpcError(errorCode: number, errorMessage: string): Error {
@@ -113,6 +115,7 @@ describe("floodStopFor", () => {
         code: "FLOOD_WAIT_15382",
         waitS: 15382,
         resumeAt: "2026-11-06T04:16:22.000Z",
+        hold: false,
       })
     })
 
@@ -121,6 +124,7 @@ describe("floodStopFor", () => {
       code: "PEER_FLOOD",
       waitS: null,
       resumeAt: null,
+      hold: false,
     })
     expect(
       floodStopFor(rpcError(420, "SLOWMODE_WAIT_9999"), 300_000, now),
@@ -129,6 +133,35 @@ describe("floodStopFor", () => {
       floodStopFor(rpcError(400, "CHAT_ADMIN_REQUIRED"), 300_000, now),
     ).toBeNull()
     expect(floodStopFor(new Error("Unknown profile: x"), 0, now)).toBeNull()
+  })
+
+  test("a saved hold stops with the hold's end time", () => {
+    const untilMs = now + 3_600_000
+    const error = new HoldError(untilMs, "invite", now)
+    expect(floodStopFor(error, 300_000, now)).toEqual({
+      code: "TG_SAI_HOLD_3600",
+      waitS: 3600,
+      resumeAt: "2026-11-06T01:00:00.000Z",
+      hold: true,
+    })
+    // Even a hold shorter than the threshold: nothing would be sent.
+    expect(
+      floodStopFor(new HoldError(now + 5_000, "invite", now), 300_000, now),
+    ).toMatchObject({ code: "TG_SAI_HOLD_5", hold: true })
+  })
+
+  test("unreadable holds and an unknown account stop without a time", () => {
+    for (const error of [
+      new HoldStoreUnavailableError("disk I/O error"),
+      new HoldAccountUnknownError("channels.inviteToChannel"),
+    ]) {
+      expect(floodStopFor(error, 300_000, now)).toEqual({
+        code: error.text,
+        waitS: null,
+        resumeAt: null,
+        hold: true,
+      })
+    }
   })
 })
 
@@ -197,6 +230,7 @@ describe("runChatBatch", () => {
       code: "FLOOD_WAIT_15382",
       waitS: 15382,
       resumeAt: "1970-01-01T04:16:22.000Z",
+      hold: false,
       item: -101,
       index: 1,
       remaining: 2,
@@ -209,6 +243,20 @@ describe("runChatBatch", () => {
       ["action_start", -101],
       ["action_error", -101],
     ])
+  })
+
+  test("a saved hold stops the remaining chats", async () => {
+    const hold = new HoldError(3_600_000, "invite", 0)
+    const { result, errors } = await runBatch([hold, undefined, undefined])
+    expect(result.processed).toBe(1)
+    expect(result.floodStop).toMatchObject({
+      code: "TG_SAI_HOLD_3600",
+      hold: true,
+      index: 0,
+      remaining: 2,
+      resumeAt: "1970-01-01T01:00:00.000Z",
+    })
+    expect(errors).toEqual([-100])
   })
 
   test("PEER_FLOOD stops the batch at once", async () => {

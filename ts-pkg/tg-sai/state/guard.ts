@@ -52,7 +52,28 @@ export class HoldError extends Error {
   }
 }
 
-/** Account the client acts as; `null`/`undefined` disables the guard. */
+/** Text of `HoldAccountUnknownError`. */
+export const HOLD_ACCOUNT_UNKNOWN = "TG_SAI_HOLD_ACCOUNT_UNKNOWN"
+
+/**
+ * Thrown by the guard instead of sending an invite/create call when the
+ * account the session acts as is not known, so its saved holds cannot be
+ * checked. Shaped like `HoldStoreUnavailableError` (code 500).
+ */
+export class HoldAccountUnknownError extends Error {
+  readonly code = 500
+  readonly text = HOLD_ACCOUNT_UNKNOWN
+
+  constructor(
+    readonly method: string,
+    readonly reason: string = "session account not verified",
+  ) {
+    super(HOLD_ACCOUNT_UNKNOWN)
+    this.name = "HoldAccountUnknownError"
+  }
+}
+
+/** Account the client acts as; `null`/`undefined` while unknown. */
 export type HoldAccountProvider = () => string | number | null | undefined
 
 export interface FloodGuardOptions {
@@ -66,6 +87,16 @@ export interface FloodGuardOptions {
   sleepThresholdMs?: number
   /** Request ID to store with a recorded hold (e.g. telemetry's). */
   requestIdOf?: (ctx: RpcCallMiddlewareContext) => string | null | undefined
+  /**
+   * Invite/create calls need a known account: while the provider returns
+   * none, `check` calls `resolveAccount` (if set) once, and refuses with
+   * `HoldAccountUnknownError` when the account is still unknown. Other
+   * calls pass unguarded until the account is known. Unset: a client with
+   * no account passes every call.
+   */
+  requireAccount?: boolean
+  /** Learns the account (e.g. `getMe`); the provider must then return it. */
+  resolveAccount?: () => Promise<unknown>
 }
 
 /** A store, or a provider called on each use (e.g. a lazy singleton). */
@@ -123,6 +154,8 @@ function accountOf(provider: HoldAccountProvider): string | null {
  * - `check` throws `HoldError` (code 420, `TG_SAI_HOLD_<s>`) without calling
  *   `next` while the call's group is held. With the store unavailable it
  *   throws `HoldStoreUnavailableError` for invite/create and passes the rest.
+ *   With `requireAccount` and no known account it throws
+ *   `HoldAccountUnknownError` for invite/create.
  * - `record` saves `FLOOD_WAIT_N`, `FLOOD_PREMIUM_WAIT_N`, and `PEER_FLOOD`
  *   results that `shouldSaveHold` accepts, returns the result unchanged, and
  *   never throws from recording.
@@ -145,11 +178,33 @@ export function createFloodGuard(
     }
   }
 
-  const check: RpcCallMiddleware = async (ctx, next) => {
+  let resolving: Promise<unknown> | null = null
+  const resolveAccount = async (method: string): Promise<string> => {
+    let reason: string | undefined
+    if (options.resolveAccount) {
+      resolving ??= options.resolveAccount().finally(() => {
+        resolving = null
+      })
+      try {
+        await resolving
+      } catch (error) {
+        reason = error instanceof Error ? error.message : String(error)
+      }
+    }
+    // The provider decides: a resolver may fail after the account is known.
     const accountId = accountOf(accountProvider)
-    if (accountId === null) return next(ctx)
+    if (accountId === null) throw new HoldAccountUnknownError(method, reason)
+    return accountId
+  }
+
+  const check: RpcCallMiddleware = async (ctx, next) => {
     const method = String(ctx.request._)
     const grp = methodGroup(method)
+    let accountId = accountOf(accountProvider)
+    if (accountId === null) {
+      if (!options.requireAccount || !isFailClosedGroup(grp)) return next(ctx)
+      accountId = await resolveAccount(method)
+    }
     const store = storeOf()
     if (store.unavailable) {
       if (isFailClosedGroup(grp)) {

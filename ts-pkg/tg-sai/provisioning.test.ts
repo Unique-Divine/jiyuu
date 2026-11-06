@@ -2,11 +2,15 @@ import { describe, expect, setSystemTime, test } from "bun:test"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { holdExitFor } from "./main"
 import { addProfile, strictProfileCredentials } from "./profiles"
 import {
   BOT_BASELINE_RIGHTS,
+  cloudRetryAt,
   creationMarker,
   definiteCreateRejection,
+  isPerUserAddError,
+  MIN_CLOUD_RETRY_MS,
   PROVISIONING_BOT_ID,
   provisionRetryAt,
   provisionSetup,
@@ -31,7 +35,7 @@ import {
   dealDeskRequestKey,
 } from "./provisioningCloud"
 import { HoldError } from "./state/guard"
-import { HoldStoreUnavailableError } from "./state/holds"
+import { holdUntil, HoldStoreUnavailableError } from "./state/holds"
 import {
   accountPaths,
   FileProvisionJournal,
@@ -836,13 +840,19 @@ describe("flood and hold retry times", () => {
     const hold = new HoldError(now + 90_500, "create", now)
     expect(hold.text).toBe("TG_SAI_HOLD_91")
     const cases: [unknown, string | null][] = [
-      [{ text: "FLOOD_WAIT_30", code: 420 }, after(30_000)],
-      [{ text: "FLOOD_WAIT_%d", seconds: 40, code: 420 }, after(40_000)],
-      [{ text: "FLOOD_PREMIUM_WAIT_12", code: 420 }, after(12_000)],
-      [{ text: "PEER_FLOOD", code: 400 }, after(24 * 3_600_000)],
+      // Telegram waits get the local hold's margin: max(10 s, 1 %).
+      [{ text: "FLOOD_WAIT_30", code: 420 }, after(40_000)],
+      [{ text: "FLOOD_WAIT_%d", seconds: 40, code: 420 }, after(50_000)],
+      [{ text: "FLOOD_WAIT_3600", code: 420 }, after(3_636_000)],
+      // 12 s + 10 s margin is under the 30 s floor.
+      [{ text: "FLOOD_PREMIUM_WAIT_12", code: 420 }, after(30_000)],
+      [{ text: "PEER_FLOOD", code: 400 }, after(24 * 3_600_000 * 1.01)],
       // The hold's exact end wins over its rounded seconds.
       [hold, after(90_500)],
       [{ text: "TG_SAI_HOLD_45", code: 420 }, after(45_000)],
+      // A hold about to end still gets the 30 s floor.
+      [new HoldError(now + 2_000, "create", now), after(30_000)],
+      [{ text: "TG_SAI_HOLD_1", code: 420 }, after(30_000)],
       [new HoldStoreUnavailableError("locked"), after(5 * 60_000)],
       [{ text: "USER_PRIVACY_RESTRICTED", code: 403 }, null],
       [{ text: "FLOOD_WAIT_0", code: 420 }, null],
@@ -850,6 +860,22 @@ describe("flood and hold retry times", () => {
     ]
     for (const [error, expected] of cases)
       expect(provisionRetryAt(error, now)).toBe(expected)
+  })
+  test("cloudRetryAt never precedes the local hold or now + 30 s", () => {
+    expect(cloudRetryAt(now + 90_000, now)).toBe(after(90_000))
+    expect(cloudRetryAt(now + 29_999, now)).toBe(after(30_000))
+    expect(cloudRetryAt(now - 5_000, now)).toBe(after(30_000))
+    expect(cloudRetryAt(now + 400.2, now)).toBe(after(30_000))
+    expect(cloudRetryAt(now + 2 * 31_536_000_000, now)).toBeNull()
+    expect(cloudRetryAt(Number.NaN, now)).toBeNull()
+    // A saved Telegram wait: the cloud time is the local hold's end or later.
+    for (const waitS of [1, 30, 400, 15_382, 86_400]) {
+      const retryAt = Date.parse(
+        provisionRetryAt({ text: `FLOOD_WAIT_${waitS}`, code: 420 }, now)!,
+      )
+      expect(retryAt).toBeGreaterThanOrEqual(holdUntil(now, waitS))
+      expect(retryAt).toBeGreaterThanOrEqual(now + MIN_CLOUD_RETRY_MS)
+    }
   })
   test("error codes stay code-only and holds count as definite rejections", () => {
     const hold = new HoldError(now + 90_000, "create", now)
@@ -889,7 +915,12 @@ describe("flood and hold retry times", () => {
     f.telegram.create = async () => {
       throw new HoldError(untilMs, "create")
     }
-    await expect(f.run()).rejects.toThrow("Group creation failed")
+    const error = await f.run().catch((e: unknown) => e)
+    expect(error).toBeInstanceOf(Error)
+    expect((error as Error).message).toContain("Group creation failed")
+    // The cause survives the rethrow, so `provision run` exits 75.
+    expect((error as Error).cause).toBeInstanceOf(HoldError)
+    expect(holdExitFor(error)?.exitCode).toBe(75)
     expect(f.setup.state).toBe("incomplete")
     expect(f.setup.retryAt).toBe(new Date(untilMs).toISOString())
     expect((f.setup as Setup & { error: string }).error).toMatch(
@@ -965,6 +996,53 @@ describe("batched member adds", () => {
       `add:${PROVISIONING_BOT_ID}`,
       "link:21",
     ])
+  })
+  test("a per-user 400 on the batch falls back to per-user adds", async () => {
+    const f = fixture()
+    const batches = batched(f)
+    f.telegram.addMany = async (_chat, ids) => {
+      batches.push(ids)
+      throw { text: "USER_CHANNELS_TOO_MUCH", code: 400 }
+    }
+    const add = f.telegram.add
+    f.telegram.add = async (chat, id) => {
+      if (id === 21) throw { text: "USER_CHANNELS_TOO_MUCH", code: 400 }
+      return add(chat, id)
+    }
+    const error = await f.run().catch((e: unknown) => e)
+    expect((error as Error).message).toContain("Setup incomplete")
+    expect(batches).toHaveLength(1)
+    // The other users are still added; the refused one is not retried.
+    expect(f.events.filter((e) => /^(add|link):/.test(e))).toEqual([
+      `add:22`,
+      `add:${PROVISIONING_BOT_ID}`,
+    ])
+    expect((f.setup as Setup & { error: string }).error).toBe(
+      "add_member:USER_CHANNELS_TOO_MUCH",
+    )
+    expect(f.setup.retryAt).toBeNull()
+  })
+  test("per-user add errors: USER_*, CHAT_*, BOT_GROUPS_BLOCKED, privacy", () => {
+    for (const text of [
+      "USER_CHANNELS_TOO_MUCH",
+      "USER_BANNED_IN_CHANNEL",
+      "USER_KICKED",
+      "CHAT_MEMBER_ADD_FAILED",
+      "BOT_GROUPS_BLOCKED",
+    ])
+      expect(isPerUserAddError({ text, code: 400 })).toBe(true)
+    expect(isPerUserAddError({ text: "USER_PRIVACY_RESTRICTED", code: 403 }))
+      .toBe(true)
+    for (const error of [
+      { text: "FLOOD_WAIT_30", code: 420 },
+      { text: "PEER_FLOOD", code: 400 },
+      { text: "USER_CHANNELS_TOO_MUCH", code: 403 },
+      { text: "CHANNELS_TOO_MUCH", code: 400 },
+      new HoldError(Date.now() + 5_000, "invite"),
+      new HoldStoreUnavailableError("locked"),
+      new Error("USER_KICKED"),
+    ])
+      expect(isPerUserAddError(error)).toBe(false)
   })
   test("a required user's privacy refusal still adds the others, then fails", async () => {
     const f = fixture()

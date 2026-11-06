@@ -5,7 +5,9 @@ import { join } from "node:path"
 import type { RpcCallMiddlewareContext } from "@mtcute/bun"
 
 import {
+  HOLD_ACCOUNT_UNKNOWN,
   HOLD_ERROR_CODE,
+  HoldAccountUnknownError,
   HoldError,
   createFloodGuard,
   holdErrorSeconds,
@@ -376,5 +378,92 @@ describe("HoldError", () => {
     )
     expect(new HoldError(T0, "send", T0).message).toBe("TG_SAI_HOLD_1")
     expect(holdErrorSeconds("TG_SAI_HOLD_STATE_UNAVAILABLE")).toBeNull()
+  })
+})
+
+describe("requireAccount", () => {
+  function sessionGuard(resolveAccount?: () => Promise<unknown>) {
+    const session: { id: number | null } = { id: null }
+    const guard = createFloodGuard(store, () => session.id, {
+      now: () => nowMs,
+      requireAccount: true,
+      ...(resolveAccount ? { resolveAccount } : {}),
+    })
+    return { guard, session }
+  }
+
+  test("invite/create without an account are refused before the wire", async () => {
+    const { guard } = sessionGuard()
+    const wire = new FakeWire()
+    for (const method of ["channels.inviteToChannel", "messages.createChat"]) {
+      const error = await call(guard, wire, method).catch((e: unknown) => e)
+      expect(error).toBeInstanceOf(HoldAccountUnknownError)
+      expect(error).toMatchObject({
+        code: 500,
+        text: HOLD_ACCOUNT_UNKNOWN,
+        method,
+      })
+    }
+    // Other groups pass while the account is unknown.
+    await call(guard, wire, "messages.sendMessage")
+    expect(wire.calls).toEqual(["messages.sendMessage"])
+  })
+
+  test("concurrent invites share one resolve, then use the account", async () => {
+    let resolves = 0
+    const { guard, session } = sessionGuard(async () => {
+      resolves += 1
+      await Promise.resolve()
+      session.id = 77
+    })
+    store.recordHold({
+      accountId: 77,
+      grp: "invite",
+      method: "channels.inviteToChannel",
+      source: "flood_wait",
+      waitS: 600,
+      nowMs,
+    })
+    const wire = new FakeWire()
+    const results = await Promise.allSettled([
+      call(guard, wire, "channels.inviteToChannel"),
+      call(guard, wire, "channels.inviteToChannel"),
+    ])
+    expect(resolves).toBe(1)
+    for (const result of results) {
+      expect(result.status).toBe("rejected")
+      expect((result as PromiseRejectedResult).reason).toBeInstanceOf(
+        HoldError,
+      )
+    }
+    expect(wire.calls).toEqual([])
+  })
+
+  test("a failed resolve is refused with its reason and retried later", async () => {
+    let attempts = 0
+    const { guard, session } = sessionGuard(async () => {
+      attempts += 1
+      if (attempts === 1) throw new Error("network down")
+      session.id = 77
+    })
+    const wire = new FakeWire()
+    const first = await call(guard, wire, "channels.inviteToChannel").catch(
+      (e: unknown) => e,
+    )
+    expect(first).toMatchObject({ text: HOLD_ACCOUNT_UNKNOWN })
+    expect((first as HoldAccountUnknownError).reason).toBe("network down")
+    await call(guard, wire, "channels.inviteToChannel")
+    expect(attempts).toBe(2)
+    expect(wire.calls).toEqual(["channels.inviteToChannel"])
+  })
+
+  test("a resolver that fails after learning the account still passes", async () => {
+    const { guard, session } = sessionGuard(async () => {
+      session.id = 77
+      throw new Error("storage not ready")
+    })
+    const wire = new FakeWire()
+    await call(guard, wire, "channels.inviteToChannel")
+    expect(wire.calls).toEqual(["channels.inviteToChannel"])
   })
 })

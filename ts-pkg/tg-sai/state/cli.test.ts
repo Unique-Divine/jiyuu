@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { Command, CommanderError } from "commander"
-import { existsSync, mkdtempSync, rmSync } from "node:fs"
+import { existsSync, mkdtempSync, rmSync, statSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -12,10 +12,18 @@ import {
   parseReasonCode,
   parseUntil,
   plannedUntil,
+  foreignOwnerRefusal,
   registerHoldsCommand,
+  userNameOf,
+  type HoldsCliContext,
 } from "./cli.ts"
 import { openStateDb, stateDbPath } from "./db.ts"
 import { HoldStore, MAX_HOLD_MS, holdUntil, type FloodHold } from "./holds.ts"
+import {
+  openTelemetryDb,
+  telemetryDbPath,
+  type EventRow,
+} from "../telemetry/db.ts"
 
 const NOW_MS = Date.parse("2026-11-06T12:00:00.000Z")
 const ACCOUNT = "8274304175"
@@ -38,15 +46,19 @@ interface RunResult {
   exitCode: number | null
 }
 
-async function runHolds(args: string[]): Promise<RunResult> {
+async function runHolds(
+  args: string[],
+  extra: Partial<HoldsCliContext> = {},
+): Promise<RunResult> {
   const out: string[] = []
   const err: string[] = []
   const program = new Command().name("tg-sai").exitOverride()
   registerHoldsCommand(program, {
-    env,
+    env: { ...env, TG_SAI_TELEMETRY: "on" },
     now: () => NOW_MS,
     stdout: (text) => out.push(text),
     stderr: (text) => err.push(text),
+    ...extra,
   })
   try {
     await program.parseAsync(["holds", ...args], { from: "user" })
@@ -383,9 +395,33 @@ describe("holds clear", () => {
     })
     expect(readHolds()).toHaveLength(1)
 
-    const run = await runHolds([...args, "--run"])
+    expect(dry.err.join("\n")).toContain("--force")
+
+    // An active hold needs --force.
+    const refused = await runHolds([...args, "--run"])
+    expect(refused.exitCode).toBe(1)
+    expect(refused.err.join("\n")).toContain("add --force")
+    expect(readHolds()).toHaveLength(1)
+
+    const run = await runHolds([...args, "--run", "--force"])
     expect(run.out[0]).toContain("removed: true")
     expect(readHolds()).toHaveLength(0)
+  })
+
+  test("an ended hold clears with --run alone", async () => {
+    seed([
+      {
+        accountId: ACCOUNT,
+        grp: "invite",
+        method: "channels.inviteToChannel",
+        source: "flood_wait",
+        untilMs: NOW_MS - 1_000,
+        nowMs: NOW_MS - 60_000,
+      },
+    ])
+    const run = await runHolds([...args, "--run", "--json"])
+    expect(run.exitCode).toBeNull()
+    expect(JSON.parse(run.out[0]!)).toMatchObject({ removed: true })
   })
 
   test("missing hold reports found: false", async () => {
@@ -395,5 +431,137 @@ describe("holds clear", () => {
       removed: false,
     })
     expect(result.err.join("\n")).toContain("No hold stored")
+  })
+})
+
+describe("holds write safeguards", () => {
+  const setArgs = [
+    "set",
+    "--account",
+    ACCOUNT,
+    "--group",
+    "invite",
+    "--wait-s",
+    "600",
+    "--run",
+  ]
+  const clearArgs = ["clear", "--account", ACCOUNT, "--group", "invite"]
+
+  function logRows(): EventRow[] {
+    const path = telemetryDbPath(env)
+    if (!existsSync(path)) return []
+    const db = openTelemetryDb(path)
+    try {
+      return db
+        .query<EventRow, []>(
+          "SELECT * FROM event WHERE event LIKE 'holds.%' ORDER BY ts_ms",
+        )
+        .all()
+    } finally {
+      db.close()
+    }
+  }
+
+  test("set and clear write holds.set and holds.clear log rows", async () => {
+    expect((await runHolds(setArgs)).exitCode).toBeNull()
+    const until = readHolds()[0]!.untilMs
+    expect(
+      (await runHolds([...clearArgs, "--run", "--force"])).exitCode,
+    ).toBeNull()
+    const rows = logRows()
+    expect(rows.map((row) => [row.event, row.level, row.account_id])).toEqual([
+      ["holds.set", "info", Number(ACCOUNT)],
+      ["holds.clear", "info", Number(ACCOUNT)],
+    ])
+    for (const row of rows) {
+      expect(JSON.parse(row.attrs!)).toEqual({
+        account: Number(ACCOUNT),
+        group: { _: "invite" },
+        until,
+      })
+    }
+  })
+
+  test("dry runs and refused clears write no log row", async () => {
+    seed([
+      {
+        accountId: ACCOUNT,
+        grp: "invite",
+        method: "channels.inviteToChannel",
+        source: "flood_wait",
+        waitS: 600,
+        nowMs: NOW_MS,
+      },
+    ])
+    await runHolds(setArgs.filter((arg) => arg !== "--run"))
+    await runHolds(clearArgs)
+    await runHolds([...clearArgs, "--run"])
+    expect(logRows()).toEqual([])
+  })
+
+  test("--run refuses a state.db owned by another uid", async () => {
+    seed([
+      {
+        accountId: ACCOUNT,
+        grp: "invite",
+        method: "channels.inviteToChannel",
+        source: "flood_wait",
+        waitS: 600,
+        nowMs: NOW_MS,
+      },
+    ])
+    const ownerUid = statSync(stateDbPath(env)).uid
+    const other = { getuid: () => ownerUid + 1 }
+    for (const args of [setArgs, [...clearArgs, "--run", "--force"]]) {
+      const result = await runHolds(args, other)
+      expect(result.exitCode).toBe(1)
+      const text = result.err.join("\n")
+      expect(text).toContain(`owned by uid ${ownerUid}`)
+      expect(text).toContain(`not uid ${ownerUid + 1}`)
+      expect(text).toContain(`sudo -u `)
+      expect(text).toContain(`TG_SAI_DIR=${dir}`)
+    }
+    expect(readHolds()).toHaveLength(1)
+    expect(logRows()).toEqual([])
+    // Dry runs only read, so they still work.
+    const dry = await runHolds(
+      setArgs.filter((arg) => arg !== "--run"),
+      other,
+    )
+    expect(dry.exitCode).toBeNull()
+  })
+
+  test("foreignOwnerRefusal names the owner and its sudo -u form", () => {
+    const path = stateDbPath(env)
+    expect(foreignOwnerRefusal(path, 0, "set")).toBeNull() // no file yet
+    seed([])
+    const uid = statSync(path).uid
+    expect(foreignOwnerRefusal(path, uid, "set")).toBeNull()
+    expect(foreignOwnerRefusal(path, undefined, "set")).toBeNull()
+    expect(
+      foreignOwnerRefusal(path, uid + 1, "clear", () => "sai-custody-worker"),
+    ).toContain(
+      `(sai-custody-worker), not uid ${uid + 1}. Run as the owner, e.g.: ` +
+        `sudo -u sai-custody-worker env TG_SAI_DIR=${dir} HOME=${dir} ` +
+        "tg-sai holds clear ... --run",
+    )
+    expect(foreignOwnerRefusal(path, uid + 1, "set", () => null)).toContain(
+      `sudo -u '#${uid}' env`,
+    )
+  })
+
+  test("userNameOf reads /etc/passwd lines", () => {
+    const passwd = () =>
+      "root:x:0:0:root:/root:/bin/bash\n" +
+      "sai-custody-worker:x:998:998::/var/lib/sai-custody-worker:" +
+      "/usr/sbin/nologin\n"
+    expect(userNameOf(998, passwd)).toBe("sai-custody-worker")
+    expect(userNameOf(0, passwd)).toBe("root")
+    expect(userNameOf(1234, passwd)).toBeNull()
+    expect(
+      userNameOf(0, () => {
+        throw new Error("no file")
+      }),
+    ).toBeNull()
   })
 })

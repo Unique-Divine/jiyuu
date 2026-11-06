@@ -10,7 +10,7 @@ import {
   holdExitFor,
   shortDuration,
 } from "./main"
-import { HoldError } from "./state/guard"
+import { HoldAccountUnknownError, HoldError } from "./state/guard"
 import { HoldStoreUnavailableError } from "./state/holds"
 
 const NOW_MS = Date.UTC(2026, 10, 6, 12, 0, 0)
@@ -91,6 +91,16 @@ describe("holdExitFor", () => {
     expect(exit?.message).toContain("invite/create")
   })
 
+  test("an unverified session account exits 75", () => {
+    const exit = holdExitFor(
+      new HoldAccountUnknownError("channels.inviteToChannel"),
+      NOW_MS,
+    )
+    expect(exit?.exitCode).toBe(75)
+    expect(exit?.message).toContain("nothing was sent")
+    expect(exit?.message).not.toContain("\n")
+  })
+
   test("other errors are not holds", () => {
     expect(holdExitFor(new Error("FLOOD_WAIT_30"), NOW_MS)).toBeNull()
     const other = Object.assign(new Error("TG_SAI_HOLD_5"), { code: 400 })
@@ -123,6 +133,16 @@ describe("bare commands print help", () => {
       expect(result.exitCode).toBe(0)
       expect(result.stdout).toContain("Usage: tg-sai audit")
       expect(result.stderr).toBe("")
+    })
+  })
+
+  test("bare provision run and worker print help, exit 0", () => {
+    withDir((dir) => {
+      for (const args of [["chat", "provision", "run"], ["worker"]]) {
+        const result = runCli(args, dir)
+        expect(result.exitCode).toBe(0)
+        expect(result.stdout).toContain(`Usage: tg-sai ${args.join(" ")}`)
+      }
     })
   })
 

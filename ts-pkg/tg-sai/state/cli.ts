@@ -2,13 +2,19 @@
  * `tg-sai holds`: inspect and override the flood holds in `state.db`.
  * Writes are dry runs unless `--run` is given. `set` records a `manual`
  * hold with MAX semantics, so it can extend a hold but never shorten it;
- * `clear` is the only way to end a hold early.
+ * `clear` is the only way to end a hold early, and needs `--force` while the
+ * hold is active. `--run` refuses a `state.db` owned by another user (the
+ * worker's file must stay writable by the worker), and each write leaves a
+ * `holds.set` / `holds.clear` row in the telemetry DB.
  */
 import { Database } from "bun:sqlite"
 import type { Command } from "commander"
-import { existsSync } from "node:fs"
+import { existsSync, readFileSync, statSync } from "node:fs"
+import { dirname } from "node:path"
 
 import type { ProfileStoreEnv } from "../profiles"
+import { log as telemetryLog } from "../telemetry/run"
+import type { LogFields } from "../telemetry/run"
 import {
   isoTime,
   parseAccountId,
@@ -188,6 +194,14 @@ export function plannedUntil(
 // ---------------------------------------------------------------------------
 // Command wiring
 
+/** Writes one info row to the telemetry DB; never throws. */
+export type HoldsLogFn = (
+  event: "holds.set" | "holds.clear",
+  msg: string,
+  attrs: Record<string, unknown>,
+  fields: LogFields,
+) => void
+
 export interface HoldsCliContext {
   env?: ProfileStoreEnv
   /** Overrides `stateDbPath(env)`. */
@@ -195,6 +209,10 @@ export interface HoldsCliContext {
   now?: () => number
   stdout?: (text: string) => void
   stderr?: (text: string) => void
+  /** Current process uid; default `process.getuid()`. */
+  getuid?: () => number | undefined
+  /** Default: the telemetry `log` API with `env`. */
+  log?: HoldsLogFn
 }
 
 interface ResolvedContext {
@@ -202,15 +220,79 @@ interface ResolvedContext {
   now: () => number
   out: (text: string) => void
   err: (text: string) => void
+  getuid: () => number | undefined
+  log: HoldsLogFn
 }
 
 function resolveContext(ctx: HoldsCliContext): ResolvedContext {
+  const env = ctx.env ?? process.env
   return {
-    path: ctx.dbPath ?? stateDbPath(ctx.env ?? process.env),
+    path: ctx.dbPath ?? stateDbPath(env),
     now: ctx.now ?? Date.now,
     out: ctx.stdout ?? ((text) => process.stdout.write(`${text}\n`)),
     err: ctx.stderr ?? ((text) => process.stderr.write(`${text}\n`)),
+    getuid: ctx.getuid ?? (() => process.getuid?.()),
+    log:
+      ctx.log ??
+      ((event, msg, attrs, fields) =>
+        telemetryLog("info", event, msg, attrs, fields, { env })),
   }
+}
+
+/** Login name of `uid` from `/etc/passwd`; `null` when not listed. */
+export function userNameOf(
+  uid: number,
+  passwd: () => string = () => readFileSync("/etc/passwd", "utf8"),
+): string | null {
+  try {
+    for (const line of passwd().split("\n")) {
+      const fields = line.split(":")
+      if (fields.length > 2 && Number(fields[2]) === uid && fields[0]) {
+        return fields[0]
+      }
+    }
+  } catch {
+    // No passwd file; the caller falls back to the uid.
+  }
+  return null
+}
+
+/**
+ * Refusal text when `path` exists and is owned by a uid other than
+ * `currentUid`: writing as another user would leave holds in a file (and
+ * `-wal`/`-shm`) the owner's process may not read. `null` otherwise.
+ */
+export function foreignOwnerRefusal(
+  path: string,
+  currentUid: number | undefined,
+  subcommand: "set" | "clear",
+  nameOf: (uid: number) => string | null = (uid) => userNameOf(uid),
+): string | null {
+  if (currentUid === undefined || !existsSync(path)) return null
+  const ownerUid = statSync(path).uid
+  if (ownerUid === currentUid) return null
+  const name = nameOf(ownerUid)
+  // Quoted: an unquoted # starts a shell comment.
+  const owner = name ?? `'#${ownerUid}'`
+  const dir = dirname(path)
+  return (
+    `${path} is owned by uid ${ownerUid}` +
+    `${name ? ` (${name})` : ""}, not uid ${currentUid}. ` +
+    `Run as the owner, e.g.: sudo -u ${owner} env TG_SAI_DIR=${dir} ` +
+    `HOME=${dir} tg-sai holds ${subcommand} ... --run`
+  )
+}
+
+/**
+ * Attributes of a `holds.*` row. Telemetry stores strings as their length,
+ * so the group is a `{ _ }` name, which is kept, and times are epoch ms.
+ */
+function holdLogAttrs(
+  accountId: string,
+  grp: HoldGroup,
+  untilMs: number | null,
+): Record<string, unknown> {
+  return { account: Number(accountId), group: { _: grp }, until: untilMs }
 }
 
 /**
@@ -291,6 +373,7 @@ interface ClearCliOptions {
   account?: string
   group?: string
   run?: boolean
+  force?: boolean
   json?: boolean
 }
 
@@ -331,9 +414,11 @@ Examples:
   tg-sai holds set --account 8274304175 --group invite --wait-s 3600
   tg-sai holds set --account 8274304175 --group send \\
     --until 2026-11-07T12:00:00Z --reason-code ops_pause --run
-  tg-sai holds clear --account 8274304175 --group invite --run
+  tg-sai holds clear --account 8274304175 --group invite --run --force
 
 set and clear are dry runs without --run. set can only extend a hold.
+clear needs --force while the hold is active. Run as the user that owns
+state.db (on the VM, sudo -u sai-custody-worker; see RUNBOOK.md).
 Groups: invite, create, resolve, send, method:<tl.method>.
 `,
     )
@@ -450,9 +535,21 @@ Exactly one of --until or --wait-s. Without --run nothing is written.
         } satisfies Record<string, Cell>
       }
 
+      if (options.run) {
+        const refusal = foreignOwnerRefusal(ctx.path, ctx.getuid(), "set")
+        if (refusal) usageError(command, refusal)
+      }
       const result = options.run
         ? withWritableStore(ctx, (store, db) => write(store, db))
         : withReadOnlyDb(ctx, (db) => write(null, db))
+      if (options.run) {
+        ctx.log(
+          "holds.set",
+          "manual hold set",
+          holdLogAttrs(accountId, grp, Date.parse(String(result.until))),
+          { accountId: Number(accountId), method },
+        )
+      }
       if (options.json) ctx.out(JSON.stringify(result, null, 2))
       else ctx.out(toonObject(result))
       if (!result.changed) {
@@ -472,6 +569,7 @@ Exactly one of --until or --wait-s. Without --run nothing is written.
       "invite, create, resolve, send, or method:<tl.method>",
     )
     .option("--run", "Delete the hold (default is a dry run)")
+    .option("--force", "Allow --run to clear a hold that is still active")
     .option("--json", "Print JSON")
     .action((options: ClearCliOptions, command: Command) => {
       if (calledBare(command)) {
@@ -488,11 +586,29 @@ Exactly one of --until or --wait-s. Without --run nothing is written.
       const existing = withReadOnlyDb(ctx, (db) =>
         db ? storedHold(db, accountId, grp) : null,
       )
+      const active = existing !== null && existing.untilMs > nowMs
       let removed = false
       if (options.run && existing) {
+        const refusal = foreignOwnerRefusal(ctx.path, ctx.getuid(), "clear")
+        if (refusal) usageError(command, refusal)
+        if (active && !options.force) {
+          usageError(
+            command,
+            `the ${grp} hold for ${accountId} is active until ` +
+              `${isoTime(existing.untilMs)}; add --force to clear it early`,
+          )
+        }
         removed = withWritableStore(ctx, (store) =>
           store.clearHold(accountId, grp),
         )
+        if (removed) {
+          ctx.log(
+            "holds.clear",
+            "hold cleared",
+            holdLogAttrs(accountId, grp, existing.untilMs),
+            { accountId: Number(accountId), method: existing.method },
+          )
+        }
       }
       const result: Record<string, Cell> = {
         mode: options.run ? "run" : "dry_run",
@@ -512,7 +628,12 @@ Exactly one of --until or --wait-s. Without --run nothing is written.
       else ctx.out(toonObject(result))
       if (!existing) ctx.err(`No hold stored for ${accountId} ${grp}.`)
       else if (!options.run) {
-        ctx.err("Dry run: nothing removed. Add --run to remove.")
+        ctx.err(
+          active
+            ? "Dry run: nothing removed. The hold is active; add --run " +
+                "--force to remove it."
+            : "Dry run: nothing removed. Add --run to remove.",
+        )
       }
     })
 

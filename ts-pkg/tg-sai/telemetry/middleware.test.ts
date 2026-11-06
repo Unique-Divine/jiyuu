@@ -6,14 +6,18 @@ import { mkdtempSync, readdirSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
-import { MtPeerNotFoundError, MtTimeoutError, tl } from "@mtcute/bun"
+import { Long, MtPeerNotFoundError, MtTimeoutError, tl } from "@mtcute/bun"
 
 import {
   clientMiddlewares,
   closeProcessHoldStores,
+  addTargetToChat,
   createMtcuteRuntimeClient,
+  NO_FLOOD_SLEEP,
+  promoteTargetAdmin,
+  sessionAccountId,
 } from "../mtcuteAdapter"
-import { HoldError } from "../state/guard"
+import { HoldAccountUnknownError, HoldError } from "../state/guard"
 import { HoldStore } from "../state/holds"
 import { stateDbPath } from "../state/db"
 import {
@@ -101,10 +105,23 @@ const flood = (s: number) => ({
   errorMessage: `FLOOD_WAIT_${s}`,
 })
 
-/** Real client network whose transport answers from `results`. */
-function makeNetwork(telemetry: ClientTelemetry, results: unknown[]) {
+/**
+ * Real client network whose transport answers from `results`. The flood
+ * guard keys by `accountId` (default 42, as in `CONTEXT`); `null` leaves
+ * it to the session's getMe.
+ */
+function makeNetwork(
+  telemetry: ClientTelemetry,
+  results: unknown[],
+  accountId: number | null = 42,
+) {
   const client: any = createMtcuteRuntimeClient(
-    { apiId: 1, apiHash: "0".repeat(32), storage: ":memory:" },
+    {
+      apiId: 1,
+      apiHash: "0".repeat(32),
+      storage: ":memory:",
+      ...(accountId === null ? {} : { accountId }),
+    },
     telemetry,
   )
   const nm = client._client.mt.network
@@ -208,16 +225,18 @@ describe("createTelemetryMiddlewares", () => {
   })
 
   test("stored flood: synthetic error with zero attempts", async () => {
-    // No account: the guard passes through, so mtcute's stored wait answers.
+    // No account and a send (not invite/create): the guard passes through,
+    // so mtcute's stored wait answers.
     const sink = new MemorySink()
     const { nm, transport } = makeNetwork(
       { sink, context: () => ({ ...CONTEXT, accountId: null }) },
       [flood(15382)],
+      null,
     )
-    await nm.call({ _: "channels.inviteToChannel" })
+    await nm.call({ _: "messages.sendMessage" })
     sink.events.length = 0
 
-    const res: any = await nm.call({ _: "channels.inviteToChannel" })
+    const res: any = await nm.call({ _: "messages.sendMessage" })
     expect(res.errorMessage).toMatch(/^FLOOD_WAIT_1538[12]$/)
     expect(transport).toHaveLength(1)
     expect(sink.of("tg.rpc.attempt")).toEqual([])
@@ -303,6 +322,7 @@ describe("createTelemetryMiddlewares", () => {
         },
       },
       [{ _: "config" }],
+      null,
     )
     expect(await nm.call({ _: "help.getConfig" })).toEqual({ _: "config" })
   })
@@ -595,11 +615,25 @@ describe("flood guard through a real NetworkManager", () => {
     await expect(second.nm.call(INVITE)).rejects.toBeInstanceOf(HoldError)
     expect(second.transport).toEqual([])
 
-    // Another account, and a client with no account, still go through.
+    // Another account goes through.
     const other = plainNetwork([{ _: "updates" }], 8)
     expect(await other.nm.call(INVITE)).toEqual({ _: "updates" })
-    const anonymous = plainNetwork([{ _: "updates" }])
-    expect(await anonymous.nm.call(INVITE)).toEqual({ _: "updates" })
+  })
+
+  test("the telemetry context's account never keys holds", async () => {
+    // CONTEXT says 42 (e.g. a profile's saved userId); the session is 77.
+    const sink = new MemorySink()
+    const { client, nm, transport } = sessionNetwork(77, [flood(400)], {
+      sink,
+      context: () => CONTEXT,
+    })
+    expect(await nm.call(INVITE)).toEqual(flood(400))
+    expect(transport.map((r: any) => r._)).toEqual([
+      "users.getUsers",
+      "channels.inviteToChannel",
+    ])
+    expect(sessionAccountId(client)).toBe(77)
+    expect(savedHolds().map((h) => h.accountId)).toEqual(["77"])
   })
 
   test("config.accountId wins over the telemetry context", async () => {
@@ -614,9 +648,153 @@ describe("flood guard through a real NetworkManager", () => {
     expect(savedHolds().map((h) => h.accountId)).toEqual(["5"])
   })
 
+  test("an unverified session refuses invite/create and sends nothing", async () => {
+    // getMe answers with an error: the account stays unknown, and each
+    // invite/create tries the lookup again.
+    const { nm, transport } = plainNetwork([
+      { _: "mt_rpc_error", errorCode: 400, errorMessage: "USER_ID_INVALID" },
+    ])
+    for (const request of [INVITE, { _: "channels.createChannel" }]) {
+      const error = await nm.call(request).catch((e: unknown) => e)
+      expect(error).toBeInstanceOf(HoldAccountUnknownError)
+      expect((error as HoldAccountUnknownError).text).toBe(
+        "TG_SAI_HOLD_ACCOUNT_UNKNOWN",
+      )
+    }
+    expect(transport.map((r: any) => r._)).toEqual([
+      "users.getUsers",
+      "users.getUsers",
+    ])
+    expect(readdirSync(stateDir)).toEqual([])
+  })
+
+  test("a session's own getMe keys its holds", async () => {
+    const first = sessionNetwork(77, [flood(400)])
+    expect(sessionAccountId(first.client)).toBeNull()
+    expect(await first.nm.call(INVITE)).toEqual(flood(400))
+    expect(savedHolds()).toMatchObject([{ accountId: "77", grp: "invite" }])
+
+    // getMe already ran: the next invite is refused without another lookup.
+    first.transport.length = 0
+    await expect(first.nm.call(INVITE)).rejects.toBeInstanceOf(HoldError)
+    expect(first.transport).toEqual([])
+
+    // A new client for the same session is refused after its own getMe.
+    closeProcessHoldStores()
+    const second = sessionNetwork(77, [{ _: "updates" }])
+    await expect(second.nm.call(INVITE)).rejects.toBeInstanceOf(HoldError)
+    expect(second.transport.map((r: any) => r._)).toEqual(["users.getUsers"])
+
+    // Another session's account is not held.
+    const other = sessionNetwork(78, [{ _: "updates" }])
+    expect(await other.nm.call(INVITE)).toEqual({ _: "updates" })
+  })
+
+  test("other calls pass unguarded until the account is known", async () => {
+    const { nm, transport } = plainNetwork([{ _: "updates" }])
+    expect(await nm.call({ _: "messages.sendMessage" })).toEqual({
+      _: "updates",
+    })
+    expect(transport.map((r: any) => r._)).toEqual(["messages.sendMessage"])
+  })
+
   test("a client with no account never creates state.db", async () => {
     const { nm } = plainNetwork([flood(400)])
-    await nm.call(INVITE)
+    await nm.call({ _: "messages.sendMessage" })
+    await nm.call(INVITE).catch(() => {})
     expect(readdirSync(stateDir)).toEqual([])
   })
 })
+
+describe("CLI invite and admin writes never sleep through a flood wait", () => {
+  const CHANNEL = { _: "inputPeerChannel", channelId: 1, accessHash: Long.ZERO }
+  const USER = { _: "inputPeerUser", userId: 2, accessHash: Long.ZERO }
+
+  /** Real client keyed to account 7 whose transport answers `result`. */
+  function writeClient(result: unknown) {
+    const client: any = createMtcuteRuntimeClient({
+      apiId: 1,
+      apiHash: "0".repeat(32),
+      storage: ":memory:",
+      accountId: 7,
+    })
+    const transport: unknown[] = []
+    client._client.mt.network._call = async (request: unknown) => {
+      transport.push(request)
+      return result
+    }
+    return { client, transport }
+  }
+
+  test("addTargetToChat surfaces FLOOD_WAIT_3 at once and saves it", async () => {
+    const { client, transport } = writeClient(flood(3))
+    const started = Date.now()
+    const error = await addTargetToChat(client, {
+      chatId: CHANNEL as any,
+      targetPeer: USER as any,
+    }).catch((e: unknown) => e)
+    expect(Date.now() - started).toBeLessThan(2_000)
+    expect((error as { text?: string }).text).toBe("FLOOD_WAIT_%d")
+    expect(transport).toHaveLength(1)
+    expect(savedHolds()).toMatchObject([
+      { accountId: "7", grp: "invite", waitS: 3 },
+    ])
+    // The saved hold refuses the next add before the wire.
+    await expect(
+      addTargetToChat(client, {
+        chatId: CHANNEL as any,
+        targetPeer: USER as any,
+      }),
+    ).rejects.toBeInstanceOf(HoldError)
+    expect(transport).toHaveLength(1)
+  })
+
+  test("promoteTargetAdmin surfaces FLOOD_WAIT_3 at once by default", async () => {
+    const { client, transport } = writeClient(flood(3))
+    const started = Date.now()
+    await expect(
+      promoteTargetAdmin(client, {
+        chatId: CHANNEL as any,
+        targetPeer: USER as any,
+        rights: { addAdmins: true },
+      }),
+    ).rejects.toMatchObject({ text: "FLOOD_WAIT_%d" })
+    expect(Date.now() - started).toBeLessThan(2_000)
+    expect(transport).toHaveLength(1)
+    expect(savedHolds()).toMatchObject([
+      { accountId: "7", grp: "method:channels.editAdmin", waitS: 3 },
+    ])
+  })
+
+  test("NO_FLOOD_SLEEP sets a zero sleep threshold", () => {
+    expect(NO_FLOOD_SLEEP).toEqual({ floodSleepThreshold: 0 })
+  })
+})
+
+/** The `user` getMe returns for a session acting as `id`. */
+function selfUser(id: number) {
+  return { _: "user", id, self: true, firstName: "Fixture", accessHash: 1n }
+}
+
+/**
+ * Real client with no `accountId` whose transport answers getMe with user
+ * `selfId` and every other call from `results`.
+ */
+function sessionNetwork(
+  selfId: number,
+  results: unknown[],
+  telemetry?: ClientTelemetry,
+) {
+  const client: any = createMtcuteRuntimeClient(
+    { apiId: 1, apiHash: "0".repeat(32), storage: ":memory:" },
+    telemetry,
+  )
+  const nm = client._client.mt.network
+  const transport: unknown[] = []
+  nm._call = async (request: any) => {
+    transport.push(request)
+    if (request._ === "users.getUsers") return [selfUser(selfId)]
+    return results.length > 1 ? results.shift() : results[0]
+  }
+  return { client, nm, transport }
+}
