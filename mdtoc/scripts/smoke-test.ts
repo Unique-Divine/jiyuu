@@ -9,6 +9,11 @@ const temporary = mkdtempSync(join(tmpdir(), "ud-mdtoc-pack-"))
 const config = join(temporary, "bunfig.toml")
 const globalDirectory = join(temporary, "global")
 const binDirectory = join(temporary, "bin")
+const environment = {
+  ...process.env,
+  BUN_INSTALL_GLOBAL_DIR: globalDirectory,
+  BUN_INSTALL_BIN: binDirectory,
+}
 const executable = join(binDirectory, "ud-mdtoc")
 const tarball = join(temporary, `uniquedivine-ud-mdtoc-${version}.tgz`)
 const sample = "# Title\n\n## One\n\n### Two\n\n#### Hidden\n"
@@ -18,7 +23,7 @@ const flags = ["--bullets=-", "--maxdepth=3", "--no-firsth1"]
 function run(command: string[], cwd = temporary, input?: string): string {
   const result = Bun.spawnSync(command, {
     cwd,
-    env: { ...process.env, BUN_INSTALL_GLOBAL_DIR: globalDirectory },
+    env: environment,
     stdin: input === undefined ? undefined : Buffer.from(input),
     stdout: "pipe",
     stderr: "pipe",
@@ -71,6 +76,7 @@ try {
   rmSync(join(globalDirectory, "node_modules/list-item"), { recursive: true })
   const broken = Bun.spawnSync([executable, "-", ...flags], {
     cwd: temporary,
+    env: environment,
     stdin: Buffer.from(sample),
     stdout: "pipe",
     stderr: "pipe",
