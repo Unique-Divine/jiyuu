@@ -1,19 +1,74 @@
-# Displays available recipes when running `just` or `just list`.
+# Display the available package commands.
 [private]
 list:
-  #!/usr/bin/env bash
   just --list
 
-# install
-i: 
-  bun install
+# Install the development dependencies from the lockfile.
+install:
+  bun install --frozen-lockfile
 
-# Run tests
-t:
+alias i := install
+
+# Run library and CLI regression tests.
+test:
   bun test
 
-fmt: 
-  bun run prettier --write src
+alias t := test
 
+# Typecheck the package without emitting JavaScript.
+typecheck:
+  bun check
+
+# Check npm package compatibility.
+lint:
+  bunx publint
+
+# Format the package source and tests.
+fmt:
+  bun run prettier --write src test scripts
+
+# Run the CLI from the checkout.
 run *ARGS:
-  bun run src/cli.ts {{ARGS}}
+  bun --no-install src/cli.ts {{ARGS}}
+
+# Pack and test a disposable global installation without changing installed tools.
+smoke-test:
+  bun run scripts/smoke-test.ts
+
+# Pinned npm matches tg-sai's validated publishing and web authentication flow.
+npm := "bunx npm@12.2.0"
+
+# Validate npm's publication contents and reject npm warnings.
+publish-check:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  out="$({{npm}} publish --dry-run --access public 2>&1)"
+  if printf '%s\n' "$out" | rg -i 'npm (warn|error)'; then
+    printf '%s\n' 'Fix the npm warnings above before publishing.' >&2
+    exit 1
+  fi
+  printf '%s\n' "$out" | rg 'name:|version:|total files:'
+
+# Run package lint, regression tests, type checking, tarball smoke, and npm dry run.
+validate: lint test typecheck smoke-test publish-check
+
+# Publish after validation with npm login, version checks, and browser-based 2FA.
+publish:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  printf '%s\n' '[1/4] npm login'
+  if ! user="$({{npm}} whoami 2>/dev/null)"; then
+    printf '%s\n' 'Not logged in to npm. Run: bunx npm@12.2.0 login --auth-type=web' >&2
+    exit 1
+  fi
+  printf '      logged in as %s\n' "$user"
+  package="$(jq -r '.name + "@" + .version' package.json)"
+  printf '[2/4] %s not yet on npm\n' "$package"
+  if {{npm}} view "$package" version >/dev/null 2>&1; then
+    printf '%s is already published; bump the version\n' "$package" >&2
+    exit 1
+  fi
+  printf '%s\n' '[3/4] npm package validation'
+  just publish-check
+  printf '%s\n' "[4/4] publishing; open the printed URL and choose 'remember me for 5 minutes'"
+  BROWSER=true {{npm}} publish --access public
