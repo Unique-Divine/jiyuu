@@ -1,9 +1,10 @@
-#!/usr/bin/env bun
+#!/usr/bin/env -S bun --no-install
 
 import * as fs from "fs"
 import { Readable } from "stream"
 import { toc, minimist, concat, Toc } from "./mdtoc"
 import { type TocResult } from "./mdtoc/toc"
+import { version } from "../package.json"
 // const utils = require("./lib/utils")
 
 /**
@@ -14,7 +15,16 @@ import { type TocResult } from "./mdtoc/toc"
  * file inplace. */
 const args = minimist(process.argv.slice(2), {
   // boolean flags: "-i", "--json", ...
-  boolean: ["i", "json", "firsth1", "stripHeadingTags"],
+  boolean: [
+    "i",
+    "json",
+    "firsth1",
+    "stripHeadingTags",
+    "help",
+    "version",
+    "plugin-info",
+  ],
+  alias: { h: "help", v: "version" },
   // string flags: Flags that take string args
   string: ["append", "bullets", "indent"],
   // default values for flags
@@ -25,6 +35,9 @@ const args = minimist(process.argv.slice(2), {
 }) as CmdRootArgs
 
 type CmdRootArgs = {
+  help: boolean
+  version: boolean
+  "plugin-info": boolean
   /** i: Toggles whether to write back to the input file in-place. Cannot be used
    * with --json. */
   i: boolean
@@ -36,18 +49,38 @@ type CmdRootArgs = {
   firsth1: boolean
   stripHeadingTags: boolean
   append: string
-  /** bullets: The character to use for bullet points. Defaults to "*". */
+  /** bullets: Characters to use for bullet points at each depth. */
   bullets: string | string[]
   indent: string
   _: string[]
 }
 
+if (args["plugin-info"]) {
+  console.log(
+    JSON.stringify({
+      apiVersion: 1,
+      name: "mdtoc",
+      description: "Generate Markdown tables of contents",
+    }),
+  )
+  process.exit(0)
+}
+
+if (args.version) {
+  console.log(`ud-mdtoc ${version}`)
+  process.exit(0)
+}
+
 // If the number of positional arguments is not exactly 1, the script exits with
-// a failure status code and prints to stderr.
-if (args._.length !== 1) {
+// a failure status code and prints usage.
+if (args.help || args._.length !== 1) {
   console.info(
     [
-      "Usage: markdown-toc [options] <input> ",
+      "Usage: ud-mdtoc [options] <input> ",
+      "",
+      "  -h, --help:  Show usage",
+      "  -v, --version: Show the installed version",
+      "  --plugin-info: Print ud plugin metadata as JSON",
       "",
       "  input:        The Markdown file to parse for table of contents,",
       '                or "-" to read from stdin.',
@@ -61,7 +94,7 @@ if (args._.length !== 1) {
       "",
       "  --bullets:    Bullets to use for items in the generated TOC",
       '                (Supports multiple bullets: --bullets "*" --bullets "-" --bullets "+")',
-      '                (Default is "*".)',
+      '                (Default is "-", "*", "+" by depth.)',
       "",
       "  --maxdepth:   Use headings whose depth is at most maxdepth",
       "                (Default is 6.)",
@@ -75,16 +108,16 @@ if (args._.length !== 1) {
       "                (to specify a tab, use the bash-escaped $'\\t')",
     ].join("\n"),
   )
-  process.exit(1)
+  process.exit(args.help ? 0 : 1)
 }
 
 if (args.i && args.json) {
-  console.error("markdown-toc: you cannot use both --json and -i")
+  console.error("ud-mdtoc: you cannot use both --json and -i")
   process.exit(1)
 }
 
 if (args.i && args._[0] === "-") {
-  console.error('markdown-toc: you cannot use -i with "-" (stdin) for input')
+  console.error('ud-mdtoc: you cannot use -i with "-" (stdin) for input')
   process.exit(1)
 }
 

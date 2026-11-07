@@ -1,8 +1,8 @@
 {
-  "name": "markdown-toc",
-  "description": "Generate a markdown table of contents (TOC).",
+  "name": "@uniquedivine/ud-mdtoc",
+  "description": "Generate Markdown tables of contents with Bun or the ud command router.",
   "version": "0.1.0",
-  "homepage": "https://github.com/Unique-Divine/markdown-toc",
+  "homepage": "https://github.com/Unique-Divine/jiyuu/tree/main/mdtoc",
   "author": "Unique Divine (https://github.com/Unique-Divine)",
   "contributors": [
     "Jon Schlinkert (http://twitter.com/jonschlinkert)",
@@ -26,22 +26,26 @@
     "(https://github.com/lu22do)",
     "Zeke Sikelianos (http://zeke.sikelianos.com)"
   ],
-  "repository": "Unique-Divine/markdown-toc",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Unique-Divine/jiyuu.git",
+    "directory": "mdtoc"
+  },
   "bugs": {
-    "url": "https://github.com/Unique-Divine/markdown-toc/issues"
+    "url": "https://github.com/Unique-Divine/jiyuu/issues"
   },
   "license": "MIT",
   "files": [
-    "src/cli.ts",
-    "src/index.ts",
-    "lib"
+    "src/**/*.ts",
+    "README.md",
+    "LICENSE"
   ],
-  "main": "src/cli.ts",
+  "main": "src/mdtoc/index.ts",
   "bin": {
-    "markdown-toc": "src/cli.ts"
+    "ud-mdtoc": "src/cli.ts"
   },
   "engines": {
-    "node": ">=0.10.0"
+    "bun": ">=1.2.0"
   },
   "type": "module",
   "scripts": {
@@ -75,88 +79,14 @@
     "typescript": "^5.2.2"
   },
   "keywords": [
-    "anchor",
-    "API documentation",
-    "code documentation",
-    "commonmark",
-    "content navigation",
-    "content organization",
-    "developer tools",
-    "docs",
-    "document structure",
-    "document",
-    "documentation tool",
-    "documentation",
-    "glossary",
-    "heading",
-    "headings",
-    "index",
-    "javascript",
-    "links",
-    "markdown parser",
-    "markdown tools",
-    "Markdown-based",
-    "markdown-toc",
     "markdown",
-    "markup language",
-    "md files",
-    "md parser",
-    "md-toc",
-    "md",
-    "node.js",
-    "npm",
-    "open-source",
-    "outline",
-    "package.json",
-    "plugin",
-    "README tool",
-    "readme",
-    "reference",
-    "remarkable",
-    "remarkableplugin",
-    "render",
-    "renderer",
-    "structure",
-    "table of contents",
     "table-of-contents",
-    "table",
-    "toc-generator",
     "toc",
-    "write"
+    "bun",
+    "ud-plugin"
   ],
-  "verb": {
-    "run": true,
-    "toc": true,
-    "layout": "default",
-    "tasks": [
-      "readme"
-    ],
-    "plugins": [
-      "gulp-format-md"
-    ],
-    "related": {
-      "list": [
-        "gfm-code-blocks",
-        "markdown-link",
-        "markdown-utils",
-        "pretty-remarkable",
-        "remarkable"
-      ]
-    },
-    "reflinks": [
-      "gfm-code-blocks",
-      "markdown-link",
-      "markdown-utils",
-      "pretty-remarkable",
-      "remarkable",
-      "verb",
-      "verb-readme-generator"
-    ],
-    "lint": {
-      "reflinks": true
-    }
-  },
-  "directories": {
-    "test": "test"
+  "private": false,
+  "publishConfig": {
+    "access": "public"
   }
 }
