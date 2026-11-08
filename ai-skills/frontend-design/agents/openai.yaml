@@ -1,0 +1,3 @@
+# Codex: don't load this skill automatically; invoke it explicitly.
+policy:
+  allow_implicit_invocation: false
