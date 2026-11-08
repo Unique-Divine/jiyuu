@@ -1,0 +1,52 @@
+name: Personal Project Intake
+
+# Tracking: https://github.com/Unique-Divine/boku/issues/60
+on:
+  issues:
+    types: [opened, reopened, transferred, labeled]
+
+permissions: {}
+
+jobs:
+  add-to-project:
+    name: Add Issue to Hougyoku
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require Personal Project Credential
+        env:
+          BOKU_PM: ${{ secrets.BOKU_PM }}
+        run: |
+          if [ -z "$BOKU_PM" ]; then
+            echo "::error::Configure the BOKU_PM repository secret."
+            exit 1
+          fi
+      # v2.0.1 handles issues already present in the project.
+      - uses: actions/add-to-project@f2c1f1fa649a891be84948ea89b5dfba1526ef05
+        with:
+          project-url: https://github.com/users/Unique-Divine/projects/5
+          github-token: ${{ secrets.BOKU_PM }}
+
+  label-triage:
+    name: Triage New Issues Without a Status
+    if: github.event.action == 'opened'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Add Missing Triage Label
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          set -euo pipefail
+          has_status="$(
+            gh api "repos/$GH_REPO/issues/$ISSUE_NUMBER" \
+              --jq 'any(.labels[]; .name | startswith("S-"))'
+          )"
+          if [ "$has_status" = false ]; then
+            gh issue edit "$ISSUE_NUMBER" --repo "$GH_REPO" \
+              --add-label S-triage
+          fi
