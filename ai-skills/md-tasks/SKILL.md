@@ -92,6 +92,22 @@ they do not impose an implementation order. When editing an epic or durable
 spec, follow agent skill `epics` for placement and handoff organization. Use
 agent skill `drill-spec` when material design questions still need resolution.
 
+### Optional follow-ups
+
+Put optional work that should not block completion under a `## Follow-Ups`
+heading. Open tasks there do not keep a document from being done, and tooling
+such as `epics-plus health` excludes them from its done-with-open-tasks check.
+Keep required work, including acceptance criteria, outside that section. When
+the follow-ups grow into a cohesive outcome, move them to their own document
+and link it.
+
+```markdown
+## Follow-Ups
+
+- [ ] Add a dashboard panel for fee accrual.
+  - Why: useful for monitoring, but the migration is complete without it.
+```
+
 ### Finding tasks in the terminal
 
 Patterns differ by shell (`**/*.md` is not universal glob). Typical approaches:
