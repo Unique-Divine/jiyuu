@@ -57,7 +57,7 @@ function restrictMode(path: string, mode: number): void {
  * SQLite opens it, so the file never exists with wider permissions. SQLite
  * gives `-wal` and `-shm` the database file's mode.
  */
-function prepareFile(path: string): void {
+export function prepareStateFile(path: string): void {
   const dir = dirname(path)
   mkdirSync(dir, { recursive: true, mode: STATE_DIR_MODE })
   restrictMode(dir, STATE_DIR_MODE)
@@ -74,7 +74,7 @@ export function openStateDb(
   path: string,
   migrations: readonly Migration[] = STATE_MIGRATIONS,
 ): Database {
-  if (path !== ":memory:") prepareFile(path)
+  if (path !== ":memory:") prepareStateFile(path)
   const db = new Database(path, { create: true, strict: true })
   try {
     applyPragmas(db)
