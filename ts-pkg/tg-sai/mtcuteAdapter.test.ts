@@ -65,13 +65,18 @@ describe("session storage", () => {
     expect(existsSync(join(toolDir, SESSION_CACHE_DIR))).toBe(false)
   })
 
-  test("a runtime client without storage writes no file", () => {
+  test("a runtime client without storage writes no file", async () => {
     const before = readdirSync(process.cwd())
     const client = createMtcuteRuntimeClient({
       apiId: 1,
       apiHash: "0".repeat(32),
     })
-    expect(client).toBeDefined()
+    try {
+      // prepare opens the storage, as offline readiness does.
+      await client.prepare()
+    } finally {
+      await client.destroy()
+    }
     expect(readdirSync(process.cwd())).toEqual(before)
   })
 })
