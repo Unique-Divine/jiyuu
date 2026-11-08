@@ -126,10 +126,14 @@ Important response fields:
 | `balance_now` | Current bank balance of the SLP Vault contract for `collateral_denom`, in base units. |
 | `daily_balance_snapshot` | Bank balance captured at the most recent daily reset. The balance-based daily payout cap uses this snapshot, not `balance_now`. |
 | `max_daily_balance_loss_pct` | Configured maximum fraction of `daily_balance_snapshot` that can be paid out through trader-profit settlement in one daily window. |
-| `daily_payout_cap` | Maximum collateral amount that can be paid out in the current daily window: `daily_balance_snapshot * max_daily_balance_loss_pct`. |
-| `daily_payout_used` | Collateral already paid out through the capped settlement path in the current daily window. |
-| `daily_payout_remaining` | Remaining collateral payout capacity for the current daily window, floored at zero. |
-| `last_daily_acc_pnl_delta_reset` | Timestamp of the most recent daily reset, encoded as nanoseconds in JSON. The next reset is eligible after this timestamp plus 86,400 seconds. |
+| `daily_base_cap` | Balance-based part of the payout cap: `daily_balance_snapshot * max_daily_balance_loss_pct`, rounded down. |
+| `daily_reward_income` | Collateral funded through `distribute_reward` in the current daily window, less LP redemptions not already taken from `daily_pnl_income`, floored at zero. Adds to `payout_cap` and to the share-value allowance. |
+| `daily_pnl_income` | Collateral received through `receive_assets` in the current daily window (mostly trader losses, counted in full before the losses-burn share), less LP redemptions, which reduce it before reward income, floored at zero. Adds to `payout_cap` only. |
+| `payout_cap` | Maximum collateral amount that can be paid out in the current daily window: `daily_base_cap + daily_reward_income + daily_pnl_income`. Zero when `max_daily_balance_loss_pct` is zero. |
+| `payout_limit_used` | Collateral already paid out through the capped settlement path in the current daily window. |
+| `payout_limit_remaining` | Remaining collateral payout capacity for the current daily window, floored at zero. |
+| `window_start_unix_ns` | Timestamp of the most recent daily reset, as nanoseconds since the Unix epoch in a decimal string. |
+| `window_reset_after_unix_ns` | `window_start_unix_ns`, in whole seconds, plus 86,400 seconds: the earliest time the next reset can happen. |
 | `max_daily_acc_pnl_delta` | Daily cap on positive realized PnL movement, expressed per share as a decimal. |
 | `daily_acc_pnl_delta` | Accumulated realized PnL movement for the current daily window, expressed per share as a signed decimal. |
 | `max_acc_open_pnl_delta` | Per-epoch cap on positive open PnL movement used by the open-trades PnL feed. |
@@ -139,10 +143,33 @@ Important response fields:
 | `max_acc_pnl_per_token` | Maximum PnL accumulator allowed by rewards: `1 + acc_rewards_per_token`. |
 | `share_to_assets_price` | Current collateral-per-share price used for mint and redeem accounting. |
 
-Daily resets are lazy. Passing the `last_daily_acc_pnl_delta_reset + 86,400`
-timestamp does not update storage by itself. The contract refreshes
-`daily_acc_pnl_delta`, `daily_balance_snapshot`, `daily_payout_used`, and
-`last_daily_acc_pnl_delta_reset` when an eligible execution path calls the daily
+Field names before the sai-perps
+[#523](https://github.com/NibiruChain/sai-perps/pull/523) vault upgrade
+differ. Queries at earlier heights, including archive queries, return the old
+names, and the cap has no PnL income term (`payout_cap` was base plus reward
+income only). Scripts that read both eras should try the new name first, then
+the old one.
+
+| Field after #523 | Field before #523 |
+| --- | --- |
+| `daily_base_cap` | `daily_payout_base_cap` |
+| `daily_reward_income` | `daily_reward_credit` |
+| `daily_pnl_income` | none |
+| `payout_cap` | `daily_payout_cap` |
+| `payout_limit_used` | `daily_payout_used` |
+| `payout_limit_remaining` | `daily_payout_remaining` |
+| `window_start_unix_ns` | `last_daily_acc_pnl_delta_reset` (same value) |
+| `window_reset_after_unix_ns` | none |
+
+The vault event `wasm-sai/vault/daily_reward_income` reports changes to the
+income counters, with attributes `reward_income`, `pnl_income`, and `reason`
+(`reward`, `redemption`, or `reset`). Before #523 the event was
+`wasm-sai/vault/daily_reward_credit` with attributes `credit` and `reason`.
+
+Daily resets are lazy. Passing `window_reset_after_unix_ns` does not update
+storage by itself. The contract refreshes `daily_acc_pnl_delta`,
+`daily_balance_snapshot`, `payout_limit_used`, the income counters, and
+`window_start_unix_ns` when an eligible execution path calls the daily
 reset helper, such as SLP Vault settlement function `send_assets` or
 `receive_assets`. SLP Vault execute message `{"distribute_reward":{}}` increases
 `balance_now`, `total_rewards`, and `acc_rewards_per_token`, but it does not
@@ -214,7 +241,10 @@ raw_json_item() {
     jq -r '.data // empty' | base64 -d | jq -r .
 }
 
-daily_reset_ns="$(raw_json_item "$VAULT" last_daily_acc_pnl_delta_reset)"
+# window_start_unix_ns after sai-perps#523; last_daily_acc_pnl_delta_reset
+# before it. Raw storage key `last_daily_acc_pnl_delta_reset` is unchanged.
+daily_reset_ns="$(sai_q "$VAULT" '{"risk_params":{}}' | jq -r \
+  '.data.window_start_unix_ns // .data.last_daily_acc_pnl_delta_reset')"
 supply_update_ns="$(raw_json_item "$VAULT" last_max_supply_update)"
 
 python3 - "$current_epoch" "$epoch_ns" "$daily_reset_ns" "$supply_update_ns" <<'PY'

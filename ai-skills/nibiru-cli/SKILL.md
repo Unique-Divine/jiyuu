@@ -1,6 +1,6 @@
 ---
 name: nibiru-cli
-description: Query Nibiru chain state and submit transactions with the `nibiru` CLI, including setup via `ud`, config inspection, key discovery with `nibiru keys list`, bank transfers, bank balance queries, EVM multi-VM balance checks such as `nibiru q evm balance` for Sai USDC, wasm contract queries, wasm execute/instantiate flows, and transaction lookups by hash. Use when the user mentions `nibiru`, Nibiru CLI, `nibiru keys list`, `--from`, `nibiru tx bank`, `nibiru tx wasm`, `nibiru q bank`, `nibiru q evm balance`, `nibiru q wasm`, `nibiru q tx`, balances, contract-state smart, or tx hashes.
+description: Query Nibiru chain state and submit transactions with the `nibiru` CLI, including setup via `ud`, config inspection, key discovery with `nibiru keys list`, bank transfers, bank balance queries, EVM multi-VM balance checks such as `nibiru q evm balance` for Sai USDC, wasm contract queries, wasm execute/instantiate flows, transaction lookups by hash, and governance proposal queries such as tallies, quorum, validator votes, and software-upgrade plans. Use when the user mentions `nibiru`, Nibiru CLI, `nibiru keys list`, `--from`, `nibiru tx bank`, `nibiru tx wasm`, `nibiru q bank`, `nibiru q evm balance`, `nibiru q wasm`, `nibiru q tx`, balances, contract-state smart, tx hashes, `nibiru q gov`, `nibiru tx gov vote`, governance proposals, votes, deposits, tally, quorum, or upgrade plans.
 ---
 
 # Nibiru CLI
@@ -17,6 +17,11 @@ authoritative chain view or wants to submit a transaction with `nibiru`.
   - [`nibiru q evm funtoken`](./reference.md#nibiru-q-evm-funtoken): inspect bank denom and ERC20 mappings.
   - [`nibiru tx evm` scope](./reference.md#nibiru-tx-evm-scope): understand conversion commands versus generic EVM transactions.
 - Copy-paste examples: [`examples.md`](./examples.md)
+- Governance proposals and software-upgrade plans: [`governance.md`](./governance.md)
+  - [Canonical query bundle](./governance.md#canonical-query-bundle): first queries for any proposal.
+  - [Extract a software-upgrade plan](./governance.md#extract-a-software-upgrade-plan): plan name, height, and `plan.info` binaries.
+  - [Quorum, threshold, and veto](./governance.md#quorum-threshold-and-veto): explorer-style quorum report.
+  - [Validator votes](./governance.md#validator-votes): filter votes to the bonded validator set.
 
 ## Install the CLI
 
@@ -123,7 +128,7 @@ continues to use `http://localhost:26657`.
   proposing or running a transaction.
 - Pipe to `jq` for nested fields when needed.
 - Use specialized skills for deeper workflows:
-  - `nibiru-gov-upgrade` for governance and software upgrades
+  - [`governance.md`](./governance.md) for proposal, vote, and upgrade-plan queries
   - `sai-perps` for Sai contract query recipes and reconciliation
   - `evm-rpc` for `eth_*` / `debug_*` EVM tracing rather than Cosmos CLI
 

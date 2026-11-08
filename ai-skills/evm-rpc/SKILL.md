@@ -3,13 +3,17 @@ name: evm-rpc
 description: Query EVM JSON-RPC methods for transaction debugging and endpoint
   triage, including eth_getTransactionReceipt and debug_traceTransaction. Use
   when the user asks to inspect tx status, retrieve receipts, run tracers,
-  compare EVM vs Cosmos outcomes, or choose between EVM RPC and Comet RPC
-  endpoints.
+  compare EVM vs Cosmos outcomes, choose between EVM RPC and Comet RPC
+  endpoints, or batch many Nibiru balance and contract reads into one eth_call
+  with Multicall3 and Nibiru precompiles.
 ---
 
 # EVM RPC: Receipt and Trace Playbook
 
 Use this skill for EVM transaction debugging with JSON-RPC.
+
+For many reads in one request on Nibiru (ERC20 and bank balances, native
+NIBI, Wasm queries), read [nibiru-multicall.md](./nibiru-multicall.md).
 
 ## Quick Start
 
