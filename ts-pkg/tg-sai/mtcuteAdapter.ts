@@ -1,3 +1,4 @@
+import { join } from "node:path"
 import { networkMiddlewares, TelegramClient } from "@mtcute/bun"
 import type {
   FloodWaiterOptions,
@@ -17,7 +18,8 @@ import type { ChatAuditInput, ChatMemberData, UserData } from "./adminAudit"
 import type { SaiChatRecord } from "./ops"
 import { isSaiChatTitle } from "./ops"
 import type { ProfileStoreEnv } from "./profiles"
-import { stateDbPath } from "./state/db"
+import { configDir } from "./profiles"
+import { prepareStateFile, stateDbPath } from "./state/db"
 import { createFloodGuard } from "./state/guard"
 import type {
   FloodGuard,
@@ -306,6 +308,31 @@ export function sessionAccountId(client: TelegramClient): number | null {
  * Every client gets the flood guard (see `clientMiddlewares`). With
  * `telemetry`, every RPC call, wire attempt, and flood wait is recorded.
  */
+/** mtcute storage file used when a caller passes no `storage`. */
+export const DEFAULT_SESSION_FILE = "mtcute.session"
+
+/**
+ * Default mtcute storage path inside the tg-sai tool directory
+ * (`~/.tg-sai`, or `TG_SAI_DIR`), so runs never leave session files in the
+ * working directory.
+ */
+export function defaultSessionStoragePath(
+  env: ProfileStoreEnv = process.env,
+): string {
+  return join(configDir(env), DEFAULT_SESSION_FILE)
+}
+
+/** Resolves `storage`, creating the default file with 0600 when unset. */
+export function resolveSessionStorage(
+  storage: string | undefined,
+  env: ProfileStoreEnv = process.env,
+): string {
+  if (storage) return storage
+  const path = defaultSessionStoragePath(env)
+  prepareStateFile(path)
+  return path
+}
+
 export function createMtcuteRuntimeClient(
   config: Omit<MtcuteClientConfig, "session">,
   telemetry?: ClientTelemetry,
@@ -324,7 +351,7 @@ export function createMtcuteRuntimeClient(
     crypto: createTelegramCryptoProvider(),
     apiId: config.apiId,
     apiHash: config.apiHash,
-    storage: config.storage ?? "sai-telegram-admin-check.session",
+    storage: resolveSessionStorage(config.storage),
     network: { middlewares },
   })
   sessionAccounts.set(client, sessionAccount)
