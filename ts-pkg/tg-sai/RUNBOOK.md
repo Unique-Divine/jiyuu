@@ -64,7 +64,11 @@ The CLI resolves Telegram credentials in this order:
 
 The tool stores profiles, logs, and generated operator files under directory
 `~/.tg-sai/` by default. Tests and one-off runs can override the tool directory
-with environment variable `TG_SAI_DIR`.
+with environment variable `TG_SAI_DIR`. The mtcute client cache for each
+session lives in directory `~/.tg-sai/sessions/`, one file per session string,
+unless a caller passes its own storage path. Runs never write session files
+into the working directory. A rotated or revoked session leaves its old cache
+file behind; delete it from `~/.tg-sai/sessions/`.
 
 Discovery checks the two `tg-sai` `.env` files first, then these user-level
 config paths by platform:
