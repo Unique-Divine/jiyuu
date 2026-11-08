@@ -20,6 +20,7 @@ Prefix convention:
 - `S-*` labels describe issue status.
 - `prio-p*` labels describe issue priority.
 - `A-*` labels describe product or engineering areas.
+- `M-*` labels describe milestones or missions within a repo.
 
 ### Status labels
 
@@ -61,6 +62,17 @@ Prefix convention:
   - Use for advisories, vulnerability fixes, hardening, and tickets sourced
     from upstream repos by agent skill `upstream-watch`. Track mainnet-risk
     findings in private NibiruChain/sai-perps issues.
+
+### Mission labels
+
+- `M-launch-req`: (#04d0e4) | Mission: Required before launch.
+  - Adopted in DSN Braid. Combine with priority to distinguish launch scope
+    from work order; absence of this label does not imply a status.
+
+### Zone labels
+
+- `Z-*` labels name a code zone within a single repo, such as one
+  subdirectory. Each repo defines its own; check `gh label list` for them.
 
 When the user adds a standard label, append a bullet here with the same format:
 `` `<name>`: (#<RRGGBB>) | <description> `` - Keep their description text verbatim.

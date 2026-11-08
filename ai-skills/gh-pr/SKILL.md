@@ -1,6 +1,6 @@
 ---
 name: gh-pr
-description: Writes clear pull request descriptions from the current branch diff against a base branch. Defaults to `main`, but supports `dev` or any other user-specified comparison branch. Use when the user asks for a PR description, pull request summary, or a markdown write-up for changes against a base branch.
+description: Writes clear GitHub (gh) pull request (pr) descriptions from the current branch diff against a base branch. Defaults to `main` or the clear target branch the user specifies or is using for the PR. Use when the user asks for a PR description, pull request summary, or a markdown write-up for changes against a base branch.
 ---
 
 # GH PR
@@ -11,6 +11,10 @@ Create a clear, logical pull request description for the current branch diff
 against a base branch. A good PR body explains the problem, the decisions that
 shape the implementation, and the resulting behavior, not merely the changed
 files.
+
+You're typically meant to use this skill in combination with `gh pr create`,
+specifying the output as the body file. Or alternatively with `gh pr edit` if the
+PR already has a body and you're making updates.
 
 ## Instructions
 
@@ -79,6 +83,8 @@ Use this structure:
 <One short synopsis paragraph explaining the change and why it exists.>
 
 - Closes <gh-issue-link> (If applicable, not all PRs pertain to issues)
+- Fixes <gh-issue-link> And please don't only write "#<issue-number>" format
+because it makes the copy particular to the repo the pull request or issue is in.
 
 ## Rationale
 
@@ -109,16 +115,30 @@ do not describe implementation or runtime sequence.>
 
 ````
 
+## Why write "- Closes ..."
+
+ - This syntax above is for magic GitHub keywords that [link the pull 
+ request to the issue](https://docs.github.com/en/get-started/writing-on-github/working-with-advanced-formatting/using-keywords-in-issues-and-pull-requests).
+- It's also essential that you **use the bullet point** when writing the pr link
+keyword statement, because the bullet point makes the issue title readable in the
+GitHub user interface. This lets the reference read semantically rather than
+requiring the user to open the issue to see what the number means.
+
+
 ## Style
 
 - Prefer clarity over cleverness.
 - Do not repeat the same point in multiple sections.
 - Lead with the outcome, then give reviewers the rationale and logic they need
   to assess correctness.
-- Explain non-obvious tradeoffs explicitly. Examples: a new field is canonical
-  but a legacy fallback remains for historical data; a total intentionally
-  excludes a separate accounting component; or an operation preserves a
-  state-transition event while moving fee details to a normal receipt.
+- Explain non-obvious tradeoffs explicitly. 
+  Examples: 
+    - A new field is canonical
+  but a legacy fallback remains for historical data. 
+    - A total excludes a separate accounting component. This is intentional
+    because of <reason>
+    - An operation preserves a state-transition event while moving fee details to
+    a normal receipt.
 - Always place `## Key Changes` immediately after `## Rationale`.
 - Use numbered lists for the `## Key Changes` section, writing each item with
   `1.` so the markdown source is easy to reorder.
