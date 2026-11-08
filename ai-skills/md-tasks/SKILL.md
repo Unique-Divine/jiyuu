@@ -92,7 +92,7 @@ they do not impose an implementation order. When editing an epic or durable
 spec, follow agent skill `epics` for placement and handoff organization. Use
 agent skill `drill-spec` when material design questions still need resolution.
 
-### Optional follow-ups
+### Optional Follow-Ups
 
 Put optional work that should not block completion under a `## Follow-Ups`
 heading. Open tasks there do not keep a document from being done, and tooling

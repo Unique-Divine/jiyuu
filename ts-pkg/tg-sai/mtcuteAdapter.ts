@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto"
 import { join } from "node:path"
 import { networkMiddlewares, TelegramClient } from "@mtcute/bun"
 import type {
@@ -303,36 +304,48 @@ export function sessionAccountId(client: TelegramClient): number | null {
   return sessionAccounts.get(client)?.id ?? null
 }
 
-/**
- * Shared constructor used by offline readiness and authenticated operations.
- * Every client gets the flood guard (see `clientMiddlewares`). With
- * `telemetry`, every RPC call, wire attempt, and flood wait is recorded.
- */
-/** mtcute storage file used when a caller passes no `storage`. */
-export const DEFAULT_SESSION_FILE = "mtcute.session"
+/** Directory under the tg-sai tool directory for default session caches. */
+export const SESSION_CACHE_DIR = "sessions"
 
 /**
- * Default mtcute storage path inside the tg-sai tool directory
- * (`~/.tg-sai`, or `TG_SAI_DIR`), so runs never leave session files in the
- * working directory.
+ * Default mtcute storage path for one Telethon session string:
+ * `<tool dir>/sessions/<hash>.session`, where the tool directory is
+ * `~/.tg-sai` or `TG_SAI_DIR`. Keying by a hash of the session gives each
+ * account its own cache, so concurrent runs as different accounts never
+ * share auth keys or peer access hashes, and no run writes into the working
+ * directory.
  */
 export function defaultSessionStoragePath(
+  session: string,
   env: ProfileStoreEnv = process.env,
 ): string {
-  return join(configDir(env), DEFAULT_SESSION_FILE)
+  const hash = createHash("sha256").update(session).digest("hex")
+  const file = `${hash.slice(0, 32)}.session`
+  return join(configDir(env), SESSION_CACHE_DIR, file)
 }
 
-/** Resolves `storage`, creating the default file with 0600 when unset. */
+/**
+ * Resolves the storage for an authenticated client: an explicit `storage`
+ * wins; otherwise the per-session default file, created 0600 in 0700
+ * directories before mtcute opens it.
+ */
 export function resolveSessionStorage(
   storage: string | undefined,
+  session: string,
   env: ProfileStoreEnv = process.env,
 ): string {
   if (storage) return storage
-  const path = defaultSessionStoragePath(env)
+  const path = defaultSessionStoragePath(session, env)
   prepareStateFile(path)
   return path
 }
 
+/**
+ * Shared constructor used by offline readiness and authenticated operations.
+ * Every client gets the flood guard (see `clientMiddlewares`). With
+ * `telemetry`, every RPC call, wire attempt, and flood wait is recorded.
+ * Without `storage`, the client keeps its state in memory.
+ */
 export function createMtcuteRuntimeClient(
   config: Omit<MtcuteClientConfig, "session">,
   telemetry?: ClientTelemetry,
@@ -351,7 +364,7 @@ export function createMtcuteRuntimeClient(
     crypto: createTelegramCryptoProvider(),
     apiId: config.apiId,
     apiHash: config.apiHash,
-    storage: resolveSessionStorage(config.storage),
+    storage: config.storage ?? ":memory:",
     network: { middlewares },
   })
   sessionAccounts.set(client, sessionAccount)
@@ -365,7 +378,8 @@ export async function createMtcuteClient(
   config: MtcuteClientConfig,
   telemetry?: ClientTelemetry,
 ): Promise<TelegramClient> {
-  const client = createMtcuteRuntimeClient(config, telemetry)
+  const storage = resolveSessionStorage(config.storage, config.session)
+  const client = createMtcuteRuntimeClient({ ...config, storage }, telemetry)
 
   await client.importSession(convertFromTelethonSession(config.session), true)
   return client
