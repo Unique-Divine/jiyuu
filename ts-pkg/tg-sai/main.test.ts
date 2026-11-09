@@ -8,6 +8,7 @@ import {
   createProgram,
   HOLD_EXIT_CODE,
   holdExitFor,
+  parseDialogLimit,
   shortDuration,
 } from "./main"
 import { HoldAccountUnknownError, HoldError } from "./state/guard"
@@ -172,6 +173,30 @@ describe("no JSONL run logs", () => {
       expect(existsSync(join(dir, "telemetry.db"))).toBe(true)
       const logs = join(dir, "logs")
       expect(existsSync(logs) ? readdirSync(logs) : []).toEqual([])
+    })
+  })
+})
+
+describe("ops sai-find --limit", () => {
+  test("parseDialogLimit accepts positive integers", () => {
+    expect(parseDialogLimit("500")).toBe(500)
+    expect(parseDialogLimit("1")).toBe(1)
+  })
+
+  test("parseDialogLimit rejects values that are not positive integers", () => {
+    for (const value of ["abc", "", "0", "-5", "2.5", "1e3", "Infinity"]) {
+      expect(() => parseDialogLimit(value)).toThrow(
+        "--limit must be a positive integer",
+      )
+    }
+  })
+
+  test("a non-numeric --limit fails before resolving credentials", () => {
+    withDir((dir) => {
+      const result = runCli(["ops", "sai-find", "--limit", "abc"], dir)
+      expect(result.exitCode).toBe(1)
+      expect(result.stderr).toContain("--limit must be a positive integer")
+      expect(result.stderr).not.toContain("Missing Telegram credentials")
     })
   })
 })

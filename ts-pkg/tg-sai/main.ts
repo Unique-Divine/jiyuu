@@ -614,10 +614,24 @@ async function runAddOwner(options: AddOwnerOptions): Promise<void> {
   })
 }
 
+/**
+ * Parses flag `--limit` of command `tg-sai ops sai-find`: a positive integer
+ * written as plain digits. Throws on anything else so a typo fails before the
+ * command connects to Telegram.
+ */
+export function parseDialogLimit(value: string): number {
+  const limit = /^\d+$/.test(value) ? Number(value) : Number.NaN
+  if (!Number.isSafeInteger(limit) || limit < 1) {
+    throw new Error(`--limit must be a positive integer, got "${value}"`)
+  }
+  return limit
+}
+
 async function runSaiFind(options: SaiFindOptions): Promise<void> {
+  const limit = parseDialogLimit(options.limit)
   await withClient(options.profile, async (client) => {
     const records = await findSaiChats(client, {
-      limit: Number(options.limit),
+      limit,
       archived: options.archived ?? "exclude",
     })
     const lines = records.map(formatSaiChatJsonLine)
