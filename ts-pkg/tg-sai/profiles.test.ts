@@ -598,6 +598,20 @@ describe("resolveTelegramCredentialSource", () => {
     })
   })
 
+  test("an explicit --profile matching no profile never falls back", async () => {
+    await withTempHome(async (home) => {
+      const env = resolverEnv(home)
+      await addProfile(profileInput(), env)
+      await writeUserDotEnv(env, dotEnvLines)
+      // A misspelled name and an out-of-range index.
+      for (const selector of ["custdy", "7"]) {
+        await expect(
+          resolveTelegramCredentialSource(selector, env),
+        ).rejects.toThrow(`Unknown profile: ${selector}`)
+      }
+    })
+  })
+
   test("an incomplete profile with an identity never falls back", async () => {
     for (const identity of [
       { userId: 333, handle: null },

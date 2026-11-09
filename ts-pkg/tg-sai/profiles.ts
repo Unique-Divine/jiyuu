@@ -382,7 +382,7 @@ export async function removeProfile(
   const config = await readConfig(env)
   const index = findProfileIndex(config, selector)
   if (index === -1) {
-    throw new Error(`Unknown profile: ${selector}`)
+    throw unknownProfileError(selector)
   }
   config.profiles.splice(index, 1)
 
@@ -397,7 +397,7 @@ export async function setActiveProfile(
   const config = await readConfig(env)
   const index = findProfileIndex(config, selector)
   if (index === -1) {
-    throw new Error(`Unknown profile: ${selector}`)
+    throw unknownProfileError(selector)
   }
   const [profile] = config.profiles.splice(index, 1)
   config.profiles.unshift(profile!)
@@ -801,6 +801,11 @@ export async function credentialsFromProfile(
   return credentialsFromProfileRecord(profile)
 }
 
+/** Error for a profile selector that matches no saved profile. */
+export function unknownProfileError(selector: string): Error {
+  return new Error(`Unknown profile: ${selector}`)
+}
+
 /** Where `resolveTelegramCredentialSource` found the credentials. */
 export type TelegramCredentialSource = "env" | "profile" | "known_file"
 
@@ -868,6 +873,11 @@ export async function resolveTelegramCredentialSource(
       profileName: selectedProfile.name || profileName || null,
       userId: selectedProfile.userId,
     }
+  }
+
+  // A named profile that does not exist must not run as the known-file account.
+  if (profileName !== undefined && !selectedProfile) {
+    throw unknownProfileError(profileName)
   }
 
   const incompleteError = selectedProfile

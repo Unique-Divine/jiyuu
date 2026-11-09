@@ -213,8 +213,12 @@ Blank or partial profiles are useful while collecting `apiId`, `apiHash`, and
 `sessionString`. When the active profile is incomplete and records no account
 (no user ID or handle), commands that connect to Telegram fall back to the
 `.env` files and MCP discovery. A profile named with `--profile`, or one that
-records a user ID or handle, must be complete; tg-sai never substitutes another
-account's session for it.
+records a user ID or handle, must exist and be complete; the `.env` and MCP
+fallback never substitutes another account's session for it. Complete
+`TELEGRAM_*` environment variables still win over `--profile`, per the order in
+section Credentials. Bun auto-loads `.env` from the current directory, so
+running from `ts-pkg/tg-sai` makes a repo-local `.env` the environment source,
+including its `TELEGRAM_PASSWORD`.
 
 Add a local profile from explicit values:
 
