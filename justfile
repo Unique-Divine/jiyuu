@@ -43,6 +43,14 @@ fmt:
 typecheck:
   bun check
 
+# Preview merged PR classification inheritance; add --run to apply it.
+github-labels *ARGS:
+  bun run scripts/github-labels/main.ts {{ARGS}}
+
+# Test GitHub label planning, API decoding, and repository path mappings.
+github-labels-test:
+  bun test scripts/github-labels
+
 # Install both maintained MCP servers.
 mcp-install:
   just --justfile mcp/slack/justfile install

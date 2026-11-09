@@ -1,0 +1,37 @@
+# Path-managed labels only. Parent and child zones intentionally overlap.
+# Keep these mappings aligned with the table in GITHUB.md.
+A-ai:
+  - changed-files:
+      - any-glob-to-any-file:
+          - mcp/**
+          - ai-skills/**
+          - tmux-agent-watch/**
+Z-mcp:
+  - changed-files:
+      - any-glob-to-any-file:
+          - mcp/**
+Z-mcp-slack:
+  - changed-files:
+      - any-glob-to-any-file:
+          - mcp/slack/**
+Z-mcp-telegram:
+  - changed-files:
+      - any-glob-to-any-file:
+          - mcp/telegram/**
+Z-ai-skills:
+  - changed-files:
+      - any-glob-to-any-file:
+          - ai-skills/**
+Z-tmux-agent-watch:
+  - changed-files:
+      - any-glob-to-any-file:
+          - tmux-agent-watch/**
+Z-ci:
+  - changed-files:
+      - any-glob-to-any-file:
+          - .github/**
+          - scripts/github-labels/**
+          - justfile
+          - '**/justfile'
+          - '*.just'
+          - '**/*.just'

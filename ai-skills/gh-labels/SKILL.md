@@ -5,13 +5,44 @@ description: >-
   S-needs-scope, S-impl, prio-p0-critical, A-ext-dev-tools, A-perf, A-ux, and
   others under My Labels). Use when the user asks what a label means, which
   label to apply, or how to add missing labels to a repo.
-  Secondary: bootstrap labels on a new repo that does not have them yet.
+  Also use for repository label conventions, path-based PR labeling, merged
+  PR label inheritance, historical backfills, and bootstrapping missing labels.
 ---
 
 # GitHub labels
 
 Reference for **what labels mean**, then how to add them to a repo that does not
 have them yet.
+
+## Repository Conventions
+
+Read the repository's root `GITHUB.md` when present, then its `AGENTS.md` and
+labeler configuration for local rules. The shared vocabulary below supplies
+defaults; repository instructions define local zone names and path mappings.
+Reuse existing repository automation. Plain instructions and path mappings
+usually suffice for a small label set.
+
+Use stable area names across repositories when they describe the same work.
+For example, `A-ai` can group public MCP development with private AI planning
+in GitHub Projects. Sharing a label does not authorize copying private content
+or changing another repository.
+
+Path automation can synchronize labels listed in its mapping, including
+overlapping parent and child zones. Do not remove manually assigned status,
+priority, mission, or other labels outside that mapping.
+
+Where a repository enables merged PR inheritance, pass classification labels
+matching `^[A-Z]-.+$` except `S-` to its same-repository closing issues. This
+includes `A-`, `Z-`, `M-`, and future uppercase families. Add missing labels;
+never replace the issue's full label set. Keep cross-repository inheritance
+disabled unless separately designed and authorized. Jiyuu's root `GITHUB.md`
+documents its typed dry-run/replay command and CI behavior.
+
+For a historical backfill, inspect all changed-file pages and issue scope,
+account for renamed paths, and add only supported classifications. Do not
+infer an issue's complete label set from a mixed PR. Preserve statuses and
+priorities, report uncertain items, and keep private evidence out of public
+issues, PRs, and logs.
 
 ## My labels
 
@@ -39,6 +70,10 @@ Prefix convention:
 
 ### Area labels
 
+- `A-ai`: (#eab6cb) | Area: AI tooling, MCP servers, agent skills, and agent workflow tools
+  - Includes MCP servers, agent skills, and tools for agent workflows.
+  - Repositories define their own path mappings. A Telegram CLI is not part
+    of an MCP zone solely because both use Telegram.
 - `A-ext-dev-tools`: (#eab6cb) | Area: Tools built for developers outside the organization
   - Use for external SDKs, libraries, codegen, examples, and developer docs,
     such as the Nibiru TypeScript package `nibijs`.
@@ -72,7 +107,8 @@ Prefix convention:
 ### Zone labels
 
 - `Z-*` labels name a code zone within a single repo, such as one
-  subdirectory. Each repo defines its own; check `gh label list` for them.
+  subdirectory. Each repo defines its own; check its root `GITHUB.md`, labeler
+  configuration, and `gh label list`. Parent and child zones may overlap.
 
 When the user adds a standard label, append a bullet here with the same format:
 `` `<name>`: (#<RRGGBB>) | <description> `` - Keep their description text verbatim.
@@ -143,6 +179,11 @@ gh label create "prio-p2-normal" \
 
 gh label create "A-ext-dev-tools" \
   --description "Area: Tools built for developers outside the organization" \
+  --color eab6cb \
+  --force
+
+gh label create "A-ai" \
+  --description "Area: AI tooling, MCP servers, agent skills, and agent workflow tools" \
   --color eab6cb \
   --force
 
