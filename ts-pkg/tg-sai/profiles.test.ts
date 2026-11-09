@@ -499,4 +499,65 @@ describe("resolveTelegramCredentialSource", () => {
       expect(found.credentials.sessionString).toBe("file-session")
     })
   })
+
+  test("falls back to known files when the selected profile is incomplete", async () => {
+    await withTempHome(async (home) => {
+      const env = { HOME: home, TG_SAI_REPO_DIR: join(home, "no-repo") }
+      await addProfile(
+        {
+          name: "draft",
+          apiId: null,
+          apiHash: "",
+          sessionString: "",
+          password: "",
+          handle: null,
+          userId: 333,
+          displayName: "",
+        },
+        env,
+      )
+      await writeFile(
+        join(configDir(env), ".env"),
+        [
+          "TELEGRAM_API_ID=123",
+          "TELEGRAM_API_HASH=dotenv-hash",
+          "TELEGRAM_SESSION_STRING=dotenv-session",
+        ].join("\n"),
+        "utf8",
+      )
+
+      for (const selector of [undefined, "draft"]) {
+        expect(await resolveTelegramCredentialSource(selector, env)).toEqual({
+          credentials: {
+            apiId: 123,
+            apiHash: "dotenv-hash",
+            sessionString: "dotenv-session",
+          },
+          source: "known_file",
+        })
+      }
+    })
+  })
+
+  test("names the incomplete profile when no other source has credentials", async () => {
+    await withTempHome(async (home) => {
+      const env = { HOME: home, TG_SAI_REPO_DIR: join(home, "no-repo") }
+      await addProfile(
+        {
+          name: "draft",
+          apiId: 123,
+          apiHash: "",
+          sessionString: "",
+          password: "",
+          handle: null,
+          userId: null,
+          displayName: "",
+        },
+        env,
+      )
+      await expect(resolveTelegramCredentialSource("draft", env)).rejects.toThrow(
+        "Profile draft is incomplete",
+      )
+    })
+  })
 })

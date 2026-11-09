@@ -206,8 +206,9 @@ tg-sai profile add --name draft
 ```
 
 Blank or partial profiles are useful while collecting `apiId`, `apiHash`, and
-`sessionString`. Commands that connect to Telegram require all three fields to
-be filled.
+`sessionString`. While the selected profile is incomplete, commands that
+connect to Telegram fall back to the `.env` files and MCP discovery, and fail
+only if those sources also lack complete credentials.
 
 Add a local profile from explicit values:
 

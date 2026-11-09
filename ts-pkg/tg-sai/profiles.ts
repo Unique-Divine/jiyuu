@@ -799,17 +799,19 @@ export async function resolveTelegramCredentialSource(
   if (profileCredentials) {
     return { credentials: profileCredentials, source: "profile" }
   }
-  if (selectedProfile) {
-    throw new Error(
-      `Profile ${selectedProfile.name} is incomplete. Fill apiId, apiHash, and sessionString before running Telegram operations.`,
-    )
-  }
 
+  // An incomplete profile (e.g. an onboarding draft) does not block the
+  // `.env` and MCP discovery fallbacks.
   const knownFileCredentials = await credentialsFromKnownFiles(env)
   if (knownFileCredentials) {
     return { credentials: knownFileCredentials, source: "known_file" }
   }
 
+  if (selectedProfile) {
+    throw new Error(
+      `Profile ${selectedProfile.name} is incomplete. Fill apiId, apiHash, and sessionString before running Telegram operations.`,
+    )
+  }
   throw new Error(
     "Missing Telegram credentials. Set TELEGRAM_API_ID, TELEGRAM_API_HASH, and TELEGRAM_SESSION_STRING or run `tg-sai profile add`.",
   )
