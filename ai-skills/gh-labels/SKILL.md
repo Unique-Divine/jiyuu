@@ -38,6 +38,14 @@ never replace the issue's full label set. Keep cross-repository inheritance
 disabled unless separately designed and authorized. Jiyuu's root `GITHUB.md`
 documents its typed dry-run/replay command and CI behavior.
 
+When first enabling inheritance, verify it with a small subsequent PR after
+the workflow reaches the default branch. The bootstrap merge does not prove
+the workflow was active on its base. Use a useful scoped change and a
+same-repository closing issue. Let path automation classify the PR, then check
+that the issue gains eligible labels while retaining its status, priority,
+and existing classifications. Replay the planner after merge to confirm no
+additions remain.
+
 For a historical backfill, inspect all changed-file pages and issue scope,
 account for renamed paths, and add only supported classifications. Do not
 infer an issue's complete label set from a mixed PR. Preserve statuses and
