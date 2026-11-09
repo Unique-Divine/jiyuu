@@ -713,21 +713,44 @@ export async function discoveryReport(
   }
 }
 
-export async function credentialsFromKnownFiles(
+/** Complete credentials from one known file, with that block's 2FA password. */
+export interface KnownFileCredentials {
+  credentials: TelegramCredentials
+  /** `TELEGRAM_PASSWORD` from the same block, or null when absent or blank. */
+  password: string | null
+}
+
+function knownFileResult(
+  values: TelegramCredentialValues,
+  credentials: TelegramCredentials,
+): KnownFileCredentials {
+  return { credentials, password: values.TELEGRAM_PASSWORD || null }
+}
+
+/**
+ * Complete credentials from file `TG_SAI_DISCOVERY_FILE`, or else from the one
+ * complete block that discovery finds. Throws when discovery finds several.
+ */
+export async function knownFileCredentials(
   env: ProfileStoreEnv = process.env,
-): Promise<TelegramCredentials | null> {
+): Promise<KnownFileCredentials | null> {
   if (env.TG_SAI_DISCOVERY_FILE) {
     const text = await readFile(env.TG_SAI_DISCOVERY_FILE, "utf8")
     const textCredentials = credentialsFromText(text)
     if (textCredentials) {
-      return textCredentials
+      return knownFileResult(
+        telegramCredentialValuesFromLines(text),
+        textCredentials,
+      )
     }
     try {
       const parsed = JSON.parse(text) as unknown
       const complete = findTelegramCredentialBlocks(parsed).find(
         (candidate) => candidate.credentials !== null,
       )
-      return complete?.credentials ?? null
+      return complete
+        ? knownFileResult(complete.values, complete.credentials!)
+        : null
     } catch (error) {
       if (error instanceof SyntaxError) {
         return null
@@ -741,7 +764,8 @@ export async function credentialsFromKnownFiles(
     (candidate) => candidate.credentials !== null,
   )
   if (completeCandidates.length === 1) {
-    return completeCandidates[0]!.credentials
+    const only = completeCandidates[0]!
+    return knownFileResult(only.values, only.credentials!)
   }
   if (completeCandidates.length > 1) {
     throw new Error(
@@ -751,6 +775,12 @@ export async function credentialsFromKnownFiles(
     )
   }
   return null
+}
+
+export async function credentialsFromKnownFiles(
+  env: ProfileStoreEnv = process.env,
+): Promise<TelegramCredentials | null> {
+  return (await knownFileCredentials(env))?.credentials ?? null
 }
 
 export async function discoverTelegramCredentials(
@@ -774,21 +804,55 @@ export async function credentialsFromProfile(
 /** Where `resolveTelegramCredentialSource` found the credentials. */
 export type TelegramCredentialSource = "env" | "profile" | "known_file"
 
+/** Credentials plus the password and identity that belong to their source. */
+export interface ResolvedTelegramCredentials {
+  credentials: TelegramCredentials
+  source: TelegramCredentialSource
+  /**
+   * 2FA password for this session, or null. `TELEGRAM_PASSWORD` overrides for
+   * one command; otherwise only the source's own password applies: the
+   * profile's for `profile`, the same block's for `known_file`, none for
+   * `env`. Blank values count as null.
+   */
+  password: string | null
+  /** Saved profile name, only when the session came from that profile. */
+  profileName: string | null
+  /** Saved account user ID, only when the session came from that profile. */
+  userId: number | null
+}
+
+/**
+ * True when an incomplete profile may borrow known-file credentials: it is the
+ * implicit active profile and records no account (no `userId` or `handle`),
+ * like a blank onboarding draft. A named or identity-bearing profile must not
+ * run as whichever account a `.env` or MCP session belongs to.
+ */
+export function mayFallBackFromProfile(
+  profile: TgSaiProfile,
+  profileName: string | undefined,
+): boolean {
+  return profileName === undefined && profile.userId === null && !profile.handle
+}
+
 /**
  * Credentials for `profileName` and where they came from: `TELEGRAM_*`
  * environment variables, the selected profile, or a known credential file.
- * Only `profile` credentials match the profile's saved `userId`.
+ * Only `profile` credentials carry the profile's name and saved `userId`.
  */
 export async function resolveTelegramCredentialSource(
   profileName: string | undefined,
   env: ProfileStoreEnv = process.env,
-): Promise<{
-  credentials: TelegramCredentials
-  source: TelegramCredentialSource
-}> {
+): Promise<ResolvedTelegramCredentials> {
+  const passwordOverride = env.TELEGRAM_PASSWORD || null
   const envCredentials = credentialsFromEnv(env)
   if (envCredentials) {
-    return { credentials: envCredentials, source: "env" }
+    return {
+      credentials: envCredentials,
+      source: "env",
+      password: passwordOverride,
+      profileName: null,
+      userId: null,
+    }
   }
 
   const config = await readConfig(env)
@@ -796,24 +860,44 @@ export async function resolveTelegramCredentialSource(
   const profileCredentials = selectedProfile
     ? credentialsFromProfileRecord(selectedProfile)
     : null
-  if (profileCredentials) {
-    return { credentials: profileCredentials, source: "profile" }
+  if (selectedProfile && profileCredentials) {
+    return {
+      credentials: profileCredentials,
+      source: "profile",
+      password: passwordOverride ?? (selectedProfile.password || null),
+      profileName: selectedProfile.name || profileName || null,
+      userId: selectedProfile.userId,
+    }
   }
 
-  // An incomplete profile (e.g. an onboarding draft) does not block the
-  // `.env` and MCP discovery fallbacks.
-  const knownFileCredentials = await credentialsFromKnownFiles(env)
-  if (knownFileCredentials) {
-    return { credentials: knownFileCredentials, source: "known_file" }
+  const incompleteError = selectedProfile
+    ? new Error(
+        `Profile ${selectedProfile.name} is incomplete. Fill apiId, apiHash, and sessionString before running Telegram operations.`,
+      )
+    : null
+  if (
+    selectedProfile &&
+    !mayFallBackFromProfile(selectedProfile, profileName)
+  ) {
+    throw incompleteError
   }
 
-  if (selectedProfile) {
-    throw new Error(
-      `Profile ${selectedProfile.name} is incomplete. Fill apiId, apiHash, and sessionString before running Telegram operations.`,
+  const known = await knownFileCredentials(env)
+  if (known) {
+    return {
+      credentials: known.credentials,
+      source: "known_file",
+      password: passwordOverride ?? known.password,
+      profileName: null,
+      userId: null,
+    }
+  }
+
+  throw (
+    incompleteError ??
+    new Error(
+      "Missing Telegram credentials. Set TELEGRAM_API_ID, TELEGRAM_API_HASH, and TELEGRAM_SESSION_STRING or run `tg-sai profile add`.",
     )
-  }
-  throw new Error(
-    "Missing Telegram credentials. Set TELEGRAM_API_ID, TELEGRAM_API_HASH, and TELEGRAM_SESSION_STRING or run `tg-sai profile add`.",
   )
 }
 

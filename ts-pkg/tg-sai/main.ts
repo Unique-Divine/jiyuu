@@ -68,6 +68,7 @@ import {
 import type {
   DiscoveryReport,
   ProfileAddInput,
+  ProfileStoreEnv,
   TelegramCredentials,
   TelegramCredentialValues,
 } from "./profiles"
@@ -128,14 +129,14 @@ interface SaiBootstrapOptions {
   targetUser?: number | string
 }
 
-interface TelegramEnv {
+export interface TelegramEnv {
   apiId: number
   apiHash: string
   session: string
   password: string | null
-  /** Saved account user ID, when the profile records one. */
+  /** Saved account user ID, only for a session from a saved profile. */
   userId: number | null
-  /** Selected profile label, for telemetry. */
+  /** Saved profile name, only for a session from that profile. */
   profileName: string | null
 }
 
@@ -295,19 +296,23 @@ async function nextChatFilePath(prefix: string): Promise<string> {
   return join(dir, `${prefix}-${suffix}.jsonl`)
 }
 
-async function getTelegramEnv(profileName?: string): Promise<TelegramEnv> {
-  const { credentials, source } =
-    await resolveTelegramCredentialSource(profileName)
-  const config = await readConfig()
-  const profile = getProfile(config, profileName)
+/**
+ * Session settings for one command. The password, account ID, and profile
+ * label all come from the same source as the session, so a `.env` or MCP
+ * session never pairs with a saved profile's 2FA password or name.
+ */
+export async function getTelegramEnv(
+  profileName?: string,
+  env: ProfileStoreEnv = process.env,
+): Promise<TelegramEnv> {
+  const resolved = await resolveTelegramCredentialSource(profileName, env)
   return {
-    apiId: credentials.apiId,
-    apiHash: credentials.apiHash,
-    session: credentials.sessionString,
-    password: process.env.TELEGRAM_PASSWORD ?? profile?.password ?? null,
-    // TELEGRAM_* or credential-file sessions may act as another account.
-    userId: source === "profile" ? (profile?.userId ?? null) : null,
-    profileName: profile?.name || profileName || null,
+    apiId: resolved.credentials.apiId,
+    apiHash: resolved.credentials.apiHash,
+    session: resolved.credentials.sessionString,
+    password: resolved.password,
+    userId: resolved.userId,
+    profileName: resolved.profileName,
   }
 }
 
@@ -835,7 +840,11 @@ async function runSaiBootstrap(options: SaiBootstrapOptions): Promise<void> {
   await withClient(options.profile, async (client, env) => {
     const actor = normalizeUser(await client.getMe())
     const actorUsername = actor.username ?? ""
-    const profileName = await selectedProfileName(options.profile)
+    // Only a session from a saved profile is labeled with that profile.
+    const profileName =
+      env.profileName === null
+        ? null
+        : await selectedProfileName(options.profile)
     const ownerTarget = resolveBootstrapTarget(options.targetUser)
     const ownershipTransferEnabled =
       options.transferOwner !== false && env.password !== null

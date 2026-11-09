@@ -88,6 +88,10 @@ falls back to line-by-line scanning for JSON-like and shell-like assignments.
 Optional elevated mode value: `TELEGRAM_PASSWORD`. Profiles can store the
 Telegram 2FA password in file `~/.tg-sai/profiles.json`, and environment
 variable `TELEGRAM_PASSWORD` overrides the stored profile value for one command.
+Otherwise the password comes from the same source as the session: the
+profile's for a profile session, the same block's `TELEGRAM_PASSWORD` for a
+`.env` or MCP session, and none for a `TELEGRAM_*` environment session. A blank
+password counts as none, so ownership transfer is skipped.
 When a password is available, command `tg-sai ops sai-bootstrap --run` attempts
 ownership transfer by default for eligible chats after the target user is admin.
 Pass flag `--no-transfer-owner` to skip ownership transfer.
@@ -206,9 +210,11 @@ tg-sai profile add --name draft
 ```
 
 Blank or partial profiles are useful while collecting `apiId`, `apiHash`, and
-`sessionString`. While the selected profile is incomplete, commands that
-connect to Telegram fall back to the `.env` files and MCP discovery, and fail
-only if those sources also lack complete credentials.
+`sessionString`. When the active profile is incomplete and records no account
+(no user ID or handle), commands that connect to Telegram fall back to the
+`.env` files and MCP discovery. A profile named with `--profile`, or one that
+records a user ID or handle, must be complete; tg-sai never substitutes another
+account's session for it.
 
 Add a local profile from explicit values:
 
