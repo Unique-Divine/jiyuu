@@ -92,7 +92,9 @@ async def delete_profile_photo(account: str | None = None) -> str:
         cl = get_client(account)
         await ensure_connected(cl)
         photos = await cl(
-            functions.photos.GetUserPhotosRequest(user_id="me", offset=0, max_id=0, limit=1)
+            functions.photos.GetUserPhotosRequest(
+                user_id=types.InputUserSelf(), offset=0, max_id=0, limit=1
+            )
         )
         if not photos.photos:
             return "No profile photo to delete."
@@ -181,7 +183,7 @@ async def set_privacy_settings(
         privacy_key = key_mapping[key]()
 
         # Prepare the rules
-        rules = []
+        rules: list[types.TypeInputPrivacyRule] = []
 
         # Process allow rules
         if allow_users is None or len(allow_users) == 0:
@@ -194,7 +196,7 @@ async def set_privacy_settings(
                 for user_id in allow_users:
                     try:
                         user = await resolve_entity(user_id, cl)
-                        allow_entities.append(user)
+                        allow_entities.append(utils.get_input_user(user))
                     except Exception as user_err:
                         logger.warning(f"Could not get entity for user ID {user_id}: {user_err}")
 
@@ -211,7 +213,7 @@ async def set_privacy_settings(
                 for user_id in disallow_users:
                     try:
                         user = await resolve_entity(user_id, cl)
-                        disallow_entities.append(user)
+                        disallow_entities.append(utils.get_input_user(user))
                     except Exception as user_err:
                         logger.warning(f"Could not get entity for user ID {user_id}: {user_err}")
 

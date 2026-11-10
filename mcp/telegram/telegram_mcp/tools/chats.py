@@ -804,40 +804,20 @@ async def get_full_chat(chat_id: Union[int, str], account: str | None = None) ->
 @with_account(readonly=False)
 @validate_id("chat_id")
 async def mute_chat(chat_id: Union[int, str], account: str | None = None) -> str:
-    """
-    Mute notifications for a chat.
-    """
+    """Mute notifications for a chat."""
     try:
         cl = get_client(account)
-        from telethon.tl.types import InputPeerNotifySettings
-
-        peer = await resolve_entity(chat_id, cl)
+        peer = await resolve_input_entity(chat_id, cl)
         await cl(
             functions.account.UpdateNotifySettingsRequest(
-                peer=peer, settings=InputPeerNotifySettings(mute_until=2**31 - 1)
+                peer=types.InputNotifyPeer(utils.get_input_peer(peer)),
+                settings=types.InputPeerNotifySettings(
+                    mute_until=datetime.fromtimestamp(2**31 - 1, tz=timezone.utc)
+                ),
             )
         )
         return f"Chat {chat_id} muted."
-    except (ImportError, AttributeError) as type_err:
-        try:
-            # Alternative approach directly using raw API
-            peer = await resolve_input_entity(chat_id, cl)
-            await cl(
-                functions.account.UpdateNotifySettingsRequest(
-                    peer=peer,
-                    settings={
-                        "mute_until": 2**31 - 1,  # Far future
-                        "show_previews": False,
-                        "silent": True,
-                    },
-                )
-            )
-            return f"Chat {chat_id} muted (using alternative method)."
-        except Exception as alt_e:
-            logger.exception(f"mute_chat (alt method) failed (chat_id={chat_id})")
-            return log_and_format_error("mute_chat", alt_e, chat_id=chat_id)
     except Exception as e:
-        logger.exception(f"mute_chat failed (chat_id={chat_id})")
         return log_and_format_error("mute_chat", e, chat_id=chat_id)
 
 
@@ -849,40 +829,20 @@ async def mute_chat(chat_id: Union[int, str], account: str | None = None) -> str
 @with_account(readonly=False)
 @validate_id("chat_id")
 async def unmute_chat(chat_id: Union[int, str], account: str | None = None) -> str:
-    """
-    Unmute notifications for a chat.
-    """
+    """Unmute notifications for a chat."""
     try:
         cl = get_client(account)
-        from telethon.tl.types import InputPeerNotifySettings
-
-        peer = await resolve_entity(chat_id, cl)
+        peer = await resolve_input_entity(chat_id, cl)
         await cl(
             functions.account.UpdateNotifySettingsRequest(
-                peer=peer, settings=InputPeerNotifySettings(mute_until=0)
+                peer=types.InputNotifyPeer(utils.get_input_peer(peer)),
+                settings=types.InputPeerNotifySettings(
+                    mute_until=datetime.fromtimestamp(0, tz=timezone.utc)
+                ),
             )
         )
         return f"Chat {chat_id} unmuted."
-    except (ImportError, AttributeError) as type_err:
-        try:
-            # Alternative approach directly using raw API
-            peer = await resolve_input_entity(chat_id, cl)
-            await cl(
-                functions.account.UpdateNotifySettingsRequest(
-                    peer=peer,
-                    settings={
-                        "mute_until": 0,  # Unmute (current time)
-                        "show_previews": True,
-                        "silent": False,
-                    },
-                )
-            )
-            return f"Chat {chat_id} unmuted (using alternative method)."
-        except Exception as alt_e:
-            logger.exception(f"unmute_chat (alt method) failed (chat_id={chat_id})")
-            return log_and_format_error("unmute_chat", alt_e, chat_id=chat_id)
     except Exception as e:
-        logger.exception(f"unmute_chat failed (chat_id={chat_id})")
         return log_and_format_error("unmute_chat", e, chat_id=chat_id)
 
 

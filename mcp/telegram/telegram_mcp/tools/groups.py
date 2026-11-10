@@ -169,36 +169,13 @@ async def leave_chat(chat_id: Union[int, str], account: str | None = None) -> st
                 return log_and_format_error("leave_chat", chan_err, chat_id=chat_id)
 
         elif isinstance(entity, Chat):
-            # Traditional basic groups (not supergroups)
-            try:
-                # First try with InputPeerUser
-                me = await cl.get_me(input_peer=True)
-                await cl(
-                    functions.messages.DeleteChatUserRequest(
-                        chat_id=entity.id,
-                        user_id=me,  # Use the entity ID directly
-                    )
+            await cl(
+                functions.messages.DeleteChatUserRequest(
+                    chat_id=entity.id, user_id=types.InputUserSelf()
                 )
-                chat_name = sanitize_name(getattr(entity, "title", str(chat_id)))
-                return f"Left basic group {chat_name} (ID: {chat_id})."
-            except Exception as chat_err:
-                # If the above fails, try the second approach
-                logger.warning(
-                    f"First leave attempt failed: {chat_err}, trying alternative method"
-                )
-
-                try:
-                    # Alternative approach - sometimes this works better
-                    me_full = await cl.get_me()
-                    await cl(
-                        functions.messages.DeleteChatUserRequest(
-                            chat_id=entity.id, user_id=me_full.id
-                        )
-                    )
-                    chat_name = sanitize_name(getattr(entity, "title", str(chat_id)))
-                    return f"Left basic group {chat_name} (ID: {chat_id})."
-                except Exception as alt_err:
-                    return log_and_format_error("leave_chat", alt_err, chat_id=chat_id)
+            )
+            chat_name = sanitize_name(getattr(entity, "title", str(chat_id)))
+            return f"Left basic group {chat_name} (ID: {chat_id})."
         else:
             # Cannot leave a user chat this way
             entity_type = type(entity).__name__
@@ -336,7 +313,7 @@ async def edit_chat_title(chat_id: Union[int, str], title: str, account: str | N
         if isinstance(entity, Channel):
             await cl(functions.channels.EditTitleRequest(channel=entity, title=title))
         elif isinstance(entity, Chat):
-            await cl(functions.messages.EditChatTitleRequest(chat_id=chat_id, title=title))
+            await cl(functions.messages.EditChatTitleRequest(chat_id=entity.id, title=title))
         else:
             return f"Cannot edit title for this entity type ({type(entity)})."
         return f"Chat {chat_id} title updated to '{sanitize_name(title)}'."
@@ -381,7 +358,7 @@ async def edit_chat_photo(
         elif isinstance(entity, Chat):
             # For basic groups, use EditChatPhotoRequest with InputChatUploadedPhoto
             input_photo = InputChatUploadedPhoto(file=uploaded_file)
-            await cl(functions.messages.EditChatPhotoRequest(chat_id=chat_id, photo=input_photo))
+            await cl(functions.messages.EditChatPhotoRequest(chat_id=entity.id, photo=input_photo))
         else:
             return f"Cannot edit photo for this entity type ({type(entity)})."
 
@@ -449,7 +426,7 @@ async def delete_chat_photo(chat_id: Union[int, str], account: str | None = None
             # Use None (or InputChatPhotoEmpty) for basic groups
             await cl(
                 functions.messages.EditChatPhotoRequest(
-                    chat_id=chat_id, photo=InputChatPhotoEmpty()
+                    chat_id=entity.id, photo=InputChatPhotoEmpty()
                 )
             )
         else:
@@ -769,7 +746,7 @@ async def set_default_chat_permissions(
         await ensure_connected(cl)
         entity = await resolve_entity(chat_id, cl)
         banned_rights = ChatBannedRights(
-            until_date=until_date if until_date else None,
+            until_date=datetime.fromtimestamp(until_date, tz=timezone.utc) if until_date else None,
             send_messages=not send_messages,
             send_media=not send_media,
             send_stickers=not send_stickers,
@@ -1011,19 +988,17 @@ async def get_invite_link(chat_id: Union[int, str], account: str | None = None) 
             # If that fails, log and try alternative approach
             logger.warning(f"ExportChatInviteRequest failed: {e1}")
 
-        # Alternative approach using cl.export_chat_invite_link
-        try:
-            invite_link = await cl.export_chat_invite_link(entity)
-            return invite_link
-        except Exception as e2:
-            logger.warning(f"export_chat_invite_link failed: {e2}")
-
         # Last resort: Try directly fetching chat info
         try:
             if isinstance(entity, (Chat, Channel)):
-                full_chat = await cl(functions.messages.GetFullChatRequest(chat_id=entity.id))
-                if hasattr(full_chat, "full_chat") and hasattr(full_chat.full_chat, "invite_link"):
-                    return full_chat.full_chat.invite_link or "No invite link available."
+                full_chat = await cl(
+                    functions.channels.GetFullChannelRequest(channel=entity)
+                    if isinstance(entity, Channel)
+                    else functions.messages.GetFullChatRequest(chat_id=entity.id)
+                )
+                invite = getattr(full_chat.full_chat, "exported_invite", None)
+                if isinstance(invite, types.ChatInviteExported):
+                    return invite.link
         except Exception as e3:
             logger.warning(f"GetFullChatRequest failed: {e3}")
 
@@ -1097,26 +1072,8 @@ async def export_chat_invite(chat_id: Union[int, str], account: str | None = Non
         cl = get_client(account)
         entity = await resolve_entity(chat_id, cl)
 
-        # Try using ExportChatInviteRequest first
-        try:
-            from telethon.tl import functions
-
-            result = await cl(functions.messages.ExportChatInviteRequest(peer=entity))
-            return result.link
-        except AttributeError:
-            # If the function doesn't exist in the current Telethon version
-            logger.warning("ExportChatInviteRequest not available, using alternative method")
-        except Exception as e1:
-            # If that fails, log and try alternative approach
-            logger.warning(f"ExportChatInviteRequest failed: {e1}")
-
-        # Alternative approach using cl.export_chat_invite_link
-        try:
-            invite_link = await cl.export_chat_invite_link(entity)
-            return invite_link
-        except Exception as e2:
-            logger.warning(f"export_chat_invite_link failed: {e2}")
-            return log_and_format_error("export_chat_invite", e2, chat_id=chat_id)
+        result = await cl(functions.messages.ExportChatInviteRequest(peer=entity))
+        return result.link
 
     except Exception as e:
         logger.exception(f"export_chat_invite failed (chat_id={chat_id})")
@@ -1203,7 +1160,7 @@ async def get_recent_actions(chat_id: Union[int, str], account: str | None = Non
         await ensure_connected(cl)
         result = await cl(
             functions.channels.GetAdminLogRequest(
-                channel=chat_id,
+                channel=utils.get_input_channel(await resolve_input_entity(chat_id, cl)),
                 q="",
                 events_filter=None,
                 admins=[],
