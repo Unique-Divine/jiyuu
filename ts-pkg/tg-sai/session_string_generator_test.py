@@ -278,3 +278,16 @@ def test_standalone_guidance_uses_tg_sai_without_api_hash(monkeypatch, capsys):
     assert _FAKE_API_HASH not in captured.out
     assert "tg-sai profile add --api-id 123 --api-hash '<api hash>'" in captured.out
     assert "just tg-sai" not in captured.out
+
+
+def test_missing_app_credentials_names_every_source(monkeypatch, capsys):
+    monkeypatch.delenv("TELEGRAM_API_ID", raising=False)
+    monkeypatch.delenv("TELEGRAM_API_HASH", raising=False)
+    monkeypatch.setattr("sys.argv", ["session_string_generator.py", "--qr", "--session-output", "/unused"])
+
+    with pytest.raises(SystemExit):
+        session_string_generator.main()
+
+    out = capsys.readouterr().out
+    for source in ("environment", ".env file", "--api-id", "~/.tg-sai/.env"):
+        assert source in out

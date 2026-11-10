@@ -169,8 +169,15 @@ def main() -> None:
     api_hash = os.getenv("TELEGRAM_API_HASH")
 
     if not api_id or not api_hash:
-        print("Error: TELEGRAM_API_ID and TELEGRAM_API_HASH must be set in .env file")
-        print("Create an .env file with your credentials from https://my.telegram.org/apps")
+        print(
+            "Error: TELEGRAM_API_ID and TELEGRAM_API_HASH must be set in the "
+            "environment or in a .env file in the current directory."
+        )
+        print("Get them from https://my.telegram.org/apps.")
+        print(
+            "With tg-sai, pass --api-id and --api-hash or add them to "
+            "~/.tg-sai/.env, then run tg-sai profile add --login."
+        )
         sys.exit(1)
 
     try:
