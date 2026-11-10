@@ -47,6 +47,17 @@ from functools import wraps
 import telethon.errors.rpcerrorlist
 from sanitize import sanitize_user_content, sanitize_name, sanitize_dict, format_tool_result
 from telegram_mcp.client_identity import client_identity_kwargs
+from telegram_mcp.request_policy import (
+    FLOOD_SLEEP_THRESHOLD,
+    RequestLimited,
+    RequestTimedOut,
+    format_request_error,
+    is_wait_error,
+    limit_from_error,
+    raise_if_cooling_down,
+    request_cooldowns,
+    run_limited,
+)
 
 
 class ValidationError(Exception):
@@ -278,6 +289,9 @@ def _build_client(session: Any, label: str) -> TelegramClient:
     if connection is not None:
         kwargs["connection"] = connection
     kwargs.update(client_identity_kwargs())
+    # Raise every flood wait instead of sleeping inside Telethon, so request
+    # timeouts never cancel a wait and callers see its length.
+    kwargs["flood_sleep_threshold"] = FLOOD_SLEEP_THRESHOLD
     return TelegramClient(session, TELEGRAM_API_ID, TELEGRAM_API_HASH, **kwargs)
 
 
@@ -442,7 +456,10 @@ async def ensure_connected(cl: TelegramClient = None):
             timeout=5.0,
         )
         _last_conn_verified[key] = now
-    except (ConnectionError, OSError, asyncio.TimeoutError, Exception):
+    except Exception as exc:
+        # A flood wait is an API limit on a working connection.
+        if is_wait_error(exc):
+            raise
         await _force_reconnect(cl)
 
 
@@ -560,6 +577,18 @@ def log_and_format_error(
     Returns:
         A user-friendly error message with an error code.
     """
+    if isinstance(error, (RequestLimited, RequestTimedOut)):
+        logger.warning(f"{function_name}: {error}")
+        return format_request_error(error)
+    if is_wait_error(error):
+        try:
+            limit = limit_from_error(error, function_name, time.time())
+        except ValueError:
+            pass
+        else:
+            logger.warning(f"{function_name}: {limit.message()}")
+            return format_request_error(RequestLimited(limit))
+
     # Generate a consistent error code
     if isinstance(prefix, str) and prefix == "VALIDATION-001":
         # Special case for validation errors
@@ -709,6 +738,11 @@ def _marked_id_candidates(identifier: Union[int, str]) -> list[int]:
     ]
 
 
+async def warm_dialogs(client) -> None:
+    """Fill the entity cache from dialogs under the get_dialogs cooldown."""
+    await run_limited(client, "get_dialogs", client.get_dialogs, timeout=None)
+
+
 async def resolve_entity(identifier: Union[int, str], client=None) -> Any:
     """Resolve entity with automatic cache warming, marked-ID fallback, and reconnect.
 
@@ -730,7 +764,7 @@ async def resolve_entity(identifier: Union[int, str], client=None) -> Any:
             return await client.get_entity(identifier)
         except ValueError as error:
             last_error = error
-            await client.get_dialogs()
+            await warm_dialogs(client)
             try:
                 return await client.get_entity(identifier)
             except ValueError as error:
@@ -741,7 +775,7 @@ async def resolve_entity(identifier: Union[int, str], client=None) -> Any:
             return await client.get_entity(identifier)
         except ValueError as error:
             last_error = error
-            await client.get_dialogs()
+            await warm_dialogs(client)
             try:
                 return await client.get_entity(identifier)
             except ValueError as error:
@@ -773,7 +807,7 @@ async def resolve_input_entity(identifier: Union[int, str], client=None) -> Any:
             return await client.get_input_entity(identifier)
         except ValueError as error:
             last_error = error
-            await client.get_dialogs()
+            await warm_dialogs(client)
             try:
                 return await client.get_input_entity(identifier)
             except ValueError as error:
@@ -784,7 +818,7 @@ async def resolve_input_entity(identifier: Union[int, str], client=None) -> Any:
             return await client.get_input_entity(identifier)
         except ValueError as error:
             last_error = error
-            await client.get_dialogs()
+            await warm_dialogs(client)
             try:
                 return await client.get_input_entity(identifier)
             except ValueError as error:
