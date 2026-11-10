@@ -15,7 +15,9 @@ import {
   parseCredentialValueAfterKey,
   platformKind,
   readConfig,
+  redactedProfile,
   resolveTelegramCredentialSource,
+  strictProfileCredentials,
 } from "./profiles"
 import type { ProfileAddInput } from "./profiles"
 
@@ -510,7 +512,7 @@ describe("resolveTelegramCredentialSource", () => {
           sessionString: "custody-session",
         },
         source: "profile",
-        password: "custody-2fa",
+        password: { kind: "value", value: "custody-2fa" },
         profileName: "custody",
         userId: 222,
       })
@@ -552,7 +554,7 @@ describe("resolveTelegramCredentialSource", () => {
       ).toEqual({
         credentials: dotEnvCredentials,
         source: "known_file",
-        password: "file-2fa",
+        password: { kind: "value", value: "file-2fa" },
         profileName: null,
         userId: null,
       })
@@ -656,7 +658,7 @@ describe("resolveTelegramCredentialSource", () => {
             TELEGRAM_PASSWORD: "cli-2fa",
           })
         ).password,
-      ).toBe("cli-2fa")
+      ).toEqual({ kind: "value", value: "cli-2fa" })
       expect(
         (
           await resolveTelegramCredentialSource(undefined, {
@@ -673,6 +675,76 @@ describe("resolveTelegramCredentialSource", () => {
       expect(
         (await resolveTelegramCredentialSource("custody", env)).password,
       ).toBeNull()
+    })
+  })
+})
+
+describe("2FA password in pass", () => {
+  test("a profile keeps only the pass entry and resolution never runs pass", async () => {
+    await withTempHome(async (home) => {
+      // No pass on PATH: resolving must not read the entry.
+      const env = { ...resolverEnv(home), PATH: "" }
+      await addProfile(profileInput({ password: "legacy-2fa" }), env)
+      await addProfile(
+        profileInput({ passwordPassEntry: "tg-sai/custody/telegram-2fa" }),
+        env,
+      )
+      const raw = await readFile(configPath(env), "utf8")
+      expect(raw).not.toContain("legacy-2fa")
+      expect(JSON.parse(raw).profiles[0]).not.toHaveProperty("password")
+
+      const resolved = await resolveTelegramCredentialSource("custody", env)
+      expect(resolved.password).toEqual({
+        kind: "pass",
+        entry: "tg-sai/custody/telegram-2fa",
+      })
+      // TELEGRAM_PASSWORD still overrides for one command.
+      expect(
+        (
+          await resolveTelegramCredentialSource("custody", {
+            ...env,
+            TELEGRAM_PASSWORD: "cli-2fa",
+          })
+        ).password,
+      ).toEqual({ kind: "value", value: "cli-2fa" })
+
+      const profile = (await readConfig(env)).profiles[0]!
+      expect(redactedProfile(profile)).toMatchObject({
+        password: "",
+        passwordPassEntry: "tg-sai/custody/telegram-2fa",
+        passwordStorage: "pass",
+      })
+    })
+  })
+
+  test("legacy plain-text profiles still resolve and report their storage", async () => {
+    await withTempHome(async (home) => {
+      const env = resolverEnv(home)
+      await addProfile(profileInput({ password: "legacy-2fa" }), env)
+      const profile = (await readConfig(env)).profiles[0]!
+      expect(redactedProfile(profile)).toMatchObject({
+        password: "[redacted]",
+        passwordPassEntry: null,
+        passwordStorage: "plain_text",
+      })
+      expect(
+        (await resolveTelegramCredentialSource("custody", env)).password,
+      ).toEqual({ kind: "value", value: "legacy-2fa" })
+    })
+  })
+
+  test("custody credentials ignore the password reference and need no pass", async () => {
+    await withTempHome(async (home) => {
+      const env = { ...resolverEnv(home), PATH: "" }
+      await addProfile(
+        profileInput({ passwordPassEntry: "tg-sai/custody/telegram-2fa" }),
+        env,
+      )
+      expect(await strictProfileCredentials("custody", 222, env)).toEqual({
+        apiId: 456,
+        apiHash: "custody-hash",
+        sessionString: "custody-session",
+      })
     })
   })
 })

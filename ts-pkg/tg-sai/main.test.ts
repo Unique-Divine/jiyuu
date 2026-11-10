@@ -250,7 +250,7 @@ describe("getTelegramEnv", () => {
           apiId: 456,
           apiHash: "profile-hash",
           session: "profile-session",
-          password: "custody-2fa",
+          password: { kind: "value", value: "custody-2fa" },
           userId: 222,
           profileName: "custody",
         })

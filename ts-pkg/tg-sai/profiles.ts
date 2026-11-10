@@ -2,6 +2,7 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises"
 import { homedir, platform as osPlatform } from "node:os"
 import { dirname, join } from "node:path"
 import type { UserData } from "./adminAudit"
+import type { TelegramPasswordRef } from "./passwordStore"
 
 const TG_SAI_DIR_ENV = "TG_SAI_DIR"
 const CONFIG_FILE = "profiles.json"
@@ -34,7 +35,13 @@ export interface TgSaiProfile {
   apiId: number | null
   apiHash: string
   sessionString: string
+  /**
+   * Plain-text 2FA password from profiles saved before pass support. Read
+   * for compatibility; `tg-sai profile migrate-password` moves it to pass.
+   */
   password: string
+  /** Pass entry that holds the 2FA password. */
+  passwordPassEntry?: string
   handle: string | null
   userId: number | null
   displayName: string
@@ -57,6 +64,8 @@ export interface ProfileAddInput {
   apiHash: string
   sessionString: string
   password: string
+  /** Pass entry that holds the 2FA password; replaces `password`. */
+  passwordPassEntry?: string
   handle: string | null
   userId: number | null
   displayName: string
@@ -300,9 +309,23 @@ export async function writeConfig(
 ): Promise<void> {
   const path = configPath(env)
   await mkdir(dirname(path), { recursive: true, mode: 0o700 })
-  await writeFile(path, `${JSON.stringify(config, null, 2)}\n`, {
+  const stored = { ...config, profiles: config.profiles.map(storedProfile) }
+  await writeFile(path, `${JSON.stringify(stored, null, 2)}\n`, {
     mode: 0o600,
   })
+}
+
+/**
+ * Profile as written to `profiles.json`: an empty `password` or
+ * `passwordPassEntry` is left out, so a migrated profile has no password key.
+ */
+export function storedProfile(profile: TgSaiProfile): Partial<TgSaiProfile> {
+  const { password, passwordPassEntry, ...rest } = profile
+  return {
+    ...rest,
+    ...(password ? { password } : {}),
+    ...(passwordPassEntry ? { passwordPassEntry } : {}),
+  }
 }
 
 export async function clearConfig(
@@ -352,12 +375,18 @@ export async function addProfile(
     throw new Error("Cannot replace a saved profile's account identity. Use a new profile name or explicitly remove the old profile first.")
   }
   const timestamp = now.toISOString()
+  const passwordPassEntry =
+    input.passwordPassEntry || previous?.passwordPassEntry || undefined
   const nextProfile: TgSaiProfile = {
     name: profileNameFromInput(input, targetIndex),
     apiId: input.apiId ?? previous?.apiId ?? null,
     apiHash: input.apiHash || previous?.apiHash || "",
     sessionString: input.sessionString || previous?.sessionString || "",
-    password: input.password || previous?.password || "",
+    // A pass entry replaces any plain-text password saved earlier.
+    password: passwordPassEntry
+      ? ""
+      : input.password || previous?.password || "",
+    ...(passwordPassEntry ? { passwordPassEntry } : {}),
     handle: input.handle ?? previous?.handle ?? null,
     userId: input.userId ?? previous?.userId ?? null,
     displayName: input.displayName || previous?.displayName || "",
@@ -451,9 +480,42 @@ export function redactedProfile(profile: TgSaiProfile) {
     apiHash: profile.apiHash ? "[redacted]" : "",
     sessionString: profile.sessionString ? "[redacted]" : "",
     password: profile.password ? "[redacted]" : "",
+    passwordPassEntry: profile.passwordPassEntry ?? null,
+    passwordStorage: profilePasswordStorage(profile),
     createdAt: profile.createdAt,
     updatedAt: profile.updatedAt,
   }
+}
+
+/** Where a profile keeps its 2FA password. */
+export type ProfilePasswordStorage = "pass" | "plain_text" | "none"
+
+export function profilePasswordStorage(
+  profile: TgSaiProfile,
+): ProfilePasswordStorage {
+  if (profile.passwordPassEntry) return "pass"
+  return profile.password ? "plain_text" : "none"
+}
+
+/** Password reference for a profile; a pass entry wins over plain text. */
+export function profilePasswordRef(
+  profile: TgSaiProfile,
+): TelegramPasswordRef | null {
+  if (profile.passwordPassEntry) {
+    return { kind: "pass", entry: profile.passwordPassEntry }
+  }
+  return profile.password ? { kind: "value", value: profile.password } : null
+}
+
+/** Profiles that still keep a plain-text 2FA password. */
+export function plainTextPasswordProfiles(config: TgSaiConfig): TgSaiProfile[] {
+  return config.profiles.filter(
+    (profile) => profilePasswordStorage(profile) === "plain_text",
+  )
+}
+
+function passwordValueRef(value: string | null): TelegramPasswordRef | null {
+  return value ? { kind: "value", value } : null
 }
 
 export function credentialsFromProfileRecord(
@@ -816,10 +878,11 @@ export interface ResolvedTelegramCredentials {
   /**
    * 2FA password for this session, or null. `TELEGRAM_PASSWORD` overrides for
    * one command; otherwise only the source's own password applies: the
-   * profile's for `profile`, the same block's for `known_file`, none for
-   * `env`. Blank values count as null.
+   * profile's pass entry (or legacy plain-text value) for `profile`, the same
+   * block's for `known_file`, none for `env`. Blank values count as null. A
+   * pass entry is read only when Telegram asks for the password.
    */
-  password: string | null
+  password: TelegramPasswordRef | null
   /** Saved profile name, only when the session came from that profile. */
   profileName: string | null
   /** Saved account user ID, only when the session came from that profile. */
@@ -848,7 +911,7 @@ export async function resolveTelegramCredentialSource(
   profileName: string | undefined,
   env: ProfileStoreEnv = process.env,
 ): Promise<ResolvedTelegramCredentials> {
-  const passwordOverride = env.TELEGRAM_PASSWORD || null
+  const passwordOverride = passwordValueRef(env.TELEGRAM_PASSWORD || null)
   const envCredentials = credentialsFromEnv(env)
   if (envCredentials) {
     return {
@@ -869,7 +932,7 @@ export async function resolveTelegramCredentialSource(
     return {
       credentials: profileCredentials,
       source: "profile",
-      password: passwordOverride ?? (selectedProfile.password || null),
+      password: passwordOverride ?? profilePasswordRef(selectedProfile),
       profileName: selectedProfile.name || profileName || null,
       userId: selectedProfile.userId,
     }
@@ -897,7 +960,7 @@ export async function resolveTelegramCredentialSource(
     return {
       credentials: known.credentials,
       source: "known_file",
-      password: passwordOverride ?? known.password,
+      password: passwordOverride ?? passwordValueRef(known.password),
       profileName: null,
       userId: null,
     }
