@@ -471,7 +471,7 @@ sudo -u sai-custody-worker env TG_SAI_DIR=/var/lib/sai-custody-worker HOME=/var/
 before.
 
 `state.db` migrations are forward-only. Once a worker applies one, such as
-`0005-member-add-uncertain.sql`, an older binary refuses the file, the hold
+`0006-pool-fill.sql`, an older binary refuses the file, the hold
 check reports `TG_SAI_HOLD_STATE_UNAVAILABLE`, and setup work stops. To
 undo a release, roll forward to a fixed build; do not reinstall the older
 binary against the same `state.db`.
@@ -559,7 +559,10 @@ SaiTeam_bot's private `/newdealchat` flow submits an approved request to the
 Deal Desk API. A separate worker creates the private supergroup as custody
 user `8274304175`, profile `SaiTeam_AI`. The bot, Unique, and the requester
 become admins. August and Erick are ordinary default members. The deployed bot
-configuration controls the requester allowlist and defaults.
+configuration controls the requester allowlist and defaults. Once Deal Desk
+serves the deal chat pool, `/newdealchat` claims a ready pool chat instead
+and creates nothing (see Deal Chat Pool Filler); setups remain for explicit
+CLI requests.
 
 Run one worker per custody account. Deal Desk releases the claim while a
 setup waits on its retry or on people to join, so any worker can claim it
@@ -845,6 +848,110 @@ invitations. The bot displays the saved links in its completion reply and
 The source bot configuration starts with admission in `observe` mode. Check
 `~/ki/boku/epics/comms/telegram-bot.md` and its dated rollout evidence for
 the actual deployed state before testing bot commands.
+
+
+### Deal Chat Pool Filler
+
+Deal chats are made ahead of time
+([boku#77](https://github.com/Unique-Divine/boku/issues/77)). The worker
+keeps a pool of ready chats per owner account, and `/newdealchat` claims one
+from Deal Desk. A claim spends no member adds, so `/newdealchat` never
+creates a chat and has no create-and-add fallback.
+
+**Add math.** Telegram rations member adds per account and gives no warning
+before a `FLOOD_WAIT`; about 14 adds in 20 h drew a 4.3 h wait on Nov 5. A
+chat made on request cost about 3 custody adds (bot, requester, team admin)
+at the moment a trader was waiting. A pool chat costs exactly 1: the custody
+account creates the supergroup (not an add) and adds the bot, which cannot
+join by link. Everyone else, the team included, joins through the chat's
+shared link, which is the person's own action, and the bot approves the
+request (not an add). At the default cap of 10 adds a day, one account fills
+about 10 pool chats a day. Do not reintroduce adds on the request path.
+
+One fill, in one worker tick:
+
+1. Create the supergroup `Sai deal chat (available)` with description
+   `Chat with the Sai team. Ref: <ref>`. The ref is 8 random hex characters,
+   fixed for the chat's life (a claim renames the chat but keeps the
+   description), and read by the same `Ref: <8 hex>` matcher setup chats
+   use.
+2. Register it with Deal Desk as `filling` (best effort).
+3. Add the bot: one add, journaled before the call and counted in
+   `member_add` with source `pool`, an uncertain outcome (timeout) included.
+4. Promote the bot to every admin right short of owner (`POOL_BOT_RIGHTS`:
+   change info, delete messages, ban, invite, pin, add admins, manage calls,
+   topics, stories; not anonymous, not channel-only rights), without flood
+   sleep or resend, and read the rights back.
+5. Set the Sai chat photo (`assets/sai-chat-photo.jpg`, the sai-web app
+   icon). A refused photo leaves the chat without one; it still registers.
+6. Read the bot again and register the chat `available` with its rights,
+   `photoSet`, and `verifiedAt`.
+
+History stays visible to new members, so the trader sees the intro the bot
+posts before they join.
+
+**When a fill starts.** Only on a worker tick with no runnable or waiting
+setup job, no further queue page, and a background drain that found nothing
+due. Then all of these must hold:
+
+- No open fill for the account. A `failed` one blocks filling until an
+  operator retires it.
+- The pacing gap has passed: 20 min ±30% after the last pool add
+  (`TG_SAI_BACKGROUND_GAP_MS`), and past the end of any hold or refusal.
+- No saved hold on the `create` or `invite` group.
+- Deal Desk's `pool-status` says `allowedNow` (account enabled, below
+  target, cap left, no hold, fresh report, group count under its stop).
+  When it says no, the worker asks again after 5 minutes.
+- Local adds today are below the cap. The cap comes from `pool-status`
+  (Deal Desk's adaptive cap, read within the last hour); without it, the
+  fixed `TG_SAI_BACKGROUND_DAILY_MAX` (10) applies. The background drain
+  uses the same cap.
+
+`TG_SAI_POOL_FILL=0` turns the filler off.
+
+**Owner accounts.** `TG_SAI_OWNER_ACCOUNTS` lists the numeric user IDs that
+may own pool chats, comma- or space-separated; unset means the custody
+account `8274304175` alone. An invalid entry stops the worker at start. The
+filler refuses to run as an account outside the list, and its ownership
+check accepts a pool chat whose creator is any listed account. Deal Desk
+also needs a `pool-config` row for every account except custody.
+
+**Group count.** Once an hour, a fill session counts the account's groups,
+supergroups, and channels and sends it as `groupCount` in the custody status
+report. Deal Desk alerts near Telegram's ~500 limit and stops filling at its
+`groupStopAt`.
+
+**Failures.** The local journal (`pool_fill` in `state.db`) records each
+fill's ref, chat, stage, and bot add, so a resume never creates or adds
+twice.
+
+| Stop | What the worker does |
+| --- | --- |
+| `FLOOD_WAIT_N`, `PEER_FLOOD`, `TG_SAI_HOLD_N` on any step | The guard saves the hold; the fill and the next one wait until it ends |
+| Create refused for certain (flood, hold) | The ref is retired (nothing was made); filling waits out the hold |
+| Create timed out | `creation_unknown`: the account's dialogs are searched for the ref every 5 min; found, the fill continues; not found after 3 searches, the ref is retired |
+| Bot add timed out | Counted as an uncertain add; the next run reads the bot and never adds it again |
+| Bot added but not shown | Read again every 15 min, never re-added; after 4 reads, `failed` |
+| Transient error (timeout, 5xx) | Retried after 5 min, at most 5 times, then `failed` |
+| Deal Desk refuses or is down at `available` | Retried with backoff up to 30 min; no Telegram writes |
+| Anything else (rights missing, ref changed, per-user refusal) | `failed` |
+
+A `failed` fill is sent to Deal Desk with `pool-fail`, which retires its
+chat there, and blocks new fills on this host. Check it, then retire it
+locally, with the worker stopped:
+
+```sh
+tg-sai pool status
+tg-sai pool retire --ref <ref>          # prints the record
+tg-sai pool retire --ref <ref> --run    # retires it; filling resumes
+```
+
+Retiring an `active` fill that has a chat also sends `pool-fail` with
+`operator_retired`. Retiring never deletes or edits the Telegram chat.
+
+Deploy Deal Desk migration 20 (`pool-status`, `pool-register`, `pool-fail`)
+before this worker. Against an older Deal Desk, `pool-status` fails, the
+worker makes no chat, and asks again every 5 minutes.
 
 
 ## Runtime Health and Deployment Readiness
