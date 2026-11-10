@@ -264,12 +264,28 @@ async def send_message(
         parse_mode: Optional formatting mode. Use 'html' for HTML tags (<b>, <i>, <code>, <pre>,
             <a href="...">), 'md' or 'markdown' for Markdown (**bold**, __italic__, `code`,
             ```pre```), or omit for plain text (no formatting).
+
+    A slow-mode or flood wait returns a JSON error with wait_seconds and
+    retry_at. Slow mode blocks further sends to that chat only; a flood wait
+    blocks send_message for the account. Both are refused until retry_at.
     """
     try:
         cl = get_client(account)
+        # Refuse a known cooldown before resolving, which may hit the network.
+        raise_if_cooling_down(
+            cl, "send_message", chat_id=chat_id if isinstance(chat_id, int) else None
+        )
         entity = await resolve_entity(chat_id, cl)
-        await cl.send_message(entity, message, parse_mode=parse_mode)
+        await run_limited(
+            cl,
+            "send_message",
+            lambda: cl.send_message(entity, message, parse_mode=parse_mode),
+            timeout=None,
+            chat_id=utils.get_peer_id(entity),
+        )
         return "Message sent successfully."
+    except (RequestLimited, RequestTimedOut) as e:
+        return format_request_error(e)
     except Exception as e:
         return log_and_format_error("send_message", e, chat_id=chat_id)
 
