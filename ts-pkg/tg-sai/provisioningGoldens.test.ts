@@ -5,6 +5,8 @@ import { normalizeProvisioningMember } from "./provisioningRuntime"
 import { memberShape, requireExactCaptureDialog, sanitizedProvisioningGolden, type MemberShape } from "./provisioningGoldens"
 import type { Member } from "./provisioning"
 import { BOT_BASELINE_RIGHTS, TEAM_ADMIN_RIGHTS } from "./provisioning"
+import { chatDescription, creationMarker } from "./provisioning"
+import type { ProvisionRequest } from "./provisioning"
 
 // Synthetic shapes exercise the installed mtcute types. Live evidence is added
 // separately after an authorized throwaway group exists.
@@ -59,6 +61,22 @@ describe("Provisioning capture adapter shapes", () => {
     expect(fixture.chat.markerMatches).toBe(true)
     expect(fixture.invitations.entries[0]?.usageLimit).toBeNull()
     expect(fixture.invitations.entries[0]?.approvalNeeded).toBe(true)
+  })
+  test("capture matches the legacy marker and the new description by ref", () => {
+    const request: ProvisionRequest = { requestId: "golden-setup", custodyProfile: "custody",
+      expectedUserId: 10, title: "Sai golden", participants: [21], admins: [],
+      botRightsProfile: "baseline", dealIds: [] }
+    const capture = (bio: string) => sanitizedProvisioningGolden({
+      capturedAt: "2026-11-10T00:00:00.000Z",
+      chat: { chatType: "supergroup", isForum: false, isCreator: true, bio },
+      expectedMarker: creationMarker(request), members: [], invites: [],
+    })
+    expect(capture(creationMarker(request)).chat.markerMatches).toBe(true)
+    const fresh = capture(chatDescription(request))
+    expect(fresh.chat.markerMatches).toBe(true)
+    expect(JSON.stringify(fresh)).not.toContain("Ref:")
+    const other = { ...request, requestId: "golden-other" }
+    expect(capture(chatDescription(other)).chat.markerMatches).toBe(false)
   })
   test("saved live fixtures preserve owner, bot admin, and member mapping", async () => {
     const directory = join(import.meta.dir, "fixtures", "provisioning")

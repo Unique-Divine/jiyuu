@@ -11,14 +11,19 @@ import {
   getPrimaryInviteLink,
   hideJoinRequest,
   iterDialogs,
+  setChatDescription,
 } from "@mtcute/bun/methods.js"
 import { saiBot } from "./cfg"
 import { createMtcuteClient, promoteTargetAdmin } from "./mtcuteAdapter"
 import { configDir, strictProfileCredentials } from "./profiles"
-import { PROVISIONING_BOT_ID } from "./provisioning"
+import {
+  descriptionMatchesMarker,
+  PROVISIONING_BOT_ID,
+} from "./provisioning"
 import { withTelemetryIdentity } from "./telemetry/middleware"
 import type { ClientTelemetry } from "./telemetry/middleware"
 import type {
+  ChatInfo,
   JournalRecord,
   Member,
   ProvisionJournal,
@@ -208,6 +213,53 @@ export function provisioningRoster(
   return roster
 }
 
+/** Full-chat fields the marker check reads. */
+export interface MarkerChat {
+  chatType: string
+  isForum: boolean
+  isCreator: boolean
+  bio: string
+}
+
+/**
+ * A chat matches when the custody account created this non-forum
+ * supergroup and its description names the setup, in the legacy or the
+ * new form (`descriptionMatchesMarker`).
+ */
+export function markerChatMatches(chat: MarkerChat, marker: string): boolean {
+  return (
+    chat.chatType === "supergroup" &&
+    !chat.isForum &&
+    chat.isCreator &&
+    descriptionMatchesMarker(chat.bio, marker)
+  )
+}
+
+/**
+ * Chats among the custody account's dialogs that it created and whose
+ * description matches `marker`. Only supergroups the account created are
+ * read in full.
+ */
+export async function markerCandidates(
+  dialogs: AsyncIterable<{
+    peer: { type: string; id: number; chatType?: string; isCreator?: boolean }
+  }>,
+  verify: (chatId: number) => Promise<boolean>,
+): Promise<number[]> {
+  const candidates: number[] = []
+  for await (const dialog of dialogs) {
+    const chat = dialog.peer
+    if (
+      chat.type !== "chat" ||
+      chat.chatType !== "supergroup" ||
+      !chat.isCreator
+    )
+      continue
+    if (await verify(chat.id)) candidates.push(chat.id)
+  }
+  return candidates
+}
+
 /** Separate files and a process lock prevent account/session crossover. */
 export function accountPaths(
   root: string,
@@ -359,13 +411,7 @@ export async function withProvisionTelegram<T>(
         chatId: number,
         marker: string,
       ): Promise<boolean> => {
-        const chat = await readClient.getFullChat(chatId)
-        return (
-          chat.chatType === "supergroup" &&
-          !chat.isForum &&
-          chat.isCreator &&
-          chat.bio === marker
-        )
+        return markerChatMatches(await readClient.getFullChat(chatId), marker)
       }
       const linkClient = (abortSignal: AbortSignal) => client.withParams({
         abortSignal,
@@ -378,11 +424,11 @@ export async function withProvisionTelegram<T>(
         self: async () => (await readClient.getMe()).id,
         resolve: (peer) =>
           resolveProvisioningPeer((value) => readClient.getUser(value), peer),
-        create: async (title, marker) =>
+        create: async (title, description) =>
           (
             await createSupergroup(writeClient, {
               title,
-              description: marker,
+              description,
               forum: false,
             })
           ).id,
@@ -463,23 +509,25 @@ export async function withProvisionTelegram<T>(
           return provisioningRoster(listed)
         },
         verifyMarker,
-        candidates: async (marker) => {
-          const candidates: number[] = []
-          for await (const dialog of iterDialogs(readClient, {
-            limit: 200,
-            archived: "keep",
-          })) {
-            const chat = dialog.peer
-            if (
-              chat.type !== "chat" ||
-              chat.chatType !== "supergroup" ||
-              !chat.isCreator
-            )
-              continue
-            if (await verifyMarker(chat.id, marker)) candidates.push(chat.id)
+        candidates: (marker) =>
+          markerCandidates(
+            iterDialogs(readClient, { limit: 200, archived: "keep" }),
+            (chatId) => verifyMarker(chatId, marker),
+          ),
+        chatInfo: async (chatId): Promise<ChatInfo> => {
+          const chat = await readClient.getFullChat(chatId)
+          return {
+            title: chat.title,
+            description: chat.bio,
+            chatType: chat.chatType,
+            isForum: chat.isForum,
+            isCreator: chat.isCreator,
           }
-          return candidates
         },
+        // Editing the description is not a member add, but it is a write:
+        // no flood sleep and no resend.
+        setDescription: (chatId, description) =>
+          setChatDescription(writeClient, chatId, description),
       }
       return await operation(adapter)
     } finally {

@@ -10,6 +10,7 @@ import {
   BOT_ADDS_EXHAUSTED,
   BOT_BASELINE_RIGHTS,
   BOT_NOT_VISIBLE,
+  chatDescription,
   cloudRetryAt,
   creationMarker,
   definiteCreateRejection,
@@ -59,6 +60,7 @@ import { holdUntil, HoldStoreUnavailableError } from "./state/holds"
 import {
   accountPaths,
   FileProvisionJournal,
+  markerChatMatches,
   normalizeProvisioningMember,
   provisioningRoster,
   withAccountLock,
@@ -475,6 +477,42 @@ describe("custody provisioning", () => {
     await f.run()
     f.members.set(PROVISIONING_BOT_ID, { role: "member", rights: {} })
     await expect(f.run()).rejects.toThrow("rights changed")
+    expect(f.events.filter((event) => event === "create")).toHaveLength(1)
+  })
+  test("creates the chat with the friendly description and short ref", async () => {
+    const f = fixture()
+    const created: { title: string; description: string }[] = []
+    const create = f.telegram.create
+    f.telegram.create = async (title, description) => {
+      created.push({ title, description })
+      return create(title, description)
+    }
+    expect((await f.run()).state).toBe("ready")
+    const ref = requestFingerprint(request()).slice(0, 8)
+    expect(created).toEqual([
+      { title: "Sai test", description: `Chat with the Sai team. Ref: ${ref}` },
+    ])
+    expect(chatDescription(request())).toBe(created[0]!.description)
+  })
+  test("ready re-check accepts the legacy marker and the new description, not a wrong ref", async () => {
+    const f = fixture()
+    await f.run()
+    const chat = {
+      chatType: "supergroup",
+      isForum: false,
+      isCreator: true,
+      bio: chatDescription(request()),
+    }
+    f.telegram.verifyMarker = async (_id, marker) =>
+      markerChatMatches(chat, marker)
+    expect((await f.run()).state).toBe("ready")
+    chat.bio = creationMarker(request())
+    expect((await f.run()).state).toBe("ready")
+    chat.bio = "Chat with the Sai team. Ref: 00000000"
+    await expect(f.run()).rejects.toThrow("Ready setup owner or marker changed")
+    chat.bio = chatDescription(request())
+    chat.isCreator = false
+    await expect(f.run()).rejects.toThrow("Ready setup owner or marker changed")
     expect(f.events.filter((event) => event === "create")).toHaveLength(1)
   })
   test("optional participants cannot include admins or arbitrary outsiders", () => {
