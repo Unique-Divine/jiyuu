@@ -73,7 +73,8 @@ output, and throws on any command it does not expect.
 ## Test Behavior, Not Internals
 
 - **Compare exact command sequences.** Assert the full list of argv the
-  fake runner received, in order, with `toEqual` in Bun or `assert ... ==` in pytest.
+  fake runner received, in order, with `toEqual` in Bun or `assert ... ==`
+  in pytest.
 - **Assert what must not happen.** Zero calls when a precondition fails, no
   writes during discovery, no build step when the release already exists.
   These catch the bugs that hurt.
