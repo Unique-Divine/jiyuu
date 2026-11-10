@@ -77,6 +77,23 @@ function passBinary(env: PassEnv): string {
   return found
 }
 
+/**
+ * Throws unless `pass` is on PATH and the store was initialised with
+ * `pass init` (its `.gpg-id` file exists). Never decrypts anything.
+ */
+export async function assertPassReady(env: PassEnv = process.env): Promise<void> {
+  passBinary(env)
+  const gpgId = join(passwordStoreDir(env), ".gpg-id")
+  try {
+    if ((await stat(gpgId)).isFile()) return
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
+  }
+  throw new Error(
+    `pass store ${passwordStoreDir(env)} is not initialised. Run \`pass init <gpg-id>\` first.`,
+  )
+}
+
 /** First line of a pass entry, without the newline. */
 export function passwordFromPassOutput(output: string, entry: string): string {
   const firstLine = output.split(/\r?\n/, 1)[0] ?? ""

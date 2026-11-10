@@ -68,10 +68,12 @@ import {
   setActiveProfile,
 } from "./profiles"
 import {
+  assertPassReady,
   defaultPasswordPassEntry,
   insertPassPassword,
   passEntryExists,
   promptHiddenPassword,
+  readPassPassword,
   readPasswordFromStdin,
   readTelegramPassword,
   validatePassEntry,
@@ -535,8 +537,22 @@ async function runAddBot(options: AddBotOptions): Promise<void> {
   })
 }
 
+/**
+ * Reads a pass-backed 2FA password once, before a `--run` makes its first
+ * change, so a locked GPG agent stops the command before it promotes anyone
+ * instead of between promotion and ownership transfer.
+ */
+export async function withPasswordRead(env: TelegramEnv): Promise<TelegramEnv> {
+  if (env.password?.kind !== "pass") return env
+  return {
+    ...env,
+    password: { kind: "value", value: await readTelegramPassword(env.password) },
+  }
+}
+
 async function runAddOwner(options: AddOwnerOptions): Promise<void> {
-  await withClient(options.profile, async (client, env) => {
+  await withClient(options.profile, async (client, sessionEnv) => {
+    let env = sessionEnv
     const beforeInput = await fetchChatAuditInput(client, {
       chatId: options.chat,
       targetUserId: options.targetUser,
@@ -564,6 +580,9 @@ async function runAddOwner(options: AddOwnerOptions): Promise<void> {
       throw new Error(
         "Refusing to run: session user cannot apply admin changes",
       )
+    }
+    if (beforePlan.actorCanTransferOwnership && env.password !== null) {
+      env = await withPasswordRead(env)
     }
 
     if (shouldRunAction(beforePlan.proposedActions, "add target user")) {
@@ -856,7 +875,8 @@ async function runSaiBootstrap(options: SaiBootstrapOptions): Promise<void> {
   // Telegram calls are in the telemetry DB under this run id.
   const runId = activeTelemetryRun()?.context.runId ?? null
 
-  await withClient(options.profile, async (client, env) => {
+  await withClient(options.profile, async (client, sessionEnv) => {
+    let env = sessionEnv
     const actor = normalizeUser(await client.getMe())
     const actorUsername = actor.username ?? ""
     // Only a session from a saved profile is labeled with that profile.
@@ -881,6 +901,10 @@ async function runSaiBootstrap(options: SaiBootstrapOptions): Promise<void> {
       targetUser: ownerTarget,
       targetBot: saiBot.id,
     })
+
+    if (options.run === true && ownershipTransferEnabled) {
+      env = await withPasswordRead(env)
+    }
 
     const maxWaitMs =
       activeTelemetryRun()?.floodMaxWaitMs ??
@@ -1457,6 +1481,45 @@ async function newPasswordFromOptions(
   return null
 }
 
+/** pass entry that `profile add` targets, or null when no name is known. */
+function profileAddPassEntry(
+  options: ProfileAddOptions,
+  profileName: string | null,
+): string | null {
+  const entryName =
+    options.passwordPassEntry ??
+    (profileName ? defaultPasswordPassEntry(profileName) : null)
+  return entryName ? validatePassEntry(entryName) : null
+}
+
+/**
+ * Checks `entry` before `profile add` writes to it. Returns whether to insert.
+ * An existing entry that is not this profile's own may hold another secret,
+ * so only an identical value is accepted there.
+ */
+async function checkProfileAddPassEntry(
+  entry: string,
+  newPassword: string | null,
+  ownEntry: string | undefined,
+): Promise<boolean> {
+  const exists = await passEntryExists(entry)
+  if (newPassword === null) {
+    if (!exists) {
+      throw new Error(
+        `pass entry ${entry} does not exist. Add --password-prompt or --password-stdin to create it.`,
+      )
+    }
+    return false
+  }
+  if (!exists || entry === ownEntry) return true
+  if ((await readPassPassword(entry)) !== newPassword) {
+    throw new Error(
+      `pass entry ${entry} already exists and holds a different value. Choose another --password-pass-entry.`,
+    )
+  }
+  return false
+}
+
 /**
  * Saves `newPassword` in pass, or checks that `--password-pass-entry`
  * exists, and returns the entry to record on the profile.
@@ -1465,21 +1528,15 @@ async function passwordPassEntryForProfileAdd(
   options: ProfileAddOptions,
   newPassword: string | null,
   profileName: string | null,
+  ownEntry: string | undefined,
 ): Promise<string | null> {
   if (newPassword === null && !options.passwordPassEntry) return null
-  const entryName =
-    options.passwordPassEntry ??
-    (profileName ? defaultPasswordPassEntry(profileName) : null)
-  if (!entryName) {
+  const entry = profileAddPassEntry(options, profileName)
+  if (!entry) {
     throw new Error("Name the profile with --name or the pass entry with --password-pass-entry")
   }
-  const entry = validatePassEntry(entryName)
-  if (newPassword !== null) {
-    await insertPassPassword(entry, newPassword)
-  } else if (!(await passEntryExists(entry))) {
-    throw new Error(
-      `pass entry ${entry} does not exist. Add --password-prompt or --password-stdin to create it.`,
-    )
+  if (await checkProfileAddPassEntry(entry, newPassword, ownEntry)) {
+    await insertPassPassword(entry, newPassword!)
   }
   return entry
 }
@@ -1568,6 +1625,22 @@ async function runProfileAdd(options: ProfileAddOptions): Promise<void> {
   }
   // Read stdin before login or prompts can consume it.
   const newPassword = await newPasswordFromOptions(options)
+  if (newPassword !== null || options.passwordPassEntry) {
+    // Check pass before a login creates a session that a failed insert
+    // would leave unsaved.
+    await assertPassReady()
+    const earlyEntry = profileAddPassEntry(
+      options,
+      previous?.name ?? options.name ?? null,
+    )
+    if (earlyEntry) {
+      await checkProfileAddPassEntry(
+        earlyEntry,
+        newPassword,
+        previous?.passwordPassEntry,
+      )
+    }
+  }
   const input = await inputFromProfileAddOptions(options)
   if (previous?.userId != null && input.userId !== previous.userId) {
     throw new Error("Login or import does not match the saved account. Use a new --name for another account, or explicitly remove the old profile before replacing it.")
@@ -1579,6 +1652,7 @@ async function runProfileAdd(options: ProfileAddOptions): Promise<void> {
     input.name ??
       input.handle ??
       (input.userId !== null ? String(input.userId) : null),
+    previous?.passwordPassEntry,
   )
   if (passwordPassEntry) input.passwordPassEntry = passwordPassEntry
   const config = await addProfile(input)

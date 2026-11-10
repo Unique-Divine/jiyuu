@@ -1,4 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test"
+import { existsSync, mkdirSync, writeFileSync } from "node:fs"
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { basename, dirname, join } from "node:path"
@@ -11,9 +12,14 @@ afterAll(async () => {
   await rm(dirname(fakePass.binDir), { recursive: true, force: true })
 })
 
-/** Password store for a test's config dir, outside that dir. */
+/** Initialised password store for a test's config dir, outside that dir. */
 function storeFor(configDir: string): string {
-  return join(fakePass.storeRoot, basename(configDir))
+  const store = join(fakePass.storeRoot, basename(configDir))
+  if (!existsSync(store)) {
+    mkdirSync(store, { recursive: true })
+    writeFileSync(join(store, ".gpg-id"), "fake-gpg-id\n")
+  }
+  return store
 }
 
 interface RunResult {
@@ -514,6 +520,66 @@ await Bun.write(${JSON.stringify(join(dir, "generator-mode"))}, args.includes("-
       expect(saved.profiles[0].passwordPassEntry).toBe("ops/alice-2fa")
       // Recording a reference never decrypts the entry.
       expect(await Bun.file(join(storeFor(dir), ".calls")).exists()).toBe(false)
+    })
+  })
+
+  test("--password-stdin refuses an existing entry that holds another value", async () => {
+    await withTempConfig(async (dir) => {
+      expect(runCli(addAliceArgs, dir).exitCode).toBe(0)
+      await mkdir(join(storeFor(dir), "evm"), { recursive: true })
+      await writeFile(join(storeFor(dir), "evm", "wallet.gpg"), "unrelated-secret\n")
+      const before = await readFile(join(dir, "profiles.json"), "utf8")
+      const result = runCli(
+        ["profile", "add", "--name", "alice", "--password-pass-entry", "evm/wallet", "--password-stdin"],
+        dir, {}, "password-alice\n",
+      )
+      expect(result.exitCode).not.toBe(0)
+      expect(result.stderr).toContain("pass entry evm/wallet already exists and holds a different value")
+      expect(result.stderr).not.toContain("unrelated-secret")
+      expect(await readFile(join(storeFor(dir), "evm", "wallet.gpg"), "utf8")).toBe("unrelated-secret\n")
+      expect(await readFile(join(dir, "profiles.json"), "utf8")).toBe(before)
+
+      // The same value is accepted without rewriting the entry.
+      await writeFile(join(storeFor(dir), "evm", "same.gpg"), "password-alice\n")
+      const same = runCli(
+        ["profile", "add", "--name", "alice", "--password-pass-entry", "evm/same", "--password-stdin"],
+        dir, {}, "password-alice\n",
+      )
+      expect(same.exitCode).toBe(0)
+      expect(await readFile(join(storeFor(dir), ".calls"), "utf8")).not.toContain("insert")
+    })
+  })
+
+  test("a profile's own entry can be updated with a new password", async () => {
+    await withTempConfig(async (dir) => {
+      expect(addAlice(dir).exitCode).toBe(0)
+      const update = runCli(["profile", "add", "--name", "alice", "--password-stdin"], dir, {}, "password-alice-2\n")
+      expect(update.exitCode).toBe(0)
+      expect(
+        await readFile(join(storeFor(dir), "tg-sai/alice/telegram-2fa.gpg"), "utf8"),
+      ).toBe("password-alice-2\n")
+    })
+  })
+
+  test("checks the pass store before starting a login", async () => {
+    await withTempConfig(async (dir) => {
+      const bin = join(dir, "bin")
+      await mkdir(bin)
+      await writeFile(join(bin, "uv"), `#!/usr/bin/env bun
+await Bun.write(${JSON.stringify(join(dir, "generator-ran"))}, "yes")
+`, { mode: 0o700 })
+      const store = join(fakePass.storeRoot, `${basename(dir)}-uninit`)
+      const result = runCli(
+        ["profile", "add", "--name", "custody", "--qr", "--api-id", "1", "--api-hash", "h",
+          "--user-id", "666", "--display-name", "Custody fixture", "--password-stdin"],
+        dir,
+        { PATH: `${bin}:${fakePass.path}`, PASSWORD_STORE_DIR: store },
+        "password-custody\n",
+      )
+      expect(result.exitCode).not.toBe(0)
+      expect(result.stderr).toContain("is not initialised")
+      expect(await Bun.file(join(dir, "generator-ran")).exists()).toBe(false)
+      expect(await Bun.file(join(dir, "profiles.json")).exists()).toBe(false)
     })
   })
 

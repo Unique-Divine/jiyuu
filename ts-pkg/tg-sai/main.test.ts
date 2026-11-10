@@ -12,7 +12,10 @@ import {
   holdExitFor,
   parseDialogLimit,
   shortDuration,
+  withPasswordRead,
 } from "./main"
+import type { TelegramEnv } from "./main"
+import { installFakePass } from "./testdata"
 import { addProfile, configDir } from "./profiles"
 import { HoldAccountUnknownError, HoldError } from "./state/guard"
 import { HoldStoreUnavailableError } from "./state/holds"
@@ -295,5 +298,44 @@ describe("getTelegramEnv", () => {
         })
       },
     )
+  })
+})
+
+describe("withPasswordRead", () => {
+  const base: TelegramEnv = {
+    apiId: 1,
+    apiHash: "h",
+    session: "s",
+    password: null,
+    userId: null,
+    profileName: null,
+  }
+
+  test("reads a pass entry once and keeps other sources as they are", async () => {
+    const fakePass = installFakePass()
+    const store = join(fakePass.storeRoot, "store")
+    const saved = { PATH: process.env.PATH, PASSWORD_STORE_DIR: process.env.PASSWORD_STORE_DIR }
+    process.env.PATH = fakePass.path
+    process.env.PASSWORD_STORE_DIR = store
+    try {
+      await mkdir(join(store, "tg-sai", "c"), { recursive: true })
+      await writeFile(join(store, "tg-sai", "c", "telegram-2fa.gpg"), "fake-2fa\n")
+      const read = await withPasswordRead({
+        ...base,
+        password: { kind: "pass", entry: "tg-sai/c/telegram-2fa" },
+      })
+      expect(read.password).toEqual({ kind: "value", value: "fake-2fa" })
+      expect(await withPasswordRead(base)).toBe(base)
+      const value = { ...base, password: { kind: "value" as const, value: "v" } }
+      expect(await withPasswordRead(value)).toBe(value)
+      await expect(
+        withPasswordRead({ ...base, password: { kind: "pass", entry: "missing" } }),
+      ).rejects.toThrow("pass show failed for entry missing")
+    } finally {
+      process.env.PATH = saved.PATH
+      if (saved.PASSWORD_STORE_DIR === undefined) delete process.env.PASSWORD_STORE_DIR
+      else process.env.PASSWORD_STORE_DIR = saved.PASSWORD_STORE_DIR
+      await rm(join(fakePass.storeRoot, ".."), { recursive: true, force: true })
+    }
   })
 })
