@@ -1,10 +1,12 @@
 """Chat discovery exposes dialog checkpoints without per-chat history reads."""
 
+import asyncio
 import json
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
+from telethon import errors
 
 from telegram_mcp.tools import chats
 
@@ -16,7 +18,8 @@ def configured_client(monkeypatch, dialogs):
 
         async def get_dialogs(self, **kwargs):
             self.calls.append(kwargs)
-            return dialogs
+            limit = kwargs.get("limit")
+            return dialogs if limit is None else dialogs[:limit]
 
         async def __call__(self, request):
             raise AssertionError("Listing metadata must not fetch per-chat details")
@@ -79,12 +82,77 @@ async def test_get_chats_metadata_preserves_pagination_and_handles_missing_dialo
     page_two = decode(await chats.get_chats(page=2, page_size=1))
     page_three = decode(await chats.get_chats(page=3, page_size=1))
 
-    assert client.calls == [{}, {}]
+    assert client.calls == [{"limit": 2}, {"limit": 3}]
     assert [row["chat_id"] for row in page_two] == [-2]
     assert page_two[0]["last_message_id"] == 99
     assert page_two[0]["last_message_date"] == date.isoformat()
     assert page_three[0]["last_message_id"] is None
     assert page_three[0]["last_message_date"] is None
+
+
+@pytest.mark.asyncio
+async def test_get_chats_reports_page_beyond_available_dialogs(monkeypatch):
+    client = configured_client(monkeypatch, [dialog(1)])
+
+    assert await chats.get_chats(page=2, page_size=1) == "Page out of range."
+    assert client.calls == [{"limit": 2}]
+
+
+@pytest.mark.asyncio
+async def test_get_chats_bounds_a_stalled_dialog_read(monkeypatch):
+    cancelled = asyncio.Event()
+
+    class Client:
+        async def get_dialogs(self, **kwargs):
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+    configured_client(monkeypatch, [])
+    monkeypatch.setattr(chats, "get_client", lambda account=None: Client())
+    monkeypatch.setattr(chats, "GET_CHATS_TIMEOUT", 0.01)
+
+    result = json.loads(await chats.get_chats(page_size=5))["error"]
+
+    assert cancelled.is_set()
+    assert result["type"] == "timeout"
+    assert result["request"] == "get_dialogs"
+    assert "smaller page or page_size" in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_get_chats_flood_wait_is_explicit_and_later_calls_skip_telegram(monkeypatch):
+    connects = []
+
+    class Client:
+        def __init__(self):
+            self.calls = 0
+
+        async def get_dialogs(self, **kwargs):
+            self.calls += 1
+            raise errors.FloodWaitError(request=None, capture=420)
+
+    async def connected(client):
+        connects.append(client)
+
+    client = Client()
+    configured_client(monkeypatch, [])
+    monkeypatch.setattr(chats, "get_client", lambda account=None: client)
+    monkeypatch.setattr(chats, "ensure_connected", connected)
+
+    first = json.loads(await chats.get_chats(page=2, page_size=5))["error"]
+    second = json.loads(await chats.get_chats(page=1, page_size=5))["error"]
+
+    assert first["type"] == "flood_wait"
+    assert first["wait_seconds"] == 420
+    assert first["source"] == "telegram"
+    assert second["type"] == "flood_wait"
+    assert second["source"] == "cooldown"
+    assert second["retry_at"] == first["retry_at"]
+    # The cooldown refuses before reconnect checks or another dialog read.
+    assert client.calls == 1
+    assert connects == [client]
 
 
 @pytest.mark.asyncio

@@ -1,0 +1,41 @@
+name: Check GitHub Labels
+
+on:
+  pull_request:
+    paths:
+      - '.github/labeler.yml'
+      - '.github/workflows/github-labels*.yml'
+      - 'scripts/github-labels/**'
+      - 'GITHUB.md'
+      - 'ai-skills/gh-labels/**'
+      - 'tsconfig.json'
+      - 'justfile'
+  push:
+    branches: [main]
+    paths:
+      - '.github/labeler.yml'
+      - '.github/workflows/github-labels*.yml'
+      - 'scripts/github-labels/**'
+      - 'GITHUB.md'
+      - 'ai-skills/gh-labels/**'
+      - 'tsconfig.json'
+      - 'justfile'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: '1.4.3'
+      - run: bun install --frozen-lockfile
+      - run: bun check --cwd scripts/github-labels
+      - run: bun test scripts/github-labels

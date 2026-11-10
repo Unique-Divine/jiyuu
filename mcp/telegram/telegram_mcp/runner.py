@@ -38,12 +38,13 @@ async def _main() -> None:
         # so fetch all dialogs once per client to populate them.
         # Runs in background: blocking startup on this (e.g. under a
         # GetDialogsRequest flood wait) makes MCP clients time out, and
-        # resolve_entity() re-warms the cache on miss anyway.
+        # resolve_entity() re-warms the cache on miss anyway. A flood wait
+        # here becomes a get_dialogs cooldown that later reads respect.
         print("Warming entity caches (background)...", file=sys.stderr)
 
         async def _warm_caches() -> None:
             try:
-                await asyncio.gather(*(cl.get_dialogs() for cl in clients.values()))
+                await asyncio.gather(*(warm_dialogs(cl) for cl in clients.values()))
                 print("Entity caches warmed.", file=sys.stderr)
             except Exception as warm_exc:
                 print(f"Entity cache warm failed: {warm_exc}", file=sys.stderr)

@@ -1333,7 +1333,14 @@ async function inputFromProfileAddOptions(
   ) {
     if (!profileFields.apiId || !profileFields.apiHash) {
       throw new Error(
-        "Session generation requires apiId and apiHash from flags, env, or discovery",
+        [
+          "Session generation requires apiId and apiHash. Provide them with one of:",
+          "- flags --api-id and --api-hash",
+          "- environment variables TELEGRAM_API_ID and TELEGRAM_API_HASH",
+          "- file ~/.tg-sai/.env (or $TG_SAI_DIR/.env)",
+          "- a source from `tg-sai profile find`, selected with --src <number>",
+          "- prompts, with --interactive",
+        ].join("\n"),
       )
     }
     profileFields.sessionString = await generateSessionString({
