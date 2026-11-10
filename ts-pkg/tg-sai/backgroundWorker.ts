@@ -15,7 +15,10 @@ import {
   MAX_BACKGROUND_ATTEMPTS,
   nextUtcDayMs,
 } from "./state/background"
-import type { BackgroundPacing } from "./state/background"
+import type {
+  BackgroundPacing,
+  MemberAddOutcome,
+} from "./state/background"
 import type { ProfileStoreEnv } from "./profiles"
 
 /** Opens the queue in `state.db` under `env`'s config dir. Throws on failure. */
@@ -49,9 +52,11 @@ export function backgroundEnqueue(
 
 /**
  * `adapter` with `add` and `addMany` logging each user Telegram added, or
- * refused for that user alone, to `queue` as `setup` adds. Privacy
- * refusals and whole-call errors (floods, holds) log nothing. A failed
- * log write never fails the add.
+ * refused for that user alone, to `queue` as `setup` adds. A transient
+ * error (`isTransientTelegramError`) logs every user of the call as
+ * `uncertain`, since Telegram may have invited them. Privacy refusals and
+ * other whole-call errors (floods, holds) log nothing. A failed log write
+ * never fails the add.
  */
 export function recordingMemberAdds(
   adapter: TelegramProvisioner,
@@ -61,7 +66,7 @@ export function recordingMemberAdds(
   const record = (
     chatId: number,
     userIds: number[],
-    outcome: "added" | "refused",
+    outcome: MemberAddOutcome,
   ) => {
     if (!userIds.length) return
     try {
@@ -85,6 +90,8 @@ export function recordingMemberAdds(
       } catch (error) {
         if (isPerUserAddError(error) && !isPrivacyRestriction(error))
           record(chatId, [userId], "refused")
+        else if (isTransientTelegramError(error))
+          record(chatId, [userId], "uncertain")
         throw error
       }
       record(chatId, [userId], "added")
@@ -93,7 +100,14 @@ export function recordingMemberAdds(
       ? {
           // A refused batch falls back to `add` per user, which logs.
           addMany: async (chatId: number, userIds: number[]) => {
-            const missing = await addMany(chatId, userIds)
+            let missing: number[]
+            try {
+              missing = await addMany(chatId, userIds)
+            } catch (error) {
+              if (isTransientTelegramError(error))
+                record(chatId, userIds, "uncertain")
+              throw error
+            }
             const skipped = new Set(missing)
             record(
               chatId,
@@ -156,9 +170,10 @@ function inviteHoldUntil(
  * `background_queue` link already covers the member, and does not count
  * toward the daily cap; another per-user refusal is `failed`. A flood or
  * hold leaves the row pending until it ends. A transient error
- * (`isTransientTelegramError`) from the read, approval, or add defers the
- * row behind the others without counting an attempt. Other errors from
- * the add call retry after a gap up to `MAX_BACKGROUND_ATTEMPTS`. Errors before or
+ * (`isTransientTelegramError`) from the read or approval defers the row
+ * behind the others without counting an attempt. One from the add call
+ * counts toward today's cap as `uncertain` and as an attempt. Other errors
+ * from the add call retry after a gap up to `MAX_BACKGROUND_ATTEMPTS`. Errors before or
  * around the call (session, connect, identity checks, shutdown) defer the
  * row one gap without counting an attempt. Every call paces the remaining
  * rows by one jittered gap. Does nothing once `signal` is aborted. Throws
@@ -257,15 +272,32 @@ export async function drainBackgroundOnce(params: {
   // A counted retry goes behind the rows paced to `paced`, so one stuck row
   // never starves the rest of the queue.
   const behind = paced + pacing.gapMs
-  if (
-    (fromMember || fromCall) &&
-    !params.signal?.aborted &&
-    isTransientTelegramError(outcome.error)
-  ) {
-    // A timeout or dropped connection is no one's fault: uncounted, like a
-    // flood, but behind the other rows like a counted retry. A lost add
-    // response is safe because the next step reads the member first.
+  const transient =
+    !params.signal?.aborted && isTransientTelegramError(outcome.error)
+  if (fromMember && transient) {
+    // A timeout on a read or approval spends no add: uncounted, like a
+    // flood, but behind the other rows like a counted retry.
     queue.defer(row.chatId, row.userId, behind, code, nowMs, false)
+    queue.pace(paced)
+    return { state: "deferred", ...at, error: code, nextAtMs: paced }
+  }
+  if (fromCall && transient) {
+    // Telegram may have run the add: it counts toward today's cap and as an
+    // attempt, so a row that keeps timing out ends `failed`. The next step
+    // reads the member first, so a lost response costs no second add.
+    queue.recordAdds({
+      source: "background",
+      outcome: "uncertain",
+      chatId: row.chatId,
+      userIds: [row.userId],
+      nowMs,
+    })
+    if (row.attempts + 1 >= MAX_BACKGROUND_ATTEMPTS) {
+      queue.finish(row.chatId, row.userId, "failed", code, nowMs)
+      queue.pace(paced)
+      return { state: "failed", ...at, error: code, nextAtMs: paced }
+    }
+    queue.defer(row.chatId, row.userId, behind, code, nowMs)
     queue.pace(paced)
     return { state: "deferred", ...at, error: code, nextAtMs: paced }
   }

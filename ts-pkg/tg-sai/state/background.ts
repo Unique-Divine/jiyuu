@@ -124,10 +124,12 @@ function fromRow(row: BackgroundRow): BackgroundMember {
 export type MemberAddSource = "setup" | "background"
 
 /**
- * A member add Telegram ran: `added`, or `refused` for one user (such as
- * `USER_CHANNELS_TOO_MUCH`). Privacy refusals and floods get no row.
+ * A member add Telegram ran: `added`, `refused` for one user (such as
+ * `USER_CHANNELS_TOO_MUCH`), or `uncertain` when the call timed out or got
+ * a server error and may have invited the user. Privacy refusals and
+ * floods get no row.
  */
-export type MemberAddOutcome = "added" | "refused"
+export type MemberAddOutcome = "added" | "refused" | "uncertain"
 
 /** `member_add` rows older than this are pruned on write. */
 const MEMBER_ADD_KEEP_MS = 2 * DAY_MS

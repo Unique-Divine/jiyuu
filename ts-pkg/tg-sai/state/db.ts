@@ -21,6 +21,9 @@ import backgroundPrivacyMigrationSql from "./migrations/0003-background-privacy.
 import memberAddMigrationSql from "./migrations/0004-member-add.sql" with {
   type: "text",
 }
+import memberAddUncertainMigrationSql from "./migrations/0005-member-add-uncertain.sql" with {
+  type: "text",
+}
 
 export const STATE_DB_FILE = "state.db"
 export const STATE_DIR_MODE = 0o700
@@ -38,6 +41,10 @@ export const STATE_MIGRATIONS: readonly Migration[] = [
     sql: backgroundPrivacyMigrationSql,
   },
   { filename: "0004-member-add.sql", sql: memberAddMigrationSql },
+  {
+    filename: "0005-member-add-uncertain.sql",
+    sql: memberAddUncertainMigrationSql,
+  },
 ]
 
 export function stateDbPath(env: ProfileStoreEnv = process.env): string {
