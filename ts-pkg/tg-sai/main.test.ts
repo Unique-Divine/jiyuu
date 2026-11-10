@@ -1,15 +1,19 @@
 import { describe, expect, test } from "bun:test"
 import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs"
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import {
   bareHelpTarget,
   createProgram,
+  getTelegramEnv,
   HOLD_EXIT_CODE,
   holdExitFor,
+  parseDialogLimit,
   shortDuration,
 } from "./main"
+import { addProfile, configDir } from "./profiles"
 import { HoldAccountUnknownError, HoldError } from "./state/guard"
 import { HoldStoreUnavailableError } from "./state/holds"
 
@@ -173,5 +177,123 @@ describe("no JSONL run logs", () => {
       const logs = join(dir, "logs")
       expect(existsSync(logs) ? readdirSync(logs) : []).toEqual([])
     })
+  })
+})
+
+describe("ops sai-find --limit", () => {
+  test("parseDialogLimit accepts positive integers", () => {
+    expect(parseDialogLimit("500")).toBe(500)
+    expect(parseDialogLimit("1")).toBe(1)
+  })
+
+  test("parseDialogLimit rejects values that are not positive integers", () => {
+    for (const value of ["abc", "", "0", "-5", "2.5", "1e3", "Infinity"]) {
+      expect(() => parseDialogLimit(value)).toThrow(
+        "--limit must be a positive integer",
+      )
+    }
+  })
+
+  test("a non-numeric --limit fails before resolving credentials", () => {
+    withDir((dir) => {
+      const result = runCli(["ops", "sai-find", "--limit", "abc"], dir)
+      expect(result.exitCode).toBe(1)
+      expect(result.stderr).toContain("--limit must be a positive integer")
+      expect(result.stderr).not.toContain("Missing Telegram credentials")
+    })
+  })
+})
+
+describe("getTelegramEnv", () => {
+  /** Temp HOME holding a profile and a `~/.tg-sai/.env`; nothing real. */
+  async function withSources<T>(
+    profile: { name: string; complete: boolean; password: string },
+    fn: (env: Record<string, string>) => Promise<T>,
+  ): Promise<T> {
+    const home = await mkdtemp(join(tmpdir(), "tg-sai-env-test-"))
+    try {
+      const env = { HOME: home, TG_SAI_REPO_DIR: join(home, "no-repo") }
+      await addProfile(
+        {
+          name: profile.name,
+          apiId: profile.complete ? 456 : null,
+          apiHash: profile.complete ? "profile-hash" : "",
+          sessionString: profile.complete ? "profile-session" : "",
+          password: profile.password,
+          handle: profile.complete ? "profile_handle" : null,
+          userId: profile.complete ? 222 : null,
+          displayName: "",
+        },
+        env,
+      )
+      await mkdir(configDir(env), { recursive: true })
+      await writeFile(
+        join(configDir(env), ".env"),
+        [
+          "TELEGRAM_API_ID=123",
+          "TELEGRAM_API_HASH=dotenv-hash",
+          "TELEGRAM_SESSION_STRING=dotenv-session",
+        ].join("\n"),
+        "utf8",
+      )
+      return await fn(env)
+    } finally {
+      await rm(home, { recursive: true, force: true })
+    }
+  }
+
+  test("profile source carries the profile's password, name, and userId", async () => {
+    await withSources(
+      { name: "custody", complete: true, password: "custody-2fa" },
+      async (env) => {
+        expect(await getTelegramEnv(undefined, env)).toEqual({
+          apiId: 456,
+          apiHash: "profile-hash",
+          session: "profile-session",
+          password: "custody-2fa",
+          userId: 222,
+          profileName: "custody",
+        })
+      },
+    )
+  })
+
+  test("env source takes no profile password or label", async () => {
+    await withSources(
+      { name: "custody", complete: true, password: "custody-2fa" },
+      async (env) => {
+        expect(
+          await getTelegramEnv("custody", {
+            ...env,
+            TELEGRAM_API_ID: "999",
+            TELEGRAM_API_HASH: "env-hash",
+            TELEGRAM_SESSION_STRING: "env-session",
+          }),
+        ).toEqual({
+          apiId: 999,
+          apiHash: "env-hash",
+          session: "env-session",
+          password: null,
+          userId: null,
+          profileName: null,
+        })
+      },
+    )
+  })
+
+  test("known-file fallback takes no draft password or label", async () => {
+    await withSources(
+      { name: "draft", complete: false, password: "draft-2fa" },
+      async (env) => {
+        expect(await getTelegramEnv(undefined, env)).toEqual({
+          apiId: 123,
+          apiHash: "dotenv-hash",
+          session: "dotenv-session",
+          password: null,
+          userId: null,
+          profileName: null,
+        })
+      },
+    )
   })
 })
