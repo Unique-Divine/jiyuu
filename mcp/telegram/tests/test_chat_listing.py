@@ -16,7 +16,8 @@ def configured_client(monkeypatch, dialogs):
 
         async def get_dialogs(self, **kwargs):
             self.calls.append(kwargs)
-            return dialogs
+            limit = kwargs.get("limit")
+            return dialogs if limit is None else dialogs[:limit]
 
         async def __call__(self, request):
             raise AssertionError("Listing metadata must not fetch per-chat details")
@@ -79,12 +80,49 @@ async def test_get_chats_metadata_preserves_pagination_and_handles_missing_dialo
     page_two = decode(await chats.get_chats(page=2, page_size=1))
     page_three = decode(await chats.get_chats(page=3, page_size=1))
 
-    assert client.calls == [{}, {}]
+    assert client.calls == [{"limit": 2}, {"limit": 3}]
     assert [row["chat_id"] for row in page_two] == [-2]
     assert page_two[0]["last_message_id"] == 99
     assert page_two[0]["last_message_date"] == date.isoformat()
     assert page_three[0]["last_message_id"] is None
     assert page_three[0]["last_message_date"] is None
+
+
+@pytest.mark.asyncio
+async def test_get_chats_reports_page_beyond_available_dialogs(monkeypatch):
+    client = configured_client(monkeypatch, [dialog(1)])
+
+    assert await chats.get_chats(page=2, page_size=1) == "Page out of range."
+    assert client.calls == [{"limit": 2}]
+
+
+@pytest.mark.asyncio
+async def test_get_chats_bounds_a_stalled_dialog_read(monkeypatch):
+    import asyncio
+
+    real_wait_for = asyncio.wait_for
+    cancelled = asyncio.Event()
+
+    class Client:
+        async def get_dialogs(self, **kwargs):
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+    configured_client(monkeypatch, [])
+    monkeypatch.setattr(chats, "get_client", lambda account=None: Client())
+
+    async def short_wait_for(awaitable, *, timeout):
+        assert timeout == 30.0
+        return await real_wait_for(awaitable, timeout=0.01)
+
+    monkeypatch.setattr(chats.asyncio, "wait_for", short_wait_for)
+
+    result = await chats.get_chats()
+
+    assert cancelled.is_set()
+    assert result == "Telegram chat listing timed out. Retry with a smaller page_size."
 
 
 @pytest.mark.asyncio
