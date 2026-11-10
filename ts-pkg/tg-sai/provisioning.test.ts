@@ -1953,6 +1953,82 @@ describe("transient failure paths", () => {
     expect(f.setup.retryAt).toBeTruthy()
   })
 
+  /** Members present, promotion failing: a later-step stall every run. */
+  function promoteStalls(f: ReturnType<typeof fixture>) {
+    resumed(f)
+    for (const id of [21, 22, PROVISIONING_BOT_ID])
+      f.members.set(id, { role: "member", rights: {} })
+    f.telegram.promote = async () => {
+      throw rpc(500, "INTERNAL")
+    }
+  }
+  /** Runs until the setup stops for an operator, at most `max` runs. */
+  async function runUntilStopped(
+    f: ReturnType<typeof fixture>,
+    max: number,
+  ): Promise<number> {
+    let runs = 0
+    while (runs < max && (runs === 0 || f.setup.retryAt)) {
+      runs++
+      await expect(f.run()).rejects.toThrow("incomplete")
+    }
+    return runs
+  }
+
+  test("stalls that alternate between two steps still stop at the bound", async () => {
+    const f = fixture()
+    promoteStalls(f)
+    // The marker check runs once per run; every other run, a read of 21
+    // times out before the run reaches promotion.
+    let run = 0
+    f.telegram.verifyMarker = async () => {
+      run++
+      return true
+    }
+    const member = f.telegram.member
+    f.telegram.member = async (chat, id) => {
+      if (id === 21 && run % 2 === 0) throw new MtTimeoutError(30_000)
+      return member(chat, id)
+    }
+    const runs = await runUntilStopped(f, 4 * MAX_STALLED_RUNS)
+    expect(runs).toBe(MAX_STALLED_RUNS)
+    expect(errorOf(f)).toMatch(new RegExp(`:${TRANSIENT_LIMIT}$`))
+    expect(f.setup.retryAt).toBeNull()
+  })
+
+  test("a flood every tenth run does not reset a persistent stall", async () => {
+    const f = fixture()
+    promoteStalls(f)
+    let runs = 0
+    f.telegram.verifyMarker = async () => {
+      if (++runs % 10 === 0) throw rpc(420, "FLOOD_WAIT_60")
+      return true
+    }
+    const total = await runUntilStopped(f, 4 * MAX_STALLED_RUNS)
+    // Twelve promote stalls plus the one flood in between.
+    expect(total).toBe(MAX_STALLED_RUNS + 1)
+    expect(errorOf(f)).toBe(`promote_admin:${TRANSIENT_LIMIT}`)
+  })
+
+  test("a run that stops beyond the furthest stall starts over", async () => {
+    const f = fixture()
+    withLinks(f)
+    promoteStalls(f)
+    await runUntilStopped(f, 3)
+    expect(f.local?.stalledRuns).toBe(3)
+    // The admin now promotes, and the final listing stalls instead.
+    f.telegram.promote = async (_chat, id, rights) => {
+      f.members.set(id, { role: "admin", rights })
+    }
+    f.telegram.members = async () => {
+      throw rpc(500, "INTERNAL")
+    }
+    await expect(f.run()).rejects.toThrow("incomplete")
+    expect(errorOf(f)).toBe(`audit_membership:${TELEGRAM_TRANSIENT}`)
+    expect(f.local?.stalledRuns).toBe(1)
+    expect(f.local?.stalledStep).toBe("audit_membership")
+  })
+
   test("shutdowns do not count toward the read bound", async () => {
     const f = fixture()
     resumed(f)
@@ -2005,6 +2081,36 @@ describe("transient failure paths", () => {
     expect(sent).toBe(0)
     expect(f.local?.addedIds).toBeUndefined()
     expect(f.local?.botAdds).toBeUndefined()
+    expect(f.setup.retryAt).toBeTruthy()
+  })
+
+  test("shutdown during the pre-add journal write takes the entry back", async () => {
+    const f = fixture()
+    resumed(f)
+    let sent = 0
+    f.telegram.add = async () => {
+      sent++
+    }
+    const controller = new AbortController()
+    const write = f.journal.write
+    f.journal.write = async (id, record) => {
+      await write(id, record)
+      // Shutdown lands while the first "possibly added" entry is written.
+      if (record.addedIds?.length) controller.abort()
+    }
+    await expect(
+      provisionSetup({
+        setup: f.setup,
+        cloud: f.cloud,
+        journal: f.journal,
+        telegram: f.telegram,
+        workerId: "worker-one",
+        background: f.background,
+        signal: controller.signal,
+      }),
+    ).rejects.toThrow("incomplete")
+    expect(sent).toBe(0)
+    expect(f.local?.addedIds).toBeUndefined()
     expect(f.setup.retryAt).toBeTruthy()
   })
 

@@ -655,6 +655,16 @@ function defaultSleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
+/** A flood wait, `PEER_FLOOD`, or a local hold refusal. */
+function isFloodOrHold(error: unknown): boolean {
+  const e = error as { text?: unknown; errorMessage?: unknown }
+  const text = typeof e?.text === "string" ? e.text : e?.errorMessage
+  return (
+    typeof text === "string" &&
+    /^(?:FLOOD(?:_PREMIUM)?_WAIT_|PEER_FLOOD$|TG_SAI_HOLD_)/.test(text)
+  )
+}
+
 /** A member Telegram accepted but does not show yet; retried later. */
 function notVisibleError(): Error {
   return Object.assign(new Error("Added member not visible yet"), {
@@ -1007,6 +1017,11 @@ export async function provisionSetup(params: {
         botAdds: botAdds + (userIds.length - people.length),
         addedIds: new Set([...addedIds, ...people]),
       })
+      // Shutdown during that write: the call will not be sent.
+      if (params.signal?.aborted) {
+        await notAdded(userIds)
+        throw new DOMException("Worker is shutting down", "AbortError")
+      }
     }
     /**
      * Takes back a call Telegram refused for certain. The refusal is a
@@ -1381,18 +1396,24 @@ export async function provisionSetup(params: {
     }
     // Other steps spend no add but keep the account busy in Deal Desk, so
     // runs that keep stopping there also end with an operator, after about
-    // an hour. A run that got further starts the count again; a shutdown
-    // leaves it alone.
-    if (transient && step !== "add_member") {
-      const last = STEP_ORDER.indexOf(stalledStep as ProvisionStep)
-      const further = last >= 0 && STEP_ORDER.indexOf(step) > last
-      stalledRuns = further ? 1 : stalledRuns + 1
-      stalledStep = step
+    // an hour. `stalledStep` is the furthest step a counted stall reached:
+    // only a run that stops beyond it made progress and starts over. A stop
+    // at an earlier step counts, a flood or hold has its own retry time and
+    // leaves the count alone, and so does a shutdown. `create_invitation`
+    // runs at several points; its one place in `STEP_ORDER` only means a
+    // stall there may count instead of resetting.
+    const furthest = STEP_ORDER.indexOf(stalledStep as ProvisionStep)
+    const beyond = furthest < 0 || STEP_ORDER.indexOf(step) > furthest
+    if (params.signal?.aborted || isFloodOrHold(error)) {
+      // No progress either way.
+    } else if (transient && step !== "add_member") {
+      if (beyond) stalledStep = step
+      stalledRuns = beyond ? 1 : stalledRuns + 1
       if (stalledRuns >= MAX_STALLED_RUNS) {
         diagnostic = `${step}:${TRANSIENT_LIMIT}`
         retryAt = null
       }
-    } else if (!params.signal?.aborted) {
+    } else if (beyond) {
       stalledRuns = 0
       stalledStep = undefined
     }

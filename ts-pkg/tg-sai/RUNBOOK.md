@@ -710,14 +710,17 @@ Two counts lead to `TG_SAI_TRANSIENT_LIMIT`:
 - Every other step (`stalledRuns`): reads, approvals, marker checks,
   promotions, the final listing, and link creation spend no add, but each
   retry keeps the account busy in Deal Desk and pauses the background
-  queue. Twelve runs in a row that stop at the same or an earlier step,
-  about an hour, stop the setup. A run that gets further starts the count
-  again, and any other outcome clears it.
+  queue. The receipt keeps the furthest step a counted stall reached
+  (`stalledStep`). Every stall at or before it counts; the twelfth, about
+  an hour, stops the setup. Only a run that stops beyond that step starts
+  the count over. A flood or hold leaves the count alone.
 
-A run cut short by worker shutdown counts toward neither. Reads and
-promotions resend after a Telegram server error at most three times and
-give up after 30 s (`PROVISION_READ_PARAMS`), so a persistent server error
-reaches these counts instead of looping inside one call.
+A run cut short by worker shutdown counts toward neither. Reads, the
+identity checks, and promotions resend after a Telegram server error at
+most three times and give up after 30 s (`PROVISION_READ_PARAMS`), so a
+persistent server error reaches these counts instead of looping inside one
+call. Creating a controlled invitation is never resent
+(`PROVISION_LINK_PARAMS`), since each resend could mint another link.
 
 These limits are counters in the receipt (`botAdds`, `transientRetries`,
 `stalledRuns`). The worker resets the transient ones only as described

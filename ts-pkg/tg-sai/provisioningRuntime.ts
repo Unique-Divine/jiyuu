@@ -60,6 +60,16 @@ export const PROVISION_READ_PARAMS = {
   timeout: 30_000,
 } as const
 
+/**
+ * Call options for creating a controlled invitation. Each resend could mint
+ * another link, so mtcute never resends it; a lost response costs one
+ * extra link on the next run.
+ */
+export const PROVISION_LINK_PARAMS = {
+  maxRetryCount: 0,
+  timeout: 30_000,
+} as const
+
 /** Fetch completion links without creating invitations or sending messages. */
 export async function readProvisioningLinks(
   chatId: number,
@@ -332,9 +342,9 @@ export async function withProvisionTelegram<T>(
     try {
       signal?.throwIfAborted()
       const readClient = client.withParams(PROVISION_READ_PARAMS)
-      if ((await client.getMe()).id !== request.expectedUserId)
+      if ((await readClient.getMe()).id !== request.expectedUserId)
         throw new Error("Custody account identity mismatch")
-      const bot = await client.getUser(saiBot.handle)
+      const bot = await readClient.getUser(saiBot.handle)
       if (bot.id !== PROVISIONING_BOT_ID || !bot.isBot)
         throw new Error("Configured Sai bot identity mismatch")
       const member = async (
@@ -365,7 +375,7 @@ export async function withProvisionTelegram<T>(
       })
       const writeClient = client.withParams(PROVISION_WRITE_PARAMS)
       const adapter: TelegramProvisioner = {
-        self: async () => (await client.getMe()).id,
+        self: async () => (await readClient.getMe()).id,
         resolve: (peer) =>
           resolveProvisioningPeer((value) => readClient.getUser(value), peer),
         create: async (title, marker) =>
@@ -410,10 +420,11 @@ export async function withProvisionTelegram<T>(
         },
         inviteLink: async (chatId) => {
           const expires = new Date(Date.now() + 24 * 60 * 60 * 1000)
-          const link = await createInviteLink(client, chatId, {
-            expires,
-            withApproval: true,
-          })
+          const link = await createInviteLink(
+            client.withParams(PROVISION_LINK_PARAMS),
+            chatId,
+            { expires, withApproval: true },
+          )
           if (
             !link.isMyLink ||
             link.isRevoked ||
