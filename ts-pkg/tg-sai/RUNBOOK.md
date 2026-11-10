@@ -28,8 +28,9 @@ Implemented write behavior:
    needed.
 3. Command `tg-sai add-owner --run` adds a target user if missing.
 4. Command `tg-sai add-owner --run` promotes a target user to admin when needed.
-5. Command `tg-sai add-owner --run` transfers ownership only when environment
-   variable `TELEGRAM_PASSWORD` exists and the target user is eligible.
+5. Command `tg-sai add-owner --run` transfers ownership only when a 2FA
+   password is available (see section Credentials) and the target user is
+   eligible.
 
 Credential profile behavior:
 
@@ -85,13 +86,23 @@ Discovery first parses config files as JSON and searches for objects containing
 Telegram credential keys. If JSON parsing fails or finds no complete object, it
 falls back to line-by-line scanning for JSON-like and shell-like assignments.
 
-Optional elevated mode value: `TELEGRAM_PASSWORD`. Profiles can store the
-Telegram 2FA password in file `~/.tg-sai/profiles.json`, and environment
-variable `TELEGRAM_PASSWORD` overrides the stored profile value for one command.
-Otherwise the password comes from the same source as the session: the
-profile's for a profile session, the same block's `TELEGRAM_PASSWORD` for a
-`.env` or MCP session, and none for a `TELEGRAM_*` environment session. A blank
-password counts as none, so ownership transfer is skipped.
+Ownership transfer needs the Telegram 2FA password. A profile keeps it in
+[`pass`](https://www.passwordstore.org/): field `passwordPassEntry` in file
+`~/.tg-sai/profiles.json` names the pass entry, and tg-sai runs `pass show
+<entry>` only when Telegram asks for the password during a transfer. The first
+line of the entry is the password. Dry runs, audits, and the custody worker
+never read it, so a host without `pass` can still run them.
+
+The password comes from the same source as the session: the profile's pass
+entry for a profile session, the same block's `TELEGRAM_PASSWORD` for a `.env`
+or MCP session, and none for a `TELEGRAM_*` environment session. Environment
+variable `TELEGRAM_PASSWORD` still overrides for one command, but prefer the
+pass entry. A blank password counts as none, so ownership transfer is skipped.
+
+Profiles saved before pass support may hold a plain-text `password` field.
+tg-sai still reads it, while `tg-sai profile show` and `tg-sai health` warn
+about it. Move it with `tg-sai profile migrate-password` (section Move a
+Plain-Text Password to pass).
 When a password is available, command `tg-sai ops sai-bootstrap --run` attempts
 ownership transfer by default for eligible chats after the target user is admin.
 Pass flag `--no-transfer-owner` to skip ownership transfer.
@@ -156,12 +167,26 @@ tg-sai profile add \
   --session-string '<session string>'
 ```
 
-Store the Telegram 2FA password in the same profile when ownership transfer is
-needed:
+Store the Telegram 2FA password in pass for the same profile when ownership
+transfer is needed. The hidden prompt saves it to pass entry
+`tg-sai/sai-custody/telegram-2fa` and records only that name in the profile:
 
 ```bash
-tg-sai profile add --name sai-custody --password '<password>'
+tg-sai profile add --name sai-custody --password-prompt
 ```
+
+Scripts can pipe the password instead, or point at an entry that already
+exists:
+
+```bash
+pass show other/entry | tg-sai profile add --name sai-custody --password-stdin
+tg-sai profile add --name sai-custody --password-pass-entry other/entry
+```
+
+Flag `--password-pass-entry` also names the entry that `--password-prompt` or
+`--password-stdin` writes. tg-sai no longer accepts `--password <value>`, and
+it does not save a password it finds in the environment or a discovered
+source.
 
 Check the local setup:
 
@@ -190,9 +215,10 @@ Add a local profile from a numbered source shown by command
 tg-sai profile add --name another-account --src 1
 ```
 
-Command `tg-sai profile add` can store the Telegram 2FA password with flag
-`--password`. Command `tg-sai profile show` redacts stored `apiHash`,
-`sessionString`, and `password`.
+Command `tg-sai profile add` saves the Telegram 2FA password in pass with flag
+`--password-prompt` or `--password-stdin`. Command `tg-sai profile show`
+redacts stored `apiHash`, `sessionString`, and `password`, and prints
+`passwordPassEntry` and `passwordStorage` (`pass`, `plain_text`, or `none`).
 
 For password or metadata updates, `--name` selects an existing saved profile by
 name, handle, numeric user ID, or saved-list index. The update preserves that
@@ -202,6 +228,27 @@ profile. Explicit login/import cannot replace a known profile with a different
 account; use a new name for another account, or remove the old profile first.
 Flag `--src` selects a credential source numbered by `tg-sai profile find`, not
 the saved-profile index printed by `tg-sai profile list`.
+
+### Move a Plain-Text Password to pass
+
+Command `tg-sai profile migrate-password` moves each plain-text `password` in
+`profiles.json` to pass entry `tg-sai/<profile>/telegram-2fa`, records the
+entry as `passwordPassEntry`, and removes `password` and `TELEGRAM_PASSWORD`
+fields from `~/.tg-sai/backups/*.json`. It is a dry run by default and never
+runs `pass` without `--run`:
+
+```bash
+tg-sai profile migrate-password          # plan
+tg-sai profile migrate-password --run    # apply
+```
+
+Select one profile and entry with `--profile <selector> --pass-entry <entry>`.
+With `--run`, tg-sai writes each pass entry and reads it back before it
+rewrites `profiles.json`, and it refuses an existing entry that holds a
+different password. Afterward it scans every file under `~/.tg-sai/` for the
+moved passwords and prints the path of each file that still holds one (for
+example a `.env` with `TELEGRAM_PASSWORD`), exiting 1 until you clean them up.
+Output never includes password values.
 
 Create a blank draft profile for onboarding:
 
@@ -263,8 +310,9 @@ Command `tg-sai ops sai-bootstrap` prints one JSON event per line on stdout
 and its `telemetry_run_id`; redirect stdout if you want a copy. Its Telegram
 calls are in the telemetry database: `tg-sai events show <run_id>`. The
 command waits one second between chats by default. Use flag `--delay-ms <ms>` to change that
-delay. When environment variable `TELEGRAM_PASSWORD` is available, execution
-mode attempts ownership transfer by default for eligible chats.
+delay. When a 2FA password is available (a profile pass entry or
+`TELEGRAM_PASSWORD`), execution mode attempts ownership transfer by default for
+eligible chats.
 
 The command sleeps through flood waits up to five minutes (environment
 variable `TG_SAI_FLOOD_MAX_WAIT_MS` overrides). A longer `FLOOD_WAIT_X` or any
@@ -313,10 +361,12 @@ tg-sai add-owner \
   --run
 ```
 
-Execute add-owner with ownership transfer enabled:
+Execute add-owner with ownership transfer enabled. The profile's pass entry
+supplies the 2FA password:
 
 ```bash
-TELEGRAM_PASSWORD="<2fa password>" tg-sai add-owner \
+tg-sai add-owner \
+  --profile sai-custody \
   --chat <chat-id> \
   --target-user <target-user> \
   --run
@@ -414,7 +464,9 @@ different user is the creator.
 4. Run command `tg-sai add-bot --chat <id>` or command
    `tg-sai add-owner --chat <id> --target-user <user>` as a dry-run.
 5. Add flag `--run` after reviewing the proposed action.
-6. Set environment variable `TELEGRAM_PASSWORD` only for owner transfer runs.
+6. Save the 2FA password in pass with
+   `tg-sai profile add --name <profile> --password-prompt` before owner
+   transfer runs.
 
 ## Why not MCP `get_admins`
 

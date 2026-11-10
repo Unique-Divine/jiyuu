@@ -31,7 +31,7 @@ tg-sai ops sai-bootstrap --file chats.txt --run    # apply
 ```
 
 `chats.txt` holds one chat ID per line. Ownership transfer needs your Telegram
-2FA password in `TELEGRAM_PASSWORD` or the saved profile. `--target-user`
+2FA password, which the saved profile keeps in a `pass` entry. `--target-user`
 picks a different owner.
 
 ## Telegram Rate Limits
