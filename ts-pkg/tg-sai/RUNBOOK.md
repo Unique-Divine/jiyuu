@@ -684,7 +684,8 @@ added once more.
 | `FLOOD_WAIT_N`, `PEER_FLOOD`, `TG_SAI_HOLD_N` | Account flood limit or saved hold | When the hold ends |
 | `TG_SAI_TRANSIENT` | Timeout, dropped connection, Telegram server error, worker shutdown | 5 min; at most 3 add-call failures, or 12 runs stopped at another step |
 | `TG_SAI_TRANSIENT_LIMIT` | `add_member:` after the third add-call failure; any other step after 12 runs in a row stopped there | Operator |
-| `TG_SAI_HOLD_STATE_UNAVAILABLE`, `TG_SAI_HOLD_ACCOUNT_UNKNOWN`, `TG_SAI_QUEUE_UNAVAILABLE` | Local `state.db` or session account not readable | 5 min |
+| `TG_SAI_HOLD_STATE_UNAVAILABLE`, `TG_SAI_HOLD_ACCOUNT_UNKNOWN` | Local `state.db` or session account not readable | 5 min |
+| `TG_SAI_QUEUE_UNAVAILABLE` | Writing optional members to the local queue failed | 5 min; counts as a stall |
 | `TG_SAI_MEMBER_NOT_VISIBLE` | Added or promoted, but not shown in the chat yet; the person gets an `added_not_visible` link | 15 min |
 | `TG_SAI_BOT_NOT_VISIBLE` | Bot added but not shown yet | 15 min, one re-add |
 | `TG_SAI_AWAITING_JOIN` | Waiting for a privacy-restricted person to use their link | 15 min |
@@ -710,7 +711,10 @@ Two counts lead to `TG_SAI_TRANSIENT_LIMIT`:
 - Every other step (`stalledRuns`): reads, approvals, marker checks,
   promotions, the final listing, and link creation spend no add, but each
   retry keeps the account busy in Deal Desk and pauses the background
-  queue. The receipt keeps the furthest step a counted stall reached
+  queue. A failed local queue write counts too, and so does a person a
+  read shows but the final listing or a promotion keeps missing. That
+  person keeps the one `added_not_visible` link they got; no run mints
+  another while it is live. The receipt keeps the furthest step a counted stall reached
   (`stalledStep`). Every stall at or before it counts; the twelfth, about
   an hour, stops the setup. A transient stop beyond that step starts the
   count over, and so does any stop that is not transient, such as a link

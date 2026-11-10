@@ -655,6 +655,23 @@ function defaultSleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
+/**
+ * Whether a stop counts toward `MAX_STALLED_RUNS`: a transient error at a
+ * step that spends no add, a local queue write that keeps failing, or a
+ * person the final listing or a promotion keeps missing although a read
+ * shows them (a real absence becomes a link wait at `verify_added_member`
+ * on the next run instead).
+ */
+function stalled(error: unknown, step: ProvisionStep, transient: boolean) {
+  const text = (error as { text?: unknown } | null)?.text
+  return (
+    (transient && step !== "add_member") ||
+    text === QUEUE_UNAVAILABLE ||
+    (text === MEMBER_NOT_VISIBLE &&
+      (step === "audit_membership" || step.startsWith("promote_")))
+  )
+}
+
 /** A flood wait, `PEER_FLOOD`, or a local hold refusal. */
 function isFloodOrHold(error: unknown): boolean {
   const e = error as { text?: unknown; errorMessage?: unknown }
@@ -1134,8 +1151,19 @@ export async function provisionSetup(params: {
     for (const userId of privacyRefused) failures.delete(userId)
     /** Creates one shared link for `entries` and saves it in the journal. */
     const invite = async (
-      entries: { userId: number; reason: string }[],
+      wanted: { userId: number; reason: string }[],
     ): Promise<void> => {
+      // A person who already holds a live link for the same reason keeps
+      // it: a step that keeps missing them must not mint a link every run.
+      const entries = wanted.filter(
+        ({ userId, reason }) =>
+          !pendingInvitations.some(
+            (i) =>
+              i.userId === String(userId) &&
+              i.reason === reason &&
+              Date.parse(i.expiresAt) > Date.now(),
+          ),
+      )
       if (!entries.length) return
       // One shared link: the first person to need it decides its owner.
       step = "create_invitation"
@@ -1395,18 +1423,18 @@ export async function provisionSetup(params: {
       retryAt = null
     }
     // Other steps spend no add but keep the account busy in Deal Desk, so
-    // runs that keep stopping there also end with an operator, after about
-    // an hour. `stalledStep` is the furthest step a counted stall reached:
-    // a transient stop beyond it starts over, one at or before it counts.
-    // A flood or hold has its own retry time and leaves the count alone, and
-    // so does a shutdown. `create_invitation`
-    // runs at several points; its one place in `STEP_ORDER` only means a
-    // stall there may count instead of resetting.
+    // runs that keep stopping there (`stalled`) also end with an operator,
+    // after about an hour. `stalledStep` is the furthest step a counted
+    // stall reached: a stall beyond it starts over, one at or before it
+    // counts. A flood or hold has its own retry time and leaves the count
+    // alone, and so does a shutdown. `create_invitation` runs at several
+    // points; its one place in `STEP_ORDER` only means a stall there may
+    // count instead of resetting.
     const furthest = STEP_ORDER.indexOf(stalledStep as ProvisionStep)
     const beyond = furthest < 0 || STEP_ORDER.indexOf(step) > furthest
     if (params.signal?.aborted || isFloodOrHold(error)) {
       // No progress either way.
-    } else if (transient && step !== "add_member") {
+    } else if (stalled(error, step, transient)) {
       if (beyond) stalledStep = step
       stalledRuns = beyond ? 1 : stalledRuns + 1
       if (stalledRuns >= MAX_STALLED_RUNS) {

@@ -2038,6 +2038,81 @@ describe("transient failure paths", () => {
     )
   })
 
+  test("a queue write that keeps failing counts as a stall", async () => {
+    const f = fixture()
+    f.setup = {
+      ...f.setup,
+      optionalParticipants: ["alice"],
+      state: "configuring",
+      chatId: -100123,
+      binding: {
+        participants: [21, 22],
+        admins: [22],
+        optionalParticipants: [21],
+      },
+    }
+    f.members.set(22, { role: "member", rights: {} })
+    f.members.set(PROVISIONING_BOT_ID, { role: "member", rights: {} })
+    // The marker check runs once per run; every other run a read of 22
+    // times out, and the runs between fail to write the background queue.
+    let run = 0
+    f.telegram.verifyMarker = async () => {
+      run++
+      return true
+    }
+    const member = f.telegram.member
+    f.telegram.member = async (chat, id) => {
+      if (id === 22 && run % 2 === 0) throw new MtTimeoutError(30_000)
+      return member(chat, id)
+    }
+    const queue: BackgroundEnqueue = {
+      enqueue: () => {
+        throw new Error("database is locked")
+      },
+    }
+    let runs = 0
+    while (runs < 4 * MAX_STALLED_RUNS && (runs === 0 || f.setup.retryAt)) {
+      runs++
+      await expect(
+        provisionSetup({
+          setup: f.setup,
+          cloud: f.cloud,
+          journal: f.journal,
+          telegram: f.telegram,
+          workerId: "worker-one",
+          background: queue,
+        }),
+      ).rejects.toThrow("incomplete")
+    }
+    expect(runs).toBe(MAX_STALLED_RUNS)
+    expect(errorOf(f)).toMatch(new RegExp(`:${TRANSIENT_LIMIT}$`))
+    expect(f.setup.retryAt).toBeNull()
+  })
+
+  test("a person the listing keeps missing gets one link, then stops", async () => {
+    const f = fixture()
+    resumed(f)
+    let links = 0
+    f.telegram.inviteLink = async () => {
+      links++
+      return {
+        inviteLink: "https://t.me/+notListed",
+        expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+      }
+    }
+    // Reads show 21, but the participant listing never does.
+    f.telegram.members = async () => {
+      const listed = new Map(f.members)
+      listed.delete(21)
+      return listed
+    }
+    const runs = await runUntilStopped(f, 100)
+    expect(links).toBe(1)
+    expect(runs).toBe(MAX_STALLED_RUNS)
+    expect(errorOf(f)).toBe(`audit_membership:${TRANSIENT_LIMIT}`)
+    expect(f.setup.retryAt).toBeNull()
+  })
+
   test("a run that stops beyond the furthest stall starts over", async () => {
     const f = fixture()
     withLinks(f)
