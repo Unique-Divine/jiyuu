@@ -491,14 +491,26 @@ with error `verify_added_member:TG_SAI_MEMBER_NOT_VISIBLE` and a `retryAt`
 
 - Each resume approves their join request, if one is waiting, and finishes
   once they are in. Someone who taps the link sees "request sent" and waits
-  up to 15 minutes plus one worker tick. An admin can approve the request in
-  Telegram sooner, and the next resume finds them in the chat.
+  up to 15 minutes plus one worker tick. Only an admin with invite rights can
+  approve sooner. During this wait the team admins are usually not promoted
+  yet, because promotion runs after every required member is in, so the
+  custody account is often the only admin. Check with
+  `tg-sai audit --chat <chat-id> --target-user <user-id>` before asking a
+  team admin to approve.
 - While the setup waits on that person, it does not pause the background
   queue.
 - If the invitation expires first, the setup is saved with error
   `verify_added_member:TG_SAI_INVITATION_EXPIRED` and no `retryAt`, so the
-  worker reports `operator_recovery_required`. Recovery resumes only once the
-  person is in; it never adds them again.
+  worker reports `operator_recovery_required`. The worker never adds that
+  person again, and every resume stops with the same code until they are in.
+  To get them in:
+  1. If they tapped the link before it expired, their request may still be
+     pending. A resume (`sai-deal-desk chat-setups recover`) approves it.
+  2. Otherwise, an already-promoted team admin can add them or send a link
+     from their own account. The add does not come from the custody budget.
+  3. No tg-sai command issues a fresh controlled invitation yet. An add from
+     the custody account spends the custody add budget, so Unique decides.
+  Once they are in, run `chat-setups recover` to finish the setup.
 - An approval error is saved as `approve_join:<code>`. A flood on the
   approval becomes a saved hold and sets its own `retryAt`.
 
@@ -514,8 +526,11 @@ sudo jq '.pendingInvitations' "$f"
 
 The bot gets no link: a bot that is not visible still fails the setup. The
 background queue also reads each member before adding and approves a waiting
-join request, so a member who uses the shared link costs no add. An error
-from that read or approval defers the row without counting an attempt.
+join request, so a member who uses the shared link costs no add. A flood
+or hold on that read or approval defers the row until it ends. A chat or
+member fault there, such as `CHANNEL_PRIVATE`, `PEER_ID_INVALID`, or
+`USER_CHANNELS_TOO_MUCH`, fails the row. Any other error counts an attempt
+and moves the row behind the others.
 
 New ready receipts include an `openGroupUrl` anchored to a message actually
 observed in the group and the existing `primaryInviteLink`, when available.
