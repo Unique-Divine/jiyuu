@@ -9,7 +9,7 @@ Location: `jiyuu/ts-pkg/tg-sai/`
 
 ## What the tool does today
 
-Command `just tg-sai` exposes a Commander CLI for one selected Telegram chat at
+Command `tg-sai` exposes a Commander CLI for one selected Telegram chat at
 a time. The command prints help and exits with status code `0` when called with
 no arguments.
 
