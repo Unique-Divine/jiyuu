@@ -145,3 +145,91 @@ export function planAdminBootstrap(input: ChatAuditInput): ChatAuditResult {
     proposedActions,
   }
 }
+
+/**
+ * Reports whether a chat member is currently in the chat. Restricted users
+ * count only while Telegram still marks them as members.
+ */
+export function isPresentMember(member: ChatMemberData | null): boolean {
+  switch (deriveMemberRole(member)) {
+    case "creator":
+    case "admin":
+    case "member":
+      return true
+    case "restricted":
+      return member?.isMember === true
+    default:
+      return false
+  }
+}
+
+export type PromoteOnlyAction =
+  | "skip: actor lacks owner/admin rights"
+  | "refuse: target user not a member"
+  | "promote target user admin"
+  | "noop: target user already admin"
+
+export interface PromoteOnlyPlan {
+  chatId: number | string
+  targetUserId: number | string
+  actorRole: MemberRole
+  targetRole: MemberRole
+  actorCanApply: boolean
+  targetIsMember: boolean
+  targetIsAdmin: boolean
+  /** True only when the single proposed action is a promotion. */
+  canPromote: boolean
+  proposedActions: PromoteOnlyAction[]
+}
+
+/**
+ * Plans a promote-only update: promote an existing chat member to admin.
+ * Never proposes adding the target and never transfers ownership.
+ */
+export function planPromoteOnly(input: ChatAuditInput): PromoteOnlyPlan {
+  const actorRole = deriveMemberRole(input.actor)
+  const targetRole = deriveMemberRole(input.target)
+  const actorCanApply = canActorPromoteAdmins(input)
+  const targetIsMember = isPresentMember(input.target)
+  const targetIsAdmin = isAdminRole(targetRole)
+
+  let action: PromoteOnlyAction
+  if (!actorCanApply) {
+    action = "skip: actor lacks owner/admin rights"
+  } else if (!targetIsMember) {
+    action = "refuse: target user not a member"
+  } else if (targetIsAdmin) {
+    action = "noop: target user already admin"
+  } else {
+    action = "promote target user admin"
+  }
+
+  return {
+    chatId: input.chatId,
+    targetUserId: input.targetUserId,
+    actorRole,
+    targetRole,
+    actorCanApply,
+    targetIsMember,
+    targetIsAdmin,
+    canPromote: action === "promote target user admin",
+    proposedActions: [action],
+  }
+}
+
+/**
+ * Throws unless the member is present in the chat. Telegram adds a
+ * non-member when it promotes them, so promote-only writes call this on a
+ * fresh read right before the promotion.
+ */
+export function assertPresentMember(
+  member: ChatMemberData | null,
+  targetLabel: number | string,
+): void {
+  if (!isPresentMember(member)) {
+    throw new Error(
+      `Refusing to promote ${targetLabel}: not a member of the chat ` +
+        `(role: ${deriveMemberRole(member)})`,
+    )
+  }
+}

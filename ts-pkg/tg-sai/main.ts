@@ -19,9 +19,10 @@ import { runChatBatch, runTelegramAction } from "./actionExecutor"
 import type {
   ChatAuditInput,
   ChatMemberData,
+  PromoteOnlyAction,
   ProposedAction,
 } from "./adminAudit"
-import { planAdminBootstrap } from "./adminAudit"
+import { planAdminBootstrap, planPromoteOnly } from "./adminAudit"
 import { saiBot, USERS } from "./cfg"
 import { runHealthCheck } from "./health"
 import { addRuntimeHealthCommands } from "./runtimeHealthCli"
@@ -42,6 +43,7 @@ import {
   fetchChatAuditInput,
   findSaiChats,
   normalizeUser,
+  promoteExistingMember,
   promoteTargetAdmin,
   transferTargetOwnership,
 } from "./mtcuteAdapter"
@@ -109,6 +111,18 @@ interface AddOwnerOptions {
   chat: number | string
   targetUser: number | string
   profile?: string
+  run?: boolean
+}
+
+/**
+ * Parsed options for command `tg-sai promote-admin`.
+ */
+interface PromoteAdminOptions {
+  chat: number | string
+  /** Existing chat member to promote: user ID or username. */
+  targetUser: number | string
+  profile?: string
+  /** Execute the promotion when true; default behavior is dry-run. */
   run?: boolean
 }
 
@@ -406,7 +420,9 @@ function shouldRunAction(
   return proposedActions.includes(action)
 }
 
-function formatActionList(actions: ProposedAction[]): string {
+function formatActionList(
+  actions: readonly (ProposedAction | PromoteOnlyAction)[],
+): string {
   return JSON.stringify(actions)
 }
 
@@ -653,6 +669,67 @@ async function runAddOwner(options: AddOwnerOptions): Promise<void> {
     const transferPlan = planAdminBootstrap(transferInput)
     console.log(`target_role_after_transfer: ${transferPlan.targetRole}`)
     console.log(`actor_role_after_transfer: ${transferPlan.actorRole}`)
+  })
+}
+
+/**
+ * Runs command `tg-sai promote-admin`: promotes an existing chat member to
+ * admin with the owner-target rights. It never adds the target and never
+ * transfers ownership, even when the profile has a 2FA password.
+ */
+async function runPromoteAdmin(options: PromoteAdminOptions): Promise<void> {
+  await withClient(options.profile, async (client) => {
+    const beforeInput = await fetchChatAuditInput(client, {
+      chatId: options.chat,
+      targetUserId: options.targetUser,
+    })
+    const beforePlan = planPromoteOnly(beforeInput)
+
+    console.log(`run: ${options.run === true}`)
+    console.log("ownership_transfer: none (promote-only)")
+    console.log(`chat_id: ${beforePlan.chatId}`)
+    console.log(`target_user: ${options.targetUser}`)
+    console.log(`actor_role: ${beforePlan.actorRole}`)
+    console.log(`target_role_before: ${beforePlan.targetRole}`)
+    console.log(`target_is_member_before: ${beforePlan.targetIsMember}`)
+    console.log(
+      `proposed_actions: ${formatActionList(beforePlan.proposedActions)}`,
+    )
+
+    if (!beforePlan.actorCanApply) {
+      throw new Error(
+        "Refusing to run: session user cannot apply admin changes",
+      )
+    }
+    if (!beforePlan.targetIsMember) {
+      throw new Error(
+        "Refusing to run: target user is not a member of the chat; " +
+          "promote-admin never adds users",
+      )
+    }
+    if (!beforePlan.canPromote) {
+      return
+    }
+    if (options.run !== true) {
+      console.log("dry_run: pass --run to promote the existing member")
+      return
+    }
+
+    console.log("action: promote target user admin")
+    await promoteExistingMember(client, {
+      chatId: options.chat,
+      targetPeer: options.targetUser,
+      rights: ownerTargetAdminRights,
+    })
+
+    const afterPlan = planPromoteOnly(
+      await fetchChatAuditInput(client, {
+        chatId: options.chat,
+        targetUserId: options.targetUser,
+      }),
+    )
+    console.log(`target_role_after: ${afterPlan.targetRole}`)
+    console.log(`target_is_admin_after: ${afterPlan.targetIsAdmin}`)
   })
 }
 
@@ -1850,6 +1927,34 @@ Examples:
     .option("--run", "Execute add/promote actions; default is dry-run")
     .action(async (options: AddOwnerOptions) => {
       await runAddOwner(options)
+    })
+
+  program
+    .command("promote-admin")
+    .description(
+      "Promote an existing member to admin without transferring ownership",
+    )
+    .option("--profile <name>", "Profile name to use for Telegram credentials")
+    .requiredOption("--chat <id>", "Telegram chat ID or username", parsePeer)
+    .requiredOption(
+      "--target-user <peer>",
+      "Existing member: user ID or username",
+      parsePeer,
+    )
+    .option("--run", "Execute the promotion; default is dry-run")
+    .addHelpText(
+      "after",
+      `
+Refuses when the target is not already a member. Uses the add-owner admin
+rights, including add-admins, and never transfers ownership.
+
+Examples:
+  tg-sai promote-admin --chat -1001234567890 --target-user @example_user
+  tg-sai promote-admin --chat -1001234567890 --target-user @example_user --run
+`,
+    )
+    .action(async (options: PromoteAdminOptions) => {
+      await runPromoteAdmin(options)
     })
 
   const ops = program

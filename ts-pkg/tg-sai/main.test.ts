@@ -339,3 +339,25 @@ describe("withPasswordRead", () => {
     }
   })
 })
+
+describe("promote-admin", () => {
+  test("is dry-run by default and has no ownership-transfer option", () => {
+    const command = createProgram().commands.find(
+      (c) => c.name() === "promote-admin",
+    )
+    expect(command).toBeDefined()
+    const flags = command?.options.map((o) => o.long) ?? []
+    expect(flags).toEqual(["--profile", "--chat", "--target-user", "--run"])
+    expect(command?.getOptionValue("run")).toBeUndefined()
+  })
+
+  test("bare promote-admin prints help that says it never adds", () => {
+    withDir((dir) => {
+      const result = runCli(["promote-admin"], dir)
+      expect(result.exitCode).toBe(0)
+      expect(result.stdout).toContain("Usage: tg-sai promote-admin")
+      expect(result.stdout).toContain("never transfers ownership")
+      expect(result.stdout).toContain("not already a member")
+    })
+  })
+})

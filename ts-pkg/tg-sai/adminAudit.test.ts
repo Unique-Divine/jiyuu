@@ -1,10 +1,13 @@
 import { describe, expect, test } from "bun:test"
 import type { ChatAuditInput, ChatMemberData } from "./adminAudit"
 import {
+  assertPresentMember,
   canActorPromoteAdmins,
   canActorTransferOwnership,
   deriveMemberRole,
+  isPresentMember,
   planAdminBootstrap,
+  planPromoteOnly,
 } from "./adminAudit"
 import {
   adminCheck_asMember,
@@ -289,5 +292,102 @@ describe("planAdminBootstrap", () => {
       "add target user",
       "promote target user admin",
     ])
+  })
+})
+
+describe("isPresentMember", () => {
+  test("counts creators, admins, and members", () => {
+    for (const status of ["creator", "admin", "member"]) {
+      expect(isPresentMember(memberWith({ status }))).toBe(true)
+    }
+  })
+
+  test("rejects absent, left, and banned users", () => {
+    expect(isPresentMember(null)).toBe(false)
+    expect(isPresentMember(memberWith({ status: "left" }))).toBe(false)
+    expect(isPresentMember(memberWith({ status: "banned" }))).toBe(false)
+  })
+
+  test("counts restricted users only while still members", () => {
+    const restricted = memberWith({ status: "restricted", isMember: true })
+    expect(isPresentMember(restricted)).toBe(true)
+    expect(isPresentMember({ ...restricted, isMember: false })).toBe(false)
+  })
+})
+
+describe("planPromoteOnly", () => {
+  test("promotes an existing member when the actor is owner", () => {
+    const plan = planPromoteOnly(adminCheck_asOwnerWithTargetMember.data)
+
+    expect(plan.actorRole).toBe("creator")
+    expect(plan.targetIsMember).toBe(true)
+    expect(plan.canPromote).toBe(true)
+    expect(plan.proposedActions).toEqual(["promote target user admin"])
+  })
+
+  test("refuses a target that is not in the chat and never proposes add", () => {
+    const plan = planPromoteOnly(
+      adminCheck_ownerSessionTargetUserAbsent.data,
+    )
+
+    expect(plan.actorCanApply).toBe(true)
+    expect(plan.targetRole).toBe("not_present")
+    expect(plan.canPromote).toBe(false)
+    expect(plan.proposedActions).toEqual(["refuse: target user not a member"])
+  })
+
+  test("refuses a target that left the chat", () => {
+    const plan = planPromoteOnly(
+      auditInput(
+        memberWith({ status: "creator" }),
+        memberWith({ status: "left", isMember: false }),
+      ),
+    )
+
+    expect(plan.proposedActions).toEqual(["refuse: target user not a member"])
+  })
+
+  test("is a noop for a target that is already admin", () => {
+    const plan = planPromoteOnly(adminCheck_asOwnerWithTargetAdmin.data)
+
+    expect(plan.canPromote).toBe(false)
+    expect(plan.proposedActions).toEqual(["noop: target user already admin"])
+  })
+
+  test("skips when the actor cannot promote admins", () => {
+    const plan = planPromoteOnly(adminCheck_asMember.data)
+
+    expect(plan.actorCanApply).toBe(false)
+    expect(plan.canPromote).toBe(false)
+    expect(plan.proposedActions).toEqual([
+      "skip: actor lacks owner/admin rights",
+    ])
+  })
+
+  test("never proposes add or transfer actions", () => {
+    const inputs = [
+      adminCheck_asMember.data,
+      adminCheck_asOwnerWithTargetMember.data,
+      adminCheck_asOwnerWithTargetAdmin.data,
+      adminCheck_ownerSessionTargetUserAbsent.data,
+      adminCheck_botSessionOwnerTargetAbsent.data,
+    ]
+    for (const input of inputs) {
+      for (const action of planPromoteOnly(input).proposedActions) {
+        expect(action).not.toContain("add target")
+        expect(action).not.toContain("transfer")
+      }
+    }
+  })
+})
+
+describe("assertPresentMember", () => {
+  test("passes for a member and throws for an absent user", () => {
+    expect(() =>
+      assertPresentMember(getChatMember_targetAsMember.data, "@member"),
+    ).not.toThrow()
+    expect(() => assertPresentMember(null, "@absent")).toThrow(
+      "Refusing to promote @absent: not a member of the chat",
+    )
   })
 })

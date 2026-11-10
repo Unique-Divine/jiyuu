@@ -69,6 +69,7 @@ const COMMAND_WORDS = new Set([
   "ops",
   "prepare",
   "profile",
+  "promote-admin",
   "provision",
   "remove",
   "resolve",
