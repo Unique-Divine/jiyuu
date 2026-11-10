@@ -1210,3 +1210,19 @@ test("a bad owner list disables only the filler", () => {
     }),
   ).toBe(false)
 })
+
+test("a pool alert records the tick even while the fill waits", () => {
+  expect(
+    shouldRecordTick({
+      result: {
+        dryRun: false,
+        results: [],
+        nextAfter: null,
+        requesterWork: false,
+        pool: { state: "waiting", alert: "register_retrying" },
+      },
+      nowMs: 1000,
+      lastRecordedMs: 0,
+    }),
+  ).toBe(true)
+})
