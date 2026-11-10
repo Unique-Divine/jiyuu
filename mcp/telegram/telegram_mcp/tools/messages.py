@@ -2,6 +2,9 @@
 
 from telethon import errors
 
+from telethon.tl.custom import Message
+
+from telegram_mcp.message_results import message_page, single_message
 from telegram_mcp.runtime import *
 
 
@@ -236,7 +239,7 @@ async def get_messages(
         cl = get_client(account)
         entity = await resolve_entity(chat_id, cl)
         offset = (page - 1) * page_size
-        messages = await cl.get_messages(entity, limit=page_size, add_offset=offset)
+        messages = await message_page(cl.get_messages(entity, limit=page_size, add_offset=offset))
         if not messages:
             return "No messages found for this page."
         lines = [format_message_line(msg) for msg in messages]
@@ -479,11 +482,9 @@ async def list_inline_buttons(
         target_message = None
 
         if message_id is not None:
-            target_message = await cl.get_messages(entity, ids=message_id)
-            if isinstance(target_message, list):
-                target_message = target_message[0] if target_message else None
+            target_message = await single_message(cl.get_messages(entity, ids=message_id))
         else:
-            recent_messages = await cl.get_messages(entity, limit=limit)
+            recent_messages = await message_page(cl.get_messages(entity, limit=limit))
             target_message = next((msg for msg in recent_messages if _has_inline(msg)), None)
 
         if not target_message:
@@ -591,12 +592,10 @@ async def press_inline_button(
         if message_id is not None:
             # Fetch by ID first, then fall back to recent-message search if
             # reply_markup is missing (Telethon sometimes omits it for ID fetches).
-            target_message = await cl.get_messages(entity, ids=message_id)
-            if isinstance(target_message, list):
-                target_message = target_message[0] if target_message else None
+            target_message = await single_message(cl.get_messages(entity, ids=message_id))
             if target_message and not _has_inline_buttons(target_message):
                 # Fallback: search recent messages for the same ID with markup
-                recent = await cl.get_messages(entity, limit=30)
+                recent = await message_page(cl.get_messages(entity, limit=30))
                 fallback = next(
                     (m for m in recent if m.id == target_message.id and _has_inline_buttons(m)),
                     None,
@@ -604,7 +603,7 @@ async def press_inline_button(
                 if fallback:
                     target_message = fallback
         else:
-            recent_messages = await cl.get_messages(entity, limit=20)
+            recent_messages = await message_page(cl.get_messages(entity, limit=20))
             target_message = next(
                 (msg for msg in recent_messages if _has_inline_buttons(msg)), None
             )
@@ -702,6 +701,8 @@ async def list_messages(
         cl = get_client(account)
         entity = await resolve_entity(chat_id, cl)
 
+        messages: list[Message] = []
+
         # Parse date filters if provided
         from_date_obj = None
         to_date_obj = None
@@ -709,16 +710,7 @@ async def list_messages(
         if from_date:
             try:
                 from_date_obj = datetime.strptime(from_date, "%Y-%m-%d")
-                # Make it timezone aware by adding UTC timezone info
-                # Use datetime.timezone.utc for Python 3.9+ or import timezone directly for 3.13+
-                try:
-                    # For Python 3.9+
-                    from_date_obj = from_date_obj.replace(tzinfo=datetime.timezone.utc)
-                except AttributeError:
-                    # For Python 3.13+
-                    from datetime import timezone
-
-                    from_date_obj = from_date_obj.replace(tzinfo=timezone.utc)
+                from_date_obj = from_date_obj.replace(tzinfo=timezone.utc)
             except ValueError:
                 return f"Invalid from_date format. Use YYYY-MM-DD."
 
@@ -727,24 +719,16 @@ async def list_messages(
                 to_date_obj = datetime.strptime(to_date, "%Y-%m-%d")
                 # Set to end of day and make timezone aware
                 to_date_obj = to_date_obj + timedelta(days=1, microseconds=-1)
-                # Add timezone info
-                try:
-                    to_date_obj = to_date_obj.replace(tzinfo=datetime.timezone.utc)
-                except AttributeError:
-                    from datetime import timezone
-
-                    to_date_obj = to_date_obj.replace(tzinfo=timezone.utc)
+                to_date_obj = to_date_obj.replace(tzinfo=timezone.utc)
             except ValueError:
                 return f"Invalid to_date format. Use YYYY-MM-DD."
 
         # Prepare filter parameters
-        params = {}
         if search_query:
             # IMPORTANT: Do not combine offset_date with search.
             # Use server-side search alone, then enforce date bounds client-side.
-            params["search"] = search_query
             messages = []
-            async for msg in cl.iter_messages(entity, **params):  # newest -> oldest
+            async for msg in cl.iter_messages(entity, search=search_query):  # newest -> oldest
                 if to_date_obj and msg.date > to_date_obj:
                     continue
                 if from_date_obj and msg.date < from_date_obj:
@@ -775,13 +759,15 @@ async def list_messages(
                     async for msg in cl.iter_messages(
                         # offset_date is exclusive; +1µs makes to_date inclusive
                         entity,
-                        offset_date=to_date_obj + timedelta(microseconds=1),
+                        offset_date=(
+                            (to_date_obj + timedelta(microseconds=1)) if to_date_obj else None
+                        ),
                     ):
                         messages.append(msg)
                         if len(messages) >= limit:
                             break
             else:
-                messages = await cl.get_messages(entity, limit=limit, **params)
+                messages = await message_page(cl.get_messages(entity, limit=limit))
 
         if not messages:
             return "No messages found matching the criteria."
@@ -835,20 +821,18 @@ async def get_message_context(
         cl = get_client(account)
         chat = await resolve_entity(chat_id, cl)
         # Get messages around the specified message
-        messages_before = await cl.get_messages(chat, limit=context_size, max_id=message_id)
-        central_message = await cl.get_messages(chat, ids=message_id)
-        # Fix: get_messages(ids=...) returns a single Message, not a list
-        if central_message is not None and not isinstance(central_message, list):
-            central_message = [central_message]
-        elif central_message is None:
-            central_message = []
-        messages_after = await cl.get_messages(
-            chat, limit=context_size, min_id=message_id, reverse=True
+        messages_before = await message_page(
+            cl.get_messages(chat, limit=context_size, max_id=message_id)
+        )
+        central_message = await single_message(cl.get_messages(chat, ids=message_id))
+        central_messages = [central_message] if central_message is not None else []
+        messages_after = await message_page(
+            cl.get_messages(chat, limit=context_size, min_id=message_id, reverse=True)
         )
         if not central_message:
             return f"Message with ID {message_id} not found in chat {chat_id}."
         # Combine messages in chronological order
-        all_messages = list(messages_before) + list(central_message) + list(messages_after)
+        all_messages = list(messages_before) + central_messages + list(messages_after)
         all_messages.sort(key=lambda m: m.id)
         records = []
         for msg in all_messages:
@@ -865,10 +849,12 @@ async def get_message_context(
                 record["grouped_id"] = grouped_id
 
             # Check if this message is a reply and get the replied message
-            if msg.reply_to and msg.reply_to.reply_to_msg_id:
+            if isinstance(msg.reply_to, types.MessageReplyHeader) and msg.reply_to.reply_to_msg_id:
                 record["reply_to"] = msg.reply_to.reply_to_msg_id
                 try:
-                    replied_msg = await cl.get_messages(chat, ids=msg.reply_to.reply_to_msg_id)
+                    replied_msg = await single_message(
+                        cl.get_messages(chat, ids=msg.reply_to.reply_to_msg_id)
+                    )
                     if replied_msg:
                         replied_sender = "Unknown"
                         if replied_msg.sender:
@@ -945,13 +931,13 @@ async def forward_message(
         ids_to_forward = message_id
         expanded_from_album = False
         if expand_album and isinstance(message_id, int):
-            anchor = await cl.get_messages(from_entity, ids=message_id)
+            anchor = await single_message(cl.get_messages(from_entity, ids=message_id))
             grouped_id = getattr(anchor, "grouped_id", None) if anchor else None
             if grouped_id is not None:
                 # Album ids are allocated contiguously by Telegram; a small
                 # window around the anchor reliably captures all siblings.
                 window = list(range(message_id - 9, message_id + 10))
-                neighbors = await cl.get_messages(from_entity, ids=window)
+                neighbors = await message_page(cl.get_messages(from_entity, ids=window))
                 sibling_ids = sorted(
                     {
                         m.id
@@ -1322,7 +1308,7 @@ async def search_messages(
     try:
         cl = get_client(account)
         entity = await resolve_entity(chat_id, cl)
-        messages = await cl.get_messages(entity, limit=limit, search=query)
+        messages = await message_page(cl.get_messages(entity, limit=limit, search=query))
 
         records = []
         for msg in messages:
@@ -1332,7 +1318,7 @@ async def search_messages(
                 "date": msg.date,
                 "text": sanitize_user_content(msg.message),
             }
-            if msg.reply_to and msg.reply_to.reply_to_msg_id:
+            if isinstance(msg.reply_to, types.MessageReplyHeader) and msg.reply_to.reply_to_msg_id:
                 record["reply_to"] = msg.reply_to.reply_to_msg_id
             records.append(record)
         return format_tool_result(records)
@@ -1362,7 +1348,9 @@ async def search_global(
         cl = get_client(account)
         await ensure_connected(cl)
         offset = (page - 1) * page_size
-        messages = await cl.get_messages(None, limit=page_size, search=query, add_offset=offset)
+        messages = await message_page(
+            cl.get_messages(None, limit=page_size, search=query, add_offset=offset)
+        )
 
         if not messages:
             return "No messages found for this page."
@@ -1405,7 +1393,7 @@ async def get_history(
     try:
         cl = get_client(account)
         entity = await resolve_entity(chat_id, cl)
-        messages = await cl.get_messages(entity, limit=limit)
+        messages = await message_page(cl.get_messages(entity, limit=limit))
 
         records = [message_to_dict(msg) for msg in messages]
         return format_tool_result(records)
@@ -1433,10 +1421,12 @@ async def get_pinned_messages(chat_id: Union[int, str], account: str | None = No
             # Try newer Telethon approach
             from telethon.tl.types import InputMessagesFilterPinned
 
-            messages = await cl.get_messages(entity, filter=InputMessagesFilterPinned())
+            messages = await message_page(
+                cl.get_messages(entity, filter=InputMessagesFilterPinned())
+            )
         except (ImportError, AttributeError):
             # Fallback - try without filter and manually filter pinned
-            all_messages = await cl.get_messages(entity, limit=50)
+            all_messages = await message_page(cl.get_messages(entity, limit=50))
             messages = [m for m in all_messages if getattr(m, "pinned", False)]
 
         if not messages:
@@ -1450,7 +1440,7 @@ async def get_pinned_messages(chat_id: Union[int, str], account: str | None = No
                 "date": msg.date,
                 "text": sanitize_user_content(msg.message),
             }
-            if msg.reply_to and msg.reply_to.reply_to_msg_id:
+            if isinstance(msg.reply_to, types.MessageReplyHeader) and msg.reply_to.reply_to_msg_id:
                 record["reply_to"] = msg.reply_to.reply_to_msg_id
             records.append(record)
 

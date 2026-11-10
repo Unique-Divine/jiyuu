@@ -1,5 +1,6 @@
 """Media MCP tools."""
 
+from telegram_mcp.message_results import message_page, single_message
 from telegram_mcp.runtime import *
 
 
@@ -40,7 +41,7 @@ async def send_file(
         if path_error:
             return path_error
         entity = await resolve_entity(chat_id, cl)
-        await cl.send_file(entity, str(safe_path), caption=caption)
+        await cl.send_file(entity, str(safe_path), caption=caption or "")
         return f"File sent to chat {chat_id} from {safe_path}."
     except Exception as e:
         return log_and_format_error(
@@ -71,7 +72,7 @@ async def _send_album(
         safe_paths.append(str(safe_path))
 
     entity = await resolve_entity(chat_id, cl)
-    await cl.send_file(entity, safe_paths, caption=caption)
+    await cl.send_file(entity, safe_paths, caption=caption or "")
     return f"Album sent to chat {chat_id} with {len(safe_paths)} files."
 
 
@@ -134,7 +135,7 @@ async def download_media(
     try:
         cl = get_client(account)
         entity = await resolve_entity(chat_id, cl)
-        msg = await cl.get_messages(entity, ids=message_id)
+        msg = await single_message(cl.get_messages(entity, ids=message_id))
         if not msg or not msg.media:
             return "No media found in the specified message."
 
@@ -152,11 +153,15 @@ async def download_media(
         # If a path with extension is passed (e.g. ticket.jpg), Telethon writes to that
         # exact path even if the file is actually a PDF. Stripping the suffix lets
         # Telethon append the correct extension based on the actual file content.
+        if out_path is None:
+            raise ValidationError("No validated download path was returned.")
         out_path_for_dl = out_path.with_suffix("")
-        downloaded = await cl.download_media(msg, file=str(out_path_for_dl))
+        downloaded = await msg.download_media(file=str(out_path_for_dl))
         if not downloaded:
             return f"Download failed for message {message_id}."
 
+        if not isinstance(downloaded, str):
+            raise ValidationError("Telegram returned media bytes instead of a file path.")
         final_path = Path(downloaded).resolve(strict=True)
         roots, roots_error = await _ensure_allowed_roots(ctx, "download_media")
         if roots_error:
@@ -245,6 +250,8 @@ async def upload_file(
         if path_error:
             return path_error
 
+        if safe_path is None:
+            raise ValidationError("No validated upload path was returned.")
         uploaded = await cl.upload_file(str(safe_path))
         payload = {
             "path": str(safe_path),
@@ -275,7 +282,7 @@ async def get_media_info(
     try:
         cl = get_client(account)
         entity = await resolve_entity(chat_id, cl)
-        msg = await cl.get_messages(entity, ids=message_id)
+        msg = await single_message(cl.get_messages(entity, ids=message_id))
 
         if not msg or not msg.media:
             return "No media found in the specified message."

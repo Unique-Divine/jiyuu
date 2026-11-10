@@ -1,5 +1,6 @@
 """Contacts MCP tools."""
 
+from telegram_mcp.message_results import message_page, single_message
 from telegram_mcp.runtime import *
 from typing import Optional
 
@@ -259,7 +260,7 @@ async def get_last_interaction(contact_id: Union[int, str], account: Optional[st
         )
 
         # Get the last few messages
-        messages = await cl.get_messages(contact, limit=5)
+        messages = await message_page(cl.get_messages(contact, limit=5))
 
         if not messages:
             return f"No messages found with {contact_name} (ID: {contact_id})."
