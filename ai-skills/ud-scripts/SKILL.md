@@ -48,7 +48,7 @@ Neither Python nor Bun is the default. Choose per script:
 - **Fail loudly.** Check exit codes (`check=True` in Python; test
   `exitCode` in Bun, since `Bun.spawnSync` does not throw) and exit non-zero
   with a message that names the step.
-- **Keep tests next to the script** (`foo.test.ts`, `foo_test.py`) for any
+- **Keep tests next to the script** (`foo.test.ts`, `test_foo.py` so `python3 -m unittest` finds it) for any
   non-trivial logic.
 - **Wrap it in a justfile recipe** when people run it often, and keep the
   logic in the script, not the recipe.

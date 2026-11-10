@@ -184,7 +184,7 @@ Usage: $0 [OPTIONS]
 
 Options:
     -v, --verbose       Enable verbose output
-    --run               Apply changes (without it, print the plan)
+    --run               Apply changes (see Pattern 10)
     -o, --output FILE   Output file path
     -j, --jobs NUM      Number of parallel jobs
     -h, --help          Show this help message

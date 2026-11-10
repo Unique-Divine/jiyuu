@@ -6,8 +6,8 @@ label sync tools. Use the ones that fit. A ten-line helper needs none of
 them; a script that publishes a release or writes to a remote usually wants
 most of them.
 
-[`scripts/github-labels`](../../scripts/github-labels/) in this repository
-shows the whole set in one place.
+[`scripts/github-labels`](https://github.com/Unique-Divine/jiyuu/tree/main/scripts/github-labels)
+in the jiyuu repository shows the plan, runner, and test patterns together.
 
 ## Build a Plan, Then Print It or Run It
 
@@ -26,7 +26,7 @@ code, they drift, and the printout stops telling the truth.
 export interface Command { argv: string[]; input?: string }
 export interface Plan { tag: string; commands: Command[] }
 
-export function planRelease(branch: string, sha: string, tags: string[]): Plan {
+export function planRelease(sha: string, tags: string[]): Plan {
   const tag = nextTag(tags)
   return {
     tag,
@@ -46,7 +46,7 @@ simulates the change is another option. Neither is required. Pick what fits
 how often the script runs and how much damage a mistake does.
 
 If the script has both a plan mode and flags that only make sense when
-running, reject contradictory combinations up front.
+running, it helps to reject contradictory combinations up front.
 
 ## Inject the Runner
 
@@ -63,8 +63,8 @@ export async function publish(plan: Plan, run: Runner = spawnRunner) {
 
 ```py
 def publish(plan, run=subprocess.run):
-    for argv in plan["commands"]:
-        run(argv, check=True)
+    for cmd in plan["commands"]:
+        run(cmd["argv"], input=cmd.get("input"), text=True, check=True)
 ```
 
 Tests then pass a fake runner that records each command, returns canned
@@ -81,9 +81,9 @@ output, and throws on any command it does not expect.
   response, a CLI listing) and the expected plan in fixture files, such as
   `fixtures/*.json`. When behavior changes on purpose, update the fixture
   and review the diff like code.
-- **Keep fixtures real.** Paste output captured from the live tool, trimmed,
-  rather than writing it by hand. Hand-written fixtures test your
-  assumptions, not the tool.
+- **Start fixtures from real output.** Capture it from the live tool, then
+  trim or anonymize it. Fixtures written from scratch test your assumptions,
+  not the tool.
 
 ## Fake Tools on `PATH`
 
@@ -102,7 +102,8 @@ missing tool.
 - **Make reruns safe.** Skip work that is already done (the release exists,
   the cached artifact checks out). After a partial failure, report what
   finished and what is left, so a rerun picks up the rest.
-- **Write atomically.** Stage in a temp directory and `rename` into place.
+- **Write atomically.** Stage next to the target, on the same filesystem,
+  and `rename` into place; a rename across filesystems is a copy.
   Take a lock file opened exclusively when two runs could overlap. Keep the
   previous binary so a failed install can restore it.
 - **Verify what you ship or install.** Check sha256 checksums and a
@@ -115,6 +116,7 @@ missing tool.
 
 ## Run the Tests in CI
 
-Run the script tests on every change to the scripts, using a path filter if
-the suite is slow. Publish only from a tag or a protected branch, after the
-tests pass.
+Script tests are cheap to run in CI on changes to the scripts, with a path
+filter if the suite is slow. For scripts that publish, running the publish
+step only from a tag or a protected branch, after the tests pass, has worked
+well.
