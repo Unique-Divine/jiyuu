@@ -681,6 +681,41 @@ test("a join wait due under a hold moves its next check to the hold's end", asyn
   }
 })
 
+test("a held join wait still claimed under skew releases the claim", async () => {
+  const now = Date.parse("2026-11-06T00:00:00Z")
+  const f = fixture()
+  // A doubly refused re-save left it claimed; the worker now sees the
+  // invitation as expired.
+  f.setup = {
+    ...f.setup,
+    state: "awaiting_join",
+    chatId: -100123,
+    error: "add_member:TG_SAI_AWAITING_JOIN",
+    claimToken: "private-token",
+    nextCheckAt: new Date(now - 1000).toISOString(),
+    receipt: {
+      pendingInvitations: [
+        { userId: "1", expiresAt: new Date(now - 1).toISOString() },
+      ],
+    },
+  }
+  const untilMs = now + 3_600_000
+  hold(f.holds, "invite", untilMs)
+  await runWorkerOnce(
+    { custodyProfile: "custody", workerId: "stable", run: true, now },
+    f,
+  )
+  expect(f.calls).not.toContain("claim")
+  expect(f.progressed).toEqual([
+    {
+      state: "incomplete",
+      chatId: -100123,
+      error: "add_member:TG_SAI_AWAITING_JOIN",
+      retryAt: new Date(untilMs).toISOString(),
+    },
+  ])
+})
+
 test("a held join wait with an expired invitation is left for its check", async () => {
   const now = Date.parse("2026-11-06T00:00:00Z")
   const f = fixture()
@@ -732,6 +767,7 @@ test("a refused join-wait re-save falls back to an incomplete retry", async () =
     { custodyProfile: "custody", workerId: "stable", run: true, now },
     f,
   )
+  // The fallback retries at the hold's end, not at the earlier next check.
   expect(f.progressed).toEqual([
     {
       state: "incomplete",
@@ -740,6 +776,18 @@ test("a refused join-wait re-save falls back to an incomplete retry", async () =
       retryAt: new Date(untilMs).toISOString(),
     },
   ])
+  // A fallback that fails too shows in the result instead of vanishing.
+  f.progressed.length = 0
+  f.setup = { ...f.setup, state: "awaiting_join", retryAt: null }
+  delete f.setup.claimToken
+  f.cloud.progress = async () => {
+    throw new Error("refused")
+  }
+  const both = await runWorkerOnce(
+    { custodyProfile: "custody", workerId: "stable", run: true, now },
+    f,
+  )
+  expect(both.results[0]?.error).toContain(":fallback_failed:")
 })
 
 test("a hold about to end reports retryAt at least 30 s out, once", async () => {

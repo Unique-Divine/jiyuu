@@ -1381,7 +1381,12 @@ describe("added but not visible", () => {
       return progress(id, token, p)
     }
     const before = Date.now()
-    await expect(f.run(h.sleep)).rejects.toThrow("incomplete")
+    const thrown = (await f.run(h.sleep).catch((e: unknown) => e)) as Error & {
+      waitRefusal?: Error
+    }
+    expect(thrown.message).toContain("Setup incomplete")
+    // The refusal is kept for the worker's tick result, not dropped.
+    expect(thrown.waitRefusal?.message).toBe("Unknown field nextCheckAt")
     const setup = f.setup as Setup & { error: string }
     expect(f.events).toContain("cloud:awaiting_join:refused")
     expect(f.events.at(-1)).toBe("cloud:incomplete")

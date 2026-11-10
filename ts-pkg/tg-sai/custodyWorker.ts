@@ -20,6 +20,7 @@ import {
   processHoldStore,
 } from "./mtcuteAdapter"
 import {
+  AWAITING_JOIN_REFUSED,
   cloudRetryAt,
   HOLD_STATE_UNAVAILABLE,
   HOLD_STATE_UNAVAILABLE_RETRY_MS,
@@ -324,7 +325,11 @@ export async function runWorkerOnce(
           current.state === "awaiting_join"
             ? current.nextCheckAt
             : current.retryAt,
-        error: safeProvisionError(error),
+        error:
+          (error as { waitRefusal?: unknown } | null)?.waitRefusal ===
+          undefined
+            ? safeProvisionError(error)
+            : `${safeProvisionError(error)}:${AWAITING_JOIN_REFUSED}`,
       })
     }
   }
@@ -361,9 +366,9 @@ export async function runWorkerOnce(
  * Waiting result for a held account. An incomplete setup gets
  * `cloudRetryAt` of the hold's end as its cloud `retryAt`, through the same
  * `progress` call a flood retry uses, so Deal Desk shows the time and does
- * not serve it again until then. Deal Desk releases the claim on every
- * `incomplete` save with a `retryAt`, so the worker claims it first when it
- * holds no claim. Other setups are not claimed; Deal Desk cannot store a
+ * not serve it again until then. From migration 19, Deal Desk releases the
+ * claim on every `incomplete` save with a `retryAt`, so the worker claims it
+ * first when it holds no claim. Other setups are not claimed; Deal Desk cannot store a
  * `retryAt` for them.
  */
 async function reportHold(
@@ -433,7 +438,32 @@ async function reportHeldJoinWait(
     .map((i) => Date.parse(String(i.expiresAt)))
     .filter(Number.isFinite)
   const earliestExpiry = expiries.length ? Math.min(...expiries) : Infinity
-  if (earliestExpiry <= nowMs) return result
+  // The incomplete fallback retries at the hold's end, which is never at
+  // or before an invitation expiry Deal Desk may see first under skew.
+  const holdRetryAt =
+    cloudRetryAt(hold.untilMs, nowMs) ?? new Date(hold.untilMs).toISOString()
+  const fallback = async (claimToken: string): Promise<string | null> => {
+    try {
+      await cloud.progress(setup.requestId, claimToken, {
+        state: "incomplete",
+        ...(setup.chatId ? { chatId: setup.chatId } : {}),
+        ...(setup.binding ? { binding: setup.binding } : {}),
+        error: setup.error ?? "",
+        retryAt: holdRetryAt,
+      })
+      return null
+    } catch (error) {
+      return safeProvisionError(error)
+    }
+  }
+  if (earliestExpiry <= nowMs) {
+    // Left for its next check, which stops it for an operator. A claim it
+    // still holds (a doubly refused re-save under clock skew) is released
+    // first, so it does not keep the account busy for the whole hold.
+    if (!setup.claimToken) return result
+    const failed = await fallback(setup.claimToken)
+    return failed ? { ...result, error: `${result.error}:${failed}` } : result
+  }
   const nextMs = Math.min(
     hold.untilMs,
     nowMs + MAX_NEXT_CHECK_MS,
@@ -457,19 +487,15 @@ async function reportHeldJoinWait(
     })
     return { ...result, retryAt: nextCheckAt }
   } catch (error) {
-    // Never leave the claim held: a refused re-save falls back to the
-    // incomplete retry every Deal Desk accepts, which also releases it.
-    if (claimToken)
-      await cloud
-        .progress(setup.requestId, claimToken, {
-          state: "incomplete",
-          ...(setup.chatId ? { chatId: setup.chatId } : {}),
-          ...(setup.binding ? { binding: setup.binding } : {}),
-          error: setup.error ?? "",
-          retryAt: nextCheckAt,
-        })
-        .catch(() => {})
-    return { ...result, error: `${result.error}:${safeProvisionError(error)}` }
+    // Do not leave the claim held: fall back to the incomplete retry every
+    // Deal Desk accepts. From migration 19 that releases the claim; on
+    // older versions the retry time stops a re-run every tick.
+    let out = `${result.error}:${safeProvisionError(error)}`
+    if (claimToken) {
+      const failed = await fallback(claimToken)
+      if (failed) out += `:fallback_failed:${failed}`
+    }
+    return { ...result, error: out }
   }
 }
 

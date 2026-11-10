@@ -561,6 +561,11 @@ export const MAX_STALLED_RUNS = 12
  * after `MEMBER_NOT_VISIBLE_RETRY_MS`.
  */
 export const AWAITING_JOIN = "TG_SAI_AWAITING_JOIN"
+/**
+ * Suffix on a worker result's `error` when Deal Desk refused an
+ * `awaiting_join` save and the setup was saved `incomplete` instead.
+ */
+export const AWAITING_JOIN_REFUSED = "awaiting_join_refused"
 /** `reason` of the invitation for a required person refused for privacy. */
 export const PRIVACY_INVITATION_REASON = "privacy_restricted"
 /** Invitations a resumed setup waits on instead of adding again. */
@@ -1484,6 +1489,7 @@ export async function provisionSetup(params: {
       stalledRuns = 0
       stalledStep = undefined
     }
+    let waitRefusal: unknown
     const awaiting = waitingOn.length
       ? pendingInvitations.filter((i) =>
           waitingOn.some((userId) => String(userId) === i.userId),
@@ -1507,11 +1513,14 @@ export async function provisionSetup(params: {
           receipt: { pendingInvitations: awaiting },
         })
         waitSaved = true
-      } catch {
+      } catch (refusal) {
         // Deal Desk refused the wait: a version without awaiting_join, or
         // an invitation it already sees as expired. Fall back to the
-        // incomplete save below, which every version accepts and which
-        // also releases the claim, so the setup never re-runs every tick.
+        // incomplete save below, which every version accepts. From Deal
+        // Desk migration 19 it releases the claim; on older versions its
+        // retry time still stops a re-run every tick. The refusal rides on
+        // the thrown error so the worker's tick result shows it.
+        waitRefusal = refusal
       }
       if (waitSaved)
         throw new Error(
@@ -1526,9 +1535,12 @@ export async function provisionSetup(params: {
       error: diagnostic,
       retryAt,
     })
-    throw new Error(
-      "Setup incomplete; inspect status and resume the same request",
-      { cause: error },
+    throw Object.assign(
+      new Error(
+        "Setup incomplete; inspect status and resume the same request",
+        { cause: error },
+      ),
+      waitRefusal === undefined ? {} : { waitRefusal },
     )
   }
 }
