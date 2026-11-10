@@ -3,7 +3,7 @@
  * `profiles.json` into pass, then removes password fields from
  * `backups/*.json`. Dry-run by default.
  */
-import { readdir, readFile, stat } from "node:fs/promises"
+import { lstat, readdir, readFile, stat } from "node:fs/promises"
 import { join, relative } from "node:path"
 import {
   configDir,
@@ -160,6 +160,8 @@ interface BackupPlan {
   /** Fields to remove, or null when the file is not JSON. */
   removed: number | null
   scrubbed: string
+  /** A symlink: never rewritten, since its target may belong to another app. */
+  symlink?: boolean
 }
 
 async function backupPlans(dir: string): Promise<BackupPlan[]> {
@@ -174,6 +176,10 @@ async function backupPlans(dir: string): Promise<BackupPlan[]> {
   const plans: BackupPlan[] = []
   for (const name of names.filter((file) => file.endsWith(".json")).sort()) {
     const path = join(backupsDir, name)
+    if ((await lstat(path)).isSymbolicLink()) {
+      plans.push({ path, removed: null, scrubbed: "", symlink: true })
+      continue
+    }
     try {
       const scrubbed = scrubPasswordText(await readFile(path, "utf8"))
       plans.push({ path, removed: scrubbed.removed, scrubbed: scrubbed.text })
@@ -361,8 +367,14 @@ export async function migrateProfilePasswords(
     await writeConfig(config, env)
   }
 
+  let symlinkedBackups = 0
   for (const plan of await backupPlans(dir)) {
     const label = relative(dir, plan.path)
+    if (plan.symlink) {
+      lines.push(`backup: ${label} is a symlink; not changed, check its target by hand`)
+      symlinkedBackups++
+      continue
+    }
     if (plan.removed === null) {
       lines.push(`backup: ${label} not JSON; check it by hand`)
       continue
@@ -381,6 +393,7 @@ export async function migrateProfilePasswords(
 
   let exitCode = 0
   if (options.run) {
+    if (symlinkedBackups > 0) exitCode = 1
     // Also scan for passwords moved by earlier runs, so a rerun keeps
     // reporting a leftover copy until it is removed.
     for (const profile of passProfiles) {

@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test"
-import { lstat, mkdir, mkdtemp, readdir, readFile, rename, rm, stat, symlink, writeFile } from "node:fs/promises"
+import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, rename, rm, stat, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { filesContaining, scrubPasswordText } from "./passwordMigration"
@@ -369,6 +369,30 @@ describe("tg-sai profile migrate-password", () => {
       )
       expect(result.stdout).toContain("residual_files: 2")
       expect(result.exitCode).toBe(1)
+    } finally {
+      await f.cleanup()
+    }
+  })
+
+  test("--run leaves symlinked backups and their targets untouched", async () => {
+    const f = await fixture()
+    try {
+      const other = join(f.stateDir, "..", "otherapp")
+      await mkdir(other)
+      const body = '{"db":{"password":"unrelated-db-pw"},"port":9007199254740993123}'
+      await writeFile(join(other, "config.json"), body, { mode: 0o644 })
+      await chmod(join(other, "config.json"), 0o644)
+      await symlink("../../otherapp/config.json", join(f.stateDir, "backups", "linked.json"))
+
+      const result = runCli(f, ["profile", "migrate-password", "--run"])
+      expectNoSecrets(result)
+      expect(result.stdout).toContain(
+        "backup: backups/linked.json is a symlink; not changed, check its target by hand",
+      )
+      expect(result.exitCode).toBe(1)
+      expect(await readFile(join(other, "config.json"), "utf8")).toBe(body)
+      expect((await stat(join(other, "config.json"))).mode & 0o777).toBe(0o644)
+      expect((await lstat(join(f.stateDir, "backups", "linked.json"))).isSymbolicLink()).toBe(true)
     } finally {
       await f.cleanup()
     }
