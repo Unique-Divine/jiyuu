@@ -1,0 +1,16 @@
+{
+  "provenance": {
+    "kind": "synthetic",
+    "telethon_version": "1.42.0",
+    "clock_unix": 1800000000.0,
+    "notes": ["No live errors induced. Wire error names are synthetic inputs to Telethon's real RPC exception mapper.", "Expected payloads describe current local formatting and cooldown behavior, not a server scope guarantee.", "Generic formatter codes contain Python's process-dependent hash; the test substitutes that value."]
+  },
+  "cases": [
+    {"wire_code": 420, "wire_message": "FLOOD_WAIT_420", "class_name": "FloodWaitError", "kind": "flood_wait", "seconds": 420, "retry_at": "2027-01-15T08:07:00Z", "request": "get_dialogs", "scope": "Telegram rate-limited get_dialogs", "unrecorded_scope": "Telegram rate-limited get_chat"},
+    {"wire_code": 420, "wire_message": "FLOOD_PREMIUM_WAIT_30", "class_name": "FloodPremiumWaitError", "kind": "premium_flood_wait", "seconds": 30, "retry_at": "2027-01-15T08:00:30Z", "request": "get_dialogs", "scope": "Telegram limited transfer speed for get_dialogs", "unrecorded_scope": "Telegram limited transfer speed for get_chat"},
+    {"wire_code": 420, "wire_message": "SLOWMODE_WAIT_10", "class_name": "SlowModeWaitError", "kind": "slow_mode", "seconds": 10, "retry_at": "2027-01-15T08:00:10Z", "request": "send_message", "scope": "Slow mode in chat 900000002", "unrecorded_scope": "Slow mode in chat 900000002"},
+    {"wire_code": 400, "wire_message": "PEER_FLOOD", "class_name": "PeerFloodError"},
+    {"wire_code": 400, "wire_message": "UNKNOWN_AUDIT_ERROR", "class_name": "BadRequestError"}
+  ],
+  "generic_message_template": "An error occurred (code: CHAT-ERR-{process_hash}). Check mcp_errors.log for details."
+}

@@ -1,0 +1,64 @@
+{
+  "provenance": {
+    "kind": "anonymized-live",
+    "recorded_at_utc": "2026-11-10 03:35:31 UTC",
+    "transport": "existing Telegram MCP session",
+    "running_source_commit": "unverified",
+    "reference_source_commit": "ccd4b798bea76a73a89f41167eb8b44964b0df8b",
+    "notes": [
+      "Two successful bounded read-only probes; no live errors induced.",
+      "Raw values retained only in temporary memory and discarded after anonymization.",
+      "Identity, sender, identifiers, phone, date, and message body replaced; field types and observed message separators retained."
+    ]
+  },
+  "cases": [
+    {
+      "name": "identity-json",
+      "tool": "get_me",
+      "arguments": {},
+      "response": {
+        "content": [
+          {
+            "type": "text",
+            "text": "{\n  \"id\": 900000001,\n  \"name\": \"Example User\",\n  \"type\": \"user\",\n  \"username\": \"example_user\",\n  \"phone\": \"15550000001\"\n}",
+            "annotations": {
+              "audience": [
+                "user"
+              ]
+            }
+          }
+        ],
+        "structuredContent": {
+          "result": "{\n  \"id\": 900000001,\n  \"name\": \"Example User\",\n  \"type\": \"user\",\n  \"username\": \"example_user\",\n  \"phone\": \"15550000001\"\n}"
+        },
+        "isError": false
+      }
+    },
+    {
+      "name": "single-message-text",
+      "tool": "get_messages",
+      "arguments": {
+        "chat_id": 900000002,
+        "page": 1,
+        "page_size": 1
+      },
+      "response": {
+        "content": [
+          {
+            "type": "text",
+            "text": "ID: 101 | Example Bot | Date: 2000-01-01 00:00:00+00:00 | Message: Example message",
+            "annotations": {
+              "audience": [
+                "user"
+              ]
+            }
+          }
+        ],
+        "structuredContent": {
+          "result": "ID: 101 | Example Bot | Date: 2000-01-01 00:00:00+00:00 | Message: Example message"
+        },
+        "isError": false
+      }
+    }
+  ]
+}
