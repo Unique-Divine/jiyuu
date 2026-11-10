@@ -377,9 +377,18 @@ async def run_limited(
         with scope:
             if timeout is None:
                 return await operation()
-            return await asyncio.wait_for(operation(), timeout=timeout)
-    except asyncio.TimeoutError as exc:
-        raise RequestTimedOut(RequestTimeout(request, timeout, timeout_hint)) from exc
+            child = asyncio.ensure_future(operation())
+            try:
+                done, _ = await asyncio.wait({child}, timeout=timeout)
+                if done:
+                    # An operation-owned TimeoutError belongs to the operation.
+                    return await child
+                raise RequestTimedOut(RequestTimeout(request, timeout, timeout_hint))
+            finally:
+                if not child.done():
+                    child.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await child
     except errors.FloodError as exc:
         if not is_wait_error(exc):
             raise

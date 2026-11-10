@@ -188,3 +188,76 @@ async def test_other_rpc_errors_pass_through_unrecorded():
         await run_limited(client, "send_message", raising(error, []), timeout=1, tracker=tracker)
 
     assert tracker.active(id(client), "send_message") is None
+
+
+@pytest.mark.parametrize("timeout", [None, 1.0])
+@pytest.mark.asyncio
+async def test_operation_timeout_is_not_a_policy_timeout(timeout):
+    tracker = CooldownTracker(Clock())
+    client = object()
+    error = asyncio.TimeoutError("operation's own deadline")
+    calls = []
+    with pytest.raises(asyncio.TimeoutError) as caught:
+        await run_limited(
+            client, "send_message", raising(error, calls), timeout=timeout, tracker=tracker
+        )
+    assert caught.value is error
+    assert len(calls) == 1
+    assert tracker.active(id(client), "send_message") is None
+
+
+@pytest.mark.asyncio
+async def test_caller_cancellation_awaits_child_cleanup_and_restores_context():
+    from telegram_mcp.request_policy import _flood_sleep_override
+
+    started = asyncio.Event()
+    cleaned = asyncio.Event()
+    observed = []
+
+    async def operation():
+        observed.append(_flood_sleep_override.get())
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await asyncio.sleep(0)
+            cleaned.set()
+
+    async def call():
+        try:
+            await run_limited(object(), "get_dialogs", operation, timeout=30)
+        finally:
+            observed.append(_flood_sleep_override.get())
+
+    task = asyncio.create_task(call())
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert cleaned.is_set()
+    assert observed == [0, None]
+    assert _flood_sleep_override.get() is None
+
+
+@pytest.mark.asyncio
+async def test_policy_expiration_awaits_cleanup_and_does_not_retry():
+    from telegram_mcp.request_policy import _flood_sleep_override
+
+    calls = 0
+    cleaned = asyncio.Event()
+
+    async def operation():
+        nonlocal calls
+        calls += 1
+        assert _flood_sleep_override.get() == 0
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await asyncio.sleep(0)
+            cleaned.set()
+
+    with pytest.raises(RequestTimedOut):
+        await run_limited(object(), "get_dialogs", operation, timeout=0.01)
+    assert calls == 1
+    assert cleaned.is_set()
+    assert _flood_sleep_override.get() is None
