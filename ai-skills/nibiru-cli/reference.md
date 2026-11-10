@@ -123,6 +123,9 @@ case-insensitive `USDC` and `USDC.e` aliases select Sai and legacy USDC
 respectively. The CLI resolves them locally for compatibility with older nodes.
 Use explicit addresses with older CLIs or direct queries to older nodes.
 
+Wasm contract Stargate queries retain v2.23.0 alias semantics for consensus
+compatibility. Contracts should use explicit addresses or bank denoms.
+
 A zero result applies only to the selected token. Use `nibiru q bank balances "$ADDR"` to inspect other bank holdings before describing an account as empty.
 
 ### `balance_wei` and bank `unibi`

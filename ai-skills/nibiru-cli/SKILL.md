@@ -146,6 +146,9 @@ explicit addresses even to older nodes; direct queries to older nodes still
 resolve `USDC` to the legacy token. On other networks, use the deployed token
 address or denom.
 
+Wasm contract Stargate queries retain v2.23.0 alias semantics for consensus
+compatibility. Contracts should use explicit addresses or bank denoms.
+
 A selected token's zero balance does not mean the account has no funds. For
 account-wide questions, inspect `nibiru q bank balances "$ADDR"` as well as
 relevant ERC20 holdings. Confirm the returned token address and denom before
