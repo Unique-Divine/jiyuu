@@ -20,7 +20,11 @@ import {
 } from "../mtcuteAdapter"
 import { HoldAccountUnknownError, HoldError } from "../state/guard"
 import { HoldStore } from "../state/holds"
-import { PROVISION_WRITE_PARAMS } from "../provisioningRuntime"
+import {
+  PROVISION_LINK_PARAMS,
+  PROVISION_READ_PARAMS,
+  PROVISION_WRITE_PARAMS,
+} from "../provisioningRuntime"
 import { stateDbPath } from "../state/db"
 import {
   openTelemetryDb,
@@ -566,6 +570,25 @@ describe("provisioning write calls", () => {
     const { nm, transport } = plainNetwork([serverError, { _: "updates" }], 7)
     const result = await nm
       .call(INVITE, PROVISION_WRITE_PARAMS)
+      .catch((e: unknown) => e)
+    expect(transport).toHaveLength(1)
+    expect(result).toMatchObject({ errorCode: -503 })
+  })
+  test("a read resends a server error at most three times", async () => {
+    const { nm, transport } = plainNetwork(
+      [serverError, serverError, serverError, serverError, { _: "updates" }],
+      7,
+    )
+    const result = await nm
+      .call({ _: "channels.getParticipant" }, PROVISION_READ_PARAMS)
+      .catch((e: unknown) => e)
+    expect(transport).toHaveLength(1 + PROVISION_READ_PARAMS.maxRetryCount)
+    expect(result).toMatchObject({ errorCode: -503 })
+  }, 10_000)
+  test("a controlled invitation is never resent", async () => {
+    const { nm, transport } = plainNetwork([serverError, { _: "updates" }], 7)
+    const result = await nm
+      .call({ _: "messages.exportChatInvite" }, PROVISION_LINK_PARAMS)
       .catch((e: unknown) => e)
     expect(transport).toHaveLength(1)
     expect(result).toMatchObject({ errorCode: -503 })

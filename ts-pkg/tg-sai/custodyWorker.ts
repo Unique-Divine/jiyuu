@@ -295,6 +295,7 @@ export async function runWorkerOnce(
           journal: deps.journal,
           workerId: options.workerId,
           ...(deps.background ? { background: deps.background } : {}),
+          ...(options.signal ? { signal: options.signal } : {}),
         }),
       )
       results.push({

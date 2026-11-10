@@ -322,6 +322,20 @@ export async function drainBackgroundOnce(params: {
     queue.pace(paced)
     return { state: "deferred", ...at, error: code, nextAtMs: paced }
   }
+  if (
+    fromCall &&
+    params.signal?.aborted &&
+    isTransientTelegramError(outcome.error)
+  )
+    // Shutdown cut off an add that was sent and may have invited the user:
+    // it counts toward today's cap, but not as the member's attempt.
+    queue.recordAdds({
+      source: "background",
+      outcome: "uncertain",
+      chatId: row.chatId,
+      userIds: [row.userId],
+      nowMs,
+    })
   if (!fromCall || params.signal?.aborted) {
     // The member was never at fault: retry after one gap, uncounted.
     queue.defer(row.chatId, row.userId, paced, code, nowMs, false)

@@ -118,6 +118,12 @@ export interface JournalRecord {
    * that finds one absent gives them a link, never another add.
    */
   addedIds?: number[]
+  /**
+   * Runs in a row that stopped on a transient error at a step that spends
+   * no add, and that step; bounds how long such a setup holds the account.
+   */
+  stalledRuns?: number
+  stalledStep?: string
 }
 export interface PendingInvitation {
   userId: string
@@ -394,6 +400,25 @@ type ProvisionStep =
   | "enqueue_background"
   | "save_ready"
 
+/** Steps in the order a run reaches them, to tell when a run got further. */
+const STEP_ORDER: readonly ProvisionStep[] = [
+  "verify_marker",
+  "save_configuring",
+  "read_member",
+  "approve_join",
+  "add_member",
+  "verify_added_member",
+  "create_invitation",
+  "save_invitation",
+  "read_admin",
+  "promote_admin",
+  "read_bot",
+  "promote_bot",
+  "audit_membership",
+  "enqueue_background",
+  "save_ready",
+]
+
 /** Fixed operation names add context without copying Telegram response bodies. */
 export function safeProvisionDiagnostic(
   error: unknown,
@@ -519,6 +544,13 @@ export const TRANSIENT_LIMIT = "TG_SAI_TRANSIENT_LIMIT"
 /** Transient failures a setup may hit before it stops for an operator. */
 export const MAX_TRANSIENT_RETRIES = 3
 /**
+ * Runs in a row a setup may stop on a transient error at a step that spends
+ * no add (a read, approval, promotion, or link) before it stops for an
+ * operator with `<step>:TG_SAI_TRANSIENT_LIMIT`: about an hour of 5-minute
+ * retries.
+ */
+export const MAX_STALLED_RUNS = 12
+/**
  * Code for a setup that waits only for required people whose add was
  * refused for privacy and who got a controlled invitation instead. Retries
  * after `MEMBER_NOT_VISIBLE_RETRY_MS`.
@@ -623,6 +655,16 @@ function defaultSleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
+/** A flood wait, `PEER_FLOOD`, or a local hold refusal. */
+function isFloodOrHold(error: unknown): boolean {
+  const e = error as { text?: unknown; errorMessage?: unknown }
+  const text = typeof e?.text === "string" ? e.text : e?.errorMessage
+  return (
+    typeof text === "string" &&
+    /^(?:FLOOD(?:_PREMIUM)?_WAIT_|PEER_FLOOD$|TG_SAI_HOLD_)/.test(text)
+  )
+}
+
 /** A member Telegram accepted but does not show yet; retried later. */
 function notVisibleError(): Error {
   return Object.assign(new Error("Added member not visible yet"), {
@@ -682,6 +724,8 @@ export async function provisionSetup(params: {
   background?: BackgroundEnqueue
   /** Waits before a membership re-check; tests pass a no-op. */
   sleep?: (ms: number) => Promise<void>
+  /** Worker shutdown; a run it cuts short is not a transient failure. */
+  signal?: AbortSignal
 }): Promise<Setup | { state: "creation_unknown"; candidates: number[] }> {
   const { telegram, cloud, journal } = params
   let setup = params.setup
@@ -716,13 +760,25 @@ export async function provisionSetup(params: {
   let pendingInvitations = local?.pendingInvitations ?? []
   let botAdds = local?.botAdds ?? 0
   let transientRetries = local?.transientRetries ?? 0
-  const addedIds = new Set(local?.addedIds ?? [])
-  // Counters every journal write carries, so none is lost on restart.
-  const counts = () => ({
-    ...(botAdds ? { botAdds } : {}),
-    ...(transientRetries ? { transientRetries } : {}),
-    ...(addedIds.size ? { addedIds: [...addedIds] } : {}),
-  })
+  let addedIds = new Set(local?.addedIds ?? [])
+  let stalledRuns = local?.stalledRuns ?? 0
+  let stalledStep = local?.stalledStep
+  interface Counts {
+    botAdds: number
+    transientRetries: number
+    addedIds: Set<number>
+  }
+  // Counters every journal write carries, so none is lost on restart. A
+  // change is written first and kept in memory only once the write worked.
+  const counts = (next: Partial<Counts> = {}) => {
+    const c = { botAdds, transientRetries, addedIds, ...next }
+    return {
+      ...(c.botAdds ? { botAdds: c.botAdds } : {}),
+      ...(c.transientRetries ? { transientRetries: c.transientRetries } : {}),
+      ...(c.addedIds.size ? { addedIds: [...c.addedIds] } : {}),
+      ...(stalledRuns ? { stalledRuns, stalledStep } : {}),
+    }
+  }
   const workerId = local?.workerId ?? params.workerId
   if (
     !setup.chatId &&
@@ -921,7 +977,7 @@ export async function provisionSetup(params: {
         })
       }
     }
-    const writeJournal = () =>
+    const writeJournal = (next: Partial<Counts> = {}) =>
       journal.write(setup.requestId, {
         fingerprint,
         state: "configuring",
@@ -929,8 +985,16 @@ export async function provisionSetup(params: {
         binding,
         workerId,
         pendingInvitations,
-        ...counts(),
+        ...counts(next),
       })
+    /** Writes changed counters, then keeps them; a failed write keeps none. */
+    const commit = async (next: Partial<Counts>): Promise<void> => {
+      await writeJournal(next)
+      if (next.botAdds !== undefined) botAdds = next.botAdds
+      if (next.transientRetries !== undefined)
+        transientRetries = next.transientRetries
+      if (next.addedIds !== undefined) addedIds = next.addedIds
+    }
     // The bot cannot use a link, so a bot that never shows would cost an
     // add on every retry: each call that may reach it counts (`sending`).
     if (absent.includes(PROVISIONING_BOT_ID) && botAdds >= MAX_BOT_ADDS) {
@@ -944,17 +1008,38 @@ export async function provisionSetup(params: {
     // it can never lead to a second add. Only a known refusal of the whole
     // call (a flood, a hold, or a per-user 400) is taken back.
     const sending = async (userIds: number[]): Promise<void> => {
-      for (const id of userIds)
-        if (id === PROVISIONING_BOT_ID) botAdds++
-        else addedIds.add(id)
-      await writeJournal()
+      // After shutdown the client is destroyed and no call leaves the
+      // process, so nobody may be marked possibly added.
+      if (params.signal?.aborted)
+        throw new DOMException("Worker is shutting down", "AbortError")
+      const people = userIds.filter((id) => id !== PROVISIONING_BOT_ID)
+      await commit({
+        botAdds: botAdds + (userIds.length - people.length),
+        addedIds: new Set([...addedIds, ...people]),
+      })
+      // Shutdown during that write: the call will not be sent.
+      if (params.signal?.aborted) {
+        await notAdded(userIds)
+        throw new DOMException("Worker is shutting down", "AbortError")
+      }
     }
+    /**
+     * Takes back a call Telegram refused for certain. The refusal is a
+     * fact, so it is kept in memory even if this write fails: the run's
+     * final save journals it. The caller rethrows the Telegram error so its
+     * retry time is kept.
+     */
     const notAdded = async (userIds: number[]): Promise<void> => {
       if (!userIds.length) return
-      for (const id of userIds)
-        if (id === PROVISIONING_BOT_ID) botAdds--
-        else addedIds.delete(id)
-      await writeJournal()
+      const people = new Set(userIds.filter((id) => id !== PROVISIONING_BOT_ID))
+      const next = {
+        botAdds: botAdds - (userIds.length - people.size),
+        addedIds: new Set([...addedIds].filter((id) => !people.has(id))),
+      }
+      await commit(next).catch(() => {
+        botAdds = next.botAdds
+        addedIds = next.addedIds
+      })
     }
     const refusedWhole = (error: unknown): boolean =>
       isPerUserAddError(error) ||
@@ -996,6 +1081,9 @@ export async function provisionSetup(params: {
         await addEach(absent)
       }
     } else await addEach(absent)
+    // This run got past the adds, so earlier transient add failures no
+    // longer count toward the limit.
+    if (transientRetries) await commit({ transientRetries: 0 })
     // With a participant listing, the final audit verifies the adds.
     const listed = createdNow && Boolean(telegram.members)
     // Telegram can accept an add before the member shows up: read again
@@ -1293,15 +1381,41 @@ export async function provisionSetup(params: {
     if (authoritative.state === "ready") return authoritative
     let diagnostic = safeProvisionDiagnostic(error, step)
     let retryAt = provisionRetryAt(error)
-    // Counted per setup and never reset by the worker: a setup that keeps
-    // failing this way stops for an operator, so it cannot hold the
-    // account or keep sending adds.
+    // Only add calls count: their effect is uncertain and they spend the
+    // custody budget. Reads, approvals, and promotions spend no add, and a
+    // run cut short by worker shutdown is not Telegram's failure. The count
+    // resets once a run gets past the adds.
+    const transient = isTransientTelegramError(error) && !params.signal?.aborted
     if (
-      isTransientTelegramError(error) &&
+      step === "add_member" &&
+      transient &&
       ++transientRetries >= MAX_TRANSIENT_RETRIES
     ) {
       diagnostic = `${step}:${TRANSIENT_LIMIT}`
       retryAt = null
+    }
+    // Other steps spend no add but keep the account busy in Deal Desk, so
+    // runs that keep stopping there also end with an operator, after about
+    // an hour. `stalledStep` is the furthest step a counted stall reached:
+    // only a run that stops beyond it made progress and starts over. A stop
+    // at an earlier step counts, a flood or hold has its own retry time and
+    // leaves the count alone, and so does a shutdown. `create_invitation`
+    // runs at several points; its one place in `STEP_ORDER` only means a
+    // stall there may count instead of resetting.
+    const furthest = STEP_ORDER.indexOf(stalledStep as ProvisionStep)
+    const beyond = furthest < 0 || STEP_ORDER.indexOf(step) > furthest
+    if (params.signal?.aborted || isFloodOrHold(error)) {
+      // No progress either way.
+    } else if (transient && step !== "add_member") {
+      if (beyond) stalledStep = step
+      stalledRuns = beyond ? 1 : stalledRuns + 1
+      if (stalledRuns >= MAX_STALLED_RUNS) {
+        diagnostic = `${step}:${TRANSIENT_LIMIT}`
+        retryAt = null
+      }
+    } else if (beyond) {
+      stalledRuns = 0
+      stalledStep = undefined
     }
     await save({
       state: "incomplete",

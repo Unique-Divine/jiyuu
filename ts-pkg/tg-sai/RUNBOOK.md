@@ -470,6 +470,12 @@ sudo -u sai-custody-worker env TG_SAI_DIR=/var/lib/sai-custody-worker HOME=/var/
 `state.db` still apply, and `tg-sai events` reads whatever was recorded
 before.
 
+`state.db` migrations are forward-only. Once a worker applies one, such as
+`0005-member-add-uncertain.sql`, an older binary refuses the file, the hold
+check reports `TG_SAI_HOLD_STATE_UNAVAILABLE`, and setup work stops. To
+undo a release, roll forward to a fixed build; do not reinstall the older
+binary against the same `state.db`.
+
 ## File roles
 
 | File | Role |
@@ -660,16 +666,24 @@ for an operator once the invitation expires.
 A setup left `incomplete` with a `retryAt` resumes on its own. One without
 a `retryAt` waits for an operator. Resumed jobs read each member before
 adding, so a retry never adds someone who is already in the chat. The
-receipt also lists everyone an add call reached or may have reached
-(`addedIds`, including adds that timed out). A resume that finds one of
-them absent gives them an `added_not_visible` link instead of adding them
-again, whatever step the earlier run stopped at.
+receipt also lists everyone an add call may have reached (`addedIds`). It
+is written before each call is sent and taken back only when Telegram
+refused the call (a flood, a hold, or a per-user 400). A resume that finds
+one of them absent gives them an `added_not_visible` link instead of
+adding them again, whatever step the earlier run stopped at.
+
+A timed-out add means the person joins by link. When a batch add times out,
+everyone in it counts as possibly added, so each required person still
+absent gets a link, even if Telegram never ran the batch. This trades a
+link for the requester and team admins against any second add, in line
+with the links-first direction. Only the bot, which cannot use a link, is
+added once more.
 
 | Error | Meaning | Retry |
 | --- | --- | --- |
 | `FLOOD_WAIT_N`, `PEER_FLOOD`, `TG_SAI_HOLD_N` | Account flood limit or saved hold | When the hold ends |
-| `TG_SAI_TRANSIENT` | Timeout, dropped connection, Telegram server error, worker shutdown | 5 min, at most 3 failures per setup |
-| `TG_SAI_TRANSIENT_LIMIT` | The setup's third transient failure | Operator |
+| `TG_SAI_TRANSIENT` | Timeout, dropped connection, Telegram server error, worker shutdown | 5 min; at most 3 add-call failures, or 12 runs stopped at another step |
+| `TG_SAI_TRANSIENT_LIMIT` | `add_member:` after the third add-call failure; any other step after 12 runs in a row stopped there | Operator |
 | `TG_SAI_HOLD_STATE_UNAVAILABLE`, `TG_SAI_HOLD_ACCOUNT_UNKNOWN`, `TG_SAI_QUEUE_UNAVAILABLE` | Local `state.db` or session account not readable | 5 min |
 | `TG_SAI_MEMBER_NOT_VISIBLE` | Added or promoted, but not shown in the chat yet; the person gets an `added_not_visible` link | 15 min |
 | `TG_SAI_BOT_NOT_VISIBLE` | Bot added but not shown yet | 15 min, one re-add |
@@ -686,19 +700,39 @@ invited the user, so it counts toward today's adds (`member_add` outcome
 `uncertain`) and the background daily cap. In the background queue it also
 counts as an attempt. mtcute does not resend create, add, or approval calls
 after a server error (`PROVISION_WRITE_PARAMS`); the error reaches these
-counters instead. A worker restart during a Telegram call also counts as a
-transient failure.
+counters instead. A background add cut off by a worker restart also counts
+toward today's adds, but not as an attempt.
 
-Both limits are counters in the receipt (`botAdds`, `transientRetries`).
-The worker never resets them, and Deal Desk recovery does not touch the
-receipt. To recover:
+Two counts lead to `TG_SAI_TRANSIENT_LIMIT`:
+
+- Add calls (`transientRetries`): the third transient failure stops the
+  setup. The count resets once a run gets past the adds.
+- Every other step (`stalledRuns`): reads, approvals, marker checks,
+  promotions, the final listing, and link creation spend no add, but each
+  retry keeps the account busy in Deal Desk and pauses the background
+  queue. The receipt keeps the furthest step a counted stall reached
+  (`stalledStep`). Every stall at or before it counts; the twelfth, about
+  an hour, stops the setup. Only a run that stops beyond that step starts
+  the count over. A flood or hold leaves the count alone.
+
+A run cut short by worker shutdown counts toward neither. Reads, the
+identity checks, and promotions resend after a Telegram server error at
+most three times and give up after 30 s (`PROVISION_READ_PARAMS`), so a
+persistent server error reaches these counts instead of looping inside one
+call. Creating a controlled invitation is never resent
+(`PROVISION_LINK_PARAMS`), since each resend could mint another link.
+
+These limits are counters in the receipt (`botAdds`, `transientRetries`,
+`stalledRuns`). The worker resets the transient ones only as described
+above, and Deal Desk recovery does not touch the receipt. To recover:
 
 1. `TG_SAI_BOT_ADDS_EXHAUSTED`: check the chat with
    `tg-sai audit --chat <chat-id> --target-user 8983431101`. If the bot is
    absent, have a team admin add it, or decide to spend one more custody add
    by clearing the counter below. Then run `chat-setups recover`.
 2. `TG_SAI_TRANSIENT_LIMIT`: check that Telegram and the worker host are
-   healthy, clear `transientRetries`, then run `chat-setups recover`.
+   healthy. For `add_member:` clear `transientRetries`; for any other step
+   clear `stalledRuns` and `stalledStep`. Then run `chat-setups recover`.
 
 Clear a counter with the worker stopped. `$f` is the receipt path from the
 lookup above:
