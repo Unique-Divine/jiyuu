@@ -667,8 +667,10 @@ for an operator once the invitation expires.
 
 ### Setup Failure Paths
 
-A setup left `incomplete` with a `retryAt` resumes on its own. One without
-a `retryAt` waits for an operator. Resumed jobs read each member before
+A setup left `incomplete` with a `retryAt` resumes on its own. Deal Desk
+releases its worker claim on that save, so other setups for the account run
+until the retry is due; the worker claims it again before it resumes or
+saves a longer hold. One without a `retryAt` waits for an operator. Resumed jobs read each member before
 adding, so a retry never adds someone who is already in the chat. The
 receipt also lists everyone an add call may have reached (`addedIds`). It
 is written before each call is sent and taken back only when Telegram

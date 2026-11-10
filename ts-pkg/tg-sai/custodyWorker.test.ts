@@ -597,6 +597,33 @@ test("a setup that already has its chat ignores create holds", async () => {
   }
 })
 
+test("a held setup whose retry released its claim is claimed before the hold is saved", async () => {
+  const now = Date.parse("2026-11-06T00:00:00Z")
+  const untilMs = now + 600_000
+  const f = fixture()
+  f.setup = {
+    ...f.setup,
+    state: "incomplete",
+    chatId: -100123,
+    binding: { participants: [1912700300], admins: [1912700300] },
+    retryAt: new Date(now - 1000).toISOString(),
+  }
+  delete f.setup.claimToken
+  hold(f.holds, "invite", untilMs)
+  const held = await runWorkerOnce(
+    { custodyProfile: "custody", workerId: "stable", run: true, now },
+    f,
+  )
+  expect(held.results[0]).toMatchObject({
+    state: "waiting",
+    retryAt: new Date(untilMs).toISOString(),
+    error: "TG_SAI_HOLD_600",
+  })
+  expect(f.calls.filter((c) => c === "claim" || c.startsWith("progress:")))
+    .toEqual(["claim", "progress:private-token"])
+  expect(f.calls).not.toContain("telegram")
+})
+
 test("a hold about to end reports retryAt at least 30 s out, once", async () => {
   const now = Date.parse("2026-11-06T00:00:00Z")
   const f = fixture()

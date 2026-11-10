@@ -289,7 +289,9 @@ export async function runWorkerOnce(
       setupHoldGroups(setup),
     )
     if (hold) {
-      results.push(await reportHold(deps.cloud, setup, hold, nowMs))
+      results.push(
+        await reportHold(deps.cloud, setup, hold, nowMs, options.workerId),
+      )
       continue
     }
     try {
@@ -356,17 +358,20 @@ export async function runWorkerOnce(
 }
 
 /**
- * Waiting result for a held account. An incomplete setup this worker already
- * holds the claim for gets `cloudRetryAt` of the hold's end as its cloud
- * `retryAt`, through the
- * same `progress` call a flood retry uses, so Deal Desk shows the time. Other
- * setups are not claimed; Deal Desk cannot store a `retryAt` for them.
+ * Waiting result for a held account. An incomplete setup gets
+ * `cloudRetryAt` of the hold's end as its cloud `retryAt`, through the same
+ * `progress` call a flood retry uses, so Deal Desk shows the time and does
+ * not serve it again until then. Deal Desk releases the claim on every
+ * `incomplete` save with a `retryAt`, so the worker claims it first when it
+ * holds no claim. Other setups are not claimed; Deal Desk cannot store a
+ * `retryAt` for them.
  */
 async function reportHold(
   cloud: ProvisionCloud,
   setup: Setup,
   hold: { untilMs: number; code: string },
   nowMs: number,
+  workerId: string,
 ): Promise<WorkerResult> {
   // Same value provisioning saves for a hold, so the cloud time never ends
   // before the local hold and the next tick does not report it again.
@@ -379,9 +384,13 @@ async function reportHold(
     retryAt,
     error: hold.code,
   }
-  if (setup.state !== "incomplete" || !setup.claimToken) return result
+  if (setup.state !== "incomplete") return result
   try {
-    await cloud.progress(setup.requestId, setup.claimToken, {
+    const claimToken =
+      setup.claimToken ??
+      (await cloud.claim(setup.requestId, workerId)).claimToken
+    if (!claimToken) throw new Error("Cloud did not return a claim token")
+    await cloud.progress(setup.requestId, claimToken, {
       state: "incomplete",
       ...(setup.chatId ? { chatId: setup.chatId } : {}),
       ...(setup.binding ? { binding: setup.binding } : {}),
