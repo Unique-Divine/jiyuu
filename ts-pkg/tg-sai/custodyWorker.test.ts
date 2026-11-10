@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test"
+import { expect, setSystemTime, test } from "bun:test"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -18,7 +18,8 @@ import { HoldStore } from "./state/holds"
 import type { HoldGroup } from "./state/holds"
 import type { TelemetryEvent } from "./telemetry/db"
 import { addCustodyWorkerCommands } from "./custodyWorkerCli"
-import { MIN_CLOUD_RETRY_MS } from "./provisioning"
+import { MIN_CLOUD_RETRY_MS, PROVISIONING_BOT_ID } from "./provisioning"
+import type { JournalRecord, Member } from "./provisioning"
 import type { Progress, Setup, TelegramProvisioner } from "./provisioning"
 import { CliProvisionCloud } from "./provisioningCloud"
 
@@ -717,4 +718,129 @@ test("a failing drain is reported in the tick, never thrown", async () => {
       lastRecordedMs: 0,
     }),
   ).toBe(false)
+})
+
+test("a member added but never visible waits without stalling the drain, then blocks", async () => {
+  const start = Date.parse("2026-11-10T00:00:00Z")
+  setSystemTime(start)
+  try {
+    const f = fixture()
+    const chatId = -100555
+    f.setup = {
+      ...f.setup,
+      state: "configuring",
+      chatId,
+      binding: { participants: [1912700300], admins: [1912700300] },
+    }
+    let local: JournalRecord | null = null
+    const journal = {
+      read: async () => structuredClone(local),
+      write: async (_id: string, record: JournalRecord) => {
+        local = structuredClone(record)
+      },
+    }
+    const members = new Map<number, Member>([
+      [CUSTODY_USER_ID, { role: "creator", rights: {} }],
+      [PROVISIONING_BOT_ID, { role: "member", rights: {} }],
+    ])
+    const adds: number[] = []
+    const adapter = {
+      self: async () => CUSTODY_USER_ID,
+      verifyMarker: async () => true,
+      member: async (_chat: number, id: number) =>
+        members.get(id) ?? { role: "absent", rights: {} },
+      // Telegram accepts the add, but the member never shows up.
+      add: async (_chat: number, id: number) => {
+        adds.push(id)
+      },
+      inviteLink: async () => ({
+        inviteLink: "https://t.me/+notVisible",
+        expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+      }),
+      approveJoin: async () => false,
+      promote: async () => {},
+      resolve: async () => ({ id: 0, isBot: false }),
+      create: async () => chatId,
+      candidates: async () => [],
+    } as unknown as TelegramProvisioner
+    const telegram = async <T>(
+      _setup: Setup,
+      operation: (adapter: TelegramProvisioner) => Promise<T>,
+    ) => operation(adapter)
+    let drains = 0
+    const drain = async () => {
+      drains++
+      return { state: "idle" as const }
+    }
+    const deps = { ...f, journal, telegram, drain }
+    const tick = () =>
+      runWorkerOnce(
+        { custodyProfile: "custody", workerId: "stable", run: true },
+        deps,
+      )
+
+    // Tick 1 runs the job: one add, then a link and a 15-minute retry.
+    const first = await tick()
+    expect(first.results[0]?.state).toBe("incomplete")
+    expect(first.results[0]?.retryAt).toBeTruthy()
+    expect(f.setup.error).toBe("verify_added_member:TG_SAI_MEMBER_NOT_VISIBLE")
+    expect(adds).toEqual([1912700300])
+    expect(drains).toBe(0)
+
+    // While it waits on the invited member, background adds still run.
+    setSystemTime(start + 60_000)
+    const waiting = await tick()
+    expect(waiting.results[0]?.state).toBe("waiting")
+    expect(waiting.requesterWork).toBe(false)
+    expect(drains).toBe(1)
+
+    // Resumes before expiry never add again.
+    setSystemTime(start + 16 * 60_000)
+    await tick()
+    expect(adds).toEqual([1912700300])
+
+    // After the invitation expires the job stops for an operator.
+    setSystemTime(start + 25 * 3_600_000)
+    const expired = await tick()
+    expect(expired.results[0]?.state).toBe("incomplete")
+    expect(f.setup.error).toBe("verify_added_member:TG_SAI_INVITATION_EXPIRED")
+    expect(f.setup.retryAt).toBeNull()
+    const blocked = await tick()
+    expect(blocked.results[0]).toMatchObject({
+      state: "blocked",
+      error: "operator_recovery_required",
+    })
+    expect(blocked.background).toBeDefined()
+    expect(adds).toEqual([1912700300])
+  } finally {
+    setSystemTime()
+  }
+})
+
+test("other waiting jobs still hold up the drain", async () => {
+  const f = fixture()
+  let drains = 0
+  const drain = async () => {
+    drains++
+    return { state: "idle" as const }
+  }
+  for (const error of [
+    "add_member:FLOOD_WAIT_600",
+    "verify_added_member:provisioning_step_failed",
+    null,
+  ]) {
+    f.setup = {
+      ...f.setup,
+      state: "incomplete",
+      retryAt: "2100-01-01T00:00:00Z",
+      error,
+    }
+    const result = await runWorkerOnce(
+      { custodyProfile: "custody", workerId: "stable", run: true },
+      { ...f, drain },
+    )
+    expect(result.results[0]?.state).toBe("waiting")
+    expect(result.requesterWork).toBe(true)
+  }
+  expect(drains).toBe(0)
 })

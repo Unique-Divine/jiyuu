@@ -1351,13 +1351,11 @@ describe("added but not visible", () => {
     expect(f.events).toContain("promote:22")
   })
 
-  test("a refused approval leaves the member invited", async () => {
+  test("no waiting join request leaves the member invited", async () => {
     const f = fixture()
     const h = hiding(f, new Set([22]))
     await expect(f.run(h.sleep)).rejects.toThrow("incomplete")
-    f.telegram.approveJoin = async () => {
-      throw Object.assign(new Error("refused"), { text: "CHAT_ADMIN_REQUIRED" })
-    }
+    f.telegram.approveJoin = async () => false
     f.events.length = 0
     await expect(f.run(h.sleep)).rejects.toThrow("incomplete")
     expect((f.setup as Setup & { error: string }).error).toBe(
@@ -1366,7 +1364,65 @@ describe("added but not visible", () => {
     expect(f.events.filter((e) => e.startsWith("add:"))).toEqual([])
   })
 
-  test("an expired invitation lets a resumed job add the member again", async () => {
+  test("an approval error is saved with its own code and retry time", async () => {
+    const f = fixture()
+    const h = hiding(f, new Set([22]))
+    await expect(f.run(h.sleep)).rejects.toThrow("incomplete")
+    f.telegram.approveJoin = async () => {
+      throw Object.assign(new Error("flood"), {
+        code: 420,
+        text: "FLOOD_WAIT_600",
+      })
+    }
+    f.events.length = 0
+    const before = Date.now()
+    await expect(f.run(h.sleep)).rejects.toThrow("incomplete")
+    const setup = f.setup as Setup & { error: string }
+    expect(setup.error).toBe("approve_join:FLOOD_WAIT_600")
+    expect(Date.parse(setup.retryAt!) - before).toBeGreaterThanOrEqual(600_000)
+    expect(f.events.filter((e) => e.startsWith("add:"))).toEqual([])
+
+    f.telegram.approveJoin = async () => {
+      throw Object.assign(new Error("x"), { code: 400, text: "CHAT_ADMIN_REQUIRED" })
+    }
+    await expect(f.run(h.sleep)).rejects.toThrow("incomplete")
+    expect((f.setup as Setup & { error: string }).error).toBe(
+      "approve_join:CHAT_ADMIN_REQUIRED",
+    )
+    expect(f.setup.retryAt).toBeNull()
+  })
+
+  test("an expired invitation stops for an operator instead of adding again", async () => {
+    const f = fixture()
+    const h = hiding(f, new Set([22]))
+    await expect(f.run(h.sleep)).rejects.toThrow("incomplete")
+    const expire = () => {
+      f.local = {
+        ...f.local!,
+        pendingInvitations: f.local!.pendingInvitations!.map((i) => ({
+          ...i,
+          expiresAt: new Date(Date.now() - 1000).toISOString(),
+        })),
+      }
+    }
+    expire()
+    f.events.length = 0
+    await expect(f.run(h.sleep)).rejects.toThrow("incomplete")
+    const setup = f.setup as Setup & { error: string }
+    expect(setup.error).toBe("verify_added_member:TG_SAI_INVITATION_EXPIRED")
+    expect(setup.retryAt).toBeNull()
+    expect(f.events.filter((e) => e.startsWith("add:"))).toEqual([])
+    expect(h.links).toEqual([22])
+
+    // An operator resume stays stopped until the person is in.
+    await expect(f.run(h.sleep)).rejects.toThrow("incomplete")
+    expect(f.events.filter((e) => e.startsWith("add:"))).toEqual([])
+    f.members.set(22, { role: "member", rights: {} })
+    expect((await f.run(h.sleep)).state).toBe("ready")
+    expect(f.events.filter((e) => e.startsWith("add:"))).toEqual([])
+  })
+
+  test("an expired invitation with a waiting request is approved", async () => {
     const f = fixture()
     const h = hiding(f, new Set([22]))
     await expect(f.run(h.sleep)).rejects.toThrow("incomplete")
@@ -1377,10 +1433,72 @@ describe("added but not visible", () => {
         expiresAt: new Date(Date.now() - 1000).toISOString(),
       })),
     }
+    f.telegram.approveJoin = async (_chat, userId) => {
+      f.members.set(userId, { role: "member", rights: {} })
+      return true
+    }
+    expect((await f.run(h.sleep)).state).toBe("ready")
+    expect(f.events.filter((e) => e === "add:22")).toHaveLength(1)
+  })
+
+  test("approval goes only to members invited as not visible", async () => {
+    const f = fixture()
+    const h = hiding(f, new Set([22]))
+    await expect(f.run(h.sleep)).rejects.toThrow("incomplete")
+    // Required user 21 left the chat; one case adds a background-queue
+    // invitation for them, which must not count as a not-visible one.
+    f.members.delete(21)
+    const approvals: number[] = []
+    f.telegram.approveJoin = async (_chat, userId) => {
+      approvals.push(userId)
+      return false
+    }
+    for (const withBackgroundLink of [false, true]) {
+      if (withBackgroundLink)
+        f.local = {
+          ...f.local!,
+          pendingInvitations: [
+            ...f.local!.pendingInvitations!,
+            {
+              userId: "21",
+              inviteLink: "https://t.me/+shared",
+              expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+              reason: "background_queue",
+            },
+          ],
+        }
+      f.events.length = 0
+      approvals.length = 0
+      f.members.delete(21)
+      await expect(f.run(h.sleep)).rejects.toThrow("incomplete")
+      expect(approvals).toEqual([22])
+      expect(f.events.filter((e) => e.startsWith("add:"))).toEqual(["add:21"])
+    }
+  })
+
+  test("a per-user add failure still saves the not-visible invitation first", async () => {
+    const f = fixture()
+    const h = hiding(f, new Set([22]))
+    f.telegram.add = async (_chat, id) => {
+      f.events.push(`add:${id}`)
+      if (id === 21)
+        throw Object.assign(new Error("privacy"), {
+          code: 403,
+          text: "USER_PRIVACY_RESTRICTED",
+        })
+      if (id !== 22) f.members.set(id, { role: "member", rights: {} })
+    }
+    await expect(f.run(h.sleep)).rejects.toThrow("incomplete")
+    const setup = f.setup as Setup & { error: string }
+    expect(setup.error).toBe("add_member:USER_PRIVACY_RESTRICTED")
+    expect(setup.retryAt).toBeNull()
+    expect(
+      f.local?.pendingInvitations?.map((i) => [i.userId, i.reason]),
+    ).toEqual([["22", NOT_VISIBLE_INVITATION_REASON]])
+    // The operator's resume retries 21 but never adds 22 again.
     f.events.length = 0
     await expect(f.run(h.sleep)).rejects.toThrow("incomplete")
-    expect(f.events).toContain("add:22")
-    expect(h.links).toEqual([22, 22])
+    expect(f.events.filter((e) => e.startsWith("add:"))).toEqual(["add:21"])
   })
 
   test("a bot that is not visible still fails the setup", async () => {

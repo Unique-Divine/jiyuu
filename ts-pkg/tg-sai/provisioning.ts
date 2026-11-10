@@ -35,6 +35,8 @@ export interface Setup extends ProvisionRequest {
   claimToken?: string
   receipt?: unknown
   retryAt?: string | null
+  /** Last saved diagnostic, `<step>:<code>`, when the cloud reports one. */
+  error?: string | null
 }
 export interface Member {
   role: "creator" | "admin" | "member" | "absent"
@@ -355,7 +357,7 @@ export function safeProvisionError(error: unknown): string {
           String(Number.isSafeInteger(e.seconds) ? e.seconds : "UNKNOWN"),
         )
       : ""
-  return /^(?:FLOOD(?:_PREMIUM)?_WAIT_(?:\d{1,10}|UNKNOWN)|PEER_FLOOD|TG_SAI_HOLD_\d{1,10}|TG_SAI_HOLD_STATE_UNAVAILABLE|TG_SAI_MEMBER_NOT_VISIBLE|USER_PRIVACY_RESTRICTED|USER_NOT_MUTUAL_CONTACTS?|USER_NOT_PARTICIPANT|USER_CHANNELS_TOO_MUCH|USER_BOT|USER_ID_INVALID|PEER_ID_INVALID|CHAT_ID_INVALID|CHANNEL_INVALID|CHANNEL_PRIVATE|CHAT_ADMIN_REQUIRED|CHAT_WRITE_FORBIDDEN|USER_ADMIN_INVALID|USER_CREATOR|ADMINS_TOO_MUCH|BOTS_TOO_MUCH|BOT_GROUPS_BLOCKED|RIGHT_FORBIDDEN|USER_RESTRICTED|USER_DEACTIVATED|INPUT_USER_DEACTIVATED|CHANNELS_TOO_MUCH|USERS_TOO_MUCH|AUTH_KEY_UNREGISTERED|SESSION_REVOKED|INVITE_HASH_EXPIRED|INVITE_HASH_INVALID|INVITE_REQUEST_SENT)$/.test(
+  return /^(?:FLOOD(?:_PREMIUM)?_WAIT_(?:\d{1,10}|UNKNOWN)|PEER_FLOOD|TG_SAI_HOLD_\d{1,10}|TG_SAI_HOLD_STATE_UNAVAILABLE|TG_SAI_MEMBER_NOT_VISIBLE|TG_SAI_INVITATION_EXPIRED|USER_PRIVACY_RESTRICTED|USER_NOT_MUTUAL_CONTACTS?|USER_NOT_PARTICIPANT|USER_CHANNELS_TOO_MUCH|USER_BOT|USER_ID_INVALID|PEER_ID_INVALID|CHAT_ID_INVALID|CHANNEL_INVALID|CHANNEL_PRIVATE|CHAT_ADMIN_REQUIRED|CHAT_WRITE_FORBIDDEN|USER_ADMIN_INVALID|USER_CREATOR|ADMINS_TOO_MUCH|BOTS_TOO_MUCH|BOT_GROUPS_BLOCKED|RIGHT_FORBIDDEN|USER_RESTRICTED|USER_DEACTIVATED|INPUT_USER_DEACTIVATED|CHANNELS_TOO_MUCH|USERS_TOO_MUCH|AUTH_KEY_UNREGISTERED|SESSION_REVOKED|INVITE_HASH_EXPIRED|INVITE_HASH_INVALID|INVITE_REQUEST_SENT)$/.test(
     normalized,
   )
     ? normalized
@@ -425,12 +427,25 @@ export const HOLD_STATE_UNAVAILABLE_RETRY_MS = 5 * 60 * 1000
  * setup retries after `MEMBER_NOT_VISIBLE_RETRY_MS` without adding again.
  */
 export const MEMBER_NOT_VISIBLE = "TG_SAI_MEMBER_NOT_VISIBLE"
+/**
+ * Code for a member whose `added_not_visible` invitation expired before they
+ * joined. The setup is saved without `retryAt`, so it needs an operator; the
+ * worker never adds that member again.
+ */
+export const INVITATION_EXPIRED = "TG_SAI_INVITATION_EXPIRED"
 /** Retry delay while an added member is not yet visible. */
 export const MEMBER_NOT_VISIBLE_RETRY_MS = 15 * 60 * 1000
 /** Wait before re-reading a member whose add succeeded but who is absent. */
 export const MEMBER_RECHECK_MS = 3000
 /** `reason` of the invitation for a member added but not yet visible. */
 export const NOT_VISIBLE_INVITATION_REASON = "added_not_visible"
+
+/** Whether a saved setup is waiting for an invited member to join. */
+export function waitingOnInvitedMember(setup: {
+  error?: string | null
+}): boolean {
+  return setup.error === `verify_added_member:${MEMBER_NOT_VISIBLE}`
+}
 /** Telegram gives no duration for `PEER_FLOOD`; holds use 24 h. */
 export const PEER_FLOOD_RETRY_MS = PEER_FLOOD_WAIT_S * 1000
 /**
@@ -527,8 +542,10 @@ async function controlledInvitation(
  *
  * A person whose add succeeded but who is still absent after one re-check
  * gets a controlled invitation instead of a failed setup. The setup stays
- * `incomplete` with a `retryAt`, and a resumed job does not add anyone who
- * holds a live invitation: it waits for them to join by link.
+ * `incomplete` with a `retryAt`, and a resumed job never adds that person
+ * again: it approves their join request, if one is waiting, and otherwise
+ * waits. Once the invitation expires, the setup is saved without `retryAt`
+ * (`TG_SAI_INVITATION_EXPIRED`) for an operator.
  */
 export async function provisionSetup(params: {
   setup: Setup
@@ -714,14 +731,15 @@ export async function provisionSetup(params: {
     const optional = new Set(binding.optionalParticipants ?? [])
     const required = binding.participants.filter((id) => !optional.has(id))
     const absent: number[] = []
-    // Added earlier but not yet visible: wait for the link, never re-add.
+    // Added earlier but not yet visible: never add again. A live
+    // invitation means wait; an expired one means stop for an operator.
     const invited: number[] = []
-    const liveInvitation = (userId: number) =>
-      pendingInvitations.some(
+    const expired: number[] = []
+    const notVisibleInvitation = (userId: number) =>
+      pendingInvitations.find(
         (i) =>
           i.userId === String(userId) &&
-          i.reason === NOT_VISIBLE_INVITATION_REASON &&
-          Date.parse(i.expiresAt) > Date.now(),
+          i.reason === NOT_VISIBLE_INVITATION_REASON,
       )
     if (createdNow) {
       // The worker just created this chat: only the custody account is in
@@ -733,22 +751,29 @@ export async function provisionSetup(params: {
         step = "read_member"
         const member = await telegram.member(chatId, userId)
         if (member.role !== "absent") continue
-        if (liveInvitation(userId)) invited.push(userId)
-        else absent.push(userId)
+        const invitation = notVisibleInvitation(userId)
+        if (!invitation) absent.push(userId)
+        else if (Date.parse(invitation.expiresAt) > Date.now())
+          invited.push(userId)
+        else expired.push(userId)
       }
       // A controlled invitation needs approval: approve only the people it
-      // was made for.
-      for (const userId of [...invited]) {
-        if (!telegram.approveJoin) break
-        step = "approve_join"
-        // A refused approval leaves the person invited; the retry tries again.
-        const approved = await telegram
-          .approveJoin(chatId, userId)
-          .catch(() => false)
-        if (!approved) continue
-        step = "read_member"
-        if ((await telegram.member(chatId, userId)).role !== "absent")
-          invited.splice(invited.indexOf(userId), 1)
+      // was made for. Errors other than "no request" propagate, so a flood
+      // is saved with its own retry time.
+      for (const list of [invited, expired])
+        for (const userId of [...list]) {
+          if (!telegram.approveJoin) break
+          step = "approve_join"
+          if (!(await telegram.approveJoin(chatId, userId))) continue
+          step = "read_member"
+          if ((await telegram.member(chatId, userId)).role !== "absent")
+            list.splice(list.indexOf(userId), 1)
+        }
+      if (expired.length) {
+        step = "verify_added_member"
+        throw Object.assign(new Error("Member invitation expired"), {
+          text: INVITATION_EXPIRED,
+        })
       }
     }
     // Per-user refusals (privacy, USER_*/CHAT_* 400s) never stop the other
@@ -809,12 +834,8 @@ export async function provisionSetup(params: {
           })
         else notVisible.push(userId)
     }
-    for (const userId of absent) {
-      const failure = failures.get(userId)
-      if (!failure) continue
-      step = failure.step
-      throw failure.error
-    }
+    // Saved before any per-user failure is thrown, so a later resume never
+    // adds a not-visible member again.
     if (notVisible.length) {
       // One shared link: the first person to need it decides its owner.
       step = "create_invitation"
@@ -842,6 +863,12 @@ export async function provisionSetup(params: {
         workerId,
         pendingInvitations,
       })
+    }
+    for (const userId of absent) {
+      const failure = failures.get(userId)
+      if (!failure) continue
+      step = failure.step
+      throw failure.error
     }
     if (notVisible.length || invited.length) {
       step = "verify_added_member"

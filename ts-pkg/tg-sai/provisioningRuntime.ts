@@ -378,8 +378,10 @@ export async function withProvisionTelegram<T>(
             })
             return true
           } catch (error) {
-            if ((error as { text?: unknown }).text === "HIDE_REQUESTER_MISSING")
-              return false
+            // No request from this user; any other error propagates.
+            const text = (error as { text?: unknown }).text
+            if (text === "HIDE_REQUESTER_MISSING") return false
+            if (text === "USER_ALREADY_PARTICIPANT") return true
             throw error
           }
         },
