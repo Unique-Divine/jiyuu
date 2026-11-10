@@ -658,16 +658,17 @@ function defaultSleep(ms: number): Promise<void> {
 /**
  * Whether a stop counts toward `MAX_STALLED_RUNS`: a transient error at a
  * step that spends no add, a local queue write that keeps failing, or a
- * person the final listing or a promotion keeps missing although a read
- * shows them (a real absence becomes a link wait at `verify_added_member`
- * on the next run instead).
+ * person or the bot the final listing or a promotion keeps missing
+ * although a read shows them. A real absence is found by the next run's
+ * read instead: a person waits on a link at `verify_added_member`, and the
+ * bot is added again under `MAX_BOT_ADDS`.
  */
 function stalled(error: unknown, step: ProvisionStep, transient: boolean) {
   const text = (error as { text?: unknown } | null)?.text
   return (
     (transient && step !== "add_member") ||
     text === QUEUE_UNAVAILABLE ||
-    (text === MEMBER_NOT_VISIBLE &&
+    ((text === MEMBER_NOT_VISIBLE || text === BOT_NOT_VISIBLE) &&
       (step === "audit_membership" || step.startsWith("promote_")))
   )
 }
@@ -1153,16 +1154,29 @@ export async function provisionSetup(params: {
     const invite = async (
       wanted: { userId: number; reason: string }[],
     ): Promise<void> => {
-      // A person who already holds a live link for the same reason keeps
-      // it: a step that keeps missing them must not mint a link every run.
+      const held = (userId: number, reason: string) =>
+        pendingInvitations.find(
+          (i) => i.userId === String(userId) && i.reason === reason,
+        )
+      // One `added_not_visible` link per person per setup. A step that keeps
+      // missing them reuses it, and once it expired the setup stops for an
+      // operator, whether this run's read showed them or not.
+      if (
+        wanted.some(
+          ({ userId, reason }) =>
+            reason === NOT_VISIBLE_INVITATION_REASON &&
+            Date.parse(held(userId, reason)?.expiresAt ?? "") <= Date.now(),
+        )
+      ) {
+        step = "verify_added_member"
+        throw Object.assign(new Error("Member invitation expired"), {
+          text: INVITATION_EXPIRED,
+        })
+      }
+      // A person who already holds a live link for the same reason keeps it.
       const entries = wanted.filter(
         ({ userId, reason }) =>
-          !pendingInvitations.some(
-            (i) =>
-              i.userId === String(userId) &&
-              i.reason === reason &&
-              Date.parse(i.expiresAt) > Date.now(),
-          ),
+          !(Date.parse(held(userId, reason)?.expiresAt ?? "") > Date.now()),
       )
       if (!entries.length) return
       // One shared link: the first person to need it decides its owner.

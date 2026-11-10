@@ -617,7 +617,9 @@ with error `verify_added_member:TG_SAI_MEMBER_NOT_VISIBLE` and a `retryAt`
   queue.
 - If the invitation expires first, the setup is saved with error
   `verify_added_member:TG_SAI_INVITATION_EXPIRED` and no `retryAt`, so the
-  worker reports `operator_recovery_required`. The worker never adds that
+  worker reports `operator_recovery_required`. This holds even on a run
+  whose read shows the person while the listing still misses them: the
+  worker never replaces an expired `added_not_visible` link. The worker never adds that
   person again, and every resume stops with the same code until they are in.
   To get them in:
   1. If they tapped the link before it expired, their request may still be
@@ -711,15 +713,15 @@ Two counts lead to `TG_SAI_TRANSIENT_LIMIT`:
 - Every other step (`stalledRuns`): reads, approvals, marker checks,
   promotions, the final listing, and link creation spend no add, but each
   retry keeps the account busy in Deal Desk and pauses the background
-  queue. A failed local queue write counts too, and so does a person a
-  read shows but the final listing or a promotion keeps missing. That
-  person keeps the one `added_not_visible` link they got; no run mints
-  another while it is live. The receipt keeps the furthest step a counted stall reached
-  (`stalledStep`). Every stall at or before it counts; the twelfth, about
-  an hour, stops the setup. A transient stop beyond that step starts the
-  count over, and so does any stop that is not transient, such as a link
-  wait (Telegram answered every call up to it). A flood or hold leaves the
-  count alone.
+  queue. A failed local queue write counts too, and so does a person or
+  the bot that a read shows but the final listing or a promotion keeps
+  missing. A person gets one `added_not_visible` link per setup; no run
+  mints a second. The receipt keeps the furthest step a counted stall
+  reached (`stalledStep`). Every stall at or before it counts; the
+  twelfth, about an hour, stops the setup. A transient stop beyond that
+  step starts the count over, and so does any stop that is not transient,
+  such as a link wait (Telegram answered every call up to it). A flood or
+  hold leaves the count alone.
 
 A run cut short by worker shutdown counts toward neither. Reads, the
 identity checks, and promotions resend after a Telegram server error at

@@ -13,6 +13,7 @@ import {
   cloudRetryAt,
   creationMarker,
   definiteCreateRejection,
+  INVITATION_EXPIRED,
   isPerUserAddError,
   isTransientTelegramError,
   MEMBER_NOT_VISIBLE,
@@ -2111,6 +2112,89 @@ describe("transient failure paths", () => {
     expect(runs).toBe(MAX_STALLED_RUNS)
     expect(errorOf(f)).toBe(`audit_membership:${TRANSIENT_LIMIT}`)
     expect(f.setup.retryAt).toBeNull()
+  })
+
+  test("a bot the listing or promotion keeps missing stops", async () => {
+    for (const where of ["listing", "promote"] as const) {
+      const f = fixture()
+      resumed(f)
+      for (const id of [21, 22])
+        f.members.set(id, { role: "member", rights: {} })
+      f.members.set(PROVISIONING_BOT_ID, { role: "member", rights: {} })
+      if (where === "listing")
+        f.telegram.members = async () => {
+          const listed = new Map(f.members)
+          listed.delete(PROVISIONING_BOT_ID)
+          return listed
+        }
+      else {
+        const promote = f.telegram.promote
+        f.telegram.promote = async (chat, id, rights) => {
+          if (id === PROVISIONING_BOT_ID)
+            throw rpc(400, "USER_NOT_PARTICIPANT")
+          await promote(chat, id, rights)
+        }
+      }
+      const runs = await runUntilStopped(f, 100)
+      expect(runs).toBe(MAX_STALLED_RUNS)
+      const stopStep = where === "listing" ? "audit_membership" : "promote_bot"
+      expect(errorOf(f)).toBe(`${stopStep}:${TRANSIENT_LIMIT}`)
+      expect(f.setup.retryAt).toBeNull()
+      // Reads always show the bot, so it is never added again.
+      const botAdds = f.events.filter((e) => e === `add:${PROVISIONING_BOT_ID}`)
+      expect(botAdds).toEqual([])
+    }
+  })
+
+  test("a person whose read flips gets one link and stops at its expiry", async () => {
+    // Expiry may land on a run whose read shows 21 or on one that does not.
+    for (const expireAfter of [6, 7]) {
+      const f = fixture()
+      resumed(f)
+      for (const id of [21, 22, PROVISIONING_BOT_ID])
+        f.members.set(id, { role: "member", rights: {} })
+      let links = 0
+      f.telegram.inviteLink = async () => {
+        links++
+        return {
+          inviteLink: "https://t.me/+flip",
+          expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+        }
+      }
+      // The listing never shows 21; a read shows them every other run.
+      f.telegram.members = async () => {
+        const listed = new Map(f.members)
+        listed.delete(21)
+        return listed
+      }
+      let run = 0
+      f.telegram.verifyMarker = async () => {
+        run++
+        return true
+      }
+      const member = f.telegram.member
+      f.telegram.member = async (chat, id) =>
+        id === 21 && run % 2 === 0
+          ? { role: "absent", rights: {} }
+          : member(chat, id)
+      for (let tick = 0; tick < expireAfter; tick++) {
+        await expect(f.run()).rejects.toThrow("incomplete")
+        expect(f.setup.retryAt).toBeTruthy()
+      }
+      // The link expires: the next run stops for an operator either way.
+      f.local = {
+        ...f.local!,
+        pendingInvitations: f.local!.pendingInvitations!.map((i) => ({
+          ...i,
+          expiresAt: new Date(Date.now() - 1000).toISOString(),
+        })),
+      }
+      await expect(f.run()).rejects.toThrow("incomplete")
+      expect(errorOf(f)).toBe(`verify_added_member:${INVITATION_EXPIRED}`)
+      expect(f.setup.retryAt).toBeNull()
+      expect(links).toBe(1)
+      expect(f.events.filter((e) => e === "add:21")).toEqual([])
+    }
   })
 
   test("a run that stops beyond the furthest stall starts over", async () => {
