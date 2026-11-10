@@ -10,7 +10,10 @@ import {
   creationMarker,
   definiteCreateRejection,
   isPerUserAddError,
+  MEMBER_NOT_VISIBLE_RETRY_MS,
+  MEMBER_RECHECK_MS,
   MIN_CLOUD_RETRY_MS,
+  NOT_VISIBLE_INVITATION_REASON,
   PROVISIONING_BOT_ID,
   provisionRetryAt,
   provisionSetup,
@@ -139,7 +142,7 @@ function fixture() {
     set local(value: JournalRecord | null) {
       local = value
     },
-    run: () =>
+    run: (sleep?: (ms: number) => Promise<void>) =>
       provisionSetup({
         setup,
         cloud,
@@ -147,6 +150,7 @@ function fixture() {
         telegram,
         workerId: "worker-one",
         background,
+        ...(sleep ? { sleep } : {}),
       }),
   }
 }
@@ -1252,4 +1256,156 @@ test("participant listing keys members by user and skips users who left", () => 
   expect([...roster.keys()]).toEqual([10, 22, 21])
   expect(roster.get(22)).toEqual({ role: "admin", rights: { inviteUsers: true } })
   expect(roster.get(21)?.role).toBe("member")
+})
+
+describe("added but not visible", () => {
+  /** `hidden` users accept the add call but never show up as members. */
+  function hiding(f: ReturnType<typeof fixture>, hidden: Set<number>) {
+    const links: number[] = []
+    const sleeps: number[] = []
+    f.telegram.add = async (_chat, id) => {
+      f.events.push(`add:${id}`)
+      if (!hidden.has(id)) f.members.set(id, { role: "member", rights: {} })
+    }
+    f.telegram.inviteLink = async (_chat, userId) => {
+      links.push(userId)
+      return {
+        inviteLink: "https://t.me/+notVisible",
+        expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+      }
+    }
+    const sleep = async (ms: number) => {
+      sleeps.push(ms)
+    }
+    return { links, sleeps, sleep }
+  }
+
+  test("a member who shows up on the re-check needs no link", async () => {
+    const f = fixture()
+    const h = hiding(f, new Set([22]))
+    const sleep = async (ms: number) => {
+      h.sleeps.push(ms)
+      f.members.set(22, { role: "member", rights: {} })
+    }
+    expect((await f.run(sleep)).state).toBe("ready")
+    expect(h.sleeps).toEqual([MEMBER_RECHECK_MS])
+    expect(h.links).toEqual([])
+    expect(f.events.filter((e) => e === "add:22")).toHaveLength(1)
+  })
+
+  test("a member still absent gets a link and a retry, not a failure", async () => {
+    const f = fixture()
+    const h = hiding(f, new Set([22]))
+    const before = Date.now()
+    await expect(f.run(h.sleep)).rejects.toThrow("incomplete")
+    const setup = f.setup as Setup & { error: string }
+    expect(setup.state).toBe("incomplete")
+    expect(setup.error).toBe("verify_added_member:TG_SAI_MEMBER_NOT_VISIBLE")
+    const retryMs = Date.parse(setup.retryAt!) - before
+    expect(retryMs).toBeGreaterThanOrEqual(MEMBER_NOT_VISIBLE_RETRY_MS)
+    expect(retryMs).toBeLessThan(MEMBER_NOT_VISIBLE_RETRY_MS + 60_000)
+    expect(h.sleeps).toEqual([MEMBER_RECHECK_MS])
+    expect(h.links).toEqual([22])
+    expect(
+      f.local?.pendingInvitations?.map((i) => [i.userId, i.reason]),
+    ).toEqual([["22", NOT_VISIBLE_INVITATION_REASON]])
+    expect(f.events).not.toContain("promote:22")
+  })
+
+  test("a resumed job waits for the invited member instead of adding again", async () => {
+    const f = fixture()
+    const h = hiding(f, new Set([22]))
+    await expect(f.run(h.sleep)).rejects.toThrow("incomplete")
+    f.events.length = 0
+
+    // Still absent: no add, no new link, still incomplete with a retry.
+    await expect(f.run(h.sleep)).rejects.toThrow("incomplete")
+    expect(f.events.filter((e) => e.startsWith("add:"))).toEqual([])
+    expect(h.links).toEqual([22])
+    expect(f.setup.retryAt).toBeTruthy()
+
+    // Joined by link: promoted and ready without another add.
+    f.members.set(22, { role: "member", rights: {} })
+    expect((await f.run(h.sleep)).state).toBe("ready")
+    expect(f.events.filter((e) => e.startsWith("add:"))).toEqual([])
+    expect(f.events).toContain("promote:22")
+    expect(f.setup.receipt).not.toHaveProperty("pendingInvitations")
+  })
+
+  test("a resumed job approves the invited member's join request", async () => {
+    const f = fixture()
+    const h = hiding(f, new Set([22]))
+    await expect(f.run(h.sleep)).rejects.toThrow("incomplete")
+    const requests = new Set([22])
+    const approvals: number[] = []
+    f.telegram.approveJoin = async (_chat, userId) => {
+      approvals.push(userId)
+      if (!requests.delete(userId)) return false
+      f.members.set(userId, { role: "member", rights: {} })
+      return true
+    }
+    f.events.length = 0
+    expect((await f.run(h.sleep)).state).toBe("ready")
+    expect(approvals).toEqual([22])
+    expect(f.events.filter((e) => e.startsWith("add:"))).toEqual([])
+    expect(f.events).toContain("promote:22")
+  })
+
+  test("a refused approval leaves the member invited", async () => {
+    const f = fixture()
+    const h = hiding(f, new Set([22]))
+    await expect(f.run(h.sleep)).rejects.toThrow("incomplete")
+    f.telegram.approveJoin = async () => {
+      throw Object.assign(new Error("refused"), { text: "CHAT_ADMIN_REQUIRED" })
+    }
+    f.events.length = 0
+    await expect(f.run(h.sleep)).rejects.toThrow("incomplete")
+    expect((f.setup as Setup & { error: string }).error).toBe(
+      "verify_added_member:TG_SAI_MEMBER_NOT_VISIBLE",
+    )
+    expect(f.events.filter((e) => e.startsWith("add:"))).toEqual([])
+  })
+
+  test("an expired invitation lets a resumed job add the member again", async () => {
+    const f = fixture()
+    const h = hiding(f, new Set([22]))
+    await expect(f.run(h.sleep)).rejects.toThrow("incomplete")
+    f.local = {
+      ...f.local!,
+      pendingInvitations: f.local!.pendingInvitations!.map((i) => ({
+        ...i,
+        expiresAt: new Date(Date.now() - 1000).toISOString(),
+      })),
+    }
+    f.events.length = 0
+    await expect(f.run(h.sleep)).rejects.toThrow("incomplete")
+    expect(f.events).toContain("add:22")
+    expect(h.links).toEqual([22, 22])
+  })
+
+  test("a bot that is not visible still fails the setup", async () => {
+    const f = fixture()
+    const h = hiding(f, new Set([PROVISIONING_BOT_ID]))
+    await expect(f.run(h.sleep)).rejects.toThrow("incomplete")
+    const setup = f.setup as Setup & { error: string }
+    expect(setup.error).toBe("verify_added_member:provisioning_step_failed")
+    expect(setup.retryAt).toBeNull()
+    expect(h.links).toEqual([])
+  })
+
+  test("without invitation links the old failure stands", async () => {
+    const f = fixture()
+    const h = hiding(f, new Set([22]))
+    delete f.telegram.inviteLink
+    await expect(f.run(h.sleep)).rejects.toThrow("incomplete")
+    expect((f.setup as Setup & { error: string }).error).toBe(
+      "verify_added_member:provisioning_step_failed",
+    )
+  })
+
+  test("the not-visible code survives sanitizing", () => {
+    expect(safeProvisionError({ text: "TG_SAI_MEMBER_NOT_VISIBLE" })).toBe(
+      "TG_SAI_MEMBER_NOT_VISIBLE",
+    )
+  })
 })

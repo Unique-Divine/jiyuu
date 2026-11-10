@@ -482,6 +482,19 @@ blocked by privacy settings can remain pending with a 24-hour, approval-required
 invite link. A link does not mean the person joined. Handle-based resolution of
 fixed team defaults must verify the expected numeric ID before any invitation.
 
+Telegram can accept an add before the person shows up in the chat. The worker
+reads the member again after 3 seconds. If they are still absent, it creates
+a controlled invitation for them, saves it in the local receipt, and leaves
+the setup `incomplete` with error
+`verify_added_member:TG_SAI_MEMBER_NOT_VISIBLE` and a `retryAt` 15 minutes
+out. Resumed jobs do not add that person again while the invitation is live.
+They approve that person's join request, if one is waiting, and finish once
+the person is in. Read the link from the receipt on the custody host and
+send it to them. The bot gets no link: a bot that is not visible still fails
+the setup. The background queue also reads each member before adding and
+approves a waiting join request, so a member who uses the shared link costs
+no add.
+
 New ready receipts include an `openGroupUrl` anchored to a message actually
 observed in the group and the existing `primaryInviteLink`, when available.
 These read-only lookups run together with a 10-second limit each. A missing link

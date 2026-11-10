@@ -9,6 +9,7 @@ import {
   getChatMember,
   getChatMembers,
   getPrimaryInviteLink,
+  hideJoinRequest,
   iterDialogs,
 } from "@mtcute/bun/methods.js"
 import { saiBot } from "./cfg"
@@ -368,6 +369,20 @@ export async function withProvisionTelegram<T>(
               forwardCount: 0,
             })
           ).map((invitee) => invitee.userId),
+        approveJoin: async (chatId, userId) => {
+          try {
+            await hideJoinRequest(writeClient, {
+              chatId,
+              user: userId,
+              action: "approve",
+            })
+            return true
+          } catch (error) {
+            if ((error as { text?: unknown }).text === "HIDE_REQUESTER_MISSING")
+              return false
+            throw error
+          }
+        },
         inviteLink: async (chatId) => {
           const expires = new Date(Date.now() + 24 * 60 * 60 * 1000)
           const link = await createInviteLink(client, chatId, {

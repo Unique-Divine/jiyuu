@@ -59,6 +59,12 @@ export interface TelegramProvisioner {
     chatId: number,
     userId: number,
   ): Promise<{ inviteLink: string; expiresAt: string }>
+  /**
+   * Approves a pending join request from `userId`, as sent through a
+   * controlled invitation. Resolves `false` when that user has no pending
+   * request. Approval is not a member add.
+   */
+  approveJoin?(chatId: number, userId: number): Promise<boolean>
   /** Read existing links only. Failure must not invalidate verified setup. */
   completionLinks?(chatId: number): Promise<ProvisioningLinks>
   promote(
@@ -349,7 +355,7 @@ export function safeProvisionError(error: unknown): string {
           String(Number.isSafeInteger(e.seconds) ? e.seconds : "UNKNOWN"),
         )
       : ""
-  return /^(?:FLOOD(?:_PREMIUM)?_WAIT_(?:\d{1,10}|UNKNOWN)|PEER_FLOOD|TG_SAI_HOLD_\d{1,10}|TG_SAI_HOLD_STATE_UNAVAILABLE|USER_PRIVACY_RESTRICTED|USER_NOT_MUTUAL_CONTACTS?|USER_NOT_PARTICIPANT|USER_CHANNELS_TOO_MUCH|USER_BOT|USER_ID_INVALID|PEER_ID_INVALID|CHAT_ID_INVALID|CHANNEL_INVALID|CHANNEL_PRIVATE|CHAT_ADMIN_REQUIRED|CHAT_WRITE_FORBIDDEN|USER_ADMIN_INVALID|USER_CREATOR|ADMINS_TOO_MUCH|BOTS_TOO_MUCH|BOT_GROUPS_BLOCKED|RIGHT_FORBIDDEN|USER_RESTRICTED|USER_DEACTIVATED|INPUT_USER_DEACTIVATED|CHANNELS_TOO_MUCH|USERS_TOO_MUCH|AUTH_KEY_UNREGISTERED|SESSION_REVOKED|INVITE_HASH_EXPIRED|INVITE_HASH_INVALID|INVITE_REQUEST_SENT)$/.test(
+  return /^(?:FLOOD(?:_PREMIUM)?_WAIT_(?:\d{1,10}|UNKNOWN)|PEER_FLOOD|TG_SAI_HOLD_\d{1,10}|TG_SAI_HOLD_STATE_UNAVAILABLE|TG_SAI_MEMBER_NOT_VISIBLE|USER_PRIVACY_RESTRICTED|USER_NOT_MUTUAL_CONTACTS?|USER_NOT_PARTICIPANT|USER_CHANNELS_TOO_MUCH|USER_BOT|USER_ID_INVALID|PEER_ID_INVALID|CHAT_ID_INVALID|CHANNEL_INVALID|CHANNEL_PRIVATE|CHAT_ADMIN_REQUIRED|CHAT_WRITE_FORBIDDEN|USER_ADMIN_INVALID|USER_CREATOR|ADMINS_TOO_MUCH|BOTS_TOO_MUCH|BOT_GROUPS_BLOCKED|RIGHT_FORBIDDEN|USER_RESTRICTED|USER_DEACTIVATED|INPUT_USER_DEACTIVATED|CHANNELS_TOO_MUCH|USERS_TOO_MUCH|AUTH_KEY_UNREGISTERED|SESSION_REVOKED|INVITE_HASH_EXPIRED|INVITE_HASH_INVALID|INVITE_REQUEST_SENT)$/.test(
     normalized,
   )
     ? normalized
@@ -362,6 +368,7 @@ type ProvisionStep =
   | "read_member"
   | "add_member"
   | "verify_added_member"
+  | "approve_join"
   | "create_invitation"
   | "save_invitation"
   | "read_admin"
@@ -412,6 +419,18 @@ export function isPrivacyRestriction(error: unknown): boolean {
 export const HOLD_STATE_UNAVAILABLE = "TG_SAI_HOLD_STATE_UNAVAILABLE"
 /** Retry delay while the hold store cannot be read. */
 export const HOLD_STATE_UNAVAILABLE_RETRY_MS = 5 * 60 * 1000
+/**
+ * Code for a member whose add call succeeded but who is still not in the
+ * chat after one re-check. The member gets a controlled invitation and the
+ * setup retries after `MEMBER_NOT_VISIBLE_RETRY_MS` without adding again.
+ */
+export const MEMBER_NOT_VISIBLE = "TG_SAI_MEMBER_NOT_VISIBLE"
+/** Retry delay while an added member is not yet visible. */
+export const MEMBER_NOT_VISIBLE_RETRY_MS = 15 * 60 * 1000
+/** Wait before re-reading a member whose add succeeded but who is absent. */
+export const MEMBER_RECHECK_MS = 3000
+/** `reason` of the invitation for a member added but not yet visible. */
+export const NOT_VISIBLE_INVITATION_REASON = "added_not_visible"
 /** Telegram gives no duration for `PEER_FLOOD`; holds use 24 h. */
 export const PEER_FLOOD_RETRY_MS = PEER_FLOOD_WAIT_S * 1000
 /**
@@ -458,6 +477,8 @@ export function provisionRetryAt(
   if (code === "PEER_FLOOD") return after(PEER_FLOOD_WAIT_S)
   if (code === HOLD_STATE_UNAVAILABLE)
     return cloudRetryAt(now + HOLD_STATE_UNAVAILABLE_RETRY_MS, now)
+  if (code === MEMBER_NOT_VISIBLE)
+    return cloudRetryAt(now + MEMBER_NOT_VISIBLE_RETRY_MS, now)
   const hold = /^TG_SAI_HOLD_(\d+)$/.exec(code)
   if (hold) {
     if (Number.isSafeInteger(e.untilMs) && e.untilMs! > now)
@@ -472,11 +493,42 @@ export function provisionRetryAt(
   return after(seconds)
 }
 
+function defaultSleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/**
+ * Creates a controlled invitation for `userId` and checks its shape: a
+ * `t.me` invite URL with a future expiry.
+ */
+async function controlledInvitation(
+  telegram: TelegramProvisioner,
+  chatId: number,
+  userId: number,
+): Promise<{ inviteLink: string; expiresAt: string }> {
+  if (!telegram.inviteLink) throw new Error("Invitation links unavailable")
+  const created = await telegram.inviteLink(chatId, userId)
+  if (
+    !/^https:\/\/t\.me\/(?:\+|joinchat\/)[A-Za-z0-9_-]+$/.test(
+      created.inviteLink,
+    ) ||
+    !Number.isFinite(Date.parse(created.expiresAt)) ||
+    Date.parse(created.expiresAt) <= Date.now()
+  )
+    throw new Error("Invalid controlled invitation link")
+  return created
+}
+
 /**
  * The cloud is authoritative. The journal only recovers a result not yet
  * acknowledged by cloud. Requester first: the job adds required participants
  * and the bot, promotes, verifies, and reports ready; optional participants
  * still absent go to `background` and share one pending invitation.
+ *
+ * A person whose add succeeded but who is still absent after one re-check
+ * gets a controlled invitation instead of a failed setup. The setup stays
+ * `incomplete` with a `retryAt`, and a resumed job does not add anyone who
+ * holds a live invitation: it waits for them to join by link.
  */
 export async function provisionSetup(params: {
   setup: Setup
@@ -486,6 +538,8 @@ export async function provisionSetup(params: {
   workerId: string
   /** Queue for optional members; required when the request has any. */
   background?: BackgroundEnqueue
+  /** Waits before a membership re-check; tests pass a no-op. */
+  sleep?: (ms: number) => Promise<void>
 }): Promise<Setup | { state: "creation_unknown"; candidates: number[] }> {
   const { telegram, cloud, journal } = params
   let setup = params.setup
@@ -660,6 +714,15 @@ export async function provisionSetup(params: {
     const optional = new Set(binding.optionalParticipants ?? [])
     const required = binding.participants.filter((id) => !optional.has(id))
     const absent: number[] = []
+    // Added earlier but not yet visible: wait for the link, never re-add.
+    const invited: number[] = []
+    const liveInvitation = (userId: number) =>
+      pendingInvitations.some(
+        (i) =>
+          i.userId === String(userId) &&
+          i.reason === NOT_VISIBLE_INVITATION_REASON &&
+          Date.parse(i.expiresAt) > Date.now(),
+      )
     if (createdNow) {
       // The worker just created this chat: only the custody account is in
       // it, so no membership read comes before the add.
@@ -670,7 +733,22 @@ export async function provisionSetup(params: {
         step = "read_member"
         const member = await telegram.member(chatId, userId)
         if (member.role !== "absent") continue
-        absent.push(userId)
+        if (liveInvitation(userId)) invited.push(userId)
+        else absent.push(userId)
+      }
+      // A controlled invitation needs approval: approve only the people it
+      // was made for.
+      for (const userId of [...invited]) {
+        if (!telegram.approveJoin) break
+        step = "approve_join"
+        // A refused approval leaves the person invited; the retry tries again.
+        const approved = await telegram
+          .approveJoin(chatId, userId)
+          .catch(() => false)
+        if (!approved) continue
+        step = "read_member"
+        if ((await telegram.member(chatId, userId)).role !== "absent")
+          invited.splice(invited.indexOf(userId), 1)
       }
     }
     // Per-user refusals (privacy, USER_*/CHAT_* 400s) never stop the other
@@ -705,21 +783,71 @@ export async function provisionSetup(params: {
     } else await addEach(absent)
     // With a participant listing, the final audit verifies the adds.
     const listed = createdNow && Boolean(telegram.members)
-    if (!listed)
-      for (const userId of absent) {
-        if (failures.has(userId)) continue
-        step = "verify_added_member"
-        if ((await telegram.member(chatId, userId)).role === "absent")
+    // Telegram can accept an add before the member shows up: read again
+    // once after a short wait before treating the add as incomplete.
+    const notVisible: number[] = []
+    if (!listed) {
+      const unseen = async (ids: number[]): Promise<number[]> => {
+        const out: number[] = []
+        for (const userId of ids) {
+          step = "verify_added_member"
+          if ((await telegram.member(chatId, userId)).role === "absent")
+            out.push(userId)
+        }
+        return out
+      }
+      let missing = await unseen(absent.filter((id) => !failures.has(id)))
+      if (missing.length) {
+        await (params.sleep ?? defaultSleep)(MEMBER_RECHECK_MS)
+        missing = await unseen(missing)
+      }
+      for (const userId of missing)
+        if (userId === PROVISIONING_BOT_ID || !telegram.inviteLink)
           failures.set(userId, {
             error: new Error("Participant invitation incomplete"),
             step: "verify_added_member",
           })
-      }
+        else notVisible.push(userId)
+    }
     for (const userId of absent) {
       const failure = failures.get(userId)
       if (!failure) continue
       step = failure.step
       throw failure.error
+    }
+    if (notVisible.length) {
+      // One shared link: the first person to need it decides its owner.
+      step = "create_invitation"
+      const created = await controlledInvitation(
+        telegram,
+        chatId,
+        notVisible[0]!,
+      )
+      pendingInvitations = [
+        ...pendingInvitations.filter(
+          (i) => !notVisible.includes(Number(i.userId)),
+        ),
+        ...notVisible.map((userId) => ({
+          userId: String(userId),
+          ...created,
+          reason: NOT_VISIBLE_INVITATION_REASON,
+        })),
+      ]
+      step = "save_invitation"
+      await journal.write(setup.requestId, {
+        fingerprint,
+        state: "configuring",
+        chatId,
+        binding,
+        workerId,
+        pendingInvitations,
+      })
+    }
+    if (notVisible.length || invited.length) {
+      step = "verify_added_member"
+      throw Object.assign(new Error("Added member not visible yet"), {
+        text: MEMBER_NOT_VISIBLE,
+      })
     }
     for (const userId of binding.admins) {
       step = "read_admin"
@@ -787,15 +915,11 @@ export async function provisionSetup(params: {
         step = "create_invitation"
         if (!telegram.inviteLink)
           throw new Error("Invitation links required for background members")
-        const created = await telegram.inviteLink(chatId, backgroundIds[0]!)
-        if (
-          !/^https:\/\/t\.me\/(?:\+|joinchat\/)[A-Za-z0-9_-]+$/.test(
-            created.inviteLink,
-          ) ||
-          !Number.isFinite(Date.parse(created.expiresAt)) ||
-          Date.parse(created.expiresAt) <= Date.now()
+        const created = await controlledInvitation(
+          telegram,
+          chatId,
+          backgroundIds[0]!,
         )
-          throw new Error("Invalid controlled invitation link")
         link = {
           userId: String(backgroundIds[0]),
           ...created,
