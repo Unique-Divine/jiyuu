@@ -132,13 +132,32 @@ continues to use `http://localhost:26657`.
   - `sai-perps` for Sai contract query recipes and reconciliation
   - `evm-rpc` for `eth_*` / `debug_*` EVM tracing rather than Cosmos CLI
 
+## USDC Token Identity
+
+On mainnet, Sai USDC is `0x357c97796aA8e2A6b5A64b1Fc19d5baB9668E190`.
+Legacy LayerZero Stargate USDC.e is
+`0x0829F361A05D993d5CEb035cA6DF3446b060970b`. They are separate tokens,
+both with six decimals. Their bank denoms are `erc20/<checksummed address>`.
+
+Prefer explicit addresses for compatibility with installed CLIs and remote
+nodes. From v2.23.1, the CLI and node balance query resolve case-insensitive
+`USDC` to Sai USDC and `USDC.e` to the legacy token. The patched CLI sends
+explicit addresses even to older nodes; direct queries to older nodes still
+resolve `USDC` to the legacy token. On other networks, use the deployed token
+address or denom.
+
+A selected token's zero balance does not mean the account has no funds. For
+account-wide questions, inspect `nibiru q bank balances "$ADDR"` as well as
+relevant ERC20 holdings. Confirm the returned token address and denom before
+preparing a transfer.
+
 ## Query routing
 
 If the user asks about:
 
 - **Sai USDC balances** -> use `nibiru q evm balance "$ADDR" "$USDC_ERC20"`
   so one query shows both ERC20 and Bank-side holdings. Mainnet USDC is
-  `0x0829F361A05D993d5CEb035cA6DF3446b060970b`; details and examples are in
+  `0x357c97796aA8e2A6b5A64b1Fc19d5baB9668E190`; details and examples are in
   [`reference.md#nibiru-q-evm-balance`](./reference.md#nibiru-q-evm-balance).
 - **Multi-VM token balances** -> use `nibiru q evm balance "$ADDR" "$TOKEN"`.
   The account arg can be `0x...` or `nibi1...`; the token arg can be an ERC20
@@ -170,11 +189,11 @@ denoms, or native denoms.
 ```bash
 # Sai USDC on Nibiru mainnet
 ADDR="nibi1..."
-USDC_ERC20="0x0829F361A05D993d5CEb035cA6DF3446b060970b"
+USDC_ERC20="0x357c97796aA8e2A6b5A64b1Fc19d5baB9668E190"
 nibiru q evm balance "$ADDR" "$USDC_ERC20" | jq .
 
 # Same query with the bank denom form
-USDC_BANK="erc20/0x0829F361A05D993d5CEb035cA6DF3446b060970b"
+USDC_BANK="erc20/0x357c97796aA8e2A6b5A64b1Fc19d5baB9668E190"
 nibiru q evm balance "$ADDR" "$USDC_BANK" | jq .
 
 # Native NIBI also works by bank denom
