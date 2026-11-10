@@ -307,6 +307,18 @@ export class BackgroundQueue {
     )
   }
 
+  /** When the oldest pending row was queued, or `null` with none pending. */
+  oldestPendingMs(): number | null {
+    return (
+      this.db
+        .query<{ at: number | null }, []>(
+          "SELECT MIN(created_ms) AS at FROM background_add " +
+            "WHERE state = 'pending'",
+        )
+        .get()?.at ?? null
+    )
+  }
+
   /** Pending rows and the earliest `not_before_ms` among them. */
   summary(): { pending: number; nextAtMs: number | null } {
     const row = this.db

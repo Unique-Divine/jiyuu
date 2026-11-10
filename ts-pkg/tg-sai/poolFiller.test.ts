@@ -22,7 +22,7 @@ import type {
   PoolStatusReply,
 } from "./poolFiller"
 import { drainBackgroundOnce } from "./backgroundWorker"
-import { retirePoolFill } from "./poolCli"
+import { backgroundView, retirePoolFill } from "./poolCli"
 import { descriptionRef, PROVISIONING_BOT_ID } from "./provisioning"
 import type { ChatInfo, Member, TelegramProvisioner } from "./provisioning"
 import {
@@ -816,18 +816,43 @@ describe("state migration 0006", () => {
 })
 
 describe("pool fills share the account's add budget", () => {
-  test("nothing runs while live deal members are queued", async () => {
+  test("nothing runs while a live deal member is due", async () => {
     const f = setup()
     f.queue.enqueue({
       requestId: "deal",
       chatId: -42,
       userIds: [7],
-      notBeforeMs: T0 + 3_600_000,
+      notBeforeMs: T0,
       nowMs: T0,
     })
     expect(await f.run()).toEqual({ state: "behind_background" })
     expect(f.cloud.statusCalls).toBe(0)
     expect(f.telegram.calls).toEqual([])
+  })
+
+  test("a member paced days out never stalls the pool, and shows as stalled", async () => {
+    const f = setup()
+    f.queue.enqueue({
+      requestId: "deal",
+      chatId: -42,
+      userIds: [7],
+      notBeforeMs: T0 + 10 * 86_400_000,
+      nowMs: T0 - 2 * 86_400_000,
+    })
+    expect((await f.run()).state).toBe("filled")
+    expect(backgroundView(f.queue, f.now())).toEqual({
+      pending: 1,
+      nextAt: new Date(T0 + 10 * 86_400_000).toISOString(),
+      oldestPendingAt: new Date(T0 - 2 * 86_400_000).toISOString(),
+      stalled: true,
+    })
+    const quiet = setup()
+    expect(backgroundView(quiet.queue, T0)).toEqual({
+      pending: 0,
+      nextAt: null,
+      oldestPendingAt: null,
+      stalled: false,
+    })
   })
 
   test("a resumed fill waits for queued deal members before its add", async () => {
@@ -1012,9 +1037,19 @@ describe("pool fill recovery", () => {
     expect(f.telegram.calls).not.toContain("create")
   })
 
-  test("Deal Desk refusing `available` fails the fill", async () => {
+  test("Deal Desk refusing `available` twice, a retry apart, fails the fill", async () => {
     const f = setup()
-    f.cloud.registerErrors = [new DealDeskRefusedError("pool-register")]
+    f.cloud.registerErrors = [
+      new DealDeskRefusedError("pool-register"),
+      new DealDeskRefusedError("pool-register"),
+    ]
+    expect(await f.run()).toMatchObject({
+      state: "waiting",
+      error: "register:DEAL_DESK_REFUSED",
+      nextAtMs: T0 + POOL_RETRY_MS,
+    })
+    expect(f.cloud.failures).toEqual([])
+    f.advance(POOL_RETRY_MS)
     expect(await f.run()).toMatchObject({
       state: "failed",
       error: "register:deal_desk_refused",
@@ -1024,6 +1059,15 @@ describe("pool fill recovery", () => {
       stage: "register",
       error: "deal_desk_refused",
     })
+  })
+
+  test("a single refusal followed by success registers the chat", async () => {
+    const f = setup()
+    f.cloud.registerErrors = [new DealDeskRefusedError("pool-register")]
+    expect((await f.run()).state).toBe("waiting")
+    f.advance(POOL_RETRY_MS)
+    expect((await f.run()).state).toBe("filled")
+    expect(f.cloud.failures).toEqual([])
   })
 
   test("Deal Desk outages retry on their own counter", async () => {
@@ -1084,15 +1128,40 @@ describe("pool fill recovery", () => {
     })
   })
 
-  test("isRefusalOutput tells refusals from outages", () => {
-    const out = (status: number, rest = ': [{"message":"bad"}]') =>
+  test("isRefusalOutput counts only input refusals, never retryable answers", () => {
+    // Deal Desk's CLI prints `{"error": "<anyhow chain>"}`; the hosted API's
+    // bodies are `{"error": "..."}` or GraphQL `errors` arrays.
+    const out = (status: number, body: unknown) =>
       JSON.stringify({
-        error: `GraphQL request failed (HTTP ${status})${rest}`,
+        error: `GraphQL request failed (HTTP ${status}): ${JSON.stringify(body)}`,
       })
-    expect(isRefusalOutput(out(400))).toBe(true)
-    expect(isRefusalOutput(out(200))).toBe(true)
-    expect(isRefusalOutput(out(503))).toBe(false)
-    expect(isRefusalOutput(out(200, ": non-JSON response: eof"))).toBe(false)
+    // Retryable: per-IP limiter, credential rotation, timeouts, origin, and
+    // untyped GraphQL errors on HTTP 200.
+    expect(isRefusalOutput(out(429, "Request limit reached"))).toBe(false)
+    expect(
+      isRefusalOutput(out(401, "Invalid or revoked API credential")),
+    ).toBe(false)
+    expect(isRefusalOutput(out(403, "Origin is not allowed"))).toBe(false)
+    expect(isRefusalOutput(out(408, "timeout"))).toBe(false)
+    expect(
+      isRefusalOutput(out(200, [{ message: "Query capacity reached" }])),
+    ).toBe(false)
+    expect(isRefusalOutput(out(200, [{ message: "Record read failed" }]))).toBe(
+      false,
+    )
+    expect(isRefusalOutput(out(503, "Service unavailable"))).toBe(false)
+    expect(
+      isRefusalOutput(
+        JSON.stringify({
+          error: "GraphQL request failed (HTTP 400): non-JSON response: eof",
+        }),
+      ),
+    ).toBe(false)
     expect(isRefusalOutput('{"error":"error sending request"}')).toBe(false)
+    // Input refusals.
+    for (const status of [400, 404, 409, 422])
+      expect(
+        isRefusalOutput(out(status, [{ message: "Invalid pool transition" }])),
+      ).toBe(true)
   })
 })

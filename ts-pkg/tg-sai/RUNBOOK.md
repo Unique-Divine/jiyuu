@@ -895,8 +895,12 @@ One fill, in one worker tick:
 setup job, no further queue page, and a background drain that found nothing
 due. Then all of these must hold:
 
-- The background queue has no pending member at all. Live deals' members
-  come first, so a pool chat never spends the day's cap ahead of them.
+- No background member is due now. Live deals' members come first, so a
+  pool chat never spends an add ahead of one that is ready. A member paced
+  later (a hold, the cap, a read that keeps failing) does not stop the
+  pool; the account-wide gap below keeps the adds apart. `tg-sai pool
+  status` shows the queue under `background`, with `stalled: true` once
+  the oldest pending member has waited 24 hours.
 - No open fill for the account. A `failed` one blocks filling until an
   operator retires it.
 - One gap has passed since the account's latest member add of any source
@@ -950,8 +954,8 @@ twice.
 | Bot add timed out, or failed with an error the worker cannot place | Counted as an uncertain add; the bot is never added again |
 | Bot added but not shown | Read again every 15 min, never re-added; after 4 reads, `failed` |
 | Transient error (timeout, 5xx) | Retried after 5 min, at most 5 times, then `failed` |
-| Deal Desk refuses `available` (HTTP 4xx, or GraphQL errors) | `failed` at stage `register` |
-| Deal Desk down at `available` (5xx, transport) | Retried with backoff up to 30 min on its own counter; no Telegram writes |
+| Deal Desk refuses `available` (HTTP 400, 404, 409, or 422) | Retried once after 5 min; a second refusal in a row is `failed` at stage `register` |
+| Deal Desk down, busy, or limiting at `available` (401, 403, 408, 429, 5xx, transport, GraphQL errors on HTTP 200) | Retried with backoff up to 30 min on its own counter; no Telegram writes |
 | Group count at `groupStopAt` | No create; asks Deal Desk again after 5 min |
 | Anything else (rights missing, ref changed, per-user refusal) | `failed` |
 

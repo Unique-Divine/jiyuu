@@ -7,6 +7,7 @@ import { configDir } from "./profiles"
 import { CliProvisionCloud } from "./provisioningCloud"
 import { withAccountLock } from "./provisioningRuntime"
 import { openStateDb, stateDbPath } from "./state/db"
+import { BackgroundQueue } from "./state/background"
 import { PoolJournal } from "./state/pool"
 import type { PoolFill } from "./state/pool"
 
@@ -53,6 +54,33 @@ export async function retirePoolFill(params: {
   return { dryRun: false, fill: retired, reported }
 }
 
+/** A pending background member queued this long ago is reported stalled. */
+export const BACKGROUND_STALL_MS = 24 * 60 * 60 * 1000
+
+/**
+ * The background queue as `pool status` shows it: pending members, the
+ * next due time, and `stalled` when the oldest pending member has waited
+ * `BACKGROUND_STALL_MS` or more. Rows not yet due never block filling.
+ */
+export function backgroundView(
+  queue: Pick<BackgroundQueue, "summary" | "oldestPendingMs">,
+  nowMs: number,
+): {
+  pending: number
+  nextAt: string | null
+  oldestPendingAt: string | null
+  stalled: boolean
+} {
+  const { pending, nextAtMs } = queue.summary()
+  const oldest = queue.oldestPendingMs()
+  return {
+    pending,
+    nextAt: pending && nextAtMs !== null ? new Date(nextAtMs).toISOString() : null,
+    oldestPendingAt: oldest === null ? null : new Date(oldest).toISOString(),
+    stalled: oldest !== null && nowMs - oldest >= BACKGROUND_STALL_MS,
+  }
+}
+
 /** `tg-sai pool status` and `tg-sai pool retire`. */
 export function addPoolCommands(program: Command): void {
   const pool = program
@@ -64,7 +92,8 @@ export function addPoolCommands(program: Command): void {
     .option("--account-id <id>", "Owner account", String(CUSTODY_USER_ID))
     .option("--limit <count>", "Fills to list", "20")
     .action((options: { accountId: string; limit: string }) => {
-      const journal = new PoolJournal(openStateDb(stateDbPath()))
+      const db = openStateDb(stateDbPath())
+      const journal = new PoolJournal(db)
       try {
         const accountId = Number(options.accountId)
         console.log(
@@ -72,6 +101,7 @@ export function addPoolCommands(program: Command): void {
             {
               accountId: String(accountId),
               open: journal.open(accountId),
+              background: backgroundView(new BackgroundQueue(db), Date.now()),
               nextFillAt: new Date(journal.nextFillMs(accountId)).toISOString(),
               fills: journal.list(accountId, Number(options.limit)),
             },

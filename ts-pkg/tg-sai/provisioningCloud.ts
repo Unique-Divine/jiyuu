@@ -245,9 +245,9 @@ export class UnknownCloudOperationError extends Error {
 export const DEAL_DESK_REFUSED = "DEAL_DESK_REFUSED"
 
 /**
- * Deal Desk answered and refused the input (an HTTP 4xx, or GraphQL errors
- * on a 2xx), as opposed to being down or unreachable. Retrying the same
- * input cannot succeed. Carries no CLI output.
+ * Deal Desk answered and refused the input itself (HTTP 400, 404, 409, or
+ * 422), as opposed to being down, busy, or rate limiting. Carries no CLI
+ * output.
  */
 export class DealDeskRefusedError extends Error {
   readonly code = DEAL_DESK_REFUSED
@@ -258,13 +258,16 @@ export class DealDeskRefusedError extends Error {
 }
 
 /**
- * Whether Deal Desk's stderr reports a refusal by the server: its client
- * prints `GraphQL request failed (HTTP <status>)`, and a 4xx, or a 2xx with
- * GraphQL errors, is a refusal. A 5xx, a non-JSON body, or a transport
- * error is an outage.
+ * Whether Deal Desk's stderr reports a refusal of the input: its client
+ * prints `GraphQL request failed (HTTP <status>)`, and only 400, 404, 409,
+ * and 422 count. Everything else may pass on retry and is an outage: 401
+ * and 403 (credential rotation), 408 and 429 (Deal Desk's per-IP request
+ * limit), 5xx, a non-JSON body, a transport error, and GraphQL errors on
+ * HTTP 200, which carry no stable code (`Query capacity reached` and
+ * `Record read failed` among them).
  */
 export function isRefusalOutput(stderr: string): boolean {
-  return /GraphQL request failed \(HTTP (?:2|4)\d\d\)(?!: non-JSON)/.test(
+  return /GraphQL request failed \(HTTP (?:400|404|409|422)\)(?!: non-JSON)/.test(
     stderr,
   )
 }

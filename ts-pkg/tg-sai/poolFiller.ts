@@ -386,8 +386,8 @@ export const CREATION_NOT_FOUND = "find_created:creation_not_found"
  *
  * 1. A `failed` fill blocks every new fill until an operator retires it.
  *    An `active` fill resumes at its stage once its retry time is due.
- * 2. Pool chats come after live deals: nothing runs while the background
- *    queue has any pending member.
+ * 2. Pool chats come after live deals: nothing runs while a background
+ *    member is due.
  * 3. A new fill needs `pool_pace` passed, one jittered gap since the
  *    account's latest member add of any source (`spacedAfterMs`), no saved
  *    hold on `create` or `invite`, Deal Desk's `pool-status` `allowedNow`, a
@@ -413,7 +413,7 @@ export async function fillPoolOnce(params: {
   journal: PoolJournal
   queue: Pick<
     BackgroundQueue,
-    "addsToday" | "recordAdds" | "lastAddMs" | "summary"
+    "addsToday" | "recordAdds" | "lastAddMs" | "next"
   >
   holds: HoldStoreSource
   pacing: Pick<BackgroundPacing, "gapMs" | "jitter">
@@ -455,7 +455,9 @@ export async function fillPoolOnce(params: {
     params.queue.addsToday(nowMs) < params.cap.current(nowMs)
   const nextUtcDay = (nowMs: number) =>
     Math.floor(nowMs / 86_400_000) * 86_400_000 + 86_400_000
-  const backgroundPending = () => params.queue.summary().pending > 0
+  // Only members due now go first; a row paced days out (a hold, the cap,
+  // a stuck read) never stalls the pool, and spacing keeps adds apart.
+  const backgroundDue = (nowMs: number) => params.queue.next(nowMs) !== null
   /** When account-wide add spacing allows the next add, if later than now. */
   const spacedUntil = (nowMs: number): number | null => {
     const spaced = spacedAfterMs(params.queue.lastAddMs(), params.pacing)
@@ -464,7 +466,7 @@ export async function fillPoolOnce(params: {
   let fresh = false
   let groupStopAt: number | null = null
   if (!fill) {
-    if (backgroundPending()) return { state: "behind_background" }
+    if (backgroundDue(startMs)) return { state: "behind_background" }
     const paced = Math.max(
       journal.nextFillMs(accountId),
       spacedUntil(startMs) ?? 0,
@@ -757,7 +759,7 @@ export async function fillPoolOnce(params: {
         // after a hold began, after another add, or with live deal members
         // queued. None of these waits counts as an attempt.
         const nowMs = now()
-        if (backgroundPending())
+        if (backgroundDue(nowMs))
           return waitUntil(
             nowMs + POOL_STATUS_RECHECK_MS,
             "waiting",
@@ -905,17 +907,22 @@ export async function fillPoolOnce(params: {
           verifiedAt: new Date(now()).toISOString(),
         })
       } catch (error) {
-        // Deal Desk refused the registration itself: retrying cannot help.
-        if (safeCloudError(error) === DEAL_DESK_REFUSED)
+        const code = safeCloudError(error)
+        // Deal Desk refused the input itself twice, a retry apart: retrying
+        // cannot help. A first refusal waits one retry like an outage.
+        const refusal = `register:${DEAL_DESK_REFUSED}`
+        if (code === DEAL_DESK_REFUSED && current.lastError === refusal)
           throw await fail(null, "deal_desk_refused")
-        // Deal Desk down: the chat is ready, so retry with backoff on a
-        // counter of its own; Telegram steps keep their own attempts.
+        // Deal Desk down, busy, or rate limiting: the chat is ready, so
+        // retry with backoff on a counter of its own; Telegram steps keep
+        // their own attempts.
         const registerAttempts = current.registerAttempts + 1
         const delay = Math.min(POOL_RETRY_MS * registerAttempts, 30 * 60 * 1000)
         save({
           registerAttempts,
-          nextAttemptMs: now() + delay,
-          lastError: `register:${safeCloudError(error)}`,
+          nextAttemptMs:
+            now() + (code === DEAL_DESK_REFUSED ? POOL_RETRY_MS : delay),
+          lastError: `register:${code}`,
         })
         return {
           state: "waiting",
