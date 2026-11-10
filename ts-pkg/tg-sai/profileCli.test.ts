@@ -175,8 +175,10 @@ await Bun.write(${JSON.stringify(join(dir, "generator-mode"))}, args.includes("-
   })
 
   /**
-   * Installs a fake `uv` that records the generator call and writes a fixed
-   * session to `--session-output`, then runs `profile add --login --qr`.
+   * Installs a fake `uv` that records the generator call, prints a canary line
+   * on stdout and stderr, and writes a fixed session to `--session-output`,
+   * then runs `profile add --login --qr`. The canaries show that helper output
+   * passed through by `generateSessionString` lands in the captured streams.
    */
   async function runLoginWithFakeGenerator(
     dir: string,
@@ -189,6 +191,8 @@ await Bun.write(${JSON.stringify(join(dir, "generator-mode"))}, args.includes("-
 const args = process.argv.slice(2)
 await Bun.write(${JSON.stringify(callPath)}, JSON.stringify({ args,
   apiId: process.env.TELEGRAM_API_ID, apiHash: process.env.TELEGRAM_API_HASH }))
+console.log("fake-generator-stdout")
+console.error("fake-generator-stderr")
 await Bun.write(args[args.indexOf("--session-output") + 1], "fresh-session")
 `, { mode: 0o700 })
     const result = runCli(
@@ -209,8 +213,9 @@ await Bun.write(args[args.indexOf("--session-output") + 1], "fresh-session")
     result: RunResult & { generatorCall: string | null },
     app: { apiId: string; apiHash: string },
   ): Promise<void> {
-    expect(result.stderr).toBe("")
     expect(result.exitCode).toBe(0)
+    expect(result.stdout).toContain("fake-generator-stdout")
+    expect(result.stderr.trim()).toBe("fake-generator-stderr")
     const call = JSON.parse(result.generatorCall!)
     expect(call.args).toEqual(expect.arrayContaining(["--qr", "--session-output"]))
     expect(call.apiId).toBe(app.apiId)
