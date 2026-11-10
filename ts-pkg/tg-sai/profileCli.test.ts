@@ -174,6 +174,90 @@ await Bun.write(${JSON.stringify(join(dir, "generator-mode"))}, args.includes("-
     })
   })
 
+  /**
+   * Installs a fake `uv` that records the generator call and writes a fixed
+   * session to `--session-output`, then runs `profile add --login --qr`.
+   */
+  async function runLoginWithFakeGenerator(
+    dir: string,
+    extraEnv: Record<string, string> = {},
+  ): Promise<RunResult & { generatorCall: string | null }> {
+    const bin = join(dir, "bin")
+    const callPath = join(dir, "generator-call.json")
+    await mkdir(bin, { recursive: true })
+    await writeFile(join(bin, "uv"), `#!/usr/bin/env bun
+const args = process.argv.slice(2)
+await Bun.write(${JSON.stringify(callPath)}, JSON.stringify({ args,
+  apiId: process.env.TELEGRAM_API_ID, apiHash: process.env.TELEGRAM_API_HASH }))
+await Bun.write(args[args.indexOf("--session-output") + 1], "fresh-session")
+`, { mode: 0o700 })
+    const result = runCli(
+      ["profile", "add", "--name", "debug", "--login", "--qr",
+        "--user-id", "666", "--display-name", "Debug fixture"],
+      dir,
+      { PATH: `${bin}:${process.env.PATH}`, ...extraEnv },
+    )
+    const callFile = Bun.file(callPath)
+    return {
+      ...result,
+      generatorCall: (await callFile.exists()) ? await callFile.text() : null,
+    }
+  }
+
+  async function expectSavedLoginProfile(
+    dir: string,
+    result: RunResult & { generatorCall: string | null },
+    app: { apiId: string; apiHash: string },
+  ): Promise<void> {
+    expect(result.stderr).toBe("")
+    expect(result.exitCode).toBe(0)
+    const call = JSON.parse(result.generatorCall!)
+    expect(call.args).toEqual(expect.arrayContaining(["--qr", "--session-output"]))
+    expect(call.apiId).toBe(app.apiId)
+    expect(call.apiHash).toBe(app.apiHash)
+    const config = JSON.parse(await readFile(join(dir, "profiles.json"), "utf8"))
+    expect(config.profiles[0]).toMatchObject({
+      name: "debug",
+      apiId: Number(app.apiId),
+      apiHash: app.apiHash,
+      sessionString: "fresh-session",
+    })
+    for (const secret of ["fresh-session", app.apiHash]) {
+      expect(result.stdout).not.toContain(secret)
+      expect(result.stderr).not.toContain(secret)
+    }
+  }
+
+  test("--login takes app credentials from TELEGRAM_* environment variables", async () => {
+    await withTempConfig(async (dir) => {
+      const result = await runLoginWithFakeGenerator(dir, {
+        TELEGRAM_API_ID: "123",
+        TELEGRAM_API_HASH: "env-app-hash",
+      })
+      await expectSavedLoginProfile(dir, result, { apiId: "123", apiHash: "env-app-hash" })
+    })
+  })
+
+  test("--login takes app credentials from TG_SAI_DIR/.env", async () => {
+    await withTempConfig(async (dir) => {
+      await writeFile(join(dir, ".env"), "TELEGRAM_API_ID=321\nTELEGRAM_API_HASH=dotenv-app-hash\n")
+      const result = await runLoginWithFakeGenerator(dir)
+      await expectSavedLoginProfile(dir, result, { apiId: "321", apiHash: "dotenv-app-hash" })
+    })
+  })
+
+  test("--login without app credentials names every source and skips the generator", async () => {
+    await withTempConfig(async (dir) => {
+      const result = await runLoginWithFakeGenerator(dir)
+      expect(result.exitCode).not.toBe(0)
+      for (const source of ["--api-id", "TELEGRAM_API_ID", "~/.tg-sai/.env", "--src", "--interactive"]) {
+        expect(result.stderr).toContain(source)
+      }
+      expect(result.generatorCall).toBeNull()
+      expect(await Bun.file(join(dir, "profiles.json")).exists()).toBe(false)
+    })
+  })
+
   test("fresh login rejects an explicitly supplied session", async () => {
     await withTempConfig(async (dir) => {
       const result = runCli([...addAliceArgs, "--qr"], dir)
