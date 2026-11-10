@@ -2,7 +2,12 @@ import type { Database, Statement } from "bun:sqlite"
 
 import { openStateDb } from "./db.ts"
 
-/** Telegram limits one action family as a whole, so holds key by group. */
+/**
+ * Telegram limits one action family as a whole, so holds key by group.
+ * Telegram does not publish which methods share a limit; these groups are
+ * our conservative guess. Background: agent skill `ud-tg-telegram`, page
+ * `telegram-limits.md` (boku `priv-skills/ud-tg-telegram/`).
+ */
 export type HoldGroup =
   | "invite"
   | "create"
