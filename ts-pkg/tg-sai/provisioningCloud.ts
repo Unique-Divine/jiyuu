@@ -241,6 +241,34 @@ export class UnknownCloudOperationError extends Error {
   }
 }
 
+/** Code of `DealDeskRefusedError`. */
+export const DEAL_DESK_REFUSED = "DEAL_DESK_REFUSED"
+
+/**
+ * Deal Desk answered and refused the input (an HTTP 4xx, or GraphQL errors
+ * on a 2xx), as opposed to being down or unreachable. Retrying the same
+ * input cannot succeed. Carries no CLI output.
+ */
+export class DealDeskRefusedError extends Error {
+  readonly code = DEAL_DESK_REFUSED
+  constructor(readonly operation: CloudOperation) {
+    super(`Deal Desk refused chat-setups ${operation}`)
+    this.name = "DealDeskRefusedError"
+  }
+}
+
+/**
+ * Whether Deal Desk's stderr reports a refusal by the server: its client
+ * prints `GraphQL request failed (HTTP <status>)`, and a 4xx, or a 2xx with
+ * GraphQL errors, is a refusal. A 5xx, a non-JSON body, or a transport
+ * error is an outage.
+ */
+export function isRefusalOutput(stderr: string): boolean {
+  return /GraphQL request failed \(HTTP (?:2|4)\d\d\)(?!: non-JSON)/.test(
+    stderr,
+  )
+}
+
 /** GraphQL mutation field Deal Desk sends for each mutating operation. */
 export const CLOUD_MUTATION_FIELDS: Partial<Record<CloudOperation, string>> =
   {
@@ -315,6 +343,8 @@ export async function callDealDesk(
   ])
   if (exit !== 0 && isUnknownOperationOutput(operation, stderr))
     throw new UnknownCloudOperationError(operation)
+  if (exit !== 0 && isRefusalOutput(stderr))
+    throw new DealDeskRefusedError(operation)
   if (exit !== 0)
     throw new Error(
       `Deal Desk chat-setups ${operation} failed; inspect its operator status separately`,

@@ -11,11 +11,13 @@ import {
   getPrimaryInviteLink,
   hideJoinRequest,
   iterDialogs,
+  resolveChannel,
   setChatDescription,
   setChatPhoto,
 } from "@mtcute/bun/methods.js"
 import { saiBot } from "./cfg"
 import { createMtcuteClient, promoteTargetAdmin } from "./mtcuteAdapter"
+import { POOL_CHAT_TITLE } from "./poolTitle"
 import { configDir, strictProfileCredentials } from "./profiles"
 import {
   descriptionMatchesMarker,
@@ -272,6 +274,18 @@ export async function countGroupDialogs(
   let count = 0
   for await (const dialog of dialogs) if (dialog.peer.type === "chat") count++
   return count
+}
+
+/**
+ * Only the dialogs whose chat title is `title`, so a search reads in full
+ * only chats that can be pool chats instead of every supergroup.
+ */
+export async function* titledDialogs<
+  T extends { peer: { type: string; title?: string | null } },
+>(dialogs: AsyncIterable<T>, title: string): AsyncIterable<T> {
+  for await (const dialog of dialogs)
+    if (dialog.peer.type === "chat" && dialog.peer.title === title)
+      yield dialog
 }
 
 /**
@@ -550,6 +564,7 @@ export async function withProvisionTelegram<T>(
             isForum: chat.isForum,
             isCreator: chat.isCreator,
             hasPhoto: chat.photo !== null,
+            hiddenHistory: chat.hasHiddenHistory,
           }
         },
         // Pool fills: no flood sleep and no resend, so a flood reaches the
@@ -562,9 +577,19 @@ export async function withProvisionTelegram<T>(
           ),
         setPhoto: (chatId, jpeg) =>
           setChatPhoto(writeClient, { chatId, type: "photo", media: jpeg }),
+        showHistory: async (chatId) => {
+          await writeClient.call({
+            _: "channels.togglePreHistoryHidden",
+            channel: await resolveChannel(readClient, chatId),
+            enabled: false,
+          })
+        },
         poolCandidates: (ref) =>
           markerCandidates(
-            iterDialogs(readClient, { limit: 1000, archived: "keep" }),
+            titledDialogs(
+              iterDialogs(readClient, { limit: 1000, archived: "keep" }),
+              POOL_CHAT_TITLE,
+            ),
             async (chatId) =>
               poolRefChatMatches(await readClient.getFullChat(chatId), ref),
           ),

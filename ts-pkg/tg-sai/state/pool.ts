@@ -32,6 +32,8 @@ export interface PoolFill {
   botAdds: number
   /** Failed attempts since the last step that went through. */
   attempts: number
+  /** Deal Desk outages hit while registering the chat `available`. */
+  registerAttempts: number
   lastError: string | null
   nextAttemptMs: number
   createdMs: number
@@ -46,6 +48,7 @@ interface PoolRow {
   chat_id: number | null
   bot_adds: number
   attempts: number
+  register_attempts: number
   last_error: string | null
   next_attempt_ms: number
   created_ms: number
@@ -61,6 +64,7 @@ function fromRow(row: PoolRow): PoolFill {
     chatId: row.chat_id,
     botAdds: row.bot_adds,
     attempts: row.attempts,
+    registerAttempts: row.register_attempts,
     lastError: row.last_error,
     nextAttemptMs: row.next_attempt_ms,
     createdMs: row.created_ms,
@@ -77,6 +81,7 @@ export type PoolUpdate = Partial<
     | "chatId"
     | "botAdds"
     | "attempts"
+    | "registerAttempts"
     | "lastError"
     | "nextAttemptMs"
   >
@@ -130,14 +135,15 @@ export class PoolJournal {
     const next = { ...current, ...update }
     this.db.run(
       "UPDATE pool_fill SET stage = ?, status = ?, chat_id = ?, " +
-        "bot_adds = ?, attempts = ?, last_error = ?, next_attempt_ms = ?, " +
-        "updated_ms = ? WHERE ref = ?",
+        "bot_adds = ?, attempts = ?, register_attempts = ?, last_error = ?, " +
+        "next_attempt_ms = ?, updated_ms = ? WHERE ref = ?",
       [
         next.stage,
         next.status,
         next.chatId,
         next.botAdds,
         next.attempts,
+        next.registerAttempts,
         next.lastError,
         next.nextAttemptMs,
         nowMs,
@@ -145,6 +151,29 @@ export class PoolJournal {
       ],
     )
     return this.get(ref)!
+  }
+
+  /**
+   * Whether the account's latest fill retired with `lastError` came after
+   * its latest `done` fill: a create that went missing with no successful
+   * fill since.
+   */
+  retiredSinceDone(accountId: number, lastError: string): boolean {
+    const row = this.db
+      .query<{ retired: number | null; done: number | null }, [
+        number,
+        string,
+        number,
+      ]>(
+        "SELECT " +
+          "(SELECT MAX(updated_ms) FROM pool_fill WHERE account_id = ? " +
+          "AND status = 'retired' AND last_error = ?) AS retired, " +
+          "(SELECT MAX(updated_ms) FROM pool_fill WHERE account_id = ? " +
+          "AND status = 'done') AS done",
+      )
+      .get(accountId, lastError, accountId)
+    if (!row || row.retired === null) return false
+    return row.done === null || row.retired > row.done
   }
 
   /** Every fill of `accountId`, newest first, at most `limit`. */

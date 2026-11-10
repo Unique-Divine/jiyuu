@@ -103,6 +103,8 @@ export interface TelegramProvisioner {
     userId: number,
     rights: Record<string, boolean>,
   ): Promise<void>
+  /** Makes earlier history visible to new members. One call, never resent. */
+  showHistory?(chatId: number): Promise<void>
   /** Sets the chat photo from JPEG bytes. One call, never resent. */
   setPhoto?(chatId: number, jpeg: Uint8Array): Promise<void>
   /**
@@ -123,6 +125,8 @@ export interface ChatInfo {
   isCreator: boolean
   /** Whether the chat has a photo; set by adapters that read it. */
   hasPhoto?: boolean
+  /** Whether new members miss earlier history; set by adapters that read it. */
+  hiddenHistory?: boolean
 }
 export interface Progress {
   state: ProvisionState

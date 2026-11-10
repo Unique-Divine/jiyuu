@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { Database } from "bun:sqlite"
 import {
+  failureOf,
   fillPoolOnce,
   hasPoolBotRights,
   MAX_CREATION_SEARCHES,
@@ -20,16 +21,23 @@ import type {
   PoolRegistration,
   PoolStatusReply,
 } from "./poolFiller"
+import { drainBackgroundOnce } from "./backgroundWorker"
 import { retirePoolFill } from "./poolCli"
 import { descriptionRef, PROVISIONING_BOT_ID } from "./provisioning"
 import type { ChatInfo, Member, TelegramProvisioner } from "./provisioning"
 import {
   countGroupDialogs,
   poolRefChatMatches,
+  titledDialogs,
 } from "./provisioningRuntime"
-import { poolStatusFromCloud, CliProvisionCloud } from "./provisioningCloud"
+import {
+  CliProvisionCloud,
+  DealDeskRefusedError,
+  isRefusalOutput,
+  poolStatusFromCloud,
+} from "./provisioningCloud"
 import { applyMigrations } from "./telemetry/db"
-import { BackgroundQueue } from "./state/background"
+import { BackgroundQueue, spacedAfterMs } from "./state/background"
 import { openStateDb, STATE_MIGRATIONS } from "./state/db"
 import { HoldStore } from "./state/holds"
 import { PoolJournal } from "./state/pool"
@@ -57,6 +65,9 @@ class FakeTelegram {
   /** Whether a timed-out create still made the chat. */
   createLands = true
   nextChatId = CHAT
+  /** New chats hide history; `showHistory` works unless `historyStuck`. */
+  hideHistory = false
+  historyStuck = false
 
   constructor(readonly selfId = CUSTODY) {}
 
@@ -85,6 +96,7 @@ class FakeTelegram {
         isForum: false,
         isCreator: true,
         hasPhoto: false,
+        hiddenHistory: this.hideHistory,
       },
       members: new Map([[this.selfId, { role: "creator", rights: {} }]]),
     })
@@ -142,9 +154,14 @@ class FakeTelegram {
         this.calls.push("info")
         return { ...chat(chatId).info }
       },
+      showHistory: async (chatId) => {
+        this.calls.push("history")
+        if (!this.historyStuck) chat(chatId).info.hiddenHistory = false
+      },
       poolCandidates: async (ref) => {
         this.calls.push("search")
         return [...this.chats]
+          .filter(([, c]) => c.info.title === POOL_CHAT_TITLE)
           .filter(([, c]) => descriptionRef(c.info.description) === ref)
           .map(([id]) => id)
       },
@@ -162,6 +179,8 @@ class FakeCloud {
     cap: 10,
   }
   registered: PoolRegistration[] = []
+  /** Errors the next `available` registrations throw, in order. */
+  registerErrors: unknown[] = []
   failures: PoolFailure[] = []
   statusCalls = 0
   registerFails = 0
@@ -170,6 +189,8 @@ class FakeCloud {
     return this.status
   }
   poolRegister = async (input: PoolRegistration) => {
+    if (input.state === "available" && this.registerErrors.length)
+      throw this.registerErrors.shift()
     if (input.state === "available" && this.registerFails > 0) {
       this.registerFails--
       throw new Error("Deal Desk down")
@@ -194,6 +215,8 @@ function setup(options: { selfId?: number; owners?: number[] } = {}) {
   const groups: { value: GroupCount | null } = { value: null }
   let nowMs = T0
   let refs = 0
+  let sessionError: unknown = null
+  const pacing = { gapMs: GAP, jitter: 0.3 }
   const run = () =>
     fillPoolOnce({
       accountId: options.selfId ?? CUSTODY,
@@ -201,14 +224,16 @@ function setup(options: { selfId?: number; owners?: number[] } = {}) {
       journal,
       queue,
       holds,
-      pacing: { gapMs: GAP, jitter: 0.3 },
+      pacing,
       cap,
       cloud,
-      telegram: (op) => op(telegram.adapter()),
+      telegram: async (op) => {
+        if (sessionError) throw sessionError
+        return op(telegram.adapter())
+      },
       photo: async () => new Uint8Array([0xff, 0xd8, 1, 2]),
       groups,
       now: () => nowMs,
-      random: () => 0.5,
       newRef: () => ["3fa9c2e1", "0badc0de", "facefeed"][refs++]!,
       sleep: async () => {},
     })
@@ -224,6 +249,14 @@ function setup(options: { selfId?: number; owners?: number[] } = {}) {
     run,
     advance: (ms: number) => {
       nowMs += ms
+    },
+    /** Moves the clock to when account-wide spacing next allows an add. */
+    toSpaced: () => {
+      nowMs = Math.max(nowMs, spacedAfterMs(queue.lastAddMs(), pacing) ?? 0)
+    },
+    pacing,
+    failSession: (error: unknown) => {
+      sessionError = error
     },
     now: () => nowMs,
   }
@@ -285,17 +318,23 @@ describe("fillPoolOnce", () => {
       stage: "registered",
       botAdds: 1,
     })
-    // Next fill waits one jittered gap (random 0.5 = exactly the gap).
-    expect(f.journal.nextFillMs(CUSTODY)).toBe(T0 + GAP)
+    // The next fill waits one jittered gap after this add.
+    expect(await f.run()).toMatchObject({
+      state: "paced",
+      nextAtMs: spacedAfterMs(T0, f.pacing)!,
+    })
     // Counted when the session opened, before this chat existed.
     expect(f.groups.value).toEqual({ count: 200, atMs: T0 })
   })
 
-  test("keeps 20-minute spacing and makes one chat per call", async () => {
+  test("keeps 20-minute ±30% spacing and makes one chat per call", async () => {
     const f = setup()
     await f.run()
-    f.advance(GAP - 1)
-    expect(await f.run()).toMatchObject({ state: "paced", nextAtMs: T0 + GAP })
+    const spaced = spacedAfterMs(T0, f.pacing)!
+    expect(spaced - T0).toBeGreaterThanOrEqual(GAP * 0.7)
+    expect(spaced - T0).toBeLessThanOrEqual(GAP * 1.3)
+    f.advance(spaced - T0 - 1)
+    expect(await f.run()).toMatchObject({ state: "paced", nextAtMs: spaced })
     expect(f.cloud.statusCalls).toBe(1)
     f.advance(1)
     expect(await f.run()).toMatchObject({ state: "filled", ref: "0badc0de" })
@@ -323,7 +362,7 @@ describe("fillPoolOnce", () => {
       outcome: "uncertain",
       chatId: 1,
       userIds: [1, 2],
-      nowMs: T0,
+      nowMs: T0 - 2 * 3_600_000,
     })
     expect(await f.run()).toMatchObject({
       state: "capped",
@@ -454,9 +493,11 @@ describe("fillPoolOnce", () => {
       ref: "3fa9c2e1",
       run: true,
     })
-    // Already reported when it failed.
-    expect(done).toMatchObject({ reported: false, fill: { status: "retired" } })
-    expect(f.cloud.failures).toHaveLength(1)
+    // Reported again with the saved stage and error.
+    expect(done).toMatchObject({ reported: true, fill: { status: "retired" } })
+    expect(f.cloud.failures).toHaveLength(2)
+    expect(f.cloud.failures[1]).toEqual(f.cloud.failures[0])
+    f.toSpaced()
     expect((await f.run()).state).toBe("filled")
   })
 
@@ -771,5 +812,287 @@ describe("state migration 0006", () => {
     journal.paceFill(CUSTODY, T0 + 10)
     journal.paceFill(CUSTODY, T0 + 5)
     expect(journal.nextFillMs(CUSTODY)).toBe(T0 + 10)
+  })
+})
+
+describe("pool fills share the account's add budget", () => {
+  test("nothing runs while live deal members are queued", async () => {
+    const f = setup()
+    f.queue.enqueue({
+      requestId: "deal",
+      chatId: -42,
+      userIds: [7],
+      notBeforeMs: T0 + 3_600_000,
+      nowMs: T0,
+    })
+    expect(await f.run()).toEqual({ state: "behind_background" })
+    expect(f.cloud.statusCalls).toBe(0)
+    expect(f.telegram.calls).toEqual([])
+  })
+
+  test("a resumed fill waits for queued deal members before its add", async () => {
+    const f = setup()
+    f.telegram.failNext.set(
+      "add",
+      Object.assign(new Error("flood"), { text: "FLOOD_WAIT_60", code: 420 }),
+    )
+    const held = await f.run()
+    f.queue.enqueue({
+      requestId: "deal",
+      chatId: -42,
+      userIds: [7],
+      notBeforeMs: T0,
+      nowMs: T0,
+    })
+    f.advance(held.nextAtMs! - f.now())
+    expect(await f.run()).toMatchObject({
+      state: "waiting",
+      stage: "created",
+      error: "add_bot:background_pending",
+    })
+    expect(f.telegram.calls.filter((c) => c === "add")).toHaveLength(1)
+    expect(f.journal.get("3fa9c2e1")?.attempts).toBe(0)
+  })
+
+  test("background add, then pool: the fill waits one gap", async () => {
+    const f = setup()
+    // A background add finished 5 s ago; its row is done.
+    f.queue.recordAdds({
+      source: "background",
+      outcome: "added",
+      chatId: -42,
+      userIds: [7],
+      nowMs: T0 - 5000,
+    })
+    const spaced = spacedAfterMs(T0 - 5000, f.pacing)!
+    expect(await f.run()).toEqual({ state: "paced", nextAtMs: spaced })
+    expect(f.cloud.statusCalls).toBe(0)
+    f.toSpaced()
+    expect((await f.run()).state).toBe("filled")
+  })
+
+  test("a setup add between create and the bot add delays the bot add", async () => {
+    const f = setup()
+    f.telegram.failNext.set("add", Object.assign(new Error("x"), {
+      text: "FLOOD_WAIT_30",
+      code: 420,
+    }))
+    const held = await f.run()
+    f.advance(held.nextAtMs! - f.now())
+    f.queue.recordAdds({
+      source: "setup",
+      outcome: "added",
+      chatId: -9,
+      userIds: [1],
+      nowMs: f.now(),
+    })
+    expect(await f.run()).toMatchObject({ state: "paced", stage: "created" })
+    f.toSpaced()
+    expect((await f.run()).state).toBe("filled")
+  })
+
+  test("pool add, then background: the drain waits one gap", async () => {
+    const f = setup()
+    await f.run()
+    f.queue.enqueue({
+      requestId: "deal",
+      chatId: -42,
+      userIds: [7],
+      notBeforeMs: T0,
+      nowMs: T0,
+    })
+    const drain = (nowMs: number) =>
+      drainBackgroundOnce({
+        queue: f.queue,
+        holds: f.holds,
+        accountId: CUSTODY,
+        pacing: { ...f.pacing, dailyMax: 10 },
+        telegram: async () => {
+          throw new Error("drain must not call Telegram while paced")
+        },
+        nowMs,
+        random: () => 0.5,
+      })
+    const spaced = spacedAfterMs(T0, f.pacing)!
+    expect(await drain(T0 + 5000)).toMatchObject({
+      state: "paced",
+      nextAtMs: spaced,
+    })
+    expect(f.queue.summary().nextAtMs).toBe(spaced)
+  })
+})
+
+describe("pool fill recovery", () => {
+  test("hidden history is made visible once and read back", async () => {
+    const f = setup()
+    f.telegram.hideHistory = true
+    expect((await f.run()).state).toBe("filled")
+    expect(f.telegram.calls.filter((c) => c === "history")).toHaveLength(1)
+    expect(f.telegram.chats.get(CHAT)!.info.hiddenHistory).toBe(false)
+  })
+
+  test("visible history needs no write", async () => {
+    const f = setup()
+    expect((await f.run()).state).toBe("filled")
+    expect(f.telegram.calls).not.toContain("history")
+  })
+
+  test("history that stays hidden fails at the history stage", async () => {
+    const f = setup()
+    f.telegram.hideHistory = true
+    f.telegram.historyStuck = true
+    expect(await f.run()).toMatchObject({
+      state: "failed",
+      error: "history:history_still_hidden",
+    })
+    expect(f.cloud.failures[0]).toMatchObject({
+      stage: "history",
+      error: "history_still_hidden",
+    })
+    expect(f.cloud.registered.map((r) => r.state)).toEqual(["filling"])
+  })
+
+  test("a second create that went missing blocks for an operator", async () => {
+    const f = setup()
+    f.telegram.createLands = false
+    for (const ref of ["3fa9c2e1", "0badc0de"]) {
+      f.telegram.failNext.set("create", new Error("Request timed out"))
+      await f.run()
+      for (let i = 0; i < MAX_CREATION_SEARCHES; i++) {
+        f.advance(POOL_RETRY_MS)
+        await f.run()
+      }
+      expect(f.journal.get(ref)?.stage).toBe("creation_unknown")
+      f.advance(POOL_RETRY_MS)
+    }
+    expect(f.journal.get("3fa9c2e1")?.status).toBe("retired")
+    expect(f.journal.get("0badc0de")).toMatchObject({
+      status: "failed",
+      lastError: "find_created:creation_not_found",
+    })
+    expect(await f.run()).toMatchObject({ state: "blocked", ref: "0badc0de" })
+    expect(f.telegram.calls.filter((c) => c === "create")).toHaveLength(2)
+  })
+
+  test("the ref search reads only chats with the pool title", async () => {
+    async function* dialogs() {
+      yield { peer: { type: "chat", title: POOL_CHAT_TITLE, id: 1 } }
+      yield { peer: { type: "chat", title: "Sai <> Trader", id: 2 } }
+      yield { peer: { type: "user", title: POOL_CHAT_TITLE, id: 3 } }
+    }
+    const seen: number[] = []
+    for await (const d of titledDialogs(dialogs(), POOL_CHAT_TITLE))
+      seen.push(d.peer.id)
+    expect(seen).toEqual([1])
+  })
+
+  test("a fresh fill whose session never opened is retired unsent", async () => {
+    const f = setup()
+    f.failSession(new Error("Connection closed"))
+    expect(await f.run()).toMatchObject({
+      state: "retired",
+      error: "create_unsent:TG_SAI_TRANSIENT",
+    })
+    expect(f.telegram.calls).toEqual([])
+  })
+
+  test("a crashed create is searched for even when the next session fails", async () => {
+    const f = setup()
+    // A crash after the create was sent: the row says `creating`, the chat exists.
+    f.journal.start({ ref: "3fa9c2e1", accountId: CUSTODY, nowMs: T0 })
+    f.telegram.makeChat(POOL_CHAT_TITLE, poolDescription("3fa9c2e1"))
+    f.advance(1000)
+    f.failSession(new Error("Connection closed"))
+    expect(await f.run()).toMatchObject({ state: "waiting", stage: "creating" })
+    expect(f.journal.get("3fa9c2e1")?.status).toBe("active")
+    f.failSession(null)
+    f.advance(POOL_RETRY_MS)
+    expect(await f.run()).toMatchObject({ state: "filled", chatId: CHAT })
+    expect(f.telegram.calls).toContain("search")
+    expect(f.telegram.calls).not.toContain("create")
+  })
+
+  test("Deal Desk refusing `available` fails the fill", async () => {
+    const f = setup()
+    f.cloud.registerErrors = [new DealDeskRefusedError("pool-register")]
+    expect(await f.run()).toMatchObject({
+      state: "failed",
+      error: "register:deal_desk_refused",
+    })
+    expect(f.cloud.failures[0]).toMatchObject({
+      chatId: String(CHAT),
+      stage: "register",
+      error: "deal_desk_refused",
+    })
+  })
+
+  test("Deal Desk outages retry on their own counter", async () => {
+    const f = setup()
+    f.cloud.registerFails = 6
+    for (let i = 1; i <= 6; i++) {
+      expect((await f.run()).state).toBe("waiting")
+      const fill = f.journal.get("3fa9c2e1")!
+      expect(fill.registerAttempts).toBe(i)
+      expect(fill.attempts).toBe(0)
+      f.advance(fill.nextAttemptMs - f.now())
+    }
+    // A transient read after six outages still only retries.
+    f.telegram.failNext.set("member", new Error("Request timed out"))
+    expect((await f.run()).state).toBe("waiting")
+    f.advance(POOL_RETRY_MS)
+    expect((await f.run()).state).toBe("filled")
+  })
+
+  test("a fresh group count at Deal Desk's stop refuses the create", async () => {
+    const f = setup()
+    f.cloud.status = { ...f.cloud.status, groupStopAt: 200 }
+    expect(await f.run()).toMatchObject({
+      state: "not_allowed",
+      reason: "group_limit",
+      nextAtMs: T0 + POOL_STATUS_RECHECK_MS,
+    })
+    expect(f.telegram.calls).not.toContain("create")
+    expect(f.groups.value?.count).toBe(200)
+    f.cloud.status = { ...f.cloud.status, groupStopAt: 490 }
+    f.advance(POOL_STATUS_RECHECK_MS)
+    expect((await f.run()).state).toBe("filled")
+  })
+
+  test("an add error we cannot place counts as uncertain", async () => {
+    for (const error of [
+      new Error("unexpected"),
+      Object.assign(new Error("odd"), { text: "RANDOM_THING", code: 400 }),
+    ]) {
+      const f = setup()
+      f.telegram.failNext.set("add", error)
+      expect((await f.run()).state).toBe("failed")
+      expect(poolAdds(f.db)).toEqual([{ source: "pool", outcome: "uncertain" }])
+      expect(f.queue.addsToday(f.now())).toBe(1)
+      expect(f.journal.get("3fa9c2e1")?.botAdds).toBe(1)
+    }
+  })
+
+  test("failureOf maps a saved error back to its pool-fail stage", () => {
+    expect(failureOf("add_bot:BOT_GROUPS_BLOCKED")).toEqual({
+      stage: "add_bot",
+      error: "BOT_GROUPS_BLOCKED",
+    })
+    expect(failureOf("find_created:creation_not_found").stage).toBe("create")
+    expect(failureOf(null)).toEqual({
+      stage: "other",
+      error: "operator_retired",
+    })
+  })
+
+  test("isRefusalOutput tells refusals from outages", () => {
+    const out = (status: number, rest = ': [{"message":"bad"}]') =>
+      JSON.stringify({
+        error: `GraphQL request failed (HTTP ${status})${rest}`,
+      })
+    expect(isRefusalOutput(out(400))).toBe(true)
+    expect(isRefusalOutput(out(200))).toBe(true)
+    expect(isRefusalOutput(out(503))).toBe(false)
+    expect(isRefusalOutput(out(200, ": non-JSON response: eof"))).toBe(false)
+    expect(isRefusalOutput('{"error":"error sending request"}')).toBe(false)
   })
 })

@@ -82,6 +82,21 @@ export function jitteredGapMs(
   return Math.round(pacing.gapMs * (1 - pacing.jitter + 2 * pacing.jitter * r))
 }
 
+/**
+ * Earliest time the next member add may run after one at `lastAddMs`: the
+ * jittered gap, with the jitter derived from `lastAddMs` so every caller
+ * and every tick computes the same time. `null` when no add is logged.
+ */
+export function spacedAfterMs(
+  lastAddMs: number | null,
+  pacing: Pick<BackgroundPacing, "gapMs" | "jitter">,
+): number | null {
+  if (lastAddMs === null) return null
+  // Knuth multiplicative hash of the add time, in [0, 1).
+  const r = (Math.imul(lastAddMs % 2 ** 31, 2654435761) >>> 0) / 2 ** 32
+  return lastAddMs + jitteredGapMs(pacing, () => r)
+}
+
 /** Start of the UTC day that contains `nowMs`. */
 export function utcDayStartMs(nowMs: number): number {
   return Math.floor(nowMs / DAY_MS) * DAY_MS
@@ -275,6 +290,20 @@ export class BackgroundQueue {
           "SELECT count(*) AS n FROM member_add WHERE at_ms >= ?",
         )
         .get(utcDayStartMs(nowMs))?.n ?? 0
+    )
+  }
+
+  /**
+   * Time of the account's latest member add of any source (setup,
+   * background, pool), or `null` when none is logged.
+   */
+  lastAddMs(): number | null {
+    return (
+      this.db
+        .query<{ at: number | null }, []>(
+          "SELECT MAX(at_ms) AS at FROM member_add",
+        )
+        .get()?.at ?? null
     )
   }
 

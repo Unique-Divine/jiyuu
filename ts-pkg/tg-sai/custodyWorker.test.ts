@@ -8,6 +8,7 @@ import {
   CUSTODY_USER_ID,
   MAX_NEXT_CHECK_MS,
   poolFillEnabled,
+  poolFillPlan,
   recordWorkerTick,
   runWorkerOnce,
   setupHoldGroups,
@@ -1174,8 +1175,38 @@ test("pool fill ticks are recorded unless idle; TG_SAI_POOL_FILL turns it off", 
       lastRecordedMs: 0,
     }),
   ).toBe(true)
-  expect(poolFillEnabled({})).toBe(true)
+  // Off unless turned on, so a deploy never starts making chats.
+  expect(poolFillEnabled({})).toBe(false)
   expect(poolFillEnabled({ TG_SAI_POOL_FILL: "0" })).toBe(false)
-  expect(poolFillEnabled({ TG_SAI_POOL_FILL: "OFF" })).toBe(false)
+  expect(poolFillEnabled({ TG_SAI_POOL_FILL: "yes" })).toBe(false)
   expect(poolFillEnabled({ TG_SAI_POOL_FILL: "1" })).toBe(true)
+  expect(poolFillEnabled({ TG_SAI_POOL_FILL: " ON " })).toBe(true)
+})
+
+test("a bad owner list disables only the filler", () => {
+  expect(poolFillPlan({})).toEqual({ owners: null, error: null })
+  expect(poolFillPlan({ TG_SAI_POOL_FILL: "1" })).toEqual({
+    owners: [CUSTODY_USER_ID],
+    error: null,
+  })
+  expect(
+    poolFillPlan({
+      TG_SAI_POOL_FILL: "1",
+      TG_SAI_OWNER_ACCOUNTS: "8274304175 @typo",
+    }),
+  ).toEqual({ owners: null, error: "owner_accounts_invalid" })
+  // A disabled filler is an idle tick, not a recorded one.
+  expect(
+    shouldRecordTick({
+      result: {
+        dryRun: false,
+        results: [],
+        nextAfter: null,
+        requesterWork: false,
+        pool: { state: "disabled", error: "owner_accounts_invalid" },
+      },
+      nowMs: 1000,
+      lastRecordedMs: 0,
+    }),
+  ).toBe(false)
 })

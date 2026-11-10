@@ -1,6 +1,7 @@
 import { join } from "node:path"
 import type { Command } from "commander"
 import { CUSTODY_USER_ID } from "./custodyWorker"
+import { failureOf } from "./poolFiller"
 import type { PoolCloud } from "./poolFiller"
 import { configDir } from "./profiles"
 import { CliProvisionCloud } from "./provisioningCloud"
@@ -10,11 +11,13 @@ import { PoolJournal } from "./state/pool"
 import type { PoolFill } from "./state/pool"
 
 /**
- * Retires the open pool fill `ref`, so the filler starts new fills again.
- * A fill that is still `active` and has a chat is reported to Deal Desk
- * with `pool-fail` (stage `other`, error `operator_retired`), which retires
- * the chat there; a `failed` one was reported when it failed. The chat
- * itself is left as it is. Without `run` it only returns the record.
+ * Retires the open pool fill `ref`, so the filler starts new fills again,
+ * and tells Deal Desk with `pool-fail`, which retires the chat there. A
+ * `failed` fill is reported again with its saved stage and error, since
+ * the first report was best effort (Deal Desk dedupes the same input). An
+ * `active` fill with a chat is reported with stage `other` and error
+ * `operator_retired`. The Telegram chat is left as it is. Without `run` it
+ * only returns the record.
  */
 export async function retirePoolFill(params: {
   journal: PoolJournal
@@ -29,12 +32,15 @@ export async function retirePoolFill(params: {
     throw new Error(`Pool fill is already ${fill.status}`)
   if (!params.run) return { dryRun: true, fill, reported: false }
   let reported = false
-  if (fill.status === "active" && fill.chatId !== null) {
+  if (fill.status === "failed" || fill.chatId !== null) {
+    const failure =
+      fill.status === "failed"
+        ? failureOf(fill.lastError)
+        : { stage: "other" as const, error: "operator_retired" }
     await params.cloud.poolFail({
       accountId: String(fill.accountId),
-      chatId: String(fill.chatId),
-      stage: "other",
-      error: "operator_retired",
+      ...(fill.chatId !== null ? { chatId: String(fill.chatId) } : {}),
+      ...failure,
       floodWaitS: null,
     })
     reported = true

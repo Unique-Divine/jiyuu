@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto"
+import { POOL_CHAT_TITLE } from "./poolTitle"
 import {
   CHAT_DESCRIPTION_TEXT,
   definiteCreateRejection,
@@ -13,13 +14,13 @@ import {
 import type { ChatInfo, Member, TelegramProvisioner } from "./provisioning"
 import type { ProfileStoreEnv } from "./profiles"
 import type { BackgroundQueue, BackgroundPacing } from "./state/background"
-import { jitteredGapMs } from "./state/background"
+import { spacedAfterMs } from "./state/background"
 import type { HoldStoreSource } from "./state/guard"
 import type { HoldGroup } from "./state/holds"
 import type { PoolFill, PoolJournal, PoolUpdate } from "./state/pool"
+import { DEAL_DESK_REFUSED } from "./provisioningCloud"
 
-/** Title of a pool chat until Deal Desk claims and renames it. */
-export const POOL_CHAT_TITLE = "Sai deal chat (available)"
+export { POOL_CHAT_TITLE }
 
 /**
  * The bot's rights in a pool chat: every admin right a supergroup has,
@@ -165,6 +166,8 @@ export interface PoolStatusReply {
   cap: number | null
   remaining?: number | null
   needed?: number
+  /** Group count at which Deal Desk stops filling; checked locally too. */
+  groupStopAt?: number | null
 }
 
 /** `pool-register` input. */
@@ -251,6 +254,8 @@ export interface GroupCount {
 export interface PoolFillResult {
   state:
     | "idle"
+    | "disabled"
+    | "behind_background"
     | "paced"
     | "held"
     | "not_allowed"
@@ -274,6 +279,8 @@ export interface PoolFillResult {
 /** Fill states that made no Telegram call. */
 export const IDLE_POOL_STATES: ReadonlySet<string> = new Set([
   "idle",
+  "disabled",
+  "behind_background",
   "paced",
   "held",
   "not_allowed",
@@ -334,18 +341,34 @@ type FillStep =
   | "add_bot"
   | "read_bot"
   | "promote_bot"
+  | "history"
   | "photo"
   | "register"
 
-const FAIL_STAGE: Record<FillStep, PoolFailStage> = {
+/** `pool-fail` stage of each step. */
+export const FAIL_STAGE: Readonly<Record<string, PoolFailStage>> = {
   create: "create",
+  create_unsent: "create",
   find_created: "create",
   verify_chat: "other",
   add_bot: "add_bot",
   read_bot: "add_bot",
   promote_bot: "promote_bot",
+  history: "history",
   photo: "photo",
   register: "register",
+}
+
+/** `pool-fail` stage and error for a saved `<step>:<code>` last error. */
+export function failureOf(lastError: string | null): {
+  stage: PoolFailStage
+  error: string
+} {
+  const [step = "", ...rest] = (lastError ?? "").split(":")
+  return {
+    stage: FAIL_STAGE[step] ?? "other",
+    error: rest.join(":") || "operator_retired",
+  }
 }
 
 /** A stop that ends the step loop with `result`. */
@@ -353,10 +376,8 @@ class Stop {
   constructor(readonly result: PoolFillResult) {}
 }
 
-/** Error with a fixed code, for checks the filler makes itself. */
-function coded(text: string, message: string): Error {
-  return Object.assign(new Error(message), { text })
-}
+/** Last error of a create that went missing: searched for, never found. */
+export const CREATION_NOT_FOUND = "find_created:creation_not_found"
 
 /**
  * One step of the deal chat pool filler for `accountId` (boku#77). At most
@@ -365,27 +386,35 @@ function coded(text: string, message: string): Error {
  *
  * 1. A `failed` fill blocks every new fill until an operator retires it.
  *    An `active` fill resumes at its stage once its retry time is due.
- * 2. A new fill needs its pacing gap passed (`pool_pace`), no saved hold on
- *    `create` or `invite`, Deal Desk's `pool-status` `allowedNow`, and a
- *    member add left under today's cap (`PoolCap`, local `addsToday`).
- * 3. Create the supergroup `POOL_CHAT_TITLE` with `poolDescription(ref)`,
+ * 2. Pool chats come after live deals: nothing runs while the background
+ *    queue has any pending member.
+ * 3. A new fill needs `pool_pace` passed, one jittered gap since the
+ *    account's latest member add of any source (`spacedAfterMs`), no saved
+ *    hold on `create` or `invite`, Deal Desk's `pool-status` `allowedNow`, a
+ *    member add left under today's cap (`PoolCap`, local `addsToday`), and
+ *    a fresh group count below Deal Desk's `groupStopAt`.
+ * 4. Create the supergroup `POOL_CHAT_TITLE` with `poolDescription(ref)`,
  *    register it `filling`, add the bot (exactly one add, journaled before
- *    the call and counted in `member_add` as source `pool`, uncertain
- *    outcomes included), promote it to `POOL_BOT_RIGHTS`, set the Sai
- *    photo, then register it `available`. History stays visible.
+ *    the call and counted in `member_add` as source `pool`; any outcome but
+ *    a whole-call refusal counts), promote it to `POOL_BOT_RIGHTS`, make
+ *    history visible, set the Sai photo, then register it `available`.
  *
  * A flood or hold stops the fill until it ends and paces the next one past
  * it. A transient error retries after `POOL_RETRY_MS`, at most
  * `MAX_POOL_ATTEMPTS` times. Anything else fails the fill: the record keeps
  * its chat, Deal Desk gets `pool-fail`, and no new fill starts until an
  * operator acts. A create whose result is unknown is searched for by its
- * ref, never created again.
+ * ref, never created again; a second such create with no successful fill
+ * in between blocks for an operator.
  */
 export async function fillPoolOnce(params: {
   accountId: number
   owners: readonly number[]
   journal: PoolJournal
-  queue: Pick<BackgroundQueue, "addsToday" | "recordAdds">
+  queue: Pick<
+    BackgroundQueue,
+    "addsToday" | "recordAdds" | "lastAddMs" | "summary"
+  >
   holds: HoldStoreSource
   pacing: Pick<BackgroundPacing, "gapMs" | "jitter">
   cap: PoolCap
@@ -398,7 +427,6 @@ export async function fillPoolOnce(params: {
   /** Last group count; refreshed in a fill session when stale. */
   groups?: { value: GroupCount | null }
   now?: () => number
-  random?: () => number
   newRef?: () => string
   sleep?: (ms: number) => Promise<void>
   signal?: AbortSignal
@@ -427,10 +455,20 @@ export async function fillPoolOnce(params: {
     params.queue.addsToday(nowMs) < params.cap.current(nowMs)
   const nextUtcDay = (nowMs: number) =>
     Math.floor(nowMs / 86_400_000) * 86_400_000 + 86_400_000
+  const backgroundPending = () => params.queue.summary().pending > 0
+  /** When account-wide add spacing allows the next add, if later than now. */
+  const spacedUntil = (nowMs: number): number | null => {
+    const spaced = spacedAfterMs(params.queue.lastAddMs(), params.pacing)
+    return spaced !== null && spaced > nowMs ? spaced : null
+  }
   let fresh = false
-  let createSent = false
+  let groupStopAt: number | null = null
   if (!fill) {
-    const paced = journal.nextFillMs(accountId)
+    if (backgroundPending()) return { state: "behind_background" }
+    const paced = Math.max(
+      journal.nextFillMs(accountId),
+      spacedUntil(startMs) ?? 0,
+    )
     if (paced > startMs) return { state: "paced", nextAtMs: paced }
     const held = holdEnd(params.holds, accountId, POOL_HOLD_GROUPS, startMs)
     if (held !== null) {
@@ -457,6 +495,8 @@ export async function fillPoolOnce(params: {
       journal.paceFill(accountId, nextAtMs)
       return { state: "capped", nextAtMs }
     }
+    groupStopAt =
+      typeof status.groupStopAt === "number" ? status.groupStopAt : null
     if (params.signal?.aborted) return { state: "idle" }
     fill = journal.start({
       ref: (params.newRef ?? newPoolRef)(),
@@ -467,22 +507,18 @@ export async function fillPoolOnce(params: {
   }
   let current: PoolFill = fill
   let step: FillStep = "create"
+  let createSent = false
   const save = (update: PoolUpdate): PoolFill =>
     (current = journal.update(current.ref, update, now()))
-  const paceNext = (fromMs: number) =>
-    journal.paceFill(
-      accountId,
-      fromMs + jitteredGapMs(params.pacing, params.random),
-    )
   const fail = async (error: unknown, code?: string): Promise<Stop> => {
     const text = `${step}:${code ?? safeProvisionError(error)}`
     save({ status: "failed", lastError: text })
-    // The report is best effort; the local record keeps blocking fills.
+    // The report is best effort; `pool retire` sends it again.
     await params.cloud
       .poolFail({
         accountId: String(accountId),
         ...(current.chatId !== null ? { chatId: String(current.chatId) } : {}),
-        stage: FAIL_STAGE[step],
+        stage: FAIL_STAGE[step] ?? "other",
         error: code ?? safeProvisionError(error),
         floodWaitS: floodWaitSeconds(error),
       })
@@ -529,26 +565,41 @@ export async function fillPoolOnce(params: {
   /** Passes a step: clears its attempts and error. */
   const passed = (update: PoolUpdate): PoolFill =>
     save({ ...update, attempts: 0, lastError: null })
+  /** Retires a fresh fill whose create call never left; nothing exists. */
+  const retireUnsent = (
+    code: string,
+    result: Partial<PoolFillResult> = {},
+  ): PoolFillResult => {
+    const nextAtMs = now() + POOL_RETRY_MS
+    save({ status: "retired", lastError: `create_unsent:${code}` })
+    journal.paceFill(accountId, nextAtMs)
+    return {
+      state: "retired",
+      ...at(current),
+      error: current.lastError!,
+      nextAtMs,
+      ...result,
+    }
+  }
+  /** Waits, uncounted, until `untilMs`; the fill keeps its stage. */
+  const waitUntil = (
+    untilMs: number,
+    state: PoolFillResult["state"] = "waiting",
+    error?: string,
+  ): PoolFillResult => {
+    save({ nextAttemptMs: untilMs })
+    return {
+      state,
+      ...at(current),
+      ...(error ? { error } : {}),
+      nextAtMs: untilMs,
+    }
+  }
 
   try {
     return await params.telegram(async (telegram) => {
       if ((await telegram.self()) !== accountId)
         throw new Error("Pool owner account identity mismatch")
-      if (
-        params.groups &&
-        telegram.groupCount &&
-        (!params.groups.value ||
-          now() - params.groups.value.atMs >= GROUP_COUNT_INTERVAL_MS)
-      ) {
-        try {
-          params.groups.value = {
-            count: await telegram.groupCount(),
-            atMs: now(),
-          }
-        } catch {
-          // The count is informational; Deal Desk also counts owned chats.
-        }
-      }
       try {
         return await advance(telegram)
       } catch (error) {
@@ -556,32 +607,58 @@ export async function fillPoolOnce(params: {
       }
     })
   } catch (error) {
-    // Session, connect, or identity errors before any step ran. A fresh
-    // fill whose create was never sent made nothing: retire its ref.
-    if (current.stage === "creating" && !createSent)
+    // Session, connect, or identity errors before any step ran. Only a
+    // fill started in this call is known to have sent no create; a resumed
+    // `creating` fill may have a chat and is searched for next time.
+    if (fresh && current.stage === "creating" && !createSent)
       return retireUnsent(safeProvisionError(error))
     const stop = await stopFor(error)
     return stop.result
   }
 
-  /** Retires a fresh fill whose create call never left; nothing exists. */
-  function retireUnsent(code: string): PoolFillResult {
-    const nextAtMs = now() + POOL_RETRY_MS
-    save({ status: "retired", lastError: `create_unsent:${code}` })
-    journal.paceFill(accountId, nextAtMs)
-    return { state: "retired", ...at(current), error: current.lastError!, nextAtMs }
+  /** Counts the account's groups when stale, or always before a create. */
+  async function countGroups(
+    telegram: TelegramProvisioner,
+    force: boolean,
+  ): Promise<number | null> {
+    if (!telegram.groupCount) return null
+    const last = params.groups?.value ?? null
+    if (!force && last && now() - last.atMs < GROUP_COUNT_INTERVAL_MS)
+      return last.count
+    try {
+      const count = await telegram.groupCount()
+      if (params.groups) params.groups.value = { count, atMs: now() }
+      return count
+    } catch {
+      // Informational; Deal Desk also counts the chats it knows.
+      return null
+    }
   }
 
   async function advance(
     telegram: TelegramProvisioner,
   ): Promise<PoolFillResult> {
     const ref = current.ref
+    const groupCount = await countGroups(telegram, fresh)
     if (current.stage === "creating" && !fresh) {
       // A create was journaled but its result never was: it may exist.
       save({ stage: "creation_unknown" })
     }
     if (current.stage === "creating") {
       step = "create"
+      if (
+        groupStopAt !== null &&
+        groupCount !== null &&
+        groupCount >= groupStopAt
+      ) {
+        const result = retireUnsent("group_limit", {
+          state: "not_allowed",
+          reason: "group_limit",
+          nextAtMs: now() + POOL_STATUS_RECHECK_MS,
+        })
+        journal.paceFill(accountId, result.nextAtMs!)
+        return result
+      }
       let chatId: number
       if (params.signal?.aborted) return retireUnsent("shutdown")
       createSent = true
@@ -595,7 +672,6 @@ export async function fillPoolOnce(params: {
             nextAttemptMs: now() + POOL_RETRY_MS,
             lastError: `create:${safeProvisionError(error)}`,
           })
-          paceNext(now())
           return {
             state: "waiting",
             ...at(current),
@@ -616,7 +692,6 @@ export async function fillPoolOnce(params: {
         throw await fail(error)
       }
       passed({ stage: "created", chatId })
-      paceNext(now())
       // Deal Desk learns of the chat before the add; best effort, since
       // the local record resumes it either way.
       await params.cloud
@@ -640,12 +715,13 @@ export async function fillPoolOnce(params: {
       if (!found.length) {
         const attempts = current.attempts + 1
         if (attempts >= MAX_CREATION_SEARCHES) {
+          save({ attempts })
+          // A second missing create with no fill done since: stop for an
+          // operator instead of creating (and maybe orphaning) another.
+          if (journal.retiredSinceDone(accountId, CREATION_NOT_FOUND))
+            throw await fail(null, "creation_not_found")
           // Searched three times over 10+ minutes: nothing was created.
-          save({
-            status: "retired",
-            attempts,
-            lastError: "find_created:creation_not_found",
-          })
+          save({ status: "retired", lastError: CREATION_NOT_FOUND })
           return { state: "retired", ...at(current), error: current.lastError! }
         }
         save({ attempts, nextAttemptMs: now() + POOL_RETRY_MS })
@@ -662,7 +738,7 @@ export async function fillPoolOnce(params: {
     if (chatId === null) throw await fail(null, "chat_missing")
     step = "verify_chat"
     if (!telegram.chatInfo) throw await fail(null, "chat_info_unavailable")
-    const info = await telegram.chatInfo(chatId)
+    let info = await telegram.chatInfo(chatId)
     const creator =
       info.isCreator || !telegram.creatorId
         ? null
@@ -677,22 +753,21 @@ export async function fillPoolOnce(params: {
           ? await telegram.member(chatId, PROVISIONING_BOT_ID)
           : null
       if (current.botAdds === 0) {
-        // Re-checked here: a resumed fill may reach its add on a new day
-        // or after a hold began.
+        // Re-checked here: a resumed fill may reach its add on a new day,
+        // after a hold began, after another add, or with live deal members
+        // queued. None of these waits counts as an attempt.
         const nowMs = now()
+        if (backgroundPending())
+          return waitUntil(
+            nowMs + POOL_STATUS_RECHECK_MS,
+            "waiting",
+            "add_bot:background_pending",
+          )
         const held = holdEnd(params.holds, accountId, ["invite"], nowMs)
-        if (held !== null) {
-          save({ nextAttemptMs: held })
-          return { state: "held", ...at(current), nextAtMs: held }
-        }
-        if (!capLeft(nowMs)) {
-          save({ nextAttemptMs: nextUtcDay(nowMs) })
-          return {
-            state: "capped",
-            ...at(current),
-            nextAtMs: current.nextAttemptMs,
-          }
-        }
+        if (held !== null) return waitUntil(held, "held")
+        const spaced = spacedUntil(nowMs)
+        if (spaced !== null) return waitUntil(spaced, "paced")
+        if (!capLeft(nowMs)) return waitUntil(nextUtcDay(nowMs), "capped")
         step = "add_bot"
         if (params.signal?.aborted) return { state: "idle", ...at(current) }
         // Journaled first: a lost response never leads to a second add.
@@ -713,24 +788,24 @@ export async function fillPoolOnce(params: {
         try {
           await telegram.add(chatId, PROVISIONING_BOT_ID)
         } catch (error) {
-          if (isTransientTelegramError(error)) {
-            // Telegram may have run it: counted, and never sent again.
-            record("uncertain")
-            paceNext(now())
-          } else if (isPerUserAddError(error)) {
-            record("refused")
-            paceNext(now())
-          } else if (
+          const wholeCallRefusal =
             !params.signal?.aborted &&
+            !isTransientTelegramError(error) &&
+            !isPerUserAddError(error) &&
             provisionRetryAt(error, now()) !== null
-          ) {
+          if (wholeCallRefusal) {
             // A flood or hold refused the whole call: nothing was sent.
             save({ botAdds: 0 })
+          } else if (isPerUserAddError(error)) {
+            record("refused")
+          } else {
+            // A timeout, a cut-off call, or any error we cannot place:
+            // Telegram may have run it, so it counts and is never resent.
+            record("uncertain")
           }
           throw error
         }
         record("added")
-        paceNext(now())
         step = "read_bot"
         bot = await telegram.member(chatId, PROVISIONING_BOT_ID)
         if (bot.role === "absent") {
@@ -774,6 +849,18 @@ export async function fillPoolOnce(params: {
 
     let photoSet = info.hasPhoto === true
     if (current.stage === "promoted") {
+      // The trader must see the intro the bot posts before they join.
+      step = "history"
+      if (info.hiddenHistory !== false) {
+        if (info.hiddenHistory === undefined)
+          throw await fail(null, "history_unreadable")
+        if (!telegram.showHistory)
+          throw await fail(null, "history_toggle_unavailable")
+        await telegram.showHistory(chatId)
+        info = await telegram.chatInfo(chatId)
+        if (info.hiddenHistory !== false)
+          throw await fail(null, "history_still_hidden")
+      }
       step = "photo"
       if (!photoSet && telegram.setPhoto) {
         try {
@@ -802,8 +889,7 @@ export async function fillPoolOnce(params: {
         step = "promote_bot"
         throw await fail(null, "bot_rights_missing")
       }
-      if (!photoSet && telegram.chatInfo)
-        photoSet = (await telegram.chatInfo(chatId)).hasPhoto === true
+      if (!photoSet) photoSet = (await telegram.chatInfo(chatId)).hasPhoto === true
       try {
         await params.cloud.poolRegister({
           accountId: String(accountId),
@@ -819,12 +905,15 @@ export async function fillPoolOnce(params: {
           verifiedAt: new Date(now()).toISOString(),
         })
       } catch (error) {
-        // Deal Desk down or refusing: the chat is ready, so retry the
-        // registration with backoff and never fail the chat for it.
-        const attempts = current.attempts + 1
-        const delay = Math.min(POOL_RETRY_MS * attempts, 30 * 60 * 1000)
+        // Deal Desk refused the registration itself: retrying cannot help.
+        if (safeCloudError(error) === DEAL_DESK_REFUSED)
+          throw await fail(null, "deal_desk_refused")
+        // Deal Desk down: the chat is ready, so retry with backoff on a
+        // counter of its own; Telegram steps keep their own attempts.
+        const registerAttempts = current.registerAttempts + 1
+        const delay = Math.min(POOL_RETRY_MS * registerAttempts, 30 * 60 * 1000)
         save({
-          attempts,
+          registerAttempts,
           nextAttemptMs: now() + delay,
           lastError: `register:${safeCloudError(error)}`,
         })

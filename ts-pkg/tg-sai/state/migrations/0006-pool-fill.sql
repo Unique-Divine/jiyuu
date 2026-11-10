@@ -17,6 +17,7 @@ CREATE TABLE pool_fill (
   chat_id INTEGER,
   bot_adds INTEGER NOT NULL DEFAULT 0,
   attempts INTEGER NOT NULL DEFAULT 0,
+  register_attempts INTEGER NOT NULL DEFAULT 0,
   last_error TEXT,
   next_attempt_ms INTEGER NOT NULL,
   created_ms INTEGER NOT NULL,

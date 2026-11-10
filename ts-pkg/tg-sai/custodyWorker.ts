@@ -548,8 +548,8 @@ export async function runCustodyWorker(options: {
     )
   const root = configDir()
   const workerId = await stableWorkerId(root)
-  // Read first, so an invalid list stops the worker before any work.
-  const owners = ownerAccounts(CUSTODY_USER_ID)
+  // An invalid owner list disables only the filler; setups keep running.
+  const poolPlan = poolFillPlan()
   const telemetry = options.telemetry
   const clientTelemetry = telemetry?.client({
     accountId: CUSTODY_USER_ID,
@@ -615,7 +615,7 @@ export async function runCustodyWorker(options: {
     const cap = new PoolCap(pacing.dailyMax)
     const groups: { value: GroupCount | null } = { value: null }
     let poolJournal: PoolJournal | null = null
-    if (options.run && queue && poolFillEnabled())
+    if (options.run && queue && poolPlan.owners)
       try {
         poolJournal = new PoolJournal(openStateDb(stateDbPath()))
       } catch {
@@ -635,12 +635,33 @@ export async function runCustodyWorker(options: {
           options.signal,
         ),
       )
+    if (options.run && poolPlan.error) {
+      console.error(
+        JSON.stringify({ state: "pool_fill_disabled", error: poolPlan.error }),
+      )
+      if (telemetry)
+        recordLog(
+          telemetry.sink,
+          telemetry.context,
+          "warn",
+          "worker.pool",
+          "pool fill disabled",
+          { error: poolPlan.error },
+          { accountId: CUSTODY_USER_ID, profile: options.custodyProfile },
+        )
+    }
+    const disabledFill = poolPlan.error
+      ? async (): Promise<PoolFillResult> => ({
+          state: "disabled",
+          error: poolPlan.error!,
+        })
+      : undefined
     const fill =
-      poolJournal && queue
+      poolJournal && queue && poolPlan.owners
         ? () =>
             fillPoolOnce({
               accountId: CUSTODY_USER_ID,
-              owners,
+              owners: poolPlan.owners!,
               journal: poolJournal!,
               queue: queue!,
               holds,
@@ -722,7 +743,11 @@ export async function runCustodyWorker(options: {
               telegram: setupTelegram,
               ...(queue ? { background: backgroundEnqueue(queue) } : {}),
               ...(drain ? { drain } : {}),
-              ...(fill ? { fill } : {}),
+              ...(fill
+                ? { fill }
+                : options.run && disabledFill
+                  ? { fill: disabledFill }
+                  : {}),
             },
           )
           after = result.nextAfter ?? undefined
@@ -780,16 +805,35 @@ export const TICK_HEARTBEAT_MS = 5 * 60 * 1000
 
 export const POOL_FILL_ENV = "TG_SAI_POOL_FILL"
 
-/** Pool filling runs unless `TG_SAI_POOL_FILL` is `0`, `false`, or `off`. */
+/**
+ * Pool filling is off unless `TG_SAI_POOL_FILL` is `1`, `true`, or `on`,
+ * so a deploy never starts making chats by itself.
+ */
 export function poolFillEnabled(
   env: Record<string, string | undefined> = process.env,
 ): boolean {
   const value = env[POOL_FILL_ENV]?.trim().toLowerCase()
-  return !(value === "0" || value === "false" || value === "off")
+  return value === "1" || value === "true" || value === "on"
+}
+
+/**
+ * Whether this worker fills the pool, and as which owner accounts. An
+ * invalid `TG_SAI_OWNER_ACCOUNTS` disables the filler only (`error`), so
+ * a typo in a pool setting never stops setups or the background drain.
+ */
+export function poolFillPlan(
+  env: Record<string, string | undefined> = process.env,
+): { owners: number[] | null; error: string | null } {
+  if (!poolFillEnabled(env)) return { owners: null, error: null }
+  try {
+    return { owners: ownerAccounts(CUSTODY_USER_ID, env), error: null }
+  } catch {
+    return { owners: null, error: "owner_accounts_invalid" }
+  }
 }
 
 /** Background drain states that made no Telegram call. */
-const IDLE_BACKGROUND_STATES = new Set(["idle", "capped", "held"])
+const IDLE_BACKGROUND_STATES = new Set(["idle", "capped", "held", "paced"])
 
 /** Job states that mean the tick did no work. */
 const IDLE_STATES = new Set(["waiting", "blocked"])
