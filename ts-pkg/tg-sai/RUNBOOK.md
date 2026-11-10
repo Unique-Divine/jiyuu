@@ -659,7 +659,11 @@ for an operator once the invitation expires.
 
 A setup left `incomplete` with a `retryAt` resumes on its own. One without
 a `retryAt` waits for an operator. Resumed jobs read each member before
-adding, so a retry never adds someone who is already in the chat.
+adding, so a retry never adds someone who is already in the chat. The
+receipt also lists everyone an add call reached or may have reached
+(`addedIds`, including adds that timed out). A resume that finds one of
+them absent gives them an `added_not_visible` link instead of adding them
+again, whatever step the earlier run stopped at.
 
 | Error | Meaning | Retry |
 | --- | --- | --- |
@@ -680,7 +684,10 @@ setup becomes `creation_unknown` and needs `chat provision resolve`.
 An add call that timed out or got a Telegram server error may still have
 invited the user, so it counts toward today's adds (`member_add` outcome
 `uncertain`) and the background daily cap. In the background queue it also
-counts as an attempt.
+counts as an attempt. mtcute does not resend create, add, or approval calls
+after a server error (`PROVISION_WRITE_PARAMS`); the error reaches these
+counters instead. A worker restart during a Telegram call also counts as a
+transient failure.
 
 Both limits are counters in the receipt (`botAdds`, `transientRetries`).
 The worker never resets them, and Deal Desk recovery does not touch the

@@ -1499,6 +1499,8 @@ describe("added but not visible", () => {
       f.events.length = 0
       approvals.length = 0
       f.members.delete(21)
+      // As if no run had added 21 yet; one that had would send a link.
+      f.local = { ...f.local!, addedIds: [] }
       await expect(f.run(h.sleep)).rejects.toThrow("incomplete")
       expect(approvals).toEqual([22])
       expect(f.events.filter((e) => e.startsWith("add:"))).toEqual(["add:21"])
@@ -1819,12 +1821,12 @@ describe("transient failure paths", () => {
     expect(f.setup.retryAt).toBeNull()
   })
 
-  test("a persistent transient add error stops after the retry limit", async () => {
+  test("a persistent transient error stops after the retry limit", async () => {
     const f = fixture()
     resumed(f)
-    const adds: number[] = []
-    f.telegram.add = async (_chat, id) => {
-      adds.push(id)
+    let reads = 0
+    f.telegram.verifyMarker = async () => {
+      reads++
       throw rpc(-503, "Timeout")
     }
     for (let tick = 1; tick <= MAX_TRANSIENT_RETRIES + 2; tick++) {
@@ -1832,10 +1834,72 @@ describe("transient failure paths", () => {
       if (tick > 1 && !f.setup.retryAt) break
       await expect(f.run()).rejects.toThrow("incomplete")
     }
-    expect(adds).toHaveLength(MAX_TRANSIENT_RETRIES)
-    expect(errorOf(f)).toBe(`add_member:${TRANSIENT_LIMIT}`)
+    expect(reads).toBe(MAX_TRANSIENT_RETRIES)
+    expect(errorOf(f)).toBe(`verify_marker:${TRANSIENT_LIMIT}`)
     expect(f.setup.retryAt).toBeNull()
     expect(f.local?.transientRetries).toBe(MAX_TRANSIENT_RETRIES)
+  })
+
+  test("an add that timed out is never sent again; the person gets a link", async () => {
+    const f = fixture()
+    withLinks(f)
+    resumed(f)
+    const adds: number[] = []
+    const add = f.telegram.add
+    f.telegram.add = async (chat, id) => {
+      adds.push(id)
+      if (id === 21) throw rpc(-503, "Timeout")
+      await add(chat, id)
+    }
+    await expect(f.run()).rejects.toThrow("incomplete")
+    expect(errorOf(f)).toBe(`add_member:${TELEGRAM_TRANSIENT}`)
+    for (let tick = 0; tick < 3; tick++)
+      await expect(f.run()).rejects.toThrow("incomplete")
+    expect(adds.filter((id) => id === 21)).toHaveLength(1)
+    expect(errorOf(f)).toBe(`verify_added_member:${MEMBER_NOT_VISIBLE}`)
+    expect(
+      f.local?.pendingInvitations?.map((i) => [i.userId, i.reason]),
+    ).toEqual([["21", NOT_VISIBLE_INVITATION_REASON]])
+  })
+
+  test("a hidden person is not re-added when the stop is for someone else", async () => {
+    const f = fixture()
+    withLinks(f)
+    hide(f, new Set([21, 22]))
+    const promote = f.telegram.promote
+    f.telegram.promote = async (chat, id, rights) => {
+      if (id === 22) throw rpc(400, "USER_NOT_PARTICIPANT")
+      await promote(chat, id, rights)
+    }
+    await expect(f.run()).rejects.toThrow("incomplete")
+    expect(errorOf(f)).toBe(`promote_admin:${MEMBER_NOT_VISIBLE}`)
+    // A link wait: the background drain may run meanwhile.
+    expect(waitingOnInvitedMember(f.setup)).toBe(true)
+    f.events.length = 0
+    for (let tick = 0; tick < 3; tick++)
+      await expect(f.run()).rejects.toThrow("incomplete")
+    expect(f.events.filter((e) => e.startsWith("add:"))).toEqual([])
+  })
+
+  test("a failed link for an unlisted person never leads to a re-add", async () => {
+    const f = fixture()
+    hide(f, new Set([21]))
+    let failLink = true
+    f.telegram.inviteLink = async () => {
+      if (failLink) throw rpc(-503, "Timeout")
+      return {
+        inviteLink: "https://t.me/+notShown",
+        expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+      }
+    }
+    await expect(f.run()).rejects.toThrow("incomplete")
+    expect(errorOf(f)).toBe(`create_invitation:${TELEGRAM_TRANSIENT}`)
+    failLink = false
+    f.events.length = 0
+    for (let tick = 0; tick < 2; tick++)
+      await expect(f.run()).rejects.toThrow("incomplete")
+    expect(f.events.filter((e) => e.startsWith("add:"))).toEqual([])
+    expect(errorOf(f)).toBe(`verify_added_member:${MEMBER_NOT_VISIBLE}`)
   })
 
   test("a refused batch does not count as a bot add", async () => {

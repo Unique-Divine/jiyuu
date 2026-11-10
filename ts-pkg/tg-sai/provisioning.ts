@@ -113,6 +113,11 @@ export interface JournalRecord {
   botAdds?: number
   /** Runs that ended in a transient error; bounds unattended retries. */
   transientRetries?: number
+  /**
+   * People an add call reached, or may have reached (a timeout). A resume
+   * that finds one absent gives them a link, never another add.
+   */
+  addedIds?: number[]
 }
 export interface PendingInvitation {
   userId: string
@@ -531,8 +536,10 @@ const WAIT_INVITATION_REASONS = new Set([
 export function waitingOnInvitedMember(setup: {
   error?: string | null
 }): boolean {
+  // Every step that saves `TG_SAI_MEMBER_NOT_VISIBLE` first gives the
+  // people it waits on a link; the bot has its own code.
   return (
-    setup.error === `verify_added_member:${MEMBER_NOT_VISIBLE}` ||
+    setup.error?.endsWith(`:${MEMBER_NOT_VISIBLE}`) === true ||
     setup.error === `add_member:${AWAITING_JOIN}`
   )
 }
@@ -709,10 +716,12 @@ export async function provisionSetup(params: {
   let pendingInvitations = local?.pendingInvitations ?? []
   let botAdds = local?.botAdds ?? 0
   let transientRetries = local?.transientRetries ?? 0
+  const addedIds = new Set(local?.addedIds ?? [])
   // Counters every journal write carries, so none is lost on restart.
   const counts = () => ({
     ...(botAdds ? { botAdds } : {}),
     ...(transientRetries ? { transientRetries } : {}),
+    ...(addedIds.size ? { addedIds: [...addedIds] } : {}),
   })
   const workerId = local?.workerId ?? params.workerId
   if (
@@ -867,6 +876,9 @@ export async function provisionSetup(params: {
     // wait; an expired one means stop for an operator.
     const invited: number[] = []
     const expired: number[] = []
+    // Added by an earlier run but absent, with no invitation yet: a link,
+    // never another add.
+    const addedAbsent: number[] = []
     const notVisibleInvitation = (userId: number) =>
       pendingInvitations.find(
         (i) =>
@@ -884,7 +896,8 @@ export async function provisionSetup(params: {
         const member = await telegram.member(chatId, userId)
         if (member.role !== "absent") continue
         const invitation = notVisibleInvitation(userId)
-        if (!invitation) absent.push(userId)
+        if (!invitation && addedIds.has(userId)) addedAbsent.push(userId)
+        else if (!invitation) absent.push(userId)
         else if (Date.parse(invitation.expiresAt) > Date.now())
           invited.push(userId)
         else expired.push(userId)
@@ -929,13 +942,26 @@ export async function provisionSetup(params: {
         text: BOT_ADDS_EXHAUSTED,
       })
     }
+    /** Saves people an add call reached or may have reached. */
+    const added = async (userIds: number[]): Promise<void> => {
+      const people = userIds.filter(
+        (id) => id !== PROVISIONING_BOT_ID && !addedIds.has(id),
+      )
+      if (!people.length) return
+      for (const id of people) addedIds.add(id)
+      await writeJournal()
+    }
     const sendingBotAdd = async (): Promise<void> => {
       botAdds++
       await writeJournal()
     }
     const botAddNotSent = async (error: unknown): Promise<void> => {
-      // A timeout may have added the bot; anything else refused the call.
-      if (isTransientTelegramError(error)) return
+      // Only a known refusal of the whole call is taken back: a flood, a
+      // hold, or a per-user 400. Anything else may have added the bot.
+      const refused =
+        isPerUserAddError(error) ||
+        (!isTransientTelegramError(error) && provisionRetryAt(error) !== null)
+      if (!refused) return
       botAdds--
       await writeJournal()
     }
@@ -950,8 +976,10 @@ export async function provisionSetup(params: {
           step = "add_member"
           if (bot) await sendingBotAdd()
           await telegram.add(chatId, userId)
+          await added([userId])
         } catch (error) {
           if (bot) await botAddNotSent(error)
+          if (isTransientTelegramError(error)) await added([userId])
           if (!isPerUserAddError(error)) throw error
           failures.set(userId, { error, step: "add_member" })
         }
@@ -961,7 +989,15 @@ export async function provisionSetup(params: {
       step = "add_member"
       if (botAdd) await sendingBotAdd()
       try {
-        const missing = new Set(await telegram.addMany(chatId, absent))
+        let refused: number[]
+        try {
+          refused = await telegram.addMany(chatId, absent)
+        } catch (error) {
+          if (isTransientTelegramError(error)) await added(absent)
+          throw error
+        }
+        const missing = new Set(refused)
+        await added(absent.filter((id) => !missing.has(id)))
         for (const userId of absent)
           if (missing.has(userId))
             failures.set(userId, {
@@ -1007,6 +1043,13 @@ export async function provisionSetup(params: {
           })
         else notVisible.push(userId)
     }
+    // People an earlier run added who are still absent wait on a link,
+    // whichever step that run stopped at.
+    if (addedAbsent.length && !telegram.inviteLink) {
+      step = "verify_added_member"
+      throw new Error("Participant invitation incomplete")
+    }
+    notVisible.push(...addedAbsent)
     // A person refused for privacy can still join through a controlled
     // invitation, so the setup waits for them like a member not visible.
     const privacyRefused = absent.filter(
