@@ -69,6 +69,8 @@ export const POOL_BOT_REQUIRED_RIGHTS: readonly string[] = [
 /** Hold groups a fill uses: create the chat and add the bot. */
 export const POOL_HOLD_GROUPS: readonly HoldGroup[] = ["create", "invite"]
 
+/** Registration retries this long raise the `register_retrying` alert. */
+export const REGISTER_ALERT_MS = 24 * 60 * 60 * 1000
 /** A transient failure is retried this many times, then the fill fails. */
 export const MAX_POOL_ATTEMPTS = 5
 /** Delay before retrying a transient failure. */
@@ -272,6 +274,12 @@ export interface PoolFillResult {
   stage?: string
   /** Deal Desk's `reason` when it did not allow a fill. */
   reason?: string | null
+  /**
+   * `register_retrying`: Deal Desk registration has failed for
+   * `REGISTER_ALERT_MS` or longer, since `alertSinceMs`.
+   */
+  alert?: "register_retrying"
+  alertSinceMs?: number
   error?: string
   nextAtMs?: number
 }
@@ -357,18 +365,6 @@ export const FAIL_STAGE: Readonly<Record<string, PoolFailStage>> = {
   history: "history",
   photo: "photo",
   register: "register",
-}
-
-/** `pool-fail` stage and error for a saved `<step>:<code>` last error. */
-export function failureOf(lastError: string | null): {
-  stage: PoolFailStage
-  error: string
-} {
-  const [step = "", ...rest] = (lastError ?? "").split(":")
-  return {
-    stage: FAIL_STAGE[step] ?? "other",
-    error: rest.join(":") || "operator_retired",
-  }
 }
 
 /** A stop that ends the step loop with `result`. */
@@ -618,6 +614,68 @@ export async function fillPoolOnce(params: {
     return stop.result
   }
 
+  /**
+   * Registers the chat with Deal Desk. Resolves `null` once it is
+   * registered, or the result to return while the fill waits:
+   *
+   * - A refusal (`DealDeskRefusedError`, a stable `extensions.code`) waits
+   *   `POOL_RETRY_MS` once; the same refusal again fails the fill with that
+   *   code and sends `pool-fail`.
+   * - Anything else (outage, rate limit, credential rotation, uncoded
+   *   GraphQL error) backs off up to 30 minutes on `registerAttempts`.
+   *
+   * After `REGISTER_ALERT_MS` of retries the result carries the
+   * `register_retrying` alert.
+   */
+  async function register(
+    input: PoolRegistration,
+  ): Promise<PoolFillResult | null> {
+    step = "register"
+    try {
+      await params.cloud.poolRegister(input)
+    } catch (error) {
+      const code = safeCloudError(error)
+      const refusal = (error as { refusal?: unknown } | null)?.refusal
+      const marker = `register:${DEAL_DESK_REFUSED}`
+      if (code === DEAL_DESK_REFUSED && current.lastError === marker)
+        throw await fail(
+          null,
+          typeof refusal === "string" ? refusal : "deal_desk_refused",
+        )
+      const nowMs = now()
+      const registerAttempts = current.registerAttempts + 1
+      const delay =
+        code === DEAL_DESK_REFUSED
+          ? POOL_RETRY_MS
+          : Math.min(POOL_RETRY_MS * registerAttempts, 30 * 60 * 1000)
+      const since = current.registerRetrySinceMs ?? nowMs
+      save({
+        registerAttempts,
+        registerRetrySinceMs: since,
+        nextAttemptMs: nowMs + delay,
+        lastError: `register:${code}`,
+      })
+      return {
+        state: "waiting",
+        ...at(current),
+        error: current.lastError!,
+        nextAtMs: current.nextAttemptMs,
+        ...(nowMs - since >= REGISTER_ALERT_MS
+          ? { alert: "register_retrying" as const, alertSinceMs: since }
+          : {}),
+      }
+    }
+    if (current.registerAttempts || current.registerRetrySinceMs !== null)
+      save({
+        registerAttempts: 0,
+        registerRetrySinceMs: null,
+        ...(current.lastError?.startsWith("register:")
+          ? { lastError: null }
+          : {}),
+      })
+    return null
+  }
+
   /** Counts the account's groups when stale, or always before a create. */
   async function countGroups(
     telegram: TelegramProvisioner,
@@ -694,19 +752,6 @@ export async function fillPoolOnce(params: {
         throw await fail(error)
       }
       passed({ stage: "created", chatId })
-      // Deal Desk learns of the chat before the add; best effort, since
-      // the local record resumes it either way.
-      await params.cloud
-        .poolRegister({
-          accountId: String(accountId),
-          chatId: String(chatId),
-          state: "filling",
-          ref,
-          title: POOL_CHAT_TITLE,
-          botUserId: String(PROVISIONING_BOT_ID),
-          photoSet: false,
-        })
-        .catch(() => {})
     }
     if (current.stage === "creation_unknown") {
       step = "find_created"
@@ -749,6 +794,20 @@ export async function fillPoolOnce(params: {
       throw await fail(null, "pool_chat_mismatch")
 
     if (current.stage === "created") {
+      // Deal Desk's bot stays only in chats an owner registered `filling`
+      // or `available`, and leaves any other chat it is added to. So the
+      // registration must succeed before the add, and is confirmed again
+      // before a resumed fill reads a bot it may already have added.
+      const unregistered = await register({
+        accountId: String(accountId),
+        chatId: String(chatId),
+        state: "filling",
+        ref,
+        title: POOL_CHAT_TITLE,
+        botUserId: String(PROVISIONING_BOT_ID),
+        photoSet: false,
+      })
+      if (unregistered) return unregistered
       step = "read_bot"
       let bot =
         current.botAdds > 0
@@ -892,45 +951,20 @@ export async function fillPoolOnce(params: {
         throw await fail(null, "bot_rights_missing")
       }
       if (!photoSet) photoSet = (await telegram.chatInfo(chatId)).hasPhoto === true
-      try {
-        await params.cloud.poolRegister({
-          accountId: String(accountId),
-          chatId: String(chatId),
-          state: "available",
-          ref,
-          title: POOL_CHAT_TITLE,
-          botUserId: String(PROVISIONING_BOT_ID),
-          botRights: Object.fromEntries(
-            Object.entries(bot.rights).filter(([, v]) => v === true),
-          ),
-          photoSet,
-          verifiedAt: new Date(now()).toISOString(),
-        })
-      } catch (error) {
-        const code = safeCloudError(error)
-        // Deal Desk refused the input itself twice, a retry apart: retrying
-        // cannot help. A first refusal waits one retry like an outage.
-        const refusal = `register:${DEAL_DESK_REFUSED}`
-        if (code === DEAL_DESK_REFUSED && current.lastError === refusal)
-          throw await fail(null, "deal_desk_refused")
-        // Deal Desk down, busy, or rate limiting: the chat is ready, so
-        // retry with backoff on a counter of its own; Telegram steps keep
-        // their own attempts.
-        const registerAttempts = current.registerAttempts + 1
-        const delay = Math.min(POOL_RETRY_MS * registerAttempts, 30 * 60 * 1000)
-        save({
-          registerAttempts,
-          nextAttemptMs:
-            now() + (code === DEAL_DESK_REFUSED ? POOL_RETRY_MS : delay),
-          lastError: `register:${code}`,
-        })
-        return {
-          state: "waiting",
-          ...at(current),
-          error: current.lastError!,
-          nextAtMs: current.nextAttemptMs,
-        }
-      }
+      const unregistered = await register({
+        accountId: String(accountId),
+        chatId: String(chatId),
+        state: "available",
+        ref,
+        title: POOL_CHAT_TITLE,
+        botUserId: String(PROVISIONING_BOT_ID),
+        botRights: Object.fromEntries(
+          Object.entries(bot.rights).filter(([, v]) => v === true),
+        ),
+        photoSet,
+        verifiedAt: new Date(now()).toISOString(),
+      })
+      if (unregistered) return unregistered
       passed({ stage: "registered", status: "done" })
       return { state: "filled", ...at(current) }
     }

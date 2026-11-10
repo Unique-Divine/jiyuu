@@ -875,7 +875,15 @@ One fill, in one worker tick:
    fixed for the chat's life (a claim renames the chat but keeps the
    description), and read by the same `Ref: <8 hex>` matcher setup chats
    use.
-2. Register it with Deal Desk as `filling` (best effort).
+2. Register it with Deal Desk as `filling`. This must succeed before the
+   bot add: the bot accepts being added by an owner only to a chat that
+   owner registered `filling` or `available`, and in enforce mode leaves any
+   other chat. A fill that cannot register waits and sends no add. A
+   resumed fill confirms the registration again before it reads a bot it
+   may already have added. Each registration call gets its own request
+   key, so Deal Desk checks the chat's current state every time instead of
+   replaying an earlier answer; registering the same state again is a
+   no-op.
 3. Add the bot: one add, journaled before the call and counted in
    `member_add` with source `pool`, an uncertain outcome (timeout) included.
 4. Promote the bot to every admin right short of owner (`POOL_BOT_RIGHTS`:
@@ -954,8 +962,8 @@ twice.
 | Bot add timed out, or failed with an error the worker cannot place | Counted as an uncertain add; the bot is never added again |
 | Bot added but not shown | Read again every 15 min, never re-added; after 4 reads, `failed` |
 | Transient error (timeout, 5xx) | Retried after 5 min, at most 5 times, then `failed` |
-| Deal Desk refuses `available` (HTTP 400, 404, 409, or 422) | Retried once after 5 min; a second refusal in a row is `failed` at stage `register` |
-| Deal Desk down, busy, or limiting at `available` (401, 403, 408, 429, 5xx, transport, GraphQL errors on HTTP 200) | Retried with backoff up to 30 min on its own counter; no Telegram writes |
+| Deal Desk refuses a `filling` or `available` registration (`extensions.code` `POOL_NOT_OWNER`, `POOL_INVALID_INPUT`, `POOL_REFUSED_TRANSITION`, `POOL_MISSING_RIGHTS`, or `POOL_STALE_VERIFIED_AT`) | Retried once after 5 min; a second refusal in a row is `failed` at stage `register` with that code, and a refused `filling` never gets the bot add |
+| Any registration error without one of those codes (HTTP status, 429 rate limit, 401 credential rotation, `Query capacity reached`, network, database) | Retried with backoff up to 30 min on its own counter; no Telegram writes. After 24 hours of retries the tick result carries `alert: register_retrying`, the tick is recorded, and `tg-sai pool status` lists it under `alerts` |
 | Group count at `groupStopAt` | No create; asks Deal Desk again after 5 min |
 | Anything else (rights missing, ref changed, per-user refusal) | `failed` |
 
@@ -969,10 +977,10 @@ tg-sai pool retire --ref <ref>          # prints the record
 tg-sai pool retire --ref <ref> --run    # retires it; filling resumes
 ```
 
-Retiring sends `pool-fail` again for a `failed` fill, with its saved stage
-and error, since the first report was best effort; Deal Desk dedupes the
-same input. Retiring an `active` fill that has a chat sends `pool-fail` with
-`operator_retired`. Retiring never deletes or edits the Telegram chat.
+Retiring sends `pool-fail` with stage `other` and error `operator_retired`
+for every `failed` fill (the filler's own report was best effort) and for
+an `active` fill that has a chat. Retiring never deletes or edits the
+Telegram chat.
 
 Deploy Deal Desk migration 20 (`pool-status`, `pool-register`, `pool-fail`)
 before this worker. Against an older Deal Desk, `pool-status` fails, the

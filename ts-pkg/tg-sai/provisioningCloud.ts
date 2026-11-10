@@ -245,31 +245,103 @@ export class UnknownCloudOperationError extends Error {
 export const DEAL_DESK_REFUSED = "DEAL_DESK_REFUSED"
 
 /**
- * Deal Desk answered and refused the input itself (HTTP 400, 404, 409, or
- * 422), as opposed to being down, busy, or rate limiting. Carries no CLI
- * output.
+ * Stable `extensions.code` values Deal Desk gives a pool operation that
+ * refuses its input (pool contract, Refusals). The same input always gets
+ * the same refusal.
+ */
+export const POOL_REFUSAL_CODES = [
+  "POOL_NOT_OWNER",
+  "POOL_INVALID_INPUT",
+  "POOL_REFUSED_TRANSITION",
+  "POOL_MISSING_RIGHTS",
+  "POOL_STALE_VERIFIED_AT",
+] as const
+export type PoolRefusalCode = (typeof POOL_REFUSAL_CODES)[number]
+
+/**
+ * Deal Desk refused the input itself with one of `POOL_REFUSAL_CODES`, as
+ * opposed to being down, busy, or rate limiting. Carries the code, never
+ * CLI output.
  */
 export class DealDeskRefusedError extends Error {
   readonly code = DEAL_DESK_REFUSED
-  constructor(readonly operation: CloudOperation) {
-    super(`Deal Desk refused chat-setups ${operation}`)
+  constructor(
+    readonly operation: CloudOperation,
+    readonly refusal: PoolRefusalCode,
+  ) {
+    super(`Deal Desk refused chat-setups ${operation}: ${refusal}`)
     this.name = "DealDeskRefusedError"
   }
 }
 
+const GRAPHQL_FAILURE = /GraphQL request failed \(HTTP \d{3}\): /
+
 /**
- * Whether Deal Desk's stderr reports a refusal of the input: its client
- * prints `GraphQL request failed (HTTP <status>)`, and only 400, 404, 409,
- * and 422 count. Everything else may pass on retry and is an outage: 401
- * and 403 (credential rotation), 408 and 429 (Deal Desk's per-IP request
- * limit), 5xx, a non-JSON body, a transport error, and GraphQL errors on
- * HTTP 200, which carry no stable code (`Query capacity reached` and
- * `Record read failed` among them).
+ * The JSON value that starts at `text[start]`, or `undefined` when it does
+ * not parse. Scans to the matching bracket, skipping string contents, so
+ * text the CLI appends after the value (`. Request key: ...`) is ignored.
  */
-export function isRefusalOutput(stderr: string): boolean {
-  return /GraphQL request failed \(HTTP (?:400|404|409|422)\)(?!: non-JSON)/.test(
-    stderr,
-  )
+function jsonValueAt(text: string, start: number): unknown {
+  const open = text[start]
+  if (open !== "[" && open !== "{") return undefined
+  let depth = 0
+  let inString = false
+  for (let i = start; i < text.length; i++) {
+    const c = text[i]
+    if (inString) {
+      if (c === "\\") i++
+      else if (c === '"') inString = false
+    } else if (c === '"') inString = true
+    else if (c === "[" || c === "{") depth++
+    else if (c === "]" || c === "}") {
+      depth--
+      if (depth === 0) {
+        try {
+          return JSON.parse(text.slice(start, i + 1))
+        } catch {
+          return undefined
+        }
+      }
+    }
+  }
+  return undefined
+}
+
+/**
+ * The pool refusal code in Deal Desk's stderr, or `null`. The CLI prints
+ * `{"error": "GraphQL request failed (HTTP <n>): <errors JSON>..."}`, so the
+ * errors array sits one level of escaping deep. Only `extensions.code` of
+ * an entry in that array counts; a code in a message, output that does not
+ * parse, and any error without one of `POOL_REFUSAL_CODES` (HTTP status,
+ * rate limit, credential rotation, `Query capacity reached`, network,
+ * database) are transient.
+ */
+export function refusalCode(stderr: string): PoolRefusalCode | null {
+  const texts: string[] = [stderr]
+  for (const line of stderr.split("\n")) {
+    try {
+      const error = (JSON.parse(line) as { error?: unknown } | null)?.error
+      if (typeof error === "string") texts.push(error)
+    } catch {
+      // Not a JSON line; the raw text is tried as is.
+    }
+  }
+  for (const text of texts) {
+    const match = GRAPHQL_FAILURE.exec(text)
+    if (!match) continue
+    const errors = jsonValueAt(text, match.index + match[0].length)
+    if (!Array.isArray(errors)) continue
+    for (const entry of errors) {
+      const code = (entry as { extensions?: { code?: unknown } } | null)
+        ?.extensions?.code
+      if (
+        typeof code === "string" &&
+        (POOL_REFUSAL_CODES as readonly string[]).includes(code)
+      )
+        return code as PoolRefusalCode
+    }
+  }
+  return null
 }
 
 /** GraphQL mutation field Deal Desk sends for each mutating operation. */
@@ -313,7 +385,14 @@ export function dealDeskRequestKey(
 ): string {
   // The same payload can be a new intent after operator recovery or an explicit
   // creation rejection. Receipts must only deduplicate one invocation.
-  if (operation === "claim" || operation === "progress")
+  // A pool registration must be checked against the chat's current state
+  // each time (an operator may have retired it since), not replayed from
+  // an earlier receipt. Registering the same state again is a no-op.
+  if (
+    operation === "claim" ||
+    operation === "progress" ||
+    operation === "pool-register"
+  )
     return `tg-provision:${operation}:${randomUUID()}`
   return `tg-provision:${createHash("sha256").update(JSON.stringify({ operation, input })).digest("hex")}`
 }
@@ -346,8 +425,8 @@ export async function callDealDesk(
   ])
   if (exit !== 0 && isUnknownOperationOutput(operation, stderr))
     throw new UnknownCloudOperationError(operation)
-  if (exit !== 0 && isRefusalOutput(stderr))
-    throw new DealDeskRefusedError(operation)
+  const refusal = exit !== 0 ? refusalCode(stderr) : null
+  if (refusal) throw new DealDeskRefusedError(operation, refusal)
   if (exit !== 0)
     throw new Error(
       `Deal Desk chat-setups ${operation} failed; inspect its operator status separately`,

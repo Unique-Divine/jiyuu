@@ -1,7 +1,7 @@
 import { join } from "node:path"
 import type { Command } from "commander"
 import { CUSTODY_USER_ID } from "./custodyWorker"
-import { failureOf } from "./poolFiller"
+import { REGISTER_ALERT_MS } from "./poolFiller"
 import type { PoolCloud } from "./poolFiller"
 import { configDir } from "./profiles"
 import { CliProvisionCloud } from "./provisioningCloud"
@@ -13,12 +13,11 @@ import type { PoolFill } from "./state/pool"
 
 /**
  * Retires the open pool fill `ref`, so the filler starts new fills again,
- * and tells Deal Desk with `pool-fail`, which retires the chat there. A
- * `failed` fill is reported again with its saved stage and error, since
- * the first report was best effort (Deal Desk dedupes the same input). An
- * `active` fill with a chat is reported with stage `other` and error
- * `operator_retired`. The Telegram chat is left as it is. Without `run` it
- * only returns the record.
+ * and tells Deal Desk with `pool-fail` stage `other`, error
+ * `operator_retired` (pool contract), which retires the chat there. Sent
+ * for every `failed` fill, since the filler's own report was best effort,
+ * and for an `active` fill that has a chat. The Telegram chat is left as
+ * it is. Without `run` it only returns the record.
  */
 export async function retirePoolFill(params: {
   journal: PoolJournal
@@ -34,14 +33,11 @@ export async function retirePoolFill(params: {
   if (!params.run) return { dryRun: true, fill, reported: false }
   let reported = false
   if (fill.status === "failed" || fill.chatId !== null) {
-    const failure =
-      fill.status === "failed"
-        ? failureOf(fill.lastError)
-        : { stage: "other" as const, error: "operator_retired" }
     await params.cloud.poolFail({
       accountId: String(fill.accountId),
       ...(fill.chatId !== null ? { chatId: String(fill.chatId) } : {}),
-      ...failure,
+      stage: "other",
+      error: "operator_retired",
       floodWaitS: null,
     })
     reported = true
@@ -81,6 +77,20 @@ export function backgroundView(
   }
 }
 
+/**
+ * Alerts for an open fill: `register_retrying` once Deal Desk registration
+ * has been retrying for `REGISTER_ALERT_MS` or longer.
+ */
+export function poolAlerts(
+  fill: PoolFill | null,
+  nowMs: number,
+): { alert: "register_retrying"; since: string }[] {
+  const since = fill?.registerRetrySinceMs ?? null
+  return since !== null && nowMs - since >= REGISTER_ALERT_MS
+    ? [{ alert: "register_retrying", since: new Date(since).toISOString() }]
+    : []
+}
+
 /** `tg-sai pool status` and `tg-sai pool retire`. */
 export function addPoolCommands(program: Command): void {
   const pool = program
@@ -101,6 +111,7 @@ export function addPoolCommands(program: Command): void {
             {
               accountId: String(accountId),
               open: journal.open(accountId),
+              alerts: poolAlerts(journal.open(accountId), Date.now()),
               background: backgroundView(new BackgroundQueue(db), Date.now()),
               nextFillAt: new Date(journal.nextFillMs(accountId)).toISOString(),
               fills: journal.list(accountId, Number(options.limit)),

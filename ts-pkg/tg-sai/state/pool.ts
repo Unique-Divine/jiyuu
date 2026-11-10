@@ -32,8 +32,10 @@ export interface PoolFill {
   botAdds: number
   /** Failed attempts since the last step that went through. */
   attempts: number
-  /** Deal Desk outages hit while registering the chat `available`. */
+  /** Deal Desk registration attempts that failed in the current run. */
   registerAttempts: number
+  /** When the current run of registration retries began, or `null`. */
+  registerRetrySinceMs: number | null
   lastError: string | null
   nextAttemptMs: number
   createdMs: number
@@ -49,6 +51,7 @@ interface PoolRow {
   bot_adds: number
   attempts: number
   register_attempts: number
+  register_retry_since_ms: number | null
   last_error: string | null
   next_attempt_ms: number
   created_ms: number
@@ -65,6 +68,7 @@ function fromRow(row: PoolRow): PoolFill {
     botAdds: row.bot_adds,
     attempts: row.attempts,
     registerAttempts: row.register_attempts,
+    registerRetrySinceMs: row.register_retry_since_ms,
     lastError: row.last_error,
     nextAttemptMs: row.next_attempt_ms,
     createdMs: row.created_ms,
@@ -82,6 +86,7 @@ export type PoolUpdate = Partial<
     | "botAdds"
     | "attempts"
     | "registerAttempts"
+    | "registerRetrySinceMs"
     | "lastError"
     | "nextAttemptMs"
   >
@@ -135,8 +140,9 @@ export class PoolJournal {
     const next = { ...current, ...update }
     this.db.run(
       "UPDATE pool_fill SET stage = ?, status = ?, chat_id = ?, " +
-        "bot_adds = ?, attempts = ?, register_attempts = ?, last_error = ?, " +
-        "next_attempt_ms = ?, updated_ms = ? WHERE ref = ?",
+        "bot_adds = ?, attempts = ?, register_attempts = ?, " +
+        "register_retry_since_ms = ?, last_error = ?, next_attempt_ms = ?, " +
+        "updated_ms = ? WHERE ref = ?",
       [
         next.stage,
         next.status,
@@ -144,6 +150,7 @@ export class PoolJournal {
         next.botAdds,
         next.attempts,
         next.registerAttempts,
+        next.registerRetrySinceMs,
         next.lastError,
         next.nextAttemptMs,
         nowMs,

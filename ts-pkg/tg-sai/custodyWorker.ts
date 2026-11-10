@@ -854,8 +854,8 @@ export function shouldRecordTick(tick: {
   if (tick.result?.results.some((r) => !IDLE_STATES.has(r.state))) return true
   const background = tick.result?.background?.state
   if (background && !IDLE_BACKGROUND_STATES.has(background)) return true
-  const pool = tick.result?.pool?.state
-  if (pool && !IDLE_POOL_STATES.has(pool)) return true
+  const pool = tick.result?.pool
+  if (pool && (!IDLE_POOL_STATES.has(pool.state) || pool.alert)) return true
   if (tick.lastRecordedMs === null) return true
   return tick.nowMs - tick.lastRecordedMs >= TICK_HEARTBEAT_MS
 }
@@ -894,6 +894,9 @@ export function recordWorkerTick(
               ? { background: tick.result.background.state }
               : {}),
             ...(tick.result.pool ? { pool: tick.result.pool.state } : {}),
+            ...(tick.result.pool?.alert
+              ? { poolAlert: tick.result.pool.alert }
+              : {}),
           }
         : null,
     })

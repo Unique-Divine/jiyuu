@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { Database } from "bun:sqlite"
 import {
-  failureOf,
   fillPoolOnce,
   hasPoolBotRights,
   MAX_CREATION_SEARCHES,
@@ -12,6 +11,7 @@ import {
   POOL_RETRY_MS,
   POOL_STATUS_RECHECK_MS,
   PoolCap,
+  REGISTER_ALERT_MS,
   poolChatOwned,
   poolDescription,
 } from "./poolFiller"
@@ -22,7 +22,7 @@ import type {
   PoolStatusReply,
 } from "./poolFiller"
 import { drainBackgroundOnce } from "./backgroundWorker"
-import { backgroundView, retirePoolFill } from "./poolCli"
+import { backgroundView, poolAlerts, retirePoolFill } from "./poolCli"
 import { descriptionRef, PROVISIONING_BOT_ID } from "./provisioning"
 import type { ChatInfo, Member, TelegramProvisioner } from "./provisioning"
 import {
@@ -32,8 +32,10 @@ import {
 } from "./provisioningRuntime"
 import {
   CliProvisionCloud,
+  dealDeskRequestKey,
   DealDeskRefusedError,
-  isRefusalOutput,
+  POOL_REFUSAL_CODES,
+  refusalCode,
   poolStatusFromCloud,
 } from "./provisioningCloud"
 import { applyMigrations } from "./telemetry/db"
@@ -181,6 +183,10 @@ class FakeCloud {
   registered: PoolRegistration[] = []
   /** Errors the next `available` registrations throw, in order. */
   registerErrors: unknown[] = []
+  /** Errors the next `filling` registrations throw, in order. */
+  fillingErrors: unknown[] = []
+  /** Every registration call, including failed ones, by state. */
+  registerCalls: string[] = []
   failures: PoolFailure[] = []
   statusCalls = 0
   registerFails = 0
@@ -189,6 +195,9 @@ class FakeCloud {
     return this.status
   }
   poolRegister = async (input: PoolRegistration) => {
+    this.registerCalls.push(input.state)
+    if (input.state === "filling" && this.fillingErrors.length)
+      throw this.fillingErrors.shift()
     if (input.state === "available" && this.registerErrors.length)
       throw this.registerErrors.shift()
     if (input.state === "available" && this.registerFails > 0) {
@@ -493,10 +502,16 @@ describe("fillPoolOnce", () => {
       ref: "3fa9c2e1",
       run: true,
     })
-    // Reported again with the saved stage and error.
+    // Reported again, as the contract's operator retirement.
     expect(done).toMatchObject({ reported: true, fill: { status: "retired" } })
     expect(f.cloud.failures).toHaveLength(2)
-    expect(f.cloud.failures[1]).toEqual(f.cloud.failures[0])
+    expect(f.cloud.failures[1]).toEqual({
+      accountId: String(CUSTODY),
+      chatId: String(CHAT),
+      stage: "other",
+      error: "operator_retired",
+      floodWaitS: null,
+    })
     f.toSpaced()
     expect((await f.run()).state).toBe("filled")
   })
@@ -1040,8 +1055,8 @@ describe("pool fill recovery", () => {
   test("Deal Desk refusing `available` twice, a retry apart, fails the fill", async () => {
     const f = setup()
     f.cloud.registerErrors = [
-      new DealDeskRefusedError("pool-register"),
-      new DealDeskRefusedError("pool-register"),
+      new DealDeskRefusedError("pool-register", "POOL_STALE_VERIFIED_AT"),
+      new DealDeskRefusedError("pool-register", "POOL_STALE_VERIFIED_AT"),
     ]
     expect(await f.run()).toMatchObject({
       state: "waiting",
@@ -1052,18 +1067,18 @@ describe("pool fill recovery", () => {
     f.advance(POOL_RETRY_MS)
     expect(await f.run()).toMatchObject({
       state: "failed",
-      error: "register:deal_desk_refused",
+      error: "register:POOL_STALE_VERIFIED_AT",
     })
     expect(f.cloud.failures[0]).toMatchObject({
       chatId: String(CHAT),
       stage: "register",
-      error: "deal_desk_refused",
+      error: "POOL_STALE_VERIFIED_AT",
     })
   })
 
   test("a single refusal followed by success registers the chat", async () => {
     const f = setup()
-    f.cloud.registerErrors = [new DealDeskRefusedError("pool-register")]
+    f.cloud.registerErrors = [new DealDeskRefusedError("pool-register", "POOL_STALE_VERIFIED_AT")]
     expect((await f.run()).state).toBe("waiting")
     f.advance(POOL_RETRY_MS)
     expect((await f.run()).state).toBe("filled")
@@ -1116,52 +1131,215 @@ describe("pool fill recovery", () => {
     }
   })
 
-  test("failureOf maps a saved error back to its pool-fail stage", () => {
-    expect(failureOf("add_bot:BOT_GROUPS_BLOCKED")).toEqual({
-      stage: "add_bot",
-      error: "BOT_GROUPS_BLOCKED",
-    })
-    expect(failureOf("find_created:creation_not_found").stage).toBe("create")
-    expect(failureOf(null)).toEqual({
-      stage: "other",
-      error: "operator_retired",
-    })
+
+})
+
+describe("filling registration comes before the bot add", () => {
+  test("registers filling before the add, every fill", async () => {
+    const f = setup()
+    expect((await f.run()).state).toBe("filled")
+    expect(f.cloud.registerCalls).toEqual(["filling", "available"])
   })
 
-  test("isRefusalOutput counts only input refusals, never retryable answers", () => {
-    // Deal Desk's CLI prints `{"error": "<anyhow chain>"}`; the hosted API's
-    // bodies are `{"error": "..."}` or GraphQL `errors` arrays.
-    const out = (status: number, body: unknown) =>
+  test("a registration outage waits and sends no bot add", async () => {
+    const f = setup()
+    f.cloud.fillingErrors = [new Error("Deal Desk down")]
+    expect(await f.run()).toMatchObject({
+      state: "waiting",
+      stage: "created",
+      error: "register:deal_desk_failed",
+      nextAtMs: T0 + POOL_RETRY_MS,
+    })
+    expect(f.telegram.calls).toContain("create")
+    expect(f.telegram.calls).not.toContain("add")
+    expect(poolAdds(f.db)).toEqual([])
+    expect(f.journal.get("3fa9c2e1")).toMatchObject({
+      botAdds: 0,
+      registerAttempts: 1,
+      registerRetrySinceMs: T0,
+    })
+    f.advance(POOL_RETRY_MS)
+    expect((await f.run()).state).toBe("filled")
+    expect(f.journal.get("3fa9c2e1")).toMatchObject({
+      registerAttempts: 0,
+      registerRetrySinceMs: null,
+    })
+    expect(f.telegram.calls.filter((c) => c === "add")).toHaveLength(1)
+  })
+
+  test("a refusal repeated a retry apart fails the fill with no bot add", async () => {
+    const f = setup()
+    f.cloud.fillingErrors = [
+      new DealDeskRefusedError("pool-register", "POOL_REFUSED_TRANSITION"),
+      new DealDeskRefusedError("pool-register", "POOL_REFUSED_TRANSITION"),
+    ]
+    expect(await f.run()).toMatchObject({
+      state: "waiting",
+      error: "register:DEAL_DESK_REFUSED",
+      nextAtMs: T0 + POOL_RETRY_MS,
+    })
+    f.advance(POOL_RETRY_MS)
+    expect(await f.run()).toMatchObject({
+      state: "failed",
+      error: "register:POOL_REFUSED_TRANSITION",
+    })
+    expect(f.cloud.failures).toEqual([
+      {
+        accountId: String(CUSTODY),
+        chatId: String(CHAT),
+        stage: "register",
+        error: "POOL_REFUSED_TRANSITION",
+        floodWaitS: null,
+      },
+    ])
+    expect(f.telegram.calls).not.toContain("add")
+    expect(poolAdds(f.db)).toEqual([])
+  })
+
+  test("a resumed fill confirms registration before reading its bot", async () => {
+    const f = setup()
+    f.telegram.failNext.set("add", new Error("Request timed out"))
+    await f.run()
+    expect(f.journal.get("3fa9c2e1")?.botAdds).toBe(1)
+    f.cloud.fillingErrors = [new Error("Deal Desk down")]
+    f.telegram.calls = []
+    f.advance(POOL_RETRY_MS)
+    expect(await f.run()).toMatchObject({
+      state: "waiting",
+      error: "register:deal_desk_failed",
+    })
+    expect(f.telegram.calls).not.toContain("member")
+    expect(f.telegram.calls).not.toContain("add")
+    // Registered again: now the bot is read, never added a second time.
+    f.telegram.chats
+      .get(CHAT)!
+      .members.set(PROVISIONING_BOT_ID, { role: "member", rights: {} })
+    f.advance(POOL_RETRY_MS)
+    expect((await f.run()).state).toBe("filled")
+    expect(f.cloud.registerCalls.slice(-2)).toEqual(["filling", "available"])
+    expect(f.telegram.calls.filter((c) => c === "add")).toHaveLength(0)
+  })
+
+  test("a day of registration retries raises an alert", async () => {
+    const f = setup()
+    f.cloud.registerFails = 1000
+    let result = await f.run()
+    for (let i = 0; i < 60 && !result.alert; i++) {
+      f.advance(result.nextAtMs! - f.now())
+      result = await f.run()
+    }
+    expect(result).toMatchObject({
+      state: "waiting",
+      stage: "photo_set",
+      alert: "register_retrying",
+      alertSinceMs: T0,
+    })
+    expect(f.now() - T0).toBeGreaterThanOrEqual(REGISTER_ALERT_MS)
+    expect(poolAlerts(f.journal.get("3fa9c2e1"), f.now())).toEqual([
+      { alert: "register_retrying", since: new Date(T0).toISOString() },
+    ])
+    expect(poolAlerts(f.journal.get("3fa9c2e1"), T0 + 1000)).toEqual([])
+    // Success clears the run and its alert.
+    f.cloud.registerFails = 0
+    f.advance(result.nextAtMs! - f.now())
+    expect((await f.run()).state).toBe("filled")
+    expect(poolAlerts(f.journal.get("3fa9c2e1"), f.now())).toEqual([])
+  })
+
+  test("refusalCode reads only Deal Desk's stable pool codes", () => {
+    // Deal Desk's CLI wraps the GraphQL errors array in its JSON error.
+    const cli = (status: number, body: unknown) =>
       JSON.stringify({
         error: `GraphQL request failed (HTTP ${status}): ${JSON.stringify(body)}`,
       })
-    // Retryable: per-IP limiter, credential rotation, timeouts, origin, and
-    // untyped GraphQL errors on HTTP 200.
-    expect(isRefusalOutput(out(429, "Request limit reached"))).toBe(false)
+    // Transient: rate limit, credential rotation, uncoded GraphQL errors,
+    // and uncoded HTTP refusals.
+    expect(refusalCode(cli(429, "Request limit reached"))).toBeNull()
+    expect(refusalCode(cli(401, "Invalid or revoked API credential"))).toBeNull()
     expect(
-      isRefusalOutput(out(401, "Invalid or revoked API credential")),
-    ).toBe(false)
-    expect(isRefusalOutput(out(403, "Origin is not allowed"))).toBe(false)
-    expect(isRefusalOutput(out(408, "timeout"))).toBe(false)
+      refusalCode(cli(200, [{ message: "Query capacity reached" }])),
+    ).toBeNull()
+    expect(refusalCode(cli(400, [{ message: "Invalid pool transition" }]))).toBeNull()
+    expect(refusalCode('{"error":"error sending request"}')).toBeNull()
+    // A code word in a message is not a code.
     expect(
-      isRefusalOutput(out(200, [{ message: "Query capacity reached" }])),
-    ).toBe(false)
-    expect(isRefusalOutput(out(200, [{ message: "Record read failed" }]))).toBe(
-      false,
-    )
-    expect(isRefusalOutput(out(503, "Service unavailable"))).toBe(false)
-    expect(
-      isRefusalOutput(
-        JSON.stringify({
-          error: "GraphQL request failed (HTTP 400): non-JSON response: eof",
-        }),
-      ),
-    ).toBe(false)
-    expect(isRefusalOutput('{"error":"error sending request"}')).toBe(false)
-    // Input refusals.
-    for (const status of [400, 404, 409, 422])
+      refusalCode(cli(200, [{ message: "POOL_MISSING_RIGHTS later" }])),
+    ).toBeNull()
+    // Refusals carry `extensions.code`.
+    for (const code of POOL_REFUSAL_CODES)
       expect(
-        isRefusalOutput(out(status, [{ message: "Invalid pool transition" }])),
-      ).toBe(true)
+        refusalCode(
+          cli(200, [{ message: "refused", extensions: { code } }]),
+        ),
+      ).toBe(code)
+    expect(refusalCode(cli(200, [{ extensions: { code: "OTHER" } }]))).toBeNull()
+  })
+
+  test("refusalCode reads only extensions.code, never message text", () => {
+    const wrap = (error: string) => JSON.stringify({ error })
+    // A message quoting a coded error, escaped once inside the message.
+    const spoof = JSON.stringify([
+      { message: 'upstream said {"code":"POOL_NOT_OWNER"}' },
+    ])
+    expect(
+      refusalCode(wrap(`GraphQL request failed (HTTP 200): ${spoof}`)),
+    ).toBeNull()
+    expect(refusalCode(`GraphQL request failed (HTTP 200): ${spoof}`)).toBeNull()
+    // The CLI's request-key suffix after the array is ignored.
+    const coded = JSON.stringify([
+      { message: "refused", extensions: { code: "POOL_MISSING_RIGHTS" } },
+    ])
+    expect(
+      refusalCode(
+        wrap(
+          `GraphQL request failed (HTTP 200): ${coded}. Request key: k. ` +
+            "Inspect with request status, or repeat the saved request with request retry k",
+        ),
+      ),
+    ).toBe("POOL_MISSING_RIGHTS")
+    // Raw, unwrapped output parses too; a truncated array does not.
+    expect(refusalCode(`GraphQL request failed (HTTP 200): ${coded}`)).toBe(
+      "POOL_MISSING_RIGHTS",
+    )
+    expect(
+      refusalCode(
+        wrap(`GraphQL request failed (HTTP 200): ${coded.slice(0, -2)}`),
+      ),
+    ).toBeNull()
+    expect(refusalCode(wrap('{"code":"POOL_NOT_OWNER"}'))).toBeNull()
+  })
+
+  test("each pool registration gets a fresh request key; failures dedupe", () => {
+    const input = { accountId: "8274304175", chatId: "-1", state: "filling" }
+    expect(dealDeskRequestKey("pool-register", input)).not.toBe(
+      dealDeskRequestKey("pool-register", input),
+    )
+    expect(dealDeskRequestKey("pool-fail", input)).toBe(
+      dealDeskRequestKey("pool-fail", input),
+    )
+  })
+
+  test("a chat retired between registration and the add gets no bot add", async () => {
+    const f = setup()
+    f.telegram.failNext.set(
+      "add",
+      Object.assign(new Error("flood"), { text: "FLOOD_WAIT_60", code: 420 }),
+    )
+    const held = await f.run()
+    expect(f.journal.get("3fa9c2e1")?.botAdds).toBe(0)
+    // An operator retires the chat; Deal Desk re-checks every registration.
+    f.cloud.fillingErrors = [
+      new DealDeskRefusedError("pool-register", "POOL_REFUSED_TRANSITION"),
+      new DealDeskRefusedError("pool-register", "POOL_REFUSED_TRANSITION"),
+    ]
+    f.advance(held.nextAtMs! - f.now())
+    expect((await f.run()).state).toBe("waiting")
+    f.advance(POOL_RETRY_MS)
+    expect(await f.run()).toMatchObject({
+      state: "failed",
+      error: "register:POOL_REFUSED_TRANSITION",
+    })
+    expect(f.telegram.calls.filter((c) => c === "add")).toHaveLength(1)
+    expect(poolAdds(f.db)).toEqual([])
   })
 })

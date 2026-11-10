@@ -27,6 +27,9 @@ import memberAddUncertainMigrationSql from "./migrations/0005-member-add-uncerta
 import poolFillMigrationSql from "./migrations/0006-pool-fill.sql" with {
   type: "text",
 }
+import poolRegisterRetryMigrationSql from "./migrations/0007-pool-register-retry.sql" with {
+  type: "text",
+}
 
 export const STATE_DB_FILE = "state.db"
 export const STATE_DIR_MODE = 0o700
@@ -49,6 +52,10 @@ export const STATE_MIGRATIONS: readonly Migration[] = [
     sql: memberAddUncertainMigrationSql,
   },
   { filename: "0006-pool-fill.sql", sql: poolFillMigrationSql },
+  {
+    filename: "0007-pool-register-retry.sql",
+    sql: poolRegisterRetryMigrationSql,
+  },
 ]
 
 export function stateDbPath(env: ProfileStoreEnv = process.env): string {
