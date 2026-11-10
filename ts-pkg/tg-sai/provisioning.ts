@@ -1454,18 +1454,28 @@ export async function provisionSetup(params: {
     ) {
       // Only invited people can finish this chat. Deal Desk releases the
       // claim, so other setups run until the next check is due.
-      await save({
-        state: "awaiting_join",
-        chatId,
-        binding,
-        error: diagnostic,
-        nextCheckAt: retryAt,
-        receipt: { pendingInvitations: awaiting },
-      })
-      throw new Error(
-        "Setup waiting on invited people to join; it resumes at its next check",
-        { cause: error },
-      )
+      let waitSaved = false
+      try {
+        await save({
+          state: "awaiting_join",
+          chatId,
+          binding,
+          error: diagnostic,
+          nextCheckAt: retryAt,
+          receipt: { pendingInvitations: awaiting },
+        })
+        waitSaved = true
+      } catch {
+        // Deal Desk refused the wait: a version without awaiting_join, or
+        // an invitation it already sees as expired. Fall back to the
+        // incomplete save below, which every version accepts and which
+        // also releases the claim, so the setup never re-runs every tick.
+      }
+      if (waitSaved)
+        throw new Error(
+          "Setup waiting on invited people to join; it resumes at its next check",
+          { cause: error },
+        )
     }
     await save({
       state: "incomplete",

@@ -1352,14 +1352,61 @@ describe("added but not visible", () => {
     expect(f.events).not.toContain("promote:22")
   })
 
+  test("a legacy incomplete wait row still saves configuring on resume", async () => {
+    const f = fixture()
+    const h = hiding(f, new Set([22]))
+    await expect(f.run(h.sleep)).rejects.toThrow("waiting on invited people")
+    // As saved by a worker from before awaiting_join.
+    f.setup = { ...f.setup, state: "incomplete", nextCheckAt: null }
+    f.events.length = 0
+    await expect(f.run(h.sleep)).rejects.toThrow("waiting on invited people")
+    expect(f.events.filter((e) => e.startsWith("cloud:"))).toEqual([
+      "cloud:configuring",
+      "cloud:awaiting_join",
+    ])
+  })
+
+  test("a refused awaiting_join save falls back to incomplete with a retry", async () => {
+    const f = fixture()
+    const h = hiding(f, new Set([22]))
+    // Like a Deal Desk without awaiting_join (or one that sees the link as
+    // expired): the wait save is refused, every other save is accepted.
+    const progress = f.cloud.progress
+    f.cloud.progress = async (id, token, p) => {
+      if (p.state === "awaiting_join") {
+        f.events.push("cloud:awaiting_join:refused")
+        throw new Error("Unknown field nextCheckAt")
+      }
+      return progress(id, token, p)
+    }
+    const before = Date.now()
+    await expect(f.run(h.sleep)).rejects.toThrow("incomplete")
+    const setup = f.setup as Setup & { error: string }
+    expect(f.events).toContain("cloud:awaiting_join:refused")
+    expect(f.events.at(-1)).toBe("cloud:incomplete")
+    expect(setup.state).toBe("incomplete")
+    expect(setup.error).toBe("verify_added_member:TG_SAI_MEMBER_NOT_VISIBLE")
+    // A retry time, which Deal Desk 19+ saves without a claim, so the
+    // worker does not re-run the setup on every 5 s tick.
+    expect(
+      Date.parse(setup.retryAt!) - before,
+    ).toBeGreaterThanOrEqual(MEMBER_NOT_VISIBLE_RETRY_MS)
+    expect(f.local?.pendingInvitations?.map((i) => i.userId)).toEqual(["22"])
+  })
+
   test("a resumed job waits for the invited member instead of adding again", async () => {
     const f = fixture()
     const h = hiding(f, new Set([22]))
     await expect(f.run(h.sleep)).rejects.toThrow("waiting on invited people")
     f.events.length = 0
 
-    // Still absent: no add, no new link, still incomplete with a retry.
+    // Still absent: no add, no new link, still waiting with a next check,
+    // and no interim configuring save while it is awaiting_join.
+    expect(f.setup.state).toBe("awaiting_join")
     await expect(f.run(h.sleep)).rejects.toThrow("waiting on invited people")
+    expect(f.events.filter((e) => e.startsWith("cloud:"))).toEqual([
+      "cloud:awaiting_join",
+    ])
     expect(f.events.filter((e) => e.startsWith("add:"))).toEqual([])
     expect(h.links).toEqual([22])
     expect(f.setup.nextCheckAt).toBeTruthy()
