@@ -1,4 +1,4 @@
-"""Offline checks for report-only exit handling and actual ty file selection."""
+"""Offline checks for enforced/report-only exits and actual ty file selection."""
 
 from __future__ import annotations
 
@@ -27,6 +27,36 @@ class ReporterTests(unittest.TestCase):
         for raw, expected in [(0, 0), (1, 0), (2, 2), (101, 101), (9, 9), (-9, 2)]:
             with self.subTest(raw=raw):
                 self.assertEqual(report_exit_code(raw), expected)
+
+    def test_enforced_checker_failures_and_warning_only_results(self) -> None:
+        warning = "test.py:1:1: warning[deprecated] Example\nFound 1 diagnostic\n"
+        for raw, output, expected in [
+            (0, "", 0),
+            (0, warning, 1),
+            (1, FINDINGS, 1),
+            (2, "", 2),
+            (101, "", 101),
+            (-9, "", 2),
+        ]:
+            calls: list[list[str]] = []
+
+            def run(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
+                calls.append(list(argv))
+                if list(argv) == ["ty", "version"]:
+                    return subprocess.CompletedProcess(argv, 0, f"ty {TY_VERSION}\n", "")
+                return subprocess.CompletedProcess(argv, raw, output, "")
+
+            with self.subTest(raw=raw, output=output), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory)
+                self.assertEqual(
+                    run_report("example", path, ["."], runner=run, enforce=True),
+                    expected,
+                )
+                self.assertIn("--error-on-warning", calls[1])
+                self.assertTrue(json.loads((path / "report.json").read_text())["enforced"])
+                if expected == 1:
+                    self.assertIn("CI fails", (path / "summary.md").read_text())
+                    self.assertNotIn("without blocking", (path / "summary.md").read_text())
 
     def test_typed_report_keeps_native_status_and_counts(self) -> None:
         result = subprocess.CompletedProcess(["ty"], 1, FINDINGS, "")
@@ -242,6 +272,22 @@ class ActualTyTests(unittest.TestCase):
             self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
             self.assertEqual(len(build_report("fixture", result).diagnostics), 1)
             self.assertIn("helper.py", result.stdout)
+
+    def test_real_warning_only_fixture_blocks_enforce_but_not_report_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            fixture = path / "warning.py"
+            fixture.write_text("async def pending() -> None:\n    pass\npending()\n")
+            report_only = path / "report"
+            enforced = path / "enforced"
+            self.assertEqual(run_report("warning", report_only, [str(fixture)]), 0)
+            self.assertEqual(run_report("warning", enforced, [str(fixture)], enforce=True), 1)
+            report = json.loads((enforced / "report.json").read_text())
+            self.assertEqual(report["errors"], 0)
+            self.assertEqual(report["warnings"], 1)
+            self.assertEqual(report["checker_exit_code"], 1)
+            self.assertTrue(report["enforced"])
+            self.assertTrue((enforced / "diagnostics.txt").exists())
 
     def test_malformed_configuration_is_fatal_through_reporter(self) -> None:
         def bad_configuration(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:

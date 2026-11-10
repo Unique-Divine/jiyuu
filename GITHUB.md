@@ -34,9 +34,11 @@ manual dispatch also runs everything. Pull requests and pushes to main or releas
 branches use the path filters. Keep workflow-level path restrictions out of this
 workflow so every check reports a result.
 
-Python type diagnostics remain report-only, with native diagnostics and summaries
-uploaded as artifacts. Environment setup, configuration errors, and checker
-failures still fail the job. Label validation and privileged issue/label
+Python type errors and warnings fail CI, with native diagnostics and summaries
+uploaded as artifacts even when findings fail the check. The report recipes use
+explicit `enforce` mode in CI; their default `report` mode remains available for
+investigation. Environment setup, configuration errors, and checker failures
+fail in both modes. Label validation and privileged issue/label
 automation have separate workflows.
 
 ## Path-Managed Labels

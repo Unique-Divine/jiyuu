@@ -295,18 +295,18 @@ jobs:
         if: needs.changes.outputs[matrix.filter] == 'true'
         working-directory: ${{ matrix.path }}
         run: uv sync --frozen --group dev
-      - name: Verify report-only runner and file discovery
+      - name: Verify enforcement, reporting, and file discovery
         if: needs.changes.outputs[matrix.filter] == 'true'
         working-directory: ${{ matrix.path }}
         run: uv run --frozen --no-sync python -m unittest discover -s "$GITHUB_WORKSPACE/scripts/python" -p 'test_*.py' -v
-      - name: Report type diagnostics
+      - name: Enforce and report type diagnostics
         id: report
         if: needs.changes.outputs[matrix.filter] == 'true'
         working-directory: ${{ matrix.path }}
         env:
           REPORT_RECIPE: ${{ matrix.report_recipe }}
           REPORT_NAME: ${{ matrix.artifact }}
-        run: just "$REPORT_RECIPE" "$RUNNER_TEMP/python-types/$REPORT_NAME"
+        run: just "$REPORT_RECIPE" "$RUNNER_TEMP/python-types/$REPORT_NAME" enforce
       - name: Upload native diagnostics and report
         if: always() && steps.report.outcome != 'skipped'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

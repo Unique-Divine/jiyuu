@@ -82,16 +82,21 @@ not contact Telegram. `check` validates Python syntax and formatting.
 Both Python projects pin Astral ty 0.0.100 in their uv development groups.
 The checker targets the declared Python 3.10 minimum; CI executes under
 uv-managed Python 3.13. `typecheck` checks all owned Python files, tests, and
-shared reporting helpers, and preserves ty's failure status. From the repository
+shared reporting helpers. Errors and warnings both fail the check. From the repository
 root, `just python-typecheck` runs both projects even if the first reports errors.
 
-`typecheck-report` is the same recipe CI uses after `just install`. It writes
-native `diagnostics.txt`, typed `report.json`, and `summary.md` into the given
-directory. Existing diagnostics are initially report-only in CI. Only the direct
-checker's diagnostic exit 1 becomes success. Configuration errors, missing tools,
-failed uv setup, crashes, and unexpected exits fail. CI publishes the actual
-counts and raw checker status, and completes unaffected project jobs successfully.
-No diagnostic suppressions are configured.
+`typecheck-report OUTPUT_DIR enforce` runs the blocking CI check and writes
+native `diagnostics.txt`, typed `report.json`, and `summary.md`. The JSON report
+records the raw checker status and whether enforcement is enabled. Artifacts
+still upload when findings fail CI. Configuration errors, missing tools, failed
+uv setup, crashes, and unexpected exits fail in either mode. Unaffected project
+jobs complete successfully.
+
+Omit the final mode argument, or pass `report`, to collect findings without
+failing on diagnostic exit 1. This report-only mode is for investigation. Local
+`typecheck` and CI fail on findings. No diagnostic suppressions are configured.
+See [the diagnostic triage record](TYPECHECK.md) for the historical baseline,
+contract repairs, and Python 3.10 verification.
 
 Offline audit fixtures replay anonymized successful `get_me` and `get_messages`
 text through the current handlers with synthetic clients. Their original MCP
@@ -99,6 +104,18 @@ envelopes are schema-checked separately; the running live source revision was
 unverified. Synthetic RPC cases exercise Telethon's mapper, recorded cooldowns,
 unrecorded formatter warnings, peer flood, and unknown errors. They induce no
 live errors and do not establish Telegram's server-side rate-limit scope.
+
+Optional tool inputs with `None` defaults advertise nullable schemas. Tool names,
+required inputs, and defaults remain unchanged. Collection and single-message
+reads use checked Telethon result variants, including missing-ID placeholders
+and story reply headers.
+
+GIF searches query the `gif` inline bot and return integer IDs only for results
+with Telegram document metadata. External web results are skipped. Sending an ID
+uses the full document metadata from a recent search on the same account. The
+process retains up to 100 documents per account and releases metadata when the
+client is discarded. Search again after a restart, eviction, or expired file
+reference. Sending never retries automatically.
 
 Profile/account lookups check the connection, retry a stale read once, and
 stop after 30 seconds. Reconnection has bounded disconnect, connect and

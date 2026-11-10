@@ -6,7 +6,7 @@ from telegram_mcp.runtime import *
 
 @mcp.tool(annotations=ToolAnnotations(title="Get Me", openWorldHint=True, readOnlyHint=True))
 @with_account(readonly=True)
-async def get_me(account: str = None) -> str:
+async def get_me(account: str | None = None) -> str:
     """
     Get your own user information.
     """
@@ -25,7 +25,10 @@ async def get_me(account: str = None) -> str:
 )
 @with_account(readonly=False)
 async def update_profile(
-    account: str = None, first_name: str = None, last_name: str = None, about: str = None
+    account: str | None = None,
+    first_name: str | None = None,
+    last_name: str | None = None,
+    about: str | None = None,
 ) -> str:
     """
     Update your profile information (name, bio).
@@ -52,7 +55,7 @@ async def update_profile(
 )
 @with_account(readonly=False)
 async def set_profile_photo(
-    file_path: str, ctx: Optional[Context] = None, account: str = None
+    file_path: str, ctx: Optional[Context] = None, account: str | None = None
 ) -> str:
     """
     Set a new profile photo.
@@ -81,7 +84,7 @@ async def set_profile_photo(
     )
 )
 @with_account(readonly=False)
-async def delete_profile_photo(account: str = None) -> str:
+async def delete_profile_photo(account: str | None = None) -> str:
     """
     Delete your current profile photo.
     """
@@ -89,7 +92,9 @@ async def delete_profile_photo(account: str = None) -> str:
         cl = get_client(account)
         await ensure_connected(cl)
         photos = await cl(
-            functions.photos.GetUserPhotosRequest(user_id="me", offset=0, max_id=0, limit=1)
+            functions.photos.GetUserPhotosRequest(
+                user_id=types.InputUserSelf(), offset=0, max_id=0, limit=1
+            )
         )
         if not photos.photos:
             return "No profile photo to delete."
@@ -105,7 +110,7 @@ async def delete_profile_photo(account: str = None) -> str:
     )
 )
 @with_account(readonly=True)
-async def get_privacy_settings(account: str = None) -> str:
+async def get_privacy_settings(account: str | None = None) -> str:
     """
     Get your privacy settings for last seen status.
     """
@@ -141,7 +146,7 @@ async def set_privacy_settings(
     key: str,
     allow_users: Optional[List[Union[int, str]]] = None,
     disallow_users: Optional[List[Union[int, str]]] = None,
-    account: str = None,
+    account: str | None = None,
 ) -> str:
     """
     Set privacy settings (e.g., last seen, phone, etc.).
@@ -178,7 +183,7 @@ async def set_privacy_settings(
         privacy_key = key_mapping[key]()
 
         # Prepare the rules
-        rules = []
+        rules: list[types.TypeInputPrivacyRule] = []
 
         # Process allow rules
         if allow_users is None or len(allow_users) == 0:
@@ -191,7 +196,7 @@ async def set_privacy_settings(
                 for user_id in allow_users:
                     try:
                         user = await resolve_entity(user_id, cl)
-                        allow_entities.append(user)
+                        allow_entities.append(utils.get_input_user(user))
                     except Exception as user_err:
                         logger.warning(f"Could not get entity for user ID {user_id}: {user_err}")
 
@@ -208,7 +213,7 @@ async def set_privacy_settings(
                 for user_id in disallow_users:
                     try:
                         user = await resolve_entity(user_id, cl)
-                        disallow_entities.append(user)
+                        disallow_entities.append(utils.get_input_user(user))
                     except Exception as user_err:
                         logger.warning(f"Could not get entity for user ID {user_id}: {user_err}")
 
@@ -236,7 +241,7 @@ async def set_privacy_settings(
     annotations=ToolAnnotations(title="Get Full User", openWorldHint=True, readOnlyHint=True)
 )
 @with_account(readonly=True)
-async def get_full_user(username: Union[int, str], account: str = None) -> str:
+async def get_full_user(username: Union[int, str], account: str | None = None) -> str:
     """
     Get full profile info of a Telegram user including bio/about text,
     personal channel link, and other profile details.
@@ -307,7 +312,7 @@ async def get_full_user(username: Union[int, str], account: str = None) -> str:
 
 @mcp.tool(annotations=ToolAnnotations(title="Get Bot Info", openWorldHint=True, readOnlyHint=True))
 @with_account(readonly=True)
-async def get_bot_info(bot_username: str, account: str = None) -> str:
+async def get_bot_info(bot_username: str, account: str | None = None) -> str:
     """
     Get information about a bot by username.
 
@@ -350,7 +355,7 @@ async def get_bot_info(bot_username: str, account: str = None) -> str:
     )
 )
 @with_account(readonly=False)
-async def set_bot_commands(bot_username: str, commands: list, account: str = None) -> str:
+async def set_bot_commands(bot_username: str, commands: list, account: str | None = None) -> str:
     """
     Set bot commands for a bot you own.
     Note: This function can only be used if the Telegram client is a bot account.
@@ -402,7 +407,9 @@ async def set_bot_commands(bot_username: str, commands: list, account: str = Non
 )
 @with_account(readonly=True)
 @validate_id("user_id")
-async def get_user_photos(user_id: Union[int, str], limit: int = 10, account: str = None) -> str:
+async def get_user_photos(
+    user_id: Union[int, str], limit: int = 10, account: str | None = None
+) -> str:
     """
     Get profile photos of a user.
     """
@@ -422,7 +429,7 @@ async def get_user_photos(user_id: Union[int, str], limit: int = 10, account: st
 )
 @with_account(readonly=True)
 @validate_id("user_id")
-async def get_user_status(user_id: Union[int, str], account: str = None) -> str:
+async def get_user_status(user_id: Union[int, str], account: str | None = None) -> str:
     """
     Get the online status of a user.
     """
