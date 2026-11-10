@@ -1,4 +1,5 @@
 import type { ChatInviteLink, ChatMember, FullChat } from "@mtcute/bun"
+import { descriptionMatchesMarker } from "./provisioning"
 
 /** Numeric IDs need an access hash cached from an exact dialog readback. */
 export async function requireExactCaptureDialog(
@@ -49,7 +50,7 @@ export function sanitizedProvisioningGolden(input: {
       chatType: input.chat.chatType,
       isForum: input.chat.isForum,
       isCreator: input.chat.isCreator,
-      markerMatches: input.chat.bio === input.expectedMarker,
+      markerMatches: descriptionMatchesMarker(input.chat.bio, input.expectedMarker),
     },
     members: input.members.map(({ subject, value }) => ({ subject, value: memberShape(value) })),
     invitations: {

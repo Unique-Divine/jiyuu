@@ -5,10 +5,10 @@ import { Command } from "commander"
 import { getChatMember, iterDialogs } from "@mtcute/bun/methods.js"
 import { createMtcuteClient } from "./mtcuteAdapter"
 import { strictProfileCredentials } from "./profiles"
-import { creationMarker, PROVISIONING_BOT_ID } from "./provisioning"
+import { creationMarker, descriptionMatchesMarker, PROVISIONING_BOT_ID } from "./provisioning"
 import { setupFromCloud } from "./provisioningCloud"
 import { requireExactCaptureDialog, sanitizedProvisioningGolden } from "./provisioningGoldens"
-import { resolveProvisioningPeer } from "./provisioningRuntime"
+import { markerChatMatches, resolveProvisioningPeer } from "./provisioningRuntime"
 
 // Only read methods are used. An explicit persisted setup binds the target chat
 // and identities; a fresh temporary store avoids touching worker session files.
@@ -42,9 +42,8 @@ export async function captureProvisioningGolden(options: {
     const marker = creationMarker(setup)
     console.log(JSON.stringify({ stage: "group_verified_readback", exactId: chat.id === chatId,
       chatType: chat.chatType, isForum: chat.isForum, isCreator: chat.isCreator,
-      markerMatches: chat.bio === marker }))
-    if (chat.id !== chatId || chat.chatType !== "supergroup" || chat.isForum ||
-        !chat.isCreator || chat.bio !== marker)
+      markerMatches: descriptionMatchesMarker(chat.bio, marker) }))
+    if (chat.id !== chatId || !markerChatMatches(chat, marker))
       throw new Error("Capture group ownership or marker mismatch")
     const subjects = new Map<number, string>([
       [setup.expectedUserId, "custody"], [PROVISIONING_BOT_ID, "bot"],

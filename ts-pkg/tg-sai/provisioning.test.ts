@@ -10,6 +10,7 @@ import {
   BOT_ADDS_EXHAUSTED,
   BOT_BASELINE_RIGHTS,
   BOT_NOT_VISIBLE,
+  chatDescription,
   cloudRetryAt,
   creationMarker,
   definiteCreateRejection,
@@ -36,6 +37,7 @@ import {
   TRANSIENT_LIMIT,
   TRANSIENT_RETRY_MS,
   validateRequest,
+  verifyResolutionChat,
   waitingOnInvitedMember,
 } from "./provisioning"
 import type {
@@ -59,6 +61,7 @@ import { holdUntil, HoldStoreUnavailableError } from "./state/holds"
 import {
   accountPaths,
   FileProvisionJournal,
+  markerChatMatches,
   normalizeProvisioningMember,
   provisioningRoster,
   withAccountLock,
@@ -477,6 +480,42 @@ describe("custody provisioning", () => {
     await expect(f.run()).rejects.toThrow("rights changed")
     expect(f.events.filter((event) => event === "create")).toHaveLength(1)
   })
+  test("creates the chat with the friendly description and short ref", async () => {
+    const f = fixture()
+    const created: { title: string; description: string }[] = []
+    const create = f.telegram.create
+    f.telegram.create = async (title, description) => {
+      created.push({ title, description })
+      return create(title, description)
+    }
+    expect((await f.run()).state).toBe("ready")
+    const ref = requestFingerprint(request()).slice(0, 8)
+    expect(created).toEqual([
+      { title: "Sai test", description: `Chat with the Sai team. Ref: ${ref}` },
+    ])
+    expect(chatDescription(request())).toBe(created[0]!.description)
+  })
+  test("ready re-check accepts the legacy marker and the new description, not a wrong ref", async () => {
+    const f = fixture()
+    await f.run()
+    const chat = {
+      chatType: "supergroup",
+      isForum: false,
+      isCreator: true,
+      bio: chatDescription(request()),
+    }
+    f.telegram.verifyMarker = async (_id, marker) =>
+      markerChatMatches(chat, marker)
+    expect((await f.run()).state).toBe("ready")
+    chat.bio = creationMarker(request())
+    expect((await f.run()).state).toBe("ready")
+    chat.bio = "Chat with the Sai team. Ref: 00000000"
+    await expect(f.run()).rejects.toThrow("Ready setup owner or marker changed")
+    chat.bio = chatDescription(request())
+    chat.isCreator = false
+    await expect(f.run()).rejects.toThrow("Ready setup owner or marker changed")
+    expect(f.events.filter((event) => event === "create")).toHaveLength(1)
+  })
   test("optional participants cannot include admins or arbitrary outsiders", () => {
     expect(() =>
       validateRequest({ ...request(), optionalParticipants: [22] }),
@@ -513,6 +552,81 @@ describe("custody provisioning", () => {
     })
     expect(f.setup.state).toBe("creation_unknown")
     expect(f.events).not.toContain("create")
+  })
+  test("creation_unknown lists each candidate's title and whether it equals the setup title", async () => {
+    const f = fixture()
+    f.setup = { ...f.setup, state: "creation_unknown" }
+    const titles = new Map([
+      [-100123, "Sai test"],
+      [-100456, "Other deal"],
+    ])
+    f.telegram.candidates = async () => [-100123, -100456, -100789]
+    f.telegram.chatInfo = async (chatId) => {
+      const title = titles.get(chatId)
+      if (title === undefined) throw new Error("CHANNEL_PRIVATE")
+      return {
+        title,
+        description: chatDescription(request()),
+        chatType: "supergroup",
+        isForum: false,
+        isCreator: true,
+      }
+    }
+    expect(await f.run()).toEqual({
+      state: "creation_unknown",
+      candidates: [-100123, -100456, -100789],
+      candidateChats: [
+        { chatId: -100123, title: "Sai test", titleMatches: true },
+        { chatId: -100456, title: "Other deal", titleMatches: false },
+        { chatId: -100789, title: null, titleMatches: false },
+      ],
+    })
+    expect(f.events).not.toContain("create")
+  })
+  test("resolution requires the marker and the setup title unless overridden", async () => {
+    const setup: Setup = { ...request(), state: "creation_unknown" }
+    const chat = {
+      title: "Sai test",
+      description: chatDescription(request()),
+      chatType: "supergroup",
+      isForum: false,
+      isCreator: true,
+    }
+    const telegram = {
+      verifyMarker: async (_id: number, marker: string) =>
+        markerChatMatches({ ...chat, bio: chat.description }, marker),
+      chatInfo: async () => ({ ...chat }),
+    }
+    expect(await verifyResolutionChat(telegram, setup, -100123)).toEqual({
+      title: "Sai test",
+    })
+    // A copied description in a chat with another title.
+    chat.title = "Other deal"
+    await expect(
+      verifyResolutionChat(telegram, setup, -100123),
+    ).rejects.toThrow('title "Other deal" does not equal the setup title')
+    expect(
+      await verifyResolutionChat(telegram, setup, -100123, true),
+    ).toEqual({ title: "Other deal" })
+    // The override never skips the marker and owner check.
+    chat.description = "Chat with the Sai team. Ref: 00000000"
+    await expect(
+      verifyResolutionChat(telegram, setup, -100123, true),
+    ).rejects.toThrow("does not match custody owner")
+    chat.description = creationMarker(request())
+    chat.title = "Sai test"
+    chat.isCreator = false
+    await expect(
+      verifyResolutionChat(telegram, setup, -100123, true),
+    ).rejects.toThrow("does not match custody owner")
+  })
+  test("ready re-check ignores a renamed title", async () => {
+    const f = fixture()
+    await f.run()
+    f.telegram.chatInfo = async () => {
+      throw new Error("ready re-check must not read the title")
+    }
+    expect((await f.run()).state).toBe("ready")
   })
   test("wrong account aborts before claims or Telegram writes", async () => {
     const f = fixture()

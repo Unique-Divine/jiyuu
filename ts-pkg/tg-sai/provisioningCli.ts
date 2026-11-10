@@ -9,13 +9,14 @@ import {
 } from "./backgroundWorker"
 import type { BackgroundQueue } from "./state/background"
 import {
-  creationMarker,
   provisionSetup,
   requestFingerprint,
   validateRequest,
+  verifyResolutionChat,
 } from "./provisioning"
 import type { ProvisionRequest } from "./provisioning"
 import { CliProvisionCloud } from "./provisioningCloud"
+import { rewriteChatDescription } from "./provisioningDescription"
 import {
   FileProvisionJournal,
   withProvisionTelegram,
@@ -134,12 +135,17 @@ export function addProvisionCommands(program: Command): void {
       "Operator evidence for explicit adoption",
     )
     .option("--run", "Verify and adopt the exact group in cloud state")
+    .option(
+      "--allow-title-mismatch",
+      "Adopt even when the chat title differs from the setup title",
+    )
     .action(
       async (options: {
         requestId: string
         chat: number
         reason: string
         run?: boolean
+        allowTitleMismatch?: boolean
       }) => {
         const cloud = new CliProvisionCloud()
         const setup = await cloud.view(options.requestId)
@@ -156,18 +162,46 @@ export function addProvisionCommands(program: Command): void {
           throw new Error("Only an unresolved creation can be adopted")
         print(
           await withProvisionTelegram(setup, async (telegram) => {
-            if (
-              !(await telegram.verifyMarker(
-                options.chat,
-                creationMarker(setup),
-              ))
+            const { title } = await verifyResolutionChat(
+              telegram,
+              setup,
+              options.chat,
+              Boolean(options.allowTitleMismatch),
             )
-              throw new Error(
-                "Resolution chat does not match custody owner and request marker",
-              )
-            return cloud.resolve(setup.requestId, options.chat, options.reason)
+            const resolved = await cloud.resolve(
+              setup.requestId,
+              options.chat,
+              options.reason,
+            )
+            return { ...resolved, chatTitle: title }
           }, cliTelemetry()),
         )
       },
     )
+  provision
+    .command("rewrite-description")
+    .description(
+      "Replace a chat's legacy sai-setup marker description with the " +
+        "friendly description and short ref",
+    )
+    .requiredOption("--request-id <id>", "Stable setup request ID")
+    .option("--run", "Write the new description to the chat")
+    .action(async (options: { requestId: string; run?: boolean }) => {
+      const setup = await new CliProvisionCloud().view(options.requestId)
+      const local = await new FileProvisionJournal().read(setup.requestId)
+      // Reads the chat even on a dry run, so the operator sees the change.
+      print(
+        await withProvisionTelegram(
+          setup,
+          (telegram) =>
+            rewriteChatDescription({
+              setup,
+              local,
+              telegram,
+              run: Boolean(options.run),
+            }),
+          cliTelemetry(),
+        ),
+      )
+    })
 }

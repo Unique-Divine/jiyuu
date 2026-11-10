@@ -53,7 +53,8 @@ export interface ProvisioningLinks {
 export interface TelegramProvisioner {
   self(): Promise<number>
   resolve(peer: Peer): Promise<{ id: number; isBot: boolean }>
-  create(title: string, marker: string): Promise<number>
+  /** Creates the supergroup with `description` (see `chatDescription`). */
+  create(title: string, description: string): Promise<number>
   member(chatId: number, userId: number): Promise<Member>
   add(chatId: number, userId: number): Promise<void>
   /**
@@ -84,7 +85,22 @@ export interface TelegramProvisioner {
    * missing from the map.
    */
   members?(chatId: number): Promise<Map<number, Member>>
+  /**
+   * Whether the custody account created this non-forum supergroup and its
+   * description matches `marker` (see `descriptionMatchesMarker`).
+   */
   verifyMarker(chatId: number, marker: string): Promise<boolean>
+  /** Reads the chat fields the description rewrite checks. */
+  chatInfo?(chatId: number): Promise<ChatInfo>
+  /** Sets the chat description. One call, never resent. */
+  setDescription?(chatId: number, description: string): Promise<void>
+}
+export interface ChatInfo {
+  title: string
+  description: string
+  chatType: string
+  isForum: boolean
+  isCreator: boolean
 }
 export interface Progress {
   state: ProvisionState
@@ -276,8 +292,48 @@ export function requestFingerprint(request: ProvisionRequest): string {
     )
     .digest("hex")
 }
+/**
+ * The legacy description of a deal chat, and the key every chat check is
+ * given. Telegram groups have no hidden metadata, so the description is how
+ * the worker recognizes a chat it created: after a create call times out,
+ * and before every later change. Chats created before boku#86 still carry it.
+ */
 export function creationMarker(request: ProvisionRequest): string {
   return `sai-setup:${requestFingerprint(request)}`
+}
+/**
+ * Visible text of a new deal chat's description. The wording may change;
+ * matching reads only the `Ref: <8 hex>` that `chatDescription` appends.
+ */
+export const CHAT_DESCRIPTION_TEXT = "Chat with the Sai team."
+const SHORT_REF_LENGTH = 8
+const LEGACY_MARKER = /^sai-setup:([0-9a-f]{64})$/
+const DESCRIPTION_REF = /(?:^|\s)Ref: ([0-9a-f]{8})$/
+/** First 8 hex characters of the request fingerprint. */
+export function setupRef(request: ProvisionRequest): string {
+  return requestFingerprint(request).slice(0, SHORT_REF_LENGTH)
+}
+/** Description given to a new deal chat: friendly text plus the setup ref. */
+export function chatDescription(request: ProvisionRequest): string {
+  return `${CHAT_DESCRIPTION_TEXT} Ref: ${setupRef(request)}`
+}
+/**
+ * Whether a chat description identifies the setup that `marker` (from
+ * `creationMarker`) names: either the legacy marker itself, or any text
+ * ending in `Ref: <first 8 hex of the same fingerprint>`. Callers must also
+ * require that the custody account created the chat.
+ */
+export function descriptionMatchesMarker(
+  description: string,
+  marker: string,
+): boolean {
+  if (description === marker) return true
+  const fingerprint = LEGACY_MARKER.exec(marker)?.[1]
+  if (!fingerprint) return false
+  return (
+    DESCRIPTION_REF.exec(description)?.[1] ===
+    fingerprint.slice(0, SHORT_REF_LENGTH)
+  )
 }
 function validBinding(binding: Binding, ownerId: number): boolean {
   return (
@@ -736,6 +792,65 @@ async function controlledInvitation(
   return created
 }
 
+/** A `creation_unknown` candidate, with its title for the operator. */
+export interface CandidateChat {
+  chatId: number
+  /** Null when the chat could not be read. */
+  title: string | null
+  /** A chat created just now still has the setup's title. */
+  titleMatches: boolean
+}
+async function unknownCreation(
+  setup: Setup,
+  telegram: TelegramProvisioner,
+  candidates: number[],
+): Promise<{
+  state: "creation_unknown"
+  candidates: number[]
+  candidateChats?: CandidateChat[]
+}> {
+  if (!telegram.chatInfo) return { state: "creation_unknown", candidates }
+  const candidateChats: CandidateChat[] = []
+  for (const chatId of candidates) {
+    let title: string | null = null
+    try {
+      title = (await telegram.chatInfo(chatId)).title
+    } catch {
+      // Listing is informational; `resolve` reads the chat again.
+    }
+    candidateChats.push({ chatId, title, titleMatches: title === setup.title })
+  }
+  return { state: "creation_unknown", candidates, candidateChats }
+}
+/**
+ * Checks a chat an operator wants to adopt for a `creation_unknown` setup:
+ * the custody account created it and its description names the setup
+ * (`verifyMarker`), and its title still equals the setup title. A chat
+ * created just now has an unedited title, so a mismatch suggests a copied
+ * description; `allowTitleMismatch` overrides only that check. The ready
+ * re-check does not compare titles, since admins may rename a live chat.
+ */
+export async function verifyResolutionChat(
+  telegram: Pick<TelegramProvisioner, "verifyMarker" | "chatInfo">,
+  setup: Setup,
+  chatId: number,
+  allowTitleMismatch = false,
+): Promise<{ title: string }> {
+  if (!(await telegram.verifyMarker(chatId, creationMarker(setup))))
+    throw new Error(
+      "Resolution chat does not match custody owner and request marker",
+    )
+  if (!telegram.chatInfo)
+    throw new Error("Telegram adapter cannot read the chat title")
+  const { title } = await telegram.chatInfo(chatId)
+  if (title !== setup.title && !allowTitleMismatch)
+    throw new Error(
+      `Resolution chat title ${JSON.stringify(title)} does not equal the ` +
+        "setup title; pass --allow-title-mismatch only with evidence that " +
+        "this chat is the one created for the setup",
+    )
+  return { title }
+}
 /**
  * The cloud is authoritative. The journal only recovers a result not yet
  * acknowledged by cloud. Requester first: the job adds required participants
@@ -761,7 +876,14 @@ export async function provisionSetup(params: {
   sleep?: (ms: number) => Promise<void>
   /** Worker shutdown; a run it cuts short is not a transient failure. */
   signal?: AbortSignal
-}): Promise<Setup | { state: "creation_unknown"; candidates: number[] }> {
+}): Promise<
+  | Setup
+  | {
+      state: "creation_unknown"
+      candidates: number[]
+      candidateChats?: CandidateChat[]
+    }
+> {
   const { telegram, cloud, journal } = params
   let setup = params.setup
   const fingerprint = requestFingerprint(setup)
@@ -832,15 +954,12 @@ export async function provisionSetup(params: {
       })
     }
     // Even a unique candidate is presented for explicit adoption, never silently trusted.
-    return {
-      state: "creation_unknown",
-      candidates: [
-        ...new Set([
-          ...(local?.chatId ? [local.chatId] : []),
-          ...(await telegram.candidates(creationMarker(setup))),
-        ]),
-      ],
-    }
+    return unknownCreation(setup, telegram, [
+      ...new Set([
+        ...(local?.chatId ? [local.chatId] : []),
+        ...(await telegram.candidates(creationMarker(setup))),
+      ]),
+    ])
   }
   await journal.write(setup.requestId, {
     fingerprint,
@@ -875,10 +994,11 @@ export async function provisionSetup(params: {
         state: "creation_unknown",
         binding: setup.binding,
       })
-    return {
-      state: "creation_unknown",
-      candidates: await telegram.candidates(creationMarker(setup)),
-    }
+    return unknownCreation(
+      setup,
+      telegram,
+      await telegram.candidates(creationMarker(setup)),
+    )
   }
   const save = async (progress: Progress): Promise<void> => {
     await journal.write(setup.requestId, {
@@ -920,7 +1040,7 @@ export async function provisionSetup(params: {
     await save({ state: "creating", binding })
     let chatId: number
     try {
-      chatId = await telegram.create(setup.title, creationMarker(setup))
+      chatId = await telegram.create(setup.title, chatDescription(setup))
     } catch (error) {
       const rejected = definiteCreateRejection(error)
       await save({

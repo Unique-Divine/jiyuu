@@ -115,3 +115,20 @@ test("run --run rejects missing custody profile before claim or any Telegram con
     expect(records).toHaveLength(1)
     expect(records[0].args[1]).toBe("view")
   }))
+test("rewrite-description dry run needs the custody profile and only views the setup", async () =>
+  cliFixture(async (run, calls) => {
+    for (const args of [
+      ["rewrite-description", "--request-id", "cli-test"],
+      ["rewrite-description", "--request-id", "cli-test", "--run"],
+    ]) {
+      const result = await run(args)
+      expect(result.exit).toBe(1)
+      expect(result.stderr).toContain("Custody profile is not configured")
+      expect(result.stdout).not.toContain("private-test-token")
+    }
+    const records = (await readFile(calls, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line))
+    expect(records.map((record) => record.args[1])).toEqual(["view", "view"])
+  }))
