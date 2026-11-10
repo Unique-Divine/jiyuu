@@ -140,14 +140,13 @@ Legacy LayerZero Stargate USDC.e is
 both with six decimals. Their bank denoms are `erc20/<checksummed address>`.
 
 Prefer explicit addresses for compatibility with installed CLIs and remote
-nodes. From v2.23.1, the CLI and node balance query resolve case-insensitive
-`USDC` to Sai USDC and `USDC.e` to the legacy token. The patched CLI sends
-explicit addresses even to older nodes; direct queries to older nodes still
-resolve `USDC` to the legacy token. On other networks, use the deployed token
-address or denom.
-
-Wasm contract Stargate queries retain v2.23.0 alias semantics for consensus
-compatibility. Contracts should use explicit addresses or bank denoms.
+nodes. The unreleased CLI update resolves case-insensitive `USDC` to Sai USDC
+and `USDC.e` to the legacy token before sending explicit addresses, including
+to older nodes. The corresponding node handler change affects Wasm contract
+queries and requires a coordinated chain upgrade. It must not ship as a
+v2.23.x compatible patch. Until that upgrade, direct queries to existing nodes
+still resolve `USDC` to the legacy token. On other networks, use the deployed
+token address or denom.
 
 A selected token's zero balance does not mean the account has no funds. For
 account-wide questions, inspect `nibiru q bank balances "$ADDR"` as well as

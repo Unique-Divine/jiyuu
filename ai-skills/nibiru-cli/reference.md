@@ -118,13 +118,12 @@ Rule of thumb:
   specifically need the Bank module view.
 
 Legacy USDC.e uses `0x0829F361A05D993d5CEb035cA6DF3446b060970b`, not the
-Sai USDC address above. Both tokens have six decimals. From v2.23.1,
-case-insensitive `USDC` and `USDC.e` aliases select Sai and legacy USDC
-respectively. The CLI resolves them locally for compatibility with older nodes.
-Use explicit addresses with older CLIs or direct queries to older nodes.
-
-Wasm contract Stargate queries retain v2.23.0 alias semantics for consensus
-compatibility. Contracts should use explicit addresses or bank denoms.
+Sai USDC address above. Both tokens have six decimals. The unreleased CLI
+resolves case-insensitive `USDC` and `USDC.e` to Sai and legacy USDC
+respectively, sending explicit addresses for compatibility with existing nodes.
+Changing the node handler affects Wasm contract execution and requires a
+coordinated upgrade. It is not a v2.23.x compatible patch. Use explicit
+addresses with installed CLIs and direct queries to existing nodes.
 
 A zero result applies only to the selected token. Use `nibiru q bank balances "$ADDR"` to inspect other bank holdings before describing an account as empty.
 
