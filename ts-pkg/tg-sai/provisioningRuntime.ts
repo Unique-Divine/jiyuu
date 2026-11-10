@@ -12,12 +12,14 @@ import {
   hideJoinRequest,
   iterDialogs,
   setChatDescription,
+  setChatPhoto,
 } from "@mtcute/bun/methods.js"
 import { saiBot } from "./cfg"
 import { createMtcuteClient, promoteTargetAdmin } from "./mtcuteAdapter"
 import { configDir, strictProfileCredentials } from "./profiles"
 import {
   descriptionMatchesMarker,
+  descriptionRef,
   PROVISIONING_BOT_ID,
 } from "./provisioning"
 import { withTelemetryIdentity } from "./telemetry/middleware"
@@ -258,6 +260,31 @@ export async function markerCandidates(
     if (await verify(chat.id)) candidates.push(chat.id)
   }
   return candidates
+}
+
+/**
+ * Groups, supergroups, and channels among `dialogs`: what Telegram's
+ * per-account group limit (about 500) counts.
+ */
+export async function countGroupDialogs(
+  dialogs: AsyncIterable<{ peer: { type: string } }>,
+): Promise<number> {
+  let count = 0
+  for await (const dialog of dialogs) if (dialog.peer.type === "chat") count++
+  return count
+}
+
+/**
+ * Whether a chat is pool chat `ref` as the reading account created it: a
+ * non-forum supergroup whose description ends in `Ref: <ref>`.
+ */
+export function poolRefChatMatches(chat: MarkerChat, ref: string): boolean {
+  return (
+    chat.chatType === "supergroup" &&
+    !chat.isForum &&
+    chat.isCreator &&
+    descriptionRef(chat.bio) === ref
+  )
 }
 
 /** Separate files and a process lock prevent account/session crossover. */
@@ -522,8 +549,36 @@ export async function withProvisionTelegram<T>(
             chatType: chat.chatType,
             isForum: chat.isForum,
             isCreator: chat.isCreator,
+            hasPhoto: chat.photo !== null,
           }
         },
+        // Pool fills: no flood sleep and no resend, so a flood reaches the
+        // filler and becomes a saved hold.
+        promoteOnce: async (chatId, userId, rights) =>
+          promoteTargetAdmin(
+            client,
+            { chatId, targetPeer: userId, rights },
+            PROVISION_WRITE_PARAMS,
+          ),
+        setPhoto: (chatId, jpeg) =>
+          setChatPhoto(writeClient, { chatId, type: "photo", media: jpeg }),
+        poolCandidates: (ref) =>
+          markerCandidates(
+            iterDialogs(readClient, { limit: 1000, archived: "keep" }),
+            async (chatId) =>
+              poolRefChatMatches(await readClient.getFullChat(chatId), ref),
+          ),
+        creatorId: async (chatId) => {
+          const admins = await getChatMembers(readClient, chatId, {
+            limit: 200,
+            type: "admins",
+          })
+          return admins.find((m) => m.status === "creator")?.user.id ?? null
+        },
+        groupCount: () =>
+          countGroupDialogs(
+            iterDialogs(readClient, { limit: 2000, archived: "keep" }),
+          ),
         // Editing the description is not a member add, but it is a write:
         // no flood sleep and no resend.
         setDescription: (chatId, description) =>

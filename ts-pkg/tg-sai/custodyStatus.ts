@@ -18,6 +18,11 @@ export interface CustodyStatusReport {
   /** Member adds the account made this UTC day: setup and background. */
   addsToday: number
   background: { pending: number; nextAt: string | null }
+  /**
+   * Groups, supergroups, and channels the account is in, from the last
+   * pool fill session that counted them. Absent when not counted yet.
+   */
+  groupCount?: number
 }
 
 /** Reports go out at least this often, changed or not. */
@@ -32,6 +37,7 @@ export function buildCustodyStatus(input: {
   holds: HoldStore
   queue: BackgroundQueue
   nowMs: number
+  groupCount?: number | null
 }): CustodyStatusReport {
   const holds = input.holds
     .activeHolds(input.accountId, input.nowMs)
@@ -56,6 +62,9 @@ export function buildCustodyStatus(input: {
           ? new Date(summary.nextAtMs).toISOString()
           : null,
     },
+    ...(typeof input.groupCount === "number"
+      ? { groupCount: input.groupCount }
+      : {}),
   }
 }
 
@@ -65,6 +74,7 @@ export function custodyStatusKey(report: CustodyStatusReport): string {
     holds: report.holds.map((h) => [h.group, h.untilMs, h.source]),
     addsToday: report.addsToday,
     background: report.background,
+    groupCount: report.groupCount ?? null,
   })
 }
 

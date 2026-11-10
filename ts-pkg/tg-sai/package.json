@@ -29,6 +29,7 @@
     "state/*.ts",
     "!state/*.test.ts",
     "state/migrations/*.sql",
+    "assets/*.jpg",
     "*.py",
     "!*_test.py",
     "pyproject.toml",

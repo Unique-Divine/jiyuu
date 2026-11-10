@@ -94,6 +94,26 @@ export interface TelegramProvisioner {
   chatInfo?(chatId: number): Promise<ChatInfo>
   /** Sets the chat description. One call, never resent. */
   setDescription?(chatId: number, description: string): Promise<void>
+  /**
+   * Promotes `userId` without sleeping through a flood wait or resending,
+   * so a flood reaches the caller and becomes a saved hold.
+   */
+  promoteOnce?(
+    chatId: number,
+    userId: number,
+    rights: Record<string, boolean>,
+  ): Promise<void>
+  /** Sets the chat photo from JPEG bytes. One call, never resent. */
+  setPhoto?(chatId: number, jpeg: Uint8Array): Promise<void>
+  /**
+   * Supergroups the account created whose description ends in
+   * `Ref: <ref>`: the pool chat a timed-out create may have made.
+   */
+  poolCandidates?(ref: string): Promise<number[]>
+  /** User ID of the chat's creator, or `null` when none is listed. */
+  creatorId?(chatId: number): Promise<number | null>
+  /** Groups, supergroups, and channels the account is in. */
+  groupCount?(): Promise<number>
 }
 export interface ChatInfo {
   title: string
@@ -101,6 +121,8 @@ export interface ChatInfo {
   chatType: string
   isForum: boolean
   isCreator: boolean
+  /** Whether the chat has a photo; set by adapters that read it. */
+  hasPhoto?: boolean
 }
 export interface Progress {
   state: ProvisionState
@@ -334,6 +356,13 @@ export function descriptionMatchesMarker(
     DESCRIPTION_REF.exec(description)?.[1] ===
     fingerprint.slice(0, SHORT_REF_LENGTH)
   )
+}
+/**
+ * The `Ref: <8 hex>` a chat description ends with, or `null`. Pool chats
+ * carry their own random ref; setup chats carry `setupRef`.
+ */
+export function descriptionRef(description: string): string | null {
+  return DESCRIPTION_REF.exec(description)?.[1] ?? null
 }
 function validBinding(binding: Binding, ownerId: number): boolean {
   return (

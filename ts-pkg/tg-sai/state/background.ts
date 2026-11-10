@@ -120,8 +120,8 @@ function fromRow(row: BackgroundRow): BackgroundMember {
   }
 }
 
-/** Who made a member add: a setup job or the background drain. */
-export type MemberAddSource = "setup" | "background"
+/** Who made a member add: a setup job, the background drain, or a pool fill. */
+export type MemberAddSource = "setup" | "background" | "pool"
 
 /**
  * A member add Telegram ran: `added`, `refused` for one user (such as

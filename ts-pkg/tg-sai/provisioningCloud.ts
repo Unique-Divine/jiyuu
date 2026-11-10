@@ -7,6 +7,12 @@ import type {
 } from "./provisioning"
 import { validateRequest } from "./provisioning"
 import type { CustodyStatusReport } from "./custodyStatus"
+import type {
+  PoolCloud,
+  PoolFailure,
+  PoolRegistration,
+  PoolStatusReply,
+} from "./poolFiller"
 
 export type CloudOperation =
   | "prepare"
@@ -17,6 +23,9 @@ export type CloudOperation =
   | "progress"
   | "resolve"
   | "custody-status"
+  | "pool-status"
+  | "pool-register"
+  | "pool-fail"
 export type CloudCall = (
   operation: CloudOperation,
   input: Record<string, unknown>,
@@ -96,7 +105,33 @@ export function setupFromCloud(raw: unknown): Setup {
     throw new Error("Cloud returned invalid setup state")
   return setup
 }
-export class CliProvisionCloud implements ProvisionCloud {
+/** Checks a `pool-status` reply; throws when a field the filler reads is off. */
+export function poolStatusFromCloud(raw: unknown): PoolStatusReply {
+  const value = raw as Record<string, unknown> | null
+  if (!value || typeof value !== "object")
+    throw new Error("Cloud returned invalid pool status")
+  if (typeof value.allowedNow !== "boolean")
+    throw new Error("Cloud returned invalid pool status")
+  const cap = value.cap
+  if (
+    cap !== null &&
+    cap !== undefined &&
+    !(typeof cap === "number" && Number.isSafeInteger(cap) && cap >= 0)
+  )
+    throw new Error("Cloud returned invalid pool cap")
+  return {
+    accountId: String(value.accountId ?? ""),
+    allowedNow: value.allowedNow,
+    reason: typeof value.reason === "string" ? value.reason : null,
+    cap: typeof cap === "number" ? cap : null,
+    ...(typeof value.remaining === "number"
+      ? { remaining: value.remaining }
+      : {}),
+    ...(typeof value.needed === "number" ? { needed: value.needed } : {}),
+  }
+}
+
+export class CliProvisionCloud implements ProvisionCloud, PoolCloud {
   constructor(private call: CloudCall = callDealDesk) {}
   async pending(input: {
     expectedUserId: number
@@ -166,6 +201,20 @@ export class CliProvisionCloud implements ProvisionCloud {
   async custodyStatus(report: CustodyStatusReport): Promise<unknown> {
     return this.call("custody-status", { ...report })
   }
+  /** What to fill next for one owner account (`pool-status`). */
+  async poolStatus(accountId: number): Promise<PoolStatusReply> {
+    return poolStatusFromCloud(
+      await this.call("pool-status", { accountId: String(accountId) }),
+    )
+  }
+  /** Records a pool chat as `filling` or `available` (`pool-register`). */
+  async poolRegister(input: PoolRegistration): Promise<unknown> {
+    return this.call("pool-register", { ...input })
+  }
+  /** Reports a failed fill (`pool-fail`). */
+  async poolFail(input: PoolFailure): Promise<unknown> {
+    return this.call("pool-fail", { ...input })
+  }
   async resolve(
     requestId: string,
     chatId: number,
@@ -200,6 +249,10 @@ export const CLOUD_MUTATION_FIELDS: Partial<Record<CloudOperation, string>> =
     progress: "chatSetupProgress",
     resolve: "chatSetupResolve",
     "custody-status": "chatSetupCustodyStatus",
+    // A query, but an older server reports it the same way.
+    "pool-status": "poolStatus",
+    "pool-register": "poolRegister",
+    "pool-fail": "poolFail",
   }
 
 /**
@@ -241,7 +294,12 @@ export async function callDealDesk(
 ): Promise<unknown> {
   const key = dealDeskRequestKey(operation, input)
   const command = ["sai-deal-desk", "chat-setups", operation, "--json-stdin"]
-  if (operation !== "view" && operation !== "list" && operation !== "pending")
+  if (
+    operation !== "view" &&
+    operation !== "list" &&
+    operation !== "pending" &&
+    operation !== "pool-status"
+  )
     command.push("--request-key", key)
   const child = Bun.spawn(command, {
     stdin: "pipe",

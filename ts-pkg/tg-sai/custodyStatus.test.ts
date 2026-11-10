@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 
 import {
   buildCustodyStatus,
+  custodyStatusKey,
   CUSTODY_STATUS_INTERVAL_MS,
   CustodyStatusReporter,
   UNKNOWN_OP_LOG_MS,
@@ -94,6 +95,22 @@ describe("custody status report", () => {
     })
     expect(report.holds).toEqual([])
     expect(report.background).toEqual({ pending: 0, nextAt: null })
+    expect("groupCount" in report).toBe(false)
+  })
+  test("a counted group total rides on the report and its change key", () => {
+    const { holds, queue } = stores()
+    const input = {
+      accountId: ACCOUNT,
+      workerVersion: "0.2.0",
+      holds,
+      queue,
+      nowMs: NOW,
+    }
+    const counted = buildCustodyStatus({ ...input, groupCount: 212 })
+    expect(counted.groupCount).toBe(212)
+    expect(custodyStatusKey(counted)).not.toBe(
+      custodyStatusKey(buildCustodyStatus({ ...input, groupCount: 213 })),
+    )
   })
   test("the package version is 0.2.0", () => {
     expect(packageJson.version).toBe("0.2.0")
