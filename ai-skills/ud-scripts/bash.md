@@ -1,22 +1,8 @@
----
-name: bash-defensive-patterns
-description: Master defensive Bash programming techniques for production-grade scripts. Use when writing robust shell scripts, CI/CD pipelines, or system utilities requiring fault tolerance and safety.
----
-
 # Bash Defensive Patterns
 
-Comprehensive guidance for writing production-ready Bash scripts using defensive programming techniques, error handling, and safety best practices to prevent common pitfalls and ensure reliability.
-
-## When to Use This Skill
-
-- Writing production automation scripts
-- Building CI/CD pipeline scripts
-- Creating system administration utilities
-- Developing error-resilient deployment automation
-- Writing scripts that must handle edge cases safely
-- Building maintainable shell script libraries
-- Implementing comprehensive logging and monitoring
-- Creating scripts that must work across different platforms
+Child page of agent skill `ud-scripts`. Read [SKILL.md](SKILL.md) first: a
+new repo script usually belongs in Python or Bun. Use this page when Bash is
+the right fit (a few lines of glue) or when editing an existing Bash script.
 
 ## Core Defensive Principles
 
