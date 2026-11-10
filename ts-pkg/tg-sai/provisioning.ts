@@ -932,54 +932,45 @@ export async function provisionSetup(params: {
         ...counts(),
       })
     // The bot cannot use a link, so a bot that never shows would cost an
-    // add on every retry. Each call that may reach the bot is counted and
-    // saved before it is sent, so the count survives restarts and a lost
-    // response; a call Telegram refused as a whole is taken back.
-    const botAdd = absent.includes(PROVISIONING_BOT_ID)
-    if (botAdd && botAdds >= MAX_BOT_ADDS) {
+    // add on every retry: each call that may reach it counts (`sending`).
+    if (absent.includes(PROVISIONING_BOT_ID) && botAdds >= MAX_BOT_ADDS) {
       step = "verify_added_member"
       throw Object.assign(new Error("Bot still not visible after re-add"), {
         text: BOT_ADDS_EXHAUSTED,
       })
     }
-    /** Saves people an add call reached or may have reached. */
-    const added = async (userIds: number[]): Promise<void> => {
-      const people = userIds.filter(
-        (id) => id !== PROVISIONING_BOT_ID && !addedIds.has(id),
-      )
-      if (!people.length) return
-      for (const id of people) addedIds.add(id)
+    // Before each add call, the people and the bot it covers are journaled
+    // as possibly added: a crash or lost response after Telegram accepted
+    // it can never lead to a second add. Only a known refusal of the whole
+    // call (a flood, a hold, or a per-user 400) is taken back.
+    const sending = async (userIds: number[]): Promise<void> => {
+      for (const id of userIds)
+        if (id === PROVISIONING_BOT_ID) botAdds++
+        else addedIds.add(id)
       await writeJournal()
     }
-    const sendingBotAdd = async (): Promise<void> => {
-      botAdds++
+    const notAdded = async (userIds: number[]): Promise<void> => {
+      if (!userIds.length) return
+      for (const id of userIds)
+        if (id === PROVISIONING_BOT_ID) botAdds--
+        else addedIds.delete(id)
       await writeJournal()
     }
-    const botAddNotSent = async (error: unknown): Promise<void> => {
-      // Only a known refusal of the whole call is taken back: a flood, a
-      // hold, or a per-user 400. Anything else may have added the bot.
-      const refused =
-        isPerUserAddError(error) ||
-        (!isTransientTelegramError(error) && provisionRetryAt(error) !== null)
-      if (!refused) return
-      botAdds--
-      await writeJournal()
-    }
+    const refusedWhole = (error: unknown): boolean =>
+      isPerUserAddError(error) ||
+      (!isTransientTelegramError(error) && provisionRetryAt(error) !== null)
     // Per-user refusals (privacy, USER_*/CHAT_* 400s) never stop the other
     // users: a refused batch falls back to one add per user. Flood and hold
     // errors refuse the whole batch and propagate with their retry time.
     const failures = new Map<number, { error: unknown; step: ProvisionStep }>()
     const addEach = async (userIds: number[]): Promise<void> => {
       for (const userId of userIds) {
-        const bot = userId === PROVISIONING_BOT_ID
+        step = "add_member"
+        await sending([userId])
         try {
-          step = "add_member"
-          if (bot) await sendingBotAdd()
           await telegram.add(chatId, userId)
-          await added([userId])
         } catch (error) {
-          if (bot) await botAddNotSent(error)
-          if (isTransientTelegramError(error)) await added([userId])
+          if (refusedWhole(error)) await notAdded([userId])
           if (!isPerUserAddError(error)) throw error
           failures.set(userId, { error, step: "add_member" })
         }
@@ -987,17 +978,11 @@ export async function provisionSetup(params: {
     }
     if (absent.length && telegram.addMany) {
       step = "add_member"
-      if (botAdd) await sendingBotAdd()
+      await sending(absent)
       try {
-        let refused: number[]
-        try {
-          refused = await telegram.addMany(chatId, absent)
-        } catch (error) {
-          if (isTransientTelegramError(error)) await added(absent)
-          throw error
-        }
-        const missing = new Set(refused)
-        await added(absent.filter((id) => !missing.has(id)))
+        const missing = new Set(await telegram.addMany(chatId, absent))
+        // Telegram reports privacy refusals; those people were not added.
+        await notAdded(absent.filter((id) => missing.has(id)))
         for (const userId of absent)
           if (missing.has(userId))
             failures.set(userId, {
@@ -1006,7 +991,7 @@ export async function provisionSetup(params: {
             })
       } catch (error) {
         // A refused batch added no one; the per-user fallback counts again.
-        if (botAdd) await botAddNotSent(error)
+        if (refusedWhole(error)) await notAdded(absent)
         if (!isPerUserAddError(error)) throw error
         await addEach(absent)
       }

@@ -557,7 +557,12 @@ describe("custody provisioning", () => {
     const f = fixture()
     const add = f.telegram.add
     f.telegram.add = async (chat, id) => {
-      if (id === 22) throw new Error("privacy")
+      // A known refusal: the add did not happen, so a resume may add again.
+      if (id === 22)
+        throw Object.assign(new Error("privacy"), {
+          code: 403,
+          text: "USER_PRIVACY_RESTRICTED",
+        })
       await add(chat, id)
     }
     await expect(f.run()).rejects.toThrow("incomplete")
@@ -1860,6 +1865,26 @@ describe("transient failure paths", () => {
     expect(
       f.local?.pendingInvitations?.map((i) => [i.userId, i.reason]),
     ).toEqual([["21", NOT_VISIBLE_INVITATION_REASON]])
+  })
+
+  test("an add cut off by an unknown error is journaled before it is sent", async () => {
+    const f = fixture()
+    withLinks(f)
+    resumed(f)
+    const adds: number[] = []
+    const add = f.telegram.add
+    f.telegram.add = async (chat, id) => {
+      adds.push(id)
+      // Like a crash after Telegram accepted the call: no answer arrives.
+      if (id === 21) throw new Error("worker died mid-call")
+      await add(chat, id)
+    }
+    expect(f.local).toBeNull()
+    await expect(f.run()).rejects.toThrow("incomplete")
+    expect(f.local?.addedIds).toEqual([21])
+    for (let tick = 0; tick < 2; tick++)
+      await expect(f.run()).rejects.toThrow("incomplete")
+    expect(adds.filter((id) => id === 21)).toHaveLength(1)
   })
 
   test("a hidden person is not re-added when the stop is for someone else", async () => {
