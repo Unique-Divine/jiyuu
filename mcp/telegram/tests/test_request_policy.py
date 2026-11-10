@@ -261,3 +261,41 @@ async def test_policy_expiration_awaits_cleanup_and_does_not_retry():
     assert calls == 1
     assert cleaned.is_set()
     assert _flood_sleep_override.get() is None
+
+
+@pytest.mark.parametrize("cancel_caller", [True, False])
+@pytest.mark.parametrize("cleanup_error", [RuntimeError("cleanup failed"), flood(60)])
+@pytest.mark.asyncio
+async def test_cleanup_failure_preserves_parent_outcome_without_recording_cooldown(
+    cancel_caller, cleanup_error, caplog
+):
+    started = asyncio.Event()
+    tracker = CooldownTracker(Clock())
+    client = object()
+
+    async def operation():
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            raise cleanup_error
+
+    task = asyncio.create_task(
+        run_limited(
+            client,
+            "get_dialogs",
+            operation,
+            timeout=30 if cancel_caller else 0.01,
+            tracker=tracker,
+        )
+    )
+    await started.wait()
+    if cancel_caller:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    else:
+        with pytest.raises(RequestTimedOut):
+            await task
+    assert tracker.active(id(client), "get_dialogs") is None
+    assert "Cancelled request cleanup failed" in caplog.text

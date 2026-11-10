@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import math
 import time
 from contextvars import ContextVar
@@ -387,8 +388,16 @@ async def run_limited(
             finally:
                 if not child.done():
                     child.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
+                    try:
                         await child
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception as cleanup_error:
+                        # Cleanup must not replace the selected timeout/cancellation
+                        # or turn it into a newly recorded Telegram cooldown.
+                        logging.getLogger(__name__).warning(
+                            "Cancelled request cleanup failed: %s", type(cleanup_error).__name__
+                        )
     except errors.FloodError as exc:
         if not is_wait_error(exc):
             raise
