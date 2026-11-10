@@ -1,13 +1,18 @@
 ---
 name: ud-scripts
-description: Choose the language for a repo script, zero-dependency Python or Bun TypeScript, with Bash only for a few lines of glue. Use when writing, converting, or reviewing repo scripts, shell or Bash scripts, CI scripts, or justfile recipes that outgrow a few lines, or when choosing between Bash, Python, and Bun.
+description: Choose the language for a repo script, Python or Bun TypeScript with few or no dependencies, with Bash for a few lines of glue, and make scripts testable. Use when writing, converting, testing, or reviewing repo scripts, shell or Bash scripts, CI scripts, release or install scripts, or justfile recipes that outgrow a few lines, or when choosing between Bash, Python, and Bun.
 ---
 
 # UD Scripts
 
-Write repo scripts in Python or Bun TypeScript, with no third-party
-dependencies. Keep Bash for short glue. This applies to new scripts and to
-existing Bash scripts when they next need real changes.
+Write repo scripts in Python or Bun TypeScript. Keep Bash for short glue.
+This applies to new scripts and to existing Bash scripts when they next need
+real changes. The pages below are preferences and patterns that have worked
+well, not a checklist. Fit them to the script.
+
+- To make a script testable (plans, injected runners, behavior and golden
+  tests, fake tools on `PATH`), read [testable-scripts.md](testable-scripts.md).
+- For Bash you keep or write, read [bash.md](bash.md).
 
 ## Pick the Language
 
@@ -20,31 +25,33 @@ Neither Python nor Bun is the default. Choose per script:
 - **Python** when the script runs where only system tools exist (a VM, a
   GitHub-hosted runner, or a fresh machine). `python3` ships on macOS, most
   Linux distros, and those runners, but not on slim or Alpine container
-  images. The
-  standard library covers most needs: `argparse`, `json`, `pathlib`,
-  `subprocess`, `sqlite3`, `urllib`, and `unittest`. Type hints need a
-  separate checker (pyright or mypy).
+  images. The standard library covers most needs: `argparse`, `json`,
+  `pathlib`, `subprocess`, `sqlite3`, `tomllib`, `urllib`, and `unittest`.
+  Type hints need a separate checker (pyright or mypy).
 - **Bash** for a few lines that run commands in order, with no loops over
   data, no JSON, and little branching. Justfile recipes count. Once a script
-  needs an `if` with real logic, a data loop, or JSON, move it to Python or
-  Bun. For Bash you keep or write, read [bash.md](bash.md).
+  needs an `if` with real logic, a data loop, or JSON, Python or Bun is
+  usually the better home.
 
-## Rules
+## Habits
 
-- **No dependencies.** Use the standard library or Bun built-ins. Ask before
-  adding a pip or npm package to a script.
-- **Run commands as argument lists.** `subprocess.run(["gh", "pr", "list"])`
-  and `Bun.spawnSync(["gh", "pr", "list"])` start one process.
+- **Few dependencies.** Prefer the standard library or Bun built-ins. A
+  small package the repo already uses (an argument parser such as
+  `commander`, or `@uniquedivine/bash`) is fine. Ask before adding a new
+  one.
+- **Prefer argument lists.** `subprocess.run(["gh", "pr", "list"])` and
+  `Bun.spawnSync(["gh", "pr", "list"])` start one process.
   `shell=True` and `["bash", "-c", "..."]` start a shell and then the
   command, which doubles the cost and lets a filename with spaces or `;` be
-  read as shell syntax. Use a shell only for a real pipe or glob.
+  read as shell syntax. A shell string is fine for a real pipe, a glob, or a
+  command sent over `ssh`.
 - **Fail loudly.** Check exit codes (`check=True` in Python; test
-  `exitCode` in Bun) and exit non-zero with a message that names the step.
-- **Put tests next to the script** (`foo.test.ts` or `test_foo.py`) for any
-  non-trivial logic. Keep parsing and decisions in pure functions so tests
-  need no live tools.
-- **Dry-run by default** for scripts that change remote state; apply with
-  `--run`.
+  `exitCode` in Bun, since `Bun.spawnSync` does not throw) and exit non-zero
+  with a message that names the step.
+- **Keep tests next to the script** for any non-trivial logic:
+  `foo.test.ts`, or `test_foo.py` so `python3 -m unittest` finds it.
+- **Wrap it in a justfile recipe** when people run it often, and keep the
+  logic in the script, not the recipe.
 
 ## Why Not Bash by Default
 
@@ -63,5 +70,5 @@ between tools like `gh`, `git`, and `rg` runs at the same speed in any of
 them. Bash only wins on startup, by a few milliseconds. Logic inside the
 script is far slower in Bash. The bigger gain is maintenance: Python and
 Bun have real data structures, exceptions, type checks, and test runners,
-while Bash quietly carries on after errors unless every script remembers
-strict mode and careful quoting.
+while Bash carries on after errors unless every script remembers strict
+mode and careful quoting.
