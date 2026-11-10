@@ -1,4 +1,4 @@
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises"
+import { chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises"
 import { homedir, platform as osPlatform } from "node:os"
 import { dirname, join } from "node:path"
 import type { UserData } from "./adminAudit"
@@ -310,9 +310,23 @@ export async function writeConfig(
   const path = configPath(env)
   await mkdir(dirname(path), { recursive: true, mode: 0o700 })
   const stored = { ...config, profiles: config.profiles.map(storedProfile) }
-  await writeFile(path, `${JSON.stringify(stored, null, 2)}\n`, {
-    mode: 0o600,
-  })
+  await writePrivateFile(path, `${JSON.stringify(stored, null, 2)}\n`)
+}
+
+/**
+ * Replaces `path` with mode 0600 through a temp file and rename, so an
+ * interrupted write leaves the old file whole.
+ */
+export async function writePrivateFile(path: string, body: string): Promise<void> {
+  const temp = `${path}.tmp-${process.pid}`
+  try {
+    await writeFile(temp, body, { mode: 0o600 })
+    await chmod(temp, 0o600)
+    await rename(temp, path)
+  } catch (error) {
+    await rm(temp, { force: true })
+    throw error
+  }
 }
 
 /**

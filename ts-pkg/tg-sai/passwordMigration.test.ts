@@ -2,7 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test"
 import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
-import { filesContaining, scrubPasswordFields } from "./passwordMigration"
+import { filesContaining, scrubPasswordText } from "./passwordMigration"
 import { installFakePass } from "./testdata"
 
 const packageRoot = import.meta.dir
@@ -41,6 +41,8 @@ async function fixture(): Promise<Fixture> {
   const stateDir = join(root, "state")
   const storeDir = join(root, "store")
   await mkdir(join(stateDir, "backups"), { recursive: true })
+  await mkdir(storeDir, { recursive: true })
+  await writeFile(join(storeDir, ".gpg-id"), "fake-gpg-id\n")
   const profiles = {
     profiles: [profileRow("alpha", 111, ALPHA), profileRow("beta", 222, BETA)],
   }
@@ -55,6 +57,11 @@ async function fixture(): Promise<Fixture> {
   await writeFile(
     join(stateDir, "backups", "env-copy.json"),
     JSON.stringify({ nested: { env: { TELEGRAM_PASSWORD: BETA, keep: 1 } } }),
+    { mode: 0o600 },
+  )
+  await writeFile(
+    join(stateDir, "backups", "peers.json"),
+    '{"peers":[{"accessHash":9007199254740993123}],"password":"' + ALPHA + '"}',
     { mode: 0o600 },
   )
   await writeFile(
@@ -113,17 +120,45 @@ async function snapshot(dir: string): Promise<Record<string, string>> {
   return out
 }
 
-describe("scrubPasswordFields", () => {
+describe("scrubPasswordText", () => {
   test("removes password keys at any depth and counts non-empty ones", () => {
-    const scrubbed = scrubPasswordFields({
+    const scrubbed = scrubPasswordText(JSON.stringify({
       profiles: [{ name: "a", password: "x" }, { name: "b", password: "" }],
       env: { TELEGRAM_PASSWORD: "y", TELEGRAM_API_ID: "1" },
-    })
+      list: [],
+      empty: {},
+    }))
     expect(scrubbed.removed).toBe(2)
-    expect(scrubbed.value).toEqual({
+    expect(JSON.parse(scrubbed.text)).toEqual({
       profiles: [{ name: "a" }, { name: "b" }],
       env: { TELEGRAM_API_ID: "1" },
+      list: [],
+      empty: {},
     })
+  })
+
+  test("keeps 64-bit integers and string escapes exactly as written", () => {
+    const text =
+      '{"peers":[{"accessHash":9007199254740993123,"id":-1002233445566778899}],' +
+      '"title":"a\\"b\\u00e9","password":"fake-2fa","n":1.50e3}'
+    const scrubbed = scrubPasswordText(text)
+    expect(scrubbed.removed).toBe(1)
+    expect(scrubbed.text).toContain('"accessHash": 9007199254740993123')
+    expect(scrubbed.text).toContain('"id": -1002233445566778899')
+    expect(scrubbed.text).toContain('"title": "a\\"b\\u00e9"')
+    expect(scrubbed.text).toContain('"n": 1.50e3')
+    expect(scrubbed.text).not.toContain("fake-2fa")
+  })
+
+  test("pretty output matches JSON.stringify for safe values", () => {
+    const value = { a: [1, { b: true, c: null }], d: "x" }
+    expect(scrubPasswordText(JSON.stringify(value)).text).toBe(
+      `${JSON.stringify(value, null, 2)}\n`,
+    )
+  })
+
+  test("rejects text that is not JSON", () => {
+    expect(() => scrubPasswordText("not json")).toThrow(SyntaxError)
   })
 })
 
@@ -184,6 +219,9 @@ describe("tg-sai profile migrate-password", () => {
         await readFile(join(f.stateDir, "backups", "profiles-1.json"), "utf8"),
       )
       expect(backup.profiles[0].sessionString).toBe("session-alpha")
+      const peers = await readFile(join(f.stateDir, "backups", "peers.json"), "utf8")
+      expect(peers).toContain("9007199254740993123")
+      expect(peers).not.toContain("password")
       expect((await stat(join(f.stateDir, "backups", "env-copy.json"))).mode & 0o777).toBe(0o600)
 
       // Later commands print no password and keep the state dir clean,
@@ -269,6 +307,39 @@ describe("tg-sai profile migrate-password", () => {
         "residual: .env still contains a migrated password",
       )
       expect(result.stdout).toContain("residual_files: 1")
+
+      // A rerun still finds the copy, now through the profile's pass entry.
+      const rerun = runCli(f, ["profile", "migrate-password", "--run"])
+      expect(rerun.exitCode).toBe(1)
+      expectNoSecrets(rerun)
+      expect(rerun.stdout).toContain("profiles: none with a plain-text password")
+      expect(rerun.stdout).toContain(
+        "residual: .env still contains a migrated password",
+      )
+
+      await rm(join(f.stateDir, ".env"))
+      const clean = runCli(f, ["profile", "migrate-password", "--run"])
+      expect(clean.exitCode).toBe(0)
+      expect(clean.stdout).toContain("residual_files: 0")
+    } finally {
+      await f.cleanup()
+    }
+  })
+
+  test("--run stops before any change when pass is not initialised", async () => {
+    const f = await fixture()
+    try {
+      await rm(join(f.storeDir, ".gpg-id"))
+      const before = await snapshot(f.stateDir)
+      const result = runCli(f, ["profile", "migrate-password", "--run"])
+      expect(result.exitCode).not.toBe(0)
+      expectNoSecrets(result)
+      expect(result.stderr).toContain("is not initialised")
+      // Telemetry may record the run; credential files stay unchanged.
+      const after = await snapshot(f.stateDir)
+      for (const name of Object.keys(before).filter((n) => n.endsWith(".json"))) {
+        expect(after[name]).toBe(before[name]!)
+      }
     } finally {
       await f.cleanup()
     }

@@ -3,7 +3,7 @@
  * `profiles.json` into pass, then removes password fields from
  * `backups/*.json`. Dry-run by default.
  */
-import { chmod, readdir, readFile, rename, stat, writeFile } from "node:fs/promises"
+import { readdir, readFile, stat } from "node:fs/promises"
 import { join, relative } from "node:path"
 import {
   configDir,
@@ -12,9 +12,11 @@ import {
   readConfig,
   unknownProfileError,
   writeConfig,
+  writePrivateFile,
 } from "./profiles"
 import type { ProfileStoreEnv, TgSaiProfile } from "./profiles"
 import {
+  assertPassReady,
   defaultPasswordPassEntry,
   insertPassPassword,
   passEntryExists,
@@ -34,42 +36,130 @@ export interface MigratePasswordOptions {
 /** Keys that hold a 2FA password in profiles or credential blocks. */
 export const PASSWORD_KEYS = ["password", "TELEGRAM_PASSWORD"] as const
 
-/** Removes non-empty `password`/`TELEGRAM_PASSWORD` keys at any depth. */
-export function scrubPasswordFields(value: unknown): {
-  value: unknown
-  removed: number
-} {
-  if (Array.isArray(value)) {
-    let removed = 0
-    const items = value.map((item) => {
-      const scrubbed = scrubPasswordFields(item)
-      removed += scrubbed.removed
-      return scrubbed.value
-    })
-    return { value: items, removed }
+/** JSON value with its source text kept for strings, numbers, and literals. */
+type JsonNode =
+  | { kind: "object"; members: Array<{ keyRaw: string; key: string; value: JsonNode }> }
+  | { kind: "array"; items: JsonNode[] }
+  | { kind: "raw"; raw: string }
+
+/**
+ * Parses JSON text that `JSON.parse` already accepted, keeping each scalar's
+ * source text. Numbers stay exact, so a 64-bit ID is never rounded.
+ */
+export function parseJsonKeepingScalars(text: string): JsonNode {
+  let i = 0
+  const skip = () => {
+    while (i < text.length && /\s/.test(text[i]!)) i++
   }
-  if (typeof value !== "object" || value === null) {
-    return { value, removed: 0 }
+  const readString = (): string => {
+    const start = i
+    i++
+    while (text[i] !== '"') i += text[i] === "\\" ? 2 : 1
+    i++
+    return text.slice(start, i)
   }
+  const readValue = (): JsonNode => {
+    skip()
+    const char = text[i]
+    if (char === "{") {
+      i++
+      const members: Array<{ keyRaw: string; key: string; value: JsonNode }> = []
+      skip()
+      if (text[i] === "}") {
+        i++
+        return { kind: "object", members }
+      }
+      for (;;) {
+        skip()
+        const keyRaw = readString()
+        skip()
+        i++ // :
+        const value = readValue()
+        members.push({ keyRaw, key: JSON.parse(keyRaw) as string, value })
+        skip()
+        if (text[i++] === "}") return { kind: "object", members }
+      }
+    }
+    if (char === "[") {
+      i++
+      const items: JsonNode[] = []
+      skip()
+      if (text[i] === "]") {
+        i++
+        return { kind: "array", items }
+      }
+      for (;;) {
+        items.push(readValue())
+        skip()
+        if (text[i++] === "]") return { kind: "array", items }
+      }
+    }
+    if (char === '"') return { kind: "raw", raw: readString() }
+    const start = i
+    while (i < text.length && !/[\s,\]}]/.test(text[i]!)) i++
+    return { kind: "raw", raw: text.slice(start, i) }
+  }
+  return readValue()
+}
+
+/** Renders like `JSON.stringify(value, null, 2)`, scalars as written. */
+export function renderJson(node: JsonNode, depth = 0): string {
+  if (node.kind === "raw") return node.raw
+  const pad = "  ".repeat(depth + 1)
+  const end = "  ".repeat(depth)
+  if (node.kind === "array") {
+    if (node.items.length === 0) return "[]"
+    return `[\n${node.items.map((item) => pad + renderJson(item, depth + 1)).join(",\n")}\n${end}]`
+  }
+  if (node.members.length === 0) return "{}"
+  return `{\n${node.members
+    .map((member) => `${pad}${member.keyRaw}: ${renderJson(member.value, depth + 1)}`)
+    .join(",\n")}\n${end}}`
+}
+
+function scrubNode(node: JsonNode): { node: JsonNode; removed: number } {
+  if (node.kind === "raw") return { node, removed: 0 }
   let removed = 0
-  const out: Record<string, unknown> = {}
-  for (const [key, child] of Object.entries(value)) {
-    if ((PASSWORD_KEYS as readonly string[]).includes(key)) {
-      if (child !== "" && child !== null && child !== undefined) removed++
+  if (node.kind === "array") {
+    const items = node.items.map((item) => {
+      const scrubbed = scrubNode(item)
+      removed += scrubbed.removed
+      return scrubbed.node
+    })
+    return { node: { kind: "array", items }, removed }
+  }
+  const members = []
+  for (const member of node.members) {
+    if ((PASSWORD_KEYS as readonly string[]).includes(member.key)) {
+      const value = member.value
+      if (value.kind !== "raw" || (value.raw !== '""' && value.raw !== "null")) {
+        removed++
+      }
       continue
     }
-    const scrubbed = scrubPasswordFields(child)
+    const scrubbed = scrubNode(member.value)
     removed += scrubbed.removed
-    out[key] = scrubbed.value
+    members.push({ ...member, value: scrubbed.node })
   }
-  return { value: out, removed }
+  return { node: { kind: "object", members }, removed }
+}
+
+/**
+ * Removes `password` and `TELEGRAM_PASSWORD` keys at any depth from JSON
+ * text and counts the non-empty ones. Other values keep their exact source
+ * text. Throws `SyntaxError` for text that is not JSON.
+ */
+export function scrubPasswordText(text: string): { text: string; removed: number } {
+  JSON.parse(text)
+  const scrubbed = scrubNode(parseJsonKeepingScalars(text))
+  return { text: `${renderJson(scrubbed.node)}\n`, removed: scrubbed.removed }
 }
 
 interface BackupPlan {
   path: string
   /** Fields to remove, or null when the file is not JSON. */
   removed: number | null
-  scrubbed: unknown
+  scrubbed: string
 }
 
 async function backupPlans(dir: string): Promise<BackupPlan[]> {
@@ -84,28 +174,18 @@ async function backupPlans(dir: string): Promise<BackupPlan[]> {
   const plans: BackupPlan[] = []
   for (const name of names.filter((file) => file.endsWith(".json")).sort()) {
     const path = join(backupsDir, name)
-    let parsed: unknown
     try {
-      parsed = JSON.parse(await readFile(path, "utf8"))
+      const scrubbed = scrubPasswordText(await readFile(path, "utf8"))
+      plans.push({ path, removed: scrubbed.removed, scrubbed: scrubbed.text })
     } catch (error) {
       if (error instanceof SyntaxError) {
-        plans.push({ path, removed: null, scrubbed: null })
+        plans.push({ path, removed: null, scrubbed: "" })
         continue
       }
       throw error
     }
-    const scrubbed = scrubPasswordFields(parsed)
-    plans.push({ path, removed: scrubbed.removed, scrubbed: scrubbed.value })
   }
   return plans
-}
-
-/** Replaces `path` through a temp file, keeping mode 0600. */
-async function writePrivateFile(path: string, body: string): Promise<void> {
-  const temp = `${path}.tmp-${process.pid}`
-  await writeFile(temp, body, { mode: 0o600 })
-  await chmod(temp, 0o600)
-  await rename(temp, path)
 }
 
 async function filesUnder(dir: string): Promise<string[]> {
@@ -197,6 +277,12 @@ export async function migrateProfilePasswords(
     options,
   )
   const passwords = targets.map((target) => target.profile.password)
+  const passProfiles = config.profiles.filter(
+    (profile) => profile.passwordPassEntry && !targets.some((t) => t.profile === profile),
+  )
+  if (options.run && (targets.length > 0 || passProfiles.length > 0)) {
+    await assertPassReady(env)
+  }
 
   if (targets.length === 0) {
     lines.push("profiles: none with a plain-text password")
@@ -248,7 +334,7 @@ export async function migrateProfilePasswords(
       continue
     }
     if (options.run) {
-      await writePrivateFile(plan.path, `${JSON.stringify(plan.scrubbed, null, 2)}\n`)
+      await writePrivateFile(plan.path, plan.scrubbed)
       lines.push(`backup: ${label} removed ${plan.removed} password field(s)`)
     } else {
       lines.push(`backup: ${label} remove ${plan.removed} password field(s)`)
@@ -257,6 +343,18 @@ export async function migrateProfilePasswords(
 
   let exitCode = 0
   if (options.run) {
+    // Also scan for passwords moved by earlier runs, so a rerun keeps
+    // reporting a leftover copy until it is removed.
+    for (const profile of passProfiles) {
+      try {
+        passwords.push(await readPassPassword(profile.passwordPassEntry!, env))
+      } catch {
+        lines.push(
+          `scan: could not read pass entry ${profile.passwordPassEntry}; scan skipped profile ${profile.name}`,
+        )
+        exitCode = 1
+      }
+    }
     const residual = await filesContaining(dir, passwords)
     for (const path of residual) {
       lines.push(`residual: ${relative(dir, path)} still contains a migrated password`)
