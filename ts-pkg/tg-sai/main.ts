@@ -73,7 +73,6 @@ import {
   insertPassPassword,
   passEntryExists,
   promptHiddenPassword,
-  readPassPassword,
   readPasswordFromStdin,
   readTelegramPassword,
   validatePassEntry,
@@ -1494,13 +1493,14 @@ function profileAddPassEntry(
 
 /**
  * Checks `entry` before `profile add` writes to it. Returns whether to insert.
- * An existing entry that is not this profile's own may hold another secret,
- * so only an identical value is accepted there.
+ * The profile's own entries (the one it records and its default
+ * `tg-sai/<name>/telegram-2fa`) may be replaced. Any other existing entry may
+ * hold another secret, so it is refused without being read.
  */
 async function checkProfileAddPassEntry(
   entry: string,
   newPassword: string | null,
-  ownEntry: string | undefined,
+  ownEntries: Array<string | null | undefined>,
 ): Promise<boolean> {
   const exists = await passEntryExists(entry)
   if (newPassword === null) {
@@ -1511,13 +1511,20 @@ async function checkProfileAddPassEntry(
     }
     return false
   }
-  if (!exists || entry === ownEntry) return true
-  if ((await readPassPassword(entry)) !== newPassword) {
+  if (exists && !ownEntries.includes(entry)) {
     throw new Error(
-      `pass entry ${entry} already exists and holds a different value. Choose another --password-pass-entry.`,
+      `pass entry ${entry} already exists and is not this profile's entry. Choose another --password-pass-entry, or drop --password-prompt/--password-stdin to point the profile at the existing entry.`,
     )
   }
-  return false
+  return true
+}
+
+/** Entries that belong to profile `name`: recorded and default. */
+function ownPassEntries(
+  name: string | null,
+  recorded: string | undefined,
+): Array<string | undefined> {
+  return [recorded, name ? defaultPasswordPassEntry(name) : undefined]
 }
 
 /**
@@ -1535,7 +1542,13 @@ async function passwordPassEntryForProfileAdd(
   if (!entry) {
     throw new Error("Name the profile with --name or the pass entry with --password-pass-entry")
   }
-  if (await checkProfileAddPassEntry(entry, newPassword, ownEntry)) {
+  if (
+    await checkProfileAddPassEntry(
+      entry,
+      newPassword,
+      ownPassEntries(profileName, ownEntry),
+    )
+  ) {
     await insertPassPassword(entry, newPassword!)
   }
   return entry
@@ -1623,21 +1636,31 @@ async function runProfileAdd(options: ProfileAddOptions): Promise<void> {
   if (!previous && setsPassword(options) && !enrollsNewAccount(options)) {
     throw unknownPasswordTargetError(options)
   }
+  // A login names the profile only after it creates a Telegram session, too
+  // late to check the pass entry without discarding that session.
+  if (
+    setsPassword(options) &&
+    (options.login || options.qr || options.phone) &&
+    !options.name &&
+    !options.passwordPassEntry
+  ) {
+    throw new Error(
+      "Saving a password with a login needs --name or --password-pass-entry, so the pass entry is checked before the login starts",
+    )
+  }
   // Read stdin before login or prompts can consume it.
   const newPassword = await newPasswordFromOptions(options)
   if (newPassword !== null || options.passwordPassEntry) {
     // Check pass before a login creates a session that a failed insert
     // would leave unsaved.
     await assertPassReady()
-    const earlyEntry = profileAddPassEntry(
-      options,
-      previous?.name ?? options.name ?? null,
-    )
+    const earlyName = previous?.name ?? options.name ?? null
+    const earlyEntry = profileAddPassEntry(options, earlyName)
     if (earlyEntry) {
       await checkProfileAddPassEntry(
         earlyEntry,
         newPassword,
-        previous?.passwordPassEntry,
+        ownPassEntries(earlyName, previous?.passwordPassEntry),
       )
     }
   }

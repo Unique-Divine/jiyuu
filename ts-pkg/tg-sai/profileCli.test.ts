@@ -523,7 +523,7 @@ await Bun.write(${JSON.stringify(join(dir, "generator-mode"))}, args.includes("-
     })
   })
 
-  test("--password-stdin refuses an existing entry that holds another value", async () => {
+  test("--password-stdin refuses an existing unrelated entry without reading it", async () => {
     await withTempConfig(async (dir) => {
       expect(runCli(addAliceArgs, dir).exitCode).toBe(0)
       await mkdir(join(storeFor(dir), "evm"), { recursive: true })
@@ -534,19 +534,48 @@ await Bun.write(${JSON.stringify(join(dir, "generator-mode"))}, args.includes("-
         dir, {}, "password-alice\n",
       )
       expect(result.exitCode).not.toBe(0)
-      expect(result.stderr).toContain("pass entry evm/wallet already exists and holds a different value")
+      expect(result.stderr).toContain("pass entry evm/wallet already exists and is not this profile's entry")
       expect(result.stderr).not.toContain("unrelated-secret")
       expect(await readFile(join(storeFor(dir), "evm", "wallet.gpg"), "utf8")).toBe("unrelated-secret\n")
       expect(await readFile(join(dir, "profiles.json"), "utf8")).toBe(before)
 
-      // The same value is accepted without rewriting the entry.
-      await writeFile(join(storeFor(dir), "evm", "same.gpg"), "password-alice\n")
-      const same = runCli(
-        ["profile", "add", "--name", "alice", "--password-pass-entry", "evm/same", "--password-stdin"],
-        dir, {}, "password-alice\n",
+      // Refusing never decrypts the other entry.
+      expect(await Bun.file(join(storeFor(dir), ".calls")).exists()).toBe(false)
+
+      // Pointing the profile at the entry without a new password still works.
+      const linked = runCli(["profile", "add", "--name", "alice", "--password-pass-entry", "evm/wallet"], dir)
+      expect(linked.exitCode).toBe(0)
+      expect(await Bun.file(join(storeFor(dir), ".calls")).exists()).toBe(false)
+    })
+  })
+
+  test("rerunning the same password command rewrites the profile's own default entry", async () => {
+    await withTempConfig(async (dir) => {
+      expect(runCli(addAliceArgs, dir).exitCode).toBe(0)
+      // An entry left by an earlier run that stopped before saving the profile.
+      await mkdir(join(storeFor(dir), "tg-sai", "alice"), { recursive: true })
+      await writeFile(join(storeFor(dir), "tg-sai", "alice", "telegram-2fa.gpg"), "password-alice\n")
+      const rerun = runCli(["profile", "add", "--name", "alice", "--password-stdin"], dir, {}, "password-alice\n")
+      expect(rerun.exitCode).toBe(0)
+      expect(rerun.stdout).toContain("telegram_password: stored in pass entry tg-sai/alice/telegram-2fa")
+      expect(await readFile(join(storeFor(dir), ".calls"), "utf8")).not.toContain("show")
+    })
+  })
+
+  test("a password flag with a login needs --name or --password-pass-entry", async () => {
+    await withTempConfig(async (dir) => {
+      const bin = join(dir, "bin")
+      await mkdir(bin)
+      await writeFile(join(bin, "uv"), `#!/usr/bin/env bun
+await Bun.write(${JSON.stringify(join(dir, "generator-ran"))}, "yes")
+`, { mode: 0o700 })
+      const result = runCli(
+        ["profile", "add", "--qr", "--api-id", "1", "--api-hash", "h", "--password-stdin"],
+        dir, { PATH: `${bin}:${fakePass.path}` }, "password-custody\n",
       )
-      expect(same.exitCode).toBe(0)
-      expect(await readFile(join(storeFor(dir), ".calls"), "utf8")).not.toContain("insert")
+      expect(result.exitCode).not.toBe(0)
+      expect(result.stderr).toContain("Saving a password with a login needs --name or --password-pass-entry")
+      expect(await Bun.file(join(dir, "generator-ran")).exists()).toBe(false)
     })
   })
 
