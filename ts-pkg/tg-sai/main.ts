@@ -1519,12 +1519,20 @@ async function checkProfileAddPassEntry(
   return true
 }
 
-/** Entries that belong to profile `name`: recorded and default. */
+/**
+ * Entries that belong to profile `name`: the one it records, and its default
+ * unless another profile records that default.
+ */
 function ownPassEntries(
   name: string | null,
   recorded: string | undefined,
+  otherProfilesEntries: readonly string[],
 ): Array<string | undefined> {
-  return [recorded, name ? defaultPasswordPassEntry(name) : undefined]
+  const fallback = name ? defaultPasswordPassEntry(name) : undefined
+  return [
+    recorded,
+    fallback && !otherProfilesEntries.includes(fallback) ? fallback : undefined,
+  ]
 }
 
 /**
@@ -1536,6 +1544,7 @@ async function passwordPassEntryForProfileAdd(
   newPassword: string | null,
   profileName: string | null,
   ownEntry: string | undefined,
+  otherProfilesEntries: readonly string[],
 ): Promise<string | null> {
   if (newPassword === null && !options.passwordPassEntry) return null
   const entry = profileAddPassEntry(options, profileName)
@@ -1546,7 +1555,7 @@ async function passwordPassEntryForProfileAdd(
     await checkProfileAddPassEntry(
       entry,
       newPassword,
-      ownPassEntries(profileName, ownEntry),
+      ownPassEntries(profileName, ownEntry, otherProfilesEntries),
     )
   ) {
     await insertPassPassword(entry, newPassword!)
@@ -1631,7 +1640,12 @@ async function printProfileRemoveHelp(command: Command): Promise<void> {
 }
 
 async function runProfileAdd(options: ProfileAddOptions): Promise<void> {
-  const previous = getProfile(await readConfig(), options.name)
+  const savedConfig = await readConfig()
+  const previous = getProfile(savedConfig, options.name)
+  // Pass entries other profiles record; never treated as this profile's own.
+  const otherProfilesEntries = savedConfig.profiles
+    .filter((profile) => profile !== previous)
+    .flatMap((profile) => (profile.passwordPassEntry ? [profile.passwordPassEntry] : []))
   // Fail before asking for a password that has no profile to go to.
   if (!previous && setsPassword(options) && !enrollsNewAccount(options)) {
     throw unknownPasswordTargetError(options)
@@ -1660,7 +1674,7 @@ async function runProfileAdd(options: ProfileAddOptions): Promise<void> {
       await checkProfileAddPassEntry(
         earlyEntry,
         newPassword,
-        ownPassEntries(earlyName, previous?.passwordPassEntry),
+        ownPassEntries(earlyName, previous?.passwordPassEntry, otherProfilesEntries),
       )
     }
   }
@@ -1676,6 +1690,7 @@ async function runProfileAdd(options: ProfileAddOptions): Promise<void> {
       input.handle ??
       (input.userId !== null ? String(input.userId) : null),
     previous?.passwordPassEntry,
+    otherProfilesEntries,
   )
   if (passwordPassEntry) input.passwordPassEntry = passwordPassEntry
   const config = await addProfile(input)

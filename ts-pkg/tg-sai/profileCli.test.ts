@@ -562,6 +562,21 @@ await Bun.write(${JSON.stringify(join(dir, "generator-mode"))}, args.includes("-
     })
   })
 
+  test("a default entry that another profile records is not this profile's own", async () => {
+    await withTempConfig(async (dir) => {
+      expect(runCli(addAliceArgs, dir).exitCode).toBe(0)
+      expect(runCli(["profile", "add", "--name", "gamma"], dir).exitCode).toBe(0)
+      await mkdir(join(storeFor(dir), "tg-sai", "gamma"), { recursive: true })
+      await writeFile(join(storeFor(dir), "tg-sai", "gamma", "telegram-2fa.gpg"), "alice-real-2fa\n")
+      // alice deliberately points at gamma's default entry.
+      expect(runCli(["profile", "add", "--name", "alice", "--password-pass-entry", "tg-sai/gamma/telegram-2fa"], dir).exitCode).toBe(0)
+      const result = runCli(["profile", "add", "--name", "gamma", "--password-stdin"], dir, {}, "gamma-2fa\n")
+      expect(result.exitCode).not.toBe(0)
+      expect(result.stderr).toContain("pass entry tg-sai/gamma/telegram-2fa already exists and is not this profile's entry")
+      expect(await readFile(join(storeFor(dir), "tg-sai", "gamma", "telegram-2fa.gpg"), "utf8")).toBe("alice-real-2fa\n")
+    })
+  })
+
   test("a password flag with a login needs --name or --password-pass-entry", async () => {
     await withTempConfig(async (dir) => {
       const bin = join(dir, "bin")
