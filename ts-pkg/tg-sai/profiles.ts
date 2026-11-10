@@ -1,4 +1,4 @@
-import { chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises"
+import { chmod, mkdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises"
 import { homedir, platform as osPlatform } from "node:os"
 import { dirname, join } from "node:path"
 import type { UserData } from "./adminAudit"
@@ -318,11 +318,17 @@ export async function writeConfig(
  * interrupted write leaves the old file whole.
  */
 export async function writePrivateFile(path: string, body: string): Promise<void> {
-  const temp = `${path}.tmp-${process.pid}`
+  // Write through a symlink to its target, as a plain write would, instead
+  // of replacing the link and leaving the old content in the target.
+  const target = await realpath(path).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return path
+    throw error
+  })
+  const temp = `${target}.tmp-${process.pid}`
   try {
     await writeFile(temp, body, { mode: 0o600 })
     await chmod(temp, 0o600)
-    await rename(temp, path)
+    await rename(temp, target)
   } catch (error) {
     await rm(temp, { force: true })
     throw error

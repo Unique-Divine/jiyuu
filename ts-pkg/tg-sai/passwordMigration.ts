@@ -188,8 +188,19 @@ async function backupPlans(dir: string): Promise<BackupPlan[]> {
   return plans
 }
 
-async function filesUnder(dir: string): Promise<string[]> {
-  const out: string[] = []
+/** Files to scan under a dir, plus symlinks the scan cannot follow. */
+interface ScanFiles {
+  files: string[]
+  /** Symlinks to directories or missing targets; checked by hand. */
+  unchecked: string[]
+}
+
+/**
+ * Regular files under `dir`, including symlinks to files (read through the
+ * link). Symlinked directories are not followed, to avoid loops, and are
+ * listed in `unchecked` with broken links.
+ */
+async function filesUnder(dir: string, out: ScanFiles = { files: [], unchecked: [] }): Promise<ScanFiles> {
   let entries
   try {
     entries = await readdir(dir, { withFileTypes: true })
@@ -199,29 +210,49 @@ async function filesUnder(dir: string): Promise<string[]> {
   }
   for (const entry of entries) {
     const path = join(dir, entry.name)
-    if (entry.isDirectory()) out.push(...(await filesUnder(path)))
-    else if (entry.isFile()) out.push(path)
+    if (entry.isDirectory()) await filesUnder(path, out)
+    else if (entry.isFile()) out.files.push(path)
+    else if (entry.isSymbolicLink()) {
+      const target = await stat(path).catch(() => null)
+      if (target?.isFile()) out.files.push(path)
+      else out.unchecked.push(path)
+    }
   }
   return out
 }
 
+/** Result of scanning a dir for secrets: paths only, never values. */
+export interface SecretScan {
+  hits: string[]
+  unchecked: string[]
+}
+
 /**
- * Files under `dir` whose bytes contain any of `secrets`. Returns paths
- * only; never the matching value.
+ * Scans files under `dir` for any of `secrets`. Returns matching paths and
+ * symlinks it could not follow; never the matching value.
  */
-export async function filesContaining(
+export async function scanForSecrets(
   dir: string,
   secrets: readonly string[],
-): Promise<string[]> {
+): Promise<SecretScan> {
   const needles = secrets.filter(Boolean).map((secret) => Buffer.from(secret))
-  if (needles.length === 0) return []
+  if (needles.length === 0) return { hits: [], unchecked: [] }
+  const { files, unchecked } = await filesUnder(dir)
   const hits: string[] = []
-  for (const path of await filesUnder(dir)) {
+  for (const path of files) {
     if ((await stat(path)).size === 0) continue
     const bytes = await readFile(path)
     if (needles.some((needle) => bytes.includes(needle))) hits.push(path)
   }
-  return hits
+  return { hits, unchecked }
+}
+
+/** Paths under `dir` whose bytes contain any of `secrets`. */
+export async function filesContaining(
+  dir: string,
+  secrets: readonly string[],
+): Promise<string[]> {
+  return (await scanForSecrets(dir, secrets)).hits
 }
 
 interface ProfileTarget {
@@ -277,7 +308,14 @@ export async function migrateProfilePasswords(
     options,
   )
   const passwords = targets.map((target) => target.profile.password)
-  const passProfiles = config.profiles.filter(
+  // With --profile, the scan reads only that profile's pass entry.
+  const scope =
+    options.profile === undefined
+      ? config.profiles
+      : config.profiles.filter(
+          (_, index) => index === findProfileIndex(config, options.profile!),
+        )
+  const passProfiles = scope.filter(
     (profile) => profile.passwordPassEntry && !targets.some((t) => t.profile === profile),
   )
   if (options.run && (targets.length > 0 || passProfiles.length > 0)) {
@@ -355,12 +393,15 @@ export async function migrateProfilePasswords(
         exitCode = 1
       }
     }
-    const residual = await filesContaining(dir, passwords)
-    for (const path of residual) {
+    const scan = await scanForSecrets(dir, passwords)
+    for (const path of scan.hits) {
       lines.push(`residual: ${relative(dir, path)} still contains a migrated password`)
     }
-    lines.push(`residual_files: ${residual.length}`)
-    if (residual.length > 0) exitCode = 1
+    for (const path of scan.unchecked) {
+      lines.push(`residual: ${relative(dir, path)} is a symlink the scan does not follow; check its target`)
+    }
+    lines.push(`residual_files: ${scan.hits.length + scan.unchecked.length}`)
+    if (scan.hits.length + scan.unchecked.length > 0) exitCode = 1
   } else {
     lines.push("next: rerun with --run to apply")
   }

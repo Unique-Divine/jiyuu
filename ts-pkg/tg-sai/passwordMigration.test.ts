@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test"
-import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises"
+import { lstat, mkdir, mkdtemp, readdir, readFile, rename, rm, stat, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { filesContaining, scrubPasswordText } from "./passwordMigration"
@@ -340,6 +340,51 @@ describe("tg-sai profile migrate-password", () => {
       for (const name of Object.keys(before).filter((n) => n.endsWith(".json"))) {
         expect(after[name]).toBe(before[name]!)
       }
+    } finally {
+      await f.cleanup()
+    }
+  })
+
+  test("--run writes through a symlinked profiles.json and scans symlinked files", async () => {
+    const f = await fixture()
+    try {
+      const outside = join(f.stateDir, "..", "outside")
+      await mkdir(outside)
+      await rename(join(f.stateDir, "profiles.json"), join(outside, "real.json"))
+      await symlink("../outside/real.json", join(f.stateDir, "profiles.json"))
+      await writeFile(join(outside, "env"), `TELEGRAM_PASSWORD=${BETA}\n`)
+      await symlink(join(outside, "env"), join(f.stateDir, ".env"))
+      await mkdir(join(outside, "logs"))
+      await symlink(join(outside, "logs"), join(f.stateDir, "linked-logs"))
+
+      const result = runCli(f, ["profile", "migrate-password", "--run"])
+      expectNoSecrets(result)
+      expect((await lstat(join(f.stateDir, "profiles.json"))).isSymbolicLink()).toBe(true)
+      const real = await readFile(join(outside, "real.json"), "utf8")
+      expect(real).not.toContain(ALPHA)
+      expect(real).toContain("passwordPassEntry")
+      expect(result.stdout).toContain("residual: .env still contains a migrated password")
+      expect(result.stdout).toContain(
+        "residual: linked-logs is a symlink the scan does not follow; check its target",
+      )
+      expect(result.stdout).toContain("residual_files: 2")
+      expect(result.exitCode).toBe(1)
+    } finally {
+      await f.cleanup()
+    }
+  })
+
+  test("--profile limits the scan to that profile's pass entry", async () => {
+    const f = await fixture()
+    try {
+      expect(runCli(f, ["profile", "migrate-password", "--profile", "beta", "--run"]).exitCode).toBe(0)
+      await rm(join(f.storeDir, ".calls"))
+      const result = runCli(f, ["profile", "migrate-password", "--profile", "alpha", "--run"])
+      expect(result.exitCode).toBe(0)
+      expectNoSecrets(result)
+      const calls = await readFile(join(f.storeDir, ".calls"), "utf8")
+      expect(calls).toContain("tg-sai/alpha/telegram-2fa")
+      expect(calls).not.toContain("tg-sai/beta")
     } finally {
       await f.cleanup()
     }
