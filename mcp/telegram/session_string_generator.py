@@ -27,13 +27,49 @@ import io
 import os
 import sys
 from datetime import datetime, timezone
+from typing import Awaitable, Protocol
 
 from dotenv import load_dotenv
 from telethon import errors
 from telethon.sessions import StringSession
-from telethon.sync import TelegramClient
+from telethon import TelegramClient
 from telegram_mcp.client_identity import client_identity_kwargs
 from telegram_mcp.install_guard import UnsafeInstallationError, assert_safe_distribution
+
+
+class ExpiringToken(Protocol):
+    @property
+    def expires(self) -> datetime: ...
+
+
+class QRToken(ExpiringToken, Protocol):
+    @property
+    def url(self) -> str: ...
+
+    async def wait(self, timeout: float | None = None) -> object: ...
+
+    async def recreate(self) -> None: ...
+
+
+class SignInClient(Protocol):
+    async def sign_in(
+        self,
+        phone: str = "",
+        code: str = "",
+        *,
+        password: str = "",
+    ) -> object: ...
+
+    def disconnect(self) -> Awaitable[None]: ...
+
+
+class QRClient(SignInClient, Protocol):
+    async def qr_login(self) -> QRToken: ...
+
+
+class PhoneClient(SignInClient, Protocol):
+    async def send_code_request(self, phone: str) -> object: ...
+
 
 # How many times the QR code is regenerated after expiry before giving up.
 _QR_MAX_REFRESHES = 10
@@ -67,7 +103,7 @@ def _check_installation() -> None:
         sys.exit(1)
 
 
-def _render_qr(qr) -> None:
+def _render_qr(qr: QRToken) -> None:
     import qrcode
 
     print("\n----- QR Code Login -----\n")
@@ -86,7 +122,7 @@ def _render_qr(qr) -> None:
     print("Waiting for you to scan...")
 
 
-def _seconds_until_expiry(qr) -> float:
+def _seconds_until_expiry(qr: ExpiringToken) -> float:
     """Seconds left before this QR token expires, with a small safety margin."""
     expires = qr.expires
     if expires.tzinfo is None:
@@ -95,57 +131,65 @@ def _seconds_until_expiry(qr) -> float:
     return max(1.0, remaining - 1.0)
 
 
-def _qr_login(client: TelegramClient) -> None:
-    qr = client.qr_login()
+async def _qr_login(client: QRClient) -> None:
+    qr = await client.qr_login()
     _render_qr(qr)
 
     for _ in range(_QR_MAX_REFRESHES):
         try:
-            client.loop.run_until_complete(qr.wait(timeout=_seconds_until_expiry(qr)))
+            await qr.wait(timeout=_seconds_until_expiry(qr))
             return
         except asyncio.TimeoutError:
-            client.loop.run_until_complete(qr.recreate())
+            await qr.recreate()
             print("\nQR code expired, here is a fresh one.")
             _render_qr(qr)
         except errors.SessionPasswordNeededError:
             pw = getpass.getpass(
                 "\nTwo-factor authentication enabled. Please enter your password: "
             )
-            client.sign_in(password=pw)
+            await client.sign_in(password=pw)
             return
 
     print("\nQR code expired too many times. Please run the generator again.")
-    client.disconnect()
+    await client.disconnect()
     sys.exit(1)
 
 
-def _phone_login(client: TelegramClient) -> None:
+async def _phone_login(client: PhoneClient) -> None:
     phone = input("Please enter your phone (or bot token): ")
 
     try:
-        client.send_code_request(phone)
+        await client.send_code_request(phone)
     except errors.FloodWaitError as e:
-        print(f"\nFlood wait error; you must wait {e.seconds} seconds before trying again.")
-        client.disconnect()
+        print(
+            f"\nFlood wait error; you must wait {e.seconds} seconds before trying again."
+        )
+        await client.disconnect()
         sys.exit(1)
     except errors.PhoneNumberInvalidError:
         print("\nThe phone number is invalid.")
-        client.disconnect()
+        await client.disconnect()
         sys.exit(1)
     except Exception as e:
         print(f"\nError sending code: {e}")
-        client.disconnect()
+        await client.disconnect()
         sys.exit(1)
 
     code = input("\nPlease enter the code you received: ")
     try:
-        client.sign_in(phone, code)
+        await client.sign_in(phone, code)
     except errors.SessionPasswordNeededError:
-        pw = getpass.getpass("Two-factor authentication enabled. Please enter your password: ")
-        client.sign_in(password=pw)
+        pw = getpass.getpass(
+            "Two-factor authentication enabled. Please enter your password: "
+        )
+        await client.sign_in(password=pw)
 
 
 def main() -> None:
+    asyncio.run(_main())
+
+
+async def _main() -> None:
     args = _parse_args()
     _check_installation()
 
@@ -154,7 +198,9 @@ def main() -> None:
 
     if not API_ID or not API_HASH:
         print("Error: TELEGRAM_API_ID and TELEGRAM_API_HASH must be set in .env file")
-        print("Create an .env file with your credentials from https://my.telegram.org/apps")
+        print(
+            "Create an .env file with your credentials from https://my.telegram.org/apps"
+        )
         sys.exit(1)
 
     try:
@@ -171,7 +217,9 @@ def main() -> None:
     )
 
     label = (
-        input("Account label (optional, e.g. 'work', 'personal'; leave empty for default): ")
+        input(
+            "Account label (optional, e.g. 'work', 'personal'; leave empty for default): "
+        )
         .strip()
         .lower()
     )
@@ -186,17 +234,19 @@ def main() -> None:
         print("  2) Phone number + verification code")
         method = input("\nEnter 1 or 2 [default: 1]: ").strip() or "1"
 
+    session = StringSession()
+    client: TelegramClient | None = None
     try:
-        client = TelegramClient(StringSession(), API_ID, API_HASH, **client_identity_kwargs())
-        client.connect()
+        client = TelegramClient(session, API_ID, API_HASH, **client_identity_kwargs())
+        await client.connect()
 
-        if not client.is_user_authorized():
+        if not await client.is_user_authorized():
             if method == "1":
-                _qr_login(client)
+                await _qr_login(client)
             else:
-                _phone_login(client)
+                await _phone_login(client)
 
-        session_string = StringSession.save(client.session)
+        session_string = StringSession.save(session)
 
         if label:
             env_var = f"TELEGRAM_SESSION_STRING_{label.upper()}"
@@ -236,12 +286,13 @@ def main() -> None:
                 print(f"\nError updating .env file: {e}")
                 print("Please manually add the session string to your .env file.")
 
-        client.disconnect()
-
     except Exception as e:
         print(f"\nError: {e}")
         print("Failed to generate session string. Please try again.")
         sys.exit(1)
+    finally:
+        if client is not None:
+            await client.disconnect()
 
 
 if __name__ == "__main__":

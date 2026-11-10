@@ -19,37 +19,31 @@ class _FakeQR:
         self.expires = datetime.now(timezone.utc) + timedelta(seconds=30)
         self.recreate_calls = 0
 
-    def wait(self, timeout=None):
-        return ("wait", self._wait_outcomes.pop(0))
+    async def wait(self, timeout=None):
+        outcome = self._wait_outcomes.pop(0)
+        if outcome is not None:
+            raise outcome
+        return None
 
-    def recreate(self):
+    async def recreate(self):
         self.recreate_calls += 1
         self.expires = datetime.now(timezone.utc) + timedelta(seconds=30)
-        return ("recreate", None)
-
-
-class _FakeLoop:
-    def run_until_complete(self, marker):
-        kind, outcome = marker
-        if kind == "wait" and outcome is not None:
-            raise outcome
         return None
 
 
 class _FakeClient:
     def __init__(self, qr):
         self._qr = qr
-        self.loop = _FakeLoop()
         self.disconnected = False
         self.sign_in_calls = []
 
-    def qr_login(self):
+    async def qr_login(self):
         return self._qr
 
-    def sign_in(self, password=None):
+    async def sign_in(self, phone=None, code=None, *, password=None):
         self.sign_in_calls.append(password)
 
-    def disconnect(self):
+    async def disconnect(self):
         self.disconnected = True
 
 
@@ -82,7 +76,7 @@ def test_qr_login_returns_on_first_successful_scan():
     qr = _FakeQR([None])
     client = _FakeClient(qr)
 
-    session_string_generator._qr_login(client)
+    asyncio.run(session_string_generator._qr_login(client))
 
     assert qr.recreate_calls == 0
     assert client.disconnected is False
@@ -92,7 +86,7 @@ def test_qr_login_refreshes_after_expiry_then_succeeds():
     qr = _FakeQR([asyncio.TimeoutError(), None])
     client = _FakeClient(qr)
 
-    session_string_generator._qr_login(client)
+    asyncio.run(session_string_generator._qr_login(client))
 
     assert qr.recreate_calls == 1
     assert client.disconnected is False
@@ -104,22 +98,28 @@ def test_qr_login_gives_up_after_max_refreshes(monkeypatch):
     client = _FakeClient(qr)
 
     with pytest.raises(SystemExit):
-        session_string_generator._qr_login(client)
+        asyncio.run(session_string_generator._qr_login(client))
 
     assert qr.recreate_calls == 3
     assert client.disconnected is True
 
 
 def test_qr_login_uses_hidden_password_prompt_for_2fa(monkeypatch):
-    qr = _FakeQR([session_string_generator.errors.SessionPasswordNeededError(request=None)])
+    qr = _FakeQR(
+        [session_string_generator.errors.SessionPasswordNeededError(request=None)]
+    )
     client = _FakeClient(qr)
     prompted = []
 
-    monkeypatch.setattr("getpass.getpass", lambda prompt: prompted.append(prompt) or "secret")
+    monkeypatch.setattr(
+        "getpass.getpass", lambda prompt: prompted.append(prompt) or "secret"
+    )
 
-    session_string_generator._qr_login(client)
+    asyncio.run(session_string_generator._qr_login(client))
 
-    assert prompted == ["\nTwo-factor authentication enabled. Please enter your password: "]
+    assert prompted == [
+        "\nTwo-factor authentication enabled. Please enter your password: "
+    ]
     assert client.sign_in_calls == ["secret"]
 
 
@@ -128,29 +128,35 @@ def test_phone_login_uses_hidden_password_prompt_for_2fa(monkeypatch):
         def __init__(self):
             self.sign_in_calls = []
 
-        def send_code_request(self, phone):
+        async def send_code_request(self, phone):
             self.phone = phone
 
-        def disconnect(self):
+        async def disconnect(self):
             return None
 
-        def sign_in(self, *args, **kwargs):
+        async def sign_in(self, *args, **kwargs):
             if kwargs.get("password") is not None:
                 self.sign_in_calls.append(kwargs["password"])
                 return None
-            raise session_string_generator.errors.SessionPasswordNeededError(request=None)
+            raise session_string_generator.errors.SessionPasswordNeededError(
+                request=None
+            )
 
     client = _Client()
     prompted = []
     entered = iter(["+10000000000", "12345"])
 
     monkeypatch.setattr("builtins.input", lambda _prompt="": next(entered))
-    monkeypatch.setattr("getpass.getpass", lambda prompt: prompted.append(prompt) or "secret")
+    monkeypatch.setattr(
+        "getpass.getpass", lambda prompt: prompted.append(prompt) or "secret"
+    )
 
-    session_string_generator._phone_login(client)
+    asyncio.run(session_string_generator._phone_login(client))
 
     assert client.phone == "+10000000000"
-    assert prompted == ["Two-factor authentication enabled. Please enter your password: "]
+    assert prompted == [
+        "Two-factor authentication enabled. Please enter your password: "
+    ]
     assert client.sign_in_calls == ["secret"]
 
 
@@ -219,13 +225,13 @@ class _AuthorizedClient:
     def __init__(self, *args, **kwargs):
         self.session = object()
 
-    def connect(self):
+    async def connect(self):
         return None
 
-    def is_user_authorized(self):
+    async def is_user_authorized(self):
         return True
 
-    def disconnect(self):
+    async def disconnect(self):
         return None
 
 
@@ -236,7 +242,9 @@ def _run_main(monkeypatch, argv, inputs=()):
     monkeypatch.setattr("sys.argv", ["session_string_generator.py", *argv])
     monkeypatch.setattr(session_string_generator, "TelegramClient", _AuthorizedClient)
     monkeypatch.setattr(
-        session_string_generator.StringSession, "save", staticmethod(lambda _session: _FAKE_SESSION)
+        session_string_generator.StringSession,
+        "save",
+        staticmethod(lambda _session: _FAKE_SESSION),
     )
     prompts = []
     answers = iter(inputs)
@@ -255,10 +263,14 @@ def _run_main(monkeypatch, argv, inputs=()):
     [["--no-env-write"], []],
     ids=["with-no-env-write", "session-output-only"],
 )
-def test_wrapper_mode_writes_session_only_to_output_file(tmp_path, monkeypatch, capsys, extra_args):
+def test_wrapper_mode_writes_session_only_to_output_file(
+    tmp_path, monkeypatch, capsys, extra_args
+):
     output = tmp_path / "session.txt"
 
-    prompts = _run_main(monkeypatch, ["--qr", "--session-output", str(output), *extra_args])
+    prompts = _run_main(
+        monkeypatch, ["--qr", "--session-output", str(output), *extra_args]
+    )
 
     captured = capsys.readouterr()
     assert prompts == []
@@ -289,7 +301,9 @@ def _clear_app_credentials(monkeypatch):
 
 def test_load_env_file_reads_dotenv_from_working_directory(tmp_path, monkeypatch):
     _clear_app_credentials(monkeypatch)
-    (tmp_path / ".env").write_text("TELEGRAM_API_ID=321\nTELEGRAM_API_HASH=cwd-fake-hash\n", encoding="utf-8")
+    (tmp_path / ".env").write_text(
+        "TELEGRAM_API_ID=321\nTELEGRAM_API_HASH=cwd-fake-hash\n", encoding="utf-8"
+    )
     monkeypatch.chdir(tmp_path)
 
     session_string_generator.load_env_file()
@@ -301,7 +315,10 @@ def test_load_env_file_reads_dotenv_from_working_directory(tmp_path, monkeypatch
 def test_missing_app_credentials_names_every_source(tmp_path, monkeypatch, capsys):
     _clear_app_credentials(monkeypatch)
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr("sys.argv", ["session_string_generator.py", "--qr", "--session-output", "/unused"])
+    monkeypatch.setattr(
+        "sys.argv",
+        ["session_string_generator.py", "--qr", "--session-output", "/unused"],
+    )
 
     with pytest.raises(SystemExit):
         session_string_generator.main()
@@ -314,3 +331,26 @@ def test_missing_app_credentials_names_every_source(tmp_path, monkeypatch, capsy
         "~/.tg-sai/.env",
     ):
         assert source in out
+
+
+def test_main_disconnects_when_authentication_fails(monkeypatch):
+    disconnected = []
+
+    class Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def connect(self):
+            raise RuntimeError("synthetic connect failure")
+
+        async def disconnect(self):
+            disconnected.append(True)
+
+    monkeypatch.setenv("TELEGRAM_API_ID", "123")
+    monkeypatch.setenv("TELEGRAM_API_HASH", "fake-app-hash")
+    monkeypatch.setattr("sys.argv", ["session_string_generator.py", "--qr"])
+    monkeypatch.setattr("builtins.input", lambda prompt="": "")
+    monkeypatch.setattr(session_string_generator, "TelegramClient", Client)
+    with pytest.raises(SystemExit):
+        session_string_generator.main()
+    assert disconnected == [True]
