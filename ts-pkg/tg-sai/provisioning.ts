@@ -682,6 +682,8 @@ export async function provisionSetup(params: {
   background?: BackgroundEnqueue
   /** Waits before a membership re-check; tests pass a no-op. */
   sleep?: (ms: number) => Promise<void>
+  /** Worker shutdown; a run it cuts short is not a transient failure. */
+  signal?: AbortSignal
 }): Promise<Setup | { state: "creation_unknown"; candidates: number[] }> {
   const { telegram, cloud, journal } = params
   let setup = params.setup
@@ -716,13 +718,22 @@ export async function provisionSetup(params: {
   let pendingInvitations = local?.pendingInvitations ?? []
   let botAdds = local?.botAdds ?? 0
   let transientRetries = local?.transientRetries ?? 0
-  const addedIds = new Set(local?.addedIds ?? [])
-  // Counters every journal write carries, so none is lost on restart.
-  const counts = () => ({
-    ...(botAdds ? { botAdds } : {}),
-    ...(transientRetries ? { transientRetries } : {}),
-    ...(addedIds.size ? { addedIds: [...addedIds] } : {}),
-  })
+  let addedIds = new Set(local?.addedIds ?? [])
+  interface Counts {
+    botAdds: number
+    transientRetries: number
+    addedIds: Set<number>
+  }
+  // Counters every journal write carries, so none is lost on restart. A
+  // change is written first and kept in memory only once the write worked.
+  const counts = (next: Partial<Counts> = {}) => {
+    const c = { botAdds, transientRetries, addedIds, ...next }
+    return {
+      ...(c.botAdds ? { botAdds: c.botAdds } : {}),
+      ...(c.transientRetries ? { transientRetries: c.transientRetries } : {}),
+      ...(c.addedIds.size ? { addedIds: [...c.addedIds] } : {}),
+    }
+  }
   const workerId = local?.workerId ?? params.workerId
   if (
     !setup.chatId &&
@@ -921,7 +932,7 @@ export async function provisionSetup(params: {
         })
       }
     }
-    const writeJournal = () =>
+    const writeJournal = (next: Partial<Counts> = {}) =>
       journal.write(setup.requestId, {
         fingerprint,
         state: "configuring",
@@ -929,8 +940,16 @@ export async function provisionSetup(params: {
         binding,
         workerId,
         pendingInvitations,
-        ...counts(),
+        ...counts(next),
       })
+    /** Writes changed counters, then keeps them; a failed write keeps none. */
+    const commit = async (next: Partial<Counts>): Promise<void> => {
+      await writeJournal(next)
+      if (next.botAdds !== undefined) botAdds = next.botAdds
+      if (next.transientRetries !== undefined)
+        transientRetries = next.transientRetries
+      if (next.addedIds !== undefined) addedIds = next.addedIds
+    }
     // The bot cannot use a link, so a bot that never shows would cost an
     // add on every retry: each call that may reach it counts (`sending`).
     if (absent.includes(PROVISIONING_BOT_ID) && botAdds >= MAX_BOT_ADDS) {
@@ -944,17 +963,24 @@ export async function provisionSetup(params: {
     // it can never lead to a second add. Only a known refusal of the whole
     // call (a flood, a hold, or a per-user 400) is taken back.
     const sending = async (userIds: number[]): Promise<void> => {
-      for (const id of userIds)
-        if (id === PROVISIONING_BOT_ID) botAdds++
-        else addedIds.add(id)
-      await writeJournal()
+      const people = userIds.filter((id) => id !== PROVISIONING_BOT_ID)
+      await commit({
+        botAdds: botAdds + (userIds.length - people.length),
+        addedIds: new Set([...addedIds, ...people]),
+      })
     }
+    /**
+     * Takes back a refused call. If that write fails, the journal still
+     * says "possibly added", the safe side, and the caller rethrows the
+     * Telegram error so its retry time is kept.
+     */
     const notAdded = async (userIds: number[]): Promise<void> => {
       if (!userIds.length) return
-      for (const id of userIds)
-        if (id === PROVISIONING_BOT_ID) botAdds--
-        else addedIds.delete(id)
-      await writeJournal()
+      const people = new Set(userIds.filter((id) => id !== PROVISIONING_BOT_ID))
+      await commit({
+        botAdds: botAdds - (userIds.length - people.size),
+        addedIds: new Set([...addedIds].filter((id) => !people.has(id))),
+      }).catch(() => {})
     }
     const refusedWhole = (error: unknown): boolean =>
       isPerUserAddError(error) ||
@@ -996,6 +1022,9 @@ export async function provisionSetup(params: {
         await addEach(absent)
       }
     } else await addEach(absent)
+    // This run got past the adds, so earlier transient add failures no
+    // longer count toward the limit.
+    if (transientRetries) await commit({ transientRetries: 0 })
     // With a participant listing, the final audit verifies the adds.
     const listed = createdNow && Boolean(telegram.members)
     // Telegram can accept an add before the member shows up: read again
@@ -1293,11 +1322,14 @@ export async function provisionSetup(params: {
     if (authoritative.state === "ready") return authoritative
     let diagnostic = safeProvisionDiagnostic(error, step)
     let retryAt = provisionRetryAt(error)
-    // Counted per setup and never reset by the worker: a setup that keeps
-    // failing this way stops for an operator, so it cannot hold the
-    // account or keep sending adds.
+    // Only add calls count: their effect is uncertain and they spend the
+    // custody budget. Reads, approvals, and promotions spend no add, and a
+    // run cut short by worker shutdown is not Telegram's failure. The count
+    // resets once a run gets past the adds.
     if (
+      step === "add_member" &&
       isTransientTelegramError(error) &&
+      !params.signal?.aborted &&
       ++transientRetries >= MAX_TRANSIENT_RETRIES
     ) {
       diagnostic = `${step}:${TRANSIENT_LIMIT}`

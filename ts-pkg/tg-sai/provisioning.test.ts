@@ -1826,7 +1826,27 @@ describe("transient failure paths", () => {
     expect(f.setup.retryAt).toBeNull()
   })
 
-  test("a persistent transient error stops after the retry limit", async () => {
+  test("transient add failures in consecutive runs stop after the limit", async () => {
+    const f = fixture()
+    withLinks(f)
+    resumed(f)
+    const adds: number[] = []
+    f.telegram.add = async (_chat, id) => {
+      adds.push(id)
+      throw rpc(-503, "Timeout")
+    }
+    // Each run reaches a new add: 21, then 22, then the bot.
+    for (let tick = 1; tick <= MAX_TRANSIENT_RETRIES + 2; tick++) {
+      if (tick > 1 && !f.setup.retryAt) break
+      await expect(f.run()).rejects.toThrow("incomplete")
+    }
+    expect(adds).toEqual([21, 22, PROVISIONING_BOT_ID])
+    expect(errorOf(f)).toBe(`add_member:${TRANSIENT_LIMIT}`)
+    expect(f.setup.retryAt).toBeNull()
+    expect(f.local?.transientRetries).toBe(MAX_TRANSIENT_RETRIES)
+  })
+
+  test("reads that time out never count toward the limit", async () => {
     const f = fixture()
     resumed(f)
     let reads = 0
@@ -1834,15 +1854,117 @@ describe("transient failure paths", () => {
       reads++
       throw rpc(-503, "Timeout")
     }
-    for (let tick = 1; tick <= MAX_TRANSIENT_RETRIES + 2; tick++) {
-      // An operator-blocked setup is never run again by the worker.
-      if (tick > 1 && !f.setup.retryAt) break
+    for (let tick = 0; tick < MAX_TRANSIENT_RETRIES + 2; tick++)
       await expect(f.run()).rejects.toThrow("incomplete")
+    expect(reads).toBe(MAX_TRANSIENT_RETRIES + 2)
+    expect(errorOf(f)).toBe(`verify_marker:${TELEGRAM_TRANSIENT}`)
+    expect(f.setup.retryAt).toBeTruthy()
+  })
+
+  test("a privacy wait over 24 h with read timeouts never hits the limit", async () => {
+    const f = fixture()
+    withLinks(f)
+    f.telegram.add = async (_chat, id) => {
+      if (id === 21) throw rpc(403, "USER_PRIVACY_RESTRICTED")
+      f.members.set(id, { role: "member", rights: {} })
     }
-    expect(reads).toBe(MAX_TRANSIENT_RETRIES)
-    expect(errorOf(f)).toBe(`verify_marker:${TRANSIENT_LIMIT}`)
-    expect(f.setup.retryAt).toBeNull()
-    expect(f.local?.transientRetries).toBe(MAX_TRANSIENT_RETRIES)
+    await expect(f.run()).rejects.toThrow("incomplete")
+    const member = f.telegram.member
+    let reads = 0
+    f.telegram.member = async (chat, id) => {
+      // About one read in 30 times out.
+      if (++reads % 30 === 0) throw new MtTimeoutError(10_000)
+      return member(chat, id)
+    }
+    // A resume every 15 minutes for a day.
+    for (let tick = 0; tick < 96; tick++) {
+      await expect(f.run()).rejects.toThrow("incomplete")
+      expect(f.setup.retryAt).toBeTruthy()
+      expect(errorOf(f)).not.toContain(TRANSIENT_LIMIT)
+    }
+  })
+
+  test("runs cut short by worker shutdown never hit the limit", async () => {
+    const f = fixture()
+    resumed(f)
+    const controller = new AbortController()
+    f.telegram.add = async () => {
+      controller.abort()
+      throw new MtcuteError("Client is destroyed")
+    }
+    for (let tick = 0; tick < MAX_TRANSIENT_RETRIES + 1; tick++)
+      await expect(
+        provisionSetup({
+          setup: f.setup,
+          cloud: f.cloud,
+          journal: f.journal,
+          telegram: f.telegram,
+          workerId: "worker-one",
+          background: f.background,
+          signal: controller.signal,
+        }),
+      ).rejects.toThrow("incomplete")
+    expect(errorOf(f)).toBe(`add_member:${TELEGRAM_TRANSIENT}`)
+    expect(f.setup.retryAt).toBeTruthy()
+    expect(f.local?.transientRetries ?? 0).toBe(0)
+  })
+
+  test("a run that gets past the adds resets the transient count", async () => {
+    const f = fixture()
+    withLinks(f)
+    resumed(f)
+    const add = f.telegram.add
+    let timeouts = 1
+    f.telegram.add = async (chat, id) => {
+      if (timeouts-- > 0) throw rpc(-503, "Timeout")
+      await add(chat, id)
+    }
+    await expect(f.run()).rejects.toThrow("incomplete")
+    expect(f.local?.transientRetries).toBe(1)
+    // 21 now waits on a link; the others are added, so the count resets.
+    await expect(f.run()).rejects.toThrow("incomplete")
+    expect(f.local?.transientRetries ?? 0).toBe(0)
+  })
+
+  test("a failed journal write before an add keeps no phantom counters", async () => {
+    const f = fixture()
+    resumed(f)
+    let sent = 0
+    f.telegram.add = async () => {
+      sent++
+    }
+    const write = f.journal.write
+    let failed = false
+    f.journal.write = async (id, record) => {
+      if (!failed && (record.addedIds?.length || record.botAdds)) {
+        failed = true
+        throw new Error("disk full")
+      }
+      await write(id, record)
+    }
+    await expect(f.run()).rejects.toThrow("incomplete")
+    expect(sent).toBe(0)
+    expect(f.local?.addedIds).toBeUndefined()
+    expect(f.local?.botAdds).toBeUndefined()
+  })
+
+  test("a failed rollback write keeps the flood's code and retry time", async () => {
+    const f = fixture()
+    f.telegram.addMany = async () => {
+      throw rpc(420, "FLOOD_WAIT_60")
+    }
+    const write = f.journal.write
+    let journaled = false
+    f.journal.write = async (id, record) => {
+      // The pre-add write works; the take-back write fails.
+      if (record.addedIds?.length) journaled = true
+      else if (journaled && record.state === "configuring")
+        throw new Error("disk full")
+      await write(id, record)
+    }
+    await expect(f.run()).rejects.toThrow("incomplete")
+    expect(errorOf(f)).toBe("add_member:FLOOD_WAIT_60")
+    expect(f.setup.retryAt).toBeTruthy()
   })
 
   test("an add that timed out is never sent again; the person gets a link", async () => {

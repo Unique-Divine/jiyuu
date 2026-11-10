@@ -521,6 +521,25 @@ describe("background drain", () => {
       state: "pending",
       attempts: 0,
     })
+    // An unclassified error is not counted as an add.
+    expect(cut.queue.addsToday(NOW)).toBe(0)
+
+    // A destroyed client during a sent add may have invited the user.
+    const destroyed = new AbortController()
+    const sent = fixture({
+      signal: destroyed.signal,
+      add: async () => {
+        destroyed.abort()
+        throw new MtcuteError("Client is destroyed")
+      },
+    })
+    sent.enqueue([1])
+    expect((await sent.drain()).state).toBe("deferred")
+    expect(sent.queue.forChat(-100)[0]).toMatchObject({
+      state: "pending",
+      attempts: 0,
+    })
+    expect(sent.queue.addsToday(NOW)).toBe(1)
   })
   test("a flood from the add call does not count an attempt", async () => {
     const f = fixture({
