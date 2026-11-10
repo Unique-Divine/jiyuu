@@ -24,7 +24,11 @@ typecheck:
 
 # Run Python session generator tests
 py-test:
-  uv run pytest session_string_generator_test.py
+  uv run --frozen pytest session_string_generator_test.py
+
+# Check the Python session generator, its tests, and shared reporting helpers.
+py-typecheck:
+  uv run --frozen ty check . ../../scripts/python
 
 # Check npm package compatibility with linter
 lint:
@@ -97,3 +101,7 @@ publish:
 
   echo "[4/4] publishing; open the printed URL and choose 'remember me for 5 minutes'"
   BROWSER=true {{npm}} publish --access public
+
+# Write CI-compatible diagnostics; checker/configuration failures remain fatal.
+py-typecheck-report output_dir:
+    uv run --frozen --no-sync python ../../scripts/python/typecheck_report.py --project "tg-sai Python" --output-dir "{{output_dir}}" . ../../scripts/python

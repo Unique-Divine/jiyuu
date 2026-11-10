@@ -12,9 +12,14 @@ dependencies = [
 [dependency-groups]
 dev = [
     "pytest>=9.0.2",
+    "ty==0.0.100",
 ]
 
 [tool.pytest.ini_options]
 python_files = [
     "*_test.py",
 ]
+
+[tool.ty.environment]
+python-version = "3.10"
+root = [".", "../../scripts/python"]

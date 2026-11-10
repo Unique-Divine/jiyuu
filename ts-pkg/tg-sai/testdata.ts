@@ -5,6 +5,9 @@ import type {
   UserData,
 } from "./adminAudit"
 import { saiBot, USERS } from "./cfg"
+import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 
 /**
  * Example Telegram basic-group chat ID used for captured admin-audit fixtures.
@@ -424,3 +427,50 @@ export const adminCheck_ownerSessionTargetUserAdmin: TestData<ChatAuditInput> =
       target: getChatMember_ownerTargetAdminNibiruInternal.data,
     },
   }
+
+/**
+ * Stand-in for `pass` on PATH. It keeps each entry as plain text in
+ * `$PASSWORD_STORE_DIR/<entry>.gpg`, matching the real store layout, and
+ * appends `<subcommand> <entry>` to `$PASSWORD_STORE_DIR/.calls`.
+ */
+export const fakePassScript = `#!/usr/bin/env bash
+set -euo pipefail
+store="\${PASSWORD_STORE_DIR:?}"
+mkdir -p "$store"
+cmd="$1"
+shift
+while [[ "\${1:-}" == -* ]]; do shift; done
+entry="$1"
+echo "$cmd $entry" >> "$store/.calls"
+case "$cmd" in
+  show)
+    [[ -f "$store/$entry.gpg" ]] || exit 1
+    cat "$store/$entry.gpg"
+    ;;
+  insert)
+    mkdir -p "$(dirname "$store/$entry.gpg")"
+    cat > "$store/$entry.gpg"
+    ;;
+  *) exit 2 ;;
+esac
+`
+
+/** Fake `pass` install: a bin dir for PATH and a root for per-test stores. */
+export interface FakePass {
+  binDir: string
+  storeRoot: string
+  /** PATH with the fake `pass` first. */
+  path: string
+}
+
+/** Writes the fake `pass` into a new temp dir. */
+export function installFakePass(): FakePass {
+  const root = mkdtempSync(join(tmpdir(), "tg-sai-fake-pass-"))
+  const binDir = join(root, "bin")
+  const storeRoot = join(root, "stores")
+  mkdirSync(binDir)
+  mkdirSync(storeRoot)
+  writeFileSync(join(binDir, "pass"), fakePassScript)
+  chmodSync(join(binDir, "pass"), 0o700)
+  return { binDir, storeRoot, path: `${binDir}:${process.env.PATH ?? ""}` }
+}

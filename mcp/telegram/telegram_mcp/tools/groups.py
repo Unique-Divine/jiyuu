@@ -4,6 +4,22 @@
 from telegram_mcp.runtime import *
 
 
+def _created_chat(result):
+    """Return the chat a CreateChatRequest reply describes, or None.
+
+    Telegram answers with ``messages.InvitedUsers``, whose ``updates`` carry
+    the new chat; older layers returned ``Updates`` directly.
+    """
+    for container in (result, getattr(result, "updates", None)):
+        chats = getattr(container, "chats", None) or []
+        if chats:
+            return chats[0]
+        chat = getattr(container, "chat", None)
+        if chat is not None:
+            return chat
+    return None
+
+
 @mcp.tool(
     annotations=ToolAnnotations(title="Create Group", openWorldHint=True, destructiveHint=True)
 )
@@ -39,25 +55,16 @@ async def create_group(title: str, user_ids: List[Union[int, str]], account: str
             # Create a new chat with selected users
             result = await cl(functions.messages.CreateChatRequest(users=users, title=title))
 
-            # Check what type of response we got
-            if hasattr(result, "chats") and result.chats:
-                created_chat = result.chats[0]
+            # The group exists from here on. Report it from the reply alone:
+            # a follow-up read could fail or wait, and an error would invite
+            # the caller to create a duplicate group.
+            created_chat = _created_chat(result)
+            if created_chat is not None:
                 return f"Group created with ID: {get_marked_id(created_chat)}"
-            elif hasattr(result, "chat") and result.chat:
-                return f"Group created with ID: {get_marked_id(result.chat)}"
-            elif hasattr(result, "chat_id"):
-                return f"Group created with ID: {result.chat_id}"
-            else:
-                # If we can't determine the chat ID directly from the result
-                # Try to find it in recent dialogs
-                await asyncio.sleep(1)  # Give Telegram a moment to register the new group
-                dialogs = await cl.get_dialogs(limit=5)  # Get recent dialogs
-                for dialog in dialogs:
-                    if dialog.title == title:
-                        return f"Group created with ID: {get_marked_id(dialog.entity)}"
-
-                # If we still can't find it, at least return success
-                return f"Group created successfully. Please check your recent chats for '{sanitize_name(title)}'."
+            return (
+                f"Group created, but Telegram's reply did not include its ID. "
+                f"Check recent chats for '{sanitize_name(title)}' before creating it again."
+            )
 
         except Exception as create_err:
             if "PEER_FLOOD" in str(create_err):

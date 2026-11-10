@@ -15,8 +15,11 @@ import {
   parseCredentialValueAfterKey,
   platformKind,
   readConfig,
+  redactedProfile,
   resolveTelegramCredentialSource,
+  strictProfileCredentials,
 } from "./profiles"
+import type { ProfileAddInput } from "./profiles"
 
 async function withTempHome<T>(fn: (home: string) => Promise<T>): Promise<T> {
   const home = await mkdtemp(join(tmpdir(), "tg-sai-home-test-"))
@@ -443,23 +446,65 @@ describe("tg-sai profile discovery", () => {
   })
 })
 
+/** Temp-HOME env for the resolver: no repo `.env`, no TELEGRAM_* values. */
+function resolverEnv(home: string): Record<string, string> {
+  return { HOME: home, TG_SAI_REPO_DIR: join(home, "no-repo") }
+}
+
+/** Profile fixture; override fields per test. */
+function profileInput(
+  overrides: Partial<ProfileAddInput> = {},
+): ProfileAddInput {
+  return {
+    name: "custody",
+    apiId: 456,
+    apiHash: "custody-hash",
+    sessionString: "custody-session",
+    password: "",
+    handle: "custody_handle",
+    userId: 222,
+    displayName: "Custody fixture",
+    ...overrides,
+  }
+}
+
+/** Blank onboarding draft: no credentials and no account identity. */
+const blankDraft = profileInput({
+  name: "draft",
+  apiId: null,
+  apiHash: "",
+  sessionString: "",
+  handle: null,
+  userId: null,
+  displayName: "",
+})
+
+/** Writes `~/.tg-sai/.env` under the temp HOME. */
+async function writeUserDotEnv(
+  env: Record<string, string>,
+  lines: readonly string[],
+): Promise<void> {
+  await mkdir(configDir(env), { recursive: true })
+  await writeFile(join(configDir(env), ".env"), lines.join("\n"), "utf8")
+}
+
+const dotEnvLines = [
+  "TELEGRAM_API_ID=123",
+  "TELEGRAM_API_HASH=dotenv-hash",
+  "TELEGRAM_SESSION_STRING=dotenv-session",
+] as const
+
+const dotEnvCredentials = {
+  apiId: 123,
+  apiHash: "dotenv-hash",
+  sessionString: "dotenv-session",
+}
+
 describe("resolveTelegramCredentialSource", () => {
   test("reports env, profile, and known-file credentials", async () => {
     await withTempHome(async (home) => {
-      const env = { HOME: home, TG_SAI_REPO_DIR: join(home, "no-repo") }
-      await addProfile(
-        {
-          name: "custody",
-          apiId: 456,
-          apiHash: "custody-hash",
-          sessionString: "custody-session",
-          password: "",
-          handle: "custody_handle",
-          userId: 222,
-          displayName: "Custody fixture",
-        },
-        env,
-      )
+      const env = resolverEnv(home)
+      await addProfile(profileInput({ password: "custody-2fa" }), env)
       expect(await resolveTelegramCredentialSource("custody", env)).toEqual({
         credentials: {
           apiId: 456,
@@ -467,36 +512,239 @@ describe("resolveTelegramCredentialSource", () => {
           sessionString: "custody-session",
         },
         source: "profile",
+        password: { kind: "value", value: "custody-2fa" },
+        profileName: "custody",
+        userId: 222,
       })
 
-      // TELEGRAM_* wins over the selected profile: its userId does not apply.
-      const fromEnv = await resolveTelegramCredentialSource("custody", {
-        ...env,
-        TELEGRAM_API_ID: "999",
-        TELEGRAM_API_HASH: "env-hash",
-        TELEGRAM_SESSION_STRING: "env-session",
+      // TELEGRAM_* wins over the selected profile and takes none of its
+      // password, name, or userId.
+      expect(
+        await resolveTelegramCredentialSource("custody", {
+          ...env,
+          TELEGRAM_API_ID: "999",
+          TELEGRAM_API_HASH: "env-hash",
+          TELEGRAM_SESSION_STRING: "env-session",
+        }),
+      ).toEqual({
+        credentials: {
+          apiId: 999,
+          apiHash: "env-hash",
+          sessionString: "env-session",
+        },
+        source: "env",
+        password: null,
+        profileName: null,
+        userId: null,
       })
-      expect(fromEnv.source).toBe("env")
-      expect(fromEnv.credentials.sessionString).toBe("env-session")
     })
 
     await withTempHome(async (home) => {
       const file = join(home, "creds.env")
       await writeFile(
         file,
-        [
-          "TELEGRAM_API_ID=123",
-          "TELEGRAM_API_HASH=file-hash",
-          "TELEGRAM_SESSION_STRING=file-session",
-        ].join("\n"),
+        [...dotEnvLines, "TELEGRAM_PASSWORD=file-2fa"].join("\n"),
         "utf8",
       )
-      const found = await resolveTelegramCredentialSource(undefined, {
-        HOME: home,
-        TG_SAI_DISCOVERY_FILE: file,
+      expect(
+        await resolveTelegramCredentialSource(undefined, {
+          HOME: home,
+          TG_SAI_DISCOVERY_FILE: file,
+        }),
+      ).toEqual({
+        credentials: dotEnvCredentials,
+        source: "known_file",
+        password: { kind: "value", value: "file-2fa" },
+        profileName: null,
+        userId: null,
       })
-      expect(found.source).toBe("known_file")
-      expect(found.credentials.sessionString).toBe("file-session")
+    })
+  })
+
+  test("a complete profile wins over a complete ~/.tg-sai/.env", async () => {
+    await withTempHome(async (home) => {
+      const env = resolverEnv(home)
+      await addProfile(profileInput(), env)
+      await writeUserDotEnv(env, dotEnvLines)
+      for (const selector of [undefined, "custody"]) {
+        const found = await resolveTelegramCredentialSource(selector, env)
+        expect(found.source).toBe("profile")
+        expect(found.credentials.sessionString).toBe("custody-session")
+      }
+    })
+  })
+
+  test("a blank active draft falls back to ~/.tg-sai/.env", async () => {
+    await withTempHome(async (home) => {
+      const env = resolverEnv(home)
+      await addProfile(blankDraft, env)
+      await writeUserDotEnv(env, dotEnvLines)
+      expect(await resolveTelegramCredentialSource(undefined, env)).toEqual({
+        credentials: dotEnvCredentials,
+        source: "known_file",
+        password: null,
+        profileName: null,
+        userId: null,
+      })
+    })
+  })
+
+  test("an explicit --profile never falls back to another account", async () => {
+    await withTempHome(async (home) => {
+      const env = resolverEnv(home)
+      await addProfile(blankDraft, env)
+      await writeUserDotEnv(env, dotEnvLines)
+      await expect(
+        resolveTelegramCredentialSource("draft", env),
+      ).rejects.toThrow("Profile draft is incomplete")
+    })
+  })
+
+  test("an explicit --profile matching no profile never falls back", async () => {
+    await withTempHome(async (home) => {
+      const env = resolverEnv(home)
+      await addProfile(profileInput(), env)
+      await writeUserDotEnv(env, dotEnvLines)
+      // A misspelled name and an out-of-range index.
+      for (const selector of ["custdy", "7"]) {
+        await expect(
+          resolveTelegramCredentialSource(selector, env),
+        ).rejects.toThrow(`Unknown profile: ${selector}`)
+      }
+    })
+  })
+
+  test("an incomplete profile with an identity never falls back", async () => {
+    for (const identity of [
+      { userId: 333, handle: null },
+      { userId: null, handle: "named_account" },
+    ]) {
+      await withTempHome(async (home) => {
+        const env = resolverEnv(home)
+        await addProfile({ ...blankDraft, ...identity }, env)
+        await writeUserDotEnv(env, dotEnvLines)
+        await expect(
+          resolveTelegramCredentialSource(undefined, env),
+        ).rejects.toThrow("Profile draft is incomplete")
+      })
+    }
+  })
+
+  test("names the blank draft when no other source has credentials", async () => {
+    await withTempHome(async (home) => {
+      const env = resolverEnv(home)
+      await addProfile(blankDraft, env)
+      await expect(
+        resolveTelegramCredentialSource(undefined, env),
+      ).rejects.toThrow("Profile draft is incomplete")
+    })
+  })
+
+  test("passwords follow the session source; blanks are null", async () => {
+    await withTempHome(async (home) => {
+      const env = resolverEnv(home)
+      // A draft that stores a password must not lend it to the .env session.
+      await addProfile({ ...blankDraft, password: "draft-2fa" }, env)
+      await writeUserDotEnv(env, [...dotEnvLines, "TELEGRAM_PASSWORD="])
+      const fallback = await resolveTelegramCredentialSource(undefined, env)
+      expect(fallback.source).toBe("known_file")
+      expect(fallback.password).toBeNull()
+
+      // TELEGRAM_PASSWORD still overrides for one command; blank is null.
+      expect(
+        (
+          await resolveTelegramCredentialSource(undefined, {
+            ...env,
+            TELEGRAM_PASSWORD: "cli-2fa",
+          })
+        ).password,
+      ).toEqual({ kind: "value", value: "cli-2fa" })
+      expect(
+        (
+          await resolveTelegramCredentialSource(undefined, {
+            ...env,
+            TELEGRAM_PASSWORD: "",
+          })
+        ).password,
+      ).toBeNull()
+    })
+
+    await withTempHome(async (home) => {
+      const env = resolverEnv(home)
+      await addProfile(profileInput({ password: "" }), env)
+      expect(
+        (await resolveTelegramCredentialSource("custody", env)).password,
+      ).toBeNull()
+    })
+  })
+})
+
+describe("2FA password in pass", () => {
+  test("a profile keeps only the pass entry and resolution never runs pass", async () => {
+    await withTempHome(async (home) => {
+      // No pass on PATH: resolving must not read the entry.
+      const env = { ...resolverEnv(home), PATH: "" }
+      await addProfile(profileInput({ password: "legacy-2fa" }), env)
+      await addProfile(
+        profileInput({ passwordPassEntry: "tg-sai/custody/telegram-2fa" }),
+        env,
+      )
+      const raw = await readFile(configPath(env), "utf8")
+      expect(raw).not.toContain("legacy-2fa")
+      expect(JSON.parse(raw).profiles[0]).not.toHaveProperty("password")
+
+      const resolved = await resolveTelegramCredentialSource("custody", env)
+      expect(resolved.password).toEqual({
+        kind: "pass",
+        entry: "tg-sai/custody/telegram-2fa",
+      })
+      // TELEGRAM_PASSWORD still overrides for one command.
+      expect(
+        (
+          await resolveTelegramCredentialSource("custody", {
+            ...env,
+            TELEGRAM_PASSWORD: "cli-2fa",
+          })
+        ).password,
+      ).toEqual({ kind: "value", value: "cli-2fa" })
+
+      const profile = (await readConfig(env)).profiles[0]!
+      expect(redactedProfile(profile)).toMatchObject({
+        password: "",
+        passwordPassEntry: "tg-sai/custody/telegram-2fa",
+        passwordStorage: "pass",
+      })
+    })
+  })
+
+  test("legacy plain-text profiles still resolve and report their storage", async () => {
+    await withTempHome(async (home) => {
+      const env = resolverEnv(home)
+      await addProfile(profileInput({ password: "legacy-2fa" }), env)
+      const profile = (await readConfig(env)).profiles[0]!
+      expect(redactedProfile(profile)).toMatchObject({
+        password: "[redacted]",
+        passwordPassEntry: null,
+        passwordStorage: "plain_text",
+      })
+      expect(
+        (await resolveTelegramCredentialSource("custody", env)).password,
+      ).toEqual({ kind: "value", value: "legacy-2fa" })
+    })
+  })
+
+  test("custody credentials ignore the password reference and need no pass", async () => {
+    await withTempHome(async (home) => {
+      const env = { ...resolverEnv(home), PATH: "" }
+      await addProfile(
+        profileInput({ passwordPassEntry: "tg-sai/custody/telegram-2fa" }),
+        env,
+      )
+      expect(await strictProfileCredentials("custody", 222, env)).toEqual({
+        apiId: 456,
+        apiHash: "custody-hash",
+        sessionString: "custody-session",
+      })
     })
   })
 })

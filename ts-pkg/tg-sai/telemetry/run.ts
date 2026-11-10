@@ -65,9 +65,11 @@ const COMMAND_WORDS = new Set([
   "floods",
   "health",
   "list",
+  "migrate-password",
   "ops",
   "prepare",
   "profile",
+  "promote-admin",
   "provision",
   "remove",
   "resolve",
@@ -85,6 +87,7 @@ const COMMAND_WORDS = new Set([
 
 /** Flags that take no value; kept as-is. */
 const BOOLEAN_FLAGS = new Set([
+  "--allow-non-team",
   "--dry-run",
   "--errors",
   "--help",
@@ -97,6 +100,8 @@ const BOOLEAN_FLAGS = new Set([
   "--offline",
   "--once",
   "--online",
+  "--password-prompt",
+  "--password-stdin",
   "--phone",
   "--qr",
   "--run",
@@ -139,7 +144,9 @@ const REDACTED_VALUE_FLAGS = new Set([
   "--method",
   "--name",
   "--out",
+  "--pass-entry",
   "--password",
+  "--password-pass-entry",
   "--profile",
   "--reason",
   "--request-id",

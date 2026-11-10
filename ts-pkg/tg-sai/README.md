@@ -31,7 +31,7 @@ tg-sai ops sai-bootstrap --file chats.txt --run    # apply
 ```
 
 `chats.txt` holds one chat ID per line. Ownership transfer needs your Telegram
-2FA password in `TELEGRAM_PASSWORD` or the saved profile. `--target-user`
+2FA password, which the saved profile keeps in a `pass` entry. `--target-user`
 picks a different owner.
 
 ## Telegram Rate Limits
@@ -108,8 +108,18 @@ out of `~/.tg-sai`.
 ```bash
 bun install
 just validate       # lint, tests, typecheck, npm dry run
-uv run pytest session_string_generator_test.py
+uv sync --frozen --group dev
+just py-test
+just py-typecheck
+just py-typecheck-report /tmp/tg-sai-python-types
 bun main.ts --help  # run from source
 ```
 
 Tests use a throwaway `TG_SAI_DIR`. Publish with `just publish`.
+
+The Python checks pin ty 0.0.100, target Python 3.10, and include the session
+generator, its tests, and shared reporting helpers. CI uses managed Python 3.13.
+`py-typecheck` preserves diagnostic failures; `py-typecheck-report` reports
+existing findings without blocking CI, while setup, configuration, and checker
+failures remain fatal. See [Telegram MCP development](../../mcp/telegram/README.md#develop-and-troubleshoot)
+for report artifacts and repository-wide commands.

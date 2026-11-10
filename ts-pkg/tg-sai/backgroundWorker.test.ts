@@ -166,6 +166,21 @@ describe("background drain", () => {
       expect(f.queue.summary().pending).toBe(0)
     }
   })
+  test("a 401 USER_DEACTIVATED for the calling account does not fail the row", async () => {
+    const f = fixture({
+      readError: Object.assign(new Error("x"), {
+        code: 401,
+        text: "USER_DEACTIVATED",
+      }),
+    })
+    f.enqueue([1])
+    expect(await f.drain()).toMatchObject({
+      state: "deferred",
+      error: "USER_DEACTIVATED",
+    })
+    expect(f.queue.summary().pending).toBe(1)
+    expect(f.calls.filter((c) => c.startsWith("add:"))).toEqual([])
+  })
   test("a row whose read keeps failing does not starve the others", async () => {
     // Chat -200 errors on every read; chat -100 rows are healthy.
     const f = fixture({

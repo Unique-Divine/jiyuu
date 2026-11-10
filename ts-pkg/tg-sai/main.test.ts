@@ -1,15 +1,28 @@
 import { describe, expect, test } from "bun:test"
 import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs"
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import {
   bareHelpTarget,
   createProgram,
+  getTelegramEnv,
   HOLD_EXIT_CODE,
   holdExitFor,
+  formatMemberIdentity,
+  parseDialogLimit,
+  promoteAdminTeamIds,
   shortDuration,
+  withPasswordRead,
 } from "./main"
+import type { TelegramEnv } from "./main"
+import { saiBot, USERS } from "./cfg"
+import { addProfile, configDir } from "./profiles"
+import {
+  getChatMember_botMemberNibiruInternal,
+  installFakePass,
+} from "./testdata"
 import { HoldAccountUnknownError, HoldError } from "./state/guard"
 import { HoldStoreUnavailableError } from "./state/holds"
 
@@ -172,6 +185,215 @@ describe("no JSONL run logs", () => {
       expect(existsSync(join(dir, "telemetry.db"))).toBe(true)
       const logs = join(dir, "logs")
       expect(existsSync(logs) ? readdirSync(logs) : []).toEqual([])
+    })
+  })
+})
+
+describe("ops sai-find --limit", () => {
+  test("parseDialogLimit accepts positive integers", () => {
+    expect(parseDialogLimit("500")).toBe(500)
+    expect(parseDialogLimit("1")).toBe(1)
+  })
+
+  test("parseDialogLimit rejects values that are not positive integers", () => {
+    for (const value of ["abc", "", "0", "-5", "2.5", "1e3", "Infinity"]) {
+      expect(() => parseDialogLimit(value)).toThrow(
+        "--limit must be a positive integer",
+      )
+    }
+  })
+
+  test("a non-numeric --limit fails before resolving credentials", () => {
+    withDir((dir) => {
+      const result = runCli(["ops", "sai-find", "--limit", "abc"], dir)
+      expect(result.exitCode).toBe(1)
+      expect(result.stderr).toContain("--limit must be a positive integer")
+      expect(result.stderr).not.toContain("Missing Telegram credentials")
+    })
+  })
+})
+
+describe("getTelegramEnv", () => {
+  /** Temp HOME holding a profile and a `~/.tg-sai/.env`; nothing real. */
+  async function withSources<T>(
+    profile: { name: string; complete: boolean; password: string },
+    fn: (env: Record<string, string>) => Promise<T>,
+  ): Promise<T> {
+    const home = await mkdtemp(join(tmpdir(), "tg-sai-env-test-"))
+    try {
+      const env = { HOME: home, TG_SAI_REPO_DIR: join(home, "no-repo") }
+      await addProfile(
+        {
+          name: profile.name,
+          apiId: profile.complete ? 456 : null,
+          apiHash: profile.complete ? "profile-hash" : "",
+          sessionString: profile.complete ? "profile-session" : "",
+          password: profile.password,
+          handle: profile.complete ? "profile_handle" : null,
+          userId: profile.complete ? 222 : null,
+          displayName: "",
+        },
+        env,
+      )
+      await mkdir(configDir(env), { recursive: true })
+      await writeFile(
+        join(configDir(env), ".env"),
+        [
+          "TELEGRAM_API_ID=123",
+          "TELEGRAM_API_HASH=dotenv-hash",
+          "TELEGRAM_SESSION_STRING=dotenv-session",
+        ].join("\n"),
+        "utf8",
+      )
+      return await fn(env)
+    } finally {
+      await rm(home, { recursive: true, force: true })
+    }
+  }
+
+  test("profile source carries the profile's password, name, and userId", async () => {
+    await withSources(
+      { name: "custody", complete: true, password: "custody-2fa" },
+      async (env) => {
+        expect(await getTelegramEnv(undefined, env)).toEqual({
+          apiId: 456,
+          apiHash: "profile-hash",
+          session: "profile-session",
+          password: { kind: "value", value: "custody-2fa" },
+          userId: 222,
+          profileName: "custody",
+        })
+      },
+    )
+  })
+
+  test("env source takes no profile password or label", async () => {
+    await withSources(
+      { name: "custody", complete: true, password: "custody-2fa" },
+      async (env) => {
+        expect(
+          await getTelegramEnv("custody", {
+            ...env,
+            TELEGRAM_API_ID: "999",
+            TELEGRAM_API_HASH: "env-hash",
+            TELEGRAM_SESSION_STRING: "env-session",
+          }),
+        ).toEqual({
+          apiId: 999,
+          apiHash: "env-hash",
+          session: "env-session",
+          password: null,
+          userId: null,
+          profileName: null,
+        })
+      },
+    )
+  })
+
+  test("known-file fallback takes no draft password or label", async () => {
+    await withSources(
+      { name: "draft", complete: false, password: "draft-2fa" },
+      async (env) => {
+        expect(await getTelegramEnv(undefined, env)).toEqual({
+          apiId: 123,
+          apiHash: "dotenv-hash",
+          session: "dotenv-session",
+          password: null,
+          userId: null,
+          profileName: null,
+        })
+      },
+    )
+  })
+})
+
+describe("withPasswordRead", () => {
+  const base: TelegramEnv = {
+    apiId: 1,
+    apiHash: "h",
+    session: "s",
+    password: null,
+    userId: null,
+    profileName: null,
+  }
+
+  test("reads a pass entry once and keeps other sources as they are", async () => {
+    const fakePass = installFakePass()
+    const store = join(fakePass.storeRoot, "store")
+    const saved = { PATH: process.env.PATH, PASSWORD_STORE_DIR: process.env.PASSWORD_STORE_DIR }
+    process.env.PATH = fakePass.path
+    process.env.PASSWORD_STORE_DIR = store
+    try {
+      await mkdir(join(store, "tg-sai", "c"), { recursive: true })
+      await writeFile(join(store, "tg-sai", "c", "telegram-2fa.gpg"), "fake-2fa\n")
+      const read = await withPasswordRead({
+        ...base,
+        password: { kind: "pass", entry: "tg-sai/c/telegram-2fa" },
+      })
+      expect(read.password).toEqual({ kind: "value", value: "fake-2fa" })
+      expect(await withPasswordRead(base)).toBe(base)
+      const value = { ...base, password: { kind: "value" as const, value: "v" } }
+      expect(await withPasswordRead(value)).toBe(value)
+      await expect(
+        withPasswordRead({ ...base, password: { kind: "pass", entry: "missing" } }),
+      ).rejects.toThrow("pass show failed for entry missing")
+    } finally {
+      process.env.PATH = saved.PATH
+      if (saved.PASSWORD_STORE_DIR === undefined) delete process.env.PASSWORD_STORE_DIR
+      else process.env.PASSWORD_STORE_DIR = saved.PASSWORD_STORE_DIR
+      await rm(join(fakePass.storeRoot, ".."), { recursive: true, force: true })
+    }
+  })
+})
+
+describe("promote-admin", () => {
+  test("is dry-run by default and has no ownership-transfer option", () => {
+    const command = createProgram().commands.find(
+      (c) => c.name() === "promote-admin",
+    )
+    expect(command).toBeDefined()
+    const flags = command?.options.map((o) => o.long) ?? []
+    expect(flags).toEqual([
+      "--profile",
+      "--chat",
+      "--target-user",
+      "--run",
+      "--allow-non-team",
+    ])
+    expect(command?.getOptionValue("run")).toBeUndefined()
+  })
+
+  test("bare promote-admin prints help that says it never adds", () => {
+    withDir((dir) => {
+      const result = runCli(["promote-admin"], dir)
+      expect(result.exitCode).toBe(0)
+      expect(result.stdout).toContain("Usage: tg-sai promote-admin")
+      const help = result.stdout.replace(/\s+/g, " ")
+      expect(help).toContain("never transfers ownership")
+      expect(help).toContain("not already a member, is a bot")
+      expect(help).toContain("must own the chat")
+    })
+  })
+})
+
+describe("promote-admin targeting", () => {
+  test("the team allowlist is the cfg.ts USERS accounts and no bot", () => {
+    expect(promoteAdminTeamIds.has(USERS.uniqueDivine.id)).toBe(true)
+    expect(promoteAdminTeamIds.has(USERS.corinne.id)).toBe(true)
+    expect(promoteAdminTeamIds.has(USERS.saiCustody.id)).toBe(true)
+    expect(promoteAdminTeamIds.has(saiBot.id)).toBe(false)
+  })
+
+  test("formatMemberIdentity prints the resolved user, not the argument", () => {
+    expect(formatMemberIdentity(null)).toEqual({
+      target_resolved: "none (not in chat)",
+    })
+    const member = getChatMember_botMemberNibiruInternal.data
+    expect(formatMemberIdentity(member)).toEqual({
+      target_id: String(saiBot.id),
+      target_username: `@${saiBot.handle}`,
+      target_display_name: JSON.stringify(member.user.displayName),
+      target_is_bot: "true",
     })
   })
 })
