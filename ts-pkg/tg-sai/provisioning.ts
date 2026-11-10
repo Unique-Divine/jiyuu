@@ -1397,9 +1397,9 @@ export async function provisionSetup(params: {
     // Other steps spend no add but keep the account busy in Deal Desk, so
     // runs that keep stopping there also end with an operator, after about
     // an hour. `stalledStep` is the furthest step a counted stall reached:
-    // only a run that stops beyond it made progress and starts over. A stop
-    // at an earlier step counts, a flood or hold has its own retry time and
-    // leaves the count alone, and so does a shutdown. `create_invitation`
+    // a transient stop beyond it starts over, one at or before it counts.
+    // A flood or hold has its own retry time and leaves the count alone, and
+    // so does a shutdown. `create_invitation`
     // runs at several points; its one place in `STEP_ORDER` only means a
     // stall there may count instead of resetting.
     const furthest = STEP_ORDER.indexOf(stalledStep as ProvisionStep)
@@ -1413,7 +1413,9 @@ export async function provisionSetup(params: {
         diagnostic = `${step}:${TRANSIENT_LIMIT}`
         retryAt = null
       }
-    } else if (beyond) {
+    } else if (!isTransientTelegramError(error)) {
+      // Any other stop (a link wait, a bot wait, an operator error) means
+      // Telegram answered every call up to it, so the stall is over.
       stalledRuns = 0
       stalledStep = undefined
     }
