@@ -8,8 +8,9 @@ transfers, paginated reads, and cache warming still absorb short waits.
 A request with an outer timeout must not sleep inside it: the timeout would
 cancel the sleep and the caller would see a generic timeout instead of the
 wait. ``run_limited`` therefore lowers the threshold to 0 for the requests it
-runs, through a context variable that only the calling task and its children
-see. Every wait inside raises, becomes a ``RequestLimit``, and is recorded as
+runs, through a context variable that only the calling task and tasks it
+spawns see. ``PolicyTelegramClient.connect`` clears the variable, so
+Telethon's background tasks keep the client default. Every wait inside raises, becomes a ``RequestLimit``, and is recorded as
 a cooldown that refuses matching requests until it passes. Nothing here
 reconnects: a wait is an API limit, not a transport failure.
 
@@ -74,6 +75,20 @@ class PolicyTelegramClient(TelegramClient):
     @flood_sleep_threshold.setter
     def flood_sleep_threshold(self, value):
         self._flood_sleep_threshold = min(value or 0, 24 * 60 * 60)
+
+    async def connect(self) -> None:
+        """Connect with the override cleared.
+
+        ``connect`` starts long-lived update and keepalive tasks, which copy
+        the current context. A reconnect inside a bounded request (for
+        example ``_switch_dc`` after a migrate error) must not hand them
+        threshold 0 for the life of the client.
+        """
+        token = _flood_sleep_override.set(None)
+        try:
+            await super().connect()
+        finally:
+            _flood_sleep_override.reset(token)
 
 
 @contextlib.contextmanager

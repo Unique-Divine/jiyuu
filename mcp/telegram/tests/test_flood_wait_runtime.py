@@ -406,3 +406,28 @@ async def test_short_wait_on_profile_read_reaches_caller_without_reconnect(
 
     assert telethon_sleeps == []
     assert reconnects == []
+
+
+@pytest.mark.asyncio
+async def test_connect_inside_bounded_request_starts_tasks_with_default_threshold(
+    monkeypatch,
+):
+    client = request_policy.PolicyTelegramClient(
+        StringSession(), 12345, "hash", flood_sleep_threshold=10
+    )
+    seen = []
+
+    async def base_connect(self):
+        # Stands in for Telethon starting _update_loop and _keepalive_loop.
+        async def background():
+            seen.append(self.flood_sleep_threshold)
+
+        await asyncio.get_running_loop().create_task(background())
+
+    monkeypatch.setattr(request_policy.TelegramClient, "connect", base_connect)
+
+    with request_policy.raise_flood_waits():
+        await client.connect()
+        assert client.flood_sleep_threshold == 0
+
+    assert seen == [10]
