@@ -20,7 +20,10 @@ import {
 } from "../mtcuteAdapter"
 import { HoldAccountUnknownError, HoldError } from "../state/guard"
 import { HoldStore } from "../state/holds"
-import { PROVISION_WRITE_PARAMS } from "../provisioningRuntime"
+import {
+  PROVISION_READ_PARAMS,
+  PROVISION_WRITE_PARAMS,
+} from "../provisioningRuntime"
 import { stateDbPath } from "../state/db"
 import {
   openTelemetryDb,
@@ -570,6 +573,17 @@ describe("provisioning write calls", () => {
     expect(transport).toHaveLength(1)
     expect(result).toMatchObject({ errorCode: -503 })
   })
+  test("a read resends a server error at most three times", async () => {
+    const { nm, transport } = plainNetwork(
+      [serverError, serverError, serverError, serverError, { _: "updates" }],
+      7,
+    )
+    const result = await nm
+      .call({ _: "channels.getParticipant" }, PROVISION_READ_PARAMS)
+      .catch((e: unknown) => e)
+    expect(transport).toHaveLength(1 + PROVISION_READ_PARAMS.maxRetryCount)
+    expect(result).toMatchObject({ errorCode: -503 })
+  }, 10_000)
   test("without the limit, mtcute resends it", async () => {
     const { nm, transport } = plainNetwork([serverError, { _: "updates" }], 7)
     expect(await nm.call(INVITE, { floodSleepThreshold: 0 })).toEqual({

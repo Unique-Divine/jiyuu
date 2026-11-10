@@ -17,6 +17,7 @@ import {
   isTransientTelegramError,
   MEMBER_NOT_VISIBLE,
   MAX_BOT_ADDS,
+  MAX_STALLED_RUNS,
   MAX_TRANSIENT_RETRIES,
   MEMBER_NOT_VISIBLE_RETRY_MS,
   MEMBER_RECHECK_MS,
@@ -1846,7 +1847,7 @@ describe("transient failure paths", () => {
     expect(f.local?.transientRetries).toBe(MAX_TRANSIENT_RETRIES)
   })
 
-  test("reads that time out never count toward the limit", async () => {
+  test("reads that time out never count toward the add limit", async () => {
     const f = fixture()
     resumed(f)
     let reads = 0
@@ -1909,6 +1910,104 @@ describe("transient failure paths", () => {
     expect(f.local?.transientRetries ?? 0).toBe(0)
   })
 
+  test("a read that keeps failing stops for an operator after the bound", async () => {
+    const f = fixture()
+    resumed(f)
+    let reads = 0
+    f.telegram.member = async () => {
+      reads++
+      throw new MtTimeoutError(30_000)
+    }
+    for (let tick = 1; tick <= MAX_STALLED_RUNS + 2; tick++) {
+      if (tick > 1 && !f.setup.retryAt) break
+      await expect(f.run()).rejects.toThrow("incomplete")
+    }
+    expect(reads).toBe(MAX_STALLED_RUNS)
+    expect(errorOf(f)).toBe(`read_member:${TRANSIENT_LIMIT}`)
+    expect(f.setup.retryAt).toBeNull()
+  })
+
+  test("a stalled run that gets further starts the count again", async () => {
+    const f = fixture()
+    resumed(f)
+    f.members.set(21, { role: "member", rights: {} })
+    f.members.set(22, { role: "member", rights: {} })
+    f.members.set(PROVISIONING_BOT_ID, { role: "member", rights: {} })
+    const member = f.telegram.member
+    let failRead = true
+    f.telegram.member = async (chat, id) => {
+      if (failRead) throw new MtTimeoutError(30_000)
+      return member(chat, id)
+    }
+    f.telegram.promote = async () => {
+      throw new MtTimeoutError(30_000)
+    }
+    for (let tick = 0; tick < MAX_STALLED_RUNS - 1; tick++)
+      await expect(f.run()).rejects.toThrow("incomplete")
+    expect(f.local?.stalledRuns).toBe(MAX_STALLED_RUNS - 1)
+    // Reads recover; promotion now times out, a later step.
+    failRead = false
+    await expect(f.run()).rejects.toThrow("incomplete")
+    expect(errorOf(f)).toBe(`promote_admin:${TELEGRAM_TRANSIENT}`)
+    expect(f.local?.stalledRuns).toBe(1)
+    expect(f.setup.retryAt).toBeTruthy()
+  })
+
+  test("shutdowns do not count toward the read bound", async () => {
+    const f = fixture()
+    resumed(f)
+    const controller = new AbortController()
+    controller.abort()
+    f.telegram.verifyMarker = async () => {
+      throw new MtcuteError("Client is destroyed")
+    }
+    for (let tick = 0; tick < MAX_STALLED_RUNS + 1; tick++)
+      await expect(
+        provisionSetup({
+          setup: f.setup,
+          cloud: f.cloud,
+          journal: f.journal,
+          telegram: f.telegram,
+          workerId: "worker-one",
+          background: f.background,
+          signal: controller.signal,
+        }),
+      ).rejects.toThrow("incomplete")
+    expect(errorOf(f)).toBe(`verify_marker:${TELEGRAM_TRANSIENT}`)
+    expect(f.setup.retryAt).toBeTruthy()
+  })
+
+  test("after shutdown no one is marked possibly added", async () => {
+    const f = fixture()
+    resumed(f)
+    let sent = 0
+    f.telegram.add = async () => {
+      sent++
+    }
+    const controller = new AbortController()
+    // Shutdown lands after the reads, just before the adds.
+    const member = f.telegram.member
+    f.telegram.member = async (chat, id) => {
+      if (id === PROVISIONING_BOT_ID) controller.abort()
+      return member(chat, id)
+    }
+    await expect(
+      provisionSetup({
+        setup: f.setup,
+        cloud: f.cloud,
+        journal: f.journal,
+        telegram: f.telegram,
+        workerId: "worker-one",
+        background: f.background,
+        signal: controller.signal,
+      }),
+    ).rejects.toThrow("incomplete")
+    expect(sent).toBe(0)
+    expect(f.local?.addedIds).toBeUndefined()
+    expect(f.local?.botAdds).toBeUndefined()
+    expect(f.setup.retryAt).toBeTruthy()
+  })
+
   test("a run that gets past the adds resets the transient count", async () => {
     const f = fixture()
     withLinks(f)
@@ -1965,6 +2064,9 @@ describe("transient failure paths", () => {
     await expect(f.run()).rejects.toThrow("incomplete")
     expect(errorOf(f)).toBe("add_member:FLOOD_WAIT_60")
     expect(f.setup.retryAt).toBeTruthy()
+    // The flood refused the batch for certain: nobody is possibly added.
+    expect(f.local?.addedIds).toBeUndefined()
+    expect(f.local?.botAdds).toBeUndefined()
   })
 
   test("an add that timed out is never sent again; the person gets a link", async () => {

@@ -682,8 +682,8 @@ added once more.
 | Error | Meaning | Retry |
 | --- | --- | --- |
 | `FLOOD_WAIT_N`, `PEER_FLOOD`, `TG_SAI_HOLD_N` | Account flood limit or saved hold | When the hold ends |
-| `TG_SAI_TRANSIENT` | Timeout, dropped connection, Telegram server error, worker shutdown | 5 min; at most 3 add-call failures before a run gets past the adds |
-| `TG_SAI_TRANSIENT_LIMIT` | Third add-call failure of this kind with no run past the adds in between | Operator |
+| `TG_SAI_TRANSIENT` | Timeout, dropped connection, Telegram server error, worker shutdown | 5 min; at most 3 add-call failures, or 12 runs stopped at another step |
+| `TG_SAI_TRANSIENT_LIMIT` | `add_member:` after the third add-call failure; any other step after 12 runs in a row stopped there | Operator |
 | `TG_SAI_HOLD_STATE_UNAVAILABLE`, `TG_SAI_HOLD_ACCOUNT_UNKNOWN`, `TG_SAI_QUEUE_UNAVAILABLE` | Local `state.db` or session account not readable | 5 min |
 | `TG_SAI_MEMBER_NOT_VISIBLE` | Added or promoted, but not shown in the chat yet; the person gets an `added_not_visible` link | 15 min |
 | `TG_SAI_BOT_NOT_VISIBLE` | Bot added but not shown yet | 15 min, one re-add |
@@ -703,21 +703,33 @@ after a server error (`PROVISION_WRITE_PARAMS`); the error reaches these
 counters instead. A background add cut off by a worker restart also counts
 toward today's adds, but not as an attempt.
 
-Only add calls count toward `TG_SAI_TRANSIENT_LIMIT`. Timeouts on reads,
-approvals, marker checks, and promotions spend no add and retry without a
-limit. A run cut short by worker shutdown does not count. The count resets
-once a run gets past the adds.
+Two counts lead to `TG_SAI_TRANSIENT_LIMIT`:
 
-Both limits are counters in the receipt (`botAdds`, `transientRetries`).
-The worker never resets them, and Deal Desk recovery does not touch the
-receipt. To recover:
+- Add calls (`transientRetries`): the third transient failure stops the
+  setup. The count resets once a run gets past the adds.
+- Every other step (`stalledRuns`): reads, approvals, marker checks,
+  promotions, the final listing, and link creation spend no add, but each
+  retry keeps the account busy in Deal Desk and pauses the background
+  queue. Twelve runs in a row that stop at the same or an earlier step,
+  about an hour, stop the setup. A run that gets further starts the count
+  again, and any other outcome clears it.
+
+A run cut short by worker shutdown counts toward neither. Reads and
+promotions resend after a Telegram server error at most three times and
+give up after 30 s (`PROVISION_READ_PARAMS`), so a persistent server error
+reaches these counts instead of looping inside one call.
+
+These limits are counters in the receipt (`botAdds`, `transientRetries`,
+`stalledRuns`). The worker resets the transient ones only as described
+above, and Deal Desk recovery does not touch the receipt. To recover:
 
 1. `TG_SAI_BOT_ADDS_EXHAUSTED`: check the chat with
    `tg-sai audit --chat <chat-id> --target-user 8983431101`. If the bot is
    absent, have a team admin add it, or decide to spend one more custody add
    by clearing the counter below. Then run `chat-setups recover`.
 2. `TG_SAI_TRANSIENT_LIMIT`: check that Telegram and the worker host are
-   healthy, clear `transientRetries`, then run `chat-setups recover`.
+   healthy. For `add_member:` clear `transientRetries`; for any other step
+   clear `stalledRuns` and `stalledStep`. Then run `chat-setups recover`.
 
 Clear a counter with the worker stopped. `$f` is the receipt path from the
 lookup above:

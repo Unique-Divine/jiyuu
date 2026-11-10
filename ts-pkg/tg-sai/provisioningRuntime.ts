@@ -48,6 +48,18 @@ export const PROVISION_WRITE_PARAMS = {
   maxRetryCount: 0,
 } as const
 
+/**
+ * Call options for provisioning reads and promotion. They keep mtcute's
+ * flood sleep, but resend after a Telegram server error at most three
+ * times and give up after 30 s, so a persistent 5xx or timeout reaches
+ * provisioning as `TG_SAI_TRANSIENT` instead of looping inside one call
+ * while the account lock is held.
+ */
+export const PROVISION_READ_PARAMS = {
+  maxRetryCount: 3,
+  timeout: 30_000,
+} as const
+
 /** Fetch completion links without creating invitations or sending messages. */
 export async function readProvisioningLinks(
   chatId: number,
@@ -319,6 +331,7 @@ export async function withProvisionTelegram<T>(
     signal?.addEventListener("abort", destroy, { once: true })
     try {
       signal?.throwIfAborted()
+      const readClient = client.withParams(PROVISION_READ_PARAMS)
       if ((await client.getMe()).id !== request.expectedUserId)
         throw new Error("Custody account identity mismatch")
       const bot = await client.getUser(saiBot.handle)
@@ -329,14 +342,14 @@ export async function withProvisionTelegram<T>(
         userId: number,
       ): Promise<Member> => {
         return normalizeProvisioningMember(
-          await getChatMember(client, { chatId, userId }),
+          await getChatMember(readClient, { chatId, userId }),
         )
       }
       const verifyMarker = async (
         chatId: number,
         marker: string,
       ): Promise<boolean> => {
-        const chat = await client.getFullChat(chatId)
+        const chat = await readClient.getFullChat(chatId)
         return (
           chat.chatType === "supergroup" &&
           !chat.isForum &&
@@ -354,7 +367,7 @@ export async function withProvisionTelegram<T>(
       const adapter: TelegramProvisioner = {
         self: async () => (await client.getMe()).id,
         resolve: (peer) =>
-          resolveProvisioningPeer((value) => client.getUser(value), peer),
+          resolveProvisioningPeer((value) => readClient.getUser(value), peer),
         create: async (title, marker) =>
           (
             await createSupergroup(writeClient, {
@@ -428,11 +441,11 @@ export async function withProvisionTelegram<T>(
           promoteTargetAdmin(
             client,
             { chatId, targetPeer: userId, rights },
-            {},
+            PROVISION_READ_PARAMS,
           ),
         members: async (chatId) => {
           // Deal chats stay far below Telegram's 200-member listing cap.
-          const listed = await getChatMembers(client, chatId, {
+          const listed = await getChatMembers(readClient, chatId, {
             limit: 200,
             type: "recent",
           })
@@ -441,7 +454,7 @@ export async function withProvisionTelegram<T>(
         verifyMarker,
         candidates: async (marker) => {
           const candidates: number[] = []
-          for await (const dialog of iterDialogs(client, {
+          for await (const dialog of iterDialogs(readClient, {
             limit: 200,
             archived: "keep",
           })) {

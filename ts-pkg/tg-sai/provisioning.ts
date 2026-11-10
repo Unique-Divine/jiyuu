@@ -118,6 +118,12 @@ export interface JournalRecord {
    * that finds one absent gives them a link, never another add.
    */
   addedIds?: number[]
+  /**
+   * Runs in a row that stopped on a transient error at a step that spends
+   * no add, and that step; bounds how long such a setup holds the account.
+   */
+  stalledRuns?: number
+  stalledStep?: string
 }
 export interface PendingInvitation {
   userId: string
@@ -394,6 +400,25 @@ type ProvisionStep =
   | "enqueue_background"
   | "save_ready"
 
+/** Steps in the order a run reaches them, to tell when a run got further. */
+const STEP_ORDER: readonly ProvisionStep[] = [
+  "verify_marker",
+  "save_configuring",
+  "read_member",
+  "approve_join",
+  "add_member",
+  "verify_added_member",
+  "create_invitation",
+  "save_invitation",
+  "read_admin",
+  "promote_admin",
+  "read_bot",
+  "promote_bot",
+  "audit_membership",
+  "enqueue_background",
+  "save_ready",
+]
+
 /** Fixed operation names add context without copying Telegram response bodies. */
 export function safeProvisionDiagnostic(
   error: unknown,
@@ -518,6 +543,13 @@ export const MAX_BOT_ADDS = 2
 export const TRANSIENT_LIMIT = "TG_SAI_TRANSIENT_LIMIT"
 /** Transient failures a setup may hit before it stops for an operator. */
 export const MAX_TRANSIENT_RETRIES = 3
+/**
+ * Runs in a row a setup may stop on a transient error at a step that spends
+ * no add (a read, approval, promotion, or link) before it stops for an
+ * operator with `<step>:TG_SAI_TRANSIENT_LIMIT`: about an hour of 5-minute
+ * retries.
+ */
+export const MAX_STALLED_RUNS = 12
 /**
  * Code for a setup that waits only for required people whose add was
  * refused for privacy and who got a controlled invitation instead. Retries
@@ -719,6 +751,8 @@ export async function provisionSetup(params: {
   let botAdds = local?.botAdds ?? 0
   let transientRetries = local?.transientRetries ?? 0
   let addedIds = new Set(local?.addedIds ?? [])
+  let stalledRuns = local?.stalledRuns ?? 0
+  let stalledStep = local?.stalledStep
   interface Counts {
     botAdds: number
     transientRetries: number
@@ -732,6 +766,7 @@ export async function provisionSetup(params: {
       ...(c.botAdds ? { botAdds: c.botAdds } : {}),
       ...(c.transientRetries ? { transientRetries: c.transientRetries } : {}),
       ...(c.addedIds.size ? { addedIds: [...c.addedIds] } : {}),
+      ...(stalledRuns ? { stalledRuns, stalledStep } : {}),
     }
   }
   const workerId = local?.workerId ?? params.workerId
@@ -963,6 +998,10 @@ export async function provisionSetup(params: {
     // it can never lead to a second add. Only a known refusal of the whole
     // call (a flood, a hold, or a per-user 400) is taken back.
     const sending = async (userIds: number[]): Promise<void> => {
+      // After shutdown the client is destroyed and no call leaves the
+      // process, so nobody may be marked possibly added.
+      if (params.signal?.aborted)
+        throw new DOMException("Worker is shutting down", "AbortError")
       const people = userIds.filter((id) => id !== PROVISIONING_BOT_ID)
       await commit({
         botAdds: botAdds + (userIds.length - people.length),
@@ -970,17 +1009,22 @@ export async function provisionSetup(params: {
       })
     }
     /**
-     * Takes back a refused call. If that write fails, the journal still
-     * says "possibly added", the safe side, and the caller rethrows the
-     * Telegram error so its retry time is kept.
+     * Takes back a call Telegram refused for certain. The refusal is a
+     * fact, so it is kept in memory even if this write fails: the run's
+     * final save journals it. The caller rethrows the Telegram error so its
+     * retry time is kept.
      */
     const notAdded = async (userIds: number[]): Promise<void> => {
       if (!userIds.length) return
       const people = new Set(userIds.filter((id) => id !== PROVISIONING_BOT_ID))
-      await commit({
+      const next = {
         botAdds: botAdds - (userIds.length - people.size),
         addedIds: new Set([...addedIds].filter((id) => !people.has(id))),
-      }).catch(() => {})
+      }
+      await commit(next).catch(() => {
+        botAdds = next.botAdds
+        addedIds = next.addedIds
+      })
     }
     const refusedWhole = (error: unknown): boolean =>
       isPerUserAddError(error) ||
@@ -1326,14 +1370,31 @@ export async function provisionSetup(params: {
     // custody budget. Reads, approvals, and promotions spend no add, and a
     // run cut short by worker shutdown is not Telegram's failure. The count
     // resets once a run gets past the adds.
+    const transient = isTransientTelegramError(error) && !params.signal?.aborted
     if (
       step === "add_member" &&
-      isTransientTelegramError(error) &&
-      !params.signal?.aborted &&
+      transient &&
       ++transientRetries >= MAX_TRANSIENT_RETRIES
     ) {
       diagnostic = `${step}:${TRANSIENT_LIMIT}`
       retryAt = null
+    }
+    // Other steps spend no add but keep the account busy in Deal Desk, so
+    // runs that keep stopping there also end with an operator, after about
+    // an hour. A run that got further starts the count again; a shutdown
+    // leaves it alone.
+    if (transient && step !== "add_member") {
+      const last = STEP_ORDER.indexOf(stalledStep as ProvisionStep)
+      const further = last >= 0 && STEP_ORDER.indexOf(step) > last
+      stalledRuns = further ? 1 : stalledRuns + 1
+      stalledStep = step
+      if (stalledRuns >= MAX_STALLED_RUNS) {
+        diagnostic = `${step}:${TRANSIENT_LIMIT}`
+        retryAt = null
+      }
+    } else if (!params.signal?.aborted) {
+      stalledRuns = 0
+      stalledStep = undefined
     }
     await save({
       state: "incomplete",
