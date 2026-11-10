@@ -792,6 +792,65 @@ async function controlledInvitation(
   return created
 }
 
+/** A `creation_unknown` candidate, with its title for the operator. */
+export interface CandidateChat {
+  chatId: number
+  /** Null when the chat could not be read. */
+  title: string | null
+  /** A chat created just now still has the setup's title. */
+  titleMatches: boolean
+}
+async function unknownCreation(
+  setup: Setup,
+  telegram: TelegramProvisioner,
+  candidates: number[],
+): Promise<{
+  state: "creation_unknown"
+  candidates: number[]
+  candidateChats?: CandidateChat[]
+}> {
+  if (!telegram.chatInfo) return { state: "creation_unknown", candidates }
+  const candidateChats: CandidateChat[] = []
+  for (const chatId of candidates) {
+    let title: string | null = null
+    try {
+      title = (await telegram.chatInfo(chatId)).title
+    } catch {
+      // Listing is informational; `resolve` reads the chat again.
+    }
+    candidateChats.push({ chatId, title, titleMatches: title === setup.title })
+  }
+  return { state: "creation_unknown", candidates, candidateChats }
+}
+/**
+ * Checks a chat an operator wants to adopt for a `creation_unknown` setup:
+ * the custody account created it and its description names the setup
+ * (`verifyMarker`), and its title still equals the setup title. A chat
+ * created just now has an unedited title, so a mismatch suggests a copied
+ * description; `allowTitleMismatch` overrides only that check. The ready
+ * re-check does not compare titles, since admins may rename a live chat.
+ */
+export async function verifyResolutionChat(
+  telegram: Pick<TelegramProvisioner, "verifyMarker" | "chatInfo">,
+  setup: Setup,
+  chatId: number,
+  allowTitleMismatch = false,
+): Promise<{ title: string }> {
+  if (!(await telegram.verifyMarker(chatId, creationMarker(setup))))
+    throw new Error(
+      "Resolution chat does not match custody owner and request marker",
+    )
+  if (!telegram.chatInfo)
+    throw new Error("Telegram adapter cannot read the chat title")
+  const { title } = await telegram.chatInfo(chatId)
+  if (title !== setup.title && !allowTitleMismatch)
+    throw new Error(
+      `Resolution chat title ${JSON.stringify(title)} does not equal the ` +
+        "setup title; pass --allow-title-mismatch only with evidence that " +
+        "this chat is the one created for the setup",
+    )
+  return { title }
+}
 /**
  * The cloud is authoritative. The journal only recovers a result not yet
  * acknowledged by cloud. Requester first: the job adds required participants
@@ -817,7 +876,14 @@ export async function provisionSetup(params: {
   sleep?: (ms: number) => Promise<void>
   /** Worker shutdown; a run it cuts short is not a transient failure. */
   signal?: AbortSignal
-}): Promise<Setup | { state: "creation_unknown"; candidates: number[] }> {
+}): Promise<
+  | Setup
+  | {
+      state: "creation_unknown"
+      candidates: number[]
+      candidateChats?: CandidateChat[]
+    }
+> {
   const { telegram, cloud, journal } = params
   let setup = params.setup
   const fingerprint = requestFingerprint(setup)
@@ -888,15 +954,12 @@ export async function provisionSetup(params: {
       })
     }
     // Even a unique candidate is presented for explicit adoption, never silently trusted.
-    return {
-      state: "creation_unknown",
-      candidates: [
-        ...new Set([
-          ...(local?.chatId ? [local.chatId] : []),
-          ...(await telegram.candidates(creationMarker(setup))),
-        ]),
-      ],
-    }
+    return unknownCreation(setup, telegram, [
+      ...new Set([
+        ...(local?.chatId ? [local.chatId] : []),
+        ...(await telegram.candidates(creationMarker(setup))),
+      ]),
+    ])
   }
   await journal.write(setup.requestId, {
     fingerprint,
@@ -931,10 +994,11 @@ export async function provisionSetup(params: {
         state: "creation_unknown",
         binding: setup.binding,
       })
-    return {
-      state: "creation_unknown",
-      candidates: await telegram.candidates(creationMarker(setup)),
-    }
+    return unknownCreation(
+      setup,
+      telegram,
+      await telegram.candidates(creationMarker(setup)),
+    )
   }
   const save = async (progress: Progress): Promise<void> => {
     await journal.write(setup.requestId, {

@@ -9,10 +9,10 @@ import {
 } from "./backgroundWorker"
 import type { BackgroundQueue } from "./state/background"
 import {
-  creationMarker,
   provisionSetup,
   requestFingerprint,
   validateRequest,
+  verifyResolutionChat,
 } from "./provisioning"
 import type { ProvisionRequest } from "./provisioning"
 import { CliProvisionCloud } from "./provisioningCloud"
@@ -135,12 +135,17 @@ export function addProvisionCommands(program: Command): void {
       "Operator evidence for explicit adoption",
     )
     .option("--run", "Verify and adopt the exact group in cloud state")
+    .option(
+      "--allow-title-mismatch",
+      "Adopt even when the chat title differs from the setup title",
+    )
     .action(
       async (options: {
         requestId: string
         chat: number
         reason: string
         run?: boolean
+        allowTitleMismatch?: boolean
       }) => {
         const cloud = new CliProvisionCloud()
         const setup = await cloud.view(options.requestId)
@@ -157,16 +162,18 @@ export function addProvisionCommands(program: Command): void {
           throw new Error("Only an unresolved creation can be adopted")
         print(
           await withProvisionTelegram(setup, async (telegram) => {
-            if (
-              !(await telegram.verifyMarker(
-                options.chat,
-                creationMarker(setup),
-              ))
+            const { title } = await verifyResolutionChat(
+              telegram,
+              setup,
+              options.chat,
+              Boolean(options.allowTitleMismatch),
             )
-              throw new Error(
-                "Resolution chat does not match custody owner and request marker",
-              )
-            return cloud.resolve(setup.requestId, options.chat, options.reason)
+            const resolved = await cloud.resolve(
+              setup.requestId,
+              options.chat,
+              options.reason,
+            )
+            return { ...resolved, chatTitle: title }
           }, cliTelemetry()),
         )
       },
