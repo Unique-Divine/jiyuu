@@ -549,14 +549,24 @@ export async function promoteTargetAdmin(
 }
 
 /**
+ * Parameters for `promoteExistingMember`.
+ */
+export interface PromoteExistingMemberParams extends PromoteTargetParams {
+  /** Planned target user ID; the fresh read must resolve to this user. */
+  expectedUserId?: number
+}
+
+/**
  * Promotes a peer only if it is already a chat member. Telegram adds a
- * non-member as a side effect of promotion, so this re-reads the target's
- * membership right before the write and throws when the peer is absent,
- * left, banned, or no longer a member.
+ * non-member as a side effect of promotion, so this reads the target's
+ * membership again just before the write and throws when the peer is absent,
+ * left, banned, no longer a member, or a different user than planned. About
+ * one RPC still separates that read from `channels.editAdmin`; Telegram has
+ * no promote-without-add call to close the gap.
  */
 export async function promoteExistingMember(
   client: TelegramClient,
-  params: PromoteTargetParams,
+  params: PromoteExistingMemberParams,
 ): Promise<void> {
   const member = await getTargetChatMember(client, {
     chatId: params.chatId,
@@ -565,8 +575,21 @@ export async function promoteExistingMember(
   assertPresentMember(
     member ? normalizeChatMember(member) : null,
     params.targetPeer,
+    params.expectedUserId,
   )
-  await promoteTargetAdmin(client, params)
+  const { expectedUserId: _expected, ...promote } = params
+  await promoteTargetAdmin(client, promote)
+}
+
+/**
+ * Reads a chat's display title (the title for groups and channels).
+ */
+export async function fetchChatTitle(
+  client: TelegramClient,
+  chatId: number | string,
+): Promise<string> {
+  const chat = await client.getChat(chatId)
+  return chat.displayName
 }
 
 /**

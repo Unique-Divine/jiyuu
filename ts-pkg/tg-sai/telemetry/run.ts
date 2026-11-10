@@ -87,6 +87,7 @@ const COMMAND_WORDS = new Set([
 
 /** Flags that take no value; kept as-is. */
 const BOOLEAN_FLAGS = new Set([
+  "--allow-non-team",
   "--dry-run",
   "--errors",
   "--help",

@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test"
-import type { ChatAuditInput, ChatMemberData } from "./adminAudit"
+import type {
+  ChatAuditInput,
+  ChatMemberData,
+  PromoteOnlyOptions,
+} from "./adminAudit"
 import {
   assertPresentMember,
   canActorPromoteAdmins,
@@ -19,8 +23,10 @@ import {
   adminCheck_ownerSessionTargetUserAbsent,
   adminCheck_ownerSessionTargetUserAdmin,
   adminCheck_ownerSessionTargetUserMember,
+  corinneAntoniaUserId,
   exampleChatId,
   getChatMember_asMember,
+  getChatMember_botMemberNibiruInternal,
   getChatMember_targetAsMember,
   getMe,
   uniqueDivineUserId,
@@ -315,9 +321,17 @@ describe("isPresentMember", () => {
   })
 })
 
+const team: PromoteOnlyOptions = {
+  allowedUserIds: new Set([uniqueDivineUserId, corinneAntoniaUserId]),
+}
+
+function ownerWith(target: ChatMemberData | null): ChatAuditInput {
+  return auditInput(memberWith({ status: "creator" }), target)
+}
+
 describe("planPromoteOnly", () => {
-  test("promotes an existing member when the actor is owner", () => {
-    const plan = planPromoteOnly(adminCheck_asOwnerWithTargetMember.data)
+  test("promotes an existing team member when the actor is owner", () => {
+    const plan = planPromoteOnly(adminCheck_asOwnerWithTargetMember.data, team)
 
     expect(plan.actorRole).toBe("creator")
     expect(plan.targetIsMember).toBe(true)
@@ -328,40 +342,71 @@ describe("planPromoteOnly", () => {
   test("refuses a target that is not in the chat and never proposes add", () => {
     const plan = planPromoteOnly(
       adminCheck_ownerSessionTargetUserAbsent.data,
+      team,
     )
 
-    expect(plan.actorCanApply).toBe(true)
+    expect(plan.actorIsOwner).toBe(true)
     expect(plan.targetRole).toBe("not_present")
     expect(plan.canPromote).toBe(false)
     expect(plan.proposedActions).toEqual(["refuse: target user not a member"])
   })
 
   test("refuses a target that left the chat", () => {
-    const plan = planPromoteOnly(
-      auditInput(
-        memberWith({ status: "creator" }),
-        memberWith({ status: "left", isMember: false }),
-      ),
-    )
+    const left = memberWith({ status: "left", isMember: false })
+    const plan = planPromoteOnly(ownerWith(left), { allowedUserIds: null })
 
     expect(plan.proposedActions).toEqual(["refuse: target user not a member"])
   })
 
+  test("refuses a bot member", () => {
+    const plan = planPromoteOnly(
+      ownerWith(getChatMember_botMemberNibiruInternal.data),
+      { allowedUserIds: null },
+    )
+
+    expect(plan.targetIsBot).toBe(true)
+    expect(plan.proposedActions).toEqual(["refuse: target user is a bot"])
+  })
+
+  test("refuses a member outside the team allowlist", () => {
+    const outsider = memberWith({
+      status: "member",
+      user: { ...getChatMember_asMember.data.user, id: 424242 },
+    })
+    const plan = planPromoteOnly(ownerWith(outsider), team)
+
+    expect(plan.targetIsAllowed).toBe(false)
+    expect(plan.proposedActions).toEqual([
+      "refuse: target user not on the team allowlist",
+    ])
+    expect(
+      planPromoteOnly(ownerWith(outsider), { allowedUserIds: null })
+        .proposedActions,
+    ).toEqual(["promote target user admin"])
+  })
+
   test("is a noop for a target that is already admin", () => {
-    const plan = planPromoteOnly(adminCheck_asOwnerWithTargetAdmin.data)
+    const plan = planPromoteOnly(adminCheck_asOwnerWithTargetAdmin.data, team)
 
     expect(plan.canPromote).toBe(false)
     expect(plan.proposedActions).toEqual(["noop: target user already admin"])
   })
 
-  test("skips when the actor cannot promote admins", () => {
-    const plan = planPromoteOnly(adminCheck_asMember.data)
+  test("refuses a non-owner actor, even an admin with addAdmins", () => {
+    const admin = memberWith({
+      status: "admin",
+      permissions: { addAdmins: true },
+    })
+    const target = adminCheck_asOwnerWithTargetMember.data.target
+    const plan = planPromoteOnly(auditInput(admin, target), team)
 
-    expect(plan.actorCanApply).toBe(false)
-    expect(plan.canPromote).toBe(false)
+    expect(plan.actorIsOwner).toBe(false)
     expect(plan.proposedActions).toEqual([
-      "skip: actor lacks owner/admin rights",
+      "refuse: actor is not the chat owner",
     ])
+    expect(
+      planPromoteOnly(adminCheck_asMember.data, team).proposedActions,
+    ).toEqual(["refuse: actor is not the chat owner"])
   })
 
   test("never proposes add or transfer actions", () => {
@@ -373,9 +418,11 @@ describe("planPromoteOnly", () => {
       adminCheck_botSessionOwnerTargetAbsent.data,
     ]
     for (const input of inputs) {
-      for (const action of planPromoteOnly(input).proposedActions) {
-        expect(action).not.toContain("add target")
-        expect(action).not.toContain("transfer")
+      for (const options of [team, { allowedUserIds: null }]) {
+        for (const action of planPromoteOnly(input, options).proposedActions) {
+          expect(action).not.toContain("add target")
+          expect(action).not.toContain("transfer")
+        }
       }
     }
   })
@@ -389,5 +436,15 @@ describe("assertPresentMember", () => {
     expect(() => assertPresentMember(null, "@absent")).toThrow(
       "Refusing to promote @absent: not a member of the chat",
     )
+  })
+
+  test("throws when the fresh read resolves to another user", () => {
+    const member = getChatMember_targetAsMember.data
+    expect(() =>
+      assertPresentMember(member, "@member", member.user.id),
+    ).not.toThrow()
+    expect(() =>
+      assertPresentMember(member, "@member", member.user.id + 1),
+    ).toThrow("resolved to user")
   })
 })

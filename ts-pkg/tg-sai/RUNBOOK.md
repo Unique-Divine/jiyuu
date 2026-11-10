@@ -31,8 +31,8 @@ Implemented write behavior:
 5. Command `tg-sai add-owner --run` transfers ownership only when a 2FA
    password is available (see section Credentials) and the target user is
    eligible.
-6. Command `tg-sai promote-admin --run` promotes a user who is already a chat
-   member. It refuses non-members and never transfers ownership.
+6. Command `tg-sai promote-admin --run` promotes a team member who is already
+   in the chat. It refuses non-members and bots, and never transfers ownership.
 
 Credential profile behavior:
 
@@ -396,9 +396,16 @@ tg-sai promote-admin \
   --run
 ```
 
-The command reads membership again right before it writes, because Telegram
-adds a non-member when it promotes them. It grants the same rights as
-`add-owner`, including add-admins.
+The session user must own the chat, because only the owner can grant the full
+`add-owner` rights, including add-admins. The command refuses a target that is
+not already a member, a bot (use `add-bot`), or a user outside the team
+accounts in `cfg.ts` `USERS` unless you pass `--allow-non-team`. Both the dry
+run and `--run` print the chat title and the resolved target ID, username,
+display name, and bot flag; check them before you pass `--run`.
+
+Telegram adds a non-member when it promotes them, so the command reads the
+target's membership again just before it writes and refuses if the target
+left or resolves to a different user.
 
 Execute add-owner with ownership transfer enabled. The profile's pass entry
 supplies the 2FA password:
