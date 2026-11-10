@@ -14,7 +14,8 @@ import pytest
 from mcp.types import CallToolResult, TextContent
 from pydantic import BaseModel
 from telethon import errors
-from telethon.tl.types import RpcError, User
+from telethon.tl.types import RpcError, User, PeerUser
+from telethon.tl.custom import Message
 
 from telegram_mcp import runtime
 from telegram_mcp.request_policy import (
@@ -99,18 +100,19 @@ async def test_identity_handler_matches_anonymized_observed_text(
 async def test_messages_handler_matches_anonymized_observed_text(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    message = SimpleNamespace(
+    message = Message(
         id=101,
-        sender=User(id=900000003, first_name="Example Bot"),
+        peer_id=PeerUser(user_id=900000002),
         date=datetime(2000, 1, 1, tzinfo=timezone.utc),
         message="Example message",
     )
+    message._sender = User(id=900000003, first_name="Example Bot")
     calls: list[tuple[int, int]] = []
 
     class Client:
         async def get_messages(
             self, entity: object, *, limit: int, add_offset: int
-        ) -> list[SimpleNamespace]:
+        ) -> list[Message]:
             calls.append((limit, add_offset))
             return [message]
 

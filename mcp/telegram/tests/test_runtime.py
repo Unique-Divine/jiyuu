@@ -91,6 +91,9 @@ def test_discover_accounts_supports_suffixed_and_default_sessions(monkeypatch):
     accounts = runtime._discover_accounts()
 
     assert sorted(accounts) == ["default", "personal", "work"]
+    assert isinstance(accounts["work"], _FakeTelegramClient)
+    assert isinstance(accounts["personal"], _FakeTelegramClient)
+    assert isinstance(accounts["default"], _FakeTelegramClient)
     assert accounts["work"].args[0] == "StringSession:work-session"
     assert accounts["personal"].args[0] == "personal.session"
     assert accounts["default"].args[0] == "StringSession:default-session"
@@ -159,6 +162,7 @@ def test_build_proxy_per_label_overrides_default(monkeypatch):
     proxy, connection = runtime._build_proxy_for_label("work")
 
     assert connection is None
+    assert isinstance(proxy, dict)
     assert proxy["proxy_type"] == "http"
     assert proxy["addr"] == "proxy.work.example"
     assert proxy["port"] == 3128
@@ -225,14 +229,14 @@ def test_build_proxy_socks_requires_python_socks(monkeypatch):
 
     import builtins
 
-    real_import = builtins.__import__
+    real_import = runtime.importlib.import_module
 
     def fake_import(name, *args, **kwargs):
         if name == "python_socks":
             raise ImportError("simulated missing python-socks")
         return real_import(name, *args, **kwargs)
 
-    monkeypatch.setattr(builtins, "__import__", fake_import)
+    monkeypatch.setattr(runtime.importlib, "import_module", fake_import)
 
     with pytest.raises(runtime.ValidationError, match="python-socks"):
         runtime._build_proxy_for_label("default")
@@ -252,6 +256,7 @@ def test_discover_accounts_passes_proxy_kwargs_to_client(monkeypatch):
     accounts = runtime._discover_accounts()
 
     client = accounts["default"]
+    assert isinstance(client, _FakeTelegramClient)
     assert client.kwargs["proxy"] == ("mtproxy.example", 443, "ee0123456789abcdef")
     from telethon.network import ConnectionTcpMTProxyRandomizedIntermediate
 
@@ -272,6 +277,7 @@ def test_discover_accounts_passes_device_identity_kwargs_to_client(monkeypatch):
     accounts = runtime._discover_accounts()
 
     client = accounts["default"]
+    assert isinstance(client, _FakeTelegramClient)
     assert client.kwargs["device_model"] == "Telegram MCP"
     assert client.kwargs["app_version"] == "3.1"
     assert "system_version" not in client.kwargs
@@ -375,7 +381,7 @@ async def test_profile_lookup_recovers_stale_transport_once(monkeypatch):
             self.calls.append("get_me")
             if self.calls.count("get_me") == 1:
                 raise ConnectionError("stale transport")
-            return SimpleNamespace(id=123)
+            return runtime.User(id=123)
 
     client = Client()
     monkeypatch.setattr(runtime, "_last_conn_verified", {id(client): runtime.time.time()})
@@ -546,12 +552,17 @@ def test_entity_type_filter_and_formatting_helpers():
         phone="123",
     )
     chat = Chat(
-        id=2, title="Group\x00Name", photo=None, participants_count=3, date=None, version=1
+        id=2,
+        title="Group\x00Name",
+        photo=runtime.types.ChatPhotoEmpty(),
+        participants_count=3,
+        date=None,
+        version=1,
     )
     channel = Channel(
         id=3,
         title="Channel",
-        photo=None,
+        photo=runtime.types.ChatPhotoEmpty(),
         date=None,
         creator=False,
         left=False,
@@ -581,7 +592,7 @@ def test_entity_type_filter_and_formatting_helpers():
     supergroup = Channel(
         id=4,
         title="Super",
-        photo=None,
+        photo=runtime.types.ChatPhotoEmpty(),
         date=None,
         creator=False,
         left=False,
@@ -690,7 +701,8 @@ def test_path_helper_edges(tmp_path, monkeypatch):
 
     assert runtime._dedupe_paths([root, root, file_root]) == [root, file_root]
     assert runtime._contains_forbidden_path_patterns("   ") == "Path must not be empty."
-    assert "wildcard" in runtime._contains_forbidden_path_patterns("*.txt")
+    pattern_error = runtime._contains_forbidden_path_patterns("*.txt")
+    assert pattern_error is not None and "wildcard" in pattern_error
     assert runtime._contains_forbidden_path_patterns("safe/name.txt") is None
     with pytest.raises(ValueError, match="Unsupported root URI scheme"):
         runtime._coerce_root_uri_to_path("https://example.com/root")
@@ -698,7 +710,8 @@ def test_path_helper_edges(tmp_path, monkeypatch):
     assert runtime._path_is_within_root(file_root.resolve(), file_root.resolve()) is True
     assert runtime._path_is_within_root(root.resolve(), file_root.resolve()) is False
     assert runtime._first_resolution_root([file_root.resolve()]) == root.resolve()
-    assert runtime._ensure_extension_allowed("send_sticker", root / "bad.txt").startswith(
+    extension_error = runtime._ensure_extension_allowed("send_sticker", root / "bad.txt")
+    assert extension_error is not None and extension_error.startswith(
         "File extension is not allowed"
     )
     assert runtime._ensure_extension_allowed("send_file", root / "any.txt") is None
@@ -706,7 +719,8 @@ def test_path_helper_edges(tmp_path, monkeypatch):
     too_big = root / "big.bin"
     too_big.write_bytes(b"12345")
     monkeypatch.setitem(runtime.MAX_FILE_BYTES, "tiny_tool", 4)
-    assert runtime._ensure_size_within_limit("tiny_tool", too_big).startswith("File is too large")
+    size_error = runtime._ensure_size_within_limit("tiny_tool", too_big)
+    assert size_error is not None and size_error.startswith("File is too large")
     assert runtime._ensure_size_within_limit("unknown_tool", too_big) is None
 
 
@@ -730,7 +744,7 @@ async def test_more_file_resolution_edges(tmp_path, monkeypatch):
         raw_path="nested", ctx=None, tool_name="send_file"
     )
     assert resolved is None
-    assert "Path is not a file" in error
+    assert error is not None and "Path is not a file" in error
 
     out_path, error = await runtime._resolve_writable_file_path(
         raw_path="nested/out.bin",
@@ -852,3 +866,16 @@ async def test_empty_client_roots_fallback_noop_without_server_roots(monkeypatch
     roots, status = await runtime._get_effective_allowed_roots_with_status(_ctx_with_roots([]))
     assert roots == []
     assert status == runtime.ROOTS_STATUS_CLIENT_DENY_ALL
+
+
+@pytest.mark.asyncio
+async def test_profile_lookup_rejects_missing_authorized_user(monkeypatch):
+    class Client(_ConnectivityClient):
+        async def get_me(self):
+            return None
+
+    client = Client()
+    monkeypatch.setattr(runtime, "_last_conn_verified", {id(client): runtime.time.time()})
+    with pytest.raises(runtime.ValidationError, match="no authorized user"):
+        await runtime.read_account_profile(client)
+    assert "connect" not in client.calls
