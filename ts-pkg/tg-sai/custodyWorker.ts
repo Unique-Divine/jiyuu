@@ -25,6 +25,7 @@ import {
   HOLD_STATE_UNAVAILABLE_RETRY_MS,
   provisionSetup,
   safeProvisionError,
+  waitingOnInvitedMember,
 } from "./provisioning"
 import type {
   BackgroundEnqueue,
@@ -251,11 +252,13 @@ export async function runWorkerOnce(
       })
       continue
     }
-    requesterWork = true
     if (
       setup.retryAt &&
       Date.parse(setup.retryAt) > (options.now ?? Date.now())
     ) {
+      // A setup waiting for an invited member to join makes no add until it
+      // resumes, so it does not hold up the background drain.
+      if (!waitingOnInvitedMember(setup)) requesterWork = true
       results.push({
         requestId: setup.requestId,
         state: "waiting",
@@ -263,6 +266,7 @@ export async function runWorkerOnce(
       })
       continue
     }
+    requesterWork = true
     if (!options.run) {
       results.push({
         requestId: setup.requestId,

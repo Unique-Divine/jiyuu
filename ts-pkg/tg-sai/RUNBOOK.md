@@ -592,6 +592,56 @@ blocked by privacy settings can remain pending with a 24-hour, approval-required
 invite link. A link does not mean the person joined. Handle-based resolution of
 fixed team defaults must verify the expected numeric ID before any invitation.
 
+Telegram can accept an add before the person shows up in the chat. The worker
+reads the member again after 3 seconds. If they are still absent, it creates
+a 24-hour, approval-required invitation for them, saves it in the local
+receipt with reason `added_not_visible`, and leaves the setup `incomplete`
+with error `verify_added_member:TG_SAI_MEMBER_NOT_VISIBLE` and a `retryAt`
+15 minutes out. The worker never adds that person again:
+
+- Each resume approves their join request, if one is waiting, and finishes
+  once they are in. Someone who taps the link sees "request sent" and waits
+  up to 15 minutes plus one worker tick. Only an admin with invite rights can
+  approve sooner. During this wait the team admins are usually not promoted
+  yet, because promotion runs after every required member is in, so the
+  custody account is often the only admin. Check with
+  `tg-sai audit --chat <chat-id> --target-user <user-id>` before asking a
+  team admin to approve.
+- While the setup waits on that person, it does not pause the background
+  queue.
+- If the invitation expires first, the setup is saved with error
+  `verify_added_member:TG_SAI_INVITATION_EXPIRED` and no `retryAt`, so the
+  worker reports `operator_recovery_required`. The worker never adds that
+  person again, and every resume stops with the same code until they are in.
+  To get them in:
+  1. If they tapped the link before it expired, their request may still be
+     pending. A resume (`sai-deal-desk chat-setups recover`) approves it.
+  2. Otherwise, an already-promoted team admin can add them or send a link
+     from their own account. The add does not come from the custody budget.
+  3. No tg-sai command issues a fresh controlled invitation yet. An add from
+     the custody account spends the custody add budget, so Unique decides.
+  Once they are in, run `chat-setups recover` to finish the setup.
+- An approval error is saved as `approve_join:<code>`. A flood on the
+  approval becomes a saved hold and sets its own `retryAt`.
+
+The link is only in the receipt on the custody host. Deal Desk status shows
+only the error code. The receipt file is named by the SHA-256 of the request
+ID:
+
+```bash
+id='<request id>'
+f="/var/lib/sai-custody-worker/provisioning/receipts/$(printf '%s' "$id" | sha256sum | cut -d' ' -f1).json"
+sudo jq '.pendingInvitations' "$f"
+```
+
+The bot gets no link: a bot that is not visible still fails the setup. The
+background queue also reads each member before adding and approves a waiting
+join request, so a member who uses the shared link costs no add. A flood
+or hold on that read or approval defers the row until it ends. A chat or
+member fault there, such as `CHANNEL_PRIVATE`, `PEER_ID_INVALID`, or
+`USER_CHANNELS_TOO_MUCH`, fails the row. Any other error counts an attempt
+and moves the row behind the others.
+
 New ready receipts include an `openGroupUrl` anchored to a message actually
 observed in the group and the existing `primaryInviteLink`, when available.
 These read-only lookups run together with a 10-second limit each. A missing link
