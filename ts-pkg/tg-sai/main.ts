@@ -11,7 +11,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { stdin as input, stdout as output } from "node:process"
 import { createInterface } from "node:readline/promises"
-import { Command } from "commander"
+import { Command, Option } from "commander"
 import { addProvisionCommands } from "./provisioningCli"
 import { addCustodyWorkerCommands } from "./custodyWorkerCli"
 import type { BatchLogger } from "./actionExecutor"
@@ -61,10 +61,25 @@ import {
   profileLabel,
   readConfig,
   redactedProfile,
+  plainTextPasswordProfiles,
+  profilePasswordStorage,
   removeProfile,
   resolveTelegramCredentialSource,
   setActiveProfile,
 } from "./profiles"
+import {
+  assertPassReady,
+  defaultPasswordPassEntry,
+  insertPassPassword,
+  passEntryExists,
+  promptHiddenPassword,
+  readPasswordFromStdin,
+  readTelegramPassword,
+  validatePassEntry,
+} from "./passwordStore"
+import type { TelegramPasswordRef } from "./passwordStore"
+import { migrateProfilePasswords } from "./passwordMigration"
+import type { MigratePasswordOptions } from "./passwordMigration"
 import type {
   DiscoveryReport,
   ProfileAddInput,
@@ -133,7 +148,8 @@ export interface TelegramEnv {
   apiId: number
   apiHash: string
   session: string
-  password: string | null
+  /** Where to read the 2FA password; read only for ownership transfer. */
+  password: TelegramPasswordRef | null
   /** Saved account user ID, only for a session from a saved profile. */
   userId: number | null
   /** Saved profile name, only for a session from that profile. */
@@ -145,7 +161,11 @@ interface ProfileAddOptions {
   apiId?: string
   apiHash?: string
   sessionString?: string
+  /** Removed flag; kept so the CLI can point to its replacements. */
   password?: string
+  passwordPassEntry?: string
+  passwordStdin?: boolean
+  passwordPrompt?: boolean
   src?: string
   handle?: string
   userId?: string
@@ -516,8 +536,22 @@ async function runAddBot(options: AddBotOptions): Promise<void> {
   })
 }
 
+/**
+ * Reads a pass-backed 2FA password once, before a `--run` makes its first
+ * change, so a locked GPG agent stops the command before it promotes anyone
+ * instead of between promotion and ownership transfer.
+ */
+export async function withPasswordRead(env: TelegramEnv): Promise<TelegramEnv> {
+  if (env.password?.kind !== "pass") return env
+  return {
+    ...env,
+    password: { kind: "value", value: await readTelegramPassword(env.password) },
+  }
+}
+
 async function runAddOwner(options: AddOwnerOptions): Promise<void> {
-  await withClient(options.profile, async (client, env) => {
+  await withClient(options.profile, async (client, sessionEnv) => {
+    let env = sessionEnv
     const beforeInput = await fetchChatAuditInput(client, {
       chatId: options.chat,
       targetUserId: options.targetUser,
@@ -545,6 +579,9 @@ async function runAddOwner(options: AddOwnerOptions): Promise<void> {
       throw new Error(
         "Refusing to run: session user cannot apply admin changes",
       )
+    }
+    if (beforePlan.actorCanTransferOwnership && env.password !== null) {
+      env = await withPasswordRead(env)
     }
 
     if (shouldRunAction(beforePlan.proposedActions, "add target user")) {
@@ -606,7 +643,7 @@ async function runAddOwner(options: AddOwnerOptions): Promise<void> {
     await transferTargetOwnership(client, {
       chatId: options.chat,
       targetPeer: options.targetUser,
-      password: env.password,
+      password: await readTelegramPassword(env.password),
     })
 
     const transferInput = await fetchChatAuditInput(client, {
@@ -746,8 +783,8 @@ async function applyTargetPlan(params: {
  * Optionally transfers ownership after the target user is already admin.
  *
  * Ownership transfer only runs when the command flag is present, the actor is
- * the current owner, the target user is eligible, and `TELEGRAM_PASSWORD` is
- * present in the environment.
+ * the current owner, the target user is eligible, and the session has a 2FA
+ * password source. A pass entry is read only here, right before the transfer.
  */
 async function maybeTransferOwner(params: {
   client: Awaited<ReturnType<typeof createMtcuteClient>>
@@ -806,11 +843,11 @@ async function maybeTransferOwner(params: {
       chatId: params.chat.chatId,
       action: "transfer_owner",
     },
-    () =>
+    async () =>
       transferTargetOwnership(params.client, {
         chatId: params.chat.chatId,
         targetPeer: params.targetUser,
-        password: params.env.password ?? "",
+        password: await readTelegramPassword(params.env.password!),
       }),
     actionExecutorDeps(actorBatchLogger(params.actorUsername)),
   )
@@ -837,7 +874,8 @@ async function runSaiBootstrap(options: SaiBootstrapOptions): Promise<void> {
   // Telegram calls are in the telemetry DB under this run id.
   const runId = activeTelemetryRun()?.context.runId ?? null
 
-  await withClient(options.profile, async (client, env) => {
+  await withClient(options.profile, async (client, sessionEnv) => {
+    let env = sessionEnv
     const actor = normalizeUser(await client.getMe())
     const actorUsername = actor.username ?? ""
     // Only a session from a saved profile is labeled with that profile.
@@ -862,6 +900,10 @@ async function runSaiBootstrap(options: SaiBootstrapOptions): Promise<void> {
       targetUser: ownerTarget,
       targetBot: saiBot.id,
     })
+
+    if (options.run === true && ownershipTransferEnabled) {
+      env = await withPasswordRead(env)
+    }
 
     const maxWaitMs =
       activeTelemetryRun()?.floodMaxWaitMs ??
@@ -964,7 +1006,6 @@ function credentialValuesFromProfileAddOptions(
     TELEGRAM_API_ID: options.apiId,
     TELEGRAM_API_HASH: options.apiHash,
     TELEGRAM_SESSION_STRING: options.sessionString,
-    TELEGRAM_PASSWORD: options.password,
   }
 }
 
@@ -984,7 +1025,9 @@ function profileFieldsFromCredentialValues(values: TelegramCredentialValues) {
     apiId: values.TELEGRAM_API_ID ? Number(values.TELEGRAM_API_ID) : null,
     apiHash: values.TELEGRAM_API_HASH ?? "",
     sessionString: values.TELEGRAM_SESSION_STRING ?? "",
-    password: values.TELEGRAM_PASSWORD ?? "",
+    // Profiles keep only a pass entry, so a password from env or discovery
+    // is not saved. Use --password-prompt or --password-stdin.
+    password: "",
   }
 }
 
@@ -1244,9 +1287,7 @@ async function inputFromProfileAddOptions(
 ): Promise<ProfileAddInput> {
   validateLoginOptions(options)
   const saved = getProfile(await readConfig(), options.name)
-  const enrollsAccount = Boolean(
-    options.login || options.qr || options.phone || options.src || options.sessionString,
-  )
+  const enrollsAccount = enrollsNewAccount(options)
   if (saved && !enrollsAccount) {
     // Resolve the saved target before discovery. A password/app metadata edit
     // must never authenticate another discovered account and overwrite this one.
@@ -1261,14 +1302,14 @@ async function inputFromProfileAddOptions(
       apiId: options.apiId === undefined ? saved.apiId : Number(options.apiId),
       apiHash: options.apiHash ?? saved.apiHash,
       sessionString: saved.sessionString,
-      password: options.password ?? saved.password,
+      password: saved.password,
       handle: saved.handle,
       userId: saved.userId,
       displayName: options.displayName ?? saved.displayName,
     }
   }
-  if (!saved && options.password !== undefined && !enrollsAccount) {
-    throw new Error(`Unknown configured profile: ${options.name ?? "active profile"}. Use tg-sai profile list and select it with --name; --src selects credential discovery sources.`)
+  if (!saved && setsPassword(options) && !enrollsAccount) {
+    throw unknownPasswordTargetError(options)
   }
   const optionValues = credentialValuesFromProfileAddOptions(options)
   const envValues = profileLoginValues(credentialValuesFromEnv(), options)
@@ -1391,6 +1432,142 @@ async function runProfileShow(selector = "0"): Promise<void> {
     throw new Error(`Unknown profile: ${selector}`)
   }
   console.log(JSON.stringify(redactedProfile(profile), null, 2))
+  if (profilePasswordStorage(profile) === "plain_text") {
+    console.error(plainTextPasswordWarning(profile.name))
+  }
+}
+
+/** Warning for a profile that still keeps its 2FA password in profiles.json. */
+export function plainTextPasswordWarning(profileName: string): string {
+  return `warning: profile ${profileName} keeps its 2FA password in profiles.json; move it to pass with: tg-sai profile migrate-password --profile ${profileName}`
+}
+
+/** True when `profile add` options log in or import a session. */
+function enrollsNewAccount(options: ProfileAddOptions): boolean {
+  return Boolean(
+    options.login || options.qr || options.phone || options.src || options.sessionString,
+  )
+}
+
+function unknownPasswordTargetError(options: ProfileAddOptions): Error {
+  return new Error(`Unknown configured profile: ${options.name ?? "active profile"}. Use tg-sai profile list and select it with --name; --src selects credential discovery sources.`)
+}
+
+/** True when `profile add` options save or point to a 2FA password. */
+function setsPassword(options: ProfileAddOptions): boolean {
+  return Boolean(
+    options.passwordPassEntry || options.passwordStdin || options.passwordPrompt,
+  )
+}
+
+/**
+ * Reads a new 2FA password from `--password-stdin` or `--password-prompt`,
+ * or returns null. Rejects the removed `--password <value>` flag.
+ */
+async function newPasswordFromOptions(
+  options: ProfileAddOptions,
+): Promise<string | null> {
+  if (options.password !== undefined) {
+    throw new Error(
+      "--password <value> is no longer supported. Use --password-prompt or --password-stdin; tg-sai stores the password in pass.",
+    )
+  }
+  if (options.passwordStdin && options.passwordPrompt) {
+    throw new Error("--password-stdin and --password-prompt are mutually exclusive")
+  }
+  if (options.passwordStdin) {
+    if (options.interactive || options.phone) {
+      throw new Error("--password-stdin cannot be combined with --interactive or --phone")
+    }
+    return readPasswordFromStdin()
+  }
+  if (options.passwordPrompt) {
+    return promptHiddenPassword("Telegram 2FA password: ")
+  }
+  return null
+}
+
+/** pass entry that `profile add` targets, or null when no name is known. */
+function profileAddPassEntry(
+  options: ProfileAddOptions,
+  profileName: string | null,
+): string | null {
+  const entryName =
+    options.passwordPassEntry ??
+    (profileName ? defaultPasswordPassEntry(profileName) : null)
+  return entryName ? validatePassEntry(entryName) : null
+}
+
+/**
+ * Checks `entry` before `profile add` writes to it. Returns whether to insert.
+ * The profile's own entries (the one it records and its default
+ * `tg-sai/<name>/telegram-2fa`) may be replaced. Any other existing entry may
+ * hold another secret, so it is refused without being read.
+ */
+async function checkProfileAddPassEntry(
+  entry: string,
+  newPassword: string | null,
+  ownEntries: Array<string | null | undefined>,
+): Promise<boolean> {
+  const exists = await passEntryExists(entry)
+  if (newPassword === null) {
+    if (!exists) {
+      throw new Error(
+        `pass entry ${entry} does not exist. Add --password-prompt or --password-stdin to create it.`,
+      )
+    }
+    return false
+  }
+  if (exists && !ownEntries.includes(entry)) {
+    throw new Error(
+      `pass entry ${entry} already exists and is not this profile's entry. Choose another --password-pass-entry, or drop --password-prompt/--password-stdin to point the profile at the existing entry.`,
+    )
+  }
+  return true
+}
+
+/**
+ * Entries that belong to profile `name`: the one it records, and its default
+ * unless another profile records that default.
+ */
+function ownPassEntries(
+  name: string | null,
+  recorded: string | undefined,
+  otherProfilesEntries: readonly string[],
+): Array<string | undefined> {
+  const fallback = name ? defaultPasswordPassEntry(name) : undefined
+  return [
+    recorded,
+    fallback && !otherProfilesEntries.includes(fallback) ? fallback : undefined,
+  ]
+}
+
+/**
+ * Saves `newPassword` in pass, or checks that `--password-pass-entry`
+ * exists, and returns the entry to record on the profile.
+ */
+async function passwordPassEntryForProfileAdd(
+  options: ProfileAddOptions,
+  newPassword: string | null,
+  profileName: string | null,
+  ownEntry: string | undefined,
+  otherProfilesEntries: readonly string[],
+): Promise<string | null> {
+  if (newPassword === null && !options.passwordPassEntry) return null
+  const entry = profileAddPassEntry(options, profileName)
+  if (!entry) {
+    throw new Error("Name the profile with --name or the pass entry with --password-pass-entry")
+  }
+  if (
+    await checkProfileAddPassEntry(
+      entry,
+      newPassword,
+      ownPassEntries(profileName, ownEntry, otherProfilesEntries),
+    )
+  ) {
+    await insertPassPassword(entry, newPassword!)
+  }
+  return entry
 }
 
 async function printConfiguredProfiles(): Promise<void> {
@@ -1416,7 +1593,7 @@ async function printProfileAddHelp(command: Command): Promise<void> {
   console.log("  tg-sai profile show sai-custody")
   await printConfiguredProfiles()
   console.log("\nInspect an existing profile with tg-sai profile show <selector>.")
-  console.log("Update a saved password with --name <saved-name-or-handle-or-index> --password '<password>'.")
+  console.log("Save a 2FA password in pass with --name <saved-name-or-handle-or-index> --password-prompt.")
   console.log("--src selects a numbered credential source from profile find, not a saved profile index.")
 }
 
@@ -1470,12 +1647,59 @@ async function printProfileRemoveHelp(command: Command): Promise<void> {
 }
 
 async function runProfileAdd(options: ProfileAddOptions): Promise<void> {
-  const previous = getProfile(await readConfig(), options.name)
+  const savedConfig = await readConfig()
+  const previous = getProfile(savedConfig, options.name)
+  // Pass entries other profiles record; never treated as this profile's own.
+  const otherProfilesEntries = savedConfig.profiles
+    .filter((profile) => profile !== previous)
+    .flatMap((profile) => (profile.passwordPassEntry ? [profile.passwordPassEntry] : []))
+  // Fail before asking for a password that has no profile to go to.
+  if (!previous && setsPassword(options) && !enrollsNewAccount(options)) {
+    throw unknownPasswordTargetError(options)
+  }
+  // A login names the profile only after it creates a Telegram session, too
+  // late to check the pass entry without discarding that session.
+  if (
+    setsPassword(options) &&
+    (options.login || options.qr || options.phone) &&
+    !options.name &&
+    !options.passwordPassEntry
+  ) {
+    throw new Error(
+      "Saving a password with a login needs --name or --password-pass-entry, so the pass entry is checked before the login starts",
+    )
+  }
+  // Read stdin before login or prompts can consume it.
+  const newPassword = await newPasswordFromOptions(options)
+  if (newPassword !== null || options.passwordPassEntry) {
+    // Check pass before a login creates a session that a failed insert
+    // would leave unsaved.
+    await assertPassReady()
+    const earlyName = previous?.name ?? options.name ?? null
+    const earlyEntry = profileAddPassEntry(options, earlyName)
+    if (earlyEntry) {
+      await checkProfileAddPassEntry(
+        earlyEntry,
+        newPassword,
+        ownPassEntries(earlyName, previous?.passwordPassEntry, otherProfilesEntries),
+      )
+    }
+  }
   const input = await inputFromProfileAddOptions(options)
   if (previous?.userId != null && input.userId !== previous.userId) {
     throw new Error("Login or import does not match the saved account. Use a new --name for another account, or explicitly remove the old profile before replacing it.")
   }
   if (previous) input.name = previous.name
+  const passwordPassEntry = await passwordPassEntryForProfileAdd(
+    options,
+    newPassword,
+    input.name ??
+      input.handle ??
+      (input.userId !== null ? String(input.userId) : null),
+    previous?.passwordPassEntry,
+    otherProfilesEntries,
+  )
+  if (passwordPassEntry) input.passwordPassEntry = passwordPassEntry
   const config = await addProfile(input)
   const profile = getProfile(config, input.name)
   const index = profile ? config.profiles.indexOf(profile) : 0
@@ -1485,9 +1709,21 @@ async function runProfileAdd(options: ProfileAddOptions): Promise<void> {
   console.log(`profile_index: ${index}`)
   console.log(`user_id: ${input.userId}`)
   console.log(`handle: ${input.handle ?? ""}`)
-  console.log(`telegram_password: ${input.password ? "stored" : "missing"}`)
+  const storage = profilePasswordStorage(savedProfile)
   console.log(
-    "ownership_transfer: profile password or TELEGRAM_PASSWORD enables transfer",
+    `telegram_password: ${
+      storage === "pass"
+        ? `stored in pass entry ${savedProfile.passwordPassEntry}`
+        : storage === "plain_text"
+          ? "stored in profiles.json"
+          : "missing"
+    }`,
+  )
+  if (storage === "plain_text") {
+    console.error(plainTextPasswordWarning(savedProfile.name))
+  }
+  console.log(
+    "ownership_transfer: a profile password in pass enables transfer",
   )
 }
 
@@ -1650,7 +1886,7 @@ Examples:
     .option("--run", "Execute actions; default is dry-run")
     .option(
       "--no-transfer-owner",
-      "Skip ownership transfer even when TELEGRAM_PASSWORD is available",
+      "Skip ownership transfer even when a 2FA password is available",
     )
     .option(
       "--target-user <peer>",
@@ -1693,9 +1929,18 @@ Examples:
     .option("--api-id <id>", "Telegram API ID")
     .option("--api-hash <hash>", "Telegram API hash")
     .option("--session-string <value>", "Telegram session string")
+    .addOption(new Option("--password <value>").hideHelp())
     .option(
-      "--password <value>",
-      "Telegram 2FA password for ownership transfer",
+      "--password-prompt",
+      "Prompt for the Telegram 2FA password without echo and save it in pass",
+    )
+    .option(
+      "--password-stdin",
+      "Read the Telegram 2FA password from stdin and save it in pass",
+    )
+    .option(
+      "--password-pass-entry <entry>",
+      "pass entry for the 2FA password (default tg-sai/<name>/telegram-2fa)",
     )
     .option("--src <number>", "Import a numbered credential source from profile find, not a saved profile")
     .option(
@@ -1715,7 +1960,9 @@ Examples:
   tg-sai profile add --name sai-custody --login --qr --interactive
   tg-sai profile add --name another-account --phone --interactive
   tg-sai profile add --name another-account --src 1
-  tg-sai profile add --name existing-profile --password '<password>'
+  tg-sai profile add --name existing-profile --password-prompt
+  pass show my/entry | tg-sai profile add --name existing-profile --password-stdin
+  tg-sai profile add --name existing-profile --password-pass-entry my/entry
 
 If apiId/apiHash are missing, create a Telegram API app at:
   https://my.telegram.org/apps
@@ -1727,6 +1974,26 @@ If apiId/apiHash are missing, create a Telegram API app at:
         return
       }
       await runProfileAdd(options)
+    })
+
+  profile
+    .command("migrate-password")
+    .description(
+      "Move plain-text 2FA passwords from profiles.json and backups into pass",
+    )
+    .option(
+      "--profile <selector>",
+      "Profile to migrate; default is every profile with a plain-text password",
+    )
+    .option(
+      "--pass-entry <entry>",
+      "pass entry for --profile (default tg-sai/<name>/telegram-2fa)",
+    )
+    .option("--run", "Apply changes; default is dry-run")
+    .action(async (options: MigratePasswordOptions) => {
+      const result = await migrateProfilePasswords(options)
+      for (const line of result.lines) console.log(line)
+      process.exitCode = result.exitCode
     })
 
   profile

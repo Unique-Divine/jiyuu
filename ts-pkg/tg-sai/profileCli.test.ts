@@ -1,10 +1,26 @@
-import { describe, expect, test } from "bun:test"
+import { afterAll, describe, expect, test } from "bun:test"
+import { existsSync, mkdirSync, writeFileSync } from "node:fs"
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { basename, dirname, join } from "node:path"
+import { installFakePass } from "./testdata"
 
 const packageRoot = import.meta.dir
 const cliPath = "main.ts"
+const fakePass = installFakePass()
+afterAll(async () => {
+  await rm(dirname(fakePass.binDir), { recursive: true, force: true })
+})
+
+/** Initialised password store for a test's config dir, outside that dir. */
+function storeFor(configDir: string): string {
+  const store = join(fakePass.storeRoot, basename(configDir))
+  if (!existsSync(store)) {
+    mkdirSync(store, { recursive: true })
+    writeFileSync(join(store, ".gpg-id"), "fake-gpg-id\n")
+  }
+  return store
+}
 
 interface RunResult {
   exitCode: number
@@ -21,12 +37,20 @@ async function withTempConfig<T>(fn: (dir: string) => Promise<T>): Promise<T> {
   }
 }
 
-function runCli(args: readonly string[], configDir: string, extraEnv: Record<string, string> = {}): RunResult {
+function runCli(
+  args: readonly string[],
+  configDir: string,
+  extraEnv: Record<string, string> = {},
+  stdin?: string,
+): RunResult {
   const result = Bun.spawnSync({
     cmd: ["bun", cliPath, ...args],
     cwd: packageRoot,
+    stdin: stdin === undefined ? "ignore" : Buffer.from(stdin),
     env: {
       ...process.env,
+      PATH: fakePass.path,
+      PASSWORD_STORE_DIR: storeFor(configDir),
       TG_SAI_DIR: configDir,
       TG_SAI_REPO_DIR: join(configDir, "repo"),
       HOME: join(configDir, "home"),
@@ -58,8 +82,6 @@ const addAliceArgs = [
   "hash-alice",
   "--session-string",
   "session-alice",
-  "--password",
-  "password-alice",
   "--handle",
   "alice_handle",
   "--user-id",
@@ -67,6 +89,11 @@ const addAliceArgs = [
   "--display-name",
   "Alice Example",
 ]
+
+/** Adds alice with her 2FA password piped to `--password-stdin`. */
+function addAlice(dir: string): RunResult {
+  return runCli([...addAliceArgs, "--password-stdin"], dir, {}, "password-alice\n")
+}
 
 const addBobArgs = [
   "profile",
@@ -110,7 +137,7 @@ describe("tg-sai profile CLI", () => {
 
   test.each([{ args: ["profile"] }, { args: ["profile", "add"] }])("bare %j lists existing profiles with no mutation or credential output", async ({ args }) => {
     await withTempConfig(async (dir) => {
-      expect(runCli(addAliceArgs, dir).exitCode).toBe(0)
+      expect(addAlice(dir).exitCode).toBe(0)
       expect(runCli(addBobArgs, dir).exitCode).toBe(0)
       const before = await readFile(join(dir, "profiles.json"), "utf8")
       const result = runCli(args, dir)
@@ -134,7 +161,7 @@ describe("tg-sai profile CLI", () => {
 
   test.each(["--qr", "--phone", "--login"])("%s enrolls a fresh session without inheriting discovered account credentials", async (flag) => {
     await withTempConfig(async (dir) => {
-      expect(runCli(addAliceArgs, dir).exitCode).toBe(0)
+      expect(addAlice(dir).exitCode).toBe(0)
       const home = join(dir, "home")
       await mkdir(join(home, ".cursor"), { recursive: true })
       await writeFile(join(home, ".cursor", "mcp.json"), JSON.stringify({
@@ -167,7 +194,8 @@ await Bun.write(${JSON.stringify(join(dir, "generator-mode"))}, args.includes("-
       expect(config.profiles[0].name).toBe("alice")
       const custody = config.profiles.find((p: { name: string }) => p.name === "custody")
       expect(custody.sessionString).toBe("fresh-session")
-      expect(custody.password).toBe("")
+      expect(custody.password).toBeUndefined()
+      expect(custody.passwordPassEntry).toBeUndefined()
       expect(config.profiles[0].sessionString).toBe("session-alice")
       expect(result.stdout.toString()).not.toContain("fresh-session")
       expect(result.stderr.toString()).not.toContain("personal-session")
@@ -306,7 +334,7 @@ await Bun.write(args[args.indexOf("--session-output") + 1], "fresh-session")
 
   test("profile remove help generates executable examples for saved accounts and drafts without exposing credentials", async () => {
     await withTempConfig(async (dir) => {
-      expect(runCli(addAliceArgs, dir).exitCode).toBe(0)
+      expect(addAlice(dir).exitCode).toBe(0)
       expect(runCli(addBobArgs, dir).exitCode).toBe(0)
       expect(runCli(["profile", "add", "--name", "draft"], dir).exitCode).toBe(0)
       const before = await readFile(join(dir, "profiles.json"), "utf8")
@@ -340,7 +368,7 @@ await Bun.write(args[args.indexOf("--session-output") + 1], "fresh-session")
 
   test("profile remove examples resolve handle collisions and quote option-looking legacy names", async () => {
     await withTempConfig(async (dir) => {
-      expect(runCli(addAliceArgs, dir).exitCode).toBe(0)
+      expect(addAlice(dir).exitCode).toBe(0)
       expect(runCli(addBobArgs, dir).exitCode).toBe(0)
       const path = join(dir, "profiles.json")
       const config = JSON.parse(await readFile(path, "utf8"))
@@ -370,15 +398,21 @@ await Bun.write(args[args.indexOf("--session-output") + 1], "fresh-session")
 
   test("adds, lists, shows, uses, and removes profiles", async () => {
     await withTempConfig(async (dir) => {
-      const addAlice = runCli(addAliceArgs, dir)
-      expect(addAlice.exitCode).toBe(0)
-      expect(addAlice.stdout).toContain("profile_default: alice_handle")
-      expect(addAlice.stdout).toContain("profile_index: 0")
-      expect(addAlice.stdout).toContain("user_id: 111")
-      expect(addAlice.stdout).toContain("telegram_password: stored")
-      expect(addAlice.stdout).toContain(
-        "ownership_transfer: profile password or TELEGRAM_PASSWORD enables transfer",
+      const addedAlice = addAlice(dir)
+      expect(addedAlice.exitCode).toBe(0)
+      expect(addedAlice.stdout).toContain("profile_default: alice_handle")
+      expect(addedAlice.stdout).toContain("profile_index: 0")
+      expect(addedAlice.stdout).toContain("user_id: 111")
+      expect(addedAlice.stdout).toContain(
+        "telegram_password: stored in pass entry tg-sai/alice/telegram-2fa",
       )
+      expect(addedAlice.stdout).toContain(
+        "ownership_transfer: a profile password in pass enables transfer",
+      )
+      expect(
+        await readFile(join(storeFor(dir), "tg-sai/alice/telegram-2fa.gpg"), "utf8"),
+      ).toBe("password-alice\n")
+      expect(await readFile(join(dir, "profiles.json"), "utf8")).not.toContain("password-alice")
 
       const listOne = runCli(["profile", "list"], dir)
       expect(listOne.exitCode).toBe(0)
@@ -394,7 +428,10 @@ await Bun.write(args[args.indexOf("--session-output") + 1], "fresh-session")
       expect(show.exitCode).toBe(0)
       expect(show.stdout).toContain('"name": "alice"')
       expect(show.stdout).toContain('"apiHash": "[redacted]"')
-      expect(show.stdout).toContain('"password": "[redacted]"')
+      expect(show.stdout).toContain('"password": ""')
+      expect(show.stdout).toContain('"passwordPassEntry": "tg-sai/alice/telegram-2fa"')
+      expect(show.stdout).toContain('"passwordStorage": "pass"')
+      expect(show.stderr).toBe("")
       expect(show.stdout).not.toContain("session-alice")
       expect(show.stdout).not.toContain("password-alice")
 
@@ -426,7 +463,7 @@ await Bun.write(args[args.indexOf("--session-output") + 1], "fresh-session")
 
   test.each(["bob", "bob_handle", "222", "1"])("password update by %s preserves a second account despite personal credential discovery", async (selector) => {
     await withTempConfig(async (dir) => {
-      expect(runCli(addAliceArgs, dir).exitCode).toBe(0)
+      expect(addAlice(dir).exitCode).toBe(0)
       expect(runCli(addBobArgs, dir).exitCode).toBe(0)
       const path = join(dir, "profiles.json")
       const before = JSON.parse(await readFile(path, "utf8"))
@@ -436,17 +473,19 @@ await Bun.write(args[args.indexOf("--session-output") + 1], "fresh-session")
         first: { env: { TELEGRAM_API_ID: "123", TELEGRAM_API_HASH: "hash-alice", TELEGRAM_SESSION_STRING: "session-alice" } },
         second: { env: { TELEGRAM_API_ID: "987", TELEGRAM_API_HASH: "conflicting-hash", TELEGRAM_SESSION_STRING: "conflicting-session" } },
       } }))
-      const result = runCli(["profile", "add", "--name", selector, "--password", "new-custody-password"], dir, {
+      const result = runCli(["profile", "add", "--name", selector, "--password-stdin"], dir, {
         TELEGRAM_API_ID: "123", TELEGRAM_API_HASH: "hash-alice",
         TELEGRAM_SESSION_STRING: "session-alice", TELEGRAM_PASSWORD: "environment-password",
-      })
+      }, "new-custody-password\n")
       expect(result.exitCode).toBe(0)
       expect(result.stdout).toContain("profile_saved: bob_handle")
       expect(result.stdout).toContain("user_id: 222")
       const after = JSON.parse(await readFile(path, "utf8"))
       expect(after.profiles.length).toBe(2)
       expect(after.profiles[0]).toEqual(before.profiles[0])
-      expect(after.profiles[1]).toEqual({ ...before.profiles[1], password: "new-custody-password", updatedAt: after.profiles[1].updatedAt })
+      expect(after.profiles[1]).toEqual({ ...before.profiles[1], passwordPassEntry: "tg-sai/bob/telegram-2fa", updatedAt: after.profiles[1].updatedAt })
+      expect(await readFile(join(storeFor(dir), "tg-sai/bob/telegram-2fa.gpg"), "utf8")).toBe("new-custody-password\n")
+      expect(await readFile(path, "utf8")).not.toContain("new-custody-password")
       for (const secret of ["new-custody-password", "session-alice", "session-bob", "hash-alice", "hash-bob"]) {
         expect(result.stdout).not.toContain(secret)
         expect(result.stderr).not.toContain(secret)
@@ -456,12 +495,12 @@ await Bun.write(args[args.indexOf("--session-output") + 1], "fresh-session")
 
   test("password-only update of an unknown saved selector fails without importing another account", async () => {
     await withTempConfig(async (dir) => {
-      expect(runCli(addAliceArgs, dir).exitCode).toBe(0)
+      expect(addAlice(dir).exitCode).toBe(0)
       const path = join(dir, "profiles.json")
       const before = await readFile(path, "utf8")
-      const result = runCli(["profile", "add", "--name", "missing-custody", "--password", "new-password"], dir, {
+      const result = runCli(["profile", "add", "--name", "missing-custody", "--password-stdin"], dir, {
         TELEGRAM_API_ID: "123", TELEGRAM_API_HASH: "hash-alice", TELEGRAM_SESSION_STRING: "session-alice",
-      })
+      }, "new-password\n")
       expect(result.exitCode).not.toBe(0)
       expect(result.stderr).toContain("Unknown configured profile")
       expect(await readFile(path, "utf8")).toBe(before)
@@ -470,7 +509,7 @@ await Bun.write(args[args.indexOf("--session-output") + 1], "fresh-session")
 
   test("metadata updates keep saved identity and reject identity replacement without login", async () => {
     await withTempConfig(async (dir) => {
-      expect(runCli(addAliceArgs, dir).exitCode).toBe(0)
+      expect(addAlice(dir).exitCode).toBe(0)
       expect(runCli(addBobArgs, dir).exitCode).toBe(0)
       const path = join(dir, "profiles.json")
       const before = JSON.parse(await readFile(path, "utf8"))
@@ -490,7 +529,7 @@ await Bun.write(args[args.indexOf("--session-output") + 1], "fresh-session")
 
   test("session import cannot replace a known account and same-account refresh preserves its saved name", async () => {
     await withTempConfig(async (dir) => {
-      expect(runCli(addAliceArgs, dir).exitCode).toBe(0)
+      expect(addAlice(dir).exitCode).toBe(0)
       expect(runCli(addBobArgs, dir).exitCode).toBe(0)
       const path = join(dir, "profiles.json")
       const before = await readFile(path, "utf8")
@@ -513,31 +552,167 @@ await Bun.write(args[args.indexOf("--session-output") + 1], "fresh-session")
 
   test("adds a password to an existing profile without clearing credentials", async () => {
     await withTempConfig(async (dir) => {
-      const aliceArgsWithoutPassword = addAliceArgs.filter(
-        (arg) => arg !== "--password" && arg !== "password-alice",
-      )
-      const addAlice = runCli(aliceArgsWithoutPassword, dir)
+      const addAlice = runCli(addAliceArgs, dir)
       expect(addAlice.exitCode).toBe(0)
+      expect(addAlice.stdout).toContain("telegram_password: missing")
 
       const addPassword = runCli(
-        ["profile", "add", "--name", "alice", "--password", "password-alice"],
+        ["profile", "add", "--name", "alice", "--password-stdin"],
         dir,
+        {},
+        "password-alice\n",
       )
       expect(addPassword.exitCode).toBe(0)
       expect(addPassword.stdout).toContain("profile_default: alice_handle")
-      expect(addPassword.stdout).toContain("telegram_password: stored")
+      expect(addPassword.stdout).toContain("telegram_password: stored in pass entry")
 
       const show = runCli(["profile", "show", "alice"], dir)
       expect(show.exitCode).toBe(0)
       expect(show.stdout).toContain('"apiId": 123')
       expect(show.stdout).toContain('"apiHash": "[redacted]"')
       expect(show.stdout).toContain('"sessionString": "[redacted]"')
-      expect(show.stdout).toContain('"password": "[redacted]"')
+      expect(show.stdout).toContain('"passwordStorage": "pass"')
       expect(show.stdout).toContain('"handle": "alice_handle"')
       expect(show.stdout).toContain('"userId": 111')
       expect(show.stdout).toContain('"displayName": "Alice Example"')
       expect(show.stdout).not.toContain("session-alice")
       expect(show.stdout).not.toContain("password-alice")
+    })
+  })
+
+  test("rejects --password <value> and names its replacements", async () => {
+    await withTempConfig(async (dir) => {
+      expect(runCli(addAliceArgs, dir).exitCode).toBe(0)
+      const before = await readFile(join(dir, "profiles.json"), "utf8")
+      const result = runCli(["profile", "add", "--name", "alice", "--password", "password-alice"], dir)
+      expect(result.exitCode).not.toBe(0)
+      expect(result.stderr).toContain("--password <value> is no longer supported")
+      expect(result.stderr).toContain("--password-prompt or --password-stdin")
+      expect(await readFile(join(dir, "profiles.json"), "utf8")).toBe(before)
+      expect(runCli(["profile", "add", "--help"], dir).stdout).not.toContain("--password <value>")
+    })
+  })
+
+  test("--password-pass-entry records an existing entry and refuses a missing one", async () => {
+    await withTempConfig(async (dir) => {
+      expect(runCli(addAliceArgs, dir).exitCode).toBe(0)
+      const missing = runCli(["profile", "add", "--name", "alice", "--password-pass-entry", "ops/alice-2fa"], dir)
+      expect(missing.exitCode).not.toBe(0)
+      expect(missing.stderr).toContain("pass entry ops/alice-2fa does not exist")
+
+      await mkdir(join(storeFor(dir), "ops"), { recursive: true })
+      await writeFile(join(storeFor(dir), "ops", "alice-2fa.gpg"), "password-alice\n")
+      const linked = runCli(["profile", "add", "--name", "alice", "--password-pass-entry", "ops/alice-2fa"], dir)
+      expect(linked.exitCode).toBe(0)
+      expect(linked.stdout).toContain("telegram_password: stored in pass entry ops/alice-2fa")
+      const saved = JSON.parse(await readFile(join(dir, "profiles.json"), "utf8"))
+      expect(saved.profiles[0].passwordPassEntry).toBe("ops/alice-2fa")
+      // Recording a reference never decrypts the entry.
+      expect(await Bun.file(join(storeFor(dir), ".calls")).exists()).toBe(false)
+    })
+  })
+
+  test("--password-stdin refuses an existing unrelated entry without reading it", async () => {
+    await withTempConfig(async (dir) => {
+      expect(runCli(addAliceArgs, dir).exitCode).toBe(0)
+      await mkdir(join(storeFor(dir), "evm"), { recursive: true })
+      await writeFile(join(storeFor(dir), "evm", "wallet.gpg"), "unrelated-secret\n")
+      const before = await readFile(join(dir, "profiles.json"), "utf8")
+      const result = runCli(
+        ["profile", "add", "--name", "alice", "--password-pass-entry", "evm/wallet", "--password-stdin"],
+        dir, {}, "password-alice\n",
+      )
+      expect(result.exitCode).not.toBe(0)
+      expect(result.stderr).toContain("pass entry evm/wallet already exists and is not this profile's entry")
+      expect(result.stderr).not.toContain("unrelated-secret")
+      expect(await readFile(join(storeFor(dir), "evm", "wallet.gpg"), "utf8")).toBe("unrelated-secret\n")
+      expect(await readFile(join(dir, "profiles.json"), "utf8")).toBe(before)
+
+      // Refusing never decrypts the other entry.
+      expect(await Bun.file(join(storeFor(dir), ".calls")).exists()).toBe(false)
+
+      // Pointing the profile at the entry without a new password still works.
+      const linked = runCli(["profile", "add", "--name", "alice", "--password-pass-entry", "evm/wallet"], dir)
+      expect(linked.exitCode).toBe(0)
+      expect(await Bun.file(join(storeFor(dir), ".calls")).exists()).toBe(false)
+    })
+  })
+
+  test("rerunning the same password command rewrites the profile's own default entry", async () => {
+    await withTempConfig(async (dir) => {
+      expect(runCli(addAliceArgs, dir).exitCode).toBe(0)
+      // An entry left by an earlier run that stopped before saving the profile.
+      await mkdir(join(storeFor(dir), "tg-sai", "alice"), { recursive: true })
+      await writeFile(join(storeFor(dir), "tg-sai", "alice", "telegram-2fa.gpg"), "password-alice\n")
+      const rerun = runCli(["profile", "add", "--name", "alice", "--password-stdin"], dir, {}, "password-alice\n")
+      expect(rerun.exitCode).toBe(0)
+      expect(rerun.stdout).toContain("telegram_password: stored in pass entry tg-sai/alice/telegram-2fa")
+      expect(await readFile(join(storeFor(dir), ".calls"), "utf8")).not.toContain("show")
+    })
+  })
+
+  test("a default entry that another profile records is not this profile's own", async () => {
+    await withTempConfig(async (dir) => {
+      expect(runCli(addAliceArgs, dir).exitCode).toBe(0)
+      expect(runCli(["profile", "add", "--name", "gamma"], dir).exitCode).toBe(0)
+      await mkdir(join(storeFor(dir), "tg-sai", "gamma"), { recursive: true })
+      await writeFile(join(storeFor(dir), "tg-sai", "gamma", "telegram-2fa.gpg"), "alice-real-2fa\n")
+      // alice deliberately points at gamma's default entry.
+      expect(runCli(["profile", "add", "--name", "alice", "--password-pass-entry", "tg-sai/gamma/telegram-2fa"], dir).exitCode).toBe(0)
+      const result = runCli(["profile", "add", "--name", "gamma", "--password-stdin"], dir, {}, "gamma-2fa\n")
+      expect(result.exitCode).not.toBe(0)
+      expect(result.stderr).toContain("pass entry tg-sai/gamma/telegram-2fa already exists and is not this profile's entry")
+      expect(await readFile(join(storeFor(dir), "tg-sai", "gamma", "telegram-2fa.gpg"), "utf8")).toBe("alice-real-2fa\n")
+    })
+  })
+
+  test("a password flag with a login needs --name or --password-pass-entry", async () => {
+    await withTempConfig(async (dir) => {
+      const bin = join(dir, "bin")
+      await mkdir(bin)
+      await writeFile(join(bin, "uv"), `#!/usr/bin/env bun
+await Bun.write(${JSON.stringify(join(dir, "generator-ran"))}, "yes")
+`, { mode: 0o700 })
+      const result = runCli(
+        ["profile", "add", "--qr", "--api-id", "1", "--api-hash", "h", "--password-stdin"],
+        dir, { PATH: `${bin}:${fakePass.path}` }, "password-custody\n",
+      )
+      expect(result.exitCode).not.toBe(0)
+      expect(result.stderr).toContain("Saving a password with a login needs --name or --password-pass-entry")
+      expect(await Bun.file(join(dir, "generator-ran")).exists()).toBe(false)
+    })
+  })
+
+  test("a profile's own entry can be updated with a new password", async () => {
+    await withTempConfig(async (dir) => {
+      expect(addAlice(dir).exitCode).toBe(0)
+      const update = runCli(["profile", "add", "--name", "alice", "--password-stdin"], dir, {}, "password-alice-2\n")
+      expect(update.exitCode).toBe(0)
+      expect(
+        await readFile(join(storeFor(dir), "tg-sai/alice/telegram-2fa.gpg"), "utf8"),
+      ).toBe("password-alice-2\n")
+    })
+  })
+
+  test("checks the pass store before starting a login", async () => {
+    await withTempConfig(async (dir) => {
+      const bin = join(dir, "bin")
+      await mkdir(bin)
+      await writeFile(join(bin, "uv"), `#!/usr/bin/env bun
+await Bun.write(${JSON.stringify(join(dir, "generator-ran"))}, "yes")
+`, { mode: 0o700 })
+      const store = join(fakePass.storeRoot, `${basename(dir)}-uninit`)
+      const result = runCli(
+        ["profile", "add", "--name", "custody", "--qr", "--api-id", "1", "--api-hash", "h",
+          "--user-id", "666", "--display-name", "Custody fixture", "--password-stdin"],
+        dir,
+        { PATH: `${bin}:${fakePass.path}`, PASSWORD_STORE_DIR: store },
+        "password-custody\n",
+      )
+      expect(result.exitCode).not.toBe(0)
+      expect(result.stderr).toContain("is not initialised")
+      expect(await Bun.file(join(dir, "generator-ran")).exists()).toBe(false)
+      expect(await Bun.file(join(dir, "profiles.json")).exists()).toBe(false)
     })
   })
 
@@ -730,13 +905,15 @@ await Bun.write(args[args.indexOf("--session-output") + 1], "fresh-session")
       const stdout = new TextDecoder().decode(result.stdout)
       expect(result.exitCode).toBe(0)
       expect(stdout).toContain("profile_default: auto_handle")
-      expect(stdout).toContain("telegram_password: stored")
+      // A discovered password is not saved; profiles keep only a pass entry.
+      expect(stdout).toContain("telegram_password: missing")
 
       const show = runCli(["profile", "show"], dir)
       expect(show.stdout).toContain('"apiId": 654')
       expect(show.stdout).toContain('"apiHash": "[redacted]"')
       expect(show.stdout).toContain('"sessionString": "[redacted]"')
-      expect(show.stdout).toContain('"password": "[redacted]"')
+      expect(show.stdout).toContain('"passwordStorage": "none"')
+      expect(await readFile(join(dir, "profiles.json"), "utf8")).not.toContain("auto-password")
     })
   })
 

@@ -1,10 +1,17 @@
 import { constants } from "node:fs"
 import { access, mkdir, readdir, readFile, stat } from "node:fs/promises"
 import { join } from "node:path"
-import { configDir, configPath, profileLabel, readConfig } from "./profiles"
+import {
+  configDir,
+  configPath,
+  plainTextPasswordProfiles,
+  profileLabel,
+  readConfig,
+} from "./profiles"
 import type {
   ProfileStoreEnv,
   TelegramCredentials,
+  TgSaiConfig,
   TgSaiProfile,
 } from "./profiles"
 
@@ -144,9 +151,19 @@ function connectionFix(selector: string): string[] {
 
 function passwordFix(): string[] {
   return [
-    "Save the Telegram 2FA password in the active tg-sai profile:",
-    "tg-sai profile add --password '<password>'",
-    "You can also override it for one command with TELEGRAM_PASSWORD.",
+    "Save the Telegram 2FA password in pass for the active tg-sai profile:",
+    "tg-sai profile add --name <profile> --password-prompt",
+    "Or point the profile at an existing pass entry:",
+    "tg-sai profile add --name <profile> --password-pass-entry <entry>",
+  ]
+}
+
+function plainTextPasswordFix(): string[] {
+  return [
+    "Move plain-text 2FA passwords from profiles.json and backups into pass.",
+    "Review the dry run, then apply it:",
+    "tg-sai profile migrate-password",
+    "tg-sai profile migrate-password --run",
   ]
 }
 
@@ -293,6 +310,10 @@ function checkPassword(
   env: ProfileStoreEnv,
   profile: TgSaiProfile | null,
 ): void {
+  if (profile?.passwordPassEntry) {
+    good(collector, `password_status: pass entry ${profile.passwordPassEntry}`)
+    return
+  }
   if (env.TELEGRAM_PASSWORD || profile?.password) {
     good(collector, "password_status: present")
     return
@@ -306,6 +327,22 @@ function checkPassword(
   info(
     collector,
     "No profile password or TELEGRAM_PASSWORD is set; ownership transfer will be skipped",
+  )
+}
+
+function checkPasswordStorage(
+  collector: HealthCollector,
+  config: TgSaiConfig,
+): void {
+  const plain = plainTextPasswordProfiles(config)
+  if (plain.length === 0) return
+  warning(
+    collector,
+    "password_storage",
+    `password_storage: plain text in profiles.json for ${plain
+      .map((profile) => profile.name)
+      .join(",")}`,
+    plainTextPasswordFix(),
   )
 }
 
@@ -437,6 +474,7 @@ export async function runHealthCheck(params: {
     createClient: params.createClient,
   })
   checkPassword(collector, env, activeProfile)
+  checkPasswordStorage(collector, config)
   if (logsWritable) {
     await checkLogs(collector, logsPath)
   }
