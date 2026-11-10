@@ -207,3 +207,74 @@ def test_parse_args_rejects_conflicting_login_modes(monkeypatch):
 
     with pytest.raises(SystemExit):
         session_string_generator._parse_args()
+
+
+_FAKE_SESSION = "fake-session-string-value"
+_FAKE_API_HASH = "fake-api-hash-value"
+
+
+class _AuthorizedClient:
+    """Stands in for TelegramClient after a login that already succeeded."""
+
+    def __init__(self, *args, **kwargs):
+        self.session = object()
+
+    def connect(self):
+        return None
+
+    def is_user_authorized(self):
+        return True
+
+    def disconnect(self):
+        return None
+
+
+def _run_main(monkeypatch, argv, inputs=()):
+    """Runs main() with fake app credentials and an authorized fake client."""
+    monkeypatch.setenv("TELEGRAM_API_ID", "123")
+    monkeypatch.setenv("TELEGRAM_API_HASH", _FAKE_API_HASH)
+    monkeypatch.setattr("sys.argv", ["session_string_generator.py", *argv])
+    monkeypatch.setattr(session_string_generator, "TelegramClient", _AuthorizedClient)
+    monkeypatch.setattr(
+        session_string_generator.StringSession, "save", staticmethod(lambda _session: _FAKE_SESSION)
+    )
+    prompts = []
+    answers = iter(inputs)
+
+    def fake_input(prompt=""):
+        prompts.append(prompt)
+        return next(answers)
+
+    monkeypatch.setattr("builtins.input", fake_input)
+    session_string_generator.main()
+    return prompts
+
+
+@pytest.mark.parametrize(
+    "extra_args",
+    [["--no-env-write"], []],
+    ids=["with-no-env-write", "session-output-only"],
+)
+def test_wrapper_mode_writes_session_only_to_output_file(tmp_path, monkeypatch, capsys, extra_args):
+    output = tmp_path / "session.txt"
+
+    prompts = _run_main(monkeypatch, ["--qr", "--session-output", str(output), *extra_args])
+
+    captured = capsys.readouterr()
+    assert prompts == []
+    assert output.read_text(encoding="utf-8") == f"{_FAKE_SESSION}\n"
+    assert "Session captured by tg-sai" in captured.out
+    for value in (_FAKE_SESSION, _FAKE_API_HASH):
+        assert value not in captured.out
+        assert value not in captured.err
+
+
+def test_standalone_guidance_uses_tg_sai_without_api_hash(monkeypatch, capsys):
+    prompts = _run_main(monkeypatch, ["--qr", "--no-env-write"], inputs=[""])
+
+    captured = capsys.readouterr()
+    assert len(prompts) == 1 and prompts[0].startswith("Account label")
+    assert _FAKE_SESSION in captured.out
+    assert _FAKE_API_HASH not in captured.out
+    assert "tg-sai profile add --api-id 123 --api-hash '<api hash>'" in captured.out
+    assert "just tg-sai" not in captured.out
