@@ -701,6 +701,23 @@ only the trailing `Ref: <ref>`, so the wording can change without breaking
 existing chats. Chats created earlier carry the legacy marker
 `sai-setup:<full fingerprint>`, and the checks still accept it.
 
+This release is forward-only. A worker from before it accepts only the
+legacy marker, so it fails the ready re-check and resume checks for any chat
+with the new description, and its `creation_unknown` search does not list
+such a chat, which can make a created group look missing. Once this worker
+has created a chat or `rewrite-description --run` has changed one, undo a
+release by rolling forward to a fixed build; never run an older worker
+against chats with the new description.
+
+For a `creation_unknown` setup, the worker's result lists each candidate
+under `candidateChats` with its title and `titleMatches`. A chat created just
+now still has the setup title, so a candidate with another title most likely
+carries a copied description. `chat provision resolve --run` refuses a chat
+whose title differs from the setup title; pass `--allow-title-mismatch` only
+with evidence in `--reason` that this chat is the one created for the setup.
+The marker and owner checks still apply. The ready re-check compares only the
+description, since admins may rename a live chat.
+
 Never edit a deal chat's description by hand. A description that names
 neither the setup's ref nor its legacy marker fails the checks, and the setup
 stops with `Ready setup owner or marker changed` or `verify_marker`. To move
