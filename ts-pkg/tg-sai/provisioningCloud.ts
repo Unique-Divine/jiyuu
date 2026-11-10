@@ -88,6 +88,7 @@ export function setupFromCloud(raw: unknown): Setup {
       "creation_unknown",
       "configuring",
       "incomplete",
+      "awaiting_join",
       "ready",
       "cancelled",
     ].includes(setup.state)

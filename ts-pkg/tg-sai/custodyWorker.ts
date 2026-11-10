@@ -235,9 +235,13 @@ export async function runWorkerOnce(
       continue
     }
     if (
-      !["prepared", "creating", "configuring", "incomplete"].includes(
-        setup.state,
-      )
+      ![
+        "prepared",
+        "creating",
+        "configuring",
+        "incomplete",
+        "awaiting_join",
+      ].includes(setup.state)
     ) {
       results.push({ requestId: setup.requestId, state: setup.state })
       continue
@@ -252,17 +256,19 @@ export async function runWorkerOnce(
       })
       continue
     }
-    if (
-      setup.retryAt &&
-      Date.parse(setup.retryAt) > (options.now ?? Date.now())
-    ) {
+    // Deal Desk serves an `awaiting_join` setup only once its check is due,
+    // and an `incomplete` one only once its retry is due; a view can still
+    // show either early.
+    const dueAt =
+      setup.state === "awaiting_join" ? setup.nextCheckAt : setup.retryAt
+    if (dueAt && Date.parse(dueAt) > (options.now ?? Date.now())) {
       // A setup waiting for an invited member to join makes no add until it
       // resumes, so it does not hold up the background drain.
       if (!waitingOnInvitedMember(setup)) requesterWork = true
       results.push({
         requestId: setup.requestId,
         state: "waiting",
-        retryAt: setup.retryAt,
+        retryAt: dueAt,
       })
       continue
     }
@@ -312,7 +318,10 @@ export async function runWorkerOnce(
         requestId: setup.requestId,
         state: current.state,
         ...(current.chatId ? { chatId: current.chatId } : {}),
-        retryAt: current.retryAt,
+        retryAt:
+          current.state === "awaiting_join"
+            ? current.nextCheckAt
+            : current.retryAt,
         error: safeProvisionError(error),
       })
     }

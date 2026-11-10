@@ -22,6 +22,7 @@ export type ProvisionState =
   | "creation_unknown"
   | "configuring"
   | "incomplete"
+  | "awaiting_join"
   | "ready"
   | "cancelled"
 export interface Binding {
@@ -36,6 +37,8 @@ export interface Setup extends ProvisionRequest {
   claimToken?: string
   receipt?: unknown
   retryAt?: string | null
+  /** When an `awaiting_join` setup is due for its next check. */
+  nextCheckAt?: string | null
   /** Last saved diagnostic, `<step>:<code>`, when the cloud reports one. */
   error?: string | null
 }
@@ -91,6 +94,8 @@ export interface Progress {
   error?: string
   creationRejected?: boolean
   retryAt?: string | null
+  /** Required with `awaiting_join`: when the worker checks the chat again. */
+  nextCheckAt?: string
 }
 export interface ProvisionCloud {
   view(requestId: string): Promise<Setup>
@@ -564,13 +569,20 @@ const WAIT_INVITATION_REASONS = new Set([
   PRIVACY_INVITATION_REASON,
 ])
 
-/** Whether a saved setup is waiting for an invited member to join. */
+/**
+ * Whether a saved setup is waiting for an invited member to join: state
+ * `awaiting_join`, or an `incomplete` row saved with one of the wait codes
+ * before Deal Desk had that state. Such a setup makes no add while it
+ * waits, holds no Deal Desk claim, and never makes the account busy.
+ */
 export function waitingOnInvitedMember(setup: {
+  state?: ProvisionState
   error?: string | null
 }): boolean {
   // Every step that saves `TG_SAI_MEMBER_NOT_VISIBLE` first gives the
   // people it waits on a link; the bot has its own code.
   return (
+    setup.state === "awaiting_join" ||
     setup.error?.endsWith(`:${MEMBER_NOT_VISIBLE}`) === true ||
     setup.error === `add_member:${AWAITING_JOIN}`
   )
@@ -916,11 +928,17 @@ export async function provisionSetup(params: {
   }
   const chatId = setup.chatId!
   let step: ProvisionStep = "verify_marker"
+  // People this check left waiting on their invitation, if any.
+  let waitingOn: number[] = []
   try {
     if (!(await telegram.verifyMarker(chatId, creationMarker(setup))))
       throw new Error("Chat marker or custody owner verification failed")
-    step = "save_configuring"
-    await save({ state: "configuring", chatId, binding })
+    // A re-check of a chat waiting on people to join keeps its state, so
+    // requesters see no "configuring" flicker every 15 minutes.
+    if (setup.state !== "awaiting_join") {
+      step = "save_configuring"
+      await save({ state: "configuring", chatId, binding })
+    }
     // Requester first: only required participants (the requester and team
     // admins) and the bot join in this job. Optional members go to the
     // background queue once the chat verifies.
@@ -1174,6 +1192,7 @@ export async function provisionSetup(params: {
         })),
       )
       step = failedStep
+      if (!userIds.includes(PROVISIONING_BOT_ID)) waitingOn = people
       throw userIds.includes(PROVISIONING_BOT_ID)
         ? botNotVisibleError()
         : notVisibleError()
@@ -1198,6 +1217,7 @@ export async function provisionSetup(params: {
       throw failure.error
     }
     const waiting = [...notVisible, ...privacyRefused, ...invited]
+    if (waiting.length) waitingOn = waiting
     if (waiting.length || botNotVisible) {
       // Only privacy invitations outstanding: the person must act.
       const privacyOnly =
@@ -1418,6 +1438,31 @@ export async function provisionSetup(params: {
       // Telegram answered every call up to it, so the stall is over.
       stalledRuns = 0
       stalledStep = undefined
+    }
+    const awaiting = waitingOn.length
+      ? pendingInvitations.filter((i) =>
+          waitingOn.some((userId) => String(userId) === i.userId),
+        )
+      : []
+    if (
+      awaiting.length &&
+      retryAt &&
+      waitingOnInvitedMember({ error: diagnostic })
+    ) {
+      // Only invited people can finish this chat. Deal Desk releases the
+      // claim, so other setups run until the next check is due.
+      await save({
+        state: "awaiting_join",
+        chatId,
+        binding,
+        error: diagnostic,
+        nextCheckAt: retryAt,
+        receipt: { pendingInvitations: awaiting },
+      })
+      throw new Error(
+        "Setup waiting on invited people to join; it resumes at its next check",
+        { cause: error },
+      )
     }
     await save({
       state: "incomplete",

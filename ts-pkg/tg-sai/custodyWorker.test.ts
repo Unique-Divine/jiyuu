@@ -58,7 +58,12 @@ function fixture() {
     progress: async (_id: string, token: string, progress: Progress) => {
       calls.push(`progress:${token}`)
       progressed.push(progress)
-      setup = { ...setup, ...progress }
+      // Like Deal Desk, only awaiting_join keeps a next check time.
+      setup = {
+        ...setup,
+        ...progress,
+        nextCheckAt: progress.nextCheckAt ?? null,
+      }
       return structuredClone(setup)
     },
     resolve: async () => setup,
@@ -827,10 +832,13 @@ test("a member added but never visible waits without stalling the drain, then bl
         deps,
       )
 
-    // Tick 1 runs the job: one add, then a link and a 15-minute retry.
+    // Tick 1 runs the job: one add, then a link and a 15-minute check.
+    // The setup waits as awaiting_join, which holds no Deal Desk claim.
     const first = await tick()
-    expect(first.results[0]?.state).toBe("incomplete")
-    expect(first.results[0]?.retryAt).toBeTruthy()
+    expect(first.results[0]?.state).toBe("awaiting_join")
+    expect(first.results[0]?.retryAt).toBe(f.setup.nextCheckAt)
+    expect(f.setup.nextCheckAt).toBeTruthy()
+    expect(f.setup.retryAt).toBeFalsy()
     expect(f.setup.error).toBe("verify_added_member:TG_SAI_MEMBER_NOT_VISIBLE")
     expect(adds).toEqual([1912700300])
     expect(drains).toBe(0)
@@ -842,10 +850,11 @@ test("a member added but never visible waits without stalling the drain, then bl
     expect(waiting.requesterWork).toBe(false)
     expect(drains).toBe(1)
 
-    // Resumes before expiry never add again.
+    // Resumes before expiry never add again, and keep waiting.
     setSystemTime(start + 16 * 60_000)
     await tick()
     expect(adds).toEqual([1912700300])
+    expect(f.setup.state).toBe("awaiting_join")
 
     // After the invitation expires the job stops for an operator.
     setSystemTime(start + 25 * 3_600_000)

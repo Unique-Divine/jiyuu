@@ -601,9 +601,12 @@ fixed team defaults must verify the expected numeric ID before any invitation.
 Telegram can accept an add before the person shows up in the chat. The worker
 reads the member again after 3 seconds. If they are still absent, it creates
 a 24-hour, approval-required invitation for them, saves it in the local
-receipt with reason `added_not_visible`, and leaves the setup `incomplete`
-with error `verify_added_member:TG_SAI_MEMBER_NOT_VISIBLE` and a `retryAt`
-15 minutes out. The worker never adds that person again:
+receipt with reason `added_not_visible`, and saves the setup as
+`awaiting_join` with error `verify_added_member:TG_SAI_MEMBER_NOT_VISIBLE`,
+a `nextCheckAt` 15 minutes out, and the pending invitations. Deal Desk
+releases the worker claim for `awaiting_join`, so other setups for the
+account run meanwhile, and the bot shows the requester who it waits on and
+the link. The worker never adds that person again:
 
 - Each resume approves their join request, if one is waiting, and finishes
   once they are in. Someone who taps the link sees "request sent" and waits
@@ -614,7 +617,7 @@ with error `verify_added_member:TG_SAI_MEMBER_NOT_VISIBLE` and a `retryAt`
   `tg-sai audit --chat <chat-id> --target-user <user-id>` before asking a
   team admin to approve.
 - While the setup waits on that person, it does not pause the background
-  queue.
+  queue or other setups, and Deal Desk shows no account hold for it.
 - If the invitation expires first, the setup is saved with error
   `verify_added_member:TG_SAI_INVITATION_EXPIRED` and no `retryAt`, so the
   worker reports `operator_recovery_required`. The worker never adds that
@@ -630,9 +633,10 @@ with error `verify_added_member:TG_SAI_MEMBER_NOT_VISIBLE` and a `retryAt`
 - An approval error is saved as `approve_join:<code>`. A flood on the
   approval becomes a saved hold and sets its own `retryAt`.
 
-The link is only in the receipt on the custody host. Deal Desk status shows
-only the error code. The receipt file is named by the SHA-256 of the request
-ID:
+While the setup is `awaiting_join`, Deal Desk has the links too
+(`chat-setups view <id>`, field `receipt.pendingInvitations`). After the
+setup ends, the link is only in the receipt on the custody host, named by
+the SHA-256 of the request ID:
 
 ```bash
 id='<request id>'
@@ -656,9 +660,9 @@ and moves the row behind the others.
 
 A required person whose add is refused for privacy gets the same kind of
 invitation, with receipt reason `privacy_restricted`. The setup stays
-`incomplete` with `add_member:TG_SAI_AWAITING_JOIN` and retries every 15
-minutes. Send the person the link from the receipt. The rules above apply:
-the worker approves their join request, never adds them again, and stops
+`awaiting_join` with `add_member:TG_SAI_AWAITING_JOIN` and is checked again
+every 15 minutes. Send the person the link from the receipt. The rules above
+apply: the worker approves their join request, never adds them again, and stops
 for an operator once the invitation expires.
 
 ### Setup Failure Paths

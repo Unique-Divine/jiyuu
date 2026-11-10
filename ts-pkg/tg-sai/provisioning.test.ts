@@ -1089,14 +1089,14 @@ describe("batched member adds", () => {
         if (id !== 22) f.members.set(id, { role: "member", rights: {} })
       return [22]
     }
-    await expect(f.run()).rejects.toThrow("Setup incomplete")
+    await expect(f.run()).rejects.toThrow("waiting on invited people")
     expect(f.members.get(21)).toBeUndefined()
     expect(f.members.get(PROVISIONING_BOT_ID)?.role).toBe("member")
     expect(f.queued).toEqual([])
     expect((f.setup as Setup & { error: string }).error).toBe(
       "add_member:TG_SAI_AWAITING_JOIN",
     )
-    expect(f.setup.retryAt).toBeTruthy()
+    expect(f.setup.nextCheckAt).toBeTruthy()
     expect(
       f.local?.pendingInvitations?.map((i) => [i.userId, i.reason]),
     ).toEqual([["22", PRIVACY_INVITATION_REASON]])
@@ -1332,11 +1332,16 @@ describe("added but not visible", () => {
     const f = fixture()
     const h = hiding(f, new Set([22]))
     const before = Date.now()
-    await expect(f.run(h.sleep)).rejects.toThrow("incomplete")
+    await expect(f.run(h.sleep)).rejects.toThrow("waiting on invited people")
     const setup = f.setup as Setup & { error: string }
-    expect(setup.state).toBe("incomplete")
+    expect(setup.state).toBe("awaiting_join")
     expect(setup.error).toBe("verify_added_member:TG_SAI_MEMBER_NOT_VISIBLE")
-    const retryMs = Date.parse(setup.retryAt!) - before
+    expect(setup.retryAt).toBeFalsy()
+    expect(
+      (setup.receipt as { pendingInvitations: { userId: string }[] })
+        .pendingInvitations.map((i) => i.userId),
+    ).toEqual(["22"])
+    const retryMs = Date.parse(setup.nextCheckAt!) - before
     expect(retryMs).toBeGreaterThanOrEqual(MEMBER_NOT_VISIBLE_RETRY_MS)
     expect(retryMs).toBeLessThan(MEMBER_NOT_VISIBLE_RETRY_MS + 60_000)
     expect(h.sleeps).toEqual([MEMBER_RECHECK_MS])
@@ -1350,14 +1355,14 @@ describe("added but not visible", () => {
   test("a resumed job waits for the invited member instead of adding again", async () => {
     const f = fixture()
     const h = hiding(f, new Set([22]))
-    await expect(f.run(h.sleep)).rejects.toThrow("incomplete")
+    await expect(f.run(h.sleep)).rejects.toThrow("waiting on invited people")
     f.events.length = 0
 
     // Still absent: no add, no new link, still incomplete with a retry.
-    await expect(f.run(h.sleep)).rejects.toThrow("incomplete")
+    await expect(f.run(h.sleep)).rejects.toThrow("waiting on invited people")
     expect(f.events.filter((e) => e.startsWith("add:"))).toEqual([])
     expect(h.links).toEqual([22])
-    expect(f.setup.retryAt).toBeTruthy()
+    expect(f.setup.nextCheckAt).toBeTruthy()
 
     // Joined by link: promoted and ready without another add.
     f.members.set(22, { role: "member", rights: {} })
@@ -1370,7 +1375,7 @@ describe("added but not visible", () => {
   test("a resumed job approves the invited member's join request", async () => {
     const f = fixture()
     const h = hiding(f, new Set([22]))
-    await expect(f.run(h.sleep)).rejects.toThrow("incomplete")
+    await expect(f.run(h.sleep)).rejects.toThrow("waiting on invited people")
     const requests = new Set([22])
     const approvals: number[] = []
     f.telegram.approveJoin = async (_chat, userId) => {
@@ -1389,10 +1394,10 @@ describe("added but not visible", () => {
   test("no waiting join request leaves the member invited", async () => {
     const f = fixture()
     const h = hiding(f, new Set([22]))
-    await expect(f.run(h.sleep)).rejects.toThrow("incomplete")
+    await expect(f.run(h.sleep)).rejects.toThrow("waiting on invited people")
     f.telegram.approveJoin = async () => false
     f.events.length = 0
-    await expect(f.run(h.sleep)).rejects.toThrow("incomplete")
+    await expect(f.run(h.sleep)).rejects.toThrow("waiting on invited people")
     expect((f.setup as Setup & { error: string }).error).toBe(
       "verify_added_member:TG_SAI_MEMBER_NOT_VISIBLE",
     )
@@ -1402,7 +1407,7 @@ describe("added but not visible", () => {
   test("an approval error is saved with its own code and retry time", async () => {
     const f = fixture()
     const h = hiding(f, new Set([22]))
-    await expect(f.run(h.sleep)).rejects.toThrow("incomplete")
+    await expect(f.run(h.sleep)).rejects.toThrow("waiting on invited people")
     f.telegram.approveJoin = async () => {
       throw Object.assign(new Error("flood"), {
         code: 420,
@@ -1430,7 +1435,7 @@ describe("added but not visible", () => {
   test("an expired invitation stops for an operator instead of adding again", async () => {
     const f = fixture()
     const h = hiding(f, new Set([22]))
-    await expect(f.run(h.sleep)).rejects.toThrow("incomplete")
+    await expect(f.run(h.sleep)).rejects.toThrow("waiting on invited people")
     const expire = () => {
       f.local = {
         ...f.local!,
@@ -1460,7 +1465,7 @@ describe("added but not visible", () => {
   test("an expired invitation with a waiting request is approved", async () => {
     const f = fixture()
     const h = hiding(f, new Set([22]))
-    await expect(f.run(h.sleep)).rejects.toThrow("incomplete")
+    await expect(f.run(h.sleep)).rejects.toThrow("waiting on invited people")
     f.local = {
       ...f.local!,
       pendingInvitations: f.local!.pendingInvitations!.map((i) => ({
@@ -1479,7 +1484,7 @@ describe("added but not visible", () => {
   test("approval goes only to members invited as not visible", async () => {
     const f = fixture()
     const h = hiding(f, new Set([22]))
-    await expect(f.run(h.sleep)).rejects.toThrow("incomplete")
+    await expect(f.run(h.sleep)).rejects.toThrow("waiting on invited people")
     // Required user 21 left the chat; one case adds a background-queue
     // invitation for them, which must not count as a not-visible one.
     f.members.delete(21)
@@ -1507,7 +1512,7 @@ describe("added but not visible", () => {
       f.members.delete(21)
       // As if no run had added 21 yet; one that had would send a link.
       f.local = { ...f.local!, addedIds: [] }
-      await expect(f.run(h.sleep)).rejects.toThrow("incomplete")
+      await expect(f.run(h.sleep)).rejects.toThrow("waiting on invited people")
       expect(approvals).toEqual([22])
       expect(f.events.filter((e) => e.startsWith("add:"))).toEqual(["add:21"])
     }
@@ -1594,6 +1599,8 @@ describe("added but not visible", () => {
 })
 
 describe("transient failure paths", () => {
+  /** Saved `incomplete`, or `awaiting_join` when only invited people remain. */
+  const STOPPED = /incomplete|waiting on invited people/
   const rpc = (code: number, text: string) =>
     tl.RpcError.fromTl({ _: "rpc_error", errorCode: code, errorMessage: text })
   const transientErrors = (): unknown[] => [
@@ -1744,13 +1751,15 @@ describe("transient failure paths", () => {
           throw rpc(400, "USER_NOT_PARTICIPANT")
         await promote(chat, id, rights)
       }
-      await expect(f.run()).rejects.toThrow("incomplete")
+      await expect(f.run()).rejects.toThrow(STOPPED)
       expect(errorOf(f)).toBe(
         bot
           ? `promote_bot:${BOT_NOT_VISIBLE}`
           : `promote_admin:${MEMBER_NOT_VISIBLE}`,
       )
-      expect(f.setup.retryAt).toBeTruthy()
+      // A bot wait keeps its claim; a person's wait is awaiting_join.
+      expect(f.setup.state).toBe(bot ? "incomplete" : "awaiting_join")
+      expect(bot ? f.setup.retryAt : f.setup.nextCheckAt).toBeTruthy()
       // The resumed job finds the member and promotes without an add.
       f.telegram.promote = promote
       f.events.length = 0
@@ -1767,7 +1776,7 @@ describe("transient failure paths", () => {
       if (id === 22) throw rpc(400, "USER_NOT_PARTICIPANT")
       await promote(chat, id, rights)
     }
-    await expect(f.run()).rejects.toThrow("incomplete")
+    await expect(f.run()).rejects.toThrow(STOPPED)
     expect(
       f.local?.pendingInvitations?.map((i) => [i.userId, i.reason]),
     ).toEqual([["22", NOT_VISIBLE_INVITATION_REASON]])
@@ -1775,7 +1784,7 @@ describe("transient failure paths", () => {
     hide(f, new Set([22]))
     f.events.length = 0
     for (let tick = 0; tick < 3; tick++)
-      await expect(f.run()).rejects.toThrow("incomplete")
+      await expect(f.run()).rejects.toThrow(STOPPED)
     expect(f.events.filter((e) => e.startsWith("add:"))).toEqual([])
     expect(errorOf(f)).toBe(`verify_added_member:${MEMBER_NOT_VISIBLE}`)
   })
@@ -1789,9 +1798,10 @@ describe("transient failure paths", () => {
       listed.delete(21)
       return listed
     }
-    await expect(f.run()).rejects.toThrow("incomplete")
+    await expect(f.run()).rejects.toThrow(STOPPED)
     expect(errorOf(f)).toBe(`audit_membership:${MEMBER_NOT_VISIBLE}`)
-    expect(f.setup.retryAt).toBeTruthy()
+    expect(f.setup.state).toBe("awaiting_join")
+    expect(f.setup.nextCheckAt).toBeTruthy()
     f.telegram.members = async () => new Map(f.members)
     f.events.length = 0
     expect((await f.run()).state).toBe("ready")
@@ -1802,14 +1812,14 @@ describe("transient failure paths", () => {
     const f = fixture()
     withLinks(f)
     hide(f, new Set([21]))
-    await expect(f.run()).rejects.toThrow("incomplete")
+    await expect(f.run()).rejects.toThrow(STOPPED)
     expect(errorOf(f)).toBe(`audit_membership:${MEMBER_NOT_VISIBLE}`)
     expect(
       f.local?.pendingInvitations?.map((i) => [i.userId, i.reason]),
     ).toEqual([["21", NOT_VISIBLE_INVITATION_REASON]])
     f.events.length = 0
     for (let tick = 0; tick < 3; tick++)
-      await expect(f.run()).rejects.toThrow("incomplete")
+      await expect(f.run()).rejects.toThrow(STOPPED)
     expect(f.events.filter((e) => e.startsWith("add:"))).toEqual([])
   })
 
@@ -2214,10 +2224,10 @@ describe("transient failure paths", () => {
       if (id === 21) throw rpc(-503, "Timeout")
       await add(chat, id)
     }
-    await expect(f.run()).rejects.toThrow("incomplete")
+    await expect(f.run()).rejects.toThrow(STOPPED)
     expect(errorOf(f)).toBe(`add_member:${TELEGRAM_TRANSIENT}`)
     for (let tick = 0; tick < 3; tick++)
-      await expect(f.run()).rejects.toThrow("incomplete")
+      await expect(f.run()).rejects.toThrow(STOPPED)
     expect(adds.filter((id) => id === 21)).toHaveLength(1)
     expect(errorOf(f)).toBe(`verify_added_member:${MEMBER_NOT_VISIBLE}`)
     expect(
@@ -2238,10 +2248,10 @@ describe("transient failure paths", () => {
       await add(chat, id)
     }
     expect(f.local).toBeNull()
-    await expect(f.run()).rejects.toThrow("incomplete")
+    await expect(f.run()).rejects.toThrow(STOPPED)
     expect(f.local?.addedIds).toEqual([21])
     for (let tick = 0; tick < 2; tick++)
-      await expect(f.run()).rejects.toThrow("incomplete")
+      await expect(f.run()).rejects.toThrow(STOPPED)
     expect(adds.filter((id) => id === 21)).toHaveLength(1)
   })
 
@@ -2254,13 +2264,13 @@ describe("transient failure paths", () => {
       if (id === 22) throw rpc(400, "USER_NOT_PARTICIPANT")
       await promote(chat, id, rights)
     }
-    await expect(f.run()).rejects.toThrow("incomplete")
+    await expect(f.run()).rejects.toThrow(STOPPED)
     expect(errorOf(f)).toBe(`promote_admin:${MEMBER_NOT_VISIBLE}`)
     // A link wait: the background drain may run meanwhile.
     expect(waitingOnInvitedMember(f.setup)).toBe(true)
     f.events.length = 0
     for (let tick = 0; tick < 3; tick++)
-      await expect(f.run()).rejects.toThrow("incomplete")
+      await expect(f.run()).rejects.toThrow(STOPPED)
     expect(f.events.filter((e) => e.startsWith("add:"))).toEqual([])
   })
 
@@ -2275,12 +2285,12 @@ describe("transient failure paths", () => {
         expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
       }
     }
-    await expect(f.run()).rejects.toThrow("incomplete")
+    await expect(f.run()).rejects.toThrow(STOPPED)
     expect(errorOf(f)).toBe(`create_invitation:${TELEGRAM_TRANSIENT}`)
     failLink = false
     f.events.length = 0
     for (let tick = 0; tick < 2; tick++)
-      await expect(f.run()).rejects.toThrow("incomplete")
+      await expect(f.run()).rejects.toThrow(STOPPED)
     expect(f.events.filter((e) => e.startsWith("add:"))).toEqual([])
     expect(errorOf(f)).toBe(`verify_added_member:${MEMBER_NOT_VISIBLE}`)
   })
@@ -2389,7 +2399,7 @@ describe("transient failure paths", () => {
       if (id === 21) throw rpc(403, "USER_PRIVACY_RESTRICTED")
       f.members.set(id, { role: "member", rights: {} })
     }
-    await expect(f.run()).rejects.toThrow("incomplete")
+    await expect(f.run()).rejects.toThrow("waiting on invited people")
     expect(waitingOnInvitedMember(f.setup)).toBe(true)
     f.local = {
       ...f.local!,
@@ -2420,11 +2430,11 @@ describe("transient failure paths", () => {
       f.events.push(`add:${id}`)
       f.members.set(id, { role: "member", rights: {} })
     }
-    await expect(f.run()).rejects.toThrow("incomplete")
+    await expect(f.run()).rejects.toThrow("waiting on invited people")
     expect(errorOf(f)).toBe(`add_member:${AWAITING_JOIN}`)
     const before = Date.now()
-    await expect(f.run()).rejects.toThrow("incomplete")
-    expect(retryIn(f, before)).toBeGreaterThanOrEqual(
+    await expect(f.run()).rejects.toThrow("waiting on invited people")
+    expect(Date.parse(f.setup.nextCheckAt!) - before).toBeGreaterThanOrEqual(
       MEMBER_NOT_VISIBLE_RETRY_MS,
     )
     expect(adds).toBe(1)
