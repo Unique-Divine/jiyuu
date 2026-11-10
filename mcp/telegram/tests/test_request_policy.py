@@ -300,3 +300,30 @@ async def test_cleanup_failure_preserves_parent_outcome_without_recording_cooldo
             await task
     assert tracker.active(id(client), "get_dialogs") is None
     assert "Cancelled request cleanup failed" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_cancellation_retrieves_failure_from_already_finished_child():
+    import gc
+
+    loop = asyncio.get_running_loop()
+    unhandled = []
+    previous_handler = loop.get_exception_handler()
+    parent = None
+
+    async def operation():
+        assert parent is not None
+        loop.call_soon(parent.cancel)
+        raise RuntimeError("child finished before cancellation")
+
+    loop.set_exception_handler(lambda loop, context: unhandled.append(context))
+    try:
+        parent = asyncio.create_task(run_limited(object(), "get_dialogs", operation, timeout=30))
+        with pytest.raises(asyncio.CancelledError):
+            await parent
+        del parent
+        await asyncio.sleep(0)
+        gc.collect()
+        assert unhandled == []
+    finally:
+        loop.set_exception_handler(previous_handler)

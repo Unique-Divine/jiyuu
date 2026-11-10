@@ -398,6 +398,9 @@ async def run_limited(
                         logging.getLogger(__name__).warning(
                             "Cancelled request cleanup failed: %s", type(cleanup_error).__name__
                         )
+                elif not child.cancelled():
+                    # Caller cancellation can win after the child has failed.
+                    child.exception()
     except errors.FloodError as exc:
         if not is_wait_error(exc):
             raise
