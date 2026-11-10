@@ -6,6 +6,14 @@ install:
 test:
     uv run --frozen pytest -q
 
+# Check all Python sources, tests, and shared reporting helpers; keep ty's failure status.
+typecheck:
+    uv run --frozen ty check . ../../scripts/python
+
+# Test report-only status handling and real ty discovery without Telegram access.
+typecheck-test:
+    uv run --frozen python -m unittest discover -s ../../scripts/python -p 'test_*.py' -v
+
 # Check Python syntax and formatting.
 check:
     uv run --frozen python -m compileall -q main.py sanitize.py session_string_generator.py telegram_mcp
@@ -14,3 +22,7 @@ check:
 # Launch Telegram MCP over stdio with private environment credentials.
 run:
     uv run --frozen main.py
+
+# Write CI-compatible diagnostics; checker/configuration failures remain fatal.
+typecheck-report output_dir:
+    uv run --frozen --no-sync python ../../scripts/python/typecheck_report.py --project "Telegram MCP" --output-dir "{{output_dir}}" . ../../scripts/python

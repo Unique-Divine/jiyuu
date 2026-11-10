@@ -43,6 +43,19 @@ fmt:
 typecheck:
   bun check
 
+# Check both Python projects even when the first reports findings.
+python-typecheck:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  status=0
+  if ! just --justfile mcp/telegram/justfile typecheck; then
+    status=1
+  fi
+  if ! just --justfile ts-pkg/tg-sai/justfile py-typecheck; then
+    status=1
+  fi
+  exit "$status"
+
 # Preview merged PR classification inheritance; add --run to apply it.
 github-labels *ARGS:
   bun run scripts/github-labels/main.ts {{ARGS}}
