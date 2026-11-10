@@ -1,7 +1,16 @@
 """Media MCP tools."""
 
-from telegram_mcp.message_results import message_page, single_message
+from telethon import errors
+
+from telegram_mcp.gif_documents import GifDocuments, MAX_GIF_DOCUMENTS
+from telegram_mcp.message_results import single_message
 from telegram_mcp.runtime import *
+
+_gif_documents = GifDocuments()
+_GIF_SEARCH_AGAIN = (
+    "GIF document metadata is unavailable for this account. "
+    "Run get_gif_search again, then send an ID from that search."
+)
 
 
 @mcp.tool(annotations=ToolAnnotations(title="Send File", openWorldHint=True, destructiveHint=True))
@@ -361,49 +370,16 @@ async def get_gif_search(query: str, limit: int = 10, account: str | None = None
     try:
         cl = get_client(account)
         await ensure_connected(cl)
-        # Try approach 1: SearchGifsRequest
-        try:
-            result = await cl(
-                functions.messages.SearchGifsRequest(q=query, offset_id=0, limit=limit)
-            )
-            if not result.gifs:
-                return "[]"
-            return json.dumps(
-                [g.document.id for g in result.gifs], indent=2, default=json_serializer
-            )
-        except (AttributeError, ImportError):
-            # Fallback approach: Use SearchRequest with GIF filter
-            try:
-                from telethon.tl.types import InputMessagesFilterGif
-
-                result = await cl(
-                    functions.messages.SearchRequest(
-                        peer="gif",
-                        q=query,
-                        filter=InputMessagesFilterGif(),
-                        min_date=None,
-                        max_date=None,
-                        offset_id=0,
-                        add_offset=0,
-                        limit=limit,
-                        max_id=0,
-                        min_id=0,
-                        hash=0,
-                    )
-                )
-                if not result or not hasattr(result, "messages") or not result.messages:
-                    return "[]"
-                # Extract document IDs from any messages with media
-                gif_ids = []
-                for msg in result.messages:
-                    if hasattr(msg, "media") and msg.media and hasattr(msg.media, "document"):
-                        gif_ids.append(msg.media.document.id)
-                return json.dumps(gif_ids, default=json_serializer)
-            except Exception as inner_e:
-                # Last resort: Try to fetch from a public bot
-                return f"Could not search GIFs using available methods: {inner_e}"
+        results = await cl.inline_query("gif", query)
+        documents: list[types.Document] = []
+        for result in results:
+            document = getattr(result, "document", None)
+            if isinstance(document, types.Document):
+                documents.append(document)
+        documents = documents[: max(0, min(limit, MAX_GIF_DOCUMENTS))]
+        _gif_documents.remember(cl, documents)
+        return json.dumps([document.id for document in documents])
     except Exception as e:
-        logger.exception(f"get_gif_search failed (query={query}, limit={limit})")
         return log_and_format_error("get_gif_search", e, query=query, limit=limit)
 
 
@@ -412,7 +388,10 @@ async def get_gif_search(query: str, limit: int = 10, account: str | None = None
 @validate_id("chat_id")
 async def send_gif(chat_id: Union[int, str], gif_id: int, account: str | None = None) -> str:
     """
-    Send a GIF to a chat by Telegram GIF document ID (not a file path).
+    Send a GIF document ID from a recent get_gif_search on this account.
+
+    Search metadata lasts for this process and retains up to 100 documents
+    per account. Search again after restart, eviction, or reference expiry.
 
     Args:
         chat_id: The chat ID or username.
@@ -422,9 +401,19 @@ async def send_gif(chat_id: Union[int, str], gif_id: int, account: str | None = 
         cl = get_client(account)
         if not isinstance(gif_id, int):
             return "gif_id must be a Telegram document ID (integer), not a file path. Use get_gif_search to find IDs."
+        document = _gif_documents.get(cl, gif_id)
+        if document is None:
+            return _GIF_SEARCH_AGAIN
         entity = await resolve_entity(chat_id, cl)
-        await cl.send_file(entity, gif_id)
+        await cl.send_file(entity, document)
         return f"GIF sent to chat {chat_id}."
+    except (
+        errors.FileReferenceExpiredError,
+        errors.FileReferenceInvalidError,
+        errors.FileReferenceEmptyError,
+    ):
+        _gif_documents.forget(cl, gif_id)
+        return _GIF_SEARCH_AGAIN
     except Exception as e:
         return log_and_format_error("send_gif", e, chat_id=chat_id, gif_id=gif_id)
 
