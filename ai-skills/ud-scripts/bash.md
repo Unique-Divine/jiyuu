@@ -3,6 +3,8 @@
 Child page of agent skill `ud-scripts`. Read [SKILL.md](SKILL.md) first: a
 new repo script usually belongs in Python or Bun. Use this page when Bash is
 the right fit (a few lines of glue) or when editing an existing Bash script.
+Where this page and `SKILL.md` differ, `SKILL.md` wins. For example, scripts
+that change remote state dry-run by default, unlike Pattern 10 below.
 
 ## Core Defensive Principles
 

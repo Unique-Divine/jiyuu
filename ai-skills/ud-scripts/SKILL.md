@@ -1,6 +1,6 @@
 ---
 name: ud-scripts
-description: Choose the language for a repo script and write it well. New scripts default to zero-dependency Python or Bun TypeScript; Bash is for a few lines of glue. Use when writing, converting, or reviewing repo scripts, shell or Bash scripts, CI scripts, or justfile recipes that outgrow a few lines, or when choosing between Bash, Python, and Bun.
+description: Choose the language for a repo script, zero-dependency Python or Bun TypeScript, with Bash only for a few lines of glue. Use when writing, converting, or reviewing repo scripts, shell or Bash scripts, CI scripts, or justfile recipes that outgrow a few lines, or when choosing between Bash, Python, and Bun.
 ---
 
 # UD Scripts
@@ -17,8 +17,10 @@ Neither Python nor Bun is the default. Choose per script:
   script shares types or code with the app, or when it parses a lot of JSON.
   Bun's built-ins cover most needs: `fetch`, `Bun.file`, `Bun.spawn`,
   `bun:sqlite`, `Bun.Glob`, and `bun test`. Typecheck with `bun check`.
-- **Python** when the script runs where only system tools exist (a VM, CI
-  image, or fresh machine), since `python3` is nearly always installed. The
+- **Python** when the script runs where only system tools exist (a VM, a
+  GitHub-hosted runner, or a fresh machine). `python3` ships on macOS, most
+  Linux distros, and those runners, but not on slim or Alpine container
+  images. The
   standard library covers most needs: `argparse`, `json`, `pathlib`,
   `subprocess`, `sqlite3`, `urllib`, and `unittest`. Type hints need a
   separate checker (pyright or mypy).
