@@ -32,6 +32,13 @@ jobs:
           done
       - name: Typecheck TypeScript projects
         run: bun check
+      # No secrets: an empty environment and a throwaway HOME. testPreload.ts
+      # points TG_SAI_DIR at a temp directory, so no test reads ~/.tg-sai.
+      - name: Test tg-sai
+        working-directory: ts-pkg/tg-sai
+        run: |
+          home="$(mktemp -d)"
+          env -i PATH="$PATH" HOME="$home" TMPDIR="$RUNNER_TEMP" bun test
 
   # Runs Bun tests only when Markdown TOC sources or their workflow change.
   mdtoc-test:

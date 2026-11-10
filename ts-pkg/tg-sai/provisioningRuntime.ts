@@ -36,6 +36,18 @@ interface PrimaryInvite {
 }
 const COMPLETION_LINK_TIMEOUT_MS = 10_000
 
+/**
+ * Call options for create, add, and approval. They never sleep through a
+ * flood wait, and mtcute never resends them after a Telegram server error
+ * (its default is to resend every second without limit). Each error
+ * reaches provisioning, which saves a retry time and counts it, so a
+ * server error cannot turn one add into many.
+ */
+export const PROVISION_WRITE_PARAMS = {
+  floodSleepThreshold: 0,
+  maxRetryCount: 0,
+} as const
+
 /** Fetch completion links without creating invitations or sending messages. */
 export async function readProvisioningLinks(
   chatId: number,
@@ -338,9 +350,7 @@ export async function withProvisionTelegram<T>(
         floodSleepThreshold: 0,
         maxRetryCount: 0,
       })
-      // Create and add never sleep through a flood wait: the error reaches
-      // provisioning, which saves its retry time and releases the worker.
-      const writeClient = client.withParams({ floodSleepThreshold: 0 })
+      const writeClient = client.withParams(PROVISION_WRITE_PARAMS)
       const adapter: TelegramProvisioner = {
         self: async () => (await client.getMe()).id,
         resolve: (peer) =>

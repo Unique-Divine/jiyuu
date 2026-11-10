@@ -2,25 +2,39 @@ import { describe, expect, setSystemTime, test } from "bun:test"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { MtcuteError, MtTimeoutError, tl, TransportError } from "@mtcute/bun"
 import { holdExitFor } from "./main"
 import { addProfile, strictProfileCredentials } from "./profiles"
 import {
+  AWAITING_JOIN,
+  BOT_ADDS_EXHAUSTED,
   BOT_BASELINE_RIGHTS,
+  BOT_NOT_VISIBLE,
   cloudRetryAt,
   creationMarker,
   definiteCreateRejection,
   isPerUserAddError,
+  isTransientTelegramError,
+  MEMBER_NOT_VISIBLE,
+  MAX_BOT_ADDS,
+  MAX_TRANSIENT_RETRIES,
   MEMBER_NOT_VISIBLE_RETRY_MS,
   MEMBER_RECHECK_MS,
   MIN_CLOUD_RETRY_MS,
   NOT_VISIBLE_INVITATION_REASON,
+  PRIVACY_INVITATION_REASON,
   PROVISIONING_BOT_ID,
   provisionRetryAt,
   provisionSetup,
+  QUEUE_UNAVAILABLE,
   requestFingerprint,
   safeProvisionError,
   TEAM_ADMIN_RIGHTS,
+  TELEGRAM_TRANSIENT,
+  TRANSIENT_LIMIT,
+  TRANSIENT_RETRY_MS,
   validateRequest,
+  waitingOnInvitedMember,
 } from "./provisioning"
 import type {
   BackgroundEnqueue,
@@ -38,7 +52,7 @@ import {
   cloudRequest,
   dealDeskRequestKey,
 } from "./provisioningCloud"
-import { HoldError } from "./state/guard"
+import { HoldAccountUnknownError, HoldError } from "./state/guard"
 import { holdUntil, HoldStoreUnavailableError } from "./state/holds"
 import {
   accountPaths,
@@ -543,7 +557,12 @@ describe("custody provisioning", () => {
     const f = fixture()
     const add = f.telegram.add
     f.telegram.add = async (chat, id) => {
-      if (id === 22) throw new Error("privacy")
+      // A known refusal: the add did not happen, so a resume may add again.
+      if (id === 22)
+        throw Object.assign(new Error("privacy"), {
+          code: 403,
+          text: "USER_PRIVACY_RESTRICTED",
+        })
       await add(chat, id)
     }
     await expect(f.run()).rejects.toThrow("incomplete")
@@ -1061,7 +1080,7 @@ describe("batched member adds", () => {
     ])
       expect(isPerUserAddError(error)).toBe(false)
   })
-  test("a required user's privacy refusal still adds the others, then fails", async () => {
+  test("a required user's privacy refusal still adds the others, then waits on a link", async () => {
     const f = fixture()
     batched(f)
     f.telegram.addMany = async (_chat, ids) => {
@@ -1073,6 +1092,21 @@ describe("batched member adds", () => {
     expect(f.members.get(21)).toBeUndefined()
     expect(f.members.get(PROVISIONING_BOT_ID)?.role).toBe("member")
     expect(f.queued).toEqual([])
+    expect((f.setup as Setup & { error: string }).error).toBe(
+      "add_member:TG_SAI_AWAITING_JOIN",
+    )
+    expect(f.setup.retryAt).toBeTruthy()
+    expect(
+      f.local?.pendingInvitations?.map((i) => [i.userId, i.reason]),
+    ).toEqual([["22", PRIVACY_INVITATION_REASON]])
+  })
+  test("without invitation links a required user's privacy refusal fails", async () => {
+    const f = fixture()
+    f.telegram.add = async (_chat, id) => {
+      if (id === 22) throw { text: "USER_PRIVACY_RESTRICTED", code: 403 }
+      f.members.set(id, { role: "member", rights: {} })
+    }
+    await expect(f.run()).rejects.toThrow("Setup incomplete")
     expect((f.setup as Setup & { error: string }).error).toBe(
       "add_member:USER_PRIVACY_RESTRICTED",
     )
@@ -1470,6 +1504,8 @@ describe("added but not visible", () => {
       f.events.length = 0
       approvals.length = 0
       f.members.delete(21)
+      // As if no run had added 21 yet; one that had would send a link.
+      f.local = { ...f.local!, addedIds: [] }
       await expect(f.run(h.sleep)).rejects.toThrow("incomplete")
       expect(approvals).toEqual([22])
       expect(f.events.filter((e) => e.startsWith("add:"))).toEqual(["add:21"])
@@ -1481,16 +1517,17 @@ describe("added but not visible", () => {
     const h = hiding(f, new Set([22]))
     f.telegram.add = async (_chat, id) => {
       f.events.push(`add:${id}`)
+      // A privacy refusal would get its own invitation; this one cannot.
       if (id === 21)
-        throw Object.assign(new Error("privacy"), {
-          code: 403,
-          text: "USER_PRIVACY_RESTRICTED",
+        throw Object.assign(new Error("too many"), {
+          code: 400,
+          text: "USER_CHANNELS_TOO_MUCH",
         })
       if (id !== 22) f.members.set(id, { role: "member", rights: {} })
     }
     await expect(f.run(h.sleep)).rejects.toThrow("incomplete")
     const setup = f.setup as Setup & { error: string }
-    expect(setup.error).toBe("add_member:USER_PRIVACY_RESTRICTED")
+    expect(setup.error).toBe("add_member:USER_CHANNELS_TOO_MUCH")
     expect(setup.retryAt).toBeNull()
     expect(
       f.local?.pendingInvitations?.map((i) => [i.userId, i.reason]),
@@ -1501,14 +1538,41 @@ describe("added but not visible", () => {
     expect(f.events.filter((e) => e.startsWith("add:"))).toEqual(["add:21"])
   })
 
-  test("a bot that is not visible still fails the setup", async () => {
+  test("a bot that is not visible retries without a link", async () => {
     const f = fixture()
-    const h = hiding(f, new Set([PROVISIONING_BOT_ID]))
+    const hidden = new Set([PROVISIONING_BOT_ID])
+    const h = hiding(f, hidden)
     await expect(f.run(h.sleep)).rejects.toThrow("incomplete")
     const setup = f.setup as Setup & { error: string }
-    expect(setup.error).toBe("verify_added_member:provisioning_step_failed")
-    expect(setup.retryAt).toBeNull()
+    expect(setup.error).toBe(`verify_added_member:${BOT_NOT_VISIBLE}`)
+    expect(setup.retryAt).toBeTruthy()
     expect(h.links).toEqual([])
+    // The bot shows up later: the resumed job promotes it, no second add.
+    f.members.set(PROVISIONING_BOT_ID, { role: "member", rights: {} })
+    f.events.length = 0
+    expect((await f.run(h.sleep)).state).toBe("ready")
+    expect(f.events.filter((e) => e.startsWith("add:"))).toEqual([])
+  })
+
+  test("a bot that never shows is re-added once, then stops for an operator", async () => {
+    const f = fixture()
+    const h = hiding(f, new Set([PROVISIONING_BOT_ID]))
+    const botAdds = () =>
+      f.events.filter((e) => e === `add:${PROVISIONING_BOT_ID}`).length
+    // Tick 1 adds the bot; tick 2 re-adds it; ticks 3 and 4 add nothing.
+    await expect(f.run(h.sleep)).rejects.toThrow("incomplete")
+    expect(f.setup.retryAt).toBeTruthy()
+    await expect(f.run(h.sleep)).rejects.toThrow("incomplete")
+    expect(botAdds()).toBe(MAX_BOT_ADDS)
+    expect(f.local?.botAdds).toBe(MAX_BOT_ADDS)
+    for (let tick = 0; tick < 2; tick++) {
+      await expect(f.run(h.sleep)).rejects.toThrow("incomplete")
+      expect((f.setup as Setup & { error: string }).error).toBe(
+        `verify_added_member:${BOT_ADDS_EXHAUSTED}`,
+      )
+      expect(f.setup.retryAt).toBeNull()
+    }
+    expect(botAdds()).toBe(MAX_BOT_ADDS)
   })
 
   test("without invitation links the old failure stands", async () => {
@@ -1525,5 +1589,492 @@ describe("added but not visible", () => {
     expect(safeProvisionError({ text: "TG_SAI_MEMBER_NOT_VISIBLE" })).toBe(
       "TG_SAI_MEMBER_NOT_VISIBLE",
     )
+  })
+})
+
+describe("transient failure paths", () => {
+  const rpc = (code: number, text: string) =>
+    tl.RpcError.fromTl({ _: "rpc_error", errorCode: code, errorMessage: text })
+  const transientErrors = (): unknown[] => [
+    rpc(-503, "Timeout"),
+    rpc(500, "RPC_CALL_FAIL"),
+    rpc(500, "INTERDC_2_CALL_ERROR"),
+    new MtTimeoutError(10_000),
+    new TransportError(404),
+    new MtcuteError("Connection closed"),
+    new MtcuteError("Connection destroyed"),
+    Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" }),
+    new DOMException("The operation was aborted", "AbortError"),
+  ]
+  const errorOf = (f: ReturnType<typeof fixture>) =>
+    (f.setup as Setup & { error?: string }).error
+  /** Milliseconds from `before` to the saved retryAt. */
+  const retryIn = (f: ReturnType<typeof fixture>, before: number) =>
+    Date.parse(f.setup.retryAt!) - before
+  function resumed(f: ReturnType<typeof fixture>) {
+    f.setup = {
+      ...f.setup,
+      state: "configuring",
+      chatId: -100123,
+      binding: { participants: [21, 22], admins: [22] },
+    }
+  }
+
+  test("timeouts, dropped connections, and server errors are transient", () => {
+    for (const error of transientErrors()) {
+      expect(isTransientTelegramError(error)).toBe(true)
+      expect(safeProvisionError(error)).toBe(TELEGRAM_TRANSIENT)
+      expect(provisionRetryAt(error, 0)).toBe(
+        new Date(TRANSIENT_RETRY_MS).toISOString(),
+      )
+    }
+    for (const error of [
+      rpc(420, "FLOOD_WAIT_30"),
+      rpc(403, "USER_PRIVACY_RESTRICTED"),
+      rpc(400, "CHAT_ADMIN_REQUIRED"),
+      rpc(400, "USER_NOT_PARTICIPANT"),
+      new HoldError(Date.now() + 5_000, "invite"),
+      new HoldStoreUnavailableError("locked"),
+      new Error("network"),
+      new Error("Chat marker or custody owner verification failed"),
+      null,
+    ])
+      expect(isTransientTelegramError(error)).toBe(false)
+    expect(safeProvisionError(rpc(420, "FLOOD_WAIT_30"))).toBe("FLOOD_WAIT_30")
+  })
+
+  test("a transient error at any Telegram step leaves a retryAt", async () => {
+    const cases = [
+      ["verify_marker", "verifyMarker"],
+      ["read_member", "member"],
+      ["add_member", "add"],
+      ["promote_admin", "promote"],
+    ] as const
+    for (const error of transientErrors())
+      for (const [step, method] of cases) {
+        const f = fixture()
+        resumed(f)
+        f.telegram[method] = async () => {
+          throw error
+        }
+        const before = Date.now()
+        await expect(f.run()).rejects.toThrow("incomplete")
+        expect(f.setup.state).toBe("incomplete")
+        expect(errorOf(f)).toBe(`${step}:${TELEGRAM_TRANSIENT}`)
+        expect(retryIn(f, before)).toBeGreaterThanOrEqual(TRANSIENT_RETRY_MS)
+        expect(retryIn(f, before)).toBeLessThan(TRANSIENT_RETRY_MS + 60_000)
+      }
+  })
+
+  test("a transient error on the final listing leaves a retryAt", async () => {
+    const f = fixture()
+    f.telegram.members = async () => {
+      throw new MtTimeoutError(10_000)
+    }
+    await expect(f.run()).rejects.toThrow("incomplete")
+    expect(errorOf(f)).toBe(`audit_membership:${TELEGRAM_TRANSIENT}`)
+    expect(f.setup.retryAt).toBeTruthy()
+  })
+
+  test("an add that timed out after it took effect is not repeated", async () => {
+    const f = fixture()
+    resumed(f)
+    const adds: number[] = []
+    f.telegram.add = async (_chat, id) => {
+      adds.push(id)
+      f.members.set(id, { role: "member", rights: {} })
+      // The first add takes effect, but its response is lost.
+      if (adds.length === 1) throw new MtTimeoutError(10_000)
+    }
+    await expect(f.run()).rejects.toThrow("incomplete")
+    expect(adds).toEqual([21])
+    expect(f.setup.retryAt).toBeTruthy()
+    expect((await f.run()).state).toBe("ready")
+    expect(adds).toEqual([21, 22, PROVISIONING_BOT_ID])
+  })
+
+  test("a timed-out creation stays unknown, with no retryAt", async () => {
+    const f = fixture()
+    f.telegram.create = async () => {
+      throw new MtTimeoutError(10_000)
+    }
+    await expect(f.run()).rejects.toThrow("Group creation failed")
+    expect(f.setup.state).toBe("creation_unknown")
+    expect(f.setup.retryAt).toBeNull()
+  })
+
+  test("a creation refused for an unknown session account retries", async () => {
+    const f = fixture()
+    f.telegram.create = async () => {
+      throw new HoldAccountUnknownError("channels.createChannel")
+    }
+    await expect(f.run()).rejects.toThrow("Group creation failed")
+    expect(f.setup.state).toBe("incomplete")
+    expect(f.setup.retryAt).toBeTruthy()
+    expect(errorOf(f)).toBe("TG_SAI_HOLD_ACCOUNT_UNKNOWN")
+  })
+
+  /** Gives the fixture controlled invitation links. */
+  function withLinks(f: ReturnType<typeof fixture>) {
+    f.telegram.inviteLink = async () => ({
+      inviteLink: "https://t.me/+notShown",
+      expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+    })
+  }
+  /** `hidden` users are in the chat but every read and listing omits them. */
+  function hide(f: ReturnType<typeof fixture>, hidden: Set<number>) {
+    const member = f.telegram.member
+    f.telegram.member = async (chat, id) =>
+      hidden.has(id) ? { role: "absent", rights: {} } : member(chat, id)
+    f.telegram.members = async () => {
+      const listed = new Map(f.members)
+      for (const id of hidden) listed.delete(id)
+      return listed
+    }
+  }
+
+  test("promoting a user not shown in the chat yet retries", async () => {
+    for (const bot of [false, true]) {
+      const f = fixture()
+      withLinks(f)
+      const promote = f.telegram.promote
+      f.telegram.promote = async (chat, id, rights) => {
+        if ((id === PROVISIONING_BOT_ID) === bot)
+          throw rpc(400, "USER_NOT_PARTICIPANT")
+        await promote(chat, id, rights)
+      }
+      await expect(f.run()).rejects.toThrow("incomplete")
+      expect(errorOf(f)).toBe(
+        bot
+          ? `promote_bot:${BOT_NOT_VISIBLE}`
+          : `promote_admin:${MEMBER_NOT_VISIBLE}`,
+      )
+      expect(f.setup.retryAt).toBeTruthy()
+      // The resumed job finds the member and promotes without an add.
+      f.telegram.promote = promote
+      f.events.length = 0
+      expect((await f.run()).state).toBe("ready")
+      expect(f.events.filter((e) => e.startsWith("add:"))).toEqual([])
+    }
+  })
+
+  test("a person refused promotion as absent gets a link, never a re-add", async () => {
+    const f = fixture()
+    withLinks(f)
+    const promote = f.telegram.promote
+    f.telegram.promote = async (chat, id, rights) => {
+      if (id === 22) throw rpc(400, "USER_NOT_PARTICIPANT")
+      await promote(chat, id, rights)
+    }
+    await expect(f.run()).rejects.toThrow("incomplete")
+    expect(
+      f.local?.pendingInvitations?.map((i) => [i.userId, i.reason]),
+    ).toEqual([["22", NOT_VISIBLE_INVITATION_REASON]])
+    // Still hidden on every resume: the job waits on the link, no add.
+    hide(f, new Set([22]))
+    f.events.length = 0
+    for (let tick = 0; tick < 3; tick++)
+      await expect(f.run()).rejects.toThrow("incomplete")
+    expect(f.events.filter((e) => e.startsWith("add:"))).toEqual([])
+    expect(errorOf(f)).toBe(`verify_added_member:${MEMBER_NOT_VISIBLE}`)
+  })
+
+  test("a required member missing from the final listing retries", async () => {
+    const f = fixture()
+    withLinks(f)
+    // Added, but the listing right after does not show them yet.
+    f.telegram.members = async () => {
+      const listed = new Map(f.members)
+      listed.delete(21)
+      return listed
+    }
+    await expect(f.run()).rejects.toThrow("incomplete")
+    expect(errorOf(f)).toBe(`audit_membership:${MEMBER_NOT_VISIBLE}`)
+    expect(f.setup.retryAt).toBeTruthy()
+    f.telegram.members = async () => new Map(f.members)
+    f.events.length = 0
+    expect((await f.run()).state).toBe("ready")
+    expect(f.events.filter((e) => e.startsWith("add:"))).toEqual([])
+  })
+
+  test("a member who stays missing from the listing is never re-added", async () => {
+    const f = fixture()
+    withLinks(f)
+    hide(f, new Set([21]))
+    await expect(f.run()).rejects.toThrow("incomplete")
+    expect(errorOf(f)).toBe(`audit_membership:${MEMBER_NOT_VISIBLE}`)
+    expect(
+      f.local?.pendingInvitations?.map((i) => [i.userId, i.reason]),
+    ).toEqual([["21", NOT_VISIBLE_INVITATION_REASON]])
+    f.events.length = 0
+    for (let tick = 0; tick < 3; tick++)
+      await expect(f.run()).rejects.toThrow("incomplete")
+    expect(f.events.filter((e) => e.startsWith("add:"))).toEqual([])
+  })
+
+  test("a bot missing from the listing is re-added once, then stops", async () => {
+    const f = fixture()
+    hide(f, new Set([PROVISIONING_BOT_ID]))
+    const botAdds = () =>
+      f.events.filter((e) => e === `add:${PROVISIONING_BOT_ID}`).length
+    await expect(f.run()).rejects.toThrow("incomplete")
+    expect(errorOf(f)).toBe(`audit_membership:${BOT_NOT_VISIBLE}`)
+    for (let tick = 0; tick < 3; tick++)
+      await expect(f.run()).rejects.toThrow("incomplete")
+    expect(botAdds()).toBe(MAX_BOT_ADDS)
+    expect(errorOf(f)).toBe(`verify_added_member:${BOT_ADDS_EXHAUSTED}`)
+    expect(f.setup.retryAt).toBeNull()
+  })
+
+  test("a persistent transient error stops after the retry limit", async () => {
+    const f = fixture()
+    resumed(f)
+    let reads = 0
+    f.telegram.verifyMarker = async () => {
+      reads++
+      throw rpc(-503, "Timeout")
+    }
+    for (let tick = 1; tick <= MAX_TRANSIENT_RETRIES + 2; tick++) {
+      // An operator-blocked setup is never run again by the worker.
+      if (tick > 1 && !f.setup.retryAt) break
+      await expect(f.run()).rejects.toThrow("incomplete")
+    }
+    expect(reads).toBe(MAX_TRANSIENT_RETRIES)
+    expect(errorOf(f)).toBe(`verify_marker:${TRANSIENT_LIMIT}`)
+    expect(f.setup.retryAt).toBeNull()
+    expect(f.local?.transientRetries).toBe(MAX_TRANSIENT_RETRIES)
+  })
+
+  test("an add that timed out is never sent again; the person gets a link", async () => {
+    const f = fixture()
+    withLinks(f)
+    resumed(f)
+    const adds: number[] = []
+    const add = f.telegram.add
+    f.telegram.add = async (chat, id) => {
+      adds.push(id)
+      if (id === 21) throw rpc(-503, "Timeout")
+      await add(chat, id)
+    }
+    await expect(f.run()).rejects.toThrow("incomplete")
+    expect(errorOf(f)).toBe(`add_member:${TELEGRAM_TRANSIENT}`)
+    for (let tick = 0; tick < 3; tick++)
+      await expect(f.run()).rejects.toThrow("incomplete")
+    expect(adds.filter((id) => id === 21)).toHaveLength(1)
+    expect(errorOf(f)).toBe(`verify_added_member:${MEMBER_NOT_VISIBLE}`)
+    expect(
+      f.local?.pendingInvitations?.map((i) => [i.userId, i.reason]),
+    ).toEqual([["21", NOT_VISIBLE_INVITATION_REASON]])
+  })
+
+  test("an add cut off by an unknown error is journaled before it is sent", async () => {
+    const f = fixture()
+    withLinks(f)
+    resumed(f)
+    const adds: number[] = []
+    const add = f.telegram.add
+    f.telegram.add = async (chat, id) => {
+      adds.push(id)
+      // Like a crash after Telegram accepted the call: no answer arrives.
+      if (id === 21) throw new Error("worker died mid-call")
+      await add(chat, id)
+    }
+    expect(f.local).toBeNull()
+    await expect(f.run()).rejects.toThrow("incomplete")
+    expect(f.local?.addedIds).toEqual([21])
+    for (let tick = 0; tick < 2; tick++)
+      await expect(f.run()).rejects.toThrow("incomplete")
+    expect(adds.filter((id) => id === 21)).toHaveLength(1)
+  })
+
+  test("a hidden person is not re-added when the stop is for someone else", async () => {
+    const f = fixture()
+    withLinks(f)
+    hide(f, new Set([21, 22]))
+    const promote = f.telegram.promote
+    f.telegram.promote = async (chat, id, rights) => {
+      if (id === 22) throw rpc(400, "USER_NOT_PARTICIPANT")
+      await promote(chat, id, rights)
+    }
+    await expect(f.run()).rejects.toThrow("incomplete")
+    expect(errorOf(f)).toBe(`promote_admin:${MEMBER_NOT_VISIBLE}`)
+    // A link wait: the background drain may run meanwhile.
+    expect(waitingOnInvitedMember(f.setup)).toBe(true)
+    f.events.length = 0
+    for (let tick = 0; tick < 3; tick++)
+      await expect(f.run()).rejects.toThrow("incomplete")
+    expect(f.events.filter((e) => e.startsWith("add:"))).toEqual([])
+  })
+
+  test("a failed link for an unlisted person never leads to a re-add", async () => {
+    const f = fixture()
+    hide(f, new Set([21]))
+    let failLink = true
+    f.telegram.inviteLink = async () => {
+      if (failLink) throw rpc(-503, "Timeout")
+      return {
+        inviteLink: "https://t.me/+notShown",
+        expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+      }
+    }
+    await expect(f.run()).rejects.toThrow("incomplete")
+    expect(errorOf(f)).toBe(`create_invitation:${TELEGRAM_TRANSIENT}`)
+    failLink = false
+    f.events.length = 0
+    for (let tick = 0; tick < 2; tick++)
+      await expect(f.run()).rejects.toThrow("incomplete")
+    expect(f.events.filter((e) => e.startsWith("add:"))).toEqual([])
+    expect(errorOf(f)).toBe(`verify_added_member:${MEMBER_NOT_VISIBLE}`)
+  })
+
+  test("a refused batch does not count as a bot add", async () => {
+    // Two floods on the whole batch, then a batch that adds everyone.
+    const f = fixture()
+    let floods = 2
+    f.telegram.addMany = async (_chat, ids) => {
+      if (floods-- > 0) throw rpc(420, "FLOOD_WAIT_60")
+      for (const id of ids) {
+        f.events.push(`add:${id}`)
+        f.members.set(id, { role: "member", rights: {} })
+      }
+      return []
+    }
+    await expect(f.run()).rejects.toThrow("incomplete")
+    await expect(f.run()).rejects.toThrow("incomplete")
+    expect(f.local?.botAdds ?? 0).toBe(0)
+    expect((await f.run()).state).toBe("ready")
+    expect(f.local?.botAdds).toBe(1)
+  })
+
+  test("a person's error ahead of the bot does not count as a bot add", async () => {
+    const f = fixture()
+    resumed(f)
+    f.telegram.add = async () => {
+      throw rpc(-503, "Timeout")
+    }
+    await expect(f.run()).rejects.toThrow("incomplete")
+    await expect(f.run()).rejects.toThrow("incomplete")
+    // 21 fails first each time, so no call ever reached the bot.
+    expect(f.local?.botAdds ?? 0).toBe(0)
+  })
+
+  test("only the bot unseen is not an invitation wait", async () => {
+    const f = fixture()
+    const hidden = new Set([PROVISIONING_BOT_ID])
+    f.telegram.add = async (_chat, id) => {
+      f.events.push(`add:${id}`)
+      if (!hidden.has(id)) f.members.set(id, { role: "member", rights: {} })
+    }
+    await expect(f.run(async () => {})).rejects.toThrow("incomplete")
+    expect(errorOf(f)).toBe(`verify_added_member:${BOT_NOT_VISIBLE}`)
+    expect(waitingOnInvitedMember(f.setup)).toBe(false)
+  })
+
+  test("a wrong owner or missing rights still needs an operator", async () => {
+    const owner = fixture()
+    owner.telegram.members = async () => {
+      const listed = new Map(owner.members)
+      listed.set(10, { role: "admin", rights: {} })
+      listed.delete(21)
+      return listed
+    }
+    await expect(owner.run()).rejects.toThrow("incomplete")
+    expect(errorOf(owner)).toBe("audit_membership:provisioning_step_failed")
+    expect(owner.setup.retryAt).toBeNull()
+
+    const rights = fixture()
+    rights.telegram.promote = async () => {}
+    await expect(rights.run()).rejects.toThrow("incomplete")
+    expect(errorOf(rights)).toBe("audit_membership:provisioning_step_failed")
+    expect(rights.setup.retryAt).toBeNull()
+  })
+
+  test("a failed background queue write retries", async () => {
+    const f = fixture()
+    f.setup = { ...f.setup, optionalParticipants: ["alice"] }
+    f.telegram.members = async () => {
+      const listed = new Map(f.members)
+      listed.delete(21)
+      return listed
+    }
+    f.telegram.add = async (_chat, id) => {
+      if (id !== 21) f.members.set(id, { role: "member", rights: {} })
+    }
+    const queue: BackgroundEnqueue = {
+      enqueue: () => {
+        throw new Error("database is locked")
+      },
+    }
+    await expect(
+      provisionSetup({
+        setup: f.setup,
+        cloud: f.cloud,
+        journal: f.journal,
+        telegram: f.telegram,
+        workerId: "worker-one",
+        background: queue,
+      }),
+    ).rejects.toThrow("incomplete")
+    expect(errorOf(f)).toBe(`enqueue_background:${QUEUE_UNAVAILABLE}`)
+    expect(f.setup.retryAt).toBeTruthy()
+  })
+
+  test("an expired privacy invitation stops for an operator, no add", async () => {
+    const f = fixture()
+    f.telegram.inviteLink = async () => ({
+      inviteLink: "https://t.me/+privacy",
+      expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+    })
+    const adds: number[] = []
+    f.telegram.add = async (_chat, id) => {
+      adds.push(id)
+      if (id === 21) throw rpc(403, "USER_PRIVACY_RESTRICTED")
+      f.members.set(id, { role: "member", rights: {} })
+    }
+    await expect(f.run()).rejects.toThrow("incomplete")
+    expect(waitingOnInvitedMember(f.setup)).toBe(true)
+    f.local = {
+      ...f.local!,
+      pendingInvitations: f.local!.pendingInvitations!.map((i) => ({
+        ...i,
+        expiresAt: new Date(Date.now() - 1000).toISOString(),
+      })),
+    }
+    adds.length = 0
+    await expect(f.run()).rejects.toThrow("incomplete")
+    expect(errorOf(f)).toBe("verify_added_member:TG_SAI_INVITATION_EXPIRED")
+    expect(f.setup.retryAt).toBeNull()
+    expect(adds).toEqual([])
+  })
+
+  test("a privacy-invited member is approved on resume, never added again", async () => {
+    const f = fixture()
+    f.telegram.inviteLink = async () => ({
+      inviteLink: "https://t.me/+privacy",
+      expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+    })
+    let adds = 0
+    f.telegram.add = async (_chat, id) => {
+      if (id === 21) {
+        adds++
+        throw rpc(403, "USER_PRIVACY_RESTRICTED")
+      }
+      f.events.push(`add:${id}`)
+      f.members.set(id, { role: "member", rights: {} })
+    }
+    await expect(f.run()).rejects.toThrow("incomplete")
+    expect(errorOf(f)).toBe(`add_member:${AWAITING_JOIN}`)
+    const before = Date.now()
+    await expect(f.run()).rejects.toThrow("incomplete")
+    expect(retryIn(f, before)).toBeGreaterThanOrEqual(
+      MEMBER_NOT_VISIBLE_RETRY_MS,
+    )
+    expect(adds).toBe(1)
+    f.telegram.approveJoin = async (_chat, userId) => {
+      f.members.set(userId, { role: "member", rights: {} })
+      return true
+    }
+    expect((await f.run()).state).toBe("ready")
+    expect(adds).toBe(1)
   })
 })
