@@ -94,21 +94,15 @@ def test_qr_login_gives_up_after_max_refreshes(monkeypatch):
 
 
 def test_qr_login_uses_hidden_password_prompt_for_2fa(monkeypatch):
-    qr = _FakeQR(
-        [session_string_generator.errors.SessionPasswordNeededError(request=None)]
-    )
+    qr = _FakeQR([session_string_generator.errors.SessionPasswordNeededError(request=None)])
     client = _FakeClient(qr)
     prompted = []
 
-    monkeypatch.setattr(
-        "getpass.getpass", lambda prompt: prompted.append(prompt) or "secret"
-    )
+    monkeypatch.setattr("getpass.getpass", lambda prompt: prompted.append(prompt) or "secret")
 
     asyncio.run(session_string_generator._qr_login(client))
 
-    assert prompted == [
-        "\nTwo-factor authentication enabled. Please enter your password: "
-    ]
+    assert prompted == ["\nTwo-factor authentication enabled. Please enter your password: "]
     assert client.sign_in_calls == ["secret"]
 
 
@@ -127,25 +121,19 @@ def test_phone_login_uses_hidden_password_prompt_for_2fa(monkeypatch):
             if kwargs.get("password") is not None:
                 self.sign_in_calls.append(kwargs["password"])
                 return None
-            raise session_string_generator.errors.SessionPasswordNeededError(
-                request=None
-            )
+            raise session_string_generator.errors.SessionPasswordNeededError(request=None)
 
     client = _Client()
     prompted = []
     entered = iter(["+10000000000", "12345"])
 
     monkeypatch.setattr("builtins.input", lambda _prompt="": next(entered))
-    monkeypatch.setattr(
-        "getpass.getpass", lambda prompt: prompted.append(prompt) or "secret"
-    )
+    monkeypatch.setattr("getpass.getpass", lambda prompt: prompted.append(prompt) or "secret")
 
     asyncio.run(session_string_generator._phone_login(client))
 
     assert client.phone == "+10000000000"
-    assert prompted == [
-        "Two-factor authentication enabled. Please enter your password: "
-    ]
+    assert prompted == ["Two-factor authentication enabled. Please enter your password: "]
     assert client.sign_in_calls == ["secret"]
 
 

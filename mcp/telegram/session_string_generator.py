@@ -161,9 +161,7 @@ async def _phone_login(client: PhoneClient) -> None:
     try:
         await client.send_code_request(phone)
     except errors.FloodWaitError as e:
-        print(
-            f"\nFlood wait error; you must wait {e.seconds} seconds before trying again."
-        )
+        print(f"\nFlood wait error; you must wait {e.seconds} seconds before trying again.")
         await client.disconnect()
         sys.exit(1)
     except errors.PhoneNumberInvalidError:
@@ -179,9 +177,7 @@ async def _phone_login(client: PhoneClient) -> None:
     try:
         await client.sign_in(phone, code)
     except errors.SessionPasswordNeededError:
-        pw = getpass.getpass(
-            "Two-factor authentication enabled. Please enter your password: "
-        )
+        pw = getpass.getpass("Two-factor authentication enabled. Please enter your password: ")
         await client.sign_in(password=pw)
 
 
@@ -198,9 +194,7 @@ async def _main() -> None:
 
     if not API_ID or not API_HASH:
         print("Error: TELEGRAM_API_ID and TELEGRAM_API_HASH must be set in .env file")
-        print(
-            "Create an .env file with your credentials from https://my.telegram.org/apps"
-        )
+        print("Create an .env file with your credentials from https://my.telegram.org/apps")
         sys.exit(1)
 
     try:
@@ -217,9 +211,7 @@ async def _main() -> None:
     )
 
     label = (
-        input(
-            "Account label (optional, e.g. 'work', 'personal'; leave empty for default): "
-        )
+        input("Account label (optional, e.g. 'work', 'personal'; leave empty for default): ")
         .strip()
         .lower()
     )

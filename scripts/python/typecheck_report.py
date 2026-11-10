@@ -1,8 +1,8 @@
-"""Report ty findings without turning setup or checker failures into success.
+"""Write ty diagnostics with explicit report-only or blocking enforcement mode.
 
-Run through a project's locked uv environment. Only the direct checker's exit
-status 1 is report-only; the invoking uv process and this reporter still fail
-normally when their setup, configuration, or execution fails.
+Run through a project's locked uv environment. Report mode softens diagnostic
+exit 1 only. Enforce mode fails on errors and warnings. Setup, configuration,
+and checker failures remain failures in both modes.
 """
 
 from __future__ import annotations
@@ -44,16 +44,17 @@ class Report:
     warnings: int
     rules: dict[str, int]
     diagnostics: list[Diagnostic]
+    enforced: bool = False
 
 
 def run_command(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(argv, capture_output=True, text=True, check=False)
 
 
-def report_exit_code(checker_exit_code: int) -> int:
-    """Soften findings only. Preserve positive failure codes and reject signals."""
+def report_exit_code(checker_exit_code: int, *, enforce: bool = False) -> int:
+    """Apply diagnostic enforcement, preserve failures, and reject signal exits."""
     if checker_exit_code in (0, 1):
-        return 0
+        return checker_exit_code if enforce else 0
     return checker_exit_code if checker_exit_code > 0 else 2
 
 
@@ -70,7 +71,9 @@ def parse_diagnostics(output: str) -> list[Diagnostic]:
     return diagnostics
 
 
-def build_report(project: str, result: subprocess.CompletedProcess[str]) -> Report:
+def build_report(
+    project: str, result: subprocess.CompletedProcess[str], *, enforce: bool = False
+) -> Report:
     output = result.stdout + result.stderr
     diagnostics = parse_diagnostics(output)
     if result.returncode in (0, 1):
@@ -97,12 +100,14 @@ def build_report(project: str, result: subprocess.CompletedProcess[str]) -> Repo
         warnings=sum(item.severity == "warning" for item in diagnostics),
         rules=dict(sorted(Counter(item.rule for item in diagnostics).items())),
         diagnostics=diagnostics,
+        enforced=enforce,
     )
 
 
 def markdown_summary(report: Report) -> str:
     result = (
-        f"{report.errors} errors and {report.warnings} warnings; reported without blocking CI"
+        f"{report.errors} errors and {report.warnings} warnings; "
+        + ("CI fails" if report.enforced else "reported without blocking CI")
         if report.status == "findings"
         else "No findings" if report.status == "clean" else "Checker failed; CI fails"
     )
@@ -120,14 +125,27 @@ def run_report(
     *,
     runner: Runner = run_command,
     summary_path: Path | None = None,
+    enforce: bool = False,
 ) -> int:
     version = runner(["ty", "version"])
     if version.returncode != 0 or version.stdout.strip() != f"ty {TY_VERSION}":
         raise ValueError(f"Expected installed ty {TY_VERSION}; run the project's frozen uv sync")
-    result = runner(["ty", "check", "--output-format", "concise", "--color", "never", *paths])
+    options = ["--error-on-warning"] if enforce else []
+    result = runner(
+        [
+            "ty",
+            "check",
+            "--output-format",
+            "concise",
+            "--color",
+            "never",
+            *options,
+            *paths,
+        ]
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "diagnostics.txt").write_text(result.stdout + result.stderr, encoding="utf-8")
-    report = build_report(project, result)
+    report = build_report(project, result, enforce=enforce)
     (output_dir / "report.json").write_text(
         json.dumps(asdict(report), indent=2) + "\n", encoding="utf-8"
     )
@@ -137,13 +155,16 @@ def run_report(
         with summary_path.open("a", encoding="utf-8") as stream:
             stream.write(summary + "\n")
     print(summary, end="")
-    return report_exit_code(result.returncode)
+    if enforce and report.status == "findings":
+        return 1
+    return report_exit_code(result.returncode, enforce=enforce)
 
 
 class Arguments(argparse.Namespace):
     project: str = ""
     output_dir: Path = Path(".")
     paths: list[str]
+    mode: str = "report"
 
     def __init__(self) -> None:
         super().__init__()
@@ -154,6 +175,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--project", required=True, help="Project name shown in the report")
     parser.add_argument("--output-dir", required=True, type=Path)
+    parser.add_argument("--mode", choices=("report", "enforce"), default="report")
     parser.add_argument("paths", nargs="+", help="Project and shared helper paths to check")
     args = Arguments()
     parser.parse_args(argv, namespace=args)
@@ -164,6 +186,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.output_dir,
             args.paths,
             summary_path=Path(summary) if summary else None,
+            enforce=args.mode == "enforce",
         )
     except (OSError, ValueError) as error:
         print(f"Python typecheck reporting failed: {error}", file=sys.stderr)

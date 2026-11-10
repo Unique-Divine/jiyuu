@@ -89,7 +89,12 @@ async def test_empty_and_non_document_results_are_not_sendable(monkeypatch, resu
 
 
 @pytest.mark.parametrize(
-    "error_class", [errors.FileReferenceExpiredError, errors.FileReferenceInvalidError]
+    "error_class",
+    [
+        errors.FileReferenceExpiredError,
+        errors.FileReferenceInvalidError,
+        errors.FileReferenceEmptyError,
+    ],
 )
 @pytest.mark.asyncio
 async def test_expired_reference_requires_search_without_replaying_write(monkeypatch, error_class):
