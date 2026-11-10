@@ -31,6 +31,8 @@ Implemented write behavior:
 5. Command `tg-sai add-owner --run` transfers ownership only when a 2FA
    password is available (see section Credentials) and the target user is
    eligible.
+6. Command `tg-sai promote-admin --run` promotes a team member who is already
+   in the chat. It refuses non-members and bots, and never transfers ownership.
 
 Credential profile behavior:
 
@@ -384,6 +386,27 @@ tg-sai add-owner \
   --run
 ```
 
+Promote an existing member without adding them or transferring ownership.
+Omit `--run` for a dry run:
+
+```bash
+tg-sai promote-admin \
+  --chat <chat-id> \
+  --target-user <target-user> \
+  --run
+```
+
+The session user must own the chat, because only the owner can grant the full
+`add-owner` rights, including add-admins. The command refuses a target that is
+not already a member, a bot (use `add-bot`), or a user outside the team
+accounts in `cfg.ts` `USERS` unless you pass `--allow-non-team`. Both the dry
+run and `--run` print the chat title and the resolved target ID, username,
+display name, and bot flag; check them before you pass `--run`.
+
+Telegram adds a non-member when it promotes them, so the command reads the
+target's membership again just before it writes and refuses if the target
+left or resolves to a different user.
+
 Execute add-owner with ownership transfer enabled. The profile's pass entry
 supplies the 2FA password:
 
@@ -452,7 +475,7 @@ before.
 | File | Role |
 | --- | --- |
 | `cfg.ts` | Production bot/user IDs and handles |
-| `main.ts` | Commander CLI for audit, add-bot, and add-owner commands |
+| `main.ts` | Commander CLI for audit, add-bot, add-owner, and promote-admin |
 | `adminCheck.ts` | Legacy direct audit runner |
 | `mtcuteAdapter.ts` | Live mtcute boundary; normalizes chat/member data |
 | `adminAudit.ts` | Pure types and decision logic (testable) |
@@ -503,7 +526,8 @@ list regular members as admins. This tool uses per-member lookups
   time.
 - Basic groups: admin is on/off only.
 - Supergroups/channels: granular admin rights are hard-coded in command
-  `add-bot` and command `add-owner`; the named rights policy still needs review.
+  `add-bot`, command `add-owner`, and command `promote-admin`; the named rights
+  policy still needs review.
 - Batch audit and batch execution are not implemented.
 - Official Sai channel (`saidotfun`) may need a separate policy review.
 

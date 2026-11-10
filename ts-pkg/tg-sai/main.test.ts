@@ -10,13 +10,19 @@ import {
   getTelegramEnv,
   HOLD_EXIT_CODE,
   holdExitFor,
+  formatMemberIdentity,
   parseDialogLimit,
+  promoteAdminTeamIds,
   shortDuration,
   withPasswordRead,
 } from "./main"
 import type { TelegramEnv } from "./main"
-import { installFakePass } from "./testdata"
+import { saiBot, USERS } from "./cfg"
 import { addProfile, configDir } from "./profiles"
+import {
+  getChatMember_botMemberNibiruInternal,
+  installFakePass,
+} from "./testdata"
 import { HoldAccountUnknownError, HoldError } from "./state/guard"
 import { HoldStoreUnavailableError } from "./state/holds"
 
@@ -337,5 +343,57 @@ describe("withPasswordRead", () => {
       else process.env.PASSWORD_STORE_DIR = saved.PASSWORD_STORE_DIR
       await rm(join(fakePass.storeRoot, ".."), { recursive: true, force: true })
     }
+  })
+})
+
+describe("promote-admin", () => {
+  test("is dry-run by default and has no ownership-transfer option", () => {
+    const command = createProgram().commands.find(
+      (c) => c.name() === "promote-admin",
+    )
+    expect(command).toBeDefined()
+    const flags = command?.options.map((o) => o.long) ?? []
+    expect(flags).toEqual([
+      "--profile",
+      "--chat",
+      "--target-user",
+      "--run",
+      "--allow-non-team",
+    ])
+    expect(command?.getOptionValue("run")).toBeUndefined()
+  })
+
+  test("bare promote-admin prints help that says it never adds", () => {
+    withDir((dir) => {
+      const result = runCli(["promote-admin"], dir)
+      expect(result.exitCode).toBe(0)
+      expect(result.stdout).toContain("Usage: tg-sai promote-admin")
+      const help = result.stdout.replace(/\s+/g, " ")
+      expect(help).toContain("never transfers ownership")
+      expect(help).toContain("not already a member, is a bot")
+      expect(help).toContain("must own the chat")
+    })
+  })
+})
+
+describe("promote-admin targeting", () => {
+  test("the team allowlist is the cfg.ts USERS accounts and no bot", () => {
+    expect(promoteAdminTeamIds.has(USERS.uniqueDivine.id)).toBe(true)
+    expect(promoteAdminTeamIds.has(USERS.corinne.id)).toBe(true)
+    expect(promoteAdminTeamIds.has(USERS.saiCustody.id)).toBe(true)
+    expect(promoteAdminTeamIds.has(saiBot.id)).toBe(false)
+  })
+
+  test("formatMemberIdentity prints the resolved user, not the argument", () => {
+    expect(formatMemberIdentity(null)).toEqual({
+      target_resolved: "none (not in chat)",
+    })
+    const member = getChatMember_botMemberNibiruInternal.data
+    expect(formatMemberIdentity(member)).toEqual({
+      target_id: String(saiBot.id),
+      target_username: `@${saiBot.handle}`,
+      target_display_name: JSON.stringify(member.user.displayName),
+      target_is_bot: "true",
+    })
   })
 })
