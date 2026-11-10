@@ -146,7 +146,8 @@ function inviteHoldUntil(
  * link, is marked `added` without an add call (`joined`), so the account
  * spends no add on them and today's count is unchanged. The same holds for
  * a member whose join request through that link is waiting: the drain
- * approves it. The cap counts every member add the account made today
+ * approves it. Errors from the read or the approval come before the add
+ * call, so they defer the row like the errors below. The cap counts every member add the account made today
  * (`BackgroundQueue.addsToday`, setup adds included), so background adds
  * stop once the total reaches `dailyMax`. Success marks the row `added`; a privacy refusal marks it
  * `privacy` and makes no link, since the ready receipt's shared
@@ -196,11 +197,10 @@ export async function drainBackgroundOnce(params: {
       const member = await telegram.member(row.chatId, row.userId)
       if (member.role !== "absent") return { state: "joined" as const }
       // The shared link needs approval; a pending request is approved
-      // instead of spending an add.
-      const approved = await telegram
-        .approveJoin?.(row.chatId, row.userId)
-        .catch(() => false)
-      if (approved) return { state: "joined" as const }
+      // instead of spending an add. An approval error stops before the add,
+      // so the row defers one gap uncounted and no add is spent.
+      if (await telegram.approveJoin?.(row.chatId, row.userId))
+        return { state: "joined" as const }
       try {
         await telegram.add(row.chatId, row.userId)
         return { state: "added" as const }

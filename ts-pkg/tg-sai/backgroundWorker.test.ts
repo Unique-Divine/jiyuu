@@ -110,13 +110,24 @@ describe("background drain", () => {
     ])
     expect(f.queue.addsToday(NOW + 1_200_000)).toBe(1)
   })
-  test("a refused approval falls back to the add", async () => {
-    const f = fixture({
-      approveError: Object.assign(new Error("x"), { text: "CHAT_ADMIN_REQUIRED" }),
-    })
-    f.enqueue([1])
-    expect((await f.drain()).state).toBe("added")
-    expect(f.calls).toEqual(["connect", "approve:1", "add:1"])
+  test("an approval error defers the row uncounted and spends no add", async () => {
+    for (const text of ["FLOOD_WAIT_600", "CHAT_ADMIN_REQUIRED"]) {
+      const f = fixture({
+        approveError: Object.assign(new Error("x"), { code: 420, text }),
+      })
+      f.enqueue([1])
+      expect(await f.drain()).toMatchObject({
+        state: "deferred",
+        userId: 1,
+        error: text,
+      })
+      expect(f.calls).toEqual(["connect", "approve:1"])
+      expect(f.queue.addsToday(NOW)).toBe(0)
+      expect(f.queue.next(NOW + 86_400_000)).toMatchObject({
+        userId: 1,
+        attempts: 0,
+      })
+    }
   })
   test("one add per step, then the rest wait one jittered gap", async () => {
     const f = fixture()
