@@ -634,10 +634,13 @@ f="/var/lib/sai-custody-worker/provisioning/receipts/$(printf '%s' "$id" | sha25
 sudo jq '.pendingInvitations' "$f"
 ```
 
-The bot gets no link: a bot that is not visible gets the same 15-minute
-`retryAt`, and the resumed job adds it again only if it is still absent. The
-receipt counts bot adds (`botAdds`). After one re-add, a bot still absent
-saves `verify_added_member:TG_SAI_BOT_NOT_VISIBLE` with no `retryAt`. The
+The bot gets no link: a bot that is not visible saves
+`TG_SAI_BOT_NOT_VISIBLE` with a 15-minute `retryAt`, and the resumed job adds
+it again only if it is still absent. That wait pauses the background queue,
+because the setup still owes an add. The receipt counts bot add calls sent
+(`botAdds`); a call Telegram refused as a whole, such as a flood, is not
+counted. Once two calls were sent and the bot is still absent, the setup
+saves `verify_added_member:TG_SAI_BOT_ADDS_EXHAUSTED` with no `retryAt`. The
 background queue also reads each member before adding and approves a waiting
 join request, so a member who uses the shared link costs no add. A flood
 or hold on that read or approval defers the row until it ends. A chat or
@@ -661,16 +664,47 @@ adding, so a retry never adds someone who is already in the chat.
 | Error | Meaning | Retry |
 | --- | --- | --- |
 | `FLOOD_WAIT_N`, `PEER_FLOOD`, `TG_SAI_HOLD_N` | Account flood limit or saved hold | When the hold ends |
-| `TG_SAI_TRANSIENT` | Timeout, dropped connection, Telegram server error, worker shutdown | 5 min |
+| `TG_SAI_TRANSIENT` | Timeout, dropped connection, Telegram server error, worker shutdown | 5 min, at most 3 failures per setup |
+| `TG_SAI_TRANSIENT_LIMIT` | The setup's third transient failure | Operator |
 | `TG_SAI_HOLD_STATE_UNAVAILABLE`, `TG_SAI_HOLD_ACCOUNT_UNKNOWN`, `TG_SAI_QUEUE_UNAVAILABLE` | Local `state.db` or session account not readable | 5 min |
-| `TG_SAI_MEMBER_NOT_VISIBLE` | Added or promoted, but not shown in the chat yet | 15 min |
+| `TG_SAI_MEMBER_NOT_VISIBLE` | Added or promoted, but not shown in the chat yet; the person gets an `added_not_visible` link | 15 min |
+| `TG_SAI_BOT_NOT_VISIBLE` | Bot added but not shown yet | 15 min, one re-add |
 | `TG_SAI_AWAITING_JOIN` | Waiting for a privacy-restricted person to use their link | 15 min |
 | `TG_SAI_INVITATION_EXPIRED` | An invited person never joined | Operator |
-| `TG_SAI_BOT_NOT_VISIBLE` | Bot still absent after one re-add | Operator |
+| `TG_SAI_BOT_ADDS_EXHAUSTED` | Bot still absent after two add calls | Operator |
 | `verify_marker:*` (not transient), `audit_membership:provisioning_step_failed`, `CHAT_ADMIN_REQUIRED`, `RIGHT_FORBIDDEN`, other `USER_*` refusals | Chat ownership, rights, or the person's account | Operator |
 
 A timeout during group creation is different: the group may exist, so the
 setup becomes `creation_unknown` and needs `chat provision resolve`.
+
+An add call that timed out or got a Telegram server error may still have
+invited the user, so it counts toward today's adds (`member_add` outcome
+`uncertain`) and the background daily cap. In the background queue it also
+counts as an attempt.
+
+Both limits are counters in the receipt (`botAdds`, `transientRetries`).
+The worker never resets them, and Deal Desk recovery does not touch the
+receipt. To recover:
+
+1. `TG_SAI_BOT_ADDS_EXHAUSTED`: check the chat with
+   `tg-sai audit --chat <chat-id> --target-user 8983431101`. If the bot is
+   absent, have a team admin add it, or decide to spend one more custody add
+   by clearing the counter below. Then run `chat-setups recover`.
+2. `TG_SAI_TRANSIENT_LIMIT`: check that Telegram and the worker host are
+   healthy, clear `transientRetries`, then run `chat-setups recover`.
+
+Clear a counter with the worker stopped. `$f` is the receipt path from the
+lookup above:
+
+```bash
+sudo sh -c 'jq "del(.botAdds)" "$1" > "$1.new" &&
+  chown --reference="$1" "$1.new" && chmod 600 "$1.new" &&
+  mv "$1.new" "$1"' _ "$f"
+```
+
+The new file keeps the receipt's owner and mode. Use
+`del(.transientRetries)` for the transient limit. The worker reads the
+receipt again on the next run.
 
 New ready receipts include an `openGroupUrl` anchored to a message actually
 observed in the group and the existing `primaryInviteLink`, when available.

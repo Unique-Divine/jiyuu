@@ -7,6 +7,7 @@ import { holdExitFor } from "./main"
 import { addProfile, strictProfileCredentials } from "./profiles"
 import {
   AWAITING_JOIN,
+  BOT_ADDS_EXHAUSTED,
   BOT_BASELINE_RIGHTS,
   BOT_NOT_VISIBLE,
   cloudRetryAt,
@@ -16,6 +17,7 @@ import {
   isTransientTelegramError,
   MEMBER_NOT_VISIBLE,
   MAX_BOT_ADDS,
+  MAX_TRANSIENT_RETRIES,
   MEMBER_NOT_VISIBLE_RETRY_MS,
   MEMBER_RECHECK_MS,
   MIN_CLOUD_RETRY_MS,
@@ -29,6 +31,7 @@ import {
   safeProvisionError,
   TEAM_ADMIN_RIGHTS,
   TELEGRAM_TRANSIENT,
+  TRANSIENT_LIMIT,
   TRANSIENT_RETRY_MS,
   validateRequest,
   waitingOnInvitedMember,
@@ -1534,7 +1537,7 @@ describe("added but not visible", () => {
     const h = hiding(f, hidden)
     await expect(f.run(h.sleep)).rejects.toThrow("incomplete")
     const setup = f.setup as Setup & { error: string }
-    expect(setup.error).toBe("verify_added_member:TG_SAI_MEMBER_NOT_VISIBLE")
+    expect(setup.error).toBe(`verify_added_member:${BOT_NOT_VISIBLE}`)
     expect(setup.retryAt).toBeTruthy()
     expect(h.links).toEqual([])
     // The bot shows up later: the resumed job promotes it, no second add.
@@ -1558,7 +1561,7 @@ describe("added but not visible", () => {
     for (let tick = 0; tick < 2; tick++) {
       await expect(f.run(h.sleep)).rejects.toThrow("incomplete")
       expect((f.setup as Setup & { error: string }).error).toBe(
-        `verify_added_member:${BOT_NOT_VISIBLE}`,
+        `verify_added_member:${BOT_ADDS_EXHAUSTED}`,
       )
       expect(f.setup.retryAt).toBeNull()
     }
@@ -1704,9 +1707,29 @@ describe("transient failure paths", () => {
     expect(errorOf(f)).toBe("TG_SAI_HOLD_ACCOUNT_UNKNOWN")
   })
 
+  /** Gives the fixture controlled invitation links. */
+  function withLinks(f: ReturnType<typeof fixture>) {
+    f.telegram.inviteLink = async () => ({
+      inviteLink: "https://t.me/+notShown",
+      expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+    })
+  }
+  /** `hidden` users are in the chat but every read and listing omits them. */
+  function hide(f: ReturnType<typeof fixture>, hidden: Set<number>) {
+    const member = f.telegram.member
+    f.telegram.member = async (chat, id) =>
+      hidden.has(id) ? { role: "absent", rights: {} } : member(chat, id)
+    f.telegram.members = async () => {
+      const listed = new Map(f.members)
+      for (const id of hidden) listed.delete(id)
+      return listed
+    }
+  }
+
   test("promoting a user not shown in the chat yet retries", async () => {
     for (const bot of [false, true]) {
       const f = fixture()
+      withLinks(f)
       const promote = f.telegram.promote
       f.telegram.promote = async (chat, id, rights) => {
         if ((id === PROVISIONING_BOT_ID) === bot)
@@ -1715,7 +1738,9 @@ describe("transient failure paths", () => {
       }
       await expect(f.run()).rejects.toThrow("incomplete")
       expect(errorOf(f)).toBe(
-        `${bot ? "promote_bot" : "promote_admin"}:${MEMBER_NOT_VISIBLE}`,
+        bot
+          ? `promote_bot:${BOT_NOT_VISIBLE}`
+          : `promote_admin:${MEMBER_NOT_VISIBLE}`,
       )
       expect(f.setup.retryAt).toBeTruthy()
       // The resumed job finds the member and promotes without an add.
@@ -1726,8 +1751,30 @@ describe("transient failure paths", () => {
     }
   })
 
+  test("a person refused promotion as absent gets a link, never a re-add", async () => {
+    const f = fixture()
+    withLinks(f)
+    const promote = f.telegram.promote
+    f.telegram.promote = async (chat, id, rights) => {
+      if (id === 22) throw rpc(400, "USER_NOT_PARTICIPANT")
+      await promote(chat, id, rights)
+    }
+    await expect(f.run()).rejects.toThrow("incomplete")
+    expect(
+      f.local?.pendingInvitations?.map((i) => [i.userId, i.reason]),
+    ).toEqual([["22", NOT_VISIBLE_INVITATION_REASON]])
+    // Still hidden on every resume: the job waits on the link, no add.
+    hide(f, new Set([22]))
+    f.events.length = 0
+    for (let tick = 0; tick < 3; tick++)
+      await expect(f.run()).rejects.toThrow("incomplete")
+    expect(f.events.filter((e) => e.startsWith("add:"))).toEqual([])
+    expect(errorOf(f)).toBe(`verify_added_member:${MEMBER_NOT_VISIBLE}`)
+  })
+
   test("a required member missing from the final listing retries", async () => {
     const f = fixture()
+    withLinks(f)
     // Added, but the listing right after does not show them yet.
     f.telegram.members = async () => {
       const listed = new Map(f.members)
@@ -1741,6 +1788,97 @@ describe("transient failure paths", () => {
     f.events.length = 0
     expect((await f.run()).state).toBe("ready")
     expect(f.events.filter((e) => e.startsWith("add:"))).toEqual([])
+  })
+
+  test("a member who stays missing from the listing is never re-added", async () => {
+    const f = fixture()
+    withLinks(f)
+    hide(f, new Set([21]))
+    await expect(f.run()).rejects.toThrow("incomplete")
+    expect(errorOf(f)).toBe(`audit_membership:${MEMBER_NOT_VISIBLE}`)
+    expect(
+      f.local?.pendingInvitations?.map((i) => [i.userId, i.reason]),
+    ).toEqual([["21", NOT_VISIBLE_INVITATION_REASON]])
+    f.events.length = 0
+    for (let tick = 0; tick < 3; tick++)
+      await expect(f.run()).rejects.toThrow("incomplete")
+    expect(f.events.filter((e) => e.startsWith("add:"))).toEqual([])
+  })
+
+  test("a bot missing from the listing is re-added once, then stops", async () => {
+    const f = fixture()
+    hide(f, new Set([PROVISIONING_BOT_ID]))
+    const botAdds = () =>
+      f.events.filter((e) => e === `add:${PROVISIONING_BOT_ID}`).length
+    await expect(f.run()).rejects.toThrow("incomplete")
+    expect(errorOf(f)).toBe(`audit_membership:${BOT_NOT_VISIBLE}`)
+    for (let tick = 0; tick < 3; tick++)
+      await expect(f.run()).rejects.toThrow("incomplete")
+    expect(botAdds()).toBe(MAX_BOT_ADDS)
+    expect(errorOf(f)).toBe(`verify_added_member:${BOT_ADDS_EXHAUSTED}`)
+    expect(f.setup.retryAt).toBeNull()
+  })
+
+  test("a persistent transient add error stops after the retry limit", async () => {
+    const f = fixture()
+    resumed(f)
+    const adds: number[] = []
+    f.telegram.add = async (_chat, id) => {
+      adds.push(id)
+      throw rpc(-503, "Timeout")
+    }
+    for (let tick = 1; tick <= MAX_TRANSIENT_RETRIES + 2; tick++) {
+      // An operator-blocked setup is never run again by the worker.
+      if (tick > 1 && !f.setup.retryAt) break
+      await expect(f.run()).rejects.toThrow("incomplete")
+    }
+    expect(adds).toHaveLength(MAX_TRANSIENT_RETRIES)
+    expect(errorOf(f)).toBe(`add_member:${TRANSIENT_LIMIT}`)
+    expect(f.setup.retryAt).toBeNull()
+    expect(f.local?.transientRetries).toBe(MAX_TRANSIENT_RETRIES)
+  })
+
+  test("a refused batch does not count as a bot add", async () => {
+    // Two floods on the whole batch, then a batch that adds everyone.
+    const f = fixture()
+    let floods = 2
+    f.telegram.addMany = async (_chat, ids) => {
+      if (floods-- > 0) throw rpc(420, "FLOOD_WAIT_60")
+      for (const id of ids) {
+        f.events.push(`add:${id}`)
+        f.members.set(id, { role: "member", rights: {} })
+      }
+      return []
+    }
+    await expect(f.run()).rejects.toThrow("incomplete")
+    await expect(f.run()).rejects.toThrow("incomplete")
+    expect(f.local?.botAdds ?? 0).toBe(0)
+    expect((await f.run()).state).toBe("ready")
+    expect(f.local?.botAdds).toBe(1)
+  })
+
+  test("a person's error ahead of the bot does not count as a bot add", async () => {
+    const f = fixture()
+    resumed(f)
+    f.telegram.add = async () => {
+      throw rpc(-503, "Timeout")
+    }
+    await expect(f.run()).rejects.toThrow("incomplete")
+    await expect(f.run()).rejects.toThrow("incomplete")
+    // 21 fails first each time, so no call ever reached the bot.
+    expect(f.local?.botAdds ?? 0).toBe(0)
+  })
+
+  test("only the bot unseen is not an invitation wait", async () => {
+    const f = fixture()
+    const hidden = new Set([PROVISIONING_BOT_ID])
+    f.telegram.add = async (_chat, id) => {
+      f.events.push(`add:${id}`)
+      if (!hidden.has(id)) f.members.set(id, { role: "member", rights: {} })
+    }
+    await expect(f.run(async () => {})).rejects.toThrow("incomplete")
+    expect(errorOf(f)).toBe(`verify_added_member:${BOT_NOT_VISIBLE}`)
+    expect(waitingOnInvitedMember(f.setup)).toBe(false)
   })
 
   test("a wrong owner or missing rights still needs an operator", async () => {

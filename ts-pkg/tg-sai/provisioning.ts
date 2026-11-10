@@ -109,8 +109,10 @@ export interface JournalRecord {
   binding?: Binding
   workerId?: string
   pendingInvitations?: PendingInvitation[]
-  /** Add calls made for the bot, so a bot that never shows is bounded. */
+  /** Bot add calls sent and not refused; bounds a bot that never shows. */
   botAdds?: number
+  /** Runs that ended in a transient error; bounds unattended retries. */
+  transientRetries?: number
 }
 export interface PendingInvitation {
   userId: string
@@ -363,7 +365,7 @@ export function safeProvisionError(error: unknown): string {
         )
       : ""
   if (isTransientTelegramError(error)) return TELEGRAM_TRANSIENT
-  return /^(?:FLOOD(?:_PREMIUM)?_WAIT_(?:\d{1,10}|UNKNOWN)|PEER_FLOOD|TG_SAI_HOLD_\d{1,10}|TG_SAI_HOLD_STATE_UNAVAILABLE|TG_SAI_HOLD_ACCOUNT_UNKNOWN|TG_SAI_MEMBER_NOT_VISIBLE|TG_SAI_INVITATION_EXPIRED|TG_SAI_BOT_NOT_VISIBLE|TG_SAI_AWAITING_JOIN|TG_SAI_QUEUE_UNAVAILABLE|USER_PRIVACY_RESTRICTED|USER_NOT_MUTUAL_CONTACTS?|USER_NOT_PARTICIPANT|USER_CHANNELS_TOO_MUCH|USER_BOT|USER_ID_INVALID|PEER_ID_INVALID|CHAT_ID_INVALID|CHANNEL_INVALID|CHANNEL_PRIVATE|CHAT_ADMIN_REQUIRED|CHAT_WRITE_FORBIDDEN|USER_ADMIN_INVALID|USER_CREATOR|ADMINS_TOO_MUCH|BOTS_TOO_MUCH|BOT_GROUPS_BLOCKED|RIGHT_FORBIDDEN|USER_RESTRICTED|USER_DEACTIVATED|INPUT_USER_DEACTIVATED|CHANNELS_TOO_MUCH|USERS_TOO_MUCH|AUTH_KEY_UNREGISTERED|SESSION_REVOKED|INVITE_HASH_EXPIRED|INVITE_HASH_INVALID|INVITE_REQUEST_SENT)$/.test(
+  return /^(?:FLOOD(?:_PREMIUM)?_WAIT_(?:\d{1,10}|UNKNOWN)|PEER_FLOOD|TG_SAI_HOLD_\d{1,10}|TG_SAI_HOLD_STATE_UNAVAILABLE|TG_SAI_HOLD_ACCOUNT_UNKNOWN|TG_SAI_MEMBER_NOT_VISIBLE|TG_SAI_INVITATION_EXPIRED|TG_SAI_BOT_NOT_VISIBLE|TG_SAI_BOT_ADDS_EXHAUSTED|TG_SAI_TRANSIENT_LIMIT|TG_SAI_AWAITING_JOIN|TG_SAI_QUEUE_UNAVAILABLE|USER_PRIVACY_RESTRICTED|USER_NOT_MUTUAL_CONTACTS?|USER_NOT_PARTICIPANT|USER_CHANNELS_TOO_MUCH|USER_BOT|USER_ID_INVALID|PEER_ID_INVALID|CHAT_ID_INVALID|CHANNEL_INVALID|CHANNEL_PRIVATE|CHAT_ADMIN_REQUIRED|CHAT_WRITE_FORBIDDEN|USER_ADMIN_INVALID|USER_CREATOR|ADMINS_TOO_MUCH|BOTS_TOO_MUCH|BOT_GROUPS_BLOCKED|RIGHT_FORBIDDEN|USER_RESTRICTED|USER_DEACTIVATED|INPUT_USER_DEACTIVATED|CHANNELS_TOO_MUCH|USERS_TOO_MUCH|AUTH_KEY_UNREGISTERED|SESSION_REVOKED|INVITE_HASH_EXPIRED|INVITE_HASH_INVALID|INVITE_REQUEST_SENT)$/.test(
     normalized,
   )
     ? normalized
@@ -491,12 +493,26 @@ export const MEMBER_RECHECK_MS = 3000
 /** `reason` of the invitation for a member added but not yet visible. */
 export const NOT_VISIBLE_INVITATION_REASON = "added_not_visible"
 /**
- * Code for a bot still absent after `MAX_BOT_ADDS` add calls. The setup is
- * saved without `retryAt`, so it needs an operator; no further bot add runs.
+ * Code for a bot whose add succeeded but who is not in the chat yet. The bot
+ * cannot use a link, so the resumed job adds it again if it is still absent;
+ * retries after `MEMBER_NOT_VISIBLE_RETRY_MS`. Not an invitation wait.
  */
 export const BOT_NOT_VISIBLE = "TG_SAI_BOT_NOT_VISIBLE"
+/**
+ * Code for a bot still absent once `MAX_BOT_ADDS` add calls were sent. Saved
+ * without `retryAt`, so it needs an operator; no further bot add runs.
+ */
+export const BOT_ADDS_EXHAUSTED = "TG_SAI_BOT_ADDS_EXHAUSTED"
 /** Bot add calls per setup: the first add and one re-add. */
 export const MAX_BOT_ADDS = 2
+/**
+ * Code for a setup whose runs ended in a transient error
+ * `MAX_TRANSIENT_RETRIES` times. Saved without `retryAt`, so it needs an
+ * operator: a stuck setup cannot keep the account busy or keep adding.
+ */
+export const TRANSIENT_LIMIT = "TG_SAI_TRANSIENT_LIMIT"
+/** Transient failures a setup may hit before it stops for an operator. */
+export const MAX_TRANSIENT_RETRIES = 3
 /**
  * Code for a setup that waits only for required people whose add was
  * refused for privacy and who got a controlled invitation instead. Retries
@@ -545,8 +561,8 @@ export function cloudRetryAt(untilMs: number, now = Date.now()): string | null {
  * (also mtcute's `FLOOD_WAIT_%d` with `seconds`), `FLOOD_PREMIUM_WAIT_N`,
  * `PEER_FLOOD` (24 h), `TG_SAI_HOLD_N` (the hold's `untilMs` when present),
  * `TG_SAI_HOLD_STATE_UNAVAILABLE`, `TG_SAI_HOLD_ACCOUNT_UNKNOWN`, and
- * `TG_SAI_QUEUE_UNAVAILABLE` (5 min), `TG_SAI_MEMBER_NOT_VISIBLE` and
- * `TG_SAI_AWAITING_JOIN` (15 min), and transient Telegram errors
+ * `TG_SAI_QUEUE_UNAVAILABLE` (5 min), `TG_SAI_MEMBER_NOT_VISIBLE`,
+ * `TG_SAI_BOT_NOT_VISIBLE`, and `TG_SAI_AWAITING_JOIN` (15 min), and transient Telegram errors
  * (`isTransientTelegramError`, 5 min). Telegram waits get the same margin
  * as the local hold (`holdUntil`), and every time is at least
  * `MIN_CLOUD_RETRY_MS` out (`cloudRetryAt`). `null` for anything else.
@@ -573,7 +589,11 @@ export function provisionRetryAt(
     code === QUEUE_UNAVAILABLE
   )
     return cloudRetryAt(now + HOLD_STATE_UNAVAILABLE_RETRY_MS, now)
-  if (code === MEMBER_NOT_VISIBLE || code === AWAITING_JOIN)
+  if (
+    code === MEMBER_NOT_VISIBLE ||
+    code === BOT_NOT_VISIBLE ||
+    code === AWAITING_JOIN
+  )
     return cloudRetryAt(now + MEMBER_NOT_VISIBLE_RETRY_MS, now)
   const hold = /^TG_SAI_HOLD_(\d+)$/.exec(code)
   if (hold) {
@@ -600,6 +620,13 @@ function defaultSleep(ms: number): Promise<void> {
 function notVisibleError(): Error {
   return Object.assign(new Error("Added member not visible yet"), {
     text: MEMBER_NOT_VISIBLE,
+  })
+}
+
+/** The bot was accepted but does not show yet; retried, re-added once. */
+function botNotVisibleError(): Error {
+  return Object.assign(new Error("Added bot not visible yet"), {
+    text: BOT_NOT_VISIBLE,
   })
 }
 
@@ -681,6 +708,12 @@ export async function provisionSetup(params: {
     throw new Error("Background member queue required")
   let pendingInvitations = local?.pendingInvitations ?? []
   let botAdds = local?.botAdds ?? 0
+  let transientRetries = local?.transientRetries ?? 0
+  // Counters every journal write carries, so none is lost on restart.
+  const counts = () => ({
+    ...(botAdds ? { botAdds } : {}),
+    ...(transientRetries ? { transientRetries } : {}),
+  })
   const workerId = local?.workerId ?? params.workerId
   if (
     !setup.chatId &&
@@ -716,7 +749,7 @@ export async function provisionSetup(params: {
     binding: setup.binding,
     workerId,
     pendingInvitations,
-    ...(botAdds ? { botAdds } : {}),
+    ...counts(),
   })
   const claimed = await cloud.claim(setup.requestId, workerId)
   if (requestFingerprint(claimed) !== fingerprint || !claimed.claimToken)
@@ -752,7 +785,7 @@ export async function provisionSetup(params: {
       binding: progress.binding ?? setup.binding,
       workerId,
       pendingInvitations,
-      ...(botAdds ? { botAdds } : {}),
+      ...counts(),
     })
     setup = {
       ...(await cloud.progress(setup.requestId, claimToken, progress)),
@@ -812,7 +845,7 @@ export async function provisionSetup(params: {
       binding,
       workerId,
       pendingInvitations,
-      ...(botAdds ? { botAdds } : {}),
+      ...counts(),
     })
     await save({ state: "configuring", chatId, binding })
   }
@@ -875,27 +908,36 @@ export async function provisionSetup(params: {
         })
       }
     }
-    if (absent.includes(PROVISIONING_BOT_ID)) {
-      // The bot cannot use a link, so a bot that never shows would cost an
-      // add on every retry. The count is saved before the add, so it
-      // survives restarts and a lost response.
-      if (botAdds >= MAX_BOT_ADDS) {
-        step = "verify_added_member"
-        throw Object.assign(new Error("Bot still not visible after re-add"), {
-          text: BOT_NOT_VISIBLE,
-        })
-      }
-      botAdds++
-      step = "add_member"
-      await journal.write(setup.requestId, {
+    const writeJournal = () =>
+      journal.write(setup.requestId, {
         fingerprint,
         state: "configuring",
         chatId,
         binding,
         workerId,
         pendingInvitations,
-        botAdds,
+        ...counts(),
       })
+    // The bot cannot use a link, so a bot that never shows would cost an
+    // add on every retry. Each call that may reach the bot is counted and
+    // saved before it is sent, so the count survives restarts and a lost
+    // response; a call Telegram refused as a whole is taken back.
+    const botAdd = absent.includes(PROVISIONING_BOT_ID)
+    if (botAdd && botAdds >= MAX_BOT_ADDS) {
+      step = "verify_added_member"
+      throw Object.assign(new Error("Bot still not visible after re-add"), {
+        text: BOT_ADDS_EXHAUSTED,
+      })
+    }
+    const sendingBotAdd = async (): Promise<void> => {
+      botAdds++
+      await writeJournal()
+    }
+    const botAddNotSent = async (error: unknown): Promise<void> => {
+      // A timeout may have added the bot; anything else refused the call.
+      if (isTransientTelegramError(error)) return
+      botAdds--
+      await writeJournal()
     }
     // Per-user refusals (privacy, USER_*/CHAT_* 400s) never stop the other
     // users: a refused batch falls back to one add per user. Flood and hold
@@ -903,10 +945,13 @@ export async function provisionSetup(params: {
     const failures = new Map<number, { error: unknown; step: ProvisionStep }>()
     const addEach = async (userIds: number[]): Promise<void> => {
       for (const userId of userIds) {
+        const bot = userId === PROVISIONING_BOT_ID
         try {
           step = "add_member"
+          if (bot) await sendingBotAdd()
           await telegram.add(chatId, userId)
         } catch (error) {
+          if (bot) await botAddNotSent(error)
           if (!isPerUserAddError(error)) throw error
           failures.set(userId, { error, step: "add_member" })
         }
@@ -914,6 +959,7 @@ export async function provisionSetup(params: {
     }
     if (absent.length && telegram.addMany) {
       step = "add_member"
+      if (botAdd) await sendingBotAdd()
       try {
         const missing = new Set(await telegram.addMany(chatId, absent))
         for (const userId of absent)
@@ -923,6 +969,8 @@ export async function provisionSetup(params: {
               step: "add_member",
             })
       } catch (error) {
+        // A refused batch added no one; the per-user fallback counts again.
+        if (botAdd) await botAddNotSent(error)
         if (!isPerUserAddError(error)) throw error
         await addEach(absent)
       }
@@ -933,7 +981,7 @@ export async function provisionSetup(params: {
     // once after a short wait before treating the add as incomplete.
     const notVisible: number[] = []
     // The bot cannot use a link; a resumed job reads it and adds it again
-    // only if it is still absent, at most once (`MAX_BOT_ADDS`).
+    // only if it is still absent (`MAX_BOT_ADDS`).
     let botNotVisible = false
     if (!listed) {
       const unseen = async (ids: number[]): Promise<number[]> => {
@@ -968,6 +1016,52 @@ export async function provisionSetup(params: {
         isPrivacyRestriction(failures.get(userId)?.error),
     )
     for (const userId of privacyRefused) failures.delete(userId)
+    /** Creates one shared link for `entries` and saves it in the journal. */
+    const invite = async (
+      entries: { userId: number; reason: string }[],
+    ): Promise<void> => {
+      if (!entries.length) return
+      // One shared link: the first person to need it decides its owner.
+      step = "create_invitation"
+      const created = await controlledInvitation(
+        telegram,
+        chatId,
+        entries[0]!.userId,
+      )
+      pendingInvitations = [
+        ...pendingInvitations.filter(
+          (i) => !entries.some((n) => n.userId === Number(i.userId)),
+        ),
+        ...entries.map(({ userId, reason }) => ({
+          userId: String(userId),
+          ...created,
+          reason,
+        })),
+      ]
+      step = "save_invitation"
+      await writeJournal()
+    }
+    /**
+     * Throws for people (and the bot) Telegram accepted but does not show:
+     * people get an `added_not_visible` invitation first, so no resume adds
+     * them again; the bot stays under `MAX_BOT_ADDS`.
+     */
+    const notShown = async (userIds: number[]): Promise<never> => {
+      const failedStep = step
+      const people = userIds.filter((id) => id !== PROVISIONING_BOT_ID)
+      if (people.length && !telegram.inviteLink)
+        throw new Error("Participant invitation incomplete")
+      await invite(
+        people.map((userId) => ({
+          userId,
+          reason: NOT_VISIBLE_INVITATION_REASON,
+        })),
+      )
+      step = failedStep
+      throw userIds.includes(PROVISIONING_BOT_ID)
+        ? botNotVisibleError()
+        : notVisibleError()
+    }
     const needLink = [
       ...notVisible.map((userId) => ({
         userId,
@@ -980,35 +1074,7 @@ export async function provisionSetup(params: {
     ]
     // Saved before any per-user failure is thrown, so a later resume never
     // adds an invited member again.
-    if (needLink.length) {
-      // One shared link: the first person to need it decides its owner.
-      step = "create_invitation"
-      const created = await controlledInvitation(
-        telegram,
-        chatId,
-        needLink[0]!.userId,
-      )
-      pendingInvitations = [
-        ...pendingInvitations.filter(
-          (i) => !needLink.some((n) => n.userId === Number(i.userId)),
-        ),
-        ...needLink.map(({ userId, reason }) => ({
-          userId: String(userId),
-          ...created,
-          reason,
-        })),
-      ]
-      step = "save_invitation"
-      await journal.write(setup.requestId, {
-        fingerprint,
-        state: "configuring",
-        chatId,
-        binding,
-        workerId,
-        pendingInvitations,
-        ...(botAdds ? { botAdds } : {}),
-      })
-    }
+    await invite(needLink)
     for (const userId of absent) {
       const failure = failures.get(userId)
       if (!failure) continue
@@ -1028,11 +1094,14 @@ export async function provisionSetup(params: {
           ),
         )
       step = privacyOnly ? "add_member" : "verify_added_member"
-      throw privacyOnly
-        ? Object.assign(new Error("Invited member has not joined yet"), {
-            text: AWAITING_JOIN,
-          })
-        : notVisibleError()
+      // A bot still owed a re-add is not an invitation wait.
+      throw botNotVisible
+        ? botNotVisibleError()
+        : privacyOnly
+          ? Object.assign(new Error("Invited member has not joined yet"), {
+              text: AWAITING_JOIN,
+            })
+          : notVisibleError()
     }
     // Promoting a user Telegram does not show in the chat yet is the same
     // propagation delay as a read: retry later instead of failing.
@@ -1044,7 +1113,8 @@ export async function provisionSetup(params: {
         await telegram.promote(chatId, userId, rights)
       } catch (error) {
         const text = (error as { text?: unknown } | null)?.text
-        throw text === "USER_NOT_PARTICIPANT" ? notVisibleError() : error
+        if (text === "USER_NOT_PARTICIPANT") await notShown([userId])
+        throw error
       }
     }
     for (const userId of binding.admins) {
@@ -1086,14 +1156,13 @@ export async function provisionSetup(params: {
     // A required member or the bot missing from the listing right after
     // their add is a propagation delay; a resumed job reads them again.
     // A wrong owner or wrong rights is not, and needs an operator.
-    if (
-      owner.role === "creator" &&
-      (bot.role === "absent" ||
-        participants.some(
-          (m) => m.role === "absent" && !backgroundIds.includes(m.userId),
-        ))
-    )
-      throw notVisibleError()
+    const unlisted = [
+      ...participants
+        .filter((m) => m.role === "absent" && !backgroundIds.includes(m.userId))
+        .map((m) => m.userId),
+      ...(bot.role === "absent" ? [PROVISIONING_BOT_ID] : []),
+    ]
+    if (owner.role === "creator" && unlisted.length) await notShown(unlisted)
     if (
       owner.role !== "creator" ||
       participants.some((member) =>
@@ -1160,7 +1229,7 @@ export async function provisionSetup(params: {
         binding,
         workerId,
         pendingInvitations,
-        ...(botAdds ? { botAdds } : {}),
+        ...counts(),
       })
     } else pendingInvitations = []
     const verifiedAt = new Date().toISOString()
@@ -1194,12 +1263,24 @@ export async function provisionSetup(params: {
     // Never discard known chat identity after partial setup or an ambiguous cloud commit.
     const authoritative = await cloud.view(setup.requestId)
     if (authoritative.state === "ready") return authoritative
+    let diagnostic = safeProvisionDiagnostic(error, step)
+    let retryAt = provisionRetryAt(error)
+    // Counted per setup and never reset by the worker: a setup that keeps
+    // failing this way stops for an operator, so it cannot hold the
+    // account or keep sending adds.
+    if (
+      isTransientTelegramError(error) &&
+      ++transientRetries >= MAX_TRANSIENT_RETRIES
+    ) {
+      diagnostic = `${step}:${TRANSIENT_LIMIT}`
+      retryAt = null
+    }
     await save({
       state: "incomplete",
       chatId,
       binding,
-      error: safeProvisionDiagnostic(error, step),
-      retryAt: provisionRetryAt(error),
+      error: diagnostic,
+      retryAt,
     })
     throw new Error(
       "Setup incomplete; inspect status and resume the same request",
