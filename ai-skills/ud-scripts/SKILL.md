@@ -26,8 +26,8 @@ Neither Python nor Bun is the default. Choose per script:
   GitHub-hosted runner, or a fresh machine). `python3` ships on macOS, most
   Linux distros, and those runners, but not on slim or Alpine container
   images. The standard library covers most needs: `argparse`, `json`,
-  `pathlib`, `subprocess`, `sqlite3`, `tomllib`, `urllib`, and `unittest`.
-  Type hints need a separate checker (pyright or mypy).
+  `pathlib`, `subprocess`, `sqlite3`, `tomllib`, and `urllib`. Type hints
+  need a separate checker (pyright, mypy, or ty).
 - **Bash** for a few lines that run commands in order, with no loops over
   data, no JSON, and little branching. Justfile recipes count. Once a script
   needs an `if` with real logic, a data loop, or JSON, Python or Bun is
@@ -48,10 +48,35 @@ Neither Python nor Bun is the default. Choose per script:
 - **Fail loudly.** Check exit codes (`check=True` in Python; test
   `exitCode` in Bun, since `Bun.spawnSync` does not throw) and exit non-zero
   with a message that names the step.
-- **Keep tests next to the script** for any non-trivial logic:
-  `foo.test.ts`, or `test_foo.py` so `python3 -m unittest` finds it.
+- **Keep tests next to the script** for any non-trivial logic, named with a
+  `test` suffix: `foo.test.ts` with `bun test`, or `foo_test.py` with pytest.
+  See [Python Tests With pytest](#python-tests-with-pytest).
 - **Wrap it in a justfile recipe** when people run it often, and keep the
   logic in the script, not the recipe.
+
+## Python Tests With pytest
+
+Use pytest for Python tests: plain `assert` functions, fixtures such as
+`tmp_path` and `monkeypatch`, and readable failure diffs. pytest finds
+`foo_test.py` and `test_foo.py` without config. It is a development tool, so
+a script that imports only the standard library stays dependency-free when it
+runs.
+
+Run it through uv so nothing is installed globally:
+
+- **Standalone script** (no `pyproject.toml`): `uvx pytest -q`. The test
+  imports the script from its own directory.
+- **uv project**: add pytest to the dev group with
+  `uv add --dev 'pytest>=8,<10'` and run `uv run pytest -q`. A `uvx` pytest
+  runs in its own environment and can't import the project's dependencies.
+- **CI**: install uv with `astral-sh/setup-uv`, then run the same command.
+
+To test a script with a hyphen in its name, load it with `importlib` in the
+test, or name the script with underscores. Fall back to the standard
+library's `unittest` only where nothing can be installed, and then run
+`python3 -m unittest discover -p '*_test.py'`, since its default pattern only
+finds files that start with `test`. unittest only runs `unittest.TestCase`
+classes, so write the tests that way; pytest runs them too.
 
 ## Why Not Bash by Default
 
