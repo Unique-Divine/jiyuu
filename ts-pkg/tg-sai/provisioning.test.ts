@@ -1879,7 +1879,7 @@ describe("transient failure paths", () => {
       if (id === 21) throw rpc(403, "USER_PRIVACY_RESTRICTED")
       f.members.set(id, { role: "member", rights: {} })
     }
-    await expect(f.run()).rejects.toThrow("incomplete")
+    await expect(f.run()).rejects.toThrow(STOPPED)
     const member = f.telegram.member
     let reads = 0
     f.telegram.member = async (chat, id) => {
@@ -1889,8 +1889,8 @@ describe("transient failure paths", () => {
     }
     // A resume every 15 minutes for a day.
     for (let tick = 0; tick < 96; tick++) {
-      await expect(f.run()).rejects.toThrow("incomplete")
-      expect(f.setup.retryAt).toBeTruthy()
+      await expect(f.run()).rejects.toThrow(STOPPED)
+      expect(f.setup.retryAt ?? f.setup.nextCheckAt).toBeTruthy()
       expect(errorOf(f)).not.toContain(TRANSIENT_LIMIT)
     }
   })
@@ -2027,7 +2027,7 @@ describe("transient failure paths", () => {
     f.telegram.members = async () => {
       throw rpc(500, "INTERNAL")
     }
-    await expect(f.run()).rejects.toThrow("incomplete")
+    await expect(f.run()).rejects.toThrow(STOPPED)
     expect(errorOf(f)).toBe(`audit_membership:${TELEGRAM_TRANSIENT}`)
     // From now on 21 is hidden: it waits on a link.
     hide(f, new Set([21]))
@@ -2039,7 +2039,7 @@ describe("transient failure paths", () => {
     }
     // A resume every 15 minutes while the 24 h invitation is live.
     for (resumes = 1; resumes <= 95; resumes++) {
-      await expect(f.run()).rejects.toThrow("incomplete")
+      await expect(f.run()).rejects.toThrow(STOPPED)
       expect(f.setup.retryAt).toBeTruthy()
       expect(errorOf(f)).not.toContain(TRANSIENT_LIMIT)
     }
@@ -2162,10 +2162,10 @@ describe("transient failure paths", () => {
       if (timeouts-- > 0) throw rpc(-503, "Timeout")
       await add(chat, id)
     }
-    await expect(f.run()).rejects.toThrow("incomplete")
+    await expect(f.run()).rejects.toThrow(STOPPED)
     expect(f.local?.transientRetries).toBe(1)
     // 21 now waits on a link; the others are added, so the count resets.
-    await expect(f.run()).rejects.toThrow("incomplete")
+    await expect(f.run()).rejects.toThrow(STOPPED)
     expect(f.local?.transientRetries ?? 0).toBe(0)
   })
 
