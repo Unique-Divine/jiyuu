@@ -14,6 +14,7 @@ import {
   addTargetToChat,
   createMtcuteRuntimeClient,
   NO_FLOOD_SLEEP,
+  promoteExistingMember,
   promoteTargetAdmin,
   sessionAccountId,
 } from "../mtcuteAdapter"
@@ -764,6 +765,102 @@ describe("CLI invite and admin writes never sleep through a flood wait", () => {
     expect(savedHolds()).toMatchObject([
       { accountId: "7", grp: "method:channels.editAdmin", waitS: 3 },
     ])
+  })
+
+  /**
+   * Real client keyed to account 7 whose transport answers each request by
+   * its method name and records every method sent.
+   */
+  function methodClient(answers: Record<string, unknown>) {
+    const { client } = writeClient(null)
+    const methods: string[] = []
+    client._client.mt.network._call = async (request: { _: string }) => {
+      methods.push(request._)
+      if (!(request._ in answers)) throw new Error(`unexpected ${request._}`)
+      return answers[request._]
+    }
+    return { client, methods }
+  }
+
+  const TARGET_USER = {
+    _: "user",
+    id: 2,
+    firstName: "Target",
+    accessHash: Long.ZERO,
+  }
+  const participantAnswer = (participant: unknown) => ({
+    _: "channels.channelParticipant",
+    participant,
+    chats: [],
+    users: [TARGET_USER],
+  })
+  const promoteParams = {
+    chatId: CHANNEL as any,
+    targetPeer: USER as any,
+    rights: { addAdmins: true },
+  }
+
+  for (const [name, answer] of [
+    [
+      "USER_NOT_PARTICIPANT",
+      {
+        _: "mt_rpc_error",
+        errorCode: 400,
+        errorMessage: "USER_NOT_PARTICIPANT",
+      },
+    ],
+    [
+      "channelParticipantLeft",
+      participantAnswer({
+        _: "channelParticipantLeft",
+        peer: { _: "peerUser", userId: 2 },
+      }),
+    ],
+  ] as const) {
+    test(`promoteExistingMember refuses on ${name} and never promotes`, async () => {
+      const { client, methods } = methodClient({
+        "channels.getParticipant": answer,
+      })
+      await expect(
+        promoteExistingMember(client, promoteParams),
+      ).rejects.toThrow("Refusing to promote")
+      expect(methods).toEqual(["channels.getParticipant"])
+      expect(methods).not.toContain("channels.editAdmin")
+    })
+  }
+
+  test("promoteExistingMember sends one editAdmin for a member", async () => {
+    const { client, methods } = methodClient({
+      "channels.getParticipant": participantAnswer({
+        _: "channelParticipant",
+        userId: 2,
+        date: 0,
+      }),
+      "channels.editAdmin": {
+        _: "updates",
+        updates: [],
+        users: [],
+        chats: [],
+        date: 0,
+        seq: 0,
+      },
+    })
+    await promoteExistingMember(client, { ...promoteParams, expectedUserId: 2 })
+    expect(methods).toEqual(["channels.getParticipant", "channels.editAdmin"])
+  })
+
+  test("promoteExistingMember refuses a member that is not the planned user", async () => {
+    const { client, methods } = methodClient({
+      "channels.getParticipant": participantAnswer({
+        _: "channelParticipant",
+        userId: 2,
+        date: 0,
+      }),
+    })
+    await expect(
+      promoteExistingMember(client, { ...promoteParams, expectedUserId: 3 }),
+    ).rejects.toThrow("resolved to user 2, expected 3")
+    expect(methods).not.toContain("channels.editAdmin")
   })
 
   test("NO_FLOOD_SLEEP sets a zero sleep threshold", () => {

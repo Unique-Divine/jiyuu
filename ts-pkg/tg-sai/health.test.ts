@@ -47,6 +47,7 @@ async function writeProfiles(
     apiHash: string
     sessionString: string
     password?: string
+    passwordPassEntry?: string
   },
 ): Promise<void> {
   await writeFile(
@@ -142,7 +143,7 @@ describe("tg-sai health", () => {
         apiId: 123,
         apiHash: "hash",
         sessionString: "session",
-        password: "profile-password",
+        passwordPassEntry: "tg-sai/corinne/telegram-2fa",
       })
       await mkdir(join(dir, "logs"), { recursive: true })
       await writeFile(
@@ -169,7 +170,9 @@ describe("tg-sai health", () => {
       expect(result.lines).toContain(
         'session_user: 7930936303 corinnebernett "Corinne Bernett"',
       )
-      expect(result.lines).toContain("✅🔥 password_status: present")
+      expect(result.lines).toContain(
+        "✅🔥 password_status: pass entry tg-sai/corinne/telegram-2fa",
+      )
       expect(result.lines).not.toContain("suggested_fixes:")
       expect(result.lines).toContain(
         `latest_sai_find: ${join(dir, "logs", "sai-find-00.jsonl")}`,
@@ -211,8 +214,36 @@ describe("tg-sai health", () => {
       expect(result.lines).toContain("  tg-sai profile show 0")
       expect(result.lines).toContain("- password_status (warning):")
       expect(result.lines).toContain(
-        "  tg-sai profile add --password '<password>'",
+        "  tg-sai profile add --name <profile> --password-prompt",
       )
+      expect(result.lines.join("\n")).not.toContain("--password '")
+    })
+  })
+
+  test("warns about a plain-text profile password without printing it", async () => {
+    await withTempConfig(async (dir) => {
+      await writeProfiles(dir, {
+        name: "corinne",
+        apiId: 123,
+        apiHash: "hash",
+        sessionString: "session",
+        password: "profile-password",
+      })
+
+      const result = await runHealthCheck({
+        env: { TG_SAI_DIR: dir },
+        createClient: completeClientFactory,
+      })
+
+      expect(result.lines).toContain("✅🔥 password_status: present")
+      expect(result.lines).toContain(
+        "⚠️ password_storage: plain text in profiles.json for corinne",
+      )
+      expect(result.lines).toContain("- password_storage (warning):")
+      expect(result.lines).toContain(
+        "  tg-sai profile migrate-password --run",
+      )
+      expect(result.lines.join("\n")).not.toContain("profile-password")
     })
   })
 })
