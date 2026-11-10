@@ -16,6 +16,7 @@ import {
 } from "./provisioning"
 import type { ProvisionRequest } from "./provisioning"
 import { CliProvisionCloud } from "./provisioningCloud"
+import { rewriteChatDescription } from "./provisioningDescription"
 import {
   FileProvisionJournal,
   withProvisionTelegram,
@@ -170,4 +171,30 @@ export function addProvisionCommands(program: Command): void {
         )
       },
     )
+  provision
+    .command("rewrite-description")
+    .description(
+      "Replace a chat's legacy sai-setup marker description with the " +
+        "friendly description and short ref",
+    )
+    .requiredOption("--request-id <id>", "Stable setup request ID")
+    .option("--run", "Write the new description to the chat")
+    .action(async (options: { requestId: string; run?: boolean }) => {
+      const setup = await new CliProvisionCloud().view(options.requestId)
+      const local = await new FileProvisionJournal().read(setup.requestId)
+      // Reads the chat even on a dry run, so the operator sees the change.
+      print(
+        await withProvisionTelegram(
+          setup,
+          (telegram) =>
+            rewriteChatDescription({
+              setup,
+              local,
+              telegram,
+              run: Boolean(options.run),
+            }),
+          cliTelemetry(),
+        ),
+      )
+    })
 }
