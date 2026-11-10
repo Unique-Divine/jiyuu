@@ -146,8 +146,9 @@ function inviteHoldUntil(
  * link, is marked `added` without an add call (`joined`), so the account
  * spends no add on them and today's count is unchanged. The same holds for
  * a member whose join request through that link is waiting: the drain
- * approves it. Errors from the read or the approval come before the add
- * call, so they defer the row like the errors below. The cap counts every member add the account made today
+ * approves it. A flood or hold on the read or approval defers the row until
+ * it ends, uncounted; a chat or member fault (`isMemberFault`) fails the
+ * row; any other error there counts an attempt. The cap counts every member add the account made today
  * (`BackgroundQueue.addsToday`, setup adds included), so background adds
  * stop once the total reaches `dailyMax`. Success marks the row `added`; a privacy refusal marks it
  * `privacy` and makes no link, since the ready receipt's shared
@@ -192,15 +193,21 @@ export async function drainBackgroundOnce(params: {
   const paced = nowMs + jitteredGapMs(pacing, params.random)
   // Set only by an error the add call itself threw.
   let callError: { error: unknown } | null = null
+  // Set only by an error from the member read or the approval.
+  let memberError: { error: unknown } | null = null
   const outcome = await params
     .telegram(async (telegram) => {
-      const member = await telegram.member(row.chatId, row.userId)
-      if (member.role !== "absent") return { state: "joined" as const }
-      // The shared link needs approval; a pending request is approved
-      // instead of spending an add. An approval error stops before the add,
-      // so the row defers one gap uncounted and no add is spent.
-      if (await telegram.approveJoin?.(row.chatId, row.userId))
-        return { state: "joined" as const }
+      try {
+        const member = await telegram.member(row.chatId, row.userId)
+        if (member.role !== "absent") return { state: "joined" as const }
+        // The shared link needs approval; a pending request is approved
+        // instead of spending an add. An error here stops before the add.
+        if (await telegram.approveJoin?.(row.chatId, row.userId))
+          return { state: "joined" as const }
+      } catch (error) {
+        memberError = { error }
+        throw error
+      }
       try {
         await telegram.add(row.chatId, row.userId)
         return { state: "added" as const }
@@ -242,6 +249,32 @@ export async function drainBackgroundOnce(params: {
   const code = safeProvisionError(outcome.error)
   const fromCall =
     (callError as { error: unknown } | null)?.error === outcome.error
+  const fromMember =
+    (memberError as { error: unknown } | null)?.error === outcome.error
+  // A counted retry goes behind the rows paced to `paced`, so one stuck row
+  // never starves the rest of the queue.
+  const behind = paced + pacing.gapMs
+  if (fromMember && !params.signal?.aborted) {
+    const retryAt = provisionRetryAt(outcome.error, nowMs)
+    if (retryAt) {
+      const until = Math.max(Date.parse(retryAt), paced)
+      queue.defer(row.chatId, row.userId, until, code, nowMs, false)
+      queue.pace(until)
+      return { state: "deferred", ...at, error: code, nextAtMs: until }
+    }
+    // This chat or member cannot be read or approved: no add can help.
+    if (
+      isMemberFault(outcome.error) ||
+      row.attempts + 1 >= MAX_BACKGROUND_ATTEMPTS
+    ) {
+      queue.finish(row.chatId, row.userId, "failed", code, nowMs)
+      queue.pace(paced)
+      return { state: "failed", ...at, error: code, nextAtMs: paced }
+    }
+    queue.defer(row.chatId, row.userId, behind, code, nowMs)
+    queue.pace(paced)
+    return { state: "deferred", ...at, error: code, nextAtMs: paced }
+  }
   if (!fromCall || params.signal?.aborted) {
     // The member was never at fault: retry after one gap, uncounted.
     queue.defer(row.chatId, row.userId, paced, code, nowMs, false)
@@ -273,7 +306,23 @@ export async function drainBackgroundOnce(params: {
     queue.pace(paced)
     return { state: "failed", ...at, error: code, nextAtMs: paced }
   }
-  queue.defer(row.chatId, row.userId, paced, code, nowMs)
+  queue.defer(row.chatId, row.userId, behind, code, nowMs)
   queue.pace(paced)
   return { state: "deferred", ...at, error: code, nextAtMs: paced }
+}
+
+/**
+ * A read or approval error that belongs to this chat or member: per-user
+ * refusals, an inaccessible chat or peer, or a deleted account.
+ */
+export function isMemberFault(error: unknown): boolean {
+  if (isPerUserAddError(error)) return true
+  const e = error as { text?: unknown; errorMessage?: unknown }
+  const text = typeof e?.text === "string" ? e.text : e?.errorMessage
+  return (
+    typeof text === "string" &&
+    /^(?:CHANNEL_PRIVATE|CHANNEL_INVALID|CHAT_ID_INVALID|PEER_ID_INVALID|USER_DEACTIVATED|INPUT_USER_DEACTIVATED|USER_CHANNELS_TOO_MUCH|CHANNELS_TOO_MUCH)$/.test(
+      text,
+    )
+  )
 }

@@ -27,6 +27,8 @@ function fixture(
     /** Users with a pending join request; omit for an adapter without approval. */
     requests?: number[]
     approveError?: unknown
+    /** Error for the member read, or a function choosing one per chat. */
+    readError?: unknown
   } = {},
 ) {
   const db = openStateDb(":memory:")
@@ -34,10 +36,17 @@ function fixture(
   const holds = HoldStore.fromDb(db)
   const calls: string[] = []
   const telegram = {
-    member: async (_chat: number, userId: number) => ({
-      role: options.joined?.includes(userId) ? "member" : "absent",
-      rights: {},
-    }),
+    member: async (chatId: number, userId: number) => {
+      const error =
+        typeof options.readError === "function"
+          ? options.readError(chatId)
+          : options.readError
+      if (error) throw error
+      return {
+        role: options.joined?.includes(userId) ? "member" : "absent",
+        rights: {},
+      }
+    },
     ...(options.requests || options.approveError
       ? {
           approveJoin: async (_chat: number, userId: number) => {
@@ -110,24 +119,84 @@ describe("background drain", () => {
     ])
     expect(f.queue.addsToday(NOW + 1_200_000)).toBe(1)
   })
-  test("an approval error defers the row uncounted and spends no add", async () => {
-    for (const text of ["FLOOD_WAIT_600", "CHAT_ADMIN_REQUIRED"]) {
-      const f = fixture({
-        approveError: Object.assign(new Error("x"), { code: 420, text }),
-      })
+  test("a flood on the approval defers the row until it ends, uncounted", async () => {
+    const f = fixture({
+      approveError: Object.assign(new Error("x"), {
+        code: 420,
+        text: "FLOOD_WAIT_7200",
+      }),
+    })
+    f.enqueue([1, 2])
+    const result = await f.drain()
+    expect(result).toMatchObject({ state: "deferred", error: "FLOOD_WAIT_7200" })
+    expect(result.nextAtMs!).toBeGreaterThanOrEqual(NOW + 7_200_000)
+    expect(f.calls).toEqual(["connect", "approve:1"])
+    expect(f.queue.addsToday(NOW)).toBe(0)
+    // Every row waits for the hold, and the flooded row counts no attempt.
+    expect(f.queue.next(NOW + 7_000_000)).toBeNull()
+    expect(f.queue.next(result.nextAtMs!)).toMatchObject({
+      userId: 1,
+      attempts: 0,
+    })
+  })
+  test("a chat or member fault on the read or approval fails the row without an add", async () => {
+    const faults: [string, Record<string, unknown>][] = [
+      ["read", { code: 400, text: "CHANNEL_PRIVATE" }],
+      ["read", { code: 400, text: "PEER_ID_INVALID" }],
+      ["approve", { code: 400, text: "USER_CHANNELS_TOO_MUCH" }],
+      ["approve", { code: 400, text: "INPUT_USER_DEACTIVATED" }],
+    ]
+    for (const [where, fault] of faults) {
+      const error = Object.assign(new Error("x"), fault)
+      const f = fixture(
+        where === "read" ? { readError: error } : { approveError: error },
+      )
       f.enqueue([1])
       expect(await f.drain()).toMatchObject({
-        state: "deferred",
-        userId: 1,
-        error: text,
+        state: "failed",
+        error: fault.text,
       })
-      expect(f.calls).toEqual(["connect", "approve:1"])
+      expect(f.calls.filter((c) => c.startsWith("add:"))).toEqual([])
       expect(f.queue.addsToday(NOW)).toBe(0)
-      expect(f.queue.next(NOW + 86_400_000)).toMatchObject({
-        userId: 1,
-        attempts: 0,
-      })
+      expect(f.queue.summary().pending).toBe(0)
     }
+  })
+  test("a row whose read keeps failing does not starve the others", async () => {
+    // Chat -200 errors on every read; chat -100 rows are healthy.
+    const f = fixture({
+      readError: (chatId: number) =>
+        chatId === -200 ? new Error("unexpected read failure") : null,
+    })
+    f.queue.enqueue({
+      requestId: "r0",
+      chatId: -200,
+      userIds: [9],
+      notBeforeMs: NOW - 1,
+    })
+    f.enqueue([1, 2, 3])
+    let now = NOW
+    const results: string[] = []
+    for (let i = 0; i < 12 && f.queue.summary().pending; i++) {
+      const result = await f.drain(now)
+      if (result.state !== "idle")
+        results.push(`${result.state}:${result.chatId}/${result.userId}`)
+      now = f.queue.summary().nextAtMs ?? now
+    }
+    expect(results.filter((r) => r.startsWith("added:"))).toEqual([
+      "added:-100/1",
+      "added:-100/2",
+      "added:-100/3",
+    ])
+    // The healthy rows go between the stuck row's attempts.
+    expect(results.slice(0, 4)).toEqual([
+      "deferred:-200/9",
+      "added:-100/1",
+      "deferred:-200/9",
+      "added:-100/2",
+    ])
+    // The stuck row counts attempts and finally fails.
+    expect(results.at(-1)).toBe("failed:-200/9")
+    expect(results.filter((r) => r.endsWith("-200/9"))).toHaveLength(5)
   })
   test("one add per step, then the rest wait one jittered gap", async () => {
     const f = fixture()
@@ -259,7 +328,7 @@ describe("background drain", () => {
     for (let i = 0; i < 5; i++) {
       const result = await flaky.drain(now)
       states.push(result.state)
-      now = result.nextAtMs!
+      now = flaky.queue.summary().nextAtMs ?? result.nextAtMs!
     }
     expect(states).toEqual([
       "deferred",
