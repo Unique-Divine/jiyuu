@@ -344,7 +344,7 @@ def _discover_accounts() -> dict[str, TelegramClient]:
 clients: dict[str, TelegramClient] = _discover_accounts()
 
 
-def get_client(account: str = None) -> TelegramClient:
+def get_client(account: str | None = None) -> TelegramClient:
     """Resolve account label to TelegramClient."""
     if account is None:
         if len(clients) == 1:
@@ -372,7 +372,7 @@ def with_account(readonly=False):
       concurrently, prefixes each result with [label], concatenates.
     - In multi-mode without account + NOT readonly: returns an error.
 
-    The wrapped function must accept ``account: str = None`` and use
+    The wrapped function must accept ``account: str | None = None`` and use
     ``get_client(account)`` internally to obtain the TelegramClient.
     """
 
@@ -427,7 +427,7 @@ async def _force_reconnect(cl: TelegramClient):
     reconnect_logger.warning("Forced reconnect successful")
 
 
-async def ensure_connected(cl: TelegramClient = None):
+async def ensure_connected(cl: TelegramClient | None = None):
     """Verify Telegram connection is alive, reconnect if needed.
 
     is_connected() can return True when the underlying TCP socket is dead.
@@ -570,7 +570,7 @@ def log_and_format_error(
     function_name: str,
     error: Exception,
     prefix: Optional[Union[ErrorCategory, str]] = None,
-    user_message: str = None,
+    user_message: str | None = None,
     **kwargs,
 ) -> str:
     """

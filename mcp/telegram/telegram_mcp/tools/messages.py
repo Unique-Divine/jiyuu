@@ -219,7 +219,7 @@ def format_message_line(msg) -> str:
 @with_account(readonly=True)
 @validate_id("chat_id")
 async def get_messages(
-    chat_id: Union[int, str], page: int = 1, page_size: int = 20, account: str = None
+    chat_id: Union[int, str], page: int = 1, page_size: int = 20, account: str | None = None
 ) -> str:
     """
     Get paginated messages from a specific chat.
@@ -254,7 +254,7 @@ async def send_message(
     chat_id: Union[int, str],
     message: str,
     parse_mode: Optional[str] = None,
-    account: str = None,
+    account: str | None = None,
 ) -> str:
     """
     Send a message to a specific chat.
@@ -304,7 +304,7 @@ async def send_scheduled_message(
     chat_id: Union[int, str],
     message: str,
     schedule_date: Union[str, int],
-    account: str = None,
+    account: str | None = None,
 ) -> str:
     """
     Schedule a message to be sent at a future time.
@@ -363,7 +363,7 @@ async def send_scheduled_message(
 )
 @with_account(readonly=True)
 @validate_id("chat_id")
-async def get_scheduled_messages(chat_id: Union[int, str], account: str = None) -> str:
+async def get_scheduled_messages(chat_id: Union[int, str], account: str | None = None) -> str:
     """
     List all scheduled (pending) messages in a chat.
     Args:
@@ -403,7 +403,7 @@ async def get_scheduled_messages(chat_id: Union[int, str], account: str = None) 
 @with_account(readonly=False)
 @validate_id("chat_id")
 async def delete_scheduled_message(
-    chat_id: Union[int, str], message_ids: List[int], account: str = None
+    chat_id: Union[int, str], message_ids: List[int], account: str | None = None
 ) -> str:
     """
     Delete one or more scheduled (pending) messages from a chat.
@@ -441,7 +441,7 @@ async def list_inline_buttons(
     chat_id: Union[int, str],
     message_id: Optional[Union[int, str]] = None,
     limit: int = 20,
-    account: str = None,
+    account: str | None = None,
 ) -> str:
     """
     Inspect inline buttons on a recent message to discover their indices/text/URLs.
@@ -534,7 +534,7 @@ async def press_inline_button(
     message_id: Optional[Union[int, str]] = None,
     button_text: Optional[str] = None,
     button_index: Optional[int] = None,
-    account: str = None,
+    account: str | None = None,
 ) -> str:
     """
     Press an inline button (callback) in a chat message.
@@ -679,10 +679,10 @@ async def press_inline_button(
 async def list_messages(
     chat_id: Union[int, str],
     limit: int = 20,
-    search_query: str = None,
-    from_date: str = None,
-    to_date: str = None,
-    account: str = None,
+    search_query: str | None = None,
+    from_date: str | None = None,
+    to_date: str | None = None,
+    account: str | None = None,
 ) -> str:
     """
     Retrieve messages with optional filters.
@@ -817,7 +817,7 @@ async def get_message_context(
     chat_id: Union[int, str],
     message_id: int,
     context_size: int = 3,
-    account: str = None,
+    account: str | None = None,
 ) -> str:
     """
     Retrieve context around a specific message.
@@ -907,7 +907,7 @@ async def forward_message(
     from_chat_id: Union[int, str],
     message_id: Union[int, List[int]],
     to_chat_id: Union[int, str],
-    account: str = None,
+    account: str | None = None,
     expand_album: bool = True,
 ) -> str:
     """
@@ -992,7 +992,7 @@ async def forward_messages(
     from_chat_id: Union[int, str],
     message_ids: List[int],
     to_chat_id: Union[int, str],
-    account: str = None,
+    account: str | None = None,
 ) -> str:
     """
     Forward a BATCH of messages from a source chat to a destination chat in
@@ -1041,7 +1041,7 @@ async def forward_messages(
 @with_account(readonly=False)
 @validate_id("chat_id")
 async def edit_message(
-    chat_id: Union[int, str], message_id: int, new_text: str, account: str = None
+    chat_id: Union[int, str], message_id: int, new_text: str, account: str | None = None
 ) -> str:
     """
     Edit a message you sent.
@@ -1064,7 +1064,9 @@ async def edit_message(
 )
 @with_account(readonly=False)
 @validate_id("chat_id")
-async def delete_message(chat_id: Union[int, str], message_id: int, account: str = None) -> str:
+async def delete_message(
+    chat_id: Union[int, str], message_id: int, account: str | None = None
+) -> str:
     """
     Delete a message by ID.
     """
@@ -1088,7 +1090,7 @@ async def delete_message(chat_id: Union[int, str], message_id: int, account: str
 @with_account(readonly=False)
 @validate_id("chat_id")
 async def delete_chat_history(
-    chat_id: Union[int, str], max_id: int = 0, revoke: bool = False, account: str = None
+    chat_id: Union[int, str], max_id: int = 0, revoke: bool = False, account: str | None = None
 ) -> str:
     """
     Clear the full message history of a chat.
@@ -1138,7 +1140,7 @@ async def delete_messages_bulk(
     chat_id: Union[int, str],
     message_ids: List[int],
     revoke: bool = True,
-    account: str = None,
+    account: str | None = None,
 ) -> str:
     """
     Delete multiple messages in a single call.
@@ -1183,7 +1185,9 @@ async def delete_messages_bulk(
 )
 @with_account(readonly=False)
 @validate_id("chat_id")
-async def pin_message(chat_id: Union[int, str], message_id: int, account: str = None) -> str:
+async def pin_message(
+    chat_id: Union[int, str], message_id: int, account: str | None = None
+) -> str:
     """
     Pin a message in a chat.
     """
@@ -1203,7 +1207,9 @@ async def pin_message(chat_id: Union[int, str], message_id: int, account: str = 
 )
 @with_account(readonly=False)
 @validate_id("chat_id")
-async def unpin_message(chat_id: Union[int, str], message_id: int, account: str = None) -> str:
+async def unpin_message(
+    chat_id: Union[int, str], message_id: int, account: str | None = None
+) -> str:
     """
     Unpin a message in a chat.
     """
@@ -1226,7 +1232,7 @@ async def unpin_message(chat_id: Union[int, str], message_id: int, account: str 
 )
 @with_account(readonly=False)
 @validate_id("chat_id")
-async def unpin_all_messages(chat_id: Union[int, str], account: str = None) -> str:
+async def unpin_all_messages(chat_id: Union[int, str], account: str | None = None) -> str:
     """
     Unpin all pinned messages in a chat.
 
@@ -1252,7 +1258,7 @@ async def unpin_all_messages(chat_id: Union[int, str], account: str = None) -> s
 )
 @with_account(readonly=False)
 @validate_id("chat_id")
-async def mark_as_read(chat_id: Union[int, str], account: str = None) -> str:
+async def mark_as_read(chat_id: Union[int, str], account: str | None = None) -> str:
     """
     Mark all messages as read in a chat.
     """
@@ -1275,7 +1281,7 @@ async def reply_to_message(
     message_id: int,
     text: str,
     parse_mode: Optional[str] = None,
-    account: str = None,
+    account: str | None = None,
 ) -> str:
     """
     Reply to a specific message in a chat.
@@ -1304,7 +1310,7 @@ async def reply_to_message(
 @with_account(readonly=True)
 @validate_id("chat_id")
 async def search_messages(
-    chat_id: Union[int, str], query: str, limit: int = 20, account: str = None
+    chat_id: Union[int, str], query: str, limit: int = 20, account: str | None = None
 ) -> str:
     """
     Search for messages in a chat by text.
@@ -1343,7 +1349,7 @@ async def search_messages(
 )
 @with_account(readonly=True)
 async def search_global(
-    query: str, page: int = 1, page_size: int = 20, account: str = None
+    query: str, page: int = 1, page_size: int = 20, account: str | None = None
 ) -> str:
     """
     Search for messages across all public chats and channels by text content.
@@ -1386,7 +1392,9 @@ async def search_global(
 @mcp.tool(annotations=ToolAnnotations(title="Get History", openWorldHint=True, readOnlyHint=True))
 @with_account(readonly=True)
 @validate_id("chat_id")
-async def get_history(chat_id: Union[int, str], limit: int = 100, account: str = None) -> str:
+async def get_history(
+    chat_id: Union[int, str], limit: int = 100, account: str | None = None
+) -> str:
     """
     Get full chat history (up to limit).
 
@@ -1408,7 +1416,7 @@ async def get_history(chat_id: Union[int, str], limit: int = 100, account: str =
 )
 @with_account(readonly=True)
 @validate_id("chat_id")
-async def get_pinned_messages(chat_id: Union[int, str], account: str = None) -> str:
+async def get_pinned_messages(chat_id: Union[int, str], account: str | None = None) -> str:
     """
     Get all pinned messages in a chat.
 
@@ -1461,8 +1469,8 @@ async def create_poll(
     multiple_choice: bool = False,
     quiz_mode: bool = False,
     public_votes: bool = True,
-    close_date: str = None,
-    account: str = None,
+    close_date: str | None = None,
+    account: str | None = None,
 ) -> str:
     """
     Create a poll in a chat using Telegram's native poll feature.
@@ -1540,7 +1548,7 @@ async def send_reaction(
     message_id: int,
     emoji: str,
     big: bool = False,
-    account: str = None,
+    account: str | None = None,
 ) -> str:
     """
     Send a reaction to a message.
@@ -1584,7 +1592,7 @@ async def send_reaction(
 async def remove_reaction(
     chat_id: Union[int, str],
     message_id: int,
-    account: str = None,
+    account: str | None = None,
 ) -> str:
     """
     Remove your reaction from a message.
@@ -1620,7 +1628,7 @@ async def get_message_reactions(
     chat_id: Union[int, str],
     message_id: int,
     limit: int = 50,
-    account: str = None,
+    account: str | None = None,
 ) -> str:
     """
     Get the list of reactions on a message.
@@ -1695,7 +1703,7 @@ async def save_draft(
     message: str,
     reply_to_msg_id: Optional[int] = None,
     no_webpage: bool = False,
-    account: str = None,
+    account: str | None = None,
 ) -> str:
     """
     Save a draft message to a chat or channel. The draft will appear in the Telegram
@@ -1735,7 +1743,7 @@ async def save_draft(
 
 @mcp.tool(annotations=ToolAnnotations(title="Get Drafts", openWorldHint=True, readOnlyHint=True))
 @with_account(readonly=True)
-async def get_drafts(account: str = None) -> str:
+async def get_drafts(account: str | None = None) -> str:
     """
     Get all draft messages across all chats.
     Returns a list of drafts with their chat info and message content.
@@ -1802,7 +1810,7 @@ async def get_drafts(account: str = None) -> str:
 )
 @with_account(readonly=False)
 @validate_id("chat_id")
-async def clear_draft(chat_id: Union[int, str], account: str = None) -> str:
+async def clear_draft(chat_id: Union[int, str], account: str | None = None) -> str:
     """
     Clear/delete a draft from a specific chat.
 

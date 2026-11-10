@@ -25,7 +25,9 @@ def _created_chat(result):
 )
 @with_account(readonly=False)
 @validate_id("user_ids")
-async def create_group(title: str, user_ids: List[Union[int, str]], account: str = None) -> str:
+async def create_group(
+    title: str, user_ids: List[Union[int, str]], account: str | None = None
+) -> str:
     """
     Create a new group or supergroup and add users.
 
@@ -84,7 +86,7 @@ async def create_group(title: str, user_ids: List[Union[int, str]], account: str
 @with_account(readonly=False)
 @validate_id("group_id", "user_ids")
 async def invite_to_group(
-    group_id: Union[int, str], user_ids: List[Union[int, str]], account: str = None
+    group_id: Union[int, str], user_ids: List[Union[int, str]], account: str | None = None
 ) -> str:
     """
     Invite users to a group or channel.
@@ -143,7 +145,7 @@ async def invite_to_group(
 )
 @with_account(readonly=False)
 @validate_id("chat_id")
-async def leave_chat(chat_id: Union[int, str], account: str = None) -> str:
+async def leave_chat(chat_id: Union[int, str], account: str | None = None) -> str:
     """
     Leave a group or channel by chat ID.
 
@@ -232,7 +234,7 @@ async def get_participants(
     chat_id: Union[int, str],
     page: int = 1,
     page_size: int = 200,
-    account: str = None,
+    account: str | None = None,
 ) -> str:
     """
     List participants in a group or channel with pagination.
@@ -293,7 +295,7 @@ async def get_participants(
 )
 @with_account(readonly=False)
 async def create_channel(
-    title: str, about: str = "", megagroup: bool = False, account: str = None
+    title: str, about: str = "", megagroup: bool = False, account: str | None = None
 ) -> str:
     """
     Create a new channel or supergroup.
@@ -320,7 +322,7 @@ async def create_channel(
 )
 @with_account(readonly=False)
 @validate_id("chat_id")
-async def edit_chat_title(chat_id: Union[int, str], title: str, account: str = None) -> str:
+async def edit_chat_title(chat_id: Union[int, str], title: str, account: str | None = None) -> str:
     """
     Edit the title of a chat, group, or channel.
 
@@ -352,7 +354,7 @@ async def edit_chat_photo(
     chat_id: Union[int, str],
     file_path: str,
     ctx: Optional[Context] = None,
-    account: str = None,
+    account: str | None = None,
 ) -> str:
     """
     Edit the photo of a chat, group, or channel. Requires a file path to an image.
@@ -397,7 +399,7 @@ async def edit_chat_photo(
 )
 @with_account(readonly=False)
 @validate_id("chat_id")
-async def edit_chat_about(chat_id: Union[int, str], about: str, account: str = None) -> str:
+async def edit_chat_about(chat_id: Union[int, str], about: str, account: str | None = None) -> str:
     """
     Edit the description ("About") of a chat, group, or channel.
 
@@ -429,7 +431,7 @@ async def edit_chat_about(chat_id: Union[int, str], about: str, account: str = N
 )
 @with_account(readonly=False)
 @validate_id("chat_id")
-async def delete_chat_photo(chat_id: Union[int, str], account: str = None) -> str:
+async def delete_chat_photo(chat_id: Union[int, str], account: str | None = None) -> str:
     """
     Delete the photo of a chat, group, or channel.
     """
@@ -467,8 +469,8 @@ async def delete_chat_photo(chat_id: Union[int, str], account: str = None) -> st
 async def promote_admin(
     group_id: Union[int, str],
     user_id: Union[int, str],
-    rights: dict = None,
-    account: str = None,
+    rights: dict | None = None,
+    account: str | None = None,
 ) -> str:
     """
     Promote a user to admin in a group/channel.
@@ -545,7 +547,7 @@ async def promote_admin(
 @with_account(readonly=False)
 @validate_id("group_id", "user_id")
 async def demote_admin(
-    group_id: Union[int, str], user_id: Union[int, str], account: str = None
+    group_id: Union[int, str], user_id: Union[int, str], account: str | None = None
 ) -> str:
     """
     Demote a user from admin in a group/channel.
@@ -604,7 +606,9 @@ async def demote_admin(
 )
 @with_account(readonly=False)
 @validate_id("chat_id", "user_id")
-async def ban_user(chat_id: Union[int, str], user_id: Union[int, str], account: str = None) -> str:
+async def ban_user(
+    chat_id: Union[int, str], user_id: Union[int, str], account: str | None = None
+) -> str:
     """
     Ban a user from a group or channel.
 
@@ -660,7 +664,7 @@ async def ban_user(chat_id: Union[int, str], user_id: Union[int, str], account: 
 @with_account(readonly=False)
 @validate_id("chat_id", "user_id")
 async def unban_user(
-    chat_id: Union[int, str], user_id: Union[int, str], account: str = None
+    chat_id: Union[int, str], user_id: Union[int, str], account: str | None = None
 ) -> str:
     """
     Unban a user from a group or channel.
@@ -735,7 +739,7 @@ async def set_default_chat_permissions(
     invite_users: bool = True,
     pin_messages: bool = False,
     until_date: int = 0,
-    account: str = None,
+    account: str | None = None,
 ) -> str:
     """
     Set default member permissions for a group, supergroup, or channel.
@@ -801,7 +805,9 @@ async def set_default_chat_permissions(
 )
 @with_account(readonly=False)
 @validate_id("chat_id")
-async def toggle_slow_mode(chat_id: Union[int, str], seconds: int = 0, account: str = None) -> str:
+async def toggle_slow_mode(
+    chat_id: Union[int, str], seconds: int = 0, account: str | None = None
+) -> str:
     """
     Enable or disable slow mode for a supergroup.
 
@@ -855,7 +861,7 @@ async def edit_admin_rights(
     manage_call: bool = False,
     manage_topics: bool = False,
     other: bool = False,
-    account: str = None,
+    account: str | None = None,
 ) -> str:
     """
     Set granular admin rights for a user in a supergroup or channel.
@@ -920,7 +926,7 @@ async def edit_admin_rights(
 @mcp.tool(annotations=ToolAnnotations(title="Get Admins", openWorldHint=True, readOnlyHint=True))
 @with_account(readonly=True)
 @validate_id("chat_id")
-async def get_admins(chat_id: Union[int, str], account: str = None) -> str:
+async def get_admins(chat_id: Union[int, str], account: str | None = None) -> str:
     """
     Get all admins in a group or channel.
 
@@ -951,7 +957,7 @@ async def get_admins(chat_id: Union[int, str], account: str = None) -> str:
 )
 @with_account(readonly=True)
 @validate_id("chat_id")
-async def get_banned_users(chat_id: Union[int, str], account: str = None) -> str:
+async def get_banned_users(chat_id: Union[int, str], account: str | None = None) -> str:
     """
     Get all banned users in a group or channel.
 
@@ -982,7 +988,7 @@ async def get_banned_users(chat_id: Union[int, str], account: str = None) -> str
 )
 @with_account(readonly=True)
 @validate_id("chat_id")
-async def get_invite_link(chat_id: Union[int, str], account: str = None) -> str:
+async def get_invite_link(chat_id: Union[int, str], account: str | None = None) -> str:
     """
     Get the invite link for a group or channel.
     """
@@ -1031,7 +1037,7 @@ async def get_invite_link(chat_id: Union[int, str], account: str = None) -> str:
     )
 )
 @with_account(readonly=False)
-async def join_chat_by_link(link: str, account: str = None) -> str:
+async def join_chat_by_link(link: str, account: str | None = None) -> str:
     """
     Join a chat by invite link.
     """
@@ -1081,7 +1087,7 @@ async def join_chat_by_link(link: str, account: str = None) -> str:
 )
 @with_account(readonly=True)
 @validate_id("chat_id")
-async def export_chat_invite(chat_id: Union[int, str], account: str = None) -> str:
+async def export_chat_invite(chat_id: Union[int, str], account: str | None = None) -> str:
     """
     Export a chat invite link.
     """
@@ -1121,7 +1127,7 @@ async def export_chat_invite(chat_id: Union[int, str], account: str = None) -> s
     )
 )
 @with_account(readonly=False)
-async def import_chat_invite(hash: str, account: str = None) -> str:
+async def import_chat_invite(hash: str, account: str | None = None) -> str:
     """
     Import a chat invite by hash.
     """
@@ -1184,7 +1190,7 @@ async def import_chat_invite(hash: str, account: str = None) -> str:
 )
 @with_account(readonly=True)
 @validate_id("chat_id")
-async def get_recent_actions(chat_id: Union[int, str], account: str = None) -> str:
+async def get_recent_actions(chat_id: Union[int, str], account: str | None = None) -> str:
     """
     Get recent admin actions (admin log) in a group or channel.
 
