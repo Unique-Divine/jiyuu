@@ -22,6 +22,11 @@ function fixture(
     /** Runs before the operation, like connect and identity checks. */
     connect?: () => Promise<void>
     signal?: AbortSignal
+    /** Users already in the chat, e.g. joined by link. */
+    joined?: number[]
+    /** Users with a pending join request; omit for an adapter without approval. */
+    requests?: number[]
+    approveError?: unknown
   } = {},
 ) {
   const db = openStateDb(":memory:")
@@ -29,6 +34,19 @@ function fixture(
   const holds = HoldStore.fromDb(db)
   const calls: string[] = []
   const telegram = {
+    member: async (_chat: number, userId: number) => ({
+      role: options.joined?.includes(userId) ? "member" : "absent",
+      rights: {},
+    }),
+    ...(options.requests || options.approveError
+      ? {
+          approveJoin: async (_chat: number, userId: number) => {
+            calls.push(`approve:${userId}`)
+            if (options.approveError) throw options.approveError
+            return options.requests!.includes(userId)
+          },
+        }
+      : {}),
     add: async (_chat: number, userId: number) => {
       calls.push(`add:${userId}`)
       await options.add?.(userId)
@@ -62,6 +80,44 @@ function fixture(
 }
 
 describe("background drain", () => {
+  test("a member who already joined by link costs no add", async () => {
+    const f = fixture({ joined: [1] })
+    f.enqueue([1, 2])
+    expect(await f.drain()).toEqual({
+      state: "joined",
+      chatId: -100,
+      userId: 1,
+      nextAtMs: NOW + 1_200_000,
+    })
+    expect(f.calls).toEqual(["connect"])
+    expect(f.queue.addsToday(NOW)).toBe(0)
+    expect(f.queue.summary().pending).toBe(1)
+    expect((await f.drain(NOW + 1_200_000)).state).toBe("added")
+    expect(f.calls).toEqual(["connect", "connect", "add:2"])
+    expect(f.queue.addsToday(NOW + 1_200_000)).toBe(1)
+  })
+  test("a waiting join request is approved instead of adding", async () => {
+    const f = fixture({ requests: [1] })
+    f.enqueue([1, 2])
+    expect((await f.drain()).state).toBe("joined")
+    expect((await f.drain(NOW + 1_200_000)).state).toBe("added")
+    expect(f.calls).toEqual([
+      "connect",
+      "approve:1",
+      "connect",
+      "approve:2",
+      "add:2",
+    ])
+    expect(f.queue.addsToday(NOW + 1_200_000)).toBe(1)
+  })
+  test("a refused approval falls back to the add", async () => {
+    const f = fixture({
+      approveError: Object.assign(new Error("x"), { text: "CHAT_ADMIN_REQUIRED" }),
+    })
+    f.enqueue([1])
+    expect((await f.drain()).state).toBe("added")
+    expect(f.calls).toEqual(["connect", "approve:1", "add:1"])
+  })
   test("one add per step, then the rest wait one jittered gap", async () => {
     const f = fixture()
     f.enqueue([1, 2])
