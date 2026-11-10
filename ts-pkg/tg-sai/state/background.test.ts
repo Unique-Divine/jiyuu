@@ -162,4 +162,26 @@ describe("background queue", () => {
     applyMigrations(db, STATE_MIGRATIONS)
     expect(new BackgroundQueue(db).addsToday(DAY + 10)).toBe(2)
   })
+  test("0005 keeps today's adds and counts uncertain ones", () => {
+    const db = new Database(":memory:", { strict: true })
+    applyMigrations(db, STATE_MIGRATIONS.slice(0, 4))
+    const before = new BackgroundQueue(db)
+    before.recordAdds({
+      source: "setup",
+      outcome: "added",
+      chatId: -1,
+      userIds: [1, 2],
+      nowMs: DAY + 1,
+    })
+    applyMigrations(db, STATE_MIGRATIONS)
+    const after = new BackgroundQueue(db)
+    after.recordAdds({
+      source: "background",
+      outcome: "uncertain",
+      chatId: -1,
+      userIds: [3],
+      nowMs: DAY + 2,
+    })
+    expect(after.addsToday(DAY + 10)).toBe(3)
+  })
 })

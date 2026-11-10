@@ -2,6 +2,7 @@ import { expect, setSystemTime, test } from "bun:test"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { MtcuteError, MtTimeoutError } from "@mtcute/bun"
 import { Command } from "commander"
 import {
   CUSTODY_USER_ID,
@@ -199,6 +200,53 @@ test("interrupted creating job is marked unknown and never retried as a new grou
   expect(f.calls.filter((call) => call === "claim")).toHaveLength(1)
 })
 
+test("a transient Telegram error waits for its retryAt instead of blocking", async () => {
+  for (const error of [
+    new MtTimeoutError(10_000),
+    // Worker shutdown destroys the client mid-call.
+    new MtcuteError("Connection destroyed"),
+  ]) {
+    const f = fixture()
+    f.setup = {
+      ...f.setup,
+      state: "configuring",
+      chatId: -1001234567890,
+      binding: { participants: [1912700300], admins: [1912700300] },
+    }
+    f.telegram = async <T>(
+      _setup: Setup,
+      operation: (adapter: TelegramProvisioner) => Promise<T>,
+    ) => {
+      f.calls.push("telegram")
+      return operation({
+        self: async () => CUSTODY_USER_ID,
+        verifyMarker: async () => {
+          throw error
+        },
+      } as unknown as TelegramProvisioner)
+    }
+    const now = Date.now()
+    const first = await runWorkerOnce(
+      { custodyProfile: "custody", workerId: "stable", run: true, now },
+      f,
+    )
+    expect(first.results[0]?.state).toBe("incomplete")
+    expect(first.results[0]?.retryAt).toBeTruthy()
+    expect((f.setup as Setup & { error?: string }).error).toBe(
+      "verify_marker:TG_SAI_TRANSIENT",
+    )
+    f.calls.length = 0
+    const next = await runWorkerOnce(
+      { custodyProfile: "custody", workerId: "stable", run: true, now },
+      f,
+    )
+    expect(next.results[0]).toMatchObject({
+      state: "waiting",
+      retryAt: f.setup.retryAt,
+    })
+    expect(f.calls).not.toContain("telegram")
+  }
+})
 test("worker command defaults to one-page preview and requires explicit --run for writes", async () => {
   for (const write of [false, true]) {
     const program = new Command()
