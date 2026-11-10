@@ -19,7 +19,7 @@ import os
 import sys
 from datetime import datetime, timezone
 
-from dotenv import load_dotenv
+from dotenv import find_dotenv, load_dotenv
 from telethon import errors
 from telethon.sessions import StringSession
 from telethon.sync import TelegramClient
@@ -27,7 +27,14 @@ from telethon.sync import TelegramClient
 # How many times the QR code is regenerated after expiry before giving up.
 _QR_MAX_REFRESHES = 10
 
-load_dotenv()
+def load_env_file() -> None:
+    """Load the nearest .env from the current directory upward.
+
+    Searching from the working directory, not this script's directory, matches
+    the .env update step, which writes to the current directory. Variables
+    already set in the environment win.
+    """
+    load_dotenv(find_dotenv(usecwd=True))
 
 
 def client_identity_kwargs() -> dict:
@@ -163,6 +170,7 @@ def _phone_login(client: TelegramClient) -> None:
 
 def main() -> None:
     args = _parse_args()
+    load_env_file()
     wrapper_mode = _is_wrapper_mode(args)
 
     api_id = os.getenv("TELEGRAM_API_ID")
@@ -171,7 +179,7 @@ def main() -> None:
     if not api_id or not api_hash:
         print(
             "Error: TELEGRAM_API_ID and TELEGRAM_API_HASH must be set in the "
-            "environment or in a .env file in the current directory."
+            "environment or in a .env file in the current directory or a parent."
         )
         print("Get them from https://my.telegram.org/apps.")
         print(

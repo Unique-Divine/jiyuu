@@ -280,14 +280,37 @@ def test_standalone_guidance_uses_tg_sai_without_api_hash(monkeypatch, capsys):
     assert "just tg-sai" not in captured.out
 
 
-def test_missing_app_credentials_names_every_source(monkeypatch, capsys):
-    monkeypatch.delenv("TELEGRAM_API_ID", raising=False)
-    monkeypatch.delenv("TELEGRAM_API_HASH", raising=False)
+def _clear_app_credentials(monkeypatch):
+    """Unset app credentials for one test; teardown restores the originals."""
+    for name in ("TELEGRAM_API_ID", "TELEGRAM_API_HASH"):
+        monkeypatch.setenv(name, "placeholder")
+        monkeypatch.delenv(name)
+
+
+def test_load_env_file_reads_dotenv_from_working_directory(tmp_path, monkeypatch):
+    _clear_app_credentials(monkeypatch)
+    (tmp_path / ".env").write_text("TELEGRAM_API_ID=321\nTELEGRAM_API_HASH=cwd-fake-hash\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    session_string_generator.load_env_file()
+
+    assert session_string_generator.os.environ["TELEGRAM_API_ID"] == "321"
+    assert session_string_generator.os.environ["TELEGRAM_API_HASH"] == "cwd-fake-hash"
+
+
+def test_missing_app_credentials_names_every_source(tmp_path, monkeypatch, capsys):
+    _clear_app_credentials(monkeypatch)
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr("sys.argv", ["session_string_generator.py", "--qr", "--session-output", "/unused"])
 
     with pytest.raises(SystemExit):
         session_string_generator.main()
 
     out = capsys.readouterr().out
-    for source in ("environment", ".env file", "--api-id", "~/.tg-sai/.env"):
+    for source in (
+        "environment",
+        ".env file in the current directory or a parent",
+        "--api-id and --api-hash",
+        "~/.tg-sai/.env",
+    ):
         assert source in out
