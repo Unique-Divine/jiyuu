@@ -53,6 +53,7 @@ from telegram_mcp.request_policy import (
     RequestLimited,
     RequestTimedOut,
     format_request_error,
+    raise_flood_waits,
     is_wait_error,
     limit_from_error,
     raise_if_cooling_down,
@@ -450,12 +451,14 @@ async def ensure_connected(cl: TelegramClient = None):
     if now - _last_conn_verified.get(key, 0.0) < _CONN_VERIFY_INTERVAL:
         return
 
-    # Verify with a lightweight Telegram API call
+    # Verify with a lightweight Telegram API call. Raise waits instead of
+    # sleeping, or a short wait would hit the 5 s bound and force a reconnect.
     try:
-        await asyncio.wait_for(
-            cl(functions.help.GetNearestDcRequest()),
-            timeout=5.0,
-        )
+        with raise_flood_waits():
+            await asyncio.wait_for(
+                cl(functions.help.GetNearestDcRequest()),
+                timeout=5.0,
+            )
         _last_conn_verified[key] = now
     except Exception as exc:
         # A wait reply proves the connection works. Neither reconnect nor
@@ -467,13 +470,19 @@ async def ensure_connected(cl: TelegramClient = None):
 
 
 async def read_account_profile(cl: TelegramClient):
-    """Recover a stale connection once and bound this read-only profile lookup."""
+    """Recover a stale connection once and bound this read-only profile lookup.
+
+    A flood wait raises instead of sleeping inside the timeout, and reaches
+    the caller without a reconnect.
+    """
     await ensure_connected(cl)
     try:
-        return await asyncio.wait_for(cl.get_me(), timeout=_PROFILE_READ_TIMEOUT)
+        with raise_flood_waits():
+            return await asyncio.wait_for(cl.get_me(), timeout=_PROFILE_READ_TIMEOUT)
     except (ConnectionError, OSError, asyncio.TimeoutError):
         await _force_reconnect(cl)
-        return await asyncio.wait_for(cl.get_me(), timeout=_PROFILE_READ_TIMEOUT)
+        with raise_flood_waits():
+            return await asyncio.wait_for(cl.get_me(), timeout=_PROFILE_READ_TIMEOUT)
 
 
 # Setup robust logging with both file and console output

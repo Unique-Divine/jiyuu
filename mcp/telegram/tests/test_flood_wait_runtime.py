@@ -362,3 +362,47 @@ async def test_send_message_refuses_known_slow_mode_before_resolving(monkeypatch
 
     assert result["error"]["type"] == "slow_mode"
     assert result["error"]["source"] == "cooldown"
+
+
+def _policy_client_with_sender(monkeypatch, sender):
+    client = request_policy.PolicyTelegramClient(
+        StringSession(), 12345, "hash", flood_sleep_threshold=10
+    )
+    client._sender = sender
+    monkeypatch.setattr(client, "is_connected", lambda: True)
+    reconnects = []
+
+    async def force_reconnect(cl):
+        reconnects.append(cl)
+
+    monkeypatch.setattr(runtime, "_force_reconnect", force_reconnect)
+    return client, reconnects
+
+
+@pytest.mark.asyncio
+async def test_short_wait_on_ping_raises_instead_of_sleeping_into_a_reconnect(
+    monkeypatch, telethon_sleeps
+):
+    # 7 s is under the 10 s client threshold and over the 5 s ping bound.
+    client, reconnects = _policy_client_with_sender(monkeypatch, _Sender(flood(7)))
+    monkeypatch.setattr(runtime, "_last_conn_verified", {})
+
+    await runtime.ensure_connected(client)
+
+    assert telethon_sleeps == []
+    assert reconnects == []
+    assert id(client) in runtime._last_conn_verified
+
+
+@pytest.mark.asyncio
+async def test_short_wait_on_profile_read_reaches_caller_without_reconnect(
+    monkeypatch, telethon_sleeps
+):
+    client, reconnects = _policy_client_with_sender(monkeypatch, _Sender(flood(7)))
+    monkeypatch.setattr(runtime, "_last_conn_verified", {id(client): runtime.time.time()})
+
+    with pytest.raises(errors.FloodWaitError):
+        await runtime.read_account_profile(client)
+
+    assert telethon_sleeps == []
+    assert reconnects == []
