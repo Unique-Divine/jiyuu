@@ -524,13 +524,40 @@ f="/var/lib/sai-custody-worker/provisioning/receipts/$(printf '%s' "$id" | sha25
 sudo jq '.pendingInvitations' "$f"
 ```
 
-The bot gets no link: a bot that is not visible still fails the setup. The
+The bot gets no link: a bot that is not visible gets the same 15-minute
+`retryAt`, and the resumed job adds it again only if it is still absent. The
 background queue also reads each member before adding and approves a waiting
 join request, so a member who uses the shared link costs no add. A flood
 or hold on that read or approval defers the row until it ends. A chat or
 member fault there, such as `CHANNEL_PRIVATE`, `PEER_ID_INVALID`, or
 `USER_CHANNELS_TOO_MUCH`, fails the row. Any other error counts an attempt
 and moves the row behind the others.
+
+A required person whose add is refused for privacy gets the same kind of
+invitation, with receipt reason `privacy_restricted`. The setup stays
+`incomplete` with `add_member:TG_SAI_AWAITING_JOIN` and retries every 15
+minutes. Send the person the link from the receipt. The rules above apply:
+the worker approves their join request, never adds them again, and stops
+for an operator once the invitation expires.
+
+### Setup Failure Paths
+
+A setup left `incomplete` with a `retryAt` resumes on its own. One without
+a `retryAt` waits for an operator. Resumed jobs read each member before
+adding, so a retry never adds someone who is already in the chat.
+
+| Error | Meaning | Retry |
+| --- | --- | --- |
+| `FLOOD_WAIT_N`, `PEER_FLOOD`, `TG_SAI_HOLD_N` | Account flood limit or saved hold | When the hold ends |
+| `TG_SAI_TRANSIENT` | Timeout, dropped connection, Telegram server error, worker shutdown | 5 min |
+| `TG_SAI_HOLD_STATE_UNAVAILABLE`, `TG_SAI_HOLD_ACCOUNT_UNKNOWN`, `TG_SAI_QUEUE_UNAVAILABLE` | Local `state.db` or session account not readable | 5 min |
+| `TG_SAI_MEMBER_NOT_VISIBLE` | Added or promoted, but not shown in the chat yet | 15 min |
+| `TG_SAI_AWAITING_JOIN` | Waiting for a privacy-restricted person to use their link | 15 min |
+| `TG_SAI_INVITATION_EXPIRED` | An invited person never joined | Operator |
+| `verify_marker:*` (not transient), `audit_membership:provisioning_step_failed`, `CHAT_ADMIN_REQUIRED`, `RIGHT_FORBIDDEN`, other `USER_*` refusals | Chat ownership, rights, or the person's account | Operator |
+
+A timeout during group creation is different: the group may exist, so the
+setup becomes `creation_unknown` and needs `chat provision resolve`.
 
 New ready receipts include an `openGroupUrl` anchored to a message actually
 observed in the group and the existing `primaryInviteLink`, when available.

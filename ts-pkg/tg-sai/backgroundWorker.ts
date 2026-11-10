@@ -1,6 +1,7 @@
 import {
   isPerUserAddError,
   isPrivacyRestriction,
+  isTransientTelegramError,
   provisionRetryAt,
   safeProvisionError,
 } from "./provisioning"
@@ -154,8 +155,10 @@ function inviteHoldUntil(
  * `privacy` and makes no link, since the ready receipt's shared
  * `background_queue` link already covers the member, and does not count
  * toward the daily cap; another per-user refusal is `failed`. A flood or
- * hold leaves the row pending until it ends, and other errors from the add
- * call retry after a gap up to `MAX_BACKGROUND_ATTEMPTS`. Errors before or
+ * hold leaves the row pending until it ends. A transient error
+ * (`isTransientTelegramError`) from the read, approval, or add defers the
+ * row behind the others without counting an attempt. Other errors from
+ * the add call retry after a gap up to `MAX_BACKGROUND_ATTEMPTS`. Errors before or
  * around the call (session, connect, identity checks, shutdown) defer the
  * row one gap without counting an attempt. Every call paces the remaining
  * rows by one jittered gap. Does nothing once `signal` is aborted. Throws
@@ -254,6 +257,18 @@ export async function drainBackgroundOnce(params: {
   // A counted retry goes behind the rows paced to `paced`, so one stuck row
   // never starves the rest of the queue.
   const behind = paced + pacing.gapMs
+  if (
+    (fromMember || fromCall) &&
+    !params.signal?.aborted &&
+    isTransientTelegramError(outcome.error)
+  ) {
+    // A timeout or dropped connection is no one's fault: uncounted, like a
+    // flood, but behind the other rows like a counted retry. A lost add
+    // response is safe because the next step reads the member first.
+    queue.defer(row.chatId, row.userId, behind, code, nowMs, false)
+    queue.pace(paced)
+    return { state: "deferred", ...at, error: code, nextAtMs: paced }
+  }
   if (fromMember && !params.signal?.aborted) {
     const retryAt = provisionRetryAt(outcome.error, nowMs)
     if (retryAt) {

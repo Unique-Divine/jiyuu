@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test"
+import { MtcuteError, MtTimeoutError, tl } from "@mtcute/bun"
 
 import {
   backgroundEnqueue,
@@ -7,7 +8,11 @@ import {
 } from "./backgroundWorker"
 import type { TelegramProvisioner } from "./provisioning"
 import { HoldError } from "./state/guard"
-import { BackgroundQueue, nextUtcDayMs } from "./state/background"
+import {
+  BackgroundQueue,
+  MAX_BACKGROUND_ATTEMPTS,
+  nextUtcDayMs,
+} from "./state/background"
 import type { BackgroundPacing } from "./state/background"
 import { openStateDb } from "./state/db"
 import { HoldStore } from "./state/holds"
@@ -197,6 +202,90 @@ describe("background drain", () => {
     // The stuck row counts attempts and finally fails.
     expect(results.at(-1)).toBe("failed:-200/9")
     expect(results.filter((r) => r.endsWith("-200/9"))).toHaveLength(5)
+  })
+  test("a flood or transient approval error defers the row without an add", async () => {
+    for (const approveError of [
+      { text: "FLOOD_WAIT_%d", seconds: 60, code: 420 },
+      new MtTimeoutError(10_000),
+    ]) {
+      const f = fixture({ approveError })
+      f.enqueue([1])
+      expect(await f.drain()).toMatchObject({
+        state: "deferred",
+        nextAtMs: NOW + 1_200_000,
+      })
+      expect(f.calls).toEqual(["connect", "approve:1"])
+      expect(f.queue.forChat(-100)[0]).toMatchObject({
+        state: "pending",
+        attempts: 0,
+      })
+    }
+  })
+  test("transient add errors never fail the row or count an attempt", async () => {
+    for (const error of [
+      new MtTimeoutError(10_000),
+      tl.RpcError.fromTl({
+        _: "rpc_error",
+        errorCode: -503,
+        errorMessage: "Timeout",
+      }),
+      new MtcuteError("Connection closed"),
+    ]) {
+      const f = fixture({
+        add: async () => {
+          throw error
+        },
+      })
+      f.enqueue([1])
+      let now = NOW
+      for (let i = 0; i < MAX_BACKGROUND_ATTEMPTS + 2; i++) {
+        const result = await f.drain(now)
+        expect(result).toMatchObject({ state: "deferred", error: "TG_SAI_TRANSIENT" })
+        now = f.queue.summary().nextAtMs!
+      }
+      expect(f.queue.forChat(-100)[0]).toMatchObject({
+        state: "pending",
+        attempts: 0,
+      })
+      expect(f.queue.addsToday(now)).toBe(0)
+    }
+  })
+  test("a transient read error waits behind the other rows, uncounted", async () => {
+    const f = fixture({
+      readError: (chatId: number) =>
+        chatId === -200 ? new MtTimeoutError(10_000) : null,
+    })
+    f.queue.enqueue({
+      requestId: "r0",
+      chatId: -200,
+      userIds: [9],
+      notBeforeMs: NOW - 1,
+    })
+    f.enqueue([1])
+    expect(await f.drain()).toMatchObject({
+      state: "deferred",
+      chatId: -200,
+      error: "TG_SAI_TRANSIENT",
+    })
+    expect((await f.drain(f.queue.summary().nextAtMs!)).chatId).toBe(-100)
+    expect(f.queue.forChat(-200)[0]).toMatchObject({
+      state: "pending",
+      attempts: 0,
+    })
+  })
+  test("after a lost add response the next step finds the member", async () => {
+    const joined: number[] = []
+    const f = fixture({
+      joined,
+      add: async (userId) => {
+        joined.push(userId)
+        throw new MtTimeoutError(10_000)
+      },
+    })
+    f.enqueue([1])
+    expect((await f.drain()).state).toBe("deferred")
+    expect((await f.drain(f.queue.summary().nextAtMs!)).state).toBe("joined")
+    expect(f.calls.filter((c) => c === "add:1")).toHaveLength(1)
   })
   test("one add per step, then the rest wait one jittered gap", async () => {
     const f = fixture()
