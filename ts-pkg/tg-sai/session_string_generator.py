@@ -59,7 +59,11 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--session-output",
-        help="Write the generated session string to this file for wrapper tools.",
+        help=(
+            "Write the generated session string only to this file, for wrapper "
+            "tools. Skips the account label and .env prompts and does not print "
+            "the session string."
+        ),
     )
     parser.add_argument(
         "--no-env-write",
@@ -70,8 +74,13 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _is_wrapper_mode(args: argparse.Namespace) -> bool:
-    """Return True when tg-sai is calling this helper internally."""
-    return bool(args.session_output and args.no_env_write)
+    """Return True when a wrapper such as tg-sai captures the session.
+
+    With `--session-output`, the session goes only to that file: the helper
+    asks for no account label, offers no .env update, and prints neither the
+    session string nor the API hash.
+    """
+    return bool(args.session_output)
 
 
 def _render_qr(qr) -> None:
@@ -231,14 +240,14 @@ def main() -> None:
             print(
                 "tg-sai profile add "
                 f"--api-id {api_id_int} "
-                f"--api-hash {api_hash} "
+                "--api-hash '<api hash>' "
                 "--session-string '<session string>'"
             )
             print("\nOr add this to an .env file as:")
             print(f"{env_var}={session_string}")
             print("\nIMPORTANT: Keep this string private and never share it with anyone!")
 
-        if args.no_env_write:
+        if wrapper_mode or args.no_env_write:
             choice = "n"
         else:
             choice = input(
