@@ -19,7 +19,7 @@ import os
 import sys
 from datetime import datetime, timezone
 
-from dotenv import load_dotenv
+from dotenv import find_dotenv, load_dotenv
 from telethon import errors
 from telethon.sessions import StringSession
 from telethon.sync import TelegramClient
@@ -27,7 +27,14 @@ from telethon.sync import TelegramClient
 # How many times the QR code is regenerated after expiry before giving up.
 _QR_MAX_REFRESHES = 10
 
-load_dotenv()
+def load_env_file() -> None:
+    """Load the nearest .env from the current directory upward.
+
+    Searching from the working directory, not this script's directory, matches
+    the .env update step, which writes to the current directory. Variables
+    already set in the environment win.
+    """
+    load_dotenv(find_dotenv(usecwd=True))
 
 
 def client_identity_kwargs() -> dict:
@@ -59,7 +66,11 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--session-output",
-        help="Write the generated session string to this file for wrapper tools.",
+        help=(
+            "Write the generated session string only to this file, for wrapper "
+            "tools. Skips the account label and .env prompts and does not print "
+            "the session string."
+        ),
     )
     parser.add_argument(
         "--no-env-write",
@@ -70,8 +81,13 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _is_wrapper_mode(args: argparse.Namespace) -> bool:
-    """Return True when tg-sai is calling this helper internally."""
-    return bool(args.session_output and args.no_env_write)
+    """Return True when a wrapper such as tg-sai captures the session.
+
+    With `--session-output`, the session goes only to that file: the helper
+    asks for no account label, offers no .env update, and prints neither the
+    session string nor the API hash.
+    """
+    return bool(args.session_output)
 
 
 def _render_qr(qr) -> None:
@@ -154,14 +170,22 @@ def _phone_login(client: TelegramClient) -> None:
 
 def main() -> None:
     args = _parse_args()
+    load_env_file()
     wrapper_mode = _is_wrapper_mode(args)
 
     api_id = os.getenv("TELEGRAM_API_ID")
     api_hash = os.getenv("TELEGRAM_API_HASH")
 
     if not api_id or not api_hash:
-        print("Error: TELEGRAM_API_ID and TELEGRAM_API_HASH must be set in .env file")
-        print("Create an .env file with your credentials from https://my.telegram.org/apps")
+        print(
+            "Error: TELEGRAM_API_ID and TELEGRAM_API_HASH must be set in the "
+            "environment or in a .env file in the current directory or a parent."
+        )
+        print("Get them from https://my.telegram.org/apps.")
+        print(
+            "With tg-sai, pass --api-id and --api-hash or add them to "
+            "~/.tg-sai/.env, then run tg-sai profile add --login."
+        )
         sys.exit(1)
 
     try:
@@ -231,14 +255,14 @@ def main() -> None:
             print(
                 "tg-sai profile add "
                 f"--api-id {api_id_int} "
-                f"--api-hash {api_hash} "
+                "--api-hash '<api hash>' "
                 "--session-string '<session string>'"
             )
             print("\nOr add this to an .env file as:")
             print(f"{env_var}={session_string}")
             print("\nIMPORTANT: Keep this string private and never share it with anyone!")
 
-        if args.no_env_write:
+        if wrapper_mode or args.no_env_write:
             choice = "n"
         else:
             choice = input(
