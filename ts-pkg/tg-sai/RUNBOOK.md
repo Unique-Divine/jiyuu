@@ -880,7 +880,10 @@ One fill, in one worker tick:
    owner registered `filling` or `available`, and in enforce mode leaves any
    other chat. A fill that cannot register waits and sends no add. A
    resumed fill confirms the registration again before it reads a bot it
-   may already have added.
+   may already have added. Each registration call gets its own request
+   key, so Deal Desk checks the chat's current state every time instead of
+   replaying an earlier answer; registering the same state again is a
+   no-op.
 3. Add the bot: one add, journaled before the call and counted in
    `member_add` with source `pool`, an uncertain outcome (timeout) included.
 4. Promote the bot to every admin right short of owner (`POOL_BOT_RIGHTS`:

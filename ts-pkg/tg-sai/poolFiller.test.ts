@@ -32,6 +32,7 @@ import {
 } from "./provisioningRuntime"
 import {
   CliProvisionCloud,
+  dealDeskRequestKey,
   DealDeskRefusedError,
   POOL_REFUSAL_CODES,
   refusalCode,
@@ -1272,5 +1273,73 @@ describe("filling registration comes before the bot add", () => {
         ),
       ).toBe(code)
     expect(refusalCode(cli(200, [{ extensions: { code: "OTHER" } }]))).toBeNull()
+  })
+
+  test("refusalCode reads only extensions.code, never message text", () => {
+    const wrap = (error: string) => JSON.stringify({ error })
+    // A message quoting a coded error, escaped once inside the message.
+    const spoof = JSON.stringify([
+      { message: 'upstream said {"code":"POOL_NOT_OWNER"}' },
+    ])
+    expect(
+      refusalCode(wrap(`GraphQL request failed (HTTP 200): ${spoof}`)),
+    ).toBeNull()
+    expect(refusalCode(`GraphQL request failed (HTTP 200): ${spoof}`)).toBeNull()
+    // The CLI's request-key suffix after the array is ignored.
+    const coded = JSON.stringify([
+      { message: "refused", extensions: { code: "POOL_MISSING_RIGHTS" } },
+    ])
+    expect(
+      refusalCode(
+        wrap(
+          `GraphQL request failed (HTTP 200): ${coded}. Request key: k. ` +
+            "Inspect with request status, or repeat the saved request with request retry k",
+        ),
+      ),
+    ).toBe("POOL_MISSING_RIGHTS")
+    // Raw, unwrapped output parses too; a truncated array does not.
+    expect(refusalCode(`GraphQL request failed (HTTP 200): ${coded}`)).toBe(
+      "POOL_MISSING_RIGHTS",
+    )
+    expect(
+      refusalCode(
+        wrap(`GraphQL request failed (HTTP 200): ${coded.slice(0, -2)}`),
+      ),
+    ).toBeNull()
+    expect(refusalCode(wrap('{"code":"POOL_NOT_OWNER"}'))).toBeNull()
+  })
+
+  test("each pool registration gets a fresh request key; failures dedupe", () => {
+    const input = { accountId: "8274304175", chatId: "-1", state: "filling" }
+    expect(dealDeskRequestKey("pool-register", input)).not.toBe(
+      dealDeskRequestKey("pool-register", input),
+    )
+    expect(dealDeskRequestKey("pool-fail", input)).toBe(
+      dealDeskRequestKey("pool-fail", input),
+    )
+  })
+
+  test("a chat retired between registration and the add gets no bot add", async () => {
+    const f = setup()
+    f.telegram.failNext.set(
+      "add",
+      Object.assign(new Error("flood"), { text: "FLOOD_WAIT_60", code: 420 }),
+    )
+    const held = await f.run()
+    expect(f.journal.get("3fa9c2e1")?.botAdds).toBe(0)
+    // An operator retires the chat; Deal Desk re-checks every registration.
+    f.cloud.fillingErrors = [
+      new DealDeskRefusedError("pool-register", "POOL_REFUSED_TRANSITION"),
+      new DealDeskRefusedError("pool-register", "POOL_REFUSED_TRANSITION"),
+    ]
+    f.advance(held.nextAtMs! - f.now())
+    expect((await f.run()).state).toBe("waiting")
+    f.advance(POOL_RETRY_MS)
+    expect(await f.run()).toMatchObject({
+      state: "failed",
+      error: "register:POOL_REFUSED_TRANSITION",
+    })
+    expect(f.telegram.calls.filter((c) => c === "add")).toHaveLength(1)
+    expect(poolAdds(f.db)).toEqual([])
   })
 })
