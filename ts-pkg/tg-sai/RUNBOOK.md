@@ -420,6 +420,10 @@ tg-sai add-owner \
 
 ## Logs, Telemetry, and Flood Holds
 
+How Telegram flood waits work, what production measured, and why tg-sai
+records holds instead of sleeping: agent skill `ud-tg-telegram`, page
+`telegram-limits.md` (boku `priv-skills/ud-tg-telegram/telegram-limits.md`).
+
 tg-sai writes no JSONL run logs. Earlier versions wrote
 `~/.tg-sai/logs/<command>-NN.jsonl` and `sai-bootstrap-NN.jsonl`; those files
 stay readable but nothing new is added. Each process records into SQLite file
