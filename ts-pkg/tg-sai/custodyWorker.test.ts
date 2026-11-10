@@ -7,6 +7,8 @@ import { Command } from "commander"
 import {
   CUSTODY_USER_ID,
   MAX_NEXT_CHECK_MS,
+  poolFillEnabled,
+  poolFillPlan,
   recordWorkerTick,
   runWorkerOnce,
   setupHoldGroups,
@@ -1093,4 +1095,118 @@ test("other waiting jobs still hold up the drain", async () => {
     expect(result.requesterWork).toBe(true)
   }
   expect(drains).toBe(0)
+})
+
+test("a pool fill runs only on an idle tick after an idle drain", async () => {
+  let fills = 0
+  const fill = async () => {
+    fills++
+    return { state: "filled" as const, ref: "3fa9c2e1", chatId: -5 }
+  }
+  // A runnable setup job goes first: no fill.
+  const busy = fixture()
+  const first = await runWorkerOnce(
+    { custodyProfile: "custody", workerId: "stable", run: true },
+    { ...busy, fill },
+  )
+  expect(first.pool).toBeUndefined()
+  expect(fills).toBe(0)
+  // The drain added someone this tick: no fill.
+  const draining = fixture()
+  draining.cloud.pending = async () => ({ requests: [], nextAfter: null })
+  const drained = await runWorkerOnce(
+    { custodyProfile: "custody", workerId: "stable", run: true },
+    {
+      ...draining,
+      drain: async () => ({ state: "added" as const, chatId: -1, userId: 2 }),
+      fill,
+    },
+  )
+  expect(drained.pool).toBeUndefined()
+  expect(fills).toBe(0)
+  // Idle drain: one fill.
+  const idle = fixture()
+  idle.cloud.pending = async () => ({ requests: [], nextAfter: null })
+  const filled = await runWorkerOnce(
+    { custodyProfile: "custody", workerId: "stable", run: true },
+    { ...idle, drain: async () => ({ state: "idle" as const }), fill },
+  )
+  expect(filled.pool).toEqual({ state: "filled", ref: "3fa9c2e1", chatId: -5 })
+  expect(fills).toBe(1)
+  // A preview never fills; a thrown fill becomes an error result.
+  await runWorkerOnce(
+    { custodyProfile: "custody", workerId: "stable" },
+    { ...idle, fill },
+  )
+  expect(fills).toBe(1)
+  const thrown = await runWorkerOnce(
+    { custodyProfile: "custody", workerId: "stable", run: true },
+    {
+      ...idle,
+      fill: async () => {
+        throw new Error("boom")
+      },
+    },
+  )
+  expect(thrown.pool).toEqual({
+    state: "error",
+    error: "provisioning_step_failed",
+  })
+})
+
+test("pool fill ticks are recorded unless idle; TG_SAI_POOL_FILL turns it off", () => {
+  const base = {
+    dryRun: false,
+    results: [],
+    nextAfter: null,
+    requesterWork: false,
+  }
+  expect(
+    shouldRecordTick({
+      result: { ...base, pool: { state: "paced" } },
+      nowMs: 1000,
+      lastRecordedMs: 0,
+    }),
+  ).toBe(false)
+  expect(
+    shouldRecordTick({
+      result: { ...base, pool: { state: "filled" } },
+      nowMs: 1000,
+      lastRecordedMs: 0,
+    }),
+  ).toBe(true)
+  // Off unless turned on, so a deploy never starts making chats.
+  expect(poolFillEnabled({})).toBe(false)
+  expect(poolFillEnabled({ TG_SAI_POOL_FILL: "0" })).toBe(false)
+  expect(poolFillEnabled({ TG_SAI_POOL_FILL: "yes" })).toBe(false)
+  expect(poolFillEnabled({ TG_SAI_POOL_FILL: "1" })).toBe(true)
+  expect(poolFillEnabled({ TG_SAI_POOL_FILL: " ON " })).toBe(true)
+})
+
+test("a bad owner list disables only the filler", () => {
+  expect(poolFillPlan({})).toEqual({ owners: null, error: null })
+  expect(poolFillPlan({ TG_SAI_POOL_FILL: "1" })).toEqual({
+    owners: [CUSTODY_USER_ID],
+    error: null,
+  })
+  expect(
+    poolFillPlan({
+      TG_SAI_POOL_FILL: "1",
+      TG_SAI_OWNER_ACCOUNTS: "8274304175 @typo",
+    }),
+  ).toEqual({ owners: null, error: "owner_accounts_invalid" })
+  // A disabled filler is an idle tick, not a recorded one.
+  expect(
+    shouldRecordTick({
+      result: {
+        dryRun: false,
+        results: [],
+        nextAfter: null,
+        requesterWork: false,
+        pool: { state: "disabled", error: "owner_accounts_invalid" },
+      },
+      nowMs: 1000,
+      lastRecordedMs: 0,
+    }),
+  ).toBe(false)
 })

@@ -41,11 +41,21 @@ import {
   withAccountLock,
   withProvisionTelegram,
 } from "./provisioningRuntime"
+import {
+  fillPoolOnce,
+  IDLE_POOL_STATES,
+  ownerAccounts,
+  PoolCap,
+} from "./poolFiller"
+import type { GroupCount, PoolFillResult } from "./poolFiller"
+import { poolChatPhoto } from "./poolPhoto"
 import { backgroundPacing } from "./state/background"
 import type { BackgroundQueue } from "./state/background"
+import { openStateDb, stateDbPath } from "./state/db"
 import type { HoldStoreSource } from "./state/guard"
 import { HoldStore, remainingSeconds } from "./state/holds"
 import type { HoldGroup } from "./state/holds"
+import { PoolJournal } from "./state/pool"
 import { WORKER_TICK_EVENT } from "./telemetry/db"
 import { withTelemetryJob } from "./telemetry/middleware"
 import { recordLog } from "./telemetry/run"
@@ -180,12 +190,18 @@ export async function runWorkerOnce(
      * queue page is waiting. Blocked and terminal jobs do not stop it.
      */
     drain?: () => Promise<DrainResult>
+    /**
+     * One pool fill step (boku#77); runs under the same conditions as the
+     * drain, and only when the drain found nothing to do.
+     */
+    fill?: () => Promise<PoolFillResult>
   },
 ): Promise<{
   dryRun: boolean
   results: WorkerResult[]
   nextAfter: string | null
   background?: DrainResult
+  pool?: PoolFillResult
   /** This page or an earlier one in the pass had requester work. */
   requesterWork: boolean
 }> {
@@ -335,22 +351,36 @@ export async function runWorkerOnce(
   }
   if (
     options.run &&
-    deps.drain &&
+    (deps.drain || deps.fill) &&
     !requesterWork &&
     page.nextAfter === null &&
     !options.signal?.aborted
   ) {
-    let background: DrainResult
-    try {
-      background = await deps.drain()
-    } catch (error) {
-      background = { state: "error", error: safeProvisionError(error) }
-    }
+    let background: DrainResult | undefined
+    if (deps.drain)
+      try {
+        background = await deps.drain()
+      } catch (error) {
+        background = { state: "error", error: safeProvisionError(error) }
+      }
+    // Queued members of existing chats go first; one Telegram job a tick.
+    let pool: PoolFillResult | undefined
+    if (
+      deps.fill &&
+      (!background || background.state === "idle") &&
+      !options.signal?.aborted
+    )
+      try {
+        pool = await deps.fill()
+      } catch (error) {
+        pool = { state: "error", error: safeProvisionError(error) }
+      }
     return {
       dryRun: false,
       results,
       nextAfter: page.nextAfter,
-      background,
+      ...(background ? { background } : {}),
+      ...(pool ? { pool } : {}),
       requesterWork,
     }
   }
@@ -518,6 +548,8 @@ export async function runCustodyWorker(options: {
     )
   const root = configDir()
   const workerId = await stableWorkerId(root)
+  // An invalid owner list disables only the filler; setups keep running.
+  const poolPlan = poolFillPlan()
   const telemetry = options.telemetry
   const clientTelemetry = telemetry?.client({
     accountId: CUSTODY_USER_ID,
@@ -579,13 +611,76 @@ export async function runCustodyWorker(options: {
         operation(queue ? recordingMemberAdds(adapter, queue) : adapter),
       )
     const pacing = backgroundPacing()
+    // Deal Desk's daily cap for the account, else the fixed cap.
+    const cap = new PoolCap(pacing.dailyMax)
+    const groups: { value: GroupCount | null } = { value: null }
+    let poolJournal: PoolJournal | null = null
+    if (options.run && queue && poolPlan.owners)
+      try {
+        poolJournal = new PoolJournal(openStateDb(stateDbPath()))
+      } catch {
+        poolJournal = null
+      }
+    const poolTelegram = <T>(
+      operation: (adapter: TelegramProvisioner) => Promise<T>,
+    ): Promise<T> =>
+      withTelemetryJob("pool-fill", () =>
+        withProvisionTelegram(
+          {
+            custodyProfile: options.custodyProfile,
+            expectedUserId: CUSTODY_USER_ID,
+          },
+          operation,
+          clientTelemetry,
+          options.signal,
+        ),
+      )
+    if (options.run && poolPlan.error) {
+      console.error(
+        JSON.stringify({ state: "pool_fill_disabled", error: poolPlan.error }),
+      )
+      if (telemetry)
+        recordLog(
+          telemetry.sink,
+          telemetry.context,
+          "warn",
+          "worker.pool",
+          "pool fill disabled",
+          { error: poolPlan.error },
+          { accountId: CUSTODY_USER_ID, profile: options.custodyProfile },
+        )
+    }
+    const disabledFill = poolPlan.error
+      ? async (): Promise<PoolFillResult> => ({
+          state: "disabled",
+          error: poolPlan.error!,
+        })
+      : undefined
+    const fill =
+      poolJournal && queue && poolPlan.owners
+        ? () =>
+            fillPoolOnce({
+              accountId: CUSTODY_USER_ID,
+              owners: poolPlan.owners!,
+              journal: poolJournal!,
+              queue: queue!,
+              holds,
+              pacing,
+              cap,
+              cloud,
+              telegram: poolTelegram,
+              photo: poolChatPhoto,
+              groups,
+              ...(options.signal ? { signal: options.signal } : {}),
+            })
+        : undefined
     const drain = queue
       ? () =>
           drainBackgroundOnce({
             queue: queue!,
             holds,
             accountId: CUSTODY_USER_ID,
-            pacing,
+            pacing: { ...pacing, dailyMax: cap.current(Date.now()) },
             telegram: (operation) =>
               withTelemetryJob("background-add", () =>
                 withProvisionTelegram(
@@ -610,6 +705,7 @@ export async function runCustodyWorker(options: {
               holds: processHoldStore(),
               queue: queue!,
               nowMs,
+              groupCount: groups.value?.count ?? null,
             }),
           send: (report) => cloud.custodyStatus(report),
           log: (level, msg, attrs) => {
@@ -647,6 +743,11 @@ export async function runCustodyWorker(options: {
               telegram: setupTelegram,
               ...(queue ? { background: backgroundEnqueue(queue) } : {}),
               ...(drain ? { drain } : {}),
+              ...(fill
+                ? { fill }
+                : options.run && disabledFill
+                  ? { fill: disabledFill }
+                  : {}),
             },
           )
           after = result.nextAfter ?? undefined
@@ -678,6 +779,7 @@ export async function runCustodyWorker(options: {
         })
       } while (!options.signal?.aborted)
     } finally {
+      poolJournal?.close()
       queue?.close()
       if (options.run) closeProcessHoldStores()
     }
@@ -701,8 +803,37 @@ export function countStates(results: WorkerResult[]): Record<string, number> {
 /** Idle ticks still write a `worker.tick` row this often, as a heartbeat. */
 export const TICK_HEARTBEAT_MS = 5 * 60 * 1000
 
+export const POOL_FILL_ENV = "TG_SAI_POOL_FILL"
+
+/**
+ * Pool filling is off unless `TG_SAI_POOL_FILL` is `1`, `true`, or `on`,
+ * so a deploy never starts making chats by itself.
+ */
+export function poolFillEnabled(
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  const value = env[POOL_FILL_ENV]?.trim().toLowerCase()
+  return value === "1" || value === "true" || value === "on"
+}
+
+/**
+ * Whether this worker fills the pool, and as which owner accounts. An
+ * invalid `TG_SAI_OWNER_ACCOUNTS` disables the filler only (`error`), so
+ * a typo in a pool setting never stops setups or the background drain.
+ */
+export function poolFillPlan(
+  env: Record<string, string | undefined> = process.env,
+): { owners: number[] | null; error: string | null } {
+  if (!poolFillEnabled(env)) return { owners: null, error: null }
+  try {
+    return { owners: ownerAccounts(CUSTODY_USER_ID, env), error: null }
+  } catch {
+    return { owners: null, error: "owner_accounts_invalid" }
+  }
+}
+
 /** Background drain states that made no Telegram call. */
-const IDLE_BACKGROUND_STATES = new Set(["idle", "capped", "held"])
+const IDLE_BACKGROUND_STATES = new Set(["idle", "capped", "held", "paced"])
 
 /** Job states that mean the tick did no work. */
 const IDLE_STATES = new Set(["waiting", "blocked"])
@@ -723,6 +854,8 @@ export function shouldRecordTick(tick: {
   if (tick.result?.results.some((r) => !IDLE_STATES.has(r.state))) return true
   const background = tick.result?.background?.state
   if (background && !IDLE_BACKGROUND_STATES.has(background)) return true
+  const pool = tick.result?.pool?.state
+  if (pool && !IDLE_POOL_STATES.has(pool)) return true
   if (tick.lastRecordedMs === null) return true
   return tick.nowMs - tick.lastRecordedMs >= TICK_HEARTBEAT_MS
 }
@@ -760,6 +893,7 @@ export function recordWorkerTick(
             ...(tick.result.background
               ? { background: tick.result.background.state }
               : {}),
+            ...(tick.result.pool ? { pool: tick.result.pool.state } : {}),
           }
         : null,
     })

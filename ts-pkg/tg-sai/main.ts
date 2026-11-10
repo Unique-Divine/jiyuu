@@ -14,6 +14,7 @@ import { createInterface } from "node:readline/promises"
 import { Command, Option } from "commander"
 import { addProvisionCommands } from "./provisioningCli"
 import { addCustodyWorkerCommands } from "./custodyWorkerCli"
+import { addPoolCommands } from "./poolCli"
 import type { BatchLogger } from "./actionExecutor"
 import { runChatBatch, runTelegramAction } from "./actionExecutor"
 import type {
@@ -2185,6 +2186,7 @@ If apiId/apiHash are missing, create a Telegram API app at:
 
   addProvisionCommands(program)
   addCustodyWorkerCommands(program)
+  addPoolCommands(program)
   registerEventsCommand(program)
   registerHoldsCommand(program)
   installBareHelp(program)

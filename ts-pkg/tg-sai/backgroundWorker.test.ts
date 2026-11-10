@@ -196,9 +196,10 @@ describe("background drain", () => {
     f.enqueue([1, 2, 3])
     let now = NOW
     const results: string[] = []
-    for (let i = 0; i < 12 && f.queue.summary().pending; i++) {
+    for (let i = 0; i < 24 && f.queue.summary().pending; i++) {
       const result = await f.drain(now)
-      if (result.state !== "idle")
+      // A paced step only waits out the account-wide add spacing.
+      if (result.state !== "idle" && result.state !== "paced")
         results.push(`${result.state}:${result.chatId}/${result.userId}`)
       now = f.queue.summary().nextAtMs ?? now
     }

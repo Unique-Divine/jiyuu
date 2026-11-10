@@ -1,6 +1,6 @@
 {
   "name": "@uniquedivine/tg-sai",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "type": "module",
   "private": false,
   "description": "Sai Telegram admin audit and bootstrap CLI",
@@ -29,6 +29,7 @@
     "state/*.ts",
     "!state/*.test.ts",
     "state/migrations/*.sql",
+    "assets/*.jpg",
     "*.py",
     "!*_test.py",
     "pyproject.toml",
