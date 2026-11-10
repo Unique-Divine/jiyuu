@@ -27,6 +27,9 @@
   "files": [],
   "references": [
     {
+      "path": "scripts/github-labels"
+    },
+    {
       "path": "mdtoc"
     },
     {

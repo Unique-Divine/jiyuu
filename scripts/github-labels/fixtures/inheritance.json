@@ -1,0 +1,103 @@
+{
+  "closing": {
+    "data": {
+      "repository": {
+        "nameWithOwner": "example/tools",
+        "pullRequest": {
+          "merged": true,
+          "closingIssuesReferences": {
+            "nodes": [
+              {
+                "number": 9,
+                "repository": { "nameWithOwner": "example/tools" }
+              },
+              {
+                "number": 4,
+                "repository": { "nameWithOwner": "example/tools" }
+              },
+              {
+                "number": 88,
+                "repository": { "nameWithOwner": "other/private" }
+              },
+              {
+                "number": 4,
+                "repository": { "nameWithOwner": "example/tools" }
+              }
+            ],
+            "pageInfo": { "hasNextPage": false, "endCursor": "end" }
+          }
+        }
+      }
+    }
+  },
+  "sourceLabels": [
+    [
+      { "name": "Z-mcp-telegram" },
+      { "name": "A-ai" },
+      { "name": "M-launch" },
+      { "name": "Q-future" },
+      { "name": "Z-mcp" },
+      { "name": "A-ai" },
+      { "name": "S-impl" },
+      { "name": "prio-p1-high" },
+      { "name": "bug" },
+      { "name": "a-lowercase" },
+      { "name": "Z-" }
+    ]
+  ],
+  "issue4": [[{ "name": "S-triage" }, { "name": "A-ai" }]],
+  "issue9": [[{ "name": "M-launch" }, { "name": "Z-mcp" }]],
+  "expected": {
+    "mode": "dry-run",
+    "plan": {
+      "repo": "example/tools",
+      "pr": 12,
+      "sourceLabels": [
+        "A-ai",
+        "M-launch",
+        "Q-future",
+        "Z-mcp",
+        "Z-mcp-telegram"
+      ],
+      "skippedCrossRepository": 1,
+      "additions": [
+        {
+          "repo": "example/tools",
+          "number": 4,
+          "labels": ["M-launch", "Q-future", "Z-mcp", "Z-mcp-telegram"]
+        },
+        {
+          "repo": "example/tools",
+          "number": 9,
+          "labels": ["A-ai", "Q-future", "Z-mcp-telegram"]
+        }
+      ]
+    },
+    "commands": [
+      {
+        "argv": [
+          "gh",
+          "api",
+          "--method",
+          "POST",
+          "repos/example/tools/issues/4/labels",
+          "--input",
+          "-"
+        ],
+        "input": "{\"labels\":[\"M-launch\",\"Q-future\",\"Z-mcp\",\"Z-mcp-telegram\"]}"
+      },
+      {
+        "argv": [
+          "gh",
+          "api",
+          "--method",
+          "POST",
+          "repos/example/tools/issues/9/labels",
+          "--input",
+          "-"
+        ],
+        "input": "{\"labels\":[\"A-ai\",\"Q-future\",\"Z-mcp-telegram\"]}"
+      }
+    ]
+  }
+}
