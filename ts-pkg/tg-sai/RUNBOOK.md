@@ -484,16 +484,38 @@ fixed team defaults must verify the expected numeric ID before any invitation.
 
 Telegram can accept an add before the person shows up in the chat. The worker
 reads the member again after 3 seconds. If they are still absent, it creates
-a controlled invitation for them, saves it in the local receipt, and leaves
-the setup `incomplete` with error
-`verify_added_member:TG_SAI_MEMBER_NOT_VISIBLE` and a `retryAt` 15 minutes
-out. Resumed jobs do not add that person again while the invitation is live.
-They approve that person's join request, if one is waiting, and finish once
-the person is in. Read the link from the receipt on the custody host and
-send it to them. The bot gets no link: a bot that is not visible still fails
-the setup. The background queue also reads each member before adding and
-approves a waiting join request, so a member who uses the shared link costs
-no add.
+a 24-hour, approval-required invitation for them, saves it in the local
+receipt with reason `added_not_visible`, and leaves the setup `incomplete`
+with error `verify_added_member:TG_SAI_MEMBER_NOT_VISIBLE` and a `retryAt`
+15 minutes out. The worker never adds that person again:
+
+- Each resume approves their join request, if one is waiting, and finishes
+  once they are in. Someone who taps the link sees "request sent" and waits
+  up to 15 minutes plus one worker tick. An admin can approve the request in
+  Telegram sooner, and the next resume finds them in the chat.
+- While the setup waits on that person, it does not pause the background
+  queue.
+- If the invitation expires first, the setup is saved with error
+  `verify_added_member:TG_SAI_INVITATION_EXPIRED` and no `retryAt`, so the
+  worker reports `operator_recovery_required`. Recovery resumes only once the
+  person is in; it never adds them again.
+- An approval error is saved as `approve_join:<code>`. A flood on the
+  approval becomes a saved hold and sets its own `retryAt`.
+
+The link is only in the receipt on the custody host. Deal Desk status shows
+only the error code. The receipt file is named by the SHA-256 of the request
+ID:
+
+```bash
+id='<request id>'
+f="/var/lib/sai-custody-worker/provisioning/receipts/$(printf '%s' "$id" | sha256sum | cut -d' ' -f1).json"
+sudo jq '.pendingInvitations' "$f"
+```
+
+The bot gets no link: a bot that is not visible still fails the setup. The
+background queue also reads each member before adding and approves a waiting
+join request, so a member who uses the shared link costs no add. An error
+from that read or approval defers the row without counting an attempt.
 
 New ready receipts include an `openGroupUrl` anchored to a message actually
 observed in the group and the existing `primaryInviteLink`, when available.
