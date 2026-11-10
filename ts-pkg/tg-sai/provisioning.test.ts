@@ -2010,6 +2010,34 @@ describe("transient failure paths", () => {
     expect(errorOf(f)).toBe(`promote_admin:${TRANSIENT_LIMIT}`)
   })
 
+  test("a link wait after a late stall survives sparse read timeouts", async () => {
+    const f = fixture()
+    withLinks(f)
+    // Run 1: the final listing times out, a late stall.
+    f.telegram.members = async () => {
+      throw rpc(500, "INTERNAL")
+    }
+    await expect(f.run()).rejects.toThrow("incomplete")
+    expect(errorOf(f)).toBe(`audit_membership:${TELEGRAM_TRANSIENT}`)
+    // From now on 21 is hidden: it waits on a link.
+    hide(f, new Set([21]))
+    const member = f.telegram.member
+    let resumes = 0
+    f.telegram.member = async (chat, id) => {
+      if (id === 21 && resumes % 4 === 0) throw new MtTimeoutError(30_000)
+      return member(chat, id)
+    }
+    // A resume every 15 minutes while the 24 h invitation is live.
+    for (resumes = 1; resumes <= 95; resumes++) {
+      await expect(f.run()).rejects.toThrow("incomplete")
+      expect(f.setup.retryAt).toBeTruthy()
+      expect(errorOf(f)).not.toContain(TRANSIENT_LIMIT)
+    }
+    expect(f.local?.pendingInvitations?.[0]?.reason).toBe(
+      NOT_VISIBLE_INVITATION_REASON,
+    )
+  })
+
   test("a run that stops beyond the furthest stall starts over", async () => {
     const f = fixture()
     withLinks(f)

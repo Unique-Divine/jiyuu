@@ -712,8 +712,10 @@ Two counts lead to `TG_SAI_TRANSIENT_LIMIT`:
   retry keeps the account busy in Deal Desk and pauses the background
   queue. The receipt keeps the furthest step a counted stall reached
   (`stalledStep`). Every stall at or before it counts; the twelfth, about
-  an hour, stops the setup. Only a run that stops beyond that step starts
-  the count over. A flood or hold leaves the count alone.
+  an hour, stops the setup. A transient stop beyond that step starts the
+  count over, and so does any stop that is not transient, such as a link
+  wait (Telegram answered every call up to it). A flood or hold leaves the
+  count alone.
 
 A run cut short by worker shutdown counts toward neither. Reads, the
 identity checks, and promotions resend after a Telegram server error at
