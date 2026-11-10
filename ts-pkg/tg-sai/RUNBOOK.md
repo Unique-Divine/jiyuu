@@ -553,6 +553,13 @@ user `8274304175`, profile `SaiTeam_AI`. The bot, Unique, and the requester
 become admins. August and Erick are ordinary default members. The deployed bot
 configuration controls the requester allowlist and defaults.
 
+Run one worker per custody account. Deal Desk releases the claim while a
+setup waits on its retry or on people to join, so any worker can claim it
+again once it is due. The record of who was already added or invited
+(`addedIds`, `pendingInvitations`, `botAdds`) lives only in the worker's
+local journal. A second worker host for the same account would not see it
+and could add people again.
+
 When adding an operator, configure their numeric Telegram user ID in the bot
 allowlist. A fresh custody session may not know that ID's access hash. Add a
 verified handle alias in `provisioningRuntime.ts` for new team operators and

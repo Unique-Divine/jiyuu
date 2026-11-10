@@ -386,6 +386,7 @@ async function reportHold(
   }
   if (setup.state !== "incomplete") return result
   try {
+    // Assumes one worker per custody account; see provisionSetup's claim.
     const claimToken =
       setup.claimToken ??
       (await cloud.claim(setup.requestId, workerId)).claimToken

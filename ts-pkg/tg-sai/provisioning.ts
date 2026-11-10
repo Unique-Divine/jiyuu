@@ -828,6 +828,9 @@ export async function provisionSetup(params: {
     pendingInvitations,
     ...counts(),
   })
+  // Deal Desk releases the claim during retry and join waits, so any worker
+  // may claim here. Adds and invitations are only in this host's journal:
+  // run one worker per custody account (RUNBOOK, Custody Chat Provisioning).
   const claimed = await cloud.claim(setup.requestId, workerId)
   if (requestFingerprint(claimed) !== fingerprint || !claimed.claimToken)
     throw new Error(
