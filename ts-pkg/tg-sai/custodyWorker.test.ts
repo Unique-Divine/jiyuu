@@ -6,6 +6,7 @@ import { MtcuteError, MtTimeoutError } from "@mtcute/bun"
 import { Command } from "commander"
 import {
   CUSTODY_USER_ID,
+  MAX_NEXT_CHECK_MS,
   recordWorkerTick,
   runWorkerOnce,
   setupHoldGroups,
@@ -622,6 +623,123 @@ test("a held setup whose retry released its claim is claimed before the hold is 
   expect(f.calls.filter((c) => c === "claim" || c.startsWith("progress:")))
     .toEqual(["claim", "progress:private-token"])
   expect(f.calls).not.toContain("telegram")
+})
+
+test("a join wait due under a hold moves its next check to the hold's end", async () => {
+  const now = Date.parse("2026-11-06T00:00:00Z")
+  const hour = 3_600_000
+  const cases = [
+    // Hold end first.
+    { holdMs: 2 * hour, expiryMs: 20 * hour, nextMs: 2 * hour },
+    // Invitation expiry before the hold ends.
+    { holdMs: 30 * hour, expiryMs: 20 * hour, nextMs: 20 * hour },
+    // A hold longer than Deal Desk's 24 h cap.
+    { holdMs: 30 * hour, expiryMs: 40 * hour, nextMs: MAX_NEXT_CHECK_MS },
+  ]
+  for (const { holdMs, expiryMs, nextMs } of cases) {
+    const f = fixture()
+    f.setup = {
+      ...f.setup,
+      state: "awaiting_join",
+      chatId: -100123,
+      binding: { participants: [1912700300], admins: [1912700300] },
+      error: "add_member:TG_SAI_AWAITING_JOIN",
+      nextCheckAt: new Date(now - 1000).toISOString(),
+      receipt: {
+        pendingInvitations: [
+          {
+            userId: "1912700300",
+            inviteLink: "https://t.me/+held",
+            expiresAt: new Date(now + expiryMs).toISOString(),
+            reason: "privacy_restricted",
+          },
+        ],
+      },
+    }
+    delete f.setup.claimToken
+    hold(f.holds, "invite", now + holdMs)
+    const held = await runWorkerOnce(
+      { custodyProfile: "custody", workerId: "stable", run: true, now },
+      f,
+    )
+    const nextCheckAt = new Date(now + nextMs).toISOString()
+    expect(held.results[0]).toMatchObject({
+      state: "waiting",
+      retryAt: nextCheckAt,
+    })
+    expect(f.progressed).toEqual([
+      {
+        state: "awaiting_join",
+        chatId: -100123,
+        binding: { participants: [1912700300], admins: [1912700300] },
+        error: "add_member:TG_SAI_AWAITING_JOIN",
+        nextCheckAt,
+      },
+    ])
+    expect(f.calls).toContain("claim")
+    expect(f.calls).not.toContain("telegram")
+  }
+})
+
+test("a held join wait with an expired invitation is left for its check", async () => {
+  const now = Date.parse("2026-11-06T00:00:00Z")
+  const f = fixture()
+  f.setup = {
+    ...f.setup,
+    state: "awaiting_join",
+    chatId: -100123,
+    error: "add_member:TG_SAI_AWAITING_JOIN",
+    nextCheckAt: new Date(now - 1000).toISOString(),
+    receipt: {
+      pendingInvitations: [
+        { userId: "1", expiresAt: new Date(now - 1).toISOString() },
+      ],
+    },
+  }
+  hold(f.holds, "invite", now + 3_600_000)
+  await runWorkerOnce(
+    { custodyProfile: "custody", workerId: "stable", run: true, now },
+    f,
+  )
+  expect(f.calls).not.toContain("claim")
+  expect(f.progressed).toEqual([])
+})
+
+test("a refused join-wait re-save falls back to an incomplete retry", async () => {
+  const now = Date.parse("2026-11-06T00:00:00Z")
+  const f = fixture()
+  f.setup = {
+    ...f.setup,
+    state: "awaiting_join",
+    chatId: -100123,
+    error: "add_member:TG_SAI_AWAITING_JOIN",
+    nextCheckAt: new Date(now - 1000).toISOString(),
+    receipt: {
+      pendingInvitations: [
+        { userId: "1", expiresAt: new Date(now + 86_400_000).toISOString() },
+      ],
+    },
+  }
+  delete f.setup.claimToken
+  const progress = f.cloud.progress
+  f.cloud.progress = async (id: string, token: string, p: Progress) => {
+    if (p.state === "awaiting_join") throw new Error("refused")
+    return progress(id, token, p)
+  }
+  const untilMs = now + 3_600_000
+  hold(f.holds, "invite", untilMs)
+  await runWorkerOnce(
+    { custodyProfile: "custody", workerId: "stable", run: true, now },
+    f,
+  )
+  expect(f.progressed).toEqual([
+    {
+      state: "incomplete",
+      chatId: -100123,
+      error: "add_member:TG_SAI_AWAITING_JOIN",
+      retryAt: new Date(untilMs).toISOString(),
+    },
+  ])
 })
 
 test("a hold about to end reports retryAt at least 30 s out, once", async () => {

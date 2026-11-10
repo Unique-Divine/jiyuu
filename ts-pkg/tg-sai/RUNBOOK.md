@@ -476,6 +476,14 @@ check reports `TG_SAI_HOLD_STATE_UNAVAILABLE`, and setup work stops. To
 undo a release, roll forward to a fixed build; do not reinstall the older
 binary against the same `state.db`.
 
+The `awaiting_join` setup state needs Deal Desk migration 19 or later.
+Deploy Deal Desk first, then the worker. A worker from before
+`awaiting_join` fails its whole tick on any such row, so before
+downgrading the worker, run `sai-deal-desk chat-setups recover` on every
+`awaiting_join` row (each returns to `configuring`). The `state.db` rule
+above still applies to that downgrade. Deal Desk itself rolls back only by
+restoring its backup from before migration 19.
+
 ## File roles
 
 | File | Role |
@@ -625,6 +633,9 @@ the link. The worker never adds that person again:
   team admin to approve.
 - While the setup waits on that person, it does not pause the background
   queue or other setups, and Deal Desk shows no account hold for it.
+- A check that comes due under a saved flood hold moves the next check to
+  the hold's end (at most 23 h out, never past the invitation's expiry),
+  so Deal Desk does not show the setup as overdue during the hold.
 - If the invitation expires first, the setup is saved with error
   `verify_added_member:TG_SAI_INVITATION_EXPIRED` and no `retryAt`, so the
   worker reports `operator_recovery_required`. The worker never adds that

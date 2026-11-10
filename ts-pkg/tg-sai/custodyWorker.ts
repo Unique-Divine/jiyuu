@@ -384,6 +384,8 @@ async function reportHold(
     retryAt,
     error: hold.code,
   }
+  if (setup.state === "awaiting_join")
+    return reportHeldJoinWait(cloud, setup, result, hold, nowMs, workerId)
   if (setup.state !== "incomplete") return result
   try {
     // Assumes one worker per custody account; see provisionSetup's claim.
@@ -403,6 +405,72 @@ async function reportHold(
     return { ...result, error: `${hold.code}:${safeProvisionError(error)}` }
   }
   return result
+}
+
+/** Deal Desk takes `nextCheckAt` at most 24 h out; keep clear of skew. */
+export const MAX_NEXT_CHECK_MS = 23 * 3_600_000
+
+/**
+ * An `awaiting_join` setup that comes due under a local hold keeps
+ * waiting, but its next check moves to the hold's end (at most
+ * `MAX_NEXT_CHECK_MS` out, and never past its earliest invitation expiry),
+ * so Deal Desk does not show it as overdue for the whole hold. A setup
+ * whose invitation has already expired is left for its next real check,
+ * which stops it for an operator.
+ */
+async function reportHeldJoinWait(
+  cloud: ProvisionCloud,
+  setup: Setup,
+  result: WorkerResult,
+  hold: { untilMs: number },
+  nowMs: number,
+  workerId: string,
+): Promise<WorkerResult> {
+  const expiries = (
+    (setup.receipt as { pendingInvitations?: { expiresAt?: unknown }[] })
+      ?.pendingInvitations ?? []
+  )
+    .map((i) => Date.parse(String(i.expiresAt)))
+    .filter(Number.isFinite)
+  const earliestExpiry = expiries.length ? Math.min(...expiries) : Infinity
+  if (earliestExpiry <= nowMs) return result
+  const nextMs = Math.min(
+    hold.untilMs,
+    nowMs + MAX_NEXT_CHECK_MS,
+    earliestExpiry,
+  )
+  const nextCheckAt =
+    cloudRetryAt(nextMs, nowMs) ?? new Date(nextMs).toISOString()
+  let claimToken: string | undefined
+  try {
+    // Assumes one worker per custody account; see provisionSetup's claim.
+    claimToken =
+      setup.claimToken ??
+      (await cloud.claim(setup.requestId, workerId)).claimToken
+    if (!claimToken) throw new Error("Cloud did not return a claim token")
+    await cloud.progress(setup.requestId, claimToken, {
+      state: "awaiting_join",
+      ...(setup.chatId ? { chatId: setup.chatId } : {}),
+      ...(setup.binding ? { binding: setup.binding } : {}),
+      error: setup.error ?? "",
+      nextCheckAt,
+    })
+    return { ...result, retryAt: nextCheckAt }
+  } catch (error) {
+    // Never leave the claim held: a refused re-save falls back to the
+    // incomplete retry every Deal Desk accepts, which also releases it.
+    if (claimToken)
+      await cloud
+        .progress(setup.requestId, claimToken, {
+          state: "incomplete",
+          ...(setup.chatId ? { chatId: setup.chatId } : {}),
+          ...(setup.binding ? { binding: setup.binding } : {}),
+          error: setup.error ?? "",
+          retryAt: nextCheckAt,
+        })
+        .catch(() => {})
+    return { ...result, error: `${result.error}:${safeProvisionError(error)}` }
+  }
 }
 
 export async function runCustodyWorker(options: {
