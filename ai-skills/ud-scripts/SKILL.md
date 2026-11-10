@@ -68,14 +68,15 @@ Run it through uv so nothing is installed globally:
   imports the script from its own directory.
 - **uv project**: add pytest to the dev group with
   `uv add --dev 'pytest>=8,<10'` and run `uv run pytest -q`. A `uvx` pytest
-  can't import the project's packages.
+  runs in its own environment and can't import the project's dependencies.
 - **CI**: install uv with `astral-sh/setup-uv`, then run the same command.
 
 To test a script with a hyphen in its name, load it with `importlib` in the
 test, or name the script with underscores. Fall back to the standard
 library's `unittest` only where nothing can be installed, and then run
 `python3 -m unittest discover -p '*_test.py'`, since its default pattern only
-finds files that start with `test`.
+finds files that start with `test`. unittest only runs `unittest.TestCase`
+classes, so write the tests that way; pytest runs them too.
 
 ## Why Not Bash by Default
 
