@@ -882,22 +882,29 @@ One fill, in one worker tick:
    change info, delete messages, ban, invite, pin, add admins, manage calls,
    topics, stories; not anonymous, not channel-only rights), without flood
    sleep or resend, and read the rights back.
-5. Set the Sai chat photo (`assets/sai-chat-photo.jpg`, the sai-web app
+5. Make history visible to new members, so the trader sees the intro the
+   bot posts before they join. The worker reads the setting, and if it is
+   hidden, makes one `channels.togglePreHistoryHidden` call and reads it
+   back. Still hidden fails the fill at stage `history`.
+6. Set the Sai chat photo (`assets/sai-chat-photo.jpg`, the sai-web app
    icon). A refused photo leaves the chat without one; it still registers.
-6. Read the bot again and register the chat `available` with its rights,
+7. Read the bot again and register the chat `available` with its rights,
    `photoSet`, and `verifiedAt`.
-
-History stays visible to new members, so the trader sees the intro the bot
-posts before they join.
 
 **When a fill starts.** Only on a worker tick with no runnable or waiting
 setup job, no further queue page, and a background drain that found nothing
 due. Then all of these must hold:
 
+- The background queue has no pending member at all. Live deals' members
+  come first, so a pool chat never spends the day's cap ahead of them.
 - No open fill for the account. A `failed` one blocks filling until an
   operator retires it.
-- The pacing gap has passed: 20 min ±30% after the last pool add
-  (`TG_SAI_BACKGROUND_GAP_MS`), and past the end of any hold or refusal.
+- One gap has passed since the account's latest member add of any source
+  (setup, background, or pool): 20 min ±30%
+  (`TG_SAI_BACKGROUND_GAP_MS`), with the jitter derived from that add's
+  time, so every tick agrees. The background drain waits out the same gap
+  after a pool or setup add. A hold or refusal can push the next fill
+  later.
 - No saved hold on the `create` or `invite` group.
 - Deal Desk's `pool-status` says `allowedNow` (account enabled, below
   target, cap left, no hold, fresh report, group count under its stop).
@@ -906,13 +913,22 @@ due. Then all of these must hold:
   (Deal Desk's adaptive cap, read within the last hour); without it, the
   fixed `TG_SAI_BACKGROUND_DAILY_MAX` (10) applies. The background drain
   uses the same cap.
+- A group count taken in the same session, just before the create, is
+  below `pool-status`'s `groupStopAt`.
 
-`TG_SAI_POOL_FILL=0` turns the filler off.
+A resumed fill re-checks the queue, the gap, the `invite` hold, and the cap
+right before its bot add, and waits without counting an attempt.
+
+The filler is off by default, so a deploy never starts making chats. Turn
+it on with `TG_SAI_POOL_FILL=1` once Deal Desk is ready. While it is off,
+the worker never calls `pool-status`, so the drain uses the fixed cap.
 
 **Owner accounts.** `TG_SAI_OWNER_ACCOUNTS` lists the numeric user IDs that
 may own pool chats, comma- or space-separated; unset means the custody
-account `8274304175` alone. An invalid entry stops the worker at start. The
-filler refuses to run as an account outside the list, and its ownership
+account `8274304175` alone. An invalid entry disables only the filler: the
+worker logs `pool fill disabled` once, each tick reports pool state
+`disabled` with `owner_accounts_invalid`, and setups and the background
+drain keep running. The filler refuses to run as an account outside the list, and its ownership
 check accepts a pool chat whose creator is any listed account. Deal Desk
 also needs a `pool-config` row for every account except custody.
 
@@ -929,11 +945,14 @@ twice.
 | --- | --- |
 | `FLOOD_WAIT_N`, `PEER_FLOOD`, `TG_SAI_HOLD_N` on any step | The guard saves the hold; the fill and the next one wait until it ends |
 | Create refused for certain (flood, hold) | The ref is retired (nothing was made); filling waits out the hold |
-| Create timed out | `creation_unknown`: the account's dialogs are searched for the ref every 5 min; found, the fill continues; not found after 3 searches, the ref is retired |
-| Bot add timed out | Counted as an uncertain add; the next run reads the bot and never adds it again |
+| Create timed out | `creation_unknown`: dialogs titled `Sai deal chat (available)` are searched for the ref every 5 min; found, the fill continues; not found after 3 searches, the ref is retired. A second missing create with no fill done since is `failed` instead |
+| Session fails before a fresh fill's create | The ref is retired; nothing was sent. A `creating` fill from before a crash is searched for instead |
+| Bot add timed out, or failed with an error the worker cannot place | Counted as an uncertain add; the bot is never added again |
 | Bot added but not shown | Read again every 15 min, never re-added; after 4 reads, `failed` |
 | Transient error (timeout, 5xx) | Retried after 5 min, at most 5 times, then `failed` |
-| Deal Desk refuses or is down at `available` | Retried with backoff up to 30 min; no Telegram writes |
+| Deal Desk refuses `available` (HTTP 4xx, or GraphQL errors) | `failed` at stage `register` |
+| Deal Desk down at `available` (5xx, transport) | Retried with backoff up to 30 min on its own counter; no Telegram writes |
+| Group count at `groupStopAt` | No create; asks Deal Desk again after 5 min |
 | Anything else (rights missing, ref changed, per-user refusal) | `failed` |
 
 A `failed` fill is sent to Deal Desk with `pool-fail`, which retires its
@@ -946,7 +965,9 @@ tg-sai pool retire --ref <ref>          # prints the record
 tg-sai pool retire --ref <ref> --run    # retires it; filling resumes
 ```
 
-Retiring an `active` fill that has a chat also sends `pool-fail` with
+Retiring sends `pool-fail` again for a `failed` fill, with its saved stage
+and error, since the first report was best effort; Deal Desk dedupes the
+same input. Retiring an `active` fill that has a chat sends `pool-fail` with
 `operator_retired`. Retiring never deletes or edits the Telegram chat.
 
 Deploy Deal Desk migration 20 (`pool-status`, `pool-register`, `pool-fail`)
