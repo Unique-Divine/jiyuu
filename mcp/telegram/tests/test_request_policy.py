@@ -269,6 +269,7 @@ async def test_policy_expiration_awaits_cleanup_and_does_not_retry():
 async def test_cleanup_failure_preserves_parent_outcome_without_recording_cooldown(
     cancel_caller, cleanup_error, caplog
 ):
+    caplog.set_level("WARNING", logger="telegram_mcp.request_policy")
     started = asyncio.Event()
     tracker = CooldownTracker(Clock())
     client = object()
