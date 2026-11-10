@@ -1,144 +1,317 @@
-name: "⚡Tests"
-
-on:
-  pull_request:
-  workflow_dispatch:
+# Shared monorepo checks. Keep jobs present and gate their steps with changes outputs.
+name: ⚡Tests
+"on":
+  pull_request: null
+  workflow_dispatch: null
   push:
-    branches: ["main", "release/*"]
-
-# Allow concurrent runs on main/release branches but isolates other branches
+    branches:
+      - main
+      - release/*
+permissions:
+  contents: read
+  pull-requests: read
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ github.head_ref }}
   cancel-in-progress: ${{ ! (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/')) }}
-
 jobs:
-  # Check every TypeScript project with its own configuration.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      typescript: ${{ github.event_name == 'workflow_dispatch' || steps.paths.outputs.typescript == 'true' }}
+      tg_sai: ${{ github.event_name == 'workflow_dispatch' || steps.paths.outputs.tg_sai == 'true' }}
+      mdtoc: ${{ github.event_name == 'workflow_dispatch' || steps.paths.outputs.mdtoc == 'true' }}
+      tmux_watch: ${{ github.event_name == 'workflow_dispatch' || steps.paths.outputs.tmux_watch == 'true' }}
+      gh_rev: ${{ github.event_name == 'workflow_dispatch' || steps.paths.outputs.gh_rev == 'true' }}
+      slack: ${{ github.event_name == 'workflow_dispatch' || steps.paths.outputs.slack == 'true' }}
+      telegram: ${{ github.event_name == 'workflow_dispatch' || steps.paths.outputs.telegram == 'true' }}
+      python_mcp: ${{ github.event_name == 'workflow_dispatch' || steps.paths.outputs.python_mcp == 'true' }}
+      python_tg: ${{ github.event_name == 'workflow_dispatch' || steps.paths.outputs.python_tg == 'true' }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Detect changed projects
+        id: paths
+        uses: dorny/paths-filter@15192bc058cc28a13dbf6cde61f19e18988b7af6
+        with:
+          filters: |
+            typescript:
+            - mdtoc/**
+            - discord-nibiru/**
+            - ts-pkg/bash/**
+            - ts-pkg/jiyuu/**
+            - ts-pkg/tg-sai/**
+            - scripts/github-labels/**
+            - package.json
+            - bun.lock
+            - bun.lockb
+            - tsconfig.json
+            - bunfig.toml
+            - .github/workflows/test.yaml
+            - justfile
+            tg_sai:
+            - ts-pkg/tg-sai/**
+            - package.json
+            - bun.lock
+            - bun.lockb
+            - tsconfig.json
+            - bunfig.toml
+            - .github/workflows/test.yaml
+            - justfile
+            mdtoc:
+            - mdtoc/**
+            - package.json
+            - bun.lock
+            - bun.lockb
+            - tsconfig.json
+            - bunfig.toml
+            - .github/workflows/test.yaml
+            - justfile
+            tmux_watch:
+            - tmux-agent-watch/**
+            - .github/workflows/test.yaml
+            - justfile
+            gh_rev:
+            - gh-rev/**
+            - .github/workflows/test.yaml
+            - justfile
+            slack:
+            - mcp/slack/**
+            - .github/workflows/test.yaml
+            - justfile
+            telegram:
+            - mcp/telegram/**
+            - .github/workflows/test.yaml
+            - justfile
+            python_mcp:
+            - mcp/telegram/**
+            - scripts/python/**
+            - .github/workflows/test.yaml
+            - justfile
+            python_tg:
+            - ts-pkg/tg-sai/**
+            - scripts/python/**
+            - .github/workflows/test.yaml
+            - justfile
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - name: "Install bun" # For running things and TS package management"
+      - name: Unaffected project
+        if: needs.changes.outputs.typescript != 'true'
+        run: echo "No relevant changes; check completed successfully."
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        if: needs.changes.outputs.typescript == 'true'
+        with:
+          persist-credentials: false
+      - name: Install bun
         uses: oven-sh/setup-bun@v1
         with:
-          bun-version: 1.4.3 # Values: latest, <sha>, 1.2.3, canary
-        # Outputs:
-        # - cache-hit    : Whether the executable was read from cache. Ex. "true"
-        # - bun-version  : The output from running `bun-version`. Ex. "1.0.0"
-        # - bun-revision : The output from running `bun-revision`.
+          bun-version: 1.4.3
+        if: needs.changes.outputs.typescript == 'true'
       - name: Install TypeScript project dependencies
         run: |
           for project in . mdtoc discord-nibiru ts-pkg/bash ts-pkg/jiyuu ts-pkg/tg-sai; do
             (cd "$project" && bun install --frozen-lockfile)
           done
+        if: needs.changes.outputs.typescript == 'true'
       - name: Typecheck TypeScript projects
         run: bun check
-      # No secrets: an empty environment and a throwaway HOME. testPreload.ts
-      # points TG_SAI_DIR at a temp directory, so no test reads ~/.tg-sai.
+        if: needs.changes.outputs.typescript == 'true'
       - name: Test tg-sai
         working-directory: ts-pkg/tg-sai
         run: |
           home="$(mktemp -d)"
           env -i PATH="$PATH" HOME="$home" TMPDIR="$RUNNER_TEMP" bun test
-
-  # Runs Bun tests only when Markdown TOC sources or their workflow change.
+        if: needs.changes.outputs.tg_sai == 'true'
+    needs: changes
   mdtoc-test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - name: "Check for relevant changes"
-        id: check_changes
-        uses: dorny/paths-filter@v3
+      - name: Unaffected project
+        if: needs.changes.outputs.mdtoc != 'true'
+        run: echo "No relevant changes; check completed successfully."
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        if: needs.changes.outputs.mdtoc == 'true'
         with:
-          filters: |
-            check_changes:
-              - "mdtoc/**/*"
-
-      - if: steps.check_changes.outputs.check_changes == 'true'
-        name: "Install bun" # For running things and TS package management"
+          persist-credentials: false
+      - if: needs.changes.outputs.mdtoc == 'true'
+        name: Install bun
         uses: oven-sh/setup-bun@v1
         with:
-          bun-version: 1.4.3 # Values: latest, <sha>, 1.2.3, canary
-        # Outputs:
-        # - cache-hit    : Whether the executable was read from cache. Ex. "true"
-        # - bun-version  : The output from running `bun-version`. Ex. "1.0.0"
-        # - bun-revision : The output from running `bun-revision`.
-
-      - if: steps.check_changes.outputs.check_changes == 'true'
+          bun-version: 1.4.3
+      - if: needs.changes.outputs.mdtoc == 'true'
         run: |
           bun install
         working-directory: mdtoc
-
-      - if: steps.check_changes.outputs.check_changes == 'true'
+      - if: needs.changes.outputs.mdtoc == 'true'
         run: |
           bun test
         working-directory: mdtoc
-
-  # Exercises the tmux observer only when its Rust project or CI definition changes.
+    needs: changes
   tmux-agent-watch:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - name: "Check for relevant changes"
-        id: watcher_changes
-        uses: dorny/paths-filter@v3
+      - name: Unaffected project
+        if: needs.changes.outputs.tmux_watch != 'true'
+        run: echo "No relevant changes; check completed successfully."
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        if: needs.changes.outputs.tmux_watch == 'true'
         with:
-          filters: |
-            watcher:
-              - "tmux-agent-watch/**/*"
-              - ".github/workflows/test.yaml"
-
-      - if: steps.watcher_changes.outputs.watcher == 'true'
-        name: "Install Rust"
+          persist-credentials: false
+      - if: needs.changes.outputs.tmux_watch == 'true'
+        name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy,rustfmt
-
-      - if: steps.watcher_changes.outputs.watcher == 'true'
-        name: "Install just"
+      - if: needs.changes.outputs.tmux_watch == 'true'
+        name: Install just
         uses: extractions/setup-just@v3
-
-      - if: steps.watcher_changes.outputs.watcher == 'true'
-        name: "Install tmux"
+      - if: needs.changes.outputs.tmux_watch == 'true'
+        name: Install tmux
         run: sudo apt-get install --yes --no-install-recommends tmux
-
-      - if: steps.watcher_changes.outputs.watcher == 'true'
-        name: "Lint"
+      - if: needs.changes.outputs.tmux_watch == 'true'
+        name: Lint
         run: just lint
         working-directory: tmux-agent-watch
-
-      - if: steps.watcher_changes.outputs.watcher == 'true'
-        name: "Test"
+      - if: needs.changes.outputs.tmux_watch == 'true'
+        name: Test
         run: just test
         working-directory: tmux-agent-watch
-
-  # Verifies the standalone review-ledger CLI only when its implementation changes.
+    needs: changes
   gh-rev:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - name: "Check for relevant changes"
-        id: gh_rev_changes
-        uses: dorny/paths-filter@v3
+      - name: Unaffected project
+        if: needs.changes.outputs.gh_rev != 'true'
+        run: echo "No relevant changes; check completed successfully."
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        if: needs.changes.outputs.gh_rev == 'true'
         with:
-          filters: |
-            gh_rev:
-              - "gh-rev/**/*"
-              - ".github/workflows/test.yaml"
-
-      - if: steps.gh_rev_changes.outputs.gh_rev == 'true'
-        name: "Install Rust"
+          persist-credentials: false
+      - if: needs.changes.outputs.gh_rev == 'true'
+        name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy,rustfmt
-
-      - if: steps.gh_rev_changes.outputs.gh_rev == 'true'
-        name: "Install just"
+      - if: needs.changes.outputs.gh_rev == 'true'
+        name: Install just
         uses: extractions/setup-just@v3
-
-      - if: steps.gh_rev_changes.outputs.gh_rev == 'true'
-        name: "Check"
+      - if: needs.changes.outputs.gh_rev == 'true'
+        name: Check
         run: just check
         working-directory: gh-rev
+    needs: changes
+  slack:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mcp/slack
+    steps:
+      - name: Unaffected project
+        if: needs.changes.outputs.slack != 'true'
+        run: echo "No relevant changes; check completed successfully."
+        working-directory: ${{ runner.temp }}
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        if: needs.changes.outputs.slack == 'true'
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.3
+        if: needs.changes.outputs.slack == 'true'
+      - name: Install locked dependencies
+        run: bun install --frozen-lockfile
+        if: needs.changes.outputs.slack == 'true'
+      - name: Run bun:test suite
+        run: bun test ./test
+        if: needs.changes.outputs.slack == 'true'
+      - name: Check entrypoint imports
+        run:
+          bun build --target bun --packages external ./src/cli.js ./src/server.js ./src/server-http.js ./src/web-server.js
+          --outdir ./node_modules/.cache/mcp-check
+        if: needs.changes.outputs.slack == 'true'
+    needs: changes
+  telegram:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mcp/telegram
+    steps:
+      - name: Unaffected project
+        if: needs.changes.outputs.telegram != 'true'
+        run: echo "No relevant changes; check completed successfully."
+        working-directory: ${{ runner.temp }}
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        if: needs.changes.outputs.telegram == 'true'
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v6
+        if: needs.changes.outputs.telegram == 'true'
+      - name: Install locked environment
+        run: uv sync --frozen --group dev
+        if: needs.changes.outputs.telegram == 'true'
+      - name: Test
+        run: uv run --frozen pytest -q
+        if: needs.changes.outputs.telegram == 'true'
+      - name: Check formatting
+        run: uv run --frozen black --check main.py sanitize.py session_string_generator.py telegram_mcp tests
+        if: needs.changes.outputs.telegram == 'true'
+    needs: changes
+  python-typecheck:
+    name: Python types / ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Telegram MCP
+            path: mcp/telegram
+            artifact: telegram-mcp
+            report_recipe: typecheck-report
+            filter: python_mcp
+          - name: tg-sai Python
+            path: ts-pkg/tg-sai
+            artifact: tg-sai-python
+            report_recipe: py-typecheck-report
+            filter: python_tg
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+        if: needs.changes.outputs[matrix.filter] == 'true'
+      - name: Unaffected project
+        if: needs.changes.outputs[matrix.filter] != 'true'
+        run: echo "No relevant Python project changes; check completed successfully."
+      - name: Set up uv and managed Python
+        if: needs.changes.outputs[matrix.filter] == 'true'
+        uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff
+        with:
+          python-version: "3.13"
+      - name: Set up Just
+        if: needs.changes.outputs[matrix.filter] == 'true'
+        uses: extractions/setup-just@f8a3cce218d9f83db3a2ecd90e41ac3de6cdfd9b
+      - name: Install locked project environment
+        if: needs.changes.outputs[matrix.filter] == 'true'
+        working-directory: ${{ matrix.path }}
+        run: uv sync --frozen --group dev
+      - name: Verify report-only runner and file discovery
+        if: needs.changes.outputs[matrix.filter] == 'true'
+        working-directory: ${{ matrix.path }}
+        run: uv run --frozen --no-sync python -m unittest discover -s "$GITHUB_WORKSPACE/scripts/python" -p 'test_*.py' -v
+      - name: Report type diagnostics
+        id: report
+        if: needs.changes.outputs[matrix.filter] == 'true'
+        working-directory: ${{ matrix.path }}
+        env:
+          REPORT_RECIPE: ${{ matrix.report_recipe }}
+          REPORT_NAME: ${{ matrix.artifact }}
+        run: just "$REPORT_RECIPE" "$RUNNER_TEMP/python-types/$REPORT_NAME"
+      - name: Upload native diagnostics and report
+        if: always() && steps.report.outcome != 'skipped'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: python-types-${{ matrix.artifact }}
+          path: ${{ runner.temp }}/python-types/${{ matrix.artifact }}
+          if-no-files-found: error
+    needs: changes

@@ -20,6 +20,25 @@ Read this file before assigning repository-specific labels. Labels can overlap;
 a Telegram MCP change receives the AI area, the MCP parent zone, and its Telegram
 child zone.
 
+## Code Checks
+
+Code checks live in [the shared test workflow](.github/workflows/test.yaml).
+Its `changes` job detects affected projects once. Downstream jobs use those
+outputs in step-level `if` conditions, including checkout and tool setup.
+Unaffected jobs print a reason and succeed. Keep the `test` and `mdtoc-test`
+check names because branch protection requires them.
+
+Add a project's paths and shared dependencies to that job's filters when adding
+checks. Changes to the workflow or root Just recipes run every code check;
+manual dispatch also runs everything. Pull requests and pushes to main or release
+branches use the path filters. Keep workflow-level path restrictions out of this
+workflow so every check reports a result.
+
+Python type diagnostics remain report-only, with native diagnostics and summaries
+uploaded as artifacts. Environment setup, configuration errors, and checker
+failures still fail the job. Label validation and privileged issue/label
+automation have separate workflows.
+
 ## Path-Managed Labels
 
 The table describes Jiyuu's [PR mappings](.github/labeler.yml). CI checks that
