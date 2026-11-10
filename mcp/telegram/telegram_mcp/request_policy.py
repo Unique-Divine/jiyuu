@@ -1,12 +1,17 @@
 """Typed Telegram request limits: flood waits, slow mode, and timeouts.
 
-Telethon sleeps through flood waits shorter than ``flood_sleep_threshold``.
-An outer timeout can then cancel that sleep, and the caller sees a generic
-timeout instead of Telegram's wait. Clients built by this server set the
-threshold to ``FLOOD_SLEEP_THRESHOLD`` (0), so every wait raises. This module
-converts the raised error into a ``RequestLimit``, records it as a cooldown,
-and refuses matching requests until the cooldown passes. It never reconnects:
-a wait is an API limit, not a transport failure.
+Telethon sleeps through flood waits up to the client's
+``flood_sleep_threshold``. Clients built by this server use
+``PolicyTelegramClient`` with ``CLIENT_FLOOD_SLEEP_THRESHOLD`` (10 s), so
+transfers, paginated reads, and cache warming still absorb short waits.
+
+A request with an outer timeout must not sleep inside it: the timeout would
+cancel the sleep and the caller would see a generic timeout instead of the
+wait. ``run_limited`` therefore lowers the threshold to 0 for the requests it
+runs, through a context variable that only the calling task and its children
+see. Every wait inside raises, becomes a ``RequestLimit``, and is recorded as
+a cooldown that refuses matching requests until it passes. Nothing here
+reconnects: a wait is an API limit, not a transport failure.
 
 Telegram scopes the two kinds of wait differently:
 
@@ -20,26 +25,77 @@ Telegram scopes the two kinds of wait differently:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import math
 import time
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from typing import Awaitable, Callable, Dict, Literal, Optional, Tuple, TypeVar, Union
+from typing import (
+    Awaitable,
+    Callable,
+    Dict,
+    Iterator,
+    Literal,
+    Optional,
+    Tuple,
+    TypeVar,
+    Union,
+)
 
-from telethon import errors
+from telethon import TelegramClient, errors
 
-FLOOD_SLEEP_THRESHOLD = 0
+CLIENT_FLOOD_SLEEP_THRESHOLD = 10
 
 LimitKind = Literal["flood_wait", "slow_mode", "premium_flood_wait"]
 LimitSource = Literal["telegram", "cooldown"]
 ChatKey = Union[int, str]
 T = TypeVar("T")
 
+_flood_sleep_override: ContextVar[Optional[int]] = ContextVar(
+    "telegram_mcp_flood_sleep_override", default=None
+)
+
+
+class PolicyTelegramClient(TelegramClient):
+    """TelegramClient whose flood-sleep threshold a task can lower to 0.
+
+    Telethon reads ``self.flood_sleep_threshold`` in the task that awaits the
+    request, so a context variable scopes the override to that task without
+    affecting concurrent tool calls on the same client.
+    """
+
+    @property
+    def flood_sleep_threshold(self):
+        override = _flood_sleep_override.get()
+        return self._flood_sleep_threshold if override is None else override
+
+    @flood_sleep_threshold.setter
+    def flood_sleep_threshold(self, value):
+        self._flood_sleep_threshold = min(value or 0, 24 * 60 * 60)
+
+
+@contextlib.contextmanager
+def raise_flood_waits() -> Iterator[None]:
+    """Make Telethon raise every wait in this task instead of sleeping."""
+    token = _flood_sleep_override.set(0)
+    try:
+        yield
+    finally:
+        _flood_sleep_override.reset(token)
+
 
 @dataclass(frozen=True)
 class RequestLimit:
-    """A wait Telegram imposed, or the remaining part of a recorded one."""
+    """A wait Telegram imposed, or the remaining part of a recorded one.
+
+    ``request`` is the policy's request name (``get_dialogs``,
+    ``send_message``) for recorded limits, and the MCP tool name for waits
+    reported by ``log_and_format_error``. ``method`` is the Telethon request
+    class that waited, when known. ``recorded`` is False when no cooldown was
+    stored, so nothing refuses a retry locally.
+    """
 
     kind: LimitKind
     request: str
@@ -47,6 +103,8 @@ class RequestLimit:
     retry_at: float
     chat_id: Optional[ChatKey] = None
     source: LimitSource = "telegram"
+    method: Optional[str] = None
+    recorded: bool = True
 
     def to_payload(self) -> dict:
         retry_at = datetime.fromtimestamp(self.retry_at, tz=timezone.utc)
@@ -54,24 +112,32 @@ class RequestLimit:
             "error": {
                 "type": self.kind,
                 "request": self.request,
+                "method": self.method,
                 "chat_id": self.chat_id,
                 "wait_seconds": self.wait_seconds,
                 "retry_at": retry_at.isoformat().replace("+00:00", "Z"),
                 "source": self.source,
+                "recorded": self.recorded,
                 "message": self.message(),
             }
         }
 
     def message(self) -> str:
         if self.kind == "slow_mode":
-            scope = f"Slow mode in chat {self.chat_id}"
+            where = "this chat" if self.chat_id is None else f"chat {self.chat_id}"
+            scope = f"Slow mode in {where}"
         elif self.kind == "premium_flood_wait":
             scope = f"Telegram limited transfer speed for {self.request}"
         else:
             scope = f"Telegram rate-limited {self.request}"
+        if self.method:
+            scope += f" ({self.method})"
+        wait = f"{scope}. Wait {self.wait_seconds} s."
+        if self.recorded:
+            return f"{wait} The server refuses matching requests until retry_at."
         return (
-            f"{scope}. Wait {self.wait_seconds} s before retrying. "
-            "Do not retry sooner; the server refuses matching requests until then."
+            f"{wait} No cooldown was recorded. Earlier steps of {self.request} "
+            "may have taken effect; check state before retrying a write."
         )
 
 
@@ -130,11 +196,17 @@ def is_wait_error(error: BaseException) -> bool:
     return isinstance(error, errors.FloodError) and hasattr(error, "seconds")
 
 
+def _method_name(error: Exception) -> Optional[str]:
+    request = getattr(error, "request", None)
+    return None if request is None else type(request).__name__
+
+
 def limit_from_error(
     error: Exception,
     request: str,
     now: float,
     chat_id: Optional[ChatKey] = None,
+    recorded: bool = True,
 ) -> RequestLimit:
     """Convert a Telethon wait error into a ``RequestLimit``."""
     seconds = _wait_seconds(error)
@@ -150,6 +222,8 @@ def limit_from_error(
         wait_seconds=seconds,
         retry_at=now + seconds,
         chat_id=chat_id if kind == "slow_mode" else None,
+        method=_method_name(error),
+        recorded=recorded,
     )
 
 
@@ -239,19 +313,26 @@ async def run_limited(
     timeout_hint: str = "Retry later.",
     chat_id: Optional[ChatKey] = None,
     tracker: Optional[CooldownTracker] = None,
+    raise_waits: bool = True,
 ) -> T:
     """Run one Telegram request under the cooldown and timeout policy.
 
-    Raises ``RequestLimited`` for an active cooldown or a new Telegram wait,
-    and ``RequestTimedOut`` when ``timeout`` elapses. Pass ``timeout=None``
-    for writes, where a timeout cannot tell whether Telegram applied the write.
+    Raises ``RequestLimited`` for an active cooldown or a Telegram wait, and
+    ``RequestTimedOut`` when ``timeout`` elapses. With ``raise_waits`` (the
+    default) Telethon raises every wait instead of sleeping, so a timeout
+    never cancels a wait. Pass ``raise_waits=False`` for unbounded background
+    reads that should absorb short waits; only longer waits are recorded.
+    Pass ``timeout=None`` for writes, where a timeout cannot tell whether
+    Telegram applied the write.
     """
     tracker = tracker or request_cooldowns
     raise_if_cooling_down(client, request, chat_id, tracker)
+    scope = raise_flood_waits() if raise_waits else contextlib.nullcontext()
     try:
-        if timeout is None:
-            return await operation()
-        return await asyncio.wait_for(operation(), timeout=timeout)
+        with scope:
+            if timeout is None:
+                return await operation()
+            return await asyncio.wait_for(operation(), timeout=timeout)
     except asyncio.TimeoutError as exc:
         raise RequestTimedOut(RequestTimeout(request, timeout, timeout_hint)) from exc
     except errors.FloodError as exc:

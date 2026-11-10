@@ -1,13 +1,16 @@
 """Runtime wiring raises flood waits, keeps the connection, and shares cooldowns."""
 
+import asyncio
 import json
 from types import SimpleNamespace
 
 import pytest
-from telethon import errors
+import telethon.client.users as telethon_users
+from telethon import errors, functions, types
+from telethon.sessions import StringSession
 from telethon.tl.types import PeerChannel
 
-from telegram_mcp import runtime
+from telegram_mcp import request_policy, runtime
 from telegram_mcp.tools import chats, messages
 
 
@@ -15,23 +18,112 @@ def flood(seconds):
     return errors.FloodWaitError(request=None, capture=seconds)
 
 
-def test_clients_raise_flood_waits_instead_of_sleeping(monkeypatch):
+def test_clients_absorb_short_waits_by_default(monkeypatch):
     created = []
 
     def fake_client(*args, **kwargs):
         created.append(kwargs)
         return SimpleNamespace()
 
-    monkeypatch.setattr(runtime, "TelegramClient", fake_client)
+    monkeypatch.setattr(runtime, "PolicyTelegramClient", fake_client)
     monkeypatch.setattr(runtime, "_build_proxy_for_label", lambda label: (None, None))
 
     runtime._build_client("session", "default")
 
-    assert created[0]["flood_sleep_threshold"] == 0
+    assert created[0]["flood_sleep_threshold"] == request_policy.CLIENT_FLOOD_SLEEP_THRESHOLD
+    assert 0 < request_policy.CLIENT_FLOOD_SLEEP_THRESHOLD <= 10
+
+
+class _Sender:
+    """Stands in for Telethon's MTProto sender, failing with queued errors."""
+
+    def __init__(self, *failures):
+        self.failures = list(failures)
+
+    def send(self, request, ordered=False):
+        async def reply():
+            if self.failures:
+                raise self.failures.pop(0)
+            return types.NearestDc(country="US", this_dc=1, nearest_dc=1)
+
+        return reply()
+
+
+@pytest.fixture
+def telethon_sleeps(monkeypatch):
+    slept = []
+
+    async def sleep(seconds):
+        slept.append(seconds)
+
+    monkeypatch.setattr(telethon_users, "asyncio", SimpleNamespace(sleep=sleep))
+    return slept
 
 
 @pytest.mark.asyncio
-async def test_flood_wait_on_connection_ping_does_not_reconnect(monkeypatch):
+async def test_unbounded_requests_sleep_through_short_waits(telethon_sleeps):
+    client = request_policy.PolicyTelegramClient(
+        StringSession(), 12345, "hash", flood_sleep_threshold=10
+    )
+
+    # A mid-iteration page or transfer chunk that waits 3 s still succeeds.
+    result = await client._call(_Sender(flood(3)), functions.help.GetNearestDcRequest())
+
+    assert isinstance(result, types.NearestDc)
+    assert telethon_sleeps == [3]
+
+
+@pytest.mark.asyncio
+async def test_bounded_requests_raise_waits_in_their_task_only(telethon_sleeps):
+    client = request_policy.PolicyTelegramClient(
+        StringSession(), 12345, "hash", flood_sleep_threshold=10
+    )
+    seen = {}
+
+    async def concurrent_tool():
+        seen["threshold"] = client.flood_sleep_threshold
+
+    async def bounded():
+        task = asyncio.get_running_loop().create_task(concurrent_tool())
+        with request_policy.raise_flood_waits():
+            seen["inside"] = client.flood_sleep_threshold
+            await task
+            return await client._call(_Sender(flood(3)), functions.help.GetNearestDcRequest())
+
+    with pytest.raises(errors.FloodWaitError):
+        await bounded()
+
+    assert seen == {"inside": 0, "threshold": 10}
+    assert client.flood_sleep_threshold == 10
+    assert telethon_sleeps == []
+
+
+@pytest.mark.asyncio
+async def test_get_chats_timeout_cannot_cancel_a_short_wait(monkeypatch, telethon_sleeps):
+    client = request_policy.PolicyTelegramClient(
+        StringSession(), 12345, "hash", flood_sleep_threshold=10
+    )
+    sender = _Sender(flood(3))
+
+    async def get_dialogs(**kwargs):
+        return await client._call(sender, functions.help.GetNearestDcRequest())
+
+    async def connected(cl):
+        pass
+
+    monkeypatch.setattr(client, "get_dialogs", get_dialogs)
+    monkeypatch.setattr(chats, "get_client", lambda account=None: client)
+    monkeypatch.setattr(chats, "ensure_connected", connected)
+
+    result = json.loads(await chats.get_chats())["error"]
+
+    assert result["type"] == "flood_wait"
+    assert result["wait_seconds"] == 3
+    assert telethon_sleeps == []
+
+
+@pytest.mark.asyncio
+async def test_wait_on_connection_ping_neither_reconnects_nor_fails(monkeypatch):
     class Client:
         def __init__(self):
             self.calls = []
@@ -52,19 +144,49 @@ async def test_flood_wait_on_connection_ping_does_not_reconnect(monkeypatch):
     client = Client()
     monkeypatch.setattr(runtime, "_last_conn_verified", {})
 
-    with pytest.raises(errors.FloodWaitError):
-        await runtime.ensure_connected(client)
+    await runtime.ensure_connected(client)
+    await runtime.ensure_connected(client)
 
+    # The wait proved the connection works, so the next call skips the ping.
     assert client.calls == ["ping"]
+    assert id(client) in runtime._last_conn_verified
 
 
-def test_any_tool_error_reports_flood_wait_seconds():
-    result = json.loads(runtime.log_and_format_error("get_history", flood(90)))["error"]
+def test_unrecorded_tool_wait_names_method_and_does_not_promise_refusal():
+    request = functions.messages.GetHistoryRequest(
+        peer=types.InputPeerEmpty(),
+        offset_id=0,
+        offset_date=None,
+        add_offset=0,
+        limit=1,
+        max_id=0,
+        min_id=0,
+        hash=0,
+    )
+    error = errors.FloodWaitError(request=request, capture=90)
+    result = json.loads(runtime.log_and_format_error("get_history", error))["error"]
 
     assert result["type"] == "flood_wait"
     assert result["request"] == "get_history"
+    assert result["method"] == "GetHistoryRequest"
     assert result["wait_seconds"] == 90
+    assert result["recorded"] is False
     assert result["retry_at"].endswith("Z")
+    assert "refuses" not in result["message"]
+    assert "check state before retrying a write" in result["message"]
+
+
+def test_unrecorded_slow_mode_names_the_tool_chat():
+    error = errors.SlowModeWaitError(request=None, capture=20)
+    result = json.loads(runtime.log_and_format_error("send_file", error, chat_id=-42))["error"]
+
+    assert result["type"] == "slow_mode"
+    assert result["chat_id"] == -42
+    assert "chat -42" in result["message"]
+
+    without_chat = json.loads(runtime.log_and_format_error("forward_message", error))["error"]
+    assert "None" not in without_chat["message"]
+    assert "this chat" in without_chat["message"]
 
 
 @pytest.mark.asyncio
@@ -124,3 +246,43 @@ async def test_send_message_slow_mode_blocks_only_that_chat(monkeypatch):
     assert again["error"]["source"] == "cooldown"
     assert elsewhere == "Message sent successfully."
     assert client.sent == [(200, "c")]
+
+
+class _LookupClient:
+    """Resolves only the identifiers it knows; dialogs are under a wait."""
+
+    def __init__(self, known):
+        self.known = known
+        self.dialog_reads = 0
+
+    def is_connected(self):
+        return True
+
+    async def get_dialogs(self, **kwargs):
+        self.dialog_reads += 1
+        raise flood(300)
+
+    async def get_entity(self, identifier):
+        if identifier in self.known:
+            return self.known[identifier]
+        raise ValueError(f"unknown {identifier}")
+
+    async def get_input_entity(self, identifier):
+        return await self.get_entity(identifier)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("resolver", ["resolve_entity", "resolve_input_entity"])
+async def test_dialog_cooldown_still_tries_marked_ids(monkeypatch, resolver):
+    channel = SimpleNamespace(id=100)
+    client = _LookupClient({-1000000000100: channel})
+    monkeypatch.setattr(runtime, "_last_conn_verified", {id(client): runtime.time.time()})
+
+    assert await getattr(runtime, resolver)(100, client) is channel
+    assert client.dialog_reads == 1
+
+    # With a cooldown active, nothing resolves, so the limit explains why.
+    with pytest.raises(runtime.RequestLimited) as caught:
+        await getattr(runtime, resolver)(555, client)
+    assert caught.value.limit.source == "cooldown"
+    assert client.dialog_reads == 1

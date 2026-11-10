@@ -48,7 +48,8 @@ import telethon.errors.rpcerrorlist
 from sanitize import sanitize_user_content, sanitize_name, sanitize_dict, format_tool_result
 from telegram_mcp.client_identity import client_identity_kwargs
 from telegram_mcp.request_policy import (
-    FLOOD_SLEEP_THRESHOLD,
+    CLIENT_FLOOD_SLEEP_THRESHOLD,
+    PolicyTelegramClient,
     RequestLimited,
     RequestTimedOut,
     format_request_error,
@@ -289,10 +290,10 @@ def _build_client(session: Any, label: str) -> TelegramClient:
     if connection is not None:
         kwargs["connection"] = connection
     kwargs.update(client_identity_kwargs())
-    # Raise every flood wait instead of sleeping inside Telethon, so request
-    # timeouts never cancel a wait and callers see its length.
-    kwargs["flood_sleep_threshold"] = FLOOD_SLEEP_THRESHOLD
-    return TelegramClient(session, TELEGRAM_API_ID, TELEGRAM_API_HASH, **kwargs)
+    # Absorb short waits in transfers and paginated reads; run_limited lowers
+    # this to 0 for bounded requests so a timeout never cancels a wait.
+    kwargs["flood_sleep_threshold"] = CLIENT_FLOOD_SLEEP_THRESHOLD
+    return PolicyTelegramClient(session, TELEGRAM_API_ID, TELEGRAM_API_HASH, **kwargs)
 
 
 def _discover_accounts() -> dict[str, TelegramClient]:
@@ -457,9 +458,11 @@ async def ensure_connected(cl: TelegramClient = None):
         )
         _last_conn_verified[key] = now
     except Exception as exc:
-        # A flood wait is an API limit on a working connection.
+        # A wait reply proves the connection works. Neither reconnect nor
+        # fail the tool that only needed a live connection.
         if is_wait_error(exc):
-            raise
+            _last_conn_verified[key] = now
+            return
         await _force_reconnect(cl)
 
 
@@ -582,7 +585,13 @@ def log_and_format_error(
         return format_request_error(error)
     if is_wait_error(error):
         try:
-            limit = limit_from_error(error, function_name, time.time())
+            limit = limit_from_error(
+                error,
+                function_name,
+                time.time(),
+                chat_id=kwargs.get("chat_id"),
+                recorded=False,
+            )
         except ValueError:
             pass
         else:
@@ -739,8 +748,25 @@ def _marked_id_candidates(identifier: Union[int, str]) -> list[int]:
 
 
 async def warm_dialogs(client) -> None:
-    """Fill the entity cache from dialogs under the get_dialogs cooldown."""
-    await run_limited(client, "get_dialogs", client.get_dialogs, timeout=None)
+    """Fill the entity cache from dialogs under the get_dialogs cooldown.
+
+    Short waits are absorbed at the client threshold; longer ones raise
+    ``RequestLimited`` and are recorded for get_chats and later lookups.
+    """
+    await run_limited(client, "get_dialogs", client.get_dialogs, timeout=None, raise_waits=False)
+
+
+async def _warm_dialogs_for_lookup(client) -> Optional[RequestLimited]:
+    """Warm the cache, returning a get_dialogs limit instead of raising it.
+
+    Entity lookups still try marked-ID variants, which need no dialogs, and
+    raise the limit only when nothing resolves.
+    """
+    try:
+        await warm_dialogs(client)
+    except RequestLimited as limited:
+        return limited
+    return None
 
 
 async def resolve_entity(identifier: Union[int, str], client=None) -> Any:
@@ -759,12 +785,13 @@ async def resolve_entity(identifier: Union[int, str], client=None) -> Any:
         client = get_client()
     await ensure_connected(client)
     last_error = None
+    limited: Optional[RequestLimited] = None
     try:
         try:
             return await client.get_entity(identifier)
         except ValueError as error:
             last_error = error
-            await warm_dialogs(client)
+            limited = await _warm_dialogs_for_lookup(client) or limited
             try:
                 return await client.get_entity(identifier)
             except ValueError as error:
@@ -775,7 +802,7 @@ async def resolve_entity(identifier: Union[int, str], client=None) -> Any:
             return await client.get_entity(identifier)
         except ValueError as error:
             last_error = error
-            await warm_dialogs(client)
+            limited = await _warm_dialogs_for_lookup(client) or limited
             try:
                 return await client.get_entity(identifier)
             except ValueError as error:
@@ -786,6 +813,10 @@ async def resolve_entity(identifier: Union[int, str], client=None) -> Any:
             return await client.get_entity(candidate)
         except ValueError as error:
             last_error = error
+
+    if limited is not None:
+        # The cache stayed cold because of the wait, not a bad identifier.
+        raise limited
 
     raise ValueError(
         f"Could not resolve entity for {identifier!r}, "
@@ -802,12 +833,13 @@ async def resolve_input_entity(identifier: Union[int, str], client=None) -> Any:
         client = get_client()
     await ensure_connected(client)
     last_error = None
+    limited: Optional[RequestLimited] = None
     try:
         try:
             return await client.get_input_entity(identifier)
         except ValueError as error:
             last_error = error
-            await warm_dialogs(client)
+            limited = await _warm_dialogs_for_lookup(client) or limited
             try:
                 return await client.get_input_entity(identifier)
             except ValueError as error:
@@ -818,7 +850,7 @@ async def resolve_input_entity(identifier: Union[int, str], client=None) -> Any:
             return await client.get_input_entity(identifier)
         except ValueError as error:
             last_error = error
-            await warm_dialogs(client)
+            limited = await _warm_dialogs_for_lookup(client) or limited
             try:
                 return await client.get_input_entity(identifier)
             except ValueError as error:
@@ -829,6 +861,10 @@ async def resolve_input_entity(identifier: Union[int, str], client=None) -> Any:
             return await client.get_input_entity(candidate)
         except ValueError as error:
             last_error = error
+
+    if limited is not None:
+        # The cache stayed cold because of the wait, not a bad identifier.
+        raise limited
 
     raise ValueError(
         f"Could not resolve input entity for {identifier!r}, "
