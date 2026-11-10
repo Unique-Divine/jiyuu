@@ -8,12 +8,14 @@ import { addProfile, strictProfileCredentials } from "./profiles"
 import {
   AWAITING_JOIN,
   BOT_BASELINE_RIGHTS,
+  BOT_NOT_VISIBLE,
   cloudRetryAt,
   creationMarker,
   definiteCreateRejection,
   isPerUserAddError,
   isTransientTelegramError,
   MEMBER_NOT_VISIBLE,
+  MAX_BOT_ADDS,
   MEMBER_NOT_VISIBLE_RETRY_MS,
   MEMBER_RECHECK_MS,
   MIN_CLOUD_RETRY_MS,
@@ -1540,6 +1542,27 @@ describe("added but not visible", () => {
     f.events.length = 0
     expect((await f.run(h.sleep)).state).toBe("ready")
     expect(f.events.filter((e) => e.startsWith("add:"))).toEqual([])
+  })
+
+  test("a bot that never shows is re-added once, then stops for an operator", async () => {
+    const f = fixture()
+    const h = hiding(f, new Set([PROVISIONING_BOT_ID]))
+    const botAdds = () =>
+      f.events.filter((e) => e === `add:${PROVISIONING_BOT_ID}`).length
+    // Tick 1 adds the bot; tick 2 re-adds it; ticks 3 and 4 add nothing.
+    await expect(f.run(h.sleep)).rejects.toThrow("incomplete")
+    expect(f.setup.retryAt).toBeTruthy()
+    await expect(f.run(h.sleep)).rejects.toThrow("incomplete")
+    expect(botAdds()).toBe(MAX_BOT_ADDS)
+    expect(f.local?.botAdds).toBe(MAX_BOT_ADDS)
+    for (let tick = 0; tick < 2; tick++) {
+      await expect(f.run(h.sleep)).rejects.toThrow("incomplete")
+      expect((f.setup as Setup & { error: string }).error).toBe(
+        `verify_added_member:${BOT_NOT_VISIBLE}`,
+      )
+      expect(f.setup.retryAt).toBeNull()
+    }
+    expect(botAdds()).toBe(MAX_BOT_ADDS)
   })
 
   test("without invitation links the old failure stands", async () => {

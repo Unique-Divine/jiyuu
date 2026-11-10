@@ -109,6 +109,8 @@ export interface JournalRecord {
   binding?: Binding
   workerId?: string
   pendingInvitations?: PendingInvitation[]
+  /** Add calls made for the bot, so a bot that never shows is bounded. */
+  botAdds?: number
 }
 export interface PendingInvitation {
   userId: string
@@ -361,7 +363,7 @@ export function safeProvisionError(error: unknown): string {
         )
       : ""
   if (isTransientTelegramError(error)) return TELEGRAM_TRANSIENT
-  return /^(?:FLOOD(?:_PREMIUM)?_WAIT_(?:\d{1,10}|UNKNOWN)|PEER_FLOOD|TG_SAI_HOLD_\d{1,10}|TG_SAI_HOLD_STATE_UNAVAILABLE|TG_SAI_HOLD_ACCOUNT_UNKNOWN|TG_SAI_MEMBER_NOT_VISIBLE|TG_SAI_INVITATION_EXPIRED|TG_SAI_AWAITING_JOIN|TG_SAI_QUEUE_UNAVAILABLE|USER_PRIVACY_RESTRICTED|USER_NOT_MUTUAL_CONTACTS?|USER_NOT_PARTICIPANT|USER_CHANNELS_TOO_MUCH|USER_BOT|USER_ID_INVALID|PEER_ID_INVALID|CHAT_ID_INVALID|CHANNEL_INVALID|CHANNEL_PRIVATE|CHAT_ADMIN_REQUIRED|CHAT_WRITE_FORBIDDEN|USER_ADMIN_INVALID|USER_CREATOR|ADMINS_TOO_MUCH|BOTS_TOO_MUCH|BOT_GROUPS_BLOCKED|RIGHT_FORBIDDEN|USER_RESTRICTED|USER_DEACTIVATED|INPUT_USER_DEACTIVATED|CHANNELS_TOO_MUCH|USERS_TOO_MUCH|AUTH_KEY_UNREGISTERED|SESSION_REVOKED|INVITE_HASH_EXPIRED|INVITE_HASH_INVALID|INVITE_REQUEST_SENT)$/.test(
+  return /^(?:FLOOD(?:_PREMIUM)?_WAIT_(?:\d{1,10}|UNKNOWN)|PEER_FLOOD|TG_SAI_HOLD_\d{1,10}|TG_SAI_HOLD_STATE_UNAVAILABLE|TG_SAI_HOLD_ACCOUNT_UNKNOWN|TG_SAI_MEMBER_NOT_VISIBLE|TG_SAI_INVITATION_EXPIRED|TG_SAI_BOT_NOT_VISIBLE|TG_SAI_AWAITING_JOIN|TG_SAI_QUEUE_UNAVAILABLE|USER_PRIVACY_RESTRICTED|USER_NOT_MUTUAL_CONTACTS?|USER_NOT_PARTICIPANT|USER_CHANNELS_TOO_MUCH|USER_BOT|USER_ID_INVALID|PEER_ID_INVALID|CHAT_ID_INVALID|CHANNEL_INVALID|CHANNEL_PRIVATE|CHAT_ADMIN_REQUIRED|CHAT_WRITE_FORBIDDEN|USER_ADMIN_INVALID|USER_CREATOR|ADMINS_TOO_MUCH|BOTS_TOO_MUCH|BOT_GROUPS_BLOCKED|RIGHT_FORBIDDEN|USER_RESTRICTED|USER_DEACTIVATED|INPUT_USER_DEACTIVATED|CHANNELS_TOO_MUCH|USERS_TOO_MUCH|AUTH_KEY_UNREGISTERED|SESSION_REVOKED|INVITE_HASH_EXPIRED|INVITE_HASH_INVALID|INVITE_REQUEST_SENT)$/.test(
     normalized,
   )
     ? normalized
@@ -488,6 +490,13 @@ export const MEMBER_NOT_VISIBLE_RETRY_MS = 15 * 60 * 1000
 export const MEMBER_RECHECK_MS = 3000
 /** `reason` of the invitation for a member added but not yet visible. */
 export const NOT_VISIBLE_INVITATION_REASON = "added_not_visible"
+/**
+ * Code for a bot still absent after `MAX_BOT_ADDS` add calls. The setup is
+ * saved without `retryAt`, so it needs an operator; no further bot add runs.
+ */
+export const BOT_NOT_VISIBLE = "TG_SAI_BOT_NOT_VISIBLE"
+/** Bot add calls per setup: the first add and one re-add. */
+export const MAX_BOT_ADDS = 2
 /**
  * Code for a setup that waits only for required people whose add was
  * refused for privacy and who got a controlled invitation instead. Retries
@@ -671,6 +680,7 @@ export async function provisionSetup(params: {
   if (setup.optionalParticipants?.length && !params.background)
     throw new Error("Background member queue required")
   let pendingInvitations = local?.pendingInvitations ?? []
+  let botAdds = local?.botAdds ?? 0
   const workerId = local?.workerId ?? params.workerId
   if (
     !setup.chatId &&
@@ -706,6 +716,7 @@ export async function provisionSetup(params: {
     binding: setup.binding,
     workerId,
     pendingInvitations,
+    ...(botAdds ? { botAdds } : {}),
   })
   const claimed = await cloud.claim(setup.requestId, workerId)
   if (requestFingerprint(claimed) !== fingerprint || !claimed.claimToken)
@@ -741,6 +752,7 @@ export async function provisionSetup(params: {
       binding: progress.binding ?? setup.binding,
       workerId,
       pendingInvitations,
+      ...(botAdds ? { botAdds } : {}),
     })
     setup = {
       ...(await cloud.progress(setup.requestId, claimToken, progress)),
@@ -800,6 +812,7 @@ export async function provisionSetup(params: {
       binding,
       workerId,
       pendingInvitations,
+      ...(botAdds ? { botAdds } : {}),
     })
     await save({ state: "configuring", chatId, binding })
   }
@@ -862,6 +875,28 @@ export async function provisionSetup(params: {
         })
       }
     }
+    if (absent.includes(PROVISIONING_BOT_ID)) {
+      // The bot cannot use a link, so a bot that never shows would cost an
+      // add on every retry. The count is saved before the add, so it
+      // survives restarts and a lost response.
+      if (botAdds >= MAX_BOT_ADDS) {
+        step = "verify_added_member"
+        throw Object.assign(new Error("Bot still not visible after re-add"), {
+          text: BOT_NOT_VISIBLE,
+        })
+      }
+      botAdds++
+      step = "add_member"
+      await journal.write(setup.requestId, {
+        fingerprint,
+        state: "configuring",
+        chatId,
+        binding,
+        workerId,
+        pendingInvitations,
+        botAdds,
+      })
+    }
     // Per-user refusals (privacy, USER_*/CHAT_* 400s) never stop the other
     // users: a refused batch falls back to one add per user. Flood and hold
     // errors refuse the whole batch and propagate with their retry time.
@@ -898,7 +933,7 @@ export async function provisionSetup(params: {
     // once after a short wait before treating the add as incomplete.
     const notVisible: number[] = []
     // The bot cannot use a link; a resumed job reads it and adds it again
-    // only if it is still absent.
+    // only if it is still absent, at most once (`MAX_BOT_ADDS`).
     let botNotVisible = false
     if (!listed) {
       const unseen = async (ids: number[]): Promise<number[]> => {
@@ -971,6 +1006,7 @@ export async function provisionSetup(params: {
         binding,
         workerId,
         pendingInvitations,
+        ...(botAdds ? { botAdds } : {}),
       })
     }
     for (const userId of absent) {
@@ -1124,6 +1160,7 @@ export async function provisionSetup(params: {
         binding,
         workerId,
         pendingInvitations,
+        ...(botAdds ? { botAdds } : {}),
       })
     } else pendingInvitations = []
     const verifiedAt = new Date().toISOString()

@@ -526,6 +526,8 @@ sudo jq '.pendingInvitations' "$f"
 
 The bot gets no link: a bot that is not visible gets the same 15-minute
 `retryAt`, and the resumed job adds it again only if it is still absent. The
+receipt counts bot adds (`botAdds`). After one re-add, a bot still absent
+saves `verify_added_member:TG_SAI_BOT_NOT_VISIBLE` with no `retryAt`. The
 background queue also reads each member before adding and approves a waiting
 join request, so a member who uses the shared link costs no add. A flood
 or hold on that read or approval defers the row until it ends. A chat or
@@ -554,6 +556,7 @@ adding, so a retry never adds someone who is already in the chat.
 | `TG_SAI_MEMBER_NOT_VISIBLE` | Added or promoted, but not shown in the chat yet | 15 min |
 | `TG_SAI_AWAITING_JOIN` | Waiting for a privacy-restricted person to use their link | 15 min |
 | `TG_SAI_INVITATION_EXPIRED` | An invited person never joined | Operator |
+| `TG_SAI_BOT_NOT_VISIBLE` | Bot still absent after one re-add | Operator |
 | `verify_marker:*` (not transient), `audit_membership:provisioning_step_failed`, `CHAT_ADMIN_REQUIRED`, `RIGHT_FORBIDDEN`, other `USER_*` refusals | Chat ownership, rights, or the person's account | Operator |
 
 A timeout during group creation is different: the group may exist, so the
