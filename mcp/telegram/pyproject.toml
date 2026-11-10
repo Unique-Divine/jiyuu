@@ -79,6 +79,7 @@ dev = [
     "pytest>=9.0.2",
     "pytest-asyncio>=1.3.0",
     "pytest-cov>=6.0.0",
+    "ty==0.0.100",
 ]
 
 [tool.pytest.ini_options]
@@ -87,6 +88,11 @@ addopts = [
     "--strict-markers",
     "--strict-config",
 ]
+
+[tool.ty.environment]
+# Keep the declared Python 3.10 minimum even when uv runs Python 3.13.
+python-version = "3.10"
+root = [".", "../../scripts/python"]
 
 [tool.coverage.run]
 branch = true
