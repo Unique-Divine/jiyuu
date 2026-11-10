@@ -90,8 +90,11 @@ Ownership transfer needs the Telegram 2FA password. A profile keeps it in
 [`pass`](https://www.passwordstore.org/): field `passwordPassEntry` in file
 `~/.tg-sai/profiles.json` names the pass entry, and tg-sai runs `pass show
 <entry>` only when Telegram asks for the password during a transfer. The first
-line of the entry is the password. Dry runs, audits, and the custody worker
-never read it, so a host without `pass` can still run them.
+line of the entry is the password. A `--run` that may transfer ownership
+(`add-owner`, `ops sai-bootstrap`) reads it once before its first change, so a
+locked GPG agent stops the command before it promotes anyone. Dry runs,
+audits, and the custody worker never read it, so a host without `pass` can
+still run them.
 
 The password comes from the same source as the session: the profile's pass
 entry for a profile session, the same block's `TELEGRAM_PASSWORD` for a `.env`
@@ -184,7 +187,10 @@ tg-sai profile add --name sai-custody --password-pass-entry other/entry
 ```
 
 Flag `--password-pass-entry` also names the entry that `--password-prompt` or
-`--password-stdin` writes. tg-sai no longer accepts `--password <value>`, and
+`--password-stdin` writes. tg-sai checks that `pass` is installed and
+initialised before it starts a login. It refuses to write to an existing entry
+that is not the profile's own unless that entry already holds the same
+password, so it never replaces another secret. tg-sai no longer accepts `--password <value>`, and
 it does not save a password it finds in the environment or a discovered
 source.
 
@@ -248,7 +254,16 @@ rewrites `profiles.json`, and it refuses an existing entry that holds a
 different password. Afterward it scans every file under `~/.tg-sai/` for the
 moved passwords and prints the path of each file that still holds one (for
 example a `.env` with `TELEGRAM_PASSWORD`), exiting 1 until you clean them up.
-Output never includes password values.
+Each `--run` scans for every password that a profile keeps in pass, so a rerun
+keeps reporting a leftover copy. Output never includes password values.
+Backup rewrites keep every other value as written, including 64-bit IDs.
+
+The scan covers only `~/.tg-sai/`. If you ever ran
+`tg-sai profile add --password '<password>'`, the password is also in your
+shell history: delete those lines from `~/.zsh_history` or `~/.bash_history`.
+After migrating, change the Telegram 2FA password (Settings > Privacy and
+Security > Two-Step Verification) and save the new one with
+`tg-sai profile add --name <profile> --password-prompt`.
 
 Create a blank draft profile for onboarding:
 
