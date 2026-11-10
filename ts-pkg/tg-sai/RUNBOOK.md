@@ -191,7 +191,8 @@ Flag `--password-pass-entry` also names the entry that `--password-prompt` or
 initialised before it starts a login, and a password flag combined with a
 login needs `--name` or `--password-pass-entry` so the entry is checked first.
 It refuses to write to an existing entry other than the profile's own (the
-recorded entry or `tg-sai/<name>/telegram-2fa`) without reading it, so it never
+recorded entry, or `tg-sai/<name>/telegram-2fa` when no other profile records
+it) without reading it, so it never
 replaces or decrypts another secret. To use such an entry, pass
 `--password-pass-entry` alone. tg-sai no longer accepts `--password <value>`, and
 it does not save a password it finds in the environment or a discovered
@@ -261,7 +262,8 @@ Each `--run` scans for every password that a profile keeps in pass, so a rerun
 keeps reporting a leftover copy; with `--profile`, it reads only that profile's
 entry. The scan reads symlinked files through the link and lists symlinked
 directories as `check its target`. A symlinked `profiles.json` is rewritten at
-its target. Output never includes password values.
+its target. A symlinked backup is never rewritten, since its target may belong
+to another app; the run lists it and exits 1 so you can check it by hand. Output never includes password values.
 Backup rewrites keep every other value as written, including 64-bit IDs.
 
 The scan covers only `~/.tg-sai/`. If you ever ran
