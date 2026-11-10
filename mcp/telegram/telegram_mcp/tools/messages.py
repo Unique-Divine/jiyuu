@@ -271,6 +271,10 @@ async def send_message(
     """
     try:
         cl = get_client(account)
+        # Refuse a known cooldown before resolving, which may hit the network.
+        raise_if_cooling_down(
+            cl, "send_message", chat_id=chat_id if isinstance(chat_id, int) else None
+        )
         entity = await resolve_entity(chat_id, cl)
         await run_limited(
             cl,

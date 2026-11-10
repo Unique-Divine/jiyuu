@@ -11,7 +11,7 @@ from telethon.sessions import StringSession
 from telethon.tl.types import PeerChannel
 
 from telegram_mcp import request_policy, runtime
-from telegram_mcp.tools import chats, messages
+from telegram_mcp.tools import chats, groups, messages
 
 
 def flood(seconds):
@@ -286,3 +286,79 @@ async def test_dialog_cooldown_still_tries_marked_ids(monkeypatch, resolver):
         await getattr(runtime, resolver)(555, client)
     assert caught.value.limit.source == "cooldown"
     assert client.dialog_reads == 1
+
+
+@pytest.mark.asyncio
+async def test_create_group_reports_the_new_chat_without_reading_dialogs(monkeypatch):
+    created = types.Chat(
+        id=4321,
+        title="Ops",
+        photo=types.ChatPhotoEmpty(),
+        participants_count=2,
+        date=None,
+        version=1,
+    )
+
+    class Client:
+        async def __call__(self, request):
+            assert isinstance(request, functions.messages.CreateChatRequest)
+            updates = types.Updates(updates=[], users=[], chats=[created], date=None, seq=0)
+            return types.messages.InvitedUsers(updates=updates, missing_invitees=[])
+
+        async def get_dialogs(self, **kwargs):
+            raise flood(120)
+
+    async def resolve(user_id, client):
+        return SimpleNamespace(id=user_id)
+
+    monkeypatch.setattr(groups, "get_client", lambda account=None: Client())
+    monkeypatch.setattr(groups, "resolve_entity", resolve)
+
+    result = await groups.create_group(title="Ops", user_ids=[7])
+
+    assert result == "Group created with ID: -4321"
+
+
+@pytest.mark.asyncio
+async def test_create_group_without_chat_in_reply_still_reports_success(monkeypatch):
+    class Client:
+        async def __call__(self, request):
+            updates = types.Updates(updates=[], users=[], chats=[], date=None, seq=0)
+            return types.messages.InvitedUsers(updates=updates, missing_invitees=[])
+
+        async def get_dialogs(self, **kwargs):
+            raise flood(120)
+
+    async def resolve(user_id, client):
+        return SimpleNamespace(id=user_id)
+
+    monkeypatch.setattr(groups, "get_client", lambda account=None: Client())
+    monkeypatch.setattr(groups, "resolve_entity", resolve)
+
+    result = await groups.create_group(title="Ops", user_ids=[7])
+
+    assert result.startswith("Group created, but")
+    assert "before creating it again" in result
+    assert "wait" not in result.lower()
+
+
+@pytest.mark.asyncio
+async def test_send_message_refuses_known_slow_mode_before_resolving(monkeypatch):
+    client = object()
+    request_policy.request_cooldowns.record(
+        id(client),
+        "send_message",
+        errors.SlowModeWaitError(request=None, capture=60),
+        chat_id=-1000000000100,
+    )
+
+    async def resolve(chat_id, cl):
+        raise AssertionError("A known cooldown must refuse before network lookups")
+
+    monkeypatch.setattr(messages, "get_client", lambda account=None: client)
+    monkeypatch.setattr(messages, "resolve_entity", resolve)
+
+    result = json.loads(await messages.send_message(chat_id=-1000000000100, message="a"))
+
+    assert result["error"]["type"] == "slow_mode"
+    assert result["error"]["source"] == "cooldown"
