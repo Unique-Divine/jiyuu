@@ -1,6 +1,8 @@
 # Modified by Unique Divine in 2026: connection recovery and participant pagination fixes.
 """Groups MCP tools."""
 
+from telethon import errors
+
 from telegram_mcp.runtime import *
 
 
@@ -121,9 +123,9 @@ async def invite_to_group(
                 invited_count = result.count
 
             return f"Successfully invited {invited_count} users to {sanitize_name(entity.title)}"
-        except telethon.errors.rpcerrorlist.UserNotMutualContactError:
+        except errors.UserNotMutualContactError:
             return "Error: Cannot invite users who are not mutual contacts. Please ensure the users are in your contacts and have added you back."
-        except telethon.errors.rpcerrorlist.UserPrivacyRestrictedError:
+        except errors.UserPrivacyRestrictedError:
             return (
                 "Error: One or more users have privacy settings that prevent you from adding them."
             )
@@ -413,11 +415,11 @@ async def edit_chat_about(chat_id: Union[int, str], about: str, account: str | N
         entity = await resolve_entity(chat_id, cl)
         await cl(functions.messages.EditChatAboutRequest(peer=entity, about=about))
         return f"Chat {chat_id} description updated."
-    except telethon.errors.rpcerrorlist.ChatAboutNotModifiedError:
+    except errors.ChatAboutNotModifiedError:
         return f"Chat {chat_id} description is already set to the requested value."
-    except telethon.errors.rpcerrorlist.ChatAboutTooLongError:
+    except errors.ChatAboutTooLongError:
         return "Error: description exceeds Telegram's 255 character limit."
-    except telethon.errors.rpcerrorlist.ChatAdminRequiredError:
+    except errors.ChatAdminRequiredError:
         return "Error: admin rights required to edit the chat description."
     except Exception as e:
         logger.exception(f"edit_chat_about failed (chat_id={chat_id})")
@@ -526,7 +528,7 @@ async def promote_admin(
                 )
             )
             return f"Successfully promoted user {user_id} to admin in {sanitize_name(chat.title)}"
-        except telethon.errors.rpcerrorlist.UserNotMutualContactError:
+        except errors.UserNotMutualContactError:
             return "Error: Cannot promote users who are not mutual contacts. Please ensure the user is in your contacts and has added you back."
         except Exception as e:
             return log_and_format_error("promote_admin", e, group_id=group_id, user_id=user_id)
@@ -586,7 +588,7 @@ async def demote_admin(
                 )
             )
             return f"Successfully demoted user {user_id} from admin in {sanitize_name(chat.title)}"
-        except telethon.errors.rpcerrorlist.UserNotMutualContactError:
+        except errors.UserNotMutualContactError:
             return "Error: Cannot modify admin status of users who are not mutual contacts. Please ensure the user is in your contacts and has added you back."
         except Exception as e:
             return log_and_format_error("demote_admin", e, group_id=group_id, user_id=user_id)
@@ -647,7 +649,7 @@ async def ban_user(
                 )
             )
             return f"User {user_id} banned from chat {sanitize_name(chat.title)} (ID: {chat_id})."
-        except telethon.errors.rpcerrorlist.UserNotMutualContactError:
+        except errors.UserNotMutualContactError:
             return "Error: Cannot ban users who are not mutual contacts. Please ensure the user is in your contacts and has added you back."
         except Exception as e:
             return log_and_format_error("ban_user", e, chat_id=chat_id, user_id=user_id)
@@ -706,7 +708,7 @@ async def unban_user(
             return (
                 f"User {user_id} unbanned from chat {sanitize_name(chat.title)} (ID: {chat_id})."
             )
-        except telethon.errors.rpcerrorlist.UserNotMutualContactError:
+        except errors.UserNotMutualContactError:
             return "Error: Cannot modify status of users who are not mutual contacts. Please ensure the user is in your contacts and has added you back."
         except Exception as e:
             return log_and_format_error("unban_user", e, chat_id=chat_id, user_id=user_id)
@@ -786,9 +788,9 @@ async def set_default_chat_permissions(
             )
         )
         return f"Default permissions for chat {chat_id} updated."
-    except telethon.errors.rpcerrorlist.ChatAdminRequiredError:
+    except errors.ChatAdminRequiredError:
         return "Error: admin rights required to change default permissions."
-    except telethon.errors.rpcerrorlist.ChatNotModifiedError:
+    except errors.ChatNotModifiedError:
         return f"Chat {chat_id} default permissions unchanged (already matched)."
     except Exception as e:
         logger.exception(f"set_default_chat_permissions failed (chat_id={chat_id})")
@@ -828,7 +830,7 @@ async def toggle_slow_mode(
         if seconds == 0:
             return f"Slow mode disabled for chat {chat_id}."
         return f"Slow mode enabled for chat {chat_id} (interval: {seconds}s)."
-    except telethon.errors.rpcerrorlist.ChatAdminRequiredError:
+    except errors.ChatAdminRequiredError:
         return "Error: admin rights required to toggle slow mode."
     except Exception as e:
         logger.exception(f"toggle_slow_mode failed (chat_id={chat_id}, seconds={seconds})")
@@ -912,11 +914,11 @@ async def edit_admin_rights(
             )
         )
         return f"Admin rights updated for user {user_id} in chat {chat_id}."
-    except telethon.errors.rpcerrorlist.ChatAdminRequiredError:
+    except errors.ChatAdminRequiredError:
         return "Error: you need admin rights (with 'add_admins') to modify admin rights."
-    except telethon.errors.rpcerrorlist.UserAdminInvalidError:
+    except errors.UserAdminInvalidError:
         return "Error: cannot modify admin rights for this user (you may need to have promoted them originally)."
-    except telethon.errors.rpcerrorlist.RightForbiddenError:
+    except errors.RightForbiddenError:
         return "Error: some of the requested rights are not allowed for your account or for this chat."
     except Exception as e:
         logger.exception(f"edit_admin_rights failed (chat_id={chat_id}, user_id={user_id})")

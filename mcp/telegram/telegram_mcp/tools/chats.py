@@ -5,6 +5,8 @@ import struct
 
 from telethon.tl.tlobject import TLObject, TLRequest
 
+from telethon import errors
+
 from telegram_mcp.runtime import *
 
 
@@ -246,12 +248,12 @@ async def subscribe_public_channel(channel: Union[int, str], account: str | None
             getattr(entity, "title", getattr(entity, "username", "Unknown channel"))
         )
         return f"Subscribed to {title}."
-    except telethon.errors.rpcerrorlist.UserAlreadyParticipantError:
+    except errors.UserAlreadyParticipantError:
         title = sanitize_name(
             getattr(entity, "title", getattr(entity, "username", "this channel"))
         )
         return f"Already subscribed to {title}."
-    except telethon.errors.rpcerrorlist.ChannelPrivateError:
+    except errors.ChannelPrivateError:
         return "Cannot subscribe: this channel is private or requires an invite link."
     except Exception as e:
         return log_and_format_error("subscribe_public_channel", e, channel=channel)

@@ -1,5 +1,6 @@
 # Modified by Unique Divine in 2026: connection recovery and participant pagination fixes.
 import argparse
+import importlib
 import os
 import sys
 import json
@@ -10,7 +11,7 @@ import logging
 import mimetypes
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from typing import List, Dict, Optional, Union, Any
+from typing import Awaitable, List, Dict, Optional, Union, Any, Protocol
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
@@ -114,8 +115,12 @@ def get_entity_filter_type(entity: Any) -> Optional[str]:
 
 load_dotenv()
 
-TELEGRAM_API_ID = int(os.getenv("TELEGRAM_API_ID"))
-TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH")
+_api_id = os.getenv("TELEGRAM_API_ID")
+_api_hash = os.getenv("TELEGRAM_API_HASH")
+if not _api_id or not _api_hash:
+    raise ValidationError("TELEGRAM_API_ID and TELEGRAM_API_HASH must be set.")
+TELEGRAM_API_ID = int(_api_id)
+TELEGRAM_API_HASH: str = _api_hash
 
 mcp = FastMCP("telegram")
 
@@ -260,7 +265,7 @@ def _build_proxy_for_label(label: str) -> tuple[Optional[Any], Optional[Any]]:
 
     # SOCKS4/SOCKS5/HTTP via python-socks (Telethon's optional dependency).
     try:
-        import python_socks  # noqa: F401
+        importlib.import_module("python_socks")
     except ImportError as exc:
         raise ValidationError(
             f"Proxy type '{proxy_type}' requires the 'python-socks' package. "
@@ -409,7 +414,23 @@ _CONN_VERIFY_INTERVAL: float = 30.0  # seconds between live pings
 _PROFILE_READ_TIMEOUT: float = 10.0
 
 
-async def _force_reconnect(cl: TelegramClient):
+class ConnectionClient(Protocol):
+    def is_connected(self) -> bool: ...
+
+    def disconnect(self) -> Awaitable[None]: ...
+
+    async def connect(self) -> None: ...
+
+    async def is_user_authorized(self) -> bool: ...
+
+    def __call__(self, request: functions.help.GetNearestDcRequest, /) -> Awaitable[object]: ...
+
+
+class ProfileClient(ConnectionClient, Protocol):
+    async def get_me(self) -> object: ...
+
+
+async def _force_reconnect(cl: ConnectionClient):
     """Force disconnect + reconnect regardless of is_connected() state."""
     reconnect_logger = logging.getLogger("telegram_mcp")
     reconnect_logger.warning("Forcing reconnect...")
@@ -427,7 +448,7 @@ async def _force_reconnect(cl: TelegramClient):
     reconnect_logger.warning("Forced reconnect successful")
 
 
-async def ensure_connected(cl: TelegramClient | None = None):
+async def ensure_connected(cl: ConnectionClient | None = None):
     """Verify Telegram connection is alive, reconnect if needed.
 
     is_connected() can return True when the underlying TCP socket is dead.
@@ -469,7 +490,7 @@ async def ensure_connected(cl: TelegramClient | None = None):
         await _force_reconnect(cl)
 
 
-async def read_account_profile(cl: TelegramClient):
+async def read_account_profile(cl: ProfileClient) -> User:
     """Recover a stale connection once and bound this read-only profile lookup.
 
     A flood wait raises instead of sleeping inside the timeout, and reaches
@@ -478,11 +499,15 @@ async def read_account_profile(cl: TelegramClient):
     await ensure_connected(cl)
     try:
         with raise_flood_waits():
-            return await asyncio.wait_for(cl.get_me(), timeout=_PROFILE_READ_TIMEOUT)
+            me = await asyncio.wait_for(cl.get_me(), timeout=_PROFILE_READ_TIMEOUT)
     except (ConnectionError, OSError, asyncio.TimeoutError):
         await _force_reconnect(cl)
         with raise_flood_waits():
-            return await asyncio.wait_for(cl.get_me(), timeout=_PROFILE_READ_TIMEOUT)
+            me = await asyncio.wait_for(cl.get_me(), timeout=_PROFILE_READ_TIMEOUT)
+
+    if not isinstance(me, User):
+        raise ValidationError("Telegram returned no authorized user profile.")
+    return me
 
 
 # Setup robust logging with both file and console output

@@ -12,7 +12,7 @@ def _supergroup(*, forum=False):
     return Channel(
         id=12345,
         title="Hermes Topics",
-        photo=None,
+        photo=chats.types.ChatPhotoEmpty(),
         date=None,
         creator=True,
         left=False,

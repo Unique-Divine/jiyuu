@@ -1,5 +1,7 @@
 """Messages MCP tools."""
 
+from telethon import errors
+
 from telegram_mcp.runtime import *
 
 
@@ -335,15 +337,15 @@ async def send_scheduled_message(
         result = await cl.send_message(entity, message, schedule=dt)
         message_id = getattr(result, "id", None)
         return f"Scheduled message {message_id} for {dt.isoformat()} in chat {chat_id}."
-    except telethon.errors.rpcerrorlist.ChatAdminRequiredError as e:
+    except errors.ChatAdminRequiredError as e:
         return log_and_format_error(
             "send_scheduled_message", e, chat_id=chat_id, schedule_date=str(schedule_date)
         )
-    except telethon.errors.rpcerrorlist.ScheduleDateTooLateError as e:
+    except errors.ScheduleDateTooLateError as e:
         return log_and_format_error(
             "send_scheduled_message", e, chat_id=chat_id, schedule_date=str(schedule_date)
         )
-    except telethon.errors.rpcerrorlist.ScheduleDateInvalidError as e:
+    except errors.ScheduleDateInvalidError as e:
         return log_and_format_error(
             "send_scheduled_message", e, chat_id=chat_id, schedule_date=str(schedule_date)
         )
@@ -388,7 +390,7 @@ async def get_scheduled_messages(chat_id: Union[int, str], account: str | None =
             date_iso = msg.date.isoformat() if getattr(msg, "date", None) else "unknown"
             lines.append(f"ID: {msg.id} | Scheduled: {date_iso} | Text: {preview}")
         return "\n".join(lines)
-    except telethon.errors.rpcerrorlist.ChatAdminRequiredError as e:
+    except errors.ChatAdminRequiredError as e:
         return log_and_format_error("get_scheduled_messages", e, chat_id=chat_id)
     except Exception as e:
         logger.exception(f"get_scheduled_messages failed (chat_id={chat_id})")
@@ -419,7 +421,7 @@ async def delete_scheduled_message(
         entity = await resolve_entity(chat_id, cl)
         await cl(functions.messages.DeleteScheduledMessagesRequest(peer=entity, id=message_ids))
         return f"Deleted {len(message_ids)} scheduled message(s) from chat {chat_id}."
-    except telethon.errors.rpcerrorlist.ChatAdminRequiredError as e:
+    except errors.ChatAdminRequiredError as e:
         return log_and_format_error(
             "delete_scheduled_message", e, chat_id=chat_id, message_ids=message_ids
         )
@@ -1114,7 +1116,7 @@ async def delete_chat_history(
             f"Chat {chat_id} history cleared {scope}: "
             f"{pts_count} messages deleted (offset={offset})."
         )
-    except telethon.errors.rpcerrorlist.ChatAdminRequiredError:
+    except errors.ChatAdminRequiredError:
         return "Cannot delete chat history: admin privileges are required."
     except Exception as e:
         return log_and_format_error(
@@ -1164,9 +1166,9 @@ async def delete_messages_bulk(
             )
         pts_count = getattr(result, "pts_count", 0)
         return f"Deleted {pts_count} of {len(message_ids)} messages from chat {chat_id}."
-    except telethon.errors.rpcerrorlist.MessageIdInvalidError:
+    except errors.MessageIdInvalidError:
         return "Cannot delete messages: one or more message IDs are invalid."
-    except telethon.errors.rpcerrorlist.ChatAdminRequiredError:
+    except errors.ChatAdminRequiredError:
         return "Cannot delete messages: admin privileges are required."
     except Exception as e:
         return log_and_format_error(
@@ -1245,7 +1247,7 @@ async def unpin_all_messages(chat_id: Union[int, str], account: str | None = Non
         entity = await resolve_entity(chat_id, cl)
         await cl(functions.messages.UnpinAllMessagesRequest(peer=entity))
         return f"All messages unpinned in chat {chat_id}."
-    except telethon.errors.rpcerrorlist.ChatAdminRequiredError:
+    except errors.ChatAdminRequiredError:
         return "Cannot unpin messages: admin privileges are required."
     except Exception as e:
         return log_and_format_error("unpin_all_messages", e, chat_id=chat_id)

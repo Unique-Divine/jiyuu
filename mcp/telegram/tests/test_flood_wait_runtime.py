@@ -138,6 +138,9 @@ async def test_wait_on_connection_ping_neither_reconnects_nor_fails(monkeypatch)
         async def disconnect(self):
             self.calls.append("disconnect")
 
+        async def is_user_authorized(self):
+            return True
+
         async def connect(self):
             self.calls.append("connect")
 
