@@ -8,6 +8,9 @@ from telethon.tl.tlobject import TLObject, TLRequest
 from telegram_mcp.runtime import *
 
 
+GET_CHATS_TIMEOUT = 30.0
+
+
 def _last_message_metadata(dialog):
     """Expose the existing dialog checkpoint without fetching message content."""
     message = getattr(dialog, "message", None)
@@ -171,8 +174,10 @@ async def get_chats(account: str = None, page: int = 1, page_size: int = 20) -> 
         page: Page number (1-indexed).
         page_size: Number of chats per page.
 
-    Fetches only the dialogs needed for this page. The dialog read times out
-    after 30 seconds instead of waiting indefinitely for Telegram.
+    Fetches only the dialogs up to the end of this page, so later pages still
+    refetch earlier ones. The dialog read times out after 30 seconds. A
+    Telegram flood wait returns a JSON error with wait_seconds and retry_at;
+    the server then refuses get_chats for that account until retry_at.
 
     Latest-message metadata comes from the existing dialog response, with no
     additional API calls. Missing metadata is returned as null. It helps select
@@ -185,10 +190,17 @@ async def get_chats(account: str = None, page: int = 1, page_size: int = 20) -> 
         if page < 1 or page_size < 1:
             raise ValueError("page and page_size must be positive")
         cl = get_client(account)
+        raise_if_cooling_down(cl, "get_dialogs")
         await ensure_connected(cl)
         start = (page - 1) * page_size
         end = start + page_size
-        dialogs = await asyncio.wait_for(cl.get_dialogs(limit=end), timeout=30.0)
+        dialogs = await run_limited(
+            cl,
+            "get_dialogs",
+            lambda: cl.get_dialogs(limit=end),
+            timeout=GET_CHATS_TIMEOUT,
+            timeout_hint="Retry with a smaller page or page_size.",
+        )
         if start >= len(dialogs):
             return "Page out of range."
         chats = dialogs[start:end]
@@ -204,8 +216,8 @@ async def get_chats(account: str = None, page: int = 1, page_size: int = 20) -> 
                 }
             )
         return format_tool_result(records)
-    except asyncio.TimeoutError:
-        return "Telegram chat listing timed out. Retry with a smaller page_size."
+    except (RequestLimited, RequestTimedOut) as e:
+        return format_request_error(e)
     except Exception as e:
         return log_and_format_error("get_chats", e)
 

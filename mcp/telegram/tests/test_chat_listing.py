@@ -1,10 +1,12 @@
 """Chat discovery exposes dialog checkpoints without per-chat history reads."""
 
+import asyncio
 import json
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
+from telethon import errors
 
 from telegram_mcp.tools import chats
 
@@ -98,9 +100,6 @@ async def test_get_chats_reports_page_beyond_available_dialogs(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_get_chats_bounds_a_stalled_dialog_read(monkeypatch):
-    import asyncio
-
-    real_wait_for = asyncio.wait_for
     cancelled = asyncio.Event()
 
     class Client:
@@ -112,17 +111,48 @@ async def test_get_chats_bounds_a_stalled_dialog_read(monkeypatch):
 
     configured_client(monkeypatch, [])
     monkeypatch.setattr(chats, "get_client", lambda account=None: Client())
+    monkeypatch.setattr(chats, "GET_CHATS_TIMEOUT", 0.01)
 
-    async def short_wait_for(awaitable, *, timeout):
-        assert timeout == 30.0
-        return await real_wait_for(awaitable, timeout=0.01)
-
-    monkeypatch.setattr(chats.asyncio, "wait_for", short_wait_for)
-
-    result = await chats.get_chats()
+    result = json.loads(await chats.get_chats(page_size=5))["error"]
 
     assert cancelled.is_set()
-    assert result == "Telegram chat listing timed out. Retry with a smaller page_size."
+    assert result["type"] == "timeout"
+    assert result["request"] == "get_dialogs"
+    assert "smaller page or page_size" in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_get_chats_flood_wait_is_explicit_and_later_calls_skip_telegram(monkeypatch):
+    connects = []
+
+    class Client:
+        def __init__(self):
+            self.calls = 0
+
+        async def get_dialogs(self, **kwargs):
+            self.calls += 1
+            raise errors.FloodWaitError(request=None, capture=420)
+
+    async def connected(client):
+        connects.append(client)
+
+    client = Client()
+    configured_client(monkeypatch, [])
+    monkeypatch.setattr(chats, "get_client", lambda account=None: client)
+    monkeypatch.setattr(chats, "ensure_connected", connected)
+
+    first = json.loads(await chats.get_chats(page=2, page_size=5))["error"]
+    second = json.loads(await chats.get_chats(page=1, page_size=5))["error"]
+
+    assert first["type"] == "flood_wait"
+    assert first["wait_seconds"] == 420
+    assert first["source"] == "telegram"
+    assert second["type"] == "flood_wait"
+    assert second["source"] == "cooldown"
+    assert second["retry_at"] == first["retry_at"]
+    # The cooldown refuses before reconnect checks or another dialog read.
+    assert client.calls == 1
+    assert connects == [client]
 
 
 @pytest.mark.asyncio
