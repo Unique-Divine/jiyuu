@@ -3,8 +3,6 @@
 Child page of agent skill `ud-scripts`. Read [SKILL.md](SKILL.md) first: a
 new repo script usually belongs in Python or Bun. Use this page when Bash is
 the right fit (a few lines of glue) or when editing an existing Bash script.
-Where this page and `SKILL.md` differ, `SKILL.md` wins. For example, scripts
-that change remote state dry-run by default, unlike Pattern 10 below.
 
 ## Core Defensive Principles
 
@@ -176,7 +174,7 @@ set -Eeuo pipefail
 
 # Default values
 VERBOSE=false
-DRY_RUN=false
+RUN=false
 OUTPUT_FILE=""
 THREADS=4
 
@@ -186,7 +184,7 @@ Usage: $0 [OPTIONS]
 
 Options:
     -v, --verbose       Enable verbose output
-    -d, --dry-run       Run without making changes
+    --run               Apply changes (see Pattern 10)
     -o, --output FILE   Output file path
     -j, --jobs NUM      Number of parallel jobs
     -h, --help          Show this help message
@@ -201,8 +199,8 @@ while [[ $# -gt 0 ]]; do
             VERBOSE=true
             shift
             ;;
-        -d|--dry-run)
-            DRY_RUN=true
+        --run)
+            RUN=true
             shift
             ;;
         -o|--output)
@@ -416,17 +414,21 @@ while IFS= read -r -d '' file; do
 done < <(find /path -type f -print0)
 ```
 
-### Pattern 10: Dry-Run Support
+### Pattern 10: Print the Plan, Act on --run
+
+One option for dangerous or one-off scripts: print each command instead of
+running it, and run only when `--run` is passed. A `--sim` flag that
+simulates the change is another way to get the same safety.
 
 ```bash
 #!/bin/bash
 set -Eeuo pipefail
 
-DRY_RUN="${DRY_RUN:-false}"
+RUN=false  # set by --run (see Pattern 4)
 
 run_cmd() {
-    if [[ "$DRY_RUN" == "true" ]]; then
-        echo "[DRY RUN] Would execute: $*"
+    if [[ "$RUN" != "true" ]]; then
+        printf '+'; printf ' %q' "$@"; printf '\n'
         return 0
     fi
 
@@ -512,7 +514,7 @@ check_dependencies
 5. **Validate all inputs** - Check file existence, permissions, formats
 6. **Use functions for reusability** - Prefix with meaningful names
 7. **Implement structured logging** - Include timestamps and levels
-8. **Support dry-run mode** - Allow users to preview changes
+8. **Consider a plan mode** - For dangerous one-off scripts, print the commands and act only on `--run`
 9. **Handle temporary files safely** - Use mktemp, cleanup with trap
 10. **Design for idempotency** - Scripts should be safe to rerun
 11. **Document requirements** - List dependencies and minimum versions
