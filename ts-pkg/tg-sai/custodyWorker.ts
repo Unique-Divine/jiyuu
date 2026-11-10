@@ -20,6 +20,7 @@ import {
   processHoldStore,
 } from "./mtcuteAdapter"
 import {
+  AWAITING_JOIN_REFUSED,
   cloudRetryAt,
   HOLD_STATE_UNAVAILABLE,
   HOLD_STATE_UNAVAILABLE_RETRY_MS,
@@ -235,9 +236,13 @@ export async function runWorkerOnce(
       continue
     }
     if (
-      !["prepared", "creating", "configuring", "incomplete"].includes(
-        setup.state,
-      )
+      ![
+        "prepared",
+        "creating",
+        "configuring",
+        "incomplete",
+        "awaiting_join",
+      ].includes(setup.state)
     ) {
       results.push({ requestId: setup.requestId, state: setup.state })
       continue
@@ -252,17 +257,19 @@ export async function runWorkerOnce(
       })
       continue
     }
-    if (
-      setup.retryAt &&
-      Date.parse(setup.retryAt) > (options.now ?? Date.now())
-    ) {
+    // Deal Desk serves an `awaiting_join` setup only once its check is due,
+    // and an `incomplete` one only once its retry is due; a view can still
+    // show either early.
+    const dueAt =
+      setup.state === "awaiting_join" ? setup.nextCheckAt : setup.retryAt
+    if (dueAt && Date.parse(dueAt) > (options.now ?? Date.now())) {
       // A setup waiting for an invited member to join makes no add until it
       // resumes, so it does not hold up the background drain.
       if (!waitingOnInvitedMember(setup)) requesterWork = true
       results.push({
         requestId: setup.requestId,
         state: "waiting",
-        retryAt: setup.retryAt,
+        retryAt: dueAt,
       })
       continue
     }
@@ -283,7 +290,9 @@ export async function runWorkerOnce(
       setupHoldGroups(setup),
     )
     if (hold) {
-      results.push(await reportHold(deps.cloud, setup, hold, nowMs))
+      results.push(
+        await reportHold(deps.cloud, setup, hold, nowMs, options.workerId),
+      )
       continue
     }
     try {
@@ -312,8 +321,15 @@ export async function runWorkerOnce(
         requestId: setup.requestId,
         state: current.state,
         ...(current.chatId ? { chatId: current.chatId } : {}),
-        retryAt: current.retryAt,
-        error: safeProvisionError(error),
+        retryAt:
+          current.state === "awaiting_join"
+            ? current.nextCheckAt
+            : current.retryAt,
+        error:
+          (error as { waitRefusal?: unknown } | null)?.waitRefusal ===
+          undefined
+            ? safeProvisionError(error)
+            : `${safeProvisionError(error)}:${AWAITING_JOIN_REFUSED}`,
       })
     }
   }
@@ -347,17 +363,20 @@ export async function runWorkerOnce(
 }
 
 /**
- * Waiting result for a held account. An incomplete setup this worker already
- * holds the claim for gets `cloudRetryAt` of the hold's end as its cloud
- * `retryAt`, through the
- * same `progress` call a flood retry uses, so Deal Desk shows the time. Other
- * setups are not claimed; Deal Desk cannot store a `retryAt` for them.
+ * Waiting result for a held account. An incomplete setup gets
+ * `cloudRetryAt` of the hold's end as its cloud `retryAt`, through the same
+ * `progress` call a flood retry uses, so Deal Desk shows the time and does
+ * not serve it again until then. From migration 19, Deal Desk releases the
+ * claim on every `incomplete` save with a `retryAt`, so the worker claims it
+ * first when it holds no claim. Other setups are not claimed; Deal Desk cannot store a
+ * `retryAt` for them.
  */
 async function reportHold(
   cloud: ProvisionCloud,
   setup: Setup,
   hold: { untilMs: number; code: string },
   nowMs: number,
+  workerId: string,
 ): Promise<WorkerResult> {
   // Same value provisioning saves for a hold, so the cloud time never ends
   // before the local hold and the next tick does not report it again.
@@ -370,9 +389,16 @@ async function reportHold(
     retryAt,
     error: hold.code,
   }
-  if (setup.state !== "incomplete" || !setup.claimToken) return result
+  if (setup.state === "awaiting_join")
+    return reportHeldJoinWait(cloud, setup, result, hold, nowMs, workerId)
+  if (setup.state !== "incomplete") return result
   try {
-    await cloud.progress(setup.requestId, setup.claimToken, {
+    // Assumes one worker per custody account; see provisionSetup's claim.
+    const claimToken =
+      setup.claimToken ??
+      (await cloud.claim(setup.requestId, workerId)).claimToken
+    if (!claimToken) throw new Error("Cloud did not return a claim token")
+    await cloud.progress(setup.requestId, claimToken, {
       state: "incomplete",
       ...(setup.chatId ? { chatId: setup.chatId } : {}),
       ...(setup.binding ? { binding: setup.binding } : {}),
@@ -384,6 +410,93 @@ async function reportHold(
     return { ...result, error: `${hold.code}:${safeProvisionError(error)}` }
   }
   return result
+}
+
+/** Deal Desk takes `nextCheckAt` at most 24 h out; keep clear of skew. */
+export const MAX_NEXT_CHECK_MS = 23 * 3_600_000
+
+/**
+ * An `awaiting_join` setup that comes due under a local hold keeps
+ * waiting, but its next check moves to the hold's end (at most
+ * `MAX_NEXT_CHECK_MS` out, and never past its earliest invitation expiry),
+ * so Deal Desk does not show it as overdue for the whole hold. A setup
+ * whose invitation has already expired is left for its next real check,
+ * which stops it for an operator.
+ */
+async function reportHeldJoinWait(
+  cloud: ProvisionCloud,
+  setup: Setup,
+  result: WorkerResult,
+  hold: { untilMs: number },
+  nowMs: number,
+  workerId: string,
+): Promise<WorkerResult> {
+  const expiries = (
+    (setup.receipt as { pendingInvitations?: { expiresAt?: unknown }[] })
+      ?.pendingInvitations ?? []
+  )
+    .map((i) => Date.parse(String(i.expiresAt)))
+    .filter(Number.isFinite)
+  const earliestExpiry = expiries.length ? Math.min(...expiries) : Infinity
+  // The incomplete fallback retries at the hold's end, which is never at
+  // or before an invitation expiry Deal Desk may see first under skew.
+  const holdRetryAt =
+    cloudRetryAt(hold.untilMs, nowMs) ?? new Date(hold.untilMs).toISOString()
+  const fallback = async (claimToken: string): Promise<string | null> => {
+    try {
+      await cloud.progress(setup.requestId, claimToken, {
+        state: "incomplete",
+        ...(setup.chatId ? { chatId: setup.chatId } : {}),
+        ...(setup.binding ? { binding: setup.binding } : {}),
+        error: setup.error ?? "",
+        retryAt: holdRetryAt,
+      })
+      return null
+    } catch (error) {
+      return safeProvisionError(error)
+    }
+  }
+  if (earliestExpiry <= nowMs) {
+    // Left for its next check, which stops it for an operator. A claim it
+    // still holds (a doubly refused re-save under clock skew) is released
+    // first, so it does not keep the account busy for the whole hold.
+    if (!setup.claimToken) return result
+    const failed = await fallback(setup.claimToken)
+    return failed ? { ...result, error: `${result.error}:${failed}` } : result
+  }
+  const nextMs = Math.min(
+    hold.untilMs,
+    nowMs + MAX_NEXT_CHECK_MS,
+    earliestExpiry,
+  )
+  const nextCheckAt =
+    cloudRetryAt(nextMs, nowMs) ?? new Date(nextMs).toISOString()
+  let claimToken: string | undefined
+  try {
+    // Assumes one worker per custody account; see provisionSetup's claim.
+    claimToken =
+      setup.claimToken ??
+      (await cloud.claim(setup.requestId, workerId)).claimToken
+    if (!claimToken) throw new Error("Cloud did not return a claim token")
+    await cloud.progress(setup.requestId, claimToken, {
+      state: "awaiting_join",
+      ...(setup.chatId ? { chatId: setup.chatId } : {}),
+      ...(setup.binding ? { binding: setup.binding } : {}),
+      error: setup.error ?? "",
+      nextCheckAt,
+    })
+    return { ...result, retryAt: nextCheckAt }
+  } catch (error) {
+    // Do not leave the claim held: fall back to the incomplete retry every
+    // Deal Desk accepts. From migration 19 that releases the claim; on
+    // older versions the retry time stops a re-run every tick.
+    let out = `${result.error}:${safeProvisionError(error)}`
+    if (claimToken) {
+      const failed = await fallback(claimToken)
+      if (failed) out += `:fallback_failed:${failed}`
+    }
+    return { ...result, error: out }
+  }
 }
 
 export async function runCustodyWorker(options: {

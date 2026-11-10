@@ -6,6 +6,7 @@ import { MtcuteError, MtTimeoutError } from "@mtcute/bun"
 import { Command } from "commander"
 import {
   CUSTODY_USER_ID,
+  MAX_NEXT_CHECK_MS,
   recordWorkerTick,
   runWorkerOnce,
   setupHoldGroups,
@@ -58,7 +59,12 @@ function fixture() {
     progress: async (_id: string, token: string, progress: Progress) => {
       calls.push(`progress:${token}`)
       progressed.push(progress)
-      setup = { ...setup, ...progress }
+      // Like Deal Desk, only awaiting_join keeps a next check time.
+      setup = {
+        ...setup,
+        ...progress,
+        nextCheckAt: progress.nextCheckAt ?? null,
+      }
       return structuredClone(setup)
     },
     resolve: async () => setup,
@@ -592,6 +598,198 @@ test("a setup that already has its chat ignores create holds", async () => {
   }
 })
 
+test("a held setup whose retry released its claim is claimed before the hold is saved", async () => {
+  const now = Date.parse("2026-11-06T00:00:00Z")
+  const untilMs = now + 600_000
+  const f = fixture()
+  f.setup = {
+    ...f.setup,
+    state: "incomplete",
+    chatId: -100123,
+    binding: { participants: [1912700300], admins: [1912700300] },
+    retryAt: new Date(now - 1000).toISOString(),
+  }
+  delete f.setup.claimToken
+  hold(f.holds, "invite", untilMs)
+  const held = await runWorkerOnce(
+    { custodyProfile: "custody", workerId: "stable", run: true, now },
+    f,
+  )
+  expect(held.results[0]).toMatchObject({
+    state: "waiting",
+    retryAt: new Date(untilMs).toISOString(),
+    error: "TG_SAI_HOLD_600",
+  })
+  expect(f.calls.filter((c) => c === "claim" || c.startsWith("progress:")))
+    .toEqual(["claim", "progress:private-token"])
+  expect(f.calls).not.toContain("telegram")
+})
+
+test("a join wait due under a hold moves its next check to the hold's end", async () => {
+  const now = Date.parse("2026-11-06T00:00:00Z")
+  const hour = 3_600_000
+  const cases = [
+    // Hold end first.
+    { holdMs: 2 * hour, expiryMs: 20 * hour, nextMs: 2 * hour },
+    // Invitation expiry before the hold ends.
+    { holdMs: 30 * hour, expiryMs: 20 * hour, nextMs: 20 * hour },
+    // A hold longer than Deal Desk's 24 h cap.
+    { holdMs: 30 * hour, expiryMs: 40 * hour, nextMs: MAX_NEXT_CHECK_MS },
+  ]
+  for (const { holdMs, expiryMs, nextMs } of cases) {
+    const f = fixture()
+    f.setup = {
+      ...f.setup,
+      state: "awaiting_join",
+      chatId: -100123,
+      binding: { participants: [1912700300], admins: [1912700300] },
+      error: "add_member:TG_SAI_AWAITING_JOIN",
+      nextCheckAt: new Date(now - 1000).toISOString(),
+      receipt: {
+        pendingInvitations: [
+          {
+            userId: "1912700300",
+            inviteLink: "https://t.me/+held",
+            expiresAt: new Date(now + expiryMs).toISOString(),
+            reason: "privacy_restricted",
+          },
+        ],
+      },
+    }
+    delete f.setup.claimToken
+    hold(f.holds, "invite", now + holdMs)
+    const held = await runWorkerOnce(
+      { custodyProfile: "custody", workerId: "stable", run: true, now },
+      f,
+    )
+    const nextCheckAt = new Date(now + nextMs).toISOString()
+    expect(held.results[0]).toMatchObject({
+      state: "waiting",
+      retryAt: nextCheckAt,
+    })
+    expect(f.progressed).toEqual([
+      {
+        state: "awaiting_join",
+        chatId: -100123,
+        binding: { participants: [1912700300], admins: [1912700300] },
+        error: "add_member:TG_SAI_AWAITING_JOIN",
+        nextCheckAt,
+      },
+    ])
+    expect(f.calls).toContain("claim")
+    expect(f.calls).not.toContain("telegram")
+  }
+})
+
+test("a held join wait still claimed under skew releases the claim", async () => {
+  const now = Date.parse("2026-11-06T00:00:00Z")
+  const f = fixture()
+  // A doubly refused re-save left it claimed; the worker now sees the
+  // invitation as expired.
+  f.setup = {
+    ...f.setup,
+    state: "awaiting_join",
+    chatId: -100123,
+    error: "add_member:TG_SAI_AWAITING_JOIN",
+    claimToken: "private-token",
+    nextCheckAt: new Date(now - 1000).toISOString(),
+    receipt: {
+      pendingInvitations: [
+        { userId: "1", expiresAt: new Date(now - 1).toISOString() },
+      ],
+    },
+  }
+  const untilMs = now + 3_600_000
+  hold(f.holds, "invite", untilMs)
+  await runWorkerOnce(
+    { custodyProfile: "custody", workerId: "stable", run: true, now },
+    f,
+  )
+  expect(f.calls).not.toContain("claim")
+  expect(f.progressed).toEqual([
+    {
+      state: "incomplete",
+      chatId: -100123,
+      error: "add_member:TG_SAI_AWAITING_JOIN",
+      retryAt: new Date(untilMs).toISOString(),
+    },
+  ])
+})
+
+test("a held join wait with an expired invitation is left for its check", async () => {
+  const now = Date.parse("2026-11-06T00:00:00Z")
+  const f = fixture()
+  f.setup = {
+    ...f.setup,
+    state: "awaiting_join",
+    chatId: -100123,
+    error: "add_member:TG_SAI_AWAITING_JOIN",
+    nextCheckAt: new Date(now - 1000).toISOString(),
+    receipt: {
+      pendingInvitations: [
+        { userId: "1", expiresAt: new Date(now - 1).toISOString() },
+      ],
+    },
+  }
+  hold(f.holds, "invite", now + 3_600_000)
+  await runWorkerOnce(
+    { custodyProfile: "custody", workerId: "stable", run: true, now },
+    f,
+  )
+  expect(f.calls).not.toContain("claim")
+  expect(f.progressed).toEqual([])
+})
+
+test("a refused join-wait re-save falls back to an incomplete retry", async () => {
+  const now = Date.parse("2026-11-06T00:00:00Z")
+  const f = fixture()
+  f.setup = {
+    ...f.setup,
+    state: "awaiting_join",
+    chatId: -100123,
+    error: "add_member:TG_SAI_AWAITING_JOIN",
+    nextCheckAt: new Date(now - 1000).toISOString(),
+    receipt: {
+      pendingInvitations: [
+        { userId: "1", expiresAt: new Date(now + 86_400_000).toISOString() },
+      ],
+    },
+  }
+  delete f.setup.claimToken
+  const progress = f.cloud.progress
+  f.cloud.progress = async (id: string, token: string, p: Progress) => {
+    if (p.state === "awaiting_join") throw new Error("refused")
+    return progress(id, token, p)
+  }
+  const untilMs = now + 3_600_000
+  hold(f.holds, "invite", untilMs)
+  await runWorkerOnce(
+    { custodyProfile: "custody", workerId: "stable", run: true, now },
+    f,
+  )
+  // The fallback retries at the hold's end, not at the earlier next check.
+  expect(f.progressed).toEqual([
+    {
+      state: "incomplete",
+      chatId: -100123,
+      error: "add_member:TG_SAI_AWAITING_JOIN",
+      retryAt: new Date(untilMs).toISOString(),
+    },
+  ])
+  // A fallback that fails too shows in the result instead of vanishing.
+  f.progressed.length = 0
+  f.setup = { ...f.setup, state: "awaiting_join", retryAt: null }
+  delete f.setup.claimToken
+  f.cloud.progress = async () => {
+    throw new Error("refused")
+  }
+  const both = await runWorkerOnce(
+    { custodyProfile: "custody", workerId: "stable", run: true, now },
+    f,
+  )
+  expect(both.results[0]?.error).toContain(":fallback_failed:")
+})
+
 test("a hold about to end reports retryAt at least 30 s out, once", async () => {
   const now = Date.parse("2026-11-06T00:00:00Z")
   const f = fixture()
@@ -827,10 +1025,13 @@ test("a member added but never visible waits without stalling the drain, then bl
         deps,
       )
 
-    // Tick 1 runs the job: one add, then a link and a 15-minute retry.
+    // Tick 1 runs the job: one add, then a link and a 15-minute check.
+    // The setup waits as awaiting_join, which holds no Deal Desk claim.
     const first = await tick()
-    expect(first.results[0]?.state).toBe("incomplete")
-    expect(first.results[0]?.retryAt).toBeTruthy()
+    expect(first.results[0]?.state).toBe("awaiting_join")
+    expect(first.results[0]?.retryAt).toBe(f.setup.nextCheckAt)
+    expect(f.setup.nextCheckAt).toBeTruthy()
+    expect(f.setup.retryAt).toBeFalsy()
     expect(f.setup.error).toBe("verify_added_member:TG_SAI_MEMBER_NOT_VISIBLE")
     expect(adds).toEqual([1912700300])
     expect(drains).toBe(0)
@@ -842,10 +1043,11 @@ test("a member added but never visible waits without stalling the drain, then bl
     expect(waiting.requesterWork).toBe(false)
     expect(drains).toBe(1)
 
-    // Resumes before expiry never add again.
+    // Resumes before expiry never add again, and keep waiting.
     setSystemTime(start + 16 * 60_000)
     await tick()
     expect(adds).toEqual([1912700300])
+    expect(f.setup.state).toBe("awaiting_join")
 
     // After the invitation expires the job stops for an operator.
     setSystemTime(start + 25 * 3_600_000)
