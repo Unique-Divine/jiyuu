@@ -2026,9 +2026,14 @@ describe("transient failure paths", () => {
     max: number,
   ): Promise<number> {
     let runs = 0
-    while (runs < max && (runs === 0 || f.setup.retryAt)) {
+    // A person's wait is saved as awaiting_join; it still counts as a stall
+    // where #59 counts it, so it stops at the same bound.
+    while (
+      runs < max &&
+      (runs === 0 || f.setup.retryAt || f.setup.state === "awaiting_join")
+    ) {
       runs++
-      await expect(f.run()).rejects.toThrow("incomplete")
+      await expect(f.run()).rejects.toThrow(STOPPED)
     }
     return runs
   }
@@ -2235,8 +2240,8 @@ describe("transient failure paths", () => {
           ? { role: "absent", rights: {} }
           : member(chat, id)
       for (let tick = 0; tick < expireAfter; tick++) {
-        await expect(f.run()).rejects.toThrow("incomplete")
-        expect(f.setup.retryAt).toBeTruthy()
+        await expect(f.run()).rejects.toThrow(STOPPED)
+        expect(f.setup.retryAt ?? f.setup.nextCheckAt).toBeTruthy()
       }
       // The link expires: the next run stops for an operator either way.
       f.local = {
