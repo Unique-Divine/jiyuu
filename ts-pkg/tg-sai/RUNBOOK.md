@@ -605,8 +605,8 @@ Without `--run`, the worker reads one queue page and does not connect to
 Telegram. Execution uses a durable worker identity, account lock, and local
 receipts. Never delete these files to force a retry. An uncertain creation
 blocks further creation until an operator reconciles the original request.
-Use `chat provision resolve --help` to adopt a verified group with its original
-creation marker. Known-group partial setup resumes against that same group.
+Use `chat provision resolve --help` to adopt a verified group whose description
+names the request (see Chat Description and Setup Ref). Known-group partial setup resumes against that same group.
 
 Required admins must be members before setup becomes ready. An ordinary member
 blocked by privacy settings can remain pending with a 24-hour, approval-required
@@ -684,6 +684,43 @@ invitation, with receipt reason `privacy_restricted`. The setup stays
 every 15 minutes. Send the person the link from the receipt. The rules above
 apply: the worker approves their join request, never adds them again, and stops
 for an operator once the invitation expires.
+
+### Chat Description and Setup Ref
+
+Telegram groups have no hidden metadata, so the chat description is how the
+worker recognizes a chat it created. It reads the description to find the
+chat again after a create call times out (`creation_unknown` candidates), and
+checks it before every later change: the ready re-check, each resume, and
+`chat provision resolve`. Every check also requires that the custody account
+created the chat, as a non-forum supergroup.
+
+New chats get the description `Chat with the Sai team. Ref: <ref>`, where
+`<ref>` is the first 8 hex characters of the setup's request fingerprint. The
+text lives in `CHAT_DESCRIPTION_TEXT` in `provisioning.ts`; the checks read
+only the trailing `Ref: <ref>`, so the wording can change without breaking
+existing chats. Chats created earlier carry the legacy marker
+`sai-setup:<full fingerprint>`, and the checks still accept it.
+
+Never edit a deal chat's description by hand. A description that names
+neither the setup's ref nor its legacy marker fails the checks, and the setup
+stops with `Ready setup owner or marker changed` or `verify_marker`. To move
+a legacy chat to the new description, use the rewrite command:
+
+```sh
+tg-sai chat provision rewrite-description --request-id <request-id>
+tg-sai chat provision rewrite-description --request-id <request-id> --run
+```
+
+It reads the setup from Deal Desk and the chat ID from the setup, or from the
+local receipt when the setup has none. It refuses when the receipt conflicts
+with the setup, when the custody account did not create the chat, or when the
+current description is anything other than this setup's exact legacy marker.
+Both forms connect to Telegram as the custody account and print the chat
+title, current description, and new description. The dry run only reads; with
+`--run`, it makes one description edit (no flood sleep, no resend; not a
+member add) and reads it back. A chat that already has the new description is
+reported with `changed: false`. The command takes the custody account lock,
+so run it on the custody host while the worker is stopped or idle.
 
 ### Setup Failure Paths
 
