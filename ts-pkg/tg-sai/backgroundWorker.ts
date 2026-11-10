@@ -313,7 +313,9 @@ export async function drainBackgroundOnce(params: {
 
 /**
  * A read or approval error that belongs to this chat or member: per-user
- * refusals, an inaccessible chat or peer, or a deleted account.
+ * refusals, an inaccessible chat or peer, or a deleted target account.
+ * `USER_DEACTIVATED` is left out: Telegram returns it (401) for the calling
+ * account, which is not this row's fault.
  */
 export function isMemberFault(error: unknown): boolean {
   if (isPerUserAddError(error)) return true
@@ -321,7 +323,7 @@ export function isMemberFault(error: unknown): boolean {
   const text = typeof e?.text === "string" ? e.text : e?.errorMessage
   return (
     typeof text === "string" &&
-    /^(?:CHANNEL_PRIVATE|CHANNEL_INVALID|CHAT_ID_INVALID|PEER_ID_INVALID|USER_DEACTIVATED|INPUT_USER_DEACTIVATED|USER_CHANNELS_TOO_MUCH|CHANNELS_TOO_MUCH)$/.test(
+    /^(?:CHANNEL_PRIVATE|CHANNEL_INVALID|CHAT_ID_INVALID|PEER_ID_INVALID|INPUT_USER_DEACTIVATED|USER_CHANNELS_TOO_MUCH|CHANNELS_TOO_MUCH)$/.test(
       text,
     )
   )
