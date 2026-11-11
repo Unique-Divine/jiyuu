@@ -87,17 +87,22 @@ impl Schema {
             let name: String = row.get(1)?;
             let table: String = row.get(2)?;
             let sql: Option<String> = row.get(3)?;
-            if name == MIGRATION_HISTORY_TABLE && kind == "table" {
-                if sql.as_deref() != Some(MIGRATION_HISTORY_DDL) {
+            if (name == MIGRATION_HISTORY_TABLE || name == crate::derived::TABLE)
+                && kind == "table"
+            {
+                let ddl = if name == MIGRATION_HISTORY_TABLE {
+                    MIGRATION_HISTORY_DDL
+                } else {
+                    crate::derived::DDL
+                };
+                if sql.as_deref() != Some(ddl) {
                     return Err(Error::Drift(format!(
-                        "unexpected schema for {MIGRATION_HISTORY_TABLE}"
+                        "unexpected schema for {name}"
                     )));
                 }
                 continue;
             }
-            if table == MIGRATION_HISTORY_TABLE
-                && kind == "index"
-                && sql.is_none()
+            if crate::is_engine_table(&table) && kind == "index" && sql.is_none()
             {
                 continue;
             }
@@ -115,7 +120,7 @@ impl Schema {
 
 /// SQLite's stored schema is already parsed SQL. Token comparison avoids
 /// accidentally erasing meaningful spaces or case inside literals and names.
-fn tokens(sql: &str) -> Result<Vec<String>, Error> {
+pub(crate) fn tokens(sql: &str) -> Result<Vec<String>, Error> {
     let bytes = sql.as_bytes();
     let mut result = Vec::new();
     let mut at = 0;
