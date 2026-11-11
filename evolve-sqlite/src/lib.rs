@@ -1,12 +1,21 @@
-//! Plan and apply frozen SQL migrations against a known SQLite database.
+//! Plan and apply ordered, frozen SQL migrations for one SQLite database kind.
+//!
+//! Each migration advances the schema or data from the preceding version. The
+//! migration-history table records the applied prefix and each SQL checksum.
+//! A fresh database runs the entire sequence; an existing database runs only
+//! its pending suffix. Applied SQL is not replayed on a later call to apply.
 //!
 //! A plan opens the file read-only. Apply opens the same path for writing,
 //! acquires a write transaction, and recomputes the plan before executing SQL.
-//! The migration SQL, ledger writes, and verification share that transaction.
+//! The migration SQL, migration-history writes, and verification share that
+//! transaction. A failed operation rolls back the whole batch, so the caller
+//! can retry after fixing the cause. This crate has no down-migration API.
 //!
 //! Migration SQL and callbacks come from trusted application code. The engine
 //! owns the SQLite connection and blocks migration SQL from controlling the
-//! transaction, attaching databases, or changing engine metadata.
+//! transaction, attaching databases, or changing engine metadata. Project
+//! callbacks run with read-only SQL permissions. See [`Spec::apply`] for the
+//! permission changes during execution.
 //!
 //! The plan binds the path, schema, and migration history. Row changes can
 //! continue after planning. Applications check relevant rows with the
@@ -31,10 +40,13 @@ use rusqlite::{
 };
 use sha2::{Digest, Sha256};
 
-const LEDGER: &str = "evolve_sqlite_migration";
-// Keep this DDL stable. SQLite stores it in sqlite_schema, where we check the
-// engine-owned format before reading any ledger rows.
-const LEDGER_SQL: &str = "CREATE TABLE evolve_sqlite_migration (
+const MIGRATION_HISTORY_TABLE: &str = "evolve_sqlite_migration";
+// This engine-owned table records committed migrations in ordinal order, with
+// their frozen SQL checksum and application time. Keep its name and DDL bytes
+// stable. The DDL constant is the full CREATE TABLE statement. plan_on compares
+// sqlite_schema.sql with this exact stored definition before trusting history,
+// including databases created by previous versions.
+const MIGRATION_HISTORY_DDL: &str = "CREATE TABLE evolve_sqlite_migration (
                     ordinal INTEGER PRIMARY KEY CHECK (ordinal > 0),
                     name TEXT NOT NULL UNIQUE,
                     sha256 TEXT NOT NULL,
@@ -49,21 +61,43 @@ pub type CheckError = Box<dyn std::error::Error + Send + Sync>;
 type LegacyReader<'a> =
     dyn Fn(&Connection) -> Result<Vec<LegacyMigration>, CheckError> + 'a;
 
-/// A frozen migration embedded by the application.
+/// A frozen SQL step from the preceding database version to the next one.
+///
+/// The application embeds every step in order, with contiguous names such as
+/// `01_create_records.sql` and `02_add_notes.sql`. Fresh databases run that
+/// sequence from the beginning; existing databases run only missing steps.
+/// Reproducing a schema from an empty database does not require any individual
+/// step to be safe to rerun on an already migrated database.
+///
+/// A step and its history row commit together. If SQL or a project check fails,
+/// the whole apply transaction rolls back and the pending steps can be retried.
+/// Freeze the name and SQL bytes once applied, because planning checks them
+/// against recorded history. Down migrations are not implemented by this crate.
 #[derive(Clone, Copy, Debug)]
 pub struct Migration<'a> {
+    /// A contiguous two-digit ordinal and lowercase name ending in `.sql`.
     pub name: &'a str,
+    /// SQL whose exact UTF-8 bytes determine the recorded SHA-256 checksum.
     pub sql: &'a str,
 }
 
-/// An ordered set of migrations for one kind of database.
+/// The application's migration specification for one database kind.
 ///
-/// Choose a distinct nonzero SQLite `application_id` for each database kind.
+/// Define one spec per database kind, such as records or application state.
+/// It binds that kind's identity to its complete, ordered SQL history. Planning
+/// and applying both use this description; constructing a spec executes no SQL.
 /// The engine stores the applied migration count in SQLite `user_version` and
-/// checks it against the ledger before planning.
+/// checks it against the migration-history table before planning.
 #[derive(Clone, Copy, Debug)]
 pub struct Spec<'a> {
+    /// A distinct nonzero SQLite `application_id` for this database kind.
+    ///
+    /// This identifies a file's intended application, not an individual file or
+    /// deployment. Copies share the value. Use a project check if instance
+    /// identity matters. Empty files receive this value during explicit apply;
+    /// existing unmarked databases require explicit legacy adoption.
     pub application_id: i32,
+    /// The complete frozen history in contiguous ordinal order, starting at 01.
     pub migrations: &'a [Migration<'a>],
 }
 
@@ -73,12 +107,23 @@ pub struct PlannedMigration {
     pub sha256: String,
 }
 
-/// Project-validated evidence of a legacy migration, mapped to its new name.
+/// Project-validated evidence of work already applied before engine adoption.
+///
+/// A project validator maps legacy SQL migrations or historical project
+/// operations to an initial prefix of the spec. It must prove that the schema
+/// and original history match that prefix. Adoption records the evidence
+/// without executing the mapped SQL again and leaves the original history in
+/// place. The mapped checksum must equal the embedded migration's checksum;
+/// mapping a filename or ordinal does not permit changing the original SQL.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LegacyMigration {
+    /// The mapped, one-based ordinal in the spec, not the old history's ordinal.
     pub ordinal: i64,
+    /// The exact migration name in the spec.
     pub name: String,
+    /// The original SQL checksum, which must match the spec's frozen SQL.
     pub sha256: String,
+    /// The original application time in Unix seconds, preserved during adoption.
     pub applied_at: i64,
 }
 
@@ -102,7 +147,7 @@ impl Plan {
     }
 
     fn applied(&self) -> usize {
-        self.state.ledger_applied_at.len() + self.legacy.len()
+        self.state.migration_applied_at.len() + self.legacy.len()
     }
 }
 
@@ -169,8 +214,8 @@ struct DatabaseState {
     user_version: i32,
     schema: Vec<SchemaObject>,
     // The validated ordinal, name, hash, and outcome are implied by the spec.
-    // Keep the remaining column to detect changes to any observed ledger row.
-    ledger_applied_at: Vec<i64>,
+    // Keep the remaining column to detect changes to any observed history row.
+    migration_applied_at: Vec<i64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -196,7 +241,10 @@ impl Spec<'_> {
     /// The project callback validates the old schema and original history,
     /// then returns the applied entries mapped to the exact names and checksums
     /// of an initial prefix of this spec. Entries can have different ordinals
-    /// in the original history. The engine preserves the original ledger.
+    /// in the original history. The callback must check the original evidence,
+    /// including its checksums. The engine preserves the old history table and
+    /// records mapped entries with their original application times on apply.
+    /// Planning executes none of the mapped SQL and changes no history.
     pub fn plan_adoption(
         &self,
         path: impl AsRef<Path>,
@@ -213,9 +261,10 @@ impl Spec<'_> {
         let migrations = self.validate()?;
         let path = path.canonicalize()?;
         let mut conn = open(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        let authorizer = Authorizer::install(&mut conn)?;
+        let authorizer = SqlAuthorizer::install(&mut conn)?;
         let tx = conn.transaction()?;
-        let _restricted = authorizer.restrict(Phase::Verification);
+        let _restricted =
+            authorizer.restrict_to(SqlPermissionMode::ProjectCheck);
         self.plan_on(&tx, path, migrations, read_legacy)
     }
 
@@ -225,6 +274,20 @@ impl Spec<'_> {
     /// second checks the result before commit. An error from either callback
     /// rolls back the batch. For a rehearsal, compute a plan on the copy.
     /// The caller arranges rehearsal, backup, and retention before applying.
+    ///
+    /// The SQL authorizer starts with engine permissions to begin the
+    /// transaction. It switches to read-only project-check permissions while
+    /// revalidating the plan and capturing the baseline. Engine permissions
+    /// then allow identity and history initialization. Each pending SQL step
+    /// runs with migration permissions, which prohibit transaction control,
+    /// attached databases, history-table writes, and table drops. Engine
+    /// permissions record each completed step and check foreign keys. The final
+    /// callback runs read-only, then engine permissions allow commit. Each
+    /// restricted scope restores engine permissions when it exits, including
+    /// on error, so the transaction can roll back.
+    ///
+    /// Applied steps are skipped. After a successful apply, obtain a fresh plan
+    /// before another call; the previous plan describes the pre-apply state.
     pub fn apply<T>(
         &self,
         plan: &Plan,
@@ -238,7 +301,11 @@ impl Spec<'_> {
     ///
     /// The project supplies the same validation it used to plan the adoption.
     /// The engine records the verified legacy prefix, then runs any pending
-    /// migrations. The verification callback can reject the entire operation.
+    /// migrations. It does not rerun SQL for the adopted prefix. Original
+    /// checksums and application times are preserved in the mapped history.
+    /// Revalidation and project checks run read-only, as in [`Self::apply`].
+    /// The verification callback can reject the entire operation, including
+    /// identity assignment and history adoption.
     pub fn apply_adoption<T>(
         &self,
         plan: &Plan,
@@ -259,11 +326,12 @@ impl Spec<'_> {
         let migrations = self.validate()?;
         let mut conn = open(&plan.path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
-        let authorizer = Authorizer::install(&mut conn)?;
+        let authorizer = SqlAuthorizer::install(&mut conn)?;
         let tx =
             conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let baseline = {
-            let _restricted = authorizer.restrict(Phase::Verification);
+            let _restricted =
+                authorizer.restrict_to(SqlPermissionMode::ProjectCheck);
             let current =
                 self.plan_on(&tx, plan.path.clone(), migrations, read_legacy)?;
             if &current != plan {
@@ -274,7 +342,7 @@ impl Spec<'_> {
 
         if plan.state.application_id == 0 {
             tx.pragma_update(None, "application_id", self.application_id)?;
-            tx.execute_batch(LEDGER_SQL)?;
+            tx.execute_batch(MIGRATION_HISTORY_DDL)?;
             for migration in &plan.legacy {
                 tx.execute(
                     "INSERT INTO evolve_sqlite_migration (ordinal, name, sha256, applied_at, outcome)
@@ -288,7 +356,8 @@ impl Spec<'_> {
             self.migrations.iter().enumerate().skip(plan.applied())
         {
             {
-                let _restricted = authorizer.restrict(Phase::Migration);
+                let _restricted =
+                    authorizer.restrict_to(SqlPermissionMode::Migration);
                 tx.execute_batch(migration.sql).map_err(|source| {
                     Error::Migration {
                         name: migration.name.to_owned(),
@@ -316,7 +385,8 @@ impl Spec<'_> {
             return Err(Error::ForeignKeyViolation);
         }
         {
-            let _restricted = authorizer.restrict(Phase::Verification);
+            let _restricted =
+                authorizer.restrict_to(SqlPermissionMode::ProjectCheck);
             verify(&tx, baseline).map_err(Error::Verification)?;
         }
         tx.commit()?;
@@ -396,12 +466,11 @@ impl Spec<'_> {
             if application_id != 0 || schema.is_empty() {
                 return Err(Error::NotLegacy);
             }
-            if schema
-                .iter()
-                .any(|object| object.name.eq_ignore_ascii_case(LEDGER))
-            {
+            if schema.iter().any(|object| {
+                object.name.eq_ignore_ascii_case(MIGRATION_HISTORY_TABLE)
+            }) {
                 return Err(Error::Drift(format!(
-                    "legacy schema already contains {LEDGER}"
+                    "legacy schema already contains {MIGRATION_HISTORY_TABLE}"
                 )));
             }
             let legacy = read_legacy(conn).map_err(Error::LegacyValidation)?;
@@ -410,7 +479,7 @@ impl Spec<'_> {
         } else {
             Vec::new()
         };
-        let ledger_applied_at = if application_id == 0 {
+        let migration_applied_at = if application_id == 0 {
             if legacy.is_empty() && (user_version != 0 || !schema.is_empty()) {
                 return Err(Error::AdoptionRequired);
             }
@@ -418,21 +487,26 @@ impl Spec<'_> {
         } else {
             let ledger = schema
                 .iter()
-                .find(|object| object.kind == "table" && object.name == LEDGER)
+                .find(|object| {
+                    object.kind == "table"
+                        && object.name == MIGRATION_HISTORY_TABLE
+                })
                 .ok_or_else(|| {
-                    Error::Drift(format!("missing table {LEDGER}"))
+                    Error::Drift(format!(
+                        "missing table {MIGRATION_HISTORY_TABLE}"
+                    ))
                 })?;
-            if ledger.sql.as_deref() != Some(LEDGER_SQL) {
+            if ledger.sql.as_deref() != Some(MIGRATION_HISTORY_DDL) {
                 return Err(Error::Drift(format!(
-                    "unexpected schema for {LEDGER}"
+                    "unexpected schema for {MIGRATION_HISTORY_TABLE}"
                 )));
             }
             if let Some(trigger) = schema.iter().find(|object| {
                 object.kind == "trigger"
-                    && object.table.eq_ignore_ascii_case(LEDGER)
+                    && object.table.eq_ignore_ascii_case(MIGRATION_HISTORY_TABLE)
             }) {
                 return Err(Error::Drift(format!(
-                    "unexpected trigger {} on {LEDGER}",
+                    "unexpected trigger {} on {MIGRATION_HISTORY_TABLE}",
                     trigger.name
                 )));
             }
@@ -452,7 +526,7 @@ impl Spec<'_> {
                 application_id,
                 user_version,
                 schema,
-                ledger_applied_at,
+                migration_applied_at,
             },
             migrations,
             legacy,
@@ -529,24 +603,33 @@ fn validate_history(
     Ok(applied_at)
 }
 
+/// SQL permissions on the engine-owned connection, not migration progress.
+///
+/// The authorizer begins in Engine mode. A guard temporarily selects Migration
+/// or ProjectCheck mode and restores Engine when dropped. Restricted scopes
+/// are not nested. The surrounding transaction spans all these mode changes.
 #[repr(u8)]
-enum Phase {
+enum SqlPermissionMode {
+    /// Allow engine statements, including transaction and metadata writes.
     Engine,
+    /// Allow project SQL within main, subject to migration_action restrictions.
     Migration,
-    Verification,
+    /// Allow reads and approved inspection pragmas for planning and callbacks.
+    ProjectCheck,
 }
 
-struct Authorizer(Arc<AtomicU8>);
+/// Installs SQLite's statement authorizer and selects its SQL permission mode.
+struct SqlAuthorizer(Arc<AtomicU8>);
 
-impl Authorizer {
+impl SqlAuthorizer {
     fn install(conn: &mut Connection) -> Result<Self, Error> {
-        let phase = Arc::new(AtomicU8::new(Phase::Engine as u8));
-        let callback_phase = Arc::clone(&phase);
+        let mode = Arc::new(AtomicU8::new(SqlPermissionMode::Engine as u8));
+        let callback_mode = Arc::clone(&mode);
         conn.authorizer(Some(move |ctx: AuthContext<'_>| {
-            let phase = callback_phase.load(Ordering::Relaxed);
-            let allowed = if phase == Phase::Migration as u8 {
+            let mode = callback_mode.load(Ordering::Relaxed);
+            let allowed = if mode == SqlPermissionMode::Migration as u8 {
                 migration_action(ctx)
-            } else if phase == Phase::Verification as u8 {
+            } else if mode == SqlPermissionMode::ProjectCheck as u8 {
                 verification_action(ctx.action)
             } else {
                 true
@@ -557,20 +640,23 @@ impl Authorizer {
                 Authorization::Deny
             }
         }))?;
-        Ok(Self(phase))
+        Ok(Self(mode))
     }
 
-    fn restrict(&self, phase: Phase) -> Restricted<'_> {
-        self.0.store(phase as u8, Ordering::Relaxed);
-        Restricted(self)
+    fn restrict_to(&self, mode: SqlPermissionMode) -> SqlPermissionGuard<'_> {
+        self.0.store(mode as u8, Ordering::Relaxed);
+        SqlPermissionGuard(self)
     }
 }
 
-struct Restricted<'a>(&'a Authorizer);
+/// Restores engine permissions when a restricted SQL scope exits.
+struct SqlPermissionGuard<'a>(&'a SqlAuthorizer);
 
-impl Drop for Restricted<'_> {
+impl Drop for SqlPermissionGuard<'_> {
     fn drop(&mut self) {
-        self.0.0.store(Phase::Engine as u8, Ordering::Relaxed);
+        self.0
+            .0
+            .store(SqlPermissionMode::Engine as u8, Ordering::Relaxed);
     }
 }
 
@@ -601,7 +687,7 @@ fn migration_action(ctx: AuthContext<'_>) -> bool {
         | AuthAction::AlterTable { table_name, .. }
         | AuthAction::CreateIndex { table_name, .. }
         | AuthAction::CreateTrigger { table_name, .. } => {
-            !table_name.eq_ignore_ascii_case(LEDGER)
+            !table_name.eq_ignore_ascii_case(MIGRATION_HISTORY_TABLE)
         }
         AuthAction::Function { function_name } => {
             !function_name.eq_ignore_ascii_case("load_extension")
