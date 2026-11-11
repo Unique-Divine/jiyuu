@@ -15,29 +15,42 @@ use tempfile::NamedTempFile;
 const BACKUP_TIMEOUT: Duration = Duration::from_secs(30);
 const RETRY_DELAY: Duration = Duration::from_millis(10);
 
-/// Metadata for the verified bytes published at the caller's destination.
+/// A verified, standalone database copy published at the requested destination.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Snapshot {
+    /// Canonical destination path after publication.
     pub path: PathBuf,
+    /// Length of the complete database file in bytes.
     pub size_bytes: u64,
+    /// Lowercase hexadecimal SHA-256 digest of the complete file.
     pub sha256: String,
 }
 
+/// Failure to copy, verify, or durably publish a database snapshot.
+///
+/// Variant [`Self::Durability`] reports a file that has already been published.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum BackupError {
+    /// The resolved source path is not a regular file.
     #[error("backup source must be an existing regular file")]
     InvalidSource,
+    /// The destination has no filename or its resolved parent is not a directory.
     #[error("backup destination must have a filename in an existing directory")]
     InvalidDestination,
+    /// The destination or a reserved SQLite sidecar path is occupied.
     #[error("backup destination already exists")]
     DestinationExists,
+    /// SQLite did not finish copying within the backup time limit.
     #[error("SQLite backup did not complete within its time limit")]
     Timeout,
+    /// The copy failed integrity checks or could not use DELETE journal mode.
     #[error("snapshot failed SQLite integrity_check")]
     Integrity,
+    /// The copy contains a foreign-key violation.
     #[error("snapshot failed SQLite foreign_key_check")]
     ForeignKeys,
+    /// The verified file exists, but syncing its parent directory failed.
     #[error(
         "verified snapshot was published at {path}, but directory synchronization failed: {source}"
     )]
@@ -46,14 +59,19 @@ pub enum BackupError {
         #[source]
         source: io::Error,
     },
+    /// SQLite failed while opening, copying, verifying, or closing the database.
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
+    /// A filesystem operation failed, including resolving a missing source or parent.
     #[error(transparent)]
     Io(#[from] io::Error),
 }
 
 impl BackupError {
-    /// Stable identifiers for callers that present structured errors.
+    /// Stable error categories for logs and caller decisions.
+    ///
+    /// Display messages and source errors provide details. Code
+    /// `backup_durability` means the verified file has already been published.
     pub fn code(&self) -> &'static str {
         match self {
             Self::InvalidSource => "backup_invalid_source",
@@ -225,15 +243,17 @@ fn verify(conn: &Connection) -> Result<(), BackupError> {
 mod tests {
     use super::*;
 
+    type TestResult<T = ()> = Result<T, crate::CheckError>;
+
+    /// A locked source must time out and remove the unpublished temporary copy.
     #[test]
-    fn a_busy_source_times_out_and_leaves_no_destination() {
-        let directory = tempfile::tempdir().unwrap();
+    fn a_busy_source_times_out_and_leaves_no_destination() -> TestResult {
+        let directory = tempfile::tempdir()?;
         let source = directory.path().join("source.sqlite");
         let destination = directory.path().join("snapshot.sqlite");
-        let writer = Connection::open(&source).unwrap();
+        let writer = Connection::open(&source)?;
         writer
-            .execute_batch("CREATE TABLE item (id INTEGER); BEGIN EXCLUSIVE;")
-            .unwrap();
+            .execute_batch("CREATE TABLE item (id INTEGER); BEGIN EXCLUSIVE;")?;
         let error = create_with_timeout(
             &source,
             &destination,
@@ -243,16 +263,19 @@ mod tests {
         .unwrap_err();
         assert_eq!(error.code(), "backup_timeout");
         assert!(!destination.exists());
-        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+        assert_eq!(fs::read_dir(directory.path())?.count(), 1);
+        Ok(())
     }
+    /// Directory-sync failure must report the verified copy that has already been published.
     #[test]
-    fn a_directory_sync_failure_retains_the_verified_published_snapshot() {
-        let directory = tempfile::tempdir().unwrap();
+    fn a_directory_sync_failure_retains_the_verified_published_snapshot()
+    -> TestResult {
+        let directory = tempfile::tempdir()?;
         let source = directory.path().join("source.sqlite");
         let destination = directory.path().join("snapshot.sqlite");
-        Connection::open(&source).unwrap().execute_batch(
+        Connection::open(&source)?.execute_batch(
             "CREATE TABLE record (id INTEGER); INSERT INTO record VALUES (42);",
-        ).unwrap();
+        )?;
         let error =
             create_with_timeout(&source, &destination, BACKUP_TIMEOUT, |_| {
                 Err(io::Error::other("injected directory sync failure"))
@@ -261,7 +284,7 @@ mod tests {
         assert_eq!(error.code(), "backup_durability");
         match error {
             BackupError::Durability { path, source } => {
-                assert_eq!(path, destination.canonicalize().unwrap());
+                assert_eq!(path, destination.canonicalize()?);
                 assert_eq!(
                     source.to_string(),
                     "injected directory sync failure"
@@ -272,15 +295,14 @@ mod tests {
         let snapshot = Connection::open_with_flags(
             &destination,
             OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )
-        .unwrap();
-        verify(&snapshot).unwrap();
+        )?;
+        verify(&snapshot)?;
         assert_eq!(
-            snapshot
-                .query_row("SELECT id FROM record", [], |r| r.get::<_, i64>(0))
-                .unwrap(),
+            snapshot.query_row("SELECT id FROM record", [], |r| r
+                .get::<_, i64>(0))?,
             42
         );
-        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 2);
+        assert_eq!(fs::read_dir(directory.path())?.count(), 2);
+        Ok(())
     }
 }

@@ -192,8 +192,7 @@ jobs:
   evolve-sqlite:
     runs-on: ubuntu-latest
     steps:
-      - name: Unaffected project
-        if: needs.changes.outputs.evolve_sqlite != 'true'
+      - if: needs.changes.outputs.evolve_sqlite != 'true'
         run: echo "No relevant changes; check completed successfully."
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         if: needs.changes.outputs.evolve_sqlite == 'true'
@@ -204,12 +203,10 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy,rustfmt
+      - uses: extractions/setup-just@v3
+        if: needs.changes.outputs.evolve_sqlite == 'true'
       - if: needs.changes.outputs.evolve_sqlite == 'true'
-        name: Check and test
-        run: |
-          cargo fmt -p evolve-sqlite --check
-          cargo clippy --locked -p evolve-sqlite --all-targets -- -D warnings
-          cargo test --locked -p evolve-sqlite
+        run: just --justfile evolve-sqlite/justfile check
     needs: changes
   gh-rev:
     runs-on: ubuntu-latest

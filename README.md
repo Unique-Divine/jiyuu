@@ -57,9 +57,13 @@ Ref: [github.com/casey/just](https://github.com/casey/just)
 Run the Rust tests from the repository root.
 
 ```bash
-cargo test --workspace --locked
+just rust-test
 ```
 
-The workspace shares the root `Cargo.lock` and `target/` directory. Run
-`cargo test --locked -p gh-rev` or `cargo test --locked -p tmux-agent-watch`
-to test one package. The `tmux-agent-watch` integration tests require `tmux`.
+The workspace shares the root `Cargo.lock` and `target/` directory. To test
+one package, run `just test` from `gh-rev/` or `tmux-agent-watch/`. The
+`tmux-agent-watch` integration tests require `tmux`.
+
+Test and install recipes use `--locked` to fail if Cargo would change
+`Cargo.lock`. Update and commit the lockfile with intentional dependency
+changes.
