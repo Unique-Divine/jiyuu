@@ -96,13 +96,14 @@ pub struct Migration<'a> {
 /// checks it against the migration-history table before planning.
 #[derive(Clone, Copy, Debug)]
 pub struct Spec<'a> {
-    /// A distinct nonzero SQLite `application_id` for this database kind.
+    /// A distinct nonzero database-kind identity, stored in SQLite pragma
+    /// `application_id`.
     ///
     /// This identifies a file's intended application, not an individual file or
     /// deployment. Copies share the value. Use a project check if instance
     /// identity matters. Empty files receive this value during explicit apply;
     /// existing unmarked databases require explicit legacy adoption.
-    pub application_id: i32,
+    pub app_id: i32,
     /// The complete frozen history in contiguous ordinal order, starting at 01.
     pub migrations: &'a [Migration<'a>],
 }
@@ -188,7 +189,7 @@ impl RebuildPolicy {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Plan {
     path: PathBuf,
-    application_id: i32,
+    app_id: i32,
     state: DatabaseState,
     migrations: Vec<PlannedMigration>,
     legacy: Vec<LegacyMigration>,
@@ -256,7 +257,7 @@ pub enum Error {
     Backup(#[from] backup::BackupError),
     #[error("invalid migration spec: {0}")]
     InvalidSpec(String),
-    #[error("expected database application_id {expected}, got {actual}")]
+    #[error("expected database app_id {expected}, got {actual}")]
     WrongDatabase { expected: i32, actual: i32 },
     #[error(
         "unmarked database contains existing state and requires explicit adoption"
@@ -326,7 +327,7 @@ impl Error {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct DatabaseState {
-    application_id: i32,
+    app_id: i32,
     user_version: i32,
     schema: Vec<SchemaObject>,
     // The validated ordinal, name, hash, and outcome are implied by the spec.
@@ -556,8 +557,8 @@ impl Spec<'_> {
         };
         let preparation = prepare()?;
 
-        if plan.state.application_id == 0 {
-            tx.pragma_update(None, "application_id", self.application_id)?;
+        if plan.state.app_id == 0 {
+            tx.pragma_update(None, "application_id", self.app_id)?;
             tx.execute_batch(MIGRATION_HISTORY_DDL)?;
             for migration in &plan.legacy {
                 tx.execute(
@@ -683,10 +684,8 @@ impl Spec<'_> {
     }
 
     fn validate(&self) -> Result<Vec<PlannedMigration>, Error> {
-        if self.application_id == 0 {
-            return Err(Error::InvalidSpec(
-                "application_id must be nonzero".into(),
-            ));
+        if self.app_id == 0 {
+            return Err(Error::InvalidSpec("app_id must be nonzero".into()));
         }
         self.migrations
             .iter()
@@ -731,12 +730,12 @@ impl Spec<'_> {
         rebuilds: &RebuildPolicy,
         definitions: Vec<derived::Definition>,
     ) -> Result<Plan, Error> {
-        let application_id: i32 =
+        let app_id: i32 =
             conn.pragma_query_value(None, "application_id", |r| r.get(0))?;
-        if application_id != 0 && application_id != self.application_id {
+        if app_id != 0 && app_id != self.app_id {
             return Err(Error::WrongDatabase {
-                expected: self.application_id,
-                actual: application_id,
+                expected: self.app_id,
+                actual: app_id,
             });
         }
         let user_version =
@@ -754,7 +753,7 @@ impl Spec<'_> {
             .collect::<rusqlite::Result<Vec<_>>>()?;
 
         let legacy = if let Some(read_legacy) = read_legacy {
-            if application_id != 0 || schema.is_empty() {
+            if app_id != 0 || schema.is_empty() {
                 return Err(Error::NotLegacy);
             }
             if schema.iter().any(|object| is_engine_table(&object.name)) {
@@ -768,7 +767,7 @@ impl Spec<'_> {
         } else {
             Vec::new()
         };
-        let migration_applied_at = if application_id == 0 {
+        let migration_applied_at = if app_id == 0 {
             if legacy.is_empty() && (user_version != 0 || !schema.is_empty()) {
                 return Err(Error::AdoptionRequired);
             }
@@ -812,9 +811,9 @@ impl Spec<'_> {
             derived::read_history(conn, &schema, &definitions)?;
         Ok(Plan {
             path,
-            application_id: self.application_id,
+            app_id: self.app_id,
             state: DatabaseState {
-                application_id,
+                app_id,
                 user_version,
                 schema,
                 migration_applied_at,

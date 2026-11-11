@@ -29,7 +29,7 @@ rollback of committed changes.
 ## Plan and Apply
 
 1. Define a `Spec`, the migration specification for one database kind,
-   with a nonzero SQLite `application_id` and embedded SQL
+   with a nonzero `app_id` field and embedded SQL
    files named `01_name.sql`, `02_name.sql`, and so on. Freeze each file's
    bytes once it has been applied.
 2. Call `Spec::plan` on an existing SQLite file. Review the pending names
@@ -42,10 +42,10 @@ rollback of committed changes.
    history changes, and the project checks share the live transaction.
 
 The `Spec` struct holds the database kind's identity and complete migration
-sequence. Constructing it executes no SQL. Choose a distinct `application_id`
-for each database kind, such as records or application state. This SQLite
-pragma identifies the intended application, not an individual database
-instance. Copies retain the same value. An explicit apply marks an empty
+sequence. Constructing it executes no SQL. Choose a distinct `app_id`
+for each database kind, such as records or application state. The field maps
+to SQLite pragma `application_id`, which identifies the intended application,
+not an individual database instance. Copies retain the same value. An explicit apply marks an empty
 file; an existing unmarked database requires legacy adoption.
 
 The plan records the canonical path, schema, and migration history. It

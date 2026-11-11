@@ -25,7 +25,7 @@ const REBUILD: Migration<'_> = Migration {
 
 fn spec<'a>(migrations: &'a [Migration<'a>]) -> Spec<'a> {
     Spec {
-        application_id: 0x4556_4f4c,
+        app_id: 0x4556_4f4c,
         migrations,
     }
 }
