@@ -12,11 +12,12 @@ migration history.
    bytes once it has been applied.
 2. Call `Spec::plan` on an existing SQLite file. Review the pending names
    and checksums. To initialize a database, use an empty file.
-3. Call `Spec::apply` with the reviewed plan and two project checks. The
-   first captures a baseline and the second compares it with the migrated
-   state. The engine checks the plan again under a write transaction.
-   Migration SQL, ledger changes, and the project checks share that
-   transaction.
+3. Call `Spec::apply_verified` with the reviewed plan, unused backup and
+   copy destinations, and two project checks. The first captures a baseline
+   and the second compares it with the migrated state. The engine checks
+   the plan again under a write transaction, creates a verified snapshot,
+   and rehearses on a copy before executing the live SQL. Migration SQL,
+   ledger changes, and the project checks share the live transaction.
 
 The plan records the canonical path, schema, and migration history. It
 allows application rows to change after planning. A deployment that needs
@@ -25,7 +26,7 @@ validate its database instance identity in a project check.
 
 ## Adopt a Legacy Database
 
-Use `Spec::plan_adoption` and `Spec::apply_adoption` with the same
+Use `Spec::plan_adoption` and `Spec::apply_adoption_verified` with the same
 project-specific validator. The validator checks the old schema and
 history and maps the applied entries to the new spec's initial migration
 sequence. Adoption records that sequence and its original application
@@ -52,6 +53,15 @@ project checks. The engine keeps an unchanged snapshot and migrates a
 second copy. `Spec::rehearse_adoption` also reruns the legacy validator.
 All successful artifacts remain available if a later step fails. Choose
 fresh destination paths when retrying. The application owns retention.
+
+The guarded apply methods hold the source write reservation throughout
+snapshot, rehearsal, and live execution. This keeps the snapshot at the
+last committed state before migration and excludes application writers
+until commit or rollback. Both project checks must support repeated calls.
+The live baseline is captured before the snapshot, the copy gets its own
+baseline, and each verifier checks its corresponding baseline. Legacy
+validation runs separately on source and copy. The ordinary `apply` and
+`apply_adoption` methods remain available for executing prepared copies.
 
 Apply and rehearsal hold an exclusive advisory lock beside the canonical
 database path. The lock file stays in place after release so concurrent

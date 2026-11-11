@@ -122,6 +122,14 @@ pub enum Error {
         copy_path: PathBuf,
         source: Box<Error>,
     },
+    #[error(
+        "verified apply failed; snapshot {snapshot_path}, copy {copy_path}: {source}"
+    )]
+    VerifiedApply {
+        snapshot_path: PathBuf,
+        copy_path: PathBuf,
+        source: Box<Error>,
+    },
     #[error(transparent)]
     Backup(#[from] backup::BackupError),
     #[error("invalid migration spec: {0}")]
@@ -166,6 +174,7 @@ impl Error {
             Self::Locked { .. } => "migration_locked",
             Self::Backup(source) => source.code(),
             Self::Rehearsal { source, .. } => source.code(),
+            Self::VerifiedApply { source, .. } => source.code(),
             Self::InvalidSpec(_) => "invalid_spec",
             Self::WrongDatabase { .. } => "wrong_database",
             Self::AdoptionRequired => "adoption_required",
@@ -277,6 +286,23 @@ impl Spec<'_> {
         capture: impl FnOnce(&Connection) -> Result<T, CheckError>,
         verify: impl FnOnce(&Connection, T) -> Result<(), CheckError>,
     ) -> Result<(), Error> {
+        self.apply_with_preparation(
+            plan,
+            read_legacy,
+            || Ok(()),
+            capture,
+            verify,
+        )
+    }
+
+    fn apply_with_preparation<T, R>(
+        &self,
+        plan: &Plan,
+        read_legacy: Option<&LegacyReader<'_>>,
+        prepare: impl FnOnce() -> Result<R, Error>,
+        capture: impl FnOnce(&Connection) -> Result<T, CheckError>,
+        verify: impl FnOnce(&Connection, T) -> Result<(), CheckError>,
+    ) -> Result<R, Error> {
         let _lock = rehearsal::MigrationLock::acquire(&plan.path)?;
         let migrations = self.validate()?;
         let mut conn = open(&plan.path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
@@ -293,6 +319,7 @@ impl Spec<'_> {
             }
             capture(&tx).map_err(Error::Verification)?
         };
+        let preparation = prepare()?;
 
         if plan.state.application_id == 0 {
             tx.pragma_update(None, "application_id", self.application_id)?;
@@ -347,7 +374,7 @@ impl Spec<'_> {
             verify(&tx, baseline).map_err(Error::Verification)?;
         }
         tx.commit()?;
-        Ok(())
+        Ok(preparation)
     }
 
     fn validate(&self) -> Result<Vec<PlannedMigration>, Error> {

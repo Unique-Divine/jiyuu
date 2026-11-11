@@ -42,6 +42,17 @@ impl MigrationLock {
         let mut name = database.as_os_str().to_owned();
         name.push(".evolve-sqlite.lock");
         let path = PathBuf::from(name);
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if !metadata.is_file() => {
+                return Err(std::io::Error::other(
+                    "migration lock must be a regular file",
+                )
+                .into());
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
         let mut options = OpenOptions::new();
         options.read(true).write(true).create(true).truncate(false);
         #[cfg(unix)]
@@ -79,6 +90,65 @@ impl MigrationLock {
 }
 
 impl Spec<'_> {
+    /// Back up, rehearse, and apply while holding the source write reservation.
+    ///
+    /// The source plan and its project baseline are checked before the
+    /// snapshot. Other writers remain excluded until commit or rollback.
+    /// Capture and verify run independently on the live database and the
+    /// rehearsal copy, so callbacks must support multiple invocations.
+    pub fn apply_verified<T>(
+        &self,
+        plan: &Plan,
+        paths: &RehearsalPaths,
+        capture: impl Fn(&Connection) -> Result<T, CheckError>,
+        verify: impl Fn(&Connection, T) -> Result<(), CheckError>,
+    ) -> Result<RehearsalReport, Error> {
+        self.apply_verified_plan(plan, paths, None, capture, verify)
+    }
+
+    /// Back up, rehearse, and apply explicit adoption in one guarded operation.
+    ///
+    /// Legacy validation runs on both source and copy. Successfully published
+    /// recovery files remain available when a later operation fails.
+    pub fn apply_adoption_verified<T>(
+        &self,
+        plan: &Plan,
+        paths: &RehearsalPaths,
+        read_legacy: impl Fn(&Connection) -> Result<Vec<LegacyMigration>, CheckError>,
+        capture: impl Fn(&Connection) -> Result<T, CheckError>,
+        verify: impl Fn(&Connection, T) -> Result<(), CheckError>,
+    ) -> Result<RehearsalReport, Error> {
+        self.apply_verified_plan(
+            plan,
+            paths,
+            Some(&read_legacy),
+            capture,
+            verify,
+        )
+    }
+
+    fn apply_verified_plan<T>(
+        &self,
+        plan: &Plan,
+        paths: &RehearsalPaths,
+        read_legacy: Option<&LegacyReader<'_>>,
+        capture: impl Fn(&Connection) -> Result<T, CheckError>,
+        verify: impl Fn(&Connection, T) -> Result<(), CheckError>,
+    ) -> Result<RehearsalReport, Error> {
+        self.apply_with_preparation(
+            plan,
+            read_legacy,
+            || self.rehearse_copy(plan, paths, read_legacy, &capture, &verify),
+            &capture,
+            &verify,
+        )
+        .map_err(|source| Error::VerifiedApply {
+            snapshot_path: paths.snapshot.clone(),
+            copy_path: paths.copy.clone(),
+            source: Box::new(source),
+        })
+    }
+
     /// Rehearse a reviewed plan on a verified copy without changing its source.
     ///
     /// Project checks run on the copy under the same transaction rules as
