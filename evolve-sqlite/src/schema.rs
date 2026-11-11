@@ -177,6 +177,12 @@ fn tokens(sql: &str) -> Result<Vec<String>, Error> {
                 at += 1;
             }
             result.push(sql[start..at].to_owned());
+        } else if byte.is_ascii_digit()
+            || (byte == b'.'
+                && bytes.get(at + 1).is_some_and(u8::is_ascii_digit))
+        {
+            at = numeric_end(bytes, at);
+            result.push(sql[start..at].to_ascii_lowercase());
         } else if byte.is_ascii_alphanumeric() || byte == b'_' || byte >= 128 {
             at += 1;
             while at < bytes.len()
@@ -204,11 +210,113 @@ fn tokens(sql: &str) -> Result<Vec<String>, Error> {
     Ok(result)
 }
 
+/// Follow the numeric token boundaries in SQLite 3.54.1 sqlite3GetToken,
+/// cases CC_DOT and CC_DIGIT. Underscore placement and numeric validity remain
+/// SQLite parser checks; no whitespace/comment can be absorbed into a token.
+/// https://www.sqlite.org/lang_expr.html#literal_values_constants_
+fn numeric_end(bytes: &[u8], start: usize) -> usize {
+    let mut at = start;
+    if bytes.get(start) == Some(&b'0')
+        && matches!(bytes.get(start + 1), Some(b'x' | b'X'))
+        && bytes.get(start + 2).is_some_and(u8::is_ascii_hexdigit)
+    {
+        at += 3;
+        while bytes
+            .get(at)
+            .is_some_and(|byte| byte.is_ascii_hexdigit() || *byte == b'_')
+        {
+            at += 1;
+        }
+    } else {
+        while bytes
+            .get(at)
+            .is_some_and(|byte| byte.is_ascii_digit() || *byte == b'_')
+        {
+            at += 1;
+        }
+        if bytes.get(at) == Some(&b'.') {
+            at += 1;
+            while bytes
+                .get(at)
+                .is_some_and(|byte| byte.is_ascii_digit() || *byte == b'_')
+            {
+                at += 1;
+            }
+        }
+        if matches!(bytes.get(at), Some(b'e' | b'E')) {
+            let digits = at
+                + 1
+                + usize::from(matches!(bytes.get(at + 1), Some(b'+' | b'-')));
+            if bytes.get(digits).is_some_and(u8::is_ascii_digit) {
+                at = digits + 1;
+                while bytes
+                    .get(at)
+                    .is_some_and(|byte| byte.is_ascii_digit() || *byte == b'_')
+                {
+                    at += 1;
+                }
+            }
+        }
+    }
+    // SQLite consumes trailing identifier bytes into an illegal numeric token.
+    // Valid schema SQL has already passed SQLite's parser, but retain those
+    // boundaries conservatively if a corrupted stored definition contains one.
+    while bytes.get(at).is_some_and(|byte| {
+        byte.is_ascii_alphanumeric()
+            || matches!(*byte, b'_' | b'$')
+            || *byte >= 128
+    }) {
+        at += 1;
+    }
+    at
+}
+
 #[cfg(test)]
 mod tests {
     use super::tokens;
     use crate::CheckError;
     type TestResult = Result<(), CheckError>;
+
+    /// Every supported numeric form is one complete token. Separating an
+    /// exponent or decimal component must not collapse to the same tokens.
+    #[test]
+    fn numeric_literal_tokens_preserve_adjacency() -> TestResult {
+        for literal in [
+            ".5",
+            "1.",
+            "1.e2",
+            "1e+2",
+            "1.e-2",
+            "0xAb",
+            "1_000",
+            "0xDE_AD",
+            "1_2.3_4e+5_6",
+        ] {
+            assert_eq!(
+                tokens(literal)?,
+                [literal.to_ascii_lowercase()],
+                "{literal}"
+            );
+        }
+        for (contiguous, separated) in [
+            ("1.e2", "1. e2"),
+            ("1.e2", "1./**/e2"),
+            (".5e2", ".5 e2"),
+            (".5e2", ".5/**/e2"),
+            ("1e+2", "1 e + 2"),
+            ("1.e-2", "1. e -2"),
+            ("0xAB", "0 xAB"),
+            ("1_000", "1 _000"),
+            ("0xDE_AD", "0xDE _AD"),
+        ] {
+            assert_ne!(
+                tokens(contiguous)?,
+                tokens(separated)?,
+                "{contiguous} vs {separated}"
+            );
+        }
+        Ok(())
+    }
 
     /// Formatting normalization must not merge tokens or change quoted values.
     #[test]

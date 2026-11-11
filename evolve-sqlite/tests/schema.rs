@@ -160,3 +160,54 @@ fn blob_literal_is_distinct_from_identifier_and_string() -> TestResult {
     );
     Ok(())
 }
+
+/// Whitespace or a comment can separate a numeric exponent into an alias.
+/// SQLite accepts both views with the same column name but different values.
+#[test]
+fn numeric_literal_boundaries_detect_changed_view_results() -> TestResult {
+    for (literal, separated, expected_value, actual_value) in [
+        ("1.e2", "1. e2", 100.0, 1.0),
+        ("1.e2", "1./**/e2", 100.0, 1.0),
+        (".5e2", ".5 e2", 50.0, 0.5),
+        (".5e2", ".5/**/e2", 50.0, 0.5),
+    ] {
+        let expected_sql =
+            format!("CREATE VIEW sample(value) AS SELECT {literal};");
+        let expected = Schema::from_sql(&expected_sql)?;
+        let reference = Connection::open_in_memory()?;
+        reference.execute_batch(&expected_sql)?;
+        assert_eq!(
+            reference.query_row("SELECT value FROM sample", [], |r| r
+                .get::<_, f64>(0))?,
+            expected_value
+        );
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch(&format!(
+            "CREATE VIEW sample(value) AS SELECT {separated};"
+        ))?;
+        assert_eq!(
+            conn.query_row("SELECT value FROM sample", [], |r| r
+                .get::<_, f64>(0))?,
+            actual_value
+        );
+        assert!(matches!(expected.verify(&conn), Err(Error::Drift(_))));
+    }
+    // Validate supported syntax using the same bundled SQLite as comparison.
+    for literal in [
+        ".5",
+        "1.",
+        "1e+2",
+        "1.e-2",
+        "0xAb",
+        "1_000",
+        "0xDE_AD",
+        "1_2.3_4e+5_6",
+    ] {
+        let ddl = format!("CREATE VIEW sample(value) AS SELECT {literal};");
+        let expected = Schema::from_sql(&ddl)?;
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch(&ddl)?;
+        expected.verify(&conn)?;
+    }
+    Ok(())
+}
