@@ -213,3 +213,156 @@ fn trigger_bodies_and_fts_work_with_the_sql_authorizer() {
         Ok(())
     }).unwrap();
 }
+
+mod adoption {
+    use super::*;
+    use evolve_sqlite::{CheckError, LegacyMigration};
+    use sha2::{Digest, Sha256};
+
+    fn legacy_database() -> NamedTempFile {
+        let db = NamedTempFile::new().unwrap();
+        let conn = Connection::open(db.path()).unwrap();
+        conn.execute_batch(INITIAL.sql).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE schema_migration (
+                version INTEGER PRIMARY KEY, name TEXT NOT NULL,
+                sha256 TEXT NOT NULL, applied_at INTEGER NOT NULL
+             ) STRICT;
+             PRAGMA user_version = 7;",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO schema_migration VALUES (7, 'legacy_initial', ?1, 123)",
+            [format!("{:x}", Sha256::digest(INITIAL.sql.as_bytes()))],
+        )
+        .unwrap();
+        db
+    }
+
+    fn read_legacy(
+        conn: &Connection,
+    ) -> Result<Vec<LegacyMigration>, CheckError> {
+        let version: i32 =
+            conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        let count: i64 = conn.query_row(
+            "SELECT count(*) FROM schema_migration",
+            [],
+            |row| row.get(0),
+        )?;
+        if version != 7 || count != 1 {
+            return Err(std::io::Error::other(
+                "unexpected legacy version or row count",
+            )
+            .into());
+        }
+        let (sha256, applied_at) = conn.query_row(
+            "SELECT sha256, applied_at FROM schema_migration
+             WHERE version = 7 AND name = 'legacy_initial'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        Ok(vec![LegacyMigration {
+            ordinal: 1,
+            name: INITIAL.name.to_owned(),
+            sha256,
+            applied_at,
+        }])
+    }
+
+    #[test]
+    fn adopts_a_renumbered_prefix_without_replaying_sql() {
+        let db = legacy_database();
+        let migrations = [INITIAL, UPGRADE];
+        let target = spec(&migrations);
+        assert!(matches!(
+            target.plan(db.path()),
+            Err(Error::AdoptionRequired)
+        ));
+
+        let plan = target.plan_adoption(db.path(), read_legacy).unwrap();
+        assert_eq!(plan.adopted()[0].applied_at, 123);
+        assert_eq!(plan.pending()[0].name, UPGRADE.name);
+        target
+            .apply_adoption(
+                &plan,
+                read_legacy,
+                |conn| Ok(rows(conn)?),
+                |conn, before| {
+                    assert_eq!(rows(conn)?, before);
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        assert!(target.plan(db.path()).unwrap().pending().is_empty());
+        let conn = Connection::open(db.path()).unwrap();
+        let evidence: (i64, i64) = conn.query_row(
+            "SELECT (SELECT applied_at FROM evolve_sqlite_migration WHERE ordinal = 1),
+                    (SELECT version FROM schema_migration)",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        ).unwrap();
+        assert_eq!(evidence, (123, 7));
+    }
+
+    #[test]
+    fn adoption_stamps_the_identity_when_no_sql_is_pending() {
+        let db = legacy_database();
+        let target = spec(&[INITIAL]);
+        let plan = target.plan_adoption(db.path(), read_legacy).unwrap();
+        assert!(plan.pending().is_empty());
+        target
+            .apply_adoption(&plan, read_legacy, |_| Ok(()), |_, ()| Ok(()))
+            .unwrap();
+        assert!(target.plan(db.path()).unwrap().pending().is_empty());
+        assert!(matches!(
+            target.plan_adoption(db.path(), read_legacy),
+            Err(Error::NotLegacy)
+        ));
+    }
+
+    #[test]
+    fn rejects_drift_and_stale_legacy_evidence() {
+        let db = legacy_database();
+        let target = spec(&[INITIAL]);
+        let plan = target.plan_adoption(db.path(), read_legacy).unwrap();
+        let conn = Connection::open(db.path()).unwrap();
+        conn.execute("UPDATE schema_migration SET applied_at = 456", [])
+            .unwrap();
+        assert!(matches!(
+            target.apply_adoption(
+                &plan,
+                read_legacy,
+                |_| Ok(()),
+                |_, ()| Ok(())
+            ),
+            Err(Error::StalePlan)
+        ));
+        conn.execute("UPDATE schema_migration SET sha256 = 'changed'", [])
+            .unwrap();
+        assert!(matches!(
+            target.plan_adoption(db.path(), read_legacy),
+            Err(Error::Drift(_))
+        ));
+    }
+
+    #[test]
+    fn failed_adoption_leaves_original_history_and_identity_unchanged() {
+        let db = legacy_database();
+        let migrations = [INITIAL, UPGRADE];
+        let target = spec(&migrations);
+        let plan = target.plan_adoption(db.path(), read_legacy).unwrap();
+        let result = target.apply_adoption(
+            &plan,
+            read_legacy,
+            |_| Ok(()),
+            |_, ()| Err(std::io::Error::other("rejected adoption").into()),
+        );
+        assert!(matches!(result, Err(Error::Verification(_))));
+        assert_eq!(target.plan_adoption(db.path(), read_legacy).unwrap(), plan);
+        assert!(matches!(
+            target.plan(db.path()),
+            Err(Error::AdoptionRequired)
+        ));
+    }
+}

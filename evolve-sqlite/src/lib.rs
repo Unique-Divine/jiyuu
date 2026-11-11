@@ -10,7 +10,9 @@
 //!
 //! The plan binds the path, schema, and migration history. Row changes can
 //! continue after planning. Applications check relevant rows with the
-//! callbacks in [`Spec::apply`], which run under the write transaction.
+//! callbacks in [`Spec::apply`], which run under the write transaction. A
+//! deployment that needs to distinguish otherwise identical database instances
+//! should bind its release to a project-specific database identity.
 
 use std::{
     path::{Path, PathBuf},
@@ -32,6 +34,9 @@ const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// An error returned by a project check inside the migration transaction.
 pub type CheckError = Box<dyn std::error::Error + Send + Sync>;
+
+type LegacyReader<'a> =
+    dyn Fn(&Connection) -> Result<Vec<LegacyMigration>, CheckError> + 'a;
 
 /// A frozen migration embedded by the application.
 #[derive(Clone, Copy, Debug)]
@@ -57,6 +62,15 @@ pub struct PlannedMigration {
     pub sha256: String,
 }
 
+/// Project-validated evidence of a legacy migration, mapped to its new name.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LegacyMigration {
+    pub ordinal: i64,
+    pub name: String,
+    pub sha256: String,
+    pub applied_at: i64,
+}
+
 /// The database state and migration list observed during planning.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Plan {
@@ -65,11 +79,16 @@ pub struct Plan {
     state: DatabaseState,
     migrations: Vec<PlannedMigration>,
     applied: usize,
+    legacy: Vec<LegacyMigration>,
 }
 
 impl Plan {
     pub fn pending(&self) -> &[PlannedMigration] {
         &self.migrations[self.applied..]
+    }
+
+    pub fn adopted(&self) -> &[LegacyMigration] {
+        &self.legacy
     }
 }
 
@@ -84,6 +103,10 @@ pub enum Error {
         "unmarked database contains existing state and requires explicit adoption"
     )]
     AdoptionRequired,
+    #[error("expected an unmarked legacy database with an existing schema")]
+    NotLegacy,
+    #[error("legacy history validation failed: {0}")]
+    LegacyValidation(#[source] CheckError),
     #[error("database migration {0} is newer than this spec")]
     Ahead(String),
     #[error("migration ledger drift: {0}")]
@@ -126,11 +149,35 @@ impl Spec<'_> {
     /// file with existing schema or a nonzero `user_version` needs a separate
     /// adoption procedure.
     pub fn plan(&self, path: impl AsRef<Path>) -> Result<Plan, Error> {
+        self.read_plan(path.as_ref(), None)
+    }
+
+    /// Plan explicit adoption of an unmarked legacy database.
+    ///
+    /// The project callback validates the old schema and original history,
+    /// then returns the applied entries mapped to the exact names and checksums
+    /// of an initial prefix of this spec. Entries can have different ordinals
+    /// in the original history. The engine preserves the original ledger.
+    pub fn plan_adoption(
+        &self,
+        path: impl AsRef<Path>,
+        read_legacy: impl Fn(&Connection) -> Result<Vec<LegacyMigration>, CheckError>,
+    ) -> Result<Plan, Error> {
+        self.read_plan(path.as_ref(), Some(&read_legacy))
+    }
+
+    fn read_plan(
+        &self,
+        path: &Path,
+        read_legacy: Option<&LegacyReader<'_>>,
+    ) -> Result<Plan, Error> {
         let migrations = self.validate()?;
-        let path = path.as_ref().canonicalize()?;
+        let path = path.canonicalize()?;
         let mut conn = open(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let authorizer = Authorizer::install(&mut conn)?;
         let tx = conn.transaction()?;
-        self.plan_on(&tx, path, migrations)
+        let _restricted = authorizer.restrict(Phase::Verification);
+        self.plan_on(&tx, path, migrations, read_legacy)
     }
 
     /// Apply a plan and compare project data within the write transaction.
@@ -145,19 +192,44 @@ impl Spec<'_> {
         capture: impl FnOnce(&Connection) -> Result<T, CheckError>,
         verify: impl FnOnce(&Connection, T) -> Result<(), CheckError>,
     ) -> Result<(), Error> {
+        self.apply_plan(plan, None, capture, verify)
+    }
+
+    /// Revalidate legacy history and adopt it in the migration transaction.
+    ///
+    /// The project supplies the same validation it used to plan the adoption.
+    /// The engine records the verified legacy prefix, then runs any pending
+    /// migrations. The verification callback can reject the entire operation.
+    pub fn apply_adoption<T>(
+        &self,
+        plan: &Plan,
+        read_legacy: impl Fn(&Connection) -> Result<Vec<LegacyMigration>, CheckError>,
+        capture: impl FnOnce(&Connection) -> Result<T, CheckError>,
+        verify: impl FnOnce(&Connection, T) -> Result<(), CheckError>,
+    ) -> Result<(), Error> {
+        self.apply_plan(plan, Some(&read_legacy), capture, verify)
+    }
+
+    fn apply_plan<T>(
+        &self,
+        plan: &Plan,
+        read_legacy: Option<&LegacyReader<'_>>,
+        capture: impl FnOnce(&Connection) -> Result<T, CheckError>,
+        verify: impl FnOnce(&Connection, T) -> Result<(), CheckError>,
+    ) -> Result<(), Error> {
         let migrations = self.validate()?;
         let mut conn = open(&plan.path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         let authorizer = Authorizer::install(&mut conn)?;
         let tx =
             conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let current = self.plan_on(&tx, plan.path.clone(), migrations)?;
-        if &current != plan {
-            return Err(Error::StalePlan);
-        }
-
         let baseline = {
             let _restricted = authorizer.restrict(Phase::Verification);
+            let current =
+                self.plan_on(&tx, plan.path.clone(), migrations, read_legacy)?;
+            if &current != plan {
+                return Err(Error::StalePlan);
+            }
             capture(&tx).map_err(Error::Verification)?
         };
 
@@ -172,6 +244,13 @@ impl Spec<'_> {
                     outcome TEXT NOT NULL CHECK (outcome = 'applied')
                 ) STRICT",
             )?;
+            for migration in &plan.legacy {
+                tx.execute(
+                    "INSERT INTO evolve_sqlite_migration (ordinal, name, sha256, applied_at, outcome)
+                     VALUES (?1, ?2, ?3, ?4, 'applied')",
+                    (migration.ordinal, &migration.name, &migration.sha256, migration.applied_at),
+                )?;
+            }
         }
 
         for (index, migration) in
@@ -193,7 +272,7 @@ impl Spec<'_> {
             )?;
         }
 
-        if !plan.pending().is_empty() {
+        if !plan.pending().is_empty() || !plan.legacy.is_empty() {
             tx.pragma_update(
                 None,
                 "user_version",
@@ -258,6 +337,7 @@ impl Spec<'_> {
         conn: &Connection,
         path: PathBuf,
         migrations: Vec<PlannedMigration>,
+        read_legacy: Option<&LegacyReader<'_>>,
     ) -> Result<Plan, Error> {
         let application_id: i32 =
             conn.pragma_query_value(None, "application_id", |r| r.get(0))?;
@@ -280,7 +360,27 @@ impl Spec<'_> {
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
 
-        let applied = if application_id == 0 {
+        let legacy = if let Some(read_legacy) = read_legacy {
+            if application_id != 0 || schema.is_empty() {
+                return Err(Error::NotLegacy);
+            }
+            if schema
+                .iter()
+                .any(|object| object.name.eq_ignore_ascii_case(LEDGER))
+            {
+                return Err(Error::Drift(format!(
+                    "legacy schema already contains {LEDGER}"
+                )));
+            }
+            let legacy = read_legacy(conn).map_err(Error::LegacyValidation)?;
+            validate_legacy(&legacy, &migrations)?;
+            legacy
+        } else {
+            Vec::new()
+        };
+        let applied = if !legacy.is_empty() {
+            legacy.len()
+        } else if application_id == 0 {
             if user_version != 0 || !schema.is_empty() {
                 return Err(Error::AdoptionRequired);
             }
@@ -310,6 +410,7 @@ impl Spec<'_> {
             },
             migrations,
             applied,
+            legacy,
         })
     }
 }
@@ -321,6 +422,29 @@ fn open(path: &Path, mode: OpenFlags) -> Result<Connection, Error> {
     )?;
     conn.busy_timeout(BUSY_TIMEOUT)?;
     Ok(conn)
+}
+
+fn validate_legacy(
+    legacy: &[LegacyMigration],
+    expected: &[PlannedMigration],
+) -> Result<(), Error> {
+    if legacy.is_empty() || legacy.len() > expected.len() {
+        return Err(Error::Drift(
+            "legacy history must map to a nonempty migration prefix".into(),
+        ));
+    }
+    for (index, (legacy, migration)) in legacy.iter().zip(expected).enumerate() {
+        if legacy.ordinal != index as i64 + 1
+            || legacy.name != migration.name
+            || legacy.sha256 != migration.sha256
+        {
+            return Err(Error::Drift(format!(
+                "legacy history entry {:?} does not match migration {}",
+                legacy.name, migration.name,
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn validate_history(
