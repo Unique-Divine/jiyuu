@@ -40,6 +40,9 @@ use rusqlite::{
 };
 use sha2::{Digest, Sha256};
 
+mod rehearsal;
+pub use rehearsal::{RehearsalPaths, RehearsalReport};
+
 const MIGRATION_HISTORY_TABLE: &str = "evolve_sqlite_migration";
 // This engine-owned table records committed migrations in ordinal order, with
 // their frozen SQL checksum and application time. Keep its name and DDL bytes
@@ -154,6 +157,31 @@ impl Plan {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
+    /// Another migration operation holds the advisory lock for this database.
+    #[error("another migration holds the lock at {path}")]
+    Locked { path: PathBuf },
+    /// Rehearsal failed; paths identify requested artifacts, which may not exist.
+    /// Inspect the nested error and retained files before choosing retry paths.
+    #[error(
+        "rehearsal failed; snapshot {snapshot_path}, copy {copy_path}: {source}"
+    )]
+    Rehearsal {
+        snapshot_path: PathBuf,
+        copy_path: PathBuf,
+        source: Box<Error>,
+    },
+    /// A guarded operation failed before live commit and retains published files.
+    /// Requested paths alone do not prove that either artifact was published.
+    #[error(
+        "verified apply failed; snapshot {snapshot_path}, copy {copy_path}: {source}"
+    )]
+    VerifiedApply {
+        snapshot_path: PathBuf,
+        copy_path: PathBuf,
+        source: Box<Error>,
+    },
+    #[error(transparent)]
+    Backup(#[from] backup::BackupError),
     #[error("invalid migration spec: {0}")]
     InvalidSpec(String),
     #[error("expected database application_id {expected}, got {actual}")]
@@ -179,6 +207,8 @@ pub enum Error {
     },
     #[error("foreign key check failed")]
     ForeignKeyViolation,
+    #[error("database integrity check failed: {0}")]
+    IntegrityCheck(String),
     #[error("database verification failed: {0}")]
     Verification(#[source] CheckError),
     #[error(transparent)]
@@ -188,9 +218,16 @@ pub enum Error {
 }
 
 impl Error {
-    /// Stable identifiers for callers that present structured errors.
+    /// Stable failure categories for logs and caller decisions.
+    ///
+    /// Backup, rehearsal, and verified-apply wrappers return the underlying
+    /// failure code. Inspect the error variant for operation and artifact paths.
     pub fn code(&self) -> &'static str {
         match self {
+            Self::Locked { .. } => "migration_locked",
+            Self::Backup(source) => source.code(),
+            Self::Rehearsal { source, .. } => source.code(),
+            Self::VerifiedApply { source, .. } => source.code(),
             Self::InvalidSpec(_) => "invalid_spec",
             Self::WrongDatabase { .. } => "wrong_database",
             Self::AdoptionRequired => "adoption_required",
@@ -201,6 +238,7 @@ impl Error {
             Self::StalePlan => "stale_plan",
             Self::Migration { .. } => "migration",
             Self::ForeignKeyViolation => "foreign_key_violation",
+            Self::IntegrityCheck(_) => "integrity_check_failed",
             Self::Verification(_) => "verification",
             Self::Sqlite(_) => "sqlite",
             Self::Io(_) => "io",
@@ -323,6 +361,24 @@ impl Spec<'_> {
         capture: impl FnOnce(&Connection) -> Result<T, CheckError>,
         verify: impl FnOnce(&Connection, T) -> Result<(), CheckError>,
     ) -> Result<(), Error> {
+        self.apply_with_preparation(
+            plan,
+            read_legacy,
+            || Ok(()),
+            capture,
+            verify,
+        )
+    }
+
+    fn apply_with_preparation<T, R>(
+        &self,
+        plan: &Plan,
+        read_legacy: Option<&LegacyReader<'_>>,
+        prepare: impl FnOnce() -> Result<R, Error>,
+        capture: impl FnOnce(&Connection) -> Result<T, CheckError>,
+        verify: impl FnOnce(&Connection, T) -> Result<(), CheckError>,
+    ) -> Result<R, Error> {
+        let _lock = rehearsal::MigrationLock::acquire(&plan.path)?;
         let migrations = self.validate()?;
         let mut conn = open(&plan.path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
@@ -339,6 +395,7 @@ impl Spec<'_> {
             }
             capture(&tx).map_err(Error::Verification)?
         };
+        let preparation = prepare()?;
 
         if plan.state.application_id == 0 {
             tx.pragma_update(None, "application_id", self.application_id)?;
@@ -384,13 +441,18 @@ impl Spec<'_> {
         if foreign_key_violation {
             return Err(Error::ForeignKeyViolation);
         }
+        let integrity: String =
+            tx.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+        if integrity != "ok" {
+            return Err(Error::IntegrityCheck(integrity));
+        }
         {
             let _restricted =
                 authorizer.restrict_to(SqlPermissionMode::ProjectCheck);
             verify(&tx, baseline).map_err(Error::Verification)?;
         }
         tx.commit()?;
-        Ok(())
+        Ok(preparation)
     }
 
     fn validate(&self) -> Result<Vec<PlannedMigration>, Error> {

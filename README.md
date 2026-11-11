@@ -6,6 +6,7 @@
 
 | Path | Description |
 | ---- | ----------- |
+| [evolve-sqlite](./evolve-sqlite/README.md) | SQLite migration planning, verified backups, rehearsal, and guarded apply |
 | [mcp](./mcp/README.md) | Slack and Telegram MCP servers, with source baselines for upstream comparison |
 | <span style="white-space: nowrap;">📂 [ai-skills](./ai-skills/)</span> | Cursor/LLM agent skills for recurring workflows, repo navigation, PRs, chain queries, and data lookups |
 | <span style="white-space: nowrap;">📂 [algos](./algos/algos-notes.md)</span> | Algorithm practice problems with Go implementations and Anki-formatted notes for deliberate practice |

@@ -34,11 +34,12 @@ rollback of committed changes.
    bytes once it has been applied.
 2. Call `Spec::plan` on an existing SQLite file. Review the pending names
    and checksums. To initialize a database, use an empty file.
-3. Call `Spec::apply` with the reviewed plan and two project checks. The
-   first captures a baseline and the second compares it with the migrated
-   state. The engine checks the plan again under a write transaction.
-   Migration SQL, history changes, and the project checks share that
-   transaction.
+3. Call `Spec::apply_verified` with the reviewed plan, unused backup and
+   copy destinations, and two project checks. The first captures a baseline
+   and the second compares it with the migrated state. The engine checks
+   the plan again under a write transaction, creates a verified snapshot,
+   and rehearses on a copy before executing the live SQL. Migration SQL,
+   history changes, and the project checks share the live transaction.
 
 The `Spec` struct holds the database kind's identity and complete migration
 sequence. Constructing it executes no SQL. Choose a distinct `application_id`
@@ -77,7 +78,7 @@ protect the engine's transaction and metadata.
 
 ## Adopt a Legacy Database
 
-Use `Spec::plan_adoption` and `Spec::apply_adoption` with the same
+Use `Spec::plan_adoption` and `Spec::apply_adoption_verified` with the same
 project-specific validator. The validator checks the old schema and
 history and returns `LegacyMigration` entries mapped to the spec's initial
 migration sequence. Each entry is evidence of SQL or a project operation
@@ -114,6 +115,42 @@ file exists, but its directory sync failed, so its survival across a crash is
 uncertain. The variant contains the published path. Missing source or parent
 paths return `BackupError::Io` with the filesystem error.
 
+## Rehearse and Apply
+
+Call method `Spec::rehearse` with the reviewed plan, a `RehearsalPaths` struct, and the
+project checks. The engine keeps an unchanged snapshot and migrates a
+second copy. `Spec::rehearse_adoption` also reruns the legacy validator.
+All successful artifacts remain available if a later step fails. Choose
+fresh destination paths when retrying. The application owns retention.
+
+Methods `Spec::apply_verified` and `Spec::apply_adoption_verified` hold the
+source write reservation throughout snapshot, rehearsal, and live execution.
+This keeps the snapshot at the last committed state before migration and excludes application writers
+until commit or rollback. Both project checks must support repeated calls.
+The live baseline is captured before the snapshot, the copy gets its own
+baseline, and each verifier checks its corresponding baseline. Legacy
+validation runs separately on source and copy. Methods `Spec::apply` and
+`Spec::apply_adoption` remain available for executing prepared copies.
+
+Apply and rehearsal hold an exclusive advisory lock beside the canonical
+database path. The lock file stays in place after release so concurrent
+processes use the same lock. SQLite transactions exclude other writers
+during migration. Participating migrators must use the same canonical
+path. The engine checks foreign keys, database integrity, and the project
+verifier before committing. A project that requires exact schema matching
+supplies that check in its verifier.
+
+The engine rejects `DROP TABLE` while foreign-key enforcement is on
+because a table rebuild can cascade-delete dependent rows. Production
+integration, table rebuild support, repeatable SQL, and down migrations
+require separate work.
+
+Error variants `Error::Rehearsal` and `Error::VerifiedApply` retain the
+requested artifact paths and nested cause. A requested path may not exist if
+an earlier step failed. Their `code()` results identify the underlying failure,
+such as `stale_plan` or `verification`; inspect the variant to identify the
+operation. Published files remain available for inspection and recovery.
+
 ## Check the Crate
 
 From the crate directory, run command `just check` for formatting, Clippy, and
@@ -125,9 +162,3 @@ Migration tests cover history and row preservation, stale plans, legacy
 adoption, and transaction rollback. Backup tests cover live WAL data,
 verification failures, occupied destination paths, concurrent publication,
 and failures before and after publication.
-
-The caller arranges backup and rehearsal before apply. The engine rejects
-`DROP TABLE` while foreign-key enforcement is on because a table rebuild can
-cascade-delete dependent rows. Production integration, engine-managed
-rehearsal, table rebuild support, repeatable SQL, and down migrations require
-separate work.

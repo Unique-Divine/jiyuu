@@ -1,0 +1,227 @@
+//! Rehearse migrations against verified copies before applying them.
+
+use std::{
+    fs::{File, OpenOptions, TryLockError},
+    path::{Path, PathBuf},
+};
+
+use rusqlite::Connection;
+
+use crate::{
+    CheckError, Error, LegacyMigration, LegacyReader, Plan, Spec, backup,
+};
+
+/// Destinations selected by the application for one migration attempt.
+///
+/// Both paths must be unused. The snapshot remains an unchanged recovery
+/// image, while the copy holds the rehearsal result. The application retains
+/// or removes these files according to its own backup policy.
+#[derive(Clone, Debug)]
+pub struct RehearsalPaths {
+    /// Unused destination for the unchanged, verified recovery snapshot.
+    pub snapshot: PathBuf,
+    /// Unused destination for the copy that receives migration SQL.
+    pub copy: PathBuf,
+}
+
+/// Files retained after a successful rehearsal or verified apply.
+#[derive(Debug)]
+pub struct RehearsalReport {
+    /// Metadata for the unchanged recovery snapshot.
+    pub snapshot: backup::Snapshot,
+    /// Canonical path of the migrated rehearsal database.
+    pub copy_path: PathBuf,
+}
+
+/// An exclusive advisory lock shared by every engine migration entry point.
+///
+/// The file remains after unlocking. Removing it could let concurrent
+/// processes acquire locks on different files under the same name.
+pub(crate) struct MigrationLock {
+    _file: File,
+}
+
+impl MigrationLock {
+    pub(crate) fn acquire(database: &Path) -> Result<Self, Error> {
+        let mut name = database.as_os_str().to_owned();
+        name.push(".evolve-sqlite.lock");
+        let path = PathBuf::from(name);
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if !metadata.is_file() => {
+                return Err(std::io::Error::other(
+                    "migration lock must be a regular file",
+                )
+                .into());
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options.open(&path)?;
+        let link_metadata = std::fs::symlink_metadata(&path)?;
+        if !link_metadata.is_file() || !file.metadata()?.is_file() {
+            return Err(std::io::Error::other(
+                "migration lock must be a regular file",
+            )
+            .into());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let opened = file.metadata()?;
+            if opened.dev() != link_metadata.dev()
+                || opened.ino() != link_metadata.ino()
+            {
+                return Err(std::io::Error::other(
+                    "migration lock changed while opening",
+                )
+                .into());
+            }
+        }
+        match file.try_lock() {
+            Ok(()) => Ok(Self { _file: file }),
+            Err(TryLockError::WouldBlock) => Err(Error::Locked { path }),
+            Err(TryLockError::Error(error)) => Err(error.into()),
+        }
+    }
+}
+
+impl Spec<'_> {
+    /// Back up, rehearse, and apply while holding the source write reservation.
+    ///
+    /// The source plan and its project baseline are checked before the
+    /// snapshot. Other writers remain excluded until commit or rollback.
+    /// An immediate SQLite transaction reserves the live source for writing
+    /// before the snapshot and retains that reservation through commit.
+    /// Capture and verify run independently on the live database and the
+    /// rehearsal copy, so callbacks must support multiple invocations.
+    pub fn apply_verified<T>(
+        &self,
+        plan: &Plan,
+        paths: &RehearsalPaths,
+        capture: impl Fn(&Connection) -> Result<T, CheckError>,
+        verify: impl Fn(&Connection, T) -> Result<(), CheckError>,
+    ) -> Result<RehearsalReport, Error> {
+        self.apply_verified_plan(plan, paths, None, capture, verify)
+    }
+
+    /// Back up, rehearse, and apply explicit adoption in one guarded operation.
+    ///
+    /// Legacy validation runs on both source and copy. Successfully published
+    /// recovery files remain available when a later operation fails.
+    pub fn apply_adoption_verified<T>(
+        &self,
+        plan: &Plan,
+        paths: &RehearsalPaths,
+        read_legacy: impl Fn(&Connection) -> Result<Vec<LegacyMigration>, CheckError>,
+        capture: impl Fn(&Connection) -> Result<T, CheckError>,
+        verify: impl Fn(&Connection, T) -> Result<(), CheckError>,
+    ) -> Result<RehearsalReport, Error> {
+        self.apply_verified_plan(
+            plan,
+            paths,
+            Some(&read_legacy),
+            capture,
+            verify,
+        )
+    }
+
+    fn apply_verified_plan<T>(
+        &self,
+        plan: &Plan,
+        paths: &RehearsalPaths,
+        read_legacy: Option<&LegacyReader<'_>>,
+        capture: impl Fn(&Connection) -> Result<T, CheckError>,
+        verify: impl Fn(&Connection, T) -> Result<(), CheckError>,
+    ) -> Result<RehearsalReport, Error> {
+        self.apply_with_preparation(
+            plan,
+            read_legacy,
+            || self.rehearse_copy(plan, paths, read_legacy, &capture, &verify),
+            &capture,
+            &verify,
+        )
+        .map_err(|source| Error::VerifiedApply {
+            snapshot_path: paths.snapshot.clone(),
+            copy_path: paths.copy.clone(),
+            source: Box::new(source),
+        })
+    }
+
+    /// Rehearse a reviewed plan on a verified copy without changing its source.
+    ///
+    /// Project checks run on the copy under the same transaction rules as
+    /// ordinary apply. Successfully published files remain on later errors.
+    pub fn rehearse<T>(
+        &self,
+        plan: &Plan,
+        paths: &RehearsalPaths,
+        capture: impl FnOnce(&Connection) -> Result<T, CheckError>,
+        verify: impl FnOnce(&Connection, T) -> Result<(), CheckError>,
+    ) -> Result<RehearsalReport, Error> {
+        self.rehearse_plan(plan, paths, None, capture, verify)
+    }
+
+    /// Rehearse legacy adoption using the validator from planning.
+    ///
+    /// The validator checks the copied legacy history before adoption. The
+    /// source remains unchanged, and published recovery files remain on error.
+    pub fn rehearse_adoption<T>(
+        &self,
+        plan: &Plan,
+        paths: &RehearsalPaths,
+        read_legacy: impl Fn(&Connection) -> Result<Vec<LegacyMigration>, CheckError>,
+        capture: impl FnOnce(&Connection) -> Result<T, CheckError>,
+        verify: impl FnOnce(&Connection, T) -> Result<(), CheckError>,
+    ) -> Result<RehearsalReport, Error> {
+        self.rehearse_plan(plan, paths, Some(&read_legacy), capture, verify)
+    }
+
+    fn rehearse_plan<T>(
+        &self,
+        plan: &Plan,
+        paths: &RehearsalPaths,
+        read_legacy: Option<&LegacyReader<'_>>,
+        capture: impl FnOnce(&Connection) -> Result<T, CheckError>,
+        verify: impl FnOnce(&Connection, T) -> Result<(), CheckError>,
+    ) -> Result<RehearsalReport, Error> {
+        let _lock = MigrationLock::acquire(&plan.path)?;
+        if self.read_plan(&plan.path, read_legacy)? != *plan {
+            return Err(Error::StalePlan);
+        }
+        self.rehearse_copy(plan, paths, read_legacy, capture, verify)
+    }
+
+    pub(crate) fn rehearse_copy<T>(
+        &self,
+        plan: &Plan,
+        paths: &RehearsalPaths,
+        read_legacy: Option<&LegacyReader<'_>>,
+        capture: impl FnOnce(&Connection) -> Result<T, CheckError>,
+        verify: impl FnOnce(&Connection, T) -> Result<(), CheckError>,
+    ) -> Result<RehearsalReport, Error> {
+        let run = || {
+            let snapshot = backup::create(&plan.path, &paths.snapshot)?;
+            let copy = backup::create(&snapshot.path, &paths.copy)?;
+            let mut copied_plan = plan.clone();
+            copied_plan.path = copy.path;
+            self.apply_plan(&copied_plan, read_legacy, capture, verify)?;
+            Ok(RehearsalReport {
+                snapshot,
+                copy_path: copied_plan.path,
+            })
+        };
+        run().map_err(|source| Error::Rehearsal {
+            snapshot_path: paths.snapshot.clone(),
+            copy_path: paths.copy.clone(),
+            source: Box::new(source),
+        })
+    }
+}
