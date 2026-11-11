@@ -41,8 +41,27 @@ different numbering scheme. They check history and row preservation,
 checksum mismatch, stale plans, and rollback after failed SQL or a
 failed project check.
 
-The caller arranges backup and rehearsal for this slice. The engine
-rejects `DROP TABLE` while foreign-key enforcement is on because a table
-rebuild can cascade-delete dependent rows. Production integration,
-engine-managed rehearsal, table rebuild support, repeatable SQL, and
-down migrations have their own follow-up work.
+## Back Up and Rehearse
+
+Call `backup::create` with a source database and an unused destination to
+publish a verified SQLite snapshot, including committed rows in its WAL.
+The returned metadata includes the path, size, and SHA-256 digest.
+
+Call `Spec::rehearse` with the reviewed plan, `RehearsalPaths`, and the
+project checks. The engine keeps an unchanged snapshot and migrates a
+second copy. `Spec::rehearse_adoption` also reruns the legacy validator.
+All successful artifacts remain available if a later step fails. Choose
+fresh destination paths when retrying. The application owns retention.
+
+Apply and rehearsal hold an exclusive advisory lock beside the canonical
+database path. The lock file stays in place after release so concurrent
+processes use the same lock. SQLite transactions exclude other writers
+during migration. Participating migrators must use the same canonical
+path. The engine checks foreign keys, database integrity, and the project
+verifier before committing. A project that requires exact schema matching
+supplies that check in its verifier.
+
+The engine rejects `DROP TABLE` while foreign-key enforcement is on
+because a table rebuild can cascade-delete dependent rows. Production
+integration, table rebuild support, repeatable SQL, and down migrations
+have their own follow-up work.

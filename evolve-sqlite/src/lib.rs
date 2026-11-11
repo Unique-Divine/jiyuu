@@ -31,6 +31,9 @@ use rusqlite::{
 };
 use sha2::{Digest, Sha256};
 
+mod rehearsal;
+pub use rehearsal::{RehearsalPaths, RehearsalReport};
+
 const LEDGER: &str = "evolve_sqlite_migration";
 // Keep this DDL stable. SQLite stores it in sqlite_schema, where we check the
 // engine-owned format before reading any ledger rows.
@@ -109,6 +112,18 @@ impl Plan {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
+    #[error("another migration holds the lock at {path}")]
+    Locked { path: PathBuf },
+    #[error(
+        "rehearsal failed; snapshot {snapshot_path}, copy {copy_path}: {source}"
+    )]
+    Rehearsal {
+        snapshot_path: PathBuf,
+        copy_path: PathBuf,
+        source: Box<Error>,
+    },
+    #[error(transparent)]
+    Backup(#[from] backup::BackupError),
     #[error("invalid migration spec: {0}")]
     InvalidSpec(String),
     #[error("expected database application_id {expected}, got {actual}")]
@@ -134,6 +149,8 @@ pub enum Error {
     },
     #[error("foreign key check failed")]
     ForeignKeyViolation,
+    #[error("database integrity check failed: {0}")]
+    IntegrityCheck(String),
     #[error("database verification failed: {0}")]
     Verification(#[source] CheckError),
     #[error(transparent)]
@@ -146,6 +163,9 @@ impl Error {
     /// Stable identifiers for callers that present structured errors.
     pub fn code(&self) -> &'static str {
         match self {
+            Self::Locked { .. } => "migration_locked",
+            Self::Backup(source) => source.code(),
+            Self::Rehearsal { source, .. } => source.code(),
             Self::InvalidSpec(_) => "invalid_spec",
             Self::WrongDatabase { .. } => "wrong_database",
             Self::AdoptionRequired => "adoption_required",
@@ -156,6 +176,7 @@ impl Error {
             Self::StalePlan => "stale_plan",
             Self::Migration { .. } => "migration",
             Self::ForeignKeyViolation => "foreign_key_violation",
+            Self::IntegrityCheck(_) => "integrity_check_failed",
             Self::Verification(_) => "verification",
             Self::Sqlite(_) => "sqlite",
             Self::Io(_) => "io",
@@ -256,6 +277,7 @@ impl Spec<'_> {
         capture: impl FnOnce(&Connection) -> Result<T, CheckError>,
         verify: impl FnOnce(&Connection, T) -> Result<(), CheckError>,
     ) -> Result<(), Error> {
+        let _lock = rehearsal::MigrationLock::acquire(&plan.path)?;
         let migrations = self.validate()?;
         let mut conn = open(&plan.path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
@@ -314,6 +336,11 @@ impl Spec<'_> {
             tx.prepare("PRAGMA foreign_key_check")?.exists([])?;
         if foreign_key_violation {
             return Err(Error::ForeignKeyViolation);
+        }
+        let integrity: String =
+            tx.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+        if integrity != "ok" {
+            return Err(Error::IntegrityCheck(integrity));
         }
         {
             let _restricted = authorizer.restrict(Phase::Verification);
