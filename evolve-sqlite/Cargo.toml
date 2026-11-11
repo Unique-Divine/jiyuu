@@ -13,9 +13,7 @@ categories = ["database"]
 license = "MIT"
 
 [dependencies]
-rusqlite = { version = "0.41", features = ["bundled", "hooks"] }
+rusqlite = { version = "0.41", features = ["backup", "bundled", "hooks"] }
 sha2 = "0.10"
 thiserror = { workspace = true }
-
-[dev-dependencies]
 tempfile = "3"

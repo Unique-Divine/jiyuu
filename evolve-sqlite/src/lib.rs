@@ -23,6 +23,8 @@
 //! deployment that needs to distinguish otherwise identical database instances
 //! should bind its release to a project-specific database identity.
 
+pub mod backup;
+
 use std::{
     path::{Path, PathBuf},
     sync::{
@@ -183,6 +185,27 @@ pub enum Error {
     Sqlite(#[from] rusqlite::Error),
     #[error(transparent)]
     Io(#[from] std::io::Error),
+}
+
+impl Error {
+    /// Stable identifiers for callers that present structured errors.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::InvalidSpec(_) => "invalid_spec",
+            Self::WrongDatabase { .. } => "wrong_database",
+            Self::AdoptionRequired => "adoption_required",
+            Self::NotLegacy => "not_legacy",
+            Self::LegacyValidation(_) => "legacy_validation",
+            Self::Ahead(_) => "ahead",
+            Self::Drift(_) => "drift",
+            Self::StalePlan => "stale_plan",
+            Self::Migration { .. } => "migration",
+            Self::ForeignKeyViolation => "foreign_key_violation",
+            Self::Verification(_) => "verification",
+            Self::Sqlite(_) => "sqlite",
+            Self::Io(_) => "io",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
