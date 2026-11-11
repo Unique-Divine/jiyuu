@@ -54,8 +54,9 @@ second copy. `Spec::rehearse_adoption` also reruns the legacy validator.
 All successful artifacts remain available if a later step fails. Choose
 fresh destination paths when retrying. The application owns retention.
 
-The guarded apply methods hold the source write reservation throughout
-snapshot, rehearsal, and live execution. This keeps the snapshot at the
+Methods `Spec::apply_verified` and `Spec::apply_adoption_verified` hold the
+source write reservation throughout snapshot, rehearsal, and live execution.
+This keeps the snapshot at the
 last committed state before migration and excludes application writers
 until commit or rollback. Both project checks must support repeated calls.
 The live baseline is captured before the snapshot, the copy gets its own
