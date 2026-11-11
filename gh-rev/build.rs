@@ -55,6 +55,8 @@ fn main() {
             "--untracked-files=normal",
             "--",
             ".",
+            ":(top,literal)Cargo.toml",
+            ":(top,literal)Cargo.lock",
         ],
     )
     .map(|status| (!status.trim().is_empty()).to_string())

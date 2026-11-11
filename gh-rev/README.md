@@ -157,9 +157,9 @@ Command `gh-rev --version` prints package and Git provenance as JSON:
 }
 ```
 
-Field `dirty` is `null` when Git metadata was unavailable at build time. The
-dirty check is scoped to this `gh-rev` package rather than unrelated changes in
-the surrounding `jiyuu` repository.
+Field `dirty` reports changes in the `gh-rev` package and the workspace's root
+`Cargo.toml` and `Cargo.lock`. It is `null` when Git metadata was unavailable at
+build time.
 
 ## Install or update
 
