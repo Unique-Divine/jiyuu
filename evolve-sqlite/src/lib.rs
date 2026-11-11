@@ -130,6 +130,57 @@ pub struct LegacyMigration {
     pub applied_at: i64,
 }
 
+/// Reviewed permission to rebuild specific ordinary tables in `main`.
+///
+/// Rebuilding means copying rows into a replacement, dropping the old table,
+/// and renaming the replacement. SQLite must disable foreign-key enforcement
+/// before the transaction to avoid cascading deletes during the drop. Apply
+/// checks every foreign key again before commit. This policy permits drops,
+/// not data loss: project callbacks must verify the rows that must survive.
+///
+/// The policy is bound into the plan and follows it through rehearsal and
+/// apply. Ordinary planning has no policy and continues to reject table drops.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RebuildPolicy {
+    tables: Vec<String>,
+}
+
+impl RebuildPolicy {
+    /// Allow drops of these table names. Names are unqualified ASCII SQL
+    /// identifiers, compared without case. Engine history remains protected.
+    pub fn new(tables: &[&str]) -> Result<Self, Error> {
+        let mut names = Vec::new();
+        for table in tables {
+            if table.is_empty()
+                || !table.bytes().enumerate().all(|(index, byte)| {
+                    byte == b'_'
+                        || byte.is_ascii_alphabetic()
+                        || (index > 0 && byte.is_ascii_digit())
+                })
+                || table.eq_ignore_ascii_case(MIGRATION_HISTORY_TABLE)
+                || table.to_ascii_lowercase().starts_with("sqlite_")
+            {
+                return Err(Error::InvalidSpec(format!(
+                    "invalid rebuild table {table:?}"
+                )));
+            }
+            names.push(table.to_ascii_lowercase());
+        }
+        names.sort();
+        names.dedup();
+        Ok(Self { tables: names })
+    }
+
+    /// Table drops approved for this plan. An empty list means strict mode.
+    pub fn tables(&self) -> &[String] {
+        &self.tables
+    }
+
+    fn enabled(&self) -> bool {
+        !self.tables.is_empty()
+    }
+}
+
 /// The database state and migration list observed during planning.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Plan {
@@ -138,9 +189,15 @@ pub struct Plan {
     state: DatabaseState,
     migrations: Vec<PlannedMigration>,
     legacy: Vec<LegacyMigration>,
+    rebuilds: RebuildPolicy,
 }
 
 impl Plan {
+    /// Table rebuild permissions reviewed when this plan was created.
+    pub fn rebuilds(&self) -> &RebuildPolicy {
+        &self.rebuilds
+    }
+
     pub fn pending(&self) -> &[PlannedMigration] {
         &self.migrations[self.applied()..]
     }
@@ -271,7 +328,20 @@ impl Spec<'_> {
     /// file with existing schema or a nonzero `user_version` needs a separate
     /// adoption procedure.
     pub fn plan(&self, path: impl AsRef<Path>) -> Result<Plan, Error> {
-        self.read_plan(path.as_ref(), None)
+        self.read_plan(path.as_ref(), None, &RebuildPolicy::default())
+    }
+
+    /// Plan with explicit table rebuild permissions.
+    ///
+    /// Pending SQL may drop only the policy's named tables. The engine owns
+    /// foreign-key settings; SQL may toggle `legacy_alter_table` for SQLite's
+    /// rebuild recipe but cannot change `foreign_keys` itself.
+    pub fn plan_with_rebuilds(
+        &self,
+        path: impl AsRef<Path>,
+        rebuilds: &RebuildPolicy,
+    ) -> Result<Plan, Error> {
+        self.read_plan(path.as_ref(), None, rebuilds)
     }
 
     /// Plan explicit adoption of an unmarked legacy database.
@@ -288,22 +358,40 @@ impl Spec<'_> {
         path: impl AsRef<Path>,
         read_legacy: impl Fn(&Connection) -> Result<Vec<LegacyMigration>, CheckError>,
     ) -> Result<Plan, Error> {
-        self.read_plan(path.as_ref(), Some(&read_legacy))
+        self.read_plan(
+            path.as_ref(),
+            Some(&read_legacy),
+            &RebuildPolicy::default(),
+        )
+    }
+
+    /// Plan legacy adoption and pending table rebuilds together.
+    ///
+    /// Legacy validation has the same read-only contract as
+    /// [`Self::plan_adoption`]. Only pending SQL receives rebuild permissions.
+    pub fn plan_adoption_with_rebuilds(
+        &self,
+        path: impl AsRef<Path>,
+        rebuilds: &RebuildPolicy,
+        read_legacy: impl Fn(&Connection) -> Result<Vec<LegacyMigration>, CheckError>,
+    ) -> Result<Plan, Error> {
+        self.read_plan(path.as_ref(), Some(&read_legacy), rebuilds)
     }
 
     fn read_plan(
         &self,
         path: &Path,
         read_legacy: Option<&LegacyReader<'_>>,
+        rebuilds: &RebuildPolicy,
     ) -> Result<Plan, Error> {
         let migrations = self.validate()?;
         let path = path.canonicalize()?;
         let mut conn = open(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        let authorizer = SqlAuthorizer::install(&mut conn)?;
+        let authorizer = SqlAuthorizer::install(&mut conn, rebuilds)?;
         let tx = conn.transaction()?;
         let _restricted =
             authorizer.restrict_to(SqlPermissionMode::ProjectCheck);
-        self.plan_on(&tx, path, migrations, read_legacy)
+        self.plan_on(&tx, path, migrations, read_legacy, rebuilds)
     }
 
     /// Apply a plan and compare project data within the write transaction.
@@ -318,7 +406,8 @@ impl Spec<'_> {
     /// revalidating the plan and capturing the baseline. Engine permissions
     /// then allow identity and history initialization. Each pending SQL step
     /// runs with migration permissions, which prohibit transaction control,
-    /// attached databases, history-table writes, and table drops. Engine
+    /// attached databases, and history-table writes. Table drops require a
+    /// rebuild policy bound into the plan. Engine
     /// permissions record each completed step and check foreign keys. The final
     /// callback runs read-only, then engine permissions allow commit. Each
     /// restricted scope restores engine permissions when it exits, including
@@ -380,16 +469,20 @@ impl Spec<'_> {
     ) -> Result<R, Error> {
         let _lock = rehearsal::MigrationLock::acquire(&plan.path)?;
         let migrations = self.validate()?;
-        let mut conn = open(&plan.path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
-        conn.pragma_update(None, "foreign_keys", "ON")?;
-        let authorizer = SqlAuthorizer::install(&mut conn)?;
+        let mut conn = MigrationConnection::open(&plan.path, &plan.rebuilds)?;
+        let authorizer = SqlAuthorizer::install(&mut conn, &plan.rebuilds)?;
         let tx =
             conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let baseline = {
             let _restricted =
                 authorizer.restrict_to(SqlPermissionMode::ProjectCheck);
-            let current =
-                self.plan_on(&tx, plan.path.clone(), migrations, read_legacy)?;
+            let current = self.plan_on(
+                &tx,
+                plan.path.clone(),
+                migrations,
+                read_legacy,
+                &plan.rebuilds,
+            )?;
             if &current != plan {
                 return Err(Error::StalePlan);
             }
@@ -421,6 +514,10 @@ impl Spec<'_> {
                         source,
                     }
                 })?;
+            }
+            // One migration's legacy rename behavior must not leak into the next.
+            if plan.rebuilds.enabled() {
+                tx.pragma_update(None, "legacy_alter_table", false)?;
             }
             tx.execute(
                 "INSERT INTO evolve_sqlite_migration (ordinal, name, sha256, applied_at, outcome)
@@ -501,6 +598,7 @@ impl Spec<'_> {
         path: PathBuf,
         migrations: Vec<PlannedMigration>,
         read_legacy: Option<&LegacyReader<'_>>,
+        rebuilds: &RebuildPolicy,
     ) -> Result<Plan, Error> {
         let application_id: i32 =
             conn.pragma_query_value(None, "application_id", |r| r.get(0))?;
@@ -592,7 +690,69 @@ impl Spec<'_> {
             },
             migrations,
             legacy,
+            rebuilds: rebuilds.clone(),
         })
+    }
+}
+
+/// Owns settings changed for one apply. The transaction and authorizer guards
+/// drop before this connection, including during unwinding. Restore the original
+/// pragmas outside the transaction, then close the connection even if restoration
+/// fails. A project never receives an owned or reusable connection.
+struct MigrationConnection {
+    conn: Connection,
+    foreign_keys: bool,
+    legacy_alter_table: bool,
+}
+
+impl MigrationConnection {
+    fn open(path: &Path, rebuilds: &RebuildPolicy) -> Result<Self, Error> {
+        let conn = open(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+        let foreign_keys =
+            conn.pragma_query_value(None, "foreign_keys", |r| r.get(0))?;
+        let legacy_alter_table =
+            conn.pragma_query_value(None, "legacy_alter_table", |r| r.get(0))?;
+        let owned = Self {
+            conn,
+            foreign_keys,
+            legacy_alter_table,
+        };
+        owned
+            .conn
+            .pragma_update(None, "foreign_keys", !rebuilds.enabled())?;
+        owned
+            .conn
+            .pragma_update(None, "legacy_alter_table", false)?;
+        Ok(owned)
+    }
+}
+
+impl std::ops::Deref for MigrationConnection {
+    type Target = Connection;
+
+    fn deref(&self) -> &Connection {
+        &self.conn
+    }
+}
+
+impl std::ops::DerefMut for MigrationConnection {
+    fn deref_mut(&mut self) -> &mut Connection {
+        &mut self.conn
+    }
+}
+
+impl Drop for MigrationConnection {
+    fn drop(&mut self) {
+        // No transaction or restricted authorizer scope remains at this point.
+        // Closing the owned connection is the fallback if SQLite rejects reset.
+        let _ = self.conn.pragma_update(
+            None,
+            "legacy_alter_table",
+            self.legacy_alter_table,
+        );
+        let _ = self
+            .conn
+            .pragma_update(None, "foreign_keys", self.foreign_keys);
     }
 }
 
@@ -684,13 +844,17 @@ enum SqlPermissionMode {
 struct SqlAuthorizer(Arc<AtomicU8>);
 
 impl SqlAuthorizer {
-    fn install(conn: &mut Connection) -> Result<Self, Error> {
+    fn install(
+        conn: &mut Connection,
+        rebuilds: &RebuildPolicy,
+    ) -> Result<Self, Error> {
+        let rebuilds = rebuilds.clone();
         let mode = Arc::new(AtomicU8::new(SqlPermissionMode::Engine as u8));
         let callback_mode = Arc::clone(&mode);
         conn.authorizer(Some(move |ctx: AuthContext<'_>| {
             let mode = callback_mode.load(Ordering::Relaxed);
             let allowed = if mode == SqlPermissionMode::Migration as u8 {
-                migration_action(ctx)
+                migration_action(ctx, &rebuilds)
             } else if mode == SqlPermissionMode::ProjectCheck as u8 {
                 verification_action(ctx.action)
             } else {
@@ -722,9 +886,23 @@ impl Drop for SqlPermissionGuard<'_> {
     }
 }
 
-fn migration_action(ctx: AuthContext<'_>) -> bool {
+fn migration_action(ctx: AuthContext<'_>, rebuilds: &RebuildPolicy) -> bool {
     if ctx.database_name.is_some_and(|name| name != "main") {
-        return false;
+        // SQLite's ALTER TABLE implementation reads and rewrites temp schema
+        // SQL while renaming a main table. Direct schema writes still require
+        // writable_schema, which migration permissions prohibit.
+        return rebuilds.enabled()
+            && ctx.database_name == Some("temp")
+            && matches!(
+                ctx.action,
+                AuthAction::Read {
+                    table_name: "sqlite_temp_master" | "sqlite_temp_schema",
+                    ..
+                } | AuthAction::Update {
+                    table_name: "sqlite_temp_master" | "sqlite_temp_schema",
+                    column_name: "sql" | "tbl_name" | "name"
+                }
+            );
     }
     match ctx.action {
         AuthAction::Unknown { .. }
@@ -732,16 +910,31 @@ fn migration_action(ctx: AuthContext<'_>) -> bool {
         | AuthAction::Savepoint { .. }
         | AuthAction::Attach { .. }
         | AuthAction::Detach { .. }
-        // A DROP can implicitly cascade-delete dependent rows with foreign keys on.
-        | AuthAction::DropTable { .. }
         | AuthAction::DropVtable { .. } => false,
+        AuthAction::DropTable { table_name } => rebuilds
+            .tables
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(table_name)),
         AuthAction::Pragma {
             pragma_name,
             pragma_value,
         } => {
-            // FTS5 reads these while creating or opening its shadow tables.
-            pragma_value.is_none()
-                && pragma_is(pragma_name, &["data_version", "page_size"])
+            // ALTER ADD CHECK invokes quick_check(table) internally. These
+            // inspection pragmas are read-only even with a table argument.
+            // FTS5 also reads data_version and page_size for shadow tables.
+            pragma_is(
+                pragma_name,
+                &["quick_check", "integrity_check", "foreign_key_check"],
+            ) || (pragma_value.is_none()
+                && pragma_is(pragma_name, &["data_version", "page_size"]))
+                || (rebuilds.enabled()
+                    && pragma_name.eq_ignore_ascii_case("legacy_alter_table")
+                    && pragma_value.is_some_and(|value| {
+                        pragma_is(
+                            value,
+                            &["on", "off", "1", "0", "true", "false"],
+                        )
+                    }))
         }
         AuthAction::Delete { table_name }
         | AuthAction::Insert { table_name }
