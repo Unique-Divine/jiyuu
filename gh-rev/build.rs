@@ -26,15 +26,13 @@ fn main() {
         env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.0.0".to_string())
     );
 
-    for path in [
-        "Cargo.toml",
-        "Cargo.lock",
-        "build.rs",
-        "src",
-        "README.md",
-        "justfile",
-    ] {
+    for path in ["Cargo.toml", "build.rs", "src", "README.md", "justfile"] {
         println!("cargo:rerun-if-changed={path}");
+    }
+    for path in ["../Cargo.toml", "../Cargo.lock", "Cargo.lock"] {
+        if manifest_dir.join(path).is_file() {
+            println!("cargo:rerun-if-changed={path}");
+        }
     }
     watch_git_path(&manifest_dir, "HEAD");
     watch_git_path(&manifest_dir, "index");

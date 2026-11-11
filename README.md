@@ -51,3 +51,15 @@ cargo install just
 You can view the list of available development commands with `just -ls`.
 
 Ref: [github.com/casey/just](https://github.com/casey/just)
+
+### Rust Workspace
+
+Run the Rust tests from the repository root.
+
+```bash
+cargo test --workspace --locked
+```
+
+The workspace shares the root `Cargo.lock` and `target/` directory. Run
+`cargo test --locked -p gh-rev` or `cargo test --locked -p tmux-agent-watch`
+to test one package. The `tmux-agent-watch` integration tests require `tmux`.
