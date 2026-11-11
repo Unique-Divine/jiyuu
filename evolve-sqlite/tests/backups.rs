@@ -41,9 +41,9 @@ fn a_live_wal_source_becomes_a_verified_standalone_snapshot() -> TestResult {
     let content: String =
         copy.query_row("SELECT content FROM record", [], |r| r.get(0))?;
     assert_eq!(content, "committed in WAL");
-    let application_id: i32 =
+    let app_id: i32 =
         copy.pragma_query_value(None, "application_id", |r| r.get(0))?;
-    assert_eq!(application_id, 1234);
+    assert_eq!(app_id, 1234);
     let mode: String =
         copy.pragma_query_value(None, "journal_mode", |r| r.get(0))?;
     assert_eq!(mode, "delete");

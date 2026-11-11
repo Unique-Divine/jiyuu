@@ -18,7 +18,7 @@ const APP_ID: i32 = 0x4544_4253;
 
 fn spec<'a>(migrations: &'a [Migration<'a>]) -> Spec<'a> {
     Spec {
-        application_id: APP_ID,
+        app_id: APP_ID,
         migrations,
     }
 }

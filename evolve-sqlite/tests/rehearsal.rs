@@ -18,7 +18,7 @@ const UPGRADE: Migration<'_> = Migration {
 };
 const MIGRATIONS: &[Migration<'_>] = &[INITIAL, UPGRADE];
 const LATEST: Spec<'_> = Spec {
-    application_id: 0x5248_5253,
+    app_id: 0x5248_5253,
     migrations: MIGRATIONS,
 };
 

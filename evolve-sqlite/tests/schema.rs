@@ -23,11 +23,11 @@ fn one_reference_checks_fresh_upgrade_copy_and_live() -> TestResult {
         Schema::from_sql(&format!("{} {}", INITIAL.sql, UPGRADE.sql))?;
     let migrations = [INITIAL, UPGRADE];
     let target = Spec {
-        application_id: 0x4556_4f4c,
+        app_id: 0x4556_4f4c,
         migrations: &migrations,
     };
     let first = Spec {
-        application_id: target.application_id,
+        app_id: target.app_id,
         migrations: &migrations[..1],
     };
     for upgrade in [false, true] {
@@ -120,7 +120,7 @@ fn schema_mismatch_rejects_the_whole_apply() -> TestResult {
     let db = NamedTempFile::new()?;
     let migrations = [INITIAL];
     let target = Spec {
-        application_id: 0x4556_4f4c,
+        app_id: 0x4556_4f4c,
         migrations: &migrations,
     };
     let plan = target.plan(db.path())?;

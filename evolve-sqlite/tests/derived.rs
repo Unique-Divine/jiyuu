@@ -27,7 +27,7 @@ const SEARCH: DerivedSql<'_> = DerivedSql {
 
 fn spec() -> Spec<'static> {
     Spec {
-        application_id: 0x4556_4f4c,
+        app_id: 0x4556_4f4c,
         migrations: &[INITIAL],
     }
 }
