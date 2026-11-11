@@ -193,7 +193,7 @@ impl Spec<'_> {
         verify: impl FnOnce(&Connection, T) -> Result<(), CheckError>,
     ) -> Result<RehearsalReport, Error> {
         let _lock = MigrationLock::acquire(&plan.path)?;
-        if self.read_plan(&plan.path, read_legacy)? != *plan {
+        if self.read_plan(&plan.path, read_legacy, &plan.rebuilds)? != *plan {
             return Err(Error::StalePlan);
         }
         self.rehearse_copy(plan, paths, read_legacy, capture, verify)

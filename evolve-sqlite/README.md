@@ -64,8 +64,9 @@ These modes describe permissions, not schema versions or migration progress.
    baseline callback. They also cover the legacy validator during adoption.
 3. Engine permissions allow identity assignment and history-table creation.
 4. Migration permissions cover each pending SQL file. They prohibit
-   transaction control, attached databases, history-table writes, and table
-   drops. After each file, engine permissions allow its history insert.
+   transaction control, attached databases, and history-table writes. Table
+   drops require a rebuild policy in the plan. After each file, engine
+   permissions allow its history insert.
 5. Engine permissions allow the foreign-key check. Read-only project-check
    permissions cover the final verification callback, then engine permissions
    allow commit.
@@ -92,7 +93,10 @@ It records the mapped prefix without executing that SQL again, then runs
 any pending migrations. The engine leaves the original history table in
 place, where project-specific evidence remains available. It sets SQLite
 `user_version` to the length of the engine's migration history. A failure
-rolls back the adoption and pending SQL together.
+rolls back the adoption and pending SQL together. The legacy validator proves
+history before pending SQL runs. The final project check must also compare the
+original history table with its captured baseline. The engine protects its
+own history from SQL writes; legacy table names belong to the application.
 
 ## Create a Backup
 
@@ -140,10 +144,45 @@ path. The engine checks foreign keys, database integrity, and the project
 verifier before committing. A project that requires exact schema matching
 supplies that check in its verifier.
 
-The engine rejects `DROP TABLE` while foreign-key enforcement is on
-because a table rebuild can cascade-delete dependent rows. Production
-integration, table rebuild support, repeatable SQL, and down migrations
-require separate work.
+## Rebuild a Table
+
+A table rebuild copies rows to a replacement table, drops the original, and
+renames the replacement. With foreign-key enforcement enabled, SQLite can
+cascade-delete child rows during the drop, even when the replacement has the
+same keys. Ordinary methods `Spec::plan` and `Spec::plan_adoption` therefore
+continue to reject table drops.
+
+Use struct `RebuildPolicy` to approve specific ordinary tables for a reviewed
+rebuild. Method `Spec::plan_with_rebuilds` binds that allowlist into the plan.
+For a legacy database, use method `Spec::plan_adoption_with_rebuilds` with the
+same legacy validator used for adoption. Inspect method `Plan::rebuilds` when
+printing the release plan. All apply and rehearsal methods retain the policy.
+
+```rust,ignore
+let rebuilds = RebuildPolicy::new(&["booking"])?;
+let plan = spec.plan_with_rebuilds(database_path, &rebuilds)?;
+spec.apply_verified(&plan, &paths, capture_bookings, verify_bookings)?;
+```
+
+```text
+reviewed targets -> FK OFF before BEGIN IMMEDIATE -> copy/drop/rename
+                 -> foreign_key_check + integrity_check + project checks
+                 -> COMMIT, or roll back SQL and migration history together
+```
+
+Migration SQL may set `legacy_alter_table` to preserve existing references
+while following a historical rebuild recipe. The engine resets that setting
+after each SQL file. SQL cannot change `foreign_keys`, control transactions,
+drop virtual tables, or write engine history. SQLite's rename implementation
+may inspect and update temporary schema metadata, but project SQL cannot
+create temporary objects or access temporary data.
+
+Rebuild permission does not prove data preservation. Capture the application
+rows that must survive and compare them before commit, including user-edited
+configuration or descriptions. A valid database can still be missing rows.
+The engine restores connection settings after the transaction on every exit
+and closes the owned connection. Repeatable SQL and down migrations require
+separate work.
 
 Error variants `Error::Rehearsal` and `Error::VerifiedApply` retain the
 requested artifact paths and nested cause. A requested path may not exist if
