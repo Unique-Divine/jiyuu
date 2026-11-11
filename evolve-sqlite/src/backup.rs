@@ -74,7 +74,9 @@ impl BackupError {
 /// SQLite's backup API includes committed WAL contents while other connections
 /// remain open. The destination is a standalone database with a SHA-256 digest
 /// of its complete bytes. A file, directory, or symlink already occupying the
-/// destination causes an error. The source is opened read-only.
+/// destination or any SQLite sidecar path causes an error. The source is
+/// opened read-only. The caller must control the destination directory while
+/// creating and retaining a snapshot.
 ///
 /// The caller chooses the destination directory and owns retention. The copy
 /// has a 30-second completion limit. Failures before publication leave the
@@ -112,11 +114,7 @@ fn create_with_timeout(
         return Err(BackupError::InvalidDestination);
     }
     let destination = parent.join(filename);
-    match fs::symlink_metadata(&destination) {
-        Ok(_) => return Err(BackupError::DestinationExists),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error.into()),
-    }
+    require_unused_destination(&destination)?;
 
     let input = Connection::open_with_flags(
         source,
@@ -171,6 +169,7 @@ fn create_with_timeout(
     }
     let size_bytes = temporary.as_file().metadata()?.len();
     temporary.as_file().sync_all()?;
+    require_unused_destination(&destination)?;
     let published =
         temporary.persist_noclobber(&destination).map_err(|error| {
             if error.error.kind() == io::ErrorKind::AlreadyExists {
@@ -189,6 +188,19 @@ fn create_with_timeout(
         size_bytes,
         sha256: format!("{:x}", digest.finalize()),
     })
+}
+
+fn require_unused_destination(destination: &Path) -> Result<(), BackupError> {
+    for suffix in ["", "-wal", "-shm", "-journal"] {
+        let mut candidate = destination.as_os_str().to_owned();
+        candidate.push(suffix);
+        match fs::symlink_metadata(Path::new(&candidate)) {
+            Ok(_) => return Err(BackupError::DestinationExists),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
 }
 
 fn sync_directory(parent: &Path) -> io::Result<()> {

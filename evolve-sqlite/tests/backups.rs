@@ -203,3 +203,83 @@ fn a_reserved_writer_can_snapshot_before_live_changes() {
         );
     }
 }
+
+#[test]
+fn retained_destination_wal_cannot_override_a_published_snapshot() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source.sqlite");
+    let destination = directory.path().join("snapshot.sqlite");
+    Connection::open(&source)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE record (id INTEGER); INSERT INTO record VALUES (42);",
+        )
+        .unwrap();
+    let old_database = directory.path().join("old.sqlite");
+    let old_writer = Connection::open(&old_database).unwrap();
+    old_writer
+        .execute_batch(
+            "PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;
+         CREATE TABLE record (id INTEGER); INSERT INTO record VALUES (666);",
+        )
+        .unwrap();
+    let wal_bytes = fs::read(old_database.with_extension("sqlite-wal")).unwrap();
+    assert!(!wal_bytes.is_empty());
+    drop(old_writer);
+    let wal = destination.with_extension("sqlite-wal");
+    fs::write(&wal, &wal_bytes).unwrap();
+
+    let error = backup::create(&source, &destination).unwrap_err();
+    assert_eq!(error.code(), "backup_destination_exists");
+    assert!(!destination.exists());
+    assert_eq!(fs::read(&wal).unwrap(), wal_bytes);
+}
+
+#[test]
+fn destination_sidecars_and_dangling_sidecar_symlinks_are_preserved() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source.sqlite");
+    Connection::open(&source)
+        .unwrap()
+        .execute_batch("CREATE TABLE record (id INTEGER)")
+        .unwrap();
+    for suffix in ["-wal", "-shm", "-journal"] {
+        let destination =
+            directory.path().join(format!("snapshot{suffix}.sqlite"));
+        let mut sidecar = destination.as_os_str().to_owned();
+        sidecar.push(suffix);
+        let sidecar = std::path::PathBuf::from(sidecar);
+        fs::write(&sidecar, b"retain sidecar evidence").unwrap();
+        assert!(matches!(
+            backup::create(&source, &destination),
+            Err(BackupError::DestinationExists)
+        ));
+        assert!(!destination.exists());
+        assert_eq!(fs::read(&sidecar).unwrap(), b"retain sidecar evidence");
+
+        #[cfg(unix)]
+        {
+            let destination =
+                directory.path().join(format!("symlink{suffix}.sqlite"));
+            let mut sidecar = destination.as_os_str().to_owned();
+            sidecar.push(suffix);
+            let sidecar = std::path::PathBuf::from(sidecar);
+            std::os::unix::fs::symlink(
+                directory.path().join("absent"),
+                &sidecar,
+            )
+            .unwrap();
+            assert!(matches!(
+                backup::create(&source, &destination),
+                Err(BackupError::DestinationExists)
+            ));
+            assert!(!destination.exists());
+            assert!(
+                fs::symlink_metadata(sidecar)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+        }
+    }
+}
