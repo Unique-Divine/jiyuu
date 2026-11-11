@@ -1,3 +1,3 @@
 [workspace]
-members = ["gh-rev", "tmux-agent-watch"]
+members = ["evolve-sqlite", "gh-rev", "tmux-agent-watch"]
 resolver = "3"

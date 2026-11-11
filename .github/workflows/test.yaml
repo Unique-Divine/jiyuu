@@ -22,6 +22,7 @@ jobs:
       mdtoc: ${{ github.event_name == 'workflow_dispatch' || steps.paths.outputs.mdtoc == 'true' }}
       tmux_watch: ${{ github.event_name == 'workflow_dispatch' || steps.paths.outputs.tmux_watch == 'true' }}
       gh_rev: ${{ github.event_name == 'workflow_dispatch' || steps.paths.outputs.gh_rev == 'true' }}
+      evolve_sqlite: ${{ github.event_name == 'workflow_dispatch' || steps.paths.outputs.evolve_sqlite == 'true' }}
       slack: ${{ github.event_name == 'workflow_dispatch' || steps.paths.outputs.slack == 'true' }}
       telegram: ${{ github.event_name == 'workflow_dispatch' || steps.paths.outputs.telegram == 'true' }}
       python_mcp: ${{ github.event_name == 'workflow_dispatch' || steps.paths.outputs.python_mcp == 'true' }}
@@ -74,6 +75,12 @@ jobs:
             - .cargo/**
             - .github/workflows/test.yaml
             - justfile
+            evolve_sqlite:
+            - evolve-sqlite/**
+            - Cargo.toml
+            - Cargo.lock
+            - .cargo/**
+            - .github/workflows/test.yaml
             gh_rev:
             - gh-rev/**
             - Cargo.toml
@@ -181,6 +188,28 @@ jobs:
       - if: needs.changes.outputs.tmux_watch == 'true'
         name: Test
         run: just --justfile tmux-agent-watch/justfile test
+    needs: changes
+  evolve-sqlite:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Unaffected project
+        if: needs.changes.outputs.evolve_sqlite != 'true'
+        run: echo "No relevant changes; check completed successfully."
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        if: needs.changes.outputs.evolve_sqlite == 'true'
+        with:
+          persist-credentials: false
+      - if: needs.changes.outputs.evolve_sqlite == 'true'
+        name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+      - if: needs.changes.outputs.evolve_sqlite == 'true'
+        name: Check and test
+        run: |
+          cargo fmt -p evolve-sqlite --check
+          cargo clippy --locked -p evolve-sqlite --all-targets -- -D warnings
+          cargo test --locked -p evolve-sqlite
     needs: changes
   gh-rev:
     runs-on: ubuntu-latest
