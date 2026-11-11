@@ -41,6 +41,8 @@ different numbering scheme. They check history and row preservation,
 checksum mismatch, stale plans, and rollback after failed SQL or a
 failed project check.
 
-The caller arranges backup and rehearsal for this slice. Production
-integration, engine-managed rehearsal, table rebuild support, repeatable
-SQL, and down migrations have their own follow-up work.
+The caller arranges backup and rehearsal for this slice. The engine
+rejects `DROP TABLE` while foreign-key enforcement is on because a table
+rebuild can cascade-delete dependent rows. Production integration,
+engine-managed rehearsal, table rebuild support, repeatable SQL, and
+down migrations have their own follow-up work.

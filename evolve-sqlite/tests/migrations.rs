@@ -167,6 +167,41 @@ fn all_pending_migrations_and_ledger_writes_roll_back_on_failure() {
 }
 
 #[test]
+fn a_table_rebuild_cannot_cascade_delete_children() {
+    let db = NamedTempFile::new().unwrap();
+    let initial = Migration {
+        name: INITIAL.name,
+        sql: "CREATE TABLE parent (id INTEGER PRIMARY KEY);
+              CREATE TABLE child (id INTEGER REFERENCES parent(id) ON DELETE CASCADE);
+              INSERT INTO parent VALUES (1);
+              INSERT INTO child VALUES (1);",
+    };
+    let first = spec(std::slice::from_ref(&initial));
+    apply(first, &first.plan(db.path()).unwrap()).unwrap();
+
+    let migrations = [
+        initial,
+        Migration {
+            name: UPGRADE.name,
+            sql: "CREATE TABLE replacement (id INTEGER PRIMARY KEY, name TEXT);
+                  INSERT INTO replacement (id) SELECT id FROM parent;
+                  DROP TABLE parent;
+                  ALTER TABLE replacement RENAME TO parent;",
+        },
+    ];
+    let target = spec(&migrations);
+    let plan = target.plan(db.path()).unwrap();
+    assert!(matches!(apply(target, &plan), Err(Error::Migration { .. })));
+    assert_eq!(target.plan(db.path()).unwrap(), plan);
+
+    let conn = Connection::open(db.path()).unwrap();
+    let child: i64 = conn
+        .query_row("SELECT id FROM child", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(child, 1);
+}
+
+#[test]
 fn rejected_verification_rolls_back_and_cannot_commit_or_write() {
     let db = NamedTempFile::new().unwrap();
     let target = spec(&[INITIAL]);

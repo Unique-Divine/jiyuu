@@ -536,7 +536,10 @@ fn migration_action(ctx: AuthContext<'_>) -> bool {
         | AuthAction::Transaction { .. }
         | AuthAction::Savepoint { .. }
         | AuthAction::Attach { .. }
-        | AuthAction::Detach { .. } => false,
+        | AuthAction::Detach { .. }
+        // A DROP can implicitly cascade-delete dependent rows with foreign keys on.
+        | AuthAction::DropTable { .. }
+        | AuthAction::DropVtable { .. } => false,
         AuthAction::Pragma {
             pragma_name,
             pragma_value,
@@ -548,7 +551,6 @@ fn migration_action(ctx: AuthContext<'_>) -> bool {
         AuthAction::Delete { table_name }
         | AuthAction::Insert { table_name }
         | AuthAction::Update { table_name, .. }
-        | AuthAction::DropTable { table_name }
         | AuthAction::AlterTable { table_name, .. }
         | AuthAction::CreateIndex { table_name, .. }
         | AuthAction::CreateTrigger { table_name, .. } => {
