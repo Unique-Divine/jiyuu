@@ -108,6 +108,59 @@ fn refuses_changed_sql_and_a_missing_ledger_tail() {
 }
 
 #[test]
+fn refuses_a_ledger_with_changed_columns() {
+    for change in [
+        "ALTER TABLE evolve_sqlite_migration DROP COLUMN applied_at",
+        "ALTER TABLE evolve_sqlite_migration RENAME COLUMN sha256 TO checksum",
+    ] {
+        let db = NamedTempFile::new().unwrap();
+        let first = spec(&[INITIAL]);
+        apply(first, &first.plan(db.path()).unwrap()).unwrap();
+        let conn = Connection::open(db.path()).unwrap();
+        conn.execute_batch(change).unwrap();
+        assert!(
+            matches!(first.plan(db.path()), Err(Error::Drift(_))),
+            "{change}"
+        );
+    }
+}
+
+#[test]
+fn authorizer_recognizes_mixed_case_pragma_names() {
+    let db = NamedTempFile::new().unwrap();
+    let migrations = [
+        INITIAL,
+        Migration {
+            sql: "PRAGMA Page_Size; PRAGMA DATA_VERSION;",
+            ..UPGRADE
+        },
+    ];
+    let target = spec(&migrations);
+    let plan = target.plan(db.path()).unwrap();
+    target
+        .apply(
+            &plan,
+            |_| Ok(()),
+            |conn, ()| {
+                let columns = conn
+                    .prepare("PRAGMA Table_Xinfo('booking')")?
+                    .query_map([], |row| row.get::<_, String>(1))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                assert_eq!(columns, ["id", "status"]);
+
+                let version: i32 =
+                    conn.pragma_query_value(None, "User_Version", |row| {
+                        row.get(0)
+                    })?;
+                assert_eq!(version, 2);
+                assert!(conn.execute_batch("PRAGMA USER_VERSION = 10").is_err());
+                Ok(())
+            },
+        )
+        .unwrap();
+}
+
+#[test]
 fn rejects_a_stale_schema_or_changed_pending_sql() {
     let db = NamedTempFile::new().unwrap();
     let first = spec(&[INITIAL]);

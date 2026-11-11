@@ -30,6 +30,15 @@ use rusqlite::{
 use sha2::{Digest, Sha256};
 
 const LEDGER: &str = "evolve_sqlite_migration";
+// Keep this DDL stable. SQLite stores it in sqlite_schema, where we check the
+// engine-owned format before reading any ledger rows.
+const LEDGER_SQL: &str = "CREATE TABLE evolve_sqlite_migration (
+                    ordinal INTEGER PRIMARY KEY CHECK (ordinal > 0),
+                    name TEXT NOT NULL UNIQUE,
+                    sha256 TEXT NOT NULL,
+                    applied_at INTEGER NOT NULL,
+                    outcome TEXT NOT NULL CHECK (outcome = 'applied')
+                ) STRICT";
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// An error returned by a project check inside the migration transaction.
@@ -235,15 +244,7 @@ impl Spec<'_> {
 
         if plan.state.application_id == 0 {
             tx.pragma_update(None, "application_id", self.application_id)?;
-            tx.execute_batch(
-                "CREATE TABLE evolve_sqlite_migration (
-                    ordinal INTEGER PRIMARY KEY CHECK (ordinal > 0),
-                    name TEXT NOT NULL UNIQUE,
-                    sha256 TEXT NOT NULL,
-                    applied_at INTEGER NOT NULL,
-                    outcome TEXT NOT NULL CHECK (outcome = 'applied')
-                ) STRICT",
-            )?;
+            tx.execute_batch(LEDGER_SQL)?;
             for migration in &plan.legacy {
                 tx.execute(
                     "INSERT INTO evolve_sqlite_migration (ordinal, name, sha256, applied_at, outcome)
@@ -386,11 +387,16 @@ impl Spec<'_> {
             }
             0
         } else {
-            if !schema
+            let ledger = schema
                 .iter()
-                .any(|object| object.kind == "table" && object.name == LEDGER)
-            {
-                return Err(Error::Drift(format!("missing table {LEDGER}")));
+                .find(|object| object.kind == "table" && object.name == LEDGER)
+                .ok_or_else(|| {
+                    Error::Drift(format!("missing table {LEDGER}"))
+                })?;
+            if ledger.sql.as_deref() != Some(LEDGER_SQL) {
+                return Err(Error::Drift(format!(
+                    "unexpected schema for {LEDGER}"
+                )));
             }
             let applied = validate_history(conn, &migrations)?;
             if user_version != applied as i32 {
@@ -546,7 +552,7 @@ fn migration_action(ctx: AuthContext<'_>) -> bool {
         } => {
             // FTS5 reads these while creating or opening its shadow tables.
             pragma_value.is_none()
-                && ["data_version", "page_size"].contains(&pragma_name)
+                && pragma_is(pragma_name, &["data_version", "page_size"])
         }
         AuthAction::Delete { table_name }
         | AuthAction::Insert { table_name }
@@ -574,15 +580,35 @@ fn verification_action(action: AuthAction<'_>) -> bool {
         AuthAction::Pragma {
             pragma_name,
             pragma_value,
-        } => match pragma_name {
-            "foreign_key_check" | "integrity_check" | "quick_check"
-            | "table_info" | "table_xinfo" | "index_list" | "index_info"
-            | "index_xinfo" | "foreign_key_list" => true,
-            "data_version" | "page_size" | "application_id" | "user_version" => {
-                pragma_value.is_none()
-            }
-            _ => false,
-        },
+        } => {
+            pragma_is(
+                pragma_name,
+                &[
+                    "foreign_key_check",
+                    "integrity_check",
+                    "quick_check",
+                    "table_info",
+                    "table_xinfo",
+                    "index_list",
+                    "index_info",
+                    "index_xinfo",
+                    "foreign_key_list",
+                ],
+            ) || (pragma_value.is_none()
+                && pragma_is(
+                    pragma_name,
+                    &[
+                        "data_version",
+                        "page_size",
+                        "application_id",
+                        "user_version",
+                    ],
+                ))
+        }
         _ => false,
     }
+}
+
+fn pragma_is(name: &str, allowed: &[&str]) -> bool {
+    allowed.iter().any(|entry| name.eq_ignore_ascii_case(entry))
 }
