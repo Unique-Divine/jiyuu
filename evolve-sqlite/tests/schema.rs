@@ -138,3 +138,25 @@ fn schema_mismatch_rejects_the_whole_apply() -> TestResult {
     assert_eq!(target.plan(db.path())?, plan);
     Ok(())
 }
+
+/// SQLite accepts an unresolved view expression X '4142' as an identifier and
+/// alias. It must not compare equal to the single blob literal token X'4142'.
+#[test]
+fn blob_literal_is_distinct_from_identifier_and_string() -> TestResult {
+    let expected = Schema::from_sql("CREATE VIEW sample AS SELECT X'4142';")?;
+    for sql in [
+        "CREATE VIEW sample AS SELECT X '4142';",
+        "CREATE VIEW sample AS SELECT X/**/'4142';",
+    ] {
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch(sql)?;
+        assert!(matches!(expected.verify(&conn), Err(Error::Drift(_))));
+    }
+    let conn = Connection::open_in_memory()?;
+    conn.execute_batch("CREATE VIEW sample AS SELECT x'4142';")?;
+    expected.verify(&conn)?;
+    assert!(
+        Schema::from_sql("CREATE VIEW invalid AS SELECT X'not hex';").is_err()
+    );
+    Ok(())
+}

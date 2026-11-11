@@ -140,6 +140,23 @@ fn tokens(sql: &str) -> Result<Vec<String>, Error> {
                 ));
             }
             at += 2;
+        } else if matches!(byte, b'x' | b'X')
+            && bytes.get(at + 1) == Some(&b'\'')
+        {
+            // A contiguous X'...' is one blob literal. X '...' instead names
+            // an identifier followed by a separate string, which SQLite may
+            // accept in a view without resolving its columns yet.
+            at += 2;
+            while at < bytes.len() && bytes[at] != b'\'' {
+                at += 1;
+            }
+            if at >= bytes.len() {
+                return Err(Error::InvalidSpec(
+                    "unterminated schema blob".into(),
+                ));
+            }
+            at += 1;
+            result.push(format!("x{}", &sql[start + 1..at]));
         } else if matches!(byte, b'\'' | b'"' | b'`' | b'[') {
             let close = if byte == b'[' { b']' } else { byte };
             at += 1;
@@ -212,9 +229,12 @@ mod tests {
             ("'--'", "''"),
             ("'/* x */'", "'x'"),
             ("a ->> b", "a -> > b"),
+            ("X'4142'", "X '4142'"),
+            ("X'4142'", "X/**/'4142'"),
         ] {
             assert_ne!(tokens(left)?, tokens(right)?, "{left} vs {right}");
         }
+        assert_eq!(tokens("X'4142'")?, tokens("x'4142'")?);
         Ok(())
     }
 }
