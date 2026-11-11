@@ -8,11 +8,11 @@ fmt-check:
 
 # Reject compiler and Clippy warnings across all targets.
 lint:
-  cargo clippy --all-targets --all-features -- -D warnings
+  cargo clippy --locked --all-targets --all-features -- -D warnings
 
 # Run all gh-rev tests.
 test:
-  cargo test --all-targets
+  cargo test --locked --all-targets
 
 # Run every local and CI quality check.
 check: fmt-check lint test
@@ -21,8 +21,9 @@ check: fmt-check lint test
 install-local destination="${HOME}/.local/bin/gh-rev":
   #!/usr/bin/env bash
   set -euo pipefail
-  cargo build --release --locked
-  install -Dm755 target/release/gh-rev "{{destination}}"
+  target_dir="{{justfile_directory()}}/../target"
+  cargo build --release --locked --target-dir "$target_dir"
+  install -Dm755 "$target_dir/release/gh-rev" "{{destination}}"
   "{{destination}}" --version
 
 alias i := install-local

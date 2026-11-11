@@ -69,10 +69,16 @@ jobs:
             - justfile
             tmux_watch:
             - tmux-agent-watch/**
+            - Cargo.toml
+            - Cargo.lock
+            - .cargo/**
             - .github/workflows/test.yaml
             - justfile
             gh_rev:
             - gh-rev/**
+            - Cargo.toml
+            - Cargo.lock
+            - .cargo/**
             - .github/workflows/test.yaml
             - justfile
             slack:
@@ -171,12 +177,10 @@ jobs:
         run: sudo apt-get install --yes --no-install-recommends tmux
       - if: needs.changes.outputs.tmux_watch == 'true'
         name: Lint
-        run: just lint
-        working-directory: tmux-agent-watch
+        run: just --justfile tmux-agent-watch/justfile lint
       - if: needs.changes.outputs.tmux_watch == 'true'
         name: Test
-        run: just test
-        working-directory: tmux-agent-watch
+        run: just --justfile tmux-agent-watch/justfile test
     needs: changes
   gh-rev:
     runs-on: ubuntu-latest
@@ -198,8 +202,7 @@ jobs:
         uses: extractions/setup-just@v3
       - if: needs.changes.outputs.gh_rev == 'true'
         name: Check
-        run: just check
-        working-directory: gh-rev
+        run: just --justfile gh-rev/justfile check
     needs: changes
   slack:
     runs-on: ubuntu-latest

@@ -6,18 +6,18 @@ run *args:
 test:
   #!/usr/bin/env bash
   set -euo pipefail
-  cargo test
+  cargo test --locked
 
 # Format Rust source files.
 fmt:
-  cargo fmt --all
+  cargo fmt -p tmux-agent-watch
 
 # Check formatting and run Clippy with warnings denied.
 lint:
   #!/usr/bin/env bash
   set -euo pipefail
-  cargo fmt --all -- --check
-  cargo clippy --all-targets --all-features -- -D warnings
+  cargo fmt -p tmux-agent-watch -- --check
+  cargo clippy --locked --all-targets --all-features -- -D warnings
 
 # Build an optimized binary.
 build:
@@ -27,4 +27,4 @@ build:
 install:
   #!/usr/bin/env bash
   set -euo pipefail
-  cargo install --path . --root "$HOME/.local" --force
+  cargo install --locked --path . --root "$HOME/.local" --force
