@@ -1,7 +1,7 @@
 # evolve-sqlite
 
 A Rust library for explicit SQLite migration planning and execution. The
-first slice runs against disposable databases and copies. It covers
+engine runs against disposable databases and copies. It covers
 initialization, transactional updates, and adoption of verified legacy
 migration history.
 
@@ -93,16 +93,41 @@ place, where project-specific evidence remains available. It sets SQLite
 `user_version` to the length of the engine's migration history. A failure
 rolls back the adoption and pending SQL together.
 
-## Test the Slice
+## Create a Backup
 
-From the crate directory, run `cargo test --locked`. The tests create
-temporary databases, including an unmarked legacy database with a
-different numbering scheme. They check history and row preservation,
-checksum mismatch, stale plans, and rollback after failed SQL or a
-failed project check.
+Call function `backup::create(source, destination)` to publish a verified,
+standalone SQLite copy. SQLite's backup API includes committed WAL pages while
+other connections remain open. The returned `Snapshot` struct records the
+canonical path, byte length, and SHA-256 digest of the entire file.
 
-The caller arranges backup and rehearsal for this slice. The engine
-rejects `DROP TABLE` while foreign-key enforcement is on because a table
-rebuild can cascade-delete dependent rows. Production integration,
-engine-managed rehearsal, table rebuild support, repeatable SQL, and
-down migrations have their own follow-up work.
+The source opens read-only. The copy must pass SQLite `integrity_check` and
+`foreign_key_check`, and use DELETE journal mode before publication. A file,
+directory, or symlink at the destination or its `-wal`, `-shm`, or `-journal`
+path prevents publication. The caller controls the destination directory and
+chooses how long to retain backups.
+
+The `BackupError` enum distinguishes copy and verification failures from
+publication durability failures. Its `code()` method returns stable category
+identifiers. Failures before publication leave the destination absent and
+remove the temporary file. Variant `BackupError::Durability` means the verified
+file exists, but its directory sync failed, so its survival across a crash is
+uncertain. The variant contains the published path. Missing source or parent
+paths return `BackupError::Io` with the filesystem error.
+
+## Check the Crate
+
+From the crate directory, run command `just check` for formatting, Clippy, and
+tests. Commands `just test`, `just fmt-check`, and `just lint` run each check
+separately. From the repository root, command `just rust-test` runs all Rust
+workspace tests with the committed dependency resolution.
+
+Migration tests cover history and row preservation, stale plans, legacy
+adoption, and transaction rollback. Backup tests cover live WAL data,
+verification failures, occupied destination paths, concurrent publication,
+and failures before and after publication.
+
+The caller arranges backup and rehearsal before apply. The engine rejects
+`DROP TABLE` while foreign-key enforcement is on because a table rebuild can
+cascade-delete dependent rows. Production integration, engine-managed
+rehearsal, table rebuild support, repeatable SQL, and down migrations require
+separate work.
