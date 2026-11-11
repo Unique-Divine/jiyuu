@@ -198,3 +198,141 @@ pub(crate) fn validate_fts(conn: &Connection, table: &str) -> Result<(), Error> 
 }
 
 use rusqlite::OptionalExtension;
+
+/// Actual table classes observed after versioned DDL. Names alone do not prove
+/// shadow ownership: external-content and columnsize=0 omit some shadow tables.
+#[derive(Clone, Default)]
+pub(crate) struct TableInventory {
+    types: std::collections::BTreeMap<String, String>,
+    pub fts_writes: BTreeSet<String>,
+}
+
+impl TableInventory {
+    pub fn read(conn: &Connection) -> Result<Self, Error> {
+        let mut statement = conn.prepare(
+            "SELECT name, type FROM pragma_table_list WHERE schema='main'",
+        )?;
+        let types = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?.to_ascii_lowercase(), row.get(1)?))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(Self {
+            types,
+            fts_writes: BTreeSet::new(),
+        })
+    }
+
+    pub fn ordinary_source(&self, name: &str) -> bool {
+        !crate::is_engine_table(name)
+            && self
+                .types
+                .get(&name.to_ascii_lowercase())
+                .is_some_and(|kind| kind == "table")
+            && !name.to_ascii_lowercase().starts_with("sqlite_")
+    }
+
+    pub fn for_fts(
+        &self,
+        conn: &Connection,
+        target: &str,
+    ) -> Result<Self, Error> {
+        validate_fts(conn, target)?;
+        let sql: String = conn.query_row(
+            "SELECT sql FROM sqlite_schema WHERE type='table' AND name=?1 COLLATE NOCASE",
+            [target], |row| row.get(0),
+        )?;
+        let mut constructor = Connection::open_in_memory()?;
+        let authorizer = crate::SqlAuthorizer::install(
+            &mut constructor,
+            &crate::RebuildPolicy::default(),
+        )?;
+        {
+            let _restricted =
+                authorizer.restrict_to(crate::SqlPermissionMode::Migration);
+            // Connection::execute rejects additional statements in rusqlite.
+            // Run only the validated constructor, under permissions that deny
+            // attachments, transaction control, pragma writes, and extension loading.
+            // No source rows or triggers are copied into this private database.
+            constructor.execute(&sql, [])?;
+        }
+        let created = Self::read(&constructor)?;
+        let mut inventory = self.clone();
+        inventory.fts_writes.clear();
+        let target = target.to_ascii_lowercase();
+        if self.types.get(&target).map(String::as_str) != Some("virtual") {
+            return Err(Error::InvalidSpec(format!(
+                "FTS target {target:?} is not virtual"
+            )));
+        }
+        inventory.fts_writes.insert(target.clone());
+        for suffix in ["data", "idx", "config", "docsize", "content"] {
+            let name = format!("{target}_{suffix}");
+            // table_list itself uses module suffix recognition and can label
+            // an ordinary lookalike as shadow even when FTS never creates it.
+            // Require that this exact constructor actually creates the table.
+            if self.types.get(&name).map(String::as_str) == Some("shadow")
+                && created.types.get(&name).map(String::as_str) == Some("shadow")
+            {
+                inventory.fts_writes.insert(name);
+            }
+        }
+        Ok(inventory)
+    }
+
+    /// Applications maintain FTS through triggers on ordinary source tables.
+    /// Shadow/virtual-table triggers are unsupported and must not execute as
+    /// side effects of the engine's rebuild command.
+    pub fn reject_index_triggers(&self, conn: &Connection) -> Result<(), Error> {
+        let mut statement = conn.prepare(
+            "SELECT name, tbl_name FROM sqlite_schema WHERE type='trigger'",
+        )?;
+        let triggers = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for trigger in triggers {
+            let (name, table) = trigger?;
+            if self.fts_writes.contains(&table.to_ascii_lowercase()) {
+                return Err(Error::InvalidSpec(format!(
+                    "unsupported trigger {name:?} on FTS index table {table:?}"
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TableInventory;
+    use crate::CheckError;
+    use rusqlite::Connection;
+    type TestResult = Result<(), CheckError>;
+
+    /// External-content FTS omits its content shadow, and columnsize=0 omits
+    /// docsize. Ordinary tables with those suffixes are not index-owned rows.
+    #[test]
+    fn actual_shadow_classes_exclude_ordinary_same_suffix_tables() -> TestResult
+    {
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch("CREATE TABLE note(id INTEGER PRIMARY KEY, body TEXT);
+            CREATE VIRTUAL TABLE ft USING fts5(body,content='note',content_rowid='id',columnsize=0);
+            CREATE TABLE ft_content(value TEXT);
+            CREATE TABLE ft_docsize(value TEXT);
+            CREATE VIRTUAL TABLE ft_other USING fts5(body);")?;
+        let tables = TableInventory::read(&conn)?;
+        let owned = tables.for_fts(&conn, "ft")?;
+        assert!(owned.fts_writes.contains("ft"));
+        assert!(owned.fts_writes.contains("ft_data"));
+        assert!(!owned.fts_writes.contains("ft_content"));
+        assert!(!owned.fts_writes.contains("ft_docsize"));
+        assert!(!owned.fts_writes.contains("ft_other_data"));
+        assert!(tables.ordinary_source("note"));
+        // SQLite labels this ordinary lookalike shadow. Trigger-source
+        // acceptance remains conservative; rebuild writes still exclude it.
+        assert!(!tables.ordinary_source("ft_content"));
+        assert!(!tables.ordinary_source("ft_data"));
+        assert!(!tables.ordinary_source("ft"));
+        Ok(())
+    }
+}

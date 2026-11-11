@@ -31,7 +31,7 @@ pub mod schema;
 use std::{
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, RwLock,
         atomic::{AtomicU8, Ordering},
     },
     time::Duration,
@@ -447,7 +447,7 @@ impl Spec<'_> {
         let migrations = self.validate()?;
         let path = path.canonicalize()?;
         let mut conn = open(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        let authorizer = SqlAuthorizer::install(&mut conn, rebuilds, &[])?;
+        let authorizer = SqlAuthorizer::install(&mut conn, rebuilds)?;
         let tx = conn.transaction()?;
         let _restricted =
             authorizer.restrict_to(SqlPermissionMode::ProjectCheck);
@@ -535,15 +535,7 @@ impl Spec<'_> {
         let _lock = rehearsal::MigrationLock::acquire(&plan.path)?;
         let migrations = self.validate()?;
         let mut conn = MigrationConnection::open(&plan.path, &plan.rebuilds)?;
-        let fts_targets = plan
-            .derived
-            .iter()
-            .flat_map(|definition| {
-                definition.planned.fts_rebuilds.iter().cloned()
-            })
-            .collect::<Vec<_>>();
-        let authorizer =
-            SqlAuthorizer::install(&mut conn, &plan.rebuilds, &fts_targets)?;
+        let authorizer = SqlAuthorizer::install(&mut conn, &plan.rebuilds)?;
         let tx =
             conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let baseline = {
@@ -609,10 +601,19 @@ impl Spec<'_> {
         {
             tx.execute_batch(derived::DDL)?;
         }
-        for definition in plan.derived.iter().filter(|definition| {
-            derived::pending(definition, &plan.derived_history)
-        }) {
-            {
+        let pending = plan
+            .derived
+            .iter()
+            .filter(|definition| {
+                derived::pending(definition, &plan.derived_history)
+            })
+            .collect::<Vec<_>>();
+        if !pending.is_empty() {
+            // Read SQLite outside the shared authorizer lock. Derived SQL
+            // changes views/triggers only, so table classes remain stable.
+            let tables = derived::TableInventory::read(&tx)?;
+            authorizer.set_inventory(tables.clone())?;
+            for definition in &pending {
                 let _restricted =
                     authorizer.restrict_to(SqlPermissionMode::Derived);
                 tx.execute_batch(&definition.sql).map_err(|source| {
@@ -622,19 +623,37 @@ impl Spec<'_> {
                     }
                 })?;
             }
-            for table in &definition.planned.fts_rebuilds {
-                derived::validate_fts(&tx, table)?;
+            // All derived definitions must be final before any index rebuild.
+            // Deduplicate targets case-insensitively across changed definitions.
+            let mut targets = std::collections::BTreeMap::new();
+            for definition in &pending {
+                for table in &definition.planned.fts_rebuilds {
+                    targets
+                        .entry(table.to_ascii_lowercase())
+                        .or_insert((table, &definition.planned.name));
+                }
+            }
+            let mut rebuilds = Vec::new();
+            for (table, name) in targets.values() {
+                let inventory = tables.for_fts(&tx, table)?;
+                inventory.reject_index_triggers(&tx)?;
+                rebuilds.push((table, name, inventory));
+            }
+            for (table, name, inventory) in rebuilds {
+                authorizer.set_inventory(inventory)?;
                 let _restricted =
                     authorizer.restrict_to(SqlPermissionMode::FtsRebuild);
                 tx.execute_batch(&format!(
                     "INSERT INTO \"{table}\"(\"{table}\") VALUES('rebuild');"
                 ))
                 .map_err(|source| Error::Derived {
-                    name: definition.planned.name.clone(),
+                    name: (*name).clone(),
                     source,
                 })?;
             }
-            tx.execute("INSERT INTO evolve_sqlite_derived(name,sha256,applied_at) VALUES(?1,?2,unixepoch()) ON CONFLICT(name) DO UPDATE SET sha256=excluded.sha256,applied_at=excluded.applied_at", (&definition.planned.name, &definition.planned.sha256))?;
+            for definition in pending {
+                tx.execute("INSERT INTO evolve_sqlite_derived(name,sha256,applied_at) VALUES(?1,?2,unixepoch()) ON CONFLICT(name) DO UPDATE SET sha256=excluded.sha256,applied_at=excluded.applied_at", (&definition.planned.name, &definition.planned.sha256))?;
+            }
         }
 
         if !plan.pending().is_empty() || !plan.legacy.is_empty() {
@@ -959,27 +978,35 @@ enum SqlPermissionMode {
 }
 
 /// Installs SQLite's statement authorizer and selects its SQL permission mode.
-struct SqlAuthorizer(Arc<AtomicU8>);
+struct SqlAuthorizer {
+    mode: Arc<AtomicU8>,
+    inventory: Arc<RwLock<derived::TableInventory>>,
+}
 
 impl SqlAuthorizer {
     fn install(
         conn: &mut Connection,
         rebuilds: &RebuildPolicy,
-        fts_targets: &[String],
     ) -> Result<Self, Error> {
-        let fts_targets = fts_targets.to_vec();
         let rebuilds = rebuilds.clone();
         let mode = Arc::new(AtomicU8::new(SqlPermissionMode::Engine as u8));
         let callback_mode = Arc::clone(&mode);
+        let inventory =
+            Arc::new(RwLock::new(derived::TableInventory::default()));
+        let callback_inventory = Arc::clone(&inventory);
         let mut dropped_views = std::collections::BTreeSet::new();
         conn.authorizer(Some(move |ctx: AuthContext<'_>| {
             let mode = callback_mode.load(Ordering::Relaxed);
             let allowed = if mode == SqlPermissionMode::Migration as u8 {
                 migration_action(ctx, &rebuilds)
             } else if mode == SqlPermissionMode::Derived as u8 {
-                derived_action(ctx, &mut dropped_views)
+                callback_inventory.read().is_ok_and(|inventory| {
+                    derived_action(ctx, &mut dropped_views, &inventory)
+                })
             } else if mode == SqlPermissionMode::FtsRebuild as u8 {
-                fts_rebuild_action(ctx, &fts_targets)
+                callback_inventory
+                    .read()
+                    .is_ok_and(|inventory| fts_rebuild_action(ctx, &inventory))
             } else if mode == SqlPermissionMode::ProjectCheck as u8 {
                 verification_action(ctx.action)
             } else {
@@ -991,11 +1018,23 @@ impl SqlAuthorizer {
                 Authorization::Deny
             }
         }))?;
-        Ok(Self(mode))
+        Ok(Self { mode, inventory })
+    }
+
+    fn set_inventory(
+        &self,
+        inventory: derived::TableInventory,
+    ) -> Result<(), Error> {
+        *self.inventory.write().map_err(|_| {
+            Error::InvalidSpec(
+                "SQL permission inventory lock is poisoned".into(),
+            )
+        })? = inventory;
+        Ok(())
     }
 
     fn restrict_to(&self, mode: SqlPermissionMode) -> SqlPermissionGuard<'_> {
-        self.0.store(mode as u8, Ordering::Relaxed);
+        self.mode.store(mode as u8, Ordering::Relaxed);
         SqlPermissionGuard(self)
     }
 }
@@ -1006,7 +1045,7 @@ struct SqlPermissionGuard<'a>(&'a SqlAuthorizer);
 impl Drop for SqlPermissionGuard<'_> {
     fn drop(&mut self) {
         self.0
-            .0
+            .mode
             .store(SqlPermissionMode::Engine as u8, Ordering::Relaxed);
     }
 }
@@ -1130,6 +1169,7 @@ fn is_engine_table(table: &str) -> bool {
 fn derived_action(
     ctx: AuthContext<'_>,
     dropped_views: &mut std::collections::BTreeSet<String>,
+    inventory: &derived::TableInventory,
 ) -> bool {
     if ctx.database_name.is_some_and(|name| name != "main") {
         return false;
@@ -1148,7 +1188,7 @@ fn derived_action(
             true
         }
         AuthAction::CreateTrigger { table_name, .. } => {
-            !is_engine_table(table_name)
+            inventory.ordinary_source(table_name)
         }
         // SQLite modifies schema rows while executing approved view/trigger DDL.
         AuthAction::Insert { table_name }
@@ -1160,25 +1200,19 @@ fn derived_action(
     }
 }
 
-fn fts_rebuild_action(ctx: AuthContext<'_>, targets: &[String]) -> bool {
+fn fts_rebuild_action(
+    ctx: AuthContext<'_>,
+    inventory: &derived::TableInventory,
+) -> bool {
     if ctx.database_name.is_some_and(|name| name != "main") {
         return false;
     }
     match ctx.action {
         AuthAction::Insert { table_name }
         | AuthAction::Delete { table_name }
-        | AuthAction::Update { table_name, .. } => {
-            targets.iter().any(|target| {
-                table_name.eq_ignore_ascii_case(target)
-                    || ["data", "idx", "config", "docsize", "content"]
-                        .iter()
-                        .any(|suffix| {
-                            table_name.eq_ignore_ascii_case(&format!(
-                                "{target}_{suffix}"
-                            ))
-                        })
-            })
-        }
+        | AuthAction::Update { table_name, .. } => inventory
+            .fts_writes
+            .contains(&table_name.to_ascii_lowercase()),
         action => verification_action(action),
     }
 }

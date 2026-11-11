@@ -252,10 +252,20 @@ pending versioned SQL -> changed derived view/trigger DDL
 
 Use guarded DROP/CREATE statements in derived SQL. FTS table creation and
 structural changes belong to versioned migrations. When maintenance triggers
-change, declare their existing FTS5 table in field `fts_rebuilds`. The engine
-rebuilds that index from its source content in the same transaction. FTS rebuild
-writes are restricted to the declared virtual tables and their shadow tables.
-The SQL checksum includes the ordered FTS target list.
+or an FTS content view change, declare their existing FTS5 table in field
+`fts_rebuilds`. The engine applies all pending view/trigger definitions first,
+then rebuilds each declared index once from its final source content. History
+updates and checks follow in the same transaction. The SQL checksum includes
+the ordered FTS target list.
+
+Rebuild writes are restricted to each declared virtual table and its actual
+shadows. SQLite can label an ordinary suffix lookalike as `shadow` even when an
+external-content or `columnsize=0` index does not create that table. The engine
+therefore materializes only the validated, single-statement FTS5 constructor in
+a restricted private in-memory database and intersects its created shadows with
+the main database's inventory. No source rows or triggers are copied. Derived
+maintenance triggers must attach to ordinary source tables. Triggers on index
+storage are rejected before any rebuild.
 
 Table `evolve_sqlite_derived` stores the current name, checksum, and application
 time separately from frozen migration history. Unchanged definitions keep their

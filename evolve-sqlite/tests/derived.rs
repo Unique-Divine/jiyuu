@@ -406,3 +406,109 @@ fn guarded_derived_sql_can_be_replayed_without_source_changes() -> TestResult {
     }
     Ok(())
 }
+
+/// A changed content view may follow its maintenance trigger declaration.
+/// Rebuilds must index the final view after every pending definition is applied.
+#[test]
+fn rebuilds_use_final_content_view_after_all_pending_ddl() -> TestResult {
+    let db = NamedTempFile::new()?;
+    let migrations = [Migration {
+        name: "01_view_search.sql",
+        sql: "CREATE TABLE note(id INTEGER PRIMARY KEY,title TEXT,body TEXT);
+            INSERT INTO note VALUES(1,'oldtitle','currentbody');
+            CREATE VIEW search_source AS SELECT id,title AS body FROM note;
+            CREATE VIRTUAL TABLE search USING fts5(body,content='search_source',content_rowid='id');",
+    }];
+    let target = Spec {
+        migrations: &migrations,
+        ..spec()
+    };
+    let old = [
+        DerivedSql {
+            name: "maintenance",
+            sql: "DROP TRIGGER IF EXISTS note_ai; CREATE TRIGGER note_ai AFTER INSERT ON note BEGIN INSERT INTO search(rowid,body) VALUES(new.id,new.title); END;",
+            fts_rebuilds: &["search"],
+        },
+        DerivedSql {
+            name: "content_view",
+            sql: "DROP VIEW IF EXISTS search_source; CREATE VIEW search_source AS SELECT id,title AS body FROM note;",
+            fts_rebuilds: &[],
+        },
+    ];
+    let policy = RebuildPolicy::default();
+    target.apply(
+        &target.plan_with_derived(db.path(), &policy, &old)?,
+        |_| Ok(()),
+        |_, ()| Ok(()),
+    )?;
+    let conn = Connection::open(db.path())?;
+    assert_eq!(
+        conn.query_row(
+            "SELECT count(*) FROM search WHERE search MATCH 'oldtitle'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )?,
+        1
+    );
+    let changed = [
+        DerivedSql {
+            sql: "DROP TRIGGER IF EXISTS note_ai; CREATE TRIGGER note_ai AFTER INSERT ON note BEGIN INSERT INTO search(rowid,body) VALUES(new.id,new.body); END;",
+            ..old[0]
+        },
+        DerivedSql {
+            sql: "DROP VIEW IF EXISTS search_source; CREATE VIEW search_source AS SELECT id,body FROM note;",
+            fts_rebuilds: &["SEARCH"],
+            ..old[1]
+        },
+    ];
+    let plan = target.plan_with_derived(db.path(), &policy, &changed)?;
+    assert_eq!(plan.pending_derived().count(), 2);
+    target.apply(&plan, |_| Ok(()), |_, ()| Ok(()))?;
+    assert_eq!(
+        conn.query_row("SELECT body FROM search_source WHERE id=1", [], |r| {
+            r.get::<_, String>(0)
+        })?,
+        "currentbody"
+    );
+    assert_eq!(
+        conn.query_row(
+            "SELECT count(*) FROM search WHERE search MATCH 'currentbody'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )?,
+        1
+    );
+    assert_eq!(
+        conn.query_row(
+            "SELECT count(*) FROM search WHERE search MATCH 'oldtitle'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )?,
+        0
+    );
+    Ok(())
+}
+
+/// Maintenance triggers belong to ordinary source tables. A benign trigger
+/// declaration on shadow metadata must fail before any trigger can execute.
+#[test]
+fn rejects_benign_shadow_trigger_declarations_before_rebuild() -> TestResult {
+    let db = NamedTempFile::new()?;
+    let declaration = [DerivedSql {
+        name: "unsupported_trigger",
+        sql: "CREATE TRIGGER helper AFTER INSERT ON note_fts_data BEGIN SELECT 1; END;",
+        fts_rebuilds: &["note_fts"],
+    }];
+    let target = spec();
+    let policy = RebuildPolicy::default();
+    let plan = target.plan_with_derived(db.path(), &policy, &declaration)?;
+    assert!(matches!(
+        target.apply(&plan, |_| Ok(()), |_, ()| Ok(())),
+        Err(Error::Derived { .. })
+    ));
+    assert_eq!(
+        target.plan_with_derived(db.path(), &policy, &declaration)?,
+        plan
+    );
+    Ok(())
+}
