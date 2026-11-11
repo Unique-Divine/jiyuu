@@ -7,9 +7,7 @@ repository = "https://github.com/Unique-Divine/jiyuu"
 license = "MIT"
 
 [dependencies]
-rusqlite = { version = "0.41", features = ["bundled", "hooks"] }
+rusqlite = { version = "0.41", features = ["backup", "bundled", "hooks"] }
 sha2 = "0.10"
 thiserror = "2"
-
-[dev-dependencies]
 tempfile = "3"

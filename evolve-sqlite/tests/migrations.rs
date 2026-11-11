@@ -79,11 +79,16 @@ fn refuses_wrong_and_unmarked_nonempty_databases() {
         target.plan(db.path()),
         Err(Error::AdoptionRequired)
     ));
+    assert_eq!(
+        target.plan(db.path()).unwrap_err().code(),
+        "adoption_required"
+    );
     conn.pragma_update(None, "application_id", 1).unwrap();
     assert!(matches!(
         target.plan(db.path()),
         Err(Error::WrongDatabase { actual: 1, .. })
     ));
+    assert_eq!(target.plan(db.path()).unwrap_err().code(), "wrong_database");
 }
 
 #[test]
