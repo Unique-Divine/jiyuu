@@ -24,6 +24,7 @@
 //! should bind its release to a project-specific database identity.
 
 pub mod backup;
+pub mod schema;
 
 use std::{
     path::{Path, PathBuf},

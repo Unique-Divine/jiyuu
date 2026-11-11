@@ -190,6 +190,38 @@ an earlier step failed. Their `code()` results identify the underlying failure,
 such as `stale_plan` or `verification`; inspect the variant to identify the
 operation. Published files remain available for inspection and recovery.
 
+## Verify the Application Schema
+
+Construct struct `schema::Schema` from a trusted, checked-in schema file with
+method `Schema::from_sql`. The helper executes that reference in an isolated
+in-memory database and compares SQLite's stored schema. Do not generate the
+reference from the live database you intend to check.
+
+```rust,ignore
+let expected = Schema::from_sql(include_str!("schema.sql"))?;
+spec.apply_verified(&plan, &paths, capture_rows, |conn, before| {
+    expected.verify(conn)?;
+    verify_preserved_rows(conn, before)?;
+    Ok(())
+})?;
+```
+
+Use the same reference for fresh installations, upgraded databases, rehearsal
+copies, and live verification. The helper compares the complete table, index,
+view, and trigger inventory, including FTS shadow schema generated from virtual
+table declarations. Engine history has its own immutable DDL check and is
+excluded from the application inventory. Other extra objects cause a mismatch.
+For adopted databases, append the exact expected legacy-history DDL explicitly.
+Compare its original rows separately in the project verifier.
+
+The comparator ignores comments, whitespace between tokens, and ASCII case in
+unquoted words. It preserves literal bytes, quoted identifier bytes, and token
+boundaries. It accepts formatting differences without erasing a changed default
+or CHECK constraint. It may reject two differently written but equivalent
+schemas. A mismatch rejects the transaction; the helper does not repair drift.
+Row preservation, legacy-history evidence, foreign keys, and integrity remain
+separate checks.
+
 ## Check the Crate
 
 From the crate directory, run command `just check` for formatting, Clippy, and
