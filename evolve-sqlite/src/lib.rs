@@ -24,6 +24,8 @@
 //! should bind its release to a project-specific database identity.
 
 pub mod backup;
+mod derived;
+pub use derived::{DerivedSql, PlannedDerived};
 pub mod schema;
 
 use std::{
@@ -158,7 +160,7 @@ impl RebuildPolicy {
                         || byte.is_ascii_alphabetic()
                         || (index > 0 && byte.is_ascii_digit())
                 })
-                || table.eq_ignore_ascii_case(MIGRATION_HISTORY_TABLE)
+                || is_engine_table(table)
                 || table.to_ascii_lowercase().starts_with("sqlite_")
             {
                 return Err(Error::InvalidSpec(format!(
@@ -191,9 +193,21 @@ pub struct Plan {
     migrations: Vec<PlannedMigration>,
     legacy: Vec<LegacyMigration>,
     rebuilds: RebuildPolicy,
+    derived: Vec<derived::Definition>,
+    derived_history: Vec<derived::History>,
 }
 
 impl Plan {
+    /// Derived definitions whose SQL or FTS target list differs from history.
+    pub fn pending_derived(&self) -> impl Iterator<Item = &PlannedDerived> {
+        self.derived
+            .iter()
+            .filter(|definition| {
+                derived::pending(definition, &self.derived_history)
+            })
+            .map(|definition| &definition.planned)
+    }
+
     /// Table rebuild permissions reviewed when this plan was created.
     pub fn rebuilds(&self) -> &RebuildPolicy {
         &self.rebuilds
@@ -263,6 +277,11 @@ pub enum Error {
         name: String,
         source: rusqlite::Error,
     },
+    #[error("derived definition {name} failed: {source}")]
+    Derived {
+        name: String,
+        source: rusqlite::Error,
+    },
     #[error("foreign key check failed")]
     ForeignKeyViolation,
     #[error("database integrity check failed: {0}")]
@@ -295,6 +314,7 @@ impl Error {
             Self::Drift(_) => "drift",
             Self::StalePlan => "stale_plan",
             Self::Migration { .. } => "migration",
+            Self::Derived { .. } => "derived",
             Self::ForeignKeyViolation => "foreign_key_violation",
             Self::IntegrityCheck(_) => "integrity_check_failed",
             Self::Verification(_) => "verification",
@@ -329,7 +349,12 @@ impl Spec<'_> {
     /// file with existing schema or a nonzero `user_version` needs a separate
     /// adoption procedure.
     pub fn plan(&self, path: impl AsRef<Path>) -> Result<Plan, Error> {
-        self.read_plan(path.as_ref(), None, &RebuildPolicy::default())
+        self.read_plan(
+            path.as_ref(),
+            None,
+            &RebuildPolicy::default(),
+            Vec::new(),
+        )
     }
 
     /// Plan with explicit table rebuild permissions.
@@ -342,7 +367,7 @@ impl Spec<'_> {
         path: impl AsRef<Path>,
         rebuilds: &RebuildPolicy,
     ) -> Result<Plan, Error> {
-        self.read_plan(path.as_ref(), None, rebuilds)
+        self.read_plan(path.as_ref(), None, rebuilds, Vec::new())
     }
 
     /// Plan explicit adoption of an unmarked legacy database.
@@ -363,6 +388,7 @@ impl Spec<'_> {
             path.as_ref(),
             Some(&read_legacy),
             &RebuildPolicy::default(),
+            Vec::new(),
         )
     }
 
@@ -376,7 +402,39 @@ impl Spec<'_> {
         rebuilds: &RebuildPolicy,
         read_legacy: impl Fn(&Connection) -> Result<Vec<LegacyMigration>, CheckError>,
     ) -> Result<Plan, Error> {
-        self.read_plan(path.as_ref(), Some(&read_legacy), rebuilds)
+        self.read_plan(path.as_ref(), Some(&read_legacy), rebuilds, Vec::new())
+    }
+
+    /// Plan versioned SQL followed by changed view/FTS trigger definitions.
+    /// Pass an empty rebuild policy when versioned SQL does not rebuild tables.
+    pub fn plan_with_derived(
+        &self,
+        path: impl AsRef<Path>,
+        rebuilds: &RebuildPolicy,
+        definitions: &[DerivedSql<'_>],
+    ) -> Result<Plan, Error> {
+        self.read_plan(
+            path.as_ref(),
+            None,
+            rebuilds,
+            derived::validate(definitions)?,
+        )
+    }
+
+    /// Adopt validated legacy history, then apply pending SQL and derived DDL.
+    pub fn plan_adoption_with_derived(
+        &self,
+        path: impl AsRef<Path>,
+        rebuilds: &RebuildPolicy,
+        definitions: &[DerivedSql<'_>],
+        read_legacy: impl Fn(&Connection) -> Result<Vec<LegacyMigration>, CheckError>,
+    ) -> Result<Plan, Error> {
+        self.read_plan(
+            path.as_ref(),
+            Some(&read_legacy),
+            rebuilds,
+            derived::validate(definitions)?,
+        )
     }
 
     fn read_plan(
@@ -384,15 +442,16 @@ impl Spec<'_> {
         path: &Path,
         read_legacy: Option<&LegacyReader<'_>>,
         rebuilds: &RebuildPolicy,
+        definitions: Vec<derived::Definition>,
     ) -> Result<Plan, Error> {
         let migrations = self.validate()?;
         let path = path.canonicalize()?;
         let mut conn = open(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        let authorizer = SqlAuthorizer::install(&mut conn, rebuilds)?;
+        let authorizer = SqlAuthorizer::install(&mut conn, rebuilds, &[])?;
         let tx = conn.transaction()?;
         let _restricted =
             authorizer.restrict_to(SqlPermissionMode::ProjectCheck);
-        self.plan_on(&tx, path, migrations, read_legacy, rebuilds)
+        self.plan_on(&tx, path, migrations, read_legacy, rebuilds, definitions)
     }
 
     /// Apply a plan and compare project data within the write transaction.
@@ -413,6 +472,11 @@ impl Spec<'_> {
     /// callback runs read-only, then engine permissions allow commit. Each
     /// restricted scope restores engine permissions when it exits, including
     /// on error, so the transaction can roll back.
+    ///
+    /// Plans with derived definitions run changed view/trigger DDL after
+    /// versioned SQL, then rebuild declared FTS indexes. Derived SQL cannot
+    /// write project rows or change tables. Their separate history records
+    /// share this transaction; unchanged definitions keep their timestamps.
     ///
     /// Applied steps are skipped. After a successful apply, obtain a fresh plan
     /// before another call; the previous plan describes the pre-apply state.
@@ -471,7 +535,15 @@ impl Spec<'_> {
         let _lock = rehearsal::MigrationLock::acquire(&plan.path)?;
         let migrations = self.validate()?;
         let mut conn = MigrationConnection::open(&plan.path, &plan.rebuilds)?;
-        let authorizer = SqlAuthorizer::install(&mut conn, &plan.rebuilds)?;
+        let fts_targets = plan
+            .derived
+            .iter()
+            .flat_map(|definition| {
+                definition.planned.fts_rebuilds.iter().cloned()
+            })
+            .collect::<Vec<_>>();
+        let authorizer =
+            SqlAuthorizer::install(&mut conn, &plan.rebuilds, &fts_targets)?;
         let tx =
             conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let baseline = {
@@ -483,6 +555,7 @@ impl Spec<'_> {
                 migrations,
                 read_legacy,
                 &plan.rebuilds,
+                plan.derived.clone(),
             )?;
             if &current != plan {
                 return Err(Error::StalePlan);
@@ -525,6 +598,43 @@ impl Spec<'_> {
                  VALUES (?1, ?2, ?3, unixepoch(), 'applied')",
                 ((index + 1) as i64, migration.name, &plan.migrations[index].sha256),
             )?;
+        }
+
+        if !plan.derived.is_empty()
+            && !plan
+                .state
+                .schema
+                .iter()
+                .any(|object| object.name == derived::TABLE)
+        {
+            tx.execute_batch(derived::DDL)?;
+        }
+        for definition in plan.derived.iter().filter(|definition| {
+            derived::pending(definition, &plan.derived_history)
+        }) {
+            {
+                let _restricted =
+                    authorizer.restrict_to(SqlPermissionMode::Derived);
+                tx.execute_batch(&definition.sql).map_err(|source| {
+                    Error::Derived {
+                        name: definition.planned.name.clone(),
+                        source,
+                    }
+                })?;
+            }
+            for table in &definition.planned.fts_rebuilds {
+                derived::validate_fts(&tx, table)?;
+                let _restricted =
+                    authorizer.restrict_to(SqlPermissionMode::FtsRebuild);
+                tx.execute_batch(&format!(
+                    "INSERT INTO \"{table}\"(\"{table}\") VALUES('rebuild');"
+                ))
+                .map_err(|source| Error::Derived {
+                    name: definition.planned.name.clone(),
+                    source,
+                })?;
+            }
+            tx.execute("INSERT INTO evolve_sqlite_derived(name,sha256,applied_at) VALUES(?1,?2,unixepoch()) ON CONFLICT(name) DO UPDATE SET sha256=excluded.sha256,applied_at=excluded.applied_at", (&definition.planned.name, &definition.planned.sha256))?;
         }
 
         if !plan.pending().is_empty() || !plan.legacy.is_empty() {
@@ -600,6 +710,7 @@ impl Spec<'_> {
         migrations: Vec<PlannedMigration>,
         read_legacy: Option<&LegacyReader<'_>>,
         rebuilds: &RebuildPolicy,
+        definitions: Vec<derived::Definition>,
     ) -> Result<Plan, Error> {
         let application_id: i32 =
             conn.pragma_query_value(None, "application_id", |r| r.get(0))?;
@@ -627,9 +738,7 @@ impl Spec<'_> {
             if application_id != 0 || schema.is_empty() {
                 return Err(Error::NotLegacy);
             }
-            if schema.iter().any(|object| {
-                object.name.eq_ignore_ascii_case(MIGRATION_HISTORY_TABLE)
-            }) {
+            if schema.iter().any(|object| is_engine_table(&object.name)) {
                 return Err(Error::Drift(format!(
                     "legacy schema already contains {MIGRATION_HISTORY_TABLE}"
                 )));
@@ -680,6 +789,8 @@ impl Spec<'_> {
             }
             applied_at
         };
+        let derived_history =
+            derived::read_history(conn, &schema, &definitions)?;
         Ok(Plan {
             path,
             application_id: self.application_id,
@@ -692,6 +803,8 @@ impl Spec<'_> {
             migrations,
             legacy,
             rebuilds: rebuilds.clone(),
+            derived: definitions,
+            derived_history,
         })
     }
 }
@@ -839,6 +952,10 @@ enum SqlPermissionMode {
     Migration,
     /// Allow reads and approved inspection pragmas for planning and callbacks.
     ProjectCheck,
+    /// Allow view/trigger definitions, without project table writes.
+    Derived,
+    /// Allow engine-generated FTS rebuild writes only to declared FTS tables.
+    FtsRebuild,
 }
 
 /// Installs SQLite's statement authorizer and selects its SQL permission mode.
@@ -848,14 +965,21 @@ impl SqlAuthorizer {
     fn install(
         conn: &mut Connection,
         rebuilds: &RebuildPolicy,
+        fts_targets: &[String],
     ) -> Result<Self, Error> {
+        let fts_targets = fts_targets.to_vec();
         let rebuilds = rebuilds.clone();
         let mode = Arc::new(AtomicU8::new(SqlPermissionMode::Engine as u8));
         let callback_mode = Arc::clone(&mode);
+        let mut dropped_views = std::collections::BTreeSet::new();
         conn.authorizer(Some(move |ctx: AuthContext<'_>| {
             let mode = callback_mode.load(Ordering::Relaxed);
             let allowed = if mode == SqlPermissionMode::Migration as u8 {
                 migration_action(ctx, &rebuilds)
+            } else if mode == SqlPermissionMode::Derived as u8 {
+                derived_action(ctx, &mut dropped_views)
+            } else if mode == SqlPermissionMode::FtsRebuild as u8 {
+                fts_rebuild_action(ctx, &fts_targets)
             } else if mode == SqlPermissionMode::ProjectCheck as u8 {
                 verification_action(ctx.action)
             } else {
@@ -937,13 +1061,15 @@ fn migration_action(ctx: AuthContext<'_>, rebuilds: &RebuildPolicy) -> bool {
                         )
                     }))
         }
-        AuthAction::Delete { table_name }
+        AuthAction::CreateTable { table_name }
+        | AuthAction::CreateVtable { table_name, .. }
+        | AuthAction::Delete { table_name }
         | AuthAction::Insert { table_name }
         | AuthAction::Update { table_name, .. }
         | AuthAction::AlterTable { table_name, .. }
         | AuthAction::CreateIndex { table_name, .. }
         | AuthAction::CreateTrigger { table_name, .. } => {
-            !table_name.eq_ignore_ascii_case(MIGRATION_HISTORY_TABLE)
+            !is_engine_table(table_name)
         }
         AuthAction::Function { function_name } => {
             !function_name.eq_ignore_ascii_case("load_extension")
@@ -994,4 +1120,65 @@ fn verification_action(action: AuthAction<'_>) -> bool {
 
 fn pragma_is(name: &str, allowed: &[&str]) -> bool {
     allowed.iter().any(|entry| name.eq_ignore_ascii_case(entry))
+}
+
+fn is_engine_table(table: &str) -> bool {
+    table.eq_ignore_ascii_case(MIGRATION_HISTORY_TABLE)
+        || table.eq_ignore_ascii_case(derived::TABLE)
+}
+
+fn derived_action(
+    ctx: AuthContext<'_>,
+    dropped_views: &mut std::collections::BTreeSet<String>,
+) -> bool {
+    if ctx.database_name.is_some_and(|name| name != "main") {
+        return false;
+    }
+    match ctx.action {
+        AuthAction::CreateView { .. } | AuthAction::DropTrigger { .. } => true,
+        AuthAction::DropView { view_name } => {
+            // SQLite authorizes a DELETE on the view itself as part of DROP.
+            // Consume that one internal action, without permitting row DML.
+            dropped_views.insert(view_name.to_ascii_lowercase());
+            true
+        }
+        AuthAction::Delete { table_name }
+            if dropped_views.remove(&table_name.to_ascii_lowercase()) =>
+        {
+            true
+        }
+        AuthAction::CreateTrigger { table_name, .. } => {
+            !is_engine_table(table_name)
+        }
+        // SQLite modifies schema rows while executing approved view/trigger DDL.
+        AuthAction::Insert { table_name }
+        | AuthAction::Delete { table_name }
+        | AuthAction::Update { table_name, .. } => {
+            table_name == "sqlite_master" || table_name == "sqlite_schema"
+        }
+        action => verification_action(action),
+    }
+}
+
+fn fts_rebuild_action(ctx: AuthContext<'_>, targets: &[String]) -> bool {
+    if ctx.database_name.is_some_and(|name| name != "main") {
+        return false;
+    }
+    match ctx.action {
+        AuthAction::Insert { table_name }
+        | AuthAction::Delete { table_name }
+        | AuthAction::Update { table_name, .. } => {
+            targets.iter().any(|target| {
+                table_name.eq_ignore_ascii_case(target)
+                    || ["data", "idx", "config", "docsize", "content"]
+                        .iter()
+                        .any(|suffix| {
+                            table_name.eq_ignore_ascii_case(&format!(
+                                "{target}_{suffix}"
+                            ))
+                        })
+            })
+        }
+        action => verification_action(action),
+    }
 }

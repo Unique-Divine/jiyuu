@@ -181,8 +181,7 @@ Rebuild permission does not prove data preservation. Capture the application
 rows that must survive and compare them before commit, including user-edited
 configuration or descriptions. A valid database can still be missing rows.
 The engine restores connection settings after the transaction on every exit
-and closes the owned connection. Repeatable SQL and down migrations require
-separate work.
+and closes the owned connection. Down migrations require separate work.
 
 Error variants `Error::Rehearsal` and `Error::VerifiedApply` retain the
 requested artifact paths and nested cause. A requested path may not exist if
@@ -221,6 +220,54 @@ or CHECK constraint. It may reject two differently written but equivalent
 schemas. A mismatch rejects the transaction; the helper does not repair drift.
 Row preservation, legacy-history evidence, foreign keys, and integrity remain
 separate checks.
+
+## Replace Views and FTS Maintenance Triggers
+
+Declare replaceable derived definitions with struct `DerivedSql`. Unlike frozen
+versioned SQL, these definitions rerun when their checksum changes. They may
+replace views and triggers. They cannot change application rows, table
+structure, engine metadata, or transaction boundaries. Business seeds remain
+explicit create-once or versioned operations so edited defaults survive.
+
+Use method `Spec::plan_with_derived`, or method
+`Spec::plan_adoption_with_derived` for a legacy database. Both take an explicit
+`RebuildPolicy` for versioned SQL, which may be empty. Method
+`Plan::pending_derived` lists changed definitions and their FTS rebuild targets.
+The plan owns their SQL and permissions through rehearsal and apply.
+
+```rust,ignore
+let derived = [DerivedSql {
+    name: "note_search",
+    sql: include_str!("derived/note_search.sql"),
+    fts_rebuilds: &["note_fts"],
+}];
+let plan = spec.plan_with_derived(database_path, &RebuildPolicy::default(), &derived)?;
+```
+
+```text
+pending versioned SQL -> changed derived view/trigger DDL
+                     -> rebuild each declared existing FTS5 table
+                     -> checksum records -> schema/row checks -> COMMIT
+```
+
+Use guarded DROP/CREATE statements in derived SQL. FTS table creation and
+structural changes belong to versioned migrations. When maintenance triggers
+change, declare their existing FTS5 table in field `fts_rebuilds`. The engine
+rebuilds that index from its source content in the same transaction. FTS rebuild
+writes are restricted to the declared virtual tables and their shadow tables.
+The SQL checksum includes the ordered FTS target list.
+
+Table `evolve_sqlite_derived` stores the current name, checksum, and application
+time separately from frozen migration history. Unchanged definitions keep their
+timestamps and execute no SQL. A source, definition, rebuild, or final-check
+failure rolls back the entire batch. Existing names cannot disappear from the
+supplied declarations. To remove an object, retain its stable declaration name
+and change its SQL to an explicit DROP. Callers without those declarations
+refuse a database with recorded derived definitions.
+
+Derived SQL does not repair unreported drift automatically. Verify the complete
+expected schema and source rows before committing. Original legacy history
+still requires its own preservation check.
 
 ## Check the Crate
 
