@@ -59,16 +59,11 @@ fn rehearsal_includes_wal_rows_and_leaves_the_source_and_snapshot_unchanged()
     writer.pragma_update(None, "wal_autocheckpoint", 0)?;
     writer.execute("INSERT INTO booking VALUES (2, 'confirmed')", [])?;
     let paths = paths(folder.path());
-    let report = LATEST.rehearse(
-        &plan,
-        &paths,
-        |conn| Ok(rows(conn)?),
-        |conn, before| {
-            assert_eq!(before, ["pending", "confirmed"]);
-            assert_eq!(rows(conn)?, before);
-            Ok(())
-        },
-    )?;
+    let report = LATEST.rehearse(&plan, &paths, rows, |conn, before| {
+        assert_eq!(before, ["pending", "confirmed"]);
+        assert_eq!(rows(conn)?, before);
+        Ok(())
+    })?;
 
     assert_eq!(LATEST.plan(&source)?, plan);
     assert!(LATEST.plan(&report.copy_path)?.pending().is_empty());
@@ -239,7 +234,7 @@ fn verified_apply_snapshots_new_rows_and_excludes_writers_until_commit()
             &paths(folder.path()),
             |conn| {
                 capture_calls.set(capture_calls.get() + 1);
-                Ok(rows(conn)?)
+                rows(conn)
             },
             |conn, before| {
                 verify_calls.set(verify_calls.get() + 1);
@@ -270,11 +265,8 @@ fn a_failed_rehearsal_or_live_check_keeps_the_live_plan_unapplied() -> TestResul
         let plan = LATEST.plan(&source)?;
         let paths = paths(folder.path());
         let verifies = Cell::new(0);
-        let result = LATEST.apply_verified(
-            &plan,
-            &paths,
-            |conn| Ok(rows(conn)?),
-            |conn, before| {
+        let result =
+            LATEST.apply_verified(&plan, &paths, rows, |conn, before| {
                 assert_eq!(rows(conn)?, before);
                 verifies.set(verifies.get() + 1);
                 if verifies.get() == reject_call {
@@ -283,8 +275,7 @@ fn a_failed_rehearsal_or_live_check_keeps_the_live_plan_unapplied() -> TestResul
                     );
                 }
                 Ok(())
-            },
-        );
+            });
         let error = result.unwrap_err();
         assert_eq!(error.code(), "verification");
         assert!(matches!(error, Error::VerifiedApply { .. }));
@@ -358,7 +349,7 @@ fn verified_adoption_validates_both_databases_under_the_live_write_lock()
             writes_are_blocked(&source)?;
             read_legacy(conn)
         },
-        |conn| Ok(rows(conn)?),
+        rows,
         |conn, before| {
             assert_eq!(rows(conn)?, before);
             Ok(())

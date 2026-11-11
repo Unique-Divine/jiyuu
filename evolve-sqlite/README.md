@@ -162,4 +162,3 @@ Migration tests cover history and row preservation, stale plans, legacy
 adoption, and transaction rollback. Backup tests cover live WAL data,
 verification failures, occupied destination paths, concurrent publication,
 and failures before and after publication.
-
