@@ -87,17 +87,20 @@ pub struct Plan {
     application_id: i32,
     state: DatabaseState,
     migrations: Vec<PlannedMigration>,
-    applied: usize,
     legacy: Vec<LegacyMigration>,
 }
 
 impl Plan {
     pub fn pending(&self) -> &[PlannedMigration] {
-        &self.migrations[self.applied..]
+        &self.migrations[self.applied()..]
     }
 
     pub fn adopted(&self) -> &[LegacyMigration] {
         &self.legacy
+    }
+
+    fn applied(&self) -> usize {
+        self.state.ledger_applied_at.len() + self.legacy.len()
     }
 }
 
@@ -142,12 +145,16 @@ struct DatabaseState {
     application_id: i32,
     user_version: i32,
     schema: Vec<SchemaObject>,
+    // The validated ordinal, name, hash, and outcome are implied by the spec.
+    // Keep the remaining column to detect changes to any observed ledger row.
+    ledger_applied_at: Vec<i64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct SchemaObject {
     kind: String,
     name: String,
+    table: String,
     sql: Option<String>,
 }
 
@@ -255,7 +262,7 @@ impl Spec<'_> {
         }
 
         for (index, migration) in
-            self.migrations.iter().enumerate().skip(plan.applied)
+            self.migrations.iter().enumerate().skip(plan.applied())
         {
             {
                 let _restricted = authorizer.restrict(Phase::Migration);
@@ -351,12 +358,13 @@ impl Spec<'_> {
         let user_version =
             conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
         let schema = conn
-            .prepare("SELECT type, name, sql FROM main.sqlite_schema ORDER BY type, name")?
+            .prepare("SELECT type, name, tbl_name, sql FROM main.sqlite_schema ORDER BY type, name")?
             .query_map([], |row| {
                 Ok(SchemaObject {
                     kind: row.get(0)?,
                     name: row.get(1)?,
-                    sql: row.get(2)?,
+                    table: row.get(2)?,
+                    sql: row.get(3)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -379,13 +387,11 @@ impl Spec<'_> {
         } else {
             Vec::new()
         };
-        let applied = if !legacy.is_empty() {
-            legacy.len()
-        } else if application_id == 0 {
-            if user_version != 0 || !schema.is_empty() {
+        let ledger_applied_at = if application_id == 0 {
+            if legacy.is_empty() && (user_version != 0 || !schema.is_empty()) {
                 return Err(Error::AdoptionRequired);
             }
-            0
+            Vec::new()
         } else {
             let ledger = schema
                 .iter()
@@ -398,13 +404,23 @@ impl Spec<'_> {
                     "unexpected schema for {LEDGER}"
                 )));
             }
-            let applied = validate_history(conn, &migrations)?;
+            if let Some(trigger) = schema.iter().find(|object| {
+                object.kind == "trigger"
+                    && object.table.eq_ignore_ascii_case(LEDGER)
+            }) {
+                return Err(Error::Drift(format!(
+                    "unexpected trigger {} on {LEDGER}",
+                    trigger.name
+                )));
+            }
+            let applied_at = validate_history(conn, &migrations)?;
+            let applied = applied_at.len();
             if user_version != applied as i32 {
                 return Err(Error::Drift(format!(
                     "user_version {user_version} disagrees with ledger length {applied}"
                 )));
             }
-            applied
+            applied_at
         };
         Ok(Plan {
             path,
@@ -413,9 +429,9 @@ impl Spec<'_> {
                 application_id,
                 user_version,
                 schema,
+                ledger_applied_at,
             },
             migrations,
-            applied,
             legacy,
         })
     }
@@ -456,13 +472,15 @@ fn validate_legacy(
 fn validate_history(
     conn: &Connection,
     expected: &[PlannedMigration],
-) -> Result<usize, Error> {
+) -> Result<Vec<i64>, Error> {
     let mut statement = conn.prepare(
-        "SELECT ordinal, name, sha256, outcome FROM main.evolve_sqlite_migration ORDER BY ordinal",
+        "SELECT ordinal, name, sha256, outcome, applied_at
+         FROM main.evolve_sqlite_migration ORDER BY ordinal",
     )?;
     let mut rows = statement.query([])?;
-    let mut index = 0;
+    let mut applied_at = Vec::new();
     while let Some(row) = rows.next()? {
+        let index = applied_at.len();
         let ordinal: i64 = row.get(0)?;
         let name: String = row.get(1)?;
         if ordinal != index as i64 + 1 {
@@ -483,9 +501,9 @@ fn validate_history(
                 "migration {name} does not match the spec"
             )));
         }
-        index += 1;
+        applied_at.push(row.get(4)?);
     }
-    Ok(index)
+    Ok(applied_at)
 }
 
 #[repr(u8)]

@@ -126,6 +126,50 @@ fn refuses_a_ledger_with_changed_columns() {
 }
 
 #[test]
+fn changed_managed_ledger_timestamps_make_the_plan_stale() {
+    let db = NamedTempFile::new().unwrap();
+    let first = spec(&[INITIAL]);
+    apply(first, &first.plan(db.path()).unwrap()).unwrap();
+
+    let migrations = [INITIAL, UPGRADE];
+    let latest = spec(&migrations);
+    let plan = latest.plan(db.path()).unwrap();
+    let conn = Connection::open(db.path()).unwrap();
+    conn.execute(
+        "UPDATE evolve_sqlite_migration SET applied_at = applied_at + 1",
+        [],
+    )
+    .unwrap();
+
+    assert!(matches!(apply(latest, &plan), Err(Error::StalePlan)));
+    assert_eq!(
+        latest.plan(db.path()).unwrap().pending()[0].name,
+        UPGRADE.name
+    );
+}
+
+#[test]
+fn rejects_a_preexisting_trigger_on_the_engine_ledger() {
+    let db = NamedTempFile::new().unwrap();
+    let first = spec(&[INITIAL]);
+    apply(first, &first.plan(db.path()).unwrap()).unwrap();
+
+    let migrations = [INITIAL, UPGRADE];
+    let latest = spec(&migrations);
+    let plan = latest.plan(db.path()).unwrap();
+    let conn = Connection::open(db.path()).unwrap();
+    conn.execute_batch(
+        "CREATE TRIGGER suppress_history BEFORE INSERT ON EVOLVE_SQLITE_MIGRATION
+         BEGIN
+             SELECT RAISE(IGNORE);
+         END;",
+    ).unwrap();
+
+    assert!(matches!(latest.plan(db.path()), Err(Error::Drift(_))));
+    assert!(matches!(apply(latest, &plan), Err(Error::Drift(_))));
+}
+
+#[test]
 fn authorizer_recognizes_mixed_case_pragma_names() {
     let db = NamedTempFile::new().unwrap();
     let migrations = [
