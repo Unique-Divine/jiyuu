@@ -1,15 +1,21 @@
 [package]
 name = "evolve-sqlite"
 version = "0.1.0"
+authors = ["Unique Divine <ud@uniquedivine.com>"]
 edition = "2024"
 description = "Explicit, transactional SQLite migrations"
 repository = "https://github.com/Unique-Divine/jiyuu"
+homepage = "https://github.com/Unique-Divine/jiyuu/tree/main/evolve-sqlite"
+documentation = "https://github.com/Unique-Divine/jiyuu/tree/main/evolve-sqlite"
+readme = "README.md"
+keywords = ["sqlite", "migrations", "database", "rusqlite"]
+categories = ["database"]
 license = "MIT"
 
 [dependencies]
 rusqlite = { version = "0.41", features = ["bundled", "hooks"] }
 sha2 = "0.10"
-thiserror = "2"
+thiserror = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
