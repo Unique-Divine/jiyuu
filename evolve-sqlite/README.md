@@ -39,7 +39,7 @@ rollback of committed changes.
    and the second compares it with the migrated state. The engine checks
    the plan again under a write transaction, creates a verified snapshot,
    and rehearses on a copy before executing the live SQL. Migration SQL,
-   ledger changes, and the project checks share the live transaction.
+   history changes, and the project checks share the live transaction.
 
 The `Spec` struct holds the database kind's identity and complete migration
 sequence. Constructing it executes no SQL. Choose a distinct `application_id`
@@ -115,24 +115,9 @@ file exists, but its directory sync failed, so its survival across a crash is
 uncertain. The variant contains the published path. Missing source or parent
 paths return `BackupError::Io` with the filesystem error.
 
-## Check the Crate
+## Rehearse and Apply
 
-From the crate directory, run command `just check` for formatting, Clippy, and
-tests. Commands `just test`, `just fmt-check`, and `just lint` run each check
-separately. From the repository root, command `just rust-test` runs all Rust
-workspace tests with the committed dependency resolution.
-
-Migration tests cover history and row preservation, stale plans, legacy
-adoption, and transaction rollback. Backup tests cover live WAL data,
-verification failures, occupied destination paths, concurrent publication,
-and failures before and after publication.
-
-The engine rejects
-`DROP TABLE` while foreign-key enforcement is on because a table rebuild can
-cascade-delete dependent rows. Production integration, table rebuild support, repeatable SQL, and down migrations require
-separate work.
-
-Call `Spec::rehearse` with the reviewed plan, `RehearsalPaths`, and the
+Call method `Spec::rehearse` with the reviewed plan, a `RehearsalPaths` struct, and the
 project checks. The engine keeps an unchanged snapshot and migrates a
 second copy. `Spec::rehearse_adoption` also reruns the legacy validator.
 All successful artifacts remain available if a later step fails. Choose
@@ -140,13 +125,12 @@ fresh destination paths when retrying. The application owns retention.
 
 Methods `Spec::apply_verified` and `Spec::apply_adoption_verified` hold the
 source write reservation throughout snapshot, rehearsal, and live execution.
-This keeps the snapshot at the
-last committed state before migration and excludes application writers
+This keeps the snapshot at the last committed state before migration and excludes application writers
 until commit or rollback. Both project checks must support repeated calls.
 The live baseline is captured before the snapshot, the copy gets its own
 baseline, and each verifier checks its corresponding baseline. Legacy
-validation runs separately on source and copy. The ordinary `apply` and
-`apply_adoption` methods remain available for executing prepared copies.
+validation runs separately on source and copy. Methods `Spec::apply` and
+`Spec::apply_adoption` remain available for executing prepared copies.
 
 Apply and rehearsal hold an exclusive advisory lock beside the canonical
 database path. The lock file stays in place after release so concurrent
@@ -159,4 +143,23 @@ supplies that check in its verifier.
 The engine rejects `DROP TABLE` while foreign-key enforcement is on
 because a table rebuild can cascade-delete dependent rows. Production
 integration, table rebuild support, repeatable SQL, and down migrations
-have their own follow-up work.
+require separate work.
+
+Error variants `Error::Rehearsal` and `Error::VerifiedApply` retain the
+requested artifact paths and nested cause. A requested path may not exist if
+an earlier step failed. Their `code()` results identify the underlying failure,
+such as `stale_plan` or `verification`; inspect the variant to identify the
+operation. Published files remain available for inspection and recovery.
+
+## Check the Crate
+
+From the crate directory, run command `just check` for formatting, Clippy, and
+tests. Commands `just test`, `just fmt-check`, and `just lint` run each check
+separately. From the repository root, command `just rust-test` runs all Rust
+workspace tests with the committed dependency resolution.
+
+Migration tests cover history and row preservation, stale plans, legacy
+adoption, and transaction rollback. Backup tests cover live WAL data,
+verification failures, occupied destination paths, concurrent publication,
+and failures before and after publication.
+

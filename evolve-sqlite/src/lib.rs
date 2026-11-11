@@ -157,8 +157,11 @@ impl Plan {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
+    /// Another migration operation holds the advisory lock for this database.
     #[error("another migration holds the lock at {path}")]
     Locked { path: PathBuf },
+    /// Rehearsal failed; paths identify requested artifacts, which may not exist.
+    /// Inspect the nested error and retained files before choosing retry paths.
     #[error(
         "rehearsal failed; snapshot {snapshot_path}, copy {copy_path}: {source}"
     )]
@@ -167,6 +170,8 @@ pub enum Error {
         copy_path: PathBuf,
         source: Box<Error>,
     },
+    /// A guarded operation failed before live commit and retains published files.
+    /// Requested paths alone do not prove that either artifact was published.
     #[error(
         "verified apply failed; snapshot {snapshot_path}, copy {copy_path}: {source}"
     )]
@@ -213,7 +218,10 @@ pub enum Error {
 }
 
 impl Error {
-    /// Stable identifiers for callers that present structured errors.
+    /// Stable failure categories for logs and caller decisions.
+    ///
+    /// Backup, rehearsal, and verified-apply wrappers return the underlying
+    /// failure code. Inspect the error variant for operation and artifact paths.
     pub fn code(&self) -> &'static str {
         match self {
             Self::Locked { .. } => "migration_locked",

@@ -18,14 +18,18 @@ use crate::{
 /// or removes these files according to its own backup policy.
 #[derive(Clone, Debug)]
 pub struct RehearsalPaths {
+    /// Unused destination for the unchanged, verified recovery snapshot.
     pub snapshot: PathBuf,
+    /// Unused destination for the copy that receives migration SQL.
     pub copy: PathBuf,
 }
 
-/// Evidence produced by a completed rehearsal.
+/// Files retained after a successful rehearsal or verified apply.
 #[derive(Debug)]
 pub struct RehearsalReport {
+    /// Metadata for the unchanged recovery snapshot.
     pub snapshot: backup::Snapshot,
+    /// Canonical path of the migrated rehearsal database.
     pub copy_path: PathBuf,
 }
 
@@ -94,6 +98,8 @@ impl Spec<'_> {
     ///
     /// The source plan and its project baseline are checked before the
     /// snapshot. Other writers remain excluded until commit or rollback.
+    /// An immediate SQLite transaction reserves the live source for writing
+    /// before the snapshot and retains that reservation through commit.
     /// Capture and verify run independently on the live database and the
     /// rehearsal copy, so callbacks must support multiple invocations.
     pub fn apply_verified<T>(
@@ -164,6 +170,9 @@ impl Spec<'_> {
     }
 
     /// Rehearse legacy adoption using the validator from planning.
+    ///
+    /// The validator checks the copied legacy history before adoption. The
+    /// source remains unchanged, and published recovery files remain on error.
     pub fn rehearse_adoption<T>(
         &self,
         plan: &Plan,
