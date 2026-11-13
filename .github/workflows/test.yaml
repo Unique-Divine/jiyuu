@@ -22,6 +22,7 @@ jobs:
       mdtoc: ${{ github.event_name == 'workflow_dispatch' || steps.paths.outputs.mdtoc == 'true' }}
       tmux_watch: ${{ github.event_name == 'workflow_dispatch' || steps.paths.outputs.tmux_watch == 'true' }}
       gh_rev: ${{ github.event_name == 'workflow_dispatch' || steps.paths.outputs.gh_rev == 'true' }}
+      jiyuu_abi: ${{ github.event_name == 'workflow_dispatch' || steps.paths.outputs.jiyuu_abi == 'true' }}
       evolve_sqlite: ${{ github.event_name == 'workflow_dispatch' || steps.paths.outputs.evolve_sqlite == 'true' }}
       slack: ${{ github.event_name == 'workflow_dispatch' || steps.paths.outputs.slack == 'true' }}
       telegram: ${{ github.event_name == 'workflow_dispatch' || steps.paths.outputs.telegram == 'true' }}
@@ -77,6 +78,12 @@ jobs:
             - justfile
             evolve_sqlite:
             - evolve-sqlite/**
+            - Cargo.toml
+            - Cargo.lock
+            - .cargo/**
+            - .github/workflows/test.yaml
+            jiyuu_abi:
+            - jiyuu-abi/**
             - Cargo.toml
             - Cargo.lock
             - .cargo/**
@@ -207,6 +214,25 @@ jobs:
         if: needs.changes.outputs.evolve_sqlite == 'true'
       - if: needs.changes.outputs.evolve_sqlite == 'true'
         run: just --justfile evolve-sqlite/justfile check
+    needs: changes
+  jiyuu-abi:
+    runs-on: ubuntu-latest
+    steps:
+      - if: needs.changes.outputs.jiyuu_abi != 'true'
+        run: echo "No relevant changes; check completed successfully."
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        if: needs.changes.outputs.jiyuu_abi == 'true'
+        with:
+          persist-credentials: false
+      - if: needs.changes.outputs.jiyuu_abi == 'true'
+        name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+      - uses: extractions/setup-just@v3
+        if: needs.changes.outputs.jiyuu_abi == 'true'
+      - if: needs.changes.outputs.jiyuu_abi == 'true'
+        run: just --justfile jiyuu-abi/justfile check
     needs: changes
   gh-rev:
     runs-on: ubuntu-latest
