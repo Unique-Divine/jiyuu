@@ -84,6 +84,10 @@ auto-login, and `discord_login` can supply one later.
 ```
 
 After `just link`, `"command": "mcp-discord"` with no arguments also works.
+Unique-Divine/dotfiles manages this link itself starting with
+[dotfiles PR #137](https://github.com/Unique-Divine/dotfiles/pull/137): its
+`just bun-sync` links `mcp-discord` to this checkout's `src/index.ts`. On a
+workstation with that change, don't also run `just link`.
 `just run` starts the same entrypoint from this directory.
 
 ### Streamable HTTP Transport
