@@ -15,8 +15,9 @@ commands. Prefer the nearest relevant Just recipes when available.
   raise the project's minimum version or rewrite unrelated code.
 - Use [uv](https://docs.astral.sh/uv/guides/projects/) for dependencies,
   environments, and execution. In uv projects, manage dependencies with `uv add`,
-  run commands through `uv run`, and honor the lockfile. Use frozen installs and
-  checks in CI.
+  run commands through `uv run`, and honor the lockfile. In CI, install with
+  `uv sync --locked`, which fails when `uv.lock` no longer matches
+  `pyproject.toml`; `--frozen` skips that check.
 - Prefer Astral's [ty](https://docs.astral.sh/ty/) for new type-checking setups
   and [Ruff](https://docs.astral.sh/ruff/) for new linting and formatting setups.
   Keep existing repository tooling unless changing it is part of the task.
