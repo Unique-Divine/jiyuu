@@ -1,0 +1,35 @@
+# Node.js
+node_modules/
+npm-debug.log
+yarn-debug.log
+yarn-error.log
+
+# Logs
+logs
+*.log
+
+# Internal AI memory/log
+knowledge.md
+
+# Environment Variables
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Build Output
+dist/
+build/
+
+# IDE and Editors
+.idea/
+.vscode/
+*.swp
+*.swo
+record/
+*.mdc
+
+# Operating Systems
+.DS_Store
+Thumbs.db 

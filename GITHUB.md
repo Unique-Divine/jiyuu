@@ -51,6 +51,7 @@ use `61afef`.
 | --- | --- | --- |
 | `A-ai` | Area: AI tooling, MCP servers, agent skills, and agent workflow tools | `mcp/**`, `ai-skills/**`, `tmux-agent-watch/**` |
 | `Z-mcp` | Zone: MCP servers and shared MCP support | `mcp/**` |
+| `Z-mcp-discord` | Zone: Discord MCP server | `mcp/discord/**` |
 | `Z-mcp-slack` | Zone: Slack MCP server | `mcp/slack/**` |
 | `Z-mcp-telegram` | Zone: Telegram MCP server | `mcp/telegram/**` |
 | `Z-ai-skills` | Zone: Agent skills | `ai-skills/**` |

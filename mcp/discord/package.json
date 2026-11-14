@@ -1,0 +1,52 @@
+{
+  "name": "mcp-discord",
+  "version": "1.3.8",
+  "description": "Discord MCP server maintained in Jiyuu",
+  "main": "src/index.ts",
+  "bin": {
+    "mcp-discord": "src/index.ts"
+  },
+  "type": "module",
+  "scripts": {
+    "test": "bun test --isolate ./src",
+    "start": "bun src/index.ts",
+    "start-app": "bun src/app.ts"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "discord",
+    "claude",
+    "ai",
+    "chatbot",
+    "automation"
+  ],
+  "author": "Barry Yip <barry99625@gmail.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Unique-Divine/jiyuu.git",
+    "directory": "mcp/discord"
+  },
+  "bugs": {
+    "url": "https://github.com/Unique-Divine/jiyuu/issues"
+  },
+  "homepage": "https://github.com/Unique-Divine/jiyuu/tree/main/mcp/discord",
+  "engines": {
+    "bun": ">=1.4.3"
+  },
+  "devDependencies": {
+    "@types/bun": "1.4.3",
+    "@types/express": "^5.0.1",
+    "@types/node": "^20.17.50"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.11.0",
+    "discord.js": "^14.19.3",
+    "dotenv": "^16.5.0",
+    "express": "^5.1.0",
+    "zod": "^3.25.13"
+  },
+  "private": true,
+  "packageManager": "bun@1.4.3"
+}

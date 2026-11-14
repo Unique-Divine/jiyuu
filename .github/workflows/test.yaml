@@ -24,6 +24,7 @@ jobs:
       gh_rev: ${{ github.event_name == 'workflow_dispatch' || steps.paths.outputs.gh_rev == 'true' }}
       jiyuu_abi: ${{ github.event_name == 'workflow_dispatch' || steps.paths.outputs.jiyuu_abi == 'true' }}
       evolve_sqlite: ${{ github.event_name == 'workflow_dispatch' || steps.paths.outputs.evolve_sqlite == 'true' }}
+      discord: ${{ github.event_name == 'workflow_dispatch' || steps.paths.outputs.discord == 'true' }}
       slack: ${{ github.event_name == 'workflow_dispatch' || steps.paths.outputs.slack == 'true' }}
       telegram: ${{ github.event_name == 'workflow_dispatch' || steps.paths.outputs.telegram == 'true' }}
       python_mcp: ${{ github.event_name == 'workflow_dispatch' || steps.paths.outputs.python_mcp == 'true' }}
@@ -93,6 +94,10 @@ jobs:
             - Cargo.toml
             - Cargo.lock
             - .cargo/**
+            - .github/workflows/test.yaml
+            - justfile
+            discord:
+            - mcp/discord/**
             - .github/workflows/test.yaml
             - justfile
             slack:
@@ -255,6 +260,39 @@ jobs:
       - if: needs.changes.outputs.gh_rev == 'true'
         name: Check
         run: just --justfile gh-rev/justfile check
+    needs: changes
+  discord:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mcp/discord
+    steps:
+      - name: Unaffected project
+        if: needs.changes.outputs.discord != 'true'
+        run: echo "No relevant changes; check completed successfully."
+        working-directory: ${{ runner.temp }}
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        if: needs.changes.outputs.discord == 'true'
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.3
+        if: needs.changes.outputs.discord == 'true'
+      - name: Install locked dependencies
+        run: bun install --frozen-lockfile
+        if: needs.changes.outputs.discord == 'true'
+      - name: Run bun:test suite
+        run: bun test --isolate ./src
+        if: needs.changes.outputs.discord == 'true'
+      - name: Typecheck
+        run: bun check
+        if: needs.changes.outputs.discord == 'true'
+      - name: Check entrypoint imports
+        run:
+          bun build --target bun --packages external ./src/index.ts ./src/app.ts
+          --outdir ./node_modules/.cache/mcp-check
+        if: needs.changes.outputs.discord == 'true'
     needs: changes
   slack:
     runs-on: ubuntu-latest

@@ -47,11 +47,37 @@
         "forkBehindBy": 93,
         "changesReviewed": false
       }
+    },
+    {
+      "path": "mcp/discord",
+      "license": "MIT",
+      "import": {
+        "repository": "barryyip0625/mcp-discord",
+        "commit": "5c67e9d714971490aaedf8fab21753d7704bd4fa",
+        "tag": "v1.4.0"
+      },
+      "watchRepositories": [
+        "barryyip0625/mcp-discord"
+      ],
+      "reviewPriorities": [
+        "bot token handling",
+        "write and moderation tools",
+        "network destinations",
+        "MCP compatibility"
+      ],
+      "comparisonObservation": {
+        "date": "2026-11-14",
+        "upstreamTag": "v1.5.2",
+        "upstreamCommit": "aef9595e6fe55d3e80b9c47d4f32fa05616ab386",
+        "baselineTag": "v1.4.0",
+        "upgradeReviewed": false
+      }
     }
   ],
   "comparisonProcedure": [
     "Fetch source repositories into separate upstream caches, never into these imported component directories.",
     "Compare jtalk22/slack-mcp-server after bc703e9bd1b5bb137b3793c2fbf987b0bce3fc95, keeping the fork-only e68cc989585e8a29291d34fed143e84fef6f1898 change in view.",
+    "Compare barryyip0625/mcp-discord after 5c67e9d714971490aaedf8fab21753d7704bd4fa (v1.4.0); v1.5.2 is an unreviewed upgrade, not the baseline.",
     "Compare upstream changes after each pinned baseline with the corresponding Jiyuu subtree.",
     "Record dispositions and Jiyuu issue candidates; do not update scanned-through markers without complete review.",
     "Use a separate Jiyuu profile when upstream-watch supports non-Nibiru targets. Existing Nibiru ledgers remain unchanged."
