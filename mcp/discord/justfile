@@ -6,7 +6,8 @@ install:
 link:
     bun link
 
-# Run the bun:test suite, isolating module mocks per file.
+# Run the bun:test suite. Keep --isolate: Bun's mock.module is process-wide,
+# so without it one file's logger mock leaks into logger.test.ts.
 test:
     bun test --isolate ./src
 

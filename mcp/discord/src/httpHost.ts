@@ -1,5 +1,10 @@
-// Jiyuu local modification: the HTTP transports have no authentication, so
-// they bind to loopback unless the operator names another host explicitly.
+// Jiyuu local modification, from the review of
+// https://github.com/Unique-Divine/jiyuu/pull/109. The HTTP transports have no
+// authentication, and upstream listened on every interface, so any LAN or
+// Tailscale peer could call every tool, including sends and deletes. They
+// bind to loopback unless the operator names another host. Keep loopback as
+// the default; a remote or container setup must opt in with --host or
+// HTTP_HOST and gets a warning.
 
 export const DEFAULT_HTTP_HOST = '127.0.0.1';
 
@@ -28,12 +33,21 @@ export function nonLoopbackWarning(host: string): string | null {
         'every Discord tool.';
 }
 
-// DNS rebinding guard. A web page can point its own hostname at 127.0.0.1,
-// so binding to loopback alone does not keep browsers out. Requests must
-// name an allowed Host, and a browser Origin, when sent, must match one.
-// Clients that send no Origin (MCP clients, curl) are allowed. The SDK's own
-// check is not used because it rejects requests that omit Origin.
+// DNS rebinding guard, from round 2 of the same review. A web page can point
+// its own hostname at 127.0.0.1, so binding to loopback does not keep
+// browsers out: an initialize request with an attacker's Host and Origin got
+// HTTP 200. Requests must name an allowed Host, and a browser Origin, when
+// sent, must match one. Requests without Origin pass, because MCP clients
+// and curl don't send one.
+//
+// Don't switch to the SDK's enableDnsRebindingProtection: once
+// allowedOrigins is set, it also rejects requests that omit Origin, which
+// breaks those clients. Both entrypoints install this guard before
+// express.json(), so rejected requests are never parsed.
 
+// Keys are hostname:port with the port always explicit. A Host header with no
+// port means port 80, so `localhost` alone never matches a server on another
+// port. Credentials or a path in the value make it invalid.
 function hostKey(value: string, defaultPort: string): string | null {
     try {
         const url = new URL(`http://${value.trim()}`);
@@ -44,6 +58,8 @@ function hostKey(value: string, defaultPort: string): string | null {
     }
 }
 
+// Origins other than http(s), including "null" from sandboxed frames and
+// file:// pages, have no key and are rejected.
 function originKey(origin: string): string | null {
     try {
         const url = new URL(origin);
@@ -55,7 +71,11 @@ function originKey(origin: string): string | null {
     }
 }
 
-/** Host:port values a request may name for a server bound to host:port. */
+/**
+ * Host:port values a request may name for a server bound to host:port. A
+ * wildcard bind (0.0.0.0, ::) is not a name clients send, so it adds nothing;
+ * remote names for such a bind come only from HTTP_ALLOWED_HOSTS.
+ */
 export function allowedHostKeys(
     host: string,
     port: number,
