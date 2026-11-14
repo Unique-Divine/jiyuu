@@ -1,0 +1,12 @@
+Discord MCP
+Original project: https://github.com/barryyip0625/mcp-discord
+Original author: Barry Yip, as named in package.json and LICENSE.
+
+Imported into Unique-Divine/jiyuu from commit
+5c67e9d714971490aaedf8fab21753d7704bd4fa (tag v1.4.0) without Git history.
+The upstream package.json at that commit still reports version 1.3.8.
+
+The original MIT License, with its copyright notice, is reproduced in LICENSE.
+See IMPORT.json for snapshot provenance, exclusions and local modifications.
+The Jiyuu root MIT license does not replace this component's license. This
+import does not imply upstream endorsement.
