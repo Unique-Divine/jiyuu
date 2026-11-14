@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 import { Client, GatewayIntentBits } from "discord.js";
 import { config as dotenvConfig } from 'dotenv';
 import { DiscordMCPServer } from './server.js';
