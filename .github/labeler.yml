@@ -10,6 +10,10 @@ Z-mcp:
   - changed-files:
       - any-glob-to-any-file:
           - mcp/**
+Z-mcp-discord:
+  - changed-files:
+      - any-glob-to-any-file:
+          - mcp/discord/**
 Z-mcp-slack:
   - changed-files:
       - any-glob-to-any-file:

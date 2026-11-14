@@ -68,17 +68,20 @@ github-labels *ARGS:
 github-labels-test:
   bun test scripts/github-labels
 
-# Install both maintained MCP servers.
+# Install the maintained MCP servers.
 mcp-install:
+  just --justfile mcp/discord/justfile install
   just --justfile mcp/slack/justfile install
   just --justfile mcp/telegram/justfile install
 
-# Run both MCP regression suites.
+# Run the MCP regression suites.
 mcp-test:
+  just --justfile mcp/discord/justfile test
   just --justfile mcp/slack/justfile test
   just --justfile mcp/telegram/justfile test
 
-# Check both MCP source trees.
+# Check the MCP source trees.
 mcp-check:
+  just --justfile mcp/discord/justfile check
   just --justfile mcp/slack/justfile check
   just --justfile mcp/telegram/justfile check
