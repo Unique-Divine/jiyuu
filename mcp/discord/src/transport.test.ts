@@ -1,23 +1,30 @@
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import express, { Application } from "express";
-import { MCPTransport, StdioTransport, StreamableHttpTransport } from './transport.js';
+import { describe, it, expect, beforeEach, afterEach, jest, mock, type Mock } from 'bun:test';
+import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import type { Application } from "express";
+import type { MCPTransport } from './transport.js';
+
+// Bun does not hoist module mocks, and require() of the SDK resolves its
+// CommonJS build rather than the ESM build that transport.ts imports. Keep
+// handles on the mocked constructors and import the module under test after
+// registering the mocks.
+const StdioServerTransportMock = jest.fn();
+const StreamableHTTPServerTransportMock = jest.fn();
+let expressMock: Mock<(...args: any[]) => any>;
 
 // Mock the imported modules
-jest.mock('@modelcontextprotocol/sdk/server/index.js', () => ({
+mock.module('@modelcontextprotocol/sdk/server/index.js', () => ({
   Server: jest.fn()
 }));
 
-jest.mock('@modelcontextprotocol/sdk/server/streamableHttp.js', () => ({
-  StreamableHTTPServerTransport: jest.fn()
+mock.module('@modelcontextprotocol/sdk/server/streamableHttp.js', () => ({
+  StreamableHTTPServerTransport: StreamableHTTPServerTransportMock
 }));
 
-jest.mock('@modelcontextprotocol/sdk/server/stdio.js', () => ({
-  StdioServerTransport: jest.fn()
+mock.module('@modelcontextprotocol/sdk/server/stdio.js', () => ({
+  StdioServerTransport: StdioServerTransportMock
 }));
 
-jest.mock('express', () => {
+mock.module('express', () => {
   const mockApp = {
     use: jest.fn().mockReturnThis(),
     all: jest.fn().mockReturnThis(),
@@ -39,14 +46,15 @@ jest.mock('express', () => {
 
   const mockExpress: any = jest.fn(() => mockApp);
   mockExpress.json = jest.fn().mockReturnThis();
-  return mockExpress;
+  expressMock = mockExpress;
+  return { default: mockExpress };
 });
 
-jest.mock('./tools/tools.js', () => ({
+mock.module('./tools/tools.js', () => ({
   createToolContext: jest.fn()
 }));
 
-jest.mock('discord.js', () => ({
+mock.module('discord.js', () => ({
   Client: jest.fn(() => ({
     login: jest.fn(),
     on: jest.fn()
@@ -59,21 +67,23 @@ jest.mock('discord.js', () => ({
   }
 }));
 
-jest.mock('./logger.js', () => ({
+mock.module('./logger.js', () => ({
   info: jest.fn(),
   error: jest.fn()
 }));
 
+const { StdioTransport, StreamableHttpTransport } = await import('./transport.js');
+
 describe('StdioTransport', () => {
-  let stdioTransport: StdioTransport;
-  let mockServer: jest.Mocked<Server>;
+  let stdioTransport: InstanceType<typeof StdioTransport>;
+  let mockServer: Server;
 
   beforeEach(() => {
     stdioTransport = new StdioTransport();
     mockServer = {
       connect: jest.fn().mockResolvedValue(undefined),
       close: jest.fn().mockResolvedValue(undefined)
-    } as unknown as jest.Mocked<Server>;
+    } as unknown as Server;
   });
 
   afterEach(() => {
@@ -85,12 +95,12 @@ describe('StdioTransport', () => {
       const mockStdioTransport = {
         close: jest.fn().mockResolvedValue(undefined)
       };
-      (require('@modelcontextprotocol/sdk/server/stdio.js').StdioServerTransport as jest.Mock)
+      StdioServerTransportMock
         .mockReturnValue(mockStdioTransport);
 
       await stdioTransport.start(mockServer);
 
-      expect(require('@modelcontextprotocol/sdk/server/stdio.js').StdioServerTransport).toHaveBeenCalledTimes(1);
+      expect(StdioServerTransportMock).toHaveBeenCalledTimes(1);
       expect(mockServer.connect).toHaveBeenCalledWith(mockStdioTransport);
     });
   });
@@ -100,7 +110,7 @@ describe('StdioTransport', () => {
       const mockStdioTransport = {
         close: jest.fn().mockResolvedValue(undefined)
       };
-      (require('@modelcontextprotocol/sdk/server/stdio.js').StdioServerTransport as jest.Mock)
+      StdioServerTransportMock
         .mockReturnValue(mockStdioTransport);
 
       // Start the transport first to initialize it
@@ -119,17 +129,17 @@ describe('StdioTransport', () => {
 });
 
 describe('StreamableHttpTransport', () => {
-  let httpTransport: StreamableHttpTransport;
-  let mockServer: jest.Mocked<Server>;
-  let mockApp: jest.Mocked<Application>;
-  let mockExpress: jest.Mock;
+  let httpTransport: InstanceType<typeof StreamableHttpTransport>;
+  let mockServer: Server;
+  let mockApp: Application;
+  let mockExpress: Mock<(...args: any[]) => any>;
   let originalConsoleInfo: typeof console.info;
 
   beforeEach(() => {
     originalConsoleInfo = console.info;
     console.info = jest.fn(); // Suppress console logs during tests
     
-    mockExpress = require('express');
+    mockExpress = expressMock;
     mockApp = {
       use: jest.fn(),
       all: jest.fn(),
@@ -137,15 +147,15 @@ describe('StreamableHttpTransport', () => {
         process.nextTick(callback);
         return { close: jest.fn((closeCallback) => process.nextTick(closeCallback)) };
       })
-    } as unknown as jest.Mocked<Application>;
+    } as unknown as Application;
     
-    (mockExpress as jest.Mock).mockReturnValue(mockApp);
+    mockExpress.mockReturnValue(mockApp);
 
     httpTransport = new StreamableHttpTransport(3000);
     mockServer = {
       connect: jest.fn().mockResolvedValue(undefined),
       close: jest.fn().mockResolvedValue(undefined)
-    } as unknown as jest.Mocked<Server>;
+    } as unknown as Server;
   });
 
   afterEach(() => {
@@ -173,12 +183,12 @@ describe('StreamableHttpTransport', () => {
         handleRequest: jest.fn(),
         close: jest.fn().mockResolvedValue(undefined)
       };
-      (require('@modelcontextprotocol/sdk/server/streamableHttp.js').StreamableHTTPServerTransport as jest.Mock)
+      StreamableHTTPServerTransportMock
         .mockReturnValue(mockTransport);
 
       await httpTransport.start(mockServer);
 
-      expect(require('@modelcontextprotocol/sdk/server/streamableHttp.js').StreamableHTTPServerTransport).toHaveBeenCalledTimes(1);
+      expect(StreamableHTTPServerTransportMock).toHaveBeenCalledTimes(1);
       expect(mockServer.connect).toHaveBeenCalledWith(mockTransport);
       expect(mockApp.listen).toHaveBeenCalledWith(3000, '0.0.0.0', expect.any(Function));
     });
@@ -188,7 +198,7 @@ describe('StreamableHttpTransport', () => {
         handleRequest: jest.fn(),
         close: jest.fn().mockResolvedValue(undefined)
       };
-      (require('@modelcontextprotocol/sdk/server/streamableHttp.js').StreamableHTTPServerTransport as jest.Mock)
+      StreamableHTTPServerTransportMock
         .mockReturnValue(mockTransport);
 
       await httpTransport.start(mockServer);
@@ -202,15 +212,15 @@ describe('StreamableHttpTransport', () => {
         handleRequest: jest.fn().mockRejectedValue(new Error('Test error')),
         close: jest.fn().mockResolvedValue(undefined)
       };
-      (require('@modelcontextprotocol/sdk/server/streamableHttp.js').StreamableHTTPServerTransport as jest.Mock)
+      StreamableHTTPServerTransportMock
         .mockReturnValue(mockTransport);
 
       await httpTransport.start(mockServer);
       
       // Get the handler function for the /mcp route
-      const mockRouteHandler = (mockApp.all as jest.Mock).mock.calls.find(
+      const mockRouteHandler = (mockApp.all as unknown as Mock<(...args: any[]) => any>).mock.calls.find(
         (call) => call[0] === '/mcp'
-      )[1];
+      )![1];
       
       // Create mock request and response objects
       const mockReq = { body: {} };
@@ -233,7 +243,7 @@ describe('StreamableHttpTransport', () => {
         handleRequest: jest.fn(),
         close: jest.fn().mockResolvedValue(undefined)
       };
-      (require('@modelcontextprotocol/sdk/server/streamableHttp.js').StreamableHTTPServerTransport as jest.Mock)
+      StreamableHTTPServerTransportMock
         .mockReturnValue(mockTransport);
 
       // Start the transport first

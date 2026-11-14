@@ -1,15 +1,12 @@
-import { 
-  createCategoryHandler, 
-  editCategoryHandler, 
-  deleteCategoryHandler, 
-  createTextChannelHandler, 
-  deleteChannelHandler, 
-  readMessagesHandler 
-} from './channel.js';
+import { describe, it, expect, beforeEach, jest, mock } from 'bun:test';
 import { ChannelType } from 'discord.js';
 
+// Bun has no jest.requireActual. Copy the real exports before mock.module
+// replaces the module, then import the module under test after the mocks.
+const actualDiscordJs = { ...(await import('discord.js')) };
+
 // Mock the errorHandler module since it's used in the channel module
-jest.mock('../errorHandler', () => ({
+mock.module('../errorHandler', () => ({
   handleDiscordError: jest.fn((error) => ({
     content: [{ type: "text", text: `An unexpected error occurred: ${error.message}` }],
     isError: true
@@ -62,9 +59,8 @@ const mockMessage = {
 };
 
 // Mock the Discord.js module
-jest.mock('discord.js', () => {
-  const actualDiscordJs = jest.requireActual('discord.js');
-  
+mock.module('discord.js', () => {
+
   const mockClient = {
     isReady: jest.fn(),
     guilds: {
@@ -84,6 +80,15 @@ jest.mock('discord.js', () => {
     VoiceChannel: jest.fn(() => mockNonTextChannel),
   };
 });
+
+const {
+  createCategoryHandler,
+  editCategoryHandler,
+  deleteCategoryHandler,
+  createTextChannelHandler,
+  deleteChannelHandler,
+  readMessagesHandler
+} = await import('./channel.js');
 
 describe('Channel Handlers', () => {
   let mockContext = {} as any;

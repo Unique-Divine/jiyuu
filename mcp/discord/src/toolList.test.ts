@@ -1,3 +1,4 @@
+import { describe, test, expect } from 'bun:test';
 import { toolList } from './toolList.js';
 
 // Define types for the tool interface to satisfy TypeScript

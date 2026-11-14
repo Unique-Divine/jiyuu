@@ -1,3 +1,4 @@
+import { describe, test, expect } from 'bun:test';
 import {
     DiscordLoginSchema,
     SendMessageSchema,
@@ -739,7 +740,7 @@ describe('Discord Schemas Validation Tests', () => {
                 sortOrder: 'desc',
                 limit: 50,
                 offset: 10
-            };
+            } as const;
             expect(SearchMessagesSchema.parse(data)).toEqual(data);
         });
 

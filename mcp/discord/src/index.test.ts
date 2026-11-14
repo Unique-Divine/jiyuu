@@ -1,4 +1,4 @@
-import { jest, describe, it, expect, beforeEach, afterEach } from '@jest/globals';
+import { describe, it, expect, beforeEach, afterEach, jest } from 'bun:test';
 
 // Define a simpler approach - we'll manually test the core logic by simulating the behaviors
 

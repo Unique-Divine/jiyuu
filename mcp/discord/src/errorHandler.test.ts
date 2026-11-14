@@ -1,3 +1,4 @@
+import { describe, it, expect } from 'bun:test';
 import { handleDiscordError } from './errorHandler.js';
 import { ToolResponse } from './tools/types.js';
 

@@ -1,10 +1,11 @@
+import { describe, it, test, expect, beforeEach, afterEach, jest, mock, type Mock } from 'bun:test';
 import { Client, Guild, Collection, GuildChannelManager, REST, ChannelType } from "discord.js";
 import { searchMessagesHandler, listServersHandler, getServerInfoHandler } from "./server.js";
-import { ToolContext, ToolResponse } from "./types.js";
+import type { ToolContext, ToolResponse } from "./types.js";
 import { handleDiscordError } from "../errorHandler.js";
 
 // Mock the external dependencies
-jest.mock("../errorHandler.js", () => ({
+mock.module("../errorHandler.js", () => ({
   handleDiscordError: jest.fn((error) => ({
     content: [{ type: "text", text: `Error: ${error.message}` }],
     isError: true
@@ -12,10 +13,10 @@ jest.mock("../errorHandler.js", () => ({
 }));
 
 describe("Server Handlers", () => {
-  let mockClient: jest.Mocked<Client>;
-  let mockGuild: jest.Mocked<Guild>;
+  let mockClient: any;
+  let mockGuild: any;
   let mockContext: ToolContext;
-  let mockREST: jest.Mocked<REST>;
+  let mockREST: any;
 
   beforeEach(() => {
     // Reset mocks
@@ -24,7 +25,7 @@ describe("Server Handlers", () => {
     // Create mock REST client
     mockREST = {
       get: jest.fn()
-    } as unknown as jest.Mocked<REST>;
+    } as unknown as any;
 
     // Create mock guild
     mockGuild = {
@@ -42,13 +43,13 @@ describe("Server Handlers", () => {
       channels: {
         fetch: jest.fn().mockResolvedValue(new Collection())
       } as unknown as GuildChannelManager
-    } as unknown as jest.Mocked<Guild>;
+    } as unknown as any;
 
     // Create mock client
     // Create mock for guilds manager - make it flexible to allow individual test control
     const mockGuildsFetch = jest.fn().mockResolvedValue(
       new Collection([["123456789", mockGuild]])
-    ) as jest.Mock<any, [any?]>;
+    ) as Mock<(...args: any[]) => any>;
 
     const mockGuildsManager = {
       fetch: mockGuildsFetch
@@ -58,7 +59,7 @@ describe("Server Handlers", () => {
       isReady: jest.fn().mockReturnValue(true),
       guilds: mockGuildsManager,
       rest: mockREST
-    } as unknown as jest.Mocked<Client>;
+    } as unknown as any;
 
     // Create context
     mockContext = {

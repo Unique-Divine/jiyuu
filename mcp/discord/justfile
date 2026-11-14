@@ -6,9 +6,9 @@ install:
 link:
     bun link
 
-# Run the bun:test suite.
+# Run the bun:test suite, isolating module mocks per file.
 test:
-    bun test ./src
+    bun test --isolate ./src
 
 # Typecheck, then validate entrypoint imports in an ignored build cache.
 check:

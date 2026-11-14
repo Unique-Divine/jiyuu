@@ -1,5 +1,6 @@
+import { describe, it, expect } from 'bun:test';
 import { Client } from "discord.js";
-import { ToolResponse, ToolContext, ToolHandler } from "./types.js";
+import type { ToolResponse, ToolContext, ToolHandler } from "./types.js";
 
 // Mock Discord.js client for testing purposes
 const mockClient = {

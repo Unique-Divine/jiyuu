@@ -1,3 +1,4 @@
+import { describe, it, expect, beforeEach, afterEach, jest, mock } from 'bun:test';
 import { loginHandler } from './login.js';
 import { DiscordLoginSchema } from '../schemas.js';
 import { Client } from 'discord.js';
@@ -5,17 +6,17 @@ import { handleDiscordError } from '../errorHandler.js';
 import { info, error } from '../logger.js';
 
 // Mock the dependencies
-jest.mock('../schemas.js', () => ({
+mock.module('../schemas.js', () => ({
   DiscordLoginSchema: {
     parse: jest.fn()
   }
 }));
 
-jest.mock('../errorHandler.js', () => ({
+mock.module('../errorHandler.js', () => ({
   handleDiscordError: jest.fn()
 }));
 
-jest.mock('../logger.js', () => ({
+mock.module('../logger.js', () => ({
   info: jest.fn(),
   error: jest.fn()
 }));
@@ -30,7 +31,7 @@ describe('loginHandler', () => {
     user: { tag: string } | null;
   };
   let mockContext: any;
-  let consoleSpy: jest.SpyInstance;
+  let consoleSpy: ReturnType<typeof jest.spyOn>;
 
   beforeEach(() => {
     mockClient = {
@@ -191,10 +192,20 @@ describe('loginHandler', () => {
       isError: true
     });
 
-    // Increase the timeout for this test since timeout is internally 30 seconds
-    const result = await loginHandler(args, mockContext);
+    // Fake timers reach the internal 30-second ready timeout without waiting.
+    jest.useFakeTimers();
+    try {
+      const resultPromise = loginHandler(args, mockContext);
+      jest.advanceTimersByTime(30000);
+      const result = await resultPromise;
 
-    expect(handleDiscordError).toHaveBeenCalled();
-    expect(result.isError).toBe(true);
-  }, 35000); // Set timeout to 35 seconds to accommodate the internal 30-second timeout
+      expect(handleDiscordError).toHaveBeenCalled();
+      expect(error).toHaveBeenCalledWith(
+        'Error in login handler: Client ready event timed out after 30000ms'
+      );
+      expect(result.isError).toBe(true);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
 });

@@ -1,3 +1,4 @@
+import { describe, it, expect, beforeEach, jest } from 'bun:test';
 import { sendMessageHandler } from './send-message.js';
 import { SendMessageSchema } from '../schemas.js';
 import { handleDiscordError } from "../errorHandler.js";

@@ -1,12 +1,22 @@
-jest.mock('../errorHandler.js');
+import { describe, it, expect, beforeEach, jest, mock } from 'bun:test';
 
-import { 
-  getForumChannelsHandler, 
-  createForumPostHandler, 
-  getForumPostHandler, 
-  replyToForumHandler, 
-  deleteForumPostHandler 
-} from './forum.js';
+// Bun has no automock. This explicit mock replaces Jest's automock of
+// errorHandler.js, using the response shape of the upstream manual mock.
+const handleDiscordErrorMock = jest.fn((error: any) => ({
+  content: [{ type: "text", text: `Discord API Error: ${error.message || 'Unknown error'}` }],
+  isError: true
+}));
+mock.module('../errorHandler.js', () => ({
+  handleDiscordError: handleDiscordErrorMock
+}));
+
+const {
+  getForumChannelsHandler,
+  createForumPostHandler,
+  getForumPostHandler,
+  replyToForumHandler,
+  deleteForumPostHandler
+} = await import('./forum.js');
 import { 
   GetForumChannelsSchema, 
   CreateForumPostSchema, 
@@ -15,7 +25,6 @@ import {
   DeleteForumPostSchema 
 } from '../schemas.js';
 import { ChannelType, Client } from 'discord.js';
-import { handleDiscordError } from '../errorHandler.js';
 
 // Mock discord.js
 const createMockCollectionWithFilter = (items: Array<any>) => {
@@ -125,7 +134,7 @@ const mockClient = {
 const mockContext = { client: mockClient };
 
 // TypeScript type for the mocked function
-const mockedHandleDiscordError = handleDiscordError as jest.MockedFunction<typeof handleDiscordError>;
+const mockedHandleDiscordError = handleDiscordErrorMock;
 
 describe('getForumChannelsHandler', () => {
   beforeEach(() => {
@@ -176,7 +185,7 @@ describe('getForumChannelsHandler', () => {
 
   it('should return forum channels with their details', async () => {
     // Ensure error handler is not called during success path
-    mockedHandleDiscordError.mockImplementation((error) => {
+    mockedHandleDiscordError.mockImplementation((error: any) => {
       // Fail the test if error handler is called unexpectedly
       throw new Error(`Unexpected error handler call: ${error.message}`);
     });
@@ -340,7 +349,7 @@ describe('getForumPostHandler', () => {
 
   it('should return forum post details', async () => {
     // Ensure error handler is not called during success path
-    mockedHandleDiscordError.mockImplementation((error) => {
+    mockedHandleDiscordError.mockImplementation((error: any) => {
       // Fail the test if error handler is called unexpectedly
       throw new Error(`Unexpected error handler call: ${error.message}`);
     });

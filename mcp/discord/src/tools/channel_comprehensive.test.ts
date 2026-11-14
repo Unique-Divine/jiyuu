@@ -1,3 +1,4 @@
+import { describe, test, expect, beforeEach, jest, mock } from 'bun:test';
 import { ChannelType } from "discord.js";
 import { 
   createCategoryHandler,
@@ -7,7 +8,7 @@ import {
   deleteChannelHandler,
   readMessagesHandler
 } from "./channel.js";
-import { ToolContext } from "./types.js";
+import type { ToolContext } from "./types.js";
 
 // Mock Discord.js client and related objects
 const createMockClient = (isReady: boolean) => {
@@ -64,7 +65,7 @@ const createMockMessage = (id: string, content: string, authorId: string, author
 });
 
 // Mock the errorHandler module since it's used in the channel module
-jest.mock("../errorHandler", () => ({
+mock.module("../errorHandler", () => ({
   handleDiscordError: jest.fn((error) => ({
     content: [{ type: "text", text: `An unexpected error occurred: ${error.message || error}` }],
     isError: true

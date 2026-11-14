@@ -1,3 +1,4 @@
+import { describe, it, expect, beforeEach, jest } from 'bun:test';
 import { 
   createWebhookHandler, 
   sendWebhookMessageHandler,
@@ -6,7 +7,7 @@ import {
 } from './webhooks.js';
 import { handleDiscordError } from '../errorHandler.js';
 import { ChannelType } from 'discord.js';
-import { ToolContext } from './types.js';
+import type { ToolContext } from './types.js';
 
 // Mock Discord.js modules
 const mockClient = {

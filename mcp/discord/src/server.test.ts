@@ -1,57 +1,32 @@
-import { DiscordMCPServer } from './server.js';
-import { Client } from 'discord.js';
-import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { MCPTransport } from './transport.js';
+import { describe, it, expect, beforeEach, afterEach, jest, mock, type Mock } from 'bun:test';
+import { z } from 'zod';
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import { toolList } from './toolList.js';
 
-// Mock the external dependencies
-jest.mock('@modelcontextprotocol/sdk/server/index.js');
-jest.mock('discord.js');
-jest.mock('./transport.js', () => ({
-  MCPTransport: jest.fn()
+// Bun has no automock and does not hoist module mocks. Register explicit
+// mocks first, keep handles on them, then import the module under test.
+// server.ts imports Client and MCPTransport only as types, so discord.js and
+// transport.js need no mocks. Real zod and toolList replace their automocks.
+const ServerMock = jest.fn();
+mock.module('@modelcontextprotocol/sdk/server/index.js', () => ({
+  Server: ServerMock
 }));
-jest.mock('./toolList.js');
-jest.mock('zod', () => ({
-  z: {
-    ...jest.requireActual('zod'),
-    ZodError: class ZodError extends Error { }
-  }
-}));
-jest.mock('./tools/tools.js', () => ({
-  createToolContext: jest.fn(() => ({})),
-  loginHandler: jest.fn(),
-  sendMessageHandler: jest.fn(),
-  getForumChannelsHandler: jest.fn(),
-  createForumPostHandler: jest.fn(),
-  getForumPostHandler: jest.fn(),
-  replyToForumHandler: jest.fn(),
-  deleteForumPostHandler: jest.fn(),
-  createTextChannelHandler: jest.fn(),
-  deleteChannelHandler: jest.fn(),
-  readMessagesHandler: jest.fn(),
-  getServerInfoHandler: jest.fn(),
-  addReactionHandler: jest.fn(),
-  addMultipleReactionsHandler: jest.fn(),
-  removeReactionHandler: jest.fn(),
-  deleteMessageHandler: jest.fn(),
-  createWebhookHandler: jest.fn(),
-  sendWebhookMessageHandler: jest.fn(),
-  editWebhookHandler: jest.fn(),
-  deleteWebhookHandler: jest.fn(),
-  createCategoryHandler: jest.fn(),
-  editCategoryHandler: jest.fn(),
-  deleteCategoryHandler: jest.fn(),
-  listServersHandler: jest.fn(),
-  searchMessagesHandler: jest.fn()
-}));
-jest.mock('./logger.js', () => ({
+// server.ts imports every handler by name and Bun checks named imports, so
+// mock each export of the real module rather than a hand-kept subset.
+const actualTools = await import('./tools/tools.js');
+const toolsMock: Record<string, Mock<(...args: any[]) => any>> =
+  Object.fromEntries(Object.keys(actualTools).map((name) => [name, jest.fn()]));
+toolsMock.createToolContext = jest.fn(() => ({}));
+mock.module('./tools/tools.js', () => toolsMock);
+mock.module('./logger.js', () => ({
   info: jest.fn(),
   error: jest.fn(),
 }));
+
+const { DiscordMCPServer } = await import('./server.js');
 
 const mockedServer = {
   setRequestHandler: jest.fn(),
@@ -69,7 +44,7 @@ const mockedClient = {
 };
 
 describe('DiscordMCPServer', () => {
-  let discordMCPServer: DiscordMCPServer;
+  let discordMCPServer: InstanceType<typeof DiscordMCPServer>;
   let mockServer: any;
   let mockTransport: any;
   let mockClient: any;
@@ -81,9 +56,7 @@ describe('DiscordMCPServer', () => {
     jest.clearAllMocks();
 
     // Setup mocks
-    (Server as jest.MockedClass<any>).mockReturnValue(mockedServer);
-    (require('./transport.js').MCPTransport as jest.Mock).mockImplementation(() => mockedTransport);
-    (Client as jest.MockedClass<any>).mockReturnValue(mockedClient);
+    ServerMock.mockReturnValue(mockedServer);
 
     mockServer = mockedServer;
     mockTransport = mockedTransport;
@@ -98,7 +71,7 @@ describe('DiscordMCPServer', () => {
 
   describe('constructor', () => {
     it('should initialize server with correct parameters', () => {
-      expect(Server).toHaveBeenCalledWith(
+      expect(ServerMock).toHaveBeenCalledWith(
         {
           name: 'MCP-Discord',
           version: '1.0.0'
@@ -124,7 +97,7 @@ describe('DiscordMCPServer', () => {
 
     beforeEach(() => {
       // Extract the handlers that were registered
-      const mockCalls = (mockServer.setRequestHandler as jest.Mock).mock.calls;
+      const mockCalls = (mockServer.setRequestHandler as Mock<(...args: any[]) => any>).mock.calls;
       listToolsHandler = mockCalls.find((call: any[]) => call[0] === ListToolsRequestSchema)?.[1];
       callToolHandler = mockCalls.find((call: any[]) => call[0] === CallToolRequestSchema)?.[1];
     });
@@ -142,7 +115,7 @@ describe('DiscordMCPServer', () => {
     describe('CallTool handler', () => {
       it('should handle discord_create_category tool', async () => {
         const mockResult = { success: true };
-        (require('./tools/tools.js').createCategoryHandler as jest.Mock).mockResolvedValue(mockResult);
+        toolsMock.createCategoryHandler.mockResolvedValue(mockResult);
 
         const mockArgs = { categoryName: 'test-category' };
         const result = await callToolHandler({
@@ -152,7 +125,7 @@ describe('DiscordMCPServer', () => {
           }
         } as any);
 
-        expect(require('./tools/tools.js').createCategoryHandler).toHaveBeenCalledWith(
+        expect(toolsMock.createCategoryHandler).toHaveBeenCalledWith(
           mockArgs,
           expect.anything()
         );
@@ -161,7 +134,7 @@ describe('DiscordMCPServer', () => {
 
       it('should handle discord_edit_category tool', async () => {
         const mockResult = { success: true };
-        (require('./tools/tools.js').editCategoryHandler as jest.Mock).mockResolvedValue(mockResult);
+        toolsMock.editCategoryHandler.mockResolvedValue(mockResult);
 
         const result = await callToolHandler({
           params: {
@@ -170,7 +143,7 @@ describe('DiscordMCPServer', () => {
           }
         } as any);
 
-        expect(require('./tools/tools.js').editCategoryHandler).toHaveBeenCalledWith(
+        expect(toolsMock.editCategoryHandler).toHaveBeenCalledWith(
           { categoryId: '123', newName: 'edited-category' },
           expect.anything()
         );
@@ -179,7 +152,7 @@ describe('DiscordMCPServer', () => {
 
       it('should handle discord_delete_category tool', async () => {
         const mockResult = { success: true };
-        (require('./tools/tools.js').deleteCategoryHandler as jest.Mock).mockResolvedValue(mockResult);
+        toolsMock.deleteCategoryHandler.mockResolvedValue(mockResult);
 
         const result = await callToolHandler({
           params: {
@@ -188,7 +161,7 @@ describe('DiscordMCPServer', () => {
           }
         } as any);
 
-        expect(require('./tools/tools.js').deleteCategoryHandler).toHaveBeenCalledWith(
+        expect(toolsMock.deleteCategoryHandler).toHaveBeenCalledWith(
           { categoryId: '123' },
           expect.anything()
         );
@@ -197,7 +170,7 @@ describe('DiscordMCPServer', () => {
 
       it('should handle discord_login tool', async () => {
         const mockResult = { success: true };
-        (require('./tools/tools.js').loginHandler as jest.Mock).mockResolvedValue(mockResult);
+        toolsMock.loginHandler.mockResolvedValue(mockResult);
 
         const result = await callToolHandler({
           params: {
@@ -206,7 +179,7 @@ describe('DiscordMCPServer', () => {
           }
         } as any);
 
-        expect(require('./tools/tools.js').loginHandler).toHaveBeenCalledWith(
+        expect(toolsMock.loginHandler).toHaveBeenCalledWith(
           { token: 'fake-token' },
           expect.anything()
         );
@@ -215,7 +188,7 @@ describe('DiscordMCPServer', () => {
 
       it('should handle discord_send tool', async () => {
         const mockResult = { success: true };
-        (require('./tools/tools.js').sendMessageHandler as jest.Mock).mockResolvedValue(mockResult);
+        toolsMock.sendMessageHandler.mockResolvedValue(mockResult);
 
         const result = await callToolHandler({
           params: {
@@ -224,7 +197,7 @@ describe('DiscordMCPServer', () => {
           }
         } as any);
 
-        expect(require('./tools/tools.js').sendMessageHandler).toHaveBeenCalledWith(
+        expect(toolsMock.sendMessageHandler).toHaveBeenCalledWith(
           { channelId: '123', message: 'hello' },
           expect.anything()
         );
@@ -233,7 +206,7 @@ describe('DiscordMCPServer', () => {
 
       it('should handle discord_get_forum_channels tool', async () => {
         const mockResult = { channels: [] };
-        (require('./tools/tools.js').getForumChannelsHandler as jest.Mock).mockResolvedValue(mockResult);
+        toolsMock.getForumChannelsHandler.mockResolvedValue(mockResult);
 
         const result = await callToolHandler({
           params: {
@@ -242,7 +215,7 @@ describe('DiscordMCPServer', () => {
           }
         } as any);
 
-        expect(require('./tools/tools.js').getForumChannelsHandler).toHaveBeenCalledWith(
+        expect(toolsMock.getForumChannelsHandler).toHaveBeenCalledWith(
           { serverId: '123' },
           expect.anything()
         );
@@ -251,7 +224,7 @@ describe('DiscordMCPServer', () => {
 
       it('should handle discord_create_forum_post tool', async () => {
         const mockResult = { postId: '456' };
-        (require('./tools/tools.js').createForumPostHandler as jest.Mock).mockResolvedValue(mockResult);
+        toolsMock.createForumPostHandler.mockResolvedValue(mockResult);
 
         const result = await callToolHandler({
           params: {
@@ -260,7 +233,7 @@ describe('DiscordMCPServer', () => {
           }
         } as any);
 
-        expect(require('./tools/tools.js').createForumPostHandler).toHaveBeenCalledWith(
+        expect(toolsMock.createForumPostHandler).toHaveBeenCalledWith(
           { channelId: '123', title: 'test', content: 'content' },
           expect.anything()
         );
@@ -269,7 +242,7 @@ describe('DiscordMCPServer', () => {
 
       it('should handle discord_get_forum_post tool', async () => {
         const mockResult = { post: {} };
-        (require('./tools/tools.js').getForumPostHandler as jest.Mock).mockResolvedValue(mockResult);
+        toolsMock.getForumPostHandler.mockResolvedValue(mockResult);
 
         const result = await callToolHandler({
           params: {
@@ -278,7 +251,7 @@ describe('DiscordMCPServer', () => {
           }
         } as any);
 
-        expect(require('./tools/tools.js').getForumPostHandler).toHaveBeenCalledWith(
+        expect(toolsMock.getForumPostHandler).toHaveBeenCalledWith(
           { postId: '456' },
           expect.anything()
         );
@@ -287,7 +260,7 @@ describe('DiscordMCPServer', () => {
 
       it('should handle discord_reply_to_forum tool', async () => {
         const mockResult = { replyId: '789' };
-        (require('./tools/tools.js').replyToForumHandler as jest.Mock).mockResolvedValue(mockResult);
+        toolsMock.replyToForumHandler.mockResolvedValue(mockResult);
 
         const result = await callToolHandler({
           params: {
@@ -296,7 +269,7 @@ describe('DiscordMCPServer', () => {
           }
         } as any);
 
-        expect(require('./tools/tools.js').replyToForumHandler).toHaveBeenCalledWith(
+        expect(toolsMock.replyToForumHandler).toHaveBeenCalledWith(
           { postId: '456', content: 'reply' },
           expect.anything()
         );
@@ -305,7 +278,7 @@ describe('DiscordMCPServer', () => {
 
       it('should handle discord_delete_forum_post tool', async () => {
         const mockResult = { success: true };
-        (require('./tools/tools.js').deleteForumPostHandler as jest.Mock).mockResolvedValue(mockResult);
+        toolsMock.deleteForumPostHandler.mockResolvedValue(mockResult);
 
         const result = await callToolHandler({
           params: {
@@ -314,7 +287,7 @@ describe('DiscordMCPServer', () => {
           }
         } as any);
 
-        expect(require('./tools/tools.js').deleteForumPostHandler).toHaveBeenCalledWith(
+        expect(toolsMock.deleteForumPostHandler).toHaveBeenCalledWith(
           { postId: '456' },
           expect.anything()
         );
@@ -323,7 +296,7 @@ describe('DiscordMCPServer', () => {
 
       it('should handle discord_create_text_channel tool', async () => {
         const mockResult = { channelId: '999' };
-        (require('./tools/tools.js').createTextChannelHandler as jest.Mock).mockResolvedValue(mockResult);
+        toolsMock.createTextChannelHandler.mockResolvedValue(mockResult);
 
         const result = await callToolHandler({
           params: {
@@ -332,7 +305,7 @@ describe('DiscordMCPServer', () => {
           }
         } as any);
 
-        expect(require('./tools/tools.js').createTextChannelHandler).toHaveBeenCalledWith(
+        expect(toolsMock.createTextChannelHandler).toHaveBeenCalledWith(
           { serverId: '123', channelName: 'new-channel' },
           expect.anything()
         );
@@ -341,7 +314,7 @@ describe('DiscordMCPServer', () => {
 
       it('should handle discord_delete_channel tool', async () => {
         const mockResult = { success: true };
-        (require('./tools/tools.js').deleteChannelHandler as jest.Mock).mockResolvedValue(mockResult);
+        toolsMock.deleteChannelHandler.mockResolvedValue(mockResult);
 
         const result = await callToolHandler({
           params: {
@@ -350,7 +323,7 @@ describe('DiscordMCPServer', () => {
           }
         } as any);
 
-        expect(require('./tools/tools.js').deleteChannelHandler).toHaveBeenCalledWith(
+        expect(toolsMock.deleteChannelHandler).toHaveBeenCalledWith(
           { channelId: '999' },
           expect.anything()
         );
@@ -359,7 +332,7 @@ describe('DiscordMCPServer', () => {
 
       it('should handle discord_read_messages tool', async () => {
         const mockResult = { messages: [] };
-        (require('./tools/tools.js').readMessagesHandler as jest.Mock).mockResolvedValue(mockResult);
+        toolsMock.readMessagesHandler.mockResolvedValue(mockResult);
 
         const result = await callToolHandler({
           params: {
@@ -368,7 +341,7 @@ describe('DiscordMCPServer', () => {
           }
         } as any);
 
-        expect(require('./tools/tools.js').readMessagesHandler).toHaveBeenCalledWith(
+        expect(toolsMock.readMessagesHandler).toHaveBeenCalledWith(
           { channelId: '123', limit: 10 },
           expect.anything()
         );
@@ -377,7 +350,7 @@ describe('DiscordMCPServer', () => {
 
       it('should handle discord_get_server_info tool', async () => {
         const mockResult = { name: 'Test Server', id: '123' };
-        (require('./tools/tools.js').getServerInfoHandler as jest.Mock).mockResolvedValue(mockResult);
+        toolsMock.getServerInfoHandler.mockResolvedValue(mockResult);
 
         const result = await callToolHandler({
           params: {
@@ -386,7 +359,7 @@ describe('DiscordMCPServer', () => {
           }
         } as any);
 
-        expect(require('./tools/tools.js').getServerInfoHandler).toHaveBeenCalledWith(
+        expect(toolsMock.getServerInfoHandler).toHaveBeenCalledWith(
           { serverId: '123' },
           expect.anything()
         );
@@ -395,7 +368,7 @@ describe('DiscordMCPServer', () => {
 
       it('should handle discord_add_reaction tool', async () => {
         const mockResult = { success: true };
-        (require('./tools/tools.js').addReactionHandler as jest.Mock).mockResolvedValue(mockResult);
+        toolsMock.addReactionHandler.mockResolvedValue(mockResult);
 
         const result = await callToolHandler({
           params: {
@@ -404,7 +377,7 @@ describe('DiscordMCPServer', () => {
           }
         } as any);
 
-        expect(require('./tools/tools.js').addReactionHandler).toHaveBeenCalledWith(
+        expect(toolsMock.addReactionHandler).toHaveBeenCalledWith(
           { messageId: '456', emoji: '👍' },
           expect.anything()
         );
@@ -413,7 +386,7 @@ describe('DiscordMCPServer', () => {
 
       it('should handle discord_add_multiple_reactions tool', async () => {
         const mockResult = { success: true };
-        (require('./tools/tools.js').addMultipleReactionsHandler as jest.Mock).mockResolvedValue(mockResult);
+        toolsMock.addMultipleReactionsHandler.mockResolvedValue(mockResult);
 
         const result = await callToolHandler({
           params: {
@@ -422,7 +395,7 @@ describe('DiscordMCPServer', () => {
           }
         } as any);
 
-        expect(require('./tools/tools.js').addMultipleReactionsHandler).toHaveBeenCalledWith(
+        expect(toolsMock.addMultipleReactionsHandler).toHaveBeenCalledWith(
           { messageId: '456', emojis: ['👍', '👎'] },
           expect.anything()
         );
@@ -431,7 +404,7 @@ describe('DiscordMCPServer', () => {
 
       it('should handle discord_remove_reaction tool', async () => {
         const mockResult = { success: true };
-        (require('./tools/tools.js').removeReactionHandler as jest.Mock).mockResolvedValue(mockResult);
+        toolsMock.removeReactionHandler.mockResolvedValue(mockResult);
 
         const result = await callToolHandler({
           params: {
@@ -440,7 +413,7 @@ describe('DiscordMCPServer', () => {
           }
         } as any);
 
-        expect(require('./tools/tools.js').removeReactionHandler).toHaveBeenCalledWith(
+        expect(toolsMock.removeReactionHandler).toHaveBeenCalledWith(
           { messageId: '456', userId: '789', emoji: '👍' },
           expect.anything()
         );
@@ -449,7 +422,7 @@ describe('DiscordMCPServer', () => {
 
       it('should handle discord_delete_message tool', async () => {
         const mockResult = { success: true };
-        (require('./tools/tools.js').deleteMessageHandler as jest.Mock).mockResolvedValue(mockResult);
+        toolsMock.deleteMessageHandler.mockResolvedValue(mockResult);
 
         const result = await callToolHandler({
           params: {
@@ -458,7 +431,7 @@ describe('DiscordMCPServer', () => {
           }
         } as any);
 
-        expect(require('./tools/tools.js').deleteMessageHandler).toHaveBeenCalledWith(
+        expect(toolsMock.deleteMessageHandler).toHaveBeenCalledWith(
           { messageId: '456', channelId: '123' },
           expect.anything()
         );
@@ -467,7 +440,7 @@ describe('DiscordMCPServer', () => {
 
       it('should handle discord_create_webhook tool', async () => {
         const mockResult = { webhookId: 'abc' };
-        (require('./tools/tools.js').createWebhookHandler as jest.Mock).mockResolvedValue(mockResult);
+        toolsMock.createWebhookHandler.mockResolvedValue(mockResult);
 
         const result = await callToolHandler({
           params: {
@@ -476,7 +449,7 @@ describe('DiscordMCPServer', () => {
           }
         } as any);
 
-        expect(require('./tools/tools.js').createWebhookHandler).toHaveBeenCalledWith(
+        expect(toolsMock.createWebhookHandler).toHaveBeenCalledWith(
           { channelId: '123', name: 'webhook-name' },
           expect.anything()
         );
@@ -485,7 +458,7 @@ describe('DiscordMCPServer', () => {
 
       it('should handle discord_send_webhook_message tool', async () => {
         const mockResult = { messageId: 'def' };
-        (require('./tools/tools.js').sendWebhookMessageHandler as jest.Mock).mockResolvedValue(mockResult);
+        toolsMock.sendWebhookMessageHandler.mockResolvedValue(mockResult);
 
         const result = await callToolHandler({
           params: {
@@ -494,7 +467,7 @@ describe('DiscordMCPServer', () => {
           }
         } as any);
 
-        expect(require('./tools/tools.js').sendWebhookMessageHandler).toHaveBeenCalledWith(
+        expect(toolsMock.sendWebhookMessageHandler).toHaveBeenCalledWith(
           { webhookId: 'abc', message: 'hello' },
           expect.anything()
         );
@@ -503,7 +476,7 @@ describe('DiscordMCPServer', () => {
 
       it('should handle discord_edit_webhook tool', async () => {
         const mockResult = { success: true };
-        (require('./tools/tools.js').editWebhookHandler as jest.Mock).mockResolvedValue(mockResult);
+        toolsMock.editWebhookHandler.mockResolvedValue(mockResult);
 
         const result = await callToolHandler({
           params: {
@@ -512,7 +485,7 @@ describe('DiscordMCPServer', () => {
           }
         } as any);
 
-        expect(require('./tools/tools.js').editWebhookHandler).toHaveBeenCalledWith(
+        expect(toolsMock.editWebhookHandler).toHaveBeenCalledWith(
           { webhookId: 'abc', newName: 'updated-name' },
           expect.anything()
         );
@@ -521,7 +494,7 @@ describe('DiscordMCPServer', () => {
 
       it('should handle discord_delete_webhook tool', async () => {
         const mockResult = { success: true };
-        (require('./tools/tools.js').deleteWebhookHandler as jest.Mock).mockResolvedValue(mockResult);
+        toolsMock.deleteWebhookHandler.mockResolvedValue(mockResult);
 
         const result = await callToolHandler({
           params: {
@@ -530,7 +503,7 @@ describe('DiscordMCPServer', () => {
           }
         } as any);
 
-        expect(require('./tools/tools.js').deleteWebhookHandler).toHaveBeenCalledWith(
+        expect(toolsMock.deleteWebhookHandler).toHaveBeenCalledWith(
           { webhookId: 'abc' },
           expect.anything()
         );
@@ -539,7 +512,7 @@ describe('DiscordMCPServer', () => {
 
       it('should handle discord_list_servers tool', async () => {
         const mockResult = { servers: [] };
-        (require('./tools/tools.js').listServersHandler as jest.Mock).mockResolvedValue(mockResult);
+        toolsMock.listServersHandler.mockResolvedValue(mockResult);
 
         const result = await callToolHandler({
           params: {
@@ -548,7 +521,7 @@ describe('DiscordMCPServer', () => {
           }
         } as any);
 
-        expect(require('./tools/tools.js').listServersHandler).toHaveBeenCalledWith(
+        expect(toolsMock.listServersHandler).toHaveBeenCalledWith(
           {},
           expect.anything()
         );
@@ -557,7 +530,7 @@ describe('DiscordMCPServer', () => {
 
       it('should handle discord_search_messages tool', async () => {
         const mockResult = { messages: [] };
-        (require('./tools/tools.js').searchMessagesHandler as jest.Mock).mockResolvedValue(mockResult);
+        toolsMock.searchMessagesHandler.mockResolvedValue(mockResult);
 
         const result = await callToolHandler({
           params: {
@@ -566,7 +539,7 @@ describe('DiscordMCPServer', () => {
           }
         } as any);
 
-        expect(require('./tools/tools.js').searchMessagesHandler).toHaveBeenCalledWith(
+        expect(toolsMock.searchMessagesHandler).toHaveBeenCalledWith(
           { query: 'test', channelId: '123' },
           expect.anything()
         );
@@ -588,13 +561,11 @@ describe('DiscordMCPServer', () => {
       });
 
       it('should handle Zod validation errors', async () => {
-        // Create a proper ZodError mock that will pass the instanceof check
-        const mockZodError = new (require('zod').z.ZodError)([] as any);
-        mockZodError.errors = [
-          { path: ['param'], message: 'Invalid param' }
-        ];
+        const mockZodError = new z.ZodError([
+          { code: 'custom', path: ['param'], message: 'Invalid param' }
+        ]);
 
-        (require('./tools/tools.js').sendMessageHandler as jest.Mock).mockRejectedValue(mockZodError);
+        toolsMock.sendMessageHandler.mockRejectedValue(mockZodError);
 
         const result = await callToolHandler({
           params: {
@@ -612,7 +583,7 @@ describe('DiscordMCPServer', () => {
       it('should handle generic errors', async () => {
         const mockError = new Error('Generic error');
 
-        (require('./tools/tools.js').sendMessageHandler as jest.Mock).mockRejectedValue(mockError);
+        toolsMock.sendMessageHandler.mockRejectedValue(mockError);
 
         const result = await callToolHandler({
           params: {

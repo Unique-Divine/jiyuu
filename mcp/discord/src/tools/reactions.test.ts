@@ -1,3 +1,4 @@
+import { describe, it, expect, beforeEach, afterEach, jest, mock } from 'bun:test';
 import {
   addReactionHandler,
   addMultipleReactionsHandler,
@@ -5,10 +6,10 @@ import {
   deleteMessageHandler
 } from './reactions.js';
 import { AddReactionSchema, AddMultipleReactionsSchema, RemoveReactionSchema, DeleteMessageSchema } from '../schemas.js';
-import { ToolContext } from './types.js';
+import type { ToolContext } from './types.js';
 
 // Mock the errorHandler module
-jest.mock('../errorHandler', () => ({
+mock.module('../errorHandler', () => ({
   handleDiscordError: jest.fn((error) => ({
     content: [{ type: 'text', text: `Error: ${error.message || 'Unknown error'}` }],
     isError: true

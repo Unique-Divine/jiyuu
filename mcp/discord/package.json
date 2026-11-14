@@ -8,8 +8,7 @@
   },
   "type": "module",
   "scripts": {
-    "test": "bun test ./src",
-    "check": "bun check",
+    "test": "bun test --isolate ./src",
     "start": "bun src/index.ts",
     "start-app": "bun src/app.ts"
   },
@@ -37,11 +36,9 @@
     "bun": ">=1.4.3"
   },
   "devDependencies": {
+    "@types/bun": "1.4.3",
     "@types/express": "^5.0.1",
-    "@types/jest": "^30.0.0",
-    "@types/node": "^20.17.50",
-    "jest": "^30.4.2",
-    "ts-jest": "^29.4.11"
+    "@types/node": "^20.17.50"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.11.0",
