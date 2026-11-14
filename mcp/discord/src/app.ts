@@ -203,7 +203,8 @@ const discord = createDiscordClient(config.DISCORD_TOKEN);
 const server = createMcpServer(discord);
 
 const app = express();
-// Jiyuu: reject disallowed Host or Origin headers before any MCP handling.
+// Jiyuu: reject disallowed Host or Origin headers before body parsing and any
+// MCP handling. See httpHost.ts for why this is not the SDK's own check.
 app.use(hostOriginGuard(
     allowedHostKeys(config.HTTP_HOST, config.HTTP_PORT || 8080,
         extraAllowedHosts(process.env))));
@@ -216,8 +217,10 @@ const mcpPostHandler = async (req: Request, res: Response) => {
     if (sessionId) {
         process.stderr.write(`Received MCP request for session: ${sessionId}\n`);
     } else {
-        // Jiyuu: log the JSON-RPC method only. Bodies can carry tokens, such as
-        // discord_login or webhook arguments.
+        // Jiyuu: log the JSON-RPC method only, never the body. Upstream logged
+        // whole bodies here, before validation, so a rejected discord_login or
+        // webhook call still wrote its token to stderr (review of
+        // https://github.com/Unique-Divine/jiyuu/pull/109).
         const method = typeof req.body?.method === 'string' ? req.body.method : 'unknown';
         process.stderr.write(`Received MCP request without session ID: method=${JSON.stringify(method)}\n`);
     }
@@ -334,6 +337,7 @@ if (config.TRANSPORT.toLowerCase() === 'http') {
             process.stderr.write('Error starting MCP HTTP server: ' + String(error) + '\n');
             process.exit(1);
         }
+        // Log the address actually bound; tests read it to prove loopback.
         const address = httpServer.address();
         const where = address && typeof address === 'object'
             ? `${address.address}:${address.port}` : `${host}:${port}`;

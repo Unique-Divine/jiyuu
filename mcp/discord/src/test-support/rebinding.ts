@@ -1,7 +1,11 @@
 import { describe, it, expect } from 'bun:test';
 import { postInitialize, type RunningEntrypoint } from './httpEntrypoint.js';
 
-/** Shared Host and Origin checks for an HTTP entrypoint. */
+/**
+ * Host and Origin checks shared by both HTTP entrypoints, so app.ts and
+ * transport.ts cannot drift apart. The 403 cases fail if either entrypoint
+ * stops installing the guard.
+ */
 export function describeRebindingGuard(name: string, server: () => RunningEntrypoint) {
     describe(`${name} Host and Origin validation`, () => {
         it('accepts a loopback request without Origin', async () => {

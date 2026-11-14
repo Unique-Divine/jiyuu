@@ -1,3 +1,6 @@
+// Starts the real HTTP entrypoints in a child process. transport.test.ts
+// mocks express and the SDK, so only a running server shows what the Host
+// and Origin guard, the bound address and the logs actually do.
 import { mkdtempSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
