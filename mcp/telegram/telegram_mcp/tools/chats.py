@@ -5,6 +5,8 @@ import struct
 
 from telethon.tl.tlobject import TLObject, TLRequest
 
+from telethon import errors
+
 from telegram_mcp.runtime import *
 
 
@@ -167,7 +169,7 @@ class CreateForumTopicRequest(TLRequest):
 
 @mcp.tool(annotations=ToolAnnotations(title="Get Chats", openWorldHint=True, readOnlyHint=True))
 @with_account(readonly=True)
-async def get_chats(account: str = None, page: int = 1, page_size: int = 20) -> str:
+async def get_chats(account: str | None = None, page: int = 1, page_size: int = 20) -> str:
     """
     Get a paginated list of chats, including their latest message ID and date.
     Args:
@@ -232,7 +234,7 @@ async def get_chats(account: str = None, page: int = 1, page_size: int = 20) -> 
 )
 @with_account(readonly=False)
 @validate_id("channel")
-async def subscribe_public_channel(channel: Union[int, str], account: str = None) -> str:
+async def subscribe_public_channel(channel: Union[int, str], account: str | None = None) -> str:
     """
     Subscribe (join) to a public channel or supergroup by username or ID.
 
@@ -246,12 +248,12 @@ async def subscribe_public_channel(channel: Union[int, str], account: str = None
             getattr(entity, "title", getattr(entity, "username", "Unknown channel"))
         )
         return f"Subscribed to {title}."
-    except telethon.errors.rpcerrorlist.UserAlreadyParticipantError:
+    except errors.UserAlreadyParticipantError:
         title = sanitize_name(
             getattr(entity, "title", getattr(entity, "username", "this channel"))
         )
         return f"Already subscribed to {title}."
-    except telethon.errors.rpcerrorlist.ChannelPrivateError:
+    except errors.ChannelPrivateError:
         return "Cannot subscribe: this channel is private or requires an invite link."
     except Exception as e:
         return log_and_format_error("subscribe_public_channel", e, channel=channel)
@@ -263,8 +265,8 @@ async def list_topics(
     chat_id: int,
     limit: int = 200,
     offset_topic: int = 0,
-    search_query: str = None,
-    account: str = None,
+    search_query: str | None = None,
+    account: str | None = None,
 ) -> str:
     """
     Retrieve forum topics from a supergroup with the forum feature enabled.
@@ -355,7 +357,7 @@ async def list_topics(
 @with_account(readonly=False)
 @validate_id("chat_id")
 async def enable_forum_topics(
-    chat_id: Union[int, str], tabs: bool = True, account: str = None
+    chat_id: Union[int, str], tabs: bool = True, account: str | None = None
 ) -> str:
     """
     Enable Telegram forum topics for a supergroup.
@@ -400,9 +402,9 @@ async def enable_forum_topics(
 async def create_forum_topic(
     chat_id: Union[int, str],
     title: str,
-    icon_color: int = None,
-    icon_emoji_id: int = None,
-    account: str = None,
+    icon_color: int | None = None,
+    icon_emoji_id: int | None = None,
+    account: str | None = None,
 ) -> str:
     """
     Create a Telegram forum topic in a forum-enabled supergroup.
@@ -483,13 +485,13 @@ def _extract_created_topic_id(result) -> Optional[int]:
 @mcp.tool(annotations=ToolAnnotations(title="List Chats", openWorldHint=True, readOnlyHint=True))
 @with_account(readonly=True)
 async def list_chats(
-    chat_type: str = None,
+    chat_type: str | None = None,
     limit: int = 20,
     unread_only: bool = False,
     unmuted_only: bool = False,
-    archived: bool = None,
+    archived: bool | None = None,
     with_about: bool = False,
-    account: str = None,
+    account: str | None = None,
 ) -> str:
     """
     List available chats with metadata.
@@ -634,7 +636,7 @@ async def list_chats(
 @mcp.tool(annotations=ToolAnnotations(title="Get Chat", openWorldHint=True, readOnlyHint=True))
 @with_account(readonly=True)
 @validate_id("chat_id")
-async def get_chat(chat_id: Union[int, str], account: str = None) -> str:
+async def get_chat(chat_id: Union[int, str], account: str | None = None) -> str:
     """
     Get detailed information about a specific chat.
 
@@ -713,7 +715,7 @@ async def get_chat(chat_id: Union[int, str], account: str = None) -> str:
     annotations=ToolAnnotations(title="Search Public Chats", openWorldHint=True, readOnlyHint=True)
 )
 @with_account(readonly=True)
-async def search_public_chats(query: str, limit: int = 20, account: str = None) -> str:
+async def search_public_chats(query: str, limit: int = 20, account: str | None = None) -> str:
     """
     Search for public chats, channels, or bots by username or title.
     """
@@ -731,7 +733,7 @@ async def search_public_chats(query: str, limit: int = 20, account: str = None) 
     annotations=ToolAnnotations(title="Resolve Username", openWorldHint=True, readOnlyHint=True)
 )
 @with_account(readonly=True)
-async def resolve_username(username: str, account: str = None) -> str:
+async def resolve_username(username: str, account: str | None = None) -> str:
     """
     Resolve a username to a user or chat ID.
     """
@@ -748,7 +750,7 @@ async def resolve_username(username: str, account: str = None) -> str:
     annotations=ToolAnnotations(title="Get Full Chat", openWorldHint=True, readOnlyHint=True)
 )
 @with_account(readonly=True)
-async def get_full_chat(chat_id: Union[int, str], account: str = None) -> str:
+async def get_full_chat(chat_id: Union[int, str], account: str | None = None) -> str:
     """
     Get full info of a channel or group including description/about text.
 
@@ -801,41 +803,21 @@ async def get_full_chat(chat_id: Union[int, str], account: str = None) -> str:
 )
 @with_account(readonly=False)
 @validate_id("chat_id")
-async def mute_chat(chat_id: Union[int, str], account: str = None) -> str:
-    """
-    Mute notifications for a chat.
-    """
+async def mute_chat(chat_id: Union[int, str], account: str | None = None) -> str:
+    """Mute notifications for a chat."""
     try:
         cl = get_client(account)
-        from telethon.tl.types import InputPeerNotifySettings
-
-        peer = await resolve_entity(chat_id, cl)
+        peer = await resolve_input_entity(chat_id, cl)
         await cl(
             functions.account.UpdateNotifySettingsRequest(
-                peer=peer, settings=InputPeerNotifySettings(mute_until=2**31 - 1)
+                peer=types.InputNotifyPeer(utils.get_input_peer(peer)),
+                settings=types.InputPeerNotifySettings(
+                    mute_until=datetime.fromtimestamp(2**31 - 1, tz=timezone.utc)
+                ),
             )
         )
         return f"Chat {chat_id} muted."
-    except (ImportError, AttributeError) as type_err:
-        try:
-            # Alternative approach directly using raw API
-            peer = await resolve_input_entity(chat_id, cl)
-            await cl(
-                functions.account.UpdateNotifySettingsRequest(
-                    peer=peer,
-                    settings={
-                        "mute_until": 2**31 - 1,  # Far future
-                        "show_previews": False,
-                        "silent": True,
-                    },
-                )
-            )
-            return f"Chat {chat_id} muted (using alternative method)."
-        except Exception as alt_e:
-            logger.exception(f"mute_chat (alt method) failed (chat_id={chat_id})")
-            return log_and_format_error("mute_chat", alt_e, chat_id=chat_id)
     except Exception as e:
-        logger.exception(f"mute_chat failed (chat_id={chat_id})")
         return log_and_format_error("mute_chat", e, chat_id=chat_id)
 
 
@@ -846,41 +828,21 @@ async def mute_chat(chat_id: Union[int, str], account: str = None) -> str:
 )
 @with_account(readonly=False)
 @validate_id("chat_id")
-async def unmute_chat(chat_id: Union[int, str], account: str = None) -> str:
-    """
-    Unmute notifications for a chat.
-    """
+async def unmute_chat(chat_id: Union[int, str], account: str | None = None) -> str:
+    """Unmute notifications for a chat."""
     try:
         cl = get_client(account)
-        from telethon.tl.types import InputPeerNotifySettings
-
-        peer = await resolve_entity(chat_id, cl)
+        peer = await resolve_input_entity(chat_id, cl)
         await cl(
             functions.account.UpdateNotifySettingsRequest(
-                peer=peer, settings=InputPeerNotifySettings(mute_until=0)
+                peer=types.InputNotifyPeer(utils.get_input_peer(peer)),
+                settings=types.InputPeerNotifySettings(
+                    mute_until=datetime.fromtimestamp(0, tz=timezone.utc)
+                ),
             )
         )
         return f"Chat {chat_id} unmuted."
-    except (ImportError, AttributeError) as type_err:
-        try:
-            # Alternative approach directly using raw API
-            peer = await resolve_input_entity(chat_id, cl)
-            await cl(
-                functions.account.UpdateNotifySettingsRequest(
-                    peer=peer,
-                    settings={
-                        "mute_until": 0,  # Unmute (current time)
-                        "show_previews": True,
-                        "silent": False,
-                    },
-                )
-            )
-            return f"Chat {chat_id} unmuted (using alternative method)."
-        except Exception as alt_e:
-            logger.exception(f"unmute_chat (alt method) failed (chat_id={chat_id})")
-            return log_and_format_error("unmute_chat", alt_e, chat_id=chat_id)
     except Exception as e:
-        logger.exception(f"unmute_chat failed (chat_id={chat_id})")
         return log_and_format_error("unmute_chat", e, chat_id=chat_id)
 
 
@@ -891,7 +853,7 @@ async def unmute_chat(chat_id: Union[int, str], account: str = None) -> str:
 )
 @with_account(readonly=False)
 @validate_id("chat_id")
-async def archive_chat(chat_id: Union[int, str], account: str = None) -> str:
+async def archive_chat(chat_id: Union[int, str], account: str | None = None) -> str:
     """
     Archive a chat.
     """
@@ -916,7 +878,7 @@ async def archive_chat(chat_id: Union[int, str], account: str = None) -> str:
 )
 @with_account(readonly=False)
 @validate_id("chat_id")
-async def unarchive_chat(chat_id: Union[int, str], account: str = None) -> str:
+async def unarchive_chat(chat_id: Union[int, str], account: str | None = None) -> str:
     """
     Unarchive a chat.
     """
@@ -940,7 +902,7 @@ async def unarchive_chat(chat_id: Union[int, str], account: str = None) -> str:
 @with_account(readonly=True)
 @validate_id("user_id")
 async def get_common_chats(
-    user_id: Union[int, str], limit: int = 100, max_id: int = 0, account: str = None
+    user_id: Union[int, str], limit: int = 100, max_id: int = 0, account: str | None = None
 ) -> str:
     """
     List chats shared with a specific user.
@@ -997,7 +959,7 @@ async def get_common_chats(
 @with_account(readonly=True)
 @validate_id("chat_id")
 async def get_message_read_by(
-    chat_id: Union[int, str], message_id: int, account: str = None
+    chat_id: Union[int, str], message_id: int, account: str | None = None
 ) -> str:
     """
     List user IDs who have read a specific message.
@@ -1088,7 +1050,7 @@ async def get_message_read_by(
 @with_account(readonly=True)
 @validate_id("chat_id")
 async def get_message_link(
-    chat_id: Union[int, str], message_id: int, thread: bool = False, account: str = None
+    chat_id: Union[int, str], message_id: int, thread: bool = False, account: str | None = None
 ) -> str:
     """
     Export a t.me/... link for a specific message.

@@ -1,0 +1,14 @@
+# Run migration and backup tests with the committed dependency resolution.
+test:
+  cargo test --locked -p evolve-sqlite
+
+# Check crate formatting.
+fmt-check:
+  cargo fmt -p evolve-sqlite --check
+
+# Reject compiler and Clippy warnings in library and tests.
+lint:
+  cargo clippy --locked -p evolve-sqlite --all-targets -- -D warnings
+
+# Run all crate checks.
+check: fmt-check lint test

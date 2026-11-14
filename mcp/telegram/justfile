@@ -8,9 +8,9 @@ test:
 
 # Check all Python sources, tests, and shared reporting helpers; keep ty's failure status.
 typecheck:
-    uv run --frozen ty check . ../../scripts/python
+    uv run --frozen ty check --error-on-warning . ../../scripts/python
 
-# Test report-only status handling and real ty discovery without Telegram access.
+# Test enforced/report-only status handling and real ty discovery offline.
 typecheck-test:
     uv run --frozen python -m unittest discover -s ../../scripts/python -p 'test_*.py' -v
 
@@ -23,6 +23,6 @@ check:
 run:
     uv run --frozen main.py
 
-# Write CI-compatible diagnostics; checker/configuration failures remain fatal.
-typecheck-report output_dir:
-    uv run --frozen --no-sync python ../../scripts/python/typecheck_report.py --project "Telegram MCP" --output-dir "{{output_dir}}" . ../../scripts/python
+# Write diagnostic artifacts; use mode=enforce to fail on errors and warnings.
+typecheck-report output_dir mode="report":
+    uv run --frozen --no-sync python ../../scripts/python/typecheck_report.py --project "Telegram MCP" --output-dir "{{output_dir}}" --mode "{{mode}}" . ../../scripts/python

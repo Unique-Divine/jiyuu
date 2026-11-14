@@ -36,24 +36,29 @@ class DistributionIdentity:
     @classmethod
     def from_distribution(cls, dist: metadata.Distribution) -> "DistributionIdentity":
         package_metadata = dist.metadata
+
+        def value(name: str) -> str:
+            values = package_metadata.get_all(name)
+            return values[0] if values else ""
+
         urls = tuple(package_metadata.get_all("Project-URL") or ())
-        homepage = package_metadata.get("Home-page")
+        homepage = value("Home-page")
         if homepage:
             urls += (homepage,)
 
         authors = tuple(
             value
             for value in (
-                package_metadata.get("Author"),
-                package_metadata.get("Author-email"),
+                value("Author"),
+                value("Author-email"),
             )
             if value
         )
         maintainers = tuple(
             value
             for value in (
-                package_metadata.get("Maintainer"),
-                package_metadata.get("Maintainer-email"),
+                value("Maintainer"),
+                value("Maintainer-email"),
             )
             if value
         )
@@ -62,12 +67,12 @@ class DistributionIdentity:
         direct_url = read_text("direct_url.json") if callable(read_text) else ""
 
         return cls(
-            name=package_metadata.get("Name") or getattr(dist, "name", DISTRIBUTION_NAME),
-            version=package_metadata.get("Version") or dist.version,
+            name=value("Name") or getattr(dist, "name", DISTRIBUTION_NAME),
+            version=value("Version") or dist.version,
             authors=authors,
             maintainers=maintainers,
             urls=urls,
-            summary=package_metadata.get("Summary", ""),
+            summary=value("Summary") or "",
             direct_url=direct_url or "",
             source_root=_distribution_source_root(dist),
         )

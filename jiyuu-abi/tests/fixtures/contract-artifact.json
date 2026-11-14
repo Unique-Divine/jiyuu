@@ -1,0 +1,1 @@
+{"contractName":"Counter","abi":[{"type":"function","name":"increment","inputs":[{"type":"uint256"}],"outputs":[],"stateMutability":"nonpayable"}],"bytecode":"0x6000"}

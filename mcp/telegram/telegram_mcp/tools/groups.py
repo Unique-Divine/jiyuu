@@ -1,6 +1,8 @@
 # Modified by Unique Divine in 2026: connection recovery and participant pagination fixes.
 """Groups MCP tools."""
 
+from telethon import errors
+
 from telegram_mcp.runtime import *
 
 
@@ -25,7 +27,9 @@ def _created_chat(result):
 )
 @with_account(readonly=False)
 @validate_id("user_ids")
-async def create_group(title: str, user_ids: List[Union[int, str]], account: str = None) -> str:
+async def create_group(
+    title: str, user_ids: List[Union[int, str]], account: str | None = None
+) -> str:
     """
     Create a new group or supergroup and add users.
 
@@ -84,7 +88,7 @@ async def create_group(title: str, user_ids: List[Union[int, str]], account: str
 @with_account(readonly=False)
 @validate_id("group_id", "user_ids")
 async def invite_to_group(
-    group_id: Union[int, str], user_ids: List[Union[int, str]], account: str = None
+    group_id: Union[int, str], user_ids: List[Union[int, str]], account: str | None = None
 ) -> str:
     """
     Invite users to a group or channel.
@@ -119,9 +123,9 @@ async def invite_to_group(
                 invited_count = result.count
 
             return f"Successfully invited {invited_count} users to {sanitize_name(entity.title)}"
-        except telethon.errors.rpcerrorlist.UserNotMutualContactError:
+        except errors.UserNotMutualContactError:
             return "Error: Cannot invite users who are not mutual contacts. Please ensure the users are in your contacts and have added you back."
-        except telethon.errors.rpcerrorlist.UserPrivacyRestrictedError:
+        except errors.UserPrivacyRestrictedError:
             return (
                 "Error: One or more users have privacy settings that prevent you from adding them."
             )
@@ -143,7 +147,7 @@ async def invite_to_group(
 )
 @with_account(readonly=False)
 @validate_id("chat_id")
-async def leave_chat(chat_id: Union[int, str], account: str = None) -> str:
+async def leave_chat(chat_id: Union[int, str], account: str | None = None) -> str:
     """
     Leave a group or channel by chat ID.
 
@@ -165,36 +169,13 @@ async def leave_chat(chat_id: Union[int, str], account: str = None) -> str:
                 return log_and_format_error("leave_chat", chan_err, chat_id=chat_id)
 
         elif isinstance(entity, Chat):
-            # Traditional basic groups (not supergroups)
-            try:
-                # First try with InputPeerUser
-                me = await cl.get_me(input_peer=True)
-                await cl(
-                    functions.messages.DeleteChatUserRequest(
-                        chat_id=entity.id,
-                        user_id=me,  # Use the entity ID directly
-                    )
+            await cl(
+                functions.messages.DeleteChatUserRequest(
+                    chat_id=entity.id, user_id=types.InputUserSelf()
                 )
-                chat_name = sanitize_name(getattr(entity, "title", str(chat_id)))
-                return f"Left basic group {chat_name} (ID: {chat_id})."
-            except Exception as chat_err:
-                # If the above fails, try the second approach
-                logger.warning(
-                    f"First leave attempt failed: {chat_err}, trying alternative method"
-                )
-
-                try:
-                    # Alternative approach - sometimes this works better
-                    me_full = await cl.get_me()
-                    await cl(
-                        functions.messages.DeleteChatUserRequest(
-                            chat_id=entity.id, user_id=me_full.id
-                        )
-                    )
-                    chat_name = sanitize_name(getattr(entity, "title", str(chat_id)))
-                    return f"Left basic group {chat_name} (ID: {chat_id})."
-                except Exception as alt_err:
-                    return log_and_format_error("leave_chat", alt_err, chat_id=chat_id)
+            )
+            chat_name = sanitize_name(getattr(entity, "title", str(chat_id)))
+            return f"Left basic group {chat_name} (ID: {chat_id})."
         else:
             # Cannot leave a user chat this way
             entity_type = type(entity).__name__
@@ -232,7 +213,7 @@ async def get_participants(
     chat_id: Union[int, str],
     page: int = 1,
     page_size: int = 200,
-    account: str = None,
+    account: str | None = None,
 ) -> str:
     """
     List participants in a group or channel with pagination.
@@ -293,7 +274,7 @@ async def get_participants(
 )
 @with_account(readonly=False)
 async def create_channel(
-    title: str, about: str = "", megagroup: bool = False, account: str = None
+    title: str, about: str = "", megagroup: bool = False, account: str | None = None
 ) -> str:
     """
     Create a new channel or supergroup.
@@ -320,7 +301,7 @@ async def create_channel(
 )
 @with_account(readonly=False)
 @validate_id("chat_id")
-async def edit_chat_title(chat_id: Union[int, str], title: str, account: str = None) -> str:
+async def edit_chat_title(chat_id: Union[int, str], title: str, account: str | None = None) -> str:
     """
     Edit the title of a chat, group, or channel.
 
@@ -332,7 +313,7 @@ async def edit_chat_title(chat_id: Union[int, str], title: str, account: str = N
         if isinstance(entity, Channel):
             await cl(functions.channels.EditTitleRequest(channel=entity, title=title))
         elif isinstance(entity, Chat):
-            await cl(functions.messages.EditChatTitleRequest(chat_id=chat_id, title=title))
+            await cl(functions.messages.EditChatTitleRequest(chat_id=entity.id, title=title))
         else:
             return f"Cannot edit title for this entity type ({type(entity)})."
         return f"Chat {chat_id} title updated to '{sanitize_name(title)}'."
@@ -352,7 +333,7 @@ async def edit_chat_photo(
     chat_id: Union[int, str],
     file_path: str,
     ctx: Optional[Context] = None,
-    account: str = None,
+    account: str | None = None,
 ) -> str:
     """
     Edit the photo of a chat, group, or channel. Requires a file path to an image.
@@ -377,7 +358,7 @@ async def edit_chat_photo(
         elif isinstance(entity, Chat):
             # For basic groups, use EditChatPhotoRequest with InputChatUploadedPhoto
             input_photo = InputChatUploadedPhoto(file=uploaded_file)
-            await cl(functions.messages.EditChatPhotoRequest(chat_id=chat_id, photo=input_photo))
+            await cl(functions.messages.EditChatPhotoRequest(chat_id=entity.id, photo=input_photo))
         else:
             return f"Cannot edit photo for this entity type ({type(entity)})."
 
@@ -397,7 +378,7 @@ async def edit_chat_photo(
 )
 @with_account(readonly=False)
 @validate_id("chat_id")
-async def edit_chat_about(chat_id: Union[int, str], about: str, account: str = None) -> str:
+async def edit_chat_about(chat_id: Union[int, str], about: str, account: str | None = None) -> str:
     """
     Edit the description ("About") of a chat, group, or channel.
 
@@ -411,11 +392,11 @@ async def edit_chat_about(chat_id: Union[int, str], about: str, account: str = N
         entity = await resolve_entity(chat_id, cl)
         await cl(functions.messages.EditChatAboutRequest(peer=entity, about=about))
         return f"Chat {chat_id} description updated."
-    except telethon.errors.rpcerrorlist.ChatAboutNotModifiedError:
+    except errors.ChatAboutNotModifiedError:
         return f"Chat {chat_id} description is already set to the requested value."
-    except telethon.errors.rpcerrorlist.ChatAboutTooLongError:
+    except errors.ChatAboutTooLongError:
         return "Error: description exceeds Telegram's 255 character limit."
-    except telethon.errors.rpcerrorlist.ChatAdminRequiredError:
+    except errors.ChatAdminRequiredError:
         return "Error: admin rights required to edit the chat description."
     except Exception as e:
         logger.exception(f"edit_chat_about failed (chat_id={chat_id})")
@@ -429,7 +410,7 @@ async def edit_chat_about(chat_id: Union[int, str], about: str, account: str = N
 )
 @with_account(readonly=False)
 @validate_id("chat_id")
-async def delete_chat_photo(chat_id: Union[int, str], account: str = None) -> str:
+async def delete_chat_photo(chat_id: Union[int, str], account: str | None = None) -> str:
     """
     Delete the photo of a chat, group, or channel.
     """
@@ -445,7 +426,7 @@ async def delete_chat_photo(chat_id: Union[int, str], account: str = None) -> st
             # Use None (or InputChatPhotoEmpty) for basic groups
             await cl(
                 functions.messages.EditChatPhotoRequest(
-                    chat_id=chat_id, photo=InputChatPhotoEmpty()
+                    chat_id=entity.id, photo=InputChatPhotoEmpty()
                 )
             )
         else:
@@ -467,8 +448,8 @@ async def delete_chat_photo(chat_id: Union[int, str], account: str = None) -> st
 async def promote_admin(
     group_id: Union[int, str],
     user_id: Union[int, str],
-    rights: dict = None,
-    account: str = None,
+    rights: dict | None = None,
+    account: str | None = None,
 ) -> str:
     """
     Promote a user to admin in a group/channel.
@@ -524,7 +505,7 @@ async def promote_admin(
                 )
             )
             return f"Successfully promoted user {user_id} to admin in {sanitize_name(chat.title)}"
-        except telethon.errors.rpcerrorlist.UserNotMutualContactError:
+        except errors.UserNotMutualContactError:
             return "Error: Cannot promote users who are not mutual contacts. Please ensure the user is in your contacts and has added you back."
         except Exception as e:
             return log_and_format_error("promote_admin", e, group_id=group_id, user_id=user_id)
@@ -545,7 +526,7 @@ async def promote_admin(
 @with_account(readonly=False)
 @validate_id("group_id", "user_id")
 async def demote_admin(
-    group_id: Union[int, str], user_id: Union[int, str], account: str = None
+    group_id: Union[int, str], user_id: Union[int, str], account: str | None = None
 ) -> str:
     """
     Demote a user from admin in a group/channel.
@@ -584,7 +565,7 @@ async def demote_admin(
                 )
             )
             return f"Successfully demoted user {user_id} from admin in {sanitize_name(chat.title)}"
-        except telethon.errors.rpcerrorlist.UserNotMutualContactError:
+        except errors.UserNotMutualContactError:
             return "Error: Cannot modify admin status of users who are not mutual contacts. Please ensure the user is in your contacts and has added you back."
         except Exception as e:
             return log_and_format_error("demote_admin", e, group_id=group_id, user_id=user_id)
@@ -604,7 +585,9 @@ async def demote_admin(
 )
 @with_account(readonly=False)
 @validate_id("chat_id", "user_id")
-async def ban_user(chat_id: Union[int, str], user_id: Union[int, str], account: str = None) -> str:
+async def ban_user(
+    chat_id: Union[int, str], user_id: Union[int, str], account: str | None = None
+) -> str:
     """
     Ban a user from a group or channel.
 
@@ -643,7 +626,7 @@ async def ban_user(chat_id: Union[int, str], user_id: Union[int, str], account: 
                 )
             )
             return f"User {user_id} banned from chat {sanitize_name(chat.title)} (ID: {chat_id})."
-        except telethon.errors.rpcerrorlist.UserNotMutualContactError:
+        except errors.UserNotMutualContactError:
             return "Error: Cannot ban users who are not mutual contacts. Please ensure the user is in your contacts and has added you back."
         except Exception as e:
             return log_and_format_error("ban_user", e, chat_id=chat_id, user_id=user_id)
@@ -660,7 +643,7 @@ async def ban_user(chat_id: Union[int, str], user_id: Union[int, str], account: 
 @with_account(readonly=False)
 @validate_id("chat_id", "user_id")
 async def unban_user(
-    chat_id: Union[int, str], user_id: Union[int, str], account: str = None
+    chat_id: Union[int, str], user_id: Union[int, str], account: str | None = None
 ) -> str:
     """
     Unban a user from a group or channel.
@@ -702,7 +685,7 @@ async def unban_user(
             return (
                 f"User {user_id} unbanned from chat {sanitize_name(chat.title)} (ID: {chat_id})."
             )
-        except telethon.errors.rpcerrorlist.UserNotMutualContactError:
+        except errors.UserNotMutualContactError:
             return "Error: Cannot modify status of users who are not mutual contacts. Please ensure the user is in your contacts and has added you back."
         except Exception as e:
             return log_and_format_error("unban_user", e, chat_id=chat_id, user_id=user_id)
@@ -735,7 +718,7 @@ async def set_default_chat_permissions(
     invite_users: bool = True,
     pin_messages: bool = False,
     until_date: int = 0,
-    account: str = None,
+    account: str | None = None,
 ) -> str:
     """
     Set default member permissions for a group, supergroup, or channel.
@@ -763,7 +746,7 @@ async def set_default_chat_permissions(
         await ensure_connected(cl)
         entity = await resolve_entity(chat_id, cl)
         banned_rights = ChatBannedRights(
-            until_date=until_date if until_date else None,
+            until_date=datetime.fromtimestamp(until_date, tz=timezone.utc) if until_date else None,
             send_messages=not send_messages,
             send_media=not send_media,
             send_stickers=not send_stickers,
@@ -782,9 +765,9 @@ async def set_default_chat_permissions(
             )
         )
         return f"Default permissions for chat {chat_id} updated."
-    except telethon.errors.rpcerrorlist.ChatAdminRequiredError:
+    except errors.ChatAdminRequiredError:
         return "Error: admin rights required to change default permissions."
-    except telethon.errors.rpcerrorlist.ChatNotModifiedError:
+    except errors.ChatNotModifiedError:
         return f"Chat {chat_id} default permissions unchanged (already matched)."
     except Exception as e:
         logger.exception(f"set_default_chat_permissions failed (chat_id={chat_id})")
@@ -801,7 +784,9 @@ async def set_default_chat_permissions(
 )
 @with_account(readonly=False)
 @validate_id("chat_id")
-async def toggle_slow_mode(chat_id: Union[int, str], seconds: int = 0, account: str = None) -> str:
+async def toggle_slow_mode(
+    chat_id: Union[int, str], seconds: int = 0, account: str | None = None
+) -> str:
     """
     Enable or disable slow mode for a supergroup.
 
@@ -822,7 +807,7 @@ async def toggle_slow_mode(chat_id: Union[int, str], seconds: int = 0, account: 
         if seconds == 0:
             return f"Slow mode disabled for chat {chat_id}."
         return f"Slow mode enabled for chat {chat_id} (interval: {seconds}s)."
-    except telethon.errors.rpcerrorlist.ChatAdminRequiredError:
+    except errors.ChatAdminRequiredError:
         return "Error: admin rights required to toggle slow mode."
     except Exception as e:
         logger.exception(f"toggle_slow_mode failed (chat_id={chat_id}, seconds={seconds})")
@@ -855,7 +840,7 @@ async def edit_admin_rights(
     manage_call: bool = False,
     manage_topics: bool = False,
     other: bool = False,
-    account: str = None,
+    account: str | None = None,
 ) -> str:
     """
     Set granular admin rights for a user in a supergroup or channel.
@@ -906,11 +891,11 @@ async def edit_admin_rights(
             )
         )
         return f"Admin rights updated for user {user_id} in chat {chat_id}."
-    except telethon.errors.rpcerrorlist.ChatAdminRequiredError:
+    except errors.ChatAdminRequiredError:
         return "Error: you need admin rights (with 'add_admins') to modify admin rights."
-    except telethon.errors.rpcerrorlist.UserAdminInvalidError:
+    except errors.UserAdminInvalidError:
         return "Error: cannot modify admin rights for this user (you may need to have promoted them originally)."
-    except telethon.errors.rpcerrorlist.RightForbiddenError:
+    except errors.RightForbiddenError:
         return "Error: some of the requested rights are not allowed for your account or for this chat."
     except Exception as e:
         logger.exception(f"edit_admin_rights failed (chat_id={chat_id}, user_id={user_id})")
@@ -920,7 +905,7 @@ async def edit_admin_rights(
 @mcp.tool(annotations=ToolAnnotations(title="Get Admins", openWorldHint=True, readOnlyHint=True))
 @with_account(readonly=True)
 @validate_id("chat_id")
-async def get_admins(chat_id: Union[int, str], account: str = None) -> str:
+async def get_admins(chat_id: Union[int, str], account: str | None = None) -> str:
     """
     Get all admins in a group or channel.
 
@@ -951,7 +936,7 @@ async def get_admins(chat_id: Union[int, str], account: str = None) -> str:
 )
 @with_account(readonly=True)
 @validate_id("chat_id")
-async def get_banned_users(chat_id: Union[int, str], account: str = None) -> str:
+async def get_banned_users(chat_id: Union[int, str], account: str | None = None) -> str:
     """
     Get all banned users in a group or channel.
 
@@ -982,7 +967,7 @@ async def get_banned_users(chat_id: Union[int, str], account: str = None) -> str
 )
 @with_account(readonly=True)
 @validate_id("chat_id")
-async def get_invite_link(chat_id: Union[int, str], account: str = None) -> str:
+async def get_invite_link(chat_id: Union[int, str], account: str | None = None) -> str:
     """
     Get the invite link for a group or channel.
     """
@@ -1003,19 +988,17 @@ async def get_invite_link(chat_id: Union[int, str], account: str = None) -> str:
             # If that fails, log and try alternative approach
             logger.warning(f"ExportChatInviteRequest failed: {e1}")
 
-        # Alternative approach using cl.export_chat_invite_link
-        try:
-            invite_link = await cl.export_chat_invite_link(entity)
-            return invite_link
-        except Exception as e2:
-            logger.warning(f"export_chat_invite_link failed: {e2}")
-
         # Last resort: Try directly fetching chat info
         try:
             if isinstance(entity, (Chat, Channel)):
-                full_chat = await cl(functions.messages.GetFullChatRequest(chat_id=entity.id))
-                if hasattr(full_chat, "full_chat") and hasattr(full_chat.full_chat, "invite_link"):
-                    return full_chat.full_chat.invite_link or "No invite link available."
+                full_chat = await cl(
+                    functions.channels.GetFullChannelRequest(channel=entity)
+                    if isinstance(entity, Channel)
+                    else functions.messages.GetFullChatRequest(chat_id=entity.id)
+                )
+                invite = getattr(full_chat.full_chat, "exported_invite", None)
+                if isinstance(invite, types.ChatInviteExported):
+                    return invite.link
         except Exception as e3:
             logger.warning(f"GetFullChatRequest failed: {e3}")
 
@@ -1031,7 +1014,7 @@ async def get_invite_link(chat_id: Union[int, str], account: str = None) -> str:
     )
 )
 @with_account(readonly=False)
-async def join_chat_by_link(link: str, account: str = None) -> str:
+async def join_chat_by_link(link: str, account: str | None = None) -> str:
     """
     Join a chat by invite link.
     """
@@ -1081,7 +1064,7 @@ async def join_chat_by_link(link: str, account: str = None) -> str:
 )
 @with_account(readonly=True)
 @validate_id("chat_id")
-async def export_chat_invite(chat_id: Union[int, str], account: str = None) -> str:
+async def export_chat_invite(chat_id: Union[int, str], account: str | None = None) -> str:
     """
     Export a chat invite link.
     """
@@ -1089,26 +1072,8 @@ async def export_chat_invite(chat_id: Union[int, str], account: str = None) -> s
         cl = get_client(account)
         entity = await resolve_entity(chat_id, cl)
 
-        # Try using ExportChatInviteRequest first
-        try:
-            from telethon.tl import functions
-
-            result = await cl(functions.messages.ExportChatInviteRequest(peer=entity))
-            return result.link
-        except AttributeError:
-            # If the function doesn't exist in the current Telethon version
-            logger.warning("ExportChatInviteRequest not available, using alternative method")
-        except Exception as e1:
-            # If that fails, log and try alternative approach
-            logger.warning(f"ExportChatInviteRequest failed: {e1}")
-
-        # Alternative approach using cl.export_chat_invite_link
-        try:
-            invite_link = await cl.export_chat_invite_link(entity)
-            return invite_link
-        except Exception as e2:
-            logger.warning(f"export_chat_invite_link failed: {e2}")
-            return log_and_format_error("export_chat_invite", e2, chat_id=chat_id)
+        result = await cl(functions.messages.ExportChatInviteRequest(peer=entity))
+        return result.link
 
     except Exception as e:
         logger.exception(f"export_chat_invite failed (chat_id={chat_id})")
@@ -1121,7 +1086,7 @@ async def export_chat_invite(chat_id: Union[int, str], account: str = None) -> s
     )
 )
 @with_account(readonly=False)
-async def import_chat_invite(hash: str, account: str = None) -> str:
+async def import_chat_invite(hash: str, account: str | None = None) -> str:
     """
     Import a chat invite by hash.
     """
@@ -1184,7 +1149,7 @@ async def import_chat_invite(hash: str, account: str = None) -> str:
 )
 @with_account(readonly=True)
 @validate_id("chat_id")
-async def get_recent_actions(chat_id: Union[int, str], account: str = None) -> str:
+async def get_recent_actions(chat_id: Union[int, str], account: str | None = None) -> str:
     """
     Get recent admin actions (admin log) in a group or channel.
 
@@ -1195,7 +1160,7 @@ async def get_recent_actions(chat_id: Union[int, str], account: str = None) -> s
         await ensure_connected(cl)
         result = await cl(
             functions.channels.GetAdminLogRequest(
-                channel=chat_id,
+                channel=utils.get_input_channel(await resolve_input_entity(chat_id, cl)),
                 q="",
                 events_filter=None,
                 admins=[],

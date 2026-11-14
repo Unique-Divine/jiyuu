@@ -43,6 +43,10 @@ fmt:
 typecheck:
   bun check
 
+# Run all Rust workspace tests with the committed dependency resolution.
+rust-test:
+  cargo test --workspace --locked
+
 # Check both Python projects even when the first reports findings.
 python-typecheck:
   #!/usr/bin/env bash

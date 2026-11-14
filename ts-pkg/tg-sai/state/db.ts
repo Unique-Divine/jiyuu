@@ -24,6 +24,12 @@ import memberAddMigrationSql from "./migrations/0004-member-add.sql" with {
 import memberAddUncertainMigrationSql from "./migrations/0005-member-add-uncertain.sql" with {
   type: "text",
 }
+import poolFillMigrationSql from "./migrations/0006-pool-fill.sql" with {
+  type: "text",
+}
+import poolRegisterRetryMigrationSql from "./migrations/0007-pool-register-retry.sql" with {
+  type: "text",
+}
 
 export const STATE_DB_FILE = "state.db"
 export const STATE_DIR_MODE = 0o700
@@ -44,6 +50,11 @@ export const STATE_MIGRATIONS: readonly Migration[] = [
   {
     filename: "0005-member-add-uncertain.sql",
     sql: memberAddUncertainMigrationSql,
+  },
+  { filename: "0006-pool-fill.sql", sql: poolFillMigrationSql },
+  {
+    filename: "0007-pool-register-retry.sql",
+    sql: poolRegisterRetryMigrationSql,
   },
 ]
 

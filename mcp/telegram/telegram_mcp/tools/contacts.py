@@ -1,5 +1,6 @@
 """Contacts MCP tools."""
 
+from telegram_mcp.message_results import message_page, single_message
 from telegram_mcp.runtime import *
 from typing import Optional
 
@@ -205,8 +206,12 @@ async def get_contact_chats(contact_id: Union[int, str], account: Optional[str] 
 
         # Look for common groups/channels
         try:
-            common = await cl.get_common_chats(contact)
-            for chat in common:
+            common = await cl(
+                functions.messages.GetCommonChatsRequest(
+                    user_id=utils.get_input_user(contact), max_id=0, limit=100
+                )
+            )
+            for chat in common.chats:
                 records.append(
                     {
                         "chat_id": get_marked_id(chat),
@@ -259,7 +264,7 @@ async def get_last_interaction(contact_id: Union[int, str], account: Optional[st
         )
 
         # Get the last few messages
-        messages = await cl.get_messages(contact, limit=5)
+        messages = await message_page(cl.get_messages(contact, limit=5))
 
         if not messages:
             return f"No messages found with {contact_name} (ID: {contact_id})."
@@ -391,32 +396,6 @@ async def add_contact(
                 return f"Contact not added. Response: {str(result)}"
         else:
             return "Error: Phone number is required when username is not provided."
-    except (ImportError, AttributeError) as type_err:
-        # Try alternative approach using raw API (only for phone-based)
-        if phone and not username:
-            try:
-                result = await cl(
-                    functions.contacts.ImportContactsRequest(
-                        contacts=[
-                            {
-                                "client_id": 0,
-                                "phone": phone,
-                                "first_name": first_name,
-                                "last_name": last_name,
-                            }
-                        ]
-                    )
-                )
-                if hasattr(result, "imported") and result.imported:
-                    return f"Contact {first_name} {last_name} added successfully (alt method)."
-                else:
-                    return f"Contact not added. Alternative method response: {str(result)}"
-            except Exception as alt_e:
-                logger.exception(f"add_contact (alt method) failed (phone={phone})")
-                return log_and_format_error("add_contact", alt_e, phone=phone)
-        else:
-            logger.exception(f"add_contact (type error) failed")
-            return log_and_format_error("add_contact", type_err)
     except Exception as e:
         logger.exception(f"add_contact failed (phone={phone}, username={username})")
         return log_and_format_error("add_contact", e, phone=phone, username=username)
@@ -500,7 +479,7 @@ async def import_contacts(contacts: list, account: Optional[str] = None) -> str:
         cl = get_client(account)
         await ensure_connected(cl)
         input_contacts = [
-            functions.contacts.InputPhoneContact(
+            types.InputPhoneContact(
                 client_id=i,
                 phone=c["phone"],
                 first_name=c["first_name"],

@@ -188,3 +188,142 @@ async def test_other_rpc_errors_pass_through_unrecorded():
         await run_limited(client, "send_message", raising(error, []), timeout=1, tracker=tracker)
 
     assert tracker.active(id(client), "send_message") is None
+
+
+@pytest.mark.parametrize("timeout", [None, 1.0])
+@pytest.mark.asyncio
+async def test_operation_timeout_is_not_a_policy_timeout(timeout):
+    tracker = CooldownTracker(Clock())
+    client = object()
+    error = asyncio.TimeoutError("operation's own deadline")
+    calls = []
+    with pytest.raises(asyncio.TimeoutError) as caught:
+        await run_limited(
+            client, "send_message", raising(error, calls), timeout=timeout, tracker=tracker
+        )
+    assert caught.value is error
+    assert len(calls) == 1
+    assert tracker.active(id(client), "send_message") is None
+
+
+@pytest.mark.asyncio
+async def test_caller_cancellation_awaits_child_cleanup_and_restores_context():
+    from telegram_mcp.request_policy import _flood_sleep_override
+
+    started = asyncio.Event()
+    cleaned = asyncio.Event()
+    observed = []
+
+    async def operation():
+        observed.append(_flood_sleep_override.get())
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await asyncio.sleep(0)
+            cleaned.set()
+
+    async def call():
+        try:
+            await run_limited(object(), "get_dialogs", operation, timeout=30)
+        finally:
+            observed.append(_flood_sleep_override.get())
+
+    task = asyncio.create_task(call())
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert cleaned.is_set()
+    assert observed == [0, None]
+    assert _flood_sleep_override.get() is None
+
+
+@pytest.mark.asyncio
+async def test_policy_expiration_awaits_cleanup_and_does_not_retry():
+    from telegram_mcp.request_policy import _flood_sleep_override
+
+    calls = 0
+    cleaned = asyncio.Event()
+
+    async def operation():
+        nonlocal calls
+        calls += 1
+        assert _flood_sleep_override.get() == 0
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await asyncio.sleep(0)
+            cleaned.set()
+
+    with pytest.raises(RequestTimedOut):
+        await run_limited(object(), "get_dialogs", operation, timeout=0.01)
+    assert calls == 1
+    assert cleaned.is_set()
+    assert _flood_sleep_override.get() is None
+
+
+@pytest.mark.parametrize("cancel_caller", [True, False])
+@pytest.mark.parametrize("cleanup_error", [RuntimeError("cleanup failed"), flood(60)])
+@pytest.mark.asyncio
+async def test_cleanup_failure_preserves_parent_outcome_without_recording_cooldown(
+    cancel_caller, cleanup_error, caplog
+):
+    caplog.set_level("WARNING", logger="telegram_mcp.request_policy")
+    started = asyncio.Event()
+    tracker = CooldownTracker(Clock())
+    client = object()
+
+    async def operation():
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            raise cleanup_error
+
+    task = asyncio.create_task(
+        run_limited(
+            client,
+            "get_dialogs",
+            operation,
+            timeout=30 if cancel_caller else 0.01,
+            tracker=tracker,
+        )
+    )
+    await started.wait()
+    if cancel_caller:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    else:
+        with pytest.raises(RequestTimedOut):
+            await task
+    assert tracker.active(id(client), "get_dialogs") is None
+    assert "Cancelled request cleanup failed" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_cancellation_retrieves_failure_from_already_finished_child():
+    import gc
+
+    loop = asyncio.get_running_loop()
+    unhandled = []
+    previous_handler = loop.get_exception_handler()
+    parent = None
+
+    async def operation():
+        assert parent is not None
+        loop.call_soon(parent.cancel)
+        raise RuntimeError("child finished before cancellation")
+
+    loop.set_exception_handler(lambda loop, context: unhandled.append(context))
+    try:
+        parent = asyncio.create_task(run_limited(object(), "get_dialogs", operation, timeout=30))
+        with pytest.raises(asyncio.CancelledError):
+            await parent
+        del parent
+        await asyncio.sleep(0)
+        gc.collect()
+        assert unhandled == []
+    finally:
+        loop.set_exception_handler(previous_handler)

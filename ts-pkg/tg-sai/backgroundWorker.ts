@@ -14,6 +14,7 @@ import {
   jitteredGapMs,
   MAX_BACKGROUND_ATTEMPTS,
   nextUtcDayMs,
+  spacedAfterMs,
 } from "./state/background"
 import type {
   BackgroundPacing,
@@ -127,6 +128,7 @@ export interface DrainResult {
     | "idle"
     | "capped"
     | "held"
+    | "paced"
     | "added"
     | "joined"
     | "privacy"
@@ -156,8 +158,9 @@ function inviteHoldUntil(
 }
 
 /**
- * One background add, when one is due, the daily cap allows, and no invite
- * hold is active. A member who already joined, usually through the shared
+ * One background add, when one is due, the daily cap allows, no invite
+ * hold is active, and one jittered gap has passed since the account's
+ * latest member add of any source (`spacedAfterMs`). A member who already joined, usually through the shared
  * link, is marked `added` without an add call (`joined`), so the account
  * spends no add on them and today's count is unchanged. The same holds for
  * a member whose join request through that link is waiting: the drain
@@ -207,6 +210,13 @@ export async function drainBackgroundOnce(params: {
   if (held !== null) {
     queue.pace(held)
     return { state: "held", ...at, nextAtMs: held }
+  }
+  // Account-wide spacing: one gap after the latest add of any source, so a
+  // pool or setup add just before does not leave two adds seconds apart.
+  const spaced = spacedAfterMs(queue.lastAddMs(), pacing)
+  if (spaced !== null && spaced > nowMs) {
+    queue.pace(spaced)
+    return { state: "paced", ...at, nextAtMs: spaced }
   }
   const paced = nowMs + jitteredGapMs(pacing, params.random)
   // Set only by an error the add call itself threw.

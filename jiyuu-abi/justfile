@@ -1,0 +1,7 @@
+# Check formatting, lint, and test the ABI library.
+check:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  cargo fmt -p jiyuu-abi -- --check
+  cargo clippy --locked -p jiyuu-abi --all-targets -- -D warnings
+  cargo test --locked -p jiyuu-abi

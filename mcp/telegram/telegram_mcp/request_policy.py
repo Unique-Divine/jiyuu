@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import math
 import time
 from contextvars import ContextVar
@@ -37,11 +38,12 @@ from typing import (
     Awaitable,
     Callable,
     Dict,
-    Iterator,
+    Generator,
     Literal,
     Optional,
     Tuple,
     TypeVar,
+    TypedDict,
     Union,
 )
 
@@ -92,13 +94,40 @@ class PolicyTelegramClient(TelegramClient):
 
 
 @contextlib.contextmanager
-def raise_flood_waits() -> Iterator[None]:
+def raise_flood_waits() -> Generator[None, None, None]:
     """Make Telethon raise every wait in this task instead of sleeping."""
     token = _flood_sleep_override.set(0)
     try:
         yield
     finally:
         _flood_sleep_override.reset(token)
+
+
+class LimitErrorPayload(TypedDict):
+    type: LimitKind
+    request: str
+    method: Optional[str]
+    chat_id: Optional[ChatKey]
+    wait_seconds: int
+    retry_at: str
+    source: LimitSource
+    recorded: bool
+    message: str
+
+
+class LimitPayload(TypedDict):
+    error: LimitErrorPayload
+
+
+class TimeoutErrorPayload(TypedDict):
+    type: Literal["timeout"]
+    request: str
+    timeout_seconds: float
+    message: str
+
+
+class TimeoutPayload(TypedDict):
+    error: TimeoutErrorPayload
 
 
 @dataclass(frozen=True)
@@ -121,7 +150,7 @@ class RequestLimit:
     method: Optional[str] = None
     recorded: bool = True
 
-    def to_payload(self) -> dict:
+    def to_payload(self) -> LimitPayload:
         retry_at = datetime.fromtimestamp(self.retry_at, tz=timezone.utc)
         return {
             "error": {
@@ -164,7 +193,7 @@ class RequestTimeout:
     timeout_seconds: float
     hint: str
 
-    def to_payload(self) -> dict:
+    def to_payload(self) -> TimeoutPayload:
         return {
             "error": {
                 "type": "timeout",
@@ -242,7 +271,9 @@ def limit_from_error(
     )
 
 
-CooldownKey = Tuple[int, str, Union[str, ChatKey]]
+RequestCooldownKey = Tuple[int, Literal["request"], str]
+ChatCooldownKey = Tuple[int, Literal["chat"], ChatKey]
+CooldownKey = Union[RequestCooldownKey, ChatCooldownKey]
 
 
 class CooldownTracker:
@@ -253,11 +284,11 @@ class CooldownTracker:
         self._limits: Dict[CooldownKey, RequestLimit] = {}
 
     @staticmethod
-    def _request_key(client_key: int, request: str) -> CooldownKey:
+    def _request_key(client_key: int, request: str) -> RequestCooldownKey:
         return (client_key, "request", request)
 
     @staticmethod
-    def _chat_key(client_key: int, chat_id: ChatKey) -> CooldownKey:
+    def _chat_key(client_key: int, chat_id: ChatKey) -> ChatCooldownKey:
         return (client_key, "chat", chat_id)
 
     def active(
@@ -265,7 +296,7 @@ class CooldownTracker:
     ) -> Optional[RequestLimit]:
         """Return the longest unexpired cooldown covering this request."""
         now = self._clock()
-        keys = [self._request_key(client_key, request)]
+        keys: list[CooldownKey] = [self._request_key(client_key, request)]
         if chat_id is not None:
             keys.append(self._chat_key(client_key, chat_id))
         found: Optional[RequestLimit] = None
@@ -347,9 +378,29 @@ async def run_limited(
         with scope:
             if timeout is None:
                 return await operation()
-            return await asyncio.wait_for(operation(), timeout=timeout)
-    except asyncio.TimeoutError as exc:
-        raise RequestTimedOut(RequestTimeout(request, timeout, timeout_hint)) from exc
+            child = asyncio.ensure_future(operation())
+            try:
+                done, _ = await asyncio.wait({child}, timeout=timeout)
+                if done:
+                    # An operation-owned TimeoutError belongs to the operation.
+                    return await child
+                raise RequestTimedOut(RequestTimeout(request, timeout, timeout_hint))
+            finally:
+                if not child.done():
+                    child.cancel()
+                    try:
+                        await child
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception as cleanup_error:
+                        # Cleanup must not replace the selected timeout/cancellation
+                        # or turn it into a newly recorded Telegram cooldown.
+                        logging.getLogger(__name__).warning(
+                            "Cancelled request cleanup failed: %s", type(cleanup_error).__name__
+                        )
+                elif not child.cancelled():
+                    # Caller cancellation can win after the child has failed.
+                    child.exception()
     except errors.FloodError as exc:
         if not is_wait_error(exc):
             raise

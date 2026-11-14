@@ -119,7 +119,10 @@ Tests use a throwaway `TG_SAI_DIR`. Publish with `just publish`.
 
 The Python checks pin ty 0.0.100, target Python 3.10, and include the session
 generator, its tests, and shared reporting helpers. CI uses managed Python 3.13.
-`py-typecheck` preserves diagnostic failures; `py-typecheck-report` reports
-existing findings without blocking CI, while setup, configuration, and checker
-failures remain fatal. See [Telegram MCP development](../../mcp/telegram/README.md#develop-and-troubleshoot)
+`py-typecheck` fails on errors and warnings. CI uses
+`py-typecheck-report OUTPUT_DIR enforce`, which retains diagnostics and summaries
+while failing on findings. Omit `enforce`, or pass `report`, for an investigative
+report-only run. Setup, configuration, and checker failures remain fatal in
+both modes. Session authentication uses explicit async Telethon calls; the CLI
+still runs synchronously and disconnects on success or failure. See [Telegram MCP development](../../mcp/telegram/README.md#develop-and-troubleshoot)
 for report artifacts and repository-wide commands.
