@@ -1,52 +1,30 @@
-# MCP-Discord
-[![smithery badge](https://smithery.ai/badge/@barryyip0625/mcp-discord)](https://smithery.ai/server/@barryyip0625/mcp-discord) ![](https://badge.mcpx.dev?type=server 'MCP Server') [![Docker Hub](https://img.shields.io/docker/v/barryy625/mcp-discord?logo=docker&label=Docker%20Hub)](https://hub.docker.com/r/barryy625/mcp-discord)
+# Discord MCP
 
-A Discord MCP (Model Context Protocol) server that enables AI assistants to interact with the Discord platform.
+Read and manage Discord servers through a bot account over MCP. The server
+covers messages, channels, forums, reactions, webhooks, roles and members, with
+stdio and streamable HTTP transports. It is maintained as part of Jiyuu.
 
-<a href="https://glama.ai/mcp/servers/@barryyip0625/mcp-discord">
-  <img width="380" height="200" src="https://glama.ai/mcp/servers/@barryyip0625/mcp-discord/badge" alt="MCP-Discord MCP server" />
-</a>
+Imported from [barryyip0625/mcp-discord](https://github.com/barryyip0625/mcp-discord)
+at v1.4.0 and run from TypeScript source with Bun. Original source and license:
+[IMPORT.json](IMPORT.json), [NOTICE](NOTICE) and [LICENSE](LICENSE).
 
-## Overview
+## Install
 
-MCP-Discord provides the following Discord-related functionalities:
+Requirements: Git and Bun 1.4.3 or newer. No Node installation or build step
+is needed; Bun runs the TypeScript entrypoints directly.
 
-- Login to Discord bot
-- List servers the bot is a member of
-- Get server information
-- List members and inspect member details
-- List, create, edit, delete, assign, and remove roles
-- Search messages in a server
-- Read, edit, and delete channel messages
-- Send messages to specified channels
-- Retrieve forum channel lists
-- Create, update, delete, and reply to forum posts
-- List forum threads and manage forum tags
-- Create, edit, and delete text, forum, voice channels, and categories
-- Set and remove channel permission overrides
-- Add/remove message reactions
-- Create/edit/delete/use webhooks
+```sh
+git clone https://github.com/Unique-Divine/jiyuu.git
+cd jiyuu
+just --justfile mcp/discord/justfile install
+```
 
-## Table of Contents
+Without Just, run `bun install --frozen-lockfile` inside `mcp/discord`. To make
+the `mcp-discord` command available, run `just link` in that directory. This
+uses `bun link` and points the command at this source checkout.
 
-- [Prerequisites](#prerequisites)
-- [Installation](#installation)
-- [Configuration](#configuration)
-- [Tools Documentation](#tools-documentation)
-  - [Basic Functions](#basic-functions)
-  - [Channel Management](#channel-management)
-  - [Forum Functions](#forum-functions)
-  - [Messages and Reactions](#messages-and-reactions)
-  - [Webhook Management](#webhook-management)
-  - [Role Management](#role-management)
-  - [Member Management](#member-management)
-- [Development](#development)
-- [License](#license)
+## Discord Bot Setup
 
-## Prerequisites
-
-- Node.js (v18.0.0 or higher)
-- npm (v7.0.0 or higher)
 - A Discord bot with appropriate permissions
   - Bot token (obtainable from the [Discord Developer Portal](https://discord.com/developers/applications))
   - Message Content Intent enabled
@@ -81,179 +59,43 @@ MCP-Discord provides the following Discord-related functionalities:
 > If you want to use this MCP server to access a specific Discord server, you must add the bot to that server first.  
 > Use the invite link below to add the bot to your target server.
 
-## Installation
+## Configure
 
-### Installing via NPM
+The server reads the bot token from `DISCORD_TOKEN`, from a `.env` file in the
+working directory, or from `--config <token>`. Prefer the environment: command
+line arguments are visible to other local processes. Do not commit tokens or
+`.env` files. Without a token the server starts, reports that it skipped
+auto-login, and `discord_login` can supply one later.
 
-You can use it with the following command:
-```bash
-npx mcp-discord --config ${DISCORD_TOKEN}
-```
+### Stdio Transport
 
-For more details, you can check out the [NPM Package](https://www.npmjs.com/package/mcp-discord).
-
-### Installing via Smithery
-
-To install mcp-discord automatically via [Smithery](https://smithery.ai/server/@barryyip0625/mcp-discord)
-
-### Installing via Docker
-
-You can run mcp-discord using Docker. The Docker images are automatically built and published to Docker Hub.
-
-**Docker Hub Repository**: [barryy625/mcp-discord](https://hub.docker.com/r/barryy625/mcp-discord)
-
-Docker uses the streamable HTTP server by default via `build/app.js`.
-
-```bash
-# Pull the latest image
-docker pull barryy625/mcp-discord:latest
-
-# Run HTTP server on port 8080
-docker run -e DISCORD_TOKEN=your_discord_bot_token -p 8080:8080 barryy625/mcp-discord:latest
-
-# Override the listening port if needed
-docker run -e DISCORD_TOKEN=your_discord_bot_token -p 3000:3000 barryy625/mcp-discord:latest --transport http --port 3000
-```
-
-**Available Tags:**
-- `latest` - Latest stable version from main branch
-- `v1.3.8`, etc. - Specific version releases
-
-### Manual Installation
-```bash
-# Clone the repository
-git clone https://github.com/barryyip0625/mcp-discord.git
-cd mcp-discord
-
-# Install dependencies
-npm install
-
-# Compile TypeScript
-npm run build
-```
-
-## Configuration
-
-A Discord bot token is required for proper operation. The server supports two transport methods: stdio and streamable HTTP.
-
-### Transport Methods
-
-1. **stdio** (Default)
-   - Traditional stdio transport for basic usage
-   - Suitable for simple integrations
-
-2. **streamable HTTP**
-   - HTTP-based transport for more advanced scenarios
-   - Supports stateless operation
-   - Configurable port number
-
-### Configuration Options
-
-You can provide configuration in two ways:
-
-1. Environment variables:
-```bash
-DISCORD_TOKEN=your_discord_bot_token
-```
-
-2. Using command line arguments:
-```bash
-# For stdio transport (default)
-node build/index.js --config "your_discord_bot_token"
-
-# For streamable HTTP transport
-node build/app.js --transport http --port 3000 --config "your_discord_bot_token"
-```
-
-## Usage with Claude/Cursor
-
-### 1. Use Stdio Transport with Claude/Cursor
-
-Use `build/index.js` when your MCP client expects a command-based stdio server.
-
-#### Claude Desktop / Claude Code
+`src/index.ts` is the stdio entrypoint for command-based MCP clients:
 
 ```json
 {
-    "mcpServers": {
-        "discord": {
-            "command": "node",
-            "args": [
-                "path/to/mcp-discord/build/index.js"
-            ],
-            "env": {
-                "DISCORD_TOKEN": "your_discord_bot_token"
-            }
-        }
+  "mcpServers": {
+    "discord": {
+      "command": "bun",
+      "args": ["/path/to/jiyuu/mcp/discord/src/index.ts"],
+      "env": { "DISCORD_TOKEN": "your_discord_bot_token" }
     }
+  }
 }
 ```
 
-#### Cursor
+After `just link`, `"command": "mcp-discord"` with no arguments also works.
+`just run` starts the same entrypoint from this directory.
 
-```json
-{
-    "mcpServers": {
-        "discord": {
-            "command": "node",
-            "args": [
-                "path/to/mcp-discord/build/index.js"
-            ],
-            "env": {
-                "DISCORD_TOKEN": "your_discord_bot_token"
-            }
-        }
-    }
-}
+### Streamable HTTP Transport
+
+`src/app.ts` serves MCP over HTTP at `/mcp`. It does not speak stdio.
+
+```sh
+DISCORD_TOKEN=your_discord_bot_token bun src/app.ts --transport http --port 3000
 ```
 
-This is the recommended setup for local command-based MCP clients.
-
-### 2. Self-Host the Streamable HTTP Server
-
-Use `build/app.js` when you want to run mcp-discord as an HTTP MCP server.
-
-#### Run with Node.js
-
-```bash
-DISCORD_TOKEN=your_discord_bot_token node build/app.js --transport http --port 3000
-```
-
-On Windows PowerShell:
-
-```powershell
-$env:DISCORD_TOKEN="your_discord_bot_token"
-node build/app.js --transport http --port 3000
-```
-
-#### Run with Docker
-
-```bash
-docker run -e DISCORD_TOKEN=your_discord_bot_token -p 3000:3000 barryy625/mcp-discord:latest --transport http --port 3000
-```
-
-Once started, the MCP HTTP endpoint is:
-
-```text
-http://localhost:3000/mcp
-```
-
-### 3. Connect to a Hosted HTTP MCP Server
-
-If you already host mcp-discord elsewhere, point your MCP client at the server's `/mcp` endpoint instead of launching `build/app.js` as a command.
-
-Example endpoint:
-
-```text
-https://your-server.example.com/mcp
-```
-
-Important notes:
-
-- `build/app.js` starts an HTTP server. It does not speak stdio.
-- `build/index.js` is the correct entrypoint for command-based stdio MCP clients.
-- For hosted HTTP usage, configure your MCP client to connect to the HTTP endpoint URL provided by your deployment.
-- The exact HTTP-client configuration format depends on the MCP client you use.
+The endpoint is then `http://localhost:3000/mcp`. `src/index.ts --transport http`
+also serves HTTP on port 8080 unless `--port` is given.
 
 ## Tools Documentation
 
@@ -322,11 +164,12 @@ Important notes:
 
 ## Development
 
-```bash
-# Development mode
-npm run dev
+```sh
+just test   # bun:test suite, each file isolated so module mocks do not leak
+just check  # bun check, then a Bun build of both entrypoints
 ```
 
 ## License
 
-[MIT License](https://github.com/barryyip0625/mcp-discord?tab=MIT-1-ov-file)
+MIT. See [LICENSE](LICENSE) for the original copyright notice and
+[NOTICE](NOTICE) for provenance.

@@ -15,5 +15,5 @@
     "smithery.yaml"
   ],
   "license": "MIT",
-  "localModifications": "bun.lock migrated from the excluded package-lock.json with the same resolved versions."
+  "localModifications": "Jiyuu documentation and source metadata; package publishing disabled. Bun runs the TypeScript entrypoints directly (bun shebang, no tsc build); bun.lock migrated from the excluded package-lock.json with the same resolved versions. Tool type re-export in src/tools/tools.ts made type-only so Bun can load it. Jest suite ported to bun:test with explicit module mocks and per-file isolation; jest.config.js and __mocks__/errorHandler.js removed. Logger and client-state interval tests updated to the behavior of upstream 34882e8. Server behavior and tool surface unchanged."
 }
