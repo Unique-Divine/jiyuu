@@ -343,6 +343,6 @@ curl -s -X POST -H "Content-Type: application/json" \
 ## Additional Resources
 
 - Zero-gas debug walkthrough:
-  `$HOME/ki/boku/epics/epic-evm/26-02-zero-gas/26-02-10-zero-gas-debug.md`
+  `$HOME/ki/boku/epics/26-02-zero-gas/26-02-10-zero-gas-debug.md`
 - Existing endpoint conventions:
   `$HOME/ki/boku/nibi/cook/index.ts`
