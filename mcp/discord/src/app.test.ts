@@ -59,4 +59,19 @@ describe('app.ts HTTP entrypoint', () => {
         expect(stderr).not.toContain('[warning]');
     });
 
+    it('does not log request bodies for requests without a session', async () => {
+        await waitFor(/listening on/);
+        const secret = 'sentinel-token-value-4f9c';
+        const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+            body: JSON.stringify({
+                jsonrpc: '2.0', id: 7, method: 'tools/call',
+                params: { name: 'discord_login', arguments: { token: secret } }
+            })
+        });
+        expect(res.status).toBe(400);
+        await waitFor(/without session ID: method="tools\/call"/);
+        expect(stderr).not.toContain(secret);
+    });
 });

@@ -206,7 +206,10 @@ const mcpPostHandler = async (req: Request, res: Response) => {
     if (sessionId) {
         process.stderr.write(`Received MCP request for session: ${sessionId}\n`);
     } else {
-        process.stderr.write('Request body:' + JSON.stringify(req.body) + '\n');
+        // Jiyuu: log the JSON-RPC method only. Bodies can carry tokens, such as
+        // discord_login or webhook arguments.
+        const method = typeof req.body?.method === 'string' ? req.body.method : 'unknown';
+        process.stderr.write(`Received MCP request without session ID: method=${JSON.stringify(method)}\n`);
     }
 
     try {
