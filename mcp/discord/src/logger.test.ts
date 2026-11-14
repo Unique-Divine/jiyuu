@@ -1,170 +1,75 @@
+import { describe, it, expect, beforeEach, afterEach, mock } from 'bun:test';
 import { log, info, error } from './logger.js';
 
-// Mock process.stdout.write to capture log output
-const mockStdoutWrite = jest.fn();
+// Upstream commit 34882e8 moved diagnostics from JSON-RPC "log" messages on
+// stdout to plain lines on stderr, because stdout carries the MCP stdio
+// protocol. These tests follow that behavior.
+const mockStdoutWrite = mock(() => true);
+const mockStderrWrite = mock(() => true);
 
 describe('Logger', () => {
     let originalStdoutWrite: typeof process.stdout.write;
+    let originalStderrWrite: typeof process.stderr.write;
 
     beforeEach(() => {
-        // Save original function
         originalStdoutWrite = process.stdout.write;
-        // Mock the function
-        process.stdout.write = mockStdoutWrite;
-        // Clear previous calls
+        originalStderrWrite = process.stderr.write;
+        process.stdout.write = mockStdoutWrite as any;
+        process.stderr.write = mockStderrWrite as any;
         mockStdoutWrite.mockClear();
+        mockStderrWrite.mockClear();
     });
 
     afterEach(() => {
-        // Restore original function
         process.stdout.write = originalStdoutWrite;
+        process.stderr.write = originalStderrWrite;
     });
+
+    function written(): string[] {
+        return mockStderrWrite.mock.calls.map((call: any[]) => call[0]);
+    }
 
     describe('log', () => {
         it('should log with default info level when no level is provided', () => {
             log('Test message');
-            
-            expect(mockStdoutWrite).toHaveBeenCalledTimes(1);
-            const [call] = mockStdoutWrite.mock.calls;
-            const jsonStr = call[0];
-            const parsedLog = JSON.parse(jsonStr);
-            
-            expect(parsedLog).toEqual({
-                jsonrpc: '2.0',
-                method: 'log',
-                params: {
-                    level: 'info',
-                    message: 'Test message'
-                }
-            });
-            
-            // Ensure the log ends with a newline
-            expect(jsonStr.endsWith('\n')).toBe(true);
+            expect(written()).toEqual(['[info] Test message\n']);
         });
 
         it('should log with specified info level', () => {
             log('Info message', 'info');
-            
-            expect(mockStdoutWrite).toHaveBeenCalledTimes(1);
-            const [call] = mockStdoutWrite.mock.calls;
-            const jsonStr = call[0];
-            const parsedLog = JSON.parse(jsonStr);
-            
-            expect(parsedLog).toEqual({
-                jsonrpc: '2.0',
-                method: 'log',
-                params: {
-                    level: 'info',
-                    message: 'Info message'
-                }
-            });
+            expect(written()).toEqual(['[info] Info message\n']);
         });
 
         it('should log with specified error level', () => {
             log('Error message', 'error');
-            
-            expect(mockStdoutWrite).toHaveBeenCalledTimes(1);
-            const [call] = mockStdoutWrite.mock.calls;
-            const jsonStr = call[0];
-            const parsedLog = JSON.parse(jsonStr);
-            
-            expect(parsedLog).toEqual({
-                jsonrpc: '2.0',
-                method: 'log',
-                params: {
-                    level: 'error',
-                    message: 'Error message'
-                }
-            });
+            expect(written()).toEqual(['[error] Error message\n']);
         });
 
-        it('should properly format the JSON-RPC message structure', () => {
+        it('should never write to stdout, the MCP stdio protocol channel', () => {
             log('Test message', 'info');
-            
-            const [call] = mockStdoutWrite.mock.calls;
-            const jsonStr = call[0];
-            const parsedLog = JSON.parse(jsonStr);
-            
-            expect(parsedLog).toHaveProperty('jsonrpc', '2.0');
-            expect(parsedLog).toHaveProperty('method', 'log');
-            expect(parsedLog).toHaveProperty('params');
-            expect(parsedLog.params).toHaveProperty('level');
-            expect(parsedLog.params).toHaveProperty('message');
+            log('Test message', 'error');
+            expect(mockStdoutWrite).not.toHaveBeenCalled();
         });
     });
 
     describe('info', () => {
         it('should call log with info level', () => {
-            const logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
             info('Info message');
-            logSpy.mockRestore();
-            
-            expect(mockStdoutWrite).toHaveBeenCalledTimes(1);
-            const [call] = mockStdoutWrite.mock.calls;
-            const jsonStr = call[0];
-            const parsedLog = JSON.parse(jsonStr);
-            
-            expect(parsedLog).toEqual({
-                jsonrpc: '2.0',
-                method: 'log',
-                params: {
-                    level: 'info',
-                    message: 'Info message'
-                }
-            });
+            expect(written()).toEqual(['[info] Info message\n']);
         });
     });
 
     describe('error', () => {
         it('should call log with error level', () => {
-            const logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
             error('Error message');
-            logSpy.mockRestore();
-            
-            expect(mockStdoutWrite).toHaveBeenCalledTimes(1);
-            const [call] = mockStdoutWrite.mock.calls;
-            const jsonStr = call[0];
-            const parsedLog = JSON.parse(jsonStr);
-            
-            expect(parsedLog).toEqual({
-                jsonrpc: '2.0',
-                method: 'log',
-                params: {
-                    level: 'error',
-                    message: 'Error message'
-                }
-            });
+            expect(written()).toEqual(['[error] Error message\n']);
         });
     });
 
     describe('output formatting', () => {
         it('should append newline character to the output', () => {
             log('Test message', 'info');
-            
-            const [call] = mockStdoutWrite.mock.calls;
-            const output = call[0];
-            
-            expect(output).toMatch(/\n$/);
-        });
-
-        it('should write stringified JSON to stdout', () => {
-            log('Test message', 'info');
-            
-            const [call] = mockStdoutWrite.mock.calls;
-            const output = call[0].slice(0, -1); // Remove newline for parsing
-            
-            // Should be valid JSON
-            expect(() => JSON.parse(output)).not.toThrow();
-            
-            const parsed = JSON.parse(output);
-            expect(parsed).toEqual({
-                jsonrpc: '2.0',
-                method: 'log',
-                params: {
-                    level: 'info',
-                    message: 'Test message'
-                }
-            });
+            expect(written()[0]).toMatch(/\n$/);
         });
     });
 });

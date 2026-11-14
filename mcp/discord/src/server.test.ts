@@ -610,7 +610,8 @@ describe('DiscordMCPServer', () => {
       await discordMCPServer.start();
 
       expect(mockTransport.start).toHaveBeenCalledWith(mockServer);
-      expect(setIntervalSpy).toHaveBeenCalledWith(expect.any(Function), 10000);
+      // Upstream commit 34882e8 raised the interval from 10 s to 5 min.
+      expect(setIntervalSpy).toHaveBeenCalledWith(expect.any(Function), 5 * 60 * 1000);
 
       // Clean up timer
       jest.useRealTimers();
