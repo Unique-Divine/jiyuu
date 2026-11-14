@@ -94,8 +94,14 @@ After `just link`, `"command": "mcp-discord"` with no arguments also works.
 DISCORD_TOKEN=your_discord_bot_token bun src/app.ts --transport http --port 3000
 ```
 
-The endpoint is then `http://localhost:3000/mcp`. `src/index.ts --transport http`
-also serves HTTP on port 8080 unless `--port` is given.
+The endpoint is then `http://127.0.0.1:3000/mcp`. `src/index.ts --transport http`
+also serves HTTP, on port 8080 unless `--port` is given.
+
+The HTTP transports have no authentication. Anyone who can reach the port can
+call every tool with the bot's permissions, including sends and deletes. Both
+entrypoints bind to `127.0.0.1` by default; keep them on loopback. `--host` or
+`HTTP_HOST` overrides the address, and the server logs a warning for any
+non-loopback host. Upstream bound to all interfaces.
 
 ## Tools Documentation
 

@@ -10,6 +10,7 @@ import express, { Request, Response } from 'express';
 import { info, Level, setLevel, warning } from './notifications.js';
 import * as schemas from './schemas.js';
 import * as handlers from './tools/tools.js';
+import { nonLoopbackWarning, resolveHttpHost } from './httpHost.js';
 import { createToolContext } from './tools/tools.js';
 
 // Load environment variables from .env file if exists
@@ -188,7 +189,8 @@ const config = {
         }
         // Default port for MCP
         return 8080;
-    })()
+    })(),
+    HTTP_HOST: resolveHttpHost(process.argv, process.env)
 };
 
 const discord = createDiscordClient(config.DISCORD_TOKEN);
@@ -311,12 +313,18 @@ if (config.TRANSPORT.toLowerCase() === 'http') {
     app.delete('/mcp', mcpDeleteHandler);
 
     const port = config.HTTP_PORT || 8080;
-    app.listen(port, error => {
+    const host = config.HTTP_HOST;
+    const hostWarning = nonLoopbackWarning(host);
+    if (hostWarning) process.stderr.write(`[warning] ${hostWarning}\n`);
+    const httpServer = app.listen(port, host, error => {
         if (error) {
             process.stderr.write('Error starting MCP HTTP server: ' + String(error) + '\n');
             process.exit(1);
         }
-        process.stderr.write(`MCP Streamable HTTP Server listening on port ${port}\n`);
+        const address = httpServer.address();
+        const where = address && typeof address === 'object'
+            ? `${address.address}:${address.port}` : `${host}:${port}`;
+        process.stderr.write(`MCP Streamable HTTP Server listening on ${where}\n`);
     });
 
     // Handle server shutdown

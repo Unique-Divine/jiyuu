@@ -32,6 +32,7 @@ import {
 } from './tools/tools.js';
 import { Client, GatewayIntentBits } from "discord.js";
 import { info, error } from './logger.js';
+import { DEFAULT_HTTP_HOST, nonLoopbackWarning } from './httpHost.js';
 
 export interface MCPTransport {
     start(server: Server): Promise<void>;
@@ -62,7 +63,10 @@ export class StreamableHttpTransport implements MCPTransport {
     private toolContext: ReturnType<typeof createToolContext> | null = null;
     private sessionId: string = '';
 
-    constructor(private port: number = 8080) {
+    constructor(
+        private port: number = 8080,
+        private host: string = DEFAULT_HTTP_HOST
+    ) {
         this.app = express();
         this.app.use(express.json());
         this.sessionId = `session_${Date.now()}_${Math.random().toString(36).substring(2, 10)}`;
@@ -131,8 +135,10 @@ export class StreamableHttpTransport implements MCPTransport {
         });
 
         return new Promise((resolve) => {
-            this.httpServer = this.app.listen(this.port, '0.0.0.0', () => {
-                info(`MCP Server listening on 0.0.0.0:${this.port}`);
+            const warning = nonLoopbackWarning(this.host);
+            if (warning) error(warning);
+            this.httpServer = this.app.listen(this.port, this.host, () => {
+                info(`MCP Server listening on ${this.host}:${this.port}`);
                 resolve();
             });
         });

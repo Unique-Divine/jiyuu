@@ -67,9 +67,10 @@ mock.module('discord.js', () => ({
   }
 }));
 
+const loggerErrorMock = jest.fn();
 mock.module('./logger.js', () => ({
   info: jest.fn(),
-  error: jest.fn()
+  error: loggerErrorMock
 }));
 
 const { StdioTransport, StreamableHttpTransport } = await import('./transport.js');
@@ -190,7 +191,20 @@ describe('StreamableHttpTransport', () => {
 
       expect(StreamableHTTPServerTransportMock).toHaveBeenCalledTimes(1);
       expect(mockServer.connect).toHaveBeenCalledWith(mockTransport);
+      expect(mockApp.listen).toHaveBeenCalledWith(3000, '127.0.0.1', expect.any(Function));
+      expect(loggerErrorMock).not.toHaveBeenCalled();
+    });
+
+    it('should bind an explicit host and warn when it is not loopback', async () => {
+      StreamableHTTPServerTransportMock.mockReturnValue({
+        handleRequest: jest.fn(),
+        close: jest.fn().mockResolvedValue(undefined)
+      });
+
+      await new StreamableHttpTransport(3000, '0.0.0.0').start(mockServer);
+
       expect(mockApp.listen).toHaveBeenCalledWith(3000, '0.0.0.0', expect.any(Function));
+      expect(loggerErrorMock).toHaveBeenCalledWith(expect.stringContaining('no authentication'));
     });
 
     it('should set up /mcp endpoint correctly', async () => {
