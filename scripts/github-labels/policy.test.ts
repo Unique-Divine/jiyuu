@@ -46,6 +46,11 @@ test("Telegram receives AI and both MCP zones; CLI paths stay outside that zone"
     "Z-mcp",
     "Z-mcp-telegram",
   ])
+  expect(labels("mcp/discord/src/index.ts")).toEqual([
+    "A-ai",
+    "Z-mcp",
+    "Z-mcp-discord",
+  ])
   expect(labels("mcp/slack/src/server.js")).toEqual([
     "A-ai",
     "Z-mcp",
