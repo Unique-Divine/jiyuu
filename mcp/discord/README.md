@@ -103,6 +103,14 @@ entrypoints bind to `127.0.0.1` by default; keep them on loopback. `--host` or
 `HTTP_HOST` overrides the address, and the server logs a warning for any
 non-loopback host. Upstream bound to all interfaces.
 
+Both entrypoints also reject requests whose `Host` header is not
+`127.0.0.1`, `localhost` or `[::1]` on the bound port, or the explicit
+`--host`, with HTTP 403. A browser `Origin`, when sent, must match one of those
+too. This blocks DNS rebinding, where a web page points its own hostname at
+127.0.0.1. Requests without `Origin`, as MCP clients send them, are allowed.
+`HTTP_ALLOWED_HOSTS` (comma-separated `host[:port]`) adds names, which a
+wildcard bind such as `0.0.0.0` needs for remote clients.
+
 ## Tools Documentation
 
 ### Basic Functions

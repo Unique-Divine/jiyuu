@@ -32,7 +32,13 @@ import {
 } from './tools/tools.js';
 import { Client, GatewayIntentBits } from "discord.js";
 import { info, error } from './logger.js';
-import { DEFAULT_HTTP_HOST, nonLoopbackWarning } from './httpHost.js';
+import {
+    DEFAULT_HTTP_HOST,
+    allowedHostKeys,
+    extraAllowedHosts,
+    hostOriginGuard,
+    nonLoopbackWarning
+} from './httpHost.js';
 
 export interface MCPTransport {
     start(server: Server): Promise<void>;
@@ -68,6 +74,8 @@ export class StreamableHttpTransport implements MCPTransport {
         private host: string = DEFAULT_HTTP_HOST
     ) {
         this.app = express();
+        this.app.use(hostOriginGuard(
+            allowedHostKeys(host, port, extraAllowedHosts(process.env))));
         this.app.use(express.json());
         this.sessionId = `session_${Date.now()}_${Math.random().toString(36).substring(2, 10)}`;
         info(`Created HTTP transport with session ID: ${this.sessionId}`);

@@ -10,7 +10,13 @@ import express, { Request, Response } from 'express';
 import { info, Level, setLevel, warning } from './notifications.js';
 import * as schemas from './schemas.js';
 import * as handlers from './tools/tools.js';
-import { nonLoopbackWarning, resolveHttpHost } from './httpHost.js';
+import {
+    allowedHostKeys,
+    extraAllowedHosts,
+    hostOriginGuard,
+    nonLoopbackWarning,
+    resolveHttpHost
+} from './httpHost.js';
 import { createToolContext } from './tools/tools.js';
 
 // Load environment variables from .env file if exists
@@ -197,6 +203,10 @@ const discord = createDiscordClient(config.DISCORD_TOKEN);
 const server = createMcpServer(discord);
 
 const app = express();
+// Jiyuu: reject disallowed Host or Origin headers before any MCP handling.
+app.use(hostOriginGuard(
+    allowedHostKeys(config.HTTP_HOST, config.HTTP_PORT || 8080,
+        extraAllowedHosts(process.env))));
 app.use(express.json());
 
 // region MCP Streamable HTTP Transport Handlers
