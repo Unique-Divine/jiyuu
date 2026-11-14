@@ -66,22 +66,22 @@ It accepts either address format for the account argument:
 
 It accepts either token format for the token argument:
 
-- ERC20 address, e.g. mainnet USDC `0x0829F361A05D993d5CEb035cA6DF3446b060970b`
-- Bank denom, e.g. `erc20/0x0829F361A05D993d5CEb035cA6DF3446b060970b`
+- ERC20 address, e.g. mainnet USDC `0x357c97796aA8e2A6b5A64b1Fc19d5baB9668E190`
+- Bank denom, e.g. `erc20/0x357c97796aA8e2A6b5A64b1Fc19d5baB9668E190`
 - Native bank denom, e.g. `unibi`
 
-Mainnet Sai USDC reference:
+Mainnet Sai USDC reference, distinct from legacy Stargate USDC.e:
 
 ```bash
-USDC_ERC20="0x0829F361A05D993d5CEb035cA6DF3446b060970b"
-USDC_BANK="erc20/0x0829F361A05D993d5CEb035cA6DF3446b060970b"
+USDC_ERC20="0x357c97796aA8e2A6b5A64b1Fc19d5baB9668E190"
+USDC_BANK="erc20/0x357c97796aA8e2A6b5A64b1Fc19d5baB9668E190"
 ```
 
 The examples from `nibiru q evm balance --help` are the canonical quick-start:
 
 ```bash
 # USDC on Nibiru mainnet
-addr="0xYourAddr" token="0x0829F361A05D993d5CEb035cA6DF3446b060970b"
+addr="0xYourAddr" token="0x357c97796aA8e2A6b5A64b1Fc19d5baB9668E190"
 nibiru query evm balance "$addr" "$token"
 
 # NIBI via bank denom
@@ -97,7 +97,7 @@ For a Bech32 keyring address, use the key address directly:
 
 ```bash
 ADDR="$(nibiru keys show sai-perp-admin -a)"
-TOKEN="0x0829F361A05D993d5CEb035cA6DF3446b060970b"
+TOKEN="0x357c97796aA8e2A6b5A64b1Fc19d5baB9668E190"
 nibiru q evm balance "$ADDR" "$TOKEN" | jq .
 ```
 
@@ -116,6 +116,16 @@ Rule of thumb:
   checks because it shows both EVM/ERC20 and Bank-side holdings in one response.
 - Use `nibiru q bank balances "$ADDR" --denom "$USDC_BANK"` only when you
   specifically need the Bank module view.
+
+Legacy USDC.e uses `0x0829F361A05D993d5CEb035cA6DF3446b060970b`, not the
+Sai USDC address above. Both tokens have six decimals. The planned v2.23.1
+CLI patch resolves `USDC` and `USDC.e` locally to explicit Sai and legacy
+addresses on the compatible `release/v2.23` line. It does not change direct
+node or Wasm Stargate query semantics: `USDC` still selects legacy USDC there.
+The separate native alias change on `main` requires a coordinated upgrade.
+Use explicit addresses with installed CLIs and direct queries to existing nodes.
+
+A zero result applies only to the selected token. Use `nibiru q bank balances "$ADDR"` to inspect other bank holdings before describing an account as empty.
 
 ### `balance_wei` and bank `unibi`
 
