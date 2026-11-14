@@ -103,7 +103,9 @@ export {
   searchMessagesHandler
 };
 
-// Export common types
+// Jiyuu: keep this `export type`. Bun transpiles each file on its own and
+// cannot tell these are interfaces, so a plain `export { ... }` fails at
+// startup with "export 'ToolContext' not found". tsc erased it upstream.
 export type { ToolResponse, ToolContext, ToolHandler };
 
 // Create tool context

@@ -74,6 +74,7 @@ export class StreamableHttpTransport implements MCPTransport {
         private host: string = DEFAULT_HTTP_HOST
     ) {
         this.app = express();
+        // Jiyuu: same Host and Origin guard as app.ts, before body parsing.
         this.app.use(hostOriginGuard(
             allowedHostKeys(host, port, extraAllowedHosts(process.env))));
         this.app.use(express.json());
