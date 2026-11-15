@@ -80,8 +80,8 @@ tables with explanations for each column.
 
 The **sai-keeper** database schema is the source of truth for the Sai exchange's indexed data. The schema is defined by SQL migrations in the `sai-keeper` repository.
 
-- **Schema Location**: `$REPO/sai-keeper/models/migrations/`
-- **Routines/Stored Procs**: `$REPO/sai-keeper/models/routines/` (maintains stats/aggregates)
+- **Schema Location**: `~/sai-keeper/models/migrations/`
+- **Routines/Stored Procs**: `~/sai-keeper/models/routines/` (maintains stats/aggregates)
 
 ## High-value SQL snippets
 
