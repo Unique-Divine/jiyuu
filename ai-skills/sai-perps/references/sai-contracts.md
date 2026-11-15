@@ -12,7 +12,7 @@ Source of truth for deployed query examples: file
 `$HOME/ki/sai-website/webapp/pages/debug.tsx` (`QUERY_CONFIG`). The Rust
 `QueryMsg` enums in the contract repositories are authoritative for the
 supported message names and response types.
-Full validated CLI notes: `$HOME/ki/boku/epics/26-02-10-sai-mainnet-query.md`.
+Full validated CLI notes: `$REPO/boku/epics/26-02-10-sai-mainnet-query.md`.
 
 ### Mainnet addresses
 
