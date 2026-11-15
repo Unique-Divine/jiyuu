@@ -850,7 +850,7 @@ invitations. The bot displays the saved links in its completion reply and
 `/chatstatus`. Completed requests are not rewritten to refresh missing links.
 
 The source bot configuration starts with admission in `observe` mode. Check
-`$REPO/boku/epics/comms/telegram-bot.md` and its dated rollout evidence for
+`~/boku/epics/comms/telegram-bot.md` and its dated rollout evidence for
 the actual deployed state before testing bot commands.
 
 
