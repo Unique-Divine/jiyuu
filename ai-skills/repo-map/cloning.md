@@ -1,6 +1,6 @@
-# Cloning — `$REPO` layout (NibiruChain and related)
+# Cloning — `~` layout (NibiruChain and related)
 
-Use this when recreating the machine layout under **`$REPO`**. All **NibiruChain** URLs use SSH; ensure `git@github.com` works for your keys.
+Use this when recreating the machine layout under **`~`**. All **NibiruChain** URLs use SSH; ensure `git@github.com` works for your keys.
 
 ## Discover NibiruChain slugs
 
@@ -12,11 +12,10 @@ If the list truncates, raise `--limit` or run `gh api orgs/NibiruChain/repos --p
 
 ## NibiruChain — `git clone` (slug → local folder)
 
-From an empty or partial `$REPO`, run only the lines you still need (skip if the directory already exists).
+From an empty or partial `~`, run only the lines you still need (skip if the directory already exists).
 
 ```bash
-mkdir -p "$REPO"
-cd "$REPO"
+cd "$HOME"
 
 git clone git@github.com:NibiruChain/nibiru.git nibi-chain
 git clone git@github.com:NibiruChain/go-ethereum.git nibi-geth
@@ -32,13 +31,12 @@ git clone git@github.com:NibiruChain/iac.git nibi-iac
 
 The **`nibiru`** checkout also contains **`nibi-chain/sai-trading/`** (trading bot automation); there is **no** separate clone for that path.
 
-Sanity-check: `git -C $REPO/<folder> remote get-url origin` should show `NibiruChain/<slug>.git`; the **`folder`** name is chosen for ergonomics and may not equal **`slug`** (see table in [SKILL.md](./SKILL.md)).
+Sanity-check: `git -C ~/<folder> remote get-url origin` should show `NibiruChain/<slug>.git`; the **`folder`** name is chosen for ergonomics and may not equal **`slug`** (see table in [SKILL.md](./SKILL.md)).
 
 ## Wasm / toolchain (upstream CosmWasm, not NibiruChain)
 
 ```bash
-mkdir -p "$REPO"
-cd "$REPO"
+cd "$HOME"
 
 git clone git@github.com:CosmWasm/cosmwasm.git wasm-cosmwasm
 ```
@@ -53,7 +51,7 @@ are public archives; use them only when historical source or releases are needed
 These are **outside** `NibiruChain`; URLs follow your forks.
 
 ```bash
-cd "$REPO"
+cd "$HOME"
 
 git clone git@github.com:Unique-Divine/boku.git boku
 
@@ -69,9 +67,8 @@ Runs the same clones as above; skips directories that already contain **`.git`**
 
 ```bash
 clone_nibiruchain_ki() {
-  mkdir -p "$REPO" || return 1
   (
-    cd "$REPO" || return 1
+    cd "$HOME" || return 1
     clone_into() {
       local slug="$1" dir="$2"
       if [[ -d "$dir/.git" ]]; then
@@ -101,6 +98,6 @@ Then **`clone_nibiruchain_ki`**.
 ```bash
 for d in nibi-chain nibi-geth nibi-go-hm nibi-ts-sdk nibi-web sai-web sai-perps sai-keeper sai-docs nibi-iac; do
   printf '%s: ' "$d"
-  git -C "$REPO/$d" remote get-url origin 2>/dev/null || echo "(missing)"
+  git -C "$HOME/$d" remote get-url origin 2>/dev/null || echo "(missing)"
 done
 ```
