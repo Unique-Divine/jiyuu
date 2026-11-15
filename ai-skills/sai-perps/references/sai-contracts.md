@@ -9,7 +9,7 @@ trading credits. Use agent skill `nibiru-cli` for CLI mechanics.
 ## Contract query playbook
 
 Source of truth for deployed query examples: file
-`~/sai-website/webapp/pages/debug.tsx` (`QUERY_CONFIG`). The Rust
+`~/sai-web/webapp/pages/debug.tsx` (`QUERY_CONFIG`). The Rust
 `QueryMsg` enums in the contract repositories are authoritative for the
 supported message names and response types.
 Full validated CLI notes: `~/boku/epics/26-02-10-sai-mainnet-query.md`.
@@ -25,7 +25,7 @@ Full validated CLI notes: `~/boku/epics/26-02-10-sai-mainnet-query.md`.
 | SLP-USDC Vault — Group 1 | `nibi1waf5c8z55qvjay4de8wkm9cxyt6wa8zdnrvlexjrq77lqgqf258q3yn7l8` |
 | SLP-stNIBI Vault — Group 1 | `nibi1pgurgas0za436c3fm2km99zkzutfx0jwpn7meespv6szv8c8g39qjz2tvj` |
 
-Source: `~/sai-website/webapp/config/env.ts` (`SaiContractsMainnet`).
+Source: `~/sai-web/packages/sai-core/src/config/saiContracts.ts` (`SaiContractsMainnet`).
 
 Group meanings:
 - `GroupIndex(0)` = crypto assets
@@ -340,7 +340,7 @@ const result = await querier.wasmClient.queryContractSmart(
 )
 ```
 
-Address constants live in `~/sai-website/webapp/config/env.ts` (`SaiContractsMainnet`).
+Address constants live in `~/sai-web/packages/sai-core/src/config/saiContracts.ts` (`SaiContractsMainnet`).
 
 
 ---

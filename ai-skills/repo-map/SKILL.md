@@ -53,7 +53,7 @@ and query builders.
 frontend and API integrations. This uses the "sai-keeper" GraphQL interface.
 - `~/sai-perps`: **Official Sai protocol contracts** (EVM + Wasm). This repo defines what gets deployed onchain; the web app and sai-keeper both talk to these contracts. Used by trading tools and integrations.
 - `~/sai-keeper`: Defines the "sai-keeper" GraphQL interface for Sai.
-- `~/nibi-chain/sai-trading`: **Sai: Trading bot automation service**
+- `~/nibi-chain/lib/sai-trading`: **Sai: Trading bot automation service**
 - `~/sai-docs`: Public-facing user documentation for Sai. Great conceptual
   resource.
 - `~/open-sai`: **Open Sai, the public monorepo for Sai**
