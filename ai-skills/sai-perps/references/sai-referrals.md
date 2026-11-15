@@ -24,7 +24,7 @@ changelog notes, switch to agent skill `sai-ops`.
 
 ## Important paths
 
-- Sai referrals epic: `$HOME/ki/boku/epics/tools/sai-deal-desk`
+- Sai referrals epic: `$REPO/boku/epics/tools/sai-deal-desk`
 - Deal Desk command: `sai-deal-desk`
 - Sai perp repo: `$HOME/ki/sai-perps`
 - Mainnet perp contract: `nibi1ntmw2dfvd0qnw5fnwdu9pev2hsnqfdj9ny9n0nzh2a5u8v0scflq930mph`
