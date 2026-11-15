@@ -8,8 +8,8 @@ subscriptions. For live protocol state or contract-owned values, use
 ## Source and endpoints
 
 The source of truth is the GraphQL schema in directory
-`$HOME/ki/sai-keeper/graphql/graph/`. File
-`$HOME/ki/sai-website/webapp/config/chain.ts` builds the deployed endpoint with
+`$REPO/sai-keeper/graphql/graph/`. File
+`$REPO/sai-website/webapp/config/chain.ts` builds the deployed endpoint with
 path `/query`.
 
 | Network | HTTP | WebSocket |
