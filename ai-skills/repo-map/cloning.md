@@ -29,7 +29,7 @@ git clone git@github.com:NibiruChain/sai-docs.git sai-docs
 git clone git@github.com:NibiruChain/iac.git nibi-iac
 ```
 
-The **`nibiru`** checkout also contains **`nibi-chain/sai-trading/`** (trading bot automation); there is **no** separate clone for that path.
+The **`nibiru`** checkout also contains **`nibi-chain/lib/sai-trading/`** (trading bot automation); there is **no** separate clone for that path.
 
 Sanity-check: `git -C ~/<folder> remote get-url origin` should show `NibiruChain/<slug>.git`; the **`folder`** name is chosen for ergonomics and may not equal **`slug`** (see table in [SKILL.md](./SKILL.md)).
 
