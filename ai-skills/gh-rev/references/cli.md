@@ -20,7 +20,7 @@ ledger root and state file. The default root is `~/gh`; environment variable
 `GH_REV_HOME` or option `--home` overrides it. Command `--version` reports
 package and Git provenance.
 
-The source package lives at `$HOME/ki/boku/jiyuu/gh-rev`; its `README.md`
+The source package lives at `$REPO/boku/jiyuu/gh-rev`; its `README.md`
 documents the full command and recovery contract. On this workstation, install
 or update through dotfiles:
 

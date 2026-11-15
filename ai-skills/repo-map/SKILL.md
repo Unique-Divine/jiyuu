@@ -90,7 +90,7 @@ frontend and API integrations. This uses the "sai-keeper" GraphQL interface.
   `go-hm-graphql`, `heart-monitor`)
 
 ### Personal, Blog, Boku Workspace
-- `$HOME/ki/boku`: **Personal knowledge base and project hub.** Monorepo for sandboxing, backups, and external brain. Use when working on epics, specs, Nibiru notes, focustime, or scripts that span nibi-chain, sai-perps, sai-web. Contains: `epics/`, `nibi/` (addr-book, cook), `free/` (todos, journal), `sde/`, `jiyuu/` (focustime, mdtoc), `scripts/`. Bun/TS + Go + Rust. Run `just test`, `just install`.
+- `$REPO/boku`: **Personal knowledge base and project hub.** Monorepo for sandboxing, backups, and external brain. Use when working on epics, specs, Nibiru notes, focustime, or scripts that span nibi-chain, sai-perps, sai-web. Contains: `epics/`, `nibi/` (addr-book, cook), `free/` (todos, journal), `sde/`, `jiyuu/` (focustime, mdtoc), `scripts/`. Bun/TS + Go + Rust. Run `just test`, `just install`.
 - `$HOME/ki/gh-io-ud`: **Personal site (Firebase Hosting).** Astro 4 + Tailwind. Blog
   content in `src/content/post/` (schema in `src/content/config.ts`). Site config
   `src/config.yaml`, nav `src/navigation.js`. Run `just dev`, build `just b`,
