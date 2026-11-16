@@ -354,3 +354,40 @@ def test_main_disconnects_when_authentication_fails(monkeypatch):
     with pytest.raises(SystemExit):
         session_string_generator.main()
     assert disconnected == [True]
+
+
+class _NeverAuthorizedClient(_AuthorizedClient):
+    """A client whose login returned but Telegram never authorized it."""
+
+    async def is_user_authorized(self):
+        return False
+
+
+def test_unauthorized_login_saves_nothing(tmp_path, monkeypatch, capsys):
+    output = tmp_path / "session.txt"
+    monkeypatch.setenv("TELEGRAM_API_ID", "123")
+    monkeypatch.setenv("TELEGRAM_API_HASH", _FAKE_API_HASH)
+    monkeypatch.setattr(
+        "sys.argv",
+        ["session_string_generator.py", "--qr", "--session-output", str(output)],
+    )
+    monkeypatch.setattr(
+        session_string_generator, "TelegramClient", _NeverAuthorizedClient
+    )
+
+    async def fake_qr_login(_client):
+        return None
+
+    monkeypatch.setattr(session_string_generator, "_qr_login", fake_qr_login)
+    monkeypatch.setattr(
+        session_string_generator.StringSession,
+        "save",
+        staticmethod(lambda _session: _FAKE_SESSION),
+    )
+
+    with pytest.raises(SystemExit) as exit_info:
+        session_string_generator.main()
+
+    assert exit_info.value.code == 1
+    assert not output.exists()
+    assert "Login did not complete" in capsys.readouterr().out

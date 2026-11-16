@@ -285,6 +285,18 @@ async def _main() -> None:
             else:
                 await _phone_login(client)
 
+        # A login that stops early (an unfinished 2FA step, a dropped QR
+        # approval) leaves an auth key Telegram never signed in. Saving it
+        # gives tg-sai a profile that fails later with AUTH_KEY_UNREGISTERED,
+        # so check before writing anything.
+        if not await client.is_user_authorized():
+            print(
+                "\nLogin did not complete: Telegram has not authorized this "
+                "session. Nothing was saved. Run the login again."
+            )
+            await client.disconnect()
+            sys.exit(1)
+
         session_string = StringSession.save(session)
 
         if label:
