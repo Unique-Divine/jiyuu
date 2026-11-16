@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, test } from "bun:test"
+import { afterAll, describe, expect, setDefaultTimeout, test } from "bun:test"
 import { existsSync, mkdirSync, writeFileSync } from "node:fs"
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
@@ -113,6 +113,9 @@ const addBobArgs = [
   "--display-name",
   "Bob Example",
 ]
+
+// Each test runs several CLI subprocesses; 5 seconds is too tight on a busy host.
+setDefaultTimeout(30_000)
 
 describe("tg-sai profile CLI", () => {
   test.each([{ args: ["profile"] }, { args: ["profile", "add"] }])("bare %j displays help and empty profiles without saving or discovering credentials", async ({ args }) => {

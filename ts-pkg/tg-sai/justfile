@@ -59,7 +59,9 @@ smoke-test:
     exit 1
   fi
 
-  bun add -g "./${tarball}"
+  # bun add -g resolves a relative path from the global directory, so pass
+  # an absolute one.
+  bun add -g "$(pwd)/${tarball}"
   tg-sai --help
   tg-sai health
 
