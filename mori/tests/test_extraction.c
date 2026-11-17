@@ -5064,6 +5064,54 @@ TEST(graphql_type) {
     PASS();
 }
 
+/* A GraphQL field's declared type and @deprecated directive reach its Field
+ * def: return_type keeps the wrappers, and extra_props carry deprecated and
+ * the reason (the spec's default when the directive names none). */
+static const char *gql_field_prop(const CBMDefinition *def, const char *key) {
+    for (const char **kv = def->extra_props; kv && kv[0] && kv[1]; kv += 2) {
+        if (strcmp(kv[0], key) == 0) {
+            return kv[1];
+        }
+    }
+    return NULL;
+}
+
+TEST(graphql_field_type_and_deprecation) {
+    CBMFileResult *r = extract("type Perp {\n"
+                               "  trades(limit: Int): [PerpTrade!]!\n"
+                               "  realizedPnl: Float @deprecated(reason: \"Use realizedPnlUsd.\")\n"
+                               "  oldPnl: Float @deprecated\n"
+                               "  blockPnl: Float @deprecated(reason: \"\"\"\n    Block reason.\n  \"\"\")\n"
+                               "}\n",
+                               CBM_LANG_GRAPHQL, "t", "perp.graphqls");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    int fields = 0;
+    for (int i = 0; i < r->defs.count; i++) {
+        const CBMDefinition *def = &r->defs.items[i];
+        if (strcmp(def->label, "Field") != 0) {
+            continue;
+        }
+        fields++;
+        if (strcmp(def->name, "trades") == 0) {
+            ASSERT_STR_EQ(def->return_type, "[PerpTrade!]!");
+            ASSERT_NULL(gql_field_prop(def, "deprecated"));
+        } else if (strcmp(def->name, "realizedPnl") == 0) {
+            ASSERT_STR_EQ(def->return_type, "Float");
+            ASSERT_STR_EQ(gql_field_prop(def, "deprecated"), "true");
+            ASSERT_STR_EQ(gql_field_prop(def, "deprecation_reason"), "Use realizedPnlUsd.");
+        } else if (strcmp(def->name, "oldPnl") == 0) {
+            ASSERT_STR_EQ(gql_field_prop(def, "deprecation_reason"), "No longer supported");
+        } else if (strcmp(def->name, "blockPnl") == 0) {
+            ASSERT_STR_EQ(gql_field_prop(def, "deprecation_reason"), "Block reason.");
+        }
+    }
+    /* The `limit` argument is not a field of Perp. */
+    ASSERT_EQ(fields, 4);
+    cbm_free_result(r);
+    PASS();
+}
+
 /* --- Svelte component --- */
 TEST(svelte_component) {
     CBMFileResult *r = extract("<script>\n  let name = 'World';\n  function greet() {\n    return "
@@ -15965,6 +16013,7 @@ SUITE(extraction) {
     RUN_TEST(json_object);
     RUN_TEST(protobuf_message);
     RUN_TEST(graphql_type);
+    RUN_TEST(graphql_field_type_and_deprecation);
     RUN_TEST(svelte_component);
     RUN_TEST(vue_component);
     RUN_TEST(glsl_shader);

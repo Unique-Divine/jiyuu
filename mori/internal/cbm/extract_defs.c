@@ -12257,6 +12257,81 @@ static TSNode resolve_field_name_node(TSNode child) {
     return name_node;
 }
 
+/* GraphQL `@deprecated(reason: "...")` on a field definition. */
+enum { GQL_DEPRECATION_KV = 5, GQL_BLOCK_QUOTE_LEN = 3 };
+
+/* The text of a GraphQL string value without its quotes (`"x"` or `"""x"""`). */
+static char *graphql_string_text(CBMArena *a, TSNode value, const char *source) {
+    char *raw = cbm_node_text(a, value, source);
+    if (!raw) {
+        return NULL;
+    }
+    size_t len = strlen(raw);
+    size_t quote = 0;
+    if (len >= (size_t)GQL_BLOCK_QUOTE_LEN * PAIR_LEN &&
+        strncmp(raw, "\"\"\"", GQL_BLOCK_QUOTE_LEN) == 0) {
+        quote = GQL_BLOCK_QUOTE_LEN;
+    } else if (len >= PAIR_LEN && raw[0] == '"') {
+        quote = SKIP_ONE;
+    }
+    const char *start = raw + quote;
+    size_t n = len - (quote * PAIR_LEN);
+    while (n > 0 && isspace((unsigned char)*start)) {
+        start++;
+        n--;
+    }
+    while (n > 0 && isspace((unsigned char)start[n - SKIP_ONE])) {
+        n--;
+    }
+    return cbm_arena_strndup(a, start, n);
+}
+
+/* The `reason:` argument of a directive, or NULL. */
+static char *graphql_directive_reason(CBMArena *a, TSNode directive, const char *source) {
+    TSNode args = cbm_find_child_by_kind(directive, "arguments");
+    uint32_t count = ts_node_is_null(args) ? 0 : ts_node_named_child_count(args);
+    for (uint32_t i = 0; i < count; i++) {
+        TSNode arg = ts_node_named_child(args, i);
+        TSNode name = cbm_find_child_by_kind(arg, "name");
+        char *key = ts_node_is_null(name) ? NULL : cbm_node_text(a, name, source);
+        if (!key || strcmp(key, "reason") != 0) {
+            continue;
+        }
+        TSNode value = cbm_find_child_by_kind(arg, "value");
+        TSNode str = ts_node_is_null(value) ? value : cbm_find_child_by_kind(value, "string_value");
+        return ts_node_is_null(str) ? NULL : graphql_string_text(a, str, source);
+    }
+    return NULL;
+}
+
+/* extra_props for a deprecated GraphQL field: deprecated=true and its
+ * deprecation_reason (the spec's default when none is given). NULL when the
+ * field carries no @deprecated directive. */
+static const char **graphql_deprecation_props(CBMArena *a, TSNode field, const char *source) {
+    TSNode dirs = cbm_find_child_by_kind(field, "directives");
+    uint32_t count = ts_node_is_null(dirs) ? 0 : ts_node_named_child_count(dirs);
+    for (uint32_t i = 0; i < count; i++) {
+        TSNode dir = ts_node_named_child(dirs, i);
+        TSNode name = cbm_find_child_by_kind(dir, "name");
+        char *dname = ts_node_is_null(name) ? NULL : cbm_node_text(a, name, source);
+        if (!dname || strcmp(dname, "deprecated") != 0) {
+            continue;
+        }
+        char *reason = graphql_directive_reason(a, dir, source);
+        const char **kv = cbm_arena_alloc(a, GQL_DEPRECATION_KV * sizeof(*kv));
+        if (!kv) {
+            return NULL;
+        }
+        kv[0] = "deprecated";
+        kv[SKIP_ONE] = "true";
+        kv[PAIR_LEN] = "deprecation_reason";
+        kv[PAIR_LEN + SKIP_ONE] = reason && reason[0] ? reason : "No longer supported";
+        kv[PAIR_LEN + PAIR_LEN] = NULL;
+        return kv;
+    }
+    return NULL;
+}
+
 /* Schema/grammar languages whose field node carries the field name on a plain
  * child (no C-style `declarator`/`type` field), so the generic field path below
  * skips them. Emit a "Field" def (with optional return_type) and return true if
@@ -12274,6 +12349,10 @@ static bool extract_schema_field(CBMExtractCtx *ctx, TSNode child, const char *c
             name_node = cbm_find_child_by_kind(child, "name");
         }
         type_node = ts_node_child_by_field_name(child, TS_FIELD("type"));
+        /* FIELD_COUNT 0: the declared type is a plain `type` child. */
+        if (ts_node_is_null(type_node)) {
+            type_node = cbm_find_child_by_kind(child, "type");
+        }
     } else if (ctx->language == CBM_LANG_PRISMA) {
         name_node = cbm_find_child_by_kind(child, "identifier");
         type_node = cbm_find_child_by_kind(child, "column_type");
@@ -12305,6 +12384,9 @@ static bool extract_schema_field(CBMExtractCtx *ctx, TSNode child, const char *c
     def.start_line = ts_node_start_point(child).row + TS_LINE_OFFSET;
     def.end_line = ts_node_end_point(child).row + TS_LINE_OFFSET;
     def.is_exported = cbm_is_exported(name, ctx->language);
+    if (ctx->language == CBM_LANG_GRAPHQL) {
+        def.extra_props = graphql_deprecation_props(a, child, ctx->source);
+    }
     cbm_defs_push(&ctx->result->defs, a, def);
     return true;
 }
