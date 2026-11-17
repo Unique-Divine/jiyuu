@@ -365,7 +365,12 @@ jobs:
           uv build --wheel --out-dir "$RUNNER_TEMP/telegram-wheel"
           uv venv "$RUNNER_TEMP/telegram-fresh"
           uv pip install --python "$RUNNER_TEMP/telegram-fresh/bin/python" "$RUNNER_TEMP"/telegram-wheel/*.whl
-          "$RUNNER_TEMP/telegram-fresh/bin/python" -c "import main, telegram_mcp.runtime"
+          # -I and a neutral working directory keep the checkout off sys.path,
+          # so this imports only what the wheel installed. Importing
+          # telegram_mcp.runtime needs real Telegram config, so check the SDK
+          # API it uses and that every shipped module is present instead.
+          cd "$RUNNER_TEMP"
+          "$RUNNER_TEMP/telegram-fresh/bin/python" -I -c 'import importlib.util as u, mcp.server.fastmcp, telethon, telegram_mcp; mods = ["main", "sanitize", "session_string_generator", "telegram_mcp.runtime", "telegram_mcp.tools", "telegram_mcp.update_check"]; missing = [m for m in mods if u.find_spec(m) is None]; assert not missing, missing; print("wheel ok")'
         if: needs.changes.outputs.telegram == 'true'
     needs: changes
   python-typecheck:
