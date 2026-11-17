@@ -579,6 +579,20 @@ export async function handleSendMessage(args) {
 }
 
 /**
+ * Re-read a message after chat.delete reported message_not_found. A lookup
+ * that runs out of pages can't prove the message is gone, so it returns
+ * false and the original error is reported.
+ */
+async function isGoneOnReread(channel, timestamp, selfId) {
+  try {
+    return isGoneForSelf(await findMessage(channel, timestamp), selfId);
+  } catch (error) {
+    if (error?.message === "lookup_incomplete") return false;
+    throw error;
+  }
+}
+
+/**
  * Delete message handler. Refuses messages the signed-in user didn't send
  * before calling chat.delete, and maps known Slack errors to clear results.
  */
@@ -603,9 +617,12 @@ export async function handleDeleteMessage(args) {
   try {
     // No auth retry: a retry could swap in another Chrome session and run
     // the delete as a user the guard never checked.
+    // expectedToken also stops a network or rate-limit retry from running
+    // under a session another call swapped in during the backoff.
     await slackAPI("chat.delete", { channel, ts: timestamp }, {
       logger: tracker.logger,
-      retryOnAuthFail: false
+      retryOnAuthFail: false,
+      expectedToken: ownership.sessionToken
     });
   } catch (error) {
     // The guard just found the message, so message_not_found here means it
@@ -614,7 +631,7 @@ export async function handleDeleteMessage(args) {
     // leaves a tombstone at the same ts, which also counts as gone.
     if (
       error?.message === "message_not_found" &&
-      isGoneForSelf(await findMessage(channel, timestamp), ownership.selfId)
+      await isGoneOnReread(channel, timestamp, ownership.selfId)
     ) {
       return asMcpJson({
         status: "probably_deleted",

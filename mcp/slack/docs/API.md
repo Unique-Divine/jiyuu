@@ -278,15 +278,17 @@ Before it calls `chat.delete`, the tool checks the target:
 
 1. The message is no older than 24 hours. Environment variable
    `SLACK_MCP_EDIT_DELETE_MAX_AGE_HOURS` sets another window.
-2. The message exists, as a top-level message or a thread reply on any page.
+2. The message exists, as a top-level message or a thread reply. The replies
+   lookup is narrowed to the target timestamp.
 3. Its author is the signed-in user from `auth.test`. Without this check, a
    workspace owner or admin's session token could delete other people's
    messages in public channels and in private channels they belong to.
 4. Its text equals `expected_text` after trimming whitespace. This ties the
    delete to a message the agent read, so a wrong or injected timestamp
    doesn't remove something else.
-5. The session token hasn't changed since the check started. The delete
-   itself never retries with a refreshed session.
+5. The session token hasn't changed since the check started. The delete is
+   pinned to that token, so neither an auth refresh nor a network or
+   rate-limit retry can send it under another session.
 
 **Parameters:**
 | Name | Type | Default | Description |
@@ -311,13 +313,16 @@ Before it calls `chat.delete`, the tool checks the target:
 | `invalid_argument` | An argument is missing or malformed; `field` names it |
 | `message_too_old` | The message is older than the age window |
 | `message_not_found` | No message with that timestamp in the channel |
+| `lookup_incomplete` | The thread search hit its page cap before finding the message |
 | `not_own_message` | Someone else, or a bot, sent the message |
 | `text_mismatch` | `expected_text` doesn't match the message's text |
-| `session_changed` | The session token changed during the check |
+| `session_changed` | The session token changed during the check or before a retry |
 | `cant_delete_message` | Slack refused the delete |
 | `no_permission` | The workspace doesn't let this session delete it |
 
-The tool returns the first six errors before calling `chat.delete`.
+Every error except the last two comes back before `chat.delete` is sent.
+`session_changed` can also stop a retry after the first attempt failed on the
+network.
 
 When `chat.delete` returns `message_not_found` for a message the check just
 found, usually after a network retry, the tool reads the channel again. If the
