@@ -56,10 +56,24 @@ class RecordingFetcher:
         ("v2.1.0", "2.0.1", True),
         ("not-a-version", "2.0.1", False),
         ("2.1.0", "local", False),
+        # PEP 440 post- and dev releases, which a hand-rolled semver parse
+        # misread as prereleases.
+        ("2.0.1", "2.0.1.post1", False),
+        ("2.0.1.post1", "2.0.1", True),
+        ("2.0.1.post2", "2.0.1.post1", True),
+        ("2.0.1", "2.0.1.dev3", True),
+        ("2.0.1.dev3", "2.0.1", False),
+        ("2.0.1rc1", "2.0.1.dev3", True),
     ],
 )
 def test_is_newer_orders_versions(candidate, running, expected):
     assert is_newer(candidate, running) is expected
+
+
+def test_post_release_running_ahead_of_registry_gets_no_notice():
+    status = UpdateStatus(NAME, "2.0.1.post1", "2.0.1", NOW.isoformat())
+
+    assert status.update_available is False
 
 
 def test_running_version_newer_than_registry_means_no_update():

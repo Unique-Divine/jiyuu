@@ -22,6 +22,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Mapping, Optional
 
+from packaging.version import InvalidVersion, Version
+
 OPT_OUT_ENV = "JIYUU_MCP_NO_UPDATE_CHECK"
 CACHE_TTL = timedelta(hours=24)
 FETCH_TIMEOUT_SECONDS = 2.0
@@ -69,53 +71,26 @@ def check_disabled(env: Mapping[str, str]) -> bool:
     return value not in ("", "0", "false", "no")
 
 
-_VERSION_RE = re.compile(r"^v?(\d+(?:\.\d+)*)(?:[-.]?([0-9A-Za-z.\-]+))?(?:\+.*)?$")
-
-
-def parse_version(
-    version: str,
-) -> Optional[tuple[tuple[int, ...], tuple[tuple[int, int | str], ...]]]:
-    """Parse ``1.2.3``, ``1.2.3-rc.1`` or PEP 440 ``1.2.3rc1`` for ordering.
-
-    Returns ``(release, prerelease)``; an empty prerelease means a final
-    release. Returns ``None`` for strings that are not versions.
-    """
-    match = _VERSION_RE.match(version.strip())
-    if match is None:
+def parse_version(version: str) -> Optional[Version]:
+    """Parse a PEP 440 version, or return ``None`` for anything else."""
+    try:
+        return Version(version)
+    except InvalidVersion:
         return None
-    release = tuple(int(part) for part in match.group(1).split("."))
-    release += (0,) * max(0, 3 - len(release))
-    pre_text = match.group(2) or ""
-    prerelease: list[tuple[int, int | str]] = []
-    for part in re.split(r"[.\-]|(?<=\D)(?=\d)|(?<=\d)(?=\D)", pre_text):
-        if part == "":
-            continue
-        # Numeric identifiers sort before alphanumeric ones, as in semver.
-        prerelease.append((0, int(part)) if part.isdigit() else (1, part))
-    return release, tuple(prerelease)
 
 
 def is_newer(candidate: str, running: str) -> bool:
-    """Report whether ``candidate`` sorts after ``running``.
+    """Report whether ``candidate`` sorts after ``running`` under PEP 440.
 
-    Unparseable versions never count as newer, so a bad registry response
-    produces no notice.
+    PEP 440 orders pre-, post- and dev releases, so a running ``2.0.1.post1``
+    is ahead of ``2.0.1``. Invalid versions never count as newer, so a bad
+    registry response produces no notice.
     """
     parsed_candidate = parse_version(candidate)
     parsed_running = parse_version(running)
     if parsed_candidate is None or parsed_running is None:
         return False
-    cand_release, cand_pre = parsed_candidate
-    run_release, run_pre = parsed_running
-    width = max(len(cand_release), len(run_release))
-    cand_release += (0,) * (width - len(cand_release))
-    run_release += (0,) * (width - len(run_release))
-    if cand_release != run_release:
-        return cand_release > run_release
-    if not cand_pre or not run_pre:
-        # A final release sorts after any prerelease of the same version.
-        return not cand_pre and bool(run_pre)
-    return cand_pre > run_pre
+    return parsed_candidate > parsed_running
 
 
 def latest_version_url(name: str) -> str:
