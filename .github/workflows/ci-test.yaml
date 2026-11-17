@@ -649,6 +649,10 @@ jobs:
         uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff
         with:
           python-version: "3.13"
+      # Build first: the check compares these filenames with PyPI's, so a
+      # version with only some of its files uploaded still publishes.
+      - name: Build sdist and wheel
+        run: uv build --out-dir dist
       - name: Check whether this version is already on PyPI
         id: version
         run: |
@@ -657,13 +661,11 @@ jobs:
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           uv run --no-project python \
             "$GITHUB_WORKSPACE/scripts/python/registry_release.py" \
-            check pypi "$name" "$version"
-      - name: Build sdist and wheel
-        if: steps.version.outputs.publish == 'true'
-        run: uv build --out-dir dist
-      # --check-url skips files PyPI already has. A rebuilt file can differ
-      # byte for byte from the uploaded one, so a failed upload still passes
-      # when PyPI already lists this version.
+            check --dist-dir dist pypi "$name" "$version"
+      # A rebuilt file rarely matches an uploaded one byte for byte, so
+      # registry_release.py first deletes local files PyPI already lists and
+      # uploads the rest. uv expands the quoted glob after that. If the upload
+      # fails, the step passes only when PyPI lists every built file.
       - name: Publish
         if: steps.version.outputs.publish == 'true'
         env:
@@ -672,9 +674,9 @@ jobs:
         run: |
           uv run --no-project python \
             "$GITHUB_WORKSPACE/scripts/python/registry_release.py" \
-            publish pypi "$NAME" "$VERSION" -- \
+            publish --dist-dir dist pypi "$NAME" "$VERSION" -- \
             uv publish --trusted-publishing always \
-            --check-url https://pypi.org/simple/ dist/*
+            --check-url https://pypi.org/simple/ 'dist/*'
   publish-jiyuu:
     needs:
       - changes

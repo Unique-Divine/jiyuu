@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
@@ -28,6 +29,8 @@ class FakeRegistry:
 
     def __init__(self) -> None:
         self.scripts: dict[str, list[int]] = {}
+        self.bodies: dict[str, bytes] = {}
+        self.body_scripts: dict[str, list[bytes]] = {}
         self.hits: dict[str, int] = {}
         registry = self
 
@@ -39,7 +42,12 @@ class FakeRegistry:
                 status = script[min(hits, len(script) - 1)]
                 self.send_response(status)
                 self.end_headers()
-                self.wfile.write(b"{}")
+                bodies = registry.body_scripts.get(self.path)
+                if bodies:
+                    body = bodies[min(hits, len(bodies) - 1)]
+                else:
+                    body = registry.bodies.get(self.path, b"{}")
+                self.wfile.write(body)
 
             def log_message(self, format: str, *args: object) -> None:
                 pass
@@ -95,6 +103,12 @@ class RegistryTests(unittest.TestCase):
         self.registry.scripts["/a"] = [503, 429, 200]
         self.assertTrue(lookup(self.url("/a"), NO_WAIT))
         self.assertEqual(self.registry.hits["/a"], 3)
+
+    def test_unreadable_pypi_json_is_an_error(self) -> None:
+        self.registry.scripts["/a"] = [200]
+        self.registry.bodies["/a"] = b"not json"
+        with self.assertRaises(RegistryLookupError):
+            lookup(self.url("/a"), NO_WAIT, expected=frozenset({"x.whl"}))
 
     def test_gives_up_on_persistent_server_errors(self) -> None:
         self.registry.scripts["/a"] = [502]
@@ -168,6 +182,86 @@ class CliTests(unittest.TestCase):
         fail = [sys.executable, "-c", "raise SystemExit(1)"]
         code = self.run_cli("publish", "npm", "@s/pkg", "1.0.0", "--", *fail)
         self.assertEqual(code, 0)
+
+    def pypi_version(self, *filenames: str) -> list[str]:
+        """Serve pypi `pkg 1.0.0` listing filenames; return a dist dir."""
+        path = "/pypi/pkg/1.0.0/json"
+        self.registry.scripts[path] = [200]
+        urls = [{"filename": name} for name in filenames]
+        self.registry.bodies[path] = json.dumps({"urls": urls}).encode()
+        dist = tempfile.TemporaryDirectory()
+        self.addCleanup(dist.cleanup)
+        for name in ("pkg-1.0.0-py3-none-any.whl", "pkg-1.0.0.tar.gz"):
+            Path(dist.name, name).write_bytes(b"")
+        return ["--dist-dir", dist.name]
+
+    def test_pypi_check_skips_when_all_files_present(self) -> None:
+        dist = self.pypi_version(
+            "pkg-1.0.0-py3-none-any.whl", "pkg-1.0.0.tar.gz"
+        )
+        self.assertEqual(self.run_cli("check", *dist, "pypi", "pkg", "1.0.0"), 0)
+        self.assertEqual(self.output.read_text(), "publish=false\n")
+
+    def test_pypi_check_publishes_when_a_file_is_missing(self) -> None:
+        dist = self.pypi_version("pkg-1.0.0-py3-none-any.whl")
+        self.assertEqual(self.run_cli("check", *dist, "pypi", "pkg", "1.0.0"), 0)
+        self.assertEqual(self.output.read_text(), "publish=true\n")
+
+    def test_pypi_publish_fallback_fails_when_a_file_is_missing(self) -> None:
+        dist = self.pypi_version("pkg-1.0.0-py3-none-any.whl")
+        fail = [sys.executable, "-c", "raise SystemExit(3)"]
+        code = self.run_cli(
+            "publish", *dist, "--delay", "0", "pypi", "pkg", "1.0.0",
+            "--", *fail,
+        )
+        self.assertEqual(code, 3)
+        # One listing to prune, then six polls for the missing sdist.
+        self.assertEqual(self.registry.hits["/pypi/pkg/1.0.0/json"], 7)
+
+    def test_pypi_publish_uploads_only_missing_files(self) -> None:
+        dist = self.pypi_version("pkg-1.0.0-py3-none-any.whl")
+        only_sdist = (
+            "import os, sys; "
+            f"sys.exit(0 if os.listdir({dist[1]!r}) == ['pkg-1.0.0.tar.gz'] "
+            "else 9)"
+        )
+        code = self.run_cli(
+            "publish", *dist, "pypi", "pkg", "1.0.0",
+            "--", sys.executable, "-c", only_sdist,
+        )
+        self.assertEqual(code, 0)
+
+    def test_pypi_publish_skips_upload_when_all_files_present(self) -> None:
+        dist = self.pypi_version(
+            "pkg-1.0.0-py3-none-any.whl", "pkg-1.0.0.tar.gz", "extra.whl"
+        )
+        fail = [sys.executable, "-c", "raise SystemExit(3)"]
+        code = self.run_cli(
+            "publish", *dist, "pypi", "pkg", "1.0.0", "--", *fail
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(self.registry.hits["/pypi/pkg/1.0.0/json"], 1)
+
+    def test_pypi_publish_fallback_passes_when_upload_lands(self) -> None:
+        path = "/pypi/pkg/1.0.0/json"
+        dist = self.pypi_version("pkg-1.0.0-py3-none-any.whl")
+        # First listing (prune) shows the wheel; later polls show both.
+        both = [{"filename": "pkg-1.0.0-py3-none-any.whl"},
+                {"filename": "pkg-1.0.0.tar.gz"}]
+        fail = [sys.executable, "-c", "raise SystemExit(3)"]
+        self.registry.scripts[path] = [200]
+        first = self.registry.bodies[path]
+        later = json.dumps({"urls": both}).encode()
+        self.registry.body_scripts[path] = [first, later]
+        code = self.run_cli(
+            "publish", *dist, "--delay", "0", "pypi", "pkg", "1.0.0",
+            "--", *fail,
+        )
+        self.assertEqual(code, 0)
+
+    def test_dist_dir_is_pypi_only(self) -> None:
+        dist = self.pypi_version()
+        self.assertEqual(self.run_cli("check", *dist, "npm", "pkg", "1.0.0"), 2)
 
     def test_failed_publish_of_missing_version_fails(self) -> None:
         fail = [sys.executable, "-c", "raise SystemExit(7)"]
