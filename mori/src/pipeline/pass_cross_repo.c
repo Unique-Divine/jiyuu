@@ -396,11 +396,18 @@ static int64_t find_route_handler(cbm_store_t *target_store, const char *route_q
         return 0;
     }
 
-    /* Follow HANDLES edge to find the handler function */
+    /* Follow HANDLES edge to find the handler function. A Route can have
+     * several handlers (a GraphQL field: its resolver method and, in a
+     * monorepo, a second schema's Field); pick one by a fixed order, code
+     * (Method, then Function) before a schema or config node, so the link
+     * lands on the code an agent reads and never depends on row order. */
     if (sqlite3_prepare_v2(db,
                            "SELECT n.id, n.name, n.file_path FROM edges e "
                            "JOIN nodes n ON n.id = e.source_id "
-                           "WHERE e.target_id = ?1 AND e.type = 'HANDLES' LIMIT 1",
+                           "WHERE e.target_id = ?1 AND e.type = 'HANDLES' "
+                           "ORDER BY CASE n.label WHEN 'Method' THEN 0 "
+                           "WHEN 'Function' THEN 1 ELSE 2 END, "
+                           "n.qualified_name, n.id LIMIT 1",
                            CBM_NOT_FOUND, &s, NULL) != SQLITE_OK) {
         *failed = true;
         return 0;

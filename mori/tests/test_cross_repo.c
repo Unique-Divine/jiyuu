@@ -1134,7 +1134,105 @@ TEST(cross_repo_angular_http_client_exact_verb_matching_issue2768) {
     PASS();
 }
 
+/* A GraphQL field Route can carry more than one HANDLES edge (the gqlgen
+ * resolver method and a schema Field). find_route_handler took LIMIT 1 in row
+ * order, so the link landed on whichever edge was written first; it must
+ * prefer the resolver Method. The Field's HANDLES is seeded first here, so
+ * row order alone would pick it. */
+TEST(cross_repo_graphql_prefers_resolver_method_handler) {
+    cross_repo_fixture_t fixture;
+    char client_path[512];
+    char server_path[512];
+    bool ok = cross_repo_fixture_begin(&fixture) &&
+              cross_repo_project_path(&fixture, "gql-client", client_path, sizeof(client_path)) &&
+              cross_repo_project_path(&fixture, "gql-server", server_path, sizeof(server_path));
+    cbm_store_t *client = ok ? cbm_store_open_path(client_path) : NULL;
+    cbm_store_t *server = ok ? cbm_store_open_path(server_path) : NULL;
+    ok = client && server &&
+         cbm_store_upsert_project(client, "gql-client", fixture.cache) == CBM_STORE_OK &&
+         cbm_store_upsert_project(server, "gql-server", fixture.cache) == CBM_STORE_OK;
+
+    const char *route_qn = "__graphql__Query.perp.trades";
+    cbm_node_t caller = {.project = "gql-client",
+                         .label = "Function",
+                         .name = "loadTrades",
+                         .qualified_name = "gql-client.perp.loadTrades",
+                         .file_path = "perp.ts"};
+    cbm_node_t client_route = {.project = "gql-client",
+                               .label = "Route",
+                               .name = "Query.perp.trades",
+                               .qualified_name = route_qn,
+                               .file_path = "perp.ts"};
+    int64_t caller_id = ok ? cbm_store_upsert_node(client, &caller) : 0;
+    int64_t client_route_id = ok ? cbm_store_upsert_node(client, &client_route) : 0;
+    cbm_edge_t call = {.project = "gql-client",
+                       .source_id = caller_id,
+                       .target_id = client_route_id,
+                       .type = "GRAPHQL_CALLS",
+                       .properties_json = "{\"callee\":\"gql\",\"operation\":\"PerpTrades\","
+                                          "\"operation_type\":\"query\","
+                                          "\"field_path\":\"perp.trades\"}"};
+    ok = ok && caller_id > 0 && client_route_id > 0 && cbm_store_insert_edge(client, &call) > 0;
+
+    cbm_node_t server_route = {.project = "gql-server",
+                               .label = "Route",
+                               .name = "Query.perp.trades",
+                               .qualified_name = route_qn,
+                               .file_path = "graph/perp.graphqls"};
+    cbm_node_t field = {.project = "gql-server",
+                        .label = "Field",
+                        .name = "trades",
+                        .qualified_name = "gql-server.graph.perp.Perp.trades",
+                        .file_path = "graph/perp.graphqls"};
+    cbm_node_t method = {.project = "gql-server",
+                         .label = "Method",
+                         .name = "Trades",
+                         .qualified_name = "gql-server.graph.resolver.perpResolver.Trades",
+                         .file_path = "graph/resolver/perp.resolvers.go"};
+    int64_t server_route_id = ok ? cbm_store_upsert_node(server, &server_route) : 0;
+    int64_t field_id = ok ? cbm_store_upsert_node(server, &field) : 0;
+    int64_t method_id = ok ? cbm_store_upsert_node(server, &method) : 0;
+    cbm_edge_t by_field = {.project = "gql-server",
+                           .source_id = field_id,
+                           .target_id = server_route_id,
+                           .type = "HANDLES",
+                           .properties_json = "{\"via\":\"graphql_schema_field\"}"};
+    cbm_edge_t by_method = {.project = "gql-server",
+                            .source_id = method_id,
+                            .target_id = server_route_id,
+                            .type = "HANDLES",
+                            .properties_json = "{\"via\":\"gqlgen_resolver\"}"};
+    ok = ok && server_route_id > 0 && field_id > 0 && method_id > 0 &&
+         cbm_store_insert_edge(server, &by_field) > 0 &&
+         cbm_store_insert_edge(server, &by_method) > 0;
+    cbm_store_close(client);
+    cbm_store_close(server);
+    if (!ok) {
+        cross_repo_fixture_end(&fixture);
+        FAIL("failed to seed GraphQL handler fixture");
+    }
+
+    const char *target = "gql-server";
+    cbm_cross_repo_result_t fwd = cbm_cross_repo_match("gql-client", &target, 1);
+    bool failed = fwd.failed;
+    int graphql_edges = fwd.graphql_edges;
+    int to_resolver = cross_repo_count_edges_like(&fixture, "gql-client", "CROSS_GRAPHQL_CALLS",
+                                                  "%perp.resolvers.go%");
+    int to_schema = cross_repo_count_edges_like(&fixture, "gql-client", "CROSS_GRAPHQL_CALLS",
+                                                "%perp.graphqls%");
+    /* Restore CBM_CACHE_DIR before asserting: a failed ASSERT returns early,
+     * and a leaked cache dir would break every later suite. */
+    cbm_cross_repo_result_free(&fwd);
+    cross_repo_fixture_end(&fixture);
+    ASSERT_FALSE(failed);
+    ASSERT_EQ(graphql_edges, 1);
+    ASSERT_EQ(to_resolver, 1);
+    ASSERT_EQ(to_schema, 0);
+    PASS();
+}
+
 SUITE(cross_repo) {
+    RUN_TEST(cross_repo_graphql_prefers_resolver_method_handler);
     RUN_TEST(cross_repo_caller_local_handler_blocks_cross_http_issue1459);
     RUN_TEST(cross_repo_methodless_call_to_local_get_route_blocks_cross_http_issue1459);
     RUN_TEST(cross_repo_caller_without_local_handler_keeps_cross_http_issue1459);
