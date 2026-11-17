@@ -157,7 +157,7 @@ Create `~/Library/LaunchAgents/com.yourname.slack-token-refresh.plist`:
     <array>
         <string>/bin/bash</string>
         <string>-c</string>
-        <string>export NVM_DIR="$HOME/.nvm" &amp;&amp; [ -s "$NVM_DIR/nvm.sh" ] &amp;&amp; \. "$NVM_DIR/nvm.sh" &amp;&amp; exec bunx @uniquedivine/mcp-slack --refresh-tokens</string>
+        <string>exec "$HOME/.bun/bin/bunx" @uniquedivine/mcp-slack@4.4.3 --refresh-tokens</string>
     </array>
     <key>StartCalendarInterval</key>
     <array>
@@ -182,7 +182,7 @@ Check it ran:
 tail /tmp/slack-token-refresh.log
 ```
 
-**Why the `bash -c` wrapper:** LaunchAgents start without a TTY, so a bare `node` won't be on PATH if you use nvm. The wrapper sources `nvm.sh` first, then runs the refresher. (If you installed node via Homebrew, replace the whole inner command with `/opt/homebrew/bin/node /opt/homebrew/bin/bunx @uniquedivine/mcp-slack --refresh-tokens`.)
+**Why the absolute `bunx` path:** LaunchAgents start without your shell profile, so `bunx` is not on `PATH`. The `bash -c` wrapper expands `$HOME` to the default Bun install path, `~/.bun/bin/bunx`. If you installed Bun with Homebrew, use `/opt/homebrew/bin/bunx` instead. Run `bunx` directly, not through `node`: `bunx` is Bun's native binary, not a JavaScript file. Keep the version pin equal to the one in your MCP client config.
 
 **Trade-off:** Chrome must be running for extraction to succeed. If it's not, the LaunchAgent logs "Failed to extract" and tokens stay where they are — which is fine for another 12 hours.
 
