@@ -112,8 +112,8 @@ describe("custody status report", () => {
       custodyStatusKey(buildCustodyStatus({ ...input, groupCount: 213 })),
     )
   })
-  test("the package version is 0.3.1", () => {
-    expect(packageJson.version).toBe("0.3.1")
+  test("the package version is 0.3.2", () => {
+    expect(packageJson.version).toBe("0.3.2")
   })
 })
 

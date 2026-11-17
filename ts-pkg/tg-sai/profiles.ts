@@ -926,13 +926,18 @@ export function mayFallBackFromProfile(
  * Credentials for `profileName` and where they came from: `TELEGRAM_*`
  * environment variables, the selected profile, or a known credential file.
  * Only `profile` credentials carry the profile's name and saved `userId`.
+ *
+ * A named profile wins over `TELEGRAM_*`: a stale exported session string
+ * must not silently replace the account the caller asked for. Environment
+ * credentials apply only when no profile is named.
  */
 export async function resolveTelegramCredentialSource(
   profileName: string | undefined,
   env: ProfileStoreEnv = process.env,
 ): Promise<ResolvedTelegramCredentials> {
   const passwordOverride = passwordValueRef(env.TELEGRAM_PASSWORD || null)
-  const envCredentials = credentialsFromEnv(env)
+  const envCredentials =
+    profileName === undefined ? credentialsFromEnv(env) : null
   if (envCredentials) {
     return {
       credentials: envCredentials,

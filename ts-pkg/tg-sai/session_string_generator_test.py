@@ -92,6 +92,35 @@ def test_qr_login_refreshes_after_expiry_then_succeeds():
     assert client.disconnected is False
 
 
+def test_qr_login_recovers_when_token_expires_during_dc_move(capsys):
+    qr = _FakeQR(
+        [session_string_generator.errors.AuthTokenExpiredError(request=None), None]
+    )
+    client = _FakeClient(qr)
+
+    asyncio.run(session_string_generator._qr_login(client))
+
+    assert qr.recreate_calls == 1
+    assert client.disconnected is False
+    out = capsys.readouterr().out
+    assert "home data center" in out
+    assert "Scan this fresh code" in out
+
+
+def test_countdown_shows_seconds_left(monkeypatch, capsys):
+    qr = _FakeQR([])
+    qr.expires = datetime.now(timezone.utc) + timedelta(seconds=20)
+
+    async def run_briefly():
+        task = asyncio.create_task(session_string_generator._countdown(qr))
+        await asyncio.sleep(0)
+        task.cancel()
+
+    asyncio.run(run_briefly())
+
+    assert "Code expires in" in capsys.readouterr().out
+
+
 def test_qr_login_gives_up_after_max_refreshes(monkeypatch):
     monkeypatch.setattr(session_string_generator, "_QR_MAX_REFRESHES", 3)
     qr = _FakeQR([asyncio.TimeoutError()] * 3)
