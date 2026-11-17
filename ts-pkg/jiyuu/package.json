@@ -1,6 +1,21 @@
 {
   "name": "@uniquedivine/jiyuu",
   "version": "0.0.3",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Unique-Divine/jiyuu.git",
+    "directory": "ts-pkg/jiyuu"
+  },
+  "homepage": "https://github.com/Unique-Divine/jiyuu/tree/main/ts-pkg/jiyuu#readme",
+  "bugs": {
+    "url": "https://github.com/Unique-Divine/jiyuu/issues"
+  },
+  "files": [
+    "index.ts",
+    "src/*.ts",
+    "!src/*.test.ts",
+    "README.md"
+  ],
   "description": "TypeScript utils that mimic functionality from Rust and Golang",
   "module": "index.ts",
   "type": "module",

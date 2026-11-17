@@ -19,6 +19,8 @@ jobs:
     outputs:
       typescript: ${{ github.event_name == 'workflow_dispatch' || steps.paths.outputs.typescript == 'true' }}
       tg_sai: ${{ github.event_name == 'workflow_dispatch' || steps.paths.outputs.tg_sai == 'true' }}
+      ts_jiyuu: ${{ github.event_name == 'workflow_dispatch' || steps.paths.outputs.ts_jiyuu == 'true' }}
+      ts_bash: ${{ github.event_name == 'workflow_dispatch' || steps.paths.outputs.ts_bash == 'true' }}
       mdtoc: ${{ github.event_name == 'workflow_dispatch' || steps.paths.outputs.mdtoc == 'true' }}
       tmux_watch: ${{ github.event_name == 'workflow_dispatch' || steps.paths.outputs.tmux_watch == 'true' }}
       gh_rev: ${{ github.event_name == 'workflow_dispatch' || steps.paths.outputs.gh_rev == 'true' }}
@@ -61,6 +63,12 @@ jobs:
             - bunfig.toml
             - .github/workflows/ci-test.yaml
             - justfile
+            ts_jiyuu:
+            - ts-pkg/jiyuu/**
+            - .github/workflows/ci-test.yaml
+            ts_bash:
+            - ts-pkg/bash/**
+            - .github/workflows/ci-test.yaml
             mdtoc:
             - mdtoc/**
             - package.json
@@ -419,7 +427,7 @@ jobs:
       - changes
       - test
     # vars.PUBLISH_TG_SAI turns publishing on once npm trusts this workflow.
-    if: vars.PUBLISH_TG_SAI == 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.changes.outputs.tg_sai == 'true'
+    if: vars.PUBLISH_TG_SAI == 'true' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main' && needs.changes.outputs.tg_sai == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -478,7 +486,7 @@ jobs:
       - changes
       - discord
     # vars.PUBLISH_MCP_DISCORD turns publishing on once npm trusts this workflow.
-    if: vars.PUBLISH_MCP_DISCORD == 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.changes.outputs.discord == 'true'
+    if: vars.PUBLISH_MCP_DISCORD == 'true' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main' && needs.changes.outputs.discord == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -537,7 +545,7 @@ jobs:
       - changes
       - slack
     # vars.PUBLISH_MCP_SLACK turns publishing on once npm trusts this workflow.
-    if: vars.PUBLISH_MCP_SLACK == 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.changes.outputs.slack == 'true'
+    if: vars.PUBLISH_MCP_SLACK == 'true' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main' && needs.changes.outputs.slack == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -597,7 +605,7 @@ jobs:
       - telegram
       - python-typecheck
     # vars.PUBLISH_TELEGRAM_MCP turns publishing on once PyPI trusts this workflow.
-    if: vars.PUBLISH_TELEGRAM_MCP == 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.changes.outputs.telegram == 'true'
+    if: vars.PUBLISH_TELEGRAM_MCP == 'true' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main' && needs.changes.outputs.telegram == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -642,3 +650,121 @@ jobs:
       - name: Publish
         if: steps.version.outputs.publish == 'true'
         run: uv publish --trusted-publishing always dist/*
+  publish-jiyuu:
+    needs:
+      - changes
+      - test
+    # vars.PUBLISH_JIYUU turns publishing on once npm trusts this workflow.
+    if: vars.PUBLISH_JIYUU == 'true' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main' && needs.changes.outputs.ts_jiyuu == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # npm exchanges this OIDC token for a short-lived publish credential.
+      id-token: write
+    concurrency:
+      group: publish-jiyuu
+      cancel-in-progress: false
+    defaults:
+      run:
+        working-directory: ts-pkg/jiyuu
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Install bun
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: 1.4.3
+      # Trusted publishing needs Node 22.14+ and npm 11.5.1+ (npm 12.2.0 below).
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - name: Check whether this version is already on npm
+        id: version
+        run: |
+          name="$(jq -r .name package.json)"
+          version="$(jq -r .version package.json)"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          if npx --yes npm@12.2.0 view "${name}@${version}" version >/dev/null 2>&1; then
+            echo "${name}@${version} is already on npm; nothing to publish."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Install dependencies
+        if: steps.version.outputs.publish == 'true'
+        run: bun install --frozen-lockfile
+      - name: Lint the package
+        if: steps.version.outputs.publish == 'true'
+        run: bunx publint
+      # bun publish has no OIDC support, so pack with Bun and publish the
+      # tarball with npm, which handles the trusted-publishing exchange.
+      - name: Pack
+        if: steps.version.outputs.publish == 'true'
+        run: bun pm pack
+      - name: Publish
+        if: steps.version.outputs.publish == 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: npx --yes npm@12.2.0 publish "./uniquedivine-jiyuu-${VERSION}.tgz" --access public
+  publish-bash:
+    needs:
+      - changes
+      - test
+    # vars.PUBLISH_BASH turns publishing on once npm trusts this workflow.
+    if: vars.PUBLISH_BASH == 'true' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main' && needs.changes.outputs.ts_bash == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # npm exchanges this OIDC token for a short-lived publish credential.
+      id-token: write
+    concurrency:
+      group: publish-bash
+      cancel-in-progress: false
+    defaults:
+      run:
+        working-directory: ts-pkg/bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Install bun
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: 1.4.3
+      # Trusted publishing needs Node 22.14+ and npm 11.5.1+ (npm 12.2.0 below).
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - name: Check whether this version is already on npm
+        id: version
+        run: |
+          name="$(jq -r .name package.json)"
+          version="$(jq -r .version package.json)"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          if npx --yes npm@12.2.0 view "${name}@${version}" version >/dev/null 2>&1; then
+            echo "${name}@${version} is already on npm; nothing to publish."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Install dependencies
+        if: steps.version.outputs.publish == 'true'
+        run: bun install --frozen-lockfile
+      - name: Lint the package
+        if: steps.version.outputs.publish == 'true'
+        run: bunx publint
+      # bun publish has no OIDC support, so pack with Bun and publish the
+      # tarball with npm, which handles the trusted-publishing exchange.
+      - name: Pack
+        if: steps.version.outputs.publish == 'true'
+        run: bun pm pack
+      - name: Publish
+        if: steps.version.outputs.publish == 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: npx --yes npm@12.2.0 publish "./uniquedivine-bash-${VERSION}.tgz" --access public
