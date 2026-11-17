@@ -249,7 +249,7 @@ describe("mcp_info", () => {
     expect(readPackageIdentity(installed).upstream).toBeNull();
   });
 
-  test("git state reports commit and dirty flag", () => {
+  test("git state reports commit and dirty flag", async () => {
     const dir = tempDir();
     const git = (...args: string[]) => execFileSync("git", ["-C", dir, ...args], { encoding: "utf8" }).trim();
     git("init", "-q");
@@ -257,10 +257,35 @@ describe("mcp_info", () => {
     git("add", "a.txt");
     git("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-qm", "init");
     const commit = git("rev-parse", "HEAD");
-    expect(gitState(dir)).toEqual({ commit, dirty: false });
+    expect(await gitState(dir)).toEqual({ commit, dirty: false });
     writeFileSync(join(dir, "a.txt"), "b");
-    expect(gitState(dir)).toEqual({ commit, dirty: true });
-    expect(gitState(tempDir())).toBeNull();
+    expect(await gitState(dir)).toEqual({ commit, dirty: true });
+    expect(await gitState(tempDir())).toBeNull();
+  });
+
+  // A stand-in git that answers slowly, to watch the event loop meanwhile.
+  function slowGit(seconds: number): string {
+    const path = join(tempDir(), "git");
+    writeFileSync(path, `#!/bin/sh\nsleep ${seconds}\necho 0123abc\n`, { mode: 0o755 });
+    return path;
+  }
+
+  test("a slow git leaves the event loop free for other work", async () => {
+    let ticks = 0;
+    const timer = setInterval(() => ticks++, 10);
+    try {
+      const state = await gitState(tempDir(), { command: slowGit(0.4) });
+      expect(state).toEqual({ commit: "0123abc", dirty: true });
+      expect(ticks).toBeGreaterThanOrEqual(10);
+    } finally {
+      clearInterval(timer);
+    }
+  });
+
+  test("a hung git times out to null", async () => {
+    const started = performance.now();
+    expect(await gitState(tempDir(), { command: slowGit(5), timeoutMs: 200 })).toBeNull();
+    expect(performance.now() - started).toBeLessThan(2000);
   });
 
   const identity: PackageIdentity = {

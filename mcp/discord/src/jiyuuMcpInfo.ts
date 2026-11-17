@@ -14,7 +14,7 @@
  * carries a one-line notice when the running version is behind. Set
  * JIYUU_MCP_NO_UPDATE_CHECK=1 to turn the check off.
  */
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
@@ -63,18 +63,32 @@ export function readPackageIdentity(packageRoot: string): PackageIdentity {
   };
 }
 
-export function gitState(root: string): GitState | null {
+export interface GitOptions {
+  /** The git executable; tests pass a stand-in. */
+  command?: string;
+  timeoutMs?: number;
+}
+
+/**
+ * Commit and dirty flag for a checkout, or null. Runs git asynchronously so a
+ * slow `git status` never blocks other tool calls on the event loop.
+ */
+export async function gitState(root: string, options: GitOptions = {}): Promise<GitState | null> {
   const git = (...args: string[]) =>
-    execFileSync("git", ["-C", root, ...args], {
-      encoding: "utf8",
-      timeout: 2000,
-      stdio: ["ignore", "pipe", "ignore"],
-    }).trim();
+    new Promise<string>((resolve, reject) => {
+      execFile(
+        options.command ?? "git",
+        ["-C", root, ...args],
+        { encoding: "utf8", timeout: options.timeoutMs ?? 2000 },
+        (err, stdout) => (err ? reject(err) : resolve(stdout.trim())),
+      );
+    });
   try {
-    return {
-      commit: git("rev-parse", "HEAD"),
-      dirty: git("status", "--porcelain", "--", ".") !== "",
-    };
+    const [commit, status] = await Promise.all([
+      git("rev-parse", "HEAD"),
+      git("status", "--porcelain", "--", "."),
+    ]);
+    return { commit, dirty: status !== "" };
   } catch {
     return null;
   }
@@ -383,7 +397,8 @@ export class JiyuuMcpInfo {
   async callTool(env: Env = process.env) {
     this.notifier.start();
     const status = await this.notifier.status(FETCH_TIMEOUT_MS + 500);
-    const git = this.identity.provenance === "source-checkout" ? gitState(this.identity.root) : null;
+    const git =
+      this.identity.provenance === "source-checkout" ? await gitState(this.identity.root) : null;
     const report = buildMcpInfo({
       server: this.server,
       identity: this.identity,
