@@ -570,6 +570,24 @@ export async function handleSendMessage(args) {
 }
 
 /**
+ * Delete message handler. Slack rejects messages the signed-in user did not
+ * send with `cant_delete_message` and unknown timestamps with
+ * `message_not_found`; both propagate as errors to the transport.
+ */
+export async function handleDeleteMessage(args) {
+  const result = await slackAPI("chat.delete", {
+    channel: args.channel_id,
+    ts: args.ts
+  });
+
+  return asMcpJson({
+    status: "deleted",
+    channel: result.channel,
+    ts: result.ts
+  });
+}
+
+/**
  * Get thread handler
  */
 export async function handleGetThread(args) {
@@ -928,6 +946,7 @@ export const TOOL_HANDLERS = Object.freeze({
   slack_search_messages: handleSearchMessages,
   slack_users_info: handleUsersInfo,
   slack_send_message: handleSendMessage,
+  slack_delete_message: handleDeleteMessage,
   slack_get_thread: handleGetThread,
   slack_list_users: handleListUsers,
   slack_add_reaction: handleAddReaction,

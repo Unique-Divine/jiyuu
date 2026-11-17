@@ -265,6 +265,31 @@ Send a message.
 
 ---
 
+### slack_delete_message
+
+Delete a message. A session token can only delete messages the signed-in user
+sent.
+
+**Parameters:**
+| Name | Type | Default | Description |
+|------|------|---------|-------------|
+| channel_id | string | *required* | Channel or DM ID |
+| ts | string | *required* | Timestamp of the message to delete |
+
+**Returns:**
+```json
+{
+  "status": "deleted",
+  "channel": "D063M4403MW",
+  "ts": "1767368030.607599"
+}
+```
+
+Slack returns error `cant_delete_message` for a message another user sent and
+error `message_not_found` for an unknown timestamp.
+
+---
+
 ### slack_get_thread
 
 Get all replies in a thread.

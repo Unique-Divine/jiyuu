@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- `slack_delete_message` wraps `chat.delete`. A session token can only delete messages the signed-in user sent; Slack returns `cant_delete_message` for anyone else's.
+
 ## [4.4.3] - 2026-07-03
 
 ### Added
