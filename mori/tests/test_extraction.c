@@ -5077,18 +5077,26 @@ static const char *gql_field_prop(const CBMDefinition *def, const char *key) {
 }
 
 TEST(graphql_field_type_and_deprecation) {
-    CBMFileResult *r = extract("type Perp {\n"
-                               "  trades(limit: Int): [PerpTrade!]!\n"
-                               "  realizedPnl: Float @deprecated(reason: \"Use realizedPnlUsd.\")\n"
-                               "  oldPnl: Float @deprecated\n"
-                               "  blockPnl: Float @deprecated(reason: \"\"\"\n    Block reason.\n  \"\"\")\n"
-                               "}\n",
-                               CBM_LANG_GRAPHQL, "t", "perp.graphqls");
+    CBMFileResult *r =
+        extract("type Perp {\n"
+                "  trades(limit: Int): [PerpTrade!]!\n"
+                "  realizedPnl: Float @deprecated(reason: \"Use realizedPnlUsd.\")\n"
+                "  oldPnl: Float @deprecated\n"
+                "  emptyPnl: Float @deprecated(reason: \"\")\n"
+                "}\n"
+                "extend type Perp {\n"
+                "  more: Int\n"
+                "}\n",
+                CBM_LANG_GRAPHQL, "t", "perp.graphqls");
     ASSERT_NOT_NULL(r);
     ASSERT_FALSE(r->has_error);
     int fields = 0;
+    int classes = 0;
     for (int i = 0; i < r->defs.count; i++) {
         const CBMDefinition *def = &r->defs.items[i];
+        if (strcmp(def->label, "Class") == 0) {
+            classes++;
+        }
         if (strcmp(def->label, "Field") != 0) {
             continue;
         }
@@ -5096,18 +5104,96 @@ TEST(graphql_field_type_and_deprecation) {
         if (strcmp(def->name, "trades") == 0) {
             ASSERT_STR_EQ(def->return_type, "[PerpTrade!]!");
             ASSERT_NULL(gql_field_prop(def, "deprecated"));
+            ASSERT_NULL(gql_field_prop(def, "graphql_extends"));
         } else if (strcmp(def->name, "realizedPnl") == 0) {
             ASSERT_STR_EQ(def->return_type, "Float");
             ASSERT_STR_EQ(gql_field_prop(def, "deprecated"), "true");
             ASSERT_STR_EQ(gql_field_prop(def, "deprecation_reason"), "Use realizedPnlUsd.");
         } else if (strcmp(def->name, "oldPnl") == 0) {
+            /* reason omitted: the spec's default */
             ASSERT_STR_EQ(gql_field_prop(def, "deprecation_reason"), "No longer supported");
-        } else if (strcmp(def->name, "blockPnl") == 0) {
-            ASSERT_STR_EQ(gql_field_prop(def, "deprecation_reason"), "Block reason.");
+        } else if (strcmp(def->name, "emptyPnl") == 0) {
+            /* an explicit empty reason stays empty */
+            ASSERT_STR_EQ(gql_field_prop(def, "deprecated"), "true");
+            ASSERT_STR_EQ(gql_field_prop(def, "deprecation_reason"), "");
+        } else if (strcmp(def->name, "more") == 0) {
+            ASSERT_STR_EQ(gql_field_prop(def, "graphql_extends"), "Perp");
         }
     }
-    /* The `limit` argument is not a field of Perp. */
-    ASSERT_EQ(fields, 4);
+    /* The `limit` argument is not a field of Perp; the extension is no second
+     * Perp. */
+    ASSERT_EQ(fields, 5);
+    ASSERT_EQ(classes, 1);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* Deprecation reasons are decoded per the GraphQL spec: escapes in a "..."
+ * string, and \""" plus common indentation in a block string. The vendored
+ * grammar has no string escapes (it parses them as ERROR), so the reason is
+ * read from the source text; each field sits in its own type so the parse
+ * error stays local. */
+static const char *gql_reason_of(const CBMFileResult *r, const char *field) {
+    for (int i = 0; i < r->defs.count; i++) {
+        const CBMDefinition *def = &r->defs.items[i];
+        if (strcmp(def->label, "Field") == 0 && strcmp(def->name, field) == 0) {
+            return gql_field_prop(def, "deprecation_reason");
+        }
+    }
+    return NULL;
+}
+
+TEST(graphql_deprecation_reason_decoding) {
+    CBMFileResult *r = extract("type A {\n"
+                               "  quoted: Float @deprecated(reason: \"Use \\\"new\\\"\")\n"
+                               "}\n"
+                               "type B {\n"
+                               "  unicode: Float @deprecated(reason: \"caf\\u00e9\")\n"
+                               "}\n"
+                               "type C {\n"
+                               "  braced: Float @deprecated(reason: \"x \\u{1F600}\")\n"
+                               "}\n"
+                               "type D {\n"
+                               "  pair: Float @deprecated(reason: \"x \\ud83d\\ude00\\tend\")\n"
+                               "}\n"
+                               "type E {\n"
+                               "  block: Float @deprecated(reason: \"\"\"\n"
+                               "    Block \\\"\"\" reason,\n"
+                               "      indented.\n"
+                               "  \"\"\")\n"
+                               "}\n"
+                               "type F {\n"
+                               "  spaced: Float @deprecated( reason : \"  kept  \" )\n"
+                               "}\n",
+                               CBM_LANG_GRAPHQL, "t", "reasons.graphqls");
+    ASSERT_NOT_NULL(r);
+    ASSERT_STR_EQ(gql_reason_of(r, "quoted"), "Use \"new\"");
+    ASSERT_STR_EQ(gql_reason_of(r, "unicode"), "caf\xc3\xa9");
+    ASSERT_STR_EQ(gql_reason_of(r, "braced"), "x \xf0\x9f\x98\x80");
+    ASSERT_STR_EQ(gql_reason_of(r, "pair"), "x \xf0\x9f\x98\x80\tend");
+    ASSERT_STR_EQ(gql_reason_of(r, "block"), "Block \"\"\" reason,\n  indented.");
+    ASSERT_STR_EQ(gql_reason_of(r, "spaced"), "  kept  ");
+    cbm_free_result(r);
+    PASS();
+}
+
+/* `schema { query: RootQuery }` is recorded on the file's module def. */
+TEST(graphql_schema_definition_roots) {
+    CBMFileResult *r = extract("schema {\n  query: RootQuery\n  subscription: Events\n}\n"
+                               "type RootQuery {\n  ping: String\n}\n",
+                               CBM_LANG_GRAPHQL, "t", "schema.graphqls");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    const CBMDefinition *mod = NULL;
+    for (int i = 0; i < r->defs.count && !mod; i++) {
+        if (strcmp(r->defs.items[i].label, "Module") == 0) {
+            mod = &r->defs.items[i];
+        }
+    }
+    ASSERT_NOT_NULL(mod);
+    ASSERT_STR_EQ(gql_field_prop(mod, "graphql_schema_query"), "RootQuery");
+    ASSERT_STR_EQ(gql_field_prop(mod, "graphql_schema_subscription"), "Events");
+    ASSERT_NULL(gql_field_prop(mod, "graphql_schema_mutation"));
     cbm_free_result(r);
     PASS();
 }
@@ -16014,6 +16100,8 @@ SUITE(extraction) {
     RUN_TEST(protobuf_message);
     RUN_TEST(graphql_type);
     RUN_TEST(graphql_field_type_and_deprecation);
+    RUN_TEST(graphql_schema_definition_roots);
+    RUN_TEST(graphql_deprecation_reason_decoding);
     RUN_TEST(svelte_component);
     RUN_TEST(vue_component);
     RUN_TEST(glsl_shader);
