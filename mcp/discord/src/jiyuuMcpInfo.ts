@@ -17,7 +17,7 @@
 import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, sep } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 
 export const OPT_OUT_ENV = "JIYUU_MCP_NO_UPDATE_CHECK";
 export const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
@@ -51,7 +51,8 @@ export interface GitState {
   dirty: boolean;
 }
 
-export function readPackageIdentity(root: string): PackageIdentity {
+export function readPackageIdentity(packageRoot: string): PackageIdentity {
+  const root = resolve(packageRoot);
   const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
   return {
     name: String(pkg.name),

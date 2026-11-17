@@ -16,6 +16,37 @@ version changes. Each package has its own plain semver version. Package
 metadata `jiyuu.upstream` in file `package.json`, or table
 `[tool.jiyuu.upstream]` in file `pyproject.toml`, records the upstream baseline.
 
+## Version and Update Notices
+
+Each server has a read-only `mcp_info` tool. It reports the running version,
+whether the server runs from a source checkout or an installed package, the
+git commit for a checkout, the upstream baseline, and update status. The
+update fields are `latestVersion`, `updateAvailable`, `checkedAt`, and
+`pinCommand`. The report lists environment variable names, never values.
+Agents should call `mcp_info` instead of reading MCP client configs, which
+hold secrets.
+
+At startup each server reads its latest published version from npm or PyPI in
+the background. The read has a 2-second timeout, is cached for 24 hours under
+`$XDG_CACHE_HOME/jiyuu-mcp/` (default `~/.cache/jiyuu-mcp/`), and fails
+silently. When the running version is older, the first successful tool result
+of the process ends with one line:
+
+```text
+Update available: uniquedivine-telegram-mcp 2.1.0 (running 2.0.1). Change the pin to `uvx uniquedivine-telegram-mcp@2.1.0` and reload the MCP server.
+```
+
+The servers never update themselves; the pin in the client config decides
+what runs. Set `JIYUU_MCP_NO_UPDATE_CHECK=1` to turn the check off.
+
+The TypeScript module is copied, byte for byte, to
+`discord/src/jiyuuMcpInfo.ts` and `slack/lib/jiyuuMcpInfo.ts`, so each
+published package runs alone. Tests in both packages fail if the copies
+differ. Telegram's equivalent lives in `telegram/telegram_mcp/update_check.py`
+and `telegram/telegram_mcp/server_info.py`.
+
+## Development
+
 From a source checkout, each directory has recipes `just install`,
 `just test`, `just check`, and `just run`.
 
