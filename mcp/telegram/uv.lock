@@ -1447,7 +1447,7 @@ wheels = [
 
 [[package]]
 name = "uniquedivine-telegram-mcp"
-version = "2.0.1"
+version = "2.0.2"
 source = { editable = "." }
 dependencies = [
     { name = "dotenv" },
@@ -1479,16 +1479,16 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "dotenv", specifier = ">=0.9.9" },
-    { name = "httpx", specifier = ">=0.28.1" },
-    { name = "mcp", extras = ["cli"], specifier = ">=1.8.0" },
-    { name = "nest-asyncio", specifier = ">=1.6.0" },
-    { name = "packaging", specifier = ">=25.0" },
-    { name = "python-dotenv", specifier = ">=1.1.0" },
-    { name = "python-json-logger", specifier = ">=3.3.0" },
+    { name = "dotenv", specifier = ">=0.9.9,<1" },
+    { name = "httpx", specifier = ">=0.28.1,<1" },
+    { name = "mcp", extras = ["cli"], specifier = ">=1.8.0,<2" },
+    { name = "nest-asyncio", specifier = ">=1.6.0,<2" },
+    { name = "packaging", specifier = ">=25.0,<26" },
+    { name = "python-dotenv", specifier = ">=1.1.0,<2" },
+    { name = "python-json-logger", specifier = ">=3.3.0,<5" },
     { name = "python-socks", marker = "extra == 'proxy'", specifier = ">=2.4.3" },
-    { name = "qrcode", specifier = ">=8.2" },
-    { name = "telethon", specifier = ">=1.42.0" },
+    { name = "qrcode", specifier = ">=8.2,<9" },
+    { name = "telethon", specifier = ">=1.42.0,<2" },
 ]
 provides-extras = ["proxy"]
 

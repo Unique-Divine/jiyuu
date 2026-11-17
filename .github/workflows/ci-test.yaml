@@ -357,6 +357,21 @@ jobs:
       - name: Check formatting
         run: uv run --frozen black --check main.py sanitize.py session_string_generator.py telegram_mcp tests
         if: needs.changes.outputs.telegram == 'true'
+      # uvx installs the published wheel without uv.lock, resolving the newest
+      # versions the dependency ranges allow. Build and install the same way,
+      # so a range that admits a breaking release fails here, not for users.
+      - name: Install the built wheel without the lockfile and import it
+        run: |
+          uv build --wheel --out-dir "$RUNNER_TEMP/telegram-wheel"
+          uv venv "$RUNNER_TEMP/telegram-fresh"
+          uv pip install --python "$RUNNER_TEMP/telegram-fresh/bin/python" "$RUNNER_TEMP"/telegram-wheel/*.whl
+          # -I and a neutral working directory keep the checkout off sys.path,
+          # so this imports only what the wheel installed. Importing
+          # telegram_mcp.runtime needs real Telegram config, so check the SDK
+          # API it uses and that every shipped module is present instead.
+          cd "$RUNNER_TEMP"
+          "$RUNNER_TEMP/telegram-fresh/bin/python" -I -c 'import importlib.util as u, mcp.server.fastmcp, telethon, telegram_mcp; mods = ["main", "sanitize", "session_string_generator", "telegram_mcp.runtime", "telegram_mcp.tools", "telegram_mcp.update_check"]; missing = [m for m in mods if u.find_spec(m) is None]; assert not missing, missing; print("wheel ok")'
+        if: needs.changes.outputs.telegram == 'true'
     needs: changes
   python-typecheck:
     name: Python types / ${{ matrix.name }}
