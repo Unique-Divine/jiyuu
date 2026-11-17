@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "uniquedivine-telegram-mcp"
-version = "2.0.1"
+version = "2.0.2"
 description = "Telegram MCP server maintained in Jiyuu"
 readme = "README.md"
 authors = [
@@ -25,15 +25,15 @@ classifiers = [
 ]
 requires-python = ">=3.10"
 dependencies = [
-    "dotenv>=0.9.9",
-    "httpx>=0.28.1",
-    "mcp[cli]>=1.8.0",
-    "nest-asyncio>=1.6.0",
-    "packaging>=25.0",
-    "python-dotenv>=1.1.0",
-    "python-json-logger>=3.3.0",
-    "qrcode>=8.2",
-    "telethon>=1.42.0",
+    "dotenv>=0.9.9,<1",
+    "httpx>=0.28.1,<1",
+    "mcp[cli]>=1.8.0,<2",
+    "nest-asyncio>=1.6.0,<2",
+    "packaging>=25.0,<26",
+    "python-dotenv>=1.1.0,<2",
+    "python-json-logger>=3.3.0,<5",
+    "qrcode>=8.2,<9",
+    "telethon>=1.42.0,<2",
 ]
 
 [project.optional-dependencies]
