@@ -22,6 +22,12 @@ import {
 } from "./workflow-store.js";
 import { withRichMessageFields } from "./rich-message-fields.js";
 import { isAuthDeath, lifeboatResponse } from "./lifeboat.js";
+import {
+  checkOwnMessage,
+  createRetryTracker,
+  findMessage,
+  slackWriteErrorResult,
+} from "./message-ownership.js";
 
 // ============ Utilities ============
 
@@ -570,20 +576,44 @@ export async function handleSendMessage(args) {
 }
 
 /**
- * Delete message handler. Slack rejects messages the signed-in user did not
- * send with `cant_delete_message` and unknown timestamps with
- * `message_not_found`; both propagate as errors to the transport.
+ * Delete message handler. Refuses messages the signed-in user didn't send
+ * before calling chat.delete, and maps known Slack errors to clear results.
  */
 export async function handleDeleteMessage(args) {
-  const result = await slackAPI("chat.delete", {
-    channel: args.channel_id,
-    ts: args.ts
-  });
+  const channel = args.channel_id;
+  const timestamp = args.timestamp;
+  const details = { channel, timestamp };
+
+  const ownership = await checkOwnMessage(channel, timestamp);
+  if (!ownership.ok) return ownership.result;
+  const oldText = ownership.message.text ?? "";
+
+  const tracker = createRetryTracker();
+  try {
+    await slackAPI("chat.delete", { channel, ts: timestamp }, { logger: tracker.logger });
+  } catch (error) {
+    // The guard just found the message, so message_not_found here means it
+    // vanished in between. After a network retry, the first attempt most
+    // likely landed; re-check before reporting either way.
+    if (error?.message === "message_not_found" && !(await findMessage(channel, timestamp))) {
+      return asMcpJson({
+        status: "probably_deleted",
+        ...details,
+        old_text: oldText,
+        note: tracker.retried
+          ? "Probably deleted: a network retry got message_not_found, so the first attempt likely landed. A re-check no longer finds the message."
+          : "Probably deleted: Slack reported message_not_found and a re-check no longer finds the message."
+      });
+    }
+    const mapped = slackWriteErrorResult(error, details);
+    if (mapped) return mapped;
+    throw error;
+  }
 
   return asMcpJson({
     status: "deleted",
-    channel: result.channel,
-    ts: result.ts
+    ...details,
+    old_text: oldText
   });
 }
 

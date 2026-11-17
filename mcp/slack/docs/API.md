@@ -267,26 +267,44 @@ Send a message.
 
 ### slack_delete_message
 
-Delete a message. A session token can only delete messages the signed-in user
-sent.
+Permanently delete one of your own messages. Slack can't restore it. Deleting
+a thread parent leaves a "This message was deleted." placeholder above the
+replies.
+
+Before it calls `chat.delete`, the tool reads the message and compares its
+author with the signed-in user from `auth.test`. It refuses anyone else's
+message with error `not_own_message`. Without that check, a workspace owner
+or admin's session token could delete other people's messages in public
+channels and in private channels they belong to.
 
 **Parameters:**
 | Name | Type | Default | Description |
 |------|------|---------|-------------|
 | channel_id | string | *required* | Channel or DM ID |
-| ts | string | *required* | Timestamp of the message to delete |
+| timestamp | string | *required* | Timestamp of the message, top-level or thread reply |
 
 **Returns:**
 ```json
 {
   "status": "deleted",
   "channel": "D063M4403MW",
-  "ts": "1767368030.607599"
+  "timestamp": "1767368030.607599",
+  "old_text": "Hello!"
 }
 ```
 
-Slack returns error `cant_delete_message` for a message another user sent and
-error `message_not_found` for an unknown timestamp.
+**Errors:**
+| Code | Meaning |
+|------|---------|
+| `not_own_message` | Someone else sent the message; the tool didn't call Slack |
+| `message_not_found` | No message with that timestamp in the channel |
+| `cant_delete_message` | Slack refused the delete |
+| `no_permission` | The workspace doesn't let this session delete it |
+
+When `chat.delete` returns `message_not_found` for a message the check just
+found, usually after a network retry, the tool reads the channel again. If the
+message is gone, it returns status `probably_deleted` with a note instead of
+an error.
 
 ---
 

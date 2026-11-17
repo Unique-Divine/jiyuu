@@ -248,7 +248,7 @@ export const TOOLS = [
   },
   {
     name: "slack_delete_message",
-    description: "Delete a message. A session token can only delete messages the signed-in user sent.",
+    description: "Permanently delete one of your own messages; it can't be restored. The tool checks the author first and refuses messages someone else sent, even when the workspace would let an admin delete them. Deleting a thread parent leaves a \"This message was deleted.\" placeholder above the replies. Returns the deleted text.",
     inputSchema: {
       type: "object",
       properties: {
@@ -256,18 +256,18 @@ export const TOOLS = [
           type: "string",
           description: "Channel or DM ID containing the message"
         },
-        ts: {
+        timestamp: {
           type: "string",
-          description: "Timestamp of the message to delete"
+          description: "Timestamp of the message to delete (top-level message or thread reply)"
         }
       },
-      required: ["channel_id", "ts"]
+      required: ["channel_id", "timestamp"]
     },
     annotations: {
       title: "Delete Message",
       readOnlyHint: false,
       destructiveHint: true,
-      idempotentHint: true,
+      idempotentHint: false,
       openWorldHint: true
     }
   },

@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- `slack_delete_message` wraps `chat.delete`. A session token can only delete messages the signed-in user sent; Slack returns `cant_delete_message` for anyone else's.
+- `slack_delete_message` wraps `chat.delete` and returns the deleted text. It reads the message first and refuses with `not_own_message` when someone else sent it, since an admin's session token could otherwise delete other people's messages.
 
 ## [4.4.3] - 2026-07-03
 
