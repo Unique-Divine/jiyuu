@@ -192,7 +192,10 @@ class _SlowHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
-        self.wfile.write(self.body)
+        try:
+            self.wfile.write(self.body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # The client already timed out.
 
     def log_message(self, format: str, *args: object) -> None:
         pass

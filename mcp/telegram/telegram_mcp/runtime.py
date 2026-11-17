@@ -122,7 +122,14 @@ if not _api_id or not _api_hash:
 TELEGRAM_API_ID = int(_api_id)
 TELEGRAM_API_HASH: str = _api_hash
 
-mcp = FastMCP("telegram")
+mcp = FastMCP(
+    "telegram",
+    instructions=(
+        "Telegram user-account tools. To learn this server's version, where it "
+        "runs from, whether an update exists, or which accounts it serves, call "
+        "mcp_info. Never read MCP client config files for this; they hold secrets."
+    ),
+)
 
 # Annotate all tool results with audience=["user"] so MCP clients know
 # the content is user-generated data, not instructions for the model.
