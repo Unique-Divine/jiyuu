@@ -1,0 +1,80 @@
+# Publish @uniquedivine/tg-sai to npm with trusted publishing (OIDC).
+#
+# A merge to main that changes ts-pkg/tg-sai publishes package.json's version
+# when npm doesn't have it yet. No npm token is stored: npm trusts this exact
+# workflow file, registered under the package's Trusted Publisher settings.
+# Rerunning is safe; an already-published version is skipped.
+name: 📦 Publish tg-sai
+"on":
+  push:
+    branches:
+      - main
+    paths:
+      - ts-pkg/tg-sai/**
+      - .github/workflows/tg-sai-publish.yml
+  workflow_dispatch: null
+permissions:
+  contents: read
+concurrency:
+  group: tg-sai-publish
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # npm exchanges this OIDC token for a short-lived publish credential.
+      id-token: write
+    defaults:
+      run:
+        working-directory: ts-pkg/tg-sai
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Install bun
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: 1.4.3
+      # Trusted publishing needs Node 22.14+ and npm 11.5.1+ (npm 12.2.0 below).
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - name: Check whether this version is already on npm
+        id: version
+        run: |
+          name="$(jq -r .name package.json)"
+          version="$(jq -r .version package.json)"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          if npx --yes npm@12.2.0 view "${name}@${version}" version >/dev/null 2>&1; then
+            echo "${name}@${version} is already on npm; nothing to publish."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Install dependencies
+        if: steps.version.outputs.publish == 'true'
+        run: bun install --frozen-lockfile
+      - name: Typecheck
+        if: steps.version.outputs.publish == 'true'
+        run: bun check
+      - name: Test
+        if: steps.version.outputs.publish == 'true'
+        run: |
+          home="$(mktemp -d)"
+          env -i PATH="$PATH" HOME="$home" TMPDIR="$RUNNER_TEMP" bun test
+      - name: Lint the package
+        if: steps.version.outputs.publish == 'true'
+        run: bunx publint
+      # bun publish has no OIDC support, so pack with Bun and publish the
+      # tarball with npm, which handles the trusted-publishing exchange.
+      - name: Pack
+        if: steps.version.outputs.publish == 'true'
+        run: bun pm pack
+      - name: Publish
+        if: steps.version.outputs.publish == 'true'
+        run: |
+          tarball="uniquedivine-tg-sai-${{ steps.version.outputs.version }}.tgz"
+          npx --yes npm@12.2.0 publish "./${tarball}" --access public
