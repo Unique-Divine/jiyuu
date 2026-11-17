@@ -26,7 +26,10 @@ import {
   checkOwnMessage,
   createRetryTracker,
   findMessage,
+  isGoneForSelf,
+  sessionChangedResult,
   slackWriteErrorResult,
+  validateTargetArgs,
 } from "./message-ownership.js";
 
 // ============ Utilities ============
@@ -580,22 +583,39 @@ export async function handleSendMessage(args) {
  * before calling chat.delete, and maps known Slack errors to clear results.
  */
 export async function handleDeleteMessage(args) {
+  const invalid = validateTargetArgs(args);
+  if (invalid) return invalid;
+
   const channel = args.channel_id;
   const timestamp = args.timestamp;
   const details = { channel, timestamp };
 
-  const ownership = await checkOwnMessage(channel, timestamp);
+  const ownership = await checkOwnMessage(channel, timestamp, {
+    expectedText: args.expected_text
+  });
   if (!ownership.ok) return ownership.result;
   const oldText = ownership.message.text ?? "";
 
+  const sessionChanged = sessionChangedResult(ownership, details);
+  if (sessionChanged) return sessionChanged;
+
   const tracker = createRetryTracker();
   try {
-    await slackAPI("chat.delete", { channel, ts: timestamp }, { logger: tracker.logger });
+    // No auth retry: a retry could swap in another Chrome session and run
+    // the delete as a user the guard never checked.
+    await slackAPI("chat.delete", { channel, ts: timestamp }, {
+      logger: tracker.logger,
+      retryOnAuthFail: false
+    });
   } catch (error) {
     // The guard just found the message, so message_not_found here means it
     // vanished in between. After a network retry, the first attempt most
-    // likely landed; re-check before reporting either way.
-    if (error?.message === "message_not_found" && !(await findMessage(channel, timestamp))) {
+    // likely landed; re-check before reporting either way. A thread parent
+    // leaves a tombstone at the same ts, which also counts as gone.
+    if (
+      error?.message === "message_not_found" &&
+      isGoneForSelf(await findMessage(channel, timestamp), ownership.selfId)
+    ) {
       return asMcpJson({
         status: "probably_deleted",
         ...details,

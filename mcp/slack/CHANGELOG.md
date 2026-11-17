@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- `slack_delete_message` wraps `chat.delete` and returns the deleted text. It reads the message first and refuses with `not_own_message` when someone else sent it, since an admin's session token could otherwise delete other people's messages.
+- `slack_delete_message` wraps `chat.delete` and returns the deleted text. Before deleting, it checks that the signed-in user sent the message, that required argument `expected_text` matches the message's text, and that the message is less than 24 hours old (`SLACK_MCP_EDIT_DELETE_MAX_AGE_HOURS` changes the window). It refuses with `not_own_message`, `text_mismatch`, or `message_too_old`, since an admin's session token could otherwise delete other people's messages and injected Slack text could steer an agent to delete old records.
 
 ## [4.4.3] - 2026-07-03
 
