@@ -1,6 +1,9 @@
 import { afterEach, expect, test } from "bun:test"
 import { handleDeleteMessage, TOOL_HANDLERS } from "../lib/handlers.js"
-import { clearSelfUserIdCache } from "../lib/message-ownership.js"
+import {
+  clearSelfUserIdCache,
+  MAX_REPLY_PAGES,
+} from "../lib/message-ownership.js"
 import { TOOLS } from "../lib/tools.js"
 import { callTool } from "../src/server.js"
 import { stubSlackApi } from "./helpers/slack-api-stub.js"
@@ -148,6 +151,14 @@ test("finds a thread reply through conversations.replies", async () => {
     status: "deleted",
     old_text: OLD_TEXT,
   })
+  // The replies call is narrowed to the target ts.
+  const replies = stub.calls.find((c) => c.method === "conversations.replies")
+  expect(replies.params).toMatchObject({
+    ts: TS,
+    oldest: TS,
+    latest: TS,
+    inclusive: "true",
+  })
 })
 
 test("finds a thread reply beyond the first conversations.replies page", async () => {
@@ -170,6 +181,30 @@ test("finds a thread reply beyond the first conversations.replies page", async (
     .filter((c) => c.method === "conversations.replies")
     .map((c) => c.params.cursor)
   expect(cursors).toStrictEqual([undefined, "page-2"])
+})
+
+test("a reply past the page cap fails with lookup_incomplete, not message_not_found", async () => {
+  let page = 0
+  stub = stubSlackApi(slackWithMessage({}, {
+    "conversations.history": { ok: true, messages: [] },
+    "conversations.replies": () => {
+      page += 1
+      return {
+        ok: true,
+        messages: [{ ts: tsHoursAgo(1), user: OTHER, text: "parent" }],
+        response_metadata: { next_cursor: `page-${page + 1}` },
+      }
+    },
+  }))
+
+  const result = await handleDeleteMessage(ARGS)
+
+  expect(result.isError).toBe(true)
+  expect(parsePayload(result).code).toBe("lookup_incomplete")
+  expect(methods().filter((m) => m === "conversations.replies")).toHaveLength(
+    MAX_REPLY_PAGES,
+  )
+  expect(methods()).not.toContain("chat.delete")
 })
 
 test("an unknown timestamp fails with message_not_found before chat.delete", async () => {
@@ -309,6 +344,26 @@ test("refuses with session_changed when the token rotates during the guard", asy
   expect(parsePayload(result).code).toBe("session_changed")
   expect(methods()).not.toContain("chat.delete")
 })
+
+test("a session swapped during the retry backoff stops the retried delete", async () => {
+  stub = stubSlackApi(slackWithMessage({}, {
+    "chat.delete": () => {
+      // Another call swaps the session while slackAPI sleeps before retrying.
+      setTimeout(() => {
+        process.env.SLACK_TOKEN = "xoxc-test-other-session"
+      }, 50)
+      const err = new Error("socket hang up")
+      err.code = "ECONNRESET"
+      throw err
+    },
+  }))
+
+  const result = await handleDeleteMessage(ARGS)
+
+  expect(result.isError).toBe(true)
+  expect(parsePayload(result).code).toBe("session_changed")
+  expect(methods().filter((m) => m === "chat.delete")).toHaveLength(1)
+}, 10_000)
 
 test("auth errors still throw so the transport can show the Lifeboat message", async () => {
   stub = stubSlackApi(slackWithMessage({}, {

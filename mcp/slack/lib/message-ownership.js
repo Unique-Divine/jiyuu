@@ -46,6 +46,14 @@ export const SLACK_WRITE_ERRORS = Object.freeze({
     message: "The new text is longer than Slack's 4,000-character limit.",
     next_action: "Shorten the text and retry."
   },
+  session_changed: {
+    message: "The Slack session changed after the ownership check, so the tool didn't make the change.",
+    next_action: "Run slack_health_check to confirm the signed-in user, then call the tool again."
+  },
+  lookup_incomplete: {
+    message: "The tool couldn't finish searching the thread for this message, so it didn't make the change.",
+    next_action: "Check the timestamp with slack_get_thread and call the tool again."
+  },
   message_not_found: {
     message: "No message with that timestamp exists in this channel.",
     next_action: "Read the channel with slack_conversations_history or the thread with slack_get_thread to get the exact timestamp."
@@ -86,8 +94,9 @@ export function slackWriteErrorResult(error, details = {}) {
 // SLACK_MCP_EDIT_DELETE_MAX_AGE_HOURS overrides it.
 export const DEFAULT_MAX_AGE_HOURS = 24;
 
-// Cap on conversations.replies pages read while looking for a thread reply.
-const MAX_REPLY_PAGES = 50;
+// Safety cap on conversations.replies pages. The lookup narrows the call to
+// the target ts, so it normally needs one page.
+export const MAX_REPLY_PAGES = 50;
 
 const SLACK_TS_PATTERN = /^\d+\.\d+$/;
 
@@ -161,8 +170,10 @@ export function clearSelfUserIdCache() {
 /**
  * Fetch one message by channel and timestamp, or null when it doesn't exist.
  * Top-level messages come from conversations.history; thread replies only
- * appear in conversations.replies, which accepts a reply's own timestamp and
- * pages with response_metadata.next_cursor.
+ * appear in conversations.replies, which accepts a reply's own timestamp.
+ * The replies call is narrowed to oldest = latest = ts (inclusive), so it
+ * returns the parent and the target. It still follows next_cursor, and
+ * throws Error("lookup_incomplete") if the page cap runs out first.
  */
 export async function findMessage(channelId, timestamp) {
   const history = await slackAPI("conversations.history", {
@@ -181,6 +192,9 @@ export async function findMessage(channelId, timestamp) {
       replies = await slackAPI("conversations.replies", {
         channel: channelId,
         ts: timestamp,
+        oldest: timestamp,
+        latest: timestamp,
+        inclusive: true,
         limit: 200,
         cursor
       });
@@ -195,7 +209,7 @@ export async function findMessage(channelId, timestamp) {
     cursor = replies.response_metadata?.next_cursor;
     if (!cursor) return null;
   }
-  return null;
+  throw new Error("lookup_incomplete");
 }
 
 /**
@@ -238,10 +252,19 @@ export async function checkOwnMessage(channelId, timestamp, options = {}) {
     };
   }
 
-  const [selfId, message] = await Promise.all([
-    getSelfUserId(sessionToken),
-    findMessage(channelId, timestamp)
-  ]);
+  let selfId;
+  let message;
+  try {
+    [selfId, message] = await Promise.all([
+      getSelfUserId(sessionToken),
+      findMessage(channelId, timestamp)
+    ]);
+  } catch (error) {
+    if (error?.message === "lookup_incomplete") {
+      return { ok: false, result: messageWriteError("lookup_incomplete", details) };
+    }
+    throw error;
+  }
 
   if (!message) {
     return { ok: false, result: messageWriteError("message_not_found", details) };
@@ -278,10 +301,7 @@ export async function checkOwnMessage(channelId, timestamp, options = {}) {
 export function sessionChangedResult(ownership, details = {}) {
   if (currentSessionToken() === ownership.sessionToken) return null;
   clearSelfUserIdCache();
-  return messageWriteError("session_changed", details, {
-    message: "The Slack session changed during the ownership check, so the tool didn't make the change.",
-    next_action: "Run slack_health_check to confirm the signed-in user, then call the tool again."
-  });
+  return messageWriteError("session_changed", details);
 }
 
 /**
