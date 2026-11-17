@@ -649,6 +649,81 @@ TEST(graphql_long_reason_and_type_name) {
     PASS();
 }
 
+/* Overwrite one fixture file in an indexed project. */
+static void et_rewrite(const EtProj *lp, const char *rel, const char *content) {
+    char path[700];
+    snprintf(path, sizeof(path), "%s/%s", lp->tmpdir, rel);
+    FILE *f = fopen(path, "wb");
+    if (f) {
+        fputs(content, f);
+        fclose(f);
+    }
+}
+
+/* Re-run index_repository on an indexed project (the incremental route). */
+static cbm_store_t *et_reindex(EtProj *lp, cbm_store_t *store) {
+    if (store) cbm_store_close(store);
+    char args[700];
+    snprintf(args, sizeof(args), "{\"repo_path\":\"%s\"}", lp->tmpdir);
+    char *resp = cbm_mcp_handle_tool(lp->srv, "index_repository", args);
+    if (resp) free(resp);
+    return cbm_store_open_path(lp->dbpath);
+}
+
+/* Incremental reindexing keeps the Routes and HANDLES a full index makes.
+ * Editing a resolver file used to drop its HANDLES (the closure repair does
+ * not run the route pass); editing a model file still repairs in place and
+ * keeps them; editing the schema replaces its Routes. */
+TEST(graphql_gqlgen_routes_survive_incremental_edits) {
+    EtProj lp;
+    int nfiles = ET_NWANT(et_gqlgen_files);
+    cbm_store_t *store = et_index_files(&lp, et_gqlgen_files, nfiles);
+    int ok = et_gqlgen_routes_exact(store, lp.project, et_gqlgen_want, ET_NWANT(et_gqlgen_want));
+
+    const char *perp_resolvers = NULL;
+    const char *models = NULL;
+    for (int i = 0; i < nfiles; i++) {
+        if (strcmp(et_gqlgen_files[i].name, "graph/resolver/perp.resolvers.go") == 0) {
+            perp_resolvers = et_gqlgen_files[i].content;
+        } else if (strcmp(et_gqlgen_files[i].name, "graph/model/models.go") == 0) {
+            models = et_gqlgen_files[i].content;
+        }
+    }
+    char edited[4096];
+    snprintf(edited, sizeof(edited), "%s\n// edited\n", perp_resolvers ? perp_resolvers : "");
+    et_rewrite(&lp, "graph/resolver/perp.resolvers.go", edited);
+    store = et_reindex(&lp, store);
+    int after_resolver =
+        et_gqlgen_routes_exact(store, lp.project, et_gqlgen_want, ET_NWANT(et_gqlgen_want));
+
+    snprintf(edited, sizeof(edited), "%s\n// edited\n", models ? models : "");
+    et_rewrite(&lp, "graph/model/models.go", edited);
+    store = et_reindex(&lp, store);
+    int after_model =
+        et_gqlgen_routes_exact(store, lp.project, et_gqlgen_want, ET_NWANT(et_gqlgen_want));
+
+    et_rewrite(&lp, "graph/query.graphqls",
+               "type Query {\n  perp: Perp!\n  appVersion: String!\n  newField: String\n}\n");
+    store = et_reindex(&lp, store);
+    EtGqlServerRoute after_schema_want[ET_NWANT(et_gqlgen_want)];
+    int n = 0;
+    for (int i = 0; i < ET_NWANT(et_gqlgen_want); i++) {
+        if (strcmp(et_gqlgen_want[i].qn, "__graphql__Query.oldPing") != 0) {
+            after_schema_want[n++] = et_gqlgen_want[i];
+        }
+    }
+    after_schema_want[n++] = (EtGqlServerRoute){"__graphql__Query.newField", "String", "false", "",
+                                                "Field", ".Query.newField",
+                                                "graphql_schema_field", 0};
+    int after_schema = et_gqlgen_routes_exact(store, lp.project, after_schema_want, n);
+    et_cleanup(&lp, store);
+    if (!after_resolver) fprintf(stderr, "  [ET-GQLS] wrong after the resolver edit\n");
+    if (!after_model) fprintf(stderr, "  [ET-GQLS] wrong after the model edit\n");
+    if (!after_schema) fprintf(stderr, "  [ET-GQLS] wrong after the schema edit\n");
+    ASSERT_TRUE(ok && after_resolver && after_model && after_schema);
+    PASS();
+}
+
 /* #598 parser edges the end-to-end fixture cannot reach through one language's
  * string extraction: comments/strings/interpolations that contain braces, a
  * bare word, non-document arguments and name truncation. */
@@ -3367,6 +3442,7 @@ SUITE(edge_types_probe) {
     RUN_TEST(graphql_gqlgen_duplicate_paths_one_handler);
     RUN_TEST(graphql_schema_remap_and_extensions);
     RUN_TEST(graphql_long_reason_and_type_name);
+    RUN_TEST(graphql_gqlgen_routes_survive_incremental_edits);
     RUN_TEST(handles_flask_python);
     RUN_TEST(handles_fastapi_python);
     RUN_TEST(handles_drf_action_python);

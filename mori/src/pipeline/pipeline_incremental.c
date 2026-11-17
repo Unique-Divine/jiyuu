@@ -26,6 +26,7 @@ enum { INCR_RING_BUF = 4, INCR_RING_MASK = 3, INCR_TS_BUF = 24 };
 #include "store/store.h"
 #include "graph_buffer/graph_buffer.h"
 #include "discover/discover.h"
+#include "cbm.h" /* CBM_LANG_GO, CBM_LANG_GRAPHQL */
 #include "foundation/log.h"
 #include "foundation/hash_table.h"
 #include "foundation/mem_core.h"
@@ -2756,6 +2757,48 @@ static const char *closure_terraform_decline(char **paths, int n) {
     return NULL;
 }
 
+/* Does the Go package (directory) of `path` hold a gqlgen `*.resolvers.go`
+ * file among the stored or discovered files? */
+static bool closure_in_gqlgen_package(const char *path, const cbm_file_hash_t *stored,
+                                      int stored_count, const cbm_file_info_t *files,
+                                      int file_count) {
+    static const char SUFFIX[] = ".resolvers.go";
+    const char *slash = strrchr(path, '/');
+    size_t dl = slash ? (size_t)(slash - path) + SKIP_ONE : 0;
+    for (int i = 0; i < stored_count + file_count; i++) {
+        const char *other =
+            i < stored_count ? stored[i].rel_path : files[i - stored_count].rel_path;
+        size_t ol = other ? strlen(other) : 0;
+        if (ol > dl + sizeof(SUFFIX) - SKIP_ONE && strncmp(other, path, dl) == 0 &&
+            !strchr(other + dl, '/') &&
+            strcmp(other + ol - (sizeof(SUFFIX) - SKIP_ONE), SUFFIX) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* GraphQL field-path Routes and their HANDLES (pass_route_nodes.c) are
+ * computed from the whole schema and the gqlgen resolver packages by a
+ * full-index pass that a closure repair does not run: a changed schema file
+ * would lose its Routes, a changed resolver file its HANDLES. A delta
+ * touching either declines to the full rebuild. Returns the reason, or NULL. */
+static const char *closure_graphql_decline(char **paths, int n, const cbm_file_hash_t *stored,
+                                           int stored_count, const cbm_file_info_t *files,
+                                           int file_count) {
+    for (int i = 0; i < n; i++) {
+        CBMLanguage lang = cbm_language_for_filename(paths[i]);
+        if (lang == CBM_LANG_GRAPHQL) {
+            return "graphql_schema_changed";
+        }
+        if (lang == CBM_LANG_GO &&
+            closure_in_gqlgen_package(paths[i], stored, stored_count, files, file_count)) {
+            return "graphql_resolver_changed";
+        }
+    }
+    return NULL;
+}
+
 /* A role's defaults/ or vars/ main.yml (.yaml): the lists a kube task's loop
  * reads (pass_ansible.c, an_role_list) -- a roles/<name> component before. */
 static bool closure_ansible_role_vars(const char *rel) {
@@ -3147,6 +3190,11 @@ static int closure_try_plan(cbm_pipeline_t *p, cbm_store_t *store, const char *p
         goto done;
     }
     decline = closure_terraform_decline(changed_paths, n_changed + n_deleted);
+    if (decline) {
+        goto done;
+    }
+    decline = closure_graphql_decline(changed_paths, n_changed + n_deleted, stored, stored_count,
+                                      files, file_count);
     if (decline) {
         goto done;
     }
