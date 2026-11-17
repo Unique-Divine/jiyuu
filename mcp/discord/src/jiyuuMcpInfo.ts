@@ -2,9 +2,10 @@
  * mcp_info and the update notice for Jiyuu's TypeScript MCP servers.
  *
  * Keep this file byte-identical in mcp/discord/src/jiyuuMcpInfo.ts and
- * mcp/slack/lib/jiyuuMcpInfo.ts; jiyuuMcpInfo.test.ts in each package checks
- * the copies match. Each published package must run on its own, so the module
- * is copied rather than shared through a workspace dependency.
+ * mcp/slack/lib/jiyuuMcpInfo.ts. Each published package must run on its own,
+ * so the module is copied rather than shared through a workspace dependency.
+ * mcp/discord/src/jiyuuMcpInfo.test.ts covers its behavior, and both packages'
+ * tests fail when the copies drift apart.
  *
  * The server never updates itself: the client config pins an exact version,
  * so what runs is what was reviewed. At startup the server reads the npm
