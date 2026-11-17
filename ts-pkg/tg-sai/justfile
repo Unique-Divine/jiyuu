@@ -43,27 +43,10 @@ build:
 
 alias b := build
 
-# Pack, global-install the tarball, and smoke-test the CLI
+# Pack, install the tarball into a throwaway Bun global dir, and run tg-sai.
+# Never touches ~/.bun/install/global, which may be a tracked dotfiles dir.
 smoke-test:
-  #!/usr/bin/env bash
-  set -euo pipefail
-
-  package_version="$(jq -r .version package.json)"
-  tarball="uniquedivine-tg-sai-${package_version}.tgz"
-
-  rm -f ./*.tgz
-  bun pm pack
-  packed="$(ls -1 ./*.tgz | head -1)"
-  if [[ "$(basename "${packed}")" != "${tarball}" ]]; then
-    echo "unexpected tarball name: ${packed} (expected ${tarball})"
-    exit 1
-  fi
-
-  # bun add -g resolves a relative path from the global directory, so pass
-  # an absolute one.
-  bun add -g "$(pwd)/${tarball}"
-  tg-sai --help
-  tg-sai health
+  bun run scripts/smoke-test.ts
 
 # Pinned npm for every registry step; newer npm changed validation and web auth, so bump only after testing.
 npm := "bunx npm@12.2.0"
