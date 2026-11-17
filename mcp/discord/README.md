@@ -10,9 +10,9 @@ at v1.4.0 and run from TypeScript source with Bun. Original source and license:
 
 ## Install
 
-Requirements: [Bun](https://bun.sh) 1.4.3 or newer and a Discord bot token
-(see [Discord Bot Setup](#discord-bot-setup)). Run the published package with
-an exact version pin:
+Requirements: [Bun](https://bun.sh) 1.4.3 or newer and a Discord bot token.
+[Discord Bot Setup](#discord-bot-setup) explains how to get the token. Run the
+published package with an exact version pin:
 
 ```sh
 DISCORD_TOKEN=your_discord_bot_token bunx @uniquedivine/mcp-discord@1.3.8
@@ -20,7 +20,7 @@ DISCORD_TOKEN=your_discord_bot_token bunx @uniquedivine/mcp-discord@1.3.8
 
 CI in [Unique-Divine/jiyuu](https://github.com/Unique-Divine/jiyuu) builds and
 publishes `@uniquedivine/mcp-discord` to npm from this directory when its
-version changes on `main`. The pin decides which reviewed version runs.
+version changes on `main`. The version pin selects the exact reviewed release that runs.
 
 ### Claude Code
 
@@ -31,7 +31,7 @@ claude mcp add discord --env DISCORD_TOKEN=your_discord_bot_token \
 
 ### Codex
 
-Add to `~/.codex/config.toml`:
+Add this entry to file `~/.codex/config.toml`:
 
 ```toml
 [mcp_servers.discord]
@@ -42,7 +42,8 @@ env = { DISCORD_TOKEN = "your_discord_bot_token" }
 
 ### Cursor
 
-Add to `~/.cursor/mcp.json`, or `.cursor/mcp.json` in a project:
+Add this entry to file `~/.cursor/mcp.json`, or to file `.cursor/mcp.json` in
+a project:
 
 ```json
 {
@@ -58,10 +59,12 @@ Add to `~/.cursor/mcp.json`, or `.cursor/mcp.json` in a project:
 
 ### Update
 
-1. Find the newest version with `npm view @uniquedivine/mcp-discord version`.
-2. Change the `@1.3.8` pin in the client config to that version.
-3. Restart the MCP server in the client (for example `/mcp` in Claude Code)
-   or restart the client. `bunx` downloads the new version on the next launch.
+1. Find the newest version with command
+   `npm view @uniquedivine/mcp-discord version`.
+2. Change the `@1.3.8` pin in the client configuration to that version.
+3. Restart the MCP server in the client, or restart the client. In Claude
+   Code, run `/mcp` and reconnect the server. Command `bunx` downloads the new
+   version on the next launch.
 
 ## Install From Source
 
