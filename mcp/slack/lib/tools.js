@@ -247,6 +247,31 @@ export const TOOLS = [
     }
   },
   {
+    name: "slack_delete_message",
+    description: "Delete a message. A session token can only delete messages the signed-in user sent.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        channel_id: {
+          type: "string",
+          description: "Channel or DM ID containing the message"
+        },
+        ts: {
+          type: "string",
+          description: "Timestamp of the message to delete"
+        }
+      },
+      required: ["channel_id", "ts"]
+    },
+    annotations: {
+      title: "Delete Message",
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: true
+    }
+  },
+  {
     name: "slack_get_thread",
     description: "Get all replies in a message thread",
     inputSchema: {
