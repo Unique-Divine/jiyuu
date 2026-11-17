@@ -11,21 +11,22 @@ and [LICENSE](LICENSE).
 
 ## Install
 
-Requirements: [uv](https://docs.astral.sh/uv/) and Telegram credentials (see
-[Authenticate](#authenticate)). Run the published package with an exact
-version pin:
+Requirements: [uv](https://docs.astral.sh/uv/) and Telegram credentials.
+[Authenticate](#authenticate) explains how to get them. Run the published
+package with an exact version pin:
 
 ```sh
 uvx uniquedivine-telegram-mcp@2.0.1
 ```
 
-The PyPI name is `uniquedivine-telegram-mcp`. Do not install the unrelated
-package named `telegram-mcp` from PyPI. CI in
+The PyPI project is `uniquedivine-telegram-mcp`. Do not install the unrelated
+PyPI project `telegram-mcp`. CI in
 [Unique-Divine/jiyuu](https://github.com/Unique-Divine/jiyuu) builds and
 publishes this package to PyPI from this directory when its version changes
-on `main`. The pin decides which reviewed version runs.
+on `main`. The version pin selects the exact reviewed release that runs.
 
-Generate a session string with the same pinned package:
+Generate a session string with console script `telegram-mcp-generate-session`
+from the same pinned package:
 
 ```sh
 TELEGRAM_API_ID=123456 TELEGRAM_API_HASH=your_api_hash \
@@ -47,7 +48,7 @@ claude mcp add telegram \
 
 ### Codex
 
-Add to `~/.codex/config.toml`:
+Add this entry to file `~/.codex/config.toml`:
 
 ```toml
 [mcp_servers.telegram]
@@ -62,7 +63,8 @@ TELEGRAM_SESSION_STRING = "your_session_string"
 
 ### Cursor
 
-Add to `~/.cursor/mcp.json`, or `.cursor/mcp.json` in a project:
+Add this entry to file `~/.cursor/mcp.json`, or to file `.cursor/mcp.json` in
+a project:
 
 ```json
 {
@@ -85,15 +87,17 @@ Add to `~/.cursor/mcp.json`, or `.cursor/mcp.json` in a project:
 1. Find the newest version at
    https://pypi.org/project/uniquedivine-telegram-mcp/ or with
    `curl -s https://pypi.org/pypi/uniquedivine-telegram-mcp/json | jq -r .info.version`.
-2. Change the `@2.0.1` pin in the client config to that version.
-3. Restart the MCP server in the client (for example `/mcp` in Claude Code)
-   or restart the client. `uvx` installs the new version on the next launch.
+2. Change the `@2.0.1` pin in the client configuration to that version.
+3. Restart the MCP server in the client, or restart the client. In Claude
+   Code, run `/mcp` and reconnect the server. Command `uvx` installs the new
+   version on the next launch.
 
 ## Install From Source
 
-Requirements: Git, uv and Python 3.13. The source-install guard remains
-enabled: it refuses to start when the unrelated `telegram-mcp` distribution is
-installed in the same environment.
+Requirements: Git, uv, and Python 3.13. The install guard in module
+`telegram_mcp.install_guard` stays on. It refuses to start the server when a
+registry install of the unrelated `telegram-mcp` distribution is in the same
+environment.
 
 ```sh
 git clone https://github.com/Unique-Divine/jiyuu.git
@@ -212,4 +216,5 @@ Issues and changes are maintained in
 [Unique-Divine/jiyuu](https://github.com/Unique-Divine/jiyuu/issues), under
 `mcp/telegram`. Upstream provenance is retained for future comparisons; imports
 do not imply an upstream security review. The version continues from upstream
-2.0.1; `[tool.jiyuu.upstream]` in `pyproject.toml` records that baseline.
+2.0.1. Table `[tool.jiyuu.upstream]` in file `pyproject.toml` records that
+baseline.
