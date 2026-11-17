@@ -13,6 +13,7 @@ from telegram_mcp.update_check import (
     UpdateNotifier,
     UpdateStatus,
     check_for_update,
+    format_notice,
     is_newer,
 )
 
@@ -283,3 +284,44 @@ def test_notifier_survives_a_raising_check():
 
     assert notifier.status(wait=2.0) is None
     assert notifier.take_notice() is None
+
+
+async def _call_tool(server, name: str):
+    from mcp.types import CallToolRequest, CallToolRequestParams
+
+    handler = server._mcp_server.request_handlers[CallToolRequest]
+    request = CallToolRequest(method="tools/call", params=CallToolRequestParams(name=name))
+    return (await handler(request)).root
+
+
+@pytest.mark.asyncio
+async def test_first_tool_result_carries_the_notice_once():
+    from mcp.server.fastmcp import FastMCP
+
+    from telegram_mcp import runtime
+
+    server = FastMCP("test")
+
+    @server.tool()
+    def ping() -> str:
+        return "pong"
+
+    @server.tool()
+    def fail() -> str:
+        raise ValueError("nope")
+
+    status = UpdateStatus(NAME, "2.0.1", "2.1.0", NOW.isoformat())
+    notifier = UpdateNotifier(lambda: status)
+    notifier.start()
+    notifier.status(wait=2.0)
+    runtime._install_annotation_hook(server, notifier.take_notice)
+
+    failed = await _call_tool(server, "fail")
+    first = await _call_tool(server, "ping")
+    second = await _call_tool(server, "ping")
+
+    assert failed.isError and len(failed.content) == 1
+    assert [block.text for block in first.content] == ["pong", format_notice(status)]
+    assert first.content[0].annotations.audience == ["user"]
+    assert first.content[1].annotations.audience == ["user", "assistant"]
+    assert [block.text for block in second.content] == ["pong"]
