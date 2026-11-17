@@ -1,8 +1,11 @@
 """Installation provenance checks for the Telegram MCP server.
 
-The PyPI distribution name ``telegram-mcp`` is currently occupied by an
-unrelated project. This guard can only protect executions that reach this
-repository's code; it cannot run when a user launches the third-party package.
+This server publishes to PyPI as ``uniquedivine-telegram-mcp``. The older
+distribution name ``telegram-mcp`` is occupied on PyPI by an unrelated project,
+so metadata under that name is trusted only when an installer recorded an
+explicit source checkout. This guard can only protect executions that reach
+this repository's code; it cannot run when a user launches the third-party
+package.
 """
 
 from __future__ import annotations
@@ -13,7 +16,13 @@ from importlib import metadata
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
-DISTRIBUTION_NAME = "telegram-mcp"
+DISTRIBUTION_NAME = "uniquedivine-telegram-mcp"
+"""The PyPI distribution this repository publishes."""
+
+LEGACY_DISTRIBUTION_NAME = "telegram-mcp"
+"""The colliding PyPI name that source checkouts used before the rename."""
+
+SOURCE_DISTRIBUTION_NAMES = (DISTRIBUTION_NAME, LEGACY_DISTRIBUTION_NAME)
 
 
 class UnsafeInstallationError(RuntimeError):
@@ -67,7 +76,7 @@ class DistributionIdentity:
         direct_url = read_text("direct_url.json") if callable(read_text) else ""
 
         return cls(
-            name=value("Name") or getattr(dist, "name", DISTRIBUTION_NAME),
+            name=value("Name") or getattr(dist, "name", LEGACY_DISTRIBUTION_NAME),
             version=value("Version") or dist.version,
             authors=authors,
             maintainers=maintainers,
@@ -88,7 +97,7 @@ def _project_root_declares_distribution_name(path: Path) -> bool:
     except OSError:
         return False
 
-    return f'name = "{DISTRIBUTION_NAME}"' in pyproject_text
+    return any(f'name = "{name}"' in pyproject_text for name in SOURCE_DISTRIBUTION_NAMES)
 
 
 def _resolve_path(path: Path) -> Path:
@@ -181,25 +190,27 @@ def _format_unsafe_installation_message(identity: DistributionIdentity) -> str:
     urls = "; ".join(identity.urls) or "unknown"
 
     return (
-        "Refusing to start: the installed 'telegram-mcp' distribution was not "
-        "installed from an explicit source checkout.\n"
+        f"Refusing to start: the installed {LEGACY_DISTRIBUTION_NAME!r} distribution "
+        "was not installed from an explicit source checkout.\n"
         f"Detected distribution: name={identity.name!r}, version={identity.version!r}, "
         f"authors={authors!r}, maintainers={maintainers!r}, urls={urls!r}.\n"
-        "The 'telegram-mcp' name on PyPI is currently owned by a different project. "
-        "This guard requires a source checkout or installer-recorded direct "
-        "git/file URL. Run this server from a cloned checkout or install a "
-        "trusted repository explicitly with: "
-        'pip install "git+https://github.com/chigwell/telegram-mcp.git"'
+        f"The {LEGACY_DISTRIBUTION_NAME!r} name on PyPI is owned by a different "
+        "project. Remove it from this environment, then run this server from "
+        f"PyPI as {DISTRIBUTION_NAME!r} (for example "
+        f'"uvx {DISTRIBUTION_NAME}@<version>") or from a cloned checkout of '
+        "https://github.com/Unique-Divine/jiyuu."
     )
 
 
-def assert_safe_distribution(distribution_name: str = DISTRIBUTION_NAME) -> None:
-    """Abort when the installed distribution metadata is not this project.
+def assert_safe_distribution(distribution_name: str = LEGACY_DISTRIBUTION_NAME) -> None:
+    """Abort when ``telegram-mcp`` metadata in this environment is not this project.
 
-    Source checkouts that have not been installed as a distribution are allowed:
-    ``uv --directory /path/to/telegram-mcp run main.py`` can run from source
-    without package metadata. If metadata for ``telegram-mcp`` is present, it
-    must come from an explicit git or file install recorded by the installer.
+    Installs of ``uniquedivine-telegram-mcp``, from PyPI or from source, are
+    allowed: this repository owns that name. Source checkouts that have not
+    been installed as a distribution are allowed too:
+    ``uv --directory /path/to/telegram run main.py`` runs without package
+    metadata. If metadata for ``telegram-mcp`` is present, it must come from an
+    explicit git or file install recorded by the installer.
     """
 
     try:

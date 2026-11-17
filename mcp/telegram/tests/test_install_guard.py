@@ -83,7 +83,7 @@ def test_install_guard_rejects_known_pypi_collision_metadata():
     assert "Refusing to start" in message
     assert "0.6.3" in message
     assert "Furkan Kucuk" in message
-    assert "git+https://github.com/chigwell/telegram-mcp.git" in message
+    assert "uvx uniquedivine-telegram-mcp@<version>" in message
 
 
 def test_install_guard_rejects_spoofed_metadata_without_trusted_origin():
@@ -176,5 +176,43 @@ def test_install_guard_allows_fork_distribution_with_direct_url(monkeypatch):
         "distribution",
         lambda _distribution_name: FakeDistribution(),
     )
+
+    install_guard.assert_safe_distribution()
+
+
+def test_install_guard_distribution_name_matches_pyproject():
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+
+    assert f'name = "{install_guard.DISTRIBUTION_NAME}"' in pyproject.read_text(encoding="utf-8")
+
+
+def test_install_guard_accepts_file_install_of_renamed_project_root(tmp_path):
+    (tmp_path / "pyproject.toml").write_text(
+        f'[project]\nname = "{install_guard.DISTRIBUTION_NAME}"\n',
+        encoding="utf-8",
+    )
+    identity = _identity(direct_url=_direct_url(tmp_path.as_uri()))
+
+    assert install_guard._looks_like_explicit_source_install(identity) is True
+
+
+def test_install_guard_allows_registry_install_of_published_distribution(monkeypatch):
+    class PublishedDistribution:
+        version = "2.0.1"
+
+        def __init__(self):
+            self.metadata = Message()
+            self.metadata["Name"] = install_guard.DISTRIBUTION_NAME
+            self.metadata["Version"] = "2.0.1"
+
+        def read_text(self, _filename):
+            return None
+
+    def distribution(name):
+        if name == install_guard.DISTRIBUTION_NAME:
+            return PublishedDistribution()
+        raise metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(install_guard.metadata, "distribution", distribution)
 
     install_guard.assert_safe_distribution()

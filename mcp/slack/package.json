@@ -1,11 +1,12 @@
 {
-  "name": "@jtalk22/slack-mcp",
-  "mcpName": "io.github.jtalk22/slack-mcp-server",
+  "name": "@uniquedivine/mcp-slack",
+  "mcpName": "io.github.unique-divine/mcp-slack",
   "version": "4.4.3",
   "description": "Slack MCP server maintained in Jiyuu",
   "type": "module",
   "main": "src/server.js",
   "bin": {
+    "mcp-slack": "src/cli.js",
     "slack-mcp": "src/cli.js",
     "slack-mcp-server": "src/server.js",
     "slack-mcp-http": "src/server-http.js",
@@ -111,8 +112,7 @@
     "docs/assets/icon-512.png",
     "README.md",
     "LICENSE",
-    "server.json",
-    "smithery.yaml"
+    "server.json"
   ],
   "devDependencies": {
     "playwright": "^1.57.0"
@@ -120,6 +120,21 @@
   "overrides": {
     "ip-address": "^10.1.1"
   },
-  "private": true,
-  "packageManager": "bun@1.4.3"
+  "packageManager": "bun@1.4.3",
+  "private": false,
+  "publishConfig": {
+    "access": "public"
+  },
+  "jiyuu": {
+    "upstream": {
+      "repository": "jtalk22/slack-mcp-server",
+      "package": "@jtalk22/slack-mcp",
+      "version": "4.4.3",
+      "commit": "bc703e9bd1b5bb137b3793c2fbf987b0bce3fc95",
+      "fork": {
+        "repository": "Unique-Divine/slack-mcp-server",
+        "commit": "e68cc989585e8a29291d34fed143e84fef6f1898"
+      }
+    }
+  }
 }

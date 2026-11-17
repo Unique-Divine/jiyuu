@@ -1,0 +1,770 @@
+# Shared monorepo checks. Keep jobs present and gate their steps with changes outputs.
+name: ⚡Tests
+"on":
+  pull_request: null
+  workflow_dispatch: null
+  push:
+    branches:
+      - main
+      - release/*
+permissions:
+  contents: read
+  pull-requests: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.head_ref }}
+  cancel-in-progress: ${{ ! (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/')) }}
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      typescript: ${{ github.event_name == 'workflow_dispatch' || steps.paths.outputs.typescript == 'true' }}
+      tg_sai: ${{ github.event_name == 'workflow_dispatch' || steps.paths.outputs.tg_sai == 'true' }}
+      ts_jiyuu: ${{ github.event_name == 'workflow_dispatch' || steps.paths.outputs.ts_jiyuu == 'true' }}
+      ts_bash: ${{ github.event_name == 'workflow_dispatch' || steps.paths.outputs.ts_bash == 'true' }}
+      mdtoc: ${{ github.event_name == 'workflow_dispatch' || steps.paths.outputs.mdtoc == 'true' }}
+      tmux_watch: ${{ github.event_name == 'workflow_dispatch' || steps.paths.outputs.tmux_watch == 'true' }}
+      gh_rev: ${{ github.event_name == 'workflow_dispatch' || steps.paths.outputs.gh_rev == 'true' }}
+      jiyuu_abi: ${{ github.event_name == 'workflow_dispatch' || steps.paths.outputs.jiyuu_abi == 'true' }}
+      evolve_sqlite: ${{ github.event_name == 'workflow_dispatch' || steps.paths.outputs.evolve_sqlite == 'true' }}
+      discord: ${{ github.event_name == 'workflow_dispatch' || steps.paths.outputs.discord == 'true' }}
+      slack: ${{ github.event_name == 'workflow_dispatch' || steps.paths.outputs.slack == 'true' }}
+      telegram: ${{ github.event_name == 'workflow_dispatch' || steps.paths.outputs.telegram == 'true' }}
+      python_mcp: ${{ github.event_name == 'workflow_dispatch' || steps.paths.outputs.python_mcp == 'true' }}
+      python_tg: ${{ github.event_name == 'workflow_dispatch' || steps.paths.outputs.python_tg == 'true' }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Detect changed projects
+        id: paths
+        uses: dorny/paths-filter@15192bc058cc28a13dbf6cde61f19e18988b7af6
+        with:
+          filters: |
+            typescript:
+            - mdtoc/**
+            - discord-nibiru/**
+            - ts-pkg/bash/**
+            - ts-pkg/jiyuu/**
+            - ts-pkg/tg-sai/**
+            - scripts/github-labels/**
+            - package.json
+            - bun.lock
+            - bun.lockb
+            - tsconfig.json
+            - bunfig.toml
+            - .github/workflows/ci-test.yaml
+            - justfile
+            tg_sai:
+            - ts-pkg/tg-sai/**
+            - package.json
+            - bun.lock
+            - bun.lockb
+            - tsconfig.json
+            - bunfig.toml
+            - .github/workflows/ci-test.yaml
+            - justfile
+            ts_jiyuu:
+            - ts-pkg/jiyuu/**
+            - .github/workflows/ci-test.yaml
+            ts_bash:
+            - ts-pkg/bash/**
+            - .github/workflows/ci-test.yaml
+            mdtoc:
+            - mdtoc/**
+            - package.json
+            - bun.lock
+            - bun.lockb
+            - tsconfig.json
+            - bunfig.toml
+            - .github/workflows/ci-test.yaml
+            - justfile
+            tmux_watch:
+            - tmux-agent-watch/**
+            - Cargo.toml
+            - Cargo.lock
+            - .cargo/**
+            - .github/workflows/ci-test.yaml
+            - justfile
+            evolve_sqlite:
+            - evolve-sqlite/**
+            - Cargo.toml
+            - Cargo.lock
+            - .cargo/**
+            - .github/workflows/ci-test.yaml
+            jiyuu_abi:
+            - jiyuu-abi/**
+            - Cargo.toml
+            - Cargo.lock
+            - .cargo/**
+            - .github/workflows/ci-test.yaml
+            gh_rev:
+            - gh-rev/**
+            - Cargo.toml
+            - Cargo.lock
+            - .cargo/**
+            - .github/workflows/ci-test.yaml
+            - justfile
+            discord:
+            - mcp/discord/**
+            - .github/workflows/ci-test.yaml
+            - justfile
+            slack:
+            - mcp/slack/**
+            - .github/workflows/ci-test.yaml
+            - justfile
+            telegram:
+            - mcp/telegram/**
+            - .github/workflows/ci-test.yaml
+            - justfile
+            python_mcp:
+            - mcp/telegram/**
+            - scripts/python/**
+            - .github/workflows/ci-test.yaml
+            - justfile
+            python_tg:
+            - ts-pkg/tg-sai/**
+            - scripts/python/**
+            - .github/workflows/ci-test.yaml
+            - justfile
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Unaffected project
+        if: needs.changes.outputs.typescript != 'true'
+        run: echo "No relevant changes; check completed successfully."
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        if: needs.changes.outputs.typescript == 'true'
+        with:
+          persist-credentials: false
+      - name: Install bun
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: 1.4.3
+        if: needs.changes.outputs.typescript == 'true'
+      - name: Install TypeScript project dependencies
+        run: |
+          for project in . mdtoc discord-nibiru ts-pkg/bash ts-pkg/jiyuu ts-pkg/tg-sai; do
+            (cd "$project" && bun install --frozen-lockfile)
+          done
+        if: needs.changes.outputs.typescript == 'true'
+      - name: Typecheck TypeScript projects
+        run: bun check
+        if: needs.changes.outputs.typescript == 'true'
+      - name: Test tg-sai
+        working-directory: ts-pkg/tg-sai
+        run: |
+          home="$(mktemp -d)"
+          env -i PATH="$PATH" HOME="$home" TMPDIR="$RUNNER_TEMP" bun test
+        if: needs.changes.outputs.tg_sai == 'true'
+    needs: changes
+  mdtoc-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Unaffected project
+        if: needs.changes.outputs.mdtoc != 'true'
+        run: echo "No relevant changes; check completed successfully."
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        if: needs.changes.outputs.mdtoc == 'true'
+        with:
+          persist-credentials: false
+      - if: needs.changes.outputs.mdtoc == 'true'
+        name: Install bun
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: 1.4.3
+      - if: needs.changes.outputs.mdtoc == 'true'
+        run: |
+          bun install
+        working-directory: mdtoc
+      - if: needs.changes.outputs.mdtoc == 'true'
+        run: |
+          bun test
+        working-directory: mdtoc
+    needs: changes
+  tmux-agent-watch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Unaffected project
+        if: needs.changes.outputs.tmux_watch != 'true'
+        run: echo "No relevant changes; check completed successfully."
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        if: needs.changes.outputs.tmux_watch == 'true'
+        with:
+          persist-credentials: false
+      - if: needs.changes.outputs.tmux_watch == 'true'
+        name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+      - if: needs.changes.outputs.tmux_watch == 'true'
+        name: Install just
+        uses: extractions/setup-just@v3
+      - if: needs.changes.outputs.tmux_watch == 'true'
+        name: Install tmux
+        run: sudo apt-get install --yes --no-install-recommends tmux
+      - if: needs.changes.outputs.tmux_watch == 'true'
+        name: Lint
+        run: just --justfile tmux-agent-watch/justfile lint
+      - if: needs.changes.outputs.tmux_watch == 'true'
+        name: Test
+        run: just --justfile tmux-agent-watch/justfile test
+    needs: changes
+  evolve-sqlite:
+    runs-on: ubuntu-latest
+    steps:
+      - if: needs.changes.outputs.evolve_sqlite != 'true'
+        run: echo "No relevant changes; check completed successfully."
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        if: needs.changes.outputs.evolve_sqlite == 'true'
+        with:
+          persist-credentials: false
+      - if: needs.changes.outputs.evolve_sqlite == 'true'
+        name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+      - uses: extractions/setup-just@v3
+        if: needs.changes.outputs.evolve_sqlite == 'true'
+      - if: needs.changes.outputs.evolve_sqlite == 'true'
+        run: just --justfile evolve-sqlite/justfile check
+    needs: changes
+  jiyuu-abi:
+    runs-on: ubuntu-latest
+    steps:
+      - if: needs.changes.outputs.jiyuu_abi != 'true'
+        run: echo "No relevant changes; check completed successfully."
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        if: needs.changes.outputs.jiyuu_abi == 'true'
+        with:
+          persist-credentials: false
+      - if: needs.changes.outputs.jiyuu_abi == 'true'
+        name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+      - uses: extractions/setup-just@v3
+        if: needs.changes.outputs.jiyuu_abi == 'true'
+      - if: needs.changes.outputs.jiyuu_abi == 'true'
+        run: just --justfile jiyuu-abi/justfile check
+    needs: changes
+  gh-rev:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Unaffected project
+        if: needs.changes.outputs.gh_rev != 'true'
+        run: echo "No relevant changes; check completed successfully."
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        if: needs.changes.outputs.gh_rev == 'true'
+        with:
+          persist-credentials: false
+      - if: needs.changes.outputs.gh_rev == 'true'
+        name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+      - if: needs.changes.outputs.gh_rev == 'true'
+        name: Install just
+        uses: extractions/setup-just@v3
+      - if: needs.changes.outputs.gh_rev == 'true'
+        name: Check
+        run: just --justfile gh-rev/justfile check
+    needs: changes
+  discord:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mcp/discord
+    steps:
+      - name: Unaffected project
+        if: needs.changes.outputs.discord != 'true'
+        run: echo "No relevant changes; check completed successfully."
+        working-directory: ${{ runner.temp }}
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        if: needs.changes.outputs.discord == 'true'
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.3
+        if: needs.changes.outputs.discord == 'true'
+      - name: Install locked dependencies
+        run: bun install --frozen-lockfile
+        if: needs.changes.outputs.discord == 'true'
+      - name: Run bun:test suite
+        run: bun test --isolate ./src
+        if: needs.changes.outputs.discord == 'true'
+      - name: Typecheck
+        run: bun check
+        if: needs.changes.outputs.discord == 'true'
+      - name: Check entrypoint imports
+        run:
+          bun build --target bun --packages external ./src/index.ts ./src/app.ts
+          --outdir ./node_modules/.cache/mcp-check
+        if: needs.changes.outputs.discord == 'true'
+    needs: changes
+  slack:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mcp/slack
+    steps:
+      - name: Unaffected project
+        if: needs.changes.outputs.slack != 'true'
+        run: echo "No relevant changes; check completed successfully."
+        working-directory: ${{ runner.temp }}
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        if: needs.changes.outputs.slack == 'true'
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.3
+        if: needs.changes.outputs.slack == 'true'
+      - name: Install locked dependencies
+        run: bun install --frozen-lockfile
+        if: needs.changes.outputs.slack == 'true'
+      - name: Run bun:test suite
+        run: bun test ./test
+        if: needs.changes.outputs.slack == 'true'
+      - name: Check entrypoint imports
+        run:
+          bun build --target bun --packages external ./src/cli.js ./src/server.js ./src/server-http.js ./src/web-server.js
+          --outdir ./node_modules/.cache/mcp-check
+        if: needs.changes.outputs.slack == 'true'
+    needs: changes
+  telegram:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mcp/telegram
+    steps:
+      - name: Unaffected project
+        if: needs.changes.outputs.telegram != 'true'
+        run: echo "No relevant changes; check completed successfully."
+        working-directory: ${{ runner.temp }}
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        if: needs.changes.outputs.telegram == 'true'
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v6
+        if: needs.changes.outputs.telegram == 'true'
+      - name: Install locked environment
+        run: uv sync --frozen --group dev
+        if: needs.changes.outputs.telegram == 'true'
+      - name: Test
+        run: uv run --frozen pytest -q
+        if: needs.changes.outputs.telegram == 'true'
+      - name: Check formatting
+        run: uv run --frozen black --check main.py sanitize.py session_string_generator.py telegram_mcp tests
+        if: needs.changes.outputs.telegram == 'true'
+    needs: changes
+  python-typecheck:
+    name: Python types / ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Telegram MCP
+            path: mcp/telegram
+            artifact: telegram-mcp
+            report_recipe: typecheck-report
+            filter: python_mcp
+          - name: tg-sai Python
+            path: ts-pkg/tg-sai
+            artifact: tg-sai-python
+            report_recipe: py-typecheck-report
+            filter: python_tg
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+        if: needs.changes.outputs[matrix.filter] == 'true'
+      - name: Unaffected project
+        if: needs.changes.outputs[matrix.filter] != 'true'
+        run: echo "No relevant Python project changes; check completed successfully."
+      - name: Set up uv and managed Python
+        if: needs.changes.outputs[matrix.filter] == 'true'
+        uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff
+        with:
+          python-version: "3.13"
+      - name: Set up Just
+        if: needs.changes.outputs[matrix.filter] == 'true'
+        uses: extractions/setup-just@f8a3cce218d9f83db3a2ecd90e41ac3de6cdfd9b
+      - name: Install locked project environment
+        if: needs.changes.outputs[matrix.filter] == 'true'
+        working-directory: ${{ matrix.path }}
+        run: uv sync --frozen --group dev
+      - name: Verify enforcement, reporting, and file discovery
+        if: needs.changes.outputs[matrix.filter] == 'true'
+        working-directory: ${{ matrix.path }}
+        run: uv run --frozen --no-sync python -m unittest discover -s "$GITHUB_WORKSPACE/scripts/python" -p 'test_*.py' -v
+      - name: Enforce and report type diagnostics
+        id: report
+        if: needs.changes.outputs[matrix.filter] == 'true'
+        working-directory: ${{ matrix.path }}
+        env:
+          REPORT_RECIPE: ${{ matrix.report_recipe }}
+          REPORT_NAME: ${{ matrix.artifact }}
+        run: just "$REPORT_RECIPE" "$RUNNER_TEMP/python-types/$REPORT_NAME" enforce
+      - name: Upload native diagnostics and report
+        if: always() && steps.report.outcome != 'skipped'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: python-types-${{ matrix.artifact }}
+          path: ${{ runner.temp }}/python-types/${{ matrix.artifact }}
+          if-no-files-found: error
+    needs: changes
+  # Publish jobs, one per distributable package. Each runs only on a push to
+  # main after the tests pass, and only when its package changed and npm
+  # doesn't have its version yet. Releases use npm trusted publishing (OIDC):
+  # the package trusts this workflow file (ci-test.yaml), so no npm token is
+  # stored. To add a package: copy this block, register ci-test.yaml as the
+  # package's trusted publisher, then set its PUBLISH_* repository variable.
+  publish-tg-sai:
+    needs:
+      - changes
+      - test
+    # vars.PUBLISH_TG_SAI turns publishing on once npm trusts this workflow.
+    if: vars.PUBLISH_TG_SAI == 'true' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main' && needs.changes.outputs.tg_sai == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # npm exchanges this OIDC token for a short-lived publish credential.
+      id-token: write
+    concurrency:
+      group: publish-tg-sai
+      cancel-in-progress: false
+    defaults:
+      run:
+        working-directory: ts-pkg/tg-sai
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Install bun
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: 1.4.3
+      # Trusted publishing needs Node 22.14+ and npm 11.5.1+ (npm 12.2.0 below).
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - name: Check whether this version is already on npm
+        id: version
+        run: |
+          name="$(jq -r .name package.json)"
+          version="$(jq -r .version package.json)"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          if npx --yes npm@12.2.0 view "${name}@${version}" version >/dev/null 2>&1; then
+            echo "${name}@${version} is already on npm; nothing to publish."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Install dependencies
+        if: steps.version.outputs.publish == 'true'
+        run: bun install --frozen-lockfile
+      - name: Lint the package
+        if: steps.version.outputs.publish == 'true'
+        run: bunx publint
+      # bun publish has no OIDC support, so pack with Bun and publish the
+      # tarball with npm, which handles the trusted-publishing exchange.
+      - name: Pack
+        if: steps.version.outputs.publish == 'true'
+        run: bun pm pack
+      - name: Publish
+        if: steps.version.outputs.publish == 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: npx --yes npm@12.2.0 publish "./uniquedivine-tg-sai-${VERSION}.tgz" --access public
+  publish-mcp-discord:
+    needs:
+      - changes
+      - discord
+    # vars.PUBLISH_MCP_DISCORD turns publishing on once npm trusts this workflow.
+    if: vars.PUBLISH_MCP_DISCORD == 'true' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main' && needs.changes.outputs.discord == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # npm exchanges this OIDC token for a short-lived publish credential.
+      id-token: write
+    concurrency:
+      group: publish-mcp-discord
+      cancel-in-progress: false
+    defaults:
+      run:
+        working-directory: mcp/discord
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Install bun
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: 1.4.3
+      # Trusted publishing needs Node 22.14+ and npm 11.5.1+ (npm 12.2.0 below).
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - name: Check whether this version is already on npm
+        id: version
+        run: |
+          name="$(jq -r .name package.json)"
+          version="$(jq -r .version package.json)"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          if npx --yes npm@12.2.0 view "${name}@${version}" version >/dev/null 2>&1; then
+            echo "${name}@${version} is already on npm; nothing to publish."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Install dependencies
+        if: steps.version.outputs.publish == 'true'
+        run: bun install --frozen-lockfile
+      - name: Lint the package
+        if: steps.version.outputs.publish == 'true'
+        run: bunx publint
+      # bun publish has no OIDC support, so pack with Bun and publish the
+      # tarball with npm, which handles the trusted-publishing exchange.
+      - name: Pack
+        if: steps.version.outputs.publish == 'true'
+        run: bun pm pack
+      - name: Publish
+        if: steps.version.outputs.publish == 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: npx --yes npm@12.2.0 publish "./uniquedivine-mcp-discord-${VERSION}.tgz" --access public
+  publish-mcp-slack:
+    needs:
+      - changes
+      - slack
+    # vars.PUBLISH_MCP_SLACK turns publishing on once npm trusts this workflow.
+    if: vars.PUBLISH_MCP_SLACK == 'true' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main' && needs.changes.outputs.slack == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # npm exchanges this OIDC token for a short-lived publish credential.
+      id-token: write
+    concurrency:
+      group: publish-mcp-slack
+      cancel-in-progress: false
+    defaults:
+      run:
+        working-directory: mcp/slack
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Install bun
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: 1.4.3
+      # Trusted publishing needs Node 22.14+ and npm 11.5.1+ (npm 12.2.0 below).
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - name: Check whether this version is already on npm
+        id: version
+        run: |
+          name="$(jq -r .name package.json)"
+          version="$(jq -r .version package.json)"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          if npx --yes npm@12.2.0 view "${name}@${version}" version >/dev/null 2>&1; then
+            echo "${name}@${version} is already on npm; nothing to publish."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Install dependencies
+        if: steps.version.outputs.publish == 'true'
+        run: bun install --frozen-lockfile
+      - name: Lint the package
+        if: steps.version.outputs.publish == 'true'
+        run: bunx publint
+      # bun publish has no OIDC support, so pack with Bun and publish the
+      # tarball with npm, which handles the trusted-publishing exchange.
+      - name: Pack
+        if: steps.version.outputs.publish == 'true'
+        run: bun pm pack
+      - name: Publish
+        if: steps.version.outputs.publish == 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: npx --yes npm@12.2.0 publish "./uniquedivine-mcp-slack-${VERSION}.tgz" --access public
+  publish-telegram-mcp:
+    needs:
+      - changes
+      - telegram
+      - python-typecheck
+    # vars.PUBLISH_TELEGRAM_MCP turns publishing on once PyPI trusts this workflow.
+    if: vars.PUBLISH_TELEGRAM_MCP == 'true' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main' && needs.changes.outputs.telegram == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # PyPI exchanges this OIDC token for a short-lived upload token.
+      id-token: write
+    concurrency:
+      group: publish-telegram-mcp
+      cancel-in-progress: false
+    defaults:
+      run:
+        working-directory: mcp/telegram
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Set up uv
+        uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff
+        with:
+          python-version: "3.13"
+      - name: Check whether this version is already on PyPI
+        id: version
+        run: |
+          read -r name version < <(uv run --no-project python -c 'import tomllib; p = tomllib.load(open("pyproject.toml", "rb"))["project"]; print(p["name"], p["version"])')
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          status="$(curl --silent --output /dev/null --write-out '%{http_code}' "https://pypi.org/pypi/${name}/${version}/json")"
+          case "$status" in
+            200)
+              echo "${name} ${version} is already on PyPI; nothing to publish."
+              echo "publish=false" >> "$GITHUB_OUTPUT"
+              ;;
+            404)
+              echo "publish=true" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "::error::PyPI returned HTTP ${status} for ${name} ${version}."
+              exit 1
+              ;;
+          esac
+      - name: Build sdist and wheel
+        if: steps.version.outputs.publish == 'true'
+        run: uv build --out-dir dist
+      - name: Publish
+        if: steps.version.outputs.publish == 'true'
+        run: uv publish --trusted-publishing always dist/*
+  publish-jiyuu:
+    needs:
+      - changes
+      - test
+    # vars.PUBLISH_JIYUU turns publishing on once npm trusts this workflow.
+    if: vars.PUBLISH_JIYUU == 'true' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main' && needs.changes.outputs.ts_jiyuu == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # npm exchanges this OIDC token for a short-lived publish credential.
+      id-token: write
+    concurrency:
+      group: publish-jiyuu
+      cancel-in-progress: false
+    defaults:
+      run:
+        working-directory: ts-pkg/jiyuu
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Install bun
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: 1.4.3
+      # Trusted publishing needs Node 22.14+ and npm 11.5.1+ (npm 12.2.0 below).
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - name: Check whether this version is already on npm
+        id: version
+        run: |
+          name="$(jq -r .name package.json)"
+          version="$(jq -r .version package.json)"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          if npx --yes npm@12.2.0 view "${name}@${version}" version >/dev/null 2>&1; then
+            echo "${name}@${version} is already on npm; nothing to publish."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Install dependencies
+        if: steps.version.outputs.publish == 'true'
+        run: bun install --frozen-lockfile
+      - name: Lint the package
+        if: steps.version.outputs.publish == 'true'
+        run: bunx publint
+      # bun publish has no OIDC support, so pack with Bun and publish the
+      # tarball with npm, which handles the trusted-publishing exchange.
+      - name: Pack
+        if: steps.version.outputs.publish == 'true'
+        run: bun pm pack
+      - name: Publish
+        if: steps.version.outputs.publish == 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: npx --yes npm@12.2.0 publish "./uniquedivine-jiyuu-${VERSION}.tgz" --access public
+  publish-bash:
+    needs:
+      - changes
+      - test
+    # vars.PUBLISH_BASH turns publishing on once npm trusts this workflow.
+    if: vars.PUBLISH_BASH == 'true' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main' && needs.changes.outputs.ts_bash == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # npm exchanges this OIDC token for a short-lived publish credential.
+      id-token: write
+    concurrency:
+      group: publish-bash
+      cancel-in-progress: false
+    defaults:
+      run:
+        working-directory: ts-pkg/bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Install bun
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: 1.4.3
+      # Trusted publishing needs Node 22.14+ and npm 11.5.1+ (npm 12.2.0 below).
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - name: Check whether this version is already on npm
+        id: version
+        run: |
+          name="$(jq -r .name package.json)"
+          version="$(jq -r .version package.json)"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          if npx --yes npm@12.2.0 view "${name}@${version}" version >/dev/null 2>&1; then
+            echo "${name}@${version} is already on npm; nothing to publish."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Install dependencies
+        if: steps.version.outputs.publish == 'true'
+        run: bun install --frozen-lockfile
+      - name: Lint the package
+        if: steps.version.outputs.publish == 'true'
+        run: bunx publint
+      # bun publish has no OIDC support, so pack with Bun and publish the
+      # tarball with npm, which handles the trusted-publishing exchange.
+      - name: Pack
+        if: steps.version.outputs.publish == 'true'
+        run: bun pm pack
+      - name: Publish
+        if: steps.version.outputs.publish == 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: npx --yes npm@12.2.0 publish "./uniquedivine-bash-${VERSION}.tgz" --access public

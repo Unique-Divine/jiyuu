@@ -11,9 +11,9 @@ If first-run setup is failing, validate command resolution in a clean directory:
 ```bash
 tmpdir="$(mktemp -d)"
 cd "$tmpdir"
-npx -y @jtalk22/slack-mcp --version
-npx -y @jtalk22/slack-mcp --help
-npx -y @jtalk22/slack-mcp --doctor
+bunx @uniquedivine/mcp-slack --version
+bunx @uniquedivine/mcp-slack --help
+bunx @uniquedivine/mcp-slack --doctor
 ```
 
 Expected:
@@ -88,10 +88,10 @@ slack_list_conversations limit=50
 slack_refresh_tokens
 
 # Option 2: Package setup wizard
-npx -y @jtalk22/slack-mcp --setup
+bunx @uniquedivine/mcp-slack --setup
 
 # Option 3: Diagnostics check
-npx -y @jtalk22/slack-mcp --doctor
+bunx @uniquedivine/mcp-slack --doctor
 
 # Option 4: Repo CLI
 npm run tokens:auto
@@ -119,11 +119,10 @@ cat > ~/Library/LaunchAgents/com.slack-web-api.plist << 'EOF'
     <string>com.slack-web-api</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/opt/homebrew/bin/node</string>
-        <string>/Users/YOUR_USERNAME/slack-mcp-server/src/web-server.js</string>
+        <string>/Users/YOUR_USERNAME/.bun/bin/bunx</string>
+        <string>@uniquedivine/mcp-slack@4.4.3</string>
+        <string>web</string>
     </array>
-    <key>WorkingDirectory</key>
-    <string>/Users/YOUR_USERNAME/slack-mcp-server</string>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
@@ -171,7 +170,7 @@ cat /tmp/slack-web-api.error.log
 
 ### Hosted HTTP `/mcp` Returns 503 or 401
 
-If you run `node src/server-http.js`, `/mcp` is protected by default.
+If you run `bun src/server-http.js`, `/mcp` is protected by default.
 
 `503 http_auth_token_missing` means you did not set:
 
@@ -193,7 +192,7 @@ curl http://localhost:3000/mcp \
 For local-only testing (not remote exposure), you can opt out:
 
 ```bash
-SLACK_MCP_HTTP_INSECURE=1 node src/server-http.js
+SLACK_MCP_HTTP_INSECURE=1 bun src/server-http.js
 ```
 
 ---
@@ -220,9 +219,9 @@ SLACK_MCP_HTTP_INSECURE=1 node src/server-http.js
    cat ~/Library/Logs/Claude/mcp-server-slack.log
    ```
 
-4. **Verify node path:**
+4. **Verify the Bun path:**
    ```bash
-   which node
+   which bunx
    # Use this full path in config
    ```
 
@@ -234,7 +233,7 @@ tail -50 ~/Library/Logs/Claude/mcp-server-slack.log
 ```
 
 **Common causes:**
-- Node.js not found (use full path like `/opt/homebrew/bin/node`)
+- Bun not found (use the full path, such as `~/.bun/bin/bunx` or `/opt/homebrew/bin/bunx`)
 - Missing tokens in env section
 - Invalid JSON syntax in config
 
@@ -280,8 +279,8 @@ Browser tokens (xoxc/xoxd) provide the same access you have in Slack's web inter
 
 2. Test manually:
    ```bash
-   cd ~/slack-mcp-server
-   node src/server.js  # Should say "running"
+   cd jiyuu/mcp/slack
+   bun src/server.js  # Should say "running"
    ```
 
 3. Verify tokens:

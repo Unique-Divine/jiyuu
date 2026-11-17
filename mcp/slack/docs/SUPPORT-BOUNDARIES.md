@@ -26,7 +26,7 @@ This document sets expectations for issue triage, support scope, and rollout saf
 
 Include the following in every issue:
 
-1. Version (`npm view @jtalk22/slack-mcp version` output).
+1. Version (`npm view @uniquedivine/mcp-slack version` output).
 2. Runtime mode (`stdio`, `web`, `http`, or Worker/Smithery).
 3. OS and Node version.
 4. Minimal reproduction steps and exact error text.

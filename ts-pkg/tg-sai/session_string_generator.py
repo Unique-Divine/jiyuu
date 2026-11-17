@@ -157,17 +157,52 @@ def _seconds_until_expiry(qr: ExpiringToken) -> float:
     return max(1.0, remaining - 1.0)
 
 
+async def _countdown(qr: ExpiringToken) -> None:
+    """Rewrite one terminal line with the seconds left on the current code."""
+    while True:
+        left = int(_seconds_until_expiry(qr))
+        sys.stdout.write(f"\r  Code expires in {left:2d}s ")
+        sys.stdout.flush()
+        await asyncio.sleep(1)
+
+
+async def _wait_for_scan(qr: QRToken) -> None:
+    """Wait for the scan, showing a live countdown when stdout is a terminal."""
+    if not sys.stdout.isatty():
+        await qr.wait(timeout=_seconds_until_expiry(qr))
+        return
+    ticker = asyncio.create_task(_countdown(qr))
+    try:
+        await qr.wait(timeout=_seconds_until_expiry(qr))
+    finally:
+        ticker.cancel()
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+
+
 async def _qr_login(client: QRClient) -> None:
     qr = await client.qr_login()
     _render_qr(qr)
 
     for _ in range(_QR_MAX_REFRESHES):
         try:
-            await qr.wait(timeout=_seconds_until_expiry(qr))
+            await _wait_for_scan(qr)
             return
         except asyncio.TimeoutError:
             await qr.recreate()
             print("\nQR code expired, here is a fresh one.")
+            _render_qr(qr)
+        except errors.AuthTokenExpiredError:
+            # Telegram moves a QR login to the account's home data center
+            # after the scan. When that move outlasts the code, the import
+            # fails here. The client is now on the right data center, so a
+            # second scan completes without another move.
+            await qr.recreate()
+            print(
+                "\nYour scan worked, but Telegram moved the login to your "
+                "account's home data center and the code expired during the "
+                "move. Scan this fresh code; it should go through now."
+            )
             _render_qr(qr)
         except errors.SessionPasswordNeededError:
             pw = getpass.getpass(
@@ -284,6 +319,18 @@ async def _main() -> None:
                 await _qr_login(client)
             else:
                 await _phone_login(client)
+
+        # A login that stops early (an unfinished 2FA step, a dropped QR
+        # approval) leaves an auth key Telegram never signed in. Saving it
+        # gives tg-sai a profile that fails later with AUTH_KEY_UNREGISTERED,
+        # so check before writing anything.
+        if not await client.is_user_authorized():
+            print(
+                "\nLogin did not complete: Telegram has not authorized this "
+                "session. Nothing was saved. Run the login again."
+            )
+            await client.disconnect()
+            sys.exit(1)
 
         session_string = StringSession.save(session)
 

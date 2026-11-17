@@ -1,4 +1,5 @@
-# Modified by Unique Divine in 2026: connection recovery and participant pagination fixes.
+# Modified by Unique Divine in 2026: connection recovery, participant pagination fixes,
+# mcp_info instructions and the update notice.
 import argparse
 import importlib
 import os
@@ -11,7 +12,7 @@ import logging
 import mimetypes
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from typing import Awaitable, List, Dict, Optional, Union, Any, Protocol
+from typing import Awaitable, Callable, List, Dict, Optional, Union, Any, Protocol
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
@@ -122,7 +123,14 @@ if not _api_id or not _api_hash:
 TELEGRAM_API_ID = int(_api_id)
 TELEGRAM_API_HASH: str = _api_hash
 
-mcp = FastMCP("telegram")
+mcp = FastMCP(
+    "telegram",
+    instructions=(
+        "Telegram user-account tools. To learn this server's version, where it "
+        "runs from, whether an update exists, or which accounts it serves, call "
+        "mcp_info. Never read MCP client config files for this; they hold secrets."
+    ),
+)
 
 # Annotate all tool results with audience=["user"] so MCP clients know
 # the content is user-generated data, not instructions for the model.
@@ -131,10 +139,31 @@ mcp = FastMCP("telegram")
 _USER_AUDIENCE = Annotations(audience=["user"])
 
 
-def _install_annotation_hook() -> None:
+# The update notice is meant for the model to relay, so it's not user-only.
+_NOTICE_AUDIENCE = Annotations(audience=["user", "assistant"])
+
+
+def _take_update_notice() -> Optional[str]:
+    try:
+        from telegram_mcp.server_info import update_notifier
+
+        return update_notifier().take_notice()
+    except Exception:
+        return None
+
+
+def _install_annotation_hook(
+    server: FastMCP = mcp,
+    take_notice: Callable[[], Optional[str]] = _take_update_notice,
+) -> None:
+    """Annotate tool results and append the one-time update notice.
+
+    The notice rides on the first successful tool result after the background
+    update check finds a newer release; see ``telegram_mcp.update_check``.
+    """
     from mcp.types import CallToolRequest, ServerResult, CallToolResult
 
-    original_handler = mcp._mcp_server.request_handlers[CallToolRequest]
+    original_handler = server._mcp_server.request_handlers[CallToolRequest]
 
     async def annotated_handler(req):
         response = await original_handler(req)
@@ -149,9 +178,16 @@ def _install_annotation_hook() -> None:
                     )
                     for block in content
                 ]
+            if not response.root.isError:
+                notice = take_notice()
+                if notice:
+                    response.root.content = [
+                        *response.root.content,
+                        TextContent(type="text", text=notice, annotations=_NOTICE_AUDIENCE),
+                    ]
         return response
 
-    mcp._mcp_server.request_handlers[CallToolRequest] = annotated_handler
+    server._mcp_server.request_handlers[CallToolRequest] = annotated_handler
 
 
 _install_annotation_hook()

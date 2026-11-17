@@ -271,8 +271,9 @@ describe("getTelegramEnv", () => {
     await withSources(
       { name: "custody", complete: true, password: "custody-2fa" },
       async (env) => {
+        // With no profile named, TELEGRAM_* applies; a named profile would win.
         expect(
-          await getTelegramEnv("custody", {
+          await getTelegramEnv(undefined, {
             ...env,
             TELEGRAM_API_ID: "999",
             TELEGRAM_API_HASH: "env-hash",

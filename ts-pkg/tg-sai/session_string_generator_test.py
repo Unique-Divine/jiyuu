@@ -92,6 +92,35 @@ def test_qr_login_refreshes_after_expiry_then_succeeds():
     assert client.disconnected is False
 
 
+def test_qr_login_recovers_when_token_expires_during_dc_move(capsys):
+    qr = _FakeQR(
+        [session_string_generator.errors.AuthTokenExpiredError(request=None), None]
+    )
+    client = _FakeClient(qr)
+
+    asyncio.run(session_string_generator._qr_login(client))
+
+    assert qr.recreate_calls == 1
+    assert client.disconnected is False
+    out = capsys.readouterr().out
+    assert "home data center" in out
+    assert "Scan this fresh code" in out
+
+
+def test_countdown_shows_seconds_left(monkeypatch, capsys):
+    qr = _FakeQR([])
+    qr.expires = datetime.now(timezone.utc) + timedelta(seconds=20)
+
+    async def run_briefly():
+        task = asyncio.create_task(session_string_generator._countdown(qr))
+        await asyncio.sleep(0)
+        task.cancel()
+
+    asyncio.run(run_briefly())
+
+    assert "Code expires in" in capsys.readouterr().out
+
+
 def test_qr_login_gives_up_after_max_refreshes(monkeypatch):
     monkeypatch.setattr(session_string_generator, "_QR_MAX_REFRESHES", 3)
     qr = _FakeQR([asyncio.TimeoutError()] * 3)
@@ -354,3 +383,40 @@ def test_main_disconnects_when_authentication_fails(monkeypatch):
     with pytest.raises(SystemExit):
         session_string_generator.main()
     assert disconnected == [True]
+
+
+class _NeverAuthorizedClient(_AuthorizedClient):
+    """A client whose login returned but Telegram never authorized it."""
+
+    async def is_user_authorized(self):
+        return False
+
+
+def test_unauthorized_login_saves_nothing(tmp_path, monkeypatch, capsys):
+    output = tmp_path / "session.txt"
+    monkeypatch.setenv("TELEGRAM_API_ID", "123")
+    monkeypatch.setenv("TELEGRAM_API_HASH", _FAKE_API_HASH)
+    monkeypatch.setattr(
+        "sys.argv",
+        ["session_string_generator.py", "--qr", "--session-output", str(output)],
+    )
+    monkeypatch.setattr(
+        session_string_generator, "TelegramClient", _NeverAuthorizedClient
+    )
+
+    async def fake_qr_login(_client):
+        return None
+
+    monkeypatch.setattr(session_string_generator, "_qr_login", fake_qr_login)
+    monkeypatch.setattr(
+        session_string_generator.StringSession,
+        "save",
+        staticmethod(lambda _session: _FAKE_SESSION),
+    )
+
+    with pytest.raises(SystemExit) as exit_info:
+        session_string_generator.main()
+
+    assert exit_info.value.code == 1
+    assert not output.exists()
+    assert "Login did not complete" in capsys.readouterr().out

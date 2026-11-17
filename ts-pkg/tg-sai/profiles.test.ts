@@ -517,16 +517,29 @@ describe("resolveTelegramCredentialSource", () => {
         userId: 222,
       })
 
-      // TELEGRAM_* wins over the selected profile and takes none of its
-      // password, name, or userId.
-      expect(
-        await resolveTelegramCredentialSource("custody", {
-          ...env,
-          TELEGRAM_API_ID: "999",
-          TELEGRAM_API_HASH: "env-hash",
-          TELEGRAM_SESSION_STRING: "env-session",
-        }),
-      ).toEqual({
+      // A named profile wins over TELEGRAM_*, so a stale exported session
+      // can't replace the account the caller asked for.
+      const withEnv = {
+        ...env,
+        TELEGRAM_API_ID: "999",
+        TELEGRAM_API_HASH: "env-hash",
+        TELEGRAM_SESSION_STRING: "env-session",
+      }
+      expect(await resolveTelegramCredentialSource("custody", withEnv)).toEqual({
+        credentials: {
+          apiId: 456,
+          apiHash: "custody-hash",
+          sessionString: "custody-session",
+        },
+        source: "profile",
+        password: { kind: "value", value: "custody-2fa" },
+        profileName: "custody",
+        userId: 222,
+      })
+
+      // With no profile named, TELEGRAM_* still applies and takes none of
+      // the profile's password, name, or userId.
+      expect(await resolveTelegramCredentialSource(undefined, withEnv)).toEqual({
         credentials: {
           apiId: 999,
           apiHash: "env-hash",

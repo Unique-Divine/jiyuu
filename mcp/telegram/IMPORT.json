@@ -11,5 +11,5 @@
     "claude_desktop_config.json"
   ],
   "license": "Apache-2.0",
-  "localModifications": "Connection recovery, participant pagination and regression tests; Jiyuu documentation and source metadata."
+  "localModifications": "Connection recovery, participant pagination and regression tests; Jiyuu documentation and source metadata. Published to PyPI from Jiyuu CI as uniquedivine-telegram-mcp; the source-install guard now checks only the colliding telegram-mcp name."
 }

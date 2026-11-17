@@ -1,9 +1,18 @@
 {
   "name": "@uniquedivine/tg-sai",
-  "version": "0.3.0",
+  "version": "0.3.2",
   "type": "module",
   "private": false,
   "description": "Sai Telegram admin audit and bootstrap CLI",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Unique-Divine/jiyuu.git",
+    "directory": "ts-pkg/tg-sai"
+  },
+  "homepage": "https://github.com/Unique-Divine/jiyuu/tree/main/ts-pkg/tg-sai#readme",
+  "bugs": {
+    "url": "https://github.com/Unique-Divine/jiyuu/issues"
+  },
   "engines": {
     "bun": ">=1.2.0"
   },
@@ -43,9 +52,10 @@
     "typescript": "^6.0.3"
   },
   "dependencies": {
-    "@mtcute/bun": "^0.30.1",
-    "@mtcute/convert": "^0.30.1",
-    "@mtcute/wasm": "^0.29.0",
+    "@mtcute/bun": "0.30.1",
+    "@mtcute/convert": "0.30.1",
+    "@mtcute/core": "0.30.1",
+    "@mtcute/wasm": "0.29.0",
     "commander": "^15.0.0"
   }
 }
