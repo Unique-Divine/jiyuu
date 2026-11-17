@@ -4,7 +4,9 @@ import { z } from "zod";
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
+  type CallToolRequest,
 } from "@modelcontextprotocol/sdk/types.js";
+import { fileURLToPath } from "node:url";
 import { toolList } from './toolList.js';
 import {
   createToolContext,
@@ -54,6 +56,12 @@ import {
 } from './tools/tools.js';
 import { MCPTransport } from './transport.js';
 import { info, error } from './logger.js';
+import {
+  JiyuuMcpInfo,
+  MCP_INFO_INSTRUCTIONS,
+  MCP_INFO_TOOL,
+  withUpdateNotice,
+} from './jiyuuMcpInfo.js';
 
 const CLIENT_STATE_LOG_INTERVAL_MS = 5 * 60 * 1000; // was 10_000
 
@@ -64,17 +72,23 @@ export class DiscordMCPServer {
 
   constructor(
     private client: Client, 
-    private transport: MCPTransport
+    private transport: MCPTransport,
+    private mcpInfo: JiyuuMcpInfo = new JiyuuMcpInfo(
+      "discord",
+      fileURLToPath(new URL("..", import.meta.url)),
+      ["DISCORD_"],
+    ),
   ) {
     this.server = new Server(
       {
         name: "MCP-Discord",
-        version: "1.0.0"
+        version: mcpInfo.identity.version
       },
       {
         capabilities: {
           tools: {}
-        }
+        },
+        instructions: MCP_INFO_INSTRUCTIONS
       }
     );
 
@@ -86,12 +100,21 @@ export class DiscordMCPServer {
     // Set up the tool list
     this.server.setRequestHandler(ListToolsRequestSchema, async () => {
       return {
-        tools: toolList
+        tools: [...toolList, MCP_INFO_TOOL]
       };
     });
 
-    // Handle tool execution requests
+    // Handle tool execution requests. The first successful result after the
+    // background update check finds a newer release carries a one-line notice.
     this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
+      const result = request.params.name === MCP_INFO_TOOL.name
+        ? await this.mcpInfo.callTool()
+        : await this.callTool(request);
+      return withUpdateNotice(result, this.mcpInfo.notifier);
+    });
+  }
+
+  private async callTool(request: CallToolRequest): Promise<any> {
       const { name, arguments: args } = request.params;
 
       try {
@@ -317,7 +340,6 @@ export class DiscordMCPServer {
           isError: true
         };
       }
-    });
   }
 
   private logClientState(context: string) {
@@ -332,6 +354,7 @@ export class DiscordMCPServer {
   }
 
   async start() {
+    this.mcpInfo.notifier.start();
     // Add client to server context so transport can access it
     (this.server as any)._context = { client: this.client };
     (this.server as any).client = this.client;

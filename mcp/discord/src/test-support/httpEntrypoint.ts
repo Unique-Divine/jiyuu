@@ -25,7 +25,8 @@ function freePort(): number {
 /**
  * Start an entrypoint with `--transport http` on a free port, no Discord
  * token and a minimal environment, so no secrets reach the child and it
- * never logs in. The working directory is empty, so no .env is loaded.
+ * never logs in. The working directory is empty, so no .env is loaded, and
+ * the update check is off.
  */
 export function startHttpEntrypoint(
     entry: string,
@@ -37,7 +38,13 @@ export function startHttpEntrypoint(
         [process.execPath, entry, '--transport', 'http', '--port', String(port)],
         {
             cwd: workDir,
-            env: { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: workDir, ...env },
+            env: {
+                PATH: process.env.PATH ?? '/usr/bin:/bin',
+                HOME: workDir,
+                // Keep tests off the npm registry.
+                JIYUU_MCP_NO_UPDATE_CHECK: '1',
+                ...env,
+            },
             // index.ts shuts down when stdin ends, so keep it open.
             stdin: 'pipe', stdout: 'ignore', stderr: 'pipe'
         }
