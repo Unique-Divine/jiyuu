@@ -124,4 +124,26 @@ const char *cbm_service_pattern_broker(const char *resolved_qn);
 bool cbm_service_pattern_graphql_operation(const char *doc, const char **op_type, char *name_buf,
                                            size_t name_sz);
 
+/* GraphQL selection signature of a client operation (field-path Routes).
+ * Parses the first operation of `doc` (leading fragment definitions skipped)
+ * and writes "<type>|<name>|<path>,<path>,..." to out: <type> is "query",
+ * "mutation" or "subscription" ("query" for the `{ ... }` shorthand), <name>
+ * is empty for an anonymous operation, and each path is a root field
+ * (`perp`) or a root field and one field below it (`perp.trades`). Aliases
+ * resolve to the field name; arguments, directives, fragment spreads, inline
+ * fragments, `__` meta fields, comments, strings and `${...}` interpolations
+ * are skipped; duplicate paths appear once. A path that does not fit out_sz
+ * is dropped whole. Returns false when `doc` holds no operation with a
+ * selection set, or when require_keyword is set and the operation is the
+ * keyword-less shorthand. */
+bool cbm_service_pattern_graphql_signature(const char *doc, bool require_keyword, char *out,
+                                           size_t out_sz);
+
+/* Split a signature from cbm_service_pattern_graphql_signature: sets *op_type
+ * to a static "query"/"mutation"/"subscription", copies the operation name
+ * (bounded, "" when anonymous) and returns the comma-separated paths. NULL
+ * when `sig` is not a signature. */
+const char *cbm_service_pattern_graphql_sig_parts(const char *sig, const char **op_type,
+                                                  char *name_buf, size_t name_sz);
+
 #endif /* CBM_SERVICE_PATTERNS_H */

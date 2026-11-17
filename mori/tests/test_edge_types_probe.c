@@ -1323,6 +1323,79 @@ TEST(graphql_operation_identity_parser_issue598) {
     PASS();
 }
 
+/* Field-path selection signature: the operation, its name and the field paths
+ * a server defines (root fields and one level below), never aliases, fragment
+ * spreads, inline fragments, arguments, directives or meta fields. */
+TEST(graphql_selection_signature_parser) {
+    static const struct {
+        const char *doc;
+        int require_keyword;
+        int ok;
+        const char *sig;
+    } cases[] = {
+        /* multi-line, aliases, nested arguments with object values */
+        {"\n  query PerpPortfolioStats($trader: String!) {\n    perp {\n"
+         "      stats7d: statsUserPortfolio(trader: $trader, range: \"7d\") { a }\n"
+         "      stats30d: statsUserPortfolio(trader: $trader, range: \"30d\") { a }\n"
+         "    }\n  }\n",
+         1, 1, "query|PerpPortfolioStats|perp,perp.statsUserPortfolio"},
+        {"query T($t: String!) { perp { trades(where: { trader: $t, isOpen: true }, "
+         "limit: 10) { ...PerpTradeFields id } } }",
+         1, 1, "query|T|perp,perp.trades"},
+        /* fragments before the operation, spreads and inline fragments */
+        {"fragment F on X { a { b } } query Q { ...F viewer { ... on User { name } "
+         "...G id } }",
+         1, 1, "query|Q|viewer,viewer.id"},
+        /* comments and strings with braces, directives, __typename */
+        {"# { not: a field }\nquery Q2 @live { __typename perp @include(if: true) "
+         "{ __typename trades(f: \"{x}\") { id } } }",
+         1, 1, "query|Q2|perp,perp.trades"},
+        /* depth stops at two; root scalars keep their root path */
+        {"query { appVersion perp { trade(id: 1) { state { pnl } } } }", 1, 1,
+         "query||appVersion,perp,perp.trade"},
+        {"mutation M($a: String!) { createChallenge(evmAddress: $a) { nonce } }", 1, 1,
+         "mutation|M|createChallenge,createChallenge.nonce"},
+        {"subscription { perpTrades(where: {}) { id } }", 1, 1,
+         "subscription||perpTrades,perpTrades.id"},
+        /* the `{ }` shorthand only when a keyword is not required */
+        {"{ orders { id total } }", 0, 1, "query||orders,orders.id,orders.total"},
+        {"{ orders { id total } }", 1, 0, ""},
+        /* template interpolation and string escapes are trivia */
+        {"${F}\\n query Esc {\\n  perp {\\n    borrowings { id }\\n  }\\n}", 1, 1,
+         "query|Esc|perp,perp.borrowings"},
+        /* not an operation */
+        {"query failed for user", 1, 0, ""},
+        {"https://api.example.com/graphql", 0, 0, ""},
+        {"fragment F on T { a }", 0, 0, ""},
+        {"", 0, 0, ""},
+    };
+    char sig[CBM_SZ_512];
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        bool ok = cbm_service_pattern_graphql_signature(cases[i].doc, cases[i].require_keyword != 0,
+                                                        sig, sizeof(sig));
+        if ((int)ok != cases[i].ok || (ok && strcmp(sig, cases[i].sig) != 0)) {
+            fprintf(stderr, "  [ET-GQL] sig case %zu -> ok=%d sig='%s' want='%s'\n", i, (int)ok,
+                    sig, cases[i].sig);
+            ASSERT_TRUE(0);
+        }
+    }
+    /* A path that does not fit is dropped whole; the header survives. */
+    char small[24];
+    ASSERT_TRUE(cbm_service_pattern_graphql_signature("query Q { alpha beta gamma }", true, small,
+                                                      sizeof(small)));
+    ASSERT_STR_EQ(small, "query|Q|alpha,beta");
+    const char *type = NULL;
+    char name[8];
+    const char *paths =
+        cbm_service_pattern_graphql_sig_parts("mutation|LongName|a,b.c", &type, name, sizeof(name));
+    ASSERT_STR_EQ(type, "mutation");
+    ASSERT_STR_EQ(name, "LongNam");
+    ASSERT_STR_EQ(paths, "a,b.c");
+    ASSERT_TRUE(cbm_service_pattern_graphql_sig_parts("select|x|", &type, name, sizeof(name)) ==
+                NULL);
+    PASS();
+}
+
 /* #1085: count CALLS edges whose target node has `name`, indexing via the
  * PARALLEL path (et_index_parallel pads to >50 files). The per-file TS resolver
  * used to treat a raw tsconfig alias as a confident target. That false row made
@@ -4020,6 +4093,7 @@ SUITE(edge_types_probe) {
     RUN_TEST(graphql_gqlgen_underscored_field_resolver);
     RUN_TEST(graphql_gqlgen_config_default_schema);
     RUN_TEST(graphql_gqlgen_config_parent_relative_paths);
+    RUN_TEST(graphql_selection_signature_parser);
     RUN_TEST(handles_flask_python);
     RUN_TEST(handles_fastapi_python);
     RUN_TEST(handles_drf_action_python);

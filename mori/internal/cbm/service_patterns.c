@@ -17,6 +17,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -1084,6 +1085,356 @@ bool cbm_service_pattern_graphql_operation(const char *doc, const char **op_type
         return gql_copy_name(gql_skip_ignored(p), name_buf, name_sz);
     }
     return false;
+}
+
+/* ── GraphQL selection signature (field-path Routes) ───────────── */
+
+enum {
+    GQL_META_PREFIX = 2, /* "__typename", "__schema": introspection, not schema fields */
+    GQL_SPREAD_LEN = 3,  /* "..." */
+    GQL_ON_LEN = 2,      /* "on" */
+};
+
+/* Whitespace, commas, comments, `${...}` interpolations and source escapes
+ * (`\n` inside a one-line string literal) carry no structure. */
+static const char *gql_skip_trivia(const char *p) {
+    for (;;) {
+        while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' || *p == ',') {
+            p++;
+        }
+        if (*p == '\\' && p[SKIP_ONE]) {
+            p += PAIR_LEN;
+            continue;
+        }
+        if (*p == '#' || (p[0] == '$' && p[SKIP_ONE] == '{')) {
+            p = gql_skip_opaque(p);
+            continue;
+        }
+        return p;
+    }
+}
+
+/* p at `open`: returns past the matching `close` (or at the NUL). */
+static const char *gql_skip_balanced(const char *p, char open, char close) {
+    int depth = 0;
+    while (*p) {
+        const char *q = gql_skip_opaque(p);
+        if (q != p) {
+            p = q;
+            continue;
+        }
+        depth += (*p == open) - (*p == close);
+        p++;
+        if (depth <= 0) {
+            return p;
+        }
+    }
+    return p;
+}
+
+static size_t gql_name_len(const char *p) {
+    size_t n = 0;
+    if (!gql_name_start((unsigned char)*p)) {
+        return 0;
+    }
+    while (gql_name_char((unsigned char)p[n])) {
+        n++;
+    }
+    return n;
+}
+
+/* `@name` or `@name(args)`, repeated. */
+static const char *gql_skip_directives(const char *p) {
+    p = gql_skip_trivia(p);
+    while (*p == '@') {
+        p++;
+        p += gql_name_len(p);
+        p = gql_skip_trivia(p);
+        if (*p == '(') {
+            p = gql_skip_trivia(gql_skip_balanced(p, '(', ')'));
+        }
+    }
+    return p;
+}
+
+typedef struct {
+    char *out;
+    size_t cap;
+    size_t len;
+    size_t paths_at; /* offset of the first path in out */
+} gql_sig_t;
+
+/* True when `path` is already one of the comma-separated paths. */
+static bool gql_sig_has_path(const gql_sig_t *s, const char *path, size_t n) {
+    const char *p = s->out + s->paths_at;
+    while (*p) {
+        const char *end = strchr(p, ',');
+        size_t len = end ? (size_t)(end - p) : strlen(p);
+        if (len == n && strncmp(p, path, n) == 0) {
+            return true;
+        }
+        if (!end) {
+            break;
+        }
+        p = end + SKIP_ONE;
+    }
+    return false;
+}
+
+/* Append `parent.field` (or `field` at the root). A path that does not fit is
+ * dropped whole, never cut. */
+static void gql_sig_add_path(gql_sig_t *s, const char *parent, size_t plen, const char *field,
+                             size_t flen) {
+    char path[CBM_SZ_512];
+    if (plen + flen + PAIR_LEN > sizeof(path)) {
+        return;
+    }
+    size_t n = 0;
+    if (plen > 0) {
+        memcpy(path, parent, plen);
+        path[plen] = '.';
+        n = plen + SKIP_ONE;
+    }
+    memcpy(path + n, field, flen);
+    n += flen;
+    if (gql_sig_has_path(s, path, n)) {
+        return;
+    }
+    bool first = s->len == s->paths_at;
+    if (s->len + n + (first ? 0 : SKIP_ONE) + SKIP_ONE > s->cap) {
+        return;
+    }
+    if (!first) {
+        s->out[s->len++] = ',';
+    }
+    memcpy(s->out + s->len, path, n);
+    s->len += n;
+    s->out[s->len] = '\0';
+}
+
+/* `...Name @dir` (spread) or `... on T @dir { }` / `... @dir { }` (inline
+ * fragment), with p past the dots. Neither is a field of this level for
+ * certain, so both are skipped whole. */
+static const char *gql_skip_fragment_selection(const char *p) {
+    p = gql_skip_trivia(p);
+    size_t n = gql_name_len(p);
+    if (n == GQL_ON_LEN && strncmp(p, "on", GQL_ON_LEN) == 0) {
+        p = gql_skip_trivia(p + n);
+        p += gql_name_len(p);
+    } else {
+        p += n;
+    }
+    p = gql_skip_directives(p);
+    return *p == '{' ? gql_skip_balanced(p, '{', '}') : p;
+}
+
+/* One field selection head at p: `alias: name(args) @dir`. Sets the field
+ * (the name after an alias) and returns p after the head, at the `{` of a
+ * sub-selection when there is one. */
+static const char *gql_field_head(const char *p, const char **field, size_t *flen) {
+    *field = p;
+    *flen = gql_name_len(p);
+    p = gql_skip_trivia(p + *flen);
+    if (*p == ':') { /* alias: the field is the name after the colon */
+        p = gql_skip_trivia(p + SKIP_ONE);
+        *field = p;
+        *flen = gql_name_len(p);
+        p = gql_skip_trivia(p + *flen);
+    }
+    if (*p == '(') {
+        p = gql_skip_balanced(p, '(', ')');
+    }
+    return gql_skip_directives(p);
+}
+
+static bool gql_is_meta(const char *field, size_t flen) {
+    return flen >= GQL_META_PREFIX && field[0] == '_' && field[SKIP_ONE] == '_';
+}
+
+/* The next selection at p: steps over a fragment selection or a stray token
+ * and returns NULL, or returns the field head's end with *field set. *done is
+ * set (and p returned past the `}`) at the end of the selection set. */
+static const char *gql_next_field(const char *p, const char **field, size_t *flen, bool *done) {
+    *field = NULL;
+    *done = false;
+    p = gql_skip_trivia(p);
+    if (!*p || *p == '}') {
+        *done = true;
+        return *p ? p + SKIP_ONE : p;
+    }
+    if (strncmp(p, "...", GQL_SPREAD_LEN) == 0) {
+        return gql_skip_fragment_selection(p + GQL_SPREAD_LEN);
+    }
+    if (gql_name_start((unsigned char)*p)) {
+        return gql_field_head(p, field, flen);
+    }
+    const char *q = gql_skip_opaque(p);
+    return q != p ? q : p + SKIP_ONE; /* a stray token: step over it */
+}
+
+/* p past the `{` of a root field's selection set: records `parent.child`
+ * paths and skips deeper selections. Returns past the `}`. */
+static const char *gql_child_set(const char *p, const char *parent, size_t plen, gql_sig_t *s) {
+    for (;;) {
+        const char *field = NULL;
+        size_t flen = 0;
+        bool done = false;
+        p = gql_next_field(p, &field, &flen, &done);
+        if (done) {
+            return p;
+        }
+        if (!field) {
+            continue;
+        }
+        if (flen > 0 && !gql_is_meta(field, flen)) {
+            gql_sig_add_path(s, parent, plen, field, flen);
+        }
+        if (*p == '{') {
+            p = gql_skip_balanced(p, '{', '}');
+        }
+    }
+}
+
+/* p past the `{` of the operation's selection set. */
+static void gql_root_set(const char *p, gql_sig_t *s) {
+    for (;;) {
+        const char *field = NULL;
+        size_t flen = 0;
+        bool done = false;
+        p = gql_next_field(p, &field, &flen, &done);
+        if (done) {
+            return;
+        }
+        if (!field) {
+            continue;
+        }
+        bool keep = flen > 0 && !gql_is_meta(field, flen);
+        if (keep) {
+            gql_sig_add_path(s, "", 0, field, flen);
+        }
+        if (*p == '{') {
+            p = keep ? gql_child_set(p + SKIP_ONE, field, flen, s) : gql_skip_balanced(p, '{', '}');
+        }
+    }
+}
+
+/* Find the first operation of a document, skipping leading fragment
+ * definitions. Returns its keyword ("query" ...), or "{" for the `{ ... }`
+ * shorthand, with *after past the keyword (at the `{` for the shorthand);
+ * NULL when the text is not a GraphQL document. */
+static const char *gql_locate_operation(const char *doc, const char **after) {
+    int depth = 0;
+    bool in_fragment = false;
+    const char *p = doc;
+    while (*p) {
+        const char *q = gql_skip_trivia(p);
+        if (q == p) {
+            q = gql_skip_opaque(p);
+        }
+        if (q != p) {
+            p = q;
+            continue;
+        }
+        unsigned char c = (unsigned char)*p;
+        if (c == '{' && depth == 0 && !in_fragment) {
+            *after = p;
+            return "{";
+        }
+        if (c == '{' || c == '}') {
+            depth += (c == '{') ? 1 : -1;
+            depth = depth < 0 ? 0 : depth;
+            in_fragment = in_fragment && depth > 0;
+            p++;
+            continue;
+        }
+        if (depth > 0 || in_fragment || !gql_name_start(c)) {
+            p++;
+            continue;
+        }
+        size_t len = gql_name_len(p);
+        if (len == strlen("fragment") && strncmp(p, "fragment", len) == 0) {
+            in_fragment = true;
+            p += len;
+            continue;
+        }
+        *after = p + len;
+        return gql_operation_keyword(p, len);
+    }
+    return NULL;
+}
+
+/* p past the operation keyword: `Name($v: T) @dir`. Copies the name. */
+static const char *gql_operation_header(const char *p, char *name, size_t name_sz) {
+    p = gql_skip_trivia(p);
+    size_t n = gql_name_len(p);
+    if (n > 0) {
+        (void)gql_copy_name(p, name, name_sz);
+        p += n;
+    }
+    p = gql_skip_trivia(p);
+    if (*p == '(') {
+        p = gql_skip_balanced(p, '(', ')');
+    }
+    return gql_skip_directives(p);
+}
+
+bool cbm_service_pattern_graphql_signature(const char *doc, bool require_keyword, char *out,
+                                           size_t out_sz) {
+    if (!doc || !out || out_sz == 0) {
+        return false;
+    }
+    out[0] = '\0';
+    const char *p = NULL;
+    const char *kw = gql_locate_operation(doc, &p);
+    bool shorthand = kw && kw[0] == '{';
+    if (!kw || (require_keyword && shorthand)) {
+        return false;
+    }
+    char name[CBM_SZ_128] = "";
+    if (!shorthand) {
+        p = gql_operation_header(p, name, sizeof(name));
+    }
+    if (*p != '{') {
+        return false; /* no selection set: not an operation */
+    }
+    int hdr = snprintf(out, out_sz, "%s|%s|", shorthand ? "query" : kw, name);
+    if (hdr < 0 || (size_t)hdr >= out_sz) {
+        out[0] = '\0';
+        return false;
+    }
+    gql_sig_t s = {.out = out, .cap = out_sz, .len = (size_t)hdr, .paths_at = (size_t)hdr};
+    gql_root_set(p + SKIP_ONE, &s);
+    return true;
+}
+
+const char *cbm_service_pattern_graphql_sig_parts(const char *sig, const char **op_type,
+                                                  char *name_buf, size_t name_sz) {
+    static const char *const kws[] = {"query", "mutation", "subscription", NULL};
+    *op_type = NULL;
+    if (name_buf && name_sz > 0) {
+        name_buf[0] = '\0';
+    }
+    const char *bar = sig ? strchr(sig, '|') : NULL;
+    const char *bar2 = bar ? strchr(bar + SKIP_ONE, '|') : NULL;
+    if (!bar2) {
+        return NULL;
+    }
+    for (int i = 0; kws[i]; i++) {
+        size_t kl = strlen(kws[i]);
+        if ((size_t)(bar - sig) == kl && strncmp(sig, kws[i], kl) == 0) {
+            *op_type = kws[i];
+        }
+    }
+    if (!*op_type) {
+        return NULL;
+    }
+    if (name_buf && name_sz > 0) {
+        size_t n = (size_t)(bar2 - bar - SKIP_ONE);
+        n = n < name_sz ? n : name_sz - SKIP_ONE;
+        memcpy(name_buf, bar + SKIP_ONE, n);
+        name_buf[n] = '\0';
+    }
+    return bar2 + SKIP_ONE;
 }
 
 /* ── Public API ────────────────────────────────────────────────── */
