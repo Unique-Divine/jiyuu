@@ -473,13 +473,10 @@ jobs:
         run: |
           name="$(jq -r .name package.json)"
           version="$(jq -r .version package.json)"
+          echo "name=${name}" >> "$GITHUB_OUTPUT"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
-          if npx --yes npm@12.2.0 view "${name}@${version}" version >/dev/null 2>&1; then
-            echo "${name}@${version} is already on npm; nothing to publish."
-            echo "publish=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "publish=true" >> "$GITHUB_OUTPUT"
-          fi
+          python3 "$GITHUB_WORKSPACE/scripts/python/registry_release.py" \
+            check npm "$name" "$version"
       - name: Install dependencies
         if: steps.version.outputs.publish == 'true'
         run: bun install --frozen-lockfile
@@ -491,11 +488,17 @@ jobs:
       - name: Pack
         if: steps.version.outputs.publish == 'true'
         run: bun pm pack
+      # A publish that fails because an earlier run already published this
+      # version passes; registry_release.py asks the registry to decide.
       - name: Publish
         if: steps.version.outputs.publish == 'true'
         env:
+          NAME: ${{ steps.version.outputs.name }}
           VERSION: ${{ steps.version.outputs.version }}
-        run: npx --yes npm@12.2.0 publish "./uniquedivine-tg-sai-${VERSION}.tgz" --access public
+        run: |
+          python3 "$GITHUB_WORKSPACE/scripts/python/registry_release.py" \
+            publish npm "$NAME" "$VERSION" -- \
+            npx --yes npm@12.2.0 publish "./uniquedivine-tg-sai-${VERSION}.tgz" --access public
   publish-mcp-discord:
     needs:
       - changes
@@ -532,13 +535,10 @@ jobs:
         run: |
           name="$(jq -r .name package.json)"
           version="$(jq -r .version package.json)"
+          echo "name=${name}" >> "$GITHUB_OUTPUT"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
-          if npx --yes npm@12.2.0 view "${name}@${version}" version >/dev/null 2>&1; then
-            echo "${name}@${version} is already on npm; nothing to publish."
-            echo "publish=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "publish=true" >> "$GITHUB_OUTPUT"
-          fi
+          python3 "$GITHUB_WORKSPACE/scripts/python/registry_release.py" \
+            check npm "$name" "$version"
       - name: Install dependencies
         if: steps.version.outputs.publish == 'true'
         run: bun install --frozen-lockfile
@@ -550,11 +550,17 @@ jobs:
       - name: Pack
         if: steps.version.outputs.publish == 'true'
         run: bun pm pack
+      # A publish that fails because an earlier run already published this
+      # version passes; registry_release.py asks the registry to decide.
       - name: Publish
         if: steps.version.outputs.publish == 'true'
         env:
+          NAME: ${{ steps.version.outputs.name }}
           VERSION: ${{ steps.version.outputs.version }}
-        run: npx --yes npm@12.2.0 publish "./uniquedivine-mcp-discord-${VERSION}.tgz" --access public
+        run: |
+          python3 "$GITHUB_WORKSPACE/scripts/python/registry_release.py" \
+            publish npm "$NAME" "$VERSION" -- \
+            npx --yes npm@12.2.0 publish "./uniquedivine-mcp-discord-${VERSION}.tgz" --access public
   publish-mcp-slack:
     needs:
       - changes
@@ -591,13 +597,10 @@ jobs:
         run: |
           name="$(jq -r .name package.json)"
           version="$(jq -r .version package.json)"
+          echo "name=${name}" >> "$GITHUB_OUTPUT"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
-          if npx --yes npm@12.2.0 view "${name}@${version}" version >/dev/null 2>&1; then
-            echo "${name}@${version} is already on npm; nothing to publish."
-            echo "publish=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "publish=true" >> "$GITHUB_OUTPUT"
-          fi
+          python3 "$GITHUB_WORKSPACE/scripts/python/registry_release.py" \
+            check npm "$name" "$version"
       - name: Install dependencies
         if: steps.version.outputs.publish == 'true'
         run: bun install --frozen-lockfile
@@ -609,11 +612,17 @@ jobs:
       - name: Pack
         if: steps.version.outputs.publish == 'true'
         run: bun pm pack
+      # A publish that fails because an earlier run already published this
+      # version passes; registry_release.py asks the registry to decide.
       - name: Publish
         if: steps.version.outputs.publish == 'true'
         env:
+          NAME: ${{ steps.version.outputs.name }}
           VERSION: ${{ steps.version.outputs.version }}
-        run: npx --yes npm@12.2.0 publish "./uniquedivine-mcp-slack-${VERSION}.tgz" --access public
+        run: |
+          python3 "$GITHUB_WORKSPACE/scripts/python/registry_release.py" \
+            publish npm "$NAME" "$VERSION" -- \
+            npx --yes npm@12.2.0 publish "./uniquedivine-mcp-slack-${VERSION}.tgz" --access public
   publish-telegram-mcp:
     needs:
       - changes
@@ -644,27 +653,28 @@ jobs:
         id: version
         run: |
           read -r name version < <(uv run --no-project python -c 'import tomllib; p = tomllib.load(open("pyproject.toml", "rb"))["project"]; print(p["name"], p["version"])')
+          echo "name=${name}" >> "$GITHUB_OUTPUT"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
-          status="$(curl --silent --output /dev/null --write-out '%{http_code}' "https://pypi.org/pypi/${name}/${version}/json")"
-          case "$status" in
-            200)
-              echo "${name} ${version} is already on PyPI; nothing to publish."
-              echo "publish=false" >> "$GITHUB_OUTPUT"
-              ;;
-            404)
-              echo "publish=true" >> "$GITHUB_OUTPUT"
-              ;;
-            *)
-              echo "::error::PyPI returned HTTP ${status} for ${name} ${version}."
-              exit 1
-              ;;
-          esac
+          uv run --no-project python \
+            "$GITHUB_WORKSPACE/scripts/python/registry_release.py" \
+            check pypi "$name" "$version"
       - name: Build sdist and wheel
         if: steps.version.outputs.publish == 'true'
         run: uv build --out-dir dist
+      # --check-url skips files PyPI already has. A rebuilt file can differ
+      # byte for byte from the uploaded one, so a failed upload still passes
+      # when PyPI already lists this version.
       - name: Publish
         if: steps.version.outputs.publish == 'true'
-        run: uv publish --trusted-publishing always dist/*
+        env:
+          NAME: ${{ steps.version.outputs.name }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          uv run --no-project python \
+            "$GITHUB_WORKSPACE/scripts/python/registry_release.py" \
+            publish pypi "$NAME" "$VERSION" -- \
+            uv publish --trusted-publishing always \
+            --check-url https://pypi.org/simple/ dist/*
   publish-jiyuu:
     needs:
       - changes
@@ -701,13 +711,10 @@ jobs:
         run: |
           name="$(jq -r .name package.json)"
           version="$(jq -r .version package.json)"
+          echo "name=${name}" >> "$GITHUB_OUTPUT"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
-          if npx --yes npm@12.2.0 view "${name}@${version}" version >/dev/null 2>&1; then
-            echo "${name}@${version} is already on npm; nothing to publish."
-            echo "publish=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "publish=true" >> "$GITHUB_OUTPUT"
-          fi
+          python3 "$GITHUB_WORKSPACE/scripts/python/registry_release.py" \
+            check npm "$name" "$version"
       - name: Install dependencies
         if: steps.version.outputs.publish == 'true'
         run: bun install --frozen-lockfile
@@ -719,11 +726,17 @@ jobs:
       - name: Pack
         if: steps.version.outputs.publish == 'true'
         run: bun pm pack
+      # A publish that fails because an earlier run already published this
+      # version passes; registry_release.py asks the registry to decide.
       - name: Publish
         if: steps.version.outputs.publish == 'true'
         env:
+          NAME: ${{ steps.version.outputs.name }}
           VERSION: ${{ steps.version.outputs.version }}
-        run: npx --yes npm@12.2.0 publish "./uniquedivine-jiyuu-${VERSION}.tgz" --access public
+        run: |
+          python3 "$GITHUB_WORKSPACE/scripts/python/registry_release.py" \
+            publish npm "$NAME" "$VERSION" -- \
+            npx --yes npm@12.2.0 publish "./uniquedivine-jiyuu-${VERSION}.tgz" --access public
   publish-bash:
     needs:
       - changes
@@ -760,13 +773,10 @@ jobs:
         run: |
           name="$(jq -r .name package.json)"
           version="$(jq -r .version package.json)"
+          echo "name=${name}" >> "$GITHUB_OUTPUT"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
-          if npx --yes npm@12.2.0 view "${name}@${version}" version >/dev/null 2>&1; then
-            echo "${name}@${version} is already on npm; nothing to publish."
-            echo "publish=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "publish=true" >> "$GITHUB_OUTPUT"
-          fi
+          python3 "$GITHUB_WORKSPACE/scripts/python/registry_release.py" \
+            check npm "$name" "$version"
       - name: Install dependencies
         if: steps.version.outputs.publish == 'true'
         run: bun install --frozen-lockfile
@@ -778,8 +788,14 @@ jobs:
       - name: Pack
         if: steps.version.outputs.publish == 'true'
         run: bun pm pack
+      # A publish that fails because an earlier run already published this
+      # version passes; registry_release.py asks the registry to decide.
       - name: Publish
         if: steps.version.outputs.publish == 'true'
         env:
+          NAME: ${{ steps.version.outputs.name }}
           VERSION: ${{ steps.version.outputs.version }}
-        run: npx --yes npm@12.2.0 publish "./uniquedivine-bash-${VERSION}.tgz" --access public
+        run: |
+          python3 "$GITHUB_WORKSPACE/scripts/python/registry_release.py" \
+            publish npm "$NAME" "$VERSION" -- \
+            npx --yes npm@12.2.0 publish "./uniquedivine-bash-${VERSION}.tgz" --access public

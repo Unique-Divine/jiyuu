@@ -25,6 +25,7 @@ lag a fresh publish by minutes.
 from __future__ import annotations
 
 import argparse
+import io
 import os
 import subprocess
 import sys
@@ -207,6 +208,9 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
+    # Keep stdout, stderr, and the publish command's output in order in CI.
+    if isinstance(sys.stdout, io.TextIOWrapper):
+        sys.stdout.reconfigure(line_buffering=True)
     # After a failed publish the version may take a while to show up, so
     # publish polls longer than check.
     attempts, delay_s = (3, 2.0) if args.action == "check" else (6, 5.0)
