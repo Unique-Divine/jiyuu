@@ -8,6 +8,8 @@
         "@mtcute/bun": "0.30.1",
         "@mtcute/convert": "0.30.1",
         "@mtcute/core": "0.30.1",
+        "@mtcute/html-parser": "0.30.1",
+        "@mtcute/markdown-parser": "0.30.1",
         "@mtcute/wasm": "0.29.0",
         "commander": "^15.0.0",
       },
