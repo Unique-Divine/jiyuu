@@ -48,6 +48,7 @@
 #include <store/store.h>
 #include <pipeline/pipeline.h>
 #include <foundation/log.h>
+#include <sqlite3.h>
 
 #include <string.h>
 #include <stdlib.h>
@@ -334,6 +335,207 @@ TEST(graphql_route_keyed_by_operation_name_issue598) {
     };
     ASSERT_TRUE(et_graphql_routes_exact(f, (int)(sizeof(f) / sizeof(f[0])), want,
                                         (int)(sizeof(want) / sizeof(want[0]))));
+    PASS();
+}
+
+/* GraphQL server side: field-path Routes from a gqlgen schema, handled by its
+ * resolver methods. Modeled on sai-keeper: schema files named *.graphqls, a
+ * `perp: Perp!` root field whose type's fields have their own resolvers
+ * (perpResolver), a deprecated field, a model-bound field with no resolver
+ * (HANDLES from the schema Field) and a subscription. Routes go one level
+ * below the root, so PerpTrade's fields appear only under
+ * Subscription.perpTrades (its root return type) and never under
+ * Query.perp.trades. gqlgen's generated resolver interfaces must not be taken
+ * for the implementations. */
+static const EtFile et_gqlgen_files[] = {
+    {"go.mod", "module keeper\n"},
+    {"graph/query.graphqls",
+     "type Query {\n"
+     "  perp: Perp!\n"
+     "  appVersion: String!\n"
+     "  oldPing: String @deprecated(reason: \"Use appVersion instead.\")\n"
+     "}\n"},
+    {"graph/perp.graphqls",
+     "type Perp @goModel(model: \"keeper/graph/model.Perp\") {\n"
+     "  trades(trader: String, limit: Int): [PerpTrade!]!\n"
+     "  realizedPnl: Float @deprecated(reason: \"Use realizedPnlUsd.\")\n"
+     "  realizedPnlUsd: Float\n"
+     "}\n\n"
+     "type PerpTrade {\n"
+     "  id: ID!\n"
+     "  trader: String!\n"
+     "}\n"},
+    {"graph/subscription.graphqls",
+     "type Subscription {\n"
+     "  perpTrades(trader: String): [PerpTrade!]!\n"
+     "}\n"},
+    {"graph/model/models.go",
+     "package model\n\n"
+     "type Perp struct {\n\tRealizedPnlUsd *float64\n}\n\n"
+     "type PerpTrade struct {\n\tID     string\n\tTrader string\n}\n"},
+    /* gqlgen's generated interfaces: Methods named like the resolvers, on
+     * `PerpResolver` / `QueryResolver`, one directory nearer the schema. */
+    {"graph/generated.go",
+     "package graph\n\n"
+     "import (\n\t\"context\"\n\n\t\"keeper/graph/model\"\n)\n\n"
+     "type PerpResolver interface {\n"
+     "\tTrades(ctx context.Context, obj *model.Perp, trader *string, limit *int) "
+     "([]*model.PerpTrade, error)\n"
+     "\tRealizedPnl(ctx context.Context, obj *model.Perp) (*float64, error)\n}\n\n"
+     "type QueryResolver interface {\n"
+     "\tPerp(ctx context.Context) (*model.Perp, error)\n"
+     "\tAppVersion(ctx context.Context) (string, error)\n}\n"},
+    {"graph/resolver/resolver.go",
+     "package resolver\n\n"
+     "type Resolver struct{}\n\n"
+     "type queryResolver struct{ *Resolver }\n"
+     "type perpResolver struct{ *Resolver }\n"
+     "type subscriptionResolver struct{ *Resolver }\n"},
+    {"graph/resolver/query.resolvers.go",
+     "package resolver\n\n"
+     "import (\n\t\"context\"\n\n\t\"keeper/graph/model\"\n)\n\n"
+     "func (r *queryResolver) Perp(ctx context.Context) (*model.Perp, error) {\n"
+     "\treturn &model.Perp{}, nil\n}\n\n"
+     "func (r *queryResolver) AppVersion(ctx context.Context) (string, error) {\n"
+     "\treturn \"v1\", nil\n}\n"},
+    {"graph/resolver/perp.resolvers.go",
+     "package resolver\n\n"
+     "import (\n\t\"context\"\n\n\t\"keeper/graph/model\"\n)\n\n"
+     "func (r *perpResolver) Trades(ctx context.Context, obj *model.Perp, trader *string, "
+     "limit *int) ([]*model.PerpTrade, error) {\n"
+     "\treturn nil, nil\n}\n\n"
+     "func (r *perpResolver) RealizedPnl(ctx context.Context, obj *model.Perp) (*float64, "
+     "error) {\n"
+     "\treturn nil, nil\n}\n"},
+    {"graph/resolver/subscription.resolvers.go",
+     "package resolver\n\n"
+     "import (\n\t\"context\"\n\n\t\"keeper/graph/model\"\n)\n\n"
+     "func (r *subscriptionResolver) PerpTrades(ctx context.Context, trader *string) "
+     "(<-chan []*model.PerpTrade, error) {\n"
+     "\treturn nil, nil\n}\n"},
+};
+
+typedef struct {
+    const char *qn;
+    const char *schema_type;
+    const char *deprecated; /* "true" or "false" */
+    const char *reason;
+    const char *handler_label;
+    const char *handler_qn_suffix;
+    const char *via;
+} EtGqlServerRoute;
+
+static const EtGqlServerRoute et_gqlgen_want[] = {
+    {"__graphql__Query.perp", "Perp!", "false", "", "Method", ".resolver.queryResolver.Perp",
+     "gqlgen_resolver"},
+    {"__graphql__Query.perp.trades", "[PerpTrade!]!", "false", "", "Method",
+     ".resolver.perpResolver.Trades", "gqlgen_resolver"},
+    {"__graphql__Query.perp.realizedPnl", "Float", "true", "Use realizedPnlUsd.", "Method",
+     ".resolver.perpResolver.RealizedPnl", "gqlgen_resolver"},
+    {"__graphql__Query.perp.realizedPnlUsd", "Float", "false", "", "Field", ".Perp.realizedPnlUsd",
+     "graphql_schema_field"},
+    {"__graphql__Query.appVersion", "String!", "false", "", "Method", ".resolver.queryResolver.AppVersion",
+     "gqlgen_resolver"},
+    {"__graphql__Query.oldPing", "String", "true", "Use appVersion instead.", "Field",
+     ".Query.oldPing", "graphql_schema_field"},
+    {"__graphql__Subscription.perpTrades", "[PerpTrade!]!", "false", "", "Method",
+     ".resolver.subscriptionResolver.PerpTrades", "gqlgen_resolver"},
+    {"__graphql__Subscription.perpTrades.id", "ID!", "false", "", "Field", ".PerpTrade.id",
+     "graphql_schema_field"},
+    {"__graphql__Subscription.perpTrades.trader", "String!", "false", "", "Field",
+     ".PerpTrade.trader", "graphql_schema_field"},
+};
+
+static int et_ends_with(const char *s, const char *suffix) {
+    size_t sl = strlen(s);
+    size_t xl = strlen(suffix);
+    return sl >= xl && strcmp(s + sl - xl, suffix) == 0;
+}
+
+/* Check one Route row against the expected table; returns 1 on a match. */
+static int et_gqlgen_row_ok(const char *qn, const char *rprops, const char *eprops,
+                            const char *hlabel, const char *hqn, int *seen) {
+    for (size_t wi = 0; wi < sizeof(et_gqlgen_want) / sizeof(et_gqlgen_want[0]); wi++) {
+        const EtGqlServerRoute *w = &et_gqlgen_want[wi];
+        if (strcmp(qn, w->qn) != 0) {
+            continue;
+        }
+        seen[wi]++;
+        char want_props[512];
+        snprintf(want_props, sizeof(want_props),
+                 "{\"source\":\"graphql_schema\",\"schema_type\":\"%s\",\"deprecated\":%s,"
+                 "\"deprecation_reason\":\"%s\"}",
+                 w->schema_type, w->deprecated, w->reason);
+        char want_via[64];
+        snprintf(want_via, sizeof(want_via), "\"via\":\"%s\"", w->via);
+        int ok = strcmp(rprops, want_props) == 0 && strstr(eprops, want_via) != NULL &&
+                 strcmp(hlabel, w->handler_label) == 0 && et_ends_with(hqn, w->handler_qn_suffix);
+        if (!ok) {
+            fprintf(stderr,
+                    "  [ET-GQLS] %s props=%s handles=%s from %s %s (want %s, %s %s)\n", qn,
+                    rprops, eprops, hlabel, hqn, want_props, w->handler_label, w->via);
+        }
+        return ok;
+    }
+    fprintf(stderr, "  [ET-GQLS] unexpected Route %s\n", qn);
+    return 0;
+}
+
+/* Every __graphql__ Route with each of its HANDLES edges: exactly the table,
+ * one handler per Route. */
+static int et_gqlgen_routes_exact(cbm_store_t *store, const char *project) {
+    enum { NWANT = sizeof(et_gqlgen_want) / sizeof(et_gqlgen_want[0]) };
+    int seen[NWANT] = {0};
+    int ok = store != NULL;
+    sqlite3_stmt *st = NULL;
+    if (!store ||
+        sqlite3_prepare_v2(cbm_store_get_db(store),
+                           "SELECT r.qualified_name, r.properties, IFNULL(e.properties,''), "
+                           "IFNULL(h.label,''), IFNULL(h.qualified_name,'') FROM nodes r "
+                           "LEFT JOIN edges e ON e.target_id = r.id AND e.type = 'HANDLES' "
+                           "LEFT JOIN nodes h ON h.id = e.source_id "
+                           "WHERE r.project = ?1 AND r.label = 'Route' "
+                           "AND substr(r.qualified_name, 1, 11) = '__graphql__'",
+                           -1, &st, NULL) != SQLITE_OK) {
+        return 0;
+    }
+    sqlite3_bind_text(st, 1, project, -1, SQLITE_STATIC);
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        const char *col[5];
+        for (int c = 0; c < 5; c++) {
+            col[c] = (const char *)sqlite3_column_text(st, c);
+            if (!col[c]) col[c] = "";
+        }
+        ok &= et_gqlgen_row_ok(col[0], col[1], col[2], col[3], col[4], seen);
+    }
+    sqlite3_finalize(st);
+    for (int wi = 0; wi < NWANT; wi++) {
+        if (seen[wi] != 1) {
+            fprintf(stderr, "  [ET-GQLS] %s: %d HANDLES rows, want 1\n", et_gqlgen_want[wi].qn,
+                    seen[wi]);
+            ok = 0;
+        }
+    }
+    return ok;
+}
+
+TEST(graphql_gqlgen_field_routes_sequential) {
+    EtProj lp;
+    cbm_store_t *store =
+        et_index_files(&lp, et_gqlgen_files, (int)(sizeof(et_gqlgen_files) / sizeof(*et_gqlgen_files)));
+    int ok = et_gqlgen_routes_exact(store, lp.project);
+    et_cleanup(&lp, store);
+    ASSERT_TRUE(ok);
+    PASS();
+}
+
+TEST(graphql_gqlgen_field_routes_parallel) {
+    EtProj lp;
+    cbm_store_t *store = et_index_parallel(
+        &lp, et_gqlgen_files, (int)(sizeof(et_gqlgen_files) / sizeof(*et_gqlgen_files)));
+    int ok = et_gqlgen_routes_exact(store, lp.project);
+    et_cleanup(&lp, store);
+    ASSERT_TRUE(ok);
     PASS();
 }
 
@@ -3050,6 +3252,8 @@ SUITE(edge_types_probe) {
     RUN_TEST(calls_jsx_component_via_tsconfig_alias_parallel_issue1085);
     RUN_TEST(graphql_route_keyed_by_operation_name_issue598);
     RUN_TEST(graphql_operation_identity_parser_issue598);
+    RUN_TEST(graphql_gqlgen_field_routes_sequential);
+    RUN_TEST(graphql_gqlgen_field_routes_parallel);
     RUN_TEST(handles_flask_python);
     RUN_TEST(handles_fastapi_python);
     RUN_TEST(handles_drf_action_python);

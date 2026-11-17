@@ -36,8 +36,11 @@ enum {
 #include "service_patterns.h"  /* cbm_service_pattern_is_http_route_literal */
 #include "helpers.h"           /* cbm_is_test_file */
 #include "discover/discover.h" /* cbm_language_for_filename */
+#include "cbm.h"               /* CBM_LANG_GO, CBM_LANG_GRAPHQL */
 
+#include <ctype.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* Extract a JSON string value by key from properties.
@@ -1011,6 +1014,420 @@ static void create_grpc_routes(cbm_gbuf_t *gb) {
     }
 }
 
+/* ── Phase 4b: GraphQL schema Routes (field paths) ──────────────────
+ *
+ * A GraphQL server defines fields, not operations: a client's operation
+ * selects field paths such as `perp { trades }`. One Route per field path,
+ * `__graphql__<Root>.<field>` for each field of the Query, Mutation and
+ * Subscription types, and `__graphql__<Root>.<field>.<child>` for each field
+ * of that field's return type, one level down. Leaf (scalar or enum) return
+ * types have no fields, so they get the root Route only.
+ *
+ * HANDLES comes from the gqlgen resolver method for the field when one exists
+ * (type `Perp` -> receiver `perpResolver`, field `trades` -> method `Trades`,
+ * the method name compared case-insensitively), and otherwise from the schema
+ * Field node, so every field Route has exactly one handler. The root types
+ * are the default names; a `schema { query: X }` remap is not followed. */
+
+enum { GQL_ROOT_COUNT = 3 };
+
+static const char *const gql_root_types[GQL_ROOT_COUNT] = {"Query", "Mutation", "Subscription"};
+
+/* One schema field: the Field node plus the props the Routes need. */
+typedef struct {
+    const cbm_gbuf_node_t *node;
+    char parent_qn[CBM_SZ_512];
+    char return_type[CBM_SZ_256];
+    char reason[CBM_SZ_512];
+    bool deprecated;
+} gql_field_t;
+
+/* One Go method on a gqlgen resolver type, keyed "<receiver>.<method>" with
+ * the method name in lower case (the receiver keeps its case). */
+typedef struct {
+    const cbm_gbuf_node_t *node;
+    char key[CBM_SZ_256];
+} gql_resolver_t;
+
+typedef struct {
+    cbm_gbuf_t *gb;
+    const cbm_gbuf_node_t **classes;
+    int class_count;
+    gql_field_t *fields;
+    int field_count;
+    gql_resolver_t *resolvers;
+    int resolver_count;
+    int routes;
+    int via_resolver;
+    int via_field;
+} gql_ctx_t;
+
+static bool gql_is_schema_file(const char *path) {
+    return path && path[0] && cbm_language_for_filename(path) == CBM_LANG_GRAPHQL;
+}
+
+static bool gql_is_go_file(const char *path) {
+    return path && path[0] && cbm_language_for_filename(path) == CBM_LANG_GO;
+}
+
+static void gql_lower(char *s) {
+    for (; *s; s++) {
+        *s = (char)tolower((unsigned char)*s);
+    }
+}
+
+/* The named type of a declared GraphQL type: `[PerpTrade!]!` -> `PerpTrade`. */
+static void gql_base_type(const char *declared, char *out, size_t out_sz) {
+    size_t n = 0;
+    for (const char *p = declared; p && *p && n + SKIP_ONE < out_sz; p++) {
+        if (isalnum((unsigned char)*p) || *p == '_') {
+            out[n++] = *p;
+        } else if (n > 0) {
+            break;
+        }
+    }
+    out[n] = '\0';
+}
+
+/* Length of the longest common directory prefix of two file paths. */
+static size_t gql_common_dir_len(const char *a, const char *b) {
+    size_t common = 0;
+    for (size_t i = 0; a[i] && a[i] == b[i]; i++) {
+        if (a[i] == '/') {
+            common = i + SKIP_ONE;
+        }
+    }
+    return common;
+}
+
+/* Is candidate a better pick than best for a schema node at `near`: closer in
+ * the directory tree, then the smaller QN. Deterministic whatever the buffer
+ * order. */
+static bool gql_better_pick(const cbm_gbuf_node_t *cand, const cbm_gbuf_node_t *best,
+                            const char *near) {
+    if (!best) {
+        return true;
+    }
+    size_t cand_len = gql_common_dir_len(cand->file_path ? cand->file_path : "", near);
+    size_t best_len = gql_common_dir_len(best->file_path ? best->file_path : "", near);
+    if (cand_len != best_len) {
+        return cand_len > best_len;
+    }
+    return strcmp(cand->qualified_name, best->qualified_name) < 0;
+}
+
+/* Collect every GraphQL Field node with its parent type, declared type and
+ * deprecation (extract_defs.c records `deprecated` and `deprecation_reason`). */
+static int gql_collect_fields(gql_ctx_t *ctx) {
+    const cbm_gbuf_node_t **nodes = NULL;
+    int count = 0;
+    if (cbm_gbuf_find_by_label(ctx->gb, "Field", &nodes, &count) != 0 || count == 0) {
+        return 0;
+    }
+    /* Size for the schema's fields only: every language's Fields share the
+     * label, and a large Java or C# tree has far more of them. */
+    int schema_count = 0;
+    for (int i = 0; i < count; i++) {
+        schema_count += gql_is_schema_file(nodes[i]->file_path) ? SKIP_ONE : 0;
+    }
+    if (schema_count == 0) {
+        return 0;
+    }
+    ctx->fields = cbm_alloc(CBM_MEM_CLASS_OTHER, (size_t)schema_count * sizeof(*ctx->fields));
+    if (!ctx->fields) {
+        return CBM_NOT_FOUND;
+    }
+    for (int i = 0; i < count && ctx->field_count < schema_count; i++) {
+        const cbm_gbuf_node_t *n = nodes[i];
+        if (!gql_is_schema_file(n->file_path) || !n->name || !n->properties_json) {
+            continue;
+        }
+        gql_field_t *f = &ctx->fields[ctx->field_count];
+        memset(f, 0, sizeof(*f));
+        yyjson_doc *doc = yyjson_read(n->properties_json, strlen(n->properties_json),
+                                      YYJSON_READ_ALLOW_INVALID_UNICODE);
+        yyjson_val *root = yyjson_doc_get_root(doc);
+        bool parented = extract_json_prop(root, "parent_class", f->parent_qn, sizeof(f->parent_qn));
+        extract_json_prop(root, "return_type", f->return_type, sizeof(f->return_type));
+        char flag[CBM_SZ_16] = "";
+        f->deprecated =
+            extract_json_prop(root, "deprecated", flag, sizeof(flag)) && strcmp(flag, "true") == 0;
+        if (f->deprecated) {
+            extract_json_prop(root, "deprecation_reason", f->reason, sizeof(f->reason));
+        }
+        yyjson_doc_free(doc);
+        if (parented) {
+            f->node = n;
+            ctx->field_count++;
+        }
+    }
+    return ctx->field_count;
+}
+
+/* Collect every GraphQL Class node (object, interface, input, enum, ...). */
+static int gql_collect_classes(gql_ctx_t *ctx) {
+    const cbm_gbuf_node_t **nodes = NULL;
+    int count = 0;
+    if (cbm_gbuf_find_by_label(ctx->gb, "Class", &nodes, &count) != 0 || count == 0) {
+        return 0;
+    }
+    ctx->classes = cbm_alloc(CBM_MEM_CLASS_OTHER, (size_t)count * sizeof(*ctx->classes));
+    if (!ctx->classes) {
+        return CBM_NOT_FOUND;
+    }
+    for (int i = 0; i < count; i++) {
+        if (gql_is_schema_file(nodes[i]->file_path) && nodes[i]->name && nodes[i]->qualified_name) {
+            ctx->classes[ctx->class_count++] = nodes[i];
+        }
+    }
+    return ctx->class_count;
+}
+
+static int gql_resolver_cmp(const void *x, const void *y) {
+    const gql_resolver_t *a = x;
+    const gql_resolver_t *b = y;
+    int c = strcmp(a->key, b->key);
+    return c != 0 ? c : strcmp(a->node->qualified_name, b->node->qualified_name);
+}
+
+/* The receiver type of a Go method: the last segment of its QN's parent,
+ * `proj.graph.resolver.perpResolver.Trades` -> `perpResolver`. */
+static bool gql_receiver_type(const cbm_gbuf_node_t *m, char *out, size_t out_sz) {
+    const char *qn = m->qualified_name;
+    size_t qlen = strlen(qn);
+    size_t nlen = strlen(m->name);
+    if (qlen <= nlen + SKIP_ONE || qn[qlen - nlen - SKIP_ONE] != '.' ||
+        strcmp(qn + qlen - nlen, m->name) != 0) {
+        return false;
+    }
+    size_t end = qlen - nlen - SKIP_ONE;
+    size_t start = end;
+    while (start > 0 && qn[start - SKIP_ONE] != '.') {
+        start--;
+    }
+    if (end - start + SKIP_ONE > out_sz) {
+        return false;
+    }
+    memcpy(out, qn + start, end - start);
+    out[end - start] = '\0';
+    return true;
+}
+
+static bool gql_ends_with(const char *s, const char *suffix) {
+    size_t sl = strlen(s);
+    size_t xl = strlen(suffix);
+    return sl > xl && strcmp(s + sl - xl, suffix) == 0;
+}
+
+/* Collect Go methods whose receiver type ends in "Resolver", sorted by key. */
+static int gql_collect_resolvers(gql_ctx_t *ctx) {
+    const cbm_gbuf_node_t **nodes = NULL;
+    int count = 0;
+    if (cbm_gbuf_find_by_label(ctx->gb, "Method", &nodes, &count) != 0 || count == 0) {
+        return 0;
+    }
+    ctx->resolvers = cbm_alloc(CBM_MEM_CLASS_OTHER, (size_t)count * sizeof(*ctx->resolvers));
+    if (!ctx->resolvers) {
+        return CBM_NOT_FOUND;
+    }
+    for (int i = 0; i < count; i++) {
+        const cbm_gbuf_node_t *m = nodes[i];
+        char recv[CBM_SZ_128];
+        if (!m->name || !m->qualified_name || !gql_is_go_file(m->file_path) ||
+            !gql_receiver_type(m, recv, sizeof(recv)) || !gql_ends_with(recv, "Resolver")) {
+            continue;
+        }
+        gql_resolver_t *r = &ctx->resolvers[ctx->resolver_count];
+        int n = snprintf(r->key, sizeof(r->key), "%s.%s", recv, m->name);
+        if (n <= 0 || (size_t)n >= sizeof(r->key)) {
+            continue;
+        }
+        gql_lower(r->key + strlen(recv) + SKIP_ONE);
+        r->node = m;
+        ctx->resolver_count++;
+    }
+    if (ctx->resolver_count > SKIP_ONE) {
+        qsort(ctx->resolvers, (size_t)ctx->resolver_count, sizeof(*ctx->resolvers),
+              gql_resolver_cmp);
+    }
+    return ctx->resolver_count;
+}
+
+/* The gqlgen resolver method for field `field` of type `type_name`, or NULL.
+ * gqlgen names the implementation `<lcFirst type>Resolver` and the method
+ * after the field in Go case (`id` -> `ID`), so the receiver matches exactly
+ * and the method name case-insensitively. An exact receiver also keeps out
+ * the generated `PerpResolver` interface, whose members are Methods with the
+ * same names. When several packages define the same resolver, the one
+ * nearest the schema file wins. */
+static const cbm_gbuf_node_t *gql_find_resolver(const gql_ctx_t *ctx, const char *type_name,
+                                                const char *field, const char *near) {
+    char key[CBM_SZ_256];
+    int n = snprintf(key, sizeof(key), "%sResolver.%s", type_name, field);
+    if (n <= 0 || (size_t)n >= sizeof(key)) {
+        return NULL;
+    }
+    key[0] = (char)tolower((unsigned char)key[0]);
+    gql_lower(key + strlen(type_name) + strlen("Resolver") + SKIP_ONE);
+    const cbm_gbuf_node_t *best = NULL;
+    /* Binary search for the first entry with this key, then scan its run. */
+    int lo = 0;
+    int hi = ctx->resolver_count;
+    while (lo < hi) {
+        int mid = lo + ((hi - lo) / PAIR_LEN);
+        if (strcmp(ctx->resolvers[mid].key, key) < 0) {
+            lo = mid + SKIP_ONE;
+        } else {
+            hi = mid;
+        }
+    }
+    for (int i = lo; i < ctx->resolver_count && strcmp(ctx->resolvers[i].key, key) == 0; i++) {
+        if (gql_better_pick(ctx->resolvers[i].node, best, near)) {
+            best = ctx->resolvers[i].node;
+        }
+    }
+    return best;
+}
+
+/* The schema type named `name` nearest `near`, or NULL. */
+static const cbm_gbuf_node_t *gql_find_class(const gql_ctx_t *ctx, const char *name,
+                                             const char *near) {
+    const cbm_gbuf_node_t *best = NULL;
+    for (int i = 0; i < ctx->class_count; i++) {
+        if (strcmp(ctx->classes[i]->name, name) == 0 &&
+            gql_better_pick(ctx->classes[i], best, near)) {
+            best = ctx->classes[i];
+        }
+    }
+    return best;
+}
+
+/* Upsert the Route for `path` (e.g. "Query.perp.trades") from field `f` of
+ * type `type_name`, and its one HANDLES edge. */
+static void gql_emit_route(gql_ctx_t *ctx, const char *path, const char *type_name,
+                           const gql_field_t *f) {
+    char route_qn[CBM_ROUTE_QN_SIZE];
+    int n = snprintf(route_qn, sizeof(route_qn), "__graphql__%s", path);
+    if (n <= 0 || (size_t)n >= sizeof(route_qn)) {
+        return;
+    }
+    char esc_type[CBM_SZ_512];
+    char esc_reason[CBM_SZ_1K];
+    cbm_json_escape(esc_type, sizeof(esc_type), f->return_type);
+    cbm_json_escape(esc_reason, sizeof(esc_reason), f->reason);
+    char props[CBM_SZ_2K];
+    (void)snprintf(props, sizeof(props),
+                   "{\"source\":\"graphql_schema\",\"schema_type\":\"%s\",\"deprecated\":%s,"
+                   "\"deprecation_reason\":\"%s\"}",
+                   esc_type, f->deprecated ? "true" : "false", esc_reason);
+    const cbm_gbuf_node_t *fn = f->node;
+    int64_t route_id = cbm_gbuf_upsert_node(ctx->gb, "Route", path, route_qn, fn->file_path,
+                                            fn->start_line, fn->end_line, props);
+    if (route_id == 0) {
+        return;
+    }
+    ctx->routes++;
+    const cbm_gbuf_node_t *resolver = gql_find_resolver(ctx, type_name, fn->name, fn->file_path);
+    if (resolver) {
+        cbm_gbuf_insert_edge(ctx->gb, resolver->id, route_id, "HANDLES",
+                             "{\"via\":\"gqlgen_resolver\"}");
+        ctx->via_resolver++;
+    } else {
+        cbm_gbuf_insert_edge(ctx->gb, fn->id, route_id, "HANDLES",
+                             "{\"via\":\"graphql_schema_field\"}");
+        ctx->via_field++;
+    }
+}
+
+/* Emit the Routes one level below root field `rf` (path `root_path`): one per
+ * field of rf's return type. Leaf return types have no fields: nothing. */
+static void gql_emit_children(gql_ctx_t *ctx, const char *root_path, const gql_field_t *rf) {
+    char base[CBM_SZ_256];
+    gql_base_type(rf->return_type, base, sizeof(base));
+    if (!base[0]) {
+        return;
+    }
+    const cbm_gbuf_node_t *type_node = gql_find_class(ctx, base, rf->node->file_path);
+    if (!type_node) {
+        return;
+    }
+    for (int i = 0; i < ctx->field_count; i++) {
+        const gql_field_t *cf = &ctx->fields[i];
+        if (strcmp(cf->parent_qn, type_node->qualified_name) != 0) {
+            continue;
+        }
+        char path[CBM_ROUTE_QN_SIZE];
+        int n = snprintf(path, sizeof(path), "%s.%s", root_path, cf->node->name);
+        if (n > 0 && (size_t)n < sizeof(path)) {
+            gql_emit_route(ctx, path, type_node->name, cf);
+        }
+    }
+}
+
+/* Emit the Routes for every field of one root type node. */
+static void gql_emit_root(gql_ctx_t *ctx, const cbm_gbuf_node_t *root) {
+    for (int i = 0; i < ctx->field_count; i++) {
+        const gql_field_t *rf = &ctx->fields[i];
+        if (strcmp(rf->parent_qn, root->qualified_name) != 0) {
+            continue;
+        }
+        char path[CBM_ROUTE_QN_SIZE];
+        int n = snprintf(path, sizeof(path), "%s.%s", root->name, rf->node->name);
+        if (n <= 0 || (size_t)n >= sizeof(path)) {
+            continue;
+        }
+        gql_emit_route(ctx, path, root->name, rf);
+        gql_emit_children(ctx, path, rf);
+    }
+}
+
+static bool gql_is_root_type(const char *name) {
+    for (int r = 0; r < GQL_ROOT_COUNT; r++) {
+        if (strcmp(name, gql_root_types[r]) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void gql_ctx_free(gql_ctx_t *ctx) {
+    cbm_free(CBM_MEM_CLASS_OTHER, ctx->classes);
+    cbm_free(CBM_MEM_CLASS_OTHER, ctx->fields);
+    cbm_free(CBM_MEM_CLASS_OTHER, ctx->resolvers);
+}
+
+/* Phase 4b entry: __graphql__<Root>.<field>[.<child>] Routes from GraphQL
+ * schema files, with HANDLES from gqlgen resolvers or the schema Field. */
+static void create_graphql_routes(cbm_gbuf_t *gb) {
+    gql_ctx_t ctx = {.gb = gb};
+    bool has_root = false;
+    if (gql_collect_classes(&ctx) > 0) {
+        for (int i = 0; i < ctx.class_count && !has_root; i++) {
+            has_root = gql_is_root_type(ctx.classes[i]->name);
+        }
+    }
+    /* Most repositories have no schema: stop before touching Fields/Methods. */
+    if (!has_root || gql_collect_fields(&ctx) <= 0 || gql_collect_resolvers(&ctx) < 0) {
+        gql_ctx_free(&ctx);
+        return;
+    }
+    for (int i = 0; i < ctx.class_count; i++) {
+        if (gql_is_root_type(ctx.classes[i]->name)) {
+            gql_emit_root(&ctx, ctx.classes[i]);
+        }
+    }
+    gql_ctx_free(&ctx);
+    if (ctx.routes > 0) {
+        char b1[CBM_SZ_16];
+        char b2[CBM_SZ_16];
+        char b3[CBM_SZ_16];
+        (void)snprintf(b1, sizeof(b1), "%d", ctx.routes);
+        (void)snprintf(b2, sizeof(b2), "%d", ctx.via_resolver);
+        (void)snprintf(b3, sizeof(b3), "%d", ctx.via_field);
+        cbm_log_info("pass.route_nodes.graphql", "routes", b1, "via_resolver", b2, "via_field", b3);
+    }
+}
+
 /* Phase 3: Create DATA_FLOWS edges by linking callers through Route to handlers. */
 static void create_data_flows(cbm_gbuf_t *gb) {
     const cbm_gbuf_node_t **routes = NULL;
@@ -1357,6 +1774,10 @@ void cbm_pipeline_create_route_nodes(cbm_gbuf_t *gb) {
      * Scans Class nodes from .proto files, follows DEFINES_METHOD edges
      * to find rpc methods, creates __grpc__ServiceName/MethodName Route nodes. */
     create_grpc_routes(gb);
+
+    /* Phase 4b: GraphQL field-path Route nodes from schema types, handled by
+     * gqlgen resolver methods (or the schema Field when there is none). */
+    create_graphql_routes(gb);
 
     /* Phase 5: filesystem-based SvelteKit routes (+server / +page.server /
      * +layout.server) — no call-site equivalent for pass_calls.c to pick
