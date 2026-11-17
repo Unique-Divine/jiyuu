@@ -9,6 +9,10 @@
  * These tools must only change the signed-in user's own messages, so each one
  * fetches the target message first and refuses locally when its author is
  * someone else.
+ *
+ * Text in Slack can carry injected instructions. To tie each write to a
+ * message the agent actually read, the caller also passes the message's
+ * current text, and messages older than a default 24-hour window are refused.
  */
 
 import { slackAPI } from "./slack-client.js";
@@ -78,19 +82,75 @@ export function slackWriteErrorResult(error, details = {}) {
   return messageWriteError(code, details);
 }
 
+// Default age window for edits and deletes. Env
+// SLACK_MCP_EDIT_DELETE_MAX_AGE_HOURS overrides it.
+export const DEFAULT_MAX_AGE_HOURS = 24;
+
+// Cap on conversations.replies pages read while looking for a thread reply.
+const MAX_REPLY_PAGES = 50;
+
+const SLACK_TS_PATTERN = /^\d+\.\d+$/;
+
+/**
+ * Build an invalid_argument error result for one input field.
+ */
+export function invalidArgument(field, message) {
+  return messageWriteError("invalid_argument", { field }, {
+    message,
+    next_action: "Fix the argument and call the tool again."
+  });
+}
+
+/**
+ * Validate the arguments every message write shares: channel_id, timestamp,
+ * and expected_text. Returns null when they are valid, otherwise an MCP
+ * error result. Runs before any Slack call.
+ */
+export function validateTargetArgs(args) {
+  const input = args && typeof args === "object" ? args : {};
+  const { channel_id: channelId, timestamp, expected_text: expectedText } = input;
+  if (typeof channelId !== "string" || channelId.trim() === "" || /\s/.test(channelId)) {
+    return invalidArgument("channel_id", "channel_id must be a non-empty channel or DM ID with no spaces.");
+  }
+  if (typeof timestamp !== "string" || !SLACK_TS_PATTERN.test(timestamp)) {
+    return invalidArgument("timestamp", "timestamp must be a Slack message timestamp such as \"1767368030.607599\".");
+  }
+  if (typeof expectedText !== "string") {
+    return invalidArgument("expected_text", "expected_text must be the message's current text, as read from Slack.");
+  }
+  return null;
+}
+
+/**
+ * Maximum message age, in hours, that an edit or delete may target.
+ */
+export function maxAgeHours(env = process.env) {
+  const raw = env.SLACK_MCP_EDIT_DELETE_MAX_AGE_HOURS;
+  const hours = Number(raw);
+  return raw !== undefined && raw !== "" && Number.isFinite(hours) && hours > 0
+    ? hours
+    : DEFAULT_MAX_AGE_HOURS;
+}
+
+/**
+ * The session token slackAPI would use right now, or "" when none is set.
+ */
+export function currentSessionToken() {
+  return loadTokensReadOnly()?.token || "";
+}
+
 /**
  * Signed-in user ID from auth.test, cached per session token.
  */
-export async function getSelfUserId() {
-  const cacheKey = loadTokensReadOnly()?.token || "";
-  const cached = selfUserIdByToken.get(cacheKey);
+export async function getSelfUserId(sessionToken = currentSessionToken()) {
+  const cached = selfUserIdByToken.get(sessionToken);
   if (cached) return cached;
 
-  const result = await slackAPI("auth.test", {});
+  const result = await slackAPI("auth.test", {}, { retryOnAuthFail: false });
   if (!result.user_id) {
     throw new Error("auth.test returned no user_id");
   }
-  selfUserIdByToken.set(cacheKey, result.user_id);
+  selfUserIdByToken.set(sessionToken, result.user_id);
   return result.user_id;
 }
 
@@ -101,7 +161,8 @@ export function clearSelfUserIdCache() {
 /**
  * Fetch one message by channel and timestamp, or null when it doesn't exist.
  * Top-level messages come from conversations.history; thread replies only
- * appear in conversations.replies, which accepts a reply's own timestamp.
+ * appear in conversations.replies, which accepts a reply's own timestamp and
+ * pages with response_metadata.next_cursor.
  */
 export async function findMessage(channelId, timestamp) {
   const history = await slackAPI("conversations.history", {
@@ -113,31 +174,72 @@ export async function findMessage(channelId, timestamp) {
   const top = (history.messages || []).find((m) => m.ts === timestamp);
   if (top) return top;
 
-  let replies;
-  try {
-    replies = await slackAPI("conversations.replies", {
-      channel: channelId,
-      ts: timestamp,
-      limit: 1000
-    });
-  } catch (error) {
-    if (error?.message === "thread_not_found" || error?.message === "message_not_found") {
-      return null;
+  let cursor;
+  for (let page = 0; page < MAX_REPLY_PAGES; page += 1) {
+    let replies;
+    try {
+      replies = await slackAPI("conversations.replies", {
+        channel: channelId,
+        ts: timestamp,
+        limit: 200,
+        cursor
+      });
+    } catch (error) {
+      if (error?.message === "thread_not_found" || error?.message === "message_not_found") {
+        return null;
+      }
+      throw error;
     }
-    throw error;
+    const found = (replies.messages || []).find((m) => m.ts === timestamp);
+    if (found) return found;
+    cursor = replies.response_metadata?.next_cursor;
+    if (!cursor) return null;
   }
-  return (replies.messages || []).find((m) => m.ts === timestamp) || null;
+  return null;
 }
 
 /**
- * Confirm the message exists and the signed-in user wrote it.
- * Returns { ok: true, message } or { ok: false, result } where result is a
- * ready MCP error.
+ * True when a re-read shows the message is no longer the user's live
+ * message: absent, a "This message was deleted." tombstone, or not theirs.
  */
-export async function checkOwnMessage(channelId, timestamp) {
+export function isGoneForSelf(message, selfId) {
+  return !message || message.subtype === "tombstone" || message.user !== selfId;
+}
+
+/**
+ * Confirm the target before a write:
+ * 1. the message is no older than maxAgeHours() (checked before any call),
+ * 2. it exists,
+ * 3. the signed-in user wrote it,
+ * 4. its text equals expected_text after trimming.
+ *
+ * Returns { ok: true, message, selfId, sessionToken } or
+ * { ok: false, result } where result is a ready MCP error. Pass the result
+ * to sessionChangedResult just before the write.
+ */
+export async function checkOwnMessage(channelId, timestamp, options = {}) {
+  const { expectedText, now = Date.now(), env = process.env } = options;
   const details = { channel: channelId, timestamp };
+  const sessionToken = currentSessionToken();
+
+  const limitHours = maxAgeHours(env);
+  const ageHours = (now - Number(timestamp) * 1000) / 3_600_000;
+  if (ageHours > limitHours) {
+    return {
+      ok: false,
+      result: messageWriteError("message_too_old", {
+        ...details,
+        age_hours: Math.round(ageHours * 10) / 10,
+        max_age_hours: limitHours
+      }, {
+        message: `The message is older than the ${limitHours}-hour window for edits and deletes.`,
+        next_action: "Leave it, or ask the user to raise SLACK_MCP_EDIT_DELETE_MAX_AGE_HOURS for this server."
+      })
+    };
+  }
+
   const [selfId, message] = await Promise.all([
-    getSelfUserId(),
+    getSelfUserId(sessionToken),
     findMessage(channelId, timestamp)
   ]);
 
@@ -156,7 +258,30 @@ export async function checkOwnMessage(channelId, timestamp) {
       })
     };
   }
-  return { ok: true, message };
+  if (typeof expectedText !== "string" || (message.text ?? "").trim() !== expectedText.trim()) {
+    return {
+      ok: false,
+      result: messageWriteError("text_mismatch", details, {
+        message: "expected_text doesn't match the message's current text, so the tool won't change it.",
+        next_action: "Read the message again with slack_conversations_history or slack_get_thread and confirm it's the one the user meant."
+      })
+    };
+  }
+  return { ok: true, message, selfId, sessionToken };
+}
+
+/**
+ * Refuse the write when the session token changed after checkOwnMessage,
+ * for example because slackAPI swapped in another Chrome session on
+ * invalid_auth. Returns null when the session is unchanged.
+ */
+export function sessionChangedResult(ownership, details = {}) {
+  if (currentSessionToken() === ownership.sessionToken) return null;
+  clearSelfUserIdCache();
+  return messageWriteError("session_changed", details, {
+    message: "The Slack session changed during the ownership check, so the tool didn't make the change.",
+    next_action: "Run slack_health_check to confirm the signed-in user, then call the tool again."
+  });
 }
 
 /**
