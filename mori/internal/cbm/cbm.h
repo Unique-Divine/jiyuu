@@ -374,6 +374,10 @@ typedef struct {
     const char *callee_name;       // raw callee text ("pkg.Func", "foo")
     const char *enclosing_func_qn; // QN of enclosing function (or module QN)
     const char *first_string_arg;  // first string literal argument (URL, topic, key) or NULL
+    const char *graphql_sig;       // GraphQL selection signature of a literal argument that
+                                   // holds an operation ("<type>|<name>|<path>,..." from
+                                   // cbm_service_pattern_graphql_signature), or NULL. Read
+                                   // only when the callee classifies as a GraphQL client.
     const char *second_arg_name;   // second argument identifier (handler ref) or NULL
     /* First arg_count captured arguments, arena-allocated on first capture;
      * NULL when arg_count == 0. Was an inline args[CBM_MAX_CALL_ARGS] (256 of
@@ -601,8 +605,11 @@ typedef struct {
 // String reference: URL, config key, or async target found in source.
 // Extracted from string literals during AST walk.
 typedef enum {
-    CBM_STRREF_URL = 0,    // REST path or full URL
-    CBM_STRREF_CONFIG = 1, // config file path or env var key
+    CBM_STRREF_URL = 0,     // REST path or full URL
+    CBM_STRREF_CONFIG = 1,  // config file path or env var key
+    CBM_STRREF_GRAPHQL = 2, // GraphQL operation held by a module-level constant: value is
+                            // its selection signature, enclosing_func_qn the constant's
+                            // QN, key_path the callee wrapping the literal (or NULL)
 } CBMStringRefKind;
 
 typedef struct {

@@ -1995,6 +1995,7 @@ static void pxc_append_synthetic_calls(CBMArena *dst_arena, CBMCallArray *dst_ca
             src->first_string_arg ? cbm_arena_strdup(dst_arena, src->first_string_arg) : NULL;
         dst.second_arg_name =
             src->second_arg_name ? cbm_arena_strdup(dst_arena, src->second_arg_name) : NULL;
+        dst.graphql_sig = src->graphql_sig ? cbm_arena_strdup(dst_arena, src->graphql_sig) : NULL;
         dst.args = NULL;
         if (src->args && src->arg_count > 0) {
             dst.args = cbm_arena_calloc(dst_arena, (size_t)src->arg_count * sizeof(CBMCallArg));

@@ -1440,6 +1440,47 @@ static bool is_string_node(const char *kind);
 
 // --- Module-level constant collection ---
 
+/* A module-level constant whose value is a GraphQL operation document: a
+ * string or template literal (`MARKETS = """query { ... }"""`), or a call or
+ * tagged template wrapping one (`const q = graphql(`query Q { ... }`)`,
+ * `const q = gql`...``). Records a CBM_STRREF_GRAPHQL ref owned by the
+ * constant: value = selection signature, key_path = the wrapping callee (NULL
+ * for a bare literal). An operation keyword and a field are required: a
+ * `{ ... }` literal is not evidence of a GraphQL document. */
+static void record_graphql_constant(CBMExtractCtx *ctx, const char *name, TSNode value) {
+    if (!name || !name[0] || !ctx->module_qn) {
+        return;
+    }
+    const char *callee = NULL;
+    const char *vk = ts_node_type(value);
+    if (strcmp(vk, "call_expression") == 0 || strcmp(vk, "call") == 0) {
+        TSNode fn = ts_node_child_by_field_name(value, TS_FIELD("function"));
+        TSNode args = ts_node_child_by_field_name(value, TS_FIELD("arguments"));
+        if (ts_node_is_null(fn) || ts_node_is_null(args)) {
+            return;
+        }
+        callee = cbm_node_text(ctx->arena, fn, ctx->source);
+        value = strcmp(ts_node_type(args), "template_string") == 0 ||
+                        ts_node_named_child_count(args) == 0
+                    ? args
+                    : ts_node_named_child(args, 0);
+    }
+    const char *sig = cbm_graphql_literal_sig(ctx->arena, value, ctx->source, true);
+    const char *paths = sig ? strrchr(sig, '|') : NULL;
+    if (!paths || !paths[SKIP_ONE]) {
+        return;
+    }
+    CBMStringRef ref = {
+        .value = sig,
+        .enclosing_func_qn = cbm_arena_sprintf(ctx->arena, "%s.%s", ctx->module_qn, name),
+        .key_path = callee,
+        .kind = CBM_STRREF_GRAPHQL,
+    };
+    if (ref.enclosing_func_qn) {
+        cbm_stringref_push(&ctx->result->string_refs, ctx->arena, ref);
+    }
+}
+
 static void handle_string_constants(CBMExtractCtx *ctx, TSNode node, const WalkState *state) {
     /* Only collect at module level (not inside functions/classes) */
     if (state->enclosing_func_qn != NULL && state->enclosing_func_qn != ctx->module_qn) {
@@ -1478,6 +1519,8 @@ static void handle_string_constants(CBMExtractCtx *ctx, TSNode node, const WalkS
     if (strcmp(name_kind, "identifier") != 0 && strcmp(name_kind, "constant") != 0) {
         return;
     }
+
+    record_graphql_constant(ctx, cbm_node_text(ctx->arena, name_node, ctx->source), value_node);
 
     /* Python and JS/TS fold the value: `BASE + "/path"`, `${BASE}/path`,
      * f"{BASE}/path" and object-literal endpoint maps (#706, #1147). */

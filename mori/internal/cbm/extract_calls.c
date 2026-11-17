@@ -3257,6 +3257,30 @@ static const char *extract_positional_url(CBMExtractCtx *ctx, TSNode arg, const 
     return NULL;
 }
 
+/* GraphQL selection signature of a call's operation argument: a tagged
+ * template (gql`...`, whose arguments node is the template itself) or one of
+ * the first positional / keyword string or template literals. Read apart from
+ * first_string_arg, which keeps its URL-shaped limits. */
+static const char *extract_graphql_arg_sig(CBMExtractCtx *ctx, TSNode args) {
+    if (strcmp(ts_node_type(args), "template_string") == 0) {
+        return cbm_graphql_literal_sig(ctx->arena, args, ctx->source, false);
+    }
+    uint32_t nc = ts_node_named_child_count(args);
+    for (uint32_t ai = 0; ai < nc && ai < MAX_POSITIONAL_SCAN; ai++) {
+        TSNode arg = ts_node_named_child(args, ai);
+        const char *ak = ts_node_type(arg);
+        if ((strcmp(ak, "argument") == 0 || strcmp(ak, "keyword_argument") == 0) &&
+            ts_node_named_child_count(arg) > 0) {
+            arg = ts_node_named_child(arg, ts_node_named_child_count(arg) - SKIP_ONE);
+        }
+        const char *sig = cbm_graphql_literal_sig(ctx->arena, arg, ctx->source, false);
+        if (sig) {
+            return sig;
+        }
+    }
+    return NULL;
+}
+
 // Extract URL/topic from keyword or positional args.
 static const char *extract_url_or_topic_arg(CBMExtractCtx *ctx, TSNode args,
                                             const char *callee_name) {
@@ -5064,6 +5088,7 @@ CBMInvocationDescriptor handle_calls(CBMExtractCtx *ctx, TSNode node, const CBML
             }
             if (!ts_node_is_null(args)) {
                 call.first_string_arg = extract_url_or_topic_arg(ctx, args, call.callee_name);
+                call.graphql_sig = extract_graphql_arg_sig(ctx, args);
                 /* #1146: a Laravel registration's slashless URI ('users', '')
                  * becomes '/users' / '/' so it mints and composes below. */
                 const char *laravel_uri = NULL;

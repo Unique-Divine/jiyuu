@@ -1,4 +1,5 @@
 #include "helpers.h"
+#include "service_patterns.h"
 #include "arena.h" // CBMArena, cbm_arena_alloc/strdup/strndup/sprintf
 #include "cbm.h"   // CBMExtractCtx, CBMLanguage, CBM_LANG_*, EFCEntry, EFC_SIZE
 #include "lang_specs.h"
@@ -2546,4 +2547,72 @@ const char *cbm_template_string_text(CBMArena *a, TSNode node, const char *sourc
         return NULL;
     }
     return cbm_arena_strndup(a, buf, pos);
+}
+
+/* Largest literal read as a GraphQL document (generated documents run to tens
+ * of KB; anything past this is not hand-written client code). */
+enum { GQL_DOC_MAX = 256 * CBM_SZ_1K, GQL_TRIPLE_QUOTE = 3, GQL_SIG_MAX = CBM_SZ_4K };
+
+static bool gql_literal_kind(const char *k) {
+    return strcmp(k, "string") == 0 || strcmp(k, "string_literal") == 0 ||
+           strcmp(k, "template_string") == 0 || strcmp(k, "raw_string_literal") == 0 ||
+           strcmp(k, "interpreted_string_literal") == 0 || strcmp(k, "string_content") == 0;
+}
+
+/* Byte span of a literal's text inside its delimiters. */
+static void gql_literal_span(const char *src, uint32_t *start, uint32_t *end) {
+    uint32_t s = *start;
+    uint32_t e = *end;
+    while (s < e && isalpha((unsigned char)src[s])) {
+        s++; /* Python r/b/f/u prefixes */
+    }
+    uint32_t q = 0;
+    if (e - s >= GQL_TRIPLE_QUOTE * PAIR_LEN &&
+        (strncmp(src + s, "\"\"\"", GQL_TRIPLE_QUOTE) == 0 ||
+         strncmp(src + s, "'''", GQL_TRIPLE_QUOTE) == 0)) {
+        q = GQL_TRIPLE_QUOTE;
+    } else if (e - s >= PAIR_LEN && (src[s] == '"' || src[s] == '\'' || src[s] == '`')) {
+        q = SKIP_ONE;
+    } else if (s != *start) {
+        s = *start; /* letters but no quote: string_content, not a prefix */
+    }
+    *start = s + q;
+    *end = e - q;
+}
+
+/* Cheap pre-check on the raw bytes: a document opens with an operation or
+ * fragment keyword, a selection set, a comment or an interpolation. */
+static bool gql_opens_like_document(const char *p, const char *end) {
+    for (;;) {
+        while (p < end && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')) {
+            p++;
+        }
+        if (p + SKIP_ONE < end && p[0] == '\\' && p[SKIP_ONE] == 'n') {
+            p += PAIR_LEN; /* an escaped newline in a one-line literal */
+            continue;
+        }
+        break;
+    }
+    return p < end && (*p == 'q' || *p == 'm' || *p == 's' || *p == 'f' || *p == '{' || *p == '#' ||
+                       *p == '$');
+}
+
+const char *cbm_graphql_literal_sig(CBMArena *a, TSNode node, const char *source,
+                                    bool require_keyword) {
+    if (ts_node_is_null(node) || !source || !gql_literal_kind(ts_node_type(node))) {
+        return NULL;
+    }
+    uint32_t start = ts_node_start_byte(node);
+    uint32_t end = ts_node_end_byte(node);
+    gql_literal_span(source, &start, &end);
+    if (end <= start || end - start > GQL_DOC_MAX ||
+        !gql_opens_like_document(source + start, source + end)) {
+        return NULL;
+    }
+    char *doc = cbm_arena_strndup(a, source + start, end - start);
+    char sig[GQL_SIG_MAX];
+    if (!doc || !cbm_service_pattern_graphql_signature(doc, require_keyword, sig, sizeof(sig))) {
+        return NULL;
+    }
+    return cbm_arena_strdup(a, sig);
 }
