@@ -345,8 +345,8 @@ TEST(graphql_route_keyed_by_operation_name_issue598) {
  * (HANDLES from the schema Field) and a subscription. Routes go one level
  * below the root, so PerpTrade's fields appear only under
  * Subscription.perpTrades (its root return type) and never under
- * Query.perp.trades. gqlgen's generated resolver interfaces must not be taken
- * for the implementations. */
+ * Query.perp.trades. gqlgen's generated resolver interfaces and a lookalike
+ * outside the resolver package must not be taken for the implementations. */
 static const EtFile et_gqlgen_files[] = {
     {"go.mod", "module keeper\n"},
     {"graph/query.graphqls",
@@ -385,6 +385,13 @@ static const EtFile et_gqlgen_files[] = {
      "type QueryResolver interface {\n"
      "\tPerp(ctx context.Context) (*model.Perp, error)\n"
      "\tAppVersion(ctx context.Context) (string, error)\n}\n"},
+    /* A package that is not gqlgen's resolver package (no *.resolvers.go)
+     * with a lookalike perpResolver.Trades, as near the schema as the real
+     * one: never a candidate. */
+    {"graph/legacy/perp.go",
+     "package legacy\n\n"
+     "type perpResolver struct{}\n\n"
+     "func (r *perpResolver) Trades() int {\n\treturn 0\n}\n"},
     {"graph/resolver/resolver.go",
      "package resolver\n\n"
      "type Resolver struct{}\n\n"
@@ -423,28 +430,31 @@ typedef struct {
     const char *handler_label;
     const char *handler_qn_suffix;
     const char *via;
+    int ambiguous;
 } EtGqlServerRoute;
 
 static const EtGqlServerRoute et_gqlgen_want[] = {
     {"__graphql__Query.perp", "Perp!", "false", "", "Method", ".resolver.queryResolver.Perp",
-     "gqlgen_resolver"},
+     "gqlgen_resolver", 0},
     {"__graphql__Query.perp.trades", "[PerpTrade!]!", "false", "", "Method",
-     ".resolver.perpResolver.Trades", "gqlgen_resolver"},
+     ".resolver.perpResolver.Trades", "gqlgen_resolver", 0},
     {"__graphql__Query.perp.realizedPnl", "Float", "true", "Use realizedPnlUsd.", "Method",
-     ".resolver.perpResolver.RealizedPnl", "gqlgen_resolver"},
+     ".resolver.perpResolver.RealizedPnl", "gqlgen_resolver", 0},
     {"__graphql__Query.perp.realizedPnlUsd", "Float", "false", "", "Field", ".Perp.realizedPnlUsd",
-     "graphql_schema_field"},
-    {"__graphql__Query.appVersion", "String!", "false", "", "Method", ".resolver.queryResolver.AppVersion",
-     "gqlgen_resolver"},
+     "graphql_schema_field", 0},
+    {"__graphql__Query.appVersion", "String!", "false", "", "Method",
+     ".resolver.queryResolver.AppVersion", "gqlgen_resolver", 0},
     {"__graphql__Query.oldPing", "String", "true", "Use appVersion instead.", "Field",
-     ".Query.oldPing", "graphql_schema_field"},
+     ".Query.oldPing", "graphql_schema_field", 0},
     {"__graphql__Subscription.perpTrades", "[PerpTrade!]!", "false", "", "Method",
-     ".resolver.subscriptionResolver.PerpTrades", "gqlgen_resolver"},
+     ".resolver.subscriptionResolver.PerpTrades", "gqlgen_resolver", 0},
     {"__graphql__Subscription.perpTrades.id", "ID!", "false", "", "Field", ".PerpTrade.id",
-     "graphql_schema_field"},
+     "graphql_schema_field", 0},
     {"__graphql__Subscription.perpTrades.trader", "String!", "false", "", "Field",
-     ".PerpTrade.trader", "graphql_schema_field"},
+     ".PerpTrade.trader", "graphql_schema_field", 0},
 };
+
+#define ET_NWANT(w) ((int)(sizeof(w) / sizeof((w)[0])))
 
 static int et_ends_with(const char *s, const char *suffix) {
     size_t sl = strlen(s);
@@ -453,27 +463,28 @@ static int et_ends_with(const char *s, const char *suffix) {
 }
 
 /* Check one Route row against the expected table; returns 1 on a match. */
-static int et_gqlgen_row_ok(const char *qn, const char *rprops, const char *eprops,
-                            const char *hlabel, const char *hqn, int *seen) {
-    for (size_t wi = 0; wi < sizeof(et_gqlgen_want) / sizeof(et_gqlgen_want[0]); wi++) {
-        const EtGqlServerRoute *w = &et_gqlgen_want[wi];
+static int et_gqlgen_row_ok(const EtGqlServerRoute *want, int nwant, const char *qn,
+                            const char *rprops, const char *eprops, const char *hlabel,
+                            const char *hqn, int *seen) {
+    for (int wi = 0; wi < nwant; wi++) {
+        const EtGqlServerRoute *w = &want[wi];
         if (strcmp(qn, w->qn) != 0) {
             continue;
         }
         seen[wi]++;
-        char want_props[512];
+        char want_props[4096];
         snprintf(want_props, sizeof(want_props),
                  "{\"source\":\"graphql_schema\",\"schema_type\":\"%s\",\"deprecated\":%s,"
-                 "\"deprecation_reason\":\"%s\"}",
-                 w->schema_type, w->deprecated, w->reason);
+                 "\"deprecation_reason\":\"%s\"%s}",
+                 w->schema_type, w->deprecated, w->reason,
+                 w->ambiguous ? ",\"ambiguous\":true" : "");
         char want_via[64];
         snprintf(want_via, sizeof(want_via), "\"via\":\"%s\"", w->via);
         int ok = strcmp(rprops, want_props) == 0 && strstr(eprops, want_via) != NULL &&
                  strcmp(hlabel, w->handler_label) == 0 && et_ends_with(hqn, w->handler_qn_suffix);
         if (!ok) {
-            fprintf(stderr,
-                    "  [ET-GQLS] %s props=%s handles=%s from %s %s (want %s, %s %s)\n", qn,
-                    rprops, eprops, hlabel, hqn, want_props, w->handler_label, w->via);
+            fprintf(stderr, "  [ET-GQLS] %s props=%s handles=%s from %s %s (want %s, %s %s)\n",
+                    qn, rprops, eprops, hlabel, hqn, want_props, w->handler_label, w->via);
         }
         return ok;
     }
@@ -481,14 +492,14 @@ static int et_gqlgen_row_ok(const char *qn, const char *rprops, const char *epro
     return 0;
 }
 
-/* Every __graphql__ Route with each of its HANDLES edges: exactly the table,
- * one handler per Route. */
-static int et_gqlgen_routes_exact(cbm_store_t *store, const char *project) {
-    enum { NWANT = sizeof(et_gqlgen_want) / sizeof(et_gqlgen_want[0]) };
-    int seen[NWANT] = {0};
-    int ok = store != NULL;
+/* Every schema-sourced __graphql__ Route with each of its HANDLES edges:
+ * exactly the table, one handler per Route. */
+static int et_gqlgen_routes_exact(cbm_store_t *store, const char *project,
+                                  const EtGqlServerRoute *want, int nwant) {
+    int seen[64] = {0};
+    int ok = store != NULL && nwant <= 64;
     sqlite3_stmt *st = NULL;
-    if (!store ||
+    if (!ok ||
         sqlite3_prepare_v2(cbm_store_get_db(store),
                            "SELECT r.qualified_name, r.properties, IFNULL(e.properties,''), "
                            "IFNULL(h.label,''), IFNULL(h.qualified_name,'') FROM nodes r "
@@ -506,36 +517,135 @@ static int et_gqlgen_routes_exact(cbm_store_t *store, const char *project) {
             col[c] = (const char *)sqlite3_column_text(st, c);
             if (!col[c]) col[c] = "";
         }
-        ok &= et_gqlgen_row_ok(col[0], col[1], col[2], col[3], col[4], seen);
+        ok &= et_gqlgen_row_ok(want, nwant, col[0], col[1], col[2], col[3], col[4], seen);
     }
     sqlite3_finalize(st);
-    for (int wi = 0; wi < NWANT; wi++) {
+    for (int wi = 0; wi < nwant; wi++) {
         if (seen[wi] != 1) {
-            fprintf(stderr, "  [ET-GQLS] %s: %d HANDLES rows, want 1\n", et_gqlgen_want[wi].qn,
-                    seen[wi]);
+            fprintf(stderr, "  [ET-GQLS] %s: %d HANDLES rows, want 1\n", want[wi].qn, seen[wi]);
             ok = 0;
         }
     }
     return ok;
 }
 
-TEST(graphql_gqlgen_field_routes_sequential) {
+static int et_gqlgen_case(const EtFile *files, int nfiles, int parallel,
+                          const EtGqlServerRoute *want, int nwant) {
     EtProj lp;
     cbm_store_t *store =
-        et_index_files(&lp, et_gqlgen_files, (int)(sizeof(et_gqlgen_files) / sizeof(*et_gqlgen_files)));
-    int ok = et_gqlgen_routes_exact(store, lp.project);
+        parallel ? et_index_parallel(&lp, files, nfiles) : et_index_files(&lp, files, nfiles);
+    int ok = et_gqlgen_routes_exact(store, lp.project, want, nwant);
     et_cleanup(&lp, store);
-    ASSERT_TRUE(ok);
+    return ok;
+}
+
+TEST(graphql_gqlgen_field_routes_sequential) {
+    ASSERT_TRUE(et_gqlgen_case(et_gqlgen_files, ET_NWANT(et_gqlgen_files), 0, et_gqlgen_want,
+                               ET_NWANT(et_gqlgen_want)));
     PASS();
 }
 
 TEST(graphql_gqlgen_field_routes_parallel) {
-    EtProj lp;
-    cbm_store_t *store = et_index_parallel(
-        &lp, et_gqlgen_files, (int)(sizeof(et_gqlgen_files) / sizeof(*et_gqlgen_files)));
-    int ok = et_gqlgen_routes_exact(store, lp.project);
-    et_cleanup(&lp, store);
-    ASSERT_TRUE(ok);
+    ASSERT_TRUE(et_gqlgen_case(et_gqlgen_files, ET_NWANT(et_gqlgen_files), 1, et_gqlgen_want,
+                               ET_NWANT(et_gqlgen_want)));
+    PASS();
+}
+
+/* Two gqlgen servers in one project both define Query.ping: the Route is
+ * shared, so neither resolver may claim it. It is marked ambiguous and keeps
+ * one HANDLES, from the first schema's Field. Query.pong is also defined by
+ * a schema copy without resolvers (svc_c), but only svc_a resolves it: its
+ * resolver wins and the Route is not ambiguous. */
+static const EtFile et_gqlgen_multi_files[] = {
+    {"go.mod", "module multi\n"},
+    {"svc_a/graph/schema.graphqls", "type Query {\n  ping: String\n  pong: String\n}\n"},
+    {"svc_a/graph/schema.resolvers.go",
+     "package graph\n\n"
+     "type queryResolver struct{}\n\n"
+     "func (r *queryResolver) Ping() string {\n\treturn \"a\"\n}\n\n"
+     "func (r *queryResolver) Pong() string {\n\treturn \"a\"\n}\n"},
+    {"svc_b/graph/schema.graphqls", "type Query {\n  ping: String\n}\n"},
+    {"svc_b/graph/schema.resolvers.go",
+     "package graph\n\n"
+     "type queryResolver struct{}\n\n"
+     "func (r *queryResolver) Ping() string {\n\treturn \"b\"\n}\n"},
+    {"svc_c/schema.graphql", "type Query {\n  pong: String\n}\n"},
+};
+
+static const EtGqlServerRoute et_gqlgen_multi_want[] = {
+    {"__graphql__Query.ping", "String", "false", "", "Field", ".svc_a.graph.schema.Query.ping",
+     "graphql_schema_field", 1},
+    {"__graphql__Query.pong", "String", "false", "", "Method", ".svc_a.graph.queryResolver.Pong",
+     "gqlgen_resolver", 0},
+};
+
+TEST(graphql_gqlgen_duplicate_paths_one_handler) {
+    ASSERT_TRUE(et_gqlgen_case(et_gqlgen_multi_files, ET_NWANT(et_gqlgen_multi_files), 0,
+                               et_gqlgen_multi_want, ET_NWANT(et_gqlgen_multi_want)));
+    PASS();
+}
+
+/* `schema { query: RootQuery mutation: RootMutation }` names the roots, so
+ * the type called Query is an ordinary type here; Routes still say Query and
+ * Mutation (the operation), and the resolver follows the type name
+ * (rootQueryResolver). `extend type` blocks add fields to the root and to a
+ * child type from another file. */
+static const EtFile et_gqlgen_remap_files[] = {
+    {"go.mod", "module remap\n"},
+    {"graph/schema.graphqls",
+     "schema {\n  query: RootQuery\n  mutation: RootMutation\n}\n\n"
+     "type RootQuery {\n  ping: String\n}\n\n"
+     "type RootMutation {\n  save: Boolean\n}\n\n"
+     "type Query {\n  legacy: String\n}\n"},
+    {"graph/extra.graphqls",
+     "extend type RootQuery {\n  extra: Item\n}\n\n"
+     "type Item {\n  id: ID!\n}\n\n"
+     "extend type Item {\n  name: String\n}\n"},
+    {"graph/schema.resolvers.go",
+     "package graph\n\n"
+     "type rootQueryResolver struct{}\n\n"
+     "func (r *rootQueryResolver) Extra() int {\n\treturn 0\n}\n"},
+};
+
+static const EtGqlServerRoute et_gqlgen_remap_want[] = {
+    {"__graphql__Query.ping", "String", "false", "", "Field", ".RootQuery.ping",
+     "graphql_schema_field", 0},
+    {"__graphql__Query.extra", "Item", "false", "", "Method", ".graph.rootQueryResolver.Extra",
+     "gqlgen_resolver", 0},
+    {"__graphql__Query.extra.id", "ID!", "false", "", "Field", ".Item.id", "graphql_schema_field",
+     0},
+    {"__graphql__Query.extra.name", "String", "false", "", "Field", ".Item.name",
+     "graphql_schema_field", 0},
+    {"__graphql__Mutation.save", "Boolean", "false", "", "Field", ".RootMutation.save",
+     "graphql_schema_field", 0},
+};
+
+TEST(graphql_schema_remap_and_extensions) {
+    ASSERT_TRUE(et_gqlgen_case(et_gqlgen_remap_files, ET_NWANT(et_gqlgen_remap_files), 0,
+                               et_gqlgen_remap_want, ET_NWANT(et_gqlgen_remap_want)));
+    PASS();
+}
+
+/* Names and reasons have no length limit: a 600-byte reason and a 300-byte
+ * type name survive whole, and the long type still yields its child Route. */
+TEST(graphql_long_reason_and_type_name) {
+    char reason[601];
+    char type[301];
+    memset(reason, 'r', sizeof(reason) - 1);
+    reason[sizeof(reason) - 1] = '\0';
+    memset(type, 'T', sizeof(type) - 1);
+    type[sizeof(type) - 1] = '\0';
+    char schema[2048];
+    snprintf(schema, sizeof(schema),
+             "type Query {\n  big: %s @deprecated(reason: \"%s\")\n}\n\ntype %s {\n  id: ID\n}\n",
+             type, reason, type);
+    const EtFile files[] = {{"graph/schema.graphqls", schema}};
+    const EtGqlServerRoute want[] = {
+        {"__graphql__Query.big", type, "true", reason, "Field", ".Query.big",
+         "graphql_schema_field", 0},
+        {"__graphql__Query.big.id", "ID", "false", "", "Field", ".id", "graphql_schema_field", 0},
+    };
+    ASSERT_TRUE(et_gqlgen_case(files, 1, 0, want, ET_NWANT(want)));
     PASS();
 }
 
@@ -3254,6 +3364,9 @@ SUITE(edge_types_probe) {
     RUN_TEST(graphql_operation_identity_parser_issue598);
     RUN_TEST(graphql_gqlgen_field_routes_sequential);
     RUN_TEST(graphql_gqlgen_field_routes_parallel);
+    RUN_TEST(graphql_gqlgen_duplicate_paths_one_handler);
+    RUN_TEST(graphql_schema_remap_and_extensions);
+    RUN_TEST(graphql_long_reason_and_type_name);
     RUN_TEST(handles_flask_python);
     RUN_TEST(handles_fastapi_python);
     RUN_TEST(handles_drf_action_python);
