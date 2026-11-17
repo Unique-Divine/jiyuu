@@ -333,6 +333,20 @@ TEST(graphql_route_keyed_by_operation_name_issue598) {
          * anonymous queries and share one key. */
         {"__graphql__query__anonymous", "(anonymous query)"},
         {"__graphql__mutation__anonymous", "(anonymous mutation)"},
+        /* Field-path Routes, keyed by root type and at most two fields. */
+        {"__graphql__Query.user", "Query.user"},
+        {"__graphql__Query.user.name", "Query.user.name"},
+        {"__graphql__Mutation.updateUser", "Mutation.updateUser"},
+        {"__graphql__Mutation.updateUser.id", "Mutation.updateUser.id"},
+        {"__graphql__Query.users", "Query.users"},
+        {"__graphql__Subscription.event", "Subscription.event"},
+        {"__graphql__Subscription.event.id", "Subscription.event.id"},
+        {"__graphql__Query.products", "Query.products"},
+        {"__graphql__Query.products.items", "Query.products.items"},
+        {"__graphql__Query.orders", "Query.orders"},
+        {"__graphql__Query.orders.id", "Query.orders.id"},
+        {"__graphql__Query.orders.total", "Query.orders.total"},
+        {"__graphql__Mutation.logout", "Mutation.logout"},
     };
     ASSERT_TRUE(et_graphql_routes_exact(f, (int)(sizeof(f) / sizeof(f[0])), want,
                                         (int)(sizeof(want) / sizeof(want[0]))));
@@ -1393,6 +1407,209 @@ TEST(graphql_selection_signature_parser) {
     ASSERT_STR_EQ(paths, "a,b.c");
     ASSERT_TRUE(cbm_service_pattern_graphql_sig_parts("select|x|", &type, name, sizeof(name)) ==
                 NULL);
+    PASS();
+}
+
+/* Every GRAPHQL_CALLS edge as "\n<source name>><target QN>" lines, plus the
+ * props of the edge into `props_qn` (when non-NULL) in props_out. */
+static int et_gql_edges(const EtFile *files, int nfiles, bool parallel, char *out, size_t out_sz,
+                        const char *props_qn, const char *props_src, char *props_out,
+                        size_t props_sz) {
+    EtProj lp;
+    cbm_store_t *store =
+        parallel ? et_index_parallel(&lp, files, nfiles) : et_index_files(&lp, files, nfiles);
+    size_t len = 0;
+    out[0] = '\0';
+    if (props_out) {
+        props_out[0] = '\0';
+    }
+    int n = 0;
+    cbm_edge_t *edges = NULL;
+    if (store && cbm_store_find_edges_by_type(store, lp.project, "GRAPHQL_CALLS", &edges, &n) ==
+                     CBM_STORE_OK) {
+        for (int i = 0; i < n; i++) {
+            cbm_node_t src;
+            cbm_node_t tgt;
+            memset(&src, 0, sizeof(src));
+            memset(&tgt, 0, sizeof(tgt));
+            if (cbm_store_find_node_by_id(store, edges[i].source_id, &src) == CBM_STORE_OK &&
+                cbm_store_find_node_by_id(store, edges[i].target_id, &tgt) == CBM_STORE_OK) {
+                int w = snprintf(out + len, out_sz - len, "\n%s>%s", src.name ? src.name : "",
+                                 tgt.qualified_name ? tgt.qualified_name : "");
+                if (w > 0 && (size_t)w < out_sz - len) {
+                    len += (size_t)w;
+                }
+                if (props_out && props_qn && tgt.qualified_name && src.name &&
+                    strcmp(tgt.qualified_name, props_qn) == 0 && strcmp(src.name, props_src) == 0) {
+                    snprintf(props_out, props_sz, "%s",
+                             edges[i].properties_json ? edges[i].properties_json : "");
+                }
+            }
+            cbm_node_free_fields(&src);
+            cbm_node_free_fields(&tgt);
+        }
+        cbm_store_free_edges(edges, n);
+    }
+    if (len + 1 < out_sz) {
+        out[len++] = '\n';
+        out[len] = '\0';
+    }
+    et_cleanup(&lp, store);
+    return n;
+}
+
+/* Each "src>qn" in want must be an edge line, each in reject must not. */
+static int et_gql_expect(const char *dump, const char *const *want, const char *const *reject) {
+    int ok = 1;
+    char line[600];
+    for (int i = 0; want && want[i]; i++) {
+        snprintf(line, sizeof(line), "\n%s\n", want[i]);
+        if (!strstr(dump, line)) {
+            fprintf(stderr, "  [ET-GQL] missing edge %s\n", want[i]);
+            ok = 0;
+        }
+    }
+    for (int i = 0; reject && reject[i]; i++) {
+        snprintf(line, sizeof(line), "\n%s\n", reject[i]);
+        if (strstr(dump, line)) {
+            fprintf(stderr, "  [ET-GQL] unexpected edge %s\n", reject[i]);
+            ok = 0;
+        }
+    }
+    if (!ok) {
+        fprintf(stderr, "  [ET-GQL] edges:%s", dump);
+    }
+    return ok;
+}
+
+/* A codegen `graphql()` from a `codegen/gql` module (graphql-codegen client
+ * preset, as in a webapp's `@/graphql-codegen/gql`): multi-line operations
+ * longer than 512 bytes with aliases, nested arguments and fragment spreads,
+ * the fragments in calls of their own. */
+static const EtFile et_gql_ts_files[] = {
+    {"client/codegen/gql.ts",
+     "export function graphql(source: string): string {\n  return source\n}\n"},
+    {"client/query/perp.ts",
+     "import { graphql } from \"../codegen/gql\"\n\n"
+     "graphql(`\n  fragment PerpTradeFields on PerpTrade {\n    id\n    trader\n  }\n`)\n\n"
+     "export const perpTraderOpenTradesQuery = graphql(`\n"
+     "  query PerpTraderOpenTrades($trader: String!, $limit: Int!, $offset: Int!) {\n"
+     "    perp {\n"
+     "      trades(\n"
+     "        where: { trader: $trader, isOpen: true }\n"
+     "        limit: $limit\n"
+     "        offset: $offset\n"
+     "        order_desc: true\n"
+     "      ) {\n"
+     "        ...PerpTradeFields\n"
+     "        collateralAmount\n        leverage\n        openPrice\n        closePrice\n"
+     "        state {\n          liquidationPrice\n          pnlCollateral\n"
+     "          pnlCollateralAfterFees\n          remainingCollateralAfterFees\n        }\n"
+     "      }\n"
+     "      stats7d: statsUserPortfolio(trader: $trader, range: \"7d\") {\n"
+     "        realizedPnlUSD\n      }\n"
+     "      stats30d: statsUserPortfolio(trader: $trader, range: \"30d\") {\n"
+     "        realizedPnlUSD\n      }\n"
+     "    }\n"
+     "    oracle {\n"
+     "      tokenPricesUsd {\n        __typename\n        priceUsd\n      }\n"
+     "    }\n"
+     "  }\n`)\n"},
+};
+
+static const char *const et_gql_ts_want[] = {
+    "client/query/perp.ts>__graphql__PerpTraderOpenTrades",
+    "client/query/perp.ts>__graphql__Query.perp",
+    "client/query/perp.ts>__graphql__Query.perp.trades",
+    "client/query/perp.ts>__graphql__Query.perp.statsUserPortfolio",
+    "client/query/perp.ts>__graphql__Query.oracle",
+    "client/query/perp.ts>__graphql__Query.oracle.tokenPricesUsd",
+    "perpTraderOpenTradesQuery>__graphql__Query.perp.trades",
+    "perpTraderOpenTradesQuery>__graphql__Query.oracle.tokenPricesUsd",
+    NULL,
+};
+
+static const char *const et_gql_ts_reject[] = {
+    "client/query/perp.ts>__graphql__Query.perp.stats7d",      /* an alias is not a field */
+    "client/query/perp.ts>__graphql__Query.perp.trades.state", /* depth stops at two fields */
+    "client/query/perp.ts>__graphql__Query.oracle.__typename",
+    NULL,
+};
+
+static int et_gql_ts_case(bool parallel) {
+    char dump[CBM_SZ_8K];
+    char props[CBM_SZ_1K];
+    (void)et_gql_edges(et_gql_ts_files, (int)(sizeof(et_gql_ts_files) / sizeof(et_gql_ts_files[0])),
+                       parallel, dump, sizeof(dump), "__graphql__Query.perp.trades",
+                       "client/query/perp.ts", props, sizeof(props));
+    int ok = et_gql_expect(dump, et_gql_ts_want, et_gql_ts_reject);
+    if (!strstr(props, "\"callee\":\"graphql\"") ||
+        !strstr(props, "\"operation\":\"PerpTraderOpenTrades\"") ||
+        !strstr(props, "\"operation_type\":\"query\"") ||
+        !strstr(props, "\"field_path\":\"perp.trades\"") || !strstr(props, "\"confidence\":")) {
+        fprintf(stderr, "  [ET-GQL] field-path edge props: %s\n", props);
+        ok = 0;
+    }
+    return ok;
+}
+
+/* >50 files: the parallel resolver. */
+TEST(graphql_field_paths_multiline_ts_parallel) {
+    ASSERT_TRUE(et_gql_ts_case(true));
+    PASS();
+}
+
+/* <50 files: the sequential resolver emitted no GraphQL edge at all. */
+TEST(graphql_field_paths_multiline_ts_sequential) {
+    ASSERT_TRUE(et_gql_ts_case(false));
+    PASS();
+}
+
+/* Operations held by module constants and passed by name to a plain HTTP
+ * helper (no GraphQL client library to classify the call): the constant
+ * links. A brace literal or the word "query" alone is no operation. */
+TEST(graphql_field_paths_python_constants) {
+    static const EtFile f[] = {
+        {"sai_cli/core/keeper.py",
+         "import httpx\n\n"
+         "MARKETS = \"\"\"query { perp { borrowings { marketId baseToken { id } } } }\"\"\"\n"
+         "POSITION = \"\"\"query($trader:String!, $id:Int!) { perp { trade(trader:$trader,id:$id) "
+         "{ id } } }\"\"\"\n"
+         "ROUTE = \"\"\"query { oneClickTrading { enabled chainId } }\"\"\"\n"
+         "CHALLENGE = \"\"\"mutation($address:String!) { "
+         "createUserIntentAuthChallenge(evmAddress:$address) { nonce } }\"\"\"\n"
+         "TEMPLATE = \"{ name }\"\n"
+         "MESSAGE = \"query failed for user\"\n\n\n"
+         "def request(endpoint, query, variables=None):\n"
+         "    return httpx.post(endpoint, json={\"query\": query, \"variables\": variables})\n\n\n"
+         "def markets(endpoint):\n"
+         "    return request(endpoint, MARKETS)\n"},
+    };
+    static const char *const want[] = {
+        "MARKETS>__graphql__Query.perp",
+        "MARKETS>__graphql__Query.perp.borrowings",
+        "POSITION>__graphql__Query.perp.trade",
+        "ROUTE>__graphql__Query.oneClickTrading",
+        "CHALLENGE>__graphql__Mutation.createUserIntentAuthChallenge",
+        NULL,
+    };
+    static const char *const reject[] = {
+        "TEMPLATE>__graphql__Query.name",
+        "MARKETS>__graphql__Query.perp.borrowings.baseToken",
+        NULL,
+    };
+    char dump[CBM_SZ_4K];
+    char props[CBM_SZ_1K];
+    int n = et_gql_edges(f, (int)(sizeof(f) / sizeof(f[0])), false, dump, sizeof(dump),
+                         "__graphql__Mutation.createUserIntentAuthChallenge", "CHALLENGE", props,
+                         sizeof(props));
+    ASSERT_TRUE(et_gql_expect(dump, want, reject));
+    /* 2 + 2 + 3 + 2 paths (root fields and one level below), nothing from
+     * TEMPLATE or MESSAGE */
+    ASSERT_EQ(n, 9);
+    ASSERT_TRUE(strstr(props, "\"operation\":\"(anonymous mutation)\"") != NULL);
+    ASSERT_TRUE(strstr(props, "\"operation_type\":\"mutation\"") != NULL);
+    ASSERT_TRUE(strstr(props, "\"field_path\":\"createUserIntentAuthChallenge\"") != NULL);
     PASS();
 }
 
@@ -4094,6 +4311,9 @@ SUITE(edge_types_probe) {
     RUN_TEST(graphql_gqlgen_config_default_schema);
     RUN_TEST(graphql_gqlgen_config_parent_relative_paths);
     RUN_TEST(graphql_selection_signature_parser);
+    RUN_TEST(graphql_field_paths_multiline_ts_parallel);
+    RUN_TEST(graphql_field_paths_multiline_ts_sequential);
+    RUN_TEST(graphql_field_paths_python_constants);
     RUN_TEST(handles_flask_python);
     RUN_TEST(handles_fastapi_python);
     RUN_TEST(handles_drf_action_python);

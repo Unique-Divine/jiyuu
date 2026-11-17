@@ -808,6 +808,19 @@ void cbm_pipeline_set_nsmap(CBMHashTable *map);
 char *cbm_pipeline_resolve_module(const cbm_pipeline_ctx_t *ctx, const char *source_rel,
                                   const char *module_path);
 
+/* GraphQL client edges (pass_calls.c), shared by both resolve passes: the
+ * operation-name Route edge (#598) and one GRAPHQL_CALLS edge per field path
+ * of the call's selection signature to `__graphql__<Root>.<path>`, with props
+ * {callee, operation, operation_type, field_path, confidence}. */
+void cbm_pipeline_emit_graphql_call(cbm_gbuf_t *gbuf, const cbm_gbuf_node_t *source,
+                                    const CBMCall *call, double confidence);
+
+/* Field-path GRAPHQL_CALLS edges for the GraphQL documents a file's
+ * module-level constants hold (CBM_STRREF_GRAPHQL refs), from the constant's
+ * node in `lookup` (its module when the constant has no node), into gbuf. */
+void cbm_pipeline_emit_graphql_documents(cbm_gbuf_t *gbuf, const cbm_gbuf_t *lookup,
+                                         const CBMFileResult *result);
+
 /* #1916: HTTP client-instance calls. When `call` is `<recv>.<verb>(url)` with
  * an HTTP verb suffix and a path/URL first argument, and `recv` is bound —
  * in the calling module itself, or via an ES import (named or default) — to a

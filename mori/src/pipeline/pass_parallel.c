@@ -2785,46 +2785,6 @@ static void emit_grpc_edge(cbm_gbuf_t *gbuf, const cbm_gbuf_node_t *source, cons
     cbm_gbuf_insert_edge(gbuf, source->id, route_id, "GRPC_CALLS", props);
 }
 
-/* Emit GRAPHQL_CALLS edge. The Route is keyed by the operation NAME only
- * (#598), never by the operation text:
- *   named operation          -> __graphql__<Name>                  name "<Name>"
- *   anonymous query/mutation/ -> __graphql__<type>__anonymous       name "(anonymous <type>)"
- *   subscription (incl. the `{ ... }` query shorthand)
- *   no GraphQL document      -> __graphql__operation__anonymous    name "(anonymous operation)"
- *   (URL, variable, missing string argument)
- * Keys are bounded by the GraphQL Name grammar and deterministic. */
-static void emit_graphql_edge(cbm_gbuf_t *gbuf, const cbm_gbuf_node_t *source, const CBMCall *call,
-                              const cbm_resolution_t *res) {
-    const char *op_type = "operation";
-    char op_name[CBM_SZ_128];
-    bool named = cbm_service_pattern_graphql_operation(call->first_string_arg, &op_type, op_name,
-                                                       sizeof(op_name));
-
-    char route_name[CBM_SZ_256];
-    char route_qn[CBM_SZ_256];
-    if (named) {
-        snprintf(route_name, sizeof(route_name), "%s", op_name);
-        snprintf(route_qn, sizeof(route_qn), "__graphql__%s", op_name);
-    } else {
-        snprintf(route_name, sizeof(route_name), "(anonymous %s)", op_type);
-        snprintf(route_qn, sizeof(route_qn), "__graphql__%s__anonymous", op_type);
-    }
-
-    int64_t route_id = cbm_gbuf_upsert_node(gbuf, "Route", route_name, route_qn, "", 0, 0,
-                                            "{\"source\":\"graphql\"}");
-
-    char esc_c[CBM_SZ_256];
-    char esc_op[CBM_SZ_512];
-    cbm_json_escape(esc_c, sizeof(esc_c), call->callee_name);
-    cbm_json_escape(esc_op, sizeof(esc_op), route_name);
-    char props[CBM_SZ_1K];
-    snprintf(props, sizeof(props),
-             "{\"callee\":\"%s\",\"operation\":\"%s\",\"operation_type\":\"%s\","
-             "\"confidence\":%.2f}",
-             esc_c, esc_op, op_type, res->confidence);
-    cbm_gbuf_insert_edge(gbuf, source->id, route_id, "GRAPHQL_CALLS", props);
-}
-
 /* Emit TRPC_CALLS edge. Extract procedure path from callee chain. */
 static void emit_trpc_edge(cbm_gbuf_t *gbuf, const cbm_gbuf_node_t *source, const CBMCall *call,
                            const cbm_resolution_t *res) {
@@ -2924,7 +2884,7 @@ static bool emit_service_edge(cbm_gbuf_t *gbuf, const cbm_gbuf_node_t *source,
     } else if (svc == CBM_SVC_GRPC) {
         emit_grpc_edge(gbuf, source, call, res);
     } else if (svc == CBM_SVC_GRAPHQL) {
-        emit_graphql_edge(gbuf, source, call, res);
+        cbm_pipeline_emit_graphql_call(gbuf, source, call, res->confidence);
     } else if (svc == CBM_SVC_TRPC) {
         emit_trpc_edge(gbuf, source, call, res);
     } else if (svc == CBM_SVC_CONFIG) {
@@ -4703,6 +4663,7 @@ static void resolve_worker(int worker_id, void *ctx_ptr) {
         _ph_t0 = extract_now_ns();
         resolve_file_calls(rc, ws, result, rel, module_qn, imp_keys, imp_vals, imp_count, lang,
                            &php_vendor, evidence);
+        cbm_pipeline_emit_graphql_documents(ws->local_edge_buf, rc->main_gbuf, result);
         atomic_fetch_add_explicit(&rc->time_ns_calls, extract_now_ns() - _ph_t0,
                                   memory_order_relaxed);
 
