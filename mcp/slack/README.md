@@ -6,6 +6,64 @@ part of Jiyuu. It preserves the imported stdio, HTTP and web entrypoints.
 
 ## Install
 
+Requirements: [Bun](https://bun.sh) 1.4.3 or newer and a Slack account signed
+in through a browser. Store credentials once, then run the published package
+with an exact version pin:
+
+```sh
+bunx @uniquedivine/mcp-slack@4.4.3 --setup
+bunx @uniquedivine/mcp-slack@4.4.3
+```
+
+`--setup` writes `~/.slack-mcp-tokens.json`; see [Authenticate](#authenticate)
+for the `SLACK_TOKEN` and `SLACK_COOKIE` alternative. CI in
+[Unique-Divine/jiyuu](https://github.com/Unique-Divine/jiyuu) builds and
+publishes `@uniquedivine/mcp-slack` to npm from this directory when its version
+changes on `main`. The pin decides which reviewed version runs.
+
+### Claude Code
+
+```sh
+claude mcp add slack -- bunx @uniquedivine/mcp-slack@4.4.3
+```
+
+### Codex
+
+Add to `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.slack]
+command = "bunx"
+args = ["@uniquedivine/mcp-slack@4.4.3"]
+```
+
+### Cursor
+
+Add to `~/.cursor/mcp.json`, or `.cursor/mcp.json` in a project:
+
+```json
+{
+  "mcpServers": {
+    "slack": {
+      "command": "bunx",
+      "args": ["@uniquedivine/mcp-slack@4.4.3"]
+    }
+  }
+}
+```
+
+### Update
+
+1. Find the newest version with `npm view @uniquedivine/mcp-slack version`.
+2. Change the `@4.4.3` pin in the client config to that version.
+3. Restart the MCP server in the client (for example `/mcp` in Claude Code)
+   or restart the client. `bunx` downloads the new version on the next launch.
+
+The token store and workflow files stay in your home directory, so updating
+needs no new credentials.
+
+## Install From Source
+
 Requirements: Git and Bun 1.4.3 or newer. Linked executables, package scripts,
 tests and CI use Bun directly; no Node installation or `node` shim is needed.
 
@@ -34,7 +92,7 @@ The server accepts `SLACK_TOKEN` and `SLACK_COOKIE`, or uses the existing
 locations are retained. No new credentials are needed for a checkout move.
 Do not commit tokens, cookies, browser profiles or local exports.
 
-## Configure an MCP Client
+## Configure an MCP Client From Source
 
 After `just link`, the existing configuration remains valid:
 
@@ -74,9 +132,9 @@ has not been removed in this compatibility import. Keeping it is not a
 recommendation to deploy or purchase the original hosted service.
 
 Report issues in [Unique-Divine/jiyuu](https://github.com/Unique-Divine/jiyuu/issues)
-with `mcp/slack` in the title. This checkout is installed from source; inherited
-package names and version numbers identify compatibility, not a Jiyuu registry
-release. Package publishing is disabled.
+with `mcp/slack` in the title. The version continues from the imported
+`@jtalk22/slack-mcp` 4.4.3; `jiyuu.upstream` in `package.json` records that
+baseline.
 
 ## Origin and License
 

@@ -115,7 +115,7 @@ export async function handleTokenStatus() {
       || (health.age_state === "unknown" ? "unknown_age" : null)
       || (health.critical ? "token_critical" : health.warning ? "token_warning" : "ok"),
     message: health.message,
-    next_action: health.reason === 'no_tokens' ? "Run npx -y @jtalk22/slack-mcp --setup" : null,
+    next_action: health.reason === 'no_tokens' ? "Run bunx @uniquedivine/mcp-slack --setup" : null,
     details: {
       age_known: health.age_known,
       age_state: health.age_state
@@ -152,7 +152,7 @@ export async function handleHealthCheck() {
       status: "error",
       code: "missing_credentials",
       message: "No credentials found",
-      next_action: "Run npx -y @jtalk22/slack-mcp --setup"
+      next_action: "Run bunx @uniquedivine/mcp-slack --setup"
     }, true);
   }
 
@@ -180,7 +180,7 @@ export async function handleHealthCheck() {
       status: "error",
       code: "auth_failed",
       message: e.message,
-      next_action: "Run npx -y @jtalk22/slack-mcp --setup"
+      next_action: "Run bunx @uniquedivine/mcp-slack --setup"
     }, true);
   }
 }

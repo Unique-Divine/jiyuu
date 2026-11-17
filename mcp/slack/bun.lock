@@ -3,7 +3,7 @@
   "configVersion": 0,
   "workspaces": {
     "": {
-      "name": "@jtalk22/slack-mcp",
+      "name": "@uniquedivine/mcp-slack",
       "dependencies": {
         "@modelcontextprotocol/sdk": "^1.27.0",
         "express": "^5.2.1",

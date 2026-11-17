@@ -10,24 +10,24 @@ A hosted version with permanent OAuth tokens, semantic search, and AI summaries 
 
 ### Prerequisites
 
-- Node.js 20+
+- Bun 1.4.3 or newer
 - Google Chrome (for token extraction on macOS)
 - macOS (for Keychain storage - other platforms use file storage only)
 
-### 1. Install via npm
+### 1. Install with Bun
 
 ```bash
-npm install -g @jtalk22/slack-mcp
-# or use npx (no install):
-npx -y @jtalk22/slack-mcp --version
+bun add -g @uniquedivine/mcp-slack
+# or run it without a global install:
+bunx @uniquedivine/mcp-slack --version
 ```
 
 ### 1b. Or Clone the Repository
 
 ```bash
-git clone https://github.com/jtalk22/slack-mcp-server.git
-cd slack-mcp-server
-npm install
+git clone https://github.com/Unique-Divine/jiyuu.git
+cd jiyuu/mcp/slack
+bun install --frozen-lockfile
 ```
 
 ### 2. Verify Installation
@@ -35,9 +35,9 @@ npm install
 ```bash
 tmpdir="$(mktemp -d)"
 cd "$tmpdir"
-npx -y @jtalk22/slack-mcp --version
-npx -y @jtalk22/slack-mcp --help
-npx -y @jtalk22/slack-mcp --doctor
+bunx @uniquedivine/mcp-slack --version
+bunx @uniquedivine/mcp-slack --help
+bunx @uniquedivine/mcp-slack --doctor
 ```
 
 Expected:
@@ -57,7 +57,7 @@ Expected:
 2. Navigate to https://app.slack.com and log in
 3. Run:
    ```bash
-   npx -y @jtalk22/slack-mcp --setup
+   bunx @uniquedivine/mcp-slack --setup
    ```
 
 **Option B: Automatic Extraction (repo clone workflow)**
@@ -92,8 +92,8 @@ npm run tokens:auto
 {
   "mcpServers": {
     "slack": {
-      "command": "npx",
-      "args": ["-y", "@jtalk22/slack-mcp"]
+      "command": "bunx",
+      "args": ["@uniquedivine/mcp-slack@4.4.3"]
     }
   }
 }
@@ -106,7 +106,7 @@ Fully restart Claude Desktop (Cmd+Q on macOS, then reopen).
 ### 5. Configure Claude Code (CLI)
 
 ```bash
-claude mcp add slack npx -y @jtalk22/slack-mcp
+claude mcp add slack bunx @uniquedivine/mcp-slack
 ```
 
 Or manually edit `~/.claude.json`:
@@ -116,8 +116,8 @@ Or manually edit `~/.claude.json`:
   "mcpServers": {
     "slack": {
       "type": "stdio",
-      "command": "npx",
-      "args": ["-y", "@jtalk22/slack-mcp"]
+      "command": "bunx",
+      "args": ["@uniquedivine/mcp-slack@4.4.3"]
     }
   }
 }
@@ -157,7 +157,7 @@ Create `~/Library/LaunchAgents/com.yourname.slack-token-refresh.plist`:
     <array>
         <string>/bin/bash</string>
         <string>-c</string>
-        <string>export NVM_DIR="$HOME/.nvm" &amp;&amp; [ -s "$NVM_DIR/nvm.sh" ] &amp;&amp; \. "$NVM_DIR/nvm.sh" &amp;&amp; exec npx -y @jtalk22/slack-mcp --refresh-tokens</string>
+        <string>export NVM_DIR="$HOME/.nvm" &amp;&amp; [ -s "$NVM_DIR/nvm.sh" ] &amp;&amp; \. "$NVM_DIR/nvm.sh" &amp;&amp; exec bunx @uniquedivine/mcp-slack --refresh-tokens</string>
     </array>
     <key>StartCalendarInterval</key>
     <array>
@@ -182,7 +182,7 @@ Check it ran:
 tail /tmp/slack-token-refresh.log
 ```
 
-**Why the `bash -c` wrapper:** LaunchAgents start without a TTY, so a bare `node` won't be on PATH if you use nvm. The wrapper sources `nvm.sh` first, then runs the refresher. (If you installed node via Homebrew, replace the whole inner command with `/opt/homebrew/bin/node /opt/homebrew/bin/npx -y @jtalk22/slack-mcp --refresh-tokens`.)
+**Why the `bash -c` wrapper:** LaunchAgents start without a TTY, so a bare `node` won't be on PATH if you use nvm. The wrapper sources `nvm.sh` first, then runs the refresher. (If you installed node via Homebrew, replace the whole inner command with `/opt/homebrew/bin/node /opt/homebrew/bin/bunx @uniquedivine/mcp-slack --refresh-tokens`.)
 
 **Trade-off:** Chrome must be running for extraction to succeed. If it's not, the LaunchAgent logs "Failed to extract" and tokens stay where they are — which is fine for another 12 hours.
 
@@ -190,11 +190,11 @@ tail /tmp/slack-token-refresh.log
 
 ### "No credentials found"
 
-Run `npx -y @jtalk22/slack-mcp --doctor` to confirm diagnostic code, then `npx -y @jtalk22/slack-mcp --setup` with Slack open in Chrome.
+Run `bunx @uniquedivine/mcp-slack --doctor` to confirm diagnostic code, then `bunx @uniquedivine/mcp-slack --setup` with Slack open in Chrome.
 
 ### "invalid_auth" Error
 
-Tokens have expired. Run `npx -y @jtalk22/slack-mcp --doctor` and follow the suggested next action.
+Tokens have expired. Run `bunx @uniquedivine/mcp-slack --doctor` and follow the suggested next action.
 
 ### MCP Server Not Loading
 

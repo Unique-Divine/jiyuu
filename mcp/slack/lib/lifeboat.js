@@ -30,9 +30,9 @@ export const AUTH_DEATH_SLACK_CODES = new Set([
 
 const THROTTLE_WINDOW_MS = 60 * 60 * 1000; // one long-form message per process per hour
 
-const SETUP_CMD = "npx -y @jtalk22/slack-mcp --setup";
+const SETUP_CMD = "bunx @uniquedivine/mcp-slack --setup";
 const README_ANCHOR_URL =
-  "https://github.com/jtalk22/slack-mcp-server#token-expired--oauth-lifeboat";
+  "https://github.com/Unique-Divine/jiyuu/tree/main/mcp/slack#authenticate";
 const HOSTED_SETUP_URL =
   "https://mcp.revasserlabs.com/setup?utm_source=lifeboat&utm_medium=npm&utm_campaign=token_death";
 

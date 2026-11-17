@@ -102,7 +102,7 @@ test("first message in the window is long-form; subsequent ones are throttled on
   expect(first.code).toBe("slack_auth_expired")
   expect(first.self_fix, "long-form carries self_fix").toBeTruthy()
   expect(
-    first.self_fix.includes("npx -y @jtalk22/slack-mcp --setup"),
+    first.self_fix.includes("bunx @uniquedivine/mcp-slack --setup"),
     "self_fix names the setup command",
   ).toBeTruthy()
 

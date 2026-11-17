@@ -17,7 +17,7 @@ References:
 cd ~/slack-mcp-server
 npm run web
 # Or run directly from npm:
-npx -y @jtalk22/slack-mcp web
+bunx @uniquedivine/mcp-slack web
 ```
 
 The server will:

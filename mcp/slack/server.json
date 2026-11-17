@@ -1,12 +1,12 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.jtalk22/slack-mcp-server",
+  "name": "io.github.unique-divine/mcp-slack",
   "title": "Slack MCP Server",
-  "description": "Slack MCP without OAuth \u2014 21 tools, session-based, local-first. Free OSS + hosted tier from $19/mo.",
-  "websiteUrl": "https://mcp.revasserlabs.com",
+  "description": "Slack MCP server maintained in Jiyuu: session-based, local-first.",
+  "websiteUrl": "https://github.com/Unique-Divine/jiyuu/tree/main/mcp/slack",
   "icons": [
     {
-      "src": "https://raw.githubusercontent.com/jtalk22/slack-mcp-server/main/docs/assets/icon-512.png",
+      "src": "https://raw.githubusercontent.com/Unique-Divine/jiyuu/main/mcp/slack/docs/assets/icon-512.png",
       "mimeType": "image/png",
       "sizes": [
         "512x512"
@@ -14,20 +14,15 @@
     }
   ],
   "repository": {
-    "url": "https://github.com/jtalk22/slack-mcp-server",
-    "source": "github"
+    "url": "https://github.com/Unique-Divine/jiyuu",
+    "source": "github",
+    "subfolder": "mcp/slack"
   },
   "version": "4.4.3",
-  "remotes": [
-    {
-      "type": "streamable-http",
-      "url": "https://mcp.revasserlabs.com/oauth/mcp"
-    }
-  ],
   "packages": [
     {
       "registryType": "npm",
-      "identifier": "@jtalk22/slack-mcp",
+      "identifier": "@uniquedivine/mcp-slack",
       "version": "4.4.3",
       "transport": {
         "type": "stdio"

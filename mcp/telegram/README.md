@@ -1,5 +1,7 @@
 # Telegram MCP
 
+<!-- mcp-name: io.github.unique-divine/telegram-mcp -->
+
 Read and manage Telegram through an authenticated user account. This Python
 server supports messages, chats, participants, folders and media over MCP stdio.
 
@@ -9,9 +11,89 @@ and [LICENSE](LICENSE).
 
 ## Install
 
-Requirements: Git, [uv](https://docs.astral.sh/uv/) and Python 3.13. Run from a
-source checkout; do not install the unrelated package named `telegram-mcp` from
-PyPI. The source-install guard remains enabled.
+Requirements: [uv](https://docs.astral.sh/uv/) and Telegram credentials (see
+[Authenticate](#authenticate)). Run the published package with an exact
+version pin:
+
+```sh
+uvx uniquedivine-telegram-mcp@2.0.1
+```
+
+The PyPI name is `uniquedivine-telegram-mcp`. Do not install the unrelated
+package named `telegram-mcp` from PyPI. CI in
+[Unique-Divine/jiyuu](https://github.com/Unique-Divine/jiyuu) builds and
+publishes this package to PyPI from this directory when its version changes
+on `main`. The pin decides which reviewed version runs.
+
+Generate a session string with the same pinned package:
+
+```sh
+TELEGRAM_API_ID=123456 TELEGRAM_API_HASH=your_api_hash \
+  uvx --from uniquedivine-telegram-mcp@2.0.1 telegram-mcp-generate-session --qr
+```
+
+The examples below pass credentials as environment variables. Keep the real
+values out of version control.
+
+### Claude Code
+
+```sh
+claude mcp add telegram \
+  --env TELEGRAM_API_ID=123456 \
+  --env TELEGRAM_API_HASH=your_api_hash \
+  --env TELEGRAM_SESSION_STRING=your_session_string \
+  -- uvx uniquedivine-telegram-mcp@2.0.1
+```
+
+### Codex
+
+Add to `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.telegram]
+command = "uvx"
+args = ["uniquedivine-telegram-mcp@2.0.1"]
+
+[mcp_servers.telegram.env]
+TELEGRAM_API_ID = "123456"
+TELEGRAM_API_HASH = "your_api_hash"
+TELEGRAM_SESSION_STRING = "your_session_string"
+```
+
+### Cursor
+
+Add to `~/.cursor/mcp.json`, or `.cursor/mcp.json` in a project:
+
+```json
+{
+  "mcpServers": {
+    "telegram": {
+      "command": "uvx",
+      "args": ["uniquedivine-telegram-mcp@2.0.1"],
+      "env": {
+        "TELEGRAM_API_ID": "123456",
+        "TELEGRAM_API_HASH": "your_api_hash",
+        "TELEGRAM_SESSION_STRING": "your_session_string"
+      }
+    }
+  }
+}
+```
+
+### Update
+
+1. Find the newest version at
+   https://pypi.org/project/uniquedivine-telegram-mcp/ or with
+   `curl -s https://pypi.org/pypi/uniquedivine-telegram-mcp/json | jq -r .info.version`.
+2. Change the `@2.0.1` pin in the client config to that version.
+3. Restart the MCP server in the client (for example `/mcp` in Claude Code)
+   or restart the client. `uvx` installs the new version on the next launch.
+
+## Install From Source
+
+Requirements: Git, uv and Python 3.13. The source-install guard remains
+enabled: it refuses to start when the unrelated `telegram-mcp` distribution is
+installed in the same environment.
 
 ```sh
 git clone https://github.com/Unique-Divine/jiyuu.git
@@ -36,7 +118,7 @@ Store the resulting session privately as `TELEGRAM_SESSION_STRING`. Treat it as
 an account credential. Do not commit it, a `.env` file, or a `.session` database.
 See [.env.example](.env.example) for configuration names and optional settings.
 
-## Configure an MCP Client
+## Configure an MCP Client From Source
 
 Use an absolute checkout path and supply credentials through your client's
 private environment configuration:
@@ -129,4 +211,5 @@ Send failures can be ambiguous: inspect the chat before retrying a write.
 Issues and changes are maintained in
 [Unique-Divine/jiyuu](https://github.com/Unique-Divine/jiyuu/issues), under
 `mcp/telegram`. Upstream provenance is retained for future comparisons; imports
-do not imply a new package release or an upstream security review.
+do not imply an upstream security review. The version continues from upstream
+2.0.1; `[tool.jiyuu.upstream]` in `pyproject.toml` records that baseline.

@@ -11,9 +11,9 @@ If first-run setup is failing, validate command resolution in a clean directory:
 ```bash
 tmpdir="$(mktemp -d)"
 cd "$tmpdir"
-npx -y @jtalk22/slack-mcp --version
-npx -y @jtalk22/slack-mcp --help
-npx -y @jtalk22/slack-mcp --doctor
+bunx @uniquedivine/mcp-slack --version
+bunx @uniquedivine/mcp-slack --help
+bunx @uniquedivine/mcp-slack --doctor
 ```
 
 Expected:
@@ -88,10 +88,10 @@ slack_list_conversations limit=50
 slack_refresh_tokens
 
 # Option 2: Package setup wizard
-npx -y @jtalk22/slack-mcp --setup
+bunx @uniquedivine/mcp-slack --setup
 
 # Option 3: Diagnostics check
-npx -y @jtalk22/slack-mcp --doctor
+bunx @uniquedivine/mcp-slack --doctor
 
 # Option 4: Repo CLI
 npm run tokens:auto
