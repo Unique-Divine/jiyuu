@@ -52,6 +52,12 @@ export function isolatedGlobal(
   }
 }
 
+/** Every installed copy of `name` under `nodeModules`, as relative paths. */
+export function installedCopies(nodeModules: string, name: string): string[] {
+  const glob = new Bun.Glob(`**/${name}/package.json`)
+  return [...glob.scanSync({ cwd: nodeModules, dot: true })].sort()
+}
+
 /** Expected `bun pm pack` file name for a scoped package. */
 export function tarballName(name: string, version: string): string {
   return `${name.replace(/^@/, "").replace("/", "-")}-${version}.tgz`
@@ -115,6 +121,13 @@ async function main(): Promise<void> {
       iso.root,
       iso.env,
     )
+    // One @mtcute/core keeps the wasm that tg-sai initializes shared with
+    // @mtcute/bun; a second copy breaks every Telegram connection.
+    const cores = installedCopies(
+      join(iso.globalDir, "node_modules"),
+      "@mtcute/core",
+    )
+    assert.deepEqual(cores, ["@mtcute/core/package.json"])
     const executable = join(iso.binDir, "tg-sai")
     assert.equal(
       run([executable, "--version"], iso.root, iso.env).trim(),

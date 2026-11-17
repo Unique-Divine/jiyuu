@@ -33,11 +33,38 @@ describe("mtcute dependency pins", () => {
     expect(resolvePkgJson("@mtcute/wasm", bunDir)).toBe(ours)
   })
 
-  test("@mtcute/bun and @mtcute/convert share one @mtcute/core", () => {
+  // @mtcute/bun depends on the html and markdown parsers with ^ ranges. A
+  // fresh install resolves those to newer releases that pull a second, newer
+  // @mtcute/core, so tg-sai pins both parsers to its own core version.
+  test("@mtcute/bun, convert, and both parsers share one @mtcute/core", () => {
     const core = resolvePkgJson("@mtcute/core", PKG_DIR)
-    for (const dep of ["@mtcute/bun", "@mtcute/convert"]) {
+    for (const dep of [
+      "@mtcute/bun",
+      "@mtcute/convert",
+      "@mtcute/html-parser",
+      "@mtcute/markdown-parser",
+    ]) {
       const dir = dirname(resolvePkgJson(dep, PKG_DIR))
       expect(resolvePkgJson("@mtcute/core", dir)).toBe(core)
     }
+  })
+
+  test("@mtcute/bun's parsers are pinned to the core version", () => {
+    const deps = pkg.dependencies as Record<string, string>
+    const bunDeps = JSON.parse(
+      readFileSync(resolvePkgJson("@mtcute/bun", PKG_DIR), "utf8"),
+    ).dependencies as Record<string, string>
+    const parsers = Object.keys(bunDeps).filter((name) =>
+      name.endsWith("-parser"),
+    )
+    expect(parsers.sort()).toEqual([
+      "@mtcute/html-parser",
+      "@mtcute/markdown-parser",
+    ])
+    for (const name of parsers)
+      expect({ name, range: deps[name] }).toEqual({
+        name,
+        range: deps["@mtcute/core"],
+      })
   })
 })
