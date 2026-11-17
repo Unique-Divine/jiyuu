@@ -51,12 +51,25 @@ describe("isNewer", () => {
     ["1.3.10", "1.3.9", true],
     ["1.3.8", "1.3.8", false],
     ["1.3.7", "1.3.8", false],
-    ["2", "1.9.9", true],
+    ["2", "1.9.9", false], // Not SemVer: needs MAJOR.MINOR.PATCH.
+    ["01.4.0", "1.3.8", false], // Not SemVer: leading zero.
     ["1.3.8", "1.3.8-rc.1", true],
     ["1.3.8-rc.1", "1.3.8", false],
     ["1.3.8-rc.10", "1.3.8-rc.9", true],
     ["1.3.8-beta", "1.3.8-alpha", true],
     ["v1.4.0", "1.3.8", true],
+    ["1.4.0+build.5", "1.3.8", true],
+    // SemVer 2.0.0 section 11.4: dots are the only separators, alphanumeric
+    // identifiers compare in ASCII order, numeric < alphanumeric, and a
+    // longer set wins over an equal prefix.
+    ["1.0.0-beta10", "1.0.0-beta2", false],
+    ["1.0.0-beta2", "1.0.0-beta10", true],
+    ["1.0.0-alpha.1", "1.0.0-alpha", true],
+    ["1.0.0-alpha.beta", "1.0.0-alpha.1", true],
+    ["1.0.0-beta", "1.0.0-alpha.beta", true],
+    ["1.0.0-beta.11", "1.0.0-beta.2", true],
+    ["1.0.0-rc.1", "1.0.0-beta.11", true],
+    ["1.0.0-Beta", "1.0.0-alpha", false], // "B" < "a" in ASCII.
     ["not-a-version", "1.3.8", false],
     ["1.4.0", "local", false],
   ];

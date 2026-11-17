@@ -113,26 +113,30 @@ interface ParsedVersion {
   prerelease: Identifier[];
 }
 
-const VERSION_RE = /^v?(\d+(?:\.\d+)*)(?:[-.]?([0-9A-Za-z.-]+))?(?:\+.*)?$/;
+// SemVer 2.0.0 (semver.org), with an optional leading "v".
+const VERSION_RE =
+  /^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 
 export function parseVersion(version: string): ParsedVersion | null {
   const match = VERSION_RE.exec(version.trim());
   if (!match) return null;
-  const release = match[1].split(".").map(Number);
-  while (release.length < 3) release.push(0);
-  const prerelease = (match[2] ?? "")
-    .split(/[.-]|(?<=\D)(?=\d)|(?<=\d)(?=\D)/)
-    .filter((part) => part !== "")
-    .map((part): Identifier => (/^\d+$/.test(part) ? [0, Number(part)] : [1, part]));
+  const release = [match[1], match[2], match[3]].map(Number);
+  // Prerelease identifiers split on dots only (SemVer 11.4).
+  const prerelease = match[4] === undefined
+    ? []
+    : match[4].split(".").map((part): Identifier =>
+      /^\d+$/.test(part) ? [0, Number(part)] : [1, part],
+    );
   return { release, prerelease };
 }
 
+/** SemVer 11.4: numeric < alphanumeric, numbers numerically, text in ASCII order. */
 function compareIdentifiers(a: Identifier[], b: Identifier[]): number {
   for (let i = 0; i < Math.min(a.length, b.length); i++) {
-    // Numeric identifiers sort before alphanumeric ones, as in semver.
     if (a[i][0] !== b[i][0]) return a[i][0] - b[i][0];
     if (a[i][1] !== b[i][1]) return a[i][1] < b[i][1] ? -1 : 1;
   }
+  // With an equal prefix, the larger set of identifiers sorts higher.
   return a.length - b.length;
 }
 
@@ -141,9 +145,8 @@ export function isNewer(candidate: string, running: string): boolean {
   const c = parseVersion(candidate);
   const r = parseVersion(running);
   if (!c || !r) return false;
-  const width = Math.max(c.release.length, r.release.length);
-  for (let i = 0; i < width; i++) {
-    const diff = (c.release[i] ?? 0) - (r.release[i] ?? 0);
+  for (let i = 0; i < 3; i++) {
+    const diff = c.release[i] - r.release[i];
     if (diff !== 0) return diff > 0;
   }
   if (c.prerelease.length === 0 || r.prerelease.length === 0) {
