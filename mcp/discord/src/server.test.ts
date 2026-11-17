@@ -27,6 +27,13 @@ mock.module('./logger.js', () => ({
 }));
 
 const { DiscordMCPServer } = await import('./server.js');
+const { JiyuuMcpInfo, formatNotice } = await import('./jiyuuMcpInfo.js');
+type UpdateStatus = import('./jiyuuMcpInfo.js').UpdateStatus;
+
+const packageRoot = new URL('..', import.meta.url).pathname;
+// Never reach the registry or the user's cache from tests.
+const offlineInfo = (status: UpdateStatus | null = null) =>
+  new JiyuuMcpInfo('discord', packageRoot, ['DISCORD_'], async () => status);
 
 const mockedServer = {
   setRequestHandler: jest.fn(),
@@ -62,7 +69,7 @@ describe('DiscordMCPServer', () => {
     mockTransport = mockedTransport;
     mockClient = mockedClient;
 
-    discordMCPServer = new DiscordMCPServer(mockClient, mockTransport);
+    discordMCPServer = new DiscordMCPServer(mockClient, mockTransport, offlineInfo());
   });
 
   afterEach(() => {
@@ -74,12 +81,13 @@ describe('DiscordMCPServer', () => {
       expect(ServerMock).toHaveBeenCalledWith(
         {
           name: 'MCP-Discord',
-          version: '1.0.0'
+          version: expect.any(String)
         },
         {
           capabilities: {
             tools: {}
-          }
+          },
+          instructions: expect.stringContaining('mcp_info')
         }
       );
       expect(mockServer.setRequestHandler).toHaveBeenCalledTimes(2); // ListTools and CallTool handlers
@@ -107,7 +115,7 @@ describe('DiscordMCPServer', () => {
         const result = await listToolsHandler();
         
         expect(result).toEqual({
-          tools: toolList
+          tools: [...toolList, expect.objectContaining({ name: 'mcp_info' })]
         });
       });
     });
@@ -645,6 +653,48 @@ describe('DiscordMCPServer', () => {
       await discordMCPServer.stop();
 
       expect(mockTransport.stop).toHaveBeenCalled();
+    });
+  });
+
+  describe('mcp_info and the update notice', () => {
+    const behind: UpdateStatus = {
+      name: '@uniquedivine/mcp-discord',
+      runningVersion: '1.3.8',
+      latestVersion: '1.4.0',
+      checkedAt: '2026-11-17T12:00:00Z',
+    };
+
+    function callHandler() {
+      const calls = (mockServer.setRequestHandler as Mock<(...args: any[]) => any>).mock.calls;
+      return calls.filter((call: any[]) => call[0] === CallToolRequestSchema).at(-1)?.[1];
+    }
+
+    it('answers mcp_info with the package version and provenance', async () => {
+      const result = await callHandler()({ params: { name: 'mcp_info', arguments: {} } });
+      const report = JSON.parse(result.content[0].text);
+
+      expect(report.server).toBe('discord');
+      expect(report.version).toBe(JSON.parse(await Bun.file(`${packageRoot}package.json`).text()).version);
+      expect(report.provenance.kind).toBe('source-checkout');
+    });
+
+    it('appends the notice to the first successful tool result only', async () => {
+      const info = offlineInfo(behind);
+      const server = new DiscordMCPServer(mockClient, mockTransport, info);
+      await server.start();
+      await info.notifier.status(1000);
+      const handler = callHandler();
+      toolsMock.sendMessageHandler.mockResolvedValue({ content: [{ type: 'text', text: 'sent' }] });
+
+      const first = await handler({ params: { name: 'discord_send', arguments: {} } });
+      const second = await handler({ params: { name: 'discord_send', arguments: {} } });
+
+      expect(first.content).toEqual([
+        { type: 'text', text: 'sent' },
+        { type: 'text', text: formatNotice(behind) },
+      ]);
+      expect(second.content).toEqual([{ type: 'text', text: 'sent' }]);
+      await server.stop();
     });
   });
 });

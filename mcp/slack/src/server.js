@@ -15,7 +15,7 @@
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
@@ -35,6 +35,12 @@ import {
   handleListConversations,
 } from "../lib/handlers.js";
 import { isAuthDeath, lifeboatResponse } from "../lib/lifeboat.js";
+import {
+  JiyuuMcpInfo,
+  MCP_INFO_INSTRUCTIONS,
+  MCP_INFO_TOOL,
+  withUpdateNotice,
+} from "../lib/jiyuuMcpInfo.ts";
 
 // Background refresh interval (4 hours)
 const BACKGROUND_REFRESH_INTERVAL = 4 * 60 * 60 * 1000;
@@ -101,15 +107,25 @@ const RESOURCES = [
   }
 ];
 
+// Version, provenance and the one-time update notice (stdio server only).
+export const mcpInfo = new JiyuuMcpInfo(
+  "slack",
+  fileURLToPath(new URL("..", import.meta.url)),
+  ["SLACK_"],
+);
+
 // Initialize server
 const server = new Server(
   { name: SERVER_NAME, version: SERVER_VERSION },
-  { capabilities: { tools: {}, prompts: {}, resources: {} } }
+  {
+    capabilities: { tools: {}, prompts: {}, resources: {} },
+    instructions: MCP_INFO_INSTRUCTIONS,
+  }
 );
 
 // Register tool list handler
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: TOOLS
+  tools: [...TOOLS, MCP_INFO_TOOL]
 }));
 
 // Register prompts handlers
@@ -209,8 +225,18 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
   }
 });
 
-// Register tool call handler
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
+/**
+ * Run one tool call. The first successful result after the background update
+ * check finds a newer release carries a one-line notice.
+ */
+export async function callTool(request, info = mcpInfo) {
+  const result = request.params.name === MCP_INFO_TOOL.name
+    ? await info.callTool()
+    : await dispatchTool(request);
+  return withUpdateNotice(result, info.notifier);
+}
+
+async function dispatchTool(request) {
   const { name, arguments: args } = request.params;
 
   try {
@@ -250,7 +276,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       isError: true
     };
   }
-});
+}
+
+// Register tool call handler
+server.setRequestHandler(CallToolRequestSchema, (request) => callTool(request));
 
 // Main entry point
 async function main() {
@@ -303,6 +332,8 @@ async function main() {
   process.on("SIGHUP", () => shutdown("SIGHUP"));
   process.stdin.on("end", () => shutdown("stdin end (MCP client disconnected)"));
   process.stdin.on("error", (err) => shutdown(`stdin error: ${err?.message || err}`));
+
+  mcpInfo.notifier.start();
 
   // Start server
   const transport = new StdioServerTransport();
