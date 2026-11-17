@@ -311,7 +311,7 @@ async function showStatus() {
     print("Code: missing_credentials");
     print("Message: No credentials available from environment, file, or keychain.");
     print();
-    print("Run setup wizard: npx -y @jtalk22/slack-mcp --setup");
+    print("Run setup wizard: bunx @uniquedivine/mcp-slack --setup");
     process.exit(1);
   }
 
@@ -330,7 +330,7 @@ async function showStatus() {
     print("Code: auth_failed");
     print(`Error: ${result.error}`);
     print();
-    print("Run setup wizard to refresh: npx -y @jtalk22/slack-mcp --setup");
+    print("Run setup wizard to refresh: bunx @uniquedivine/mcp-slack --setup");
     process.exit(1);
   }
 
@@ -396,7 +396,7 @@ async function runDoctor() {
     print("Code: runtime_node_unsupported");
     print();
     print("Next action:");
-    print(`  npx -y @jtalk22/slack-mcp --doctor  # rerun after upgrading Node ${MIN_NODE_MAJOR}+`);
+    print(`  bunx @uniquedivine/mcp-slack --doctor  # rerun after upgrading Node ${MIN_NODE_MAJOR}+`);
     process.exit(3);
   }
   success(`Node.js ${process.versions.node} (supported)`);
@@ -407,7 +407,7 @@ async function runDoctor() {
     print("Code: missing_credentials");
     print();
     print("Next action:");
-    print("  npx -y @jtalk22/slack-mcp --setup");
+    print("  bunx @uniquedivine/mcp-slack --setup");
     print();
     print(`${colors.dim}Prefer no local tokens? Hosted tier uses OAuth:${colors.reset}`);
     print(`${colors.dim}  https://mcp.revasserlabs.com${colors.reset}`);
@@ -432,13 +432,13 @@ async function runDoctor() {
     print();
     print("Next action:");
     if (exitCode === 2) {
-      print("  npx -y @jtalk22/slack-mcp --setup");
+      print("  bunx @uniquedivine/mcp-slack --setup");
       print();
       print(`${colors.dim}Tokens expire every 1-2 weeks. Hosted tier has permanent OAuth:${colors.reset}`);
       print(`${colors.dim}  https://mcp.revasserlabs.com${colors.reset}`);
     } else {
       print("  Check network connectivity and retry:");
-      print("  npx -y @jtalk22/slack-mcp --doctor");
+      print("  bunx @uniquedivine/mcp-slack --doctor");
     }
     process.exit(exitCode);
   }
@@ -447,7 +447,7 @@ async function runDoctor() {
   print("Code: ok");
   print();
   print("Ready. Next command:");
-  print("  npx -y @jtalk22/slack-mcp");
+  print("  bunx @uniquedivine/mcp-slack");
   process.exit(0);
 }
 
@@ -457,12 +457,12 @@ async function showHelp() {
   print("Full Slack access for Claude via MCP.");
   print();
   print(`${colors.bold}Usage:${colors.reset}`);
-  print("  npx -y @jtalk22/slack-mcp             Start MCP server (stdio)");
-  print("  npx -y @jtalk22/slack-mcp --setup     Interactive token setup wizard");
-  print("  npx -y @jtalk22/slack-mcp --status    Check token health");
-  print("  npx -y @jtalk22/slack-mcp --doctor    Run runtime and auth diagnostics");
-  print("  npx -y @jtalk22/slack-mcp --version   Print version");
-  print("  npx -y @jtalk22/slack-mcp --help      Show this help");
+  print("  bunx @uniquedivine/mcp-slack             Start MCP server (stdio)");
+  print("  bunx @uniquedivine/mcp-slack --setup     Interactive token setup wizard");
+  print("  bunx @uniquedivine/mcp-slack --status    Check token health");
+  print("  bunx @uniquedivine/mcp-slack --doctor    Run runtime and auth diagnostics");
+  print("  bunx @uniquedivine/mcp-slack --version   Print version");
+  print("  bunx @uniquedivine/mcp-slack --help      Show this help");
   print();
   print(`${colors.bold}npm scripts:${colors.reset}`);
   print("  npm start              Start MCP server");
@@ -471,7 +471,7 @@ async function showHelp() {
   print("  npm run tokens:status  Check token health");
   print();
   print(`${colors.bold}More info:${colors.reset}`);
-  print("  https://github.com/jtalk22/slack-mcp-server");
+  print("  https://github.com/Unique-Divine/jiyuu/tree/main/mcp/slack");
   print();
   print(`${colors.bold}Hosted tier:${colors.reset}`);
   print("  https://mcp.revasserlabs.com — $19/mo Pro, permanent OAuth,");
@@ -543,8 +543,8 @@ async function main() {
       print(`${colors.green}${colors.bold}Setup complete!${colors.reset}`);
       print();
       print("Next steps:");
-      print("  • Verify: npx -y @jtalk22/slack-mcp --status");
-      print("  • Start server: npx -y @jtalk22/slack-mcp");
+      print("  • Verify: bunx @uniquedivine/mcp-slack --status");
+      print("  • Start server: bunx @uniquedivine/mcp-slack");
       print("  • Or add to Claude Desktop config");
       print();
       print(`${colors.dim}Want permanent tokens, semantic search, and workflow continuity?${colors.reset}`);

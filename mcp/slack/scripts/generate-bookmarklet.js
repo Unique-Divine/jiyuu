@@ -27,11 +27,11 @@ console.log(`   ${oneLiner}`);
 console.log();
 console.log(`4. Your token is now on the clipboard`);
 if (isMac) {
-  console.log(`5. Run: npx -y @jtalk22/slack-mcp --setup`);
+  console.log(`5. Run: bunx @uniquedivine/mcp-slack --setup`);
   console.log(`6. Paste when prompted (cookie is extracted automatically)`);
 } else {
   console.log(`5. You'll also need the 'd' cookie from Chrome DevTools > Application > Cookies`);
-  console.log(`6. Run: npx -y @jtalk22/slack-mcp --setup`);
+  console.log(`6. Run: bunx @uniquedivine/mcp-slack --setup`);
   console.log(`7. Paste both when prompted`);
 }
 console.log();

@@ -1,10 +1,10 @@
-# Modified by Unique Divine in 2026: Jiyuu source installation metadata.
+# Modified by Unique Divine in 2026: Jiyuu source installation and PyPI metadata.
 [build-system]
 requires = ["setuptools>=42", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "telegram-mcp"
+name = "uniquedivine-telegram-mcp"
 version = "2.0.1"
 description = "Telegram MCP server maintained in Jiyuu"
 readme = "README.md"
@@ -43,6 +43,7 @@ proxy = [
 
 [project.urls]
 "Homepage" = "https://github.com/Unique-Divine/jiyuu/tree/main/mcp/telegram"
+"Repository" = "https://github.com/Unique-Divine/jiyuu"
 "Bug Tracker" = "https://github.com/Unique-Divine/jiyuu/issues"
 "Upstream" = "https://github.com/chigwell/telegram-mcp"
 
@@ -52,7 +53,14 @@ packages = ["telegram_mcp", "telegram_mcp.tools"]
 
 [project.scripts]
 telegram-mcp = "main:main"
+uniquedivine-telegram-mcp = "main:main"
 telegram-mcp-generate-session = "session_string_generator:main"
+
+[tool.jiyuu.upstream]
+repository = "chigwell/telegram-mcp"
+package = "telegram-mcp"
+version = "2.0.1"
+commit = "0d7b7e3630397ff931624fee7e4b0f33a134c513"
 
 [tool.black]
 line-length = 99

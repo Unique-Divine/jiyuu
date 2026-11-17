@@ -258,7 +258,7 @@ async function main() {
   const credentials = loadTokensReadOnly();
   if (!credentials) {
     console.error("WARNING: No Slack credentials found at startup");
-    console.error("Use npx -y @jtalk22/slack-mcp --setup to configure credentials");
+    console.error("Use bunx @uniquedivine/mcp-slack --setup to configure credentials");
   } else {
     console.error(`Credentials loaded from: ${credentials.source}`);
 

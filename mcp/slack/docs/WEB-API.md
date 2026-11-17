@@ -17,7 +17,7 @@ References:
 cd ~/slack-mcp-server
 npm run web
 # Or run directly from npm:
-npx -y @jtalk22/slack-mcp web
+bunx @uniquedivine/mcp-slack web
 ```
 
 The server will:
@@ -39,11 +39,10 @@ cat > ~/Library/LaunchAgents/com.slack-web-api.plist << 'EOF'
     <string>com.slack-web-api</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/opt/homebrew/bin/node</string>
-        <string>/Users/YOUR_USERNAME/slack-mcp-server/src/web-server.js</string>
+        <string>/Users/YOUR_USERNAME/.bun/bin/bunx</string>
+        <string>@uniquedivine/mcp-slack@4.4.3</string>
+        <string>web</string>
     </array>
-    <key>WorkingDirectory</key>
-    <string>/Users/YOUR_USERNAME/slack-mcp-server</string>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>

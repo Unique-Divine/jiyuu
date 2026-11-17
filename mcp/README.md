@@ -4,20 +4,29 @@ Discord, Slack and Telegram MCP servers maintained in Jiyuu. Slack and Telegram
 use your existing user accounts; Discord uses a bot token. Sending messages and
 other writes require explicit authorization.
 
-| Directory | Runtime | Commands |
-| --- | --- | --- |
-| [discord](discord/README.md) | Bun 1.4.3+ | `just install`, `just test`, `just check`, `just run` |
-| [slack](slack/README.md) | Bun 1.4.3+ | `just install`, `just test`, `just check`, `just run` |
-| [telegram](telegram/README.md) | Python 3.13 and uv | `just install`, `just test`, `just check`, `just run` |
+| Directory | Package | Pinned install | Runtime |
+| --- | --- | --- | --- |
+| [discord](discord/README.md) | npm `@uniquedivine/mcp-discord` | `bunx @uniquedivine/mcp-discord@1.3.8` | Bun 1.4.3+ |
+| [slack](slack/README.md) | npm `@uniquedivine/mcp-slack` | `bunx @uniquedivine/mcp-slack@4.4.3` | Bun 1.4.3+ |
+| [telegram](telegram/README.md) | PyPI `uniquedivine-telegram-mcp` | `uvx uniquedivine-telegram-mcp@2.0.1` | Python 3.10+ and uv |
 
-Run the listed commands inside the component directory. From the repository
+Each component README has client configuration for Claude Code, Codex, and
+Cursor, plus update steps. CI publishes a package from branch `main` when its
+version changes. Each package has its own plain semver version. Package
+metadata `jiyuu.upstream` in file `package.json`, or table
+`[tool.jiyuu.upstream]` in file `pyproject.toml`, records the upstream baseline.
+
+From a source checkout, each directory has recipes `just install`,
+`just test`, `just check`, and `just run`.
+
+Run the `just` commands inside the component directory. From the repository
 root, `just mcp-install`, `just mcp-test` and `just mcp-check` operate on all
-three. MCP clients launch the entrypoints documented in each component README
-directly.
+three.
 
 Report issues in [Unique-Divine/jiyuu](https://github.com/Unique-Divine/jiyuu/issues)
-with `mcp/discord`, `mcp/slack` or `mcp/telegram` in the title. These are source
-installations; this repository does not publish the imported upstream packages.
+with `mcp/discord`, `mcp/slack` or `mcp/telegram` in the title. Jiyuu
+publishes these packages under its own names. The upstream packages are
+separate projects.
 
 ## Source Baselines
 
