@@ -18,6 +18,28 @@ tg-sai profile add --name me --login --qr --interactive
 Any command or command group run without arguments prints its help, for
 example `tg-sai events` or `tg-sai holds`.
 
+To pin a version, as agents and scripts should, name it:
+`bunx @uniquedivine/tg-sai@0.3.2 health` or
+`bun add -g @uniquedivine/tg-sai@0.3.2`. `tg-sai --version` shows what's
+installed.
+
+For agents setting this up:
+
+- Profiles and state live in `~/.tg-sai`, outside the package, so upgrading
+  keeps them.
+- Log in once with `tg-sai profile add --name <name> --login --qr`. If a scan
+  works but the code expires while Telegram moves the login to your home data
+  center, the command shows a fresh code; scan it.
+- Select an account with `--profile <name>`. A named profile wins over
+  `TELEGRAM_*` environment variables, which apply only when no profile is
+  named.
+- `tg-sai health` checks the runtime without contacting Telegram.
+
+Releases publish from this repo's CI to npm with provenance, from
+[`ci-test.yaml`](https://github.com/Unique-Divine/jiyuu/blob/main/.github/workflows/ci-test.yaml),
+job `publish-tg-sai`: merging a version bump to `main` publishes it. Source
+and issues: [Unique-Divine/jiyuu](https://github.com/Unique-Divine/jiyuu).
+
 ## Move Chats to the Custody Account
 
 `ops sai-bootstrap` makes the Sai custody account,
