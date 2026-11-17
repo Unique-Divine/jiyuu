@@ -2,6 +2,9 @@
 install:
     bun install --frozen-lockfile
 
+# bun link only adds a symlink and bins under the global dir; it leaves the
+# global package.json and bun.lock alone, so tracked dotfiles stay clean.
+
 # Link the mcp-discord command name to this checkout.
 link:
     bun link
