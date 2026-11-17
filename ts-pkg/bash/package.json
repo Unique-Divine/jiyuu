@@ -1,6 +1,19 @@
 {
   "name": "@uniquedivine/bash",
   "version": "0.0.3",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Unique-Divine/jiyuu.git",
+    "directory": "ts-pkg/bash"
+  },
+  "homepage": "https://github.com/Unique-Divine/jiyuu/tree/main/ts-pkg/bash#readme",
+  "bugs": {
+    "url": "https://github.com/Unique-Divine/jiyuu/issues"
+  },
+  "files": [
+    "index.ts",
+    "README.md"
+  ],
   "description": "Bash runner to write scripts in TypeScript with the Bun Shell.",
   "module": "index.ts",
   "type": "module",
