@@ -10,22 +10,23 @@ other writes require explicit authorization.
 | [slack](slack/README.md) | npm `@uniquedivine/mcp-slack` | `bunx @uniquedivine/mcp-slack@4.4.3` | Bun 1.4.3+ |
 | [telegram](telegram/README.md) | PyPI `uniquedivine-telegram-mcp` | `uvx uniquedivine-telegram-mcp@2.0.1` | Python 3.10+ and uv |
 
-Each component README has the client configuration for Claude Code, Codex and
-Cursor, and the update steps. CI publishes a package from `main` when its
-version changes. Each package has its own plain semver version; the upstream
-baseline it started from is recorded as `jiyuu.upstream` in `package.json` or
-`[tool.jiyuu.upstream]` in `pyproject.toml`.
+Each component README has client configuration for Claude Code, Codex, and
+Cursor, plus update steps. CI publishes a package from branch `main` when its
+version changes. Each package has its own plain semver version. Package
+metadata `jiyuu.upstream` in file `package.json`, or table
+`[tool.jiyuu.upstream]` in file `pyproject.toml`, records the upstream baseline.
 
-From a source checkout, each directory has `just install`, `just test`,
-`just check` and `just run`.
+From a source checkout, each directory has recipes `just install`,
+`just test`, `just check`, and `just run`.
 
 Run the `just` commands inside the component directory. From the repository
 root, `just mcp-install`, `just mcp-test` and `just mcp-check` operate on all
 three.
 
 Report issues in [Unique-Divine/jiyuu](https://github.com/Unique-Divine/jiyuu/issues)
-with `mcp/discord`, `mcp/slack` or `mcp/telegram` in the title. The packages
-are published under Jiyuu's own names; the upstream packages are separate.
+with `mcp/discord`, `mcp/slack` or `mcp/telegram` in the title. Jiyuu
+publishes these packages under its own names. The upstream packages are
+separate projects.
 
 ## Source Baselines
 
