@@ -17,9 +17,9 @@ A hosted version with permanent OAuth tokens, semantic search, and AI summaries 
 ### 1. Install with Bun
 
 ```bash
-bun add -g @uniquedivine/mcp-slack
+bun add -g @uniquedivine/mcp-slack@4.4.3
 # or run it without a global install:
-bunx @uniquedivine/mcp-slack --version
+bunx @uniquedivine/mcp-slack@4.4.3 --version
 ```
 
 ### 1b. Or Clone the Repository
@@ -35,9 +35,9 @@ bun install --frozen-lockfile
 ```bash
 tmpdir="$(mktemp -d)"
 cd "$tmpdir"
-bunx @uniquedivine/mcp-slack --version
-bunx @uniquedivine/mcp-slack --help
-bunx @uniquedivine/mcp-slack --doctor
+bunx @uniquedivine/mcp-slack@4.4.3 --version
+bunx @uniquedivine/mcp-slack@4.4.3 --help
+bunx @uniquedivine/mcp-slack@4.4.3 --doctor
 ```
 
 Expected:
@@ -57,7 +57,7 @@ Expected:
 2. Navigate to https://app.slack.com and log in
 3. Run:
    ```bash
-   bunx @uniquedivine/mcp-slack --setup
+   bunx @uniquedivine/mcp-slack@4.4.3 --setup
    ```
 
 **Option B: Automatic Extraction (repo clone workflow)**
@@ -106,7 +106,7 @@ Fully restart Claude Desktop (Cmd+Q on macOS, then reopen).
 ### 5. Configure Claude Code (CLI)
 
 ```bash
-claude mcp add slack bunx @uniquedivine/mcp-slack
+claude mcp add slack -- bunx @uniquedivine/mcp-slack@4.4.3
 ```
 
 Or manually edit `~/.claude.json`:
@@ -182,7 +182,7 @@ Check it ran:
 tail /tmp/slack-token-refresh.log
 ```
 
-**Why the absolute `bunx` path:** LaunchAgents start without your shell profile, so `bunx` is not on `PATH`. The `bash -c` wrapper expands `$HOME` to the default Bun install path, `~/.bun/bin/bunx`. If you installed Bun with Homebrew, use `/opt/homebrew/bin/bunx` instead. Run `bunx` directly, not through `node`: `bunx` is Bun's native binary, not a JavaScript file. Keep the version pin equal to the one in your MCP client config.
+**Why the absolute `bunx` path:** LaunchAgents start without your shell profile, so `bunx` is not on `PATH`. The `bash -c` wrapper expands `$HOME` to the default Bun install path, `~/.bun/bin/bunx`. If you installed Bun with Homebrew, use `/opt/homebrew/bin/bunx` instead. Run `bunx` directly, not through `node`. Command `bunx` is a native Bun binary, not a JavaScript file. Keep the version pin equal to the one in your MCP client config.
 
 **Trade-off:** Chrome must be running for extraction to succeed. If it's not, the LaunchAgent logs "Failed to extract" and tokens stay where they are — which is fine for another 12 hours.
 
@@ -190,11 +190,11 @@ tail /tmp/slack-token-refresh.log
 
 ### "No credentials found"
 
-Run `bunx @uniquedivine/mcp-slack --doctor` to confirm diagnostic code, then `bunx @uniquedivine/mcp-slack --setup` with Slack open in Chrome.
+Run `bunx @uniquedivine/mcp-slack@4.4.3 --doctor` to confirm diagnostic code, then `bunx @uniquedivine/mcp-slack@4.4.3 --setup` with Slack open in Chrome.
 
 ### "invalid_auth" Error
 
-Tokens have expired. Run `bunx @uniquedivine/mcp-slack --doctor` and follow the suggested next action.
+Tokens have expired. Run `bunx @uniquedivine/mcp-slack@4.4.3 --doctor` and follow the suggested next action.
 
 ### MCP Server Not Loading
 

@@ -15,11 +15,12 @@ bunx @uniquedivine/mcp-slack@4.4.3 --setup
 bunx @uniquedivine/mcp-slack@4.4.3
 ```
 
-`--setup` writes `~/.slack-mcp-tokens.json`; see [Authenticate](#authenticate)
-for the `SLACK_TOKEN` and `SLACK_COOKIE` alternative. CI in
+Flag `--setup` writes file `~/.slack-mcp-tokens.json`. To pass environment
+variables `SLACK_TOKEN` and `SLACK_COOKIE` instead, see
+[Authenticate](#authenticate). CI in
 [Unique-Divine/jiyuu](https://github.com/Unique-Divine/jiyuu) builds and
 publishes `@uniquedivine/mcp-slack` to npm from this directory when its version
-changes on `main`. The pin decides which reviewed version runs.
+changes on `main`. The version pin selects the exact reviewed release that runs.
 
 ### Claude Code
 
@@ -29,7 +30,7 @@ claude mcp add slack -- bunx @uniquedivine/mcp-slack@4.4.3
 
 ### Codex
 
-Add to `~/.codex/config.toml`:
+Add this entry to file `~/.codex/config.toml`:
 
 ```toml
 [mcp_servers.slack]
@@ -39,7 +40,8 @@ args = ["@uniquedivine/mcp-slack@4.4.3"]
 
 ### Cursor
 
-Add to `~/.cursor/mcp.json`, or `.cursor/mcp.json` in a project:
+Add this entry to file `~/.cursor/mcp.json`, or to file `.cursor/mcp.json` in
+a project:
 
 ```json
 {
@@ -54,12 +56,14 @@ Add to `~/.cursor/mcp.json`, or `.cursor/mcp.json` in a project:
 
 ### Update
 
-1. Find the newest version with `npm view @uniquedivine/mcp-slack version`.
-2. Change the `@4.4.3` pin in the client config to that version.
-3. Restart the MCP server in the client (for example `/mcp` in Claude Code)
-   or restart the client. `bunx` downloads the new version on the next launch.
+1. Find the newest version with command
+   `npm view @uniquedivine/mcp-slack version`.
+2. Change the `@4.4.3` pin in the client configuration to that version.
+3. Restart the MCP server in the client, or restart the client. In Claude
+   Code, run `/mcp` and reconnect the server. Command `bunx` downloads the new
+   version on the next launch.
 
-The token store and workflow files stay in your home directory, so updating
+The token store and workflow files live in your home directory, so an update
 needs no new credentials.
 
 ## Install From Source
@@ -133,8 +137,8 @@ recommendation to deploy or purchase the original hosted service.
 
 Report issues in [Unique-Divine/jiyuu](https://github.com/Unique-Divine/jiyuu/issues)
 with `mcp/slack` in the title. The version continues from the imported
-`@jtalk22/slack-mcp` 4.4.3; `jiyuu.upstream` in `package.json` records that
-baseline.
+`@jtalk22/slack-mcp` 4.4.3. Package metadata `jiyuu.upstream` in file
+`package.json` records that baseline.
 
 ## Origin and License
 
