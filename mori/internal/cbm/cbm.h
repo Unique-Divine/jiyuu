@@ -607,9 +607,10 @@ typedef struct {
 typedef enum {
     CBM_STRREF_URL = 0,     // REST path or full URL
     CBM_STRREF_CONFIG = 1,  // config file path or env var key
-    CBM_STRREF_GRAPHQL = 2, // GraphQL operation held by a module-level constant: value is
-                            // its selection signature, enclosing_func_qn the constant's
-                            // QN, key_path the callee wrapping the literal (or NULL)
+    CBM_STRREF_GRAPHQL = 2, // GraphQL operation held by a module-level constant or passed
+                            // as a call argument: value is its selection signature,
+                            // enclosing_func_qn the constant's (or calling function's)
+                            // QN, key_path the callee taking the literal (or NULL)
 } CBMStringRefKind;
 
 typedef struct {

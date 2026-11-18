@@ -1613,6 +1613,86 @@ TEST(graphql_field_paths_python_constants) {
     PASS();
 }
 
+/* Operations passed inline to callees the classifier does not know as
+ * GraphQL clients: a graphql-ws `client.subscribe({ query })` and a fetch body
+ * `JSON.stringify({ query })`. The enclosing function links. Other `query`
+ * members (a media query, a log message) are no operations. */
+static int et_gql_inline_case(bool parallel) {
+    static const EtFile f[] = {
+        {"app/src/pages/portfolio/balances.ts",
+         "import { createClient } from \"graphql-ws\"\n\n"
+         "export function subscribeBalances(address: string): () => void {\n"
+         "  const client = createClient({ url: \"wss://keeper.example/query\", lazy: true })\n"
+         "  return client.subscribe(\n"
+         "    {\n"
+         "      query: `subscription PortfolioBalances($user: String!) {\n"
+         "      userBalances(where: {user: $user}) {\n"
+         "        amount token_info {type name decimals}\n"
+         "      }\n"
+         "    }`,\n"
+         "      variables: { user: address },\n"
+         "    },\n"
+         "    { next: () => {}, error: () => {}, complete: () => {} }\n"
+         "  )\n"
+         "}\n"},
+        {"app/src/pages/markets/fetchMarkets.ts",
+         "export async function fetchMarkets(url: string): Promise<unknown> {\n"
+         "  const resp = await fetch(url, {\n"
+         "    method: \"POST\",\n"
+         "    body: JSON.stringify({\n"
+         "      query: `query Markets { perp { borrowings { marketId } } }`,\n"
+         "    }),\n"
+         "  })\n"
+         "  return resp.json()\n"
+         "}\n\n"
+         "export function screen(useMediaQuery: (q: object) => boolean, log: (q: object) => void) {\n"
+         "  log({ query: \"query failed for user\" })\n"
+         "  return useMediaQuery({ query: \"(max-width: 480px)\" })\n"
+         "}\n"},
+    };
+    static const char *const want[] = {
+        "subscribeBalances>__graphql__Subscription.userBalances",
+        "subscribeBalances>__graphql__Subscription.userBalances.amount",
+        "subscribeBalances>__graphql__Subscription.userBalances.token_info",
+        "fetchMarkets>__graphql__Query.perp",
+        "fetchMarkets>__graphql__Query.perp.borrowings",
+        NULL,
+    };
+    static const char *const reject[] = {
+        "subscribeBalances>__graphql__Subscription.userBalances.token_info.type",
+        NULL,
+    };
+    char dump[CBM_SZ_4K];
+    char props[CBM_SZ_1K];
+    int n = et_gql_edges(f, (int)(sizeof(f) / sizeof(f[0])), parallel, dump, sizeof(dump),
+                         "__graphql__Subscription.userBalances", "subscribeBalances", props,
+                         sizeof(props));
+    int ok = et_gql_expect(dump, want, reject);
+    /* 3 + 2 paths; nothing from screen() */
+    if (n != 5) {
+        fprintf(stderr, "  [ET-GQL] inline edges: %d, want 5%s", n, dump);
+        ok = 0;
+    }
+    if (!strstr(props, "\"callee\":\"client.subscribe\"") ||
+        !strstr(props, "\"operation\":\"PortfolioBalances\"") ||
+        !strstr(props, "\"operation_type\":\"subscription\"") ||
+        !strstr(props, "\"field_path\":\"userBalances\"")) {
+        fprintf(stderr, "  [ET-GQL] inline edge props: %s\n", props);
+        ok = 0;
+    }
+    return ok;
+}
+
+TEST(graphql_field_paths_inline_object_arg_sequential) {
+    ASSERT_TRUE(et_gql_inline_case(false));
+    PASS();
+}
+
+TEST(graphql_field_paths_inline_object_arg_parallel) {
+    ASSERT_TRUE(et_gql_inline_case(true));
+    PASS();
+}
+
 /* #1085: count CALLS edges whose target node has `name`, indexing via the
  * PARALLEL path (et_index_parallel pads to >50 files). The per-file TS resolver
  * used to treat a raw tsconfig alias as a confident target. That false row made
@@ -4314,6 +4394,8 @@ SUITE(edge_types_probe) {
     RUN_TEST(graphql_field_paths_multiline_ts_parallel);
     RUN_TEST(graphql_field_paths_multiline_ts_sequential);
     RUN_TEST(graphql_field_paths_python_constants);
+    RUN_TEST(graphql_field_paths_inline_object_arg_sequential);
+    RUN_TEST(graphql_field_paths_inline_object_arg_parallel);
     RUN_TEST(handles_flask_python);
     RUN_TEST(handles_fastapi_python);
     RUN_TEST(handles_drf_action_python);

@@ -3257,13 +3257,54 @@ static const char *extract_positional_url(CBMExtractCtx *ctx, TSNode arg, const 
     return NULL;
 }
 
-/* GraphQL selection signature of a call's operation argument: a tagged
- * template (gql`...`, whose arguments node is the template itself) or one of
- * the first positional / keyword string or template literals. Read apart from
- * first_string_arg, which keeps its URL-shaped limits. */
-static const char *extract_graphql_arg_sig(CBMExtractCtx *ctx, TSNode args) {
+/* The `query` / `document` member of an object-literal argument
+ * (`client.subscribe({ query: `...` })` in graphql-ws, a fetch body, a
+ * graphql-request `request({ document })`), or a null node. */
+static TSNode graphql_object_member(CBMExtractCtx *ctx, TSNode obj) {
+    TSNode none = {0};
+    const char *ok = ts_node_type(obj);
+    if (strcmp(ok, "object") != 0 && strcmp(ok, "dictionary") != 0) {
+        return none;
+    }
+    uint32_t nc = ts_node_named_child_count(obj);
+    for (uint32_t i = 0; i < nc; i++) {
+        TSNode pair = ts_node_named_child(obj, i);
+        if (strcmp(ts_node_type(pair), "pair") != 0) {
+            continue;
+        }
+        TSNode key = ts_node_child_by_field_name(pair, TS_FIELD("key"));
+        TSNode value = ts_node_child_by_field_name(pair, TS_FIELD("value"));
+        if (ts_node_is_null(key) || ts_node_is_null(value)) {
+            continue;
+        }
+        const char *k = cbm_node_text(ctx->arena, key, ctx->source);
+        if (!k) {
+            continue;
+        }
+        size_t kl = strlen(k);
+        if (kl >= PAIR_LEN && (k[0] == '"' || k[0] == '\'') && k[kl - SKIP_ONE] == k[0]) {
+            k++;
+            kl -= PAIR_LEN;
+        }
+        if ((kl == strlen("query") && strncmp(k, "query", kl) == 0) ||
+            (kl == strlen("document") && strncmp(k, "document", kl) == 0)) {
+            return value;
+        }
+    }
+    return none;
+}
+
+/* The literal of a call's operation argument: a tagged template (gql`...`,
+ * whose arguments node is the template itself), one of the first positional /
+ * keyword string or template literals, or the `query` member of an
+ * object-literal argument. Sets *sig to its selection signature (read apart
+ * from first_string_arg, which keeps its URL-shaped limits) and returns the
+ * literal node, or a null node with *sig NULL. */
+static TSNode extract_graphql_arg(CBMExtractCtx *ctx, TSNode args, const char **sig) {
+    *sig = NULL;
     if (strcmp(ts_node_type(args), "template_string") == 0) {
-        return cbm_graphql_literal_sig(ctx->arena, args, ctx->source, false);
+        *sig = cbm_graphql_literal_sig(ctx->arena, args, ctx->source, false);
+        return args;
     }
     uint32_t nc = ts_node_named_child_count(args);
     for (uint32_t ai = 0; ai < nc && ai < MAX_POSITIONAL_SCAN; ai++) {
@@ -3273,12 +3314,41 @@ static const char *extract_graphql_arg_sig(CBMExtractCtx *ctx, TSNode args) {
             ts_node_named_child_count(arg) > 0) {
             arg = ts_node_named_child(arg, ts_node_named_child_count(arg) - SKIP_ONE);
         }
-        const char *sig = cbm_graphql_literal_sig(ctx->arena, arg, ctx->source, false);
-        if (sig) {
-            return sig;
+        TSNode member = graphql_object_member(ctx, arg);
+        if (!ts_node_is_null(member)) {
+            arg = member;
+        }
+        *sig = cbm_graphql_literal_sig(ctx->arena, arg, ctx->source, false);
+        if (*sig) {
+            return arg;
         }
     }
-    return NULL;
+    TSNode none = {0};
+    return none;
+}
+
+/* A call argument that is a whole GraphQL operation (operation keyword and
+ * selection set, not the `{ }` shorthand) is the client's own evidence of
+ * the fields it selects, whatever the callee: graphql-ws `client.subscribe`,
+ * a plain `fetch`, or a project helper are not GraphQL client libraries the
+ * callee classifier knows. Records a CBM_STRREF_GRAPHQL ref owned by the
+ * enclosing function so its field paths link like a constant's. */
+static void record_graphql_call_document(CBMExtractCtx *ctx, const CBMCall *call, TSNode lit) {
+    if (ts_node_is_null(lit) || !call->enclosing_func_qn) {
+        return;
+    }
+    const char *sig = cbm_graphql_literal_sig(ctx->arena, lit, ctx->source, true);
+    const char *paths = sig ? strrchr(sig, '|') : NULL;
+    if (!paths || !paths[SKIP_ONE]) {
+        return;
+    }
+    CBMStringRef ref = {
+        .value = sig,
+        .enclosing_func_qn = call->enclosing_func_qn,
+        .key_path = call->callee_name,
+        .kind = CBM_STRREF_GRAPHQL,
+    };
+    cbm_stringref_push(&ctx->result->string_refs, ctx->arena, ref);
 }
 
 // Extract URL/topic from keyword or positional args.
@@ -5088,7 +5158,10 @@ CBMInvocationDescriptor handle_calls(CBMExtractCtx *ctx, TSNode node, const CBML
             }
             if (!ts_node_is_null(args)) {
                 call.first_string_arg = extract_url_or_topic_arg(ctx, args, call.callee_name);
-                call.graphql_sig = extract_graphql_arg_sig(ctx, args);
+                TSNode gql_lit = extract_graphql_arg(ctx, args, &call.graphql_sig);
+                if (call.graphql_sig) {
+                    record_graphql_call_document(ctx, &call, gql_lit);
+                }
                 /* #1146: a Laravel registration's slashless URI ('users', '')
                  * becomes '/users' / '/' so it mints and composes below. */
                 const char *laravel_uri = NULL;
