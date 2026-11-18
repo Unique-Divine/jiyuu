@@ -1,5 +1,5 @@
 ---
-name: sai-cli
+name: sai
 description: >-
   Trade and inspect Sai perpetuals on Nibiru from a terminal or agent with the
   open-source `sai` CLI and its MCP server. Use for Sai markets, prices,
