@@ -1148,9 +1148,16 @@ static void gqlgen_resolve(cbm_gqlgen_config_t *c, const char *rel_path) {
     if (!c->has_schema_key) {
         gqlgen_add_glob(c, gqlgen_strndup("graph/*.graphqls", strlen("graph/*.graphqls")));
     }
+    /* A glob whose join fails is dropped, never left NULL in the list. */
+    int kept = 0;
     for (int i = 0; i < c->schema_count; i++) {
-        gqlgen_set(&c->schema_globs[i], gqlgen_join(dir, c->schema_globs[i]));
+        char *joined = gqlgen_join(dir, c->schema_globs[i]);
+        cbm_free(CBM_MEM_CLASS_OTHER, c->schema_globs[i]);
+        if (joined) {
+            c->schema_globs[kept++] = joined;
+        }
     }
+    c->schema_count = kept;
     char *pkg = NULL;
     bool follow = c->resolver_layout && strcmp(c->resolver_layout, "follow-schema") == 0;
     if (c->has_resolver && follow && c->resolver_dir) {
@@ -1796,10 +1803,12 @@ static int gql_collect_resolvers(gql_ctx_t *ctx) {
         if (!recv || !gql_ends_with(recv, "Resolver")) {
             continue;
         }
-        gql_resolver_t *r = &ctx->resolvers[ctx->resolver_count++];
-        r->node = m;
-        r->dir = dir;
-        r->key = cbm_arena_sprintf(&ctx->arena, "%s.%s", recv, gql_lower_dup(&ctx->arena, m->name));
+        const char *method = gql_lower_dup(&ctx->arena, m->name);
+        const char *key = method ? cbm_arena_sprintf(&ctx->arena, "%s.%s", recv, method) : NULL;
+        if (!key) {
+            continue; /* out of memory: never publish an entry without its key */
+        }
+        ctx->resolvers[ctx->resolver_count++] = (gql_resolver_t){m, key, dir};
     }
     if (ctx->resolver_count > SKIP_ONE) {
         qsort(ctx->resolvers, (size_t)ctx->resolver_count, sizeof(*ctx->resolvers),
@@ -1826,7 +1835,8 @@ static int gql_resolver_lower_bound(const gql_ctx_t *ctx, const char *key) {
 /* The lookup key gqlgen's naming gives field `field` of type `type_name`:
  * `Perp`, `trades` -> "perpResolver.trades". */
 static const char *gql_resolver_key(CBMArena *a, const char *type_name, const char *field) {
-    char *key = cbm_arena_sprintf(a, "%sResolver.%s", type_name, gql_lower_dup(a, field));
+    const char *lower = gql_lower_dup(a, field);
+    char *key = lower ? cbm_arena_sprintf(a, "%sResolver.%s", type_name, lower) : NULL;
     if (key && key[0]) {
         key[0] = (char)tolower((unsigned char)key[0]);
     }
@@ -1854,6 +1864,9 @@ static bool gql_owns(const gql_ctx_t *ctx, const gql_resolver_t *r, const gql_fi
 
 static void gql_add_emit(gql_ctx_t *ctx, const char *path, const char *type_name,
                          const gql_field_t *f) {
+    if (!path) {
+        return; /* out of memory building the path */
+    }
     const char *qn = cbm_arena_sprintf(&ctx->arena, "__graphql__%s", path);
     if (!qn || strlen(qn) >= CBM_ROUTE_QN_SIZE) {
         ctx->too_long++; /* reported in the pass summary, never truncated */
