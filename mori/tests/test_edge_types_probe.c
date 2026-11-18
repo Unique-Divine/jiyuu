@@ -891,6 +891,37 @@ TEST(graphql_schema_extension_roots) {
     PASS();
 }
 
+/* A federation subgraph declares its root only as `extend type Query`, with
+ * no base `type Query` anywhere in its set: the extension declares the root,
+ * and its fields (and those of their return types) are Routes resolved by
+ * queryResolver. An extension-only non-root type works the same way. */
+static const EtFile et_gqlgen_extension_only_root_files[] = {
+    {"go.mod", "module fed\n"},
+    {"graph/schema.graphqls",
+     "extend type Query {\n  me: User\n}\n\ntype User @key(fields: \"id\") {\n  id: ID!\n}\n"},
+    {"graph/more.graphqls", "extend type Query {\n  ping: String\n}\n"},
+    {"graph/schema.resolvers.go",
+     "package graph\n\n"
+     "type queryResolver struct{}\n\n"
+     "func (r *queryResolver) Me() int {\n\treturn 0\n}\n"},
+};
+
+static const EtGqlServerRoute et_gqlgen_extension_only_root_want[] = {
+    {"__graphql__Query.me", "User", "false", "", "Method", ".graph.queryResolver.Me",
+     "gqlgen_resolver", 0},
+    {"__graphql__Query.me.id", "ID!", "false", "", "Field", ".User.id", "graphql_schema_field", 0},
+    {"__graphql__Query.ping", "String", "false", "", "Field", ".Query.ping",
+     "graphql_schema_field", 0},
+};
+
+TEST(graphql_extension_only_root_type) {
+    ASSERT_TRUE(et_gqlgen_case(et_gqlgen_extension_only_root_files,
+                               ET_NWANT(et_gqlgen_extension_only_root_files), 0,
+                               et_gqlgen_extension_only_root_want,
+                               ET_NWANT(et_gqlgen_extension_only_root_want)));
+    PASS();
+}
+
 /* Overwrite one fixture file in an indexed project. */
 static void et_rewrite(const EtProj *lp, const char *rel, const char *content) {
     char path[700];
@@ -3706,6 +3737,7 @@ SUITE(edge_types_probe) {
     RUN_TEST(graphql_gqlgen_config_sibling_schema_single_file);
     RUN_TEST(graphql_resolver_needs_ownership_without_config);
     RUN_TEST(graphql_sibling_schema_single_file_without_config);
+    RUN_TEST(graphql_extension_only_root_type);
     RUN_TEST(graphql_schema_extension_roots);
     RUN_TEST(graphql_gqlgen_underscored_field_resolver);
     RUN_TEST(graphql_gqlgen_config_default_schema);

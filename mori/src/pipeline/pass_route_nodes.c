@@ -1688,6 +1688,32 @@ static int gql_root_op(const gql_ctx_t *ctx, const gql_class_t *c) {
     return CBM_NOT_FOUND;
 }
 
+static int gql_class_name_cmp(const void *x, const void *y) {
+    const gql_class_t *a = *(const gql_class_t *const *)x;
+    const gql_class_t *b = *(const gql_class_t *const *)y;
+    return strcmp(a->node->name, b->node->name);
+}
+
+static int gql_field_parent_cmp(const void *x, const void *y) {
+    const gql_field_t *a = *(const gql_field_t *const *)x;
+    const gql_field_t *b = *(const gql_field_t *const *)y;
+    return strcmp(a->parent_qn, b->parent_qn);
+}
+
+/* Sort pointers to the n items of size `size` at `items` with cmp; NULL on
+ * allocation failure. */
+static const void **gql_sorted_index(CBMArena *a, const void *items, int n, size_t size,
+                                     int (*cmp)(const void *, const void *)) {
+    const void **index = cbm_arena_alloc(a, ((size_t)n + SKIP_ONE) * sizeof(*index));
+    for (int i = 0; index && i < n; i++) {
+        index[i] = (const char *)items + ((size_t)i * size);
+    }
+    if (index && n > SKIP_ONE) {
+        qsort(index, (size_t)n, sizeof(*index), cmp);
+    }
+    return index;
+}
+
 /* The type named `name` in set `group` nearest `near`, or NULL (ties:
  * smaller QN). */
 static const gql_class_t *gql_find_class(const gql_ctx_t *ctx, const char *name, const char *near,
@@ -1738,8 +1764,65 @@ static bool gql_read_field(gql_ctx_t *ctx, const cbm_gbuf_node_t *n, gql_field_t
     return f->parent_qn != NULL;
 }
 
+static int gql_pending_cmp(const void *x, const void *y) {
+    const gql_field_t *a = *(const gql_field_t *const *)x;
+    const gql_field_t *b = *(const gql_field_t *const *)y;
+    int c = strcmp(a->node->file_path, b->node->file_path);
+    if (c == 0) {
+        c = a->node->start_line - b->node->start_line;
+    }
+    return c != 0 ? c : strcmp(a->node->qualified_name, b->node->qualified_name);
+}
+
+/* Declare T for `extend type T` fields whose set declares no T (a
+ * federation subgraph's `extend type Query`): the first extension (by
+ * path, then line) stands for the type, named T, with its block's QN; the
+ * set's other extensions of T join it. False on allocation failure. */
+static bool gql_declare_extended(gql_ctx_t *ctx, gql_field_t **pending, int n) {
+    if (n == 0) {
+        return true;
+    }
+    qsort(pending, (size_t)n, sizeof(*pending), gql_pending_cmp);
+    gql_class_t *grown =
+        cbm_arena_alloc(&ctx->arena, ((size_t)ctx->class_count + (size_t)n) * sizeof(*grown));
+    if (!grown) {
+        return false;
+    }
+    if (ctx->class_count > 0) {
+        memcpy(grown, ctx->classes, (size_t)ctx->class_count * sizeof(*grown));
+    }
+    ctx->classes = grown;
+    for (int i = 0; i < n; i++) {
+        gql_field_t *f = pending[i];
+        const gql_class_t *owner = gql_find_class(ctx, f->extends, f->node->file_path, f->group);
+        if (!owner) {
+            cbm_gbuf_node_t *type = cbm_arena_alloc(&ctx->arena, sizeof(*type));
+            if (!type) {
+                return false;
+            }
+            memset(type, 0, sizeof(*type));
+            type->label = (char *)"Class";
+            type->name = (char *)f->extends;
+            type->qualified_name = (char *)f->parent_qn;
+            type->file_path = f->node->file_path;
+            type->start_line = f->node->start_line;
+            type->end_line = f->node->end_line;
+            ctx->classes[ctx->class_count++] = (gql_class_t){type, f->group};
+            ctx->classes_by_name = (const gql_class_t **)gql_sorted_index(
+                &ctx->arena, ctx->classes, ctx->class_count, sizeof(*ctx->classes),
+                gql_class_name_cmp);
+            if (!ctx->classes_by_name) {
+                return false;
+            }
+            owner = &ctx->classes[ctx->class_count - SKIP_ONE];
+        }
+        f->parent_qn = owner->node->qualified_name;
+    }
+    return true;
+}
+
 /* Collect every schema Field; an `extend type T` field is re-parented to its
- * set's nearest declared T. */
+ * set's nearest declared T, or declares T when its set has none. */
 static int gql_collect_fields(gql_ctx_t *ctx) {
     const cbm_gbuf_node_t **nodes = NULL;
     int count = 0;
@@ -1747,9 +1830,11 @@ static int gql_collect_fields(gql_ctx_t *ctx) {
         return 0;
     }
     ctx->fields = cbm_arena_alloc(&ctx->arena, (size_t)count * sizeof(*ctx->fields));
-    if (!ctx->fields) {
+    gql_field_t **pending = cbm_arena_alloc(&ctx->arena, (size_t)count * sizeof(*pending));
+    if (!ctx->fields || !pending) {
         return CBM_NOT_FOUND;
     }
+    int pending_count = 0;
     for (int i = 0; i < count; i++) {
         const cbm_gbuf_node_t *n = nodes[i];
         if (!gql_is_schema_file(n->file_path) || !n->name || !n->properties_json) {
@@ -1761,14 +1846,15 @@ static int gql_collect_fields(gql_ctx_t *ctx) {
         }
         if (f->extends) {
             const gql_class_t *owner = gql_find_class(ctx, f->extends, n->file_path, f->group);
-            if (!owner) {
-                continue; /* extends a type its set never declares */
+            if (owner) {
+                f->parent_qn = owner->node->qualified_name;
+            } else {
+                pending[pending_count++] = f;
             }
-            f->parent_qn = owner->node->qualified_name;
         }
         ctx->field_count++;
     }
-    return ctx->field_count;
+    return gql_declare_extended(ctx, pending, pending_count) ? ctx->field_count : CBM_NOT_FOUND;
 }
 
 /* The receiver type of a Go method: the last segment of its QN's parent,
@@ -1937,32 +2023,6 @@ static bool gql_owns(const gql_ctx_t *ctx, const gql_resolver_t *r, const gql_fi
     bool same_or_below = rl >= sl && strncmp(r->dir, file, sl) == 0;
     bool parent = rl == gql_parent_dir_len(file) && strncmp(r->dir, file, rl) == 0;
     return same_or_below || parent;
-}
-
-static int gql_class_name_cmp(const void *x, const void *y) {
-    const gql_class_t *a = *(const gql_class_t *const *)x;
-    const gql_class_t *b = *(const gql_class_t *const *)y;
-    return strcmp(a->node->name, b->node->name);
-}
-
-static int gql_field_parent_cmp(const void *x, const void *y) {
-    const gql_field_t *a = *(const gql_field_t *const *)x;
-    const gql_field_t *b = *(const gql_field_t *const *)y;
-    return strcmp(a->parent_qn, b->parent_qn);
-}
-
-/* Sort pointers to the n items of size `size` at `items` with cmp; NULL on
- * allocation failure. */
-static const void **gql_sorted_index(CBMArena *a, const void *items, int n, size_t size,
-                                     int (*cmp)(const void *, const void *)) {
-    const void **index = cbm_arena_alloc(a, ((size_t)n + SKIP_ONE) * sizeof(*index));
-    for (int i = 0; index && i < n; i++) {
-        index[i] = (const char *)items + ((size_t)i * size);
-    }
-    if (index && n > SKIP_ONE) {
-        qsort(index, (size_t)n, sizeof(*index), cmp);
-    }
-    return index;
 }
 
 /* The fields whose parent is `parent_qn`: [*first, return). */
@@ -2183,6 +2243,21 @@ static void gql_plan_and_emit(gql_ctx_t *ctx) {
     }
 }
 
+/* Does the buffer hold a Field from a GraphQL file? */
+static bool gql_has_schema_field(cbm_gbuf_t *gb) {
+    const cbm_gbuf_node_t **nodes = NULL;
+    int count = 0;
+    if (cbm_gbuf_find_by_label(gb, "Field", &nodes, &count) != 0) {
+        return false;
+    }
+    for (int i = 0; i < count; i++) {
+        if (gql_is_schema_file(nodes[i]->file_path)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 /* Phase 4b entry: __graphql__<Op>.<field>[.<child>] Routes from GraphQL
  * schema files, with HANDLES from gqlgen resolvers or the schema Field.
  * repo_path locates the gqlgen configs (NULL: none are read). */
@@ -2192,8 +2267,9 @@ void cbm_pipeline_create_graphql_routes(cbm_gbuf_t *gb, const char *repo_path) {
     }
     gql_ctx_t ctx = {.gb = gb, .repo_path = repo_path};
     cbm_arena_init(&ctx.arena);
-    /* Most repositories have no schema: stop before touching anything else. */
-    if (gql_collect_classes(&ctx) > 0) {
+    /* Most repositories have no schema: stop before touching anything else.
+     * A schema of extensions only (a federation subgraph) has no Class. */
+    if (gql_collect_classes(&ctx) > 0 || (ctx.class_count == 0 && gql_has_schema_field(gb))) {
         gql_load_configs(&ctx);
         gql_plan_and_emit(&ctx);
         gql_free_configs(&ctx);
