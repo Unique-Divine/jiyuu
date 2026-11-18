@@ -276,8 +276,10 @@ never authorize a delete.
 
 Before it calls `chat.delete`, the tool checks the target:
 
-1. The message is no older than 24 hours. Environment variable
-   `SLACK_MCP_EDIT_DELETE_MAX_AGE_HOURS` sets another window.
+1. The message is no older than 7 days (168 hours). Environment variable
+   `SLACK_MCP_EDIT_DELETE_MAX_AGE_HOURS` sets another window. The
+   `message_too_old` error names `slack_delete_message_unsafe` and says to ask
+   the user first.
 2. The message exists, as a top-level message or a thread reply. The replies
    lookup is narrowed to the target timestamp.
 3. Its author is the signed-in user from `auth.test`. Without this check, a
@@ -330,6 +332,21 @@ When `chat.delete` returns `message_not_found` for a message the check just
 found, usually after a network retry, the tool reads the channel again. If the
 message is gone or only a "This message was deleted." tombstone remains, it
 returns status `probably_deleted` with a note instead of an error.
+
+---
+
+### slack_delete_message_unsafe
+
+The same delete as `slack_delete_message`, with the same parameters, results,
+and errors, except that it has no age limit. It's meant for deliberate cleanup
+of older messages. Call it only when the user explicitly asked to delete that
+specific message.
+
+Don't put this tool on a client's auto-allow list. Claude Code and similar
+clients grant permissions per tool, so keeping the unsafe tool separate means
+the user confirms each call. Every other check still runs: ownership,
+`expected_text`, input validation, session pinning, and `outcome_unknown`
+reporting.
 
 ---
 
