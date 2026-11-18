@@ -348,6 +348,12 @@ the user confirms each call. Every other check still runs: ownership,
 `expected_text`, input validation, session pinning, and `outcome_unknown`
 reporting.
 
+The stdio server lists the unsafe tools by default, because local clients such
+as Claude Code prompt per tool. The HTTP server (`src/server-http.js`) neither
+lists nor dispatches them unless environment variable
+`SLACK_MCP_ENABLE_UNSAFE_TOOLS` is `true`, since HTTP clients may never
+prompt. Without it, a call returns `unknown_tool`.
+
 ---
 
 ### slack_get_thread

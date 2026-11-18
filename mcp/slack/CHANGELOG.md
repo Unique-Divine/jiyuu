@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - `slack_delete_message` wraps `chat.delete` and returns the deleted text. Before deleting, it checks that the signed-in user sent the message, that required argument `expected_text` matches the message's text, and that the message is less than 7 days old (`SLACK_MCP_EDIT_DELETE_MAX_AGE_HOURS` changes the window). It refuses with `not_own_message`, `text_mismatch`, or `message_too_old`, since an admin's session token could otherwise delete other people's messages and injected Slack text could steer an agent to delete old records.
 - `slack_delete_message_unsafe` runs the same delete without the age window, for deliberate cleanup of older messages. It's a separate tool so clients that grant permissions per tool, such as Claude Code, prompt the user on every call.
+- The HTTP transport hides and refuses the `_unsafe` tools unless `SLACK_MCP_ENABLE_UNSAFE_TOOLS=true`, because HTTP clients may not prompt per tool. Stdio keeps them by default.
 
 ## [4.4.3] - 2026-07-03
 
