@@ -1,0 +1,568 @@
+{
+  "source": "live Slack Web API, scripts/probe-message-markup.js",
+  "captured_at": "2026-11-18",
+  "channel": "D_SELF_DM",
+  "sent_text": "jiyuu#138 probe (deleting): <https://example.com|label #1> <@U03DYE9ALTB> <#C03DD94GR8W> `discord.gg/saidotfun` (`discord.gg/saidotfun`). bare https://example.com/path and example.org a & b < c > d",
+  "variants": [
+    {
+      "variant": "post_default",
+      "post_args": {},
+      "update_args": null,
+      "response_text": "jiyuu#138 probe (deleting): <https://example.com|label #1> <@U03DYE9ALTB> <#C03DD94GR8W> `<http://discord.gg/saidotfun|discord.gg/saidotfun>` (`<http://discord.gg/saidotfun`|discord.gg/saidotfun`>). bare <https://example.com/path> and <http://example.org|example.org> a &amp; b &lt; c &gt; d",
+      "stored": {
+        "ts": "TS_POST_DEFAULT",
+        "text": "jiyuu#138 probe (deleting): <https://example.com|label #1> <@U03DYE9ALTB> <#C03DD94GR8W> `<http://discord.gg/saidotfun|discord.gg/saidotfun>` (`<http://discord.gg/saidotfun`|discord.gg/saidotfun`>). bare <https://example.com/path> and <http://example.org|example.org> a &amp; b &lt; c &gt; d",
+        "blocks": [
+          {
+            "type": "rich_text",
+            "block_id": "IXe/W",
+            "elements": [
+              {
+                "type": "rich_text_section",
+                "elements": [
+                  {
+                    "type": "text",
+                    "text": "jiyuu#138 probe (deleting): "
+                  },
+                  {
+                    "type": "link",
+                    "url": "https://example.com",
+                    "text": "label #1"
+                  },
+                  {
+                    "type": "text",
+                    "text": " "
+                  },
+                  {
+                    "type": "user",
+                    "user_id": "U03DYE9ALTB"
+                  },
+                  {
+                    "type": "text",
+                    "text": " "
+                  },
+                  {
+                    "type": "channel",
+                    "channel_id": "C03DD94GR8W"
+                  },
+                  {
+                    "type": "text",
+                    "text": " "
+                  },
+                  {
+                    "type": "link",
+                    "url": "http://discord.gg/saidotfun",
+                    "text": "discord.gg/saidotfun",
+                    "style": {
+                      "code": true
+                    }
+                  },
+                  {
+                    "type": "text",
+                    "text": " (`"
+                  },
+                  {
+                    "type": "link",
+                    "url": "http://discord.gg/saidotfun`",
+                    "text": "discord.gg/saidotfun`"
+                  },
+                  {
+                    "type": "text",
+                    "text": "). bare "
+                  },
+                  {
+                    "type": "link",
+                    "url": "https://example.com/path"
+                  },
+                  {
+                    "type": "text",
+                    "text": " and "
+                  },
+                  {
+                    "type": "link",
+                    "url": "http://example.org",
+                    "text": "example.org"
+                  },
+                  {
+                    "type": "text",
+                    "text": " a & b < c > d"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "variant": "post_parse_none",
+      "post_args": {
+        "parse": "none"
+      },
+      "update_args": null,
+      "response_text": "jiyuu#138 probe (deleting): <https://example.com|label #1> <@U03DYE9ALTB> <#C03DD94GR8W> `discord.gg/saidotfun` (`discord.gg/saidotfun`). bare https://example.com/path and example.org a &amp; b &lt; c &gt; d",
+      "stored": {
+        "ts": "TS_POST_PARSE_NONE",
+        "text": "jiyuu#138 probe (deleting): <https://example.com|label #1> <@U03DYE9ALTB> <#C03DD94GR8W> `discord.gg/saidotfun` (`discord.gg/saidotfun`). bare https://example.com/path and example.org a &amp; b &lt; c &gt; d",
+        "blocks": [
+          {
+            "type": "rich_text",
+            "block_id": "VRco=",
+            "elements": [
+              {
+                "type": "rich_text_section",
+                "elements": [
+                  {
+                    "type": "text",
+                    "text": "jiyuu#138 probe (deleting): "
+                  },
+                  {
+                    "type": "link",
+                    "url": "https://example.com",
+                    "text": "label #1"
+                  },
+                  {
+                    "type": "text",
+                    "text": " "
+                  },
+                  {
+                    "type": "user",
+                    "user_id": "U03DYE9ALTB"
+                  },
+                  {
+                    "type": "text",
+                    "text": " "
+                  },
+                  {
+                    "type": "channel",
+                    "channel_id": "C03DD94GR8W"
+                  },
+                  {
+                    "type": "text",
+                    "text": " "
+                  },
+                  {
+                    "type": "text",
+                    "text": "discord.gg/saidotfun",
+                    "style": {
+                      "code": true
+                    }
+                  },
+                  {
+                    "type": "text",
+                    "text": " ("
+                  },
+                  {
+                    "type": "text",
+                    "text": "discord.gg/saidotfun",
+                    "style": {
+                      "code": true
+                    }
+                  },
+                  {
+                    "type": "text",
+                    "text": "). bare https://example.com/path and example.org a & b < c > d"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "variant": "post_parse_client",
+      "post_args": {
+        "parse": "client"
+      },
+      "update_args": null,
+      "response_text": "jiyuu#138 probe (deleting): &lt;https://example.com|label #1&gt; <@U03DYE9ALTB> <#C03DD94GR8W> `<http://discord.gg/saidotfun|discord.gg/saidotfun>` (`<http://discord.gg/saidotfun`|discord.gg/saidotfun`>). bare <https://example.com/path> and <http://example.org|example.org> a &amp; b &lt; c &gt; d",
+      "stored": {
+        "ts": "TS_POST_PARSE_CLIENT",
+        "text": "jiyuu#138 probe (deleting): &lt;https://example.com|label #1&gt; <@U03DYE9ALTB> <#C03DD94GR8W> `<http://discord.gg/saidotfun|discord.gg/saidotfun>` (`<http://discord.gg/saidotfun`|discord.gg/saidotfun`>). bare <https://example.com/path> and <http://example.org|example.org> a &amp; b &lt; c &gt; d",
+        "blocks": [
+          {
+            "type": "rich_text",
+            "block_id": "Sr6",
+            "elements": [
+              {
+                "type": "rich_text_section",
+                "elements": [
+                  {
+                    "type": "text",
+                    "text": "jiyuu#138 probe (deleting): <https://example.com|label #1> "
+                  },
+                  {
+                    "type": "user",
+                    "user_id": "U03DYE9ALTB"
+                  },
+                  {
+                    "type": "text",
+                    "text": " "
+                  },
+                  {
+                    "type": "channel",
+                    "channel_id": "C03DD94GR8W"
+                  },
+                  {
+                    "type": "text",
+                    "text": " "
+                  },
+                  {
+                    "type": "link",
+                    "url": "http://discord.gg/saidotfun",
+                    "text": "discord.gg/saidotfun",
+                    "style": {
+                      "code": true
+                    }
+                  },
+                  {
+                    "type": "text",
+                    "text": " (`"
+                  },
+                  {
+                    "type": "link",
+                    "url": "http://discord.gg/saidotfun`",
+                    "text": "discord.gg/saidotfun`"
+                  },
+                  {
+                    "type": "text",
+                    "text": "). bare "
+                  },
+                  {
+                    "type": "link",
+                    "url": "https://example.com/path"
+                  },
+                  {
+                    "type": "text",
+                    "text": " and "
+                  },
+                  {
+                    "type": "link",
+                    "url": "http://example.org",
+                    "text": "example.org"
+                  },
+                  {
+                    "type": "text",
+                    "text": " a & b < c > d"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "variant": "update_default",
+      "post_args": {},
+      "update_args": {},
+      "response_text": "jiyuu#138 probe (deleting): &lt;https://example.com|label #1&gt; <@U03DYE9ALTB> <#C03DD94GR8W> `<http://discord.gg/saidotfun|discord.gg/saidotfun>` (`<http://discord.gg/saidotfun`|discord.gg/saidotfun`>). bare <https://example.com/path> and <http://example.org|example.org> a &amp; b &lt; c &gt; d",
+      "stored": {
+        "ts": "TS_UPDATE_DEFAULT",
+        "text": "jiyuu#138 probe (deleting): &lt;https://example.com|label #1&gt; <@U03DYE9ALTB> <#C03DD94GR8W> `<http://discord.gg/saidotfun|discord.gg/saidotfun>` (`<http://discord.gg/saidotfun`|discord.gg/saidotfun`>). bare <https://example.com/path> and <http://example.org|example.org> a &amp; b &lt; c &gt; d",
+        "blocks": [
+          {
+            "type": "rich_text",
+            "block_id": "78M54",
+            "elements": [
+              {
+                "type": "rich_text_section",
+                "elements": [
+                  {
+                    "type": "text",
+                    "text": "jiyuu#138 probe (deleting): <https://example.com|label #1> "
+                  },
+                  {
+                    "type": "user",
+                    "user_id": "U03DYE9ALTB"
+                  },
+                  {
+                    "type": "text",
+                    "text": " "
+                  },
+                  {
+                    "type": "channel",
+                    "channel_id": "C03DD94GR8W"
+                  },
+                  {
+                    "type": "text",
+                    "text": " "
+                  },
+                  {
+                    "type": "link",
+                    "url": "http://discord.gg/saidotfun",
+                    "text": "discord.gg/saidotfun",
+                    "style": {
+                      "code": true
+                    }
+                  },
+                  {
+                    "type": "text",
+                    "text": " (`"
+                  },
+                  {
+                    "type": "link",
+                    "url": "http://discord.gg/saidotfun`",
+                    "text": "discord.gg/saidotfun`"
+                  },
+                  {
+                    "type": "text",
+                    "text": "). bare "
+                  },
+                  {
+                    "type": "link",
+                    "url": "https://example.com/path"
+                  },
+                  {
+                    "type": "text",
+                    "text": " and "
+                  },
+                  {
+                    "type": "link",
+                    "url": "http://example.org",
+                    "text": "example.org"
+                  },
+                  {
+                    "type": "text",
+                    "text": " a & b < c > d"
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "edited": true
+      }
+    },
+    {
+      "variant": "update_parse_none",
+      "post_args": {},
+      "update_args": {
+        "parse": "none"
+      },
+      "response_text": "jiyuu#138 probe (deleting): <https://example.com|label #1> <@U03DYE9ALTB> <#C03DD94GR8W> `discord.gg/saidotfun` (`discord.gg/saidotfun`). bare https://example.com/path and example.org a &amp; b &lt; c &gt; d",
+      "stored": {
+        "ts": "TS_UPDATE_PARSE_NONE",
+        "text": "jiyuu#138 probe (deleting): <https://example.com|label #1> <@U03DYE9ALTB> <#C03DD94GR8W> `discord.gg/saidotfun` (`discord.gg/saidotfun`). bare https://example.com/path and example.org a &amp; b &lt; c &gt; d",
+        "blocks": [
+          {
+            "type": "rich_text",
+            "block_id": "qtf",
+            "elements": [
+              {
+                "type": "rich_text_section",
+                "elements": [
+                  {
+                    "type": "text",
+                    "text": "jiyuu#138 probe (deleting): "
+                  },
+                  {
+                    "type": "link",
+                    "url": "https://example.com",
+                    "text": "label #1"
+                  },
+                  {
+                    "type": "text",
+                    "text": " "
+                  },
+                  {
+                    "type": "user",
+                    "user_id": "U03DYE9ALTB"
+                  },
+                  {
+                    "type": "text",
+                    "text": " "
+                  },
+                  {
+                    "type": "channel",
+                    "channel_id": "C03DD94GR8W"
+                  },
+                  {
+                    "type": "text",
+                    "text": " "
+                  },
+                  {
+                    "type": "text",
+                    "text": "discord.gg/saidotfun",
+                    "style": {
+                      "code": true
+                    }
+                  },
+                  {
+                    "type": "text",
+                    "text": " ("
+                  },
+                  {
+                    "type": "text",
+                    "text": "discord.gg/saidotfun",
+                    "style": {
+                      "code": true
+                    }
+                  },
+                  {
+                    "type": "text",
+                    "text": "). bare https://example.com/path and example.org a & b < c > d"
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "edited": true
+      }
+    },
+    {
+      "variant": "update_parse_client",
+      "post_args": {},
+      "update_args": {
+        "parse": "client"
+      },
+      "response_text": "jiyuu#138 probe (deleting): &lt;https://example.com|label #1&gt; <@U03DYE9ALTB> <#C03DD94GR8W> `<http://discord.gg/saidotfun|discord.gg/saidotfun>` (`<http://discord.gg/saidotfun`|discord.gg/saidotfun`>). bare <https://example.com/path> and <http://example.org|example.org> a &amp; b &lt; c &gt; d",
+      "stored": {
+        "ts": "TS_UPDATE_PARSE_CLIENT",
+        "text": "jiyuu#138 probe (deleting): &lt;https://example.com|label #1&gt; <@U03DYE9ALTB> <#C03DD94GR8W> `<http://discord.gg/saidotfun|discord.gg/saidotfun>` (`<http://discord.gg/saidotfun`|discord.gg/saidotfun`>). bare <https://example.com/path> and <http://example.org|example.org> a &amp; b &lt; c &gt; d",
+        "blocks": [
+          {
+            "type": "rich_text",
+            "block_id": "z2csP",
+            "elements": [
+              {
+                "type": "rich_text_section",
+                "elements": [
+                  {
+                    "type": "text",
+                    "text": "jiyuu#138 probe (deleting): <https://example.com|label #1> "
+                  },
+                  {
+                    "type": "user",
+                    "user_id": "U03DYE9ALTB"
+                  },
+                  {
+                    "type": "text",
+                    "text": " "
+                  },
+                  {
+                    "type": "channel",
+                    "channel_id": "C03DD94GR8W"
+                  },
+                  {
+                    "type": "text",
+                    "text": " "
+                  },
+                  {
+                    "type": "link",
+                    "url": "http://discord.gg/saidotfun",
+                    "text": "discord.gg/saidotfun",
+                    "style": {
+                      "code": true
+                    }
+                  },
+                  {
+                    "type": "text",
+                    "text": " (`"
+                  },
+                  {
+                    "type": "link",
+                    "url": "http://discord.gg/saidotfun`",
+                    "text": "discord.gg/saidotfun`"
+                  },
+                  {
+                    "type": "text",
+                    "text": "). bare "
+                  },
+                  {
+                    "type": "link",
+                    "url": "https://example.com/path"
+                  },
+                  {
+                    "type": "text",
+                    "text": " and "
+                  },
+                  {
+                    "type": "link",
+                    "url": "http://example.org",
+                    "text": "example.org"
+                  },
+                  {
+                    "type": "text",
+                    "text": " a & b < c > d"
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "edited": true
+      }
+    },
+    {
+      "variant": "update_parse_full",
+      "post_args": {},
+      "update_args": {
+        "parse": "full"
+      },
+      "response_text": "jiyuu#138 probe (deleting): &lt;https://example.com|label #1&gt; &lt;@U03DYE9ALTB&gt; &lt;#C03DD94GR8W&gt; `<http://discord.gg/saidotfun|discord.gg/saidotfun>` (`<http://discord.gg/saidotfun`|discord.gg/saidotfun`>). bare <https://example.com/path> and <http://example.org|example.org> a &amp; b &lt; c &gt; d",
+      "stored": {
+        "ts": "TS_UPDATE_PARSE_FULL",
+        "text": "jiyuu#138 probe (deleting): &lt;https://example.com|label #1&gt; &lt;@U03DYE9ALTB&gt; &lt;#C03DD94GR8W&gt; `<http://discord.gg/saidotfun|discord.gg/saidotfun>` (`<http://discord.gg/saidotfun`|discord.gg/saidotfun`>). bare <https://example.com/path> and <http://example.org|example.org> a &amp; b &lt; c &gt; d",
+        "blocks": [
+          {
+            "type": "rich_text",
+            "block_id": "io4",
+            "elements": [
+              {
+                "type": "rich_text_section",
+                "elements": [
+                  {
+                    "type": "text",
+                    "text": "jiyuu#138 probe (deleting): <https://example.com|label #1> <@U03DYE9ALTB> <#C03DD94GR8W> "
+                  },
+                  {
+                    "type": "link",
+                    "url": "http://discord.gg/saidotfun",
+                    "text": "discord.gg/saidotfun",
+                    "style": {
+                      "code": true
+                    }
+                  },
+                  {
+                    "type": "text",
+                    "text": " (`"
+                  },
+                  {
+                    "type": "link",
+                    "url": "http://discord.gg/saidotfun`",
+                    "text": "discord.gg/saidotfun`"
+                  },
+                  {
+                    "type": "text",
+                    "text": "). bare "
+                  },
+                  {
+                    "type": "link",
+                    "url": "https://example.com/path"
+                  },
+                  {
+                    "type": "text",
+                    "text": " and "
+                  },
+                  {
+                    "type": "link",
+                    "url": "http://example.org",
+                    "text": "example.org"
+                  },
+                  {
+                    "type": "text",
+                    "text": " a & b < c > d"
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "edited": true
+      }
+    }
+  ]
+}
