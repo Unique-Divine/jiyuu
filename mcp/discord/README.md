@@ -63,7 +63,12 @@ a project:
 Restart the MCP server in the client, or restart the client. In Claude Code,
 run `/mcp` and reconnect the server. Because the configuration names
 `@latest`, command `bunx` downloads any newer release on that launch, so the
-configuration never needs editing.
+configuration needs no edit.
+
+A configuration copied from an older version of this README names an exact
+version, such as `@uniquedivine/mcp-discord@1.3.9`, and keeps running that
+version. Replace the version with `@latest` once, then restart. In Claude Code,
+run `claude mcp remove discord`, then rerun the `claude mcp add` command above.
 
 ## Install From Source
 
