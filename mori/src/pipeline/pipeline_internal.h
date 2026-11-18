@@ -1315,6 +1315,14 @@ int cbm_gqlgen_config_load(const char *repo_path, const char *rel_path, cbm_gqlg
 void cbm_gqlgen_config_free(cbm_gqlgen_config_t *c);
 /* `*` and `?` within a path segment, `**` across segments. */
 bool cbm_gqlgen_glob_match(const char *glob, const char *path);
+/* Does GraphQL text define schema (a type-system definition or extension:
+ * type, interface, input, enum, union, scalar, directive, schema, extend) at
+ * its top level? An operation document (query/mutation/subscription/
+ * fragment) does not. The input need not be NUL-terminated. */
+bool cbm_graphql_text_defines_schema(const char *text, size_t len);
+/* Does Go text declare a method whose receiver type ends in "Resolver" (a
+ * method the GraphQL route pass may bind)? */
+bool cbm_go_text_has_resolver_method(const char *text, size_t len);
 
 /* ── Pass function prototypes ────────────────────────────────────── */
 

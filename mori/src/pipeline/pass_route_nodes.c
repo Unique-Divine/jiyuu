@@ -1053,6 +1053,100 @@ bool cbm_gqlgen_is_config_path(const char *rel_path) {
     return false;
 }
 
+static bool gql_word_char(char c) {
+    return isalnum((unsigned char)c) || c == '_';
+}
+
+/* Skip a GraphQL string at text[i] ('"' or a '"""' block); returns the index
+ * after it. */
+static size_t gql_skip_string(const char *text, size_t len, size_t i) {
+    if (i + PAIR_LEN < len && text[i + SKIP_ONE] == '"' && text[i + PAIR_LEN] == '"') {
+        for (i += CBM_SZ_3; i < len; i++) {
+            if (text[i] == '\\') {
+                i++;
+            } else if (i + PAIR_LEN < len && text[i] == '"' && text[i + SKIP_ONE] == '"' &&
+                       text[i + PAIR_LEN] == '"') {
+                return i + CBM_SZ_3;
+            }
+        }
+        return len;
+    }
+    for (i++; i < len && text[i] != '"' && text[i] != '\n'; i++) {
+        if (text[i] == '\\') {
+            i++;
+        }
+    }
+    return i < len ? i + SKIP_ONE : len;
+}
+
+bool cbm_graphql_text_defines_schema(const char *text, size_t len) {
+    static const char *const kinds[] = {"type",  "interface", "input",     "enum",   "union",
+                                        "scalar", "directive", "schema", "extend"};
+    int depth = 0; /* braces and parentheses */
+    for (size_t i = 0; text && i < len;) {
+        char c = text[i];
+        if (c == '#') {
+            while (i < len && text[i] != '\n') {
+                i++;
+            }
+        } else if (c == '"') {
+            i = gql_skip_string(text, len, i);
+        } else if (c == '{' || c == '(' || c == '[') {
+            depth++;
+            i++;
+        } else if (c == '}' || c == ')' || c == ']') {
+            depth -= depth > 0 ? SKIP_ONE : 0;
+            i++;
+        } else if (gql_word_char(c) || c == '$' || c == '@') {
+            size_t start = i++;
+            while (i < len && gql_word_char(text[i])) {
+                i++;
+            }
+            for (size_t k = 0; depth == 0 && c != '$' && c != '@' && k < sizeof(kinds) / sizeof(kinds[0]); k++) {
+                if (strlen(kinds[k]) == i - start && strncmp(text + start, kinds[k], i - start) == 0) {
+                    return true;
+                }
+            }
+        } else {
+            i++;
+        }
+    }
+    return false;
+}
+
+bool cbm_go_text_has_resolver_method(const char *text, size_t len) {
+    static const char FUNC[] = "func";
+    static const char SUFFIX[] = "Resolver";
+    size_t fl = sizeof(FUNC) - SKIP_ONE;
+    size_t sl = sizeof(SUFFIX) - SKIP_ONE;
+    for (size_t i = 0; text && i + fl < len; i++) {
+        if (strncmp(text + i, FUNC, fl) != 0 || (i > 0 && gql_word_char(text[i - SKIP_ONE])) ||
+            gql_word_char(text[i + fl])) {
+            continue;
+        }
+        size_t j = i + fl;
+        while (j < len && (text[j] == ' ' || text[j] == '\t')) {
+            j++;
+        }
+        if (j >= len || text[j] != '(') {
+            continue;
+        }
+        size_t close = j;
+        while (close < len && text[close] != ')' && text[close] != '\n') {
+            close++;
+        }
+        size_t end = close;
+        while (end > j && (text[end - SKIP_ONE] == ' ' || text[end - SKIP_ONE] == '\t')) {
+            end--;
+        }
+        if (close < len && text[close] == ')' && end - j > sl &&
+            strncmp(text + end - sl, SUFFIX, sl) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static char *gqlgen_strndup(const char *s, size_t n) {
     char *out = cbm_alloc(CBM_MEM_CLASS_OTHER, n + SKIP_ONE);
     if (out) {

@@ -1014,6 +1014,69 @@ TEST(graphql_gqlgen_routes_survive_incremental_edits) {
     PASS();
 }
 
+/* Only an edit that can change Routes or HANDLES declines the closure
+ * repair: an operation-only .graphql document and a Go helper beside the
+ * resolvers (no resolver methods) repair in place and keep the Routes; a
+ * resolver file and a schema file still rebuild in full. */
+TEST(graphql_incremental_rebuild_only_for_route_inputs) {
+    int nbase = ET_NWANT(et_gqlgen_files);
+    EtFile files[ET_NWANT(et_gqlgen_files) + 2];
+    memcpy(files, et_gqlgen_files, sizeof(et_gqlgen_files));
+    files[nbase] = (EtFile){"client/trades.graphql",
+                            "query Trades($type: String) {\n  perp {\n    trades(trader: $type) "
+                            "{\n      id\n      type: trader\n    }\n  }\n}\n"};
+    files[nbase + 1] =
+        (EtFile){"graph/resolver/helpers.go",
+                 "package resolver\n\nfunc clamp(n int) int {\n\treturn n\n}\n"};
+    EtProj lp;
+    cbm_store_t *store = et_index_files(&lp, files, nbase + 2);
+    int ok = et_gqlgen_routes_exact(store, lp.project, et_gqlgen_want, ET_NWANT(et_gqlgen_want));
+
+    int op_route = 0;
+    et_rewrite(&lp, "client/trades.graphql",
+               "# edited\nquery Trades {\n  perp {\n    trades {\n      id\n    }\n  }\n}\n");
+    store = et_reindex(&lp, store, &op_route);
+    int after_op =
+        et_gqlgen_routes_exact(store, lp.project, et_gqlgen_want, ET_NWANT(et_gqlgen_want));
+
+    int helper_route = 0;
+    et_rewrite(&lp, "graph/resolver/helpers.go",
+               "package resolver\n\nfunc clamp(n int) int {\n\treturn n + 0\n}\n");
+    store = et_reindex(&lp, store, &helper_route);
+    int after_helper =
+        et_gqlgen_routes_exact(store, lp.project, et_gqlgen_want, ET_NWANT(et_gqlgen_want));
+
+    const char *perp_resolvers = NULL;
+    for (int i = 0; i < nbase; i++) {
+        if (strcmp(files[i].name, "graph/resolver/perp.resolvers.go") == 0) {
+            perp_resolvers = files[i].content;
+        }
+    }
+    char edited[4096];
+    snprintf(edited, sizeof(edited), "%s\n// edited\n", perp_resolvers ? perp_resolvers : "");
+    int resolver_route = 0;
+    et_rewrite(&lp, "graph/resolver/perp.resolvers.go", edited);
+    store = et_reindex(&lp, store, &resolver_route);
+
+    int schema_route = 0;
+    et_rewrite(&lp, "graph/subscription.graphqls",
+               "type Subscription {\n  perpTrades(trader: String): [PerpTrade!]!\n}\n# edited\n");
+    store = et_reindex(&lp, store, &schema_route);
+    int after_schema =
+        et_gqlgen_routes_exact(store, lp.project, et_gqlgen_want, ET_NWANT(et_gqlgen_want));
+    et_cleanup(&lp, store);
+
+    ASSERT_TRUE(ok);
+    ASSERT_EQ(op_route, (int)CBM_INCREMENTAL_ROUTE_CLOSURE_REPAIR);
+    ASSERT_TRUE(after_op);
+    ASSERT_EQ(helper_route, (int)CBM_INCREMENTAL_ROUTE_CLOSURE_REPAIR);
+    ASSERT_TRUE(after_helper);
+    ASSERT_EQ(resolver_route, (int)CBM_INCREMENTAL_ROUTE_FORCED_FULL);
+    ASSERT_EQ(schema_route, (int)CBM_INCREMENTAL_ROUTE_FORCED_FULL);
+    ASSERT_TRUE(after_schema);
+    PASS();
+}
+
 /* #598 parser edges the end-to-end fixture cannot reach through one language's
  * string extraction: comments/strings/interpolations that contain braces, a
  * bare word, non-document arguments and name truncation. */
@@ -3733,6 +3796,7 @@ SUITE(edge_types_probe) {
     RUN_TEST(graphql_schema_remap_and_extensions);
     RUN_TEST(graphql_long_reason_and_type_name);
     RUN_TEST(graphql_gqlgen_routes_survive_incremental_edits);
+    RUN_TEST(graphql_incremental_rebuild_only_for_route_inputs);
     RUN_TEST(graphql_gqlgen_config_two_servers);
     RUN_TEST(graphql_gqlgen_config_sibling_schema_single_file);
     RUN_TEST(graphql_resolver_needs_ownership_without_config);
