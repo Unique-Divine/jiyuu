@@ -71,6 +71,9 @@ codebase-memory-mcp cli --quiet index_repository \
 
 - **Reindex, then relink.** A full reindex drops the project's cross-repo
   links. Rerun linking for it and for every project that links to it.
+- **One run per project, every target in it.** A link run replaces that
+  project's earlier links, so a client calling two servers lists both in
+  `target_projects` in a single run.
 - **Name the target** when two servers share field or route names, so a
   client links only to the server it calls. Use `["*"]` only when names are
   unique across projects.

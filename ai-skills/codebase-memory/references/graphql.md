@@ -60,21 +60,26 @@ WHERE h.name = "Trades" RETURN rt.name, c.name, c.file_path LIMIT 100
 
 ```cypher
 MATCH (rt:Route) WHERE rt.qualified_name STARTS WITH "__graphql__"
-AND NOT ()-[:CROSS_GRAPHQL_CALLS]->(rt)
-RETURN rt.name LIMIT 500
+RETURN count(rt)
+MATCH ()-[:CROSS_GRAPHQL_CALLS]->(rt) RETURN count(DISTINCT rt)
 ```
+
+Run both in the server project; the difference is the field Routes no linked
+client reaches.
 
 A field with no static caller may still be used by runtime-built queries or
 other clients you haven't indexed; treat the list as candidates.
 
-**Deprecated fields still in use**: Routes whose props say `deprecated`, with
-callers:
+**Deprecated fields still in use**: list the deprecated Routes in the server
+project, then look for callers of those names:
 
 ```cypher
-MATCH (c)-[:CROSS_GRAPHQL_CALLS]->(rt:Route)
-WHERE rt.properties CONTAINS '"deprecated":true'
-RETURN rt.name, c.name, c.file_path LIMIT 200
+MATCH (rt:Route) WHERE rt.deprecated = true
+RETURN rt.qualified_name, rt.deprecation_reason LIMIT 100
+MATCH (c)-[:CROSS_GRAPHQL_CALLS]->(rt:Route) WHERE rt.deprecated = true
+RETURN rt.name, c.name LIMIT 200
 ```
 
-Property and label names can differ between versions; check
-`get_graph_schema` if a query returns nothing, and page through results.
+Route props (`deprecated`, `deprecation_reason`, `schema_type`, `source`) are
+queryable fields. Check `get_graph_schema` if a query returns nothing, and
+page through results.
