@@ -116,7 +116,9 @@ Call tool `slack_health_check`. It returns your user and team names.
 
 While it runs on macOS, the server checks token health every 4 hours. It reads
 new tokens from Chrome only when the token file is more than 10 days old, or
-when a Slack call fails with `invalid_auth` or `token_expired`. If no client
+when a read or send fails with `invalid_auth` or `token_expired`; edit and
+delete tools don't retry. Neither path helps when `SLACK_TOKEN` and
+`SLACK_COOKIE` are set, because those win over the token file. If no client
 runs the server for a week or two, the tokens can expire before either case
 happens. A LaunchAgent can run the refresh twice a day
 whenever Chrome is open with a Slack tab.

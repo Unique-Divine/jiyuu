@@ -131,7 +131,9 @@ Slack rotates session tokens every one to two weeks. On macOS, the server
 reads fresh tokens from Chrome in three cases:
 
 - A Slack call fails with `invalid_auth` or `token_expired`. The server
-  extracts new tokens and retries the call once.
+  extracts new tokens and retries the call once. Edit and delete tools skip
+  this retry on purpose, so that a write never runs under a different
+  session. Refresh the tokens, then call the tool again.
 - A health check, which runs every 4 hours, finds that the tokens in file
   `~/.slack-mcp-tokens.json` are more than 10 days old. The server tries at
   most once an hour. Tokens from environment variables have no recorded age,
@@ -139,6 +141,9 @@ reads fresh tokens from Chrome in three cases:
 - You call tool `slack_refresh_tokens` or run `--refresh-tokens`.
 
 Each case needs Chrome running with a signed-in Slack tab at `app.slack.com`.
+Extraction writes file `~/.slack-mcp-tokens.json`. If you set `SLACK_TOKEN`
+and `SLACK_COOKIE`, the server keeps using them, so none of these cases
+helps. Update both variables or unset both.
 
 Chrome auto-refresh runs only on macOS. On Linux, Windows, and WSL, refresh by
 hand when a tool returns `invalid_auth` or `slack_auth_expired`:
