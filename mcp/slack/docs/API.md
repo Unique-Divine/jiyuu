@@ -702,6 +702,11 @@ Report the server version, install source, and whether a newer release
 exists. The stdio server lists it; the HTTP server doesn't. It takes no
 parameters.
 
+Each call reads the npm registry. If npm can't be reached, the `update`
+object holds the last cached answer and `update.source` is `cache` instead
+of `live`. `update.pinCommand` is set only when npm has a newer version. See
+the [MCP servers README](../../README.md#version-and-update-notices).
+
 ## Write Log
 
 Each call to `slack_delete_message`, `slack_delete_message_unsafe`,

@@ -21,16 +21,26 @@ metadata `jiyuu.upstream` in file `package.json`, or table
 Each server has a read-only `mcp_info` tool. It reports the running version,
 whether the server runs from a source checkout or an installed package, the
 git commit for a checkout, the upstream baseline, and update status. The
-update fields are `latestVersion`, `updateAvailable`, `checkedAt`, and
-`pinCommand`. The report lists environment variable names, never values.
-Agents should call `mcp_info` instead of reading MCP client configs, which
-hold secrets.
+update fields are `latestVersion`, `updateAvailable`, `checkedAt`,
+`pinCommand`, `source`, and `notChecked`. The report lists environment
+variable names, never values. Agents should call `mcp_info` instead of
+reading MCP client configs, which hold secrets.
 
-At startup each server reads its latest published version from npm or PyPI in
-the background. The read has a 2-second timeout, is cached for 24 hours under
-`$XDG_CACHE_HOME/jiyuu-mcp/` (default `~/.cache/jiyuu-mcp/`), and fails
-silently. When the running version is older, the first successful tool result
-of the process ends with one line:
+Two callers read the latest published version from npm or PyPI, each with a
+2-second timeout. Both share a cache under `$XDG_CACHE_HOME/jiyuu-mcp/`
+(default `~/.cache/jiyuu-mcp/`).
+
+| | Startup notice | Tool `mcp_info` |
+| --- | --- | --- |
+| Reads the registry | When the cache is older than 1 hour | On every call |
+| Cache | Read and written | Written after a registry read; read only when the registry can't be reached |
+| Output | One line on the first successful tool result, only when a newer version exists | The answer with `checkedAt` and `source` |
+
+Field `source` is `live` when the call read the registry and `cache` when it
+fell back to the cache. Neither caller trusts a cached latest version older
+than the running version, and `pinCommand` is set only when the latest
+version is newer than the running one, so the report never suggests a
+downgrade. The startup notice fails silently. Its line looks like this:
 
 ```text
 Update available: uniquedivine-telegram-mcp 2.1.0 (running 2.0.1). Change the pin to `uvx uniquedivine-telegram-mcp@2.1.0` and reload the MCP server.
