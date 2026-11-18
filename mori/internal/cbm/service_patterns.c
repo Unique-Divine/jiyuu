@@ -989,19 +989,88 @@ static const char *gql_skip_js_comment(const char *p) {
     return p;
 }
 
+/* Is the identifier ending just before `end` a keyword after which a JS
+ * expression (so a regex literal) begins? */
+static bool gql_js_keyword_before(const char *begin, const char *end) {
+    static const char *const kws[] = {
+        "return",     "typeof", "case",  "void",  "delete", "in", "of", "new",
+        "instanceof", "throw",  "yield", "await", "else",   "do", NULL,
+    };
+    const char *w = end;
+    while (w > begin && gql_name_char((unsigned char)w[-SKIP_ONE])) {
+        w--;
+    }
+    size_t n = (size_t)(end - w);
+    for (int i = 0; kws[i]; i++) {
+        if (strlen(kws[i]) == n && strncmp(w, kws[i], n) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Standard tokenizer heuristic: a `/` at p (not a comment) starts a regex
+ * literal when it opens the expression (nothing significant since `begin`)
+ * or follows an operator, an opening bracket or punctuation, or a keyword
+ * such as `return`; after an operand (`a / b`, `(x) / 2`) it divides. */
+static bool gql_js_regex_allowed(const char *begin, const char *p) {
+    const char *q = p;
+    while (q > begin && (q[-SKIP_ONE] == ' ' || q[-SKIP_ONE] == '\t' || q[-SKIP_ONE] == '\n' ||
+                         q[-SKIP_ONE] == '\r')) {
+        q--;
+    }
+    if (q == begin) {
+        return true;
+    }
+    char c = q[-SKIP_ONE];
+    if (strchr("(,=:[!&|?{};+-*%<>~^", c) != NULL) {
+        return true;
+    }
+    return gql_name_char((unsigned char)c) && gql_js_keyword_before(begin, q);
+}
+
+/* p at the `/` opening a regex literal: returns past its closing `/` and
+ * flags. A `/` inside a `[...]` class or after a backslash does not close
+ * it; a newline ends an unterminated literal. */
+static const char *gql_skip_js_regex(const char *p) {
+    bool in_class = false;
+    p++;
+    while (*p && *p != '\n') {
+        char c = *p;
+        if (c == '\\' && p[SKIP_ONE]) {
+            p += PAIR_LEN;
+            continue;
+        }
+        p++;
+        if (c == '[') {
+            in_class = true;
+        } else if (c == ']') {
+            in_class = false;
+        } else if (c == '/' && !in_class) {
+            break;
+        }
+    }
+    while (gql_name_char((unsigned char)*p)) {
+        p++; /* flags */
+    }
+    return p;
+}
+
 /* p at a JS `${`: returns past its matching `}`. Braces inside JS strings,
- * nested template literals (and their own interpolations) and comments are
- * not structure. Iterative: one stack entry per open template or
- * interpolation, at most GQL_JS_NEST_MAX deep. */
+ * regex literals, nested template literals (and their own interpolations)
+ * and comments are not structure. Iterative: one stack entry per open
+ * template or interpolation, at most GQL_JS_NEST_MAX deep. */
 static const char *gql_skip_js_interpolation(const char *p) {
     struct {
         bool in_template;
         int depth;
+        const char *begin; /* first byte of the interpolation's expression */
     } stack[GQL_JS_NEST_MAX];
     int top = 0;
     stack[0].in_template = false;
     stack[0].depth = GQL_JS_OPEN;
     p += PAIR_LEN;
+    stack[0].begin = p;
     while (*p && top >= 0) {
         char c = *p;
         bool room = top + SKIP_ONE < GQL_JS_NEST_MAX;
@@ -1016,6 +1085,7 @@ static const char *gql_skip_js_interpolation(const char *p) {
                 stack[top].in_template = false;
                 stack[top].depth = GQL_JS_OPEN;
                 p += PAIR_LEN;
+                stack[top].begin = p;
             } else {
                 p++;
             }
@@ -1025,9 +1095,12 @@ static const char *gql_skip_js_interpolation(const char *p) {
             top++;
             stack[top].in_template = true;
             stack[top].depth = 0;
+            stack[top].begin = p;
             p++;
         } else if (c == '/' && (p[SKIP_ONE] == '*' || p[SKIP_ONE] == '/')) {
             p = gql_skip_js_comment(p);
+        } else if (c == '/' && gql_js_regex_allowed(stack[top].begin, p)) {
+            p = gql_skip_js_regex(p);
         } else {
             stack[top].depth += (c == '{') - (c == '}');
             top -= stack[top].depth == 0;

@@ -1383,6 +1383,13 @@ TEST(graphql_selection_signature_parser) {
          "query|T|perp,perp.trades"},
         {"query U { ${`a}${'}'}`} perp { id } }", 1, 1, "query|U|perp,perp.id"},
         {"query V { ${x /* } */} perp { id } }", 1, 1, "query|V|perp,perp.id"},
+        /* a `}` in a regex literal is not structure; `/` after an operand
+         * divides */
+        {"query Q { ${/}/.test(x)} user { id } }", 1, 1, "query|Q|user,user.id"},
+        {"query R { ${x ? /[}/]{1}/g : typeof /}/} user { id } }", 1, 1,
+         "query|R|user,user.id"},
+        {"query D { ${a / b} user { id } }", 1, 1, "query|D|user,user.id"},
+        {"query E { ${(a) / 2 / (b)} user { id } }", 1, 1, "query|E|user,user.id"},
         /* not an operation */
         {"query failed for user", 1, 0, ""},
         {"https://api.example.com/graphql", 0, 0, ""},
@@ -1695,6 +1702,12 @@ static int et_gql_inline_case(bool parallel) {
          "}\n\n"
          "export function withHelper(post: (q: string) => void, helper: (s: string) => string) {\n"
          "  post(`query Helped { ${helper(\"a\\\"}\")} user { id } }`)\n"
+         "}\n\n"
+         "export function withRegex(post: (q: string) => void, x: string) {\n"
+         "  post(`query Rx { ${/}/.test(x) ? \"a\" : \"b\"} user { id } }`)\n"
+         "}\n\n"
+         "export function withDivision(post: (q: string) => void, a: number, b: number) {\n"
+         "  post(`query Dv { ${a / b} total { id } }`)\n"
          "}\n"},
     };
     static const char *const want[] = {
@@ -1722,12 +1735,19 @@ static int et_gql_inline_case(bool parallel) {
         /* an escaped quote inside a ${...} expression is JS, not literal text */
         "withHelper>__graphql__Query.user.id",
         "withHelper>__graphql__Helped",
+        /* a `}` inside a regex literal in ${...} ends nothing; `/` after an
+         * operand divides */
+        "withRegex>__graphql__Query.user.id",
+        "withRegex>__graphql__Rx",
+        "withDivision>__graphql__Query.total.id",
+        "withDivision>__graphql__Dv",
         NULL,
     };
     static const char *const reject[] = {
         "subscribeBalances>__graphql__Subscription.userBalances.token_info.type",
         "screen>__graphql__Query.user", /* console.log and logger.info only log */
         "screen>__graphql__Debug",
+        "withRegex>__graphql__Query.test",
         NULL,
     };
     char dump[CBM_SZ_4K];
@@ -1736,10 +1756,10 @@ static int et_gql_inline_case(bool parallel) {
                          "__graphql__Subscription.userBalances", "subscribeBalances", props,
                          sizeof(props));
     int ok = et_gql_expect(dump, want, reject);
-    /* 3 + 2 + 2 + 2 + 2 + 2 + 2 paths and 7 operation-name Routes; nothing
-     * from screen() */
-    if (n != 22) {
-        fprintf(stderr, "  [ET-GQL] inline edges: %d, want 22%s", n, dump);
+    /* 3 + 2 + 2 + 2 + 2 + 2 + 2 + 2 + 2 paths and 9 operation-name Routes;
+     * nothing from screen() */
+    if (n != 28) {
+        fprintf(stderr, "  [ET-GQL] inline edges: %d, want 28%s", n, dump);
         ok = 0;
     }
     if (!strstr(props, "\"callee\":\"client.subscribe\"") ||
