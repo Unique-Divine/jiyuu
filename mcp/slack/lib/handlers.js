@@ -670,7 +670,8 @@ async function deleteMessage(args, { ignoreAge }) {
 }
 
 /**
- * Update message handler. Sends text only. Runs the shared target checks
+ * Update message handler. Sends text only, with parse=none so Slack markup
+ * such as <url|label> survives the edit. Runs the shared target checks
  * before calling chat.update, and maps known Slack errors to clear results.
  */
 export const UPDATE_TEXT_MAX_CHARS = 4000;
@@ -718,7 +719,15 @@ async function updateMessage(args, { ignoreAge }) {
     // the edit as a user the guard never checked.
     // expectedToken also stops a network or rate-limit retry from running
     // under a session another call swapped in during the backoff.
-    result = await slackAPI("chat.update", { channel, ts: timestamp, text: args.text }, {
+    // parse: "none" keeps <url|label> links. chat.update defaults to
+    // parse=client, which stores them as literal &lt;…&gt; text; see
+    // test/fixtures/message-markup-live.json.
+    result = await slackAPI("chat.update", {
+      channel,
+      ts: timestamp,
+      text: args.text,
+      parse: "none"
+    }, {
       logger: tracker.logger,
       retryOnAuthFail: false,
       expectedToken: ownership.sessionToken
