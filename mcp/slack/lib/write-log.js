@@ -9,8 +9,9 @@
  *   slack-mcp write {"tool":"slack_delete_message","channel":"D0123","timestamp":"1794916496.123799","status":"deleted","code":null,"age_hours":0.2}
  */
 
+import { SLACK_CONVERSATION_ID_PATTERN } from "./message-ownership.js";
+
 const LOG_PREFIX = "slack-mcp write";
-const CHANNEL_PATTERN = /^[A-Z0-9]{1,32}$/;
 const TS_PATTERN = /^\d{1,12}\.\d{1,9}$/;
 const CODE_PATTERN = /^[a-z][a-z0-9_]{0,63}$/;
 
@@ -27,9 +28,16 @@ export function setWriteLogSink(next) {
 }
 
 // Arguments come from the agent, so log a field only when it has the shape
-// of an ID; anything else could carry message text.
+// of an ID; anything else could carry message text. A channel must match the
+// Slack conversation ID form and contain a digit, so an uppercase word such
+// as CONFIDENTIAL isn't logged. A word that happens to fit that shape, like
+// C0NF1DENT1AL, can't be told apart from a real ID and would be logged.
 function safeChannel(value) {
-  return typeof value === "string" && CHANNEL_PATTERN.test(value) ? value : null;
+  return typeof value === "string"
+    && SLACK_CONVERSATION_ID_PATTERN.test(value)
+    && /\d/.test(value)
+    ? value
+    : null;
 }
 
 function safeTimestamp(value) {
