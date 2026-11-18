@@ -1,28 +1,24 @@
 # Setup Guide
 
-## Hosted (Coming Soon)
+This guide covers `@uniquedivine/mcp-slack`, maintained by
+[Unique Divine](https://uniquedivine.com). The [README](../README.md) has the
+short version.
 
-A hosted version with permanent OAuth tokens, semantic search, and AI summaries is in development at [mcp.revasserlabs.com](https://mcp.revasserlabs.com). The current release is self-hosted only — continue below.
+## Prerequisites
 
----
+- Bun 1.4.3 or newer.
+- A Slack account signed in at `app.slack.com` in a browser.
+- On macOS only: Google Chrome, for automatic token extraction and refresh.
+  The server also stores tokens in the macOS Keychain. Other platforms use the
+  token file.
 
-## Self-Hosted Setup
-
-### Prerequisites
-
-- Bun 1.4.3 or newer
-- Google Chrome (for token extraction on macOS)
-- macOS (for Keychain storage - other platforms use file storage only)
-
-### 1. Install with Bun
+## 1. Install
 
 ```bash
-bun add -g @uniquedivine/mcp-slack@4.5.2
-# or run it without a global install:
 bunx @uniquedivine/mcp-slack@4.5.2 --version
 ```
 
-### 1b. Or Clone the Repository
+To work from source instead:
 
 ```bash
 git clone https://github.com/Unique-Divine/jiyuu.git
@@ -30,92 +26,77 @@ cd jiyuu/mcp/slack
 bun install --frozen-lockfile
 ```
 
-### 2. Verify Installation
+## 2. Verify the Install
+
+Run these in an empty directory so that a local checkout can't shadow the
+package:
 
 ```bash
-tmpdir="$(mktemp -d)"
-cd "$tmpdir"
+cd "$(mktemp -d)"
 bunx @uniquedivine/mcp-slack@4.5.2 --version
 bunx @uniquedivine/mcp-slack@4.5.2 --help
 bunx @uniquedivine/mcp-slack@4.5.2 --doctor
 ```
 
-Expected:
-- `--version` and `--help` succeed.
-- `--doctor` exits with one clear status:
-  - `0` ready
-  - `1` missing credentials
-  - `2` invalid/expired credentials
-  - `3` connectivity/runtime issue
-- `--status` is read-only and never performs Chrome extraction.
+Flags `--version` and `--help` exit `0`. Flag `--doctor` exits with one code:
 
-### 3. Get Slack Tokens
+| Code | Meaning |
+|------|---------|
+| `0` | Ready |
+| `1` | Missing credentials |
+| `2` | Invalid or expired credentials |
+| `3` | Connectivity or runtime issue |
 
-**Option A: Setup Wizard**
+Flag `--status` is read-only and never runs Chrome extraction.
 
-1. Open Chrome
-2. Navigate to https://app.slack.com and log in
-3. Run:
-   ```bash
-   bunx @uniquedivine/mcp-slack@4.5.2 --setup
-   ```
+## 3. Get Slack Tokens
 
-**Option B: Automatic Extraction (repo clone workflow)**
+Run the setup wizard:
 
 ```bash
-npm run tokens:auto
+bunx @uniquedivine/mcp-slack@4.5.2 --setup
 ```
 
-**Option C: Manual Extraction**
+On macOS, the wizard reads the tokens from Chrome when Slack is open in a
+Chrome tab. On other platforms, it asks you to paste them. From a source
+checkout, `bun run tokens:auto` runs the macOS extraction and
+`bun run tokens:refresh` prompts for manual values.
 
-1. Open https://app.slack.com in Chrome
-2. Press F12 to open DevTools
-3. Go to **Application** → **Cookies** → **https://app.slack.com**
-4. Find the cookie named `d` and copy its value (starts with `xoxd-`)
-5. Go to **Console** and paste:
+### Manual Extraction
+
+1. Open <https://app.slack.com> in a browser and sign in.
+2. Open DevTools with F12.
+3. Under **Application** > **Cookies** > `https://app.slack.com`, copy the
+   value of cookie `d`. It starts with `xoxd-`.
+4. In the **Console** tab, run:
+
    ```javascript
    JSON.parse(localStorage.localConfig_v2).teams[Object.keys(JSON.parse(localStorage.localConfig_v2).teams)[0]].token
    ```
-6. Copy the result (starts with `xoxc-`)
-7. Run:
-   ```bash
-   npm run tokens:refresh
-   ```
-   And paste both values when prompted.
 
-### 4. Configure Claude Desktop
+5. Copy the result. It starts with `xoxc-`.
+6. Paste both values into `--setup`, or set environment variables
+   `SLACK_TOKEN` and `SLACK_COOKIE`.
 
-**macOS:** Edit `~/Library/Application Support/Claude/claude_desktop_config.json`
-**Windows:** Edit `%APPDATA%\Claude\claude_desktop_config.json`
+Slack rotates these tokens every one to two weeks. Off macOS, repeat these
+steps when a tool returns `invalid_auth` or `slack_auth_expired`.
 
-```json
-{
-  "mcpServers": {
-    "slack": {
-      "command": "bunx",
-      "args": ["@uniquedivine/mcp-slack@4.5.2"]
-    }
-  }
-}
-```
+## 4. Configure a Client
 
-Fully restart Claude Desktop (Cmd+Q on macOS, then reopen).
-
-**Verify it's working:** Check `~/Library/Logs/Claude/mcp-server-slack.log` (macOS)
-
-### 5. Configure Claude Code (CLI)
+Claude Code:
 
 ```bash
 claude mcp add slack -- bunx @uniquedivine/mcp-slack@4.5.2
 ```
 
-Or manually edit `~/.claude.json`:
+Claude Desktop reads file
+`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS and
+`%APPDATA%\Claude\claude_desktop_config.json` on Windows:
 
 ```json
 {
   "mcpServers": {
     "slack": {
-      "type": "stdio",
       "command": "bunx",
       "args": ["@uniquedivine/mcp-slack@4.5.2"]
     }
@@ -123,28 +104,22 @@ Or manually edit `~/.claude.json`:
 }
 ```
 
-Claude Code reads tokens from `~/.slack-mcp-tokens.json` automatically.
+Quit Claude Desktop fully and reopen it. On macOS, its log is file
+`~/Library/Logs/Claude/mcp-server-slack.log`. The [README](../README.md#install)
+lists the Codex and Cursor entries.
 
-### 6. Restart Claude
+## 5. Verify the Connection
 
-The Slack tools will now be available in both Claude Desktop and Claude Code.
+Call tool `slack_health_check`. It returns your user and team names.
 
-## Verification
+## Keep Tokens Fresh While the Client Is Closed (macOS)
 
-In Claude Code, try:
-```
-slack_health_check
-```
+The server refreshes tokens from Chrome every 4 hours while it runs. If no
+client runs it for a week or two, the tokens expire and the next session
+starts with `invalid_auth`. A LaunchAgent can run the refresh twice a day
+whenever Chrome is open with a Slack tab.
 
-You should see your username and team name.
-
-## Keep Tokens Fresh While Claude Is Closed (macOS, Optional)
-
-The MCP server auto-refreshes tokens every 4 hours while Claude is running. But if you keep Claude closed for a couple weeks, tokens expire silently — your next session opens with `invalid_auth`.
-
-A LaunchAgent fixes this. It runs token refresh twice a day regardless of whether Claude is open, as long as Chrome is running with a Slack tab somewhere.
-
-Create `~/Library/LaunchAgents/com.yourname.slack-token-refresh.plist`:
+Create file `~/Library/LaunchAgents/com.yourname.slack-token-refresh.plist`:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -170,42 +145,17 @@ Create `~/Library/LaunchAgents/com.yourname.slack-token-refresh.plist`:
 </plist>
 ```
 
-Load it:
+Load it and check the log:
 
 ```bash
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.yourname.slack-token-refresh.plist
-```
-
-Check it ran:
-
-```bash
 tail /tmp/slack-token-refresh.log
 ```
 
-**Why the absolute `bunx` path:** LaunchAgents start without your shell profile, so `bunx` is not on `PATH`. The `bash -c` wrapper expands `$HOME` to the default Bun install path, `~/.bun/bin/bunx`. If you installed Bun with Homebrew, use `/opt/homebrew/bin/bunx` instead. Run `bunx` directly, not through `node`. Command `bunx` is a native Bun binary, not a JavaScript file. Keep the version pin equal to the one in your MCP client config.
+LaunchAgents start without your shell profile, so the plist calls `bunx` by
+its absolute path. With a Homebrew Bun install, use `/opt/homebrew/bin/bunx`.
+Keep the version pin equal to the one in your client configuration. If Chrome
+isn't running, the log shows "Failed to extract" and the tokens stay as they
+were.
 
-**Trade-off:** Chrome must be running for extraction to succeed. If it's not, the LaunchAgent logs "Failed to extract" and tokens stay where they are — which is fine for another 12 hours.
-
-## Troubleshooting
-
-### "No credentials found"
-
-Run `bunx @uniquedivine/mcp-slack@4.5.2 --doctor` to confirm diagnostic code, then `bunx @uniquedivine/mcp-slack@4.5.2 --setup` with Slack open in Chrome.
-
-### "invalid_auth" Error
-
-Tokens have expired. Run `bunx @uniquedivine/mcp-slack@4.5.2 --doctor` and follow the suggested next action.
-
-### MCP Server Not Loading
-
-1. Check `~/.claude.json` syntax
-2. Verify JSON syntax in your client's MCP config
-3. Restart Claude Code
-
-### Chrome Extraction Fails
-
-Make sure:
-- Chrome is running (not just in dock)
-- You have a Slack tab open (not the desktop app)
-- You're logged into Slack in that tab
-- In Chrome menu, enable `View > Developer > Allow JavaScript from Apple Events`
+For problems, see [TROUBLESHOOTING.md](TROUBLESHOOTING.md).

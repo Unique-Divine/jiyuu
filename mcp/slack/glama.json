@@ -1,13 +1,13 @@
 {
   "$schema": "https://glama.ai/mcp/schemas/server.json",
   "name": "slack-mcp-server",
-  "description": "Slack MCP without OAuth \u2014 25 tools, session-based, local-first. Free OSS + hosted tier from $19/mo.",
-  "repository": "https://github.com/jtalk22/slack-mcp-server",
-  "homepage": "https://mcp.revasserlabs.com",
+  "description": "Slack MCP server by Unique Divine. Reads and writes Slack through your browser session.",
+  "repository": "https://github.com/Unique-Divine/jiyuu",
+  "homepage": "https://github.com/Unique-Divine/jiyuu/tree/main/mcp/slack",
   "version": "4.5.2",
   "license": "MIT",
   "maintainers": [
-    "jtalk22"
+    "Unique-Divine"
   ],
   "categories": [
     "communication",
