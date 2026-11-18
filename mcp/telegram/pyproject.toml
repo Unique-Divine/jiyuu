@@ -67,19 +67,50 @@ commit = "0d7b7e3630397ff931624fee7e4b0f33a134c513"
 # [tool.jiyuu] to leave this server off the site.
 [tool.jiyuu.site]
 tools = "telegram_mcp.catalog:list_tools"
-env = [
-    { name = "TELEGRAM_API_ID", required = true, secret = true },
-    { name = "TELEGRAM_API_HASH", required = true, secret = true },
-    { name = "TELEGRAM_SESSION_STRING", required = true, secret = true },
-    { name = "TELEGRAM_EXPOSED_TOOLS", required = false, secret = false },
-    { name = "JIYUU_MCP_NO_UPDATE_CHECK", required = false, secret = false },
-]
 
 # Synthetic values that let telegram_mcp.runtime import; no Telegram login.
 [tool.jiyuu.site.tools-env]
 TELEGRAM_API_ID = "12345"
 TELEGRAM_API_HASH = "dummy_hash"
 TELEGRAM_SESSION_NAME = "site_manifest"
+
+[[tool.jiyuu.site.env]]
+name = "TELEGRAM_API_ID"
+required = true
+secret = true
+
+[[tool.jiyuu.site.env]]
+name = "TELEGRAM_API_HASH"
+required = true
+secret = true
+
+# One session is required, in any of the forms the notes name.
+[[tool.jiyuu.site.env]]
+name = "TELEGRAM_SESSION_STRING"
+required = false
+secret = true
+note = """\
+Set this or TELEGRAM_SESSION_NAME. For several accounts, set \
+TELEGRAM_SESSION_STRING_<LABEL> or TELEGRAM_SESSION_NAME_<LABEL> per \
+account instead."""
+
+[[tool.jiyuu.site.env]]
+name = "TELEGRAM_SESSION_NAME"
+required = false
+secret = false
+note = """\
+Name of a local session file, used instead of TELEGRAM_SESSION_STRING. \
+The session file itself is a credential."""
+
+[[tool.jiyuu.site.env]]
+name = "TELEGRAM_EXPOSED_TOOLS"
+required = false
+secret = false
+
+[[tool.jiyuu.site.env]]
+name = "JIYUU_MCP_NO_UPDATE_CHECK"
+required = false
+secret = false
 
 [tool.black]
 line-length = 99

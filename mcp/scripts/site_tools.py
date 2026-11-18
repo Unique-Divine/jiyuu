@@ -4,8 +4,10 @@ Usage: python -I site_tools.py IMPORT_ROOT MODULE:FUNCTION
 
 FUNCTION is an async function that returns MCP ``Tool`` models or plain
 dicts. The caller runs this with a scrubbed environment and synthetic
-credentials. ``dotenv.load_dotenv`` becomes a no-op before any server module
-loads, so no ``.env`` file is read.
+credentials, in a temporary working directory. Before any server module
+loads, ``dotenv.load_dotenv`` becomes a no-op, so no ``.env`` file is read,
+and every ``logging.FileHandler`` writes into the working directory, so no
+real log file is opened.
 """
 
 from __future__ import annotations
@@ -14,6 +16,8 @@ import asyncio
 import contextlib
 import importlib
 import json
+import logging
+import os
 import sys
 from typing import Any
 
@@ -31,6 +35,19 @@ def disable_dotenv() -> None:
     setattr(dotenv, "load_dotenv", _no_dotenv)
 
 
+def redirect_file_logs() -> None:
+    """Open every log file by its base name in the working directory."""
+    original = logging.FileHandler.__init__
+
+    def _init(
+        self: logging.FileHandler, filename: Any, *args: Any, **kwargs: Any
+    ) -> None:
+        name = os.path.basename(os.fspath(filename))
+        original(self, os.path.join(os.getcwd(), name), *args, **kwargs)
+
+    setattr(logging.FileHandler, "__init__", _init)
+
+
 def as_dict(tool: Any) -> dict[str, Any]:
     if isinstance(tool, dict):
         return tool
@@ -43,6 +60,7 @@ def list_tools(import_root: str, spec: str) -> list[dict[str, Any]]:
         raise SystemExit(f"site_tools: expected MODULE:FUNCTION, got {spec!r}")
     sys.path.insert(0, import_root)
     disable_dotenv()
+    redirect_file_logs()
     function = getattr(importlib.import_module(module_name), function_name)
     return [as_dict(tool) for tool in asyncio.run(function())]
 

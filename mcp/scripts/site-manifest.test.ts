@@ -6,6 +6,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs"
 import { tmpdir } from "node:os"
@@ -14,7 +15,12 @@ import {
   apply,
   assertNoUpstreamBranding,
   buildManifest,
+  compare,
+  dirtyInputs,
   discoverServers,
+  failsCheck,
+  generatedFromProblem,
+  inputRevision,
   installSection,
   isSecretFileName,
   makePythonToolLister,
@@ -22,6 +28,7 @@ import {
   parseArgs,
   plan,
   readSafeText,
+  safePath,
   schemaType,
   summarize,
   toManifestTool,
@@ -82,7 +89,11 @@ export const MCP_INFO_TOOL = ${JSON.stringify(MCP_INFO)}
 `
 
 // Lists env names and cwd so tests can check what the server process sees.
-const BETA_TOOLS_PY = `import os
+const BETA_TOOLS_PY = `import logging
+import os
+
+# Like telegram_mcp.runtime: a log file next to the module, opened at import.
+logging.FileHandler(os.path.join(os.path.dirname(__file__), "beta_errors.log"))
 
 async def list_tools():
     return [
@@ -164,7 +175,10 @@ requires-python = ">=3.10"
 
 [tool.jiyuu.site]
 tools = "beta_tools:list_tools"
-env = [{ name = "BETA_API_ID", required = true, secret = true }]
+env = [
+  { name = "BETA_API_ID", required = true, secret = true },
+  { name = "BETA_SESSION", secret = true, note = "Or BETA_FILE." },
+]
 
 [tool.jiyuu.site.tools-env]
 BETA_API_ID = "12345"
@@ -190,8 +204,11 @@ site = false
 
 const python: PythonToolLister = makePythonToolLister(() => ["python3", "-I"])
 
-function options(revision = "abc123") {
-  return { mcpDir, revision, listPythonTools: python }
+const REV1 = "1111111111111111111111111111111111111111"
+const REV2 = "2222222222222222222222222222222222222222"
+
+function options(revision = REV1) {
+  return { mcpDir, revisionFor: () => revision, listPythonTools: python }
 }
 
 function byFolder(outcomes: Outcome[]): Record<string, Outcome["status"]> {
@@ -282,6 +299,11 @@ describe("never reads secret files", () => {
     await expect(plan(options())).rejects.toThrow(/refusing to read \.env/)
   })
 
+  test("Python file logs stay out of the server folder", async () => {
+    await plan(options())
+    expect(existsSync(join(mcpDir, "beta", "beta_errors.log"))).toBe(false)
+  })
+
   test("the Python server sees only PATH, HOME, and synthetic env", async () => {
     process.env.SITE_MANIFEST_TEST_SECRET = "do-not-pass"
     try {
@@ -300,9 +322,105 @@ describe("never reads secret files", () => {
   })
 })
 
+describe("symlinks", () => {
+  function outside(name: string, text: string): string {
+    const path = join(root, "outside", name)
+    write(path, text)
+    return path
+  }
+
+  test("a tool module symlinked to .env is refused before import", async () => {
+    symlinkSync("../.env", join(mcpDir, "alpha/lib/linked.ts"))
+    expect(() => safePath(join(mcpDir, "alpha"), "lib/linked.ts")).toThrow(
+      /refusing to read lib\/linked.ts \(links to .*\.env\)/,
+    )
+    write(
+      join(mcpDir, "alpha/package.json"),
+      npmPackage("alpha", { tools: ["lib/linked.ts#TOOLS"] }),
+    )
+    await expect(plan(options())).rejects.toThrow(/symlinked tool module/)
+  })
+
+  test("a README symlinked outside the server folder is refused", async () => {
+    const target = outside("README.md", README)
+    rmSync(join(mcpDir, "alpha/README.md"))
+    symlinkSync(target, join(mcpDir, "alpha/README.md"))
+    await expect(plan(options())).rejects.toThrow(/README.md.*outside/)
+  })
+
+  test("a file reached through a symlinked directory is refused", async () => {
+    outside("lib/tools.ts", ALPHA_TOOLS)
+    symlinkSync(join(root, "outside/lib"), join(mcpDir, "alpha/linked-lib"))
+    write(
+      join(mcpDir, "alpha/package.json"),
+      npmPackage("alpha", {
+        tools: [
+          "linked-lib/tools.ts#TOOLS",
+          "linked-lib/tools.ts#MCP_INFO_TOOL",
+        ],
+      }),
+    )
+    await expect(plan(options())).rejects.toThrow(/outside/)
+  })
+
+  test("a symlinked server folder is refused", () => {
+    mkdirSync(join(root, "outside"), { recursive: true })
+    symlinkSync(join(mcpDir, "alpha"), join(mcpDir, "epsilon"))
+    expect(() => discoverServers(mcpDir)).toThrow(
+      /symlinked folder mcp\/epsilon/,
+    )
+    expect(() => safePath(join(mcpDir, "epsilon"), "README.md")).toThrow(
+      /symlinked server folder/,
+    )
+  })
+})
+
+describe("input revision", () => {
+  function git(repo: string, ...args: string[]): string {
+    const proc = Bun.spawnSync(
+      [
+        "git",
+        "-c",
+        "user.name=test",
+        "-c",
+        "user.email=test@example.com",
+        "-c",
+        "commit.gpgsign=false",
+        ...args,
+      ],
+      { cwd: repo },
+    )
+    if (proc.exitCode !== 0) throw new Error(proc.stderr.toString())
+    return proc.stdout.toString().trim()
+  }
+
+  test("tracks the server folder and generator, not the manifest", () => {
+    // The fixture's chmod 000 secret files stay untracked, as in a real repo.
+    write(join(root, ".gitignore"), SECRET_FILES.join("\n") + "\n")
+    git(root, "init", "-q")
+    git(root, "add", ".")
+    git(root, "commit", "-qm", "inputs")
+    const first = git(root, "rev-parse", "HEAD")
+    expect(inputRevision(root, "alpha")).toBe(first)
+    expect(dirtyInputs(root, "alpha")).toEqual([])
+
+    write(join(mcpDir, "alpha", MANIFEST_FILE), "{}\n")
+    expect(dirtyInputs(root, "alpha")).toEqual([])
+    git(root, "add", ".")
+    git(root, "commit", "-qm", "manifest")
+    expect(inputRevision(root, "alpha")).toBe(first)
+
+    write(join(mcpDir, "scripts/helper.ts"), "export const x = 1\n")
+    expect(dirtyInputs(root, "alpha")).toEqual([" M mcp/scripts/helper.ts"])
+    git(root, "commit", "-qam", "generator")
+    expect(inputRevision(root, "alpha")).toBe(git(root, "rev-parse", "HEAD"))
+    expect(inputRevision(root, "beta")).toBe(git(root, "rev-parse", "HEAD"))
+  })
+})
+
 describe("manifest content", () => {
   test("writes the contract shape for npm and PyPI servers", async () => {
-    apply(await plan(options("rev1")))
+    apply(await plan(options(REV1)))
     const alpha = manifestOf("alpha")
     expect(Object.keys(alpha)).toEqual([
       "schemaVersion",
@@ -337,7 +455,7 @@ describe("manifest content", () => {
       toolCount: 3,
       readOnlyCount: 2,
       writeCount: 1,
-      generatedFrom: { revision: "rev1" },
+      generatedFrom: { revision: REV1 },
     })
     expect(alpha.tools[0]).toEqual({
       name: "alpha_read",
@@ -362,6 +480,15 @@ describe("manifest content", () => {
       installCommand: "uvx example-beta@2.0.0",
       registryUrl: "https://pypi.org/project/example-beta/",
       license: "Apache-2.0",
+      envVars: [
+        { name: "BETA_API_ID", required: true, secret: true },
+        {
+          name: "BETA_SESSION",
+          required: false,
+          secret: true,
+          note: "Or BETA_FILE.",
+        },
+      ],
     })
     expect(beta.tools[1].params).toEqual([
       { name: "chat_id", type: "integer | string", required: true },
@@ -390,12 +517,44 @@ describe("manifest content", () => {
 })
 
 describe("check mode", () => {
-  test("a new revision alone leaves a manifest fresh", async () => {
-    apply(await plan(options("rev1")))
-    const again = await plan(options("rev2"))
-    expect(byFolder(again)).toEqual({ alpha: "fresh", beta: "fresh" })
+  test("a new revision passes --check; a write records it", async () => {
+    apply(await plan(options(REV1)))
+    const again = await plan(options(REV2))
+    expect(byFolder(again)).toEqual({ alpha: "revision", beta: "revision" })
+    expect(again.some((o) => failsCheck(o.status))).toBe(false)
     apply(again)
-    expect(manifestOf("alpha").generatedFrom.revision).toBe("rev1")
+    expect(manifestOf("alpha").generatedFrom.revision).toBe(REV2)
+    expect(byFolder(await plan(options(REV2)))).toEqual({
+      alpha: "fresh",
+      beta: "fresh",
+    })
+  })
+
+  test("a missing or malformed generatedFrom fails --check", async () => {
+    apply(await plan(options()))
+    const path = join(mcpDir, "alpha", MANIFEST_FILE)
+    const good = readFileSync(path, "utf8")
+    const variants: unknown[] = [
+      undefined,
+      null,
+      "abc1234",
+      {},
+      { revision: "" },
+      { revision: 7 },
+      { revision: "not-a-sha" },
+      { revision: REV1, extra: true },
+    ]
+    for (const generatedFrom of variants) {
+      const bad = { ...JSON.parse(good), generatedFrom }
+      if (generatedFrom === undefined) delete bad.generatedFrom
+      expect(generatedFromProblem(generatedFrom)).not.toBeNull()
+      expect(compare(JSON.stringify(bad), good)).toBe("stale")
+    }
+    writeFileSync(path, "{ not json")
+    const outcomes = await plan(options())
+    expect(byFolder(outcomes).alpha).toBe("stale")
+    expect(failsCheck("stale")).toBe(true)
+    expect(generatedFromProblem({ revision: REV1 })).toBeNull()
   })
 
   test("a tool change makes the manifest stale", async () => {

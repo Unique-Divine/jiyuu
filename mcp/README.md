@@ -64,18 +64,29 @@ separate projects.
 Each server directory holds a committed file `site-manifest.json`. The MCP
 pages on [uniquedivine.com](https://uniquedivine.com/mcp) are built from these
 files. Script `scripts/site-manifest.ts` writes them from package metadata,
-each server's tool definitions, and the README's `## Install` section. Run
-`just mcp-manifest` after changing any of those, and commit the result. CI
-runs `just mcp-manifest --check`, which fails when a file is stale. A change
-to field `generatedFrom.revision` alone does not make a file stale.
+each server's tool definitions, and the README's `## Install` section.
+
+After changing any of those, commit the change, run `just mcp-manifest`, and
+commit the manifests. Field `generatedFrom.revision` records the last commit
+that touched the server's folder or `mcp/scripts`, so the generator refuses
+to write while those inputs have uncommitted changes. CI runs
+`just mcp-manifest --check`, which fails when content is stale or
+`generatedFrom` is malformed. A revision that differs only in value passes,
+because a shallow CI checkout can't always find the input commit.
 
 Package metadata `jiyuu.site` in file `package.json`, or table
 `[tool.jiyuu.site]` in file `pyproject.toml`, names the tool modules and the
-environment variable names to publish. Set `"site": false` there, or
-`site = false` under `[tool.jiyuu]`, to leave a server off the site. The
-generator reads only package manifests, tool modules, and READMEs. It refuses
-any env, token, session, cookie, or log file, and lists Telegram's tools with
-synthetic credentials in a scrubbed environment.
+environment variable names to publish. An env entry may carry a `note` for
+alternatives, such as Telegram's several ways to supply a session. Set
+`"site": false` there, or `site = false` under `[tool.jiyuu]`, to leave a
+server off the site.
+
+The generator reads only package manifests, tool modules, and READMEs inside
+each server folder. It follows symlinks before checking, refuses symlinked
+server folders and tool modules, and refuses any env, token, session,
+cookie, or log file. It runs with Bun's `.env` loading off. Telegram's tools
+are listed with synthetic credentials in a scrubbed environment, from a
+temporary directory that also receives any log file the server opens.
 
 ## Source Baselines
 
