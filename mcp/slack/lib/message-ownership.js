@@ -276,7 +276,7 @@ export async function checkOwnMessage(channelId, timestamp, options = {}) {
       }, {
         message: `The message is older than the ${limitHours}-hour window for edits and deletes.`,
         next_action: unsafeTool
-          ? `Leave it. If the user explicitly wants this older message changed, ask them first, then use ${unsafeTool}, which skips only the age check.`
+          ? `Leave it. If the user explicitly wants this older message changed, ask them first, then use ${unsafeTool}, which skips only the age check. Over HTTP that tool is listed only when the operator sets SLACK_MCP_ENABLE_UNSAFE_TOOLS=true; otherwise the operator can raise SLACK_MCP_EDIT_DELETE_MAX_AGE_HOURS.`
           : "Leave it, or ask the user to raise SLACK_MCP_EDIT_DELETE_MAX_AGE_HOURS for this server."
       })
     };
