@@ -1,7 +1,7 @@
 {
   "name": "@uniquedivine/mcp-slack",
   "mcpName": "io.github.unique-divine/mcp-slack",
-  "version": "4.4.3",
+  "version": "4.5.1",
   "description": "Slack MCP server maintained in Jiyuu",
   "type": "module",
   "main": "src/server.js",

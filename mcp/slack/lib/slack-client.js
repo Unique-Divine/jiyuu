@@ -202,13 +202,22 @@ export async function checkTokenHealth(logger = console) {
 /**
  * Make an authenticated Slack API call
  * Features: auth retry, rate limit handling, network error retry
+ *
+ * Option `expectedToken` pins the call to one session: every attempt,
+ * retries included, throws Error("session_changed") without sending when
+ * the loaded token differs.
  */
 export async function slackAPI(method, params = {}, options = {}) {
-  const { retryOnAuthFail = true, retryCount = 0, maxRetries = 3, logger = console } = options;
+  const { retryOnAuthFail = true, retryCount = 0, maxRetries = 3, logger = console, expectedToken } = options;
 
   const creds = loadTokens(false, logger);
   if (!creds) {
     throw new Error("No credentials available. Run bunx @uniquedivine/mcp-slack --setup or open Slack in Chrome.");
+  }
+  if (expectedToken !== undefined && creds.token !== expectedToken) {
+    const err = new Error("session_changed");
+    err.code = "session_changed";
+    throw err;
   }
 
   // Proactive token health check (non-blocking, only on first attempt)

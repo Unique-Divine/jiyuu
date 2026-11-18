@@ -1,10 +1,10 @@
 {
   "$schema": "https://glama.ai/mcp/schemas/server.json",
   "name": "slack-mcp-server",
-  "description": "Slack MCP without OAuth \u2014 21 tools, session-based, local-first. Free OSS + hosted tier from $19/mo.",
+  "description": "Slack MCP without OAuth \u2014 25 tools, session-based, local-first. Free OSS + hosted tier from $19/mo.",
   "repository": "https://github.com/jtalk22/slack-mcp-server",
   "homepage": "https://mcp.revasserlabs.com",
-  "version": "4.4.3",
+  "version": "4.5.1",
   "license": "MIT",
   "maintainers": [
     "jtalk22"
@@ -14,7 +14,7 @@
     "productivity"
   ],
   "features": {
-    "tools": 21,
+    "tools": 25,
     "resources": 2,
     "prompts": 3,
     "transports": [

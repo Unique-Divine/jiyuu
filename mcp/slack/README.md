@@ -11,8 +11,8 @@ in through a browser. Store credentials once, then run the published package
 with an exact version pin:
 
 ```sh
-bunx @uniquedivine/mcp-slack@4.4.3 --setup
-bunx @uniquedivine/mcp-slack@4.4.3
+bunx @uniquedivine/mcp-slack@4.5.1 --setup
+bunx @uniquedivine/mcp-slack@4.5.1
 ```
 
 Flag `--setup` writes file `~/.slack-mcp-tokens.json`. To pass environment
@@ -25,7 +25,7 @@ changes on `main`. The version pin selects the exact reviewed release that runs.
 ### Claude Code
 
 ```sh
-claude mcp add slack -- bunx @uniquedivine/mcp-slack@4.4.3
+claude mcp add slack -- bunx @uniquedivine/mcp-slack@4.5.1
 ```
 
 ### Codex
@@ -35,7 +35,7 @@ Add this entry to file `~/.codex/config.toml`:
 ```toml
 [mcp_servers.slack]
 command = "bunx"
-args = ["@uniquedivine/mcp-slack@4.4.3"]
+args = ["@uniquedivine/mcp-slack@4.5.1"]
 ```
 
 ### Cursor
@@ -48,7 +48,7 @@ a project:
   "mcpServers": {
     "slack": {
       "command": "bunx",
-      "args": ["@uniquedivine/mcp-slack@4.4.3"]
+      "args": ["@uniquedivine/mcp-slack@4.5.1"]
     }
   }
 }
@@ -58,7 +58,7 @@ a project:
 
 1. Find the newest version with command
    `npm view @uniquedivine/mcp-slack version`.
-2. Change the `@4.4.3` pin in the client configuration to that version.
+2. Change the `@4.5.1` pin in the client configuration to that version.
 3. Restart the MCP server in the client, or restart the client. In Claude
    Code, run `/mcp` and reconnect the server. Command `bunx` downloads the new
    version on the next launch.
