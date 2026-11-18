@@ -14449,15 +14449,34 @@ static const char *cbm_razor_page_route(CBMArena *a, const char *source, int sou
     return NULL;
 }
 
-/* GraphQL `schema { query: Q mutation: M subscription: S }`: the module def's
- * extra_props graphql_schema_<operation> = type name, so the route pass can
- * find the root types when they are not named Query/Mutation/Subscription. */
-enum { GQL_SCHEMA_SEARCH_DEPTH = 4, GQL_SCHEMA_KV = 7 };
+/* GraphQL `schema { query: Q mutation: M subscription: S }` and
+ * `extend schema { ... }`: the module def's extra_props
+ * graphql_schema_<operation> = type name, so the route pass can find the
+ * root types when they are not named Query/Mutation/Subscription. A
+ * `schema` definition (not only an extension) also sets
+ * graphql_schema_defined: its roots replace the default names. */
+enum { GQL_SCHEMA_SEARCH_DEPTH = 4, GQL_SCHEMA_KV = 9 };
+
+/* Add key = value unless the key is already set (the first one wins). */
+static void graphql_schema_kv_put(const char **kv, int *n, const char *key, const char *value) {
+    if (!key || !value) {
+        return;
+    }
+    for (int i = 0; i < *n; i += PAIR_LEN) {
+        if (strcmp(kv[i], key) == 0) {
+            return;
+        }
+    }
+    if (*n + PAIR_LEN < GQL_SCHEMA_KV) {
+        kv[(*n)++] = key;
+        kv[(*n)++] = value;
+    }
+}
 
 static void graphql_schema_roots_in(CBMArena *a, TSNode def, const char *source, const char **kv,
                                     int *n) {
     uint32_t count = ts_node_named_child_count(def);
-    for (uint32_t i = 0; i < count && *n < GQL_SCHEMA_KV - SKIP_ONE; i++) {
+    for (uint32_t i = 0; i < count; i++) {
         TSNode root = ts_node_named_child(def, i);
         if (strcmp(ts_node_type(root), "root_operation_type_definition") != 0) {
             continue;
@@ -14467,14 +14486,15 @@ static void graphql_schema_roots_in(CBMArena *a, TSNode def, const char *source,
         char *op_text = ts_node_is_null(op) ? NULL : cbm_node_text(a, op, source);
         char *type_text = ts_node_is_null(type) ? NULL : cbm_node_text(a, type, source);
         if (op_text && type_text && type_text[0]) {
-            kv[(*n)++] = cbm_arena_sprintf(a, "graphql_schema_%s", op_text);
-            kv[(*n)++] = type_text;
+            graphql_schema_kv_put(kv, n, cbm_arena_sprintf(a, "graphql_schema_%s", op_text),
+                                  type_text);
         }
     }
 }
 
 /* A schema_definition sits at source_file > document > definition >
- * type_system_definition; look that deep and no deeper. */
+ * type_system_definition (a schema_extension under type_system_extension);
+ * look that deep and no deeper. */
 static void graphql_find_schema(CBMArena *a, TSNode root, const char *source, const char **kv,
                                 int *n) {
     TSNode stack[GQL_SCHEMA_SEARCH_DEPTH];
@@ -14487,7 +14507,11 @@ static void graphql_find_schema(CBMArena *a, TSNode root, const char *source, co
             continue;
         }
         TSNode child = ts_node_named_child(stack[depth], index[depth]++);
-        if (strcmp(ts_node_type(child), "schema_definition") == 0) {
+        const char *kind = ts_node_type(child);
+        if (strcmp(kind, "schema_definition") == 0) {
+            graphql_schema_kv_put(kv, n, "graphql_schema_defined", "true");
+            graphql_schema_roots_in(a, child, source, kv, n);
+        } else if (strcmp(kind, "schema_extension") == 0) {
             graphql_schema_roots_in(a, child, source, kv, n);
         } else if (depth + SKIP_ONE < GQL_SCHEMA_SEARCH_DEPTH) {
             stack[++depth] = child;

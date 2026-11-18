@@ -1418,11 +1418,13 @@ typedef struct {
     int group;
 } gql_field_t;
 
-/* A `schema { ... }` definition: the root type name per operation. */
+/* One file's `schema { ... }` definition and `extend schema { ... }`
+ * blocks: the root type name per operation. */
 typedef struct {
     const char *file;
     const char *roots[GQL_OP_COUNT];
     int group;
+    bool defined; /* holds a `schema` definition, not only extensions */
 } gql_schema_t;
 
 /* One candidate resolver method, keyed "<receiver>.<lower-case method>". */
@@ -1625,43 +1627,58 @@ static void gql_collect_schemas(gql_ctx_t *ctx) {
         for (int op = 0; op < GQL_OP_COUNT; op++) {
             sd->roots[op] = gql_prop(&ctx->arena, root, gql_schema_keys[op]);
         }
+        sd->defined = gql_prop(&ctx->arena, root, "graphql_schema_defined") != NULL;
         yyjson_doc_free(doc);
     }
 }
 
-/* The `schema` definition that names the roots for class c: in a config's
- * set, its first one (by path); in the heuristic set, the nearest one whose
- * parent directory holds c. NULL: the default root names apply. */
-static const gql_schema_t *gql_schema_for(const gql_ctx_t *ctx, const gql_class_t *c) {
+/* Does schema file sd apply to class c? In a config's set, every one of the
+ * set's files; in the heuristic set, those whose parent directory holds c. */
+static bool gql_schema_applies(const gql_schema_t *sd, const gql_class_t *c) {
+    if (sd->group != c->group) {
+        return false;
+    }
+    if (c->group != GQL_HEURISTIC) {
+        return true;
+    }
+    return strncmp(sd->file, c->node->file_path, gql_parent_dir_len(sd->file)) == 0;
+}
+
+/* The root type name of operation op for class c. The `schema` definitions
+ * and `extend schema` blocks that apply to c merge: for each operation, the
+ * first (by path) in a config's set, the nearest in the heuristic set.
+ * Without any `schema` definition the default name stands for an operation
+ * no extension names; with one, an unnamed operation has no root (NULL). */
+static const char *gql_root_name(const gql_ctx_t *ctx, const gql_class_t *c, int op) {
     const gql_schema_t *best = NULL;
     size_t best_len = 0;
+    bool defined = false;
     for (int i = 0; i < ctx->schema_count; i++) {
         const gql_schema_t *sd = &ctx->schemas[i];
-        if (sd->group != c->group) {
+        if (!gql_schema_applies(sd, c)) {
             continue;
         }
-        if (c->group != GQL_HEURISTIC) {
-            if (!best || strcmp(sd->file, best->file) < 0) {
-                best = sd;
-            }
+        defined = defined || sd->defined;
+        if (!sd->roots[op]) {
             continue;
         }
-        size_t pl = gql_parent_dir_len(sd->file);
-        size_t len = gql_common_dir_len(sd->file, c->node->file_path);
-        if (strncmp(sd->file, c->node->file_path, pl) == 0 &&
-            (!best || len > best_len || (len == best_len && strcmp(sd->file, best->file) < 0))) {
+        size_t len =
+            c->group == GQL_HEURISTIC ? gql_common_dir_len(sd->file, c->node->file_path) : 0;
+        if (!best || len > best_len || (len == best_len && strcmp(sd->file, best->file) < 0)) {
             best = sd;
             best_len = len;
         }
     }
-    return best;
+    if (best) {
+        return best->roots[op];
+    }
+    return defined ? NULL : gql_ops[op];
 }
 
 /* The operation class c is the root type of, or CBM_NOT_FOUND. */
 static int gql_root_op(const gql_ctx_t *ctx, const gql_class_t *c) {
-    const gql_schema_t *sd = gql_schema_for(ctx, c);
     for (int op = 0; op < GQL_OP_COUNT; op++) {
-        const char *root = sd ? sd->roots[op] : gql_ops[op];
+        const char *root = gql_root_name(ctx, c, op);
         if (root && strcmp(root, c->node->name) == 0) {
             return op;
         }

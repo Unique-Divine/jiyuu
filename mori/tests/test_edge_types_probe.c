@@ -865,6 +865,32 @@ TEST(graphql_gqlgen_underscored_field_resolver) {
     PASS();
 }
 
+/* `extend schema { mutation: Actions }` in another file adds a root to the
+ * set's `schema` definition: Actions' fields are Mutation Routes. The type
+ * named Mutation is not a root, since the definition names the roots. */
+static const EtFile et_gqlgen_schema_extension_files[] = {
+    {"graph/schema.graphqls",
+     "schema {\n  query: Query\n}\n\ntype Query {\n  ping: String\n}\n\n"
+     "type Mutation {\n  legacy: Boolean\n}\n"},
+    {"graph/actions.graphqls",
+     "extend schema {\n  mutation: Actions\n}\n\ntype Actions {\n  save: Boolean\n}\n"},
+};
+
+static const EtGqlServerRoute et_gqlgen_schema_extension_want[] = {
+    {"__graphql__Query.ping", "String", "false", "", "Field", ".Query.ping",
+     "graphql_schema_field", 0},
+    {"__graphql__Mutation.save", "Boolean", "false", "", "Field", ".Actions.save",
+     "graphql_schema_field", 0},
+};
+
+TEST(graphql_schema_extension_roots) {
+    ASSERT_TRUE(et_gqlgen_case(et_gqlgen_schema_extension_files,
+                               ET_NWANT(et_gqlgen_schema_extension_files), 0,
+                               et_gqlgen_schema_extension_want,
+                               ET_NWANT(et_gqlgen_schema_extension_want)));
+    PASS();
+}
+
 /* Overwrite one fixture file in an indexed project. */
 static void et_rewrite(const EtProj *lp, const char *rel, const char *content) {
     char path[700];
@@ -3680,6 +3706,7 @@ SUITE(edge_types_probe) {
     RUN_TEST(graphql_gqlgen_config_sibling_schema_single_file);
     RUN_TEST(graphql_resolver_needs_ownership_without_config);
     RUN_TEST(graphql_sibling_schema_single_file_without_config);
+    RUN_TEST(graphql_schema_extension_roots);
     RUN_TEST(graphql_gqlgen_underscored_field_resolver);
     RUN_TEST(graphql_gqlgen_config_default_schema);
     RUN_TEST(graphql_gqlgen_config_parent_relative_paths);
