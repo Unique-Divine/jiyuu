@@ -48,6 +48,18 @@ UNCONFIRMED_ERRORS = (
     errors.TimedOutError,
 )
 
+# Telethon 1.42 ``TelegramClient._call`` resends a request after ServerError,
+# TimedOutError, and similar errors, then raises a ValueError with this prefix
+# unless the client sets ``raise_last_call_error``.
+RETRIES_EXHAUSTED_PREFIX = "Request was unsuccessful "
+
+
+def _is_unconfirmed(error: BaseException) -> bool:
+    """Return True when Telegram may have applied a request that raised."""
+    if isinstance(error, UNCONFIRMED_ERRORS):
+        return True
+    return isinstance(error, ValueError) and str(error).startswith(RETRIES_EXHAUSTED_PREFIX)
+
 
 def _missing_invitee_reason(invitee) -> str:
     """Explain why Telegram left one invitee out, from its Premium flags.
@@ -156,6 +168,7 @@ async def create_group(
                 logger.error(f"Failed to get entity for user ID {user_id}: {e}")
                 return f"Error: Could not find user with ID {user_id}"
 
+        users = _distinct_users(users)
         if not users:
             return "Error: No valid users provided"
 
@@ -175,7 +188,9 @@ async def create_group(
                     f"Group created, but Telegram's reply did not include its ID. "
                     f"Check recent chats for '{sanitize_name(title)}' before creating it again."
                 )
-            missing_note = _not_added_note(_missing_invitees(result))
+            missing = _missing_invitees(result)
+            report += f"\nAdded {len(users) - len(missing)} of {len(users)} users."
+            missing_note = _not_added_note(missing)
             if missing_note:
                 report += f"\nWarning: {missing_note}"
             return report
@@ -263,7 +278,9 @@ async def _invite_to_basic_group(cl, entity, users, history_messages, group_id, 
     per-user refusal doesn't stop the rest. A chat-level error, such as a
     missing admin right or a flood wait, stops the loop. After a timeout or a
     server error, Telegram may have added the user, so the report marks that
-    user unconfirmed and stops.
+    user unconfirmed and stops. If Telethon's internal resend reaches Telegram
+    after an earlier attempt already added the user, the user appears under
+    "Already members".
     """
     not_added: List[Tuple[int, str]] = []
     already: List[int] = []
@@ -287,7 +304,7 @@ async def _invite_to_basic_group(cl, entity, users, history_messages, group_id, 
             message = log_and_format_error(
                 "invite_to_group", e, group_id=group_id, user_ids=user_ids
             )
-            is_unconfirmed = isinstance(e, UNCONFIRMED_ERRORS)
+            is_unconfirmed = _is_unconfirmed(e)
             if index == 0 and not is_unconfirmed:
                 return message
             if is_unconfirmed:

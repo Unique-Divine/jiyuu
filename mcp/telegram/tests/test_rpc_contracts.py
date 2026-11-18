@@ -390,8 +390,12 @@ async def test_basic_group_invite_first_chat_error_is_an_error(monkeypatch):
     assert result.startswith("An error occurred")
 
 
+# Telethon 1.42 resends after ServerError and TimedOutError, then raises this.
+RETRIES_EXHAUSTED = ValueError("Request was unsuccessful 5 time(s)")
+
+
 @pytest.mark.parametrize(
-    "error", [TimeoutError(), errors.ServerError(request=None, message="INTERNAL")]
+    "error", [TimeoutError(), RETRIES_EXHAUSTED, errors.ServerError(request=None, message="X")]
 )
 @pytest.mark.asyncio
 async def test_basic_group_invite_marks_ambiguous_failure_unconfirmed(monkeypatch, error):
@@ -406,6 +410,14 @@ async def test_basic_group_invite_marks_ambiguous_failure_unconfirmed(monkeypatc
         "Added 1 of 3 users to Example. Unconfirmed, check membership: 8. "
         "Not added: 9 (not attempted). Stopped early: "
     )
+
+
+def test_is_unconfirmed_matches_only_ambiguous_failures():
+    assert groups._is_unconfirmed(RETRIES_EXHAUSTED)
+    assert groups._is_unconfirmed(errors.TimedOutError(request=None, message="TIMEOUT"))
+    assert groups._is_unconfirmed(ConnectionError())
+    assert not groups._is_unconfirmed(ValueError("Could not find the input entity"))
+    assert not groups._is_unconfirmed(errors.ChatAdminRequiredError(request=None))
 
 
 @pytest.mark.asyncio
@@ -452,7 +464,11 @@ async def test_create_group_warns_about_missing_invitees(monkeypatch):
     users = [example_user(7), example_user(8)]
     client = configure_invite(monkeypatch, None, users, {None: reply})
 
-    result = await groups.create_group(title="Example", user_ids=[7, 8])
+    result = await groups.create_group(title="Example", user_ids=[7, 8, 7])
 
-    assert isinstance(client.requests[0], functions.messages.CreateChatRequest)
-    assert result == f"Group created with ID: -42\nWarning: Not added: 8 ({PRIVACY})."
+    request = client.requests[0]
+    assert isinstance(request, functions.messages.CreateChatRequest)
+    assert [user.user_id for user in request.users] == [7, 8]
+    assert result == (
+        f"Group created with ID: -42\nAdded 1 of 2 users.\nWarning: Not added: 8 ({PRIVACY})."
+    )
