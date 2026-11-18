@@ -92,6 +92,7 @@ frontend and API integrations. This uses the "sai-keeper" GraphQL interface.
 ### Personal, Blog, Boku Workspace
 - `~/boku`: **Personal knowledge base and project hub.** Monorepo for sandboxing, backups, and external brain. Use when working on epics, specs, Nibiru notes, focustime, or scripts that span nibi-chain, sai-perps, sai-web. Contains: `epics/`, `nibi/` (addr-book, cook), `free/` (todos, journal), `sde/`, `jiyuu/` (focustime, mdtoc), `scripts/`. Bun/TS + Go + Rust. Run `just test`, `just install`.
   - Boku, its `dotfiles` submodule, and Jiyuu keep one branch per machine: `ud/main` on the laptop and `ud/homebox` on homebox. Commit work in progress there, merge `origin/main` into it after a PR merges, and never check out `main` in the main checkouts. To move work to the other machine, merge one machine branch into the other.
+- `~/codebase-memory-mcp`: **Codebase Memory MCP fork (C).** The local code graph agents query; fork https://github.com/Unique-Divine/codebase-memory-mcp of DeusData/codebase-memory-mcp, built and installed from branch `ud/main` (adds GraphQL cross-repo linking). Kept beside other repos, not as a submodule. Use agent skill `codebase-memory`.
 - `~/gh-io-ud`: **Personal site (Firebase Hosting).** Astro 4 + Tailwind. Blog
   content in `src/content/post/` (schema in `src/content/config.ts`). Site config
   `src/config.yaml`, nav `src/navigation.js`. Run `just dev`, build `just b`,
