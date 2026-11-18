@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import tempfile
 import threading
 import urllib.request
 from dataclasses import dataclass
@@ -169,14 +170,25 @@ def read_cache(
 
 
 def write_cache(path: Path, name: str, latest: str, checked_at: str) -> None:
+    """Replace the cache file atomically; give up silently on any OS error.
+
+    The startup thread and ``mcp_info`` worker threads can write at once and
+    share a process ID, so each write gets its own temporary file.
+    """
+    payload = {"name": name, "latestVersion": latest, "checkedAt": checked_at}
+    tmp: Optional[str] = None
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {"name": name, "latestVersion": latest, "checkedAt": checked_at}
-        tmp = path.with_suffix(f".{os.getpid()}.tmp")
-        tmp.write_text(json.dumps(payload) + "\n", encoding="utf-8")
-        tmp.replace(path)
+        fd, tmp = tempfile.mkstemp(prefix=f".{path.stem}.", suffix=".tmp", dir=path.parent)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload) + "\n")
+        os.replace(tmp, path)
     except OSError:
-        pass
+        if tmp is not None:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
 
 
 def urllib_fetch(url: str, timeout: float) -> bytes:

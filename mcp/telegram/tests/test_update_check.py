@@ -270,6 +270,53 @@ def test_names_jiyuu_does_not_publish_are_not_checked(tmp_path):
     assert fetch.urls == []
 
 
+def test_concurrent_cache_writes_never_expose_a_partial_file(tmp_path):
+    # The startup thread and mcp_info worker threads share one process ID, so
+    # each write needs its own temporary file.
+    path = tmp_path / f"{NAME}.json"
+    versions = [f"2.{i}.0" for i in range(16)]
+    stop = threading.Event()
+    bad_reads: list[str] = []
+
+    def writer(version: str) -> None:
+        for _ in range(200):
+            update_check.write_cache(path, NAME, version, NOW.isoformat())
+
+    def reader() -> None:
+        while not stop.is_set():
+            try:
+                text = path.read_text()
+            except FileNotFoundError:
+                continue
+            try:
+                assert json.loads(text)["latestVersion"] in versions
+            except (ValueError, KeyError, AssertionError):
+                bad_reads.append(text)
+
+    watcher = threading.Thread(target=reader)
+    watcher.start()
+    writers = [threading.Thread(target=writer, args=(v,)) for v in versions]
+    for thread in writers:
+        thread.start()
+    for thread in writers:
+        thread.join()
+    stop.set()
+    watcher.join()
+
+    assert bad_reads == []
+    assert json.loads(path.read_text())["latestVersion"] in versions
+    assert [entry.name for entry in tmp_path.iterdir()] == [path.name]
+
+
+def test_failed_cache_write_leaves_no_temporary_file(tmp_path):
+    path = tmp_path / f"{NAME}.json"
+    path.mkdir()  # Replacing a directory with a file fails.
+
+    update_check.write_cache(path, NAME, "2.1.0", NOW.isoformat())
+
+    assert [entry.name for entry in tmp_path.iterdir()] == [path.name]
+
+
 def test_default_cache_dir_follows_xdg_cache_home(tmp_path):
     env = {"XDG_CACHE_HOME": str(tmp_path)}
 
