@@ -11,11 +11,15 @@ const behind = {
   runningVersion: "4.4.3",
   latestVersion: "4.5.0",
   checkedAt: "2026-11-17T12:00:00Z",
+  source: "live",
 }
 
 // Never reach the registry or the user's cache from tests.
 const offlineInfo = (status = null) =>
-  new JiyuuMcpInfo("slack", packageRoot, ["SLACK_"], async () => status)
+  new JiyuuMcpInfo("slack", packageRoot, ["SLACK_"], {
+    startup: async () => status,
+    live: async () => status,
+  })
 
 const mcpInfoRequest = { params: { name: "mcp_info", arguments: {} } }
 
@@ -55,4 +59,27 @@ test("the Slack and Discord copies of jiyuuMcpInfo.ts are identical", () => {
   const discord = fileURLToPath(new URL("../../discord/src/jiyuuMcpInfo.ts", import.meta.url))
   if (!existsSync(discord)) return // Outside the Jiyuu monorepo.
   expect(readFileSync(slack, "utf8")).toBe(readFileSync(discord, "utf8"))
+})
+
+test("mcp_info runs the live check on every call, not the startup result", async () => {
+  let calls = 0
+  const current = { ...behind, runningVersion: "4.5.0", source: "live" }
+  const info = new JiyuuMcpInfo("slack", packageRoot, ["SLACK_"], {
+    startup: async () => behind,
+    live: async () => {
+      calls++
+      return current
+    },
+  })
+
+  const first = JSON.parse((await callTool(mcpInfoRequest, info)).content[0].text)
+  await callTool(mcpInfoRequest, info)
+
+  expect(calls).toBe(2)
+  expect(first.update).toMatchObject({
+    latestVersion: "4.5.0",
+    updateAvailable: false,
+    pinCommand: null,
+    source: "live",
+  })
 })

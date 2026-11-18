@@ -33,7 +33,10 @@ type UpdateStatus = import('./jiyuuMcpInfo.js').UpdateStatus;
 const packageRoot = new URL('..', import.meta.url).pathname;
 // Never reach the registry or the user's cache from tests.
 const offlineInfo = (status: UpdateStatus | null = null) =>
-  new JiyuuMcpInfo('discord', packageRoot, ['DISCORD_'], async () => status);
+  new JiyuuMcpInfo('discord', packageRoot, ['DISCORD_'], {
+    startup: async () => status,
+    live: async () => status,
+  });
 
 const mockedServer = {
   setRequestHandler: jest.fn(),
@@ -662,6 +665,7 @@ describe('DiscordMCPServer', () => {
       runningVersion: '1.3.8',
       latestVersion: '1.4.0',
       checkedAt: '2026-11-17T12:00:00Z',
+      source: 'live',
     };
 
     function callHandler() {
