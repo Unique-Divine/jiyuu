@@ -110,13 +110,13 @@ For local testing only, `SLACK_MCP_HTTP_INSECURE=1` turns the check off.
 
 ## Web Server Problems
 
-The web server writes its API key to file `~/.slack-mcp-api-key`. The startup
-log masks all but the first 8 characters, so read the key from the file.
-Environment variable `SLACK_API_KEY` sets your own key.
-Check that the server answers:
+The web server writes its API key to file `~/.slack-mcp-api-key`, and the
+startup log masks all but the first 8 characters. If `SLACK_API_KEY` is set,
+the server uses it instead of the file. This check picks the same key:
 
 ```bash
-curl http://localhost:3000/health -H "Authorization: Bearer $(cat ~/.slack-mcp-api-key)"
+API_KEY="${SLACK_API_KEY:-$(cat ~/.slack-mcp-api-key)}"
+curl http://localhost:3000/health -H "Authorization: Bearer $API_KEY"
 ```
 
 To keep it running after the terminal closes on macOS, use the LaunchAgent

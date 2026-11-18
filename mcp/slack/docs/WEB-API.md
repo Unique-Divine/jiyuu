@@ -72,11 +72,11 @@ Authorization: Bearer <your-api-key>
 ```
 
 The server writes a random API key to file `~/.slack-mcp-api-key` on first run.
-The startup log shows only its first 8 characters. Read the full key from the
-file:
+The startup log shows only its first 8 characters. If `SLACK_API_KEY` is set,
+the server uses it and ignores the file. This command picks the same key:
 
 ```bash
-API_KEY="$(cat ~/.slack-mcp-api-key)"
+API_KEY="${SLACK_API_KEY:-$(cat ~/.slack-mcp-api-key)}"
 ```
 
 To use a custom key:
