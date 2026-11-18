@@ -89,7 +89,7 @@ test("slack_update_message is advertised as a destructive, idempotent write", ()
   expect(TOOL_HANDLERS.slack_update_message).toBe(handleUpdateMessage)
 })
 
-test("edits your own message, sends text only, and returns old and new text", async () => {
+test("edits your own message, sends text with parse=none, and returns old and new text", async () => {
   stub = stubSlackApi(slackWithMessage())
 
   const result = await handleUpdateMessage(ARGS)
@@ -107,6 +107,7 @@ test("edits your own message, sends text only, and returns old and new text", as
     channel: CHANNEL,
     ts: TS,
     text: NEW_TEXT,
+    parse: "none",
   })
 })
 
