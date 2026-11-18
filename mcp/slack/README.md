@@ -5,9 +5,7 @@ browser session, and send, edit, or delete your messages when you ask. The
 server needs no Slack app and no admin approval.
 
 Maintained by [Unique Divine](https://uniquedivine.com) in
-[Unique-Divine/jiyuu](https://github.com/Unique-Divine/jiyuu). Forked from
-[jtalk22/slack-mcp-server](https://github.com/jtalk22/slack-mcp-server); see
-[Attribution and License](#attribution-and-license).
+[Unique-Divine/jiyuu](https://github.com/Unique-Divine/jiyuu).
 
 ## Install
 
@@ -85,8 +83,8 @@ The server has 25 Slack tools. The stdio server also lists tool `mcp_info`.
 | Workflow profiles | `slack_workflow_save`, `slack_workflows` |
 | Hosted only | `slack_smart_search`, `slack_catch_me_up`, `slack_triage` |
 
-The three hosted-only tools come from upstream. Locally they call nothing and
-return error `tool_requires_hosted` with upstream's signup links.
+The three hosted-only tools call nothing locally and return error
+`tool_requires_hosted`.
 
 ### Edit and Delete
 
@@ -199,23 +197,11 @@ builds the entrypoints to an ignored cache to catch import and syntax errors.
 
 HTTP and web modes run through `bun src/cli.js http` and
 `bun src/cli.js web`. [docs/WEB-API.md](docs/WEB-API.md) covers the web mode.
-The inherited Dockerfile still targets upstream's Node image and is not a
-supported install path.
+The Dockerfile targets a Node image and is not a supported install path.
 
 Report issues in [Unique-Divine/jiyuu](https://github.com/Unique-Divine/jiyuu/issues)
 with `mcp/slack` in the title.
 
-## Attribution and License
+## License
 
-This package is a fork of
-[jtalk22/slack-mcp-server](https://github.com/jtalk22/slack-mcp-server),
-imported through
-[Unique-Divine/slack-mcp-server](https://github.com/Unique-Divine/slack-mcp-server).
-Its version continues from upstream `@jtalk22/slack-mcp` 4.4.3.
-[IMPORT.json](IMPORT.json) and package metadata `jiyuu.upstream` in file
-`package.json` pin the source commit. The original
-[MIT license and copyright notice](LICENSE) are retained.
-
-Upstream code for its hosted service is still in the tree. When session tokens
-expire, the error links to that service. Set `SLACK_MCP_NO_UPSELL=1` to hide
-the link. Unique Divine does not run that service.
+MIT. See [LICENSE](LICENSE).
