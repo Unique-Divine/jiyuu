@@ -675,7 +675,7 @@ slack-mcp write {"tool":"slack_delete_message","channel":"D063M4403MW","timestam
 | `timestamp` | `timestamp`, once Slack has returned that message; otherwise `null` |
 | `status` | `deleted`, `updated`, `probably_deleted`, `outcome_unknown`, `error`, or `thrown` |
 | `code` | The error code, such as `text_mismatch`, or `null` on success |
-| `age_hours` | The message's age in hours, computed from the numeric `timestamp` argument |
+| `age_hours` | The message's age in hours, once Slack has returned that message; otherwise `null` |
 
 The line never includes tokens, cookies, or message text. `channel_id` and
 `timestamp` come from the caller, and an ID shape proves nothing:
@@ -683,5 +683,6 @@ The line never includes tokens, cookies, or message text. `channel_id` and
 after Slack confirms the conversation exists, and the timestamp only after
 Slack returns the message. A refusal before any Slack call, such as
 `invalid_argument` or `message_too_old`, and a Slack error such as
-`channel_not_found` or `not_in_channel` log both as `null`. For
-`message_not_found`, the channel is logged and the timestamp is `null`.
+`channel_not_found` or `not_in_channel` log both as `null`, along with
+`age_hours`. A `message_too_old` result still reports the age to the caller. For
+`message_not_found`, the channel is logged and the timestamp and age are `null`.

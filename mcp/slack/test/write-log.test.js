@@ -135,7 +135,7 @@ test("a thrown error is logged with status thrown and still propagates", async (
     timestamp: null,
     status: "thrown",
     code: "account_inactive",
-    age_hours: lines.length ? parseLine(lines[0]).age_hours : null,
+    age_hours: null,
   }])
 })
 
@@ -149,6 +149,7 @@ for (const channel of ["C0123456789", "D03DN5VMBPW", "G01ABCDEF2", "C0NF1DENT1AL
     }))
     expect(entry.channel).toBe(null)
     expect(entry.timestamp).toBe(null)
+    expect(entry.age_hours).toBe(null)
   })
 }
 
@@ -201,8 +202,12 @@ test("a refusal before any Slack call logs channel and timestamp as null", async
 
   expect(stub.calls).toStrictEqual([])
   const entry = parseLine(lines[0])
-  expect(entry).toMatchObject({ channel: null, timestamp: null, code: "message_too_old" })
-  expect(entry.age_hours).toBeGreaterThan(190)
+  expect(entry).toMatchObject({
+    channel: null,
+    timestamp: null,
+    age_hours: null,
+    code: "message_too_old",
+  })
 })
 
 test("message_not_found logs the verified channel but not the timestamp", async () => {
@@ -217,6 +222,7 @@ test("message_not_found logs the verified channel but not the timestamp", async 
   expect(parseLine(lines[0])).toMatchObject({
     channel: CHANNEL,
     timestamp: null,
+    age_hours: null,
     code: "message_not_found",
   })
 })
