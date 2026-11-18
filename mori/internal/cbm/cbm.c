@@ -3393,6 +3393,94 @@ static uint64_t swift_error_lines(TSTree *tree, const char *source, int source_l
     return lines;
 }
 
+/* The vendored GraphQL grammar has no string escapes: in `"Use \"}\""` the
+ * `\"` ends the string, the `}` after it closes the enclosing type, and
+ * error recovery drops the fields that follow. Parse a copy whose escape
+ * sequences inside string values are blanked: same length and lines, so
+ * every node's offsets hold for the real source, which extraction reads
+ * (string values, such as a deprecation reason, are decoded from it).
+ * Returns `source` when it holds no escape to blank. */
+enum { GQL_MASK_BLOCK_QUOTE = 3 };
+
+typedef enum { GQL_MASK_CODE, GQL_MASK_COMMENT, GQL_MASK_STRING, GQL_MASK_BLOCK } gql_mask_state_t;
+
+static bool gql_mask_block_quote(const char *s, int i, int len) {
+    return i + GQL_MASK_BLOCK_QUOTE <= len && strncmp(s + i, "\"\"\"", GQL_MASK_BLOCK_QUOTE) == 0;
+}
+
+/* One step outside strings; returns the next state, advancing *i past an
+ * opening """. */
+static gql_mask_state_t gql_mask_code(const char *s, int *i, int len) {
+    if (s[*i] == '#') {
+        return GQL_MASK_COMMENT;
+    }
+    if (gql_mask_block_quote(s, *i, len)) {
+        *i += GQL_MASK_BLOCK_QUOTE - SKIP_ONE;
+        return GQL_MASK_BLOCK;
+    }
+    return s[*i] == '"' ? GQL_MASK_STRING : GQL_MASK_CODE;
+}
+
+/* One step inside "...": an escape and its character are blanked. */
+static gql_mask_state_t gql_mask_string(char *s, int *i, int len) {
+    if (s[*i] == '\\' && *i + SKIP_ONE < len && s[*i + SKIP_ONE] != '\n') {
+        s[*i] = ' ';
+        s[++(*i)] = ' ';
+        return GQL_MASK_STRING;
+    }
+    return s[*i] == '"' || s[*i] == '\n' ? GQL_MASK_CODE : GQL_MASK_STRING;
+}
+
+/* One step inside """...""": only \""" escapes, and every backslash is
+ * blanked so the grammar never sees one. */
+static gql_mask_state_t gql_mask_block(char *s, int *i, int len) {
+    if (s[*i] == '\\') {
+        s[*i] = ' ';
+        if (gql_mask_block_quote(s, *i + SKIP_ONE, len)) {
+            memset(s + *i + SKIP_ONE, ' ', GQL_MASK_BLOCK_QUOTE);
+            *i += GQL_MASK_BLOCK_QUOTE;
+        }
+        return GQL_MASK_BLOCK;
+    }
+    if (gql_mask_block_quote(s, *i, len)) {
+        *i += GQL_MASK_BLOCK_QUOTE - SKIP_ONE;
+        return GQL_MASK_CODE;
+    }
+    return GQL_MASK_BLOCK;
+}
+
+static const char *graphql_mask_string_escapes(CBMArena *a, CBMLanguage language,
+                                               const char *source, int source_len) {
+    if (language != CBM_LANG_GRAPHQL || !source || source_len <= 0 ||
+        !memchr(source, '\\', (size_t)source_len)) {
+        return source;
+    }
+    char *masked = cbm_arena_alloc(a, (size_t)source_len + SKIP_ONE);
+    if (!masked) {
+        return source;
+    }
+    memcpy(masked, source, (size_t)source_len);
+    masked[source_len] = '\0';
+    gql_mask_state_t state = GQL_MASK_CODE;
+    for (int i = 0; i < source_len; i++) {
+        switch (state) {
+        case GQL_MASK_CODE:
+            state = gql_mask_code(masked, &i, source_len);
+            break;
+        case GQL_MASK_COMMENT:
+            state = masked[i] == '\n' ? GQL_MASK_CODE : GQL_MASK_COMMENT;
+            break;
+        case GQL_MASK_STRING:
+            state = gql_mask_string(masked, &i, source_len);
+            break;
+        case GQL_MASK_BLOCK:
+            state = gql_mask_block(masked, &i, source_len);
+            break;
+        }
+    }
+    return masked;
+}
+
 /* Masking can also make a file read worse: an `#error` line from a dropped
  * branch stays in a type body. Keep the re-parse only when its error regions
  * cover no more lines than the first parse's (#2061). Counting regions instead
@@ -3958,7 +4046,8 @@ static CBMFileResult *extract_file_ex_body(const char *source, int source_len, C
     bool sql_ranged = language == CBM_LANG_SQL && cbm_sql_values_exclusion_on(rel_path) &&
                       cbm_sql_values_kept_ranges(source, (uint32_t)source_len, &sql_kept) &&
                       ts_parser_set_included_ranges(parser, sql_kept.items, sql_kept.count);
-    TSTree *tree = cbm_parse_source(parser, source, (uint32_t)source_len, opts);
+    const char *parse_source = graphql_mask_string_escapes(a, language, source, source_len);
+    TSTree *tree = cbm_parse_source(parser, parse_source, (uint32_t)source_len, opts);
     tree = swift_retry_conditional_parse(a, parser, tree, language, source, source_len, opts);
     if (sql_ranged) {
         (void)ts_parser_set_included_ranges(parser, NULL, 0);

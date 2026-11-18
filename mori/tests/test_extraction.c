@@ -5177,6 +5177,35 @@ TEST(graphql_deprecation_reason_decoding) {
     PASS();
 }
 
+/* An escaped quote before a brace inside a string used to end the string
+ * early and close the type at the brace, so error recovery dropped every
+ * later field. The parse now blanks string escapes in a same-length copy. */
+TEST(graphql_escaped_brace_keeps_later_fields) {
+    CBMFileResult *r = extract("type Query { before: String old: String "
+                               "@deprecated(reason: \"Use \\\"}\\\"\") after: String }\n"
+                               "type Next {\n  more: Int @deprecated(reason: \"a \\\\ b \\\"{\\\"\")\n"
+                               "  last: Int\n}\n",
+                               CBM_LANG_GRAPHQL, "t", "query.graphqls");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    const char *want[] = {"before", "old", "after", "more", "last"};
+    for (size_t w = 0; w < sizeof(want) / sizeof(want[0]); w++) {
+        bool found = false;
+        for (int i = 0; i < r->defs.count && !found; i++) {
+            found = strcmp(r->defs.items[i].label, "Field") == 0 &&
+                    strcmp(r->defs.items[i].name, want[w]) == 0;
+        }
+        if (!found) {
+            fprintf(stderr, "  missing Field %s\n", want[w]);
+        }
+        ASSERT_TRUE(found);
+    }
+    ASSERT_STR_EQ(gql_reason_of(r, "old"), "Use \"}\"");
+    ASSERT_STR_EQ(gql_reason_of(r, "more"), "a \\ b \"{\"");
+    cbm_free_result(r);
+    PASS();
+}
+
 /* `schema { query: RootQuery }` is recorded on the file's module def. */
 TEST(graphql_schema_definition_roots) {
     CBMFileResult *r = extract("schema {\n  query: RootQuery\n  subscription: Events\n}\n"
@@ -16102,6 +16131,7 @@ SUITE(extraction) {
     RUN_TEST(graphql_field_type_and_deprecation);
     RUN_TEST(graphql_schema_definition_roots);
     RUN_TEST(graphql_deprecation_reason_decoding);
+    RUN_TEST(graphql_escaped_brace_keeps_later_fields);
     RUN_TEST(svelte_component);
     RUN_TEST(vue_component);
     RUN_TEST(glsl_shader);
