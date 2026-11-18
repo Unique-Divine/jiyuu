@@ -1381,10 +1381,70 @@ TEST(cross_repo_graphql_ambiguous_route_marked) {
     PASS();
 }
 
+/* A Route QN longer than the matcher's old 511-byte buffer: the exact lookup
+ * uses the whole QN. A distinct server Route whose QN is the long one's
+ * 511-byte prefix must not be linked in its place. */
+TEST(cross_repo_graphql_long_route_qn_exact) {
+    char field[506];
+    memset(field, 'f', sizeof(field) - 1);
+    field[sizeof(field) - 1] = '\0';
+    char qn[600];
+    snprintf(qn, sizeof(qn), "__graphql__Query.%s", field); /* 522 bytes */
+    char prefix[512];
+    snprintf(prefix, sizeof(prefix), "%s", qn); /* the first 511 */
+    cross_repo_fixture_t fixture;
+    bool ok = cross_repo_fixture_begin(&fixture) &&
+              cross_repo_seed_graphql(&fixture, qn, 1, "{\"source\":\"graphql_schema\"}");
+    char server_path[512];
+    cbm_store_t *server =
+        ok && cross_repo_project_path(&fixture, "gql-server", server_path, sizeof(server_path))
+            ? cbm_store_open_path(server_path)
+            : NULL;
+    cbm_node_t decoy_route = {.project = "gql-server",
+                              .label = "Route",
+                              .name = prefix + strlen("__graphql__"),
+                              .qualified_name = prefix,
+                              .file_path = "graph/other.graphqls"};
+    cbm_node_t decoy = {.project = "gql-server",
+                        .label = "Function",
+                        .name = "Decoy",
+                        .qualified_name = "gql-server.graph.Decoy",
+                        .file_path = "graph/decoy.go"};
+    int64_t decoy_route_id = server ? cbm_store_upsert_node(server, &decoy_route) : 0;
+    int64_t decoy_id = server ? cbm_store_upsert_node(server, &decoy) : 0;
+    cbm_edge_t handles = {.project = "gql-server",
+                          .source_id = decoy_id,
+                          .target_id = decoy_route_id,
+                          .type = "HANDLES",
+                          .properties_json = "{}"};
+    ok = ok && decoy_route_id > 0 && decoy_id > 0 && cbm_store_insert_edge(server, &handles) > 0;
+    cbm_store_close(server);
+    if (!ok) {
+        cross_repo_fixture_end(&fixture);
+        FAIL("failed to seed GraphQL long-QN fixture");
+    }
+    const char *target = "gql-server";
+    cbm_cross_repo_result_t fwd = cbm_cross_repo_match("gql-client", &target, 1);
+    bool failed = fwd.failed;
+    int graphql_edges = fwd.graphql_edges;
+    cbm_cross_repo_result_free(&fwd);
+    int to_resolver = cross_repo_count_edges_like(&fixture, "gql-client", "CROSS_GRAPHQL_CALLS",
+                                                  "%schema.resolvers.go%");
+    int to_decoy = cross_repo_count_edges_like(&fixture, "gql-client", "CROSS_GRAPHQL_CALLS",
+                                               "%decoy.go%");
+    cross_repo_fixture_end(&fixture);
+    ASSERT_FALSE(failed);
+    ASSERT_EQ(graphql_edges, 1);
+    ASSERT_EQ(to_resolver, 1);
+    ASSERT_EQ(to_decoy, 0);
+    PASS();
+}
+
 SUITE(cross_repo) {
     RUN_TEST(cross_repo_graphql_prefers_resolver_method_handler);
     RUN_TEST(cross_repo_graphql_reverse_edge_keeps_every_caller);
     RUN_TEST(cross_repo_graphql_ambiguous_route_marked);
+    RUN_TEST(cross_repo_graphql_long_route_qn_exact);
     RUN_TEST(cross_repo_caller_local_handler_blocks_cross_http_issue1459);
     RUN_TEST(cross_repo_methodless_call_to_local_get_route_blocks_cross_http_issue1459);
     RUN_TEST(cross_repo_caller_without_local_handler_keeps_cross_http_issue1459);

@@ -1096,40 +1096,43 @@ static cr_match_result_t match_channels(cbm_store_t *src_store, const char *src_
 
 /* ── Phase D: Generic route-type matcher (gRPC, GraphQL, tRPC) ──── */
 
-/* Look up a node's qualified_name by id. Returns true if found and reports SQL
- * failures separately from an ordinary miss. */
-static bool lookup_node_qn(struct sqlite3 *db, int64_t node_id, char *out, size_t out_sz,
-                           bool *failed) {
+/* Look up a node's qualified_name by id: a heap copy of the whole name
+ * (never truncated: the lookup that follows is exact), or NULL. Reports SQL
+ * and allocation failures separately from an ordinary miss. */
+static char *lookup_node_qn(struct sqlite3 *db, int64_t node_id, bool *failed) {
     *failed = false;
-    out[0] = '\0';
     if (!db) {
         *failed = true;
-        return false;
+        return NULL;
     }
     sqlite3_stmt *st = NULL;
     if (sqlite3_prepare_v2(db, "SELECT qualified_name FROM nodes WHERE id = ?1", CBM_NOT_FOUND, &st,
                            NULL) != SQLITE_OK) {
         *failed = true;
-        return false;
+        return NULL;
     }
     if (sqlite3_bind_int64(st, SKIP_ONE, node_id) != SQLITE_OK) {
         sqlite3_finalize(st);
         *failed = true;
-        return false;
+        return NULL;
     }
-    bool found = false;
+    char *found = NULL;
     int step_rc = sqlite3_step(st);
     if (step_rc == SQLITE_ROW) {
         const char *qn = (const char *)sqlite3_column_text(st, 0);
         if (qn) {
-            snprintf(out, out_sz, "%s", qn);
-            found = true;
+            found = strdup(qn);
+            *failed = found == NULL;
         }
     } else if (step_rc != SQLITE_DONE) {
         *failed = true;
     }
     if (sqlite3_finalize(st) != SQLITE_OK) {
         *failed = true;
+    }
+    if (*failed) {
+        free(found);
+        return NULL;
     }
     return found;
 }
@@ -1208,9 +1211,9 @@ static cr_match_result_t match_typed_routes(cbm_store_t *src_store, const char *
         }
 
         /* Look up the Route QN from the target node (already points to the Route). */
-        char route_qn[CR_QN_BUF] = {0};
         bool query_failed = false;
-        if (!lookup_node_qn(src_db, route_id, route_qn, sizeof(route_qn), &query_failed)) {
+        char *route_qn = lookup_node_qn(src_db, route_id, &query_failed);
+        if (!route_qn) {
             if (query_failed) {
                 failed = true;
                 break;
@@ -1223,6 +1226,15 @@ static cr_match_result_t match_typed_routes(cbm_store_t *src_store, const char *
         int64_t handler_id =
             find_route_handler(tgt_store, route_qn, handler_name, sizeof(handler_name),
                                handler_file, sizeof(handler_file), &query_failed);
+        bool ambiguous = !query_failed && handler_id != 0 &&
+                         cr_route_ambiguous(tgt_store, route_qn, &query_failed);
+        bool cancelled = !query_failed && handler_id != 0 && cr_cancel_requested(ctx);
+        bool emitted = !query_failed && handler_id != 0 && !cancelled &&
+                       emit_cross_route_bidirectional(
+                           src_store, src_project, src_db, caller_id, route_id, tgt_store,
+                           tgt_project, handler_id, route_qn, handler_name, handler_file, svc_val,
+                           svc_key, cross_edge_type, ambiguous, ctx);
+        free(route_qn);
         if (query_failed) {
             failed = true;
             break;
@@ -1230,20 +1242,10 @@ static cr_match_result_t match_typed_routes(cbm_store_t *src_store, const char *
         if (handler_id == 0) {
             continue;
         }
-        bool ambiguous = cr_route_ambiguous(tgt_store, route_qn, &query_failed);
-        if (query_failed) {
-            failed = true;
+        if (cancelled) {
             break;
         }
-
-        if (cr_cancel_requested(ctx)) {
-            break;
-        }
-
-        if (!emit_cross_route_bidirectional(src_store, src_project, src_db, caller_id, route_id,
-                                            tgt_store, tgt_project, handler_id, route_qn,
-                                            handler_name, handler_file, svc_val, svc_key,
-                                            cross_edge_type, ambiguous, ctx)) {
+        if (!emitted) {
             failed = !cr_cancel_requested(ctx);
             break;
         }
