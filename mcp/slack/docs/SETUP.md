@@ -17,9 +17,9 @@ A hosted version with permanent OAuth tokens, semantic search, and AI summaries 
 ### 1. Install with Bun
 
 ```bash
-bun add -g @uniquedivine/mcp-slack@4.4.3
+bun add -g @uniquedivine/mcp-slack@4.5.0
 # or run it without a global install:
-bunx @uniquedivine/mcp-slack@4.4.3 --version
+bunx @uniquedivine/mcp-slack@4.5.0 --version
 ```
 
 ### 1b. Or Clone the Repository
@@ -35,9 +35,9 @@ bun install --frozen-lockfile
 ```bash
 tmpdir="$(mktemp -d)"
 cd "$tmpdir"
-bunx @uniquedivine/mcp-slack@4.4.3 --version
-bunx @uniquedivine/mcp-slack@4.4.3 --help
-bunx @uniquedivine/mcp-slack@4.4.3 --doctor
+bunx @uniquedivine/mcp-slack@4.5.0 --version
+bunx @uniquedivine/mcp-slack@4.5.0 --help
+bunx @uniquedivine/mcp-slack@4.5.0 --doctor
 ```
 
 Expected:
@@ -57,7 +57,7 @@ Expected:
 2. Navigate to https://app.slack.com and log in
 3. Run:
    ```bash
-   bunx @uniquedivine/mcp-slack@4.4.3 --setup
+   bunx @uniquedivine/mcp-slack@4.5.0 --setup
    ```
 
 **Option B: Automatic Extraction (repo clone workflow)**
@@ -93,7 +93,7 @@ npm run tokens:auto
   "mcpServers": {
     "slack": {
       "command": "bunx",
-      "args": ["@uniquedivine/mcp-slack@4.4.3"]
+      "args": ["@uniquedivine/mcp-slack@4.5.0"]
     }
   }
 }
@@ -106,7 +106,7 @@ Fully restart Claude Desktop (Cmd+Q on macOS, then reopen).
 ### 5. Configure Claude Code (CLI)
 
 ```bash
-claude mcp add slack -- bunx @uniquedivine/mcp-slack@4.4.3
+claude mcp add slack -- bunx @uniquedivine/mcp-slack@4.5.0
 ```
 
 Or manually edit `~/.claude.json`:
@@ -117,7 +117,7 @@ Or manually edit `~/.claude.json`:
     "slack": {
       "type": "stdio",
       "command": "bunx",
-      "args": ["@uniquedivine/mcp-slack@4.4.3"]
+      "args": ["@uniquedivine/mcp-slack@4.5.0"]
     }
   }
 }
@@ -157,7 +157,7 @@ Create `~/Library/LaunchAgents/com.yourname.slack-token-refresh.plist`:
     <array>
         <string>/bin/bash</string>
         <string>-c</string>
-        <string>exec "$HOME/.bun/bin/bunx" @uniquedivine/mcp-slack@4.4.3 --refresh-tokens</string>
+        <string>exec "$HOME/.bun/bin/bunx" @uniquedivine/mcp-slack@4.5.0 --refresh-tokens</string>
     </array>
     <key>StartCalendarInterval</key>
     <array>
@@ -190,11 +190,11 @@ tail /tmp/slack-token-refresh.log
 
 ### "No credentials found"
 
-Run `bunx @uniquedivine/mcp-slack@4.4.3 --doctor` to confirm diagnostic code, then `bunx @uniquedivine/mcp-slack@4.4.3 --setup` with Slack open in Chrome.
+Run `bunx @uniquedivine/mcp-slack@4.5.0 --doctor` to confirm diagnostic code, then `bunx @uniquedivine/mcp-slack@4.5.0 --setup` with Slack open in Chrome.
 
 ### "invalid_auth" Error
 
-Tokens have expired. Run `bunx @uniquedivine/mcp-slack@4.4.3 --doctor` and follow the suggested next action.
+Tokens have expired. Run `bunx @uniquedivine/mcp-slack@4.5.0 --doctor` and follow the suggested next action.
 
 ### MCP Server Not Loading
 
