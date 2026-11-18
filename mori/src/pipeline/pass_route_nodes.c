@@ -1759,10 +1759,21 @@ static const char *gql_receiver_type(CBMArena *a, const cbm_gbuf_node_t *m) {
     return cbm_arena_strndup(a, qn + start, end - start);
 }
 
+/* A field or method name as the resolver lookup compares it: lower case,
+ * underscores dropped. gqlgen names a field's resolver method with
+ * templates.ToGo, which splits words at '_' and joins them capitalized
+ * (`user_count` -> `UserCount`, `user_id` -> `UserID`); folding case and
+ * dropping '_' maps both sides to `usercount` / `userid`. */
 static char *gql_lower_dup(CBMArena *a, const char *s) {
     char *out = cbm_arena_strdup(a, s);
-    for (char *p = out; p && *p; p++) {
-        *p = (char)tolower((unsigned char)*p);
+    char *w = out;
+    for (const char *p = out; p && *p; p++) {
+        if (*p != '_') {
+            *w++ = (char)tolower((unsigned char)*p);
+        }
+    }
+    if (w) {
+        *w = '\0';
     }
     return out;
 }

@@ -840,6 +840,31 @@ TEST(graphql_gqlgen_config_default_schema) {
     PASS();
 }
 
+/* gqlgen names a field's resolver method with templates.ToGo: `user_count`
+ * is resolved by UserCount and `account_id` by AccountID. */
+static const EtFile et_gqlgen_underscore_files[] = {
+    {"go.mod", "module under\n"},
+    {"graph/schema.graphqls", "type Query {\n  user_count: Int\n  account_id: ID\n}\n"},
+    {"graph/schema.resolvers.go",
+     "package graph\n\n"
+     "type queryResolver struct{}\n\n"
+     "func (r *queryResolver) UserCount() int {\n\treturn 0\n}\n\n"
+     "func (r *queryResolver) AccountID() string {\n\treturn \"\"\n}\n"},
+};
+
+static const EtGqlServerRoute et_gqlgen_underscore_want[] = {
+    {"__graphql__Query.user_count", "Int", "false", "", "Method", ".graph.queryResolver.UserCount",
+     "gqlgen_resolver", 0},
+    {"__graphql__Query.account_id", "ID", "false", "", "Method", ".graph.queryResolver.AccountID",
+     "gqlgen_resolver", 0},
+};
+
+TEST(graphql_gqlgen_underscored_field_resolver) {
+    ASSERT_TRUE(et_gqlgen_case(et_gqlgen_underscore_files, ET_NWANT(et_gqlgen_underscore_files), 0,
+                               et_gqlgen_underscore_want, ET_NWANT(et_gqlgen_underscore_want)));
+    PASS();
+}
+
 /* Overwrite one fixture file in an indexed project. */
 static void et_rewrite(const EtProj *lp, const char *rel, const char *content) {
     char path[700];
@@ -3655,6 +3680,7 @@ SUITE(edge_types_probe) {
     RUN_TEST(graphql_gqlgen_config_sibling_schema_single_file);
     RUN_TEST(graphql_resolver_needs_ownership_without_config);
     RUN_TEST(graphql_sibling_schema_single_file_without_config);
+    RUN_TEST(graphql_gqlgen_underscored_field_resolver);
     RUN_TEST(graphql_gqlgen_config_default_schema);
     RUN_TEST(graphql_gqlgen_config_parent_relative_paths);
     RUN_TEST(handles_flask_python);
