@@ -1,9 +1,20 @@
 """Tell the user when a newer published release of this server exists.
 
 The server never updates itself: the MCP client config pins an exact version,
-so what runs is what was reviewed. This module reads the registry's latest
-version in the background, caches it for a day, and stays silent on any
-failure. Set ``JIYUU_MCP_NO_UPDATE_CHECK=1`` to turn the check off.
+so what runs is what was reviewed. Two callers read PyPI's latest version,
+each with a 2-second timeout:
+
+- At startup, in a background thread, through a 1-hour cache
+  (``check_for_update``). The first successful tool result after that check
+  carries a one-line notice when the running version is behind. Failures are
+  silent.
+- Tool ``mcp_info`` reads PyPI on every call and rewrites the cache
+  (``check_latest``). When PyPI can't be read, it reports the cached answer
+  with source ``cache``.
+
+A cached latest version older than the running version is out of date, so
+both callers ignore it. Set ``JIYUU_MCP_NO_UPDATE_CHECK=1`` to turn the check
+off.
 
 Only names that Jiyuu publishes are checked. Before the PyPI rename the
 distribution was ``telegram-mcp``, a name an unrelated project owns, and its
@@ -20,12 +31,12 @@ import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, Mapping, Optional
+from typing import Callable, Literal, Mapping, Optional
 
 from packaging.version import InvalidVersion, Version
 
 OPT_OUT_ENV = "JIYUU_MCP_NO_UPDATE_CHECK"
-CACHE_TTL = timedelta(hours=24)
+CACHE_TTL = timedelta(hours=1)
 FETCH_TIMEOUT_SECONDS = 2.0
 PUBLISHED_PREFIX = "uniquedivine-"
 USER_AGENT = "jiyuu-mcp-update-check"
@@ -42,6 +53,8 @@ class UpdateStatus:
     running_version: str
     latest_version: Optional[str]
     checked_at: Optional[str]
+    source: Literal["live", "cache"] = "live"
+    """``live`` when this call read PyPI; ``cache`` for a cached answer."""
 
     @property
     def update_available(self) -> bool:
@@ -51,7 +64,11 @@ class UpdateStatus:
 
     @property
     def pin_command(self) -> Optional[str]:
-        if self.latest_version is None:
+        """The upgrade command; ``None`` unless a newer release exists.
+
+        A pin to an older or equal release would downgrade or do nothing.
+        """
+        if self.latest_version is None or not self.update_available:
             return None
         return pin_command(self.name, self.latest_version)
 
@@ -119,8 +136,19 @@ def cache_file(cache_dir: Path, name: str) -> Path:
     return cache_dir / f"{safe_name}.json"
 
 
-def read_cache(path: Path, name: str, now: datetime) -> Optional[tuple[str, str]]:
-    """Return ``(latest_version, checked_at)`` from a fresh cache entry."""
+def read_cache(
+    path: Path,
+    name: str,
+    now: datetime,
+    *,
+    running_version: Optional[str] = None,
+    max_age: Optional[timedelta] = CACHE_TTL,
+) -> Optional[tuple[str, str]]:
+    """Return ``(latest_version, checked_at)`` from a usable cache entry.
+
+    An entry older than ``max_age`` (``None`` accepts any age) or with a
+    latest version older than ``running_version`` doesn't count.
+    """
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         if data.get("name") != name:
@@ -132,8 +160,10 @@ def read_cache(path: Path, name: str, now: datetime) -> Optional[tuple[str, str]
         return None
     if not isinstance(latest, str) or checked.tzinfo is None:
         return None
+    if running_version is not None and is_newer(running_version, latest):
+        return None
     age = now - checked
-    if age < timedelta(0) or age >= CACHE_TTL:
+    if age < timedelta(0) or (max_age is not None and age >= max_age):
         return None
     return latest, checked_at
 
@@ -157,6 +187,26 @@ def urllib_fetch(url: str, timeout: float) -> bytes:
         return response.read()
 
 
+def _read_registry(
+    name: str,
+    running_version: str,
+    path: Path,
+    now: datetime,
+    fetch: Fetcher,
+    timeout: float,
+) -> Optional[UpdateStatus]:
+    """Read PyPI and rewrite the cache; ``None`` on any failure."""
+    try:
+        latest = parse_latest_version(fetch(latest_version_url(name), timeout))
+    except Exception:
+        return None
+    if latest is None:
+        return None
+    checked_at = now.isoformat(timespec="seconds")
+    write_cache(path, name, latest, checked_at)
+    return UpdateStatus(name, running_version, latest, checked_at, "live")
+
+
 def check_for_update(
     name: str,
     running_version: str,
@@ -167,7 +217,7 @@ def check_for_update(
     now: Optional[datetime] = None,
     timeout: float = FETCH_TIMEOUT_SECONDS,
 ) -> Optional[UpdateStatus]:
-    """Return the latest published version, from cache or the registry.
+    """The startup check: a fresh cache entry if one exists, else PyPI.
 
     Returns ``None`` when the check is off, the name is not Jiyuu's, or the
     registry can't be read. Never raises.
@@ -178,15 +228,42 @@ def check_for_update(
     try:
         now = now or datetime.now(timezone.utc)
         path = cache_file(cache_dir or default_cache_dir(env), name)
-        cached = read_cache(path, name, now)
+        cached = read_cache(path, name, now, running_version=running_version)
         if cached is not None:
-            return UpdateStatus(name, running_version, cached[0], cached[1])
-        latest = parse_latest_version(fetch(latest_version_url(name), timeout))
-        if latest is None:
+            return UpdateStatus(name, running_version, cached[0], cached[1], "cache")
+        return _read_registry(name, running_version, path, now, fetch, timeout)
+    except Exception:
+        return None
+
+
+def check_latest(
+    name: str,
+    running_version: str,
+    *,
+    fetch: Fetcher = urllib_fetch,
+    env: Optional[Mapping[str, str]] = None,
+    cache_dir: Optional[Path] = None,
+    now: Optional[datetime] = None,
+    timeout: float = FETCH_TIMEOUT_SECONDS,
+) -> Optional[UpdateStatus]:
+    """The ``mcp_info`` check: always PyPI, then the cache of any age.
+
+    Returns ``None`` when the check is off, the name is not Jiyuu's, or
+    neither source has an answer. Never raises.
+    """
+    env = os.environ if env is None else env
+    if check_disabled(env) or not is_published_name(name):
+        return None
+    try:
+        now = now or datetime.now(timezone.utc)
+        path = cache_file(cache_dir or default_cache_dir(env), name)
+        live = _read_registry(name, running_version, path, now, fetch, timeout)
+        if live is not None:
+            return live
+        cached = read_cache(path, name, now, running_version=running_version, max_age=None)
+        if cached is None:
             return None
-        checked_at = now.isoformat(timespec="seconds")
-        write_cache(path, name, latest, checked_at)
-        return UpdateStatus(name, running_version, latest, checked_at)
+        return UpdateStatus(name, running_version, cached[0], cached[1], "cache")
     except Exception:
         return None
 
