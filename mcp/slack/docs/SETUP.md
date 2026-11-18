@@ -15,7 +15,7 @@ short version.
 ## 1. Install
 
 ```bash
-bunx @uniquedivine/mcp-slack@4.5.3 --version
+bunx @uniquedivine/mcp-slack@latest --version
 ```
 
 To work from source instead:
@@ -33,9 +33,9 @@ package:
 
 ```bash
 cd "$(mktemp -d)"
-bunx @uniquedivine/mcp-slack@4.5.3 --version
-bunx @uniquedivine/mcp-slack@4.5.3 --help
-bunx @uniquedivine/mcp-slack@4.5.3 --doctor
+bunx @uniquedivine/mcp-slack@latest --version
+bunx @uniquedivine/mcp-slack@latest --help
+bunx @uniquedivine/mcp-slack@latest --doctor
 ```
 
 Flags `--version` and `--help` exit `0`. Flag `--doctor` exits with one code:
@@ -54,7 +54,7 @@ Flag `--status` is read-only and never runs Chrome extraction.
 Run the setup wizard:
 
 ```bash
-bunx @uniquedivine/mcp-slack@4.5.3 --setup
+bunx @uniquedivine/mcp-slack@latest --setup
 ```
 
 On macOS, the wizard reads the tokens from Chrome when Slack is open in a
@@ -86,7 +86,7 @@ steps when a tool returns `invalid_auth` or `slack_auth_expired`.
 Claude Code:
 
 ```bash
-claude mcp add slack -- bunx @uniquedivine/mcp-slack@4.5.3
+claude mcp add slack -- bunx @uniquedivine/mcp-slack@latest
 ```
 
 Claude Desktop reads file
@@ -98,7 +98,7 @@ Claude Desktop reads file
   "mcpServers": {
     "slack": {
       "command": "bunx",
-      "args": ["@uniquedivine/mcp-slack@4.5.3"]
+      "args": ["@uniquedivine/mcp-slack@latest"]
     }
   }
 }
@@ -136,7 +136,7 @@ Create file `~/Library/LaunchAgents/com.yourname.slack-token-refresh.plist`:
     <array>
         <string>/bin/bash</string>
         <string>-c</string>
-        <string>exec "$HOME/.bun/bin/bunx" @uniquedivine/mcp-slack@4.5.3 --refresh-tokens</string>
+        <string>exec "$HOME/.bun/bin/bunx" @uniquedivine/mcp-slack@latest --refresh-tokens</string>
     </array>
     <key>StartCalendarInterval</key>
     <array>
@@ -158,8 +158,8 @@ tail /tmp/slack-token-refresh.log
 
 LaunchAgents start without your shell profile, so the plist calls `bunx` by
 its absolute path. With a Homebrew Bun install, use `/opt/homebrew/bin/bunx`.
-Keep the version pin equal to the one in your client configuration. If Chrome
-isn't running, the log shows "Failed to extract" and the tokens stay as they
-were.
+Tag `@latest` keeps the refresh job on the same release as the server. If
+Chrome isn't running, the log shows "Failed to extract" and the tokens stay as
+they were.
 
 For problems, see [TROUBLESHOOTING.md](TROUBLESHOOTING.md).

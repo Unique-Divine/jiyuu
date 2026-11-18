@@ -4,11 +4,11 @@ Discord, Slack and Telegram MCP servers maintained in Jiyuu. Slack and Telegram
 use your existing user accounts; Discord uses a bot token. Sending messages and
 other writes require explicit authorization.
 
-| Directory | Package | Pinned install | Runtime |
+| Directory | Package | Install | Runtime |
 | --- | --- | --- | --- |
-| [discord](discord/README.md) | npm `@uniquedivine/mcp-discord` | `bunx @uniquedivine/mcp-discord@1.3.9` | Bun 1.4.3+ |
-| [slack](slack/README.md) | npm `@uniquedivine/mcp-slack` | `bunx @uniquedivine/mcp-slack@4.5.3` | Bun 1.4.3+ |
-| [telegram](telegram/README.md) | PyPI `uniquedivine-telegram-mcp` | `uvx uniquedivine-telegram-mcp@2.0.3` | Python 3.10+ and uv |
+| [discord](discord/README.md) | npm `@uniquedivine/mcp-discord` | `bunx @uniquedivine/mcp-discord@latest` | Bun 1.4.3+ |
+| [slack](slack/README.md) | npm `@uniquedivine/mcp-slack` | `bunx @uniquedivine/mcp-slack@latest` | Bun 1.4.3+ |
+| [telegram](telegram/README.md) | PyPI `uniquedivine-telegram-mcp` | `uvx uniquedivine-telegram-mcp@latest` | Python 3.10+ and uv |
 
 Each component README has client configuration for Claude Code, Codex, and
 Cursor, plus update steps. CI publishes a package from branch `main` when its
@@ -46,8 +46,10 @@ downgrade. The startup notice fails silently. Its line looks like this:
 Update available: uniquedivine-telegram-mcp 2.1.0 (running 2.0.1). Change the pin to `uvx uniquedivine-telegram-mcp@2.1.0` and reload the MCP server.
 ```
 
-The servers never update themselves; the pin in the client config decides
-what runs. Set `JIYUU_MCP_NO_UPDATE_CHECK=1` to turn the check off.
+The servers never update themselves; the package spec in the client config
+decides what runs. The documented `@latest` spec runs the newest release at
+each launch, so the notice appears only for a config that names an older
+version. Set `JIYUU_MCP_NO_UPDATE_CHECK=1` to turn the check off.
 
 The TypeScript module is copied, byte for byte, to
 `discord/src/jiyuuMcpInfo.ts` and `slack/lib/jiyuuMcpInfo.ts`, so each
