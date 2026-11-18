@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- The edit and delete tools return `message_deleted` for a deleted thread parent instead of `not_own_message`. Slack leaves a "This message was deleted." placeholder at the parent's timestamp, which the ownership check read as someone else's message.
+
 ## [4.5.1] - 2026-11-18
 
 ### Fixed

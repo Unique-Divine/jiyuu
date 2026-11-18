@@ -51,6 +51,10 @@ export const SLACK_WRITE_ERRORS = Object.freeze({
     message: "The Slack session changed after the ownership check, so the tool didn't send the change.",
     next_action: "Run slack_health_check to confirm the signed-in user, then call the tool again."
   },
+  message_deleted: {
+    message: "The message was already deleted. Only Slack's \"This message was deleted.\" placeholder remains at that timestamp, above its thread replies.",
+    next_action: "Nothing to change. If you meant another message, read the thread with slack_get_thread to get its timestamp."
+  },
   lookup_incomplete: {
     message: "The tool couldn't finish searching the thread for this message, so it didn't make the change.",
     next_action: "Check the timestamp with slack_get_thread and call the tool again."
@@ -298,6 +302,11 @@ export async function checkOwnMessage(channelId, timestamp, options = {}) {
 
   if (!message) {
     return { ok: false, result: messageWriteError("message_not_found", details) };
+  }
+  // A deleted thread parent leaves a tombstone at the same ts, authored by
+  // Slack rather than the user; report it as deleted, not as someone else's.
+  if (message.subtype === "tombstone") {
+    return { ok: false, result: messageWriteError("message_deleted", details) };
   }
   if (message.user !== selfId) {
     return {
