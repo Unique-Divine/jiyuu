@@ -70,10 +70,17 @@ and pass its text.
 
 **Symptom:** `slack_list_conversations` returns channels but no DMs.
 
-Slack's `conversations.list` method doesn't return IMs for `xoxc-` tokens, so
-the server opens a DM with each workspace user through
-`conversations.open`. If DMs still don't appear, pass `types=im,mpim` and
-check that the user exists with `slack_list_users`.
+Slack's `conversations.list` method doesn't return DMs for `xoxc-` tokens. By
+default, `slack_list_conversations` adds DMs only from its cache in file
+`~/.slack-mcp-dm-cache.json`, and the server ignores that cache once it is
+more than 24 hours old. To rebuild it, call the tool with
+`discover_dms: true` and `types: "im,mpim"`. The server then reads the first
+200 users from `users.list`, calls `conversations.open` for each one, 50 ms
+apart, and saves the DMs it finds.
+
+Discovery is slow and can hit rate limits. It also calls `conversations.open`
+for users you have never messaged, which can add empty DMs to your Slack
+sidebar.
 
 ## Rate Limits
 
@@ -103,8 +110,9 @@ For local testing only, `SLACK_MCP_HTTP_INSECURE=1` turns the check off.
 
 ## Web Server Problems
 
-The web server writes its API key to file `~/.slack-mcp-api-key` and prints
-it at startup. Environment variable `SLACK_API_KEY` sets your own key.
+The web server writes its API key to file `~/.slack-mcp-api-key`. The startup
+log masks all but the first 8 characters, so read the key from the file.
+Environment variable `SLACK_API_KEY` sets your own key.
 Check that the server answers:
 
 ```bash

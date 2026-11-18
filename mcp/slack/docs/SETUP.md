@@ -114,9 +114,11 @@ Call tool `slack_health_check`. It returns your user and team names.
 
 ## Keep Tokens Fresh While the Client Is Closed (macOS)
 
-The server refreshes tokens from Chrome every 4 hours while it runs. If no
-client runs it for a week or two, the tokens expire and the next session
-starts with `invalid_auth`. A LaunchAgent can run the refresh twice a day
+While it runs on macOS, the server checks token health every 4 hours. It reads
+new tokens from Chrome only when the token file is more than 10 days old, or
+when a Slack call fails with `invalid_auth` or `token_expired`. If no client
+runs the server for a week or two, the tokens can expire before either case
+happens. A LaunchAgent can run the refresh twice a day
 whenever Chrome is open with a Slack tab.
 
 Create file `~/Library/LaunchAgents/com.yourname.slack-token-refresh.plist`:

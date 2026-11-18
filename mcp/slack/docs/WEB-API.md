@@ -71,11 +71,12 @@ All API requests require the API key in the Authorization header:
 Authorization: Bearer <your-api-key>
 ```
 
-The server writes a random API key to file `~/.slack-mcp-api-key` on first run
-and prints it at startup:
+The server writes a random API key to file `~/.slack-mcp-api-key` on first run.
+The startup log shows only its first 8 characters. Read the full key from the
+file:
 
-```
-Dashboard: http://localhost:3000/?key=smcp_xxxxxxxxxxxx
+```bash
+API_KEY="$(cat ~/.slack-mcp-api-key)"
 ```
 
 To use a custom key:
@@ -295,9 +296,15 @@ curl -X POST -H "Authorization: Bearer $API_KEY" \
 
 ## Web UI
 
-Open <http://localhost:3000> for the dashboard. It connects with the
-generated API key and lets you pick a conversation, read messages and
-threads, search, and send messages.
+Open <http://localhost:3000> for the dashboard. On first load it asks for the
+API key: paste the contents of `~/.slack-mcp-api-key`, or your `SLACK_API_KEY`
+value. Check **Remember this key on this device** to keep the key in browser storage; otherwise the
+dashboard forgets it when the tab closes. You can also open
+`http://localhost:3000/?key=<api-key>` once; the dashboard stores the key for
+that tab and removes it from the URL.
+
+The dashboard lets you pick a conversation, read messages and threads,
+search, and send messages.
 
 ## Environment Variables
 
