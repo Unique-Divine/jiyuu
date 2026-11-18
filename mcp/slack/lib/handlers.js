@@ -28,8 +28,8 @@ import {
   findMessage,
   isGoneForSelf,
   sessionChangedResult,
-  slackWriteErrorResult,
   validateTargetArgs,
+  writeFailureResult,
 } from "./message-ownership.js";
 
 // ============ Utilities ============
@@ -642,7 +642,7 @@ export async function handleDeleteMessage(args) {
           : "Probably deleted: Slack reported message_not_found and a re-check no longer finds the message."
       });
     }
-    const mapped = slackWriteErrorResult(error, details);
+    const mapped = writeFailureResult(error, details, tracker);
     if (mapped) return mapped;
     throw error;
   }

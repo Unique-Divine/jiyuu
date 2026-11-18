@@ -322,7 +322,9 @@ Before it calls `chat.delete`, the tool checks the target:
 
 Every error except the last two comes back before `chat.delete` is sent.
 `session_changed` can also stop a retry after the first attempt failed on the
-network.
+network. That first attempt may have reached Slack, so the result then has
+status `outcome_unknown` instead of `error`. Re-read the message before acting
+again.
 
 When `chat.delete` returns `message_not_found` for a message the check just
 found, usually after a network retry, the tool reads the channel again. If the

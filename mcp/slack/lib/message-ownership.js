@@ -47,7 +47,7 @@ export const SLACK_WRITE_ERRORS = Object.freeze({
     next_action: "Shorten the text and retry."
   },
   session_changed: {
-    message: "The Slack session changed after the ownership check, so the tool didn't make the change.",
+    message: "The Slack session changed after the ownership check, so the tool didn't send the change.",
     next_action: "Run slack_health_check to confirm the signed-in user, then call the tool again."
   },
   lookup_incomplete: {
@@ -146,6 +146,26 @@ export function maxAgeHours(env = process.env) {
  */
 export function currentSessionToken() {
   return loadTokensReadOnly()?.token || "";
+}
+
+/**
+ * Map a failed chat.delete or chat.update to an MCP error result, or return
+ * null when the error should propagate. When slackAPI already sent the write
+ * once and lost the response to a network error, a later session_changed
+ * means the first attempt may have landed, so the result reports status
+ * outcome_unknown instead of claiming nothing changed.
+ */
+export function writeFailureResult(error, details, tracker) {
+  if (error?.message === "session_changed") {
+    clearSelfUserIdCache();
+    if (tracker?.retried) {
+      return messageWriteError("session_changed", { status: "outcome_unknown", ...details }, {
+        message: "The outcome is unknown. The first attempt hit a network error after it was sent, so it may have landed. The Slack session then changed, so the tool didn't retry.",
+        next_action: "Re-read the message with slack_conversations_history or slack_get_thread, confirm the signed-in user with slack_health_check, and only then act again."
+      });
+    }
+  }
+  return slackWriteErrorResult(error, details);
 }
 
 /**
