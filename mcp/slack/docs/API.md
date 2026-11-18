@@ -319,6 +319,7 @@ Before it calls `chat.delete`, the tool checks the target:
 | `invalid_argument` | An argument is missing or malformed; `field` names it |
 | `message_too_old` | The message is older than the age window |
 | `message_not_found` | No message with that timestamp in the channel |
+| `message_deleted` | Only a deleted thread parent's placeholder remains at that timestamp |
 | `lookup_incomplete` | The thread search hit its page cap before finding the message |
 | `not_own_message` | Someone else, or a bot, sent the message |
 | `text_mismatch` | `expected_text` doesn't match the message's text |
@@ -411,6 +412,7 @@ string of at most 4,000 characters.
 | `invalid_argument` | An argument is missing or malformed; `field` names it |
 | `message_too_old` | The message is older than the age window |
 | `message_not_found` | No message with that timestamp in the channel |
+| `message_deleted` | Only a deleted thread parent's placeholder remains at that timestamp |
 | `lookup_incomplete` | The thread search hit its page cap before finding the message |
 | `not_own_message` | Someone else, or a bot, sent the message |
 | `text_mismatch` | `expected_text` doesn't match the message's text |
@@ -655,3 +657,32 @@ Search workspace users by name, display name, or email. Case-insensitive partial
   ]
 }
 ```
+
+## Write Log
+
+Each call to `slack_delete_message`, `slack_delete_message_unsafe`,
+`slack_update_message`, or `slack_update_message_unsafe` writes one line to
+stderr, whether it succeeds, is refused, or throws:
+
+```text
+slack-mcp write {"tool":"slack_delete_message","channel":"D063M4403MW","timestamp":"1767368030.607599","status":"deleted","code":null,"age_hours":0.2}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `tool` | The tool called |
+| `channel` | `channel_id`, once Slack has answered `conversations.history` for it; otherwise `null` |
+| `timestamp` | `timestamp`, once Slack has returned that message; otherwise `null` |
+| `status` | `deleted`, `updated`, `probably_deleted`, `outcome_unknown`, `error`, or `thrown` |
+| `code` | The error code, such as `text_mismatch`, or `null` on success |
+| `age_hours` | The message's age in hours, once Slack has returned that message; otherwise `null` |
+
+The line never includes tokens, cookies, or message text. `channel_id` and
+`timestamp` come from the caller, and an ID shape proves nothing:
+`C0NF1DENT1AL` looks like a channel ID. So the log writes the channel only
+after Slack confirms the conversation exists, and the timestamp only after
+Slack returns the message. A refusal before any Slack call, such as
+`invalid_argument` or `message_too_old`, and a Slack error such as
+`channel_not_found` or `not_in_channel` log both as `null`, along with
+`age_hours`. A `message_too_old` result still reports the age to the caller. For
+`message_not_found`, the channel is logged and the timestamp and age are `null`.

@@ -51,6 +51,10 @@ export const SLACK_WRITE_ERRORS = Object.freeze({
     message: "The Slack session changed after the ownership check, so the tool didn't send the change.",
     next_action: "Run slack_health_check to confirm the signed-in user, then call the tool again."
   },
+  message_deleted: {
+    message: "The message was already deleted. Only Slack's \"This message was deleted.\" placeholder remains at that timestamp, above its thread replies.",
+    next_action: "Nothing to change. If you meant another message, read the thread with slack_get_thread to get its timestamp."
+  },
   lookup_incomplete: {
     message: "The tool couldn't finish searching the thread for this message, so it didn't make the change.",
     next_action: "Check the timestamp with slack_get_thread and call the tool again."
@@ -101,6 +105,10 @@ export const MAX_REPLY_PAGES = 50;
 
 const SLACK_TS_PATTERN = /^\d+\.\d+$/;
 
+// Slack conversation IDs: C (channel), D (DM), or G (private channel or
+// group DM), then at least 8 uppercase letters or digits.
+export const SLACK_CONVERSATION_ID_PATTERN = /^[CDG][A-Z0-9]{8,}$/;
+
 /**
  * Build an invalid_argument error result for one input field.
  */
@@ -119,8 +127,8 @@ export function invalidArgument(field, message) {
 export function validateTargetArgs(args) {
   const input = args && typeof args === "object" ? args : {};
   const { channel_id: channelId, timestamp, expected_text: expectedText } = input;
-  if (typeof channelId !== "string" || channelId.trim() === "" || /\s/.test(channelId)) {
-    return invalidArgument("channel_id", "channel_id must be a non-empty channel or DM ID with no spaces.");
+  if (typeof channelId !== "string" || !SLACK_CONVERSATION_ID_PATTERN.test(channelId)) {
+    return invalidArgument("channel_id", "channel_id must be a Slack channel or DM ID, such as C0123456789 or D0123456789.");
   }
   if (typeof timestamp !== "string" || !SLACK_TS_PATTERN.test(timestamp)) {
     return invalidArgument("timestamp", "timestamp must be a Slack message timestamp such as \"1767368030.607599\".");
@@ -252,7 +260,15 @@ export function isGoneForSelf(message, selfId) {
  * Returns { ok: true, message, selfId, sessionToken } or
  * { ok: false, result } where result is a ready MCP error. Pass the result
  * to sessionChangedResult just before the write.
+ *
+ * `verified` says what Slack confirmed: the channel once conversations.history
+ * answered for it, and the timestamp once the message was found. It's absent
+ * for refusals made before any Slack call. The write log uses it so only
+ * Slack-confirmed IDs reach stderr.
  */
+const CHANNEL_VERIFIED = Object.freeze({ channel: true, timestamp: false });
+const MESSAGE_VERIFIED = Object.freeze({ channel: true, timestamp: true });
+
 export async function checkOwnMessage(channelId, timestamp, options = {}) {
   const {
     expectedText,
@@ -291,17 +307,23 @@ export async function checkOwnMessage(channelId, timestamp, options = {}) {
     ]);
   } catch (error) {
     if (error?.message === "lookup_incomplete") {
-      return { ok: false, result: messageWriteError("lookup_incomplete", details) };
+      return { ok: false, verified: CHANNEL_VERIFIED, result: messageWriteError("lookup_incomplete", details) };
     }
     throw error;
   }
 
   if (!message) {
-    return { ok: false, result: messageWriteError("message_not_found", details) };
+    return { ok: false, verified: CHANNEL_VERIFIED, result: messageWriteError("message_not_found", details) };
+  }
+  // A deleted thread parent leaves a tombstone at the same ts, authored by
+  // Slack rather than the user; report it as deleted, not as someone else's.
+  if (message.subtype === "tombstone") {
+    return { ok: false, verified: MESSAGE_VERIFIED, result: messageWriteError("message_deleted", details) };
   }
   if (message.user !== selfId) {
     return {
       ok: false,
+      verified: MESSAGE_VERIFIED,
       result: messageWriteError("not_own_message", {
         ...details,
         author: message.user || message.bot_id || null
@@ -314,13 +336,14 @@ export async function checkOwnMessage(channelId, timestamp, options = {}) {
   if (typeof expectedText !== "string" || (message.text ?? "").trim() !== expectedText.trim()) {
     return {
       ok: false,
+      verified: MESSAGE_VERIFIED,
       result: messageWriteError("text_mismatch", details, {
         message: "expected_text doesn't match the message's current text, so the tool won't change it.",
         next_action: "Read the message again with slack_conversations_history or slack_get_thread and confirm it's the one the user meant."
       })
     };
   }
-  return { ok: true, message, selfId, sessionToken };
+  return { ok: true, verified: MESSAGE_VERIFIED, message, selfId, sessionToken };
 }
 
 /**
