@@ -815,14 +815,14 @@ static void pc_emit_graphql_paths(cbm_gbuf_t *gbuf, int64_t source_id, const cha
         if (n < 0 || (size_t)n >= sizeof(route_name)) {
             continue;
         }
-        snprintf(route_qn, sizeof(route_qn), "__graphql__%s", route_name);
+        (void)snprintf(route_qn, sizeof(route_qn), "__graphql__%s", route_name);
         int64_t route_id = cbm_gbuf_upsert_node(gbuf, "Route", route_name, route_qn, "", 0, 0,
                                                 "{\"source\":\"graphql\"}");
         char props[CBM_SZ_2K];
-        snprintf(props, sizeof(props),
-                 "{\"callee\":\"%s\",\"operation\":\"%s\",\"operation_type\":\"%s\","
-                 "\"field_path\":\"%s\",\"confidence\":%.2f}",
-                 esc_c, esc_op, op_type, route_name + strlen(root) + SKIP_ONE, confidence);
+        (void)snprintf(props, sizeof(props),
+                       "{\"callee\":\"%s\",\"operation\":\"%s\",\"operation_type\":\"%s\","
+                       "\"field_path\":\"%s\",\"confidence\":%.2f}",
+                       esc_c, esc_op, op_type, route_name + strlen(root) + SKIP_ONE, confidence);
         cbm_gbuf_insert_edge(gbuf, source_id, route_id, "GRAPHQL_CALLS", props);
     }
 }
@@ -857,11 +857,11 @@ void cbm_pipeline_emit_graphql_call(cbm_gbuf_t *gbuf, const cbm_gbuf_node_t *sou
     char route_name[CBM_SZ_256];
     char route_qn[CBM_SZ_256];
     if (op_name[0]) {
-        snprintf(route_name, sizeof(route_name), "%s", op_name);
-        snprintf(route_qn, sizeof(route_qn), "__graphql__%s", op_name);
+        (void)snprintf(route_name, sizeof(route_name), "%s", op_name);
+        (void)snprintf(route_qn, sizeof(route_qn), "__graphql__%s", op_name);
     } else {
-        snprintf(route_name, sizeof(route_name), "(anonymous %s)", op_type);
-        snprintf(route_qn, sizeof(route_qn), "__graphql__%s__anonymous", op_type);
+        (void)snprintf(route_name, sizeof(route_name), "(anonymous %s)", op_type);
+        (void)snprintf(route_qn, sizeof(route_qn), "__graphql__%s__anonymous", op_type);
     }
 
     int64_t route_id = cbm_gbuf_upsert_node(gbuf, "Route", route_name, route_qn, "", 0, 0,
@@ -872,10 +872,10 @@ void cbm_pipeline_emit_graphql_call(cbm_gbuf_t *gbuf, const cbm_gbuf_node_t *sou
     cbm_json_escape(esc_c, sizeof(esc_c), call->callee_name);
     cbm_json_escape(esc_op, sizeof(esc_op), route_name);
     char props[CBM_SZ_1K];
-    snprintf(props, sizeof(props),
-             "{\"callee\":\"%s\",\"operation\":\"%s\",\"operation_type\":\"%s\","
-             "\"confidence\":%.2f}",
-             esc_c, esc_op, op_type, confidence);
+    (void)snprintf(props, sizeof(props),
+                   "{\"callee\":\"%s\",\"operation\":\"%s\",\"operation_type\":\"%s\","
+                   "\"confidence\":%.2f}",
+                   esc_c, esc_op, op_type, confidence);
     cbm_gbuf_insert_edge(gbuf, source->id, route_id, "GRAPHQL_CALLS", props);
     pc_emit_graphql_paths(gbuf, source->id, paths, call->callee_name, route_name, op_type,
                           confidence);
@@ -910,9 +910,9 @@ void cbm_pipeline_emit_graphql_documents(cbm_gbuf_t *gbuf, const cbm_gbuf_t *loo
         }
         char operation[CBM_SZ_256];
         if (op_name[0]) {
-            snprintf(operation, sizeof(operation), "%s", op_name);
+            (void)snprintf(operation, sizeof(operation), "%s", op_name);
         } else {
-            snprintf(operation, sizeof(operation), "(anonymous %s)", op_type);
+            (void)snprintf(operation, sizeof(operation), "(anonymous %s)", op_type);
         }
         pc_emit_graphql_paths(gbuf, source->id, paths, sr->key_path, operation, op_type,
                               PC_GRAPHQL_DOC_CONF);

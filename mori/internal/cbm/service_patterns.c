@@ -1341,7 +1341,7 @@ static const char *gql_locate_operation(const char *doc, const char **after) {
             return "{";
         }
         if (c == '{' || c == '}') {
-            depth += (c == '{') ? 1 : -1;
+            depth += (c == '{') - (c == '}');
             depth = depth < 0 ? 0 : depth;
             in_fragment = in_fragment && depth > 0;
             p++;
