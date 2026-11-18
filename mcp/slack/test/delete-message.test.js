@@ -340,14 +340,20 @@ test("refuses with session_changed when the token rotates during the guard", asy
 
   const result = await handleDeleteMessage(ARGS)
 
+  // Nothing was sent, so this is a plain refusal, not an unknown outcome.
   expect(result.isError).toBe(true)
-  expect(parsePayload(result).code).toBe("session_changed")
+  const payload = parsePayload(result)
+  expect(payload).toMatchObject({ status: "error", code: "session_changed" })
+  expect(payload.message).toContain("didn't send")
   expect(methods()).not.toContain("chat.delete")
 })
 
-test("a session swapped during the retry backoff stops the retried delete", async () => {
+test("a landed delete with a lost response, then a session swap, reports outcome_unknown", async () => {
+  let landed = false
   stub = stubSlackApi(slackWithMessage({}, {
     "chat.delete": () => {
+      // Slack deletes the message, but the response is lost.
+      landed = true
       // Another call swaps the session while slackAPI sleeps before retrying.
       setTimeout(() => {
         process.env.SLACK_TOKEN = "xoxc-test-other-session"
@@ -360,9 +366,19 @@ test("a session swapped during the retry backoff stops the retried delete", asyn
 
   const result = await handleDeleteMessage(ARGS)
 
-  expect(result.isError).toBe(true)
-  expect(parsePayload(result).code).toBe("session_changed")
+  expect(landed).toBe(true)
   expect(methods().filter((m) => m === "chat.delete")).toHaveLength(1)
+  expect(result.isError).toBe(true)
+  const payload = parsePayload(result)
+  expect(payload).toMatchObject({
+    status: "outcome_unknown",
+    code: "session_changed",
+    channel: CHANNEL,
+    timestamp: TS,
+  })
+  expect(payload.message).toContain("may have landed")
+  expect(payload.message).not.toContain("didn't send")
+  expect(payload.next_action).toContain("Re-read")
 }, 10_000)
 
 test("auth errors still throw so the transport can show the Lifeboat message", async () => {
