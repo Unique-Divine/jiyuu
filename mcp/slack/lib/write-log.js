@@ -8,7 +8,8 @@
  * channel_id and timestamp come from the agent, so their shape proves
  * nothing: "C0NF1DENT1AL" looks like a channel ID. The log writes the channel
  * only after Slack answered conversations.history for it, and the timestamp
- * only after Slack returned that message. Otherwise both are null.
+ * only after Slack returned that message. Otherwise both are null, and so is
+ * age_hours, since it comes from the timestamp.
  *
  * Format:
  *   slack-mcp write {"tool":"slack_delete_message","channel":"D0123","timestamp":"1794916496.123799","status":"deleted","code":null,"age_hours":0.2}
@@ -80,7 +81,7 @@ export function formatWriteLogLine({ tool, args, status, code, verified, now = D
     timestamp: verified?.timestamp ? safeTimestamp(args?.timestamp) : null,
     status: safeCode(status),
     code: safeCode(code),
-    age_hours: ageHours(args?.timestamp, now)
+    age_hours: verified?.timestamp ? ageHours(args?.timestamp, now) : null
   };
   return `${LOG_PREFIX} ${JSON.stringify(entry)}`;
 }
