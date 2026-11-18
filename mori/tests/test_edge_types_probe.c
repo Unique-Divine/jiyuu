@@ -1427,9 +1427,11 @@ TEST(graphql_selection_signature_alloc_keeps_every_path) {
     (void)snprintf(doc + len, sizeof(doc) - len, " } }");
     char *sig = cbm_service_pattern_graphql_signature_alloc(doc, true);
     ASSERT_TRUE(sig != NULL);
-    ASSERT_TRUE(strstr(sig, "root.f0001,") != NULL);
-    ASSERT_TRUE(strstr(sig, ",root.f0600") != NULL);
+    bool first = strstr(sig, "root.f0001,") != NULL;
+    bool last = strstr(sig, ",root.f0600") != NULL;
     free(sig);
+    ASSERT_TRUE(first);
+    ASSERT_TRUE(last);
     PASS();
 }
 
