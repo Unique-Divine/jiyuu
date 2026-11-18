@@ -22,6 +22,7 @@ import {
 } from "./workflow-store.js";
 import { withRichMessageFields } from "./rich-message-fields.js";
 import { isAuthDeath, lifeboatResponse } from "./lifeboat.js";
+import { withWriteLog } from "./write-log.js";
 import {
   checkOwnMessage,
   createRetryTracker,
@@ -598,7 +599,7 @@ async function isGoneOnReread(channel, timestamp, selfId) {
  * before calling chat.delete, and maps known Slack errors to clear results.
  */
 export async function handleDeleteMessage(args) {
-  return deleteMessage(args, { ignoreAge: false });
+  return withWriteLog("slack_delete_message", args, () => deleteMessage(args, { ignoreAge: false }));
 }
 
 /**
@@ -606,7 +607,7 @@ export async function handleDeleteMessage(args) {
  * age window, for deliberate cleanup of older messages.
  */
 export async function handleDeleteMessageUnsafe(args) {
-  return deleteMessage(args, { ignoreAge: true });
+  return withWriteLog("slack_delete_message_unsafe", args, () => deleteMessage(args, { ignoreAge: true }));
 }
 
 async function deleteMessage(args, { ignoreAge }) {
@@ -677,7 +678,7 @@ async function deleteMessage(args, { ignoreAge }) {
 export const UPDATE_TEXT_MAX_CHARS = 4000;
 
 export async function handleUpdateMessage(args) {
-  return updateMessage(args, { ignoreAge: false });
+  return withWriteLog("slack_update_message", args, () => updateMessage(args, { ignoreAge: false }));
 }
 
 /**
@@ -685,7 +686,7 @@ export async function handleUpdateMessage(args) {
  * age window, for deliberate cleanup of older messages.
  */
 export async function handleUpdateMessageUnsafe(args) {
-  return updateMessage(args, { ignoreAge: true });
+  return withWriteLog("slack_update_message_unsafe", args, () => updateMessage(args, { ignoreAge: true }));
 }
 
 async function updateMessage(args, { ignoreAge }) {
