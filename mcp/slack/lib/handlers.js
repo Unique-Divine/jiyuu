@@ -14,7 +14,7 @@ import {
   isAutoRefreshAvailable,
   getLastExtractionError
 } from "./token-store.js";
-import { slackAPI, resolveUser, formatTimestamp, sleep, checkTokenHealth, getUserCacheStats } from "./slack-client.js";
+import { slackAPI, resolveUser, formatTimestamp, sleep, checkTokenHealth, getUserCacheStats, manualRefreshAdvice } from "./slack-client.js";
 import {
   saveProfile as workflowSaveProfile,
   listProfiles as workflowListProfiles,
@@ -141,7 +141,8 @@ export async function handleTokenStatus() {
       enabled: isAutoRefreshAvailable(),
       interval: "4 hours",
       last_attempt: health.refreshed ? "just_now" : null,
-      requires: isAutoRefreshAvailable() ? "Slack tab open in Chrome" : "Not supported on this platform"
+      requires: isAutoRefreshAvailable() ? "Slack tab open in Chrome" : "Not supported on this platform",
+      manual_refresh: isAutoRefreshAvailable() ? null : manualRefreshAdvice()
     },
     cache: {
       users: cacheStats,

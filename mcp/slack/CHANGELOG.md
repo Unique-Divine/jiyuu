@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - The edit and delete tools return `message_deleted` for a deleted thread parent instead of `not_own_message`. Slack leaves a "This message was deleted." placeholder at the parent's timestamp, which the ownership check read as someone else's message.
+- On Linux, WSL, and Windows, where Chrome auto-heal can't run, the token health check no longer reports auto-heal as failing or stuck and no longer shows the macOS "Allow JavaScript from Apple Events" advice. It skips the Chrome refresh, keeps the token-age warning, and says how to refresh by hand (`bunx @uniquedivine/mcp-slack --setup`, or `SLACK_TOKEN` and `SLACK_COOKIE`). An `invalid_auth` error gives the same advice. `slack_token_status` adds `auto_refresh.manual_refresh`.
 
 ## [4.5.1] - 2026-11-18
 
