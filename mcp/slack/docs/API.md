@@ -246,8 +246,9 @@ Search messages across the workspace.
 
 Send a message. Text uses Slack markup: `<url|label>` links, `<@U…>` user
 mentions, and `<#C…>` channel mentions. Slack auto-links bare URLs and
-domains, even inside inline code. A bare domain in inline code right before
-punctuation, as in ``(`example.com`)``, loses its closing backtick.
+domains. In a live test it also linked `discord.gg/saidotfun` inside inline
+code, and in ``(`discord.gg/saidotfun`).`` the link took the closing
+backtick.
 
 **Parameters:**
 | Name | Type | Default | Description |

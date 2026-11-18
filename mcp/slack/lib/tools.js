@@ -263,7 +263,7 @@ export const TOOLS = [
   },
   {
     name: "slack_send_message",
-    description: "Send a message to a channel or DM. Text uses Slack markup: <url|label> links, <@U…> and <#C…> mentions. Slack auto-links bare URLs and domains, even inside `inline code`, and a bare domain in inline code right before punctuation, as in (`example.com`), loses its closing backtick.",
+    description: "Send a message to a channel or DM. Text uses Slack markup: <url|label> links, <@U…> and <#C…> mentions. Slack auto-links bare URLs and domains. In a live test it also linked `discord.gg/saidotfun` inside inline code, and in (`discord.gg/saidotfun`). the link took the closing backtick.",
     inputSchema: {
       type: "object",
       properties: {
