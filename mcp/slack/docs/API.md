@@ -319,6 +319,7 @@ Before it calls `chat.delete`, the tool checks the target:
 | `invalid_argument` | An argument is missing or malformed; `field` names it |
 | `message_too_old` | The message is older than the age window |
 | `message_not_found` | No message with that timestamp in the channel |
+| `message_deleted` | Only a deleted thread parent's placeholder remains at that timestamp |
 | `lookup_incomplete` | The thread search hit its page cap before finding the message |
 | `not_own_message` | Someone else, or a bot, sent the message |
 | `text_mismatch` | `expected_text` doesn't match the message's text |
@@ -411,6 +412,7 @@ string of at most 4,000 characters.
 | `invalid_argument` | An argument is missing or malformed; `field` names it |
 | `message_too_old` | The message is older than the age window |
 | `message_not_found` | No message with that timestamp in the channel |
+| `message_deleted` | Only a deleted thread parent's placeholder remains at that timestamp |
 | `lookup_incomplete` | The thread search hit its page cap before finding the message |
 | `not_own_message` | Someone else, or a bot, sent the message |
 | `text_mismatch` | `expected_text` doesn't match the message's text |
