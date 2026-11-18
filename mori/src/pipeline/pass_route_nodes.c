@@ -1179,8 +1179,10 @@ static void gqlgen_resolve(cbm_gqlgen_config_t *c, const char *rel_path) {
     if (!dir) {
         return;
     }
+    /* gqlgen's default when `schema` is omitted (codegen/config/config.go
+     * DefaultConfig): schema.graphql beside the config. */
     if (!c->has_schema_key) {
-        gqlgen_add_glob(c, gqlgen_strndup("graph/*.graphqls", strlen("graph/*.graphqls")));
+        gqlgen_add_glob(c, gqlgen_strndup("schema.graphql", strlen("schema.graphql")));
     }
     /* A glob whose join fails is dropped, never left NULL in the list. */
     int kept = 0;

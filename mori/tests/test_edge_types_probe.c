@@ -813,6 +813,33 @@ TEST(graphql_gqlgen_config_parent_relative_paths) {
     PASS();
 }
 
+/* gqlgen's default schema, when the config omits `schema`, is
+ * schema.graphql beside the config (codegen/config/config.go). api/'s config
+ * claims api/schema.graphql and resolves it in internal/resolver.go; a
+ * graph/ glob of .graphqls files is not its default. */
+static const EtFile et_gqlgen_default_schema_files[] = {
+    {"go.mod", "module defaults\n"},
+    {"api/gqlgen.yml", "resolver:\n  filename: internal/resolver.go\n"},
+    {"api/schema.graphql", "type Query {\n  ping: String\n}\n"},
+    {"api/internal/resolver.go",
+     "package internal\n\n"
+     "type queryResolver struct{}\n\n"
+     "func (r *queryResolver) Ping() string {\n\treturn \"p\"\n}\n"},
+};
+
+static const EtGqlServerRoute et_gqlgen_default_schema_want[] = {
+    {"__graphql__Query.ping", "String", "false", "", "Method", ".internal.queryResolver.Ping",
+     "gqlgen_resolver", 0},
+};
+
+TEST(graphql_gqlgen_config_default_schema) {
+    ASSERT_TRUE(et_gqlgen_case(et_gqlgen_default_schema_files,
+                               ET_NWANT(et_gqlgen_default_schema_files), 0,
+                               et_gqlgen_default_schema_want,
+                               ET_NWANT(et_gqlgen_default_schema_want)));
+    PASS();
+}
+
 /* Overwrite one fixture file in an indexed project. */
 static void et_rewrite(const EtProj *lp, const char *rel, const char *content) {
     char path[700];
@@ -3628,6 +3655,7 @@ SUITE(edge_types_probe) {
     RUN_TEST(graphql_gqlgen_config_sibling_schema_single_file);
     RUN_TEST(graphql_resolver_needs_ownership_without_config);
     RUN_TEST(graphql_sibling_schema_single_file_without_config);
+    RUN_TEST(graphql_gqlgen_config_default_schema);
     RUN_TEST(graphql_gqlgen_config_parent_relative_paths);
     RUN_TEST(handles_flask_python);
     RUN_TEST(handles_fastapi_python);
