@@ -8,7 +8,7 @@ other writes require explicit authorization.
 | --- | --- | --- | --- |
 | [discord](discord/README.md) | npm `@uniquedivine/mcp-discord` | `bunx @uniquedivine/mcp-discord@1.3.9` | Bun 1.4.3+ |
 | [slack](slack/README.md) | npm `@uniquedivine/mcp-slack` | `bunx @uniquedivine/mcp-slack@4.5.3` | Bun 1.4.3+ |
-| [telegram](telegram/README.md) | PyPI `uniquedivine-telegram-mcp` | `uvx uniquedivine-telegram-mcp@2.0.1` | Python 3.10+ and uv |
+| [telegram](telegram/README.md) | PyPI `uniquedivine-telegram-mcp` | `uvx uniquedivine-telegram-mcp@2.0.3` | Python 3.10+ and uv |
 
 Each component README has client configuration for Claude Code, Codex, and
 Cursor, plus update steps. CI publishes a package from branch `main` when its
