@@ -1452,6 +1452,8 @@ typedef struct {
     int class_count;
     gql_field_t *fields;
     int field_count;
+    const gql_class_t **classes_by_name; /* classes sorted by name */
+    const gql_field_t **fields_by_parent; /* fields sorted by parent_qn */
     gql_schema_t *schemas;
     int schema_count;
     gql_resolver_t *resolvers;
@@ -1692,9 +1694,20 @@ static const gql_class_t *gql_find_class(const gql_ctx_t *ctx, const char *name,
                                          int group) {
     const gql_class_t *best = NULL;
     size_t best_len = 0;
-    for (int i = 0; i < ctx->class_count; i++) {
-        const gql_class_t *c = &ctx->classes[i];
-        if (c->group != group || strcmp(c->node->name, name) != 0) {
+    int lo = 0;
+    int hi = ctx->class_count;
+    while (lo < hi) { /* the first class named `name` or after it */
+        int mid = lo + ((hi - lo) / PAIR_LEN);
+        if (strcmp(ctx->classes_by_name[mid]->node->name, name) < 0) {
+            lo = mid + SKIP_ONE;
+        } else {
+            hi = mid;
+        }
+    }
+    for (int i = lo; i < ctx->class_count && strcmp(ctx->classes_by_name[i]->node->name, name) == 0;
+         i++) {
+        const gql_class_t *c = ctx->classes_by_name[i];
+        if (c->group != group) {
             continue;
         }
         size_t len = gql_common_dir_len(c->node->file_path, near);
@@ -1926,6 +1939,52 @@ static bool gql_owns(const gql_ctx_t *ctx, const gql_resolver_t *r, const gql_fi
     return same_or_below || parent;
 }
 
+static int gql_class_name_cmp(const void *x, const void *y) {
+    const gql_class_t *a = *(const gql_class_t *const *)x;
+    const gql_class_t *b = *(const gql_class_t *const *)y;
+    return strcmp(a->node->name, b->node->name);
+}
+
+static int gql_field_parent_cmp(const void *x, const void *y) {
+    const gql_field_t *a = *(const gql_field_t *const *)x;
+    const gql_field_t *b = *(const gql_field_t *const *)y;
+    return strcmp(a->parent_qn, b->parent_qn);
+}
+
+/* Sort pointers to the n items of size `size` at `items` with cmp; NULL on
+ * allocation failure. */
+static const void **gql_sorted_index(CBMArena *a, const void *items, int n, size_t size,
+                                     int (*cmp)(const void *, const void *)) {
+    const void **index = cbm_arena_alloc(a, ((size_t)n + SKIP_ONE) * sizeof(*index));
+    for (int i = 0; index && i < n; i++) {
+        index[i] = (const char *)items + ((size_t)i * size);
+    }
+    if (index && n > SKIP_ONE) {
+        qsort(index, (size_t)n, sizeof(*index), cmp);
+    }
+    return index;
+}
+
+/* The fields whose parent is `parent_qn`: [*first, return). */
+static int gql_fields_of(const gql_ctx_t *ctx, const char *parent_qn, int *first) {
+    int lo = 0;
+    int hi = ctx->field_count;
+    while (lo < hi) {
+        int mid = lo + ((hi - lo) / PAIR_LEN);
+        if (strcmp(ctx->fields_by_parent[mid]->parent_qn, parent_qn) < 0) {
+            lo = mid + SKIP_ONE;
+        } else {
+            hi = mid;
+        }
+    }
+    int end = lo;
+    while (end < ctx->field_count && strcmp(ctx->fields_by_parent[end]->parent_qn, parent_qn) == 0) {
+        end++;
+    }
+    *first = lo;
+    return end;
+}
+
 static void gql_add_emit(gql_ctx_t *ctx, const char *path, const char *type_name,
                          const gql_field_t *f) {
     if (!path) {
@@ -1954,21 +2013,25 @@ static void gql_add_emit(gql_ctx_t *ctx, const char *path, const char *type_name
 /* The field paths of one root type: each field, and each field of that
  * field's return type. */
 static void gql_plan_root(gql_ctx_t *ctx, const gql_class_t *root, int op) {
-    for (int i = 0; i < ctx->field_count; i++) {
-        const gql_field_t *rf = &ctx->fields[i];
-        if (strcmp(rf->parent_qn, root->node->qualified_name) != 0) {
+    int first = 0;
+    int end = gql_fields_of(ctx, root->node->qualified_name, &first);
+    for (int i = first; i < end; i++) {
+        const gql_field_t *rf = ctx->fields_by_parent[i];
+        const char *path = cbm_arena_sprintf(&ctx->arena, "%s.%s", gql_ops[op], rf->node->name);
+        if (!path) {
             continue;
         }
-        const char *path = cbm_arena_sprintf(&ctx->arena, "%s.%s", gql_ops[op], rf->node->name);
         gql_add_emit(ctx, path, root->node->name, rf);
         const char *base = gql_base_type(&ctx->arena, rf->return_type);
         const gql_class_t *type =
             base && base[0] ? gql_find_class(ctx, base, rf->node->file_path, root->group) : NULL;
-        for (int j = 0; type && j < ctx->field_count; j++) {
-            const gql_field_t *cf = &ctx->fields[j];
-            if (strcmp(cf->parent_qn, type->node->qualified_name) == 0) {
-                gql_add_emit(ctx, cbm_arena_sprintf(&ctx->arena, "%s.%s", path, cf->node->name),
-                             type->node->name, cf);
+        int child = 0;
+        int child_end = type ? gql_fields_of(ctx, type->node->qualified_name, &child) : 0;
+        for (int j = child; j < child_end; j++) {
+            const gql_field_t *cf = ctx->fields_by_parent[j];
+            const char *child_path = cbm_arena_sprintf(&ctx->arena, "%s.%s", path, cf->node->name);
+            if (child_path) {
+                gql_add_emit(ctx, child_path, type->node->name, cf);
             }
         }
     }
@@ -2087,8 +2150,18 @@ static void gql_plan_and_emit(gql_ctx_t *ctx) {
     for (int i = 0; i < ctx->class_count; i++) {
         ctx->classes[i].group = gql_group_of(ctx, ctx->classes[i].node->file_path);
     }
+    ctx->classes_by_name = (const gql_class_t **)gql_sorted_index(
+        &ctx->arena, ctx->classes, ctx->class_count, sizeof(*ctx->classes), gql_class_name_cmp);
+    if (!ctx->classes_by_name) {
+        return;
+    }
     gql_collect_schemas(ctx);
     if (gql_collect_fields(ctx) <= 0 || gql_collect_resolvers(ctx) < 0) {
+        return;
+    }
+    ctx->fields_by_parent = (const gql_field_t **)gql_sorted_index(
+        &ctx->arena, ctx->fields, ctx->field_count, sizeof(*ctx->fields), gql_field_parent_cmp);
+    if (!ctx->fields_by_parent) {
         return;
     }
     for (int i = 0; i < ctx->class_count; i++) {
