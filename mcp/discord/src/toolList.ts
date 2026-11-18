@@ -11,6 +11,11 @@ export const toolList = [
         reason: { type: "string" }
       },
       required: ["guildId", "name"]
+    },
+    annotations: {
+      title: "Create Category",
+      readOnlyHint: false,
+      destructiveHint: false
     }
   },
   {
@@ -25,6 +30,11 @@ export const toolList = [
         reason: { type: "string" }
       },
       required: ["categoryId"]
+    },
+    annotations: {
+      title: "Edit Category",
+      readOnlyHint: false,
+      destructiveHint: true
     }
   },
   {
@@ -37,6 +47,11 @@ export const toolList = [
         reason: { type: "string" }
       },
       required: ["categoryId"]
+    },
+    annotations: {
+      title: "Delete Category",
+      readOnlyHint: false,
+      destructiveHint: true
     }
   },
   {
@@ -48,6 +63,11 @@ export const toolList = [
         token: { type: "string" }
       },
       required: []
+    },
+    annotations: {
+      title: "Log In",
+      readOnlyHint: false,
+      destructiveHint: false
     }
   },
   {
@@ -61,6 +81,11 @@ export const toolList = [
         replyToMessageId: { type: "string" }
       },
       required: ["channelId", "message"]
+    },
+    annotations: {
+      title: "Send Message",
+      readOnlyHint: false,
+      destructiveHint: false
     }
   },
   {
@@ -72,6 +97,10 @@ export const toolList = [
         guildId: { type: "string" }
       },
       required: ["guildId"]
+    },
+    annotations: {
+      title: "List Forum Channels",
+      readOnlyHint: true
     }
   },
   {
@@ -89,6 +118,11 @@ export const toolList = [
         }
       },
       required: ["forumChannelId", "title", "content"]
+    },
+    annotations: {
+      title: "Create Forum Post",
+      readOnlyHint: false,
+      destructiveHint: false
     }
   },
   {
@@ -100,6 +134,10 @@ export const toolList = [
         threadId: { type: "string" }
       },
       required: ["threadId"]
+    },
+    annotations: {
+      title: "Get Forum Post",
+      readOnlyHint: true
     }
   },
   {
@@ -113,6 +151,10 @@ export const toolList = [
         limit: { type: "number", description: "Maximum number of archived threads to fetch (default: 100, max: 100)", minimum: 1, maximum: 100, default: 100 }
       },
       required: ["forumChannelId"]
+    },
+    annotations: {
+      title: "List Forum Threads",
+      readOnlyHint: true
     }
   },
   {
@@ -125,6 +167,11 @@ export const toolList = [
         message: { type: "string" }
       },
       required: ["threadId", "message"]
+    },
+    annotations: {
+      title: "Reply to Forum Post",
+      readOnlyHint: false,
+      destructiveHint: false
     }
   },
   {
@@ -139,6 +186,11 @@ export const toolList = [
         categoryId: { type: "string", description: "Parent category ID to place the channel under" }
       },
       required: ["guildId", "channelName"]
+    },
+    annotations: {
+      title: "Create Text Channel",
+      readOnlyHint: false,
+      destructiveHint: false
     }
   },
   {
@@ -153,6 +205,11 @@ export const toolList = [
         categoryId: { type: "string", description: "The ID of the parent category to create the channel under" }
       },
       required: ["guildId", "name"]
+    },
+    annotations: {
+      title: "Create Forum Channel",
+      readOnlyHint: false,
+      destructiveHint: false
     }
   },
   {
@@ -169,6 +226,11 @@ export const toolList = [
         reason: { type: "string", description: "Reason for editing (shown in audit log)" }
       },
       required: ["channelId"]
+    },
+    annotations: {
+      title: "Edit Channel",
+      readOnlyHint: false,
+      destructiveHint: true
     }
   },
   {
@@ -181,6 +243,11 @@ export const toolList = [
         reason: { type: "string" }
       },
       required: ["channelId"]
+    },
+    annotations: {
+      title: "Delete Channel",
+      readOnlyHint: false,
+      destructiveHint: true
     }
   },
   {
@@ -201,6 +268,10 @@ export const toolList = [
         around: { type: "string", description: "Snowflake ID or ISO 8601 date (e.g. '2025-03-01T00:00:00Z'). Get messages around this point." }
       },
       required: ["channelId"]
+    },
+    annotations: {
+      title: "Read Messages",
+      readOnlyHint: true
     }
   },
   {
@@ -212,6 +283,10 @@ export const toolList = [
         guildId: { type: "string" }
       },
       required: ["guildId"]
+    },
+    annotations: {
+      title: "Get Server Info",
+      readOnlyHint: true
     }
   },
   {
@@ -225,6 +300,11 @@ export const toolList = [
         emoji: { type: "string" }
       },
       required: ["channelId", "messageId", "emoji"]
+    },
+    annotations: {
+      title: "Add Reaction",
+      readOnlyHint: false,
+      destructiveHint: false
     }
   },
   {
@@ -241,6 +321,11 @@ export const toolList = [
         }
       },
       required: ["channelId", "messageId", "emojis"]
+    },
+    annotations: {
+      title: "Add Multiple Reactions",
+      readOnlyHint: false,
+      destructiveHint: false
     }
   },
   {
@@ -255,6 +340,11 @@ export const toolList = [
         userId: { type: "string" }
       },
       required: ["channelId", "messageId", "emoji"]
+    },
+    annotations: {
+      title: "Remove Reaction",
+      readOnlyHint: false,
+      destructiveHint: true
     }
   },
   {
@@ -274,6 +364,10 @@ export const toolList = [
         }
       },
       required: ["channelId", "messageId", "emoji"]
+    },
+    annotations: {
+      title: "List Reaction Users",
+      readOnlyHint: true
     }
   },
   {
@@ -286,6 +380,11 @@ export const toolList = [
         reason: { type: "string" }
       },
       required: ["threadId"]
+    },
+    annotations: {
+      title: "Delete Forum Post",
+      readOnlyHint: false,
+      destructiveHint: true
     }
   },
   {
@@ -297,6 +396,10 @@ export const toolList = [
         forumChannelId: { type: "string", description: "The ID of the forum channel to get tags from" }
       },
       required: ["forumChannelId"]
+    },
+    annotations: {
+      title: "Get Forum Tags",
+      readOnlyHint: true
     }
   },
   {
@@ -321,6 +424,11 @@ export const toolList = [
         }
       },
       required: ["forumChannelId", "tags"]
+    },
+    annotations: {
+      title: "Set Forum Tags",
+      readOnlyHint: false,
+      destructiveHint: true
     }
   },
   {
@@ -336,6 +444,11 @@ export const toolList = [
         locked: { type: "boolean", description: "Whether to lock or unlock the post" }
       },
       required: ["threadId"]
+    },
+    annotations: {
+      title: "Update Forum Post",
+      readOnlyHint: false,
+      destructiveHint: true
     }
   },
   {
@@ -349,6 +462,11 @@ export const toolList = [
         content: { type: "string", description: "The new content for the message" }
       },
       required: ["channelId", "messageId", "content"]
+    },
+    annotations: {
+      title: "Edit Message",
+      readOnlyHint: false,
+      destructiveHint: true
     }
   },
   {
@@ -362,6 +480,11 @@ export const toolList = [
         reason: { type: "string" }
       },
       required: ["channelId", "messageId"]
+    },
+    annotations: {
+      title: "Delete Message",
+      readOnlyHint: false,
+      destructiveHint: true
     }
   },
   {
@@ -376,6 +499,11 @@ export const toolList = [
         reason: { type: "string" }
       },
       required: ["channelId", "name"]
+    },
+    annotations: {
+      title: "Create Webhook",
+      readOnlyHint: false,
+      destructiveHint: false
     }
   },
   {
@@ -392,6 +520,11 @@ export const toolList = [
         threadId: { type: "string" }
       },
       required: ["webhookId", "webhookToken", "content"]
+    },
+    annotations: {
+      title: "Send Webhook Message",
+      readOnlyHint: false,
+      destructiveHint: false
     }
   },
   {
@@ -408,6 +541,11 @@ export const toolList = [
         reason: { type: "string" }
       },
       required: ["webhookId"]
+    },
+    annotations: {
+      title: "Edit Webhook",
+      readOnlyHint: false,
+      destructiveHint: true
     }
   },
   {
@@ -421,6 +559,11 @@ export const toolList = [
         reason: { type: "string" }
       },
       required: ["webhookId"]
+    },
+    annotations: {
+      title: "Delete Webhook",
+      readOnlyHint: false,
+      destructiveHint: true
     }
   },
   {
@@ -430,6 +573,10 @@ export const toolList = [
       type: "object",
       properties: {},
       required: []
+    },
+    annotations: {
+      title: "List Servers",
+      readOnlyHint: true
     }
   },
   {
@@ -454,6 +601,10 @@ export const toolList = [
         offset: { type: "number", description: "Number of messages to skip (for pagination)" }
       },
       required: ["guildId"]
+    },
+    annotations: {
+      title: "Search Messages",
+      readOnlyHint: true
     }
   },
   {
@@ -465,6 +616,10 @@ export const toolList = [
         guildId: { type: "string" }
       },
       required: ["guildId"]
+    },
+    annotations: {
+      title: "List Roles",
+      readOnlyHint: true
     }
   },
   {
@@ -482,6 +637,11 @@ export const toolList = [
         reason: { type: "string" }
       },
       required: ["guildId", "name"]
+    },
+    annotations: {
+      title: "Create Role",
+      readOnlyHint: false,
+      destructiveHint: false
     }
   },
   {
@@ -501,6 +661,11 @@ export const toolList = [
         reason: { type: "string" }
       },
       required: ["guildId", "roleId"]
+    },
+    annotations: {
+      title: "Edit Role",
+      readOnlyHint: false,
+      destructiveHint: true
     }
   },
   {
@@ -514,6 +679,11 @@ export const toolList = [
         reason: { type: "string" }
       },
       required: ["guildId", "roleId"]
+    },
+    annotations: {
+      title: "Delete Role",
+      readOnlyHint: false,
+      destructiveHint: true
     }
   },
   {
@@ -528,6 +698,11 @@ export const toolList = [
         reason: { type: "string" }
       },
       required: ["guildId", "userId", "roleId"]
+    },
+    annotations: {
+      title: "Assign Role",
+      readOnlyHint: false,
+      destructiveHint: false
     }
   },
   {
@@ -542,6 +717,11 @@ export const toolList = [
         reason: { type: "string" }
       },
       required: ["guildId", "userId", "roleId"]
+    },
+    annotations: {
+      title: "Remove Role",
+      readOnlyHint: false,
+      destructiveHint: true
     }
   },
   {
@@ -555,6 +735,10 @@ export const toolList = [
         after: { type: "string", description: "User ID to paginate after" }
       },
       required: ["guildId"]
+    },
+    annotations: {
+      title: "List Members",
+      readOnlyHint: true
     }
   },
   {
@@ -567,6 +751,10 @@ export const toolList = [
         userId: { type: "string" }
       },
       required: ["guildId", "userId"]
+    },
+    annotations: {
+      title: "Get Member",
+      readOnlyHint: true
     }
   },
   {
@@ -582,6 +770,11 @@ export const toolList = [
         reason: { type: "string" }
       },
       required: ["guildId", "channelName"]
+    },
+    annotations: {
+      title: "Create Voice Channel",
+      readOnlyHint: false,
+      destructiveHint: false
     }
   },
   {
@@ -597,6 +790,11 @@ export const toolList = [
         reason: { type: "string" }
       },
       required: ["channelId", "roleId"]
+    },
+    annotations: {
+      title: "Set Channel Permissions",
+      readOnlyHint: false,
+      destructiveHint: true
     }
   },
   {
@@ -610,6 +808,11 @@ export const toolList = [
         reason: { type: "string" }
       },
       required: ["channelId", "roleId"]
+    },
+    annotations: {
+      title: "Remove Channel Permissions",
+      readOnlyHint: false,
+      destructiveHint: true
     }
   }
 ]; 

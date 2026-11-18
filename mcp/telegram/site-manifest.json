@@ -1,0 +1,2964 @@
+{
+  "schemaVersion": 1,
+  "folder": "telegram",
+  "slug": "telegram-mcp",
+  "title": "Telegram MCP",
+  "description": "Telegram MCP server maintained in Jiyuu. Reads and manages chats, messages, contacts, folders, and media through your Telegram user account.",
+  "registry": "pypi",
+  "package": "uniquedivine-telegram-mcp",
+  "version": "2.0.2",
+  "installCommand": "uvx uniquedivine-telegram-mcp@2.0.2",
+  "runtime": "Python >= 3.10",
+  "license": "Apache-2.0",
+  "sourceUrl": "https://github.com/Unique-Divine/jiyuu/tree/main/mcp/telegram",
+  "registryUrl": "https://pypi.org/project/uniquedivine-telegram-mcp/",
+  "envVars": [
+    {
+      "name": "TELEGRAM_API_ID",
+      "required": true,
+      "secret": true
+    },
+    {
+      "name": "TELEGRAM_API_HASH",
+      "required": true,
+      "secret": true
+    },
+    {
+      "name": "TELEGRAM_SESSION_STRING",
+      "required": false,
+      "secret": true,
+      "note": "Set this or TELEGRAM_SESSION_NAME. For several accounts, set TELEGRAM_SESSION_STRING_<LABEL> or TELEGRAM_SESSION_NAME_<LABEL> per account instead."
+    },
+    {
+      "name": "TELEGRAM_SESSION_NAME",
+      "required": false,
+      "secret": false,
+      "note": "Name of a local session file, used instead of TELEGRAM_SESSION_STRING. The session file itself is a credential."
+    },
+    {
+      "name": "TELEGRAM_EXPOSED_TOOLS",
+      "required": false,
+      "secret": false
+    },
+    {
+      "name": "JIYUU_MCP_NO_UPDATE_CHECK",
+      "required": false,
+      "secret": false
+    }
+  ],
+  "toolCount": 117,
+  "readOnlyCount": 50,
+  "writeCount": 67,
+  "tools": [
+    {
+      "name": "list_accounts",
+      "title": "List Accounts",
+      "description": "List all configured Telegram accounts with profile info.",
+      "readOnly": true,
+      "destructive": false,
+      "params": []
+    },
+    {
+      "name": "list_contacts",
+      "title": "List Contacts",
+      "description": "List all contacts in your Telegram account.",
+      "readOnly": true,
+      "destructive": false,
+      "params": [
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "search_contacts",
+      "title": "Search Contacts",
+      "description": "Search for contacts by name, username, or phone number using Telethon's SearchRequest.",
+      "readOnly": true,
+      "destructive": false,
+      "params": [
+        {
+          "name": "query",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "get_contact_ids",
+      "title": "Get Contact Ids",
+      "description": "Get all contact IDs in your Telegram account.",
+      "readOnly": true,
+      "destructive": false,
+      "params": [
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "get_direct_chat_by_contact",
+      "title": "Get Direct Chat By Contact",
+      "description": "Find a direct chat with a specific contact by name, username, or phone.",
+      "readOnly": true,
+      "destructive": false,
+      "params": [
+        {
+          "name": "contact_query",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "get_contact_chats",
+      "title": "Get Contact Chats",
+      "description": "List all chats involving a specific contact.",
+      "readOnly": true,
+      "destructive": false,
+      "params": [
+        {
+          "name": "contact_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "get_last_interaction",
+      "title": "Get Last Interaction",
+      "description": "Get the most recent message with a contact.",
+      "readOnly": true,
+      "destructive": false,
+      "params": [
+        {
+          "name": "contact_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "add_contact",
+      "title": "Add Contact",
+      "description": "Add a new contact to your Telegram account.",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "phone",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "first_name",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "last_name",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "username",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "delete_contact",
+      "title": "Delete Contact",
+      "description": "Delete a contact by user ID.",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "user_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "block_user",
+      "title": "Block User",
+      "description": "Block a user by user ID.",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "user_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "unblock_user",
+      "title": "Unblock User",
+      "description": "Unblock a user by user ID.",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "user_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "import_contacts",
+      "title": "Import Contacts",
+      "description": "Import a list of contacts. Each contact should be a dict with phone, first_name, last_name.",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "contacts",
+          "type": "array",
+          "required": true
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "export_contacts",
+      "title": "Export Contacts",
+      "description": "Export all contacts as a JSON string.",
+      "readOnly": true,
+      "destructive": false,
+      "params": [
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "get_blocked_users",
+      "title": "Get Blocked Users",
+      "description": "Get a list of blocked users.",
+      "readOnly": true,
+      "destructive": false,
+      "params": [
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "send_contact",
+      "title": "Send Contact",
+      "description": "Send a contact to a chat.",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "chat_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "phone_number",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "first_name",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "last_name",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "vcard",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "get_chats",
+      "title": "Get Chats",
+      "description": "Get a paginated list of chats, including their latest message ID and date.",
+      "readOnly": true,
+      "destructive": false,
+      "params": [
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "page",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "page_size",
+          "type": "integer",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "subscribe_public_channel",
+      "title": "Subscribe Public Channel",
+      "description": "Subscribe (join) to a public channel or supergroup by username or ID.",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "channel",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "list_topics",
+      "title": "List Topics",
+      "description": "Retrieve forum topics from a supergroup with the forum feature enabled.",
+      "readOnly": true,
+      "destructive": false,
+      "params": [
+        {
+          "name": "chat_id",
+          "type": "integer",
+          "required": true
+        },
+        {
+          "name": "limit",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "offset_topic",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "search_query",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "enable_forum_topics",
+      "title": "Enable Forum Topics",
+      "description": "Enable Telegram forum topics for a supergroup.",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "chat_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "tabs",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "create_forum_topic",
+      "title": "Create Forum Topic",
+      "description": "Create a Telegram forum topic in a forum-enabled supergroup.",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "chat_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "title",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "icon_color",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "icon_emoji_id",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "list_chats",
+      "title": "List Chats",
+      "description": "List available chats with metadata.",
+      "readOnly": true,
+      "destructive": false,
+      "params": [
+        {
+          "name": "chat_type",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "limit",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "unread_only",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "unmuted_only",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "archived",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "with_about",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "get_chat",
+      "title": "Get Chat",
+      "description": "Get detailed information about a specific chat.",
+      "readOnly": true,
+      "destructive": false,
+      "params": [
+        {
+          "name": "chat_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "search_public_chats",
+      "title": "Search Public Chats",
+      "description": "Search for public chats, channels, or bots by username or title.",
+      "readOnly": true,
+      "destructive": false,
+      "params": [
+        {
+          "name": "query",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "limit",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "resolve_username",
+      "title": "Resolve Username",
+      "description": "Resolve a username to a user or chat ID.",
+      "readOnly": true,
+      "destructive": false,
+      "params": [
+        {
+          "name": "username",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "get_full_chat",
+      "title": "Get Full Chat",
+      "description": "Get full info of a channel or group including description/about text.",
+      "readOnly": true,
+      "destructive": false,
+      "params": [
+        {
+          "name": "chat_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "mute_chat",
+      "title": "Mute Chat",
+      "description": "Mute notifications for a chat.",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "chat_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "unmute_chat",
+      "title": "Unmute Chat",
+      "description": "Unmute notifications for a chat.",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "chat_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "archive_chat",
+      "title": "Archive Chat",
+      "description": "Archive a chat.",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "chat_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "unarchive_chat",
+      "title": "Unarchive Chat",
+      "description": "Unarchive a chat.",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "chat_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "get_common_chats",
+      "title": "Get Common Chats",
+      "description": "List chats shared with a specific user.",
+      "readOnly": true,
+      "destructive": false,
+      "params": [
+        {
+          "name": "user_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "limit",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "max_id",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "get_message_read_by",
+      "title": "Get Message Read By",
+      "description": "List user IDs who have read a specific message.",
+      "readOnly": true,
+      "destructive": false,
+      "params": [
+        {
+          "name": "chat_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "message_id",
+          "type": "integer",
+          "required": true
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "get_message_link",
+      "title": "Get Message Link",
+      "description": "Export a t.me/... link for a specific message.",
+      "readOnly": true,
+      "destructive": false,
+      "params": [
+        {
+          "name": "chat_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "message_id",
+          "type": "integer",
+          "required": true
+        },
+        {
+          "name": "thread",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "get_messages",
+      "title": "Get Messages",
+      "description": "Get paginated messages from a specific chat.",
+      "readOnly": true,
+      "destructive": false,
+      "params": [
+        {
+          "name": "chat_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "page",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "page_size",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "send_message",
+      "title": "Send Message",
+      "description": "Send a message to a specific chat.",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "chat_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "message",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "parse_mode",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "send_scheduled_message",
+      "title": "Send Scheduled Message",
+      "description": "Schedule a message to be sent at a future time.",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "chat_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "message",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "schedule_date",
+          "type": "string | integer",
+          "required": true
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "get_scheduled_messages",
+      "title": "Get Scheduled Messages",
+      "description": "List all scheduled (pending) messages in a chat.",
+      "readOnly": true,
+      "destructive": false,
+      "params": [
+        {
+          "name": "chat_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "delete_scheduled_message",
+      "title": "Delete Scheduled Message",
+      "description": "Delete one or more scheduled (pending) messages from a chat.",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "chat_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "message_ids",
+          "type": "array",
+          "required": true
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "list_inline_buttons",
+      "title": "List Inline Buttons",
+      "description": "Inspect inline buttons on a recent message to discover their indices/text/URLs.",
+      "readOnly": true,
+      "destructive": false,
+      "params": [
+        {
+          "name": "chat_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "message_id",
+          "type": "integer | string",
+          "required": false
+        },
+        {
+          "name": "limit",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "press_inline_button",
+      "title": "Press Inline Button",
+      "description": "Press an inline button (callback) in a chat message.",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "chat_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "message_id",
+          "type": "integer | string",
+          "required": false
+        },
+        {
+          "name": "button_text",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "button_index",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "list_messages",
+      "title": "List Messages",
+      "description": "Retrieve messages with optional filters.",
+      "readOnly": true,
+      "destructive": false,
+      "params": [
+        {
+          "name": "chat_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "limit",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "search_query",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "from_date",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "to_date",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "get_message_context",
+      "title": "Get Message Context",
+      "description": "Retrieve context around a specific message.",
+      "readOnly": true,
+      "destructive": false,
+      "params": [
+        {
+          "name": "chat_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "message_id",
+          "type": "integer",
+          "required": true
+        },
+        {
+          "name": "context_size",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "forward_message",
+      "title": "Forward Message",
+      "description": "Forward a message (or several) from a source chat to a destination chat.",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "from_chat_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "message_id",
+          "type": "integer | array",
+          "required": true
+        },
+        {
+          "name": "to_chat_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "expand_album",
+          "type": "boolean",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "forward_messages",
+      "title": "Forward Messages (batch)",
+      "description": "Forward a BATCH of messages from a source chat to a destination chat in a single atomic call.",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "from_chat_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "message_ids",
+          "type": "array",
+          "required": true
+        },
+        {
+          "name": "to_chat_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "edit_message",
+      "title": "Edit Message",
+      "description": "Edit a message you sent.",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "chat_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "message_id",
+          "type": "integer",
+          "required": true
+        },
+        {
+          "name": "new_text",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "delete_message",
+      "title": "Delete Message",
+      "description": "Delete a message by ID.",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "chat_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "message_id",
+          "type": "integer",
+          "required": true
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "delete_chat_history",
+      "title": "Delete Chat History",
+      "description": "Clear the full message history of a chat.",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "chat_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "max_id",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "revoke",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "delete_messages_bulk",
+      "title": "Delete Messages Bulk",
+      "description": "Delete multiple messages in a single call.",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "chat_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "message_ids",
+          "type": "array",
+          "required": true
+        },
+        {
+          "name": "revoke",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "pin_message",
+      "title": "Pin Message",
+      "description": "Pin a message in a chat.",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "chat_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "message_id",
+          "type": "integer",
+          "required": true
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "unpin_message",
+      "title": "Unpin Message",
+      "description": "Unpin a message in a chat.",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "chat_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "message_id",
+          "type": "integer",
+          "required": true
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "unpin_all_messages",
+      "title": "Unpin All Messages",
+      "description": "Unpin all pinned messages in a chat.",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "chat_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "mark_as_read",
+      "title": "Mark As Read",
+      "description": "Mark all messages as read in a chat.",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "chat_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "reply_to_message",
+      "title": "Reply To Message",
+      "description": "Reply to a specific message in a chat.",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "chat_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "message_id",
+          "type": "integer",
+          "required": true
+        },
+        {
+          "name": "text",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "parse_mode",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "search_messages",
+      "title": "Search Messages",
+      "description": "Search for messages in a chat by text.",
+      "readOnly": true,
+      "destructive": false,
+      "params": [
+        {
+          "name": "chat_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "query",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "limit",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "search_global",
+      "title": "Search Global Messages",
+      "description": "Search for messages across all public chats and channels by text content.",
+      "readOnly": true,
+      "destructive": false,
+      "params": [
+        {
+          "name": "query",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "page",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "page_size",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "get_history",
+      "title": "Get History",
+      "description": "Get full chat history (up to limit).",
+      "readOnly": true,
+      "destructive": false,
+      "params": [
+        {
+          "name": "chat_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "limit",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "get_pinned_messages",
+      "title": "Get Pinned Messages",
+      "description": "Get all pinned messages in a chat.",
+      "readOnly": true,
+      "destructive": false,
+      "params": [
+        {
+          "name": "chat_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "create_poll",
+      "title": "Create Poll",
+      "description": "Create a poll in a chat using Telegram's native poll feature.",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "chat_id",
+          "type": "integer",
+          "required": true
+        },
+        {
+          "name": "question",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "options",
+          "type": "array",
+          "required": true
+        },
+        {
+          "name": "multiple_choice",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "quiz_mode",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "public_votes",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "close_date",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "send_reaction",
+      "title": "Send Reaction",
+      "description": "Send a reaction to a message.",
+      "readOnly": false,
+      "destructive": false,
+      "params": [
+        {
+          "name": "chat_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "message_id",
+          "type": "integer",
+          "required": true
+        },
+        {
+          "name": "emoji",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "big",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "remove_reaction",
+      "title": "Remove Reaction",
+      "description": "Remove your reaction from a message.",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "chat_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "message_id",
+          "type": "integer",
+          "required": true
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "get_message_reactions",
+      "title": "Get Message Reactions",
+      "description": "Get the list of reactions on a message.",
+      "readOnly": true,
+      "destructive": false,
+      "params": [
+        {
+          "name": "chat_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "message_id",
+          "type": "integer",
+          "required": true
+        },
+        {
+          "name": "limit",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "save_draft",
+      "title": "Save Draft",
+      "description": "Save a draft message to a chat or channel. The draft will appear in the Telegram app's input field when you open that chat, allowing you to review and send it manually.",
+      "readOnly": false,
+      "destructive": false,
+      "params": [
+        {
+          "name": "chat_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "message",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "reply_to_msg_id",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "no_webpage",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "get_drafts",
+      "title": "Get Drafts",
+      "description": "Get all draft messages across all chats. Returns a list of drafts with their chat info and message content.",
+      "readOnly": true,
+      "destructive": false,
+      "params": [
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "clear_draft",
+      "title": "Clear Draft",
+      "description": "Clear/delete a draft from a specific chat.",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "chat_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "create_group",
+      "title": "Create Group",
+      "description": "Create a new group or supergroup and add users.",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "title",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "user_ids",
+          "type": "array",
+          "required": true
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "invite_to_group",
+      "title": "Invite To Group",
+      "description": "Invite users to a group or channel.",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "group_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "user_ids",
+          "type": "array",
+          "required": true
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "leave_chat",
+      "title": "Leave Chat",
+      "description": "Leave a group or channel by chat ID.",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "chat_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "get_participants",
+      "title": "Get Participants",
+      "description": "List participants in a group or channel with pagination.",
+      "readOnly": true,
+      "destructive": false,
+      "params": [
+        {
+          "name": "chat_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "page",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "page_size",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "create_channel",
+      "title": "Create Channel",
+      "description": "Create a new channel or supergroup.",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "title",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "about",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "megagroup",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "edit_chat_title",
+      "title": "Edit Chat Title",
+      "description": "Edit the title of a chat, group, or channel.",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "chat_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "title",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "edit_chat_photo",
+      "title": "Edit Chat Photo",
+      "description": "Edit the photo of a chat, group, or channel. Requires a file path to an image.",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "chat_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "file_path",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "edit_chat_about",
+      "title": "Edit Chat About",
+      "description": "Edit the description (\"About\") of a chat, group, or channel.",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "chat_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "about",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "delete_chat_photo",
+      "title": "Delete Chat Photo",
+      "description": "Delete the photo of a chat, group, or channel.",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "chat_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "promote_admin",
+      "title": "Promote Admin",
+      "description": "Promote a user to admin in a group/channel.",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "group_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "user_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "rights",
+          "type": "object",
+          "required": false
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "demote_admin",
+      "title": "Demote Admin",
+      "description": "Demote a user from admin in a group/channel.",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "group_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "user_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "ban_user",
+      "title": "Ban User",
+      "description": "Ban a user from a group or channel.",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "chat_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "user_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "unban_user",
+      "title": "Unban User",
+      "description": "Unban a user from a group or channel.",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "chat_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "user_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "set_default_chat_permissions",
+      "title": "Set Default Chat Permissions",
+      "description": "Set default member permissions for a group, supergroup, or channel.",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "chat_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "send_messages",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "send_media",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "send_stickers",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "send_gifs",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "send_games",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "send_inline",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "embed_links",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "send_polls",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "change_info",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "invite_users",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "pin_messages",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "until_date",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "toggle_slow_mode",
+      "title": "Toggle Slow Mode",
+      "description": "Enable or disable slow mode for a supergroup.",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "chat_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "seconds",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "edit_admin_rights",
+      "title": "Edit Admin Rights",
+      "description": "Set granular admin rights for a user in a supergroup or channel.",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "chat_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "user_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "rank",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "change_info",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "post_messages",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "edit_messages",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "delete_messages",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "ban_users",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "invite_users",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "pin_messages",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "add_admins",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "anonymous",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "manage_call",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "manage_topics",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "other",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "get_admins",
+      "title": "Get Admins",
+      "description": "Get all admins in a group or channel.",
+      "readOnly": true,
+      "destructive": false,
+      "params": [
+        {
+          "name": "chat_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "get_banned_users",
+      "title": "Get Banned Users",
+      "description": "Get all banned users in a group or channel.",
+      "readOnly": true,
+      "destructive": false,
+      "params": [
+        {
+          "name": "chat_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "get_invite_link",
+      "title": "Get Invite Link",
+      "description": "Get the invite link for a group or channel.",
+      "readOnly": true,
+      "destructive": false,
+      "params": [
+        {
+          "name": "chat_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "join_chat_by_link",
+      "title": "Join Chat By Link",
+      "description": "Join a chat by invite link.",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "link",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "export_chat_invite",
+      "title": "Export Chat Invite",
+      "description": "Export a chat invite link.",
+      "readOnly": true,
+      "destructive": false,
+      "params": [
+        {
+          "name": "chat_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "import_chat_invite",
+      "title": "Import Chat Invite",
+      "description": "Import a chat invite by hash.",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "hash",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "get_recent_actions",
+      "title": "Get Recent Actions",
+      "description": "Get recent admin actions (admin log) in a group or channel.",
+      "readOnly": true,
+      "destructive": false,
+      "params": [
+        {
+          "name": "chat_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "send_file",
+      "title": "Send File",
+      "description": "Send a file to a chat.",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "chat_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "file_path",
+          "type": "string | array",
+          "required": true
+        },
+        {
+          "name": "caption",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "send_album",
+      "title": "Send Album",
+      "description": "Send multiple photos/videos as one Telegram media group (album).",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "chat_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "file_paths",
+          "type": "array",
+          "required": true
+        },
+        {
+          "name": "caption",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "download_media",
+      "title": "Download Media",
+      "description": "Download media from a message in a chat.",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "chat_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "message_id",
+          "type": "integer",
+          "required": true
+        },
+        {
+          "name": "file_path",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "send_voice",
+      "title": "Send Voice",
+      "description": "Send a voice message to a chat. File must be an OGG/OPUS voice note.",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "chat_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "file_path",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "upload_file",
+      "title": "Upload File",
+      "description": "Upload a local file to Telegram and return upload metadata.",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "file_path",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "get_media_info",
+      "title": "Get Media Info",
+      "description": "Get info about media in a message.",
+      "readOnly": true,
+      "destructive": false,
+      "params": [
+        {
+          "name": "chat_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "message_id",
+          "type": "integer",
+          "required": true
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "get_sticker_sets",
+      "title": "Get Sticker Sets",
+      "description": "Get all sticker sets.",
+      "readOnly": true,
+      "destructive": false,
+      "params": [
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "send_sticker",
+      "title": "Send Sticker",
+      "description": "Send a sticker to a chat. File must be a valid .webp sticker file.",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "chat_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "file_path",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "get_gif_search",
+      "title": "Get Gif Search",
+      "description": "Search for GIFs by query. Returns a list of Telegram document IDs (not file paths).",
+      "readOnly": true,
+      "destructive": false,
+      "params": [
+        {
+          "name": "query",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "limit",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "send_gif",
+      "title": "Send Gif",
+      "description": "Send a GIF document ID from a recent get_gif_search on this account.",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "chat_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "gif_id",
+          "type": "integer",
+          "required": true
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "get_me",
+      "title": "Get Me",
+      "description": "Get your own user information.",
+      "readOnly": true,
+      "destructive": false,
+      "params": [
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "update_profile",
+      "title": "Update Profile",
+      "description": "Update your profile information (name, bio).",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "first_name",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "last_name",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "about",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "set_profile_photo",
+      "title": "Set Profile Photo",
+      "description": "Set a new profile photo.",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "file_path",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "delete_profile_photo",
+      "title": "Delete Profile Photo",
+      "description": "Delete your current profile photo.",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "get_privacy_settings",
+      "title": "Get Privacy Settings",
+      "description": "Get your privacy settings for last seen status.",
+      "readOnly": true,
+      "destructive": false,
+      "params": [
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "set_privacy_settings",
+      "title": "Set Privacy Settings",
+      "description": "Set privacy settings (e.g., last seen, phone, etc.).",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "key",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "allow_users",
+          "type": "array",
+          "required": false
+        },
+        {
+          "name": "disallow_users",
+          "type": "array",
+          "required": false
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "get_full_user",
+      "title": "Get Full User",
+      "description": "Get full profile info of a Telegram user including bio/about text, personal channel link, and other profile details.",
+      "readOnly": true,
+      "destructive": false,
+      "params": [
+        {
+          "name": "username",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "get_bot_info",
+      "title": "Get Bot Info",
+      "description": "Get information about a bot by username.",
+      "readOnly": true,
+      "destructive": false,
+      "params": [
+        {
+          "name": "bot_username",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "set_bot_commands",
+      "title": "Set Bot Commands",
+      "description": "Set bot commands for a bot you own.",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "bot_username",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "commands",
+          "type": "array",
+          "required": true
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "get_user_photos",
+      "title": "Get User Photos",
+      "description": "Get profile photos of a user.",
+      "readOnly": true,
+      "destructive": false,
+      "params": [
+        {
+          "name": "user_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "limit",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "get_user_status",
+      "title": "Get User Status",
+      "description": "Get the online status of a user.",
+      "readOnly": true,
+      "destructive": false,
+      "params": [
+        {
+          "name": "user_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "list_folders",
+      "title": "List Folders",
+      "description": "Get all dialog folders (filters) with their IDs, names, and emoji. Returns a list of folders that can be used with other folder tools.",
+      "readOnly": true,
+      "destructive": false,
+      "params": [
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "get_folder",
+      "title": "Get Folder",
+      "description": "Get detailed information about a specific folder including all included chats.",
+      "readOnly": true,
+      "destructive": false,
+      "params": [
+        {
+          "name": "folder_id",
+          "type": "integer",
+          "required": true
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "create_folder",
+      "title": "Create Folder",
+      "description": "Create a new dialog folder.",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "title",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "emoticon",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "chat_ids",
+          "type": "array",
+          "required": false
+        },
+        {
+          "name": "contacts",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "non_contacts",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "groups",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "broadcasts",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "bots",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "exclude_muted",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "exclude_read",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "exclude_archived",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "add_chat_to_folder",
+      "title": "Add Chat to Folder",
+      "description": "Add a chat to an existing folder.",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "folder_id",
+          "type": "integer",
+          "required": true
+        },
+        {
+          "name": "chat_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "pinned",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "remove_chat_from_folder",
+      "title": "Remove Chat from Folder",
+      "description": "Remove a chat from a folder.",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "folder_id",
+          "type": "integer",
+          "required": true
+        },
+        {
+          "name": "chat_id",
+          "type": "integer | string",
+          "required": true
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "delete_folder",
+      "title": "Delete Folder",
+      "description": "Delete a folder. Chats in the folder are preserved, only the folder is removed.",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "folder_id",
+          "type": "integer",
+          "required": true
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "reorder_folders",
+      "title": "Reorder Folders",
+      "description": "Change the order of folders in the folder list.",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "folder_ids",
+          "type": "array",
+          "required": true
+        },
+        {
+          "name": "account",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "wait_for_new_message",
+      "title": "Wait For New Message",
+      "description": "Block until a new incoming private message from a non-bot user arrives, then return immediately with the list of chats that currently have pending (unprocessed) incoming messages. If nothing arrives within `timeout` seconds, returns {\"event\": false, \"reason\": \"timeout\"}. Lets the agent react to events instead of polling. Does NOT consume the pending set — use wait_for_settled_message to consume a debounced burst.",
+      "readOnly": true,
+      "destructive": false,
+      "params": [
+        {
+          "name": "timeout",
+          "type": "number",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "wait_for_settled_message",
+      "title": "Wait For Settled Message",
+      "description": "Event-driven, DEBOUNCED wait. Blocks until some private user chat has received one or more incoming messages AND then gone quiet for `settle_ms` — so a client who types several messages (or sends file + text) in a row is delivered as ONE settled burst instead of waking the agent on every message. Returns that chat's burst summary and removes it from the pending set, so the next call returns the next settled chat. If no chat settles within `max_wait_ms`, returns {\"event\": false, \"reason\": \"timeout\"} (caller should simply call again).",
+      "readOnly": true,
+      "destructive": false,
+      "params": [
+        {
+          "name": "settle_ms",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "max_wait_ms",
+          "type": "integer",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "mcp_info",
+      "title": "MCP Info",
+      "description": "Report this server's version, install provenance and update status.",
+      "readOnly": true,
+      "destructive": false,
+      "params": []
+    }
+  ],
+  "installMarkdown": "Requirements: [uv](https://docs.astral.sh/uv/) and Telegram credentials.\n[Authenticate](#authenticate) explains how to get them. Run the published\npackage with an exact version pin:\n\n```sh\nuvx uniquedivine-telegram-mcp@2.0.2\n```\n\nThe PyPI project is `uniquedivine-telegram-mcp`. Do not install the unrelated\nPyPI project `telegram-mcp`. CI in\n[Unique-Divine/jiyuu](https://github.com/Unique-Divine/jiyuu) builds and\npublishes this package to PyPI from this directory when its version changes\non `main`. The version pin selects the exact reviewed release that runs.\n\nGenerate a session string with console script `telegram-mcp-generate-session`\nfrom the same pinned package:\n\n```sh\nTELEGRAM_API_ID=123456 TELEGRAM_API_HASH=your_api_hash \\\n  uvx --from uniquedivine-telegram-mcp@2.0.2 telegram-mcp-generate-session --qr\n```\n\nThe examples below pass credentials as environment variables. Keep the real\nvalues out of version control.\n\n### Claude Code\n\n```sh\nclaude mcp add telegram \\\n  --env TELEGRAM_API_ID=123456 \\\n  --env TELEGRAM_API_HASH=your_api_hash \\\n  --env TELEGRAM_SESSION_STRING=your_session_string \\\n  -- uvx uniquedivine-telegram-mcp@2.0.2\n```\n\n### Codex\n\nAdd this entry to file `~/.codex/config.toml`:\n\n```toml\n[mcp_servers.telegram]\ncommand = \"uvx\"\nargs = [\"uniquedivine-telegram-mcp@2.0.2\"]\n\n[mcp_servers.telegram.env]\nTELEGRAM_API_ID = \"123456\"\nTELEGRAM_API_HASH = \"your_api_hash\"\nTELEGRAM_SESSION_STRING = \"your_session_string\"\n```\n\n### Cursor\n\nAdd this entry to file `~/.cursor/mcp.json`, or to file `.cursor/mcp.json` in\na project:\n\n```json\n{\n  \"mcpServers\": {\n    \"telegram\": {\n      \"command\": \"uvx\",\n      \"args\": [\"uniquedivine-telegram-mcp@2.0.2\"],\n      \"env\": {\n        \"TELEGRAM_API_ID\": \"123456\",\n        \"TELEGRAM_API_HASH\": \"your_api_hash\",\n        \"TELEGRAM_SESSION_STRING\": \"your_session_string\"\n      }\n    }\n  }\n}\n```\n\n### Update\n\n1. Find the newest version at\n   https://pypi.org/project/uniquedivine-telegram-mcp/ or with\n   `curl -s https://pypi.org/pypi/uniquedivine-telegram-mcp/json | jq -r .info.version`.\n2. Change the `@2.0.2` pin in the client configuration to that version.\n3. Restart the MCP server in the client, or restart the client. In Claude\n   Code, run `/mcp` and reconnect the server. Command `uvx` installs the new\n   version on the next launch.",
+  "generatedFrom": {
+    "revision": "c122a7f8b54ec2feda04e48f06efaafc04056246"
+  }
+}

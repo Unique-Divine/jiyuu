@@ -141,6 +141,29 @@
         "repository": "Unique-Divine/slack-mcp-server",
         "commit": "e68cc989585e8a29291d34fed143e84fef6f1898"
       }
+    },
+    "site": {
+      "tools": [
+        "lib/tools.js#TOOLS",
+        "lib/jiyuuMcpInfo.ts#MCP_INFO_TOOL"
+      ],
+      "env": [
+        {
+          "name": "SLACK_TOKEN",
+          "required": false,
+          "secret": true
+        },
+        {
+          "name": "SLACK_COOKIE",
+          "required": false,
+          "secret": true
+        },
+        {
+          "name": "JIYUU_MCP_NO_UPDATE_CHECK",
+          "required": false,
+          "secret": false
+        }
+      ]
     }
   }
 }

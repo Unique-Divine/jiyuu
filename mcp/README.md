@@ -69,6 +69,41 @@ with `mcp/discord`, `mcp/slack` or `mcp/telegram` in the title. Jiyuu
 publishes these packages under its own names. The upstream packages are
 separate projects.
 
+## Site Manifests
+
+Each server directory holds a committed file `site-manifest.json`. The MCP
+pages on [uniquedivine.com](https://uniquedivine.com/mcp) are built from these
+files. Script `scripts/site-manifest.ts` writes them from package metadata,
+each server's tool definitions, and the README's `## Install` section.
+
+After changing any of those, commit the change, run `just mcp-manifest`, and
+commit the manifests. Field `generatedFrom.revision` records the last commit
+that touched the server's folder or `mcp/scripts`, so the generator refuses
+to write while those inputs have uncommitted changes. CI runs
+`just mcp-manifest --check`, which fails when content is stale or
+`generatedFrom` is malformed. A revision that differs only in value passes,
+because a shallow CI checkout can't always find the input commit.
+
+Package metadata `jiyuu.site` in file `package.json`, or table
+`[tool.jiyuu.site]` in file `pyproject.toml`, names the tool modules and the
+environment variable names to publish. Set
+`"site": false` there, or `site = false` under `[tool.jiyuu]`, to leave a
+server off the site.
+
+Each entry in a manifest's `envVars` has fields `name`, `required`, and
+`secret`, and optionally `note`, all part of schema version 1. A `note` is
+plain text of at most 300 characters that names alternatives, such as
+Telegram's several ways to supply a session. The generator rejects a note
+that looks like a value: an assignment such as `NAME=value`, a Slack
+`xoxc-` style token, a long hex or base64 run, or a known secret prefix.
+
+The generator reads only package manifests, tool modules, and READMEs inside
+each server folder. It follows symlinks before checking, refuses symlinked
+server folders and tool modules, and refuses any env, token, session,
+cookie, or log file. It runs with Bun's `.env` loading off. Telegram's tools
+are listed with synthetic credentials in a scrubbed environment, from a
+temporary directory that also receives any log file the server opens.
+
 ## Source Baselines
 
 Each component's `IMPORT.json` records the source snapshot and exclusions. Git

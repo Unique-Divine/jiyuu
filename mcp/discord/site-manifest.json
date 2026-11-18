@@ -1,0 +1,1210 @@
+{
+  "schemaVersion": 1,
+  "folder": "discord",
+  "slug": "discord-mcp",
+  "title": "Discord MCP",
+  "description": "Discord MCP server maintained in Jiyuu. Manages channels, forums, messages, reactions, roles, and webhooks through a Discord bot.",
+  "registry": "npm",
+  "package": "@uniquedivine/mcp-discord",
+  "version": "1.3.8",
+  "installCommand": "bunx @uniquedivine/mcp-discord@1.3.8",
+  "runtime": "Bun >= 1.4.3",
+  "license": "MIT",
+  "sourceUrl": "https://github.com/Unique-Divine/jiyuu/tree/main/mcp/discord",
+  "registryUrl": "https://www.npmjs.com/package/@uniquedivine/mcp-discord",
+  "envVars": [
+    {
+      "name": "DISCORD_TOKEN",
+      "required": false,
+      "secret": true
+    },
+    {
+      "name": "JIYUU_MCP_NO_UPDATE_CHECK",
+      "required": false,
+      "secret": false
+    }
+  ],
+  "toolCount": 44,
+  "readOnlyCount": 13,
+  "writeCount": 31,
+  "tools": [
+    {
+      "name": "discord_create_category",
+      "title": "Create Category",
+      "description": "Creates a new category in a Discord server.",
+      "readOnly": false,
+      "destructive": false,
+      "params": [
+        {
+          "name": "guildId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "position",
+          "type": "number",
+          "required": false
+        },
+        {
+          "name": "reason",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "discord_edit_category",
+      "title": "Edit Category",
+      "description": "Edits an existing Discord category (name and position).",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "categoryId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "position",
+          "type": "number",
+          "required": false
+        },
+        {
+          "name": "reason",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "discord_delete_category",
+      "title": "Delete Category",
+      "description": "Deletes a Discord category by ID.",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "categoryId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "reason",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "discord_login",
+      "title": "Log In",
+      "description": "Logs in to Discord using the configured token",
+      "readOnly": false,
+      "destructive": false,
+      "params": [
+        {
+          "name": "token",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "discord_send",
+      "title": "Send Message",
+      "description": "Sends a message to a specified Discord text channel. Optionally reply to another message by providing its message ID.",
+      "readOnly": false,
+      "destructive": false,
+      "params": [
+        {
+          "name": "channelId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "message",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "replyToMessageId",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "discord_get_forum_channels",
+      "title": "List Forum Channels",
+      "description": "Lists all forum channels in a specified Discord server (guild)",
+      "readOnly": true,
+      "destructive": false,
+      "params": [
+        {
+          "name": "guildId",
+          "type": "string",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "discord_create_forum_post",
+      "title": "Create Forum Post",
+      "description": "Creates a new post in a Discord forum channel with optional tags",
+      "readOnly": false,
+      "destructive": false,
+      "params": [
+        {
+          "name": "forumChannelId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "title",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "content",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "tags",
+          "type": "array",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "discord_get_forum_post",
+      "title": "Get Forum Post",
+      "description": "Retrieves details about a forum post including its messages",
+      "readOnly": true,
+      "destructive": false,
+      "params": [
+        {
+          "name": "threadId",
+          "type": "string",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "discord_list_forum_threads",
+      "title": "List Forum Threads",
+      "description": "Lists all threads (posts) in a Discord forum channel, including both active and archived threads",
+      "readOnly": true,
+      "destructive": false,
+      "params": [
+        {
+          "name": "forumChannelId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "includeArchived",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "limit",
+          "type": "number",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "discord_reply_to_forum",
+      "title": "Reply to Forum Post",
+      "description": "Adds a reply to an existing forum post or thread",
+      "readOnly": false,
+      "destructive": false,
+      "params": [
+        {
+          "name": "threadId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "message",
+          "type": "string",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "discord_create_text_channel",
+      "title": "Create Text Channel",
+      "description": "Creates a new text channel in a Discord server with an optional topic and parent category",
+      "readOnly": false,
+      "destructive": false,
+      "params": [
+        {
+          "name": "guildId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "channelName",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "topic",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "categoryId",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "discord_create_forum_channel",
+      "title": "Create Forum Channel",
+      "description": "Creates a new forum channel in a Discord server, optionally under a category",
+      "readOnly": false,
+      "destructive": false,
+      "params": [
+        {
+          "name": "guildId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "topic",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "categoryId",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "discord_edit_channel",
+      "title": "Edit Channel",
+      "description": "Edits a Discord channel's name, topic, parent category, or position",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "channelId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "topic",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "parentId",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "position",
+          "type": "number",
+          "required": false
+        },
+        {
+          "name": "reason",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "discord_delete_channel",
+      "title": "Delete Channel",
+      "description": "Deletes a Discord channel with an optional reason",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "channelId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "reason",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "discord_read_messages",
+      "title": "Read Messages",
+      "description": "Retrieves messages from a Discord text channel. Supports date-based filtering via before/after/around params (accepts snowflake IDs or ISO 8601 dates).",
+      "readOnly": true,
+      "destructive": false,
+      "params": [
+        {
+          "name": "channelId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "limit",
+          "type": "number",
+          "required": false
+        },
+        {
+          "name": "before",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "after",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "around",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "discord_get_server_info",
+      "title": "Get Server Info",
+      "description": "Retrieves detailed information about a Discord server including channels and member count",
+      "readOnly": true,
+      "destructive": false,
+      "params": [
+        {
+          "name": "guildId",
+          "type": "string",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "discord_add_reaction",
+      "title": "Add Reaction",
+      "description": "Adds an emoji reaction to a specific Discord message",
+      "readOnly": false,
+      "destructive": false,
+      "params": [
+        {
+          "name": "channelId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "messageId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "emoji",
+          "type": "string",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "discord_add_multiple_reactions",
+      "title": "Add Multiple Reactions",
+      "description": "Adds multiple emoji reactions to a Discord message at once",
+      "readOnly": false,
+      "destructive": false,
+      "params": [
+        {
+          "name": "channelId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "messageId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "emojis",
+          "type": "array",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "discord_remove_reaction",
+      "title": "Remove Reaction",
+      "description": "Removes a specific emoji reaction from a Discord message",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "channelId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "messageId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "emoji",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "userId",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "discord_get_reaction_users",
+      "title": "List Reaction Users",
+      "description": "Lists the users who reacted with a specific emoji to a Discord message. Uses REST fetch and does not require Gateway intents. Returns up to 100 users per call.",
+      "readOnly": true,
+      "destructive": false,
+      "params": [
+        {
+          "name": "channelId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "messageId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "emoji",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "limit",
+          "type": "number",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "discord_delete_forum_post",
+      "title": "Delete Forum Post",
+      "description": "Deletes a forum post or thread with an optional reason",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "threadId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "reason",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "discord_get_forum_tags",
+      "title": "Get Forum Tags",
+      "description": "Gets all available tags for a Discord forum channel, including tag IDs, names, and emoji",
+      "readOnly": true,
+      "destructive": false,
+      "params": [
+        {
+          "name": "forumChannelId",
+          "type": "string",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "discord_set_forum_tags",
+      "title": "Set Forum Tags",
+      "description": "Sets the available tags for a Discord forum channel. Replaces all existing tags.",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "forumChannelId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "tags",
+          "type": "array",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "discord_update_forum_post",
+      "title": "Update Forum Post",
+      "description": "Updates a forum post's title, applied tags, archived status, or locked status. Tags can be specified by name or ID.",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "threadId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "tags",
+          "type": "array",
+          "required": false
+        },
+        {
+          "name": "archived",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "locked",
+          "type": "boolean",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "discord_edit_message",
+      "title": "Edit Message",
+      "description": "Edits a message previously sent by the bot. Only messages authored by the bot can be edited.",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "channelId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "messageId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "content",
+          "type": "string",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "discord_delete_message",
+      "title": "Delete Message",
+      "description": "Deletes a specific message from a Discord text channel",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "channelId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "messageId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "reason",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "discord_create_webhook",
+      "title": "Create Webhook",
+      "description": "Creates a new webhook for a Discord channel",
+      "readOnly": false,
+      "destructive": false,
+      "params": [
+        {
+          "name": "channelId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "avatar",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "reason",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "discord_send_webhook_message",
+      "title": "Send Webhook Message",
+      "description": "Sends a message to a Discord channel using a webhook",
+      "readOnly": false,
+      "destructive": false,
+      "params": [
+        {
+          "name": "webhookId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "webhookToken",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "content",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "username",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "avatarURL",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "threadId",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "discord_edit_webhook",
+      "title": "Edit Webhook",
+      "description": "Edits an existing webhook for a Discord channel",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "webhookId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "webhookToken",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "avatar",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "channelId",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "reason",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "discord_delete_webhook",
+      "title": "Delete Webhook",
+      "description": "Deletes an existing webhook for a Discord channel",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "webhookId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "webhookToken",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "reason",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "discord_list_servers",
+      "title": "List Servers",
+      "description": "Lists all Discord servers the bot is a member of",
+      "readOnly": true,
+      "destructive": false,
+      "params": []
+    },
+    {
+      "name": "discord_search_messages",
+      "title": "Search Messages",
+      "description": "Searches for messages in a Discord server",
+      "readOnly": true,
+      "destructive": false,
+      "params": [
+        {
+          "name": "guildId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "content",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "authorId",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "mentions",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "has",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "maxId",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "minId",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "channelId",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "pinned",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "authorType",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "sortBy",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "sortOrder",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "limit",
+          "type": "number",
+          "required": false
+        },
+        {
+          "name": "offset",
+          "type": "number",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "discord_list_roles",
+      "title": "List Roles",
+      "description": "Lists all roles in a Discord server with their properties",
+      "readOnly": true,
+      "destructive": false,
+      "params": [
+        {
+          "name": "guildId",
+          "type": "string",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "discord_create_role",
+      "title": "Create Role",
+      "description": "Creates a new role in a Discord server",
+      "readOnly": false,
+      "destructive": false,
+      "params": [
+        {
+          "name": "guildId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "color",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "hoist",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "mentionable",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "permissions",
+          "type": "array",
+          "required": false
+        },
+        {
+          "name": "reason",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "discord_edit_role",
+      "title": "Edit Role",
+      "description": "Edits an existing role in a Discord server",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "guildId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "roleId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "color",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "hoist",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "mentionable",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "permissions",
+          "type": "array",
+          "required": false
+        },
+        {
+          "name": "position",
+          "type": "number",
+          "required": false
+        },
+        {
+          "name": "reason",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "discord_delete_role",
+      "title": "Delete Role",
+      "description": "Deletes a role from a Discord server",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "guildId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "roleId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "reason",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "discord_assign_role",
+      "title": "Assign Role",
+      "description": "Assigns a role to a member in a Discord server",
+      "readOnly": false,
+      "destructive": false,
+      "params": [
+        {
+          "name": "guildId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "userId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "roleId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "reason",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "discord_remove_role",
+      "title": "Remove Role",
+      "description": "Removes a role from a member in a Discord server",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "guildId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "userId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "roleId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "reason",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "discord_list_members",
+      "title": "List Members",
+      "description": "Lists members in a Discord server with their roles",
+      "readOnly": true,
+      "destructive": false,
+      "params": [
+        {
+          "name": "guildId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "limit",
+          "type": "number",
+          "required": false
+        },
+        {
+          "name": "after",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "discord_get_member",
+      "title": "Get Member",
+      "description": "Gets detailed information about a specific member in a Discord server",
+      "readOnly": true,
+      "destructive": false,
+      "params": [
+        {
+          "name": "guildId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "userId",
+          "type": "string",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "discord_create_voice_channel",
+      "title": "Create Voice Channel",
+      "description": "Creates a new voice channel in a Discord server with an optional parent category",
+      "readOnly": false,
+      "destructive": false,
+      "params": [
+        {
+          "name": "guildId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "channelName",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "categoryId",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "userLimit",
+          "type": "number",
+          "required": false
+        },
+        {
+          "name": "reason",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "discord_set_channel_permissions",
+      "title": "Set Channel Permissions",
+      "description": "Sets permission overrides for a role or user on a channel or category",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "channelId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "roleId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "allow",
+          "type": "array",
+          "required": false
+        },
+        {
+          "name": "deny",
+          "type": "array",
+          "required": false
+        },
+        {
+          "name": "reason",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "discord_remove_channel_permissions",
+      "title": "Remove Channel Permissions",
+      "description": "Removes all permission overrides for a role or user on a channel or category",
+      "readOnly": false,
+      "destructive": true,
+      "params": [
+        {
+          "name": "channelId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "roleId",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "reason",
+          "type": "string",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "mcp_info",
+      "title": "MCP Info",
+      "description": "Report this server's version, install provenance and update status. Call this to learn where the server runs from, which version it is, and whether a newer release exists. Never read MCP client config files for this: they hold secrets. The report holds names and paths only.",
+      "readOnly": true,
+      "destructive": false,
+      "params": []
+    }
+  ],
+  "installMarkdown": "Requirements: [Bun](https://bun.sh) 1.4.3 or newer and a Discord bot token.\n[Discord Bot Setup](#discord-bot-setup) explains how to get the token. Run the\npublished package with an exact version pin:\n\n```sh\nDISCORD_TOKEN=your_discord_bot_token bunx @uniquedivine/mcp-discord@1.3.8\n```\n\nCI in [Unique-Divine/jiyuu](https://github.com/Unique-Divine/jiyuu) builds and\npublishes `@uniquedivine/mcp-discord` to npm from this directory when its\nversion changes on `main`. The version pin selects the exact reviewed release that runs.\n\n### Claude Code\n\n```sh\nclaude mcp add discord --env DISCORD_TOKEN=your_discord_bot_token \\\n  -- bunx @uniquedivine/mcp-discord@1.3.8\n```\n\n### Codex\n\nAdd this entry to file `~/.codex/config.toml`:\n\n```toml\n[mcp_servers.discord]\ncommand = \"bunx\"\nargs = [\"@uniquedivine/mcp-discord@1.3.8\"]\nenv = { DISCORD_TOKEN = \"your_discord_bot_token\" }\n```\n\n### Cursor\n\nAdd this entry to file `~/.cursor/mcp.json`, or to file `.cursor/mcp.json` in\na project:\n\n```json\n{\n  \"mcpServers\": {\n    \"discord\": {\n      \"command\": \"bunx\",\n      \"args\": [\"@uniquedivine/mcp-discord@1.3.8\"],\n      \"env\": { \"DISCORD_TOKEN\": \"your_discord_bot_token\" }\n    }\n  }\n}\n```\n\n### Update\n\n1. Find the newest version with command\n   `npm view @uniquedivine/mcp-discord version`.\n2. Change the `@1.3.8` pin in the client configuration to that version.\n3. Restart the MCP server in the client, or restart the client. In Claude\n   Code, run `/mcp` and reconnect the server. Command `bunx` downloads the new\n   version on the next launch.",
+  "generatedFrom": {
+    "revision": "c122a7f8b54ec2feda04e48f06efaafc04056246"
+  }
+}
