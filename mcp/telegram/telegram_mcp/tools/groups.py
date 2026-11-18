@@ -1,4 +1,5 @@
-# Modified by Unique Divine in 2026: connection recovery and participant pagination fixes.
+# Modified by Unique Divine in 2026: connection recovery, participant pagination,
+# basic-group invites, and missing-invitee reporting fixes.
 """Groups MCP tools."""
 
 from telethon import errors
@@ -20,6 +21,62 @@ def _created_chat(result):
         if chat is not None:
             return chat
     return None
+
+
+PRIVACY_REASON = "their privacy settings block group invites"
+MUTUAL_CONTACT_REASON = "they are not mutual contacts"
+
+
+def _missing_invitee_ids(result) -> list[int]:
+    """Return the user IDs Telegram left out of a create or invite reply.
+
+    Since layer 160, ``CreateChatRequest``, ``AddChatUserRequest``, and
+    ``InviteToChannelRequest`` answer with ``messages.InvitedUsers``. Its
+    ``missing_invitees`` lists users Telegram did not add, usually because
+    of their privacy settings. Older reply types have no such field.
+    """
+    missing = getattr(result, "missing_invitees", None) or []
+    ids = (getattr(invitee, "user_id", None) for invitee in missing)
+    return [user_id for user_id in ids if user_id is not None]
+
+
+def _not_added_note(user_ids: List[int], reason: str) -> str:
+    """Name the users Telegram did not add and why; empty if there are none."""
+    if not user_ids:
+        return ""
+    noun = "user" if len(user_ids) == 1 else "users"
+    ids = ", ".join(str(user_id) for user_id in user_ids)
+    return f"Telegram did not add {len(user_ids)} {noun} because {reason}: {ids}."
+
+
+def _invite_report(
+    title: str,
+    requested: int,
+    missing: List[int],
+    already: List[int] | None = None,
+    not_mutual: List[int] | None = None,
+    stopped: str | None = None,
+    not_added: List[int] | None = None,
+) -> str:
+    """Summarize an invite: who was added, who was left out, and why."""
+    already = already or []
+    not_mutual = not_mutual or []
+    not_added = not_added or []
+    invited = requested - len(missing) - len(already) - len(not_mutual) - len(not_added)
+    parts = [f"Invited {invited} of {requested} users to {sanitize_name(title)}."]
+    if already:
+        parts.append(f"Already members: {', '.join(str(u) for u in already)}.")
+    privacy_note = _not_added_note(missing, PRIVACY_REASON)
+    if privacy_note:
+        parts.append(f"{privacy_note} Send them an invite link instead.")
+    mutual_note = _not_added_note(not_mutual, MUTUAL_CONTACT_REASON)
+    if mutual_note:
+        parts.append(mutual_note)
+    if stopped:
+        parts.append(f"Stopped early: {stopped}")
+        if not_added:
+            parts.append(f"Not added: {', '.join(str(u) for u in not_added)}.")
+    return " ".join(parts)
 
 
 @mcp.tool(
@@ -64,11 +121,16 @@ async def create_group(
             # the caller to create a duplicate group.
             created_chat = _created_chat(result)
             if created_chat is not None:
-                return f"Group created with ID: {get_marked_id(created_chat)}"
-            return (
-                f"Group created, but Telegram's reply did not include its ID. "
-                f"Check recent chats for '{sanitize_name(title)}' before creating it again."
-            )
+                report = f"Group created with ID: {get_marked_id(created_chat)}"
+            else:
+                report = (
+                    f"Group created, but Telegram's reply did not include its ID. "
+                    f"Check recent chats for '{sanitize_name(title)}' before creating it again."
+                )
+            missing_note = _not_added_note(_missing_invitee_ids(result), PRIVACY_REASON)
+            if missing_note:
+                report += f"\nWarning: {missing_note} Send them an invite link instead."
+            return report
 
         except Exception as create_err:
             if "PEER_FLOOD" in str(create_err):
@@ -111,18 +173,14 @@ async def invite_to_group(
             except ValueError as e:
                 return f"Error: User with ID {user_id} could not be found. {e}"
 
+        if isinstance(entity, Chat):
+            return await _invite_to_basic_group(cl, entity, users_to_add, group_id, user_ids)
+
         try:
             result = await cl(
                 functions.channels.InviteToChannelRequest(channel=entity, users=users_to_add)
             )
-
-            invited_count = 0
-            if hasattr(result, "users") and result.users:
-                invited_count = len(result.users)
-            elif hasattr(result, "count"):
-                invited_count = result.count
-
-            return f"Successfully invited {invited_count} users to {sanitize_name(entity.title)}"
+            return _invite_report(entity.title, len(users_to_add), _missing_invitee_ids(result))
         except errors.UserNotMutualContactError:
             return "Error: Cannot invite users who are not mutual contacts. Please ensure the users are in your contacts and have added you back."
         except errors.UserPrivacyRestrictedError:
@@ -138,6 +196,53 @@ async def invite_to_group(
             exc_info=True,
         )
         return log_and_format_error("invite_to_group", e, group_id=group_id, user_ids=user_ids)
+
+
+async def _invite_to_basic_group(cl, entity, users, group_id, user_ids) -> str:
+    """Add users to a basic group, one ``AddChatUserRequest`` per user.
+
+    Basic groups reject ``InviteToChannelRequest``. An existing member or a
+    user whose settings refuse the add doesn't stop the rest. Any other error
+    stops the loop; once a user is added, the report says who got in.
+    """
+    missing: List[int] = []
+    already: List[int] = []
+    not_mutual: List[int] = []
+    for index, user in enumerate(users):
+        user_id = getattr(user, "id", user_ids[index])
+        try:
+            result = await cl(
+                functions.messages.AddChatUserRequest(
+                    chat_id=entity.id, user_id=user, fwd_limit=100
+                )
+            )
+        except errors.UserAlreadyParticipantError:
+            already.append(user_id)
+            continue
+        except errors.UserPrivacyRestrictedError:
+            missing.append(user_id)
+            continue
+        except errors.UserNotMutualContactError:
+            not_mutual.append(user_id)
+            continue
+        except Exception as e:
+            message = log_and_format_error(
+                "invite_to_group", e, group_id=group_id, user_ids=user_ids
+            )
+            if index == 0:
+                return message
+            not_added = [getattr(u, "id", u) for u in users[index:]]
+            return _invite_report(
+                entity.title,
+                len(users),
+                missing,
+                already,
+                not_mutual,
+                stopped=message,
+                not_added=not_added,
+            )
+        missing.extend(_missing_invitee_ids(result))
+    return _invite_report(entity.title, len(users), missing, already, not_mutual)
 
 
 @mcp.tool(
