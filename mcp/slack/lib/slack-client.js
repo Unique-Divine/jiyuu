@@ -15,7 +15,9 @@ import {
   extractFromChrome,
   getLastExtractionError,
   saveAutoHealTelemetry,
+  isAutoRefreshAvailable,
 } from "./token-store.js";
+import { platform as osPlatform } from "node:os";
 
 // ============ Configuration ============
 
@@ -97,11 +99,29 @@ const userCache = new LRUCache(USER_CACHE_MAX_SIZE, USER_CACHE_TTL);
 // ============ Token Health ============
 
 /**
- * Check token health and attempt proactive refresh if needed
+ * How to refresh the session token by hand, for platforms where Chrome
+ * auto-heal can't run.
  */
-export async function checkTokenHealth(logger = console) {
+export function manualRefreshAdvice(platformName = osPlatform()) {
+  return `Auto-refresh only runs on macOS, not ${platformName}. To refresh by hand, sign in to Slack in your browser, then run bunx @uniquedivine/mcp-slack --setup, or update SLACK_TOKEN and SLACK_COOKIE.`;
+}
+
+/**
+ * Check token health and attempt proactive refresh if needed.
+ *
+ * Options (for tests): autoHealAvailable defaults to isAutoRefreshAvailable(),
+ * platformName to os.platform(), and creds to the stored credentials. Where auto-heal can't run, the check
+ * skips the Chrome refresh, never reports auto-heal as failing or stuck, and
+ * gives manual-refresh advice with the token-age warning.
+ */
+export async function checkTokenHealth(logger = console, options = {}) {
+  const {
+    autoHealAvailable = isAutoRefreshAvailable(),
+    platformName = osPlatform(),
+    creds: injectedCreds
+  } = options;
   const silentLogger = { error: () => {}, warn: () => {}, log: () => {} };
-  const creds = loadTokens(false, silentLogger, { autoExtract: false });
+  const creds = injectedCreds ?? loadTokens(false, silentLogger, { autoExtract: false });
 
   if (!creds) {
     return {
@@ -120,13 +140,15 @@ export async function checkTokenHealth(logger = console) {
     ? Math.round(tokenAge / (60 * 60 * 1000) * 10) / 10
     : null;
 
-  // Read auto-heal telemetry (only populated when source is "file")
-  let lastAutoHealAttempt = creds.lastAutoHealAttempt || null;
-  let lastAutoHealError = creds.lastAutoHealError || null;
-  let stuckSince = creds.stuckSince || null;
+  // Read auto-heal telemetry (only populated when source is "file"). Where
+  // auto-heal can't run, older telemetry such as unsupported_platform isn't
+  // a failure, so it's ignored.
+  let lastAutoHealAttempt = autoHealAvailable ? creds.lastAutoHealAttempt || null : null;
+  let lastAutoHealError = autoHealAvailable ? creds.lastAutoHealError || null : null;
+  let stuckSince = autoHealAvailable ? creds.stuckSince || null : null;
 
   // Attempt proactive refresh if token is getting old
-  if (hasKnownAge && tokenAge > TOKEN_WARNING_AGE && Date.now() - lastRefreshAttempt > REFRESH_COOLDOWN) {
+  if (autoHealAvailable && hasKnownAge && tokenAge > TOKEN_WARNING_AGE && Date.now() - lastRefreshAttempt > REFRESH_COOLDOWN) {
     lastRefreshAttempt = Date.now();
     const attemptAt = new Date().toISOString();
     logger.error?.(`Token is ${ageHours}h old, attempting proactive refresh...`);
@@ -162,7 +184,8 @@ export async function checkTokenHealth(logger = console) {
   }
 
   const stuckSinceMs = stuckSince ? new Date(stuckSince).getTime() : Number.NaN;
-  const isStuck = Number.isFinite(stuckSinceMs)
+  const isStuck = autoHealAvailable
+    && Number.isFinite(stuckSinceMs)
     && (Date.now() - stuckSinceMs) > STUCK_THRESHOLD_MS
     && !!lastAutoHealError;
 
@@ -187,14 +210,19 @@ export async function checkTokenHealth(logger = console) {
     last_auto_heal_attempt: lastAutoHealAttempt,
     last_auto_heal_error: lastAutoHealError,
     stuck_since: stuckSince,
+    auto_heal_available: autoHealAvailable,
     message: isStuck
       ? `Auto-heal has been failing since ${stuckSince} (last error: ${lastAutoHealError}). Open Chrome > View > Developer > Allow JavaScript from Apple Events, then run npm run tokens:auto.`
       : !hasKnownAge
         ? 'Token age unknown (missing timestamp) - auth can still be valid'
         : tokenAge > TOKEN_CRITICAL_AGE
-          ? 'Token may expire soon - open Slack in Chrome'
+          ? (autoHealAvailable
+            ? 'Token may expire soon - open Slack in Chrome'
+            : `Token may expire soon. ${manualRefreshAdvice(platformName)}`)
           : tokenAge > TOKEN_WARNING_AGE
-            ? 'Token is getting old - will auto-refresh if Slack tab is open'
+            ? (autoHealAvailable
+              ? 'Token is getting old - will auto-refresh if Slack tab is open'
+              : `Token is getting old. ${manualRefreshAdvice(platformName)}`)
             : 'Token is healthy'
   };
 }
@@ -295,6 +323,20 @@ export async function slackAPI(method, params = {}, options = {}) {
     }
 
     // Handle auth errors with auto-retry
+    if ((data.error === "invalid_auth" || data.error === "token_expired") && retryOnAuthFail && !isAutoRefreshAvailable()) {
+      // Chrome auto-heal can't run here, so don't try it or record it as a
+      // failure; point to the manual refresh instead.
+      const err = new Error(`Slack auth failed (${data.error}). ${manualRefreshAdvice()}`);
+      err.code = 'token_auth_failed';
+      err.slack_error = data.error;
+      err.extraction_error = {
+        code: 'unsupported_platform',
+        message: 'Chrome auto-extraction is only available on macOS.',
+        detail: null
+      };
+      err.next_action = manualRefreshAdvice();
+      throw err;
+    }
     if ((data.error === "invalid_auth" || data.error === "token_expired") && retryOnAuthFail) {
       logger.error?.("Token expired, attempting Chrome auto-extraction...");
       const attemptAt = new Date().toISOString();

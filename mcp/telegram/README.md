@@ -16,7 +16,7 @@ Requirements: [uv](https://docs.astral.sh/uv/) and Telegram credentials.
 package with an exact version pin:
 
 ```sh
-uvx uniquedivine-telegram-mcp@2.0.1
+uvx uniquedivine-telegram-mcp@2.0.3
 ```
 
 The PyPI project is `uniquedivine-telegram-mcp`. Do not install the unrelated
@@ -30,7 +30,7 @@ from the same pinned package:
 
 ```sh
 TELEGRAM_API_ID=123456 TELEGRAM_API_HASH=your_api_hash \
-  uvx --from uniquedivine-telegram-mcp@2.0.1 telegram-mcp-generate-session --qr
+  uvx --from uniquedivine-telegram-mcp@2.0.3 telegram-mcp-generate-session --qr
 ```
 
 The examples below pass credentials as environment variables. Keep the real
@@ -43,7 +43,7 @@ claude mcp add telegram \
   --env TELEGRAM_API_ID=123456 \
   --env TELEGRAM_API_HASH=your_api_hash \
   --env TELEGRAM_SESSION_STRING=your_session_string \
-  -- uvx uniquedivine-telegram-mcp@2.0.1
+  -- uvx uniquedivine-telegram-mcp@2.0.3
 ```
 
 ### Codex
@@ -53,7 +53,7 @@ Add this entry to file `~/.codex/config.toml`:
 ```toml
 [mcp_servers.telegram]
 command = "uvx"
-args = ["uniquedivine-telegram-mcp@2.0.1"]
+args = ["uniquedivine-telegram-mcp@2.0.3"]
 
 [mcp_servers.telegram.env]
 TELEGRAM_API_ID = "123456"
@@ -71,7 +71,7 @@ a project:
   "mcpServers": {
     "telegram": {
       "command": "uvx",
-      "args": ["uniquedivine-telegram-mcp@2.0.1"],
+      "args": ["uniquedivine-telegram-mcp@2.0.3"],
       "env": {
         "TELEGRAM_API_ID": "123456",
         "TELEGRAM_API_HASH": "your_api_hash",
@@ -87,7 +87,7 @@ a project:
 1. Find the newest version at
    https://pypi.org/project/uniquedivine-telegram-mcp/ or with
    `curl -s https://pypi.org/pypi/uniquedivine-telegram-mcp/json | jq -r .info.version`.
-2. Change the `@2.0.1` pin in the client configuration to that version.
+2. Change the `@2.0.3` pin in the client configuration to that version.
 3. Restart the MCP server in the client, or restart the client. In Claude
    Code, run `/mcp` and reconnect the server. Command `uvx` installs the new
    version on the next launch.

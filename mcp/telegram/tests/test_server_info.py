@@ -130,6 +130,7 @@ def test_build_mcp_info_reports_update_and_accounts():
         "updateAvailable": True,
         "checkedAt": CHECKED_AT,
         "pinCommand": f"uvx {NAME}@2.1.0",
+        "source": "live",
         "notChecked": None,
     }
     work = report["accounts"][1]
@@ -149,7 +150,7 @@ def test_build_mcp_info_reports_update_and_accounts():
     [
         ("telegram-mcp", {}, "'telegram-mcp' is not a name Jiyuu publishes"),
         (NAME, {"JIYUU_MCP_NO_UPDATE_CHECK": "1"}, "disabled by JIYUU_MCP_NO_UPDATE_CHECK"),
-        (NAME, {}, "no registry result yet (offline, pending, or failed)"),
+        (NAME, {}, "registry unreachable and no cached result"),
     ],
 )
 def test_update_fields_explain_a_missing_check(name, env, expected):
@@ -179,6 +180,7 @@ async def test_mcp_info_tool_is_registered_and_leaks_no_secrets(monkeypatch):
     for name, value in SECRETS.items():
         monkeypatch.setenv(name, value)
     monkeypatch.setattr(server_info, "_notifier", UpdateNotifier(lambda: None))
+    monkeypatch.setattr(server_info, "live_update_check", lambda identity, env: None)
 
     tool_names = {tool.name for tool in runtime.mcp._tool_manager.list_tools()}
     text = await mcp_info()
@@ -190,6 +192,25 @@ async def test_mcp_info_tool_is_registered_and_leaks_no_secrets(monkeypatch):
     assert report["server"] == "telegram"
     assert report["provenance"]["kind"] == "source-checkout"
     assert "TELEGRAM_SESSION_STRING_WORK" in report["envVarsSet"]
+
+
+@pytest.mark.asyncio
+async def test_mcp_info_tool_runs_the_live_check_on_every_call(monkeypatch):
+    calls = []
+
+    def live(identity, env):
+        calls.append(identity.version)
+        return UpdateStatus(identity.name, identity.version, identity.version, CHECKED_AT, "live")
+
+    monkeypatch.setattr(server_info, "live_update_check", live)
+
+    first = json.loads(await mcp_info())
+    await mcp_info()
+
+    assert len(calls) == 2
+    assert first["update"]["source"] == "live"
+    assert first["update"]["updateAvailable"] is False
+    assert first["update"]["pinCommand"] is None
 
 
 def test_instructions_point_agents_at_mcp_info():

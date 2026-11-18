@@ -1,186 +1,103 @@
 # Troubleshooting Guide
 
-Common issues and their solutions.
+Fixes for common problems with `@uniquedivine/mcp-slack`. If none of these
+help, open an issue in
+[Unique-Divine/jiyuu](https://github.com/Unique-Divine/jiyuu/issues) with
+`mcp/slack` in the title.
 
----
+## Install Check
 
-## Install Flow Sanity Check
-
-If first-run setup is failing, validate command resolution in a clean directory:
+If first-run setup fails, check command resolution in an empty directory:
 
 ```bash
-tmpdir="$(mktemp -d)"
-cd "$tmpdir"
+cd "$(mktemp -d)"
 bunx @uniquedivine/mcp-slack --version
 bunx @uniquedivine/mcp-slack --help
 bunx @uniquedivine/mcp-slack --doctor
 ```
 
-Expected:
-- `--version` and `--help` exit `0`
-- `--doctor` exits with one of:
-  - `0` ready
-  - `1` missing credentials
-  - `2` invalid/expired credentials
-  - `3` connectivity/runtime issue
-- `--status` is read-only and never attempts Chrome extraction.
+Flag `--doctor` exits `0` when ready, `1` for missing credentials, `2` for
+invalid or expired credentials, and `3` for a connectivity or runtime issue.
+If `--version` fails, the problem is the Bun install or `PATH`, not Slack
+credentials.
 
-If `--version` fails here, the issue is install/runtime path, not Slack credentials.
+## Expired Tokens
 
----
+**Symptom:** Tools return `invalid_auth`, `token_expired`, or
+`slack_auth_expired`.
 
-## Hosted Version
+**Cause:** Slack rotates browser session tokens (`xoxc-` and `xoxd-`) every
+one to two weeks.
 
-The hosted version is live at [mcp.revasserlabs.com](https://mcp.revasserlabs.com). Free tier (no card) ships 2,000 requests/mo + 25 AI tool calls/mo + all 5 workflow profile types. Pro at $19/mo (or $190/yr) unlocks unlimited requests and AI tool calls, permanent OAuth (no 2-week token rotation), email support, and 2 workspaces. Team at $49/mo flat (or $490/yr) covers 5 workspaces with shared workflow profiles and 24h support. Safeguard at $199/mo (waitlist only) adds agent approval gates, the scheduled morning catch-up DM at 8am workspace time, and workspace memory — all *(in development)*.
+The server looks for tokens in this order:
 
-The OSS package keeps the local-machine path. The hosted version adds the AI brain (smart_search, catch_me_up, triage) — these tools also appear in the OSS package as discoverable upgrade stubs that point at the hosted signup.
+1. Environment variables `SLACK_TOKEN` and `SLACK_COOKIE`.
+2. File `~/.slack-mcp-tokens.json`.
+3. The macOS Keychain.
+4. Chrome extraction, on macOS only.
 
----
+**Fix on macOS:** With Slack open in a Chrome tab, call tool
+`slack_refresh_tokens`, or run
+`bunx @uniquedivine/mcp-slack --refresh-tokens`.
 
-## DMs Not Showing Up
+**Fix everywhere else:** Chrome auto-refresh runs only on macOS. Sign in to
+Slack in a browser, run `bunx @uniquedivine/mcp-slack --setup`, and paste
+fresh values. [Manual Extraction](SETUP.md#manual-extraction) shows where to
+find them. Then reconnect the MCP server.
+
+If `SLACK_TOKEN` and `SLACK_COOKIE` are set, they win over the token file.
+Update both or unset both; `--setup` alone has no effect while they are set.
+
+## Edit or Delete Refused
+
+**`message_too_old`:** Tools `slack_update_message` and
+`slack_delete_message` refuse messages older than 7 days. Set
+`SLACK_MCP_EDIT_DELETE_MAX_AGE_HOURS` on the server to change the window, or
+ask for `slack_update_message_unsafe` or `slack_delete_message_unsafe`, which
+skip only the age check.
+
+**`unknown_tool` for an `_unsafe` tool over HTTP:** The HTTP server hides
+the `_unsafe` tools unless `SLACK_MCP_ENABLE_UNSAFE_TOOLS=true`.
+
+**`not_own_message` or `text_mismatch`:** The tools act only on your own
+messages, and argument `expected_text` must match the message's current text.
+Re-read the message with `slack_conversations_history` or `slack_get_thread`
+and pass its text.
+
+[API.md](API.md#slack_delete_message) lists every error code.
+
+## DMs Missing
 
 **Symptom:** `slack_list_conversations` returns channels but no DMs.
 
-**Cause:** Slack's `conversations.list` API doesn't return IMs when using xoxc browser tokens.
+Slack's `conversations.list` method doesn't return DMs for `xoxc-` tokens. By
+default, `slack_list_conversations` adds DMs only from its cache in file
+`~/.slack-mcp-dm-cache.json`, and the server ignores that cache once it is
+more than 24 hours old. To rebuild it, call the tool with
+`discover_dms: true` and `types: "im,mpim"`. The server then reads the first
+200 users from `users.list`, calls `conversations.open` for each one, 50 ms
+apart, and saves the DMs it finds.
 
-**Solution:** This is handled automatically. The server discovers DMs by calling `conversations.open` for each user in your workspace. This happens in `lib/handlers.js`.
+Discovery is slow and can hit rate limits. It also calls `conversations.open`
+for users you have never messaged, which can add empty DMs to your Slack
+sidebar.
 
-If DMs still don't appear:
-1. Check you're requesting the right types: `slack_list_conversations types=im,mpim`
-2. Verify the user exists: `slack_list_users`
+## Rate Limits
 
----
+**Symptom:** `ratelimited` errors.
 
-## Rate Limiting Errors
+The Slack client in file `lib/slack-client.js` waits for Slack's
+`Retry-After` header, or 5 seconds without one, and retries up to 3 times
+with a longer wait each time. If you still hit limits, lower `limit` on list
+calls.
 
-**Symptom:** `{"error":"ratelimited"}` in API responses.
+## HTTP Server Returns 503 or 401
 
-**Cause:** Slack limits API calls, especially when listing many users/DMs.
+Endpoint `/mcp` on the HTTP server (`bun src/cli.js http`) requires a bearer
+token.
 
-**Solution:** The client (`lib/slack-client.js`) implements automatic retry with exponential backoff:
-- First retry: Wait 5 seconds
-- Second retry: Wait 10 seconds
-- Third retry: Wait 15 seconds
-
-If you still hit limits, reduce batch sizes:
-```
-slack_list_conversations limit=50
-```
-
----
-
-## Token Expiration
-
-**Symptom:** `invalid_auth` or `token_expired` errors.
-
-**Cause:** Browser tokens (xoxc/xoxd) expire after 1-2 weeks.
-
-**Solution:** The server has 4 layers of token recovery:
-
-1. **Environment variables** - From MCP config (Claude Desktop)
-2. **Token file** - `~/.slack-mcp-tokens.json`
-3. **macOS Keychain** - Encrypted persistent storage
-4. **Chrome auto-extraction** - Fallback when all else fails
-
-**To refresh tokens:**
-```bash
-# Option 1: In Claude Code/Desktop
-slack_refresh_tokens
-
-# Option 2: Package setup wizard
-bunx @uniquedivine/mcp-slack --setup
-
-# Option 3: Diagnostics check
-bunx @uniquedivine/mcp-slack --doctor
-
-# Option 4: Repo CLI
-npm run tokens:auto
-
-# Option 5: Manual
-npm run tokens:refresh
-```
-
----
-
-## Web Server Issues
-
-### Server Stops When Terminal Closes
-
-**Solution:** Use LaunchAgent for persistence:
-
-```bash
-# Create LaunchAgent
-cat > ~/Library/LaunchAgents/com.slack-web-api.plist << 'EOF'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.slack-web-api</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>/Users/YOUR_USERNAME/.bun/bin/bunx</string>
-        <string>@uniquedivine/mcp-slack@4.5.1</string>
-        <string>web</string>
-    </array>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-</dict>
-</plist>
-EOF
-
-launchctl load ~/Library/LaunchAgents/com.slack-web-api.plist
-```
-
-### API Key Invalid
-
-The web server generates a unique API key on first run, stored in `~/.slack-mcp-api-key`.
-
-The key is printed to the console when you start the server:
-```
-Dashboard: http://localhost:3000/?key=smcp_xxxxxxxxxxxx
-API Key:   smcp_xxxxxxxxxxxx
-```
-
-You can also set a custom key:
-```bash
-SLACK_API_KEY=your-custom-key npm run web
-```
-
-### Can't Connect to localhost:3000
-
-Check if the server is running:
-```bash
-# Get your API key from ~/.slack-mcp-api-key
-curl http://localhost:3000/health -H "Authorization: Bearer $(cat ~/.slack-mcp-api-key)"
-```
-
-Check LaunchAgent status:
-```bash
-launchctl list | grep slack-web-api
-```
-
-Check logs:
-```bash
-cat /tmp/slack-web-api.log
-cat /tmp/slack-web-api.error.log
-```
-
-### Hosted HTTP `/mcp` Returns 503 or 401
-
-If you run `bun src/server-http.js`, `/mcp` is protected by default.
-
-`503 http_auth_token_missing` means you did not set:
-
-```bash
-SLACK_MCP_HTTP_AUTH_TOKEN=change-this
-```
-
-`401 unauthorized` means your request is missing or using the wrong bearer token.
-
-Example request:
+- `503 http_auth_token_missing`: set `SLACK_MCP_HTTP_AUTH_TOKEN`.
+- `401 unauthorized`: the request has no bearer token or the wrong one.
 
 ```bash
 curl http://localhost:3000/mcp \
@@ -189,101 +106,47 @@ curl http://localhost:3000/mcp \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0.0"}}}'
 ```
 
-For local-only testing (not remote exposure), you can opt out:
+For local testing only, `SLACK_MCP_HTTP_INSECURE=1` turns the check off.
+
+## Web Server Problems
+
+The web server writes its API key to file `~/.slack-mcp-api-key`, and the
+startup log masks all but the first 8 characters. If `SLACK_API_KEY` is set,
+the server uses it instead of the file. This check picks the same key:
 
 ```bash
-SLACK_MCP_HTTP_INSECURE=1 bun src/server-http.js
+API_KEY="${SLACK_API_KEY:-$(cat ~/.slack-mcp-api-key)}"
+curl http://localhost:3000/health -H "Authorization: Bearer $API_KEY"
 ```
 
----
+To keep it running after the terminal closes on macOS, use the LaunchAgent
+in [WEB-API.md](WEB-API.md#auto-start-on-login).
 
-## Claude Desktop Issues
+## Tools Missing in Claude Desktop
 
-### Slack Tools Not Appearing
+1. Quit Claude Desktop fully and reopen it.
+2. Check the config syntax:
+   `python3 -m json.tool ~/Library/Application\ Support/Claude/claude_desktop_config.json`.
+3. Read file `~/Library/Logs/Claude/mcp-server-slack.log`.
+4. If the log says Bun wasn't found, put the absolute path from
+   `which bunx` in `command`.
 
-**Symptom:** Claude Desktop doesn't show Slack tools after adding config.
+## Chrome Extraction Fails (macOS)
 
-**Solutions:**
+**Symptom:** `slack_refresh_tokens` can't extract tokens from Chrome.
 
-1. **Fully restart Claude Desktop:**
-   - Cmd+Q (don't just close window)
-   - Reopen the app
+Check that:
 
-2. **Check config syntax:**
-   ```bash
-   cat ~/Library/Application\ Support/Claude/claude_desktop_config.json | python -m json.tool
-   ```
+1. Chrome is running with a Slack tab at `app.slack.com`, not the desktop
+   app, and you are signed in.
+2. **View** > **Developer** > **Allow JavaScript from Apple Events** is on.
+   Or set `SLACK_MCP_EXTRACTION_MODE=leveldb` to skip AppleScript.
+3. If Chrome uses a non-default profile or location, set
+   `SLACK_MCP_CHROME_PROFILE` or `SLACK_MCP_CHROME_USER_DATA_DIR`.
 
-3. **Check MCP logs:**
-   ```bash
-   cat ~/Library/Logs/Claude/mcp-server-slack.log
-   ```
+## Why Browser Tokens Instead of a Slack App?
 
-4. **Verify the Bun path:**
-   ```bash
-   which bunx
-   # Use this full path in config
-   ```
-
-### MCP Server Crashes on Start
-
-**Check the log:**
-```bash
-tail -50 ~/Library/Logs/Claude/mcp-server-slack.log
-```
-
-**Common causes:**
-- Bun not found (use the full path, such as `~/.bun/bin/bunx` or `/opt/homebrew/bin/bunx`)
-- Missing tokens in env section
-- Invalid JSON syntax in config
-
----
-
-## Chrome Extraction Fails
-
-**Symptom:** `slack_refresh_tokens` returns "Could not extract from Chrome"
-
-**Requirements:**
-1. Google Chrome must be running (not just in Dock)
-2. Have a Slack tab open at `app.slack.com` (not desktop app)
-3. Be logged into Slack in that tab
-4. In Chrome menu, enable `View > Developer > Allow JavaScript from Apple Events`
-5. Grant accessibility permissions to Terminal/Claude
-
-**Check permissions:**
-System Preferences → Privacy & Security → Accessibility → Ensure Terminal is enabled
-
----
-
-## Why Browser Tokens Instead of Slack App?
-
-**Question:** Why not just create a Slack app with proper OAuth?
-
-**Answer:** Slack apps cannot access DMs without explicit OAuth authorization for each conversation. This is by design for privacy.
-
-Browser tokens (xoxc/xoxd) provide the same access you have in Slack's web interface - everything you can see, Claude can see.
-
-**Trade-offs:**
-- ✅ Full access to all your conversations
-- ✅ No per-conversation authorization needed
-- ❌ Tokens expire every 1-2 weeks
-- ❌ Requires Chrome for token extraction
-
----
-
-## Getting Help
-
-1. Check logs:
-   - MCP: `~/Library/Logs/Claude/mcp-server-slack.log`
-   - Web: `/tmp/slack-web-api.log`
-
-2. Test manually:
-   ```bash
-   cd jiyuu/mcp/slack
-   bun src/server.js  # Should say "running"
-   ```
-
-3. Verify tokens:
-   ```bash
-   npm run tokens:status
-   ```
+A Slack app needs workspace approval and OAuth scopes, and it can't read your
+DMs the way you see them. Session tokens give the server the same access you
+have in Slack's web client. The cost is token rotation every one to two
+weeks, which you refresh by hand off macOS.

@@ -15,8 +15,17 @@
  * - The long-form message is emitted at most once per process per hour;
  *   subsequent failures inside that window get a one-line version so agents
  *   in retry loops do not spam.
- * - Never reads or logs token values — it only inspects error codes.
+ * - Never reads or logs token values — it only inspects error codes and
+ *   the credential source label.
+ * - The self-fix fits the setup. Credentials from SLACK_TOKEN/SLACK_COOKIE
+ *   take precedence over the file --setup writes, so env users are told to
+ *   update or unset those variables. Off macOS, where Chrome auto-heal and
+ *   slack_refresh_tokens can't run, the advice is a manual refresh. macOS
+ *   with file or keychain credentials keeps the original wording.
  */
+
+import { platform as osPlatform } from "node:os";
+import { loadTokensReadOnly } from "./token-store.js";
 
 // Slack API error codes (and the HTTP 401 case) that mean the session token
 // is dead and cannot be auto-healed — the point where the Lifeboat fires.
@@ -44,6 +53,37 @@ let lastLongFormAt = 0;
  */
 export function resetLifeboatThrottle() {
   lastLongFormAt = 0;
+}
+
+/**
+ * Recovery advice for this platform and credential source, or null for the
+ * default macOS wording.
+ */
+export function recoveryAdvice({ platformName, credentialSource }) {
+  if (credentialSource === "environment") {
+    return {
+      selfFix:
+        `Your Slack credentials come from the SLACK_TOKEN and SLACK_COOKIE environment variables, which take precedence over the file \`${SETUP_CMD}\` writes. Update both with fresh values from a signed-in browser session, or unset both and run \`${SETUP_CMD}\`. Full steps: ${README_ANCHOR_URL}`,
+      nextAction:
+        `Update SLACK_TOKEN and SLACK_COOKIE with fresh values, or unset both and run \`${SETUP_CMD}\`. Running setup alone won't help while they're set.`,
+    };
+  }
+  if (platformName !== "darwin") {
+    return {
+      selfFix:
+        `Auto-refresh only runs on macOS, not ${platformName}. Sign in to Slack in your browser, then run \`${SETUP_CMD}\` to save fresh tokens. Full steps: ${README_ANCHOR_URL}`,
+      nextAction: `Sign in to Slack in your browser, then run \`${SETUP_CMD}\`.`,
+    };
+  }
+  return null;
+}
+
+function currentCredentialSource() {
+  try {
+    return loadTokensReadOnly()?.source ?? null;
+  } catch {
+    return null;
+  }
 }
 
 function upsellEnabled() {
@@ -108,8 +148,25 @@ export function buildLifeboatPayload(err, options = {}) {
   const now = options?.now ?? Date.now();
   const slackError = authDeathCode(err);
   const upsell = upsellEnabled();
+  const advice = recoveryAdvice({
+    platformName: options?.platformName ?? osPlatform(),
+    credentialSource: options?.credentialSource !== undefined
+      ? options.credentialSource
+      : currentCredentialSource(),
+  });
 
   const throttled = lastLongFormAt > 0 && now - lastLongFormAt < THROTTLE_WINDOW_MS;
+
+  if (throttled && advice) {
+    return {
+      status: "error",
+      code: "slack_auth_expired",
+      slack_error: slackError,
+      throttled: true,
+      message: `Slack session token is still expired or revoked. ${advice.nextAction}`,
+      next_action: advice.nextAction,
+    };
+  }
 
   if (throttled) {
     const message = upsell
@@ -143,12 +200,20 @@ export function buildLifeboatPayload(err, options = {}) {
     payload.extraction_error = err.extraction_error;
   }
 
+  if (advice) {
+    payload.self_fix = advice.selfFix;
+  }
+
   if (upsell) {
     payload.hosted_option =
       `To stop re-extracting every 1-2 weeks, switch to hosted OAuth (it never rotates): ${HOSTED_SETUP_URL} — free tier available, no credit card.`;
-    payload.next_action = `Run \`${SETUP_CMD}\` to re-extract tokens, or switch to permanent hosted OAuth (see hosted_option).`;
+    payload.next_action = advice
+      ? `${advice.nextAction} Or switch to permanent hosted OAuth (see hosted_option).`
+      : `Run \`${SETUP_CMD}\` to re-extract tokens, or switch to permanent hosted OAuth (see hosted_option).`;
   } else {
-    payload.next_action = `Run \`${SETUP_CMD}\` to re-extract tokens (macOS: call the slack_refresh_tokens tool).`;
+    payload.next_action = advice
+      ? advice.nextAction
+      : `Run \`${SETUP_CMD}\` to re-extract tokens (macOS: call the slack_refresh_tokens tool).`;
   }
 
   return payload;

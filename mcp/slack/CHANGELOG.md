@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.5.3] - 2026-11-18
+
+### Fixed
+- Tool `mcp_info` reads the npm registry on every call instead of reusing the startup check, so a long-running server reports the current latest version. When npm can't be reached, it reports the cached answer and sets the new field `update.source` to `cache` (`live` otherwise).
+- `mcp_info` no longer reports an impossible latest version. A cached latest version older than the running one, such as 4.4.3 cached before an upgrade to 4.5.1, counts as out of date, and `update.pinCommand` is set only when npm has a newer version, so it never suggests a downgrade.
+- The startup update notice caches the npm answer for 1 hour instead of 24.
+
+## [4.5.2] - 2026-11-18
+
+### Added
+- Each edit or delete attempt writes one structured line to stderr (`slack-mcp write {...}`) with the tool, channel, timestamp, status or error code, and message age in hours. It never logs tokens, cookies, or message text, and it logs the channel and timestamp only after Slack confirms them. See `docs/API.md`.
+- The edit and delete tools reject a `channel_id` that isn't a Slack conversation ID (`C`, `D`, or `G`, then 8 or more uppercase letters or digits) with `invalid_argument` before any Slack call.
+
+### Fixed
+- The edit and delete tools return `message_deleted` for a deleted thread parent instead of `not_own_message`. Slack leaves a "This message was deleted." placeholder at the parent's timestamp, which the ownership check read as someone else's message.
+- On Linux, WSL, and Windows, where Chrome auto-heal can't run, the token health check no longer reports auto-heal as failing or stuck and no longer shows the macOS "Allow JavaScript from Apple Events" advice. It skips the Chrome refresh, keeps the token-age warning, and says how to refresh by hand (`bunx @uniquedivine/mcp-slack --setup`, or `SLACK_TOKEN` and `SLACK_COOKIE`). The auth-expired recovery message (the Lifeboat) gives the same manual advice instead of macOS steps. `slack_token_status` adds `auto_refresh.manual_refresh`.
+- When credentials come from `SLACK_TOKEN` and `SLACK_COOKIE`, the auth-expired message says to update or unset those variables, since they take precedence over the file `--setup` writes. macOS with file or keychain credentials keeps its wording.
+
 ## [4.5.1] - 2026-11-18
 
 ### Fixed

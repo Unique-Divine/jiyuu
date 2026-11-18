@@ -14,7 +14,7 @@ import {
   isAutoRefreshAvailable,
   getLastExtractionError
 } from "./token-store.js";
-import { slackAPI, resolveUser, formatTimestamp, sleep, checkTokenHealth, getUserCacheStats } from "./slack-client.js";
+import { slackAPI, resolveUser, formatTimestamp, sleep, checkTokenHealth, getUserCacheStats, manualRefreshAdvice } from "./slack-client.js";
 import {
   saveProfile as workflowSaveProfile,
   listProfiles as workflowListProfiles,
@@ -22,6 +22,7 @@ import {
 } from "./workflow-store.js";
 import { withRichMessageFields } from "./rich-message-fields.js";
 import { isAuthDeath, lifeboatResponse } from "./lifeboat.js";
+import { withWriteLog } from "./write-log.js";
 import {
   checkOwnMessage,
   createRetryTracker,
@@ -140,7 +141,8 @@ export async function handleTokenStatus() {
       enabled: isAutoRefreshAvailable(),
       interval: "4 hours",
       last_attempt: health.refreshed ? "just_now" : null,
-      requires: isAutoRefreshAvailable() ? "Slack tab open in Chrome" : "Not supported on this platform"
+      requires: isAutoRefreshAvailable() ? "Slack tab open in Chrome" : "Not supported on this platform",
+      manual_refresh: isAutoRefreshAvailable() ? null : manualRefreshAdvice()
     },
     cache: {
       users: cacheStats,
@@ -598,7 +600,7 @@ async function isGoneOnReread(channel, timestamp, selfId) {
  * before calling chat.delete, and maps known Slack errors to clear results.
  */
 export async function handleDeleteMessage(args) {
-  return deleteMessage(args, { ignoreAge: false });
+  return withWriteLog("slack_delete_message", args, (recorder) => deleteMessage(args, { ignoreAge: false, recorder }));
 }
 
 /**
@@ -606,10 +608,10 @@ export async function handleDeleteMessage(args) {
  * age window, for deliberate cleanup of older messages.
  */
 export async function handleDeleteMessageUnsafe(args) {
-  return deleteMessage(args, { ignoreAge: true });
+  return withWriteLog("slack_delete_message_unsafe", args, (recorder) => deleteMessage(args, { ignoreAge: true, recorder }));
 }
 
-async function deleteMessage(args, { ignoreAge }) {
+async function deleteMessage(args, { ignoreAge, recorder }) {
   const invalid = validateTargetArgs(args);
   if (invalid) return invalid;
 
@@ -622,6 +624,7 @@ async function deleteMessage(args, { ignoreAge }) {
     ignoreAge,
     unsafeTool: "slack_delete_message_unsafe"
   });
+  recorder?.verify(ownership.verified);
   if (!ownership.ok) return ownership.result;
   const oldText = ownership.message.text ?? "";
 
@@ -677,7 +680,7 @@ async function deleteMessage(args, { ignoreAge }) {
 export const UPDATE_TEXT_MAX_CHARS = 4000;
 
 export async function handleUpdateMessage(args) {
-  return updateMessage(args, { ignoreAge: false });
+  return withWriteLog("slack_update_message", args, (recorder) => updateMessage(args, { ignoreAge: false, recorder }));
 }
 
 /**
@@ -685,10 +688,10 @@ export async function handleUpdateMessage(args) {
  * age window, for deliberate cleanup of older messages.
  */
 export async function handleUpdateMessageUnsafe(args) {
-  return updateMessage(args, { ignoreAge: true });
+  return withWriteLog("slack_update_message_unsafe", args, (recorder) => updateMessage(args, { ignoreAge: true, recorder }));
 }
 
-async function updateMessage(args, { ignoreAge }) {
+async function updateMessage(args, { ignoreAge, recorder }) {
   const invalid = validateTargetArgs(args);
   if (invalid) return invalid;
   if (typeof args.text !== "string" || args.text.trim() === "") {
@@ -707,6 +710,7 @@ async function updateMessage(args, { ignoreAge }) {
     ignoreAge,
     unsafeTool: "slack_update_message_unsafe"
   });
+  recorder?.verify(ownership.verified);
   if (!ownership.ok) return ownership.result;
 
   const sessionChanged = sessionChangedResult(ownership, details);

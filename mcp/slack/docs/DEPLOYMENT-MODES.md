@@ -8,15 +8,14 @@ Use this guide to choose the right operating mode before rollout.
 - Choose local `web` for browser workflows and manual Slack browsing.
 - Choose hosted HTTP only when you need remote execution and can handle token operations.
 - Choose Smithery/Worker only when your consumers require registry-hosted MCP transport.
-- A managed **Hosted** version is live at [mcp.revasserlabs.com](https://mcp.revasserlabs.com) — Free tier (no card), Pro $19/mo, Team $49/mo flat, Safeguard $199/mo (waitlist). See [pricing](https://mcp.revasserlabs.com/pricing).
 
 ## Mode Matrix
 
 | Mode | Start Command | Best For | Auth Material | Exposure | Notes |
 |------|---------------|----------|---------------|----------|-------|
-| Local MCP (`stdio`) | `bunx @uniquedivine/mcp-slack` | Individual daily usage in Claude | `SLACK_TOKEN` + `SLACK_COOKIE` via token file/env | Local process | Lowest ops burden. Free. 21 tools (16 read/write + 2 workflow profile primitives + 3 discoverable upgrade stubs to hosted). |
+| Local MCP (`stdio`) | `bunx @uniquedivine/mcp-slack` | Individual daily usage in Claude | `SLACK_TOKEN` + `SLACK_COOKIE` via token file/env | Local process | 26 tools: 25 Slack tools plus `mcp_info`. |
 | Local Web UI (`web`) | `bunx @uniquedivine/mcp-slack web` | Browser-first usage, manual search/send | Same as above + generated API key | `localhost` by default | Useful when MCP is not available |
-| Hosted MCP (`http`) | `bun src/server-http.js` | Controlled hosted integration | Env-injected Slack token/cookie + HTTP bearer token | Remote endpoint | `/mcp` is bearer-protected by default; configure CORS allowlist |
+| Hosted MCP (`http`) | `bun src/server-http.js` | Controlled hosted integration | Env-injected Slack token/cookie + HTTP bearer token | Remote endpoint | `/mcp` requires a bearer token. The `_unsafe` tools need `SLACK_MCP_ENABLE_UNSAFE_TOOLS=true`. |
 | Smithery/Worker | `wrangler deploy` + Smithery publish flow | Registry distribution for hosted consumers | Query/env token handoff | Remote endpoint | Keep worker version parity with npm release |
 
 ## Team Deployment Guidance

@@ -6,8 +6,10 @@ import { join } from "node:path";
 import {
   JiyuuMcpInfo,
   UpdateNotifier,
+  CACHE_TTL_MS,
   buildMcpInfo,
   checkForUpdate,
+  checkLatest,
   fetchText,
   formatNotice,
   gitState,
@@ -44,6 +46,14 @@ function recordingFetcher(body: string | Error) {
 }
 
 const npmBody = (version: string) => JSON.stringify({ name: NAME, version });
+const CACHE_NAME = "_uniquedivine_mcp-test.json";
+
+function seedCache(cacheDir: string, latestVersion: string, checkedAt: Date): void {
+  const entry = { name: NAME, latestVersion, checkedAt: checkedAt.toISOString() };
+  writeFileSync(join(cacheDir, CACHE_NAME), JSON.stringify(entry));
+}
+const readCacheFile = (cacheDir: string) =>
+  JSON.parse(readFileSync(join(cacheDir, CACHE_NAME), "utf8"));
 
 describe("isNewer", () => {
   const cases: [string, string, boolean][] = [
@@ -93,12 +103,16 @@ describe("checkForUpdate", () => {
       runningVersion: "1.3.8",
       latestVersion: "1.4.0",
       checkedAt: "2026-11-17T12:00:00Z",
+      source: "live",
     });
-    const cached = JSON.parse(readFileSync(join(cacheDir, "_uniquedivine_mcp-test.json"), "utf8"));
-    expect(cached).toEqual({ name: NAME, latestVersion: "1.4.0", checkedAt: "2026-11-17T12:00:00Z" });
+    expect(readCacheFile(cacheDir)).toEqual({ name: NAME, latestVersion: "1.4.0", checkedAt: "2026-11-17T12:00:00Z" });
   });
 
-  test("cache hit within a day skips the registry", async () => {
+  test("the cache lasts one hour", () => {
+    expect(CACHE_TTL_MS).toBe(HOUR);
+  });
+
+  test("cache hit within the hour skips the registry", async () => {
     const cacheDir = tempDir();
     await checkForUpdate(NAME, "1.3.8", {
       fetch: recordingFetcher(npmBody("1.4.0")).fetch, env: {}, cacheDir, now: NOW,
@@ -106,11 +120,12 @@ describe("checkForUpdate", () => {
     const { fetch, urls } = recordingFetcher(npmBody("9.9.9"));
 
     const status = await checkForUpdate(NAME, "1.3.8", {
-      fetch, env: {}, cacheDir, now: new Date(NOW.getTime() + 23 * HOUR),
+      fetch, env: {}, cacheDir, now: new Date(NOW.getTime() + 59 * 60 * 1000),
     });
 
     expect(urls).toEqual([]);
     expect(status?.latestVersion).toBe("1.4.0");
+    expect(status?.source).toBe("cache");
   });
 
   test("expired cache reads the registry again", async () => {
@@ -121,11 +136,25 @@ describe("checkForUpdate", () => {
     const { fetch, urls } = recordingFetcher(npmBody("1.5.0"));
 
     const status = await checkForUpdate(NAME, "1.3.8", {
-      fetch, env: {}, cacheDir, now: new Date(NOW.getTime() + 24 * HOUR),
+      fetch, env: {}, cacheDir, now: new Date(NOW.getTime() + HOUR),
     });
 
     expect(urls.length).toBe(1);
     expect(status?.latestVersion).toBe("1.5.0");
+    expect(status?.source).toBe("live");
+  });
+
+  test("a fresh cache older than the running version reads the registry", async () => {
+    // The issue 147 case: 4.4.3 cached minutes ago, 4.5.1 running.
+    const cacheDir = tempDir();
+    seedCache(cacheDir, "4.4.3", new Date(NOW.getTime() - 5 * 60 * 1000));
+    const { fetch, urls } = recordingFetcher(npmBody("4.5.2"));
+
+    const status = await checkForUpdate(NAME, "4.5.1", { fetch, env: {}, cacheDir, now: NOW });
+
+    expect(urls.length).toBe(1);
+    expect(status).toMatchObject({ latestVersion: "4.5.2", source: "live" });
+    expect(readCacheFile(cacheDir).latestVersion).toBe("4.5.2");
   });
 
   for (const [label, body] of [
@@ -139,7 +168,7 @@ describe("checkForUpdate", () => {
         fetch: recordingFetcher(body).fetch, env: {}, cacheDir, now: NOW,
       });
       expect(status).toBeNull();
-      expect(existsSync(join(cacheDir, "_uniquedivine_mcp-test.json"))).toBe(false);
+      expect(existsSync(join(cacheDir, CACHE_NAME))).toBe(false);
     });
   }
 
@@ -194,9 +223,81 @@ describe("checkForUpdate", () => {
   });
 });
 
+describe("checkLatest", () => {
+  test("reads the registry even with a fresh cache, and rewrites the cache", async () => {
+    const cacheDir = tempDir();
+    seedCache(cacheDir, "1.4.0", new Date(NOW.getTime() - 60 * 1000));
+    const { fetch, urls } = recordingFetcher(npmBody("1.5.0"));
+
+    const status = await checkLatest(NAME, "1.3.8", { fetch, env: {}, cacheDir, now: NOW });
+
+    expect(urls).toEqual([`https://registry.npmjs.org/${NAME}/latest`]);
+    expect(status).toEqual({
+      name: NAME,
+      runningVersion: "1.3.8",
+      latestVersion: "1.5.0",
+      checkedAt: "2026-11-17T12:00:00Z",
+      source: "live",
+    });
+    expect(readCacheFile(cacheDir)).toEqual({
+      name: NAME, latestVersion: "1.5.0", checkedAt: "2026-11-17T12:00:00Z",
+    });
+  });
+
+  test("a registry failure falls back to the cache of any age", async () => {
+    const cacheDir = tempDir();
+    const weekOld = new Date(NOW.getTime() - 7 * 24 * HOUR);
+    seedCache(cacheDir, "1.4.0", weekOld);
+
+    const status = await checkLatest(NAME, "1.3.8", {
+      fetch: recordingFetcher(new Error("ECONNREFUSED")).fetch, env: {}, cacheDir, now: NOW,
+    });
+
+    expect(status).toEqual({
+      name: NAME,
+      runningVersion: "1.3.8",
+      latestVersion: "1.4.0",
+      checkedAt: weekOld.toISOString(),
+      source: "cache",
+    });
+  });
+
+  test("a registry failure ignores a cache older than the running version", async () => {
+    const cacheDir = tempDir();
+    seedCache(cacheDir, "4.4.3", NOW);
+
+    const status = await checkLatest(NAME, "4.5.1", {
+      fetch: recordingFetcher("<html>rate limited</html>").fetch, env: {}, cacheDir, now: NOW,
+    });
+
+    expect(status).toBeNull();
+  });
+
+  test("a registry failure with no cache returns null", async () => {
+    const status = await checkLatest(NAME, "1.3.8", {
+      fetch: recordingFetcher(new Error("ECONNREFUSED")).fetch, env: {}, cacheDir: tempDir(), now: NOW,
+    });
+    expect(status).toBeNull();
+  });
+
+  test("env opt-out and names Jiyuu does not publish skip the registry", async () => {
+    const { fetch, urls } = recordingFetcher(npmBody("1.4.0"));
+    const cacheDir = tempDir();
+    expect(
+      await checkLatest(NAME, "1.3.8", { fetch, env: { JIYUU_MCP_NO_UPDATE_CHECK: "1" }, cacheDir }),
+    ).toBeNull();
+    expect(await checkLatest("mcp-discord", "1.3.8", { fetch, env: {}, cacheDir })).toBeNull();
+    expect(urls).toEqual([]);
+  });
+});
+
 describe("UpdateNotifier", () => {
   const behind: UpdateStatus = {
-    name: NAME, runningVersion: "1.3.8", latestVersion: "1.4.0", checkedAt: "2026-11-17T12:00:00Z",
+    name: NAME,
+    runningVersion: "1.3.8",
+    latestVersion: "1.4.0",
+    checkedAt: "2026-11-17T12:00:00Z",
+    source: "live",
   };
 
   test("the notice goes on the first successful result only", async () => {
@@ -308,7 +409,11 @@ describe("mcp_info", () => {
 
   test("report carries update fields and env names, never values", () => {
     const status: UpdateStatus = {
-      name: NAME, runningVersion: "1.3.8", latestVersion: "1.4.0", checkedAt: "2026-11-17T12:00:00Z",
+      name: NAME,
+      runningVersion: "1.3.8",
+      latestVersion: "1.4.0",
+      checkedAt: "2026-11-17T12:00:00Z",
+      source: "live",
     };
     const report = buildMcpInfo({
       server: "discord", identity, git: null, status, env: secrets, envPrefixes: ["DISCORD_"],
@@ -319,6 +424,7 @@ describe("mcp_info", () => {
       updateAvailable: true,
       checkedAt: "2026-11-17T12:00:00Z",
       pinCommand: `bunx ${NAME}@1.4.0`,
+      source: "live",
       notChecked: null,
     });
     expect(report.provenance).toEqual({ kind: "installed", packageRoot: "/x", git: null });
@@ -328,6 +434,27 @@ describe("mcp_info", () => {
     for (const value of Object.values(secrets)) expect(text).not.toContain(value);
   });
 
+  for (const [label, latestVersion] of [
+    ["equal to", "1.3.8"],
+    ["older than", "1.2.0"],
+  ] as const) {
+    test(`pinCommand is null when latest is ${label} the running version`, () => {
+      const report = buildMcpInfo({
+        server: "discord",
+        identity,
+        git: null,
+        status: {
+          name: NAME, runningVersion: "1.3.8", latestVersion, checkedAt: "2026-11-17T12:00:00Z", source: "cache",
+        },
+        env: {},
+        envPrefixes: [],
+      });
+      expect(report.update).toMatchObject({
+        latestVersion, updateAvailable: false, pinCommand: null, source: "cache",
+      });
+    });
+  }
+
   test("report explains why no check ran", () => {
     const build = (name: string, env: Record<string, string>) =>
       (buildMcpInfo({
@@ -335,11 +462,14 @@ describe("mcp_info", () => {
       }).update as { notChecked: string }).notChecked;
     expect(build("mcp-discord", {})).toBe("'mcp-discord' is not a name Jiyuu publishes");
     expect(build(NAME, { JIYUU_MCP_NO_UPDATE_CHECK: "1" })).toBe("disabled by JIYUU_MCP_NO_UPDATE_CHECK");
-    expect(build(NAME, {})).toBe("no registry result yet (offline, pending, or failed)");
+    expect(build(NAME, {})).toBe("registry unreachable and no cached result");
   });
 
   test("this package's tool call reports itself as a source checkout", async () => {
-    const info = new JiyuuMcpInfo("discord", join(import.meta.dir, ".."), ["DISCORD_"], async () => null);
+    const info = new JiyuuMcpInfo("discord", join(import.meta.dir, ".."), ["DISCORD_"], {
+      startup: async () => null,
+      live: async () => null,
+    });
     const result = await info.callTool(secrets);
     const report = JSON.parse(result.content[0].text);
 
@@ -347,6 +477,66 @@ describe("mcp_info", () => {
     expect(report.provenance.kind).toBe("source-checkout");
     expect(report.provenance.git.commit).toMatch(/^[0-9a-f]{40}$/);
     expect(result.content[0].text).not.toContain(secrets.DISCORD_TOKEN);
+  });
+});
+
+describe("mcp_info tool call", () => {
+  function packageRoot(version: string): string {
+    const root = tempDir();
+    writeFileSync(join(root, "package.json"), JSON.stringify({ name: NAME, version }));
+    return root;
+  }
+
+  async function report(info: JiyuuMcpInfo) {
+    const result = await info.callTool({});
+    return JSON.parse(result.content[0].text).update;
+  }
+
+  test("each call reads a real HTTP registry live, past a stale cache", async () => {
+    let latest = "4.5.2";
+    const server = Bun.serve({ port: 0, fetch: () => new Response(npmBody(latest)) });
+    const cacheDir = tempDir();
+    seedCache(cacheDir, "4.4.3", new Date());
+    try {
+      const fetch: Fetcher = (_url, timeoutMs) => fetchText(`http://127.0.0.1:${server.port}/`, timeoutMs);
+      const info = new JiyuuMcpInfo("discord", packageRoot("4.5.1"), [], {
+        startup: async () => null,
+        live: (env) => checkLatest(NAME, "4.5.1", { fetch, env, cacheDir }),
+      });
+
+      expect(await report(info)).toMatchObject({
+        latestVersion: "4.5.2", updateAvailable: true, pinCommand: `bunx ${NAME}@4.5.2`, source: "live",
+      });
+      latest = "4.5.3";
+      expect(await report(info)).toMatchObject({ latestVersion: "4.5.3", source: "live" });
+      expect(readCacheFile(cacheDir).latestVersion).toBe("4.5.3");
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("a failed registry read reports the cached answer as such", async () => {
+    const cacheDir = tempDir();
+    const fetch = recordingFetcher(new Error("ECONNREFUSED")).fetch;
+    const info = new JiyuuMcpInfo("discord", packageRoot("4.5.1"), [], {
+      startup: async () => null,
+      live: (env) => checkLatest(NAME, "4.5.1", { fetch, env, cacheDir }),
+    });
+
+    seedCache(cacheDir, "4.5.1", NOW);
+    expect(await report(info)).toEqual({
+      latestVersion: "4.5.1",
+      updateAvailable: false,
+      checkedAt: NOW.toISOString(),
+      pinCommand: null,
+      source: "cache",
+      notChecked: null,
+    });
+
+    seedCache(cacheDir, "4.4.3", NOW);
+    expect(await report(info)).toMatchObject({
+      latestVersion: null, pinCommand: null, source: null, notChecked: "registry unreachable and no cached result",
+    });
   });
 });
 

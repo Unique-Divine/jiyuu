@@ -2,7 +2,6 @@
 
 from telegram_mcp import server_info
 from telegram_mcp.runtime import *
-from telegram_mcp.update_check import FETCH_TIMEOUT_SECONDS
 
 
 @mcp.tool(annotations=ToolAnnotations(title="MCP Info", readOnlyHint=True))
@@ -15,14 +14,15 @@ async def mcp_info() -> str:
     names, paths and short fingerprints only.
     """
     identity = server_info.current_identity()
-    notifier = server_info.update_notifier()
-    notifier.start()
-    status = await asyncio.to_thread(notifier.status, FETCH_TIMEOUT_SECONDS + 0.5)
-    git = (
-        await asyncio.to_thread(server_info.git_state, identity.source_root)
-        if identity.source_root
-        else None
-    )
+    env = dict(os.environ)
+    # PyPI on every call, so a long-running server never reports a stale answer.
+    status_task = asyncio.to_thread(server_info.live_update_check, identity, env)
+    if identity.source_root:
+        status, git = await asyncio.gather(
+            status_task, asyncio.to_thread(server_info.git_state, identity.source_root)
+        )
+    else:
+        status, git = await status_task, None
     report = server_info.build_mcp_info(
         identity, status=status, git=git, clients=clients, env=os.environ
     )
