@@ -1230,7 +1230,19 @@ void cbm_gbuf_settle_variants(cbm_gbuf_t *gb) {
  * The case left is Chialisp, whose `defmacro` / `defmac` defs are labelled
  * "Macro" under a plain QN: a macro and a `defun` of one name in one file, or
  * in a same-stem `.clsp` / `.clib` pair (one module QN). */
-static int gb_qn_claim_rank(const char *label) {
+/* A GraphQL field-path Route from the schema (pass_route_nodes.c) shares its
+ * QN with the placeholder Route a client selecting that field upserts (no
+ * file, props {"source":"graphql"}). Only the schema's carries the location,
+ * type and deprecation, so it outranks any other claim in either order. */
+static bool gb_is_graphql_schema_route(const char *label, const char *props) {
+    return label && strcmp(label, "Route") == 0 && props &&
+           strstr(props, "\"source\":\"graphql_schema\"") != NULL;
+}
+
+static int gb_qn_claim_rank(const char *label, const char *props) {
+    if (gb_is_graphql_schema_route(label, props)) {
+        return 2;
+    }
     return (label && strcmp(label, "Macro") == 0) ? 0 : 1;
 }
 
@@ -1327,10 +1339,12 @@ int64_t cbm_gbuf_upsert_node(cbm_gbuf_t *gb, const char *label, const char *name
          * of the same entity with new content) replaces the earlier one,
          * deterministically, because intra-file arrival order is fixed. A
          * full tie is the same entity re-upserted → refresh in place.
-         * Ahead of all of these, a definition beats a macro
-         * (gb_qn_claim_rank). Kind-disambiguated QNs (the real cure) remain
+         * Ahead of all of these, a definition beats a macro and a GraphQL
+         * schema Route beats its client placeholder (gb_qn_claim_rank).
+         * Kind-disambiguated QNs (the real cure) remain
          * a follow-up. */
-        int c = gb_qn_claim_rank(existing->label) - gb_qn_claim_rank(label);
+        int c = gb_qn_claim_rank(existing->label, existing->properties_json) -
+                gb_qn_claim_rank(label, properties_json);
         if (c == 0) {
             c = strcmp(file_path ? file_path : "", existing->file_path ? existing->file_path : "");
         }
@@ -2116,7 +2130,8 @@ static void merge_update_existing(cbm_gbuf_t *dst, cbm_gbuf_node_t *existing,
          * name/label — one total order, commutative, scheduling-free; a full
          * tie is the same entity → refresh from src. A definition beats a
          * macro ahead of all of these (gb_qn_claim_rank). */
-        int c = gb_qn_claim_rank(existing->label) - gb_qn_claim_rank(sn->label);
+        int c = gb_qn_claim_rank(existing->label, existing->properties_json) -
+                gb_qn_claim_rank(sn->label, sn->properties_json);
         if (c == 0) {
             c = strcmp(sn->file_path ? sn->file_path : "",
                        existing->file_path ? existing->file_path : "");

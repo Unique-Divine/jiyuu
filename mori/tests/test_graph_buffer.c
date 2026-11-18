@@ -721,6 +721,57 @@ TEST(gbuf_merge_definition_beats_same_qn_macro_c1) {
     PASS();
 }
 
+/* A repo holding a GraphQL schema and a client that selects one of its
+ * fields: the client's GRAPHQL_CALLS upserts the field's Route as a
+ * placeholder (no file, {"source":"graphql"}), the route pass upserts the
+ * same QN from the schema. The schema's Route keeps its file, line and props
+ * (type, deprecation) in either order, and both upserts name one node. The
+ * empty file path used to win the tie and drop the schema's metadata. */
+static const char GB_GQL_SCHEMA_PROPS[] =
+    "{\"source\":\"graphql_schema\",\"schema_type\":\"String\",\"deprecated\":true,"
+    "\"deprecation_reason\":\"gone\"}";
+
+static int64_t gb_gql_client_route(cbm_gbuf_t *gb) {
+    return cbm_gbuf_upsert_node(gb, "Route", "Query.ping", "__graphql__Query.ping", "", 0, 0,
+                                "{\"source\":\"graphql\"}");
+}
+
+static int64_t gb_gql_schema_route(cbm_gbuf_t *gb) {
+    return cbm_gbuf_upsert_node(gb, "Route", "Query.ping", "__graphql__Query.ping",
+                                "graph/schema.graphqls", 2, 2, GB_GQL_SCHEMA_PROPS);
+}
+
+static int gb_gql_schema_route_kept(const cbm_gbuf_t *gb) {
+    const cbm_gbuf_node_t *n = cbm_gbuf_find_by_qn(gb, "__graphql__Query.ping");
+    return n && n->file_path && strcmp(n->file_path, "graph/schema.graphqls") == 0 &&
+           n->start_line == 2 && n->properties_json &&
+           strcmp(n->properties_json, GB_GQL_SCHEMA_PROPS) == 0;
+}
+
+TEST(gbuf_graphql_schema_route_beats_client_placeholder) {
+    for (int order = 0; order < 2; order++) {
+        cbm_gbuf_t *gb = cbm_gbuf_new("test", "/tmp");
+        int64_t first = order == 0 ? gb_gql_client_route(gb) : gb_gql_schema_route(gb);
+        int64_t second = order == 0 ? gb_gql_schema_route(gb) : gb_gql_client_route(gb);
+        ASSERT_GT(first, 0);
+        ASSERT_EQ(second, first);
+        ASSERT_TRUE(gb_gql_schema_route_kept(gb));
+        cbm_gbuf_free(gb);
+    }
+    /* The parallel merge (worker gbuf -> main gbuf), in both directions. */
+    for (int order = 0; order < 2; order++) {
+        cbm_gbuf_t *dst = cbm_gbuf_new("test", "/tmp");
+        cbm_gbuf_t *src = cbm_gbuf_new("test", "/tmp");
+        (void)gb_gql_client_route(order == 0 ? dst : src);
+        (void)gb_gql_schema_route(order == 0 ? src : dst);
+        ASSERT_EQ(cbm_gbuf_merge(dst, src), 0);
+        ASSERT_TRUE(gb_gql_schema_route_kept(dst));
+        cbm_gbuf_free(dst);
+        cbm_gbuf_free(src);
+    }
+    PASS();
+}
+
 /* deckhouse pkg/log: a package function and three methods share the QN
  * `pkg.log.Error` (Go method QNs carry no receiver). Every definition that
  * collapsed into the node is a span a change can land in, so `variants`
@@ -1539,6 +1590,7 @@ SUITE(graph_buffer) {
     RUN_TEST(gbuf_upsert_same_qn_updates_all_fields);
     RUN_TEST(gbuf_upsert_definition_beats_same_qn_macro_c1);
     RUN_TEST(gbuf_merge_definition_beats_same_qn_macro_c1);
+    RUN_TEST(gbuf_graphql_schema_route_beats_client_placeholder);
     RUN_TEST(gbuf_variants_cross_label_order_independent);
     RUN_TEST(gbuf_variants_keep_every_span);
     RUN_TEST(gbuf_variants_travel_through_worker_merge);
