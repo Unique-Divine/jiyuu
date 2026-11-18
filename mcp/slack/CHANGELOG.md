@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.5.1] - 2026-11-18
+
+### Fixed
+- `slack_update_message` and `slack_update_message_unsafe` stored `<url|label>` links as literal `&lt;url|label&gt;` text, because `chat.update` defaults to `parse=client`. `<@U…>` and `<#C…>` mentions already survived. Edits now send `parse: "none"`, so links work as they do in `slack_send_message`. Slack doesn't auto-link bare URLs or domains in an edit; write `<https://…>` to make a link. A live probe (`scripts/probe-message-markup.js`) recorded what Slack stores for each variant in `test/fixtures/message-markup-live.json`, and the tests replay it ([jiyuu#138](https://github.com/Unique-Divine/jiyuu/issues/138)).
+
+### Changed
+- The `slack_send_message` description and `docs/API.md` note what the live probe saw: Slack linked `discord.gg/saidotfun` inside inline code, and in ``(`discord.gg/saidotfun`).`` the link took the closing backtick.
+
+## [4.5.0] - 2026-11-18
+
+### Added
+- `slack_delete_message` wraps `chat.delete` and returns the deleted text. Before deleting, it checks that the signed-in user sent the message, that required argument `expected_text` matches the message's text, and that the message is less than 7 days old (`SLACK_MCP_EDIT_DELETE_MAX_AGE_HOURS` changes the window). It refuses with `not_own_message`, `text_mismatch`, or `message_too_old`, since an admin's session token could otherwise delete other people's messages and injected Slack text could steer an agent to delete old records.
+- `slack_delete_message_unsafe` runs the same delete without the age window, for deliberate cleanup of older messages. It's a separate tool so clients that grant permissions per tool, such as Claude Code, prompt the user on every call.
+- `slack_update_message` wraps `chat.update`, replaces a message's text, and returns the old and new text. It runs the same checks as `slack_delete_message`, with `expected_text` set to the text being replaced, and refuses with `not_own_message`, `text_mismatch`, or `message_too_old`.
+- `slack_update_message_unsafe` runs the same edit without the age window, for deliberate cleanup of older messages.
+- The HTTP transport hides and refuses the `_unsafe` tools unless `SLACK_MCP_ENABLE_UNSAFE_TOOLS=true`, because HTTP clients may not prompt per tool. Stdio keeps them by default.
+
 ## [4.4.3] - 2026-07-03
 
 ### Added

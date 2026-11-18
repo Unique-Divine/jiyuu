@@ -14,10 +14,8 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 
-import { TOOLS } from "../lib/tools.js";
-import { TOOL_HANDLERS } from "../lib/handlers.js";
+import { createHttpToolHandlers } from "../lib/http-tools.js";
 import { RELEASE_VERSION } from "../lib/public-metadata.js";
-import { isAuthDeath, lifeboatResponse } from "../lib/lifeboat.js";
 
 const SERVER_NAME = "slack-mcp-server";
 const SERVER_VERSION = RELEASE_VERSION;
@@ -72,53 +70,11 @@ const server = new Server(
   { capabilities: { tools: {} } }
 );
 
-// Register tool list handler
-server.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: TOOLS
-}));
-
-// Register tool call handler
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const { name, arguments: args } = request.params;
-
-  try {
-    // Shared dispatch map keeps this transport in lockstep with the stdio
-    // server and the advertised TOOLS list.
-    const handler = TOOL_HANDLERS[name];
-    if (!handler) {
-      return {
-        content: [{
-          type: "text",
-          text: JSON.stringify({
-            status: "error",
-            code: "unknown_tool",
-            message: `Unknown tool: ${name}`,
-            next_action: "Call tools/list to inspect available tool names."
-          }, null, 2)
-        }],
-        isError: true
-      };
-    }
-    return await handler(args);
-  } catch (error) {
-    // OAuth Lifeboat: dead session token → recovery guidance, not a raw error.
-    if (isAuthDeath(error)) {
-      return lifeboatResponse(error);
-    }
-    return {
-      content: [{
-        type: "text",
-        text: JSON.stringify({
-          status: "error",
-          code: "tool_call_failed",
-          message: String(error?.message || error),
-          next_action: "Retry with validated input payload."
-        }, null, 2)
-      }],
-      isError: true
-    };
-  }
-});
+// Tool list and dispatch. The _unsafe tools stay hidden over HTTP unless
+// SLACK_MCP_ENABLE_UNSAFE_TOOLS=true (see lib/http-tools.js).
+const httpTools = createHttpToolHandlers(process.env);
+server.setRequestHandler(ListToolsRequestSchema, httpTools.listTools);
+server.setRequestHandler(CallToolRequestSchema, httpTools.callTool);
 
 // Create HTTP transport
 const transport = new StreamableHTTPServerTransport({

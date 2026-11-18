@@ -120,7 +120,7 @@ cat > ~/Library/LaunchAgents/com.slack-web-api.plist << 'EOF'
     <key>ProgramArguments</key>
     <array>
         <string>/Users/YOUR_USERNAME/.bun/bin/bunx</string>
-        <string>@uniquedivine/mcp-slack@4.4.3</string>
+        <string>@uniquedivine/mcp-slack@4.5.1</string>
         <string>web</string>
     </array>
     <key>RunAtLoad</key>

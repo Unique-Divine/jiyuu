@@ -8,6 +8,11 @@ Next-feature priorities for slack-mcp-server, ranked by (value × differentiatio
 
 Wraps `chat.update` and `chat.delete`. The server can post via `chat.postMessage` but cannot edit or delete — the most-felt gap for any agent that writes to Slack. The handlers are structurally identical to the existing send path; a session token can only edit or delete the user's own messages, so the blast radius is contained, and both reuse the `destructive` annotation already in place. No new auth, transport, or dependency. Maximum user-pain relief for near-zero investment.
 
+Status:
+
+- [x] `slack_delete_message`: shipped in 4.5.0 ([jiyuu#128](https://github.com/Unique-Divine/jiyuu/issues/128))
+- [x] `slack_update_message`: shipped in 4.5.0 ([jiyuu#133](https://github.com/Unique-Divine/jiyuu/issues/133))
+
 ## Runners-up (all cheap, all funnel-feeding)
 
 | Feature | Effort | Why |

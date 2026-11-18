@@ -22,6 +22,16 @@ import {
 } from "./workflow-store.js";
 import { withRichMessageFields } from "./rich-message-fields.js";
 import { isAuthDeath, lifeboatResponse } from "./lifeboat.js";
+import {
+  checkOwnMessage,
+  createRetryTracker,
+  findMessage,
+  invalidArgument,
+  isGoneForSelf,
+  sessionChangedResult,
+  validateTargetArgs,
+  writeFailureResult,
+} from "./message-ownership.js";
 
 // ============ Utilities ============
 
@@ -570,6 +580,173 @@ export async function handleSendMessage(args) {
 }
 
 /**
+ * Re-read a message after chat.delete reported message_not_found. A lookup
+ * that runs out of pages can't prove the message is gone, so it returns
+ * false and the original error is reported.
+ */
+async function isGoneOnReread(channel, timestamp, selfId) {
+  try {
+    return isGoneForSelf(await findMessage(channel, timestamp), selfId);
+  } catch (error) {
+    if (error?.message === "lookup_incomplete") return false;
+    throw error;
+  }
+}
+
+/**
+ * Delete message handler. Refuses messages the signed-in user didn't send
+ * before calling chat.delete, and maps known Slack errors to clear results.
+ */
+export async function handleDeleteMessage(args) {
+  return deleteMessage(args, { ignoreAge: false });
+}
+
+/**
+ * slack_delete_message_unsafe: the same delete with every guard except the
+ * age window, for deliberate cleanup of older messages.
+ */
+export async function handleDeleteMessageUnsafe(args) {
+  return deleteMessage(args, { ignoreAge: true });
+}
+
+async function deleteMessage(args, { ignoreAge }) {
+  const invalid = validateTargetArgs(args);
+  if (invalid) return invalid;
+
+  const channel = args.channel_id;
+  const timestamp = args.timestamp;
+  const details = { channel, timestamp };
+
+  const ownership = await checkOwnMessage(channel, timestamp, {
+    expectedText: args.expected_text,
+    ignoreAge,
+    unsafeTool: "slack_delete_message_unsafe"
+  });
+  if (!ownership.ok) return ownership.result;
+  const oldText = ownership.message.text ?? "";
+
+  const sessionChanged = sessionChangedResult(ownership, details);
+  if (sessionChanged) return sessionChanged;
+
+  const tracker = createRetryTracker();
+  try {
+    // No auth retry: a retry could swap in another Chrome session and run
+    // the delete as a user the guard never checked.
+    // expectedToken also stops a network or rate-limit retry from running
+    // under a session another call swapped in during the backoff.
+    await slackAPI("chat.delete", { channel, ts: timestamp }, {
+      logger: tracker.logger,
+      retryOnAuthFail: false,
+      expectedToken: ownership.sessionToken
+    });
+  } catch (error) {
+    // The guard just found the message, so message_not_found here means it
+    // vanished in between. After a network retry, the first attempt most
+    // likely landed; re-check before reporting either way. A thread parent
+    // leaves a tombstone at the same ts, which also counts as gone.
+    if (
+      error?.message === "message_not_found" &&
+      await isGoneOnReread(channel, timestamp, ownership.selfId)
+    ) {
+      return asMcpJson({
+        status: "probably_deleted",
+        ...details,
+        old_text: oldText,
+        note: tracker.retried
+          ? "Probably deleted: a network retry got message_not_found, so the first attempt likely landed. A re-check no longer finds the message."
+          : "Probably deleted: Slack reported message_not_found and a re-check no longer finds the message."
+      });
+    }
+    const mapped = writeFailureResult(error, details, tracker);
+    if (mapped) return mapped;
+    throw error;
+  }
+
+  return asMcpJson({
+    status: "deleted",
+    ...details,
+    old_text: oldText
+  });
+}
+
+/**
+ * Update message handler. Sends text only, with parse=none so Slack markup
+ * such as <url|label> survives the edit. Runs the shared target checks
+ * before calling chat.update, and maps known Slack errors to clear results.
+ */
+export const UPDATE_TEXT_MAX_CHARS = 4000;
+
+export async function handleUpdateMessage(args) {
+  return updateMessage(args, { ignoreAge: false });
+}
+
+/**
+ * slack_update_message_unsafe: the same edit with every guard except the
+ * age window, for deliberate cleanup of older messages.
+ */
+export async function handleUpdateMessageUnsafe(args) {
+  return updateMessage(args, { ignoreAge: true });
+}
+
+async function updateMessage(args, { ignoreAge }) {
+  const invalid = validateTargetArgs(args);
+  if (invalid) return invalid;
+  if (typeof args.text !== "string" || args.text.trim() === "") {
+    return invalidArgument("text", "text must be a non-empty string.");
+  }
+  if ([...args.text].length > UPDATE_TEXT_MAX_CHARS) {
+    return invalidArgument("text", `text must be at most ${UPDATE_TEXT_MAX_CHARS} characters.`);
+  }
+
+  const channel = args.channel_id;
+  const timestamp = args.timestamp;
+  const details = { channel, timestamp };
+
+  const ownership = await checkOwnMessage(channel, timestamp, {
+    expectedText: args.expected_text,
+    ignoreAge,
+    unsafeTool: "slack_update_message_unsafe"
+  });
+  if (!ownership.ok) return ownership.result;
+
+  const sessionChanged = sessionChangedResult(ownership, details);
+  if (sessionChanged) return sessionChanged;
+
+  const tracker = createRetryTracker();
+  let result;
+  try {
+    // No auth retry: a retry could swap in another Chrome session and run
+    // the edit as a user the guard never checked.
+    // expectedToken also stops a network or rate-limit retry from running
+    // under a session another call swapped in during the backoff.
+    // parse: "none" keeps <url|label> links. chat.update defaults to
+    // parse=client, which stores them as literal &lt;…&gt; text; see
+    // test/fixtures/message-markup-live.json.
+    result = await slackAPI("chat.update", {
+      channel,
+      ts: timestamp,
+      text: args.text,
+      parse: "none"
+    }, {
+      logger: tracker.logger,
+      retryOnAuthFail: false,
+      expectedToken: ownership.sessionToken
+    });
+  } catch (error) {
+    const mapped = writeFailureResult(error, details, tracker);
+    if (mapped) return mapped;
+    throw error;
+  }
+
+  return asMcpJson({
+    status: "updated",
+    ...details,
+    old_text: ownership.message.text ?? "",
+    text: result.text ?? args.text
+  });
+}
+
+/**
  * Get thread handler
  */
 export async function handleGetThread(args) {
@@ -928,6 +1105,10 @@ export const TOOL_HANDLERS = Object.freeze({
   slack_search_messages: handleSearchMessages,
   slack_users_info: handleUsersInfo,
   slack_send_message: handleSendMessage,
+  slack_delete_message: handleDeleteMessage,
+  slack_delete_message_unsafe: handleDeleteMessageUnsafe,
+  slack_update_message: handleUpdateMessage,
+  slack_update_message_unsafe: handleUpdateMessageUnsafe,
   slack_get_thread: handleGetThread,
   slack_list_users: handleListUsers,
   slack_add_reaction: handleAddReaction,
