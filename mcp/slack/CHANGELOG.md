@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [4.5.1] - 2026-11-18
 
 ### Fixed
-- `slack_update_message` and `slack_update_message_unsafe` kept `<url|label>` links only as literal `&lt;url|label&gt;` text, because `chat.update` defaults to `parse=client`. Edits now send `parse: "none"`, so links and `<@U…>`, `<#C…>` mentions work as they do in `slack_send_message`. Slack doesn't auto-link bare URLs or domains in an edit; write `<https://…>` to make a link. A live probe (`scripts/probe-message-markup.js`) recorded what Slack stores for each variant in `test/fixtures/message-markup-live.json`, and the tests replay it ([jiyuu#138](https://github.com/Unique-Divine/jiyuu/issues/138)).
+- `slack_update_message` and `slack_update_message_unsafe` stored `<url|label>` links as literal `&lt;url|label&gt;` text, because `chat.update` defaults to `parse=client`. `<@U…>` and `<#C…>` mentions already survived. Edits now send `parse: "none"`, so links work as they do in `slack_send_message`. Slack doesn't auto-link bare URLs or domains in an edit; write `<https://…>` to make a link. A live probe (`scripts/probe-message-markup.js`) recorded what Slack stores for each variant in `test/fixtures/message-markup-live.json`, and the tests replay it ([jiyuu#138](https://github.com/Unique-Divine/jiyuu/issues/138)).
 
 ### Changed
 - The `slack_send_message` description and `docs/API.md` note what the live probe saw: Slack linked `discord.gg/saidotfun` inside inline code, and in ``(`discord.gg/saidotfun`).`` the link took the closing backtick.
