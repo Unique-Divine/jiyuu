@@ -11,9 +11,9 @@ If first-run setup fails, check command resolution in an empty directory:
 
 ```bash
 cd "$(mktemp -d)"
-bunx @uniquedivine/mcp-slack --version
-bunx @uniquedivine/mcp-slack --help
-bunx @uniquedivine/mcp-slack --doctor
+bunx @uniquedivine/mcp-slack@latest --version
+bunx @uniquedivine/mcp-slack@latest --help
+bunx @uniquedivine/mcp-slack@latest --doctor
 ```
 
 Flag `--doctor` exits `0` when ready, `1` for missing credentials, `2` for
@@ -38,10 +38,10 @@ The server looks for tokens in this order:
 
 **Fix on macOS:** With Slack open in a Chrome tab, call tool
 `slack_refresh_tokens`, or run
-`bunx @uniquedivine/mcp-slack --refresh-tokens`.
+`bunx @uniquedivine/mcp-slack@latest --refresh-tokens`.
 
 **Fix everywhere else:** Chrome auto-refresh runs only on macOS. Sign in to
-Slack in a browser, run `bunx @uniquedivine/mcp-slack --setup`, and paste
+Slack in a browser, run `bunx @uniquedivine/mcp-slack@latest --setup`, and paste
 fresh values. [Manual Extraction](SETUP.md#manual-extraction) shows where to
 find them. Then reconnect the MCP server.
 

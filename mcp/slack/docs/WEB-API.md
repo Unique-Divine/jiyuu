@@ -8,7 +8,7 @@ For MCP over HTTP, use `bun src/cli.js http` instead.
 ## Start the Server
 
 ```bash
-bunx @uniquedivine/mcp-slack@4.5.3 web
+bunx @uniquedivine/mcp-slack@latest web
 # From a source checkout:
 bun run web
 ```
@@ -32,7 +32,7 @@ cat > ~/Library/LaunchAgents/com.slack-web-api.plist << 'EOF'
     <key>ProgramArguments</key>
     <array>
         <string>/Users/YOUR_USERNAME/.bun/bin/bunx</string>
-        <string>@uniquedivine/mcp-slack@4.5.3</string>
+        <string>@uniquedivine/mcp-slack@latest</string>
         <string>web</string>
     </array>
     <key>RunAtLoad</key>
@@ -81,7 +81,7 @@ API_KEY="${SLACK_API_KEY:-$(cat ~/.slack-mcp-api-key)}"
 
 To use a custom key:
 ```bash
-SLACK_API_KEY=your-custom-key bunx @uniquedivine/mcp-slack@4.5.3 web
+SLACK_API_KEY=your-custom-key bunx @uniquedivine/mcp-slack@latest web
 ```
 
 ---

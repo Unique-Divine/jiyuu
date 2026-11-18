@@ -49,13 +49,13 @@ Intro.
 Run it:
 
 \`\`\`sh
-bunx @example/alpha@1.0.0
+bunx @example/alpha@latest
 ## not a heading inside a fence
 \`\`\`
 
 ### Update
 
-Change the pin.
+Restart it.
 
 ## Install From Source
 
@@ -487,7 +487,9 @@ describe("manifest content", () => {
       slug: "alpha-mcp",
       title: "Alpha MCP",
       registry: "npm",
-      installCommand: "bunx @example/alpha@1.0.0",
+      // The version field tracks the package; the command tracks @latest.
+      version: "1.0.0",
+      installCommand: "bunx @example/alpha@latest",
       registryUrl: "https://www.npmjs.com/package/@example/alpha",
       envVars: [{ name: "ALPHA_TOKEN", required: true, secret: true }],
       toolCount: 3,
@@ -515,7 +517,8 @@ describe("manifest content", () => {
     const beta = manifestOf("beta")
     expect(beta).toMatchObject({
       registry: "pypi",
-      installCommand: "uvx example-beta@2.0.0",
+      version: "2.0.0",
+      installCommand: "uvx example-beta@latest",
       registryUrl: "https://pypi.org/project/example-beta/",
       license: "Apache-2.0",
       envVars: [

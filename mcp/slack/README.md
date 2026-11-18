@@ -10,12 +10,12 @@ Maintained by [Unique Divine](https://uniquedivine.com) in
 ## Install
 
 Requirements: [Bun](https://bun.sh) 1.4.3 or newer and a Slack account signed
-in through a browser. Store credentials once, then run the published package
-with an exact version pin:
+in through a browser. Store credentials once, then run the latest published
+package:
 
 ```sh
-bunx @uniquedivine/mcp-slack@4.5.3 --setup
-bunx @uniquedivine/mcp-slack@4.5.3
+bunx @uniquedivine/mcp-slack@latest --setup
+bunx @uniquedivine/mcp-slack@latest
 ```
 
 Flag `--setup` writes file `~/.slack-mcp-tokens.json`. To pass environment
@@ -23,12 +23,13 @@ variables `SLACK_TOKEN` and `SLACK_COOKIE` instead, see
 [Authenticate](#authenticate). CI in
 [Unique-Divine/jiyuu](https://github.com/Unique-Divine/jiyuu) builds and
 publishes `@uniquedivine/mcp-slack` to npm from this directory when its version
-changes on `main`. The version pin selects the exact reviewed release that runs.
+changes on `main`. With tag `@latest`, command `bunx` checks npm at each
+launch and runs the newest release.
 
 ### Claude Code
 
 ```sh
-claude mcp add slack -- bunx @uniquedivine/mcp-slack@4.5.3
+claude mcp add slack -- bunx @uniquedivine/mcp-slack@latest
 ```
 
 ### Codex
@@ -38,7 +39,7 @@ Add this entry to file `~/.codex/config.toml`:
 ```toml
 [mcp_servers.slack]
 command = "bunx"
-args = ["@uniquedivine/mcp-slack@4.5.3"]
+args = ["@uniquedivine/mcp-slack@latest"]
 ```
 
 ### Cursor
@@ -51,7 +52,7 @@ a project:
   "mcpServers": {
     "slack": {
       "command": "bunx",
-      "args": ["@uniquedivine/mcp-slack@4.5.3"]
+      "args": ["@uniquedivine/mcp-slack@latest"]
     }
   }
 }
@@ -59,12 +60,15 @@ a project:
 
 ### Update
 
-1. Find the newest version with command
-   `npm view @uniquedivine/mcp-slack version`.
-2. Change the `@4.5.3` pin in the client configuration to that version.
-3. Restart the MCP server in the client, or restart the client. In Claude
-   Code, run `/mcp` and reconnect the server. Command `bunx` downloads the new
-   version on the next launch.
+Restart the MCP server in the client, or restart the client. In Claude Code,
+run `/mcp` and reconnect the server. Because the configuration names
+`@latest`, command `bunx` downloads any newer release on that launch, so the
+configuration needs no edit.
+
+A configuration copied from an older version of this README names an exact
+version, such as `@uniquedivine/mcp-slack@4.5.3`, and keeps running that
+version. Replace the version with `@latest` once, then restart. In Claude Code,
+run `claude mcp remove slack`, then rerun the `claude mcp add` command above.
 
 The token store and workflow files live in your home directory, so an update
 needs no new credentials. Tool `mcp_info` reports the running version and
@@ -118,7 +122,7 @@ value of cookie `d`. Run the setup helper, which stores them outside the
 source tree:
 
 ```sh
-bunx @uniquedivine/mcp-slack@4.5.3 --setup
+bunx @uniquedivine/mcp-slack@latest --setup
 ```
 
 Environment variables `SLACK_TOKEN` and `SLACK_COOKIE` take precedence over
@@ -147,7 +151,7 @@ Chrome auto-refresh runs only on macOS. On Linux, Windows, and WSL, refresh by
 hand when a tool returns `invalid_auth` or `slack_auth_expired`:
 
 1. Sign in to Slack at <https://app.slack.com> in a browser.
-2. Run `bunx @uniquedivine/mcp-slack@4.5.3 --setup` and paste the token and
+2. Run `bunx @uniquedivine/mcp-slack@latest --setup` and paste the token and
    cookie when it asks. [Manual Extraction](docs/SETUP.md#manual-extraction)
    shows where to find them.
 3. If you set `SLACK_TOKEN` and `SLACK_COOKIE`, update both or unset both.

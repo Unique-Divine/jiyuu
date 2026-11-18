@@ -565,8 +565,9 @@ export function buildManifest(
     registry: source.registry,
     package: source.package,
     version: source.version,
-    installCommand:
-      `${npm ? "bunx" : "uvx"} ${source.package}@` + source.version,
+    // Tag @latest makes bunx and uvx check the registry at each launch.
+    // A bare uvx name reuses its first cached install and never updates.
+    installCommand: `${npm ? "bunx" : "uvx"} ${source.package}@latest`,
     runtime: source.runtime,
     license: source.license,
     sourceUrl: `${REPO_URL}/tree/main/mcp/${source.folder}`,

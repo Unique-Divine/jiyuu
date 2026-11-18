@@ -12,21 +12,22 @@ at v1.4.0 and run from TypeScript source with Bun. Original source and license:
 
 Requirements: [Bun](https://bun.sh) 1.4.3 or newer and a Discord bot token.
 [Discord Bot Setup](#discord-bot-setup) explains how to get the token. Run the
-published package with an exact version pin:
+latest published package:
 
 ```sh
-DISCORD_TOKEN=your_discord_bot_token bunx @uniquedivine/mcp-discord@1.3.9
+DISCORD_TOKEN=your_discord_bot_token bunx @uniquedivine/mcp-discord@latest
 ```
 
 CI in [Unique-Divine/jiyuu](https://github.com/Unique-Divine/jiyuu) builds and
 publishes `@uniquedivine/mcp-discord` to npm from this directory when its
-version changes on `main`. The version pin selects the exact reviewed release that runs.
+version changes on `main`. With tag `@latest`, command `bunx` checks npm at
+each launch and runs the newest release.
 
 ### Claude Code
 
 ```sh
 claude mcp add discord --env DISCORD_TOKEN=your_discord_bot_token \
-  -- bunx @uniquedivine/mcp-discord@1.3.9
+  -- bunx @uniquedivine/mcp-discord@latest
 ```
 
 ### Codex
@@ -36,7 +37,7 @@ Add this entry to file `~/.codex/config.toml`:
 ```toml
 [mcp_servers.discord]
 command = "bunx"
-args = ["@uniquedivine/mcp-discord@1.3.9"]
+args = ["@uniquedivine/mcp-discord@latest"]
 env = { DISCORD_TOKEN = "your_discord_bot_token" }
 ```
 
@@ -50,7 +51,7 @@ a project:
   "mcpServers": {
     "discord": {
       "command": "bunx",
-      "args": ["@uniquedivine/mcp-discord@1.3.9"],
+      "args": ["@uniquedivine/mcp-discord@latest"],
       "env": { "DISCORD_TOKEN": "your_discord_bot_token" }
     }
   }
@@ -59,12 +60,15 @@ a project:
 
 ### Update
 
-1. Find the newest version with command
-   `npm view @uniquedivine/mcp-discord version`.
-2. Change the `@1.3.9` pin in the client configuration to that version.
-3. Restart the MCP server in the client, or restart the client. In Claude
-   Code, run `/mcp` and reconnect the server. Command `bunx` downloads the new
-   version on the next launch.
+Restart the MCP server in the client, or restart the client. In Claude Code,
+run `/mcp` and reconnect the server. Because the configuration names
+`@latest`, command `bunx` downloads any newer release on that launch, so the
+configuration needs no edit.
+
+A configuration copied from an older version of this README names an exact
+version, such as `@uniquedivine/mcp-discord@1.3.9`, and keeps running that
+version. Replace the version with `@latest` once, then restart. In Claude Code,
+run `claude mcp remove discord`, then rerun the `claude mcp add` command above.
 
 ## Install From Source
 

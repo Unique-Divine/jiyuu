@@ -10,17 +10,17 @@ VM worker in depth.
 Requires [Bun](https://bun.sh) 1.2 or newer.
 
 ```bash
-bunx @uniquedivine/tg-sai --help        # run without installing
-bun add -g @uniquedivine/tg-sai         # or install the `tg-sai` command
+bunx @uniquedivine/tg-sai@latest --help   # run without installing
+bun add -g @uniquedivine/tg-sai@latest    # or install the `tg-sai` command
 tg-sai profile add --name me --login --qr --interactive
 ```
 
 Any command or command group run without arguments prints its help, for
 example `tg-sai events` or `tg-sai holds`.
 
-To pin a version, as agents and scripts should, name it:
-`bunx @uniquedivine/tg-sai@0.3.2 health` or
-`bun add -g @uniquedivine/tg-sai@0.3.2`. `tg-sai --version` shows what's
+Command `bunx` with tag `@latest` checks npm at each run and uses the newest
+release. To update an installed `tg-sai` command, rerun
+`bun add -g @uniquedivine/tg-sai@latest`. `tg-sai --version` shows what's
 installed.
 
 For agents setting this up:
