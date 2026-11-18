@@ -5,6 +5,11 @@
  * messages leave a local record beyond the agent's chat. The line carries
  * only identifiers and outcome codes: never tokens, cookies, or message text.
  *
+ * channel_id and timestamp come from the agent, so their shape proves
+ * nothing: "C0NF1DENT1AL" looks like a channel ID. The log writes the channel
+ * only after Slack answered conversations.history for it, and the timestamp
+ * only after Slack returned that message. Otherwise both are null.
+ *
  * Format:
  *   slack-mcp write {"tool":"slack_delete_message","channel":"D0123","timestamp":"1794916496.123799","status":"deleted","code":null,"age_hours":0.2}
  */
@@ -27,17 +32,9 @@ export function setWriteLogSink(next) {
   return previous;
 }
 
-// Arguments come from the agent, so log a field only when it has the shape
-// of an ID; anything else could carry message text. A channel must match the
-// Slack conversation ID form and contain a digit, so an uppercase word such
-// as CONFIDENTIAL isn't logged. A word that happens to fit that shape, like
-// C0NF1DENT1AL, can't be told apart from a real ID and would be logged.
+// The shape checks are a second guard; Slack verification is the main one.
 function safeChannel(value) {
-  return typeof value === "string"
-    && SLACK_CONVERSATION_ID_PATTERN.test(value)
-    && /\d/.test(value)
-    ? value
-    : null;
+  return typeof value === "string" && SLACK_CONVERSATION_ID_PATTERN.test(value) ? value : null;
 }
 
 function safeTimestamp(value) {
@@ -76,11 +73,11 @@ function outcomeOf(result) {
 /**
  * Build the log line for one attempt. Pure, for tests.
  */
-export function formatWriteLogLine({ tool, args, status, code, now = Date.now() }) {
+export function formatWriteLogLine({ tool, args, status, code, verified, now = Date.now() }) {
   const entry = {
     tool: safeCode(tool),
-    channel: safeChannel(args?.channel_id),
-    timestamp: safeTimestamp(args?.timestamp),
+    channel: verified?.channel ? safeChannel(args?.channel_id) : null,
+    timestamp: verified?.timestamp ? safeTimestamp(args?.timestamp) : null,
     status: safeCode(status),
     code: safeCode(code),
     age_hours: ageHours(args?.timestamp, now)
@@ -90,18 +87,25 @@ export function formatWriteLogLine({ tool, args, status, code, now = Date.now() 
 
 /**
  * Run a write handler and log one line for the attempt, whether it returns a
- * result or throws.
+ * result or throws. The handler receives a recorder and calls
+ * `recorder.verify(ownership.verified)` with what Slack confirmed.
  */
 export async function withWriteLog(tool, args, run) {
+  const recorder = {
+    verified: null,
+    verify(verified) {
+      if (verified) recorder.verified = verified;
+    }
+  };
   let result;
   try {
-    result = await run();
+    result = await run(recorder);
   } catch (error) {
     // A thrown Slack error's message is its code, such as invalid_auth.
-    logSafely({ tool, args, status: "thrown", code: error?.message });
+    logSafely({ tool, args, status: "thrown", code: error?.message, verified: recorder.verified });
     throw error;
   }
-  logSafely({ tool, args, ...outcomeOf(result) });
+  logSafely({ tool, args, ...outcomeOf(result), verified: recorder.verified });
   return result;
 }
 

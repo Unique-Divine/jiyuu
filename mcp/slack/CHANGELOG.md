@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [4.5.2] - 2026-11-18
 
 ### Added
-- Each edit or delete attempt writes one structured line to stderr (`slack-mcp write {...}`) with the tool, channel, timestamp, status or error code, and message age in hours. It never logs tokens, cookies, or message text. See `docs/API.md`.
+- Each edit or delete attempt writes one structured line to stderr (`slack-mcp write {...}`) with the tool, channel, timestamp, status or error code, and message age in hours. It never logs tokens, cookies, or message text, and it logs the channel and timestamp only after Slack confirms them. See `docs/API.md`.
 - The edit and delete tools reject a `channel_id` that isn't a Slack conversation ID (`C`, `D`, or `G`, then 8 or more uppercase letters or digits) with `invalid_argument` before any Slack call.
 
 ### Fixed

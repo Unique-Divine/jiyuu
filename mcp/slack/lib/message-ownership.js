@@ -260,7 +260,15 @@ export function isGoneForSelf(message, selfId) {
  * Returns { ok: true, message, selfId, sessionToken } or
  * { ok: false, result } where result is a ready MCP error. Pass the result
  * to sessionChangedResult just before the write.
+ *
+ * `verified` says what Slack confirmed: the channel once conversations.history
+ * answered for it, and the timestamp once the message was found. It's absent
+ * for refusals made before any Slack call. The write log uses it so only
+ * Slack-confirmed IDs reach stderr.
  */
+const CHANNEL_VERIFIED = Object.freeze({ channel: true, timestamp: false });
+const MESSAGE_VERIFIED = Object.freeze({ channel: true, timestamp: true });
+
 export async function checkOwnMessage(channelId, timestamp, options = {}) {
   const {
     expectedText,
@@ -299,22 +307,23 @@ export async function checkOwnMessage(channelId, timestamp, options = {}) {
     ]);
   } catch (error) {
     if (error?.message === "lookup_incomplete") {
-      return { ok: false, result: messageWriteError("lookup_incomplete", details) };
+      return { ok: false, verified: CHANNEL_VERIFIED, result: messageWriteError("lookup_incomplete", details) };
     }
     throw error;
   }
 
   if (!message) {
-    return { ok: false, result: messageWriteError("message_not_found", details) };
+    return { ok: false, verified: CHANNEL_VERIFIED, result: messageWriteError("message_not_found", details) };
   }
   // A deleted thread parent leaves a tombstone at the same ts, authored by
   // Slack rather than the user; report it as deleted, not as someone else's.
   if (message.subtype === "tombstone") {
-    return { ok: false, result: messageWriteError("message_deleted", details) };
+    return { ok: false, verified: MESSAGE_VERIFIED, result: messageWriteError("message_deleted", details) };
   }
   if (message.user !== selfId) {
     return {
       ok: false,
+      verified: MESSAGE_VERIFIED,
       result: messageWriteError("not_own_message", {
         ...details,
         author: message.user || message.bot_id || null
@@ -327,13 +336,14 @@ export async function checkOwnMessage(channelId, timestamp, options = {}) {
   if (typeof expectedText !== "string" || (message.text ?? "").trim() !== expectedText.trim()) {
     return {
       ok: false,
+      verified: MESSAGE_VERIFIED,
       result: messageWriteError("text_mismatch", details, {
         message: "expected_text doesn't match the message's current text, so the tool won't change it.",
         next_action: "Read the message again with slack_conversations_history or slack_get_thread and confirm it's the one the user meant."
       })
     };
   }
-  return { ok: true, message, selfId, sessionToken };
+  return { ok: true, verified: MESSAGE_VERIFIED, message, selfId, sessionToken };
 }
 
 /**
