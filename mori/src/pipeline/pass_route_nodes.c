@@ -1209,8 +1209,13 @@ int cbm_gqlgen_config_load(const char *repo_path, const char *rel_path, cbm_gqlg
     if (!f) {
         return CBM_NOT_FOUND;
     }
-    char *buf = cbm_alloc(CBM_MEM_CLASS_OTHER, GQLGEN_MAX_CONFIG_BYTES);
+    /* The parser takes the bytes read and their count; the terminator is
+     * a guard, never part of the input. */
+    char *buf = cbm_alloc(CBM_MEM_CLASS_OTHER, GQLGEN_MAX_CONFIG_BYTES + SKIP_ONE);
     size_t len = buf ? fread(buf, SKIP_ONE, GQLGEN_MAX_CONFIG_BYTES, f) : 0;
+    if (buf) {
+        buf[len] = '\0';
+    }
     (void)fclose(f);
     cbm_yaml_node_t *y = buf ? cbm_yaml_parse(buf, (int)len) : NULL;
     cbm_free(CBM_MEM_CLASS_OTHER, buf);
