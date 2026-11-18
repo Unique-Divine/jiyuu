@@ -15,6 +15,7 @@ import {
   apply,
   assertNoUpstreamBranding,
   buildManifest,
+  checkNote,
   compare,
   dirtyInputs,
   discoverServers,
@@ -25,6 +26,7 @@ import {
   isSecretFileName,
   makePythonToolLister,
   MANIFEST_FILE,
+  NOTE_MAX_LENGTH,
   parseArgs,
   plan,
   readSafeText,
@@ -243,6 +245,42 @@ describe("discovery", () => {
     expect(optedOut).toEqual(["delta", "gamma"])
     expect(servers[1]!.runtime).toBe("Python >= 3.10")
     expect(servers[0]!.runtime).toBe("Bun >= 1.4.3")
+  })
+
+  test("accepts plain notes and the Telegram session notes", () => {
+    const telegram = Bun.TOML.parse(
+      readFileSync(join(import.meta.dir, "../telegram/pyproject.toml"), "utf8"),
+    ) as any
+    for (const row of telegram.tool.jiyuu.site.env) {
+      if (row.note) expect(checkNote(row.note, row.name)).toBe(row.note)
+    }
+    const max = "a ".repeat(NOTE_MAX_LENGTH / 2)
+    expect(checkNote(max, "n")).toBe(max)
+  })
+
+  test("rejects notes that are too long or shaped like values", () => {
+    const bad: [string, RegExp][] = [
+      ["x".repeat(NOTE_MAX_LENGTH + 1), /limit is 300/],
+      ["Example: TELEGRAM_API_HASH=abc", /assignment/],
+      ["Set API_ID = 12345 first.", /assignment/],
+      ["Looks like xoxc-123-456.", /Slack token/],
+      ["Hash 0123456789abcdef0123456789abcdef here.", /hex/],
+      ["1BVtsOKABu2k3Lm9QxYzP0aB7cD8eF9gH0iJ1kL2mN3oP4qR5s=", /base64/],
+      ["Use ghp_abcdefgh for the token.", /secret prefix/],
+      ["Key sk-proj-abc.", /secret prefix/],
+      ["Begins -----BEGIN PRIVATE KEY", /secret prefix/],
+    ]
+    for (const [note, why] of bad) {
+      expect(() => checkNote(note, "n")).toThrow(why)
+    }
+    write(
+      join(mcpDir, "gamma/package.json"),
+      npmPackage("gamma", {
+        tools: ["x.ts#T"],
+        env: [{ name: "GAMMA_TOKEN", note: "GAMMA_TOKEN=xoxc-1" }],
+      }),
+    )
+    expect(() => discoverServers(mcpDir)).toThrow(/env\[0\]\.note/)
   })
 
   test("rejects env entries that carry values", () => {

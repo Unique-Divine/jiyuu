@@ -201,10 +201,45 @@ function parseEnvVars(value: unknown, what: string): EnvVar[] {
       secret: row.secret === true,
     }
     if (row.note !== undefined) {
-      envVar.note = asString(row.note, `${what}[${index}].note`)
+      envVar.note = checkNote(
+        asString(row.note, `${what}[${index}].note`),
+        `${what}[${index}].note`,
+      )
     }
     return envVar
   })
+}
+
+/** The site importer's limit for envVars[].note. */
+export const NOTE_MAX_LENGTH = 300
+
+const NOTE_REJECTS: [RegExp, string][] = [
+  [/[A-Z][A-Z0-9_]*\s*=/, "an assignment such as NAME=value"],
+  [/xox[a-z]-/i, "a Slack token"],
+  [/[0-9a-f]{32,}/i, "a long hex run"],
+  [/[A-Za-z0-9+/_-]{40,}={0,2}/, "a long base64 run"],
+  [
+    /\b(gh[pousr]_|github_pat_|glpat-|npm_|sk-|AKIA|AIza)|-----BEGIN/,
+    "a known secret prefix",
+  ],
+]
+
+/**
+ * Checks an envVars note: plain text up to NOTE_MAX_LENGTH characters with
+ * nothing shaped like a value. Notes name alternatives; they never hold one.
+ */
+export function checkNote(note: string, what: string): string {
+  if (note.length > NOTE_MAX_LENGTH) {
+    throw new Error(
+      `${what} is ${note.length} characters; the limit is ${NOTE_MAX_LENGTH}`,
+    )
+  }
+  for (const [pattern, why] of NOTE_REJECTS) {
+    if (pattern.test(note)) {
+      throw new Error(`${what} looks like it holds ${why}; notes name only`)
+    }
+  }
+  return note
 }
 
 /** Turns ">=1.4.3" into "Bun >= 1.4.3". */
