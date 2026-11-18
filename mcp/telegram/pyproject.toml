@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "uniquedivine-telegram-mcp"
-version = "2.0.2"
+version = "2.0.3"
 description = "Telegram MCP server maintained in Jiyuu. Reads and manages chats, messages, contacts, folders, and media through your Telegram user account."
 readme = "README.md"
 authors = [

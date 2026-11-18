@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.5.3] - 2026-11-18
+
+### Fixed
+- Tool `mcp_info` reads the npm registry on every call instead of reusing the startup check, so a long-running server reports the current latest version. When npm can't be reached, it reports the cached answer and sets the new field `update.source` to `cache` (`live` otherwise).
+- `mcp_info` no longer reports an impossible latest version. A cached latest version older than the running one, such as 4.4.3 cached before an upgrade to 4.5.1, counts as out of date, and `update.pinCommand` is set only when npm has a newer version, so it never suggests a downgrade.
+- The startup update notice caches the npm answer for 1 hour instead of 24.
+
 ## [4.5.2] - 2026-11-18
 
 ### Added

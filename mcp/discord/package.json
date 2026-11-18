@@ -1,7 +1,7 @@
 {
   "name": "@uniquedivine/mcp-discord",
   "mcpName": "io.github.unique-divine/mcp-discord",
-  "version": "1.3.8",
+  "version": "1.3.9",
   "description": "Discord MCP server maintained in Jiyuu. Manages channels, forums, messages, reactions, roles, and webhooks through a Discord bot.",
   "main": "src/index.ts",
   "bin": {

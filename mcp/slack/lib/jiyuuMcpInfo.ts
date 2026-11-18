@@ -8,11 +8,19 @@
  * tests fail when the copies drift apart.
  *
  * The server never updates itself: the client config pins an exact version,
- * so what runs is what was reviewed. At startup the server reads the npm
- * registry's latest version in the background (2 s timeout, 24 h cache,
- * silent on failure). The first successful tool result after that check
- * carries a one-line notice when the running version is behind. Set
- * JIYUU_MCP_NO_UPDATE_CHECK=1 to turn the check off.
+ * so what runs is what was reviewed. Two callers read the npm registry's
+ * latest version, each with a 2 s timeout:
+ *
+ * - At startup, in the background, through a 1 h cache. The first successful
+ *   tool result after that check carries a one-line notice when the running
+ *   version is behind. Failures are silent.
+ * - Tool mcp_info reads the registry on every call and rewrites the cache.
+ *   When the registry can't be read, it reports the cached answer and marks
+ *   it with source "cache".
+ *
+ * A cached latest version older than the running version is out of date, so
+ * both callers ignore it. Set JIYUU_MCP_NO_UPDATE_CHECK=1 to turn the check
+ * off.
  */
 import { execFile } from "node:child_process";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
@@ -20,7 +28,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 
 export const OPT_OUT_ENV = "JIYUU_MCP_NO_UPDATE_CHECK";
-export const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+export const CACHE_TTL_MS = 60 * 60 * 1000;
 export const FETCH_TIMEOUT_MS = 2000;
 /** Only names Jiyuu publishes are checked; upstream names are someone else's. */
 export const PUBLISHED_SCOPE = "@uniquedivine/";
@@ -44,6 +52,8 @@ export interface UpdateStatus {
   runningVersion: string;
   latestVersion: string;
   checkedAt: string;
+  /** "live" when this call read the registry; "cache" for a cached answer. */
+  source: "live" | "cache";
 }
 
 export interface GitState {
@@ -156,7 +166,7 @@ export function isNewer(candidate: string, running: string): boolean {
   return compareIdentifiers(c.prerelease, r.prerelease) > 0;
 }
 
-export function updateAvailable(status: UpdateStatus | null): boolean {
+export function updateAvailable(status: UpdateStatus | null): status is UpdateStatus {
   return status !== null && isNewer(status.latestVersion, status.runningVersion);
 }
 
@@ -181,16 +191,26 @@ export function cacheFile(cacheDir: string, name: string): string {
   return join(cacheDir, `${name.replace(/[^A-Za-z0-9._-]/g, "_")}.json`);
 }
 
+export interface CacheReadOptions {
+  /** A cached latest version older than this one is out of date. */
+  runningVersion?: string;
+  /** Maximum entry age; null accepts any age. */
+  maxAgeMs?: number | null;
+}
+
 export function readCache(
   path: string,
   name: string,
   now: Date,
+  options: CacheReadOptions = {},
 ): { latestVersion: string; checkedAt: string } | null {
   try {
     const data = JSON.parse(readFileSync(path, "utf8"));
     if (data?.name !== name || typeof data.latestVersion !== "string") return null;
+    const { runningVersion, maxAgeMs = CACHE_TTL_MS } = options;
+    if (runningVersion !== undefined && isNewer(runningVersion, data.latestVersion)) return null;
     const age = now.getTime() - Date.parse(data.checkedAt);
-    if (!(age >= 0 && age < CACHE_TTL_MS)) return null;
+    if (!(age >= 0 && (maxAgeMs === null || age < maxAgeMs))) return null;
     return { latestVersion: data.latestVersion, checkedAt: data.checkedAt };
   } catch {
     return null;
@@ -225,23 +245,15 @@ export interface CheckOptions {
   timeoutMs?: number;
 }
 
-/**
- * Return the latest published version, from cache or the registry. Returns
- * null when the check is off, the name isn't Jiyuu's, or the registry can't be
- * read. Never throws.
- */
-export async function checkForUpdate(
+/** Read the registry and rewrite the cache; null on any failure. */
+async function readRegistry(
   name: string,
   runningVersion: string,
-  options: CheckOptions = {},
+  path: string,
+  now: Date,
+  options: CheckOptions,
 ): Promise<UpdateStatus | null> {
-  const env = options.env ?? process.env;
-  if (checkDisabled(env) || !isPublishedName(name)) return null;
   try {
-    const now = options.now ?? new Date();
-    const path = cacheFile(options.cacheDir ?? defaultCacheDir(env), name);
-    const cached = readCache(path, name, now);
-    if (cached) return { name, runningVersion, ...cached };
     const body = await (options.fetch ?? fetchText)(
       latestVersionUrl(name),
       options.timeoutMs ?? FETCH_TIMEOUT_MS,
@@ -250,10 +262,49 @@ export async function checkForUpdate(
     if (!latestVersion) return null;
     const checkedAt = now.toISOString().replace(/\.\d{3}Z$/, "Z");
     writeCache(path, { name, latestVersion, checkedAt });
-    return { name, runningVersion, latestVersion, checkedAt };
+    return { name, runningVersion, latestVersion, checkedAt, source: "live" };
   } catch {
     return null;
   }
+}
+
+/**
+ * The startup check: a fresh cache entry if one exists, else the registry.
+ * Returns null when the check is off, the name isn't Jiyuu's, or the registry
+ * can't be read. Never throws.
+ */
+export async function checkForUpdate(
+  name: string,
+  runningVersion: string,
+  options: CheckOptions = {},
+): Promise<UpdateStatus | null> {
+  const env = options.env ?? process.env;
+  if (checkDisabled(env) || !isPublishedName(name)) return null;
+  const now = options.now ?? new Date();
+  const path = cacheFile(options.cacheDir ?? defaultCacheDir(env), name);
+  const cached = readCache(path, name, now, { runningVersion });
+  if (cached) return { name, runningVersion, ...cached, source: "cache" };
+  return await readRegistry(name, runningVersion, path, now, options);
+}
+
+/**
+ * The mcp_info check: always the registry, then the cache of any age when the
+ * registry can't be read. Returns null when the check is off, the name isn't
+ * Jiyuu's, or neither source has an answer. Never throws.
+ */
+export async function checkLatest(
+  name: string,
+  runningVersion: string,
+  options: CheckOptions = {},
+): Promise<UpdateStatus | null> {
+  const env = options.env ?? process.env;
+  if (checkDisabled(env) || !isPublishedName(name)) return null;
+  const now = options.now ?? new Date();
+  const path = cacheFile(options.cacheDir ?? defaultCacheDir(env), name);
+  const live = await readRegistry(name, runningVersion, path, now, options);
+  if (live) return live;
+  const cached = readCache(path, name, now, { runningVersion, maxAgeMs: null });
+  return cached ? { name, runningVersion, ...cached, source: "cache" } : null;
 }
 
 export function formatNotice(status: UpdateStatus): string {
@@ -351,7 +402,7 @@ export function buildMcpInfo(input: McpInfoInput): Record<string, unknown> {
   if (checkDisabled(env)) notChecked = `disabled by ${OPT_OUT_ENV}`;
   else if (!isPublishedName(identity.name))
     notChecked = `'${identity.name}' is not a name Jiyuu publishes`;
-  else if (!status) notChecked = "no registry result yet (offline, pending, or failed)";
+  else if (!status) notChecked = "registry unreachable and no cached result";
   return {
     server: input.server,
     name: identity.name,
@@ -366,7 +417,9 @@ export function buildMcpInfo(input: McpInfoInput): Record<string, unknown> {
       latestVersion: status?.latestVersion ?? null,
       updateAvailable: updateAvailable(status),
       checkedAt: status?.checkedAt ?? null,
-      pinCommand: status ? pinCommand(status.name, status.latestVersion) : null,
+      // Only an upgrade gets a command; a pin to an older release downgrades.
+      pinCommand: updateAvailable(status) ? pinCommand(status.name, status.latestVersion) : null,
+      source: status?.source ?? null,
       notChecked,
     },
     runtime: {
@@ -381,27 +434,36 @@ export function buildMcpInfo(input: McpInfoInput): Record<string, unknown> {
   };
 }
 
+export interface JiyuuMcpInfoChecks {
+  /** The startup check behind the one-time notice; default checkForUpdate. */
+  startup?: () => Promise<UpdateStatus | null>;
+  /** The check each mcp_info call runs; default checkLatest. */
+  live?: (env: Env) => Promise<UpdateStatus | null>;
+}
+
 /** Wire-up for one server process: identity, notifier and the tool body. */
 export class JiyuuMcpInfo {
   readonly identity: PackageIdentity;
   readonly notifier: UpdateNotifier;
+  private readonly liveCheck: (env: Env) => Promise<UpdateStatus | null>;
 
   constructor(
     private readonly server: string,
     packageRoot: string,
     private readonly envPrefixes: string[],
-    check?: () => Promise<UpdateStatus | null>,
+    checks: JiyuuMcpInfoChecks = {},
   ) {
     this.identity = readPackageIdentity(packageRoot);
     const { name, version } = this.identity;
-    this.notifier = new UpdateNotifier(check ?? (() => checkForUpdate(name, version)));
+    this.notifier = new UpdateNotifier(checks.startup ?? (() => checkForUpdate(name, version)));
+    this.liveCheck = checks.live ?? ((env) => checkLatest(name, version, { env }));
   }
 
   async callTool(env: Env = process.env) {
-    this.notifier.start();
-    const status = await this.notifier.status(FETCH_TIMEOUT_MS + 500);
-    const git =
-      this.identity.provenance === "source-checkout" ? await gitState(this.identity.root) : null;
+    const [status, git] = await Promise.all([
+      this.liveCheck(env).catch(() => null),
+      this.identity.provenance === "source-checkout" ? gitState(this.identity.root) : null,
+    ]);
     const report = buildMcpInfo({
       server: this.server,
       identity: this.identity,
