@@ -1768,8 +1768,13 @@ int cbm_pipeline_build_fresh_semantic_manifest(cbm_pipeline_t *p, const char *pr
  *      directories name and HANDLES its Route (extract_nextjs.c). An index
  *      built before has none of these Routes for its unchanged route files,
  *      so it rebuilds once on upgrade.
+ *  14: GraphQL schemas (.graphql, .gql, .graphqls) yield field-path Routes
+ *      (__graphql__Query.perp.trades) with schema props and one HANDLES each,
+ *      from the gqlgen resolver method or the schema Field
+ *      (pass_route_nodes.c). An index built before has none of them for its
+ *      unchanged schema files, so it rebuilds once on upgrade.
  * The unresolved-call coverage threshold remains independent. */
-enum { CBM_SEMANTIC_INDEX_VERSION = 13 };
+enum { CBM_SEMANTIC_INDEX_VERSION = 14 };
 
 typedef struct {
     cbm_gbuf_t *gbuf;
