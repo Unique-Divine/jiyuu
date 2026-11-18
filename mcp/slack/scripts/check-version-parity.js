@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -9,6 +9,14 @@ const repoRoot = join(__dirname, "..");
 
 const pkg = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8"));
 const serverMeta = JSON.parse(readFileSync(join(repoRoot, "server.json"), "utf8"));
+
+// The jiyuu-level mcp/README.md pins each package's install version.
+const monorepoReadme = join(repoRoot, "..", "README.md");
+const readmePins = existsSync(monorepoReadme)
+  ? [...readFileSync(monorepoReadme, "utf8")
+      .matchAll(/@uniquedivine\/mcp-slack@(\d+\.\d+\.\d+)/g)]
+      .map((m) => m[1])
+  : null;
 
 const outputArg = process.argv.includes("--out")
   ? process.argv[process.argv.indexOf("--out") + 1]
@@ -94,6 +102,10 @@ async function main() {
   const parityChecks = [
     { name: "package.json vs server.json", ok: localVersion === localServerVersion },
     { name: "package.json vs server.json package", ok: localVersion === localServerPkgVersion },
+    {
+      name: "package.json vs mcp/README.md pin",
+      ok: readmePins === null || readmePins.every((v) => v === localVersion),
+    },
     { name: "npm latest", ok: npmVersion === localVersion },
     { name: "MCP registry latest", ok: mcpRegistryVersion === localVersion },
     { name: "MCP registry websiteUrl", ok: mcpRegistryWebsiteUrl === expectedWebsiteUrl },
@@ -141,6 +153,14 @@ async function main() {
       "server.json (package entry)",
       localServerPkgVersion,
       localServerPkgVersion === localVersion ? "ok" : "mismatch"
+    ),
+    row(
+      "mcp/README.md pin",
+      readmePins === null ? "n/a" : [...new Set(readmePins)].join(", "),
+      readmePins === null
+        ? "skipped"
+        : readmePins.every((v) => v === localVersion) ? "ok" : "mismatch",
+      readmePins === null ? "not in a jiyuu checkout" : ""
     ),
     row(
       "npm dist-tag latest",
