@@ -1,12 +1,11 @@
 # Sai referral queries
 
 Use this reference for referral and affiliate diagnostics: existing code
-ownership, code redemption history, sheet metadata, EVM/Bech32 address
+ownership, code redemption history, EVM/Bech32 address
 normalization, indexed referral analytics, and trading-credit balance checks.
 
 If the user asks to create or update referral codes, set discounts, issue
-trading credits, mutate the Referral Identity Directory sheet, or append operator
-changelog notes, switch to agent skill `sai-ops`.
+trading credits, or edit operator records, switch to agent skill `sai-ops`.
 
 ## Source-of-truth model
 
@@ -19,61 +18,40 @@ changelog notes, switch to agent skill `sai-ops`.
 2. Sai Keeper GraphQL and the `sai-keeper` Postgres database are truth for
    indexed historical analytics such as redemptions, trades, volume, earnings,
    and claims.
-3. The Referral Identity Directory sheet is human-maintained metadata: Telegram
-   names, Notion CRM links, notes, deal terms, share URLs, and operator labels.
+3. Operator records, such as a referral spreadsheet, are human-maintained
+   metadata: names, deal terms, share URLs, and labels. Agent skill `sai-ops`
+   covers them. Do not use them as proof that a code exists or that an address
+   owns it.
 
-## Important paths
+## Constants
 
-- Sai referrals epic: `~/boku/epics/tools/sai-deal-desk`
-- Deal Desk command: `sai-deal-desk`
-- Sai perp repo: `~/sai-perps`
-- Mainnet perp contract: `nibi1ntmw2dfvd0qnw5fnwdu9pev2hsnqfdj9ny9n0nzh2a5u8v0scflq930mph`
-
-## Referral Directory sheet
-
-Current columns:
-
-```text
-saiCode, telegramGroupName, notionCrmUrl, notes, hasDeal, shareUrl,
-addrEvm, addrBech32, txHashCodeCreation, accType
-```
-
-Interpretation rules:
-
-- Preserve `saiCode` as the exact referral code identifier.
-- Derive `shareUrl` as `https://sai.fun/?ref=<saiCode>` when checking
-  whether a sheet value is stale.
-- Treat the sheet as metadata. Do not use it as proof that a code exists or that
-  an address owns the code.
-- Explain conflicts by source: sheet metadata, on-chain owner, and indexed
-  GraphQL/Postgres history.
+- A referral link is `https://sai.fun/?ref=<code>`.
+- Mainnet Perp contract: `nibi1ntmw2dfvd0qnw5fnwdu9pev2hsnqfdj9ny9n0nzh2a5u8v0scflq930mph`
 
 ## Existing affiliate information
 
 When asked about an existing code, address, or partner:
 
-1. Search the sheet or epic for exact code/address matches and likely human
-   metadata matches.
-2. Use GraphQL referral code and redemption records for indexed ownership and
+1. Use GraphQL referral code and redemption records for indexed ownership and
    history. Escalate to a verified raw-state/operator procedure only when the
    question specifically requires contract storage as the deciding layer.
-3. Normalize EVM and Bech32 address pairs with command `nibiru q evm account`.
-4. Check code-specific discount state if fee terms matter.
-5. Use Sai Keeper GraphQL for indexed history or analytics: redemptions, referred
+2. Normalize EVM and Bech32 address pairs with command `nibiru q evm account`.
+3. Check code-specific discount state if fee terms matter.
+4. Use Sai Keeper GraphQL for indexed history or analytics: redemptions, referred
    trades, volume, earnings, stats, or claims.
-6. Use DB references when GraphQL/REST behavior or table ownership is the
-   question. Relevant tables include table `referral_code`, table
-   `referral_redeem_history`, table `referral_claim_history`, and referral stats
-   tables documented in [`sai-db.md`](sai-db.md).
+5. When GraphQL/REST behavior or table ownership is the question, use
+   private agent skill `sai-db`. Relevant tables include table `referral_code`, table
+   `referral_redeem_history`, table `referral_claim_history`, and the referral
+   stats tables.
 
 ## Related query surfaces
 
-- Contract query payloads and constants: [`sai-contracts.md`](sai-contracts.md)
+- Contract query payloads and constants: [`contracts.md`](contracts.md)
 - GraphQL fields `referral.referralCodes`, `referral.referralRedemption`, and
   `referral.referralRedemptionTrader`:
-  [`sai-graphql.md`](sai-graphql.md)
-- REST endpoint `GET /dexpal/v1/referrals`: [`sai-rest.md`](sai-rest.md)
-- DB referral tables and API surfacing: [`sai-db.md`](sai-db.md)
+  [`graphql.md`](graphql.md)
+- REST endpoint `GET /dexpal/v1/referrals`: [`rest.md`](rest.md)
+- DB referral tables and API surfacing: private agent skill `sai-db`
 
 ---
 
@@ -97,7 +75,8 @@ This is a read-only workflow. It checks:
 Point `nibiru` at Testnet2 and verify before querying:
 
 ```bash
-ud nibi cfg test
+nibiru config node https://rpc.testnet-2.nibiru.fi:443
+nibiru config chain-id nibiru-testnet-2
 nibiru config
 ```
 

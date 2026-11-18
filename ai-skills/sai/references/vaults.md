@@ -23,7 +23,7 @@ Estate group. USDC and stNIBI both use 6 decimal base units on Sai.
 
 ## Setup
 
-Use the `/nibiru-cli` skill since this behavior relies heavily on using the
+Use agent skill `nibiru-cli` since this behavior relies heavily on using the
 CLI properly.
 
 ```bash

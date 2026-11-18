@@ -9,10 +9,9 @@ trading credits. Use agent skill `nibiru-cli` for CLI mechanics.
 ## Contract query playbook
 
 Source of truth for deployed query examples: file
-`~/sai-web/webapp/pages/debug.tsx` (`QUERY_CONFIG`). The Rust
+`webapp/pages/debug.tsx` (`QUERY_CONFIG`) in repository `sai-web`. The Rust
 `QueryMsg` enums in the contract repositories are authoritative for the
 supported message names and response types.
-Full validated CLI notes: `~/boku/epics/26-02-10-sai-mainnet-query.md`.
 
 ### Mainnet addresses
 
@@ -25,7 +24,7 @@ Full validated CLI notes: `~/boku/epics/26-02-10-sai-mainnet-query.md`.
 | SLP-USDC Vault — Group 1 | `nibi1waf5c8z55qvjay4de8wkm9cxyt6wa8zdnrvlexjrq77lqgqf258q3yn7l8` |
 | SLP-stNIBI Vault — Group 1 | `nibi1pgurgas0za436c3fm2km99zkzutfx0jwpn7meespv6szv8c8g39qjz2tvj` |
 
-Source: `~/sai-web/packages/sai-core/src/config/saiContracts.ts` (`SaiContractsMainnet`).
+Source: file `packages/sai-core/src/config/saiContracts.ts` (`SaiContractsMainnet`) in repository `sai-web`.
 
 Group meanings:
 - `GroupIndex(0)` = crypto assets
@@ -44,13 +43,12 @@ exact group/collateral pair when in doubt. Mainnet currently maps:
 
 ## Related references and skills
 
-- [`sai-graphql.md`](sai-graphql.md): indexed, app-facing trades, vaults,
+- [`graphql.md`](graphql.md): indexed, app-facing trades, vaults,
   prices, referrals, and subscriptions; use it instead of contract queries when
   the question is what Sai Keeper exposes.
-- Agent skill `sai-db`: private database connectivity, primary/replica routing,
-  and write workflows. This bundle's [`sai-db.md`](sai-db.md) covers static
-  schema and query semantics.
-- [`sai-rest.md`](sai-rest.md): public aggregate metrics and health checks.
+- Private agent skill `sai-db`: Sai Keeper Postgres schema, query semantics,
+  and database access. This public skill does not cover the database.
+- [`rest.md`](rest.md): public aggregate metrics and health checks.
 - Agent skill `nibiru-cli`: command mechanics for
   `nibiru query wasm contract-state <raw|smart>`. This reference supplies Sai
   addresses and payloads.
@@ -163,7 +161,7 @@ Validate deployed fee parameters with on-chain queries (`get_fees`,
 `get_fee_tiers`, `get_trader_fee_multiplier`, `get_pending_gov_fees`). Expected
 defaults, tier table, validation checklist, and settings that are **not**
 queryable on-chain are in
-[sai-contracts.md § Fee config validation](#fee-config-validation-1).
+[contracts.md § Fee config validation](#fee-config-validation-1).
 
 Fee semantics (what fees mean, distribution, code paths):
 `/epics/26-05-26-sai-perpetuals-fee-analysis.md`.
@@ -177,7 +175,7 @@ be on different release cadences.
 ## Perp contract
 
 Below are smart query request payloads for the Sai perp contract. 
-You can use the `/nibiru-cli` skill to pull any of this information.
+You can use agent skill `nibiru-cli` to pull any of this information.
 
 - Source: sai-perps repo contracts/perp for the Rust logic
 
@@ -240,11 +238,11 @@ that need open/close metadata and fee snapshots.
 ## SLP Vault contract
 
 For SLP Vault operations, health accounting, reward distribution, raw state keys,
-and mainnet runbooks, see [sai-vaults.md](sai-vaults.md).
+and mainnet runbooks, see [vaults.md](vaults.md).
 For epoch and reset timing, see
-[Check Epoch and Daily Reset Distance](sai-vaults.md#check-epoch-and-daily-reset-distance).
+[Check Epoch and Daily Reset Distance](vaults.md#check-epoch-and-daily-reset-distance).
 
-You can use the `/nibiru-cli` skill to pull any of this information.
+You can use agent skill `nibiru-cli` to pull any of this information.
 
 - Source: sai-perps repo contracts/vault for the Rust logic
 
@@ -267,7 +265,7 @@ You can use the `/nibiru-cli` skill to pull any of this information.
   `RiskParamsResponse` with current collateral balance, daily balance snapshot,
   daily payout cap and remaining amount, daily PnL throttle state, PnL
   accumulators, and share price. See
-  [Daily Risk Params](sai-vaults.md#daily-risk-params).
+  [Daily Risk Params](vaults.md#daily-risk-params).
 - `{"vault_snapshot":{}}` - One-call operator health snapshot. Returns
   `VaultSnapshotResponse` with `tvl`, `market_cap`, `share_price`,
   `collateralization_p`, `total_supply`, `total_liability`, `total_rewards`,
@@ -311,7 +309,7 @@ You can use the `/nibiru-cli` skill to pull any of this information.
 ## Oracle contract
 
 Below are smart query request payloads for the Sai oracle contract.
-You can use the `/nibiru-cli` skill to pull any of this information.
+You can use agent skill `nibiru-cli` to pull any of this information.
 
 - Source: sai-perps repo contracts/oracle for the Rust logic
 
@@ -340,7 +338,7 @@ const result = await querier.wasmClient.queryContractSmart(
 )
 ```
 
-Address constants live in `~/sai-web/packages/sai-core/src/config/saiContracts.ts` (`SaiContractsMainnet`).
+Address constants live in file `packages/sai-core/src/config/saiContracts.ts` (`SaiContractsMainnet`) in repository `sai-web`.
 
 
 ---
@@ -666,6 +664,6 @@ defaults, admin events, or controlled test trades.
 | Vault closing fee % | `VAULT_CLOSING_FEE_P` | 4.2% of closing-fee component | Close a trade; compare vault reward to closing fee charged |
 | Referrer fee tiers | `REFERRER_FEE_PERCENTAGE` | 5%, 10%, 15%, 50% | Code default in `contracts/perp/src/fees/state.rs` |
 | Referee discount | `REFERREE_BASE_FEE_MULTIPLIER` | 5% off base (`0.95` effective) | Compare `get_trader_fee_multiplier` with/without referrer |
-| Referrer maps | `USER_REFERRERS`, `REFERRER_FEE_TIER`, `REFERRER_FEES` | — | Use `get_trader_fee_multiplier`; indexed referral history via [`sai-graphql.md`](sai-graphql.md) |
+| Referrer maps | `USER_REFERRERS`, `REFERRER_FEE_TIER`, `REFERRER_FEES` | — | Use `get_trader_fee_multiplier`; indexed referral history via [`graphql.md`](graphql.md) |
 
 See also `slp-vaults.md` for `get_pending_gov_fees` and vault reward routing.

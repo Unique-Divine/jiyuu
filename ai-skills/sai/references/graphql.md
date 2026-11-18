@@ -3,13 +3,13 @@
 Use this reference for indexed, app-facing Sai data: perp positions and
 history, SLP Vault history, Oracle prices, referral analytics, and live
 subscriptions. For live protocol state or contract-owned values, use
-[`sai-contracts.md`](sai-contracts.md) instead.
+[`contracts.md`](contracts.md) instead.
 
 ## Source and endpoints
 
 The source of truth is the GraphQL schema in directory
-`~/sai-keeper/graphql/graph/`. File
-`~/sai-web/webapp/config/chain.ts` builds the deployed endpoint with
+`graphql/graph/` in repository `sai-keeper`. File
+`webapp/config/chain.ts` in repository `sai-web` builds the deployed endpoint with
 path `/query`.
 
 | Network | HTTP | WebSocket |
@@ -102,6 +102,6 @@ query ReferralHistory($referrer: String!) {
 
 ## Related references
 
-- [`sai-contracts.md`](sai-contracts.md): live Perp, Oracle, and vault queries.
-- [`sai-rest.md`](sai-rest.md): public aggregates rather than entity history.
-- [`sai-db.md`](sai-db.md): table ownership, aggregation, and freshness.
+- [`contracts.md`](contracts.md): live Perp, Oracle, and vault queries.
+- [`rest.md`](rest.md): public aggregates rather than entity history.
+- Private agent skill `sai-db`: table ownership, aggregation, and freshness.

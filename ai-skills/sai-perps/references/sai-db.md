@@ -67,8 +67,8 @@ Suggested debugging workflow:
 
 This database powers two primary APIs. For usage instructions and query patterns, see their respective skills:
 
-- **[sai-graphql.md](sai-graphql.md)**: Most tables are exposed via GraphQL queries and subscriptions.
-- **[sai-rest.md](sai-rest.md)**: High-level metrics (volume, OI, TVL) are served via REST primarily from `stats_*` table queries (with `stats_cache` as legacy/auxiliary context).
+- **[`sai` skill page `references/graphql.md`](../../sai/references/graphql.md)**: Most tables are exposed via GraphQL queries and subscriptions.
+- **[`sai` skill page `references/rest.md`](../../sai/references/rest.md)**: High-level metrics (volume, OI, TVL) are served via REST primarily from `stats_*` table queries (with `stats_cache` as legacy/auxiliary context).
 
 ## Quick start
 
@@ -736,7 +736,7 @@ SELECT partman.create_parent(
 This document maps database tables to their respective API exposures in GraphQL and REST.
 
 ### GraphQL surfacing
-[`sai-graphql.md`](sai-graphql.md) covers API usage. Most DB tables map to a
+[`sai` skill page `references/graphql.md`](../../sai/references/graphql.md) covers API usage. Most DB tables map to a
 GraphQL type, but query fields are grouped below the root domain objects
 `perp`, `lp`, `oracle`, and `referral`.
 
@@ -753,7 +753,7 @@ GraphQL type, but query fields are grouped below the root domain objects
 **Note**: For live updates (Subscriptions), GraphQL watchers monitor these tables and push updates when rows change or are added.
 
 ### REST API surfacing
-[`sai-rest.md`](sai-rest.md) covers high-level metrics. In current code paths,
+[`sai` skill page `references/rest.md`](../../sai/references/rest.md) covers high-level metrics. In current code paths,
 `/dexpal/v1/stats` and `/dexpal/v1/metrics` are derived primarily from
 `stats_*` table queries in the API service layer.
 
@@ -778,5 +778,5 @@ Key Procs:
 - `func_refresh_stats_cache`: Updates `stats_cache` (legacy/auxiliary path).
 
 ### See also
-- [sai-graphql.md](sai-graphql.md)
-- [sai-rest.md](sai-rest.md)
+- [`sai` skill page `references/graphql.md`](../../sai/references/graphql.md)
+- [`sai` skill page `references/rest.md`](../../sai/references/rest.md)

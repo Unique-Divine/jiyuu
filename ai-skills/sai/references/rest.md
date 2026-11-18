@@ -37,7 +37,7 @@ replacement for live contract state.
 | **Testnet** | https://sai-api.testnet-2.nibiru.fi |
 
 For indexed trades, LP history, Oracle prices, referrals, and subscriptions,
-read [`sai-graphql.md`](sai-graphql.md).
+read [`graphql.md`](graphql.md).
 
 ## Available endpoints
 
@@ -242,8 +242,8 @@ OK
 
 ## References
 
-- **The `sai-keeper` repo**: `~/sai-keeper` — root `README.md` documents stats, health, and /; full endpoint list is in `api/server.go`
-- **The `nibi-iac` repo**: `~/nibi-iac` — `terraform/_modules/sai-keeper` for deployment
+- **The `sai-keeper` repo**: root `README.md` documents stats, health, and /; full endpoint list is in `api/server.go`
+- **The `nibi-iac` repo**: `terraform/_modules/sai-keeper` for deployment
 
 The sai-keeper Terraform module (in the `nibi-iac` repo) exposes two domains: `domain_graphql` (sai-keeper.*) for GraphQL, `domain_rest` (sai-api.*) for this REST API.
 
