@@ -1,33 +1,25 @@
 # Web API Reference
 
-The Slack Web Server exposes all MCP tools as REST endpoints, accessible from any browser or HTTP client.
+The web server (`bun src/cli.js web`) serves a local dashboard and REST
+endpoints for reading Slack, sending messages, marking conversations read,
+and adding or removing reactions. It doesn't expose the edit and delete tools.
+For MCP over HTTP, use `bun src/cli.js http` instead.
 
-Claude web now supports remote MCP connectors on paid plans, so this Web API mode is best used for:
-- local localhost dashboard workflows
-- REST/API integrations
-- fallback operation when you do not want to host a remote MCP endpoint
-
-References:
-- https://support.anthropic.com/en/articles/11995447-connectors-in-claude
-- https://support.anthropic.com/en/articles/11175166-about-custom-integrations-using-remote-mcp
-
-## Starting the Server
+## Start the Server
 
 ```bash
-cd ~/slack-mcp-server
-npm run web
-# Or run directly from npm:
-bunx @uniquedivine/mcp-slack web
+bunx @uniquedivine/mcp-slack@4.5.2 web
+# From a source checkout:
+bun run web
 ```
 
-The server will:
-1. Start on port 3000
-2. Serve the web UI at http://localhost:3000
-3. Generate a secure API key (saved to `~/.slack-mcp-api-key`)
+The server listens on `127.0.0.1:3000`, serves the dashboard at
+<http://localhost:3000>, and writes an API key to file `~/.slack-mcp-api-key`
+on first run.
 
 ## Auto-Start on Login
 
-Create a LaunchAgent to auto-start the web server on login:
+On macOS, a LaunchAgent starts the web server at login:
 
 ```bash
 cat > ~/Library/LaunchAgents/com.slack-web-api.plist << 'EOF'
@@ -79,7 +71,8 @@ All API requests require the API key in the Authorization header:
 Authorization: Bearer <your-api-key>
 ```
 
-The server generates a cryptographically secure API key on first run, saved to `~/.slack-mcp-api-key`. The key is printed to the console:
+The server writes a random API key to file `~/.slack-mcp-api-key` on first run
+and prints it at startup:
 
 ```
 Dashboard: http://localhost:3000/?key=smcp_xxxxxxxxxxxx
@@ -87,7 +80,7 @@ Dashboard: http://localhost:3000/?key=smcp_xxxxxxxxxxxx
 
 To use a custom key:
 ```bash
-SLACK_API_KEY=your-custom-key npm run web
+SLACK_API_KEY=your-custom-key bunx @uniquedivine/mcp-slack@4.5.2 web
 ```
 
 ---
@@ -110,8 +103,8 @@ curl -H "Authorization: Bearer $API_KEY" http://localhost:3000/health
   "status": "ok",
   "code": "ok",
   "message": "Slack auth valid",
-  "user": "james",
-  "team": "Rêvasser"
+  "user": "unique",
+  "team": "Example Workspace"
 }
 ```
 
@@ -206,6 +199,21 @@ curl -H "Authorization: Bearer $API_KEY" "http://localhost:3000/conversations/D0
 
 ---
 
+### GET /conversations/unreads
+List channels and DMs with unread messages, most unread first.
+
+| Param | Default | Description |
+|-------|---------|-------------|
+| types | im,mpim,public_channel,private_channel | Conversation types |
+| limit | 50 | Max conversations |
+
+---
+
+### POST /conversations/:id/mark
+Mark a conversation read up to a timestamp. Body: `{"timestamp": "1767368030.607599"}`.
+
+---
+
 ### GET /search
 Search messages across workspace.
 
@@ -216,10 +224,10 @@ Search messages across workspace.
 | count | 20 | Max results |
 
 **Query Syntax:**
-- `from:@username` - From specific user
-- `in:#channel` - In specific channel
-- `before:2026-01-01` - Before date
-- `after:2025-12-01` - After date
+- `from:@username`: From a user.
+- `in:#channel`: In a channel.
+- `before:2026-01-01`: Before a date.
+- `after:2025-12-01`: After a date.
 
 ```bash
 curl -H "Authorization: Bearer $API_KEY" "http://localhost:3000/search?q=from:@gwen%20meeting"
@@ -257,6 +265,12 @@ curl -H "Authorization: Bearer $API_KEY" "http://localhost:3000/users?limit=50"
 
 ---
 
+### GET /users/search
+Search users by name, display name, or email. Parameters: `q` (required) and
+`limit` (default 20).
+
+---
+
 ### GET /users/:id
 Get user details.
 
@@ -266,37 +280,36 @@ curl -H "Authorization: Bearer $API_KEY" http://localhost:3000/users/U05GPEVH7J9
 
 ---
 
-## Web UI
+### POST /reactions and DELETE /reactions
+Add or remove a reaction. Body: `channel_id`, `timestamp`, and `reaction`, the
+emoji name without colons.
 
-Open http://localhost:3000 in your browser for a visual interface.
-
-The UI auto-connects with the default API key:
-1. Select a conversation from the sidebar
-2. View messages, threads, and user info
-3. Search messages across the workspace
-4. Send messages directly from the browser
-
-**Using with claude.ai:**
-1. Preferred: add a remote MCP connector in Claude settings if you run a remote endpoint.
-2. Fallback: open the web UI alongside claude.ai for local browsing/search.
-3. Copy-paste relevant message content as needed.
+```bash
+curl -X POST -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"channel_id":"D063M4403MW","timestamp":"1767368030.607599","reaction":"thumbsup"}' \
+  http://localhost:3000/reactions
+```
 
 ---
+
+## Web UI
+
+Open <http://localhost:3000> for the dashboard. It connects with the
+generated API key and lets you pick a conversation, read messages and
+threads, search, and send messages.
 
 ## Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| PORT | 3000 | Server port |
-| SLACK_API_KEY | (generated) | API key for authentication |
-| SLACK_TOKEN | - | Slack xoxc token |
-| SLACK_COOKIE | - | Slack xoxd cookie |
-
----
+| `PORT` | 3000 | Server port |
+| `SLACK_API_KEY` | Generated | API key for requests |
+| `SLACK_TOKEN` | None | Slack `xoxc-` token |
+| `SLACK_COOKIE` | None | Slack `xoxd-` cookie |
 
 ## Security Notes
 
-1. **API Key**: Keep it secret. Anyone with the key can access your Slack.
-2. **Local Only**: By default, only accessible from localhost.
-3. **HTTPS**: For remote access, put behind a reverse proxy with HTTPS.
-4. **Token Storage**: Slack tokens are stored in keychain and token file.
+- Anyone with the API key can read and post as you. Keep it secret.
+- The server binds to `127.0.0.1`, and CORS allows only localhost origins.
+- For remote access, put it behind a reverse proxy with HTTPS.

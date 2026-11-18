@@ -1,5 +1,9 @@
 # API Reference
 
+Parameters, results, and errors for the 25 Slack tools in
+`@uniquedivine/mcp-slack`, plus tool `mcp_info`. Over HTTP, the `_unsafe`
+tools need `SLACK_MCP_ENABLE_UNSAFE_TOOLS=true`.
+
 ## Tools
 
 ### slack_health_check
@@ -14,8 +18,8 @@ Check if Slack tokens are valid.
   "status": "ok",
   "code": "ok",
   "message": "Slack auth valid",
-  "user": "james",
-  "team": "Rêvasser",
+  "user": "unique",
+  "team": "Example Workspace",
   "token_source": "environment",
   "token_updated": "2026-01-03T00:00:00Z"
 }
@@ -70,8 +74,8 @@ Force refresh tokens from Chrome.
   "status": "ok",
   "code": "refreshed",
   "message": "Tokens refreshed from Chrome.",
-  "user": "james",
-  "team": "Rêvasser"
+  "user": "unique",
+  "team": "Example Workspace"
 }
 ```
 
@@ -149,20 +153,20 @@ Get messages from a channel or DM.
 }
 ```
 
-`include_rich_message_fields` changes this tool's **output shape only** — it surfaces fields Slack
-already returns on the message object: `attachments`, `blocks`, `files`, `reactions`, `metadata`,
-plus `subtype`, `bot_id`, `app_id` (markers that flag automated / bot / app messages) and `team`
-(the workspace id, present on all messages). Especially `blocks` can be large, so it's opt-in per
-call to keep MCP client context lean.
+Parameter `include_rich_message_fields` changes only the output shape. It
+adds fields Slack already returns on each message: `attachments`, `blocks`,
+`files`, `reactions`, `metadata`, `subtype`, `bot_id`, `app_id`, and `team`.
+Fields `subtype`, `bot_id`, and `app_id` mark bot and app messages. Field
+`blocks` can be large, so the parameter is off by default.
 
-`include_all_metadata` is a **separate, independent** Slack request flag: its only effect is to add
-the full `event_payload` inside a message's developer `metadata` (without it you still get
-`metadata.event_type`). The two are orthogonal — set `include_rich_message_fields` to see `metadata`
-in the output at all; additionally set `include_all_metadata` for the full payload.
+Parameter `include_all_metadata` is a separate Slack request flag. It adds the
+full `event_payload` inside a message's `metadata`; without it, you get only
+`metadata.event_type`. Set `include_rich_message_fields` to see `metadata` at
+all, and add `include_all_metadata` for the full payload.
 
-Note: `slack_search_messages` matches are thin — Slack's search API does not return these rich
-fields on matches (only `team`). To read rich content for a search hit, call
-`slack_conversations_history` or `slack_get_thread` on the match's channel/ts.
+Slack's search API doesn't return these rich fields on matches, only `team`.
+To read rich content for a search hit, call `slack_conversations_history` or
+`slack_get_thread` with the match's channel and timestamp.
 
 ---
 
@@ -196,7 +200,7 @@ Export full conversation with threads.
     "oldest": "2025-12-01T00:00:00Z",
     "latest": "now"
   },
-  "saved_to": "/Users/james/export.json",
+  "saved_to": "/Users/you/export.json",
   "messages": [...]
 }
 ```
@@ -657,6 +661,46 @@ Search workspace users by name, display name, or email. Case-insensitive partial
   ]
 }
 ```
+
+---
+
+### slack_workflow_save
+
+Save or update a workflow profile in file `~/.slack-mcp-workflows.json`. A
+profile binds a `workflow_kind` to channels and people. Only the hosted-only
+tools below read profiles.
+
+**Parameters:**
+| Name | Type | Default | Description |
+|------|------|---------|-------------|
+| profile_name | string | *required* | Profile name |
+| workflow_kind | string | *required* | `support_inbox`, `incident_room`, `exec_brief`, `product_launch_watch`, or `custom` |
+| channels | string[] | - | Channel IDs |
+| priority_people | string[] | - | User IDs to weight higher |
+| retention_mode | string | `ephemeral` | `ephemeral` or `persistent` |
+| summary_cadence | string | - | `on_demand`, `daily_8am`, or `weekly_monday` |
+
+---
+
+### slack_workflows
+
+List saved workflow profiles. Optional parameter `workflow_kind` filters them.
+
+---
+
+### slack_smart_search, slack_catch_me_up, slack_triage
+
+Upstream's hosted-only AI tools. This package lists them for parity with
+upstream, but locally each returns error `tool_requires_hosted` without
+calling Slack. The error carries upstream's signup and pricing links.
+
+---
+
+### mcp_info
+
+Report the server version, install source, and whether a newer release
+exists. The stdio server lists it; the HTTP server doesn't. It takes no
+parameters.
 
 ## Write Log
 
