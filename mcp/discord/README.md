@@ -15,7 +15,7 @@ Requirements: [Bun](https://bun.sh) 1.4.3 or newer and a Discord bot token.
 published package with an exact version pin:
 
 ```sh
-DISCORD_TOKEN=your_discord_bot_token bunx @uniquedivine/mcp-discord@1.3.8
+DISCORD_TOKEN=your_discord_bot_token bunx @uniquedivine/mcp-discord@1.3.9
 ```
 
 CI in [Unique-Divine/jiyuu](https://github.com/Unique-Divine/jiyuu) builds and
@@ -26,7 +26,7 @@ version changes on `main`. The version pin selects the exact reviewed release th
 
 ```sh
 claude mcp add discord --env DISCORD_TOKEN=your_discord_bot_token \
-  -- bunx @uniquedivine/mcp-discord@1.3.8
+  -- bunx @uniquedivine/mcp-discord@1.3.9
 ```
 
 ### Codex
@@ -36,7 +36,7 @@ Add this entry to file `~/.codex/config.toml`:
 ```toml
 [mcp_servers.discord]
 command = "bunx"
-args = ["@uniquedivine/mcp-discord@1.3.8"]
+args = ["@uniquedivine/mcp-discord@1.3.9"]
 env = { DISCORD_TOKEN = "your_discord_bot_token" }
 ```
 
@@ -50,7 +50,7 @@ a project:
   "mcpServers": {
     "discord": {
       "command": "bunx",
-      "args": ["@uniquedivine/mcp-discord@1.3.8"],
+      "args": ["@uniquedivine/mcp-discord@1.3.9"],
       "env": { "DISCORD_TOKEN": "your_discord_bot_token" }
     }
   }
@@ -61,7 +61,7 @@ a project:
 
 1. Find the newest version with command
    `npm view @uniquedivine/mcp-discord version`.
-2. Change the `@1.3.8` pin in the client configuration to that version.
+2. Change the `@1.3.9` pin in the client configuration to that version.
 3. Restart the MCP server in the client, or restart the client. In Claude
    Code, run `/mcp` and reconnect the server. Command `bunx` downloads the new
    version on the next launch.
