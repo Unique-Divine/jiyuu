@@ -597,6 +597,18 @@ async function isGoneOnReread(channel, timestamp, selfId) {
  * before calling chat.delete, and maps known Slack errors to clear results.
  */
 export async function handleDeleteMessage(args) {
+  return deleteMessage(args, { ignoreAge: false });
+}
+
+/**
+ * slack_delete_message_unsafe: the same delete with every guard except the
+ * age window, for deliberate cleanup of older messages.
+ */
+export async function handleDeleteMessageUnsafe(args) {
+  return deleteMessage(args, { ignoreAge: true });
+}
+
+async function deleteMessage(args, { ignoreAge }) {
   const invalid = validateTargetArgs(args);
   if (invalid) return invalid;
 
@@ -605,7 +617,9 @@ export async function handleDeleteMessage(args) {
   const details = { channel, timestamp };
 
   const ownership = await checkOwnMessage(channel, timestamp, {
-    expectedText: args.expected_text
+    expectedText: args.expected_text,
+    ignoreAge,
+    unsafeTool: "slack_delete_message_unsafe"
   });
   if (!ownership.ok) return ownership.result;
   const oldText = ownership.message.text ?? "";
@@ -1014,6 +1028,7 @@ export const TOOL_HANDLERS = Object.freeze({
   slack_users_info: handleUsersInfo,
   slack_send_message: handleSendMessage,
   slack_delete_message: handleDeleteMessage,
+  slack_delete_message_unsafe: handleDeleteMessageUnsafe,
   slack_get_thread: handleGetThread,
   slack_list_users: handleListUsers,
   slack_add_reaction: handleAddReaction,

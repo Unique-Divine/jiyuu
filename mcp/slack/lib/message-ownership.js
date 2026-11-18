@@ -12,7 +12,8 @@
  *
  * Text in Slack can carry injected instructions. To tie each write to a
  * message the agent actually read, the caller also passes the message's
- * current text, and messages older than a default 24-hour window are refused.
+ * current text, and messages older than a default 7-day window are refused.
+ * The _unsafe tools skip only that age check, for deliberate cleanup.
  */
 
 import { slackAPI } from "./slack-client.js";
@@ -92,7 +93,7 @@ export function slackWriteErrorResult(error, details = {}) {
 
 // Default age window for edits and deletes. Env
 // SLACK_MCP_EDIT_DELETE_MAX_AGE_HOURS overrides it.
-export const DEFAULT_MAX_AGE_HOURS = 24;
+export const DEFAULT_MAX_AGE_HOURS = 168;
 
 // Safety cap on conversations.replies pages. The lookup narrows the call to
 // the target ts, so it normally needs one page.
@@ -242,7 +243,8 @@ export function isGoneForSelf(message, selfId) {
 
 /**
  * Confirm the target before a write:
- * 1. the message is no older than maxAgeHours() (checked before any call),
+ * 1. the message is no older than maxAgeHours() (checked before any call;
+ *    skipped when ignoreAge is true, for the _unsafe tools),
  * 2. it exists,
  * 3. the signed-in user wrote it,
  * 4. its text equals expected_text after trimming.
@@ -252,13 +254,19 @@ export function isGoneForSelf(message, selfId) {
  * to sessionChangedResult just before the write.
  */
 export async function checkOwnMessage(channelId, timestamp, options = {}) {
-  const { expectedText, now = Date.now(), env = process.env } = options;
+  const {
+    expectedText,
+    ignoreAge = false,
+    unsafeTool,
+    now = Date.now(),
+    env = process.env
+  } = options;
   const details = { channel: channelId, timestamp };
   const sessionToken = currentSessionToken();
 
   const limitHours = maxAgeHours(env);
   const ageHours = (now - Number(timestamp) * 1000) / 3_600_000;
-  if (ageHours > limitHours) {
+  if (!ignoreAge && ageHours > limitHours) {
     return {
       ok: false,
       result: messageWriteError("message_too_old", {
@@ -267,7 +275,9 @@ export async function checkOwnMessage(channelId, timestamp, options = {}) {
         max_age_hours: limitHours
       }, {
         message: `The message is older than the ${limitHours}-hour window for edits and deletes.`,
-        next_action: "Leave it, or ask the user to raise SLACK_MCP_EDIT_DELETE_MAX_AGE_HOURS for this server."
+        next_action: unsafeTool
+          ? `Leave it. If the user explicitly wants this older message changed, ask them first, then use ${unsafeTool}, which skips only the age check.`
+          : "Leave it, or ask the user to raise SLACK_MCP_EDIT_DELETE_MAX_AGE_HOURS for this server."
       })
     };
   }
