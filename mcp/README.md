@@ -59,6 +59,24 @@ with `mcp/discord`, `mcp/slack` or `mcp/telegram` in the title. Jiyuu
 publishes these packages under its own names. The upstream packages are
 separate projects.
 
+## Site Manifests
+
+Each server directory holds a committed file `site-manifest.json`. The MCP
+pages on [uniquedivine.com](https://uniquedivine.com/mcp) are built from these
+files. Script `scripts/site-manifest.ts` writes them from package metadata,
+each server's tool definitions, and the README's `## Install` section. Run
+`just mcp-manifest` after changing any of those, and commit the result. CI
+runs `just mcp-manifest --check`, which fails when a file is stale. A change
+to field `generatedFrom.revision` alone does not make a file stale.
+
+Package metadata `jiyuu.site` in file `package.json`, or table
+`[tool.jiyuu.site]` in file `pyproject.toml`, names the tool modules and the
+environment variable names to publish. Set `"site": false` there, or
+`site = false` under `[tool.jiyuu]`, to leave a server off the site. The
+generator reads only package manifests, tool modules, and READMEs. It refuses
+any env, token, session, cookie, or log file, and lists Telegram's tools with
+synthetic credentials in a scrubbed environment.
+
 ## Source Baselines
 
 Each component's `IMPORT.json` records the source snapshot and exclusions. Git

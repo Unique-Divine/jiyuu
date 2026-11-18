@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "uniquedivine-telegram-mcp"
 version = "2.0.2"
-description = "Telegram MCP server maintained in Jiyuu"
+description = "Telegram MCP server maintained in Jiyuu. Reads and manages chats, messages, contacts, folders, and media through your Telegram user account."
 readme = "README.md"
 authors = [
     {name = "chigwell"},
@@ -62,6 +62,24 @@ repository = "chigwell/telegram-mcp"
 package = "telegram-mcp"
 version = "2.0.1"
 commit = "0d7b7e3630397ff931624fee7e4b0f33a134c513"
+
+# Read by mcp/scripts/site-manifest.ts. Set `site = false` under
+# [tool.jiyuu] to leave this server off the site.
+[tool.jiyuu.site]
+tools = "telegram_mcp.catalog:list_tools"
+env = [
+    { name = "TELEGRAM_API_ID", required = true, secret = true },
+    { name = "TELEGRAM_API_HASH", required = true, secret = true },
+    { name = "TELEGRAM_SESSION_STRING", required = true, secret = true },
+    { name = "TELEGRAM_EXPOSED_TOOLS", required = false, secret = false },
+    { name = "JIYUU_MCP_NO_UPDATE_CHECK", required = false, secret = false },
+]
+
+# Synthetic values that let telegram_mcp.runtime import; no Telegram login.
+[tool.jiyuu.site.tools-env]
+TELEGRAM_API_ID = "12345"
+TELEGRAM_API_HASH = "dummy_hash"
+TELEGRAM_SESSION_NAME = "site_manifest"
 
 [tool.black]
 line-length = 99
