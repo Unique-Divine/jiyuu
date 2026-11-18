@@ -75,12 +75,12 @@ session, even when the person asks for one quick order.
 
 ## Copies of This Skill
 
-Command `sai --skill` prints the copy of this skill packaged with the
-installed CLI. When this page and the installed CLI disagree about a command,
-follow `sai --help` and the packaged copy. CLI versions with command group
-`sai skill` also have `sai skill show --page cli` for one page, `sai skill
-source` for where the copy came from, and `sai skill install` to copy the
-whole skill into `~/.agents/skills/sai`.
+This skill is edited in
+[Unique-Divine/jiyuu](https://github.com/Unique-Divine/jiyuu/tree/main/ai-skills/sai)
+and packaged with the CLI. Command `sai skill show`, or `sai --skill` on
+older versions, prints the packaged copy, and `sai skill source` names the
+commit it was copied from. When this page and the installed CLI disagree
+about a command, follow `sai --help`.
 
 ## Outside This Skill
 

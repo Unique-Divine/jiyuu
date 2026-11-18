@@ -5,8 +5,8 @@ Use this page to run `sai` commands. For trades, also read
 prefer them and read [mcp.md](mcp.md).
 
 Command `sai --help` lists the command groups: `account`, `auth`, `config`,
-`doctor`, `intent`, `market`, `mcp`, `trade`, `update`, and `watch`. Global
-options go before the command:
+`doctor`, `intent`, `market`, `mcp`, `skill`, `trade`, `update`, and `watch`.
+Global options go before the command:
 
 ```bash
 sai --json market prices
@@ -155,6 +155,21 @@ release is published yet", and reinstalling from `main` is the update:
 ```bash
 uv tool install --reinstall git+https://github.com/SaiDotFun/open-sai
 ```
+
+## This Skill
+
+```bash
+sai skill show --page mcp
+sai --json skill source
+sai skill install
+```
+
+`sai skill show` prints the `SKILL.md` packaged with the installed CLI, and
+`--page NAME` prints one child page. `sai skill source` reports the packaged
+path and the commit the skill was copied from. `sai skill install` copies the
+whole skill into `~/.agents/skills/sai`, or into `--dir DIR`. It refuses to
+replace a symlink or a copy that differs unless given `--force`. Ask the
+person before using `--force`.
 
 ## Trade Commands
 
