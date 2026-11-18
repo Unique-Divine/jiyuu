@@ -783,6 +783,36 @@ TEST(graphql_sibling_schema_single_file_without_config) {
     PASS();
 }
 
+/* gqlgen config paths are relative to the config and may climb out of its
+ * directory: service/gqlgen.yml names a `../schema` glob and a resolver
+ * package `../resolvers`. Both must match the repo-relative paths, or the
+ * config claims nothing and its resolver is never a candidate. A glob
+ * climbing above the repository is dropped. */
+static const EtFile et_gqlgen_parent_relative_files[] = {
+    {"go.mod", "module parent\n"},
+    {"service/gqlgen.yml",
+     "schema:\n  - ../schema/*.graphqls\n  - ../../../outside/*.graphqls\nresolver:\n"
+     "  layout: follow-schema\n  dir: ./../resolvers\n"},
+    {"schema/schema.graphqls", "type Query {\n  ping: String\n}\n"},
+    {"resolvers/schema.resolvers.go",
+     "package resolvers\n\n"
+     "type queryResolver struct{}\n\n"
+     "func (r *queryResolver) Ping() string {\n\treturn \"p\"\n}\n"},
+};
+
+static const EtGqlServerRoute et_gqlgen_parent_relative_want[] = {
+    {"__graphql__Query.ping", "String", "false", "", "Method", ".resolvers.queryResolver.Ping",
+     "gqlgen_resolver", 0},
+};
+
+TEST(graphql_gqlgen_config_parent_relative_paths) {
+    ASSERT_TRUE(et_gqlgen_case(et_gqlgen_parent_relative_files,
+                               ET_NWANT(et_gqlgen_parent_relative_files), 0,
+                               et_gqlgen_parent_relative_want,
+                               ET_NWANT(et_gqlgen_parent_relative_want)));
+    PASS();
+}
+
 /* Overwrite one fixture file in an indexed project. */
 static void et_rewrite(const EtProj *lp, const char *rel, const char *content) {
     char path[700];
@@ -3598,6 +3628,7 @@ SUITE(edge_types_probe) {
     RUN_TEST(graphql_gqlgen_config_sibling_schema_single_file);
     RUN_TEST(graphql_resolver_needs_ownership_without_config);
     RUN_TEST(graphql_sibling_schema_single_file_without_config);
+    RUN_TEST(graphql_gqlgen_config_parent_relative_paths);
     RUN_TEST(handles_flask_python);
     RUN_TEST(handles_fastapi_python);
     RUN_TEST(handles_drf_action_python);

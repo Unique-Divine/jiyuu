@@ -1120,19 +1120,53 @@ static void gqlgen_set(char **slot, char *value) {
     *slot = value;
 }
 
-/* Join the config's directory and a path it names; "./" prefixes dropped. */
+/* Normalize a repo-relative path in place: "." segments and empty ones
+ * dropped, ".." removes the segment before it; a trailing '/' is kept.
+ * False when ".." climbs above the repository root. */
+static bool gqlgen_normalize(char *path) {
+    size_t len = strlen(path);
+    bool trailing = len > 0 && path[len - SKIP_ONE] == '/';
+    size_t out = 0;
+    for (size_t i = 0; i < len;) {
+        size_t end = i;
+        while (end < len && path[end] != '/') {
+            end++;
+        }
+        size_t seg = end - i;
+        if (seg == PAIR_LEN && path[i] == '.' && path[i + SKIP_ONE] == '.') {
+            if (out == 0) {
+                return false;
+            }
+            out--; /* the '/' after the previous segment */
+            while (out > 0 && path[out - SKIP_ONE] != '/') {
+                out--;
+            }
+        } else if (seg > 0 && !(seg == SKIP_ONE && path[i] == '.')) {
+            memmove(path + out, path + i, seg);
+            out += seg;
+            path[out++] = '/';
+        }
+        i = end + SKIP_ONE;
+    }
+    if (out > 0 && !trailing) {
+        out--;
+    }
+    path[out] = '\0';
+    return true;
+}
+
+/* Join the config's directory and a path it names, normalized ("./",
+ * "../"); NULL when it leaves the repository or on allocation failure. */
 static char *gqlgen_join(const char *dir, const char *rel) {
-    while (rel[0] == '.' && rel[SKIP_ONE] == '/') {
-        rel += PAIR_LEN;
-    }
-    if (strcmp(rel, ".") == 0) {
-        rel = "";
-    }
     size_t dl = strlen(dir);
     size_t rl = strlen(rel);
     char *out = cbm_alloc(CBM_MEM_CLASS_OTHER, dl + rl + SKIP_ONE);
     if (out) {
         (void)snprintf(out, dl + rl + SKIP_ONE, "%s%s", dir, rel);
+        if (!gqlgen_normalize(out)) {
+            cbm_free(CBM_MEM_CLASS_OTHER, out);
+            out = NULL;
+        }
     }
     return out;
 }
