@@ -657,3 +657,26 @@ Search workspace users by name, display name, or email. Case-insensitive partial
   ]
 }
 ```
+
+## Write Log
+
+Each call to `slack_delete_message`, `slack_delete_message_unsafe`,
+`slack_update_message`, or `slack_update_message_unsafe` writes one line to
+stderr, whether it succeeds, is refused, or throws:
+
+```text
+slack-mcp write {"tool":"slack_delete_message","channel":"D063M4403MW","timestamp":"1767368030.607599","status":"deleted","code":null,"age_hours":0.2}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `tool` | The tool called |
+| `channel` | `channel_id`, or `null` when it isn't shaped like a Slack ID |
+| `timestamp` | `timestamp`, or `null` when it isn't shaped like a Slack ts |
+| `status` | `deleted`, `updated`, `probably_deleted`, `outcome_unknown`, `error`, or `thrown` |
+| `code` | The error code, such as `text_mismatch`, or `null` on success |
+| `age_hours` | The message's age in hours, from its timestamp |
+
+The line never includes tokens, cookies, or message text. Fields that come
+from the caller are logged only when they look like IDs, so text passed in
+the wrong argument can't reach the log.
