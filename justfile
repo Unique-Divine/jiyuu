@@ -82,7 +82,7 @@ mcp-test:
 
 # Write each MCP server's site-manifest.json; with --check, fail when one is stale.
 mcp-manifest *ARGS:
-  bun run mcp/scripts/site-manifest.ts {{ARGS}}
+  bun --no-env-file run mcp/scripts/site-manifest.ts {{ARGS}}
 
 # Test the MCP site manifest generator against fixture servers.
 mcp-manifest-test:

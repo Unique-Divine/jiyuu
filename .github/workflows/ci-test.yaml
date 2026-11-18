@@ -405,7 +405,7 @@ jobs:
         run: bun test mcp/scripts
         if: needs.changes.outputs.mcp_manifest == 'true'
       - name: Check committed site manifests
-        run: bun run mcp/scripts/site-manifest.ts --check
+        run: bun --no-env-file run mcp/scripts/site-manifest.ts --check
         if: needs.changes.outputs.mcp_manifest == 'true'
     needs: changes
   python-typecheck:

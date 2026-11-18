@@ -3,16 +3,18 @@
 // `just mcp-manifest --check` to fail when a committed manifest is stale.
 //
 // The generator reads package manifests, the tool modules they name, and
-// READMEs. Every file read goes through readSafeText, which refuses env,
-// token, session, cookie, credential, secret, and log files.
+// READMEs. Every file read goes through safePath, which resolves symlinks
+// and refuses env, token, session, cookie, credential, secret, and log files
+// and anything outside the server folder.
 
 import {
   existsSync,
+  lstatSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
-  statSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs"
@@ -29,6 +31,8 @@ export interface EnvVar {
   name: string
   required: boolean
   secret: boolean
+  /** Plain-text alternatives or caveats, such as other ways to log in. */
+  note?: string
 }
 
 export interface ToolParam {
@@ -108,7 +112,8 @@ export type PythonToolLister = (source: ServerSource) => Promise<McpTool[]>
 
 export interface GenerateOptions {
   mcpDir: string
-  revision: string
+  /** The commit that holds the inputs used to build this server's manifest. */
+  revisionFor: (source: ServerSource) => string
   listPythonTools: PythonToolLister
 }
 
@@ -123,18 +128,40 @@ export function isSecretFileName(path: string): boolean {
   return SECRET_NAME.test(basename(path))
 }
 
-/** Reads a text file, refusing secret-looking names and paths outside root. */
-export function readSafeText(root: string, path: string): string {
-  const full = resolve(root, path)
-  if (full !== root && !full.startsWith(root + sep)) {
-    throw new Error(`refusing to read ${path}: outside ${root}`)
+function inside(root: string, path: string): boolean {
+  return path === root || path.startsWith(root + sep)
+}
+
+function checkPath(root: string, path: string, shown: string): void {
+  if (!inside(root, path)) {
+    throw new Error(`refusing to read ${shown}: outside ${root}`)
   }
-  if (isSecretFileName(full)) {
+  if (isSecretFileName(path)) {
     throw new Error(
-      `refusing to read ${path}: env, token, session, or log file`,
+      `refusing to read ${shown}: env, token, session, or log file`,
     )
   }
-  return readFileSync(full, "utf8")
+}
+
+/**
+ * Resolves `path` under server folder `root` and returns its real path.
+ * Checks containment and the secret-name rule on both the path as written
+ * and the path after following symlinks. Refuses a symlinked root.
+ */
+export function safePath(root: string, path: string): string {
+  if (lstatSync(root).isSymbolicLink()) {
+    throw new Error(`refusing symlinked server folder ${root}`)
+  }
+  const full = resolve(root, path)
+  checkPath(resolve(root), full, path)
+  const real = realpathSync(full)
+  checkPath(realpathSync(root), real, `${path} (links to ${real})`)
+  return real
+}
+
+/** Reads a text file through safePath. */
+export function readSafeText(root: string, path: string): string {
+  return readFileSync(safePath(root, path), "utf8")
 }
 
 // ---------------------------------------------------------------------------
@@ -164,15 +191,19 @@ function parseEnvVars(value: unknown, what: string): EnvVar[] {
       throw new Error(`${what}[${index}].name is not an env var name: ${name}`)
     }
     for (const key of Object.keys(row)) {
-      if (!["name", "required", "secret"].includes(key)) {
+      if (!["name", "required", "secret", "note"].includes(key)) {
         throw new Error(`${what}[${index}] has unknown key ${key}; names only`)
       }
     }
-    return {
+    const envVar: EnvVar = {
       name,
       required: row.required === true,
       secret: row.secret === true,
     }
+    if (row.note !== undefined) {
+      envVar.note = asString(row.note, `${what}[${index}].note`)
+    }
+    return envVar
   })
 }
 
@@ -264,8 +295,14 @@ function pypiSource(folder: string, dir: string): ServerSource | null {
 export function discoverServers(mcpDir: string): Discovery {
   const servers: ServerSource[] = []
   const optedOut: string[] = []
-  const folders = readdirSync(mcpDir)
-    .filter((name) => statSync(join(mcpDir, name)).isDirectory())
+  const folders = readdirSync(mcpDir, { withFileTypes: true })
+    .filter((entry) => {
+      if (entry.isSymbolicLink()) {
+        throw new Error(`refusing symlinked folder mcp/${entry.name}`)
+      }
+      return entry.isDirectory()
+    })
+    .map((entry) => entry.name)
     .sort()
   for (const folder of folders) {
     const dir = join(mcpDir, folder)
@@ -294,8 +331,12 @@ export async function loadNpmTools(source: ServerSource): Promise<McpTool[]> {
       )
     }
     // Check the name and location before import runs the module.
-    readSafeText(source.dir, path)
-    const module = await import(resolve(source.dir, path))
+    if (lstatSync(resolve(source.dir, path)).isSymbolicLink()) {
+      throw new Error(
+        `${source.folder}: refusing symlinked tool module ${path}`,
+      )
+    }
+    const module = await import(safePath(source.dir, path))
     const value = module[exportName]
     if (value === undefined) {
       throw new Error(`${source.folder}: ${path} has no export ${exportName}`)
@@ -513,17 +554,52 @@ export function serialize(manifest: SiteManifest): string {
   return JSON.stringify(manifest, null, 2) + "\n"
 }
 
-/** Manifest text without generatedFrom, which changes with every commit. */
-export function comparable(text: string): string {
-  const parsed = JSON.parse(text) as Partial<SiteManifest>
-  delete parsed.generatedFrom
-  return JSON.stringify(parsed)
+/** Problem with a committed generatedFrom object, or null when valid. */
+export function generatedFromProblem(value: unknown): string | null {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return "generatedFrom must be an object"
+  }
+  const keys = Object.keys(value)
+  if (keys.length !== 1 || keys[0] !== "revision") {
+    return "generatedFrom must hold only revision"
+  }
+  const revision = (value as { revision: unknown }).revision
+  if (typeof revision !== "string" || !/^[0-9a-f]{7,40}$/.test(revision)) {
+    return "generatedFrom.revision must be a git commit hash"
+  }
+  return null
+}
+
+export type Status = "fresh" | "stale" | "revision" | "missing" | "unwanted"
+
+/**
+ * Compares a committed manifest with a freshly built one. "stale" means the
+ * content differs or generatedFrom is malformed; "revision" means only the
+ * revision value differs. --check accepts "revision", because a shallow CI
+ * checkout can't always find the input commit.
+ */
+export function compare(current: string, next: string): Status {
+  let parsed: Record<string, unknown>
+  try {
+    parsed = JSON.parse(current)
+  } catch {
+    return "stale"
+  }
+  if (generatedFromProblem(parsed.generatedFrom) !== null) return "stale"
+  const wanted = JSON.parse(next) as Record<string, unknown>
+  const revision = (parsed.generatedFrom as { revision: string }).revision
+  const same = (a: Record<string, unknown>, b: Record<string, unknown>) =>
+    JSON.stringify({ ...a, generatedFrom: null }) ===
+    JSON.stringify({ ...b, generatedFrom: null })
+  if (!same(parsed, wanted)) return "stale"
+  const want = (wanted.generatedFrom as { revision: string }).revision
+  return revision === want ? "fresh" : "revision"
 }
 
 export interface Outcome {
   folder: string
   path: string
-  status: "fresh" | "stale" | "missing" | "unwanted"
+  status: Status
   text?: string
 }
 
@@ -538,7 +614,7 @@ export async function plan(options: GenerateOptions): Promise<Outcome[]> {
         : await options.listPythonTools(source)
     const readme = readSafeText(source.dir, "README.md")
     const text = serialize(
-      buildManifest(source, mcpTools, readme, options.revision),
+      buildManifest(source, mcpTools, readme, options.revisionFor(source)),
     )
     const path = join(source.dir, MANIFEST_FILE)
     if (!existsSync(path)) {
@@ -546,11 +622,10 @@ export async function plan(options: GenerateOptions): Promise<Outcome[]> {
       continue
     }
     const current = readSafeText(source.dir, MANIFEST_FILE)
-    const fresh = comparable(current) === comparable(text)
     outcomes.push({
       folder: source.folder,
       path,
-      status: fresh ? "fresh" : "stale",
+      status: compare(current, text),
       text,
     })
   }
@@ -561,13 +636,18 @@ export async function plan(options: GenerateOptions): Promise<Outcome[]> {
   return outcomes
 }
 
-/** Writes stale and missing manifests and removes opted-out ones. */
+/** Writes changed and missing manifests and removes opted-out ones. */
 export function apply(outcomes: Outcome[]): void {
   for (const outcome of outcomes) {
     if (outcome.status === "unwanted") unlinkSync(outcome.path)
     else if (outcome.status !== "fresh")
       writeFileSync(outcome.path, outcome.text!)
   }
+}
+
+/** Statuses that fail --check. */
+export function failsCheck(status: Status): boolean {
+  return status !== "fresh" && status !== "revision"
 }
 
 export function parseArgs(args: readonly string[]): { check: boolean } {
@@ -579,18 +659,69 @@ export function parseArgs(args: readonly string[]): { check: boolean } {
   return { check }
 }
 
-function gitRevision(dir: string): string {
-  const proc = Bun.spawnSync(["git", "rev-parse", "HEAD"], { cwd: dir })
-  if (proc.exitCode !== 0) throw new Error("git rev-parse HEAD failed")
-  return proc.stdout.toString().trim()
+/**
+ * Git pathspecs for a server's manifest inputs: its folder except the
+ * manifest itself, plus the generator and helper in mcp/scripts.
+ */
+export function inputPathspecs(folder: string): string[] {
+  return [
+    `mcp/${folder}`,
+    `:(exclude)mcp/${folder}/${MANIFEST_FILE}`,
+    "mcp/scripts",
+  ]
+}
+
+function git(repo: string, args: string[]): string {
+  const proc = Bun.spawnSync(["git", ...args], { cwd: repo })
+  if (proc.exitCode !== 0) {
+    throw new Error(`git ${args.join(" ")} failed\n${proc.stderr}`)
+  }
+  // trimEnd keeps the leading space of porcelain status lines.
+  return proc.stdout.toString().trimEnd()
+}
+
+/** The last commit that changed a server's manifest inputs. */
+export function inputRevision(repo: string, folder: string): string {
+  const revision = git(repo, [
+    "log",
+    "-1",
+    "--format=%H",
+    "--",
+    ...inputPathspecs(folder),
+  ])
+  if (!revision) throw new Error(`no commit touches mcp/${folder}`)
+  return revision
+}
+
+/** Uncommitted changes to a server's manifest inputs, as porcelain lines. */
+export function dirtyInputs(repo: string, folder: string): string[] {
+  const out = git(repo, [
+    "status",
+    "--porcelain",
+    "--untracked-files=all",
+    "--",
+    ...inputPathspecs(folder),
+  ])
+  return out === "" ? [] : out.split("\n")
 }
 
 export async function main(args: readonly string[]): Promise<number> {
   const { check } = parseArgs(args)
   const mcpDir = resolve(dirname(import.meta.dir))
+  const repo = dirname(mcpDir)
   const outcomes = await plan({
     mcpDir,
-    revision: gitRevision(mcpDir),
+    revisionFor: (source) => {
+      // A revision names committed inputs, so writing needs a clean tree.
+      const dirty = check ? [] : dirtyInputs(repo, source.folder)
+      if (dirty.length > 0) {
+        throw new Error(
+          `commit the changes to mcp/${source.folder} inputs first:\n` +
+            dirty.join("\n"),
+        )
+      }
+      return inputRevision(repo, source.folder)
+    },
     listPythonTools: uvToolLister,
   })
   const changed = outcomes.filter((o) => o.status !== "fresh")
@@ -599,7 +730,7 @@ export async function main(args: readonly string[]): Promise<number> {
     console.log(`${o.status.padEnd(8)} ${rel}`)
   }
   if (check) {
-    if (changed.length > 0) {
+    if (outcomes.some((o) => failsCheck(o.status))) {
       console.error("Site manifests are out of date. Run: just mcp-manifest")
       return 1
     }
