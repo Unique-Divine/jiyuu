@@ -1884,6 +1884,68 @@ static bool edge_props_should_replace(const char *existing_json, const char *inc
     return strcmp(incoming_json, existing_json) > 0;
 }
 
+enum { GB_GQL_OPS_MAX = 64 }; /* operations listed on one GRAPHQL_CALLS edge */
+
+/* Add the operation names of one GRAPHQL_CALLS props document (its
+ * `operations` list and `operation`) to names[], without duplicates. */
+static void gb_graphql_collect_operations(yyjson_doc *doc, const char **names, int *n) {
+    yyjson_val *root = doc ? yyjson_doc_get_root(doc) : NULL;
+    yyjson_val *one = root ? yyjson_obj_get(root, "operation") : NULL;
+    yyjson_val *list = root ? yyjson_obj_get(root, "operations") : NULL;
+    size_t count = yyjson_is_arr(list) ? yyjson_arr_size(list) : 0;
+    for (size_t i = 0; i <= count; i++) {
+        yyjson_val *v = i < count ? yyjson_arr_get(list, i) : one;
+        const char *s = yyjson_get_str(v);
+        bool seen = s == NULL;
+        for (int j = 0; j < *n && !seen; j++) {
+            seen = strcmp(names[j], s) == 0;
+        }
+        if (!seen && *n < GB_GQL_OPS_MAX) {
+            names[(*n)++] = s;
+        }
+    }
+}
+
+static int gb_str_cmp(const void *a, const void *b) {
+    return strcmp(*(const char *const *)a, *(const char *const *)b);
+}
+
+/* GRAPHQL_CALLS edges dedupe on source, Route and type, so two operations
+ * that select the same field from one function or module meet here. The
+ * kept props get the sorted union of both sides' operations, so no
+ * operation loses its link. Returns interned props, or NULL to keep `keep`. */
+static const char *gb_graphql_union_operations(cbm_gbuf_t *gb, const char *keep,
+                                               const char *other) {
+    yyjson_doc *dk = yyjson_read_opts((char *)keep, strlen(keep), 0, &gb_yy_alc, NULL);
+    yyjson_doc *dother = yyjson_read_opts((char *)other, strlen(other), 0, &gb_yy_alc, NULL);
+    const char *names[GB_GQL_OPS_MAX];
+    int n = 0;
+    gb_graphql_collect_operations(dk, names, &n);
+    gb_graphql_collect_operations(dother, names, &n);
+    const char *out = NULL;
+    yyjson_mut_doc *md = dk && n > 0 ? yyjson_doc_mut_copy(dk, &gb_yy_alc) : NULL;
+    yyjson_mut_val *root = md ? yyjson_mut_doc_get_root(md) : NULL;
+    if (yyjson_mut_is_obj(root)) {
+        qsort(names, (size_t)n, sizeof(names[0]), gb_str_cmp);
+        yyjson_mut_val *arr = yyjson_mut_arr(md);
+        for (int i = 0; arr && i < n; i++) {
+            (void)yyjson_mut_arr_add_strcpy(md, arr, names[i]);
+        }
+        (void)yyjson_mut_obj_remove_key(root, "operations");
+        if (arr && yyjson_mut_obj_add_val(md, root, "operations", arr)) {
+            char *json = yyjson_mut_write_opts(md, 0, &gb_yy_alc, NULL, NULL);
+            if (json) {
+                out = gb_intern(gb, json);
+                gb_yy_free(NULL, json);
+            }
+        }
+    }
+    yyjson_mut_doc_free(md);
+    yyjson_doc_free(dk);
+    yyjson_doc_free(dother);
+    return out;
+}
+
 int64_t cbm_gbuf_insert_edge(cbm_gbuf_t *gb, int64_t source_id, int64_t target_id, const char *type,
                              const char *properties_json) {
     if (!gb || !type) {
@@ -1900,7 +1962,17 @@ int64_t cbm_gbuf_insert_edge(cbm_gbuf_t *gb, int64_t source_id, int64_t target_i
     edge_key_slot_t *hit = edge_key_map_find(&gb->edge_by_key, h0, h1);
     cbm_gbuf_edge_t *existing = hit ? hit->edge : NULL;
     if (existing) {
-        if (edge_props_should_replace(existing->properties_json, properties_json)) {
+        bool replace = edge_props_should_replace(existing->properties_json, properties_json);
+        if (properties_json && existing->properties_json && strcmp(type, "GRAPHQL_CALLS") == 0) {
+            const char *keep = replace ? properties_json : existing->properties_json;
+            const char *other = replace ? existing->properties_json : properties_json;
+            const char *merged = gb_graphql_union_operations(gb, keep, other);
+            if (merged) {
+                existing->properties_json = (char *)merged;
+                return existing->id;
+            }
+        }
+        if (replace) {
             existing->properties_json = (char *)gb_intern(gb, properties_json);
         }
         return existing->id;

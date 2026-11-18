@@ -139,6 +139,10 @@ bool cbm_service_pattern_graphql_operation(const char *doc, const char **op_type
 bool cbm_service_pattern_graphql_signature(const char *doc, bool require_keyword, char *out,
                                            size_t out_sz);
 
+/* The same signature in a heap buffer that grows to hold every path (free()
+ * it); NULL when `doc` holds no operation or on allocation failure. */
+char *cbm_service_pattern_graphql_signature_alloc(const char *doc, bool require_keyword);
+
 /* Split a signature from cbm_service_pattern_graphql_signature: sets *op_type
  * to a static "query"/"mutation"/"subscription", copies the operation name
  * (bounded, "" when anonymous) and returns the comma-separated paths. NULL

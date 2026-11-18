@@ -3307,7 +3307,7 @@ static TSNode extract_graphql_arg(CBMExtractCtx *ctx, TSNode args, const char **
         return args;
     }
     uint32_t nc = ts_node_named_child_count(args);
-    for (uint32_t ai = 0; ai < nc && ai < MAX_POSITIONAL_SCAN; ai++) {
+    for (uint32_t ai = 0; ai < nc && ai < CBM_MAX_CALL_ARGS; ai++) {
         TSNode arg = ts_node_named_child(args, ai);
         const char *ak = ts_node_type(arg);
         if ((strcmp(ak, "argument") == 0 || strcmp(ak, "keyword_argument") == 0) &&
@@ -3333,8 +3333,38 @@ static TSNode extract_graphql_arg(CBMExtractCtx *ctx, TSNode args, const char **
  * a plain `fetch`, or a project helper are not GraphQL client libraries the
  * callee classifier knows. Records a CBM_STRREF_GRAPHQL ref owned by the
  * enclosing function so its field paths link like a constant's. */
+/* A logging or printing call (console.log, print, logger.info) carries text
+ * about an operation, never a request. */
+static bool graphql_callee_is_logging(const char *callee) {
+    static const char *const prefixes[] = {
+        "console.",     "logger.",      "logging.",  "log.",
+        "this.logger.", "self.logger.", "self.log.", NULL,
+    };
+    static const char *const names[] = {
+        "print", "println", "printf", "puts",  "log",   "debug", "info",
+        "warn",  "warning", "error",  "trace", "fatal", NULL,
+    };
+    if (!callee) {
+        return false;
+    }
+    for (int i = 0; prefixes[i]; i++) {
+        if (strncmp(callee, prefixes[i], strlen(prefixes[i])) == 0) {
+            return true;
+        }
+    }
+    const char *dot = strrchr(callee, '.');
+    const char *last = dot ? dot + SKIP_ONE : callee;
+    for (int i = 0; names[i]; i++) {
+        if (strcmp(last, names[i]) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static void record_graphql_call_document(CBMExtractCtx *ctx, const CBMCall *call, TSNode lit) {
-    if (ts_node_is_null(lit) || !call->enclosing_func_qn) {
+    if (ts_node_is_null(lit) || !call->enclosing_func_qn ||
+        graphql_callee_is_logging(call->callee_name)) {
         return;
     }
     const char *sig = cbm_graphql_literal_sig(ctx->arena, lit, ctx->source, true);

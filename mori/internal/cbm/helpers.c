@@ -2551,7 +2551,7 @@ const char *cbm_template_string_text(CBMArena *a, TSNode node, const char *sourc
 
 /* Largest literal read as a GraphQL document (generated documents run to tens
  * of KB; anything past this is not hand-written client code). */
-enum { GQL_DOC_MAX = 256 * CBM_SZ_1K, GQL_TRIPLE_QUOTE = 3, GQL_SIG_MAX = CBM_SZ_4K };
+enum { GQL_DOC_MAX = 256 * CBM_SZ_1K, GQL_TRIPLE_QUOTE = 3 };
 
 static bool gql_literal_kind(const char *k) {
     return strcmp(k, "string") == 0 || strcmp(k, "string_literal") == 0 ||
@@ -2559,11 +2559,13 @@ static bool gql_literal_kind(const char *k) {
            strcmp(k, "interpreted_string_literal") == 0 || strcmp(k, "string_content") == 0;
 }
 
-/* Byte span of a literal's text inside its delimiters. */
-static void gql_literal_span(const char *src, uint32_t *start, uint32_t *end) {
+/* Byte span of a literal's text inside its delimiters. Sets *raw for a
+ * Python r-prefixed string, whose backslashes are text. */
+static void gql_literal_span(const char *src, uint32_t *start, uint32_t *end, bool *raw) {
     uint32_t s = *start;
     uint32_t e = *end;
     while (s < e && isalpha((unsigned char)src[s])) {
+        *raw = *raw || src[s] == 'r' || src[s] == 'R';
         s++; /* Python r/b/f/u prefixes */
     }
     uint32_t q = 0;
@@ -2575,6 +2577,7 @@ static void gql_literal_span(const char *src, uint32_t *start, uint32_t *end) {
         q = SKIP_ONE;
     } else if (s != *start) {
         s = *start; /* letters but no quote: string_content, not a prefix */
+        *raw = false;
     }
     *start = s + q;
     *end = e - q;
@@ -2597,22 +2600,64 @@ static bool gql_opens_like_document(const char *p, const char *end) {
                        *p == '$');
 }
 
+/* The character a backslash escape `\\c` stands for. */
+static char gql_unescape(char c) {
+    switch (c) {
+    case 'n':
+        return '\n';
+    case 't':
+        return '\t';
+    case 'r':
+        return '\r';
+    default:
+        return c;
+    }
+}
+
+/* The literal's text with the host language's escapes decoded (`\"` is a
+ * quote, `\n` a newline), so a GraphQL string argument written inside a
+ * quoted host string ends where GraphQL sees it end. */
+static char *gql_decode_literal(CBMArena *a, const char *text, size_t len, bool raw) {
+    char *out = cbm_arena_alloc(a, len + SKIP_ONE);
+    if (!out) {
+        return NULL;
+    }
+    size_t n = 0;
+    for (size_t i = 0; i < len; i++) {
+        char c = text[i];
+        if (!raw && c == '\\' && i + SKIP_ONE < len) {
+            c = gql_unescape(text[++i]);
+        }
+        out[n++] = c;
+    }
+    out[n] = '\0';
+    return out;
+}
+
+static bool gql_raw_literal_kind(const char *k) {
+    return strcmp(k, "raw_string_literal") == 0; /* Go/Rust: no escapes */
+}
+
 const char *cbm_graphql_literal_sig(CBMArena *a, TSNode node, const char *source,
                                     bool require_keyword) {
-    if (ts_node_is_null(node) || !source || !gql_literal_kind(ts_node_type(node))) {
+    const char *kind = ts_node_is_null(node) ? NULL : ts_node_type(node);
+    if (!kind || !source || !gql_literal_kind(kind)) {
         return NULL;
     }
     uint32_t start = ts_node_start_byte(node);
     uint32_t end = ts_node_end_byte(node);
-    gql_literal_span(source, &start, &end);
+    bool raw = gql_raw_literal_kind(kind);
+    gql_literal_span(source, &start, &end, &raw);
     if (end <= start || end - start > GQL_DOC_MAX ||
         !gql_opens_like_document(source + start, source + end)) {
         return NULL;
     }
-    char *doc = cbm_arena_strndup(a, source + start, end - start);
-    char sig[GQL_SIG_MAX];
-    if (!doc || !cbm_service_pattern_graphql_signature(doc, require_keyword, sig, sizeof(sig))) {
+    char *doc = gql_decode_literal(a, source + start, end - start, raw);
+    char *sig = doc ? cbm_service_pattern_graphql_signature_alloc(doc, require_keyword) : NULL;
+    if (!sig) {
         return NULL;
     }
-    return cbm_arena_strdup(a, sig);
+    const char *kept = cbm_arena_strdup(a, sig);
+    free(sig);
+    return kept;
 }

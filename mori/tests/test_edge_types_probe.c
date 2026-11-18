@@ -1377,6 +1377,12 @@ TEST(graphql_selection_signature_parser) {
         /* template interpolation and string escapes are trivia */
         {"${F}\\n query Esc {\\n  perp {\\n    borrowings { id }\\n  }\\n}", 1, 1,
          "query|Esc|perp,perp.borrowings"},
+        /* a `${...}` interpolation ends at its own brace, not one inside a JS
+         * string, a nested template or a comment */
+        {"query T { ${helper(\"}\")} perp { trades { id } } }", 1, 1,
+         "query|T|perp,perp.trades"},
+        {"query U { ${`a}${'}'}`} perp { id } }", 1, 1, "query|U|perp,perp.id"},
+        {"query V { ${x /* } */} perp { id } }", 1, 1, "query|V|perp,perp.id"},
         /* not an operation */
         {"query failed for user", 1, 0, ""},
         {"https://api.example.com/graphql", 0, 0, ""},
@@ -1407,6 +1413,23 @@ TEST(graphql_selection_signature_parser) {
     ASSERT_STR_EQ(paths, "a,b.c");
     ASSERT_TRUE(cbm_service_pattern_graphql_sig_parts("select|x|", &type, name, sizeof(name)) ==
                 NULL);
+    PASS();
+}
+
+/* A selection far past any fixed buffer keeps every path. */
+TEST(graphql_selection_signature_alloc_keeps_every_path) {
+    enum { FIELDS = 600 };
+    static char doc[FIELDS * 8 + 64];
+    size_t len = (size_t)snprintf(doc, sizeof(doc), "query Big { root {");
+    for (int i = 1; i <= FIELDS; i++) {
+        len += (size_t)snprintf(doc + len, sizeof(doc) - len, " f%04d", i);
+    }
+    (void)snprintf(doc + len, sizeof(doc) - len, " } }");
+    char *sig = cbm_service_pattern_graphql_signature_alloc(doc, true);
+    ASSERT_TRUE(sig != NULL);
+    ASSERT_TRUE(strstr(sig, "root.f0001,") != NULL);
+    ASSERT_TRUE(strstr(sig, ",root.f0600") != NULL);
+    free(sig);
     PASS();
 }
 
@@ -1583,7 +1606,10 @@ TEST(graphql_field_paths_python_constants) {
          "def request(endpoint, query, variables=None):\n"
          "    return httpx.post(endpoint, json={\"query\": query, \"variables\": variables})\n\n\n"
          "def markets(endpoint):\n"
-         "    return request(endpoint, MARKETS)\n"},
+         "    return request(endpoint, MARKETS)\n\n\n"
+         "def debug():\n"
+         "    print(\"query Dbg { user { id } }\")\n"
+         "    logging.info(\"\"\"query Dbg2 { user { id } }\"\"\")\n"},
     };
     static const char *const want[] = {
         "MARKETS>__graphql__Query.perp",
@@ -1647,7 +1673,17 @@ static int et_gql_inline_case(bool parallel) {
          "}\n\n"
          "export function screen(useMediaQuery: (q: object) => boolean, log: (q: object) => void) {\n"
          "  log({ query: \"query failed for user\" })\n"
+         "  console.log(\"query Debug { user { id } }\")\n"
+         "  logger.info(`query Debug2 { user { id } }`)\n"
          "  return useMediaQuery({ query: \"(max-width: 480px)\" })\n"
+         "}\n\n"
+         "export function fetchUser(url: string): Promise<Response> {\n"
+         "  return fetch(url, { method: \"POST\", body: JSON.stringify({\n"
+         "    query: \"query UserByName { user(name: \\\"bob\\\") { id } }\",\n"
+         "  }) })\n"
+         "}\n\n"
+         "export function lateArg(send: (a: number, b: number, c: number, q: string) => void) {\n"
+         "  send(1, 2, 3, `query Late { late { id } }`)\n"
          "}\n"},
     };
     static const char *const want[] = {
@@ -1656,10 +1692,23 @@ static int et_gql_inline_case(bool parallel) {
         "subscribeBalances>__graphql__Subscription.userBalances.token_info",
         "fetchMarkets>__graphql__Query.perp",
         "fetchMarkets>__graphql__Query.perp.borrowings",
+        /* named inline documents keep their operation-name Route */
+        "subscribeBalances>__graphql__PortfolioBalances",
+        "fetchMarkets>__graphql__Markets",
+        /* an escaped quote inside a host string ends the GraphQL string */
+        "fetchUser>__graphql__Query.user",
+        "fetchUser>__graphql__Query.user.id",
+        "fetchUser>__graphql__UserByName",
+        /* the operation is the fourth argument */
+        "lateArg>__graphql__Query.late",
+        "lateArg>__graphql__Query.late.id",
+        "lateArg>__graphql__Late",
         NULL,
     };
     static const char *const reject[] = {
         "subscribeBalances>__graphql__Subscription.userBalances.token_info.type",
+        "screen>__graphql__Query.user", /* console.log and logger.info only log */
+        "screen>__graphql__Debug",
         NULL,
     };
     char dump[CBM_SZ_4K];
@@ -1668,9 +1717,9 @@ static int et_gql_inline_case(bool parallel) {
                          "__graphql__Subscription.userBalances", "subscribeBalances", props,
                          sizeof(props));
     int ok = et_gql_expect(dump, want, reject);
-    /* 3 + 2 paths; nothing from screen() */
-    if (n != 5) {
-        fprintf(stderr, "  [ET-GQL] inline edges: %d, want 5%s", n, dump);
+    /* 3 + 2 + 2 + 2 paths and 4 operation-name Routes; nothing from screen() */
+    if (n != 13) {
+        fprintf(stderr, "  [ET-GQL] inline edges: %d, want 13%s", n, dump);
         ok = 0;
     }
     if (!strstr(props, "\"callee\":\"client.subscribe\"") ||
@@ -1681,6 +1730,69 @@ static int et_gql_inline_case(bool parallel) {
         ok = 0;
     }
     return ok;
+}
+
+/* Two operations in one function select the same field: the one edge into
+ * that Route lists both, so neither loses its link. */
+static int et_gql_shared_case(bool parallel) {
+    static const EtFile f[] = {
+        {"app/src/pages/trades/loadBoth.ts",
+         "export async function loadBoth(url: string): Promise<void> {\n"
+         "  await fetch(url, { body: JSON.stringify({\n"
+         "    query: `query First { perp { trades { id } } }` }) })\n"
+         "  await fetch(url, { body: JSON.stringify({\n"
+         "    query: `query Second { perp { trades { id } } }` }) })\n"
+         "}\n"},
+    };
+    char dump[CBM_SZ_4K];
+    char props[CBM_SZ_1K];
+    (void)et_gql_edges(f, (int)(sizeof(f) / sizeof(f[0])), parallel, dump, sizeof(dump),
+                       "__graphql__Query.perp.trades", "loadBoth", props, sizeof(props));
+    static const char *const want[] = {
+        "loadBoth>__graphql__Query.perp.trades",
+        "loadBoth>__graphql__First",
+        "loadBoth>__graphql__Second",
+        NULL,
+    };
+    int ok = et_gql_expect(dump, want, NULL);
+    if (!strstr(props, "\"operations\":[\"First\",\"Second\"]")) {
+        fprintf(stderr, "  [ET-GQL] shared edge props: %s\n", props);
+        ok = 0;
+    }
+    return ok;
+}
+
+TEST(graphql_field_paths_shared_field_keeps_operations_sequential) {
+    ASSERT_TRUE(et_gql_shared_case(false));
+    PASS();
+}
+
+TEST(graphql_field_paths_shared_field_keeps_operations_parallel) {
+    ASSERT_TRUE(et_gql_shared_case(true));
+    PASS();
+}
+
+/* A generated-size selection (600 fields, about 7 KB of paths) links every
+ * field, the last one included. */
+TEST(graphql_field_paths_large_selection) {
+    enum { FIELDS = 600 };
+    static char src[FIELDS * 8 + 64];
+    size_t len = (size_t)snprintf(src, sizeof(src), "BIG = \"\"\"query { root {");
+    for (int i = 1; i <= FIELDS; i++) {
+        len += (size_t)snprintf(src + len, sizeof(src) - len, " f%04d", i);
+    }
+    (void)snprintf(src + len, sizeof(src) - len, " } }\"\"\"\n");
+    EtFile f[] = {{"sai_cli/core/big.py", src}};
+    static char dump[CBM_SZ_64K];
+    int n = et_gql_edges(f, 1, false, dump, sizeof(dump), NULL, NULL, NULL, 0);
+    static const char *const want[] = {
+        "BIG>__graphql__Query.root.f0001",
+        "BIG>__graphql__Query.root.f0600",
+        NULL,
+    };
+    ASSERT_TRUE(et_gql_expect(dump, want, NULL));
+    ASSERT_EQ(n, FIELDS + 1);
+    PASS();
 }
 
 TEST(graphql_field_paths_inline_object_arg_sequential) {
@@ -4396,6 +4508,10 @@ SUITE(edge_types_probe) {
     RUN_TEST(graphql_field_paths_python_constants);
     RUN_TEST(graphql_field_paths_inline_object_arg_sequential);
     RUN_TEST(graphql_field_paths_inline_object_arg_parallel);
+    RUN_TEST(graphql_field_paths_shared_field_keeps_operations_sequential);
+    RUN_TEST(graphql_field_paths_shared_field_keeps_operations_parallel);
+    RUN_TEST(graphql_field_paths_large_selection);
+    RUN_TEST(graphql_selection_signature_alloc_keeps_every_path);
     RUN_TEST(handles_flask_python);
     RUN_TEST(handles_fastapi_python);
     RUN_TEST(handles_drf_action_python);

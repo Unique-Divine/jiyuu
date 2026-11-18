@@ -964,6 +964,79 @@ static bool gql_name_char(unsigned char c) {
     return gql_name_start(c) || (c >= '0' && c <= '9');
 }
 
+enum {
+    GQL_JS_NEST_MAX = 32, /* nested template literals and interpolations followed */
+    GQL_JS_OPEN = 1,      /* brace depth just past a `${` */
+};
+
+/* p just past a JS ' or " quote `q`: returns past the closing quote. */
+static const char *gql_skip_js_quoted(const char *p, char q) {
+    while (*p && *p != q) {
+        p += (*p == '\\' && p[SKIP_ONE]) ? PAIR_LEN : SKIP_ONE;
+    }
+    return *p ? p + SKIP_ONE : p;
+}
+
+/* p at a JS comment opener: returns past the comment. */
+static const char *gql_skip_js_comment(const char *p) {
+    if (p[SKIP_ONE] == '*') {
+        const char *end = strstr(p + PAIR_LEN, "*/");
+        return end ? end + PAIR_LEN : p + strlen(p);
+    }
+    while (*p && *p != '\n') {
+        p++;
+    }
+    return p;
+}
+
+/* p at a JS `${`: returns past its matching `}`. Braces inside JS strings,
+ * nested template literals (and their own interpolations) and comments are
+ * not structure. Iterative: one stack entry per open template or
+ * interpolation, at most GQL_JS_NEST_MAX deep. */
+static const char *gql_skip_js_interpolation(const char *p) {
+    struct {
+        bool in_template;
+        int depth;
+    } stack[GQL_JS_NEST_MAX];
+    int top = 0;
+    stack[0].in_template = false;
+    stack[0].depth = GQL_JS_OPEN;
+    p += PAIR_LEN;
+    while (*p && top >= 0) {
+        char c = *p;
+        bool room = top + SKIP_ONE < GQL_JS_NEST_MAX;
+        if (stack[top].in_template) {
+            if (c == '\\' && p[SKIP_ONE]) {
+                p += PAIR_LEN;
+            } else if (c == '`') {
+                top--;
+                p++;
+            } else if (c == '$' && p[SKIP_ONE] == '{' && room) {
+                top++;
+                stack[top].in_template = false;
+                stack[top].depth = GQL_JS_OPEN;
+                p += PAIR_LEN;
+            } else {
+                p++;
+            }
+        } else if (c == '\'' || c == '"') {
+            p = gql_skip_js_quoted(p + SKIP_ONE, c);
+        } else if (c == '`' && room) {
+            top++;
+            stack[top].in_template = true;
+            stack[top].depth = 0;
+            p++;
+        } else if (c == '/' && (p[SKIP_ONE] == '*' || p[SKIP_ONE] == '/')) {
+            p = gql_skip_js_comment(p);
+        } else {
+            stack[top].depth += (c == '{') - (c == '}');
+            top -= stack[top].depth == 0;
+            p++;
+        }
+    }
+    return p;
+}
+
 /* Skip one lexical unit whose braces are not structure: a # comment, a "..."
  * or """...""" string, or a JS ${...} template interpolation. Returns p
  * unchanged when p starts none of them. */
@@ -986,13 +1059,7 @@ static const char *gql_skip_opaque(const char *p) {
         return *p ? p + 1 : p;
     }
     if (p[0] == '$' && p[1] == '{') {
-        int depth = 1;
-        p += 2;
-        while (*p && depth > 0) {
-            depth += (*p == '{') - (*p == '}');
-            p++;
-        }
-        return p;
+        return gql_skip_js_interpolation(p);
     }
     return p;
 }
@@ -1162,7 +1229,29 @@ typedef struct {
     size_t cap;
     size_t len;
     size_t paths_at; /* offset of the first path in out */
+    bool grow;       /* out is heap-owned and grows instead of dropping paths */
 } gql_sig_t;
+
+/* Make room for `need` more bytes. A fixed buffer never grows. */
+static bool gql_sig_reserve(gql_sig_t *s, size_t need) {
+    if (s->len + need <= s->cap) {
+        return true;
+    }
+    if (!s->grow) {
+        return false;
+    }
+    size_t cap = s->cap;
+    while (s->len + need > cap) {
+        cap *= PAIR_LEN;
+    }
+    char *grown = realloc(s->out, cap);
+    if (!grown) {
+        return false;
+    }
+    s->out = grown;
+    s->cap = cap;
+    return true;
+}
 
 /* True when `path` is already one of the comma-separated paths. */
 static bool gql_sig_has_path(const gql_sig_t *s, const char *path, size_t n) {
@@ -1201,7 +1290,7 @@ static void gql_sig_add_path(gql_sig_t *s, const char *parent, size_t plen, cons
         return;
     }
     bool first = s->len == s->paths_at;
-    if (s->len + n + (first ? 0 : SKIP_ONE) + SKIP_ONE > s->cap) {
+    if (!gql_sig_reserve(s, n + (first ? 0 : SKIP_ONE) + SKIP_ONE)) {
         return;
     }
     if (!first) {
@@ -1378,11 +1467,11 @@ static const char *gql_operation_header(const char *p, char *name, size_t name_s
     return gql_skip_directives(p);
 }
 
-bool cbm_service_pattern_graphql_signature(const char *doc, bool require_keyword, char *out,
-                                           size_t out_sz) {
-    if (!doc || !out || out_sz == 0) {
-        return false;
-    }
+/* Shared by the fixed-buffer and allocating forms: s->out holds at least
+ * the header's room (the caller sized it). */
+static bool gql_signature_into(const char *doc, bool require_keyword, gql_sig_t *s) {
+    char *out = s->out;
+    size_t out_sz = s->cap;
     out[0] = '\0';
     const char *p = NULL;
     const char *kw = gql_locate_operation(doc, &p);
@@ -1402,9 +1491,35 @@ bool cbm_service_pattern_graphql_signature(const char *doc, bool require_keyword
         out[0] = '\0';
         return false;
     }
-    gql_sig_t s = {.out = out, .cap = out_sz, .len = (size_t)hdr, .paths_at = (size_t)hdr};
-    gql_root_set(p + SKIP_ONE, &s);
+    s->len = (size_t)hdr;
+    s->paths_at = (size_t)hdr;
+    gql_root_set(p + SKIP_ONE, s);
     return true;
+}
+
+bool cbm_service_pattern_graphql_signature(const char *doc, bool require_keyword, char *out,
+                                           size_t out_sz) {
+    if (!doc || !out || out_sz == 0) {
+        return false;
+    }
+    gql_sig_t s = {.out = out, .cap = out_sz, .grow = false};
+    return gql_signature_into(doc, require_keyword, &s);
+}
+
+char *cbm_service_pattern_graphql_signature_alloc(const char *doc, bool require_keyword) {
+    enum { GQL_SIG_INITIAL = 1024 };
+    if (!doc) {
+        return NULL;
+    }
+    gql_sig_t s = {.out = malloc(GQL_SIG_INITIAL), .cap = GQL_SIG_INITIAL, .grow = true};
+    if (!s.out) {
+        return NULL;
+    }
+    if (!gql_signature_into(doc, require_keyword, &s)) {
+        free(s.out);
+        return NULL;
+    }
+    return s.out;
 }
 
 const char *cbm_service_pattern_graphql_sig_parts(const char *sig, const char **op_type,
