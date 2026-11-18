@@ -562,6 +562,53 @@ static int64_t find_route_handler_fuzzy(cbm_store_t *target_store, const char *c
     return found;
 }
 
+/* Reverse-edge props `rev` (a JSON object) plus this caller's entry under
+ * "callers", keyed "<project>:<file>:<function>"; heap-allocated, NULL on
+ * failure. Every caller of one handler and Route shares the reverse edge
+ * (the store keeps one row per source, target and type), and the store
+ * merges a re-inserted edge's props with json_patch: the top-level target_*
+ * keys name the last caller, while the nested "callers" object merges key by
+ * key and keeps them all. */
+static char *cr_props_with_caller(const char *rev, const char *project, const char *function,
+                                  const char *file) {
+    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+    if (!doc) {
+        return NULL;
+    }
+    yyjson_mut_val *root = yyjson_mut_obj(doc);
+    yyjson_mut_doc_set_root(doc, root);
+    yyjson_mut_val *callers = yyjson_mut_obj_add_obj(doc, root, "callers");
+    yyjson_mut_val *entry = yyjson_mut_obj(doc);
+    size_t key_len = strlen(project) + strlen(file) + strlen(function) + PAIR_LEN + SKIP_ONE;
+    char *key = callers && entry ? malloc(key_len) : NULL;
+    char *out = NULL;
+    if (key) {
+        (void)snprintf(key, key_len, "%s:%s:%s", project, file, function);
+        yyjson_mut_obj_add_strcpy(doc, entry, "project", project);
+        yyjson_mut_obj_add_strcpy(doc, entry, "function", function);
+        yyjson_mut_obj_add_strcpy(doc, entry, "file", file);
+        yyjson_mut_obj_put(callers, yyjson_mut_strcpy(doc, key), entry);
+        free(key);
+        size_t callers_len = 0;
+        char *json = yyjson_mut_write(doc, 0, &callers_len);
+        size_t rev_len = strlen(rev);
+        if (json && rev_len >= PAIR_LEN && rev[rev_len - SKIP_ONE] == '}' && callers_len > 0) {
+            /* rev without its closing brace, a comma, then callers without
+             * its opening one. */
+            out = malloc(rev_len + callers_len + SKIP_ONE);
+            if (out) {
+                memcpy(out, rev, rev_len - SKIP_ONE);
+                out[rev_len - SKIP_ONE] = ',';
+                memcpy(out + rev_len, json + SKIP_ONE, callers_len - SKIP_ONE);
+                out[rev_len + callers_len - SKIP_ONE] = '\0';
+            }
+        }
+        free(json);
+    }
+    yyjson_mut_doc_free(doc);
+    return out;
+}
+
 /* Emit CROSS_* edge for a route match: forward into source, reverse into target.
  * A pair is successful only when both writes complete. */
 static bool emit_cross_route_bidirectional(
@@ -617,7 +664,15 @@ static bool emit_cross_route_bidirectional(
     char rev[CR_PROPS_BUF];
     build_cross_props(rev, sizeof(rev), src_project, caller_name, caller_file, url_path, "url_path",
                       method);
-    return insert_cross_edge(tgt_store, tgt_project, handler_id, tgt_route_id, edge_type, rev, ctx);
+    char *rev_callers = cr_props_with_caller(rev, src_project, caller_name, caller_file);
+    if (!rev_callers) {
+        return false;
+    }
+    bool inserted =
+        insert_cross_edge(tgt_store, tgt_project, handler_id, tgt_route_id, edge_type, rev_callers,
+                          ctx);
+    free(rev_callers);
+    return inserted;
 }
 
 /* A resolved route: the matched Route QN plus its handler's name and file. */

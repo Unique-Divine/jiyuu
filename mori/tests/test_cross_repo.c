@@ -1231,8 +1231,131 @@ TEST(cross_repo_graphql_prefers_resolver_method_handler) {
     PASS();
 }
 
+/* Seed a GraphQL client and server: `ncallers` client functions (file
+ * caller<i>.ts) each selecting `route_qn`, and a server Route `route_qn`
+ * with props `route_props`, handled by one resolver method. */
+static bool cross_repo_seed_graphql(const cross_repo_fixture_t *fixture, const char *route_qn,
+                                    int ncallers, const char *route_props) {
+    char client_path[512];
+    char server_path[512];
+    if (!cross_repo_project_path(fixture, "gql-client", client_path, sizeof(client_path)) ||
+        !cross_repo_project_path(fixture, "gql-server", server_path, sizeof(server_path))) {
+        return false;
+    }
+    cbm_store_t *client = cbm_store_open_path(client_path);
+    cbm_store_t *server = cbm_store_open_path(server_path);
+    bool ok = client && server &&
+              cbm_store_upsert_project(client, "gql-client", fixture->cache) == CBM_STORE_OK &&
+              cbm_store_upsert_project(server, "gql-server", fixture->cache) == CBM_STORE_OK;
+    const char *name = route_qn + strlen("__graphql__");
+    cbm_node_t client_route = {.project = "gql-client",
+                               .label = "Route",
+                               .name = name,
+                               .qualified_name = route_qn,
+                               .file_path = ""};
+    int64_t client_route_id = ok ? cbm_store_upsert_node(client, &client_route) : 0;
+    ok = ok && client_route_id > 0;
+    for (int i = 0; ok && i < ncallers; i++) {
+        char fn[64];
+        char qn[128];
+        char file[64];
+        snprintf(fn, sizeof(fn), "load%d", i);
+        snprintf(qn, sizeof(qn), "gql-client.caller%d.load%d", i, i);
+        snprintf(file, sizeof(file), "caller%d.ts", i);
+        cbm_node_t caller = {.project = "gql-client",
+                             .label = "Function",
+                             .name = fn,
+                             .qualified_name = qn,
+                             .file_path = file};
+        int64_t caller_id = cbm_store_upsert_node(client, &caller);
+        cbm_edge_t call = {.project = "gql-client",
+                           .source_id = caller_id,
+                           .target_id = client_route_id,
+                           .type = "GRAPHQL_CALLS",
+                           .properties_json = "{\"callee\":\"gql\",\"operation\":\"Op\","
+                                              "\"operation_type\":\"query\"}"};
+        ok = caller_id > 0 && cbm_store_insert_edge(client, &call) > 0;
+    }
+    cbm_node_t server_route = {.project = "gql-server",
+                               .label = "Route",
+                               .name = name,
+                               .qualified_name = route_qn,
+                               .file_path = "graph/schema.graphqls",
+                               .properties_json = route_props};
+    cbm_node_t method = {.project = "gql-server",
+                         .label = "Method",
+                         .name = "Ping",
+                         .qualified_name = "gql-server.graph.resolver.queryResolver.Ping",
+                         .file_path = "graph/resolver/schema.resolvers.go"};
+    int64_t server_route_id = ok ? cbm_store_upsert_node(server, &server_route) : 0;
+    int64_t method_id = ok ? cbm_store_upsert_node(server, &method) : 0;
+    cbm_edge_t handles = {.project = "gql-server",
+                          .source_id = method_id,
+                          .target_id = server_route_id,
+                          .type = "HANDLES",
+                          .properties_json = "{\"via\":\"gqlgen_resolver\"}"};
+    ok = ok && server_route_id > 0 && method_id > 0 && cbm_store_insert_edge(server, &handles) > 0;
+    cbm_store_close(client);
+    cbm_store_close(server);
+    return ok;
+}
+
+/* One integer from an SQL query over a project's store, -1 on error. */
+static int cross_repo_query_int(const cross_repo_fixture_t *fixture, const char *project,
+                                const char *sql) {
+    char path[512];
+    sqlite3 *db = NULL;
+    sqlite3_stmt *st = NULL;
+    int n = -1;
+    if (cross_repo_project_path(fixture, project, path, sizeof(path)) &&
+        sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY, NULL) == SQLITE_OK &&
+        sqlite3_prepare_v2(db, sql, -1, &st, NULL) == SQLITE_OK && sqlite3_step(st) == SQLITE_ROW) {
+        n = sqlite3_column_int(st, 0);
+    }
+    sqlite3_finalize(st);
+    sqlite3_close(db);
+    return n;
+}
+
+/* Three client functions select one field: the server's reverse edge (one
+ * row per handler, Route and type) names every caller under "callers", not
+ * only the last one written. */
+TEST(cross_repo_graphql_reverse_edge_keeps_every_caller) {
+    cross_repo_fixture_t fixture;
+    bool ok = cross_repo_fixture_begin(&fixture) &&
+              cross_repo_seed_graphql(&fixture, "__graphql__Query.ping", 3,
+                                      "{\"source\":\"graphql_schema\"}");
+    if (!ok) {
+        cross_repo_fixture_end(&fixture);
+        FAIL("failed to seed GraphQL callers fixture");
+    }
+    const char *target = "gql-server";
+    cbm_cross_repo_result_t fwd = cbm_cross_repo_match("gql-client", &target, 1);
+    bool failed = fwd.failed;
+    int graphql_edges = fwd.graphql_edges;
+    cbm_cross_repo_result_free(&fwd);
+    int forward = cross_repo_query_int(
+        &fixture, "gql-client", "SELECT COUNT(*) FROM edges WHERE type = 'CROSS_GRAPHQL_CALLS'");
+    int reverse = cross_repo_query_int(
+        &fixture, "gql-server", "SELECT COUNT(*) FROM edges WHERE type = 'CROSS_GRAPHQL_CALLS'");
+    int callers = cross_repo_query_int(
+        &fixture, "gql-server",
+        "SELECT COUNT(DISTINCT json_extract(c.value, '$.function') || ' ' || "
+        "json_extract(c.value, '$.file')) FROM edges e, json_each(e.properties, '$.callers') c "
+        "WHERE e.type = 'CROSS_GRAPHQL_CALLS' AND json_extract(c.value, '$.project') = "
+        "'gql-client'");
+    cross_repo_fixture_end(&fixture);
+    ASSERT_FALSE(failed);
+    ASSERT_EQ(graphql_edges, 3);
+    ASSERT_EQ(forward, 3);
+    ASSERT_EQ(reverse, 1);
+    ASSERT_EQ(callers, 3);
+    PASS();
+}
+
 SUITE(cross_repo) {
     RUN_TEST(cross_repo_graphql_prefers_resolver_method_handler);
+    RUN_TEST(cross_repo_graphql_reverse_edge_keeps_every_caller);
     RUN_TEST(cross_repo_caller_local_handler_blocks_cross_http_issue1459);
     RUN_TEST(cross_repo_methodless_call_to_local_get_route_blocks_cross_http_issue1459);
     RUN_TEST(cross_repo_caller_without_local_handler_keeps_cross_http_issue1459);
