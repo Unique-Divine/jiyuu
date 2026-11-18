@@ -319,7 +319,7 @@ async def test_create_group_reports_the_new_chat_without_reading_dialogs(monkeyp
 
     result = await groups.create_group(title="Ops", user_ids=[7])
 
-    assert result == "Group created with ID: -4321"
+    assert result == "Group created with ID: -4321\nAdded 1 of 1 users."
 
 
 @pytest.mark.asyncio

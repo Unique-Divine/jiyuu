@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
-from telethon import functions, types, utils
+from telethon import errors, functions, types, utils
 
 from telegram_mcp.tools import chats, contacts, groups, profile
 
@@ -197,3 +197,295 @@ async def test_permission_expiry_preserves_wire_timestamp(monkeypatch, timestamp
     request = client.requests[0]
     expected = datetime.fromtimestamp(timestamp, tz=timezone.utc) if timestamp else None
     assert request.banned_rights.until_date == expected
+
+
+def invited_users(missing_user_ids=(), **flags):
+    updates = types.Updates(updates=[], users=[], chats=[], date=None, seq=0)
+    missing = [types.MissingInvitee(user_id=user_id, **flags) for user_id in missing_user_ids]
+    return types.messages.InvitedUsers(updates=updates, missing_invitees=missing)
+
+
+def example_user(user_id):
+    return types.User(id=user_id, access_hash=user_id * 10, first_name="Example")
+
+
+def example_channel():
+    return types.Channel(
+        id=77,
+        title="Example Channel",
+        photo=types.ChatPhotoEmpty(),
+        date=None,
+        access_hash=770,
+        megagroup=True,
+    )
+
+
+class InviteClient(Client):
+    """Answer each request from a per-user plan: a reply or an error to raise."""
+
+    def __init__(self, replies):
+        super().__init__(None)
+        self.replies = replies
+
+    async def __call__(self, request):
+        await request.resolve(self, utils)
+        assert request._bytes()
+        self.requests.append(request)
+        user_id = getattr(getattr(request, "user_id", None), "user_id", None)
+        reply = self.replies.get(user_id, self.replies.get(None))
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+
+def configure_invite(monkeypatch, group, users, replies):
+    client = InviteClient(replies)
+    entities = {"group": group, **{user.id: user for user in users}}
+
+    async def resolve(identifier, client):
+        return entities[identifier]
+
+    monkeypatch.setattr(groups, "get_client", lambda account=None: client)
+    monkeypatch.setattr(groups, "resolve_entity", resolve)
+    return client
+
+
+PRIVACY = "their privacy settings block group invites; send them an invite link"
+
+
+def test_missing_invitees_read_invited_users_and_tolerate_old_replies():
+    assert groups._missing_invitees(invited_users([7, 8])) == [(7, PRIVACY), (8, PRIVACY)]
+    assert groups._missing_invitees(invited_users()) == []
+    old_reply = types.Updates(updates=[], users=[], chats=[], date=None, seq=0)
+    assert groups._missing_invitees(old_reply) == []
+    assert groups._missing_invitees(None) == []
+
+
+@pytest.mark.parametrize(
+    "flags, reason",
+    [
+        ({}, PRIVACY),
+        (
+            {"premium_would_allow_invite": True},
+            "they accept group invites only from Telegram Premium accounts; "
+            "send them an invite link",
+        ),
+        (
+            {"premium_required_for_pm": True},
+            "their privacy settings block group invites; "
+            "sending them an invite link by private message also needs Premium",
+        ),
+        (
+            {"premium_would_allow_invite": True, "premium_required_for_pm": True},
+            "they accept group invites only from Telegram Premium accounts; "
+            "sending them an invite link by private message also needs Premium",
+        ),
+    ],
+)
+def test_missing_invitee_reason_follows_premium_flags(flags, reason):
+    assert groups._missing_invitees(invited_users([7], **flags)) == [(7, reason)]
+
+
+def test_invite_report_counts_only_users_that_were_added():
+    report = groups._invite_report(
+        "Example", 5, not_added=[(8, "a reason")], already=[9], unconfirmed=[10]
+    )
+    assert report == (
+        "Added 2 of 5 users to Example. Already members: 9. "
+        "Unconfirmed, check membership: 10. Not added: 8 (a reason)."
+    )
+    assert groups._not_added_note([]) == ""
+
+
+@pytest.mark.asyncio
+async def test_basic_group_invite_sends_one_add_chat_user_request_per_user(monkeypatch):
+    users = [example_user(7), example_user(8)]
+    client = configure_invite(monkeypatch, basic_chat(), users, {None: invited_users()})
+
+    result = await groups.invite_to_group(group_id="group", user_ids=[7, 8])
+
+    assert result == "Added 2 of 2 users to Example."
+    assert [type(request) for request in client.requests] == [
+        functions.messages.AddChatUserRequest,
+        functions.messages.AddChatUserRequest,
+    ]
+    assert [request.chat_id for request in client.requests] == [42, 42]
+    assert [request.user_id.user_id for request in client.requests] == [7, 8]
+    # No earlier history is shared unless the caller asks for it.
+    assert all(request.fwd_limit == 0 for request in client.requests)
+
+
+@pytest.mark.asyncio
+async def test_basic_group_invite_shares_requested_history(monkeypatch):
+    client = configure_invite(
+        monkeypatch, basic_chat(), [example_user(7)], {None: invited_users()}
+    )
+
+    result = await groups.invite_to_group(group_id="group", user_ids=[7], history_messages=25)
+
+    assert result == "Added 1 of 1 users to Example."
+    assert client.requests[0].fwd_limit == 25
+
+
+@pytest.mark.parametrize("history_messages", [-1, 101])
+@pytest.mark.asyncio
+async def test_invite_rejects_out_of_range_history(monkeypatch, history_messages):
+    client = configure_invite(monkeypatch, basic_chat(), [example_user(7)], {})
+
+    result = await groups.invite_to_group(
+        group_id="group", user_ids=[7], history_messages=history_messages
+    )
+
+    assert result == "Error: history_messages must be between 0 and 100."
+    assert client.requests == []
+
+
+@pytest.mark.asyncio
+async def test_basic_group_invite_continues_past_per_user_refusals(monkeypatch):
+    users = [example_user(user_id) for user_id in (7, 8, 9, 10, 11, 12)]
+    replies = {
+        None: invited_users(),
+        7: errors.UserAlreadyParticipantError(request=None),
+        8: invited_users([8]),
+        9: errors.UserPrivacyRestrictedError(request=None),
+        10: errors.UserNotMutualContactError(request=None),
+        11: errors.UserKickedError(request=None),
+    }
+    client = configure_invite(monkeypatch, basic_chat(), users, replies)
+
+    result = await groups.invite_to_group(group_id="group", user_ids=[7, 8, 9, 10, 11, 12])
+
+    assert [request.user_id.user_id for request in client.requests] == [7, 8, 9, 10, 11, 12]
+    assert result == (
+        "Added 1 of 6 users to Example. Already members: 7. "
+        f"Not added: 8 ({PRIVACY}), 9 ({PRIVACY}), 10 (not a mutual contact), "
+        "11 (was removed from this group earlier)."
+    )
+
+
+@pytest.mark.asyncio
+async def test_basic_group_invite_reports_partial_success_when_stopped(monkeypatch):
+    users = [example_user(7), example_user(8), example_user(9)]
+    replies = {None: invited_users(), 8: errors.ChatAdminRequiredError(request=None)}
+    client = configure_invite(monkeypatch, basic_chat(), users, replies)
+
+    result = await groups.invite_to_group(group_id="group", user_ids=[7, 8, 9])
+
+    assert len(client.requests) == 2
+    assert result.startswith(
+        "Added 1 of 3 users to Example. Not added: 8 (request failed), 9 (not attempted)."
+    )
+    assert "Stopped early: An error occurred" in result
+
+
+@pytest.mark.asyncio
+async def test_basic_group_invite_first_chat_error_is_an_error(monkeypatch):
+    users = [example_user(7), example_user(8)]
+    replies = {7: errors.ChatAdminRequiredError(request=None)}
+    client = configure_invite(monkeypatch, basic_chat(), users, replies)
+
+    result = await groups.invite_to_group(group_id="group", user_ids=[7, 8])
+
+    assert len(client.requests) == 1
+    assert result.startswith("An error occurred")
+
+
+# Telethon 1.42 resends after ServerError and TimedOutError, then raises this.
+RETRIES_EXHAUSTED = ValueError("Request was unsuccessful 5 time(s)")
+
+
+@pytest.mark.parametrize(
+    "error", [TimeoutError(), RETRIES_EXHAUSTED, errors.ServerError(request=None, message="X")]
+)
+@pytest.mark.asyncio
+async def test_basic_group_invite_marks_ambiguous_failure_unconfirmed(monkeypatch, error):
+    users = [example_user(7), example_user(8), example_user(9)]
+    replies = {None: invited_users(), 8: error}
+    client = configure_invite(monkeypatch, basic_chat(), users, replies)
+
+    result = await groups.invite_to_group(group_id="group", user_ids=[7, 8, 9])
+
+    assert len(client.requests) == 2
+    assert result.startswith(
+        "Added 1 of 3 users to Example. Unconfirmed, check membership: 8. "
+        "Not added: 9 (not attempted). Stopped early: "
+    )
+
+
+def test_is_unconfirmed_matches_only_ambiguous_failures():
+    assert groups._is_unconfirmed(RETRIES_EXHAUSTED)
+    assert groups._is_unconfirmed(errors.TimedOutError(request=None, message="TIMEOUT"))
+    assert groups._is_unconfirmed(ConnectionError())
+    assert not groups._is_unconfirmed(ValueError("Could not find the input entity"))
+    assert not groups._is_unconfirmed(errors.ChatAdminRequiredError(request=None))
+
+
+@pytest.mark.asyncio
+async def test_invite_counts_duplicate_inputs_once(monkeypatch):
+    user = example_user(7)
+    client = configure_invite(monkeypatch, basic_chat(), [user], {None: invited_users()})
+
+    result = await groups.invite_to_group(group_id="group", user_ids=[7, 7])
+
+    assert result == "Added 1 of 1 users to Example."
+    assert len(client.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_channel_invite_sends_one_deduplicated_request_and_reports_missing(monkeypatch):
+    users = [example_user(7), example_user(8)]
+    client = configure_invite(
+        monkeypatch,
+        example_channel(),
+        users,
+        {None: invited_users([8], premium_would_allow_invite=True)},
+    )
+
+    result = await groups.invite_to_group(group_id="group", user_ids=[7, 8, 7])
+
+    assert len(client.requests) == 1
+    request = client.requests[0]
+    assert isinstance(request, functions.channels.InviteToChannelRequest)
+    assert isinstance(request.channel, types.InputChannel)
+    assert [user.user_id for user in request.users] == [7, 8]
+    assert result == (
+        "Invited 1 of 2 users to Example Channel (Telegram does not report users "
+        "who were already members). Not added: 8 (they accept group "
+        "invites only from Telegram Premium accounts; send them an invite link)."
+    )
+
+
+@pytest.mark.asyncio
+async def test_create_group_warns_about_missing_invitees(monkeypatch):
+    created = basic_chat()
+    updates = types.Updates(updates=[], users=[], chats=[created], date=None, seq=0)
+    reply = types.messages.InvitedUsers(
+        updates=updates, missing_invitees=[types.MissingInvitee(user_id=8)]
+    )
+    users = [example_user(7), example_user(8)]
+    client = configure_invite(monkeypatch, None, users, {None: reply})
+
+    result = await groups.create_group(title="Example", user_ids=[7, 8, 7])
+
+    request = client.requests[0]
+    assert isinstance(request, functions.messages.CreateChatRequest)
+    assert [user.user_id for user in request.users] == [7, 8]
+    assert result == (
+        f"Group created with ID: -42\nAdded 1 of 2 users.\nWarning: Not added: 8 ({PRIVACY})."
+    )
+
+
+@pytest.mark.asyncio
+async def test_channel_invite_does_not_claim_existing_members_were_added(monkeypatch):
+    # Telegram answers an invite of an existing member with no missing invitees.
+    client = configure_invite(
+        monkeypatch, example_channel(), [example_user(7)], {None: invited_users()}
+    )
+
+    result = await groups.invite_to_group(group_id="group", user_ids=[7])
+
+    assert len(client.requests) == 1
+    assert result == (
+        "Invited 1 of 1 users to Example Channel "
+        "(Telegram does not report users who were already members)."
+    )
