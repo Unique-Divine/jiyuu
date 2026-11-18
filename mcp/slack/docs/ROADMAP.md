@@ -11,7 +11,7 @@ Wraps `chat.update` and `chat.delete`. The server can post via `chat.postMessage
 Status:
 
 - [x] `slack_delete_message`: shipped, unreleased ([jiyuu#128](https://github.com/Unique-Divine/jiyuu/issues/128))
-- [ ] `slack_update_message`: open ([jiyuu#133](https://github.com/Unique-Divine/jiyuu/issues/133))
+- [x] `slack_update_message`: shipped, unreleased ([jiyuu#133](https://github.com/Unique-Divine/jiyuu/issues/133))
 
 ## Runners-up (all cheap, all funnel-feeding)
 
