@@ -449,7 +449,8 @@ async def test_channel_invite_sends_one_deduplicated_request_and_reports_missing
     assert isinstance(request.channel, types.InputChannel)
     assert [user.user_id for user in request.users] == [7, 8]
     assert result == (
-        "Added 1 of 2 users to Example Channel. Not added: 8 (they accept group "
+        "Invited 1 of 2 users to Example Channel (Telegram does not report users "
+        "who were already members). Not added: 8 (they accept group "
         "invites only from Telegram Premium accounts; send them an invite link)."
     )
 
@@ -471,4 +472,20 @@ async def test_create_group_warns_about_missing_invitees(monkeypatch):
     assert [user.user_id for user in request.users] == [7, 8]
     assert result == (
         f"Group created with ID: -42\nAdded 1 of 2 users.\nWarning: Not added: 8 ({PRIVACY})."
+    )
+
+
+@pytest.mark.asyncio
+async def test_channel_invite_does_not_claim_existing_members_were_added(monkeypatch):
+    # Telegram answers an invite of an existing member with no missing invitees.
+    client = configure_invite(
+        monkeypatch, example_channel(), [example_user(7)], {None: invited_users()}
+    )
+
+    result = await groups.invite_to_group(group_id="group", user_ids=[7])
+
+    assert len(client.requests) == 1
+    assert result == (
+        "Invited 1 of 1 users to Example Channel "
+        "(Telegram does not report users who were already members)."
     )

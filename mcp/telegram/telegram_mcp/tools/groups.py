@@ -120,12 +120,23 @@ def _invite_report(
     already: List[int] | None = None,
     unconfirmed: List[int] | None = None,
     stopped: str | None = None,
+    channel: bool = False,
 ) -> str:
-    """Summarize an invite: who was added, who was left out, and why."""
+    """Summarize an invite: who was added, who was left out, and why.
+
+    For a channel or supergroup, Telegram neither raises nor lists users who
+    were already members, so the headline says "Invited" and notes the gap.
+    """
     already = already or []
     unconfirmed = unconfirmed or []
     added = requested - len(not_added) - len(already) - len(unconfirmed)
-    parts = [f"Added {added} of {requested} users to {sanitize_name(title)}."]
+    if channel:
+        parts = [
+            f"Invited {added} of {requested} users to {sanitize_name(title)} "
+            "(Telegram does not report users who were already members)."
+        ]
+    else:
+        parts = [f"Added {added} of {requested} users to {sanitize_name(title)}."]
     if already:
         parts.append(f"Already members: {', '.join(str(u) for u in already)}.")
     if unconfirmed:
@@ -253,7 +264,9 @@ async def invite_to_group(
             result = await cl(
                 functions.channels.InviteToChannelRequest(channel=entity, users=users_to_add)
             )
-            return _invite_report(entity.title, len(users_to_add), _missing_invitees(result))
+            return _invite_report(
+                entity.title, len(users_to_add), _missing_invitees(result), channel=True
+            )
         except errors.UserNotMutualContactError:
             return "Error: Cannot invite users who are not mutual contacts. Please ensure the users are in your contacts and have added you back."
         except errors.UserPrivacyRestrictedError:
