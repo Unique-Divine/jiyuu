@@ -3333,29 +3333,26 @@ static TSNode extract_graphql_arg(CBMExtractCtx *ctx, TSNode args, const char **
  * a plain `fetch`, or a project helper are not GraphQL client libraries the
  * callee classifier knows. Records a CBM_STRREF_GRAPHQL ref owned by the
  * enclosing function so its field paths link like a constant's. */
-/* A logging or printing call (console.log, print, logger.info) carries text
- * about an operation, never a request. */
+/* A call on a known logger (console.log, logger.info, logging.warning) or a
+ * bare print/puts carries text about an operation, never a request. Other
+ * receivers keep their documents whatever the method is called
+ * (`client.info(...)`, `log.query(...)`), and calls the classifier knows as
+ * GraphQL clients never come through here. */
 static bool graphql_callee_is_logging(const char *callee) {
-    static const char *const prefixes[] = {
-        "console.",     "logger.",      "logging.",  "log.",
-        "this.logger.", "self.logger.", "self.log.", NULL,
+    static const char *const receivers[] = {
+        "console.", "logger.", "logging.", "this.logger.", "self.logger.", NULL,
     };
-    static const char *const names[] = {
-        "print", "println", "printf", "puts",  "log",   "debug", "info",
-        "warn",  "warning", "error",  "trace", "fatal", NULL,
-    };
+    static const char *const printers[] = {"print", "println", "printf", "puts", NULL};
     if (!callee) {
         return false;
     }
-    for (int i = 0; prefixes[i]; i++) {
-        if (strncmp(callee, prefixes[i], strlen(prefixes[i])) == 0) {
+    for (int i = 0; receivers[i]; i++) {
+        if (strncmp(callee, receivers[i], strlen(receivers[i])) == 0) {
             return true;
         }
     }
-    const char *dot = strrchr(callee, '.');
-    const char *last = dot ? dot + SKIP_ONE : callee;
-    for (int i = 0; names[i]; i++) {
-        if (strcmp(last, names[i]) == 0) {
+    for (int i = 0; printers[i]; i++) {
+        if (strcmp(callee, printers[i]) == 0) {
             return true;
         }
     }

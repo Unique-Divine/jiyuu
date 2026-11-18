@@ -1686,6 +1686,15 @@ static int et_gql_inline_case(bool parallel) {
          "}\n\n"
          "export function lateArg(send: (a: number, b: number, c: number, q: string) => void) {\n"
          "  send(1, 2, 3, `query Late { late { id } }`)\n"
+         "}\n\n"
+         "export function infoCall(client: { info: (q: string) => void }) {\n"
+         "  client.info(\"query InfoQ { info { id } }\")\n"
+         "}\n\n"
+         "export function logQuery(log: { query: (q: string) => void }) {\n"
+         "  log.query(`query LogQ { logs { id } }`)\n"
+         "}\n\n"
+         "export function withHelper(post: (q: string) => void, helper: (s: string) => string) {\n"
+         "  post(`query Helped { ${helper(\"a\\\"}\")} user { id } }`)\n"
          "}\n"},
     };
     static const char *const want[] = {
@@ -1705,6 +1714,14 @@ static int et_gql_inline_case(bool parallel) {
         "lateArg>__graphql__Query.late",
         "lateArg>__graphql__Query.late.id",
         "lateArg>__graphql__Late",
+        /* a client method named like a log level is still a client */
+        "infoCall>__graphql__Query.info.id",
+        "infoCall>__graphql__InfoQ",
+        "logQuery>__graphql__Query.logs.id",
+        "logQuery>__graphql__LogQ",
+        /* an escaped quote inside a ${...} expression is JS, not literal text */
+        "withHelper>__graphql__Query.user.id",
+        "withHelper>__graphql__Helped",
         NULL,
     };
     static const char *const reject[] = {
@@ -1719,9 +1736,10 @@ static int et_gql_inline_case(bool parallel) {
                          "__graphql__Subscription.userBalances", "subscribeBalances", props,
                          sizeof(props));
     int ok = et_gql_expect(dump, want, reject);
-    /* 3 + 2 + 2 + 2 paths and 4 operation-name Routes; nothing from screen() */
-    if (n != 13) {
-        fprintf(stderr, "  [ET-GQL] inline edges: %d, want 13%s", n, dump);
+    /* 3 + 2 + 2 + 2 + 2 + 2 + 2 paths and 7 operation-name Routes; nothing
+     * from screen() */
+    if (n != 22) {
+        fprintf(stderr, "  [ET-GQL] inline edges: %d, want 22%s", n, dump);
         ok = 0;
     }
     if (!strstr(props, "\"callee\":\"client.subscribe\"") ||
@@ -1794,6 +1812,30 @@ TEST(graphql_field_paths_large_selection) {
     };
     ASSERT_TRUE(et_gql_expect(dump, want, NULL));
     ASSERT_EQ(n, FIELDS + 1);
+    PASS();
+}
+
+/* A field path whose Route name is 511 bytes (`Query.` + 505) links with its
+ * full QN; one byte longer is skipped, never truncated into another QN. */
+TEST(graphql_field_paths_route_name_boundary) {
+    enum { FITS = 505, SKIPPED = 506 };
+    static char src[2048];
+    char fits[FITS + 1];
+    char skipped[SKIPPED + 1];
+    memset(fits, 'a', FITS);
+    fits[FITS] = '\0';
+    memset(skipped, 'b', SKIPPED);
+    skipped[SKIPPED] = '\0';
+    (void)snprintf(src, sizeof(src), "LONG = \"\"\"query { %s %s }\"\"\"\n", fits, skipped);
+    EtFile f[] = {{"sai_cli/core/long.py", src}};
+    static char dump[CBM_SZ_8K];
+    int n = et_gql_edges(f, 1, false, dump, sizeof(dump), NULL, NULL, NULL, 0);
+    char want_line[CBM_SZ_1K];
+    (void)snprintf(want_line, sizeof(want_line), "LONG>__graphql__Query.%s", fits);
+    const char *const want[] = {want_line, NULL};
+    ASSERT_TRUE(et_gql_expect(dump, want, NULL));
+    ASSERT_TRUE(strstr(dump, "bbbb") == NULL);
+    ASSERT_EQ(n, 1);
     PASS();
 }
 
@@ -4513,6 +4555,7 @@ SUITE(edge_types_probe) {
     RUN_TEST(graphql_field_paths_shared_field_keeps_operations_sequential);
     RUN_TEST(graphql_field_paths_shared_field_keeps_operations_parallel);
     RUN_TEST(graphql_field_paths_large_selection);
+    RUN_TEST(graphql_field_paths_route_name_boundary);
     RUN_TEST(graphql_selection_signature_alloc_keeps_every_path);
     RUN_TEST(handles_flask_python);
     RUN_TEST(handles_fastapi_python);

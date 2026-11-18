@@ -1884,11 +1884,17 @@ static bool edge_props_should_replace(const char *existing_json, const char *inc
     return strcmp(incoming_json, existing_json) > 0;
 }
 
-enum { GB_GQL_OPS_MAX = 64 }; /* operations listed on one GRAPHQL_CALLS edge */
+typedef struct {
+    const char **items;
+    size_t count;
+    size_t cap;
+    bool failed; /* an allocation failed: the union is incomplete */
+} gb_names_t;
 
 /* Add the operation names of one GRAPHQL_CALLS props document (its
- * `operations` list and `operation`) to names[], without duplicates. */
-static void gb_graphql_collect_operations(yyjson_doc *doc, const char **names, int *n) {
+ * `operations` list and `operation`) to names, without duplicates. */
+static void gb_graphql_collect_operations(yyjson_doc *doc, gb_names_t *names) {
+    enum { GB_NAMES_MIN = 8 };
     yyjson_val *root = doc ? yyjson_doc_get_root(doc) : NULL;
     yyjson_val *one = root ? yyjson_obj_get(root, "operation") : NULL;
     yyjson_val *list = root ? yyjson_obj_get(root, "operations") : NULL;
@@ -1897,12 +1903,24 @@ static void gb_graphql_collect_operations(yyjson_doc *doc, const char **names, i
         yyjson_val *v = i < count ? yyjson_arr_get(list, i) : one;
         const char *s = yyjson_get_str(v);
         bool seen = s == NULL;
-        for (int j = 0; j < *n && !seen; j++) {
-            seen = strcmp(names[j], s) == 0;
+        for (size_t j = 0; j < names->count && !seen; j++) {
+            seen = strcmp(names->items[j], s) == 0;
         }
-        if (!seen && *n < GB_GQL_OPS_MAX) {
-            names[(*n)++] = s;
+        if (seen) {
+            continue;
         }
+        if (names->count == names->cap) {
+            size_t cap = names->cap ? names->cap * PAIR_LEN : GB_NAMES_MIN;
+            const char **grown =
+                cbm_realloc(CBM_MEM_CLASS_GBUF_STRING, (void *)names->items, cap * sizeof(*grown));
+            if (!grown) {
+                names->failed = true;
+                return;
+            }
+            names->items = grown;
+            names->cap = cap;
+        }
+        names->items[names->count++] = s;
     }
 }
 
@@ -1918,21 +1936,25 @@ static const char *gb_graphql_union_operations(cbm_gbuf_t *gb, const char *keep,
                                                const char *other) {
     yyjson_doc *dk = yyjson_read_opts((char *)keep, strlen(keep), 0, &gb_yy_alc, NULL);
     yyjson_doc *dother = yyjson_read_opts((char *)other, strlen(other), 0, &gb_yy_alc, NULL);
-    const char *names[GB_GQL_OPS_MAX];
-    int n = 0;
-    gb_graphql_collect_operations(dk, names, &n);
-    gb_graphql_collect_operations(dother, names, &n);
+    gb_names_t names = {0};
+    gb_graphql_collect_operations(dk, &names);
+    gb_graphql_collect_operations(dother, &names);
     const char *out = NULL;
-    yyjson_mut_doc *md = dk && n > 0 ? yyjson_doc_mut_copy(dk, &gb_yy_alc) : NULL;
+    bool usable = dk && names.count > 0 && !names.failed;
+    yyjson_mut_doc *md = usable ? yyjson_doc_mut_copy(dk, &gb_yy_alc) : NULL;
     yyjson_mut_val *root = md ? yyjson_mut_doc_get_root(md) : NULL;
     if (yyjson_mut_is_obj(root)) {
-        qsort(names, (size_t)n, sizeof(names[0]), gb_str_cmp);
+        /* Sorted, and `operation` is the first name, so the result depends
+         * only on the set of operations, never on merge order. */
+        qsort((void *)names.items, names.count, sizeof(names.items[0]), gb_str_cmp);
         yyjson_mut_val *arr = yyjson_mut_arr(md);
-        for (int i = 0; arr && i < n; i++) {
-            (void)yyjson_mut_arr_add_strcpy(md, arr, names[i]);
+        for (size_t i = 0; arr && i < names.count; i++) {
+            (void)yyjson_mut_arr_add_strcpy(md, arr, names.items[i]);
         }
         (void)yyjson_mut_obj_remove_key(root, "operations");
-        if (arr && yyjson_mut_obj_add_val(md, root, "operations", arr)) {
+        (void)yyjson_mut_obj_remove_key(root, "operation");
+        if (arr && yyjson_mut_obj_add_strcpy(md, root, "operation", names.items[0]) &&
+            yyjson_mut_obj_add_val(md, root, "operations", arr)) {
             char *json = yyjson_mut_write_opts(md, 0, &gb_yy_alc, NULL, NULL);
             if (json) {
                 out = gb_intern(gb, json);
@@ -1941,6 +1963,7 @@ static const char *gb_graphql_union_operations(cbm_gbuf_t *gb, const char *keep,
         }
     }
     yyjson_mut_doc_free(md);
+    cbm_free(CBM_MEM_CLASS_GBUF_STRING, (void *)names.items);
     yyjson_doc_free(dk);
     yyjson_doc_free(dother);
     return out;

@@ -1556,6 +1556,43 @@ TEST(gbuf_worker_buffer_keeps_no_by_id_array) {
     PASS();
 }
 
+/* More than 64 operations selecting one field from one source: the merged
+ * GRAPHQL_CALLS edge lists every one, identically whatever the insert order. */
+TEST(gbuf_graphql_operations_union_unbounded_and_order_free) {
+    enum { OPS = 70 };
+    const char *props[2] = {NULL, NULL};
+    cbm_gbuf_t *gbs[2];
+    for (int order = 0; order < 2; order++) {
+        cbm_gbuf_t *gb = cbm_gbuf_new("test", "/tmp");
+        gbs[order] = gb;
+        int64_t src = cbm_gbuf_upsert_node(gb, "Function", "load", "pkg.load", "a.ts", 1, 2, "{}");
+        int64_t tgt = cbm_gbuf_upsert_node(gb, "Route", "Query.perp.trades",
+                                           "__graphql__Query.perp.trades", "", 0, 0, "{}");
+        for (int k = 0; k < OPS; k++) {
+            int i = order == 0 ? k : OPS - 1 - k;
+            char p[256];
+            (void)snprintf(p, sizeof(p),
+                           "{\"callee\":\"fetch\",\"operation\":\"Op%02d\",\"operation_type\":"
+                           "\"query\",\"field_path\":\"perp.trades\",\"confidence\":0.80,"
+                           "\"operations\":[\"Op%02d\"]}",
+                           i, i);
+            cbm_gbuf_insert_edge(gb, src, tgt, "GRAPHQL_CALLS", p);
+        }
+        const cbm_gbuf_edge_t **edges = NULL;
+        int count = 0;
+        cbm_gbuf_find_edges_by_type(gb, "GRAPHQL_CALLS", &edges, &count);
+        ASSERT_EQ(count, 1);
+        props[order] = edges[0]->properties_json;
+    }
+    ASSERT_STR_EQ(props[0], props[1]);
+    ASSERT_TRUE(strstr(props[0], "\"operation\":\"Op00\"") != NULL);
+    ASSERT_TRUE(strstr(props[0], "\"Op00\",\"Op01\"") != NULL);
+    ASSERT_TRUE(strstr(props[0], "\"Op68\",\"Op69\"]") != NULL);
+    cbm_gbuf_free(gbs[0]);
+    cbm_gbuf_free(gbs[1]);
+    PASS();
+}
+
 SUITE(graph_buffer) {
     RUN_TEST(gbuf_worker_buffer_keeps_no_by_id_array);
     /* Original tests */
@@ -1563,6 +1600,7 @@ SUITE(graph_buffer) {
     RUN_TEST(gbuf_free_null);
     RUN_TEST(gbuf_upsert_node);
     RUN_TEST(gbuf_upsert_updates);
+    RUN_TEST(gbuf_graphql_operations_union_unbounded_and_order_free);
     RUN_TEST(gbuf_swift_declaration_and_extension_keep_both_markers);
     RUN_TEST(gbuf_find_by_id);
     RUN_TEST(gbuf_find_by_label);

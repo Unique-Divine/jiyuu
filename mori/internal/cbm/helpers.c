@@ -2616,17 +2616,28 @@ static char gql_unescape(char c) {
 
 /* The literal's text with the host language's escapes decoded (`\"` is a
  * quote, `\n` a newline), so a GraphQL string argument written inside a
- * quoted host string ends where GraphQL sees it end. */
-static char *gql_decode_literal(CBMArena *a, const char *text, size_t len, bool raw) {
+ * quoted host string ends where GraphQL sees it end. A template's `${...}`
+ * expressions are JS source, not literal text: they are copied verbatim, so
+ * their own escaped quotes still delimit their strings. */
+static char *gql_decode_literal(CBMArena *a, const char *text, size_t len, bool raw,
+                                bool is_template) {
+    char *src = cbm_arena_strndup(a, text, len);
     char *out = cbm_arena_alloc(a, len + SKIP_ONE);
-    if (!out) {
+    if (!src || !out) {
         return NULL;
     }
     size_t n = 0;
     for (size_t i = 0; i < len; i++) {
-        char c = text[i];
+        char c = src[i];
+        if (is_template && c == '$' && src[i + SKIP_ONE] == '{') {
+            size_t end = (size_t)(cbm_service_pattern_js_interpolation_end(src + i) - src);
+            memcpy(out + n, src + i, end - i);
+            n += end - i;
+            i = end - SKIP_ONE;
+            continue;
+        }
         if (!raw && c == '\\' && i + SKIP_ONE < len) {
-            c = gql_unescape(text[++i]);
+            c = gql_unescape(src[++i]);
         }
         out[n++] = c;
     }
@@ -2652,7 +2663,8 @@ const char *cbm_graphql_literal_sig(CBMArena *a, TSNode node, const char *source
         !gql_opens_like_document(source + start, source + end)) {
         return NULL;
     }
-    char *doc = gql_decode_literal(a, source + start, end - start, raw);
+    char *doc = gql_decode_literal(a, source + start, end - start, raw,
+                                   strcmp(kind, "template_string") == 0);
     char *sig = doc ? cbm_service_pattern_graphql_signature_alloc(doc, require_keyword) : NULL;
     if (!sig) {
         return NULL;

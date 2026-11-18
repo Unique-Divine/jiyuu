@@ -139,6 +139,10 @@ bool cbm_service_pattern_graphql_operation(const char *doc, const char **op_type
 bool cbm_service_pattern_graphql_signature(const char *doc, bool require_keyword, char *out,
                                            size_t out_sz);
 
+/* p at a JS template `${`: returns past its matching `}`, skipping braces
+ * inside JS strings, nested templates and comments. */
+const char *cbm_service_pattern_js_interpolation_end(const char *p);
+
 /* The same signature in a heap buffer that grows to hold every path (free()
  * it); NULL when `doc` holds no operation or on allocation failure. */
 char *cbm_service_pattern_graphql_signature_alloc(const char *doc, bool require_keyword);

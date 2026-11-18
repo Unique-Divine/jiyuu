@@ -1037,6 +1037,10 @@ static const char *gql_skip_js_interpolation(const char *p) {
     return p;
 }
 
+const char *cbm_service_pattern_js_interpolation_end(const char *p) {
+    return gql_skip_js_interpolation(p);
+}
+
 /* Skip one lexical unit whose braces are not structure: a # comment, a "..."
  * or """...""" string, or a JS ${...} template interpolation. Returns p
  * unchanged when p starts none of them. */
