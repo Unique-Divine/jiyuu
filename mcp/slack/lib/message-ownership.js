@@ -105,6 +105,10 @@ export const MAX_REPLY_PAGES = 50;
 
 const SLACK_TS_PATTERN = /^\d+\.\d+$/;
 
+// Slack conversation IDs: C (channel), D (DM), or G (private channel or
+// group DM), then at least 8 uppercase letters or digits.
+export const SLACK_CONVERSATION_ID_PATTERN = /^[CDG][A-Z0-9]{8,}$/;
+
 /**
  * Build an invalid_argument error result for one input field.
  */
@@ -123,8 +127,8 @@ export function invalidArgument(field, message) {
 export function validateTargetArgs(args) {
   const input = args && typeof args === "object" ? args : {};
   const { channel_id: channelId, timestamp, expected_text: expectedText } = input;
-  if (typeof channelId !== "string" || channelId.trim() === "" || /\s/.test(channelId)) {
-    return invalidArgument("channel_id", "channel_id must be a non-empty channel or DM ID with no spaces.");
+  if (typeof channelId !== "string" || !SLACK_CONVERSATION_ID_PATTERN.test(channelId)) {
+    return invalidArgument("channel_id", "channel_id must be a Slack channel or DM ID, such as C0123456789 or D0123456789.");
   }
   if (typeof timestamp !== "string" || !SLACK_TS_PATTERN.test(timestamp)) {
     return invalidArgument("timestamp", "timestamp must be a Slack message timestamp such as \"1767368030.607599\".");

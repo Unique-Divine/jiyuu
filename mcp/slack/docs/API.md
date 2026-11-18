@@ -671,7 +671,7 @@ slack-mcp write {"tool":"slack_delete_message","channel":"D063M4403MW","timestam
 | Field | Meaning |
 |-------|---------|
 | `tool` | The tool called |
-| `channel` | `channel_id`, or `null` when it isn't shaped like a Slack ID |
+| `channel` | `channel_id` when it's a Slack conversation ID (`C`, `D`, or `G`, then 8 or more uppercase letters or digits, including a digit), otherwise `null` |
 | `timestamp` | `timestamp`, or `null` when it isn't shaped like a Slack ts |
 | `status` | `deleted`, `updated`, `probably_deleted`, `outcome_unknown`, `error`, or `thrown` |
 | `code` | The error code, such as `text_mismatch`, or `null` on success |
@@ -679,4 +679,6 @@ slack-mcp write {"tool":"slack_delete_message","channel":"D063M4403MW","timestam
 
 The line never includes tokens, cookies, or message text. Fields that come
 from the caller are logged only when they look like IDs, so text passed in
-the wrong argument can't reach the log.
+the wrong argument, such as `CONFIDENTIAL`, is logged as `null`. A word that
+happens to fit the ID shape, such as `C0NF1DENT1AL`, can't be told apart from
+a real ID and is logged as given.

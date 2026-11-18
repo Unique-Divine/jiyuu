@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - Each edit or delete attempt writes one structured line to stderr (`slack-mcp write {...}`) with the tool, channel, timestamp, status or error code, and message age in hours. It never logs tokens, cookies, or message text. See `docs/API.md`.
+- The edit and delete tools reject a `channel_id` that isn't a Slack conversation ID (`C`, `D`, or `G`, then 8 or more uppercase letters or digits) with `invalid_argument` before any Slack call.
 
 ### Fixed
 - The edit and delete tools return `message_deleted` for a deleted thread parent instead of `not_own_message`. Slack leaves a "This message was deleted." placeholder at the parent's timestamp, which the ownership check read as someone else's message.

@@ -136,3 +136,38 @@ test("a thrown error is logged with status thrown and still propagates", async (
     age_hours: lines.length ? parseLine(lines[0]).age_hours : null,
   }])
 })
+
+for (const [label, channel, expected] of [
+  ["an uppercase word", "CONFIDENTIAL", null],
+  ["a too-short ID", "C123", null],
+  ["a lowercase value", "c0123456789", null],
+  ["free text", "please delete this", null],
+  ["a channel ID", "C0123456789", "C0123456789"],
+  ["a DM ID", "D03DN5VMBPW", "D03DN5VMBPW"],
+  ["a private channel ID", "G01ABCDEF2", "G01ABCDEF2"],
+]) {
+  test(`channel is logged only for real Slack IDs: ${label}`, () => {
+    const entry = parseLine(formatWriteLogLine({
+      tool: "slack_delete_message",
+      args: { channel_id: channel, timestamp: TS },
+      status: "error",
+      code: "invalid_argument",
+    }))
+    expect(entry.channel).toBe(expected)
+  })
+}
+
+test("validation rejects C123 and lowercase IDs before any Slack call", async () => {
+  stub = stubSlackApi(slackWithOwnMessage())
+  for (const channel of ["C123", "c0123456789"]) {
+    const result = await TOOL_HANDLERS.slack_delete_message(
+      argsFor("slack_delete_message", { channel_id: channel }),
+    )
+    expect(JSON.parse(result.content[0].text)).toMatchObject({
+      code: "invalid_argument",
+      field: "channel_id",
+    })
+  }
+  expect(stub.calls).toStrictEqual([])
+  expect(lines.map(parseLine).map((e) => e.channel)).toStrictEqual([null, null])
+})
