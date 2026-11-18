@@ -36,8 +36,8 @@ sai mcp uninstall codex
 
 The server resolves its endpoints once, at start: flags after `sai mcp
 serve`, then `SAI_*` variables, then `~/.sai/config.toml`, then mainnet. To
-point it at another network, run `sai config set` ([cli.md](cli.md)) and
-reconnect the client. Never read or edit an MCP client's config file to learn
+point it at another network, set both the Keeper and LCD endpoints as
+[cli.md](cli.md#switch-networks) shows, then reconnect the client. Never read or edit an MCP client's config file to learn
 about the server. Call `mcp_info`.
 
 ## Tools
@@ -56,9 +56,9 @@ and `trading`, which says whether trades can submit.
 | `preview_open`, `preview_close`, `preview_partial_close`, `preview_tpsl`, `preview_leverage`, `preview_margin` | What a trade would do. Submits nothing. |
 | `trade_open`, `trade_close`, `trade_partial_close`, `trade_tpsl`, `trade_leverage`, `trade_margin` | Submit the previewed trade |
 
-Account reads take an optional `address`. Without one they read the active
-account and report `addressSource` as `session`. Say so to the person, and
-pass `address` to read any other account.
+Account reads take an optional `addr`. Without one they read the active
+account and report `addrSource` as `session`. Say so to the person, and pass
+`addr` to read any other account.
 
 ## Sign-In
 
@@ -78,29 +78,50 @@ for the token and never returns it.
 
 ## Preview, Confirm, Then Trade
 
-1. Call the matching `preview_*` tool.
-2. Show the person the preview and the account it names. Wait for explicit
+1. Call the matching `preview_*` tool with `addr` set to the account the
+   person means. Read the account from `auth_list` once, then pass it on
+   every preview and trade. Without `addr` a tool acts on whichever account
+   is active at that moment, and another terminal or client can switch it.
+2. Show the person the preview and the `addr` it names. Wait for explicit
    confirmation.
-3. Call the `trade_*` tool with the same arguments plus the preview's
-   `previewDigest`. A market `trade_open` also takes the preview's
-   `referencePrice`.
+3. Call the `trade_*` tool with the same arguments, the same `addr`, and the
+   preview's digest.
 
-Before submitting, the server rebuilds the trade and compares it with the
-confirmed preview:
+Outputs use camelCase and inputs use snake_case:
 
-- Every trade: the account and the arguments.
-- `trade_margin` and `trade_partial_close`: also the position state the
-  preview quoted.
-- A market `trade_open`: also the price, which may move at most the slippage
-  from the confirmed `referencePrice`.
+| Preview output | `trade_*` input | Needed by |
+| --- | --- | --- |
+| `previewDigest` | `preview_digest` | every `trade_*` tool |
+| `referencePrice` | `reference_price` | `trade_open` for a market order |
+
+Sending `previewDigest` or `referencePrice` as an input fails argument
+validation. Other inputs are snake_case too, such as `market_id`,
+`order_type`, `take_profit`, `cancel_order`, and `allow_concurrent_open`.
+
+Before submitting, the server rebuilds the trade and compares its digest with
+the one the person confirmed. The digest covers:
+
+- Every trade: the account and the intent the arguments produce.
+- `trade_open` for a market order: also the confirmed `reference_price`. The
+  live price may differ from it by at most the slippage.
+- `trade_margin`: also the whole margin quote computed from the position. If
+  the position changed, the quote changes and the digest no longer matches.
+- `trade_partial_close`: the collateral reduction computed from the position.
+  It does not cover the position's leverage. If leverage changes after the
+  preview and the same reduction is still valid, the digest matches and the
+  trade submits. The server also reads the position twice during the live
+  call and refuses when collateral or leverage differ between those two
+  reads, which catches a change during the call, not one since the preview.
+  Preview again right before submitting when the position may have changed.
 
 On `PREVIEW_MISMATCH` or `PRICE_MOVED` nothing was submitted. The result
 holds a fresh preview. Show it, get confirmation again, and retry with the
-new `previewDigest` and `referencePrice`.
+new `preview_digest` and `reference_price`.
 
-Preview and trade tools act on the active account, or on another connected
-account passed as `address`. Call `auth_use` only when the person asks to
-switch accounts.
+To cancel a pending order, pass `cancel_order=true` to `preview_close` and
+`trade_close`. Without it the tools close a position.
+
+Call `auth_use` only when the person asks to switch accounts.
 
 [trading-safety.md](trading-safety.md) covers what to do after a trade is
 accepted, times out, or returns `OUTCOME_UNKNOWN` or `RECENT_OPEN_PENDING`.

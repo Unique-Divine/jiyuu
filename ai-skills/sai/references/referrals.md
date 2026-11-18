@@ -55,124 +55,121 @@ When asked about an existing code, address, or partner:
 
 ---
 
-## Read-only testnet balance recipe
+## Read-Only Testnet Balance Recipe
 
-### Testnet USDC and Sai deposit balance checks
+Use this recipe to check which Testnet2 accounts hold Sai testnet USDC in the
+wallet, withdrawable Sai deposits, or Sai trading credits. It only reads.
 
-Use this recipe when an operator asks which local testnet accounts have
-canonical Sai testnet USDC in the wallet, withdrawable Sai perp deposits, or
-Sai trading credits. Keep the report scoped to local keyring names with the
-`test-` prefix; do not enumerate unrelated local keyring accounts.
+It checks:
 
-This is a read-only workflow. It checks:
+- Wallet USDC with `nibiru q evm balance`.
+- Sai withdrawable deposits and non-withdrawable trading credits with Perp
+  query `list_user_deposits`.
 
-- Wallet USDC via `nibiru q evm balance`.
-- Sai internal withdrawable deposits via `list_user_deposits`.
-- Sai internal non-withdrawable credits via `list_user_deposits`.
+### Network and Constants
 
-#### Network and constants
-
-Point `nibiru` at Testnet2 and verify before querying:
+Pass the network on every query. Do not run `nibiru config node` or `nibiru
+config chain-id` for this: those commands rewrite `client.toml`, and the
+person's next unqualified command would go to Testnet2.
 
 ```bash
-nibiru config node https://rpc.testnet-2.nibiru.fi:443
-nibiru config chain-id nibiru-testnet-2
-nibiru config
-```
-
-This recipe reads current EVM and Wasm state. Keep the default, non-archive
-testnet RPC; do not add `--archive`.
-
-Expected chain:
-
-```text
-nibiru-testnet-2
-```
-
-Use these testnet constants:
-
-```bash
+NET=(--node https://rpc.testnet-2.nibiru.fi:443 --chain-id nibiru-testnet-2)
 PERP="nibi1qtkcns647w959cj9x2yytateu6dgscfnfkraywwa443pr2erak0s5ux7e5"
 USDC="tf/nibi1pc2mmwcqhvzn9vsm0umpu40yzl6gfy6nucwn7g/usdc"
 ```
 
-`USDC` is the canonical Sai testnet USDC token-factory denom. Use the base-unit
-fields from `nibiru q evm balance`; on testnet, token metadata can make human
+`USDC` is the Sai testnet USDC token-factory denom. This recipe reads current
+state, so the default non-archive RPC is enough. Use the base-unit fields
+from `nibiru q evm balance`; on testnet, token metadata can make the human
 fields misleading.
 
-#### Summary command
+### Summary Command
 
-Run this from any directory with `nibiru`, `jq`, and `python3` on `PATH`:
+Run this with `nibiru`, `jq`, and `python3` on `PATH`. List the Bech32
+addresses to check in `ADDRS`. `list_user_deposits` returns one row per
+collateral, so the script reads the USDC collateral index from the contract
+and sums only that row.
 
 ```bash
 set -euo pipefail
 
+NET=(--node https://rpc.testnet-2.nibiru.fi:443 --chain-id nibiru-testnet-2)
 PERP="nibi1qtkcns647w959cj9x2yytateu6dgscfnfkraywwa443pr2erak0s5ux7e5"
 USDC="tf/nibi1pc2mmwcqhvzn9vsm0umpu40yzl6gfy6nucwn7g/usdc"
+ADDRS=(nibi1... nibi1...)
 
-printf "%-24s %14s %14s %16s %16s\n" \
-  "KEY" "BANK_USDC" "ERC20_USDC" "SAI_DEPOSIT" "SAI_CREDITS"
+perp_q() {
+  nibiru q wasm contract-state smart "$PERP" "$1" "${NET[@]}" --output json
+}
 
-nibiru keys list |
-  jq -r '.[] | select(.type == "local" and (.name | startswith("test-"))) |
-    [.name, .address] | @tsv' |
-  while IFS="$(printf '\t')" read -r name bech32; do
-    bal=$(nibiru q evm balance "$bech32" "$USDC")
-    bank_base=$(echo "$bal" | jq -r '.bank_balance_base // "0"')
-    erc20_base=$(echo "$bal" | jq -r '.erc20_balance_base // "0"')
+# The collateral that trading credits and USDC deposits use.
+usdc_idx=$(perp_q '{"get_trading_credit_params":{}}' |
+  jq -r '.data.collateral_idx')
 
-    query='{"list_user_deposits":{"user":"'"$bech32"'"}}'
-    deposits=$(nibiru q wasm contract-state smart "$PERP" "$query")
-    sai_deposit=$(echo "$deposits" |
-      jq -r '[.data[]? | (.amount // "0" | tonumber)] | add // 0')
-    sai_credits=$(echo "$deposits" |
-      jq -r '[.data[]? | (.trading_credits // "0" | tonumber)] | add // 0')
+printf "%-46s %14s %14s %16s %16s\n" \
+  "ADDR" "BANK_USDC" "ERC20_USDC" "SAI_DEPOSIT" "SAI_CREDITS"
 
-    bank_usdc=$(python3 -c \
-      "print(f'{int(\"$bank_base\") / 1_000_000:,.2f}')")
+for bech32 in "${ADDRS[@]}"; do
+  bal=$(nibiru q evm balance "$bech32" "$USDC" "${NET[@]}" --output json)
+  bank_base=$(echo "$bal" | jq -r '.bank_balance_base // "0"')
+  erc20_base=$(echo "$bal" | jq -r '.erc20_balance_base // "0"')
 
-    printf "%-24s %14s %14s %16s %16s\n" \
-      "$name" "$bank_usdc" "$erc20_base" "$sai_deposit" "$sai_credits"
-  done
+  deposits=$(perp_q '{"list_user_deposits":{"user":"'"$bech32"'"}}')
+  row=$(echo "$deposits" | jq --arg idx "$usdc_idx" \
+    '[.data[]? | select(.collateral_index == $idx)] | first // {}')
+  sai_deposit=$(echo "$row" | jq -r '.amount // "0"')
+  sai_credits=$(echo "$row" | jq -r '.trading_credits // "0"')
+
+  bank_usdc=$(python3 -c \
+    "print(f'{int(\"$bank_base\") / 1_000_000:,.2f}')")
+
+  printf "%-46s %14s %14s %16s %16s\n" \
+    "$bech32" "$bank_usdc" "$erc20_base" "$sai_deposit" "$sai_credits"
+done
 ```
 
-#### Reading the output
+To build `ADDRS` from the local keyring, ask for JSON explicitly, because
+`nibiru keys list` prints text by default:
 
-Interpret the columns this way:
+```bash
+nibiru keys list --output json | jq -r '.[] | [.name, .address] | @tsv'
+```
 
-- `BANK_USDC`: wallet USDC held as the Cosmos bank token, displayed with
-  6-decimal USDC units.
-- `ERC20_USDC`: wallet USDC held in the ERC20 representation, still in base
+Check only the accounts the person names. Do not enumerate the whole keyring
+in a report.
+
+### Reading the Output
+
+- `BANK_USDC`: wallet USDC held as the Cosmos bank token, in 6-decimal USDC
   units.
-- `SAI_DEPOSIT`: withdrawable Sai perp collateral balance, in USDC base units.
+- `ERC20_USDC`: wallet USDC held in the ERC20 representation, in base units.
+- `SAI_DEPOSIT`: withdrawable Sai USDC collateral balance, in base units.
 - `SAI_CREDITS`: non-withdrawable Sai trading credit balance, in USDC base
   units.
 
-Mention only rows with meaningful balances when answering an operator question.
-If all Sai deposit and credit fields are zero, say that no `test-*` keyring
-account currently has Sai internal USDC deposit balance or trading credits.
+Mention only rows with a balance. If every Sai deposit and credit field is
+zero, say that none of the checked accounts holds a Sai USDC deposit or
+trading credits.
 
-#### Optional verification
+### Optional Verification
 
-For any nonzero row, verify the raw wallet and Sai contract state directly:
+For any nonzero row, read the wallet and the contract directly:
 
 ```bash
 BECH32="nibi1..."
 
-nibiru q evm balance "$BECH32" "$USDC" | jq '{
+nibiru q evm balance "$BECH32" "$USDC" "${NET[@]}" --output json | jq '{
   bank_balance_base,
   erc20_balance_base
 }'
 
-nibiru q wasm contract-state smart "$PERP" \
-  '{"list_user_deposits":{"user":"'"$BECH32"'"}}' |
-  jq '.data'
+perp_q '{"list_user_deposits":{"user":"'"$BECH32"'"}}' | jq '.data'
 ```
 
-If the operator asks for account normalization, use:
+To map between the Bech32 and EVM forms of an account:
 
 ```bash
-nibiru q evm account "$BECH32" | jq '{
+nibiru q evm account "$BECH32" "${NET[@]}" --output json | jq '{
   bech32_address,
   eth_address,
   balance_wei

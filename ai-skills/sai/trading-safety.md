@@ -5,22 +5,40 @@ the CLI or the MCP tools. A mistake here spends the person's money.
 
 ## Rules
 
-1. **Preview first.** In the CLI, run the trade command with `--dry-run`.
-   With MCP tools, call the matching `preview_*` tool. Show the person the
-   result and the account it uses, and wait for an explicit yes.
-2. **Accepted is not executed.** `accepted` means Keeper admitted the intent.
+1. **Preview first.** With MCP tools, call the matching `preview_*` tool. In
+   the CLI, run the trade command with `--dry-run`. Show the person the
+   result and the account it names, and wait for an explicit yes.
+2. **Pin the account on both calls.** Each call resolves the active account
+   by itself, and another terminal or MCP client can switch it while the
+   person decides. Put the same `sai --as ADDR` on the dry run and on the
+   live command, or pass the same `addr` to the `preview_*` and `trade_*`
+   tools. Check that the preview's `addr` is the account the person named.
+   Trade IDs are per account: `trade close 42` on another account closes a
+   different position.
+3. **Use MCP when approval depends on the price.** A CLI market order does
+   not show a price in its dry run. The live command reads the price just
+   before submitting and applies the slippage to that price, so a person who
+   approved a quote of 60,000 with 1% slippage can be filled near 61,000 if
+   the market moved in between. Tools `preview_open` and `trade_open` bind
+   the trade to the confirmed `reference_price` and refuse with `PRICE_MOVED`
+   beyond the slippage. If only the CLI is available, tell the person the
+   order fills at the market price at submit time, within their slippage of
+   that price, and let them decide. A limit or stop order carries its own
+   `--price` and has no such gap.
+4. **Accepted is not executed.** `accepted` means Keeper admitted the intent.
    The trade is pending until its outcome is observed. Follow it with `sai
-   intent status ADDRESS --key KEY` or tool `intent_status`, and report it as
+   intent status ADDR --key KEY` or tool `intent_status`, and report it as
    executed only once that shows it.
-3. **Never resubmit blindly.** After a timeout, a transport error, or code
+5. **Never resubmit blindly.** After a timeout, a transport error, or code
    `OUTCOME_UNKNOWN`, the first request may have gone through. Keep the
    intent key and check it before anything else.
-4. **Never handle the token.** Do not ask for a session token, read it from a
+6. **Never handle the token.** Do not ask for a session token, read it from a
    file, or pass it anywhere. The person signs in with `sai auth import` or
    `sai auth login` in their own terminal.
-5. **Do not switch accounts by yourself.** Use `sai auth use` or tool
-   `auth_use` only when the person asks.
-6. **Confirm again when anything changes.** A new price, a new size, or a new
+7. **Do not switch accounts by yourself.** Use `sai auth use` or tool
+   `auth_use` only when the person asks. Pinning with `--as` or `addr`
+   switches nothing.
+8. **Confirm again when anything changes.** A new price, a new size, or a new
    account needs a new confirmation. An earlier yes does not carry over.
 
 ## Unknown Intents
@@ -29,7 +47,7 @@ The CLI records each intent's identity locally before it submits. A network
 error after submission leaves the outcome unknown.
 
 - An unknown intent blocks new trades on that account until it is resolved.
-- Resolve it with `sai --json intent status ADDRESS --key KEY`, or with tools
+- Resolve it with `sai --json intent status ADDR --key KEY`, or with tools
   `intent_local` then `intent_status`.
 - When Keeper has no record of the key five minutes after submission, the CLI
   marks the intent `absent` and trading resumes. Keeper expires an unadmitted
@@ -45,38 +63,48 @@ error after submission leaves the outcome unknown.
 
 ## Digest Confirmation in MCP
 
-Each preview returns a `previewDigest`. A `trade_*` call must carry the
-digest of the preview the person confirmed, and a market `trade_open` also
-its `referencePrice`. The server rebuilds the trade and refuses with
-`PREVIEW_MISMATCH` or `PRICE_MOVED` when the account, the arguments, the
-quoted position state, or the price no longer match. Nothing is submitted on
-a refusal. Show the fresh preview from the result and ask again.
-[mcp.md](mcp.md) has the full flow.
+Each preview returns `previewDigest`. A `trade_*` call must send it back as
+input `preview_digest`, and a market `trade_open` must also send the
+preview's `referencePrice` as `reference_price`. The server rebuilds the
+trade and refuses with `PREVIEW_MISMATCH` or `PRICE_MOVED` when the account,
+the intent, the margin quote, or the price no longer match. Nothing is
+submitted on a refusal. Show the fresh preview from the result and ask again.
+
+The digest of a partial close covers the computed collateral reduction, not
+the position's leverage. Preview again right before submitting if the
+position may have changed. [mcp.md](mcp.md#preview-confirm-then-trade) lists
+what each digest covers.
 
 ## CLI Trade Commands
 
 Each command's `--help` lists its parameters. These examples use `--dry-run`,
-a placeholder address, and an existing trade ID. They send nothing.
+a placeholder account, and an existing trade ID. They send nothing. Drop
+`--dry-run`, and keep the same `--as`, to submit.
 
 ```bash
-sai --json trade open --market 0 --side long --type market \
-  --amount 2 --leverage 2 --slippage 1 --dry-run
-sai --json trade open --market 0 --side long --type limit \
-  --amount 2 --leverage 2 --price 60000 --slippage 1 --dry-run
-sai --json trade partial-close 42 --percent 50 --dry-run
-sai --json trade tpsl 42 --take-profit 70000 --dry-run
-sai --json trade leverage 42 --leverage 5 --dry-run
-sai --json trade margin 42 --direction add --amount 5 --dry-run
-sai --json trade close 42 --dry-run
-sai --json intent local 0xYOUR_ADDRESS
-sai --json intent status 0xYOUR_ADDRESS --key INTENT_KEY
+sai --as 0xYOUR_ADDR --json trade open --market 0 --side long \
+  --type market --amount 2 --leverage 2 --slippage 1 --dry-run
+sai --as 0xYOUR_ADDR --json trade open --market 0 --side long \
+  --type limit --amount 2 --leverage 2 --price 60000 --slippage 1 --dry-run
+sai --as 0xYOUR_ADDR --json trade partial-close 42 --percent 50 --dry-run
+sai --as 0xYOUR_ADDR --json trade tpsl 42 --take-profit 70000 --dry-run
+sai --as 0xYOUR_ADDR --json trade leverage 42 --leverage 5 --dry-run
+sai --as 0xYOUR_ADDR --json trade margin 42 --direction add --amount 5 \
+  --dry-run
+sai --as 0xYOUR_ADDR --json trade close 42 --dry-run
+sai --as 0xYOUR_ADDR --json trade close 43 --cancel-order --dry-run
+sai --json intent local 0xYOUR_ADDR
+sai --json intent status 0xYOUR_ADDR --key INTENT_KEY
 ```
+
+`--as ADDR` needs `ADDR` to be a connected account (`sai auth list`). Trade
+output names the account in field `addr`.
 
 What each command checks:
 
 - **Market open.** The CLI refreshes the market price before admission and
   includes the reference price in the accepted response. A dry run reports
-  that a price refresh is still required.
+  that a price refresh is still required and shows no price. See rule 3.
 - **Partial close.** It reads the live position from the Perp contract, in
   dry-run mode too, and refuses while Keeper's index lags the contract.
 - **Margin.** It quotes from live contract state, in dry-run mode too, and
@@ -84,7 +112,9 @@ What each command checks:
   differ from the quote if the position changes before execution. If the
   index and the contract disagree, the CLI refuses and submits nothing. Wait
   and retry.
-- **Close.** `trade close` closes a position or cancels a pending order.
+- **Close and cancel.** `trade close ID` closes an open position. To cancel a
+  pending limit or stop order, add `--cancel-order`. Without the flag the CLI
+  sends a close-position intent for that ID.
 
 An executed trade stays pending locally until the CLI sees matching indexed
 trade history.

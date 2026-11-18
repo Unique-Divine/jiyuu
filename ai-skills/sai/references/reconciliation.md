@@ -39,9 +39,12 @@ Postgres database, or operator records such as spreadsheets and notes.
 - REST endpoint `GET /dexpal/v1/stats` can show zero open interest when table
   `stats_perp_oi_daily` lacks a current-day row, even while contract state and
   table `perp_trade` show open positions.
-- REST endpoint `GET /dexpal/v1/stats` uses a wall-clock 24h window, while REST
-  endpoint `GET /dexpal/v1/markets/details` can use a latest-block timestamp
-  anchor.
+- REST endpoint `GET /dexpal/v1/stats` builds its 24-hour volume, trade, and
+  user figures from daily date buckets, not a rolling wall-clock window. REST
+  endpoint `GET /dexpal/v1/markets/details` computes a separate 24-hour view
+  and can use a latest-block timestamp anchor. A trade missing from one day's
+  bucket is a bucket boundary, not indexing lag. See
+  [24-hour time-window semantics](rest.md#24-hour-time-window-semantics).
 - GraphQL fields expose indexed state, not necessarily the same moment as a live
   contract query.
 - Referral spreadsheet rows can be stale or incomplete because they are operator

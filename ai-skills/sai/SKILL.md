@@ -70,17 +70,19 @@ session, even when the person asks for one quick order.
 - Mainnet is the default network.
 - Never ask the person for a session token, and never type, paste, or echo
   one. The person signs in with `sai auth import` or `sai auth login`.
-- Say which account a trade uses before the person confirms it.
+- Say which account a trade uses before the person confirms it, and pin
+  that account on both the preview and the trade.
 - Keeper accepting an intent does not mean the trade executed.
 
 ## Copies of This Skill
 
 This skill is edited in
 [Unique-Divine/jiyuu](https://github.com/Unique-Divine/jiyuu/tree/main/ai-skills/sai)
-and packaged with the CLI. Command `sai skill show`, or `sai --skill` on
-older versions, prints the packaged copy, and `sai skill source` names the
-commit it was copied from. When this page and the installed CLI disagree
-about a command, follow `sai --help`.
+and packaged with the CLI. Command `sai --skill` prints the packaged
+`SKILL.md`. A CLI that lists `skill` in `sai --help` also has `sai skill show
+--page NAME` for one child page and `sai skill source` for the commit the
+copy came from; [cli.md](cli.md) has the details. When this page and the
+installed CLI disagree about a command, follow `sai --help`.
 
 ## Outside This Skill
 

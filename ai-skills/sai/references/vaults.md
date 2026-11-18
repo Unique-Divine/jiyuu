@@ -143,8 +143,7 @@ Important response fields:
 | `max_acc_pnl_per_token` | Maximum PnL accumulator allowed by rewards: `1 + acc_rewards_per_token`. |
 | `share_to_assets_price` | Current collateral-per-share price used for mint and redeem accounting. |
 
-Field names before the sai-perps
-[#523](https://github.com/NibiruChain/sai-perps/pull/523) vault upgrade
+Field names before the vault upgrade that added the daily PnL window
 differ. Queries at earlier heights, including archive queries, return the old
 names, and the cap has no PnL income term (`payout_cap` was base plus reward
 income only). Scripts that read both eras should try the new name first, then
@@ -241,7 +240,7 @@ raw_json_item() {
     jq -r '.data // empty' | base64 -d | jq -r .
 }
 
-# window_start_unix_ns after sai-perps#523; last_daily_acc_pnl_delta_reset
+# window_start_unix_ns after the vault upgrade; last_daily_acc_pnl_delta_reset
 # before it. Raw storage key `last_daily_acc_pnl_delta_reset` is unchanged.
 daily_reset_ns="$(sai_q "$VAULT" '{"risk_params":{}}' | jq -r \
   '.data.window_start_unix_ns // .data.last_daily_acc_pnl_delta_reset')"

@@ -7,18 +7,16 @@ subscriptions. For live protocol state or contract-owned values, use
 
 ## Source and endpoints
 
-The source of truth is the GraphQL schema in directory
-`graphql/graph/` in repository `sai-keeper`. File
-`webapp/config/chain.ts` in repository `sai-web` builds the deployed endpoint with
-path `/query`.
+The deployed schema is the authority. Read it with a GraphQL introspection
+query or in the playground at the host root. The endpoint path is `/query`.
 
 | Network | HTTP | WebSocket |
 | --- | --- | --- |
 | Mainnet | `https://sai-keeper.nibiru.fi/query` | `wss://sai-keeper.nibiru.fi/query` |
 | Testnet2 | `https://sai-keeper.testnet-2.nibiru.fi/query` | `wss://sai-keeper.testnet-2.nibiru.fi/query` |
 
-The host root serves the GraphQL playground. Verify a public deployment before
-assuming that its schema has caught up with the local Keeper commit.
+Verify a field against the deployment you query. Mainnet and Testnet2 can
+run different Keeper versions.
 
 ## Query domains
 

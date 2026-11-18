@@ -11,7 +11,7 @@ This guide covers the **REST API** — DexPal aggregated metrics and feeds (`/de
 
 - [Selecting the Right API](#selecting-the-right-api)
 - [Available Endpoints](#available-endpoints)
-  - [24h Time Window Semantics](#24h-time-window-semantics)
+  - [24-Hour Time-Window Semantics](#24-hour-time-window-semantics)
 - [Usage Examples](#usage-examples)
   - [GET /](#get-)
   - [GET /dexpal/v1/stats](#get-dexpalv1stats)
@@ -21,7 +21,7 @@ This guide covers the **REST API** — DexPal aggregated metrics and feeds (`/de
   - [GET /dexpal/v1/markets/details](#get-dexpalv1marketsdetails)
   - [GET /dexpal/v1/yield](#get-dexpalv1yield)
   - [GET /health](#get-health)
-- [References](#references)
+- [Hosts](#hosts)
 
 ## Selecting the right API
 
@@ -59,8 +59,9 @@ read [`graphql.md`](graphql.md).
   `current_date - 1` for several 24-hour aggregates) and caches the assembled
   response for two minutes. It is not a rolling wall-clock window.
 - **`/dexpal/v1/markets/details`**: its service calculates a separate
-  24-hour market view. Read the handler/service when a precise comparison to
-  `/stats` matters; do not assume a shared anchor.
+  24-hour market view. Do not assume it shares an anchor with `/stats`;
+  compare the two only after checking each endpoint's response for the same
+  day.
 
 ## Usage examples
 
@@ -221,7 +222,7 @@ curl -s https://sai-api.nibiru.fi/dexpal/v1/yield | jq .
       "withdrawal_lockup_days": 9,
       "early_withdrawal_penalty": 0,
       "date_listed": "2025-12-19T19:29:05.788346Z",
-      "details_link": "https://app.sai.zone/vault/nibi1mrplvu3scplnrgns96kg0j8pk3l2p9c7eaz0qdedx0kt3vmcujyqrjkfej"
+      "details_link": "<URL of the vault page>"
     }
   ]
 }
@@ -240,13 +241,12 @@ curl -s https://sai-api.nibiru.fi/health
 OK
 ```
 
-## References
+## Hosts
 
-- **The `sai-keeper` repo**: root `README.md` documents stats, health, and /; full endpoint list is in `api/server.go`
-- **The `nibi-iac` repo**: `terraform/_modules/sai-keeper` for deployment
+GraphQL and REST use separate hosts: `sai-keeper.*` serves GraphQL
+([graphql.md](graphql.md)), and `sai-api.*` serves this REST API.
 
-The sai-keeper Terraform module (in the `nibi-iac` repo) exposes two domains: `domain_graphql` (sai-keeper.*) for GraphQL, `domain_rest` (sai-api.*) for this REST API.
-
-Source: the `nibi-iac` repo — mainnet in `mainnet-gcp/06-mainnet.tf` (domain_rest), testnet in `itn2-gcp/07-testnet-2.tf`. DNS: `nibiru-gcp/02-dns.tf`.
-
-Notes on querying the Sai REST API (the `sai-keeper` repo run with `-api` flag). Endpoints from the `nibi-iac` repo; paths from the `sai-keeper` repo.
+| Network | REST host |
+| --- | --- |
+| Mainnet | `https://sai-api.nibiru.fi` |
+| Testnet2 | `https://sai-api.testnet-2.nibiru.fi` |
