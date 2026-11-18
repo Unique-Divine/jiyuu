@@ -14,8 +14,8 @@ in through a browser. Store credentials once, then run the published package
 with an exact version pin:
 
 ```sh
-bunx @uniquedivine/mcp-slack@4.5.2 --setup
-bunx @uniquedivine/mcp-slack@4.5.2
+bunx @uniquedivine/mcp-slack@4.5.3 --setup
+bunx @uniquedivine/mcp-slack@4.5.3
 ```
 
 Flag `--setup` writes file `~/.slack-mcp-tokens.json`. To pass environment
@@ -28,7 +28,7 @@ changes on `main`. The version pin selects the exact reviewed release that runs.
 ### Claude Code
 
 ```sh
-claude mcp add slack -- bunx @uniquedivine/mcp-slack@4.5.2
+claude mcp add slack -- bunx @uniquedivine/mcp-slack@4.5.3
 ```
 
 ### Codex
@@ -38,7 +38,7 @@ Add this entry to file `~/.codex/config.toml`:
 ```toml
 [mcp_servers.slack]
 command = "bunx"
-args = ["@uniquedivine/mcp-slack@4.5.2"]
+args = ["@uniquedivine/mcp-slack@4.5.3"]
 ```
 
 ### Cursor
@@ -51,7 +51,7 @@ a project:
   "mcpServers": {
     "slack": {
       "command": "bunx",
-      "args": ["@uniquedivine/mcp-slack@4.5.2"]
+      "args": ["@uniquedivine/mcp-slack@4.5.3"]
     }
   }
 }
@@ -61,7 +61,7 @@ a project:
 
 1. Find the newest version with command
    `npm view @uniquedivine/mcp-slack version`.
-2. Change the `@4.5.2` pin in the client configuration to that version.
+2. Change the `@4.5.3` pin in the client configuration to that version.
 3. Restart the MCP server in the client, or restart the client. In Claude
    Code, run `/mcp` and reconnect the server. Command `bunx` downloads the new
    version on the next launch.
@@ -118,7 +118,7 @@ value of cookie `d`. Run the setup helper, which stores them outside the
 source tree:
 
 ```sh
-bunx @uniquedivine/mcp-slack@4.5.2 --setup
+bunx @uniquedivine/mcp-slack@4.5.3 --setup
 ```
 
 Environment variables `SLACK_TOKEN` and `SLACK_COOKIE` take precedence over
@@ -147,7 +147,7 @@ Chrome auto-refresh runs only on macOS. On Linux, Windows, and WSL, refresh by
 hand when a tool returns `invalid_auth` or `slack_auth_expired`:
 
 1. Sign in to Slack at <https://app.slack.com> in a browser.
-2. Run `bunx @uniquedivine/mcp-slack@4.5.2 --setup` and paste the token and
+2. Run `bunx @uniquedivine/mcp-slack@4.5.3 --setup` and paste the token and
    cookie when it asks. [Manual Extraction](docs/SETUP.md#manual-extraction)
    shows where to find them.
 3. If you set `SLACK_TOKEN` and `SLACK_COOKIE`, update both or unset both.

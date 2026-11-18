@@ -4,7 +4,7 @@
   "description": "Slack MCP server by Unique Divine. Reads and writes Slack through your browser session.",
   "repository": "https://github.com/Unique-Divine/jiyuu",
   "homepage": "https://github.com/Unique-Divine/jiyuu/tree/main/mcp/slack",
-  "version": "4.5.2",
+  "version": "4.5.3",
   "license": "MIT",
   "maintainers": [
     "Unique-Divine"

@@ -15,7 +15,7 @@ short version.
 ## 1. Install
 
 ```bash
-bunx @uniquedivine/mcp-slack@4.5.2 --version
+bunx @uniquedivine/mcp-slack@4.5.3 --version
 ```
 
 To work from source instead:
@@ -33,9 +33,9 @@ package:
 
 ```bash
 cd "$(mktemp -d)"
-bunx @uniquedivine/mcp-slack@4.5.2 --version
-bunx @uniquedivine/mcp-slack@4.5.2 --help
-bunx @uniquedivine/mcp-slack@4.5.2 --doctor
+bunx @uniquedivine/mcp-slack@4.5.3 --version
+bunx @uniquedivine/mcp-slack@4.5.3 --help
+bunx @uniquedivine/mcp-slack@4.5.3 --doctor
 ```
 
 Flags `--version` and `--help` exit `0`. Flag `--doctor` exits with one code:
@@ -54,7 +54,7 @@ Flag `--status` is read-only and never runs Chrome extraction.
 Run the setup wizard:
 
 ```bash
-bunx @uniquedivine/mcp-slack@4.5.2 --setup
+bunx @uniquedivine/mcp-slack@4.5.3 --setup
 ```
 
 On macOS, the wizard reads the tokens from Chrome when Slack is open in a
@@ -86,7 +86,7 @@ steps when a tool returns `invalid_auth` or `slack_auth_expired`.
 Claude Code:
 
 ```bash
-claude mcp add slack -- bunx @uniquedivine/mcp-slack@4.5.2
+claude mcp add slack -- bunx @uniquedivine/mcp-slack@4.5.3
 ```
 
 Claude Desktop reads file
@@ -98,7 +98,7 @@ Claude Desktop reads file
   "mcpServers": {
     "slack": {
       "command": "bunx",
-      "args": ["@uniquedivine/mcp-slack@4.5.2"]
+      "args": ["@uniquedivine/mcp-slack@4.5.3"]
     }
   }
 }
@@ -136,7 +136,7 @@ Create file `~/Library/LaunchAgents/com.yourname.slack-token-refresh.plist`:
     <array>
         <string>/bin/bash</string>
         <string>-c</string>
-        <string>exec "$HOME/.bun/bin/bunx" @uniquedivine/mcp-slack@4.5.2 --refresh-tokens</string>
+        <string>exec "$HOME/.bun/bin/bunx" @uniquedivine/mcp-slack@4.5.3 --refresh-tokens</string>
     </array>
     <key>StartCalendarInterval</key>
     <array>
