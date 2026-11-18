@@ -609,17 +609,32 @@ static char *cr_props_with_caller(const char *rev, const char *project, const ch
     return out;
 }
 
+/* Mark cross-edge props (a JSON object in buf) "ambiguous":true. */
+static void cr_mark_ambiguous(char *buf, size_t bufsz) {
+    static const char mark[] = ",\"ambiguous\":true}";
+    size_t len = strlen(buf);
+    if (len > 0 && buf[len - SKIP_ONE] == '}' && len - SKIP_ONE + sizeof(mark) <= bufsz) {
+        memcpy(buf + len - SKIP_ONE, mark, sizeof(mark));
+    }
+}
+
 /* Emit CROSS_* edge for a route match: forward into source, reverse into target.
- * A pair is successful only when both writes complete. */
+ * A pair is successful only when both writes complete. `ambiguous`: the
+ * target Route is one several handlers claim (a GraphQL field two APIs in one
+ * checkout define), so the handler is a pick, not a definite match; both
+ * edges say so. */
 static bool emit_cross_route_bidirectional(
     cbm_store_t *src_store, const char *src_project, struct sqlite3 *src_db, int64_t caller_id,
     int64_t local_route_id, cbm_store_t *tgt_store, const char *tgt_project, int64_t handler_id,
     const char *route_qn, const char *handler_name, const char *handler_file, const char *url_path,
-    const char *method, const char *edge_type, cr_run_context_t *ctx) {
+    const char *method, const char *edge_type, bool ambiguous, cr_run_context_t *ctx) {
     /* Forward: caller → local Route in source DB */
     char fwd[CR_PROPS_BUF];
     build_cross_props(fwd, sizeof(fwd), tgt_project, handler_name, handler_file, url_path,
                       "url_path", method);
+    if (ambiguous) {
+        cr_mark_ambiguous(fwd, sizeof(fwd));
+    }
     if (!insert_cross_edge(src_store, src_project, caller_id, local_route_id, edge_type, fwd,
                            ctx)) {
         return false;
@@ -664,6 +679,9 @@ static bool emit_cross_route_bidirectional(
     char rev[CR_PROPS_BUF];
     build_cross_props(rev, sizeof(rev), src_project, caller_name, caller_file, url_path, "url_path",
                       method);
+    if (ambiguous) {
+        cr_mark_ambiguous(rev, sizeof(rev));
+    }
     char *rev_callers = cr_props_with_caller(rev, src_project, caller_name, caller_file);
     if (!rev_callers) {
         return false;
@@ -830,7 +848,8 @@ static cr_match_result_t match_http_routes(cbm_store_t *src_store, const char *s
 
         if (!emit_cross_route_bidirectional(src_store, src_project, src_db, caller_id, route_id,
                                             tgt_store, tgt_project, handler_id, hit.qn, hit.name,
-                                            hit.file, url_path, method, "CROSS_HTTP_CALLS", ctx)) {
+                                            hit.file, url_path, method, "CROSS_HTTP_CALLS",
+                                            false, ctx)) {
             failed = !cr_cancel_requested(ctx);
             break;
         }
@@ -1115,6 +1134,36 @@ static bool lookup_node_qn(struct sqlite3 *db, int64_t node_id, char *out, size_
     return found;
 }
 
+/* Is the target's Route `route_qn` marked "ambiguous" (pass_route_nodes.c:
+ * several schemas define the GraphQL field and no one resolver owns it)? */
+static bool cr_route_ambiguous(cbm_store_t *store, const char *route_qn, bool *failed) {
+    *failed = false;
+    struct sqlite3 *db = cbm_store_get_db(store);
+    sqlite3_stmt *st = NULL;
+    if (!db || sqlite3_prepare_v2(db,
+                                  "SELECT json_extract(properties, '$.ambiguous') FROM nodes "
+                                  "WHERE qualified_name = ?1 AND label = 'Route' LIMIT 1",
+                                  CBM_NOT_FOUND, &st, NULL) != SQLITE_OK) {
+        *failed = true;
+        return false;
+    }
+    bool ambiguous = false;
+    if (sqlite3_bind_text(st, SKIP_ONE, route_qn, CBM_NOT_FOUND, SQLITE_STATIC) != SQLITE_OK) {
+        *failed = true;
+    } else {
+        int step_rc = sqlite3_step(st);
+        if (step_rc == SQLITE_ROW) {
+            ambiguous = sqlite3_column_int(st, 0) != 0;
+        } else if (step_rc != SQLITE_DONE) {
+            *failed = true;
+        }
+    }
+    if (sqlite3_finalize(st) != SQLITE_OK) {
+        *failed = true;
+    }
+    return ambiguous && !*failed;
+}
+
 /* Match edges of a given type against Route nodes with a given QN prefix.
  * Reuses the same infrastructure as HTTP/async matching. */
 static cr_match_result_t match_typed_routes(cbm_store_t *src_store, const char *src_project,
@@ -1181,6 +1230,11 @@ static cr_match_result_t match_typed_routes(cbm_store_t *src_store, const char *
         if (handler_id == 0) {
             continue;
         }
+        bool ambiguous = cr_route_ambiguous(tgt_store, route_qn, &query_failed);
+        if (query_failed) {
+            failed = true;
+            break;
+        }
 
         if (cr_cancel_requested(ctx)) {
             break;
@@ -1189,7 +1243,7 @@ static cr_match_result_t match_typed_routes(cbm_store_t *src_store, const char *
         if (!emit_cross_route_bidirectional(src_store, src_project, src_db, caller_id, route_id,
                                             tgt_store, tgt_project, handler_id, route_qn,
                                             handler_name, handler_file, svc_val, svc_key,
-                                            cross_edge_type, ctx)) {
+                                            cross_edge_type, ambiguous, ctx)) {
             failed = !cr_cancel_requested(ctx);
             break;
         }

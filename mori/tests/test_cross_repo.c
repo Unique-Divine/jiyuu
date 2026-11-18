@@ -1353,9 +1353,38 @@ TEST(cross_repo_graphql_reverse_edge_keeps_every_caller) {
     PASS();
 }
 
+/* A server Route the route pass marked ambiguous (two APIs in one checkout
+ * define the field): the cross edges say so instead of passing the picked
+ * handler off as a definite match. */
+TEST(cross_repo_graphql_ambiguous_route_marked) {
+    cross_repo_fixture_t fixture;
+    bool ok = cross_repo_fixture_begin(&fixture) &&
+              cross_repo_seed_graphql(&fixture, "__graphql__Query.ping", 1,
+                                      "{\"source\":\"graphql_schema\",\"ambiguous\":true}");
+    if (!ok) {
+        cross_repo_fixture_end(&fixture);
+        FAIL("failed to seed GraphQL ambiguous fixture");
+    }
+    const char *target = "gql-server";
+    cbm_cross_repo_result_t fwd = cbm_cross_repo_match("gql-client", &target, 1);
+    bool failed = fwd.failed;
+    cbm_cross_repo_result_free(&fwd);
+    static const char marked[] =
+        "SELECT COUNT(*) FROM edges WHERE type = 'CROSS_GRAPHQL_CALLS' AND "
+        "json_extract(properties, '$.ambiguous') = 1";
+    int fwd_marked = cross_repo_query_int(&fixture, "gql-client", marked);
+    int rev_marked = cross_repo_query_int(&fixture, "gql-server", marked);
+    cross_repo_fixture_end(&fixture);
+    ASSERT_FALSE(failed);
+    ASSERT_EQ(fwd_marked, 1);
+    ASSERT_EQ(rev_marked, 1);
+    PASS();
+}
+
 SUITE(cross_repo) {
     RUN_TEST(cross_repo_graphql_prefers_resolver_method_handler);
     RUN_TEST(cross_repo_graphql_reverse_edge_keeps_every_caller);
+    RUN_TEST(cross_repo_graphql_ambiguous_route_marked);
     RUN_TEST(cross_repo_caller_local_handler_blocks_cross_http_issue1459);
     RUN_TEST(cross_repo_methodless_call_to_local_get_route_blocks_cross_http_issue1459);
     RUN_TEST(cross_repo_caller_without_local_handler_keeps_cross_http_issue1459);
