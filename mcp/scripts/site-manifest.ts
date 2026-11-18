@@ -1,0 +1,619 @@
+// Writes mcp/<folder>/site-manifest.json for each MCP server, the data behind
+// the server pages on uniquedivine.com. Run `just mcp-manifest` to write and
+// `just mcp-manifest --check` to fail when a committed manifest is stale.
+//
+// The generator reads package manifests, the tool modules they name, and
+// READMEs. Every file read goes through readSafeText, which refuses env,
+// token, session, cookie, credential, secret, and log files.
+
+import {
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs"
+import { tmpdir } from "node:os"
+import { basename, dirname, join, resolve, sep } from "node:path"
+
+export const MANIFEST_FILE = "site-manifest.json"
+export const SCHEMA_VERSION = 1
+const REPO_URL = "https://github.com/Unique-Divine/jiyuu"
+
+export type Registry = "npm" | "pypi"
+
+export interface EnvVar {
+  name: string
+  required: boolean
+  secret: boolean
+}
+
+export interface ToolParam {
+  name: string
+  type: string
+  required: boolean
+}
+
+export interface ManifestTool {
+  name: string
+  title: string
+  description: string
+  readOnly: boolean
+  destructive: boolean
+  params: ToolParam[]
+}
+
+export interface SiteManifest {
+  schemaVersion: number
+  folder: string
+  slug: string
+  title: string
+  description: string
+  registry: Registry
+  package: string
+  version: string
+  installCommand: string
+  runtime: string
+  license: string
+  sourceUrl: string
+  registryUrl: string
+  envVars: EnvVar[]
+  toolCount: number
+  readOnlyCount: number
+  writeCount: number
+  tools: ManifestTool[]
+  installMarkdown: string
+  generatedFrom: { revision: string }
+}
+
+/** A tool as an MCP server lists it (tools/list result shape). */
+export interface McpTool {
+  name: string
+  title?: string
+  description?: string
+  inputSchema?: { properties?: Record<string, unknown>; required?: string[] }
+  annotations?: {
+    title?: string
+    readOnlyHint?: boolean
+    destructiveHint?: boolean
+  }
+}
+
+/** Site settings read from a package manifest. */
+export interface ServerSource {
+  folder: string
+  dir: string
+  registry: Registry
+  package: string
+  version: string
+  description: string
+  license: string
+  runtime: string
+  envVars: EnvVar[]
+  /** npm: "path/to/module.ts#EXPORT" entries. pypi: one "module:function". */
+  tools: string[]
+  /** pypi only: synthetic env values that let the server module import. */
+  toolsEnv: Record<string, string>
+}
+
+export interface Discovery {
+  servers: ServerSource[]
+  optedOut: string[]
+}
+
+export type PythonToolLister = (source: ServerSource) => Promise<McpTool[]>
+
+export interface GenerateOptions {
+  mcpDir: string
+  revision: string
+  listPythonTools: PythonToolLister
+}
+
+// ---------------------------------------------------------------------------
+// Safe reads
+
+const SECRET_NAME =
+  /(^\.env|\.env$|token|session|cookie|credential|secret|\.log$|\.pem$|\.key$)/i
+
+/** True when a file name looks like it holds secrets or logs. */
+export function isSecretFileName(path: string): boolean {
+  return SECRET_NAME.test(basename(path))
+}
+
+/** Reads a text file, refusing secret-looking names and paths outside root. */
+export function readSafeText(root: string, path: string): string {
+  const full = resolve(root, path)
+  if (full !== root && !full.startsWith(root + sep)) {
+    throw new Error(`refusing to read ${path}: outside ${root}`)
+  }
+  if (isSecretFileName(full)) {
+    throw new Error(
+      `refusing to read ${path}: env, token, session, or log file`,
+    )
+  }
+  return readFileSync(full, "utf8")
+}
+
+// ---------------------------------------------------------------------------
+// Discovery
+
+function asRecord(value: unknown, what: string): Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${what} must be an object`)
+  }
+  return value as Record<string, unknown>
+}
+
+function asString(value: unknown, what: string): string {
+  if (typeof value !== "string" || value.trim() === "") {
+    throw new Error(`${what} must be a non-empty string`)
+  }
+  return value
+}
+
+function parseEnvVars(value: unknown, what: string): EnvVar[] {
+  if (value === undefined) return []
+  if (!Array.isArray(value)) throw new Error(`${what} must be an array`)
+  return value.map((item, index) => {
+    const row = asRecord(item, `${what}[${index}]`)
+    const name = asString(row.name, `${what}[${index}].name`)
+    if (!/^[A-Z][A-Z0-9_]*$/.test(name)) {
+      throw new Error(`${what}[${index}].name is not an env var name: ${name}`)
+    }
+    for (const key of Object.keys(row)) {
+      if (!["name", "required", "secret"].includes(key)) {
+        throw new Error(`${what}[${index}] has unknown key ${key}; names only`)
+      }
+    }
+    return {
+      name,
+      required: row.required === true,
+      secret: row.secret === true,
+    }
+  })
+}
+
+/** Turns ">=1.4.3" into "Bun >= 1.4.3". */
+export function runtimeLabel(name: string, range: string): string {
+  const match = range.trim().match(/^(>=|>|\^|~|=)?\s*(\S+)$/)
+  if (!match) return `${name} ${range.trim()}`
+  const op = match[1] === "=" || match[1] === undefined ? "" : `${match[1]} `
+  return `${name} ${op}${match[2]}`
+}
+
+function npmSource(folder: string, dir: string): ServerSource | null {
+  const pkg = asRecord(
+    JSON.parse(readSafeText(dir, "package.json")),
+    `${folder}/package.json`,
+  )
+  const jiyuu = pkg.jiyuu === undefined ? {} : asRecord(pkg.jiyuu, "jiyuu")
+  if (jiyuu.site === false) return null
+  const where = `${folder}/package.json jiyuu.site`
+  const site = asRecord(jiyuu.site, where)
+  const tools = site.tools
+  if (!Array.isArray(tools) || tools.length === 0) {
+    throw new Error(`${where}.tools must list "module#EXPORT" entries`)
+  }
+  const engines =
+    pkg.engines === undefined ? {} : asRecord(pkg.engines, "engines")
+  return {
+    folder,
+    dir,
+    registry: "npm",
+    package: asString(pkg.name, `${folder} name`),
+    version: asString(pkg.version, `${folder} version`),
+    description: asString(pkg.description, `${folder} description`),
+    license: asString(pkg.license, `${folder} license`),
+    runtime: runtimeLabel(
+      "Bun",
+      asString(engines.bun, `${folder} engines.bun`),
+    ),
+    envVars: parseEnvVars(site.env, `${where}.env`),
+    tools: tools.map((entry, i) => asString(entry, `${where}.tools[${i}]`)),
+    toolsEnv: {},
+  }
+}
+
+function pypiSource(folder: string, dir: string): ServerSource | null {
+  const doc = asRecord(
+    Bun.TOML.parse(readSafeText(dir, "pyproject.toml")),
+    `${folder}/pyproject.toml`,
+  )
+  const project = asRecord(doc.project, `${folder} [project]`)
+  const tool = doc.tool === undefined ? {} : asRecord(doc.tool, "[tool]")
+  const jiyuu =
+    tool.jiyuu === undefined ? {} : asRecord(tool.jiyuu, "[tool.jiyuu]")
+  if (jiyuu.site === false) return null
+  const where = `${folder}/pyproject.toml [tool.jiyuu.site]`
+  const site = asRecord(jiyuu.site, where)
+  const license = project.license
+  const toolsEnv =
+    site["tools-env"] === undefined
+      ? {}
+      : asRecord(site["tools-env"], `${where} tools-env`)
+  return {
+    folder,
+    dir,
+    registry: "pypi",
+    package: asString(project.name, `${folder} name`),
+    version: asString(project.version, `${folder} version`),
+    description: asString(project.description, `${folder} description`),
+    license:
+      typeof license === "string"
+        ? license
+        : asString(asRecord(license, "license").text, `${folder} license`),
+    runtime: runtimeLabel(
+      "Python",
+      asString(project["requires-python"], `${folder} requires-python`),
+    ),
+    envVars: parseEnvVars(site.env, `${where} env`),
+    tools: [asString(site.tools, `${where} tools`)],
+    toolsEnv: Object.fromEntries(
+      Object.entries(toolsEnv).map(([k, v]) => [
+        k,
+        asString(v, `tools-env.${k}`),
+      ]),
+    ),
+  }
+}
+
+/** Lists mcp/<folder>/ directories and reads each package manifest. */
+export function discoverServers(mcpDir: string): Discovery {
+  const servers: ServerSource[] = []
+  const optedOut: string[] = []
+  const folders = readdirSync(mcpDir)
+    .filter((name) => statSync(join(mcpDir, name)).isDirectory())
+    .sort()
+  for (const folder of folders) {
+    const dir = join(mcpDir, folder)
+    let source: ServerSource | null
+    if (existsSync(join(dir, "package.json"))) source = npmSource(folder, dir)
+    else if (existsSync(join(dir, "pyproject.toml")))
+      source = pypiSource(folder, dir)
+    else continue
+    if (source) servers.push(source)
+    else optedOut.push(folder)
+  }
+  return { servers, optedOut }
+}
+
+// ---------------------------------------------------------------------------
+// Tools
+
+/** Loads "module#EXPORT" entries from an npm server and concatenates them. */
+export async function loadNpmTools(source: ServerSource): Promise<McpTool[]> {
+  const tools: McpTool[] = []
+  for (const entry of source.tools) {
+    const [path, exportName] = entry.split("#")
+    if (!path || !exportName) {
+      throw new Error(
+        `${source.folder}: tool entry must be "module#EXPORT": ${entry}`,
+      )
+    }
+    // Check the name and location before import runs the module.
+    readSafeText(source.dir, path)
+    const module = await import(resolve(source.dir, path))
+    const value = module[exportName]
+    if (value === undefined) {
+      throw new Error(`${source.folder}: ${path} has no export ${exportName}`)
+    }
+    tools.push(...(Array.isArray(value) ? value : [value]))
+  }
+  return tools
+}
+
+const HELPER = join(import.meta.dir, "site_tools.py")
+
+/** Environment for the Python helper: PATH, HOME, and synthetic values only. */
+export function pythonEnv(source: ServerSource): Record<string, string> {
+  const env: Record<string, string> = { JIYUU_MCP_NO_UPDATE_CHECK: "1" }
+  for (const name of ["PATH", "HOME"]) {
+    const value = process.env[name]
+    if (value !== undefined) env[name] = value
+  }
+  return { ...env, ...source.toolsEnv }
+}
+
+/** Builds a lister that runs the helper with `command` plus helper args. */
+export function makePythonToolLister(
+  command: (source: ServerSource) => string[],
+): PythonToolLister {
+  return async (source) => {
+    // The server may create session or log files in its working directory.
+    const cwd = mkdtempSync(join(tmpdir(), "site-manifest-"))
+    try {
+      const spec = source.tools[0]!
+      const proc = Bun.spawnSync(
+        [...command(source), HELPER, source.dir, spec],
+        { cwd, env: pythonEnv(source), stdout: "pipe", stderr: "pipe" },
+      )
+      if (proc.exitCode !== 0) {
+        throw new Error(
+          `${source.folder}: listing tools with ${spec} failed\n` +
+            proc.stderr.toString(),
+        )
+      }
+      return JSON.parse(proc.stdout.toString()) as McpTool[]
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  }
+}
+
+/** Runs the helper in the server's locked uv environment. */
+export const uvToolLister = makePythonToolLister((source) => [
+  "uv",
+  "run",
+  "--frozen",
+  "--quiet",
+  "--project",
+  source.dir,
+  "python",
+  "-I",
+])
+
+/** First paragraph of a description, before any "Args:" block, on one line. */
+export function summarize(text: string | undefined): string {
+  const lines = (text ?? "").trim().split("\n")
+  const kept: string[] = []
+  for (const line of lines) {
+    if (line.trim() === "" || /^\s*(Args|Returns|Note):/.test(line)) break
+    kept.push(line.trim())
+  }
+  return kept.join(" ")
+}
+
+function collectTypes(schema: unknown): string[] {
+  if (schema === null || typeof schema !== "object") return ["any"]
+  const s = schema as Record<string, unknown>
+  if (typeof s.type === "string") return [s.type]
+  if (Array.isArray(s.type)) return s.type.map(String)
+  const options = Array.isArray(s.anyOf) ? s.anyOf : s.oneOf
+  if (Array.isArray(options)) return options.flatMap(collectTypes)
+  return ["any"]
+}
+
+/** JSON Schema type as "integer | string"; a nullable type drops "null". */
+export function schemaType(schema: unknown): string {
+  const kept = [...new Set(collectTypes(schema).filter((t) => t !== "null"))]
+  return kept.length === 0 ? "any" : kept.join(" | ")
+}
+
+/** Maps an MCP tool to the manifest shape, using MCP's annotation defaults. */
+export function toManifestTool(tool: McpTool): ManifestTool {
+  const annotations = tool.annotations ?? {}
+  const readOnly = annotations.readOnlyHint === true
+  const properties = tool.inputSchema?.properties ?? {}
+  const required = new Set(tool.inputSchema?.required ?? [])
+  return {
+    name: tool.name,
+    title: tool.title ?? annotations.title ?? tool.name,
+    description: summarize(tool.description),
+    readOnly,
+    // MCP treats a missing destructiveHint on a write tool as true.
+    destructive: !readOnly && annotations.destructiveHint !== false,
+    params: Object.entries(properties).map(([name, schema]) => ({
+      name,
+      type: schemaType(schema),
+      required: required.has(name),
+    })),
+  }
+}
+
+// ---------------------------------------------------------------------------
+// README
+
+/** Body of the README's "## Install" section, without the heading. */
+export function installSection(readme: string): string {
+  const lines = readme.split("\n")
+  let inSection = false
+  let found = false
+  let inFence = false
+  const body: string[] = []
+  for (const line of lines) {
+    if (/^\s*(```|~~~)/.test(line)) inFence = !inFence
+    if (!inFence && /^## /.test(line)) {
+      if (inSection) break
+      inSection = line.trim() === "## Install"
+      found ||= inSection
+      continue
+    }
+    if (inSection) body.push(line)
+  }
+  if (!found) throw new Error('README has no "## Install" section')
+  return body.join("\n").trim()
+}
+
+/** The README's first "# " heading. */
+export function readmeTitle(readme: string): string {
+  const match = readme.match(/^# (.+)$/m)
+  if (!match) throw new Error("README has no # title")
+  return match[1]!.trim()
+}
+
+// ---------------------------------------------------------------------------
+// Branding guard
+
+const BANNED: [RegExp, string][] = [
+  [/revasser/i, "upstream vendor name"],
+  [/jtalk22|barryyip|chigwell|l1v0n1/i, "upstream author or repository"],
+  [/\$\s?\d/, "price"],
+  [/\/mo(nth)?\b|per month/i, "price"],
+  [/pricing|free tier|upgrade to pro|\bPro or Team\b/i, "pricing"],
+  [/\bhosted\b/i, "hosted-service text"],
+]
+
+/** Throws on an upstream vendor, price, or hosted service in the text. */
+export function assertNoUpstreamBranding(manifest: SiteManifest): void {
+  const text = JSON.stringify(manifest)
+  for (const [pattern, why] of BANNED) {
+    const match = text.match(pattern)
+    if (match) {
+      throw new Error(
+        `${manifest.folder}: manifest contains ${why} ` +
+          `(${JSON.stringify(match[0])}); ` +
+          "fix the package's own description or tool metadata",
+      )
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Build
+
+export function buildManifest(
+  source: ServerSource,
+  mcpTools: McpTool[],
+  readme: string,
+  revision: string,
+): SiteManifest {
+  const tools = mcpTools.map(toManifestTool)
+  const names = tools.map((t) => t.name)
+  const duplicate = names.find((name, i) => names.indexOf(name) !== i)
+  if (duplicate)
+    throw new Error(`${source.folder}: duplicate tool ${duplicate}`)
+  if (!names.includes("mcp_info")) {
+    throw new Error(`${source.folder}: tool list has no mcp_info`)
+  }
+  const readOnlyCount = tools.filter((t) => t.readOnly).length
+  const npm = source.registry === "npm"
+  const manifest: SiteManifest = {
+    schemaVersion: SCHEMA_VERSION,
+    folder: source.folder,
+    slug: `${source.folder}-mcp`,
+    title: readmeTitle(readme),
+    description: source.description,
+    registry: source.registry,
+    package: source.package,
+    version: source.version,
+    installCommand:
+      `${npm ? "bunx" : "uvx"} ${source.package}@` + source.version,
+    runtime: source.runtime,
+    license: source.license,
+    sourceUrl: `${REPO_URL}/tree/main/mcp/${source.folder}`,
+    registryUrl: npm
+      ? `https://www.npmjs.com/package/${source.package}`
+      : `https://pypi.org/project/${source.package}/`,
+    envVars: source.envVars,
+    toolCount: tools.length,
+    readOnlyCount,
+    writeCount: tools.length - readOnlyCount,
+    tools,
+    installMarkdown: installSection(readme),
+    generatedFrom: { revision },
+  }
+  assertNoUpstreamBranding(manifest)
+  return manifest
+}
+
+export function serialize(manifest: SiteManifest): string {
+  return JSON.stringify(manifest, null, 2) + "\n"
+}
+
+/** Manifest text without generatedFrom, which changes with every commit. */
+export function comparable(text: string): string {
+  const parsed = JSON.parse(text) as Partial<SiteManifest>
+  delete parsed.generatedFrom
+  return JSON.stringify(parsed)
+}
+
+export interface Outcome {
+  folder: string
+  path: string
+  status: "fresh" | "stale" | "missing" | "unwanted"
+  text?: string
+}
+
+/** Computes each server's manifest and compares it with the file on disk. */
+export async function plan(options: GenerateOptions): Promise<Outcome[]> {
+  const { servers, optedOut } = discoverServers(options.mcpDir)
+  const outcomes: Outcome[] = []
+  for (const source of servers) {
+    const mcpTools =
+      source.registry === "npm"
+        ? await loadNpmTools(source)
+        : await options.listPythonTools(source)
+    const readme = readSafeText(source.dir, "README.md")
+    const text = serialize(
+      buildManifest(source, mcpTools, readme, options.revision),
+    )
+    const path = join(source.dir, MANIFEST_FILE)
+    if (!existsSync(path)) {
+      outcomes.push({ folder: source.folder, path, status: "missing", text })
+      continue
+    }
+    const current = readSafeText(source.dir, MANIFEST_FILE)
+    const fresh = comparable(current) === comparable(text)
+    outcomes.push({
+      folder: source.folder,
+      path,
+      status: fresh ? "fresh" : "stale",
+      text,
+    })
+  }
+  for (const folder of optedOut) {
+    const path = join(options.mcpDir, folder, MANIFEST_FILE)
+    if (existsSync(path)) outcomes.push({ folder, path, status: "unwanted" })
+  }
+  return outcomes
+}
+
+/** Writes stale and missing manifests and removes opted-out ones. */
+export function apply(outcomes: Outcome[]): void {
+  for (const outcome of outcomes) {
+    if (outcome.status === "unwanted") unlinkSync(outcome.path)
+    else if (outcome.status !== "fresh")
+      writeFileSync(outcome.path, outcome.text!)
+  }
+}
+
+export function parseArgs(args: readonly string[]): { check: boolean } {
+  let check = false
+  for (const arg of args) {
+    if (arg === "--check") check = true
+    else throw new Error("Usage: just mcp-manifest [--check]")
+  }
+  return { check }
+}
+
+function gitRevision(dir: string): string {
+  const proc = Bun.spawnSync(["git", "rev-parse", "HEAD"], { cwd: dir })
+  if (proc.exitCode !== 0) throw new Error("git rev-parse HEAD failed")
+  return proc.stdout.toString().trim()
+}
+
+export async function main(args: readonly string[]): Promise<number> {
+  const { check } = parseArgs(args)
+  const mcpDir = resolve(dirname(import.meta.dir))
+  const outcomes = await plan({
+    mcpDir,
+    revision: gitRevision(mcpDir),
+    listPythonTools: uvToolLister,
+  })
+  const changed = outcomes.filter((o) => o.status !== "fresh")
+  for (const o of outcomes) {
+    const rel = o.path.slice(dirname(mcpDir).length + 1)
+    console.log(`${o.status.padEnd(8)} ${rel}`)
+  }
+  if (check) {
+    if (changed.length > 0) {
+      console.error("Site manifests are out of date. Run: just mcp-manifest")
+      return 1
+    }
+    return 0
+  }
+  apply(changed)
+  return 0
+}
+
+if (import.meta.main) {
+  try {
+    process.exit(await main(Bun.argv.slice(2)))
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : error)
+    process.exit(1)
+  }
+}
