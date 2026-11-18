@@ -1289,6 +1289,33 @@ int cbm_parallel_resolve(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files, 
  * Re-targets these edges to Route nodes for cross-service traversal. */
 void cbm_pipeline_create_route_nodes(cbm_gbuf_t *gb);
 
+/* GraphQL field-path Routes (__graphql__<Op>.<field>[.<child>]) from the
+ * schema files in gb, with one HANDLES edge each: the owning gqlgen resolver
+ * method, else the schema Field. repo_path locates gqlgen configs (NULL:
+ * none are read). Full-index only; pipeline_incremental.c declines closure
+ * repairs that touch its inputs. */
+void cbm_pipeline_create_graphql_routes(cbm_gbuf_t *gb, const char *repo_path);
+
+/* A gqlgen config (gqlgen.yml), as far as GraphQL Routes need it. Paths are
+ * repo-relative: schema globs, and the resolvers' Go package directory with
+ * its trailing '/' ("" at the root; NULL when the config generates none). */
+typedef struct {
+    char **schema_globs;
+    int schema_count;
+    bool has_schema_key;
+    bool has_resolver;
+    char *resolver_layout;
+    char *resolver_dir;
+    char *resolver_filename;
+    char *resolver_pkg;
+} cbm_gqlgen_config_t;
+
+bool cbm_gqlgen_is_config_path(const char *rel_path);
+int cbm_gqlgen_config_load(const char *repo_path, const char *rel_path, cbm_gqlgen_config_t *out);
+void cbm_gqlgen_config_free(cbm_gqlgen_config_t *c);
+/* `*` and `?` within a path segment, `**` across segments. */
+bool cbm_gqlgen_glob_match(const char *glob, const char *path);
+
 /* ── Pass function prototypes ────────────────────────────────────── */
 
 int cbm_pipeline_pass_definitions(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files,

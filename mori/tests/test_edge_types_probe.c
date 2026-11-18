@@ -649,6 +649,139 @@ TEST(graphql_long_reason_and_type_name) {
     PASS();
 }
 
+/* gqlgen configs decide ownership. Two servers, each with a gqlgen.yml whose
+ * follow-schema resolvers live in internal/resolvers (no directory relation
+ * to the schema, so only the config ties them). Both define Query.ping:
+ * ambiguous. alpha and beta resolve in their own server. svc_b's resolver
+ * package has a Gamma, but gamma is svc_a's field and svc_a has no resolver
+ * for it: the Field handles it, never the other server's method. */
+static const EtFile et_gqlgen_config_two_servers_files[] = {
+    {"go.mod", "module two\n"},
+    {"svc_a/gqlgen.yml",
+     "# server A\nschema:\n  - graph/*.graphqls\nresolver:\n  layout: follow-schema\n"
+     "  dir: internal/resolvers\n  package: resolvers\n"},
+    {"svc_a/graph/schema.graphqls",
+     "type Query {\n  ping: String\n  alpha: String\n  gamma: String\n}\n"},
+    {"svc_a/internal/resolvers/schema.resolvers.go",
+     "package resolvers\n\n"
+     "type queryResolver struct{}\n\n"
+     "func (r *queryResolver) Ping() string {\n\treturn \"a\"\n}\n\n"
+     "func (r *queryResolver) Alpha() string {\n\treturn \"a\"\n}\n"},
+    {"svc_b/gqlgen.yaml",
+     "schema: [\"graph/*.graphqls\"]\nresolver:\n  layout: follow-schema # per schema file\n"
+     "  dir: ./internal/resolvers\n"},
+    {"svc_b/graph/schema.graphqls", "type Query {\n  ping: String\n  beta: String\n}\n"},
+    {"svc_b/internal/resolvers/schema.resolvers.go",
+     "package resolvers\n\n"
+     "type queryResolver struct{}\n\n"
+     "func (r *queryResolver) Ping() string {\n\treturn \"b\"\n}\n\n"
+     "func (r *queryResolver) Beta() string {\n\treturn \"b\"\n}\n\n"
+     "func (r *queryResolver) Gamma() string {\n\treturn \"b\"\n}\n"},
+};
+
+static const EtGqlServerRoute et_gqlgen_config_two_servers_want[] = {
+    {"__graphql__Query.ping", "String", "false", "", "Field", ".svc_a.graph.schema.Query.ping",
+     "graphql_schema_field", 1},
+    {"__graphql__Query.alpha", "String", "false", "", "Method",
+     ".svc_a.internal.resolvers.queryResolver.Alpha", "gqlgen_resolver", 0},
+    {"__graphql__Query.beta", "String", "false", "", "Method",
+     ".svc_b.internal.resolvers.queryResolver.Beta", "gqlgen_resolver", 0},
+    {"__graphql__Query.gamma", "String", "false", "", "Field", ".svc_a.graph.schema.Query.gamma",
+     "graphql_schema_field", 0},
+};
+
+TEST(graphql_gqlgen_config_two_servers) {
+    ASSERT_TRUE(et_gqlgen_case(et_gqlgen_config_two_servers_files,
+                               ET_NWANT(et_gqlgen_config_two_servers_files), 0,
+                               et_gqlgen_config_two_servers_want,
+                               ET_NWANT(et_gqlgen_config_two_servers_want)));
+    PASS();
+}
+
+/* A config's schema set spans sibling directories: the `schema` definition
+ * in graph/schema/ names the root declared in graph/types/. The default
+ * single-file layout puts the resolvers in the configured filename
+ * (api/resolvers.go), which no file-name heuristic would find. */
+static const EtFile et_gqlgen_config_single_file_files[] = {
+    {"go.mod", "module single\n"},
+    {"gqlgen.yml", "schema:\n  - graph/**/*.graphqls\nresolver:\n  filename: api/resolvers.go\n"},
+    {"graph/schema/schema.graphqls", "schema {\n  query: RootQuery\n}\n"},
+    {"graph/types/query.graphqls",
+     "type RootQuery {\n  ping: String\n}\n\ntype Query {\n  legacy: String\n}\n"},
+    {"api/resolvers.go",
+     "package api\n\n"
+     "type rootQueryResolver struct{}\n\n"
+     "func (r *rootQueryResolver) Ping() string {\n\treturn \"p\"\n}\n"},
+};
+
+static const EtGqlServerRoute et_gqlgen_config_single_file_want[] = {
+    {"__graphql__Query.ping", "String", "false", "", "Method", ".api.rootQueryResolver.Ping",
+     "gqlgen_resolver", 0},
+};
+
+TEST(graphql_gqlgen_config_sibling_schema_single_file) {
+    ASSERT_TRUE(et_gqlgen_case(et_gqlgen_config_single_file_files,
+                               ET_NWANT(et_gqlgen_config_single_file_files), 0,
+                               et_gqlgen_config_single_file_want,
+                               ET_NWANT(et_gqlgen_config_single_file_want)));
+    PASS();
+}
+
+/* Without a config, a resolver package owns only schema files in its own
+ * directory, below it or one level below: svc_b's queryResolver.Ping shares
+ * nothing with svc_a's schema, so svc_a's ping keeps its Field. */
+static const EtFile et_gqlgen_lone_candidate_files[] = {
+    {"go.mod", "module lone\n"},
+    {"svc_a/graph/schema.graphqls", "type Query {\n  ping: String\n}\n"},
+    {"svc_b/graph/schema.graphqls", "type Query {\n  other: String\n}\n"},
+    {"svc_b/graph/schema.resolvers.go",
+     "package graph\n\n"
+     "type queryResolver struct{}\n\n"
+     "func (r *queryResolver) Ping() string {\n\treturn \"b\"\n}\n"},
+};
+
+static const EtGqlServerRoute et_gqlgen_lone_candidate_want[] = {
+    {"__graphql__Query.ping", "String", "false", "", "Field", ".svc_a.graph.schema.Query.ping",
+     "graphql_schema_field", 0},
+    {"__graphql__Query.other", "String", "false", "", "Field", ".svc_b.graph.schema.Query.other",
+     "graphql_schema_field", 0},
+};
+
+TEST(graphql_resolver_needs_ownership_without_config) {
+    ASSERT_TRUE(et_gqlgen_case(et_gqlgen_lone_candidate_files,
+                               ET_NWANT(et_gqlgen_lone_candidate_files), 0,
+                               et_gqlgen_lone_candidate_want,
+                               ET_NWANT(et_gqlgen_lone_candidate_want)));
+    PASS();
+}
+
+/* Without a config: a `schema` definition applies across its parent
+ * directory (graph/schema/ names the root in graph/types/), and gqlgen's
+ * single-file `resolver.go` in graph/ resolves it. */
+static const EtFile et_gqlgen_sibling_noconfig_files[] = {
+    {"go.mod", "module sibling\n"},
+    {"graph/schema/schema.graphqls", "schema {\n  query: RootQuery\n}\n"},
+    {"graph/types/query.graphqls",
+     "type RootQuery {\n  ping: String\n}\n\ntype Query {\n  legacy: String\n}\n"},
+    {"graph/resolver.go",
+     "package graph\n\n"
+     "type rootQueryResolver struct{}\n\n"
+     "func (r *rootQueryResolver) Ping() string {\n\treturn \"p\"\n}\n"},
+};
+
+static const EtGqlServerRoute et_gqlgen_sibling_noconfig_want[] = {
+    {"__graphql__Query.ping", "String", "false", "", "Method", ".graph.rootQueryResolver.Ping",
+     "gqlgen_resolver", 0},
+};
+
+TEST(graphql_sibling_schema_single_file_without_config) {
+    ASSERT_TRUE(et_gqlgen_case(et_gqlgen_sibling_noconfig_files,
+                               ET_NWANT(et_gqlgen_sibling_noconfig_files), 0,
+                               et_gqlgen_sibling_noconfig_want,
+                               ET_NWANT(et_gqlgen_sibling_noconfig_want)));
+    PASS();
+}
+
 /* Overwrite one fixture file in an indexed project. */
 static void et_rewrite(const EtProj *lp, const char *rel, const char *content) {
     char path[700];
@@ -3443,6 +3576,10 @@ SUITE(edge_types_probe) {
     RUN_TEST(graphql_schema_remap_and_extensions);
     RUN_TEST(graphql_long_reason_and_type_name);
     RUN_TEST(graphql_gqlgen_routes_survive_incremental_edits);
+    RUN_TEST(graphql_gqlgen_config_two_servers);
+    RUN_TEST(graphql_gqlgen_config_sibling_schema_single_file);
+    RUN_TEST(graphql_resolver_needs_ownership_without_config);
+    RUN_TEST(graphql_sibling_schema_single_file_without_config);
     RUN_TEST(handles_flask_python);
     RUN_TEST(handles_fastapi_python);
     RUN_TEST(handles_drf_action_python);

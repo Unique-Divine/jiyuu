@@ -2459,6 +2459,7 @@ static void predump_deco(cbm_pipeline_ctx_t *ctx) {
 }
 static void predump_route(cbm_pipeline_ctx_t *ctx) {
     cbm_pipeline_create_route_nodes(ctx->gbuf);
+    cbm_pipeline_create_graphql_routes(ctx->gbuf, ctx->repo_path);
 }
 static void predump_sim(cbm_pipeline_ctx_t *ctx) {
     cbm_pipeline_pass_similarity(ctx);
