@@ -14,24 +14,28 @@
  *   bun scripts/probe-message-markup.js --run      # post, read, delete
  *   bun scripts/probe-message-markup.js --run --out test/fixtures/x.json
  *
- * Never prints tokens or cookies: the client loads them itself, and the
- * output keeps only message fields.
+ * The probe mentions the signed-in user (from auth.test) and one public
+ * channel they belong to (from users.conversations). The saved JSON
+ * replaces both IDs with placeholders and keeps only message text and
+ * blocks. Never prints tokens or cookies: the client loads them itself.
  */
 
 import { writeFileSync } from "node:fs"
 import { slackAPI } from "../lib/slack-client.js"
 
 export const CHANNEL_PLACEHOLDER = "D_SELF_DM"
+export const USER_PLACEHOLDER = "U0SELF0001"
+export const MENTION_CHANNEL_PLACEHOLDER = "C0CHANNEL01"
 
 /** Markup cases from issue 138: link, user and channel mentions, inline
  * code with a bare domain (alone and before punctuation), bare URLs and
  * domains outside code, and raw &, <, > characters. */
-export function probeText(selfId) {
+export function probeText(selfId, mentionChannelId) {
   return [
     "jiyuu#138 probe (deleting):",
     "<https://example.com|label #1>",
     `<@${selfId}>`,
-    "<#C03DD94GR8W>",
+    `<#${mentionChannelId}>`,
     "`discord.gg/saidotfun`",
     "(`discord.gg/saidotfun`).",
     "bare https://example.com/path and example.org",
@@ -53,14 +57,41 @@ export const VARIANTS = [
   { name: "update_parse_full", post: {}, update: { parse: "full" } },
 ]
 
-/** Keep only the stored fields the fixture documents; drop ids and tokens. */
-export function sanitizeMessage(message, tsPlaceholder) {
-  return {
+/**
+ * Replace every occurrence of each real ID with its placeholder, in all
+ * strings inside `value`.
+ * @param {unknown} value
+ * @param {Record<string, string>} replacements real ID to placeholder
+ */
+export function scrubIds(value, replacements) {
+  if (typeof value === "string") {
+    let out = value
+    for (const [real, placeholder] of Object.entries(replacements)) {
+      out = out.split(real).join(placeholder)
+    }
+    return out
+  }
+  if (Array.isArray(value)) return value.map((v) => scrubIds(v, replacements))
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([k, v]) => [k, scrubIds(v, replacements)]),
+    )
+  }
+  return value
+}
+
+/**
+ * Keep only the stored text, blocks, and edited flag; drop the message's
+ * user, team, client_msg_id, and other fields. Real user and channel IDs
+ * inside text and blocks become placeholders via `replacements`.
+ */
+export function sanitizeMessage(message, tsPlaceholder, replacements = {}) {
+  return scrubIds({
     ts: tsPlaceholder,
     text: message?.text ?? null,
     blocks: message?.blocks ?? null,
     edited: message?.edited ? true : undefined,
-  }
+  }, replacements)
 }
 
 async function readBack(channel, ts) {
@@ -74,7 +105,7 @@ async function readBack(channel, ts) {
   return res.messages?.find((m) => m.ts === ts) ?? null
 }
 
-async function runVariant(variant, channel, text, posted) {
+async function runVariant(variant, channel, text, posted, replacements) {
   const post = await slackAPI("chat.postMessage", {
     channel,
     text,
@@ -97,7 +128,11 @@ async function runVariant(variant, channel, text, posted) {
     post_args: variant.post,
     update_args: variant.update ?? null,
     response_text: apiText,
-    stored: sanitizeMessage(stored, `TS_${variant.name.toUpperCase()}`),
+    stored: sanitizeMessage(
+      stored,
+      `TS_${variant.name.toUpperCase()}`,
+      replacements,
+    ),
   }
 }
 
@@ -109,7 +144,7 @@ async function main() {
 
   if (!run) {
     console.log("Dry run. Pass --run to post to your own self-DM.")
-    console.log(`Text: ${probeText("<self>")}`)
+    console.log(`Text: ${probeText("<self>", "<public channel>")}`)
     for (const v of VARIANTS) {
       console.log(`- ${v.name}: post ${JSON.stringify(v.post)}` +
         (v.update ? `, update ${JSON.stringify(v.update)}` : ""))
@@ -127,12 +162,28 @@ async function main() {
   }
   console.log(`Self-DM ${channel} for ${selfId}`)
 
-  const text = probeText(selfId)
+  // Any public channel the user is in works for the <#C…> mention.
+  const member = await slackAPI("users.conversations", {
+    types: "public_channel",
+    exclude_archived: true,
+    limit: 1,
+  })
+  const mentionChannelId = member.channels?.[0]?.id
+  if (!mentionChannelId) {
+    throw new Error("users.conversations returned no public channel")
+  }
+
+  const replacements = {
+    [selfId]: USER_PLACEHOLDER,
+    [mentionChannelId]: MENTION_CHANNEL_PLACEHOLDER,
+    [channel]: CHANNEL_PLACEHOLDER,
+  }
+  const text = probeText(selfId, mentionChannelId)
   const posted = []
   const results = []
   try {
     for (const v of VARIANTS) {
-      results.push(await runVariant(v, channel, text, posted))
+      results.push(await runVariant(v, channel, text, posted, replacements))
     }
   } finally {
     for (const p of posted) {
@@ -148,13 +199,13 @@ async function main() {
     }
   }
 
-  const fixture = {
+  const fixture = scrubIds({
     source: "live Slack Web API, scripts/probe-message-markup.js",
     captured_at: new Date().toISOString().slice(0, 10),
     channel: CHANNEL_PLACEHOLDER,
     sent_text: text,
     variants: results,
-  }
+  }, replacements)
   const json = JSON.stringify(fixture, null, 2) + "\n"
   if (out) writeFileSync(out, json)
   else console.log(json)

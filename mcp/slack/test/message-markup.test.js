@@ -13,6 +13,10 @@ import {
   handleUpdateMessageUnsafe,
 } from "../lib/handlers.js"
 import { clearSelfUserIdCache } from "../lib/message-ownership.js"
+import {
+  sanitizeMessage,
+  scrubIds,
+} from "../scripts/probe-message-markup.js"
 import { stubSlackApi } from "./helpers/slack-api-stub.js"
 import live from "./fixtures/message-markup-live.json"
 
@@ -25,8 +29,8 @@ afterEach(() => {
 
 const LINK = "<https://example.com|label #1>"
 const ESCAPED_LINK = "&lt;https://example.com|label #1&gt;"
-const USER = "<@U03DYE9ALTB>"
-const CHANNEL_MENTION = "<#C03DD94GR8W>"
+const USER = "<@U0SELF0001>"
+const CHANNEL_MENTION = "<#C0CHANNEL01>"
 const CODE = "`discord.gg/saidotfun`"
 const SWALLOWED = "`<http://discord.gg/saidotfun`|discord.gg/saidotfun`>"
 
@@ -99,7 +103,7 @@ test("live: a default send auto-links a bare domain inside inline code", () => {
   expect(text).toContain(SWALLOWED)
 })
 
-const SELF = "U03DYE9ALTB"
+const SELF = "U0SELF0001"
 const CHANNEL = "D0SELFDM01"
 const NOW_SEC = Math.floor(Date.now() / 1000)
 const OLD_TEXT = "draft before the edit"
@@ -158,3 +162,43 @@ for (const [name, handler, hoursAgo] of [
     expect(update.params.parse).toBe("none")
   })
 }
+
+test("the probe swaps real IDs for placeholders in text and blocks", () => {
+  const replacements = { U0REAL0001: "U0SELF0001", C0REAL0001: "C0CHANNEL01" }
+  const message = {
+    ts: "1794974094.305739",
+    user: "U0REAL0001",
+    team: "T0REAL0001",
+    client_msg_id: "abc",
+    text: "<@U0REAL0001> in <#C0REAL0001>",
+    blocks: [{
+      type: "rich_text",
+      elements: [{
+        type: "rich_text_section",
+        elements: [
+          { type: "user", user_id: "U0REAL0001" },
+          { type: "channel", channel_id: "C0REAL0001" },
+        ],
+      }],
+    }],
+  }
+
+  const clean = sanitizeMessage(message, "TS_X", replacements)
+
+  expect(Object.keys(clean).sort()).toStrictEqual(
+    ["blocks", "edited", "text", "ts"],
+  )
+  expect(clean.ts).toBe("TS_X")
+  expect(clean.text).toBe("<@U0SELF0001> in <#C0CHANNEL01>")
+  expect(JSON.stringify(clean)).not.toContain("REAL")
+  expect(scrubIds({ a: ["U0REAL0001", 3, null] }, replacements))
+    .toStrictEqual({ a: ["U0SELF0001", 3, null] })
+})
+
+test("the saved fixture holds only placeholder IDs", () => {
+  const json = JSON.stringify(live)
+  expect(json).toContain("U0SELF0001")
+  expect(json).toContain("C0CHANNEL01")
+  expect(json.match(/\b[UC]0[A-Z0-9]{8,}\b/g).every((id) =>
+    id === "U0SELF0001" || id === "C0CHANNEL01")).toBe(true)
+})
