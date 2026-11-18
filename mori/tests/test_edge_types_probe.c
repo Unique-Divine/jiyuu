@@ -47,6 +47,7 @@
 #include <mcp/mcp.h>
 #include <store/store.h>
 #include <pipeline/pipeline.h>
+#include <pipeline/pipeline_internal.h>
 #include <foundation/log.h>
 #include <sqlite3.h>
 
@@ -793,13 +794,16 @@ static void et_rewrite(const EtProj *lp, const char *rel, const char *content) {
     }
 }
 
-/* Re-run index_repository on an indexed project (the incremental route). */
-static cbm_store_t *et_reindex(EtProj *lp, cbm_store_t *store) {
+/* Re-run index_repository on an indexed project (the incremental route);
+ * *route receives the route the run took. */
+static cbm_store_t *et_reindex(EtProj *lp, cbm_store_t *store, int *route) {
     if (store) cbm_store_close(store);
     char args[700];
     snprintf(args, sizeof(args), "{\"repo_path\":\"%s\"}", lp->tmpdir);
     char *resp = cbm_mcp_handle_tool(lp->srv, "index_repository", args);
     if (resp) free(resp);
+    *route = (int)cbm_pipeline_incremental_test_last_route();
+    fprintf(stderr, "  [ET-GQLS] incremental route %d\n", *route);
     return cbm_store_open_path(lp->dbpath);
 }
 
@@ -815,6 +819,7 @@ TEST(graphql_gqlgen_routes_survive_incremental_edits) {
 
     const char *perp_resolvers = NULL;
     const char *models = NULL;
+    int route = 0;
     for (int i = 0; i < nfiles; i++) {
         if (strcmp(et_gqlgen_files[i].name, "graph/resolver/perp.resolvers.go") == 0) {
             perp_resolvers = et_gqlgen_files[i].content;
@@ -825,19 +830,31 @@ TEST(graphql_gqlgen_routes_survive_incremental_edits) {
     char edited[4096];
     snprintf(edited, sizeof(edited), "%s\n// edited\n", perp_resolvers ? perp_resolvers : "");
     et_rewrite(&lp, "graph/resolver/perp.resolvers.go", edited);
-    store = et_reindex(&lp, store);
+    store = et_reindex(&lp, store, &route);
     int after_resolver =
         et_gqlgen_routes_exact(store, lp.project, et_gqlgen_want, ET_NWANT(et_gqlgen_want));
 
     snprintf(edited, sizeof(edited), "%s\n// edited\n", models ? models : "");
     et_rewrite(&lp, "graph/model/models.go", edited);
-    store = et_reindex(&lp, store);
+    store = et_reindex(&lp, store, &route);
     int after_model =
+        et_gqlgen_routes_exact(store, lp.project, et_gqlgen_want, ET_NWANT(et_gqlgen_want));
+
+    /* A surface change to the model (a field of Perp, which the resolvers
+     * use, changes type; no name is added or removed) pulls those resolver
+     * files into the closure repair. */
+    snprintf(edited, sizeof(edited),
+             "package model\n\n"
+             "type Perp struct {\n\tRealizedPnlUsd float64\n}\n\n"
+             "type PerpTrade struct {\n\tID     string\n\tTrader string\n}\n");
+    et_rewrite(&lp, "graph/model/models.go", edited);
+    store = et_reindex(&lp, store, &route);
+    int after_surface =
         et_gqlgen_routes_exact(store, lp.project, et_gqlgen_want, ET_NWANT(et_gqlgen_want));
 
     et_rewrite(&lp, "graph/query.graphqls",
                "type Query {\n  perp: Perp!\n  appVersion: String!\n  newField: String\n}\n");
-    store = et_reindex(&lp, store);
+    store = et_reindex(&lp, store, &route);
     EtGqlServerRoute after_schema_want[ET_NWANT(et_gqlgen_want)];
     int n = 0;
     for (int i = 0; i < ET_NWANT(et_gqlgen_want); i++) {
@@ -852,8 +869,9 @@ TEST(graphql_gqlgen_routes_survive_incremental_edits) {
     et_cleanup(&lp, store);
     if (!after_resolver) fprintf(stderr, "  [ET-GQLS] wrong after the resolver edit\n");
     if (!after_model) fprintf(stderr, "  [ET-GQLS] wrong after the model edit\n");
+    if (!after_surface) fprintf(stderr, "  [ET-GQLS] wrong after the model surface edit\n");
     if (!after_schema) fprintf(stderr, "  [ET-GQLS] wrong after the schema edit\n");
-    ASSERT_TRUE(ok && after_resolver && after_model && after_schema);
+    ASSERT_TRUE(ok && after_resolver && after_model && after_surface && after_schema);
     PASS();
 }
 

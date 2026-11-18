@@ -2757,46 +2757,106 @@ static const char *closure_terraform_decline(char **paths, int n) {
     return NULL;
 }
 
-/* Does the Go package (directory) of `path` hold a gqlgen `*.resolvers.go`
- * file among the stored or discovered files? */
-static bool closure_in_gqlgen_package(const char *path, const cbm_file_hash_t *stored,
-                                      int stored_count, const cbm_file_info_t *files,
-                                      int file_count) {
-    static const char SUFFIX[] = ".resolvers.go";
-    const char *slash = strrchr(path, '/');
-    size_t dl = slash ? (size_t)(slash - path) + SKIP_ONE : 0;
-    for (int i = 0; i < stored_count + file_count; i++) {
-        const char *other =
-            i < stored_count ? stored[i].rel_path : files[i - stored_count].rel_path;
-        size_t ol = other ? strlen(other) : 0;
-        if (ol > dl + sizeof(SUFFIX) - SKIP_ONE && strncmp(other, path, dl) == 0 &&
-            !strchr(other + dl, '/') &&
-            strcmp(other + ol - (sizeof(SUFFIX) - SKIP_ONE), SUFFIX) == 0) {
-            return true;
+/* What a closure plan must know about GraphQL in the project: whether it
+ * has schema files at all, and the gqlgen resolver packages (directories
+ * holding `*.resolvers.go` or `resolver.go`, plus every gqlgen config's
+ * resolver package). Directories keep their trailing '/'. */
+typedef struct {
+    bool has_schema;
+    char **dirs;
+    int dir_count;
+    int dir_cap;
+} closure_gql_facts_t;
+
+static void closure_gql_add_dir(closure_gql_facts_t *f, const char *dir, size_t len) {
+    for (int i = 0; i < f->dir_count; i++) {
+        if (strlen(f->dirs[i]) == len && strncmp(f->dirs[i], dir, len) == 0) {
+            return;
         }
     }
-    return false;
+    if (f->dir_count == f->dir_cap) {
+        int cap = f->dir_cap ? f->dir_cap * PAIR_LEN : CBM_SZ_16;
+        char **grown = realloc(f->dirs, (size_t)cap * sizeof(*grown));
+        if (!grown) {
+            return;
+        }
+        f->dirs = grown;
+        f->dir_cap = cap;
+    }
+    char *copy = malloc(len + SKIP_ONE);
+    if (copy) {
+        memcpy(copy, dir, len);
+        copy[len] = '\0';
+        f->dirs[f->dir_count++] = copy;
+    }
+}
+
+static void closure_gql_note_path(closure_gql_facts_t *f, const char *repo_path, const char *rel) {
+    if (!rel) {
+        return;
+    }
+    const char *slash = strrchr(rel, '/');
+    size_t dl = slash ? (size_t)(slash - rel) + SKIP_ONE : 0;
+    size_t len = strlen(rel);
+    static const char SUFFIX[] = ".resolvers.go";
+    if (cbm_language_for_filename(rel) == CBM_LANG_GRAPHQL) {
+        f->has_schema = true;
+    } else if ((len > sizeof(SUFFIX) - SKIP_ONE &&
+                strcmp(rel + len - (sizeof(SUFFIX) - SKIP_ONE), SUFFIX) == 0) ||
+               strcmp(rel + dl, "resolver.go") == 0) {
+        closure_gql_add_dir(f, rel, dl);
+    } else if (cbm_gqlgen_is_config_path(rel)) {
+        cbm_gqlgen_config_t cfg;
+        if (cbm_gqlgen_config_load(repo_path, rel, &cfg) == 0) {
+            if (cfg.resolver_pkg) {
+                closure_gql_add_dir(f, cfg.resolver_pkg, strlen(cfg.resolver_pkg));
+            }
+            cbm_gqlgen_config_free(&cfg);
+        }
+    }
+}
+
+static void closure_gql_facts_free(closure_gql_facts_t *f) {
+    for (int i = 0; i < f->dir_count; i++) {
+        free(f->dirs[i]);
+    }
+    free(f->dirs);
 }
 
 /* GraphQL field-path Routes and their HANDLES (pass_route_nodes.c) are
- * computed from the whole schema and the gqlgen resolver packages by a
- * full-index pass that a closure repair does not run: a changed schema file
- * would lose its Routes, a changed resolver file its HANDLES. A delta
- * touching either declines to the full rebuild. Returns the reason, or NULL. */
-static const char *closure_graphql_decline(char **paths, int n, const cbm_file_hash_t *stored,
-                                           int stored_count, const cbm_file_info_t *files,
-                                           int file_count) {
-    for (int i = 0; i < n; i++) {
+ * computed from the whole schema, its gqlgen config and resolver packages
+ * by a full-index pass that a closure repair does not run: a re-parsed
+ * schema file would lose its Routes, a re-parsed resolver file its HANDLES.
+ * Called on the changed paths and again on the completed closure (a
+ * surface change can pull an unchanged resolver file in): any such file
+ * declines to the full rebuild. Returns the reason, or NULL. */
+static const char *closure_graphql_decline(const char *repo_path, char **paths, int n,
+                                           const cbm_file_hash_t *stored, int stored_count,
+                                           const cbm_file_info_t *files, int file_count) {
+    closure_gql_facts_t facts = {0};
+    for (int i = 0; i < stored_count + file_count; i++) {
+        closure_gql_note_path(&facts, repo_path,
+                              i < stored_count ? stored[i].rel_path
+                                               : files[i - stored_count].rel_path);
+    }
+    const char *reason = NULL;
+    for (int i = 0; facts.has_schema && i < n && !reason; i++) {
+        const char *slash = strrchr(paths[i], '/');
+        size_t dl = slash ? (size_t)(slash - paths[i]) + SKIP_ONE : 0;
         CBMLanguage lang = cbm_language_for_filename(paths[i]);
         if (lang == CBM_LANG_GRAPHQL) {
-            return "graphql_schema_changed";
+            reason = "graphql_schema_changed";
+        } else if (cbm_gqlgen_is_config_path(paths[i])) {
+            reason = "graphql_config_changed";
         }
-        if (lang == CBM_LANG_GO &&
-            closure_in_gqlgen_package(paths[i], stored, stored_count, files, file_count)) {
-            return "graphql_resolver_changed";
+        for (int d = 0; !reason && lang == CBM_LANG_GO && d < facts.dir_count; d++) {
+            if (strlen(facts.dirs[d]) == dl && strncmp(facts.dirs[d], paths[i], dl) == 0) {
+                reason = "graphql_resolver_changed";
+            }
         }
     }
-    return NULL;
+    closure_gql_facts_free(&facts);
+    return reason;
 }
 
 /* A role's defaults/ or vars/ main.yml (.yaml): the lists a kube task's loop
@@ -3065,6 +3125,27 @@ static bool closure_metadata_current(bool metadata_current, const cbm_file_hash_
 /* Decide whether this manifest delta is closure-repairable, and if so build
  * the plan. Returns 1 with *plan filled, or 0 (decline → FULL) with the
  * reason logged. Every early exit declines; nothing here mutates state. */
+/* closure_graphql_decline over the completed closure. On a decline the
+ * plan's file list is released. */
+static const char *closure_graphql_decline_plan(const char *repo_path, closure_plan_t *plan,
+                                                const cbm_file_hash_t *stored, int stored_count,
+                                                const cbm_file_info_t *files, int file_count) {
+    char **planned = calloc((size_t)plan->count + SKIP_ONE, sizeof(*planned));
+    for (int i = 0; planned && i < plan->count; i++) {
+        planned[i] = plan->files[i].rel_path;
+    }
+    const char *decline = planned ? closure_graphql_decline(repo_path, planned, plan->count, stored,
+                                                            stored_count, files, file_count)
+                                  : "alloc";
+    free(planned);
+    if (decline) {
+        free(plan->files);
+        plan->files = NULL;
+        plan->count = 0;
+    }
+    return decline;
+}
+
 static int closure_try_plan(cbm_pipeline_t *p, cbm_store_t *store, const char *project,
                             cbm_file_info_t *files, int file_count, const cbm_file_hash_t *stored,
                             int stored_count, const cbm_file_hash_t *fresh, int fresh_count,
@@ -3193,8 +3274,9 @@ static int closure_try_plan(cbm_pipeline_t *p, cbm_store_t *store, const char *p
     if (decline) {
         goto done;
     }
-    decline = closure_graphql_decline(changed_paths, n_changed + n_deleted, stored, stored_count,
-                                      files, file_count);
+    decline =
+        closure_graphql_decline(cbm_pipeline_repo_path(p), changed_paths, n_changed + n_deleted,
+                                stored, stored_count, files, file_count);
     if (decline) {
         goto done;
     }
@@ -3439,6 +3521,11 @@ static int closure_try_plan(cbm_pipeline_t *p, cbm_store_t *store, const char *p
         if (cbm_ht_get(closure_set, files[i].rel_path)) {
             plan->files[plan->count++] = files[i];
         }
+    }
+    decline = closure_graphql_decline_plan(cbm_pipeline_repo_path(p), plan, stored, stored_count,
+                                           files, file_count);
+    if (decline) {
+        goto done;
     }
     plan->n_changed = n_changed;
     plan->n_dependents = dependent_count;
