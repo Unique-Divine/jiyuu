@@ -31,6 +31,7 @@ jobs:
       telegram: ${{ github.event_name == 'workflow_dispatch' || steps.paths.outputs.telegram == 'true' }}
       python_mcp: ${{ github.event_name == 'workflow_dispatch' || steps.paths.outputs.python_mcp == 'true' }}
       python_tg: ${{ github.event_name == 'workflow_dispatch' || steps.paths.outputs.python_tg == 'true' }}
+      mcp_manifest: ${{ github.event_name == 'workflow_dispatch' || steps.paths.outputs.mcp_manifest == 'true' }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -47,6 +48,7 @@ jobs:
             - ts-pkg/jiyuu/**
             - ts-pkg/tg-sai/**
             - scripts/github-labels/**
+            - mcp/scripts/**
             - package.json
             - bun.lock
             - bun.lockb
@@ -124,6 +126,10 @@ jobs:
             python_tg:
             - ts-pkg/tg-sai/**
             - scripts/python/**
+            - .github/workflows/ci-test.yaml
+            - justfile
+            mcp_manifest:
+            - mcp/**
             - .github/workflows/ci-test.yaml
             - justfile
   test:
@@ -372,6 +378,35 @@ jobs:
           cd "$RUNNER_TEMP"
           "$RUNNER_TEMP/telegram-fresh/bin/python" -I -c 'import importlib.util as u, mcp.server.fastmcp, telethon, telegram_mcp; mods = ["main", "sanitize", "session_string_generator", "telegram_mcp.runtime", "telegram_mcp.tools", "telegram_mcp.update_check"]; missing = [m for m in mods if u.find_spec(m) is None]; assert not missing, missing; print("wheel ok")'
         if: needs.changes.outputs.telegram == 'true'
+    needs: changes
+  # Site manifests feed the MCP pages on uniquedivine.com. Listing Telegram's
+  # tools imports the package, so this job needs its locked uv environment.
+  mcp-manifest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Unaffected project
+        if: needs.changes.outputs.mcp_manifest != 'true'
+        run: echo "No relevant changes; check completed successfully."
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        if: needs.changes.outputs.mcp_manifest == 'true'
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.3
+        if: needs.changes.outputs.mcp_manifest == 'true'
+      - uses: astral-sh/setup-uv@v6
+        if: needs.changes.outputs.mcp_manifest == 'true'
+      - name: Install Telegram's locked environment
+        run: uv sync --frozen
+        working-directory: mcp/telegram
+        if: needs.changes.outputs.mcp_manifest == 'true'
+      - name: Test the generator
+        run: bun test mcp/scripts
+        if: needs.changes.outputs.mcp_manifest == 'true'
+      - name: Check committed site manifests
+        run: bun run mcp/scripts/site-manifest.ts --check
+        if: needs.changes.outputs.mcp_manifest == 'true'
     needs: changes
   python-typecheck:
     name: Python types / ${{ matrix.name }}
