@@ -49,7 +49,7 @@ Use the owning layer for each fact:
   HM or Sai Keeper indexing failure.
 
 For a Sai incident, first prove the contract state with agent skill
-`sai-perps`, then verify the chain event through this skill. Use agent skill
+`sai`, then verify the chain event through this skill. Use agent skill
 `sai-db` to locate the API-serving Sai Keeper database and inspect its derived
 row. Finally, query the Sai Keeper GraphQL API to verify app-visible data.
 
@@ -57,7 +57,7 @@ row. Finally, query the Sai Keeper GraphQL API to verify app-visible data.
 
 - Use agent skill `nibiru-cli` for authoritative chain state, address
   normalization, and transaction lookup.
-- Use agent skill `sai-perps` for Perp contract state and reconciliation across
+- Use agent skill `sai` for Perp contract state and reconciliation across
   contracts, Sai Keeper GraphQL, REST, and operator records.
 - Use agent skill `sai-db` for safe discovery and read-only inspection of the
   API-serving Sai Keeper PostgreSQL database. Do not infer its endpoint from a
