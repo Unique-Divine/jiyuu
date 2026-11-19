@@ -254,6 +254,27 @@ async def test_join_reports_a_pending_join_request(monkeypatch, handler):
 
 
 @pytest.mark.parametrize("handler", JOIN_TOOLS)
+@pytest.mark.parametrize(
+    "error, message",
+    [
+        (
+            errors.ChannelsTooMuchError(request=None),
+            "Error: this account has joined too many channels and groups.",
+        ),
+        (
+            errors.UsersTooMuchError(request=None),
+            "Cannot join this chat - it has reached maximum number of participants.",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_join_names_which_limit_was_reached(monkeypatch, handler, error, message):
+    configure_join(monkeypatch, errors.InviteHashInvalidError(request=None), error)
+
+    assert await join(handler) == message
+
+
+@pytest.mark.parametrize("handler", JOIN_TOOLS)
 @pytest.mark.asyncio
 async def test_join_failure_logs_once_without_the_invite(monkeypatch, handler):
     configure_join(

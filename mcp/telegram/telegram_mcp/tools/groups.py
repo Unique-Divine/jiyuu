@@ -1287,6 +1287,10 @@ async def _join_invite(account: str | None, invite_hash: str, tool_name: str) ->
         try:
             result = await cl(functions.messages.ImportChatInviteRequest(hash=invite_hash))
             return _join_result(True, _first_chat(result))
+        except errors.ChannelsTooMuchError:
+            return "Error: this account has joined too many channels and groups."
+        except errors.UsersTooMuchError:
+            return "Cannot join this chat - it has reached maximum number of participants."
         except errors.InviteRequestSentError:
             return json_result(
                 {
@@ -1306,8 +1310,6 @@ async def _join_invite(account: str | None, invite_hash: str, tool_name: str) ->
                 return _join_result(False, None)
             elif "admin" in err_str:
                 return "Cannot join this chat - requires admin approval."
-            elif "too much" in err_str or "too many" in err_str:
-                return "Cannot join this chat - it has reached maximum number of participants."
             raise
     except Exception as e:
         return log_and_format_error(tool_name, e)
