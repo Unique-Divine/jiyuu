@@ -49,6 +49,8 @@ jobs:
             - ts-pkg/tg-sai/**
             - scripts/github-labels/**
             - mcp/scripts/**
+            - mori/scripts/**
+            - mori/grammars.lock.json
             - package.json
             - bun.lock
             - bun.lockb
@@ -155,6 +157,10 @@ jobs:
         if: needs.changes.outputs.typescript == 'true'
       - name: Typecheck TypeScript projects
         run: bun check
+        if: needs.changes.outputs.typescript == 'true'
+      - name: Test Mori grammar scripts
+        working-directory: mori
+        run: bun test scripts
         if: needs.changes.outputs.typescript == 'true'
       - name: Test tg-sai
         working-directory: ts-pkg/tg-sai
