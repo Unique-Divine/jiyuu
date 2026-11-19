@@ -30,3 +30,16 @@ async def test_participant_pages_do_not_pass_unsupported_offset(monkeypatch, pag
     assert result["page"] == page
     assert result["count"] == len(expected)
     assert result["has_more"] == (len(expected) == 2)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("page, page_size", [(1, 0), (1, -5), (0, 2), (-1, 2)])
+async def test_participant_pages_reject_nonpositive_bounds(monkeypatch, page, page_size):
+    def no_client(account=None):
+        raise AssertionError("must not reach Telegram")
+
+    monkeypatch.setattr(groups, "get_client", no_client)
+
+    output = await groups.get_participants(chat_id=-123, page=page, page_size=page_size)
+
+    assert output == "Error: page and page_size must be at least 1."

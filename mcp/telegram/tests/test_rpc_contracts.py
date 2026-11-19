@@ -1,6 +1,7 @@
 """Serialize generated Telethon requests without sending Telegram writes."""
 
 import json
+import logging
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -157,26 +158,124 @@ async def test_basic_chat_edits_use_resolved_positive_id(monkeypatch):
     assert client.requests[1].chat_id == 42
 
 
-@pytest.mark.asyncio
-async def test_import_chat_invite_reports_the_joined_chat(monkeypatch):
-    class JoinClient(Client):
-        async def __call__(self, request):
-            self.requests.append(request)
-            if isinstance(request, functions.messages.CheckChatInviteRequest):
-                raise errors.InviteHashInvalidError(request=None)
-            return SimpleNamespace(chats=[basic_chat()])
+class JoinClient(Client):
+    """Answer CheckChatInviteRequest and ImportChatInviteRequest from a plan."""
 
-    client = JoinClient(None)
+    def __init__(self, check, join):
+        super().__init__(None)
+        self.check = check
+        self.join = join
+
+    async def __call__(self, request):
+        self.requests.append(request)
+        reply = (
+            self.check
+            if isinstance(request, functions.messages.CheckChatInviteRequest)
+            else self.join
+        )
+        if isinstance(reply, BaseException):
+            raise reply
+        return reply
+
+
+def configure_join(monkeypatch, check, join):
+    client = JoinClient(check, join)
     monkeypatch.setattr(groups, "get_client", lambda account=None: client)
     monkeypatch.setattr(groups, "ensure_connected", lambda client: _noop())
+    return client
 
-    assert json.loads(await groups.import_chat_invite(hash="+abc")) == {
-        "joined": True,
-        "already_member": False,
+
+def joined_updates():
+    return types.Updates(updates=[], users=[], chats=[basic_chat()], date=None, seq=0)
+
+
+async def join(handler):
+    if handler is groups.join_chat_by_link:
+        return await handler(link="https://t.me/+secretHash")
+    return await handler(hash="+secretHash")
+
+
+JOIN_TOOLS = [groups.join_chat_by_link, groups.import_chat_invite]
+JOINED = {"joined": True, "already_member": False, "chat_id": -42, "title": "Example"}
+
+
+@pytest.mark.parametrize("handler", JOIN_TOOLS)
+@pytest.mark.asyncio
+async def test_join_reports_the_joined_chat(monkeypatch, handler):
+    client = configure_join(
+        monkeypatch, errors.InviteHashInvalidError(request=None), joined_updates()
+    )
+
+    assert json.loads(await join(handler)) == JOINED
+    assert isinstance(client.requests[-1], functions.messages.ImportChatInviteRequest)
+    assert client.requests[-1].hash == "secretHash"
+
+
+@pytest.mark.parametrize("handler", JOIN_TOOLS)
+@pytest.mark.asyncio
+async def test_join_skips_only_when_already_a_member(monkeypatch, handler):
+    client = configure_join(monkeypatch, types.ChatInviteAlready(chat=basic_chat()), None)
+
+    assert json.loads(await join(handler)) == {
+        "joined": False,
+        "already_member": True,
         "chat_id": -42,
         "title": "Example",
     }
+    assert len(client.requests) == 1
+
+
+@pytest.mark.parametrize("handler", JOIN_TOOLS)
+@pytest.mark.asyncio
+async def test_join_still_joins_after_a_chat_preview(monkeypatch, handler):
+    # ChatInvitePeek carries a chat too, but only for a temporary preview.
+    peek = types.ChatInvitePeek(chat=basic_chat(), expires=datetime.now(tz=timezone.utc))
+    client = configure_join(monkeypatch, peek, joined_updates())
+
+    assert json.loads(await join(handler)) == JOINED
     assert isinstance(client.requests[-1], functions.messages.ImportChatInviteRequest)
+
+
+@pytest.mark.parametrize("handler", JOIN_TOOLS)
+@pytest.mark.asyncio
+async def test_join_reports_a_pending_join_request(monkeypatch, handler):
+    configure_join(
+        monkeypatch,
+        errors.InviteHashInvalidError(request=None),
+        errors.InviteRequestSentError(request=None),
+    )
+
+    assert json.loads(await join(handler)) == {
+        "joined": False,
+        "already_member": False,
+        "request_sent": True,
+        "note": groups.REQUEST_SENT_NOTE,
+    }
+
+
+@pytest.mark.parametrize("handler", JOIN_TOOLS)
+@pytest.mark.asyncio
+async def test_join_failure_logs_once_without_the_invite(monkeypatch, handler):
+    configure_join(
+        monkeypatch, errors.InviteHashInvalidError(request=None), ConnectionError("dropped")
+    )
+    records = []
+
+    class Capture(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+
+    capture = Capture(level=logging.DEBUG)
+    groups.logger.addHandler(capture)
+    try:
+        result = await join(handler)
+    finally:
+        groups.logger.removeHandler(capture)
+
+    assert result.startswith("An error occurred")
+    errors_logged = [r for r in records if r.levelno >= logging.ERROR]
+    assert len(errors_logged) == 1
+    assert all("secretHash" not in r.getMessage() for r in records)
 
 
 async def _noop():
