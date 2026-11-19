@@ -11,7 +11,7 @@ Rust port is planned as crate `jiyuu-mori` with command `mori`. Releases will
 be tagged `mori/v*`.
 
 Upstream's README, with usage, MCP tools and agent setup, is kept as
-[README.upstream.md](README.upstream.md). [IMPORT.json](IMPORT.json) and
+[README.upstream.md](README.upstream.md). [IMPORT.md](IMPORT.md) and
 [NOTICE](NOTICE) record the source commit, exclusions and local changes.
 
 ## Build
