@@ -52,9 +52,10 @@ which:
    place.
 5. Writes `.grammars.stamp` with the archive hash and the size and mtime of
    every installed file. The next run compares the tree with the stamp and
-   hashes `MANIFEST.md` and the license files, which takes about a second.
+   hashes `MANIFEST.md` and the license files, which takes under a second.
    If a file was added, removed or changed, it hashes the whole tree (about
-   a minute) and reinstalls from the cached archive when that check fails.
+   6 seconds with a warm page cache, longer cold) and reinstalls from the
+   cached archive when that check fails.
    Pass `--force` to reinstall.
 
 The archive is published as release
