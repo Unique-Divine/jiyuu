@@ -132,6 +132,10 @@ struct cbm_gbuf {
      * freed by free_node_strings/free_edge_strings — only once in cbm_gbuf_free. */
     CBMHashTable *intern_pool;
 
+    /* GRAPHQL_CALLS operation unions by edge id (gb_graphql_merge): each
+     * owns its sorted names and the serialized props its edge points at. */
+    CBMHashTable *gql_ops;
+
     /* Vector storage for semantic embeddings (filled by pass_semantic_edges,
      * consumed by cbm_write_db during dump). */
     CBMDumpVector *dump_vectors;
@@ -395,6 +399,8 @@ static void free_index_key(const char *key, void *value, void *ud) {
 
 /* Free one intern-pool entry: key == value == the single owned string copy
  * that nodes/edges borrowed for label/file_path/type. */
+static void gb_gql_ops_free(cbm_gbuf_t *gb);
+
 static void free_intern_entry(const char *key, void *value, void *ud) {
     (void)value;
     (void)ud;
@@ -747,6 +753,7 @@ void cbm_gbuf_free(cbm_gbuf_t *gb) {
     /* Free interned strings (node label/file_path, edge type) — pool owns one
      * copy each (key == value), freed exactly once via free_intern_entry. Done
      * after nodes/edges since they borrowed these pointers. */
+    gb_gql_ops_free(gb);
     if (gb->intern_pool) {
         cbm_ht_foreach(gb->intern_pool, free_intern_entry, NULL);
         cbm_ht_free(gb->intern_pool);
@@ -1884,89 +1891,222 @@ static bool edge_props_should_replace(const char *existing_json, const char *inc
     return strcmp(incoming_json, existing_json) > 0;
 }
 
+/* Operation union of one GRAPHQL_CALLS edge from its first merge on: the
+ * sorted, deduplicated operation names, the winning props without the
+ * operation keys (the highest confidence, then the greatest text, so the
+ * result depends only on the set of inputs), and the serialized props the
+ * edge points at. Each merge inserts by binary search and serializes once;
+ * the superseded props are freed, so nothing accumulates. */
 typedef struct {
-    const char **items;
+    char *key; /* edge id, decimal */
+    char **names;
     size_t count;
     size_t cap;
-    bool failed; /* an allocation failed: the union is incomplete */
-} gb_names_t;
+    char *base; /* winning props minus "operation"/"operations" */
+    double base_conf;
+    char *props; /* serialized; the edge's properties_json */
+} gb_gql_ops_t;
 
-/* Add the operation names of one GRAPHQL_CALLS props document (its
- * `operations` list and `operation`) to names, without duplicates. */
-static void gb_graphql_collect_operations(yyjson_doc *doc, gb_names_t *names) {
+static void gb_gql_add_name(gb_gql_ops_t *ops, const char *s) {
     enum { GB_NAMES_MIN = 8 };
+    size_t lo = 0;
+    size_t hi = ops->count;
+    while (lo < hi) {
+        size_t mid = lo + ((hi - lo) / PAIR_LEN);
+        int c = strcmp(ops->names[mid], s);
+        if (c == 0) {
+            return;
+        }
+        if (c < 0) {
+            lo = mid + SKIP_ONE;
+        } else {
+            hi = mid;
+        }
+    }
+    if (ops->count == ops->cap) {
+        size_t cap = ops->cap ? ops->cap * PAIR_LEN : GB_NAMES_MIN;
+        char **grown = cbm_realloc(CBM_MEM_CLASS_GBUF_STRING, ops->names, cap * sizeof(*grown));
+        if (!grown) {
+            return; /* a lost name costs that operation's attribution, never data */
+        }
+        ops->names = grown;
+        ops->cap = cap;
+    }
+    char *copy = cbm_mem_strdup(CBM_MEM_CLASS_GBUF_STRING, s);
+    if (!copy) {
+        return;
+    }
+    memmove(ops->names + lo + SKIP_ONE, ops->names + lo, (ops->count - lo) * sizeof(*ops->names));
+    ops->names[lo] = copy;
+    ops->count++;
+}
+
+/* Fold one props document into the union: its names (the `operations` list
+ * and `operation`) and, when it wins, its base. */
+static void gb_gql_absorb(gb_gql_ops_t *ops, const char *props) {
+    yyjson_doc *doc = yyjson_read_opts((char *)props, strlen(props), 0, &gb_yy_alc, NULL);
     yyjson_val *root = doc ? yyjson_doc_get_root(doc) : NULL;
-    yyjson_val *one = root ? yyjson_obj_get(root, "operation") : NULL;
-    yyjson_val *list = root ? yyjson_obj_get(root, "operations") : NULL;
+    if (!yyjson_is_obj(root)) {
+        yyjson_doc_free(doc);
+        return;
+    }
+    yyjson_val *list = yyjson_obj_get(root, "operations");
     size_t count = yyjson_is_arr(list) ? yyjson_arr_size(list) : 0;
-    for (size_t i = 0; i <= count; i++) {
-        yyjson_val *v = i < count ? yyjson_arr_get(list, i) : one;
-        const char *s = yyjson_get_str(v);
-        bool seen = s == NULL;
-        for (size_t j = 0; j < names->count && !seen; j++) {
-            seen = strcmp(names->items[j], s) == 0;
+    for (size_t i = 0; i < count; i++) {
+        const char *s = yyjson_get_str(yyjson_arr_get(list, i));
+        if (s) {
+            gb_gql_add_name(ops, s);
         }
-        if (seen) {
-            continue;
-        }
-        if (names->count == names->cap) {
-            size_t cap = names->cap ? names->cap * PAIR_LEN : GB_NAMES_MIN;
-            const char **grown =
-                cbm_realloc(CBM_MEM_CLASS_GBUF_STRING, (void *)names->items, cap * sizeof(*grown));
-            if (!grown) {
-                names->failed = true;
-                return;
-            }
-            names->items = grown;
-            names->cap = cap;
-        }
-        names->items[names->count++] = s;
+    }
+    const char *one = yyjson_get_str(yyjson_obj_get(root, "operation"));
+    if (one) {
+        gb_gql_add_name(ops, one);
+    }
+    yyjson_mut_doc *md = yyjson_doc_mut_copy(doc, &gb_yy_alc);
+    yyjson_mut_val *mroot = md ? yyjson_mut_doc_get_root(md) : NULL;
+    char *base = NULL;
+    if (yyjson_mut_is_obj(mroot)) {
+        (void)yyjson_mut_obj_remove_key(mroot, "operations");
+        (void)yyjson_mut_obj_remove_key(mroot, "operation");
+        base = yyjson_mut_write_opts(md, 0, &gb_yy_alc, NULL, NULL);
+    }
+    yyjson_mut_doc_free(md);
+    yyjson_doc_free(doc);
+    if (!base) {
+        return;
+    }
+    double conf = edge_props_confidence(props);
+    if (!ops->base || conf > ops->base_conf ||
+        (conf == ops->base_conf && strcmp(base, ops->base) > 0)) {
+        gb_yy_free(NULL, ops->base);
+        ops->base = base;
+        ops->base_conf = conf;
+    } else {
+        gb_yy_free(NULL, base);
     }
 }
 
-static int gb_str_cmp(const void *a, const void *b) {
-    return strcmp(*(const char *const *)a, *(const char *const *)b);
+/* JSON string body of s into out (sized by the caller for the worst case). */
+static size_t gb_json_escape_into(char *out, const char *s) {
+    static const char hex[] = "0123456789abcdef";
+    enum { GB_CTRL_MAX = 0x20, GB_HEX_BASE = 16 };
+    size_t n = 0;
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+        if (*p == '"' || *p == '\\') {
+            out[n++] = '\\';
+            out[n++] = (char)*p;
+        } else if (*p < GB_CTRL_MAX) {
+            static const char u00[] = "\\u00";
+            memcpy(out + n, u00, sizeof(u00) - SKIP_ONE);
+            n += sizeof(u00) - SKIP_ONE;
+            unsigned byte = *p;
+            out[n++] = hex[byte / GB_HEX_BASE];
+            out[n++] = hex[byte % GB_HEX_BASE];
+        } else {
+            out[n++] = (char)*p;
+        }
+    }
+    return n;
+}
+
+/* `base` with "operation" (the first sorted name) and the sorted
+ * "operations" list appended. Heap-owned; NULL on allocation failure. */
+static char *gb_gql_serialize(const gb_gql_ops_t *ops) {
+    enum { GB_ESC_WORST = 6, GB_FIXED_JSON = 64 }; /* \u00XX per byte; keys and brackets */
+    size_t blen = strlen(ops->base);
+    size_t size = blen + GB_FIXED_JSON;
+    for (size_t i = 0; i < ops->count; i++) {
+        size += (strlen(ops->names[i]) + SKIP_ONE) * GB_ESC_WORST * PAIR_LEN;
+    }
+    char *out = cbm_alloc(CBM_MEM_CLASS_GBUF_STRING, size);
+    if (!out || blen < PAIR_LEN || ops->base[blen - SKIP_ONE] != '}') {
+        cbm_free(CBM_MEM_CLASS_GBUF_STRING, out);
+        return NULL;
+    }
+    size_t n = blen - SKIP_ONE; /* drop the closing brace */
+    memcpy(out, ops->base, n);
+    if (n > SKIP_ONE) {
+        out[n++] = ',';
+    }
+    static const char op_key[] = "\"operation\":\"";
+    static const char ops_key[] = "\",\"operations\":[";
+    memcpy(out + n, op_key, sizeof(op_key) - SKIP_ONE);
+    n += sizeof(op_key) - SKIP_ONE;
+    n += gb_json_escape_into(out + n, ops->names[0]);
+    memcpy(out + n, ops_key, sizeof(ops_key) - SKIP_ONE);
+    n += sizeof(ops_key) - SKIP_ONE;
+    for (size_t i = 0; i < ops->count; i++) {
+        out[n++] = i > 0 ? ',' : '"';
+        if (i > 0) {
+            out[n++] = '"';
+        }
+        n += gb_json_escape_into(out + n, ops->names[i]);
+        out[n++] = '"';
+    }
+    out[n++] = ']';
+    out[n++] = '}';
+    out[n] = '\0';
+    return out;
 }
 
 /* GRAPHQL_CALLS edges dedupe on source, Route and type, so two operations
- * that select the same field from one function or module meet here. The
- * kept props get the sorted union of both sides' operations, so no
- * operation loses its link. Returns interned props, or NULL to keep `keep`. */
-static const char *gb_graphql_union_operations(cbm_gbuf_t *gb, const char *keep,
-                                               const char *other) {
-    yyjson_doc *dk = yyjson_read_opts((char *)keep, strlen(keep), 0, &gb_yy_alc, NULL);
-    yyjson_doc *dother = yyjson_read_opts((char *)other, strlen(other), 0, &gb_yy_alc, NULL);
-    gb_names_t names = {0};
-    gb_graphql_collect_operations(dk, &names);
-    gb_graphql_collect_operations(dother, &names);
-    const char *out = NULL;
-    bool usable = dk && names.count > 0 && !names.failed;
-    yyjson_mut_doc *md = usable ? yyjson_doc_mut_copy(dk, &gb_yy_alc) : NULL;
-    yyjson_mut_val *root = md ? yyjson_mut_doc_get_root(md) : NULL;
-    if (yyjson_mut_is_obj(root)) {
-        /* Sorted, and `operation` is the first name, so the result depends
-         * only on the set of operations, never on merge order. */
-        qsort((void *)names.items, names.count, sizeof(names.items[0]), gb_str_cmp);
-        yyjson_mut_val *arr = yyjson_mut_arr(md);
-        for (size_t i = 0; arr && i < names.count; i++) {
-            (void)yyjson_mut_arr_add_strcpy(md, arr, names.items[i]);
-        }
-        (void)yyjson_mut_obj_remove_key(root, "operations");
-        (void)yyjson_mut_obj_remove_key(root, "operation");
-        if (arr && yyjson_mut_obj_add_strcpy(md, root, "operation", names.items[0]) &&
-            yyjson_mut_obj_add_val(md, root, "operations", arr)) {
-            char *json = yyjson_mut_write_opts(md, 0, &gb_yy_alc, NULL, NULL);
-            if (json) {
-                out = gb_intern(gb, json);
-                gb_yy_free(NULL, json);
-            }
+ * that select the same field from one function or module meet here. Merges
+ * `incoming` into the edge's union and returns the new props (owned by the
+ * buffer's union table), or NULL to fall back to plain replacement. */
+static const char *gb_graphql_merge(cbm_gbuf_t *gb, const cbm_gbuf_edge_t *edge,
+                                    const char *incoming) {
+    enum { GB_GQL_OPS_MIN = 64, GB_ID_KEY = 32 };
+    if (!gb->gql_ops) {
+        gb->gql_ops = cbm_ht_create_in(CBM_MEM_CLASS_GBUF_STRING, GB_GQL_OPS_MIN);
+        if (!gb->gql_ops) {
+            return NULL;
         }
     }
-    yyjson_mut_doc_free(md);
-    cbm_free(CBM_MEM_CLASS_GBUF_STRING, (void *)names.items);
-    yyjson_doc_free(dk);
-    yyjson_doc_free(dother);
-    return out;
+    char key[GB_ID_KEY];
+    (void)snprintf(key, sizeof(key), "%lld", (long long)edge->id);
+    gb_gql_ops_t *ops = cbm_ht_get(gb->gql_ops, key);
+    if (!ops) {
+        ops = cbm_calloc(CBM_MEM_CLASS_GBUF_STRING, sizeof(*ops));
+        char *owned_key = cbm_mem_strdup(CBM_MEM_CLASS_GBUF_STRING, key);
+        if (!ops || !owned_key) {
+            cbm_free(CBM_MEM_CLASS_GBUF_STRING, ops);
+            cbm_free(CBM_MEM_CLASS_GBUF_STRING, owned_key);
+            return NULL;
+        }
+        ops->key = owned_key;
+        cbm_ht_set(gb->gql_ops, ops->key, ops);
+        gb_gql_absorb(ops, edge->properties_json);
+    }
+    gb_gql_absorb(ops, incoming);
+    char *props = ops->base && ops->count > 0 ? gb_gql_serialize(ops) : NULL;
+    if (!props) {
+        return NULL;
+    }
+    cbm_free(CBM_MEM_CLASS_GBUF_STRING, ops->props);
+    ops->props = props;
+    return props;
+}
+
+static void gb_gql_ops_free_entry(const char *key, void *value, void *ud) {
+    (void)key;
+    (void)ud;
+    gb_gql_ops_t *ops = value;
+    for (size_t i = 0; i < ops->count; i++) {
+        cbm_free(CBM_MEM_CLASS_GBUF_STRING, ops->names[i]);
+    }
+    cbm_free(CBM_MEM_CLASS_GBUF_STRING, ops->names);
+    gb_yy_free(NULL, ops->base);
+    cbm_free(CBM_MEM_CLASS_GBUF_STRING, ops->props);
+    cbm_free(CBM_MEM_CLASS_GBUF_STRING, ops->key);
+    cbm_free(CBM_MEM_CLASS_GBUF_STRING, ops);
+}
+
+static void gb_gql_ops_free(cbm_gbuf_t *gb) {
+    if (gb->gql_ops) {
+        cbm_ht_foreach(gb->gql_ops, gb_gql_ops_free_entry, NULL);
+        cbm_ht_free(gb->gql_ops);
+        gb->gql_ops = NULL;
+    }
 }
 
 int64_t cbm_gbuf_insert_edge(cbm_gbuf_t *gb, int64_t source_id, int64_t target_id, const char *type,
@@ -1987,9 +2127,7 @@ int64_t cbm_gbuf_insert_edge(cbm_gbuf_t *gb, int64_t source_id, int64_t target_i
     if (existing) {
         bool replace = edge_props_should_replace(existing->properties_json, properties_json);
         if (properties_json && existing->properties_json && strcmp(type, "GRAPHQL_CALLS") == 0) {
-            const char *keep = replace ? properties_json : existing->properties_json;
-            const char *other = replace ? existing->properties_json : properties_json;
-            const char *merged = gb_graphql_union_operations(gb, keep, other);
+            const char *merged = gb_graphql_merge(gb, existing, properties_json);
             if (merged) {
                 existing->properties_json = (char *)merged;
                 return existing->id;

@@ -7,6 +7,7 @@
 #include "test_framework.h"
 #include "graph_buffer/graph_buffer.h"
 #include "foundation/mem_core.h"
+#include <time.h>
 #include <stdatomic.h>
 #include "store/store.h"
 #include "../src/foundation/compat.h"
@@ -1593,6 +1594,39 @@ TEST(gbuf_graphql_operations_union_unbounded_and_order_free) {
     PASS();
 }
 
+/* 3,000 operations selecting one field: the union keeps every name, and the
+ * merges stay far from the old pairwise-rescan cost. */
+TEST(gbuf_graphql_operations_union_scales) {
+    enum { OPS = 3000 };
+    cbm_gbuf_t *gb = cbm_gbuf_new("test", "/tmp");
+    int64_t src = cbm_gbuf_upsert_node(gb, "Function", "gen", "pkg.gen", "a.ts", 1, 2, "{}");
+    int64_t tgt =
+        cbm_gbuf_upsert_node(gb, "Route", "Query.viewer", "__graphql__Query.viewer", "", 0, 0, "{}");
+    clock_t t0 = clock();
+    for (int i = 0; i < OPS; i++) {
+        char p[256];
+        (void)snprintf(p, sizeof(p),
+                       "{\"callee\":\"gql\",\"operation\":\"Q%04d\",\"operation_type\":"
+                       "\"query\",\"field_path\":\"viewer\",\"confidence\":0.80,"
+                       "\"operations\":[\"Q%04d\"]}",
+                       i, i);
+        cbm_gbuf_insert_edge(gb, src, tgt, "GRAPHQL_CALLS", p);
+    }
+    double secs = (double)(clock() - t0) / CLOCKS_PER_SEC;
+    const cbm_gbuf_edge_t **edges = NULL;
+    int count = 0;
+    cbm_gbuf_find_edges_by_type(gb, "GRAPHQL_CALLS", &edges, &count);
+    ASSERT_EQ(count, 1);
+    ASSERT_TRUE(strstr(edges[0]->properties_json, "\"Q0000\",\"Q0001\"") != NULL);
+    ASSERT_TRUE(strstr(edges[0]->properties_json, "\"Q2998\",\"Q2999\"]") != NULL);
+    cbm_gbuf_free(gb);
+    if (secs > 5.0) {
+        fprintf(stderr, "  union of %d operations took %.2fs\n", OPS, secs);
+        ASSERT_TRUE(0);
+    }
+    PASS();
+}
+
 SUITE(graph_buffer) {
     RUN_TEST(gbuf_worker_buffer_keeps_no_by_id_array);
     /* Original tests */
@@ -1601,6 +1635,7 @@ SUITE(graph_buffer) {
     RUN_TEST(gbuf_upsert_node);
     RUN_TEST(gbuf_upsert_updates);
     RUN_TEST(gbuf_graphql_operations_union_unbounded_and_order_free);
+    RUN_TEST(gbuf_graphql_operations_union_scales);
     RUN_TEST(gbuf_swift_declaration_and_extension_keep_both_markers);
     RUN_TEST(gbuf_find_by_id);
     RUN_TEST(gbuf_find_by_label);
