@@ -1118,6 +1118,9 @@ const char *cbm_service_pattern_js_interpolation_end(const char *p) {
 /* Skip one lexical unit whose braces are not structure: a # comment, a "..."
  * or """...""" string, or a JS ${...} template interpolation. Returns p
  * unchanged when p starts none of them. */
+#define GQL_BLOCK_QUOTE "\"\"\""
+enum { GQL_BLOCK_QUOTE_LEN = 3 };
+
 static const char *gql_skip_opaque(const char *p) {
     if (*p == '#') {
         while (*p && *p != '\n' && *p != '\r') {
@@ -1125,9 +1128,19 @@ static const char *gql_skip_opaque(const char *p) {
         }
         return p;
     }
-    if (strncmp(p, "\"\"\"", 3) == 0) {
-        const char *end = strstr(p + 3, "\"\"\"");
-        return end ? end + 3 : p + strlen(p);
+    if (strncmp(p, GQL_BLOCK_QUOTE, GQL_BLOCK_QUOTE_LEN) == 0) {
+        /* A block string ends at the first `"""` not escaped as `\"""`. */
+        const char *q = p + GQL_BLOCK_QUOTE_LEN;
+        for (;;) {
+            const char *end = strstr(q, GQL_BLOCK_QUOTE);
+            if (!end) {
+                return p + strlen(p);
+            }
+            if (end[-SKIP_ONE] != '\\') {
+                return end + GQL_BLOCK_QUOTE_LEN;
+            }
+            q = end + GQL_BLOCK_QUOTE_LEN;
+        }
     }
     if (*p == '"') {
         p++;
@@ -1450,20 +1463,51 @@ static void gql_sig_add_path(gql_sig_t *s, const char *parent, size_t plen, cons
     s->used++;
 }
 
-/* `...Name @dir` (spread) or `... on T @dir { }` / `... @dir { }` (inline
- * fragment), with p past the dots. Neither is a field of this level for
- * certain, so both are skipped whole. */
-static const char *gql_skip_fragment_selection(const char *p) {
-    p = gql_skip_trivia(p);
+/* Trivia inside a selection head: as gql_skip_trivia, but stopping at a
+ * `${...}` interpolation, which stands for a field of its own
+ * (`appVersion ${field} { id }`) and must not be read as part of the head
+ * before it. */
+static const char *gql_skip_plain_trivia(const char *p) {
+    for (;;) {
+        while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' || *p == ',') {
+            p++;
+        }
+        if (*p == '\\' && p[SKIP_ONE]) {
+            p += PAIR_LEN;
+        } else if (*p == '#') {
+            p = gql_skip_opaque(p);
+        } else {
+            return p;
+        }
+    }
+}
+
+/* `@name` or `@name(args)`, repeated, inside a selection head. */
+static const char *gql_skip_head_directives(const char *p) {
+    p = gql_skip_plain_trivia(p);
+    while (*p == '@') {
+        p++;
+        p += gql_name_len(p);
+        p = gql_skip_plain_trivia(p);
+        if (*p == '(') {
+            p = gql_skip_plain_trivia(gql_skip_balanced(p, '(', ')'));
+        }
+    }
+    return p;
+}
+
+/* p past the dots of `...Name @dir` (spread) or `... on T @dir` / `... @dir`
+ * (inline fragment): returns past the head, at the inline fragment's `{`. */
+static const char *gql_fragment_head(const char *p) {
+    p = gql_skip_plain_trivia(p);
     size_t n = gql_name_len(p);
     if (n == GQL_ON_LEN && strncmp(p, "on", GQL_ON_LEN) == 0) {
-        p = gql_skip_trivia(p + n);
+        p = gql_skip_plain_trivia(p + n);
         p += gql_name_len(p);
     } else {
         p += n;
     }
-    p = gql_skip_directives(p);
-    return *p == '{' ? gql_skip_balanced(p, '{', '}') : p;
+    return gql_skip_head_directives(p);
 }
 
 /* One field selection head at p: `alias: name(args) @dir`. Sets the field
@@ -1472,18 +1516,18 @@ static const char *gql_skip_fragment_selection(const char *p) {
 static const char *gql_field_head(const char *p, const char **field, size_t *flen, bool *bad) {
     *field = p;
     *flen = gql_name_len(p);
-    p = gql_skip_trivia(p + *flen);
+    p = gql_skip_plain_trivia(p + *flen);
     if (*p == ':') { /* alias: the field is the name after the colon */
-        p = gql_skip_trivia(p + SKIP_ONE);
+        p = gql_skip_plain_trivia(p + SKIP_ONE);
         *field = p;
         *flen = gql_name_len(p);
         *bad = *bad || *flen == 0;
-        p = gql_skip_trivia(p + *flen);
+        p = gql_skip_plain_trivia(p + *flen);
     }
     if (*p == '(') {
         p = gql_skip_balanced(p, '(', ')');
     }
-    return gql_skip_directives(p);
+    return gql_skip_head_directives(p);
 }
 
 static bool gql_is_meta(const char *field, size_t flen) {
@@ -1495,14 +1539,8 @@ static bool gql_is_meta(const char *field, size_t flen) {
 static const char *gql_skip_trivia_interp(const char *p, bool *interp) {
     *interp = false;
     for (;;) {
-        while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' || *p == ',') {
-            p++;
-        }
-        if (*p == '\\' && p[SKIP_ONE]) {
-            p += PAIR_LEN;
-        } else if (*p == '#') {
-            p = gql_skip_opaque(p);
-        } else if (p[0] == '$' && p[SKIP_ONE] == '{') {
+        p = gql_skip_plain_trivia(p);
+        if (p[0] == '$' && p[SKIP_ONE] == '{') {
             p = gql_skip_opaque(p);
             *interp = true;
         } else {
@@ -1511,11 +1549,53 @@ static const char *gql_skip_trivia_interp(const char *p, bool *interp) {
     }
 }
 
-/* A sub-selection skipped whole must still close. */
+/* p at a `{`: returns past its matching `}`, checking that every selection
+ * nested in it is well formed (fields with aliases, arguments and
+ * directives, fragment spreads, inline fragments, interpolated field names).
+ * An unclosed set or a token no selection holds sets *bad. Iterative. */
+static const char *gql_check_set(const char *p, bool *bad) {
+    int depth = GQL_JS_OPEN; /* past the opening `{` */
+    p++;
+    while (depth > 0 && !*bad) {
+        bool interp = false;
+        p = gql_skip_trivia_interp(p, &interp);
+        if (*p == '}') {
+            depth--;
+            p++;
+            continue;
+        }
+        bool opens = *p == '{' && interp; /* `${field} { ... }` */
+        if (!opens && strncmp(p, "...", GQL_SPREAD_LEN) == 0) {
+            p = gql_fragment_head(p + GQL_SPREAD_LEN);
+            opens = *p == '{';
+        } else if (!opens && gql_name_start((unsigned char)*p)) {
+            const char *field = NULL;
+            size_t flen = 0;
+            p = gql_field_head(p, &field, &flen, bad);
+            opens = *p == '{';
+        } else if (!opens) {
+            *bad = true; /* the end of the text, or a token no selection holds */
+            break;
+        }
+        if (opens) {
+            depth++;
+            p++;
+        }
+    }
+    return p;
+}
+
+/* `...Name @dir` (spread) or `... on T @dir { }` / `... @dir { }` (inline
+ * fragment), with p past the dots. Neither is a field of this level for
+ * certain, so both are skipped whole (an inline fragment's body checked). */
+static const char *gql_skip_fragment_selection(const char *p, bool *bad) {
+    p = gql_fragment_head(p);
+    return *p == '{' ? gql_check_set(p, bad) : p;
+}
+
+/* A sub-selection skipped whole must still be well formed and close. */
 static const char *gql_skip_subselection(const char *p, bool *bad) {
-    const char *end = gql_skip_balanced(p, '{', '}');
-    *bad = *bad || end[-SKIP_ONE] != '}';
-    return end;
+    return gql_check_set(p, bad);
 }
 
 /* The next selection at p: steps over a fragment selection and returns NULL,
@@ -1538,7 +1618,7 @@ static const char *gql_next_field(const char *p, const char **field, size_t *fle
         return *p ? p + SKIP_ONE : p;
     }
     if (strncmp(p, "...", GQL_SPREAD_LEN) == 0) {
-        return gql_skip_fragment_selection(p + GQL_SPREAD_LEN);
+        return gql_skip_fragment_selection(p + GQL_SPREAD_LEN, bad);
     }
     if (gql_name_start((unsigned char)*p)) {
         return gql_field_head(p, field, flen, bad);
@@ -1596,14 +1676,29 @@ static const char *gql_root_set(const char *p, gql_sig_t *s) {
 }
 
 /* p at a `fragment Name on Type @dir { ... }` keyword: returns past its
- * selection set, or NULL when it has none. */
+ * selection set, or NULL when the definition is malformed or unclosed. */
 static const char *gql_skip_fragment_definition(const char *p) {
-    p += strlen("fragment");
-    while (*p && *p != '{') {
-        const char *q = gql_skip_opaque(p);
-        p = q != p ? q : p + SKIP_ONE;
+    p = gql_skip_trivia(p + strlen("fragment"));
+    size_t n = gql_name_len(p);
+    if (n == 0) {
+        return NULL;
     }
-    return *p ? gql_skip_balanced(p, '{', '}') : NULL;
+    p = gql_skip_trivia(p + n);
+    if (gql_name_len(p) != GQL_ON_LEN || strncmp(p, "on", GQL_ON_LEN) != 0) {
+        return NULL;
+    }
+    p = gql_skip_trivia(p + GQL_ON_LEN);
+    n = gql_name_len(p);
+    if (n == 0) {
+        return NULL;
+    }
+    p = gql_skip_directives(p + n);
+    if (*p != '{') {
+        return NULL;
+    }
+    bool bad = false;
+    p = gql_check_set(p, &bad);
+    return bad ? NULL : p;
 }
 
 static bool gql_is_fragment_keyword(const char *p, size_t len) {

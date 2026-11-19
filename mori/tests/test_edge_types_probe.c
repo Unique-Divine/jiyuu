@@ -1409,6 +1409,17 @@ TEST(graphql_selection_signature_parser) {
         {"query {account} not found", 1, 0, ""},
         {"Error: query { a }", 0, 0, ""},
         {"query A { a } # trailing comment\n", 1, 1, "query|A|a"},
+        /* the interpolation stays a field of its own after a field head */
+        {"query I { appVersion ${field} { id } viewer { id } }", 1, 1,
+         "query|I|appVersion,viewer,viewer.id"},
+        /* skipped definitions and deeper selections must be well formed */
+        {"query Q { viewer } fragment nonsense { a", 1, 0, ""},
+        {"query Q { viewer } fragment F on T { a", 1, 0, ""},
+        {"query Q { viewer { a { b = c } } }", 1, 0, ""},
+        {"query Q { viewer { ... on User { x.y } } }", 1, 0, ""},
+        /* an escaped triple quote does not end a block string */
+        {"query Q { viewer(filter: \"\"\"literal \\\"\"\" ) } still in block\"\"\") { id } status }", 1,
+         1, "query|Q|viewer,viewer.id,status"},
         /* an interpolated field name hides its block's field */
         {"query I { ${field} { id } user { id } }", 1, 1, "query|I|user,user.id"},
         /* not an operation */
