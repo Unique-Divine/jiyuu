@@ -276,6 +276,60 @@ static cr_run_status_t delete_cross_edges(cbm_store_t *store, const char *projec
     return cr_cancel_requested(ctx) ? CR_RUN_CANCELLED : CR_RUN_OK;
 }
 
+/* Remove src_project's callers from the provider tgt's reverse CROSS_*
+ * edges before src_project is matched again: an entry under "callers"
+ * outlived the client function it names, because the store only merges
+ * into a reverse row (json_patch) and delete_cross_edges clears the source
+ * store alone. A row left with no caller is dropped, and a row naming a
+ * removed caller at the top level takes a remaining one. Forward edges and
+ * channel edges carry no "callers" and are left alone. The run then re-adds the
+ * current callers. */
+static cr_run_status_t cr_reconcile_reverse(cbm_store_t *tgt_store, const char *tgt_project,
+                                            const char *src_project, cr_run_context_t *ctx) {
+    static const char *const sql[] = {
+        "UPDATE edges SET properties = json_set(properties, '$.callers', (SELECT "
+        "json_group_object(c.key, json(c.value)) FROM json_each(edges.properties, '$.callers') c "
+        "WHERE json_extract(c.value, '$.project') IS NOT ?2)) "
+        "WHERE project = ?1 AND type LIKE 'CROSS\\_%' ESCAPE '\\' AND EXISTS (SELECT 1 FROM "
+        "json_each(edges.properties, '$.callers') c WHERE json_extract(c.value, '$.project') = "
+        "?2)",
+        "DELETE FROM edges WHERE project = ?1 AND type LIKE 'CROSS\\_%' ESCAPE '\\' AND "
+        "json_type(properties, '$.callers') = 'object' AND NOT EXISTS (SELECT 1 FROM "
+        "json_each(edges.properties, '$.callers')) AND ?2 IS NOT NULL",
+        "UPDATE edges SET properties = (SELECT json_set(edges.properties, '$.target_project', "
+        "json_extract(c.value, '$.project'), '$.target_function', json_extract(c.value, "
+        "'$.function'), '$.target_file', json_extract(c.value, '$.file')) FROM "
+        "json_each(edges.properties, '$.callers') c ORDER BY c.key LIMIT 1) "
+        "WHERE project = ?1 AND type LIKE 'CROSS\\_%' ESCAPE '\\' AND "
+        "json_extract(properties, '$.target_project') = ?2 AND json_type(properties, "
+        "'$.callers') = 'object'",
+    };
+    struct sqlite3 *db = cbm_store_get_db(tgt_store);
+    if (!db) {
+        return CR_RUN_FAILED;
+    }
+    for (size_t i = 0; i < sizeof(sql) / sizeof(sql[0]); i++) {
+        if (cr_cancel_requested(ctx)) {
+            return CR_RUN_CANCELLED;
+        }
+        sqlite3_stmt *st = NULL;
+        int changes_before = sqlite3_total_changes(db);
+        bool ok = sqlite3_prepare_v2(db, sql[i], CBM_NOT_FOUND, &st, NULL) == SQLITE_OK &&
+                  sqlite3_bind_text(st, SKIP_ONE, tgt_project, CBM_NOT_FOUND, SQLITE_STATIC) ==
+                      SQLITE_OK &&
+                  sqlite3_bind_text(st, PAIR_LEN, src_project, CBM_NOT_FOUND, SQLITE_STATIC) ==
+                      SQLITE_OK &&
+                  sqlite3_step(st) == SQLITE_DONE;
+        if (sqlite3_finalize(st) != SQLITE_OK || !ok) {
+            return CR_RUN_FAILED;
+        }
+        if (sqlite3_total_changes(db) > changes_before) {
+            ctx->mutated = true;
+        }
+    }
+    return CR_RUN_OK;
+}
+
 /* Insert a CROSS_* edge into a store. Idempotent by construction: the edges
  * table is UNIQUE(source_id, target_id, type) and cbm_store_insert_edge
  * upserts on conflict, so a pair reached from both match directions or on a
@@ -562,15 +616,17 @@ static int64_t find_route_handler_fuzzy(cbm_store_t *target_store, const char *c
     return found;
 }
 
+static char *lookup_node_qn(struct sqlite3 *db, int64_t node_id, bool *failed);
+
 /* Reverse-edge props `rev` (a JSON object) plus this caller's entry under
- * "callers", keyed "<project>:<file>:<function>"; heap-allocated, NULL on
- * failure. Every caller of one handler and Route shares the reverse edge
+ * "callers", keyed "<project>:<qualified name>" (two same-named methods of
+ * one file are distinct callers); heap-allocated, NULL on failure. Every caller of one handler and Route shares the reverse edge
  * (the store keeps one row per source, target and type), and the store
  * merges a re-inserted edge's props with json_patch: the top-level target_*
  * keys name the last caller, while the nested "callers" object merges key by
  * key and keeps them all. */
-static char *cr_props_with_caller(const char *rev, const char *project, const char *function,
-                                  const char *file) {
+static char *cr_props_with_caller(const char *rev, const char *project, const char *qn,
+                                  const char *function, const char *file) {
     yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
     if (!doc) {
         return NULL;
@@ -579,12 +635,13 @@ static char *cr_props_with_caller(const char *rev, const char *project, const ch
     yyjson_mut_doc_set_root(doc, root);
     yyjson_mut_val *callers = yyjson_mut_obj_add_obj(doc, root, "callers");
     yyjson_mut_val *entry = yyjson_mut_obj(doc);
-    size_t key_len = strlen(project) + strlen(file) + strlen(function) + PAIR_LEN + SKIP_ONE;
+    size_t key_len = strlen(project) + strlen(qn) + PAIR_LEN;
     char *key = callers && entry ? malloc(key_len) : NULL;
     char *out = NULL;
     if (key) {
-        (void)snprintf(key, key_len, "%s:%s:%s", project, file, function);
+        (void)snprintf(key, key_len, "%s:%s", project, qn);
         yyjson_mut_obj_add_strcpy(doc, entry, "project", project);
+        yyjson_mut_obj_add_strcpy(doc, entry, "qualified_name", qn);
         yyjson_mut_obj_add_strcpy(doc, entry, "function", function);
         yyjson_mut_obj_add_strcpy(doc, entry, "file", file);
         yyjson_mut_obj_put(callers, yyjson_mut_strcpy(doc, key), entry);
@@ -619,22 +676,16 @@ static void cr_mark_ambiguous(char *buf, size_t bufsz) {
 }
 
 /* Emit CROSS_* edge for a route match: forward into source, reverse into target.
- * A pair is successful only when both writes complete. `ambiguous`: the
- * target Route is one several handlers claim (a GraphQL field two APIs in one
- * checkout define), so the handler is a pick, not a definite match; both
- * edges say so. */
+ * A pair is successful only when both writes complete. */
 static bool emit_cross_route_bidirectional(
     cbm_store_t *src_store, const char *src_project, struct sqlite3 *src_db, int64_t caller_id,
     int64_t local_route_id, cbm_store_t *tgt_store, const char *tgt_project, int64_t handler_id,
     const char *route_qn, const char *handler_name, const char *handler_file, const char *url_path,
-    const char *method, const char *edge_type, bool ambiguous, cr_run_context_t *ctx) {
+    const char *method, const char *edge_type, cr_run_context_t *ctx) {
     /* Forward: caller → local Route in source DB */
     char fwd[CR_PROPS_BUF];
     build_cross_props(fwd, sizeof(fwd), tgt_project, handler_name, handler_file, url_path,
                       "url_path", method);
-    if (ambiguous) {
-        cr_mark_ambiguous(fwd, sizeof(fwd));
-    }
     if (!insert_cross_edge(src_store, src_project, caller_id, local_route_id, edge_type, fwd,
                            ctx)) {
         return false;
@@ -679,10 +730,12 @@ static bool emit_cross_route_bidirectional(
     char rev[CR_PROPS_BUF];
     build_cross_props(rev, sizeof(rev), src_project, caller_name, caller_file, url_path, "url_path",
                       method);
-    if (ambiguous) {
-        cr_mark_ambiguous(rev, sizeof(rev));
-    }
-    char *rev_callers = cr_props_with_caller(rev, src_project, caller_name, caller_file);
+    bool qn_failed = false;
+    char *caller_qn = lookup_node_qn(src_db, caller_id, &qn_failed);
+    char *rev_callers = caller_qn ? cr_props_with_caller(rev, src_project, caller_qn, caller_name,
+                                                         caller_file)
+                                  : NULL;
+    free(caller_qn);
     if (!rev_callers) {
         return false;
     }
@@ -849,7 +902,7 @@ static cr_match_result_t match_http_routes(cbm_store_t *src_store, const char *s
         if (!emit_cross_route_bidirectional(src_store, src_project, src_db, caller_id, route_id,
                                             tgt_store, tgt_project, handler_id, hit.qn, hit.name,
                                             hit.file, url_path, method, "CROSS_HTTP_CALLS",
-                                            false, ctx)) {
+                                            ctx)) {
             failed = !cr_cancel_requested(ctx);
             break;
         }
@@ -1167,6 +1220,22 @@ static bool cr_route_ambiguous(cbm_store_t *store, const char *route_qn, bool *f
     return ambiguous && !*failed;
 }
 
+/* A call into a target Route several handlers claim (a GraphQL field two
+ * APIs in one checkout define, which the route pass marks "ambiguous"): the
+ * forward edge names the target project and marks the link ambiguous, but
+ * names no handler, since any one would be a guess; there is no reverse
+ * edge, as no handler is known to serve this caller. */
+static bool cr_emit_ambiguous(cbm_store_t *src_store, const char *src_project, int64_t caller_id,
+                              int64_t local_route_id, const char *tgt_project,
+                              const char *url_path, const char *method, const char *edge_type,
+                              cr_run_context_t *ctx) {
+    char fwd[CR_PROPS_BUF];
+    build_cross_props(fwd, sizeof(fwd), tgt_project, "", "", url_path, "url_path", method);
+    cr_mark_ambiguous(fwd, sizeof(fwd));
+    return insert_cross_edge(src_store, src_project, caller_id, local_route_id, edge_type, fwd,
+                             ctx);
+}
+
 /* Match edges of a given type against Route nodes with a given QN prefix.
  * Reuses the same infrastructure as HTTP/async matching. */
 static cr_match_result_t match_typed_routes(cbm_store_t *src_store, const char *src_project,
@@ -1229,11 +1298,16 @@ static cr_match_result_t match_typed_routes(cbm_store_t *src_store, const char *
         bool ambiguous = !query_failed && handler_id != 0 &&
                          cr_route_ambiguous(tgt_store, route_qn, &query_failed);
         bool cancelled = !query_failed && handler_id != 0 && cr_cancel_requested(ctx);
-        bool emitted = !query_failed && handler_id != 0 && !cancelled &&
-                       emit_cross_route_bidirectional(
-                           src_store, src_project, src_db, caller_id, route_id, tgt_store,
-                           tgt_project, handler_id, route_qn, handler_name, handler_file, svc_val,
-                           svc_key, cross_edge_type, ambiguous, ctx);
+        bool emitted = false;
+        if (!query_failed && handler_id != 0 && !cancelled) {
+            emitted = ambiguous ? cr_emit_ambiguous(src_store, src_project, caller_id, route_id,
+                                                    tgt_project, svc_val, svc_key,
+                                                    cross_edge_type, ctx)
+                                : emit_cross_route_bidirectional(
+                                      src_store, src_project, src_db, caller_id, route_id,
+                                      tgt_store, tgt_project, handler_id, route_qn, handler_name,
+                                      handler_file, svc_val, svc_key, cross_edge_type, ctx);
+        }
         free(route_qn);
         if (query_failed) {
             failed = true;
@@ -1249,7 +1323,8 @@ static cr_match_result_t match_typed_routes(cbm_store_t *src_store, const char *
             failed = !cr_cancel_requested(ctx);
             break;
         }
-        count++;
+        /* An ambiguous Route is linked but not resolved: not counted. */
+        count += ambiguous ? 0 : SKIP_ONE;
     }
     if (!failed && !cr_cancel_requested(ctx) && step_rc != SQLITE_DONE) {
         failed = true;
@@ -1646,8 +1721,11 @@ cbm_cross_repo_result_t cbm_cross_repo_match_cancellable(const char *project,
             break;
         }
 
-        cr_run_status_t match_status = add_match_count(
-            &result.http_edges, match_http_routes(src_store, project, tgt_store, tgt, &run));
+        cr_run_status_t match_status = cr_reconcile_reverse(tgt_store, tgt, project, &run);
+        if (match_status == CR_RUN_OK) {
+            match_status = add_match_count(
+                &result.http_edges, match_http_routes(src_store, project, tgt_store, tgt, &run));
+        }
         /* Reverse direction: when this pass runs from the provider side, the
          * consumer's HTTP_CALLS live in tgt, not src — the forward pass above
          * finds nothing because the provider has no outbound calls. This also
@@ -1684,6 +1762,28 @@ cbm_cross_repo_result_t cbm_cross_repo_match_cancellable(const char *project,
             match_status = add_match_count(
                 &result.trpc_edges,
                 match_typed_routes(src_store, project, tgt_store, tgt, "TRPC_CALLS", "procedure",
+                                   "procedure", "CROSS_TRPC_CALLS", &run));
+        }
+        /* Provider side, as for HTTP above: the consumer's typed calls live in
+         * tgt. Without this a provider-side run deleted its gRPC, GraphQL
+         * and tRPC reverse edges (delete_cross_edges) and never recreated
+         * them. */
+        if (match_status == CR_RUN_OK) {
+            match_status = add_match_count(
+                &result.grpc_edges,
+                match_typed_routes(tgt_store, tgt, src_store, project, "GRPC_CALLS", "service",
+                                   "method", "CROSS_GRPC_CALLS", &run));
+        }
+        if (match_status == CR_RUN_OK) {
+            match_status = add_match_count(
+                &result.graphql_edges,
+                match_typed_routes(tgt_store, tgt, src_store, project, "GRAPHQL_CALLS",
+                                   "operation", "operation", "CROSS_GRAPHQL_CALLS", &run));
+        }
+        if (match_status == CR_RUN_OK) {
+            match_status = add_match_count(
+                &result.trpc_edges,
+                match_typed_routes(tgt_store, tgt, src_store, project, "TRPC_CALLS", "procedure",
                                    "procedure", "CROSS_TRPC_CALLS", &run));
         }
 
