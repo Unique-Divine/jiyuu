@@ -49,11 +49,12 @@ use `61afef`.
 
 | Label | Description | Paths |
 | --- | --- | --- |
-| `A-ai` | Area: AI tooling, MCP servers, agent skills, and agent workflow tools | `mcp/**`, `ai-skills/**`, `tmux-agent-watch/**` |
+| `A-ai` | Area: AI tooling, MCP servers, agent skills, and agent workflow tools | `mcp/**`, `mori/**`, `ai-skills/**`, `tmux-agent-watch/**` |
 | `Z-mcp` | Zone: MCP servers and shared MCP support | `mcp/**` |
 | `Z-mcp-discord` | Zone: Discord MCP server | `mcp/discord/**` |
 | `Z-mcp-slack` | Zone: Slack MCP server | `mcp/slack/**` |
 | `Z-mcp-telegram` | Zone: Telegram MCP server | `mcp/telegram/**` |
+| `Z-mori` | Zone: Mori cross-repo code graph | `mori/**` |
 | `Z-ai-skills` | Zone: Agent skills | `ai-skills/**` |
 | `Z-tmux-agent-watch` | Zone: tmux agent observer | `tmux-agent-watch/**` |
 | `Z-ci` | Zone: GitHub automation and Just recipes | `.github/**`, `scripts/github-labels/**`, `justfile`, `**/justfile`, `*.just`, `**/*.just` |
