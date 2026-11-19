@@ -2144,6 +2144,13 @@ static bool gql_owns(const gql_ctx_t *ctx, const gql_resolver_t *r, const gql_fi
     size_t rl = strlen(r->dir);
     bool same_or_below = rl >= sl && strncmp(r->dir, file, sl) == 0;
     bool parent = rl == gql_parent_dir_len(file) && strncmp(r->dir, file, rl) == 0;
+    if (sl == 0) {
+        /* A schema at the repository root is "above" every package: only the
+         * root package or one directory below it (gqlgen's graph/, resolver/)
+         * is evidence enough, never another service deeper in the tree. */
+        const char *slash = strchr(r->dir, '/');
+        return !slash || slash[SKIP_ONE] == '\0';
+    }
     return same_or_below || parent;
 }
 

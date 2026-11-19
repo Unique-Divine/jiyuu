@@ -1028,6 +1028,36 @@ TEST(graphql_mixed_schema_and_client_keep_route_props) {
     PASS();
 }
 
+/* Without a config, a schema at the repository root is owned by the root
+ * package or one directory below it, never by a resolver package deep in
+ * another service (svc/api/graph/), which every directory is "below". */
+static const EtFile et_gqlgen_root_schema_files[] = {
+    {"go.mod", "module rootschema\n"},
+    {"schema.graphqls", "type Query {\n  ping: String\n  pong: String\n}\n"},
+    {"graph/schema.resolvers.go",
+     "package graph\n\n"
+     "type queryResolver struct{}\n\n"
+     "func (r *queryResolver) Pong() string {\n\treturn \"p\"\n}\n"},
+    {"svc/api/graph/schema.resolvers.go",
+     "package graph\n\n"
+     "type queryResolver struct{}\n\n"
+     "func (r *queryResolver) Ping() string {\n\treturn \"x\"\n}\n"},
+};
+
+static const EtGqlServerRoute et_gqlgen_root_schema_want[] = {
+    {"__graphql__Query.ping", "String", "false", "", "Field", ".Query.ping",
+     "graphql_schema_field", 0},
+    {"__graphql__Query.pong", "String", "false", "", "Method", ".graph.queryResolver.Pong",
+     "gqlgen_resolver", 0},
+};
+
+TEST(graphql_root_schema_not_owned_by_deep_packages) {
+    ASSERT_TRUE(et_gqlgen_case(et_gqlgen_root_schema_files, ET_NWANT(et_gqlgen_root_schema_files),
+                               0, et_gqlgen_root_schema_want,
+                               ET_NWANT(et_gqlgen_root_schema_want)));
+    PASS();
+}
+
 /* Overwrite one fixture file in an indexed project. */
 static void et_rewrite(const EtProj *lp, const char *rel, const char *content) {
     char path[700];
@@ -3984,6 +4014,7 @@ SUITE(edge_types_probe) {
     RUN_TEST(graphql_mixed_schema_and_client_keep_route_props);
     RUN_TEST(graphql_incremental_resolver_package_ownership_change);
     RUN_TEST(graphql_incremental_user_schema_extension);
+    RUN_TEST(graphql_root_schema_not_owned_by_deep_packages);
     RUN_TEST(graphql_extension_only_root_type);
     RUN_TEST(graphql_schema_extension_roots);
     RUN_TEST(graphql_gqlgen_underscored_field_resolver);
