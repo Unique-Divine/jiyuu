@@ -43,7 +43,7 @@ This document describes the Nibiru indexer (Heart Monitor) and the **user** / **
 
 ## 1. Repo and indexer context
 
-For repo locations and cross-repo routing (nibi-go-hm, nibi-ts-sdk, nibi-chain, etc.), see the **repo-map** skill. The indexer schema lives in **nibi-go-hm**; the TypeScript client (HeartMonitor, generated types) lives in **nibi-ts-sdk**.
+For repo locations and cross-repo routing (nibi-go-hm, nibi-ts-sdk, nibiru, etc.), see the **repo-map** skill. The indexer schema lives in **nibi-go-hm**; the TypeScript client (HeartMonitor, generated types) lives in **nibi-ts-sdk**.
 
 ---
 

@@ -232,7 +232,7 @@ replace (
 	// Replace statements from NibiruChain/nibiru
 	cosmossdk.io/api => cosmossdk.io/api v0.3.1
 	// This is true for me locally. Use pinned version later.
-	github.com/NibiruChain/nibiru/v2 => ../../nibi-chain
+	github.com/NibiruChain/nibiru/v2 => ../../nibiru
 	github.com/cosmos/iavl => github.com/cosmos/iavl v0.20.0
 	github.com/ethereum/go-ethereum => github.com/NibiruChain/go-ethereum v1.10.27-nibiru
 	github.com/gogo/protobuf => github.com/regen-network/protobuf v1.3.3-alpha.regen.1
