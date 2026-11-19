@@ -1429,15 +1429,17 @@ TEST(graphql_selection_signature_parser) {
         {"", 0, 0, ""},
     };
     char sig[CBM_SZ_512];
+    int failed = 0; /* every failing case is reported, not only the first */
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
         bool ok = cbm_service_pattern_graphql_signature(cases[i].doc, cases[i].require_keyword != 0,
                                                         sig, sizeof(sig));
         if ((int)ok != cases[i].ok || (ok && strcmp(sig, cases[i].sig) != 0)) {
             fprintf(stderr, "  [ET-GQL] sig case %zu -> ok=%d sig='%s' want='%s'\n", i, (int)ok,
                     sig, cases[i].sig);
-            ASSERT_TRUE(0);
+            failed++;
         }
     }
+    ASSERT_EQ(failed, 0);
     /* A path that does not fit is dropped whole; the header survives. */
     char small[24];
     ASSERT_TRUE(cbm_service_pattern_graphql_signature("query Q { alpha beta gamma }", true, small,
