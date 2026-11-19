@@ -1,7 +1,7 @@
 ---
 name: repo-map
 description: >-
-  Maps and routes between key repositories on my machine (boku, nibi-chain,
+  Maps and routes between key repositories on my machine (boku, nibiru,
   nibi-geth, nibi-go-hm, nibi-ts-sdk, sai-web, sai-perps, open-sai, nibi-iac,
   nibi-web, gh-io-ud, and the in-tree Wasm runtime and Rust contracts). Use when the user
   asks which repo to look at, where a feature lives, how repos connect, how
@@ -17,21 +17,21 @@ Use this skill to quickly route questions/tasks to the correct repo(s) under pat
 ## Quick routing
 
 ### Blockchain and EVM Impl
-- `~/nibi-chain`: **Chain logic, modules, and Nibiru CLI (`nibiru`)**. This repo
+- `~/nibiru`: **Chain logic, modules, and Nibiru CLI (`nibiru`)**. This repo
 defines the logic, and you can run `nibiru tx`, `nibiru query`, or other commands in
 the terminal to inspect exact functionality. Core L1 chain (Go). App wiring +
 custom modules. Includes `cmd/nibid`. | `x/`, `app/`, `proto/`, `cmd/nibid/`
-- `~/nibi-chain/x/evm`: **Nibiru EVM execution and precompiles live here.**. RPC is standard for the EVM.
+- `~/nibiru/x/evm`: **Nibiru EVM execution and precompiles live here.**. RPC is standard for the EVM.
 - `~/nibi-geth`: **EVM state transition internals that do not involve precompiles; go-ethereum logic**
-- `~/nibi-chain/lib/wasmvm`: **Nibiru's maintained Go WasmVM bindings and Rust FFI runtime**.
+- `~/nibiru/lib/wasmvm`: **Nibiru's maintained Go WasmVM bindings and Rust FFI runtime**.
 The Go types live in `wvm/`, and the Rust crate lives in `libwasmvm/`.
 Follow this directory's `README.md` for builds and releases.
-- `~/nibi-chain/lib/cosmwasm-vm` and `~/nibi-chain/lib/wasmer`:
+- `~/nibiru/lib/cosmwasm-vm` and `~/nibiru/lib/wasmer`:
 **Nibiru's maintained Rust VM and patched Wasmer runtime**. Dependency paths
 connect these in-tree directories to `lib/wasmvm/libwasmvm`.
-- `~/nibi-chain/wasm-contracts` and Rust packages under `~/nibi-chain/lib`:
+- `~/nibiru/wasm-contracts` and Rust packages under `~/nibiru/lib`:
 **Nibiru's maintained CosmWasm contracts and reusable Rust crates**, including
-`nibiru-std` and `nibiru-ownable`. Read `nibi-chain/spec/04-rust-contract-workspace.md`
+`nibiru-std` and `nibiru-ownable`. Read `nibiru/spec/04-rust-contract-workspace.md`
 for the root Cargo workspace and `just rs` commands.
 - **Archived standalone forks**: `NibiruChain/go-wasmvm` and
 `NibiruChain/nibiru-wasm` are public archives. Their former local checkouts
@@ -53,7 +53,7 @@ and query builders.
 frontend and API integrations. This uses the "sai-keeper" GraphQL interface.
 - `~/sai-perps`: **Official Sai protocol contracts** (EVM + Wasm). This repo defines what gets deployed onchain; the web app and sai-keeper both talk to these contracts. Used by trading tools and integrations.
 - `~/sai-keeper`: Defines the "sai-keeper" GraphQL interface for Sai.
-- `~/nibi-chain/lib/sai-trading`: **Sai: Trading bot automation service**
+- `~/nibiru/lib/sai-trading`: **Sai: Trading bot automation service**
 - `~/sai-docs`: Public-facing user documentation for Sai. Great conceptual
   resource.
 - `~/open-sai`: **Open Sai, the public monorepo for Sai**
@@ -69,7 +69,7 @@ frontend and API integrations. This uses the "sai-keeper" GraphQL interface.
 ### Nibiru public site, docs, and wallet app
 - `~/nibi-web`: **Combined Nibiru website**, `NibiruChain/nibi-web`.
   Astro marketing and blog source lives in `src/`. VitePress docs live in
-  `docs-v2/`, with content synced from `nibi-chain/docs`. React wallet app source
+  `docs-v2/`, with content synced from `nibiru/docs`. React wallet app source
   lives in `app/`. One Bun workspace builds `/`, `/docs`, and `/app` into `dist`
   for a shared Firebase release. Use root `just dev`, `just build`, and
   `just preview`; focused app commands remain available.
@@ -90,7 +90,7 @@ frontend and API integrations. This uses the "sai-keeper" GraphQL interface.
   `go-hm-graphql`, `heart-monitor`)
 
 ### Personal, Blog, Boku Workspace
-- `~/boku`: **Personal knowledge base and project hub.** Monorepo for sandboxing, backups, and external brain. Use when working on epics, specs, Nibiru notes, focustime, or scripts that span nibi-chain, sai-perps, sai-web. Contains: `epics/`, `nibi/` (addr-book, cook), `free/` (todos, journal), `sde/`, `jiyuu/` (focustime, mdtoc), `scripts/`. Bun/TS + Go + Rust. Run `just test`, `just install`.
+- `~/boku`: **Personal knowledge base and project hub.** Monorepo for sandboxing, backups, and external brain. Use when working on epics, specs, Nibiru notes, focustime, or scripts that span nibiru, sai-perps, sai-web. Contains: `epics/`, `nibi/` (addr-book, cook), `free/` (todos, journal), `sde/`, `jiyuu/` (focustime, mdtoc), `scripts/`. Bun/TS + Go + Rust. Run `just test`, `just install`.
 - `~/gh-io-ud`: **Personal site (Firebase Hosting).** Astro 4 + Tailwind. Blog
   content in `src/content/post/` (schema in `src/content/config.ts`). Site config
   `src/config.yaml`, nav `src/navigation.js`. Run `just dev`, build `just b`,
@@ -100,11 +100,11 @@ frontend and API integrations. This uses the "sai-keeper" GraphQL interface.
 
 ### Repos with Prefix "sai-" or "nibi-" (`~`)
 
-Nibiru work lives under org **`NibiruChain`**. Local directory names often **differ** from the repository slug (e.g. clone `nibiru` into **`nibi-chain`**). **`gh repo list NibiruChain`** lists canonical slugs for your account.
+Nibiru work lives under org **`NibiruChain`**. Local directory names often **differ** from the repository slug (e.g. clone `go-ethereum` into **`nibi-geth`**). **`gh repo list NibiruChain`** lists canonical slugs for your account.
 
 | Local folder | Remote |
 |--------------|--------|
-| `nibi-chain` | `git@github.com:NibiruChain/nibiru.git` |
+| `nibiru` | `git@github.com:NibiruChain/nibiru.git` |
 | `nibi-geth` | `git@github.com:NibiruChain/go-ethereum.git` |
 | `nibi-go-hm` | `git@github.com:NibiruChain/go-heartmonitor.git` |
 | `nibi-ts-sdk` | `git@github.com:NibiruChain/ts-sdk.git` |
