@@ -1,0 +1,22 @@
+Mori (Codebase Memory MCP)
+Original project: https://github.com/DeusData/codebase-memory-mcp
+Original author: DeusData, as named in LICENSE. The design is described in
+Vogel, Meyer-Eschenbach, Kohler, Grünewald and Balzer, "Codebase-Memory:
+Tree-Sitter-Based Knowledge Graphs for LLM Code Exploration via MCP",
+arXiv:2603.27277.
+
+Imported into Unique-Divine/jiyuu through the fork
+https://github.com/Unique-Divine/codebase-memory-mcp from commit
+cdfdf26483fa56f4f7d9d85e7c4c3924133b458b without Git history.
+Modified by Unique Divine in 2026. Changes include fetching the vendored
+Tree-sitter grammars at build time from a sha256-pinned archive instead of
+committing them, removing upstream CI, package-publishing wrappers and
+installers, test adjustments for those removals, build recipes and
+documentation.
+
+The original MIT License, with its copyright notice, is reproduced in LICENSE.
+Third-party components keep their own licenses; see THIRD_PARTY.md and the
+LICENSE file beside each vendored component, including each grammar in the
+grammar archive. See IMPORT.md for snapshot provenance, exclusions and local
+modifications. The Jiyuu root MIT license does not replace this component's
+license. This import does not imply upstream endorsement.

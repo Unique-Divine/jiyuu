@@ -1,0 +1,231 @@
+/*
+ * platform.h — OS abstractions.
+ *
+ * Provides cross-platform wrappers for:
+ *   - Memory-mapped files (mmap / VirtualAlloc)
+ *   - High-resolution monotonic clock
+ *   - CPU core count
+ *   - File existence check
+ */
+#ifndef CBM_PLATFORM_H
+#define CBM_PLATFORM_H
+
+#include <stddef.h>
+#include <stdint.h>
+#include <stdbool.h>
+#include <stdlib.h>
+
+/* ── Safe memory ──────────────────────────────────────────────── */
+
+/* Safe realloc: frees old pointer on failure instead of leaking it.
+ * Returns NULL on allocation failure (old memory is freed). */
+static inline void *safe_realloc(void *ptr, size_t size) {
+    enum { SAFE_REALLOC_MIN = 1 };
+    if (size == 0) {
+        size = SAFE_REALLOC_MIN;
+    }
+    void *tmp = realloc(ptr, size);
+    if (!tmp) {
+        free(ptr);
+    }
+    return tmp;
+}
+
+/* Safe free: frees and NULLs a pointer to prevent double-free / use-after-free.
+ * Use via the safe_free() macro so the caller's pointer is actually cleared. */
+static inline void safe_free_impl(void **pp) {
+    if (pp && *pp) {
+        free(*pp);
+        *pp = NULL;
+    }
+}
+#define safe_free(ptr) safe_free_impl((void **)(void *)&(ptr))
+
+/* Safe const string free: frees a const char* and NULLs it.
+ * Casts away const so callers don't repeat the (void *) dance. */
+static inline void safe_str_free(const char **sp) {
+    if (sp && *sp) {
+        free((void *)*sp);
+        *sp = NULL;
+    }
+}
+
+/* Safe buffer free: frees a heap array and zeros its element count.
+ * Use for dynamic arrays paired with a size_t count. */
+static inline void safe_buf_free_impl(void **buf, size_t *count) {
+    if (buf && *buf) {
+        free(*buf);
+        *buf = NULL;
+    }
+    if (count) {
+        *count = 0;
+    }
+}
+#define safe_buf_free(buf, countp) safe_buf_free_impl((void **)(void *)&(buf), (countp))
+
+/* Safe grow: doubles capacity and reallocs when count reaches cap.
+ * Note: uses safe_realloc which frees the old buffer on failure, so this is
+ * only appropriate for arrays whose elements don't own additional heap memory.
+ * For arrays of heap-allocated pointers, prefer a manual realloc+cleanup pattern.
+ * Usage: safe_grow(arr, count, cap, growth_factor)
+ * After the call, arr is the new buffer (NULL on OOM). */
+#define safe_grow(arr, n, cap, factor)                                   \
+    do {                                                                 \
+        if ((size_t)(n) >= (size_t)(cap)) {                              \
+            (cap) *= (factor);                                           \
+            (arr) = safe_realloc((arr), (size_t)(cap) * sizeof(*(arr))); \
+        }                                                                \
+    } while (0)
+
+/* ── Memory mapping ────────────────────────────────────────────── */
+
+/* Map a file read-only into memory. Returns NULL on error.
+ * *out_size is set to the file size. */
+void *cbm_mmap_read(const char *path, size_t *out_size);
+
+/* Unmap a previously mapped region. */
+void cbm_munmap(void *addr, size_t size);
+
+/* ── Timing ────────────────────────────────────────────────────── */
+
+/* Monotonic nanosecond timestamp (for elapsed time measurement). */
+uint64_t cbm_now_ns(void);
+
+/* Monotonic millisecond timestamp. */
+uint64_t cbm_now_ms(void);
+
+/* Symbolic name for an errno value ("ENOSPC"), or the decimal number when the
+ * value is not in the portable table. The fallback lives in thread-local
+ * storage; copy it before the next call on the same thread. Diagnostics only:
+ * a log line that says `errno=ENOSPC path=...` is a one-line diagnosis where
+ * `stage=pending_publication` alone cost a reporter hours (#1828). */
+const char *cbm_errno_name(int error);
+
+/* ── System info ───────────────────────────────────────────────── */
+
+/* Number of available CPU cores. */
+int cbm_nprocs(void);
+
+/* System topology: core types and RAM (only fields with production consumers). */
+typedef struct {
+    int total_cores;  /* hw.ncpu (all cores) */
+    int perf_cores;   /* P-cores (Apple) or total_cores (others) */
+    size_t total_ram; /* total physical RAM in bytes */
+} cbm_system_info_t;
+
+/* Query system information. Results are cached after first call. */
+cbm_system_info_t cbm_system_info(void);
+
+/* Physical memory the system could hand out right now, or 0 when the platform
+ * cannot answer. NOT cached - it changes during a run, which is the point. */
+size_t cbm_system_available_ram(void);
+
+/* Free bytes on the filesystem holding `path`, or 0 when the platform cannot
+ * answer. Spilling trades a memory problem for a disk problem, so the disk has
+ * to be ASKED before that trade, not discovered through a failed write halfway
+ * through. Not cached: free space changes while we spill into it. */
+size_t cbm_fs_free_bytes(const char *path);
+
+/* Recommended worker count for parallel indexing.
+ * initial=true:  all cores (user is waiting for initial index)
+ * initial=false: max(1, perf_cores-1) (leave headroom for user apps) */
+int cbm_default_worker_count(bool initial);
+
+/* ── Environment variables ──────────────────────────────────────── */
+
+/* Thread-safe getenv: copies the value into a caller-provided buffer.
+ * Returns buf on success, or fallback if the variable is unset.
+ * Returns NULL when the variable is unset and fallback is NULL. */
+const char *cbm_safe_getenv(const char *name, char *buf, size_t buf_sz, const char *fallback);
+
+/* Startup-only installation of an immutable settings resolver. A true return
+ * means handled, including a NULL value that deliberately masks a presence
+ * flag. This does not mutate the process environment or child inheritance. */
+typedef bool (*cbm_environment_resolver_t)(const char *name, const char **value);
+void cbm_set_environment_resolver(cbm_environment_resolver_t resolver);
+const char *cbm_runtime_getenv(const char *name);
+/* Explicit inherited environment access for bootstrap/settings provenance. */
+const char *cbm_native_getenv(const char *name, char *buf, size_t buf_sz, const char *fallback);
+
+/* Allocating sibling of cbm_safe_getenv, for a value that must not be capped at
+ * a caller-chosen size. A Windows PATH routinely runs past the 4096-byte buffer
+ * cbm_safe_getenv's callers pass, and the copy helper REPORTS that as failure
+ * rather than truncating -- so the whole PATH was skipped and every directory
+ * past the cut became invisible (#221).
+ *
+ * Returns a UTF-8 copy owned by the memory core: release it with
+ * cbm_free(CBM_MEM_CLASS_OTHER, ptr), never free(). NULL when the variable is
+ * unset or cannot be read; a variable that exists but is empty yields "".
+ * On Windows the value is read with the wide API and converted, the same route
+ * cbm_safe_getenv takes, so a non-ASCII value survives intact. Like
+ * cbm_safe_getenv, an installed settings resolver answers before the process
+ * environment does. */
+char *cbm_env_dup(const char *name);
+
+/* Read an environment variable as a whole number.
+ *
+ * Answers true only when the variable is set, is not empty, and reads cleanly
+ * from its first character to its last. Anything else — a typo, a trailing
+ * unit such as "30s", a leading or trailing space, or a number too large for a
+ * long — answers false and leaves *out untouched, so the caller picks its own
+ * fallback and can say that it did.
+ *
+ * This exists because atoi and atol answer 0 for text they cannot read, and 0
+ * is a real setting at every call site in this project. */
+bool cbm_env_long(const char *name, long *out);
+
+/* ── Home directory ─────────────────────────────────────────────── */
+
+/* Cross-platform home directory: tries HOME first, then USERPROFILE (Windows).
+ * Returns NULL when neither is set. */
+const char *cbm_get_home_dir(void);
+
+/* ── App config directories ────────────────────────────────────── */
+
+/* Cross-platform app config directory (static buffer, not thread-safe).
+ * Windows: %APPDATA% (e.g. C:/Users/.../AppData/Roaming)
+ * macOS:   $HOME (callers append Library/Application Support/...)
+ * Linux:   $XDG_CONFIG_HOME or ~/.config */
+const char *cbm_app_config_dir(void);
+
+/* Windows: %LOCALAPPDATA% (e.g. C:/Users/.../AppData/Local)
+ * macOS/Linux: same as cbm_app_config_dir(). */
+const char *cbm_app_local_dir(void);
+
+/* ── Cache directory ────────────────────────────────────────────── */
+
+/* Resolve the database cache directory. All project indexes are stored here.
+ * Priority: CBM_CACHE_DIR env var > ~/.cache/codebase-memory-mcp (default).
+ * Returns static buffer or NULL if home is unavailable. */
+const char *cbm_resolve_cache_dir(void);
+
+/* ── File system ───────────────────────────────────────────────── */
+
+/* Check if a path exists. */
+bool cbm_file_exists(const char *path);
+
+/* Check if path is a directory. */
+bool cbm_is_dir(const char *path);
+
+/* Get file size. Returns -1 on error. */
+int64_t cbm_file_size(const char *path);
+
+/* Normalize path separators to forward slashes (in-place).
+ * On Windows, converts backslashes to forward slashes.
+ * On POSIX, this is a no-op. Returns the input pointer. */
+char *cbm_normalize_path_sep(char *path);
+
+/* ── CPU scheduling priority ───────────────────────────────────── */
+
+enum { CBM_LOW_CPU_PRIORITY_NICE = 10 };
+
+/* Lower this process's CPU scheduling priority so background work yields the
+ * cores to interactive processes. POSIX: nice CBM_LOW_CPU_PRIORITY_NICE (never
+ * raises an already-nicer process). Plain nice only, deliberately not macOS
+ * background QoS: that pins work to efficiency cores and throttles I/O.
+ * Windows: BELOW_NORMAL_PRIORITY_CLASS. On Linux nice is per thread, so call
+ * this before creating threads; later threads inherit it.
+ * Returns false when the priority could not be changed. */
+bool cbm_lower_cpu_priority(void);
+
+#endif /* CBM_PLATFORM_H */

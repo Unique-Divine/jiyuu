@@ -1,0 +1,289 @@
+#ifndef CBM_LSP_PY_LSP_H
+#define CBM_LSP_PY_LSP_H
+
+#include "lsp_name_rows.h"
+#include "type_rep.h"
+#include "scope.h"
+#include "type_registry.h"
+#include "../cbm.h"
+#include "go_lsp.h" // CBMLSPDef, CBMResolvedCallArray reused across languages
+
+// Lambda body record. When a lambda is assigned to a name (`fn =
+// lambda x: x.method()`), we stash its parameter list + body so the
+// next call site (`fn(arg)`) can do call-site driven inference.
+typedef struct {
+    const char *name;   // bound name, e.g. "fn"
+    TSNode lambda_node; // the lambda AST node
+    bool expanding;     // body is being re-walked for a call site right now
+} CBMLambdaEntry;
+
+// Function-as-dict-value entry. When `funcs = {"a": foo, "b": bar}` is
+// seen, we record the per-key target QN so `funcs["a"]()` emits an
+// edge to foo.
+typedef struct {
+    const char *var_name;    // e.g. "funcs"
+    const char *literal_key; // e.g. "a"
+    const char *target_qn;   // e.g. "test.main.foo"
+} CBMDictLiteralEntry;
+
+// Memoization entry for py_eval_expr_type (issue #710). Keyed by the
+// tree-sitter node identity pointer (TSNode.id), which is unique per node
+// within one file's parse tree. NOT the start byte: every leftmost
+// descendant of a chained call expression shares the chain's start byte,
+// so byte-keyed entries would alias distinct nodes and silently corrupt
+// call resolution. `gen` snapshots the scope generation (see
+// py_scope_bind in py_lsp.c); entries from older generations are treated
+// as misses so scope rebinding can never serve a stale type.
+typedef struct {
+    const void *node_id;   // TSNode.id; NULL marks an empty slot
+    uint32_t gen;          // scope generation at insert time
+    const CBMType *result; // full-fidelity result, never NULL in a live entry
+} CBMPyTypeCacheEntry;
+
+// A class's C3 method resolution order (py_c3_linearize), computed once per
+// class and file. The registry is complete before the walk starts, so an entry
+// never goes stale.
+typedef struct {
+    const char *qn;   // class QN; NULL marks an empty slot
+    uint32_t hash;    // hash of qn
+    int len;          // entries in mro; -1 = the class has no C3 order
+    const char **mro; // arena-allocated, mro[0] is the class (or its alias target)
+} CBMPyMroCacheEntry;
+
+// PyLSPContext holds state for one Python file's type evaluation.
+typedef struct {
+    CBMArena *arena;
+    const char *source;
+    int source_len;
+    const CBMTypeRegistry *registry;
+    /* Writable head of the registry chain (the per-file overlay, or the
+     * per-file registry on the non-cross path); refinements go here via
+     * cbm_registry_*_for_update, never into anything behind ->fallback. */
+    CBMTypeRegistry *registry_head;
+    CBMScope *current_scope;
+    // Names a module-level `if TYPE_CHECKING:` imports (#1277): consulted by
+    // annotation resolution only, after the ordinary scope chain misses, so a
+    // runtime call through such a name never resolves. NULL when none.
+    CBMScope *annotation_scope;
+
+    // Import map: local_name -> module_qn (arena-allocated, NULL-terminated).
+    // Built from CBMFileResult.imports.
+    const char **import_local_names;
+    const char **import_module_qns;
+    unsigned char *import_kinds; // internal PyDirectImportKind, classified once from the AST
+    int import_count;
+    int import_capacity;     // rows the three arrays hold (py_lsp_add_import)
+    CBMNameRows import_rows; // import_local_names by name, rows in table order
+    // During one file's walk: the items of its import statements by the names they bind.
+    struct PyImportJoin *import_join;
+
+    // Current function/class context for resolving `self`/`cls` and emitting
+    // caller QNs.
+    const char *enclosing_func_qn;
+    const char *enclosing_class_qn;
+    // Active class execution: nested class bodies skip this class frame.
+    // Local classes have no extracted graph QN, so class_body_qn stays NULL.
+    CBMScope *class_body_outer_scope;
+    const char *class_body_qn;
+    bool class_body_in_comprehension; // retain enclosing comprehension bindings
+    const char *module_qn;            // Python symbol scope (package __init__ omitted)
+    const char *file_module_qn;       // raw file identity; borrowed for this API call
+
+    // Output: resolved calls accumulate here.
+    CBMResolvedCallArray *resolved_calls;
+
+    // Syntactic-call list (result->calls), borrowed from the per-file
+    // extraction result. The downstream pipeline only turns a resolved_call
+    // into a CALLS edge when a *syntactic* CBMCall with the same
+    // (enclosing_func_qn, callee short-name) exists here. Operator/subscript
+    // dunder desugaring (`s[k]` -> T.__getitem__, `a + b` -> T.__add__) never
+    // appears in result->calls because a `subscript`/`binary_operator` is not
+    // a `call` node, so the syntactic extractor produced no call. When this is
+    // non-NULL, py_emit_dunder_call injects a matching synthetic CBMCall so the
+    // recovered dunder call becomes a real CALLS edge. Cross-file callers use
+    // a separate arena-owned output and merge it into the file result after
+    // resolution. Mirrors RustLSPContext.syn_calls.
+    CBMCallArray *syn_calls;
+
+    // Lambda registry: simple linear list, looked up by name.
+    CBMLambdaEntry *lambdas;
+    int lambda_count;
+    int lambda_cap;
+
+    // Dict-literal-as-dispatch-table tracking.
+    CBMDictLiteralEntry *dict_literals;
+    int dict_literal_count;
+    int dict_literal_cap;
+
+    // AST-walk recursion depth for py_resolve_calls_in (guards stack overflow on
+    // deeply-nested/cyclic files; see cbm_lsp_max_walk_depth). Zero via memset.
+    int walk_depth;
+
+    // py_eval_expr_type memoization + guards (issues #710/#720; mirrors
+    // c_eval_expr_type's guard design in c_lsp.c). All zero via memset —
+    // each file starts with a cold cache.
+    CBMPyTypeCacheEntry *type_cache; // open addressing, linear probe, arena-allocated
+    int type_cache_count;            // occupied slots (kept < 75% of cap)
+    int type_cache_cap;              // power-of-two capacity
+    uint32_t type_cache_gen;         // bumped on every scope mutation (O(1) flush)
+    int eval_depth;                  // evaluator recursion depth (PY_LSP_MAX_EVAL_DEPTH)
+    uint32_t eval_truncations;       // depth-cap cutoff count — gates memo inserts
+    CBMLSPStatus eval_failure;       // sticky: explicit failure makes this walk incomplete
+    // C3 orders of the classes whose attributes this file looks up: one
+    // linearization per class, open addressing, arena-allocated.
+    CBMPyMroCacheEntry *mro_cache;
+    int mro_cache_count; // occupied slots (kept < 75% of cap)
+    int mro_cache_cap;   // power-of-two capacity
+    // Pending links of the left-associative chains being evaluated
+    // iteratively (operator, receiver, subscript, conditional and
+    // parenthesis chains): one stack shared by nested evaluations.
+    TSNode *eval_chain; // arena-allocated
+    int eval_chain_len;
+    int eval_chain_cap;
+#ifdef CBM_ENABLE_TEST_SEAMS
+    int test_memo_allocations_left;
+    int test_root_name_failure; // 1 = NULL, 2 = empty; only the root-name collection
+#endif
+
+    // Sticky fail-closed guard for exact callable-value proof. If a required
+    // scope/name/overlay allocation fails, later semantic passes must leave
+    // the syntactic occurrence as ordinary USAGE instead of consulting stale
+    // bindings and fabricating CALL_REFERENCE/CALLS edges.
+    bool callable_value_proof_disabled;
+
+    // Per-file instance-field OVERLAY. When the Tier-2 registry is shared + sealed
+    // (registry->read_only), `self.x = ...` / PEP-526 field discoveries made during
+    // resolve are recorded HERE instead of mutating the shared registry (which would
+    // bypass the add_* seal, race the other resolve workers, and leave the shared
+    // entry pointing into this file's arena once it is freed). py_lookup_field
+    // consults this overlay alongside the shared base, so same-file attribute-chain
+    // resolution is preserved with zero shared mutation. Arena-allocated (per-file
+    // lifetime); holds no pointer into the shared registry, and the shared registry
+    // holds none into it. Mutable per-file registries keep the direct write.
+    struct {
+        const char *class_qn;
+        const char *field_name;
+        const CBMType *field_type;
+    } *field_overlay;
+    int field_overlay_count;
+    int field_overlay_cap;
+
+    // Debug mode (CBM_LSP_DEBUG env, shared across all language LSPs).
+    bool debug;
+} PyLSPContext;
+
+// Initialize a PyLSPContext for processing one file.
+void py_lsp_init(PyLSPContext *ctx, CBMArena *arena, const char *source, int source_len,
+                 const CBMTypeRegistry *registry, const char *module_qn, CBMResolvedCallArray *out);
+
+// Add an import mapping (call once per CBMImport entry).
+void py_lsp_add_import(PyLSPContext *ctx, const char *local_name, const char *module_qn);
+
+// Bind every recorded import into the root scope. Idempotent. Called from
+// py_lsp_process_file before AST traversal. Exposed for unit tests that
+// don't need a tree-sitter parse.
+void py_lsp_bind_imports(PyLSPContext *ctx);
+
+// Test hook: lookup a name in the context's scope chain. Returns
+// cbm_type_unknown() if not bound.
+const CBMType *py_lsp_lookup_in_scope(const PyLSPContext *ctx, const char *name);
+
+// Process all functions/classes in a file's AST, evaluating types and resolving calls.
+// root must be the tree-sitter Python `module` node.
+void py_lsp_process_file(PyLSPContext *ctx, TSNode root);
+
+// Entry point: build registry from file's own defs + run LSP resolution.
+// Mirrors cbm_run_go_lsp / cbm_run_c_lsp.
+void cbm_run_py_lsp(CBMArena *arena, CBMFileResult *result, const char *source, int source_len,
+                    TSNode root);
+
+// Register Python stdlib types and functions into a registry.
+// Auto-generated by scripts/gen-py-stdlib.py from typeshed.
+// Phase 10 fills the body; Phase 2 ships a no-op so linkage works.
+void cbm_python_stdlib_register(CBMTypeRegistry *reg, CBMArena *arena);
+
+#define CBM_PY_LSP_DEPTH_ERROR "Python expression recursion depth limit exceeded"
+#define CBM_PY_LSP_MEMO_ERROR "Python expression memo allocation or capacity failure"
+#define CBM_PY_LSP_SCOPE_ERROR "Python symbol scope allocation failure"
+void cbm_py_lsp_record_failure(CBMFileResult *result, CBMLSPStatus status);
+#ifdef CBM_ENABLE_TEST_SEAMS
+void cbm_py_lsp_test_memo_fail_after(int successful_allocations);
+void cbm_py_lsp_test_depth_fail(bool enabled);
+void cbm_py_lsp_test_scope_fail_after(int successful_allocations);
+// Separate from the package symbol-scope seam; only new class execution frames.
+void cbm_py_lsp_test_class_frame_fail_after(int successful_allocations);
+bool cbm_py_lsp_test_register_defs(CBMArena *arena, CBMTypeRegistry *reg, CBMLSPDef *defs,
+                                   int def_count);
+const CBMType *cbm_py_lsp_test_eval(PyLSPContext *ctx, TSNode node);
+void cbm_py_lsp_test_bind_external_classes(PyLSPContext *ctx, TSNode root);
+#endif
+
+// --- Cross-file LSP resolution ---
+// Status variants distinguish memo/depth failure; bool wrappers report success.
+// Existing no-op/parser exits retain their previous behavior.
+
+CBMLSPStatus cbm_run_py_lsp_cross_status(CBMArena *arena, const char *source, int source_len,
+                                         const char *module_qn, CBMLSPDef *defs, int def_count,
+                                         const char **import_names, const char **import_qns,
+                                         int import_count,
+                                         TSTree *cached_tree, // NULL = parse internally
+                                         CBMResolvedCallArray *out, CBMCallArray *synthetic_calls);
+
+bool cbm_run_py_lsp_cross(CBMArena *arena, const char *source, int source_len,
+                          const char *module_qn, CBMLSPDef *defs, int def_count,
+                          const char **import_names, const char **import_qns, int import_count,
+                          TSTree *cached_tree, // NULL = parse internally
+                          CBMResolvedCallArray *out, CBMCallArray *synthetic_calls);
+
+/* Tier 2: pre-built per-language registry (mirrors Go pilot).
+ * Filters all_defs to Python entries, builds + finalizes once. */
+CBMTypeRegistry *cbm_py_build_cross_registry(CBMArena *arena, CBMLSPDef *defs, int def_count);
+
+CBMLSPStatus cbm_run_py_lsp_cross_with_registry_status(
+    CBMArena *arena, const char *source, int source_len, const char *module_qn,
+    CBMTypeRegistry *reg, // pre-built, finalized, READ-ONLY
+    const char **import_names, const char **import_qns, int import_count, TSTree *cached_tree,
+    CBMResolvedCallArray *out, CBMCallArray *synthetic_calls);
+
+bool cbm_run_py_lsp_cross_with_registry(CBMArena *arena, const char *source, int source_len,
+                                        const char *module_qn,
+                                        CBMTypeRegistry *reg, // pre-built, finalized, READ-ONLY
+                                        const char **import_names, const char **import_qns,
+                                        int import_count, TSTree *cached_tree,
+                                        CBMResolvedCallArray *out, CBMCallArray *synthetic_calls);
+
+// --- Batch cross-file LSP ---
+
+typedef struct {
+    const char *source;
+    int source_len;
+    const char *module_qn;
+    TSTree *cached_tree; // from TSTree caching (NULL = parse internally)
+    CBMLSPDef *defs;     // combined file-local + cross-file defs
+    int def_count;
+    const char **import_names; // parallel arrays, import_count long
+    const char **import_qns;
+    int import_count;
+} CBMBatchPyLSPFile;
+
+bool cbm_batch_py_lsp_cross(CBMArena *arena, CBMBatchPyLSPFile *files, int file_count,
+                            CBMResolvedCallArray *out);
+
+#ifdef CBM_ENABLE_TEST_SEAMS
+#include <stdatomic.h>
+/* Process-wide comparison counts for deterministic resolver operation tests.
+ * Only missing exact symbol/type attributes reach this submodule predicate. */
+extern _Atomic uint64_t cbm_py_submodule_probes;
+extern _Atomic uint64_t cbm_py_submodule_probe_visits;
+/* Complete module operations, including optimization fallbacks. Visits count
+ * inspected QNs/search comparisons, not sorting or string-length work. */
+extern _Atomic uint64_t cbm_py_module_class_binds;
+extern _Atomic uint64_t cbm_py_module_class_bind_visits;
+extern _Atomic uint64_t cbm_py_wildcard_invalidations;
+extern _Atomic uint64_t cbm_py_wildcard_invalidation_visits;
+/* -1 disables; zero fails until reset; positive counts down attempts. */
+void cbm_py_test_module_scratch_fail_after(int successful_allocations);
+void cbm_py_test_module_prefix_fail_after(int successful_allocations);
+#endif
+
+#endif // CBM_LSP_PY_LSP_H

@@ -1,0 +1,589 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Codebase Memory — Local Code Intelligence &amp; MCP</title>
+    <meta name="description" content="A local MCP server for AI coding agents. Connect code, docs and infrastructure in a persistent knowledge graph, with 17 tools and native CLI access.">
+    <meta name="author" content="DeusData">
+    <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1">
+    <meta name="theme-color" content="#0a0e0d">
+    <meta property="og:title" content="Codebase Memory — Local Code Intelligence &amp; MCP">
+    <meta property="og:description" content="A local MCP server for AI coding agents. Connect code, docs and infrastructure in a persistent knowledge graph, with 17 tools and native CLI access.">
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="https://deusdata.github.io/codebase-memory-mcp/">
+    <meta property="og:image" content="https://deusdata.github.io/codebase-memory-mcp/images/lens-architecture.png">
+    <meta property="og:image:alt" content="CBM Lens architecture view of the codebase-memory-mcp repository">
+    <meta property="og:image:width" content="1440">
+    <meta property="og:image:height" content="900">
+    <meta property="og:locale" content="en_US">
+    <meta property="og:site_name" content="Codebase Memory">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="Codebase Memory — Local Code Intelligence &amp; MCP">
+    <meta name="twitter:description" content="A local MCP server for AI coding agents. Connect code, docs and infrastructure in a persistent knowledge graph, with 17 tools and native CLI access.">
+    <meta name="twitter:image" content="https://deusdata.github.io/codebase-memory-mcp/images/lens-architecture.png">
+    <meta name="twitter:image:alt" content="CBM Lens architecture view of the codebase-memory-mcp repository">
+    <link rel="canonical" href="https://deusdata.github.io/codebase-memory-mcp/">
+    <link rel="alternate" type="text/plain" href="llms.txt" title="Codebase Memory facts and documentation">
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%230a0e0d'/%3E%3Cg stroke='%2333ff99' stroke-width='2'%3E%3Cpath d='M9 9L23 16L10 24Z' fill='none'/%3E%3C/g%3E%3Cg fill='%2333ff99'%3E%3Ccircle cx='9' cy='9' r='3.5'/%3E%3Ccircle cx='23' cy='16' r='3.5'/%3E%3Ccircle cx='10' cy='24' r='3.5'/%3E%3C/g%3E%3C/svg%3E">
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@graph": [
+        {
+          "@type": "WebPage",
+          "@id": "https://deusdata.github.io/codebase-memory-mcp/#webpage",
+          "url": "https://deusdata.github.io/codebase-memory-mcp/",
+          "name": "Codebase Memory — Local Code Intelligence & MCP",
+          "description": "A local MCP server for AI coding agents. Connect code, docs and infrastructure in a persistent knowledge graph, with 17 tools and native CLI access.",
+          "inLanguage": "en",
+          "mainEntity": {
+            "@id": "https://deusdata.github.io/codebase-memory-mcp/#software"
+          }
+        },
+        {
+          "@type": "SoftwareApplication",
+          "name": "Codebase Memory",
+          "alternateName": [
+            "codebase-memory-mcp",
+            "CBM"
+          ],
+          "applicationCategory": "DeveloperApplication",
+          "operatingSystem": "macOS, Linux, Windows",
+          "description": "A local MCP server for AI coding agents. Connect code, docs and infrastructure in a persistent knowledge graph, with 17 tools and native CLI access.",
+          "url": "https://deusdata.github.io/codebase-memory-mcp/",
+          "downloadUrl": "https://github.com/DeusData/codebase-memory-mcp/releases/latest",
+          "license": "https://opensource.org/licenses/MIT",
+          "isAccessibleForFree": true,
+          "offers": {
+            "@type": "Offer",
+            "price": "0",
+            "priceCurrency": "USD"
+          },
+          "featureList": [
+            "Persistent local graph of code, documentation and infrastructure",
+            "Structural, full-text and local semantic search",
+            "Hybrid LSP semantic type resolution for supported language families",
+            "17 MCP tools, CLI access and Cypher graph queries",
+            "Optional CBM Lens visual companion: source navigation, architecture maps and Galaxy graph (open beta)",
+            "Documentation sections, PDF text pages and architecture decision records",
+            "Static infrastructure, deployment and configuration relationships",
+            "Cross-service and cross-repository linking",
+            "Change impact, coverage diagnostics and optional runtime trace ingestion",
+            "Experimental C/C++ test selection using static relationships and admitted per-test coverage",
+            "46 automatic/conditional client surfaces with client-specific setup",
+            "Optional browser AI with on-device inference"
+          ],
+          "author": {
+            "@type": "Organization",
+            "name": "DeusData",
+            "url": "https://github.com/DeusData"
+          },
+          "@id": "https://deusdata.github.io/codebase-memory-mcp/#software",
+          "image": "https://deusdata.github.io/codebase-memory-mcp/images/lens-architecture.png",
+          "mainEntityOfPage": {
+            "@id": "https://deusdata.github.io/codebase-memory-mcp/#webpage"
+          },
+          "isBasedOn": {
+            "@id": "https://deusdata.github.io/codebase-memory-mcp/#source"
+          }
+        },
+        {
+          "@type": "SoftwareSourceCode",
+          "@id": "https://deusdata.github.io/codebase-memory-mcp/#source",
+          "name": "codebase-memory-mcp",
+          "codeRepository": "https://github.com/DeusData/codebase-memory-mcp",
+          "programmingLanguage": "C",
+          "license": "https://opensource.org/licenses/MIT",
+          "targetProduct": {
+            "@id": "https://deusdata.github.io/codebase-memory-mcp/#software"
+          }
+        }
+      ]
+    }
+    </script>
+    <style>
+        :root {
+            color-scheme: dark;
+            --bg: #0a0e0d; --panel: #0f1513; --raised: #131b18; --line: #243a30;
+            --green: #33ff99; --muted: #9eb5a8; --text: #dce8e1; --cyan: #66d9e8; --selected: #12251d;
+            --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        }
+        * { box-sizing: border-box; }
+        html { scroll-behavior: smooth; scroll-padding-top: 100px; }
+        body { margin: 0; background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 16px; line-height: 1.65; }
+        a { color: var(--green); text-decoration: none; text-underline-offset: 4px; }
+        a:hover { text-decoration: underline; }
+        a:focus-visible, summary:focus-visible { outline: 2px solid var(--green); outline-offset: 5px; }
+        ::selection { background: var(--green); color: var(--bg); }
+        img { max-width: 100%; height: auto; display: block; }
+        p { margin: 0 0 20px; }
+        h1, h2, h3 { color: #edf5f0; line-height: 1.12; letter-spacing: -.035em; margin: 0; font-weight: 600; }
+        h1 { font-size: clamp(48px, 6.3vw, 84px); max-width: 820px; }
+        h2 { font-size: clamp(32px, 4vw, 49px); max-width: 800px; }
+        h3 { font-size: 22px; line-height: 1.3; }
+        code { font-family: var(--mono); font-size: .87em; overflow-wrap: anywhere; color: #c3decf; }
+        p code, li code { padding: 2px 5px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); }
+        pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+        pre code { font-size: 13px; line-height: 1.9; }
+        .container { width: min(1180px, calc(100% - 64px)); margin: 0 auto; }
+        .skip { position: absolute; top: -80px; left: 20px; padding: 10px 20px; background: var(--green); color: var(--bg); z-index: 10; }
+        .skip:focus { top: 10px; }
+        .site-header { position: sticky; top: 0; z-index: 5; border-bottom: 1px solid var(--line); background: rgba(10,14,13,.95); backdrop-filter: blur(16px); }
+        .nav { display: flex; align-items: center; justify-content: space-between; min-height: 76px; gap: 28px; }
+        .brand { display: flex; align-items: center; gap: 10px; font-weight: 600; color: var(--text); letter-spacing: -.025em; white-space: nowrap; }
+        .brand svg { width: 27px; height: 27px; color: var(--green); }
+        .nav-links { display: flex; gap: 24px; align-items: center; margin-left: auto; font-size: 13px; white-space: nowrap; }
+        .nav-links a { color: var(--muted); }
+        .nav-links a:hover { color: var(--green); }
+        .nav-actions, .community-badges { display: flex; align-items: center; gap: 10px; }
+        .community-link, .nav-install { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 40px; padding: 8px 13px; border: 1px solid var(--line); border-radius: 6px; font-size: 12px; font-weight: 500; white-space: nowrap; }
+        .community-link { color: var(--muted); background: var(--panel); }
+        .community-link svg { width: 16px; height: 16px; flex: none; color: var(--green); }
+        .nav-install { color: var(--green); background: var(--selected); }
+        .community-link:hover, .nav-install:hover { color: var(--text); border-color: var(--green); text-decoration: none; }
+        @media (max-width: 950px) { .nav-links { display: none; } }
+        .eyebrow { font-family: var(--mono); font-size: 11px; font-weight: 500; letter-spacing: .12em; text-transform: uppercase; color: var(--green); margin-bottom: 23px; }
+        .hero { padding: 80px 0 0; }
+        .hero-top { display: grid; grid-template-columns: 1fr 270px; gap: 65px; align-items: end; }
+        .hero h1 span { color: var(--green); }
+        .hero-intro { color: var(--muted); max-width: 690px; font-size: 19px; line-height: 1.6; margin-top: 28px; }
+        .hero-aside { padding: 0 0 8px 24px; border-left: 1px solid var(--line); color: var(--muted); font-size: 14px; }
+        .hero-aside strong { display: block; color: var(--text); font-weight: 500; margin: 15px 0 2px; }
+        .hero-aside p { margin: 0; }
+        .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin: 30px 0 20px; }
+        .button { display: inline-flex; justify-content: center; align-items: center; gap: 20px; min-height: 47px; padding: 10px 22px; border-radius: 6px; font-size: 14px; font-weight: 600; border: 1px solid var(--line); color: var(--text); background: var(--raised); }
+        .button:hover { text-decoration: none; border-color: var(--green); }
+        .button.primary { color: #062014; border-color: var(--green); background: var(--green); }
+        .hero-note { color: var(--muted); font-family: var(--mono); font-size: 11px; }
+        .product-shot { margin: 48px 0 0; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: var(--panel); box-shadow: 0 24px 80px rgba(0,0,0,.3); }
+        .shot-bar { display: flex; justify-content: space-between; align-items: center; gap: 15px; padding: 12px 18px; border-bottom: 1px solid var(--line); font-family: var(--mono); font-size: 10px; color: var(--muted); }
+        .shot-bar .live { color: var(--green); }
+        .shot-bar .live:before { content: ""; display: inline-block; width: 6px; height: 6px; background: var(--green); border-radius: 100%; margin-right: 8px; }
+        .product-shot img { width: 100%; }
+        figcaption { font-size: 12px; color: var(--muted); padding: 13px 18px; border-top: 1px solid var(--line); }
+        .facts { display: grid; grid-template-columns: repeat(4, 1fr); padding: 30px 0; border-bottom: 1px solid var(--line); gap: 24px; }
+        .facts strong { display: block; font-size: 22px; font-weight: 500; letter-spacing: -.03em; }
+        .facts span { font-size: 12px; color: var(--muted); }
+        .section { padding: 100px 0; border-bottom: 1px solid var(--line); }
+        .section-head { display: flex; justify-content: space-between; align-items: end; gap: 60px; margin-bottom: 42px; }
+        .section-head p { max-width: 370px; color: var(--muted); margin: 0; font-size: 15px; }
+        .section-head .eyebrow { margin-bottom: 17px; }
+        .intro { max-width: 740px; margin-top: 24px; color: var(--muted); font-size: 18px; }
+        .connection-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 42px; }
+        .connection { border-top: 2px solid var(--line); padding-top: 25px; }
+        .connection .number { font: 11px var(--mono); color: var(--green); margin-bottom: 22px; display: block; }
+        .connection p { font-size: 14px; color: var(--muted); margin: 18px 0; }
+        .connection ul { padding-left: 18px; margin: 0; font-size: 13px; color: var(--muted); }
+        .connection li { margin-bottom: 8px; }
+        .source-link { display: inline-block; margin-top: 18px; font-size: 13px; }
+        .trace-strip { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 25px 28px; margin: 35px 0 0; border: 1px solid var(--line); background: var(--panel); border-radius: 8px; }
+        .trace-strip span { font-family: var(--mono); font-size: 12px; }
+        .trace-strip .arrow { color: var(--green); }
+        .trace-strip .trace-label { color: var(--muted); margin-right: auto; }
+        .fine { color: var(--muted); font-size: 12px; margin-top: 16px; }
+        .lens-grid { display: grid; grid-template-columns: 1.5fr 1fr; gap: 35px; align-items: center; }
+        .lens-grid figure { margin: 0; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: var(--panel); }
+        .lens-copy { padding-left: 15px; }
+        .lens-copy h3 { margin: 24px 0 12px; font-size: 20px; }
+        .lens-copy h3:first-child { margin-top: 0; }
+        .lens-copy p { color: var(--muted); font-size: 14px; }
+        .gallery { display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; margin-top: 38px; }
+        .gallery figure { margin: 0; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; background: var(--panel); }
+        .gallery a { display: block; }
+        .gallery img { width: 100%; aspect-ratio: 16/10; object-fit: cover; object-position: top left; }
+        .gallery figcaption { padding: 14px 16px; }
+        .gallery strong { display: block; color: var(--text); font-weight: 500; margin-bottom: 4px; }
+        .feature-row { display: grid; grid-template-columns: 240px 1fr; gap: 60px; border-top: 1px solid var(--line); padding: 30px 0; }
+        .feature-row h3 { font-size: 20px; }
+        .feature-row p { color: var(--muted); font-size: 15px; margin-bottom: 12px; }
+        .feature-row p:last-child { margin-bottom: 0; }
+        .feature-row .tags { display: flex; flex-wrap: wrap; gap: 8px; }
+        .tag { border: 1px solid var(--line); border-radius: 4px; padding: 3px 8px; font: 10px var(--mono); color: var(--muted); }
+        .split { display: grid; grid-template-columns: 1fr 1fr; gap: 65px; align-items: start; }
+        .split p { color: var(--muted); }
+        .split h2 { margin-bottom: 25px; }
+        .ci-panel { border: 1px solid var(--line); background: var(--panel); border-radius: 8px; overflow: hidden; }
+        .ci-title { padding: 13px 22px; border-bottom: 1px solid var(--line); color: var(--muted); font: 11px var(--mono); }
+        .ci-step { display: grid; grid-template-columns: 25px 1fr; gap: 15px; padding: 21px 22px; border-bottom: 1px solid var(--line); }
+        .ci-step:last-child { border-bottom: none; }
+        .ci-step .number { color: var(--green); font: 12px var(--mono); padding-top: 3px; }
+        .ci-step strong { display: block; font-size: 14px; font-weight: 500; }
+        .ci-step p { font-size: 12px; margin: 5px 0 0; }
+        .ci-step.fallback { background: var(--selected); }
+        .label { display: inline-block; font: 10px var(--mono); color: var(--cyan); border: 1px solid #31555b; padding: 4px 7px; border-radius: 4px; margin-left: 10px; vertical-align: middle; letter-spacing: .02em; }
+        .integration-flow { display: grid; grid-template-columns: repeat(3, 1fr); margin: 35px 0; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+        .integration-step { padding: 24px; background: var(--panel); border-right: 1px solid var(--line); }
+        .integration-step:last-child { border-right: none; }
+        .integration-step strong { font-size: 16px; font-weight: 500; }
+        .integration-step .number { display: block; color: var(--green); font: 11px var(--mono); margin-bottom: 15px; }
+        .integration-step p { font-size: 13px; color: var(--muted); margin: 12px 0 0; }
+        details { border-top: 1px solid var(--line); padding: 20px 0; }
+        summary { cursor: pointer; font-size: 15px; font-weight: 500; }
+        details p { color: var(--muted); font-size: 14px; margin: 18px 0 0; }
+        details p:last-child { margin-bottom: 0; }
+        .tool-list { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 22px; }
+        .tool-list code { padding: 5px 8px; border: 1px solid var(--line); border-radius: 4px; font-size: 11px; }
+        .terminal { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: var(--panel); }
+        .terminal-head { padding: 12px 22px; border-bottom: 1px solid var(--line); font: 11px var(--mono); color: var(--muted); }
+        .terminal pre { padding: 25px; }
+        .comment { color: var(--muted); }
+        .command { color: var(--green); }
+        .install-links { display: flex; flex-wrap: wrap; gap: 18px; margin-top: 20px; font-size: 13px; }
+        .install-copy h3 { margin: 8px 0 16px; }
+        .install-copy p { font-size: 14px; }
+        .install-copy .button { margin-top: 7px; }
+        .evidence { display: grid; grid-template-columns: 1.1fr 1fr; gap: 65px; }
+        .evidence h2 { font-size: 35px; }
+        .evidence p { color: var(--muted); font-size: 15px; }
+        .evidence-links { display: flex; flex-wrap: wrap; gap: 12px 25px; font-size: 13px; }
+        .faq { max-width: 900px; }
+        .faq h2 { margin-bottom: 35px; }
+        .release { border-top: 1px solid var(--line); padding: 20px 0; }
+        .release-head { display: flex; justify-content: space-between; gap: 25px; align-items: start; }
+        .release-tag { font-size: 15px; }
+        .release-date { color: var(--muted); font: 11px var(--mono); white-space: nowrap; padding-top: 5px; }
+        .release details { border-top: none; padding: 12px 0 0; }
+        .release summary { font-size: 12px; color: var(--muted); }
+        .release-body { color: var(--muted); font-size: 13px; }
+        .release-body h4, .release-body h5, .release-body h6 { color: var(--text); font-size: 14px; margin: 18px 0 10px; }
+        .release-body p { font-size: 13px; margin: 10px 0; }
+        .release-body a { overflow-wrap: anywhere; }
+        .skeleton { color: var(--muted); font-size: 14px; }
+        footer { padding: 35px 0 45px; }
+        .footer-inner { display: flex; justify-content: space-between; gap: 30px; align-items: start; }
+        footer p { color: var(--muted); font-size: 12px; margin: 7px 0 0; }
+        .footer-links { display: flex; flex-wrap: wrap; gap: 20px; font-size: 12px; }
+        @media (max-width: 950px) {
+            .hero-top { grid-template-columns: 1fr; gap: 25px; }
+            .hero-aside { display: none; }
+            .section-head { align-items: start; gap: 30px; }
+            .section-head p { max-width: 300px; }
+            .connection-grid { gap: 24px; }
+            .split { gap: 35px; }
+            .lens-grid { grid-template-columns: 1fr; }
+            .lens-copy { padding: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 28px; }
+            .lens-copy h3 { margin-top: 0; }
+            .feature-row { grid-template-columns: 200px 1fr; gap: 30px; }
+        }
+        @media (max-width: 680px) {
+            .container { width: calc(100% - 36px); }
+            html { scroll-padding-top: 140px; }
+            .nav { display: grid; grid-template-columns: 1fr auto; gap: 10px; padding: 12px 0; }
+            .nav .brand { grid-column: 1; grid-row: 1; }
+            .nav-actions { display: contents; }
+            .nav-install { grid-column: 2; grid-row: 1; }
+            .community-badges { grid-column: 1 / -1; grid-row: 2; }
+            .community-link { flex: 1; }
+            .brand { font-size: 14px; }
+            .brand svg { width: 23px; }
+            .hero { padding-top: 50px; }
+            h1 { font-size: clamp(42px, 10.5vw, 64px); }
+            .hero-intro { font-size: 17px; }
+            .hero-note { font-size: 10px; }
+            .hero .actions { gap: 10px; }
+            .button { padding: 10px 17px; gap: 12px; }
+            .product-shot { margin-top: 35px; }
+            .shot-bar { font-size: 9px; padding: 10px 12px; }
+            .shot-bar .shot-path { display: none; }
+            figcaption { font-size: 11px; padding: 12px; }
+            .facts { grid-template-columns: 1fr 1fr; gap: 22px; }
+            .facts strong { font-size: 20px; }
+            .section { padding: 65px 0; }
+            .section-head { display: block; margin-bottom: 30px; }
+            .section-head p { max-width: none; margin-top: 20px; }
+            .connection-grid, .split, .evidence { grid-template-columns: 1fr; gap: 35px; }
+            .connection { padding-top: 20px; }
+            .connection .number { margin-bottom: 13px; }
+            .connection p { margin: 12px 0; }
+            .trace-strip { gap: 9px; padding: 20px; }
+            .trace-strip .trace-label { flex-basis: 100%; margin-bottom: 5px; }
+            .trace-strip span { font-size: 10px; }
+            .lens-copy { grid-template-columns: 1fr; gap: 10px; }
+            .gallery { grid-template-columns: 1fr; gap: 22px; }
+            .gallery img { aspect-ratio: auto; object-fit: contain; }
+            .feature-row { grid-template-columns: 1fr; gap: 16px; }
+            .integration-flow { grid-template-columns: 1fr; }
+            .integration-step { border-right: none; border-bottom: 1px solid var(--line); }
+            .integration-step:last-child { border-bottom: none; }
+            .terminal pre { padding: 18px; }
+            .terminal pre code { font-size: 11px; }
+            .release-head { flex-direction: column; gap: 4px; }
+            .footer-inner { flex-direction: column; gap: 22px; }
+        }
+        @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+    </style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="site-header">
+    <nav class="container nav" aria-label="Main navigation">
+        <a class="brand" href="#main" aria-label="Codebase Memory home">
+            <svg viewBox="0 0 32 32" aria-hidden="true" fill="none"><path d="M8 8L25 15L11 25Z" stroke="currentColor" stroke-width="1.5"/><g fill="currentColor"><circle cx="8" cy="8" r="3"/><circle cx="25" cy="15" r="3"/><circle cx="11" cy="25" r="3"/></g></svg>
+            Codebase Memory
+        </a>
+        <div class="nav-links">
+            <a href="#features">Capabilities</a>
+            <a href="#lens">Lens beta</a>
+            <a href="#smart-ci">Smart CI</a>
+        </div>
+        <div class="nav-actions">
+            <div class="community-badges" role="group" aria-label="Community links">
+                <a class="community-link" href="https://discord.gg/KguGXxg2X" title="Join the community on Discord"><svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 2.5h10v8H7l-3.5 3v-3H3z"/><path d="M5.5 5.5h5M5.5 8h3"/></svg>Discord</a>
+                <a class="community-link" href="https://github.com/DeusData/codebase-memory-mcp" title="Star Codebase Memory on GitHub"><svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m8 1.5 2 4.1 4.5.7-3.3 3.2.8 4.5L8 11.9 4 14l.8-4.5L1.5 6.3l4.5-.7z"/></svg>Star on GitHub</a>
+            </div>
+            <a class="nav-install" href="#install">Get started</a>
+        </div>
+    </nav>
+</header>
+<main id="main" class="container">
+    <section class="hero" id="what-is-it">
+        <div class="hero-top">
+            <div>
+                <p class="eyebrow">Local MCP server · Open source</p>
+                <h1>Understand the<br><span>whole repository.</span></h1>
+                <p class="hero-intro">Codebase Memory (CBM) is an open-source server for the Model Context Protocol (MCP). Give your AI coding agent a persistent knowledge graph of code, documentation and infrastructure. Search symbols, trace relationships and retrieve source evidence through 17 MCP tools.</p>
+                <p>Focused graph queries help reduce repeated code reading and token use. <a href="#token-savings">See the evidence →</a></p>
+                <div class="actions">
+                    <a class="button primary" href="#install">Install the MCP server <span aria-hidden="true">↗</span></a>
+                    <a class="button" href="#features">Explore the MCP tools <span aria-hidden="true">↓</span></a>
+                </div>
+                <p class="hero-note">macOS · Linux · Windows &nbsp;/&nbsp; Native C · MIT licensed</p>
+            </div>
+            <div class="hero-aside">
+                <strong>For your agent</strong><p>17 MCP tools, source evidence and coverage checks, with client-specific skills, profiles and hooks.</p>
+                <strong>For your workflow</strong><p>Native CLI access, persistent indexes and optional visual exploration in Lens.</p>
+            </div>
+        </div>
+        <figure class="product-shot">
+            <div class="shot-bar"><span class="live">CBM LENS · OPEN BETA v0.0.1</span><span class="shot-path">codebase-memory-mcp / architecture</span><span>LOCAL WORKSPACE</span></div>
+            <a href="images/lens-overview.gif" aria-label="View the full CBM Lens architecture walkthrough"><picture><source media="(prefers-reduced-motion: reduce)" srcset="images/lens-architecture.png" width="1440" height="900"><img src="images/lens-overview.gif" width="1600" height="1000" alt="CBM Lens architecture walkthrough: open src/foundation, select arena.c and read its source beside the map" fetchpriority="high"></picture></a>
+            <figcaption>See the MCP server’s graph through CBM Lens, its optional visual companion. Open beta v0.0.1, captured in October 2026. <a href="https://github.com/DeusData/codebase-memory-mcp/blob/main/docs/images/README.md">Capture details ↗</a></figcaption>
+        </figure>
+        <div class="facts" aria-label="Project at a glance">
+            <div><strong>One connected graph</strong><span>Source, docs and infrastructure</span></div>
+            <div><strong>17 MCP tools</strong><span>Plus native CLI access</span></div>
+            <div><strong>46 client surfaces</strong><span>Automatic or conditional setup</span></div>
+            <div><strong>Local processing</strong><span>Your index stays on your machine</span></div>
+        </div>
+    </section>
+
+    <section class="section" id="problem">
+        <div class="section-head">
+            <div><p class="eyebrow">Beyond file search</p><h2>Find the relationship.<br>Then read the evidence.</h2></div>
+            <p>A function rarely tells the whole story. Follow its callers, find the decision behind it, and trace the infrastructure that runs it.</p>
+        </div>
+        <div class="connection-grid">
+            <article class="connection">
+                <span class="number">01 / CODE</span><h3>What calls this?</h3>
+                <p>Explore symbols, call paths, types, dependencies and routes. Move across files, services and indexed repositories.</p>
+                <ul><li>Structural, full-text and local semantic search</li><li>Hybrid LSP type resolution for supported languages</li><li>HTTP, gRPC, GraphQL, tRPC and async links</li></ul>
+                <a class="source-link" href="#features">Explore code intelligence →</a>
+            </article>
+            <article class="connection" id="documentation">
+                <span class="number">02 / DOCUMENTATION</span><h3>Why does it work this way?</h3>
+                <p>Bring documentation into the graph. Search sections, follow resolved code references, and keep architecture decisions close to their implementation.</p>
+                <ul><li>Markdown, reStructuredText and AsciiDoc sections</li><li>Searchable pages from PDFs with text layers</li><li>ADRs, supersession and supported doc comments</li></ul>
+                <a class="source-link" href="https://github.com/DeusData/codebase-memory-mcp#documentation-connected-to-code">Documentation support →</a>
+            </article>
+            <article class="connection" id="infrastructure">
+                <span class="number">03 / INFRASTRUCTURE</span><h3>What builds and deploys it?</h3>
+                <p>Connect supported infrastructure and configuration to source. Trace the path from a service to the program inside its container.</p>
+                <ul><li>Docker, Compose, Kubernetes, Helm and Kustomize</li><li>Terraform / OpenTofu, Terragrunt and Ansible</li><li>Shell, Make and supported CI steps</li></ul>
+                <a class="source-link" href="https://github.com/DeusData/codebase-memory-mcp#infrastructure-and-deployment">Infrastructure support →</a>
+            </article>
+        </div>
+        <div class="trace-strip" aria-label="Example of a resolvable deployment path">
+            <span class="trace-label">A deployment path</span><span>Service</span><span class="arrow" aria-hidden="true">→</span><span>Workload</span><span class="arrow" aria-hidden="true">→</span><span>Image</span><span class="arrow" aria-hidden="true">→</span><span>Dockerfile</span><span class="arrow" aria-hidden="true">→</span><span>Program</span>
+        </div>
+        <p class="fine">Relationships come from supported source forms. Dynamic values and unresolved references can leave gaps; PDF extraction requires a text layer and does not perform OCR.</p>
+    </section>
+
+    <section class="section" id="features">
+        <div class="section-head">
+            <div><p class="eyebrow">Code intelligence</p><h2>Ask better questions<br>of your repository.</h2></div>
+            <p>Give your coding agent structural context through 17 MCP tools. Query the same graph from the CLI and open source evidence whenever a result needs verification.</p>
+        </div>
+        <article class="feature-row" id="semantic-search"><h3>Find the right starting point</h3><div><p>Search by symbol, structure, text or meaning. Combine regex and graph filters, BM25 full-text search, and local semantic search to find relevant code even when the wording differs.</p><div class="tags"><span class="tag">search_graph</span><span class="tag">search_code</span><span class="tag">get_file_outline</span></div></div></article>
+        <article class="feature-row" id="hybrid-lsp"><h3>Follow actual relationships</h3><div><p>Tree-sitter parsing and Hybrid LSP resolution build call and dependency relationships for supported languages. Trace callers, callees, data flow and supported cross-service links; query more complex patterns with Cypher.</p><p>Language and framework coverage varies. <a href="https://github.com/DeusData/codebase-memory-mcp#language-support">Check the support matrix →</a></p></div></article>
+        <article class="feature-row"><h3>Understand change</h3><div><p>Map a diff to affected symbols, investigate the blast radius, compare graph snapshots and inspect related tests. Near-clone and semantic relationships help surface related implementations worth reviewing.</p><div class="tags"><span class="tag">detect_changes</span><span class="tag">compare_graphs</span><span class="tag">SIMILAR_TO</span></div></div></article>
+        <article class="feature-row"><h3>Connect the wider system</h3><div><p>Link multiple repositories in the same store. Explore service relationships across HTTP, gRPC, GraphQL, tRPC and supported async patterns, or ingest runtime traces to add observed relationships.</p><div class="tags"><span class="tag">Cross-repo intelligence</span><span class="tag">ingest_traces</span><span class="tag">get_architecture</span></div></div></article>
+        <article class="feature-row"><h3>Know what the index knows</h3><div><p>Inspect index status and recorded coverage before making a claim. Coverage diagnostics identify skipped, partial or stale evidence so you can read the relevant source directly. Preserve architecture decisions with ADR management.</p><div class="tags"><span class="tag">check_index_coverage</span><span class="tag">index_status</span><span class="tag">manage_adr</span></div></div></article>
+        <details><summary>Explore all 17 MCP tools</summary><div class="tool-list"><code>index_repository</code><code>search_graph</code><code>query_graph</code><code>trace_path</code><code>get_code_snippet</code><code>get_file_outline</code><code>get_graph_schema</code><code>compare_graphs</code><code>get_architecture</code><code>search_code</code><code>list_projects</code><code>delete_project</code><code>index_status</code><code>check_index_coverage</code><code>detect_changes</code><code>manage_adr</code><code>ingest_traces</code></div><p><a href="https://github.com/DeusData/codebase-memory-mcp#mcp-tools">Tool reference, inputs and examples →</a></p></details>
+    </section>
+
+    <section class="section" id="smart-ci">
+        <div class="split">
+            <div><p class="eyebrow">Smart CI <span class="label">Experimental</span></p><h2>Turn change impact<br>into test selection.</h2><p>Combine static reachability, changed tests and admitted per-test coverage to explain which tests a change reaches. Use the result to focus supported CI runs.</p><p>Job selection uses repository-specific path rules. Test narrowing currently supports C/C++ with supported <code>TEST</code>/<code>SUITE</code>-style harnesses or declared equivalents.</p><p class="fine">Start in shadow mode and validate your harness before enabling gating. This repository narrows its Linux x86_64 PR unit-test leg; release and dry-run workflows retain full execution.</p><a class="source-link" href="https://github.com/DeusData/codebase-memory-mcp/blob/main/docs/SMART_CI.md">Read the Smart CI setup guide →</a></div>
+            <div class="ci-panel">
+                <div class="ci-title">FROM CHANGE TO EXPLAINED SELECTION</div>
+                <div class="ci-step"><span class="number">01</span><div><strong>Establish a baseline</strong><p>Publish the graph and compatible per-test coverage with <code>test-impact publish</code>.</p></div></div>
+                <div class="ci-step"><span class="number">02</span><div><strong>Trace the change</strong><p>Combine changed tests, static relationships and admitted coverage.</p></div></div>
+                <div class="ci-step"><span class="number">03</span><div><strong>Select with reasons</strong><p><code>test-impact select</code> explains its selection for a runner that accepts named tests or suites.</p></div></div>
+                <div class="ci-step fallback"><span class="number">↳</span><div><strong>Broaden when evidence is insufficient</strong><p>Missing, stale or incomplete evidence broadens the selection or returns <code>run_all</code>. Static reachability alone never omits a suite.</p></div></div>
+            </div>
+        </div>
+    </section>
+
+    <section class="section" id="integrations">
+        <div class="section-head"><div><p class="eyebrow">Agent setup</p><h2>Context that fits<br>your coding workflow.</h2></div><p>The installer configures 46 automatic/conditional client surfaces. MCP connections, instructions, skills, profiles and hooks are installed according to each client's supported capabilities.</p></div>
+        <div class="integration-flow">
+            <div class="integration-step"><span class="number">01 / CONNECT</span><strong>Set up your clients</strong><p>Configure supported integrations for clients such as Claude Code, Codex CLI, Gemini CLI, Cursor, Zed and OpenCode.</p></div>
+            <div class="integration-step"><span class="number">02 / GUIDE</span><strong>Give agents a working method</strong><p>Skills and instructions guide graph queries, coverage checks and source verification. Supported custom-agent formats get Scout, Verify and Auditor profiles.</p></div>
+            <div class="integration-step"><span class="number">03 / MAINTAIN CONTEXT</span><strong>Use supported hooks</strong><p>Client-specific lifecycle and read/search hooks help surface relevant graph context. Hook and subagent capabilities differ by client and platform.</p></div>
+        </div>
+        <details><summary>See the supported clients and integration boundaries</summary>
+            <p><strong>Detected automatically (40):</strong> Claude Code, Codex CLI, Gemini CLI, Zed, OpenCode, Antigravity, Aider, KiloCode, VS Code, Cursor, Windsurf, Augment / Auggie, OpenClaw, Kiro, Junie, Hermes, OpenHands, Cline, Warp, Qwen Code, GitHub Copilot CLI, Factory Droid, Crush, Goose, Mistral Vibe, Grok Build, Qoder CLI, Kimi Code CLI, GitLab Duo CLI, Rovo Dev CLI, Amp, Devin CLI / Local, Tabnine, Amazon Q Developer IDE, CodeBuddy Code CLI, IBM Bob Shell, Pochi, Pi, Oh My Pi (omp), and agentty.</p>
+            <p><strong>Conditional or explicit (6):</strong> Continue / cn, Visual Studio, TRAE, Roo Code, IBM Bob IDE, and Sourcegraph Cody.</p>
+            <p>These are client surfaces, not a promise of identical MCP, hook or subagent support. For example, Pi receives instructions and a skill; Warp's detected skill installation is counted while its MCP connection remains manual. Other manual, UI, cloud and repository-managed integrations are documented separately.</p>
+            <p><a href="https://github.com/DeusData/codebase-memory-mcp#agent-setup-skills-profiles-and-hooks">Review the client matrix and setup details →</a></p>
+        </details>
+    </section>
+
+    <section class="section" id="lens">
+        <div class="section-head">
+            <div><p class="eyebrow">CBM Lens · Open beta v0.0.1</p><h2>A visual companion<br>to the MCP server.</h2></div>
+            <p>An optional way to explore the same graph your agent queries. Included in standard native releases, with source navigation, architecture maps and the Galaxy view.</p>
+        </div>
+        <div class="lens-grid">
+            <figure><a href="images/lens-explore.jpg" aria-label="View the full CBM Lens source navigation screenshot"><img src="images/lens-explore.jpg" width="1280" height="720" alt="Lens source reader beside the file impact summary and graph dependencies for limits.c" loading="lazy"></a><figcaption>Source navigation with indexed relationships and impact context.</figcaption></figure>
+            <div class="lens-copy">
+                <div><h3>Read code in context</h3><p>Browse files and symbols, inspect callers and dependencies, and keep the relevant source beside the graph.</p></div>
+                <div><h3>See the shape of the system</h3><p>Explore architecture, system structure and the Galaxy graph. Inspect coverage diagnostics and architecture decisions from the same workspace.</p></div>
+            </div>
+        </div>
+        <div class="gallery">
+            <figure><a href="images/lens-galaxy.gif" aria-label="View the full CBM Lens Galaxy walkthrough"><picture><source media="(prefers-reduced-motion: reduce)" srcset="images/lens-galaxy.jpg" width="1280" height="720"><img src="images/lens-galaxy.gif" width="1600" height="1000" alt="CBM Lens Galaxy walkthrough: expand cbm_arena_alloc and follow its call path through arena_grow to cbm_alloc" loading="lazy"></picture></a><figcaption><strong>Follow the connections</strong>Expand relationships and trace a call path.</figcaption></figure>
+            <figure><a href="images/lens-system-structure.png" aria-label="View the full Lens system structure screenshot"><img src="images/lens-system-structure.png" width="1440" height="900" alt="CBM Lens system structure showing source groups and their dependencies" loading="lazy"></a><figcaption><strong>Inspect system structure</strong>See source groups and dependencies.</figcaption></figure>
+            <figure><a href="images/lens-chat.gif" aria-label="View the full Lens local chat walkthrough"><picture><source media="(prefers-reduced-motion: reduce)" srcset="images/lens-chat.png" width="1440" height="1200"><img src="images/lens-chat.gif" width="1600" height="1000" alt="CBM Lens local chat walkthrough: callers and callees of arena_grow answered directly from the indexed graph" loading="lazy"></picture></a><figcaption><strong>Ask about selected code</strong>Caller and callee answers from the indexed graph.</figcaption></figure>
+        </div>
+        <p class="fine">Lens is served on loopback. Browser AI downloads its optional model after you enable it. Its explanations should be checked against the displayed source.</p>
+        <a class="source-link" href="https://github.com/DeusData/codebase-memory-mcp#cbm-lens-beta-code-visualization-and-source-navigation">Read the Lens guide and watch the walkthroughs →</a>
+    </section>
+
+    <section class="section" id="install">
+        <div class="section-head"><div><p class="eyebrow">Get started</p><h2>Install. Index. Explore.</h2></div><p>Install the MCP server and configure your coding agent. The native runtime needs no Docker or language runtime; indexing and graph queries need no API key. Standard releases also include the optional Lens open beta.</p></div>
+        <div class="split">
+            <div><div class="terminal"><div class="terminal-head">TERMINAL · macOS / Linux</div><pre><code><span class="comment"># Install the native release and agent integrations</span>
+<span class="command">curl -fsSL https://raw.githubusercontent.com/DeusData/codebase-memory-mcp/main/install.sh | bash</span>
+
+<span class="comment"># Restart your agent, then ask:</span>
+"Index this project"
+
+<span class="comment"># Optional: open CBM Lens (open beta)</span>
+<span class="command">codebase-memory-mcp daemon start --open</span></code></pre></div><div class="install-links"><a href="https://github.com/DeusData/codebase-memory-mcp/blob/main/install.sh">Inspect the installer ↗</a><a href="https://github.com/DeusData/codebase-memory-mcp#quick-start">Windows / PowerShell ↗</a><a href="https://github.com/DeusData/codebase-memory-mcp#installation">Other installation methods ↗</a></div></div>
+            <div class="install-copy"><h3>Your machine. Your index.</h3><p>Source analysis and graph storage run locally. Native releases contain the executable and authenticated release-owned assets, including the Lens frontend and agent integration templates.</p><p>Use native packages or the npm, PyPI and Go wrappers. Package wrappers use their respective runtimes. Nix and source builds also offer builds without the UI.</p><p>Choose the clients you want to configure, restart them after installation, then build your first index.</p><a class="button" href="https://github.com/DeusData/codebase-memory-mcp/releases/latest">Download the latest release <span aria-hidden="true">↗</span></a></div>
+        </div>
+    </section>
+
+    <section class="section" id="performance">
+        <div class="evidence" id="benchmark"><div><p class="eyebrow">Performance and research</p><h2>More useful context.<br>Less repeated work.</h2></div><div><p id="token-savings">Reuse the graph to find relevant symbols, follow relationships and retrieve focused source snippets. Compact, paged results help keep repeated repository exploration out of your agent’s context window.</p><p>Our <a href="https://arxiv.org/abs/2603.27277v1">March 2026 preprint</a> reports <strong>10× lower token use</strong> and <strong>2.1× fewer tool calls</strong> across 31 repositories compared with file-by-file exploration.</p><p>These measurements cover the study’s backend workloads from March 2026. See the paper for the evaluation setup and full results.</p><div class="evidence-links"><a href="https://github.com/DeusData/codebase-memory-mcp#performance">Token-use results ↗</a><a href="https://github.com/DeusData/codebase-memory-mcp/blob/main/docs/BENCHMARK.md">Indexing benchmarks ↗</a><a href="https://arxiv.org/abs/2603.27277">Research paper ↗</a></div></div></div>
+    </section>
+
+    <section class="section" id="faq">
+        <div class="faq"><p class="eyebrow">Common questions</p><h2>Is Codebase Memory<br>right for your workflow?</h2>
+            <details><summary>When should I use Codebase Memory?</summary><p>Choose CBM when your coding agent needs a persistent local graph of code, docs and infrastructure. The MCP server brings structural search, source evidence, agent integrations and experimental test selection into one open-source package. The CLI provides direct access, and CBM Lens adds an optional visual workspace in open beta. Native releases run on macOS, Linux and Windows without Docker or a language runtime. <a href="#features">Explore the capabilities</a> and <a href="#smart-ci">Smart CI’s current scope</a>.</p></details>
+            <details><summary>How does Codebase Memory reduce AI token use?</summary><p>Your agent can query indexed relationships and retrieve the relevant symbols or source snippets instead of repeatedly exploring whole files. Compact results and pagination control how much context each query returns. The benefit depends on the task; <a href="#token-savings">explore the published token-use measurements</a>.</p></details>
+            <details><summary>Does Codebase Memory send my source code anywhere?</summary><p>The backend indexes source and stores and queries its graph locally. Your coding agent has its own data-handling settings. Lens can optionally download a browser model after you enable it, with inference on-device. Installers and update checks use the network to obtain releases and assets.</p></details>
+            <details><summary>How does the index stay current?</summary><p>Incremental indexing updates changed files. With auto-watch enabled, an eligible active MCP session can watch an already indexed project. Automatic first indexing is a separate opt-in setting. The local UI daemon is not a promise of a permanent background watcher.</p></details>
+            <details><summary>How much language coverage is available?</summary><p>Bundled tree-sitter grammars cover a broad range of languages and formats. Supported language families also have Hybrid LSP semantic resolution. Extraction depth, type resolution and framework relationships vary; the <a href="https://github.com/DeusData/codebase-memory-mcp#language-support">language support matrix</a> describes the details.</p></details>
+            <details><summary>Does Smart CI select tests for every indexed language?</summary><p>No. Test narrowing currently supports C/C++ family code with supported test-harness conventions or declared equivalents. It requires configuration, admitted coverage and a compatible runner. Missing or incompatible evidence broadens execution or returns <code>run_all</code>. See the <a href="https://github.com/DeusData/codebase-memory-mcp/blob/main/docs/SMART_CI.md">Smart CI guide</a>.</p></details>
+            <details><summary>How do I verify the release?</summary><p>Use the signed release artifacts and checksums, and review the release's verification information. The <a href="https://github.com/DeusData/codebase-memory-mcp/blob/main/SECURITY.md">security policy</a> explains artifact verification, antivirus reports and vulnerability reporting.</p></details>
+            <details><summary>Is it free and open source?</summary><p>Yes. Codebase Memory is MIT licensed. Source, release binaries, detailed documentation and contribution guidelines are available on <a href="https://github.com/DeusData/codebase-memory-mcp">GitHub</a>.</p></details>
+        </div>
+    </section>
+
+    <section class="section" id="releases">
+        <div class="section-head"><div><p class="eyebrow">Project updates</p><h2>What's shipping.</h2></div><p>Recent releases from GitHub, with the implementation details and fixes behind each version.</p></div>
+        <div id="releases-list"><p class="skeleton">Loading recent releases from GitHub…</p></div>
+        <noscript><p><a href="https://github.com/DeusData/codebase-memory-mcp/releases">Read the release history on GitHub →</a></p></noscript>
+        <a class="source-link" href="https://github.com/DeusData/codebase-memory-mcp/releases">View all releases on GitHub →</a>
+    </section>
+</main>
+<footer><div class="container footer-inner"><div><a class="brand" href="#main">Codebase Memory</a><p>Local code intelligence. Open source, MIT licensed.</p></div><div class="footer-links"><a href="https://discord.gg/KguGXxg2X">Discord</a><a href="https://github.com/DeusData/codebase-memory-mcp">GitHub</a><a href="https://github.com/DeusData/codebase-memory-mcp#readme">Documentation</a><a href="https://github.com/DeusData/codebase-memory-mcp/blob/main/SECURITY.md">Security</a><a href="llms.txt">llms.txt</a></div></div></footer>
+
+<script>
+    (function () {
+        var REPO = 'DeusData/codebase-memory-mcp';
+        var listEl = document.getElementById('releases-list');
+        if (!listEl) return;
+
+        function esc(s) {
+            return String(s)
+                .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;');
+        }
+
+        // Minimal, safe Markdown → HTML for release bodies (escape first, then format).
+        function renderMarkdown(md) {
+            var lines = esc(md || '').split(/\r?\n/);
+            var html = '', inList = false;
+            function inline(t) {
+                return t
+                    .replace(/`([^`]+)`/g, '<code>$1</code>')
+                    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+                    .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g,
+                             '<a href="$2" target="_blank" rel="nofollow noopener">$1</a>');
+            }
+            for (var i = 0; i < lines.length; i++) {
+                var ln = lines[i];
+                var h = ln.match(/^(#{1,6})\s+(.*)$/);
+                var li = ln.match(/^\s*[-*]\s+(.*)$/);
+                if (h) {
+                    if (inList) { html += '</ul>'; inList = false; }
+                    // Demote release-note headings to h4-h6 so they never pollute the page outline.
+                    var lvl = Math.min(h[1].length + 3, 6);
+                    html += '<h' + lvl + '>' + inline(h[2]) + '</h' + lvl + '>';
+                } else if (li) {
+                    if (!inList) { html += '<ul>'; inList = true; }
+                    html += '<li>' + inline(li[1]) + '</li>';
+                } else if (ln.trim() === '') {
+                    if (inList) { html += '</ul>'; inList = false; }
+                } else {
+                    if (inList) { html += '</ul>'; inList = false; }
+                    html += '<p>' + inline(ln) + '</p>';
+                }
+            }
+            if (inList) html += '</ul>';
+            return html;
+        }
+
+        function fmtDate(iso) {
+            if (!iso) return '';
+            var d = new Date(iso);
+            if (isNaN(d)) return '';
+            return d.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
+        }
+
+        function renderRelease(r) {
+            var tag = esc(r.tag_name || r.name || 'release');
+            var name = r.name && r.name !== r.tag_name ? ' — ' + esc(r.name) : '';
+            var url = esc(r.html_url || ('https://github.com/' + REPO + '/releases'));
+            var date = fmtDate(r.published_at);
+            var body = (r.body || '').trim();
+            var bodyHtml = body
+                ? '<details><summary>Release notes</summary><div class="release-body">' + renderMarkdown(body) + '</div></details>'
+                : '<p class="release-body"><a href="' + url + '" target="_blank" rel="noopener">View on GitHub →</a></p>';
+            return '<article class="release">'
+                + '<div class="release-head">'
+                + '<span class="release-tag"><a href="' + url + '" target="_blank" rel="noopener">' + tag + '</a>' + name + '</span>'
+                + '<span class="release-date">' + date + '</span>'
+                + '</div>' + bodyHtml + '</article>';
+        }
+
+        fetch('https://api.github.com/repos/' + REPO + '/releases?per_page=5', {
+            headers: { 'Accept': 'application/vnd.github+json' }
+        })
+        .then(function (res) { if (!res.ok) throw new Error('HTTP ' + res.status); return res.json(); })
+        .then(function (data) {
+            if (!Array.isArray(data) || data.length === 0) throw new Error('no releases');
+            listEl.innerHTML = data.map(renderRelease).join('');
+        })
+        .catch(function () {
+            listEl.innerHTML = '<p class="skeleton">Couldn\'t load releases right now — '
+                + '<a href="https://github.com/' + REPO + '/releases">view them on GitHub →</a></p>';
+        });
+    })();
+</script>
+</body>
+</html>

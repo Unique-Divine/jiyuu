@@ -1,0 +1,503 @@
+#ifndef CBM_LSP_TYPE_REGISTRY_H
+#define CBM_LSP_TYPE_REGISTRY_H
+
+#include "type_rep.h"
+#include "../arena.h"
+#include "lsp_neg_memo.h"
+#include <stdbool.h>
+
+// Language-specific function metadata. Added at struct tail so existing
+// callers that memset to zero before populating other fields keep working.
+typedef enum {
+    CBM_FUNC_FLAG_NONE = 0,
+    CBM_FUNC_FLAG_PROPERTY = 1 << 0,        // @property -> obj.attr returns getter return
+    CBM_FUNC_FLAG_CLASSMETHOD = 1 << 1,     // @classmethod -> first arg is cls (the class)
+    CBM_FUNC_FLAG_STATICMETHOD = 1 << 2,    // @staticmethod -> no implicit self/cls
+    CBM_FUNC_FLAG_ABSTRACTMETHOD = 1 << 3,  // @abstractmethod -> still callable for resolution
+    CBM_FUNC_FLAG_OVERLOAD = 1 << 4,        // @overload entry — non-implementation stub
+    CBM_FUNC_FLAG_ASYNC = 1 << 5,           // async def — return is Coroutine[..., T]
+    CBM_FUNC_FLAG_GENERATOR = 1 << 6,       // contains yield — return is Generator[T, ...]
+    CBM_FUNC_FLAG_FINAL = 1 << 7,           // @final — overrides not allowed
+    CBM_FUNC_FLAG_RUST_TRAIT_IMPL = 1 << 8, // exact method from impl Trait for Type
+    CBM_FUNC_FLAG_RUST_ABSTRACT = 1 << 9,   // required trait method without a default body
+    /* Python only: more than one registered definition has this exact QN.
+     * Ordinary call resolution keeps its historical language-specific choice,
+     * but a function value cannot name one materialized definition exactly. */
+    CBM_FUNC_FLAG_AMBIGUOUS_BINDING = 1 << 10,
+} CBMFuncFlags;
+
+// Registered function/method with full type signature.
+typedef struct {
+    const char *qualified_name;    // e.g., "proj.pkg.TypeName.MethodName"
+    const char *receiver_type;     // e.g., "proj.pkg.TypeName" (NULL for functions)
+    const char *short_name;        // e.g., "MethodName"
+    const CBMType *signature;      // FUNC type with param/return types
+    const char **type_param_names; // NULL-terminated, e.g., ["T", "R", NULL] for generics
+    int min_params;                // Minimum required params (excluding defaulted). -1 = unknown.
+    int flags;                     // CBM_FUNC_FLAG_* bitfield
+    const char **decorator_qns;    // NULL-terminated decorator QNs (Python only); used for
+                                   // user-decorator return-type substitution.
+    /* Rust only: canonical trait QN for a concrete trait-impl method. It may
+     * remain NULL when raw cross-file provenance is ambiguous; the Rust trait
+     * flag still prevents that method from being mistaken for inherent. */
+    const char *impl_trait_qn;
+    /* Callable identity (#2061): this overload's signature suffix; its graph
+     * QN is qualified_name + sig. NULL = none (always, until enabled). */
+    const char *sig;
+} CBMRegisteredFunc;
+
+// Registered type with fields and method names.
+typedef struct {
+    const char *qualified_name;    // e.g., "proj.pkg.TypeName"
+    const char *short_name;        // e.g., "TypeName"
+    const char **field_names;      // NULL-terminated
+    const CBMType **field_types;   // NULL-terminated (parallel to field_names)
+    const char **method_names;     // NULL-terminated (short names)
+    const char **method_qns;       // NULL-terminated (qualified names, parallel)
+    const char **embedded_types;   // NULL-terminated (embedded/anonymous field type QNs)
+    const char *alias_of;          // QN of aliased type (type Foo = Bar), NULL if not alias
+    const char **type_param_names; // NULL-terminated, e.g., ["T", "K", NULL] for template classes
+    bool is_interface;
+    bool is_object; // Kotlin `object`/`companion object` singleton (member calls are static)
+
+    // --- TS-specific fields (NULL/empty for non-TS types — backward compatible) ---
+    // TS interfaces / object types may be callable: `interface F { (x:number): string }`.
+    const CBMType *call_signature; // FUNC type or NULL
+    // TS objects can have an index signature: `{ [key:string]: V }` or `{ [i:number]: V }`.
+    const CBMType *index_key_type;   // BUILTIN("string"|"number") or NULL
+    const CBMType *index_value_type; // V or NULL
+    // Generic constraints, parallel to type_param_names. NULL or shorter array means "any".
+    const CBMType **type_param_constraints; // NULL-terminated, parallel to type_param_names
+
+    // --- C#-specific (NULL for every other language) ---
+    // Declared namespace of a TOP-LEVEL project type. Graph QNs are path-derived,
+    // so this is the only way to bind a short name through `using` directives and
+    // enclosing namespaces (#2120). NULL for nested types and unknown namespaces.
+    const char *namespace_qn;
+} CBMRegisteredType;
+
+// Hash-table bucket entry. Chains collisions via next-index list for overload sets.
+typedef struct {
+    uint64_t hash;     // FNV-1a of key
+    int payload_index; // index into reg->funcs[] or reg->types[]
+    int next_index;    // -1 = end of chain; else index of next bucket entry in same chain
+    int slot;          // bucket slot this entry sits in (for resize)
+} CBMRegistryHashEntry;
+
+/* A borrowed immutable QN and stable array index, never a movable func pointer. */
+typedef struct {
+    const char *qualified_name;
+    int func_index;
+} CBMRegistryQNEntry;
+
+/* Type identities use their own representation; func_index remains unchanged. */
+typedef struct {
+    const char *qualified_name;
+    int type_index;
+} CBMRegistryTypeQNEntry;
+
+// The rows of funcs[] or types[] past their QN index, by name (see tail_arena).
+typedef struct {
+    CBMIdxMemo first; // a QN's first row among [start, synced)
+    int start;
+    int synced;
+} CBMRegistryTail;
+
+// Cross-file type/function registry.
+typedef struct CBMTypeRegistry {
+    CBMRegisteredFunc *funcs;
+    int func_count;
+    int func_cap;
+
+    CBMRegisteredType *types;
+    int type_count;
+    int type_cap;
+
+    CBMArena *arena; // owns all string data
+
+    /* Optional fallback registry (Tier 2 two-level lookup). When a
+     * lookup misses in this registry, it chains to `fallback`. Used by
+     * TS/PHP cross-LSP: a small per-file registry (the file's own
+     * AST-refined types) chains to a shared, immutable base registry
+     * (stdlib + all project defs) built once. NULL = no chaining. */
+    const struct CBMTypeRegistry *fallback;
+
+    // Hash indexes (built lazily by cbm_registry_finalize, NULL until then).
+    // Lookups fall back to linear scan when these are NULL.
+    int *func_qn_buckets; // bucket → first entry index in func_qn_entries; -1 = empty
+    CBMRegistryHashEntry *func_qn_entries; // entries indexed by linear order
+    int func_qn_bucket_count;
+    int func_qn_entry_count;
+
+    int *type_qn_buckets;
+    CBMRegistryHashEntry *type_qn_entries;
+    int type_qn_bucket_count;
+    int type_qn_entry_count;
+
+    // Set by a caller whose lookups run while the registry fills: the rows past
+    // the QN indexes are then found by name instead of by a scan, with the same
+    // answers. The arena must outlive those lookups. NULL keeps the scan.
+    CBMArena *tail_arena;
+    CBMRegistryTail func_tail;
+    CBMRegistryTail type_tail;
+
+    // Methods indexed by (receiver_type, short_name) — chain holds overloads.
+    int *method_buckets;
+    CBMRegistryHashEntry *method_entries;
+    int method_bucket_count;
+    int method_entry_count;
+
+    // Auxiliary short-name / embedded-type indexes. The type short-name index is
+    // opt-in after finalize; the others are built by finalize. Current C/C++ cross
+    // registries opt in, while other languages incur no construction cost.
+    // Type short-name index: fnv1a(last-'.'-segment of qualified_name) -> chain
+    // of TYPE indices. payload_index = type index.
+    int *type_short_buckets;
+    CBMRegistryHashEntry *type_short_entries;
+    int type_short_bucket_count;
+    int type_short_entry_count;
+    // Embedded-type index: fnv1a(bare last-'.'-segment of each embedded_type) -> chain
+    // of TYPE indices declaring it. payload_index = type index (a type may appear once
+    // per embedded entry; consumers dedup adjacent same-type via the iterator).
+    int *type_embed_buckets;
+    CBMRegistryHashEntry *type_embed_entries;
+    int type_embed_bucket_count;
+    int type_embed_entry_count;
+    // Free-function short-name index: fnv1a(short_name) -> chain of FREE-function
+    // (receiver_type==NULL) indices. payload_index = func index.
+    int *ffunc_short_buckets;
+    CBMRegistryHashEntry *ffunc_short_entries;
+    int ffunc_short_bucket_count;
+    int ffunc_short_entry_count;
+
+    /* Sealed / read-only. Set true by the cbm_X_build_cross_registry builders
+     * (c/cpp, python, c#, ts, go) right after finalize: a Tier-2 cross-registry
+     * is built ONCE and shared READ-ONLY across the parallel resolve workers.
+     * cbm_registry_add_func/_type no-op on a sealed registry, so a per-file
+     * resolver can never mutate the shared, finalized registry. Without this,
+     * post-finalize adds accumulate in a tail the hash index does not cover ->
+     * every lookup linear-scans it -> O(files*defs) (the Linux-kernel full-index
+     * hang) plus a heap data race across workers. */
+    bool read_only;
+    // Set before finalize by a caller whose lookups used to run unfinalized
+    // (#1527): the exact-QN and method indexes then chain entries in
+    // registration order, so a duplicated name resolves to its FIRST
+    // registration -- the answer the linear scan gave. Without it the
+    // hashed chains answer with the LAST registration (the Tier-2 behavior,
+    // left unchanged).
+    bool index_first_registered;
+
+    /* Additional prefix/duplicate index; exact lookup order is unchanged.
+     * Covers non-NULL QNs in funcs[0..func_qn_sorted_upto), ordered by (QN,index).
+     * Appended functions remain visible through a tail scan. */
+    CBMRegistryQNEntry *func_qn_sorted;
+    int func_qn_sorted_count;
+    int func_qn_sorted_upto;
+    CBMRegistryTypeQNEntry *type_qn_sorted;
+    int type_qn_sorted_count;
+    int type_qn_sorted_upto;
+
+    /* Module namespaces (Python re-exports). module_qns: every module symbol
+     * scope with definitions or namespace facts, sorted (strcmp). export_keys /
+     * export_targets: `module.name` -> the definition QN the module's imports
+     * bind that name to (re-exports), sorted by key. Built once by the language
+     * builder after finalize and before the seal; lookups are binary searches
+     * and never mutate. Separate from the func/type arrays by design: a
+     * re-export is an alias of a definition, never a definition of its own. */
+    const char **module_qns;
+    int module_count;
+    const char **export_keys;
+    const char **export_targets;
+    int export_count;
+} CBMTypeRegistry;
+
+// Initialize a registry.
+void cbm_registry_init(CBMTypeRegistry *reg, CBMArena *arena);
+
+// Build the hash indexes after all funcs/types have been added. Subsequent lookups
+// use O(1) hashed dispatch instead of linear scans. Calling this is OPTIONAL — the
+// linear-scan path remains correct. Single-file resolvers (small registries) skip
+// finalize and stay linear; project-wide registries (many thousands of entries) call
+// it once after pass-1.5 def-collection.
+void cbm_registry_finalize(CBMTypeRegistry *reg);
+
+// Like cbm_registry_finalize, but the hash-index allocations (buckets/entries)
+// come from idx_arena instead of reg->arena. Per-file cross resolvers MUST use
+// this with a scratch arena destroyed after the walk: their reg->arena is the
+// pipeline-lifetime result arena, and per-file index allocations accumulated
+// there add GBs across a large repo (FastAPI incremental test: +1.1 GB RSS).
+void cbm_registry_finalize_into(CBMTypeRegistry *reg, CBMArena *idx_arena);
+// Indexes only the types, for a registry that is still filling. A scan finds the first
+// registration, so these answer with that one; a later finalize replaces them.
+void cbm_registry_index_types_into(CBMTypeRegistry *reg, CBMArena *idx_arena);
+
+// Build the optional final-QN-segment type index. Call immediately after
+// finalization. Consumers that do not opt in avoid its type_count-sized allocation
+// and scan. Allocation failure preserves the iterator's linear fallback.
+void cbm_registry_build_type_short_index(CBMTypeRegistry *reg);
+
+// Register a function/method.
+void cbm_registry_add_func(CBMTypeRegistry *reg, CBMRegisteredFunc func);
+
+// Register a type.
+void cbm_registry_add_type(CBMTypeRegistry *reg, CBMRegisteredType type);
+
+// Look up a method by receiver type QN + method name.
+const CBMRegisteredFunc *cbm_registry_lookup_method(const CBMTypeRegistry *reg,
+                                                    const char *receiver_qn,
+                                                    const char *method_name);
+
+// Look up a type by qualified name.
+const CBMRegisteredType *cbm_registry_lookup_type(const CBMTypeRegistry *reg,
+                                                  const char *qualified_name);
+
+// Look up a function by qualified name.
+const CBMRegisteredFunc *cbm_registry_lookup_func(const CBMTypeRegistry *reg,
+                                                  const char *qualified_name);
+
+// Look up a symbol (type or function) in a package by short name.
+// package_qn is the package prefix (e.g., "proj.pkg").
+const CBMRegisteredFunc *cbm_registry_lookup_symbol(const CBMTypeRegistry *reg,
+                                                    const char *package_qn, const char *name);
+
+// Module-namespace lookups (CBMTypeRegistry.module_qns / export_keys); both
+// chain to reg->fallback. cbm_registry_lookup_export returns the definition QN
+// `module_qn.name` is re-exported as, or NULL.
+bool cbm_registry_is_module(const CBMTypeRegistry *reg, const char *module_qn);
+const char *cbm_registry_lookup_export(const CBMTypeRegistry *reg, const char *module_qn,
+                                       const char *name);
+
+/* Build in an arena that outlives every use (owner arena for shared registries,
+ * walk scratch for per-file registries). QN strings and registered identities
+ * must remain immutable while a snapshot is used; end its use before changing
+ * identities, then rebuild before querying again. Appends do not invalidate it.
+ * Never frees caller arenas. Sealed registries are unchanged. A failed rebuild
+ * discards the old order and queries scan the complete registry instead. */
+void cbm_registry_build_func_qn_order(CBMTypeRegistry *reg, CBMArena *arena);
+
+/* Boolean starts-with over all function/method QNs in the fallback chain.
+ * Does not allocate or mutate. NULL prefix is false; empty prefix matches any
+ * non-NULL QN. Optional visits accumulates compared entries, including tail
+ * scans; fully indexed links use a lower bound plus at most one candidate. */
+bool cbm_registry_has_func_qn_prefix(const CBMTypeRegistry *reg, const char *prefix,
+                                     uint64_t *visits);
+#ifdef CBM_ENABLE_TEST_SEAMS
+/* -1 disables; zero fails this allocation until reset; positive counts down. */
+void cbm_registry_test_qn_order_fail_after(int successful_allocations);
+#endif
+
+/* Optional type order, with the same ownership/immutability/rebuild contract as
+ * the function order. Build shared orders before sealing; queries never build. */
+void cbm_registry_build_type_qn_order(CBMTypeRegistry *reg, CBMArena *arena);
+
+/* Single-link literal-prefix query. Results retain original array order,
+ * including duplicate QNs, followed by the captured unindexed tail. Registry
+ * identities and the borrowed prefix must stay alive and unchanged while open;
+ * no concurrent registry mutation. No movable element pointers are retained.
+ * direct_only excludes a dot anywhere after the prefix (an empty suffix matches).
+ * With a non-NULL out, open always succeeds: missing inputs are empty; missing
+ * scratch, an invalid snapshot or optimization OOM selects the full linear scan.
+ * NULL out returns false; next(NULL) returns -1. Caller owns/destroys scratch.
+ * visits includes compared/inspected QNs in search, count, fill and tail passes,
+ * but excludes string-length work and sorting the original-index block. */
+typedef struct {
+    const CBMTypeRegistry *reg;
+    const char *prefix;
+    size_t prefix_len;
+    bool types;
+    bool direct_only;
+    int *indices;
+    int count;
+    int pos;
+    int tail_i;
+    int tail_end;
+    uint64_t visits;
+} CBMQNPrefixIter;
+
+bool cbm_registry_types_with_qn_prefix(const CBMTypeRegistry *reg, const char *prefix,
+                                       bool direct_only, CBMArena *scratch, CBMQNPrefixIter *out);
+bool cbm_registry_funcs_with_qn_prefix(const CBMTypeRegistry *reg, const char *prefix,
+                                       bool direct_only, CBMArena *scratch, CBMQNPrefixIter *out);
+int cbm_qn_prefix_iter_next(CBMQNPrefixIter *it);
+/* Preserve the existing chain iterator's original-head-only type shadow rule. */
+bool cbm_registry_type_shadowed(const CBMTypeRegistry *head, const CBMTypeRegistry *reg, int index);
+#ifdef CBM_ENABLE_TEST_SEAMS
+void cbm_registry_test_type_qn_order_fail_after(int successful_allocations);
+void cbm_registry_test_qn_prefix_block_fail_after(int successful_allocations);
+#endif
+
+// Resolve type alias chain: follow alias_of until concrete type found (max 16 levels).
+const CBMRegisteredType *cbm_registry_resolve_alias(const CBMTypeRegistry *reg,
+                                                    const char *type_qn);
+
+// Look up a method by receiver type QN + method name, following alias chains.
+const CBMRegisteredFunc *cbm_registry_lookup_method_aliased(const CBMTypeRegistry *reg,
+                                                            const char *receiver_qn,
+                                                            const char *method_name);
+
+// Look up a method by receiver type + name, preferring the overload with matching arg count.
+// Falls back to any match if no exact arg count match found.
+const CBMRegisteredFunc *cbm_registry_lookup_method_by_args(const CBMTypeRegistry *reg,
+                                                            const char *receiver_qn,
+                                                            const char *method_name, int arg_count);
+
+// Look up a free function by package + name, preferring matching arg count.
+const CBMRegisteredFunc *cbm_registry_lookup_symbol_by_args(const CBMTypeRegistry *reg,
+                                                            const char *package_qn,
+                                                            const char *name, int arg_count);
+
+// Look up a method by receiver type + name, scoring overloads by parameter type match.
+// arg_types may contain NULL entries for unknown types. Falls back to arg-count matching.
+const CBMRegisteredFunc *cbm_registry_lookup_method_by_types(const CBMTypeRegistry *reg,
+                                                             const char *receiver_qn,
+                                                             const char *method_name,
+                                                             const CBMType **arg_types,
+                                                             int arg_count);
+
+// Look up a free function by package + name, scoring overloads by parameter type match.
+const CBMRegisteredFunc *cbm_registry_lookup_symbol_by_types(const CBMTypeRegistry *reg,
+                                                             const char *package_qn,
+                                                             const char *name,
+                                                             const CBMType **arg_types,
+                                                             int arg_count);
+
+// --- Auxiliary index iterators (language fallback fast paths) ---
+//
+// Iterate registry TYPE indices whose qualified-name final segment may equal
+// `short_name`. When the optional index is present this walks its hash chain plus
+// any post-finalize tail; otherwise it degrades to the original full scan. Results
+// preserve ascending registry order. The index is a hash prefilter; callers must
+// re-check their exact predicate, including tail entries.
+// Built by finalize into type_short_buckets. Shared by the C++ short-name lookup
+// and by cs_resolve_type_name's step-9 fallback, which scanned type_count per
+// unresolved name — quadratic against the shared Tier-2 registry.
+typedef struct {
+    const CBMTypeRegistry *reg;
+    uint64_t hash;
+    int chain_idx;
+    int tail_i;
+    int tail_end;
+    /* Chain mode (see cbm_registry_*_chain): when this registry is exhausted
+     * the iterator re-opens on reg->fallback; `reg` then names the registry
+     * the yielded index belongs to, so callers deref it->reg->types[i], never
+     * the registry they started from. `key` re-opens the same query on the
+     * next link; NULL = linear scan. `shadow` is the head: fallback entries
+     * whose qualified_name the head also holds are skipped (an overlay copy
+     * hides its base original). */
+    bool chain;
+    const char *key;
+    const CBMTypeRegistry *shadow;
+} CBMTypeShortIter;
+void cbm_registry_types_by_short_name(const CBMTypeRegistry *reg, const char *short_name,
+                                      CBMTypeShortIter *out);
+int cbm_type_short_iter_next(CBMTypeShortIter *it);
+
+// Iterate registry TYPE indices whose embedded_types contain an entry whose BARE
+// name (last '.'-segment) equals `bare`. On a finalized registry this walks the
+// embedded-type index plus any post-finalize tail; on an unfinalized registry it
+// degrades to a full linear scan over all types (identical candidate set). Each
+// matching type index is yielded at most once, in ascending registry order. The
+// index is a bare-name PREFILTER — the caller MUST still apply its own exact
+// predicate on each yielded type. Read-only, allocation-free. Usage:
+//   CBMTypeEmbedIter it; cbm_registry_types_by_embedded_bare(reg, bare, &it);
+//   int ti; while ((ti = cbm_type_embed_iter_next(&it)) >= 0) { ... reg->types[ti] ... }
+typedef struct {
+    const CBMTypeRegistry *reg;
+    uint64_t hash;
+    int chain_idx; // next entry in the embed chain, or -1
+    int tail_i;    // next tail/linear type index
+    int tail_end;  // reg->type_count snapshot
+    int prev_type; // last yielded type index (adjacent-dedup); -1 = none
+    bool chain;
+    const char *key;
+    const CBMTypeRegistry *shadow;
+} CBMTypeEmbedIter;
+void cbm_registry_types_by_embedded_bare(const CBMTypeRegistry *reg, const char *bare,
+                                         CBMTypeEmbedIter *out);
+int cbm_type_embed_iter_next(CBMTypeEmbedIter *it);
+
+// Iterate FREE-function (receiver_type==NULL) indices whose short_name equals
+// `short_name`. Same finalized/unfinalized behavior as above; caller re-checks its
+// own predicate. Read-only, allocation-free.
+typedef struct {
+    const CBMTypeRegistry *reg;
+    uint64_t hash;
+    int chain_idx;
+    int tail_i;
+    int tail_end;
+    bool chain;
+    const char *key;
+    const CBMTypeRegistry *shadow;
+} CBMFreeFuncIter;
+
+void cbm_registry_free_funcs_by_short_name(const CBMTypeRegistry *reg, const char *short_name,
+                                           CBMFreeFuncIter *out);
+int cbm_free_func_iter_next(CBMFreeFuncIter *it);
+
+// Iterate function indices for one exact (receiver QN, method name) key.  This
+// exposes the existing finalized method bucket without making Rust scan the
+// project-wide func array merely to distinguish inherent and trait-impl
+// entries that intentionally share the same source-level QN.  The caller may
+// filter on language-specific flags. Read-only and allocation-free.
+typedef struct {
+    const CBMTypeRegistry *reg;
+    const char *receiver_qn;
+    const char *method_name;
+    uint64_t hash;
+    int chain_idx;
+    int tail_i;
+    int tail_end;
+    bool chain;
+    const CBMTypeRegistry *shadow;
+} CBMMethodIter;
+void cbm_registry_methods(const CBMTypeRegistry *reg, const char *receiver_qn,
+                          const char *method_name, CBMMethodIter *out);
+int cbm_method_iter_next(CBMMethodIter *it);
+
+/* ── Chain-aware iteration and copy-on-write (per-file overlay contract) ──
+ *
+ * A resolve walk is handed a per-file OVERLAY registry chained (`fallback`) to
+ * the immutable shared base. Lookups already chain; these make the index
+ * iterators and the whole-registry scans chain too, and give a walk one way
+ * to refine an entry: copy it into the head first. Nothing behind `fallback`
+ * is ever written. Every yielded index belongs to it->reg at that moment. */
+void cbm_registry_types_by_short_name_chain(const CBMTypeRegistry *head, const char *short_name,
+                                            CBMTypeShortIter *out);
+void cbm_registry_types_by_embedded_bare_chain(const CBMTypeRegistry *head, const char *bare,
+                                               CBMTypeEmbedIter *out);
+void cbm_registry_free_funcs_by_short_name_chain(const CBMTypeRegistry *head,
+                                                 const char *short_name, CBMFreeFuncIter *out);
+void cbm_registry_methods_chain(const CBMTypeRegistry *head, const char *receiver_qn,
+                                const char *method_name, CBMMethodIter *out);
+/* Linear scans over every func / type in the chain (head first, shadowed
+ * base entries skipped). Same iterator types, same it->reg contract. */
+void cbm_registry_all_funcs_chain(const CBMTypeRegistry *head, CBMFreeFuncIter *out);
+void cbm_registry_all_types_chain(const CBMTypeRegistry *head, CBMTypeShortIter *out);
+
+/* The writable entry for qualified_name: the head's own entry if it has one,
+ * else a copy of the first fallback entry added to the head (copy-on-write),
+ * else NULL. NULL also when the head is sealed (read_only) -- a walk must never
+ * mutate a shared registry, so the caller skips the refinement, exactly as the
+ * sealed-registry no-op in cbm_registry_add_func does today. */
+CBMRegisteredFunc *cbm_registry_func_for_update(CBMTypeRegistry *head, const char *qualified_name);
+CBMRegisteredType *cbm_registry_type_for_update(CBMTypeRegistry *head, const char *qualified_name);
+/* The first function or type registered under this name in reg itself, whichever order
+ * its index answers lookups in; a fallback registry is not consulted. */
+CBMRegisteredFunc *cbm_registry_first_own_func(CBMTypeRegistry *reg, const char *qualified_name);
+CBMRegisteredType *cbm_registry_first_own_type(CBMTypeRegistry *reg, const char *qualified_name);
+
+// --- TS-specific helpers (return NULL for types without these signatures) ---
+
+// If the type has a call signature (e.g., `interface F { (x:number): string }`), return
+// a synthesised CBMRegisteredFunc whose qualified_name is "<type_qn>.__call" and
+// short_name is "__call". Returns NULL if no call signature is present, the type is
+// missing, or the receiver type was not registered. Caller must NOT free.
+const CBMRegisteredFunc *cbm_registry_lookup_callable(const CBMTypeRegistry *reg, CBMArena *arena,
+                                                      const char *type_qn);
+
+// If the type has an index signature, return the value type produced by indexing with
+// the given key type (string vs number). Returns NULL if no matching index signature.
+const CBMType *cbm_registry_lookup_index_signature(const CBMTypeRegistry *reg, const char *type_qn,
+                                                   const CBMType *key_type);
+
+#endif // CBM_LSP_TYPE_REGISTRY_H

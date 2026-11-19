@@ -1,0 +1,1561 @@
+/*
+ * compat_fs.c — Portable file system operations.
+ *
+ * POSIX: direct wrappers around opendir/readdir/closedir, popen/pclose, mkdir, unlink.
+ * Windows: FindFirstFile/FindNextFile, _popen/_pclose, _mkdir, _unlink.
+ */
+#include "foundation/constants.h"
+#include "foundation/compat_fs.h"
+#include "foundation/compat_fs_internal.h"
+#include "foundation/git_env.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+
+#ifdef _WIN32
+
+/* ── Windows implementation ────────────────────────────────── */
+
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+
+#include <aclapi.h>
+#include <direct.h>   /* _wmkdir */
+#include <errno.h>    /* errno for spawn-failure logging */
+#include <fcntl.h>    /* _O_RDONLY */
+#include <io.h>       /* _wunlink, _open_osfhandle, _close */
+#include <share.h>    /* _SH_DENYRW */
+#include <sys/stat.h> /* _S_IREAD */
+#include <stdint.h>   /* intptr_t */
+#include "foundation/log.h"
+#include "foundation/win_utf8.h"
+
+struct cbm_dir {
+    HANDLE find_handle;
+    WIN32_FIND_DATAW find_data;
+    wchar_t wide_pattern[CBM_PATH_MAX];
+    cbm_dirent_t entry;
+    bool first;
+    bool done;
+};
+
+cbm_dir_t *cbm_opendir(const char *path) {
+    if (!path) {
+        return NULL;
+    }
+    wchar_t *wpath = cbm_path_to_wide(path);
+    if (!wpath) {
+        return NULL;
+    }
+
+    size_t wlen = wcslen(wpath);
+    if (wlen == 0 || wlen + 2 >= CBM_PATH_MAX) {
+        free(wpath);
+        return NULL;
+    }
+
+    cbm_dir_t *d = (cbm_dir_t *)calloc(CBM_ALLOC_ONE, sizeof(cbm_dir_t));
+    if (!d) {
+        free(wpath);
+        return NULL;
+    }
+
+    wmemcpy(d->wide_pattern, wpath, wlen + 1);
+    wchar_t *p = d->wide_pattern + wlen - SKIP_ONE;
+    if (*p != L'\\' && *p != L'/') {
+        ++p;
+        *p++ = L'\\';
+    } else {
+        ++p;
+    }
+    *p++ = L'*';
+    *p = L'\0';
+    free(wpath);
+
+    d->find_handle = FindFirstFileW(d->wide_pattern, &d->find_data);
+    if (d->find_handle == INVALID_HANDLE_VALUE) {
+        free(d);
+        return NULL;
+    }
+    d->first = true;
+    d->done = false;
+    return d;
+}
+
+cbm_dirent_t *cbm_readdir(cbm_dir_t *d) {
+    if (!d || d->done) {
+        return NULL;
+    }
+    if (!d->first) {
+        if (!FindNextFileW(d->find_handle, &d->find_data)) {
+            d->done = true;
+            return NULL;
+        }
+    }
+    d->first = false;
+
+    while (d->find_data.cFileName[0] == L'.' &&
+           (d->find_data.cFileName[1] == L'\0' ||
+            (d->find_data.cFileName[1] == L'.' && d->find_data.cFileName[2] == L'\0'))) {
+        if (!FindNextFileW(d->find_handle, &d->find_data)) {
+            d->done = true;
+            return NULL;
+        }
+    }
+
+    char *u8 = cbm_wide_to_utf8(d->find_data.cFileName);
+    if (!u8) {
+        d->done = true;
+        return NULL;
+    }
+    size_t nlen = strlen(u8);
+    if (nlen >= CBM_DIRENT_NAME_MAX) {
+        nlen = CBM_DIRENT_NAME_MAX - SKIP_ONE;
+    }
+    memcpy(d->entry.name, u8, nlen);
+    d->entry.name[nlen] = '\0';
+    free(u8);
+    d->entry.is_dir = (d->find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+    d->entry.d_type = 0;
+    return &d->entry;
+}
+
+int cbm_path_info_utf8(const char *path, cbm_path_info_t *out) {
+    if (!path || !out) {
+        return CBM_PATH_INFO_UNAVAILABLE;
+    }
+    wchar_t *wpath = cbm_path_to_wide(path);
+    if (!wpath) {
+        return CBM_PATH_INFO_UNAVAILABLE;
+    }
+    WIN32_FILE_ATTRIBUTE_DATA data;
+    BOOL ok = GetFileAttributesExW(wpath, GetFileExInfoStandard, &data);
+    DWORD path_error = ok ? ERROR_SUCCESS : GetLastError();
+    free(wpath);
+    if (!ok) {
+        return path_error == ERROR_FILE_NOT_FOUND || path_error == ERROR_PATH_NOT_FOUND
+                   ? CBM_PATH_INFO_ABSENT
+                   : CBM_PATH_INFO_UNAVAILABLE;
+    }
+    memset(out, 0, sizeof(*out));
+    out->is_directory = (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+    out->is_symlink = (data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+    out->is_regular = !out->is_directory && !out->is_symlink;
+    /* Compose the 64-bit values arithmetically rather than through
+     * ULARGE_INTEGER. Writing .LowPart/.HighPart and reading .QuadPart is
+     * correct -- it is a union -- but cppcheck does not model that aliasing and
+     * reports all four halves as assigned-but-never-read. This form says the
+     * same thing without the union, so the checker needs no exception. */
+    uint64_t file_size = ((uint64_t)data.nFileSizeHigh << 32) | (uint64_t)data.nFileSizeLow;
+    out->size = (int64_t)file_size;
+    uint64_t written = ((uint64_t)data.ftLastWriteTime.dwHighDateTime << 32) |
+                       (uint64_t)data.ftLastWriteTime.dwLowDateTime;
+    enum { NANOSECONDS_PER_WINDOWS_TICK = 100 };
+    const uint64_t windows_to_unix_ticks = UINT64_C(116444736000000000);
+    out->mtime_ns =
+        written >= windows_to_unix_ticks
+            ? (int64_t)((written - windows_to_unix_ticks) * NANOSECONDS_PER_WINDOWS_TICK)
+            : 0;
+    return CBM_PATH_INFO_OK;
+}
+
+void cbm_closedir(cbm_dir_t *d) {
+    if (d) {
+        if (d->find_handle != INVALID_HANDLE_VALUE) {
+            FindClose(d->find_handle);
+        }
+        free(d);
+    }
+}
+
+/* Windows _popen replacement that inherits ONLY the child's stdout pipe.
+ *
+ * The CRT's _popen uses CreateProcess(bInheritHandles=TRUE), which leaks EVERY
+ * inheritable handle we hold into the child — listening/client sockets, the
+ * Winsock/AFD helper handles created by WSAStartup, the MCP stdio pipe, etc.
+ * When the child is git-for-Windows (MSYS2/Cygwin runtime), its startup walks
+ * every inherited handle and calls NtQueryObject on each to classify it; on an
+ * inherited socket/AFD handle NtQueryObject deadlocks. Since our UI server runs
+ * requests on a single thread, that wedges the whole server (list_projects,
+ * which shells out to git per project, never returns → the web UI hangs).
+ *
+ * The fix: spawn via CreateProcessW with STARTUPINFOEXW + an explicit
+ * PROC_THREAD_ATTRIBUTE_HANDLE_LIST containing only the stdout write-end and a
+ * NUL handle for stdin/stderr. Nothing else crosses into git, so there is no
+ * foreign handle to deadlock on. POSIX popen() already sets O_CLOEXEC on its
+ * pipe, so the POSIX path is unchanged.
+ *
+ * There is deliberately NO fallback to _popen when the isolated spawn fails:
+ * falling back would silently re-arm the deadlock. cbm_popen logs a structured
+ * warning and returns NULL instead (every call site handles NULL). */
+
+enum { CBM_POPEN_MAX = 16 };
+static struct {
+    FILE *fp;
+    HANDLE proc;
+} g_popen_tab[CBM_POPEN_MAX];
+static CRITICAL_SECTION g_popen_lock;
+static INIT_ONCE g_popen_once = INIT_ONCE_STATIC_INIT;
+
+/* Test hook (declared in compat_fs_internal.h): 1 when the most recent
+ * cbm_popen(..., "r") stream came from the isolated spawn. Test-only
+ * observable; not synchronized across threads. */
+static volatile LONG g_popen_last_isolated = 0;
+
+int cbm_popen_last_was_isolated(void) {
+    return (int)g_popen_last_isolated;
+}
+
+static BOOL CALLBACK cbm_popen_init(PINIT_ONCE once, PVOID param, PVOID *ctx) {
+    (void)once;
+    (void)param;
+    (void)ctx;
+    InitializeCriticalSection(&g_popen_lock);
+    return TRUE;
+}
+
+/* Resolve the shell explicitly — %COMSPEC%, else <system dir>\cmd.exe — so it
+ * can be passed as lpApplicationName and CreateProcess never walks the search
+ * path (no cmd.exe planting from a hostile CWD). Heap string; caller frees. */
+static wchar_t *cbm_resolve_comspec(void) {
+    wchar_t buf[MAX_PATH];
+    const wchar_t suffix[] = L"\\cmd.exe";
+    DWORD n = GetEnvironmentVariableW(L"COMSPEC", buf, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) {
+        UINT sn = GetSystemDirectoryW(buf, MAX_PATH);
+        if (sn == 0 || (size_t)sn + wcslen(suffix) >= MAX_PATH) {
+            return NULL;
+        }
+        wmemcpy(buf + sn, suffix, wcslen(suffix) + 1);
+    }
+    return _wcsdup(buf);
+}
+
+/* On failure returns NULL with *stage naming the failing step and *gle the
+ * GetLastError value captured at that step (0 when errno is the signal). */
+/* env: a CREATE_UNICODE_ENVIRONMENT block for the child, or NULL to inherit. */
+static FILE *cbm_popen_isolated(const char *cmd, const wchar_t *env, const char **stage,
+                                DWORD *gle) {
+    *stage = "";
+    *gle = 0;
+    InitOnceExecuteOnce(&g_popen_once, cbm_popen_init, NULL, NULL);
+
+    SECURITY_ATTRIBUTES sa;
+    sa.nLength = sizeof(sa);
+    sa.lpSecurityDescriptor = NULL;
+    sa.bInheritHandle = TRUE;
+
+    HANDLE rd = NULL, wr = NULL;
+    if (!CreatePipe(&rd, &wr, &sa, 0)) {
+        *stage = "pipe";
+        *gle = GetLastError();
+        return NULL;
+    }
+    /* The parent read-end must never cross into the child. */
+    SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);
+
+    /* NUL for the child's stdin/stderr so it never touches our real stdin
+     * pipe. If NUL cannot be opened, fail: STARTF_USESTDHANDLES slots must
+     * never carry INVALID_HANDLE_VALUE. */
+    HANDLE nul = CreateFileW(L"NUL", GENERIC_READ | GENERIC_WRITE,
+                             FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_EXISTING, 0, NULL);
+    if (nul == INVALID_HANDLE_VALUE) {
+        *stage = "nul";
+        *gle = GetLastError();
+        CloseHandle(rd);
+        CloseHandle(wr);
+        return NULL;
+    }
+
+    HANDLE inherit[2];
+    inherit[0] = wr;
+    inherit[1] = nul;
+
+    SIZE_T attr_sz = 0;
+    InitializeProcThreadAttributeList(NULL, 1, 0, &attr_sz);
+    LPPROC_THREAD_ATTRIBUTE_LIST attr = (LPPROC_THREAD_ATTRIBUTE_LIST)malloc(attr_sz);
+    BOOL attr_init = attr && InitializeProcThreadAttributeList(attr, 1, 0, &attr_sz);
+    BOOL prepared =
+        attr_init && UpdateProcThreadAttribute(attr, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherit,
+                                               sizeof(inherit), NULL, NULL);
+    DWORD attr_gle = prepared ? 0 : GetLastError();
+
+    STARTUPINFOEXW si;
+    ZeroMemory(&si, sizeof(si));
+    si.StartupInfo.cb = sizeof(si);
+    si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    si.StartupInfo.hStdInput = nul;
+    si.StartupInfo.hStdOutput = wr;
+    si.StartupInfo.hStdError = nul;
+    si.lpAttributeList = attr;
+
+    /* Run through cmd.exe /c so command quoting and `2>NUL` behave as under
+     * _popen. The command line is heap-composed (no fixed-size truncation)
+     * and widened via UTF-8 so non-ASCII repo paths survive intact. */
+    wchar_t *app = cbm_resolve_comspec();
+    wchar_t *wcmdline = NULL;
+    if (app) {
+        size_t u8len = strlen(cmd) + sizeof("cmd.exe /c ");
+        char *u8 = (char *)malloc(u8len);
+        if (u8) {
+            snprintf(u8, u8len, "cmd.exe /c %s", cmd);
+            wcmdline = cbm_utf8_to_wide(u8);
+            free(u8);
+        }
+    }
+
+    PROCESS_INFORMATION pi;
+    ZeroMemory(&pi, sizeof(pi));
+    BOOL created = FALSE;
+    if (!prepared) {
+        *stage = "attr";
+        *gle = attr_gle;
+    } else if (!app || !wcmdline) {
+        *stage = "cmdline";
+        *gle = ERROR_NOT_ENOUGH_MEMORY;
+    } else {
+        DWORD flags = EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW;
+        if (env) {
+            flags |= CREATE_UNICODE_ENVIRONMENT;
+        }
+        created = CreateProcessW(app, wcmdline, NULL, NULL, TRUE, flags, (LPVOID)env, NULL,
+                                 &si.StartupInfo, &pi);
+        if (!created) {
+            *stage = "spawn";
+            *gle = GetLastError();
+        }
+    }
+
+    free(app);
+    free(wcmdline);
+    if (attr) {
+        if (attr_init) {
+            DeleteProcThreadAttributeList(attr);
+        }
+        free(attr);
+    }
+    CloseHandle(wr); /* the child owns the write-end now */
+    CloseHandle(nul);
+    if (!created) {
+        CloseHandle(rd);
+        return NULL;
+    }
+    CloseHandle(pi.hThread);
+
+    int fd = _open_osfhandle((intptr_t)rd, _O_RDONLY);
+    if (fd == -1) {
+        *stage = "osfhandle";
+        CloseHandle(rd);
+        CloseHandle(pi.hProcess);
+        return NULL;
+    }
+    FILE *fp = _fdopen(fd, "r"); /* takes ownership of fd/rd */
+    if (!fp) {
+        *stage = "fdopen";
+        _close(fd);
+        CloseHandle(pi.hProcess);
+        return NULL;
+    }
+
+    EnterCriticalSection(&g_popen_lock);
+    for (int i = 0; i < CBM_POPEN_MAX; i++) {
+        if (!g_popen_tab[i].fp) {
+            g_popen_tab[i].fp = fp;
+            g_popen_tab[i].proc = pi.hProcess;
+            LeaveCriticalSection(&g_popen_lock);
+            return fp;
+        }
+    }
+    LeaveCriticalSection(&g_popen_lock);
+    /* Table full (shouldn't happen): don't leak the process handle. */
+    *stage = "table";
+    CloseHandle(pi.hProcess);
+    fclose(fp);
+    return NULL;
+}
+
+static FILE *cbm_popen_read_isolated(const char *cmd, const wchar_t *env) {
+    const char *stage = "";
+    DWORD gle = 0;
+    FILE *fp = cbm_popen_isolated(cmd, env, &stage, &gle);
+    g_popen_last_isolated = (fp != NULL);
+    if (!fp) {
+        char glebuf[CBM_SZ_16];
+        char errnobuf[CBM_SZ_16];
+        snprintf(glebuf, sizeof(glebuf), "%lu", (unsigned long)gle);
+        snprintf(errnobuf, sizeof(errnobuf), "%d", errno);
+        cbm_log_warn("compat.popen_isolated_failed", "stage", stage, "gle", glebuf, "errno",
+                     errnobuf);
+    }
+    return fp;
+}
+
+FILE *cbm_popen(const char *cmd, const char *mode) {
+    /* Our git shell-outs are all read-mode; they MUST use the isolated
+     * spawn. On failure, log and fail the call — never fall back to
+     * _popen, whose full handle inheritance re-arms the UI hang (#798). */
+    if (mode && mode[0] == 'r' && mode[1] == '\0') {
+        return cbm_popen_read_isolated(cmd, NULL);
+    }
+    g_popen_last_isolated = 0;
+    return _popen(cmd, mode);
+}
+
+FILE *cbm_popen_git(const char *cmd) {
+    /* Fail closed: without the scrubbed block the child would inherit a
+     * caller's GIT_DIR and read the wrong repository (#2003). */
+    wchar_t *env = cbm_git_child_env_block();
+    if (!env) {
+        cbm_log_warn("compat.popen_git_env_failed", "stage", "env_block");
+        return NULL;
+    }
+    FILE *fp = cbm_popen_read_isolated(cmd, env);
+    cbm_git_child_env_free(env); /* CreateProcessW copies the block into the child */
+    return fp;
+}
+
+int cbm_pclose(FILE *f) {
+    InitOnceExecuteOnce(&g_popen_once, cbm_popen_init, NULL, NULL);
+
+    HANDLE proc = NULL;
+    EnterCriticalSection(&g_popen_lock);
+    for (int i = 0; i < CBM_POPEN_MAX; i++) {
+        if (g_popen_tab[i].fp == f) {
+            proc = g_popen_tab[i].proc;
+            g_popen_tab[i].fp = NULL;
+            g_popen_tab[i].proc = NULL;
+            break;
+        }
+    }
+    LeaveCriticalSection(&g_popen_lock);
+
+    if (!proc) {
+        return _pclose(f); /* opened via _popen (non-read mode) */
+    }
+    fclose(f);
+    WaitForSingleObject(proc, INFINITE);
+    DWORD code = 0;
+    BOOL got = GetExitCodeProcess(proc, &code);
+    CloseHandle(proc);
+    return got ? (int)code : -1;
+}
+
+FILE *cbm_fopen(const char *path, const char *mode) {
+    wchar_t *wpath = cbm_path_to_wide(path);
+    if (!wpath) {
+        return NULL;
+    }
+    wchar_t *wmode = cbm_utf8_to_wide(mode);
+    if (!wmode) {
+        free(wpath);
+        return NULL;
+    }
+    FILE *f = _wfopen(wpath, wmode);
+    free(wpath);
+    free(wmode);
+    return f;
+}
+
+/* Stamp the exact current user as owner and apply an owner-only protected
+ * DACL on a directory cbm just created. Under the Administrators-default-owner
+ * policy (server/runner images), a plain _wmkdir yields an Administrators-owned
+ * directory that the launcher/activation exact-owner validators reject. Only
+ * freshly created directories are stamped; pre-existing ones keep their owner. */
+static void cbm_windows_stamp_dir_owner(const wchar_t *path) {
+    HANDLE token = NULL;
+    TOKEN_USER *user = NULL;
+    PACL acl = NULL;
+    DWORD needed = 0U;
+    if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token) &&
+        !GetTokenInformation(token, TokenUser, NULL, 0U, &needed) &&
+        GetLastError() == ERROR_INSUFFICIENT_BUFFER && (user = malloc(needed)) != NULL &&
+        GetTokenInformation(token, TokenUser, user, needed, &needed) && user->User.Sid &&
+        IsValidSid(user->User.Sid)) {
+        EXPLICIT_ACCESSW access;
+        memset(&access, 0, sizeof(access));
+        access.grfAccessPermissions = GENERIC_ALL;
+        access.grfAccessMode = SET_ACCESS;
+        access.grfInheritance = SUB_CONTAINERS_AND_OBJECTS_INHERIT;
+        access.Trustee.TrusteeForm = TRUSTEE_IS_SID;
+        access.Trustee.TrusteeType = TRUSTEE_IS_USER;
+        access.Trustee.ptstrName = (LPWSTR)user->User.Sid;
+        HANDLE directory =
+            CreateFileW(path, WRITE_OWNER | WRITE_DAC | READ_CONTROL,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
+                        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+        if (directory != INVALID_HANDLE_VALUE) {
+            if (SetEntriesInAclW(1U, &access, NULL, &acl) == ERROR_SUCCESS) {
+                (void)SetSecurityInfo(directory, SE_FILE_OBJECT,
+                                      OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION |
+                                          PROTECTED_DACL_SECURITY_INFORMATION,
+                                      user->User.Sid, NULL, acl, NULL);
+            }
+            (void)CloseHandle(directory);
+        }
+    }
+    if (acl) {
+        (void)LocalFree(acl);
+    }
+    free(user);
+    if (token) {
+        (void)CloseHandle(token);
+    }
+}
+
+static bool cbm_windows_mkdir_component(wchar_t *path) {
+    bool created = _wmkdir(path) == 0;
+    if (!created && errno != EEXIST) {
+        return false;
+    }
+    DWORD attributes = GetFileAttributesW(path);
+    if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0U ||
+        (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0U) {
+        return false;
+    }
+    if (created) {
+        cbm_windows_stamp_dir_owner(path);
+    }
+    return true;
+}
+
+bool cbm_mkdir_p(const char *path, int mode) {
+    (void)mode;
+    if (!path || path[0] == '\0') {
+        return false;
+    }
+    wchar_t *wpath = cbm_path_to_wide(path);
+    if (!wpath) {
+        return false;
+    }
+
+    size_t wlen = wcslen(wpath);
+    wchar_t *tmp = (wchar_t *)malloc((wlen + 1) * sizeof(wchar_t));
+    if (!tmp) {
+        free(wpath);
+        return false;
+    }
+    wmemcpy(tmp, wpath, wlen + 1);
+    size_t start = wlen > 0U && cbm_win_path_separator(tmp[0]) ? 1U : 0U;
+    if (wlen >= 8U && _wcsnicmp(tmp, L"\\\\?\\UNC\\", 8U) == 0) {
+        /* Extended UNC roots are \\?\UNC\server\share\. Neither the server
+         * nor share component is creatable; begin with the first descendant. */
+        size_t separators = 0U;
+        start = 8U;
+        while (start < wlen && separators < 2U) {
+            if (cbm_win_path_separator(tmp[start])) {
+                separators++;
+            }
+            start++;
+        }
+    } else if (wlen >= 7U && wcsncmp(tmp, L"\\\\?\\", 4U) == 0 && tmp[5] == L':' &&
+               cbm_win_path_separator(tmp[6])) {
+        start = 7U;
+    } else if (wlen >= 3U && tmp[1] == L':' && cbm_win_path_separator(tmp[2])) {
+        start = 3U;
+    } else if (wlen >= 2U && cbm_win_path_separator(tmp[0]) && cbm_win_path_separator(tmp[1])) {
+        size_t separators = 0U;
+        start = 2U;
+        while (start < wlen && separators < 2U) {
+            if (cbm_win_path_separator(tmp[start])) {
+                separators++;
+            }
+            start++;
+        }
+    }
+    bool ok = true;
+    for (wchar_t *p = tmp + start; ok && *p; p++) {
+        if (cbm_win_path_separator(*p)) {
+            if (p == tmp || cbm_win_path_separator(p[-1])) {
+                continue;
+            }
+            wchar_t separator = *p;
+            *p = L'\0';
+            ok = cbm_windows_mkdir_component(tmp);
+            *p = separator;
+        }
+    }
+    if (ok) {
+        ok = cbm_windows_mkdir_component(tmp);
+    }
+    free(tmp);
+    free(wpath);
+    return ok;
+}
+
+bool cbm_mkdir_p_ex(const char *path, int mode, unsigned int policy) {
+    /* The Windows walk has its own reparse-point policy (see
+     * cbm_windows_mkdir_component); the POSIX symlink policy does not apply. */
+    (void)policy;
+    return cbm_mkdir_p(path, mode);
+}
+
+int cbm_unlink(const char *path) {
+    wchar_t *wpath = cbm_path_to_wide(path);
+    if (!wpath) {
+        return CBM_NOT_FOUND;
+    }
+    int ret = _wunlink(wpath);
+    free(wpath);
+    return ret;
+}
+
+int cbm_rmdir(const char *path) {
+    wchar_t *wpath = cbm_path_to_wide(path);
+    if (!wpath) {
+        return CBM_NOT_FOUND;
+    }
+    int ret = _wrmdir(wpath);
+    free(wpath);
+    return ret;
+}
+
+int cbm_lockfile_open(const char *path, bool create) {
+    wchar_t *wpath = cbm_path_to_wide(path);
+    if (!wpath) {
+        errno = EINVAL;
+        return -1;
+    }
+    int flags = _O_RDWR | _O_BINARY | _O_NOINHERIT | (create ? _O_CREAT : 0);
+    /* _SH_DENYRW: every other open of this file, from any process, fails
+     * with EACCES until this descriptor closes -- including at death. */
+    int fd = _wsopen(wpath, flags, _SH_DENYRW, _S_IREAD | _S_IWRITE);
+    free(wpath);
+    return fd;
+}
+
+void cbm_lockfile_close(int fd) {
+    if (fd >= 0) {
+        (void)_close(fd);
+    }
+}
+
+/* Build a properly-quoted Windows command line from an argv array.
+ * Returns a heap-allocated wide string, or NULL on allocation failure.
+ * Quoting follows the MSVC CRT convention: arguments containing spaces,
+ * tabs, or double-quotes are wrapped in double-quotes, with backslashes
+ * before a closing quote doubled and the quote itself escaped. Argument
+ * bytes are treated as UTF-8 and converted to wide via cbm_utf8_to_wide,
+ * so non-ASCII arguments (e.g. a non-ASCII %USERPROFILE%) survive intact.
+ * Declared in compat_fs_internal.h so the test suite can drive it. */
+wchar_t *cbm_build_cmdline(const char *const *argv) {
+    /* First pass: compute required buffer size. */
+    size_t total = 1; /* NUL terminator */
+    for (int i = 0; argv[i]; i++) {
+        const char *arg = argv[i];
+        bool needs_quote = (arg[0] == '\0');
+        for (const char *p = arg; *p; p++) {
+            if (*p == ' ' || *p == '\t' || *p == '"') {
+                needs_quote = true;
+            }
+        }
+        if (i > 0) {
+            total++; /* space separator */
+        }
+        if (needs_quote) {
+            total += 2; /* opening and closing quote */
+            size_t backslashes = 0;
+            for (const char *p = arg; *p; p++) {
+                if (*p == '\\') {
+                    backslashes++;
+                } else if (*p == '"') {
+                    total += backslashes + 1; /* double backslashes + escape backslash */
+                    backslashes = 0;
+                } else {
+                    backslashes = 0;
+                }
+                total++;
+            }
+            /* Trailing backslashes before closing quote must be doubled. */
+            total += backslashes;
+        } else {
+            total += strlen(arg);
+        }
+    }
+
+    /* Build the quoted command line in UTF-8 first, then widen it as a
+     * whole via cbm_utf8_to_wide. Every character the quoting logic acts
+     * on (space, tab, '"', '\\') is ASCII and, by UTF-8's design, never
+     * appears inside a multibyte sequence, so operating on raw bytes here
+     * is safe and keeps multibyte argument bytes intact for conversion. */
+    char *buf = (char *)malloc(total);
+    if (!buf) {
+        return NULL;
+    }
+
+    /* Second pass: write the command line bytes. */
+    char *w = buf;
+    for (int i = 0; argv[i]; i++) {
+        const char *arg = argv[i];
+        bool needs_quote = (arg[0] == '\0');
+        for (const char *p = arg; *p; p++) {
+            if (*p == ' ' || *p == '\t' || *p == '"') {
+                needs_quote = true;
+                break;
+            }
+        }
+        if (i > 0) {
+            *w++ = ' ';
+        }
+        if (needs_quote) {
+            *w++ = '"';
+            size_t backslashes = 0;
+            for (const char *p = arg; *p; p++) {
+                if (*p == '\\') {
+                    backslashes++;
+                    *w++ = '\\';
+                } else if (*p == '"') {
+                    /* Double the preceding backslashes, then escape the quote. */
+                    for (size_t b = 0; b < backslashes; b++) {
+                        *w++ = '\\';
+                    }
+                    *w++ = '\\';
+                    *w++ = '"';
+                    backslashes = 0;
+                } else {
+                    backslashes = 0;
+                    *w++ = *p;
+                }
+            }
+            /* Double trailing backslashes before the closing quote. */
+            for (size_t b = 0; b < backslashes; b++) {
+                *w++ = '\\';
+            }
+            *w++ = '"';
+        } else {
+            for (const char *p = arg; *p; p++) {
+                *w++ = *p;
+            }
+        }
+    }
+    *w = '\0';
+
+    wchar_t *out = cbm_utf8_to_wide(buf);
+    free(buf);
+    return out;
+}
+
+int cbm_exec_no_shell(const char *const *argv) {
+    if (!argv || !argv[0]) {
+        return CBM_NOT_FOUND;
+    }
+
+    wchar_t *cmdline = cbm_build_cmdline(argv);
+    if (!cmdline) {
+        return CBM_NOT_FOUND;
+    }
+
+    STARTUPINFOW si;
+    PROCESS_INFORMATION pi;
+    memset(&si, 0, sizeof(si));
+    memset(&pi, 0, sizeof(pi));
+    si.cb = sizeof(si);
+
+    /* CREATE_NO_WINDOW: the third and last spawn site that still needed it
+     * (#1427). Without it every helper routed through here — git, codesign,
+     * open — flashes a console window, and under a stdio MCP session with
+     * auto_watch those steal focus while the user is typing. The other three
+     * CreateProcessW sites already set it: subprocess.c and cbm_popen_isolated
+     * via #1448, and the detached daemon spawn in daemon/bootstrap.c, which has
+     * had it since it was written. */
+    if (!CreateProcessW(NULL, cmdline, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+        free(cmdline);
+        return CBM_NOT_FOUND;
+    }
+    free(cmdline);
+
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD exit_code = (DWORD)CBM_NOT_FOUND;
+    GetExitCodeProcess(pi.hProcess, &exit_code);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    return (int)exit_code;
+}
+
+#else /* POSIX */
+
+/* ── POSIX implementation ────────────────────────────────── */
+
+#include <dirent.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <pthread.h>
+#include <spawn.h>
+#include <sys/file.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+struct cbm_dir {
+    DIR *dir;
+    cbm_dirent_t entry;
+};
+
+cbm_dir_t *cbm_opendir(const char *path) {
+    if (!path) {
+        return NULL;
+    }
+    DIR *dir = opendir(path);
+    if (!dir) {
+        return NULL;
+    }
+    cbm_dir_t *d = (cbm_dir_t *)calloc(CBM_ALLOC_ONE, sizeof(cbm_dir_t));
+    if (!d) {
+        closedir(dir);
+        return NULL;
+    }
+    d->dir = dir;
+    return d;
+}
+
+cbm_dirent_t *cbm_readdir(cbm_dir_t *d) {
+    if (!d || !d->dir) {
+        return NULL;
+    }
+    struct dirent *de;
+    while ((de = readdir(d->dir)) != NULL) {
+        /* Skip "." and ".." */
+        if (de->d_name[0] == '.' &&
+            (de->d_name[SKIP_ONE] == '\0' ||
+             (de->d_name[SKIP_ONE] == '.' && de->d_name[PAIR_LEN] == '\0'))) {
+            continue;
+        }
+        size_t nlen = strlen(de->d_name);
+        if (nlen >= CBM_DIRENT_NAME_MAX) {
+            nlen = CBM_DIRENT_NAME_MAX - SKIP_ONE;
+        }
+        memcpy(d->entry.name, de->d_name, nlen);
+        d->entry.name[nlen] = '\0';
+        unsigned char type = de->d_type;
+#if defined(DT_UNKNOWN) && defined(AT_SYMLINK_NOFOLLOW)
+        if (type == DT_UNKNOWN) {
+            struct stat state;
+            if (fstatat(dirfd(d->dir), de->d_name, &state, AT_SYMLINK_NOFOLLOW) == 0) {
+                if (S_ISDIR(state.st_mode)) {
+                    type = DT_DIR;
+                } else if (S_ISREG(state.st_mode)) {
+                    type = DT_REG;
+                } else if (S_ISLNK(state.st_mode)) {
+                    type = DT_LNK;
+                }
+            }
+        }
+#endif
+        d->entry.is_dir = (type == DT_DIR);
+        d->entry.d_type = type;
+        return &d->entry;
+    }
+    return NULL;
+}
+
+int cbm_path_info_utf8(const char *path, cbm_path_info_t *out) {
+    if (!path || !out) {
+        return CBM_PATH_INFO_UNAVAILABLE;
+    }
+    struct stat state;
+    if (lstat(path, &state) != 0) {
+        return errno == ENOENT || errno == ENOTDIR ? CBM_PATH_INFO_ABSENT
+                                                   : CBM_PATH_INFO_UNAVAILABLE;
+    }
+    memset(out, 0, sizeof(*out));
+    out->is_regular = S_ISREG(state.st_mode);
+    out->is_directory = S_ISDIR(state.st_mode);
+    out->is_symlink = S_ISLNK(state.st_mode);
+    out->size = (int64_t)state.st_size;
+#ifdef __APPLE__
+    out->mtime_ns = ((int64_t)state.st_mtimespec.tv_sec * INT64_C(1000000000)) +
+                    (int64_t)state.st_mtimespec.tv_nsec;
+#else
+    out->mtime_ns =
+        ((int64_t)state.st_mtim.tv_sec * INT64_C(1000000000)) + (int64_t)state.st_mtim.tv_nsec;
+#endif
+    return CBM_PATH_INFO_OK;
+}
+
+void cbm_closedir(cbm_dir_t *d) {
+    if (d) {
+        if (d->dir) {
+            closedir(d->dir);
+        }
+        free(d);
+    }
+}
+
+FILE *cbm_popen(const char *cmd, const char *mode) {
+    return popen(cmd, mode);
+}
+
+/* Streams opened by cbm_popen_git: popen() cannot take an environment, so
+ * those children are spawned here and reaped by cbm_pclose via this list. */
+typedef struct cbm_popen_git_entry {
+    FILE *fp;
+    pid_t pid;
+    struct cbm_popen_git_entry *next;
+} cbm_popen_git_entry_t;
+
+static cbm_popen_git_entry_t *g_popen_git_list = NULL;
+static pthread_mutex_t g_popen_git_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static bool cbm_fd_set_cloexec(int fd) {
+    int flags = fcntl(fd, F_GETFD);
+    return flags >= 0 && fcntl(fd, F_SETFD, flags | FD_CLOEXEC) == 0;
+}
+
+/* `/bin/sh -c cmd` with stdout on a pipe, stdin on /dev/null (never the MCP
+ * transport), stderr inherited like popen(), and `envp` as the environment. */
+static pid_t cbm_popen_spawn_sh(const char *cmd, char **envp, int *read_fd) {
+    int fds[2];
+    if (pipe(fds) != 0) {
+        return -1;
+    }
+    if (!cbm_fd_set_cloexec(fds[0]) || !cbm_fd_set_cloexec(fds[1])) {
+        (void)close(fds[0]);
+        (void)close(fds[1]);
+        return -1;
+    }
+    posix_spawn_file_actions_t actions;
+    if (posix_spawn_file_actions_init(&actions) != 0) {
+        (void)close(fds[0]);
+        (void)close(fds[1]);
+        return -1;
+    }
+    /* dup2 clears close-on-exec on the child's stdout; both pipe ends
+     * themselves stay close-on-exec, so no other child ever holds them. */
+    bool configured =
+        posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0) == 0 &&
+        posix_spawn_file_actions_adddup2(&actions, fds[1], STDOUT_FILENO) == 0;
+    char *const argv[] = {(char *)"sh", (char *)"-c", (char *)cmd, NULL};
+    pid_t pid = -1;
+    int rc = configured ? posix_spawn(&pid, "/bin/sh", &actions, NULL, argv, envp) : -1;
+    (void)posix_spawn_file_actions_destroy(&actions);
+    (void)close(fds[1]);
+    if (rc != 0 || pid <= 0) {
+        (void)close(fds[0]);
+        return -1;
+    }
+    *read_fd = fds[0];
+    return pid;
+}
+
+static int cbm_popen_git_wait(pid_t pid) {
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno != EINTR) {
+            return -1;
+        }
+    }
+    return status;
+}
+
+FILE *cbm_popen_git(const char *cmd) {
+    if (!cmd) {
+        return NULL;
+    }
+    /* Fail closed: without the scrubbed environment the child would inherit
+     * a caller's GIT_DIR and read the wrong repository (#2003). */
+    char **envp = cbm_git_child_envp();
+    if (!envp) {
+        return NULL;
+    }
+    int read_fd = -1;
+    pid_t pid = cbm_popen_spawn_sh(cmd, envp, &read_fd);
+    cbm_git_child_env_free(envp); /* posix_spawn copied it into the child */
+    if (pid < 0) {
+        return NULL;
+    }
+    cbm_popen_git_entry_t *entry = (cbm_popen_git_entry_t *)malloc(sizeof(*entry));
+    FILE *fp = entry ? fdopen(read_fd, "r") : NULL;
+    if (!fp) {
+        free(entry);
+        (void)close(read_fd);
+        (void)cbm_popen_git_wait(pid);
+        return NULL;
+    }
+    entry->fp = fp;
+    entry->pid = pid;
+    pthread_mutex_lock(&g_popen_git_lock);
+    entry->next = g_popen_git_list;
+    g_popen_git_list = entry;
+    pthread_mutex_unlock(&g_popen_git_lock);
+    return fp;
+}
+
+int cbm_pclose(FILE *f) {
+    cbm_popen_git_entry_t *found = NULL;
+    pthread_mutex_lock(&g_popen_git_lock);
+    for (cbm_popen_git_entry_t **link = &g_popen_git_list; *link; link = &(*link)->next) {
+        if ((*link)->fp == f) {
+            found = *link;
+            *link = found->next;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_popen_git_lock);
+    if (!found) {
+        return pclose(f); /* opened by popen() */
+    }
+    pid_t pid = found->pid;
+    free(found);
+    (void)fclose(f);
+    return cbm_popen_git_wait(pid); /* the raw wait status, as pclose() */
+}
+
+FILE *cbm_fopen(const char *path, const char *mode) {
+    return fopen(path, mode);
+}
+
+/* Symlink policy for the parent-chain walk. Every component is opened with
+ * O_NOFOLLOW; a symlink is followed only when its OWNER is trusted, never by
+ * default. Root-owned links are trusted everywhere (distro /home indirection,
+ * macOS /tmp: only root can create those, so they are outside the attacker
+ * model). A link owned by the invoking account is trusted only where the
+ * caller opted in with CBM_MKDIR_FOLLOW_OWNED: for a path rooted in the user's
+ * own configuration such a link is the user's own arrangement (a dotfile
+ * manager, ~/.config/opencode -> /mnt/...), and refusing it made every
+ * agent-config write under such a root fail with an opaque agent_config
+ * error. It is not trusted for a path derived from a repository, where git
+ * creates symlinks owned by whoever cloned, so "user-owned" says nothing about
+ * "user-intended". The rule is the one the Linux kernel's
+ * fs.protected_symlinks applies, and the ancestor policy the activation
+ * transaction already uses. A link owned by any OTHER account (planted in a
+ * group- or world-writable ancestor) stays refused, and a privileged walk
+ * (euid 0) still refuses user-owned links.
+ *
+ * Inspecting the link and following it are two steps, so what the follow
+ * lands on is checked as well: the opened target must be a directory owned by
+ * root or the invoking user, and not world-writable unless sticky. An account
+ * that can write the parent cannot steer the walk into a directory it
+ * controls or into one where anyone can pre-plant entries, and because the
+ * judgement and the follow are bound to one inode (cbm_read_trusted_link) it
+ * cannot substitute a link of its own between them either. */
+static bool cbm_walk_link_trusted(uid_t owner, bool follow_owned) {
+    return owner == 0U || (follow_owned && owner == geteuid());
+}
+
+static bool cbm_walk_target_trusted(const struct stat *target) {
+    bool trusted_owner = target->st_uid == 0U || target->st_uid == geteuid();
+    bool world_writable = (target->st_mode & S_IWOTH) != 0;
+    bool sticky = (target->st_mode & S_ISVTX) != 0;
+    return S_ISDIR(target->st_mode) && trusted_owner && (!world_writable || sticky);
+}
+
+/* Read the target text of the symlink at `component`, but only if the link's
+ * owner is trusted -- and read it from the SAME inode the judgement was made
+ * on. Judging by name and then opening by name is a check-then-use pair: an
+ * account that can write the parent could swap the entry in between, so the
+ * link that gets followed is never the one that was judged (demonstrated
+ * against an earlier head with an LD_PRELOAD shim). The link is therefore
+ * never opened by name after the judgement: on Linux an O_PATH|O_NOFOLLOW
+ * descriptor pins the inode, and both the fstat and the readlinkat operate on
+ * it; elsewhere the link is stat'ed by name before and after the readlinkat
+ * and both must be the same inode with the same owner. What is followed
+ * afterwards is the text this function returns, resolved from the parent. */
+static bool cbm_read_trusted_link(int parent, const char *component, bool follow_owned, char *text,
+                                  size_t text_size) {
+    ssize_t length = 0; /* nothing read yet: refused below unless a read succeeds */
+#if defined(__linux__) && defined(O_PATH)
+    int link = openat(parent, component, O_PATH | O_NOFOLLOW | O_CLOEXEC);
+    if (link < 0) {
+        return false;
+    }
+    struct stat state;
+    if (fstat(link, &state) == 0 && S_ISLNK(state.st_mode) &&
+        cbm_walk_link_trusted(state.st_uid, follow_owned)) {
+        /* An empty path names the link the descriptor itself refers to. */
+        length = readlinkat(link, "", text, text_size);
+    }
+    (void)close(link);
+#else
+    struct stat before;
+    struct stat after;
+    if (fstatat(parent, component, &before, AT_SYMLINK_NOFOLLOW) != 0 || !S_ISLNK(before.st_mode) ||
+        !cbm_walk_link_trusted(before.st_uid, follow_owned)) {
+        return false;
+    }
+    length = readlinkat(parent, component, text, text_size);
+    if (fstatat(parent, component, &after, AT_SYMLINK_NOFOLLOW) != 0 || !S_ISLNK(after.st_mode) ||
+        after.st_dev != before.st_dev || after.st_ino != before.st_ino ||
+        after.st_uid != before.st_uid) {
+        return false;
+    }
+#endif
+    /* Empty or truncated text is refused rather than guessed at. */
+    if (length <= 0 || (size_t)length >= text_size) {
+        return false;
+    }
+    text[length] = '\0';
+    return true;
+}
+
+static int cbm_open_directory_component(int parent, const char *component, int flags,
+                                        bool follow_owned) {
+    int descriptor = openat(parent, component, flags);
+#if defined(O_NOFOLLOW) && defined(AT_SYMLINK_NOFOLLOW)
+    if (descriptor < 0) {
+        /* The caller decides on errno from the FIRST open (ENOENT means
+         * "create it"); a refused link must not leak a later call's errno. */
+        int open_errno = errno;
+        char text[CBM_SZ_4K];
+        if (cbm_read_trusted_link(parent, component, follow_owned, text, sizeof(text))) {
+            /* The judged link's own text, resolved from the parent exactly as
+             * the kernel would resolve it (relative texts against the link's
+             * directory). Links inside the text are resolved by the kernel as
+             * before; the target check bounds where the walk lands. */
+            int followed = openat(parent, text, flags & ~O_NOFOLLOW);
+            struct stat target;
+            if (followed >= 0 && fstat(followed, &target) == 0 &&
+                cbm_walk_target_trusted(&target)) {
+                descriptor = followed;
+            } else if (followed >= 0) {
+                (void)close(followed);
+            }
+        }
+        if (descriptor < 0) {
+            errno = open_errno;
+        }
+    }
+#else
+    (void)follow_owned;
+#endif
+    return descriptor;
+}
+
+bool cbm_mkdir_p(const char *path, int mode) {
+    return cbm_mkdir_p_ex(path, mode, 0U);
+}
+
+bool cbm_mkdir_p_ex(const char *path, int mode, unsigned int policy) {
+    if (!path || path[0] == '\0') {
+        return false;
+    }
+    bool follow_owned = (policy & CBM_MKDIR_FOLLOW_OWNED) != 0U;
+    char *tmp = strdup(path);
+    if (!tmp) {
+        return false;
+    }
+
+    int flags = O_RDONLY;
+#ifdef O_DIRECTORY
+    flags |= O_DIRECTORY;
+#endif
+#ifdef O_NOFOLLOW
+    flags |= O_NOFOLLOW;
+#endif
+#ifdef O_CLOEXEC
+    flags |= O_CLOEXEC;
+#endif
+    int directory = open(path[0] == '/' ? "/" : ".", flags);
+    if (directory < 0) {
+        free(tmp);
+        return false;
+    }
+
+    bool ok = true;
+    char *cursor = tmp;
+    while (*cursor == '/') {
+        cursor++;
+    }
+    while (ok && *cursor) {
+        char *separator = strchr(cursor, '/');
+        if (separator) {
+            *separator = '\0';
+        }
+        if (cursor[0] != '\0' && strcmp(cursor, ".") != 0) {
+            int next = cbm_open_directory_component(directory, cursor, flags, follow_owned);
+            if (next < 0 && errno == ENOENT) {
+                if (mkdirat(directory, cursor, (mode_t)mode) != 0 && errno != EEXIST) {
+                    ok = false;
+                } else {
+                    next = cbm_open_directory_component(directory, cursor, flags, follow_owned);
+                }
+            }
+            if (ok && next < 0) {
+                ok = false;
+            }
+            if (ok) {
+                (void)close(directory);
+                directory = next;
+            }
+        }
+        if (!separator) {
+            break;
+        }
+        *separator = '/';
+        cursor = separator + 1;
+        while (*cursor == '/') {
+            cursor++;
+        }
+    }
+    (void)close(directory);
+    free(tmp);
+    return ok;
+}
+
+int cbm_unlink(const char *path) {
+    return unlink(path);
+}
+
+int cbm_rmdir(const char *path) {
+    return rmdir(path);
+}
+
+int cbm_lockfile_open(const char *path, bool create) {
+    int flags = O_RDWR | O_CLOEXEC | O_NOFOLLOW | (create ? O_CREAT : 0);
+    int fd;
+    do {
+        fd = open(path, flags, S_IRUSR | S_IWUSR);
+    } while (fd < 0 && errno == EINTR);
+    if (fd < 0) {
+        return -1;
+    }
+    int rc;
+    do {
+        rc = flock(fd, LOCK_EX | LOCK_NB);
+    } while (rc != 0 && errno == EINTR);
+    if (rc != 0) {
+        int saved = errno;
+        (void)close(fd);
+        errno = saved;
+        return -1;
+    }
+    return fd;
+}
+
+void cbm_lockfile_close(int fd) {
+    if (fd >= 0) {
+        (void)close(fd);
+    }
+}
+
+int cbm_exec_no_shell(const char *const *argv) {
+    if (!argv || !argv[0]) {
+        return CBM_NOT_FOUND;
+    }
+    pid_t pid = fork();
+    if (pid < 0) {
+        return CBM_NOT_FOUND;
+    }
+    if (pid == 0) {
+        /* Child: exec directly — no shell interpretation */
+        /* 127 = standard "command not found" exit code (POSIX convention) */
+        enum { EXEC_NOT_FOUND = 127 };
+        execvp(argv[0], (char *const *)argv);
+        _exit(EXEC_NOT_FOUND);
+    }
+    /* Parent: wait for child */
+    int status = 0;
+    if (waitpid(pid, &status, 0) < 0) {
+        return CBM_NOT_FOUND;
+    }
+    if (WIFEXITED(status)) {
+        return WEXITSTATUS(status);
+    }
+    return CBM_NOT_FOUND; /* killed by signal */
+}
+
+#endif /* _WIN32 */
+
+/* Canonicalize an EXISTING path (collapse `..`, resolve links/junctions):
+ * realpath on POSIX; a final path queried from an opened handle on Windows.
+ * The previous Windows callers used the ANSI CRT (_access/_fullpath) on UTF-8
+ * input — locale-dependent by construction: on a CJK system codepage (e.g.
+ * Big5) the UTF-8 bytes of a CJK path re-decode into different characters and
+ * canonicalization corrupts the path (#973).  GetFullPathNameW alone is also
+ * only lexical and would let an allowed-root check follow a junction outside
+ * the root.  Returns 0 when the path does not exist or cannot be resolved. */
+int cbm_canonical_path(const char *path, char *out, size_t out_sz) {
+    if (!path || !out || out_sz == 0) {
+        return 0;
+    }
+#ifdef _WIN32
+    wchar_t *wpath = cbm_path_to_wide(path);
+    if (!wpath) {
+        return 0;
+    }
+    HANDLE handle = CreateFileW(wpath, FILE_READ_ATTRIBUTES,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                                OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    free(wpath);
+    if (handle == INVALID_HANDLE_VALUE) {
+        return 0;
+    }
+    DWORD needed =
+        GetFinalPathNameByHandleW(handle, NULL, 0, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+    /* MAXDWORD keeps the +1 below safe; calloc rejects an unrepresentable
+     * capacity * sizeof(wchar_t) allocation on narrower size_t targets. */
+    if (needed == 0 || needed == MAXDWORD) {
+        (void)CloseHandle(handle);
+        return 0;
+    }
+    size_t capacity = (size_t)needed + 1;
+    wchar_t *wfull = calloc(capacity, sizeof(*wfull));
+    if (!wfull) {
+        (void)CloseHandle(handle);
+        return 0;
+    }
+    DWORD n = GetFinalPathNameByHandleW(handle, wfull, (DWORD)capacity,
+                                        FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+    (void)CloseHandle(handle);
+    if (n == 0 || (size_t)n >= capacity) {
+        free(wfull);
+        return 0;
+    }
+
+    /* Preserve the conventional DOS/UNC form returned by the old API while
+     * retaining the handle-based resolution. */
+    if (wcsncmp(wfull, L"\\\\?\\UNC\\", 8) == 0) {
+        size_t tail_length = wcslen(wfull + 8);
+        wmemmove(wfull + 2, wfull + 8, tail_length + 1);
+        wfull[0] = L'\\';
+        wfull[1] = L'\\';
+    } else if (wcsncmp(wfull, L"\\\\?\\", 4) == 0) {
+        size_t tail_length = wcslen(wfull + 4);
+        wmemmove(wfull, wfull + 4, tail_length + 1);
+    }
+    char *utf8 = cbm_wide_to_utf8(wfull);
+    free(wfull);
+    if (!utf8) {
+        return 0;
+    }
+    size_t len = strlen(utf8);
+    if (len >= out_sz) {
+        free(utf8);
+        return 0;
+    }
+    memcpy(out, utf8, len + 1);
+    free(utf8);
+    return 1;
+#else
+    /* Callers pass >= 4K buffers (>= PATH_MAX on our platforms). */
+    return realpath(path, out) != NULL;
+#endif
+}
+
+/* rename() with overwrite semantics on every platform: POSIX rename already
+ * replaces atomically; Windows rename fails with EEXIST when the target
+ * exists, so use write-through MoveFileExW(MOVEFILE_REPLACE_EXISTING) there
+ * (wide paths — raw MoveFileExA would re-mangle non-ASCII cache paths). */
+int cbm_rename_replace(const char *src, const char *dst) {
+#ifdef _WIN32
+    wchar_t *wsrc = cbm_path_to_wide(src);
+    wchar_t *wdst = cbm_path_to_wide(dst);
+    int ret = CBM_NOT_FOUND;
+    if (wsrc && wdst) {
+        if (MoveFileExW(wsrc, wdst, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+            ret = 0;
+        } else {
+            /* Translate the Win32 error into errno so callers can report WHY.
+             *
+             * Callers log `errno` after a failed rename (see
+             * finalize.rename_failed in the pipeline). Without this the value
+             * is whatever happened to be left there by an unrelated CRT call,
+             * so on Windows the one field that should explain an atomic-publish
+             * failure was noise. #1620 is exactly that: an ACL problem surfaced
+             * to the user as "Pipeline failed. Check repo_path exists and
+             * contains source files" — blaming their repository — because
+             * ERROR_ACCESS_DENIED never reached the log.
+             *
+             * ERROR_ACCESS_DENIED is the interesting one here: MoveFileEx needs
+             * DELETE on the destination, which a cache file created under an
+             * empty or foreign DACL does not grant. */
+            DWORD error = GetLastError();
+            switch (error) {
+            case ERROR_ACCESS_DENIED:
+            case ERROR_WRITE_PROTECT:
+                errno = EACCES;
+                break;
+            case ERROR_FILE_NOT_FOUND:
+            case ERROR_PATH_NOT_FOUND:
+                errno = ENOENT;
+                break;
+            case ERROR_SHARING_VIOLATION:
+            case ERROR_LOCK_VIOLATION:
+            case ERROR_USER_MAPPED_FILE:
+                errno = EBUSY;
+                break;
+            case ERROR_NOT_SAME_DEVICE:
+                errno = EXDEV;
+                break;
+            case ERROR_DISK_FULL:
+                errno = ENOSPC;
+                break;
+            case ERROR_INVALID_NAME:
+            case ERROR_FILENAME_EXCED_RANGE:
+                errno = ENAMETOOLONG;
+                break;
+            default:
+                errno = EIO;
+                break;
+            }
+            ret = CBM_NOT_FOUND;
+        }
+    }
+    free(wsrc);
+    free(wdst);
+    return ret;
+#else
+    return rename(src, dst);
+#endif
+}
+
+int cbm_rename_noreplace(const char *src, const char *dst) {
+    if (!src || !dst || !src[0] || !dst[0]) {
+        return CBM_NOT_FOUND;
+    }
+#ifdef _WIN32
+    wchar_t *wsrc = cbm_path_to_wide(src);
+    wchar_t *wdst = cbm_path_to_wide(dst);
+    int ret = CBM_NOT_FOUND;
+    if (wsrc && wdst) {
+        ret = MoveFileExW(wsrc, wdst, MOVEFILE_COPY_ALLOWED | MOVEFILE_WRITE_THROUGH)
+                  ? 0
+                  : CBM_NOT_FOUND;
+    }
+    free(wsrc);
+    free(wdst);
+    return ret;
+#else
+    /* link()+unlink() provides no-overwrite semantics portably (including
+     * macOS, where renameat2(RENAME_NOREPLACE) is unavailable). Both paths
+     * are adjacent database files and therefore on the same filesystem. */
+    if (link(src, dst) != 0) {
+        return CBM_NOT_FOUND;
+    }
+    if (unlink(src) != 0) {
+        int saved_errno = errno;
+        (void)unlink(dst);
+        errno = saved_errno;
+        return CBM_NOT_FOUND;
+    }
+    return 0;
+#endif
+}
+
+/* Remove a SQLite database's -wal/-shm/-journal sidecars (both platforms). Any code
+ * path that installs a FRESH database file at a path where a previous
+ * generation lived must call this first: SQLite decides whether to replay a
+ * WAL purely from the sidecar's own header/checksums, so a leftover WAL
+ * from a crashed session is recovered ON TOP of the freshly installed file
+ * at the next open, splicing old-generation pages into it (#897). */
+int cbm_remove_db_sidecars(const char *db_path) {
+    if (!db_path || !db_path[0]) {
+        return CBM_NOT_FOUND;
+    }
+    enum { SIDECAR_PATH_MAX = 4096 };
+    char side[SIDECAR_PATH_MAX];
+    /* Validate the longest suffix before unlinking anything. Otherwise a
+     * near-limit path can remove -wal/-shm, silently skip a truncated
+     * -journal, and report success after partially mutating the generation. */
+    if (strlen(db_path) > sizeof(side) - sizeof("-journal")) {
+        return CBM_NOT_FOUND;
+    }
+    int result = 0;
+    int n = snprintf(side, sizeof(side), "%s-wal", db_path);
+    if (n <= 0 || (size_t)n >= sizeof(side)) {
+        return CBM_NOT_FOUND;
+    }
+    errno = 0;
+    int unlink_rc = cbm_unlink(side);
+    int unlink_error = errno;
+    if (unlink_rc != 0 && unlink_error != ENOENT) {
+        result = CBM_NOT_FOUND;
+    }
+    n = snprintf(side, sizeof(side), "%s-shm", db_path);
+    if (n <= 0 || (size_t)n >= sizeof(side)) {
+        return CBM_NOT_FOUND;
+    }
+    errno = 0;
+    unlink_rc = cbm_unlink(side);
+    unlink_error = errno;
+    if (unlink_rc != 0 && unlink_error != ENOENT) {
+        result = CBM_NOT_FOUND;
+    }
+    n = snprintf(side, sizeof(side), "%s-journal", db_path);
+    if (n <= 0 || (size_t)n >= sizeof(side)) {
+        return CBM_NOT_FOUND;
+    }
+    errno = 0;
+    unlink_rc = cbm_unlink(side);
+    unlink_error = errno;
+    if (unlink_rc != 0 && unlink_error != ENOENT) {
+        result = CBM_NOT_FOUND;
+    }
+    return result;
+}
+
+/* ── Clone-or-copy ───────────────────────────────────────────────── */
+
+#if defined(__APPLE__)
+#include <sys/clonefile.h>
+#elif defined(__linux__)
+#include <linux/fs.h>
+#include <sys/ioctl.h>
+#endif
+#include <fcntl.h>
+
+static int stream_copy_file(const char *src, const char *dst) {
+    FILE *in = cbm_fopen(src, "rb");
+    if (!in) {
+        return CBM_NOT_FOUND;
+    }
+    FILE *out = cbm_fopen(dst, "wb");
+    if (!out) {
+        (void)fclose(in);
+        return CBM_NOT_FOUND;
+    }
+    char buf[CBM_SZ_64K];
+    size_t n;
+    int rc = 0;
+    while ((n = fread(buf, 1, sizeof(buf), in)) > 0) {
+        if (fwrite(buf, 1, n, out) != n) {
+            rc = CBM_NOT_FOUND;
+            break;
+        }
+    }
+    if (ferror(in)) {
+        rc = CBM_NOT_FOUND;
+    }
+    (void)fclose(in);
+    if (fclose(out) != 0) {
+        rc = CBM_NOT_FOUND;
+    }
+    if (rc != 0) {
+        (void)cbm_unlink(dst);
+    }
+    return rc;
+}
+
+int cbm_clone_or_copy_file(const char *src, const char *dst) {
+    if (!src || !dst) {
+        return CBM_NOT_FOUND;
+    }
+#if defined(__APPLE__)
+    /* clonefile refuses to overwrite; the staging name is freshly minted by
+     * the caller, but clear any leftover defensively so the fast path is
+     * never abandoned for a stale artifact. */
+    (void)cbm_unlink(dst);
+    if (clonefile(src, dst, 0) == 0) {
+        return 0;
+    }
+#elif defined(__linux__)
+    int in_fd = open(src, O_RDONLY | O_CLOEXEC);
+    if (in_fd >= 0) {
+        int out_fd = open(dst, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+        if (out_fd >= 0) {
+            int cloned = ioctl(out_fd, FICLONE, in_fd);
+            int close_rc = close(out_fd);
+            (void)close(in_fd);
+            if (cloned == 0 && close_rc == 0) {
+                return 0;
+            }
+            (void)cbm_unlink(dst);
+        } else {
+            (void)close(in_fd);
+        }
+    }
+#endif
+    return stream_copy_file(src, dst);
+}

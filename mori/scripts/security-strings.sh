@@ -1,0 +1,306 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Layer 2: Binary string audit — post-build check on the production binary.
+#
+# Scans extracted strings for:
+#   1. Unauthorized URLs (only github.com + localhost allowed)
+#   2. Suspiciously long base64-encoded payloads
+#   3. Dangerous command names (wget, nc, netcat, telnet, ssh, /dev/tcp)
+#   4. Credential patterns (password=, secret=, api_key=)
+#
+# Usage: scripts/security-strings.sh <binary-path>
+
+BINARY="${1:?usage: security-strings.sh <binary-path>}"
+
+if [[ ! -f "$BINARY" ]]; then
+    echo "FAIL: binary not found: $BINARY"
+    exit 1
+fi
+
+FAIL=0
+
+# Detect file type. Shell scripts and other text files extract poorly via
+# `strings` (the entire content becomes the "strings"), and rules tuned for
+# compiled binaries (URL allowlist, wget/telnet detection) produce false
+# positives — install.sh legitimately uses `wget` as a curl fallback, and
+# `case` glob patterns like `https://*` look like unauthorized URLs.
+#
+# Strategy: for non-binary files we still run credential and base64 audits
+# (those are universally meaningful), but skip the URL and dangerous-command
+# audits which are designed for compiled artifacts. Script content is
+# reviewed in PRs and scanned end-to-end by VirusTotal in the same pipeline.
+IS_SCRIPT=false
+# Structured-text artifacts by EXTENSION first: `file` reports JSON as
+# "JSON data" / "JSON text data", which matched none of the text patterns
+# below, so an .mcpb bundle manifest was audited as if it were a compiled
+# binary and its own homepage/documentation URLs were BLOCKED as unauthorized.
+# The extension check also covers hosts where file(1) is absent, where the
+# `command -v` guard below silently leaves every artifact classified as binary.
+case "$BINARY" in
+    *.json|*.jsonc|*.yaml|*.yml|*.toml|*.md|*.txt) IS_SCRIPT=true ;;
+esac
+if [ "$IS_SCRIPT" = false ] && command -v file &>/dev/null; then
+    FILE_TYPE=$(file -b "$BINARY" 2>/dev/null || echo "")
+    case "$FILE_TYPE" in
+        *"shell script"*|*"ASCII text"*|*"UTF-8 Unicode text"*|*"Unicode text"*|*"a /usr/bin/env"*|\
+        *"JSON"*|*"XML"*)
+            IS_SCRIPT=true
+            ;;
+    esac
+fi
+
+if $IS_SCRIPT; then
+    echo "=== Layer 2: Script Content Audit ==="
+else
+    echo "=== Layer 2: Binary String Audit ==="
+fi
+echo "File: $BINARY"
+echo ""
+
+# Check for strings command (needs binutils on some MSYS2 setups)
+if ! command -v strings &>/dev/null; then
+    echo "SKIP: 'strings' command not available"
+    exit 0
+fi
+
+# Extract all printable strings (min length 4)
+STRINGS_FILE=$(mktemp)
+SEC_CMDS=$(mktemp)
+SEC_CREDS=$(mktemp)
+trap 'rm -f "$STRINGS_FILE" "$SEC_CMDS" "$SEC_CREDS"' EXIT
+strings -n 4 "$BINARY" | sort -u > "$STRINGS_FILE"
+
+# Remove only byte-for-byte reviewed strings from the named detector candidates.
+# Hash the entire extracted line, excluding its line terminator, without trimming
+# or normalizing. A rebuilt dependency that changes even one byte requires review.
+# Never filter STRINGS_FILE: URL and base64 checks must still inspect these lines.
+filter_reviewed_lines() {
+    local candidates="$1"; shift
+    local line digest expected allowed
+    local -a hash_command
+    if command -v sha256sum &>/dev/null; then
+        hash_command=(sha256sum)
+    elif command -v shasum &>/dev/null; then
+        hash_command=(shasum -a 256)
+    else
+        echo "FAIL: SHA-256 utility required to verify reviewed binary strings" >&2
+        return 1
+    fi
+    while IFS= read -r line; do
+        digest=$(printf '%s' "$line" | "${hash_command[@]}")
+        digest=${digest%% *}
+        allowed=false
+        for expected in "$@"; do
+            if [[ "$digest" == "$expected" ]]; then
+                allowed=true
+                break
+            fi
+        done
+        if ! $allowed; then
+            printf '%s\n' "$line"
+        fi
+    done < "$candidates" > "${candidates}.tmp"
+    mv "${candidates}.tmp" "$candidates"
+}
+
+# ── 1. URL audit (binary only — scripts handled via VT + PR review) ────
+
+if $IS_SCRIPT; then
+    echo "--- URL audit (skipped — script file) ---"
+else
+echo "--- URL audit ---"
+
+# Allowed URL prefixes
+ALLOWED_URLS=(
+    "https://api.github.com/repos/DeusData/codebase-memory-mcp"
+    "https://github.com/DeusData/codebase-memory-mcp"
+    # Our own org root and documentation site: the .mcpb bundle manifest carries
+    # them as homepage/documentation fields, and the graph UI links the docs.
+    "https://github.com/DeusData"
+    "https://deusdata.github.io/codebase-memory-mcp"
+    "http://127.0.0.1"
+    "http://localhost"
+    # SQLite internal URLs (part of vendored sqlite3 strings)
+    "https://sqlite.org"
+    "https://www.sqlite.org"
+    # Toolchain URLs embedded by compiler/linker in static builds
+    "https://bugs.launchpad.net"
+    "https://gcc.gnu.org"
+    "https://sourceware.org"
+    # MSYS2 CLANG64 toolchain (libc++/compiler-rt) package-tracker URL, baked
+    # into the static Windows .exe — Windows-only, hence Linux smoke stays clean.
+    "https://github.com/msys2/MINGW-packages"
+    # W3C XML namespace URIs (SVG, MathML, XLink — used in UI bundle)
+    "http://www.w3.org/"
+    # UI bundle: React, Three.js, Tailwind, Google Fonts, bundled libraries
+    "https://react.dev"
+    "https://fonts.googleapis.com"
+    "https://fonts.gstatic.com"
+    "https://tailwindcss.com"
+    "https://cdn.jsdelivr.net"
+    "https://docs.pmnd.rs"
+    "https://jcgt.org"
+    "https://github.com/pmndrs"
+    "https://github.com/react-spring"
+    "https://github.com/101arrowz"
+    "https://github.com/arty-name"
+    "https://github.com/fredli74"
+    "https://github.com/lojjic"
+)
+
+# Exact documentation/license/example tokens embedded by pinned UI dependencies:
+# Monaco 0.56.0, Transformers.js 4.2.0, ONNX Runtime, and the Markdown renderer.
+# The URL extractor retains closing Markdown punctuation; keep those exact bytes
+# too. These are references in diagnostics, editor help, and operator schemas,
+# not download-host permissions. No sibling path or hostname inherits an entry.
+ALLOWED_UI_REFERENCE_URLS=(
+    "https://web.dev/cross-origin-isolation-guide/"
+    "https://code.visualstudio.com/docs/editor/codebasics#_multicursor-modifier)."
+    "https://developer.mozilla.org/en-US/docs/Web/API/Cache"
+    "https://github.com/huggingface/transformers.js/issues/new/choose"
+    "https://github.com/microsoft/vscode/issues/103170"
+    "https://github.com/markedjs/marked."
+    # Numerical-overflow reference in the ONNX attention schema.
+    "https://tinyurl.com/sudb9s96),"
+    "https://ieeexplore.ieee.org/document/1163711"
+    "https://code.visualstudio.com/docs/editor/codebasics#_find-and-replace)"
+    # Sample link insertion text in the Monaco Markdown editor.
+    "https://microsoft.com)"
+    "https://github.com/syntax-tree/hast-util-to-jsx-runtime"
+    "https://github.com/microsoft/vscode/issues/new"
+    "https://github.com/microsoft/vscode/blob/main/LICENSE.txt"
+    "https://github.com/microsoft/monaco-editor#faq"
+    "https://gist.github.com/hollance/42e32852f24243b748ae6bc1f985b13a"
+    "https://github.com/remarkjs/react-markdown/blob/main/changelog.md"
+    "https://docs.nvidia.com/cuda/cublas/index.html#cublasLtOrder_t"
+    "https://arxiv.org/abs/1502.03167."
+)
+
+while IFS= read -r url; do
+    # Skip short false positives from binary data (e.g. "https://H9")
+    if [[ ${#url} -lt 15 ]]; then
+        continue
+    fi
+    allowed=false
+    # The pinned, opt-in browser model uses these two verified download hosts.
+    # Match host boundaries; a similar hostname must not inherit permission.
+    case "$url" in
+        "https://huggingface.co"|"https://huggingface.co/"*|"https://huggingface.co;"|\
+        "https://us.aws.cdn.hf.co"|"https://us.aws.cdn.hf.co/"*|"https://us.aws.cdn.hf.co;")
+            allowed=true
+            ;;
+    esac
+    for reference in "${ALLOWED_UI_REFERENCE_URLS[@]}"; do
+        if [[ "$url" == "$reference" ]]; then
+            allowed=true
+            break
+        fi
+    done
+    for prefix in "${ALLOWED_URLS[@]}"; do
+        if [[ "$url" == "$prefix"* ]]; then
+            allowed=true
+            break
+        fi
+    done
+    if ! $allowed; then
+        echo "BLOCKED: Unauthorized URL in binary: $url"
+        FAIL=1
+    fi
+done < <(grep -oE 'https?://[a-zA-Z0-9._/~:@!$&()*+,;=?#%[-]+' "$STRINGS_FILE" || true)
+
+if [[ $FAIL -eq 0 ]]; then
+    echo "OK: All URLs are authorized."
+fi
+fi  # end !IS_SCRIPT URL audit
+
+# ── 2. Base64 payload detection ──────────────────────────────────
+
+echo ""
+echo "--- Base64 payload detection ---"
+
+# Look for base64-like strings longer than 100 chars (potential encoded payloads)
+B64_COUNT=$(grep -cE '^[A-Za-z0-9+/]{100,}={0,2}$' "$STRINGS_FILE" || true)
+if [[ "$B64_COUNT" -gt 0 ]]; then
+    echo "WARNING: Found $B64_COUNT potential base64-encoded strings > 100 chars"
+    grep -E '^[A-Za-z0-9+/]{100,}={0,2}$' "$STRINGS_FILE" | head -5 | while IFS= read -r s; do
+        echo "  ${s:0:80}..."
+    done
+    # Warning only — tree-sitter grammar data can look like base64
+else
+    echo "OK: No suspicious base64 payloads found."
+fi
+
+# ── 3. Dangerous command detection (binary only) ─────────────────
+
+echo ""
+if $IS_SCRIPT; then
+    echo "--- Dangerous command detection (skipped — script file) ---"
+    DANGEROUS_CMDS=''
+else
+echo "--- Dangerous command detection ---"
+
+DANGEROUS_CMDS='wget|netcat|ncat|/dev/tcp|telnet'
+# Known-benign matches (vendored grammar URI scheme tables, etc.). Each entry
+# is a regex matched against the full line; matches are stripped before
+# evaluation. Document the source so reviewers can verify the false positive.
+ALLOWED_DANGEROUS=(
+    '^telnet$'  # rst tree-sitter grammar: valid_schemas[] in vendored/grammars/rst/tree_sitter_rst/chars.c
+    '^wget$'    # src/pipeline/pass_shell.c: the program name a script's curl / wget HTTP_CALLS compares and records as `via`
+)
+if grep -wE "$DANGEROUS_CMDS" "$STRINGS_FILE" > "$SEC_CMDS" 2>/dev/null && [ -s "$SEC_CMDS" ]; then
+    for allow in "${ALLOWED_DANGEROUS[@]}"; do
+        grep -vE "$allow" "$SEC_CMDS" > "${SEC_CMDS}.tmp" || true
+        mv "${SEC_CMDS}.tmp" "$SEC_CMDS"
+    done
+    # Monaco 0.56.0 shell tokenizer: wget/telnet occur in its command keyword
+    # array. Reviewed full line: assets/shell-DiJ1NA_G.js:1 (2,934 bytes).
+    filter_reviewed_lines "$SEC_CMDS" \
+        0d9431238bb1665cc08548a02889077577f6a5e2f7f945ccc8c5128cefa7d688
+fi
+if [ -s "$SEC_CMDS" ]; then
+    echo "BLOCKED: Dangerous commands found in binary:"
+    cat "$SEC_CMDS"
+    FAIL=1
+else
+    echo "OK: No dangerous commands found."
+fi
+fi  # end !IS_SCRIPT dangerous-cmd audit
+
+# ── 4. Credential pattern detection ──────────────────────────────
+
+echo ""
+echo "--- Credential pattern detection ---"
+
+CRED_PATTERNS='password=|secret=|api_key=|apikey=|auth_token=|private_key='
+if grep -iE "$CRED_PATTERNS" "$STRINGS_FILE" > "$SEC_CREDS" 2>/dev/null; then
+    # Monaco 0.56.0 quick-input password mode is a boolean/UI property, not a
+    # credential. Reviewed full lines of the graph-ui bundle as CI builds it
+    # since #2068: 15,644 and 72,472 bytes; every match is the input box's
+    # password-mode flag (_password=!1, password=!!e.password,
+    # inputBox.password=this.password, inputBox.password=!1). The same two lines
+    # appear on every platform. These hashes exempt no command or URL.
+    # A rebuilt bundle changes these bytes: the smoke log prints the lines,
+    # re-review them and replace both hashes (the 09-09 pair for
+    # assets/index-B4p3fUhm.js stopped matching with #2068).
+    filter_reviewed_lines "$SEC_CREDS" \
+        8b4df6dea02b9433ac5b7ddb9f186c0f38c9f016fa8c610aa9ef987ae4bd81cf \
+        e4ef9bacb65321a35ae24f154aede5ea157d7c2f7e084c1c6adcd4d33b520325
+fi
+if [ -s "$SEC_CREDS" ]; then
+    echo "BLOCKED: Credential patterns found in binary:"
+    cat "$SEC_CREDS"
+    FAIL=1
+else
+    echo "OK: No credential patterns found."
+fi
+
+# ── Summary ──────────────────────────────────────────────────────
+
+echo ""
+if [[ $FAIL -ne 0 ]]; then
+    echo "=== BINARY STRING AUDIT FAILED ==="
+    exit 1
+fi
+
+echo "=== Binary string audit passed ==="

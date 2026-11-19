@@ -1,0 +1,1937 @@
+/*
+ * test_language.c — Tests for language detection (filename + extension).
+ *
+ * RED phase: These tests define the expected behavior for registered languages.
+ */
+#include "../src/foundation/compat.h"
+#include "../src/foundation/compat_fs.h"
+#include "test_framework.h"
+#include "discover/discover.h"
+
+/* ── Extension-based detection ─────────────────────────────────── */
+
+TEST(lang_ext_go) {
+    ASSERT_EQ(cbm_language_for_extension(".go"), CBM_LANG_GO);
+    PASS();
+}
+TEST(lang_ext_python) {
+    ASSERT_EQ(cbm_language_for_extension(".py"), CBM_LANG_PYTHON);
+    PASS();
+}
+TEST(lang_ext_javascript) {
+    ASSERT_EQ(cbm_language_for_extension(".js"), CBM_LANG_JAVASCRIPT);
+    PASS();
+}
+TEST(lang_ext_jsx) {
+    ASSERT_EQ(cbm_language_for_extension(".jsx"), CBM_LANG_JAVASCRIPT);
+    PASS();
+}
+/* Issue #197: .mjs (ES modules) / .cjs (CommonJS) were unmapped, so those
+ * files were never indexed or searchable. */
+TEST(lang_ext_mjs_cjs) {
+    ASSERT_EQ(cbm_language_for_extension(".mjs"), CBM_LANG_JAVASCRIPT);
+    ASSERT_EQ(cbm_language_for_extension(".cjs"), CBM_LANG_JAVASCRIPT);
+    PASS();
+}
+TEST(lang_ext_mts_cts) {
+    ASSERT_EQ(cbm_language_for_extension(".mts"), CBM_LANG_TYPESCRIPT);
+    ASSERT_EQ(cbm_language_for_extension(".cts"), CBM_LANG_TYPESCRIPT);
+    PASS();
+}
+TEST(lang_ext_typescript) {
+    ASSERT_EQ(cbm_language_for_extension(".ts"), CBM_LANG_TYPESCRIPT);
+    PASS();
+}
+TEST(lang_ext_tsx) {
+    ASSERT_EQ(cbm_language_for_extension(".tsx"), CBM_LANG_TSX);
+    PASS();
+}
+TEST(lang_ext_rust) {
+    ASSERT_EQ(cbm_language_for_extension(".rs"), CBM_LANG_RUST);
+    PASS();
+}
+TEST(lang_ext_java) {
+    ASSERT_EQ(cbm_language_for_extension(".java"), CBM_LANG_JAVA);
+    PASS();
+}
+TEST(lang_ext_cpp) {
+    ASSERT_EQ(cbm_language_for_extension(".cpp"), CBM_LANG_CPP);
+    PASS();
+}
+TEST(lang_ext_hpp) {
+    ASSERT_EQ(cbm_language_for_extension(".hpp"), CBM_LANG_CPP);
+    PASS();
+}
+TEST(lang_ext_cc) {
+    ASSERT_EQ(cbm_language_for_extension(".cc"), CBM_LANG_CPP);
+    PASS();
+}
+TEST(lang_ext_cxx) {
+    ASSERT_EQ(cbm_language_for_extension(".cxx"), CBM_LANG_CPP);
+    PASS();
+}
+TEST(lang_ext_hxx) {
+    ASSERT_EQ(cbm_language_for_extension(".hxx"), CBM_LANG_CPP);
+    PASS();
+}
+TEST(lang_ext_hh) {
+    ASSERT_EQ(cbm_language_for_extension(".hh"), CBM_LANG_CPP);
+    PASS();
+}
+TEST(lang_ext_h) {
+    ASSERT_EQ(cbm_language_for_extension(".h"), CBM_LANG_CPP);
+    PASS();
+}
+TEST(lang_ext_ixx) {
+    ASSERT_EQ(cbm_language_for_extension(".ixx"), CBM_LANG_CPP);
+    PASS();
+}
+TEST(lang_ext_csharp) {
+    ASSERT_EQ(cbm_language_for_extension(".cs"), CBM_LANG_CSHARP);
+    PASS();
+}
+/* Blazor components were unmapped, so a .razor file was never discovered at
+ * all: indexing a Blazor app produced no nodes for any component, and reaching
+ * them required an undocumented extra_extensions entry in a per-project
+ * .codebase-memory.json. */
+TEST(lang_ext_razor) {
+    ASSERT_EQ(cbm_language_for_extension(".razor"), CBM_LANG_CSHARP);
+    PASS();
+}
+/* Razor Pages / MVC views were unmapped for the same reason .razor was, so an
+ * ASP.NET Core app's entire view layer was invisible to discovery. */
+TEST(lang_ext_cshtml) {
+    ASSERT_EQ(cbm_language_for_extension(".cshtml"), CBM_LANG_CSHARP);
+    PASS();
+}
+TEST(lang_ext_php) {
+    ASSERT_EQ(cbm_language_for_extension(".php"), CBM_LANG_PHP);
+    PASS();
+}
+TEST(lang_ext_lua) {
+    ASSERT_EQ(cbm_language_for_extension(".lua"), CBM_LANG_LUA);
+    PASS();
+}
+TEST(lang_ext_scala) {
+    ASSERT_EQ(cbm_language_for_extension(".scala"), CBM_LANG_SCALA);
+    PASS();
+}
+TEST(lang_ext_sc) {
+    ASSERT_EQ(cbm_language_for_extension(".sc"), CBM_LANG_SCALA);
+    PASS();
+}
+TEST(lang_ext_kotlin) {
+    ASSERT_EQ(cbm_language_for_extension(".kt"), CBM_LANG_KOTLIN);
+    PASS();
+}
+TEST(lang_ext_kts) {
+    ASSERT_EQ(cbm_language_for_extension(".kts"), CBM_LANG_KOTLIN);
+    PASS();
+}
+TEST(lang_ext_ruby) {
+    ASSERT_EQ(cbm_language_for_extension(".rb"), CBM_LANG_RUBY);
+    PASS();
+}
+TEST(lang_ext_rake) {
+    ASSERT_EQ(cbm_language_for_extension(".rake"), CBM_LANG_RUBY);
+    PASS();
+}
+TEST(lang_ext_gemspec) {
+    ASSERT_EQ(cbm_language_for_extension(".gemspec"), CBM_LANG_RUBY);
+    PASS();
+}
+TEST(lang_ext_c) {
+    ASSERT_EQ(cbm_language_for_extension(".c"), CBM_LANG_C);
+    PASS();
+}
+TEST(lang_ext_bash) {
+    ASSERT_EQ(cbm_language_for_extension(".sh"), CBM_LANG_BASH);
+    PASS();
+}
+TEST(lang_ext_bash2) {
+    ASSERT_EQ(cbm_language_for_extension(".bash"), CBM_LANG_BASH);
+    PASS();
+}
+TEST(lang_ext_zig) {
+    ASSERT_EQ(cbm_language_for_extension(".zig"), CBM_LANG_ZIG);
+    PASS();
+}
+TEST(lang_ext_elixir) {
+    ASSERT_EQ(cbm_language_for_extension(".ex"), CBM_LANG_ELIXIR);
+    PASS();
+}
+TEST(lang_ext_exs) {
+    ASSERT_EQ(cbm_language_for_extension(".exs"), CBM_LANG_ELIXIR);
+    PASS();
+}
+TEST(lang_ext_haskell) {
+    ASSERT_EQ(cbm_language_for_extension(".hs"), CBM_LANG_HASKELL);
+    PASS();
+}
+TEST(lang_ext_ocaml) {
+    ASSERT_EQ(cbm_language_for_extension(".ml"), CBM_LANG_OCAML);
+    PASS();
+}
+TEST(lang_ext_mli) {
+    ASSERT_EQ(cbm_language_for_extension(".mli"), CBM_LANG_OCAML);
+    PASS();
+}
+TEST(lang_ext_swift) {
+    ASSERT_EQ(cbm_language_for_extension(".swift"), CBM_LANG_SWIFT);
+    PASS();
+}
+TEST(lang_ext_dart) {
+    ASSERT_EQ(cbm_language_for_extension(".dart"), CBM_LANG_DART);
+    PASS();
+}
+TEST(lang_ext_perl) {
+    ASSERT_EQ(cbm_language_for_extension(".pl"), CBM_LANG_PERL);
+    PASS();
+}
+TEST(lang_ext_pm) {
+    ASSERT_EQ(cbm_language_for_extension(".pm"), CBM_LANG_PERL);
+    PASS();
+}
+TEST(lang_ext_groovy) {
+    ASSERT_EQ(cbm_language_for_extension(".groovy"), CBM_LANG_GROOVY);
+    PASS();
+}
+TEST(lang_ext_gradle) {
+    ASSERT_EQ(cbm_language_for_extension(".gradle"), CBM_LANG_GROOVY);
+    PASS();
+}
+TEST(lang_ext_erlang) {
+    ASSERT_EQ(cbm_language_for_extension(".erl"), CBM_LANG_ERLANG);
+    PASS();
+}
+TEST(lang_ext_r) {
+    ASSERT_EQ(cbm_language_for_extension(".r"), CBM_LANG_R);
+    PASS();
+}
+TEST(lang_ext_R) {
+    ASSERT_EQ(cbm_language_for_extension(".R"), CBM_LANG_R);
+    PASS();
+}
+
+/* Tier 2 programming */
+TEST(lang_ext_clojure) {
+    ASSERT_EQ(cbm_language_for_extension(".clj"), CBM_LANG_CLOJURE);
+    PASS();
+}
+TEST(lang_ext_cljs) {
+    ASSERT_EQ(cbm_language_for_extension(".cljs"), CBM_LANG_CLOJURE);
+    PASS();
+}
+TEST(lang_ext_cljc) {
+    ASSERT_EQ(cbm_language_for_extension(".cljc"), CBM_LANG_CLOJURE);
+    PASS();
+}
+TEST(lang_ext_fsharp) {
+    ASSERT_EQ(cbm_language_for_extension(".fs"), CBM_LANG_FSHARP);
+    PASS();
+}
+TEST(lang_ext_fsi) {
+    ASSERT_EQ(cbm_language_for_extension(".fsi"), CBM_LANG_FSHARP);
+    PASS();
+}
+TEST(lang_ext_fsx) {
+    ASSERT_EQ(cbm_language_for_extension(".fsx"), CBM_LANG_FSHARP);
+    PASS();
+}
+TEST(lang_ext_julia) {
+    ASSERT_EQ(cbm_language_for_extension(".jl"), CBM_LANG_JULIA);
+    PASS();
+}
+TEST(lang_ext_vim) {
+    ASSERT_EQ(cbm_language_for_extension(".vim"), CBM_LANG_VIMSCRIPT);
+    PASS();
+}
+TEST(lang_ext_nix) {
+    ASSERT_EQ(cbm_language_for_extension(".nix"), CBM_LANG_NIX);
+    PASS();
+}
+TEST(lang_ext_commonlisp) {
+    ASSERT_EQ(cbm_language_for_extension(".lisp"), CBM_LANG_COMMONLISP);
+    PASS();
+}
+TEST(lang_ext_lsp) {
+    ASSERT_EQ(cbm_language_for_extension(".lsp"), CBM_LANG_COMMONLISP);
+    PASS();
+}
+TEST(lang_ext_cl) {
+    ASSERT_EQ(cbm_language_for_extension(".cl"), CBM_LANG_COMMONLISP);
+    PASS();
+}
+TEST(lang_ext_elm) {
+    ASSERT_EQ(cbm_language_for_extension(".elm"), CBM_LANG_ELM);
+    PASS();
+}
+TEST(lang_ext_fortran) {
+    ASSERT_EQ(cbm_language_for_extension(".f90"), CBM_LANG_FORTRAN);
+    PASS();
+}
+TEST(lang_ext_f95) {
+    ASSERT_EQ(cbm_language_for_extension(".f95"), CBM_LANG_FORTRAN);
+    PASS();
+}
+TEST(lang_ext_f03) {
+    ASSERT_EQ(cbm_language_for_extension(".f03"), CBM_LANG_FORTRAN);
+    PASS();
+}
+TEST(lang_ext_f08) {
+    ASSERT_EQ(cbm_language_for_extension(".f08"), CBM_LANG_FORTRAN);
+    PASS();
+}
+TEST(lang_ext_cuda) {
+    ASSERT_EQ(cbm_language_for_extension(".cu"), CBM_LANG_CUDA);
+    PASS();
+}
+TEST(lang_ext_cuh) {
+    ASSERT_EQ(cbm_language_for_extension(".cuh"), CBM_LANG_CUDA);
+    PASS();
+}
+TEST(lang_ext_cobol) {
+    ASSERT_EQ(cbm_language_for_extension(".cob"), CBM_LANG_COBOL);
+    PASS();
+}
+TEST(lang_ext_cbl) {
+    ASSERT_EQ(cbm_language_for_extension(".cbl"), CBM_LANG_COBOL);
+    PASS();
+}
+TEST(lang_ext_verilog) {
+    ASSERT_EQ(cbm_language_for_extension(".v"), CBM_LANG_VERILOG);
+    PASS();
+}
+TEST(lang_ext_sv) {
+    ASSERT_EQ(cbm_language_for_extension(".sv"), CBM_LANG_VERILOG);
+    PASS();
+}
+TEST(lang_ext_emacslisp) {
+    ASSERT_EQ(cbm_language_for_extension(".el"), CBM_LANG_EMACSLISP);
+    PASS();
+}
+
+/* Scientific/math */
+TEST(lang_ext_matlab) {
+    ASSERT_EQ(cbm_language_for_extension(".matlab"), CBM_LANG_MATLAB);
+    PASS();
+}
+TEST(lang_ext_mlx) {
+    ASSERT_EQ(cbm_language_for_extension(".mlx"), CBM_LANG_MATLAB);
+    PASS();
+}
+TEST(lang_ext_lean) {
+    ASSERT_EQ(cbm_language_for_extension(".lean"), CBM_LANG_LEAN);
+    PASS();
+}
+TEST(lang_ext_form) {
+    ASSERT_EQ(cbm_language_for_extension(".frm"), CBM_LANG_FORM);
+    PASS();
+}
+TEST(lang_ext_prc) {
+    ASSERT_EQ(cbm_language_for_extension(".prc"), CBM_LANG_FORM);
+    PASS();
+}
+TEST(lang_ext_magma) {
+    ASSERT_EQ(cbm_language_for_extension(".mag"), CBM_LANG_MAGMA);
+    PASS();
+}
+TEST(lang_ext_magma2) {
+    ASSERT_EQ(cbm_language_for_extension(".magma"), CBM_LANG_MAGMA);
+    PASS();
+}
+TEST(lang_ext_wolfram) {
+    ASSERT_EQ(cbm_language_for_extension(".wl"), CBM_LANG_WOLFRAM);
+    PASS();
+}
+TEST(lang_ext_wls) {
+    ASSERT_EQ(cbm_language_for_extension(".wls"), CBM_LANG_WOLFRAM);
+    PASS();
+}
+
+/* Helper languages */
+TEST(lang_ext_html) {
+    ASSERT_EQ(cbm_language_for_extension(".html"), CBM_LANG_HTML);
+    PASS();
+}
+TEST(lang_ext_htm) {
+    ASSERT_EQ(cbm_language_for_extension(".htm"), CBM_LANG_HTML);
+    PASS();
+}
+TEST(lang_ext_css) {
+    ASSERT_EQ(cbm_language_for_extension(".css"), CBM_LANG_CSS);
+    PASS();
+}
+TEST(lang_ext_scss) {
+    ASSERT_EQ(cbm_language_for_extension(".scss"), CBM_LANG_SCSS);
+    PASS();
+}
+TEST(lang_ext_yaml) {
+    ASSERT_EQ(cbm_language_for_extension(".yml"), CBM_LANG_YAML);
+    PASS();
+}
+TEST(lang_ext_yaml2) {
+    ASSERT_EQ(cbm_language_for_extension(".yaml"), CBM_LANG_YAML);
+    PASS();
+}
+TEST(lang_ext_toml) {
+    ASSERT_EQ(cbm_language_for_extension(".toml"), CBM_LANG_TOML);
+    PASS();
+}
+TEST(lang_ext_hcl) {
+    ASSERT_EQ(cbm_language_for_extension(".tf"), CBM_LANG_HCL);
+    PASS();
+}
+TEST(lang_ext_hcl2) {
+    ASSERT_EQ(cbm_language_for_extension(".hcl"), CBM_LANG_HCL);
+    PASS();
+}
+/* OpenTofu's own configuration files and Terraform/OpenTofu variable files
+ * are HCL too; neither was indexed (cloud-foundation-fabric: 104 .tofu,
+ * 208 .tfvars). */
+TEST(lang_ext_tofu_tfvars) {
+    ASSERT_EQ(cbm_language_for_extension(".tofu"), CBM_LANG_HCL);
+    ASSERT_EQ(cbm_language_for_extension(".tfvars"), CBM_LANG_HCL);
+    PASS();
+}
+TEST(lang_ext_sql) {
+    ASSERT_EQ(cbm_language_for_extension(".sql"), CBM_LANG_SQL);
+    PASS();
+}
+TEST(lang_ext_dockerfile) {
+    ASSERT_EQ(cbm_language_for_extension(".dockerfile"), CBM_LANG_DOCKERFILE);
+    PASS();
+}
+TEST(lang_ext_json) {
+    ASSERT_EQ(cbm_language_for_extension(".json"), CBM_LANG_JSON);
+    PASS();
+}
+TEST(lang_ext_xml) {
+    ASSERT_EQ(cbm_language_for_extension(".xml"), CBM_LANG_XML);
+    PASS();
+}
+TEST(lang_ext_xsl) {
+    ASSERT_EQ(cbm_language_for_extension(".xsl"), CBM_LANG_XML);
+    PASS();
+}
+TEST(lang_ext_xsd) {
+    ASSERT_EQ(cbm_language_for_extension(".xsd"), CBM_LANG_XML);
+    PASS();
+}
+TEST(lang_ext_svg) {
+    ASSERT_EQ(cbm_language_for_extension(".svg"), CBM_LANG_XML);
+    PASS();
+}
+/* Issue #2229: the XML documents that make up a .NET repository's project
+ * system were unmapped, so a solution's package references, target frameworks,
+ * localized strings and app manifests were never indexed or searchable. */
+TEST(lang_ext_msbuild_projects) {
+    ASSERT_EQ(cbm_language_for_extension(".csproj"), CBM_LANG_XML);
+    ASSERT_EQ(cbm_language_for_extension(".vbproj"), CBM_LANG_XML);
+    ASSERT_EQ(cbm_language_for_extension(".fsproj"), CBM_LANG_XML);
+    ASSERT_EQ(cbm_language_for_extension(".props"), CBM_LANG_XML);
+    ASSERT_EQ(cbm_language_for_extension(".targets"), CBM_LANG_XML);
+    ASSERT_EQ(cbm_language_for_extension(".nuspec"), CBM_LANG_XML);
+    ASSERT_EQ(cbm_language_for_extension(".slnx"), CBM_LANG_XML);
+    ASSERT_EQ(cbm_language_for_extension(".runsettings"), CBM_LANG_XML);
+    PASS();
+}
+TEST(lang_ext_resx) {
+    ASSERT_EQ(cbm_language_for_extension(".resx"), CBM_LANG_XML);
+    PASS();
+}
+TEST(lang_ext_xaml) {
+    ASSERT_EQ(cbm_language_for_extension(".xaml"), CBM_LANG_XML);
+    ASSERT_EQ(cbm_language_for_extension(".axaml"), CBM_LANG_XML);
+    PASS();
+}
+TEST(lang_ext_app_manifests) {
+    ASSERT_EQ(cbm_language_for_extension(".plist"), CBM_LANG_XML);
+    ASSERT_EQ(cbm_language_for_extension(".xcprivacy"), CBM_LANG_XML);
+    ASSERT_EQ(cbm_language_for_extension(".manifest"), CBM_LANG_XML);
+    ASSERT_EQ(cbm_language_for_extension(".appxmanifest"), CBM_LANG_XML);
+    PASS();
+}
+TEST(lang_ext_markdown) {
+    ASSERT_EQ(cbm_language_for_extension(".md"), CBM_LANG_MARKDOWN);
+    PASS();
+}
+TEST(lang_ext_mdx) {
+    ASSERT_EQ(cbm_language_for_extension(".mdx"), CBM_LANG_MARKDOWN);
+    PASS();
+}
+TEST(lang_ext_makefile) {
+    ASSERT_EQ(cbm_language_for_extension(".mk"), CBM_LANG_MAKEFILE);
+    PASS();
+}
+TEST(lang_ext_cmake) {
+    ASSERT_EQ(cbm_language_for_extension(".cmake"), CBM_LANG_CMAKE);
+    PASS();
+}
+TEST(lang_ext_protobuf) {
+    ASSERT_EQ(cbm_language_for_extension(".proto"), CBM_LANG_PROTOBUF);
+    PASS();
+}
+TEST(lang_ext_graphql) {
+    ASSERT_EQ(cbm_language_for_extension(".graphql"), CBM_LANG_GRAPHQL);
+    PASS();
+}
+TEST(lang_ext_gql) {
+    ASSERT_EQ(cbm_language_for_extension(".gql"), CBM_LANG_GRAPHQL);
+    PASS();
+}
+TEST(lang_ext_vue) {
+    ASSERT_EQ(cbm_language_for_extension(".vue"), CBM_LANG_VUE);
+    PASS();
+}
+TEST(lang_ext_svelte) {
+    ASSERT_EQ(cbm_language_for_extension(".svelte"), CBM_LANG_SVELTE);
+    PASS();
+}
+TEST(lang_ext_meson) {
+    ASSERT_EQ(cbm_language_for_extension(".meson"), CBM_LANG_MESON);
+    PASS();
+}
+TEST(lang_ext_glsl) {
+    ASSERT_EQ(cbm_language_for_extension(".glsl"), CBM_LANG_GLSL);
+    PASS();
+}
+TEST(lang_ext_vert) {
+    ASSERT_EQ(cbm_language_for_extension(".vert"), CBM_LANG_GLSL);
+    PASS();
+}
+/* Compute, geometry and tessellation stages are GLSL too (glslang naming). */
+TEST(lang_ext_glsl_other_stages) {
+    ASSERT_EQ(cbm_language_for_extension(".comp"), CBM_LANG_GLSL);
+    ASSERT_EQ(cbm_language_for_extension(".geom"), CBM_LANG_GLSL);
+    ASSERT_EQ(cbm_language_for_extension(".tesc"), CBM_LANG_GLSL);
+    ASSERT_EQ(cbm_language_for_extension(".tese"), CBM_LANG_GLSL);
+    PASS();
+}
+
+TEST(lang_ext_frag) {
+    ASSERT_EQ(cbm_language_for_extension(".frag"), CBM_LANG_GLSL);
+    PASS();
+}
+TEST(lang_ext_ini) {
+    ASSERT_EQ(cbm_language_for_extension(".ini"), CBM_LANG_INI);
+    PASS();
+}
+TEST(lang_ext_cfg) {
+    ASSERT_EQ(cbm_language_for_extension(".cfg"), CBM_LANG_INI);
+    PASS();
+}
+TEST(lang_ext_conf) {
+    ASSERT_EQ(cbm_language_for_extension(".conf"), CBM_LANG_INI);
+    PASS();
+}
+
+/* Unknown extension */
+TEST(lang_ext_unknown) {
+    ASSERT_EQ(cbm_language_for_extension(".xyz"), CBM_LANG_COUNT);
+    PASS();
+}
+TEST(lang_ext_null) {
+    ASSERT_EQ(cbm_language_for_extension(""), CBM_LANG_COUNT);
+    PASS();
+}
+
+/* ── Filename-based detection ──────────────────────────────────── */
+
+TEST(lang_fn_makefile) {
+    ASSERT_EQ(cbm_language_for_filename("Makefile"), CBM_LANG_MAKEFILE);
+    PASS();
+}
+TEST(lang_fn_gnumakefile) {
+    ASSERT_EQ(cbm_language_for_filename("GNUmakefile"), CBM_LANG_MAKEFILE);
+    PASS();
+}
+TEST(lang_fn_makefile_lower) {
+    ASSERT_EQ(cbm_language_for_filename("makefile"), CBM_LANG_MAKEFILE);
+    PASS();
+}
+TEST(lang_fn_cmake) {
+    ASSERT_EQ(cbm_language_for_filename("CMakeLists.txt"), CBM_LANG_CMAKE);
+    PASS();
+}
+TEST(lang_fn_dockerfile) {
+    ASSERT_EQ(cbm_language_for_filename("Dockerfile"), CBM_LANG_DOCKERFILE);
+    PASS();
+}
+/* Build files named for a variant; a template or ignore file of one is not. */
+TEST(lang_fn_dockerfile_variants) {
+    ASSERT_EQ(cbm_language_for_filename("Dockerfile.debug"), CBM_LANG_DOCKERFILE);
+    ASSERT_EQ(cbm_language_for_filename("Dockerfile.multiarch"), CBM_LANG_DOCKERFILE);
+    ASSERT_EQ(cbm_language_for_filename("Dockerfile-test"), CBM_LANG_DOCKERFILE);
+    ASSERT_EQ(cbm_language_for_filename("Dockerfile_base"), CBM_LANG_DOCKERFILE);
+    ASSERT_EQ(cbm_language_for_filename("Containerfile"), CBM_LANG_DOCKERFILE);
+    ASSERT_EQ(cbm_language_for_filename("Containerfile.arm64"), CBM_LANG_DOCKERFILE);
+    ASSERT_EQ(cbm_language_for_filename("pipeline.Dockerfile"), CBM_LANG_DOCKERFILE);
+    ASSERT_EQ(cbm_language_for_filename("Dockerfile.j2"), CBM_LANG_JINJA2);
+    ASSERT_NEQ(cbm_language_for_filename("Dockerfile.dockerignore"), CBM_LANG_DOCKERFILE);
+    ASSERT_NEQ(cbm_language_for_filename("Dockerfile."), CBM_LANG_DOCKERFILE);
+    ASSERT_NEQ(cbm_language_for_filename("Dockerfiles"), CBM_LANG_DOCKERFILE);
+    PASS();
+}
+/* A name shorter than "Dockerfile" / "Containerfile" is read no further than
+ * its end: each name sits in a heap block of exactly its size, so a sanitizer
+ * sees the overread the variant check once made (GCC ASan, doc-link code
+ * asking for the language of `a.go`). */
+TEST(lang_fn_short_names_read_in_bounds) {
+    static const char *const NAMES[] = {"a",    "a.go",       "go.mod", "Dock",
+                                        "Dockerf", "Containe", "x.yaml"};
+    for (size_t i = 0; i < sizeof(NAMES) / sizeof(NAMES[0]); i++) {
+        size_t n = strlen(NAMES[i]) + 1;
+        char *exact = malloc(n);
+        ASSERT_NOT_NULL(exact);
+        memcpy(exact, NAMES[i], n);
+        CBMLanguage lang = cbm_language_for_filename(exact);
+        free(exact);
+        ASSERT_NEQ(lang, CBM_LANG_DOCKERFILE);
+    }
+    PASS();
+}
+TEST(lang_fn_meson_build) {
+    ASSERT_EQ(cbm_language_for_filename("meson.build"), CBM_LANG_MESON);
+    PASS();
+}
+TEST(lang_fn_meson_opts) {
+    ASSERT_EQ(cbm_language_for_filename("meson.options"), CBM_LANG_MESON);
+    PASS();
+}
+TEST(lang_fn_meson_opts_txt) {
+    ASSERT_EQ(cbm_language_for_filename("meson_options.txt"), CBM_LANG_MESON);
+    PASS();
+}
+TEST(lang_fn_vimrc) {
+    ASSERT_EQ(cbm_language_for_filename(".vimrc"), CBM_LANG_VIMSCRIPT);
+    PASS();
+}
+
+/* issue #258: .blade.php is a built-in compound extension → Blade by default
+ * (previously fell through to the single-extension lookup and was mis-typed as
+ * PHP). Plain .php still maps to PHP. */
+TEST(lang_fn_blade_php_compound_issue258) {
+    ASSERT_EQ(cbm_language_for_filename("login.blade.php"), CBM_LANG_BLADE);
+    ASSERT_EQ(cbm_language_for_filename("alert.blade.php"), CBM_LANG_BLADE);
+    ASSERT_EQ(cbm_language_for_filename("index.php"), CBM_LANG_PHP);
+    PASS();
+}
+
+/* Filename with extension falls through to extension lookup */
+TEST(lang_fn_main_go) {
+    ASSERT_EQ(cbm_language_for_filename("main.go"), CBM_LANG_GO);
+    PASS();
+}
+TEST(lang_fn_test_py) {
+    ASSERT_EQ(cbm_language_for_filename("test.py"), CBM_LANG_PYTHON);
+    PASS();
+}
+TEST(lang_fn_unknown) {
+    ASSERT_EQ(cbm_language_for_filename("README"), CBM_LANG_COUNT);
+    PASS();
+}
+
+/* ── Language name ─────────────────────────────────────────────── */
+
+TEST(lang_name_go) {
+    ASSERT_STR_EQ(cbm_language_name(CBM_LANG_GO), "Go");
+    PASS();
+}
+TEST(lang_name_python) {
+    ASSERT_STR_EQ(cbm_language_name(CBM_LANG_PYTHON), "Python");
+    PASS();
+}
+TEST(lang_name_cpp) {
+    ASSERT_STR_EQ(cbm_language_name(CBM_LANG_CPP), "C++");
+    PASS();
+}
+TEST(lang_name_csharp) {
+    ASSERT_STR_EQ(cbm_language_name(CBM_LANG_CSHARP), "C#");
+    PASS();
+}
+TEST(lang_name_unknown) {
+    ASSERT_STR_EQ(cbm_language_name(CBM_LANG_COUNT), "Unknown");
+    PASS();
+}
+
+/* ── .m disambiguation ─────────────────────────────────────────── */
+
+/* These tests need temp files with content markers */
+TEST(lang_m_objc) {
+    /* Write a temp file with Objective-C markers */
+    char path[256];
+    snprintf(path, sizeof(path), "%s/test_lang_objc.m", cbm_tmpdir());
+    FILE *f = fopen(path, "w");
+    ASSERT_NOT_NULL(f);
+    fprintf(f, "#import <Foundation/Foundation.h>\n@interface Foo : NSObject\n@end\n");
+    fclose(f);
+
+    ASSERT_EQ(cbm_disambiguate_m(path), CBM_LANG_OBJC);
+    remove(path);
+    PASS();
+}
+
+TEST(lang_m_magma) {
+    char path[256];
+    snprintf(path, sizeof(path), "%s/test_lang_magma.m", cbm_tmpdir());
+    FILE *f = fopen(path, "w");
+    ASSERT_NOT_NULL(f);
+    fprintf(f, "function MyFunc(x)\n  return x^2;\nend function;\n");
+    fclose(f);
+
+    ASSERT_EQ(cbm_disambiguate_m(path), CBM_LANG_MAGMA);
+    remove(path);
+    PASS();
+}
+
+TEST(lang_m_matlab) {
+    char path[256];
+    snprintf(path, sizeof(path), "%s/test_lang_matlab.m", cbm_tmpdir());
+    FILE *f = fopen(path, "w");
+    ASSERT_NOT_NULL(f);
+    fprintf(f, "function y = square(x)\n  y = x.^2;\nend\n");
+    fclose(f);
+
+    ASSERT_EQ(cbm_disambiguate_m(path), CBM_LANG_MATLAB);
+    remove(path);
+    PASS();
+}
+
+TEST(lang_m_default_on_read_fail) {
+    /* Non-existent file defaults to MATLAB */
+    ASSERT_EQ(cbm_disambiguate_m("/tmp/nonexistent_file_12345.m"), CBM_LANG_MATLAB);
+    PASS();
+}
+
+/* ── .cfc disambiguation (tag vs script dialect) ───────────────── */
+
+/* Helper: write content to a temp .cfc and return its disambiguated language. */
+static CBMLanguage disambiguate_cfc_content(const char *name, const char *content) {
+    char path[256];
+    snprintf(path, sizeof(path), "%s/%s", cbm_tmpdir(), name);
+    FILE *f = fopen(path, "w");
+    if (!f) {
+        return CBM_LANG_COUNT;
+    }
+    fputs(content, f);
+    fclose(f);
+    CBMLanguage lang = cbm_disambiguate_cfc(path);
+    remove(path);
+    return lang;
+}
+
+/* ── .cls / .frm: VB6 vs Apex / ObjectScript / FORM (#721) ────────── */
+
+static bool write_probe_file(const char *path, const char *content) {
+    FILE *f = fopen(path, "w");
+    if (!f) {
+        return false;
+    }
+    fputs(content, f);
+    fclose(f);
+    return true;
+}
+
+TEST(lang_cls_vb6_class_module_unsupported) {
+    char path[256];
+    snprintf(path, sizeof(path), "%s/test_lang_vb6.cls", cbm_tmpdir());
+    ASSERT_TRUE(write_probe_file(path, "VERSION 1.0 CLASS\r\nBEGIN\r\n  MultiUse = -1  'True\r\n"
+                                       "END\r\nAttribute VB_Name = \"Widget\"\r\n"
+                                       "Option Explicit\r\n\r\nPublic Sub Go()\r\nEnd Sub\r\n"));
+    ASSERT_EQ(cbm_disambiguate_cls(path), CBM_LANG_COUNT);
+    remove(path);
+    PASS();
+}
+
+TEST(lang_cls_apex_stays_apex) {
+    char path[256];
+    snprintf(path, sizeof(path), "%s/test_lang_apex.cls", cbm_tmpdir());
+    ASSERT_TRUE(write_probe_file(path, "public with sharing class Widget {\n"
+                                       "  public void go() {}\n}\n"));
+    ASSERT_EQ(cbm_disambiguate_cls(path), CBM_LANG_APEX);
+    remove(path);
+    /* Unreadable file keeps the pre-existing owner. */
+    ASSERT_EQ(cbm_disambiguate_cls("/tmp/nonexistent_file_12345.cls"), CBM_LANG_APEX);
+    PASS();
+}
+
+TEST(lang_cls_objectscript_stays_objectscript) {
+    char path[256];
+    snprintf(path, sizeof(path), "%s/test_lang_udl.cls", cbm_tmpdir());
+    ASSERT_TRUE(write_probe_file(path, "Class MyPkg.Widget Extends %RegisteredObject\n{\n\n"
+                                       "Method Go()\n{\n}\n\n}\n"));
+    ASSERT_EQ(cbm_disambiguate_cls(path), CBM_LANG_OBJECTSCRIPT_UDL);
+    remove(path);
+    PASS();
+}
+
+TEST(lang_frm_vb6_form_unsupported) {
+    char path[256];
+    snprintf(path, sizeof(path), "%s/test_lang_vb6.frm", cbm_tmpdir());
+    ASSERT_TRUE(write_probe_file(path, "VERSION 5.00\r\nBegin VB.Form Form1 \r\n"
+                                       "   Caption         =   \"Hi\"\r\nEnd\r\n"
+                                       "Attribute VB_Name = \"Form1\"\r\nOption Explicit\r\n"));
+    ASSERT_EQ(cbm_disambiguate_frm(path), CBM_LANG_COUNT);
+    remove(path);
+    PASS();
+}
+
+TEST(lang_frm_form_stays_form) {
+    char path[256];
+    snprintf(path, sizeof(path), "%s/test_lang_form.frm", cbm_tmpdir());
+    ASSERT_TRUE(write_probe_file(path, "Symbols x, y;\nLocal F = x + y;\nPrint;\n.end\n"));
+    ASSERT_EQ(cbm_disambiguate_frm(path), CBM_LANG_FORM);
+    remove(path);
+    ASSERT_EQ(cbm_disambiguate_frm("/tmp/nonexistent_file_12345.frm"), CBM_LANG_FORM);
+    PASS();
+}
+
+/* #2176: a Godot binary resource shares the .res extension with ReScript.
+ * Parsed as ReScript it produced an error tree that never finished indexing;
+ * binary content is not ReScript source and must not be indexed as such. */
+TEST(lang_res_binary_resource_unsupported) {
+    static const unsigned char godot_head[] = {'R',  'S',  'R',  'C',  0x00, 0x00, 0x00, 0x00,
+                                               0x04, 0x00, 0x00, 0x00, 'A',  'r',  'r',  'a',
+                                               'y',  'M',  'e',  's',  'h',  0x00, 0xff, 0x80};
+    char path[256];
+    snprintf(path, sizeof(path), "%s/test_lang_godot.res", cbm_tmpdir());
+    FILE *f = cbm_fopen(path, "wb");
+    ASSERT_NOT_NULL(f);
+    ASSERT_EQ(fwrite(godot_head, 1, sizeof(godot_head), f), sizeof(godot_head));
+    fclose(f);
+    ASSERT_EQ(cbm_disambiguate_res(path), CBM_LANG_COUNT);
+    remove(path);
+    PASS();
+}
+
+TEST(lang_res_rescript_stays_rescript) {
+    char path[256];
+    snprintf(path, sizeof(path), "%s/test_lang_rescript.res", cbm_tmpdir());
+    ASSERT_TRUE(write_probe_file(path, "let greet = name => `Hello ${name}`\n"
+                                       "module M = {\n  let x = 1\n}\n"));
+    ASSERT_EQ(cbm_disambiguate_res(path), CBM_LANG_RESCRIPT);
+    remove(path);
+    ASSERT_EQ(cbm_disambiguate_res("/tmp/nonexistent_file_12345.res"), CBM_LANG_RESCRIPT);
+    PASS();
+}
+
+TEST(lang_cfc_tag_component) {
+    /* <cfcomponent> wrapper ⇒ tag dialect. */
+    ASSERT_EQ(disambiguate_cfc_content("test_cfc_tag.cfc",
+                                       "<cfcomponent>\n<cffunction name=\"f\"></cffunction>\n"
+                                       "</cfcomponent>\n"),
+              CBM_LANG_CFML);
+    PASS();
+}
+
+TEST(lang_cfc_bare_cffunction) {
+    /* A component that omits <cfcomponent> but uses <cffunction> is still tag. */
+    ASSERT_EQ(disambiguate_cfc_content("test_cfc_bare.cfc",
+                                       "<cffunction name=\"f\" output=\"false\">\n"
+                                       "<cfreturn 1>\n</cffunction>\n"),
+              CBM_LANG_CFML);
+    PASS();
+}
+
+TEST(lang_cfc_script_component) {
+    /* Plain "component { ... }" ⇒ script dialect. */
+    ASSERT_EQ(disambiguate_cfc_content("test_cfc_script.cfc",
+                                       "component {\n    function f() { return 1; }\n}\n"),
+              CBM_LANG_CFSCRIPT);
+    PASS();
+}
+
+TEST(lang_cfc_script_bare_keyword) {
+    /* "component" on its own line (brace on the next) ⇒ script dialect. */
+    ASSERT_EQ(disambiguate_cfc_content("test_cfc_kw.cfc",
+                                       "component\n{\n    function f() { return 1; }\n}\n"),
+              CBM_LANG_CFSCRIPT);
+    PASS();
+}
+
+TEST(lang_cfc_cfscript_wrapped_script) {
+    /* A script component wrapped in a leading <cfscript> is still script — the
+     * leading '<' must NOT route it to the tag grammar. */
+    ASSERT_EQ(
+        disambiguate_cfc_content("test_cfc_wrapped.cfc",
+                                 "<cfscript>\ncomponent {\n    function f() { return 1; }\n}\n"
+                                 "</cfscript>\n"),
+        CBM_LANG_CFSCRIPT);
+    PASS();
+}
+
+TEST(lang_cfc_tag_after_license_comment) {
+    /* A leading <!--- ---> license comment before <cfcomponent> ⇒ tag. */
+    ASSERT_EQ(disambiguate_cfc_content("test_cfc_licensed.cfc",
+                                       "<!---\n  Copyright\n--->\n<cfcomponent>\n</cfcomponent>\n"),
+              CBM_LANG_CFML);
+    PASS();
+}
+
+TEST(lang_cfc_script_after_license_comment) {
+    /* A leading <!--- ---> comment before a script component ⇒ script (the
+     * comment's '<' must be skipped, not treated as a tag opener). */
+    ASSERT_EQ(disambiguate_cfc_content("test_cfc_lic_script.cfc",
+                                       "<!--- header ---> \ncomponent {\n"
+                                       "    function f() { return 1; }\n}\n"),
+              CBM_LANG_CFSCRIPT);
+    PASS();
+}
+
+TEST(lang_cfc_default_on_read_fail) {
+    /* Non-existent file defaults to script dialect. */
+    ASSERT_EQ(cbm_disambiguate_cfc("/tmp/nonexistent_file_98765.cfc"), CBM_LANG_CFSCRIPT);
+    PASS();
+}
+
+/* ── .d: D source vs make/cargo dep-info ───────────────────────── */
+
+/* Write content to a temp .d file and return cbm_disambiguate_d() for it. A
+ * setup failure returns -1 so neither a D nor a COUNT expectation can pass
+ * vacuously. */
+static int disambiguate_d_content(const char *content) {
+    char path[256];
+    snprintf(path, sizeof(path), "%s/test_lang_dotd.d", cbm_tmpdir());
+    if (!write_probe_file(path, content)) {
+        return -1;
+    }
+    CBMLanguage lang = cbm_disambiguate_d(path);
+    remove(path);
+    return (int)lang;
+}
+
+TEST(lang_d_dep_info_unsupported) {
+    /* cargo (absolute target), gcc -MD continuation, CMake object rule, Windows
+     * drive letter (not the rule colon), escaped space (one target, not "app"),
+     * and the GNU make manual's "foo.o foo.d : ..." (two targets, spaced colon). */
+    ASSERT_EQ(disambiguate_d_content("/home/u/t/debug/deps/foo-abc123.d: src/lib.rs src/a.rs\n"
+                                     "\nsrc/lib.rs:\n"),
+              CBM_LANG_COUNT);
+    ASSERT_EQ(disambiguate_d_content("foo.o: foo.c /usr/include/stdio.h \\\n"
+                                     " /usr/include/features.h\n"),
+              CBM_LANG_COUNT);
+    ASSERT_EQ(disambiguate_d_content("CMakeFiles/x.dir/a.cpp.o: \\\n /src/a.cpp\n"),
+              CBM_LANG_COUNT);
+    ASSERT_EQ(disambiguate_d_content("C:/b/foo.o: C:/s/foo.c \\\r\n C:/s/foo.h\r\n"),
+              CBM_LANG_COUNT);
+    ASSERT_EQ(disambiguate_d_content("out/my\\ app: main.c\n"), CBM_LANG_COUNT);
+    ASSERT_EQ(disambiguate_d_content("foo.o foo.d : foo.c defs.h\n"), CBM_LANG_COUNT);
+    PASS();
+}
+
+TEST(lang_d_source_stays_dlang) {
+    ASSERT_EQ(disambiguate_d_content("module a;\n"), CBM_LANG_DLANG);
+    ASSERT_EQ(disambiguate_d_content("import std.stdio : writeln;\n"), CBM_LANG_DLANG);
+    ASSERT_EQ(disambiguate_d_content("@safe:\nvoid f() {}\n"), CBM_LANG_DLANG);
+    /* A leading comment is D, even DUB's "/+ dub.sdl:" single-file recipe. */
+    ASSERT_EQ(disambiguate_d_content("/+ dub.sdl:\n    name \"hello\"\n+/\nvoid main() {}\n"),
+              CBM_LANG_DLANG);
+    ASSERT_EQ(disambiguate_d_content("enum E : ubyte {\n    a,\n}\n"), CBM_LANG_DLANG);
+    /* A float UDA ("@ FloatLiteral") has a '.' before its colon, alone or glued
+     * to a keyword. */
+    ASSERT_EQ(disambiguate_d_content("@1.0:\nvoid f() {}\n"), CBM_LANG_DLANG);
+    ASSERT_EQ(disambiguate_d_content("nothrow@1.0:\nvoid f() {}\n"), CBM_LANG_DLANG);
+    /* A comment between tokens puts a '/' before the colon. */
+    ASSERT_EQ(disambiguate_d_content("public/**/:\nvoid f() {}\n"), CBM_LANG_DLANG);
+    ASSERT_EQ(disambiguate_d_content("public/+ +/:\nvoid f() {}\n"), CBM_LANG_DLANG);
+    ASSERT_EQ(disambiguate_d_content("public//note: x\nvoid f() {}\n"), CBM_LANG_DLANG);
+    /* Every D whitespace splits tokens, not only space, tab and CR: form feed,
+     * vertical tab, U+2028 and U+2029. */
+    ASSERT_EQ(disambiguate_d_content("import\fstd.stdio : writeln;\n"), CBM_LANG_DLANG);
+    ASSERT_EQ(disambiguate_d_content("import\vstd.stdio : writeln;\n"), CBM_LANG_DLANG);
+    ASSERT_EQ(disambiguate_d_content("import\xE2\x80\xA8"
+                                     "std.stdio : writeln;\n"),
+              CBM_LANG_DLANG);
+    ASSERT_EQ(disambiguate_d_content("import\xE2\x80\xA9"
+                                     "std.stdio : writeln;\n"),
+              CBM_LANG_DLANG);
+    /* Default on doubt: empty or unreadable. */
+    ASSERT_EQ(disambiguate_d_content(""), CBM_LANG_DLANG);
+    ASSERT_EQ(cbm_disambiguate_d("/tmp/nonexistent_file_12345.d"), CBM_LANG_DLANG);
+    PASS();
+}
+
+/* --- New languages (auto-generated) --- */
+TEST(lang_ext_solidity) {
+    ASSERT_EQ(cbm_language_for_extension(".sol"), CBM_LANG_SOLIDITY);
+    PASS();
+}
+
+TEST(lang_ext_typst) {
+    ASSERT_EQ(cbm_language_for_extension(".typ"), CBM_LANG_TYPST);
+    PASS();
+}
+
+TEST(lang_ext_gdscript) {
+    ASSERT_EQ(cbm_language_for_extension(".gd"), CBM_LANG_GDSCRIPT);
+    PASS();
+}
+
+TEST(lang_ext_gleam) {
+    ASSERT_EQ(cbm_language_for_extension(".gleam"), CBM_LANG_GLEAM);
+    PASS();
+}
+
+TEST(lang_ext_powershell) {
+    ASSERT_EQ(cbm_language_for_extension(".ps1"), CBM_LANG_POWERSHELL);
+    ASSERT_EQ(cbm_language_for_extension(".psm1"), CBM_LANG_POWERSHELL);
+    ASSERT_EQ(cbm_language_for_extension(".psd1"), CBM_LANG_POWERSHELL);
+    PASS();
+}
+
+TEST(lang_ext_pascal) {
+    ASSERT_EQ(cbm_language_for_extension(".pas"), CBM_LANG_PASCAL);
+    ASSERT_EQ(cbm_language_for_extension(".lpr"), CBM_LANG_PASCAL);
+    ASSERT_EQ(cbm_language_for_extension(".dpr"), CBM_LANG_PASCAL);
+    PASS();
+}
+
+TEST(lang_ext_d) {
+    ASSERT_EQ(cbm_language_for_extension(".d"), CBM_LANG_DLANG);
+    PASS();
+}
+
+TEST(lang_ext_nim) {
+    /* nim grammar removed — .nim/.nims no longer map to a language */
+    ASSERT_EQ(cbm_language_for_extension(".nim"), CBM_LANG_COUNT);
+    ASSERT_EQ(cbm_language_for_extension(".nims"), CBM_LANG_COUNT);
+    PASS();
+}
+
+TEST(lang_ext_scheme) {
+    ASSERT_EQ(cbm_language_for_extension(".scm"), CBM_LANG_SCHEME);
+    ASSERT_EQ(cbm_language_for_extension(".ss"), CBM_LANG_SCHEME);
+    PASS();
+}
+
+TEST(lang_ext_chialisp) {
+    ASSERT_EQ(cbm_language_for_extension(".clsp"), CBM_LANG_CHIALISP);
+    ASSERT_EQ(cbm_language_for_extension(".clib"), CBM_LANG_CHIALISP);
+    ASSERT_EQ(cbm_language_for_extension(".clinc"), CBM_LANG_CHIALISP);
+    /* .clj stays Clojure — the Chialisp extensions must not widen it. */
+    ASSERT_EQ(cbm_language_for_extension(".clj"), CBM_LANG_CLOJURE);
+    PASS();
+}
+
+TEST(lang_ext_fennel) {
+    ASSERT_EQ(cbm_language_for_extension(".fnl"), CBM_LANG_FENNEL);
+    PASS();
+}
+
+TEST(lang_ext_fish) {
+    ASSERT_EQ(cbm_language_for_extension(".fish"), CBM_LANG_FISH);
+    PASS();
+}
+
+TEST(lang_ext_awk) {
+    ASSERT_EQ(cbm_language_for_extension(".awk"), CBM_LANG_AWK);
+    PASS();
+}
+
+TEST(lang_ext_zsh) {
+    ASSERT_EQ(cbm_language_for_extension(".zsh"), CBM_LANG_ZSH);
+    PASS();
+}
+
+TEST(lang_ext_tcl) {
+    ASSERT_EQ(cbm_language_for_extension(".tcl"), CBM_LANG_TCL);
+    PASS();
+}
+
+TEST(lang_ext_ada) {
+    ASSERT_EQ(cbm_language_for_extension(".adb"), CBM_LANG_ADA);
+    ASSERT_EQ(cbm_language_for_extension(".ads"), CBM_LANG_ADA);
+    PASS();
+}
+
+TEST(lang_ext_agda) {
+    ASSERT_EQ(cbm_language_for_extension(".agda"), CBM_LANG_AGDA);
+    PASS();
+}
+
+TEST(lang_ext_racket) {
+    ASSERT_EQ(cbm_language_for_extension(".rkt"), CBM_LANG_RACKET);
+    PASS();
+}
+
+TEST(lang_ext_odin) {
+    ASSERT_EQ(cbm_language_for_extension(".odin"), CBM_LANG_ODIN);
+    PASS();
+}
+
+TEST(lang_ext_rescript) {
+    ASSERT_EQ(cbm_language_for_extension(".res"), CBM_LANG_RESCRIPT);
+    ASSERT_EQ(cbm_language_for_extension(".resi"), CBM_LANG_RESCRIPT);
+    PASS();
+}
+
+TEST(lang_ext_purescript) {
+    ASSERT_EQ(cbm_language_for_extension(".purs"), CBM_LANG_PURESCRIPT);
+    PASS();
+}
+
+TEST(lang_ext_nickel) {
+    ASSERT_EQ(cbm_language_for_extension(".ncl"), CBM_LANG_NICKEL);
+    PASS();
+}
+
+TEST(lang_ext_crystal) {
+    ASSERT_EQ(cbm_language_for_extension(".cr"), CBM_LANG_CRYSTAL);
+    PASS();
+}
+
+TEST(lang_ext_teal) {
+    ASSERT_EQ(cbm_language_for_extension(".tl"), CBM_LANG_TEAL);
+    PASS();
+}
+
+TEST(lang_ext_hare) {
+    ASSERT_EQ(cbm_language_for_extension(".ha"), CBM_LANG_HARE);
+    PASS();
+}
+
+TEST(lang_ext_pony) {
+    ASSERT_EQ(cbm_language_for_extension(".pony"), CBM_LANG_PONY);
+    PASS();
+}
+
+TEST(lang_ext_luau) {
+    ASSERT_EQ(cbm_language_for_extension(".luau"), CBM_LANG_LUAU);
+    PASS();
+}
+
+TEST(lang_ext_qml) {
+    ASSERT_EQ(cbm_language_for_extension(".qml"), CBM_LANG_QML);
+    PASS();
+}
+
+TEST(lang_ext_cfml) {
+    ASSERT_EQ(cbm_language_for_extension(".cfc"), CBM_LANG_CFSCRIPT);
+    ASSERT_EQ(cbm_language_for_extension(".cfm"), CBM_LANG_CFML);
+    PASS();
+}
+
+TEST(lang_ext_helm_tpl) {
+    ASSERT_EQ(cbm_language_for_extension(".tpl"), CBM_LANG_GOTEMPLATE);
+    PASS();
+}
+
+TEST(lang_ext_janet) {
+    ASSERT_EQ(cbm_language_for_extension(".janet"), CBM_LANG_JANET);
+    PASS();
+}
+
+TEST(lang_ext_sway) {
+    ASSERT_EQ(cbm_language_for_extension(".sw"), CBM_LANG_SWAY);
+    PASS();
+}
+
+TEST(lang_ext_nasm) {
+    ASSERT_EQ(cbm_language_for_extension(".nasm"), CBM_LANG_NASM);
+    PASS();
+}
+
+TEST(lang_ext_assembly) {
+    ASSERT_EQ(cbm_language_for_extension(".s"), CBM_LANG_ASSEMBLY);
+    ASSERT_EQ(cbm_language_for_extension(".S"), CBM_LANG_ASSEMBLY);
+    PASS();
+}
+
+TEST(lang_ext_astro) {
+    ASSERT_EQ(cbm_language_for_extension(".astro"), CBM_LANG_ASTRO);
+    PASS();
+}
+
+TEST(lang_ext_gotemplate) {
+    ASSERT_EQ(cbm_language_for_extension(".tmpl"), CBM_LANG_GOTEMPLATE);
+    ASSERT_EQ(cbm_language_for_extension(".gotmpl"), CBM_LANG_GOTEMPLATE);
+    PASS();
+}
+
+TEST(lang_ext_templ) {
+    ASSERT_EQ(cbm_language_for_extension(".templ"), CBM_LANG_TEMPL);
+    PASS();
+}
+
+TEST(lang_ext_liquid) {
+    ASSERT_EQ(cbm_language_for_extension(".liquid"), CBM_LANG_LIQUID);
+    PASS();
+}
+
+TEST(lang_ext_jinja2) {
+    ASSERT_EQ(cbm_language_for_extension(".j2"), CBM_LANG_JINJA2);
+    ASSERT_EQ(cbm_language_for_extension(".jinja2"), CBM_LANG_JINJA2);
+    ASSERT_EQ(cbm_language_for_extension(".jinja"), CBM_LANG_JINJA2);
+    PASS();
+}
+
+TEST(lang_ext_prisma) {
+    ASSERT_EQ(cbm_language_for_extension(".prisma"), CBM_LANG_PRISMA);
+    PASS();
+}
+
+TEST(lang_ext_hyprlang) {
+    ASSERT_EQ(cbm_language_for_extension(".hl"), CBM_LANG_HYPRLANG);
+    PASS();
+}
+
+TEST(lang_ext_diff) {
+    ASSERT_EQ(cbm_language_for_extension(".diff"), CBM_LANG_DIFF);
+    ASSERT_EQ(cbm_language_for_extension(".patch"), CBM_LANG_DIFF);
+    PASS();
+}
+
+TEST(lang_ext_wgsl) {
+    ASSERT_EQ(cbm_language_for_extension(".wgsl"), CBM_LANG_WGSL);
+    PASS();
+}
+
+TEST(lang_ext_kdl) {
+    ASSERT_EQ(cbm_language_for_extension(".kdl"), CBM_LANG_KDL);
+    PASS();
+}
+
+TEST(lang_ext_json5) {
+    ASSERT_EQ(cbm_language_for_extension(".json5"), CBM_LANG_JSON5);
+    PASS();
+}
+
+TEST(lang_ext_jsonnet) {
+    ASSERT_EQ(cbm_language_for_extension(".jsonnet"), CBM_LANG_JSONNET);
+    ASSERT_EQ(cbm_language_for_extension(".libsonnet"), CBM_LANG_JSONNET);
+    PASS();
+}
+
+TEST(lang_ext_ron) {
+    ASSERT_EQ(cbm_language_for_extension(".ron"), CBM_LANG_RON);
+    PASS();
+}
+
+TEST(lang_ext_thrift) {
+    ASSERT_EQ(cbm_language_for_extension(".thrift"), CBM_LANG_THRIFT);
+    PASS();
+}
+
+TEST(lang_ext_capnp) {
+    ASSERT_EQ(cbm_language_for_extension(".capnp"), CBM_LANG_CAPNP);
+    PASS();
+}
+
+TEST(lang_ext_properties) {
+    ASSERT_EQ(cbm_language_for_extension(".properties"), CBM_LANG_PROPERTIES);
+    PASS();
+}
+
+TEST(lang_ext_bibtex) {
+    ASSERT_EQ(cbm_language_for_extension(".bib"), CBM_LANG_BIBTEX);
+    PASS();
+}
+
+TEST(lang_ext_starlark) {
+    ASSERT_EQ(cbm_language_for_extension(".star"), CBM_LANG_STARLARK);
+    ASSERT_EQ(cbm_language_for_extension(".bzl"), CBM_LANG_STARLARK);
+    PASS();
+}
+
+TEST(lang_ext_bicep) {
+    ASSERT_EQ(cbm_language_for_extension(".bicep"), CBM_LANG_BICEP);
+    PASS();
+}
+
+TEST(lang_ext_csv) {
+    ASSERT_EQ(cbm_language_for_extension(".csv"), CBM_LANG_CSV);
+    PASS();
+}
+
+TEST(lang_ext_hlsl) {
+    ASSERT_EQ(cbm_language_for_extension(".hlsl"), CBM_LANG_HLSL);
+    ASSERT_EQ(cbm_language_for_extension(".hlsli"), CBM_LANG_HLSL);
+    ASSERT_EQ(cbm_language_for_extension(".fx"), CBM_LANG_HLSL);
+    PASS();
+}
+
+TEST(lang_ext_vhdl) {
+    ASSERT_EQ(cbm_language_for_extension(".vhd"), CBM_LANG_VHDL);
+    ASSERT_EQ(cbm_language_for_extension(".vhdl"), CBM_LANG_VHDL);
+    PASS();
+}
+
+TEST(lang_ext_devicetree) {
+    ASSERT_EQ(cbm_language_for_extension(".dts"), CBM_LANG_DEVICETREE);
+    ASSERT_EQ(cbm_language_for_extension(".dtsi"), CBM_LANG_DEVICETREE);
+    ASSERT_EQ(cbm_language_for_extension(".overlay"), CBM_LANG_DEVICETREE);
+    PASS();
+}
+
+TEST(lang_ext_linkerscript) {
+    ASSERT_EQ(cbm_language_for_extension(".ld"), CBM_LANG_LINKERSCRIPT);
+    ASSERT_EQ(cbm_language_for_extension(".lds"), CBM_LANG_LINKERSCRIPT);
+    PASS();
+}
+
+TEST(lang_ext_gn) {
+    ASSERT_EQ(cbm_language_for_extension(".gn"), CBM_LANG_GN);
+    ASSERT_EQ(cbm_language_for_extension(".gni"), CBM_LANG_GN);
+    PASS();
+}
+
+TEST(lang_ext_bitbake) {
+    ASSERT_EQ(cbm_language_for_extension(".bb"), CBM_LANG_BITBAKE);
+    ASSERT_EQ(cbm_language_for_extension(".bbclass"), CBM_LANG_BITBAKE);
+    ASSERT_EQ(cbm_language_for_extension(".bbappend"), CBM_LANG_BITBAKE);
+    PASS();
+}
+
+TEST(lang_ext_smali) {
+    ASSERT_EQ(cbm_language_for_extension(".smali"), CBM_LANG_SMALI);
+    PASS();
+}
+
+TEST(lang_ext_tablegen) {
+    ASSERT_EQ(cbm_language_for_extension(".td"), CBM_LANG_TABLEGEN);
+    PASS();
+}
+
+TEST(lang_ext_ispc) {
+    ASSERT_EQ(cbm_language_for_extension(".ispc"), CBM_LANG_ISPC);
+    PASS();
+}
+
+TEST(lang_ext_cairo) {
+    ASSERT_EQ(cbm_language_for_extension(".cairo"), CBM_LANG_CAIRO);
+    PASS();
+}
+
+TEST(lang_ext_move) {
+    ASSERT_EQ(cbm_language_for_extension(".move"), CBM_LANG_MOVE);
+    PASS();
+}
+
+TEST(lang_ext_mojo) {
+    ASSERT_EQ(cbm_language_for_extension(".mojo"), CBM_LANG_MOJO);
+    PASS();
+}
+
+TEST(lang_ext_arkts) {
+    ASSERT_EQ(cbm_language_for_extension(".ets"), CBM_LANG_ARKTS);
+    PASS();
+}
+
+TEST(lang_ext_plsql) {
+    ASSERT_EQ(cbm_language_for_extension(".pks"), CBM_LANG_PLSQL);
+    ASSERT_EQ(cbm_language_for_extension(".pkb"), CBM_LANG_PLSQL);
+    ASSERT_EQ(cbm_language_for_extension(".pck"), CBM_LANG_PLSQL);
+    ASSERT_EQ(cbm_language_for_extension(".pls"), CBM_LANG_PLSQL);
+    ASSERT_EQ(cbm_language_for_extension(".plb"), CBM_LANG_PLSQL);
+    ASSERT_EQ(cbm_language_for_extension(".plsql"), CBM_LANG_PLSQL);
+    ASSERT_EQ(cbm_language_for_extension(".fnc"), CBM_LANG_PLSQL);
+    ASSERT_EQ(cbm_language_for_extension(".trg"), CBM_LANG_PLSQL);
+    ASSERT_EQ(cbm_language_for_extension(".bdy"), CBM_LANG_PLSQL);
+    ASSERT_EQ(cbm_language_for_extension(".tps"), CBM_LANG_PLSQL);
+    ASSERT_EQ(cbm_language_for_extension(".tpb"), CBM_LANG_PLSQL);
+    /* .sql stays generic SQL; .prc stays FORM */
+    ASSERT_EQ(cbm_language_for_extension(".sql"), CBM_LANG_SQL);
+    ASSERT_EQ(cbm_language_for_extension(".prc"), CBM_LANG_FORM);
+    PASS();
+}
+
+TEST(lang_ext_squirrel) {
+    ASSERT_EQ(cbm_language_for_extension(".nut"), CBM_LANG_SQUIRREL);
+    PASS();
+}
+
+TEST(lang_ext_func) {
+    ASSERT_EQ(cbm_language_for_extension(".fc"), CBM_LANG_FUNC);
+    PASS();
+}
+
+TEST(lang_ext_rst) {
+    ASSERT_EQ(cbm_language_for_extension(".rst"), CBM_LANG_RST);
+    PASS();
+}
+
+TEST(lang_ext_beancount) {
+    ASSERT_EQ(cbm_language_for_extension(".beancount"), CBM_LANG_BEANCOUNT);
+    PASS();
+}
+
+TEST(lang_ext_mermaid) {
+    ASSERT_EQ(cbm_language_for_extension(".mmd"), CBM_LANG_MERMAID);
+    ASSERT_EQ(cbm_language_for_extension(".mermaid"), CBM_LANG_MERMAID);
+    PASS();
+}
+
+TEST(lang_ext_puppet) {
+    ASSERT_EQ(cbm_language_for_extension(".pp"), CBM_LANG_PUPPET);
+    PASS();
+}
+
+TEST(lang_ext_po) {
+    ASSERT_EQ(cbm_language_for_extension(".po"), CBM_LANG_PO);
+    ASSERT_EQ(cbm_language_for_extension(".pot"), CBM_LANG_PO);
+    PASS();
+}
+
+TEST(lang_ext_slang) {
+    ASSERT_EQ(cbm_language_for_extension(".slang"), CBM_LANG_SLANG);
+    PASS();
+}
+
+TEST(lang_ext_llvm) {
+    ASSERT_EQ(cbm_language_for_extension(".ll"), CBM_LANG_LLVM_IR);
+    PASS();
+}
+
+TEST(lang_ext_smithy) {
+    ASSERT_EQ(cbm_language_for_extension(".smithy"), CBM_LANG_SMITHY);
+    PASS();
+}
+
+TEST(lang_ext_wit) {
+    ASSERT_EQ(cbm_language_for_extension(".wit"), CBM_LANG_WIT);
+    PASS();
+}
+
+TEST(lang_ext_tlaplus) {
+    ASSERT_EQ(cbm_language_for_extension(".tla"), CBM_LANG_TLAPLUS);
+    PASS();
+}
+
+TEST(lang_ext_pkl) {
+    ASSERT_EQ(cbm_language_for_extension(".pkl"), CBM_LANG_PKL);
+    PASS();
+}
+
+TEST(lang_ext_apex) {
+    ASSERT_EQ(cbm_language_for_extension(".cls"), CBM_LANG_APEX);
+    ASSERT_EQ(cbm_language_for_extension(".trigger"), CBM_LANG_APEX);
+    PASS();
+}
+
+TEST(lang_ext_soql) {
+    ASSERT_EQ(cbm_language_for_extension(".soql"), CBM_LANG_SOQL);
+    PASS();
+}
+
+TEST(lang_ext_sosl) {
+    ASSERT_EQ(cbm_language_for_extension(".sosl"), CBM_LANG_SOSL);
+    PASS();
+}
+
+/* --- Ported from lang_test.go: TestForLanguage --- */
+TEST(lang_all_have_names) {
+    /* Every language enum value from 0 to CBM_LANG_COUNT-1
+     * should have a non-"Unknown" name. */
+    for (int i = 0; i < CBM_LANG_COUNT; i++) {
+        const char *name = cbm_language_name((CBMLanguage)i);
+        ASSERT_NOT_NULL(name);
+        ASSERT_TRUE(strcmp(name, "Unknown") != 0);
+    }
+    PASS();
+}
+
+/* ── One classifier for a name plus its first bytes ─────────────────
+ * Discovery reads files from disk; the pinned test-impact inventory reads git
+ * blobs. Both must give every file the same language, so both go through
+ * cbm_language_classify with the bytes cbm_language_probe_bytes asks for. */
+
+/* The file `name` with `content`, written byte for byte (no text-mode
+ * conversion on any platform). */
+static bool write_exact(const char *path, const char *content, size_t len) {
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        return false;
+    }
+    bool ok = fwrite(content, 1, len, f) == len;
+    return fclose(f) == 0 && ok;
+}
+
+/* The classifier on the first probe_bytes(name) bytes of `content`, as the
+ * pinned inventory calls it. */
+static CBMLanguage classify_content(const char *name, const char *content, size_t len) {
+    size_t probe = cbm_language_probe_bytes(name);
+    size_t head = len < probe ? len : probe;
+    return cbm_language_classify(name, (const unsigned char *)content, head, len > head, true);
+}
+
+typedef CBMLanguage (*path_probe_fn)(const char *path);
+
+/* Exercise the shared classifier and both disk entry points. All sources are
+ * synthetic; the recipe bodies deliberately contain misleading C-like code. */
+TEST(lang_inc_c_family_and_existing_dialects) {
+    static const struct {
+        const char *content;
+        CBMLanguage expected;
+    } cases[] = {
+        {"#include \"sample.h\"\nextern \"C\" int sample_export() { return 0; }\n", CBM_LANG_CPP},
+        {"extern \"C\" __declspec(dllexport) int sample_export() { return 0; }\n", CBM_LANG_CPP},
+        {"#define SAMPLE_CALLBACK(T) T\nstatic SAMPLE_CALLBACK(int) sample() { return 0; }\n",
+         CBM_LANG_CPP},
+        {"/* in-function fragment */\n#ifdef SAMPLE_ENABLED\nif (check()) return 1;\n#endif\n",
+         CBM_LANG_CPP},
+        {"int sample(void) { return 0; }\n", CBM_LANG_CPP},
+        {" \t# include <stdint.h>\r\n", CBM_LANG_CPP},
+        {"/* example:\nextern \"C\" int example();\n*/\nSUMMARY = \"sample\"\n", CBM_LANG_BITBAKE},
+        {"// extern \"C\" example only\n", CBM_LANG_BITBAKE},
+        {"#include_extra \"sample.h\"\n", CBM_LANG_BITBAKE},
+        {"#define Value 1\n", CBM_LANG_OBJECTSCRIPT_ROUTINE},
+        {"#ifndef SAMPLE\n#define SAMPLE 1\n#endif\n", CBM_LANG_OBJECTSCRIPT_ROUTINE},
+        {"ROUTINE Sample [Type=INC]\n#define Value 1\n", CBM_LANG_OBJECTSCRIPT_ROUTINE},
+        {"#def1arg Value(%x) %x\n", CBM_LANG_OBJECTSCRIPT_ROUTINE},
+        {"#; ObjectScript comment\n", CBM_LANG_OBJECTSCRIPT_ROUTINE},
+        {"#include <sample.h>\n#def1arg Value(%x) %x\n", CBM_LANG_OBJECTSCRIPT_ROUTINE},
+        {"# recipe\nSUMMARY = \"sample\"\nrequire base.inc\n", CBM_LANG_BITBAKE},
+        {"SRC_URI += \"file://sample.c\"\ndo_compile() {\nif (check) { return; }\n}\n",
+         CBM_LANG_BITBAKE},
+        {"python do_generate() {\nif (ready):\n    pass\n}\n", CBM_LANG_BITBAKE},
+        {"do_compile() {\ncat <<'EOF'\n#include <stdio.h>\nstatic int sample;\nEOF\n}\n",
+         CBM_LANG_BITBAKE},
+        {"require base.inc\nextern \"C\" example in recipe text\n", CBM_LANG_BITBAKE},
+        {"", CBM_LANG_BITBAKE},
+    };
+    char path[512];
+    snprintf(path, sizeof(path), "%s/cbm_lang_inc_routing.inc", cbm_tmpdir());
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        size_t len = strlen(cases[i].content);
+        ASSERT_EQ(classify_content("sample.inc", cases[i].content, len), cases[i].expected);
+        ASSERT_TRUE(write_exact(path, cases[i].content, len));
+        CBMLanguage by_probe = cbm_disambiguate_inc(path);
+        CBMLanguage by_file = cbm_language_for_file("sample.inc", path);
+        remove(path);
+        ASSERT_EQ(by_probe, cases[i].expected);
+        ASSERT_EQ(by_file, cases[i].expected);
+    }
+    ASSERT_EQ(cbm_disambiguate_inc(NULL), CBM_LANG_BITBAKE);
+    PASS();
+}
+
+TEST(lang_probe_bytes_follow_the_name) {
+    ASSERT_EQ(cbm_language_probe_bytes("main.go"), 0);
+    ASSERT_EQ(cbm_language_probe_bytes("Makefile"), 0);
+    ASSERT_EQ(cbm_language_probe_bytes("Foo.m"), 4096);
+    ASSERT_EQ(cbm_language_probe_bytes("Foo.cls"), 4096);
+    ASSERT_EQ(cbm_language_probe_bytes("foo.inc"), 4096);
+    ASSERT_EQ(cbm_language_probe_bytes("Form1.frm"), 4096);
+    ASSERT_EQ(cbm_language_probe_bytes("App.res"), 4096);
+    ASSERT_EQ(cbm_language_probe_bytes("app.d"), 4096);
+    ASSERT_EQ(cbm_language_probe_bytes("Widget.cfc"), 16384);
+    ASSERT_EQ(cbm_language_probe_bytes("pom.xml"), 255);
+    /* An unknown name falls back to a shebang probe of the first line. */
+    ASSERT_EQ(cbm_language_probe_bytes("run-tests"), 255);
+    ASSERT_EQ(cbm_language_probe_bytes("package.json"), 0);
+    PASS();
+}
+
+/* Every content rule, through the classifier and through the path probe
+ * discovery used before: both must agree, and agree with the expectation. */
+TEST(lang_classify_matches_every_content_rule) {
+    static const struct {
+        const char *name;
+        const char *content;
+        CBMLanguage expect;
+        path_probe_fn path_probe; /* NULL: no public path probe for this rule */
+    } cases[] = {
+        {"a.m", "#import <Foundation/Foundation.h>\n@interface A\n@end\n", CBM_LANG_OBJC,
+         cbm_disambiguate_m},
+        {"b.m", "function f(x)\n  return x;\nend function;\n", CBM_LANG_MAGMA, cbm_disambiguate_m},
+        {"c.m", "intrinsic Foo(x) -> RngIntElt\n{}\n", CBM_LANG_MAGMA, cbm_disambiguate_m},
+        {"d.m", "% a comment\nx = 1;\n", CBM_LANG_MATLAB, cbm_disambiguate_m},
+        {"e.cls", "VERSION 1.0 CLASS\r\nAttribute VB_Name = \"W\"\r\n", CBM_LANG_COUNT,
+         cbm_disambiguate_cls},
+        {"f.cls", "/// doc\nClass Demo.Person Extends %Persistent\n{\n}\n",
+         CBM_LANG_OBJECTSCRIPT_UDL, cbm_disambiguate_cls},
+        {"g.cls", "public class Account { }\n", CBM_LANG_APEX, cbm_disambiguate_cls},
+        {"h.inc", "ROUTINE MyMacros [Type=INC]\n", CBM_LANG_OBJECTSCRIPT_ROUTINE,
+         cbm_disambiguate_inc},
+        {"i.inc", "#define Max 10\n", CBM_LANG_OBJECTSCRIPT_ROUTINE, cbm_disambiguate_inc},
+        {"j.inc", "# a BitBake comment\nSRC_URI = \"x\"\n", CBM_LANG_BITBAKE, cbm_disambiguate_inc},
+        {"k.cfc", "<!--- header --->\n<cfcomponent>\n</cfcomponent>\n", CBM_LANG_CFML,
+         cbm_disambiguate_cfc},
+        {"l.cfc", "<!--- header --->\n<cfscript>component {}</cfscript>\n", CBM_LANG_CFSCRIPT,
+         cbm_disambiguate_cfc},
+        {"m.cfc", "<cfquery name=\"q\">select 1</cfquery>\n", CBM_LANG_CFML, cbm_disambiguate_cfc},
+        {"n.cfc", "component {\n  function f() {}\n}\n", CBM_LANG_CFSCRIPT, cbm_disambiguate_cfc},
+        {"o.frm", "VERSION 5.00\r\nBegin VB.Form Form1\r\n", CBM_LANG_COUNT, cbm_disambiguate_frm},
+        {"p.frm", "#procedure foo\nLocal F = a;\n", CBM_LANG_FORM, cbm_disambiguate_frm},
+        {"q.res", "RSRC\0\0\0\1binary", CBM_LANG_COUNT, cbm_disambiguate_res},
+        {"r.res", "let x = 1\n", CBM_LANG_RESCRIPT, cbm_disambiguate_res},
+        {"dep.d", "target/debug/deps/app-0a1b2c.d: src/main.rs src/lib.rs\n", CBM_LANG_COUNT,
+         cbm_disambiguate_d},
+        {"app.d", "module app;\nimport std.stdio : writeln;\n", CBM_LANG_DLANG, cbm_disambiguate_d},
+        {"s.xml", "<?xml version=\"1.0\"?>\n<Export generator=\"IRIS\" version=\"26\">\n",
+         CBM_LANG_OBJECTSCRIPT_EXPORT, NULL},
+        {"t.xml", "<?xml version=\"1.0\"?>\n<project/>\n", CBM_LANG_XML, NULL},
+        {"package.json", "{}\n", CBM_LANG_COUNT, NULL},
+        {"data.json", "{}\n", CBM_LANG_JSON, NULL},
+        {"u", "#!/usr/bin/env python3\nprint(1)\n", CBM_LANG_PYTHON, cbm_language_from_shebang},
+        {"v", "#!/bin/sh\r\necho hi\r\n", CBM_LANG_BASH, cbm_language_from_shebang},
+        {"w", "#!/usr/bin/env -S node --no-warnings\n", CBM_LANG_JAVASCRIPT,
+         cbm_language_from_shebang},
+        {"x", "#!/usr/bin/env PYTHON=/usr/bin/python python\n", CBM_LANG_COUNT,
+         cbm_language_from_shebang},
+        {"y", "plain text, no shebang\n", CBM_LANG_COUNT, cbm_language_from_shebang},
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        /* q.res holds NULs: its length is the literal's, not strlen. */
+        size_t len = strcmp(cases[i].name, "q.res") == 0 ? 15 : strlen(cases[i].content);
+        CBMLanguage got = classify_content(cases[i].name, cases[i].content, len);
+        if (got != cases[i].expect) {
+            printf("  %s: classifier %d, expected %d\n", cases[i].name, (int)got,
+                   (int)cases[i].expect);
+        }
+        ASSERT_EQ(got, cases[i].expect);
+        if (cases[i].path_probe) {
+            char path[512];
+            snprintf(path, sizeof(path), "%s/cbm_lang_classify_%s", cbm_tmpdir(), cases[i].name);
+            ASSERT_TRUE(write_exact(path, cases[i].content, len));
+            CBMLanguage by_path = cases[i].path_probe(path);
+            remove(path);
+            if (by_path != cases[i].expect) {
+                printf("  %s: path probe %d, expected %d\n", cases[i].name, (int)by_path,
+                       (int)cases[i].expect);
+            }
+            ASSERT_EQ(by_path, cases[i].expect);
+        }
+    }
+    PASS();
+}
+
+/* Content that cannot be read gets what a failed open gave before: the
+ * name's default, and no language for a name that needed a shebang. */
+TEST(lang_classify_unreadable_content_keeps_the_name_default) {
+    ASSERT_EQ(cbm_language_classify("a.m", NULL, 0, false, false), CBM_LANG_MATLAB);
+    ASSERT_EQ(cbm_language_classify("a.cls", NULL, 0, false, false), CBM_LANG_APEX);
+    ASSERT_EQ(cbm_language_classify("a.inc", NULL, 0, false, false), CBM_LANG_BITBAKE);
+    ASSERT_EQ(cbm_language_classify("a.cfc", NULL, 0, false, false), CBM_LANG_CFSCRIPT);
+    ASSERT_EQ(cbm_language_classify("a.frm", NULL, 0, false, false), CBM_LANG_FORM);
+    ASSERT_EQ(cbm_language_classify("a.res", NULL, 0, false, false), CBM_LANG_RESCRIPT);
+    ASSERT_EQ(cbm_language_classify("a.d", NULL, 0, false, false), CBM_LANG_DLANG);
+    ASSERT_EQ(cbm_language_classify("a.xml", NULL, 0, false, false), CBM_LANG_XML);
+    ASSERT_EQ(cbm_language_classify("run-tests", NULL, 0, false, false), CBM_LANG_COUNT);
+    ASSERT_EQ(cbm_language_classify("main.go", NULL, 0, false, false), CBM_LANG_GO);
+    ASSERT_EQ(cbm_language_classify("package.json", NULL, 0, false, false), CBM_LANG_COUNT);
+    PASS();
+}
+
+/* A shebang counts only when the whole first line was seen: a first line that
+ * runs past the probe is cut, and a cut line names no interpreter. */
+TEST(lang_classify_shebang_needs_the_whole_first_line) {
+    char line[300];
+    memset(line, ' ', sizeof(line));
+    memcpy(line, "#!/bin/sh", 9);
+    /* 255 bytes of first line, and more bytes follow: cut. */
+    ASSERT_EQ(cbm_language_classify("tool", (const unsigned char *)line, 255, true, true),
+              CBM_LANG_COUNT);
+    /* The same 255 bytes are the whole file: the line is complete. */
+    ASSERT_EQ(cbm_language_classify("tool", (const unsigned char *)line, 255, false, true),
+              CBM_LANG_BASH);
+    /* The path probe agrees on both shapes. */
+    char path[512];
+    snprintf(path, sizeof(path), "%s/cbm_lang_classify_long_shebang", cbm_tmpdir());
+    ASSERT_TRUE(write_exact(path, line, sizeof(line)));
+    ASSERT_EQ(cbm_language_from_shebang(path), CBM_LANG_COUNT);
+    ASSERT_TRUE(write_exact(path, line, 255));
+    ASSERT_EQ(cbm_language_from_shebang(path), CBM_LANG_BASH);
+    remove(path);
+    PASS();
+}
+
+/* A probe reads a fixed number of leading bytes and nothing beyond: a marker
+ * past the probe does not count, on either path. */
+TEST(lang_classify_reads_only_its_probe) {
+    static char content[5000];
+    memset(content, ' ', sizeof(content));
+    content[sizeof(content) - 1] = '\0';
+    memcpy(content + 4500, "@interface", 10);
+    size_t len = strlen(content);
+    ASSERT_EQ(classify_content("late.m", content, len), CBM_LANG_MATLAB);
+    char path[512];
+    snprintf(path, sizeof(path), "%s/cbm_lang_classify_late.m", cbm_tmpdir());
+    ASSERT_TRUE(write_exact(path, content, len));
+    ASSERT_EQ(cbm_disambiguate_m(path), CBM_LANG_MATLAB);
+    /* Moved inside the probe it counts. */
+    memcpy(content + 100, "@interface", 10);
+    ASSERT_EQ(classify_content("late.m", content, len), CBM_LANG_OBJC);
+    ASSERT_TRUE(write_exact(path, content, len));
+    ASSERT_EQ(cbm_disambiguate_m(path), CBM_LANG_OBJC);
+    remove(path);
+    PASS();
+}
+
+/* ── Suite ─────────────────────────────────────────────────────── */
+
+SUITE(language) {
+    /* Extension: Tier 1 programming */
+    RUN_TEST(lang_ext_go);
+    RUN_TEST(lang_ext_python);
+    RUN_TEST(lang_ext_javascript);
+    RUN_TEST(lang_ext_jsx);
+    RUN_TEST(lang_ext_mjs_cjs);
+    RUN_TEST(lang_ext_mts_cts);
+    RUN_TEST(lang_ext_typescript);
+    RUN_TEST(lang_ext_tsx);
+    RUN_TEST(lang_ext_rust);
+    RUN_TEST(lang_ext_java);
+    RUN_TEST(lang_ext_cpp);
+    RUN_TEST(lang_ext_hpp);
+    RUN_TEST(lang_ext_cc);
+    RUN_TEST(lang_ext_cxx);
+    RUN_TEST(lang_ext_hxx);
+    RUN_TEST(lang_ext_hh);
+    RUN_TEST(lang_ext_h);
+    RUN_TEST(lang_ext_ixx);
+    RUN_TEST(lang_ext_csharp);
+    RUN_TEST(lang_ext_razor);
+    RUN_TEST(lang_ext_cshtml);
+    RUN_TEST(lang_ext_php);
+    RUN_TEST(lang_ext_lua);
+    RUN_TEST(lang_ext_scala);
+    RUN_TEST(lang_ext_sc);
+    RUN_TEST(lang_ext_kotlin);
+    RUN_TEST(lang_ext_kts);
+    RUN_TEST(lang_ext_ruby);
+    RUN_TEST(lang_ext_rake);
+    RUN_TEST(lang_ext_gemspec);
+    RUN_TEST(lang_ext_c);
+    RUN_TEST(lang_ext_bash);
+    RUN_TEST(lang_ext_bash2);
+    RUN_TEST(lang_ext_zig);
+    RUN_TEST(lang_ext_elixir);
+    RUN_TEST(lang_ext_exs);
+    RUN_TEST(lang_ext_haskell);
+    RUN_TEST(lang_ext_ocaml);
+    RUN_TEST(lang_ext_mli);
+    RUN_TEST(lang_ext_swift);
+    RUN_TEST(lang_ext_dart);
+    RUN_TEST(lang_ext_perl);
+    RUN_TEST(lang_ext_pm);
+    RUN_TEST(lang_ext_groovy);
+    RUN_TEST(lang_ext_gradle);
+    RUN_TEST(lang_ext_erlang);
+    RUN_TEST(lang_ext_r);
+    RUN_TEST(lang_ext_R);
+
+    /* Extension: Tier 2 programming */
+    RUN_TEST(lang_ext_clojure);
+    RUN_TEST(lang_ext_cljs);
+    RUN_TEST(lang_ext_cljc);
+    RUN_TEST(lang_ext_fsharp);
+    RUN_TEST(lang_ext_fsi);
+    RUN_TEST(lang_ext_fsx);
+    RUN_TEST(lang_ext_julia);
+    RUN_TEST(lang_ext_vim);
+    RUN_TEST(lang_ext_nix);
+    RUN_TEST(lang_ext_commonlisp);
+    RUN_TEST(lang_ext_lsp);
+    RUN_TEST(lang_ext_cl);
+    RUN_TEST(lang_ext_elm);
+    RUN_TEST(lang_ext_fortran);
+    RUN_TEST(lang_ext_f95);
+    RUN_TEST(lang_ext_f03);
+    RUN_TEST(lang_ext_f08);
+    RUN_TEST(lang_ext_cuda);
+    RUN_TEST(lang_ext_cuh);
+    RUN_TEST(lang_ext_cobol);
+    RUN_TEST(lang_ext_cbl);
+    RUN_TEST(lang_ext_verilog);
+    RUN_TEST(lang_ext_sv);
+    RUN_TEST(lang_ext_emacslisp);
+
+    /* Extension: Scientific/math */
+    RUN_TEST(lang_ext_matlab);
+    RUN_TEST(lang_ext_mlx);
+    RUN_TEST(lang_ext_lean);
+    RUN_TEST(lang_ext_form);
+    RUN_TEST(lang_ext_prc);
+    RUN_TEST(lang_ext_magma);
+    RUN_TEST(lang_ext_magma2);
+    RUN_TEST(lang_ext_wolfram);
+    RUN_TEST(lang_ext_wls);
+
+    /* Extension: Helper languages */
+    RUN_TEST(lang_ext_html);
+    RUN_TEST(lang_ext_htm);
+    RUN_TEST(lang_ext_css);
+    RUN_TEST(lang_ext_scss);
+    RUN_TEST(lang_ext_yaml);
+    RUN_TEST(lang_ext_yaml2);
+    RUN_TEST(lang_ext_toml);
+    RUN_TEST(lang_ext_hcl);
+    RUN_TEST(lang_ext_hcl2);
+    RUN_TEST(lang_ext_tofu_tfvars);
+    RUN_TEST(lang_ext_sql);
+    RUN_TEST(lang_ext_dockerfile);
+    RUN_TEST(lang_ext_json);
+    RUN_TEST(lang_ext_xml);
+    RUN_TEST(lang_ext_xsl);
+    RUN_TEST(lang_ext_xsd);
+    RUN_TEST(lang_ext_svg);
+    RUN_TEST(lang_ext_msbuild_projects);
+    RUN_TEST(lang_ext_resx);
+    RUN_TEST(lang_ext_xaml);
+    RUN_TEST(lang_ext_app_manifests);
+    RUN_TEST(lang_ext_markdown);
+    RUN_TEST(lang_ext_mdx);
+    RUN_TEST(lang_ext_makefile);
+    RUN_TEST(lang_ext_cmake);
+    RUN_TEST(lang_ext_protobuf);
+    RUN_TEST(lang_ext_graphql);
+    RUN_TEST(lang_ext_gql);
+    RUN_TEST(lang_ext_vue);
+    RUN_TEST(lang_ext_svelte);
+    RUN_TEST(lang_ext_meson);
+    RUN_TEST(lang_ext_glsl);
+    RUN_TEST(lang_ext_vert);
+    RUN_TEST(lang_ext_frag);
+    RUN_TEST(lang_ext_glsl_other_stages);
+    RUN_TEST(lang_ext_ini);
+    RUN_TEST(lang_ext_cfg);
+    RUN_TEST(lang_ext_conf);
+
+    /* Unknown/edge cases */
+    RUN_TEST(lang_ext_unknown);
+    RUN_TEST(lang_ext_null);
+
+    /* Filename-based */
+    RUN_TEST(lang_fn_makefile);
+    RUN_TEST(lang_fn_gnumakefile);
+    RUN_TEST(lang_fn_makefile_lower);
+    RUN_TEST(lang_fn_cmake);
+    RUN_TEST(lang_fn_dockerfile);
+    RUN_TEST(lang_fn_dockerfile_variants);
+    RUN_TEST(lang_fn_short_names_read_in_bounds);
+    RUN_TEST(lang_fn_meson_build);
+    RUN_TEST(lang_fn_meson_opts);
+    RUN_TEST(lang_fn_meson_opts_txt);
+    RUN_TEST(lang_fn_vimrc);
+    RUN_TEST(lang_fn_blade_php_compound_issue258);
+    RUN_TEST(lang_fn_main_go);
+    RUN_TEST(lang_fn_test_py);
+    RUN_TEST(lang_fn_unknown);
+
+    /* Language names */
+    RUN_TEST(lang_name_go);
+    RUN_TEST(lang_name_python);
+    RUN_TEST(lang_name_cpp);
+    RUN_TEST(lang_name_csharp);
+    RUN_TEST(lang_name_unknown);
+
+    /* .m disambiguation */
+    RUN_TEST(lang_m_objc);
+    RUN_TEST(lang_m_magma);
+    RUN_TEST(lang_m_matlab);
+    RUN_TEST(lang_m_default_on_read_fail);
+    RUN_TEST(lang_cfc_tag_component);
+    RUN_TEST(lang_cfc_bare_cffunction);
+    RUN_TEST(lang_cfc_script_component);
+    RUN_TEST(lang_cfc_script_bare_keyword);
+    RUN_TEST(lang_cfc_cfscript_wrapped_script);
+    RUN_TEST(lang_cfc_tag_after_license_comment);
+    RUN_TEST(lang_cfc_script_after_license_comment);
+    RUN_TEST(lang_cfc_default_on_read_fail);
+    RUN_TEST(lang_cls_vb6_class_module_unsupported);
+    RUN_TEST(lang_cls_apex_stays_apex);
+    RUN_TEST(lang_cls_objectscript_stays_objectscript);
+    RUN_TEST(lang_frm_vb6_form_unsupported);
+    RUN_TEST(lang_frm_form_stays_form);
+    RUN_TEST(lang_res_binary_resource_unsupported);
+    RUN_TEST(lang_res_rescript_stays_rescript);
+    RUN_TEST(lang_d_dep_info_unsupported);
+    RUN_TEST(lang_d_source_stays_dlang);
+
+    /* Go test ports */
+    /* New languages */
+    RUN_TEST(lang_ext_solidity);
+    RUN_TEST(lang_ext_typst);
+    RUN_TEST(lang_ext_gdscript);
+    RUN_TEST(lang_ext_gleam);
+    RUN_TEST(lang_ext_powershell);
+    RUN_TEST(lang_ext_pascal);
+    RUN_TEST(lang_ext_d);
+    RUN_TEST(lang_ext_nim);
+    RUN_TEST(lang_ext_scheme);
+    RUN_TEST(lang_ext_chialisp);
+    RUN_TEST(lang_ext_fennel);
+    RUN_TEST(lang_ext_fish);
+    RUN_TEST(lang_ext_awk);
+    RUN_TEST(lang_ext_zsh);
+    RUN_TEST(lang_ext_tcl);
+    RUN_TEST(lang_ext_ada);
+    RUN_TEST(lang_ext_agda);
+    RUN_TEST(lang_ext_racket);
+    RUN_TEST(lang_ext_odin);
+    RUN_TEST(lang_ext_rescript);
+    RUN_TEST(lang_ext_purescript);
+    RUN_TEST(lang_ext_nickel);
+    RUN_TEST(lang_ext_crystal);
+    RUN_TEST(lang_ext_teal);
+    RUN_TEST(lang_ext_hare);
+    RUN_TEST(lang_ext_pony);
+    RUN_TEST(lang_ext_luau);
+    RUN_TEST(lang_ext_qml);
+    RUN_TEST(lang_ext_cfml);
+    RUN_TEST(lang_ext_helm_tpl);
+    RUN_TEST(lang_ext_janet);
+    RUN_TEST(lang_ext_sway);
+    RUN_TEST(lang_ext_nasm);
+    RUN_TEST(lang_ext_assembly);
+    RUN_TEST(lang_ext_astro);
+    RUN_TEST(lang_ext_gotemplate);
+    RUN_TEST(lang_ext_templ);
+    RUN_TEST(lang_ext_liquid);
+    RUN_TEST(lang_ext_jinja2);
+    RUN_TEST(lang_ext_prisma);
+    RUN_TEST(lang_ext_hyprlang);
+    RUN_TEST(lang_ext_diff);
+    RUN_TEST(lang_ext_wgsl);
+    RUN_TEST(lang_ext_kdl);
+    RUN_TEST(lang_ext_json5);
+    RUN_TEST(lang_ext_jsonnet);
+    RUN_TEST(lang_ext_ron);
+    RUN_TEST(lang_ext_thrift);
+    RUN_TEST(lang_ext_capnp);
+    RUN_TEST(lang_ext_properties);
+    RUN_TEST(lang_ext_bibtex);
+    RUN_TEST(lang_ext_starlark);
+    RUN_TEST(lang_ext_bicep);
+    RUN_TEST(lang_ext_csv);
+    RUN_TEST(lang_ext_hlsl);
+    RUN_TEST(lang_ext_vhdl);
+    RUN_TEST(lang_ext_devicetree);
+    RUN_TEST(lang_ext_linkerscript);
+    RUN_TEST(lang_ext_gn);
+    RUN_TEST(lang_ext_bitbake);
+    RUN_TEST(lang_ext_smali);
+    RUN_TEST(lang_ext_tablegen);
+    RUN_TEST(lang_ext_ispc);
+    RUN_TEST(lang_ext_cairo);
+    RUN_TEST(lang_ext_move);
+    RUN_TEST(lang_ext_mojo);
+    RUN_TEST(lang_ext_arkts);
+    RUN_TEST(lang_ext_plsql);
+    RUN_TEST(lang_ext_squirrel);
+    RUN_TEST(lang_ext_func);
+    RUN_TEST(lang_ext_rst);
+    RUN_TEST(lang_ext_beancount);
+    RUN_TEST(lang_ext_mermaid);
+    RUN_TEST(lang_ext_puppet);
+    RUN_TEST(lang_ext_po);
+    RUN_TEST(lang_ext_slang);
+    RUN_TEST(lang_ext_llvm);
+    RUN_TEST(lang_ext_smithy);
+    RUN_TEST(lang_ext_wit);
+    RUN_TEST(lang_ext_tlaplus);
+    RUN_TEST(lang_ext_pkl);
+    RUN_TEST(lang_ext_apex);
+    RUN_TEST(lang_ext_soql);
+    RUN_TEST(lang_ext_sosl);
+
+    RUN_TEST(lang_all_have_names);
+    RUN_TEST(lang_inc_c_family_and_existing_dialects);
+    RUN_TEST(lang_probe_bytes_follow_the_name);
+    RUN_TEST(lang_classify_matches_every_content_rule);
+    RUN_TEST(lang_classify_unreadable_content_keeps_the_name_default);
+    RUN_TEST(lang_classify_shebang_needs_the_whole_first_line);
+    RUN_TEST(lang_classify_reads_only_its_probe);
+}

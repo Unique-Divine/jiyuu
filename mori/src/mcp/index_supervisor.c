@@ -1,0 +1,1469 @@
+/*
+ * index_supervisor.c — see index_supervisor.h.
+ */
+#include "index_supervisor.h"
+
+#include "daemon/runtime.h"
+#include "foundation/compat.h"
+#include "foundation/compat_fs.h" /* cbm_mkdir_p, cbm_fopen */
+#include "foundation/constants.h"
+#include "foundation/log.h"
+#include "foundation/platform.h" /* cbm_safe_getenv, path normalization */
+#include "foundation/profile.h"  /* cbm_profile_active (keep worker log under CBM_PROFILE) */
+#include "ui/http_server.h"      /* cbm_http_server_resolve_binary_path */
+
+#include <limits.h>
+#include <errno.h>
+#include <stdio.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdatomic.h>
+
+#ifdef _WIN32
+#include <io.h>
+#include <process.h>
+#define worker_close _close
+#define worker_getpid _getpid
+#else
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#define worker_close close
+#define worker_getpid getpid
+#endif
+
+/* Same release-injected macro (and same fallback) main.c and cli.c use; the
+ * worker log's header must name the build the user actually ran. */
+#ifndef CBM_VERSION
+#define CBM_VERSION "dev"
+#endif
+
+_Static_assert(CBM_INDEX_WORKER_BUILD_FINGERPRINT_SIZE == CBM_DAEMON_BUILD_FINGERPRINT_SIZE,
+               "worker and daemon build fingerprint sizes must match");
+
+/* ── Worker-role state ────────────────────────────────────────────── */
+
+static bool g_worker_active = false;
+static char g_worker_response_out[CBM_SZ_4K] = {0};
+static size_t g_worker_memory_budget_bytes = 0;
+static bool g_build_fingerprint_capture_attempted = false;
+static char g_build_fingerprint[CBM_INDEX_WORKER_BUILD_FINGERPRINT_SIZE] = {0};
+
+void cbm_index_set_worker_role(bool is_worker, const char *response_out) {
+    g_worker_active = is_worker;
+    if (response_out && response_out[0]) {
+        snprintf(g_worker_response_out, sizeof(g_worker_response_out), "%s", response_out);
+    } else {
+        g_worker_response_out[0] = '\0';
+    }
+}
+
+static void worker_set_local_env(const char *name, const char *value) {
+    if (value && value[0]) {
+        (void)cbm_setenv(name, value, 1);
+    } else {
+        (void)cbm_unsetenv(name);
+    }
+}
+
+void cbm_index_set_worker_role_options(bool is_worker, const char *response_out, bool single_thread,
+                                       const char *marker_file, const char *quarantine_file,
+                                       size_t memory_budget_bytes) {
+    cbm_index_set_worker_role(is_worker, response_out);
+    g_worker_memory_budget_bytes = is_worker ? memory_budget_bytes : 0;
+    if (!is_worker) {
+        return;
+    }
+    worker_set_local_env("CBM_INDEX_SINGLE_THREAD", single_thread ? "1" : NULL);
+    worker_set_local_env("CBM_INDEX_MARKER_FILE", marker_file);
+    worker_set_local_env("CBM_INDEX_QUARANTINE_FILE", quarantine_file);
+}
+
+bool cbm_index_worker_active(void) {
+    return g_worker_active;
+}
+
+const char *cbm_index_worker_response_out(void) {
+    return g_worker_response_out[0] ? g_worker_response_out : NULL;
+}
+
+size_t cbm_index_worker_memory_budget_bytes(void) {
+    return g_worker_memory_budget_bytes;
+}
+
+/* ── Publication fence (see index_supervisor.h) ───────────────────── */
+
+typedef enum {
+    INDEX_PUBLICATION_CLAIMED = 0, /* this caller created the fence file */
+    INDEX_PUBLICATION_TAKEN,       /* the other side created it first */
+    INDEX_PUBLICATION_CLAIM_ERROR, /* neither could be established */
+} index_publication_claim_t;
+
+/* Exclusive creation is the single atomic decision both processes race for:
+ * "x" is O_CREAT|O_EXCL on POSIX and CREATE_NEW on Windows, so exactly one
+ * creator succeeds and the other gets EEXIST. A deletion-based claim would
+ * be ambiguous on Windows, where a delete-pending file reports access denied. */
+static index_publication_claim_t index_publication_claim(const char *fence_file) {
+    if (!fence_file || !fence_file[0]) {
+        return INDEX_PUBLICATION_CLAIM_ERROR;
+    }
+    errno = 0;
+    FILE *claim = cbm_fopen(fence_file, "wbx");
+    if (claim) {
+        (void)fclose(claim);
+        return INDEX_PUBLICATION_CLAIMED;
+    }
+    return errno == EEXIST ? INDEX_PUBLICATION_TAKEN : INDEX_PUBLICATION_CLAIM_ERROR;
+}
+
+static char g_worker_publish_fence[CBM_SZ_4K] = {0};
+static bool g_worker_publication_claimed = false;
+
+void cbm_index_set_worker_publish_fence(const char *fence_file) {
+    if (fence_file && fence_file[0]) {
+        (void)snprintf(g_worker_publish_fence, sizeof(g_worker_publish_fence), "%s", fence_file);
+    } else {
+        g_worker_publish_fence[0] = '\0';
+    }
+    g_worker_publication_claimed = false;
+}
+
+const char *cbm_index_worker_publish_fence(void) {
+    return g_worker_publish_fence[0] ? g_worker_publish_fence : NULL;
+}
+
+bool cbm_index_worker_claim_publication(void) {
+    if (!g_worker_publish_fence[0] || g_worker_publication_claimed) {
+        return true;
+    }
+    index_publication_claim_t claim = index_publication_claim(g_worker_publish_fence);
+    if (claim == INDEX_PUBLICATION_CLAIMED) {
+        g_worker_publication_claimed = true;
+        cbm_log_info("index.worker.publication_claimed", "fence", g_worker_publish_fence);
+        return true;
+    }
+    cbm_log_warn("index.worker.publication_refused", "reason",
+                 claim == INDEX_PUBLICATION_TAKEN ? "resource_limit" : "claim_failed", "fence",
+                 g_worker_publish_fence);
+    return false;
+}
+
+/* Worker log startup header — see index_supervisor.h. */
+static atomic_flag g_worker_log_begun = ATOMIC_FLAG_INIT;
+
+void cbm_index_worker_log_begin(const char *args_json, const char *repo_path) {
+    /* Durability first, header second: if the header itself is the last thing
+     * this process ever manages to write, it must already be on disk. */
+    cbm_log_set_crash_durable(true);
+    if (atomic_flag_test_and_set_explicit(&g_worker_log_begun, memory_order_relaxed)) {
+        return; /* the CLI arg parser re-installs the worker role; header once */
+    }
+    char pid_text[CBM_SZ_32];
+    (void)snprintf(pid_text, sizeof(pid_text), "%ld", (long)worker_getpid());
+    const char *build = cbm_index_supervisor_build_fingerprint();
+    /* A control record, not an info line: a user who set CBM_LOG_LEVEL to warn
+     * or error would otherwise still hand us a 0-byte log, which is the whole
+     * defect. JSON-encoded, so a repo path with spaces or a quote survives. */
+    cbm_log_control(CBM_INDEX_WORKER_LOG_START_EVENT, "version", CBM_VERSION, "build",
+                    build ? build : "", "pid", pid_text, "repo_path", repo_path ? repo_path : "",
+                    "args", args_json ? args_json : "");
+    (void)fflush(stderr);
+}
+
+static bool worker_fingerprint_valid(const char *fingerprint);
+
+bool cbm_index_supervisor_capture_build_fingerprint(void) {
+    if (g_build_fingerprint_capture_attempted) {
+        return g_build_fingerprint[0] != '\0';
+    }
+    g_build_fingerprint_capture_attempted = true;
+#if defined(CBM_CLI_ENABLE_TEST_API)
+    /* Test-only seam: computing the real fingerprint hashes the ENTIRE
+     * executable image, which for the ASan test-runner (hundreds of MB) takes
+     * tens of seconds per spawned worker/daemon on constrained CI runners and
+     * is the sole cause of the daemon-family readiness-timeout flakes. When a
+     * valid stub is provided the hash is skipped; every process in the test
+     * (parent, forked children, re-exec'd workers) inherits the same stub via
+     * the environment, so exact-build match/mismatch behaviour is preserved
+     * while startup becomes instant. Never compiled into production. */
+    char test_fingerprint[CBM_INDEX_WORKER_BUILD_FINGERPRINT_SIZE];
+    const char *test_value = cbm_safe_getenv("CBM_TEST_BUILD_FINGERPRINT", test_fingerprint,
+                                             sizeof(test_fingerprint), NULL);
+    if (test_value && worker_fingerprint_valid(test_value)) {
+        (void)snprintf(g_build_fingerprint, sizeof(g_build_fingerprint), "%s", test_value);
+        return true;
+    }
+#endif
+    char captured[CBM_INDEX_WORKER_BUILD_FINGERPRINT_SIZE] = {0};
+    if (!cbm_daemon_runtime_process_build_fingerprint((uint64_t)worker_getpid(), captured)) {
+        return false;
+    }
+    (void)snprintf(g_build_fingerprint, sizeof(g_build_fingerprint), "%s", captured);
+    return true;
+}
+
+const char *cbm_index_supervisor_build_fingerprint(void) {
+    return g_build_fingerprint[0] ? g_build_fingerprint : NULL;
+}
+
+#if defined(CBM_CLI_ENABLE_TEST_API)
+void cbm_index_supervisor_set_build_fingerprint_for_test(const char *fingerprint) {
+    if (!fingerprint || !worker_fingerprint_valid(fingerprint)) {
+        return;
+    }
+    g_build_fingerprint_capture_attempted = true;
+    (void)snprintf(g_build_fingerprint, sizeof(g_build_fingerprint), "%s", fingerprint);
+}
+#endif
+
+static bool worker_fingerprint_valid(const char *fingerprint) {
+    if (!fingerprint || strlen(fingerprint) != CBM_INDEX_WORKER_BUILD_FINGERPRINT_LENGTH) {
+        return false;
+    }
+    for (size_t i = 0; i < CBM_INDEX_WORKER_BUILD_FINGERPRINT_LENGTH; i++) {
+        char ch = fingerprint[i];
+        if (!((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f'))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool worker_parse_positive_size(const char *text, size_t *value_out) {
+    if (!text || !text[0] || !value_out) {
+        return false;
+    }
+    size_t value = 0;
+    for (const unsigned char *cursor = (const unsigned char *)text; *cursor; cursor++) {
+        if (*cursor < '0' || *cursor > '9') {
+            return false;
+        }
+        size_t digit = (size_t)(*cursor - '0');
+        if (value > (SIZE_MAX - digit) / 10U) {
+            return false;
+        }
+        value = value * 10U + digit;
+    }
+    if (value == 0) {
+        return false;
+    }
+    *value_out = value;
+    return true;
+}
+
+cbm_index_worker_argv_status_t cbm_index_worker_parse_process_argv(
+    int argc, char *const argv[], cbm_index_worker_invocation_t *invocation_out) {
+    if (invocation_out) {
+        memset(invocation_out, 0, sizeof(*invocation_out));
+    }
+    bool contains_worker_role = false;
+    for (int index = 1; argv && index < argc; index++) {
+        if (argv[index] && strcmp(argv[index], "--index-worker") == 0) {
+            contains_worker_role = true;
+            break;
+        }
+    }
+    if (!contains_worker_role) {
+        return CBM_INDEX_WORKER_ARGV_NOT_WORKER;
+    }
+    if (!invocation_out || argc < 9 || !argv || !argv[0] || !argv[0][0] || !argv[1] ||
+        strcmp(argv[1], "cli") != 0 || !argv[2] || strcmp(argv[2], "--index-worker") != 0 ||
+        !argv[3] || strcmp(argv[3], CBM_INDEX_WORKER_BUILD_ARG) != 0 ||
+        !worker_fingerprint_valid(argv[4]) || !argv[5] ||
+        strcmp(argv[5], "index_repository") != 0 || !argv[6] || !argv[6][0] || !argv[7] ||
+        strcmp(argv[7], "--response-out") != 0 || !argv[8] || !argv[8][0]) {
+        return CBM_INDEX_WORKER_ARGV_INVALID;
+    }
+
+    cbm_index_worker_invocation_t parsed = {
+        .expected_build_fingerprint = argv[4],
+        .args_json = argv[6],
+        .response_out = argv[8],
+    };
+    int next = 9;
+    if (next < argc && argv[next] && strcmp(argv[next], CBM_INDEX_WORKER_MEMORY_BUDGET_ARG) == 0) {
+        if (next + 1 >= argc ||
+            !worker_parse_positive_size(argv[next + 1], &parsed.memory_budget_bytes)) {
+            return CBM_INDEX_WORKER_ARGV_INVALID;
+        }
+        next += 2;
+    }
+    if (next < argc && argv[next] && strcmp(argv[next], CBM_INDEX_WORKER_SINGLE_THREAD_ARG) == 0) {
+        parsed.single_thread = true;
+        next++;
+    }
+    if (next < argc && argv[next] && strcmp(argv[next], CBM_INDEX_WORKER_MARKER_ARG) == 0) {
+        if (next + 1 >= argc || !argv[next + 1] || !argv[next + 1][0]) {
+            return CBM_INDEX_WORKER_ARGV_INVALID;
+        }
+        parsed.marker_file = argv[next + 1];
+        next += 2;
+    }
+    if (next < argc && argv[next] && strcmp(argv[next], CBM_INDEX_WORKER_QUARANTINE_ARG) == 0) {
+        if (next + 1 >= argc || !argv[next + 1] || !argv[next + 1][0]) {
+            return CBM_INDEX_WORKER_ARGV_INVALID;
+        }
+        parsed.quarantine_file = argv[next + 1];
+        next += 2;
+    }
+    if (next < argc && argv[next] && strcmp(argv[next], CBM_INDEX_WORKER_PUBLISH_FENCE_ARG) == 0) {
+        if (next + 1 >= argc || !argv[next + 1] || !argv[next + 1][0]) {
+            return CBM_INDEX_WORKER_ARGV_INVALID;
+        }
+        parsed.publish_fence_file = argv[next + 1];
+        next += 2;
+    }
+    if (next != argc) {
+        return CBM_INDEX_WORKER_ARGV_INVALID;
+    }
+    if (!g_build_fingerprint[0]) {
+        return CBM_INDEX_WORKER_ARGV_BUILD_UNAVAILABLE;
+    }
+    if (strcmp(parsed.expected_build_fingerprint, g_build_fingerprint) != 0) {
+        return CBM_INDEX_WORKER_ARGV_BUILD_MISMATCH;
+    }
+    *invocation_out = parsed;
+    return CBM_INDEX_WORKER_ARGV_VALID;
+}
+
+const char *cbm_index_worker_argv_status_message(cbm_index_worker_argv_status_t status) {
+    switch (status) {
+    case CBM_INDEX_WORKER_ARGV_VALID:
+        return "worker invocation accepted";
+    case CBM_INDEX_WORKER_ARGV_INVALID:
+        return "invalid internal worker arguments";
+    case CBM_INDEX_WORKER_ARGV_BUILD_UNAVAILABLE:
+        return "worker executable fingerprint could not be verified";
+    case CBM_INDEX_WORKER_ARGV_BUILD_MISMATCH:
+        return "worker executable build conflicts with its supervisor; close all CBM sessions "
+               "and retry";
+    case CBM_INDEX_WORKER_ARGV_NOT_WORKER:
+    default:
+        return "not an internal worker invocation";
+    }
+}
+
+/* Test hook (#845): counts worker-start ATTEMPTS, including ones that fail to
+ * resolve the self binary — an embedder must never even try to spawn. */
+static atomic_int g_spawn_count = 0;
+
+int cbm_index_supervisor_spawn_count(void) {
+    return atomic_load_explicit(&g_spawn_count, memory_order_relaxed);
+}
+
+/* Test hook: counts SINGLE-THREADED spawns. Production recovery is parallel-
+ * only (there are no sequential production runs); this must stay ZERO on
+ * every supervised path — any nonzero count means a recovery/probe regressed
+ * to the sequential crawl that ground an 81k-file TS corpus for hours. */
+static atomic_int g_spawn_st_count = 0;
+
+int cbm_index_supervisor_spawn_st_count(void) {
+    return atomic_load_explicit(&g_spawn_st_count, memory_order_relaxed);
+}
+
+/* #845: opt-in host mark — see the header. Set once from the real binary's
+ * main(); embedders never set it, so should_wrap() stays false for them. */
+static bool g_host_marked = false;
+
+void cbm_index_supervisor_mark_host(void) {
+    g_host_marked = true;
+}
+
+bool cbm_index_supervisor_should_wrap(void) {
+    if (!g_host_marked) {
+        return false; /* embedder (#845): never spawn `<self> cli --index-worker` */
+    }
+    if (g_worker_active) {
+        return false; /* I am the worker — run in-process, never re-supervise */
+    }
+    /* Supervision is a safety boundary for the physical CBM host. An ambient
+     * variable must never turn a long-lived MCP/CLI parent into the indexer. */
+    return true;
+}
+
+static bool supervisor_disable_requested(void) {
+    char supervisor_setting[CBM_SZ_32] = {0};
+    return cbm_safe_getenv("CBM_INDEX_SUPERVISOR", supervisor_setting, sizeof(supervisor_setting),
+                           NULL) &&
+           strcmp(supervisor_setting, "0") == 0;
+}
+
+/* Quiet-timeout (ms) for a supervised worker: killed + reported as a hang if it
+ * emits no NEW log line within the window. This is a NO-PROGRESS timeout — every
+ * completed log line the worker tails (per-batch parallel.extract.progress every
+ * 10 files, plus each pass boundary) resets it — NOT a total-time cap, so a large
+ * repo that keeps making progress is never falsely killed. Default: 15 min (a
+ * genuinely stuck file emits nothing, so this fires only on a real hang). The
+ * CBM_INDEX_WORKER_TIMEOUT_S override (seconds → ms) tightens it for tests. */
+static int worker_quiet_timeout_ms(void) {
+    enum { DEFAULT_QUIET_TIMEOUT_MS = 900000 }; /* 15 min with no progress */
+    enum { MS_PER_SECOND = 1000 };
+    char timeout_seconds[CBM_SZ_32] = {0};
+    long s = 0;
+    /* The upper test only stops the seconds-to-ms multiply from overflowing an
+     * int. It sets no policy: a longer timeout than the default is still fine. */
+    if (cbm_env_long("CBM_INDEX_WORKER_TIMEOUT_S", &s) && s > 0 && s <= INT_MAX / MS_PER_SECOND) {
+        return (int)(s * MS_PER_SECOND);
+    }
+    /* atol used to answer 0 for a value it could not read, and 0 fell straight
+     * through to the 15-minute default with nothing on screen. A test set to
+     * give up after 30 seconds then hung for 15 minutes and nobody could see
+     * why. An unreadable value now says so before it is dropped. */
+    if (cbm_safe_getenv("CBM_INDEX_WORKER_TIMEOUT_S", timeout_seconds, sizeof(timeout_seconds),
+                        NULL) &&
+        timeout_seconds[0]) {
+        cbm_log_warn("index.supervisor.worker_timeout_ignored", "value", timeout_seconds, "action",
+                     "using_default");
+    }
+    return DEFAULT_QUIET_TIMEOUT_MS;
+}
+
+typedef enum {
+    WORKER_RESPONSE_READ_OK = 0,
+    WORKER_RESPONSE_READ_ERROR,
+    WORKER_RESPONSE_READ_TOO_LARGE,
+    WORKER_RESPONSE_READ_EMPTY, /* the pre-created file was never written (#1300) */
+} worker_response_read_status_t;
+
+/* Read at most one daemon-application payload. The worker is already reaped,
+ * but the byte count remains an explicit allocation/read boundary even if an
+ * escaped process still has the response file open. */
+static char *slurp_worker_response(const char *path, worker_response_read_status_t *status_out) {
+    *status_out = WORKER_RESPONSE_READ_ERROR;
+    FILE *f = cbm_fopen(path, "rb");
+    if (!f) {
+        return NULL;
+    }
+    if (fseek(f, 0, SEEK_END) != 0) {
+        (void)fclose(f);
+        return NULL;
+    }
+    long n = ftell(f);
+    if (n < 0) {
+        (void)fclose(f);
+        return NULL;
+    }
+    if ((uint64_t)n > (uint64_t)CBM_DAEMON_RUNTIME_APPLICATION_PAYLOAD_MAX) {
+        *status_out = WORKER_RESPONSE_READ_TOO_LARGE;
+        (void)fclose(f);
+        return NULL;
+    }
+    if (n == 0) {
+        /* The supervisor creates the response file before spawning, so an
+         * empty file is a worker that never wrote its result. Reading it as
+         * "" made that a successful run with an empty response (#1300). */
+        *status_out = WORKER_RESPONSE_READ_EMPTY;
+        (void)fclose(f);
+        return NULL;
+    }
+    if (fseek(f, 0, SEEK_SET) != 0) {
+        (void)fclose(f);
+        return NULL;
+    }
+    char *buf = (char *)malloc((size_t)n + 1);
+    if (!buf) {
+        (void)fclose(f);
+        return NULL;
+    }
+    size_t rd = fread(buf, 1, (size_t)n, f);
+    bool complete = rd == (size_t)n && !ferror(f);
+    (void)fclose(f);
+    if (!complete) {
+        free(buf);
+        return NULL;
+    }
+    buf[rd] = '\0';
+    *status_out = WORKER_RESPONSE_READ_OK;
+    return buf;
+}
+
+enum {
+    WORKER_LOG_TAIL_BYTES = 64 * 1024, /* last-phase scan window: bounded, never the whole log */
+    WORKER_LOG_LINE_CAP = 1024,
+};
+
+/* Copy the event name of one structured log line ("level=... msg=<event> ..."
+ * or {"level":...,"event":"<event>",...}) into out. False for any other line
+ * (plain stderr text, a truncated fragment). */
+static bool worker_log_line_event(const char *line, char *out, size_t out_size) {
+    static const char text_key[] = " msg=";
+    static const char json_key[] = "\"event\":\"";
+    const char *start = NULL;
+    char stop = ' ';
+    if (strncmp(line, "level=", strlen("level=")) == 0) {
+        const char *msg = strstr(line, text_key);
+        start = msg ? msg + strlen(text_key) : NULL;
+    } else if (strncmp(line, "{\"level\":", strlen("{\"level\":")) == 0) {
+        const char *event = strstr(line, json_key);
+        start = event ? event + strlen(json_key) : NULL;
+        stop = '"';
+    }
+    if (!start) {
+        return false;
+    }
+    size_t length = 0;
+    while (start[length] && start[length] != stop && start[length] != '\n' &&
+           start[length] != '\r') {
+        length++;
+    }
+    if (length == 0 || length >= out_size) {
+        return false;
+    }
+    memcpy(out, start, length);
+    out[length] = '\0';
+    return true;
+}
+
+/* #1300: the last structured event the worker logged before it exited — the
+ * phase it reached. Scans only the log's final WORKER_LOG_TAIL_BYTES. */
+static void worker_log_last_phase(const char *log_path, char *out, size_t out_size) {
+    (void)snprintf(out, out_size, "%s", "unknown");
+    FILE *log = cbm_fopen(log_path, "rb");
+    if (!log) {
+        return;
+    }
+    if (fseek(log, 0, SEEK_END) == 0) {
+        long size = ftell(log);
+        long from = size > WORKER_LOG_TAIL_BYTES ? size - WORKER_LOG_TAIL_BYTES : 0;
+        if (size >= 0 && fseek(log, from, SEEK_SET) == 0) {
+            char line[WORKER_LOG_LINE_CAP];
+            char event[CBM_SZ_128];
+            while (fgets(line, sizeof(line), log)) {
+                if (worker_log_line_event(line, event, sizeof(event))) {
+                    (void)snprintf(out, out_size, "%s", event);
+                }
+            }
+        }
+    }
+    (void)fclose(log);
+}
+
+enum {
+    INDEX_WORKER_PATH_CAP = CBM_SZ_4K,
+    INDEX_WORKER_ARGV_CAP = 19,
+    INDEX_WORKER_SYNC_POLL_NS = 10000000,
+    INDEX_WORKER_RELAY_LINES_PER_POLL = 64,
+    INDEX_WORKER_RELAY_BYTES_PER_POLL = 64 * 1024,
+    INDEX_WORKER_RSS_PROBE_FAILURE_LIMIT = 3,
+    INDEX_WORKER_RSS_PROBE_INTERVAL_MS = 250,
+};
+
+typedef enum {
+    INDEX_WORKER_TERMINATION_NONE = 0,
+    INDEX_WORKER_TERMINATION_CANCEL_PENDING,
+    INDEX_WORKER_TERMINATION_CANCEL,
+    INDEX_WORKER_TERMINATION_RESOURCE,
+} index_worker_termination_reason_t;
+
+/* Who owns the publication fence of one attempt. Only the polling owner thread
+ * reads or writes it. */
+typedef enum {
+    INDEX_WORKER_PUBLICATION_OPEN = 0, /* unclaimed, or no fence at all */
+    INDEX_WORKER_PUBLICATION_SUPERVISOR,
+    INDEX_WORKER_PUBLICATION_WORKER,
+} index_worker_publication_owner_t;
+
+#ifdef CBM_ENABLE_TEST_SEAMS
+static cbm_index_supervisor_clock_fn g_resource_clock;
+static cbm_index_supervisor_rss_fn g_resource_rss;
+static void *g_resource_hook_context;
+
+void cbm_index_supervisor_set_resource_hooks_for_testing(cbm_index_supervisor_clock_fn clock_fn,
+                                                         cbm_index_supervisor_rss_fn rss_fn,
+                                                         void *context) {
+    g_resource_clock = clock_fn;
+    g_resource_rss = rss_fn;
+    g_resource_hook_context = context;
+}
+
+void cbm_index_supervisor_reset_resource_hooks_for_testing(void) {
+    g_resource_clock = NULL;
+    g_resource_rss = NULL;
+    g_resource_hook_context = NULL;
+}
+#endif
+
+static uint64_t worker_resource_now_ms(void) {
+#ifdef CBM_ENABLE_TEST_SEAMS
+    if (g_resource_clock) {
+        return g_resource_clock(g_resource_hook_context);
+    }
+#endif
+    return cbm_now_ms();
+}
+
+static cbm_proc_tree_rss_status_t worker_resource_rss(cbm_subprocess_t *process,
+                                                      uint64_t *rss_bytes) {
+#ifdef CBM_ENABLE_TEST_SEAMS
+    if (g_resource_rss) {
+        return g_resource_rss(process, rss_bytes, g_resource_hook_context);
+    }
+#endif
+    return cbm_subprocess_tree_rss_bytes(process, rss_bytes);
+}
+
+struct cbm_index_worker_handle {
+    cbm_subprocess_t *process;
+    char response_path[INDEX_WORKER_PATH_CAP];
+    char log_path[INDEX_WORKER_PATH_CAP];
+    cbm_proc_log_cb log_callback;
+    void *log_context;
+    long relay_tail_pos;
+    bool process_terminal;
+    cbm_proc_result_t process_result;
+    cbm_index_resource_policy_t resource_policy;
+    uint64_t started_ms;
+    uint64_t last_rss_probe_ms;
+    unsigned int rss_probe_failures;
+    bool rss_probe_started;
+    /* Publication fence: a never-created path next to a reserved unique file
+     * (both removed at terminal). Empty when no worker limit is enabled. */
+    char publish_fence_reserve[INDEX_WORKER_PATH_CAP];
+    char publish_fence_path[INDEX_WORKER_PATH_CAP];
+    index_worker_publication_owner_t publication_owner;
+    bool publication_claim_error_logged;
+    atomic_int termination_reason;
+    atomic_bool terminal;
+    cbm_index_worker_result_t result;
+};
+
+#ifdef CBM_ENABLE_TEST_SEAMS
+const char *cbm_index_worker_publish_fence_path_for_testing(
+    const cbm_index_worker_handle_t *handle) {
+    return handle && handle->publish_fence_path[0] ? handle->publish_fence_path : NULL;
+}
+#endif
+
+/* The generic subprocess supervisor tails logs in bounded batches to preserve
+ * its nonblocking poll contract. A short-lived worker can therefore become
+ * terminal with more completed lines still on disk. Keep the request callback
+ * at this layer and delay the index-worker terminal result until its independent
+ * bounded cursor has caught up. This also keeps callback state request-scoped:
+ * no process-global sink is installed and concurrent workers never share a
+ * cursor or context.
+ *
+ * Returns true when the relay cursor is at EOF (or no callback was requested),
+ * false when another bounded poll is needed. A partial final line is deliberately
+ * left undelivered, matching cbm_proc_log_cb's completed-line contract. */
+static bool worker_relay_log(cbm_index_worker_handle_t *handle) {
+    if (!handle || !handle->log_callback) {
+        return true;
+    }
+
+#ifdef _WIN32
+    FILE *log = cbm_fopen(handle->log_path, "rb");
+#else
+    int flags = O_RDONLY | O_NONBLOCK;
+#ifdef O_CLOEXEC
+    flags |= O_CLOEXEC;
+#endif
+#ifdef O_NOFOLLOW
+    flags |= O_NOFOLLOW;
+#endif
+    int descriptor = open(handle->log_path, flags);
+    if (descriptor < 0) {
+        return true;
+    }
+    struct stat status;
+    if (fstat(descriptor, &status) != 0 || !S_ISREG(status.st_mode)) {
+        (void)close(descriptor);
+        return true;
+    }
+    FILE *log = fdopen(descriptor, "r");
+#endif
+    if (!log) {
+#ifndef _WIN32
+        (void)close(descriptor);
+#endif
+        return true;
+    }
+
+    bool caught_up = true;
+    if (fseek(log, handle->relay_tail_pos, SEEK_SET) == 0) {
+        char line[1024];
+        size_t delivered_lines = 0;
+        size_t delivered_bytes = 0;
+        while (delivered_lines < INDEX_WORKER_RELAY_LINES_PER_POLL &&
+               delivered_bytes < INDEX_WORKER_RELAY_BYTES_PER_POLL) {
+            long before = ftell(log);
+            if (!fgets(line, sizeof(line), log)) {
+                break;
+            }
+            size_t length = strlen(line);
+            delivered_bytes += length;
+            bool complete = length > 0 && line[length - 1] == '\n';
+            if (complete) {
+                line[length - 1] = '\0';
+                handle->relay_tail_pos = ftell(log);
+                delivered_lines++;
+                if (line[0]) {
+                    handle->log_callback(line, handle->log_context);
+                }
+            } else if (length == sizeof(line) - 1) {
+                /* Consume an oversized line in bounded chunks so it cannot pin
+                 * the cursor forever. This mirrors the subprocess tailer. */
+                handle->relay_tail_pos = ftell(log);
+                delivered_lines++;
+                handle->log_callback(line, handle->log_context);
+            } else {
+                /* The worker may append the rest before a later running poll.
+                 * Once its process tree is quiescent this remains intentionally
+                 * undelivered because callbacks are for complete lines only. */
+                handle->relay_tail_pos = before;
+                break;
+            }
+        }
+        if (delivered_lines == INDEX_WORKER_RELAY_LINES_PER_POLL ||
+            delivered_bytes >= INDEX_WORKER_RELAY_BYTES_PER_POLL) {
+            /* Probe without advancing the durable cursor. The FILE is closed
+             * immediately, so consuming this byte only answers whether another
+             * bounded owner-thread poll is required. */
+            caught_up = fgetc(log) == EOF;
+        }
+    }
+    (void)fclose(log);
+    return caught_up;
+}
+
+/* cbm_mkstemp's Windows compatibility implementation uses an internal buffer.
+ * Serialize just the name creation so concurrent daemon jobs remain safe; the
+ * spawned workers themselves are fully concurrent. */
+static atomic_flag g_worker_tmp_lock = ATOMIC_FLAG_INIT;
+
+static void worker_tmp_lock(void) {
+    while (atomic_flag_test_and_set_explicit(&g_worker_tmp_lock, memory_order_acquire)) {
+        cbm_usleep(1000);
+    }
+}
+
+static void worker_tmp_unlock(void) {
+    atomic_flag_clear_explicit(&g_worker_tmp_lock, memory_order_release);
+}
+
+static void worker_result_init(cbm_index_worker_result_t *result) {
+    memset(result, 0, sizeof(*result));
+    result->outcome = CBM_PROC_SPAWN_FAILED;
+    result->exit_code = -1;
+}
+
+/* Resolve into caller-owned storage. The generic resolver returns a shared
+ * static buffer, which is unsuitable for concurrent daemon starts. */
+static bool worker_cache_dir(char out[INDEX_WORKER_PATH_CAP]) {
+    char configured[INDEX_WORKER_PATH_CAP] = {0};
+    if (cbm_safe_getenv("CBM_CACHE_DIR", configured, sizeof(configured), NULL) && configured[0]) {
+        int written = snprintf(out, INDEX_WORKER_PATH_CAP, "%s", configured);
+        if (written <= 0 || written >= INDEX_WORKER_PATH_CAP) {
+            return false;
+        }
+        cbm_normalize_path_sep(out);
+        return true;
+    }
+    char home[INDEX_WORKER_PATH_CAP] = {0};
+    if (!cbm_safe_getenv("HOME", home, sizeof(home), NULL) || !home[0]) {
+        (void)cbm_safe_getenv("USERPROFILE", home, sizeof(home), NULL);
+    }
+    if (!home[0]) {
+        return false;
+    }
+    int written = snprintf(out, INDEX_WORKER_PATH_CAP, "%s/.cache/codebase-memory-mcp", home);
+    if (written <= 0 || written >= INDEX_WORKER_PATH_CAP) {
+        return false;
+    }
+    cbm_normalize_path_sep(out);
+    return true;
+}
+
+static bool worker_unique_file(char *out, size_t out_size, const char *kind) {
+    if (!out || out_size == 0 || !kind || !kind[0]) {
+        return false;
+    }
+    char cache_copy[INDEX_WORKER_PATH_CAP] = {0};
+    bool have_cache = worker_cache_dir(cache_copy);
+    int written;
+    if (have_cache) {
+        char directory[INDEX_WORKER_PATH_CAP];
+        written = snprintf(directory, sizeof(directory), "%s/logs", cache_copy);
+        if (written <= 0 || written >= (int)sizeof(directory) ||
+            !cbm_mkdir_p_ex(directory, 0700, CBM_MKDIR_FOLLOW_OWNED)) {
+            return false;
+        }
+        written = snprintf(out, out_size, "%s/.worker-%s-XXXXXX", directory, kind);
+    } else {
+        written = snprintf(out, out_size, ".worker-%s-XXXXXX", kind);
+    }
+    if (written <= 0 || written >= (int)out_size) {
+        out[0] = '\0';
+        return false;
+    }
+    worker_tmp_lock();
+    int descriptor = cbm_mkstemp(out);
+    worker_tmp_unlock();
+    if (descriptor < 0) {
+        out[0] = '\0';
+        return false;
+    }
+    (void)worker_close(descriptor);
+    return true;
+}
+
+static bool worker_result_succeeded(const cbm_index_worker_result_t *result) {
+    return result && result->outcome == CBM_PROC_CLEAN && !result->cancellation_requested &&
+           result->resource_violation.resource == CBM_INDEX_RESOURCE_NONE &&
+           !result->resource_probe_failed && result->tree_quiesced && !result->supervision_failed;
+}
+
+static void worker_terminal_log(cbm_index_worker_handle_t *handle) {
+    char signal_text[16];
+    char exit_text[16];
+    (void)snprintf(signal_text, sizeof(signal_text), "%d", handle->result.term_signal);
+    (void)snprintf(exit_text, sizeof(exit_text), "%d", handle->result.exit_code);
+    cbm_log_info("index.supervisor.reap", "outcome", cbm_proc_outcome_str(handle->result.outcome),
+                 "exit_code", exit_text, "signal", signal_text);
+    if (!worker_result_succeeded(&handle->result) &&
+        handle->process_result.job_memory_limit_bytes > 0) {
+        char limit_text[CBM_SZ_32];
+        char peak_text[CBM_SZ_32];
+        (void)snprintf(limit_text, sizeof(limit_text), "%zu",
+                       handle->process_result.job_memory_limit_bytes);
+        (void)snprintf(peak_text, sizeof(peak_text), "%zu",
+                       handle->process_result.peak_job_memory_bytes);
+        /* Peak accounting may include a denied allocation and exceed the cap,
+         * or remain below it. Report evidence, not an inferred OOM classification
+         * or a file to quarantine. */
+        cbm_log_warn("index.supervisor.worker_memory", "job_limit_bytes", limit_text,
+                     "peak_job_memory_bytes",
+                     handle->process_result.job_memory_available ? peak_text : "unavailable");
+    }
+    if (handle->result.response_rejected) {
+        cbm_log_error("index.supervisor.response_rejected", "reason", "payload_too_large", "log",
+                      handle->log_path);
+    } else if (handle->result.supervision_failed || !handle->result.tree_quiesced) {
+        cbm_log_error("index.supervisor.containment_failed", "outcome",
+                      cbm_proc_outcome_str(handle->result.outcome), "log", handle->log_path);
+    } else if (handle->result.resource_probe_failed) {
+        cbm_log_error("index.supervisor.resource_probe_failed", "resource", "rss_bytes", "log",
+                      handle->log_path);
+    } else if (handle->result.resource_violation.resource != CBM_INDEX_RESOURCE_NONE) {
+        cbm_log_warn("index.supervisor.resource_limit", "resource",
+                     cbm_index_resource_name(handle->result.resource_violation.resource), "log",
+                     handle->log_path);
+    } else if (handle->result.cancellation_requested) {
+        cbm_log_warn("index.supervisor.worker_cancelled", "outcome",
+                     cbm_proc_outcome_str(handle->result.outcome), "log", handle->log_path);
+    } else if (handle->result.response_missing) {
+        /* #1300: keep and name the log — it is the only record of the run. */
+        cbm_log_error("index.supervisor.no_response", "exit_code", exit_text, "last_phase",
+                      handle->result.last_phase, "log", handle->log_path);
+    } else if (handle->result.outcome == CBM_PROC_CLEAN && !cbm_profile_active) {
+        (void)cbm_unlink(handle->log_path);
+    } else if (handle->result.outcome == CBM_PROC_CLEAN) {
+        cbm_log_info("index.supervisor.profile_log", "log", handle->log_path);
+    } else {
+        cbm_log_warn("index.supervisor.worker_failed", "outcome",
+                     cbm_proc_outcome_str(handle->result.outcome), "exit_code", exit_text, "log",
+                     handle->log_path);
+    }
+}
+
+size_t cbm_index_worker_job_memory_limit(size_t memory_budget_bytes) {
+    /* Tiny token budgets must still reach main (image/CRT/stack startup already
+     * needs memory). Keep their argv value but leave the OS cap disabled below
+     * 512 MiB. KILL_ON_JOB_CLOSE remains in force regardless of the cap.
+     *
+     * Windows charges job-wide COMMIT, not RSS. This 1.5x limit leaves room
+     * for the
+     * cooperative budget's recovery/abort gate, but an allocation can
+     * still be denied before
+     * the next cooperative check. It is a backstop for
+     * descendants too, not exact
+     * enforcement of the accounting budget. */
+    const size_t minimum_budget = (size_t)512U * 1024U * 1024U;
+    if (memory_budget_bytes < minimum_budget) {
+        return 0;
+    }
+    size_t headroom = memory_budget_bytes / 2;
+    return memory_budget_bytes > SIZE_MAX - headroom ? SIZE_MAX : memory_budget_bytes + headroom;
+}
+
+/* Claim the publication fence before stopping the worker for a resource limit
+ * (see index_supervisor.h). True when the termination may proceed. */
+static bool worker_claim_publication_for_limit(cbm_index_worker_handle_t *handle,
+                                               cbm_index_resource_t resource, uint64_t observed,
+                                               uint64_t limit, bool probe_failed) {
+    if (!handle->publish_fence_path[0] ||
+        handle->publication_owner == INDEX_WORKER_PUBLICATION_SUPERVISOR) {
+        return true;
+    }
+    if (handle->publication_owner == INDEX_WORKER_PUBLICATION_WORKER) {
+        return false;
+    }
+    index_publication_claim_t claim = index_publication_claim(handle->publish_fence_path);
+    if (claim == INDEX_PUBLICATION_CLAIMED) {
+        handle->publication_owner = INDEX_WORKER_PUBLICATION_SUPERVISOR;
+        return true;
+    }
+    if (claim == INDEX_PUBLICATION_TAKEN) {
+        /* The worker committed to publishing before the limit was observed.
+         * Stopping it now could leave a new generation serving behind a report
+         * that the previous index was preserved, so this attempt is no longer
+         * limited; the crossing is recorded here instead. */
+        handle->publication_owner = INDEX_WORKER_PUBLICATION_WORKER;
+        char observed_text[CBM_SZ_32];
+        char limit_text[CBM_SZ_32];
+        (void)snprintf(observed_text, sizeof(observed_text), "%llu", (unsigned long long)observed);
+        (void)snprintf(limit_text, sizeof(limit_text), "%llu", (unsigned long long)limit);
+        cbm_log_warn("index.supervisor.resource_limit_after_publication", "resource",
+                     cbm_index_resource_name(resource), "observed",
+                     probe_failed ? "unmeasured" : observed_text, "limit", limit_text, "action",
+                     "not_enforced", "log", handle->log_path);
+        return false;
+    }
+    /* Neither side holds the fence and it could not be created. Terminating
+     * now could race a later successful claim by the worker, so the decision
+     * is retried on the next poll instead. */
+    if (!handle->publication_claim_error_logged) {
+        handle->publication_claim_error_logged = true;
+        char errno_text[CBM_SZ_32];
+        (void)snprintf(errno_text, sizeof(errno_text), "%d", errno);
+        cbm_log_error("index.supervisor.publication_claim_failed", "errno", errno_text, "action",
+                      "retry_next_poll", "log", handle->log_path);
+    }
+    return false;
+}
+
+static void worker_request_resource_termination(cbm_index_worker_handle_t *handle,
+                                                cbm_index_resource_t resource, uint64_t observed,
+                                                uint64_t limit, bool probe_failed) {
+    if (!worker_claim_publication_for_limit(handle, resource, observed, limit, probe_failed)) {
+        return;
+    }
+    int expected = INDEX_WORKER_TERMINATION_NONE;
+    if (!atomic_compare_exchange_strong_explicit(&handle->termination_reason, &expected,
+                                                 INDEX_WORKER_TERMINATION_RESOURCE,
+                                                 memory_order_acq_rel, memory_order_acquire)) {
+        return;
+    }
+    handle->result.resource_violation = (cbm_index_resource_violation_t){
+        .resource = resource, .observed = observed, .limit = limit};
+    handle->result.resource_probe_failed = probe_failed;
+    if (!cbm_subprocess_request_cancel(handle->process)) {
+        handle->result.resource_violation = (cbm_index_resource_violation_t){0};
+        handle->result.resource_probe_failed = false;
+        expected = INDEX_WORKER_TERMINATION_RESOURCE;
+        (void)atomic_compare_exchange_strong_explicit(&handle->termination_reason, &expected,
+                                                      INDEX_WORKER_TERMINATION_NONE,
+                                                      memory_order_acq_rel, memory_order_acquire);
+    }
+}
+
+static bool worker_check_resource_limits(cbm_index_worker_handle_t *handle) {
+    /* A worker that committed to publishing is no longer resource-limited. */
+    if (handle->publication_owner == INDEX_WORKER_PUBLICATION_WORKER ||
+        atomic_load_explicit(&handle->termination_reason, memory_order_acquire) !=
+            INDEX_WORKER_TERMINATION_NONE ||
+        cbm_subprocess_termination_pending(handle->process) ||
+        !cbm_subprocess_supervision_active(handle->process)) {
+        return false;
+    }
+    uint64_t now = 0;
+    bool have_now = false;
+    bool rss_probe_failed = false;
+    if (handle->resource_policy.max_rss_bytes.enabled) {
+        now = worker_resource_now_ms();
+        have_now = true;
+        bool probe_due = !handle->rss_probe_started || now < handle->last_rss_probe_ms ||
+                         now - handle->last_rss_probe_ms >= INDEX_WORKER_RSS_PROBE_INTERVAL_MS;
+        if (!probe_due) {
+            goto duration_check;
+        }
+        handle->rss_probe_started = true;
+        handle->last_rss_probe_ms = now;
+        uint64_t rss_bytes = 0;
+        cbm_proc_tree_rss_status_t status = worker_resource_rss(handle->process, &rss_bytes);
+        if (status == CBM_PROC_TREE_RSS_OK) {
+            handle->rss_probe_failures = 0;
+            if (rss_bytes > handle->resource_policy.max_rss_bytes.value) {
+                worker_request_resource_termination(handle, CBM_INDEX_RESOURCE_RSS_BYTES, rss_bytes,
+                                                    handle->resource_policy.max_rss_bytes.value,
+                                                    false);
+                return false;
+            }
+        } else if (status == CBM_PROC_TREE_RSS_ERROR) {
+            handle->rss_probe_failures++;
+            if (handle->rss_probe_failures >= INDEX_WORKER_RSS_PROBE_FAILURE_LIMIT) {
+                rss_probe_failed = true;
+            }
+        } else {
+            handle->rss_probe_failures = 0;
+        }
+    }
+duration_check:
+    if (handle->resource_policy.max_duration_ms.enabled) {
+        if (!have_now) {
+            now = worker_resource_now_ms();
+        }
+        uint64_t elapsed = now >= handle->started_ms ? now - handle->started_ms : 0;
+        if (elapsed > handle->resource_policy.max_duration_ms.value) {
+            worker_request_resource_termination(handle, CBM_INDEX_RESOURCE_DURATION_MS, elapsed,
+                                                handle->resource_policy.max_duration_ms.value,
+                                                false);
+        }
+    }
+    return rss_probe_failed;
+}
+
+/* Reserve a unique private name and derive the fence path from it. The fence
+ * itself is never created here: creating it IS the claim. */
+static bool worker_publish_fence_create(cbm_index_worker_handle_t *handle) {
+    if (!worker_unique_file(handle->publish_fence_reserve, sizeof(handle->publish_fence_reserve),
+                            "publish")) {
+        return false;
+    }
+    int written = snprintf(handle->publish_fence_path, sizeof(handle->publish_fence_path),
+                           "%s.claim", handle->publish_fence_reserve);
+    if (written <= 0 || written >= (int)sizeof(handle->publish_fence_path)) {
+        (void)cbm_unlink(handle->publish_fence_reserve);
+        handle->publish_fence_reserve[0] = '\0';
+        handle->publish_fence_path[0] = '\0';
+        return false;
+    }
+    return true;
+}
+
+static void worker_publish_fence_remove(cbm_index_worker_handle_t *handle) {
+    if (handle->publish_fence_path[0]) {
+        (void)cbm_unlink(handle->publish_fence_path);
+    }
+    if (handle->publish_fence_reserve[0]) {
+        (void)cbm_unlink(handle->publish_fence_reserve);
+    }
+}
+
+/* Create the private files of one attempt. NULL on success; otherwise the name
+ * of the artifact that could not be created, with errno as that step left it
+ * and every earlier artifact still in place for the caller to remove. */
+static const char *worker_artifacts_create(cbm_index_worker_handle_t *handle) {
+    if (!worker_unique_file(handle->response_path, sizeof(handle->response_path), "response")) {
+        return "response";
+    }
+    if (!worker_unique_file(handle->log_path, sizeof(handle->log_path), "log")) {
+        return "log";
+    }
+    /* Opt-in: only an enabled worker limit can stop a worker, so only then is
+     * there a publication to coordinate. */
+    if (cbm_index_policy_worker_enabled(&handle->resource_policy) &&
+        !worker_publish_fence_create(handle)) {
+        return "publish_fence";
+    }
+    return NULL;
+}
+
+/* Settle who held the fence once the attempt is terminal. Claiming an unowned
+ * fence now also bars any later claim, so a stray member of an unquiesced tree
+ * can never publish after this report. */
+static bool worker_publication_committed_at_terminal(cbm_index_worker_handle_t *handle) {
+    if (!handle->publish_fence_path[0] ||
+        handle->publication_owner == INDEX_WORKER_PUBLICATION_SUPERVISOR) {
+        return false;
+    }
+    if (handle->publication_owner == INDEX_WORKER_PUBLICATION_WORKER) {
+        return true;
+    }
+    index_publication_claim_t claim = index_publication_claim(handle->publish_fence_path);
+    if (claim == INDEX_PUBLICATION_CLAIMED) {
+        handle->publication_owner = INDEX_WORKER_PUBLICATION_SUPERVISOR;
+        return false;
+    }
+    if (claim == INDEX_PUBLICATION_TAKEN) {
+        handle->publication_owner = INDEX_WORKER_PUBLICATION_WORKER;
+    }
+    /* Taken: the worker committed. Unreadable: preservation cannot be proven. */
+    return true;
+}
+
+static int worker_start_internal(const char *args_json, size_t memory_budget_bytes,
+                                 const cbm_index_resource_policy_t *resource_policy,
+                                 bool single_thread, const char *marker_file,
+                                 const char *quarantine_file, cbm_proc_log_cb log_callback,
+                                 void *log_context, uint64_t duration_origin_ms,
+                                 cbm_index_worker_handle_t **handle_out) {
+    if (handle_out) {
+        *handle_out = NULL;
+    }
+    atomic_fetch_add_explicit(&g_spawn_count, 1, memory_order_relaxed);
+    if (single_thread) {
+        atomic_fetch_add_explicit(&g_spawn_st_count, 1, memory_order_relaxed);
+    }
+    if (!handle_out || !args_json || !args_json[0]) {
+        return -1;
+    }
+    if (g_host_marked && !g_worker_active && supervisor_disable_requested()) {
+        /* Keep the old variable as a deterministic refusal seam, but never as
+         * a production escape hatch into unsafe in-process indexing. */
+        cbm_log_error("index.supervisor.disable_refused", "action", "fail_closed");
+        return -1;
+    }
+    const char *build_fingerprint = cbm_index_supervisor_build_fingerprint();
+    if (!build_fingerprint) {
+        cbm_log_error("index.supervisor.build_fingerprint_unavailable", "action", "refuse_spawn");
+        return -1;
+    }
+
+    char self[INDEX_WORKER_PATH_CAP] = {0};
+    if (!cbm_http_server_resolve_binary_path(NULL, self, sizeof(self)) || !self[0]) {
+        cbm_log_error("index.supervisor.no_self_path", "action", "fail_closed");
+        return -1;
+    }
+    cbm_index_worker_handle_t *handle = calloc(1, sizeof(*handle));
+    if (!handle) {
+        return -1;
+    }
+    cbm_index_policy_init(&handle->resource_policy);
+    if (resource_policy) {
+        handle->resource_policy = *resource_policy;
+    }
+    atomic_init(&handle->termination_reason, INDEX_WORKER_TERMINATION_NONE);
+    atomic_init(&handle->terminal, false);
+    handle->log_callback = log_callback;
+    handle->log_context = log_context;
+    worker_result_init(&handle->result);
+    const char *failed_artifact = worker_artifacts_create(handle);
+    if (failed_artifact) {
+        int saved_errno = errno;
+        char error_text[CBM_SZ_32];
+        (void)snprintf(error_text, sizeof(error_text), "%d", saved_errno);
+        cbm_log_error("index.supervisor.artifact_create_failed", "artifact", failed_artifact,
+                      "errno", error_text);
+        (void)cbm_unlink(handle->response_path);
+        (void)cbm_unlink(handle->log_path);
+        free(handle);
+        return -1;
+    }
+
+    const char *argv[INDEX_WORKER_ARGV_CAP];
+    size_t argc = 0;
+    argv[argc++] = self;
+    argv[argc++] = "cli";
+    argv[argc++] = "--index-worker";
+    argv[argc++] = CBM_INDEX_WORKER_BUILD_ARG;
+    argv[argc++] = build_fingerprint;
+    argv[argc++] = "index_repository";
+    argv[argc++] = args_json;
+    argv[argc++] = "--response-out";
+    argv[argc++] = handle->response_path;
+    char memory_budget_text[CBM_SZ_32];
+    if (memory_budget_bytes > 0) {
+        (void)snprintf(memory_budget_text, sizeof(memory_budget_text), "%zu", memory_budget_bytes);
+        argv[argc++] = CBM_INDEX_WORKER_MEMORY_BUDGET_ARG;
+        argv[argc++] = memory_budget_text;
+    }
+    if (single_thread) {
+        argv[argc++] = CBM_INDEX_WORKER_SINGLE_THREAD_ARG;
+    }
+    if (marker_file && marker_file[0]) {
+        argv[argc++] = CBM_INDEX_WORKER_MARKER_ARG;
+        argv[argc++] = marker_file;
+    }
+    if (quarantine_file && quarantine_file[0]) {
+        argv[argc++] = CBM_INDEX_WORKER_QUARANTINE_ARG;
+        argv[argc++] = quarantine_file;
+    }
+    if (handle->publish_fence_path[0]) {
+        argv[argc++] = CBM_INDEX_WORKER_PUBLISH_FENCE_ARG;
+        argv[argc++] = handle->publish_fence_path;
+    }
+    argv[argc] = NULL;
+
+    cbm_proc_opts_t options = {0};
+    options.bin = self;
+    options.argv = argv;
+    options.log_file = handle->log_path;
+    /* The subprocess tail remains authoritative for quiet-timeout activity.
+     * Request callbacks use the supervisor's independent cursor so a terminal
+     * child cannot strand a bounded tail backlog. */
+    options.on_log_line = NULL;
+    options.log_ud = NULL;
+    options.quiet_timeout_ms = worker_quiet_timeout_ms();
+    options.memory_limit_bytes = cbm_index_worker_job_memory_limit(memory_budget_bytes);
+    options.delete_log_on_exit = false;
+    if (cbm_subprocess_spawn(&options, &handle->process) != 0) {
+        (void)cbm_unlink(handle->response_path);
+        (void)cbm_unlink(handle->log_path);
+        worker_publish_fence_remove(handle);
+        free(handle);
+        cbm_log_error("index.supervisor.spawn_failed", "action", "fail_closed");
+        return -1;
+    }
+    if (handle->resource_policy.max_duration_ms.enabled) {
+        /* Duration is per request, not per spawn: a crash/hang recovery must
+         * not reset the clock. Callers pass the request origin; 0 means now. */
+        uint64_t origin = duration_origin_ms != 0 ? duration_origin_ms : worker_resource_now_ms();
+        handle->started_ms = origin;
+    }
+    *handle_out = handle;
+    return 0;
+}
+
+uint64_t cbm_index_worker_now_ms(void) {
+    return worker_resource_now_ms();
+}
+
+int cbm_index_worker_start_with_log(const char *args_json, size_t memory_budget_bytes,
+                                    bool single_thread, const char *marker_file,
+                                    const char *quarantine_file, cbm_proc_log_cb log_callback,
+                                    void *log_context, cbm_index_worker_handle_t **handle_out) {
+    return worker_start_internal(args_json, memory_budget_bytes, NULL, single_thread, marker_file,
+                                 quarantine_file, log_callback, log_context, 0, handle_out);
+}
+
+int cbm_index_worker_start(const char *args_json, size_t memory_budget_bytes, bool single_thread,
+                           const char *marker_file, const char *quarantine_file,
+                           cbm_index_worker_handle_t **handle_out) {
+    return worker_start_internal(args_json, memory_budget_bytes, NULL, single_thread, marker_file,
+                                 quarantine_file, NULL, NULL, 0, handle_out);
+}
+
+int cbm_index_worker_start_with_policy(const char *args_json, size_t memory_budget_bytes,
+                                       const cbm_index_resource_policy_t *resource_policy,
+                                       bool single_thread, const char *marker_file,
+                                       const char *quarantine_file, uint64_t duration_origin_ms,
+                                       cbm_index_worker_handle_t **handle_out) {
+    return worker_start_internal(args_json, memory_budget_bytes, resource_policy, single_thread,
+                                 marker_file, quarantine_file, NULL, NULL, duration_origin_ms,
+                                 handle_out);
+}
+
+int cbm_index_worker_start_with_policy_log(const char *args_json, size_t memory_budget_bytes,
+                                           const cbm_index_resource_policy_t *resource_policy,
+                                           bool single_thread, const char *marker_file,
+                                           const char *quarantine_file,
+                                           cbm_proc_log_cb log_callback, void *log_context,
+                                           uint64_t duration_origin_ms,
+                                           cbm_index_worker_handle_t **handle_out) {
+    return worker_start_internal(args_json, memory_budget_bytes, resource_policy, single_thread,
+                                 marker_file, quarantine_file, log_callback, log_context,
+                                 duration_origin_ms, handle_out);
+}
+
+cbm_index_worker_poll_t cbm_index_worker_poll(cbm_index_worker_handle_t *handle,
+                                              const cbm_index_worker_result_t **result_out) {
+    if (result_out) {
+        *result_out = NULL;
+    }
+    if (!handle || !result_out || !handle->process) {
+        return CBM_INDEX_WORKER_POLL_ERROR;
+    }
+    if (atomic_load_explicit(&handle->terminal, memory_order_acquire)) {
+        *result_out = &handle->result;
+        return CBM_INDEX_WORKER_POLL_TERMINAL;
+    }
+    bool relay_caught_up = true;
+    if (!handle->process_terminal) {
+        bool rss_probe_failed = worker_check_resource_limits(handle);
+        cbm_proc_result_t process_result;
+        cbm_proc_poll_t state = cbm_subprocess_poll(handle->process, &process_result);
+        relay_caught_up = worker_relay_log(handle);
+        if (state == CBM_PROC_POLL_RUNNING) {
+            if (rss_probe_failed && cbm_subprocess_root_running(handle->process)) {
+                worker_request_resource_termination(handle, CBM_INDEX_RESOURCE_RSS_BYTES, 0,
+                                                    handle->resource_policy.max_rss_bytes.value,
+                                                    true);
+            }
+            return CBM_INDEX_WORKER_POLL_RUNNING;
+        }
+        if (state != CBM_PROC_POLL_TERMINAL) {
+            return CBM_INDEX_WORKER_POLL_ERROR;
+        }
+        handle->process_result = process_result;
+        handle->process_terminal = true;
+    } else {
+        relay_caught_up = worker_relay_log(handle);
+    }
+    if (!relay_caught_up) {
+        /* The process tree is already quiescent, but one bounded callback batch
+         * remains. Keep the public poll nonblocking and report terminal only
+         * after every completed worker log line has reached its request sink. */
+        return CBM_INDEX_WORKER_POLL_RUNNING;
+    }
+    const cbm_proc_result_t *process_result = &handle->process_result;
+    handle->result.outcome = process_result->outcome;
+    handle->result.exit_code = process_result->exit_code;
+    handle->result.term_signal = process_result->term_signal;
+    int termination_reason =
+        atomic_load_explicit(&handle->termination_reason, memory_order_acquire);
+    handle->result.cancellation_requested =
+        termination_reason == INDEX_WORKER_TERMINATION_CANCEL ||
+        (termination_reason == INDEX_WORKER_TERMINATION_CANCEL_PENDING &&
+         process_result->cancellation_requested);
+    handle->result.forced = process_result->forced;
+    handle->result.tree_quiesced = process_result->tree_quiesced;
+    handle->result.supervision_failed = process_result->supervision_failed;
+    handle->result.publication_committed = worker_publication_committed_at_terminal(handle);
+    if (handle->result.tree_quiesced) {
+        /* An unquiesced tree keeps the fence as it is: removing a claim the
+         * supervisor holds would let a surviving member publish later. */
+        worker_publish_fence_remove(handle);
+    }
+    if (worker_result_succeeded(&handle->result)) {
+        worker_response_read_status_t response_status;
+        handle->result.response = slurp_worker_response(handle->response_path, &response_status);
+        if (response_status == WORKER_RESPONSE_READ_TOO_LARGE) {
+            /* A clean exit with an out-of-contract response is a contained
+             * worker failure, not a fallback to in-process indexing. */
+            handle->result.response_rejected = true;
+            handle->result.outcome = CBM_PROC_EXIT_NONZERO;
+            handle->result.exit_code = -1;
+        } else if (!handle->result.response) {
+            /* #1300: a clean exit that wrote no response. The outcome stays
+             * CLEAN (the disposition is FALLBACK: an explicit error, no
+             * in-process fallback and no recovery re-run of a worker that did
+             * not crash); the log and the last phase it reached are kept. */
+            handle->result.response_missing = true;
+            worker_log_last_phase(handle->log_path, handle->result.last_phase,
+                                  sizeof(handle->result.last_phase));
+            (void)snprintf(handle->result.worker_log, sizeof(handle->result.worker_log), "%s",
+                           handle->log_path);
+        }
+    }
+    (void)cbm_unlink(handle->response_path);
+    worker_terminal_log(handle);
+    atomic_store_explicit(&handle->terminal, true, memory_order_release);
+    *result_out = &handle->result;
+    return CBM_INDEX_WORKER_POLL_TERMINAL;
+}
+
+bool cbm_index_worker_request_cancel(cbm_index_worker_handle_t *handle) {
+    if (!handle || atomic_load_explicit(&handle->terminal, memory_order_acquire)) {
+        return false;
+    }
+    int expected = INDEX_WORKER_TERMINATION_NONE;
+    bool claimed = atomic_compare_exchange_strong_explicit(
+        &handle->termination_reason, &expected, INDEX_WORKER_TERMINATION_CANCEL_PENDING,
+        memory_order_acq_rel, memory_order_acquire);
+    if (!claimed) {
+        if (expected == INDEX_WORKER_TERMINATION_CANCEL) {
+            return true;
+        }
+        if (expected != INDEX_WORKER_TERMINATION_CANCEL_PENDING) {
+            return false;
+        }
+        bool accepted = cbm_subprocess_request_cancel(handle->process);
+        if (accepted) {
+            expected = INDEX_WORKER_TERMINATION_CANCEL_PENDING;
+            (void)atomic_compare_exchange_strong_explicit(
+                &handle->termination_reason, &expected, INDEX_WORKER_TERMINATION_CANCEL,
+                memory_order_acq_rel, memory_order_acquire);
+        }
+        return accepted;
+    }
+    bool accepted = cbm_subprocess_request_cancel(handle->process);
+    expected = INDEX_WORKER_TERMINATION_CANCEL_PENDING;
+    (void)atomic_compare_exchange_strong_explicit(&handle->termination_reason, &expected,
+                                                  accepted ? INDEX_WORKER_TERMINATION_CANCEL
+                                                           : INDEX_WORKER_TERMINATION_NONE,
+                                                  memory_order_acq_rel, memory_order_acquire);
+    return accepted;
+}
+
+const char *cbm_index_worker_response_path(const cbm_index_worker_handle_t *handle) {
+    return handle ? handle->response_path : NULL;
+}
+
+const char *cbm_index_worker_log_path(const cbm_index_worker_handle_t *handle) {
+    return handle ? handle->log_path : NULL;
+}
+
+void cbm_index_worker_destroy(cbm_index_worker_handle_t *handle) {
+    if (!handle) {
+        return;
+    }
+    if (!atomic_load_explicit(&handle->terminal, memory_order_acquire)) {
+        cbm_log_error("index.supervisor.destroy_running", "action", "ignored");
+        return;
+    }
+    cbm_subprocess_destroy(handle->process);
+    free(handle->result.response);
+    handle->result.response = NULL;
+    free(handle);
+}
+
+static int worker_spawn_internal(const char *args_json,
+                                 const cbm_index_resource_policy_t *resource_policy,
+                                 bool single_thread, const char *marker_file,
+                                 const char *quarantine_file, cbm_proc_log_cb log_callback,
+                                 void *log_context, const atomic_int *cancel_requested,
+                                 uint64_t duration_origin_ms, cbm_index_worker_result_t *result) {
+    if (!result) {
+        return -1;
+    }
+    worker_result_init(result);
+    cbm_index_worker_handle_t *handle = NULL;
+    if (worker_start_internal(args_json, 0, resource_policy, single_thread, marker_file,
+                              quarantine_file, log_callback, log_context, duration_origin_ms,
+                              &handle) != 0) {
+        return -1;
+    }
+    const cbm_index_worker_result_t *cached = NULL;
+    bool cancellation_forwarded = false;
+    for (;;) {
+        if (!cancellation_forwarded && cancel_requested &&
+            atomic_load_explicit(cancel_requested, memory_order_acquire) != 0) {
+            cancellation_forwarded = cbm_index_worker_request_cancel(handle);
+        }
+        cbm_index_worker_poll_t state = cbm_index_worker_poll(handle, &cached);
+        if (state == CBM_INDEX_WORKER_POLL_TERMINAL) {
+            break;
+        }
+        if (state == CBM_INDEX_WORKER_POLL_ERROR) {
+            (void)cbm_index_worker_request_cancel(handle);
+        }
+        const struct timespec pause = {0, INDEX_WORKER_SYNC_POLL_NS};
+        (void)cbm_nanosleep(&pause, NULL);
+    }
+    *result = *cached;
+    result->response = cached->response ? cbm_strdup(cached->response) : NULL;
+    cbm_index_worker_destroy(handle);
+    return 0;
+}
+
+int cbm_index_spawn_worker_with_log_cancel(const char *args_json, bool single_thread,
+                                           const char *marker_file, const char *quarantine_file,
+                                           cbm_proc_log_cb log_callback, void *log_context,
+                                           const atomic_int *cancel_requested,
+                                           cbm_index_worker_result_t *result) {
+    return worker_spawn_internal(args_json, NULL, single_thread, marker_file, quarantine_file,
+                                 log_callback, log_context, cancel_requested, 0, result);
+}
+
+int cbm_index_spawn_worker_with_policy_log_cancel(
+    const char *args_json, const cbm_index_resource_policy_t *resource_policy, bool single_thread,
+    const char *marker_file, const char *quarantine_file, cbm_proc_log_cb log_callback,
+    void *log_context, const atomic_int *cancel_requested, uint64_t duration_origin_ms,
+    cbm_index_worker_result_t *result) {
+    return worker_spawn_internal(args_json, resource_policy, single_thread, marker_file,
+                                 quarantine_file, log_callback, log_context, cancel_requested,
+                                 duration_origin_ms, result);
+}
+
+int cbm_index_spawn_worker_with_log(const char *args_json, bool single_thread,
+                                    const char *marker_file, const char *quarantine_file,
+                                    cbm_proc_log_cb log_callback, void *log_context,
+                                    cbm_index_worker_result_t *result) {
+    return cbm_index_spawn_worker_with_log_cancel(args_json, single_thread, marker_file,
+                                                  quarantine_file, log_callback, log_context, NULL,
+                                                  result);
+}
+
+int cbm_index_spawn_worker(const char *args_json, bool single_thread, const char *marker_file,
+                           const char *quarantine_file, cbm_index_worker_result_t *result) {
+    return cbm_index_spawn_worker_with_log(args_json, single_thread, marker_file, quarantine_file,
+                                           NULL, NULL, result);
+}
+
+void cbm_index_worker_result_free(cbm_index_worker_result_t *result) {
+    if (result) {
+        free(result->response);
+        result->response = NULL;
+    }
+}

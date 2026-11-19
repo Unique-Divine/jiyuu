@@ -1,0 +1,199 @@
+"""Minimal MCP stdio client for the Windows red-test suite.
+
+Drives a real codebase-memory-mcp(.exe) over a line-delimited JSON-RPC stdio
+pipe. The pipe carries UTF-8 bytes, so a non-ASCII repo_path reaches the server
+without passing through the Windows ANSI command-line code page (which mangles
+argv for a binary whose main() is not wmain/GetCommandLineW). This isolates the
+server's real path handling from CLI-argv encoding artifacts.
+
+No third-party dependencies — standard library only.
+"""
+import json
+import os
+import subprocess
+import threading
+import time
+
+
+class McpError(Exception):
+    pass
+
+
+class McpServer:
+    def __init__(self, binary, cache_dir=None, extra_env=None, cwd=None):
+        self.binary = binary
+        self._id = 0
+        self.proc = None
+        self._stderr = []
+        self._stderr_thread = None
+        self._stderr_eof = False
+        env = dict(os.environ)
+        if cache_dir:
+            env["CBM_CACHE_DIR"] = cache_dir  # isolate the graph DB location
+        if extra_env:
+            env.update(extra_env)
+        self.env = env
+        self.cwd = cwd
+
+    def __enter__(self):
+        self.start()
+        return self
+
+    def __exit__(self, *a):
+        self.close()
+
+    def start(self):
+        self.proc = subprocess.Popen(
+            [self.binary],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env=self.env, cwd=self.cwd, bufsize=0)
+        self._stderr_thread = threading.Thread(target=self._drain_stderr, daemon=True)
+        self._stderr_thread.start()
+
+    def _drain_stderr(self):
+        try:
+            for line in self.proc.stderr:
+                self._stderr.append(line.decode("utf-8", "replace"))
+            self._stderr_eof = True
+        except Exception:
+            pass
+
+    def stderr_text(self):
+        return "".join(self._stderr)
+
+    def stderr_complete(self, timeout):
+        """Wait for the stderr reader to reach EOF; True once it has.
+
+        Only then is stderr_text() the whole capture. False means the reader
+        is still running (some process still holds the pipe) or stopped on a
+        read error, so the text may be partial: a caller that asserts on
+        stderr must treat False as a setup failure, never as a verdict. The
+        timeout is a liveness backstop, not part of any verdict.
+        """
+        if self._stderr_thread is None:
+            return False
+        self._stderr_thread.join(timeout)
+        return not self._stderr_thread.is_alive() and self._stderr_eof
+
+    def _send(self, obj):
+        data = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+        self.proc.stdin.write(data + b"\n")
+        self.proc.stdin.flush()
+
+    def _read_message(self, timeout=60):
+        result = {}
+
+        def reader():
+            try:
+                result["line"] = self.proc.stdout.readline()
+            except Exception as ex:
+                result["exc"] = ex
+
+        th = threading.Thread(target=reader, daemon=True)
+        th.start()
+        th.join(timeout)
+        if th.is_alive():
+            raise McpError("timeout after %ss (hang)" % timeout)
+        if "exc" in result:
+            raise McpError("read error: %r" % result["exc"])
+        line = result.get("line", b"")
+        if not line:
+            self._stderr_thread.join(timeout=1)
+            stderr = self.stderr_text().strip()
+            detail = ": %s" % stderr[-1200:] if stderr else ""
+            raise McpError("EOF / server closed stdout%s" % detail)
+        # strict: an invalid-UTF-8 JSON-RPC response is itself a failure.
+        return json.loads(line.decode("utf-8", "strict"))
+
+    def request(self, method, params=None, timeout=60):
+        self._id += 1
+        rid = self._id
+        self._send({"jsonrpc": "2.0", "id": rid, "method": method,
+                    "params": params or {}})
+        deadline = time.time() + timeout
+        while True:
+            msg = self._read_message(timeout=max(1, deadline - time.time()))
+            if msg.get("id") == rid:
+                return msg
+            if time.time() > deadline:
+                raise McpError("timeout waiting for id=%d" % rid)
+
+    def notify(self, method, params=None):
+        self._send({"jsonrpc": "2.0", "method": method, "params": params or {}})
+
+    def initialize(self, timeout=60):
+        resp = self.request("initialize", {
+            "protocolVersion": "2024-11-05", "capabilities": {},
+            "clientInfo": {"name": "windows-red-test", "version": "1.0"}}, timeout)
+        if "error" in resp:
+            raise McpError("initialize error: %r" % resp["error"])
+        try:
+            self.notify("notifications/initialized")
+        except Exception:
+            pass
+        return resp
+
+    def tools_list(self, timeout=60):
+        resp = self.request("tools/list", {}, timeout=timeout)
+        if "error" in resp:
+            raise McpError("tools/list error: %r" % resp["error"])
+        return resp["result"]["tools"]
+
+    def call_tool(self, name, arguments, timeout=180):
+        return self.request("tools/call",
+                            {"name": name, "arguments": arguments}, timeout=timeout)
+
+    @staticmethod
+    def tool_text(resp):
+        if "error" in resp:
+            return None, resp["error"]
+        parts = [c.get("text", "") for c in resp.get("result", {}).get("content", [])
+                 if c.get("type") == "text"]
+        return "".join(parts), None
+
+    def close(self):
+        if not self.proc:
+            return
+        try:
+            self.proc.stdin.close()
+        except Exception:
+            pass
+        try:
+            self.proc.wait(timeout=10)
+        except Exception:
+            try:
+                self.proc.kill()
+            except Exception:
+                pass
+        self._stderr_thread.join(timeout=10)
+
+
+def wait_projects_with_stats(server, timeout=90.0, poll=1.0):
+    """Poll list_projects until a project row carries node/edge counts.
+
+    index_repository returns when the pipeline finishes, but the project
+    stats are published asynchronously; on slow CI runners the first
+    list_projects can observe the registration row before its counts land
+    (`nodes` absent/None). That window is environmental, not a product
+    regression (#1952), so wait it out instead of failing setup on it.
+
+    Returns (projects, last_text): the parsed project list (possibly [])
+    and the last raw list_projects payload for diagnostics.
+    """
+    deadline = time.time() + timeout
+    last_txt = ""
+    while True:
+        resp = server.call_tool("list_projects", {}, timeout=60)
+        txt, err = server.tool_text(resp)
+        projects = []
+        if not err and txt:
+            last_txt = txt
+            try:
+                projects = json.loads(txt).get("projects") or []
+            except ValueError:
+                projects = []
+        if projects and projects[0].get("nodes") is not None:
+            return projects, last_txt
+        if time.time() >= deadline:
+            return projects, last_txt
+        time.sleep(poll)

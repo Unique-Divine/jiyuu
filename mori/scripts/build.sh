@@ -1,0 +1,211 @@
+#!/usr/bin/env bash
+# build.sh — Clean build of production binary (standard or with UI).
+#
+# Usage:
+#   scripts/build.sh                              # Standard binary
+#   scripts/build.sh --with-ui                    # Binary with the UI embedded
+#   scripts/build.sh --help                       # Full usage
+#   scripts/build.sh --version v0.8.0             # With version stamp
+#   scripts/build.sh --arch x86_64                # Force x86_64 build
+#   scripts/build.sh CC=gcc-14 CXX=g++-14        # Override compiler
+#
+# This script is the SINGLE source of truth for building release binaries.
+# Used identically in local development and CI workflows.
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT"
+
+usage() {
+    cat <<'EOF'
+Usage: scripts/build.sh [--with-ui] [--version V] [--arch ARCH] [VAR=VAL ...]
+
+The canonical production-build entry: identical in local CI, PR CI, dry run
+and release. Always a CLEAN build of BUILD_DIR (build/c by default) — the
+content-verified compiler cache (ccache via scripts/env.sh) makes repeat
+builds fast without ever reusing a stale object: every object is re-derived
+from current sources; a cache hit is byte-identical to a cold compile by
+construction (CCACHE_COMPILERCHECK=content).
+
+Options:
+  --with-ui       Build the web UI as a content-addressed sidecar (needs node).
+  --version V     Stamp the version string (release venue passes the tag).
+  --arch ARCH     Force target arch (arm64 | x86_64), e.g. under Rosetta.
+  --vendored-only Build only the third-party objects (make cbm-third-party)
+                  into a clean BUILD_DIR, no binary.
+  --reuse-vendored  Do NOT clean BUILD_DIR: build the binary on top of a
+                  --vendored-only run with the same arguments, compiling
+                  first-party code only. The pair exists for CodeQL's light
+                  PR scan (codeql.yml): the first runs before tracing starts.
+  --retrace-from F  With --reuse-vendored: F lists vendored paths (one per
+                  line) whose objects must be rebuilt anyway (make -W), so a
+                  vendored file the PR changes is compiled under tracing too.
+  -h, --help      This text.
+
+Make passthrough (VAR=VAL, forwarded verbatim):
+  CC= CXX=        Compiler override (venues pass their matrix compiler).
+  BUILD_DIR=      Build in an isolated directory — REQUIRED when a clean
+                  product build must not wipe build/c's test-runner (e.g.
+                  build/smoke for the local ladder smoke).
+  STATIC=1        Fully static portable build (Alpine/musl leg).
+  EXTRA_CFLAGS= EXTRA_LDFLAGS=   Sanitizer soak builds (see _soak.yml).
+
+Environment:
+  CBM_NO_CCACHE=1  Disable the compiler cache (build correctness is identical;
+                   only speed changes).
+
+Callers: _build.yml (all release artifacts) · pr.yml pr-smoke · every
+docker-compose build/smoke service · win.sh build (Windows VM ladder).
+EOF
+}
+for arg in "$@"; do
+    case "$arg" in
+        -h|--help) usage; exit 0 ;;
+    esac
+done
+
+# Pre-parse --arch flag before sourcing env.sh
+for arg in "$@"; do
+    case "$arg" in
+        --arch=*) export CBM_ARCH="${arg#--arch=}" ;;
+    esac
+done
+prev_arg=""
+for arg in "$@"; do
+    if [[ "${prev_arg:-}" == "--arch" ]]; then
+        export CBM_ARCH="$arg"
+    fi
+    prev_arg="$arg"
+done
+
+# shellcheck source=env.sh
+source "$ROOT/scripts/env.sh"
+# shellcheck source=path-safety.sh
+source "$ROOT/scripts/path-safety.sh"
+
+# Parse remaining arguments. BUILD_DIR is tracked for the clean step below so
+# containerized legs can build in their own directory instead of deleting and
+# clobbering the host's native build/c artifacts.
+WITH_UI=false
+PHASE=all
+RETRACE_FROM=""
+VERSION=""
+BUILD_DIR="build/c"
+EXTRA_MAKE_ARGS=()
+
+prev_arg=""
+for arg in "$@"; do
+    # Skip --arch and its value (already handled)
+    if [[ "${prev_arg:-}" == "--arch" ]]; then
+        prev_arg="$arg"
+        continue
+    fi
+    case "$arg" in
+        --with-ui)
+            WITH_UI=true
+            ;;
+        --vendored-only)
+            PHASE=vendored
+            ;;
+        --reuse-vendored)
+            PHASE=reuse
+            ;;
+        --version|--retrace-from)
+            prev_arg="$arg"
+            continue
+            ;;
+        --arch|--arch=*)
+            ;; # already handled
+        -*)
+            # STRICT: an unknown flag never falls through into make where it
+            # would fail cryptically (or worse, be absorbed).
+            echo "build.sh: unknown option '$arg'. Please consult --help." >&2
+            exit 2
+            ;;
+        BUILD_DIR=*)
+            BUILD_DIR="${arg#BUILD_DIR=}"
+            EXTRA_MAKE_ARGS+=("$arg")
+            ;;
+        CC=*|CXX=*)
+            export "${arg}"
+            EXTRA_MAKE_ARGS+=("$arg")
+            ;;
+        *=*)
+            EXTRA_MAKE_ARGS+=("$arg") # VAR=VAL make passthrough
+            ;;
+        *)
+            # Bare words are only ever the value of --version; anything else is
+            # a usage error, not a silent make argument.
+            if [[ "${prev_arg:-}" == "--version" ]]; then
+                VERSION="$arg"
+            elif [[ "${prev_arg:-}" == "--retrace-from" ]]; then
+                RETRACE_FROM="$arg"
+            else
+                echo "build.sh: unexpected argument '$arg'. Please consult --help." >&2
+                exit 2
+            fi
+            ;;
+    esac
+    prev_arg="$arg"
+done
+
+# Version flag
+CFLAGS_EXTRA=""
+if [[ -n "$VERSION" ]]; then
+    CLEAN_VERSION="${VERSION#v}"
+    CFLAGS_EXTRA="-DCBM_VERSION=\"\\\"$CLEAN_VERSION\\\"\""
+fi
+
+print_env "build.sh"
+echo "  ui=$WITH_UI version=${VERSION:-dev}"
+
+# Verify compiler supports target arch
+verify_compiler "$CC"
+
+if [[ "$PHASE" != all ]] && $WITH_UI; then
+    echo "build.sh: --vendored-only / --reuse-vendored do not combine with --with-ui. Please consult --help." >&2
+    exit 2
+fi
+
+# --retrace-from: each listed path becomes `make -W <path>` (treated as changed
+# now -- the retrace helper supplies direct compilation entrypoints, so nested
+# includes do not depend on Makefile wildcard coverage; no timestamp race).
+RETRACE_ARGS=()
+if [[ -n "$RETRACE_FROM" ]]; then
+    if [[ "$PHASE" != reuse || ! -f "$RETRACE_FROM" ]]; then
+        echo "build.sh: --retrace-from needs --reuse-vendored and an existing list file. Please consult --help." >&2
+        exit 2
+    fi
+    while IFS= read -r retrace_path || [[ -n "$retrace_path" ]]; do
+        [[ -n "$retrace_path" ]] && RETRACE_ARGS+=(-W "$retrace_path")
+    done < "$RETRACE_FROM"
+fi
+
+# Step 1: Clean C build artifacts only (not node_modules — npm ci handles that).
+# --reuse-vendored keeps the third-party objects of the --vendored-only run.
+if [[ "$PHASE" == reuse ]]; then
+    if [[ ! -d "$BUILD_DIR" ]]; then
+        echo "build.sh: --reuse-vendored needs a --vendored-only run in $BUILD_DIR first." >&2
+        exit 2
+    fi
+else
+    cbm_remove_build_dir "$ROOT" "$BUILD_DIR"
+fi
+
+# Step 2: Build (Makefile applies $ARCHFLAGS for the target arch on macOS;
+# $MAKE comes from env.sh: gmake on FreeBSD, make elsewhere)
+if [[ "$PHASE" == vendored ]]; then
+    "$MAKE" -j"$NPROC" -f Makefile.cbm cbm-third-party \
+        CFLAGS_EXTRA="$CFLAGS_EXTRA" "${EXTRA_MAKE_ARGS[@]+"${EXTRA_MAKE_ARGS[@]}"}"
+    echo "=== Third-party objects built in ${BUILD_DIR} (no binary) ==="
+    exit 0
+elif $WITH_UI; then
+    "$MAKE" -j"$NPROC" -f Makefile.cbm cbm-with-ui \
+        CFLAGS_EXTRA="$CFLAGS_EXTRA" "${EXTRA_MAKE_ARGS[@]+"${EXTRA_MAKE_ARGS[@]}"}"
+else
+    "$MAKE" -j"$NPROC" -f Makefile.cbm cbm "${RETRACE_ARGS[@]+"${RETRACE_ARGS[@]}"}" \
+        CFLAGS_EXTRA="$CFLAGS_EXTRA" "${EXTRA_MAKE_ARGS[@]+"${EXTRA_MAKE_ARGS[@]}"}"
+fi
+
+echo "=== Build complete: ${BUILD_DIR}/codebase-memory-mcp ==="
