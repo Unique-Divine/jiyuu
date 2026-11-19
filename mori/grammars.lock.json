@@ -1,0 +1,8 @@
+{
+  "url": "https://github.com/Unique-Divine/jiyuu/releases/download/mori%2Fgrammars%2Fv1/grammars.tar.zst",
+  "sha256": "6bc58d5ae682284c434cb18779b554cfd3af7de6ab307ba24a67daea2ec114e8",
+  "sizeBytes": 22017050,
+  "sourceRepository": "https://github.com/Unique-Divine/codebase-memory-mcp",
+  "sourceCommit": "cdfdf26483fa56f4f7d9d85e7c4c3924133b458b",
+  "path": "internal/cbm/vendored/grammars"
+}

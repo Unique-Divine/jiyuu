@@ -95,3 +95,9 @@ soak-results-query-leak/
 # Nix build symlinks (nix build → ./result, ./result-1, …)
 /result
 /result-*
+
+# Jiyuu: Tree-sitter grammars are fetched from the archive pinned in
+# grammars.lock.json (scripts/grammars-fetch.ts), never committed.
+/internal/cbm/vendored/grammars/
+/.grammars.stamp
+/.grammars-tmp-*/
