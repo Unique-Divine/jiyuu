@@ -57,6 +57,21 @@ file says was made because the path was missing.
   `scripts/grammars-lib.ts`, `scripts/grammars-pack.ts`,
   `scripts/grammars.test.ts` and `scripts/tsconfig.json`.
 
+## GraphQL Linking
+
+GraphQL cross-repo linking was replayed from the fork's linear branch
+`ud/gql-linear` onto the import with
+`git format-patch | git am -3 --directory=mori`. Each commit keeps its
+original author and message. The next replay starts from tip `9266f4c1`.
+
+| Range | Commits | Contents |
+| --- | --- | --- |
+| `cdfdf264..dd23b155` | 30 | Server lane `ud/gql-server-routes`: schema Routes and gqlgen resolvers |
+| `dd23b155..9266f4c1` | 14 | Client lane `ud/gql-client-fields` (tip `9c8df01b`) rebased onto the server lane: client field-path edges |
+
+The range applied without conflicts. It touches no path excluded below and
+no file this import modifies.
+
 ## Excluded Paths
 
 ### Vendored Grammars
