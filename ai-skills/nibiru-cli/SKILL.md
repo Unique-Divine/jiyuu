@@ -129,7 +129,7 @@ continues to use `http://localhost:26657`.
 - Pipe to `jq` for nested fields when needed.
 - Use specialized skills for deeper workflows:
   - [`governance.md`](./governance.md) for proposal, vote, and upgrade-plan queries
-  - `sai-perps` for Sai contract query recipes and reconciliation
+  - `sai` for Sai contract query recipes and reconciliation
   - `evm-rpc` for `eth_*` / `debug_*` EVM tracing rather than Cosmos CLI
 
 ## USDC Token Identity

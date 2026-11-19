@@ -8,11 +8,9 @@ trading credits. Use agent skill `nibiru-cli` for CLI mechanics.
 
 ## Contract query playbook
 
-Source of truth for deployed query examples: file
-`~/sai-web/webapp/pages/debug.tsx` (`QUERY_CONFIG`). The Rust
-`QueryMsg` enums in the contract repositories are authoritative for the
-supported message names and response types.
-Full validated CLI notes: `~/boku/epics/26-02-10-sai-mainnet-query.md`.
+The deployed contract is the authority for query names and response types.
+A query with an unknown variant returns an error that lists the variants the
+contract accepts, which is the quickest way to check a name.
 
 ### Mainnet addresses
 
@@ -25,7 +23,7 @@ Full validated CLI notes: `~/boku/epics/26-02-10-sai-mainnet-query.md`.
 | SLP-USDC Vault — Group 1 | `nibi1waf5c8z55qvjay4de8wkm9cxyt6wa8zdnrvlexjrq77lqgqf258q3yn7l8` |
 | SLP-stNIBI Vault — Group 1 | `nibi1pgurgas0za436c3fm2km99zkzutfx0jwpn7meespv6szv8c8g39qjz2tvj` |
 
-Source: `~/sai-web/packages/sai-core/src/config/saiContracts.ts` (`SaiContractsMainnet`).
+Confirm an address by querying it; a wrong address fails with "contract not found".
 
 Group meanings:
 - `GroupIndex(0)` = crypto assets
@@ -44,13 +42,12 @@ exact group/collateral pair when in doubt. Mainnet currently maps:
 
 ## Related references and skills
 
-- [`sai-graphql.md`](sai-graphql.md): indexed, app-facing trades, vaults,
+- [`graphql.md`](graphql.md): indexed, app-facing trades, vaults,
   prices, referrals, and subscriptions; use it instead of contract queries when
   the question is what Sai Keeper exposes.
-- Agent skill `sai-db`: private database connectivity, primary/replica routing,
-  and write workflows. This bundle's [`sai-db.md`](sai-db.md) covers static
-  schema and query semantics.
-- [`sai-rest.md`](sai-rest.md): public aggregate metrics and health checks.
+- Private agent skill `sai-db`: Sai Keeper Postgres schema, query semantics,
+  and database access. This public skill does not cover the database.
+- [`rest.md`](rest.md): public aggregate metrics and health checks.
 - Agent skill `nibiru-cli`: command mechanics for
   `nibiru query wasm contract-state <raw|smart>`. This reference supplies Sai
   addresses and payloads.
@@ -70,7 +67,8 @@ sai_perps_q() { nibiru query wasm contract-state smart "$1" "$2"; }
 - Some args use **wrapped string indices**: `"index": "MarketIndex(0)"`, `"index": "GroupIndex(0)"`, `"group_index": "GroupIndex(1)"`, `"collateral_index": "TokenIndex(1)"`.
 - Some args use **plain integers**: `collateral_index: 1`, `market_index: 0`, `group_index: 0`.
   - When both arg names are plain integers, use integers. When the field name takes a typed index (e.g. `get_vault_address`), use the wrapped string form.
-  - Check `QUERY_CONFIG` in file `pages/debug.tsx` for deployed examples.
+  - The payloads under [Curated query reference](#curated-query-reference) show
+    which form each query takes.
 - **Never use `collateral_index: 0`**. On mainnet `TokenIndex(0)` is the quote/USD placeholder — not a collateral. Valid collaterals are `TokenIndex(1)` (USDC) and `TokenIndex(2)` (stNIBI). Confirm first with `list_collaterals`.
 - OI values (`long`, `short`, `max`) are in **collateral token base units** and represent **position size (margin × leverage)**, not margin only. USDC and stNIBI both have 6 decimals → divide by `1e6` to get human units.
 
@@ -163,10 +161,7 @@ Validate deployed fee parameters with on-chain queries (`get_fees`,
 `get_fee_tiers`, `get_trader_fee_multiplier`, `get_pending_gov_fees`). Expected
 defaults, tier table, validation checklist, and settings that are **not**
 queryable on-chain are in
-[sai-contracts.md § Fee config validation](#fee-config-validation-1).
-
-Fee semantics (what fees mean, distribution, code paths):
-`/epics/26-05-26-sai-perpetuals-fee-analysis.md`.
+[Fee configuration validation](#fee-configuration-validation).
 
 ## Curated query reference
 
@@ -177,9 +172,8 @@ be on different release cadences.
 ## Perp contract
 
 Below are smart query request payloads for the Sai perp contract. 
-You can use the `/nibiru-cli` skill to pull any of this information.
+You can use agent skill `nibiru-cli` to pull any of this information.
 
-- Source: sai-perps repo contracts/perp for the Rust logic
 
 ```json
 {"list_markets":{}}
@@ -240,13 +234,12 @@ that need open/close metadata and fee snapshots.
 ## SLP Vault contract
 
 For SLP Vault operations, health accounting, reward distribution, raw state keys,
-and mainnet runbooks, see [sai-vaults.md](sai-vaults.md).
+and mainnet runbooks, see [vaults.md](vaults.md).
 For epoch and reset timing, see
-[Check Epoch and Daily Reset Distance](sai-vaults.md#check-epoch-and-daily-reset-distance).
+[Check Epoch and Daily Reset Distance](vaults.md#check-epoch-and-daily-reset-distance).
 
-You can use the `/nibiru-cli` skill to pull any of this information.
+You can use agent skill `nibiru-cli` to pull any of this information.
 
-- Source: sai-perps repo contracts/vault for the Rust logic
 
 ### SLP Vault smart queries
 
@@ -267,7 +260,7 @@ You can use the `/nibiru-cli` skill to pull any of this information.
   `RiskParamsResponse` with current collateral balance, daily balance snapshot,
   daily payout cap and remaining amount, daily PnL throttle state, PnL
   accumulators, and share price. See
-  [Daily Risk Params](sai-vaults.md#daily-risk-params).
+  [Daily risk parameters](vaults.md#daily-risk-parameters).
 - `{"vault_snapshot":{}}` - One-call operator health snapshot. Returns
   `VaultSnapshotResponse` with `tvl`, `market_cap`, `share_price`,
   `collateralization_p`, `total_supply`, `total_liability`, `total_rewards`,
@@ -311,9 +304,8 @@ You can use the `/nibiru-cli` skill to pull any of this information.
 ## Oracle contract
 
 Below are smart query request payloads for the Sai oracle contract.
-You can use the `/nibiru-cli` skill to pull any of this information.
+You can use agent skill `nibiru-cli` to pull any of this information.
 
-- Source: sai-perps repo contracts/oracle for the Rust logic
 
 ```json
 {"list_tokens":{"start_after":null,"limit":null}}
@@ -339,8 +331,6 @@ const result = await querier.wasmClient.queryContractSmart(
   { get_borrowing_group_oi: { collateral_index: 1, group_index: 0 } },
 )
 ```
-
-Address constants live in `~/sai-web/packages/sai-core/src/config/saiContracts.ts` (`SaiContractsMainnet`).
 
 
 ---
@@ -592,11 +582,9 @@ All markets have `MarketInfo.quote=TokenIndex(0)` (USD).
 
 ### Fee configuration validation
 
-Use on-chain smart queries to verify deployed fee parameters. For fee
-**semantics** (what each fee means, distribution splits, code paths), see
-`/epics/26-05-26-sai-perpetuals-fee-analysis.md`.
+Use on-chain smart queries to verify deployed fee parameters.
 
-Use `sai_perps_q` from `SKILL.md`. Index wrappers must match mainnet:
+Use helper `sai_perps_q` from [CLI setup](#cli-setup). Index wrappers must match mainnet:
 `"MarketIndex(0)"`, `"FeeIndex(0)"`, not `{"0": 0}`.
 
 #### Effective fee formula
@@ -666,6 +654,7 @@ defaults, admin events, or controlled test trades.
 | Vault closing fee % | `VAULT_CLOSING_FEE_P` | 4.2% of closing-fee component | Close a trade; compare vault reward to closing fee charged |
 | Referrer fee tiers | `REFERRER_FEE_PERCENTAGE` | 5%, 10%, 15%, 50% | Code default in `contracts/perp/src/fees/state.rs` |
 | Referee discount | `REFERREE_BASE_FEE_MULTIPLIER` | 5% off base (`0.95` effective) | Compare `get_trader_fee_multiplier` with/without referrer |
-| Referrer maps | `USER_REFERRERS`, `REFERRER_FEE_TIER`, `REFERRER_FEES` | — | Use `get_trader_fee_multiplier`; indexed referral history via [`sai-graphql.md`](sai-graphql.md) |
+| Referrer maps | `USER_REFERRERS`, `REFERRER_FEE_TIER`, `REFERRER_FEES` | — | Use `get_trader_fee_multiplier`; indexed referral history via [`graphql.md`](graphql.md) |
 
-See also `slp-vaults.md` for `get_pending_gov_fees` and vault reward routing.
+See [Pending governance fees](vaults.md#pending-governance-fees) for
+`get_pending_gov_fees` and vault reward routing.
