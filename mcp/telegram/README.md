@@ -177,9 +177,17 @@ this object for a basic group:
 ```
 
 With several accounts and no `account` argument, a read tool runs once per
-account. If every account returns JSON, the result is one object,
-`{"accounts": [{"account": "work", "result": {...}}, ...]}`. Otherwise each
-result appears as text under a `[label]` header.
+account. The read tools in `groups` then return one object with an entry per
+account. An entry holds `result` on success, or `error` with that account's
+error message:
+
+```json
+{"accounts": [{"account": "work", "result": {"results": []}},
+              {"account": "personal", "error": "An error occurred (code: ...)"}]}
+```
+
+Other read tools still join each account's result as text under a `[label]`
+header.
 
 Errors are not covered yet. Most are plain text, such as `Error: ...` or
 `An error occurred (code: ...)`, and some repeat caller input, such as an
