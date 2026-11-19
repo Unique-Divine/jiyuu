@@ -1497,7 +1497,8 @@ static const char *const gql_schema_keys[GQL_OP_COUNT] = {
 /* A schema type. */
 typedef struct {
     const cbm_gbuf_node_t *node;
-    int group; /* index of the owning gqlgen config, or GQL_HEURISTIC */
+    int group;      /* index of the owning gqlgen config, or GQL_HEURISTIC */
+    bool synthetic; /* stands for an `extend type T` with no declared T */
 } gql_class_t;
 
 /* One schema field and the props its Routes carry. Strings live in the
@@ -1689,7 +1690,7 @@ static int gql_collect_classes(gql_ctx_t *ctx) {
     for (int i = 0; i < count; i++) {
         const cbm_gbuf_node_t *c = nodes[i];
         if (gql_is_schema_file(c->file_path) && c->name && c->qualified_name) {
-            ctx->classes[ctx->class_count++] = (gql_class_t){c, GQL_HEURISTIC};
+            ctx->classes[ctx->class_count++] = (gql_class_t){c, GQL_HEURISTIC, false};
         }
     }
     return ctx->class_count;
@@ -1871,7 +1872,8 @@ static int gql_pending_cmp(const void *x, const void *y) {
 /* Declare T for `extend type T` fields whose set declares no T (a
  * federation subgraph's `extend type Query`): the first extension (by
  * path, then line) stands for the type, named T, with its block's QN; the
- * set's other extensions of T join it. False on allocation failure. */
+ * set's other extensions of T join it (in the heuristic set, only those in
+ * the stand-in's directory or below). False on allocation failure. */
 static bool gql_declare_extended(gql_ctx_t *ctx, gql_field_t **pending, int n) {
     if (n == 0) {
         return true;
@@ -1889,6 +1891,14 @@ static bool gql_declare_extended(gql_ctx_t *ctx, gql_field_t **pending, int n) {
     for (int i = 0; i < n; i++) {
         gql_field_t *f = pending[i];
         const gql_class_t *owner = gql_find_class(ctx, f->extends, f->node->file_path, f->group);
+        /* Unconfigured subgraphs share the heuristic set: a stand-in T
+         * serves the extensions in its own directory and below, never
+         * another service's that reuses the name. */
+        if (owner && owner->synthetic && f->group == GQL_HEURISTIC &&
+            strncmp(f->node->file_path, owner->node->file_path,
+                    gql_dir_len(owner->node->file_path)) != 0) {
+            owner = NULL;
+        }
         if (!owner) {
             cbm_gbuf_node_t *type = cbm_arena_alloc(&ctx->arena, sizeof(*type));
             if (!type) {
@@ -1901,7 +1911,7 @@ static bool gql_declare_extended(gql_ctx_t *ctx, gql_field_t **pending, int n) {
             type->file_path = f->node->file_path;
             type->start_line = f->node->start_line;
             type->end_line = f->node->end_line;
-            ctx->classes[ctx->class_count++] = (gql_class_t){type, f->group};
+            ctx->classes[ctx->class_count++] = (gql_class_t){type, f->group, true};
             ctx->classes_by_name = (const gql_class_t **)gql_sorted_index(
                 &ctx->arena, ctx->classes, ctx->class_count, sizeof(*ctx->classes),
                 gql_class_name_cmp);

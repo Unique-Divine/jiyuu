@@ -950,6 +950,33 @@ TEST(graphql_gqlgen_digit_underscore_resolvers) {
     PASS();
 }
 
+/* Two unconfigured federation subgraphs each extend Query and User with no
+ * base types. Each service's User extensions stay with its own stand-in
+ * User: svc_b's otherValue never appears under svc_a's Query.account. */
+static const EtFile et_gqlgen_subgraphs_files[] = {
+    {"svc_a/schema.graphqls",
+     "extend type Query {\n  account: User\n}\n\nextend type User {\n  localValue: String\n}\n"},
+    {"svc_b/schema.graphqls",
+     "extend type Query {\n  me: User\n}\n\nextend type User {\n  otherValue: String\n}\n"},
+};
+
+static const EtGqlServerRoute et_gqlgen_subgraphs_want[] = {
+    {"__graphql__Query.account", "User", "false", "", "Field", ".svc_a.schema.Query.account",
+     "graphql_schema_field", 0},
+    {"__graphql__Query.account.localValue", "String", "false", "", "Field",
+     ".svc_a.schema.User.localValue", "graphql_schema_field", 0},
+    {"__graphql__Query.me", "User", "false", "", "Field", ".svc_b.schema.Query.me",
+     "graphql_schema_field", 0},
+    {"__graphql__Query.me.otherValue", "String", "false", "", "Field",
+     ".svc_b.schema.User.otherValue", "graphql_schema_field", 0},
+};
+
+TEST(graphql_extension_only_types_stay_in_their_subgraph) {
+    ASSERT_TRUE(et_gqlgen_case(et_gqlgen_subgraphs_files, ET_NWANT(et_gqlgen_subgraphs_files), 0,
+                               et_gqlgen_subgraphs_want, ET_NWANT(et_gqlgen_subgraphs_want)));
+    PASS();
+}
+
 /* Overwrite one fixture file in an indexed project. */
 static void et_rewrite(const EtProj *lp, const char *rel, const char *content) {
     char path[700];
@@ -3830,6 +3857,7 @@ SUITE(edge_types_probe) {
     RUN_TEST(graphql_resolver_needs_ownership_without_config);
     RUN_TEST(graphql_sibling_schema_single_file_without_config);
     RUN_TEST(graphql_gqlgen_digit_underscore_resolvers);
+    RUN_TEST(graphql_extension_only_types_stay_in_their_subgraph);
     RUN_TEST(graphql_extension_only_root_type);
     RUN_TEST(graphql_schema_extension_roots);
     RUN_TEST(graphql_gqlgen_underscored_field_resolver);
