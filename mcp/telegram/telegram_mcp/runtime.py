@@ -47,7 +47,13 @@ from telethon.tl.types import (
 import re
 from functools import wraps
 import telethon.errors.rpcerrorlist
-from sanitize import sanitize_user_content, sanitize_name, sanitize_dict, format_tool_result
+from sanitize import (
+    format_tool_result,
+    json_result,
+    sanitize_dict,
+    sanitize_name,
+    sanitize_user_content,
+)
 from telegram_mcp.client_identity import client_identity_kwargs
 from telegram_mcp.request_policy import (
     CLIENT_FLOOD_SLEEP_THRESHOLD,

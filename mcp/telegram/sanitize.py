@@ -127,17 +127,28 @@ def _json_default(obj: Any) -> Any:
     raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
 
 
+def json_result(payload: Dict[str, Any]) -> str:
+    """Serialize one tool result object as JSON.
+
+    Field names and non-string values come from the tool. Telegram text,
+    such as titles and names, belongs only in string values, sanitized
+    first. Keys keep the order the tool wrote them in.
+    """
+    return json.dumps(payload, ensure_ascii=False, default=_json_default)
+
+
 def format_tool_result(
     records: List[Dict[str, Any]],
     metadata: Optional[Dict[str, Any]] = None,
 ) -> str:
-    """Format tool output as a JSON string.
+    """Format a list of records as a JSON string under key ``results``.
 
     All tool functions that return user-controlled content should use
-    this formatter. The JSON structure provides an unambiguous boundary
-    between trusted field names and untrusted user-generated values.
+    this formatter or ``json_result``. The JSON structure provides an
+    unambiguous boundary between trusted field names and untrusted
+    user-generated values.
     """
     payload: Dict[str, Any] = {"results": records}
     if metadata:
         payload.update(metadata)
-    return json.dumps(payload, ensure_ascii=False, default=_json_default)
+    return json_result(payload)

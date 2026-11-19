@@ -24,6 +24,9 @@ async def test_participant_pages_do_not_pass_unsupported_offset(monkeypatch, pag
     monkeypatch.setattr(groups, "ensure_connected", connected)
 
     output = await groups.get_participants(chat_id=-123, page=page, page_size=2)
-    result, _ = json.JSONDecoder().raw_decode(output)
+    result = json.loads(output)
 
     assert [row["id"] for row in result["results"]] == expected
+    assert result["page"] == page
+    assert result["count"] == len(expected)
+    assert result["has_more"] == (len(expected) == 2)

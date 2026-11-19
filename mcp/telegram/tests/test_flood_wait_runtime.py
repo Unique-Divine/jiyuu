@@ -319,7 +319,14 @@ async def test_create_group_reports_the_new_chat_without_reading_dialogs(monkeyp
 
     result = await groups.create_group(title="Ops", user_ids=[7])
 
-    assert result == "Group created with ID: -4321\nAdded 1 of 1 users."
+    assert json.loads(result) == {
+        "created": True,
+        "chat_id": -4321,
+        "title": "Ops",
+        "requested": 1,
+        "added": 1,
+        "not_added": [],
+    }
 
 
 @pytest.mark.asyncio
@@ -340,8 +347,10 @@ async def test_create_group_without_chat_in_reply_still_reports_success(monkeypa
 
     result = await groups.create_group(title="Ops", user_ids=[7])
 
-    assert result.startswith("Group created, but")
-    assert "before creating it again" in result
+    report = json.loads(result)
+    assert report["created"] is True
+    assert report["chat_id"] is None
+    assert "before creating the group again" in report["note"]
     assert "wait" not in result.lower()
 
 
