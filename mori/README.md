@@ -52,7 +52,10 @@ which:
 5. Writes `.grammars.stamp`, so the next run returns at once. Pass `--force`
    to reinstall.
 
-Before the release asset exists, pass a local archive:
+The archive is published as release
+[`mori/grammars/v1`](https://github.com/Unique-Divine/jiyuu/releases/tag/mori%2Fgrammars%2Fv1).
+To build offline, pass a local copy of the same archive; it must match the
+lock's sha256:
 
 ```bash
 just mori-build --from /path/to/grammars.tar.zst

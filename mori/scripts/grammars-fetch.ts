@@ -68,8 +68,8 @@ export const httpDownload: Downloader = async (url, dest) => {
   const response = await fetch(url, { signal: AbortSignal.timeout(30 * 60_000) })
   if (!response.ok) {
     throw new Error(
-      `download of ${url} failed: HTTP ${response.status}. If the release ` +
-        "does not exist yet, pass --from <grammars.tar.zst> (see README.md).",
+      `download of ${url} failed: HTTP ${response.status}. To install ` +
+        "without the network, pass --from <grammars.tar.zst> (see README.md).",
     )
   }
   await Bun.write(dest, response)
