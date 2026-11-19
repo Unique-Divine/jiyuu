@@ -362,4 +362,20 @@ char *cbm_fqn_folder(CBMArena *a, const char *project, const char *rel_dir);
  * shape that server-side route paths already use. NULL when empty/oversized. */
 const char *cbm_template_string_text(CBMArena *a, TSNode node, const char *source);
 
+/* GraphQL selection signature (see cbm_service_pattern_graphql_signature) of
+ * a string or template literal node whose text is a GraphQL operation, read
+ * without the URL argument's newline and 512-byte limits: quotes (including
+ * Python triple quotes and string prefixes) are stripped, and `${...}`
+ * substitutions are skipped. A node that is no literal or whose text does not
+ * open like a GraphQL document is rejected before any copy. Arena-allocated;
+ * NULL when the text holds no operation. */
+const char *cbm_graphql_literal_sig(CBMArena *a, TSNode node, const char *source,
+                                    bool require_keyword);
+
+/* The same signature (every operation of the document) read once, with
+ * *shorthand set for the keyword-less `{ ... }` form. F-strings never hold a
+ * document. */
+const char *cbm_graphql_literal_sig_ex(CBMArena *a, TSNode node, const char *source,
+                                       bool *shorthand);
+
 #endif // CBM_HELPERS_H

@@ -4,6 +4,9 @@
 #include "test_framework.h"
 #include "../src/foundation/yaml.h"
 
+#include <stdlib.h>
+#include <string.h>
+
 /* ── Parsing: NULL and empty input ─────────────────────────────── */
 
 TEST(yaml_parse_null_input) {
@@ -997,6 +1000,34 @@ TEST(yaml_indented_top_level) {
     PASS();
 }
 
+/* ── Edge cases: input without a NUL terminator ─────────────────── */
+
+/* The text is a length-bounded buffer (a file read into memory), not a C
+ * string: a last line of only spaces and no newline must not read past it.
+ * The copy is exactly the input's length, so ASan reports any overread. */
+static int yaml_parse_unterminated(const char *text) {
+    size_t len = strlen(text);
+    char *buf = malloc(len);
+    if (!buf) {
+        return 0;
+    }
+    memcpy(buf, text, len);
+    cbm_yaml_node_t *root = cbm_yaml_parse(buf, (int)len);
+    const char *v = root ? cbm_yaml_get_str(root, "key") : NULL;
+    int ok = v && strcmp(v, "val") == 0;
+    cbm_yaml_free(root);
+    free(buf);
+    return ok;
+}
+
+TEST(yaml_unterminated_trailing_spaces) {
+    ASSERT_TRUE(yaml_parse_unterminated("key: val\n    "));
+    ASSERT_TRUE(yaml_parse_unterminated("list:\n  - a\nkey: val\n   "));
+    /* "map:" peeks ahead at the space-only last line to choose map or list */
+    ASSERT_TRUE(yaml_parse_unterminated("key: val\nmap:\n    "));
+    PASS();
+}
+
 /* ── Suite registration ────────────────────────────────────────── */
 
 SUITE(yaml) {
@@ -1005,6 +1036,7 @@ SUITE(yaml) {
     RUN_TEST(yaml_parse_empty_string);
     RUN_TEST(yaml_parse_negative_len);
     RUN_TEST(yaml_free_null);
+    RUN_TEST(yaml_unterminated_trailing_spaces);
 
     /* Parsing: key-value */
     RUN_TEST(yaml_single_kv);

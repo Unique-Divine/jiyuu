@@ -476,6 +476,10 @@ TEST(lang_ext_graphql) {
     ASSERT_EQ(cbm_language_for_extension(".graphql"), CBM_LANG_GRAPHQL);
     PASS();
 }
+TEST(lang_ext_graphqls) {
+    ASSERT_EQ(cbm_language_for_extension(".graphqls"), CBM_LANG_GRAPHQL);
+    PASS();
+}
 TEST(lang_ext_gql) {
     ASSERT_EQ(cbm_language_for_extension(".gql"), CBM_LANG_GRAPHQL);
     PASS();
@@ -1777,6 +1781,7 @@ SUITE(language) {
     RUN_TEST(lang_ext_cmake);
     RUN_TEST(lang_ext_protobuf);
     RUN_TEST(lang_ext_graphql);
+    RUN_TEST(lang_ext_graphqls);
     RUN_TEST(lang_ext_gql);
     RUN_TEST(lang_ext_vue);
     RUN_TEST(lang_ext_svelte);

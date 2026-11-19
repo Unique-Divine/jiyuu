@@ -149,6 +149,8 @@ static const ext_entry_t EXT_TABLE[] = {
     /* GraphQL */
     {".gql", CBM_LANG_GRAPHQL},
     {".graphql", CBM_LANG_GRAPHQL},
+    /* gqlgen and other Go servers name schema files *.graphqls. */
+    {".graphqls", CBM_LANG_GRAPHQL},
 
     /* Groovy */
     {".gradle", CBM_LANG_GROOVY},

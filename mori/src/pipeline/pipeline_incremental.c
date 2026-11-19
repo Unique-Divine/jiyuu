@@ -26,6 +26,7 @@ enum { INCR_RING_BUF = 4, INCR_RING_MASK = 3, INCR_TS_BUF = 24 };
 #include "store/store.h"
 #include "graph_buffer/graph_buffer.h"
 #include "discover/discover.h"
+#include "cbm.h" /* CBM_LANG_GO, CBM_LANG_GRAPHQL */
 #include "foundation/log.h"
 #include "foundation/hash_table.h"
 #include "foundation/mem_core.h"
@@ -2756,6 +2757,244 @@ static const char *closure_terraform_decline(char **paths, int n) {
     return NULL;
 }
 
+/* What a closure plan must know about GraphQL in the project: the gqlgen
+ * resolver packages (directories holding `*.resolvers.go` or `resolver.go`,
+ * plus every gqlgen config's resolver package). Directories keep their
+ * trailing '/'. */
+typedef struct {
+    char **dirs;
+    int dir_count;
+    int dir_cap;
+} closure_gql_facts_t;
+
+static void closure_gql_add_dir(closure_gql_facts_t *f, const char *dir, size_t len) {
+    for (int i = 0; i < f->dir_count; i++) {
+        if (strlen(f->dirs[i]) == len && strncmp(f->dirs[i], dir, len) == 0) {
+            return;
+        }
+    }
+    if (f->dir_count == f->dir_cap) {
+        int cap = f->dir_cap ? f->dir_cap * PAIR_LEN : CBM_SZ_16;
+        char **grown = realloc(f->dirs, (size_t)cap * sizeof(*grown));
+        if (!grown) {
+            return;
+        }
+        f->dirs = grown;
+        f->dir_cap = cap;
+    }
+    char *copy = malloc(len + SKIP_ONE);
+    if (copy) {
+        memcpy(copy, dir, len);
+        copy[len] = '\0';
+        f->dirs[f->dir_count++] = copy;
+    }
+}
+
+static void closure_gql_note_path(closure_gql_facts_t *f, const char *repo_path, const char *rel) {
+    if (!rel) {
+        return;
+    }
+    const char *slash = strrchr(rel, '/');
+    size_t dl = slash ? (size_t)(slash - rel) + SKIP_ONE : 0;
+    size_t len = strlen(rel);
+    static const char SUFFIX[] = ".resolvers.go";
+    if ((len > sizeof(SUFFIX) - SKIP_ONE &&
+                strcmp(rel + len - (sizeof(SUFFIX) - SKIP_ONE), SUFFIX) == 0) ||
+               strcmp(rel + dl, "resolver.go") == 0) {
+        closure_gql_add_dir(f, rel, dl);
+    } else if (cbm_gqlgen_is_config_path(rel)) {
+        cbm_gqlgen_config_t cfg;
+        if (cbm_gqlgen_config_load(repo_path, rel, &cfg) == 0) {
+            if (cfg.resolver_pkg) {
+                closure_gql_add_dir(f, cfg.resolver_pkg, strlen(cfg.resolver_pkg));
+            }
+            cbm_gqlgen_config_free(&cfg);
+        }
+    }
+}
+
+static void closure_gql_facts_free(closure_gql_facts_t *f) {
+    for (int i = 0; i < f->dir_count; i++) {
+        free(f->dirs[i]);
+    }
+    free(f->dirs);
+}
+
+/* Read repo_path/rel whole (bounded); NULL when absent, unreadable or too
+ * large to be a schema or resolver file worth scanning. */
+enum { CLOSURE_GQL_SCAN_MAX = 16 * 1024 * 1024 };
+
+static char *closure_gql_read(const char *repo_path, const char *rel, size_t *len) {
+    char path[CBM_SZ_4K];
+    int n = snprintf(path, sizeof(path), "%s/%s", repo_path ? repo_path : "", rel);
+    FILE *f = n > 0 && (size_t)n < sizeof(path) ? cbm_fopen(path, "rb") : NULL;
+    if (!f) {
+        return NULL;
+    }
+    char *buf = NULL;
+    long size = fseek(f, 0, SEEK_END) == 0 ? ftell(f) : -1;
+    if (size >= 0 && size <= CLOSURE_GQL_SCAN_MAX && fseek(f, 0, SEEK_SET) == 0) {
+        buf = malloc((size_t)size + SKIP_ONE);
+        *len = buf ? fread(buf, SKIP_ONE, (size_t)size, f) : 0;
+        if (buf) {
+            buf[*len] = '\0';
+        }
+    }
+    (void)fclose(f);
+    return buf;
+}
+
+/* One integer from a store query binding (project, rel); -1 on error. */
+static int closure_gql_store_count(cbm_store_t *store, const char *sql, const char *project,
+                                   const char *rel) {
+    sqlite3 *db = store ? cbm_store_get_db(store) : NULL;
+    sqlite3_stmt *st = NULL;
+    int count = CBM_NOT_FOUND;
+    if (db && sqlite3_prepare_v2(db, sql, CBM_NOT_FOUND, &st, NULL) == SQLITE_OK &&
+        sqlite3_bind_text(st, SKIP_ONE, project, CBM_NOT_FOUND, SQLITE_STATIC) == SQLITE_OK &&
+        (!rel || sqlite3_bind_text(st, PAIR_LEN, rel, CBM_NOT_FOUND, SQLITE_STATIC) == SQLITE_OK) &&
+        sqlite3_step(st) == SQLITE_ROW) {
+        count = sqlite3_column_int(st, 0);
+    }
+    sqlite3_finalize(st);
+    return count;
+}
+
+/* The schema nodes the route pass reads from a GraphQL file: types, fields
+ * and `schema` definitions. */
+#define CLOSURE_GQL_SCHEMA_NODE                                                                   \
+    "(label IN ('Class', 'Field') OR (label = 'Module' AND "                                    \
+    "instr(properties, '\"graphql_schema_') > 0))"
+
+/* Does a GraphQL file define schema, before (the stored index) or after
+ * (its current text) the change? Operation-only documents do not. -1 on a
+ * store error. */
+static int closure_gql_schema_file(cbm_store_t *store, const char *project,
+                                   const char *repo_path, const char *rel) {
+    int stored = closure_gql_store_count(store,
+                                         "SELECT EXISTS(SELECT 1 FROM nodes WHERE project = ?1 AND "
+                                         "file_path = ?2 AND " CLOSURE_GQL_SCHEMA_NODE ")",
+                                         project, rel);
+    if (stored != 0) {
+        return stored;
+    }
+    size_t len = 0;
+    char *text = closure_gql_read(repo_path, rel, &len);
+    bool defines = text && cbm_graphql_text_defines_schema(text, len);
+    free(text);
+    return defines ? SKIP_ONE : 0;
+}
+
+/* Does a Go file declare methods that decide Routes' HANDLES, before or
+ * after the change? A gqlgen marker file (`resolver.go`, `*.resolvers.go`)
+ * with any method makes its package a resolver package (pass_route_nodes.c,
+ * gql_heuristic_dirs); any other file counts only methods on a `...Resolver`
+ * receiver. -1 on a store error. */
+static int closure_gql_resolver_file(cbm_store_t *store, const char *project,
+                                     const char *repo_path, const char *rel) {
+    static const char SUFFIX[] = ".resolvers.go";
+    const char *slash = strrchr(rel, '/');
+    const char *base = slash ? slash + SKIP_ONE : rel;
+    size_t bl = strlen(base);
+    bool marker = strcmp(base, "resolver.go") == 0 ||
+                  (bl > sizeof(SUFFIX) - SKIP_ONE &&
+                   strcmp(base + bl - (sizeof(SUFFIX) - SKIP_ONE), SUFFIX) == 0);
+    int stored = closure_gql_store_count(
+        store,
+        marker ? "SELECT EXISTS(SELECT 1 FROM nodes WHERE project = ?1 AND file_path = ?2 AND "
+                 "label = 'Method')"
+               : "SELECT EXISTS(SELECT 1 FROM nodes WHERE project = ?1 AND file_path = ?2 AND "
+                 "label = 'Method' AND instr(qualified_name, 'Resolver.') > 0)",
+        project, rel);
+    if (stored != 0) {
+        return stored;
+    }
+    size_t len = 0;
+    char *text = closure_gql_read(repo_path, rel, &len);
+    bool has = text && cbm_go_text_has_method(text, len, marker ? NULL : "Resolver");
+    free(text);
+    return has ? SKIP_ONE : 0;
+}
+
+/* GraphQL field-path Routes and their HANDLES (pass_route_nodes.c) are
+ * computed from the whole schema, its gqlgen config and resolver packages
+ * by a full-index pass that a closure repair does not run: a re-parsed
+ * schema file would lose its Routes, a re-parsed resolver file its HANDLES.
+ * Called on the changed paths and again on the completed closure (a
+ * surface change can pull an unchanged resolver file in). Only a file that
+ * can change Routes or HANDLES declines to the full rebuild: a GraphQL file
+ * that defines (or defined) schema, and, in a project with schema, a gqlgen
+ * config or a Go file in a resolver package that declares (or declared)
+ * methods deciding HANDLES (closure_gql_resolver_file). An operation-only
+ * document or a helper beside the resolvers repairs in place. GraphQL files
+ * are recognized by language, so user extension mappings count; a project
+ * with none stops before any store query. Returns the reason, or NULL. */
+static const char *closure_graphql_decline(cbm_store_t *store, const char *project,
+                                           const char *repo_path, char **paths, int n,
+                                           const cbm_file_hash_t *stored, int stored_count,
+                                           const cbm_file_info_t *files, int file_count) {
+    const char *reason = NULL;
+    bool any_go_or_config = false;
+    for (int i = 0; i < n && !reason; i++) {
+        CBMLanguage lang = cbm_language_for_filename(paths[i]);
+        if (lang == CBM_LANG_GRAPHQL) {
+            int schema = closure_gql_schema_file(store, project, repo_path, paths[i]);
+            reason = schema < 0 ? "graphql_store_error"
+                     : schema   ? "graphql_schema_changed"
+                                : NULL;
+        } else if (lang == CBM_LANG_GO || cbm_gqlgen_is_config_path(paths[i])) {
+            any_go_or_config = true;
+        }
+    }
+    if (reason || !any_go_or_config) {
+        return reason;
+    }
+    /* The project's schema, as stored: any stored GraphQL file holding
+     * schema nodes (a schema file this change adds or edits declined
+     * above). */
+    int has_schema = 0;
+    for (int i = 0; i < stored_count && has_schema == 0; i++) {
+        if (cbm_language_for_filename(stored[i].rel_path) == CBM_LANG_GRAPHQL) {
+            has_schema = closure_gql_store_count(
+                store,
+                "SELECT EXISTS(SELECT 1 FROM nodes WHERE project = ?1 AND file_path = ?2 AND "
+                CLOSURE_GQL_SCHEMA_NODE ")",
+                project, stored[i].rel_path);
+        }
+    }
+    if (has_schema <= 0) {
+        return has_schema < 0 ? "graphql_store_error" : NULL;
+    }
+    closure_gql_facts_t facts = {0};
+    for (int i = 0; i < stored_count + file_count; i++) {
+        closure_gql_note_path(&facts, repo_path,
+                              i < stored_count ? stored[i].rel_path
+                                               : files[i - stored_count].rel_path);
+    }
+    for (int i = 0; i < n && !reason; i++) {
+        const char *slash = strrchr(paths[i], '/');
+        size_t dl = slash ? (size_t)(slash - paths[i]) + SKIP_ONE : 0;
+        if (cbm_gqlgen_is_config_path(paths[i])) {
+            reason = "graphql_config_changed";
+            break;
+        }
+        if (cbm_language_for_filename(paths[i]) != CBM_LANG_GO) {
+            continue;
+        }
+        for (int d = 0; !reason && d < facts.dir_count; d++) {
+            if (strlen(facts.dirs[d]) == dl && strncmp(facts.dirs[d], paths[i], dl) == 0) {
+                int resolver = closure_gql_resolver_file(store, project, repo_path, paths[i]);
+                reason = resolver < 0 ? "graphql_store_error"
+                         : resolver   ? "graphql_resolver_changed"
+                                      : NULL;
+                break;
+            }
+        }
+    }
+    closure_gql_facts_free(&facts);
+    return reason;
+}
+
 /* A role's defaults/ or vars/ main.yml (.yaml): the lists a kube task's loop
  * reads (pass_ansible.c, an_role_list) -- a roles/<name> component before. */
 static bool closure_ansible_role_vars(const char *rel) {
@@ -3022,6 +3261,29 @@ static bool closure_metadata_current(bool metadata_current, const cbm_file_hash_
 /* Decide whether this manifest delta is closure-repairable, and if so build
  * the plan. Returns 1 with *plan filled, or 0 (decline → FULL) with the
  * reason logged. Every early exit declines; nothing here mutates state. */
+/* closure_graphql_decline over the completed closure. On a decline the
+ * plan's file list is released. */
+static const char *closure_graphql_decline_plan(cbm_store_t *store, const char *project,
+                                                const char *repo_path, closure_plan_t *plan,
+                                                const cbm_file_hash_t *stored, int stored_count,
+                                                const cbm_file_info_t *files, int file_count) {
+    char **planned = calloc((size_t)plan->count + SKIP_ONE, sizeof(*planned));
+    for (int i = 0; planned && i < plan->count; i++) {
+        planned[i] = plan->files[i].rel_path;
+    }
+    const char *decline = planned ? closure_graphql_decline(store, project, repo_path, planned,
+                                                            plan->count, stored, stored_count,
+                                                            files, file_count)
+                                  : "alloc";
+    free(planned);
+    if (decline) {
+        free(plan->files);
+        plan->files = NULL;
+        plan->count = 0;
+    }
+    return decline;
+}
+
 static int closure_try_plan(cbm_pipeline_t *p, cbm_store_t *store, const char *project,
                             cbm_file_info_t *files, int file_count, const cbm_file_hash_t *stored,
                             int stored_count, const cbm_file_hash_t *fresh, int fresh_count,
@@ -3147,6 +3409,12 @@ static int closure_try_plan(cbm_pipeline_t *p, cbm_store_t *store, const char *p
         goto done;
     }
     decline = closure_terraform_decline(changed_paths, n_changed + n_deleted);
+    if (decline) {
+        goto done;
+    }
+    decline = closure_graphql_decline(store, project, cbm_pipeline_repo_path(p), changed_paths,
+                                      n_changed + n_deleted, stored, stored_count, files,
+                                      file_count);
     if (decline) {
         goto done;
     }
@@ -3391,6 +3659,11 @@ static int closure_try_plan(cbm_pipeline_t *p, cbm_store_t *store, const char *p
         if (cbm_ht_get(closure_set, files[i].rel_path)) {
             plan->files[plan->count++] = files[i];
         }
+    }
+    decline = closure_graphql_decline_plan(store, project, cbm_pipeline_repo_path(p), plan, stored,
+                                           stored_count, files, file_count);
+    if (decline) {
+        goto done;
     }
     plan->n_changed = n_changed;
     plan->n_dependents = dependent_count;

@@ -25612,6 +25612,83 @@ TEST(pipeline_nextjs_semantic_upgrade_issue759) {
     PASS();
 }
 
+/* CBM_SEMANTIC_INDEX_VERSION 14: an index version 13 wrote has no GraphQL
+ * field-path Route (__graphql__Query.ping) or its HANDLES, and an unchanged
+ * tree is otherwise a no-op, so only the version makes the upgraded binary
+ * build them. The stored index is put back to the version-13 state by hand
+ * (metadata, the field Routes and their edges); the run after that must
+ * rebuild in full, the next one is a no-op. */
+static int gql_upgrade_index(const char *repo, const char *db_path) {
+    cbm_pipeline_t *p = cbm_pipeline_new(repo, db_path, CBM_MODE_FULL);
+    if (!p) {
+        return -1;
+    }
+    (void)cbm_pipeline_set_project_name(p, "gqlup");
+    int rc = cbm_pipeline_run(p);
+    cbm_pipeline_free(p);
+    return rc;
+}
+
+TEST(pipeline_graphql_field_routes_semantic_upgrade) {
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "/tmp/cbm_gql_upgrade_XXXXXX");
+    ASSERT_NOT_NULL(cbm_mkdtemp(tmp));
+    write_temp_file(tmp, "graph/schema.graphqls", "type Query {\n  ping: String\n}\n");
+    write_temp_file(tmp, "lib/helper.ts", "export function helper(): number {\n  return 1;\n}\n");
+    char db_path[512];
+    snprintf(db_path, sizeof(db_path), "%s/gqlup.db", tmp);
+    static const char field_routes[] =
+        "SELECT COUNT(*) FROM nodes r JOIN edges e ON e.target_id = r.id AND e.type = 'HANDLES' "
+        "WHERE r.label = 'Route' AND r.qualified_name = '__graphql__Query.ping'";
+
+    int full_rc = gql_upgrade_index(tmp, db_path);
+    int routes_full = k8s_inc_count(db_path, field_routes);
+
+    /* Put the published index back to what version 13 wrote. */
+    cbm_store_t *store = cbm_store_open_path(db_path);
+    ASSERT_NOT_NULL(store);
+    cbm_coverage_row_t *coverage_rows = NULL;
+    int coverage_count = 0;
+    ASSERT_EQ(cbm_store_coverage_get(store, "gqlup", &coverage_rows, &coverage_count),
+              CBM_STORE_OK);
+    cbm_coverage_meta_t meta = {0};
+    ASSERT_EQ(cbm_store_coverage_meta_get(store, "gqlup", &meta), CBM_STORE_OK);
+    cbm_coverage_meta_t old_meta = meta;
+    old_meta.coverage_version = 13;
+    ASSERT_EQ(
+        cbm_store_coverage_replace_ex(store, "gqlup", coverage_rows, coverage_count, &old_meta),
+        CBM_STORE_OK);
+    cbm_store_free_coverage(coverage_rows, coverage_count);
+    cbm_store_coverage_meta_clear(&meta);
+    ASSERT_EQ(cbm_store_exec(store,
+                             "DELETE FROM edges WHERE target_id IN (SELECT id FROM nodes WHERE "
+                             "label = 'Route' AND substr(qualified_name, 1, 11) = '__graphql__');"
+                             "DELETE FROM nodes WHERE label = 'Route' AND "
+                             "substr(qualified_name, 1, 11) = '__graphql__';"),
+              CBM_STORE_OK);
+    cbm_store_close(store);
+    int routes_13 = k8s_inc_count(db_path, field_routes);
+
+    /* Nothing in the tree changed: only the version says the index is stale. */
+    int upgrade_rc = gql_upgrade_index(tmp, db_path);
+    cbm_incremental_route_t upgrade_route = cbm_pipeline_incremental_test_last_route();
+    int routes_after = k8s_inc_count(db_path, field_routes);
+    int again_rc = gql_upgrade_index(tmp, db_path);
+    cbm_incremental_route_t again_route = cbm_pipeline_incremental_test_last_route();
+    th_rmtree(tmp);
+
+    ASSERT_EQ(full_rc, 0);
+    ASSERT_EQ(routes_full, 1);
+    ASSERT_EQ(routes_13, 0);
+    ASSERT_EQ(upgrade_rc, 0);
+    ASSERT_EQ(upgrade_route, CBM_INCREMENTAL_ROUTE_FORCED_FULL);
+    ASSERT_EQ(routes_after, 1);
+    ASSERT_EQ(again_rc, 0);
+    ASSERT_EQ(again_route, CBM_INCREMENTAL_ROUTE_NOOP);
+    ASSERT_GTE(CBM_SEMANTIC_INDEX_VERSION, 14);
+    PASS();
+}
+
 /* #759: a quote is legal in a POSIX directory name, so a route path, its file
  * and its handler's QN can hold one, escaped in the stored JSON. The route pass
  * builds the Route from its handler's stored properties on every index
@@ -35241,6 +35318,7 @@ SUITE(pipeline) {
     RUN_TEST(pipeline_nextjs_persisted_route_contract_parallel_issue759);
     RUN_TEST(pipeline_nextjs_incremental_lifecycle_issue759);
     RUN_TEST(pipeline_nextjs_semantic_upgrade_issue759);
+    RUN_TEST(pipeline_graphql_field_routes_semantic_upgrade);
     RUN_TEST(pipeline_nextjs_quoted_route_round_trip_issue759);
     RUN_TEST(pipeline_python_app_factory_routes_issue1548);
     RUN_TEST(pipeline_python_nested_def_is_function_local_issue1548);

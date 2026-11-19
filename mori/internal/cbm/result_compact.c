@@ -288,6 +288,7 @@ static void cr_walk_call(cr_ctx_t *c, CBMCall *call) {
     cr_str(c, &call->callee_name);
     cr_str(c, &call->enclosing_func_qn);
     cr_str(c, &call->first_string_arg);
+    cr_str(c, &call->graphql_sig);
     cr_str(c, &call->second_arg_name);
     int argc = call->arg_count;
     if (argc > CBM_MAX_CALL_ARGS) {

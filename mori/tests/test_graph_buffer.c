@@ -7,6 +7,7 @@
 #include "test_framework.h"
 #include "graph_buffer/graph_buffer.h"
 #include "foundation/mem_core.h"
+#include <time.h>
 #include <stdatomic.h>
 #include "store/store.h"
 #include "../src/foundation/compat.h"
@@ -715,6 +716,57 @@ TEST(gbuf_merge_definition_beats_same_qn_macro_c1) {
         ASSERT_NOT_NULL(n);
         ASSERT_STR_EQ(n->label, "Function");
         ASSERT_EQ(n->start_line, 10);
+        cbm_gbuf_free(dst);
+        cbm_gbuf_free(src);
+    }
+    PASS();
+}
+
+/* A repo holding a GraphQL schema and a client that selects one of its
+ * fields: the client's GRAPHQL_CALLS upserts the field's Route as a
+ * placeholder (no file, {"source":"graphql"}), the route pass upserts the
+ * same QN from the schema. The schema's Route keeps its file, line and props
+ * (type, deprecation) in either order, and both upserts name one node. The
+ * empty file path used to win the tie and drop the schema's metadata. */
+static const char GB_GQL_SCHEMA_PROPS[] =
+    "{\"source\":\"graphql_schema\",\"schema_type\":\"String\",\"deprecated\":true,"
+    "\"deprecation_reason\":\"gone\"}";
+
+static int64_t gb_gql_client_route(cbm_gbuf_t *gb) {
+    return cbm_gbuf_upsert_node(gb, "Route", "Query.ping", "__graphql__Query.ping", "", 0, 0,
+                                "{\"source\":\"graphql\"}");
+}
+
+static int64_t gb_gql_schema_route(cbm_gbuf_t *gb) {
+    return cbm_gbuf_upsert_node(gb, "Route", "Query.ping", "__graphql__Query.ping",
+                                "graph/schema.graphqls", 2, 2, GB_GQL_SCHEMA_PROPS);
+}
+
+static int gb_gql_schema_route_kept(const cbm_gbuf_t *gb) {
+    const cbm_gbuf_node_t *n = cbm_gbuf_find_by_qn(gb, "__graphql__Query.ping");
+    return n && n->file_path && strcmp(n->file_path, "graph/schema.graphqls") == 0 &&
+           n->start_line == 2 && n->properties_json &&
+           strcmp(n->properties_json, GB_GQL_SCHEMA_PROPS) == 0;
+}
+
+TEST(gbuf_graphql_schema_route_beats_client_placeholder) {
+    for (int order = 0; order < 2; order++) {
+        cbm_gbuf_t *gb = cbm_gbuf_new("test", "/tmp");
+        int64_t first = order == 0 ? gb_gql_client_route(gb) : gb_gql_schema_route(gb);
+        int64_t second = order == 0 ? gb_gql_schema_route(gb) : gb_gql_client_route(gb);
+        ASSERT_GT(first, 0);
+        ASSERT_EQ(second, first);
+        ASSERT_TRUE(gb_gql_schema_route_kept(gb));
+        cbm_gbuf_free(gb);
+    }
+    /* The parallel merge (worker gbuf -> main gbuf), in both directions. */
+    for (int order = 0; order < 2; order++) {
+        cbm_gbuf_t *dst = cbm_gbuf_new("test", "/tmp");
+        cbm_gbuf_t *src = cbm_gbuf_new("test", "/tmp");
+        (void)gb_gql_client_route(order == 0 ? dst : src);
+        (void)gb_gql_schema_route(order == 0 ? src : dst);
+        ASSERT_EQ(cbm_gbuf_merge(dst, src), 0);
+        ASSERT_TRUE(gb_gql_schema_route_kept(dst));
         cbm_gbuf_free(dst);
         cbm_gbuf_free(src);
     }
@@ -1505,6 +1557,76 @@ TEST(gbuf_worker_buffer_keeps_no_by_id_array) {
     PASS();
 }
 
+/* More than 64 operations selecting one field from one source: the merged
+ * GRAPHQL_CALLS edge lists every one, identically whatever the insert order. */
+TEST(gbuf_graphql_operations_union_unbounded_and_order_free) {
+    enum { OPS = 70 };
+    const char *props[2] = {NULL, NULL};
+    cbm_gbuf_t *gbs[2];
+    for (int order = 0; order < 2; order++) {
+        cbm_gbuf_t *gb = cbm_gbuf_new("test", "/tmp");
+        gbs[order] = gb;
+        int64_t src = cbm_gbuf_upsert_node(gb, "Function", "load", "pkg.load", "a.ts", 1, 2, "{}");
+        int64_t tgt = cbm_gbuf_upsert_node(gb, "Route", "Query.perp.trades",
+                                           "__graphql__Query.perp.trades", "", 0, 0, "{}");
+        for (int k = 0; k < OPS; k++) {
+            int i = order == 0 ? k : OPS - 1 - k;
+            char p[256];
+            (void)snprintf(p, sizeof(p),
+                           "{\"callee\":\"fetch\",\"operation\":\"Op%02d\",\"operation_type\":"
+                           "\"query\",\"field_path\":\"perp.trades\",\"confidence\":0.80,"
+                           "\"operations\":[\"Op%02d\"]}",
+                           i, i);
+            cbm_gbuf_insert_edge(gb, src, tgt, "GRAPHQL_CALLS", p);
+        }
+        const cbm_gbuf_edge_t **edges = NULL;
+        int count = 0;
+        cbm_gbuf_find_edges_by_type(gb, "GRAPHQL_CALLS", &edges, &count);
+        ASSERT_EQ(count, 1);
+        props[order] = edges[0]->properties_json;
+    }
+    ASSERT_STR_EQ(props[0], props[1]);
+    ASSERT_TRUE(strstr(props[0], "\"operation\":\"Op00\"") != NULL);
+    ASSERT_TRUE(strstr(props[0], "\"Op00\",\"Op01\"") != NULL);
+    ASSERT_TRUE(strstr(props[0], "\"Op68\",\"Op69\"]") != NULL);
+    cbm_gbuf_free(gbs[0]);
+    cbm_gbuf_free(gbs[1]);
+    PASS();
+}
+
+/* 3,000 operations selecting one field: the union keeps every name, and the
+ * merges stay far from the old pairwise-rescan cost. */
+TEST(gbuf_graphql_operations_union_scales) {
+    enum { OPS = 3000 };
+    cbm_gbuf_t *gb = cbm_gbuf_new("test", "/tmp");
+    int64_t src = cbm_gbuf_upsert_node(gb, "Function", "gen", "pkg.gen", "a.ts", 1, 2, "{}");
+    int64_t tgt =
+        cbm_gbuf_upsert_node(gb, "Route", "Query.viewer", "__graphql__Query.viewer", "", 0, 0, "{}");
+    clock_t t0 = clock();
+    for (int i = 0; i < OPS; i++) {
+        char p[256];
+        (void)snprintf(p, sizeof(p),
+                       "{\"callee\":\"gql\",\"operation\":\"Q%04d\",\"operation_type\":"
+                       "\"query\",\"field_path\":\"viewer\",\"confidence\":0.80,"
+                       "\"operations\":[\"Q%04d\"]}",
+                       i, i);
+        cbm_gbuf_insert_edge(gb, src, tgt, "GRAPHQL_CALLS", p);
+    }
+    double secs = (double)(clock() - t0) / CLOCKS_PER_SEC;
+    const cbm_gbuf_edge_t **edges = NULL;
+    int count = 0;
+    cbm_gbuf_find_edges_by_type(gb, "GRAPHQL_CALLS", &edges, &count);
+    ASSERT_EQ(count, 1);
+    ASSERT_TRUE(strstr(edges[0]->properties_json, "\"Q0000\",\"Q0001\"") != NULL);
+    ASSERT_TRUE(strstr(edges[0]->properties_json, "\"Q2998\",\"Q2999\"]") != NULL);
+    cbm_gbuf_free(gb);
+    if (secs > 5.0) {
+        fprintf(stderr, "  union of %d operations took %.2fs\n", OPS, secs);
+        ASSERT_TRUE(0);
+    }
+    PASS();
+}
+
 SUITE(graph_buffer) {
     RUN_TEST(gbuf_worker_buffer_keeps_no_by_id_array);
     /* Original tests */
@@ -1512,6 +1634,8 @@ SUITE(graph_buffer) {
     RUN_TEST(gbuf_free_null);
     RUN_TEST(gbuf_upsert_node);
     RUN_TEST(gbuf_upsert_updates);
+    RUN_TEST(gbuf_graphql_operations_union_unbounded_and_order_free);
+    RUN_TEST(gbuf_graphql_operations_union_scales);
     RUN_TEST(gbuf_swift_declaration_and_extension_keep_both_markers);
     RUN_TEST(gbuf_find_by_id);
     RUN_TEST(gbuf_find_by_label);
@@ -1539,6 +1663,7 @@ SUITE(graph_buffer) {
     RUN_TEST(gbuf_upsert_same_qn_updates_all_fields);
     RUN_TEST(gbuf_upsert_definition_beats_same_qn_macro_c1);
     RUN_TEST(gbuf_merge_definition_beats_same_qn_macro_c1);
+    RUN_TEST(gbuf_graphql_schema_route_beats_client_placeholder);
     RUN_TEST(gbuf_variants_cross_label_order_independent);
     RUN_TEST(gbuf_variants_keep_every_span);
     RUN_TEST(gbuf_variants_travel_through_worker_merge);

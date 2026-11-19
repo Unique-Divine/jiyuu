@@ -33,11 +33,18 @@ enum {
 #include <stdint.h>
 #include "graph_buffer/graph_buffer.h"
 #include "foundation/log.h"
-#include "service_patterns.h"  /* cbm_service_pattern_is_http_route_literal */
-#include "helpers.h"           /* cbm_is_test_file */
-#include "discover/discover.h" /* cbm_language_for_filename */
+#include "service_patterns.h"     /* cbm_service_pattern_is_http_route_literal */
+#include "helpers.h"              /* cbm_is_test_file */
+#include "discover/discover.h"    /* cbm_language_for_filename */
+#include "cbm.h"                  /* CBM_LANG_GO, CBM_LANG_GRAPHQL */
+#include "foundation/arena.h"     /* CBMArena */
+#include "foundation/compat_fs.h" /* cbm_fopen */
+#include "foundation/mem_core.h"  /* cbm_alloc */
+#include "foundation/yaml.h"      /* cbm_yaml_parse */
 
+#include <ctype.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* Extract a JSON string value by key from properties.
@@ -1009,6 +1016,1400 @@ static void create_grpc_routes(cbm_gbuf_t *gb) {
         snprintf(svc_buf, sizeof(svc_buf), "%d", svc_count);
         cbm_log_info("pass.route_nodes.grpc", "routes", buf, "services", svc_buf);
     }
+}
+
+/* ── gqlgen configuration (gqlgen.yml) ──────────────────────────────
+ *
+ * A gqlgen server is defined by its config file: the schema files it loads
+ * (`schema:` globs, relative to the config's directory) and where its
+ * resolvers live (`resolver:`; `layout: follow-schema` puts them in `dir`,
+ * the default single-file layout in `filename`). Only those keys are read,
+ * line by line; anything else in the YAML is ignored. */
+
+enum {
+    GQLGEN_MAX_CONFIG_BYTES = CBM_SZ_256 * CBM_SZ_1K,
+    GQLGEN_MAX_SCHEMA_GLOBS = 64,
+    GQLGEN_MAX_GLOB_SEGMENTS = 64,
+};
+
+static const char *const gqlgen_config_names[] = {
+    "gqlgen.yml",
+    "gqlgen.yaml",
+    ".gqlgen.yml",
+    ".gqlgen.yaml",
+};
+
+bool cbm_gqlgen_is_config_path(const char *rel_path) {
+    if (!rel_path) {
+        return false;
+    }
+    const char *slash = strrchr(rel_path, '/');
+    const char *base = slash ? slash + SKIP_ONE : rel_path;
+    for (size_t i = 0; i < sizeof(gqlgen_config_names) / sizeof(gqlgen_config_names[0]); i++) {
+        if (strcmp(base, gqlgen_config_names[i]) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool gql_word_char(char c) {
+    return isalnum((unsigned char)c) || c == '_';
+}
+
+/* Skip a GraphQL string at text[i] ('"' or a '"""' block); returns the index
+ * after it. */
+static size_t gql_skip_string(const char *text, size_t len, size_t i) {
+    if (i + PAIR_LEN < len && text[i + SKIP_ONE] == '"' && text[i + PAIR_LEN] == '"') {
+        for (i += CBM_SZ_3; i < len; i++) {
+            if (text[i] == '\\') {
+                i++;
+            } else if (i + PAIR_LEN < len && text[i] == '"' && text[i + SKIP_ONE] == '"' &&
+                       text[i + PAIR_LEN] == '"') {
+                return i + CBM_SZ_3;
+            }
+        }
+        return len;
+    }
+    for (i++; i < len && text[i] != '"' && text[i] != '\n'; i++) {
+        if (text[i] == '\\') {
+            i++;
+        }
+    }
+    return i < len ? i + SKIP_ONE : len;
+}
+
+bool cbm_graphql_text_defines_schema(const char *text, size_t len) {
+    static const char *const kinds[] = {"type",  "interface", "input",     "enum",   "union",
+                                        "scalar", "directive", "schema", "extend"};
+    int depth = 0; /* braces and parentheses */
+    for (size_t i = 0; text && i < len;) {
+        char c = text[i];
+        if (c == '#') {
+            while (i < len && text[i] != '\n') {
+                i++;
+            }
+        } else if (c == '"') {
+            i = gql_skip_string(text, len, i);
+        } else if (c == '{' || c == '(' || c == '[') {
+            depth++;
+            i++;
+        } else if (c == '}' || c == ')' || c == ']') {
+            depth -= depth > 0 ? SKIP_ONE : 0;
+            i++;
+        } else if (gql_word_char(c) || c == '$' || c == '@') {
+            size_t start = i++;
+            while (i < len && gql_word_char(text[i])) {
+                i++;
+            }
+            for (size_t k = 0; depth == 0 && c != '$' && c != '@' && k < sizeof(kinds) / sizeof(kinds[0]); k++) {
+                if (strlen(kinds[k]) == i - start && strncmp(text + start, kinds[k], i - start) == 0) {
+                    return true;
+                }
+            }
+        } else {
+            i++;
+        }
+    }
+    return false;
+}
+
+bool cbm_go_text_has_method(const char *text, size_t len, const char *receiver_suffix) {
+    static const char FUNC[] = "func";
+    const char *suffix = receiver_suffix ? receiver_suffix : "";
+    size_t fl = sizeof(FUNC) - SKIP_ONE;
+    size_t sl = strlen(suffix);
+    for (size_t i = 0; text && i + fl < len; i++) {
+        if (strncmp(text + i, FUNC, fl) != 0 || (i > 0 && gql_word_char(text[i - SKIP_ONE])) ||
+            gql_word_char(text[i + fl])) {
+            continue;
+        }
+        size_t j = i + fl;
+        while (j < len && (text[j] == ' ' || text[j] == '\t')) {
+            j++;
+        }
+        if (j >= len || text[j] != '(') {
+            continue;
+        }
+        size_t close = j;
+        while (close < len && text[close] != ')' && text[close] != '\n') {
+            close++;
+        }
+        size_t end = close;
+        while (end > j && (text[end - SKIP_ONE] == ' ' || text[end - SKIP_ONE] == '\t')) {
+            end--;
+        }
+        if (close < len && text[close] == ')' && end - j > sl &&
+            strncmp(text + end - sl, suffix, sl) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static char *gqlgen_strndup(const char *s, size_t n) {
+    char *out = cbm_alloc(CBM_MEM_CLASS_OTHER, n + SKIP_ONE);
+    if (out) {
+        memcpy(out, s, n);
+        out[n] = '\0';
+    }
+    return out;
+}
+
+/* A YAML scalar with surrounding blanks, quotes and a trailing comment
+ * removed; a heap copy, or NULL when empty. */
+static char *gqlgen_scalar(const char *s, const char *end) {
+    while (s < end && (*s == ' ' || *s == '\t')) {
+        s++;
+    }
+    char quote = s < end && (*s == '"' || *s == '\'') ? *s : '\0';
+    if (quote) {
+        const char *close = memchr(s + SKIP_ONE, quote, (size_t)(end - s - SKIP_ONE));
+        return close && close > s + SKIP_ONE
+                   ? gqlgen_strndup(s + SKIP_ONE, (size_t)(close - s - SKIP_ONE))
+                   : NULL;
+    }
+    const char *e = s;
+    while (e < end && !(*e == '#' && (e == s || e[-SKIP_ONE] == ' ' || e[-SKIP_ONE] == '\t'))) {
+        e++;
+    }
+    while (e > s && (e[-SKIP_ONE] == ' ' || e[-SKIP_ONE] == '\t')) {
+        e--;
+    }
+    return e > s ? gqlgen_strndup(s, (size_t)(e - s)) : NULL;
+}
+
+static void gqlgen_add_glob(cbm_gqlgen_config_t *c, char *glob) {
+    if (glob && c->schema_count < GQLGEN_MAX_SCHEMA_GLOBS) {
+        c->schema_globs[c->schema_count++] = glob;
+    } else {
+        cbm_free(CBM_MEM_CLASS_OTHER, glob);
+    }
+}
+
+/* `schema: [a, b]` or `schema: a`. */
+static void gqlgen_inline_schema(cbm_gqlgen_config_t *c, const char *v, const char *end) {
+    while (v < end && (*v == ' ' || *v == '\t')) {
+        v++;
+    }
+    if (v >= end || *v == '#') {
+        return;
+    }
+    if (*v != '[') {
+        gqlgen_add_glob(c, gqlgen_scalar(v, end));
+        return;
+    }
+    const char *close = memchr(v, ']', (size_t)(end - v));
+    const char *stop = close ? close : end;
+    for (const char *p = v + SKIP_ONE; p < stop;) {
+        const char *comma = memchr(p, ',', (size_t)(stop - p));
+        const char *item_end = comma ? comma : stop;
+        gqlgen_add_glob(c, gqlgen_scalar(p, item_end));
+        p = item_end + SKIP_ONE;
+    }
+}
+
+static void gqlgen_set(char **slot, char *value) {
+    cbm_free(CBM_MEM_CLASS_OTHER, *slot);
+    *slot = value;
+}
+
+/* Normalize a repo-relative path in place: "." segments and empty ones
+ * dropped, ".." removes the segment before it; a trailing '/' is kept.
+ * False when ".." climbs above the repository root. */
+static bool gqlgen_normalize(char *path) {
+    size_t len = strlen(path);
+    bool trailing = len > 0 && path[len - SKIP_ONE] == '/';
+    size_t out = 0;
+    for (size_t i = 0; i < len;) {
+        size_t end = i;
+        while (end < len && path[end] != '/') {
+            end++;
+        }
+        size_t seg = end - i;
+        if (seg == PAIR_LEN && path[i] == '.' && path[i + SKIP_ONE] == '.') {
+            if (out == 0) {
+                return false;
+            }
+            out--; /* the '/' after the previous segment */
+            while (out > 0 && path[out - SKIP_ONE] != '/') {
+                out--;
+            }
+        } else if (seg > 0 && !(seg == SKIP_ONE && path[i] == '.')) {
+            memmove(path + out, path + i, seg);
+            out += seg;
+            path[out++] = '/';
+        }
+        i = end + SKIP_ONE;
+    }
+    if (out > 0 && !trailing) {
+        out--;
+    }
+    path[out] = '\0';
+    return true;
+}
+
+/* Join the config's directory and a path it names, normalized ("./",
+ * "../"); NULL when it leaves the repository or on allocation failure. */
+static char *gqlgen_join(const char *dir, const char *rel) {
+    size_t dl = strlen(dir);
+    size_t rl = strlen(rel);
+    char *out = cbm_alloc(CBM_MEM_CLASS_OTHER, dl + rl + SKIP_ONE);
+    if (out) {
+        (void)snprintf(out, dl + rl + SKIP_ONE, "%s%s", dir, rel);
+        if (!gqlgen_normalize(out)) {
+            cbm_free(CBM_MEM_CLASS_OTHER, out);
+            out = NULL;
+        }
+    }
+    return out;
+}
+
+/* Resolve the config's paths against its directory: schema globs, and the
+ * package directory of its resolvers ("" when it has none). */
+static void gqlgen_resolve(cbm_gqlgen_config_t *c, const char *rel_path) {
+    const char *slash = strrchr(rel_path, '/');
+    char *dir = gqlgen_strndup(rel_path, slash ? (size_t)(slash - rel_path) + SKIP_ONE : 0);
+    if (!dir) {
+        return;
+    }
+    /* gqlgen's default when `schema` is omitted (codegen/config/config.go
+     * DefaultConfig): schema.graphql beside the config. */
+    if (!c->has_schema_key) {
+        gqlgen_add_glob(c, gqlgen_strndup("schema.graphql", strlen("schema.graphql")));
+    }
+    /* A glob whose join fails is dropped, never left NULL in the list. */
+    int kept = 0;
+    for (int i = 0; i < c->schema_count; i++) {
+        char *joined = gqlgen_join(dir, c->schema_globs[i]);
+        cbm_free(CBM_MEM_CLASS_OTHER, c->schema_globs[i]);
+        if (joined) {
+            c->schema_globs[kept++] = joined;
+        }
+    }
+    c->schema_count = kept;
+    char *pkg = NULL;
+    bool follow = c->resolver_layout && strcmp(c->resolver_layout, "follow-schema") == 0;
+    if (c->has_resolver && follow && c->resolver_dir) {
+        char *joined = gqlgen_join(dir, c->resolver_dir);
+        size_t jl = joined ? strlen(joined) : 0;
+        pkg = joined && jl > 0 && joined[jl - SKIP_ONE] != '/' ? gqlgen_join(joined, "/") : joined;
+        if (pkg != joined) {
+            cbm_free(CBM_MEM_CLASS_OTHER, joined);
+        }
+    } else if (c->has_resolver && !follow) {
+        char *file = gqlgen_join(dir, c->resolver_filename ? c->resolver_filename : "resolver.go");
+        const char *fs = file ? strrchr(file, '/') : NULL;
+        pkg = file ? gqlgen_strndup(file, fs ? (size_t)(fs - file) + SKIP_ONE : 0) : NULL;
+        cbm_free(CBM_MEM_CLASS_OTHER, file);
+    }
+    gqlgen_set(&c->resolver_pkg, pkg);
+    cbm_free(CBM_MEM_CLASS_OTHER, dir);
+}
+
+/* A config value as a heap copy, quotes and trailing comment removed. */
+static char *gqlgen_value(const cbm_yaml_node_t *y, const char *path) {
+    const char *v = cbm_yaml_get_str(y, path);
+    return v ? gqlgen_scalar(v, v + strlen(v)) : NULL;
+}
+
+/* Read the keys a config needs through the foundation YAML reader (block
+ * maps and lists); a flow list `schema: [a, b]` is split here. */
+static void gqlgen_read(cbm_gqlgen_config_t *c, const cbm_yaml_node_t *y) {
+    const char *items[GQLGEN_MAX_SCHEMA_GLOBS];
+    int n = cbm_yaml_get_str_list(y, "schema", items, GQLGEN_MAX_SCHEMA_GLOBS);
+    for (int i = 0; i < n; i++) {
+        gqlgen_add_glob(c, gqlgen_scalar(items[i], items[i] + strlen(items[i])));
+    }
+    const char *inline_schema = n == 0 ? cbm_yaml_get_str(y, "schema") : NULL;
+    if (inline_schema) {
+        gqlgen_inline_schema(c, inline_schema, inline_schema + strlen(inline_schema));
+    }
+    c->has_schema_key = cbm_yaml_has(y, "schema");
+    c->has_resolver = cbm_yaml_has(y, "resolver");
+    c->resolver_layout = gqlgen_value(y, "resolver.layout");
+    c->resolver_dir = gqlgen_value(y, "resolver.dir");
+    c->resolver_filename = gqlgen_value(y, "resolver.filename");
+}
+
+int cbm_gqlgen_config_load(const char *repo_path, const char *rel_path, cbm_gqlgen_config_t *out) {
+    memset(out, 0, sizeof(*out));
+    if (!repo_path || !rel_path) {
+        return CBM_NOT_FOUND;
+    }
+    char path[CBM_SZ_4K];
+    int n = snprintf(path, sizeof(path), "%s/%s", repo_path, rel_path);
+    if (n <= 0 || (size_t)n >= sizeof(path)) {
+        return CBM_NOT_FOUND;
+    }
+    FILE *f = cbm_fopen(path, "rb");
+    if (!f) {
+        return CBM_NOT_FOUND;
+    }
+    /* The parser takes the bytes read and their count; the terminator is
+     * a guard, never part of the input. */
+    char *buf = cbm_alloc(CBM_MEM_CLASS_OTHER, GQLGEN_MAX_CONFIG_BYTES + SKIP_ONE);
+    size_t len = buf ? fread(buf, SKIP_ONE, GQLGEN_MAX_CONFIG_BYTES, f) : 0;
+    if (buf) {
+        buf[len] = '\0';
+    }
+    (void)fclose(f);
+    cbm_yaml_node_t *y = buf ? cbm_yaml_parse(buf, (int)len) : NULL;
+    cbm_free(CBM_MEM_CLASS_OTHER, buf);
+    out->schema_globs =
+        y ? cbm_alloc(CBM_MEM_CLASS_OTHER, GQLGEN_MAX_SCHEMA_GLOBS * sizeof(*out->schema_globs))
+          : NULL;
+    if (!out->schema_globs) {
+        cbm_yaml_free(y);
+        return CBM_NOT_FOUND;
+    }
+    gqlgen_read(out, y);
+    cbm_yaml_free(y);
+    gqlgen_resolve(out, rel_path);
+    return 0;
+}
+
+void cbm_gqlgen_config_free(cbm_gqlgen_config_t *c) {
+    if (!c) {
+        return;
+    }
+    for (int i = 0; i < c->schema_count; i++) {
+        cbm_free(CBM_MEM_CLASS_OTHER, c->schema_globs[i]);
+    }
+    cbm_free(CBM_MEM_CLASS_OTHER, c->schema_globs);
+    cbm_free(CBM_MEM_CLASS_OTHER, c->resolver_layout);
+    cbm_free(CBM_MEM_CLASS_OTHER, c->resolver_dir);
+    cbm_free(CBM_MEM_CLASS_OTHER, c->resolver_filename);
+    cbm_free(CBM_MEM_CLASS_OTHER, c->resolver_pkg);
+    memset(c, 0, sizeof(*c));
+}
+
+/* Does one path segment match one glob segment (`*` and `?`, no '/')? */
+static bool gqlgen_segment_match(const char *pat, size_t pl, const char *str, size_t sl) {
+    size_t p = 0;
+    size_t s = 0;
+    size_t star = SIZE_MAX;
+    size_t mark = 0;
+    while (s < sl) {
+        if (p < pl && (pat[p] == '?' || pat[p] == str[s])) {
+            p++;
+            s++;
+        } else if (p < pl && pat[p] == '*') {
+            star = p++;
+            mark = s;
+        } else if (star != SIZE_MAX) {
+            p = star + SKIP_ONE;
+            s = ++mark;
+        } else {
+            return false;
+        }
+    }
+    while (p < pl && pat[p] == '*') {
+        p++;
+    }
+    return p == pl;
+}
+
+typedef struct {
+    const char *s;
+    size_t len;
+} gqlgen_seg_t;
+
+static int gqlgen_split(const char *path, gqlgen_seg_t *segs, int max) {
+    int n = 0;
+    for (const char *p = path; *p && n < max;) {
+        const char *slash = strchr(p, '/');
+        size_t len = slash ? (size_t)(slash - p) : strlen(p);
+        if (len > 0) {
+            segs[n++] = (gqlgen_seg_t){p, len};
+        }
+        p += len + (slash ? SKIP_ONE : 0);
+    }
+    return n;
+}
+
+bool cbm_gqlgen_glob_match(const char *glob, const char *path) {
+    gqlgen_seg_t pat[GQLGEN_MAX_GLOB_SEGMENTS];
+    gqlgen_seg_t str[GQLGEN_MAX_GLOB_SEGMENTS];
+    int pn = gqlgen_split(glob, pat, GQLGEN_MAX_GLOB_SEGMENTS);
+    int sn = gqlgen_split(path, str, GQLGEN_MAX_GLOB_SEGMENTS);
+    int p = 0;
+    int s = 0;
+    int star = CBM_NOT_FOUND; /* the last `**` segment, for backtracking */
+    int mark = 0;
+    while (s < sn) {
+        bool globstar = p < pn && pat[p].len == PAIR_LEN && strncmp(pat[p].s, "**", PAIR_LEN) == 0;
+        if (globstar) {
+            star = p++;
+            mark = s;
+        } else if (p < pn && gqlgen_segment_match(pat[p].s, pat[p].len, str[s].s, str[s].len)) {
+            p++;
+            s++;
+        } else if (star >= 0) {
+            p = star + SKIP_ONE;
+            s = ++mark;
+        } else {
+            return false;
+        }
+    }
+    while (p < pn && pat[p].len == PAIR_LEN && strncmp(pat[p].s, "**", PAIR_LEN) == 0) {
+        p++;
+    }
+    return p == pn;
+}
+
+/* ── Phase 4b: GraphQL schema Routes (field paths) ──────────────────
+ *
+ * A GraphQL server defines fields, not operations: a client's operation
+ * selects field paths such as `perp { trades }`. One Route per field path,
+ * `__graphql__<Op>.<field>` for each field of the query, mutation and
+ * subscription root types, and `__graphql__<Op>.<field>.<child>` for each
+ * field of that field's return type, one level down. <Op> is the operation
+ * (Query, Mutation, Subscription) whatever the root type is named. Leaf
+ * (scalar or enum) return types have no fields, so they get the root Route
+ * only.
+ *
+ * Schema files belong to a server. A gqlgen config (gqlgen.yml) names its
+ * server's schema files and resolver package: a `schema { query: X }`
+ * definition anywhere in that set names its roots, `extend type T` fields
+ * join that set's T, and only methods in that resolver package resolve its
+ * fields. Schema files no config claims form one heuristic set: a `schema`
+ * definition applies to the files under its parent directory, and a resolver
+ * package (a directory with gqlgen `*.resolvers.go` files, or a single-file
+ * `resolver.go`) resolves a schema file only when it is the file's directory,
+ * below it, or its parent, and no config claims the package.
+ *
+ * Each Route gets exactly one HANDLES edge: from the one resolver method that
+ * owns it (receiver `lcFirst(T)Resolver`, method named after the field
+ * case-insensitively), else from the schema Field. Two owning methods, or two
+ * schemas defining the same path with no method to tell them apart, mark the
+ * Route `ambiguous` and link the first schema's Field. */
+
+enum { GQL_OP_COUNT = 3, GQL_EMIT_INITIAL = 64, GQL_HEURISTIC = -1 };
+
+static const char *const gql_ops[GQL_OP_COUNT] = {"Query", "Mutation", "Subscription"};
+static const char *const gql_schema_keys[GQL_OP_COUNT] = {
+    "graphql_schema_query",
+    "graphql_schema_mutation",
+    "graphql_schema_subscription",
+};
+
+/* A schema type. */
+typedef struct {
+    const cbm_gbuf_node_t *node;
+    int group;      /* index of the owning gqlgen config, or GQL_HEURISTIC */
+    bool synthetic; /* stands for an `extend type T` with no declared T */
+} gql_class_t;
+
+/* One schema field and the props its Routes carry. Strings live in the
+ * pass arena, unbounded. */
+typedef struct {
+    const cbm_gbuf_node_t *node;
+    const char *parent_qn;
+    const char *extends; /* T of an `extend type T` block, or NULL */
+    const char *return_type;
+    const char *reason;
+    bool deprecated;
+    int group;
+} gql_field_t;
+
+/* One file's `schema { ... }` definition and `extend schema { ... }`
+ * blocks: the root type name per operation. */
+typedef struct {
+    const char *file;
+    const char *roots[GQL_OP_COUNT];
+    int group;
+    bool defined; /* holds a `schema` definition, not only extensions */
+} gql_schema_t;
+
+/* One candidate resolver method, keyed "<receiver>.<lower-case method>". */
+typedef struct {
+    const cbm_gbuf_node_t *node;
+    const char *key;
+    const char *dir; /* its Go package directory, with the trailing '/' */
+} gql_resolver_t;
+
+/* One field path a schema defines. */
+typedef struct {
+    const char *qn;
+    const char *path;
+    const char *type_name; /* the field's owner type (names the resolver) */
+    const gql_field_t *field;
+} gql_emit_t;
+
+typedef struct {
+    cbm_gbuf_t *gb;
+    const char *repo_path;
+    CBMArena arena;
+    cbm_gqlgen_config_t *configs;
+    int config_count;
+    gql_class_t *classes;
+    int class_count;
+    gql_field_t *fields;
+    int field_count;
+    const gql_class_t **classes_by_name; /* classes sorted by name */
+    const gql_field_t **fields_by_parent; /* fields sorted by parent_qn */
+    gql_schema_t *schemas;
+    int schema_count;
+    gql_resolver_t *resolvers;
+    int resolver_count;
+    const char **heuristic_dirs; /* resolver packages no config claims */
+    int heuristic_dir_count;
+    gql_emit_t *emits;
+    int emit_count;
+    int emit_cap;
+    int routes;
+    int via_resolver;
+    int via_field;
+    int ambiguous;
+    int too_long;
+} gql_ctx_t;
+
+static bool gql_is_schema_file(const char *path) {
+    return path && path[0] && cbm_language_for_filename(path) == CBM_LANG_GRAPHQL;
+}
+
+static bool gql_is_go_file(const char *path) {
+    return path && path[0] && cbm_language_for_filename(path) == CBM_LANG_GO;
+}
+
+static bool gql_ends_with(const char *s, const char *suffix) {
+    size_t sl = strlen(s);
+    size_t xl = strlen(suffix);
+    return sl > xl && strcmp(s + sl - xl, suffix) == 0;
+}
+
+/* Length of the directory part of path, including its trailing '/'. */
+static size_t gql_dir_len(const char *path) {
+    const char *slash = strrchr(path, '/');
+    return slash ? (size_t)(slash - path) + SKIP_ONE : 0;
+}
+
+/* Length of the longest common directory prefix of two file paths. */
+static size_t gql_common_dir_len(const char *a, const char *b) {
+    size_t common = 0;
+    for (size_t i = 0; a[i] && a[i] == b[i]; i++) {
+        if (a[i] == '/') {
+            common = i + SKIP_ONE;
+        }
+    }
+    return common;
+}
+
+/* Length of the parent of `path`'s directory, with its trailing '/'. */
+static size_t gql_parent_dir_len(const char *path) {
+    size_t dl = gql_dir_len(path);
+    size_t i = dl > 0 ? dl - SKIP_ONE : 0; /* the slash closing the directory */
+    while (i > 0 && path[i - SKIP_ONE] != '/') {
+        i--;
+    }
+    return i;
+}
+
+/* The named type of a declared GraphQL type: `[PerpTrade!]!` -> `PerpTrade`. */
+static const char *gql_base_type(CBMArena *a, const char *declared) {
+    const char *p = declared ? declared : "";
+    while (*p && !isalnum((unsigned char)*p) && *p != '_') {
+        p++;
+    }
+    const char *start = p;
+    while (*p && (isalnum((unsigned char)*p) || *p == '_')) {
+        p++;
+    }
+    return cbm_arena_strndup(a, start, (size_t)(p - start));
+}
+
+/* The string property `key` of a parsed properties object, copied into the
+ * arena whatever its length; NULL when absent or not a string. */
+static const char *gql_prop(CBMArena *a, yyjson_val *root, const char *key) {
+    yyjson_val *val = yyjson_obj_get(root, key);
+    const char *str = yyjson_get_str(val);
+    return str ? cbm_arena_strndup(a, str, yyjson_get_len(val)) : NULL;
+}
+
+/* The gqlgen config whose schema globs claim `path`, or GQL_HEURISTIC. */
+static int gql_group_of(const gql_ctx_t *ctx, const char *path) {
+    for (int i = 0; i < ctx->config_count; i++) {
+        for (int g = 0; g < ctx->configs[i].schema_count; g++) {
+            if (cbm_gqlgen_glob_match(ctx->configs[i].schema_globs[g], path)) {
+                return i;
+            }
+        }
+    }
+    return GQL_HEURISTIC;
+}
+
+static int gql_str_cmp(const void *x, const void *y) {
+    return strcmp(*(const char *const *)x, *(const char *const *)y);
+}
+
+/* Load every gqlgen config the index holds (sorted by path, so the first
+ * config claiming a schema file is the same on every run). */
+static void gql_load_configs(gql_ctx_t *ctx) {
+    const cbm_gbuf_node_t **nodes = NULL;
+    int count = 0;
+    if (!ctx->repo_path || cbm_gbuf_find_by_label(ctx->gb, "File", &nodes, &count) != 0) {
+        return;
+    }
+    const char **paths = cbm_arena_alloc(&ctx->arena, ((size_t)count + SKIP_ONE) * sizeof(*paths));
+    int n = 0;
+    for (int i = 0; paths && i < count; i++) {
+        if (cbm_gqlgen_is_config_path(nodes[i]->file_path)) {
+            paths[n++] = nodes[i]->file_path;
+        }
+    }
+    if (n == 0) {
+        return;
+    }
+    qsort(paths, (size_t)n, sizeof(*paths), gql_str_cmp);
+    ctx->configs = cbm_arena_alloc(&ctx->arena, (size_t)n * sizeof(*ctx->configs));
+    for (int i = 0; ctx->configs && i < n; i++) {
+        if (cbm_gqlgen_config_load(ctx->repo_path, paths[i], &ctx->configs[ctx->config_count]) ==
+            0) {
+            ctx->config_count++;
+        }
+    }
+}
+
+static void gql_free_configs(gql_ctx_t *ctx) {
+    for (int i = 0; i < ctx->config_count; i++) {
+        cbm_gqlgen_config_free(&ctx->configs[i]);
+    }
+}
+
+static int gql_collect_classes(gql_ctx_t *ctx) {
+    const cbm_gbuf_node_t **nodes = NULL;
+    int count = 0;
+    if (cbm_gbuf_find_by_label(ctx->gb, "Class", &nodes, &count) != 0 || count == 0) {
+        return 0;
+    }
+    ctx->classes = cbm_arena_alloc(&ctx->arena, (size_t)count * sizeof(*ctx->classes));
+    if (!ctx->classes) {
+        return CBM_NOT_FOUND;
+    }
+    for (int i = 0; i < count; i++) {
+        const cbm_gbuf_node_t *c = nodes[i];
+        if (gql_is_schema_file(c->file_path) && c->name && c->qualified_name) {
+            ctx->classes[ctx->class_count++] = (gql_class_t){c, GQL_HEURISTIC, false};
+        }
+    }
+    return ctx->class_count;
+}
+
+/* `schema { ... }` definitions, recorded on each schema file's Module node. */
+static void gql_collect_schemas(gql_ctx_t *ctx) {
+    const cbm_gbuf_node_t **nodes = NULL;
+    int count = 0;
+    if (cbm_gbuf_find_by_label(ctx->gb, "Module", &nodes, &count) != 0 || count == 0) {
+        return;
+    }
+    for (int i = 0; i < count; i++) {
+        const cbm_gbuf_node_t *m = nodes[i];
+        if (!gql_is_schema_file(m->file_path) || !m->properties_json ||
+            !strstr(m->properties_json, "\"graphql_schema_")) {
+            continue;
+        }
+        if (!ctx->schemas) {
+            ctx->schemas = cbm_arena_alloc(&ctx->arena, (size_t)count * sizeof(*ctx->schemas));
+            if (!ctx->schemas) {
+                return;
+            }
+        }
+        gql_schema_t *sd = &ctx->schemas[ctx->schema_count++];
+        sd->file = m->file_path;
+        sd->group = gql_group_of(ctx, m->file_path);
+        yyjson_doc *doc = yyjson_read(m->properties_json, strlen(m->properties_json),
+                                      YYJSON_READ_ALLOW_INVALID_UNICODE);
+        yyjson_val *root = yyjson_doc_get_root(doc);
+        for (int op = 0; op < GQL_OP_COUNT; op++) {
+            sd->roots[op] = gql_prop(&ctx->arena, root, gql_schema_keys[op]);
+        }
+        sd->defined = gql_prop(&ctx->arena, root, "graphql_schema_defined") != NULL;
+        yyjson_doc_free(doc);
+    }
+}
+
+/* Does schema file sd apply to class c? In a config's set, every one of the
+ * set's files; in the heuristic set, those whose parent directory holds c. */
+static bool gql_schema_applies(const gql_schema_t *sd, const gql_class_t *c) {
+    if (sd->group != c->group) {
+        return false;
+    }
+    if (c->group != GQL_HEURISTIC) {
+        return true;
+    }
+    return strncmp(sd->file, c->node->file_path, gql_parent_dir_len(sd->file)) == 0;
+}
+
+/* The root type name of operation op for class c. The `schema` definitions
+ * and `extend schema` blocks that apply to c merge: for each operation, the
+ * first (by path) in a config's set, the nearest in the heuristic set.
+ * Without any `schema` definition the default name stands for an operation
+ * no extension names; with one, an unnamed operation has no root (NULL). */
+static const char *gql_root_name(const gql_ctx_t *ctx, const gql_class_t *c, int op) {
+    const gql_schema_t *best = NULL;
+    size_t best_len = 0;
+    bool defined = false;
+    for (int i = 0; i < ctx->schema_count; i++) {
+        const gql_schema_t *sd = &ctx->schemas[i];
+        if (!gql_schema_applies(sd, c)) {
+            continue;
+        }
+        defined = defined || sd->defined;
+        if (!sd->roots[op]) {
+            continue;
+        }
+        size_t len =
+            c->group == GQL_HEURISTIC ? gql_common_dir_len(sd->file, c->node->file_path) : 0;
+        if (!best || len > best_len || (len == best_len && strcmp(sd->file, best->file) < 0)) {
+            best = sd;
+            best_len = len;
+        }
+    }
+    if (best) {
+        return best->roots[op];
+    }
+    return defined ? NULL : gql_ops[op];
+}
+
+/* The operation class c is the root type of, or CBM_NOT_FOUND. */
+static int gql_root_op(const gql_ctx_t *ctx, const gql_class_t *c) {
+    for (int op = 0; op < GQL_OP_COUNT; op++) {
+        const char *root = gql_root_name(ctx, c, op);
+        if (root && strcmp(root, c->node->name) == 0) {
+            return op;
+        }
+    }
+    return CBM_NOT_FOUND;
+}
+
+static int gql_class_name_cmp(const void *x, const void *y) {
+    const gql_class_t *a = *(const gql_class_t *const *)x;
+    const gql_class_t *b = *(const gql_class_t *const *)y;
+    return strcmp(a->node->name, b->node->name);
+}
+
+static int gql_field_parent_cmp(const void *x, const void *y) {
+    const gql_field_t *a = *(const gql_field_t *const *)x;
+    const gql_field_t *b = *(const gql_field_t *const *)y;
+    return strcmp(a->parent_qn, b->parent_qn);
+}
+
+/* Sort pointers to the n items of size `size` at `items` with cmp; NULL on
+ * allocation failure. */
+static const void **gql_sorted_index(CBMArena *a, const void *items, int n, size_t size,
+                                     int (*cmp)(const void *, const void *)) {
+    const void **index = cbm_arena_alloc(a, ((size_t)n + SKIP_ONE) * sizeof(*index));
+    for (int i = 0; index && i < n; i++) {
+        index[i] = (const char *)items + ((size_t)i * size);
+    }
+    if (index && n > SKIP_ONE) {
+        qsort(index, (size_t)n, sizeof(*index), cmp);
+    }
+    return index;
+}
+
+/* The type named `name` in set `group` nearest `near`, or NULL (ties:
+ * smaller QN). */
+static const gql_class_t *gql_find_class(const gql_ctx_t *ctx, const char *name, const char *near,
+                                         int group) {
+    const gql_class_t *best = NULL;
+    size_t best_len = 0;
+    int lo = 0;
+    int hi = ctx->class_count;
+    while (lo < hi) { /* the first class named `name` or after it */
+        int mid = lo + ((hi - lo) / PAIR_LEN);
+        if (strcmp(ctx->classes_by_name[mid]->node->name, name) < 0) {
+            lo = mid + SKIP_ONE;
+        } else {
+            hi = mid;
+        }
+    }
+    for (int i = lo; i < ctx->class_count && strcmp(ctx->classes_by_name[i]->node->name, name) == 0;
+         i++) {
+        const gql_class_t *c = ctx->classes_by_name[i];
+        if (c->group != group) {
+            continue;
+        }
+        size_t len = gql_common_dir_len(c->node->file_path, near);
+        if (!best || len > best_len ||
+            (len == best_len && strcmp(c->node->qualified_name, best->node->qualified_name) < 0)) {
+            best = c;
+            best_len = len;
+        }
+    }
+    return best;
+}
+
+/* Read one Field node's props; false when it has no parent type. */
+static bool gql_read_field(gql_ctx_t *ctx, const cbm_gbuf_node_t *n, gql_field_t *f) {
+    memset(f, 0, sizeof(*f));
+    yyjson_doc *doc = yyjson_read(n->properties_json, strlen(n->properties_json),
+                                  YYJSON_READ_ALLOW_INVALID_UNICODE);
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    f->node = n;
+    f->parent_qn = gql_prop(&ctx->arena, root, "parent_class");
+    f->extends = gql_prop(&ctx->arena, root, "graphql_extends");
+    f->return_type = gql_prop(&ctx->arena, root, "return_type");
+    const char *flag = gql_prop(&ctx->arena, root, "deprecated");
+    f->deprecated = flag && strcmp(flag, "true") == 0;
+    f->reason = f->deprecated ? gql_prop(&ctx->arena, root, "deprecation_reason") : NULL;
+    f->group = gql_group_of(ctx, n->file_path);
+    yyjson_doc_free(doc);
+    return f->parent_qn != NULL;
+}
+
+static int gql_pending_cmp(const void *x, const void *y) {
+    const gql_field_t *a = *(const gql_field_t *const *)x;
+    const gql_field_t *b = *(const gql_field_t *const *)y;
+    int c = strcmp(a->node->file_path, b->node->file_path);
+    if (c == 0) {
+        c = a->node->start_line - b->node->start_line;
+    }
+    return c != 0 ? c : strcmp(a->node->qualified_name, b->node->qualified_name);
+}
+
+/* Declare T for `extend type T` fields whose set declares no T (a
+ * federation subgraph's `extend type Query`): the first extension (by
+ * path, then line) stands for the type, named T, with its block's QN; the
+ * set's other extensions of T join it (in the heuristic set, only those in
+ * the stand-in's directory or below). False on allocation failure. */
+static bool gql_declare_extended(gql_ctx_t *ctx, gql_field_t **pending, int n) {
+    if (n == 0) {
+        return true;
+    }
+    qsort(pending, (size_t)n, sizeof(*pending), gql_pending_cmp);
+    gql_class_t *grown =
+        cbm_arena_alloc(&ctx->arena, ((size_t)ctx->class_count + (size_t)n) * sizeof(*grown));
+    if (!grown) {
+        return false;
+    }
+    if (ctx->class_count > 0) {
+        memcpy(grown, ctx->classes, (size_t)ctx->class_count * sizeof(*grown));
+    }
+    ctx->classes = grown;
+    for (int i = 0; i < n; i++) {
+        gql_field_t *f = pending[i];
+        const gql_class_t *owner = gql_find_class(ctx, f->extends, f->node->file_path, f->group);
+        /* Unconfigured subgraphs share the heuristic set: a stand-in T
+         * serves the extensions in its own directory and below, never
+         * another service's that reuses the name. */
+        if (owner && owner->synthetic && f->group == GQL_HEURISTIC &&
+            strncmp(f->node->file_path, owner->node->file_path,
+                    gql_dir_len(owner->node->file_path)) != 0) {
+            owner = NULL;
+        }
+        if (!owner) {
+            cbm_gbuf_node_t *type = cbm_arena_alloc(&ctx->arena, sizeof(*type));
+            if (!type) {
+                return false;
+            }
+            memset(type, 0, sizeof(*type));
+            type->label = (char *)"Class";
+            type->name = (char *)f->extends;
+            type->qualified_name = (char *)f->parent_qn;
+            type->file_path = f->node->file_path;
+            type->start_line = f->node->start_line;
+            type->end_line = f->node->end_line;
+            ctx->classes[ctx->class_count++] = (gql_class_t){type, f->group, true};
+            ctx->classes_by_name = (const gql_class_t **)gql_sorted_index(
+                &ctx->arena, ctx->classes, ctx->class_count, sizeof(*ctx->classes),
+                gql_class_name_cmp);
+            if (!ctx->classes_by_name) {
+                return false;
+            }
+            owner = &ctx->classes[ctx->class_count - SKIP_ONE];
+        }
+        f->parent_qn = owner->node->qualified_name;
+    }
+    return true;
+}
+
+/* Collect every schema Field; an `extend type T` field is re-parented to its
+ * set's nearest declared T, or declares T when its set has none. */
+static int gql_collect_fields(gql_ctx_t *ctx) {
+    const cbm_gbuf_node_t **nodes = NULL;
+    int count = 0;
+    if (cbm_gbuf_find_by_label(ctx->gb, "Field", &nodes, &count) != 0 || count == 0) {
+        return 0;
+    }
+    ctx->fields = cbm_arena_alloc(&ctx->arena, (size_t)count * sizeof(*ctx->fields));
+    gql_field_t **pending = cbm_arena_alloc(&ctx->arena, (size_t)count * sizeof(*pending));
+    if (!ctx->fields || !pending) {
+        return CBM_NOT_FOUND;
+    }
+    int pending_count = 0;
+    for (int i = 0; i < count; i++) {
+        const cbm_gbuf_node_t *n = nodes[i];
+        if (!gql_is_schema_file(n->file_path) || !n->name || !n->properties_json) {
+            continue;
+        }
+        gql_field_t *f = &ctx->fields[ctx->field_count];
+        if (!gql_read_field(ctx, n, f)) {
+            continue;
+        }
+        if (f->extends) {
+            const gql_class_t *owner = gql_find_class(ctx, f->extends, n->file_path, f->group);
+            if (owner) {
+                f->parent_qn = owner->node->qualified_name;
+            } else {
+                pending[pending_count++] = f;
+            }
+        }
+        ctx->field_count++;
+    }
+    return gql_declare_extended(ctx, pending, pending_count) ? ctx->field_count : CBM_NOT_FOUND;
+}
+
+/* The receiver type of a Go method: the last segment of its QN's parent,
+ * `proj.graph.resolver.perpResolver.Trades` -> `perpResolver`. */
+static const char *gql_receiver_type(CBMArena *a, const cbm_gbuf_node_t *m) {
+    const char *qn = m->qualified_name;
+    size_t qlen = strlen(qn);
+    size_t nlen = strlen(m->name);
+    if (qlen <= nlen + SKIP_ONE || qn[qlen - nlen - SKIP_ONE] != '.' ||
+        strcmp(qn + qlen - nlen, m->name) != 0) {
+        return NULL;
+    }
+    size_t end = qlen - nlen - SKIP_ONE;
+    size_t start = end;
+    while (start > 0 && qn[start - SKIP_ONE] != '.') {
+        start--;
+    }
+    return cbm_arena_strndup(a, qn + start, end - start);
+}
+
+/* A Go method name as the resolver lookup compares it: lower case. */
+static char *gql_lower_dup(CBMArena *a, const char *s) {
+    char *out = cbm_arena_strdup(a, s);
+    for (char *p = out; p && *p; p++) {
+        *p = (char)tolower((unsigned char)*p);
+    }
+    return out;
+}
+
+/* A schema field name as its generated resolver method is named, in lower
+ * case. gqlgen names the method with templates.ToGo, which splits words at
+ * '_' and joins them capitalized (`user_count` -> `UserCount`, `user_id` ->
+ * `UserID`), but keeps one '_' of a run between two digits (`score0_1` ->
+ * `Score0_1`, distinct from `score01`). Leading and trailing '_' go. Folding
+ * case covers ToGo's initialisms. */
+static char *gql_field_method_dup(CBMArena *a, const char *field) {
+    char *out = cbm_arena_strdup(a, field);
+    char *w = out;
+    for (const char *p = field; out && *p;) {
+        if (*p != '_') {
+            *w++ = (char)tolower((unsigned char)*p++);
+            continue;
+        }
+        const char *run = p;
+        while (*p == '_') {
+            p++;
+        }
+        if (run > field && isdigit((unsigned char)run[-SKIP_ONE]) && isdigit((unsigned char)*p)) {
+            *w++ = '_';
+        }
+    }
+    if (w) {
+        *w = '\0';
+    }
+    return out;
+}
+
+static int gql_resolver_cmp(const void *x, const void *y) {
+    const gql_resolver_t *a = x;
+    const gql_resolver_t *b = y;
+    int c = strcmp(a->key, b->key);
+    return c != 0 ? c : strcmp(a->node->qualified_name, b->node->qualified_name);
+}
+
+static bool gql_dir_listed(const char *const *dirs, int count, const char *dir) {
+    for (int i = 0; i < count; i++) {
+        if (strcmp(dirs[i], dir) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool gql_is_config_package(const gql_ctx_t *ctx, const char *dir) {
+    for (int i = 0; i < ctx->config_count; i++) {
+        if (ctx->configs[i].resolver_pkg && strcmp(ctx->configs[i].resolver_pkg, dir) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* The resolver packages no config claims: directories holding a gqlgen
+ * `*.resolvers.go` file (follow-schema layout) or a `resolver.go` with
+ * resolver methods (single-file layout). */
+static void gql_heuristic_dirs(gql_ctx_t *ctx, const cbm_gbuf_node_t **nodes, int count) {
+    ctx->heuristic_dirs = cbm_arena_alloc(&ctx->arena, (size_t)count * sizeof(char *));
+    for (int i = 0; ctx->heuristic_dirs && i < count; i++) {
+        const char *fp = nodes[i]->file_path;
+        const char *base = fp ? fp + gql_dir_len(fp) : "";
+        if (!fp || (!gql_ends_with(fp, ".resolvers.go") && strcmp(base, "resolver.go") != 0)) {
+            continue;
+        }
+        const char *dir = cbm_arena_strndup(&ctx->arena, fp, gql_dir_len(fp));
+        if (dir && !gql_is_config_package(ctx, dir) &&
+            !gql_dir_listed(ctx->heuristic_dirs, ctx->heuristic_dir_count, dir)) {
+            ctx->heuristic_dirs[ctx->heuristic_dir_count++] = dir;
+        }
+    }
+}
+
+/* Collect the Go methods that can be gqlgen resolvers: receiver type ending
+ * in "Resolver", in a configured or heuristic resolver package. Sorted by
+ * key. */
+static int gql_collect_resolvers(gql_ctx_t *ctx) {
+    const cbm_gbuf_node_t **nodes = NULL;
+    int count = 0;
+    if (cbm_gbuf_find_by_label(ctx->gb, "Method", &nodes, &count) != 0 || count == 0) {
+        return 0;
+    }
+    gql_heuristic_dirs(ctx, nodes, count);
+    ctx->resolvers = cbm_arena_alloc(&ctx->arena, (size_t)count * sizeof(*ctx->resolvers));
+    if (!ctx->resolvers) {
+        return CBM_NOT_FOUND;
+    }
+    for (int i = 0; i < count; i++) {
+        const cbm_gbuf_node_t *m = nodes[i];
+        if (!m->name || !m->qualified_name || !gql_is_go_file(m->file_path)) {
+            continue;
+        }
+        const char *dir = cbm_arena_strndup(&ctx->arena, m->file_path, gql_dir_len(m->file_path));
+        if (!dir || (!gql_is_config_package(ctx, dir) &&
+                     !gql_dir_listed(ctx->heuristic_dirs, ctx->heuristic_dir_count, dir))) {
+            continue;
+        }
+        const char *recv = gql_receiver_type(&ctx->arena, m);
+        if (!recv || !gql_ends_with(recv, "Resolver")) {
+            continue;
+        }
+        const char *method = gql_lower_dup(&ctx->arena, m->name);
+        const char *key = method ? cbm_arena_sprintf(&ctx->arena, "%s.%s", recv, method) : NULL;
+        if (!key) {
+            continue; /* out of memory: never publish an entry without its key */
+        }
+        ctx->resolvers[ctx->resolver_count++] = (gql_resolver_t){m, key, dir};
+    }
+    if (ctx->resolver_count > SKIP_ONE) {
+        qsort(ctx->resolvers, (size_t)ctx->resolver_count, sizeof(*ctx->resolvers),
+              gql_resolver_cmp);
+    }
+    return ctx->resolver_count;
+}
+
+/* The index of the first resolver whose key is `key`, or resolver_count. */
+static int gql_resolver_lower_bound(const gql_ctx_t *ctx, const char *key) {
+    int lo = 0;
+    int hi = ctx->resolver_count;
+    while (lo < hi) {
+        int mid = lo + ((hi - lo) / PAIR_LEN);
+        if (strcmp(ctx->resolvers[mid].key, key) < 0) {
+            lo = mid + SKIP_ONE;
+        } else {
+            hi = mid;
+        }
+    }
+    return lo;
+}
+
+/* The lookup key gqlgen's naming gives field `field` of type `type_name`:
+ * `Perp`, `trades` -> "perpResolver.trades". */
+static const char *gql_resolver_key(CBMArena *a, const char *type_name, const char *field) {
+    const char *lower = gql_field_method_dup(a, field);
+    char *key = lower ? cbm_arena_sprintf(a, "%sResolver.%s", type_name, lower) : NULL;
+    if (key && key[0]) {
+        key[0] = (char)tolower((unsigned char)key[0]);
+    }
+    return key;
+}
+
+/* Does resolver r belong to the server of schema field f? A configured
+ * server owns exactly its resolver package; a heuristic package owns the
+ * schema files in its own directory, below it, or one level below. */
+static bool gql_owns(const gql_ctx_t *ctx, const gql_resolver_t *r, const gql_field_t *f) {
+    if (f->group != GQL_HEURISTIC) {
+        const char *pkg = ctx->configs[f->group].resolver_pkg;
+        return pkg && strcmp(pkg, r->dir) == 0;
+    }
+    if (gql_is_config_package(ctx, r->dir)) {
+        return false;
+    }
+    const char *file = f->node->file_path;
+    size_t sl = gql_dir_len(file);
+    size_t rl = strlen(r->dir);
+    bool same_or_below = rl >= sl && strncmp(r->dir, file, sl) == 0;
+    bool parent = rl == gql_parent_dir_len(file) && strncmp(r->dir, file, rl) == 0;
+    if (sl == 0) {
+        /* A schema at the repository root is "above" every package: only the
+         * root package or one directory below it (gqlgen's graph/, resolver/)
+         * is evidence enough, never another service deeper in the tree. */
+        const char *slash = strchr(r->dir, '/');
+        return !slash || slash[SKIP_ONE] == '\0';
+    }
+    return same_or_below || parent;
+}
+
+/* The fields whose parent is `parent_qn`: [*first, return). */
+static int gql_fields_of(const gql_ctx_t *ctx, const char *parent_qn, int *first) {
+    int lo = 0;
+    int hi = ctx->field_count;
+    while (lo < hi) {
+        int mid = lo + ((hi - lo) / PAIR_LEN);
+        if (strcmp(ctx->fields_by_parent[mid]->parent_qn, parent_qn) < 0) {
+            lo = mid + SKIP_ONE;
+        } else {
+            hi = mid;
+        }
+    }
+    int end = lo;
+    while (end < ctx->field_count && strcmp(ctx->fields_by_parent[end]->parent_qn, parent_qn) == 0) {
+        end++;
+    }
+    *first = lo;
+    return end;
+}
+
+static void gql_add_emit(gql_ctx_t *ctx, const char *path, const char *type_name,
+                         const gql_field_t *f) {
+    if (!path) {
+        return; /* out of memory building the path */
+    }
+    const char *qn = cbm_arena_sprintf(&ctx->arena, "__graphql__%s", path);
+    if (!qn || strlen(qn) >= CBM_ROUTE_QN_SIZE) {
+        ctx->too_long++; /* reported in the pass summary, never truncated */
+        return;
+    }
+    if (ctx->emit_count == ctx->emit_cap) {
+        int cap = ctx->emit_cap ? ctx->emit_cap * PAIR_LEN : GQL_EMIT_INITIAL;
+        gql_emit_t *grown = cbm_arena_alloc(&ctx->arena, (size_t)cap * sizeof(*grown));
+        if (!grown) {
+            return;
+        }
+        if (ctx->emit_count > 0) {
+            memcpy(grown, ctx->emits, (size_t)ctx->emit_count * sizeof(*grown));
+        }
+        ctx->emits = grown;
+        ctx->emit_cap = cap;
+    }
+    ctx->emits[ctx->emit_count++] = (gql_emit_t){qn, path, type_name, f};
+}
+
+/* The field paths of one root type: each field, and each field of that
+ * field's return type. */
+static void gql_plan_root(gql_ctx_t *ctx, const gql_class_t *root, int op) {
+    int first = 0;
+    int end = gql_fields_of(ctx, root->node->qualified_name, &first);
+    for (int i = first; i < end; i++) {
+        const gql_field_t *rf = ctx->fields_by_parent[i];
+        const char *path = cbm_arena_sprintf(&ctx->arena, "%s.%s", gql_ops[op], rf->node->name);
+        if (!path) {
+            continue;
+        }
+        gql_add_emit(ctx, path, root->node->name, rf);
+        const char *base = gql_base_type(&ctx->arena, rf->return_type);
+        const gql_class_t *type =
+            base && base[0] ? gql_find_class(ctx, base, rf->node->file_path, root->group) : NULL;
+        int child = 0;
+        int child_end = type ? gql_fields_of(ctx, type->node->qualified_name, &child) : 0;
+        for (int j = child; j < child_end; j++) {
+            const gql_field_t *cf = ctx->fields_by_parent[j];
+            const char *child_path = cbm_arena_sprintf(&ctx->arena, "%s.%s", path, cf->node->name);
+            if (child_path) {
+                gql_add_emit(ctx, child_path, type->node->name, cf);
+            }
+        }
+    }
+}
+
+static int gql_emit_cmp(const void *x, const void *y) {
+    const gql_emit_t *a = x;
+    const gql_emit_t *b = y;
+    int c = strcmp(a->qn, b->qn);
+    if (c == 0) {
+        c = strcmp(a->field->node->file_path, b->field->node->file_path);
+    }
+    if (c == 0) {
+        c = a->field->node->start_line - b->field->node->start_line;
+    }
+    return c != 0 ? c : strcmp(a->field->node->qualified_name, b->field->node->qualified_name);
+}
+
+/* The decision for one Route: the emission whose field it shows, and the
+ * resolver that handles it (NULL: the field does). */
+typedef struct {
+    const gql_emit_t *emit;
+    const cbm_gbuf_node_t *resolver;
+    bool ambiguous;
+} gql_pick_t;
+
+/* Pick among the emissions [first, first + n) of one field path: the one
+ * resolver method that owns any of them wins; none leaves the Field; more
+ * than one is ambiguous. */
+static gql_pick_t gql_pick(gql_ctx_t *ctx, const gql_emit_t *first, int n) {
+    gql_pick_t pick = {first, NULL, n > SKIP_ONE};
+    for (int e = 0; e < n; e++) {
+        const gql_emit_t *em = &first[e];
+        const char *key = gql_resolver_key(&ctx->arena, em->type_name, em->field->node->name);
+        for (int i = key ? gql_resolver_lower_bound(ctx, key) : ctx->resolver_count;
+             i < ctx->resolver_count && strcmp(ctx->resolvers[i].key, key) == 0; i++) {
+            const gql_resolver_t *r = &ctx->resolvers[i];
+            if (!gql_owns(ctx, r, em->field) || r->node == pick.resolver) {
+                continue;
+            }
+            if (pick.resolver) {
+                return (gql_pick_t){first, NULL, true};
+            }
+            pick = (gql_pick_t){em, r->node, false};
+        }
+    }
+    return pick;
+}
+
+static char *gql_route_props(const gql_field_t *f, bool ambiguous) {
+    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+    if (!doc) {
+        return NULL;
+    }
+    yyjson_mut_val *root = yyjson_mut_obj(doc);
+    yyjson_mut_doc_set_root(doc, root);
+    yyjson_mut_obj_add_str(doc, root, "source", "graphql_schema");
+    yyjson_mut_obj_add_str(doc, root, "schema_type", f->return_type ? f->return_type : "");
+    yyjson_mut_obj_add_bool(doc, root, "deprecated", f->deprecated);
+    yyjson_mut_obj_add_str(doc, root, "deprecation_reason", f->reason ? f->reason : "");
+    if (ambiguous) {
+        yyjson_mut_obj_add_bool(doc, root, "ambiguous", true);
+    }
+    char *json = yyjson_mut_write(doc, YYJSON_WRITE_ALLOW_INVALID_UNICODE, NULL);
+    yyjson_mut_doc_free(doc);
+    return json;
+}
+
+/* Upsert one Route from its pick, with its one HANDLES edge. */
+static void gql_emit_route(gql_ctx_t *ctx, gql_pick_t pick) {
+    const gql_field_t *f = pick.emit->field;
+    char *props = gql_route_props(f, pick.ambiguous);
+    if (!props) {
+        return;
+    }
+    const cbm_gbuf_node_t *fn = f->node;
+    int64_t route_id = cbm_gbuf_upsert_node(ctx->gb, "Route", pick.emit->path, pick.emit->qn,
+                                            fn->file_path, fn->start_line, fn->end_line, props);
+    free(props);
+    if (route_id == 0) {
+        return;
+    }
+    ctx->routes++;
+    ctx->ambiguous += pick.ambiguous ? SKIP_ONE : 0;
+    if (pick.resolver) {
+        cbm_gbuf_insert_edge(ctx->gb, pick.resolver->id, route_id, "HANDLES",
+                             "{\"via\":\"gqlgen_resolver\"}");
+        ctx->via_resolver++;
+    } else {
+        cbm_gbuf_insert_edge(ctx->gb, fn->id, route_id, "HANDLES",
+                             "{\"via\":\"graphql_schema_field\"}");
+        ctx->via_field++;
+    }
+}
+
+static void gql_log_summary(const gql_ctx_t *ctx) {
+    char b1[CBM_SZ_16];
+    char b2[CBM_SZ_16];
+    char b3[CBM_SZ_16];
+    char b4[CBM_SZ_16];
+    (void)snprintf(b1, sizeof(b1), "%d", ctx->routes);
+    (void)snprintf(b2, sizeof(b2), "%d", ctx->via_resolver);
+    (void)snprintf(b3, sizeof(b3), "%d", ctx->via_field);
+    (void)snprintf(b4, sizeof(b4), "%d", ctx->ambiguous);
+    cbm_log_info("pass.route_nodes.graphql", "routes", b1, "via_resolver", b2, "via_field", b3,
+                 "ambiguous", b4);
+    if (ctx->too_long > 0) {
+        char b5[CBM_SZ_16];
+        (void)snprintf(b5, sizeof(b5), "%d", ctx->too_long);
+        cbm_log_warn("pass.route_nodes.graphql_skipped", "reason", "route_qn_too_long", "paths",
+                     b5);
+    }
+}
+
+static void gql_plan_and_emit(gql_ctx_t *ctx) {
+    for (int i = 0; i < ctx->class_count; i++) {
+        ctx->classes[i].group = gql_group_of(ctx, ctx->classes[i].node->file_path);
+    }
+    ctx->classes_by_name = (const gql_class_t **)gql_sorted_index(
+        &ctx->arena, ctx->classes, ctx->class_count, sizeof(*ctx->classes), gql_class_name_cmp);
+    if (!ctx->classes_by_name) {
+        return;
+    }
+    gql_collect_schemas(ctx);
+    if (gql_collect_fields(ctx) <= 0 || gql_collect_resolvers(ctx) < 0) {
+        return;
+    }
+    ctx->fields_by_parent = (const gql_field_t **)gql_sorted_index(
+        &ctx->arena, ctx->fields, ctx->field_count, sizeof(*ctx->fields), gql_field_parent_cmp);
+    if (!ctx->fields_by_parent) {
+        return;
+    }
+    for (int i = 0; i < ctx->class_count; i++) {
+        int op = gql_root_op(ctx, &ctx->classes[i]);
+        if (op >= 0) {
+            gql_plan_root(ctx, &ctx->classes[i], op);
+        }
+    }
+    if (ctx->emit_count > SKIP_ONE) {
+        qsort(ctx->emits, (size_t)ctx->emit_count, sizeof(*ctx->emits), gql_emit_cmp);
+    }
+    for (int i = 0; i < ctx->emit_count;) {
+        int n = SKIP_ONE;
+        while (i + n < ctx->emit_count && strcmp(ctx->emits[i + n].qn, ctx->emits[i].qn) == 0) {
+            n++;
+        }
+        gql_emit_route(ctx, gql_pick(ctx, &ctx->emits[i], n));
+        i += n;
+    }
+}
+
+/* Does the index hold a GraphQL file (by language, so user extension
+ * mappings count)? One pass over the File nodes, so a repository without
+ * GraphQL stops before any Class or Field scan. */
+static bool gql_has_graphql_file(cbm_gbuf_t *gb) {
+    const cbm_gbuf_node_t **nodes = NULL;
+    int count = 0;
+    if (cbm_gbuf_find_by_label(gb, "File", &nodes, &count) != 0) {
+        return false;
+    }
+    for (int i = 0; i < count; i++) {
+        if (gql_is_schema_file(nodes[i]->file_path)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Phase 4b entry: __graphql__<Op>.<field>[.<child>] Routes from GraphQL
+ * schema files, with HANDLES from gqlgen resolvers or the schema Field.
+ * repo_path locates the gqlgen configs (NULL: none are read). */
+void cbm_pipeline_create_graphql_routes(cbm_gbuf_t *gb, const char *repo_path) {
+    if (!gb) {
+        return;
+    }
+    gql_ctx_t ctx = {.gb = gb, .repo_path = repo_path};
+    cbm_arena_init(&ctx.arena);
+    /* Most repositories have no GraphQL: stop before touching anything else.
+     * A schema of extensions only (a federation subgraph) has no Class, so
+     * the Class count alone cannot decide. */
+    if (gql_has_graphql_file(gb) && gql_collect_classes(&ctx) >= 0) {
+        gql_load_configs(&ctx);
+        gql_plan_and_emit(&ctx);
+        gql_free_configs(&ctx);
+        if (ctx.routes > 0 || ctx.too_long > 0) {
+            gql_log_summary(&ctx);
+        }
+    }
+    cbm_arena_destroy(&ctx.arena);
 }
 
 /* Phase 3: Create DATA_FLOWS edges by linking callers through Route to handlers. */

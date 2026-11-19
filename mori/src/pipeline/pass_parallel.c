@@ -2785,46 +2785,6 @@ static void emit_grpc_edge(cbm_gbuf_t *gbuf, const cbm_gbuf_node_t *source, cons
     cbm_gbuf_insert_edge(gbuf, source->id, route_id, "GRPC_CALLS", props);
 }
 
-/* Emit GRAPHQL_CALLS edge. The Route is keyed by the operation NAME only
- * (#598), never by the operation text:
- *   named operation          -> __graphql__<Name>                  name "<Name>"
- *   anonymous query/mutation/ -> __graphql__<type>__anonymous       name "(anonymous <type>)"
- *   subscription (incl. the `{ ... }` query shorthand)
- *   no GraphQL document      -> __graphql__operation__anonymous    name "(anonymous operation)"
- *   (URL, variable, missing string argument)
- * Keys are bounded by the GraphQL Name grammar and deterministic. */
-static void emit_graphql_edge(cbm_gbuf_t *gbuf, const cbm_gbuf_node_t *source, const CBMCall *call,
-                              const cbm_resolution_t *res) {
-    const char *op_type = "operation";
-    char op_name[CBM_SZ_128];
-    bool named = cbm_service_pattern_graphql_operation(call->first_string_arg, &op_type, op_name,
-                                                       sizeof(op_name));
-
-    char route_name[CBM_SZ_256];
-    char route_qn[CBM_SZ_256];
-    if (named) {
-        snprintf(route_name, sizeof(route_name), "%s", op_name);
-        snprintf(route_qn, sizeof(route_qn), "__graphql__%s", op_name);
-    } else {
-        snprintf(route_name, sizeof(route_name), "(anonymous %s)", op_type);
-        snprintf(route_qn, sizeof(route_qn), "__graphql__%s__anonymous", op_type);
-    }
-
-    int64_t route_id = cbm_gbuf_upsert_node(gbuf, "Route", route_name, route_qn, "", 0, 0,
-                                            "{\"source\":\"graphql\"}");
-
-    char esc_c[CBM_SZ_256];
-    char esc_op[CBM_SZ_512];
-    cbm_json_escape(esc_c, sizeof(esc_c), call->callee_name);
-    cbm_json_escape(esc_op, sizeof(esc_op), route_name);
-    char props[CBM_SZ_1K];
-    snprintf(props, sizeof(props),
-             "{\"callee\":\"%s\",\"operation\":\"%s\",\"operation_type\":\"%s\","
-             "\"confidence\":%.2f}",
-             esc_c, esc_op, op_type, res->confidence);
-    cbm_gbuf_insert_edge(gbuf, source->id, route_id, "GRAPHQL_CALLS", props);
-}
-
 /* Emit TRPC_CALLS edge. Extract procedure path from callee chain. */
 static void emit_trpc_edge(cbm_gbuf_t *gbuf, const cbm_gbuf_node_t *source, const CBMCall *call,
                            const cbm_resolution_t *res) {
@@ -2924,7 +2884,12 @@ static bool emit_service_edge(cbm_gbuf_t *gbuf, const cbm_gbuf_node_t *source,
     } else if (svc == CBM_SVC_GRPC) {
         emit_grpc_edge(gbuf, source, call, res);
     } else if (svc == CBM_SVC_GRAPHQL) {
-        emit_graphql_edge(gbuf, source, call, res);
+        /* As pass_calls.c: GraphQL edges plus the plain CALLS edge to an
+         * in-project client wrapper. */
+        cbm_pipeline_emit_graphql_call(gbuf, source, call, res->confidence);
+        if (target && !suppress_plain_calls) {
+            calls_emitted = emit_normal_calls_edge(gbuf, source, target, call, res);
+        }
     } else if (svc == CBM_SVC_TRPC) {
         emit_trpc_edge(gbuf, source, call, res);
     } else if (svc == CBM_SVC_CONFIG) {
@@ -3726,6 +3691,11 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CB
                     cbm_resolution_t imp_res = {.qualified_name = spelled,
                                                 .confidence = PP_HALF_CONF,
                                                 .strategy = "import_binding"};
+                    if (isvc == CBM_SVC_GRAPHQL) {
+                        cbm_pipeline_emit_graphql_call(ws->local_edge_buf, source_node, &through,
+                                                       imp_res.confidence);
+                        continue;
+                    }
                     emit_http_async_service_edge(ws->local_edge_buf, source_node, &through,
                                                  &imp_res, isvc, through.first_string_arg);
                 }
@@ -3799,6 +3769,13 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CB
              * anyway so cross-repo matching has an HTTP_CALLS edge to work with
              * (#523). Mirrors the sequential resolve_single_call bypass. */
             cbm_svc_kind_t psvc = cbm_service_pattern_match(res.qualified_name);
+            if (psvc == CBM_SVC_GRAPHQL && !target_node && res.qualified_name) {
+                /* An external GraphQL client: its document still links
+                 * (mirrors pass_calls.c calls_emit_service_call). */
+                cbm_pipeline_emit_graphql_call(ws->local_edge_buf, source_node, call,
+                                               res.confidence);
+                continue;
+            }
             if ((psvc == CBM_SVC_HTTP || psvc == CBM_SVC_ASYNC) && !target_node) {
                 const char *u = call->first_string_arg;
                 bool url_or_topic = u && u[0] != '\0' &&
@@ -4703,6 +4680,7 @@ static void resolve_worker(int worker_id, void *ctx_ptr) {
         _ph_t0 = extract_now_ns();
         resolve_file_calls(rc, ws, result, rel, module_qn, imp_keys, imp_vals, imp_count, lang,
                            &php_vendor, evidence);
+        cbm_pipeline_emit_graphql_documents(ws->local_edge_buf, rc->main_gbuf, result);
         atomic_fetch_add_explicit(&rc->time_ns_calls, extract_now_ns() - _ph_t0,
                                   memory_order_relaxed);
 

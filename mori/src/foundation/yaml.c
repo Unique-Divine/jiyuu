@@ -113,10 +113,11 @@ static char *trim_dup(const char *start, const char *end) {
     return s;
 }
 
-/* Count leading spaces (not tabs). */
-static int leading_spaces(const char *line) {
+/* Count leading spaces (not tabs) in [line, end): the input need not be
+ * NUL-terminated, so a final line of only spaces stops at end. */
+static int leading_spaces(const char *line, const char *end) {
     int n = 0;
-    while (line[n] == ' ') {
+    while (line + n < end && line[n] == ' ') {
         n++;
     }
     return n;
@@ -182,7 +183,7 @@ static bool peek_is_list(const char *eol, const char *end) {
         if (!peek_eol) {
             peek_eol = end;
         }
-        int pi = leading_spaces(peek);
+        int pi = leading_spaces(peek, peek_eol);
         const char *pc = peek + pi;
         int pcl = (int)(peek_eol - pc);
         if (pcl > 0 && pc[pcl - SKIP_ONE] == '\r') {
@@ -278,7 +279,7 @@ cbm_yaml_node_t *cbm_yaml_parse(const char *text, int len) {
         int line_len = (int)(eol - p);
 
         /* Skip empty lines and comments */
-        int indent = leading_spaces(p);
+        int indent = leading_spaces(p, eol);
         const char *content = p + indent;
         int content_len = line_len - indent;
 
