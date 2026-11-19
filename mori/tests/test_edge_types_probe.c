@@ -977,6 +977,57 @@ TEST(graphql_extension_only_types_stay_in_their_subgraph) {
     PASS();
 }
 
+/* A project holding a schema, its resolver and a client string that selects
+ * the deprecated field: the Route keeps the schema's type, deprecation and
+ * location and its resolver's HANDLES whatever the client side upserts for
+ * the same QN (rev-1 P1; the graph-buffer test covers the tie-break alone).
+ * Only this Route is checked, since a client may add operation Routes. */
+TEST(graphql_mixed_schema_and_client_keep_route_props) {
+    static const EtFile files[] = {
+        {"go.mod", "module mixed\n"},
+        {"graph/schema.graphqls",
+         "type Query {\n  ping: String @deprecated(reason: \"Use pong.\")\n  pong: String\n}\n"},
+        {"graph/schema.resolvers.go",
+         "package graph\n\n"
+         "type queryResolver struct{}\n\n"
+         "func (r *queryResolver) Ping() string {\n\treturn \"p\"\n}\n"},
+        {"graph/schema_test.go",
+         "package graph\n\n"
+         "import \"testing\"\n\n"
+         "type client struct{}\n\n"
+         "func (c *client) MustPost(q string, out interface{}) {}\n\n"
+         "func TestPing(t *testing.T) {\n"
+         "\tc := &client{}\n"
+         "\tvar resp struct{ Ping string }\n"
+         "\tc.MustPost(`query { ping pong }`, &resp)\n}\n"},
+    };
+    EtProj lp;
+    cbm_store_t *store = et_index_files(&lp, files, ET_NWANT(files));
+    int rows = -1;
+    sqlite3_stmt *st = NULL;
+    if (store && sqlite3_prepare_v2(cbm_store_get_db(store),
+                                    "SELECT COUNT(*) FROM nodes r JOIN edges e ON e.target_id = r.id "
+                                    "AND e.type = 'HANDLES' JOIN nodes h ON h.id = e.source_id "
+                                    "WHERE r.project = ?1 AND r.label = 'Route' AND "
+                                    "r.qualified_name = '__graphql__Query.ping' AND "
+                                    "r.file_path = 'graph/schema.graphqls' AND "
+                                    "json_extract(r.properties, '$.source') = 'graphql_schema' AND "
+                                    "json_extract(r.properties, '$.schema_type') = 'String' AND "
+                                    "json_extract(r.properties, '$.deprecated') = 1 AND "
+                                    "json_extract(r.properties, '$.deprecation_reason') = "
+                                    "'Use pong.' AND h.label = 'Method' AND h.name = 'Ping'",
+                                    -1, &st, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(st, 1, lp.project, -1, SQLITE_STATIC);
+        if (sqlite3_step(st) == SQLITE_ROW) {
+            rows = sqlite3_column_int(st, 0);
+        }
+    }
+    sqlite3_finalize(st);
+    et_cleanup(&lp, store);
+    ASSERT_EQ(rows, 1);
+    PASS();
+}
+
 /* Overwrite one fixture file in an indexed project. */
 static void et_rewrite(const EtProj *lp, const char *rel, const char *content) {
     char path[700];
@@ -3858,6 +3909,7 @@ SUITE(edge_types_probe) {
     RUN_TEST(graphql_sibling_schema_single_file_without_config);
     RUN_TEST(graphql_gqlgen_digit_underscore_resolvers);
     RUN_TEST(graphql_extension_only_types_stay_in_their_subgraph);
+    RUN_TEST(graphql_mixed_schema_and_client_keep_route_props);
     RUN_TEST(graphql_extension_only_root_type);
     RUN_TEST(graphql_schema_extension_roots);
     RUN_TEST(graphql_gqlgen_underscored_field_resolver);

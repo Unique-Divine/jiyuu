@@ -2365,11 +2365,13 @@ static void gql_plan_and_emit(gql_ctx_t *ctx) {
     }
 }
 
-/* Does the buffer hold a Field from a GraphQL file? */
-static bool gql_has_schema_field(cbm_gbuf_t *gb) {
+/* Does the index hold a GraphQL file (by language, so user extension
+ * mappings count)? One pass over the File nodes, so a repository without
+ * GraphQL stops before any Class or Field scan. */
+static bool gql_has_graphql_file(cbm_gbuf_t *gb) {
     const cbm_gbuf_node_t **nodes = NULL;
     int count = 0;
-    if (cbm_gbuf_find_by_label(gb, "Field", &nodes, &count) != 0) {
+    if (cbm_gbuf_find_by_label(gb, "File", &nodes, &count) != 0) {
         return false;
     }
     for (int i = 0; i < count; i++) {
@@ -2389,9 +2391,10 @@ void cbm_pipeline_create_graphql_routes(cbm_gbuf_t *gb, const char *repo_path) {
     }
     gql_ctx_t ctx = {.gb = gb, .repo_path = repo_path};
     cbm_arena_init(&ctx.arena);
-    /* Most repositories have no schema: stop before touching anything else.
-     * A schema of extensions only (a federation subgraph) has no Class. */
-    if (gql_collect_classes(&ctx) > 0 || (ctx.class_count == 0 && gql_has_schema_field(gb))) {
+    /* Most repositories have no GraphQL: stop before touching anything else.
+     * A schema of extensions only (a federation subgraph) has no Class, so
+     * the Class count alone cannot decide. */
+    if (gql_has_graphql_file(gb) && gql_collect_classes(&ctx) >= 0) {
         gql_load_configs(&ctx);
         gql_plan_and_emit(&ctx);
         gql_free_configs(&ctx);
