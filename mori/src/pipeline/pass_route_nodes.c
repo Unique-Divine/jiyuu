@@ -1969,17 +1969,35 @@ static const char *gql_receiver_type(CBMArena *a, const cbm_gbuf_node_t *m) {
     return cbm_arena_strndup(a, qn + start, end - start);
 }
 
-/* A field or method name as the resolver lookup compares it: lower case,
- * underscores dropped. gqlgen names a field's resolver method with
- * templates.ToGo, which splits words at '_' and joins them capitalized
- * (`user_count` -> `UserCount`, `user_id` -> `UserID`); folding case and
- * dropping '_' maps both sides to `usercount` / `userid`. */
+/* A Go method name as the resolver lookup compares it: lower case. */
 static char *gql_lower_dup(CBMArena *a, const char *s) {
     char *out = cbm_arena_strdup(a, s);
+    for (char *p = out; p && *p; p++) {
+        *p = (char)tolower((unsigned char)*p);
+    }
+    return out;
+}
+
+/* A schema field name as its generated resolver method is named, in lower
+ * case. gqlgen names the method with templates.ToGo, which splits words at
+ * '_' and joins them capitalized (`user_count` -> `UserCount`, `user_id` ->
+ * `UserID`), but keeps one '_' of a run between two digits (`score0_1` ->
+ * `Score0_1`, distinct from `score01`). Leading and trailing '_' go. Folding
+ * case covers ToGo's initialisms. */
+static char *gql_field_method_dup(CBMArena *a, const char *field) {
+    char *out = cbm_arena_strdup(a, field);
     char *w = out;
-    for (const char *p = out; p && *p; p++) {
+    for (const char *p = field; out && *p;) {
         if (*p != '_') {
-            *w++ = (char)tolower((unsigned char)*p);
+            *w++ = (char)tolower((unsigned char)*p++);
+            continue;
+        }
+        const char *run = p;
+        while (*p == '_') {
+            p++;
+        }
+        if (run > field && isdigit((unsigned char)run[-SKIP_ONE]) && isdigit((unsigned char)*p)) {
+            *w++ = '_';
         }
     }
     if (w) {
@@ -2092,7 +2110,7 @@ static int gql_resolver_lower_bound(const gql_ctx_t *ctx, const char *key) {
 /* The lookup key gqlgen's naming gives field `field` of type `type_name`:
  * `Perp`, `trades` -> "perpResolver.trades". */
 static const char *gql_resolver_key(CBMArena *a, const char *type_name, const char *field) {
-    const char *lower = gql_lower_dup(a, field);
+    const char *lower = gql_field_method_dup(a, field);
     char *key = lower ? cbm_arena_sprintf(a, "%sResolver.%s", type_name, lower) : NULL;
     if (key && key[0]) {
         key[0] = (char)tolower((unsigned char)key[0]);

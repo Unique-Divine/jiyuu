@@ -922,6 +922,34 @@ TEST(graphql_extension_only_root_type) {
     PASS();
 }
 
+/* gqlgen's ToGo keeps one '_' between two digits: `score0_1` is resolved
+ * by Score0_1 and `score01` by Score01, two distinct methods (dropping every
+ * '_' made both keys `score01`, and both Routes ambiguous). */
+static const EtFile et_gqlgen_digit_underscore_files[] = {
+    {"go.mod", "module digits\n"},
+    {"graph/schema.graphqls", "type Query {\n  score0_1: Int\n  score01: Int\n}\n"},
+    {"graph/schema.resolvers.go",
+     "package graph\n\n"
+     "type queryResolver struct{}\n\n"
+     "func (r *queryResolver) Score0_1() int {\n\treturn 0\n}\n\n"
+     "func (r *queryResolver) Score01() int {\n\treturn 1\n}\n"},
+};
+
+static const EtGqlServerRoute et_gqlgen_digit_underscore_want[] = {
+    {"__graphql__Query.score0_1", "Int", "false", "", "Method", ".graph.queryResolver.Score0_1",
+     "gqlgen_resolver", 0},
+    {"__graphql__Query.score01", "Int", "false", "", "Method", ".graph.queryResolver.Score01",
+     "gqlgen_resolver", 0},
+};
+
+TEST(graphql_gqlgen_digit_underscore_resolvers) {
+    ASSERT_TRUE(et_gqlgen_case(et_gqlgen_digit_underscore_files,
+                               ET_NWANT(et_gqlgen_digit_underscore_files), 0,
+                               et_gqlgen_digit_underscore_want,
+                               ET_NWANT(et_gqlgen_digit_underscore_want)));
+    PASS();
+}
+
 /* Overwrite one fixture file in an indexed project. */
 static void et_rewrite(const EtProj *lp, const char *rel, const char *content) {
     char path[700];
@@ -3801,6 +3829,7 @@ SUITE(edge_types_probe) {
     RUN_TEST(graphql_gqlgen_config_sibling_schema_single_file);
     RUN_TEST(graphql_resolver_needs_ownership_without_config);
     RUN_TEST(graphql_sibling_schema_single_file_without_config);
+    RUN_TEST(graphql_gqlgen_digit_underscore_resolvers);
     RUN_TEST(graphql_extension_only_root_type);
     RUN_TEST(graphql_schema_extension_roots);
     RUN_TEST(graphql_gqlgen_underscored_field_resolver);
