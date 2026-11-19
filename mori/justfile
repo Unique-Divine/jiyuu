@@ -1,0 +1,25 @@
+# Suites that exercise the grammars and the extraction pipeline. The full
+# matrix (scripts/test.sh with no arguments) also runs upstream's release and
+# CI contracts, several of which read files this import excludes.
+default_suites := "edge_types_probe lang_contract cross_repo extraction"
+
+# Install the pinned grammars (--from <archive> for a local file, --force).
+grammars *ARGS:
+    bun scripts/grammars-fetch.ts {{ARGS}}
+
+# Build build/c/codebase-memory-mcp after installing the grammars.
+build: grammars
+    scripts/build.sh
+
+# Run grammar suites plus the language-count and vendored-checksum checks.
+test SUITES=default_suites: grammars
+    scripts/test.sh --suites "{{SUITES}}"
+    bash tests/test_language_count_contract.sh
+    scripts/security-vendored.sh
+
+# Test the grammar archive scripts.
+scripts-test:
+    bun test scripts
+
+# Run the script tests, the build and the targeted suites.
+check: scripts-test build test
