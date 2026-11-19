@@ -1612,7 +1612,10 @@ static const EtFile et_gql_ts_files[] = {
      "    oracle {\n"
      "      tokenPricesUsd {\n        __typename\n        priceUsd\n      }\n"
      "    }\n"
-     "  }\n`)\n"},
+     "  }\n`)\n\n"
+     "export function loadTrades() {\n"
+     "  return graphql(`query LoadTrades { perp { trades { id } } }`)\n"
+     "}\n"},
 };
 
 static const char *const et_gql_ts_want[] = {
@@ -1635,8 +1638,9 @@ static const char *const et_gql_ts_reject[] = {
     NULL,
 };
 
-/* CALLS edges into nodes named `name`. */
-static int et_calls_into(const EtFile *files, int nfiles, bool parallel, const char *name) {
+/* CALLS edges from nodes named `src_name` into nodes named `name`. */
+static int et_calls_into(const EtFile *files, int nfiles, bool parallel, const char *src_name,
+                         const char *name) {
     EtProj lp;
     cbm_store_t *store =
         parallel ? et_index_parallel(&lp, files, nfiles) : et_index_files(&lp, files, nfiles);
@@ -1646,12 +1650,17 @@ static int et_calls_into(const EtFile *files, int nfiles, bool parallel, const c
     if (store &&
         cbm_store_find_edges_by_type(store, lp.project, "CALLS", &edges, &n) == CBM_STORE_OK) {
         for (int i = 0; i < n; i++) {
+            cbm_node_t src;
             cbm_node_t tgt;
+            memset(&src, 0, sizeof(src));
             memset(&tgt, 0, sizeof(tgt));
-            if (cbm_store_find_node_by_id(store, edges[i].target_id, &tgt) == CBM_STORE_OK &&
-                tgt.name && strcmp(tgt.name, name) == 0) {
+            if (cbm_store_find_node_by_id(store, edges[i].source_id, &src) == CBM_STORE_OK &&
+                cbm_store_find_node_by_id(store, edges[i].target_id, &tgt) == CBM_STORE_OK &&
+                src.name && strcmp(src.name, src_name) == 0 && tgt.name &&
+                strcmp(tgt.name, name) == 0) {
                 hits++;
             }
+            cbm_node_free_fields(&src);
             cbm_node_free_fields(&tgt);
         }
         cbm_store_free_edges(edges, n);
@@ -1670,9 +1679,10 @@ static int et_gql_ts_case(bool parallel) {
     /* the in-project `graphql` client keeps its plain CALLS callers */
     int calls = et_calls_into(et_gql_ts_files,
                               (int)(sizeof(et_gql_ts_files) / sizeof(et_gql_ts_files[0])),
-                              parallel, "graphql");
+                              parallel, "loadTrades", "graphql");
     if (calls == 0) {
-        fprintf(stderr, "  [ET-GQL] no CALLS edge into graphql (parallel=%d)\n", (int)parallel);
+        fprintf(stderr, "  [ET-GQL] no CALLS edge loadTrades -> graphql (parallel=%d)\n",
+                (int)parallel);
         ok = 0;
     }
     if (!strstr(props, "\"callee\":\"graphql\"") ||
@@ -1984,6 +1994,17 @@ static int et_gql_binding_case(bool parallel) {
          "}\n\n"
          "export function loadExplicit(client: any) {\n"
          "  return client.request({ query: QUERY })\n"
+         "}\n\n"
+         "export function shadowed(query: string, client: any, sink: any) {\n"
+         "  return client.subscribe({ query }, sink)\n"
+         "}\n\n"
+         "export function localDoc(client: any) {\n"
+         "  const query = `query Inner { inner { id } }`\n"
+         "  return client.subscribe({ query })\n"
+         "}\n\n"
+         "const DOCS = `query Profile { viewer { id } } mutation Save { save { ok } }`\n\n"
+         "export function saveVia(transport: any) {\n"
+         "  return transport({ query: DOCS, operationName: \"Save\" })\n"
          "}\n"},
     };
     char dump[CBM_SZ_4K];
@@ -1995,14 +2016,71 @@ static int et_gql_binding_case(bool parallel) {
         "load>__graphql__Q",
         "loadExplicit>__graphql__Query.profile.id",
         "loadExplicit>__graphql__P",
+        /* a local const holding a document links that document */
+        "localDoc>__graphql__Query.inner.id",
+        /* operationName narrows a named binding's document */
+        "saveVia>__graphql__Mutation.save.ok",
+        "saveVia>__graphql__Save",
         NULL,
     };
     static const char *const reject[] = {
         "load>__graphql__Query.profile.id",
         "loadExplicit>__graphql__Query.viewer.id",
+        /* a parameter shadows the module constant */
+        "shadowed>__graphql__Query.viewer.id",
+        "shadowed>__graphql__Q",
+        "localDoc>__graphql__Query.viewer.id",
+        "saveVia>__graphql__Query.viewer.id",
+        "saveVia>__graphql__Profile",
         NULL,
     };
     return et_gql_expect(dump, want, reject);
+}
+
+/* A module constant initialized by a call owns the call's document, whatever
+ * argument holds it; a document it cannot take (the `{ }` shorthand of a
+ * tagged constant) stays with the module's classified call. Nothing is lost. */
+static int et_gql_owner_case(bool parallel) {
+    static const EtFile f[] = {
+        {"app/src/api/owners.ts",
+         "import gql from \"graphql-tag\"\n\n"
+         "declare function transport(o: object): unknown\n"
+         "declare function request(url: string, q: string): unknown\n\n"
+         "export const data = transport({ query: 'query Owned { viewer { id } }' })\n"
+         "export const pending = request(\"/graphql\", `query Q2 { perp { legacy } }`)\n"
+         "export const VIEWER = gql`{ viewer { name } }`\n"},
+        {"sai_cli/core/client.py",
+         "import requests\n\n"
+         "URL = \"https://keeper.example/query\"\n"
+         "resp = requests.post(URL, json={\"query\": \"\"\"query PyQ { perp { trades { id } } }\"\"\"})\n"},
+    };
+    char dump[CBM_SZ_4K];
+    (void)et_gql_edges(f, (int)(sizeof(f) / sizeof(f[0])), parallel, dump, sizeof(dump), NULL,
+                       NULL, NULL, 0);
+    static const char *const want[] = {
+        "data>__graphql__Query.viewer.id",
+        "data>__graphql__Owned",
+        "pending>__graphql__Query.perp.legacy",
+        "resp>__graphql__Query.perp.trades",
+        "app/src/api/owners.ts>__graphql__Query.viewer.name",
+        NULL,
+    };
+    static const char *const reject[] = {
+        "app/src/api/owners.ts>__graphql__Query.viewer.id",
+        "app/src/api/owners.ts>__graphql__Query.perp.legacy",
+        NULL,
+    };
+    return et_gql_expect(dump, want, reject);
+}
+
+TEST(graphql_field_paths_constant_owns_call_document_sequential) {
+    ASSERT_TRUE(et_gql_owner_case(false));
+    PASS();
+}
+
+TEST(graphql_field_paths_constant_owns_call_document_parallel) {
+    ASSERT_TRUE(et_gql_owner_case(true));
+    PASS();
 }
 
 TEST(graphql_field_paths_shorthand_object_binding_sequential) {
@@ -4812,6 +4890,8 @@ SUITE(edge_types_probe) {
     RUN_TEST(graphql_field_paths_route_name_boundary);
     RUN_TEST(graphql_selection_signature_alloc_keeps_every_path);
     RUN_TEST(graphql_selection_signature_dedupe_scales);
+    RUN_TEST(graphql_field_paths_constant_owns_call_document_sequential);
+    RUN_TEST(graphql_field_paths_constant_owns_call_document_parallel);
     RUN_TEST(graphql_field_paths_shorthand_object_binding_sequential);
     RUN_TEST(graphql_field_paths_shorthand_object_binding_parallel);
     RUN_TEST(graphql_field_paths_external_client_shorthand_sequential);

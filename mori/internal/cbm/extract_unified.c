@@ -1441,30 +1441,17 @@ static bool is_string_node(const char *kind);
 
 // --- Module-level constant collection ---
 
-/* A module-level constant whose value is a GraphQL operation document: a
- * string or template literal (`MARKETS = """query { ... }"""`), or a call or
- * tagged template wrapping one (`const q = graphql(`query Q { ... }`)`,
- * `const q = gql`...``). Records a CBM_STRREF_GRAPHQL ref owned by the
- * constant: value = selection signature, key_path = the wrapping callee (NULL
- * for a bare literal). An operation keyword and a field are required: a
- * `{ ... }` literal is not evidence of a GraphQL document. */
+/* A module-level constant whose value is a GraphQL operation document held
+ * as a string or template literal (`MARKETS = """query { ... }"""`). Records
+ * a CBM_STRREF_GRAPHQL ref owned by the constant (value = selection
+ * signature). A call or tagged template wrapping a document
+ * (`const q = graphql(`query Q { ... }`)`) is read by the call reader
+ * (extract_calls.c), which gives the same constant ownership of whatever
+ * argument holds the document. An operation keyword and a field are
+ * required: a `{ ... }` literal is not evidence of a GraphQL document. */
 static void record_graphql_constant(CBMExtractCtx *ctx, const char *name, TSNode value) {
     if (!name || !name[0] || !ctx->module_qn) {
         return;
-    }
-    const char *callee = NULL;
-    const char *vk = ts_node_type(value);
-    if (strcmp(vk, "call_expression") == 0 || strcmp(vk, "call") == 0) {
-        TSNode fn = ts_node_child_by_field_name(value, TS_FIELD("function"));
-        TSNode args = ts_node_child_by_field_name(value, TS_FIELD("arguments"));
-        if (ts_node_is_null(fn) || ts_node_is_null(args)) {
-            return;
-        }
-        callee = cbm_node_text(ctx->arena, fn, ctx->source);
-        value = strcmp(ts_node_type(args), "template_string") == 0 ||
-                        ts_node_named_child_count(args) == 0
-                    ? args
-                    : ts_node_named_child(args, 0);
     }
     const char *sig = cbm_graphql_literal_sig(ctx->arena, value, ctx->source, true);
     if (!sig || !cbm_service_pattern_graphql_sig_has_paths(sig)) {
@@ -1473,7 +1460,7 @@ static void record_graphql_constant(CBMExtractCtx *ctx, const char *name, TSNode
     CBMStringRef ref = {
         .value = sig,
         .enclosing_func_qn = cbm_arena_sprintf(ctx->arena, "%s.%s", ctx->module_qn, name),
-        .key_path = callee,
+        .key_path = NULL,
         .kind = CBM_STRREF_GRAPHQL,
     };
     if (ref.enclosing_func_qn) {

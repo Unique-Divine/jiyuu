@@ -3421,34 +3421,191 @@ static bool graphql_callee_is_logging(const char *callee) {
     return false;
 }
 
+/* Does the source text of node n spell exactly `name`? */
+static bool graphql_node_spells(CBMExtractCtx *ctx, TSNode n, const char *name, size_t len) {
+    uint32_t start = ts_node_start_byte(n);
+    uint32_t end = ts_node_end_byte(n);
+    return ctx->source && end - start == len && strncmp(ctx->source + start, name, len) == 0;
+}
+
+static bool graphql_function_like(const char *k) {
+    static const char *const kinds[] = {
+        "function_declaration",
+        "function_expression",
+        "function",
+        "arrow_function",
+        "method_definition",
+        "generator_function_declaration",
+        "generator_function",
+        "function_definition",
+        "lambda",
+        NULL,
+    };
+    for (int i = 0; kinds[i]; i++) {
+        if (strcmp(k, kinds[i]) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Does a parameter list (any depth: defaults, destructuring, types) bind
+ * `name`? Iterative walk with an explicit stack. */
+static bool graphql_params_bind(CBMExtractCtx *ctx, TSNode params, const char *name, size_t len) {
+    enum { GQL_PARAM_STACK = 64 };
+    TSNode stack[GQL_PARAM_STACK];
+    int top = 0;
+    stack[top++] = params;
+    while (top > 0) {
+        TSNode n = stack[--top];
+        const char *k = ts_node_type(n);
+        if ((strcmp(k, "identifier") == 0 ||
+             strcmp(k, "shorthand_property_identifier_pattern") == 0) &&
+            graphql_node_spells(ctx, n, name, len)) {
+            return true;
+        }
+        uint32_t nc = ts_node_named_child_count(n);
+        for (uint32_t i = 0; i < nc && top < GQL_PARAM_STACK; i++) {
+            stack[top++] = ts_node_named_child(n, i);
+        }
+    }
+    return false;
+}
+
+typedef enum {
+    GQL_BIND_NONE,   /* a parameter or other local shadows it, or no binding */
+    GQL_BIND_LOCAL,  /* a declaration inside the function: *value is its initializer */
+    GQL_BIND_MODULE, /* the module-level constant of that name */
+} graphql_binding_t;
+
+/* A declaration of `name` among the direct children of a block: its
+ * initializer through *value (null when it has none). */
+static bool graphql_block_declares(CBMExtractCtx *ctx, TSNode block, const char *name, size_t len,
+                                   TSNode *value) {
+    uint32_t nc = ts_node_named_child_count(block);
+    for (uint32_t i = 0; i < nc; i++) {
+        TSNode stmt = ts_node_named_child(block, i);
+        const char *sk = ts_node_type(stmt);
+        if (strcmp(sk, "export_statement") == 0 && ts_node_named_child_count(stmt) > 0) {
+            stmt = ts_node_named_child(stmt, 0);
+            sk = ts_node_type(stmt);
+        }
+        bool js = strcmp(sk, "lexical_declaration") == 0 || strcmp(sk, "variable_declaration") == 0;
+        bool py = strcmp(sk, "expression_statement") == 0;
+        if (!js && !py) {
+            continue;
+        }
+        uint32_t dc = ts_node_named_child_count(stmt);
+        for (uint32_t j = 0; j < dc; j++) {
+            TSNode d = ts_node_named_child(stmt, j);
+            const char *dk = ts_node_type(d);
+            TSNode n = {0};
+            TSNode v = {0};
+            if (js && strcmp(dk, "variable_declarator") == 0) {
+                n = ts_node_child_by_field_name(d, TS_FIELD("name"));
+                v = ts_node_child_by_field_name(d, TS_FIELD("value"));
+            } else if (py && strcmp(dk, "assignment") == 0) {
+                n = ts_node_child_by_field_name(d, TS_FIELD("left"));
+                v = ts_node_child_by_field_name(d, TS_FIELD("right"));
+            }
+            if (!ts_node_is_null(n) && strcmp(ts_node_type(n), "identifier") == 0 &&
+                graphql_node_spells(ctx, n, name, len)) {
+                *value = v;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+/* Which binding `name` refers to at the call: walking out from the call, a
+ * parameter or local declaration shadows the module constant. */
+static graphql_binding_t graphql_resolve_binding(CBMExtractCtx *ctx, TSNode call_node,
+                                                 const char *name, TSNode *value) {
+    size_t len = strlen(name);
+    TSNode none = {0};
+    *value = none;
+    for (TSNode a = ts_node_parent(call_node); !ts_node_is_null(a); a = ts_node_parent(a)) {
+        const char *k = ts_node_type(a);
+        bool root = ts_node_is_null(ts_node_parent(a));
+        if (graphql_function_like(k)) {
+            TSNode params = ts_node_child_by_field_name(a, TS_FIELD("parameters"));
+            if (ts_node_is_null(params)) {
+                params = ts_node_child_by_field_name(a, TS_FIELD("parameter"));
+            }
+            if (!ts_node_is_null(params) && graphql_params_bind(ctx, params, name, len)) {
+                return GQL_BIND_NONE;
+            }
+            continue;
+        }
+        bool block = root || strcmp(k, "statement_block") == 0 || strcmp(k, "block") == 0;
+        if (block && graphql_block_declares(ctx, a, name, len, value)) {
+            return root ? GQL_BIND_MODULE : GQL_BIND_LOCAL;
+        }
+    }
+    return GQL_BIND_NONE;
+}
+
+/* The signature of the document a local const holds (keyword form only),
+ * narrowed to `op_name` when it names one of its operations; NULL when the
+ * initializer is no such document. */
+static const char *graphql_local_document(CBMExtractCtx *ctx, TSNode init, const char *op_name) {
+    bool shorthand = false;
+    const char *sig = cbm_graphql_literal_sig_ex(ctx->arena, init, ctx->source, &shorthand);
+    if (!sig || shorthand) {
+        return NULL;
+    }
+    char *picked = op_name ? cbm_service_pattern_graphql_sig_select(sig, op_name) : NULL;
+    if (picked) {
+        sig = cbm_arena_sprintf(ctx->arena, "%s", picked);
+        free(picked);
+    }
+    return cbm_service_pattern_graphql_sig_has_paths(sig) ? sig : NULL;
+}
+
 /* A call argument that is a whole GraphQL operation (operation keyword and
  * selection set, not the `{ }` shorthand) is the client's own evidence of
  * the fields it selects, whatever the callee: graphql-ws `client.subscribe`,
  * a plain `fetch`, or a project helper are not GraphQL client libraries the
- * callee classifier knows. Records a CBM_STRREF_GRAPHQL ref owned by the
- * enclosing function so its field paths link like a constant's. A call that
- * names a binding instead (`{ query }`) records a CBM_STRREF_GRAPHQL_REF to
- * the module constant of that name, resolved against the file's constants
- * when edges are emitted. */
-static void record_graphql_call_document(CBMExtractCtx *ctx, const CBMCall *call,
-                                         const graphql_arg_t *g) {
-    if (!call->enclosing_func_qn || graphql_callee_is_logging(call->callee_name)) {
-        return;
+ * callee classifier knows. Records a CBM_STRREF_GRAPHQL ref owned by `owner`
+ * (the module constant the call initializes, else the enclosing function).
+ * A call that names a binding instead (`{ query }`) is resolved through
+ * scope: a local const initialized with a document links that document, the
+ * module constant of that name records a CBM_STRREF_GRAPHQL_REF ("<QN>" or
+ * "<QN>\n<operationName>") resolved against the file's constants when edges
+ * are emitted, and a parameter or other local links nothing. Returns whether
+ * a ref was recorded. */
+static bool record_graphql_call_document(CBMExtractCtx *ctx, const CBMCall *call,
+                                         const graphql_arg_t *g, TSNode call_node,
+                                         const char *owner) {
+    if (!owner || graphql_callee_is_logging(call->callee_name)) {
+        return false;
     }
     CBMStringRef ref = {
-        .enclosing_func_qn = call->enclosing_func_qn,
+        .enclosing_func_qn = owner,
         .key_path = call->callee_name,
         .kind = CBM_STRREF_GRAPHQL,
     };
     if (g->sig && !g->shorthand && cbm_service_pattern_graphql_sig_has_paths(g->sig)) {
         ref.value = g->sig;
-    } else if (!g->sig && g->ident && ctx->module_qn) {
-        ref.value = cbm_arena_sprintf(ctx->arena, "%s.%s", ctx->module_qn, g->ident);
-        ref.kind = CBM_STRREF_GRAPHQL_REF;
+    } else if (!g->sig && g->ident) {
+        TSNode init = {0};
+        graphql_binding_t b = graphql_resolve_binding(ctx, call_node, g->ident, &init);
+        if (b == GQL_BIND_LOCAL && !ts_node_is_null(init)) {
+            ref.value = graphql_local_document(ctx, init, g->op_name);
+        } else if (b == GQL_BIND_MODULE && ctx->module_qn) {
+            ref.value = g->op_name
+                            ? cbm_arena_sprintf(ctx->arena, "%s.%s\n%s", ctx->module_qn, g->ident,
+                                                g->op_name)
+                            : cbm_arena_sprintf(ctx->arena, "%s.%s", ctx->module_qn, g->ident);
+            ref.kind = CBM_STRREF_GRAPHQL_REF;
+        }
     }
-    if (ref.value) {
-        cbm_stringref_push(&ctx->result->string_refs, ctx->arena, ref);
+    if (!ref.value) {
+        return false;
     }
+    cbm_stringref_push(&ctx->result->string_refs, ctx->arena, ref);
+    return true;
 }
 
 /* Languages whose code calls GraphQL clients with document literals; the
@@ -3479,22 +3636,21 @@ static bool graphql_reader_language(CBMLanguage lang) {
     }
 }
 
-/* Is this call the whole value of a module-level constant
- * (`export const TRADES = graphql(`...`)`, `MARKETS = gql("""...""")`)?
- * Then the constant records the document (extract_unified.c
- * record_graphql_constant) and the call adds no second, module-owned copy. */
-static bool graphql_call_owned_by_constant(CBMExtractCtx *ctx, TSNode node,
-                                           const char *enclosing_qn) {
+/* The module-level constant this call is the whole value of
+ * (`export const TRADES = graphql(`...`)`, `MARKETS = gql("""...""")`), as
+ * its QN, or NULL. A document such a call passes is owned by the constant,
+ * not by its module. */
+static const char *graphql_call_owner(CBMExtractCtx *ctx, TSNode node, const char *enclosing_qn) {
     if (!enclosing_qn || !ctx->module_qn || strcmp(enclosing_qn, ctx->module_qn) != 0) {
-        return false;
+        return NULL;
     }
     TSNode parent = ts_node_parent(node);
     if (ts_node_is_null(parent)) {
-        return false;
+        return NULL;
     }
     const char *pk = ts_node_type(parent);
     if (strcmp(pk, "variable_declarator") != 0 && strcmp(pk, "assignment") != 0) {
-        return false;
+        return NULL;
     }
     TSNode name = ts_node_child_by_field_name(parent, TS_FIELD("name"));
     TSNode value = ts_node_child_by_field_name(parent, TS_FIELD("value"));
@@ -3502,9 +3658,13 @@ static bool graphql_call_owned_by_constant(CBMExtractCtx *ctx, TSNode node,
         name = ts_node_child_by_field_name(parent, TS_FIELD("left"));
         value = ts_node_child_by_field_name(parent, TS_FIELD("right"));
     }
-    return !ts_node_is_null(name) && !ts_node_is_null(value) && ts_node_eq(value, node) &&
-           (strcmp(ts_node_type(name), "identifier") == 0 ||
-            strcmp(ts_node_type(name), "constant") == 0);
+    if (ts_node_is_null(name) || ts_node_is_null(value) || !ts_node_eq(value, node) ||
+        (strcmp(ts_node_type(name), "identifier") != 0 &&
+         strcmp(ts_node_type(name), "constant") != 0)) {
+        return NULL;
+    }
+    const char *text = cbm_node_text(ctx->arena, name, ctx->source);
+    return text ? cbm_arena_sprintf(ctx->arena, "%s.%s", ctx->module_qn, text) : NULL;
 }
 
 // Extract URL/topic from keyword or positional args.
@@ -5317,11 +5477,15 @@ CBMInvocationDescriptor handle_calls(CBMExtractCtx *ctx, TSNode node, const CBML
                 if (graphql_reader_language(ctx->language)) {
                     graphql_arg_t gql = extract_graphql_arg(ctx, args);
                     call.graphql_sig = gql.sig;
-                    call.graphql_owned = gql.sig && graphql_call_owned_by_constant(
-                                                        ctx, node, call.enclosing_func_qn);
-                    if (!call.graphql_owned) {
-                        record_graphql_call_document(ctx, &call, &gql);
-                    }
+                    const char *owner = gql.sig || gql.ident
+                                            ? graphql_call_owner(ctx, node, call.enclosing_func_qn)
+                                            : NULL;
+                    bool recorded = record_graphql_call_document(
+                        ctx, &call, &gql, node, owner ? owner : call.enclosing_func_qn);
+                    /* The constant now holds the document: the module adds no
+                     * second, classified copy. A document the constant could
+                     * not take (the `{ }` shorthand) stays with the call. */
+                    call.graphql_owned = owner && recorded && gql.sig;
                 }
                 /* #1146: a Laravel registration's slashless URI ('users', '')
                  * becomes '/users' / '/' so it mints and composes below. */

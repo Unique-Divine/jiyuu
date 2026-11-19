@@ -1004,22 +1004,35 @@ void cbm_pipeline_emit_graphql_documents(cbm_gbuf_t *gbuf, const cbm_gbuf_t *loo
             continue;
         }
         const char *sig = sr->value;
+        char *picked = NULL;
         if (sr->kind == CBM_STRREF_GRAPHQL_REF) {
             /* `client.subscribe({ query })`: the call names a constant of
-             * this module; its document is the call's operation. */
-            const CBMStringRef *doc = pc_graphql_constant(result, sr->value);
+             * this module ("<QN>" or "<QN>\n<operationName>"); its document,
+             * narrowed to that operation, is the call's operation. */
+            char const_qn[CBM_SZ_1K];
+            const char *nl = strchr(sr->value, '\n');
+            size_t qlen = nl ? (size_t)(nl - sr->value) : strlen(sr->value);
+            if (qlen >= sizeof(const_qn)) {
+                continue;
+            }
+            memcpy(const_qn, sr->value, qlen);
+            const_qn[qlen] = '\0';
+            const CBMStringRef *doc = pc_graphql_constant(result, const_qn);
             if (!doc) {
                 continue;
             }
             sig = doc->value;
+            picked = nl ? cbm_service_pattern_graphql_sig_select(sig, nl + SKIP_ONE) : NULL;
+            sig = picked ? picked : sig;
         }
         const cbm_gbuf_node_t *source = pc_graphql_ref_source(lookup, sr->enclosing_func_qn);
-        if (!source) {
-            continue;
+        if (source) {
+            /* A named document keeps its operation-name Route, as a call
+             * site does (#598); an anonymous one adds no shared key. */
+            pc_emit_graphql_records(gbuf, source->id, sig, sr->key_path, PC_GRAPHQL_DOC_CONF,
+                                    false);
         }
-        /* A named document keeps its operation-name Route, as a call site
-         * does (#598); an anonymous one adds no shared key. */
-        pc_emit_graphql_records(gbuf, source->id, sig, sr->key_path, PC_GRAPHQL_DOC_CONF, false);
+        free(picked);
     }
 }
 
