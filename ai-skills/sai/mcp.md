@@ -43,7 +43,10 @@ about the server. Call `mcp_info`.
 ## Tools
 
 Call `mcp_info` first. It reports the version, endpoints, the active account,
-and `trading`, which says whether trades can submit.
+and `trading`, which says whether trades can submit. `restartNeeded` is true
+when sai was updated and this server still runs the old code; ask the person
+to restart the client. `logs.dir` is where sai logs every tool call, and `sai
+logs tail --surface mcp` in a terminal reads them ([cli.md](cli.md#logs)).
 
 | Tool | Use |
 | --- | --- |

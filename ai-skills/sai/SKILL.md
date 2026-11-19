@@ -7,6 +7,7 @@ description: >-
   positions, balances, trade history, live watches, connecting a Sai account,
   previewing or submitting trades, checking intents, installing or
   configuring the Sai MCP server, `sai config`, `sai doctor`, `sai update`,
+  `sai logs`,
   fees, open interest, SLP vaults, referrals, or disagreements between
   on-chain and indexed data. Use agent skill `sai-ops` for contract and
   operator mutations.
@@ -27,8 +28,16 @@ the pages the task needs.
 
 ## Install
 
-Check for the CLI with `sai --version`. If it is missing, install it with
-[uv](https://docs.astral.sh/uv/):
+Check for the CLI with `sai --version`. If it is missing, install the newest
+release with [uv](https://docs.astral.sh/uv/):
+
+```bash
+uv run https://raw.githubusercontent.com/SaiDotFun/open-sai/main/scripts/install.py
+```
+
+The script finds the newest `sai-cli` release, checks its wheel against the
+release's checksums, and installs it with `uv tool install`. To build from
+source instead:
 
 ```bash
 uv tool install git+https://github.com/SaiDotFun/open-sai
@@ -48,6 +57,7 @@ package.
 | Task | Page |
 | --- | --- |
 | Run `sai` commands: markets, accounts, watches, connecting an account, settings, `sai doctor`, `sai update` | [cli.md](cli.md) |
+| Find out what a command, MCP tool call, or trade did, from `sai logs` | [cli.md](cli.md#logs) |
 | Register the MCP server with an agent client, or use Sai MCP tools | [mcp.md](mcp.md) |
 | Anything that previews, submits, or follows a trade, through the CLI or MCP | [trading-safety.md](trading-safety.md) |
 | Live Perp and Oracle contract state: markets, collaterals, OI limits, fees, deposits, credits | [references/contracts.md](references/contracts.md) |

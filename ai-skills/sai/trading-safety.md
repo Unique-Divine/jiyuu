@@ -82,6 +82,12 @@ error after submission leaves the outcome unknown.
 - An unknown intent blocks new trades on that account until it is resolved.
 - Resolve it with `sai --json intent status ADDR --key KEY`, or with tools
   `intent_local` then `intent_status`.
+- To see what happened on this machine, read the logs: `sai --json logs tail
+  -n 50 --event intent` shows the intent's status changes by `intentKey`,
+  and `--event keeper.request` shows whether the `submit` request was sent
+  and what Keeper answered. [cli.md](cli.md#logs) explains the fields. The
+  logs are evidence, not the outcome: Keeper's record from `intent status`
+  still decides.
 - When Keeper has no record of the key five minutes after submission, the CLI
   marks the intent `absent` and trading resumes. Keeper expires an unadmitted
   intent after two minutes, so `absent` means it was not admitted.

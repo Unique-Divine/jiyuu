@@ -5,8 +5,8 @@ Use this page to run `sai` commands. For trades, also read
 prefer them and read [mcp.md](mcp.md).
 
 Command `sai --help` lists the command groups: `account`, `auth`, `config`,
-`doctor`, `intent`, `market`, `mcp`, `trade`, `update`, and `watch`, plus
-`skill` on versions that have it. Global options go before the command:
+`doctor`, `intent`, `logs`, `market`, `mcp`, `trade`, `update`, and `watch`,
+plus `skill` on versions that have it. Global options go before the command:
 
 ```bash
 sai --json market prices
@@ -106,11 +106,14 @@ sai config unset keeper.endpoint
 | `keeper.endpoint` | Keeper GraphQL HTTP endpoint | `SAI_ENDPOINT` | `--endpoint` |
 | `keeper.ws_endpoint` | Keeper WebSocket endpoint. Unset derives it from `keeper.endpoint`. | `SAI_WS_ENDPOINT` | `--ws-endpoint` |
 | `lcd.endpoint` | Nibiru REST endpoint for margin and partial-close reads | `SAI_LCD_ENDPOINT` | `--lcd-endpoint` |
-| `update.auto` | Reserved for automatic updates. `sai update` installs nothing by itself. | `SAI_UPDATE_AUTO` | |
+| `update.auto` | `true` (default): sai installs new releases by itself, about once a day. `false`: it only says a release is available. | `SAI_UPDATE_AUTO` | |
+| `logs.enabled` | `true` (default): record commands, tool calls, and requests under `~/.sai/logs`. | `SAI_LOG` | |
+| `logs.keep_days` | Days of log files to keep. Default `14`. | `SAI_LOG_KEEP_DAYS` | |
 
 A flag overrides a variable, which overrides the file, which overrides the
 mainnet default. `config list` shows each key's value and its source: `flag`,
-`env`, `file`, `default`, or `derived`. Change settings with `sai config set`
+`env`, `file`, `default`, `derived`, or `invalid`. `invalid` marks a `logs.*`
+value sai could not read, which turns logging off. Change settings with `sai config set`
 and `sai config unset`. Do not edit the file or an MCP client's config by
 hand.
 
@@ -157,21 +160,76 @@ never prints the token.
   checks.
 - Doctor exits 1 while any check still fails.
 
+## Logs
+
+sai records what it does as JSON lines under `~/.sai/logs` (`$SAI_HOME/logs`):
+each CLI command, each MCP tool call, each Keeper request, and each intent
+status change. It never writes the session token. Read the logs when a
+command or tool call failed, timed out, or left a trade's outcome unclear.
+
+```bash
+sai --json logs tail -n 50
+sai --json logs tail -n 50 --surface mcp
+sai --json logs tail --event intent
+sai --json logs tail --event keeper.request
+sai logs path
+```
+
+- `tail` shows the most recent events, oldest first. `-n` sets how many.
+  With `--json` each line is the stored JSON object.
+- `--surface` is `cli`, `mcp`, or `update`. Each surface has its own file
+  per UTC day.
+- `--event NAME` matches one event or a family by prefix: `intent`,
+  `keeper`, `mcp`, `command`, `update`.
+- `sai logs path` prints the directory. Tool `mcp_info` reports the same
+  directory as `logs.dir`.
+
+| Event | Fields to read |
+| --- | --- |
+| `command.end` | `exitCode`, `error`, `durationMs` |
+| `mcp.tool_result` | `code`, `durationMs`, `error` |
+| `keeper.request` | `operation`, `status`, `httpStatus`, `keeperErrors` |
+| `intent.status` | `intentKey`, `previous`, `status` |
+
+Every line carries `ts`, `surface`, `event`, and `runId`. `runId` is one id
+per process, so it ties the lines of one command together. Lines written
+during an MCP tool call also carry `tool` and `callId`; filter on `callId` to
+follow one call from `mcp.tool_call` to `mcp.tool_result`. To follow one
+trade, filter on its `intentKey`.
+
+A `keeper.request` has `status` `ok`, `error`, `rejected` (Keeper refused
+the request), or `not_sent` (the connection failed first). Operation `submit`
+is the trade submission.
+
+Logging is on by default. `sai config set logs.enabled false` or `SAI_LOG=0`
+turns it off, and `logs.keep_days` sets how long files stay. Do not turn
+logging off or delete log files unless the person asks.
+
 ## Update
 
 ```bash
 sai --version
 sai --json update --check
+sai update
 ```
 
-`sai update --check` compares the installed version with the latest GitHub
-release, reports how `sai` was installed, and prints the command that updates
-it. Run the command it prints. Until a release exists it fails with "no
-release is published yet", and reinstalling from `main` is the update:
-
-```bash
-uv tool install --reinstall git+https://github.com/SaiDotFun/open-sai
-```
+- `sai update` installs the latest release over the current install. The
+  `sai` path and everything under `~/.sai` stay the same, so MCP
+  registrations keep working. If a step fails, the previous version stays.
+- `sai update --check` only reports the installed and latest versions.
+- sai also updates by itself. With `update.auto` at its default `true`, a
+  command a person runs in a terminal starts an update in the background at
+  most once a day. With `update.auto` set to `false`, sai only says a release
+  is available.
+- A command run with `--json`, or without a terminal, never starts an update.
+  Commands an agent runs therefore do not update sai by themselves. Run `sai
+  update` when the person asks for the update.
+- After an update, ask the person to restart or reconnect their agent client.
+  A running MCP server keeps the old code until then; tool `mcp_info` reports
+  `restartNeeded`.
+- `sai update` only updates a `uv tool install` of a release or of the
+  official Git source. A checkout, a `uvx` run, or another install gets a
+  note and exit code 3. Follow the note.
 
 ## This Skill
 
