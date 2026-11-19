@@ -1320,9 +1320,10 @@ bool cbm_gqlgen_glob_match(const char *glob, const char *path);
  * its top level? An operation document (query/mutation/subscription/
  * fragment) does not. The input need not be NUL-terminated. */
 bool cbm_graphql_text_defines_schema(const char *text, size_t len);
-/* Does Go text declare a method whose receiver type ends in "Resolver" (a
- * method the GraphQL route pass may bind)? */
-bool cbm_go_text_has_resolver_method(const char *text, size_t len);
+/* Does Go text declare a method (`func (r T) Name`) whose receiver type ends
+ * in receiver_suffix ("Resolver": one the GraphQL route pass may bind; NULL:
+ * any method)? */
+bool cbm_go_text_has_method(const char *text, size_t len, const char *receiver_suffix);
 
 /* ── Pass function prototypes ────────────────────────────────────── */
 

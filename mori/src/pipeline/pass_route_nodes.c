@@ -1114,11 +1114,11 @@ bool cbm_graphql_text_defines_schema(const char *text, size_t len) {
     return false;
 }
 
-bool cbm_go_text_has_resolver_method(const char *text, size_t len) {
+bool cbm_go_text_has_method(const char *text, size_t len, const char *receiver_suffix) {
     static const char FUNC[] = "func";
-    static const char SUFFIX[] = "Resolver";
+    const char *suffix = receiver_suffix ? receiver_suffix : "";
     size_t fl = sizeof(FUNC) - SKIP_ONE;
-    size_t sl = sizeof(SUFFIX) - SKIP_ONE;
+    size_t sl = strlen(suffix);
     for (size_t i = 0; text && i + fl < len; i++) {
         if (strncmp(text + i, FUNC, fl) != 0 || (i > 0 && gql_word_char(text[i - SKIP_ONE])) ||
             gql_word_char(text[i + fl])) {
@@ -1140,7 +1140,7 @@ bool cbm_go_text_has_resolver_method(const char *text, size_t len) {
             end--;
         }
         if (close < len && text[close] == ')' && end - j > sl &&
-            strncmp(text + end - sl, SUFFIX, sl) == 0) {
+            strncmp(text + end - sl, suffix, sl) == 0) {
             return true;
         }
     }

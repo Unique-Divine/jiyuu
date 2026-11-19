@@ -2860,12 +2860,11 @@ static int closure_gql_store_count(cbm_store_t *store, const char *sql, const ch
     return count;
 }
 
-/* The schema nodes the route pass reads: types, fields and `schema`
- * definitions, in GraphQL files. */
+/* The schema nodes the route pass reads from a GraphQL file: types, fields
+ * and `schema` definitions. */
 #define CLOSURE_GQL_SCHEMA_NODE                                                                   \
     "(label IN ('Class', 'Field') OR (label = 'Module' AND "                                    \
-    "instr(properties, '\"graphql_schema_') > 0)) AND (file_path LIKE '%.graphql' OR "         \
-    "file_path LIKE '%.graphqls' OR file_path LIKE '%.gql')"
+    "instr(properties, '\"graphql_schema_') > 0))"
 
 /* Does a GraphQL file define schema, before (the stored index) or after
  * (its current text) the change? Operation-only documents do not. -1 on a
@@ -2886,21 +2885,33 @@ static int closure_gql_schema_file(cbm_store_t *store, const char *project,
     return defines ? SKIP_ONE : 0;
 }
 
-/* Does a Go file declare resolver methods (receiver type `...Resolver`),
- * before or after the change? -1 on a store error. */
+/* Does a Go file declare methods that decide Routes' HANDLES, before or
+ * after the change? A gqlgen marker file (`resolver.go`, `*.resolvers.go`)
+ * with any method makes its package a resolver package (pass_route_nodes.c,
+ * gql_heuristic_dirs); any other file counts only methods on a `...Resolver`
+ * receiver. -1 on a store error. */
 static int closure_gql_resolver_file(cbm_store_t *store, const char *project,
                                      const char *repo_path, const char *rel) {
-    int stored = closure_gql_store_count(store,
-                                         "SELECT EXISTS(SELECT 1 FROM nodes WHERE project = ?1 AND "
-                                         "file_path = ?2 AND label = 'Method' AND "
-                                         "instr(qualified_name, 'Resolver.') > 0)",
-                                         project, rel);
+    static const char SUFFIX[] = ".resolvers.go";
+    const char *slash = strrchr(rel, '/');
+    const char *base = slash ? slash + SKIP_ONE : rel;
+    size_t bl = strlen(base);
+    bool marker = strcmp(base, "resolver.go") == 0 ||
+                  (bl > sizeof(SUFFIX) - SKIP_ONE &&
+                   strcmp(base + bl - (sizeof(SUFFIX) - SKIP_ONE), SUFFIX) == 0);
+    int stored = closure_gql_store_count(
+        store,
+        marker ? "SELECT EXISTS(SELECT 1 FROM nodes WHERE project = ?1 AND file_path = ?2 AND "
+                 "label = 'Method')"
+               : "SELECT EXISTS(SELECT 1 FROM nodes WHERE project = ?1 AND file_path = ?2 AND "
+                 "label = 'Method' AND instr(qualified_name, 'Resolver.') > 0)",
+        project, rel);
     if (stored != 0) {
         return stored;
     }
     size_t len = 0;
     char *text = closure_gql_read(repo_path, rel, &len);
-    bool has = text && cbm_go_text_has_resolver_method(text, len);
+    bool has = text && cbm_go_text_has_method(text, len, marker ? NULL : "Resolver");
     free(text);
     return has ? SKIP_ONE : 0;
 }
@@ -2914,8 +2925,10 @@ static int closure_gql_resolver_file(cbm_store_t *store, const char *project,
  * can change Routes or HANDLES declines to the full rebuild: a GraphQL file
  * that defines (or defined) schema, and, in a project with schema, a gqlgen
  * config or a Go file in a resolver package that declares (or declared)
- * resolver methods. An operation-only document or a helper beside the
- * resolvers repairs in place. Returns the reason, or NULL. */
+ * methods deciding HANDLES (closure_gql_resolver_file). An operation-only
+ * document or a helper beside the resolvers repairs in place. GraphQL files
+ * are recognized by language, so user extension mappings count; a project
+ * with none stops before any store query. Returns the reason, or NULL. */
 static const char *closure_graphql_decline(cbm_store_t *store, const char *project,
                                            const char *repo_path, char **paths, int n,
                                            const cbm_file_hash_t *stored, int stored_count,
@@ -2936,12 +2949,19 @@ static const char *closure_graphql_decline(cbm_store_t *store, const char *proje
     if (reason || !any_go_or_config) {
         return reason;
     }
-    /* The project's schema, as stored; a schema file this change adds or
-     * edits has declined above. */
-    int has_schema = closure_gql_store_count(
-        store,
-        "SELECT EXISTS(SELECT 1 FROM nodes WHERE project = ?1 AND " CLOSURE_GQL_SCHEMA_NODE ")",
-        project, NULL);
+    /* The project's schema, as stored: any stored GraphQL file holding
+     * schema nodes (a schema file this change adds or edits declined
+     * above). */
+    int has_schema = 0;
+    for (int i = 0; i < stored_count && has_schema == 0; i++) {
+        if (cbm_language_for_filename(stored[i].rel_path) == CBM_LANG_GRAPHQL) {
+            has_schema = closure_gql_store_count(
+                store,
+                "SELECT EXISTS(SELECT 1 FROM nodes WHERE project = ?1 AND file_path = ?2 AND "
+                CLOSURE_GQL_SCHEMA_NODE ")",
+                project, stored[i].rel_path);
+        }
+    }
     if (has_schema <= 0) {
         return has_schema < 0 ? "graphql_store_error" : NULL;
     }

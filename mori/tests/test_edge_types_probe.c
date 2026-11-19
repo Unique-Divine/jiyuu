@@ -1183,6 +1183,78 @@ TEST(graphql_incremental_rebuild_only_for_route_inputs) {
     PASS();
 }
 
+/* Package ownership changes take the full rebuild. Unconfigured, graph/ is
+ * a resolver package because resolver.go declares a method (Setup, on no
+ * `...Resolver` receiver); handlers.go's queryResolver.Ping then handles
+ * Query.ping. Removing Setup makes graph/ an ordinary package and the Field
+ * handles ping, which only the route pass can tell. */
+TEST(graphql_incremental_resolver_package_ownership_change) {
+    static const EtFile files[] = {
+        {"go.mod", "module own\n"},
+        {"graph/schema.graphqls", "type Query {\n  ping: String\n}\n"},
+        {"graph/resolver.go",
+         "package graph\n\ntype Helper struct{}\n\nfunc (h *Helper) Setup() {}\n"},
+        {"graph/handlers.go",
+         "package graph\n\n"
+         "type queryResolver struct{}\n\n"
+         "func (r *queryResolver) Ping() string {\n\treturn \"p\"\n}\n"},
+    };
+    static const EtGqlServerRoute before[] = {
+        {"__graphql__Query.ping", "String", "false", "", "Method", ".graph.queryResolver.Ping",
+         "gqlgen_resolver", 0},
+    };
+    static const EtGqlServerRoute after[] = {
+        {"__graphql__Query.ping", "String", "false", "", "Field", ".Query.ping",
+         "graphql_schema_field", 0},
+    };
+    EtProj lp;
+    cbm_store_t *store = et_index_files(&lp, files, ET_NWANT(files));
+    int ok = et_gqlgen_routes_exact(store, lp.project, before, ET_NWANT(before));
+    int route = 0;
+    et_rewrite(&lp, "graph/resolver.go", "package graph\n\ntype Helper struct{}\n");
+    store = et_reindex(&lp, store, &route);
+    int after_ok = et_gqlgen_routes_exact(store, lp.project, after, ET_NWANT(after));
+    et_cleanup(&lp, store);
+    ASSERT_TRUE(ok);
+    ASSERT_EQ(route, (int)CBM_INCREMENTAL_ROUTE_FORCED_FULL);
+    ASSERT_TRUE(after_ok);
+    PASS();
+}
+
+/* A user extension mapping (.schema -> graphql) makes api.schema a schema
+ * file for the incremental guard as for the route pass: a body-only edit to
+ * its resolver rebuilds in full and keeps the resolver's HANDLES. */
+TEST(graphql_incremental_user_schema_extension) {
+    static const EtFile files[] = {
+        {".codebase-memory.json", "{\"extra_extensions\":{\".schema\":\"graphql\"}}\n"},
+        {"go.mod", "module ext\n"},
+        {"api/api.schema", "type Query {\n  ping: String\n}\n"},
+        {"api/schema.resolvers.go",
+         "package api\n\n"
+         "type queryResolver struct{}\n\n"
+         "func (r *queryResolver) Ping() string {\n\treturn \"p\"\n}\n"},
+    };
+    static const EtGqlServerRoute want[] = {
+        {"__graphql__Query.ping", "String", "false", "", "Method", ".api.queryResolver.Ping",
+         "gqlgen_resolver", 0},
+    };
+    EtProj lp;
+    cbm_store_t *store = et_index_files(&lp, files, ET_NWANT(files));
+    int ok = et_gqlgen_routes_exact(store, lp.project, want, ET_NWANT(want));
+    int route = 0;
+    et_rewrite(&lp, "api/schema.resolvers.go",
+               "package api\n\n"
+               "type queryResolver struct{}\n\n"
+               "func (r *queryResolver) Ping() string {\n\treturn \"q\"\n}\n");
+    store = et_reindex(&lp, store, &route);
+    int after_ok = et_gqlgen_routes_exact(store, lp.project, want, ET_NWANT(want));
+    et_cleanup(&lp, store);
+    ASSERT_TRUE(ok);
+    ASSERT_EQ(route, (int)CBM_INCREMENTAL_ROUTE_FORCED_FULL);
+    ASSERT_TRUE(after_ok);
+    PASS();
+}
+
 /* #598 parser edges the end-to-end fixture cannot reach through one language's
  * string extraction: comments/strings/interpolations that contain braces, a
  * bare word, non-document arguments and name truncation. */
@@ -3910,6 +3982,8 @@ SUITE(edge_types_probe) {
     RUN_TEST(graphql_gqlgen_digit_underscore_resolvers);
     RUN_TEST(graphql_extension_only_types_stay_in_their_subgraph);
     RUN_TEST(graphql_mixed_schema_and_client_keep_route_props);
+    RUN_TEST(graphql_incremental_resolver_package_ownership_change);
+    RUN_TEST(graphql_incremental_user_schema_extension);
     RUN_TEST(graphql_extension_only_root_type);
     RUN_TEST(graphql_schema_extension_roots);
     RUN_TEST(graphql_gqlgen_underscored_field_resolver);
