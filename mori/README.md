@@ -68,6 +68,14 @@ bun scripts/grammars-pack.ts --repo ~/codebase-memory-mcp \
   --out /tmp/grammars.tar.zst --update-lock
 ```
 
+Ten grammars that upstream maintains itself (arkts, chialisp, form,
+javascript, magma, pascal, sql, tsx, vba and vbnet) keep their hand-written
+sources in `tools/tree-sitter-*/`: `grammar.js`, external scanners, patches
+and corpus tests. The files `tree-sitter generate` writes from them
+(`src/parser.c`, `src/grammar.json`, `src/node-types.json` and
+`src/tree_sitter/`) are left out; the build uses the generated copies in the
+grammar archive.
+
 To change grammars, update `scripts/vendored-checksums.txt` and the grammar
 sources in the source repository, pack at the new commit with
 `--update-lock`, and publish the archive at the lock URL.
