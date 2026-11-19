@@ -8237,9 +8237,9 @@ TEST(cli_supported_agent_surfaces_match_installers) {
     /* The table-driven registry must carry agentty too — the legacy detector no
      * longer knows about it. */
     ASSERT_NOT_NULL(cbm_agent_client_by_stable_id("agentty"));
-    char *data = read_test_file_alloc("README.md");
+    char *data = read_test_file_alloc("README.upstream.md");
     if (!data)
-        FAIL("could not read README.md for supported-agent contract");
+        FAIL("could not read README.upstream.md for supported-agent contract");
     if (!strstr(data, "46 supported automatic/conditional client surfaces")) {
         free(data);
         FAIL("README must describe all 46 automatic/conditional client surfaces accurately");

@@ -22,12 +22,12 @@ hash_file() {
 # Public policy surfaces must not promise a stricter/different gate than the
 # one actually enforced here. Native ClamAV/Defender jobs remain separate and
 # may still use an any-detection-fails rule.
-for surface in "$ROOT/README.md" "$ROOT/SECURITY.md" "$ROOT/docs/index.html"; do
+for surface in "$ROOT/README.upstream.md" "$ROOT/SECURITY.md" "$ROOT/docs/index.html"; do
   if grep -Eqi '(zero malicious( and| or) zero suspicious (required|verdicts required)|zero malicious or suspicious verdicts (are )?required|no exception path in this release gate)' "$surface"; then
     fail "stale zero-tolerance VirusTotal promise contradicts the Microsoft !ml policy: $surface"
   fi
 done
-grep -Fq 'Microsoft `!ml` tolerance' "$ROOT/README.md" || \
+grep -Fq 'Microsoft `!ml` tolerance' "$ROOT/README.upstream.md" || \
   fail "README must link the exact documented Microsoft !ml tolerance"
 grep -Fq 'Policy identifier: `cbm-vt-candidate-selection-v1`' "$ROOT/SECURITY.md" || \
   fail "SECURITY.md must name the versioned candidate-selection policy"
