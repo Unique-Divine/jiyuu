@@ -45,11 +45,17 @@ the CLI or the MCP tools. A mistake here spends the person's money.
      ceiling of 60,600 from 60,000 that is `s ≤ 0.498%`: 0.49% gives a worst
      case of 60,589.44, while 0.5% already allows 60,601.50. For a short with
      a floor `F`, use `s ≤ 1 − sqrt(F / R)`.
-   - A limit or stop order is no ceiling either. Its `--price` is a trigger.
-     The contract checks the trigger first and applies the slippage after it,
-     so the worst fill is `trigger × (1 + s)` for a long and
+   - A limit order is no ceiling either. Its `--price` is a trigger. The
+     contract checks the trigger first and applies the slippage after it, so
+     the worst fill is `trigger × (1 + s)` for a long and
      `trigger × (1 − s)` for a short. A long limit at 60,600 with 1% slippage
      can fill up to 61,206. State that number too.
+   - A stop order has no fill bound you can state in advance. It triggers
+     once the oracle price passes the stop price, and the contract applies
+     the slippage to the oracle price at that moment. If the price gaps from
+     below 60,600 to 62,000, a long stop at 60,600 fills near 62,000. Tell
+     the person the stop price is where the order starts, not where it
+     fills.
    - Prefer MCP tools `preview_open` and `trade_open` when approval depends
      on a quoted price.
 4. **Accepted is not executed.** `accepted` means Keeper admitted the intent.
@@ -139,9 +145,10 @@ approval still describes the trade:
 
 - **Limit and stop opens, `tpsl`, `leverage`, `close`, and `--cancel-order`**
   send exactly the arguments shown. Drop `--dry-run` once the person has
-  confirmed the account, the network, and those arguments. For a limit or
-  stop open, the confirmation covers the worst fill from rule 3,
-  `trigger × (1 + s)` for a long, not the trigger alone.
+  confirmed the account, the network, and those arguments. For a limit
+  open, the confirmation covers the worst fill from rule 3,
+  `trigger × (1 + s)` for a long, not the trigger alone. For a stop open,
+  the person confirms knowing the fill has no advance bound.
 - **Partial close** takes a percentage and recomputes the amount from the
   position at submit. If the person approved "close 50%, about 50 USDC" and
   the position doubles before submit, the live command closes 100 USDC. Ask
