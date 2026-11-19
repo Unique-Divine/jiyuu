@@ -5064,6 +5064,169 @@ TEST(graphql_type) {
     PASS();
 }
 
+/* A GraphQL field's declared type and @deprecated directive reach its Field
+ * def: return_type keeps the wrappers, and extra_props carry deprecated and
+ * the reason (the spec's default when the directive names none). */
+static const char *gql_field_prop(const CBMDefinition *def, const char *key) {
+    for (const char **kv = def->extra_props; kv && kv[0] && kv[1]; kv += 2) {
+        if (strcmp(kv[0], key) == 0) {
+            return kv[1];
+        }
+    }
+    return NULL;
+}
+
+TEST(graphql_field_type_and_deprecation) {
+    CBMFileResult *r =
+        extract("type Perp {\n"
+                "  trades(limit: Int): [PerpTrade!]!\n"
+                "  realizedPnl: Float @deprecated(reason: \"Use realizedPnlUsd.\")\n"
+                "  oldPnl: Float @deprecated\n"
+                "  emptyPnl: Float @deprecated(reason: \"\")\n"
+                "}\n"
+                "extend type Perp {\n"
+                "  more: Int\n"
+                "}\n",
+                CBM_LANG_GRAPHQL, "t", "perp.graphqls");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    int fields = 0;
+    int classes = 0;
+    for (int i = 0; i < r->defs.count; i++) {
+        const CBMDefinition *def = &r->defs.items[i];
+        if (strcmp(def->label, "Class") == 0) {
+            classes++;
+        }
+        if (strcmp(def->label, "Field") != 0) {
+            continue;
+        }
+        fields++;
+        if (strcmp(def->name, "trades") == 0) {
+            ASSERT_STR_EQ(def->return_type, "[PerpTrade!]!");
+            ASSERT_NULL(gql_field_prop(def, "deprecated"));
+            ASSERT_NULL(gql_field_prop(def, "graphql_extends"));
+        } else if (strcmp(def->name, "realizedPnl") == 0) {
+            ASSERT_STR_EQ(def->return_type, "Float");
+            ASSERT_STR_EQ(gql_field_prop(def, "deprecated"), "true");
+            ASSERT_STR_EQ(gql_field_prop(def, "deprecation_reason"), "Use realizedPnlUsd.");
+        } else if (strcmp(def->name, "oldPnl") == 0) {
+            /* reason omitted: the spec's default */
+            ASSERT_STR_EQ(gql_field_prop(def, "deprecation_reason"), "No longer supported");
+        } else if (strcmp(def->name, "emptyPnl") == 0) {
+            /* an explicit empty reason stays empty */
+            ASSERT_STR_EQ(gql_field_prop(def, "deprecated"), "true");
+            ASSERT_STR_EQ(gql_field_prop(def, "deprecation_reason"), "");
+        } else if (strcmp(def->name, "more") == 0) {
+            ASSERT_STR_EQ(gql_field_prop(def, "graphql_extends"), "Perp");
+        }
+    }
+    /* The `limit` argument is not a field of Perp; the extension is no second
+     * Perp. */
+    ASSERT_EQ(fields, 5);
+    ASSERT_EQ(classes, 1);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* Deprecation reasons are decoded per the GraphQL spec: escapes in a "..."
+ * string, and \""" plus common indentation in a block string. The vendored
+ * grammar has no string escapes (it parses them as ERROR), so the reason is
+ * read from the source text; each field sits in its own type so the parse
+ * error stays local. */
+static const char *gql_reason_of(const CBMFileResult *r, const char *field) {
+    for (int i = 0; i < r->defs.count; i++) {
+        const CBMDefinition *def = &r->defs.items[i];
+        if (strcmp(def->label, "Field") == 0 && strcmp(def->name, field) == 0) {
+            return gql_field_prop(def, "deprecation_reason");
+        }
+    }
+    return NULL;
+}
+
+TEST(graphql_deprecation_reason_decoding) {
+    CBMFileResult *r = extract("type A {\n"
+                               "  quoted: Float @deprecated(reason: \"Use \\\"new\\\"\")\n"
+                               "}\n"
+                               "type B {\n"
+                               "  unicode: Float @deprecated(reason: \"caf\\u00e9\")\n"
+                               "}\n"
+                               "type C {\n"
+                               "  braced: Float @deprecated(reason: \"x \\u{1F600}\")\n"
+                               "}\n"
+                               "type D {\n"
+                               "  pair: Float @deprecated(reason: \"x \\ud83d\\ude00\\tend\")\n"
+                               "}\n"
+                               "type E {\n"
+                               "  block: Float @deprecated(reason: \"\"\"\n"
+                               "    Block \\\"\"\" reason,\n"
+                               "      indented.\n"
+                               "  \"\"\")\n"
+                               "}\n"
+                               "type F {\n"
+                               "  spaced: Float @deprecated( reason : \"  kept  \" )\n"
+                               "}\n",
+                               CBM_LANG_GRAPHQL, "t", "reasons.graphqls");
+    ASSERT_NOT_NULL(r);
+    ASSERT_STR_EQ(gql_reason_of(r, "quoted"), "Use \"new\"");
+    ASSERT_STR_EQ(gql_reason_of(r, "unicode"), "caf\xc3\xa9");
+    ASSERT_STR_EQ(gql_reason_of(r, "braced"), "x \xf0\x9f\x98\x80");
+    ASSERT_STR_EQ(gql_reason_of(r, "pair"), "x \xf0\x9f\x98\x80\tend");
+    ASSERT_STR_EQ(gql_reason_of(r, "block"), "Block \"\"\" reason,\n  indented.");
+    ASSERT_STR_EQ(gql_reason_of(r, "spaced"), "  kept  ");
+    cbm_free_result(r);
+    PASS();
+}
+
+/* An escaped quote before a brace inside a string used to end the string
+ * early and close the type at the brace, so error recovery dropped every
+ * later field. The parse now blanks string escapes in a same-length copy. */
+TEST(graphql_escaped_brace_keeps_later_fields) {
+    CBMFileResult *r = extract("type Query { before: String old: String "
+                               "@deprecated(reason: \"Use \\\"}\\\"\") after: String }\n"
+                               "type Next {\n  more: Int @deprecated(reason: \"a \\\\ b \\\"{\\\"\")\n"
+                               "  last: Int\n}\n",
+                               CBM_LANG_GRAPHQL, "t", "query.graphqls");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    const char *want[] = {"before", "old", "after", "more", "last"};
+    for (size_t w = 0; w < sizeof(want) / sizeof(want[0]); w++) {
+        bool found = false;
+        for (int i = 0; i < r->defs.count && !found; i++) {
+            found = strcmp(r->defs.items[i].label, "Field") == 0 &&
+                    strcmp(r->defs.items[i].name, want[w]) == 0;
+        }
+        if (!found) {
+            fprintf(stderr, "  missing Field %s\n", want[w]);
+        }
+        ASSERT_TRUE(found);
+    }
+    ASSERT_STR_EQ(gql_reason_of(r, "old"), "Use \"}\"");
+    ASSERT_STR_EQ(gql_reason_of(r, "more"), "a \\ b \"{\"");
+    cbm_free_result(r);
+    PASS();
+}
+
+/* `schema { query: RootQuery }` is recorded on the file's module def. */
+TEST(graphql_schema_definition_roots) {
+    CBMFileResult *r = extract("schema {\n  query: RootQuery\n  subscription: Events\n}\n"
+                               "type RootQuery {\n  ping: String\n}\n",
+                               CBM_LANG_GRAPHQL, "t", "schema.graphqls");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    const CBMDefinition *mod = NULL;
+    for (int i = 0; i < r->defs.count && !mod; i++) {
+        if (strcmp(r->defs.items[i].label, "Module") == 0) {
+            mod = &r->defs.items[i];
+        }
+    }
+    ASSERT_NOT_NULL(mod);
+    ASSERT_STR_EQ(gql_field_prop(mod, "graphql_schema_query"), "RootQuery");
+    ASSERT_STR_EQ(gql_field_prop(mod, "graphql_schema_subscription"), "Events");
+    ASSERT_NULL(gql_field_prop(mod, "graphql_schema_mutation"));
+    cbm_free_result(r);
+    PASS();
+}
+
 /* --- Svelte component --- */
 TEST(svelte_component) {
     CBMFileResult *r = extract("<script>\n  let name = 'World';\n  function greet() {\n    return "
@@ -15965,6 +16128,10 @@ SUITE(extraction) {
     RUN_TEST(json_object);
     RUN_TEST(protobuf_message);
     RUN_TEST(graphql_type);
+    RUN_TEST(graphql_field_type_and_deprecation);
+    RUN_TEST(graphql_schema_definition_roots);
+    RUN_TEST(graphql_deprecation_reason_decoding);
+    RUN_TEST(graphql_escaped_brace_keeps_later_fields);
     RUN_TEST(svelte_component);
     RUN_TEST(vue_component);
     RUN_TEST(glsl_shader);

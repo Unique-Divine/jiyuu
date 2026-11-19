@@ -886,10 +886,10 @@ static const char *protobuf_import_types[] = {"import", NULL};
 
 // ==================== GRAPHQL ====================
 static const char *graphql_class_types[] = {
-    "object_type_definition", "input_object_type_definition",
-    "enum_type_definition",   "interface_type_definition",
-    "union_type_definition",  "scalar_type_definition",
-    "type_definition",        NULL};
+    "object_type_definition",    "input_object_type_definition", "enum_type_definition",
+    "interface_type_definition", "union_type_definition",        "scalar_type_definition",
+    "type_definition",           "object_type_extension",        NULL,
+};
 static const char *graphql_module_types[] = {"document", NULL};
 static const char *graphql_field_types[] = {"field_definition", "input_value_definition", NULL};
 

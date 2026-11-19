@@ -808,6 +808,19 @@ void cbm_pipeline_set_nsmap(CBMHashTable *map);
 char *cbm_pipeline_resolve_module(const cbm_pipeline_ctx_t *ctx, const char *source_rel,
                                   const char *module_path);
 
+/* GraphQL client edges (pass_calls.c), shared by both resolve passes: the
+ * operation-name Route edge (#598) and one GRAPHQL_CALLS edge per field path
+ * of the call's selection signature to `__graphql__<Root>.<path>`, with props
+ * {callee, operation, operation_type, field_path, confidence}. */
+void cbm_pipeline_emit_graphql_call(cbm_gbuf_t *gbuf, const cbm_gbuf_node_t *source,
+                                    const CBMCall *call, double confidence);
+
+/* Field-path GRAPHQL_CALLS edges for the GraphQL documents a file's
+ * module-level constants hold (CBM_STRREF_GRAPHQL refs), from the constant's
+ * node in `lookup` (its module when the constant has no node), into gbuf. */
+void cbm_pipeline_emit_graphql_documents(cbm_gbuf_t *gbuf, const cbm_gbuf_t *lookup,
+                                         const CBMFileResult *result);
+
 /* #1916: HTTP client-instance calls. When `call` is `<recv>.<verb>(url)` with
  * an HTTP verb suffix and a path/URL first argument, and `recv` is bound —
  * in the calling module itself, or via an ES import (named or default) — to a
@@ -1289,6 +1302,42 @@ int cbm_parallel_resolve(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files, 
  * Re-targets these edges to Route nodes for cross-service traversal. */
 void cbm_pipeline_create_route_nodes(cbm_gbuf_t *gb);
 
+/* GraphQL field-path Routes (__graphql__<Op>.<field>[.<child>]) from the
+ * schema files in gb, with one HANDLES edge each: the owning gqlgen resolver
+ * method, else the schema Field. repo_path locates gqlgen configs (NULL:
+ * none are read). Full-index only; pipeline_incremental.c declines closure
+ * repairs that touch its inputs. */
+void cbm_pipeline_create_graphql_routes(cbm_gbuf_t *gb, const char *repo_path);
+
+/* A gqlgen config (gqlgen.yml), as far as GraphQL Routes need it. Paths are
+ * repo-relative: schema globs, and the resolvers' Go package directory with
+ * its trailing '/' ("" at the root; NULL when the config generates none). */
+typedef struct {
+    char **schema_globs;
+    int schema_count;
+    bool has_schema_key;
+    bool has_resolver;
+    char *resolver_layout;
+    char *resolver_dir;
+    char *resolver_filename;
+    char *resolver_pkg;
+} cbm_gqlgen_config_t;
+
+bool cbm_gqlgen_is_config_path(const char *rel_path);
+int cbm_gqlgen_config_load(const char *repo_path, const char *rel_path, cbm_gqlgen_config_t *out);
+void cbm_gqlgen_config_free(cbm_gqlgen_config_t *c);
+/* `*` and `?` within a path segment, `**` across segments. */
+bool cbm_gqlgen_glob_match(const char *glob, const char *path);
+/* Does GraphQL text define schema (a type-system definition or extension:
+ * type, interface, input, enum, union, scalar, directive, schema, extend) at
+ * its top level? An operation document (query/mutation/subscription/
+ * fragment) does not. The input need not be NUL-terminated. */
+bool cbm_graphql_text_defines_schema(const char *text, size_t len);
+/* Does Go text declare a method (`func (r T) Name`) whose receiver type ends
+ * in receiver_suffix ("Resolver": one the GraphQL route pass may bind; NULL:
+ * any method)? */
+bool cbm_go_text_has_method(const char *text, size_t len, const char *receiver_suffix);
+
 /* ── Pass function prototypes ────────────────────────────────────── */
 
 int cbm_pipeline_pass_definitions(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files,
@@ -1741,8 +1790,13 @@ int cbm_pipeline_build_fresh_semantic_manifest(cbm_pipeline_t *p, const char *pr
  *      directories name and HANDLES its Route (extract_nextjs.c). An index
  *      built before has none of these Routes for its unchanged route files,
  *      so it rebuilds once on upgrade.
+ *  14: GraphQL schemas (.graphql, .gql, .graphqls) yield field-path Routes
+ *      (__graphql__Query.perp.trades) with schema props and one HANDLES each,
+ *      from the gqlgen resolver method or the schema Field
+ *      (pass_route_nodes.c). An index built before has none of them for its
+ *      unchanged schema files, so it rebuilds once on upgrade.
  * The unresolved-call coverage threshold remains independent. */
-enum { CBM_SEMANTIC_INDEX_VERSION = 13 };
+enum { CBM_SEMANTIC_INDEX_VERSION = 14 };
 
 typedef struct {
     cbm_gbuf_t *gbuf;

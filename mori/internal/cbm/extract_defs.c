@@ -8860,6 +8860,13 @@ static void emit_class_def(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *s
     } else {
         class_qn = cbm_fqn_compute_source_lang(a, ctx->project, ctx->rel_path, name, ctx->language);
     }
+    /* GraphQL `extend type T { ... }` adds fields to T, which is declared
+     * elsewhere (often another file): emit the fields only, each marked with
+     * `graphql_extends` (extract_schema_field), and no second T. */
+    if (ctx->language == CBM_LANG_GRAPHQL && strcmp(kind, "object_type_extension") == 0) {
+        extract_class_fields(ctx, node, class_qn, spec);
+        return;
+    }
     const char *label = class_label_for_kind(kind);
 
     // Sway/WGSL: label struct defs as "Struct" and Sway `abi` blocks as
@@ -12257,6 +12264,382 @@ static TSNode resolve_field_name_node(TSNode child) {
     return name_node;
 }
 
+/* GraphQL string values (spec "String Value" and "Block Strings"). */
+enum {
+    GQL_BLOCK_QUOTE_LEN = 3,
+    GQL_HEX_DIGITS = 4,
+    GQL_HEX_ALPHA = 10,
+    GQL_MAX_CODE_POINT = 0x10FFFF,
+    GQL_SURROGATE_HIGH = 0xD800,
+    GQL_SURROGATE_LOW = 0xDC00,
+    GQL_SURROGATE_END = 0xE000,
+    GQL_SURROGATE_BITS = 10,
+    GQL_SUPPLEMENTARY = 0x10000,
+    GQL_REPLACEMENT_CHAR = 0xFFFD,
+    GQL_UTF8_ONE_MAX = 0x80,
+    GQL_UTF8_TWO_MAX = 0x800,
+    GQL_UTF8_CONT = 0x80,
+    GQL_UTF8_CONT_MASK = 0x3F,
+    GQL_UTF8_LEAD_TWO = 0xC0,
+    GQL_UTF8_LEAD_THREE = 0xE0,
+    GQL_UTF8_LEAD_FOUR = 0xF0,
+    GQL_UTF8_SHIFT = 6,
+    GQL_UTF8_THREE_BYTES = 3,
+    GQL_UTF8_FOUR_BYTES = 4,
+    GQL_FIELD_PROPS_KV = 7, /* deprecated, deprecation_reason, graphql_extends, NULL */
+};
+
+static int gql_hex_value(char c) {
+    if (c >= '0' && c <= '9') {
+        return c - '0';
+    }
+    if (c >= 'a' && c <= 'f') {
+        return c - 'a' + GQL_HEX_ALPHA;
+    }
+    if (c >= 'A' && c <= 'F') {
+        return c - 'A' + GQL_HEX_ALPHA;
+    }
+    return CBM_NOT_FOUND;
+}
+
+/* Write code point cp as UTF-8 at out; returns the bytes written (1..4). */
+static size_t gql_put_utf8(uint32_t cp, char *out) {
+    if (cp > GQL_MAX_CODE_POINT || (cp >= GQL_SURROGATE_HIGH && cp < GQL_SURROGATE_END)) {
+        cp = GQL_REPLACEMENT_CHAR;
+    }
+    if (cp < GQL_UTF8_ONE_MAX) {
+        out[0] = (char)cp;
+        return SKIP_ONE;
+    }
+    size_t len = GQL_UTF8_FOUR_BYTES;
+    if (cp < GQL_UTF8_TWO_MAX) {
+        len = PAIR_LEN;
+    } else if (cp < GQL_SUPPLEMENTARY) {
+        len = GQL_UTF8_THREE_BYTES;
+    }
+    static const uint32_t lead[] = {
+        0, 0, GQL_UTF8_LEAD_TWO, GQL_UTF8_LEAD_THREE, GQL_UTF8_LEAD_FOUR,
+    };
+    for (size_t i = len - SKIP_ONE; i > 0; i--) {
+        out[i] = (char)((uint32_t)GQL_UTF8_CONT | (cp & (uint32_t)GQL_UTF8_CONT_MASK));
+        cp >>= (uint32_t)GQL_UTF8_SHIFT;
+    }
+    out[0] = (char)(lead[len] | cp);
+    return len;
+}
+
+/* Parse the hex digits of a `\u` escape starting at p: either exactly four
+ * (`é`) or braced (`\u{1F600}`). Returns the position after them, or
+ * NULL when malformed. */
+static const char *gql_unicode_escape(const char *p, const char *end, uint32_t *cp) {
+    *cp = 0;
+    if (p < end && *p == '{') {
+        const char *q = p + SKIP_ONE;
+        for (; q < end && *q != '}'; q++) {
+            int v = gql_hex_value(*q);
+            if (v < 0 || *cp > GQL_MAX_CODE_POINT) {
+                return NULL;
+            }
+            *cp = (*cp << (uint32_t)GQL_HEX_DIGITS) | (uint32_t)v;
+        }
+        return q < end && q > p + SKIP_ONE ? q + SKIP_ONE : NULL;
+    }
+    if (end - p < GQL_HEX_DIGITS) {
+        return NULL;
+    }
+    for (int i = 0; i < GQL_HEX_DIGITS; i++) {
+        int v = gql_hex_value(p[i]);
+        if (v < 0) {
+            return NULL;
+        }
+        *cp = (*cp << (uint32_t)GQL_HEX_DIGITS) | (uint32_t)v;
+    }
+    return p + GQL_HEX_DIGITS;
+}
+
+/* One escape sequence at p (just after the backslash) into out; returns the
+ * position after it. A malformed escape is kept as written. */
+static const char *gql_decode_escape(const char *p, const char *end, char *out, size_t *n) {
+    static const char from[] = "\"\\/bfnrt";
+    static const char to[] = "\"\\/\b\f\n\r\t";
+    const char *hit = p < end ? strchr(from, *p) : NULL;
+    if (hit && *hit) {
+        out[(*n)++] = to[hit - from];
+        return p + SKIP_ONE;
+    }
+    uint32_t cp = 0;
+    const char *next = p < end && *p == 'u' ? gql_unicode_escape(p + SKIP_ONE, end, &cp) : NULL;
+    if (!next) {
+        out[(*n)++] = '\\';
+        return p;
+    }
+    /* A surrogate pair spelled as two escapes is one code point. */
+    uint32_t low = 0;
+    const char *after = NULL;
+    if (cp >= GQL_SURROGATE_HIGH && cp < GQL_SURROGATE_LOW && end - next > PAIR_LEN &&
+        next[0] == '\\' && next[SKIP_ONE] == 'u') {
+        after = gql_unicode_escape(next + PAIR_LEN, end, &low);
+    }
+    if (after && low >= GQL_SURROGATE_LOW && low < GQL_SURROGATE_END) {
+        cp = (uint32_t)GQL_SUPPLEMENTARY +
+             ((cp - (uint32_t)GQL_SURROGATE_HIGH) << (uint32_t)GQL_SURROGATE_BITS) +
+             (low - (uint32_t)GQL_SURROGATE_LOW);
+        next = after;
+    }
+    *n += gql_put_utf8(cp, out + *n);
+    return next;
+}
+
+/* A "..." string's content (without the quotes) with its escapes decoded. */
+static char *gql_decode_string(CBMArena *a, const char *s, size_t len) {
+    char *out = cbm_arena_alloc(a, len + SKIP_ONE);
+    if (!out) {
+        return NULL;
+    }
+    size_t n = 0;
+    const char *end = s + len;
+    for (const char *p = s; p < end;) {
+        if (*p == '\\') {
+            p = gql_decode_escape(p + SKIP_ONE, end, out, &n);
+        } else {
+            out[n++] = *p++;
+        }
+    }
+    out[n] = '\0';
+    return out;
+}
+
+static bool gql_is_blank(const char *s, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        if (s[i] != ' ' && s[i] != '\t') {
+            return false;
+        }
+    }
+    return true;
+}
+
+static size_t gql_indent(const char *s, size_t n) {
+    size_t i = 0;
+    while (i < n && (s[i] == ' ' || s[i] == '\t')) {
+        i++;
+    }
+    return i;
+}
+
+/* The length of the line at s (up to end), and *next = the start of the next
+ * line (after \n, \r\n or \r), or end. */
+static size_t gql_line(const char *s, const char *end, const char **next) {
+    const char *p = s;
+    while (p < end && *p != '\n' && *p != '\r') {
+        p++;
+    }
+    size_t len = (size_t)(p - s);
+    if (p < end && *p == '\r' && p + SKIP_ONE < end && p[SKIP_ONE] == '\n') {
+        p++;
+    }
+    *next = p < end ? p + SKIP_ONE : end;
+    return len;
+}
+
+/* A """...""" block string's value (spec BlockStringValue): \""" unescaped,
+ * the common indentation of every line but the first removed, and leading
+ * and trailing blank lines dropped. */
+static char *gql_block_string(CBMArena *a, const char *s, size_t len) {
+    char *raw = cbm_arena_alloc(a, len + SKIP_ONE);
+    char *out = cbm_arena_alloc(a, len + SKIP_ONE);
+    if (!raw || !out) {
+        return NULL;
+    }
+    size_t rn = 0;
+    for (size_t i = 0; i < len; i++) {
+        if (s[i] == '\\' && len - i > GQL_BLOCK_QUOTE_LEN &&
+            strncmp(s + i + SKIP_ONE, "\"\"\"", GQL_BLOCK_QUOTE_LEN) == 0) {
+            continue; /* \""" -> """ */
+        }
+        raw[rn++] = s[i];
+    }
+    const char *end = raw + rn;
+    size_t common = SIZE_MAX;
+    const char *next = NULL;
+    bool first = true;
+    for (const char *p = raw; p < end; p = next, first = false) {
+        size_t ll = gql_line(p, end, &next);
+        size_t ind = gql_indent(p, ll);
+        if (!first && ind < ll && ind < common) {
+            common = ind;
+        }
+    }
+    size_t n = 0;
+    size_t last_content = 0; /* out length after the last non-blank line */
+    first = true;
+    for (const char *p = raw; p < end; p = next, first = false) {
+        size_t ll = gql_line(p, end, &next);
+        const char *line = p;
+        if (!first && common != SIZE_MAX) {
+            size_t cut = common < ll ? common : ll;
+            line += cut;
+            ll -= cut;
+        }
+        bool blank = gql_is_blank(line, ll);
+        if (blank && n == 0) {
+            continue; /* leading blank lines */
+        }
+        if (n > 0) {
+            out[n++] = '\n';
+        }
+        memcpy(out + n, line, ll);
+        n += ll;
+        if (!blank) {
+            last_content = n;
+        }
+    }
+    out[last_content] = '\0';
+    return out;
+}
+
+/* Skip GraphQL ignored tokens (whitespace, commas, # comments). */
+static const char *gql_skip_ignored(const char *p, const char *end) {
+    while (p < end) {
+        if (*p == '#') {
+            while (p < end && *p != '\n') {
+                p++;
+            }
+        } else if (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' || *p == ',') {
+            p++;
+        } else {
+            break;
+        }
+    }
+    return p;
+}
+
+static bool gql_name_char(char c) {
+    return isalnum((unsigned char)c) || c == '_';
+}
+
+/* The string literal at p (a "..." or """...""" value), decoded; NULL when p
+ * holds no complete string. */
+static char *gql_scan_string(CBMArena *a, const char *p, const char *end) {
+    if (end - p >= GQL_BLOCK_QUOTE_LEN && strncmp(p, "\"\"\"", GQL_BLOCK_QUOTE_LEN) == 0) {
+        const char *body = p + GQL_BLOCK_QUOTE_LEN;
+        for (const char *q = body; end - q >= GQL_BLOCK_QUOTE_LEN; q++) {
+            if (*q == '\\' && end - q > GQL_BLOCK_QUOTE_LEN &&
+                strncmp(q + SKIP_ONE, "\"\"\"", GQL_BLOCK_QUOTE_LEN) == 0) {
+                q += GQL_BLOCK_QUOTE_LEN; /* \""" stays inside the string */
+            } else if (strncmp(q, "\"\"\"", GQL_BLOCK_QUOTE_LEN) == 0) {
+                return gql_block_string(a, body, (size_t)(q - body));
+            }
+        }
+        return NULL;
+    }
+    if (p >= end || *p != '"') {
+        return NULL;
+    }
+    for (const char *q = p + SKIP_ONE; q < end && *q != '\n' && *q != '\r'; q++) {
+        if (*q == '\\') {
+            q++;
+        } else if (*q == '"') {
+            return gql_decode_string(a, p + SKIP_ONE, (size_t)(q - p - SKIP_ONE));
+        }
+    }
+    return NULL;
+}
+
+/* The `reason:` argument of the @deprecated directive starting at `start`,
+ * read from the source text: the vendored grammar has no string escapes, so
+ * a reason holding `\"` or `é` parses as an ERROR node. NULL when the
+ * directive has no reason argument (or it is null). */
+static char *graphql_directive_reason(CBMArena *a, TSNode directive, const char *source,
+                                      int source_len) {
+    const char *end = source + source_len;
+    const char *p = source + ts_node_start_byte(directive);
+    if (p >= end || *p != '@') {
+        return NULL;
+    }
+    p++;
+    while (p < end && gql_name_char(*p)) {
+        p++;
+    }
+    p = gql_skip_ignored(p, end);
+    if (p >= end || *p != '(') {
+        return NULL;
+    }
+    p = gql_skip_ignored(p + SKIP_ONE, end);
+    const char *name = p;
+    while (p < end && gql_name_char(*p)) {
+        p++;
+    }
+    static const char REASON[] = "reason";
+    if ((size_t)(p - name) != sizeof(REASON) - SKIP_ONE ||
+        strncmp(name, REASON, sizeof(REASON) - SKIP_ONE) != 0) {
+        return NULL;
+    }
+    p = gql_skip_ignored(p, end);
+    if (p >= end || *p != ':') {
+        return NULL;
+    }
+    return gql_scan_string(a, gql_skip_ignored(p + SKIP_ONE, end), end);
+}
+
+/* The @deprecated directive of a GraphQL field, or a null node. */
+static TSNode graphql_deprecated_directive(CBMArena *a, TSNode field, const char *source) {
+    TSNode dirs = cbm_find_child_by_kind(field, "directives");
+    uint32_t count = ts_node_is_null(dirs) ? 0 : ts_node_named_child_count(dirs);
+    for (uint32_t i = 0; i < count; i++) {
+        TSNode dir = ts_node_named_child(dirs, i);
+        TSNode name = cbm_find_child_by_kind(dir, "name");
+        char *dname = ts_node_is_null(name) ? NULL : cbm_node_text(a, name, source);
+        if (dname && strcmp(dname, "deprecated") == 0) {
+            return dir;
+        }
+    }
+    TSNode null_node = {0};
+    return null_node;
+}
+
+/* The type a GraphQL field_definition extends when it sits in an
+ * `extend type T { ... }` block (T), else NULL. */
+static char *graphql_extended_type(CBMArena *a, TSNode field, const char *source) {
+    TSNode body = ts_node_parent(field);
+    TSNode owner = ts_node_is_null(body) ? body : ts_node_parent(body);
+    if (ts_node_is_null(owner) || strcmp(ts_node_type(owner), "object_type_extension") != 0) {
+        return NULL;
+    }
+    TSNode name = cbm_find_child_by_kind(owner, "name");
+    return ts_node_is_null(name) ? NULL : cbm_node_text(a, name, source);
+}
+
+/* extra_props of a GraphQL field: `deprecated`=true with its
+ * `deprecation_reason` when it carries @deprecated (the spec's default when
+ * `reason` is omitted; an explicit "" stays empty), and `graphql_extends`=T
+ * for a field of an `extend type T` block. NULL when there are none. */
+static const char **graphql_field_props(CBMArena *a, TSNode field, const char *source,
+                                        int source_len) {
+    TSNode dir = graphql_deprecated_directive(a, field, source);
+    char *extends = graphql_extended_type(a, field, source);
+    if (ts_node_is_null(dir) && !extends) {
+        return NULL;
+    }
+    const char **kv = cbm_arena_alloc(a, GQL_FIELD_PROPS_KV * sizeof(*kv));
+    if (!kv) {
+        return NULL;
+    }
+    int n = 0;
+    if (!ts_node_is_null(dir)) {
+        char *reason = graphql_directive_reason(a, dir, source, source_len);
+        kv[n++] = "deprecated";
+        kv[n++] = "true";
+        kv[n++] = "deprecation_reason";
+        kv[n++] = reason ? reason : "No longer supported";
+    }
+    if (extends) {
+        kv[n++] = "graphql_extends";
+        kv[n++] = extends;
+    }
+    kv[n] = NULL;
+    return kv;
+}
+
 /* Schema/grammar languages whose field node carries the field name on a plain
  * child (no C-style `declarator`/`type` field), so the generic field path below
  * skips them. Emit a "Field" def (with optional return_type) and return true if
@@ -12274,6 +12657,10 @@ static bool extract_schema_field(CBMExtractCtx *ctx, TSNode child, const char *c
             name_node = cbm_find_child_by_kind(child, "name");
         }
         type_node = ts_node_child_by_field_name(child, TS_FIELD("type"));
+        /* FIELD_COUNT 0: the declared type is a plain `type` child. */
+        if (ts_node_is_null(type_node)) {
+            type_node = cbm_find_child_by_kind(child, "type");
+        }
     } else if (ctx->language == CBM_LANG_PRISMA) {
         name_node = cbm_find_child_by_kind(child, "identifier");
         type_node = cbm_find_child_by_kind(child, "column_type");
@@ -12305,6 +12692,9 @@ static bool extract_schema_field(CBMExtractCtx *ctx, TSNode child, const char *c
     def.start_line = ts_node_start_point(child).row + TS_LINE_OFFSET;
     def.end_line = ts_node_end_point(child).row + TS_LINE_OFFSET;
     def.is_exported = cbm_is_exported(name, ctx->language);
+    if (ctx->language == CBM_LANG_GRAPHQL) {
+        def.extra_props = graphql_field_props(a, child, ctx->source, ctx->source_len);
+    }
     cbm_defs_push(&ctx->result->defs, a, def);
     return true;
 }
@@ -14059,6 +14449,88 @@ static const char *cbm_razor_page_route(CBMArena *a, const char *source, int sou
     return NULL;
 }
 
+/* GraphQL `schema { query: Q mutation: M subscription: S }` and
+ * `extend schema { ... }`: the module def's extra_props
+ * graphql_schema_<operation> = type name, so the route pass can find the
+ * root types when they are not named Query/Mutation/Subscription. A
+ * `schema` definition (not only an extension) also sets
+ * graphql_schema_defined: its roots replace the default names. */
+enum { GQL_SCHEMA_SEARCH_DEPTH = 4, GQL_SCHEMA_KV = 9 };
+
+/* Add key = value unless the key is already set (the first one wins). */
+static void graphql_schema_kv_put(const char **kv, int *n, const char *key, const char *value) {
+    if (!key || !value) {
+        return;
+    }
+    for (int i = 0; i < *n; i += PAIR_LEN) {
+        if (strcmp(kv[i], key) == 0) {
+            return;
+        }
+    }
+    if (*n + PAIR_LEN < GQL_SCHEMA_KV) {
+        kv[(*n)++] = key;
+        kv[(*n)++] = value;
+    }
+}
+
+static void graphql_schema_roots_in(CBMArena *a, TSNode def, const char *source, const char **kv,
+                                    int *n) {
+    uint32_t count = ts_node_named_child_count(def);
+    for (uint32_t i = 0; i < count; i++) {
+        TSNode root = ts_node_named_child(def, i);
+        if (strcmp(ts_node_type(root), "root_operation_type_definition") != 0) {
+            continue;
+        }
+        TSNode op = cbm_find_child_by_kind(root, "operation_type");
+        TSNode type = cbm_find_child_by_kind(root, "named_type");
+        char *op_text = ts_node_is_null(op) ? NULL : cbm_node_text(a, op, source);
+        char *type_text = ts_node_is_null(type) ? NULL : cbm_node_text(a, type, source);
+        if (op_text && type_text && type_text[0]) {
+            graphql_schema_kv_put(kv, n, cbm_arena_sprintf(a, "graphql_schema_%s", op_text),
+                                  type_text);
+        }
+    }
+}
+
+/* A schema_definition sits at source_file > document > definition >
+ * type_system_definition (a schema_extension under type_system_extension);
+ * look that deep and no deeper. */
+static void graphql_find_schema(CBMArena *a, TSNode root, const char *source, const char **kv,
+                                int *n) {
+    TSNode stack[GQL_SCHEMA_SEARCH_DEPTH];
+    uint32_t index[GQL_SCHEMA_SEARCH_DEPTH] = {0};
+    int depth = 0;
+    stack[0] = root;
+    while (depth >= 0) {
+        if (index[depth] >= ts_node_named_child_count(stack[depth])) {
+            depth--;
+            continue;
+        }
+        TSNode child = ts_node_named_child(stack[depth], index[depth]++);
+        const char *kind = ts_node_type(child);
+        if (strcmp(kind, "schema_definition") == 0) {
+            graphql_schema_kv_put(kv, n, "graphql_schema_defined", "true");
+            graphql_schema_roots_in(a, child, source, kv, n);
+        } else if (strcmp(kind, "schema_extension") == 0) {
+            graphql_schema_roots_in(a, child, source, kv, n);
+        } else if (depth + SKIP_ONE < GQL_SCHEMA_SEARCH_DEPTH) {
+            stack[++depth] = child;
+            index[depth] = 0;
+        }
+    }
+}
+
+static const char **graphql_schema_roots(CBMExtractCtx *ctx) {
+    const char **kv = cbm_arena_alloc(ctx->arena, GQL_SCHEMA_KV * sizeof(*kv));
+    if (!kv) {
+        return NULL;
+    }
+    int n = 0;
+    graphql_find_schema(ctx->arena, ctx->root, ctx->source, kv, &n);
+    kv[n] = NULL;
+    return n > 0 ? kv : NULL;
+}
+
 void cbm_extract_definitions(CBMExtractCtx *ctx) {
     const CBMLangSpec *spec = cbm_lang_spec(ctx->language);
     if (!spec) {
@@ -14090,6 +14562,9 @@ void cbm_extract_definitions(CBMExtractCtx *ctx) {
             mod.route_path = route;
             mod.route_method = "GET"; /* a routable page is reached by navigation */
         }
+    }
+    if (ctx->language == CBM_LANG_GRAPHQL) {
+        mod.extra_props = graphql_schema_roots(ctx);
     }
     int mod_idx = ctx->result->defs.count;
     cbm_defs_push(&ctx->result->defs, a, mod);
