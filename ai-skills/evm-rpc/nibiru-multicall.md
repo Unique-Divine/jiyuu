@@ -23,7 +23,7 @@ Cosmos module state, and Multicall3 can call them like any contract:
 | `0x0000000000000000000000000000000000000801` | Oracle | `queryExchangeRate(string pair)`, Chainlink-style `latestRoundData` |
 | `0x0000000000000000000000000000000000000802` | Wasm | `query(string contract, bytes json)` returns the JSON response as bytes; `queryRaw(string contract, bytes key)` |
 
-Interfaces: nibi-chain `evm/embeds/contracts/IFunToken.sol`, `IOracle.sol`,
+Interfaces: nibiru `evm/embeds/contracts/IFunToken.sol`, `IOracle.sol`,
 and `Wasm.sol`.
 
 Native NIBI comes from Multicall3's own `getEthBalance(address)`. It is the
