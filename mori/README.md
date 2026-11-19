@@ -44,13 +44,18 @@ which:
 1. Reuses `${XDG_CACHE_HOME:-~/.cache}/jiyuu-mori/grammars/<sha256>.tar.zst`
    after checking its hash, or downloads the archive from the lock URL.
 2. Checks the size and sha256 before unpacking anything.
-3. Rejects absolute paths, `..` components and members outside the grammar
-   directory.
+3. Rejects absolute paths, `..` components, members outside the grammar
+   directory, and any member that is not a regular file or directory
+   (symlinks, hard links, devices).
 4. Unpacks into a temporary directory and checks every file against the
    grammar lines of `scripts/vendored-checksums.txt` before moving it into
    place.
-5. Writes `.grammars.stamp`, so the next run returns at once. Pass `--force`
-   to reinstall.
+5. Writes `.grammars.stamp` with the archive hash and the size and mtime of
+   every installed file. The next run compares the tree with the stamp and
+   hashes `MANIFEST.md` and the license files, which takes about a second.
+   If a file was added, removed or changed, it hashes the whole tree (about
+   a minute) and reinstalls from the cached archive when that check fails.
+   Pass `--force` to reinstall.
 
 The archive is published as release
 [`mori/grammars/v1`](https://github.com/Unique-Divine/jiyuu/releases/tag/mori%2Fgrammars%2Fv1).

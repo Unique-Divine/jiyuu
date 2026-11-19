@@ -10,7 +10,10 @@
 // --from, or downloaded from the lock URL, and its sha256 is checked before
 // anything is unpacked. After extraction every file is checked against the
 // grammar lines of scripts/vendored-checksums.txt. A stamp file records the
-// installed archive so a repeat run is a no-op; --force reinstalls.
+// installed archive and the size and mtime of every file. A repeat run
+// compares the tree with the stamp and hashes the license files; if anything
+// differs it re-hashes the whole tree and reinstalls only when that fails.
+// --force reinstalls.
 
 import { copyFile, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises"
 import { dirname, join, resolve } from "node:path"
@@ -18,16 +21,22 @@ import { dirname, join, resolve } from "node:path"
 import {
   cachedArchivePath,
   checkArchiveEntries,
+  checkMemberTypes,
+  compareSnapshot,
   defaultCacheDir,
   errorMessage,
   extractArchive,
+  formatStamp,
   formatTreeReport,
   type GrammarLock,
   listArchive,
   parseChecksums,
   parseLock,
+  parseStamp,
   readOptional,
-  stampMatches,
+  sampleFiles,
+  sha256File,
+  snapshotTree,
   treeReportOk,
   verifyArchive,
   verifyTree,
@@ -84,7 +93,37 @@ export interface FetchOptions {
   log?: (line: string) => void
 }
 
-export type FetchOutcome = "up-to-date" | "installed"
+export type FetchOutcome = "up-to-date" | "reverified" | "installed"
+
+/** Writes the stamp for the verified tree at `target`. */
+async function writeStamp(stampPath: string, target: string, sha256: string): Promise<void> {
+  const { files } = await snapshotTree(target)
+  await writeFile(stampPath, formatStamp({ archiveSha256: sha256, files }))
+}
+
+/**
+ * Checks an installed tree against its stamp without hashing everything:
+ * the file list, each file's size and mtime, and the sha256 of MANIFEST.md
+ * and every license file. Returns the problems found.
+ */
+export async function quickCheck(
+  target: string,
+  stampText: string | null,
+  sha256: string,
+  expected: Map<string, string>,
+): Promise<string[]> {
+  const stamp = parseStamp(stampText)
+  if (stamp === null) return ["no stamp, or a stamp from an older fetch script"]
+  if (stamp.archiveSha256 !== sha256) return ["installed from a different archive"]
+  const problems = compareSnapshot(stamp, await snapshotTree(target), expected)
+  if (problems.length > 0) return problems
+  for (const rel of sampleFiles(expected)) {
+    if ((await sha256File(join(target, rel))) !== expected.get(rel)) {
+      problems.push(`wrong sha256: ${rel}`)
+    }
+  }
+  return problems
+}
 
 /**
  * Returns a verified archive path in the cache, copying --from or
@@ -146,11 +185,28 @@ export async function fetchGrammars(options: FetchOptions): Promise<FetchOutcome
     throw new Error(`scripts/vendored-checksums.txt lists no files under ${lock.path}`)
   }
 
-  const stampText = await readOptional(stampPath)
   const targetExists = (await readOptional(join(target, "MANIFEST.md"))) !== null
-  if (!options.force && targetExists && stampMatches(stampText, lock.sha256)) {
-    log(`Grammars already installed from ${lock.sha256.slice(0, 12)}; nothing to do`)
-    return "up-to-date"
+  if (!options.force && targetExists) {
+    const problems = await quickCheck(
+      target,
+      await readOptional(stampPath),
+      lock.sha256,
+      expected,
+    )
+    if (problems.length === 0) {
+      log(`Grammars already installed from ${lock.sha256.slice(0, 12)}; nothing to do`)
+      return "up-to-date"
+    }
+    // Something moved since the last check (or the stamp predates it):
+    // hash the whole tree before deciding to reinstall.
+    log(`Re-verifying installed grammars: ${problems.slice(0, 3).join("; ")}`)
+    const report = await verifyTree(target, expected)
+    if (treeReportOk(report)) {
+      await writeStamp(stampPath, target, lock.sha256)
+      log(`Installed grammars match vendored-checksums.txt (${report.checked} files)`)
+      return "reverified"
+    }
+    log(`Reinstalling: ${formatTreeReport(report)}`)
   }
 
   const archive = await obtainArchive(
@@ -161,7 +217,14 @@ export async function fetchGrammars(options: FetchOptions): Promise<FetchOutcome
     log,
   )
 
-  const problems = checkArchiveEntries(await listArchive(archive), lock.path)
+  const members = await listArchive(archive)
+  const problems = [
+    ...checkArchiveEntries(
+      members.map((member) => member.name),
+      lock.path,
+    ),
+    ...checkMemberTypes(members),
+  ]
   if (problems.length > 0) {
     throw new Error(`refusing to unpack ${archive}:\n  ${problems.slice(0, 20).join("\n  ")}`)
   }
@@ -182,7 +245,7 @@ export async function fetchGrammars(options: FetchOptions): Promise<FetchOutcome
     await rm(target, { recursive: true, force: true })
     await mkdir(dirname(target), { recursive: true })
     await rename(unpacked, target)
-    await writeFile(stampPath, `${lock.sha256}\n`)
+    await writeStamp(stampPath, target, lock.sha256)
     log(`Installed ${report.checked} grammar files (sha256 ${lock.sha256.slice(0, 12)})`)
     return "installed"
   } finally {

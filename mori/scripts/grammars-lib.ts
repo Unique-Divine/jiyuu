@@ -159,9 +159,102 @@ export function cachedArchivePath(cacheDir: string, sha256: string): string {
   return join(cacheDir, `${sha256}.tar.zst`)
 }
 
-/** The stamp file holds the sha256 of the archive the target came from. */
-export function stampMatches(stampText: string | null, sha256: string): boolean {
-  return stampText !== null && stampText.trim() === sha256
+/** Size and mtime (ms) of an installed file, as recorded in the stamp. */
+export type FileStat = [size: number, mtimeMs: number]
+
+/**
+ * Contents of the stamp file: the sha256 of the archive the grammars came
+ * from and the size and mtime of every installed file, so a later run can
+ * notice an edited, deleted or added file without rehashing 1.3 GB.
+ */
+export interface InstallStamp {
+  archiveSha256: string
+  files: Record<string, FileStat>
+}
+
+/** Parses the stamp; returns null for a missing, older or damaged stamp. */
+export function parseStamp(text: string | null): InstallStamp | null {
+  if (text === null) return null
+  let raw: unknown
+  try {
+    raw = JSON.parse(text)
+  } catch {
+    return null
+  }
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null
+  const { archiveSha256, files } = raw as Record<string, unknown>
+  if (typeof archiveSha256 !== "string" || !SHA256_RE.test(archiveSha256)) {
+    return null
+  }
+  if (!files || typeof files !== "object" || Array.isArray(files)) return null
+  for (const value of Object.values(files)) {
+    if (
+      !Array.isArray(value) ||
+      value.length !== 2 ||
+      !value.every((n) => typeof n === "number" && Number.isFinite(n))
+    ) {
+      return null
+    }
+  }
+  return { archiveSha256, files: files as Record<string, FileStat> }
+}
+
+export function formatStamp(stamp: InstallStamp): string {
+  return `${JSON.stringify(stamp)}\n`
+}
+
+/** Size and mtime of every regular file under `dir`, plus anything else. */
+export async function snapshotTree(
+  dir: string,
+): Promise<{ files: Record<string, FileStat>; other: string[] }> {
+  const { files, other } = await walk(dir)
+  const out: Record<string, FileStat> = {}
+  for (const rel of files) {
+    const info = await lstat(join(dir, rel))
+    out[rel] = [info.size, info.mtimeMs]
+  }
+  return { files: out, other }
+}
+
+/**
+ * Compares an installed tree's snapshot with the stamp and the expected
+ * file list. Returns the problems found; an empty list means every expected
+ * file is present with the size and mtime it had when it was verified, and
+ * nothing else is there.
+ */
+export function compareSnapshot(
+  stamp: InstallStamp,
+  snapshot: { files: Record<string, FileStat>; other: string[] },
+  expected: Map<string, string>,
+): string[] {
+  const problems: string[] = []
+  for (const rel of snapshot.other) problems.push(`not a regular file: ${rel}`)
+  for (const rel of expected.keys()) {
+    const seen = snapshot.files[rel]
+    const recorded = stamp.files[rel]
+    if (seen === undefined) problems.push(`missing: ${rel}`)
+    else if (
+      recorded === undefined ||
+      seen[0] !== recorded[0] ||
+      seen[1] !== recorded[1]
+    ) {
+      problems.push(`changed since install: ${rel}`)
+    }
+  }
+  for (const rel of Object.keys(snapshot.files)) {
+    if (!expected.has(rel)) problems.push(`not in vendored-checksums.txt: ${rel}`)
+  }
+  return problems
+}
+
+/**
+ * The files hashed on every no-op run: MANIFEST.md and each grammar's
+ * license files. They are small, so the spot check costs little.
+ */
+export function sampleFiles(expected: Map<string, string>): string[] {
+  return [...expected.keys()].filter(
+    (rel) => rel === "MANIFEST.md" || /^[^/]+\/LICENSE[^/]*$/.test(rel),
+  )
 }
 
 export async function readOptional(path: string): Promise<string | null> {
@@ -363,13 +456,59 @@ export function runPipeline(
   })
 }
 
-/** Member names of a .tar.zst archive. */
-export async function listArchive(archive: string): Promise<string[]> {
-  const out = await runPipeline(
-    ["zstd", [...ZSTD_DECOMPRESS_ARGS, archive]],
-    ["tar", ["-tf", "-"]],
-  )
-  return out.split("\n").filter((line) => line.length > 0)
+/** One archive member: its name and the tar -tv type character. */
+export interface ArchiveMember {
+  name: string
+  /** "-" regular file, "d" directory, "l" symlink, "h" hard link, ... */
+  type: string
+}
+
+/**
+ * Pairs the `tar -tf` names with the type column of `tar -tvf`. The two
+ * listings must have the same length; a name with a newline in it would
+ * split differently, so a mismatch is refused rather than guessed at.
+ */
+export function pairListings(
+  names: string[],
+  verbose: string[],
+): ArchiveMember[] {
+  if (names.length !== verbose.length) {
+    throw new Error(
+      `archive listings disagree: ${names.length} names, ` +
+        `${verbose.length} verbose lines`,
+    )
+  }
+  return names.map((name, i) => ({ name, type: verbose[i]!.charAt(0) }))
+}
+
+/**
+ * Checks member types: only regular files and directories may be unpacked.
+ * Symlinks, hard links and device or FIFO entries are refused before
+ * extraction, so the result never depends on tar's link handling.
+ */
+export function checkMemberTypes(members: ArchiveMember[]): string[] {
+  const problems: string[] = []
+  for (const { name, type } of members) {
+    if (type === "-" || type === "d") continue
+    const kind =
+      type === "l" ? "symlink" : type === "h" ? "hard link" : `type ${JSON.stringify(type)}`
+    problems.push(`${kind} member refused: ${JSON.stringify(name)}`)
+  }
+  return problems
+}
+
+/** Members of a .tar.zst archive, with their types. */
+export async function listArchive(archive: string): Promise<ArchiveMember[]> {
+  const list = async (flags: string): Promise<string[]> =>
+    (
+      await runPipeline(
+        ["zstd", [...ZSTD_DECOMPRESS_ARGS, archive]],
+        ["tar", [flags, "-"]],
+      )
+    )
+      .split("\n")
+      .filter((line) => line.length > 0)
+  return pairListings(await list("-tf"), await list("-tvf"))
 }
 
 /** Extracts a .tar.zst archive into an existing directory. */
