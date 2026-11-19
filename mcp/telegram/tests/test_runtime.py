@@ -318,6 +318,40 @@ async def test_with_account_routes_single_multi_and_readonly(monkeypatch):
     )
 
 
+@pytest.mark.asyncio
+async def test_readonly_fan_out_wraps_json_results_in_one_object(monkeypatch):
+    async def tool(account=None):
+        return json.dumps({"results": [{"id": 1, "name": f"{account}\n[other]"}]})
+
+    monkeypatch.setattr(runtime, "clients", {"work": object(), "personal": object()})
+    output = await runtime.with_account(readonly=True)(tool)()
+
+    assert json.loads(output) == {
+        "accounts": [
+            {"account": "work", "result": {"results": [{"id": 1, "name": "work\n[other]"}]}},
+            {
+                "account": "personal",
+                "result": {"results": [{"id": 1, "name": "personal\n[other]"}]},
+            },
+        ]
+    }
+
+
+@pytest.mark.asyncio
+async def test_readonly_fan_out_keeps_text_when_any_result_is_text(monkeypatch):
+    async def tool(account=None):
+        return '{"results": []}' if account == "work" else "Error: not found"
+
+    monkeypatch.setattr(runtime, "clients", {"work": object(), "personal": object()})
+    assert await runtime.with_account(readonly=True)(tool)() == (
+        '[work]\n{"results": []}\n\n[personal]\nError: not found'
+    )
+
+
+def test_merge_account_results_treats_json_scalars_as_text():
+    assert runtime.merge_account_results([("a", "1"), ("b", '"x"')]) == '[a]\n1\n\n[b]\n"x"'
+
+
 class _ConnectivityClient:
     def __init__(self, *, connected=True, authorized=True, ping_error=None):
         self.connected = connected

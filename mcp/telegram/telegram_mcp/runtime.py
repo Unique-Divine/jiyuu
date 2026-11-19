@@ -410,13 +410,41 @@ def is_multi_mode() -> bool:
     return len(clients) > 1
 
 
+def _parse_json_container(text: Any) -> Any:
+    """Return the JSON object or array ``text`` encodes, or None."""
+    if not isinstance(text, str):
+        return None
+    try:
+        value = json.loads(text)
+    except ValueError:
+        return None
+    return value if isinstance(value, (dict, list)) else None
+
+
+def merge_account_results(results: List[tuple]) -> str:
+    """Combine ``(label, result)`` pairs from a multi-account fan-out.
+
+    JSON results stay parseable in one envelope. If any result is text, as
+    from a tool that still returns prose or a plain-text error, the results
+    are joined under ``[label]`` headers as before.
+    """
+    parsed = [(label, _parse_json_container(result)) for label, result in results]
+    if parsed and all(value is not None for _, value in parsed):
+        return json_result(
+            {"accounts": [{"account": label, "result": value} for label, value in parsed]}
+        )
+    return "\n\n".join(f"[{label}]\n{result}" for label, result in results)
+
+
 def with_account(readonly=False):
     """Decorator that adds multi-account support to MCP tools.
 
     - In single-mode: always uses the sole client, no output tagging.
     - In multi-mode with explicit account: uses that account's client.
     - In multi-mode without account + readonly: fans out to all accounts
-      concurrently, prefixes each result with [label], concatenates.
+      concurrently. When every result is a JSON object or array, returns
+      ``{"accounts": [{"account": label, "result": ...}, ...]}``. Otherwise
+      prefixes each result with [label] and concatenates the text.
     - In multi-mode without account + NOT readonly: returns an error.
 
     The wrapped function must accept ``account: str | None = None`` and use
@@ -444,7 +472,7 @@ def with_account(readonly=False):
                 return label, await fn(*args, **kw)
 
             results = await asyncio.gather(*(_call_for(label) for label in clients))
-            return "\n\n".join(f"[{label}]\n{result}" for label, result in results)
+            return merge_account_results(results)
 
         return wrapper
 
