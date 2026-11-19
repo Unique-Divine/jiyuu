@@ -26,7 +26,7 @@ import {
   verifyTree,
   ZSTD_COMPRESS_ARGS,
 } from "./grammars-lib.ts"
-import { checkGrammarListing, isInside, parsePackArgs } from "./grammars-pack.ts"
+import { checkGrammarListing, isInside, parsePackArgs, releaseUrl, updatedLock } from "./grammars-pack.ts"
 
 const GRAMMARS = "internal/cbm/vendored/grammars"
 const SHA_A = "a".repeat(64)
@@ -306,8 +306,50 @@ describe("argument parsing", () => {
   })
   test("pack flags", () => {
     expect(() => parsePackArgs([])).toThrow(/--repo/)
-    const args = parsePackArgs(["--repo", "/r", "--out", "/o.tar.zst", "--update-lock"])
-    expect(args).toEqual({ repo: "/r", commit: undefined, out: "/o.tar.zst", updateLock: true })
+    const args = parsePackArgs([
+      "--repo", "/r", "--out", "/o.tar.zst", "--update-lock", "--release-tag", "mori/grammars/v2",
+    ])
+    expect(args).toEqual({
+      repo: "/r",
+      commit: undefined,
+      out: "/o.tar.zst",
+      updateLock: true,
+      releaseTag: "mori/grammars/v2",
+      url: undefined,
+    })
+    expect(parsePackArgs(["--repo", "/r", "--update-lock", "--url", "https://x/y"]).url).toBe("https://x/y")
+    expect(() => parsePackArgs(["--repo", "/r", "--update-lock"])).toThrow(/--release-tag <tag> or --url/)
+    expect(() => parsePackArgs(["--repo", "/r", "--release-tag", "t"])).toThrow(/only apply with --update-lock/)
+    expect(() =>
+      parsePackArgs(["--repo", "/r", "--update-lock", "--release-tag", "t", "--url", "https://x"]),
+    ).toThrow(/not both/)
+  })
+  test("releaseUrl swaps the tag in a GitHub release URL", () => {
+    const v1 = "https://github.com/Unique-Divine/jiyuu/releases/download/mori%2Fgrammars%2Fv1/grammars.tar.zst"
+    expect(releaseUrl(v1, "mori/grammars/v2")).toBe(
+      "https://github.com/Unique-Divine/jiyuu/releases/download/mori%2Fgrammars%2Fv2/grammars.tar.zst",
+    )
+    expect(() => releaseUrl("https://example.com/grammars.tar.zst", "v2")).toThrow(/pass --url/)
+    expect(() => releaseUrl(v1, " ")).toThrow(/invalid release tag/)
+  })
+  test("updatedLock rewrites url, sha256, size and commit and validates them", () => {
+    const raw = JSON.parse(lockJson()) as Record<string, unknown>
+    const next = updatedLock(raw, {
+      url: "https://example.invalid/v2/grammars.tar.zst",
+      sha256: "b".repeat(64),
+      sizeBytes: 42,
+      commit: "d".repeat(40),
+    })
+    expect(parseLock(JSON.stringify(next))).toMatchObject({
+      url: "https://example.invalid/v2/grammars.tar.zst",
+      sha256: "b".repeat(64),
+      sizeBytes: 42,
+      sourceCommit: "d".repeat(40),
+      path: GRAMMARS,
+    })
+    expect(() =>
+      updatedLock(raw, { url: "http://insecure", sha256: SHA_A, sizeBytes: 1, commit: COMMIT }),
+    ).toThrow(/https/)
   })
   test("isInside", () => {
     expect(isInside("/a/b/c", "/a/b")).toBe(true)

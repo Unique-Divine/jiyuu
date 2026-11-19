@@ -4,11 +4,14 @@
 //
 // Usage:
 //   bun scripts/grammars-pack.ts --repo <git repo> [--commit <sha>]
-//     [--out <file>] [--update-lock]
+//     [--out <file>] [--update-lock (--release-tag <tag> | --url <url>)]
 //
 // --commit defaults to sourceCommit in grammars.lock.json. --out defaults to
 // $TMPDIR/jiyuu-mori/grammars.tar.zst and must lie outside the repository.
-// --update-lock writes the new sha256, size and commit into the lock.
+// --update-lock writes the new url, sha256, size and commit into the lock.
+// It needs the release the archive will be published under: --release-tag
+// swaps the tag in the lock's GitHub release URL (for example
+// mori/grammars/v2), and --url sets any https URL.
 
 import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
@@ -31,6 +34,44 @@ export interface PackArgs {
   commit?: string
   out: string
   updateLock: boolean
+  releaseTag?: string
+  url?: string
+}
+
+const RELEASE_URL_RE = /^(https:\/\/github\.com\/[^/]+\/[^/]+\/releases\/download\/)[^/]+(\/[^/]+)$/
+
+/**
+ * The lock URL for `tag`: the lock's GitHub release download URL with its
+ * tag segment replaced, keeping the asset name.
+ */
+export function releaseUrl(currentUrl: string, tag: string): string {
+  const match = RELEASE_URL_RE.exec(currentUrl)
+  if (!match) {
+    throw new Error(
+      `cannot derive a release URL from ${currentUrl}; pass --url instead`,
+    )
+  }
+  if (tag.trim() === "" || tag !== tag.trim()) {
+    throw new Error(`invalid release tag: ${JSON.stringify(tag)}`)
+  }
+  return `${match[1]}${encodeURIComponent(tag)}${match[2]}`
+}
+
+/** The lock JSON after a pack: new url, sha256, size and source commit. */
+export function updatedLock(
+  raw: Record<string, unknown>,
+  update: { url: string; sha256: string; sizeBytes: number; commit: string },
+): Record<string, unknown> {
+  const next = {
+    ...raw,
+    url: update.url,
+    sha256: update.sha256,
+    sizeBytes: update.sizeBytes,
+    sourceCommit: update.commit,
+  }
+  // Fails on a bad URL, hash or commit before anything is written.
+  parseLock(JSON.stringify(next))
+  return next
 }
 
 export function parsePackArgs(argv: string[]): PackArgs {
@@ -48,14 +89,29 @@ export function parsePackArgs(argv: string[]): PackArgs {
     else if (flag === "--commit") args.commit = value()
     else if (flag === "--out") args.out = resolve(value())
     else if (flag === "--update-lock") args.updateLock = true
+    else if (flag === "--release-tag") args.releaseTag = value()
+    else if (flag === "--url") args.url = value()
     else throw new Error(`unknown argument: ${flag}`)
   }
   if (!args.repo) throw new Error("--repo <path to codebase-memory-mcp> is required")
+  if (args.releaseTag !== undefined && args.url !== undefined) {
+    throw new Error("pass --release-tag or --url, not both")
+  }
+  if ((args.releaseTag !== undefined || args.url !== undefined) && !args.updateLock) {
+    throw new Error("--release-tag and --url only apply with --update-lock")
+  }
+  if (args.updateLock && args.releaseTag === undefined && args.url === undefined) {
+    throw new Error(
+      "--update-lock needs --release-tag <tag> or --url <url> for the new archive",
+    )
+  }
   return {
     repo: args.repo,
     commit: args.commit,
     out: args.out ?? join(tmpdir(), "jiyuu-mori", "grammars.tar.zst"),
     updateLock: args.updateLock ?? false,
+    releaseTag: args.releaseTag,
+    url: args.url,
   }
 }
 
@@ -95,6 +151,10 @@ export function checkGrammarListing(paths: string[], root: string): string[] {
 async function main(): Promise<void> {
   const args = parsePackArgs(process.argv.slice(2))
   const lock = parseLock(await readFile(LOCK_PATH, "utf8"))
+  // Resolve the new URL first so a bad tag fails before the slow pack.
+  const newUrl =
+    args.url ??
+    (args.releaseTag !== undefined ? releaseUrl(lock.url, args.releaseTag) : lock.url)
   const toplevel = (
     await runCommand("git", ["rev-parse", "--show-toplevel"], { cwd: MORI_ROOT })
   ).trim()
@@ -140,11 +200,9 @@ async function main(): Promise<void> {
   console.log(`commit:      ${commit}`)
   if (args.updateLock) {
     const raw = JSON.parse(await readFile(LOCK_PATH, "utf8")) as Record<string, unknown>
-    raw.sha256 = sha256
-    raw.sizeBytes = sizeBytes
-    raw.sourceCommit = commit
-    await writeFile(LOCK_PATH, `${JSON.stringify(raw, null, 2)}\n`)
-    console.log(`updated ${relative(process.cwd(), LOCK_PATH)}`)
+    const next = updatedLock(raw, { url: newUrl, sha256, sizeBytes, commit })
+    await writeFile(LOCK_PATH, `${JSON.stringify(next, null, 2)}\n`)
+    console.log(`updated ${relative(process.cwd(), LOCK_PATH)}; publish the archive at ${newUrl}`)
   }
 }
 

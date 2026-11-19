@@ -72,9 +72,13 @@ and compresses with fixed `zstd` settings, so the same commit gives the same
 bytes:
 
 ```bash
-bun scripts/grammars-pack.ts --repo ~/codebase-memory-mcp \
-  --out /tmp/grammars.tar.zst --update-lock
+bun scripts/grammars-pack.ts --repo ~/codebase-memory-mcp --commit <sha> \
+  --out /tmp/grammars.tar.zst --update-lock --release-tag mori/grammars/v2
 ```
+
+`--update-lock` rewrites the lock's `url`, `sha256`, `sizeBytes` and
+`sourceCommit`. `--release-tag` puts the new tag into the lock's GitHub
+release URL; `--url` sets the URL directly.
 
 Ten grammars that upstream maintains itself (arkts, chialisp, form,
 javascript, magma, pascal, sql, tsx, vba and vbnet) keep their hand-written
@@ -86,7 +90,8 @@ grammar archive.
 
 To change grammars, update `scripts/vendored-checksums.txt` and the grammar
 sources in the source repository, pack at the new commit with
-`--update-lock`, and publish the archive at the lock URL.
+`--update-lock --release-tag <new tag>`, and publish the archive under that
+tag.
 
 ## Test
 
