@@ -656,4 +656,5 @@ defaults, admin events, or controlled test trades.
 | Referee discount | `REFERREE_BASE_FEE_MULTIPLIER` | 5% off base (`0.95` effective) | Compare `get_trader_fee_multiplier` with/without referrer |
 | Referrer maps | `USER_REFERRERS`, `REFERRER_FEE_TIER`, `REFERRER_FEES` | — | Use `get_trader_fee_multiplier`; indexed referral history via [`graphql.md`](graphql.md) |
 
-See also `slp-vaults.md` for `get_pending_gov_fees` and vault reward routing.
+See [Pending governance fees](vaults.md#pending-governance-fees) for
+`get_pending_gov_fees` and vault reward routing.

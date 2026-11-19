@@ -72,8 +72,9 @@ The server lists every tool whether or not anyone is signed in. Each
 | `expired` | `SESSION_EXPIRED` | The session ran out. |
 | `other-endpoint` | `SESSION_UNAVAILABLE` | The session belongs to another Keeper endpoint, or its file is unreadable. |
 
-A refused call submits nothing. Ask the person to run `sai auth login` or
-`sai auth import` in their own terminal, then retry. The server never asks
+A refused call submits nothing. Ask the person to run `sai auth import`, or
+`sai auth login NAME` with their Foundry keystore name, in their own
+terminal, then retry. The server never asks
 for the token and never returns it.
 
 ## Preview, Confirm, Then Trade
@@ -82,8 +83,9 @@ for the token and never returns it.
    person means. Read the account from `auth_list` once, then pass it on
    every preview and trade. Without `addr` a tool acts on whichever account
    is active at that moment, and another terminal or client can switch it.
-2. Show the person the preview and the `addr` it names. Wait for explicit
-   confirmation.
+2. Show the person the preview, the `addr` it names, and the network from
+   `mcp_info`. For a market open, also give the worst-case fill described
+   below. Wait for explicit confirmation.
 3. Call the `trade_*` tool with the same arguments, the same `addr`, and the
    preview's digest.
 
@@ -102,8 +104,7 @@ Before submitting, the server rebuilds the trade and compares its digest with
 the one the person confirmed. The digest covers:
 
 - Every trade: the account and the intent the arguments produce.
-- `trade_open` for a market order: also the confirmed `reference_price`. The
-  live price may differ from it by at most the slippage.
+- `trade_open` for a market order: also the confirmed `reference_price`.
 - `trade_margin`: also the whole margin quote computed from the position. If
   the position changed, the quote changes and the digest no longer matches.
 - `trade_partial_close`: the collateral reduction computed from the position.
@@ -113,6 +114,24 @@ the one the person confirmed. The digest covers:
   call and refuses when collateral or leverage differ between those two
   reads, which catches a change during the call, not one since the preview.
   Preview again right before submitting when the position may have changed.
+
+### Market Opens: Quote Check and Fill Bound
+
+A market `trade_open` makes two different price comparisons:
+
+1. **Quote check, by the server.** It reads the price again at submit and
+   refuses with `PRICE_MOVED` when that price differs from the confirmed
+   `reference_price` by more than the slippage.
+2. **Fill bound, by the contract.** The submitted intent carries the price
+   read at submit as its `intentPrice`, and the contract allows the fill to
+   differ from that price by the full slippage.
+
+The two stack. A long confirmed at 60,000 with 1% slippage passes the quote
+check at 60,600 and can fill up to 61,206. The worst-case fill is the
+confirmed price moved by the slippage twice: `reference × (1 + s)²` for a
+long, `reference × (1 − s)²` for a short. Tell the person that number before
+they confirm. To hold a ceiling of one slippage from the quote, halve the
+slippage, or use a limit order.
 
 On `PREVIEW_MISMATCH` or `PRICE_MOVED` nothing was submitted. The result
 holds a fresh preview. Show it, get confirmation again, and retry with the

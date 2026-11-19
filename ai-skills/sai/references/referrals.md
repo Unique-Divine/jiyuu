@@ -75,36 +75,44 @@ person's next unqualified command would go to Testnet2.
 ```bash
 NET=(--node https://rpc.testnet-2.nibiru.fi:443 --chain-id nibiru-testnet-2)
 PERP="nibi1qtkcns647w959cj9x2yytateu6dgscfnfkraywwa443pr2erak0s5ux7e5"
-USDC="tf/nibi1pc2mmwcqhvzn9vsm0umpu40yzl6gfy6nucwn7g/usdc"
 ```
 
-`USDC` is the Sai testnet USDC token-factory denom. This recipe reads current
-state, so the default non-archive RPC is enough. Use the base-unit fields
-from `nibiru q evm balance`; on testnet, token metadata can make the human
-fields misleading.
+Do not hardcode the USDC denom. Testnet2 has had more than one USDC asset,
+and a wallet funded with the one Sai uses shows zero under another. Ask the
+contract which asset it uses: `get_trading_credit_params` names the USDC
+collateral index, and `get_collateral` returns that collateral's wallet
+denom. On 2026-11-19 these returned `TokenIndex(3)` and
+`erc20/0x1d2eD546C1b5e142d568cab5a4A438f3B2f561E3`.
+
+This recipe reads current state, so the default non-archive RPC is enough.
+Use the base-unit fields from `nibiru q evm balance`.
 
 ### Summary Command
 
 Run this with `nibiru`, `jq`, and `python3` on `PATH`. List the Bech32
 addresses to check in `ADDRS`. `list_user_deposits` returns one row per
-collateral, so the script reads the USDC collateral index from the contract
-and sums only that row.
+collateral, so the script reads the USDC collateral index from the contract,
+reads only that row, and queries the wallet for that collateral's denom.
 
 ```bash
 set -euo pipefail
 
 NET=(--node https://rpc.testnet-2.nibiru.fi:443 --chain-id nibiru-testnet-2)
 PERP="nibi1qtkcns647w959cj9x2yytateu6dgscfnfkraywwa443pr2erak0s5ux7e5"
-USDC="tf/nibi1pc2mmwcqhvzn9vsm0umpu40yzl6gfy6nucwn7g/usdc"
 ADDRS=(nibi1... nibi1...)
 
 perp_q() {
   nibiru q wasm contract-state smart "$PERP" "$1" "${NET[@]}" --output json
 }
 
-# The collateral that trading credits and USDC deposits use.
+# The collateral that trading credits and USDC deposits use, such as
+# "TokenIndex(3)", and the wallet denom the contract accepts for it.
 usdc_idx=$(perp_q '{"get_trading_credit_params":{}}' |
   jq -r '.data.collateral_idx')
+usdc_num=$(echo "$usdc_idx" | tr -cd '0-9')
+USDC=$(perp_q '{"get_collateral":{"index":'"$usdc_num"'}}' |
+  jq -r '.data.denom')
+echo "Sai USDC collateral: $usdc_idx, wallet denom: $USDC"
 
 printf "%-46s %14s %14s %16s %16s\n" \
   "ADDR" "BANK_USDC" "ERC20_USDC" "SAI_DEPOSIT" "SAI_CREDITS"
@@ -153,7 +161,8 @@ trading credits.
 
 ### Optional Verification
 
-For any nonzero row, read the wallet and the contract directly:
+For any nonzero row, read the wallet and the contract directly, with `USDC`
+set as the script sets it:
 
 ```bash
 BECH32="nibi1..."

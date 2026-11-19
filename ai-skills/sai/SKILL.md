@@ -69,7 +69,7 @@ session, even when the person asks for one quick order.
   `sai --json market list`.
 - Mainnet is the default network.
 - Never ask the person for a session token, and never type, paste, or echo
-  one. The person signs in with `sai auth import` or `sai auth login`.
+  one. The person signs in with `sai auth import` or `sai auth login NAME`.
 - Say which account a trade uses before the person confirms it, and pin
   that account on both the preview and the trade.
 - Keeper accepting an intent does not mean the trade executed.
