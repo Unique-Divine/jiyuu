@@ -2884,7 +2884,12 @@ static bool emit_service_edge(cbm_gbuf_t *gbuf, const cbm_gbuf_node_t *source,
     } else if (svc == CBM_SVC_GRPC) {
         emit_grpc_edge(gbuf, source, call, res);
     } else if (svc == CBM_SVC_GRAPHQL) {
+        /* As pass_calls.c: GraphQL edges plus the plain CALLS edge to an
+         * in-project client wrapper. */
         cbm_pipeline_emit_graphql_call(gbuf, source, call, res->confidence);
+        if (target && !suppress_plain_calls) {
+            calls_emitted = emit_normal_calls_edge(gbuf, source, target, call, res);
+        }
     } else if (svc == CBM_SVC_TRPC) {
         emit_trpc_edge(gbuf, source, call, res);
     } else if (svc == CBM_SVC_CONFIG) {
@@ -3686,6 +3691,11 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CB
                     cbm_resolution_t imp_res = {.qualified_name = spelled,
                                                 .confidence = PP_HALF_CONF,
                                                 .strategy = "import_binding"};
+                    if (isvc == CBM_SVC_GRAPHQL) {
+                        cbm_pipeline_emit_graphql_call(ws->local_edge_buf, source_node, &through,
+                                                       imp_res.confidence);
+                        continue;
+                    }
                     emit_http_async_service_edge(ws->local_edge_buf, source_node, &through,
                                                  &imp_res, isvc, through.first_string_arg);
                 }
@@ -3759,6 +3769,13 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CB
              * anyway so cross-repo matching has an HTTP_CALLS edge to work with
              * (#523). Mirrors the sequential resolve_single_call bypass. */
             cbm_svc_kind_t psvc = cbm_service_pattern_match(res.qualified_name);
+            if (psvc == CBM_SVC_GRAPHQL && !target_node && res.qualified_name) {
+                /* An external GraphQL client: its document still links
+                 * (mirrors pass_calls.c calls_emit_service_call). */
+                cbm_pipeline_emit_graphql_call(ws->local_edge_buf, source_node, call,
+                                               res.confidence);
+                continue;
+            }
             if ((psvc == CBM_SVC_HTTP || psvc == CBM_SVC_ASYNC) && !target_node) {
                 const char *u = call->first_string_arg;
                 bool url_or_topic = u && u[0] != '\0' &&

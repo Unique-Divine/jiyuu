@@ -3,6 +3,7 @@
 #include "cbm.h"   // CBMExtractCtx
 #include "callable_sig.h"
 #include "helpers.h"
+#include "service_patterns.h"
 #include "extract_url_fold.h" // cbm_url_fold_record_constant (#706, #1147)
 #include "lang_specs.h"       // CBMLangSpec, cbm_lang_spec, CBM_LANG_*
 #include "tree_sitter/api.h"  // TSNode, TSTreeCursor, ts_tree_cursor_*, ts_node_*
@@ -1466,8 +1467,7 @@ static void record_graphql_constant(CBMExtractCtx *ctx, const char *name, TSNode
                     : ts_node_named_child(args, 0);
     }
     const char *sig = cbm_graphql_literal_sig(ctx->arena, value, ctx->source, true);
-    const char *paths = sig ? strrchr(sig, '|') : NULL;
-    if (!paths || !paths[SKIP_ONE]) {
+    if (!sig || !cbm_service_pattern_graphql_sig_has_paths(sig)) {
         return;
     }
     CBMStringRef ref = {

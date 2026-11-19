@@ -372,4 +372,10 @@ const char *cbm_template_string_text(CBMArena *a, TSNode node, const char *sourc
 const char *cbm_graphql_literal_sig(CBMArena *a, TSNode node, const char *source,
                                     bool require_keyword);
 
+/* The same signature (every operation of the document) read once, with
+ * *shorthand set for the keyword-less `{ ... }` form. F-strings never hold a
+ * document. */
+const char *cbm_graphql_literal_sig_ex(CBMArena *a, TSNode node, const char *source,
+                                       bool *shorthand);
+
 #endif // CBM_HELPERS_H

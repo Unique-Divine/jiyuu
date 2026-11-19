@@ -2560,12 +2560,15 @@ static bool gql_literal_kind(const char *k) {
 }
 
 /* Byte span of a literal's text inside its delimiters. Sets *raw for a
- * Python r-prefixed string, whose backslashes are text. */
-static void gql_literal_span(const char *src, uint32_t *start, uint32_t *end, bool *raw) {
+ * Python r-prefixed string, whose backslashes are text, and *format for an
+ * f-string, whose `{...}` are placeholders, never a selection set. */
+static void gql_literal_span(const char *src, uint32_t *start, uint32_t *end, bool *raw,
+                             bool *format) {
     uint32_t s = *start;
     uint32_t e = *end;
     while (s < e && isalpha((unsigned char)src[s])) {
         *raw = *raw || src[s] == 'r' || src[s] == 'R';
+        *format = *format || src[s] == 'f' || src[s] == 'F';
         s++; /* Python r/b/f/u prefixes */
     }
     uint32_t q = 0;
@@ -2578,14 +2581,25 @@ static void gql_literal_span(const char *src, uint32_t *start, uint32_t *end, bo
     } else if (s != *start) {
         s = *start; /* letters but no quote: string_content, not a prefix */
         *raw = false;
+        *format = false;
     }
     *start = s + q;
     *end = e - q;
 }
 
-/* Cheap pre-check on the raw bytes: a document opens with an operation or
- * fragment keyword, a selection set, a comment or an interpolation. */
+/* Does the word at p (bounded by end) equal `kw`, followed by a non-name
+ * byte? */
+static bool gql_word_at(const char *p, const char *end, const char *kw) {
+    size_t n = strlen(kw);
+    return (size_t)(end - p) >= n && strncmp(p, kw, n) == 0 &&
+           (p + n == end || !(isalnum((unsigned char)p[n]) || p[n] == '_'));
+}
+
+/* Cheap pre-check on the raw bytes, before any copy: a document opens with
+ * an operation or fragment keyword, a selection set, a comment or an
+ * interpolation, and holds a closing brace. */
 static bool gql_opens_like_document(const char *p, const char *end) {
+    const char *start = p;
     for (;;) {
         while (p < end && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')) {
             p++;
@@ -2596,8 +2610,11 @@ static bool gql_opens_like_document(const char *p, const char *end) {
         }
         break;
     }
-    return p < end && (*p == 'q' || *p == 'm' || *p == 's' || *p == 'f' || *p == '{' || *p == '#' ||
-                       *p == '$');
+    bool opens =
+        p < end && (*p == '{' || *p == '#' || *p == '$' || gql_word_at(p, end, "query") ||
+                    gql_word_at(p, end, "mutation") || gql_word_at(p, end, "subscription") ||
+                    gql_word_at(p, end, "fragment"));
+    return opens && memchr(start, '}', (size_t)(end - start)) != NULL;
 }
 
 /* The character a backslash escape `\\c` stands for. */
@@ -2614,43 +2631,44 @@ static char gql_unescape(char c) {
     }
 }
 
-/* The literal's text with the host language's escapes decoded (`\"` is a
- * quote, `\n` a newline), so a GraphQL string argument written inside a
+/* The literal's text with the host language's escapes decoded (`\\"` is a
+ * quote, `\\n` a newline), so a GraphQL string argument written inside a
  * quoted host string ends where GraphQL sees it end. A template's `${...}`
- * expressions are JS source, not literal text: they are copied verbatim, so
- * their own escaped quotes still delimit their strings. */
+ * expressions are JS source, not literal text: they are kept verbatim, so
+ * their own escaped quotes still delimit their strings. One copy, decoded in
+ * place (decoding never grows the text). */
 static char *gql_decode_literal(CBMArena *a, const char *text, size_t len, bool raw,
                                 bool is_template) {
-    char *src = cbm_arena_strndup(a, text, len);
-    char *out = cbm_arena_alloc(a, len + SKIP_ONE);
-    if (!src || !out) {
-        return NULL;
+    char *buf = cbm_arena_strndup(a, text, len);
+    if (!buf || (raw && !is_template) || !memchr(buf, '\\', len)) {
+        return buf;
     }
     size_t n = 0;
     for (size_t i = 0; i < len; i++) {
-        char c = src[i];
-        if (is_template && c == '$' && src[i + SKIP_ONE] == '{') {
-            size_t end = (size_t)(cbm_service_pattern_js_interpolation_end(src + i) - src);
-            memcpy(out + n, src + i, end - i);
+        char c = buf[i];
+        if (is_template && c == '$' && buf[i + SKIP_ONE] == '{') {
+            size_t end = (size_t)(cbm_service_pattern_js_interpolation_end(buf + i) - buf);
+            memmove(buf + n, buf + i, end - i);
             n += end - i;
             i = end - SKIP_ONE;
             continue;
         }
         if (!raw && c == '\\' && i + SKIP_ONE < len) {
-            c = gql_unescape(src[++i]);
+            c = gql_unescape(buf[++i]);
         }
-        out[n++] = c;
+        buf[n++] = c;
     }
-    out[n] = '\0';
-    return out;
+    buf[n] = '\0';
+    return buf;
 }
 
 static bool gql_raw_literal_kind(const char *k) {
     return strcmp(k, "raw_string_literal") == 0; /* Go/Rust: no escapes */
 }
 
-const char *cbm_graphql_literal_sig(CBMArena *a, TSNode node, const char *source,
-                                    bool require_keyword) {
+const char *cbm_graphql_literal_sig_ex(CBMArena *a, TSNode node, const char *source,
+                                       bool *shorthand) {
+    *shorthand = false;
     const char *kind = ts_node_is_null(node) ? NULL : ts_node_type(node);
     if (!kind || !source || !gql_literal_kind(kind)) {
         return NULL;
@@ -2658,18 +2676,26 @@ const char *cbm_graphql_literal_sig(CBMArena *a, TSNode node, const char *source
     uint32_t start = ts_node_start_byte(node);
     uint32_t end = ts_node_end_byte(node);
     bool raw = gql_raw_literal_kind(kind);
-    gql_literal_span(source, &start, &end, &raw);
-    if (end <= start || end - start > GQL_DOC_MAX ||
+    bool format = false;
+    gql_literal_span(source, &start, &end, &raw, &format);
+    if (format || end <= start || end - start > GQL_DOC_MAX ||
         !gql_opens_like_document(source + start, source + end)) {
         return NULL;
     }
     char *doc = gql_decode_literal(a, source + start, end - start, raw,
                                    strcmp(kind, "template_string") == 0);
-    char *sig = doc ? cbm_service_pattern_graphql_signature_alloc(doc, require_keyword) : NULL;
+    char *sig = doc ? cbm_service_pattern_graphql_signature_alloc(doc, false, shorthand) : NULL;
     if (!sig) {
         return NULL;
     }
     const char *kept = cbm_arena_strdup(a, sig);
     free(sig);
     return kept;
+}
+
+const char *cbm_graphql_literal_sig(CBMArena *a, TSNode node, const char *source,
+                                    bool require_keyword) {
+    bool shorthand = false;
+    const char *sig = cbm_graphql_literal_sig_ex(a, node, source, &shorthand);
+    return sig && require_keyword && shorthand ? NULL : sig;
 }

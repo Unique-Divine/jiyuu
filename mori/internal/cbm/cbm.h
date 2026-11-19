@@ -418,6 +418,8 @@ typedef struct {
                                      // guard's unique-name exemption. Default false.
     bool has_trailing_closure;
     bool args_truncated;
+    bool graphql_owned; // the call is the whole value of a module-level constant that
+                        // records its GraphQL document: the constant owns the edges
     /* Swift multi-trailing-closure capture (#2061). `has_trailing_closure`
      * stays the "there is at least one trailing closure" flag manual callers
      * and existing tests set; `trailing_closure_count` is the actual number
@@ -611,6 +613,9 @@ typedef enum {
                             // as a call argument: value is its selection signature,
                             // enclosing_func_qn the constant's (or calling function's)
                             // QN, key_path the callee taking the literal (or NULL)
+    CBM_STRREF_GRAPHQL_REF = 3, // a call names a binding (`{ query }`): value is the module
+                                // constant's QN whose CBM_STRREF_GRAPHQL ref holds the
+                                // document, enclosing_func_qn the caller, key_path the callee
 } CBMStringRefKind;
 
 typedef struct {

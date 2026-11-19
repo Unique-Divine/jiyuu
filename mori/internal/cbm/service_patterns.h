@@ -144,8 +144,22 @@ bool cbm_service_pattern_graphql_signature(const char *doc, bool require_keyword
 const char *cbm_service_pattern_js_interpolation_end(const char *p);
 
 /* The same signature in a heap buffer that grows to hold every path (free()
- * it); NULL when `doc` holds no operation or on allocation failure. */
-char *cbm_service_pattern_graphql_signature_alloc(const char *doc, bool require_keyword);
+ * it); NULL when `doc` holds no operation or on allocation failure. Sets
+ * *shorthand (when non-NULL) for the keyword-less `{ ... }` form. */
+char *cbm_service_pattern_graphql_signature_alloc(const char *doc, bool require_keyword,
+                                                  bool *shorthand);
+
+/* A signature holds one record per operation of the document, separated by
+ * newlines: "<type>|<name>|<paths>\n<type>|<name>|<paths>". The record after
+ * `record`, or NULL after the last one. */
+const char *cbm_service_pattern_graphql_sig_next(const char *record);
+
+/* Does any record of the signature carry a field path? */
+bool cbm_service_pattern_graphql_sig_has_paths(const char *sig);
+
+/* The record of the operation named `operation` as its own signature (free()
+ * it), or NULL when the signature has no such operation. */
+char *cbm_service_pattern_graphql_sig_select(const char *sig, const char *operation);
 
 /* Split a signature from cbm_service_pattern_graphql_signature: sets *op_type
  * to a static "query"/"mutation"/"subscription", copies the operation name
