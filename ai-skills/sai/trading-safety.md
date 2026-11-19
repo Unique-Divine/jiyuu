@@ -37,9 +37,19 @@ the CLI or the MCP tools. A mistake here spends the person's money.
      short. Through the CLI there is no quote check: the dry run shows no
      price, and the worst case is the market price at submit moved by the
      slippage once, with no tie to any price the person saw.
-   - Before asking for confirmation, give the person that worst-case number,
-     not only the quote. If they need a ceiling at 60,600, halve the
-     slippage, or use a limit order, whose `--price` is the price they set.
+   - Before asking for confirmation, compute the worst-case fill and give
+     the person that number, not only the quote.
+   - No order type gives a hard price ceiling. To keep an MCP market long
+     under a ceiling `C` from reference `R`, the slippage must satisfy
+     `R × (1 + s)² ≤ C`, so `s ≤ sqrt(C / R) − 1`, rounded down. For a
+     ceiling of 60,600 from 60,000 that is `s ≤ 0.498%`: 0.49% gives a worst
+     case of 60,589.44, while 0.5% already allows 60,601.50. For a short with
+     a floor `F`, use `s ≤ 1 − sqrt(F / R)`.
+   - A limit or stop order is no ceiling either. Its `--price` is a trigger.
+     The contract checks the trigger first and applies the slippage after it,
+     so the worst fill is `trigger × (1 + s)` for a long and
+     `trigger × (1 − s)` for a short. A long limit at 60,600 with 1% slippage
+     can fill up to 61,206. State that number too.
    - Prefer MCP tools `preview_open` and `trade_open` when approval depends
      on a quoted price.
 4. **Accepted is not executed.** `accepted` means Keeper admitted the intent.
@@ -129,7 +139,9 @@ approval still describes the trade:
 
 - **Limit and stop opens, `tpsl`, `leverage`, `close`, and `--cancel-order`**
   send exactly the arguments shown. Drop `--dry-run` once the person has
-  confirmed the account, the network, and those arguments.
+  confirmed the account, the network, and those arguments. For a limit or
+  stop open, the confirmation covers the worst fill from rule 3,
+  `trigger × (1 + s)` for a long, not the trigger alone.
 - **Partial close** takes a percentage and recomputes the amount from the
   position at submit. If the person approved "close 50%, about 50 USDC" and
   the position doubles before submit, the live command closes 100 USDC. Ask
@@ -137,10 +149,15 @@ approval still describes the trade:
   and say so in those words. If they approve a fixed amount, use MCP tools
   `preview_partial_close` and `trade_partial_close`, whose digest binds the
   computed reduction.
-- **Margin** submits a target leverage quoted from the position at submit.
-  The margin that moves can differ from the dry run's quote. Ask the person
-  to approve the target leverage, or use the MCP tools, whose digest binds
-  the whole quote.
+- **Margin** takes an amount, `--direction add|remove --amount USDC`, and
+  computes the target leverage from the position at submit. The dry run's
+  target is a quote: adding 25 USDC to 100 USDC of collateral at 5x previews
+  4x, but if the collateral doubles before submit the same command sends
+  about 4.44x. Ask the person to approve the amount, and say the CLI
+  computes the target leverage at submit. If they approve a specific target
+  leverage, use MCP tools `preview_margin` and `trade_margin`, whose digest
+  binds the whole quote, or `trade leverage ID --leverage VALUE`, which
+  sends the target they named.
 - **Market open** fills from the price at submit. Give the worst case from
   rule 3 before asking.
 

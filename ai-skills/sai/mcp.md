@@ -130,8 +130,18 @@ The two stack. A long confirmed at 60,000 with 1% slippage passes the quote
 check at 60,600 and can fill up to 61,206. The worst-case fill is the
 confirmed price moved by the slippage twice: `reference × (1 + s)²` for a
 long, `reference × (1 − s)²` for a short. Tell the person that number before
-they confirm. To hold a ceiling of one slippage from the quote, halve the
-slippage, or use a limit order.
+they confirm.
+
+No setting gives a hard ceiling. To keep a long under a ceiling `C` from
+reference `R`, choose a slippage with `R × (1 + s)² ≤ C`, so
+`s ≤ sqrt(C / R) − 1`, rounded down. For a ceiling of 60,600 from 60,000,
+`s ≤ 0.498%`: 0.49% gives a worst case of 60,589.44, and 0.5% allows
+60,601.50. For a short with a floor `F`, use `s ≤ 1 − sqrt(F / R)`.
+
+A limit or stop order's `price` is a trigger, not a cap. The contract applies
+the slippage after the trigger check, so its worst fill is
+`trigger × (1 + s)` for a long and `trigger × (1 − s)` for a short.
+[trading-safety.md](trading-safety.md) rule 3 has the full rule.
 
 On `PREVIEW_MISMATCH` or `PRICE_MOVED` nothing was submitted. The result
 holds a fresh preview. Show it, get confirmation again, and retry with the
