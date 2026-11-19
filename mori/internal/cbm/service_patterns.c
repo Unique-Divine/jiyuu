@@ -1,0 +1,1296 @@
+/*
+ * service_patterns.c — Classify call edges by library identity in resolved QN.
+ *
+ * Instead of matching callee names (ambiguous: "get", "post", "send"),
+ * we match library identifiers in the RESOLVED qualified name. The QN
+ * contains the full module path, so import aliases are transparent:
+ *   r.get("/api") → QN: project.venv.requests.api.get → match "requests" → HTTP_CALLS
+ *
+ * Two-level matching:
+ *   1. Library identifier in QN → determines edge type (HTTP/ASYNC/CONFIG)
+ *   2. Method suffix → determines HTTP method (get→GET, post→POST)
+ */
+#include "service_patterns.h"
+#include "callable_sig.h"
+#include "foundation/constants.h"
+#include "foundation/mem_core.h"
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdlib.h>
+#include <string.h>
+
+/* ── Library identifier → edge type ────────────────────────────── */
+
+typedef struct {
+    const char *library_id; /* substring to find in resolved QN */
+    cbm_svc_kind_t kind;    /* HTTP_CALLS, ASYNC_CALLS, CONFIGURES */
+    const char *broker;     /* for ASYNC: broker name (NULL otherwise) */
+} lib_pattern_t;
+
+/* HTTP client libraries — match these substrings in the resolved QN.
+ * Sources: github.com/easybase/awesome-http, official SDK docs, agent research */
+static const lib_pattern_t http_libraries[] = {
+    /* Python */
+    {"requests", CBM_SVC_HTTP, NULL},
+    {"httpx", CBM_SVC_HTTP, NULL},
+    {"aiohttp", CBM_SVC_HTTP, NULL},
+    {"urllib", CBM_SVC_HTTP, NULL},
+    {"urllib3", CBM_SVC_HTTP, NULL},
+    {"httplib2", CBM_SVC_HTTP, NULL},
+    {"pycurl", CBM_SVC_HTTP, NULL},
+    {"treq", CBM_SVC_HTTP, NULL},
+    {"uplink", CBM_SVC_HTTP, NULL},
+
+    /* JavaScript / TypeScript */
+    {"axios", CBM_SVC_HTTP, NULL},
+    /* `import Axios from "axios"`: the capitalized default-import binding
+     * (also axios's own Axios / AxiosInstance types). Matching is
+     * case-sensitive, so without this entry `Axios.get(url)` fell through to
+     * the `.get` route-suffix fallback and became a route registration. */
+    {"Axios", CBM_SVC_HTTP, NULL},
+    /* Angular HttpClient (#2768). The receiver rows end in a dot, like "gin.":
+     * a bare "this.http" / "$http" would also match this.httpAdapter.get
+     * (NestJS route registration) and $httpBackend.expectGET (an AngularJS test
+     * double), because an uppercase letter after an id counts as CamelCase
+     * glue. A chain wrapped before the verb keeps its line break in the callee
+     * text ("this.http\n      .post", prettier's style), so each receiver also
+     * has a line-break twin: LF, and CR for CRLF files. Java/C# HttpClient is
+     * already listed below. */
+    {"@angular/common/http", CBM_SVC_HTTP, NULL},
+    {"angular.common.http", CBM_SVC_HTTP, NULL},
+    {"this.http.", CBM_SVC_HTTP, NULL},
+    {"this.http\n", CBM_SVC_HTTP, NULL},
+    {"this.http\r", CBM_SVC_HTTP, NULL},
+    {"httpClient.", CBM_SVC_HTTP, NULL},
+    {"httpClient\n", CBM_SVC_HTTP, NULL},
+    {"httpClient\r", CBM_SVC_HTTP, NULL},
+    {"$http.", CBM_SVC_HTTP, NULL},
+    {"$http\n", CBM_SVC_HTTP, NULL},
+    {"$http\r", CBM_SVC_HTTP, NULL},
+    {"superagent", CBM_SVC_HTTP, NULL},
+    {"needle", CBM_SVC_HTTP, NULL},
+    {"node-fetch", CBM_SVC_HTTP, NULL},
+    {"undici", CBM_SVC_HTTP, NULL},
+    {"ofetch", CBM_SVC_HTTP, NULL},
+    {"wretch", CBM_SVC_HTTP, NULL},
+    {"sindresorhus/ky", CBM_SVC_HTTP, NULL},
+    {"phin", CBM_SVC_HTTP, NULL},
+
+    /* Go */
+    {"net/http", CBM_SVC_HTTP, NULL},
+    {"resty", CBM_SVC_HTTP, NULL},
+    {"sling", CBM_SVC_HTTP, NULL},
+    {"heimdall", CBM_SVC_HTTP, NULL},
+    {"gentleman", CBM_SVC_HTTP, NULL},
+    {"retryablehttp", CBM_SVC_HTTP, NULL},
+
+    /* Java / Kotlin */
+    {"HttpClient", CBM_SVC_HTTP, NULL},
+    {"OkHttp", CBM_SVC_HTTP, NULL},
+    {"okhttp3", CBM_SVC_HTTP, NULL},
+    {"RestTemplate", CBM_SVC_HTTP, NULL},
+    {"WebClient", CBM_SVC_HTTP, NULL},
+    {"Unirest", CBM_SVC_HTTP, NULL},
+    {"AsyncHttpClient", CBM_SVC_HTTP, NULL},
+    {"apache.http", CBM_SVC_HTTP, NULL},
+    {"Retrofit", CBM_SVC_HTTP, NULL},
+    {"Feign", CBM_SVC_HTTP, NULL},
+    {"ktor.client", CBM_SVC_HTTP, NULL},
+    {"kittinunf.fuel", CBM_SVC_HTTP, NULL},
+
+    /* Rust */
+    {"reqwest", CBM_SVC_HTTP, NULL},
+    {"hyper", CBM_SVC_HTTP, NULL},
+    {"surf", CBM_SVC_HTTP, NULL},
+    {"ureq", CBM_SVC_HTTP, NULL},
+    {"isahc", CBM_SVC_HTTP, NULL},
+    {"attohttpc", CBM_SVC_HTTP, NULL},
+
+    /* C# */
+    {"HttpClient", CBM_SVC_HTTP, NULL},
+    {"RestSharp", CBM_SVC_HTTP, NULL},
+    {"Flurl", CBM_SVC_HTTP, NULL},
+    {"Refit", CBM_SVC_HTTP, NULL},
+
+    /* Ruby */
+    {"HTTParty", CBM_SVC_HTTP, NULL},
+    {"Faraday", CBM_SVC_HTTP, NULL},
+    {"RestClient", CBM_SVC_HTTP, NULL},
+    {"Typhoeus", CBM_SVC_HTTP, NULL},
+    {"Excon", CBM_SVC_HTTP, NULL},
+    {"Net::HTTP", CBM_SVC_HTTP, NULL},
+
+    /* PHP */
+    {"Guzzle", CBM_SVC_HTTP, NULL},
+    {"guzzle", CBM_SVC_HTTP, NULL},
+    {"curl", CBM_SVC_HTTP, NULL},
+    {"Symfony\\HttpClient", CBM_SVC_HTTP, NULL},
+
+    /* C/C++ */
+    {"cpr", CBM_SVC_HTTP, NULL},
+    {"cpp-httplib", CBM_SVC_HTTP, NULL},
+    {"Poco.Net", CBM_SVC_HTTP, NULL},
+    {"Beast", CBM_SVC_HTTP, NULL},
+
+    /* Swift */
+    {"Alamofire", CBM_SVC_HTTP, NULL},
+    {"Moya", CBM_SVC_HTTP, NULL},
+    {"URLSession", CBM_SVC_HTTP, NULL},
+
+    /* Dart */
+    {"Dio", CBM_SVC_HTTP, NULL},
+    {"dio", CBM_SVC_HTTP, NULL},
+    {"package:http", CBM_SVC_HTTP, NULL},
+    {"Chopper", CBM_SVC_HTTP, NULL},
+
+    /* Elixir */
+    {"HTTPoison", CBM_SVC_HTTP, NULL},
+    {"Tesla", CBM_SVC_HTTP, NULL},
+    {"Finch", CBM_SVC_HTTP, NULL},
+    {"Mint.HTTP", CBM_SVC_HTTP, NULL},
+
+    /* Scala */
+    {"sttp", CBM_SVC_HTTP, NULL},
+    {"akka.http", CBM_SVC_HTTP, NULL},
+    {"http4s", CBM_SVC_HTTP, NULL},
+    {"scalaj", CBM_SVC_HTTP, NULL},
+
+    /* Haskell */
+    {"wreq", CBM_SVC_HTTP, NULL},
+    {"http-client", CBM_SVC_HTTP, NULL},
+    {"http-conduit", CBM_SVC_HTTP, NULL},
+    {"servant-client", CBM_SVC_HTTP, NULL},
+    {"Network.HTTP", CBM_SVC_HTTP, NULL},
+
+    /* Lua */
+    {"socket.http", CBM_SVC_HTTP, NULL},
+    {"resty.http", CBM_SVC_HTTP, NULL},
+
+    /* Glued-name libraries. match_qn needs an identifier boundary around an
+     * id, so a library whose own name glues a lowercase prefix/suffix onto
+     * another id ("grequests", "curlpp") is listed explicitly: no boundary
+     * rule can tell "grequests" from "myrequests". */
+    {"grequests", CBM_SVC_HTTP, NULL},  /* Python: gevent + requests */
+    {"txrequests", CBM_SVC_HTTP, NULL}, /* Python: Twisted + requests */
+    {"redaxios", CBM_SVC_HTTP, NULL},   /* JS: axios-compatible fetch client */
+    {"gaxios", CBM_SVC_HTTP, NULL},     /* JS: Google's axios-style client */
+    {"libcurl", CBM_SVC_HTTP, NULL},    /* C, node-libcurl */
+    {"curlpp", CBM_SVC_HTTP, NULL},     /* C++ libcurl wrapper */
+    {"curlcpp", CBM_SVC_HTTP, NULL},    /* C++ libcurl wrapper */
+    {"hyperlocal", CBM_SVC_HTTP, NULL}, /* Rust: hyper over unix sockets */
+    {"guzzlehttp", CBM_SVC_HTTP, NULL}, /* PHP: Guzzle's composer vendor */
+
+    {NULL, CBM_SVC_NONE, NULL},
+};
+
+/* Async dispatch / message broker libraries */
+static const lib_pattern_t async_libraries[] = {
+    /* GCP */
+    {"cloudtasks", CBM_SVC_ASYNC, "cloud_tasks"},
+    {"cloud_tasks", CBM_SVC_ASYNC, "cloud_tasks"},
+    {"cloud.tasks", CBM_SVC_ASYNC, "cloud_tasks"},
+    {"CloudTasks", CBM_SVC_ASYNC, "cloud_tasks"},
+    {"pubsub", CBM_SVC_ASYNC, "pubsub"},
+    {"cloud.pubsub", CBM_SVC_ASYNC, "pubsub"},
+    {"PubSub", CBM_SVC_ASYNC, "pubsub"},
+
+    /* AWS — use SDK module paths to avoid false positives.  cbm_fqn_compute
+     * converts path slashes to '.', so a resolved local Go QN reads
+     * "aws-sdk-go.service.sqs..."; include both slash and dot forms so the
+     * substring match fires whether the id comes from an import path or a QN. */
+    {"aws-sdk-go/service/sqs", CBM_SVC_ASYNC, "sqs"},
+    {"aws-sdk-go.service.sqs", CBM_SVC_ASYNC, "sqs"},
+    {"aws_sdk_sqs", CBM_SVC_ASYNC, "sqs"},
+    {"Amazon.SQS", CBM_SVC_ASYNC, "sqs"},
+    {"@aws-sdk/client-sqs", CBM_SVC_ASYNC, "sqs"},
+    {"boto3.client.sqs", CBM_SVC_ASYNC, "sqs"},
+    {"aws-sdk-go/service/sns", CBM_SVC_ASYNC, "sns"},
+    {"aws-sdk-go.service.sns", CBM_SVC_ASYNC, "sns"},
+    {"aws_sdk_sns", CBM_SVC_ASYNC, "sns"},
+    {"Amazon.SNS", CBM_SVC_ASYNC, "sns"},
+    {"@aws-sdk/client-sns", CBM_SVC_ASYNC, "sns"},
+    {"eventbridge", CBM_SVC_ASYNC, "eventbridge"},
+    {"EventBridge", CBM_SVC_ASYNC, "eventbridge"},
+    {"aws-sdk-go/service/lambda", CBM_SVC_ASYNC, "lambda"},
+    {"aws-sdk-go.service.lambda", CBM_SVC_ASYNC, "lambda"},
+    {"aws_sdk_lambda", CBM_SVC_ASYNC, "lambda"},
+    {"@aws-sdk/client-lambda", CBM_SVC_ASYNC, "lambda"},
+    {"stepfunctions", CBM_SVC_ASYNC, "stepfunctions"},
+
+    /* Azure */
+    {"ServiceBus", CBM_SVC_ASYNC, "servicebus"},
+    {"Azure.Messaging", CBM_SVC_ASYNC, "servicebus"},
+
+    /* Kafka */
+    {"kafka", CBM_SVC_ASYNC, "kafka"},
+    {"Kafka", CBM_SVC_ASYNC, "kafka"},
+    {"kafkajs", CBM_SVC_ASYNC, "kafka"},
+    {"sarama", CBM_SVC_ASYNC, "kafka"},
+    {"rdkafka", CBM_SVC_ASYNC, "kafka"},
+    {"confluent", CBM_SVC_ASYNC, "kafka"},
+    {"Confluent.Kafka", CBM_SVC_ASYNC, "kafka"},
+
+    /* RabbitMQ */
+    {"amqp", CBM_SVC_ASYNC, "rabbitmq"},
+    {"AMQP", CBM_SVC_ASYNC, "rabbitmq"},
+    {"amqplib", CBM_SVC_ASYNC, "rabbitmq"},
+    {"RabbitMQ", CBM_SVC_ASYNC, "rabbitmq"},
+    {"lapin", CBM_SVC_ASYNC, "rabbitmq"},
+    {"MassTransit", CBM_SVC_ASYNC, "rabbitmq"},
+
+    /* NATS */
+    {"nats", CBM_SVC_ASYNC, "nats"},
+    {"NATS", CBM_SVC_ASYNC, "nats"},
+
+    /* Redis pub/sub */
+    {"ioredis", CBM_SVC_ASYNC, "redis"},
+
+    /* Task queues */
+    {"celery", CBM_SVC_ASYNC, "celery"},
+    {"Celery", CBM_SVC_ASYNC, "celery"},
+    {"dramatiq", CBM_SVC_ASYNC, "dramatiq"},
+    {"huey", CBM_SVC_ASYNC, "huey"},
+    {"python-rq", CBM_SVC_ASYNC, "rq"},
+    {"rq.Queue", CBM_SVC_ASYNC, "rq"},
+    {"bullmq", CBM_SVC_ASYNC, "bullmq"},
+    {"BullMQ", CBM_SVC_ASYNC, "bullmq"},
+    {"bull.Queue", CBM_SVC_ASYNC, "bull"},
+    {"Sidekiq", CBM_SVC_ASYNC, "sidekiq"},
+    {"sidekiq", CBM_SVC_ASYNC, "sidekiq"},
+    {"Resque", CBM_SVC_ASYNC, "resque"},
+    {"GoodJob", CBM_SVC_ASYNC, "goodjob"},
+    {"DelayedJob", CBM_SVC_ASYNC, "delayed_job"},
+    {"Hangfire", CBM_SVC_ASYNC, "hangfire"},
+    {"NServiceBus", CBM_SVC_ASYNC, "nservicebus"},
+    {"asynq", CBM_SVC_ASYNC, "asynq"},
+    {"RichardKnop/machinery", CBM_SVC_ASYNC, "machinery"},
+
+    /* Workflow engines — use specific module paths to avoid "Temporal" in Django etc. */
+    {"temporalio", CBM_SVC_ASYNC, "temporal"},
+    {"@temporalio", CBM_SVC_ASYNC, "temporal"},
+    {"temporal.client", CBM_SVC_ASYNC, "temporal"},
+    {"temporal.worker", CBM_SVC_ASYNC, "temporal"},
+    {"inngest", CBM_SVC_ASYNC, "inngest"},
+
+    /* Elixir */
+    {"Oban", CBM_SVC_ASYNC, "oban"},
+    {"Broadway", CBM_SVC_ASYNC, "broadway"},
+    {"GenStage", CBM_SVC_ASYNC, "genstage"},
+    {"Phoenix.PubSub", CBM_SVC_ASYNC, "phoenix_pubsub"},
+
+    /* Scala */
+    {"Alpakka", CBM_SVC_ASYNC, "alpakka"},
+
+    /* MQTT */
+    {"mqtt", CBM_SVC_ASYNC, "mqtt"},
+    {"paho.mqtt", CBM_SVC_ASYNC, "mqtt"},
+    {"MQTTClient", CBM_SVC_ASYNC, "mqtt"},
+    {"mosquitto", CBM_SVC_ASYNC, "mqtt"},
+    {"asyncio_mqtt", CBM_SVC_ASYNC, "mqtt"},
+    {"gmqtt", CBM_SVC_ASYNC, "mqtt"},
+    {"rumqttc", CBM_SVC_ASYNC, "mqtt"},
+
+    /* NATS */
+    {"nats.go", CBM_SVC_ASYNC, "nats"},
+    {"nats-py", CBM_SVC_ASYNC, "nats"},
+    {"nats.ws", CBM_SVC_ASYNC, "nats"},
+    {"nats.java", CBM_SVC_ASYNC, "nats"},
+    {"nats.net", CBM_SVC_ASYNC, "nats"},
+    {"async-nats", CBM_SVC_ASYNC, "nats"},
+    {"nats.rs", CBM_SVC_ASYNC, "nats"},
+
+    /* Dapr pub/sub */
+    {"dapr.clients.grpc", CBM_SVC_ASYNC, "dapr"},
+    {"DaprClient", CBM_SVC_ASYNC, "dapr"},
+
+    /* Glued-name libraries (see the note in http_libraries). */
+    {"aiokafka", CBM_SVC_ASYNC, "kafka"},
+    {"pykafka", CBM_SVC_ASYNC, "kafka"},
+    {"librdkafka", CBM_SVC_ASYNC, "kafka"},
+    {"rdkafkacpp", CBM_SVC_ASYNC, "kafka"},
+    {"rskafka", CBM_SVC_ASYNC, "kafka"},
+    {"aioamqp", CBM_SVC_ASYNC, "rabbitmq"},
+    {"amqpstorm", CBM_SVC_ASYNC, "rabbitmq"},
+    {"pamqp", CBM_SVC_ASYNC, "rabbitmq"},
+    {"pyamqp", CBM_SVC_ASYNC, "rabbitmq"},
+    {"amqprs", CBM_SVC_ASYNC, "rabbitmq"},
+    {"amqpcpp", CBM_SVC_ASYNC, "rabbitmq"},
+    {"pynats", CBM_SVC_ASYNC, "nats"},
+    {"jnats", CBM_SVC_ASYNC, "nats"},
+    {"aiomqtt", CBM_SVC_ASYNC, "mqtt"},
+    {"amqtt", CBM_SVC_ASYNC, "mqtt"},
+    {"hbmqtt", CBM_SVC_ASYNC, "mqtt"},
+    {"umqtt", CBM_SVC_ASYNC, "mqtt"},
+    {"mqttools", CBM_SVC_ASYNC, "mqtt"},
+    {"emqtt", CBM_SVC_ASYNC, "mqtt"},
+    {"rumqtt", CBM_SVC_ASYNC, "mqtt"},
+    {"gomqtt", CBM_SVC_ASYNC, "mqtt"},
+    {"libmosquitto", CBM_SVC_ASYNC, "mqtt"},
+    {"mosquittopp", CBM_SVC_ASYNC, "mqtt"},
+    {"pubsublite", CBM_SVC_ASYNC, "pubsub"},
+    {"gocelery", CBM_SVC_ASYNC, "celery"},
+
+    {NULL, CBM_SVC_NONE, NULL},
+};
+
+/* Config accessor libraries */
+static const lib_pattern_t config_libraries[] = {
+    /* Universal */
+    {"getenv", CBM_SVC_CONFIG, NULL},
+    {"Getenv", CBM_SVC_CONFIG, NULL},
+    {"getEnv", CBM_SVC_CONFIG, NULL},
+    {"LookupEnv", CBM_SVC_CONFIG, NULL},
+    {"lookupEnv", CBM_SVC_CONFIG, NULL},
+    {"get_env", CBM_SVC_CONFIG, NULL},
+    {"fetch_env", CBM_SVC_CONFIG, NULL},
+    {"GetEnvironmentVariable", CBM_SVC_CONFIG, NULL},
+    {"getProperty", CBM_SVC_CONFIG, NULL},
+    {"getEnvironment", CBM_SVC_CONFIG, NULL},
+
+    /* Go */
+    {"viper", CBM_SVC_CONFIG, NULL},
+    {"envconfig", CBM_SVC_CONFIG, NULL},
+    {"godotenv", CBM_SVC_CONFIG, NULL},
+
+    /* Python */
+    {"decouple", CBM_SVC_CONFIG, NULL},
+    {"dynaconf", CBM_SVC_CONFIG, NULL},
+    {"dotenv", CBM_SVC_CONFIG, NULL},
+
+    /* JS/TS */
+    {"nconf", CBM_SVC_CONFIG, NULL},
+    {"convict", CBM_SVC_CONFIG, NULL},
+    {"envalid", CBM_SVC_CONFIG, NULL},
+
+    /* Rust */
+    {"dotenvy", CBM_SVC_CONFIG, NULL},
+    {"figment", CBM_SVC_CONFIG, NULL},
+    {"config-rs", CBM_SVC_CONFIG, NULL},
+
+    /* Java/Scala */
+    {"ConfigFactory", CBM_SVC_CONFIG, NULL},
+    {"ConfigurationProperties", CBM_SVC_CONFIG, NULL},
+
+    /* Elixir */
+    {"Application.get_env", CBM_SVC_CONFIG, NULL},
+    {"Application.fetch_env", CBM_SVC_CONFIG, NULL},
+
+    /* Glued-name accessors (see the note in http_libraries). */
+    {"wgetenv", CBM_SVC_CONFIG, NULL},   /* Windows CRT: _wgetenv, _wgetenv_s */
+    {"getenvb", CBM_SVC_CONFIG, NULL},   /* Python: os.getenvb */
+    {"qgetenv", CBM_SVC_CONFIG, NULL},   /* Qt */
+    {"dotenvx", CBM_SVC_CONFIG, NULL},   /* JS: @dotenvx/dotenvx */
+    {"phpdotenv", CBM_SVC_CONFIG, NULL}, /* PHP: vlucas/phpdotenv */
+
+    {NULL, CBM_SVC_NONE, NULL},
+};
+
+/* Route registration frameworks — callee resolves to one of these AND
+ * has an HTTP method suffix → CBM_SVC_ROUTE_REG.
+ * Distinguished from HTTP clients: "gin.GET" registers a handler,
+ * "requests.get" makes an outbound HTTP call. */
+static const lib_pattern_t route_reg_libraries[] = {
+    /* Go */
+    {"gin-gonic/gin", CBM_SVC_ROUTE_REG, NULL},
+    {"gin.", CBM_SVC_ROUTE_REG, NULL},
+    {"go-chi/chi", CBM_SVC_ROUTE_REG, NULL},
+    {"chi.", CBM_SVC_ROUTE_REG, NULL},
+    {"gorilla/mux", CBM_SVC_ROUTE_REG, NULL},
+    {"labstack/echo", CBM_SVC_ROUTE_REG, NULL},
+    {"echo.", CBM_SVC_ROUTE_REG, NULL},
+    {"gofiber/fiber", CBM_SVC_ROUTE_REG, NULL},
+    {"fiber.", CBM_SVC_ROUTE_REG, NULL},
+    {"net/http.ServeMux", CBM_SVC_ROUTE_REG, NULL},
+    {"http.ServeMux", CBM_SVC_ROUTE_REG, NULL},
+    {"httprouter", CBM_SVC_ROUTE_REG, NULL},
+
+    /* JavaScript / TypeScript */
+    {"express", CBM_SVC_ROUTE_REG, NULL},
+    {"fastify", CBM_SVC_ROUTE_REG, NULL},
+    {"koa-router", CBM_SVC_ROUTE_REG, NULL},
+    {"hono", CBM_SVC_ROUTE_REG, NULL},
+    {"hapi", CBM_SVC_ROUTE_REG, NULL},
+
+    /* Python (non-decorator, e.g., Flask add_url_rule) */
+    {"flask", CBM_SVC_ROUTE_REG, NULL},
+    {"FastAPI", CBM_SVC_ROUTE_REG, NULL},
+    {"starlette", CBM_SVC_ROUTE_REG, NULL},
+
+    /* PHP */
+    {"Laravel", CBM_SVC_ROUTE_REG, NULL},
+    {"Illuminate.Routing", CBM_SVC_ROUTE_REG, NULL},
+    {"Symfony.Routing", CBM_SVC_ROUTE_REG, NULL},
+
+    /* Kotlin */
+    {"ktor.server", CBM_SVC_ROUTE_REG, NULL},
+    {"ktor.routing", CBM_SVC_ROUTE_REG, NULL},
+
+    /* Rust */
+    {"actix-web", CBM_SVC_ROUTE_REG, NULL},
+    {"actix_web", CBM_SVC_ROUTE_REG, NULL},
+    {"axum", CBM_SVC_ROUTE_REG, NULL},
+    {"rocket", CBM_SVC_ROUTE_REG, NULL},
+
+    /* Java */
+    {"Spring", CBM_SVC_ROUTE_REG, NULL},
+    {"jakarta.ws.rs", CBM_SVC_ROUTE_REG, NULL},
+
+    /* C# */
+    {"Microsoft.AspNetCore", CBM_SVC_ROUTE_REG, NULL},
+    {"MapGet", CBM_SVC_ROUTE_REG, NULL},
+    {"MapPost", CBM_SVC_ROUTE_REG, NULL},
+
+    /* Ruby */
+    {"ActionDispatch", CBM_SVC_ROUTE_REG, NULL},
+    {"Sinatra", CBM_SVC_ROUTE_REG, NULL},
+
+    /* Elixir */
+    {"Phoenix.Router", CBM_SVC_ROUTE_REG, NULL},
+
+    /* Scala */
+    {"akka.http.scaladsl.server", CBM_SVC_ROUTE_REG, NULL},
+    {"play.api.routing", CBM_SVC_ROUTE_REG, NULL},
+
+    /* Glued-name frameworks (see the note in http_libraries). */
+    {"apiflask", CBM_SVC_ROUTE_REG, NULL},       /* Python: Flask-based */
+    {"honox", CBM_SVC_ROUTE_REG, NULL},          /* JS: Hono meta-framework */
+    {"fasthttprouter", CBM_SVC_ROUTE_REG, NULL}, /* Go: httprouter for fasthttp */
+
+    {NULL, CBM_SVC_NONE, NULL},
+};
+
+/* gRPC client libraries — protobuf stub invocations */
+static const lib_pattern_t grpc_libraries[] = {
+    /* Go */
+    {"google.golang.org/grpc", CBM_SVC_GRPC, NULL},
+    {"grpc.Dial", CBM_SVC_GRPC, NULL},
+    {"grpc.NewClient", CBM_SVC_GRPC, NULL},
+    {"grpc.DialContext", CBM_SVC_GRPC, NULL},
+
+    /* Python */
+    {"grpc.insecure_channel", CBM_SVC_GRPC, NULL},
+    {"grpc.secure_channel", CBM_SVC_GRPC, NULL},
+    {"grpcio", CBM_SVC_GRPC, NULL},
+    {"grpc.aio", CBM_SVC_GRPC, NULL},
+
+    /* Java/Kotlin */
+    {"io.grpc", CBM_SVC_GRPC, NULL},
+    {"ManagedChannelBuilder", CBM_SVC_GRPC, NULL},
+    {"ManagedChannel", CBM_SVC_GRPC, NULL},
+    {"newBlockingStub", CBM_SVC_GRPC, NULL},
+    {"newFutureStub", CBM_SVC_GRPC, NULL},
+
+    /* C# */
+    {"Grpc.Net.Client", CBM_SVC_GRPC, NULL},
+    {"GrpcChannel", CBM_SVC_GRPC, NULL},
+    {"Grpc.Core", CBM_SVC_GRPC, NULL},
+
+    /* JS/TS */
+    {"@grpc/grpc-js", CBM_SVC_GRPC, NULL},
+    {"grpc-web", CBM_SVC_GRPC, NULL},
+
+    /* Rust */
+    {"tonic", CBM_SVC_GRPC, NULL},
+
+    /* Dart/Flutter */
+    {"package:grpc", CBM_SVC_GRPC, NULL},
+
+    {NULL, CBM_SVC_NONE, NULL},
+};
+
+/* GraphQL client libraries */
+static const lib_pattern_t graphql_libraries[] = {
+    /* JS/TS */
+    {"graphql-request", CBM_SVC_GRAPHQL, NULL},
+    {"@apollo/client", CBM_SVC_GRAPHQL, NULL},
+    {"apollo-client", CBM_SVC_GRAPHQL, NULL},
+    {"urql", CBM_SVC_GRAPHQL, NULL},
+    {"graphql-tag", CBM_SVC_GRAPHQL, NULL},
+
+    /* Python */
+    {"gql", CBM_SVC_GRAPHQL, NULL},
+    {"sgqlc", CBM_SVC_GRAPHQL, NULL},
+    {"graphene", CBM_SVC_GRAPHQL, NULL},
+
+    /* Java */
+    {"graphql-java", CBM_SVC_GRAPHQL, NULL},
+    {"DgsQueryExecutor", CBM_SVC_GRAPHQL, NULL},
+
+    /* Go */
+    {"graphql-go", CBM_SVC_GRAPHQL, NULL},
+    {"gqlgen", CBM_SVC_GRAPHQL, NULL},
+
+    /* Ruby */
+    {"graphql-ruby", CBM_SVC_GRAPHQL, NULL},
+
+    /* Rust */
+    {"async-graphql", CBM_SVC_GRAPHQL, NULL},
+    {"juniper", CBM_SVC_GRAPHQL, NULL},
+
+    /* Glued-name libraries (see the note in http_libraries). */
+    {"gqlparser", CBM_SVC_GRAPHQL, NULL}, /* Go: vektah/gqlparser */
+    {"gqlgenc", CBM_SVC_GRAPHQL, NULL},   /* Go: gqlgen client generator */
+    {"aiogqlc", CBM_SVC_GRAPHQL, NULL},   /* Python: asyncio GraphQL client */
+
+    {NULL, CBM_SVC_NONE, NULL},
+};
+
+/* tRPC libraries (TypeScript only) */
+static const lib_pattern_t trpc_libraries[] = {
+    {"@trpc/server", CBM_SVC_TRPC, NULL},
+    {"@trpc/client", CBM_SVC_TRPC, NULL},
+    {"@trpc/react-query", CBM_SVC_TRPC, NULL},
+    {"createTRPCRouter", CBM_SVC_TRPC, NULL},
+    {"createTRPCProxyClient", CBM_SVC_TRPC, NULL},
+
+    {NULL, CBM_SVC_NONE, NULL},
+};
+
+/* Method suffix type (used by both route registration and HTTP client tables) */
+typedef struct {
+    const char *suffix;
+    const char *method;
+} method_suffix_t;
+
+/* Route registration method suffixes — matched on callee name.
+ * These are methods on router objects that register handlers. */
+static const method_suffix_t route_reg_suffixes[] = {
+    /* HTTP method registrations */
+    {".GET", "GET"},
+    {".Get", "GET"},
+    {".get", "GET"},
+    {".POST", "POST"},
+    {".Post", "POST"},
+    {".post", "POST"},
+    {".PUT", "PUT"},
+    {".Put", "PUT"},
+    {".put", "PUT"},
+    {".DELETE", "DELETE"},
+    {".Delete", "DELETE"},
+    {".delete", "DELETE"},
+    {".PATCH", "PATCH"},
+    {".Patch", "PATCH"},
+    {".patch", "PATCH"},
+    /* Handle/HandleFunc (Go stdlib, gorilla) */
+    {".Handle", "ANY"},
+    {".HandleFunc", "ANY"},
+    {".handle", "ANY"},
+    /* Framework-specific route registration */
+    {".Route", "ANY"},
+    {".route", "ANY"},
+    {"::get", "GET"},
+    {"::post", "POST"},
+    {"::put", "PUT"},
+    {"::delete", "DELETE"},
+    {"::patch", "PATCH"},
+    /* Minimal API (C# ASP.NET) */
+    {".MapGet", "GET"},
+    {".MapPost", "POST"},
+    {".MapPut", "PUT"},
+    {".MapDelete", "DELETE"},
+    /* Router mounting / prefix registration (any method) */
+    {".include_router", "ANY"},
+    {".mount", "ANY"},
+    {".add_url_rule", "ANY"},
+    {".register_blueprint", "ANY"},
+    {".use", "ANY"},
+    {".register", "ANY"},
+    {".add_route", "ANY"},
+    {".add_api_route", "ANY"},
+    {".add_api_websocket_route", "ANY"},
+    /* FastAPI/Starlette WebSocket decorators (`@router.websocket('/ws')`,
+     * `@app.websocket_route('/events')`): not an HTTP verb, so ANY — mirrors
+     * .add_api_websocket_route above (#1245). */
+    {".websocket", "ANY"},
+    {".websocket_route", "ANY"},
+    {NULL, NULL},
+};
+
+/* ── HTTP method inference from function/method name suffix ───── */
+
+static const method_suffix_t method_suffixes[] = {
+    {".get", "GET"},           {".Get", "GET"},           {".GET", "GET"},
+    {".post", "POST"},         {".Post", "POST"},         {".POST", "POST"},
+    {".put", "PUT"},           {".Put", "PUT"},           {".PUT", "PUT"},
+    {".delete", "DELETE"},     {".Delete", "DELETE"},     {".DELETE", "DELETE"},
+    {".patch", "PATCH"},       {".Patch", "PATCH"},       {".PATCH", "PATCH"},
+    {".head", "HEAD"},         {".Head", "HEAD"},         {".HEAD", "HEAD"},
+    {".options", "OPTIONS"},   {".Options", "OPTIONS"},   {"GetAsync", "GET"},
+    {"PostAsync", "POST"},     {"PutAsync", "PUT"},       {"DeleteAsync", "DELETE"},
+    {"SendAsync", NULL},       {"getForObject", "GET"},   {"getForEntity", "GET"},
+    {"postForObject", "POST"}, {"postForEntity", "POST"}, {NULL, NULL},
+};
+
+/* ── Matching implementation ───────────────────────────────────── */
+
+static bool qn_is_lower(char ch) {
+    return ch >= 'a' && ch <= 'z';
+}
+
+static bool is_digit_char(char ch) {
+    return ch >= '0' && ch <= '9';
+}
+
+static bool qn_is_alnum(char ch) {
+    return qn_is_lower(ch) || is_digit_char(ch) || (ch >= 'A' && ch <= 'Z');
+}
+
+/* True when the occurrence of `id` at `hit` sits on identifier boundaries.
+ *
+ * A raw substring match let short ids fire inside unrelated words: "gin."
+ * in "plugin.", "dio" in "studio", "surf" in "surface", "express" in
+ * "expression". Every character that is not an ASCII letter or digit is a
+ * separator ('.', '/', '\\', ':', '_', '-', '$', '@', ...).
+ *
+ *   BEFORE: start of string, a separator, an id that itself starts with a
+ *           separator ("@trpc/server"), or an id that starts with an
+ *           uppercase letter — a capital opens a new CamelCase word whatever
+ *           precedes it ("AsyncHttpClient", "IHttpClientFactory",
+ *           "NSURLSession"). Rejected: a lowercase/digit-initial id glued to
+ *           a letter or digit ("plugin." / "studio" / "myrequests").
+ *   AFTER:  end of string, a separator, an id that itself ends in a
+ *           separator ("gin."), an uppercase letter (CamelCase glue:
+ *           "GuzzleHttp", "FeignClient", "KafkaProducer", "kafkaProducer")
+ *           or a digit (version suffix: "urllib2", "amqp091-go").
+ *           Rejected: a lowercase letter continuing the word ("surface",
+ *           "curly", "expression"). */
+static bool qn_hit_on_boundary(const char *qn, const char *hit, const char *id, size_t id_len) {
+    char first = id[0];
+    char last = id[id_len - 1];
+    if (hit > qn && qn_is_alnum(hit[-1]) && (qn_is_lower(first) || is_digit_char(first))) {
+        return false;
+    }
+    if (qn_is_alnum(last) && qn_is_lower(hit[id_len])) {
+        return false;
+    }
+    return true;
+}
+
+/* Check if any library identifier appears in the QN on identifier
+ * boundaries (see qn_hit_on_boundary). Case-sensitive: "requests" matches
+ * "project.venv.requests.api.get" and "svc.requests_get" but neither
+ * "Requests" nor "myrequests". */
+static const lib_pattern_t *match_qn(const char *qn, const lib_pattern_t *patterns) {
+    if (!qn || !qn[0]) {
+        return NULL;
+    }
+    for (int i = 0; patterns[i].library_id != NULL; i++) {
+        const char *id = patterns[i].library_id;
+        size_t id_len = strlen(id);
+        if (id_len == 0) {
+            continue;
+        }
+        for (const char *hit = strstr(qn, id); hit != NULL; hit = strstr(hit + 1, id)) {
+            if (qn_hit_on_boundary(qn, hit, id, id_len)) {
+                return &patterns[i];
+            }
+        }
+    }
+    return NULL;
+}
+
+static bool starts_with_segment(const char *path, const char *segment) {
+    if (!path || path[0] != '/' || !segment) {
+        return false;
+    }
+    size_t seg_len = strlen(segment);
+    const char *p = path + 1;
+    return strncmp(p, segment, seg_len) == 0 && (p[seg_len] == '\0' || p[seg_len] == '/');
+}
+
+static bool contains_segment(const char *path, const char *segment) {
+    if (!path || !segment) {
+        return false;
+    }
+    size_t seg_len = strlen(segment);
+    const char *p = path;
+    while ((p = strchr(p, '/')) != NULL) {
+        p++;
+        if (strncmp(p, segment, seg_len) == 0 && (p[seg_len] == '\0' || p[seg_len] == '/')) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool has_http_route_marker(const char *path) {
+    if (starts_with_segment(path, "api") || starts_with_segment(path, "apis") ||
+        starts_with_segment(path, "graphql") || starts_with_segment(path, "health") ||
+        starts_with_segment(path, "metrics")) {
+        return true;
+    }
+    return path && path[0] == '/' && path[1] == 'v' && is_digit_char(path[2]) &&
+           (path[3] == '\0' || path[3] == '/');
+}
+
+static bool has_filesystem_root(const char *path) {
+    static const char *const roots[] = {"etc",     "root", "var",   "usr",     "home", "tmp",
+                                        "private", "opt",  "bin",   "sbin",    "dev",  "proc",
+                                        "sys",     "run",  "lib",   "lib64",   "mnt",  "media",
+                                        "boot",    "srv",  "Users", "Volumes", NULL};
+    for (int i = 0; roots[i]; i++) {
+        if (starts_with_segment(path, roots[i])) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool has_hidden_config_segment(const char *path) {
+    static const char *const segments[] = {".aws", ".azure", ".config", ".docker", ".env",
+                                           ".git", ".gnupg", ".kube",   ".ssh",    NULL};
+    for (int i = 0; segments[i]; i++) {
+        if (contains_segment(path, segments[i])) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool path_ext_matches(const char *ext, const char *wanted) {
+    return ext && wanted && strcmp(ext, wanted) == 0;
+}
+
+static bool has_filesystem_extension(const char *path) {
+    if (!path) {
+        return false;
+    }
+    const char *end = strpbrk(path, "?#");
+    if (!end) {
+        end = path + strlen(path);
+    }
+    const char *last_slash = path;
+    for (const char *p = path; p < end; p++) {
+        if (*p == '/') {
+            last_slash = p;
+        }
+    }
+    const char *dot = NULL;
+    for (const char *p = last_slash + 1; p < end; p++) {
+        if (*p == '.') {
+            dot = p;
+        }
+    }
+    if (!dot || dot == end - 1) {
+        return false;
+    }
+    char ext[32];
+    size_t ext_len = (size_t)(end - dot);
+    if (ext_len >= sizeof(ext)) {
+        return false;
+    }
+    memcpy(ext, dot, ext_len);
+    ext[ext_len] = '\0';
+
+    static const char *const hard_file_exts[] = {
+        ".cfg",  ".conf",   ".credentials", ".crt",  ".db",  ".env",        ".ini", ".key",
+        ".log",  ".md",     ".pdf",         ".pem",  ".pid", ".properties", ".rst", ".service",
+        ".sock", ".socket", ".sqlite",      ".toml", ".txt", NULL};
+    for (int i = 0; hard_file_exts[i]; i++) {
+        if (path_ext_matches(ext, hard_file_exts[i])) {
+            return true;
+        }
+    }
+    if ((path_ext_matches(ext, ".json") || path_ext_matches(ext, ".yaml") ||
+         path_ext_matches(ext, ".yml") || path_ext_matches(ext, ".xml")) &&
+        !has_http_route_marker(path)) {
+        return true;
+    }
+    return false;
+}
+
+static bool callee_is_delimiter_or_filesystem_builder(const char *callee_name) {
+    if (!callee_name) {
+        return false;
+    }
+    const char *last_dot = strrchr(callee_name, '.');
+    const char *last_colon = strstr(callee_name, "::");
+    const char *method = callee_name;
+    if (last_dot && last_dot[1]) {
+        method = last_dot + 1;
+    }
+    if (last_colon && last_colon[2]) {
+        method = last_colon + 2;
+    }
+    if (strcmp(method, "split") == 0 || strcmp(method, "rsplit") == 0 ||
+        strcmp(method, "partition") == 0 || strcmp(method, "join") == 0 ||
+        strcmp(method, "replace") == 0 || strcmp(method, "replaceAll") == 0 ||
+        strcmp(method, "match") == 0 || strcmp(method, "matchAll") == 0 ||
+        strcmp(method, "search") == 0 || strcmp(method, "test") == 0 ||
+        strcmp(method, "exec") == 0) {
+        return true;
+    }
+    return strstr(callee_name, "os.path.join") != NULL || strstr(callee_name, "path.join") != NULL;
+}
+
+/* Case-insensitive "text ends with suffix" over [text, text + len). */
+static bool span_ends_with_ci(const char *text, size_t len, const char *suffix) {
+    size_t sl = strlen(suffix);
+    if (len < sl) {
+        return false;
+    }
+    const char *tail = text + (len - sl);
+    for (size_t i = 0; i < sl; i++) {
+        char a = tail[i];
+        if (a >= 'A' && a <= 'Z') {
+            a = (char)(a - 'A' + 'a');
+        }
+        if (a != suffix[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool cbm_service_pattern_is_client_navigation(bool js_family, const char *callee_name) {
+    if (!js_family || !callee_name || !callee_name[0]) {
+        return false;
+    }
+    const char *last_dot = strrchr(callee_name, '.');
+    const char *method = last_dot ? last_dot + 1 : callee_name;
+    size_t recv_len = last_dot ? (size_t)(last_dot - callee_name) : 0;
+    /* Angular Router.navigate/navigateByUrl, Ionic NavController.navigateForward/
+     * Back/Root, Nuxt navigateTo, react-router/Gatsby navigate — any receiver. */
+    if (strcmp(method, "navigate") == 0 || strcmp(method, "navigateByUrl") == 0 ||
+        strcmp(method, "navigateTo") == 0 || strcmp(method, "navigateForward") == 0 ||
+        strcmp(method, "navigateBack") == 0 || strcmp(method, "navigateRoot") == 0) {
+        return true;
+    }
+    /* History API: the URL is the third argument of pushState/replaceState. */
+    if (strcmp(method, "pushState") == 0 || strcmp(method, "replaceState") == 0) {
+        return true;
+    }
+    /* Bare SvelteKit goto, Next.js/Remix redirect helpers. */
+    if (!last_dot && (strcmp(method, "goto") == 0 || strcmp(method, "redirect") == 0 ||
+                      strcmp(method, "permanentRedirect") == 0)) {
+        return true;
+    }
+    /* Next.js / Vue router and react-router history objects: router.push,
+     * this.$router.push, props.history.push, Router.prefetch. */
+    if ((strcmp(method, "push") == 0 || strcmp(method, "replace") == 0 ||
+         strcmp(method, "prefetch") == 0) &&
+        (span_ends_with_ci(callee_name, recv_len, "router") ||
+         span_ends_with_ci(callee_name, recv_len, "history"))) {
+        return true;
+    }
+    /* Angular Location.go, window.location.assign / replace. */
+    return (strcmp(method, "go") == 0 || strcmp(method, "assign") == 0 ||
+            strcmp(method, "replace") == 0) &&
+           span_ends_with_ci(callee_name, recv_len, "location");
+}
+
+static const char *strip_string_delimiters(const char *literal, char *buf, size_t buf_sz) {
+    if (!literal || !literal[0]) {
+        return NULL;
+    }
+    const char *start = literal;
+    while (*start == ' ' || *start == '\t' || *start == '\n' || *start == '\r') {
+        start++;
+    }
+    size_t len = strlen(start);
+    while (len > 0 && (start[len - 1] == ' ' || start[len - 1] == '\t' || start[len - 1] == '\n' ||
+                       start[len - 1] == '\r')) {
+        len--;
+    }
+    if (len >= 2 && (start[0] == '"' || start[0] == '\'' || start[0] == '`') &&
+        start[len - 1] == start[0]) {
+        start++;
+        len -= 2;
+    }
+    if (len == 0 || len >= buf_sz) {
+        return NULL;
+    }
+    memcpy(buf, start, len);
+    buf[len] = '\0';
+    return buf;
+}
+
+/* A comment opens with the slash a route opens with, and an argument list
+ * that starts with one handed three Java block comments to the Route pass as
+ * URLs (elasticsearch, 2026-09-16). The wildcard route (slash-star alone) is a
+ * path, so the block-comment shape needs its closing star-slash; a route
+ * literal never holds a line break. */
+bool cbm_service_pattern_is_comment_text(const char *text) {
+    if (!text || text[0] != '/') {
+        return false;
+    }
+    if (strchr(text, '\n') != NULL || strchr(text, '\r') != NULL) {
+        return true;
+    }
+    size_t n = strlen(text);
+    if (text[1] == '*' && n >= 4 && text[n - 2] == '*' && text[n - 1] == '/') {
+        return true;
+    }
+    return text[1] == '/' && (text[2] == ' ' || text[2] == '\t');
+}
+
+bool cbm_service_pattern_is_http_route_literal(const char *literal, const char *callee_name) {
+    char path_buf[1024];
+    const char *path = strip_string_delimiters(literal, path_buf, sizeof(path_buf));
+    if (!path || !path[0]) {
+        return false;
+    }
+    if (strncmp(path, "http://", 7) == 0 || strncmp(path, "https://", 8) == 0) {
+        return true;
+    }
+    if (strstr(path, "://") != NULL) {
+        return false;
+    }
+    if (path[0] != '/') {
+        return false;
+    }
+    if (cbm_service_pattern_is_comment_text(path)) {
+        return false;
+    }
+    if (callee_is_delimiter_or_filesystem_builder(callee_name)) {
+        return false;
+    }
+    if (has_filesystem_root(path) || has_hidden_config_segment(path) ||
+        has_filesystem_extension(path)) {
+        return false;
+    }
+    return true;
+}
+
+/* ── GraphQL operation identity (#598) ─────────────────────────── */
+
+static bool gql_name_start(unsigned char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
+}
+
+static bool gql_name_char(unsigned char c) {
+    return gql_name_start(c) || (c >= '0' && c <= '9');
+}
+
+/* Skip one lexical unit whose braces are not structure: a # comment, a "..."
+ * or """...""" string, or a JS ${...} template interpolation. Returns p
+ * unchanged when p starts none of them. */
+static const char *gql_skip_opaque(const char *p) {
+    if (*p == '#') {
+        while (*p && *p != '\n' && *p != '\r') {
+            p++;
+        }
+        return p;
+    }
+    if (strncmp(p, "\"\"\"", 3) == 0) {
+        const char *end = strstr(p + 3, "\"\"\"");
+        return end ? end + 3 : p + strlen(p);
+    }
+    if (*p == '"') {
+        p++;
+        while (*p && *p != '"') {
+            p += (*p == '\\' && p[1]) ? 2 : 1;
+        }
+        return *p ? p + 1 : p;
+    }
+    if (p[0] == '$' && p[1] == '{') {
+        int depth = 1;
+        p += 2;
+        while (*p && depth > 0) {
+            depth += (*p == '{') - (*p == '}');
+            p++;
+        }
+        return p;
+    }
+    return p;
+}
+
+/* Skip GraphQL "ignored tokens" (whitespace, commas, comments). */
+static const char *gql_skip_ignored(const char *p) {
+    for (;;) {
+        while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' || *p == ',') {
+            p++;
+        }
+        if (*p != '#') {
+            return p;
+        }
+        p = gql_skip_opaque(p);
+    }
+}
+
+/* Copy the Name token at p (bounded). Returns false when p is not a Name. */
+static bool gql_copy_name(const char *p, char *name_buf, size_t name_sz) {
+    if (!gql_name_start((unsigned char)*p) || !name_buf || name_sz == 0) {
+        return false;
+    }
+    size_t n = 0;
+    while (gql_name_char((unsigned char)p[n]) && n + 1 < name_sz) {
+        name_buf[n] = p[n];
+        n++;
+    }
+    name_buf[n] = '\0';
+    return true;
+}
+
+static const char *gql_operation_keyword(const char *tok, size_t len) {
+    static const char *const kws[] = {"query", "mutation", "subscription", NULL};
+    for (int i = 0; kws[i]; i++) {
+        if (strlen(kws[i]) == len && strncmp(tok, kws[i], len) == 0) {
+            return kws[i];
+        }
+    }
+    return NULL;
+}
+
+bool cbm_service_pattern_graphql_operation(const char *doc, const char **op_type, char *name_buf,
+                                           size_t name_sz) {
+    *op_type = "operation";
+    if (name_buf && name_sz > 0) {
+        name_buf[0] = '\0';
+    }
+    if (!doc) {
+        return false;
+    }
+    int depth = 0;
+    bool in_fragment = false;
+    const char *p = doc;
+    while (*p) {
+        const char *q = gql_skip_opaque(p);
+        if (q != p) {
+            p = q;
+            continue;
+        }
+        unsigned char c = (unsigned char)*p;
+        if (c == '{' && depth == 0 && !in_fragment) {
+            *op_type = "query"; /* `{ ... }` shorthand is an anonymous query */
+            return false;
+        }
+        if (c == '{' || c == '}') {
+            depth += (c == '{') ? 1 : -1;
+            depth = depth < 0 ? 0 : depth;
+            in_fragment = in_fragment && depth > 0;
+            p++;
+            continue;
+        }
+        if (depth > 0 || in_fragment || !gql_name_start(c)) {
+            p++;
+            continue;
+        }
+        const char *tok = p;
+        while (gql_name_char((unsigned char)*p)) {
+            p++;
+        }
+        size_t len = (size_t)(p - tok);
+        if (len == strlen("fragment") && strncmp(tok, "fragment", len) == 0) {
+            in_fragment = true;
+            continue;
+        }
+        const char *kw = gql_operation_keyword(tok, len);
+        if (!kw) {
+            return false; /* not a GraphQL document (URL, dict key, variable ...) */
+        }
+        *op_type = kw;
+        return gql_copy_name(gql_skip_ignored(p), name_buf, name_sz);
+    }
+    return false;
+}
+
+/* ── Public API ────────────────────────────────────────────────── */
+
+/* Per-worker TLS cache of cbm_service_pattern_match results.
+ * The hot path in resolve_file_calls invokes pattern matching for
+ * EVERY resolved CALL (via emit_service_edge) — that's 6 pattern-list
+ * scans × ~30 patterns × strstr per call. On kubernetes (~600k
+ * resolved call edges), the same resolved QN (e.g. "context.Context.
+ * Done", "fmt.Errorf", "errors.New") repeats hundreds of thousands of
+ * times. A simple TLS hash cache turns the linear scan into one
+ * lookup after the first miss for that QN. Lifetime is per-worker for
+ * the duration of the parallel_resolve phase. */
+#include "foundation/hash_table.h"
+#include "foundation/compat.h"
+
+static CBM_TLS CBMHashTable *_svc_cache = NULL;
+/* Encode the enum + 1 in the pointer so 0/NULL means "miss". */
+static inline void *svc_enum_to_ptr(cbm_svc_kind_t k) {
+    return (void *)(uintptr_t)((unsigned)k + 1u);
+}
+static inline cbm_svc_kind_t svc_ptr_to_enum(void *p) {
+    return (cbm_svc_kind_t)((uintptr_t)p - 1u);
+}
+
+static void svc_cache_free_key(const char *key, void *val, void *ud) {
+    (void)val;
+    (void)ud;
+    free((char *)key);
+}
+
+void cbm_service_pattern_cache_begin(void) {
+    if (_svc_cache)
+        return; /* idempotent */
+    _svc_cache = cbm_ht_create(8192);
+}
+
+void cbm_service_pattern_cache_end(void) {
+    if (!_svc_cache)
+        return;
+    cbm_ht_foreach(_svc_cache, svc_cache_free_key, NULL);
+    cbm_ht_free(_svc_cache);
+    _svc_cache = NULL;
+}
+
+void cbm_service_patterns_init(void) {
+    /* No-op — tables are static const */
+}
+
+bool cbm_service_pattern_is_global_fetch(const char *callee_name) {
+    return callee_name != NULL && strcmp(callee_name, "fetch") == 0;
+}
+
+cbm_svc_kind_t cbm_service_pattern_match(const char *resolved_qn) {
+    if (!resolved_qn || !resolved_qn[0]) {
+        return CBM_SVC_NONE;
+    }
+
+    if (_svc_cache) {
+        void *cached = cbm_ht_get(_svc_cache, resolved_qn);
+        if (cached) {
+            return svc_ptr_to_enum(cached);
+        }
+    }
+
+    cbm_svc_kind_t result = CBM_SVC_NONE;
+    /* Route registration checked first — prevents gin/echo from matching
+     * as HTTP clients (both have .get/.post suffixes). */
+    const lib_pattern_t *const tables[] = {route_reg_libraries, http_libraries, async_libraries,
+                                           config_libraries,    grpc_libraries, graphql_libraries,
+                                           trpc_libraries};
+    for (size_t i = 0; i < sizeof(tables) / sizeof(tables[0]); i++) {
+        const lib_pattern_t *p = match_qn(resolved_qn, tables[i]);
+        if (p) {
+            result = p->kind;
+            break;
+        }
+    }
+    if (_svc_cache) {
+        char *kdup = strdup(resolved_qn);
+        if (kdup)
+            cbm_ht_set(_svc_cache, kdup, svc_enum_to_ptr(result));
+    }
+    return result;
+}
+
+cbm_svc_kind_t cbm_service_pattern_match_in_project(const char *resolved_qn, const char *name,
+                                                    const char *project_name) {
+    if (resolved_qn && project_name && project_name[0]) {
+        size_t len = strlen(project_name);
+        if (strncmp(resolved_qn, project_name, len) == 0 && resolved_qn[len] == '.') {
+            resolved_qn += len + 1;
+        }
+    }
+    return cbm_service_pattern_match_named(resolved_qn, name);
+}
+
+cbm_svc_kind_t cbm_service_pattern_match_named(const char *resolved_qn, const char *name) {
+    if (!resolved_qn || !name) {
+        return cbm_service_pattern_match(resolved_qn);
+    }
+    size_t base_len = cbm_qn_callable_base_len_named(resolved_qn, name);
+    if (base_len == strlen(resolved_qn)) {
+        return cbm_service_pattern_match(resolved_qn);
+    }
+    char *base = cbm_alloc(CBM_MEM_CLASS_EXTRACT, base_len + SKIP_ONE);
+    if (!base) {
+        return CBM_SVC_NONE;
+    }
+    memcpy(base, resolved_qn, base_len);
+    base[base_len] = '\0';
+    cbm_svc_kind_t result = cbm_service_pattern_match(base);
+    cbm_free(CBM_MEM_CLASS_EXTRACT, base);
+    return result;
+}
+
+const char *cbm_service_pattern_http_method(const char *callee_name) {
+    if (!callee_name) {
+        return NULL;
+    }
+    for (int i = 0; method_suffixes[i].suffix != NULL; i++) {
+        size_t slen = strlen(method_suffixes[i].suffix);
+        size_t clen = strlen(callee_name);
+        if (clen >= slen && strcmp(callee_name + clen - slen, method_suffixes[i].suffix) == 0) {
+            return method_suffixes[i].method;
+        }
+    }
+    return NULL;
+}
+
+const char *cbm_service_pattern_route_method(const char *callee_name) {
+    if (!callee_name) {
+        return NULL;
+    }
+    size_t clen = strlen(callee_name);
+    for (int i = 0; route_reg_suffixes[i].suffix != NULL; i++) {
+        size_t slen = strlen(route_reg_suffixes[i].suffix);
+        if (clen >= slen && strcmp(callee_name + clen - slen, route_reg_suffixes[i].suffix) == 0) {
+            return route_reg_suffixes[i].method;
+        }
+    }
+    return NULL;
+}
+
+static bool mux_is_blank(char ch) {
+    return ch == ' ' || ch == '\t';
+}
+
+const char *cbm_service_pattern_mux_split(const char *pattern, char *method, size_t method_sz) {
+    if (method && method_sz > 0) {
+        method[0] = '\0';
+    }
+    if (!pattern || pattern[0] == '/') {
+        return NULL;
+    }
+    /* METHOD: Go cuts it at the first space or tab and trims the rest. */
+    const char *rest = pattern;
+    size_t method_len = 0;
+    while (pattern[method_len] >= 'A' && pattern[method_len] <= 'Z') {
+        method_len++;
+    }
+    if (method_len > 0 && mux_is_blank(pattern[method_len])) {
+        rest = pattern + method_len;
+        while (mux_is_blank(*rest)) {
+            rest++;
+        }
+    } else {
+        method_len = 0;
+    }
+    /* HOST: everything before the path's slash, with no blank or line break. */
+    const char *slash = rest;
+    while (*slash && *slash != '/' && !mux_is_blank(*slash) && *slash != '\n' && *slash != '\r') {
+        slash++;
+    }
+    if (*slash != '/' || (method_len == 0 && slash == rest)) {
+        return NULL;
+    }
+    if (method_len > 0 && method) {
+        if (method_len >= method_sz) {
+            method[0] = '\0';
+            return NULL;
+        }
+        memcpy(method, pattern, method_len);
+        method[method_len] = '\0';
+    }
+    return slash;
+}
+
+const char *cbm_service_pattern_mux_route_path(const char *callee_name, const char *pattern) {
+    static const char *const mux_callees[] = {".Handle", ".HandleFunc"};
+    if (!callee_name || !pattern || strstr(pattern, "://") != NULL) {
+        return NULL;
+    }
+    size_t clen = strlen(callee_name);
+    for (size_t i = 0; i < sizeof(mux_callees) / sizeof(mux_callees[0]); i++) {
+        size_t slen = strlen(mux_callees[i]);
+        if (clen >= slen && strcmp(callee_name + clen - slen, mux_callees[i]) == 0) {
+            return cbm_service_pattern_mux_split(pattern, NULL, 0);
+        }
+    }
+    return NULL;
+}
+
+const char *cbm_service_pattern_broker(const char *resolved_qn) {
+    if (!resolved_qn) {
+        return NULL;
+    }
+    const lib_pattern_t *p = match_qn(resolved_qn, async_libraries);
+    return p ? p->broker : NULL;
+}

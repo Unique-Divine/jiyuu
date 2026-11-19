@@ -1,0 +1,32 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.DeusData/codebase-memory-mcp",
+  "title": "Codebase Memory",
+  "description": "Local code intelligence connecting code, docs and infrastructure for developers and AI agents.",
+  "repository": {
+    "url": "https://github.com/DeusData/codebase-memory-mcp",
+    "source": "github"
+  },
+  "websiteUrl": "https://deusdata.github.io/codebase-memory-mcp/",
+  "version": "0.12.1",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "codebase-memory-mcp",
+      "version": "0.12.1",
+      "runtimeHint": "npx",
+      "transport": {
+        "type": "stdio"
+      }
+    },
+    {
+      "registryType": "pypi",
+      "identifier": "codebase-memory-mcp",
+      "version": "0.12.1",
+      "runtimeHint": "uvx",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}

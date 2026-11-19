@@ -1,0 +1,1594 @@
+/* RED contract for daemon-owned asynchronous index workers. */
+#include "test_framework.h"
+#include "test_helpers.h"
+
+#include "cli/progress_sink.h"
+#include "daemon/bootstrap.h"
+#include "foundation/compat.h"
+#include "foundation/compat_fs.h"
+#include "foundation/log.h"
+#include "foundation/platform.h"
+#include "foundation/profile.h"
+#include "foundation/constants.h"
+#include "mcp/index_supervisor.h"
+#include "mcp/mcp.h"
+
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+
+enum {
+    INDEX_SUPERVISOR_TEST_PATH_CAP = 1024,
+    /* Worker startup re-hashes the entire executable image for the
+     * exact-build fingerprint before its first write. For the ASan
+     * test-runner that is a multi-hundred-MB read+SHA-256, which on the
+     * 3-core CI runner VMs with cold IO takes several seconds — the CI
+     * macOS legs showed workers alive with created-but-EMPTY logs at the
+     * old 5 s/3 s deadlines. These are hang guards, not benchmarks: a
+     * genuinely wedged worker still fails loudly here, and the failure
+     * dumps the (empty) worker log as proof.  */
+    INDEX_SUPERVISOR_TEST_TERMINAL_MS = 90000,
+    INDEX_SUPERVISOR_TEST_READY_MS = 60000,
+    INDEX_SUPERVISOR_TEST_BACKLOG_LINES = 1024,
+};
+
+static void index_supervisor_test_pause(void) {
+    const struct timespec pause = {0, 10000000L};
+    (void)cbm_nanosleep(&pause, NULL);
+}
+
+static bool index_supervisor_test_poll_terminal(cbm_index_worker_handle_t *handle,
+                                                uint32_t timeout_ms,
+                                                const cbm_index_worker_result_t **result_out) {
+    uint64_t deadline = cbm_now_ms() + timeout_ms;
+    do {
+        cbm_index_worker_poll_t state = cbm_index_worker_poll(handle, result_out);
+        if (state == CBM_INDEX_WORKER_POLL_TERMINAL) {
+            return result_out && *result_out;
+        }
+        if (state == CBM_INDEX_WORKER_POLL_ERROR) {
+            return false;
+        }
+        index_supervisor_test_pause();
+    } while (cbm_now_ms() < deadline);
+    return cbm_index_worker_poll(handle, result_out) == CBM_INDEX_WORKER_POLL_TERMINAL;
+}
+
+static bool index_supervisor_test_wait_file(cbm_index_worker_handle_t *handle, const char *path,
+                                            char *out, size_t out_size) {
+    uint64_t deadline = cbm_now_ms() + INDEX_SUPERVISOR_TEST_READY_MS;
+    do {
+        FILE *file = cbm_fopen(path, "rb");
+        if (file) {
+            size_t used = fread(out, 1, out_size - 1, file);
+            out[used] = '\0';
+            (void)fclose(file);
+            if (used > 0) {
+                return true;
+            }
+        }
+        const cbm_index_worker_result_t *unexpected = NULL;
+        if (cbm_index_worker_poll(handle, &unexpected) != CBM_INDEX_WORKER_POLL_RUNNING) {
+            return false;
+        }
+        index_supervisor_test_pause();
+    } while (cbm_now_ms() < deadline);
+    return false;
+}
+
+/* On failure, the worker's own log/marker files carry the exit reason; they
+ * are deleted during teardown before the asserts run, so dump them at the
+ * failure site or the evidence is gone by the time CI prints the FAIL. */
+static void index_supervisor_test_dump(const char *label, const char *path) {
+    (void)fprintf(stderr, "  [worker-dump] %s: %s\n", label, path && path[0] ? path : "<none>");
+    FILE *file = path && path[0] ? cbm_fopen(path, "rb") : NULL;
+    if (!file) {
+        (void)fprintf(stderr, "  [worker-dump] (missing or unreadable)\n");
+        return;
+    }
+    char content[4096];
+    size_t used = fread(content, 1, sizeof(content) - 1, file);
+    content[used] = '\0';
+    (void)fclose(file);
+    (void)fprintf(stderr, "%s%s", content, used > 0 && content[used - 1] == '\n' ? "" : "\n");
+}
+
+static bool index_supervisor_test_wait_file_text(const char *path, const char *needle,
+                                                 uint32_t timeout_ms) {
+    uint64_t deadline = cbm_now_ms() + timeout_ms;
+    do {
+        FILE *file = cbm_fopen(path, "rb");
+        if (file) {
+            char content[4096] = {0};
+            size_t used = fread(content, 1, sizeof(content) - 1, file);
+            content[used] = '\0';
+            (void)fclose(file);
+            if (strstr(content, needle)) {
+                return true;
+            }
+        }
+        index_supervisor_test_pause();
+    } while (cbm_now_ms() < deadline);
+    return false;
+}
+
+static bool index_supervisor_test_append_log(const char *path, const char *line) {
+    FILE *file = cbm_fopen(path, "ab");
+    if (!file) {
+        return false;
+    }
+    bool written = fputs(line, file) >= 0 && fflush(file) == 0;
+    return fclose(file) == 0 && written;
+}
+
+static bool index_supervisor_test_append_terminal_backlog(const char *path) {
+    FILE *file = cbm_fopen(path, "ab");
+    if (!file) {
+        return false;
+    }
+    bool written =
+        fputs("level=info msg=pipeline.discover files=7\n", file) >= 0 &&
+        fputs("{\"level\":\"info\",\"event\":\"pass.start\",\"pass\":\"structure\"}\n", file) >= 0;
+    for (int i = 0; written && i < INDEX_SUPERVISOR_TEST_BACKLOG_LINES; i++) {
+        written = fprintf(file, "terminal-backlog-%04d\n", i) > 0;
+    }
+    written = written && fputs("terminal-backlog-sentinel\n", file) >= 0 && fflush(file) == 0;
+    return fclose(file) == 0 && written;
+}
+
+static void index_supervisor_test_cleanup_handle(cbm_index_worker_handle_t *handle) {
+    if (!handle) {
+        return;
+    }
+    (void)cbm_index_worker_request_cancel(handle);
+    const cbm_index_worker_result_t *result = NULL;
+    if (index_supervisor_test_poll_terminal(handle, INDEX_SUPERVISOR_TEST_TERMINAL_MS, &result)) {
+        cbm_index_worker_destroy(handle);
+    }
+}
+
+static void index_supervisor_test_restore_env(const char *name, char *saved) {
+    if (saved) {
+        (void)cbm_setenv(name, saved, 1);
+    } else {
+        (void)cbm_unsetenv(name);
+    }
+    free(saved);
+}
+
+static bool index_supervisor_test_owner_file(const char *path) {
+#ifdef _WIN32
+    return cbm_file_size(path) >= 0;
+#else
+    struct stat status;
+    return path && stat(path, &status) == 0 && S_ISREG(status.st_mode) &&
+           (status.st_mode & 0777) == 0600;
+#endif
+}
+
+typedef struct {
+    int delivered;
+    bool saw_clean_probe;
+    bool saw_request_a;
+    bool saw_request_b;
+    bool saw_structured_text;
+    bool saw_structured_json;
+    bool saw_backlog_sentinel;
+    int backlog_lines;
+    bool render_progress;
+} index_supervisor_log_capture_t;
+
+static void index_supervisor_test_capture_log(const char *line, void *context) {
+    index_supervisor_log_capture_t *capture = context;
+    if (!capture || !line) {
+        return;
+    }
+    capture->delivered++;
+    if (strstr(line, "async worker clean probe")) {
+        capture->saw_clean_probe = true;
+    }
+    if (strcmp(line, "request-a-only") == 0) {
+        capture->saw_request_a = true;
+    }
+    if (strcmp(line, "request-b-only") == 0) {
+        capture->saw_request_b = true;
+    }
+    if (strcmp(line, "level=info msg=pipeline.discover files=7") == 0) {
+        capture->saw_structured_text = true;
+    }
+    if (strcmp(line, "{\"level\":\"info\",\"event\":\"pass.start\",\"pass\":\"structure\"}") == 0) {
+        capture->saw_structured_json = true;
+    }
+    if (strncmp(line, "terminal-backlog-", strlen("terminal-backlog-")) == 0) {
+        capture->backlog_lines++;
+    }
+    if (strcmp(line, "terminal-backlog-sentinel") == 0) {
+        capture->saw_backlog_sentinel = true;
+    }
+    if (capture->render_progress) {
+        cbm_progress_sink_fn(line);
+    }
+}
+
+TEST(index_supervisor_worker_argv_requires_exact_build_bound_grammar) {
+    const char *captured = cbm_index_supervisor_build_fingerprint();
+    ASSERT_NOT_NULL(captured);
+    ASSERT_EQ(strlen(captured), CBM_INDEX_WORKER_BUILD_FINGERPRINT_LENGTH);
+
+    char mismatched[CBM_INDEX_WORKER_BUILD_FINGERPRINT_SIZE];
+    (void)snprintf(mismatched, sizeof(mismatched), "%s", captured);
+    mismatched[0] = mismatched[0] == '0' ? '1' : '0';
+
+    char *valid[] = {
+        "test-runner",
+        "cli",
+        "--index-worker",
+        CBM_INDEX_WORKER_BUILD_ARG,
+        (char *)captured,
+        "index_repository",
+        "{\"__cbm_test_worker\":\"hang-tree\"}",
+        "--response-out",
+        "/tmp/r",
+        CBM_INDEX_WORKER_MEMORY_BUDGET_ARG,
+        "1024",
+        CBM_INDEX_WORKER_SINGLE_THREAD_ARG,
+        CBM_INDEX_WORKER_MARKER_ARG,
+        "/tmp/m",
+        CBM_INDEX_WORKER_QUARANTINE_ARG,
+        "/tmp/q",
+        CBM_INDEX_WORKER_PUBLISH_FENCE_ARG,
+        "/tmp/f",
+        NULL,
+    };
+    cbm_index_worker_invocation_t invocation;
+    ASSERT_EQ(cbm_index_worker_parse_process_argv(18, valid, &invocation),
+              CBM_INDEX_WORKER_ARGV_VALID);
+    ASSERT_EQ(cbm_daemon_process_role(18, valid), CBM_DAEMON_PROCESS_WORKER);
+    ASSERT_STR_EQ(invocation.args_json, valid[6]);
+    ASSERT_STR_EQ(invocation.response_out, valid[8]);
+    ASSERT_EQ(invocation.memory_budget_bytes, 1024);
+    ASSERT_TRUE(invocation.single_thread);
+    ASSERT_STR_EQ(invocation.marker_file, valid[13]);
+    ASSERT_STR_EQ(invocation.quarantine_file, valid[15]);
+    ASSERT_STR_EQ(invocation.publish_fence_file, valid[17]);
+    /* Without a worker limit there is no fence: the shorter grammar stays valid. */
+    ASSERT_EQ(cbm_index_worker_parse_process_argv(16, valid, &invocation),
+              CBM_INDEX_WORKER_ARGV_VALID);
+    ASSERT_EQ(cbm_daemon_process_role(16, valid), CBM_DAEMON_PROCESS_WORKER);
+    ASSERT_NULL(invocation.publish_fence_file);
+
+    char *fence_before_quarantine[] = {"test-runner",
+                                       "cli",
+                                       "--index-worker",
+                                       CBM_INDEX_WORKER_BUILD_ARG,
+                                       (char *)captured,
+                                       "index_repository",
+                                       "{}",
+                                       "--response-out",
+                                       "/tmp/r",
+                                       CBM_INDEX_WORKER_PUBLISH_FENCE_ARG,
+                                       "/tmp/f",
+                                       CBM_INDEX_WORKER_QUARANTINE_ARG,
+                                       "/tmp/q",
+                                       NULL};
+    char *empty_fence[] = {"test-runner",
+                           "cli",
+                           "--index-worker",
+                           CBM_INDEX_WORKER_BUILD_ARG,
+                           (char *)captured,
+                           "index_repository",
+                           "{}",
+                           "--response-out",
+                           "/tmp/r",
+                           CBM_INDEX_WORKER_PUBLISH_FENCE_ARG,
+                           "",
+                           NULL};
+    ASSERT_EQ(cbm_index_worker_parse_process_argv(13, fence_before_quarantine, &invocation),
+              CBM_INDEX_WORKER_ARGV_INVALID);
+    ASSERT_EQ(cbm_daemon_process_role(13, fence_before_quarantine), CBM_DAEMON_PROCESS_INVALID);
+    ASSERT_EQ(cbm_index_worker_parse_process_argv(11, empty_fence, &invocation),
+              CBM_INDEX_WORKER_ARGV_INVALID);
+    ASSERT_EQ(cbm_daemon_process_role(11, empty_fence), CBM_DAEMON_PROCESS_INVALID);
+
+    char *missing_build[] = {"test-runner",      "cli", "--index-worker",
+                             "index_repository", "{}",  "--response-out",
+                             "/tmp/r",           NULL};
+    char *wrong_build[] = {"test-runner",
+                           "cli",
+                           "--index-worker",
+                           CBM_INDEX_WORKER_BUILD_ARG,
+                           mismatched,
+                           "index_repository",
+                           "{}",
+                           "--response-out",
+                           "/tmp/r",
+                           NULL};
+    char *reordered[] = {"test-runner",
+                         "cli",
+                         "--index-worker",
+                         CBM_INDEX_WORKER_BUILD_ARG,
+                         (char *)captured,
+                         "index_repository",
+                         "{}",
+                         "--response-out",
+                         "/tmp/r",
+                         CBM_INDEX_WORKER_QUARANTINE_ARG,
+                         "/tmp/q",
+                         CBM_INDEX_WORKER_MARKER_ARG,
+                         "/tmp/m",
+                         NULL};
+    char *trailing[] = {"test-runner",
+                        "cli",
+                        "--index-worker",
+                        CBM_INDEX_WORKER_BUILD_ARG,
+                        (char *)captured,
+                        "index_repository",
+                        "{}",
+                        "--response-out",
+                        "/tmp/r",
+                        "unexpected",
+                        NULL};
+    char *zero_budget[] = {"test-runner",
+                           "cli",
+                           "--index-worker",
+                           CBM_INDEX_WORKER_BUILD_ARG,
+                           (char *)captured,
+                           "index_repository",
+                           "{}",
+                           "--response-out",
+                           "/tmp/r",
+                           CBM_INDEX_WORKER_MEMORY_BUDGET_ARG,
+                           "0",
+                           NULL};
+    char *overflow_budget[] = {"test-runner",
+                               "cli",
+                               "--index-worker",
+                               CBM_INDEX_WORKER_BUILD_ARG,
+                               (char *)captured,
+                               "index_repository",
+                               "{}",
+                               "--response-out",
+                               "/tmp/r",
+                               CBM_INDEX_WORKER_MEMORY_BUDGET_ARG,
+                               "184467440737095516160",
+                               NULL};
+    char *user_value[] = {"test-runner", "cli", "search_code", "--query", "--index-worker", NULL};
+    ASSERT_EQ(cbm_index_worker_parse_process_argv(7, missing_build, &invocation),
+              CBM_INDEX_WORKER_ARGV_INVALID);
+    ASSERT_EQ(cbm_daemon_process_role(7, missing_build), CBM_DAEMON_PROCESS_INVALID);
+    ASSERT_EQ(cbm_index_worker_parse_process_argv(9, wrong_build, &invocation),
+              CBM_INDEX_WORKER_ARGV_BUILD_MISMATCH);
+    ASSERT_EQ(cbm_index_worker_parse_process_argv(13, reordered, &invocation),
+              CBM_INDEX_WORKER_ARGV_INVALID);
+    ASSERT_EQ(cbm_index_worker_parse_process_argv(10, trailing, &invocation),
+              CBM_INDEX_WORKER_ARGV_INVALID);
+    ASSERT_EQ(cbm_index_worker_parse_process_argv(11, zero_budget, &invocation),
+              CBM_INDEX_WORKER_ARGV_INVALID);
+    ASSERT_EQ(cbm_daemon_process_role(11, zero_budget), CBM_DAEMON_PROCESS_INVALID);
+    ASSERT_EQ(cbm_index_worker_parse_process_argv(11, overflow_budget, &invocation),
+              CBM_INDEX_WORKER_ARGV_INVALID);
+    ASSERT_EQ(cbm_daemon_process_role(11, overflow_budget), CBM_DAEMON_PROCESS_INVALID);
+    ASSERT_EQ(cbm_index_worker_parse_process_argv(5, user_value, &invocation),
+              CBM_INDEX_WORKER_ARGV_INVALID);
+    ASSERT_EQ(cbm_daemon_process_role(5, user_value), CBM_DAEMON_PROCESS_INVALID);
+    PASS();
+}
+
+TEST(index_supervisor_async_jobs_are_isolated_cancellable_and_terminal_cached) {
+    const char *captured = cbm_index_supervisor_build_fingerprint();
+    ASSERT_NOT_NULL(captured);
+    char *worker_argv[] = {
+        "test-runner",
+        "cli",
+        "--index-worker",
+        CBM_INDEX_WORKER_BUILD_ARG,
+        (char *)captured,
+        "index_repository",
+        "{\"__cbm_test_worker\":\"hang-tree\"}",
+        "--response-out",
+        "/tmp/r",
+        CBM_INDEX_WORKER_SINGLE_THREAD_ARG,
+        CBM_INDEX_WORKER_MARKER_ARG,
+        "/tmp/m",
+        CBM_INDEX_WORKER_QUARANTINE_ARG,
+        "/tmp/q",
+        NULL,
+    };
+    ASSERT_EQ(cbm_daemon_process_role(14, worker_argv), CBM_DAEMON_PROCESS_WORKER);
+
+    char cache[INDEX_SUPERVISOR_TEST_PATH_CAP];
+    (void)snprintf(cache, sizeof(cache), "%s/cbm-index-async-XXXXXX", cbm_tmpdir());
+    ASSERT_NOT_NULL(cbm_mkdtemp(cache));
+    char marker_a[INDEX_SUPERVISOR_TEST_PATH_CAP];
+    char marker_b[INDEX_SUPERVISOR_TEST_PATH_CAP];
+    char quarantine_a[INDEX_SUPERVISOR_TEST_PATH_CAP];
+    char quarantine_b[INDEX_SUPERVISOR_TEST_PATH_CAP];
+    (void)snprintf(marker_a, sizeof(marker_a), "%s/marker-a", cache);
+    (void)snprintf(marker_b, sizeof(marker_b), "%s/marker-b", cache);
+    (void)snprintf(quarantine_a, sizeof(quarantine_a), "%s/quarantine-a", cache);
+    (void)snprintf(quarantine_b, sizeof(quarantine_b), "%s/quarantine-b", cache);
+
+    const char *old_cache = getenv("CBM_CACHE_DIR");
+    const char *old_single = getenv("CBM_INDEX_SINGLE_THREAD");
+    const char *old_marker = getenv("CBM_INDEX_MARKER_FILE");
+    const char *old_quarantine = getenv("CBM_INDEX_QUARANTINE_FILE");
+    char *saved_cache = old_cache ? cbm_strdup(old_cache) : NULL;
+    char *saved_single = old_single ? cbm_strdup(old_single) : NULL;
+    char *saved_marker = old_marker ? cbm_strdup(old_marker) : NULL;
+    char *saved_quarantine = old_quarantine ? cbm_strdup(old_quarantine) : NULL;
+    (void)cbm_setenv("CBM_CACHE_DIR", cache, 1);
+    (void)cbm_setenv("CBM_INDEX_SINGLE_THREAD", "parent-single", 1);
+    (void)cbm_setenv("CBM_INDEX_MARKER_FILE", "parent-marker", 1);
+    (void)cbm_setenv("CBM_INDEX_QUARANTINE_FILE", "parent-quarantine", 1);
+
+    const char args[] = "{\"__cbm_test_worker\":\"hang-tree\"}";
+    cbm_index_worker_handle_t *first = NULL;
+    cbm_index_worker_handle_t *second = NULL;
+    index_supervisor_log_capture_t first_capture = {0};
+    index_supervisor_log_capture_t second_capture = {0};
+    uint64_t start_before = cbm_now_ms();
+    int first_rc =
+        cbm_index_worker_start_with_log(args, 4096, true, marker_a, quarantine_a,
+                                        index_supervisor_test_capture_log, &first_capture, &first);
+    int second_rc = cbm_index_worker_start_with_log(args, 8192, true, marker_b, quarantine_b,
+                                                    index_supervisor_test_capture_log,
+                                                    &second_capture, &second);
+    uint64_t start_elapsed = cbm_now_ms() - start_before;
+
+    char response_a[INDEX_SUPERVISOR_TEST_PATH_CAP] = {0};
+    char response_b[INDEX_SUPERVISOR_TEST_PATH_CAP] = {0};
+    char log_a[INDEX_SUPERVISOR_TEST_PATH_CAP] = {0};
+    char log_b[INDEX_SUPERVISOR_TEST_PATH_CAP] = {0};
+    if (first) {
+        (void)snprintf(response_a, sizeof(response_a), "%s", cbm_index_worker_response_path(first));
+        (void)snprintf(log_a, sizeof(log_a), "%s", cbm_index_worker_log_path(first));
+    }
+    if (second) {
+        (void)snprintf(response_b, sizeof(response_b), "%s",
+                       cbm_index_worker_response_path(second));
+        (void)snprintf(log_b, sizeof(log_b), "%s", cbm_index_worker_log_path(second));
+    }
+    bool unique = response_a[0] && response_b[0] && log_a[0] && log_b[0] &&
+                  strcmp(response_a, response_b) != 0 && strcmp(log_a, log_b) != 0 &&
+                  strcmp(response_a, log_a) != 0 && strcmp(response_b, log_b) != 0;
+    bool owner_only = index_supervisor_test_owner_file(response_a) &&
+                      index_supervisor_test_owner_file(response_b) &&
+                      index_supervisor_test_owner_file(log_a) &&
+                      index_supervisor_test_owner_file(log_b);
+
+    char ready_a[2048] = {0};
+    char ready_b[2048] = {0};
+    bool first_ready =
+        first && index_supervisor_test_wait_file(first, marker_a, ready_a, sizeof(ready_a));
+    bool second_ready =
+        second && index_supervisor_test_wait_file(second, marker_b, ready_b, sizeof(ready_b));
+    bool child_options = strstr(ready_a, "single=1") && strstr(ready_a, marker_a) &&
+                         strstr(ready_a, quarantine_a) && strstr(ready_a, "budget=4096") &&
+                         strstr(ready_b, "single=1") && strstr(ready_b, marker_b) &&
+                         strstr(ready_b, quarantine_b) && strstr(ready_b, "budget=8192");
+    bool parent_unchanged = strcmp(getenv("CBM_INDEX_SINGLE_THREAD"), "parent-single") == 0 &&
+                            strcmp(getenv("CBM_INDEX_MARKER_FILE"), "parent-marker") == 0 &&
+                            strcmp(getenv("CBM_INDEX_QUARANTINE_FILE"), "parent-quarantine") == 0;
+
+    bool worker_logs_ready =
+        index_supervisor_test_wait_file_text(log_a, "async worker hang-tree probe",
+                                             INDEX_SUPERVISOR_TEST_READY_MS) &&
+        index_supervisor_test_wait_file_text(log_b, "async worker hang-tree probe",
+                                             INDEX_SUPERVISOR_TEST_READY_MS);
+    bool callback_lines_injected = worker_logs_ready &&
+                                   index_supervisor_test_append_log(log_a, "request-a-only\n") &&
+                                   index_supervisor_test_append_log(log_b, "request-b-only\n");
+
+    const cbm_index_worker_result_t *premature = (const cbm_index_worker_result_t *)1;
+    uint64_t poll_before = cbm_now_ms();
+    cbm_index_worker_poll_t running =
+        first ? cbm_index_worker_poll(first, &premature) : CBM_INDEX_WORKER_POLL_ERROR;
+    uint64_t poll_elapsed = cbm_now_ms() - poll_before;
+    uint64_t cancel_before = cbm_now_ms();
+    bool first_cancel = first && cbm_index_worker_request_cancel(first);
+    bool second_cancel = second && cbm_index_worker_request_cancel(second);
+    uint64_t cancel_elapsed = cbm_now_ms() - cancel_before;
+
+    const cbm_index_worker_result_t *first_result = NULL;
+    const cbm_index_worker_result_t *second_result = NULL;
+    bool first_terminal = first && index_supervisor_test_poll_terminal(
+                                       first, INDEX_SUPERVISOR_TEST_TERMINAL_MS, &first_result);
+    bool second_terminal = second && index_supervisor_test_poll_terminal(
+                                         second, INDEX_SUPERVISOR_TEST_TERMINAL_MS, &second_result);
+    const cbm_index_worker_result_t *cached = NULL;
+    int first_callbacks_at_terminal = first_capture.delivered;
+    bool cached_result = first_terminal &&
+                         cbm_index_worker_poll(first, &cached) == CBM_INDEX_WORKER_POLL_TERMINAL &&
+                         cached == first_result;
+    bool callback_terminal_stable = first_capture.delivered == first_callbacks_at_terminal;
+    bool callback_isolation = callback_lines_injected && first_capture.saw_request_a &&
+                              !first_capture.saw_request_b && second_capture.saw_request_b &&
+                              !second_capture.saw_request_a;
+    bool forced_as_expected = true;
+#ifndef _WIN32
+    forced_as_expected =
+        first_result && second_result && first_result->forced && second_result->forced;
+#endif
+    bool contained = first_result && second_result && first_result->cancellation_requested &&
+                     second_result->cancellation_requested && forced_as_expected &&
+                     first_result->tree_quiesced && second_result->tree_quiesced &&
+                     !first_result->supervision_failed && !second_result->supervision_failed;
+    bool terminal_cancel_rejected = first && !cbm_index_worker_request_cancel(first);
+    bool response_cleaned = cbm_file_size(response_a) < 0 && cbm_file_size(response_b) < 0;
+    bool failure_logs_kept = cbm_file_size(log_a) >= 0 && cbm_file_size(log_b) >= 0;
+
+    if (first_terminal) {
+        cbm_index_worker_destroy(first);
+    } else {
+        index_supervisor_test_cleanup_handle(first);
+    }
+    if (second_terminal) {
+        cbm_index_worker_destroy(second);
+    } else {
+        index_supervisor_test_cleanup_handle(second);
+    }
+    if (!first_ready || !second_ready) {
+        index_supervisor_test_dump("worker-a log", log_a);
+        index_supervisor_test_dump("worker-b log", log_b);
+        index_supervisor_test_dump("worker-a response", response_a);
+        index_supervisor_test_dump("worker-b response", response_b);
+    }
+    (void)cbm_unlink(log_a);
+    (void)cbm_unlink(log_b);
+    (void)cbm_unlink(marker_a);
+    (void)cbm_unlink(marker_b);
+    index_supervisor_test_restore_env("CBM_CACHE_DIR", saved_cache);
+    index_supervisor_test_restore_env("CBM_INDEX_SINGLE_THREAD", saved_single);
+    index_supervisor_test_restore_env("CBM_INDEX_MARKER_FILE", saved_marker);
+    index_supervisor_test_restore_env("CBM_INDEX_QUARANTINE_FILE", saved_quarantine);
+    (void)th_rmtree(cache);
+
+    ASSERT_EQ(first_rc, 0);
+    ASSERT_EQ(second_rc, 0);
+    ASSERT_TRUE(start_elapsed < 2000);
+    ASSERT_TRUE(unique);
+    ASSERT_TRUE(owner_only);
+    ASSERT_TRUE(first_ready);
+    ASSERT_TRUE(second_ready);
+    ASSERT_TRUE(child_options);
+    ASSERT_TRUE(parent_unchanged);
+    ASSERT_EQ(running, CBM_INDEX_WORKER_POLL_RUNNING);
+    ASSERT_NULL(premature);
+    ASSERT_TRUE(poll_elapsed < 100);
+    ASSERT_TRUE(first_cancel);
+    ASSERT_TRUE(second_cancel);
+    ASSERT_TRUE(cancel_elapsed < 100);
+    ASSERT_TRUE(first_terminal);
+    ASSERT_TRUE(second_terminal);
+    ASSERT_TRUE(cached_result);
+    ASSERT_TRUE(callback_terminal_stable);
+    ASSERT_TRUE(callback_isolation);
+    ASSERT_TRUE(contained);
+    ASSERT_TRUE(terminal_cancel_rejected);
+    ASSERT_TRUE(response_cleaned);
+    ASSERT_TRUE(failure_logs_kept);
+    PASS();
+}
+
+TEST(index_supervisor_sync_wrapper_forwards_cancel_and_drains_tree) {
+    char cache[INDEX_SUPERVISOR_TEST_PATH_CAP];
+    (void)snprintf(cache, sizeof(cache), "%s/cbm-index-sync-cancel-XXXXXX", cbm_tmpdir());
+    ASSERT_NOT_NULL(cbm_mkdtemp(cache));
+    const char *old_cache = getenv("CBM_CACHE_DIR");
+    char *saved_cache = old_cache ? cbm_strdup(old_cache) : NULL;
+    (void)cbm_setenv("CBM_CACHE_DIR", cache, 1);
+
+    atomic_int cancel_requested;
+    atomic_init(&cancel_requested, 1);
+    cbm_index_worker_result_t result = {0};
+    int run_status =
+        cbm_index_spawn_worker_with_log_cancel("{\"__cbm_test_worker\":\"hang-tree\"}", false, NULL,
+                                               NULL, NULL, NULL, &cancel_requested, &result);
+    bool contained = run_status == 0 && result.cancellation_requested && result.tree_quiesced &&
+                     !result.supervision_failed && result.response == NULL;
+    cbm_index_worker_result_free(&result);
+    index_supervisor_test_restore_env("CBM_CACHE_DIR", saved_cache);
+    (void)th_rmtree(cache);
+
+    ASSERT_TRUE(contained);
+    PASS();
+}
+
+static bool index_supervisor_test_run_probe(const char *mode, bool profiling,
+                                            cbm_proc_outcome_t *outcome_out, bool *has_response_out,
+                                            bool *log_exists_out, bool *response_path_exists_out) {
+    char args[128];
+    (void)snprintf(args, sizeof(args), "{\"__cbm_test_worker\":\"%s\"}", mode);
+    cbm_profile_active = profiling;
+    cbm_index_worker_handle_t *handle = NULL;
+    const size_t budget = (size_t)1024U * 1024U * 1024U;
+    if (cbm_index_worker_start(args, budget, false, NULL, NULL, &handle) != 0 || !handle) {
+        return false;
+    }
+    char log_path[INDEX_SUPERVISOR_TEST_PATH_CAP];
+    char response_path[INDEX_SUPERVISOR_TEST_PATH_CAP];
+    (void)snprintf(log_path, sizeof(log_path), "%s", cbm_index_worker_log_path(handle));
+    (void)snprintf(response_path, sizeof(response_path), "%s",
+                   cbm_index_worker_response_path(handle));
+    const cbm_index_worker_result_t *result = NULL;
+    bool terminal =
+        index_supervisor_test_poll_terminal(handle, INDEX_SUPERVISOR_TEST_TERMINAL_MS, &result);
+    if (terminal && result) {
+        *outcome_out = result->outcome;
+        *has_response_out = result->response != NULL;
+        *log_exists_out = cbm_file_size(log_path) >= 0;
+        *response_path_exists_out = cbm_file_size(response_path) >= 0;
+        cbm_index_worker_destroy(handle);
+    } else {
+        index_supervisor_test_dump("probe worker log", log_path);
+        index_supervisor_test_dump("probe worker response", response_path);
+        index_supervisor_test_cleanup_handle(handle);
+    }
+    if (cbm_file_size(log_path) >= 0) {
+        (void)cbm_unlink(log_path);
+    }
+    return terminal;
+}
+
+static char g_index_supervisor_memory_log[1024];
+static int g_index_supervisor_memory_log_count;
+
+static void index_supervisor_test_memory_log_sink(const char *line) {
+    if (strstr(line, "index.supervisor.worker_memory")) {
+        g_index_supervisor_memory_log_count++;
+        (void)snprintf(g_index_supervisor_memory_log, sizeof(g_index_supervisor_memory_log), "%s",
+                       line);
+    }
+}
+
+TEST(index_supervisor_terminal_log_lifecycle_matches_outcome_and_profiling) {
+    char cache[INDEX_SUPERVISOR_TEST_PATH_CAP];
+    (void)snprintf(cache, sizeof(cache), "%s/cbm-index-logs-XXXXXX", cbm_tmpdir());
+    ASSERT_NOT_NULL(cbm_mkdtemp(cache));
+    const char *old_cache = getenv("CBM_CACHE_DIR");
+    char *saved_cache = old_cache ? cbm_strdup(old_cache) : NULL;
+    bool saved_profile = cbm_profile_active;
+    (void)cbm_setenv("CBM_CACHE_DIR", cache, 1);
+
+    CBMLogLevel saved_level = cbm_log_get_level();
+    CBMLogFormat saved_format = cbm_log_get_format();
+    cbm_log_set_level(CBM_LOG_INFO);
+    cbm_log_set_format(CBM_LOG_FORMAT_TEXT);
+    g_index_supervisor_memory_log[0] = '\0';
+    g_index_supervisor_memory_log_count = 0;
+    cbm_log_set_sink_ex(index_supervisor_test_memory_log_sink, CBM_LOG_SINK_TEE);
+
+    cbm_proc_outcome_t clean_outcome = CBM_PROC_SPAWN_FAILED;
+    cbm_proc_outcome_t profile_outcome = CBM_PROC_SPAWN_FAILED;
+    cbm_proc_outcome_t crash_outcome = CBM_PROC_SPAWN_FAILED;
+    bool clean_response = false;
+    bool clean_log = true;
+    bool clean_response_file = true;
+    bool profile_response = false;
+    bool profile_log = false;
+    bool profile_response_file = true;
+    bool crash_response = true;
+    bool crash_log = false;
+    bool crash_response_file = true;
+    bool clean_terminal = index_supervisor_test_run_probe(
+        "clean", false, &clean_outcome, &clean_response, &clean_log, &clean_response_file);
+    bool profile_terminal = index_supervisor_test_run_probe(
+        "clean", true, &profile_outcome, &profile_response, &profile_log, &profile_response_file);
+    bool crash_terminal = index_supervisor_test_run_probe(
+        "crash", false, &crash_outcome, &crash_response, &crash_log, &crash_response_file);
+#ifdef _WIN32
+    bool crash_classified_failure = crash_outcome != CBM_PROC_CLEAN;
+#else
+    bool crash_classified_failure = crash_outcome == CBM_PROC_CRASH;
+#endif
+
+    cbm_log_set_sink(NULL);
+    cbm_log_set_level(saved_level);
+    cbm_log_set_format(saved_format);
+    cbm_profile_active = saved_profile;
+    index_supervisor_test_restore_env("CBM_CACHE_DIR", saved_cache);
+    (void)th_rmtree(cache);
+
+    ASSERT_TRUE(clean_terminal);
+    ASSERT_EQ(clean_outcome, CBM_PROC_CLEAN);
+    ASSERT_TRUE(clean_response);
+    ASSERT_FALSE(clean_log);
+    ASSERT_FALSE(clean_response_file);
+    ASSERT_TRUE(profile_terminal);
+    ASSERT_EQ(profile_outcome, CBM_PROC_CLEAN);
+    ASSERT_TRUE(profile_response);
+    ASSERT_TRUE(profile_log);
+    ASSERT_FALSE(profile_response_file);
+    ASSERT_TRUE(crash_terminal);
+    ASSERT_TRUE(crash_classified_failure);
+    ASSERT_FALSE(crash_response);
+    ASSERT_TRUE(crash_log);
+    ASSERT_FALSE(crash_response_file);
+#ifdef _WIN32
+    ASSERT_EQ(g_index_supervisor_memory_log_count, 1); /* crash only, never clean */
+    ASSERT_TRUE(strstr(g_index_supervisor_memory_log, "job_limit_bytes=1610612736") != NULL);
+    ASSERT_TRUE(strstr(g_index_supervisor_memory_log, "peak_job_memory_bytes=") != NULL);
+    ASSERT_TRUE(strstr(g_index_supervisor_memory_log, "unavailable") == NULL);
+#else
+    ASSERT_EQ(g_index_supervisor_memory_log_count, 0);
+#endif
+    PASS();
+}
+
+TEST(index_supervisor_worker_keeps_default_info_liveness_heartbeat) {
+    char cache[INDEX_SUPERVISOR_TEST_PATH_CAP];
+    (void)snprintf(cache, sizeof(cache), "%s/cbm-index-heartbeat-XXXXXX", cbm_tmpdir());
+    ASSERT_NOT_NULL(cbm_mkdtemp(cache));
+    const char *old_cache = getenv("CBM_CACHE_DIR");
+    const char *old_log_level = getenv("CBM_LOG_LEVEL");
+    char *saved_cache = old_cache ? cbm_strdup(old_cache) : NULL;
+    char *saved_log_level = old_log_level ? cbm_strdup(old_log_level) : NULL;
+    (void)cbm_setenv("CBM_CACHE_DIR", cache, 1);
+    (void)cbm_unsetenv("CBM_LOG_LEVEL");
+
+    cbm_index_worker_handle_t *handle = NULL;
+    int start_rc = cbm_index_worker_start("{\"__cbm_test_worker\":\"heartbeat\"}", 0, false, NULL,
+                                          NULL, &handle);
+    char log_path[INDEX_SUPERVISOR_TEST_PATH_CAP] = {0};
+    if (handle) {
+        (void)snprintf(log_path, sizeof(log_path), "%s", cbm_index_worker_log_path(handle));
+    }
+    bool ready = log_path[0] && index_supervisor_test_wait_file_text(
+                                    log_path, "async worker heartbeat probe ready",
+                                    INDEX_SUPERVISOR_TEST_READY_MS);
+    bool heartbeat =
+        ready && index_supervisor_test_wait_file_text(log_path, "msg=pipeline.discover", 1000);
+    const cbm_index_worker_result_t *result = NULL;
+    bool terminal = handle && index_supervisor_test_poll_terminal(
+                                  handle, INDEX_SUPERVISOR_TEST_TERMINAL_MS, &result);
+    bool clean = terminal && result && result->outcome == CBM_PROC_CLEAN && result->response;
+    if (terminal) {
+        cbm_index_worker_destroy(handle);
+    } else {
+        index_supervisor_test_dump("heartbeat worker log", log_path);
+        index_supervisor_test_cleanup_handle(handle);
+    }
+    index_supervisor_test_restore_env("CBM_LOG_LEVEL", saved_log_level);
+    index_supervisor_test_restore_env("CBM_CACHE_DIR", saved_cache);
+    (void)th_rmtree(cache);
+
+    ASSERT_EQ(start_rc, 0);
+    ASSERT_TRUE(ready);
+    ASSERT_TRUE(heartbeat);
+    ASSERT_TRUE(clean);
+    PASS();
+}
+
+TEST(index_supervisor_drains_terminal_backlog_into_request_progress_callback) {
+    char cache[INDEX_SUPERVISOR_TEST_PATH_CAP];
+    (void)snprintf(cache, sizeof(cache), "%s/cbm-index-relay-XXXXXX", cbm_tmpdir());
+    ASSERT_NOT_NULL(cbm_mkdtemp(cache));
+    const char *old_cache = getenv("CBM_CACHE_DIR");
+    char *saved_cache = old_cache ? cbm_strdup(old_cache) : NULL;
+    (void)cbm_setenv("CBM_CACHE_DIR", cache, 1);
+
+    FILE *progress = tmpfile();
+    ASSERT_NOT_NULL(progress);
+    index_supervisor_log_capture_t capture = {.render_progress = true};
+    cbm_progress_sink_init(progress);
+    cbm_index_worker_handle_t *handle = NULL;
+    int start_rc =
+        cbm_index_worker_start_with_log("{\"__cbm_test_worker\":\"clean\"}", 0, false, NULL, NULL,
+                                        index_supervisor_test_capture_log, &capture, &handle);
+    char log_path[INDEX_SUPERVISOR_TEST_PATH_CAP] = {0};
+    if (handle) {
+        (void)snprintf(log_path, sizeof(log_path), "%s", cbm_index_worker_log_path(handle));
+    }
+    bool worker_logged =
+        log_path[0] && index_supervisor_test_wait_file_text(log_path, "async worker clean probe",
+                                                            INDEX_SUPERVISOR_TEST_READY_MS);
+    if (worker_logged) {
+        /* Seeing the flushed probe places the child immediately before _Exit.
+         * Give it time to become waitable without polling: the regression is a
+         * backlog already present when the first terminal poll occurs. */
+        cbm_usleep(250000);
+    }
+    bool backlog_written = worker_logged && index_supervisor_test_append_terminal_backlog(log_path);
+    const cbm_index_worker_result_t *result = NULL;
+    bool terminal = handle && index_supervisor_test_poll_terminal(
+                                  handle, INDEX_SUPERVISOR_TEST_TERMINAL_MS, &result);
+    cbm_proc_outcome_t outcome = result ? result->outcome : CBM_PROC_SPAWN_FAILED;
+    int callbacks_at_terminal = capture.delivered;
+    const cbm_index_worker_result_t *cached = NULL;
+    bool terminal_cached =
+        terminal && cbm_index_worker_poll(handle, &cached) == CBM_INDEX_WORKER_POLL_TERMINAL &&
+        cached == result && capture.delivered == callbacks_at_terminal;
+    cbm_progress_sink_fini();
+    bool progress_rewound = fseek(progress, 0, SEEK_SET) == 0;
+    char rendered[1024] = {0};
+    size_t rendered_size =
+        progress_rewound ? fread(rendered, 1, sizeof(rendered) - 1, progress) : 0;
+    (void)fclose(progress);
+    if (terminal) {
+        cbm_index_worker_destroy(handle);
+    } else {
+        index_supervisor_test_cleanup_handle(handle);
+    }
+
+    if (!worker_logged || !terminal) {
+        index_supervisor_test_dump("backlog worker log", log_path);
+    }
+    index_supervisor_test_restore_env("CBM_CACHE_DIR", saved_cache);
+    (void)th_rmtree(cache);
+
+    ASSERT_EQ(start_rc, 0);
+    ASSERT_TRUE(worker_logged);
+    ASSERT_TRUE(backlog_written);
+    ASSERT_TRUE(terminal);
+    ASSERT_EQ(outcome, CBM_PROC_CLEAN);
+    ASSERT_TRUE(terminal_cached);
+    ASSERT_TRUE(capture.saw_clean_probe);
+    ASSERT_TRUE(capture.saw_structured_text);
+    ASSERT_TRUE(capture.saw_structured_json);
+    ASSERT_EQ(capture.backlog_lines, INDEX_SUPERVISOR_TEST_BACKLOG_LINES + 1);
+    ASSERT_TRUE(capture.saw_backlog_sentinel);
+    ASSERT_TRUE(progress_rewound);
+    ASSERT_TRUE(rendered_size > 0);
+    ASSERT_NOT_NULL(strstr(rendered, "Discovering files (7 found)"));
+    ASSERT_NOT_NULL(strstr(rendered, "[1/9] Building file structure"));
+    PASS();
+}
+
+TEST(index_supervisor_oversized_response_is_contained_and_log_is_retained) {
+    char cache[INDEX_SUPERVISOR_TEST_PATH_CAP];
+    (void)snprintf(cache, sizeof(cache), "%s/cbm-index-oversize-XXXXXX", cbm_tmpdir());
+    ASSERT_NOT_NULL(cbm_mkdtemp(cache));
+    const char *old_cache = getenv("CBM_CACHE_DIR");
+    char *saved_cache = old_cache ? cbm_strdup(old_cache) : NULL;
+    (void)cbm_setenv("CBM_CACHE_DIR", cache, 1);
+
+    cbm_index_worker_handle_t *handle = NULL;
+    int start_rc = cbm_index_worker_start("{\"__cbm_test_worker\":\"oversize\"}", 0, false, NULL,
+                                          NULL, &handle);
+    char log_path[INDEX_SUPERVISOR_TEST_PATH_CAP] = {0};
+    char response_path[INDEX_SUPERVISOR_TEST_PATH_CAP] = {0};
+    if (handle) {
+        (void)snprintf(log_path, sizeof(log_path), "%s", cbm_index_worker_log_path(handle));
+        (void)snprintf(response_path, sizeof(response_path), "%s",
+                       cbm_index_worker_response_path(handle));
+    }
+    const cbm_index_worker_result_t *result = NULL;
+    bool terminal = handle && index_supervisor_test_poll_terminal(
+                                  handle, INDEX_SUPERVISOR_TEST_TERMINAL_MS, &result);
+    bool rejected = terminal && result && result->response_rejected && !result->response &&
+                    result->outcome == CBM_PROC_EXIT_NONZERO && result->tree_quiesced &&
+                    !result->supervision_failed;
+    bool log_retained = log_path[0] && cbm_file_size(log_path) >= 0;
+    bool response_removed = response_path[0] && cbm_file_size(response_path) < 0;
+    if (terminal) {
+        cbm_index_worker_destroy(handle);
+    } else {
+        index_supervisor_test_dump("oversize worker log", log_path);
+        index_supervisor_test_cleanup_handle(handle);
+    }
+    (void)cbm_unlink(log_path);
+    index_supervisor_test_restore_env("CBM_CACHE_DIR", saved_cache);
+    (void)th_rmtree(cache);
+
+    ASSERT_EQ(start_rc, 0);
+    ASSERT_TRUE(terminal);
+    ASSERT_TRUE(rejected);
+    ASSERT_TRUE(log_retained);
+    ASSERT_TRUE(response_removed);
+    PASS();
+}
+
+static char g_index_supervisor_no_response_log[CBM_SZ_2K];
+
+static void index_supervisor_test_no_response_sink(const char *line) {
+    if (strstr(line, "index.supervisor.no_response")) {
+        (void)snprintf(g_index_supervisor_no_response_log,
+                       sizeof(g_index_supervisor_no_response_log), "%s", line);
+    }
+}
+
+/* #1300: a worker that exits 0 without writing its response. The supervisor
+ * pre-creates the response file, so the old read returned "" and the run was
+ * a SUCCESS with an empty response; the clean-exit branch then deleted the
+ * worker log, the only record of where the run stopped. It must instead be a
+ * named failure: no response, the log retained, and the last phase the log
+ * recorded (incremental.edge_snapshot, not the plain stderr line after it). */
+TEST(index_supervisor_clean_exit_without_response_is_named_failure_issue1300) {
+    char cache[INDEX_SUPERVISOR_TEST_PATH_CAP];
+    (void)snprintf(cache, sizeof(cache), "%s/cbm-index-silent-XXXXXX", cbm_tmpdir());
+    ASSERT_NOT_NULL(cbm_mkdtemp(cache));
+    const char *old_cache = getenv("CBM_CACHE_DIR");
+    char *saved_cache = old_cache ? cbm_strdup(old_cache) : NULL;
+    (void)cbm_setenv("CBM_CACHE_DIR", cache, 1);
+    CBMLogLevel saved_level = cbm_log_get_level();
+    CBMLogFormat saved_format = cbm_log_get_format();
+    cbm_log_set_level(CBM_LOG_INFO);
+    cbm_log_set_format(CBM_LOG_FORMAT_TEXT);
+    g_index_supervisor_no_response_log[0] = '\0';
+    cbm_log_set_sink_ex(index_supervisor_test_no_response_sink, CBM_LOG_SINK_TEE);
+
+    cbm_index_worker_handle_t *handle = NULL;
+    int start_rc = cbm_index_worker_start("{\"__cbm_test_worker\":\"silent-exit\"}", 0, false, NULL,
+                                          NULL, &handle);
+    char log_path[INDEX_SUPERVISOR_TEST_PATH_CAP] = {0};
+    if (handle) {
+        (void)snprintf(log_path, sizeof(log_path), "%s", cbm_index_worker_log_path(handle));
+    }
+    const cbm_index_worker_result_t *result = NULL;
+    bool terminal = handle && index_supervisor_test_poll_terminal(
+                                  handle, INDEX_SUPERVISOR_TEST_TERMINAL_MS, &result);
+    bool clean_exit = terminal && result && result->outcome == CBM_PROC_CLEAN &&
+                      result->exit_code == 0 && result->tree_quiesced;
+    bool no_response = terminal && result && result->response == NULL;
+    bool named = terminal && result && result->response_missing &&
+                 strcmp(result->last_phase, "incremental.edge_snapshot") == 0 &&
+                 strcmp(result->worker_log, log_path) == 0;
+    bool not_success =
+        terminal && result &&
+        cbm_mcp_supervised_result_disposition(0, result) != CBM_MCP_SUPERVISED_RESULT_SUCCESS;
+    bool log_retained = log_path[0] && cbm_file_size(log_path) > 0;
+    if (terminal) {
+        cbm_index_worker_destroy(handle);
+    } else {
+        index_supervisor_test_dump("silent-exit worker log", log_path);
+        index_supervisor_test_cleanup_handle(handle);
+    }
+    cbm_log_set_sink(NULL);
+    cbm_log_set_level(saved_level);
+    cbm_log_set_format(saved_format);
+    bool event_named = strstr(g_index_supervisor_no_response_log,
+                              "last_phase=incremental.edge_snapshot") != NULL &&
+                       log_path[0] && strstr(g_index_supervisor_no_response_log, log_path) != NULL;
+    (void)cbm_unlink(log_path);
+    index_supervisor_test_restore_env("CBM_CACHE_DIR", saved_cache);
+    (void)th_rmtree(cache);
+
+    ASSERT_EQ(start_rc, 0);
+    ASSERT_TRUE(terminal);
+    ASSERT_TRUE(clean_exit);
+    ASSERT_TRUE(no_response);
+    ASSERT_TRUE(not_success);
+    ASSERT_TRUE(named);
+    ASSERT_TRUE(log_retained);
+    ASSERT_TRUE(event_named);
+    PASS();
+}
+
+/* #1070, #1130, #1132, #1133, #1145, #1450: six reports of an indexing worker
+ * that died leaving "the worker log file is completely empty (0 KB)". Nothing
+ * was ever flushed, so not one of them is reproducible or attributable — the
+ * hint says "crashed on a file" and the file is never named.
+ *
+ * The repro: the worker starts with a FULLY BUFFERED stderr (what the Windows
+ * CRT hands a redirected stderr; tf_maybe_run_index_worker forces the same
+ * state on POSIX so this binds on all three legs), writes diagnostics, then is
+ * SIGKILLed — #1070's own `signal=9`, and the death that runs no cleanup and
+ * flushes nothing. The supervisor keeps the log of a failed worker, so the log
+ * on disk afterwards is exactly what a user would attach to an issue.
+ *
+ * Asserted: it is not empty, it carries the startup header with the version,
+ * pid, repo path and the worker's own arguments, and the line written after the
+ * header survived too. Reverting the fix leaves the file at 0 bytes. */
+TEST(index_supervisor_killed_worker_log_is_never_empty_and_names_the_run) {
+    char cache[INDEX_SUPERVISOR_TEST_PATH_CAP];
+    (void)snprintf(cache, sizeof(cache), "%s/cbm-index-logheader-XXXXXX", cbm_tmpdir());
+    ASSERT_NOT_NULL(cbm_mkdtemp(cache));
+    const char *old_cache = getenv("CBM_CACHE_DIR");
+    char *saved_cache = old_cache ? cbm_strdup(old_cache) : NULL;
+    (void)cbm_setenv("CBM_CACHE_DIR", cache, 1);
+
+    /* A repo path with a space: the header must survive JSON-escaping intact,
+     * because Windows reporters index paths like C:/Users/Some Name/repo. */
+    char repo_path[INDEX_SUPERVISOR_TEST_PATH_CAP];
+    (void)snprintf(repo_path, sizeof(repo_path), "%s/some repo", cache);
+    char args[INDEX_SUPERVISOR_TEST_PATH_CAP];
+    (void)snprintf(args, sizeof(args),
+                   "{\"__cbm_test_worker\":\"buffered-kill\",\"repo_path\":\"%s\"}", repo_path);
+
+    cbm_index_worker_handle_t *handle = NULL;
+    int start_rc = cbm_index_worker_start(args, 0, false, NULL, NULL, &handle);
+    char log_path[INDEX_SUPERVISOR_TEST_PATH_CAP] = {0};
+    if (handle) {
+        (void)snprintf(log_path, sizeof(log_path), "%s", cbm_index_worker_log_path(handle));
+    }
+    const cbm_index_worker_result_t *result = NULL;
+    bool terminal = handle && index_supervisor_test_poll_terminal(
+                                  handle, INDEX_SUPERVISOR_TEST_TERMINAL_MS, &result);
+    cbm_proc_outcome_t outcome = result ? result->outcome : CBM_PROC_SPAWN_FAILED;
+
+    /* Read the log the way a reporter would: after the worker is gone. */
+    long log_size = log_path[0] ? cbm_file_size(log_path) : -1;
+    char log_text[8192] = {0};
+    FILE *log = log_path[0] ? cbm_fopen(log_path, "rb") : NULL;
+    if (log) {
+        size_t used = fread(log_text, 1, sizeof(log_text) - 1, log);
+        log_text[used] = '\0';
+        (void)fclose(log);
+    }
+    bool has_header =
+        strstr(log_text, "\"event\":\"" CBM_INDEX_WORKER_LOG_START_EVENT "\"") != NULL;
+    bool names_repo =
+        strstr(log_text, "\"repo_path\":\"") != NULL && strstr(log_text, "some repo") != NULL;
+    bool names_args =
+        strstr(log_text, "\"args\":\"") != NULL && strstr(log_text, "buffered-kill") != NULL;
+    bool names_version = strstr(log_text, "\"version\":\"") != NULL;
+    bool names_pid = strstr(log_text, "\"pid\":\"") != NULL;
+    bool kept_post_header_line = strstr(log_text, "index.worker.buffered_kill_probe") != NULL;
+
+    if (terminal) {
+        cbm_index_worker_destroy(handle);
+    } else {
+        index_supervisor_test_dump("buffered-kill worker log", log_path);
+        index_supervisor_test_cleanup_handle(handle);
+    }
+    if (!has_header) {
+        index_supervisor_test_dump("buffered-kill worker log", log_path);
+    }
+    (void)cbm_unlink(log_path);
+    index_supervisor_test_restore_env("CBM_CACHE_DIR", saved_cache);
+    (void)th_rmtree(cache);
+
+    ASSERT_EQ(start_rc, 0);
+    ASSERT_TRUE(terminal);
+    ASSERT_TRUE(outcome != CBM_PROC_CLEAN); /* killed: the supervisor keeps the log */
+    ASSERT_TRUE(log_size > 0);              /* the 0-byte log of the six reports */
+    ASSERT_TRUE(has_header);
+    ASSERT_TRUE(names_version);
+    ASSERT_TRUE(names_pid);
+    ASSERT_TRUE(names_repo);
+    ASSERT_TRUE(names_args);
+    ASSERT_TRUE(kept_post_header_line);
+    PASS();
+}
+
+TEST(index_supervisor_job_memory_limit_has_floor_headroom_and_no_overflow) {
+    const size_t mib = (size_t)1024U * 1024U;
+    ASSERT_TRUE(cbm_index_worker_job_memory_limit(0) == 0);
+    ASSERT_TRUE(cbm_index_worker_job_memory_limit(4096) == 0);
+    ASSERT_TRUE(cbm_index_worker_job_memory_limit(8192) == 0);
+    ASSERT_TRUE(cbm_index_worker_job_memory_limit(512U * mib - 1) == 0);
+    ASSERT_TRUE(cbm_index_worker_job_memory_limit(512U * mib) == 768U * mib);
+    ASSERT_TRUE(cbm_index_worker_job_memory_limit(512U * mib + 1) == 768U * mib + 1);
+    ASSERT_TRUE(cbm_index_worker_job_memory_limit(1024U * mib) == 1536U * mib);
+    ASSERT_TRUE(cbm_index_worker_job_memory_limit(SIZE_MAX / 2) ==
+                SIZE_MAX / 2 + (SIZE_MAX / 2) / 2);
+    ASSERT_TRUE(cbm_index_worker_job_memory_limit(SIZE_MAX - 1) == SIZE_MAX);
+    ASSERT_TRUE(cbm_index_worker_job_memory_limit(SIZE_MAX) == SIZE_MAX);
+    PASS();
+}
+
+typedef struct {
+    uint64_t now_ms;
+    uint64_t rss_values[4];
+    int rss_value_count;
+    int rss_calls;
+    int clock_calls;
+    cbm_proc_tree_rss_status_t rss_status;
+} index_supervisor_resource_fake_t;
+
+static uint64_t index_supervisor_fake_clock(void *context) {
+    index_supervisor_resource_fake_t *fake = context;
+    fake->clock_calls++;
+    return fake->now_ms;
+}
+
+static cbm_proc_tree_rss_status_t index_supervisor_fake_charged_rss(cbm_subprocess_t *process,
+                                                                    uint64_t *rss_bytes,
+                                                                    void *context) {
+    (void)process;
+    index_supervisor_resource_fake_t *fake = context;
+    int value_index =
+        fake->rss_calls < fake->rss_value_count ? fake->rss_calls : fake->rss_value_count - 1;
+    fake->rss_calls++;
+    if (fake->rss_status == CBM_PROC_TREE_RSS_OK && rss_bytes && value_index >= 0) {
+        *rss_bytes = fake->rss_values[value_index];
+    }
+    return fake->rss_status;
+}
+
+static cbm_index_resource_policy_t index_supervisor_test_worker_policy(uint64_t rss_bytes,
+                                                                       uint64_t duration_ms) {
+    cbm_index_resource_policy_t policy;
+    cbm_index_policy_init(&policy);
+    policy.max_rss_bytes = (cbm_index_limit_u64_t){.enabled = rss_bytes > 0, .value = rss_bytes};
+    policy.max_duration_ms =
+        (cbm_index_limit_u64_t){.enabled = duration_ms > 0, .value = duration_ms};
+    return policy;
+}
+
+TEST(index_supervisor_disabled_limits_do_not_probe) {
+    index_supervisor_resource_fake_t fake = {
+        .now_ms = 100,
+        .rss_values = {UINT64_MAX},
+        .rss_value_count = 1,
+        .rss_status = CBM_PROC_TREE_RSS_OK,
+    };
+    cbm_index_supervisor_set_resource_hooks_for_testing(index_supervisor_fake_clock,
+                                                        index_supervisor_fake_charged_rss, &fake);
+    cbm_index_resource_policy_t policy = index_supervisor_test_worker_policy(0, 0);
+    cbm_index_worker_handle_t *handle = NULL;
+    int start_rc = cbm_index_worker_start_with_policy("{\"__cbm_test_worker\":\"clean\"}", 0,
+                                                      &policy, false, NULL, NULL, 0, &handle);
+    /* Opt-in: no worker limit, no publication fence, no claim. */
+    bool fenced = !handle || cbm_index_worker_publish_fence_path_for_testing(handle) != NULL;
+    const cbm_index_worker_result_t *result = NULL;
+    bool terminal = handle && index_supervisor_test_poll_terminal(
+                                  handle, INDEX_SUPERVISOR_TEST_TERMINAL_MS, &result);
+    cbm_index_resource_t resource =
+        result ? result->resource_violation.resource : CBM_INDEX_RESOURCE_RSS_BYTES;
+    bool probe_failed = result && result->resource_probe_failed;
+    bool committed = !result || result->publication_committed;
+    if (terminal) {
+        cbm_index_worker_destroy(handle);
+    } else {
+        index_supervisor_test_cleanup_handle(handle);
+    }
+    cbm_index_supervisor_reset_resource_hooks_for_testing();
+
+    ASSERT_EQ(start_rc, 0);
+    ASSERT_TRUE(terminal);
+    ASSERT_EQ(fake.rss_calls, 0);
+    ASSERT_EQ(fake.clock_calls, 0);
+    ASSERT_EQ(resource, CBM_INDEX_RESOURCE_NONE);
+    ASSERT_FALSE(probe_failed);
+    ASSERT_FALSE(fenced);
+    ASSERT_FALSE(committed);
+    PASS();
+}
+
+TEST(index_supervisor_charged_rss_equality_runs_then_excess_terminates_tree) {
+    const uint64_t limit = UINT64_C(64) * CBM_INDEX_MIB_BYTES;
+    index_supervisor_resource_fake_t fake = {
+        .now_ms = 100,
+        .rss_values = {limit, limit + 1},
+        .rss_value_count = 2,
+        .rss_status = CBM_PROC_TREE_RSS_OK,
+    };
+    cbm_index_supervisor_set_resource_hooks_for_testing(index_supervisor_fake_clock,
+                                                        index_supervisor_fake_charged_rss, &fake);
+    cbm_index_resource_policy_t policy = index_supervisor_test_worker_policy(limit, 0);
+    cbm_index_worker_handle_t *handle = NULL;
+    int start_rc = cbm_index_worker_start_with_policy("{\"__cbm_test_worker\":\"hang-tree\"}", 0,
+                                                      &policy, false, NULL, NULL, 0, &handle);
+    const cbm_index_worker_result_t *result = NULL;
+    cbm_index_worker_poll_t equal_state =
+        handle ? cbm_index_worker_poll(handle, &result) : CBM_INDEX_WORKER_POLL_ERROR;
+    fake.now_ms += 250;
+    bool terminal = handle && index_supervisor_test_poll_terminal(
+                                  handle, INDEX_SUPERVISOR_TEST_TERMINAL_MS, &result);
+    const cbm_index_worker_result_t *cached = NULL;
+    bool cached_terminal =
+        terminal && cbm_index_worker_poll(handle, &cached) == CBM_INDEX_WORKER_POLL_TERMINAL &&
+        cached == result;
+    bool limited = terminal && result &&
+                   result->resource_violation.resource == CBM_INDEX_RESOURCE_RSS_BYTES &&
+                   result->resource_violation.observed == limit + 1 &&
+                   result->resource_violation.limit == limit && !result->cancellation_requested &&
+                   result->tree_quiesced && !result->supervision_failed;
+    if (terminal) {
+        cbm_index_worker_destroy(handle);
+    } else {
+        index_supervisor_test_cleanup_handle(handle);
+    }
+    cbm_index_supervisor_reset_resource_hooks_for_testing();
+
+    ASSERT_EQ(start_rc, 0);
+    ASSERT_EQ(equal_state, CBM_INDEX_WORKER_POLL_RUNNING);
+    ASSERT_TRUE(limited);
+    ASSERT_TRUE(cached_terminal);
+    PASS();
+}
+
+TEST(index_supervisor_duration_is_total_time_not_quiet_timeout) {
+    index_supervisor_resource_fake_t fake = {
+        .now_ms = 100,
+        .rss_status = CBM_PROC_TREE_RSS_EMPTY,
+    };
+    cbm_index_supervisor_set_resource_hooks_for_testing(index_supervisor_fake_clock,
+                                                        index_supervisor_fake_charged_rss, &fake);
+    cbm_index_resource_policy_t policy = index_supervisor_test_worker_policy(0, 1000);
+    cbm_index_worker_handle_t *handle = NULL;
+    int start_rc = cbm_index_worker_start_with_policy("{\"__cbm_test_worker\":\"hang-tree\"}", 0,
+                                                      &policy, false, NULL, NULL, 0, &handle);
+    fake.now_ms = 1100;
+    const cbm_index_worker_result_t *result = NULL;
+    cbm_index_worker_poll_t equal_state =
+        handle ? cbm_index_worker_poll(handle, &result) : CBM_INDEX_WORKER_POLL_ERROR;
+    fake.now_ms = 1101;
+    bool terminal = handle && index_supervisor_test_poll_terminal(
+                                  handle, INDEX_SUPERVISOR_TEST_TERMINAL_MS, &result);
+    bool limited = terminal && result &&
+                   result->resource_violation.resource == CBM_INDEX_RESOURCE_DURATION_MS &&
+                   result->resource_violation.observed == 1001 &&
+                   result->resource_violation.limit == 1000 && result->outcome != CBM_PROC_HANG &&
+                   result->tree_quiesced;
+    if (terminal) {
+        cbm_index_worker_destroy(handle);
+    } else {
+        index_supervisor_test_cleanup_handle(handle);
+    }
+    cbm_index_supervisor_reset_resource_hooks_for_testing();
+
+    ASSERT_EQ(start_rc, 0);
+    ASSERT_EQ(equal_state, CBM_INDEX_WORKER_POLL_RUNNING);
+    ASSERT_TRUE(limited);
+    PASS();
+}
+
+TEST(index_supervisor_duration_spans_recovery_attempts) {
+    index_supervisor_resource_fake_t fake = {
+        .now_ms = 100,
+        .rss_status = CBM_PROC_TREE_RSS_EMPTY,
+    };
+    cbm_index_supervisor_set_resource_hooks_for_testing(index_supervisor_fake_clock,
+                                                        index_supervisor_fake_charged_rss, &fake);
+    cbm_index_resource_policy_t policy = index_supervisor_test_worker_policy(0, 1000);
+    cbm_index_worker_handle_t *first = NULL;
+    int first_rc = cbm_index_worker_start_with_policy("{\"__cbm_test_worker\":\"hang-tree\"}", 0,
+                                                      &policy, false, NULL, NULL, 100, &first);
+    fake.now_ms = 500;
+    const cbm_index_worker_result_t *first_result = NULL;
+    cbm_index_worker_poll_t mid =
+        first ? cbm_index_worker_poll(first, &first_result) : CBM_INDEX_WORKER_POLL_ERROR;
+    bool cancel_accepted = first && cbm_index_worker_request_cancel(first);
+    bool first_terminal = first && index_supervisor_test_poll_terminal(
+                                       first, INDEX_SUPERVISOR_TEST_TERMINAL_MS, &first_result);
+    if (first_terminal) {
+        cbm_index_worker_destroy(first);
+        first = NULL;
+    } else {
+        index_supervisor_test_cleanup_handle(first);
+        first = NULL;
+    }
+
+    fake.now_ms = 1101;
+    cbm_index_worker_handle_t *second = NULL;
+    int second_rc = cbm_index_worker_start_with_policy("{\"__cbm_test_worker\":\"hang-tree\"}", 0,
+                                                       &policy, false, NULL, NULL, 100, &second);
+    const cbm_index_worker_result_t *second_result = NULL;
+    bool second_terminal = second && index_supervisor_test_poll_terminal(
+                                         second, INDEX_SUPERVISOR_TEST_TERMINAL_MS, &second_result);
+    bool limited = second_terminal && second_result &&
+                   second_result->resource_violation.resource == CBM_INDEX_RESOURCE_DURATION_MS &&
+                   second_result->resource_violation.observed == 1001 &&
+                   second_result->resource_violation.limit == 1000 &&
+                   second_result->outcome != CBM_PROC_HANG && second_result->tree_quiesced;
+    if (second_terminal) {
+        cbm_index_worker_destroy(second);
+    } else {
+        index_supervisor_test_cleanup_handle(second);
+    }
+    cbm_index_supervisor_reset_resource_hooks_for_testing();
+
+    ASSERT_EQ(first_rc, 0);
+    ASSERT_EQ(mid, CBM_INDEX_WORKER_POLL_RUNNING);
+    ASSERT_TRUE(cancel_accepted);
+    ASSERT_TRUE(first_terminal);
+    ASSERT_EQ(second_rc, 0);
+    ASSERT_TRUE(limited);
+    PASS();
+}
+
+TEST(index_supervisor_quiet_timeout_remains_hang_with_duration_enabled) {
+    const char *saved_timeout = getenv("CBM_INDEX_WORKER_TIMEOUT_S");
+    char *saved_timeout_copy = saved_timeout ? cbm_strdup(saved_timeout) : NULL;
+    (void)cbm_setenv("CBM_INDEX_WORKER_TIMEOUT_S", "1", 1);
+    /* The duration watchdog stays armed, but its clock is pinned at the request
+     * origin, so the quiet timeout (the subprocess's own clock) is the only way
+     * this hung worker can end, however slowly the host runs. With the real
+     * clock a starved run could cross the duration limit first and turn the
+     * HANG into a resource kill. The limit equals the quiet timeout on purpose:
+     * more real time than the limit always passes, and it still cannot fire. */
+    index_supervisor_resource_fake_t fake = {
+        .now_ms = 100,
+        .rss_status = CBM_PROC_TREE_RSS_EMPTY,
+    };
+    cbm_index_supervisor_set_resource_hooks_for_testing(index_supervisor_fake_clock,
+                                                        index_supervisor_fake_charged_rss, &fake);
+    cbm_index_resource_policy_t policy = index_supervisor_test_worker_policy(0, 1000);
+    cbm_index_worker_handle_t *handle = NULL;
+    int start_rc = cbm_index_worker_start_with_policy("{\"__cbm_test_worker\":\"hang-tree\"}", 0,
+                                                      &policy, false, NULL, NULL, 100, &handle);
+    const cbm_index_worker_result_t *result = NULL;
+    bool terminal = handle && index_supervisor_test_poll_terminal(
+                                  handle, INDEX_SUPERVISOR_TEST_TERMINAL_MS, &result);
+    bool remained_hang = terminal && result && result->outcome == CBM_PROC_HANG &&
+                         result->resource_violation.resource == CBM_INDEX_RESOURCE_NONE &&
+                         !result->resource_probe_failed;
+    if (terminal) {
+        cbm_index_worker_destroy(handle);
+    } else {
+        index_supervisor_test_cleanup_handle(handle);
+    }
+    cbm_index_supervisor_reset_resource_hooks_for_testing();
+    index_supervisor_test_restore_env("CBM_INDEX_WORKER_TIMEOUT_S", saved_timeout_copy);
+
+    ASSERT_EQ(start_rc, 0);
+    ASSERT_TRUE(terminal);
+    ASSERT_TRUE(remained_hang);
+    /* The duration check really ran while polling (it read the pinned clock),
+     * so HANG won against a live watchdog, not against a disabled one. */
+    ASSERT_TRUE(fake.clock_calls > 0);
+    PASS();
+}
+
+TEST(index_supervisor_cancel_precedes_resource_probe) {
+    const uint64_t limit = UINT64_C(64) * CBM_INDEX_MIB_BYTES;
+    index_supervisor_resource_fake_t fake = {
+        .now_ms = 100,
+        .rss_values = {limit + 1},
+        .rss_value_count = 1,
+        .rss_status = CBM_PROC_TREE_RSS_OK,
+    };
+    cbm_index_supervisor_set_resource_hooks_for_testing(index_supervisor_fake_clock,
+                                                        index_supervisor_fake_charged_rss, &fake);
+    cbm_index_resource_policy_t policy = index_supervisor_test_worker_policy(limit, 1000);
+    cbm_index_worker_handle_t *handle = NULL;
+    int start_rc = cbm_index_worker_start_with_policy("{\"__cbm_test_worker\":\"hang-tree\"}", 0,
+                                                      &policy, false, NULL, NULL, 0, &handle);
+    fake.now_ms = 2000;
+    bool cancel_accepted = handle && cbm_index_worker_request_cancel(handle);
+    const cbm_index_worker_result_t *result = NULL;
+    bool terminal = handle && index_supervisor_test_poll_terminal(
+                                  handle, INDEX_SUPERVISOR_TEST_TERMINAL_MS, &result);
+    bool cancelled = terminal && result && result->cancellation_requested &&
+                     result->resource_violation.resource == CBM_INDEX_RESOURCE_NONE &&
+                     !result->resource_probe_failed && result->tree_quiesced;
+    if (terminal) {
+        cbm_index_worker_destroy(handle);
+    } else {
+        index_supervisor_test_cleanup_handle(handle);
+    }
+    cbm_index_supervisor_reset_resource_hooks_for_testing();
+
+    ASSERT_EQ(start_rc, 0);
+    ASSERT_TRUE(cancel_accepted);
+    ASSERT_TRUE(cancelled);
+    ASSERT_EQ(fake.rss_calls, 0);
+    PASS();
+}
+
+TEST(index_supervisor_three_failed_rss_probes_fail_closed) {
+    const uint64_t limit = UINT64_C(64) * CBM_INDEX_MIB_BYTES;
+    index_supervisor_resource_fake_t fake = {
+        .now_ms = 100,
+        .rss_status = CBM_PROC_TREE_RSS_ERROR,
+    };
+    cbm_index_supervisor_set_resource_hooks_for_testing(index_supervisor_fake_clock,
+                                                        index_supervisor_fake_charged_rss, &fake);
+    cbm_index_resource_policy_t policy = index_supervisor_test_worker_policy(limit, 0);
+    cbm_index_worker_handle_t *handle = NULL;
+    int start_rc = cbm_index_worker_start_with_policy("{\"__cbm_test_worker\":\"hang-tree\"}", 0,
+                                                      &policy, false, NULL, NULL, 0, &handle);
+    const cbm_index_worker_result_t *result = NULL;
+    cbm_index_worker_poll_t first =
+        handle ? cbm_index_worker_poll(handle, &result) : CBM_INDEX_WORKER_POLL_ERROR;
+    cbm_index_worker_poll_t throttled =
+        handle ? cbm_index_worker_poll(handle, &result) : CBM_INDEX_WORKER_POLL_ERROR;
+    int calls_before_interval = fake.rss_calls;
+    fake.now_ms += 250;
+    cbm_index_worker_poll_t second =
+        handle ? cbm_index_worker_poll(handle, &result) : CBM_INDEX_WORKER_POLL_ERROR;
+    fake.now_ms += 250;
+    cbm_index_worker_poll_t third =
+        handle ? cbm_index_worker_poll(handle, &result) : CBM_INDEX_WORKER_POLL_ERROR;
+    bool terminal = handle && index_supervisor_test_poll_terminal(
+                                  handle, INDEX_SUPERVISOR_TEST_TERMINAL_MS, &result);
+    bool failed_closed = terminal && result && result->resource_probe_failed &&
+                         result->resource_violation.resource == CBM_INDEX_RESOURCE_RSS_BYTES &&
+                         !result->cancellation_requested && result->tree_quiesced;
+    if (terminal) {
+        cbm_index_worker_destroy(handle);
+    } else {
+        index_supervisor_test_cleanup_handle(handle);
+    }
+    cbm_index_supervisor_reset_resource_hooks_for_testing();
+
+    ASSERT_EQ(start_rc, 0);
+    ASSERT_EQ(first, CBM_INDEX_WORKER_POLL_RUNNING);
+    ASSERT_EQ(throttled, CBM_INDEX_WORKER_POLL_RUNNING);
+    ASSERT_EQ(calls_before_interval, 1);
+    ASSERT_EQ(second, CBM_INDEX_WORKER_POLL_RUNNING);
+    ASSERT_EQ(third, CBM_INDEX_WORKER_POLL_RUNNING);
+    ASSERT_TRUE(failed_closed);
+    ASSERT_EQ(fake.rss_calls, 3);
+    PASS();
+}
+
+/* Publication fence (index_supervisor.h). The hang-tree probe reports the fence
+ * path it received on its argv in its marker, and the test plays the worker's
+ * publication claim through the production entry point with that path. */
+typedef struct {
+    char directory[INDEX_SUPERVISOR_TEST_PATH_CAP];
+    char marker[INDEX_SUPERVISOR_TEST_PATH_CAP];
+    char fence[INDEX_SUPERVISOR_TEST_PATH_CAP];
+} index_supervisor_fence_fixture_t;
+
+static bool index_supervisor_fence_fixture_init(index_supervisor_fence_fixture_t *fixture) {
+    memset(fixture, 0, sizeof(*fixture));
+    (void)snprintf(fixture->directory, sizeof(fixture->directory), "%s/cbm-index-fence-XXXXXX",
+                   cbm_tmpdir());
+    if (!cbm_mkdtemp(fixture->directory)) {
+        return false;
+    }
+    (void)snprintf(fixture->marker, sizeof(fixture->marker), "%s/marker", fixture->directory);
+    return true;
+}
+
+/* True once the worker started with exactly this attempt's fence. */
+static bool index_supervisor_fence_fixture_started(index_supervisor_fence_fixture_t *fixture,
+                                                   cbm_index_worker_handle_t *handle) {
+    const char *fence = handle ? cbm_index_worker_publish_fence_path_for_testing(handle) : NULL;
+    if (!fence) {
+        return false;
+    }
+    (void)snprintf(fixture->fence, sizeof(fixture->fence), "%s", fence);
+    char expected[INDEX_SUPERVISOR_TEST_PATH_CAP + 16];
+    (void)snprintf(expected, sizeof(expected), "fence=%s\n", fixture->fence);
+    return index_supervisor_test_wait_file_text(fixture->marker, expected,
+                                                INDEX_SUPERVISOR_TEST_READY_MS);
+}
+
+static bool index_supervisor_fence_fixture_worker_claims(
+    index_supervisor_fence_fixture_t *fixture) {
+    cbm_index_set_worker_publish_fence(fixture->fence);
+    bool claimed = cbm_index_worker_claim_publication();
+    cbm_index_set_worker_publish_fence(NULL);
+    return claimed;
+}
+
+static void index_supervisor_fence_fixture_cleanup(index_supervisor_fence_fixture_t *fixture) {
+    (void)cbm_unlink(fixture->marker);
+    (void)cbm_rmdir(fixture->directory);
+}
+
+static int g_index_supervisor_after_publication_logs;
+
+static void index_supervisor_test_after_publication_sink(const char *line) {
+    if (line && strstr(line, "index.supervisor.resource_limit_after_publication")) {
+        g_index_supervisor_after_publication_logs++;
+    }
+}
+
+TEST(index_supervisor_limit_claims_publication_before_terminating) {
+    index_supervisor_resource_fake_t fake = {
+        .now_ms = 100,
+        .rss_status = CBM_PROC_TREE_RSS_EMPTY,
+    };
+    index_supervisor_fence_fixture_t fixture;
+    bool fixture_ready = index_supervisor_fence_fixture_init(&fixture);
+    cbm_index_supervisor_set_resource_hooks_for_testing(index_supervisor_fake_clock,
+                                                        index_supervisor_fake_charged_rss, &fake);
+    cbm_index_resource_policy_t policy = index_supervisor_test_worker_policy(0, 1000);
+    cbm_index_worker_handle_t *handle = NULL;
+    int start_rc =
+        fixture_ready
+            ? cbm_index_worker_start_with_policy("{\"__cbm_test_worker\":\"hang-tree\"}", 0,
+                                                 &policy, false, fixture.marker, NULL, 100, &handle)
+            : -1;
+    bool started = start_rc == 0 && index_supervisor_fence_fixture_started(&fixture, handle);
+    /* The limit is crossed while the worker has not claimed publication: the
+     * supervisor claims the fence in this poll, before it stops the worker. */
+    fake.now_ms = 1101;
+    const cbm_index_worker_result_t *result = NULL;
+    cbm_index_worker_poll_t decided =
+        handle ? cbm_index_worker_poll(handle, &result) : CBM_INDEX_WORKER_POLL_ERROR;
+    /* Whatever the worker does next, it can no longer publish. */
+    bool worker_barred = started && !index_supervisor_fence_fixture_worker_claims(&fixture);
+    bool terminal = handle && index_supervisor_test_poll_terminal(
+                                  handle, INDEX_SUPERVISOR_TEST_TERMINAL_MS, &result);
+    bool limited = terminal && result &&
+                   result->resource_violation.resource == CBM_INDEX_RESOURCE_DURATION_MS &&
+                   result->resource_violation.observed == 1001 && !result->publication_committed &&
+                   !result->cancellation_requested && result->tree_quiesced;
+    bool fence_removed = terminal && fixture.fence[0] && cbm_file_size(fixture.fence) < 0;
+    if (terminal) {
+        cbm_index_worker_destroy(handle);
+    } else {
+        index_supervisor_test_cleanup_handle(handle);
+    }
+    cbm_index_supervisor_reset_resource_hooks_for_testing();
+    if (!started) {
+        index_supervisor_test_dump("marker", fixture.marker);
+    }
+    index_supervisor_fence_fixture_cleanup(&fixture);
+
+    ASSERT_TRUE(fixture_ready);
+    ASSERT_EQ(start_rc, 0);
+    ASSERT_TRUE(started);
+    ASSERT_EQ(decided, CBM_INDEX_WORKER_POLL_RUNNING);
+    ASSERT_TRUE(worker_barred);
+    ASSERT_TRUE(limited);
+    ASSERT_TRUE(fence_removed);
+    PASS();
+}
+
+TEST(index_supervisor_limit_after_worker_publication_claim_is_not_enforced) {
+    index_supervisor_resource_fake_t fake = {
+        .now_ms = 100,
+        .rss_status = CBM_PROC_TREE_RSS_EMPTY,
+    };
+    index_supervisor_fence_fixture_t fixture;
+    bool fixture_ready = index_supervisor_fence_fixture_init(&fixture);
+    CBMLogLevel saved_level = cbm_log_get_level();
+    cbm_log_set_level(CBM_LOG_INFO);
+    g_index_supervisor_after_publication_logs = 0;
+    cbm_log_set_sink_ex(index_supervisor_test_after_publication_sink, CBM_LOG_SINK_TEE);
+    cbm_index_supervisor_set_resource_hooks_for_testing(index_supervisor_fake_clock,
+                                                        index_supervisor_fake_charged_rss, &fake);
+    cbm_index_resource_policy_t policy = index_supervisor_test_worker_policy(0, 1000);
+    cbm_index_worker_handle_t *handle = NULL;
+    int start_rc =
+        fixture_ready
+            ? cbm_index_worker_start_with_policy("{\"__cbm_test_worker\":\"hang-tree\"}", 0,
+                                                 &policy, false, fixture.marker, NULL, 100, &handle)
+            : -1;
+    bool started = start_rc == 0 && index_supervisor_fence_fixture_started(&fixture, handle);
+    /* The worker commits to publishing first; only then is the limit crossed. */
+    bool worker_claimed = started && index_supervisor_fence_fixture_worker_claims(&fixture);
+    fake.now_ms = 1101;
+    const cbm_index_worker_result_t *result = NULL;
+    cbm_index_worker_poll_t decided =
+        handle ? cbm_index_worker_poll(handle, &result) : CBM_INDEX_WORKER_POLL_ERROR;
+    int clock_calls_at_decision = fake.clock_calls;
+    cbm_index_worker_poll_t after =
+        handle ? cbm_index_worker_poll(handle, &result) : CBM_INDEX_WORKER_POLL_ERROR;
+    bool disarmed = fake.clock_calls == clock_calls_at_decision;
+    /* The attempt runs on; the test ends it with an ordinary cancellation. */
+    bool cancel_accepted = handle && cbm_index_worker_request_cancel(handle);
+    bool terminal = handle && index_supervisor_test_poll_terminal(
+                                  handle, INDEX_SUPERVISOR_TEST_TERMINAL_MS, &result);
+    bool committed = terminal && result && result->cancellation_requested &&
+                     result->resource_violation.resource == CBM_INDEX_RESOURCE_NONE &&
+                     !result->resource_probe_failed && result->publication_committed &&
+                     result->tree_quiesced;
+    if (terminal) {
+        cbm_index_worker_destroy(handle);
+    } else {
+        index_supervisor_test_cleanup_handle(handle);
+    }
+    cbm_index_supervisor_reset_resource_hooks_for_testing();
+    cbm_log_set_sink(NULL);
+    cbm_log_set_level(saved_level);
+    if (!started) {
+        index_supervisor_test_dump("marker", fixture.marker);
+    }
+    index_supervisor_fence_fixture_cleanup(&fixture);
+
+    ASSERT_TRUE(fixture_ready);
+    ASSERT_EQ(start_rc, 0);
+    ASSERT_TRUE(started);
+    ASSERT_TRUE(worker_claimed);
+    ASSERT_EQ(decided, CBM_INDEX_WORKER_POLL_RUNNING);
+    ASSERT_EQ(after, CBM_INDEX_WORKER_POLL_RUNNING);
+    ASSERT_TRUE(disarmed);
+    ASSERT_EQ(g_index_supervisor_after_publication_logs, 1);
+    ASSERT_TRUE(cancel_accepted);
+    ASSERT_TRUE(committed);
+    PASS();
+}
+
+SUITE(index_supervisor) {
+    RUN_TEST(index_supervisor_job_memory_limit_has_floor_headroom_and_no_overflow);
+    RUN_TEST(index_supervisor_worker_argv_requires_exact_build_bound_grammar);
+    RUN_TEST(index_supervisor_async_jobs_are_isolated_cancellable_and_terminal_cached);
+    RUN_TEST(index_supervisor_sync_wrapper_forwards_cancel_and_drains_tree);
+    RUN_TEST(index_supervisor_terminal_log_lifecycle_matches_outcome_and_profiling);
+    RUN_TEST(index_supervisor_worker_keeps_default_info_liveness_heartbeat);
+    RUN_TEST(index_supervisor_drains_terminal_backlog_into_request_progress_callback);
+    RUN_TEST(index_supervisor_oversized_response_is_contained_and_log_is_retained);
+    RUN_TEST(index_supervisor_clean_exit_without_response_is_named_failure_issue1300);
+    RUN_TEST(index_supervisor_killed_worker_log_is_never_empty_and_names_the_run);
+    RUN_TEST(index_supervisor_disabled_limits_do_not_probe);
+    RUN_TEST(index_supervisor_charged_rss_equality_runs_then_excess_terminates_tree);
+    RUN_TEST(index_supervisor_duration_is_total_time_not_quiet_timeout);
+    RUN_TEST(index_supervisor_duration_spans_recovery_attempts);
+    RUN_TEST(index_supervisor_quiet_timeout_remains_hang_with_duration_enabled);
+    RUN_TEST(index_supervisor_cancel_precedes_resource_probe);
+    RUN_TEST(index_supervisor_three_failed_rss_probes_fail_closed);
+    RUN_TEST(index_supervisor_limit_claims_publication_before_terminating);
+    RUN_TEST(index_supervisor_limit_after_worker_publication_claim_is_not_enforced);
+}

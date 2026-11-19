@@ -1,0 +1,18 @@
+{
+  "sourceRepository": "https://github.com/Unique-Divine/codebase-memory-mcp",
+  "originalUpstream": "https://github.com/DeusData/codebase-memory-mcp",
+  "sourceCommit": "cdfdf26483fa56f4f7d9d85e7c4c3924133b458b",
+  "importedAt": "2026-11-19",
+  "historyImported": false,
+  "excludedSourceFiles": [
+    ".claude-plugin/",
+    ".github/",
+    "Formula",
+    "internal/cbm/vendored/grammars/",
+    "pkg/",
+    "plugin/",
+    "tools/tree-sitter-*/"
+  ],
+  "license": "MIT",
+  "localModifications": "Imported as directory mori/ of the Jiyuu monorepo; the project is being renamed Mori while the C binary keeps the name codebase-memory-mcp. The 164 vendored Tree-sitter grammars under internal/cbm/vendored/grammars/ (about 1.3 GB) are not committed: scripts/grammars-fetch.ts downloads a sha256-pinned archive of that directory at the source commit, recorded in grammars.lock.json, and checks every file against scripts/vendored-checksums.txt. Upstream CI workflows, the npm, PyPI, Go, Homebrew, Scoop, Chocolatey, winget and AUR publishing wrappers under pkg/ (and the Formula symlink into it), the Claude Code plugin and marketplace manifests, and the unused tools/tree-sitter-* grammar sources are excluded. tests/test_cli.c no longer reads pkg/npm/README.md and tests/test_language_count_contract.sh no longer registers the Chocolatey nuspec as a language-count surface. Upstream README.md is kept as README.upstream.md, which the README and language-count contracts now read. Adds Jiyuu documentation, a component justfile and Bun scripts for the grammar archive."
+}
