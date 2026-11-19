@@ -1,6 +1,5 @@
-# Suites that exercise the grammars and the extraction pipeline. The full
-# matrix (scripts/test.sh with no arguments) also runs upstream's release and
-# CI contracts, several of which read files this import excludes.
+# Suites that exercise the grammars and the extraction pipeline. test-all runs
+# every suite.
 default_suites := "edge_types_probe lang_contract cross_repo extraction"
 
 # Install the pinned grammars (--from <archive> for a local file, --force).
@@ -16,6 +15,14 @@ test SUITES=default_suites: grammars
     scripts/test.sh --suites "{{SUITES}}"
     bash tests/test_language_count_contract.sh
     scripts/security-vendored.sh
+
+# Plain scripts/test.sh stops at its Step 0e contract, which reads excluded
+# files (IMPORT.md), so test-all lists the suites from the runner and runs
+# them in iteration mode.
+# Run every C suite (over an hour).
+test-all: grammars
+    scripts/test.sh --suites arena
+    scripts/test.sh --suites "$(build/c/test-runner --list-suites | tr '\n' ' ')"
 
 # Test the grammar archive scripts.
 scripts-test:

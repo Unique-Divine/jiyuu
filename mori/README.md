@@ -103,10 +103,22 @@ just mori-check      # script tests, build, then the same suites
 ```
 
 Inside `mori/`, `just test "<suites>"` runs other suites and
-`just scripts-test` runs the grammar script tests. `scripts/test.sh` with no
-arguments runs upstream's full matrix. Some of its contract steps read the
-upstream CI workflows and package wrappers, which this import excludes, and
-fail for that reason.
+`just scripts-test` runs the grammar script tests.
+
+`scripts/test.sh` with no arguments, and `scripts/test.sh --contracts-only`,
+stop at Step 0e: `tests/test_windows_bundle_contract.sh` reads `install.ps1`
+and `pkg/npm/install.js`, which this import excludes, and with `set -e`
+nothing after it runs, neither the later contract steps nor any suite. To run
+every suite (194, over an hour), use:
+
+```bash
+just test-all        # inside mori/
+# same as: scripts/test.sh --suites arena   (builds build/c/test-runner)
+#          scripts/test.sh --suites "$(build/c/test-runner --list-suites | tr '\n' ' ')"
+```
+
+[IMPORT.md](IMPORT.md#known-test-gaps) lists the 13 contract scripts that
+fail because they read excluded paths.
 
 When running the binary against a real repository during development, point
 `CBM_CACHE_DIR` and `CBM_RUNTIME_DIR` at scratch directories to keep the
