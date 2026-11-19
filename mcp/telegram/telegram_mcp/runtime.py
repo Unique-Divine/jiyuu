@@ -421,30 +421,29 @@ def _parse_json_container(text: Any) -> Any:
     return value if isinstance(value, (dict, list)) else None
 
 
-def merge_account_results(results: List[tuple]) -> str:
-    """Combine ``(label, result)`` pairs from a multi-account fan-out.
+def json_account_entry(label: str, result: Any) -> Dict[str, Any]:
+    """Return one account's entry in a JSON fan-out envelope.
 
-    JSON results stay parseable in one envelope. If any result is text, as
-    from a tool that still returns prose or a plain-text error, the results
-    are joined under ``[label]`` headers as before.
+    A JSON result goes under ``result``. A plain-text error, or the JSON
+    ``error`` object of a rate limit or timeout, goes under ``error``.
     """
-    parsed = [(label, _parse_json_container(result)) for label, result in results]
-    if parsed and all(value is not None for _, value in parsed):
-        return json_result(
-            {"accounts": [{"account": label, "result": value} for label, value in parsed]}
-        )
-    return "\n\n".join(f"[{label}]\n{result}" for label, result in results)
+    value = _parse_json_container(result)
+    if value is None:
+        return {"account": label, "error": result}
+    if isinstance(value, dict) and set(value) == {"error"}:
+        return {"account": label, "error": value["error"]}
+    return {"account": label, "result": value}
 
 
-def with_account(readonly=False):
+def with_account(readonly=False, json_results=False):
     """Decorator that adds multi-account support to MCP tools.
 
     - In single-mode: always uses the sole client, no output tagging.
     - In multi-mode with explicit account: uses that account's client.
     - In multi-mode without account + readonly: fans out to all accounts
-      concurrently. When every result is a JSON object or array, returns
-      ``{"accounts": [{"account": label, "result": ...}, ...]}``. Otherwise
-      prefixes each result with [label] and concatenates the text.
+      concurrently, prefixes each result with [label], concatenates. With
+      ``json_results=True``, returns ``{"accounts": [...]}`` instead, one
+      entry per account from ``json_account_entry``.
     - In multi-mode without account + NOT readonly: returns an error.
 
     The wrapped function must accept ``account: str | None = None`` and use
@@ -472,7 +471,11 @@ def with_account(readonly=False):
                 return label, await fn(*args, **kw)
 
             results = await asyncio.gather(*(_call_for(label) for label in clients))
-            return merge_account_results(results)
+            if json_results:
+                return json_result(
+                    {"accounts": [json_account_entry(label, r) for label, r in results]}
+                )
+            return "\n\n".join(f"[{label}]\n{result}" for label, result in results)
 
         return wrapper
 

@@ -414,7 +414,7 @@ async def leave_chat(chat_id: Union[int, str], account: str | None = None) -> st
 @mcp.tool(
     annotations=ToolAnnotations(title="Get Participants", openWorldHint=True, readOnlyHint=True)
 )
-@with_account(readonly=True)
+@with_account(readonly=True, json_results=True)
 @validate_id("chat_id")
 async def get_participants(
     chat_id: Union[int, str],
@@ -1134,7 +1134,7 @@ async def edit_admin_rights(
 
 
 @mcp.tool(annotations=ToolAnnotations(title="Get Admins", openWorldHint=True, readOnlyHint=True))
-@with_account(readonly=True)
+@with_account(readonly=True, json_results=True)
 @validate_id("chat_id")
 async def get_admins(chat_id: Union[int, str], account: str | None = None) -> str:
     """
@@ -1165,7 +1165,7 @@ async def get_admins(chat_id: Union[int, str], account: str | None = None) -> st
 @mcp.tool(
     annotations=ToolAnnotations(title="Get Banned Users", openWorldHint=True, readOnlyHint=True)
 )
-@with_account(readonly=True)
+@with_account(readonly=True, json_results=True)
 @validate_id("chat_id")
 async def get_banned_users(chat_id: Union[int, str], account: str | None = None) -> str:
     """
@@ -1196,7 +1196,7 @@ async def get_banned_users(chat_id: Union[int, str], account: str | None = None)
 @mcp.tool(
     annotations=ToolAnnotations(title="Get Invite Link", openWorldHint=True, readOnlyHint=True)
 )
-@with_account(readonly=True)
+@with_account(readonly=True, json_results=True)
 @validate_id("chat_id")
 async def get_invite_link(chat_id: Union[int, str], account: str | None = None) -> str:
     """
@@ -1335,7 +1335,7 @@ async def join_chat_by_link(link: str, account: str | None = None) -> str:
 @mcp.tool(
     annotations=ToolAnnotations(title="Export Chat Invite", openWorldHint=True, readOnlyHint=True)
 )
-@with_account(readonly=True)
+@with_account(readonly=True, json_results=True)
 @validate_id("chat_id")
 async def export_chat_invite(chat_id: Union[int, str], account: str | None = None) -> str:
     """
@@ -1371,7 +1371,7 @@ async def import_chat_invite(hash: str, account: str | None = None) -> str:
 @mcp.tool(
     annotations=ToolAnnotations(title="Get Recent Actions", openWorldHint=True, readOnlyHint=True)
 )
-@with_account(readonly=True)
+@with_account(readonly=True, json_results=True)
 @validate_id("chat_id")
 async def get_recent_actions(chat_id: Union[int, str], account: str | None = None) -> str:
     """

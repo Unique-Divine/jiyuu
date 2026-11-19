@@ -318,13 +318,16 @@ async def test_with_account_routes_single_multi_and_readonly(monkeypatch):
     )
 
 
+TWO_ACCOUNTS = {"work": object(), "personal": object()}
+
+
 @pytest.mark.asyncio
-async def test_readonly_fan_out_wraps_json_results_in_one_object(monkeypatch):
+async def test_opted_in_fan_out_wraps_all_successes(monkeypatch):
     async def tool(account=None):
         return json.dumps({"results": [{"id": 1, "name": f"{account}\n[other]"}]})
 
-    monkeypatch.setattr(runtime, "clients", {"work": object(), "personal": object()})
-    output = await runtime.with_account(readonly=True)(tool)()
+    monkeypatch.setattr(runtime, "clients", TWO_ACCOUNTS)
+    output = await runtime.with_account(readonly=True, json_results=True)(tool)()
 
     assert json.loads(output) == {
         "accounts": [
@@ -338,18 +341,40 @@ async def test_readonly_fan_out_wraps_json_results_in_one_object(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_readonly_fan_out_keeps_text_when_any_result_is_text(monkeypatch):
+async def test_opted_in_fan_out_puts_each_error_in_its_entry(monkeypatch):
+    limit = {"error": {"type": "flood_wait", "wait_seconds": 30}}
+    replies = {
+        "work": '{"results": []}',
+        "personal": "An error occurred (code: GROUP-ERR-001). Check mcp_errors.log for details.",
+        "spare": json.dumps(limit),
+    }
+
     async def tool(account=None):
-        return '{"results": []}' if account == "work" else "Error: not found"
+        return replies[account or "work"]
 
-    monkeypatch.setattr(runtime, "clients", {"work": object(), "personal": object()})
+    monkeypatch.setattr(runtime, "clients", {label: object() for label in replies})
+    output = await runtime.with_account(readonly=True, json_results=True)(tool)()
+
+    assert json.loads(output) == {
+        "accounts": [
+            {"account": "work", "result": {"results": []}},
+            {"account": "personal", "error": replies["personal"]},
+            {"account": "spare", "error": limit["error"]},
+        ]
+    }
+
+
+@pytest.mark.asyncio
+async def test_fan_out_without_opt_in_keeps_the_text_format(monkeypatch):
+    async def tool(account=None):
+        return json.dumps({"id": 1, "account": account})
+
+    monkeypatch.setattr(runtime, "clients", TWO_ACCOUNTS)
+
+    # The format on main: [label] headers joined by blank lines, even for JSON.
     assert await runtime.with_account(readonly=True)(tool)() == (
-        '[work]\n{"results": []}\n\n[personal]\nError: not found'
+        '[work]\n{"id": 1, "account": "work"}\n\n[personal]\n{"id": 1, "account": "personal"}'
     )
-
-
-def test_merge_account_results_treats_json_scalars_as_text():
-    assert runtime.merge_account_results([("a", "1"), ("b", '"x"')]) == '[a]\n1\n\n[b]\n"x"'
 
 
 class _ConnectivityClient:
