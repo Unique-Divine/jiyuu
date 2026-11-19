@@ -33,6 +33,9 @@
       "path": "mcp/scripts"
     },
     {
+      "path": "mori/scripts"
+    },
+    {
       "path": "mdtoc"
     },
     {

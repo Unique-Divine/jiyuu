@@ -1,0 +1,2762 @@
+/*
+ * test_parse_coverage.c — Reproduce-first suite for the best-effort
+ * parse-coverage signal (#963, Signal A).
+ *
+ * ── The gap being reproduced ────────────────────────────────────────────────
+ * When tree-sitter hits a construct it cannot parse (ERROR/MISSING nodes in
+ * the tree), extraction silently drops every definition inside the failed
+ * region — the file looks fully indexed but is not. `ts_node_has_error(root)`
+ * detects this, yet nothing consumed it: CBMFileResult gained the fields
+ * parse_incomplete / error_ranges / error_region_count, but the parse site in
+ * cbm_extract_file_impl never sets them.
+ *
+ * Canonical trigger: the preprocessor-blind #ifdef-split-brace pattern in C —
+ * both branches open `fn(...) {` and share ONE closing brace, so the raw text
+ * is brace-unbalanced → ERROR node → the guarded function never becomes a
+ * Function node while neighbors extract fine.
+ *
+ * ── The contract these tests enforce ────────────────────────────────────────
+ *   RED  (unfixed): parse_incomplete is never set → flagged-file tests fail.
+ *   GREEN (fixed):  cbm_extract_file sets parse_incomplete=true iff the tree
+ *                   contains ERROR/MISSING nodes, records the 1-based line
+ *                   ranges of the TOP-MOST error regions ("start-end,..."),
+ *                   bounded by the 256-region cap, and clean files stay
+ *                   completely unflagged (no false positives).
+ *
+ * BEST-EFFORT framing (must never be weakened the other way): a flag means
+ * "constructs here were dropped — prefer grep"; the ABSENCE of a flag is NOT
+ * a completeness guarantee. These tests only pin down the detectable class.
+ */
+
+#include "test_framework.h"
+#include "cbm.h"
+#include "sql_values.h"        /* #1735 value-row scanner */
+#include "foundation/compat.h" /* cbm_setenv / cbm_unsetenv */
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <ctype.h>
+
+/* Convenience extract wrapper (same shape as test_extraction_imports.c). */
+static CBMFileResult *do_extract(const char *src, CBMLanguage lang, const char *path) {
+    return cbm_extract_file(src, (int)strlen(src), lang, "covproj", path, 0, NULL, NULL);
+}
+
+/* Return 1 if any extracted definition has the given short name. */
+static int has_def(CBMFileResult *r, const char *name) {
+    for (int i = 0; i < r->defs.count; i++) {
+        if (r->defs.items[i].name && strcmp(r->defs.items[i].name, name) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* ── Fixtures ─────────────────────────────────────────────────────────────── */
+
+/* #ifdef-split-brace: both branches open `guarded(...) {`, one shared `}`.
+ * Preprocessor-blind parse sees unbalanced braces → ERROR region around
+ * lines 5–11; ok_before/ok_after remain extractable. */
+static const char *C_IFDEF_SPLIT = "#include <stdio.h>\n"                      /* 1 */
+                                   "\n"                                        /* 2 */
+                                   "void ok_before(void) { printf(\"a\"); }\n" /* 3 */
+                                   "\n"                                        /* 4 */
+                                   "#ifdef FEATURE_A\n"                        /* 5 */
+                                   "static int guarded(int x) {\n"             /* 6 */
+                                   "#else\n"                                   /* 7 */
+                                   "static int guarded_alt(int x) {\n"         /* 8 */
+                                   "#endif\n"                                  /* 9 */
+                                   "    return x + 1;\n"                       /* 10 */
+                                   "}\n"                                       /* 11 */
+                                   "\n"                                        /* 12 */
+                                   "void ok_after(void) { printf(\"b\"); }\n"; /* 13 */
+
+static const char *C_CLEAN = "#include <stdio.h>\n"
+                             "\n"
+                             "void alpha(void) { printf(\"a\"); }\n"
+                             "\n"
+                             "static int beta(int x) {\n"
+                             "    return x + 1;\n"
+                             "}\n";
+
+/* `def broken(:` parses with an ERROR region, but tree-sitter error recovery
+ * still yields the `broken` function def — a DEFINITELY RECOVERED miss. */
+static const char *PY_BROKEN_RECOVERED = "def ok():\n"
+                                         "    return 1\n"
+                                         "\n"
+                                         "def broken(:\n"
+                                         "    pass\n"
+                                         "\n"
+                                         "def ok2():\n"
+                                         "    return 2\n";
+
+/* Pure operator garbage between defs: an ERROR region no def walker can
+ * recover anything from — a genuine, unrecovered miss. */
+static const char *PY_GARBAGE = "def ok():\n"
+                                "    return 1\n"
+                                "\n"
+                                "%%% ((( garbage ))) %%%\n"
+                                "??? !!!\n"
+                                "\n"
+                                "def ok2():\n"
+                                "    return 2\n";
+
+static const char *PY_CLEAN = "def ok():\n"
+                              "    return 1\n"
+                              "\n"
+                              "def ok2():\n"
+                              "    return 2\n";
+
+/* #1610 fixtures follow. Refinement fixtures live here so they sit beside the
+ * split-brace fixture they build on. */
+
+/* Same split-brace shape as C_IFDEF_SPLIT, plus real garbage further down.
+ * Guards against over-suppression: the preprocessor explains the guarded
+ * region but explains nothing about the garbage, so BOTH must stay flagged
+ * and they must be reported as two separate ranges, not one big one. */
+static const char *C_IFDEF_SPLIT_PLUS_GARBAGE = "#include <stdio.h>\n"              /* 1 */
+                                                "\n"                                /* 2 */
+                                                "void ok_before(void) { }\n"        /* 3 */
+                                                "\n"                                /* 4 */
+                                                "#ifdef FEATURE_A\n"                /* 5 */
+                                                "static int guarded(int x) {\n"     /* 6 */
+                                                "#else\n"                           /* 7 */
+                                                "static int guarded_alt(int x) {\n" /* 8 */
+                                                "#endif\n"                          /* 9 */
+                                                "    return x + 1;\n"               /* 10 */
+                                                "}\n"                               /* 11 */
+                                                "\n"                                /* 12 */
+                                                "%%% ((( &&& ))) %%%\n"             /* 13 */
+                                                "\n"                                /* 14 */
+                                                "void ok_after(void) { }\n";        /* 15 */
+
+/* Perl formats have a line-oriented body terminated by a lone dot.  The
+ * following named sub pins the important recovery boundary: a grammar must
+ * both accept the format and resume normal declaration parsing afterwards. */
+static const char *PERL_FORMAT_WITH_FOLLOWING_SUB = "package Report;\n"
+                                                    "format REPORT =\n"
+                                                    "@<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<\n"
+                                                    "$headline\n"
+                                                    ".\n"
+                                                    "sub after_format { return 1; }\n";
+
+/* A grammar refresh must not hide real Perl syntax loss. */
+static const char *PERL_MALFORMED = "package Broken;\n"
+                                    "sub before_error { return 1; }\n"
+                                    "} ] } ]\n"
+                                    "sub after_error { return 2; }\n";
+
+/* ── Tests ────────────────────────────────────────────────────────────────── */
+
+TEST(c_ifdef_split_brace_sets_parse_incomplete) {
+    CBMFileResult *r = do_extract(C_IFDEF_SPLIT, CBM_LANG_C, "split.c");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error); /* parse succeeded — this is the silent-partial class */
+    ASSERT_TRUE(r->parse_incomplete);
+    ASSERT_GTE(r->error_region_count, 1);
+    ASSERT_NOT_NULL(r->error_ranges);
+    ASSERT_GT((int)strlen(r->error_ranges), 0);
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(c_ifdef_split_brace_neighbors_still_extracted) {
+    /* Documents WHY the flag matters: the file is partially indexed —
+     * neighbors extract, so nothing else hints at the dropped region. */
+    CBMFileResult *r = do_extract(C_IFDEF_SPLIT, CBM_LANG_C, "split.c");
+    ASSERT_NOT_NULL(r);
+    ASSERT_TRUE(has_def(r, "ok_before"));
+    ASSERT_TRUE(r->parse_incomplete);
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(c_error_range_points_at_failed_region) {
+    /* The recorded range must overlap the #ifdef construct (lines 5–11) so an
+     * agent can be pointed at the exact unparsed region. Format is
+     * "start-end[,start-end...]", 1-based, inclusive. */
+    CBMFileResult *r = do_extract(C_IFDEF_SPLIT, CBM_LANG_C, "split.c");
+    ASSERT_NOT_NULL(r);
+    ASSERT_TRUE(r->parse_incomplete);
+    ASSERT_NOT_NULL(r->error_ranges);
+    unsigned int start = 0;
+    unsigned int end = 0;
+    ASSERT_EQ(sscanf(r->error_ranges, "%u-%u", &start, &end), 2);
+    ASSERT_GTE(start, 1u);
+    ASSERT_LTE(start, 11u); /* starts at or before the region's last line */
+    ASSERT_GTE(end, 5u);    /* ends at or after the region's first line   */
+    ASSERT_LTE(end, 13u);   /* never past EOF */
+    ASSERT_LTE(start, end);
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(c_clean_file_not_flagged) {
+    /* No false positives: a clean parse must stay completely unflagged. */
+    CBMFileResult *r = do_extract(C_CLEAN, CBM_LANG_C, "clean.c");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT_FALSE(r->parse_incomplete);
+    ASSERT_EQ(r->error_region_count, 0);
+    ASSERT_NULL(r->error_ranges);
+    ASSERT_TRUE(has_def(r, "alpha"));
+    ASSERT_TRUE(has_def(r, "beta"));
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(py_unrecovered_garbage_sets_parse_incomplete) {
+    CBMFileResult *r = do_extract(PY_GARBAGE, CBM_LANG_PYTHON, "garbage.py");
+    ASSERT_NOT_NULL(r);
+    ASSERT_TRUE(r->parse_incomplete);
+    ASSERT_GTE(r->error_region_count, 1);
+    ASSERT_NOT_NULL(r->error_ranges);
+    ASSERT_TRUE(has_def(r, "ok")); /* partial: clean defs still extracted */
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(py_recovered_def_not_flagged) {
+    /* Recovery subtraction: `def broken(:` produces an ERROR region, but the
+     * def walker still recovers `broken` covering the whole region — the
+     * construct IS in the graph, so flagging it would be a false miss. */
+    CBMFileResult *r = do_extract(PY_BROKEN_RECOVERED, CBM_LANG_PYTHON, "broken.py");
+    ASSERT_NOT_NULL(r);
+    ASSERT_TRUE(has_def(r, "broken")); /* the recovery that justifies unflagging */
+    ASSERT_FALSE(r->parse_incomplete);
+    ASSERT_EQ(r->error_region_count, 0);
+    ASSERT_NULL(r->error_ranges);
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(py_clean_file_not_flagged) {
+    CBMFileResult *r = do_extract(PY_CLEAN, CBM_LANG_PYTHON, "clean.py");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->parse_incomplete);
+    ASSERT_EQ(r->error_region_count, 0);
+    ASSERT_NULL(r->error_ranges);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* Read the trailing "+<N>" truncation marker off a range string. Returns N, or
+ * 0 when the string carries no marker. */
+static int ranges_dropped_marker(const char *ranges) {
+    const char *plus = ranges ? strrchr(ranges, '+') : NULL;
+    if (!plus || !isdigit((unsigned char)plus[1])) {
+        return 0;
+    }
+    return atoi(plus + 1);
+}
+
+TEST(error_region_cap_is_honored) {
+    /* Pathological input: many separate unrecoverable garbage blocks
+     * interleaved with valid defs. The collector must stay bounded by its
+     * 256-region cap (matches CBM_MAX_ERROR_REGIONS in cbm.c) — pathological
+     * input can't blow up the report, and the flag itself still fires. */
+    enum { GARBAGE_BLOCKS = 400, LINE_CAP = 256 };
+    char *src = (char *)malloc(GARBAGE_BLOCKS * 96 + 1);
+    ASSERT_NOT_NULL(src);
+    size_t off = 0;
+    for (int i = 0; i < GARBAGE_BLOCKS; i++) {
+        off += (size_t)snprintf(
+            src + off, 96, "def ok%d():\n    return %d\n%%%%%% garbage%d ((( %%%%%%\n", i, i, i);
+    }
+    CBMFileResult *r = do_extract(src, CBM_LANG_PYTHON, "many_errors.py");
+    free(src);
+    ASSERT_NOT_NULL(r);
+    ASSERT_TRUE(r->parse_incomplete);
+    ASSERT_GTE(r->error_region_count, 1);
+    ASSERT_LTE(r->error_region_count, LINE_CAP);
+    ASSERT_NOT_NULL(r->error_ranges);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* A clipped range list must say so. 400 garbage blocks overrun the 256-region
+ * cap, so the report keeps 256 ranges and ends with a "+<N>" marker naming the
+ * number thrown away. Without the marker the short list reads as a complete
+ * one, which is the whole defect this guards. */
+TEST(error_region_cap_reports_what_it_dropped) {
+    enum { GARBAGE_BLOCKS = 400, LINE_CAP = 256 };
+    char *src = (char *)malloc(GARBAGE_BLOCKS * 96 + 1);
+    ASSERT_NOT_NULL(src);
+    size_t off = 0;
+    for (int i = 0; i < GARBAGE_BLOCKS; i++) {
+        off += (size_t)snprintf(
+            src + off, 96, "def ok%d():\n    return %d\n%%%%%% garbage%d ((( %%%%%%\n", i, i, i);
+    }
+    CBMFileResult *r = do_extract(src, CBM_LANG_PYTHON, "cap_marker.py");
+    free(src);
+    ASSERT_NOT_NULL(r);
+    ASSERT_NOT_NULL(r->error_ranges);
+    /* The cap bound, so the kept list is full and the marker is present. */
+    ASSERT_EQ(r->error_region_count, LINE_CAP);
+    int dropped = ranges_dropped_marker(r->error_ranges);
+    ASSERT_GTE(dropped, 1);
+    /* Every block produces at most one region, so the total cannot exceed the
+     * number of blocks — a marker that overcounts would fail here. */
+    ASSERT_LTE(r->error_region_count + dropped, GARBAGE_BLOCKS);
+    /* The marker is a SUFFIX: nothing follows it, or a reader stops early and
+     * silently loses every range after it. */
+    const char *plus = strrchr(r->error_ranges, '+');
+    ASSERT_NOT_NULL(plus);
+    for (const char *c = plus + 1; *c; c++) {
+        ASSERT_TRUE(isdigit((unsigned char)*c));
+    }
+    cbm_free_result(r);
+    PASS();
+}
+
+/* Inverse guard: a file that stays under the cap must carry NO marker, or
+ * every ordinary report would look clipped. */
+TEST(uncapped_ranges_carry_no_marker) {
+    const char *src = "def ok():\n    return 1\n%%% garbage (((\ndef ok2():\n    return 2\n";
+    CBMFileResult *r = do_extract(src, CBM_LANG_PYTHON, "small.py");
+    ASSERT_NOT_NULL(r);
+    ASSERT_TRUE(r->parse_incomplete);
+    ASSERT_NOT_NULL(r->error_ranges);
+    ASSERT_EQ(ranges_dropped_marker(r->error_ranges), 0);
+    ASSERT_NULL(strchr(r->error_ranges, '+'));
+    cbm_free_result(r);
+    PASS();
+}
+
+/* Trailing recovered functions AFTER the failed #ifdef region must not
+ * unflag it: recovery evidence must originate INSIDE the region, and the
+ * unrecovered lines (the first branch's `guarded`) keep it flagged. */
+TEST(c_trailing_recovered_defs_keep_flag) {
+    const char *src = "void ok_before(void) { }\n"
+                      "#ifdef A\n"
+                      "static int guarded(int x) {\n"
+                      "#else\n"
+                      "static int guarded_alt(int x) {\n"
+                      "#endif\n"
+                      "    return x + 1;\n"
+                      "}\n"
+                      "void ok_after(void) { }\n"
+                      "static int nested_ok(int y) { return y; }\n";
+    CBMFileResult *r = do_extract(src, CBM_LANG_C, "probe.c");
+    ASSERT_NOT_NULL(r);
+    ASSERT_TRUE(has_def(r, "guarded_alt")); /* partial recovery inside the region */
+    ASSERT_TRUE(r->parse_incomplete);       /* ...but `guarded` is still lost */
+    ASSERT_GTE(r->error_region_count, 1);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* ── Suite ────────────────────────────────────────────────────────────────── */
+
+/* ── #1610: a missing FINAL NEWLINE is not a parse failure ────────────────────
+ *
+ * A file that does not end with "\n" leaves the grammar's mandatory line
+ * terminator MISSING. That node is ZERO-WIDTH and sits at EOF: the parser
+ * consumed no source for it, so by construction nothing was dropped — no
+ * construct can live in a zero-byte span. Every instruction still parses.
+ *
+ * Reported on #1610 for Dockerfile, where a reporter proved with a byte-exact
+ * matrix that the trigger is independent of BOM, CRLF/LF, exec-form vs
+ * shell-form and file length — it is purely the absent final newline.
+ *
+ * It was never Dockerfile-specific: tcl, fish, gomod and hyprlang flag the same
+ * way, while ini, fsharp, beancount and others do NOT — only because those
+ * grammars declare the terminator token hidden rather than visible. Whether a
+ * user saw a phantom parse_partial came down to a grammar-authoring accident.
+ *
+ * The cost was not cosmetic: a phantom flag writes a "<project>::missed" shadow
+ * row, and until #1609 that row removed the whole project from cross-repo
+ * linking, as source AND as target. */
+TEST(dockerfile_missing_final_newline_not_flagged_issue1610) {
+    const char *src = "FROM mcr.microsoft.com/dotnet/aspnet:8.0\n"
+                      "ENTRYPOINT [\"dotnet\", \"App.dll\"]"; /* deliberately no \n */
+    CBMFileResult *r = do_extract(src, CBM_LANG_DOCKERFILE, "Dockerfile");
+    ASSERT_NOT_NULL(r);
+    bool flagged = r->parse_incomplete;
+    cbm_free_result(r);
+    if (flagged) {
+        FAIL("a Dockerfile lacking only its final newline must not be parse_partial");
+    }
+    PASS();
+}
+
+/* The same bytes WITH the newline must stay clean — pins the equivalence the
+ * reporter's matrix proved, so a future change cannot "fix" one by breaking the
+ * other. */
+TEST(dockerfile_with_final_newline_still_clean_issue1610) {
+    const char *src = "FROM mcr.microsoft.com/dotnet/aspnet:8.0\n"
+                      "ENTRYPOINT [\"dotnet\", \"App.dll\"]\n";
+    CBMFileResult *r = do_extract(src, CBM_LANG_DOCKERFILE, "Dockerfile");
+    ASSERT_NOT_NULL(r);
+    bool flagged = r->parse_incomplete;
+    cbm_free_result(r);
+    if (flagged) {
+        FAIL("a terminated Dockerfile must not be parse_partial");
+    }
+    PASS();
+}
+
+/* #1746: on Windows, a Dockerfile whose final instruction is followed by one
+ * ASCII space and then EOF was reported as parse_partial. */
+TEST(dockerfile_trailing_space_at_eof_not_flagged_issue1746) {
+    const char *src = "FROM scratch\nENTRYPOINT [\"a\"] ";
+    CBMFileResult *r = do_extract(src, CBM_LANG_DOCKERFILE, "Dockerfile");
+    ASSERT_NOT_NULL(r);
+    bool flagged = r->parse_incomplete;
+    if (flagged) {
+        fprintf(stderr, "  exact issue #1746 fixture flagged: ranges=%s\n",
+                r->error_ranges ? r->error_ranges : "(none)");
+    }
+    cbm_free_result(r);
+    if (flagged) {
+        FAIL("trailing horizontal whitespace at Dockerfile EOF must not be parse_partial");
+    }
+    PASS();
+}
+
+/* The same bytes WITH the LF must stay clean. This is a separate test so the
+ * control executes even while the exact affected fixture is RED. */
+TEST(dockerfile_trailing_space_with_final_newline_clean_issue1746) {
+    const char *src = "FROM scratch\nENTRYPOINT [\"a\"] \n";
+    CBMFileResult *r = do_extract(src, CBM_LANG_DOCKERFILE, "Dockerfile");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->parse_incomplete);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* Removing the trailing space while retaining EOF must also stay clean. */
+TEST(dockerfile_without_trailing_space_at_eof_clean_issue1746) {
+    const char *src = "FROM scratch\nENTRYPOINT [\"a\"]";
+    CBMFileResult *r = do_extract(src, CBM_LANG_DOCKERFILE, "Dockerfile");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->parse_incomplete);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* The reporter also observed the same failure when the first line uses CRLF. */
+TEST(dockerfile_crlf_trailing_space_at_eof_not_flagged_issue1746) {
+    const char *src = "FROM scratch\r\nENTRYPOINT [\"a\"] ";
+    CBMFileResult *r = do_extract(src, CBM_LANG_DOCKERFILE, "Dockerfile");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->parse_incomplete);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* Language-general, not a Dockerfile patch: these four were each proven to flag
+ * on a stripped trailing newline. */
+TEST(missing_final_newline_not_flagged_across_grammars_issue1610) {
+    struct {
+        const char *src;
+        CBMLanguage lang;
+        const char *path;
+    } cases[] = {
+        {"proc foo {} {}\nproc bar {} {}", CBM_LANG_TCL, "a.tcl"},
+        {"function foo\n  echo hi\nend", CBM_LANG_FISH, "a.fish"},
+        {"module example.com/m\n\ngo 1.21", CBM_LANG_GOMOD, "go.mod"},
+        {"general {\n  gaps_in = 5\n}", CBM_LANG_HYPRLANG, "hypr.conf"},
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        CBMFileResult *r = do_extract(cases[i].src, cases[i].lang, cases[i].path);
+        ASSERT_NOT_NULL(r);
+        bool flagged = r->parse_incomplete;
+        if (flagged) {
+            fprintf(stderr, "  %s flagged: ranges=%s\n", cases[i].path,
+                    r->error_ranges ? r->error_ranges : "(none)");
+        }
+        cbm_free_result(r);
+        if (flagged) {
+            FAIL("an unterminated final line must not be parse_partial in any grammar");
+        }
+    }
+    PASS();
+}
+
+/* GUARD (the reason this suppression is safe rather than convenient): the rule
+ * is ZERO-WIDTH AT EOF only. A real failure earlier in the file must still be
+ * reported, and its range must name the broken line — not be swallowed along
+ * with the terminator. */
+TEST(real_error_before_eof_still_flagged_without_final_newline_issue1610) {
+    /* Built from C_IFDEF_SPLIT, the fixture this suite already proves is
+     * flagged, with its trailing newline removed. Two conditions now hold at
+     * once: a genuine width-bearing ERROR mid-file, AND an unterminated last
+     * line. Suppressing the EOF terminator must not swallow the real one. */
+    size_t n = strlen(C_IFDEF_SPLIT);
+    char *unterminated = (char *)malloc(n + 1);
+    ASSERT_NOT_NULL(unterminated);
+    memcpy(unterminated, C_IFDEF_SPLIT, n);
+    unterminated[n - 1] = '\0'; /* drop the final newline */
+
+    CBMFileResult *r = do_extract(unterminated, CBM_LANG_C, "split.c");
+    free(unterminated);
+    ASSERT_NOT_NULL(r);
+    bool flagged = r->parse_incomplete;
+    bool has_ranges = r->error_ranges != NULL;
+    cbm_free_result(r);
+    if (!flagged) {
+        FAIL("a real mid-file parse failure must still be reported when the file also lacks its "
+             "final newline");
+    }
+    if (!has_ranges) {
+        FAIL("a reported failure must still name its line range");
+    }
+    PASS();
+}
+
+/* GUARD: a MISSING/ERROR node WITH WIDTH at EOF is a genuine loss and must
+ * still be flagged. The construct here is broken whether or not the line is
+ * terminated, so neither the zero-width rule nor the virtual final newline
+ * (#2078) may excuse it.
+ *
+ * This guard used a Makefile whose final recipe line lacks its newline, which
+ * really did drop the recipe from the tree. Since #2078 the parser sees that
+ * line terminated and the recipe parses, so there is no loss left to report --
+ * see makefile_unterminated_recipe_is_parsed_issue2078. */
+TEST(width_bearing_error_at_eof_still_flagged_issue1610) {
+    const char *src = "def ok():\n    return 1\nx = (1,"; /* unclosed at EOF */
+    CBMFileResult *r = do_extract(src, CBM_LANG_PYTHON, "eof.py");
+    ASSERT_NOT_NULL(r);
+    bool flagged = r->parse_incomplete;
+    cbm_free_result(r);
+    if (!flagged) {
+        FAIL("a width-bearing parse failure at EOF must still be reported");
+    }
+    PASS();
+}
+
+/* #2078: the recipe the old #1610 guard lost is now parsed -- the file is not
+ * flagged, with or without a trailing blank. */
+TEST(makefile_unterminated_recipe_is_parsed_issue2078) {
+    const char *cases[] = {"all:\n\techo hi", "all:\n\techo hi "};
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        CBMFileResult *r = do_extract(cases[i], CBM_LANG_MAKEFILE, "Makefile");
+        ASSERT_NOT_NULL(r);
+        bool flagged = r->parse_incomplete;
+        cbm_free_result(r);
+        if (flagged) {
+            FAIL("an unterminated final recipe line must parse like a terminated one");
+        }
+    }
+    PASS();
+}
+
+/* #1838: tree-sitter-perl v1.0.0 rejects a valid line-oriented format and
+ * reports the file as partial.  The supported upstream v1.2.1 grammar accepts
+ * the format and preserves declaration extraction beyond its dot terminator. */
+TEST(perl_format_followed_by_named_sub_is_complete_issue1838) {
+    CBMFileResult *r = do_extract(PERL_FORMAT_WITH_FOLLOWING_SUB, CBM_LANG_PERL, "report.pl");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    bool partial = r->parse_incomplete;
+    int error_regions = r->error_region_count;
+    bool has_error_ranges = r->error_ranges != NULL;
+    bool has_following_sub = has_def(r, "after_format");
+    if (partial || error_regions != 0 || has_error_ranges || !has_following_sub) {
+        fprintf(stderr, "  Perl format result: partial=%d regions=%d ranges=%s following_sub=%d\n",
+                partial, error_regions, r->error_ranges ? r->error_ranges : "(none)",
+                has_following_sub);
+        cbm_free_result(r);
+        FAIL("a valid Perl format and its following named sub must parse completely");
+    }
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(perl_malformed_source_remains_partial_issue1838) {
+    CBMFileResult *r = do_extract(PERL_MALFORMED, CBM_LANG_PERL, "broken.pl");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT_TRUE(r->parse_incomplete);
+    ASSERT_GTE(r->error_region_count, 1);
+    ASSERT_NOT_NULL(r->error_ranges);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* ── #1746: trailing blanks before EOF are still just an absent newline ───────
+ *
+ * #1610 suppressed the zero-width MISSING terminator but tested for it with
+ * `end == source_len`. Trailing blanks are extras owned by no node, so
+ * `ENTRYPOINT ["a"] ` + EOF parks it at [29,29) while source_len is 30.
+ *
+ * The reporter's byte-exact controls pin the trigger to the PAIR: `] ` + EOF
+ * flags, `] ` + newline is clean, `]` + EOF is clean. */
+TEST(dockerfile_trailing_blank_at_eof_not_flagged_issue1746) {
+    const char *cases[] = {
+        "FROM scratch\nENTRYPOINT [\"a\"] ",     /* space + EOF — the report */
+        "FROM scratch\nENTRYPOINT [\"a\"]\t",    /* tab + EOF */
+        "FROM scratch\nENTRYPOINT [\"a\"]\v",    /* vertical tab + EOF */
+        "FROM scratch\nENTRYPOINT [\"a\"]\f",    /* form feed + EOF */
+        "FROM scratch\nENTRYPOINT [\"a\"]  \t ", /* run of blanks + EOF */
+        "FROM scratch\nENTRYPOINT [\"a\"] \r",   /* CRLF file truncated to CR */
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        CBMFileResult *r = do_extract(cases[i], CBM_LANG_DOCKERFILE, "Dockerfile");
+        ASSERT_NOT_NULL(r);
+        bool flagged = r->parse_incomplete;
+        if (flagged) {
+            fprintf(stderr, "  case %zu flagged: ranges=%s\n", i,
+                    r->error_ranges ? r->error_ranges : "(none)");
+        }
+        cbm_free_result(r);
+        if (flagged) {
+            FAIL("trailing blanks must not turn an absent final newline into parse_partial");
+        }
+    }
+    PASS();
+}
+
+/* GUARD: widening the tail must not swallow a genuine mid-file failure just
+ * because the file happens to end in blanks. */
+TEST(real_error_before_eof_still_flagged_with_trailing_blank_issue1746) {
+    size_t n = strlen(C_IFDEF_SPLIT);
+    char *buf = (char *)malloc(n + 1);
+    ASSERT_NOT_NULL(buf);
+    memcpy(buf, C_IFDEF_SPLIT, n + 1);
+    buf[n - 1] = ' '; /* final newline becomes a blank */
+
+    CBMFileResult *r = do_extract(buf, CBM_LANG_C, "split.c");
+    free(buf);
+    ASSERT_NOT_NULL(r);
+    bool flagged = r->parse_incomplete;
+    bool has_ranges = r->error_ranges != NULL;
+    cbm_free_result(r);
+    if (!flagged) {
+        FAIL("a real mid-file parse failure must still be reported when the file ends in blanks");
+    }
+    if (!has_ranges) {
+        FAIL("a reported failure must still name its line range");
+    }
+    PASS();
+}
+
+/* GUARD: a WIDTH-BEARING loss at EOF stays honest with a blank tail too, and
+ * only zero-width nodes are excused. (Formerly the unterminated Makefile
+ * recipe, which #2078 now parses -- see the #1610 guard above.) */
+TEST(width_bearing_error_at_eof_still_flagged_with_trailing_blank_issue1746) {
+    const char *src = "def ok():\n    return 1\nx = (1, ";
+    CBMFileResult *r = do_extract(src, CBM_LANG_PYTHON, "eof.py");
+    ASSERT_NOT_NULL(r);
+    bool flagged = r->parse_incomplete;
+    cbm_free_result(r);
+    if (!flagged) {
+        FAIL("a width-bearing parse failure at EOF must still be reported when the file ends in "
+             "blanks");
+    }
+    PASS();
+}
+
+/* ── Phase 2: refine raw ranges with the preprocessed tree ──────────────────
+ *
+ * The raw parse sees both #ifdef branches at once, so its ERROR node covers
+ * the whole guarded construct (lines 5-11). The PREPROCESSED parse sees only
+ * the branch the preprocessor picked, and parses it clean. Every original
+ * line that shows up clean in that second parse is therefore accounted for,
+ * and reporting it as unparsed is false.
+ *
+ * What is left is the branch the preprocessor threw away — line 6 here. That
+ * one really is missing from the graph, so it stays flagged. Directive lines
+ * (#ifdef / #else / #endif) hold no construct, so a range never starts or
+ * ends on one.
+ */
+
+/* Return 1 if the "a-b,c-d" range string covers 1-based `line`. */
+static int ranges_cover_line(const char *ranges, unsigned int line) {
+    const char *p = ranges;
+    while (p && *p) {
+        unsigned int s = 0, e = 0;
+        if (sscanf(p, "%u-%u", &s, &e) == 2 && line >= s && line <= e) {
+            return 1;
+        }
+        p = strchr(p, ',');
+        if (p) {
+            p++;
+        }
+    }
+    return 0;
+}
+
+/* Total lines covered by every range in the string. */
+static unsigned int ranges_total_span(const char *ranges) {
+    const char *p = ranges;
+    unsigned int total = 0;
+    while (p && *p) {
+        unsigned int s = 0, e = 0;
+        if (sscanf(p, "%u-%u", &s, &e) == 2 && e >= s) {
+            total += e - s + 1;
+        }
+        p = strchr(p, ',');
+        if (p) {
+            p++;
+        }
+    }
+    return total;
+}
+
+TEST(c_ifdef_split_range_narrows_to_dropped_branch) {
+    /* RED before the refinement: the raw range covers the whole 5-11
+     * construct. GREEN after: only line 6, the branch the preprocessor did
+     * not pick, is still reported. */
+    CBMFileResult *r = do_extract(C_IFDEF_SPLIT, CBM_LANG_C, "split.c");
+    ASSERT_NOT_NULL(r);
+    ASSERT_TRUE(r->parse_incomplete);
+    ASSERT_NOT_NULL(r->error_ranges);
+    ASSERT_TRUE(ranges_cover_line(r->error_ranges, 6u)); /* dropped branch */
+    ASSERT_LTE(ranges_total_span(r->error_ranges), 3u);  /* was 7 lines */
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(c_ifdef_split_range_excludes_lines_the_preprocessor_explained) {
+    /* Lines 10 and 11 are the shared body and closing brace. They parse
+     * clean once a branch is chosen, so pointing an agent at them is wrong. */
+    CBMFileResult *r = do_extract(C_IFDEF_SPLIT, CBM_LANG_C, "split.c");
+    ASSERT_NOT_NULL(r);
+    ASSERT_NOT_NULL(r->error_ranges);
+    ASSERT_FALSE(ranges_cover_line(r->error_ranges, 10u));
+    ASSERT_FALSE(ranges_cover_line(r->error_ranges, 11u));
+    ASSERT_FALSE(ranges_cover_line(r->error_ranges, 3u)); /* ok_before */
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(c_ifdef_split_range_never_starts_on_a_directive) {
+    /* Lines 5, 7 and 9 are bare #ifdef / #else / #endif. No construct can
+     * live on them, so they must not appear in a range. */
+    CBMFileResult *r = do_extract(C_IFDEF_SPLIT, CBM_LANG_C, "split.c");
+    ASSERT_NOT_NULL(r);
+    ASSERT_NOT_NULL(r->error_ranges);
+    ASSERT_FALSE(ranges_cover_line(r->error_ranges, 5u));
+    ASSERT_FALSE(ranges_cover_line(r->error_ranges, 7u));
+    ASSERT_FALSE(ranges_cover_line(r->error_ranges, 9u));
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(c_refinement_does_not_suppress_real_garbage) {
+    /* Anti-over-suppression. The preprocessor cannot explain line 13, so it
+     * stays flagged even though the guarded region above it narrowed. */
+    CBMFileResult *r = do_extract(C_IFDEF_SPLIT_PLUS_GARBAGE, CBM_LANG_C, "both.c");
+    ASSERT_NOT_NULL(r);
+    ASSERT_TRUE(r->parse_incomplete);
+    ASSERT_NOT_NULL(r->error_ranges);
+    ASSERT_TRUE(ranges_cover_line(r->error_ranges, 13u)); /* the garbage */
+    ASSERT_FALSE(ranges_cover_line(r->error_ranges, 3u)); /* ok_before */
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(c_clean_file_stays_unflagged_after_refinement) {
+    /* The refinement must never invent a range on a file that parses. */
+    CBMFileResult *r = do_extract(C_CLEAN, CBM_LANG_C, "clean.c");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->parse_incomplete);
+    ASSERT_NULL(r->error_ranges);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* The whole-file class, and the reason the parse_unusable kind exists.
+ *
+ * The Phase 2 refinement that narrows a whole-file range using the
+ * preprocessed parse only runs for C, C++ and CUDA. A Python file whose root
+ * node is ERROR gets no such help, so it still reports one range covering
+ * every line — and one range over 80% of a file is not advice worth printing. */
+TEST(python_whole_file_error_is_unusable) {
+    const char *src = ")))\n((( \n]]] [[[\ndef x(:\n";
+    CBMFileResult *r = do_extract(src, CBM_LANG_PYTHON, "unparseable.py");
+    ASSERT_NOT_NULL(r);
+    ASSERT_TRUE(r->parse_incomplete);
+    ASSERT_TRUE(r->parse_unusable);
+    ASSERT_EQ(r->error_region_count, 1);
+    ASSERT_NOT_NULL(r->error_ranges);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* Inverse guard, and the one that keeps the kind meaningful: a file with a
+ * real but LOCAL parse failure must stay parse_partial. If this flipped, every
+ * flagged file would say "read the source" and the ranges would stop earning
+ * their keep. */
+TEST(local_error_stays_partial_not_unusable) {
+    const char *src = "def ok():\n    return 1\n%%% garbage (((\ndef ok2():\n    return 2\n"
+                      "def ok3():\n    return 3\ndef ok4():\n    return 4\n"
+                      "def ok5():\n    return 5\ndef ok6():\n    return 6\n";
+    CBMFileResult *r = do_extract(src, CBM_LANG_PYTHON, "local_error.py");
+    ASSERT_NOT_NULL(r);
+    ASSERT_TRUE(r->parse_incomplete);
+    ASSERT_FALSE(r->parse_unusable);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* A clean file is neither. */
+TEST(clean_file_is_neither_partial_nor_unusable) {
+    CBMFileResult *r = do_extract(C_CLEAN, CBM_LANG_C, "clean_kinds.c");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->parse_incomplete);
+    ASSERT_FALSE(r->parse_unusable);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* The C file that started this work must NOT land in the unusable class. Its
+ * whole-file range is exactly what Phase 2 broke up, so if this ever flips
+ * back to true the refinement has stopped working. */
+TEST(c_ifdef_split_is_partial_never_unusable) {
+    CBMFileResult *r = do_extract(C_IFDEF_SPLIT, CBM_LANG_C, "split_kind.c");
+    ASSERT_NOT_NULL(r);
+    ASSERT_TRUE(r->parse_incomplete);
+    ASSERT_FALSE(r->parse_unusable);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* Phase 0 finding 2, pinned so a tree-sitter bump cannot change it quietly.
+ *
+ * The C grammar handles `_Thread_local` unevenly, and these are the three
+ * forms measured on the grammar shipped today:
+ *
+ *   static _Thread_local int x = 0;   parses clean
+ *   static _Thread_local int *p;      parses clean
+ *   static _Thread_local char b[8];   fails — flagged as range 1-1
+ *
+ * The array line really is missing from the graph, so flagging it is the
+ * honest answer, not a false positive. This test exists to make a grammar
+ * bump visible: if a newer grammar fixes the array form, this goes red and
+ * says so, instead of leaving a wrong note in the plan. (The plan's Phase 0
+ * also listed the pointer form as failing. It does not fail today.) */
+TEST(c_thread_local_grammar_limit_is_pinned_issue963) {
+    /* The init form used to read as "parses clean", but that was a masking
+     * effect, not a clean parse: the grammar leaves an ERROR on line 1 and
+     * salvages a one-line Variable named `int` from it, which the old
+     * all-or-nothing recovery rule accepted as evidence the line was
+     * understood. Since 2026-09-16 a one-line salvage is not evidence, so the
+     * line is flagged — honest, because `x` is what the graph lacks. */
+    CBMFileResult *ok = do_extract("static _Thread_local int x = 0;\n"
+                                   "void f(void) { x = 1; }\n",
+                                   CBM_LANG_C, "tls_init.c");
+    ASSERT_NOT_NULL(ok);
+    ASSERT_TRUE(ok->parse_incomplete);
+    ASSERT_NOT_NULL(ok->error_ranges);
+    ASSERT_STR_EQ("1-1", ok->error_ranges);
+    ASSERT_TRUE(has_def(ok, "f"));
+    cbm_free_result(ok);
+
+    /* The pointer form: the same masking, the same honest answer now. */
+    CBMFileResult *ptr = do_extract("static _Thread_local int *p;\n"
+                                    "void f(void) { p = 0; }\n",
+                                    CBM_LANG_C, "tls_ptr.c");
+    ASSERT_NOT_NULL(ptr);
+    ASSERT_TRUE(ptr->parse_incomplete);
+    ASSERT_NOT_NULL(ptr->error_ranges);
+    ASSERT_STR_EQ("1-1", ptr->error_ranges);
+    ASSERT_TRUE(has_def(ptr, "f"));
+    cbm_free_result(ptr);
+
+    CBMFileResult *arr = do_extract("static _Thread_local char b[8];\n"
+                                    "void f(void) { b[0] = 0; }\n",
+                                    CBM_LANG_C, "tls_arr.c");
+    ASSERT_NOT_NULL(arr);
+    ASSERT_TRUE(arr->parse_incomplete);
+    ASSERT_NOT_NULL(arr->error_ranges);
+    /* The range names the one broken line, not the whole file. */
+    ASSERT_STR_EQ("1-1", arr->error_ranges);
+    /* The clean function below it still reaches the graph. */
+    ASSERT_TRUE(has_def(arr, "f"));
+    cbm_free_result(arr);
+    PASS();
+}
+
+/* Two error nodes can sit on ONE line. Line 113 of scripts/setup-windows.ps1
+ * does exactly that, and the report used to read "113-113,113-113" — the same
+ * line named twice. A line range says nothing new the second time, so repeated
+ * or overlapping regions must collapse into one. */
+static const char *PS_TWO_ERRORS_ONE_LINE = "Write-Host \"start\"\n"             /* 1 */
+                                            "wsl.exe -- bash -c $Command 2>&1\n" /* 2 */
+                                            "Write-Host \"end\"\n";              /* 3 */
+
+/* An error region that runs to the end of the file stops just after the last
+ * newline. Tree-sitter calls that position row N, column 0 — a row that holds
+ * no text. Reading it as a line number named a line past the end of the file:
+ * scripts/setup-windows.ps1 has 326 lines and the report said "245-327". */
+static const char *PS_ERROR_TO_EOF = "} else {\n"             /* 1 */
+                                     "    if ($a) {\n"        /* 2 */
+                                     "        Write-Host x\n" /* 3 */
+                                     "}\n";                   /* 4 */
+
+TEST(coverage_repeated_error_line_reports_one_range_issue963) {
+    CBMFileResult *r =
+        cbm_extract_file(PS_TWO_ERRORS_ONE_LINE, (int)strlen(PS_TWO_ERRORS_ONE_LINE),
+                         CBM_LANG_POWERSHELL, "covproj", "two_errors.ps1", 0, NULL, NULL);
+    ASSERT_NOT_NULL(r);
+    ASSERT_TRUE(r->parse_incomplete);
+    ASSERT_NOT_NULL(r->error_ranges);
+    /* Line 2 carries two separate error nodes. It must be named once. */
+    ASSERT_STR_EQ(r->error_ranges, "2-2");
+    ASSERT_EQ(r->error_region_count, 1);
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(coverage_range_never_ends_past_the_last_line_issue963) {
+    int len = (int)strlen(PS_ERROR_TO_EOF);
+    CBMFileResult *r = cbm_extract_file(PS_ERROR_TO_EOF, len, CBM_LANG_POWERSHELL, "covproj",
+                                        "error_to_eof.ps1", 0, NULL, NULL);
+    ASSERT_NOT_NULL(r);
+    ASSERT_TRUE(r->parse_incomplete);
+    ASSERT_NOT_NULL(r->error_ranges);
+    /* The file has four lines and ends with a newline. Line 5 does not exist. */
+    ASSERT_STR_EQ(r->error_ranges, "1-4");
+    ASSERT_NULL(strstr(r->error_ranges, "5"));
+    cbm_free_result(r);
+    PASS();
+}
+
+/* ── Residual ranges (2026-09-16) ─────────────────────────────────────────
+ * The recovery subtraction used to be all-or-nothing: a region stayed flagged
+ * whole unless every one of its lines was covered by a definition that started
+ * inside it. On torvalds/linux one ERROR node that swallowed the second half of
+ * kernel/sched/core.c (lines 5522-11284) survived on the strength of the
+ * comment and macro lines BETWEEN its 286 extracted functions, and
+ * check_index_coverage told a reader 68 % of the scheduler was unindexed. The
+ * ranges must now name only the lines no extracted definition covers. */
+
+/* A brace-unbalanced junk line between two clean functions: the recovery
+ * walker still extracts both functions, so the reported range must not cover
+ * either of them, only the junk. */
+static const char *C_JUNK_BETWEEN_FUNCTIONS = "int alpha(void) {\n" /* 1 */
+                                              "    return 1;\n"     /* 2 */
+                                              "}\n"                 /* 3 */
+                                              "\n"                  /* 4 */
+                                              "} ] junk ( {\n"      /* 5 */
+                                              "\n"                  /* 6 */
+                                              "int beta(void) {\n"  /* 7 */
+                                              "    return 2;\n"     /* 8 */
+                                              "}\n"                 /* 9 */
+                                              "\n"                  /* 10 */
+                                              "int gamma(void) {\n" /* 11 */
+                                              "    return 3;\n"     /* 12 */
+                                              "}\n";                /* 13 */
+
+static int range_covers_line(const char *ranges, unsigned int line) {
+    const char *p = ranges;
+    while (p && *p) {
+        unsigned int s = 0;
+        unsigned int e = 0;
+        if (sscanf(p, "%u-%u", &s, &e) == 2 && s <= line && line <= e) {
+            return 1;
+        }
+        p = strchr(p, ',');
+        if (p) {
+            p++;
+        }
+    }
+    return 0;
+}
+
+TEST(coverage_range_never_covers_an_extracted_definition) {
+    CBMFileResult *r = do_extract(C_JUNK_BETWEEN_FUNCTIONS, CBM_LANG_C, "junk.c");
+    ASSERT_NOT_NULL(r);
+    ASSERT_TRUE(has_def(r, "alpha"));
+    ASSERT_TRUE(has_def(r, "beta"));
+    ASSERT_TRUE(has_def(r, "gamma"));
+    ASSERT_TRUE(r->parse_incomplete);
+    ASSERT_NOT_NULL(r->error_ranges);
+    /* Every extracted definition's own lines are in the graph, so no reported
+     * range may cover its start line. */
+    for (int i = 0; i < r->defs.count; i++) {
+        const CBMDefinition *d = &r->defs.items[i];
+        if (!d->label || strcmp(d->label, "Module") == 0) {
+            continue;
+        }
+        ASSERT_FALSE(range_covers_line(r->error_ranges, d->start_line));
+    }
+    /* And the junk line itself is still reported. */
+    ASSERT_TRUE(range_covers_line(r->error_ranges, 5u));
+    cbm_free_result(r);
+    PASS();
+}
+
+/* The lines between recovered definitions are comments and blanks here: a gap
+ * with no code in it is not a miss, so nothing may be reported for it. The
+ * junk line stays reported. */
+static const char *C_JUNK_WITH_COMMENT_GAPS = "int alpha(void) {\n"                /* 1 */
+                                              "    return 1;\n"                    /* 2 */
+                                              "}\n"                                /* 3 */
+                                              "/* between alpha and the junk */\n" /* 4 */
+                                              "} ] junk ( {\n"                     /* 5 */
+                                              "// trailing note\n"                 /* 6 */
+                                              "int beta(void) {\n"                 /* 7 */
+                                              "    return 2;\n"                    /* 8 */
+                                              "}\n";                               /* 9 */
+
+TEST(coverage_gap_of_only_comments_is_not_a_miss) {
+    CBMFileResult *r = do_extract(C_JUNK_WITH_COMMENT_GAPS, CBM_LANG_C, "gaps.c");
+    ASSERT_NOT_NULL(r);
+    ASSERT_TRUE(has_def(r, "alpha"));
+    ASSERT_TRUE(has_def(r, "beta"));
+    ASSERT_TRUE(r->parse_incomplete);
+    ASSERT_NOT_NULL(r->error_ranges);
+    ASSERT_TRUE(range_covers_line(r->error_ranges, 5u));
+    ASSERT_FALSE(range_covers_line(r->error_ranges, 1u));
+    ASSERT_FALSE(range_covers_line(r->error_ranges, 7u));
+    ASSERT_FALSE(range_covers_line(r->error_ranges, 9u));
+    cbm_free_result(r);
+    PASS();
+}
+
+/* ── #1735: SQL data dumps ───────────────────────────────────────────────────
+ * A mysqldump file is a few CREATE TABLEs followed by megabytes of literal
+ * INSERT rows. Tree-sitter built a full tree for every row until the parse
+ * budget ran out, and the whole file — tables included — was skipped as
+ * "parse timeout". Literal-only rows after the first of each VALUES list are
+ * now kept out of the parse (sql_values.c). These tests pin that nothing the
+ * full parse extracted outside those rows is lost (and, for standard '' escapes
+ * the grammar reads correctly, that nothing changes at all), that a row which
+ * can reference something is still parsed, and that the parse no longer grows
+ * with the row count. */
+
+typedef struct {
+    char *s;
+    size_t len;
+    size_t cap;
+} cov_buf_t;
+
+static void cov_put(cov_buf_t *b, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    va_list ap2;
+    va_copy(ap2, ap);
+    int n = vsnprintf(NULL, 0, fmt, ap);
+    va_end(ap);
+    if (n < 0) {
+        va_end(ap2);
+        return;
+    }
+    if (b->len + (size_t)n + 1 > b->cap) {
+        size_t cap = b->cap ? b->cap : 4096;
+        while (b->len + (size_t)n + 1 > cap) {
+            cap *= 2;
+        }
+        char *grown = realloc(b->s, cap);
+        if (!grown) {
+            va_end(ap2);
+            return;
+        }
+        b->s = grown;
+        b->cap = cap;
+    }
+    vsnprintf(b->s + b->len, (size_t)n + 1, fmt, ap2);
+    va_end(ap2);
+    b->len += (size_t)n;
+}
+
+static const char *const DUMP_WORDS[] = {"Kabul", "Herat",     "Amsterdam",    "O'Brien",
+                                         "Haag",  "Rotterdam", "Zuid-Holland", "Utrecht"};
+enum { DUMP_WORD_COUNT = sizeof(DUMP_WORDS) / sizeof(DUMP_WORDS[0]) };
+static const char *const DUMP_ODD[] = {"NULL", "-12.5", "0x1F",  "_binary 'ab'", "DEFAULT",
+                                       "TRUE", "1e-3",  "X'0A'", "''",           "'a''b'"};
+enum { DUMP_ODD_COUNT = sizeof(DUMP_ODD) / sizeof(DUMP_ODD[0]) };
+
+/* Deterministic mysqldump-shaped SQL: two tables and a view, then `stmts`
+ * extended INSERTs of `rows` tuples. `mysql_esc` writes a quote inside a string
+ * as \' (MySQL) instead of '' (standard). `mixed` puts one tuple holding a
+ * subquery and one holding a function call in the middle of every INSERT. The
+ * first two INSERTs separate their tuples with a newline and with a comment, the
+ * way pretty-printed dumps do. */
+static char *sql_dump(int stmts, int rows, bool mysql_esc, bool mixed) {
+    cov_buf_t b = {NULL, 0, 0};
+    cov_put(&b, "-- MySQL dump 10.13\n"
+                "/*!40101 SET NAMES utf8mb4 */;\n"
+                "CREATE TABLE `city` (\n"
+                "  `ID` int NOT NULL,\n"
+                "  `Name` char(35) NOT NULL DEFAULT '',\n"
+                "  `CountryCode` char(3),\n"
+                "  `Note` text,\n"
+                "  `Population` int\n"
+                ");\n"
+                "CREATE TABLE country (Code char(3), Name char(52));\n"
+                "CREATE VIEW big_cities AS SELECT Name FROM city WHERE Population > 1000000;\n"
+                "LOCK TABLES `city` WRITE;\n");
+    uint32_t seed = 1735;
+    int id = 1;
+    for (int s = 0; s < stmts; s++) {
+        cov_put(&b, "INSERT INTO `city` VALUES ");
+        const char *sep = s == 0 ? ",\n" : (s == 1 ? ", /* split */ " : ",");
+        for (int r = 0; r < rows; r++) {
+            if (r > 0) {
+                cov_put(&b, "%s", sep);
+            }
+            if (mixed && r == rows / 2) {
+                cov_put(&b, "((SELECT MAX(Code) FROM country),'x','AAA',NULL,1)");
+                continue;
+            }
+            if (mixed && r == rows / 2 + 1) {
+                cov_put(&b, "(%d,UPPER('y'),'BBB',NULL,2)", id++);
+                continue;
+            }
+            seed = seed * 1103515245u + 12345u;
+            const char *w = DUMP_WORDS[(seed >> 8) % DUMP_WORD_COUNT];
+            cov_put(&b, "(%d,'", id++);
+            for (const char *p = w; *p; p++) {
+                cov_put(&b, *p == '\'' ? (mysql_esc ? "\\'" : "''") : "%c", *p);
+            }
+            cov_put(&b, "','%c%c%c',%s,%u)", 'A' + (int)(seed % 26), 'A' + (int)((seed >> 5) % 26),
+                    'A' + (int)((seed >> 10) % 26), DUMP_ODD[(seed >> 12) % DUMP_ODD_COUNT],
+                    (seed >> 3) % 9000000u);
+        }
+        cov_put(&b, ";\n");
+    }
+    cov_put(&b, "UNLOCK TABLES;\n");
+    return b.s;
+}
+
+static void fp_s(cov_buf_t *b, const char *s) {
+    cov_put(b, "%s|", s ? s : "~");
+}
+
+/* Everything the graph is built from except calls and usages, in order (those
+ * two are compared site by site, sites_agree). */
+static char *result_fingerprint(const CBMFileResult *r) {
+    cov_buf_t b = {NULL, 0, 0};
+    for (int i = 0; i < r->defs.count; i++) {
+        const CBMDefinition *d = &r->defs.items[i];
+        fp_s(&b, d->label);
+        fp_s(&b, d->name);
+        fp_s(&b, d->qualified_name);
+        fp_s(&b, d->signature);
+        fp_s(&b, d->return_type);
+        fp_s(&b, d->structural_profile);
+        fp_s(&b, d->body_tokens);
+        cov_put(&b, "%u-%u c%d l%d\n", d->start_line, d->end_line, d->complexity, d->lines);
+    }
+    for (int i = 0; i < r->imports.count; i++) {
+        fp_s(&b, r->imports.items[i].local_name);
+        fp_s(&b, r->imports.items[i].module_path);
+        cov_put(&b, "imp\n");
+    }
+    for (int i = 0; i < r->rw.count; i++) {
+        fp_s(&b, r->rw.items[i].var_name);
+        cov_put(&b, "rw%d\n", (int)r->rw.items[i].is_write);
+    }
+    for (int i = 0; i < r->type_refs.count; i++) {
+        fp_s(&b, r->type_refs.items[i].type_name);
+        cov_put(&b, "tref\n");
+    }
+    for (int i = 0; i < r->env_accesses.count; i++) {
+        fp_s(&b, r->env_accesses.items[i].env_key);
+        cov_put(&b, "env\n");
+    }
+    for (int i = 0; i < r->throws.count; i++) {
+        fp_s(&b, r->throws.items[i].exception_name);
+        cov_put(&b, "throw\n");
+    }
+    for (int i = 0; i < r->string_refs.count; i++) {
+        fp_s(&b, r->string_refs.items[i].value);
+        cov_put(&b, "sref%d\n", (int)r->string_refs.items[i].kind);
+    }
+    cov_put(&b, "ta%d it%d rc%d ib%d ch%d\n", r->type_assigns.count, r->impl_traits.count,
+            r->resolved_calls.count, r->infra_bindings.count, r->channels.count);
+    return b.s;
+}
+
+static int has_usage_named(const CBMFileResult *r, const char *name) {
+    for (int i = 0; i < r->usages.count; i++) {
+        if (r->usages.items[i].ref_name && strstr(r->usages.items[i].ref_name, name)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int has_call_named(const CBMFileResult *r, const char *name) {
+    for (int i = 0; i < r->calls.count; i++) {
+        if (r->calls.items[i].callee_name && strstr(r->calls.items[i].callee_name, name)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+typedef struct {
+    const char *name;
+    uint32_t start;
+    uint32_t end;
+} cov_site_t;
+
+static int collect_sites(const CBMFileResult *r, bool calls, cov_site_t **out) {
+    int n = calls ? r->calls.count : r->usages.count;
+    *out = calloc((size_t)(n > 0 ? n : 1), sizeof(cov_site_t));
+    for (int i = 0; i < n && *out; i++) {
+        (*out)[i] =
+            calls ? (cov_site_t){r->calls.items[i].callee_name, r->calls.items[i].site_start_byte,
+                                 r->calls.items[i].site_end_byte}
+                  : (cov_site_t){r->usages.items[i].ref_name, r->usages.items[i].site_start_byte,
+                                 r->usages.items[i].site_end_byte};
+    }
+    return *out ? n : 0;
+}
+
+static bool site_in(cov_site_t s, const cov_site_t *arr, int n) {
+    for (int i = 0; i < n; i++) {
+        if (arr[i].start == s.start && arr[i].end == s.end && s.name && arr[i].name &&
+            strcmp(arr[i].name, s.name) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Calls (calls=true) or usages, cut parse against full parse:
+ *  - nothing the full parse found outside the dropped rows may be missing;
+ *  - with `exact`, the cut parse may find nothing the full parse did not.
+ * The full parse does find things INSIDE dropped rows: the SQL grammar reads
+ * DEFAULT and a _binary introducer as identifiers, and a MySQL \' escape it
+ * does not know turns the rest of a string into one. None of those names
+ * anything. Without `exact` (MySQL escapes) the cut parse may find more: the
+ * full parse's error recovery around a misread escape swallows neighbouring
+ * rows, a subquery row among them, and the cut parse no longer misreads them. */
+static bool sites_agree(const char *src, const CBMFileResult *cut, const CBMFileResult *full,
+                        bool calls, bool exact) {
+    cov_site_t *cs = NULL;
+    cov_site_t *fs = NULL;
+    int cn = collect_sites(cut, calls, &cs);
+    int fn = collect_sites(full, calls, &fs);
+    CBMSqlKeptRanges k = {NULL, 0};
+    (void)cbm_sql_values_kept_ranges(src, (uint32_t)strlen(src), &k);
+    bool ok = cs && fs;
+    for (int i = 0; ok && exact && i < cn; i++) {
+        if (!site_in(cs[i], fs, fn)) {
+            fprintf(stderr, "  %s only in the cut parse\n", cs[i].name);
+            ok = false;
+        }
+    }
+    for (int i = 0; ok && i < fn; i++) {
+        if (site_in(fs[i], cs, cn)) {
+            continue;
+        }
+        for (uint32_t j = 0; j < k.count; j++) {
+            if (fs[i].start < k.items[j].end_byte && fs[i].end > k.items[j].start_byte) {
+                fprintf(stderr, "  %s lost outside the dropped rows\n", fs[i].name);
+                ok = false;
+            }
+        }
+    }
+    cbm_sql_kept_ranges_free(&k);
+    free(cs);
+    free(fs);
+    return ok;
+}
+
+static int count_calls_named(const CBMFileResult *r, const char *name) {
+    int n = 0;
+    for (int i = 0; i < r->calls.count; i++) {
+        if (r->calls.items[i].callee_name && strcmp(r->calls.items[i].callee_name, name) == 0) {
+            n++;
+        }
+    }
+    return n;
+}
+
+/* The same source parsed with the row exclusion and without it (test seam). */
+static CBMFileResult *extract_sql_full(const char *src, const char *path) {
+    cbm_setenv("CBM_TEST_SQL_FULL_PARSE_ON", path, 1);
+    CBMFileResult *r = do_extract(src, CBM_LANG_SQL, path);
+    cbm_unsetenv("CBM_TEST_SQL_FULL_PARSE_ON");
+    return r;
+}
+
+TEST(sql_dump_literal_rows_leave_the_graph_unchanged_issue1735) {
+    for (int esc = 0; esc < 2; esc++) {
+        char *src = sql_dump(4, 60, esc == 1, true);
+        ASSERT_NOT_NULL(src);
+        CBMFileResult *cut = do_extract(src, CBM_LANG_SQL, "dump.sql");
+        CBMFileResult *full = extract_sql_full(src, "dump.sql");
+        ASSERT_NOT_NULL(cut);
+        ASSERT_NOT_NULL(full);
+        ASSERT_FALSE(cut->has_error);
+        ASSERT_TRUE(has_def(cut, "big_cities"));
+        char *fp_cut = result_fingerprint(cut);
+        char *fp_full = result_fingerprint(full);
+        ASSERT_NOT_NULL(fp_cut);
+        ASSERT_NOT_NULL(fp_full);
+        ASSERT_STR_EQ(fp_cut, fp_full);
+        ASSERT_TRUE(sites_agree(src, cut, full, true, esc == 0));
+        ASSERT_TRUE(sites_agree(src, cut, full, false, esc == 0));
+        /* Every INSERT's subquery row is parsed. */
+        ASSERT_EQ(count_calls_named(cut, "MAX"), 4);
+        /* ...and the rows really were left out: under a quarter of the file
+         * is parsed. */
+        CBMSqlKeptRanges k = {NULL, 0};
+        ASSERT_TRUE(cbm_sql_values_kept_ranges(src, (uint32_t)strlen(src), &k));
+        size_t kept = 0;
+        for (uint32_t j = 0; j < k.count; j++) {
+            kept += k.items[j].end_byte - k.items[j].start_byte;
+        }
+        cbm_sql_kept_ranges_free(&k);
+        ASSERT_LT(kept * 4, strlen(src));
+        free(fp_cut);
+        free(fp_full);
+        cbm_free_result(cut);
+        cbm_free_result(full);
+        free(src);
+    }
+    PASS();
+}
+
+TEST(sql_dump_tuple_with_subquery_or_call_is_still_parsed_issue1735) {
+    char *src = sql_dump(1, 20, true, true);
+    ASSERT_NOT_NULL(src);
+    CBMFileResult *r = do_extract(src, CBM_LANG_SQL, "dump.sql");
+    ASSERT_NOT_NULL(r);
+    ASSERT_TRUE(has_usage_named(r, "country")); /* from the subquery row */
+    ASSERT_TRUE(has_call_named(r, "UPPER"));    /* from the function-call row */
+    cbm_free_result(r);
+    free(src);
+    PASS();
+}
+
+TEST(sql_dump_parse_does_not_grow_with_the_row_count_issue1735) {
+    /* A count, not a clock: with literal rows kept out, doubling them must not
+     * add a single tree node. */
+    char *small = sql_dump(1, 500, true, false);
+    char *big = sql_dump(1, 1000, true, false);
+    ASSERT_NOT_NULL(small);
+    ASSERT_NOT_NULL(big);
+    CBMFileResult *rs = do_extract(small, CBM_LANG_SQL, "small.sql");
+    CBMFileResult *rb = do_extract(big, CBM_LANG_SQL, "big.sql");
+    ASSERT_NOT_NULL(rs);
+    ASSERT_NOT_NULL(rb);
+    ASSERT_EQ(rs->tree_nodes, rb->tree_nodes);
+    ASSERT_EQ(rs->defs.count, rb->defs.count);
+    cbm_free_result(rs);
+    cbm_free_result(rb);
+    free(small);
+    free(big);
+    PASS();
+}
+
+TEST(sql_dump_of_many_megabytes_is_indexed_not_timed_out_issue1735) {
+    /* ~26 MB with MySQL escapes. The production parse budget is CPU time, so
+     * extracting under it made the verdict a function of runner speed (an
+     * ASan arm leg tripped it). The property behind "indexed, not timed out"
+     * is a count: the parse work is set by the statements, not by the rows.
+     * So: extract unbudgeted, assert the outcome, and bound the tree by the
+     * same 330 statements carrying only a handful of rows each (the full
+     * parse built a tree node for every row token). */
+    char *src = sql_dump(330, 2000, true, true);
+    char *few = sql_dump(330, 4, true, true);
+    ASSERT_NOT_NULL(src);
+    ASSERT_NOT_NULL(few);
+    size_t len = strlen(src);
+    ASSERT_GT(len, (size_t)24 * 1024 * 1024);
+    CBMFileResult *r =
+        cbm_extract_file(src, (int)len, CBM_LANG_SQL, "covproj", "world.sql", 0, NULL, NULL);
+    CBMFileResult *rf =
+        cbm_extract_file(few, (int)strlen(few), CBM_LANG_SQL, "covproj", "few.sql", 0, NULL, NULL);
+    free(src);
+    free(few);
+    ASSERT_NOT_NULL(r);
+    ASSERT_NOT_NULL(rf);
+    bool indexed = !r->has_error && has_def(r, "big_cities") && has_usage_named(r, "country");
+    uint32_t nodes = r->tree_nodes;
+    uint32_t few_nodes = rf->tree_nodes;
+    cbm_free_result(r);
+    cbm_free_result(rf);
+    ASSERT_TRUE(indexed);
+    ASSERT_GT(few_nodes, 0);
+    ASSERT_LTE(nodes, 2 * few_nodes);
+    PASS();
+}
+
+/* The text the parser sees: every kept range, concatenated. */
+static char *kept_text(const char *src, const CBMSqlKeptRanges *k) {
+    cov_buf_t b = {NULL, 0, 0};
+    cov_put(&b, "%s", "");
+    for (uint32_t i = 0; i < k->count; i++) {
+        cov_put(&b, "%.*s", (int)(k->items[i].end_byte - k->items[i].start_byte),
+                src + k->items[i].start_byte);
+    }
+    return b.s;
+}
+
+TEST(sql_values_scanner_excludes_only_literal_rows_issue1735) {
+    /* {source, what the parser sees} — NULL means nothing is excluded. */
+    static const char *const cases[][2] = {
+        {"INSERT INTO t VALUES (1,'a'),(2,'b\\'c'),(3,NULL);", "INSERT INTO t VALUES (1,'a');"},
+        {"INSERT INTO t VALUES (1),(f(2)),(3);", "INSERT INTO t VALUES (1),(f(2));"},
+        {"insert into t values (1),(-2.5e3),(0x1F),(_binary 'x'),(DEFAULT),(true),(X'0A'),"
+         "('it''s'),(.5),();",
+         "insert into t values (1);"},
+        {"REPLACE INTO t VALUES (1), /* c */ (2), (3);", "REPLACE INTO t VALUES (1);"},
+        {"INSERT INTO t VALUES (1),(2) -- c\n,(3);", "INSERT INTO t VALUES (1) -- c\n;"},
+        {"INSERT INTO t VALUES (1),((SELECT id FROM u)),(x),(\"q\"),(`b`),(a.b);", NULL},
+        {"INSERT INTO t VALUES (1),('a\nb'),(2);", "INSERT INTO t VALUES (1),('a\nb');"},
+        {"INSERT INTO t VALUES (1),(2) ON DUPLICATE KEY UPDATE a=VALUES(a);",
+         "INSERT INTO t VALUES (1) ON DUPLICATE KEY UPDATE a=VALUES(a);"},
+        {"INSERT INTO t (a, b) VALUES (1, 2), (3, 4);", "INSERT INTO t (a, b) VALUES (1, 2);"},
+        {"SELECT 'INSERT INTO t VALUES (1),(2)';", NULL},
+        {"-- INSERT INTO t VALUES (1),(2)\nSELECT 1;", NULL},
+        {"/* INSERT INTO t VALUES (1),(2) */ SELECT 1;", NULL},
+        {"SELECT * FROM (VALUES (1),(2)) AS v(x);", NULL},
+        {"CREATE FUNCTION f() AS $$ SELECT 1; INSERT INTO t VALUES (1),(2); $$;", NULL},
+        {"INSERT INTO t VALUES (1),(2", NULL},
+        {"INSERT INTO t VALUES (1),(1abc),(2);", "INSERT INTO t VALUES (1),(1abc);"},
+    };
+    for (size_t c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
+        const char *src = cases[c][0];
+        CBMSqlKeptRanges k = {NULL, 0};
+        bool cut = cbm_sql_values_kept_ranges(src, (uint32_t)strlen(src), &k);
+        if (!cases[c][1]) {
+            if (cut) {
+                fprintf(stderr, "  case %zu excluded rows unexpectedly: %s\n", c, src);
+            }
+            ASSERT_FALSE(cut);
+            continue;
+        }
+        ASSERT_TRUE(cut);
+        char *seen = kept_text(src, &k);
+        ASSERT_NOT_NULL(seen);
+        ASSERT_STR_EQ(seen, cases[c][1]);
+        free(seen);
+        cbm_sql_kept_ranges_free(&k);
+    }
+    PASS();
+}
+
+TEST(sql_values_scanner_keeps_positions_of_kept_text_issue1735) {
+    const char *src = "INSERT INTO t VALUES\n(1),\n(2);\nCREATE TABLE u (id int);\n";
+    CBMSqlKeptRanges k = {NULL, 0};
+    ASSERT_TRUE(cbm_sql_values_kept_ranges(src, (uint32_t)strlen(src), &k));
+    ASSERT_EQ(k.count, 2u);
+    /* excluded: ",\n(2)" from byte 24 (row 1, col 3) to byte 29 (row 2, col 3) */
+    ASSERT_EQ(k.items[0].start_byte, 0u);
+    ASSERT_EQ(k.items[0].end_byte, 24u);
+    ASSERT_EQ(k.items[0].end_point.row, 1u);
+    ASSERT_EQ(k.items[0].end_point.column, 3u);
+    ASSERT_EQ(k.items[1].start_byte, 29u);
+    ASSERT_EQ(k.items[1].start_point.row, 2u);
+    ASSERT_EQ(k.items[1].start_point.column, 3u);
+    ASSERT_EQ(k.items[1].end_byte, (uint32_t)strlen(src));
+    ASSERT_EQ(k.items[1].end_point.row, 4u);
+    ASSERT_EQ(k.items[1].end_point.column, 0u);
+    cbm_sql_kept_ranges_free(&k);
+    /* The table after the cut keeps its real line. */
+    CBMFileResult *r = do_extract(src, CBM_LANG_SQL, "pos.sql");
+    ASSERT_NOT_NULL(r);
+    bool found = false;
+    for (int i = 0; i < r->defs.count; i++) {
+        if (r->defs.items[i].name && strcmp(r->defs.items[i].name, "u") == 0) {
+            ASSERT_EQ(r->defs.items[i].start_line, 4u);
+            found = true;
+        }
+    }
+    ASSERT_TRUE(found);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* ── #1736: a lone '&' in JSX is text, not a parse failure ────────────────
+ * Upstream tree-sitter-javascript (and the tsx dialect built on it) accepted
+ * '&' inside a JSX string only before a space/digit or as a complete
+ * character reference, and never inside JSX text, so `href="...?a=1&b=2"`
+ * (the reporter's Google Fonts URL) or `<p>Tom &Jerry</p>` produced an ERROR
+ * node and a parse_partial flag. Both grammars are now self-maintained forks
+ * (tools/tree-sitter-javascript, tools/tree-sitter-tsx). Each case wraps the
+ * JSX in a component and puts a second function AFTER it, so a pass also
+ * proves the definitions around the JSX are extracted. */
+static const char *const JSX_AMP_BODIES[] = {
+    /* the #1736 shape: '&' + letter in a double-quoted attribute */
+    "<link href=\"https://fonts.x/css2?family=Inter:wght@300;400&family=Syne&display=swap\" />",
+    "<link href='https://x.com/a?a=1&b=2' />", /* single-quoted attribute */
+    "<p title=\"a&\">x</p>",                   /* '&' right before the quote */
+    "<p>Tom &Jerry</p>",                       /* '&' + letter in JSX text */
+    "<p>Tom & Jerry</p>",                      /* '&' + space in JSX text */
+    "<th className=\"p-4 font-semibold\">Role & Dept</th>", /* #2481 report reproduction */
+    "<p>x &1 y</p>",                           /* '&' + digit in JSX text */
+    /* controls: references keep parsing; '& ' / '&1' in attributes */
+    "<p title=\"x&amp;y&#38;z & w &1\">A&amp;B &#38; C</p>",
+};
+
+static const struct {
+    CBMLanguage lang;
+    const char *path;
+} JSX_AMP_LANGS[] = {
+    {CBM_LANG_JAVASCRIPT, "app/page.js"},
+    {CBM_LANG_JAVASCRIPT, "app/page.jsx"},
+    {CBM_LANG_TSX, "app/layout.tsx"},
+};
+
+enum { JSX_AMP_SRC_CAP = 512 };
+
+TEST(jsx_lone_ampersand_is_not_parse_partial_issue1736) {
+    size_t nb = sizeof(JSX_AMP_BODIES) / sizeof(JSX_AMP_BODIES[0]);
+    size_t nl = sizeof(JSX_AMP_LANGS) / sizeof(JSX_AMP_LANGS[0]);
+    int failures = 0;
+    for (size_t l = 0; l < nl; l++) {
+        for (size_t b = 0; b < nb; b++) {
+            char src[JSX_AMP_SRC_CAP];
+            snprintf(src, sizeof(src),
+                     "export default function Page() {\n  return (\n    %s\n  );\n}\n"
+                     "export function After() {\n  return 1;\n}\n",
+                     JSX_AMP_BODIES[b]);
+            CBMFileResult *r = do_extract(src, JSX_AMP_LANGS[l].lang, JSX_AMP_LANGS[l].path);
+            ASSERT_NOT_NULL(r);
+            bool bad = r->parse_incomplete || !has_def(r, "Page") || !has_def(r, "After");
+            if (bad) {
+                fprintf(stderr, "  %s flagged=%d ranges=%s body=%s\n", JSX_AMP_LANGS[l].path,
+                        (int)r->parse_incomplete, r->error_ranges ? r->error_ranges : "(none)",
+                        JSX_AMP_BODIES[b]);
+                failures++;
+            }
+            cbm_free_result(r);
+        }
+    }
+    ASSERT_EQ(failures, 0);
+    PASS();
+}
+
+/* GUARD against an inert test: the same wrapper with genuinely broken JSX is
+ * still flagged in every one of the three languages, so the green above is the
+ * grammar accepting '&', not the signal being switched off. */
+TEST(jsx_broken_markup_still_parse_partial_issue1736) {
+    size_t nl = sizeof(JSX_AMP_LANGS) / sizeof(JSX_AMP_LANGS[0]);
+    for (size_t l = 0; l < nl; l++) {
+        const char *src = "export default function Page() {\n  return (\n"
+                          "    <p title=\"a\" =>x</p>\n  );\n}\n"
+                          "export function After() {\n  return 1;\n}\n";
+        CBMFileResult *r = do_extract(src, JSX_AMP_LANGS[l].lang, JSX_AMP_LANGS[l].path);
+        ASSERT_NOT_NULL(r);
+        bool flagged = r->parse_incomplete;
+        cbm_free_result(r);
+        ASSERT_TRUE(flagged);
+    }
+    PASS();
+}
+
+/* ── #1748: C# 12 collection expressions in conditional branches ─────────────
+ * The vendored tree-sitter-c-sharp (pin 88366631d598) predated upstream's
+ * collection-expression support (#402, first released in v0.23.4): `[...]` was
+ * only reachable as an element_binding_expression, so an empty or a second
+ * collection literal after `?`/`:` had no valid parse and error recovery ate
+ * the surrounding statement. Every body below is valid C# 12; the method that
+ * FOLLOWS it pins that extraction resumes after the conditional. */
+#define CS_1748_WRAP(body)                         \
+    "class M\n"                                    \
+    "{\n"                                          \
+    "    async Task Go(bool c, List<int> items)\n" \
+    "    {\n" body "\n"                            \
+    "    }\n"                                      \
+    "    Task<List<int>> F() => null;\n"           \
+    "    void AfterConditional() { }\n"            \
+    "}\n"
+
+TEST(cs_collection_expression_in_conditional_is_complete_issue1748) {
+    static const char *const bodies[] = {
+        /* the reported shape: wrapped ternary, empty collection first */
+        CS_1748_WRAP("        var x = c\n            ? []\n            : await F();"),
+        CS_1748_WRAP("        var x = c ? []\n            : await F();"),
+        CS_1748_WRAP("        List<int> x = c\n            ? []\n            : [items.First()];"),
+        /* both branches collection expressions, single line */
+        CS_1748_WRAP("        List<int> x = c ? [] : [1];"),
+        /* single-line, single collection branch (also failed on the old pin) */
+        CS_1748_WRAP("        var x = c ? [] : items;"),
+        CS_1748_WRAP("        var x = c ? [] : await F();"),
+        CS_1748_WRAP("        return c ? [] : items;"),
+        CS_1748_WRAP("        if (c) return c ? [] : items;"),
+        CS_1748_WRAP("        var x = c ? items : [];"),
+        CS_1748_WRAP("        var x = c switch { true => [], _ => items };"),
+        CS_1748_WRAP("        int[] a = [1, 2, ..items];"),
+        /* control: the same wrapped shape without a collection expression */
+        CS_1748_WRAP("        var x = c\n            ? null\n            : await F();"),
+    };
+    int failures = 0;
+    for (size_t i = 0; i < sizeof(bodies) / sizeof(bodies[0]); i++) {
+        CBMFileResult *r = do_extract(bodies[i], CBM_LANG_CSHARP, "M.cs");
+        ASSERT_NOT_NULL(r);
+        bool partial = r->parse_incomplete;
+        bool has_after = has_def(r, "AfterConditional");
+        if (partial || !has_after) {
+            fprintf(stderr, "  case %zu: partial=%d ranges=%s after_def=%d\n", i, partial,
+                    r->error_ranges ? r->error_ranges : "(none)", has_after);
+            failures++;
+        }
+        cbm_free_result(r);
+    }
+    if (failures != 0) {
+        FAIL("valid C# 12 collection expressions in conditional branches must parse completely");
+    }
+    PASS();
+}
+
+/* Calls nested in a collection expression (element and spread) must still be
+ * extracted after the refresh moved them under collection_expression /
+ * expression_element / spread_element (previously element_binding_expression /
+ * argument / range_expression). */
+TEST(cs_calls_inside_collection_expression_extracted_issue1748) {
+    const char *src = "class M\n"
+                      "{\n"
+                      "    int[] Build(bool c)\n"
+                      "    {\n"
+                      "        return c ? [] : [Head(), ..Tail()];\n"
+                      "    }\n"
+                      "    int Head() => 1;\n"
+                      "    int[] Tail() => null;\n"
+                      "}\n";
+    CBMFileResult *r = do_extract(src, CBM_LANG_CSHARP, "M.cs");
+    ASSERT_NOT_NULL(r);
+    bool partial = r->parse_incomplete;
+    bool head = false;
+    bool tail = false;
+    for (int i = 0; i < r->calls.count; i++) {
+        const char *n = r->calls.items[i].callee_name;
+        if (n && strcmp(n, "Head") == 0) {
+            head = true;
+        }
+        if (n && strcmp(n, "Tail") == 0) {
+            tail = true;
+        }
+    }
+    cbm_free_result(r);
+    ASSERT_FALSE(partial);
+    ASSERT_TRUE(head);
+    ASSERT_TRUE(tail);
+    PASS();
+}
+
+/* GUARD: the refreshed grammar must not hide genuinely broken C#. */
+TEST(cs_malformed_conditional_remains_partial_issue1748) {
+    CBMFileResult *r =
+        do_extract(CS_1748_WRAP("        var x = c ? ] : ;"), CBM_LANG_CSHARP, "M.cs");
+    ASSERT_NOT_NULL(r);
+    ASSERT_TRUE(r->parse_incomplete);
+    ASSERT_NOT_NULL(r->error_ranges);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* ── #2078: every file is parsed as if it ended with a newline ───────────────
+ *
+ * Several grammars need a line terminator that a file's last line may simply
+ * not have. tree-sitter-markdown is the sharpest case: an opening code fence,
+ * an ATX heading or a bare list marker as the final bytes of a file leaves a
+ * WIDTH-BEARING ERROR (so the #1610 zero-width rule cannot excuse it), and a
+ * file that is only "```" came back as a whole-file error. Appending one "\n"
+ * made every one of these clean -- the reporter proved it on 21 real files.
+ *
+ * cbm now feeds the parser one virtual "\n" past EOF when the last byte is not
+ * already a newline, then clamps the tree back to the real length, so no
+ * consumer sees a byte, a line or a range that is not in the file. */
+TEST(markdown_unterminated_last_line_is_clean_issue2078) {
+    const char *cases[] = {
+        "text\n```", /* opening fence at EOF (upstream PR #262, closed unmerged) */
+        "```",       /* the whole file is one opening fence */
+        "# Top",     /* ATX heading */
+        "- ",        /* bare list marker */
+    };
+    int flagged = 0;
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        CBMFileResult *r = do_extract(cases[i], CBM_LANG_MARKDOWN, "doc.md");
+        ASSERT_NOT_NULL(r);
+        if (r->parse_incomplete || r->parse_unusable) {
+            fprintf(stderr, "  case %zu flagged: partial=%d unusable=%d ranges=%s\n", i,
+                    r->parse_incomplete, r->parse_unusable,
+                    r->error_ranges ? r->error_ranges : "(none)");
+            flagged++;
+        }
+        cbm_free_result(r);
+    }
+    if (flagged) {
+        FAIL("a markdown file must not be flagged only because its last line is unterminated");
+    }
+    PASS();
+}
+
+/* Controls: the same bytes WITH the newline were already clean and stay so. */
+TEST(markdown_terminated_last_line_controls_unchanged_issue2078) {
+    const char *cases[] = {"text\n```\n", "```\n", "# Top\n", "- \n"};
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        CBMFileResult *r = do_extract(cases[i], CBM_LANG_MARKDOWN, "doc.md");
+        ASSERT_NOT_NULL(r);
+        ASSERT_FALSE(r->parse_incomplete);
+        ASSERT_FALSE(r->parse_unusable);
+        cbm_free_result(r);
+    }
+    PASS();
+}
+
+/* Everything extraction reports, as one string, so two results compare
+ * byte-for-byte: defs (every text field and range), calls (exact byte spans),
+ * imports and the coverage verdict. */
+typedef struct {
+    char *buf;
+    size_t cap;
+    size_t len;
+} dump_buf_t;
+
+static void dump_str(dump_buf_t *b, const char *tag, const char *s) {
+    int n = snprintf(b->buf + b->len, b->cap - b->len, " %s=%s", tag, s ? s : "~");
+    if (n > 0 && (size_t)n < b->cap - b->len) {
+        b->len += (size_t)n;
+    }
+}
+
+static void dump_num(dump_buf_t *b, const char *tag, long v) {
+    int n = snprintf(b->buf + b->len, b->cap - b->len, " %s=%ld", tag, v);
+    if (n > 0 && (size_t)n < b->cap - b->len) {
+        b->len += (size_t)n;
+    }
+}
+
+/* The Module def spans the whole file, and its end line follows the line
+ * convention for a terminated last line (#1967), so it is compared on its own
+ * rather than through the dump. */
+static char *dump_extraction(const CBMFileResult *r) {
+    dump_buf_t b = {(char *)calloc(1u << 16, 1), 1u << 16, 0};
+    if (!b.buf) {
+        return NULL;
+    }
+    for (int i = 0; i < r->defs.count; i++) {
+        const CBMDefinition *d = &r->defs.items[i];
+        if (d->label && strcmp(d->label, "Module") == 0) {
+            continue;
+        }
+        dump_str(&b, "\nD", d->qualified_name);
+        dump_str(&b, "name", d->name);
+        dump_str(&b, "label", d->label);
+        dump_num(&b, "start", d->start_line);
+        dump_num(&b, "end", d->end_line);
+        dump_num(&b, "lines", d->lines);
+        dump_num(&b, "cx", d->complexity);
+        dump_num(&b, "params", d->param_count);
+        dump_str(&b, "sig", d->signature);
+        dump_str(&b, "ret", d->return_type);
+        dump_str(&b, "doc", d->docstring);
+        dump_str(&b, "prof", d->structural_profile);
+        dump_str(&b, "tok", d->body_tokens);
+    }
+    for (int i = 0; i < r->calls.count; i++) {
+        const CBMCall *c = &r->calls.items[i];
+        dump_str(&b, "\nC", c->callee_name);
+        dump_str(&b, "in", c->enclosing_func_qn);
+        dump_num(&b, "line", c->start_line);
+        dump_num(&b, "from", (long)c->site_start_byte);
+        dump_num(&b, "to", (long)c->site_end_byte);
+        dump_num(&b, "args", c->arg_count);
+    }
+    for (int i = 0; i < r->imports.count; i++) {
+        dump_str(&b, "\nI", r->imports.items[i].local_name);
+        dump_str(&b, "path", r->imports.items[i].module_path);
+    }
+    dump_str(&b, "\nP", r->error_ranges);
+    dump_num(&b, "partial", r->parse_incomplete);
+    dump_num(&b, "unusable", r->parse_unusable);
+    dump_str(&b, "", "\n");
+    return b.buf;
+}
+
+static uint32_t module_end_line(const CBMFileResult *r) {
+    for (int i = 0; i < r->defs.count; i++) {
+        if (r->defs.items[i].label && strcmp(r->defs.items[i].label, "Module") == 0) {
+            return r->defs.items[i].end_line;
+        }
+    }
+    return 0;
+}
+
+static char *extract_dump(const char *src, CBMLanguage lang, const char *path,
+                          uint32_t *module_end) {
+    CBMFileResult *r = do_extract(src, lang, path);
+    if (!r) {
+        return NULL;
+    }
+    char *d = dump_extraction(r);
+    if (module_end) {
+        *module_end = module_end_line(r);
+    }
+    cbm_free_result(r);
+    return d;
+}
+
+/* GUARD: for code grammars a trailing newline is insignificant, so a file
+ * without one must extract byte-identically to the same file with one -- every
+ * def, range, text field and call byte span. The virtual newline may never
+ * show up as phantom content or a phantom line. */
+TEST(code_without_final_newline_extracts_identically_issue2078) {
+    struct {
+        const char *src; /* no trailing newline */
+        CBMLanguage lang;
+        const char *path;
+        uint32_t lines;
+    } cases[] = {
+        {"#include <stdio.h>\n\nstatic int beta(int x) {\n    return x + 1;\n}\n\n"
+         "void alpha(void) { printf(\"a\"); beta(2); }",
+         CBM_LANG_C, "a.c", 7},
+        {"import os\n\n\nclass K:\n    def m(self, a):\n        return os.path.join(a)\n\n\n"
+         "def f(x):\n    \"\"\"doc\"\"\"\n    return K().m(x)",
+         CBM_LANG_PYTHON, "a.py", 11},
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        size_t n = strlen(cases[i].src);
+        char *terminated = (char *)malloc(n + 2);
+        ASSERT_NOT_NULL(terminated);
+        memcpy(terminated, cases[i].src, n);
+        terminated[n] = '\n';
+        terminated[n + 1] = '\0';
+        uint32_t bare_module_end = 0;
+        char *bare = extract_dump(cases[i].src, cases[i].lang, cases[i].path, &bare_module_end);
+        char *term = extract_dump(terminated, cases[i].lang, cases[i].path, NULL);
+        free(terminated);
+        ASSERT_NOT_NULL(bare);
+        ASSERT_NOT_NULL(term);
+        bool same = strcmp(bare, term) == 0;
+        if (!same) {
+            fprintf(stderr, "  %s differs:\n--- without final newline%s--- with final newline%s",
+                    cases[i].path, bare, term);
+        }
+        free(bare);
+        free(term);
+        if (!same) {
+            FAIL("extraction must not depend on whether the last line is terminated");
+        }
+        if (bare_module_end != cases[i].lines) {
+            fprintf(stderr, "  %s: module ends on line %u, file has %u\n", cases[i].path,
+                    bare_module_end, cases[i].lines);
+            FAIL("the virtual newline must not add a line to the module");
+        }
+    }
+    PASS();
+}
+
+/* GUARD against phantom content: a heading on an unterminated last line is a
+ * one-line file. No def may end past line 1, no text may carry the virtual
+ * newline, and the result must equal the terminated file's. */
+TEST(virtual_newline_adds_no_phantom_line_or_text_issue2078) {
+    CBMFileResult *r = do_extract("# Top", CBM_LANG_MARKDOWN, "top.md");
+    ASSERT_NOT_NULL(r);
+    bool found = has_def(r, "Top");
+    for (int i = 0; i < r->defs.count; i++) {
+        const CBMDefinition *d = &r->defs.items[i];
+        if (d->end_line > 1 || d->start_line > 1) {
+            fprintf(stderr, "  def %s spans %u-%u\n", d->name ? d->name : "?", d->start_line,
+                    d->end_line);
+            cbm_free_result(r);
+            FAIL("no def may reach past the last real line");
+        }
+        if ((d->name && strchr(d->name, '\n')) || (d->signature && strchr(d->signature, '\n'))) {
+            cbm_free_result(r);
+            FAIL("no extracted text may contain the virtual newline");
+        }
+    }
+    cbm_free_result(r);
+    if (!found) {
+        /* Before #2078 the unterminated heading was silently dropped: no
+         * Section, and no parse_partial flag to say so. */
+        FAIL("the heading on an unterminated last line must be extracted as a Section");
+    }
+    PASS();
+}
+
+/* GUARD: the empty file and a file that is exactly "\n" get no virtual
+ * newline (nothing is unterminated) and stay clean. */
+TEST(empty_and_newline_only_files_unchanged_issue2078) {
+    const char *srcs[] = {"", "\n"};
+    CBMLanguage langs[] = {CBM_LANG_MARKDOWN, CBM_LANG_PYTHON, CBM_LANG_C};
+    const char *paths[] = {"e.md", "e.py", "e.c"};
+    for (size_t s = 0; s < 2; s++) {
+        for (size_t l = 0; l < 3; l++) {
+            CBMFileResult *r = do_extract(srcs[s], langs[l], paths[l]);
+            ASSERT_NOT_NULL(r);
+            ASSERT_FALSE(r->parse_incomplete);
+            ASSERT_FALSE(r->parse_unusable);
+            cbm_free_result(r);
+        }
+    }
+    PASS();
+}
+
+/* #1967: every line counter over one source buffer answers the same
+ * question the same way. A trailing newline ends the last line; it does not
+ * open a new one. */
+TEST(source_line_count_one_convention) {
+    ASSERT_EQ(cbm_source_line_count("", 0), 1u);
+    ASSERT_EQ(cbm_source_line_count("a", 1), 1u);
+    ASSERT_EQ(cbm_source_line_count("a\n", 2), 1u);
+    ASSERT_EQ(cbm_source_line_count("\n", 1), 1u);
+    ASSERT_EQ(cbm_source_line_count("a\nb", 3), 2u);
+    ASSERT_EQ(cbm_source_line_count("a\nb\n", 4), 2u);
+    ASSERT_EQ(cbm_source_line_count("a\n\n", 3), 2u);
+    ASSERT_EQ(cbm_source_line_count("a\r\nb\r\n", 6), 2u);
+    /* src_len bounds the count, not a NUL terminator. */
+    ASSERT_EQ(cbm_source_line_count("a\nb\nc", 2), 1u);
+    PASS();
+}
+
+/* ── #2211: Pascal/Delphi identifiers with non-ASCII letters ─────────────────
+ * Delphi accepts non-ASCII letters in identifiers; 1C integrations call its
+ * OLE API through late-bound Variants with Cyrillic member names. Upstream
+ * tree-sitter-pascal's identifier token was ASCII-only, so every such name was
+ * an ERROR node and the unit came out parse_partial. The Cyrillic text is
+ * written as UTF-8 hex escapes (the source stays ASCII); a `" "` split follows
+ * an escape run whenever the next character is a hex digit. */
+
+/* The reporter's snippet (#2211), verbatim apart from the escaping:
+ * v8_Base.<Dokumenty>.<SchetNaOplatuPostavshchika>.<NaytiPoNomeru>(...),
+ * v8_dst.<Pustaya>(), v8_Base.<Spravochniki>.<Nomenklatura>.<NaytiPoKodu>(...),
+ * NM.<PoluchitObyekt>().<Zapisat>() -- <...> = the Cyrillic name, transliterated. */
+static const char *PAS_CYRILLIC_MEMBERS =
+    "unit Demo;\n"
+    "interface\n"
+    "procedure Demo1C;\n"
+    "implementation\n"
+    "procedure Demo1C;\n"
+    "var\n"
+    "  v8_Base, v8_dst, NM: Variant;\n"
+    "begin\n"
+    "  v8_dst := "
+    "v8_Base.\xd0\x94\xd0\xbe\xd0\xba\xd1\x83\xd0\xbc\xd0\xb5\xd0\xbd\xd1\x82\xd1\x8b."
+    "\xd0\xa1\xd1\x87\xd0\xb5\xd1\x82\xd0\x9d\xd0\xb0\xd0\x9e\xd0\xbf\xd0\xbb\xd0\xb0\xd1\x82\xd1"
+    "\x83\xd0\x9f\xd0\xbe\xd1\x81\xd1\x82\xd0\xb0\xd0\xb2\xd1\x89\xd0\xb8\xd0\xba\xd0\xb0."
+    "\xd0\x9d\xd0\xb0\xd0\xb9\xd1\x82\xd0\xb8\xd0\x9f\xd0\xbe\xd0\x9d\xd0\xbe\xd0\xbc\xd0\xb5\xd1"
+    "\x80\xd1\x83('1', Now);\n"
+    "  if v8_dst.\xd0\x9f\xd1\x83\xd1\x81\xd1\x82\xd0\xb0\xd1\x8f() then Exit;\n"
+    "  NM := "
+    "v8_Base.\xd0\xa1\xd0\xbf\xd1\x80\xd0\xb0\xd0\xb2\xd0\xbe\xd1\x87\xd0\xbd\xd0\xb8\xd0\xba\xd0"
+    "\xb8.\xd0\x9d\xd0\xbe\xd0\xbc\xd0\xb5\xd0\xbd\xd0\xba\xd0\xbb\xd0\xb0\xd1\x82\xd1\x83\xd1\x80"
+    "\xd0\xb0.\xd0\x9d\xd0\xb0\xd0\xb9\xd1\x82\xd0\xb8\xd0\x9f\xd0\xbe\xd0\x9a\xd0\xbe\xd0\xb4\xd1"
+    "\x83('123', 0);\n"
+    "  if not NM.\xd0\x9f\xd1\x83\xd1\x81\xd1\x82\xd0\xb0\xd1\x8f() then\n"
+    "    "
+    "NM."
+    "\xd0\x9f\xd0\xbe\xd0\xbb\xd1\x83\xd1\x87\xd0\xb8\xd1\x82\xd1\x8c\xd0\x9e\xd0\xb1\xd1\x8a\xd0"
+    "\xb5\xd0\xba\xd1\x82().\xd0\x97\xd0\xb0\xd0\xbf\xd0\xb8\xd1\x81\xd0\xb0\xd1\x82\xd1\x8c();\n"
+    "end;\n"
+    "end.\n";
+
+/* A procedure whose own name, parameter and locals are Cyrillic (<ObrabotatDokument>,
+ * <Imya>, <Schyotchik>2), plus the keyword-boundary cases the wider identifier token must
+ * not swallow: `begin<Znachenie>` is ONE identifier, `&begin` is an escaped
+ * identifier, and upper-case BEGIN/END still open and close a block. An ASCII
+ * neighbour follows, so a keyword lost to the identifier token would surface as
+ * a missing definition as well as an ERROR. */
+#define PAS_CYR_PROC_NAME                                                                          \
+    "\xd0\x9e\xd0\xb1\xd1\x80\xd0\xb0\xd0\xb1\xd0\xbe\xd1\x82\xd0\xb0\xd1\x82\xd1\x8c\xd0\x94\xd0" \
+    "\xbe\xd0\xba\xd1\x83\xd0\xbc\xd0\xb5\xd0\xbd\xd1\x82"
+#define PAS_CYR_COUNTER "\xd0\xa1\xd1\x87\xd1\x91\xd1\x82\xd1\x87\xd0\xb8\xd0\xba"
+#define PAS_CYR_VALUE "begin\xd0\x97\xd0\xbd\xd0\xb0\xd1\x87\xd0\xb5\xd0\xbd\xd0\xb8\xd0\xb5"
+static const char *PAS_CYRILLIC_PROC =
+    "unit Kw;\n"
+    "interface\n"
+    "implementation\n"
+    "procedure " PAS_CYR_PROC_NAME "(const \xd0\x98\xd0\xbc\xd1\x8f: string);\n"
+    "var\n"
+    "  " PAS_CYR_VALUE ", &begin: Integer;\n"
+    "  " PAS_CYR_COUNTER "2: Integer;\n"
+    "begin\n"
+    "  BEGIN " PAS_CYR_COUNTER "2 := 1; END;\n"
+    "  " PAS_CYR_VALUE " := " PAS_CYR_COUNTER "2;\n"
+    "end;\n"
+    "procedure AfterIt;\n"
+    "begin\n"
+    "end;\n"
+    "end.\n";
+
+/* ASCII control: the same shapes with ASCII names parsed before the fork and
+ * must still parse identically. */
+static const char *PAS_ASCII_CONTROL = "unit Plain;\n"
+                                       "interface\n"
+                                       "procedure Run;\n"
+                                       "implementation\n"
+                                       "procedure Run;\n"
+                                       "var\n"
+                                       "  Base, Doc: Variant;\n"
+                                       "begin\n"
+                                       "  Doc := Base.Documents.Invoice.FindByNumber('1', Now);\n"
+                                       "  if Doc.IsEmpty() then Exit;\n"
+                                       "  Doc.GetObject().Write();\n"
+                                       "end;\n"
+                                       "end.\n";
+
+/* Genuinely broken Pascal (a doubled `:=` and stray parens) must stay flagged:
+ * the wider identifier token must not make the parser accept garbage. */
+static const char *PAS_BROKEN = "unit Broken;\n"
+                                "interface\n"
+                                "implementation\n"
+                                "procedure Bad;\n"
+                                "begin\n"
+                                "  x := := 1 )) ;\n"
+                                "end;\n"
+                                "procedure Good;\n"
+                                "begin\n"
+                                "end;\n"
+                                "end.\n";
+
+TEST(pascal_cyrillic_member_calls_not_partial_issue2211) {
+    CBMFileResult *r = do_extract(PAS_CYRILLIC_MEMBERS, CBM_LANG_PASCAL, "Demo.pas");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->parse_incomplete);
+    ASSERT_EQ(r->error_region_count, 0);
+    ASSERT_NULL(r->error_ranges);
+    ASSERT_TRUE(has_def(r, "Demo1C"));
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(pascal_cyrillic_procedure_name_extracted_issue2211) {
+    CBMFileResult *r = do_extract(PAS_CYRILLIC_PROC, CBM_LANG_PASCAL, "Kw.pas");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->parse_incomplete);
+    ASSERT_EQ(r->error_region_count, 0);
+    ASSERT_TRUE(has_def(r, PAS_CYR_PROC_NAME));
+    ASSERT_TRUE(has_def(r, "AfterIt"));
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(pascal_ascii_control_still_clean_issue2211) {
+    CBMFileResult *r = do_extract(PAS_ASCII_CONTROL, CBM_LANG_PASCAL, "Plain.pas");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->parse_incomplete);
+    ASSERT_EQ(r->error_region_count, 0);
+    ASSERT_TRUE(has_def(r, "Run"));
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(pascal_broken_source_still_flagged_issue2211) {
+    CBMFileResult *r = do_extract(PAS_BROKEN, CBM_LANG_PASCAL, "Broken.pas");
+    ASSERT_NOT_NULL(r);
+    ASSERT_TRUE(r->parse_incomplete);
+    ASSERT_GTE(r->error_region_count, 1);
+    ASSERT_TRUE(has_def(r, "Good"));
+    cbm_free_result(r);
+    PASS();
+}
+
+/* ── VB.NET: the vendored grammar parses real VB.NET (#1178, #1179) ────────
+ * tools/tree-sitter-vbnet (tree-sitter-vbnet + CodeGraph's real-world patch)
+ * is vendored ahead of VB.NET extraction: no CBMLanguage routes to it yet, so
+ * these cases parse through tree_sitter_vbnet() directly. The sample is the
+ * shape extraction must index -- Imports, a WinForms Designer partial class,
+ * Handles, Namespace, Inherits/Implements, MustOverride, #Region, Sub New,
+ * Property, Function -- plus names that begin with a keyword. It is RED on the
+ * alternatives: unpatched upstream leaves ERROR nodes at the Designer's Single
+ * literals (8.25!, 6.0!) and at MustOverride, and the patch revision before
+ * 2026-10-06 turns `Sub NewItem()` into an ERROR and `Public SharedCache` into
+ * a Shared field named Cache. */
+extern const TSLanguage *tree_sitter_vbnet(void);
+
+static const char VB_REAL_SOURCE[] =
+    "Imports System\n"
+    "Imports System.Collections.Generic\n"
+    "Imports System.Windows.Forms\n"
+    "\n"
+    "<Global.Microsoft.VisualBasic.CompilerServices.DesignerGenerated()> _\n"
+    "Partial Class MainForm\n"
+    "    Inherits System.Windows.Forms.Form\n"
+    "\n"
+    "    <System.Diagnostics.DebuggerStepThrough()> _\n"
+    "    Private Sub InitializeComponent()\n"
+    "        Me.btnSave = New System.Windows.Forms.Button()\n"
+    "        Me.SuspendLayout()\n"
+    "        Me.btnSave.Font = New System.Drawing.Font(\"Segoe UI\", 8.25!)\n"
+    "        Me.btnSave.Text = \"Save\"\n"
+    "        Me.AutoScaleDimensions = New System.Drawing.SizeF(6.0!, 13.0!)\n"
+    "        Me.Controls.Add(Me.btnSave)\n"
+    "        Me.ResumeLayout(False)\n"
+    "    End Sub\n"
+    "\n"
+    "    Friend WithEvents btnSave As System.Windows.Forms.Button\n"
+    "End Class\n"
+    "\n"
+    "Partial Class MainForm\n"
+    "    Private Sub btnSave_Click(sender As Object, e As EventArgs) Handles btnSave.Click\n"
+    "        MessageBox.Show(\"Saved\")\n"
+    "    End Sub\n"
+    "End Class\n"
+    "\n"
+    "Namespace Contoso.Billing\n"
+    "    Public MustInherit Class EntityBase\n"
+    "        Public MustOverride Function Describe() As String\n"
+    "    End Class\n"
+    "\n"
+    "    Public Class Customer\n"
+    "        Inherits EntityBase\n"
+    "        Implements IComparable(Of Customer), IDisposable\n"
+    "\n"
+    "#Region \"Fields\"\n"
+    "        Private _name As String\n"
+    "        Public SharedCache As Integer\n"
+    "        Public Dimension As Integer\n"
+    "#End Region\n"
+    "\n"
+    "        Public Sub New(name As String)\n"
+    "            _name = name\n"
+    "        End Sub\n"
+    "\n"
+    "        Public Sub NewItem()\n"
+    "            Dimension = 0\n"
+    "        End Sub\n"
+    "\n"
+    "        Public Property Name As String\n"
+    "            Get\n"
+    "                Return _name\n"
+    "            End Get\n"
+    "            Set(value As String)\n"
+    "                _name = value\n"
+    "            End Set\n"
+    "        End Property\n"
+    "\n"
+    "        Public Overrides Function Describe() As String\n"
+    "            Return _name\n"
+    "        End Function\n"
+    "\n"
+    "        Public Sub Dispose() Implements IDisposable.Dispose\n"
+    "            _name = Nothing\n"
+    "        End Sub\n"
+    "\n"
+    "        Public Function CompareTo(o As Customer) As Integer _\n"
+    "            Implements IComparable(Of Customer).CompareTo\n"
+    "            Return String.Compare(_name, o.Name)\n"
+    "        End Function\n"
+    "    End Class\n"
+    "End Namespace\n";
+
+/* Counts the `identifier` nodes under `node` whose text is exactly `text`. */
+static int vb_identifier_count(TSNode node, const char *src, const char *text) {
+    int hits = 0;
+    if (strcmp(ts_node_type(node), "identifier") == 0) {
+        uint32_t start = ts_node_start_byte(node);
+        uint32_t len = ts_node_end_byte(node) - start;
+        if (strlen(text) == len && memcmp(src + start, text, len) == 0) {
+            hits++;
+        }
+    }
+    uint32_t count = ts_node_child_count(node);
+    for (uint32_t i = 0; i < count; i++) {
+        hits += vb_identifier_count(ts_node_child(node, i), src, text);
+    }
+    return hits;
+}
+
+TEST(vbnet_vendored_grammar_parses_real_vb_clean) {
+    TSParser *parser = ts_parser_new();
+    ASSERT_NOT_NULL(parser);
+    /* The vendored runtime accepts the generated ABI (15). */
+    ASSERT_TRUE(ts_parser_set_language(parser, tree_sitter_vbnet()));
+    TSTree *tree =
+        ts_parser_parse_string(parser, NULL, VB_REAL_SOURCE, (uint32_t)strlen(VB_REAL_SOURCE));
+    ASSERT_NOT_NULL(tree);
+    TSNode root = ts_tree_root_node(tree);
+    ASSERT_STR_EQ(ts_node_type(root), "source_file");
+    ASSERT_FALSE(ts_node_has_error(root));
+    /* Names that begin with a keyword stay whole identifiers. */
+    ASSERT_GTE(vb_identifier_count(root, VB_REAL_SOURCE, "SharedCache"), 1);
+    ASSERT_GTE(vb_identifier_count(root, VB_REAL_SOURCE, "Dimension"), 1);
+    ASSERT_GTE(vb_identifier_count(root, VB_REAL_SOURCE, "NewItem"), 1);
+    ASSERT_EQ(vb_identifier_count(root, VB_REAL_SOURCE, "Cache"), 0);
+    ASSERT_EQ(vb_identifier_count(root, VB_REAL_SOURCE, "ension"), 0);
+    ts_tree_delete(tree);
+    ts_parser_delete(parser);
+    PASS();
+}
+
+TEST(vbnet_vendored_grammar_still_flags_broken_source) {
+    static const char broken[] = "Public Class Broken\n    Public Sub (\nEnd Class\n";
+    TSParser *parser = ts_parser_new();
+    ASSERT_NOT_NULL(parser);
+    ASSERT_TRUE(ts_parser_set_language(parser, tree_sitter_vbnet()));
+    TSTree *tree = ts_parser_parse_string(parser, NULL, broken, (uint32_t)strlen(broken));
+    ASSERT_NOT_NULL(tree);
+    ASSERT_TRUE(ts_node_has_error(ts_tree_root_node(tree)));
+    ts_tree_delete(tree);
+    ts_parser_delete(parser);
+    PASS();
+}
+
+/* ── VB6 / VBA: the vendored grammar parses real VB6 and VBA (#2564, #721) ──
+ * tools/tree-sitter-vba (harumiWeb/tree-sitter-vba v0.14.5, vba dialect) is
+ * vendored ahead of VB6/VBA extraction: no CBMLanguage routes to it yet, so
+ * these cases parse through tree_sitter_vba() directly. The class module is
+ * dual-target VB6 the way real control libraries write it: the VB6 IDE class
+ * header and Attribute lines, a Declare kept in both #If VBA7 branches
+ * (PtrSafe, LongPtr) plus the LongPtr shim enum VB6 needs, Implements, an
+ * Event, Property Get/Let/Set, a label, and bare calls with plain and member
+ * callees. It is RED on the alternatives: upstream's vb6 dialect rejects
+ * PtrSafe, and the vba dialect at v0.13.0 (the pin PR #2564 carried) leaves
+ * an ERROR at `Case Target Is Nothing` and turns `Err.Raise a, b, c` after
+ * the label into an expression_statement, losing the callee. The form is CRLF,
+ * as the VB6 IDE writes it. */
+extern const TSLanguage *tree_sitter_vba(void);
+
+static const char VBA_CLASS_SOURCE[] =
+    "VERSION 1.0 CLASS\n"
+    "BEGIN\n"
+    "  MultiUse = -1  'True\n"
+    "  Persistable = 0  'NotPersistable\n"
+    "  DataBindingBehavior = 0  'vbNone\n"
+    "  DataSourceBehavior  = 0  'vbNone\n"
+    "  MTSTransactionMode  = 0  'NotAnMTSObject\n"
+    "END\n"
+    "Attribute VB_Name = \"Account\"\n"
+    "Attribute VB_GlobalNameSpace = False\n"
+    "Attribute VB_Creatable = True\n"
+    "Attribute VB_PredeclaredId = False\n"
+    "Attribute VB_Exposed = True\n"
+    "Option Explicit\n"
+    "Implements IComparable\n"
+    "\n"
+    "#If VBA7 Then\n"
+    "Private Declare PtrSafe Sub CopyMemory Lib \"kernel32\" Alias \"RtlMoveMemory\" "
+        "(ByRef Destination As Any, ByRef Source As Any, ByVal Length As LongPtr)\n"
+    "#Else\n"
+    "Private Declare Sub CopyMemory Lib \"kernel32\" Alias \"RtlMoveMemory\" (ByRef "
+        "Destination As Any, ByRef Source As Any, ByVal Length As Long)\n"
+    "#End If\n"
+    "\n"
+    "#If (VBA7 = 0) Then\n"
+    "Private Enum LongPtr\n"
+    "    [_]\n"
+    "End Enum\n"
+    "#End If\n"
+    "\n"
+    "Public Event Changed(ByVal OldValue As Currency)\n"
+    "\n"
+    "Private Type BalanceInfo\n"
+    "    Amount As Currency\n"
+    "    Stamp As Date\n"
+    "End Type\n"
+    "\n"
+    "Private mOwner As String\n"
+    "Private mInfo As BalanceInfo\n"
+    "Private mHistory As Collection\n"
+    "\n"
+    "Private Sub Class_Initialize()\n"
+    "    Set mHistory = New Collection\n"
+    "End Sub\n"
+    "\n"
+    "Public Property Get Owner() As String\n"
+    "    Owner = mOwner\n"
+    "End Property\n"
+    "\n"
+    "Public Property Let Owner(ByVal Value As String)\n"
+    "    mOwner = Value\n"
+    "End Property\n"
+    "\n"
+    "Public Property Set History(ByVal Value As Collection)\n"
+    "    Set mHistory = Value\n"
+    "End Property\n"
+    "\n"
+    "Public Function Deposit(ByVal Amount As Currency) As Boolean\n"
+    "    On Error GoTo Fail\n"
+    "    Dim Old As Currency\n"
+    "    Old = mInfo.Amount\n"
+    "    mInfo.Amount = mInfo.Amount + Amount\n"
+    "    mHistory.Add Amount\n"
+    "    ' audit trail\n"
+    "    LogLine Format$(Amount, \"0.00\"), True\n"
+    "    RaiseEvent Changed(Old)\n"
+    "    Deposit = True\n"
+    "    Exit Function\n"
+    "Fail:\n"
+    "    Err.Raise vbObjectError + 513, \"Account.Deposit\", \"deposit failed\"\n"
+    "End Function\n"
+    "\n"
+    "Public Sub Apply(ByVal Target As Object)\n"
+    "    Dim Entry As Variant\n"
+    "    For Each Entry In mHistory\n"
+    "        CallByName Target, \"Owner\", VbLet, mOwner\n"
+    "    Next\n"
+    "    Select Case True\n"
+    "    Case Target Is Nothing\n"
+    "        Exit Sub\n"
+    "    Case Else\n"
+    "        With Target\n"
+    "            .Refresh\n"
+    "        End With\n"
+    "    End Select\n"
+    "End Sub\n"
+    "\n"
+    "Private Function IComparable_CompareTo(ByVal Other As Object) As Long\n"
+    "    IComparable_CompareTo = StrComp(mOwner, Other.Owner, vbTextCompare)\n"
+    "End Function\n";
+
+static const char VBA_FORM_SOURCE[] =
+    "VERSION 5.00\r\n"
+    "Begin VB.Form frmMain\r\n"
+    "   Caption         =   \"Accounts\"\r\n"
+    "   ClientHeight    =   3090\r\n"
+    "   ClientLeft      =   60\r\n"
+    "   ClientTop       =   450\r\n"
+    "   ClientWidth     =   4680\r\n"
+    "   LinkTopic       =   \"Form1\"\r\n"
+    "   ScaleHeight     =   3090\r\n"
+    "   ScaleWidth      =   4680\r\n"
+    "   StartUpPosition =   3  'Windows Default\r\n"
+    "   Begin VB.CommandButton cmdDeposit\r\n"
+    "      Caption         =   \"Deposit\"\r\n"
+    "      Height          =   495\r\n"
+    "      Left            =   1680\r\n"
+    "      TabIndex        =   0\r\n"
+    "      Top             =   1200\r\n"
+    "      Width           =   1215\r\n"
+    "   End\r\n"
+    "End\r\n"
+    "Attribute VB_Name = \"frmMain\"\r\n"
+    "Attribute VB_GlobalNameSpace = False\r\n"
+    "Attribute VB_Creatable = False\r\n"
+    "Attribute VB_PredeclaredId = True\r\n"
+    "Attribute VB_Exposed = False\r\n"
+    "Option Explicit\r\n"
+    "\r\n"
+    "Private WithEvents mAccount As Account\r\n"
+    "\r\n"
+    "Private Sub cmdDeposit_Click()\r\n"
+    "    If mAccount.Deposit(100) Then MsgBox \"Done\", vbInformation, Me.Caption\r\n"
+    "End Sub\r\n"
+    "\r\n"
+    "Private Sub mAccount_Changed(ByVal OldValue As Currency)\r\n"
+    "    Debug.Print \"was \"; OldValue\r\n"
+    "End Sub\r\n";
+
+/* Counts the nodes of `type` under `node`. */
+static int vba_type_count(TSNode node, const char *type) {
+    int hits = strcmp(ts_node_type(node), type) == 0 ? 1 : 0;
+    uint32_t count = ts_node_child_count(node);
+    for (uint32_t i = 0; i < count; i++) {
+        hits += vba_type_count(ts_node_child(node, i), type);
+    }
+    return hits;
+}
+
+/* Counts the call_statement nodes under `node` whose callee text is exactly
+ * `callee`. */
+static int vba_callee_count(TSNode node, const char *src, const char *callee) {
+    int hits = 0;
+    if (strcmp(ts_node_type(node), "call_statement") == 0) {
+        TSNode target = ts_node_child_by_field_name(node, "callee", 6);
+        if (!ts_node_is_null(target)) {
+            uint32_t start = ts_node_start_byte(target);
+            uint32_t len = ts_node_end_byte(target) - start;
+            if (strlen(callee) == len && memcmp(src + start, callee, len) == 0) {
+                hits++;
+            }
+        }
+    }
+    uint32_t count = ts_node_child_count(node);
+    for (uint32_t i = 0; i < count; i++) {
+        hits += vba_callee_count(ts_node_child(node, i), src, callee);
+    }
+    return hits;
+}
+
+TEST(vba_vendored_grammar_parses_dual_target_vb6_class_clean) {
+    TSParser *parser = ts_parser_new();
+    ASSERT_NOT_NULL(parser);
+    /* The vendored runtime accepts the generated ABI (15). */
+    ASSERT_TRUE(ts_parser_set_language(parser, tree_sitter_vba()));
+    TSTree *tree = ts_parser_parse_string(parser, NULL, VBA_CLASS_SOURCE,
+                                          (uint32_t)strlen(VBA_CLASS_SOURCE));
+    ASSERT_NOT_NULL(tree);
+    TSNode root = ts_tree_root_node(tree);
+    ASSERT_STR_EQ(ts_node_type(root), "source_file");
+    ASSERT_FALSE(ts_node_has_error(root));
+    /* Every procedure is a declaration node an extractor can index. */
+    ASSERT_EQ(vba_type_count(root, "sub_declaration"), 2);
+    ASSERT_EQ(vba_type_count(root, "function_declaration"), 2);
+    ASSERT_EQ(vba_type_count(root, "property_get_declaration"), 1);
+    ASSERT_EQ(vba_type_count(root, "property_let_declaration"), 1);
+    ASSERT_EQ(vba_type_count(root, "property_set_declaration"), 1);
+    ASSERT_EQ(vba_type_count(root, "declare_sub_statement"), 2);
+    /* Bare calls keep their callee; none is split into an expression. */
+    ASSERT_EQ(vba_type_count(root, "expression_statement"), 0);
+    ASSERT_EQ(vba_callee_count(root, VBA_CLASS_SOURCE, "Err.Raise"), 1);
+    ASSERT_EQ(vba_callee_count(root, VBA_CLASS_SOURCE, "CallByName"), 1);
+    ASSERT_EQ(vba_callee_count(root, VBA_CLASS_SOURCE, "LogLine"), 1);
+    ASSERT_EQ(vba_callee_count(root, VBA_CLASS_SOURCE, "mHistory.Add"), 1);
+    ts_tree_delete(tree);
+    ts_parser_delete(parser);
+    PASS();
+}
+
+TEST(vba_vendored_grammar_parses_vb6_form_clean) {
+    TSParser *parser = ts_parser_new();
+    ASSERT_NOT_NULL(parser);
+    ASSERT_TRUE(ts_parser_set_language(parser, tree_sitter_vba()));
+    TSTree *tree = ts_parser_parse_string(parser, NULL, VBA_FORM_SOURCE,
+                                          (uint32_t)strlen(VBA_FORM_SOURCE));
+    ASSERT_NOT_NULL(tree);
+    TSNode root = ts_tree_root_node(tree);
+    ASSERT_FALSE(ts_node_has_error(root));
+    /* The designer header is structure, not code: the form and its button
+     * are two nested begin blocks ahead of the two event handlers. */
+    ASSERT_STR_EQ(ts_node_type(ts_node_named_child(root, 0)), "frm_version_statement");
+    ASSERT_EQ(vba_type_count(root, "frm_begin_block"), 2);
+    ASSERT_EQ(vba_type_count(root, "sub_declaration"), 2);
+    ts_tree_delete(tree);
+    ts_parser_delete(parser);
+    PASS();
+}
+
+TEST(vba_vendored_grammar_still_flags_broken_source) {
+    static const char broken[] = "Public Sub Broken(\n    x = \nEnd Sub\n";
+    TSParser *parser = ts_parser_new();
+    ASSERT_NOT_NULL(parser);
+    ASSERT_TRUE(ts_parser_set_language(parser, tree_sitter_vba()));
+    TSTree *tree = ts_parser_parse_string(parser, NULL, broken, (uint32_t)strlen(broken));
+    ASSERT_NOT_NULL(tree);
+    ASSERT_TRUE(ts_node_has_error(ts_tree_root_node(tree)));
+    ts_tree_delete(tree);
+    ts_parser_delete(parser);
+    PASS();
+}
+
+/* ── SQLite migrations (#2246) ───────────────────────────────────────────────
+ * The vendored SQL grammar is a self-maintained fork of DerekStride/tree-sitter-sql
+ * (tools/tree-sitter-sql + patches/sqlite-dialect.patch). Upstream rejected
+ * forms that valid SQLite migrations use, so those files were reported
+ * parse_partial. The first two tests and their inputs are Kerf's, from #2246,
+ * carried over as written; the others pin the remaining forms seen in real
+ * SQLite migration sets (vaultwarden, atuin), plus controls that keep "fixed"
+ * from meaning "stopped reporting errors". */
+static const char *SQLITE_VALID_MIGRATION =
+    "PRAGMA foreign_keys = ON;\n"
+    "CREATE TABLE IF NOT EXISTS registrations (\n"
+    "  id INTEGER PRIMARY KEY AUTOINCREMENT,\n"
+    "  name TEXT NOT NULL\n"
+    ");\n"
+    "CREATE TRIGGER IF NOT EXISTS registrations_guard\n"
+    "BEFORE UPDATE ON registrations\n"
+    "BEGIN\n"
+    "  SELECT RAISE(ABORT, 'registrations are immutable');\n"
+    "END;\n"
+    "CREATE UNIQUE INDEX IF NOT EXISTS registrations_name ON registrations(name)\n"
+    "  WHERE name IS NOT NULL;\n";
+
+static const char *SQLITE_MALFORMED =
+    "CREATE TABLE broken ???;\n";
+
+TEST(sqlite_valid_migration_not_flagged) {
+    CBMFileResult *r = do_extract(SQLITE_VALID_MIGRATION, CBM_LANG_SQL, "migration.sql");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT_FALSE(r->parse_incomplete);
+    ASSERT_EQ(r->error_region_count, 0);
+    ASSERT_NULL(r->error_ranges);
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(sqlite_malformed_still_flagged) {
+    CBMFileResult *r = do_extract(SQLITE_MALFORMED, CBM_LANG_SQL, "broken.sql");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT_TRUE(r->parse_incomplete);
+    ASSERT_TRUE(r->error_region_count > 0);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* `key` is not reserved in SQLite, so it is a common column name. After the
+ * first column the grammar also accepts MySQL's `KEY name (cols)` index there,
+ * which took `key TEXT NOT NULL` for a malformed index (vaultwarden, atuin-kv). */
+static const char *SQLITE_KEY_COLUMN = "CREATE TABLE kv (\n"
+                                       "  namespace TEXT NOT NULL,\n"
+                                       "  key TEXT NOT NULL,\n"
+                                       "  value TEXT NOT NULL\n"
+                                       ");\n"
+                                       "CREATE UNIQUE INDEX idx_kv ON kv (namespace, key);\n";
+
+/* Control: MySQL's KEY index inside CREATE TABLE still parses as an index. */
+static const char *MYSQL_KEY_INDEX = "CREATE TABLE t (\n"
+                                     "  id INT NOT NULL,\n"
+                                     "  KEY idx_id (id)\n"
+                                     ");\n";
+
+static const char *SQLITE_WITHOUT_ROWID = "CREATE TABLE history_uploads (\n"
+                                          "  user_id TEXT NOT NULL,\n"
+                                          "  history_id TEXT NOT NULL,\n"
+                                          "  PRIMARY KEY (user_id, history_id)\n"
+                                          ") WITHOUT ROWID;\n";
+
+/* atuin's ai_session schema: a trigger with an unparenthesized WHEN condition
+ * and an INSERT OR IGNORE body, then an fts5 virtual table. */
+static const char *SQLITE_TRIGGER_WHEN_AND_FTS5 =
+    "CREATE TABLE sessions (id INTEGER PRIMARY KEY, root_harness INTEGER);\n"
+    "CREATE TABLE regrouped (session INTEGER PRIMARY KEY);\n"
+    "CREATE TRIGGER sessions_regrouped AFTER UPDATE OF root_harness ON sessions\n"
+    "WHEN OLD.root_harness IS NOT NEW.root_harness\n"
+    "BEGIN\n"
+    "    INSERT OR IGNORE INTO regrouped (session) VALUES (NEW.id);\n"
+    "END;\n"
+    "CREATE VIRTUAL TABLE messages_fts USING fts5(\n"
+    "    title,\n"
+    "    body,\n"
+    "    tokenize = 'unicode61',\n"
+    "    content = '',\n"
+    "    contentless_delete = 1\n"
+    ");\n";
+
+static const char *SQLITE_PRAGMA_FORMS = "PRAGMA journal_mode = WAL;\n"
+                                         "PRAGMA main.cache_size = -2000;\n"
+                                         "PRAGMA table_info(registrations);\n"
+                                         "PRAGMA optimize;\n";
+
+/* Invalid SQLite (its ALTER TABLE has no DROP INDEX), shipped in a real down
+ * migration (atuin-scripts): it must stay flagged. */
+static const char *SQLITE_ALTER_DROP_INDEX = "alter table scripts drop index name_uniq_idx;\n";
+
+static int sqlite_has_labeled_def(CBMFileResult *r, const char *label, const char *name) {
+    for (int i = 0; i < r->defs.count; i++) {
+        const CBMDefinition *d = &r->defs.items[i];
+        if (d->label && d->name && strcmp(d->label, label) == 0 && strcmp(d->name, name) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* 0 when the file parsed without any error region; the ASSERTs return 1. */
+static int sqlite_check_clean(CBMFileResult *r) {
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT_FALSE(r->parse_incomplete);
+    ASSERT_EQ(r->error_region_count, 0);
+    ASSERT_NULL(r->error_ranges);
+    return 0;
+}
+
+TEST(sqlite_key_column_not_flagged_issue2246) {
+    CBMFileResult *r = do_extract(SQLITE_KEY_COLUMN, CBM_LANG_SQL, "create_kv_db.up.sql");
+    ASSERT_EQ(sqlite_check_clean(r), 0);
+    ASSERT_TRUE(sqlite_has_labeled_def(r, "Table", "kv"));
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(mysql_key_index_in_create_table_still_clean_issue2246) {
+    CBMFileResult *r = do_extract(MYSQL_KEY_INDEX, CBM_LANG_SQL, "mysql_schema.sql");
+    ASSERT_EQ(sqlite_check_clean(r), 0);
+    ASSERT_TRUE(sqlite_has_labeled_def(r, "Table", "t"));
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(sqlite_without_rowid_not_flagged_issue2246) {
+    CBMFileResult *r = do_extract(SQLITE_WITHOUT_ROWID, CBM_LANG_SQL, "0003_queue_owners.sql");
+    ASSERT_EQ(sqlite_check_clean(r), 0);
+    ASSERT_TRUE(sqlite_has_labeled_def(r, "Table", "history_uploads"));
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(sqlite_trigger_when_body_and_fts5_not_flagged_issue2246) {
+    CBMFileResult *r = do_extract(SQLITE_TRIGGER_WHEN_AND_FTS5, CBM_LANG_SQL, "0001_init.sql");
+    ASSERT_EQ(sqlite_check_clean(r), 0);
+    ASSERT_TRUE(sqlite_has_labeled_def(r, "Table", "regrouped"));
+    /* The virtual table is a table: it is extracted like one. */
+    ASSERT_TRUE(sqlite_has_labeled_def(r, "Table", "messages_fts"));
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(sqlite_pragma_forms_not_flagged_issue2246) {
+    CBMFileResult *r = do_extract(SQLITE_PRAGMA_FORMS, CBM_LANG_SQL, "pragmas.sql");
+    ASSERT_EQ(sqlite_check_clean(r), 0);
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(sqlite_alter_table_drop_index_still_flagged_issue2246) {
+    CBMFileResult *r = do_extract(SQLITE_ALTER_DROP_INDEX, CBM_LANG_SQL, "unique_names.down.sql");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT_TRUE(r->parse_incomplete);
+    ASSERT_TRUE(r->error_region_count > 0);
+    cbm_free_result(r);
+    PASS();
+}
+
+/* ── jsonnet: the external scanner's state belongs to one parser ─────────────
+ * Upstream's jsonnet scanner kept its state (inside a string? which quote?) in
+ * process globals, so every worker's parser shared it: on go/grafana__loki a
+ * different set of jsonnet files came back parse_partial on every index, with
+ * their definitions and edges, and none does when parsed one at a time. The
+ * local patch moves the state into the per-parser payload and resets it on
+ * every deserialize (grammars/MANIFEST.md, "Local source patches").
+ *
+ * No threads here: the input callback hands parser A one byte per call, and
+ * when A first reads the byte after its opening quote -- A's scanner is then
+ * inside scan_string_start -- the callback runs a complete parse of `)'` on
+ * parser B. That parse ends on a string end, which clears B's state; with
+ * shared globals it cleared A's too, mid-scan, and A's string broke. The
+ * second test pins the other half: a parse that ends inside a string must not
+ * leave that state to the next parse. */
+extern const TSLanguage *tree_sitter_jsonnet(void);
+
+typedef struct {
+    const char *src;
+    uint32_t len;
+    uint32_t trigger; /* byte at which parser B runs */
+    bool fired;
+    TSParser *other;
+} jsonnet_interleave_t;
+
+static const char *jsonnet_read_one_byte(void *payload, uint32_t byte_index, TSPoint position,
+                                         uint32_t *bytes_read) {
+    (void)position;
+    jsonnet_interleave_t *x = (jsonnet_interleave_t *)payload;
+    if (byte_index >= x->len) {
+        *bytes_read = 0;
+        return "";
+    }
+    if (!x->fired && byte_index == x->trigger) {
+        static const char resets_on_string_end[] = ")'\n";
+        x->fired = true;
+        TSTree *other = ts_parser_parse_string(x->other, NULL, resets_on_string_end,
+                                               (uint32_t)strlen(resets_on_string_end));
+        ts_tree_delete(other);
+    }
+    *bytes_read = 1;
+    return x->src + byte_index;
+}
+
+TEST(jsonnet_scanner_state_is_per_parser) {
+    static const char src[] = "{\n  name: 'query-scheduler-discovery',\n  port: 9095,\n}\n";
+    TSParser *a = ts_parser_new();
+    TSParser *b = ts_parser_new();
+    ASSERT_NOT_NULL(a);
+    ASSERT_NOT_NULL(b);
+    ASSERT_TRUE(ts_parser_set_language(a, tree_sitter_jsonnet()));
+    ASSERT_TRUE(ts_parser_set_language(b, tree_sitter_jsonnet()));
+
+    /* Control: on its own the source parses clean. */
+    TSTree *alone = ts_parser_parse_string(a, NULL, src, (uint32_t)strlen(src));
+    ASSERT_NOT_NULL(alone);
+    ASSERT_FALSE(ts_node_has_error(ts_tree_root_node(alone)));
+    ts_tree_delete(alone);
+
+    jsonnet_interleave_t x = {src, (uint32_t)strlen(src), 0, false, b};
+    x.trigger = (uint32_t)(strchr(src, '\'') - src) + 1;
+    TSInput input = {&x, jsonnet_read_one_byte, TSInputEncodingUTF8, NULL};
+    TSTree *tree = ts_parser_parse(a, NULL, input);
+    ASSERT_NOT_NULL(tree);
+    ASSERT_TRUE(x.fired); /* B really ran inside A's string */
+    /* has_error covers ERROR and MISSING nodes alike. */
+    ASSERT_FALSE(ts_node_has_error(ts_tree_root_node(tree)));
+    ts_tree_delete(tree);
+    ts_parser_delete(b);
+    ts_parser_delete(a);
+    PASS();
+}
+
+TEST(jsonnet_scanner_state_not_carried_between_parses) {
+    static const char unterminated[] = "local s = 'unterminated\n";
+    static const char text_block[] = "local doc = |||\n  a text block\n|||;\ndoc\n";
+    TSParser *parser = ts_parser_new();
+    ASSERT_NOT_NULL(parser);
+    ASSERT_TRUE(ts_parser_set_language(parser, tree_sitter_jsonnet()));
+
+    /* A parse that ends inside a string... */
+    TSTree *first =
+        ts_parser_parse_string(parser, NULL, unterminated, (uint32_t)strlen(unterminated));
+    ASSERT_NOT_NULL(first);
+    ASSERT_TRUE(ts_node_has_error(ts_tree_root_node(first)));
+    ts_tree_delete(first);
+
+    /* ...must not decide how the next file lexes: ||| blocks are lexed only by
+     * the external scanner, which a carried-over "inside a string" disabled. */
+    TSTree *next = ts_parser_parse_string(parser, NULL, text_block, (uint32_t)strlen(text_block));
+    ASSERT_NOT_NULL(next);
+    ASSERT_FALSE(ts_node_has_error(ts_tree_root_node(next)));
+    ts_tree_delete(next);
+    ts_parser_delete(parser);
+    PASS();
+}
+
+SUITE(parse_coverage) {
+    RUN_TEST(source_line_count_one_convention);
+    RUN_TEST(c_ifdef_split_brace_sets_parse_incomplete);
+    RUN_TEST(c_ifdef_split_brace_neighbors_still_extracted);
+    RUN_TEST(c_error_range_points_at_failed_region);
+    RUN_TEST(c_clean_file_not_flagged);
+    RUN_TEST(py_unrecovered_garbage_sets_parse_incomplete);
+    RUN_TEST(py_recovered_def_not_flagged);
+    RUN_TEST(py_clean_file_not_flagged);
+    RUN_TEST(error_region_cap_is_honored);
+    RUN_TEST(error_region_cap_reports_what_it_dropped);
+    RUN_TEST(uncapped_ranges_carry_no_marker);
+    RUN_TEST(python_whole_file_error_is_unusable);
+    RUN_TEST(local_error_stays_partial_not_unusable);
+    RUN_TEST(clean_file_is_neither_partial_nor_unusable);
+    RUN_TEST(c_ifdef_split_is_partial_never_unusable);
+    RUN_TEST(c_trailing_recovered_defs_keep_flag);
+    RUN_TEST(dockerfile_missing_final_newline_not_flagged_issue1610);
+    RUN_TEST(dockerfile_with_final_newline_still_clean_issue1610);
+    RUN_TEST(dockerfile_trailing_space_at_eof_not_flagged_issue1746);
+    RUN_TEST(dockerfile_trailing_space_with_final_newline_clean_issue1746);
+    RUN_TEST(dockerfile_without_trailing_space_at_eof_clean_issue1746);
+    RUN_TEST(dockerfile_crlf_trailing_space_at_eof_not_flagged_issue1746);
+    RUN_TEST(missing_final_newline_not_flagged_across_grammars_issue1610);
+    RUN_TEST(real_error_before_eof_still_flagged_without_final_newline_issue1610);
+    RUN_TEST(width_bearing_error_at_eof_still_flagged_issue1610);
+    RUN_TEST(makefile_unterminated_recipe_is_parsed_issue2078);
+    RUN_TEST(c_ifdef_split_range_narrows_to_dropped_branch);
+    RUN_TEST(c_ifdef_split_range_excludes_lines_the_preprocessor_explained);
+    RUN_TEST(c_ifdef_split_range_never_starts_on_a_directive);
+    RUN_TEST(c_refinement_does_not_suppress_real_garbage);
+    RUN_TEST(c_clean_file_stays_unflagged_after_refinement);
+    RUN_TEST(perl_format_followed_by_named_sub_is_complete_issue1838);
+    RUN_TEST(perl_malformed_source_remains_partial_issue1838);
+    RUN_TEST(dockerfile_trailing_blank_at_eof_not_flagged_issue1746);
+    RUN_TEST(real_error_before_eof_still_flagged_with_trailing_blank_issue1746);
+    RUN_TEST(width_bearing_error_at_eof_still_flagged_with_trailing_blank_issue1746);
+    RUN_TEST(c_thread_local_grammar_limit_is_pinned_issue963);
+    RUN_TEST(coverage_repeated_error_line_reports_one_range_issue963);
+    RUN_TEST(coverage_range_never_ends_past_the_last_line_issue963);
+    RUN_TEST(coverage_range_never_covers_an_extracted_definition);
+    RUN_TEST(coverage_gap_of_only_comments_is_not_a_miss);
+    RUN_TEST(sql_values_scanner_excludes_only_literal_rows_issue1735);
+    RUN_TEST(sql_values_scanner_keeps_positions_of_kept_text_issue1735);
+    RUN_TEST(sql_dump_literal_rows_leave_the_graph_unchanged_issue1735);
+    RUN_TEST(sql_dump_tuple_with_subquery_or_call_is_still_parsed_issue1735);
+    RUN_TEST(sql_dump_parse_does_not_grow_with_the_row_count_issue1735);
+    RUN_TEST(sql_dump_of_many_megabytes_is_indexed_not_timed_out_issue1735);
+    RUN_TEST(jsx_lone_ampersand_is_not_parse_partial_issue1736);
+    RUN_TEST(jsx_broken_markup_still_parse_partial_issue1736);
+    RUN_TEST(cs_collection_expression_in_conditional_is_complete_issue1748);
+    RUN_TEST(cs_calls_inside_collection_expression_extracted_issue1748);
+    RUN_TEST(cs_malformed_conditional_remains_partial_issue1748);
+    RUN_TEST(markdown_unterminated_last_line_is_clean_issue2078);
+    RUN_TEST(markdown_terminated_last_line_controls_unchanged_issue2078);
+    RUN_TEST(code_without_final_newline_extracts_identically_issue2078);
+    RUN_TEST(virtual_newline_adds_no_phantom_line_or_text_issue2078);
+    RUN_TEST(empty_and_newline_only_files_unchanged_issue2078);
+
+    RUN_TEST(pascal_cyrillic_member_calls_not_partial_issue2211);
+    RUN_TEST(pascal_cyrillic_procedure_name_extracted_issue2211);
+    RUN_TEST(pascal_ascii_control_still_clean_issue2211);
+    RUN_TEST(pascal_broken_source_still_flagged_issue2211);
+    RUN_TEST(vbnet_vendored_grammar_parses_real_vb_clean);
+    RUN_TEST(vbnet_vendored_grammar_still_flags_broken_source);
+    RUN_TEST(vba_vendored_grammar_parses_dual_target_vb6_class_clean);
+    RUN_TEST(vba_vendored_grammar_parses_vb6_form_clean);
+    RUN_TEST(vba_vendored_grammar_still_flags_broken_source);
+
+    RUN_TEST(sqlite_valid_migration_not_flagged);
+    RUN_TEST(sqlite_malformed_still_flagged);
+    RUN_TEST(sqlite_key_column_not_flagged_issue2246);
+    RUN_TEST(mysql_key_index_in_create_table_still_clean_issue2246);
+    RUN_TEST(sqlite_without_rowid_not_flagged_issue2246);
+    RUN_TEST(sqlite_trigger_when_body_and_fts5_not_flagged_issue2246);
+    RUN_TEST(sqlite_pragma_forms_not_flagged_issue2246);
+    RUN_TEST(sqlite_alter_table_drop_index_still_flagged_issue2246);
+    /* Per-parser first: on the unpatched scanner, the carried-over state the
+     * second test leaves behind would hide the first one's defect. */
+    RUN_TEST(jsonnet_scanner_state_is_per_parser);
+    RUN_TEST(jsonnet_scanner_state_not_carried_between_parses);
+}

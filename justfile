@@ -93,3 +93,18 @@ mcp-check:
   just --justfile mcp/discord/justfile check
   just --justfile mcp/slack/justfile check
   just --justfile mcp/telegram/justfile check
+
+# Build the Mori (codebase-memory-mcp) binary, fetching pinned grammars first.
+mori-build *ARGS:
+  just --justfile mori/justfile grammars {{ARGS}}
+  just --justfile mori/justfile build
+
+# Run the Mori grammar and extraction suites.
+mori-test *ARGS:
+  just --justfile mori/justfile grammars {{ARGS}}
+  just --justfile mori/justfile test
+
+# Run the Mori script tests, build and targeted suites.
+mori-check *ARGS:
+  just --justfile mori/justfile grammars {{ARGS}}
+  just --justfile mori/justfile check

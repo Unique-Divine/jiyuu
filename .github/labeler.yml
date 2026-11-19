@@ -4,6 +4,7 @@ A-ai:
   - changed-files:
       - any-glob-to-any-file:
           - mcp/**
+          - mori/**
           - ai-skills/**
           - tmux-agent-watch/**
 Z-mcp:
@@ -22,6 +23,10 @@ Z-mcp-telegram:
   - changed-files:
       - any-glob-to-any-file:
           - mcp/telegram/**
+Z-mori:
+  - changed-files:
+      - any-glob-to-any-file:
+          - mori/**
 Z-ai-skills:
   - changed-files:
       - any-glob-to-any-file:
