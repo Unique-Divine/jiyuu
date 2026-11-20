@@ -517,10 +517,21 @@ def cmd_calls(a: argparse.Namespace) -> int:
 
 
 def cmd_seed(a: argparse.Namespace) -> int:
-  with open(a.report, encoding="utf-8") as f:
-    rep = json.load(f)
-  diffs = [d for r in rep["repos"] for d in r["diffs"]]
-  diffs += rep["l4"]["diffs"]
+  diffs = []
+  for path in a.reports:
+    with open(path, encoding="utf-8") as f:
+      rep = json.load(f)
+    # A repo whose run was invalid (parse timeouts, moved checkout) measured
+    # nothing; leave out its diffs and the calls that touch it.
+    bad = {r["dir"] for r in rep["repos"] if r["error"]}
+    if bad:
+      log(f"{path}: leaving out invalid repos {', '.join(sorted(bad))}")
+    diffs += [d for r in rep["repos"] if r["dir"] not in bad
+              for d in r["diffs"]]
+    if rep["l4"]["stats"] and not bad:
+      diffs += rep["l4"]["diffs"]
+    elif rep["l4"]["stats"]:
+      log(f"{path}: leaving out L4, which saw the invalid repos")
   entries = allowlist.seed_entries(diffs, a.measured)
   with open(a.out, "w", encoding="utf-8") as f:
     for e in entries:
@@ -544,7 +555,7 @@ def main(argv: list[str]) -> int:
     p.add_argument("--allowlist", default=ALLOWLIST)
     p.add_argument("--calls", default=CALLS if name == "run" else CALLS_CI)
     p.add_argument("--skip-l4", action="store_true")
-    p.add_argument("--timeout-retries", type=int, default=2,
+    p.add_argument("--timeout-retries", type=int, default=4,
                    help="reindexes when files hit the parse timeout")
     if name == "run":
       p.add_argument("--corpus", default=corpus.CORPUS_JSON)
@@ -569,7 +580,7 @@ def main(argv: list[str]) -> int:
   p.add_argument("--home", default=home)
   p.add_argument("--corpus", default=corpus.CORPUS_JSON)
   p = sub.add_parser("seed")
-  p.add_argument("report")
+  p.add_argument("reports", nargs="+", help="report.json of measured runs")
   p.add_argument("--out", default=ALLOWLIST)
   p.add_argument("--measured", required=True,
                  help="what was measured, e.g. 'C-vs-C 2026-11-20'")
