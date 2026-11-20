@@ -115,7 +115,7 @@ Step 0 alone in a few minutes. Both need the grammars installed first
 just test-all        # inside mori/; same as: scripts/test.sh
 ```
 
-Thirteen upstream contract checks that test DeusData's release machinery are
+Twelve upstream contract checks that test DeusData's release machinery are
 removed; [IMPORT.md](IMPORT.md#excluded-contract-checks) lists them with
 their restore commands.
 

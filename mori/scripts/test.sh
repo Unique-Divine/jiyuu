@@ -271,7 +271,7 @@ fi
 # Step 0: fast build/security harness regressions run before the compiler-heavy
 # suite. The Windows package surface is static here; native launcher behavior is
 # exercised by scripts/test-windows.ps1.
-# Mori (Jiyuu): the 13 upstream contract steps that check DeusData's release
+# Mori (Jiyuu): 12 upstream contract steps that check DeusData's release
 # machinery (.github/, pkg/, install.sh, server.json) are removed, so the step
 # letters skip. IMPORT.md, "Excluded Contract Checks", lists each with the
 # command that restores it.
@@ -328,6 +328,9 @@ bash "$ROOT/tests/test_vt_release_notes_contract.sh"
 
 echo "=== Step 0n: VirusTotal gate policy contract ==="
 bash "$ROOT/tests/test_vt_gate_policy_contract.sh"
+
+echo "=== Step 0o: MCPB bundle contract (#1246) ==="
+bash "$ROOT/tests/test_mcpb_bundle_contract.sh"
 
 echo "=== Step 0q: release candidate derivation contract ==="
 bash "$ROOT/tests/test_release_candidate_derivation_contract.sh"

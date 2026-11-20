@@ -51,7 +51,7 @@ file says was made because the path was missing.
   `flake.lock`, `server.json`, `glama.json`, `install.sh` and `install.ps1`
   (see [Excluded Paths](#excluded-paths)). Nothing in the build or the C test
   suites reads them. Release and setup scripts that do are left unchanged.
-- Removed 13 upstream contract scripts that check DeusData's release
+- Removed 12 upstream contract scripts that check DeusData's release
   machinery, their steps in `scripts/test.sh`, and the fixture
   `tests/fixtures/select-lanes/` (see
   [Excluded Contract Checks](#excluded-contract-checks)). `scripts/test.sh`
@@ -218,12 +218,18 @@ no file this import modifies.
 ## Excluded Contract Checks
 
 Step 0 of `scripts/test.sh` ran 45 static contract scripts. Thirteen of them
-check DeusData's release machinery and read paths this import excludes, so
-they failed, and with `set -e` the first one (Step 0e) stopped every later
-step and suite. They are removed with their steps; the step letters in
+read paths this import excludes and failed, and with `set -e` the first one
+(Step 0e) stopped every later step and suite. Twelve check DeusData's release
+machinery and are removed with their steps; the step letters in
 `scripts/test.sh` skip where they were. Nine failed from the start of the
-import; four (Steps 0o, 0p, 0x2 and 0y3) failed once `install.sh` and
+import; three (Steps 0p, 0x2 and 0y3) failed once `install.sh` and
 `server.json` were removed.
+
+The thirteenth, `tests/test_mcpb_bundle_contract.sh` (Step 0o), stays. It
+failed only because `scripts/package-release.sh` copied `install.sh` into
+each archive; [jiyuu#163](https://github.com/Unique-Divine/jiyuu/pull/163)
+drops the installer from the archives, and the check passes on that branch.
+Until jiyuu#163 merges, Step 0o fails and stops the run there.
 
 Each entry gives the upstream file, its Step 0 label, what it guarded, and
 the paths it reads. To restore one, run its restore command from the Jiyuu
@@ -279,18 +285,6 @@ then add its two lines back to Step 0 of `scripts/test.sh`, copied from the
     ```bash
     git -C ~/codebase-memory-mcp archive cdfdf264 \
       tests/test_venue_parity_contract.sh | tar -x -C mori
-    ```
-
-- [`tests/test_mcpb_bundle_contract.sh`](https://github.com/DeusData/codebase-memory-mcp/blob/cdfdf26483fa56f4f7d9d85e7c4c3924133b458b/tests/test_mcpb_bundle_contract.sh),
-  Step 0o, "MCPB bundle contract (#1246)"
-  - Guarded: `scripts/package-release.sh` builds MCPB bundles with the right
-    members, manifest, and executable bit for each target that gets one.
-  - Reads: `install.sh` (copied by `scripts/package-release.sh`)
-  - Restore:
-
-    ```bash
-    git -C ~/codebase-memory-mcp archive cdfdf264 \
-      tests/test_mcpb_bundle_contract.sh | tar -x -C mori
     ```
 
 - [`tests/test_mcpb_registry_entries_contract.sh`](https://github.com/DeusData/codebase-memory-mcp/blob/cdfdf26483fa56f4f7d9d85e7c4c3924133b458b/tests/test_mcpb_registry_entries_contract.sh),
@@ -405,3 +399,14 @@ upstream catch-ups clean: comments in `tests/test_main.c` and
 `scripts/ci/README.md`, `test-infrastructure/README.md`, and the history
 fixture `scripts/test-impact/fixtures/2026-09-filesets.tsv` (file lists of
 past upstream PRs, replayed by Step 0z2 without opening the files).
+
+## Follow-Ups
+
+- [ ] Rewrite or remove the upstream scripts that still fetch or run the
+  excluded installers: `scripts/setup.sh` and `scripts/setup-windows.ps1`
+  (download through `install.sh` / `install.ps1`), `scripts/smoke-local.sh`
+  and `scripts/smoke-wrappers.sh` (stage `install.sh` in the release
+  fixture), and Phase 13 of `scripts/smoke-test.sh` (skips without
+  `install.sh`).
+  - Why: no Jiyuu recipe or Step 0 check runs them, so they fail only when
+    called by hand; the removed Steps 0h and 0y3 were their only checks.
