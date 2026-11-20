@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { chmod, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -11,6 +11,7 @@ async function cliFixture(
     calls: string,
     requestFile: string,
   ) => Promise<void>,
+  executable = "sai-deals",
 ) {
   const root = await mkdtemp(join(tmpdir(), "tg-provision-cli-"))
   const calls = join(root, "calls.jsonl"),
@@ -26,9 +27,10 @@ async function cliFixture(
     dealIds: ["deal-a", "deal-b"],
   }
   try {
+    await symlink(process.execPath, join(root, "bun"))
     await writeFile(requestFile, JSON.stringify(request))
     await writeFile(
-      join(root, "sai-deal-desk"),
+      join(root, executable),
       `#!/usr/bin/env bun
 import {appendFileSync} from "node:fs";
 const input=JSON.parse(await Bun.stdin.text());
@@ -36,7 +38,7 @@ appendFileSync(process.env.TEST_CLOUD_CALLS, JSON.stringify({args:process.argv.s
 console.log(JSON.stringify({...${JSON.stringify(request)},state:"prepared",chatId:null,claimToken:"private-test-token",resolvedParticipants:null,resolvedAdmins:null}));
 `,
     )
-    await chmod(join(root, "sai-deal-desk"), 0o700)
+    await chmod(join(root, executable), 0o700)
     const run = async (args: string[]) => {
       const child = Bun.spawn(
         [
@@ -50,7 +52,7 @@ console.log(JSON.stringify({...${JSON.stringify(request)},state:"prepared",chatI
           env: {
             ...process.env,
             TG_SAI_DIR: join(root, "profiles"),
-            PATH: `${root}:${process.env.PATH}`,
+            PATH: root,
             TEST_CLOUD_CALLS: calls,
           },
           stdout: "pipe",
@@ -90,6 +92,12 @@ test("prepare --run calls only the authoritative cloud prepare with typed input"
     expect(call.input.expectedUserId).toBe("10")
     expect(result.stdout).not.toContain("private-test-token")
   }))
+test("prepare --run works with the current custody worker binary", async () =>
+  cliFixture(async (run, calls, file) => {
+    const result = await run(["prepare", "--file", file, "--run"])
+    expect(result.exit).toBe(0)
+    expect(JSON.parse((await readFile(calls, "utf8")).trim()).args[1]).toBe("prepare")
+  }, "sai-deal-desk"))
 test("run defaults to cloud view only, without local session setup or claim", async () =>
   cliFixture(async (run, calls) => {
     const result = await run(["run", "--request-id", "cli-test"])
