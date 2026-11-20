@@ -2821,7 +2821,14 @@ static int main_run_daemon_ctl(int argc, char **argv, const cbm_daemon_ipc_endpo
     return ui_result;
 }
 
+#ifdef CBM_AS_LIBRARY
+/* libmori-c (Makefile.cbm) builds this file for the Rust `mori` binary, whose
+ * main forwards argv here. Only the name changes; the body is the same. */
+int cbm_c_main(int argc, char **argv);
+int cbm_c_main(int argc, char **argv) {
+#else
 int main(int argc, char **argv) {
+#endif
     /* Must remain the first statement: see allocator binding contract above. */
     cbm_alloc_init();
 #ifndef _WIN32
