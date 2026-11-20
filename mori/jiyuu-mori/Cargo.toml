@@ -3,6 +3,7 @@ name = "jiyuu-mori"
 version = "0.14.0-dev"
 authors = ["Unique Divine <ud@uniquedivine.com>"]
 edition = "2024"
+rust-version = "1.89"
 description = "Mori: cross-repo code graph for agents (Rust over the C program)"
 repository = "https://github.com/Unique-Divine/jiyuu"
 homepage = "https://github.com/Unique-Divine/jiyuu/tree/main/mori"

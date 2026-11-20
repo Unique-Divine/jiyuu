@@ -33,6 +33,8 @@ jobs:
       python_tg: ${{ github.event_name == 'workflow_dispatch' || steps.paths.outputs.python_tg == 'true' }}
       mcp_manifest: ${{ github.event_name == 'workflow_dispatch' || steps.paths.outputs.mcp_manifest == 'true' }}
       mori: ${{ github.event_name == 'workflow_dispatch' || steps.paths.outputs.mori == 'true' }}
+      jiyuu_mori: ${{ github.event_name == 'workflow_dispatch' || steps.paths.outputs.jiyuu_mori == 'true' }}
+      mori_linked: ${{ github.event_name == 'workflow_dispatch' || steps.paths.outputs.mori_linked == 'true' }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -137,6 +139,20 @@ jobs:
             - justfile
             mori:
             - mori/**
+            - .github/workflows/ci-test.yaml
+            - justfile
+            jiyuu_mori:
+            - mori/jiyuu-mori/**
+            - Cargo.toml
+            - Cargo.lock
+            - .cargo/**
+            - .github/workflows/ci-test.yaml
+            - justfile
+            mori_linked:
+            - mori/**
+            - Cargo.toml
+            - Cargo.lock
+            - .cargo/**
             - .github/workflows/ci-test.yaml
             - justfile
   test:
@@ -531,6 +547,8 @@ jobs:
         with:
           path: ~/.cache/jiyuu-mori/grammars
           key: mori-grammars-${{ steps.keys.outputs.grammars }}
+      # Job jiyuu-mori-linked falls back to this key format
+      # (mori-ccache-<cc>-<grammars>-<Makefile hash>); change both together.
       - name: Restore compiler cache
         if: needs.changes.outputs.mori == 'true'
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
@@ -556,6 +574,119 @@ jobs:
           "edge_types_probe lang_contract cross_repo extraction graph_buffer pipeline yaml language"
       - name: Compiler cache statistics
         if: always() && needs.changes.outputs.mori == 'true'
+        run: ccache --show-stats || true
+    needs: changes
+  # Pure-Rust checks for crate jiyuu-mori: no C toolchain, no grammars.
+  jiyuu-mori:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Unaffected project
+        if: needs.changes.outputs.jiyuu_mori != 'true'
+        run: echo "No relevant changes; check completed successfully."
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        if: needs.changes.outputs.jiyuu_mori == 'true'
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        if: needs.changes.outputs.jiyuu_mori == 'true'
+        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          toolchain: stable
+          components: clippy,rustfmt
+      - name: Install just
+        if: needs.changes.outputs.jiyuu_mori == 'true'
+        uses: extractions/setup-just@f8a3cce218d9f83db3a2ecd90e41ac3de6cdfd9b # v3
+      - name: Check
+        if: needs.changes.outputs.jiyuu_mori == 'true'
+        run: just --justfile mori/jiyuu-mori/justfile check
+    needs: changes
+  # jiyuu-mori with feature c-backend: links the whole C program and compares
+  # mori with the C reference binary. Shares the grammar archive cache with
+  # mori-c and falls back to its compiler cache.
+  jiyuu-mori-linked:
+    name: jiyuu-mori linked / ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    env:
+      CCACHE_MAXSIZE: 1G
+      # As mori/scripts/env.sh sets it: a hit is the identical compilation.
+      CCACHE_COMPILERCHECK: content
+    steps:
+      - name: Unaffected project
+        if: needs.changes.outputs.mori_linked != 'true'
+        run: echo "No relevant changes; check completed successfully."
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        if: needs.changes.outputs.mori_linked == 'true'
+        with:
+          persist-credentials: false
+      - name: Install build dependencies
+        if: needs.changes.outputs.mori_linked == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            build-essential ccache jq zlib1g-dev zstd
+      # build.rs runs make without scripts/env.sh, so put ccache's
+      # masquerade directory first on PATH the way env.sh does.
+      - name: Route gcc through ccache
+        if: needs.changes.outputs.mori_linked == 'true'
+        run: echo /usr/lib/ccache >> "$GITHUB_PATH"
+      - name: Install bun
+        if: needs.changes.outputs.mori_linked == 'true'
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.3
+      - name: Install Rust
+        if: needs.changes.outputs.mori_linked == 'true'
+        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          toolchain: stable
+          components: clippy
+      - name: Install just
+        if: needs.changes.outputs.mori_linked == 'true'
+        uses: extractions/setup-just@f8a3cce218d9f83db3a2ecd90e41ac3de6cdfd9b # v3
+      - name: Compute cache keys
+        id: keys
+        if: needs.changes.outputs.mori_linked == 'true'
+        run: |
+          echo "grammars=$(jq -r .sha256 mori/grammars.lock.json)" >> "$GITHUB_OUTPUT"
+          echo "cc=$(gcc -dumpmachine)-gcc$(gcc -dumpfullversion)" >> "$GITHUB_OUTPUT"
+      - name: Restore grammar archive
+        if: needs.changes.outputs.mori_linked == 'true'
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cache/jiyuu-mori/grammars
+          key: mori-grammars-${{ steps.keys.outputs.grammars }}
+      # Same key family as mori-c plus a -rs suffix: each job saves its own
+      # entry, and either one's restore-keys prefix can pick up the other's.
+      - name: Restore compiler cache
+        if: needs.changes.outputs.mori_linked == 'true'
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cache/ccache
+          key: mori-ccache-${{ steps.keys.outputs.cc }}-${{ steps.keys.outputs.grammars }}-${{ hashFiles('mori/Makefile.cbm') }}-rs
+          restore-keys: |
+            mori-ccache-${{ steps.keys.outputs.cc }}-${{ steps.keys.outputs.grammars }}-${{ hashFiles('mori/Makefile.cbm') }}
+            mori-ccache-${{ steps.keys.outputs.cc }}-${{ steps.keys.outputs.grammars }}-
+            mori-ccache-${{ steps.keys.outputs.cc }}-
+      - name: Fetch grammars
+        if: needs.changes.outputs.mori_linked == 'true'
+        run: just --justfile mori/justfile grammars
+      - name: Reset compiler cache statistics
+        if: needs.changes.outputs.mori_linked == 'true'
+        run: ccache --zero-stats
+      - name: Check linked
+        if: needs.changes.outputs.mori_linked == 'true'
+        run: just --justfile mori/jiyuu-mori/justfile check-linked
+      - name: Compiler cache statistics
+        if: always() && needs.changes.outputs.mori_linked == 'true'
         run: ccache --show-stats || true
     needs: changes
   # Publish jobs, one per distributable package. Each runs only on a push to
