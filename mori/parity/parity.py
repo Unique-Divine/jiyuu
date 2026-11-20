@@ -435,8 +435,14 @@ def run(repos: list[tuple[str, str]], call_list: list[dict[str, Any]] | None,
   t0 = time.monotonic()
   for dir_, root in repos:
     log(f"repo {dir_} ({root})")
-    results.append(compare_repo(sides, dir_, root, entries,
-                                a.timeout_retries))
+    try:
+      results.append(compare_repo(sides, dir_, root, entries,
+                                  a.timeout_retries))
+    except (sqlite3.Error, OSError, ValueError, KeyError) as e:
+      log(f"  {dir_}: comparison failed: {e!r}")
+      r = RepoResult(dir_, root)
+      r.error = f"comparison failed: {e!r}"[:300]
+      results.append(r)
   l4: list[dict[str, Any]] = []
   l4_stats = None
   if call_list is not None:

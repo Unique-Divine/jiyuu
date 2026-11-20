@@ -117,6 +117,16 @@ class ExportDiffTest(unittest.TestCase):
       ("L3", "projects.indexed_at", "{{project}}"),
     })
 
+  def test_invalid_utf8_is_compared_not_fatal(self) -> None:
+    a = self.db("a.db")
+    b = self.db("b.db")
+    c = sqlite3.connect(b)
+    c.execute("UPDATE nodes SET name = CAST(X'4D6172E2' AS TEXT) "
+              "WHERE name = 'main'")
+    c.commit()
+    c.close()
+    self.assertEqual(self.keys(a, b), {("L2", "nodes.name", "Function")})
+
 
 if __name__ == "__main__":
   unittest.main()

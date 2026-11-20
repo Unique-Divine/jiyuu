@@ -53,6 +53,9 @@ def open_ro(path: str) -> sqlite3.Connection:
     raise FileNotFoundError(f"no database at {path}")
   conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
   conn.row_factory = sqlite3.Row
+  # The C store can hold invalid UTF-8 (a docstring cut mid-character);
+  # keep the bad bytes visible and comparable instead of failing.
+  conn.text_factory = lambda b: b.decode("utf-8", "backslashreplace")
   return conn
 
 
