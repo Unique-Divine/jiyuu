@@ -1,0 +1,130 @@
+{"args": {"paths": [".github/workflows/test-core.yml", ".github/workflows/rust.yml"], "project": "home-realu-nibi-chain", "scopes": [".github/workflows"]}, "failed": false, "seen": 1, "tool": "check_index_coverage"}
+{"args": {"paths": ["app/src/state/updaters/UpdatersUtils.ts", "app/src/state/updaters/UpdaterQuery.tsx", "app/src/pages/stake/components/StakeSummary.tsx"], "project": "{{project:nibi-web}}"}, "failed": false, "seen": 1, "tool": "check_index_coverage"}
+{"args": {"paths": ["contracts/perp/src/contract.rs", "contracts/perp/src/query.rs", "contracts/perp/src/trading/state.rs", "contracts/perp/src/teller.rs", "contracts/perp/src/trade.rs"], "project": "{{project:sai-perps}}"}, "failed": false, "seen": 1, "tool": "check_index_coverage"}
+{"args": {"paths": ["contracts/perp/src/contract.rs", "contracts/perp/src/teller.rs"], "project": "{{project:sai-perps}}"}, "failed": false, "seen": 1, "tool": "check_index_coverage"}
+{"args": {"paths": ["contracts/sai-pulse/src/contract.rs", "contracts/sai-pulse/src/state.rs", "contracts/sai-pulse/src/msgs.rs", "contracts/perp/src/contract.rs", "contracts/perp/src/msgs.rs", "contracts/perp/src/entry.rs", "contracts/perp/src/trade.rs", "contracts/perp/src/trading/mut_ctx.rs", "contracts/perp/src/trading/state.rs", "contracts/perp/src/event.rs", "contracts/oracle/src/state.rs", "contracts/oracle/src/contract.rs", "contracts/vault/src/contract.rs", "evm/contracts/SaiEvm.sol"], "project": "{{project:sai-perps}}"}, "failed": false, "seen": 2, "tool": "check_index_coverage"}
+{"args": {"paths": ["graphql/graph/query.graphqls", "graphql/graph/sai_points.graphqls"], "project": "{{project:sai-keeper}}"}, "failed": false, "seen": 1, "tool": "check_index_coverage"}
+{"args": {"paths": ["jiyuu/.github/workflows/test.yaml", "jiyuu/.github/workflows/tg-sai-publish.yml", "jiyuu/ts-pkg/tg-sai/profiles.ts"], "project": "{{project:boku}}", "scopes": ["jiyuu/.github"]}, "failed": false, "seen": 1, "tool": "check_index_coverage"}
+{"args": {"paths": ["jiyuu/env.md", "jiyuu/scripts/python/registry_release.py", "dotfiles/bun/sync.ts", "commonplace/book/_book", "jiyuu/target", "jiyuu/mcp/telegram/.venv", "dotfiles/herdr/target", "jiyuu/gh-rev/target", "dotfiles/grok-build/target", "commonplace/notes-21"], "project": "{{project:boku}}"}, "failed": false, "seen": 1, "tool": "check_index_coverage"}
+{"args": {"paths": ["packages/sai-core/src/graphql/documents.ts", "webapp/sai-keeper/query/saiPoints.ts", "webapp/sai-keeper/query/perp.ts"], "project": "{{project:sai-web}}"}, "failed": false, "seen": 1, "tool": "check_index_coverage"}
+{"args": {"paths": ["services/events_tracker.go", "services/hm_history_sync.go", "services/parser/parse_perp.go"], "project": "{{project:sai-keeper}}"}, "failed": false, "seen": 2, "tool": "check_index_coverage"}
+{"args": {"paths": ["src/pipeline/pass_route_nodes.c", "src/pipeline/pass_cross_repo.c", "internal/cbm/service_patterns.c", "internal/cbm/extract_calls.c", "src/pipeline/pass_calls.c", "src/graph_buffer/graph_buffer.c", "src/store/store.c", "src/mcp/mcp.c", "src/pipeline/pipeline_incremental.c"], "project": "home-realu-cbm-gql-linear"}, "failed": false, "seen": 1, "tool": "check_index_coverage"}
+{"args": {"paths": ["x/wasm/keeper/abci_hooks.go", "x/wasm/module.go", "x/wasm/keeper/keeper.go", "x/sudo/keeper/querier.go", "lib/cosmos-sdk/types/context.go", "lib/cosmos-sdk/baseapp/abci.go", "app/proposal_lanes.go"], "project": "{{project:nibiru}}"}, "failed": false, "seen": 2, "tool": "check_index_coverage"}
+{"args": {"project": "{{project:nibiru}}", "qualified_name": "{{project:nibiru}}.app.saiOracleAddr"}, "failed": false, "seen": 2, "tool": "get_code_snippet"}
+{"args": {"diagnostics": "full", "project": "{{project:boku}}"}, "failed": false, "seen": 1, "tool": "get_graph_schema"}
+{"args": {"limit": 12, "project": "{{project:boku}}"}, "failed": false, "seen": 1, "tool": "get_graph_schema"}
+{"args": {"limit": 60, "offset": 12, "project": "{{project:boku}}"}, "failed": false, "seen": 1, "tool": "get_graph_schema"}
+{"args": {"project": "home-realu-boku-epics"}, "failed": false, "seen": 2, "tool": "get_graph_schema"}
+{"args": {"project": "{{project:boku}}"}, "failed": false, "seen": 1, "tool": "get_graph_schema"}
+{"args": {"project": "{{project:nibi-web}}"}, "failed": false, "seen": 1, "tool": "get_graph_schema"}
+{"args": {"project": "{{project:open-sai}}"}, "failed": false, "seen": 2, "tool": "get_graph_schema"}
+{"args": {"project": "{{project:sai-web}}"}, "failed": false, "seen": 2, "tool": "get_graph_schema"}
+{"args": {"format": "json", "project": "{{project:boku}}"}, "failed": false, "seen": 6, "tool": "index_status"}
+{"args": {"format": "json", "project": "{{project:open-sai}}"}, "failed": false, "seen": 1, "tool": "index_status"}
+{"args": {"project": "{{project:boku}}"}, "failed": false, "seen": 4, "tool": "index_status"}
+{"args": {"project": "{{project:gh-io-ud}}"}, "failed": false, "seen": 2, "tool": "index_status"}
+{"args": {"project": "{{project:nibi-go-hm}}"}, "failed": false, "seen": 1, "tool": "index_status"}
+{"args": {"project": "{{project:nibi-web}}"}, "failed": false, "seen": 1, "tool": "index_status"}
+{"args": {"project": "{{project:nibiru}}"}, "failed": false, "seen": 1, "tool": "index_status"}
+{"args": {"project": "{{project:open-sai}}"}, "failed": false, "seen": 2, "tool": "index_status"}
+{"args": {"project": "{{project:sai-keeper}}"}, "failed": false, "seen": 1, "tool": "index_status"}
+{"args": {"project": "{{project:sai-perps}}"}, "failed": false, "seen": 1, "tool": "index_status"}
+{"args": {"project": "{{project:sai-web}}"}, "failed": false, "seen": 3, "tool": "index_status"}
+{"args": {"detail": "stats"}, "failed": false, "seen": 3, "tool": "list_projects"}
+{"args": {"format": "json", "limit": 200}, "failed": false, "seen": 1, "tool": "list_projects"}
+{"args": {"format": "json"}, "failed": false, "seen": 1, "tool": "list_projects"}
+{"args": {"limit": 100}, "failed": false, "seen": 1, "tool": "list_projects"}
+{"args": {}, "failed": false, "seen": 21, "tool": "list_projects"}
+{"args": {"format": "json", "project": "{{project:nibi-web}}", "query": "MATCH (a)-[r:SEMANTICALLY_RELATED]->(b) RETURN a.name, b.name, r LIMIT 3"}, "failed": false, "seen": 1, "tool": "query_graph"}
+{"args": {"format": "json", "project": "{{project:nibi-web}}", "query": "MATCH (a)-[r:SIMILAR_TO]->(b) RETURN a.name, b.name, r LIMIT 3"}, "failed": false, "seen": 1, "tool": "query_graph"}
+{"args": {"project": "home-realu-boku-epics", "query": "MATCH (s:Section)-[:MENTIONS]-  RETURN labels(t) AS kind, count(*) AS n"}, "failed": false, "seen": 1, "tool": "query_graph"}
+{"args": {"project": "home-realu-boku-epics", "query": "MATCH (s:Section)-[:MENTIONS]-  RETURN s.name, labels(t), t.name LIMIT 8"}, "failed": false, "seen": 1, "tool": "query_graph"}
+{"args": {"project": "home-realu-cbm-gql-linear", "query": "MATCH (f:File) WHERE f.file_path STARTS WITH 'build/' RETURN count(f)"}, "failed": false, "seen": 2, "tool": "query_graph"}
+{"args": {"project": "home-realu-cbm-gql-linear", "query": "MATCH (f:File) WHERE f.file_path STARTS WITH 'graph-ui/' RETURN count(f)"}, "failed": false, "seen": 2, "tool": "query_graph"}
+{"args": {"project": "home-realu-cbmprobe", "query": "MATCH (a)-[r:GRAPHQL_CALLS]-  RETURN a.name, a.file_path, b.name"}, "failed": false, "seen": 3, "tool": "query_graph"}
+{"args": {"project": "home-realu-nibi-chain", "query": "MATCH (a)-[r:CROSS_HTTP_CALLS]->(b) RETURN r.target_project AS tp, count(r) AS c"}, "failed": false, "seen": 1, "tool": "query_graph"}
+{"args": {"project": "{{project:boku}}", "query": "MATCH (a)-[r:CROSS_CHANNEL]->(b) RETURN a.file_path AS src, b.name AS dst, r.target_project AS tp LIMIT 10"}, "failed": false, "seen": 1, "tool": "query_graph"}
+{"args": {"project": "{{project:boku}}", "query": "MATCH (a)-[r:CROSS_HTTP_CALLS]->(b) RETURN a.file_path AS src, b.name AS dst, r.target_project AS tp, r.url_path AS url LIMIT 50"}, "failed": false, "seen": 1, "tool": "query_graph"}
+{"args": {"project": "{{project:boku}}", "query": "MATCH (a)-[r:REFERENCES_FILE]->(b) RETURN labels(a) AS src, r.strategy, count(*) AS n ORDER BY n DESC"}, "failed": false, "seen": 1, "tool": "query_graph"}
+{"args": {"project": "{{project:boku}}", "query": "MATCH (a)-[r]->(b) WHERE type(r) STARTS WITH 'CROSS' RETURN a.name, a.file_path, type(r), b.name, b.file_path LIMIT 20"}, "failed": true, "seen": 1, "tool": "query_graph"}
+{"args": {"project": "{{project:boku}}", "query": "MATCH (a)-[r]->(b) WHERE type(r) STARTS WITH 'CROSS_' RETURN type(r) AS t, a.file_path AS src, b.name AS dst, r.target_project AS proj LIMIT 60"}, "failed": true, "seen": 1, "tool": "query_graph"}
+{"args": {"project": "{{project:boku}}", "query": "MATCH (a)-[r]->(s:Section) RETURN labels(a) AS src, count(*) AS n ORDER BY n DESC"}, "failed": false, "seen": 1, "tool": "query_graph"}
+{"args": {"project": "{{project:boku}}", "query": "MATCH (a:File)-[r:REFERENCES_FILE]->(b:File) WHERE a.file_path STARTS WITH \"epics/\" RETURN b.file_path, count(a) AS inbound ORDER BY inbound DESC LIMIT 15"}, "failed": false, "seen": 1, "tool": "query_graph"}
+{"args": {"project": "{{project:boku}}", "query": "MATCH (f:File)-[:DEFINES]->(s:Section) WHERE f.file_path = \"epics/boku/26-11-16-codebase-memory.md\" RETURN s.name, s.qualified_name, s.start_line, s.end_line"}, "failed": false, "seen": 1, "tool": "query_graph"}
+{"args": {"project": "{{project:boku}}", "query": "MATCH (n) WHERE n.file_path IS NOT NULL RETURN split(n.file_path,'/')[0] AS top, count(n) AS c ORDER BY c DESC LIMIT 30"}, "failed": true, "seen": 1, "tool": "query_graph"}
+{"args": {"project": "{{project:boku}}", "query": "MATCH (n) WHERE n.file_path STARTS WITH 'dotfiles/herdr/' RETURN count(n) AS herdr"}, "failed": false, "seen": 1, "tool": "query_graph"}
+{"args": {"project": "{{project:boku}}", "query": "MATCH (n) WHERE n.file_path STARTS WITH 'dotfiles/herdr/' RETURN count(n) AS herdr_nodes"}, "failed": false, "seen": 3, "tool": "query_graph"}
+{"args": {"project": "{{project:boku}}", "query": "MATCH (n) WHERE n.file_path STARTS WITH 'dotfiles/herdr/' RETURN labels(n)[0] AS label, count(*) AS c ORDER BY c DESC LIMIT 12"}, "failed": true, "seen": 1, "tool": "query_graph"}
+{"args": {"project": "{{project:boku}}", "query": "MATCH (n) WHERE n.file_path STARTS WITH 'dotfiles/herdr/' WITH split(n.file_path,'/')[2] AS dir, labels(n)[0] AS label RETURN dir, label, count(*) AS c ORDER BY c DESC LIMIT 20"}, "failed": true, "seen": 1, "tool": "query_graph"}
+{"args": {"project": "{{project:boku}}", "query": "MATCH (n) WHERE n.file_path STARTS WITH 'dotfiles/herdr/src/' AND n.file_path CONTAINS '/tests' RETURN count(n) AS test_nodes"}, "failed": false, "seen": 1, "tool": "query_graph"}
+{"args": {"project": "{{project:boku}}", "query": "MATCH (n) WHERE n.file_path STARTS WITH 'dotfiles/herdr/src/' RETURN count(n) AS src_nodes"}, "failed": false, "seen": 1, "tool": "query_graph"}
+{"args": {"project": "{{project:boku}}", "query": "MATCH (n) WHERE n.file_path STARTS WITH 'jiyuu/' RETURN count(n) AS c"}, "failed": false, "seen": 1, "tool": "query_graph"}
+{"args": {"project": "{{project:boku}}", "query": "MATCH (n) WHERE n.file_path STARTS WITH \"epics/\" AND n.file_path ENDS WITH \".md\" RETURN labels(n) AS l, count(*) AS n"}, "failed": false, "seen": 1, "tool": "query_graph"}
+{"args": {"project": "{{project:boku}}", "query": "MATCH (n:Function) WHERE n.file_path STARTS WITH 'dotfiles/herdr/src/' RETURN n.name, n.file_path LIMIT 3"}, "failed": false, "seen": 1, "tool": "query_graph"}
+{"args": {"project": "{{project:boku}}", "query": "MATCH (s:Section)-[r:MENTIONS]->(t) RETURN labels(t) AS target, r.syntax, r.tier, count(*) AS n ORDER BY n DESC"}, "failed": false, "seen": 1, "tool": "query_graph"}
+{"args": {"project": "{{project:boku}}", "query": "MATCH (s:Section)-[r:MENTIONS]->(t) WHERE NOT t.file_path STARTS WITH \"epics\" RETURN s.file_path, s.name, t.name, labels(t), t.file_path, r.tier LIMIT 25"}, "failed": false, "seen": 1, "tool": "query_graph"}
+{"args": {"project": "{{project:gh-io-ud}}", "query": "MATCH (a)-[r]->(b) WHERE type(r) STARTS WITH 'CROSS' RETURN a.name, type(r), b.name, b.file_path LIMIT 10"}, "failed": true, "seen": 2, "tool": "query_graph"}
+{"args": {"project": "{{project:open-sai}}", "query": "MATCH (a)-[r:HTTP_CALLS|GRAPHQL_CALLS]-  RETURN type(r), a.name, b.name LIMIT 6"}, "failed": false, "seen": 1, "tool": "query_graph"}
+{"args": {"project": "{{project:sai-keeper}}", "query": "MATCH (a)-[r]->(b) WHERE type(r) STARTS WITH \"CROSS_\" RETURN type(r), a.name, a.file_path, b.name, b.qualified_name"}, "failed": true, "seen": 1, "tool": "query_graph"}
+{"args": {"project": "{{project:sai-keeper}}", "query": "MATCH (h)-[:HANDLES]-  RETURN r.name, h.name LIMIT 8"}, "failed": false, "seen": 1, "tool": "query_graph"}
+{"args": {"project": "{{project:sai-keeper}}", "query": "MATCH (r:Route) RETURN r.name LIMIT 8"}, "failed": false, "seen": 1, "tool": "query_graph"}
+{"args": {"project": "{{project:sai-keeper}}", "query": "MATCH (r:Route) WHERE r.qualified_name STARTS WITH '__graphql__' RETURN r.name LIMIT 10"}, "failed": false, "seen": 1, "tool": "query_graph"}
+{"args": {"project": "{{project:sai-keeper}}", "query": "MATCH (rt:Route) RETURN rt.qualified_name, rt.source LIMIT 60"}, "failed": false, "seen": 1, "tool": "query_graph"}
+{"args": {"project": "{{project:sai-keeper}}", "query": "MATCH (rt:Route) WHERE rt.qualified_name STARTS WITH \"__graphql__\" RETURN count(rt)"}, "failed": false, "seen": 1, "tool": "query_graph"}
+{"args": {"project": "{{project:sai-keeper}}", "query": "MATCH (rt:Route)<-[x:CROSS_GRAPHQL_CALLS]-(c) RETURN rt.qualified_name, count(c) AS callers ORDER BY callers DESC"}, "failed": false, "seen": 1, "tool": "query_graph"}
+{"args": {"project": "{{project:sai-web}}", "query": "MATCH (a)-[r:CROSS_CHANNEL]->(b) RETURN a.name, a.file_path, b.name, b.qualified_name, b.file_path"}, "failed": false, "seen": 1, "tool": "query_graph"}
+{"args": {"project": "{{project:sai-web}}", "query": "MATCH (a)-[r:CROSS_GRAPHQL_CALLS]->(b) RETURN a.name, a.file_path, b.qualified_name"}, "failed": false, "seen": 1, "tool": "query_graph"}
+{"args": {"project": "{{project:sai-web}}", "query": "MATCH (a)-[r:CROSS_HTTP_CALLS]->(b) RETURN a.name, a.file_path, b.name, b.file_path, r.url_path LIMIT 10"}, "failed": false, "seen": 1, "tool": "query_graph"}
+{"args": {"project": "{{project:sai-web}}", "query": "MATCH (a)-[r:CROSS_HTTP_CALLS]->(b) RETURN a.name, a.file_path, b.qualified_name, r.url_path"}, "failed": false, "seen": 1, "tool": "query_graph"}
+{"args": {"project": "{{project:sai-web}}", "query": "MATCH (a)-[r:GRAPHQL_CALLS]-  RETURN a.name, a.file_path, b.name LIMIT 5"}, "failed": false, "seen": 1, "tool": "query_graph"}
+{"args": {"project": "{{project:sai-web}}", "query": "MATCH (a)-[r:GRAPHQL_CALLS]->(b) RETURN a.name, a.file_path, b.name, b.file_path LIMIT 10"}, "failed": false, "seen": 1, "tool": "query_graph"}
+{"args": {"project": "{{project:sai-web}}", "query": "MATCH (a)-[r:GRAPHQL_CALLS]->(b) RETURN a.name, a.file_path, r.operation, r.field_path"}, "failed": false, "seen": 1, "tool": "query_graph"}
+{"args": {"project": "{{project:sai-web}}", "query": "MATCH (a)-[r:GRAPHQL_CALLS]->(b) RETURN b.qualified_name, count(a) AS n ORDER BY n DESC"}, "failed": false, "seen": 1, "tool": "query_graph"}
+{"args": {"project": "{{project:sai-web}}", "query": "MATCH (a)-[r:HTTP_CALLS]->(b) RETURN a.name, a.file_path, b.qualified_name"}, "failed": false, "seen": 1, "tool": "query_graph"}
+{"args": {"project": "{{project:sai-web}}", "query": "MATCH (a)-[r]->(b) WHERE type(r) STARTS WITH 'CROSS' RETURN a.name, a.file_path, type(r), b.name, b.file_path LIMIT 20"}, "failed": true, "seen": 1, "tool": "query_graph"}
+{"args": {"project": "{{project:sai-web}}", "query": "MATCH (a)-[r]->(b) WHERE type(r) STARTS WITH \"CROSS_\" RETURN type(r), a.name, a.file_path, b.name, b.qualified_name"}, "failed": true, "seen": 1, "tool": "query_graph"}
+{"args": {}, "failed": false, "seen": 2, "tool": "query_graph"}
+{"args": {"limit": "15", "pattern": "lion|avatar", "project": "{{project:gh-io-ud}}"}, "failed": false, "seen": 1, "tool": "search_code"}
+{"args": {"limit": "15", "pattern": "lion|avatar|logo", "project": "{{project:gh-io-ud}}", "regex": "true"}, "failed": false, "seen": 1, "tool": "search_code"}
+{"args": {"limit": 10, "path_filter": "priv-skills", "pattern": "sudo root|sudoers root|x/sudo root", "project": "{{project:boku}}", "regex": true}, "failed": false, "seen": 2, "tool": "search_code"}
+{"args": {"limit": 100, "mode": "files", "pattern": "discord\\.(gg|com)", "project": "{{project:nibi-web}}", "regex": true}, "failed": false, "seen": 1, "tool": "search_code"}
+{"args": {"limit": 100, "mode": "files", "pattern": "discord\\.(gg|com)", "project": "{{project:sai-web}}", "regex": true}, "failed": false, "seen": 1, "tool": "search_code"}
+{"args": {"limit": 15, "path_filter": "contracts", "pattern": "sudo|treasury|Sudoers|query_root|sai_oper", "project": "{{project:sai-perps}}", "regex": true}, "failed": false, "seen": 2, "tool": "search_code"}
+{"args": {"limit": 15, "pattern": "lion|avatar", "project": "{{project:gh-io-ud}}"}, "failed": false, "seen": 1, "tool": "search_code"}
+{"args": {"limit": 15, "pattern": "lion|avatar|logo", "project": "{{project:gh-io-ud}}", "regex": true}, "failed": false, "seen": 1, "tool": "search_code"}
+{"args": {"limit": 20, "pattern": "EndBlockWasmHooks|BeginBlockWasmHooks", "project": "{{project:nibiru}}"}, "failed": false, "seen": 2, "tool": "search_code"}
+{"args": {"limit": 20, "pattern": "chat.delete|chat.update|slack_delete|delete_message", "project": "home-realu-boku-jiyuu", "regex": true}, "failed": false, "seen": 1, "tool": "search_code"}
+{"args": {"limit": 20, "pattern": "state_cleanup", "project": "{{project:sai-keeper}}"}, "failed": false, "seen": 1, "tool": "search_code"}
+{"args": {"limit": 40, "mode": "files", "pattern": "open-sai", "project": "{{project:boku}}"}, "failed": false, "seen": 1, "tool": "search_code"}
+{"args": {"limit": 5, "pattern": "realizedPnlCollateral", "project": "home-realu-boku-epics"}, "failed": false, "seen": 1, "tool": "search_code"}
+{"args": {"detail": "ids", "name_pattern": "^(registry_release|lockText|isLegacyJiyuuLaunch)$", "project": "{{project:boku}}"}, "failed": false, "seen": 1, "tool": "search_graph"}
+{"args": {"detail": "ids", "name_pattern": "^cbm_probe_.*", "project": "{{project:boku}}"}, "failed": false, "seen": 5, "tool": "search_graph"}
+{"args": {"fields": ["qn", "file"], "label": "Section", "limit": 30, "project": "{{project:boku}}", "query": "MCP update version publish distribute install"}, "failed": false, "seen": 1, "tool": "search_graph"}
+{"args": {"file_pattern": ".*\\.graphqls", "limit": 10, "project": "{{project:sai-keeper}}"}, "failed": false, "seen": 1, "tool": "search_graph"}
+{"args": {"file_pattern": "contracts/**", "limit": 15, "name_pattern": ".*(assert_owner|only_owner|owner_gate|is_owner|sai_oper).*", "project": "{{project:sai-perps}}"}, "failed": false, "seen": 2, "tool": "search_graph"}
+{"args": {"file_pattern": "contracts/perp/**", "name_pattern": "^(exec_open_trade|exec_close_trade|exec_trigger_trade|exec_trigger_trade_batch|ensure_market_price_not_stale|get_all_prices|exec_intent_trade|open_trade_market|register_trade|close_trade_market)$", "project": "{{project:sai-perps}}"}, "failed": false, "seen": 2, "tool": "search_graph"}
+{"args": {"file_pattern": "contracts/perp/**", "name_pattern": "^(validate|store_trade|unregister_trade|TradeMutCtx.new|trigger_open_order|ensure_usdc_trade_can_add)$", "project": "{{project:sai-perps}}"}, "failed": false, "seen": 2, "tool": "search_graph"}
+{"args": {"file_pattern": "dotfiles/herdr/src/.*", "limit": 3, "name_pattern": ".*Pane.*", "project": "{{project:boku}}"}, "failed": false, "seen": 1, "tool": "search_graph"}
+{"args": {"label": "Section", "limit": 5, "project": "home-realu-boku-epics", "query": "realizedPnlCollateral gross price PnL"}, "failed": false, "seen": 1, "tool": "search_graph"}
+{"args": {"limit": 15, "project": "{{project:boku}}", "query": "testnet fast block time consensus timeout_commit parameters"}, "failed": false, "seen": 1, "tool": "search_graph"}
+{"args": {"limit": 15, "project": "{{project:nibiru}}", "query": "end_block_plan begin block plan sudo hooks registry"}, "failed": false, "seen": 2, "tool": "search_graph"}
+{"args": {"limit": 15, "project": "{{project:nibiru}}", "query": "prepare proposal oracle price tx first priority ordering sai oracle"}, "failed": false, "seen": 2, "tool": "search_graph"}
+{"args": {"limit": 20, "project": "{{project:boku}}", "semantic_query": ["MCP servers update themselves or notify that a newer version is available", "distribute MCP servers as packages installable with bunx or uvx"]}, "failed": false, "seen": 1, "tool": "search_graph"}
+{"args": {"limit": 20, "project": "{{project:sai-perps}}", "query": "pulse sudo end block plan"}, "failed": false, "seen": 2, "tool": "search_graph"}
+{"args": {"limit": 25, "max_output_tokens": 2500, "project": "{{project:boku}}", "query": "carry time-based charge open-only exposure fee would not work"}, "failed": false, "seen": 1, "tool": "search_graph"}
+{"args": {"limit": 25, "project": "{{project:boku}}", "query": "MCP distribution publish package self-update version bunx uvx"}, "failed": false, "seen": 1, "tool": "search_graph"}
+{"args": {"limit": 25, "project": "{{project:sai-keeper}}", "query": "parse wasm event register_trade store_trade close trade indexer"}, "failed": false, "seen": 2, "tool": "search_graph"}
+{"args": {"limit": 30, "max_output_tokens": 3000, "project": "{{project:boku}}", "semantic_query": ["behaviors the mechanism should punish versus reward", "economic factors risk transferred to the vault should cost", "what the charges protect against", "what the user wants to price"]}, "failed": false, "seen": 1, "tool": "search_graph"}
+{"args": {"limit": 5, "name_pattern": "^Trades$", "project": "{{project:sai-keeper}}"}, "failed": false, "seen": 1, "tool": "search_graph"}
+{"args": {"limit": 5, "project": "{{project:sai-keeper}}", "query": "perp trades resolver"}, "failed": false, "seen": 1, "tool": "search_graph"}
+{"args": {"limit": 8, "project": "{{project:boku}}", "query": "audio-capture hotkey recorder Windows install startup shortcut"}, "failed": false, "seen": 1, "tool": "search_graph"}
+{"args": {"name_pattern": "^(event_register_trade|event_store_trade|event_user_close_order|event_trigger_trade_register_trade|event_trigger_trade)$", "project": "{{project:sai-perps}}"}, "failed": false, "seen": 2, "tool": "search_graph"}
+{"args": {"name_pattern": "^(open_trade_with_prices_and_credit_allocation|close_market_trade|oldest_last_update_time|trigger_trade_with_price|trigger_trade_with_price_resolved|commit|for_key|persist_trade|ExchangeRateResp|PerpPrices|TradeMutCtx|TradeInfo|_close_trade|ensure_daily_payout|risk_guard_after_hours_trade_mutation)$", "project": "{{project:sai-perps}}"}, "failed": false, "seen": 2, "tool": "search_graph"}
+{"args": {"name_pattern": "registry_release|lockText|isLegacyJiyuuLaunch", "project": "{{project:boku}}"}, "failed": false, "seen": 1, "tool": "search_graph"}
+{"args": {"project": "{{project:boku}}", "query": "GetTrade"}, "failed": false, "seen": 1, "tool": "search_graph"}
+{"args": {"depth": 2, "direction": "inbound", "function_name": "close_market_trade", "project": "{{project:sai-perps}}"}, "failed": false, "seen": 2, "tool": "trace_path"}
+{"args": {"depth": 2, "direction": "inbound", "function_name": "increment_user_deposit", "project": "home-realu-sai-perps-1400-ref-intents"}, "failed": false, "seen": 1, "tool": "trace_path"}
+{"args": {"depth": 3, "direction": "both", "function_name": "exec_claim_ref_fees", "project": "home-realu-sai-perps-1400-ref-intents"}, "failed": true, "seen": 1, "tool": "trace_path"}
+{"args": {"depth": 3, "direction": "inbound", "function_name": "exec_debit_deposit_to_bridge", "project": "{{project:sai-perps}}"}, "failed": false, "seen": 1, "tool": "trace_path"}
+{"args": {"depth": 3, "direction": "inbound", "function_name": "open_trade_with_prices_and_credit_allocation", "project": "{{project:sai-perps}}"}, "failed": false, "seen": 2, "tool": "trace_path"}
+{"args": {"depth": 3, "direction": "inbound", "function_name": "receiptMatchesWithdraw", "project": "{{project:sai-keeper}}"}, "failed": true, "seen": 1, "tool": "trace_path"}
