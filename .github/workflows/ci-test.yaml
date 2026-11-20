@@ -547,6 +547,8 @@ jobs:
         with:
           path: ~/.cache/jiyuu-mori/grammars
           key: mori-grammars-${{ steps.keys.outputs.grammars }}
+      # Job jiyuu-mori-linked falls back to this key format
+      # (mori-ccache-<cc>-<grammars>-<Makefile hash>); change both together.
       - name: Restore compiler cache
         if: needs.changes.outputs.mori == 'true'
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
