@@ -138,6 +138,16 @@ class ReplayTest(unittest.TestCase):
     self.assertEqual(sorted(d.key for d in rep.diffs()), [
       "index_status:$.out{*}", "index_status:$.out{indexed_at}"])
 
+  def test_tied_rows_are_sorted(self) -> None:
+    rows = ["x.a Section a.md -13.33", "x.c Section c.md -12.46",
+            "x.b Section b.md -12.46", "x.d Section d.md -12.35",
+            "total: 4"]
+    self.assertEqual(calls.sort_ties(rows), [
+      "x.a Section a.md -13.33", "x.b Section b.md -12.46",
+      "x.c Section c.md -12.46", "x.d Section d.md -12.35", "total: 4"])
+    # Order across different scores is kept.
+    self.assertEqual(calls.sort_ties(["b 2", "a 1"]), ["b 2", "a 1"])
+
   def test_call_id_ignores_key_order(self) -> None:
     self.assertEqual(calls.call_id("q", {"a": 1, "b": 2}),
                      calls.call_id("q", {"b": 2, "a": 1}))

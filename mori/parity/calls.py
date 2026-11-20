@@ -322,14 +322,16 @@ class OutputNormalizer:
 
   def lines(self, text: str) -> list[str]:
     """Text output as lines; a `key: value` line whose key is a duration
-    loses its value, and inline durations become `<duration>`."""
+    loses its value, and inline durations become `<duration>`. Runs of
+    tied rows are sorted (see sort_ties)."""
     out = []
     for line in self.text(text).splitlines():
       m = TEXT_KEY_RE.match(line)
       if m and TIMING_KEY_RE.match(m.group(1)):
         line = line[:m.end()] + "<duration>"
       out.append(TEXT_TIMING_RE.sub("<duration>", line))
-    return out
+    return sort_ties(out)
+
 
   def output(self, exit_code: int, stdout: str, stderr: str
              ) -> dict[str, Any]:
@@ -339,6 +341,30 @@ class OutputNormalizer:
       body = TextLines(self.lines(stdout))
     return {"exit": exit_code, "out": body,
             "err": TextLines(self.lines(stderr))}
+
+
+TRAILING_SCORE_RE = re.compile(r"\s(-?\d+(?:\.\d+)?)$")
+
+
+def sort_ties(lines: list[str]) -> list[str]:
+  """Sort each run of consecutive rows that end in the same score. The C
+  tools break rank ties (BM25 scores, equal counts) by row id, which
+  varies between runs, so the order inside a tie carries no meaning; which
+  rows appear, and the order between scores, still does."""
+  out: list[str] = []
+  i = 0
+  while i < len(lines):
+    m = TRAILING_SCORE_RE.search(lines[i])
+    j = i + 1
+    if m:
+      while j < len(lines):
+        n = TRAILING_SCORE_RE.search(lines[j])
+        if not n or n.group(1) != m.group(1):
+          break
+        j += 1
+    out.extend(sorted(lines[i:j]))
+    i = j
+  return out
 
 
 class TextLines(list):

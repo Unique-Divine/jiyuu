@@ -28,7 +28,7 @@ scripts-test:
 # Run the script tests, the build and the targeted suites.
 check: scripts-test build test
 
-# Flags: --bin-a X --bin-b Y, --repos a,b, --allow-dirty, --skip-l4.
+# Flags: --bin-a/--bin-b, --repos, --allow-dirty, --snapshot, --skip-l4.
 # Diff two builds on the pinned corpus, L0-L4 (default: C vs C).
 parity *ARGS:
     python3 -I parity/parity.py run {{ARGS}}
