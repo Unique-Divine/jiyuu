@@ -34,7 +34,7 @@ _Avoid_: reindex, build
 How much an index run discovers and computes: `full`, `moderate`, or `fast`.
 _Avoid_: a bare "full"
 _See_: [pipeline.h](src/pipeline/pipeline.h): the three depths.
-[CONFIGURATION.md](docs/CONFIGURATION.md): the public `mode` parameter, which
+[README.upstream.md](README.upstream.md): the public `mode` parameter, which
 also accepts a link run
 
 **Update path**:

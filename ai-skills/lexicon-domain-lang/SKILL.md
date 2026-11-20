@@ -34,17 +34,23 @@ A `LEXICON.md` covers its directory and everything below it, like
 6. If no `LEXICON.md` exists, carry on. Don't announce its absence.
 
 ```sh
-# Lexicons that apply to the current directory, outermost first.
-# Climbs through Git submodules into the superproject. Outside Git it climbs
-# to $HOME or the filesystem root. Works in bash and zsh.
+# Lexicons that may apply to the current directory, outermost first.
+# Inside Git: climbs to the repository root, and through submodules into the
+# superproject. Outside Git: climbs to $HOME or the filesystem root, so treat
+# the output as candidates and drop any above the project (rule 5).
+# Works in bash and zsh.
 d=$(pwd -P); out=
 while :; do
   [ -f "$d/LEXICON.md" ] && out="$d/LEXICON.md
 $out"
-  if [ "$d" = "$(git -C "$d" rev-parse --show-toplevel 2>/dev/null)" ] &&
-     [ -z "$(git -C "$d" rev-parse --show-superproject-working-tree 2>/dev/null)" ]
-  then break; fi
-  if [ "$d" = / ] || [ "$d" = "$HOME" ]; then break; fi
+  top=$(git -C "$d" rev-parse --show-toplevel 2>/dev/null)
+  if [ -n "$top" ]; then
+    if [ "$d" = "$top" ] &&
+       [ -z "$(git -C "$d" rev-parse --show-superproject-working-tree 2>/dev/null)" ]
+    then break; fi
+  elif [ "$d" = "$HOME" ]; then break
+  fi
+  [ "$d" = / ] && break
   d=$(dirname "$d")
 done
 printf %s "$out"
