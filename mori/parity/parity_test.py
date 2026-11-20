@@ -33,8 +33,18 @@ class ParityTest(unittest.TestCase):
     ])
     c.commit()
     c.close()
-    self.assertEqual(parity.parse_timeouts(db), 1)
-    self.assertEqual(parity.parse_timeouts(os.path.join(self.tmp, "x")), 0)
+    self.assertEqual(parity.parse_timeouts(db), {"a.rs"})
+    self.assertEqual(parity.parse_timeouts(os.path.join(self.tmp, "x")),
+                     set())
+
+  def test_timeout_sides_keeps_files_both_drop(self) -> None:
+    self.assertEqual(parity.timeout_sides({"a": {"big.go"},
+                                           "b": {"big.go"}}), [])
+    self.assertEqual(parity.timeout_sides({"a": {"big.go", "x.rs"},
+                                           "b": {"big.go"}}), ["a"])
+    self.assertEqual(parity.timeout_sides({"a": {"x.rs"}, "b": {"y.rs"}}),
+                     ["a", "b"])
+    self.assertEqual(parity.timeout_sides({"a": set(), "b": set()}), [])
 
   def test_fresh_dir_needs_marker(self) -> None:
     work = os.path.join(self.tmp, "work")

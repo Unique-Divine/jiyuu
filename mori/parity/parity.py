@@ -132,19 +132,20 @@ def make_sides(bin_a: str, bin_b: str, work: str, rt_prefix: str
   return sides
 
 
-def parse_timeouts(db: str) -> int:
-  """Files the index dropped with `parse timeout`. The C parser has a CPU
-  budget plus a wall-clock ceiling, so a loaded machine drops different
-  files on each run; such a run is invalid, not a parity difference."""
+def parse_timeouts(db: str) -> set[str]:
+  """Files the index dropped with `parse timeout`. The C parser has a
+  5 s CPU budget plus a 60 s wall-clock ceiling: a huge generated file
+  (nibiru's statik.go) trips it every run, and a loaded or swapping machine
+  trips it on different files each run."""
   if not os.path.isfile(db):
-    return 0
+    return set()
   conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
   try:
-    return conn.execute(
-      "SELECT count(*) FROM index_coverage WHERE kind = 'extract' AND "
-      "detail LIKE 'parse timeout%'").fetchone()[0]
+    return {r[0] for r in conn.execute(
+      "SELECT rel_path FROM index_coverage WHERE kind = 'extract' AND "
+      "detail LIKE 'parse timeout%'")}
   except sqlite3.Error:
-    return 0
+    return set()
   finally:
     conn.close()
 
@@ -156,21 +157,46 @@ def remove_project_db(cache: str, project: str) -> None:
       os.remove(base + suffix)
 
 
-def index_valid(side: Side, root: str, retries: int) -> dict[str, Any]:
-  """Index, and redo the index from scratch while files time out."""
-  ix = run_index(side, root)
-  ix["timeout_retries"] = 0
-  while ix["project"]:
-    n = parse_timeouts(os.path.join(side.cache, f"{ix['project']}.db"))
-    ix["parse_timeouts"] = n
-    if n == 0 or ix["timeout_retries"] >= retries:
+def timeout_sides(sets: dict[str, set[str]]) -> list[str]:
+  """Sides to reindex: those that dropped a file the other side parsed.
+  Files every side drops are deterministic and stay; the comparison is
+  valid once all sides drop the same files."""
+  common = set.intersection(*sets.values()) if sets else set()
+  return sorted(s for s, files in sets.items() if files - common)
+
+
+def index_sides(sides: list[Side], root: str, retries: int
+                ) -> dict[str, dict[str, Any]]:
+  """Index on every side, then reindex from scratch any side whose
+  parse-timeout set differs from the others, up to `retries` times."""
+  out: dict[str, dict[str, Any]] = {}
+  for s in sides:
+    log(f"  index side {s.name} ...")
+    out[s.name] = run_index(s, root)
+    out[s.name]["timeout_retries"] = 0
+  by_name = {s.name: s for s in sides}
+
+  def timeouts() -> dict[str, set[str]]:
+    return {n: parse_timeouts(os.path.join(by_name[n].cache,
+                                           f"{ix['project']}.db"))
+            if ix["project"] else set() for n, ix in out.items()}
+
+  sets = timeouts()
+  for attempt in range(1, retries + 1):
+    redo = timeout_sides(sets)
+    if not redo:
       break
-    log(f"    {n} files hit the parse timeout (machine load); reindexing")
-    remove_project_db(side.cache, ix["project"])
-    tries = ix["timeout_retries"] + 1
-    ix = run_index(side, root)
-    ix["timeout_retries"] = tries
-  return ix
+    for n in redo:
+      extra = sorted(sets[n] - set.intersection(*sets.values()))
+      log(f"    side {n}: {len(extra)} files hit the parse timeout only "
+          f"there ({', '.join(extra[:3])}); reindexing")
+      remove_project_db(by_name[n].cache, out[n]["project"])
+      out[n] = run_index(by_name[n], root)
+      out[n]["timeout_retries"] = attempt
+    sets = timeouts()
+  for n, ix in out.items():
+    ix["parse_timeouts"] = sorted(sets[n])
+  return out
 
 
 def parse_index_output(out: str, err: str) -> dict[str, Any]:
@@ -243,23 +269,20 @@ def compare_repo(sides: list[Side], dir_: str, root: str,
                  ) -> RepoResult:
   r = RepoResult(dir_, root)
   before = corpus.fingerprint(root)
-  for s in sides:
-    log(f"  index {dir_} side {s.name} ...")
-    r.index[s.name] = index_valid(s, root, retries)
-    ix = r.index[s.name]
-    log(f"    {ix['status']} in {ix['wall_s']} s, {ix['nodes']} nodes, "
-        f"{ix['edges']} edges, {ix.get('parse_timeouts', 0)} parse "
-        "timeouts")
+  r.index = index_sides(sides, root, retries)
+  for n, ix in r.index.items():
+    log(f"    side {n}: {ix['status']} in {ix['wall_s']} s, {ix['nodes']} "
+        f"nodes, {ix['edges']} edges, parse timeouts "
+        f"{ix['parse_timeouts'] or 'none'}")
   if corpus.fingerprint(root) != before:
     r.moved = True
     r.error = "checkout changed during the run; rerun this repo"
     return r
   ia, ib = r.index["a"], r.index["b"]
-  slow = {s: ix["parse_timeouts"] for s, ix in r.index.items()
-          if ix.get("parse_timeouts")}
-  if slow:
-    r.error = f"parse timeouts after retries {slow}; rerun on a quieter " \
-      "machine"
+  if timeout_sides({n: set(ix["parse_timeouts"])
+                    for n, ix in r.index.items()}):
+    r.error = "sides dropped different files to the parse timeout " \
+      "(machine load); rerun on a quieter machine"
     return r
   bad = [s for s, ix in r.index.items()
          if ix["exit"] != 0 or not ix["project"]]
