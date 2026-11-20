@@ -227,13 +227,13 @@ import; three (Steps 0p, 0x2 and 0y3) failed once `install.sh` and
 
 The thirteenth, `tests/test_mcpb_bundle_contract.sh` (Step 0o), stays. It
 failed only because `scripts/package-release.sh` copied `install.sh` into
-each archive; [jiyuu#163](https://github.com/Unique-Divine/jiyuu/pull/163)
-drops the installer from the archives, and the check passes on that branch.
-Until jiyuu#163 merges, Step 0o fails and stops the run there.
+each archive. [jiyuu#163](https://github.com/Unique-Divine/jiyuu/pull/163)
+dropped the installer from the archives, and Step 0o passes.
 
 Each entry gives the upstream file, its Step 0 label, what it guarded, and
-the paths it reads. To restore one, run its restore command from the Jiyuu
-root, restore the paths it reads (see [Excluded Paths](#excluded-paths)),
+the first excluded paths it needs; some read more of `.github/` and `pkg/`
+than listed. To restore one, run its restore command from the Jiyuu root,
+restore the paths it reads (see [Excluded Paths](#excluded-paths)),
 then add its two lines back to Step 0 of `scripts/test.sh`, copied from the
 [upstream `scripts/test.sh`](https://github.com/DeusData/codebase-memory-mcp/blob/cdfdf26483fa56f4f7d9d85e7c4c3924133b458b/scripts/test.sh).
 
@@ -242,7 +242,7 @@ then add its two lines back to Step 0 of `scripts/test.sh`, copied from the
   - Guarded: Windows releases ship one binary with no launcher stub, and
     `install.ps1` renames the running binary out of the way before installing
     the new one.
-  - Reads: `install.ps1`, `pkg/npm/install.js`
+  - First missing inputs: `install.ps1`, `pkg/npm/install.js`
   - Restore:
 
     ```bash
@@ -254,7 +254,7 @@ then add its two lines back to Step 0 of `scripts/test.sh`, copied from the
   Step 0e3, "security gate fail-closed contract"
   - Guarded: The CodeQL alert gate in upstream's workflows fails the build when
     it cannot read the alert API, instead of reporting zero alerts.
-  - Reads: `.github/workflows/codeql.yml`
+  - First missing inputs: `.github/workflows/codeql.yml`
   - Restore:
 
     ```bash
@@ -266,7 +266,7 @@ then add its two lines back to Step 0 of `scripts/test.sh`, copied from the
   Step 0h, "smoke release-fixture contract"
   - Guarded: The local and PR release-fixture smoke covers the paths it depends
     on, as decided by the PR lane selector.
-  - Reads: `.github/workflows/pr.yml`, `install.sh`
+  - First missing inputs: `.github/workflows/pr.yml`, `install.sh`
   - Restore:
 
     ```bash
@@ -279,7 +279,7 @@ then add its two lines back to Step 0 of `scripts/test.sh`, copied from the
   - Guarded: Every `run:` step in upstream's workflows only provisions machines
     or calls a canonical leg script, so CI cannot grow its own copy of the test
     harness.
-  - Reads: `.github/workflows/release.yml` and the other workflows
+  - First missing inputs: `.github/workflows/release.yml` and the other workflows
   - Restore:
 
     ```bash
@@ -291,7 +291,7 @@ then add its two lines back to Step 0 of `scripts/test.sh`, copied from the
   Step 0p, "MCPB registry entries contract (#1246)"
   - Guarded: `scripts/ci/gen-mcpb-registry-entries.sh` turns `checksums.txt`
     into the MCP Registry bundle entries in `server.json` with correct hashes.
-  - Reads: `server.json`
+  - First missing inputs: `server.json`
   - Restore:
 
     ```bash
@@ -304,7 +304,7 @@ then add its two lines back to Step 0 of `scripts/test.sh`, copied from the
   - Guarded: In upstream's release workflow, skipping an optional phase does
     not skip the phases after it, and the release draft requires smoke and soak
     to succeed.
-  - Reads: `.github/workflows/release.yml`, `_build.yml`, `dry-run.yml`,
+  - First missing inputs: `.github/workflows/release.yml`, `_build.yml`, `dry-run.yml`,
     `_soak.yml`
   - Restore:
 
@@ -318,7 +318,7 @@ then add its two lines back to Step 0 of `scripts/test.sh`, copied from the
   - Guarded: Every packaging file that states a version (`server.json`, npm,
     PyPI, Chocolatey, Go) states a released version, and registry-facing files
     state the newest.
-  - Reads: `server.json`, `pkg/npm/package.json`, `pkg/pypi/pyproject.toml`
+  - First missing inputs: `server.json`, `pkg/npm/package.json`, `pkg/pypi/pyproject.toml`
   - Restore:
 
     ```bash
@@ -329,7 +329,7 @@ then add its two lines back to Step 0 of `scripts/test.sh`, copied from the
 - [`tests/test_install_android_guard.sh`](https://github.com/DeusData/codebase-memory-mcp/blob/cdfdf26483fa56f4f7d9d85e7c4c3924133b458b/tests/test_install_android_guard.sh),
   Step 0x2, "installer Android/Termux guard contract (#1202)"
   - Guarded: `install.sh` refuses Android/Termux before downloading anything.
-  - Reads: `install.sh`
+  - First missing inputs: `install.sh`
   - Restore:
 
     ```bash
@@ -341,7 +341,7 @@ then add its two lines back to Step 0 of `scripts/test.sh`, copied from the
   Step 0y3, "setup scripts install through the installers' verified path"
   - Guarded: `scripts/setup.sh` and `scripts/setup-windows.ps1` hand the
     download to the installers, which verify the checksum before installing.
-  - Reads: `install.sh`, `install.ps1`
+  - First missing inputs: `install.sh`, `install.ps1`
   - Restore:
 
     ```bash
@@ -354,7 +354,7 @@ then add its two lines back to Step 0 of `scripts/test.sh`, copied from the
   - Guarded: `scripts/ci/select-lanes.sh` picks the right PR CI lanes for a
     change set and falls back to every lane when unsure. Also restore
     `tests/fixtures/select-lanes/`.
-  - Reads: `.github/codeql/codeql-config.yml`, read by
+  - First missing inputs: `.github/codeql/codeql-config.yml`, read by
     `scripts/ci/select-lanes.sh`
   - Restore:
 
@@ -368,7 +368,7 @@ then add its two lines back to Step 0 of `scripts/test.sh`, copied from the
   - Guarded: When CodeQL traces a build with prebuilt third-party objects,
     `scripts/ci/codeql-retrace-vendored.sh` recompiles exactly the objects a
     change affects.
-  - Reads: `.github/codeql/codeql-config.yml`
+  - First missing inputs: `.github/codeql/codeql-config.yml`
   - Restore:
 
     ```bash
@@ -380,7 +380,7 @@ then add its two lines back to Step 0 of `scripts/test.sh`, copied from the
   Step 0z4, "lane wiring (PRs select, dry run and release run all)"
   - Guarded: Upstream's workflows honor the lane selection on PRs and run every
     lane on dry runs and releases.
-  - Reads: `.github/workflows/dry-run.yml`, `pr.yml`, `release.yml`
+  - First missing inputs: `.github/workflows/dry-run.yml`, `pr.yml`, `release.yml`
   - Restore:
 
     ```bash
