@@ -1473,6 +1473,7 @@ name = "jiyuu-mori"
 version = "0.14.0-dev"
 dependencies = [
  "libc",
+ "serde_json",
 ]
 
 [[package]]

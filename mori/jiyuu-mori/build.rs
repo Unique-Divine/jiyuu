@@ -1,10 +1,12 @@
 //! Builds and links the C program as `libmori-c.a` when feature `c-backend`
 //! is on (Strategy A, phase P0 in the Rust port design).
 //!
-//! Steps: install the pinned grammars with `mori/scripts/grammars-fetch.ts`
-//! (cached under `~/.cache/jiyuu-mori/grammars/`), run
+//! Steps: check that the pinned grammars are installed, run
 //! `make -f Makefile.cbm libmori-c` in `mori/`, then link the archive whole
-//! plus the system libraries the C binary links. `Makefile.cbm` stays the
+//! plus the system libraries the C binary links. The script never reaches
+//! the network: `just --justfile mori/justfile grammars` installs the
+//! grammars, and this script only compares `mori/.grammars.stamp` with
+//! `mori/grammars.lock.json` and the installed tree. `Makefile.cbm` stays the
 //! source of truth for C flags, so the C inside `mori` is compiled exactly
 //! like `codebase-memory-mcp`.
 //!
@@ -63,7 +65,7 @@ fn build_and_link() -> Result<(), String> {
         println!("cargo:rerun-if-env-changed={var}");
     }
 
-    fetch_grammars(&mori_dir)?;
+    check_grammars(&mori_dir)?;
 
     let mut targets = vec!["libmori-c"];
     if env::var("MORI_C_REFERENCE").as_deref() == Ok("1") {
@@ -83,21 +85,60 @@ fn build_and_link() -> Result<(), String> {
     Ok(())
 }
 
-/// Installs the pinned grammars; a repeat run with an intact tree is a
-/// quick stamp check.
-fn fetch_grammars(mori_dir: &Path) -> Result<(), String> {
-    let status = Command::new("bun")
-        .arg("scripts/grammars-fetch.ts")
-        .current_dir(mori_dir)
-        .status()
-        .map_err(|e| {
-            format!("could not run `bun scripts/grammars-fetch.ts`: {e}")
+const GRAMMARS_HINT: &str = "run `just --justfile mori/justfile grammars` \
+     (or `just mori-build`) to install them";
+
+/// Checks the installed grammars against their stamp without hashing: the
+/// stamp names the archive in `grammars.lock.json`, and every stamped file
+/// has the size and mtime recorded at install (the same quick check
+/// `scripts/grammars-fetch.ts` runs before it re-verifies anything).
+fn check_grammars(mori_dir: &Path) -> Result<(), String> {
+    let read_json = |name: &str| -> Result<serde_json::Value, String> {
+        let path = mori_dir.join(name);
+        let text = std::fs::read_to_string(&path).map_err(|e| {
+            format!(
+                "grammars missing ({}: {e}); {GRAMMARS_HINT}",
+                path.display()
+            )
         })?;
-    if !status.success() {
-        return Err(format!(
-            "grammar fetch failed ({status}); run `just mori-build` or \
-             `bun scripts/grammars-fetch.ts --from <archive>` in mori/"
-        ));
+        serde_json::from_str(&text).map_err(|e| {
+            format!("grammars stale ({}: {e}); {GRAMMARS_HINT}", path.display())
+        })
+    };
+    let lock = read_json("grammars.lock.json")?;
+    let stamp = read_json(".grammars.stamp")?;
+    let stale = |why: String| format!("grammars stale ({why}); {GRAMMARS_HINT}");
+    let want = lock["sha256"]
+        .as_str()
+        .ok_or_else(|| stale("grammars.lock.json has no sha256".into()))?;
+    if stamp["archiveSha256"].as_str() != Some(want) {
+        return Err(stale("installed from a different archive".into()));
+    }
+    let tree = mori_dir.join(
+        lock["path"]
+            .as_str()
+            .unwrap_or("internal/cbm/vendored/grammars"),
+    );
+    let files = stamp["files"]
+        .as_object()
+        .filter(|files| !files.is_empty())
+        .ok_or_else(|| stale("stamp lists no files".into()))?;
+    for (rel, stat) in files {
+        let recorded = (stat[0].as_u64(), stat[1].as_f64());
+        let (Some(size), Some(mtime_ms)) = recorded else {
+            return Err(stale(format!("bad stamp entry for {rel}")));
+        };
+        let meta = std::fs::symlink_metadata(tree.join(rel))
+            .map_err(|_| stale(format!("missing: {rel}")))?;
+        let seen_ms = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs_f64() * 1000.0);
+        let same_mtime = seen_ms.is_some_and(|ms| (ms - mtime_ms).abs() < 1.0);
+        if !meta.is_file() || meta.len() != size || !same_mtime {
+            return Err(stale(format!("changed since install: {rel}")));
+        }
     }
     Ok(())
 }

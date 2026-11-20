@@ -21,5 +21,8 @@ path = "src/main.rs"
 # that it was built without the C backend.
 c-backend = ["dep:libc"]
 
+[build-dependencies]
+serde_json = "1.0.151"
+
 [dependencies]
 libc = { version = "0.2.189", optional = true }
