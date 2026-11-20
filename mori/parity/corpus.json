@@ -64,13 +64,13 @@
     {
       "dir": "gh",
       "remote": null,
-      "tree": "sha256:6c022554cd0921af53772b8b6a378abddd92990a9ba8512a50880f4b96737691",
+      "tree": "sha256:69cef77d43ba066a781e64efc1d45b8ec67c30bd26beec70006c58e9896f17ec",
       "cbmignore": "cbmignore/gh.cbmignore"
     },
     {
       "dir": "boku",
       "remote": "git@github.com:Unique-Divine/boku.git",
-      "commit": "c5935f123fb225216e1a107d6a3f4eb21d04be7c",
+      "commit": "2b2653c80f97684390534b0dc8baeb08ac0173ef",
       "cbmignore": "cbmignore/boku.cbmignore"
     }
   ]
