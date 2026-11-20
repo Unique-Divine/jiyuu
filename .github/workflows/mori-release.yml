@@ -1,0 +1,257 @@
+# Mori release: builds the C binary codebase-memory-mcp for Linux x64 and
+# arm64 and publishes a DRAFT GitHub release for a mori/v* tag. See
+# mori/README.md "Release".
+#
+# - Tag push mori/vX.Y.Z: the tag must equal mori/VERSION. Builds, packages,
+#   attests and creates a draft release that is not marked latest.
+# - workflow_dispatch: dry_run (default true) builds and uploads workflow
+#   artifacts only. dry_run=false publishes only when run on a mori/v* tag.
+name: Mori release
+
+on:
+  push:
+    tags: ["mori/v*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Build and upload artifacts only; create no release
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mori-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      publish: ${{ steps.version.outputs.publish }}
+      source_sha: ${{ steps.version.outputs.source_sha }}
+    defaults:
+      run:
+        working-directory: mori
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.3
+      - run: bun test scripts/release.test.ts
+      - name: Check the tag against mori/VERSION
+        id: version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          REF_NAME: ${{ github.ref_name }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          publish=false
+          if [[ "$REF" == refs/tags/mori/v* ]]; then
+            version="$(bun scripts/release.ts validate "$REF_NAME")"
+            if [[ "$EVENT_NAME" == push || "$DRY_RUN" == false ]]; then
+              publish=true
+            fi
+          else
+            if [[ "$DRY_RUN" == false ]]; then
+              echo "::error::dry_run=false needs a mori/v* tag ref."
+              exit 1
+            fi
+            version="$(bun scripts/release.ts validate)"
+          fi
+          {
+            echo "version=$version"
+            echo "tag=mori/v$version"
+            echo "publish=$publish"
+            echo "source_sha=$(git rev-parse HEAD)"
+          } >> "$GITHUB_OUTPUT"
+          echo "Mori $version, publish=$publish" >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            goarch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            goarch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: mori
+    env:
+      VERSION: ${{ needs.validate.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          ref: ${{ needs.validate.outputs.source_sha }}
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.3
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zlib1g-dev zstd
+      - name: Cache grammar archive
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/jiyuu-mori/grammars
+          key: mori-grammars-${{ hashFiles('mori/grammars.lock.json') }}
+      - name: Fetch grammars
+        run: bun scripts/grammars-fetch.ts
+      # STATIC=1 is upstream's portable Linux build (gcc -static on Ubuntu):
+      # no shared-library dependencies, so one binary runs on any distro.
+      # --version stamps CBM_VERSION, which `--version` prints.
+      - name: Build static binary
+        run: scripts/build.sh --version "$VERSION" CC=gcc CXX=g++ STATIC=1
+      - name: Strip and check static linking
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/selected"
+          bin="$RUNNER_TEMP/selected/codebase-memory-mcp"
+          strip --strip-all -o "$bin" build/c/codebase-memory-mcp
+          file "$bin"
+          # ldd exits 1 on a static binary, so read its message instead.
+          linkage="$(ldd "$bin" 2>&1 || true)"
+          echo "$linkage"
+          grep -Eq 'not a dynamic executable|statically linked' <<< "$linkage"
+      - name: Smoke-test version and a tiny index
+        run: |
+          set -euo pipefail
+          bin="$RUNNER_TEMP/selected/codebase-memory-mcp"
+          got="$("$bin" --version)"
+          if [[ "$got" != "codebase-memory-mcp $VERSION" ]]; then
+            echo "::error::--version printed '$got'"
+            exit 1
+          fi
+          # The runtime dir must exist and stay short: it holds the CLI
+          # coordination socket.
+          scratch="$(mktemp -d)"
+          repo="$scratch/repo"
+          mkdir -p "$repo" "$scratch/home"
+          mkdir -m 700 "$scratch/run"
+          printf 'def greet(name):\n    return helper(name)\n\n' \
+            > "$repo/app.py"
+          printf 'def helper(name):\n    return "hi " + name\n' \
+            >> "$repo/app.py"
+          export HOME="$scratch/home"
+          export CBM_CACHE_DIR="$scratch/cache"
+          export CBM_RUNTIME_DIR="$scratch/run"
+          "$bin" cli index_repository --repo-path "$repo" \
+            | tee "$scratch/index.json"
+          project="$(jq -r .project "$scratch/index.json")"
+          test "$(jq -r .status "$scratch/index.json")" = indexed
+          "$bin" cli trace_path --project "$project" --function-name greet \
+            --direction outbound | tee "$scratch/trace"
+          grep -q '\.app\.helper 1$' "$scratch/trace"
+      - name: Package archive
+        id: package
+        env:
+          ARCH: ${{ matrix.arch }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          set -euo pipefail
+          asset="$(bun scripts/release.ts asset-name "$VERSION" "$ARCH")"
+          bin="$RUNNER_TEMP/selected/codebase-memory-mcp"
+          sha="$(sha256sum "$bin" | cut -d' ' -f1)"
+          scripts/package-release.sh linux "$GOARCH" \
+            --selected-binary "$bin" --expected-sha256 "$sha" \
+            --out-dir "$RUNNER_TEMP/dist" --archive-name "${asset%.tar.gz}"
+          tar -tzvf "$RUNNER_TEMP/dist/$asset"
+          members="$(tar -tzf "$RUNNER_TEMP/dist/$asset" | sort | tr '\n' ' ')"
+          want='LICENSE NOTICE THIRD_PARTY_NOTICES.md codebase-memory-mcp '
+          if [[ "$members" != "$want" ]]; then
+            echo "::error::unexpected archive members: $members"
+            exit 1
+          fi
+          echo "asset=$asset" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mori-linux-${{ matrix.arch }}
+          path: ${{ runner.temp }}/dist/${{ steps.package.outputs.asset }}
+          if-no-files-found: error
+
+  prepare:
+    needs: [validate, build]
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mori
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          ref: ${{ needs.validate.outputs.source_sha }}
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.3
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: mori-linux-*
+          path: release-assets
+          merge-multiple: true
+      - name: Write checksums and metadata
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+          TAG: ${{ needs.validate.outputs.tag }}
+          SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          bun scripts/release.ts prepare "$VERSION" ../release-assets \
+            --tag "$TAG" --commit "$SOURCE_SHA"
+          cat ../release-assets/checksums.txt
+          cat ../release-assets/release-notes.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mori-${{ needs.validate.outputs.version }}-${{ needs.validate.outputs.source_sha }}
+          path: release-assets/
+          if-no-files-found: error
+
+  publish:
+    needs: [validate, prepare]
+    if: needs.validate.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    defaults:
+      run:
+        working-directory: mori
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          ref: ${{ needs.validate.outputs.source_sha }}
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.3
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: mori-${{ needs.validate.outputs.version }}-${{ needs.validate.outputs.source_sha }}
+          path: release-assets
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            release-assets/*.tar.gz
+            release-assets/checksums.txt
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.validate.outputs.tag }}
+          REPO: ${{ github.repository }}
+        run: bun scripts/release.ts publish "$TAG" ../release-assets --repo "$REPO"
