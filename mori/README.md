@@ -105,20 +105,19 @@ just mori-check      # script tests, build, then the same suites
 Inside `mori/`, `just test "<suites>"` runs other suites and
 `just scripts-test` runs the grammar script tests.
 
-`scripts/test.sh` with no arguments, and `scripts/test.sh --contracts-only`,
-stop at Step 0e: `tests/test_windows_bundle_contract.sh` reads `install.ps1`
-and `pkg/npm/install.js`, which this import excludes, and with `set -e`
-nothing after it runs, neither the later contract steps nor any suite. To run
-every suite (194, over an hour), use:
+`scripts/test.sh` with no arguments runs the full leg: the static contract
+checks (Step 0), a clean sanitizer build, every suite (194, over an hour),
+and the production-binary checks. `scripts/test.sh --contracts-only` runs
+Step 0 alone in a few minutes. Both need the grammars installed first
+(`just grammars`).
 
 ```bash
-just test-all        # inside mori/
-# same as: scripts/test.sh --suites arena   (builds build/c/test-runner)
-#          scripts/test.sh --suites "$(build/c/test-runner --list-suites | tr '\n' ' ')"
+just test-all        # inside mori/; same as: scripts/test.sh
 ```
 
-[IMPORT.md](IMPORT.md#known-test-gaps) lists the 13 contract scripts that
-fail because they read excluded paths.
+Twelve upstream contract checks that test DeusData's release machinery are
+removed; [IMPORT.md](IMPORT.md#excluded-contract-checks) lists them with
+their restore commands.
 
 When running the binary against a real repository during development, point
 `CBM_CACHE_DIR` and `CBM_RUNTIME_DIR` at scratch directories to keep the
