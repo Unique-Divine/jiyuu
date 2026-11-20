@@ -30,3 +30,20 @@ scripts-test:
 
 # Run the script tests, the build and the targeted suites.
 check: scripts-test build test
+
+# Flags: --bin-a X --bin-b Y, --repos a,b, --allow-dirty, --skip-l4.
+# Diff two builds on the pinned corpus, L0-L4 (default: C vs C).
+parity *ARGS:
+    python3 -I parity/parity.py run {{ARGS}}
+
+# Parity on small generated fixture repos; fast enough for CI.
+parity-ci *ARGS: parity-test
+    python3 -I parity/parity.py ci {{ARGS}}
+
+# Unit tests for the parity harness.
+parity-test:
+    python3 -I -m unittest discover -s parity -p '*_test.py'
+
+# Re-pin the parity corpus to the current checkouts (parity/corpus.json).
+parity-pin *ARGS:
+    python3 -I parity/parity.py pin {{ARGS}}

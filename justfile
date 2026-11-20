@@ -108,3 +108,11 @@ mori-test *ARGS:
 mori-check *ARGS:
   just --justfile mori/justfile grammars {{ARGS}}
   just --justfile mori/justfile check
+
+# Diff two Mori builds on the pinned corpus, L0-L4 (default: C vs C).
+mori-parity *ARGS:
+  just --justfile mori/justfile parity {{ARGS}}
+
+# Mori parity on generated fixture repos (needs `just mori-build`).
+mori-parity-ci *ARGS:
+  just --justfile mori/justfile parity-ci {{ARGS}}
