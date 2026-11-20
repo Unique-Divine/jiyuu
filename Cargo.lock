@@ -1469,6 +1469,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "jiyuu-mori"
+version = "0.14.0-dev"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "js-sys"
 version = "0.3.107"
 source = "registry+https://github.com/rust-lang/crates.io-index"

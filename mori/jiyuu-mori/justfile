@@ -1,0 +1,29 @@
+# List jiyuu-mori development commands.
+default:
+  @just --list
+
+# Check Rust formatting without changing files.
+fmt-check:
+  cargo fmt --check
+
+# Reject compiler and Clippy warnings across all targets (pure Rust, no C).
+lint:
+  cargo clippy --locked --all-targets -- -D warnings
+
+# Run the pure-Rust tests (no C toolchain or grammars needed).
+test:
+  cargo test --locked --all-targets
+
+# Run every pure-Rust check, as the jiyuu-mori CI job does.
+check: fmt-check lint test
+
+# Build mori with the C program linked, plus the C reference binary, and
+# compare the two. Needs bun, make, a C toolchain and the pinned grammars
+# (fetched by build.rs). MORI_MAKE_JOBS caps make parallelism (default 4).
+check-linked:
+  MORI_C_REFERENCE=1 cargo clippy --locked --all-targets --features c-backend -- -D warnings
+  MORI_C_REFERENCE=1 cargo test --locked --all-targets --features c-backend
+
+# Build the release mori binary with the C program linked.
+build:
+  cargo build --release --locked --features c-backend

@@ -108,3 +108,15 @@ mori-test *ARGS:
 mori-check *ARGS:
   just --justfile mori/justfile grammars {{ARGS}}
   just --justfile mori/justfile check
+
+# Check the jiyuu-mori crate in pure Rust (format, Clippy, tests).
+mori-rs-check:
+  just --justfile mori/jiyuu-mori/justfile check
+
+# Build mori with the C program linked and compare it with the C binary.
+mori-rs-check-linked:
+  just --justfile mori/jiyuu-mori/justfile check-linked
+
+# Build the release mori binary with the C program linked.
+mori-rs-build:
+  just --justfile mori/jiyuu-mori/justfile build
