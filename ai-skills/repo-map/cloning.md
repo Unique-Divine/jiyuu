@@ -17,7 +17,7 @@ From an empty or partial `~`, run only the lines you still need (skip if the dir
 ```bash
 cd "$HOME"
 
-git clone git@github.com:NibiruChain/nibiru.git nibi-chain
+git clone git@github.com:NibiruChain/nibiru.git nibiru
 git clone git@github.com:NibiruChain/go-ethereum.git nibi-geth
 git clone git@github.com:NibiruChain/go-heartmonitor.git nibi-go-hm
 git clone git@github.com:NibiruChain/ts-sdk.git nibi-ts-sdk
@@ -29,7 +29,7 @@ git clone git@github.com:NibiruChain/sai-docs.git sai-docs
 git clone git@github.com:NibiruChain/iac.git nibi-iac
 ```
 
-The **`nibiru`** checkout also contains **`nibi-chain/lib/sai-trading/`** (trading bot automation); there is **no** separate clone for that path.
+The **`nibiru`** checkout also contains **`nibiru/lib/sai-trading/`** (trading bot automation); there is **no** separate clone for that path.
 
 Sanity-check: `git -C ~/<folder> remote get-url origin` should show `NibiruChain/<slug>.git`; the **`folder`** name is chosen for ergonomics and may not equal **`slug`** (see table in [SKILL.md](./SKILL.md)).
 
@@ -42,7 +42,7 @@ git clone git@github.com:CosmWasm/cosmwasm.git wasm-cosmwasm
 ```
 
 Nibiru's maintained WasmVM, Rust VM, Wasmer runtime, and contracts are already
-inside the `nibi-chain` checkout. Do not recreate the retired `wasm-go-wasmvm`
+inside the `nibiru` checkout. Do not recreate the retired `wasm-go-wasmvm`
 or `nibi-wasm` checkouts for maintained Nibiru work. The standalone Nibiru forks
 are public archives; use them only when historical source or releases are needed.
 
@@ -77,7 +77,7 @@ clone_nibiruchain_ki() {
       fi
       git clone "git@github.com:NibiruChain/${slug}.git" "$dir"
     }
-    clone_into nibiru               nibi-chain
+    clone_into nibiru               nibiru
     clone_into go-ethereum           nibi-geth
     clone_into go-heartmonitor       nibi-go-hm
     clone_into ts-sdk                nibi-ts-sdk
@@ -96,7 +96,7 @@ Then **`clone_nibiruchain_ki`**.
 ## Remote check (one-liner)
 
 ```bash
-for d in nibi-chain nibi-geth nibi-go-hm nibi-ts-sdk nibi-web sai-web sai-perps sai-keeper sai-docs nibi-iac; do
+for d in nibiru nibi-geth nibi-go-hm nibi-ts-sdk nibi-web sai-web sai-perps sai-keeper sai-docs nibi-iac; do
   printf '%s: ' "$d"
   git -C "$HOME/$d" remote get-url origin 2>/dev/null || echo "(missing)"
 done

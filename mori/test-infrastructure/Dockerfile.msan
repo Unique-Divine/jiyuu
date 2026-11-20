@@ -1,0 +1,115 @@
+# MemorySanitizer lane image — stage-2 of the memory-diagnostics program.
+#
+# MSan requires EVERY linked library to be MSan-instrumented, or reads of
+# memory those libraries wrote report as uninitialized. The vendored deps
+# (sqlite3, lz4, zstd, tree-sitter runtime, grammars) compile in-tree and get
+# instrumented for free; the two external links -lstdc++/-lz do not. This
+# image provides an MSan-instrumented libc++/libc++abi/libunwind and zlib in
+# /opt/msan, and scripts/msan.sh points the build at them.
+#
+# Sources are pinned by release tag from their canonical upstreams (same
+# precedent as the cppcheck 2.20.0 build in _lint.yml).
+#
+# Build:  docker build -f test-infrastructure/Dockerfile.msan -t cbm-msan test-infrastructure/
+# Run:    see scripts/msan.sh (driven via docker-compose service test-msan)
+
+# Same pinned base as the primary test image — bump deliberately, never to a tag.
+FROM ubuntu:noble@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90
+
+# WHY every network step below is wrapped: on a cache miss the builder's
+# resolver hiccups and takes the whole lane down. PR-CI runs 33816056229 and
+# 33818108315 both died with `Could not resolve 'apt.llvm.org'` inside the
+# clang layer — seconds AFTER a wget from that same host had succeeded in the
+# same layer, i.e. a transient buildkit-side DNS failure, not a wrong URL.
+# retry: 5 attempts with growing backoff, and it still exits non-zero after
+# the last one, so a genuine breakage keeps failing the build.
+RUN printf '%s\n' \
+    '#!/bin/sh' \
+    '# retry <cmd> [args...]: 5 attempts, sleeping 5s/10s/20s/40s between them.' \
+    'attempt=1; delay=5' \
+    'until "$@"; do' \
+    '  if [ "$attempt" -ge 5 ]; then' \
+    '    echo "retry: giving up after $attempt attempts: $*" >&2' \
+    '    exit 1' \
+    '  fi' \
+    '  echo "retry: attempt $attempt failed, sleeping ${delay}s before retrying: $*" >&2' \
+    '  sleep "$delay"' \
+    '  attempt=$((attempt + 1)); delay=$((delay * 2))' \
+    'done' \
+    > /usr/local/bin/retry \
+    && chmod 0755 /usr/local/bin/retry
+
+# clang 21 from apt.llvm.org — a modern sanitizer toolchain well ahead of
+# Noble's default clang 18 (three majors back), a better vantage point for
+# debugging sanitizer behaviour. We track the highest *stable* noble channel
+# apt.llvm.org serves rather than its bleeding edge: apt.llvm.org keeps only
+# the last few majors and rotates newer ones in and out, and the -22 channel
+# was transiently pulled out from under this build (#2123: "Unable to locate
+# package clang-22"), reddening test-msan repo-wide. Bump deliberately, and
+# only to a channel proven installable (and with a matching llvmorg-*.*.* tag
+# for the runtimes build below), never automatically to the newest number.
+# The key is fetched with `wget -O <file>` rather than `-qO- > <file>`: under
+# retry a redirect is opened once for all attempts, so a partial write from a
+# failed attempt would be prepended to the output of a later successful one.
+# APT normally treats transient index-download failures as warnings and exits
+# zero. Make every update fail on those errors so the outer retry can run.
+RUN retry apt-get -o Acquire::Retries=3 --error-on=any update \
+    && retry apt-get -o Acquire::Retries=3 install -y --no-install-recommends wget gnupg ca-certificates \
+    && retry wget -q -O /etc/apt/trusted.gpg.d/apt.llvm.org.asc https://apt.llvm.org/llvm-snapshot.gpg.key \
+    && echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-21 main" > /etc/apt/sources.list.d/llvm-21.list \
+    && retry apt-get -o Acquire::Retries=3 --error-on=any update \
+    && retry apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
+       clang-21 libclang-rt-21-dev llvm-21 \
+    && ln -sf /usr/bin/clang-21 /usr/bin/clang \
+    && ln -sf /usr/bin/clang++-21 /usr/bin/clang++
+
+RUN retry apt-get -o Acquire::Retries=3 --error-on=any update \
+    && retry apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
+    cmake \
+    ninja-build \
+    make \
+    python3 \
+    git \
+    curl \
+    zsh \
+    ccache \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# libc++ + libc++abi + libunwind with MemoryWithOrigins, at the SAME major as
+# the compiler above — a runtimes build must match its clang. The clone clears
+# its destination first: a half-finished clone would make every later attempt
+# fail on "destination path already exists".
+RUN retry sh -c 'rm -rf /tmp/llvm-project && git clone --depth 1 --branch llvmorg-21.1.8 https://github.com/llvm/llvm-project.git /tmp/llvm-project' \
+    && cmake -G Ninja -S /tmp/llvm-project/runtimes -B /tmp/llvm-msan \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_C_COMPILER=clang \
+        -DCMAKE_CXX_COMPILER=clang++ \
+        -DLLVM_ENABLE_RUNTIMES="libcxx;libcxxabi;libunwind" \
+        -DLLVM_USE_SANITIZER=MemoryWithOrigins \
+        -DCMAKE_INSTALL_PREFIX=/opt/msan \
+        -DLIBCXX_INCLUDE_TESTS=OFF \
+        -DLIBCXX_INCLUDE_BENCHMARKS=OFF \
+        -DLIBCXXABI_INCLUDE_TESTS=OFF \
+        -DLIBUNWIND_INCLUDE_TESTS=OFF \
+    && ninja -C /tmp/llvm-msan cxx cxxabi unwind \
+    && ninja -C /tmp/llvm-msan install-cxx install-cxxabi install-unwind \
+    && rm -rf /tmp/llvm-project /tmp/llvm-msan
+
+# zlib with MSan (static, so the runner needs no runtime path for it).
+RUN retry sh -c 'rm -rf /tmp/zlib && git clone --depth 1 --branch v1.3.1 https://github.com/madler/zlib.git /tmp/zlib' \
+    && cd /tmp/zlib \
+    && CC=clang CFLAGS="-fsanitize=memory -fsanitize-memory-track-origins=2 -fno-omit-frame-pointer -O2" \
+       ./configure --prefix=/opt/msan --static \
+    && make -j"$(nproc)" install \
+    && rm -rf /tmp/zlib
+
+# Symbolizer path in its own (last) layer so adding tools never invalidates
+# the expensive libc++ build layers above. libclang-rt-21-dev is installed
+# explicitly with the compiler: it is only a Recommends of clang, which
+# --no-install-recommends drops, and the link then fails to find
+# libclang_rt.msan-*.a.
+ENV MSAN_SYMBOLIZER_PATH=/usr/lib/llvm-21/bin/llvm-symbolizer
+
+WORKDIR /src
+ENTRYPOINT ["scripts/msan.sh"]

@@ -1,0 +1,358 @@
+/*
+ * semantic.h — Algorithmic code embeddings for SEMANTICALLY_RELATED edges.
+ *
+ * Combines 11 signals into a unified similarity score without external
+ * models or dependencies.  All signals derived from graph buffer metadata
+ * and the existing AST walk.
+ *
+ * Signals:
+ *   1. TF-IDF on metadata tokens (vocabulary overlap)
+ *   2. Random Indexing with co-occurrence (within-codebase synonym bridging)
+ *   3. MinHash structural (existing, decoded from "fp" property)
+ *   4. API Signature vectors (same callees → related)
+ *   5. Type Signature vectors (same param/return types → related)
+ *   6. Module Proximity (same directory → boost)
+ *   7. Decorator Pattern vectors (same annotations → related)
+ *   8. AST Structural Profile (control flow shape, expression types)
+ *   9. Approximate Data Flow (params→return, params→condition)
+ *  10. Graph Diffusion (transitive closure via neighbor blending)
+ *  11. Halstead-Lite (operator/operand complexity profile)
+ *
+ * Note: signals 8, 9, 11 are computed at extraction time (ast_profile.h)
+ * and stored in properties_json.  The rest are computed in the post-pass.
+ */
+#ifndef CBM_SEMANTIC_H
+#define CBM_SEMANTIC_H
+
+#include <stddef.h> /* size_t */
+#include <stdbool.h>
+#include <stdint.h>
+
+#include "semantic/rotsq.h"
+
+/* ── Configuration ───────────────────────────────────────────────── */
+
+/* Random Indexing dimension. 256 is sufficient for <500K functions. */
+/* 768 = nomic-embed-code embedding dimension.  Matches PRETRAINED_DIM. */
+enum { CBM_SEM_DIM = 768 };
+
+/* Random Indexing: non-zero entries per sparse random vector. */
+enum { CBM_SEM_SPARSE_NNZE = 8 };
+
+/* Co-occurrence window half-width. */
+enum { CBM_SEM_WINDOW = 5 };
+
+/* Frequent-token subsampling cap for co-occurrence enrichment. Code token
+ * frequencies are Zipfian — a handful of tokens (int, static, return, …) occur
+ * in 10^4–10^5 functions and dominate the O(occurrences × window × dim) corpus
+ * finalize cost. When a token has more than this many occurrences, we stride-
+ * sample down to ~this count: the enriched vector is L2-normalized afterward, so
+ * an evenly-spaced subsample preserves its *direction* while bounding the work.
+ * Rare/high-IDF (discriminative) tokens fall under the cap and are untouched.
+ * Mirrors word2vec/GloVe frequent-word subsampling. */
+enum { CBM_SEM_MAX_OCCUR = 512 };
+
+/* Default score threshold for SEMANTICALLY_RELATED edge emission.
+ * 0.75 balances recall with precision: validated ~95% precision on
+ * Linux kernel (0.80 = 100% but only 90 edges, 0.70 = 2047 edges
+ * but ~80% precision). */
+#define CBM_SEM_EDGE_THRESHOLD 0.75
+
+/* Maximum SEMANTICALLY_RELATED edges per node. */
+enum { CBM_SEM_MAX_EDGES = 10 };
+
+/* AST structural profile: 25 float features per function (control flow,
+ * nesting, expression types, literals, data flow, Halstead). */
+enum { CBM_SEM_AST_PROFILE_DIMS = 25 };
+
+/* MinHash fingerprint length (must match simhash/minhash.h CBM_MINHASH_K). */
+enum { CBM_SEM_MINHASH_K = 64 };
+
+/* Signal weights (sum to ~1.0, proximity is a multiplier). */
+typedef struct {
+    float w_tfidf;
+    float w_ri;
+    float w_minhash;
+    float w_api;
+    float w_type;
+    float w_decorator;
+    float w_struct_profile;
+    float w_dataflow;
+    float threshold;
+    int max_edges;
+} cbm_sem_config_t;
+
+/* Get default config (can be overridden via env vars). */
+cbm_sem_config_t cbm_sem_get_config(void);
+
+/* Check if semantic embeddings are enabled (CBM_SEMANTIC_ENABLED=1). */
+bool cbm_sem_is_enabled(void);
+
+/* ── Token extraction ────────────────────────────────────────────── */
+
+/* Maximum tokens per function from metadata (name + qn + path + sig + docstring + params). */
+enum { CBM_SEM_MAX_TOKENS = 512 };
+
+/* Split a name into tokens: camelCase, snake_case, dot.separated.
+ * Writes up to max_out tokens into out. Returns token count.
+ * Tokens are lowercased. Caller must free each token. */
+int cbm_sem_tokenize(const char *name, char **out, int max_out);
+
+/* ── Dense vectors ───────────────────────────────────────────────── */
+
+/* A fixed-size dense vector for cosine similarity. */
+typedef struct {
+    float v[CBM_SEM_DIM];
+} cbm_sem_vec_t;
+
+/* Compute cosine similarity between two dense vectors. */
+float cbm_sem_cosine(const cbm_sem_vec_t *a, const cbm_sem_vec_t *b);
+
+/* Generate a deterministic sparse random vector for a token.
+ * Uses xxHash(token) as seed. Output has SEM_SPARSE_NNZE non-zeros. */
+void cbm_sem_random_index(const char *token, cbm_sem_vec_t *out);
+
+/* Eagerly initialize the pretrained token lookup map.
+ * Call this BEFORE dispatching parallel work that invokes cbm_sem_random_index,
+ * so the lazy init races are avoided entirely on the hot path. */
+void cbm_sem_ensure_ready(void);
+
+/* Normalize a vector to unit length in-place. */
+void cbm_sem_normalize(cbm_sem_vec_t *v);
+
+/* Add src to dst: dst[i] += scale * src[i]. */
+void cbm_sem_vec_add_scaled(cbm_sem_vec_t *dst, const cbm_sem_vec_t *src, float scale);
+
+/* ── Per-function semantic data ──────────────────────────────────── */
+
+/* All computed signals for one function. */
+typedef struct {
+    int64_t node_id;
+    const char *file_path;
+    const char *file_ext;
+
+    /* Sparse TF-IDF: stored as parallel arrays of (token_index, weight). */
+    int *tfidf_indices;
+    float *tfidf_weights;
+    int tfidf_len;
+
+    /* Dense vectors for RI, API, Type, Decorator. */
+    /* Quantized semantic vectors (rotated 4-bit scalar quantization — see
+     * rotsq.h). The dense 768-float versions exist only transiently in the
+     * build workers: 4 x 3 KB resident floats per function were ~9.4 GB on
+     * the linux kernel; the codes are ~0.5 KB each. Scoring uses the exact
+     * code-expansion inner-product estimator (deterministic). */
+    cbm_rsq_code_t ri_code;
+    cbm_rsq_code_t api_code;
+    cbm_rsq_code_t type_code;
+    cbm_rsq_code_t deco_code;
+
+    /* AST profile as float vector (decoded from "sp" property). */
+    float struct_profile[CBM_SEM_AST_PROFILE_DIMS];
+
+    /* MinHash fingerprint (decoded from "fp" property). */
+    bool has_minhash;
+    uint32_t minhash[CBM_SEM_MINHASH_K];
+} cbm_sem_func_t;
+
+/* ── Corpus-level data ───────────────────────────────────────────── */
+
+/* Opaque corpus handle for IDF and Random Indexing state. */
+typedef struct cbm_sem_corpus cbm_sem_corpus_t;
+
+/* Create a new corpus from function data. */
+cbm_sem_corpus_t *cbm_sem_corpus_new(void);
+
+/* Register a function's tokens in the corpus (for IDF counting). */
+void cbm_sem_corpus_add_doc(cbm_sem_corpus_t *corpus, const char **tokens, int count);
+
+/* Batch-build the corpus from pre-tokenized documents (PARALLEL variant).
+ * Document f's tokens are all_tokens[offsets[f] .. offsets[f] + token_counts[f]).
+ * Packed, not strided: a fixed CBM_SEM_MAX_TOKENS (512) slots per document
+ * was 4 KB per function up front -- 7.4 GB on the kernel for tokens that
+ * average a few dozen per function.
+ * This replaces a loop of cbm_sem_corpus_add_doc() calls. */
+void cbm_sem_corpus_add_docs_batch(cbm_sem_corpus_t *corpus, char **all_tokens,
+                                   const size_t *offsets, const int *token_counts, int doc_count);
+
+/* Finalize: compute IDF, build enriched token vectors via co-occurrence. */
+void cbm_sem_corpus_finalize(cbm_sem_corpus_t *corpus);
+
+/* Get IDF weight for a token. Returns 0.0 for unknown tokens. */
+float cbm_sem_corpus_idf(const cbm_sem_corpus_t *corpus, const char *token);
+
+/* Get the enriched Random Indexing vector for a token (after co-occurrence). */
+const cbm_sem_vec_t *cbm_sem_corpus_ri_vec(const cbm_sem_corpus_t *corpus, const char *token);
+
+/* The same two answers by token index, for a caller that asks both about many
+ * tokens: resolve each token once (cbm_sem_corpus_token_index, -1 when unknown)
+ * and read idf and vector by index. The name-keyed pair costs one hash lookup and
+ * one strtol per question -- three per token in the vector build. */
+int cbm_sem_corpus_token_index(const cbm_sem_corpus_t *corpus, const char *token);
+float cbm_sem_corpus_idf_at(const cbm_sem_corpus_t *corpus, int index);
+const cbm_sem_vec_t *cbm_sem_corpus_ri_vec_at(const cbm_sem_corpus_t *corpus, int index);
+
+/* Get the total document count. */
+int cbm_sem_corpus_doc_count(const cbm_sem_corpus_t *corpus);
+
+/* Get the total token count (vocabulary size). */
+int cbm_sem_corpus_token_count(const cbm_sem_corpus_t *corpus);
+
+/* Get token name and enriched vector by index (for serialization).
+ * Returns NULL if index is out of range. */
+const char *cbm_sem_corpus_token_at(const cbm_sem_corpus_t *corpus, int index,
+                                    const cbm_sem_vec_t **out_vec, float *out_idf);
+
+/* Free corpus. */
+void cbm_sem_corpus_free(cbm_sem_corpus_t *corpus);
+
+/* The TF-IDF terms of one function: one entry per distinct corpus token whose
+ * idf is above 0, weighted term frequency x idf, in ascending token-index
+ * order (the order the TF-IDF cosine merges on). `token_index[t]` is the
+ * corpus index of tokens[t] (-1 when unknown); NULL looks each token up by
+ * name. `indices` and `weights` hold at least `count` entries. Returns the
+ * number of terms written. */
+int cbm_sem_tfidf_terms(const cbm_sem_corpus_t *corpus, char *const *tokens, const int *token_index,
+                        int count, int *indices, float *weights);
+
+/* ── Combined scoring ────────────────────────────────────────────── */
+
+/* Compute combined similarity score between two functions. */
+float cbm_sem_combined_score(const cbm_sem_func_t *a, const cbm_sem_func_t *b,
+                             const cbm_sem_config_t *cfg);
+
+/* The signal values cbm_sem_combined_score weighs, for measuring them one by
+ * one: each similarity in [0, 1] (minhash 0 when either side has none),
+ * proximity a multiplier in [1.0, 1.10]. `near_copy`: the pair is a SIMILAR_TO
+ * copy, which the combined score sets to 0. */
+typedef struct {
+    float tfidf;
+    float ri;
+    float minhash;
+    float api;
+    float type;
+    float decorator;
+    float struct_profile;
+    float proximity;
+    bool near_copy;
+} cbm_sem_signals_t;
+
+void cbm_sem_signal_values(const cbm_sem_func_t *a, const cbm_sem_func_t *b,
+                           cbm_sem_signals_t *out);
+
+/* cbm_sem_combined_score from the signal values (the same arithmetic). */
+float cbm_sem_combine(const cbm_sem_signals_t *s, const cbm_sem_config_t *cfg);
+
+/* Best-first admission under a per-function edge budget. Pair k joins
+ * functions fa[k] and fb[k] with scores[k]; pairs are taken by descending
+ * score, ties in ascending k (the caller's canonical order), and pair k is
+ * admitted when eligible[k] and both functions have fewer than max_edges
+ * admitted pairs. counts holds one zeroed slot per function and is updated.
+ * Returns false (nothing admitted) when the order cannot be allocated. */
+bool cbm_sem_admit_best_first(const float *scores, const int *fa, const int *fb,
+                              const bool *eligible, int n, int max_edges, int *counts,
+                              bool *admitted);
+
+/* The string value of "key" in a properties JSON object, unescaped into buf
+ * (cut at bufsize - 1); NULL when the key is absent. Escapes are honoured:
+ * \" \\ \/ keep their character, \n \t \r \b \f and \uXXXX become a space (a
+ * separator for the tokenizer), so a value holding a quote is read whole. */
+const char *cbm_sem_json_str(const char *json, const char *key, char *buf, int bufsize);
+
+/* The probability that an admitted SEMANTICALLY_RELATED pair is related, by
+ * its score as stored (three decimals): the judged precision of blind-judged
+ * held-out samples (the edge property "p"). */
+float cbm_sem_calibrated_p(float score);
+
+/* Doc -> code candidates: a section's best CBM_SEM_DOC_TOP_K non-test
+ * functions by TF-IDF, stored when their tfidf is at least
+ * CBM_SEM_DOC_MIN_SCORE, each with the judged probability that the section is
+ * about the function. */
+#define CBM_SEM_DOC_TOP_K 5
+#define CBM_SEM_DOC_MIN_SCORE 0.20F
+
+/* A section's document format, by its file's extension: candidates are
+ * judged, and stored, per format. */
+typedef enum {
+    CBM_SEM_DOC_FMT_OTHER = 0,
+    CBM_SEM_DOC_FMT_MARKDOWN,
+    CBM_SEM_DOC_FMT_RST, /* .rst, and .txt: a .txt file only has sections as Sphinx source */
+    CBM_SEM_DOC_FMT_ADOC,
+    CBM_SEM_DOC_FMT_PDF,
+    CBM_SEM_DOC_FMT_COUNT,
+} cbm_sem_doc_format_t;
+cbm_sem_doc_format_t cbm_sem_doc_format(const char *path);
+
+/* Where a candidate sits relative to the doc's home folder (the folder whose
+ * code the doc documents, see pass_semantic_edges.c): the home is the
+ * repository root (the doc documents the whole project), or the candidate is
+ * inside or outside the home. */
+typedef enum {
+    CBM_SEM_DOC_POS_GLOBAL = 0,
+    CBM_SEM_DOC_POS_LOCAL,
+    CBM_SEM_DOC_POS_OUTSIDE,
+    CBM_SEM_DOC_POS_COUNT,
+} cbm_sem_doc_pos_t;
+
+/* What a candidate points at: one of a section's best CBM_SEM_DOC_TOP_K
+ * functions; a function inside the home below that top K (at most
+ * CBM_SEM_DOC_LOCAL_K per section); a whole file; the doc's home folder. */
+typedef enum {
+    CBM_SEM_DOC_KIND_FUNCTION = 0,
+    CBM_SEM_DOC_KIND_LOCAL,
+    CBM_SEM_DOC_KIND_FILE,
+    CBM_SEM_DOC_KIND_FOLDER,
+    CBM_SEM_DOC_KIND_COUNT,
+} cbm_sem_doc_kind_t;
+#define CBM_SEM_DOC_LOCAL_K 2
+#define CBM_SEM_DOC_FILE_K 3
+
+/* The probability that a section of format fmt is about a candidate of this
+ * kind and position with this tfidf, from the judged curves; 0 when that band
+ * is not stored (judged below 0.20) or has no judged curve. A folder
+ * candidate has no score: cbm_sem_doc_folder_p. */
+float cbm_sem_doc_calibrated_p(cbm_sem_doc_format_t fmt, cbm_sem_doc_kind_t kind,
+                               cbm_sem_doc_pos_t pos, float score);
+
+/* The probability that the doc at doc_path documents its home folder, by
+ * the doc's kind (a README or index file, or any other doc); 0 = not
+ * stored. */
+float cbm_sem_doc_folder_p(cbm_sem_doc_format_t fmt, const char *doc_path);
+
+/* The kind family of a diagram a section embeds, by its format and
+ * diagram_kind: structural (Mermaid sequence, class, ER, C4 and architecture;
+ * PlantUML C4, class, sequence, use-case and component), prose (any other
+ * Mermaid or PlantUML diagram) or graph (any other format). A section's family
+ * is the highest any of its diagrams has, in this order. */
+typedef enum {
+    CBM_SEM_DIAG_NONE = 0,
+    CBM_SEM_DIAG_GRAPH,
+    CBM_SEM_DIAG_PROSE,
+    CBM_SEM_DIAG_STRUCTURAL,
+    CBM_SEM_DIAG_COUNT,
+} cbm_sem_diag_family_t;
+cbm_sem_diag_family_t cbm_sem_diag_family(const char *format, const char *diagram_kind);
+
+/* cbm_sem_doc_calibrated_p for a section that embeds diagrams of family fam:
+ * a Markdown section of a family with its own judged curve takes that curve
+ * for function candidates at or inside the home and for local extras; every
+ * other candidate, and every section of another family, as
+ * cbm_sem_doc_calibrated_p. */
+float cbm_sem_doc_section_p(cbm_sem_doc_format_t fmt, cbm_sem_diag_family_t fam,
+                            cbm_sem_doc_kind_t kind, cbm_sem_doc_pos_t pos, float score);
+
+/* p as stored and shown: two decimals, half up (0.225 -> 0.23, 0.325 ->
+ * 0.33; the epsilon absorbs the float representation of a judged x.xx5). */
+double cbm_sem_p_2dp(float p);
+
+/* Module proximity multiplier based on file paths. */
+float cbm_sem_proximity(const char *path_a, const char *path_b);
+
+/* ── Graph diffusion ─────────────────────────────────────────────── */
+
+/* Apply one iteration of graph diffusion to a combined embedding.
+ * Blends with mean of top-k neighbor embeddings (α=0.3). */
+void cbm_sem_diffuse(cbm_sem_vec_t *combined, const cbm_sem_vec_t *neighbors, int neighbor_count,
+                     float alpha);
+
+#endif /* CBM_SEMANTIC_H */

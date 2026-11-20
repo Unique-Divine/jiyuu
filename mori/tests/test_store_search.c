@@ -1,0 +1,2159 @@
+/*
+ * test_store_search.c — Tests for search and traversal operations.
+ *
+ * Ported from internal/store/store_test.go (TestSearch, TestBFS, etc.)
+ */
+#include "../src/foundation/compat.h"
+#include "../src/foundation/log.h"
+#include "test_framework.h"
+#include "test_helpers.h"
+#include <store/store.h>
+#include "cbm.h"     /* CBM_MACRO_QN_SUFFIX — the fence the FTS feed strips */
+#include "sqlite3.h" /* vendored/sqlite3 — raw nodes_fts MATCH probes */
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+static char trail_log[1024];
+
+static void capture_trail_log(const char *line) {
+    size_t used = strlen(trail_log);
+    if (used < sizeof(trail_log) - 1) {
+        snprintf(trail_log + used, sizeof(trail_log) - used, "%s\n", line);
+    }
+}
+
+/* Helper: create a typical graph for search/traversal tests.
+ *
+ * Nodes: SubmitOrder (Function), ProcessOrder (Function), OrderService (Class)
+ * Edges: SubmitOrder → ProcessOrder (CALLS)
+ *
+ * Returns store handle. Fills ids[3].
+ */
+static cbm_store_t *setup_search_store(int64_t *ids) {
+    cbm_store_t *s = cbm_store_open_memory();
+    cbm_store_upsert_project(s, "test", "/tmp/test");
+
+    cbm_node_t n1 = {.project = "test",
+                     .label = "Function",
+                     .name = "SubmitOrder",
+                     .qualified_name = "test.main.SubmitOrder",
+                     .file_path = "main.go"};
+    cbm_node_t n2 = {.project = "test",
+                     .label = "Function",
+                     .name = "ProcessOrder",
+                     .qualified_name = "test.service.ProcessOrder",
+                     .file_path = "service.go"};
+    cbm_node_t n3 = {.project = "test",
+                     .label = "Class",
+                     .name = "OrderService",
+                     .qualified_name = "test.service.OrderService",
+                     .file_path = "service.go"};
+
+    ids[0] = cbm_store_upsert_node(s, &n1);
+    ids[1] = cbm_store_upsert_node(s, &n2);
+    ids[2] = cbm_store_upsert_node(s, &n3);
+
+    cbm_edge_t e = {.project = "test", .source_id = ids[0], .target_id = ids[1], .type = "CALLS"};
+    cbm_store_insert_edge(s, &e);
+
+    return s;
+}
+
+/* ── Search by label ────────────────────────────────────────────── */
+
+TEST(store_search_by_label) {
+    int64_t ids[3];
+    cbm_store_t *s = setup_search_store(ids);
+
+    cbm_search_params_t params = {
+        .project = "test", .label = "Function", .min_degree = -1, .max_degree = -1};
+    cbm_search_output_t out = {0};
+    int rc = cbm_store_search(s, &params, &out);
+    ASSERT_EQ(rc, CBM_STORE_OK);
+    ASSERT_EQ(out.count, 2);
+    ASSERT_EQ(out.total, 2);
+    cbm_store_search_free(&out);
+
+    cbm_store_close(s);
+    PASS();
+}
+
+/* ── Search by name pattern ─────────────────────────────────────── */
+
+TEST(store_search_by_name_pattern) {
+    int64_t ids[3];
+    cbm_store_t *s = setup_search_store(ids);
+
+    cbm_search_params_t params = {
+        .project = "test", .name_pattern = ".*Submit.*", .min_degree = -1, .max_degree = -1};
+    cbm_search_output_t out = {0};
+    int rc = cbm_store_search(s, &params, &out);
+    ASSERT_EQ(rc, CBM_STORE_OK);
+    ASSERT_EQ(out.count, 1);
+    ASSERT_STR_EQ(out.results[0].node.name, "SubmitOrder");
+    cbm_store_search_free(&out);
+
+    cbm_store_close(s);
+    PASS();
+}
+
+/* ── Empty-string label is ignored (issue #481) ────────────────── */
+
+/* An empty-string label must behave like an omitted label (no filter), not be
+ * applied as a literal `n.label = ''` that matches nothing. Previously a
+ * name_pattern/qn_pattern search passing label="" returned zero results, while
+ * the BM25 query path ignored the empty label — an inconsistency that made
+ * structural class/service discovery silently fail. */
+TEST(store_search_empty_label_ignored) {
+    int64_t ids[3];
+    cbm_store_t *s = setup_search_store(ids);
+
+    /* name_pattern + label="" must match the same as name_pattern alone. */
+    cbm_search_params_t empty_label = {.project = "test",
+                                       .name_pattern = ".*Submit.*",
+                                       .label = "",
+                                       .min_degree = -1,
+                                       .max_degree = -1};
+    cbm_search_output_t out = {0};
+    int rc = cbm_store_search(s, &empty_label, &out);
+    ASSERT_EQ(rc, CBM_STORE_OK);
+    ASSERT_EQ(out.count, 1);
+    ASSERT_STR_EQ(out.results[0].node.name, "SubmitOrder");
+    cbm_store_search_free(&out);
+
+    /* A non-empty label still filters: ".*Order.*" matches three names but only
+     * OrderService is a Class. */
+    cbm_search_params_t cls = {.project = "test",
+                               .name_pattern = ".*Order.*",
+                               .label = "Class",
+                               .min_degree = -1,
+                               .max_degree = -1};
+    cbm_search_output_t out2 = {0};
+    rc = cbm_store_search(s, &cls, &out2);
+    ASSERT_EQ(rc, CBM_STORE_OK);
+    ASSERT_EQ(out2.count, 1);
+    ASSERT_STR_EQ(out2.results[0].node.name, "OrderService");
+    cbm_store_search_free(&out2);
+
+    /* qn_pattern shares the same WHERE builder, so empty label must be ignored
+     * there too. */
+    cbm_search_params_t qn = {.project = "test",
+                              .qn_pattern = ".*SubmitOrder",
+                              .label = "",
+                              .min_degree = -1,
+                              .max_degree = -1};
+    cbm_search_output_t out3 = {0};
+    rc = cbm_store_search(s, &qn, &out3);
+    ASSERT_EQ(rc, CBM_STORE_OK);
+    ASSERT_EQ(out3.count, 1);
+    ASSERT_STR_EQ(out3.results[0].node.name, "SubmitOrder");
+    cbm_store_search_free(&out3);
+
+    cbm_store_close(s);
+    PASS();
+}
+
+/* ── Search by file pattern ─────────────────────────────────────── */
+
+TEST(store_search_by_file_pattern) {
+    int64_t ids[3];
+    cbm_store_t *s = setup_search_store(ids);
+
+    cbm_search_params_t params = {
+        .project = "test", .file_pattern = "service*", .min_degree = -1, .max_degree = -1};
+    cbm_search_output_t out = {0};
+    int rc = cbm_store_search(s, &params, &out);
+    ASSERT_EQ(rc, CBM_STORE_OK);
+    ASSERT_EQ(out.count, 2);
+    cbm_store_search_free(&out);
+
+    cbm_store_close(s);
+    PASS();
+}
+
+/* Issue #200: a wildcard-free file_pattern must match as a path substring,
+ * not require the path to equal it. "offer-server" should match
+ * "src/offer-server/decision.js". */
+TEST(store_search_file_pattern_substring_issue200) {
+    cbm_store_t *s = cbm_store_open_memory();
+    cbm_store_upsert_project(s, "test", "/tmp/test");
+    cbm_node_t n = {.project = "test",
+                    .label = "Function",
+                    .name = "evaluate",
+                    .qualified_name = "test.offer.evaluate",
+                    .file_path = "src/offer-server/decision.js"};
+    cbm_store_upsert_node(s, &n);
+
+    cbm_search_params_t params = {
+        .project = "test", .file_pattern = "offer-server", .min_degree = -1, .max_degree = -1};
+    cbm_search_output_t out = {0};
+    int rc = cbm_store_search(s, &params, &out);
+    ASSERT_EQ(rc, CBM_STORE_OK);
+    ASSERT_EQ(out.count, 1);
+    ASSERT_STR_EQ(out.results[0].node.name, "evaluate");
+    cbm_store_search_free(&out);
+
+    cbm_store_close(s);
+    PASS();
+}
+
+/* ── Search pagination ──────────────────────────────────────────── */
+
+TEST(store_search_pagination) {
+    int64_t ids[3];
+    cbm_store_t *s = setup_search_store(ids);
+
+    /* limit=1 */
+    cbm_search_params_t params = {
+        .project = "test", .limit = 1, .min_degree = -1, .max_degree = -1};
+    cbm_search_output_t out = {0};
+    int rc = cbm_store_search(s, &params, &out);
+    ASSERT_EQ(rc, CBM_STORE_OK);
+    ASSERT_EQ(out.count, 1);
+    ASSERT_EQ(out.total, 3);
+    cbm_store_search_free(&out);
+
+    /* limit=1, offset=1 */
+    params.offset = 1;
+    rc = cbm_store_search(s, &params, &out);
+    ASSERT_EQ(rc, CBM_STORE_OK);
+    ASSERT_EQ(out.count, 1);
+    ASSERT_EQ(out.total, 3);
+    cbm_store_search_free(&out);
+
+    /* offset past end */
+    params.offset = 100;
+    rc = cbm_store_search(s, &params, &out);
+    ASSERT_EQ(rc, CBM_STORE_OK);
+    ASSERT_EQ(out.count, 0);
+    ASSERT_EQ(out.total, 3);
+    cbm_store_search_free(&out);
+
+    cbm_store_close(s);
+    PASS();
+}
+
+/* ── Search with degree filter ──────────────────────────────────── */
+
+static int search_result_index_by_name(const cbm_search_output_t *out, const char *name) {
+    for (int i = 0; i < out->count; i++) {
+        if (out->results[i].node.name && strcmp(out->results[i].node.name, name) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+TEST(store_search_degree_filter) {
+    int64_t ids[3];
+    cbm_store_t *s = setup_search_store(ids);
+
+    /* SubmitOrder has out_degree=1, ProcessOrder has in_degree=1.
+     * Degree filters: -1 = no filter, 0+ = active. */
+    cbm_search_params_t params = {
+        .project = "test", .label = "Function", .min_degree = 1, .max_degree = -1};
+    cbm_search_output_t out = {0};
+    int rc = cbm_store_search(s, &params, &out);
+    ASSERT_EQ(rc, CBM_STORE_OK);
+    /* Both functions have degree >= 1 */
+    ASSERT_EQ(out.count, 2);
+    cbm_store_search_free(&out);
+
+    /* max_degree = 0 should find nodes with no counted degree edges */
+    params.min_degree = -1; /* no min */
+    params.max_degree = 0;  /* only zero-degree nodes */
+    params.label = "Function";
+    rc = cbm_store_search(s, &params, &out);
+    ASSERT_EQ(rc, CBM_STORE_OK);
+    /* Neither function has degree 0, so 0 results */
+    ASSERT_EQ(out.count, 0);
+    cbm_store_search_free(&out);
+
+    cbm_store_close(s);
+    PASS();
+}
+
+TEST(store_search_degree_counts_inherits) {
+    cbm_store_t *s = cbm_store_open_memory();
+    cbm_store_upsert_project(s, "test", "/tmp/test");
+
+    cbm_node_t parent = {.project = "test",
+                         .label = "Class",
+                         .name = "AbstractAttachmentDto",
+                         .qualified_name = "test.AbstractAttachmentDto"};
+    int64_t parent_id = cbm_store_upsert_node(s, &parent);
+    ASSERT_GT(parent_id, 0);
+
+    const char *child_names[] = {"AttachmentDtoA", "AttachmentDtoB", "AttachmentDtoC"};
+    const char *child_qns[] = {"test.AttachmentDtoA", "test.AttachmentDtoB", "test.AttachmentDtoC"};
+    for (int i = 0; i < 3; i++) {
+        cbm_node_t child = {.project = "test",
+                            .label = "Class",
+                            .name = child_names[i],
+                            .qualified_name = child_qns[i]};
+        int64_t child_id = cbm_store_upsert_node(s, &child);
+        ASSERT_GT(child_id, 0);
+        cbm_edge_t edge = {
+            .project = "test", .source_id = child_id, .target_id = parent_id, .type = "INHERITS"};
+        ASSERT_GT(cbm_store_insert_edge(s, &edge), 0);
+    }
+
+    int in_deg = 0;
+    int out_deg = 0;
+    cbm_store_node_degree(s, parent_id, &in_deg, &out_deg);
+    ASSERT_EQ(in_deg, 0);
+    ASSERT_EQ(out_deg, 0);
+
+    cbm_search_params_t params = {
+        .project = "test", .label = "Class", .min_degree = -1, .max_degree = -1};
+    cbm_search_output_t out = {0};
+    int rc = cbm_store_search(s, &params, &out);
+    ASSERT_EQ(rc, CBM_STORE_OK);
+    int parent_idx = search_result_index_by_name(&out, "AbstractAttachmentDto");
+    ASSERT_GTE(parent_idx, 0);
+    ASSERT_EQ(out.results[parent_idx].in_degree, 3);
+    ASSERT_EQ(out.results[parent_idx].out_degree, 0);
+    cbm_store_search_free(&out);
+
+    cbm_store_close(s);
+    PASS();
+}
+
+TEST(store_search_degree_calls_plus_inherits_no_double_count) {
+    cbm_store_t *s = cbm_store_open_memory();
+    cbm_store_upsert_project(s, "test", "/tmp/test");
+
+    cbm_node_t child = {.project = "test",
+                        .label = "Class",
+                        .name = "AttachmentDto",
+                        .qualified_name = "test.AttachmentDto"};
+    cbm_node_t parent = {.project = "test",
+                         .label = "Class",
+                         .name = "BaseAttachmentDto",
+                         .qualified_name = "test.BaseAttachmentDto"};
+    cbm_node_t fn = {.project = "test",
+                     .label = "Function",
+                     .name = "normalizeAttachment",
+                     .qualified_name = "test.normalizeAttachment"};
+    int64_t child_id = cbm_store_upsert_node(s, &child);
+    int64_t parent_id = cbm_store_upsert_node(s, &parent);
+    int64_t fn_id = cbm_store_upsert_node(s, &fn);
+    ASSERT_GT(child_id, 0);
+    ASSERT_GT(parent_id, 0);
+    ASSERT_GT(fn_id, 0);
+
+    cbm_edge_t calls = {
+        .project = "test", .source_id = child_id, .target_id = fn_id, .type = "CALLS"};
+    cbm_edge_t inherits = {
+        .project = "test", .source_id = child_id, .target_id = parent_id, .type = "INHERITS"};
+    ASSERT_GT(cbm_store_insert_edge(s, &calls), 0);
+    ASSERT_GT(cbm_store_insert_edge(s, &inherits), 0);
+
+    int in_deg = 0;
+    int out_deg = 0;
+    cbm_store_node_degree(s, child_id, &in_deg, &out_deg);
+    ASSERT_EQ(in_deg, 0);
+    ASSERT_EQ(out_deg, 1);
+
+    cbm_search_params_t params = {
+        .project = "test", .label = "Class", .min_degree = -1, .max_degree = -1};
+    cbm_search_output_t out = {0};
+    int rc = cbm_store_search(s, &params, &out);
+    ASSERT_EQ(rc, CBM_STORE_OK);
+    int child_idx = search_result_index_by_name(&out, "AttachmentDto");
+    ASSERT_GTE(child_idx, 0);
+    ASSERT_EQ(out.results[child_idx].in_degree, 0);
+    ASSERT_EQ(out.results[child_idx].out_degree, 2);
+    cbm_store_search_free(&out);
+
+    cbm_store_close(s);
+    PASS();
+}
+
+TEST(store_search_min_degree_includes_inherits_only) {
+    cbm_store_t *s = cbm_store_open_memory();
+    cbm_store_upsert_project(s, "test", "/tmp/test");
+
+    cbm_node_t child = {.project = "test",
+                        .label = "Class",
+                        .name = "InheritanceOnlyChild",
+                        .qualified_name = "test.InheritanceOnlyChild"};
+    cbm_node_t parent = {.project = "test",
+                         .label = "Class",
+                         .name = "InheritanceOnlyParent",
+                         .qualified_name = "test.InheritanceOnlyParent"};
+    int64_t child_id = cbm_store_upsert_node(s, &child);
+    int64_t parent_id = cbm_store_upsert_node(s, &parent);
+    ASSERT_GT(child_id, 0);
+    ASSERT_GT(parent_id, 0);
+
+    cbm_edge_t edge = {
+        .project = "test", .source_id = child_id, .target_id = parent_id, .type = "INHERITS"};
+    ASSERT_GT(cbm_store_insert_edge(s, &edge), 0);
+
+    cbm_search_params_t params = {
+        .project = "test", .label = "Class", .min_degree = 1, .max_degree = -1};
+    cbm_search_output_t out = {0};
+    int rc = cbm_store_search(s, &params, &out);
+    ASSERT_EQ(rc, CBM_STORE_OK);
+    ASSERT_GTE(search_result_index_by_name(&out, "InheritanceOnlyParent"), 0);
+    cbm_store_search_free(&out);
+
+    cbm_store_close(s);
+    PASS();
+}
+
+TEST(store_search_isolated_node_zero_degree) {
+    cbm_store_t *s = cbm_store_open_memory();
+    cbm_store_upsert_project(s, "test", "/tmp/test");
+
+    cbm_node_t node = {.project = "test",
+                       .label = "Class",
+                       .name = "LonelyClass",
+                       .qualified_name = "test.LonelyClass"};
+    int64_t node_id = cbm_store_upsert_node(s, &node);
+    ASSERT_GT(node_id, 0);
+
+    int in_deg = 0;
+    int out_deg = 0;
+    cbm_store_node_degree(s, node_id, &in_deg, &out_deg);
+    ASSERT_EQ(in_deg, 0);
+    ASSERT_EQ(out_deg, 0);
+
+    cbm_search_params_t params = {
+        .project = "test", .label = "Class", .min_degree = -1, .max_degree = -1};
+    cbm_search_output_t out = {0};
+    int rc = cbm_store_search(s, &params, &out);
+    ASSERT_EQ(rc, CBM_STORE_OK);
+    int idx = search_result_index_by_name(&out, "LonelyClass");
+    ASSERT_GTE(idx, 0);
+    ASSERT_EQ(out.results[idx].in_degree, 0);
+    ASSERT_EQ(out.results[idx].out_degree, 0);
+    cbm_store_search_free(&out);
+
+    cbm_store_close(s);
+    PASS();
+}
+
+/* ── Search all (no filters) ────────────────────────────────────── */
+
+TEST(store_search_all) {
+    int64_t ids[3];
+    cbm_store_t *s = setup_search_store(ids);
+
+    cbm_search_params_t params = {.project = "test", .min_degree = -1, .max_degree = -1};
+    cbm_search_output_t out = {0};
+    int rc = cbm_store_search(s, &params, &out);
+    ASSERT_EQ(rc, CBM_STORE_OK);
+    ASSERT_EQ(out.count, 3);
+    ASSERT_EQ(out.total, 3);
+    cbm_store_search_free(&out);
+
+    cbm_store_close(s);
+    PASS();
+}
+
+/* ── BFS traversal ──────────────────────────────────────────────── */
+
+TEST(store_bfs_outbound) {
+    int64_t ids[4];
+    cbm_store_t *s = cbm_store_open_memory();
+    cbm_store_upsert_project(s, "test", "/tmp/test");
+
+    /* A → B → C → D chain */
+    cbm_node_t na = {
+        .project = "test", .label = "Function", .name = "A", .qualified_name = "test.A"};
+    cbm_node_t nb = {
+        .project = "test", .label = "Function", .name = "B", .qualified_name = "test.B"};
+    cbm_node_t nc = {
+        .project = "test", .label = "Function", .name = "C", .qualified_name = "test.C"};
+    cbm_node_t nd = {
+        .project = "test", .label = "Function", .name = "D", .qualified_name = "test.D"};
+    ids[0] = cbm_store_upsert_node(s, &na);
+    ids[1] = cbm_store_upsert_node(s, &nb);
+    ids[2] = cbm_store_upsert_node(s, &nc);
+    ids[3] = cbm_store_upsert_node(s, &nd);
+
+    cbm_edge_t e1 = {.project = "test", .source_id = ids[0], .target_id = ids[1], .type = "CALLS"};
+    cbm_edge_t e2 = {.project = "test", .source_id = ids[1], .target_id = ids[2], .type = "CALLS"};
+    cbm_edge_t e3 = {.project = "test", .source_id = ids[2], .target_id = ids[3], .type = "CALLS"};
+    cbm_store_insert_edge(s, &e1);
+    cbm_store_insert_edge(s, &e2);
+    cbm_store_insert_edge(s, &e3);
+
+    /* BFS from A, outbound, depth 3 */
+    const char *types[] = {"CALLS"};
+    cbm_traverse_result_t result = {0};
+    int rc = cbm_store_bfs(s, ids[0], "outbound", types, 1, 3, 100, &result);
+    ASSERT_EQ(rc, CBM_STORE_OK);
+    ASSERT_STR_EQ(result.root.name, "A");
+    ASSERT_GTE(result.visited_count, 3); /* B, C, D */
+    cbm_store_traverse_free(&result);
+
+    /* BFS with depth=1 */
+    rc = cbm_store_bfs(s, ids[0], "outbound", types, 1, 1, 100, &result);
+    ASSERT_EQ(rc, CBM_STORE_OK);
+    ASSERT_EQ(result.visited_count, 1); /* only B */
+    cbm_store_traverse_free(&result);
+
+    cbm_store_close(s);
+    PASS();
+}
+
+TEST(store_bfs_inbound) {
+    int64_t ids[3];
+    cbm_store_t *s = cbm_store_open_memory();
+    cbm_store_upsert_project(s, "test", "/tmp/test");
+
+    cbm_node_t na = {
+        .project = "test", .label = "Function", .name = "A", .qualified_name = "test.A"};
+    cbm_node_t nb = {
+        .project = "test", .label = "Function", .name = "B", .qualified_name = "test.B"};
+    cbm_node_t nc = {
+        .project = "test", .label = "Function", .name = "C", .qualified_name = "test.C"};
+    ids[0] = cbm_store_upsert_node(s, &na);
+    ids[1] = cbm_store_upsert_node(s, &nb);
+    ids[2] = cbm_store_upsert_node(s, &nc);
+
+    /* A → C, B → C */
+    cbm_edge_t e1 = {.project = "test", .source_id = ids[0], .target_id = ids[2], .type = "CALLS"};
+    cbm_edge_t e2 = {.project = "test", .source_id = ids[1], .target_id = ids[2], .type = "CALLS"};
+    cbm_store_insert_edge(s, &e1);
+    cbm_store_insert_edge(s, &e2);
+
+    /* BFS from C, inbound → should find A and B */
+    const char *types[] = {"CALLS"};
+    cbm_traverse_result_t result = {0};
+    int rc = cbm_store_bfs(s, ids[2], "inbound", types, 1, 3, 100, &result);
+    ASSERT_EQ(rc, CBM_STORE_OK);
+    ASSERT_EQ(result.visited_count, 2); /* A and B */
+    cbm_store_traverse_free(&result);
+
+    cbm_store_close(s);
+    PASS();
+}
+
+/* ── Transaction ────────────────────────────────────────────────── */
+
+TEST(store_transaction_commit) {
+    cbm_store_t *s = cbm_store_open_memory();
+    cbm_store_upsert_project(s, "test", "/tmp/test");
+
+    cbm_store_begin(s);
+    cbm_node_t n = {
+        .project = "test", .label = "Function", .name = "TxTest", .qualified_name = "test.TxTest"};
+    cbm_store_upsert_node(s, &n);
+    cbm_store_commit(s);
+
+    int cnt = cbm_store_count_nodes(s, "test");
+    ASSERT_EQ(cnt, 1);
+
+    cbm_store_close(s);
+    PASS();
+}
+
+TEST(store_transaction_rollback) {
+    cbm_store_t *s = cbm_store_open_memory();
+    cbm_store_upsert_project(s, "test", "/tmp/test");
+
+    cbm_store_begin(s);
+    cbm_node_t n = {
+        .project = "test", .label = "Function", .name = "TxTest", .qualified_name = "test.TxTest"};
+    cbm_store_upsert_node(s, &n);
+    cbm_store_rollback(s);
+
+    int cnt = cbm_store_count_nodes(s, "test");
+    ASSERT_EQ(cnt, 0);
+
+    cbm_store_close(s);
+    PASS();
+}
+
+/* ── Bulk write mode ────────────────────────────────────────────── */
+
+TEST(store_bulk_write_mode) {
+    cbm_store_t *s = cbm_store_open_memory();
+    cbm_store_upsert_project(s, "test", "/tmp/test");
+
+    cbm_store_begin_bulk(s);
+    cbm_store_drop_indexes(s);
+
+    /* Insert many nodes in bulk */
+    for (int i = 0; i < 50; i++) {
+        char name[16], qn[32];
+        snprintf(name, sizeof(name), "f%d", i);
+        snprintf(qn, sizeof(qn), "test.f%d", i);
+        cbm_node_t n = {.project = "test", .label = "Function", .name = name, .qualified_name = qn};
+        cbm_store_upsert_node(s, &n);
+    }
+
+    cbm_store_create_indexes(s);
+    cbm_store_end_bulk(s);
+
+    int cnt = cbm_store_count_nodes(s, "test");
+    ASSERT_EQ(cnt, 50);
+
+    cbm_store_close(s);
+    PASS();
+}
+
+/* ── Schema introspection ───────────────────────────────────────── */
+
+TEST(store_schema_info) {
+    int64_t ids[3];
+    cbm_store_t *s = setup_search_store(ids);
+
+    cbm_schema_info_t schema = {0};
+    int rc = cbm_store_get_schema(s, "test", &schema);
+    ASSERT_EQ(rc, CBM_STORE_OK);
+
+    /* Should have labels: Function, Class */
+    ASSERT_GTE(schema.node_label_count, 2);
+
+    /* Should have edge type: CALLS */
+    ASSERT_GTE(schema.edge_type_count, 1);
+
+    cbm_store_schema_free(&schema);
+    cbm_store_close(s);
+    PASS();
+}
+
+/* Label and edge-type counts: count DESC, tied counts in BINARY name order —
+ * the order the GROUP BY scan produced and the distinct-value walk keeps.
+ * Another project's rows must not be counted. */
+TEST(store_schema_counts_ties_in_name_order) {
+    cbm_store_t *s = cbm_store_open_memory();
+    ASSERT_NOT_NULL(s);
+    cbm_store_upsert_project(s, "test", "/tmp/test");
+    cbm_store_upsert_project(s, "other", "/tmp/other");
+    static const char *const labels[] = {"gamma", "Delta", "alpha", "Zeta",  "Beta",
+                                         "Delta", "Zeta",  "Alpha", "gamma", "Delta"};
+    enum { NODE_COUNT = 10, LABEL_GROUPS = 6, TYPE_GROUPS = 4, EDGE_COUNT = 8 };
+    int64_t ids[NODE_COUNT];
+    for (int i = 0; i < NODE_COUNT; i++) {
+        char qn[32];
+        snprintf(qn, sizeof(qn), "test.n%d", i);
+        cbm_node_t n = {.project = "test", .label = labels[i], .name = qn, .qualified_name = qn};
+        ids[i] = cbm_store_upsert_node(s, &n);
+        ASSERT_TRUE(ids[i] > 0);
+        snprintf(qn, sizeof(qn), "other.n%d", i);
+        cbm_node_t o = {.project = "other", .label = "Alpha", .name = qn, .qualified_name = qn};
+        ASSERT_TRUE(cbm_store_upsert_node(s, &o) > 0);
+    }
+    static const char *const types[] = {"USAGE", "DEFINES", "CALLS",   "IMPORTS",
+                                        "CALLS", "DEFINES", "USAGE", "DEFINES"};
+    for (int i = 0; i < EDGE_COUNT; i++) {
+        cbm_edge_t e = {
+            .project = "test", .source_id = ids[i], .target_id = ids[i + 1], .type = types[i]};
+        ASSERT_TRUE(cbm_store_insert_edge(s, &e) > 0);
+    }
+    cbm_schema_info_t schema = {0};
+    ASSERT_EQ(cbm_store_get_schema_counts(s, "test", &schema), CBM_STORE_OK);
+    static const char *const want_labels[] = {"Delta", "Zeta", "gamma", "Alpha", "Beta", "alpha"};
+    static const int want_label_counts[] = {3, 2, 2, 1, 1, 1};
+    ASSERT_EQ(schema.node_label_count, LABEL_GROUPS);
+    for (int i = 0; i < LABEL_GROUPS; i++) {
+        ASSERT_STR_EQ(schema.node_labels[i].label, want_labels[i]);
+        ASSERT_EQ(schema.node_labels[i].count, want_label_counts[i]);
+    }
+    static const char *const want_types[] = {"DEFINES", "CALLS", "USAGE", "IMPORTS"};
+    static const int want_type_counts[] = {3, 2, 2, 1};
+    ASSERT_EQ(schema.edge_type_count, TYPE_GROUPS);
+    for (int i = 0; i < TYPE_GROUPS; i++) {
+        ASSERT_STR_EQ(schema.edge_types[i].type, want_types[i]);
+        ASSERT_EQ(schema.edge_types[i].count, want_type_counts[i]);
+    }
+    cbm_store_schema_free(&schema);
+    cbm_store_close(s);
+    PASS();
+}
+
+/* ── Search with exclude_labels ─────────────────────────────────── */
+
+TEST(store_search_exclude_labels) {
+    cbm_store_t *s = cbm_store_open_memory();
+    cbm_store_upsert_project(s, "test", "/tmp/test");
+
+    /* Create nodes with different labels */
+    cbm_node_t n1 = {.project = "test",
+                     .label = "Function",
+                     .name = "node_Function",
+                     .qualified_name = "test.Function.node_0",
+                     .file_path = "test.go"};
+    cbm_node_t n2 = {.project = "test",
+                     .label = "Route",
+                     .name = "node_Route",
+                     .qualified_name = "test.Route.node_1",
+                     .file_path = "test.go"};
+    cbm_node_t n3 = {.project = "test",
+                     .label = "Method",
+                     .name = "node_Method",
+                     .qualified_name = "test.Method.node_2",
+                     .file_path = "test.go"};
+    cbm_node_t n4 = {.project = "test",
+                     .label = "Route",
+                     .name = "node_Route2",
+                     .qualified_name = "test.Route.node_3",
+                     .file_path = "test.go"};
+    cbm_store_upsert_node(s, &n1);
+    cbm_store_upsert_node(s, &n2);
+    cbm_store_upsert_node(s, &n3);
+    cbm_store_upsert_node(s, &n4);
+
+    /* Search without exclusion */
+    cbm_search_params_t params = {
+        .project = "test", .limit = 100, .min_degree = -1, .max_degree = -1};
+    cbm_search_output_t out = {0};
+    int rc = cbm_store_search(s, &params, &out);
+    ASSERT_EQ(rc, CBM_STORE_OK);
+    int total = out.total;
+    ASSERT_EQ(total, 4);
+    cbm_store_search_free(&out);
+
+    /* Search with Route excluded */
+    const char *excl[] = {"Route", NULL};
+    cbm_search_params_t params2 = {.project = "test",
+                                   .limit = 100,
+                                   .min_degree = -1,
+                                   .max_degree = -1,
+                                   .exclude_labels = excl};
+    cbm_search_output_t out2 = {0};
+    rc = cbm_store_search(s, &params2, &out2);
+    ASSERT_EQ(rc, CBM_STORE_OK);
+    ASSERT_TRUE(out2.total < total);
+
+    /* Verify no Route nodes in results */
+    for (int i = 0; i < out2.count; i++) {
+        ASSERT_FALSE(strcmp(out2.results[i].node.label, "Route") == 0);
+    }
+    cbm_store_search_free(&out2);
+
+    cbm_store_close(s);
+    PASS();
+}
+
+/* ── Dump to file ──────────────────────────────────────────────── */
+
+TEST(store_dump_to_file) {
+    cbm_store_t *s = cbm_store_open_memory();
+    cbm_store_upsert_project(s, "test", "/tmp/test");
+
+    cbm_node_t n = {.project = "test",
+                    .label = "Function",
+                    .name = "Hello",
+                    .qualified_name = "test.main.Hello",
+                    .file_path = "main.go",
+                    .start_line = 1,
+                    .end_line = 5,
+                    .properties_json = "{\"sig\":\"func Hello()\"}"};
+    int64_t id = cbm_store_upsert_node(s, &n);
+    ASSERT_TRUE(id > 0);
+
+    /* Dump to temp file */
+    char *td = th_mktempdir("cbm_dump");
+    char path[256];
+    snprintf(path, sizeof(path), "%s/test.db", td);
+
+    int rc = cbm_store_dump_to_file(s, path);
+    ASSERT_EQ(rc, CBM_STORE_OK);
+    cbm_store_close(s);
+
+    /* Open dumped file and verify data */
+    cbm_store_t *disk = cbm_store_open_path(path);
+    ASSERT_NOT_NULL(disk);
+
+    cbm_node_t found = {0};
+    rc = cbm_store_find_node_by_qn(disk, "test", "test.main.Hello", &found);
+    ASSERT_EQ(rc, CBM_STORE_OK);
+    ASSERT_STR_EQ(found.name, "Hello");
+    cbm_node_free_fields(&found);
+
+    cbm_store_close(disk);
+    unlink(path);
+    PASS();
+}
+
+/* ── BFS with cross-service (HTTP_CALLS) edges ─────────────────── */
+
+TEST(store_bfs_cross_service) {
+    cbm_store_t *s = cbm_store_open_memory();
+    cbm_store_upsert_project(s, "test", "/tmp/test");
+
+    cbm_node_t na = {
+        .project = "test", .label = "Function", .name = "A", .qualified_name = "test.A"};
+    cbm_node_t nb = {
+        .project = "test", .label = "Function", .name = "B", .qualified_name = "test.B"};
+    int64_t idA = cbm_store_upsert_node(s, &na);
+    int64_t idB = cbm_store_upsert_node(s, &nb);
+
+    cbm_edge_t e = {.project = "test", .source_id = idA, .target_id = idB, .type = "HTTP_CALLS"};
+    cbm_store_insert_edge(s, &e);
+
+    /* BFS from A with both CALLS and HTTP_CALLS */
+    const char *types[] = {"CALLS", "HTTP_CALLS"};
+    cbm_traverse_result_t result = {0};
+    int rc = cbm_store_bfs(s, idA, "outbound", types, 2, 1, 200, &result);
+    ASSERT_EQ(rc, CBM_STORE_OK);
+    ASSERT_GTE(result.visited_count, 1); /* B */
+
+    /* Verify that we found B via HTTP_CALLS */
+    int found_b = 0;
+    for (int i = 0; i < result.visited_count; i++) {
+        if (strcmp(result.visited[i].node.name, "B") == 0)
+            found_b = 1;
+    }
+    ASSERT_TRUE(found_b);
+
+    /* Check edges contain HTTP_CALLS type */
+    int found_http = 0;
+    for (int i = 0; i < result.edge_count; i++) {
+        if (strcmp(result.edges[i].type, "HTTP_CALLS") == 0)
+            found_http = 1;
+    }
+    ASSERT_TRUE(found_http);
+
+    cbm_store_traverse_free(&result);
+    cbm_store_close(s);
+    PASS();
+}
+
+/* ── BFS depth-limited chain ───────────────────────────────────── */
+
+TEST(store_bfs_depth_chain) {
+    cbm_store_t *s = cbm_store_open_memory();
+    cbm_store_upsert_project(s, "test", "/tmp/test");
+
+    /* Build chain: A → B → C → D */
+    cbm_node_t na = {
+        .project = "test", .label = "Function", .name = "A", .qualified_name = "test.A"};
+    cbm_node_t nb = {
+        .project = "test", .label = "Function", .name = "B", .qualified_name = "test.B"};
+    cbm_node_t nc = {
+        .project = "test", .label = "Function", .name = "C", .qualified_name = "test.C"};
+    cbm_node_t nd = {
+        .project = "test", .label = "Function", .name = "D", .qualified_name = "test.D"};
+    int64_t idA = cbm_store_upsert_node(s, &na);
+    int64_t idB = cbm_store_upsert_node(s, &nb);
+    int64_t idC = cbm_store_upsert_node(s, &nc);
+    int64_t idD = cbm_store_upsert_node(s, &nd);
+
+    cbm_edge_t e1 = {.project = "test", .source_id = idA, .target_id = idB, .type = "CALLS"};
+    cbm_edge_t e2 = {.project = "test", .source_id = idB, .target_id = idC, .type = "CALLS"};
+    cbm_edge_t e3 = {.project = "test", .source_id = idC, .target_id = idD, .type = "CALLS"};
+    cbm_store_insert_edge(s, &e1);
+    cbm_store_insert_edge(s, &e2);
+    cbm_store_insert_edge(s, &e3);
+
+    /* BFS from A, depth=3 should find B(hop1), C(hop2), D(hop3) */
+    const char *types[] = {"CALLS"};
+    cbm_traverse_result_t result = {0};
+    int rc = cbm_store_bfs(s, idA, "outbound", types, 1, 3, 100, &result);
+    ASSERT_EQ(rc, CBM_STORE_OK);
+    ASSERT_EQ(result.visited_count, 3);
+
+    /* Verify hop distances */
+    for (int i = 0; i < result.visited_count; i++) {
+        if (strcmp(result.visited[i].node.name, "B") == 0)
+            ASSERT_EQ(result.visited[i].hop, 1);
+        if (strcmp(result.visited[i].node.name, "C") == 0)
+            ASSERT_EQ(result.visited[i].hop, 2);
+        if (strcmp(result.visited[i].node.name, "D") == 0)
+            ASSERT_EQ(result.visited[i].hop, 3);
+    }
+
+    cbm_store_traverse_free(&result);
+    cbm_store_close(s);
+    PASS();
+}
+
+/* ── Search case insensitive ───────────────────────────────────── */
+
+TEST(store_search_case_insensitive) {
+    cbm_store_t *s = cbm_store_open_memory();
+    cbm_store_upsert_project(s, "test", "/tmp/test");
+
+    cbm_node_t n = {.project = "test",
+                    .label = "Function",
+                    .name = "HandleRequest",
+                    .qualified_name = "test.HandleRequest"};
+    cbm_store_upsert_node(s, &n);
+
+    /* Case-insensitive search (default) */
+    cbm_search_params_t params = {.project = "test",
+                                  .name_pattern = ".*handlerequest.*",
+                                  .min_degree = -1,
+                                  .max_degree = -1,
+                                  .case_sensitive = false};
+    cbm_search_output_t out = {0};
+    int rc = cbm_store_search(s, &params, &out);
+    ASSERT_EQ(rc, CBM_STORE_OK);
+    ASSERT_EQ(out.count, 1);
+    cbm_store_search_free(&out);
+
+    /* Case-sensitive search — should NOT match */
+    cbm_search_params_t params2 = {.project = "test",
+                                   .name_pattern = ".*handlerequest.*",
+                                   .min_degree = -1,
+                                   .max_degree = -1,
+                                   .case_sensitive = true};
+    cbm_search_output_t out2 = {0};
+    rc = cbm_store_search(s, &params2, &out2);
+    ASSERT_EQ(rc, CBM_STORE_OK);
+    ASSERT_EQ(out2.count, 0);
+    cbm_store_search_free(&out2);
+
+    cbm_store_close(s);
+    PASS();
+}
+
+/* ── Anchored name patterns: the idx_nodes_name range path ─────── */
+
+TEST(store_regex_anchored_prefix) {
+    char out[64];
+    ASSERT_EQ(cbm_regex_anchored_prefix("^schedule$", out, sizeof(out)), 8);
+    ASSERT_STR_EQ(out, "schedule");
+    ASSERT_EQ(cbm_regex_anchored_prefix("^kmalloc", out, sizeof(out)), 7);
+    ASSERT_STR_EQ(out, "kmalloc");
+    ASSERT_EQ(cbm_regex_anchored_prefix("^get_", out, sizeof(out)), 4);
+    ASSERT_STR_EQ(out, "get_");
+    ASSERT_EQ(cbm_regex_anchored_prefix("^o'neil", out, sizeof(out)), 6);
+    ASSERT_STR_EQ(out, "o'neil");
+    /* The run stops at the first operator; the prefix before it holds. */
+    ASSERT_EQ(cbm_regex_anchored_prefix("^foo.bar", out, sizeof(out)), 3);
+    ASSERT_STR_EQ(out, "foo");
+    ASSERT_EQ(cbm_regex_anchored_prefix("^foo[0-9]", out, sizeof(out)), 3);
+    ASSERT_EQ(cbm_regex_anchored_prefix("^foo(bar)?", out, sizeof(out)), 3);
+    ASSERT_EQ(cbm_regex_anchored_prefix("^foo$", out, sizeof(out)), 3);
+    /* A quantifier or escape after the run drops its last character. */
+    ASSERT_EQ(cbm_regex_anchored_prefix("^abc*", out, sizeof(out)), 2);
+    ASSERT_STR_EQ(out, "ab");
+    ASSERT_EQ(cbm_regex_anchored_prefix("^abc?", out, sizeof(out)), 2);
+    ASSERT_EQ(cbm_regex_anchored_prefix("^abc+?", out, sizeof(out)), 2);
+    ASSERT_EQ(cbm_regex_anchored_prefix("^abc{0,1}", out, sizeof(out)), 2);
+    ASSERT_EQ(cbm_regex_anchored_prefix("^abc\\.d", out, sizeof(out)), 2);
+    ASSERT_EQ(cbm_regex_anchored_prefix("^a*", out, sizeof(out)), 0);
+    /* No provable prefix: unanchored, alternation, leading operator,
+     * non-ASCII. */
+    ASSERT_EQ(cbm_regex_anchored_prefix("schedule", out, sizeof(out)), 0);
+    ASSERT_EQ(cbm_regex_anchored_prefix(".*schedule", out, sizeof(out)), 0);
+    ASSERT_EQ(cbm_regex_anchored_prefix("^foo|bar", out, sizeof(out)), 0);
+    ASSERT_EQ(cbm_regex_anchored_prefix("^(foo|bar)x", out, sizeof(out)), 0);
+    ASSERT_EQ(cbm_regex_anchored_prefix("^(foo)", out, sizeof(out)), 0);
+    ASSERT_EQ(cbm_regex_anchored_prefix("^[Ff]oo", out, sizeof(out)), 0);
+    ASSERT_EQ(cbm_regex_anchored_prefix("^.foo", out, sizeof(out)), 0);
+    ASSERT_EQ(cbm_regex_anchored_prefix("^\\x", out, sizeof(out)), 0);
+    ASSERT_EQ(cbm_regex_anchored_prefix("^\xc3\xbc"
+                                        "ber",
+                                        out, sizeof(out)),
+              0);
+    ASSERT_EQ(cbm_regex_anchored_prefix("^ab\xc3\xbc", out, sizeof(out)), 2);
+    ASSERT_EQ(cbm_regex_anchored_prefix("(?i)^foo", out, sizeof(out)), 0);
+    ASSERT_EQ(cbm_regex_anchored_prefix(NULL, out, sizeof(out)), 0);
+    /* Bounded by the buffer; a quantifier right after the cut still drops. */
+    ASSERT_EQ(cbm_regex_anchored_prefix("^abcdef", out, 4), 3);
+    ASSERT_STR_EQ(out, "abc");
+    ASSERT_EQ(cbm_regex_anchored_prefix("^abc*", out, 4), 2);
+    PASS();
+}
+
+/* Statements a search ran with the name-range predicate (SQLITE_TRACE_STMT). */
+static int anchored_trace_cb(unsigned type, void *ctx, void *stmt, void *sql) {
+    (void)stmt;
+    if (type == SQLITE_TRACE_STMT && sql && strstr((const char *)sql, "n.name >= ?")) {
+        (*(int *)ctx)++;
+    }
+    return 0;
+}
+
+/* "name#label;" per row plus the total, for comparing two searches. */
+static void anchored_search_rows(cbm_store_t *s, const cbm_search_params_t *p, int *rc,
+                                 char *buf, size_t buf_sz) {
+    cbm_search_output_t out = {0};
+    *rc = cbm_store_search(s, p, &out);
+    int len = snprintf(buf, buf_sz, "total=%d:", out.total);
+    for (int i = 0; i < out.count && len > 0 && (size_t)len < buf_sz; i++) {
+        len += snprintf(buf + len, buf_sz - (size_t)len, "%s#%s#%lld;", out.results[i].node.name,
+                        out.results[i].node.label, (long long)out.results[i].node.id);
+    }
+    cbm_store_search_free(&out);
+}
+
+/* An anchored literal pattern must return exactly what the same regex returns
+ * without the range path. Wrapping it in a group, "(^schedule$)", keeps the
+ * regex semantics but has no provable prefix, so it runs the plain scan. The
+ * names cover every letter case of the prefix, prefix-vs-substring, and the
+ * byte order the UNION ALL arms are merged in. */
+TEST(store_search_anchored_name_matches_plain_scan) {
+    cbm_store_t *s = cbm_store_open_memory();
+    ASSERT_NOT_NULL(s);
+    cbm_store_upsert_project(s, "p", "/tmp/p");
+    static const char *const names[] = {
+        "schedule",  "Schedule", "SCHEDULE", "sCHEDULE", "scheduler", "schedule_work",
+        "reschedule", "sched",   "Sched_x",  "get_name", "Get_Name",  "getname",
+        "o'neil",    "ScHeDuLe", "schedule", "zabc"};
+    enum { NAME_COUNT = 16 };
+    for (int i = 0; i < NAME_COUNT; i++) {
+        char qn[64];
+        snprintf(qn, sizeof(qn), "p.m%d.%s", i, names[i]);
+        cbm_node_t n = {.project = "p",
+                        .label = (i % 3 == 1) ? "Class" : "Function",
+                        .name = names[i],
+                        .qualified_name = qn,
+                        .file_path = "m.c"};
+        ASSERT_TRUE(cbm_store_upsert_node(s, &n) > 0);
+    }
+    int ranged = 0;
+    sqlite3_trace_v2(cbm_store_get_db(s), SQLITE_TRACE_STMT, anchored_trace_cb, &ranged);
+
+    struct {
+        const char *pattern;
+        const char *label;
+        bool case_sensitive;
+        int limit;
+        int offset;
+        int want_total;
+    } cases[] = {
+        {"^schedule$", NULL, false, 0, 0, 6},  {"^sched", NULL, false, 0, 0, 10},
+        {"^sched", "Function", false, 0, 0, 6}, {"^SCHED", NULL, true, 0, 0, 1},
+        {"^Sched", NULL, true, 0, 0, 2},       {"^sche+dule$", NULL, false, 0, 0, 6},
+        {"^s.hedule$", NULL, false, 0, 0, 6},  {"^get_", NULL, false, 0, 0, 2},
+        {"^o'n", NULL, false, 0, 0, 1},        {"^zzz", NULL, false, 0, 0, 0},
+        {"^sched", NULL, false, 3, 2, 10},     {"^sched", NULL, false, 4, 8, 10},
+    };
+    char fast[4096];
+    char plain[4096];
+    char twin[64];
+    for (size_t c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
+        cbm_search_params_t p = {.project = "p",
+                                 .label = cases[c].label,
+                                 .name_pattern = cases[c].pattern,
+                                 .case_sensitive = cases[c].case_sensitive,
+                                 .limit = cases[c].limit,
+                                 .offset = cases[c].offset,
+                                 .min_degree = -1,
+                                 .max_degree = -1};
+        int rc_fast = 0;
+        int rc_plain = 0;
+        int before = ranged;
+        anchored_search_rows(s, &p, &rc_fast, fast, sizeof(fast));
+        ASSERT_EQ(ranged - before, 2); /* count + page both took the range path */
+        snprintf(twin, sizeof(twin), "(%s)", cases[c].pattern);
+        p.name_pattern = twin;
+        before = ranged;
+        anchored_search_rows(s, &p, &rc_plain, plain, sizeof(plain));
+        ASSERT_EQ(ranged - before, 0);
+        ASSERT_EQ(rc_fast, CBM_STORE_OK);
+        ASSERT_EQ(rc_plain, CBM_STORE_OK);
+        ASSERT_STR_EQ(fast, plain);
+        char want_total[32];
+        snprintf(want_total, sizeof(want_total), "total=%d:", cases[c].want_total);
+        ASSERT_EQ(strncmp(fast, want_total, strlen(want_total)), 0);
+    }
+    sqlite3_trace_v2(cbm_store_get_db(s), 0, NULL, NULL);
+    cbm_store_close(s);
+    PASS();
+}
+
+/* A regex the engine rejects fails the plain query as soon as one row reaches
+ * it ("zabc" passes the LIKE '%abc%' hint). The range path would never reach
+ * the regex (no name starts with "abc") and answer an empty page instead, so a
+ * pattern that does not compile keeps the plain query and its error. */
+TEST(store_search_anchored_invalid_regex_keeps_error) {
+    cbm_store_t *s = cbm_store_open_memory();
+    ASSERT_NOT_NULL(s);
+    cbm_store_upsert_project(s, "p", "/tmp/p");
+    cbm_node_t n = {.project = "p", .label = "Function", .name = "zabc", .qualified_name = "p.zabc"};
+    ASSERT_TRUE(cbm_store_upsert_node(s, &n) > 0);
+    cbm_search_params_t p = {
+        .project = "p", .name_pattern = "^abc(", .min_degree = -1, .max_degree = -1};
+    cbm_search_output_t out = {0};
+    ASSERT_EQ(cbm_store_search(s, &p, &out), CBM_STORE_ERR);
+    cbm_store_search_free(&out);
+    cbm_store_close(s);
+    PASS();
+}
+
+/* ── Impact: HopToRisk ─────────────────────────────────────────── */
+
+TEST(store_hop_to_risk) {
+    ASSERT_STR_EQ(cbm_risk_label(cbm_hop_to_risk(1)), "CRITICAL");
+    ASSERT_STR_EQ(cbm_risk_label(cbm_hop_to_risk(2)), "HIGH");
+    ASSERT_STR_EQ(cbm_risk_label(cbm_hop_to_risk(3)), "MEDIUM");
+    ASSERT_STR_EQ(cbm_risk_label(cbm_hop_to_risk(4)), "LOW");
+    ASSERT_STR_EQ(cbm_risk_label(cbm_hop_to_risk(5)), "LOW");
+    ASSERT_STR_EQ(cbm_risk_label(cbm_hop_to_risk(10)), "LOW");
+    PASS();
+}
+
+/* ── Impact: BuildImpactSummary ────────────────────────────────── */
+
+TEST(store_build_impact_summary) {
+    cbm_node_hop_t hops[5] = {
+        {.node = {.id = 1}, .hop = 1}, {.node = {.id = 2}, .hop = 1}, {.node = {.id = 3}, .hop = 2},
+        {.node = {.id = 4}, .hop = 3}, {.node = {.id = 5}, .hop = 4},
+    };
+    cbm_edge_info_t edges[1] = {
+        {.from_name = "A", .to_name = "B", .type = "CALLS"},
+    };
+
+    cbm_impact_summary_t s = cbm_build_impact_summary(hops, 5, edges, 1);
+    ASSERT_EQ(s.critical, 2);
+    ASSERT_EQ(s.high, 1);
+    ASSERT_EQ(s.medium, 1);
+    ASSERT_EQ(s.low, 1);
+    ASSERT_EQ(s.total, 5);
+    ASSERT_FALSE(s.has_cross_service);
+    PASS();
+}
+
+/* ── Impact: cross-service detection ──────────────────────────── */
+
+TEST(store_cross_service_detection) {
+    cbm_node_hop_t hops[1] = {{.node = {.id = 1}, .hop = 1}};
+
+    cbm_edge_info_t edges_http[1] = {
+        {.from_name = "A", .to_name = "B", .type = "HTTP_CALLS"},
+    };
+    cbm_impact_summary_t s1 = cbm_build_impact_summary(hops, 1, edges_http, 1);
+    ASSERT_TRUE(s1.has_cross_service);
+
+    cbm_edge_info_t edges_async[1] = {
+        {.from_name = "A", .to_name = "B", .type = "ASYNC_CALLS"},
+    };
+    cbm_impact_summary_t s2 = cbm_build_impact_summary(hops, 1, edges_async, 1);
+    ASSERT_TRUE(s2.has_cross_service);
+    PASS();
+}
+
+/* ── Impact: DeduplicateHops ──────────────────────────────────── */
+
+TEST(store_deduplicate_hops) {
+    cbm_node_hop_t hops[4] = {
+        {.node = {.id = 1, .name = "A"}, .hop = 2},
+        {.node = {.id = 1, .name = "A"}, .hop = 3}, /* duplicate at higher hop */
+        {.node = {.id = 2, .name = "B"}, .hop = 1},
+        {.node = {.id = 3, .name = "C"}, .hop = 3},
+    };
+
+    cbm_node_hop_t *result = NULL;
+    int count = 0;
+    int rc = cbm_deduplicate_hops(hops, 4, &result, &count);
+    ASSERT_EQ(rc, CBM_STORE_OK);
+    ASSERT_EQ(count, 3);
+
+    /* Find node 1 — should have minimum hop = 2 */
+    int found1 = 0;
+    for (int i = 0; i < count; i++) {
+        if (result[i].node.id == 1) {
+            ASSERT_EQ(result[i].hop, 2);
+            found1 = 1;
+        }
+    }
+    ASSERT_TRUE(found1);
+
+    free(result);
+    PASS();
+}
+
+/* ── BFS with risk labels (from store_test.go) ─────────────────── */
+
+TEST(store_bfs_with_risk_labels) {
+    cbm_store_t *s = cbm_store_open_memory();
+    cbm_store_upsert_project(s, "test", "/tmp/test");
+
+    /* Build chain: A → B → C → D */
+    cbm_node_t na = {
+        .project = "test", .label = "Function", .name = "A", .qualified_name = "test.A"};
+    cbm_node_t nb = {
+        .project = "test", .label = "Function", .name = "B", .qualified_name = "test.B"};
+    cbm_node_t nc = {
+        .project = "test", .label = "Function", .name = "C", .qualified_name = "test.C"};
+    cbm_node_t nd = {
+        .project = "test", .label = "Function", .name = "D", .qualified_name = "test.D"};
+    int64_t idA = cbm_store_upsert_node(s, &na);
+    (void)cbm_store_upsert_node(s, &nb);
+    (void)cbm_store_upsert_node(s, &nc);
+    (void)cbm_store_upsert_node(s, &nd);
+
+    cbm_edge_t e1 = {.project = "test", .source_id = idA, .target_id = idA + 1, .type = "CALLS"};
+    cbm_edge_t e2 = {
+        .project = "test", .source_id = idA + 1, .target_id = idA + 2, .type = "CALLS"};
+    cbm_edge_t e3 = {
+        .project = "test", .source_id = idA + 2, .target_id = idA + 3, .type = "CALLS"};
+    cbm_store_insert_edge(s, &e1);
+    cbm_store_insert_edge(s, &e2);
+    cbm_store_insert_edge(s, &e3);
+
+    const char *types[] = {"CALLS"};
+    cbm_traverse_result_t result = {0};
+    int rc = cbm_store_bfs(s, idA, "outbound", types, 1, 3, 200, &result);
+    ASSERT_EQ(rc, CBM_STORE_OK);
+
+    /* Deduplicate */
+    cbm_node_hop_t *deduped = NULL;
+    int dcount = 0;
+    cbm_deduplicate_hops(result.visited, result.visited_count, &deduped, &dcount);
+    ASSERT_EQ(dcount, 3);
+
+    /* Verify risk labels */
+    for (int i = 0; i < dcount; i++) {
+        if (strcmp(deduped[i].node.name, "B") == 0)
+            ASSERT_STR_EQ(cbm_risk_label(cbm_hop_to_risk(deduped[i].hop)), "CRITICAL");
+        if (strcmp(deduped[i].node.name, "C") == 0)
+            ASSERT_STR_EQ(cbm_risk_label(cbm_hop_to_risk(deduped[i].hop)), "HIGH");
+        if (strcmp(deduped[i].node.name, "D") == 0)
+            ASSERT_STR_EQ(cbm_risk_label(cbm_hop_to_risk(deduped[i].hop)), "MEDIUM");
+    }
+
+    /* Build summary */
+    cbm_impact_summary_t summary =
+        cbm_build_impact_summary(deduped, dcount, result.edges, result.edge_count);
+    ASSERT_EQ(summary.critical, 1);
+    ASSERT_EQ(summary.high, 1);
+    ASSERT_EQ(summary.medium, 1);
+    ASSERT_EQ(summary.total, 3);
+
+    free(deduped);
+    cbm_store_traverse_free(&result);
+    cbm_store_close(s);
+    PASS();
+}
+
+TEST(store_bfs_reachability_is_not_trail_capped) {
+    cbm_store_t *s = cbm_store_open_memory();
+    cbm_store_upsert_project(s, "test", "/tmp/test");
+
+    cbm_node_t root = {
+        .project = "test", .label = "Function", .name = "Root", .qualified_name = "test.Root"};
+    int64_t root_id = cbm_store_upsert_node(s, &root);
+
+    enum { NODE_COUNT = 4200 };
+    for (int i = 0; i < NODE_COUNT; i++) {
+        char name[32];
+        snprintf(name, sizeof(name), "Leaf%d", i);
+        cbm_node_t leaf = {
+            .project = "test", .label = "Function", .name = name, .qualified_name = name};
+        int64_t leaf_id = cbm_store_upsert_node(s, &leaf);
+        cbm_edge_t edge = {
+            .project = "test", .source_id = root_id, .target_id = leaf_id, .type = "CALLS"};
+        cbm_store_insert_edge(s, &edge);
+    }
+
+    const char *types[] = {"CALLS"};
+    cbm_traverse_result_t result = {0};
+    int rc = cbm_store_bfs(s, root_id, "outbound", types, 1, 1, 5000, &result);
+    ASSERT_EQ(rc, CBM_STORE_OK);
+    ASSERT_EQ(result.visited_count, NODE_COUNT);
+
+    cbm_store_traverse_free(&result);
+    cbm_store_close(s);
+    PASS();
+}
+
+TEST(store_bfs_trail_warns_when_path_rows_are_truncated) {
+    cbm_store_t *s = cbm_store_open_memory();
+    cbm_store_upsert_project(s, "test", "/tmp/test");
+
+    int64_t ids[18];
+    for (int i = 0; i < 18; i++) {
+        char name[16];
+        snprintf(name, sizeof(name), "node-%d", i);
+        cbm_node_t node = {.project = "test",
+                           .label = "Function",
+                           .name = name,
+                           .qualified_name = name,
+                           .file_path = "graph.c"};
+        ids[i] = cbm_store_upsert_node(s, &node);
+    }
+    for (int source = 0; source < 17; source++) {
+        for (int target = source + 1; target < 18; target++) {
+            cbm_edge_t edge = {.project = "test",
+                               .source_id = ids[source],
+                               .target_id = ids[target],
+                               .type = "CALLS"};
+            cbm_store_insert_edge(s, &edge);
+        }
+    }
+
+    trail_log[0] = '\0';
+    cbm_log_set_sink(capture_trail_log);
+    const char *types[] = {"CALLS"};
+    cbm_traverse_result_t result = {0};
+    int rc = cbm_store_bfs_trail(s, ids[0], "outbound", types, 1, 10, 5000, &result);
+    cbm_log_set_sink(NULL);
+
+    ASSERT_EQ(rc, CBM_STORE_OK);
+    ASSERT_TRUE(result.truncated);
+    ASSERT_TRUE(strstr(trail_log, "cypher.trail_truncated") != NULL);
+    ASSERT_TRUE(strstr(trail_log, "result=partial") != NULL);
+
+    cbm_store_traverse_free(&result);
+    cbm_store_close(s);
+    PASS();
+}
+
+TEST(store_bfs_trail_preserves_deeper_match_under_hub_budget) {
+    cbm_store_t *s = cbm_store_open_memory();
+    cbm_store_upsert_project(s, "test", "/tmp/test");
+
+    cbm_node_t root = {
+        .project = "test", .label = "Function", .name = "root", .qualified_name = "test.root"};
+    cbm_node_t branch = {
+        .project = "test", .label = "Function", .name = "branch", .qualified_name = "test.branch"};
+    cbm_node_t target = {
+        .project = "test", .label = "Function", .name = "target", .qualified_name = "test.target"};
+    int64_t root_id = cbm_store_upsert_node(s, &root);
+    int64_t branch_id = cbm_store_upsert_node(s, &branch);
+    int64_t target_id = cbm_store_upsert_node(s, &target);
+
+    cbm_edge_t edge = {
+        .project = "test", .source_id = root_id, .target_id = branch_id, .type = "CALLS"};
+    cbm_store_insert_edge(s, &edge);
+    edge.source_id = branch_id;
+    edge.target_id = target_id;
+    cbm_store_insert_edge(s, &edge);
+
+    /* A high-fanout hub must not consume the bounded CTE before a deeper path
+     * is considered; the depth-first queue should still surface `target`. */
+    enum { LEAF_COUNT = 4100 };
+    for (int i = 0; i < LEAF_COUNT; i++) {
+        char name[32];
+        snprintf(name, sizeof(name), "leaf-%d", i);
+        cbm_node_t leaf = {
+            .project = "test", .label = "Function", .name = name, .qualified_name = name};
+        int64_t leaf_id = cbm_store_upsert_node(s, &leaf);
+        edge.source_id = root_id;
+        edge.target_id = leaf_id;
+        cbm_store_insert_edge(s, &edge);
+    }
+
+    const char *types[] = {"CALLS"};
+    cbm_traverse_result_t result = {0};
+    int rc = cbm_store_bfs_trail(s, root_id, "outbound", types, 1, 2, 5000, &result);
+    ASSERT_EQ(rc, CBM_STORE_OK);
+    ASSERT_TRUE(result.truncated);
+
+    bool saw_target = false;
+    for (int i = 0; i < result.visited_count; i++) {
+        if (result.visited[i].node.id == target_id) {
+            saw_target = true;
+            break;
+        }
+    }
+    ASSERT_TRUE(saw_target);
+
+    cbm_store_traverse_free(&result);
+    cbm_store_close(s);
+    PASS();
+}
+
+/* ── BFS cross-service summary ─────────────────────────────────── */
+
+TEST(store_bfs_cross_service_summary) {
+    cbm_store_t *s = cbm_store_open_memory();
+    cbm_store_upsert_project(s, "test", "/tmp/test");
+
+    cbm_node_t na = {
+        .project = "test", .label = "Function", .name = "A", .qualified_name = "test.A"};
+    cbm_node_t nb = {
+        .project = "test", .label = "Function", .name = "B", .qualified_name = "test.B"};
+    int64_t idA = cbm_store_upsert_node(s, &na);
+    int64_t idB = cbm_store_upsert_node(s, &nb);
+
+    cbm_edge_t e = {.project = "test", .source_id = idA, .target_id = idB, .type = "HTTP_CALLS"};
+    cbm_store_insert_edge(s, &e);
+
+    const char *types[] = {"CALLS", "HTTP_CALLS"};
+    cbm_traverse_result_t result = {0};
+    int rc = cbm_store_bfs(s, idA, "outbound", types, 2, 1, 200, &result);
+    ASSERT_EQ(rc, CBM_STORE_OK);
+
+    cbm_impact_summary_t summary = cbm_build_impact_summary(result.visited, result.visited_count,
+                                                            result.edges, result.edge_count);
+    ASSERT_TRUE(summary.has_cross_service);
+
+    cbm_store_traverse_free(&result);
+    cbm_store_close(s);
+    PASS();
+}
+
+/* ── GlobToLike ─────────────────────────────────────────────────── */
+
+TEST(store_glob_to_like) {
+    struct {
+        const char *pattern;
+        const char *want;
+    } tests[] = {
+        {"**/*.py", "%%.py"},
+        {"**/dir/**", "%dir%"},
+        {"*.go", "%.go"},
+        {"src/**", "src%"},
+        {"**/test_*.py", "%test_%.py"},
+        {"file?.txt", "file_.txt"},
+        {"exact.go", "exact.go"},
+        {"**/custom-pip-package/**", "%custom-pip-package%"},
+    };
+
+    for (int i = 0; i < 8; i++) {
+        char *got = cbm_glob_to_like(tests[i].pattern);
+        ASSERT_NOT_NULL(got);
+        ASSERT_STR_EQ(got, tests[i].want);
+        free(got);
+    }
+
+    /* NULL returns NULL */
+    ASSERT_NULL(cbm_glob_to_like(NULL));
+
+    PASS();
+}
+
+/* ── ExtractLikeHints ────────────────────────────────────────────── */
+
+TEST(store_extract_like_hints) {
+    char *hints[16];
+    int n;
+
+    /* Basic: .*handler.* → ["handler"] */
+    n = cbm_extract_like_hints(".*handler.*", hints, 16);
+    ASSERT_EQ(n, 1);
+    ASSERT_STR_EQ(hints[0], "handler");
+    free(hints[0]);
+
+    /* Multiple segments: .*Order.*Handler.* → ["Order", "Handler"] */
+    n = cbm_extract_like_hints(".*Order.*Handler.*", hints, 16);
+    ASSERT_EQ(n, 2);
+    ASSERT_STR_EQ(hints[0], "Order");
+    ASSERT_STR_EQ(hints[1], "Handler");
+    free(hints[0]);
+    free(hints[1]);
+
+    /* Plain literal: "handler" → ["handler"] */
+    n = cbm_extract_like_hints("handler", hints, 16);
+    ASSERT_EQ(n, 1);
+    ASSERT_STR_EQ(hints[0], "handler");
+    free(hints[0]);
+
+    /* Anchored: ^handleRequest$ → ["handleRequest"] */
+    n = cbm_extract_like_hints("^handleRequest$", hints, 16);
+    ASSERT_EQ(n, 1);
+    ASSERT_STR_EQ(hints[0], "handleRequest");
+    free(hints[0]);
+
+    /* Too generic: .* → no hints */
+    n = cbm_extract_like_hints(".*", hints, 16);
+    ASSERT_EQ(n, 0);
+
+    /* Short literal: .*ab.* → "ab" is only 2 chars, below threshold */
+    n = cbm_extract_like_hints(".*ab.*", hints, 16);
+    ASSERT_EQ(n, 0);
+
+    /* Exactly 3 chars: .*abc.* → ["abc"] */
+    n = cbm_extract_like_hints(".*abc.*", hints, 16);
+    ASSERT_EQ(n, 1);
+    ASSERT_STR_EQ(hints[0], "abc");
+    free(hints[0]);
+
+    /* Alternation: bail out */
+    n = cbm_extract_like_hints(".*foo|.*bar", hints, 16);
+    ASSERT_EQ(n, 0);
+
+    n = cbm_extract_like_hints(".*Order.*|.*Handler.*", hints, 16);
+    ASSERT_EQ(n, 0);
+
+    /* Escaped dot: \\. is ".", only 1 char */
+    n = cbm_extract_like_hints("\\.", hints, 16);
+    ASSERT_EQ(n, 0);
+
+    /* Multi-segment with underscore: .*test_.*helper.* → ["test_", "helper"] */
+    n = cbm_extract_like_hints(".*test_.*helper.*", hints, 16);
+    ASSERT_EQ(n, 2);
+    ASSERT_STR_EQ(hints[0], "test_");
+    ASSERT_STR_EQ(hints[1], "helper");
+    free(hints[0]);
+    free(hints[1]);
+
+    /* NULL safety */
+    n = cbm_extract_like_hints(NULL, hints, 16);
+    ASSERT_EQ(n, 0);
+
+    PASS();
+}
+
+/* ── EnsureCaseInsensitive ──────────────────────────────────────── */
+
+TEST(store_ensure_case_insensitive) {
+    ASSERT_STR_EQ(cbm_ensure_case_insensitive("handler"), "(?i)handler");
+    ASSERT_STR_EQ(cbm_ensure_case_insensitive("(?i)handler"), "(?i)handler");
+    ASSERT_STR_EQ(cbm_ensure_case_insensitive(".*Order.*"), "(?i).*Order.*");
+    ASSERT_STR_EQ(cbm_ensure_case_insensitive(""), "(?i)");
+    PASS();
+}
+
+/* ── StripCaseFlag ──────────────────────────────────────────────── */
+
+TEST(store_strip_case_flag) {
+    ASSERT_STR_EQ(cbm_strip_case_flag("(?i)handler"), "handler");
+    ASSERT_STR_EQ(cbm_strip_case_flag("handler"), "handler");
+    ASSERT_STR_EQ(cbm_strip_case_flag("(?i)(?i)double"), "(?i)double");
+    PASS();
+}
+
+TEST(store_batch_count_degrees) {
+    cbm_store_t *s = cbm_store_open_memory();
+    ASSERT_NOT_NULL(s);
+    cbm_store_upsert_project(s, "test", "/tmp/test");
+
+    /* A -> B, A -> C, B -> C (CALLS), A -> C (USAGE) */
+    cbm_node_t na = {
+        .project = "test", .label = "Function", .name = "A", .qualified_name = "test.A"};
+    cbm_node_t nb = {
+        .project = "test", .label = "Function", .name = "B", .qualified_name = "test.B"};
+    cbm_node_t nc = {
+        .project = "test", .label = "Function", .name = "C", .qualified_name = "test.C"};
+    int64_t idA = cbm_store_upsert_node(s, &na);
+    int64_t idB = cbm_store_upsert_node(s, &nb);
+    int64_t idC = cbm_store_upsert_node(s, &nc);
+
+    cbm_edge_t e1 = {.project = "test", .source_id = idA, .target_id = idB, .type = "CALLS"};
+    cbm_edge_t e2 = {.project = "test", .source_id = idA, .target_id = idC, .type = "CALLS"};
+    cbm_edge_t e3 = {.project = "test", .source_id = idB, .target_id = idC, .type = "CALLS"};
+    cbm_edge_t e4 = {.project = "test", .source_id = idA, .target_id = idC, .type = "USAGE"};
+    cbm_store_insert_edge(s, &e1);
+    cbm_store_insert_edge(s, &e2);
+    cbm_store_insert_edge(s, &e3);
+    cbm_store_insert_edge(s, &e4);
+
+    /* All edge types */
+    int64_t ids3[] = {idA, idB, idC};
+    int in3[3], out3[3];
+    int rc = cbm_store_batch_count_degrees(s, ids3, 3, NULL, in3, out3);
+    ASSERT_EQ(rc, CBM_STORE_OK);
+    /* A: in=0, out=3 (2 CALLS + 1 USAGE) */
+    ASSERT_EQ(in3[0], 0);
+    ASSERT_EQ(out3[0], 3);
+    /* B: in=1, out=1 */
+    ASSERT_EQ(in3[1], 1);
+    ASSERT_EQ(out3[1], 1);
+    /* C: in=3, out=0 */
+    ASSERT_EQ(in3[2], 3);
+    ASSERT_EQ(out3[2], 0);
+
+    /* Filtered by CALLS only */
+    int64_t ids2[] = {idA, idC};
+    int in2[2], out2[2];
+    rc = cbm_store_batch_count_degrees(s, ids2, 2, "CALLS", in2, out2);
+    ASSERT_EQ(rc, CBM_STORE_OK);
+    /* A: in=0, out=2 (CALLS only) */
+    ASSERT_EQ(in2[0], 0);
+    ASSERT_EQ(out2[0], 2);
+    /* C: in=2, out=0 (CALLS only) */
+    ASSERT_EQ(in2[1], 2);
+    ASSERT_EQ(out2[1], 0);
+
+    cbm_store_close(s);
+    PASS();
+}
+
+/* ── GlobToLike edge cases ──────────────────────────────────────── */
+
+TEST(store_glob_to_like_empty) {
+    char *got = cbm_glob_to_like("");
+    ASSERT_NOT_NULL(got);
+    ASSERT_STR_EQ(got, "");
+    free(got);
+    PASS();
+}
+
+TEST(store_glob_to_like_only_star) {
+    char *got = cbm_glob_to_like("*");
+    ASSERT_NOT_NULL(got);
+    ASSERT_STR_EQ(got, "%");
+    free(got);
+    PASS();
+}
+
+TEST(store_glob_to_like_consecutive_doublestar) {
+    /* double-star slash double-star should collapse to %% */
+    char *got = cbm_glob_to_like("**/**");
+    ASSERT_NOT_NULL(got);
+    ASSERT_STR_EQ(got, "%%");
+    free(got);
+    PASS();
+}
+
+TEST(store_glob_to_like_dot_and_brackets) {
+    /* Dots and brackets are literal in glob-to-LIKE — passed through */
+    char *got = cbm_glob_to_like("src/[abc]/*.ts");
+    ASSERT_NOT_NULL(got);
+    ASSERT_STR_EQ(got, "src/[abc]/%.ts");
+    free(got);
+    PASS();
+}
+
+TEST(store_glob_to_like_question_marks) {
+    /* Multiple ? should produce multiple _ */
+    char *got = cbm_glob_to_like("f???.txt");
+    ASSERT_NOT_NULL(got);
+    ASSERT_STR_EQ(got, "f___.txt");
+    free(got);
+    PASS();
+}
+
+/* ── ExtractLikeHints edge cases ───────────────────────────────── */
+
+TEST(store_extract_like_hints_null_out) {
+    /* NULL out array */
+    int n = cbm_extract_like_hints(".*handler.*", NULL, 16);
+    ASSERT_EQ(n, 0);
+    PASS();
+}
+
+TEST(store_extract_like_hints_zero_max) {
+    char *hints[4];
+    int n = cbm_extract_like_hints(".*handler.*", hints, 0);
+    ASSERT_EQ(n, 0);
+    PASS();
+}
+
+TEST(store_extract_like_hints_alternation_complex) {
+    char *hints[16];
+    /* Alternation with multiple segments on each side */
+    int n = cbm_extract_like_hints("(foo|bar)baz", hints, 16);
+    ASSERT_EQ(n, 0);
+    PASS();
+}
+
+TEST(store_extract_like_hints_short_segments) {
+    char *hints[16];
+    /* All segments < 3 chars — no hints */
+    int n = cbm_extract_like_hints(".*ab.*cd.*", hints, 16);
+    ASSERT_EQ(n, 0);
+    PASS();
+}
+
+TEST(store_extract_like_hints_complex_multi_segment) {
+    char *hints[16];
+    /* .*Foo.*Bar.* should extract both */
+    int n = cbm_extract_like_hints(".*Foo.*Bar.*", hints, 16);
+    ASSERT_EQ(n, 2);
+    ASSERT_STR_EQ(hints[0], "Foo");
+    ASSERT_STR_EQ(hints[1], "Bar");
+    free(hints[0]);
+    free(hints[1]);
+    PASS();
+}
+
+TEST(store_extract_like_hints_max_out_limit) {
+    char *hints[2];
+    /* More segments than max_out — should stop at max */
+    int n = cbm_extract_like_hints(".*aaa.*bbb.*ccc.*ddd.*", hints, 2);
+    ASSERT_EQ(n, 2);
+    ASSERT_STR_EQ(hints[0], "aaa");
+    ASSERT_STR_EQ(hints[1], "bbb");
+    free(hints[0]);
+    free(hints[1]);
+    PASS();
+}
+
+TEST(store_extract_like_hints_escaped_chars) {
+    char *hints[16];
+    /* Backslash escaping: \. makes the dot literal, so it becomes part of the
+     * accumulated literal string. ".handler" is the extracted hint. */
+    int n = cbm_extract_like_hints("\\.handler", hints, 16);
+    ASSERT_EQ(n, 1);
+    ASSERT_STR_EQ(hints[0], ".handler");
+    free(hints[0]);
+    PASS();
+}
+
+/* ── Case helper edge cases ────────────────────────────────────── */
+
+TEST(store_ensure_case_insensitive_null) {
+    const char *result = cbm_ensure_case_insensitive(NULL);
+    ASSERT_STR_EQ(result, "");
+    PASS();
+}
+
+TEST(store_ensure_case_insensitive_already_ci) {
+    /* Already case-insensitive — should NOT double-prefix */
+    ASSERT_STR_EQ(cbm_ensure_case_insensitive("(?i).*Order.*"), "(?i).*Order.*");
+    PASS();
+}
+
+TEST(store_ensure_case_insensitive_plain) {
+    ASSERT_STR_EQ(cbm_ensure_case_insensitive("FooBar"), "(?i)FooBar");
+    PASS();
+}
+
+TEST(store_strip_case_flag_null) {
+    const char *result = cbm_strip_case_flag(NULL);
+    ASSERT_STR_EQ(result, "");
+    PASS();
+}
+
+TEST(store_strip_case_flag_no_flag) {
+    ASSERT_STR_EQ(cbm_strip_case_flag("plain_pattern"), "plain_pattern");
+    PASS();
+}
+
+TEST(store_strip_case_flag_empty) {
+    ASSERT_STR_EQ(cbm_strip_case_flag(""), "");
+    PASS();
+}
+
+/* ── Architecture helper edge cases ────────────────────────────── */
+
+TEST(store_qn_to_package_single_segment) {
+    /* No dots — returns empty string */
+    ASSERT_STR_EQ(cbm_qn_to_package("nodots"), "");
+    PASS();
+}
+
+TEST(store_qn_to_package_two_segments) {
+    /* project.name — returns segment[1] */
+    ASSERT_STR_EQ(cbm_qn_to_package("proj.name"), "name");
+    PASS();
+}
+
+TEST(store_qn_to_package_many_segments) {
+    /* project.dir.pkg.Func — 4+ segments returns segment[2] */
+    ASSERT_STR_EQ(cbm_qn_to_package("myproj.dir.pkg.Func"), "pkg");
+    PASS();
+}
+
+TEST(store_qn_to_package_null) {
+    ASSERT_STR_EQ(cbm_qn_to_package(NULL), "");
+    PASS();
+}
+
+TEST(store_qn_to_package_empty) {
+    ASSERT_STR_EQ(cbm_qn_to_package(""), "");
+    PASS();
+}
+
+TEST(store_qn_to_top_package_single_segment) {
+    ASSERT_STR_EQ(cbm_qn_to_top_package("nodots"), "");
+    PASS();
+}
+
+TEST(store_qn_to_top_package_two_segments) {
+    /* project.dir — returns "dir" */
+    ASSERT_STR_EQ(cbm_qn_to_top_package("proj.dir"), "dir");
+    PASS();
+}
+
+TEST(store_qn_to_top_package_many_segments) {
+    /* Always returns segment[1] regardless of depth */
+    ASSERT_STR_EQ(cbm_qn_to_top_package("proj.dir.sub.Func"), "dir");
+    PASS();
+}
+
+TEST(store_qn_to_top_package_null) {
+    ASSERT_STR_EQ(cbm_qn_to_top_package(NULL), "");
+    PASS();
+}
+
+TEST(store_is_test_file_various) {
+    /* Positive cases */
+    ASSERT_TRUE(cbm_is_test_file_path("test_handler.py"));
+    ASSERT_TRUE(cbm_is_test_file_path("handler_test.go"));
+    ASSERT_TRUE(cbm_is_test_file_path("handler.test.ts"));
+    ASSERT_FALSE(cbm_is_test_file_path("handler.spec.ts")); /* "spec" not "test" — no match */
+    ASSERT_TRUE(cbm_is_test_file_path("src/__tests__/handler.js"));
+    ASSERT_TRUE(cbm_is_test_file_path("tests/unit/handler.py"));
+
+    /* Negative cases */
+    ASSERT_FALSE(cbm_is_test_file_path("handler.go"));
+    ASSERT_FALSE(cbm_is_test_file_path("main.py"));
+    ASSERT_FALSE(cbm_is_test_file_path("service.ts"));
+
+    /* Edge: NULL and empty */
+    ASSERT_FALSE(cbm_is_test_file_path(NULL));
+    ASSERT_FALSE(cbm_is_test_file_path(""));
+    PASS();
+}
+
+/* ── Risk/impact edge cases ────────────────────────────────────── */
+
+TEST(store_hop_to_risk_all_levels) {
+    /* hop 0 hits the default case → LOW */
+    ASSERT_EQ(cbm_hop_to_risk(0), CBM_RISK_LOW);
+    /* hop 1 → CRITICAL */
+    ASSERT_EQ(cbm_hop_to_risk(1), CBM_RISK_CRITICAL);
+    /* hop 2 → HIGH */
+    ASSERT_EQ(cbm_hop_to_risk(2), CBM_RISK_HIGH);
+    /* hop 3 → MEDIUM */
+    ASSERT_EQ(cbm_hop_to_risk(3), CBM_RISK_MEDIUM);
+    /* hop 4+ → LOW */
+    ASSERT_EQ(cbm_hop_to_risk(4), CBM_RISK_LOW);
+    ASSERT_EQ(cbm_hop_to_risk(100), CBM_RISK_LOW);
+    /* negative → LOW (default) */
+    ASSERT_EQ(cbm_hop_to_risk(-1), CBM_RISK_LOW);
+    PASS();
+}
+
+TEST(store_risk_label_all_levels) {
+    ASSERT_STR_EQ(cbm_risk_label(CBM_RISK_CRITICAL), "CRITICAL");
+    ASSERT_STR_EQ(cbm_risk_label(CBM_RISK_HIGH), "HIGH");
+    ASSERT_STR_EQ(cbm_risk_label(CBM_RISK_MEDIUM), "MEDIUM");
+    ASSERT_STR_EQ(cbm_risk_label(CBM_RISK_LOW), "LOW");
+    /* Out-of-range enum value falls to default → LOW */
+    ASSERT_STR_EQ(cbm_risk_label((cbm_risk_level_t)99), "LOW");
+    PASS();
+}
+
+TEST(store_impact_summary_empty) {
+    /* Zero hops and edges */
+    cbm_impact_summary_t s = cbm_build_impact_summary(NULL, 0, NULL, 0);
+    ASSERT_EQ(s.total, 0);
+    ASSERT_EQ(s.critical, 0);
+    ASSERT_EQ(s.high, 0);
+    ASSERT_EQ(s.medium, 0);
+    ASSERT_EQ(s.low, 0);
+    ASSERT_FALSE(s.has_cross_service);
+    PASS();
+}
+
+TEST(store_find_nodes_rejects_null_store_without_ub) {
+    cbm_node_t *nodes = (cbm_node_t *)(uintptr_t)1U;
+    int count = -1;
+    ASSERT_EQ(cbm_store_find_nodes_by_name(NULL, "project", "name", &nodes, &count), CBM_STORE_ERR);
+    ASSERT_NULL(nodes);
+    ASSERT_EQ(count, 0);
+    nodes = (cbm_node_t *)(uintptr_t)1U;
+    count = -1;
+    ASSERT_EQ(cbm_store_find_nodes_by_label(NULL, "project", "Function", &nodes, &count),
+              CBM_STORE_ERR);
+    ASSERT_NULL(nodes);
+    ASSERT_EQ(count, 0);
+    nodes = (cbm_node_t *)(uintptr_t)1U;
+    count = -1;
+    ASSERT_EQ(cbm_store_find_nodes_by_file(NULL, "project", "file.c", &nodes, &count),
+              CBM_STORE_ERR);
+    ASSERT_NULL(nodes);
+    ASSERT_EQ(count, 0);
+    PASS();
+}
+
+/* ── nodes_fts prose column (#518 / #519) ──────────────────────────
+ *
+ * nodes_fts is CONTENTLESS, so a column's value cannot be selected back — a
+ * MATCH with a column filter is the only way to prove a token landed in `body`
+ * rather than in one of the identifier columns. That distinction IS the test:
+ * a four-column INSERT still "works", it just silently indexes no prose. */
+
+static int fts_match_count(cbm_store_t *s, const char *match) {
+    sqlite3 *db = cbm_store_get_db(s);
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM nodes_fts WHERE nodes_fts MATCH ?1", -1, &st,
+                           NULL) != SQLITE_OK) {
+        return -1;
+    }
+    sqlite3_bind_text(st, 1, match, -1, SQLITE_TRANSIENT);
+    int n = sqlite3_step(st) == SQLITE_ROW ? sqlite3_column_int(st, 0) : -1;
+    sqlite3_finalize(st);
+    return n;
+}
+
+/* One Section carrying prose, one Function carrying none. */
+static void seed_prose_nodes(cbm_store_t *s) {
+    cbm_store_upsert_project(s, "p", "/tmp/p");
+    cbm_node_t sec = {.project = "p",
+                      .label = "Section",
+                      .name = "Installation",
+                      .qualified_name = "p.README.Installation",
+                      .file_path = "README.md",
+                      .properties_json = "{\"docstring\":\"provisions an ephemeral "
+                                         "workstation runner via getUserById\"}"};
+    cbm_store_upsert_node(s, &sec);
+    cbm_node_t fn = {.project = "p",
+                     .label = "Function",
+                     .name = "plainFunction",
+                     .qualified_name = "p.main.plainFunction",
+                     .file_path = "main.c"};
+    cbm_store_upsert_node(s, &fn);
+}
+
+static cbm_store_t *setup_prose_store(void) {
+    cbm_store_t *s = cbm_store_open_memory();
+    seed_prose_nodes(s);
+    return s;
+}
+
+TEST(store_fts_rebuild_indexes_docstring_as_body_issue518) {
+    cbm_store_t *s = setup_prose_store();
+    ASSERT_EQ(cbm_store_fts_rebuild(s, NULL, 0), CBM_STORE_OK);
+
+    /* The prose is in `body` — the column BM25 weights at 0.3. */
+    ASSERT_EQ(fts_match_count(s, "body:ephemeral"), 1);
+    ASSERT_EQ(fts_match_count(s, "body:workstation"), 1);
+    /* ...and specifically NOT smeared into an identifier column. */
+    ASSERT_EQ(fts_match_count(s, "name:ephemeral"), 0);
+    /* A node with no docstring contributes no body tokens. */
+    ASSERT_EQ(fts_match_count(s, "body:plainFunction"), 0);
+    /* Identifier indexing is untouched. */
+    ASSERT_EQ(fts_match_count(s, "name:plainFunction"), 1);
+
+    /* `body` is PROSE and must be indexed RAW — only `name` gets the camelCase
+     * splitter. cbm_camel_split("getUserById") yields "getUserById get User By
+     * Id", so a split body would additionally match the fragment "User".
+     * Asserting the fragment does NOT match is what makes this test fail if
+     * anyone ever wraps the body expression in cbm_camel_split(). */
+    ASSERT_EQ(fts_match_count(s, "body:getUserById"), 1);
+    ASSERT_EQ(fts_match_count(s, "body:User"), 0);
+    /* ...and the mirror image: `name` IS split, so its fragment DOES match.
+     * Together these pin both halves of the invariant. */
+    ASSERT_EQ(fts_match_count(s, "name:plain"), 1);
+
+    cbm_store_close(s);
+    PASS();
+}
+
+TEST(store_fts_rebuild_survives_malformed_properties_json) {
+    /* Pre-fix databases contain rows whose properties JSON does not parse.
+     * json_extract() RAISES on those, so an unguarded backfill would abort
+     * outright and leave the whole index empty — the same trap that reverted
+     * the is_entry_point expression index. */
+    cbm_store_t *s = setup_prose_store();
+    cbm_node_t broken = {.project = "p",
+                         .label = "Function",
+                         .name = "brokenProps",
+                         .qualified_name = "p.main.brokenProps",
+                         .file_path = "main.c",
+                         .properties_json = "{\"docstring\":\"unterminated"};
+    ASSERT_TRUE(cbm_store_upsert_node(s, &broken) > 0);
+
+    ASSERT_EQ(cbm_store_fts_rebuild(s, NULL, 0), CBM_STORE_OK);
+    ASSERT_EQ(fts_match_count(s, "name:brokenProps"), 1);
+    ASSERT_EQ(fts_match_count(s, "body:ephemeral"), 1);
+
+    cbm_store_close(s);
+    PASS();
+}
+
+TEST(store_fts_rebuild_tolerates_legacy_four_column_table) {
+    /* CBM_INDEX_FORMAT_VERSION deliberately does NOT move for the body column,
+     * so real users open databases whose nodes_fts predates it. Reproduce that
+     * exactly: lay down the four-column table first, then let the current
+     * store open the file — CREATE VIRTUAL TABLE IF NOT EXISTS leaves it be. */
+    char *td = th_mktempdir("cbm_fts_legacy");
+    ASSERT_NOT_NULL(td);
+    char path[512];
+    snprintf(path, sizeof(path), "%s/legacy.db", td);
+
+    sqlite3 *raw = NULL;
+    ASSERT_EQ(sqlite3_open(path, &raw), SQLITE_OK);
+    ASSERT_EQ(sqlite3_exec(raw,
+                           "CREATE VIRTUAL TABLE nodes_fts USING fts5("
+                           "  name, qualified_name, label, file_path,"
+                           "  content='', tokenize='unicode61 remove_diacritics 2');",
+                           NULL, NULL, NULL),
+              SQLITE_OK);
+    sqlite3_close(raw);
+
+    cbm_store_t *s = cbm_store_open_path(path);
+    ASSERT_NOT_NULL(s); /* a legacy database still OPENS */
+    seed_prose_nodes(s);
+
+    /* ...and still backfills, degrading to the four-column write. */
+    ASSERT_EQ(cbm_store_fts_rebuild(s, NULL, 0), CBM_STORE_OK);
+    ASSERT_EQ(fts_match_count(s, "name:plainFunction"), 1);
+    ASSERT_EQ(fts_match_count(s, "qualified_name:Installation"), 1);
+    /* No prose, exactly as promised — the words are simply not in the index. */
+    ASSERT_EQ(fts_match_count(s, "ephemeral"), 0);
+
+    /* The ranked query passes FIVE column weights. On a four-column table the
+     * fifth is never consulted (FTS5 reads a weight only for a column an
+     * instance landed in), so the SAME expression the search uses must run
+     * here without error rather than needing a second, forked query. */
+    sqlite3_stmt *ranked = NULL;
+    ASSERT_EQ(sqlite3_prepare_v2(cbm_store_get_db(s),
+                                 "SELECT rowid, bm25(nodes_fts, 1.0, 1.0, 1.0, 1.0, 0.3) AS r"
+                                 " FROM nodes_fts WHERE nodes_fts MATCH ?1 ORDER BY r LIMIT 10",
+                                 -1, &ranked, NULL),
+              SQLITE_OK);
+    sqlite3_bind_text(ranked, 1, "plainFunction", -1, SQLITE_TRANSIENT);
+    ASSERT_EQ(sqlite3_step(ranked), SQLITE_ROW);
+    ASSERT_EQ(sqlite3_step(ranked), SQLITE_DONE); /* stepped to completion: no error */
+    sqlite3_finalize(ranked);
+
+    cbm_store_close(s);
+    th_rmtree(td);
+    PASS();
+}
+
+TEST(store_fts_rebuild_incremental_adds_only_nodes_above_watermark) {
+    cbm_store_t *s = setup_prose_store();
+    ASSERT_EQ(cbm_store_fts_rebuild(s, NULL, 0), CBM_STORE_OK);
+
+    sqlite3_stmt *st = NULL;
+    ASSERT_EQ(sqlite3_prepare_v2(cbm_store_get_db(s), "SELECT COALESCE(MAX(id),0) FROM nodes", -1,
+                                 &st, NULL),
+              SQLITE_OK);
+    ASSERT_EQ(sqlite3_step(st), SQLITE_ROW);
+    int64_t watermark = sqlite3_column_int64(st, 0);
+    sqlite3_finalize(st);
+
+    cbm_node_t added = {.project = "p",
+                        .label = "Section",
+                        .name = "Upgrading",
+                        .qualified_name = "p.README.Upgrading",
+                        .file_path = "README.md",
+                        .properties_json = "{\"docstring\":\"migrates the retention ledger\"}"};
+    ASSERT_TRUE(cbm_store_upsert_node(s, &added) > 0);
+
+    ASSERT_EQ(cbm_store_fts_rebuild(s, "p", watermark), CBM_STORE_OK);
+    ASSERT_EQ(fts_match_count(s, "body:retention"), 1);
+    /* Pre-existing rows are not duplicated by the incremental pass. */
+    ASSERT_EQ(fts_match_count(s, "body:ephemeral"), 1);
+    ASSERT_EQ(fts_match_count(s, "name:plainFunction"), 1);
+
+    cbm_store_close(s);
+    PASS();
+}
+
+/* A C macro's QN ends in "#macro" (CBM_MACRO_QN_SUFFIX) and `#` separates tokens, so
+ * indexing that QN as it is would give every macro node the word "macro" a second time
+ * (its label already says Macro). On redis that is 5,513 rows outscoring the two nodes
+ * that carry the word in their NAME: tre_expand_macro fell out of the 2,000-row BM25
+ * candidate window and out of the result for the query `macro`. The qualified_name
+ * column therefore gets a Macro's QN without the fence, and only a Macro's. The
+ * wholesale rebuild and the delta-merge rebuild are one writer; both are run here. */
+TEST(store_fts_macro_qn_fence_adds_no_token_c1) {
+    cbm_store_t *s = cbm_store_open_memory();
+    ASSERT_NOT_NULL(s);
+    cbm_store_upsert_project(s, "p", "/tmp/p");
+    cbm_node_t macro = {.project = "p",
+                        .label = "Macro",
+                        .name = "LIMIT",
+                        .qualified_name = "p.cfg.LIMIT" CBM_MACRO_QN_SUFFIX,
+                        .file_path = "cfg.h"};
+    cbm_node_t named = {.project = "p",
+                        .label = "Function",
+                        .name = "expandMacro",
+                        .qualified_name = "p.cfg.expandMacro",
+                        .file_path = "cfg.c"};
+    /* not a Macro: a QN that merely ends like the fence keeps all its tokens */
+    cbm_node_t other = {.project = "p",
+                        .label = "Function",
+                        .name = "odd",
+                        .qualified_name = "p.cfg.odd#macro",
+                        .file_path = "cfg.c"};
+    ASSERT_TRUE(cbm_store_upsert_node(s, &macro) > 0);
+    ASSERT_TRUE(cbm_store_upsert_node(s, &named) > 0);
+    ASSERT_TRUE(cbm_store_upsert_node(s, &other) > 0);
+
+    ASSERT_EQ(cbm_store_fts_rebuild(s, NULL, 0), CBM_STORE_OK);
+    ASSERT_EQ(fts_match_count(s, "qualified_name:LIMIT"), 1); /* the QN stays searchable */
+    ASSERT_EQ(fts_match_count(s, "label:Macro"), 1);
+    ASSERT_EQ(fts_match_count(s, "qualified_name:macro"), 1); /* `odd` alone */
+    ASSERT_EQ(fts_match_count(s, "name:Macro"), 1);           /* expandMacro, camel-split */
+
+    sqlite3_stmt *st = NULL;
+    ASSERT_EQ(sqlite3_prepare_v2(cbm_store_get_db(s), "SELECT COALESCE(MAX(id),0) FROM nodes", -1,
+                                 &st, NULL),
+              SQLITE_OK);
+    ASSERT_EQ(sqlite3_step(st), SQLITE_ROW);
+    int64_t watermark = sqlite3_column_int64(st, 0);
+    sqlite3_finalize(st);
+
+    cbm_node_t added = {.project = "p",
+                        .label = "Macro",
+                        .name = "DEPTH",
+                        .qualified_name = "p.cfg.DEPTH" CBM_MACRO_QN_SUFFIX,
+                        .file_path = "cfg.h"};
+    ASSERT_TRUE(cbm_store_upsert_node(s, &added) > 0);
+    ASSERT_EQ(cbm_store_fts_rebuild(s, "p", watermark), CBM_STORE_OK);
+    ASSERT_EQ(fts_match_count(s, "qualified_name:DEPTH"), 1);
+    ASSERT_EQ(fts_match_count(s, "label:Macro"), 2);
+    ASSERT_EQ(fts_match_count(s, "qualified_name:macro"), 1); /* the delta path strips it too */
+
+    cbm_store_close(s);
+    PASS();
+}
+
+SUITE(store_search) {
+    RUN_TEST(store_search_by_label);
+    RUN_TEST(store_search_by_name_pattern);
+    RUN_TEST(store_search_empty_label_ignored);
+    RUN_TEST(store_search_by_file_pattern);
+    RUN_TEST(store_search_file_pattern_substring_issue200);
+    RUN_TEST(store_search_pagination);
+    RUN_TEST(store_search_degree_filter);
+    RUN_TEST(store_search_degree_counts_inherits);
+    RUN_TEST(store_search_degree_calls_plus_inherits_no_double_count);
+    RUN_TEST(store_search_min_degree_includes_inherits_only);
+    RUN_TEST(store_search_isolated_node_zero_degree);
+    RUN_TEST(store_search_all);
+    RUN_TEST(store_search_exclude_labels);
+    RUN_TEST(store_search_case_insensitive);
+    RUN_TEST(store_regex_anchored_prefix);
+    RUN_TEST(store_search_anchored_name_matches_plain_scan);
+    RUN_TEST(store_search_anchored_invalid_regex_keeps_error);
+    RUN_TEST(store_bfs_outbound);
+    RUN_TEST(store_bfs_inbound);
+    RUN_TEST(store_bfs_cross_service);
+    RUN_TEST(store_bfs_depth_chain);
+    RUN_TEST(store_transaction_commit);
+    RUN_TEST(store_transaction_rollback);
+    RUN_TEST(store_bulk_write_mode);
+    RUN_TEST(store_schema_info);
+    RUN_TEST(store_schema_counts_ties_in_name_order);
+    RUN_TEST(store_dump_to_file);
+    RUN_TEST(store_hop_to_risk);
+    RUN_TEST(store_build_impact_summary);
+    RUN_TEST(store_cross_service_detection);
+    RUN_TEST(store_deduplicate_hops);
+    RUN_TEST(store_bfs_with_risk_labels);
+    RUN_TEST(store_bfs_reachability_is_not_trail_capped);
+    RUN_TEST(store_bfs_trail_warns_when_path_rows_are_truncated);
+    RUN_TEST(store_bfs_trail_preserves_deeper_match_under_hub_budget);
+    RUN_TEST(store_bfs_cross_service_summary);
+    RUN_TEST(store_glob_to_like);
+    RUN_TEST(store_extract_like_hints);
+    RUN_TEST(store_ensure_case_insensitive);
+    RUN_TEST(store_strip_case_flag);
+    RUN_TEST(store_batch_count_degrees);
+    /* Edge case tests */
+    RUN_TEST(store_glob_to_like_empty);
+    RUN_TEST(store_glob_to_like_only_star);
+    RUN_TEST(store_glob_to_like_consecutive_doublestar);
+    RUN_TEST(store_glob_to_like_dot_and_brackets);
+    RUN_TEST(store_glob_to_like_question_marks);
+    RUN_TEST(store_extract_like_hints_null_out);
+    RUN_TEST(store_extract_like_hints_zero_max);
+    RUN_TEST(store_extract_like_hints_alternation_complex);
+    RUN_TEST(store_extract_like_hints_short_segments);
+    RUN_TEST(store_extract_like_hints_complex_multi_segment);
+    RUN_TEST(store_extract_like_hints_max_out_limit);
+    RUN_TEST(store_extract_like_hints_escaped_chars);
+    RUN_TEST(store_ensure_case_insensitive_null);
+    RUN_TEST(store_ensure_case_insensitive_already_ci);
+    RUN_TEST(store_ensure_case_insensitive_plain);
+    RUN_TEST(store_strip_case_flag_null);
+    RUN_TEST(store_strip_case_flag_no_flag);
+    RUN_TEST(store_strip_case_flag_empty);
+    RUN_TEST(store_qn_to_package_single_segment);
+    RUN_TEST(store_qn_to_package_two_segments);
+    RUN_TEST(store_qn_to_package_many_segments);
+    RUN_TEST(store_qn_to_package_null);
+    RUN_TEST(store_qn_to_package_empty);
+    RUN_TEST(store_qn_to_top_package_single_segment);
+    RUN_TEST(store_qn_to_top_package_two_segments);
+    RUN_TEST(store_qn_to_top_package_many_segments);
+    RUN_TEST(store_qn_to_top_package_null);
+    RUN_TEST(store_is_test_file_various);
+    RUN_TEST(store_hop_to_risk_all_levels);
+    RUN_TEST(store_risk_label_all_levels);
+    RUN_TEST(store_impact_summary_empty);
+    RUN_TEST(store_find_nodes_rejects_null_store_without_ub);
+    /* #518/#519 — nodes_fts prose column */
+    RUN_TEST(store_fts_rebuild_indexes_docstring_as_body_issue518);
+    RUN_TEST(store_fts_rebuild_survives_malformed_properties_json);
+    RUN_TEST(store_fts_rebuild_tolerates_legacy_four_column_table);
+    RUN_TEST(store_fts_rebuild_incremental_adds_only_nodes_above_watermark);
+    RUN_TEST(store_fts_macro_qn_fence_adds_no_token_c1);
+}

@@ -30,6 +30,12 @@
       "path": "scripts/github-labels"
     },
     {
+      "path": "mcp/scripts"
+    },
+    {
+      "path": "mori/scripts"
+    },
+    {
       "path": "mdtoc"
     },
     {

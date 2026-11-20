@@ -187,4 +187,39 @@ describe('toolList', () => {
     const uniqueNames = [...new Set(names)];
     expect(names.length).toBe(uniqueNames.length);
   });
+
+  // MCP clients use these hints to decide which calls need confirmation.
+  test('every tool declares a title, readOnlyHint, and destructiveHint', () => {
+    for (const tool of toolList) {
+      const annotations = (tool as { annotations?: Record<string, unknown> })
+        .annotations;
+      expect(annotations, tool.name).toBeDefined();
+      expect(typeof annotations!.title, tool.name).toBe('string');
+      expect(typeof annotations!.readOnlyHint, tool.name).toBe('boolean');
+      if (annotations!.readOnlyHint === false) {
+        expect(typeof annotations!.destructiveHint, tool.name).toBe('boolean');
+      } else {
+        expect(annotations!.destructiveHint, tool.name).toBeUndefined();
+      }
+    }
+  });
+
+  test('deleting and removing tools are marked destructive', () => {
+    for (const tool of toolList) {
+      if (!/_(delete|remove)_/.test(tool.name)) continue;
+      const annotations = (tool as { annotations?: Record<string, unknown> })
+        .annotations;
+      expect(annotations?.readOnlyHint, tool.name).toBe(false);
+      expect(annotations?.destructiveHint, tool.name).toBe(true);
+    }
+  });
+
+  test('read-only tools only list, get, read, or search', () => {
+    for (const tool of toolList) {
+      const annotations = (tool as { annotations?: Record<string, unknown> })
+        .annotations;
+      if (annotations?.readOnlyHint !== true) continue;
+      expect(tool.name).toMatch(/^discord_(list|get|read|search)_/);
+    }
+  });
 });

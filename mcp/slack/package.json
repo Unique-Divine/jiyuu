@@ -1,8 +1,8 @@
 {
   "name": "@uniquedivine/mcp-slack",
   "mcpName": "io.github.unique-divine/mcp-slack",
-  "version": "4.5.2",
-  "description": "Slack MCP server maintained in Jiyuu",
+  "version": "4.5.4",
+  "description": "Slack MCP server by Unique Divine. Reads and writes Slack through your browser session.",
   "type": "module",
   "main": "src/server.js",
   "bin": {
@@ -74,10 +74,16 @@
     "stealth-mode"
   ],
   "author": {
-    "name": "Revasser",
-    "email": "support@revasserlabs.com",
-    "url": "https://mcp.revasserlabs.com"
+    "name": "Unique Divine",
+    "url": "https://uniquedivine.com"
   },
+  "contributors": [
+    {
+      "name": "Revasser",
+      "email": "support@revasserlabs.com",
+      "url": "https://github.com/jtalk22/slack-mcp-server"
+    }
+  ],
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -135,6 +141,29 @@
         "repository": "Unique-Divine/slack-mcp-server",
         "commit": "e68cc989585e8a29291d34fed143e84fef6f1898"
       }
+    },
+    "site": {
+      "tools": [
+        "lib/tools.js#TOOLS",
+        "lib/jiyuuMcpInfo.ts#MCP_INFO_TOOL"
+      ],
+      "env": [
+        {
+          "name": "SLACK_TOKEN",
+          "required": false,
+          "secret": true
+        },
+        {
+          "name": "SLACK_COOKIE",
+          "required": false,
+          "secret": true
+        },
+        {
+          "name": "JIYUU_MCP_NO_UPDATE_CHECK",
+          "required": false,
+          "secret": false
+        }
+      ]
     }
   }
 }

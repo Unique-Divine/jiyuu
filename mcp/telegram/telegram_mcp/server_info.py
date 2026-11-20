@@ -15,13 +15,14 @@ import sys
 from dataclasses import dataclass
 from importlib import metadata
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any, Callable, Mapping, Optional
 
 from telegram_mcp.update_check import (
     UpdateNotifier,
     UpdateStatus,
     check_disabled,
     check_for_update,
+    check_latest,
     is_published_name,
 )
 
@@ -184,7 +185,7 @@ def update_info(
     elif not is_published_name(identity.name):
         reason = f"{identity.name!r} is not a name Jiyuu publishes"
     elif status is None:
-        reason = "no registry result yet (offline, pending, or failed)"
+        reason = "registry unreachable and no cached result"
     else:
         reason = None
     return {
@@ -192,6 +193,7 @@ def update_info(
         "updateAvailable": status.update_available if status else False,
         "checkedAt": status.checked_at if status else None,
         "pinCommand": status.pin_command if status else None,
+        "source": status.source if status else None,
         "notChecked": reason,
     }
 
@@ -237,6 +239,16 @@ def current_identity() -> PackageIdentity:
     if _identity is None:
         _identity = resolve_identity()
     return _identity
+
+
+def _check_latest(identity: PackageIdentity, env: Mapping[str, str]) -> Optional[UpdateStatus]:
+    return check_latest(identity.name, identity.version, env=env)
+
+
+live_update_check: Callable[[PackageIdentity, Mapping[str, str]], Optional[UpdateStatus]] = (
+    _check_latest
+)
+"""The check each ``mcp_info`` call runs; tests replace it to stay offline."""
 
 
 def update_notifier() -> UpdateNotifier:

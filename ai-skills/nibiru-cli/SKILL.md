@@ -36,6 +36,14 @@ Use command `nibiru` for CLI calls. Directory `.nibid` remains the default
 configuration and keyring location. The npm launcher still runs an internal
 native binary named `nibid`; do not remove that package file.
 
+Plain `nibiru` is the released binary; use it for transactions and operations.
+To test a source build, call `"$(go env GOPATH)/bin/nibiru"` by full path (the
+source build installs `nibiru`, with `nibid` as a symlink to it). When the
+version matters, run `nibiru version --long -o json` and read field
+`binary_paths`. That field exists from the release that contains the CLI
+reorganization (https://github.com/SaiDotFun/nibiru/pull/2929); older binaries
+print no such field, so its absence means an older binary.
+
 ## Quick start
 
 1. Select the chain config with your `ud` wrapper:
@@ -129,7 +137,7 @@ continues to use `http://localhost:26657`.
 - Pipe to `jq` for nested fields when needed.
 - Use specialized skills for deeper workflows:
   - [`governance.md`](./governance.md) for proposal, vote, and upgrade-plan queries
-  - `sai-perps` for Sai contract query recipes and reconciliation
+  - `sai` for Sai contract query recipes and reconciliation
   - `evm-rpc` for `eth_*` / `debug_*` EVM tracing rather than Cosmos CLI
 
 ## USDC Token Identity

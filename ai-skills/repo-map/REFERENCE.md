@@ -13,7 +13,7 @@ The `nibi-iac` repository sits at the deployment layer. It consumes the artifact
 | **nibi-go-hm** | `go-hm-graphql`, `heart-monitor` | Deploys the Heart Monitor indexer and its GraphQL interface. Defines `domain` for public access. |
 | **sai-keeper** | `sai-keeper` | Deploys the Sai Keeper GraphQL/REST API. Manages `domain_graphql` and `domain_rest`. |
 | **sai-trading-bot** | `sai-trading-bot`, `sai-trading-evm` | Deploys automation services for Sai exchange trading. |
-| **nibi-chain** | `validator`, `fullnode`, `cosmopilot` | Provisions various blockchain node types and their Kubernetes management. |
+| **nibiru** | `validator`, `fullnode`, `cosmopilot` | Provisions various blockchain node types and their Kubernetes management. |
 | **nibi-installer** | `nibiru-installer` | Deploys the service behind `get.nibiru.fi`. |
 | **networks-info** | `networks-info` | Deploys the service behind `networks.nibiru.fi`. |
 

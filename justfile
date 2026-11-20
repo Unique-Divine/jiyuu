@@ -80,8 +80,43 @@ mcp-test:
   just --justfile mcp/slack/justfile test
   just --justfile mcp/telegram/justfile test
 
+# Write each MCP server's site-manifest.json; with --check, fail when one is stale.
+mcp-manifest *ARGS:
+  bun --no-env-file run mcp/scripts/site-manifest.ts {{ARGS}}
+
+# Test the MCP site manifest generator against fixture servers.
+mcp-manifest-test:
+  bun test mcp/scripts
+
 # Check the MCP source trees.
 mcp-check:
   just --justfile mcp/discord/justfile check
   just --justfile mcp/slack/justfile check
   just --justfile mcp/telegram/justfile check
+
+# Build the Mori (codebase-memory-mcp) binary, fetching pinned grammars first.
+mori-build *ARGS:
+  just --justfile mori/justfile grammars {{ARGS}}
+  just --justfile mori/justfile build
+
+# Run the Mori grammar and extraction suites.
+mori-test *ARGS:
+  just --justfile mori/justfile grammars {{ARGS}}
+  just --justfile mori/justfile test
+
+# Run the Mori script tests, build and targeted suites.
+mori-check *ARGS:
+  just --justfile mori/justfile grammars {{ARGS}}
+  just --justfile mori/justfile check
+
+# Check the jiyuu-mori crate in pure Rust (format, Clippy, tests).
+mori-rs-check:
+  just --justfile mori/jiyuu-mori/justfile check
+
+# Build mori with the C program linked and compare it with the C binary.
+mori-rs-check-linked:
+  just --justfile mori/jiyuu-mori/justfile check-linked
+
+# Build the release mori binary with the C program linked.
+mori-rs-build:
+  just --justfile mori/jiyuu-mori/justfile build

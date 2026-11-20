@@ -1,0 +1,1528 @@
+#ifndef CBM_H
+#define CBM_H
+
+#include <stdint.h>
+#include <stdbool.h>
+#include "arena.h"
+#include "tree_sitter/api.h"
+
+/* Field lookups by NAME resolve the name with a linear strncmp scan over the
+ * grammar's field table on every call -- 951 M strncmp calls on the Go corpus
+ * (waste sanitizer, 2026-09-17) across ~1,200 call sites. Tree-sitter's own
+ * implementation is exactly "field id for name, then child by field id"; this
+ * caches the first half per thread (language, name) and keeps the second.
+ * Every extractor includes this header, so every call site gets it. */
+TSNode cbm_ts_child_by_field_name(TSNode node, const char *name, uint32_t name_length);
+/* Variadic: call sites spell the name and its length as ONE macro argument
+ * (TS_FIELD("body") expands to "body", 4), which must expand before the call. */
+#define ts_node_child_by_field_name(...) cbm_ts_child_by_field_name(__VA_ARGS__)
+
+/* Immutable, explicitly supplied test-declaration snapshot. */
+typedef struct cbm_test_declarations cbm_test_declarations_t;
+
+typedef enum {
+    CBM_TEST_ROLE_NONE = 0,
+    CBM_TEST_ROLE_CASE,
+    CBM_TEST_ROLE_SUITE
+} CBMTestDefinitionRole;
+
+typedef enum {
+    CBM_TEST_EXTRACT_OK = 0,
+    CBM_TEST_EXTRACT_UNSUPPORTED_LANGUAGE,
+    CBM_TEST_EXTRACT_UNSUPPORTED_PRESET,
+    CBM_TEST_EXTRACT_UNSUPPORTED_NAME,
+    CBM_TEST_EXTRACT_MISSING_ARGUMENT,
+    CBM_TEST_EXTRACT_UNSUPPORTED_ARGUMENT,
+    CBM_TEST_EXTRACT_AMBIGUOUS,
+    CBM_TEST_EXTRACT_UNSUPPORTED_FORM,
+    CBM_TEST_EXTRACT_OOM
+} CBMTestExtractStatus;
+
+// Language enum mirrors lang.Language in Go.
+// Order must match lang_specs.c tables.
+typedef enum {
+    CBM_LANG_GO = 0,
+    CBM_LANG_PYTHON,
+    CBM_LANG_JAVASCRIPT,
+    CBM_LANG_TYPESCRIPT,
+    CBM_LANG_TSX,
+    CBM_LANG_RUST,
+    CBM_LANG_JAVA,
+    CBM_LANG_CPP,
+    CBM_LANG_CSHARP,
+    CBM_LANG_PHP,
+    CBM_LANG_LUA,
+    CBM_LANG_SCALA,
+    CBM_LANG_KOTLIN,
+    CBM_LANG_RUBY,
+    CBM_LANG_C,
+    CBM_LANG_BASH,
+    CBM_LANG_ZIG,
+    CBM_LANG_ELIXIR,
+    CBM_LANG_HASKELL,
+    CBM_LANG_OCAML,
+    CBM_LANG_OBJC,
+    CBM_LANG_SWIFT,
+    CBM_LANG_DART,
+    CBM_LANG_PERL,
+    CBM_LANG_GROOVY,
+    CBM_LANG_ERLANG,
+    CBM_LANG_R,
+    CBM_LANG_HTML,
+    CBM_LANG_CSS,
+    CBM_LANG_SCSS,
+    CBM_LANG_YAML,
+    CBM_LANG_TOML,
+    CBM_LANG_HCL,
+    CBM_LANG_SQL,
+    CBM_LANG_DOCKERFILE,
+    // New languages (v0.5 expansion)
+    CBM_LANG_CLOJURE,
+    CBM_LANG_FSHARP,
+    CBM_LANG_JULIA,
+    CBM_LANG_VIMSCRIPT,
+    CBM_LANG_NIX,
+    CBM_LANG_COMMONLISP,
+    CBM_LANG_ELM,
+    CBM_LANG_FORTRAN,
+    CBM_LANG_CUDA,
+    CBM_LANG_COBOL,
+    CBM_LANG_VERILOG,
+    CBM_LANG_EMACSLISP,
+    CBM_LANG_JSON,
+    CBM_LANG_XML,
+    CBM_LANG_MARKDOWN,
+    CBM_LANG_MAKEFILE,
+    CBM_LANG_CMAKE,
+    CBM_LANG_PROTOBUF,
+    CBM_LANG_GRAPHQL,
+    CBM_LANG_VUE,
+    CBM_LANG_SVELTE,
+    CBM_LANG_MESON,
+    CBM_LANG_GLSL,
+    CBM_LANG_INI,
+    // Scientific/math languages
+    CBM_LANG_MATLAB,
+    CBM_LANG_LEAN,
+    CBM_LANG_FORM,
+    CBM_LANG_MAGMA,
+    CBM_LANG_WOLFRAM,
+    CBM_LANG_SOLIDITY,
+    CBM_LANG_TYPST,
+    CBM_LANG_GDSCRIPT,
+    CBM_LANG_GLEAM,
+    CBM_LANG_POWERSHELL,
+    CBM_LANG_PASCAL,
+    CBM_LANG_DLANG,
+    CBM_LANG_NIM,
+    CBM_LANG_SCHEME,
+    CBM_LANG_FENNEL,
+    CBM_LANG_FISH,
+    CBM_LANG_AWK,
+    CBM_LANG_ZSH,
+    CBM_LANG_TCL,
+    CBM_LANG_ADA,
+    CBM_LANG_AGDA,
+    CBM_LANG_RACKET,
+    CBM_LANG_ODIN,
+    CBM_LANG_RESCRIPT,
+    CBM_LANG_PURESCRIPT,
+    CBM_LANG_NICKEL,
+    CBM_LANG_CRYSTAL,
+    CBM_LANG_TEAL,
+    CBM_LANG_HARE,
+    CBM_LANG_PONY,
+    CBM_LANG_LUAU,
+    CBM_LANG_JANET,
+    CBM_LANG_SWAY,
+    CBM_LANG_NASM,
+    CBM_LANG_ASSEMBLY,
+    CBM_LANG_ASTRO,
+    CBM_LANG_BLADE,
+    CBM_LANG_JUST,
+    CBM_LANG_GOTEMPLATE,
+    CBM_LANG_TEMPL,
+    CBM_LANG_LIQUID,
+    CBM_LANG_JINJA2,
+    CBM_LANG_PRISMA,
+    CBM_LANG_HYPRLANG,
+    CBM_LANG_DOTENV,
+    CBM_LANG_DIFF,
+    CBM_LANG_WGSL,
+    CBM_LANG_KDL,
+    CBM_LANG_JSON5,
+    CBM_LANG_JSONNET,
+    CBM_LANG_RON,
+    CBM_LANG_THRIFT,
+    CBM_LANG_CAPNP,
+    CBM_LANG_PROPERTIES,
+    CBM_LANG_SSHCONFIG,
+    CBM_LANG_BIBTEX,
+    CBM_LANG_STARLARK,
+    CBM_LANG_BICEP,
+    CBM_LANG_CSV,
+    CBM_LANG_REQUIREMENTS,
+    CBM_LANG_HLSL,
+    CBM_LANG_VHDL,
+    CBM_LANG_SYSTEMVERILOG,
+    CBM_LANG_DEVICETREE,
+    CBM_LANG_LINKERSCRIPT,
+    CBM_LANG_GN,
+    CBM_LANG_KCONFIG,
+    CBM_LANG_BITBAKE,
+    CBM_LANG_SMALI,
+    CBM_LANG_TABLEGEN,
+    CBM_LANG_ISPC,
+    CBM_LANG_CAIRO,
+    CBM_LANG_MOVE,
+    CBM_LANG_SQUIRREL,
+    CBM_LANG_FUNC,
+    CBM_LANG_REGEX,
+    CBM_LANG_JSDOC,
+    CBM_LANG_RST,
+    CBM_LANG_BEANCOUNT,
+    CBM_LANG_MERMAID,
+    CBM_LANG_PUPPET,
+    CBM_LANG_PO,
+    CBM_LANG_GITATTRIBUTES,
+    CBM_LANG_GITIGNORE,
+    CBM_LANG_SLANG,
+    CBM_LANG_LLVM_IR,
+    CBM_LANG_SMITHY,
+    CBM_LANG_WIT,
+    CBM_LANG_TLAPLUS,
+    CBM_LANG_PKL,
+    CBM_LANG_GOMOD,
+    CBM_LANG_APEX,
+    CBM_LANG_SOQL,
+    CBM_LANG_SOSL,
+    CBM_LANG_KUSTOMIZE,            // kustomization.yaml — Kubernetes overlay tool
+    CBM_LANG_K8S,                  // Generic Kubernetes manifest (apiVersion: detected)
+    CBM_LANG_PINE,                 // Pine Script (TradingView indicator / strategy language)
+    CBM_LANG_QML,                  // Qt QML (Qt Modeling Language — declarative UI + embedded JS)
+    CBM_LANG_CFSCRIPT,             // CFML script dialect (.cfc components — Lucee/ColdFusion)
+    CBM_LANG_CFML,                 // CFML tag dialect (.cfm templates — Lucee/ColdFusion)
+    CBM_LANG_MOJO,                 // Mojo
+    CBM_LANG_OBJECTSCRIPT_UDL,     // InterSystems ObjectScript UDL (.cls class files)
+    CBM_LANG_OBJECTSCRIPT_ROUTINE, // InterSystems ObjectScript routine (.mac/.int/.rtn/.inc)
+    CBM_LANG_OBJECTSCRIPT_EXPORT,  // InterSystems Studio Export XML (<Export generator="Cache">)
+    CBM_LANG_ARKTS,    // ArkTS (HarmonyOS/OpenHarmony .ets — TypeScript superset + ArkUI)
+    CBM_LANG_PLSQL,    // Oracle PL/SQL
+    CBM_LANG_CHIALISP, // Chialisp (.clsp/.clib/.clinc — Chia smart-coin s-expression language)
+    CBM_LANG_PDF,      // PDF documents: the text layer, read without a grammar (doc_pdf.c)
+    CBM_LANG_ASCIIDOC, // AsciiDoc documents, read without a grammar (doc_adoc.c)
+    CBM_LANG_OPENAPI,  // openapi.json / swagger.json: the JSON grammar, no node per key; their
+                       // operations are Routes (openapi.c)
+    CBM_LANG_DIAGRAM,  // diagram files (PlantUML, DOT, D2, draw.io, Excalidraw), read
+                       // without a grammar (diagram.c)
+    CBM_LANG_COUNT
+} CBMLanguage;
+
+// --- Extraction result structs ---
+
+typedef struct {
+    const char *name;           // short name
+    const char *qualified_name; // project.path.name
+    const char *label;          // "Function", "Method", "Class", "Variable", "Module"
+    const char *file_path;      // relative path
+    uint32_t start_line;
+    uint32_t end_line;
+    const char *signature;              // parameter text (NULL if none)
+    const char *return_type;            // return type text (NULL if none)
+    const char *receiver;               // Go method receiver (NULL if none)
+    const char *docstring;              // leading doc comment (NULL if none)
+    const char *parent_class;           // enclosing class QN for methods (NULL if none)
+    const char **decorators;            // NULL-terminated array (NULL if none)
+    const char **base_classes;          // NULL-terminated array (NULL if none)
+    const char **param_names;           // NULL-terminated array (NULL if none)
+    const char **param_types;           // NULL-terminated array (NULL if none)
+    const char **signature_param_types; // ordered internal signature types; "?" means unknown
+    int signature_param_count;          // number of entries in signature_param_types
+    const char **return_types;          // NULL-terminated array (NULL if none)
+    const char *route_path;   // HTTP route path from decorator (e.g., "/api/users") or NULL
+    const char *route_method; // HTTP method from decorator (e.g., "POST") or NULL
+    // Path a client interface method requests (Retrofit @GET("v1/x")) or NULL;
+    // route_method is then its verb.
+    const char *client_route_path;
+    int complexity;           // cyclomatic complexity
+    int cognitive;            // cognitive complexity (nesting-weighted)
+    int loop_count;           // number of loop constructs in the body
+    int loop_depth;           // max nested-loop depth (bottleneck proxy)
+    bool is_recursive;        // body contains a direct self-call (seed for "recursive")
+    int param_count;          // number of parameters (large = complexity smell)
+    int max_access_depth;     // deepest chained member/subscript access (a.b.c.d)
+    int linear_scan_in_loop;  // count of linear-scan calls (find/contains/indexOf) inside loops
+    int alloc_in_loop;        // count of allocation/append calls inside loops
+    bool recursion_in_loop;   // a self-call occurs inside a loop body
+    bool unguarded_recursion; // recursive with no self-call guarded by a conditional
+    int lines;                // body line count
+    uint32_t *fingerprint;    // MinHash fingerprint (arena-allocated, K values) or NULL
+    int fingerprint_k;        // number of hash values (CBM_MINHASH_K or 0)
+    bool is_exported;
+    bool is_abstract;
+    bool is_test;
+    bool is_entry_point;
+    const char *structural_profile; // AST structural profile (arena-allocated) or NULL
+    const char *body_tokens; // space-separated raw identifier tokens from body (arena) or NULL
+    /* Rust only: raw trait path from the exact `impl Trait for Type` block
+     * that declared this method.  Kept at the tail so zero-initialised
+     * callers in every other language remain ABI/source compatible. */
+    const char *impl_trait;
+    /* JS/TS only (#1916): a module-level binding initialised by
+     * `axios.create(...)` records the client library here ("axios"), and the
+     * literal `baseURL` string (or NULL when absent / not a string literal).
+     * The Module def carries the pair when its default export is such a
+     * client. The call resolver composes `<binding>.get('/p')` into an
+     * HTTP_CALLS edge to base + path. Tail fields: zero-init stays valid. */
+    const char *http_client;
+    const char *http_base_url;
+    /* Set when this FILE holds two or more definitions with this QN and label
+     * (`#if`/`#else` twins, a macro redefined per platform, overloads): the
+     * graph keeps one node per QN, and this lists every one of those
+     * definitions' line spans, the surviving one included, as a JSON array
+     * sorted by start line, in graph_buffer.c's variants schema:
+     * [{"file_path":"a.c","start_line":10,"end_line":14},
+     *  {"file_path":"a.c","start_line":20,"end_line":26}].
+     * Carried by the definition the graph keeps for the file (the last by
+     * start line), which makes it the node's `variants` property. NULL on
+     * every other definition, and in every language outside
+     * cbm_is_c_preprocessor_lang. */
+    const char *variants;
+    /* Callable identity (#2061): offset of the signature suffix inside
+     * qualified_name (base QN = the first qn_sig_off bytes); 0 = no suffix.
+     * Always 0 until a language enables its callable_identity mode. */
+    uint32_t qn_sig_off;
+    /* Call matching: defaulted parameters, indexed in declaration order. */
+    uint64_t param_default_mask;
+    uint8_t selector_param_count;
+    const char *call_selector;
+    /* C# only: declared namespace of a TOP-LEVEL type, "" for the global
+     * namespace (proven only by a clean parse), NULL for nested types, an
+     * unknown namespace and every other language. Per type, because the
+     * file-level namespace_name records only a file's first namespace. */
+    const char *decl_namespace;
+    CBMTestDefinitionRole test_role; /* NONE preserves legacy helper/test-file semantics */
+    /* Configured raw definitions only; zero for all legacy rows. Exact spans
+     * are bound to the owning result's source identity before cross-file use. */
+    uint32_t test_name_start_byte, test_name_end_byte;
+    uint32_t test_body_start_byte, test_body_end_byte;
+    /* Facts a definition adds to its node's properties, as a NULL-terminated
+     * key, value, key, value, ... list: a document's (an ADR's id, status,
+     * date, deciders, title), or CBM_PROP_GENERATED on a member the compiler
+     * writes and the source never spells. Keys are fixed literals; the
+     * values are escaped where the properties are written. Tail field:
+     * zero-init stays valid. */
+    const char **extra_props;
+    /* C-family platform variants (helpers.h cbm_platform_neutral_qn): the
+     * platform-neutral QN of a non-static file-scope function whose path
+     * carries a platform token (foo_win.c, src/unix/fs.c). The definition
+     * keeps its own path QN; this becomes the node's `variant_key` property,
+     * and the nodes of a project sharing one key are the platform variants of
+     * one function (the test-impact walk treats a change in any of them as a
+     * change of all, store_impact.h follow_variant_keys). NULL on every other
+     * definition. Tail field: zero-init stays valid. */
+    const char *variant_key;
+    /* Go only (#2033): the raw aliased type text of an identity alias
+     * `type A = B` ("B"). Carried to the cross-file registries so a method
+     * call on A from another file follows the alias to B's method set. NULL
+     * for a defined type `type A B` (its method set is its own) and in every
+     * other language. Tail field: zero-init stays valid. */
+    const char *alias_target;
+} CBMDefinition;
+
+/* extra_props key of a generated member, one the compiler writes and the
+ * source never spells: a Java record's implicit accessor carries
+ * `generated: record`. The node keeps the property, and the pipeline registers
+ * such a definition by qualified name only, so no short-name guess can land on
+ * it (pipeline.h cbm_def_props_generated). */
+#define CBM_PROP_GENERATED "generated"
+
+/* Argument captured from a call expression */
+typedef struct {
+    const char *expr;      // raw expression text ("payload.info", "MY_URL", "'hello'")
+    const char *value;     // raw resolved string value or NULL (constant propagation)
+    const char *keyword;   // keyword name if keyword arg ("url", "topic_id"), NULL if positional
+    int index;             // positional index (0-based)
+    const char *url_value; // URL projection when different; never a topic/string identity
+} CBMCallArg;
+
+#define CBM_MAX_CALL_ARGS 8
+/* Swift trailing-closure capture bound (#2061): more than this on one call
+ * marks the call truncated and the overload matcher fails closed. */
+#define CBM_MAX_TRAILING_CLOSURES 8
+
+/* The qualified name of a C-preprocessor macro (`#define NAME ...` in C, C++,
+ * CUDA, Objective-C, GLSL, ISPC) is `<module QN>.<NAME>#macro`. C keeps macros
+ * apart from ordinary identifiers, so a macro and a function, type, variable or
+ * enumerator may legally share a name in one file; the fence gives the macro
+ * an identity of its own, and the plain `<module QN>.<NAME>` always belongs to
+ * the definition. `name` stays NAME and the label stays "Macro".
+ *
+ * Tie rule for anything that resolves a NAME or a plain QN to a node: the
+ * definition is the target, and the macro only when no definition is visible. */
+#define CBM_MACRO_QN_SUFFIX "#macro"
+
+/* Byte offsets are meaningful only within the source buffer that produced
+ * them. C/C++/CUDA run both raw and preprocessed extraction passes, and those
+ * buffers can contain unrelated occurrences at the same numeric span. */
+typedef enum {
+    CBM_SOURCE_ORIGIN_RAW = 0,
+    CBM_SOURCE_ORIGIN_PREPROCESSED,
+} CBMSourceOrigin;
+
+typedef struct {
+    const char *callee_name;       // raw callee text ("pkg.Func", "foo")
+    const char *enclosing_func_qn; // QN of enclosing function (or module QN)
+    const char *first_string_arg;  // first string literal argument (URL, topic, key) or NULL
+    const char *graphql_sig;       // GraphQL selection signature of a literal argument that
+                                   // holds an operation ("<type>|<name>|<path>,..." from
+                                   // cbm_service_pattern_graphql_signature), or NULL. Read
+                                   // only when the callee classifies as a GraphQL client.
+    const char *second_arg_name;   // second argument identifier (handler ref) or NULL
+    /* First arg_count captured arguments, arena-allocated on first capture;
+     * NULL when arg_count == 0. Was an inline args[CBM_MAX_CALL_ARGS] (256 of
+     * the record's 320 bytes) -- the Go corpus census (2026-09-13) put 825k
+     * calls at 251 MB with most of that empty slots. Readers index it exactly
+     * as before; only `sizeof` changed. */
+    CBMCallArg *args;
+    int arg_count;                   // number of captured arguments (<= CBM_MAX_CALL_ARGS)
+    int loop_depth;                  // enclosing loop nesting at the call site
+    int branch_depth;                // enclosing branch nesting at the call site
+    int start_line;                  // 1-based source line of the call (for def range-match)
+    uint32_t site_start_byte;        // exact AST occurrence span; end > start when present
+    uint32_t site_end_byte;          // exclusive byte offset in the source file
+    CBMSourceOrigin source_origin;   // raw source or C-family preprocessed buffer
+    bool is_method;                  // method/member call with an UNRESOLVED receiver. Perl:
+                                     // arrow/method call ($obj->m). TS/JS/TSX: member call
+                                     // x.foo() whose receiver is not this/super. Python:
+                                     // x.foo() where x is not self/cls/super() and is not
+                                     // rooted in an imported name. Read by the weak-member
+                                     // guard and by the pxc synthetic-carrier dedup key in
+                                     // pass_lsp_cross.c. Default false.
+    bool requires_lsp_resolution;    // synthetic semantic candidate (for example an implicit
+                                     // C++ operator). Never fall back to textual resolution.
+    bool callee_is_locally_bound;    // bare call foo() whose callee identifier is bound as a
+                                     // parameter of an enclosing function, so it cannot be the
+                                     // module-level foo. Python only today. Read by the
+                                     // weak-local-binding guard. Default false.
+    bool receiver_is_amd_dependency; // JS/TS member call x.foo() whose receiver root x is a
+                                     // parameter the factory of an enclosing AMD
+                                     // define([...], fn) / require([...], fn) binds to a
+                                     // dependency (#1128). Not an import (no IMPORTS
+                                     // edge): read by the same-module bound-receiver
+                                     // guard. Default false.
+    bool receiver_is_self_attribute; // Python member call whose receiver is an attribute
+                                     // chain rooted at self/cls but not self/cls itself
+                                     // (self.compiler.apply_converters()). An object the
+                                     // class owns, not a parameter: read by the weak-member
+                                     // guard's unique-name exemption. Default false.
+    bool has_trailing_closure;
+    bool args_truncated;
+    bool graphql_owned; // the call is the whole value of a module-level constant that
+                        // records its GraphQL document: the constant owns the edges
+    /* Swift multi-trailing-closure capture (#2061). `has_trailing_closure`
+     * stays the "there is at least one trailing closure" flag manual callers
+     * and existing tests set; `trailing_closure_count` is the actual number
+     * captured (0 => fall back to the bool, treated as one unlabelled closure).
+     * `trailing_closure_labels[i]` is closure i's argument label from the
+     * grammar's `lambda_literal (simple_identifier ':')*` sequence (NULL when
+     * unlabelled; entry 0 is always unlabelled). More closures than
+     * CBM_MAX_TRAILING_CLOSURES sets `trailing_closure_truncated`, and the
+     * overload matcher then fails closed rather than guessing a partial set. */
+    uint8_t trailing_closure_count;
+    bool trailing_closure_truncated;
+    const char **trailing_closure_labels;
+} CBMCall;
+
+// What an import statement names, when the syntax says so. Only PHP's
+// `use function` / `use const` set a non-default kind today: they name a
+// namespace MEMBER, so they must never be mapped to a class file (#1186).
+typedef enum {
+    CBM_IMPORT_KIND_DEFAULT = 0, // module / class / namespace (language default)
+    CBM_IMPORT_KIND_FUNCTION,    // PHP `use function A\b`
+    CBM_IMPORT_KIND_CONST,       // PHP `use const A\B`
+} CBMImportKind;
+
+typedef struct {
+    /* JS/TS: the statement binds no local name (side-effect `import './x'`,
+     * re-export, bare `require('x').y`), so local_name is the path's last segment,
+     * not a binding the file can call through (#1128). Default false. */
+    bool local_name_synthesized;
+    const char *local_name;  // local alias or name
+    const char *module_path; // resolved module path / QN
+    const char *member;      // ES named import: the exported name the local binds (`get` in
+                             // `import { get as navigate } from "axios"`); NULL otherwise
+    bool is_default;         // ES default import (`import X from "Y"`), JS/TS only (#1916)
+    bool type_checking_only; // Python: inside a module-level `if TYPE_CHECKING:` block --
+                             // binds the name for annotations, never at runtime (#1277)
+    CBMImportKind kind;      // CBM_IMPORT_KIND_DEFAULT unless the syntax names a member kind
+} CBMImport;
+
+/* True when an import binds its local name at runtime. A Python import under
+ * `if TYPE_CHECKING:` exists for annotations only: a call through that name
+ * cannot happen, so no CALLS import map may bind it (an import_map edge
+ * through it would be fabricated by construction). THE one rule every CALLS
+ * import-map builder applies. */
+static inline bool cbm_import_binds_runtime_name(const CBMImport *imp) {
+    return imp && !imp->type_checking_only;
+}
+
+/* Content-only ordered Python namespace facts; no resolved target identities.
+ * The version travels in the lsp_surface "py" payload, and a stored payload of
+ * another version does not decode: an incremental run then re-extracts in full,
+ * so stored facts of an older extraction never mix with fresh ones.
+ * 2: string-literal statements are no effect; `from __future__` imports bind. */
+#define CBM_PY_NAMESPACE_FACTS_VERSION 2u
+
+typedef enum {
+    CBM_PY_NS_NOT_CAPTURED = 0,
+    CBM_PY_NS_NOT_APPLICABLE = 1,
+    CBM_PY_NS_COMPLETE = 2,
+    CBM_PY_NS_INCOMPLETE = 3
+} CBMPyNamespaceStatus;
+typedef enum {
+    CBM_PY_NS_FAILURE_NONE = 0,
+    CBM_PY_NS_FAILURE_INVALID_INPUT = 1,
+    CBM_PY_NS_FAILURE_ALLOCATION = 2,
+    CBM_PY_NS_FAILURE_LIMIT = 3
+} CBMPyNamespaceFailure;
+typedef enum {
+    CBM_PY_NS_OWN_DEF = 1,
+    CBM_PY_NS_IMPORT_MODULE = 2,
+    CBM_PY_NS_IMPORT_NAME = 3,
+    CBM_PY_NS_IMPORT_STAR = 4,
+    CBM_PY_NS_SHADOW = 5,
+    CBM_PY_NS_DELETE = 6,
+    CBM_PY_NS_UNKNOWN = 7,
+    CBM_PY_NS_ALL_SET = 8,
+    CBM_PY_NS_ALL_APPEND = 9,
+    CBM_PY_NS_ALL_UNKNOWN = 10,
+    CBM_PY_NS_ALL_DELETE = 11
+} CBMPyNamespaceFactKind;
+typedef enum {
+    CBM_PY_NS_DEF_NONE = 0,
+    CBM_PY_NS_DEF_FUNCTION = 1,
+    CBM_PY_NS_DEF_CLASS = 2
+} CBMPyNamespaceDefKind;
+typedef enum {
+    CBM_PY_NS_SEQUENCE_NONE = 0,
+    CBM_PY_NS_SEQUENCE_LIST = 1,
+    CBM_PY_NS_SEQUENCE_TUPLE = 2
+} CBMPyNamespaceSequenceKind;
+typedef enum {
+    CBM_PY_NS_REASON_NONE = 0,
+    CBM_PY_NS_REASON_VALUE = 1,
+    CBM_PY_NS_REASON_DECORATED = 2,
+    CBM_PY_NS_REASON_UNPROVEN_CLASS = 3,
+    CBM_PY_NS_REASON_COMPOUND = 4,
+    CBM_PY_NS_REASON_EFFECT = 5,
+    CBM_PY_NS_REASON_UNSUPPORTED = 6,
+    CBM_PY_NS_REASON_PARSE = 7
+} CBMPyNamespaceUnknownReason;
+enum { CBM_PY_NS_IMPORT_BINDS_ROOT = 1u << 0 };
+
+typedef struct {
+    CBMPyNamespaceFactKind kind;
+    CBMPyNamespaceDefKind def_kind;
+    CBMPyNamespaceSequenceKind sequence_kind;
+    CBMPyNamespaceUnknownReason reason;
+    uint32_t flags;
+    uint32_t relative_level;
+    const char *local_name;
+    const char *module_name;
+    const char *member_name;
+    const char **names;
+    int name_count;
+} CBMPyNamespaceFact;
+typedef struct {
+    uint32_t version;
+    CBMLanguage language;
+    CBMPyNamespaceStatus status;
+    CBMPyNamespaceFailure failure;
+    CBMPyNamespaceFact *items;
+    int count;
+    int cap;
+} CBMPyNamespaceFacts;
+
+typedef enum {
+    CBM_USAGE_VALUE = 0,
+    CBM_USAGE_CALL_REFERENCE,
+} CBMUsageKind;
+
+typedef struct {
+    const char *ref_name;          // referenced identifier
+    const char *enclosing_func_qn; // QN of enclosing function (or module QN)
+    /* Fixed-width fields grouped so the record packs to 40 bytes (was 48; the
+     * Go corpus holds 4.68M of these). Field meanings unchanged. */
+    uint32_t lexical_scope_id;       // extraction-local scope instance; never graph identity
+    uint32_t site_start_byte;        // exact reference-token span; end > start when present
+    uint32_t site_end_byte;          // exclusive byte offset in the source file
+    CBMUsageKind kind;               // ordinary USAGE or explicit callable reference
+    CBMSourceOrigin source_origin;   // raw source or C-family preprocessed buffer
+    bool may_be_call_reference;      // syntactic candidate; exact LSP proof may upgrade its edge
+    bool semantic_reference_blocked; // lexical evidence blocks only unproven textual fallback
+    bool semantic_reference_local_shadow; // blocker belongs to a non-module lexical scope
+    bool is_member_access;                // token is the member half of a selector/attribute
+                                          // (Go x.f — field_identifier). The extractor strips
+                                          // the receiver, so this is the only surviving record
+                                          // of selector shape (#1962). Default false.
+} CBMUsage;
+
+typedef struct {
+    const char *exception_name;    // exception class/type name
+    const char *enclosing_func_qn; // QN of enclosing function
+} CBMThrow;
+
+typedef struct {
+    const char *var_name;          // variable name
+    const char *enclosing_func_qn; // QN of enclosing function
+    bool is_write;                 // true = write, false = read
+    bool is_member_access;         // var_name is the field half of a selector/member LHS
+                                   // (`t.err = x` → "err"); the receiver is stripped here,
+                                   // so this is the only record of selector shape (#1962)
+} CBMReadWrite;
+
+typedef struct {
+    const char *type_name;         // referenced type/class name
+    const char *enclosing_func_qn; // QN of enclosing function
+} CBMTypeRef;
+
+typedef struct {
+    const char *env_key;           // environment variable key
+    const char *enclosing_func_qn; // QN of enclosing function
+} CBMEnvAccess;
+
+typedef struct {
+    const char *var_name;          // variable being assigned
+    const char *type_name;         // declared type or RHS constructor type
+    const char *enclosing_func_qn; // enclosing function, class, or module QN
+    uint32_t value_start_byte;     // Swift call initializer span; type_name may be unknown
+    uint32_t value_end_byte;       // exclusive; zero when no initializer call was recorded
+    uint32_t decl_end_byte;        // Swift: the binding is in scope from the end of its
+    uint32_t scope_end_byte;       // declaration to the end of its block; zero = unknown
+    bool constructed;              // Swift: type_name is the type the initializer call
+                                   // constructs (`Foo(...)`), not an annotation or parameter
+} CBMTypeAssign;
+
+// String reference: URL, config key, or async target found in source.
+// Extracted from string literals during AST walk.
+typedef enum {
+    CBM_STRREF_URL = 0,     // REST path or full URL
+    CBM_STRREF_CONFIG = 1,  // config file path or env var key
+    CBM_STRREF_GRAPHQL = 2, // GraphQL operation held by a module-level constant or passed
+                            // as a call argument: value is its selection signature,
+                            // enclosing_func_qn the constant's (or calling function's)
+                            // QN, key_path the callee taking the literal (or NULL)
+    CBM_STRREF_GRAPHQL_REF = 3, // a call names a binding (`{ query }`): value is the module
+                                // constant's QN whose CBM_STRREF_GRAPHQL ref holds the
+                                // document, enclosing_func_qn the caller, key_path the callee
+} CBMStringRefKind;
+
+typedef struct {
+    const char *value;             // the string literal content
+    const char *enclosing_func_qn; // QN of enclosing function
+    const char *key_path;          // dotted key path from YAML/JSON nesting (NULL if flat)
+    CBMStringRefKind kind;         // URL, CONFIG
+} CBMStringRef;
+
+/* Infrastructure binding: topic/queue → endpoint URL.
+ * Extracted from YAML/HCL/JSON subscription/scheduler configs.
+ * Used by pass_route_nodes to connect async Route nodes to handler services. */
+typedef struct {
+    const char *source_name; // topic, queue, or schedule name
+    const char *target_url;  // push_endpoint, uri, or http_target URL
+    const char *broker;      // "pubsub", "cloud_tasks", "cloud_scheduler", "sqs", "kafka"
+} CBMInfraBinding;
+
+/* Pub/sub channel participation.  One record per emit() or on()/addListener()
+ * call detected in source — the receiver (e.g. Socket.IO client, EventEmitter
+ * instance) is intentionally NOT identified; matching is by channel_name
+ * across files, which captures the common pattern of one logical bus per
+ * service.  Transport disambiguates Socket.IO vs EventEmitter vs future
+ * detectors (Kafka, Cloud Pub/Sub, etc.). */
+typedef enum {
+    CBM_CHANNEL_EMIT = 0,
+    CBM_CHANNEL_LISTEN = 1,
+} CBMChannelDirection;
+
+typedef struct {
+    const char *channel_name;      // literal channel name (e.g. "user.created")
+    const char *transport;         // "socketio", "event_emitter", ...
+    const char *enclosing_func_qn; // QN of the function containing the emit/on call
+    CBMChannelDirection direction;
+} CBMChannel;
+
+/* Python: one annotated instance field of a class -- `x: T` or `x: T = v` in
+ * the class body, `self.x: T = v` in __init__, or `self.x = p` where `p` is an
+ * annotated __init__ parameter. Not a graph node: it only carries the field's
+ * declared type to the cross-file LSP, so `obj.x.m()` on a class imported
+ * from another file can be typed (#1277). */
+typedef struct {
+    const char *class_qn;   // QN of the owning class
+    const char *field_name; // attribute name
+    const char *type_text;  // raw annotation text, resolved later per file
+} CBMFieldType;
+
+// Rust: impl Trait for Struct
+typedef struct {
+    const char *trait_name;  // trait name (raw text)
+    const char *struct_name; // struct/type name (raw text)
+    /* Exact extracted QN of the implementing type.  Unlike struct_name this
+     * does not need a later leaf-name guess, and the relation exists even for
+     * an empty `impl Trait for Type {}` block. */
+    const char *struct_qn;
+} CBMImplTrait;
+
+typedef enum {
+    CBM_RESOLVED_INVOCATION = 0,
+    CBM_RESOLVED_CALL_REFERENCE,
+    /* C-family member access `a.b` / `a->b`: callee_qn is the Field `b` of the
+     * type of `a`. One row per (caller, field), not per occurrence, and no site
+     * span: the join is by enclosing function and member name. */
+    CBM_RESOLVED_FIELD_REFERENCE,
+} CBMResolvedKind;
+
+// LSP-resolved invocation/reference: high-confidence type-aware resolution.
+typedef struct {
+    const char *caller_qn;         // enclosing function QN
+    const char *callee_qn;         // resolved target QN (fully qualified)
+    const char *strategy;          // "lsp_type_dispatch", "lsp_direct", etc.
+    float confidence;              // 0.90-0.95
+    const char *reason;            // diagnostic label for unresolved calls (NULL if resolved)
+    CBMResolvedKind kind;          // invocation (CALLS) or explicit callable reference
+    uint32_t site_start_byte;      // exact source occurrence; end > start when present
+    uint32_t site_end_byte;        // exclusive byte offset in the source file
+    CBMSourceOrigin source_origin; // raw source or C-family preprocessed buffer
+    /* Callable identity (#2061): the resolved overload's signature suffix,
+     * appended to callee_qn when the edge is written; NULL = none (always,
+     * until a language enables its callable_identity mode). */
+    const char *callee_sig;
+} CBMResolvedCall;
+
+typedef struct {
+    CBMResolvedCall *items;
+    int count;
+    int cap;
+} CBMResolvedCallArray;
+
+/* Refinement status: existing parser/no-op exits are separate from these
+ * explicit evaluator failures. The caller retains prior completed output. */
+typedef enum {
+    CBM_LSP_COMPLETE = 0,
+    CBM_LSP_MEMO_FAILED,
+    CBM_LSP_DEPTH_EXCEEDED,
+    CBM_LSP_SCOPE_FAILED,
+} CBMLSPStatus;
+
+// Growable arrays used during extraction.
+typedef struct {
+    CBMDefinition *items;
+    int count;
+    int cap;
+} CBMDefArray;
+
+typedef struct {
+    CBMCall *items;
+    int count;
+    int cap;
+} CBMCallArray;
+
+typedef struct {
+    CBMImport *items;
+    int count;
+    int cap;
+} CBMImportArray;
+
+typedef struct {
+    CBMUsage *items;
+    int count;
+    int cap;
+} CBMUsageArray;
+
+typedef struct {
+    CBMThrow *items;
+    int count;
+    int cap;
+} CBMThrowArray;
+
+typedef struct {
+    CBMReadWrite *items;
+    int count;
+    int cap;
+} CBMRWArray;
+
+typedef struct {
+    CBMTypeRef *items;
+    int count;
+    int cap;
+} CBMTypeRefArray;
+
+typedef struct {
+    CBMEnvAccess *items;
+    int count;
+    int cap;
+} CBMEnvAccessArray;
+
+typedef struct {
+    CBMTypeAssign *items;
+    int count;
+    int cap;
+} CBMTypeAssignArray;
+
+typedef struct {
+    CBMStringRef *items;
+    int count;
+    int cap;
+} CBMStringRefArray;
+
+typedef struct {
+    CBMInfraBinding *items;
+    int count;
+    int cap;
+} CBMInfraBindingArray;
+
+/* A fact a Kubernetes manifest states about other objects (extract_k8s.c),
+ * resolved by the K8s pass against the objects of the source's bundle.
+ *   CBM_K8S_FACT_REF: object def_index names a kind/ns/name object at a
+ *     reference path (via), drawn as edge (USAGE, INFRA_MAPS, DEPENDS_ON or
+ *     CONNECTS_TO); ns NULL = the source's own namespace. A CONNECTS_TO
+ *     reference (via "env") is the Service the value of environment variable
+ *     `key` of container `container` addresses -- the value is not kept.
+ *   CBM_K8S_FACT_CRD: the CRD def_index declares kind `kind` in group `name`.
+ *   CBM_K8S_FACT_DEPLOY: object def_index (a Flux Kustomization, an Argo
+ *     Application) deploys the repository directory `name` into namespace
+ *     `ns` (NULL: the objects' own); via "flux" / "argo". via "kustomize"
+ *     (def_index -1: the kustomization itself): a `helmCharts` entry
+ *     inflates chart `name` of repository `url` at `version` as release
+ *     `release` into namespace `ns`, with values file `path`.
+ *   CBM_K8S_FACT_ROUTE: object def_index (an Ingress, an HTTPRoute) exposes
+ *     `route` ("<host or *><path>") and sends it to the kind/ns/name backend
+ *     (name NULL: none); via "ingress" / "httproute".
+ *   CBM_K8S_FACT_SOURCE: object def_index (a Flux OCIRepository) fetches
+ *     from the URL `name`; a HelmRelease whose chartRef names it deploys the
+ *     chart there.
+ *   CBM_K8S_FACT_IMAGE: object def_index runs its container `container`
+ *     (NULL: unnamed) from image `name` (a literal reference, or a Helm
+ *     template's placeholder `<...>`, which names none); via "container";
+ *     `line` the image's line, start_line / end_line the container's.
+ *   CBM_K8S_FACT_ENV: object def_index sets environment variable `name` in
+ *     its container `container` (NULL: unnamed) at `line`; via = where the
+ *     value comes from ("value", or the valueFrom kind) -- never the value.
+ *   CBM_K8S_FACT_PATCH: a kustomization's `patches` entry at `line` patches
+ *     the objects of its build named by kind / group / version / name / ns
+ *     (any NULL: any) -- its `target`, else an inline patch document's own
+ *     kind / group / name / ns; `path` is
+ *     the patch file (as written, relative to the kustomization), NULL for an
+ *     inline patch. kind and name both NULL: the patch file's documents name
+ *     them. def_index -1: the kustomization itself is the source. */
+typedef enum {
+    CBM_K8S_FACT_REF = 0,
+    CBM_K8S_FACT_CRD,
+    CBM_K8S_FACT_DEPLOY,
+    CBM_K8S_FACT_ROUTE,
+    CBM_K8S_FACT_SOURCE,
+    CBM_K8S_FACT_IMAGE,
+    CBM_K8S_FACT_ENV,
+    CBM_K8S_FACT_PATCH
+} CBMK8sFactKind;
+typedef struct {
+    CBMK8sFactKind fact;
+    int def_index;
+    const char *kind;
+    const char *ns;
+    const char *name;
+    const char *via;
+    const char *edge;
+    const char *route;
+    const char *container;
+    const char *key;      /* CONNECTS_TO: the environment variable addressing it */
+    const char *group;    /* PATCH: the API group named ("core"), NULL: any */
+    const char *version;  /* PATCH: the API version named, NULL: any */
+    const char *path;     /* PATCH: the patch file, NULL: inline */
+    const char *selector; /* PATCH: the target's labelSelector, NULL: none */
+    const char *url;      /* DEPLOY (kustomize): the chart repository */
+    const char *release;  /* DEPLOY (kustomize): the release name */
+    int line;
+    int start_line; /* IMAGE: the container mapping's first line */
+    int end_line;   /* IMAGE: its last line */
+} CBMK8sFact;
+
+typedef struct {
+    CBMK8sFact *items;
+    int count;
+    int cap;
+} CBMK8sFactArray;
+
+typedef struct {
+    CBMImplTrait *items;
+    int count;
+    int cap;
+} CBMImplTraitArray;
+
+typedef struct {
+    CBMChannel *items;
+    int count;
+    int cap;
+} CBMChannelArray;
+
+/* One arrow of a diagram (diagram.c): from one DiagramElement definition of
+ * the file to another, written as a DIAGRAM_ARROW edge. */
+typedef struct {
+    const char *from_qn;
+    const char *to_qn;
+    const char *label; /* the arrow's text, NULL for none */
+    const char *style; /* what the arrow means as its format writes it: "flow",
+                        * "message", "inherits", "composition", ... */
+    uint32_t line;
+} CBMDiagramArrow;
+
+typedef struct {
+    CBMDiagramArrow *items;
+    int count;
+    int cap;
+} CBMDiagramArrowArray;
+
+typedef struct {
+    CBMFieldType *items;
+    int count;
+    int cap;
+} CBMFieldTypeArray;
+
+/* One reference found in a definition's complete doc comment, or in the file's
+ * own doc (doclink.h has the syntax table and the per-language parsers).
+ * Resolution happens later, per file, in the pipeline
+ * (src/pipeline/doc_links.c). */
+typedef struct {
+    const char *source_qn; // QN of the documented definition (the edge source);
+                           // for a file-level reference the file's module QN
+    const char *raw;       // the reference as written, markup entities decoded
+    uint32_t line;         // 1-based source line of the reference
+    uint32_t def_line;     // 1-based start line of the documented definition
+    uint16_t syntax;       // CBMDocLinkSyntax (doclink.h)
+    uint16_t flags;        // CBM_DOCLINK_FLAG_* (doclink.h); set by the driver
+} CBMDocLink;
+
+typedef struct {
+    CBMDocLink *items;
+    int count;
+    int cap;
+    /* Memory ran out while this file's doc-link data was extracted (a token,
+     * a reference value, a doc text or the scope blob was lost): the
+     * resolving half fails the layer instead of publishing a silently
+     * incomplete graph. */
+    bool failed;
+} CBMDocLinkArray;
+
+// Full extraction result for one file.
+typedef struct CBMFileResult {
+    CBMArena arena; // owns local memory; composites may also retain child arenas below
+
+    uint64_t markdown_collection_steps; // collector cursor moves/node visits, not parser internals
+    uint64_t markdown_name_checks;      // heading-name lookup/group checks, excluding sorting
+    CBMDefArray defs;
+    CBMCallArray calls;
+    CBMImportArray imports;
+    CBMPyNamespaceFacts py_namespace;
+    CBMUsageArray usages;
+    CBMThrowArray throws;
+    CBMRWArray rw;
+    CBMTypeRefArray type_refs;
+    CBMEnvAccessArray env_accesses;
+    CBMTypeAssignArray type_assigns;
+    CBMImplTraitArray impl_traits;       // Rust: impl Trait for Struct pairs
+    CBMResolvedCallArray resolved_calls; // LSP-resolved invocations/references (high confidence)
+    CBMStringRefArray string_refs;       // URL/config string literals from AST
+    CBMInfraBindingArray infra_bindings; // topic→URL pairs from IaC configs
+    CBMK8sFactArray k8s_facts;           // Kubernetes references and CRD declarations
+    CBMChannelArray channels;            // Socket.IO / EventEmitter pub/sub participation
+    CBMDiagramArrowArray diagram_arrows; // arrows between the file's DiagramElement defs
+    CBMFieldTypeArray field_types;       // Python: annotated instance fields (#1277)
+
+    const char *module_qn;      // module qualified name
+    const char *namespace_name; // declared namespace/package (Java/Kotlin/C#/PHP), NULL if none
+    const char **exports;       // NULL-terminated (NULL if none)
+    const char **constants;     // NULL-terminated (NULL if none)
+    const char **global_vars;   // NULL-terminated (NULL if none)
+    const char **macros;        // NULL-terminated, C/C++ only (NULL if none)
+
+    bool has_error;
+    const char *error_msg;
+    /* Best-effort parse-coverage signal (experimental). parse_incomplete is true
+     * when the parse tree contains tree-sitter ERROR/MISSING nodes — constructs
+     * in those regions are silently absent from the graph. error_ranges is a
+     * compact "start-end,start-end" list of 1-based line ranges (arena-owned) or
+     * NULL. This only marks what we can DETECT: the absence of a flag is NOT a
+     * completeness guarantee. Callers should treat a flagged file as "prefer
+     * grep here", never treat an unflagged file as provably complete. */
+    bool parse_incomplete;
+    /* True when the ranges cover so much of the file that they are no longer
+     * useful advice — one range over 80% of the line count. The file WAS
+     * indexed, but pointing a reader at almost every line tells them nothing,
+     * so the report says "read the source" instead of listing the range.
+     *
+     * Its main customers are non-C languages. The refinement that narrows a
+     * whole-file range using the preprocessed parse only runs for C, C++ and
+     * CUDA, so a Python, Java or Ruby file whose root node is ERROR still
+     * reports 1-N.
+     *
+     * Note the naming: this field and the phase string it produces are both
+     * `parse_unusable`. The older `parse_incomplete` field emits the phase
+     * `parse_partial` instead. That mismatch is historical, not deliberate —
+     * do not copy it. */
+    bool parse_unusable;
+    const char *error_ranges;
+    int error_region_count;
+    bool is_test_file;
+    int imports_count;
+    TSTree *cached_tree; // retained parse tree (caller frees via cbm_free_tree)
+    /* The parse alone used more than its share of the per-file budget: the
+     * per-file LSP walk and the cross-file resolve skip this file (its
+     * unified-extractor defs stay). Set by cbm_extract_file_ex, honoured by
+     * cbm_pxc_dispatch_file -- one site for every language. */
+    bool lsp_skipped;
+    /* The unified walk stopped at its CPU budget: defs/calls/usages found up
+     * to that point are kept, the rest of the file is not walked. Implies
+     * lsp_skipped. */
+    bool walk_truncated;
+    /* Size of this file's parse tree, and how much of it the unified walk got
+     * through. Reported for a truncated or LSP-skipped file so the coverage
+     * report says how much of it is missing, instead of leaving the gap
+     * silent. */
+    uint32_t tree_nodes;
+    uint32_t walk_nodes_visited;
+    CBMLanguage cached_lang; // language of cached tree (for parser selection)
+
+    // Retained source bytes — copied into `arena` by the parallel
+    // extract pass so the fused cross-file LSP step in resolve_worker
+    // can run without re-reading the file from disk. NULL when the
+    // file exceeded the per-file (100 MB) or total (2 GB) retention
+    // cap; in that case the cross-file LSP step is skipped for this
+    // file (defs/calls already extracted are unaffected).
+    const char *source;
+    int source_len;
+
+    // Composite extraction results (currently ObjectScript Studio Export)
+    // retain their per-unit results so shallow-copied carrier strings remain
+    // valid for the composite's full lifetime. Owned and recursively released
+    // by cbm_free_result(); ordinary single-file results leave these zeroed.
+    struct CBMFileResult **owned_results;
+    int owned_result_count;
+
+    /* The file's own doc, set on its File node: the Go package comment or
+     * the Rust inner docs (//!). NULL for other languages and undocumented
+     * files. */
+    const char *module_doc;
+    /* A consumed configured definition could not be mapped safely. Only an
+     * allocation failure (OOM) still aborts publication: any other status is
+     * degraded per file by cbm_test_declarations_degrade. error_msg is
+     * arena-owned as usual. */
+    CBMTestExtractStatus test_declarations_status;
+    int test_declaration_index;     /* meaningful on failure; -1 = preset */
+    uint32_t test_declaration_line; /* 0 = snapshot preflight */
+    bool has_test_definition_owners;
+    /* has_error was raised by a configured-definition issue alone. */
+    bool test_error_only;
+    /* The file's configured test forms could not be mapped: it carries no
+     * configured test roles; the status names why (no pointer: compaction
+     * and spill relocate only the strings they know). */
+    bool test_declarations_degraded;
+    CBMTestExtractStatus test_declarations_degraded_status;
+    int test_owner_source_len;
+    CBMLanguage test_owner_language;
+    char test_owner_source_sha256[65]; /* exact raw source; identity, not authentication */
+
+    /* Doc-comment references of this file's definitions (doclink.h), and the
+     * file's doc-link scope: a language-tagged text blob with what OTHER
+     * files' doc-link resolution needs from this file (C#: namespaces,
+     * usings, type and member declarations). A pure function of the file's
+     * bytes; NULL for languages without a scope scanner. */
+    CBMDocLinkArray doc_links;
+    const char *doc_scope;
+} CBMFileResult;
+
+// --- Enclosing function cache ---
+// Avoids repeated parent-chain walks for nodes within the same function body.
+// Each entry records a function's byte range and its precomputed QN.
+#define EFC_SIZE 64 // power of 2 for fast modulo
+
+typedef struct {
+    uint32_t start_byte;
+    uint32_t end_byte;
+    const char *qn;
+} EFCEntry;
+
+typedef struct {
+    EFCEntry entries[EFC_SIZE];
+    int count;
+} EFCache;
+
+// --- Extraction context passed to sub-extractors ---
+
+// Module-level string constant map (for constant propagation)
+#define CBM_MAX_STRING_CONSTANTS 256
+typedef struct {
+    const char *names[CBM_MAX_STRING_CONSTANTS];
+    const char *values[CBM_MAX_STRING_CONSTANTS];
+    const char *url_values[CBM_MAX_STRING_CONSTANTS]; // extraction-only URL projections
+    bool is_url_builder[CBM_MAX_STRING_CONSTANTS];
+    int count;
+} CBMStringConstantMap;
+
+// Forward declaration: ObjectScript macro table (defined in macro_table.h).
+typedef struct CBMMacroTable CBMMacroTable;
+
+// Method-return-type table for ObjectScript variable type inference. Populated
+// from definition nodes (method QN -> declared return type) so a later
+// `Set x = obj.Method()` can resolve x's class.
+#define CBM_RETURN_TYPE_TABLE_CAP 2048
+
+typedef struct {
+    const char *method_qn;
+    const char *return_type;
+} CBMReturnTypeEntry;
+
+typedef struct {
+    CBMReturnTypeEntry entries[CBM_RETURN_TYPE_TABLE_CAP];
+    int count;
+} CBMReturnTypeTable;
+
+typedef struct {
+    CBMArena *arena;
+    /* Scratch for AST traversal, owned by the cbm_extract_file_ex call that
+     * built this context and destroyed when it returns. Nothing a
+     * CBMFileResult points at may be allocated here: `arena` is the result's
+     * own, and it outlives extraction by the whole pipeline (#1997). NULL in a
+     * context built without one, in which case the stacks fall back to
+     * `arena`. */
+    CBMArena *scratch;
+    CBMFileResult *result;
+    const char *source;
+    int source_len;
+    CBMLanguage language;
+    const char *project;
+    const char *rel_path;
+    const char *module_qn;
+    TSNode root;
+    EFCache ef_cache;                            // enclosing function cache
+    const char *enclosing_class_qn;              // for nested class QN computation
+    CBMStringConstantMap string_constants;       // module-level NAME = "value" pairs
+    const CBMMacroTable *macro_table;            // ObjectScript $$$macro table (NULL if none)
+    const CBMReturnTypeTable *return_type_table; // ObjectScript method return types (NULL if none)
+    /* Set by extract_class_variables around its extract_var_names calls, so a
+     * class-body variable def records which class declares it (parent_class)
+     * without changing its module-level qualified name. NULL elsewhere. */
+    const char *var_parent_class;
+    /* Per-file walk budget in VISITED NODES (0 = unbounded). The unified cursor
+     * walk stops once it is spent, so no single file can hold a worker for
+     * minutes: a 23 MB single-expression C# test file cost 346 s in usage
+     * stamping alone (tree-sitter's ts_node_parent descends from the root,
+     * quadratic on a deep tree; 2026-09-14). What was extracted before the stop
+     * is kept, and the file is named in the coverage report. Counted in nodes
+     * rather than CPU time so that the same file always stops at the same node
+     * — see CBM_WALK_MAX_NODES_DEFAULT for what a clock did here. */
+    uint32_t walk_budget_nodes;
+    bool walk_budget_exhausted;
+    /* How many nodes the unified walk actually visited (whether or not it ran
+     * out of budget) — the measurement the budget has to be expressed in. */
+    uint32_t walk_nodes_visited;
+    /* Doc-comment lookup state (extract_defs.c), NULL until first used and
+     * allocated in `scratch`: the memo of parents' child arrays and the Perl
+     * POD section index. */
+    void *doc_memo;
+    void *doc_pod_index;
+    /* Markdown: the settled names of the file's headings (extract_defs.c),
+     * NULL until the first heading; allocated in `scratch`. */
+    void *md_headings;
+    const cbm_test_declarations_t *test_declarations; /* borrowed for this call only */
+    bool test_declarations_raw_source;
+    struct CBMTestDefinitionMatch *test_definition_matches; /* traversal scratch */
+    int test_definition_match_count;
+    int test_definition_match_cap;
+    /* Start line of every doc text doc_run_text built, keyed by the returned
+     * pointer (doclink.c), so a definition's doc references get exact source
+     * lines. NULL until the first doc; allocated in `scratch`. */
+    void *doc_lines;
+    /* A per-file slot for the language's doc-link hooks (parse_doc and
+     * scan_scope, internal/cbm/doclink_<lang>.c): state that has to survive
+     * between the hook calls of ONE file, e.g. an index of the file's doc
+     * sections. NULL at the start of every file. What a hook stores here must
+     * be allocated in `scratch` (or `arena`), so that it ends with the file.
+     * The core never reads, interprets or frees it. It is the only place for
+     * such state: a static or thread-local cache is not. */
+    void *doclink_state;
+    /* C#: the first named file-scoped namespace among the children of the
+     * tree top cs_file_ns_top (extract_defs.c), found once per file. */
+    const void *cs_file_ns_top;
+    const char *cs_file_ns_name;
+    uint32_t cs_file_ns_start;
+    /* Go: what each block's statements bind (extract_calls.c), NULL until a route call asks;
+     * allocated in `scratch`. */
+    void *go_block_bindings;
+} CBMExtractCtx;
+
+/* Internal configured-definition seams. No declarations pointer enters a result. */
+/* A configured test form the extractor cannot map degrades the FILE, not
+ * the index (user decision 2026-10-04): its configured test roles, owner
+ * spans and owner flag are dropped, the status reads OK again, an error the
+ * issue alone raised is cleared, and test_declarations_degraded keeps the
+ * reason for a per-file diagnostic. OK and OOM results are left unchanged:
+ * an allocation failure still fails. Idempotent. */
+void cbm_test_declarations_degrade(CBMFileResult *result);
+/* The fixed description of a configured-definition status (static). */
+const char *cbm_test_extract_status_message(CBMTestExtractStatus status);
+bool cbm_test_declarations_validate(CBMFileResult *result,
+                                    const cbm_test_declarations_t *declarations);
+void cbm_test_declarations_finish(CBMExtractCtx *ctx);
+/* Raw AST candidate only: no declaration/configuration decisions. A C split
+ * invocation uses its adjacent compound body as scope; ordinary definitions
+ * use their function node. Callers still validate raw bytes before ownership. */
+bool cbm_test_definition_candidate(TSNode scope, CBMLanguage language, TSNode *name, TSNode *body);
+const char *cbm_test_definition_qn(CBMExtractCtx *ctx, TSNode function);
+bool cbm_test_definition_owners_match(const CBMFileResult *owners, const char *source,
+                                      int source_len, bool cpp_mode, const char *module_qn);
+const char *cbm_test_definition_owner_qn(const CBMFileResult *owners, TSNode function);
+
+// --- Public API ---
+
+// Bind third-party allocators (tree-sitter, sqlite3) to mimalloc as
+// defense-in-depth, so they never depend on the fragile MI_OVERRIDE symbol
+// override (#424). MUST be called as the very first statement of main(), before
+// any sqlite3_open*/sqlite3_initialize (SQLITE_CONFIG_MALLOC returns
+// SQLITE_MISUSE once sqlite has initialized).
+// Idempotent (static guard); intended for single-threaded startup. cbm_init()
+// also calls it so non-main entry points (pipeline passes) still get the binds.
+// In the test build (no CBM_BIND_TS_ALLOCATOR) this is a no-op.
+void cbm_alloc_init(void);
+/* SQLite allocates from a dedicated mimalloc heap per thread while on; the
+ * index worker turns it on (its default heap holds the graph). Off elsewhere:
+ * a thread-per-connection daemon would pin connection-lifetime blocks to
+ * dead threads. The switch exists in every build; it changes nothing where
+ * the allocator binds are compiled out. */
+void cbm_sqlite_dedicated_heap(bool on);
+
+// Initialize the library. Call once at startup. Returns 0 on success.
+int cbm_init(void);
+
+// True when rel_path is in the crash-quarantine set — the newline-delimited list
+// of files (CBM_INDEX_QUARANTINE_FILE) the crash supervisor pinned as crashers
+// during its single-threaded recovery re-run. Loaded once, lazily; read-only
+// after load. cbm_extract_file short-circuits such files to an empty result so no
+// pass can crash on them; the pipeline extract loops call this to also REPORT the
+// skip as phase="crash". Always false (cheap no-op) when the env var is unset.
+bool cbm_index_is_quarantined(const char *rel_path);
+
+// Phase a quarantined file was pinned under: "crash" (a fault signal) or "hang"
+// (killed for making no progress). Returns NULL when rel_path is not quarantined.
+// Drives the same lazy once-load as cbm_index_is_quarantined. Used by the pipeline
+// extract loops to report the skip's phase in skipped[] (falls back to "crash").
+const char *cbm_index_quarantine_phase(const char *rel_path);
+
+// Crash-supervisor marker journal (parallel-safe): appends "S <rel_path>" /
+// "D <rel_path>" to CBM_INDEX_MARKER_FILE. Files with an S but no D form the
+// parent's crash/hang suspect set. No-ops when the env var is unset.
+// cbm_extract_file journals its own start/done; long-running per-file phases
+// (cross-LSP resolve) call these around their per-file work so a hang there
+// is attributed to the RIGHT file instead of a stale extraction marker.
+void cbm_index_mark_start(const char *rel_path);
+void cbm_index_mark_done(const char *rel_path);
+
+/* Compact a finished result: copy everything reachable from it -- every
+ * record array at exact count, every string once (interned by content within
+ * the file), the retained source -- into one exact-size arena, and destroy the
+ * working arena the extractors wrote into. Measured on the Go corpus
+ * (2026-09-13): 14.8 GB written per index, 3.4 GB reachable; the rest was
+ * node-text copies and abandoned array generations no one could free because
+ * the result owned the arena. Call once, after the last per-file write and
+ * before the result is cached for later passes. Later appends into the arena
+ * still work (growth restarts at the default block). A composite's owned
+ * per-unit results are released: after the deep copy nothing points at them.
+ * On allocation failure the result is left exactly as it was. */
+void cbm_result_compact(CBMFileResult *result);
+
+/* The working arena the extractors write into, per worker thread. Extraction
+ * takes it (rewound, pages still mapped) instead of allocating a fresh arena
+ * per file; compaction returns it instead of destroying it. Reusing the same
+ * addresses directly is what stops the purge/re-commit churn that kept a
+ * kernel worker at 15 GB resident with 4-5 GB charged. An arena that grew past
+ * CBM_WORK_ARENA_KEEP_BYTES (one giant file) is destroyed, not kept. */
+enum { CBM_WORK_ARENA_KEEP_BYTES = 16 * 1024 * 1024 };
+void cbm_work_arena_take(CBMArena *into);
+void cbm_work_arena_give(CBMArena *from);
+/* Drop this thread's kept working arena (end of an extraction pass). */
+void cbm_work_arena_release(void);
+/* True on a thread that has given a working arena back, i.e. a pipeline
+ * worker whose cbm_work_arena_release is guaranteed to run: only such a thread
+ * may keep per-thread scratch between files. */
+bool cbm_work_arena_keeping(void);
+/* Let this thread keep its per-file extraction scratch between the files of a
+ * sequential loop; the caller must call cbm_work_arena_release on the same
+ * thread when the loop ends (every return path). */
+void cbm_work_arena_keep_begin(void);
+/* Free the compaction scratch this thread kept (cbm_work_arena_release calls it). */
+void cbm_result_compact_release_thread(void);
+
+/* Parse one whole file as if its last line ended with "\n" (#2078). The
+ * parser sees the source plus one virtual newline when the last byte is not
+ * already one; the returned tree is then clamped back to `source_len`, so no
+ * node range, point or text reaches past the real bytes. Every whole-file parse
+ * goes through here, so a retained tree and a fallback re-parse agree. */
+TSTree *cbm_parse_source(TSParser *parser, const char *source, uint32_t source_len,
+                         TSParseOptions opts);
+
+// Extract all data from one file. Caller must call cbm_free_result().
+// source must remain valid for the duration of the call.
+// timeout_micros: per-file tree-sitter parse budget in microseconds of the
+// calling thread's CPU time, with a wall-clock backstop of
+// CBM_PARSE_WALL_CEILING_FACTOR x the budget (0 = no budget).
+CBMFileResult *cbm_extract_file(const char *source, int source_len, CBMLanguage language,
+                                const char *project, const char *rel_path, int64_t timeout_micros,
+                                const char **extra_defines, // NULL-terminated, or NULL
+                                const char **include_paths  // NULL-terminated, or NULL
+);
+
+// Pipeline-internal variant of cbm_extract_file() carrying ObjectScript
+// per-project tables (macro table + method-return-type table). The public
+// cbm_extract_file() is a thin wrapper that passes NULL, NULL for both.
+CBMFileResult *cbm_extract_file_ex(
+    const char *source, int source_len, CBMLanguage language, const char *project,
+    const char *rel_path, int64_t timeout_micros,
+    const char **extra_defines,                 // NULL-terminated, or NULL
+    const char **include_paths,                 // NULL-terminated, or NULL
+    const CBMMacroTable *macro_table,           // ObjectScript macros, or NULL
+    const CBMReturnTypeTable *return_type_table // OS return types, or NULL
+);
+
+/* Additive immutable-snapshot entry point. NULL preserves legacy behavior.
+ * Snapshot must outlive this call; returned data is independently result-owned.
+ * A non-OK result status is an explicit configured-mapping failure, not a
+ * successful empty inventory. error_msg may be NULL on diagnostic OOM. */
+CBMFileResult *cbm_extract_file_ex_with_tests(
+    const char *source, int source_len, CBMLanguage language, const char *project,
+    const char *rel_path, int64_t timeout_micros, const char **extra_defines,
+    const char **include_paths, const CBMMacroTable *macro_table,
+    const CBMReturnTypeTable *return_type_table, const cbm_test_declarations_t *test_declarations);
+
+// Free all memory associated with a result.
+void cbm_free_result(CBMFileResult *result);
+
+/* Allocate an empty result; cbm_free_result releases it. */
+CBMFileResult *cbm_result_alloc(void);
+
+/* Release a composite result's per-unit results (the owner of that array). */
+void cbm_result_release_owned(CBMFileResult *result);
+
+// Free only the cached tree from a result (caller retained it for reuse).
+void cbm_free_tree(CBMFileResult *result);
+
+// Free a standalone TSTree pointer (for Go layer cleanup).
+void cbm_free_tree_ptr(TSTree *tree);
+
+#ifdef CBM_ENABLE_TEST_SEAMS
+// Test-only: source bytes this thread has read to locate lines for the #1071
+// macro-invocation check, cumulative (#1735).
+uint64_t cbm_test_macro_line_scan_bytes(void);
+#endif
+
+// Reset the thread-local parser's internal state, releasing slab-allocated
+// subtrees. Must be called BEFORE cbm_slab_reset_thread() so the slab rebuild
+// doesn't corrupt live parser state.
+void cbm_reset_thread_parser(void);
+
+// Destroy the thread-local parser. Call on worker thread exit.
+void cbm_destroy_thread_parser(void);
+
+// This thread's reusable tree cursor, reset to `node`. Child walks run once per
+// visited node; a cursor per walk was a malloc + free of its stack each time
+// (49.8 M on the Go corpus, waste sanitizer 2026-09-17). Valid until the next
+// call on this thread; released with the thread parser.
+TSTreeCursor *cbm_thread_cursor(TSNode node);
+
+// Reusable cursors for RECURSIVE walks: one per recursion depth on this thread,
+// so a walk that recurses from inside its child loop never shares a cursor with
+// its own callers. A slot already in use (another walker nested on this thread)
+// hands out a private cursor instead; release deletes it. Released with the
+// thread parser.
+typedef struct {
+    TSTreeCursor *cursor;
+    TSTreeCursor private_cursor;
+    int slot; /* -1: private */
+} cbm_cursor_lease_t;
+TSTreeCursor *cbm_cursor_acquire(cbm_cursor_lease_t *lease, int depth, TSNode node);
+void cbm_cursor_release(cbm_cursor_lease_t *lease);
+
+// Shutdown the library. Call once at exit.
+void cbm_shutdown(void);
+
+// Profiling: get accumulated parse/extraction times and file count.
+typedef struct {
+    uint64_t *parse_ns;
+    uint64_t *extract_ns;
+    uint64_t *files;
+} cbm_profile_out_t;
+void cbm_get_profile(cbm_profile_out_t out);
+uint64_t cbm_get_lsp_ns(void);
+uint64_t cbm_get_preprocess_ns(void);
+uint64_t cbm_get_files_preprocessed(void);
+void cbm_reset_profile(void);
+
+#if defined(CBM_KOTLIN_DEDUP_TEST_API) && CBM_KOTLIN_DEDUP_TEST_API
+// Test-build-only operation counter for Kotlin operator-carrier deduplication.
+// Production builds do not expose or retain this instrumentation.
+void cbm_kotlin_operator_dedup_test_reset(void);
+uint64_t cbm_kotlin_operator_dedup_test_comparisons(void);
+#endif
+
+#if defined(CBM_CALL_REFERENCE_LOOKUP_TEST_API) && CBM_CALL_REFERENCE_LOOKUP_TEST_API
+// Test-build-only work counter for resolving a node's field role while
+// classifying value references. Production builds retain no instrumentation.
+void cbm_usage_field_lookup_test_reset(void);
+uint64_t cbm_usage_field_lookup_test_work(void);
+uint64_t cbm_usage_slow_parent_fallback_test_count(void);
+#endif
+
+// Number of 1-based lines in a source buffer. The single line-count convention
+// for coverage reporting (#1967): a trailing '\n' ends the last line and opens
+// no new one; an empty buffer counts as 1 line. See the definition in cbm.c.
+uint32_t cbm_source_line_count(const char *src, int src_len);
+
+// Toggle C/C++ preprocessor Macro-node extraction (#375). The pipeline enables
+// it only for full/advanced index modes (it dominates extraction on macro-dense
+// codebases). Default ON. Set before extraction; read-only during.
+void cbm_set_macro_extraction(int enabled);
+int cbm_macro_extraction_enabled(void);
+
+// --- Internal helpers used by extractors ---
+
+CBMPyNamespaceStatus cbm_extract_python_namespace_facts(CBMExtractCtx *ctx);
+bool cbm_py_namespace_facts_valid(const CBMPyNamespaceFacts *facts);
+bool cbm_py_namespace_facts_copy(CBMArena *arena, const CBMPyNamespaceFacts *source,
+                                 CBMPyNamespaceFacts *out);
+#ifdef CBM_ENABLE_TEST_SEAMS
+void cbm_py_namespace_test_capture_fail_after(int successful_allocations);
+void cbm_py_namespace_test_copy_fail_after(int successful_allocations);
+#endif
+
+// Growable array push functions (arena-allocated, no individual free needed).
+void cbm_defs_push(CBMDefArray *arr, CBMArena *a, CBMDefinition def);
+void cbm_calls_push(CBMCallArray *arr, CBMArena *a, CBMCall call);
+void cbm_imports_push(CBMImportArray *arr, CBMArena *a, CBMImport imp);
+/* True unless every import of `imports` that binds `local_name` is
+ * annotation-only (cbm_import_binds_runtime_name), so also true when no import
+ * names it: the rule for the builders that key IMPORTS edges by local name. */
+bool cbm_imports_local_binds_runtime_name(const CBMImportArray *imports, const char *local_name);
+/* The same for the `len` bytes at `name` (not NUL-terminated): lets a caller
+ * decide before it copies the name. */
+bool cbm_imports_local_span_binds_runtime_name(const CBMImportArray *imports, const char *name,
+                                               size_t len);
+void cbm_usages_push(CBMUsageArray *arr, CBMArena *a, CBMUsage usage);
+void cbm_throws_push(CBMThrowArray *arr, CBMArena *a, CBMThrow thr);
+void cbm_rw_push(CBMRWArray *arr, CBMArena *a, CBMReadWrite rw);
+void cbm_typerefs_push(CBMTypeRefArray *arr, CBMArena *a, CBMTypeRef tr);
+void cbm_envaccess_push(CBMEnvAccessArray *arr, CBMArena *a, CBMEnvAccess ea);
+void cbm_typeassign_push(CBMTypeAssignArray *arr, CBMArena *a, CBMTypeAssign ta);
+void cbm_fieldtype_push(CBMFieldTypeArray *arr, CBMArena *a, CBMFieldType ft);
+void cbm_stringref_push(CBMStringRefArray *arr, CBMArena *a, CBMStringRef sr);
+void cbm_infrabinding_push(CBMInfraBindingArray *arr, CBMArena *a, CBMInfraBinding ib);
+void cbm_k8sfact_push(CBMK8sFactArray *arr, CBMArena *a, CBMK8sFact f);
+void cbm_impltrait_push(CBMImplTraitArray *arr, CBMArena *a, CBMImplTrait it);
+
+#ifdef CBM_ENABLE_TEST_SEAMS
+/* #1527 seam: how many of result's calls get a different innermost enclosing
+ * Function/Method from the call-context sweep than from the reference
+ * per-call scan (0 = identical), or -1 when the sweep could not allocate. */
+int cbm_test_enclosing_sweep_mismatches(const CBMFileResult *result);
+#endif
+void cbm_resolvedcall_push(CBMResolvedCallArray *arr, CBMArena *a, CBMResolvedCall rc);
+void cbm_channels_push(CBMChannelArray *arr, CBMArena *a, CBMChannel ch);
+void cbm_diagram_arrows_push(CBMDiagramArrowArray *arr, CBMArena *a, CBMDiagramArrow da);
+
+// --- Sub-extractor entry points ---
+
+void cbm_extract_definitions(CBMExtractCtx *ctx);
+/* Internal companion for embedded-language trees that contribute definitions
+ * to an existing host-file Module rather than minting a second Module. */
+void cbm_extract_definitions_without_module(CBMExtractCtx *ctx);
+// dbt lineage for Jinja-templated SQL models: emits a Model def plus one usage
+// per ref()/source() call. No-op unless the file parses as SQL and actually
+// contains a dbt builtin call. Defined in extract_dbt.c.
+void cbm_extract_dbt(CBMExtractCtx *ctx);
+// PHP source with its inline-HTML regions blanked so the php_only grammar can
+// parse past `?>` (#2000). Same length and line breaks as the input; returns
+// `source` itself when nothing needs rewriting. Defined in php_inline_html.c.
+const char *cbm_php_mask_inline_html(CBMArena *arena, const char *source, int source_len);
+void cbm_extract_imports(CBMExtractCtx *ctx);
+void cbm_extract_usages(CBMExtractCtx *ctx);
+void cbm_extract_semantic(CBMExtractCtx *ctx);
+void cbm_extract_type_refs(CBMExtractCtx *ctx);
+void cbm_extract_env_accesses(CBMExtractCtx *ctx);
+void cbm_extract_type_assigns(CBMExtractCtx *ctx);
+void cbm_extract_channels(CBMExtractCtx *ctx);
+/* Diagrams (diagram.c): a Diagram definition per diagram -- a Markdown, reST
+ * or AsciiDoc block, or a diagram file -- with a DiagramElement definition per
+ * element and the arrows between them. */
+void cbm_extract_diagrams(CBMExtractCtx *ctx);
+/* Is a Markdown block a diagram fence, and the labels its parser reads from
+ * it (space-joined; NULL for none): a Section's text keeps those labels in
+ * place of the fence (extract_markdown_section_body). */
+bool cbm_diagram_fence_is_diagram(const char *source, TSNode block);
+const char *cbm_diagram_fence_labels(CBMExtractCtx *ctx, TSNode block);
+/* A diagram file (CBM_LANG_DIAGRAM): its format comes from its extension. */
+void cbm_extract_diagram_file(CBMExtractCtx *ctx);
+
+/* OpenAPI / Swagger documents (openapi.c): a Route definition per operation and
+ * a doc link per operationId. Self-gated: openapi.json / swagger.json, and YAML
+ * or JSON files whose root says `openapi` or `swagger`. */
+void cbm_extract_openapi(CBMExtractCtx *ctx);
+
+/* Next.js App Router route handlers (extract_nextjs.c): the HTTP verb Functions
+ * a route file exports carry the route path its directories name. Self-gated:
+ * TS / JS route.ts and route.js under app/ or src/app/. */
+void cbm_extract_nextjs_routes(CBMExtractCtx *ctx);
+
+/* Canonicalize route-path parameter placeholders (":id", "{id}", "<id>",
+ * "${...}") to a single "{}" token so that client call sites, server handlers
+ * and OpenAPI operations rendezvous on the same Route QN regardless of
+ * framework syntax. Parameter names are intentionally discarded ("/u/{id}" and
+ * "/u/{slug}" both canonicalize to "/u/{}"). The result never exceeds the
+ * input length, so out_sz >= strlen(in) + 1 always suffices. Returns out.
+ * (route_path.c) */
+const char *cbm_route_canon_path(const char *in, char *out, size_t out_sz);
+
+// Single-pass unified extraction (replaces the 7 calls above except defs+imports).
+void cbm_extract_unified(CBMExtractCtx *ctx);
+
+// K8s / Kustomize semantic extractor (called when language is CBM_LANG_K8S or CBM_LANG_KUSTOMIZE).
+void cbm_extract_k8s(CBMExtractCtx *ctx);
+
+// --- Label predicates ---
+
+// True when `label` names a TYPE-LIKE container definition — a node that can own
+// methods/fields, be a base/embedded type, satisfy/declare an interface, and be a
+// target of name→type resolution. The canonical set is:
+//   Class, Struct, Interface, Enum, Type, Trait.
+// Single source of truth for every type-resolution / registry-seeding /
+// INHERITS·IMPLEMENTS / LSP-type-registrar consumer, so adding a new type-like
+// label (e.g. "Struct" for Rust/Go/Swift/D structs) updates them all at once
+// instead of scattering `|| strcmp(label,"Struct")==0` across the tree.
+// `label` may be NULL (returns false). Defined in helpers.c.
+bool cbm_label_is_type_like(const char *label);
+
+// True for data-relation labels (Table, View — SQL DDL). Relations resolve as
+// lineage targets only: registry members, but never type-like and never valid
+// CALLS/THROWS/READS/WRITES targets. `label` may be NULL. Defined in helpers.c.
+bool cbm_label_is_relation(const char *label);
+
+// True for labels admitted to the cross-file name registry: Function, Method,
+// every type-like container, Variable, Field, and the relation labels. Single
+// source of truth for registry seeding — the full (pass_definitions.c),
+// parallel (pass_parallel.c) and incremental (pipeline_incremental.c) pipelines
+// all seed through this predicate so their registries never diverge.
+// `label` may be NULL (returns false). Defined in helpers.c.
+bool cbm_label_is_registry_symbol(const char *label);
+
+/* Python symbol scope only: callers must establish the language explicitly.
+ * A trailing .__init__ is omitted when a nonempty prefix precedes it; raw
+ * Module/file identity is unchanged. NULL returns zero. */
+size_t cbm_fqn_symbol_scope_len(const char *module_qn);
+
+#endif // CBM_H

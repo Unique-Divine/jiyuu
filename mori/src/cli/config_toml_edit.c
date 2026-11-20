@@ -1,0 +1,3800 @@
+/*
+ * config_toml_edit.c — Fail-closed edits for agent TOML configuration.
+ */
+#include "cli/config_toml_edit.h"
+
+#include "cli/config_edit_path.h"
+#include "foundation/compat.h"
+#include "foundation/compat_fs.h"
+
+#include <errno.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#ifdef _WIN32
+#include "foundation/win_utf8.h"
+
+#include <fcntl.h>
+#include <io.h>
+#include <sys/stat.h>
+#define toml_close _close
+#define toml_fdopen _fdopen
+#define TOML_SYNC _commit
+#else
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
+#define toml_close close
+#define toml_fdopen fdopen
+#define TOML_SYNC fsync
+#endif
+
+#define TOML_EDIT_OK 0
+#define TOML_EDIT_FOREIGN 1
+#define TOML_EDIT_ERR (-1)
+/* #1558: exactly one of the two managed markers is present. We are the sole
+ * writer of these markers, so an imbalance is our own residue — removal can
+ * strip it, a write still refuses. */
+#define TOML_EDIT_ORPHAN_MARKER (-2)
+#define TOML_EDIT_MAX_BYTES (16U * 1024U * 1024U)
+#define TOML_EDIT_MAX_PATH_BYTES 32768U
+
+#ifdef CBM_TOML_EDIT_ENABLE_TEST_API
+static CBM_TLS cbm_toml_precommit_test_hook_t toml_precommit_test_hook = NULL;
+static CBM_TLS void *toml_precommit_test_context = NULL;
+static CBM_TLS cbm_toml_precommit_test_hook_t toml_prepublish_test_hook = NULL;
+static CBM_TLS void *toml_prepublish_test_context = NULL;
+#endif
+
+typedef struct {
+    int exists;
+#ifdef _WIN32
+    DWORD volume_serial;
+    DWORD file_index_high;
+    DWORD file_index_low;
+    DWORD attributes;
+    DWORD link_count;
+    FILETIME creation_time;
+    FILETIME write_time;
+    uint64_t size;
+#else
+    dev_t device;
+    ino_t inode;
+    mode_t mode;
+    nlink_t link_count;
+    uid_t owner;
+    gid_t group;
+    off_t size;
+    int64_t modified_sec;
+    long modified_nsec;
+    int64_t changed_sec;
+    long changed_nsec;
+#endif
+} toml_file_snapshot_t;
+
+typedef struct {
+    char *data;
+    size_t len;
+    size_t cap;
+} toml_buffer_t;
+
+typedef struct {
+    size_t start;
+    size_t content_end;
+    size_t full_end;
+} toml_line_t;
+
+typedef struct {
+    char *data;
+    size_t len;
+    size_t consumed;
+} toml_string_t;
+
+typedef struct {
+    char *data;
+    size_t len;
+    size_t count;
+} toml_key_path_t;
+
+typedef struct {
+    int present;
+    int array;
+    int target;
+    size_t edit_start;
+    toml_key_path_t path;
+} toml_header_t;
+
+typedef struct {
+    int present;
+    int multiline_value;
+    toml_key_path_t key;
+    size_t value_start;
+    size_t value_end;
+} toml_assignment_t;
+
+typedef struct {
+    int matching_count;
+    size_t start;
+    size_t header_end;
+    size_t direct_end;
+    size_t edit_end;
+} toml_table_scan_t;
+
+typedef struct {
+    int active;
+    int descendants;
+    int identity_count;
+    int identity_matches;
+    size_t start;
+    size_t header_end;
+    size_t direct_end;
+    size_t direct_significant_end;
+    size_t last_significant_end;
+} toml_target_table_t;
+
+typedef struct {
+    toml_key_path_t key;
+    toml_line_t line;
+} toml_body_entry_t;
+
+typedef struct {
+    toml_body_entry_t *entries;
+    size_t count;
+    size_t capacity;
+} toml_body_spec_t;
+
+static int toml_managed_block_conflicts(const char *existing, size_t existing_len,
+                                        size_t exclude_start, size_t exclude_end, const char *block,
+                                        size_t block_len);
+static int toml_managed_rewrite(const char *existing, size_t existing_len,
+                                const toml_line_t *begin_line, const toml_line_t *end_line,
+                                const char *begin_marker, const char *end_marker, const char *owned,
+                                size_t owned_len, int install, toml_buffer_t *output);
+
+static void toml_buffer_dispose(toml_buffer_t *buffer) {
+    if (!buffer) {
+        return;
+    }
+    free(buffer->data);
+    buffer->data = NULL;
+    buffer->len = 0;
+    buffer->cap = 0;
+}
+
+static int toml_buffer_reserve(toml_buffer_t *buffer, size_t additional) {
+    if (!buffer || buffer->len == SIZE_MAX || additional > SIZE_MAX - buffer->len - 1) {
+        return TOML_EDIT_ERR;
+    }
+    size_t needed = buffer->len + additional + 1;
+    if (needed > (size_t)TOML_EDIT_MAX_BYTES + 1U) {
+        return TOML_EDIT_ERR;
+    }
+    if (needed <= buffer->cap) {
+        return TOML_EDIT_OK;
+    }
+
+    size_t cap = buffer->cap ? buffer->cap : 128;
+    while (cap < needed) {
+        if (cap > SIZE_MAX / 2) {
+            cap = needed;
+            break;
+        }
+        cap *= 2;
+    }
+    char *grown = (char *)realloc(buffer->data, cap);
+    if (!grown) {
+        return TOML_EDIT_ERR;
+    }
+    buffer->data = grown;
+    buffer->cap = cap;
+    return TOML_EDIT_OK;
+}
+
+static int toml_buffer_append(toml_buffer_t *buffer, const char *data, size_t len) {
+    if ((!data && len != 0) || toml_buffer_reserve(buffer, len) != TOML_EDIT_OK) {
+        return TOML_EDIT_ERR;
+    }
+    if (len != 0) {
+        memcpy(buffer->data + buffer->len, data, len);
+        buffer->len += len;
+    }
+    buffer->data[buffer->len] = '\0';
+    return TOML_EDIT_OK;
+}
+
+static int toml_buffer_append_char(toml_buffer_t *buffer, char value) {
+    return toml_buffer_append(buffer, &value, 1);
+}
+
+static int toml_buffer_append_cstr(toml_buffer_t *buffer, const char *value) {
+    return value ? toml_buffer_append(buffer, value, strlen(value)) : TOML_EDIT_ERR;
+}
+
+static int toml_utf8_is_valid(const char *text, size_t len) {
+    size_t pos = 0;
+    while (pos < len) {
+        unsigned char first = (unsigned char)text[pos++];
+        if (first <= 0x7f) {
+            continue;
+        }
+        size_t continuation_count;
+        uint32_t codepoint;
+        if (first >= 0xc2 && first <= 0xdf) {
+            continuation_count = 1;
+            codepoint = first & 0x1f;
+        } else if (first >= 0xe0 && first <= 0xef) {
+            continuation_count = 2;
+            codepoint = first & 0x0f;
+        } else if (first >= 0xf0 && first <= 0xf4) {
+            continuation_count = 3;
+            codepoint = first & 0x07;
+        } else {
+            return 0;
+        }
+        if (continuation_count > len - pos) {
+            return 0;
+        }
+        for (size_t i = 0; i < continuation_count; ++i) {
+            unsigned char next = (unsigned char)text[pos++];
+            if ((next & 0xc0) != 0x80) {
+                return 0;
+            }
+            codepoint = (codepoint << 6) | (uint32_t)(next & 0x3f);
+        }
+        if ((continuation_count == 1 && codepoint < 0x80) ||
+            (continuation_count == 2 && codepoint < 0x800) ||
+            (continuation_count == 3 && codepoint < 0x10000) || codepoint > 0x10ffff ||
+            (codepoint >= 0xd800 && codepoint <= 0xdfff)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int toml_text_is_safe(const char *text, size_t len, int multiline) {
+    if (!text && len != 0) {
+        return 0;
+    }
+    for (size_t i = 0; i < len; ++i) {
+        unsigned char ch = (unsigned char)text[i];
+        if (ch == 0 || ch == 0x7f) {
+            return 0;
+        }
+        if (ch < 0x20 && !(multiline && (ch == '\t' || ch == '\n' || ch == '\r'))) {
+            return 0;
+        }
+        if (ch == '\r' && (!multiline || i + 1U >= len || text[i + 1U] != '\n')) {
+            return 0;
+        }
+    }
+    return toml_utf8_is_valid(text, len);
+}
+
+static int toml_bounded_length(const char *text, size_t maximum, size_t *length_out) {
+    if (!text || !length_out) {
+        return TOML_EDIT_ERR;
+    }
+    size_t length = 0U;
+    while (length <= maximum && text[length] != '\0') {
+        length++;
+    }
+    if (length > maximum) {
+        return TOML_EDIT_ERR;
+    }
+    *length_out = length;
+    return TOML_EDIT_OK;
+}
+
+static int toml_valid_path(const char *path) {
+    size_t len = 0U;
+    return path && path[0] != '\0' &&
+           toml_bounded_length(path, TOML_EDIT_MAX_PATH_BYTES, &len) == TOML_EDIT_OK &&
+           toml_text_is_safe(path, len, 0);
+}
+
+static int toml_is_bare_key_char(unsigned char ch) {
+    return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') ||
+           ch == '_' || ch == '-';
+}
+
+static int toml_valid_identifier(const char *identifier) {
+    size_t length = 0U;
+    if (!identifier || identifier[0] == '\0' ||
+        toml_bounded_length(identifier, 4096U, &length) != TOML_EDIT_OK) {
+        return 0;
+    }
+    for (size_t i = 0U; i < length; ++i) {
+        if (!toml_is_bare_key_char((unsigned char)identifier[i])) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int toml_valid_marker(const char *marker) {
+    if (!marker || marker[0] == '\0') {
+        return 0;
+    }
+    size_t len = 0U;
+    if (toml_bounded_length(marker, 4096U, &len) != TOML_EDIT_OK) {
+        return 0;
+    }
+    return toml_text_is_safe(marker, len, 0) && !strchr(marker, '\n') && !strchr(marker, '\r');
+}
+
+static int toml_snapshot_equal(const toml_file_snapshot_t *left,
+                               const toml_file_snapshot_t *right) {
+    if (left->exists != right->exists) {
+        return 0;
+    }
+    if (!left->exists) {
+        return 1;
+    }
+#ifdef _WIN32
+    return left->volume_serial == right->volume_serial &&
+           left->file_index_high == right->file_index_high &&
+           left->file_index_low == right->file_index_low && left->attributes == right->attributes &&
+           left->link_count == right->link_count &&
+           left->creation_time.dwLowDateTime == right->creation_time.dwLowDateTime &&
+           left->creation_time.dwHighDateTime == right->creation_time.dwHighDateTime &&
+           left->write_time.dwLowDateTime == right->write_time.dwLowDateTime &&
+           left->write_time.dwHighDateTime == right->write_time.dwHighDateTime &&
+           left->size == right->size;
+#else
+    return left->device == right->device && left->inode == right->inode &&
+           left->mode == right->mode && left->link_count == right->link_count &&
+           left->owner == right->owner && left->group == right->group &&
+           left->size == right->size && left->modified_sec == right->modified_sec &&
+           left->modified_nsec == right->modified_nsec && left->changed_sec == right->changed_sec &&
+           left->changed_nsec == right->changed_nsec;
+#endif
+}
+
+#ifdef _WIN32
+static int toml_snapshot_from_handle(HANDLE handle, toml_file_snapshot_t *snapshot) {
+    BY_HANDLE_FILE_INFORMATION info;
+    if (GetFileType(handle) != FILE_TYPE_DISK || !GetFileInformationByHandle(handle, &info) ||
+        (info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0 ||
+        info.nNumberOfLinks != 1U || (info.nFileIndexHigh == 0U && info.nFileIndexLow == 0U)) {
+        return TOML_EDIT_ERR;
+    }
+    uint64_t size = ((uint64_t)info.nFileSizeHigh << 32U) | (uint64_t)info.nFileSizeLow;
+    if (size > TOML_EDIT_MAX_BYTES) {
+        return TOML_EDIT_ERR;
+    }
+    *snapshot = (toml_file_snapshot_t){
+        .exists = 1,
+        .volume_serial = info.dwVolumeSerialNumber,
+        .file_index_high = info.nFileIndexHigh,
+        .file_index_low = info.nFileIndexLow,
+        .attributes = info.dwFileAttributes,
+        .link_count = info.nNumberOfLinks,
+        .creation_time = info.ftCreationTime,
+        .write_time = info.ftLastWriteTime,
+        .size = size,
+    };
+    return TOML_EDIT_OK;
+}
+#else
+static int toml_snapshot_from_stat(const struct stat *state, toml_file_snapshot_t *snapshot) {
+    if (!S_ISREG(state->st_mode) || state->st_ino == 0 || state->st_nlink != 1U ||
+        state->st_size < 0 || (uint64_t)state->st_size > TOML_EDIT_MAX_BYTES ||
+        (state->st_mode & (S_ISUID | S_ISGID | S_ISVTX)) != 0) {
+        return TOML_EDIT_ERR;
+    }
+    *snapshot = (toml_file_snapshot_t){
+        .exists = 1,
+        .device = state->st_dev,
+        .inode = state->st_ino,
+        .mode = state->st_mode,
+        .link_count = state->st_nlink,
+        .owner = state->st_uid,
+        .group = state->st_gid,
+        .size = state->st_size,
+#ifdef __APPLE__
+        .modified_sec = state->st_mtimespec.tv_sec,
+        .modified_nsec = state->st_mtimespec.tv_nsec,
+        .changed_sec = state->st_ctimespec.tv_sec,
+        .changed_nsec = state->st_ctimespec.tv_nsec,
+#else
+        .modified_sec = state->st_mtim.tv_sec,
+        .modified_nsec = state->st_mtim.tv_nsec,
+        .changed_sec = state->st_ctim.tv_sec,
+        .changed_nsec = state->st_ctim.tv_nsec,
+#endif
+    };
+    return TOML_EDIT_OK;
+}
+#endif
+
+static int toml_read_file(const char *path, char **out_data, size_t *out_len,
+                          toml_file_snapshot_t *snapshot_out) {
+    if (!path || !out_data || !out_len || !snapshot_out) {
+        return TOML_EDIT_ERR;
+    }
+    *out_data = NULL;
+    *out_len = 0;
+    memset(snapshot_out, 0, sizeof(*snapshot_out));
+
+#ifdef _WIN32
+    wchar_t *wide_path = cbm_utf8_to_wide(path);
+    if (!wide_path) {
+        return TOML_EDIT_ERR;
+    }
+    HANDLE handle = CreateFileW(
+        wide_path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    free(wide_path);
+    if (handle == INVALID_HANDLE_VALUE) {
+        DWORD error = GetLastError();
+        if (error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND) {
+            return TOML_EDIT_ERR;
+        }
+        char *empty = (char *)malloc(1);
+        if (!empty) {
+            return TOML_EDIT_ERR;
+        }
+        empty[0] = '\0';
+        *out_data = empty;
+        return TOML_EDIT_OK;
+    }
+    toml_file_snapshot_t before;
+    if (toml_snapshot_from_handle(handle, &before) != TOML_EDIT_OK) {
+        CloseHandle(handle);
+        return TOML_EDIT_ERR;
+    }
+    size_t size = (size_t)before.size;
+    char *data = (char *)malloc(size + 1U);
+    if (!data) {
+        CloseHandle(handle);
+        return TOML_EDIT_ERR;
+    }
+    DWORD read_count = 0U;
+    BOOL read_ok = ReadFile(handle, data, (DWORD)size, &read_count, NULL);
+    toml_file_snapshot_t after;
+    int after_result = toml_snapshot_from_handle(handle, &after);
+    BOOL close_ok = CloseHandle(handle);
+    if (!read_ok || read_count != (DWORD)size || after_result != TOML_EDIT_OK || !close_ok ||
+        !toml_snapshot_equal(&before, &after)) {
+        free(data);
+        return TOML_EDIT_ERR;
+    }
+#else
+#ifndef O_NOFOLLOW
+    return TOML_EDIT_ERR;
+#else
+    int flags = O_RDONLY | O_NOFOLLOW | O_NONBLOCK;
+#ifdef O_CLOEXEC
+    flags |= O_CLOEXEC;
+#endif
+    /* A symlink the invoking user owns, inside an opted-in configuration
+     * root, is read through the descriptor the helper validated on the
+     * target's pinned parent directory (#1954); everything else is opened by
+     * name with O_NOFOLLOW exactly as before. */
+    cbm_config_edit_target_t target;
+    if (cbm_config_edit_target_open(path, &target) < 0) {
+        return TOML_EDIT_ERR;
+    }
+    int fd = target.fd;
+    target.fd = -1;
+    if (target.status != CBM_CONFIG_EDIT_PATH_FOLLOWED) {
+        fd = open(target.path, flags);
+    }
+    cbm_config_edit_target_close(&target);
+    if (fd < 0) {
+        if (errno != ENOENT) {
+            return TOML_EDIT_ERR;
+        }
+        struct stat path_state;
+        if (lstat(target.path, &path_state) == 0 || errno != ENOENT) {
+            return TOML_EDIT_ERR;
+        }
+        char *empty = (char *)malloc(1U);
+        if (!empty) {
+            return TOML_EDIT_ERR;
+        }
+        empty[0] = '\0';
+        *out_data = empty;
+        return TOML_EDIT_OK;
+    }
+    struct stat before_state;
+    toml_file_snapshot_t before;
+    if (fstat(fd, &before_state) != 0 ||
+        toml_snapshot_from_stat(&before_state, &before) != TOML_EDIT_OK) {
+        toml_close(fd);
+        return TOML_EDIT_ERR;
+    }
+    FILE *file = toml_fdopen(fd, "rb");
+    if (!file) {
+        toml_close(fd);
+        return TOML_EDIT_ERR;
+    }
+    size_t size = (size_t)before.size;
+    char *data = (char *)malloc(size + 1U);
+    if (!data) {
+        (void)fclose(file);
+        return TOML_EDIT_ERR;
+    }
+    size_t read_count = size ? fread(data, 1, size, file) : 0;
+    int read_error = ferror(file);
+    struct stat after_state;
+    toml_file_snapshot_t after;
+    int after_result = fstat(cbm_fileno(file), &after_state) == 0
+                           ? toml_snapshot_from_stat(&after_state, &after)
+                           : TOML_EDIT_ERR;
+    int close_error = fclose(file);
+    if (read_count != size || read_error || close_error != 0 || after_result != TOML_EDIT_OK ||
+        !toml_snapshot_equal(&before, &after)) {
+        free(data);
+        return TOML_EDIT_ERR;
+    }
+#endif
+#endif
+    data[size] = '\0';
+    *out_data = data;
+    *out_len = size;
+    *snapshot_out = before;
+    return TOML_EDIT_OK;
+}
+
+#ifndef _WIN32
+static char *toml_parent_directory(const char *path) {
+    const char *separator = strrchr(path, '/');
+    if (!separator) {
+        return cbm_strdup(".");
+    }
+    if (separator == path) {
+        return cbm_strdup("/");
+    }
+    return cbm_strndup(path, (size_t)(separator - path));
+}
+#endif
+
+static int toml_snapshot_matches_path(const char *path, const char *old_data, size_t old_len,
+                                      const toml_file_snapshot_t *expected) {
+    char *current = NULL;
+    size_t current_len = 0U;
+    toml_file_snapshot_t current_snapshot;
+    if (toml_read_file(path, &current, &current_len, &current_snapshot) != TOML_EDIT_OK) {
+        return TOML_EDIT_ERR;
+    }
+    int matches = expected->exists == current_snapshot.exists &&
+                  toml_snapshot_equal(expected, &current_snapshot) && current_len == old_len &&
+                  (old_len == 0U || memcmp(current, old_data, old_len) == 0);
+    free(current);
+    return matches ? TOML_EDIT_OK : TOML_EDIT_ERR;
+}
+
+#ifndef _WIN32
+static int toml_sync_parent_directory(const char *path) {
+    char *parent = toml_parent_directory(path);
+    if (!parent) {
+        return TOML_EDIT_ERR;
+    }
+    int flags = O_RDONLY;
+#ifdef O_DIRECTORY
+    flags |= O_DIRECTORY;
+#endif
+#ifdef O_CLOEXEC
+    flags |= O_CLOEXEC;
+#endif
+    int fd = open(parent, flags);
+    free(parent);
+    if (fd < 0) {
+        return TOML_EDIT_ERR;
+    }
+    struct stat state;
+    int result = fstat(fd, &state) == 0 && S_ISDIR(state.st_mode) && fsync(fd) == 0 ? TOML_EDIT_OK
+                                                                                    : TOML_EDIT_ERR;
+    if (toml_close(fd) != 0) {
+        result = TOML_EDIT_ERR;
+    }
+    return result;
+}
+#endif
+
+static int toml_replace_atomic(const char *temp_path, const char *path, int existed) {
+#ifdef _WIN32
+    wchar_t *wide_temp = cbm_utf8_to_wide(temp_path);
+    wchar_t *wide_path = cbm_utf8_to_wide(path);
+    if (!wide_temp || !wide_path) {
+        free(wide_temp);
+        free(wide_path);
+        return TOML_EDIT_ERR;
+    }
+    /* ReplaceFileW preserves the destination ACL and other mergeable metadata;
+     * merge failures stay fatal so metadata is never silently discarded. */
+    BOOL replaced =
+        existed ? ReplaceFileW(wide_path, wide_temp, NULL, REPLACEFILE_WRITE_THROUGH, NULL, NULL)
+                : MoveFileExW(wide_temp, wide_path, MOVEFILE_WRITE_THROUGH);
+    free(wide_temp);
+    free(wide_path);
+    return replaced ? TOML_EDIT_OK : TOML_EDIT_ERR;
+#else
+    if (!existed) {
+        if (link(temp_path, path) != 0) {
+            return TOML_EDIT_ERR;
+        }
+        if (cbm_unlink(temp_path) != 0) {
+            return TOML_EDIT_ERR;
+        }
+        return toml_sync_parent_directory(path);
+    }
+    if (rename(temp_path, path) != 0) {
+        return TOML_EDIT_ERR;
+    }
+    return toml_sync_parent_directory(path);
+#endif
+}
+
+static const char *toml_temp_name(const char *temp_path) {
+    const char *slash = strrchr(temp_path, '/');
+    return slash ? slash + 1 : temp_path;
+}
+
+/* Drop a staged temp file: through the pinned parent for a followed link,
+ * by name otherwise. */
+static void toml_discard_temp(const cbm_config_edit_target_t *target, const char *temp_path) {
+    if (target->status == CBM_CONFIG_EDIT_PATH_FOLLOWED) {
+        (void)cbm_config_edit_target_unlink(target, toml_temp_name(temp_path));
+    } else {
+        (void)cbm_unlink(temp_path);
+    }
+}
+
+/* For a followed link (#1954) the temp file is created with openat() beside
+ * the target and published with renameat() on the pinned parent, so the link
+ * itself is never replaced; every pre-publish comparison runs against the
+ * resolved path. A direct path keeps the mkstemp + rename sequence unchanged. */
+static int toml_write_atomic_at(const cbm_config_edit_target_t *target, const char *old_data,
+                                size_t old_len, const char *new_data, size_t new_len,
+                                const toml_file_snapshot_t *snapshot) {
+    if (old_len > TOML_EDIT_MAX_BYTES || new_len > TOML_EDIT_MAX_BYTES) {
+        return TOML_EDIT_ERR;
+    }
+    const char *path = target->path;
+    bool followed = target->status == CBM_CONFIG_EDIT_PATH_FOLLOWED;
+    if (old_len == new_len && (old_len == 0 || memcmp(old_data, new_data, old_len) == 0)) {
+        return TOML_EDIT_OK;
+    }
+    size_t path_len = strlen(path);
+    static const char suffix[] = ".XXXXXX";
+    enum { TOML_TEMP_SUFFIX_SPACE = 48, TOML_TEMP_ATTEMPTS = 64 };
+    if (path_len > SIZE_MAX - TOML_TEMP_SUFFIX_SPACE) {
+        return TOML_EDIT_ERR;
+    }
+    size_t temp_capacity = path_len + TOML_TEMP_SUFFIX_SPACE;
+    char *temp_path = (char *)malloc(temp_capacity);
+    if (!temp_path) {
+        return TOML_EDIT_ERR;
+    }
+
+    int fd = -1;
+    if (followed) {
+        for (unsigned attempt = 0U; attempt < TOML_TEMP_ATTEMPTS && fd < 0; attempt++) {
+            int written = snprintf(temp_path, temp_capacity, "%s.cbm-toml-%u.tmp", path, attempt);
+            if (written < 0 || (size_t)written >= temp_capacity) {
+                break;
+            }
+            fd = cbm_config_edit_target_create_temp(target, toml_temp_name(temp_path), 0600U);
+            if (fd < 0 && errno != EEXIST) {
+                break;
+            }
+        }
+    } else {
+        memcpy(temp_path, path, path_len);
+        memcpy(temp_path + path_len, suffix, sizeof(suffix));
+        fd = cbm_mkstemp(temp_path);
+    }
+    if (fd < 0) {
+        free(temp_path);
+        return TOML_EDIT_ERR;
+    }
+    FILE *file = toml_fdopen(fd, "wb");
+    if (!file) {
+        (void)toml_close(fd);
+        toml_discard_temp(target, temp_path);
+        free(temp_path);
+        return TOML_EDIT_ERR;
+    }
+
+    int failed = new_len != 0 && fwrite(new_data, 1, new_len, file) != new_len;
+    if (!failed && fflush(file) != 0) {
+        failed = 1;
+    }
+#ifndef _WIN32
+    if (!failed && snapshot->exists &&
+        fchown(cbm_fileno(file), snapshot->owner, snapshot->group) != 0) {
+        failed = 1;
+    }
+    mode_t mode = snapshot->exists ? snapshot->mode & 0777U : 0600U;
+    if (!failed && fchmod(cbm_fileno(file), mode) != 0) {
+        failed = 1;
+    }
+#endif
+    if (!failed && TOML_SYNC(cbm_fileno(file)) != 0) {
+        failed = 1;
+    }
+    if (fclose(file) != 0) {
+        failed = 1;
+    }
+    if (failed) {
+        toml_discard_temp(target, temp_path);
+        free(temp_path);
+        return TOML_EDIT_ERR;
+    }
+    char *temp_data = NULL;
+    size_t temp_len = 0U;
+    toml_file_snapshot_t temp_snapshot;
+    if (toml_read_file(temp_path, &temp_data, &temp_len, &temp_snapshot) != TOML_EDIT_OK ||
+        !temp_snapshot.exists || temp_len != new_len ||
+        (new_len != 0U && memcmp(temp_data, new_data, new_len) != 0)) {
+        free(temp_data);
+        toml_discard_temp(target, temp_path);
+        free(temp_path);
+        return TOML_EDIT_ERR;
+    }
+    free(temp_data);
+#ifdef CBM_TOML_EDIT_ENABLE_TEST_API
+    if (toml_precommit_test_hook) {
+        toml_precommit_test_hook(path, toml_precommit_test_context);
+    }
+#endif
+    if (toml_snapshot_matches_path(path, old_data, old_len, snapshot) != TOML_EDIT_OK) {
+        toml_discard_temp(target, temp_path);
+        free(temp_path);
+        return TOML_EDIT_ERR;
+    }
+#ifdef CBM_TOML_EDIT_ENABLE_TEST_API
+    if (toml_prepublish_test_hook) {
+        toml_prepublish_test_hook(path, toml_prepublish_test_context);
+    }
+#endif
+    if (toml_snapshot_matches_path(path, old_data, old_len, snapshot) != TOML_EDIT_OK ||
+        toml_snapshot_matches_path(temp_path, new_data, new_len, &temp_snapshot) != TOML_EDIT_OK ||
+        (followed ? cbm_config_edit_target_commit(target, toml_temp_name(temp_path))
+                  : toml_replace_atomic(temp_path, path, snapshot->exists)) != TOML_EDIT_OK) {
+        toml_discard_temp(target, temp_path);
+        free(temp_path);
+        return TOML_EDIT_ERR;
+    }
+    free(temp_path);
+    return TOML_EDIT_OK;
+}
+
+static int toml_write_atomic(const char *requested_path, const char *old_data, size_t old_len,
+                             const char *new_data, size_t new_len,
+                             const toml_file_snapshot_t *snapshot) {
+    cbm_config_edit_target_t target;
+    if (cbm_config_edit_target_open(requested_path, &target) < 0) {
+        return TOML_EDIT_ERR;
+    }
+    int result = toml_write_atomic_at(&target, old_data, old_len, new_data, new_len, snapshot);
+    cbm_config_edit_target_close(&target);
+    return result;
+}
+
+#ifdef CBM_TOML_EDIT_ENABLE_TEST_API
+void cbm_toml_set_precommit_hook_for_testing(cbm_toml_precommit_test_hook_t hook, void *context) {
+    toml_precommit_test_hook = hook;
+    toml_precommit_test_context = context;
+}
+
+void cbm_toml_set_prepublish_hook_for_testing(cbm_toml_precommit_test_hook_t hook, void *context) {
+    toml_prepublish_test_hook = hook;
+    toml_prepublish_test_context = context;
+}
+#endif
+
+static int toml_next_line(const char *data, size_t len, size_t *cursor, toml_line_t *line) {
+    if (!data || !cursor || !line || *cursor >= len) {
+        return 0;
+    }
+    size_t pos = *cursor;
+    line->start = pos;
+    while (pos < len && data[pos] != '\n') {
+        ++pos;
+    }
+    line->content_end = pos;
+    if (line->content_end > line->start && data[line->content_end - 1] == '\r') {
+        --line->content_end;
+    }
+    line->full_end = pos < len ? pos + 1 : pos;
+    *cursor = line->full_end;
+    return 1;
+}
+
+static int toml_line_equals(const char *data, const toml_line_t *line, const char *value) {
+    size_t start = line->start;
+    if (start == 0U && line->content_end >= 3U && (unsigned char)data[0] == 0xefU &&
+        (unsigned char)data[1] == 0xbbU && (unsigned char)data[2] == 0xbfU) {
+        start = 3U;
+    }
+    size_t line_len = line->content_end - start;
+    size_t value_len = strlen(value);
+    return line_len == value_len && memcmp(data + start, value, value_len) == 0;
+}
+
+enum {
+    TOML_STRING_NONE = 0,
+    TOML_STRING_MULTILINE_BASIC = 1,
+    TOML_STRING_MULTILINE_LITERAL = 2,
+};
+
+static int toml_scan_line_strings(const char *data, const toml_line_t *line, int *multiline_state) {
+    size_t pos = line->start;
+    if (line->start == 0 && line->content_end >= 3U && (unsigned char)data[0] == 0xefU &&
+        (unsigned char)data[1] == 0xbbU && (unsigned char)data[2] == 0xbfU) {
+        pos = 3U;
+    }
+    while (pos < line->content_end) {
+        if (*multiline_state != TOML_STRING_NONE) {
+            char quote = *multiline_state == TOML_STRING_MULTILINE_BASIC ? '"' : '\'';
+            if (*multiline_state == TOML_STRING_MULTILINE_BASIC && data[pos] == '\\') {
+                pos += pos + 1U < line->content_end ? 2U : 1U;
+                continue;
+            }
+            if (pos + 2U < line->content_end && data[pos] == quote && data[pos + 1U] == quote &&
+                data[pos + 2U] == quote) {
+                *multiline_state = TOML_STRING_NONE;
+                pos += 3U;
+                continue;
+            }
+            pos++;
+            continue;
+        }
+
+        if (data[pos] == '#') {
+            return TOML_EDIT_OK;
+        }
+        if (data[pos] != '"' && data[pos] != '\'') {
+            pos++;
+            continue;
+        }
+        char quote = data[pos];
+        if (pos + 2U < line->content_end && data[pos + 1U] == quote && data[pos + 2U] == quote) {
+            *multiline_state =
+                quote == '"' ? TOML_STRING_MULTILINE_BASIC : TOML_STRING_MULTILINE_LITERAL;
+            pos += 3U;
+            continue;
+        }
+        pos++;
+        int closed = 0;
+        while (pos < line->content_end) {
+            if (quote == '"' && data[pos] == '\\') {
+                if (pos + 1U >= line->content_end) {
+                    return TOML_EDIT_ERR;
+                }
+                pos += 2U;
+                continue;
+            }
+            if (data[pos] == quote) {
+                pos++;
+                closed = 1;
+                break;
+            }
+            pos++;
+        }
+        if (!closed) {
+            return TOML_EDIT_ERR;
+        }
+    }
+    return TOML_EDIT_OK;
+}
+
+static int toml_validate_lexical_strings(const char *data, size_t len) {
+    size_t cursor = 0U;
+    toml_line_t line;
+    int multiline_state = TOML_STRING_NONE;
+    while (toml_next_line(data, len, &cursor, &line)) {
+        if (toml_scan_line_strings(data, &line, &multiline_state) != TOML_EDIT_OK) {
+            return TOML_EDIT_ERR;
+        }
+    }
+    return multiline_state == TOML_STRING_NONE ? TOML_EDIT_OK : TOML_EDIT_ERR;
+}
+
+static int toml_find_markers(const char *data, size_t len, const char *begin_marker,
+                             const char *end_marker, toml_line_t *begin_line, toml_line_t *end_line,
+                             int *has_pair) {
+    int begin_count = 0;
+    int end_count = 0;
+    size_t cursor = 0;
+    toml_line_t line;
+    int multiline_state = TOML_STRING_NONE;
+    while (toml_next_line(data, len, &cursor, &line)) {
+        int line_in_multiline = multiline_state != TOML_STRING_NONE;
+        if (!line_in_multiline && toml_line_equals(data, &line, begin_marker)) {
+            ++begin_count;
+            *begin_line = line;
+        }
+        if (!line_in_multiline && toml_line_equals(data, &line, end_marker)) {
+            ++end_count;
+            *end_line = line;
+        }
+        if (toml_scan_line_strings(data, &line, &multiline_state) != TOML_EDIT_OK) {
+            return TOML_EDIT_ERR;
+        }
+    }
+    if (multiline_state != TOML_STRING_NONE) {
+        return TOML_EDIT_ERR;
+    }
+    if (begin_count == 0 && end_count == 0) {
+        *has_pair = 0;
+        return TOML_EDIT_OK;
+    }
+    if (begin_count != 1 || end_count != 1 || begin_line->start >= end_line->start) {
+        /* #1558: an ORPHAN marker — one side present, the other missing — is
+         * reported separately from other malformations, because we are the only
+         * writer of these markers and therefore the only possible author of the
+         * imbalance. A duplicated install left a Codex config carrying a closing
+         * `# <<< ... <<<` with no opener, and every later install then failed
+         * that client outright.
+         *
+         * Refusing to touch a file we cannot parse is the right default in
+         * general. It is the wrong default for a mess we made: the caller can
+         * self-heal on REMOVAL, where deleting the stray line is unambiguous.
+         * A WRITE still refuses, because an imbalance leaves no defensible
+         * region to replace and guessing there could destroy user content. */
+        if ((begin_count == 1) != (end_count == 1) && begin_count + end_count == 1) {
+            return TOML_EDIT_ORPHAN_MARKER;
+        }
+        return TOML_EDIT_ERR;
+    }
+    *has_pair = 1;
+    return TOML_EDIT_OK;
+}
+
+static const char *toml_newline_style(const char *data, size_t len) {
+    for (size_t i = 0; i < len; ++i) {
+        if (data[i] == '\n') {
+            return i > 0U && data[i - 1U] == '\r' ? "\r\n" : "\n";
+        }
+    }
+    return "\n";
+}
+
+static int toml_append_normalized_text(toml_buffer_t *output, const char *text, size_t len,
+                                       const char *newline) {
+    size_t cursor = 0U;
+    toml_line_t line;
+    while (toml_next_line(text, len, &cursor, &line)) {
+        if (toml_buffer_append(output, text + line.start, line.content_end - line.start) !=
+            TOML_EDIT_OK) {
+            return TOML_EDIT_ERR;
+        }
+        if (line.full_end > line.content_end &&
+            toml_buffer_append_cstr(output, newline) != TOML_EDIT_OK) {
+            return TOML_EDIT_ERR;
+        }
+    }
+    return TOML_EDIT_OK;
+}
+
+static int toml_contains_marker_line(const char *data, size_t len, const char *begin_marker,
+                                     const char *end_marker) {
+    size_t cursor = 0U;
+    toml_line_t line;
+    while (toml_next_line(data, len, &cursor, &line)) {
+        if (toml_line_equals(data, &line, begin_marker) ||
+            toml_line_equals(data, &line, end_marker)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int toml_append_managed(toml_buffer_t *output, const char *begin_marker,
+                               const char *end_marker, const char *block, const char *newline) {
+    size_t block_len = strlen(block);
+    if (toml_buffer_append_cstr(output, begin_marker) != TOML_EDIT_OK ||
+        toml_buffer_append_cstr(output, newline) != TOML_EDIT_OK ||
+        toml_append_normalized_text(output, block, block_len, newline) != TOML_EDIT_OK) {
+        return TOML_EDIT_ERR;
+    }
+    if (block_len != 0 && block[block_len - 1] != '\n' &&
+        toml_buffer_append_cstr(output, newline) != TOML_EDIT_OK) {
+        return TOML_EDIT_ERR;
+    }
+    return toml_buffer_append_cstr(output, end_marker) == TOML_EDIT_OK &&
+                   toml_buffer_append_cstr(output, newline) == TOML_EDIT_OK
+               ? TOML_EDIT_OK
+               : TOML_EDIT_ERR;
+}
+
+int cbm_toml_escape_basic_string(const char *input, char *out, size_t out_size) {
+    if (!input || !out || out_size == 0) {
+        return TOML_EDIT_ERR;
+    }
+    out[0] = '\0';
+    size_t input_len = 0U;
+    if (toml_bounded_length(input, TOML_EDIT_MAX_BYTES, &input_len) != TOML_EDIT_OK ||
+        !toml_utf8_is_valid(input, input_len)) {
+        return TOML_EDIT_ERR;
+    }
+    static const char hex[] = "0123456789ABCDEF";
+    size_t used = 0;
+    for (const unsigned char *p = (const unsigned char *)input; *p; ++p) {
+        const char *escape = NULL;
+        char unicode_escape[7];
+        switch (*p) {
+        case '\b':
+            escape = "\\b";
+            break;
+        case '\t':
+            escape = "\\t";
+            break;
+        case '\n':
+            escape = "\\n";
+            break;
+        case '\f':
+            escape = "\\f";
+            break;
+        case '\r':
+            escape = "\\r";
+            break;
+        case '"':
+            escape = "\\\"";
+            break;
+        case '\\':
+            escape = "\\\\";
+            break;
+        default:
+            if (*p < 0x20 || *p == 0x7f) {
+                unicode_escape[0] = '\\';
+                unicode_escape[1] = 'u';
+                unicode_escape[2] = '0';
+                unicode_escape[3] = '0';
+                unicode_escape[4] = hex[*p >> 4];
+                unicode_escape[5] = hex[*p & 0x0f];
+                unicode_escape[6] = '\0';
+                escape = unicode_escape;
+            }
+            break;
+        }
+        size_t add = escape ? strlen(escape) : 1;
+        if (add > out_size - used - 1) {
+            out[0] = '\0';
+            return TOML_EDIT_ERR;
+        }
+        if (escape) {
+            memcpy(out + used, escape, add);
+        } else {
+            out[used] = (char)*p;
+        }
+        used += add;
+    }
+    out[used] = '\0';
+    return TOML_EDIT_OK;
+}
+
+static int toml_managed_body_valid(const char *body, const char *begin_marker,
+                                   const char *end_marker, size_t *body_len) {
+    return body && toml_bounded_length(body, TOML_EDIT_MAX_BYTES, body_len) == TOML_EDIT_OK &&
+           toml_text_is_safe(body, *body_len, 1) &&
+           !toml_contains_marker_line(body, *body_len, begin_marker, end_marker) &&
+           toml_validate_lexical_strings(body, *body_len) == TOML_EDIT_OK;
+}
+
+int cbm_toml_upsert_managed_block(const char *file_path, const char *begin_marker,
+                                  const char *end_marker, const char *block) {
+    size_t block_len = 0U;
+    if (!toml_valid_path(file_path) || !toml_valid_marker(begin_marker) ||
+        !toml_valid_marker(end_marker) || strcmp(begin_marker, end_marker) == 0 ||
+        !toml_managed_body_valid(block, begin_marker, end_marker, &block_len)) {
+        return TOML_EDIT_ERR;
+    }
+
+    char *existing = NULL;
+    size_t existing_len = 0;
+    toml_file_snapshot_t snapshot;
+    if (toml_read_file(file_path, &existing, &existing_len, &snapshot) != TOML_EDIT_OK ||
+        !toml_text_is_safe(existing, existing_len, 1)) {
+        free(existing);
+        return TOML_EDIT_ERR;
+    }
+
+    toml_line_t begin_line = {0}, end_line = {0};
+    int has_pair = 0;
+    if (toml_find_markers(existing, existing_len, begin_marker, end_marker, &begin_line, &end_line,
+                          &has_pair) != TOML_EDIT_OK) {
+        free(existing);
+        return TOML_EDIT_ERR;
+    }
+    size_t exclude_start = has_pair ? begin_line.start : SIZE_MAX;
+    size_t exclude_end = has_pair ? end_line.full_end : SIZE_MAX;
+    if (toml_managed_block_conflicts(existing, existing_len, exclude_start, exclude_end, block,
+                                     block_len) != TOML_EDIT_OK) {
+        free(existing);
+        return TOML_EDIT_ERR;
+    }
+
+    toml_buffer_t output = {0};
+    const char *newline = toml_newline_style(existing, existing_len);
+    size_t payload_start = existing_len >= 3U && (unsigned char)existing[0] == 0xefU &&
+                                   (unsigned char)existing[1] == 0xbbU &&
+                                   (unsigned char)existing[2] == 0xbfU
+                               ? 3U
+                               : 0U;
+    int built = TOML_EDIT_OK;
+    if (has_pair) {
+        /* #2228: rebuild the span around the block, keeping what it holds that
+         * is not ours instead of discarding the whole span. */
+        built = toml_managed_rewrite(existing, existing_len, &begin_line, &end_line, begin_marker,
+                                     end_marker, block, block_len, 1, &output);
+    } else if (toml_buffer_append(&output, existing, existing_len) != TOML_EDIT_OK ||
+               (existing_len > payload_start && existing[existing_len - 1] != '\n' &&
+                toml_buffer_append_cstr(&output, newline) != TOML_EDIT_OK) ||
+               toml_append_managed(&output, begin_marker, end_marker, block, newline) !=
+                   TOML_EDIT_OK) {
+        built = TOML_EDIT_ERR;
+    }
+    if (built != TOML_EDIT_OK) {
+        toml_buffer_dispose(&output);
+        free(existing);
+        return TOML_EDIT_ERR;
+    }
+
+    int result =
+        toml_write_atomic(file_path, existing, existing_len, output.data, output.len, &snapshot);
+    toml_buffer_dispose(&output);
+    free(existing);
+    return result;
+}
+
+/* owned == NULL removes the whole span (the historical contract); otherwise
+ * only the tables it declares go and the rest of the span stays (#2228). */
+static int toml_remove_managed(const char *file_path, const char *begin_marker,
+                               const char *end_marker, const char *owned) {
+    size_t owned_len = 0U;
+    if (!toml_valid_path(file_path) || !toml_valid_marker(begin_marker) ||
+        !toml_valid_marker(end_marker) || strcmp(begin_marker, end_marker) == 0 ||
+        (owned && !toml_managed_body_valid(owned, begin_marker, end_marker, &owned_len))) {
+        return TOML_EDIT_ERR;
+    }
+    char *existing = NULL;
+    size_t existing_len = 0;
+    toml_file_snapshot_t snapshot;
+    if (toml_read_file(file_path, &existing, &existing_len, &snapshot) != TOML_EDIT_OK ||
+        !toml_text_is_safe(existing, existing_len, 1)) {
+        free(existing);
+        return TOML_EDIT_ERR;
+    }
+
+    toml_line_t begin_line = {0};
+    toml_line_t end_line = {0};
+    int has_pair = 0;
+    int find_rc = toml_find_markers(existing, existing_len, begin_marker, end_marker, &begin_line,
+                                    &end_line, &has_pair);
+    if (find_rc == TOML_EDIT_ORPHAN_MARKER) {
+        /* Self-heal: drop the stray marker line. Whichever side survived is the
+         * one toml_find_markers recorded, so the line bounds are known exactly
+         * — nothing is guessed, and no surrounding content is touched. */
+        const toml_line_t *stray = begin_line.full_end > 0U ? &begin_line : &end_line;
+        toml_buffer_t healed = {0};
+        if (toml_buffer_append(&healed, existing, stray->start) != TOML_EDIT_OK ||
+            toml_buffer_append(&healed, existing + stray->full_end,
+                               existing_len - stray->full_end) != TOML_EDIT_OK) {
+            toml_buffer_dispose(&healed);
+            free(existing);
+            return TOML_EDIT_ERR;
+        }
+        int healed_rc = toml_write_atomic(file_path, existing, existing_len,
+                                          healed.data ? healed.data : "", healed.len, &snapshot);
+        toml_buffer_dispose(&healed);
+        free(existing);
+        return healed_rc;
+    }
+    if (find_rc != TOML_EDIT_OK) {
+        free(existing);
+        return TOML_EDIT_ERR;
+    }
+    if (!has_pair) {
+        free(existing);
+        return TOML_EDIT_OK;
+    }
+
+    toml_buffer_t output = {0};
+    size_t prefix_len = begin_line.start;
+    if (prefix_len == 0U && existing_len >= 3U && (unsigned char)existing[0] == 0xefU &&
+        (unsigned char)existing[1] == 0xbbU && (unsigned char)existing[2] == 0xbfU) {
+        prefix_len = 3U;
+    }
+    int built = owned ? toml_managed_rewrite(existing, existing_len, &begin_line, &end_line,
+                                             begin_marker, end_marker, owned, owned_len, 0, &output)
+                : toml_buffer_append(&output, existing, prefix_len) == TOML_EDIT_OK &&
+                        toml_buffer_append(&output, existing + end_line.full_end,
+                                           existing_len - end_line.full_end) == TOML_EDIT_OK
+                    ? TOML_EDIT_OK
+                    : TOML_EDIT_ERR;
+    if (built != TOML_EDIT_OK) {
+        toml_buffer_dispose(&output);
+        free(existing);
+        return TOML_EDIT_ERR;
+    }
+    int result =
+        toml_write_atomic(file_path, existing, existing_len, output.data, output.len, &snapshot);
+    toml_buffer_dispose(&output);
+    free(existing);
+    return result;
+}
+
+int cbm_toml_remove_managed_block(const char *file_path, const char *begin_marker,
+                                  const char *end_marker) {
+    return toml_remove_managed(file_path, begin_marker, end_marker, NULL);
+}
+
+int cbm_toml_remove_managed_block_owned(const char *file_path, const char *begin_marker,
+                                        const char *end_marker, const char *owned_tables) {
+    return owned_tables ? toml_remove_managed(file_path, begin_marker, end_marker, owned_tables)
+                        : TOML_EDIT_ERR;
+}
+
+static int toml_hex_digit(unsigned char ch) {
+    if (ch >= '0' && ch <= '9') {
+        return ch - '0';
+    }
+    if (ch >= 'a' && ch <= 'f') {
+        return ch - 'a' + 10;
+    }
+    if (ch >= 'A' && ch <= 'F') {
+        return ch - 'A' + 10;
+    }
+    return -1;
+}
+
+static int toml_append_codepoint(toml_buffer_t *buffer, uint32_t codepoint) {
+    char encoded[4];
+    size_t len = 0;
+    if (codepoint == 0 || codepoint > 0x10ffff || (codepoint >= 0xd800 && codepoint <= 0xdfff)) {
+        return TOML_EDIT_ERR;
+    }
+    if (codepoint <= 0x7f) {
+        encoded[0] = (char)codepoint;
+        len = 1;
+    } else if (codepoint <= 0x7ff) {
+        encoded[0] = (char)(0xc0 | (codepoint >> 6));
+        encoded[1] = (char)(0x80 | (codepoint & 0x3f));
+        len = 2;
+    } else if (codepoint <= 0xffff) {
+        encoded[0] = (char)(0xe0 | (codepoint >> 12));
+        encoded[1] = (char)(0x80 | ((codepoint >> 6) & 0x3f));
+        encoded[2] = (char)(0x80 | (codepoint & 0x3f));
+        len = 3;
+    } else {
+        encoded[0] = (char)(0xf0 | (codepoint >> 18));
+        encoded[1] = (char)(0x80 | ((codepoint >> 12) & 0x3f));
+        encoded[2] = (char)(0x80 | ((codepoint >> 6) & 0x3f));
+        encoded[3] = (char)(0x80 | (codepoint & 0x3f));
+        len = 4;
+    }
+    return toml_buffer_append(buffer, encoded, len);
+}
+
+static int toml_parse_unicode_escape(const char *text, size_t len, size_t digits,
+                                     uint32_t *out_codepoint) {
+    if (len < digits) {
+        return TOML_EDIT_ERR;
+    }
+    uint32_t value = 0;
+    for (size_t i = 0; i < digits; ++i) {
+        int digit = toml_hex_digit((unsigned char)text[i]);
+        if (digit < 0) {
+            return TOML_EDIT_ERR;
+        }
+        value = (value << 4) | (uint32_t)digit;
+    }
+    *out_codepoint = value;
+    return TOML_EDIT_OK;
+}
+
+static int toml_parse_string(const char *text, size_t len, toml_string_t *parsed) {
+    if (!text || !parsed || len < 2 || (text[0] != '"' && text[0] != '\'')) {
+        return TOML_EDIT_ERR;
+    }
+    char quote = text[0];
+    if (len >= 3 && text[1] == quote && text[2] == quote) {
+        return TOML_EDIT_ERR;
+    }
+    toml_buffer_t value = {0};
+    size_t pos = 1;
+    while (pos < len) {
+        unsigned char ch = (unsigned char)text[pos++];
+        if (ch == (unsigned char)quote) {
+            if (!value.data && toml_buffer_reserve(&value, 0) != TOML_EDIT_OK) {
+                return TOML_EDIT_ERR;
+            }
+            parsed->data = value.data;
+            parsed->len = value.len;
+            parsed->consumed = pos;
+            return TOML_EDIT_OK;
+        }
+        if (ch < 0x20 && ch != '\t') {
+            toml_buffer_dispose(&value);
+            return TOML_EDIT_ERR;
+        }
+        if (ch == 0x7f) {
+            toml_buffer_dispose(&value);
+            return TOML_EDIT_ERR;
+        }
+        if (quote == '\'' || ch != '\\') {
+            if (toml_buffer_append_char(&value, (char)ch) != TOML_EDIT_OK) {
+                toml_buffer_dispose(&value);
+                return TOML_EDIT_ERR;
+            }
+            continue;
+        }
+        if (pos >= len) {
+            toml_buffer_dispose(&value);
+            return TOML_EDIT_ERR;
+        }
+        unsigned char escaped = (unsigned char)text[pos++];
+        char decoded;
+        switch (escaped) {
+        case 'b':
+            decoded = '\b';
+            break;
+        case 't':
+            decoded = '\t';
+            break;
+        case 'n':
+            decoded = '\n';
+            break;
+        case 'f':
+            decoded = '\f';
+            break;
+        case 'r':
+            decoded = '\r';
+            break;
+        case '"':
+            decoded = '"';
+            break;
+        case '\\':
+            decoded = '\\';
+            break;
+        case 'u':
+        case 'U': {
+            size_t digits = escaped == 'u' ? 4 : 8;
+            uint32_t codepoint = 0;
+            if (toml_parse_unicode_escape(text + pos, len - pos, digits, &codepoint) !=
+                    TOML_EDIT_OK ||
+                toml_append_codepoint(&value, codepoint) != TOML_EDIT_OK) {
+                toml_buffer_dispose(&value);
+                return TOML_EDIT_ERR;
+            }
+            pos += digits;
+            continue;
+        }
+        default:
+            toml_buffer_dispose(&value);
+            return TOML_EDIT_ERR;
+        }
+        if (toml_buffer_append_char(&value, decoded) != TOML_EDIT_OK) {
+            toml_buffer_dispose(&value);
+            return TOML_EDIT_ERR;
+        }
+    }
+    toml_buffer_dispose(&value);
+    return TOML_EDIT_ERR;
+}
+
+static void toml_string_dispose(toml_string_t *value) {
+    if (!value) {
+        return;
+    }
+    free(value->data);
+    value->data = NULL;
+    value->len = 0;
+    value->consumed = 0;
+}
+
+static void toml_key_path_dispose(toml_key_path_t *path) {
+    if (!path) {
+        return;
+    }
+    free(path->data);
+    memset(path, 0, sizeof(*path));
+}
+
+static int toml_parse_key_path(const char *data, size_t start, size_t end, toml_key_path_t *path) {
+    memset(path, 0, sizeof(*path));
+    toml_buffer_t encoded = {0};
+    size_t pos = start;
+    while (pos < end) {
+        while (pos < end && (data[pos] == ' ' || data[pos] == '\t')) {
+            pos++;
+        }
+        if (pos >= end || path->count >= 64U) {
+            toml_buffer_dispose(&encoded);
+            return TOML_EDIT_ERR;
+        }
+        if (data[pos] == '"' || data[pos] == '\'') {
+            toml_string_t segment = {0};
+            if (toml_parse_string(data + pos, end - pos, &segment) != TOML_EDIT_OK ||
+                toml_buffer_append(&encoded, segment.data, segment.len) != TOML_EDIT_OK ||
+                toml_buffer_append_char(&encoded, '\0') != TOML_EDIT_OK) {
+                toml_string_dispose(&segment);
+                toml_buffer_dispose(&encoded);
+                return TOML_EDIT_ERR;
+            }
+            pos += segment.consumed;
+            toml_string_dispose(&segment);
+        } else {
+            size_t segment_start = pos;
+            while (pos < end && toml_is_bare_key_char((unsigned char)data[pos])) {
+                pos++;
+            }
+            if (pos == segment_start ||
+                toml_buffer_append(&encoded, data + segment_start, pos - segment_start) !=
+                    TOML_EDIT_OK ||
+                toml_buffer_append_char(&encoded, '\0') != TOML_EDIT_OK) {
+                toml_buffer_dispose(&encoded);
+                return TOML_EDIT_ERR;
+            }
+        }
+        path->count++;
+        while (pos < end && (data[pos] == ' ' || data[pos] == '\t')) {
+            pos++;
+        }
+        if (pos == end) {
+            break;
+        }
+        if (data[pos] != '.') {
+            toml_buffer_dispose(&encoded);
+            memset(path, 0, sizeof(*path));
+            return TOML_EDIT_ERR;
+        }
+        pos++;
+    }
+    if (path->count == 0U) {
+        toml_buffer_dispose(&encoded);
+        return TOML_EDIT_ERR;
+    }
+    path->data = encoded.data;
+    path->len = encoded.len;
+    return TOML_EDIT_OK;
+}
+
+static const char *toml_key_path_segment(const toml_key_path_t *path, size_t index) {
+    const char *segment = path->data;
+    for (size_t i = 0U; i < index; ++i) {
+        segment += strlen(segment) + 1U;
+    }
+    return segment;
+}
+
+static int toml_key_path_equal(const toml_key_path_t *left, const toml_key_path_t *right) {
+    return left->count == right->count && left->len == right->len &&
+           (left->len == 0U || memcmp(left->data, right->data, left->len) == 0);
+}
+
+static int toml_key_path_has_prefix(const toml_key_path_t *path, const toml_key_path_t *prefix) {
+    if (path->count < prefix->count) {
+        return 0;
+    }
+    for (size_t i = 0U; i < prefix->count; ++i) {
+        if (strcmp(toml_key_path_segment(path, i), toml_key_path_segment(prefix, i)) != 0) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int toml_key_path_is_single(const toml_key_path_t *path, const char *name) {
+    return path->count == 1U && strcmp(toml_key_path_segment(path, 0U), name) == 0;
+}
+
+static int toml_key_path_join(const toml_key_path_t *prefix, const toml_key_path_t *suffix,
+                              toml_key_path_t *joined) {
+    memset(joined, 0, sizeof(*joined));
+    if (prefix->len > SIZE_MAX - suffix->len) {
+        return TOML_EDIT_ERR;
+    }
+    joined->len = prefix->len + suffix->len;
+    joined->data = (char *)malloc(joined->len + 1U);
+    if (!joined->data) {
+        return TOML_EDIT_ERR;
+    }
+    if (prefix->len != 0U) {
+        memcpy(joined->data, prefix->data, prefix->len);
+    }
+    if (suffix->len != 0U) {
+        memcpy(joined->data + prefix->len, suffix->data, suffix->len);
+    }
+    joined->data[joined->len] = '\0';
+    joined->count = prefix->count + suffix->count;
+    return TOML_EDIT_OK;
+}
+
+static void toml_trim(const char *data, size_t *start, size_t *end) {
+    while (*start < *end && (data[*start] == ' ' || data[*start] == '\t')) {
+        ++*start;
+    }
+    while (*end > *start && (data[*end - 1] == ' ' || data[*end - 1] == '\t')) {
+        --*end;
+    }
+}
+
+static int toml_parse_header(const char *data, const toml_line_t *line, const char *target_name,
+                             toml_header_t *header) {
+    memset(header, 0, sizeof(*header));
+    size_t start = line->start;
+    size_t end = line->content_end;
+    header->edit_start = line->start;
+    if (line->start == 0 && end - start >= 3 && (unsigned char)data[start] == 0xef &&
+        (unsigned char)data[start + 1] == 0xbb && (unsigned char)data[start + 2] == 0xbf) {
+        start += 3;
+        header->edit_start = start;
+    }
+    while (start < end && (data[start] == ' ' || data[start] == '\t')) {
+        ++start;
+    }
+    if (start >= end || data[start] != '[') {
+        return TOML_EDIT_OK;
+    }
+
+    int array = start + 1 < end && data[start + 1] == '[';
+    size_t inner_start = start + (array ? 2u : 1u);
+    size_t pos = inner_start;
+    char quote = '\0';
+    int escaped = 0;
+    size_t close_start = SIZE_MAX;
+    size_t close_end = SIZE_MAX;
+    while (pos < end) {
+        char ch = data[pos];
+        if (quote) {
+            if (quote == '"' && !escaped && ch == '\\') {
+                escaped = 1;
+            } else {
+                if (!escaped && ch == quote) {
+                    quote = '\0';
+                }
+                escaped = 0;
+            }
+            ++pos;
+            continue;
+        }
+        if (ch == '"' || ch == '\'') {
+            quote = ch;
+            ++pos;
+            continue;
+        }
+        if (ch == ']' && (!array || (pos + 1 < end && data[pos + 1] == ']'))) {
+            close_start = pos;
+            close_end = pos + (array ? 2u : 1u);
+            break;
+        }
+        ++pos;
+    }
+    if (quote || close_start == SIZE_MAX) {
+        return TOML_EDIT_ERR;
+    }
+    size_t inner_end = close_start;
+    toml_trim(data, &inner_start, &inner_end);
+    if (inner_start == inner_end) {
+        return TOML_EDIT_ERR;
+    }
+    pos = close_end;
+    while (pos < end && (data[pos] == ' ' || data[pos] == '\t')) {
+        ++pos;
+    }
+    if (pos < end && data[pos] != '#') {
+        return TOML_EDIT_ERR;
+    }
+
+    header->present = 1;
+    header->array = array;
+    if (toml_parse_key_path(data, inner_start, inner_end, &header->path) != TOML_EDIT_OK) {
+        return TOML_EDIT_ERR;
+    }
+    header->target = array && toml_key_path_is_single(&header->path, target_name);
+    return TOML_EDIT_OK;
+}
+
+static void toml_header_dispose(toml_header_t *header) {
+    if (header) {
+        toml_key_path_dispose(&header->path);
+    }
+}
+
+static int toml_line_is_blank_or_comment(const char *data, const toml_line_t *line) {
+    size_t pos = line->start;
+    while (pos < line->content_end && (data[pos] == ' ' || data[pos] == '\t')) {
+        ++pos;
+    }
+    return pos == line->content_end || data[pos] == '#';
+}
+
+static int toml_parse_assignment(const char *data, const toml_line_t *line,
+                                 toml_assignment_t *assignment) {
+    memset(assignment, 0, sizeof(*assignment));
+    size_t start = line->start;
+    size_t end = line->content_end;
+    if (start == 0U && end >= 3U && (unsigned char)data[0] == 0xefU &&
+        (unsigned char)data[1] == 0xbbU && (unsigned char)data[2] == 0xbfU) {
+        start = 3U;
+    }
+    while (start < end && (data[start] == ' ' || data[start] == '\t')) {
+        start++;
+    }
+    if (start == end || data[start] == '#') {
+        return TOML_EDIT_OK;
+    }
+
+    size_t equals = SIZE_MAX;
+    char quote = '\0';
+    int escaped = 0;
+    for (size_t pos = start; pos < end; ++pos) {
+        char ch = data[pos];
+        if (quote) {
+            if (quote == '"' && !escaped && ch == '\\') {
+                escaped = 1;
+            } else {
+                if (!escaped && ch == quote) {
+                    quote = '\0';
+                }
+                escaped = 0;
+            }
+            continue;
+        }
+        if (ch == '"' || ch == '\'') {
+            quote = ch;
+        } else if (ch == '=') {
+            equals = pos;
+            break;
+        } else if (ch == '#') {
+            break;
+        }
+    }
+    if (quote || equals == SIZE_MAX) {
+        return TOML_EDIT_OK;
+    }
+    size_t key_end = equals;
+    toml_trim(data, &start, &key_end);
+    if (toml_parse_key_path(data, start, key_end, &assignment->key) != TOML_EDIT_OK) {
+        return TOML_EDIT_ERR;
+    }
+
+    size_t value_start = equals + 1U;
+    while (value_start < end && (data[value_start] == ' ' || data[value_start] == '\t')) {
+        value_start++;
+    }
+    size_t value_end = end;
+    quote = '\0';
+    escaped = 0;
+    for (size_t pos = value_start; pos < end; ++pos) {
+        char ch = data[pos];
+        if (quote) {
+            if (quote == '"' && !escaped && ch == '\\') {
+                escaped = 1;
+            } else {
+                if (!escaped && ch == quote) {
+                    quote = '\0';
+                }
+                escaped = 0;
+            }
+            continue;
+        }
+        if ((ch == '"' || ch == '\'') && pos + 2U < end && data[pos + 1U] == ch &&
+            data[pos + 2U] == ch) {
+            assignment->multiline_value = 1;
+            break;
+        }
+        if (ch == '"' || ch == '\'') {
+            quote = ch;
+        } else if (ch == '#') {
+            value_end = pos;
+            break;
+        }
+    }
+    toml_trim(data, &value_start, &value_end);
+    if (value_start == value_end) {
+        toml_key_path_dispose(&assignment->key);
+        return TOML_EDIT_ERR;
+    }
+    assignment->present = 1;
+    assignment->value_start = value_start;
+    assignment->value_end = value_end;
+    return TOML_EDIT_OK;
+}
+
+static void toml_assignment_dispose(toml_assignment_t *assignment) {
+    if (assignment) {
+        toml_key_path_dispose(&assignment->key);
+    }
+}
+
+static int toml_assignment_string_equals(const char *data, const toml_assignment_t *assignment,
+                                         const char *expected, int *matches) {
+    *matches = 0;
+    if (!assignment->present || assignment->multiline_value) {
+        return TOML_EDIT_ERR;
+    }
+    toml_string_t value = {0};
+    if (toml_parse_string(data + assignment->value_start,
+                          assignment->value_end - assignment->value_start,
+                          &value) != TOML_EDIT_OK ||
+        value.consumed != assignment->value_end - assignment->value_start) {
+        toml_string_dispose(&value);
+        return TOML_EDIT_ERR;
+    }
+    size_t expected_len = strlen(expected);
+    *matches = value.len == expected_len && memcmp(value.data, expected, expected_len) == 0;
+    toml_string_dispose(&value);
+    return TOML_EDIT_OK;
+}
+
+static int toml_block_has_prior_table(const char *block, size_t block_len, size_t stop,
+                                      const toml_key_path_t *desired) {
+    size_t cursor = 0U;
+    toml_line_t line;
+    int multiline_state = TOML_STRING_NONE;
+    toml_key_path_t scope = {0};
+    while (toml_next_line(block, block_len, &cursor, &line) && line.start < stop) {
+        int line_in_multiline = multiline_state != TOML_STRING_NONE;
+        if (!line_in_multiline) {
+            toml_header_t header;
+            if (toml_parse_header(block, &line, "", &header) != TOML_EDIT_OK) {
+                toml_key_path_dispose(&scope);
+                return TOML_EDIT_ERR;
+            }
+            int duplicate =
+                header.present && !header.array && toml_key_path_has_prefix(&header.path, desired);
+            if (header.present) {
+                toml_key_path_dispose(&scope);
+                scope = header.path;
+                memset(&header.path, 0, sizeof(header.path));
+            } else {
+                toml_assignment_t assignment;
+                if (toml_parse_assignment(block, &line, &assignment) != TOML_EDIT_OK) {
+                    toml_header_dispose(&header);
+                    toml_key_path_dispose(&scope);
+                    return TOML_EDIT_ERR;
+                }
+                if (assignment.present) {
+                    toml_key_path_t full_key;
+                    if (toml_key_path_join(&scope, &assignment.key, &full_key) != TOML_EDIT_OK) {
+                        toml_assignment_dispose(&assignment);
+                        toml_header_dispose(&header);
+                        toml_key_path_dispose(&scope);
+                        return TOML_EDIT_ERR;
+                    }
+                    duplicate = toml_key_path_has_prefix(&full_key, desired) ||
+                                toml_key_path_has_prefix(desired, &full_key);
+                    toml_key_path_dispose(&full_key);
+                }
+                toml_assignment_dispose(&assignment);
+            }
+            toml_header_dispose(&header);
+            if (duplicate) {
+                toml_key_path_dispose(&scope);
+                return TOML_EDIT_ERR;
+            }
+        }
+        if (toml_scan_line_strings(block, &line, &multiline_state) != TOML_EDIT_OK) {
+            toml_key_path_dispose(&scope);
+            return TOML_EDIT_ERR;
+        }
+    }
+    toml_key_path_dispose(&scope);
+    return TOML_EDIT_OK;
+}
+
+static int toml_existing_conflicts_with_table(const char *existing, size_t existing_len,
+                                              size_t exclude_start, size_t exclude_end,
+                                              const toml_key_path_t *desired) {
+    size_t cursor = 0U;
+    toml_line_t line;
+    int multiline_state = TOML_STRING_NONE;
+    toml_key_path_t scope = {0};
+    while (toml_next_line(existing, existing_len, &cursor, &line)) {
+        int line_in_multiline = multiline_state != TOML_STRING_NONE;
+        int excluded =
+            exclude_start != SIZE_MAX && line.start >= exclude_start && line.start < exclude_end;
+        if (!line_in_multiline) {
+            toml_header_t header;
+            if (toml_parse_header(existing, &line, "", &header) != TOML_EDIT_OK) {
+                toml_key_path_dispose(&scope);
+                return TOML_EDIT_ERR;
+            }
+            if (header.present) {
+                int conflict = !excluded && toml_key_path_has_prefix(&header.path, desired);
+                toml_key_path_dispose(&scope);
+                scope = header.path;
+                memset(&header.path, 0, sizeof(header.path));
+                toml_header_dispose(&header);
+                if (conflict) {
+                    toml_key_path_dispose(&scope);
+                    return TOML_EDIT_ERR;
+                }
+            } else if (!excluded) {
+                toml_assignment_t assignment;
+                if (toml_parse_assignment(existing, &line, &assignment) != TOML_EDIT_OK) {
+                    toml_header_dispose(&header);
+                    toml_key_path_dispose(&scope);
+                    return TOML_EDIT_ERR;
+                }
+                if (assignment.present) {
+                    toml_key_path_t full_key;
+                    if (toml_key_path_join(&scope, &assignment.key, &full_key) != TOML_EDIT_OK) {
+                        toml_assignment_dispose(&assignment);
+                        toml_header_dispose(&header);
+                        toml_key_path_dispose(&scope);
+                        return TOML_EDIT_ERR;
+                    }
+                    int conflict = toml_key_path_has_prefix(&full_key, desired) ||
+                                   toml_key_path_has_prefix(desired, &full_key);
+                    toml_key_path_dispose(&full_key);
+                    toml_assignment_dispose(&assignment);
+                    if (conflict) {
+                        toml_header_dispose(&header);
+                        toml_key_path_dispose(&scope);
+                        return TOML_EDIT_ERR;
+                    }
+                }
+            }
+            toml_header_dispose(&header);
+        }
+        if (toml_scan_line_strings(existing, &line, &multiline_state) != TOML_EDIT_OK) {
+            toml_key_path_dispose(&scope);
+            return TOML_EDIT_ERR;
+        }
+    }
+    toml_key_path_dispose(&scope);
+    return multiline_state == TOML_STRING_NONE ? TOML_EDIT_OK : TOML_EDIT_ERR;
+}
+
+static int toml_managed_block_conflicts(const char *existing, size_t existing_len,
+                                        size_t exclude_start, size_t exclude_end, const char *block,
+                                        size_t block_len) {
+    size_t cursor = 0U;
+    toml_line_t line;
+    int multiline_state = TOML_STRING_NONE;
+    while (toml_next_line(block, block_len, &cursor, &line)) {
+        int line_in_multiline = multiline_state != TOML_STRING_NONE;
+        if (!line_in_multiline) {
+            toml_header_t header;
+            if (toml_parse_header(block, &line, "", &header) != TOML_EDIT_OK) {
+                return TOML_EDIT_ERR;
+            }
+            if (header.present && !header.array &&
+                (toml_block_has_prior_table(block, block_len, line.start, &header.path) !=
+                     TOML_EDIT_OK ||
+                 toml_existing_conflicts_with_table(existing, existing_len, exclude_start,
+                                                    exclude_end, &header.path) != TOML_EDIT_OK)) {
+                toml_header_dispose(&header);
+                return TOML_EDIT_ERR;
+            }
+            toml_header_dispose(&header);
+        }
+        if (toml_scan_line_strings(block, &line, &multiline_state) != TOML_EDIT_OK) {
+            return TOML_EDIT_ERR;
+        }
+    }
+    return multiline_state == TOML_STRING_NONE ? TOML_EDIT_OK : TOML_EDIT_ERR;
+}
+
+/* ── #2228: content found between the managed markers ─────────────────
+ *
+ * The span between our markers does not only hold what we wrote. A client
+ * that appends tables at the end of the file (Codex Desktop does) puts them
+ * INSIDE the markers whenever our closing marker is the last line, and users
+ * add keys to our own table. Rewriting or removing the whole span deleted
+ * all of that.
+ *
+ * The span is read as TOML sections -- the lines before its first header
+ * (the lead) and one section per header -- and each is classified against
+ * the tables the block declares:
+ *   owned     a declared table; the k-th [[element]] of a declared array.
+ *             Keys the block writes are ours; every other key, comment and
+ *             blank line in it is the user's and stays in the table.
+ *   attached  a sub-table of a declared table: part of our entry, kept with
+ *             it on install and removed with it on uninstall.
+ *   foreign   anything else: moved byte for byte, in order, to just after
+ *             the closing marker (install) or left in place (removal).
+ *   lead      moved above the opening marker, where it keeps the table it
+ *             belongs to. A block that itself starts with bare keys owns the
+ *             lead, which is then replaced exactly as before.
+ * Whatever cannot be attributed safely is refused and the file is left
+ * untouched: a second copy of a declared table, an undeclared [[element]]
+ * of a declared array, a child of a declared array element, an unparsable
+ * line in an owned table, a user key colliding with one the block writes, a
+ * move that would hand the keys below the block to another table, or a
+ * result whose tables would conflict with the block. */
+#define TOML_MANAGED_MAX_TABLES 16U
+
+enum {
+    TOML_SPAN_LEAD = -1,
+    TOML_SPAN_FOREIGN = 0,
+    TOML_SPAN_OWNED = 1,
+    TOML_SPAN_ATTACHED = 2,
+};
+
+typedef struct {
+    size_t start;
+    size_t body;
+    size_t end;
+    toml_header_t header;
+} toml_section_t;
+
+typedef struct {
+    const char *data;
+    size_t lead_end;
+    size_t span_end;
+    const char *owned;
+    size_t owned_len;
+    size_t owned_first;
+} toml_managed_span_t;
+
+/* End of the section whose body starts at pos: the next header line outside
+ * a multiline string, or len. */
+static int toml_section_end(const char *data, size_t pos, size_t len, size_t *end) {
+    size_t cursor = pos;
+    toml_line_t line;
+    int multiline_state = TOML_STRING_NONE;
+    while (toml_next_line(data, len, &cursor, &line)) {
+        if (multiline_state == TOML_STRING_NONE) {
+            toml_header_t header;
+            if (toml_parse_header(data, &line, "", &header) != TOML_EDIT_OK) {
+                return TOML_EDIT_ERR;
+            }
+            int present = header.present;
+            toml_header_dispose(&header);
+            if (present) {
+                *end = line.start;
+                return TOML_EDIT_OK;
+            }
+        }
+        if (toml_scan_line_strings(data, &line, &multiline_state) != TOML_EDIT_OK) {
+            return TOML_EDIT_ERR;
+        }
+    }
+    *end = len;
+    return multiline_state == TOML_STRING_NONE ? TOML_EDIT_OK : TOML_EDIT_ERR;
+}
+
+/* The section whose header line starts at pos. */
+static int toml_section_at(const char *data, size_t pos, size_t len, toml_section_t *section) {
+    memset(section, 0, sizeof(*section));
+    section->start = pos;
+    size_t cursor = pos;
+    toml_line_t line;
+    if (!toml_next_line(data, len, &cursor, &line) ||
+        toml_parse_header(data, &line, "", &section->header) != TOML_EDIT_OK ||
+        !section->header.present ||
+        toml_section_end(data, line.full_end, len, &section->end) != TOML_EDIT_OK) {
+        toml_header_dispose(&section->header);
+        return TOML_EDIT_ERR;
+    }
+    section->body = line.full_end;
+    return TOML_EDIT_OK;
+}
+
+static int toml_lines_significant(const char *data, size_t start, size_t end) {
+    size_t cursor = start;
+    toml_line_t line;
+    while (toml_next_line(data, end, &cursor, &line)) {
+        if (!toml_line_is_blank_or_comment(data, &line)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Declared table `table` (1-based) of the block, or the number of declared
+ * tables in *count when table is 0. */
+static int toml_declared_table(const toml_managed_span_t *span, size_t table, size_t *count,
+                               toml_section_t *out) {
+    size_t pos = span->owned_first;
+    size_t index = 0U;
+    while (pos < span->owned_len) {
+        toml_section_t declared;
+        if (++index > TOML_MANAGED_MAX_TABLES ||
+            toml_section_at(span->owned, pos, span->owned_len, &declared) != TOML_EDIT_OK) {
+            return TOML_EDIT_ERR;
+        }
+        if (index == table) {
+            *out = declared;
+            return TOML_EDIT_OK;
+        }
+        pos = declared.end;
+        toml_header_dispose(&declared.header);
+    }
+    if (count) {
+        *count = index;
+    }
+    return table == 0U ? TOML_EDIT_OK : TOML_EDIT_ERR;
+}
+
+/* Classify one span header. seen[] marks the declared tables the span has
+ * already supplied, so a second copy is refused instead of guessed at. */
+static int toml_managed_classify(const toml_managed_span_t *span, const toml_header_t *header,
+                                 unsigned char *seen, int *kind, size_t *table) {
+    size_t exact = 0U;
+    int exact_taken = 0;
+    size_t parent = 0U;
+    size_t parent_depth = 0U;
+    int result = TOML_EDIT_OK;
+    size_t pos = span->owned_first;
+    for (size_t index = 1U; pos < span->owned_len && result == TOML_EDIT_OK; ++index) {
+        toml_section_t declared;
+        if (toml_section_at(span->owned, pos, span->owned_len, &declared) != TOML_EDIT_OK) {
+            return TOML_EDIT_ERR;
+        }
+        pos = declared.end;
+        const toml_key_path_t *path = &declared.header.path;
+        if (toml_key_path_equal(path, &header->path)) {
+            if (declared.header.array != header->array) {
+                result = TOML_EDIT_ERR;
+            } else if (!seen[index] && exact == 0U) {
+                exact = index;
+            } else {
+                exact_taken = 1;
+            }
+        } else if (toml_key_path_has_prefix(&header->path, path)) {
+            if (declared.header.array) {
+                result = TOML_EDIT_ERR;
+            } else if (path->count > parent_depth) {
+                parent = index;
+                parent_depth = path->count;
+            }
+        }
+        toml_header_dispose(&declared.header);
+    }
+    if (result != TOML_EDIT_OK || (exact == 0U && exact_taken)) {
+        return TOML_EDIT_ERR;
+    }
+    if (exact != 0U) {
+        seen[exact] = 1U;
+    }
+    *kind = exact != 0U ? TOML_SPAN_OWNED : parent != 0U ? TOML_SPAN_ATTACHED : TOML_SPAN_FOREIGN;
+    *table = exact != 0U ? exact : parent;
+    return TOML_EDIT_OK;
+}
+
+/* Sets *written when the declared table assigns key; a key that only shares
+ * a dotted prefix with one it assigns would redefine it and is refused. */
+static int toml_declared_writes_key(const toml_managed_span_t *span, const toml_section_t *declared,
+                                    const toml_key_path_t *key, int *written) {
+    *written = 0;
+    size_t cursor = declared->body;
+    toml_line_t line;
+    int multiline_state = TOML_STRING_NONE;
+    while (toml_next_line(span->owned, declared->end, &cursor, &line)) {
+        if (multiline_state == TOML_STRING_NONE) {
+            toml_assignment_t assignment;
+            if (toml_parse_assignment(span->owned, &line, &assignment) != TOML_EDIT_OK) {
+                return TOML_EDIT_ERR;
+            }
+            int equal = assignment.present && toml_key_path_equal(&assignment.key, key);
+            int collides = assignment.present && !equal &&
+                           (toml_key_path_has_prefix(&assignment.key, key) ||
+                            toml_key_path_has_prefix(key, &assignment.key));
+            toml_assignment_dispose(&assignment);
+            if (collides) {
+                return TOML_EDIT_ERR;
+            }
+            *written |= equal;
+        }
+        if (toml_scan_line_strings(span->owned, &line, &multiline_state) != TOML_EDIT_OK) {
+            return TOML_EDIT_ERR;
+        }
+    }
+    return TOML_EDIT_OK;
+}
+
+static size_t toml_line_first_char(const char *data, const toml_line_t *line) {
+    size_t pos = line->start;
+    while (pos < line->content_end && (data[pos] == ' ' || data[pos] == '\t')) {
+        pos++;
+    }
+    return pos;
+}
+
+/* Is this line, outside any multiline string, one the user owns? Comments
+ * are; an assignment is unless the declared table writes its key. */
+static int toml_line_is_users(const toml_managed_span_t *span, const toml_section_t *declared,
+                              const toml_line_t *line, int *users) {
+    if (span->data[toml_line_first_char(span->data, line)] == '#') {
+        *users = 1;
+        return TOML_EDIT_OK;
+    }
+    toml_assignment_t assignment;
+    int written = 0;
+    if (toml_parse_assignment(span->data, line, &assignment) != TOML_EDIT_OK ||
+        !assignment.present ||
+        toml_declared_writes_key(span, declared, &assignment.key, &written) != TOML_EDIT_OK) {
+        toml_assignment_dispose(&assignment);
+        return TOML_EDIT_ERR;
+    }
+    toml_assignment_dispose(&assignment);
+    *users = !written;
+    return TOML_EDIT_OK;
+}
+
+/* The lines of an owned section the block does not write, with the blank
+ * lines between them; blank lines before a replaced key or at the end of the
+ * section go with the section. */
+static int toml_append_user_lines(const toml_managed_span_t *span, const toml_section_t *section,
+                                  size_t table, toml_buffer_t *output) {
+    toml_section_t declared;
+    if (toml_declared_table(span, table, NULL, &declared) != TOML_EDIT_OK) {
+        return TOML_EDIT_ERR;
+    }
+    size_t cursor = section->body;
+    toml_line_t line;
+    int multiline_state = TOML_STRING_NONE;
+    int keep = 0;
+    size_t blank_start = SIZE_MAX;
+    int result = TOML_EDIT_OK;
+    while (result == TOML_EDIT_OK && toml_next_line(span->data, section->end, &cursor, &line)) {
+        if (multiline_state == TOML_STRING_NONE) {
+            if (toml_line_first_char(span->data, &line) == line.content_end) {
+                blank_start = blank_start == SIZE_MAX ? line.start : blank_start;
+                continue;
+            }
+            result = toml_line_is_users(span, &declared, &line, &keep);
+            if (!keep) {
+                blank_start = SIZE_MAX;
+            }
+        }
+        if (result == TOML_EDIT_OK && keep) {
+            size_t from = blank_start == SIZE_MAX ? line.start : blank_start;
+            blank_start = SIZE_MAX;
+            result = toml_buffer_append(output, span->data + from, line.full_end - from);
+        }
+        if (result == TOML_EDIT_OK &&
+            toml_scan_line_strings(span->data, &line, &multiline_state) != TOML_EDIT_OK) {
+            result = TOML_EDIT_ERR;
+        }
+    }
+    toml_header_dispose(&declared.header);
+    return result == TOML_EDIT_OK && multiline_state == TOML_STRING_NONE ? TOML_EDIT_OK
+                                                                         : TOML_EDIT_ERR;
+}
+
+/* One pass over the span's tables in file order. Appends each section of
+ * want_kind (and, unless foreign, of declared table want_table): foreign and
+ * attached sections verbatim, an owned one as its user lines. Also reports
+ * how many sections are foreign and the kind of the last one. */
+static int toml_managed_span_pass(const toml_managed_span_t *span, int want_kind, size_t want_table,
+                                  toml_buffer_t *output, size_t *foreign, int *last_kind) {
+    unsigned char seen[TOML_MANAGED_MAX_TABLES + 1U] = {0};
+    *foreign = 0U;
+    *last_kind = TOML_SPAN_LEAD;
+    size_t pos = span->lead_end;
+    while (pos < span->span_end) {
+        toml_section_t section;
+        int kind = TOML_SPAN_FOREIGN;
+        size_t table = 0U;
+        if (toml_section_at(span->data, pos, span->span_end, &section) != TOML_EDIT_OK) {
+            return TOML_EDIT_ERR;
+        }
+        int result = toml_managed_classify(span, &section.header, seen, &kind, &table);
+        toml_header_dispose(&section.header);
+        pos = section.end;
+        *foreign += kind == TOML_SPAN_FOREIGN;
+        *last_kind = kind;
+        if (result == TOML_EDIT_OK && kind == want_kind &&
+            (kind == TOML_SPAN_FOREIGN || table == want_table)) {
+            result = kind == TOML_SPAN_OWNED
+                         ? toml_append_user_lines(span, &section, table, output)
+                         : toml_buffer_append(output, span->data + section.start,
+                                              section.end - section.start);
+        }
+        if (result != TOML_EDIT_OK) {
+            return TOML_EDIT_ERR;
+        }
+    }
+    return TOML_EDIT_OK;
+}
+
+/* The declared tables of an install, each followed by what the span keeps
+ * for it: the user lines of its owned section, then its attached tables. */
+static int toml_append_managed_tables(const toml_managed_span_t *span, size_t tables,
+                                      const char *newline, toml_buffer_t *output) {
+    size_t foreign = 0U;
+    int last_kind = TOML_SPAN_LEAD;
+    if (toml_append_normalized_text(output, span->owned, span->owned_first, newline) !=
+        TOML_EDIT_OK) {
+        return TOML_EDIT_ERR;
+    }
+    for (size_t table = 1U; table <= tables; ++table) {
+        toml_section_t declared;
+        if (toml_declared_table(span, table, NULL, &declared) != TOML_EDIT_OK) {
+            return TOML_EDIT_ERR;
+        }
+        toml_header_dispose(&declared.header);
+        if (toml_append_normalized_text(output, span->owned + declared.start,
+                                        declared.end - declared.start, newline) != TOML_EDIT_OK ||
+            (output->data[output->len - 1U] != '\n' &&
+             toml_buffer_append_cstr(output, newline) != TOML_EDIT_OK) ||
+            toml_managed_span_pass(span, TOML_SPAN_OWNED, table, output, &foreign, &last_kind) !=
+                TOML_EDIT_OK ||
+            toml_managed_span_pass(span, TOML_SPAN_ATTACHED, table, output, &foreign, &last_kind) !=
+                TOML_EDIT_OK) {
+            return TOML_EDIT_ERR;
+        }
+    }
+    return output->len == 0U || output->data[output->len - 1U] == '\n' ||
+                   toml_buffer_append_cstr(output, newline) == TOML_EDIT_OK
+               ? TOML_EDIT_OK
+               : TOML_EDIT_ERR;
+}
+
+/* Rebuild existing with its managed span rewritten around `owned` (install)
+ * or removed (uninstall), keeping everything the span holds that is not
+ * ours. `owned` is the block on install and the declaration of our tables on
+ * removal. */
+static int toml_managed_rewrite(const char *existing, size_t existing_len,
+                                const toml_line_t *begin_line, const toml_line_t *end_line,
+                                const char *begin_marker, const char *end_marker, const char *owned,
+                                size_t owned_len, int install, toml_buffer_t *output) {
+    toml_managed_span_t span = {
+        .data = existing,
+        .span_end = end_line->start,
+        .owned = owned,
+        .owned_len = owned_len,
+    };
+    size_t tables = 0U;
+    size_t tail_lead_end = existing_len;
+    if (toml_section_end(owned, 0U, owned_len, &span.owned_first) != TOML_EDIT_OK ||
+        toml_declared_table(&span, 0U, &tables, NULL) != TOML_EDIT_OK ||
+        toml_section_end(existing, begin_line->full_end, span.span_end, &span.lead_end) !=
+            TOML_EDIT_OK ||
+        toml_section_end(existing, end_line->full_end, existing_len, &tail_lead_end) !=
+            TOML_EDIT_OK) {
+        return TOML_EDIT_ERR;
+    }
+    toml_buffer_t moved = {0};
+    size_t foreign = 0U;
+    int last_kind = TOML_SPAN_LEAD;
+    if (toml_managed_span_pass(&span, TOML_SPAN_FOREIGN, 0U, &moved, &foreign, &last_kind) !=
+            TOML_EDIT_OK ||
+        (foreign != 0U && last_kind != TOML_SPAN_FOREIGN &&
+         toml_lines_significant(existing, end_line->full_end, tail_lead_end))) {
+        toml_buffer_dispose(&moved);
+        return TOML_EDIT_ERR;
+    }
+
+    size_t prefix_len = begin_line->start;
+    if (prefix_len == 0U && existing_len >= 3U && (unsigned char)existing[0] == 0xefU &&
+        (unsigned char)existing[1] == 0xbbU && (unsigned char)existing[2] == 0xbfU) {
+        prefix_len = 3U;
+    }
+    const char *newline = toml_newline_style(existing, existing_len);
+    int keep_lead = !toml_lines_significant(owned, 0U, span.owned_first);
+    size_t block_start = 0U;
+    size_t block_end = 0U;
+    int result = toml_buffer_append(output, existing, prefix_len) == TOML_EDIT_OK &&
+                         (!keep_lead ||
+                          toml_buffer_append(output, existing + begin_line->full_end,
+                                             span.lead_end - begin_line->full_end) == TOML_EDIT_OK)
+                     ? TOML_EDIT_OK
+                     : TOML_EDIT_ERR;
+    if (result == TOML_EDIT_OK && install) {
+        block_start = output->len;
+        result =
+            toml_buffer_append_cstr(output, begin_marker) == TOML_EDIT_OK &&
+                    toml_buffer_append_cstr(output, newline) == TOML_EDIT_OK &&
+                    toml_append_managed_tables(&span, tables, newline, output) == TOML_EDIT_OK &&
+                    toml_buffer_append_cstr(output, end_marker) == TOML_EDIT_OK &&
+                    toml_buffer_append_cstr(output, newline) == TOML_EDIT_OK
+                ? TOML_EDIT_OK
+                : TOML_EDIT_ERR;
+        block_end = output->len;
+    }
+    if (result == TOML_EDIT_OK &&
+        (toml_buffer_append(output, moved.data, moved.len) != TOML_EDIT_OK ||
+         toml_buffer_append(output, existing + end_line->full_end,
+                            existing_len - end_line->full_end) != TOML_EDIT_OK ||
+         (install && toml_managed_block_conflicts(output->data, output->len, block_start, block_end,
+                                                  owned, owned_len) != TOML_EDIT_OK))) {
+        result = TOML_EDIT_ERR;
+    }
+    toml_buffer_dispose(&moved);
+    return result;
+}
+
+static int toml_finish_target_table(toml_target_table_t *current, toml_table_scan_t *result) {
+    if (!current->active) {
+        return TOML_EDIT_OK;
+    }
+    if (current->identity_count != 1) {
+        return TOML_EDIT_ERR;
+    }
+    if (current->identity_matches) {
+        ++result->matching_count;
+        if (result->matching_count > 1) {
+            return TOML_EDIT_ERR;
+        }
+        result->start = current->start;
+        result->header_end = current->header_end;
+        result->direct_end = current->direct_end;
+        result->edit_end = current->last_significant_end;
+    }
+    memset(current, 0, sizeof(*current));
+    return TOML_EDIT_OK;
+}
+
+static int toml_scan_named_tables(const char *data, size_t len, const char *table_name,
+                                  const char *identity_key, const char *identity_value,
+                                  toml_table_scan_t *result) {
+    memset(result, 0, sizeof(*result));
+    toml_key_path_t root_path;
+    if (toml_parse_key_path(table_name, 0U, strlen(table_name), &root_path) != TOML_EDIT_OK) {
+        return TOML_EDIT_ERR;
+    }
+    toml_target_table_t current = {0};
+    size_t cursor = 0;
+    toml_line_t line;
+    int multiline_state = TOML_STRING_NONE;
+    int at_root = 1;
+    while (toml_next_line(data, len, &cursor, &line)) {
+        int line_in_multiline = multiline_state != TOML_STRING_NONE;
+        int handled_header = 0;
+        if (!line_in_multiline) {
+            toml_header_t header;
+            if (toml_parse_header(data, &line, table_name, &header) != TOML_EDIT_OK) {
+                toml_key_path_dispose(&root_path);
+                return TOML_EDIT_ERR;
+            }
+            if (header.present) {
+                handled_header = 1;
+                at_root = 0;
+                int exact_root = toml_key_path_equal(&header.path, &root_path);
+                int descendant = header.path.count > root_path.count &&
+                                 toml_key_path_has_prefix(&header.path, &root_path);
+                if (exact_root) {
+                    if (!header.array) {
+                        toml_header_dispose(&header);
+                        toml_key_path_dispose(&root_path);
+                        return TOML_EDIT_ERR;
+                    }
+                    if (current.active && current.direct_end == 0U) {
+                        current.direct_end = current.direct_significant_end;
+                    }
+                    if (toml_finish_target_table(&current, result) != TOML_EDIT_OK) {
+                        toml_header_dispose(&header);
+                        toml_key_path_dispose(&root_path);
+                        return TOML_EDIT_ERR;
+                    }
+                    current.active = 1;
+                    current.start = header.edit_start;
+                    current.header_end = line.full_end;
+                    current.direct_significant_end = line.full_end;
+                    current.last_significant_end = line.full_end;
+                } else if (descendant) {
+                    if (!current.active) {
+                        toml_header_dispose(&header);
+                        toml_key_path_dispose(&root_path);
+                        return TOML_EDIT_ERR;
+                    }
+                    if (!current.descendants) {
+                        current.direct_end = current.direct_significant_end;
+                        current.descendants = 1;
+                    }
+                    current.last_significant_end = line.full_end;
+                } else {
+                    if (current.active && current.direct_end == 0U) {
+                        current.direct_end = current.direct_significant_end;
+                    }
+                    if (toml_finish_target_table(&current, result) != TOML_EDIT_OK) {
+                        toml_header_dispose(&header);
+                        toml_key_path_dispose(&root_path);
+                        return TOML_EDIT_ERR;
+                    }
+                }
+            }
+            toml_header_dispose(&header);
+        }
+
+        if (!handled_header && current.active) {
+            int significant = !toml_line_is_blank_or_comment(data, &line);
+            if (significant) {
+                current.last_significant_end = line.full_end;
+                if (!current.descendants) {
+                    current.direct_significant_end = line.full_end;
+                }
+            }
+            if (!line_in_multiline) {
+                toml_assignment_t assignment;
+                if (toml_parse_assignment(data, &line, &assignment) != TOML_EDIT_OK) {
+                    toml_key_path_dispose(&root_path);
+                    return TOML_EDIT_ERR;
+                }
+                if (significant && !assignment.present) {
+                    toml_assignment_dispose(&assignment);
+                    toml_key_path_dispose(&root_path);
+                    return TOML_EDIT_ERR;
+                }
+                if (!current.descendants && assignment.present &&
+                    toml_key_path_is_single(&assignment.key, identity_key)) {
+                    int identity_matches = 0;
+                    if (toml_assignment_string_equals(data, &assignment, identity_value,
+                                                      &identity_matches) != TOML_EDIT_OK) {
+                        toml_assignment_dispose(&assignment);
+                        toml_key_path_dispose(&root_path);
+                        return TOML_EDIT_ERR;
+                    }
+                    current.identity_count++;
+                    if (current.identity_count > 1) {
+                        toml_assignment_dispose(&assignment);
+                        toml_key_path_dispose(&root_path);
+                        return TOML_EDIT_ERR;
+                    }
+                    current.identity_matches = identity_matches;
+                }
+                toml_assignment_dispose(&assignment);
+            }
+        } else if (!handled_header && !current.active && at_root && !line_in_multiline) {
+            toml_assignment_t assignment;
+            if (toml_parse_assignment(data, &line, &assignment) != TOML_EDIT_OK) {
+                toml_key_path_dispose(&root_path);
+                return TOML_EDIT_ERR;
+            }
+            if (assignment.present && (toml_key_path_has_prefix(&assignment.key, &root_path) ||
+                                       toml_key_path_has_prefix(&root_path, &assignment.key))) {
+                toml_assignment_dispose(&assignment);
+                toml_key_path_dispose(&root_path);
+                return TOML_EDIT_ERR;
+            }
+            toml_assignment_dispose(&assignment);
+        }
+        if (toml_scan_line_strings(data, &line, &multiline_state) != TOML_EDIT_OK) {
+            toml_key_path_dispose(&root_path);
+            return TOML_EDIT_ERR;
+        }
+    }
+    if (multiline_state != TOML_STRING_NONE) {
+        toml_key_path_dispose(&root_path);
+        return TOML_EDIT_ERR;
+    }
+    if (current.active && current.direct_end == 0U) {
+        current.direct_end = current.direct_significant_end;
+    }
+    int finish = toml_finish_target_table(&current, result);
+    toml_key_path_dispose(&root_path);
+    return finish;
+}
+
+static void toml_body_spec_dispose(toml_body_spec_t *spec) {
+    if (!spec) {
+        return;
+    }
+    for (size_t i = 0U; i < spec->count; ++i) {
+        toml_key_path_dispose(&spec->entries[i].key);
+    }
+    free(spec->entries);
+    memset(spec, 0, sizeof(*spec));
+}
+
+static int toml_body_spec_add(toml_body_spec_t *spec, toml_assignment_t *assignment,
+                              const toml_line_t *line) {
+    for (size_t i = 0U; i < spec->count; ++i) {
+        if (toml_key_path_equal(&spec->entries[i].key, &assignment->key)) {
+            return TOML_EDIT_ERR;
+        }
+    }
+    if (spec->count == spec->capacity) {
+        size_t capacity = spec->capacity ? spec->capacity * 2U : 8U;
+        if (capacity < spec->count || capacity > SIZE_MAX / sizeof(*spec->entries)) {
+            return TOML_EDIT_ERR;
+        }
+        toml_body_entry_t *grown =
+            (toml_body_entry_t *)realloc(spec->entries, capacity * sizeof(*spec->entries));
+        if (!grown) {
+            return TOML_EDIT_ERR;
+        }
+        spec->entries = grown;
+        spec->capacity = capacity;
+    }
+    spec->entries[spec->count].key = assignment->key;
+    spec->entries[spec->count].line = *line;
+    memset(&assignment->key, 0, sizeof(assignment->key));
+    spec->count++;
+    return TOML_EDIT_OK;
+}
+
+static int toml_validate_table_body(const char *body, size_t body_len, const char *identity_key,
+                                    const char *identity_value, toml_body_spec_t *spec) {
+    memset(spec, 0, sizeof(*spec));
+    if (toml_validate_lexical_strings(body, body_len) != TOML_EDIT_OK) {
+        return TOML_EDIT_ERR;
+    }
+    int identity_count = 0;
+    size_t cursor = 0U;
+    toml_line_t line;
+    while (toml_next_line(body, body_len, &cursor, &line)) {
+        toml_header_t header;
+        if (toml_parse_header(body, &line, "", &header) != TOML_EDIT_OK) {
+            toml_body_spec_dispose(spec);
+            return TOML_EDIT_ERR;
+        }
+        if (header.present) {
+            toml_header_dispose(&header);
+            toml_body_spec_dispose(spec);
+            return TOML_EDIT_ERR;
+        }
+        toml_header_dispose(&header);
+        if (toml_line_is_blank_or_comment(body, &line)) {
+            continue;
+        }
+        toml_assignment_t assignment;
+        if (toml_parse_assignment(body, &line, &assignment) != TOML_EDIT_OK ||
+            !assignment.present || assignment.multiline_value || assignment.key.count != 1U) {
+            toml_assignment_dispose(&assignment);
+            toml_body_spec_dispose(spec);
+            return TOML_EDIT_ERR;
+        }
+        if (toml_key_path_is_single(&assignment.key, identity_key)) {
+            int matches = 0;
+            if (toml_assignment_string_equals(body, &assignment, identity_value, &matches) !=
+                    TOML_EDIT_OK ||
+                !matches) {
+                toml_assignment_dispose(&assignment);
+                toml_body_spec_dispose(spec);
+                return TOML_EDIT_ERR;
+            }
+            identity_count++;
+        }
+        if (toml_body_spec_add(spec, &assignment, &line) != TOML_EDIT_OK) {
+            toml_assignment_dispose(&assignment);
+            toml_body_spec_dispose(spec);
+            return TOML_EDIT_ERR;
+        }
+        toml_assignment_dispose(&assignment);
+    }
+    if (identity_count != 1 || spec->count == 0U) {
+        toml_body_spec_dispose(spec);
+        return TOML_EDIT_ERR;
+    }
+    return TOML_EDIT_OK;
+}
+
+static size_t toml_body_spec_find(const toml_body_spec_t *spec, const toml_key_path_t *key) {
+    for (size_t i = 0U; i < spec->count; ++i) {
+        if (toml_key_path_equal(&spec->entries[i].key, key)) {
+            return i;
+        }
+    }
+    return SIZE_MAX;
+}
+
+static int toml_append_body_entry(toml_buffer_t *output, const char *body,
+                                  const toml_body_entry_t *entry, const char *newline) {
+    return toml_buffer_append(output, body + entry->line.start,
+                              entry->line.content_end - entry->line.start) == TOML_EDIT_OK &&
+                   toml_buffer_append_cstr(output, newline) == TOML_EDIT_OK
+               ? TOML_EDIT_OK
+               : TOML_EDIT_ERR;
+}
+
+static int toml_merge_named_table(const char *existing, size_t existing_len,
+                                  const toml_table_scan_t *scan, const char *body,
+                                  const toml_body_spec_t *spec, const char *newline,
+                                  toml_buffer_t *output) {
+    if (toml_buffer_append(output, existing, scan->header_end) != TOML_EDIT_OK) {
+        return TOML_EDIT_ERR;
+    }
+    unsigned char *emitted = (unsigned char *)calloc(spec->count, 1U);
+    if (!emitted) {
+        return TOML_EDIT_ERR;
+    }
+    size_t cursor = scan->header_end;
+    toml_line_t line;
+    int multiline_state = TOML_STRING_NONE;
+    while (cursor < scan->direct_end && toml_next_line(existing, existing_len, &cursor, &line)) {
+        if (line.start >= scan->direct_end) {
+            break;
+        }
+        int replaced = 0;
+        if (multiline_state == TOML_STRING_NONE) {
+            toml_assignment_t assignment;
+            if (toml_parse_assignment(existing, &line, &assignment) != TOML_EDIT_OK) {
+                free(emitted);
+                return TOML_EDIT_ERR;
+            }
+            if (assignment.present) {
+                size_t desired = toml_body_spec_find(spec, &assignment.key);
+                if (desired != SIZE_MAX) {
+                    if (emitted[desired] || assignment.multiline_value ||
+                        toml_append_body_entry(output, body, &spec->entries[desired], newline) !=
+                            TOML_EDIT_OK) {
+                        toml_assignment_dispose(&assignment);
+                        free(emitted);
+                        return TOML_EDIT_ERR;
+                    }
+                    emitted[desired] = 1U;
+                    replaced = 1;
+                }
+            }
+            toml_assignment_dispose(&assignment);
+        }
+        if (!replaced && toml_buffer_append(output, existing + line.start,
+                                            line.full_end - line.start) != TOML_EDIT_OK) {
+            free(emitted);
+            return TOML_EDIT_ERR;
+        }
+        if (toml_scan_line_strings(existing, &line, &multiline_state) != TOML_EDIT_OK) {
+            free(emitted);
+            return TOML_EDIT_ERR;
+        }
+    }
+    if (multiline_state != TOML_STRING_NONE) {
+        free(emitted);
+        return TOML_EDIT_ERR;
+    }
+    for (size_t i = 0U; i < spec->count; ++i) {
+        if (emitted[i]) {
+            continue;
+        }
+        if (output->len != 0U && output->data[output->len - 1U] != '\n' &&
+            toml_buffer_append_cstr(output, newline) != TOML_EDIT_OK) {
+            free(emitted);
+            return TOML_EDIT_ERR;
+        }
+        if (toml_append_body_entry(output, body, &spec->entries[i], newline) != TOML_EDIT_OK) {
+            free(emitted);
+            return TOML_EDIT_ERR;
+        }
+    }
+    free(emitted);
+    return toml_buffer_append(output, existing + scan->direct_end, existing_len - scan->direct_end);
+}
+
+static int toml_append_named_table(toml_buffer_t *output, const char *table_name,
+                                   const char *table_body, const char *newline) {
+    size_t body_len = strlen(table_body);
+    if (toml_buffer_append_cstr(output, "[[") != TOML_EDIT_OK ||
+        toml_buffer_append_cstr(output, table_name) != TOML_EDIT_OK ||
+        toml_buffer_append_cstr(output, "]]") != TOML_EDIT_OK ||
+        toml_buffer_append_cstr(output, newline) != TOML_EDIT_OK ||
+        toml_append_normalized_text(output, table_body, body_len, newline) != TOML_EDIT_OK) {
+        return TOML_EDIT_ERR;
+    }
+    return body_len == 0 || table_body[body_len - 1] == '\n' ||
+                   toml_buffer_append_cstr(output, newline) == TOML_EDIT_OK
+               ? TOML_EDIT_OK
+               : TOML_EDIT_ERR;
+}
+
+static int toml_named_inputs_valid(const char *file_path, const char *table_name,
+                                   const char *identity_key, const char *identity_value) {
+    size_t identity_len = 0U;
+    return toml_valid_path(file_path) && toml_valid_identifier(table_name) &&
+           toml_valid_identifier(identity_key) && identity_value &&
+           toml_bounded_length(identity_value, 4096U, &identity_len) == TOML_EDIT_OK &&
+           toml_text_is_safe(identity_value, identity_len, 0);
+}
+
+int cbm_toml_upsert_named_array_table(const char *file_path, const char *table_name,
+                                      const char *identity_key, const char *identity_value,
+                                      const char *table_body) {
+    size_t body_len = 0U;
+    if (!toml_named_inputs_valid(file_path, table_name, identity_key, identity_value) ||
+        !table_body ||
+        toml_bounded_length(table_body, TOML_EDIT_MAX_BYTES, &body_len) != TOML_EDIT_OK ||
+        !toml_text_is_safe(table_body, body_len, 1)) {
+        return TOML_EDIT_ERR;
+    }
+    toml_body_spec_t spec;
+    if (toml_validate_table_body(table_body, body_len, identity_key, identity_value, &spec) !=
+        TOML_EDIT_OK) {
+        return TOML_EDIT_ERR;
+    }
+    char *existing = NULL;
+    size_t existing_len = 0;
+    toml_file_snapshot_t snapshot;
+    if (toml_read_file(file_path, &existing, &existing_len, &snapshot) != TOML_EDIT_OK ||
+        !toml_text_is_safe(existing, existing_len, 1)) {
+        toml_body_spec_dispose(&spec);
+        free(existing);
+        return TOML_EDIT_ERR;
+    }
+    toml_table_scan_t scan;
+    if (toml_scan_named_tables(existing, existing_len, table_name, identity_key, identity_value,
+                               &scan) != TOML_EDIT_OK) {
+        toml_body_spec_dispose(&spec);
+        free(existing);
+        return TOML_EDIT_ERR;
+    }
+
+    toml_buffer_t output = {0};
+    const char *newline = toml_newline_style(existing, existing_len);
+    int edit_result = TOML_EDIT_OK;
+    if (scan.matching_count == 1) {
+        edit_result = toml_merge_named_table(existing, existing_len, &scan, table_body, &spec,
+                                             newline, &output);
+    } else {
+        size_t payload_start = existing_len >= 3U && (unsigned char)existing[0] == 0xefU &&
+                                       (unsigned char)existing[1] == 0xbbU &&
+                                       (unsigned char)existing[2] == 0xbfU
+                                   ? 3U
+                                   : 0U;
+        edit_result = toml_buffer_append(&output, existing, existing_len);
+        if (edit_result == TOML_EDIT_OK && existing_len > payload_start) {
+            if (existing[existing_len - 1U] != '\n') {
+                edit_result = toml_buffer_append_cstr(&output, newline);
+            }
+            if (edit_result == TOML_EDIT_OK &&
+                (output.len < strlen(newline) * 2U ||
+                 memcmp(output.data + output.len - strlen(newline) * 2U, newline,
+                        strlen(newline)) != 0)) {
+                edit_result = toml_buffer_append_cstr(&output, newline);
+            }
+        }
+        if (edit_result == TOML_EDIT_OK) {
+            edit_result = toml_append_named_table(&output, table_name, table_body, newline);
+        }
+    }
+    if (edit_result != TOML_EDIT_OK) {
+        toml_buffer_dispose(&output);
+        toml_body_spec_dispose(&spec);
+        free(existing);
+        return TOML_EDIT_ERR;
+    }
+    int result =
+        toml_write_atomic(file_path, existing, existing_len, output.data, output.len, &snapshot);
+    toml_buffer_dispose(&output);
+    toml_body_spec_dispose(&spec);
+    free(existing);
+    return result;
+}
+
+int cbm_toml_remove_named_array_table(const char *file_path, const char *table_name,
+                                      const char *identity_key, const char *identity_value) {
+    if (!toml_named_inputs_valid(file_path, table_name, identity_key, identity_value)) {
+        return TOML_EDIT_ERR;
+    }
+    char *existing = NULL;
+    size_t existing_len = 0;
+    toml_file_snapshot_t snapshot;
+    if (toml_read_file(file_path, &existing, &existing_len, &snapshot) != TOML_EDIT_OK ||
+        !toml_text_is_safe(existing, existing_len, 1)) {
+        free(existing);
+        return TOML_EDIT_ERR;
+    }
+    toml_table_scan_t scan;
+    if (toml_scan_named_tables(existing, existing_len, table_name, identity_key, identity_value,
+                               &scan) != TOML_EDIT_OK) {
+        free(existing);
+        return TOML_EDIT_ERR;
+    }
+    if (scan.matching_count == 0) {
+        free(existing);
+        return TOML_EDIT_OK;
+    }
+
+    toml_buffer_t output = {0};
+    if (toml_buffer_append(&output, existing, scan.start) != TOML_EDIT_OK ||
+        toml_buffer_append(&output, existing + scan.edit_end, existing_len - scan.edit_end) !=
+            TOML_EDIT_OK) {
+        toml_buffer_dispose(&output);
+        free(existing);
+        return TOML_EDIT_ERR;
+    }
+    int result =
+        toml_write_atomic(file_path, existing, existing_len, output.data, output.len, &snapshot);
+    toml_buffer_dispose(&output);
+    free(existing);
+    return result;
+}
+
+static int toml_owned_table_is_canonical(const char *existing, size_t existing_len,
+                                         const toml_table_scan_t *scan, const char *table_name,
+                                         const char *canonical_body, const char *newline,
+                                         int *is_canonical) {
+    *is_canonical = 0;
+    if (scan->matching_count != 1 || scan->start > scan->direct_end ||
+        scan->direct_end > scan->edit_end || scan->edit_end > existing_len) {
+        return TOML_EDIT_ERR;
+    }
+    if (scan->direct_end != scan->edit_end) {
+        return TOML_EDIT_OK;
+    }
+
+    toml_buffer_t canonical = {0};
+    if (toml_append_named_table(&canonical, table_name, canonical_body, newline) != TOML_EDIT_OK) {
+        toml_buffer_dispose(&canonical);
+        return TOML_EDIT_ERR;
+    }
+    size_t existing_table_len = scan->direct_end - scan->start;
+    *is_canonical = existing_table_len == canonical.len &&
+                    memcmp(existing + scan->start, canonical.data, canonical.len) == 0;
+    toml_buffer_dispose(&canonical);
+    return TOML_EDIT_OK;
+}
+
+static int toml_build_owned_table_insert(toml_buffer_t *output, const char *existing,
+                                         size_t existing_len, const char *table_name,
+                                         const char *canonical_body, const char *newline) {
+    size_t payload_start = existing_len >= 3U && (unsigned char)existing[0] == 0xefU &&
+                                   (unsigned char)existing[1] == 0xbbU &&
+                                   (unsigned char)existing[2] == 0xbfU
+                               ? 3U
+                               : 0U;
+    int result = toml_buffer_append(output, existing, existing_len);
+    if (result == TOML_EDIT_OK && existing_len > payload_start &&
+        existing[existing_len - 1U] != '\n') {
+        result = toml_buffer_append_cstr(output, newline);
+    }
+    size_t newline_len = strlen(newline);
+    if (result == TOML_EDIT_OK && existing_len > payload_start &&
+        (output->len < newline_len * 2U ||
+         memcmp(output->data + output->len - newline_len * 2U, newline, newline_len) != 0)) {
+        result = toml_buffer_append_cstr(output, newline);
+    }
+    return result == TOML_EDIT_OK
+               ? toml_append_named_table(output, table_name, canonical_body, newline)
+               : TOML_EDIT_ERR;
+}
+
+static int toml_edit_owned_named_array_table(const char *file_path, const char *table_name,
+                                             const char *identity_key, const char *identity_value,
+                                             const char *canonical_body, int remove) {
+    size_t body_len = 0U;
+    if (!toml_named_inputs_valid(file_path, table_name, identity_key, identity_value) ||
+        !canonical_body ||
+        toml_bounded_length(canonical_body, TOML_EDIT_MAX_BYTES, &body_len) != TOML_EDIT_OK ||
+        !toml_text_is_safe(canonical_body, body_len, 1)) {
+        return CBM_TOML_OWNED_EDIT_ERROR;
+    }
+    toml_body_spec_t spec;
+    if (toml_validate_table_body(canonical_body, body_len, identity_key, identity_value, &spec) !=
+        TOML_EDIT_OK) {
+        return CBM_TOML_OWNED_EDIT_ERROR;
+    }
+    toml_body_spec_dispose(&spec);
+
+    char *existing = NULL;
+    size_t existing_len = 0U;
+    toml_file_snapshot_t snapshot;
+    if (toml_read_file(file_path, &existing, &existing_len, &snapshot) != TOML_EDIT_OK ||
+        !toml_text_is_safe(existing, existing_len, 1)) {
+        free(existing);
+        return CBM_TOML_OWNED_EDIT_ERROR;
+    }
+    toml_table_scan_t scan;
+    if (toml_scan_named_tables(existing, existing_len, table_name, identity_key, identity_value,
+                               &scan) != TOML_EDIT_OK) {
+        free(existing);
+        return CBM_TOML_OWNED_EDIT_ERROR;
+    }
+
+    const char *newline = toml_newline_style(existing, existing_len);
+    if (scan.matching_count == 1) {
+        int is_canonical = 0;
+        if (toml_owned_table_is_canonical(existing, existing_len, &scan, table_name, canonical_body,
+                                          newline, &is_canonical) != TOML_EDIT_OK) {
+            free(existing);
+            return CBM_TOML_OWNED_EDIT_ERROR;
+        }
+        if (!is_canonical) {
+            free(existing);
+            return CBM_TOML_OWNED_EDIT_FOREIGN;
+        }
+        if (!remove) {
+            free(existing);
+            return CBM_TOML_OWNED_EDIT_OK;
+        }
+    } else if (remove) {
+        free(existing);
+        return CBM_TOML_OWNED_EDIT_OK;
+    }
+
+    toml_buffer_t output = {0};
+    int build_result =
+        scan.matching_count == 1
+            ? (toml_buffer_append(&output, existing, scan.start) == TOML_EDIT_OK &&
+                       toml_buffer_append(&output, existing + scan.edit_end,
+                                          existing_len - scan.edit_end) == TOML_EDIT_OK
+                   ? TOML_EDIT_OK
+                   : TOML_EDIT_ERR)
+            : toml_build_owned_table_insert(&output, existing, existing_len, table_name,
+                                            canonical_body, newline);
+    int result = build_result == TOML_EDIT_OK
+                     ? toml_write_atomic(file_path, existing, existing_len, output.data, output.len,
+                                         &snapshot)
+                     : TOML_EDIT_ERR;
+    toml_buffer_dispose(&output);
+    free(existing);
+    return result == TOML_EDIT_OK ? CBM_TOML_OWNED_EDIT_OK : CBM_TOML_OWNED_EDIT_ERROR;
+}
+
+int cbm_toml_upsert_owned_named_array_table(const char *file_path, const char *table_name,
+                                            const char *identity_key, const char *identity_value,
+                                            const char *canonical_body) {
+    return toml_edit_owned_named_array_table(file_path, table_name, identity_key, identity_value,
+                                             canonical_body, 0);
+}
+
+int cbm_toml_remove_owned_named_array_table(const char *file_path, const char *table_name,
+                                            const char *identity_key, const char *identity_value,
+                                            const char *canonical_body) {
+    return toml_edit_owned_named_array_table(file_path, table_name, identity_key, identity_value,
+                                             canonical_body, 1);
+}
+
+static int toml_legacy_command_is_owned(const char *data, const toml_assignment_t *assignment,
+                                        int *owned) {
+    *owned = 0;
+    if (!assignment->present || assignment->multiline_value) {
+        return TOML_EDIT_ERR;
+    }
+    toml_string_t value = {0};
+    size_t value_len = assignment->value_end - assignment->value_start;
+    if (toml_parse_string(data + assignment->value_start, value_len, &value) != TOML_EDIT_OK ||
+        value.consumed != value_len) {
+        toml_string_dispose(&value);
+        return TOML_EDIT_ERR;
+    }
+    size_t basename_start = 0U;
+    for (size_t i = 0U; i < value.len; ++i) {
+        if (value.data[i] == '/' || value.data[i] == '\\') {
+            basename_start = i + 1U;
+        }
+    }
+    static const char binary_name[] = "codebase-memory-mcp";
+    static const char windows_binary_name[] = "codebase-memory-mcp.exe";
+    size_t basename_len = value.len - basename_start;
+    *owned = (basename_len == sizeof(binary_name) - 1U &&
+              memcmp(value.data + basename_start, binary_name, basename_len) == 0) ||
+             (basename_len == sizeof(windows_binary_name) - 1U &&
+              memcmp(value.data + basename_start, windows_binary_name, basename_len) == 0);
+    toml_string_dispose(&value);
+    return TOML_EDIT_OK;
+}
+
+static int toml_legacy_args_are_empty(const char *data, const toml_assignment_t *assignment) {
+    if (!assignment->present || assignment->multiline_value) {
+        return 0;
+    }
+    size_t pos = assignment->value_start;
+    size_t end = assignment->value_end;
+    if (pos >= end || data[pos++] != '[') {
+        return 0;
+    }
+    while (pos < end && (data[pos] == ' ' || data[pos] == '\t')) {
+        pos++;
+    }
+    if (pos >= end || data[pos++] != ']') {
+        return 0;
+    }
+    while (pos < end && (data[pos] == ' ' || data[pos] == '\t')) {
+        pos++;
+    }
+    return pos == end;
+}
+
+/* #1720: the only names cbm has ever listed in env_vars (#1562, #1664). */
+static int toml_legacy_env_name_is_owned(const toml_string_t *name) {
+    static const char *const owned[] = {"CBM_CACHE_DIR", "CBM_RUNTIME_DIR"};
+    for (size_t i = 0U; i < sizeof(owned) / sizeof(owned[0]); ++i) {
+        size_t owned_len = strlen(owned[i]);
+        if (name->len == owned_len && memcmp(name->data, owned[i], owned_len) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void toml_skip_blanks(const char *data, size_t end, size_t *pos) {
+    while (*pos < end && (data[*pos] == ' ' || data[*pos] == '\t')) {
+        ++*pos;
+    }
+}
+
+/* A single-line array of strings naming only variables cbm forwards: the
+ * value cbm writes, as Codex re-serializes it when it rewrites the table. */
+static int toml_legacy_env_vars_are_owned(const char *data, const toml_assignment_t *assignment) {
+    if (!assignment->present || assignment->multiline_value) {
+        return 0;
+    }
+    size_t pos = assignment->value_start;
+    size_t end = assignment->value_end;
+    if (pos >= end || data[pos++] != '[') {
+        return 0;
+    }
+    for (;;) {
+        toml_skip_blanks(data, end, &pos);
+        if (pos < end && data[pos] == ']') {
+            pos++;
+            break;
+        }
+        toml_string_t name = {0};
+        if (pos >= end || toml_parse_string(data + pos, end - pos, &name) != TOML_EDIT_OK) {
+            return 0;
+        }
+        int owned = toml_legacy_env_name_is_owned(&name);
+        pos += name.consumed;
+        toml_string_dispose(&name);
+        toml_skip_blanks(data, end, &pos);
+        if (!owned || pos >= end || (data[pos] != ',' && data[pos] != ']')) {
+            return 0;
+        }
+        if (data[pos] == ',') {
+            pos++;
+        }
+    }
+    toml_skip_blanks(data, end, &pos);
+    return pos == end;
+}
+
+typedef struct {
+    int command_count;
+    int command_owned;
+    int args_count;
+    int args_empty;
+    int env_vars_count;
+    int env_vars_owned;
+} toml_legacy_shape_t;
+
+static int toml_legacy_schema_is_owned(const toml_legacy_shape_t *shape) {
+    return shape->command_count == 1 && shape->command_owned && shape->args_count <= 1 &&
+           (shape->args_count == 0 || shape->args_empty) && shape->env_vars_count <= 1 &&
+           (shape->env_vars_count == 0 || shape->env_vars_owned);
+}
+
+/* Classify one assignment inside the target table. Returns TOML_EDIT_ERR for
+ * a duplicated key or an unparsable command, otherwise TOML_EDIT_OK with
+ * *foreign set when the assignment is not part of the owned schema. */
+static int toml_legacy_classify_assignment(const char *data, const toml_assignment_t *assignment,
+                                           toml_legacy_shape_t *shape, int *foreign) {
+    if (assignment->key.count != 1U) {
+        *foreign = 1;
+    } else if (toml_key_path_is_single(&assignment->key, "command")) {
+        if (++shape->command_count > 1 ||
+            toml_legacy_command_is_owned(data, assignment, &shape->command_owned) != TOML_EDIT_OK) {
+            return TOML_EDIT_ERR;
+        }
+        if (!shape->command_owned) {
+            *foreign = 1;
+        }
+    } else if (toml_key_path_is_single(&assignment->key, "args")) {
+        shape->args_empty = toml_legacy_args_are_empty(data, assignment);
+        if (++shape->args_count > 1) {
+            return TOML_EDIT_ERR;
+        }
+        if (!shape->args_empty) {
+            *foreign = 1;
+        }
+    } else if (toml_key_path_is_single(&assignment->key, "env_vars")) {
+        shape->env_vars_owned = toml_legacy_env_vars_are_owned(data, assignment);
+        if (++shape->env_vars_count > 1) {
+            return TOML_EDIT_ERR;
+        }
+        if (!shape->env_vars_owned) {
+            *foreign = 1;
+        }
+    } else {
+        *foreign = 1;
+    }
+    return TOML_EDIT_OK;
+}
+
+/* Copy existing into output without the one owned legacy table. Returns
+ * TOML_EDIT_OK (output holds the result, unchanged when the table is absent),
+ * TOML_EDIT_FOREIGN for a same-name table that is not ours, or TOML_EDIT_ERR. */
+static int toml_strip_legacy_table(const char *existing, size_t existing_len,
+                                   const toml_key_path_t *desired, toml_buffer_t *output) {
+    size_t cursor = 0U;
+    toml_line_t line;
+    int multiline_state = TOML_STRING_NONE;
+    int target_active = 0;
+    int target_count = 0;
+    int target_foreign = 0;
+    int target_array_seen = 0;
+    int target_regular_seen = 0;
+    toml_legacy_shape_t shape = {0};
+    size_t edit_start = SIZE_MAX;
+    size_t edit_end = existing_len;
+    while (toml_next_line(existing, existing_len, &cursor, &line)) {
+        int line_in_multiline = multiline_state != TOML_STRING_NONE;
+        int handled_header = 0;
+        if (!line_in_multiline) {
+            toml_header_t header;
+            if (toml_parse_header(existing, &line, "", &header) != TOML_EDIT_OK) {
+                return TOML_EDIT_ERR;
+            }
+            if (header.present) {
+                handled_header = 1;
+                int exact = toml_key_path_equal(&header.path, desired);
+                int descendant = header.path.count > desired->count &&
+                                 toml_key_path_has_prefix(&header.path, desired);
+                if (exact) {
+                    if (header.array) {
+                        if (target_regular_seen) {
+                            toml_header_dispose(&header);
+                            return TOML_EDIT_ERR;
+                        }
+                        target_array_seen = 1;
+                        target_foreign = 1;
+                        target_count++;
+                    } else if (target_array_seen || target_regular_seen) {
+                        toml_header_dispose(&header);
+                        return TOML_EDIT_ERR;
+                    } else {
+                        target_regular_seen = 1;
+                        target_count = 1;
+                    }
+                    target_active = 1;
+                    memset(&shape, 0, sizeof(shape));
+                    edit_start = header.edit_start;
+                } else if (target_active) {
+                    if (descendant || !toml_legacy_schema_is_owned(&shape)) {
+                        target_foreign = 1;
+                    }
+                    edit_end = header.edit_start;
+                    target_active = 0;
+                }
+            }
+            toml_header_dispose(&header);
+        }
+        if (target_active && !handled_header && !line_in_multiline &&
+            !toml_line_is_blank_or_comment(existing, &line)) {
+            toml_assignment_t assignment;
+            int classified = TOML_EDIT_ERR;
+            if (toml_parse_assignment(existing, &line, &assignment) == TOML_EDIT_OK &&
+                assignment.present) {
+                classified =
+                    toml_legacy_classify_assignment(existing, &assignment, &shape, &target_foreign);
+            }
+            toml_assignment_dispose(&assignment);
+            if (classified != TOML_EDIT_OK) {
+                return TOML_EDIT_ERR;
+            }
+        }
+        if (toml_scan_line_strings(existing, &line, &multiline_state) != TOML_EDIT_OK) {
+            return TOML_EDIT_ERR;
+        }
+    }
+    if (multiline_state != TOML_STRING_NONE) {
+        return TOML_EDIT_ERR;
+    }
+    if (target_active && !toml_legacy_schema_is_owned(&shape)) {
+        target_foreign = 1;
+    }
+    if (target_foreign) {
+        return TOML_EDIT_FOREIGN;
+    }
+    if (target_count == 0) {
+        return toml_buffer_append(output, existing, existing_len);
+    }
+    if (toml_buffer_append(output, existing, edit_start) != TOML_EDIT_OK ||
+        toml_buffer_append(output, existing + edit_end, existing_len - edit_end) != TOML_EDIT_OK) {
+        return TOML_EDIT_ERR;
+    }
+    return TOML_EDIT_OK;
+}
+
+int cbm_toml_remove_legacy_table(const char *file_path, const char *table_name,
+                                 const char *begin_marker, const char *end_marker) {
+    if (!toml_valid_path(file_path) || !table_name || !toml_valid_marker(begin_marker) ||
+        !toml_valid_marker(end_marker) || strcmp(begin_marker, end_marker) == 0) {
+        return TOML_EDIT_ERR;
+    }
+    toml_key_path_t desired;
+    if (toml_parse_key_path(table_name, 0U, strlen(table_name), &desired) != TOML_EDIT_OK) {
+        return TOML_EDIT_ERR;
+    }
+
+    char *existing = NULL;
+    size_t existing_len = 0U;
+    toml_file_snapshot_t snapshot;
+    if (toml_read_file(file_path, &existing, &existing_len, &snapshot) != TOML_EDIT_OK ||
+        !toml_text_is_safe(existing, existing_len, 1)) {
+        toml_key_path_dispose(&desired);
+        free(existing);
+        return TOML_EDIT_ERR;
+    }
+
+    toml_line_t begin_line = {0};
+    toml_line_t end_line = {0};
+    int has_managed_pair = 0;
+    int find_rc = toml_find_markers(existing, existing_len, begin_marker, end_marker, &begin_line,
+                                    &end_line, &has_managed_pair);
+    /* #1720: Codex rewrites the whole [mcp_servers] table when it edits MCP
+     * servers itself and drops comment decor on the way, so our begin marker
+     * vanishes while the end marker survives below whatever table follows.
+     * The stray line is ours (#1558) and removing it guesses nothing; the
+     * table it used to bracket is then judged by its shape like any other
+     * unmarked table, so a foreign one still fails closed untouched. */
+    toml_buffer_t healed = {0};
+    const char *scan = existing;
+    size_t scan_len = existing_len;
+    int result = TOML_EDIT_OK;
+    if (find_rc == TOML_EDIT_ORPHAN_MARKER) {
+        const toml_line_t *stray = begin_line.full_end > 0U ? &begin_line : &end_line;
+        if (toml_buffer_append(&healed, existing, stray->start) != TOML_EDIT_OK ||
+            toml_buffer_append(&healed, existing + stray->full_end,
+                               existing_len - stray->full_end) != TOML_EDIT_OK) {
+            result = TOML_EDIT_ERR;
+        }
+        scan = healed.data ? healed.data : "";
+        scan_len = healed.len;
+    } else if (find_rc != TOML_EDIT_OK) {
+        result = TOML_EDIT_ERR;
+    } else if (has_managed_pair) {
+        toml_key_path_dispose(&desired);
+        free(existing);
+        return TOML_EDIT_OK;
+    }
+
+    toml_buffer_t output = {0};
+    if (result == TOML_EDIT_OK) {
+        result = toml_strip_legacy_table(scan, scan_len, &desired, &output);
+    }
+    if (result == TOML_EDIT_OK) {
+        result = toml_write_atomic(file_path, existing, existing_len,
+                                   output.data ? output.data : "", output.len, &snapshot);
+    }
+    toml_buffer_dispose(&output);
+    toml_buffer_dispose(&healed);
+    toml_key_path_dispose(&desired);
+    free(existing);
+    return result;
+}
+typedef struct {
+    size_t start, end;
+} toml_codex_edit_t;
+static void toml_codex_set_failure(cbm_toml_codex_hook_failure_t *failure,
+                                   cbm_toml_codex_hook_failure_t value) {
+    if (failure) {
+        *failure = value;
+    }
+}
+const char *cbm_toml_codex_hook_failure_name(cbm_toml_codex_hook_failure_t failure) {
+    switch (failure) {
+    case CBM_TOML_CODEX_HOOK_FAILURE_NONE:
+        return "none";
+    case CBM_TOML_CODEX_HOOK_FAILURE_INVALID_ARGUMENT:
+        return "invalid_argument";
+    case CBM_TOML_CODEX_HOOK_FAILURE_COMMAND_RENDER:
+        return "command_render";
+    case CBM_TOML_CODEX_HOOK_FAILURE_CONFIG_READ:
+        return "config_read";
+    case CBM_TOML_CODEX_HOOK_FAILURE_UNSAFE_CONTENT:
+        return "unsafe_content";
+    case CBM_TOML_CODEX_HOOK_FAILURE_MALFORMED_CONFIG:
+        return "malformed_config";
+    case CBM_TOML_CODEX_HOOK_FAILURE_AMBIGUOUS_OWNERSHIP:
+        return "ambiguous_hook_ownership";
+    case CBM_TOML_CODEX_HOOK_FAILURE_CONFLICTING_HOOKS:
+        return "conflicting_hook_representations";
+    case CBM_TOML_CODEX_HOOK_FAILURE_EDIT_BUILD:
+        return "edit_build";
+    case CBM_TOML_CODEX_HOOK_FAILURE_CONFIG_WRITE:
+        return "config_write";
+    }
+    return "unknown";
+}
+static size_t toml_codex_payload_start(const char *data, size_t len) {
+    return len >= 3U && memcmp(data, "\xef\xbb\xbf", 3U) == 0 ? 3U : 0U;
+}
+static void toml_codex_skip_space(const char *data, size_t len, size_t *position) {
+    while (*position < len && (data[*position] == ' ' || data[*position] == '\t')) {
+        ++*position;
+    }
+}
+static int toml_codex_take(const char *data, size_t len, size_t *position, const char *expected) {
+    toml_codex_skip_space(data, len, position);
+    size_t expected_len = strlen(expected);
+    if (expected_len > len - *position || memcmp(data + *position, expected, expected_len) != 0)
+        return TOML_EDIT_ERR;
+    *position += expected_len;
+    return TOML_EDIT_OK;
+}
+static int toml_codex_take_string(const char *data, size_t len, size_t *position,
+                                  toml_string_t *value) {
+    toml_codex_skip_space(data, len, position);
+    if (*position >= len ||
+        toml_parse_string(data + *position, len - *position, value) != TOML_EDIT_OK)
+        return TOML_EDIT_ERR;
+    *position += value->consumed;
+    return TOML_EDIT_OK;
+}
+static int toml_codex_take_field(const char *data, size_t len, size_t *position, const char *name) {
+    if (toml_codex_take(data, len, position, name) != TOML_EDIT_OK)
+        return TOML_EDIT_ERR;
+    return toml_codex_take(data, len, position, "=");
+}
+static int toml_codex_executable_is_safe(const char *encoded, size_t len, size_t *start,
+                                         size_t *end) {
+    if (!encoded || len == 0U)
+        return 0;
+    *start = encoded[0] == '\'' ? 1U : 0U;
+    *end = *start && len >= 2U && encoded[len - 1U] == '\'' ? len - 1U : len;
+    if (*start && *end == len)
+        return 0;
+    /* #2044: inside the single-quoted form a space is literal in sh and
+     * PowerShell alike, and cbm_shell_quote_word/cbm_powershell_quote_word
+     * emit it for a profile such as C:\Users\First Last. Only an unquoted
+     * word must be free of spaces, since the shell would split it. */
+    unsigned char lowest = *start ? 0x20U : 0x21U;
+    for (size_t pos = *start; pos < *end;) {
+        unsigned char ch = (unsigned char)encoded[pos++];
+        if (ch < lowest || ch == 0x7fU || (!*start && strchr("\"'`$;&|<>(){}[]*?!", ch))) {
+            return 0;
+        }
+        if (*start && ch == '\'') {
+            if (pos < *end && encoded[pos] == '\'') {
+                ++pos;
+            } else if (pos + 2U < len && encoded[pos] == '\\' && encoded[pos + 1U] == '\'' &&
+                       encoded[pos + 2U] == '\'') {
+                pos += 3U;
+            } else {
+                return 0;
+            }
+        }
+    }
+    return *start < *end;
+}
+static int toml_codex_current_command_is_owned(const char *command, size_t len) {
+    static const char suffix[] = " hook-augment";
+    size_t start = len >= 2U && command[0] == '&' && command[1] == ' ' ? 2U : 0U;
+    size_t suffix_len = sizeof(suffix) - 1U;
+    if (len <= start + suffix_len || memcmp(command + len - suffix_len, suffix, suffix_len) != 0) {
+        return 0;
+    }
+    const char *executable = command + start;
+    size_t executable_len = len - start - suffix_len;
+    size_t word_start = 0U;
+    size_t word_end = 0U;
+    if (!toml_codex_executable_is_safe(executable, executable_len, &word_start, &word_end)) {
+        return 0;
+    }
+    size_t basename = word_start;
+    for (size_t i = word_start; i < word_end; ++i) {
+        if (executable[i] == '/' || executable[i] == '\\') {
+            basename = i + 1U;
+        }
+    }
+    size_t basename_len = word_end - basename;
+    return (basename_len == strlen("codebase-memory-mcp") &&
+            memcmp(executable + basename, "codebase-memory-mcp", basename_len) == 0) ||
+           (basename_len == strlen("codebase-memory-mcp.exe") &&
+            memcmp(executable + basename, "codebase-memory-mcp.exe", basename_len) == 0);
+}
+static int toml_codex_command_kind(const toml_string_t *command) {
+    static const char legacy_short[] = "echo \"Code discovery: prefer codebase-memory-mcp\"";
+    static const char legacy_released[] =
+        "echo \"Code discovery: prefer codebase-memory-mcp (search_graph, trace_path, "
+        "get_code_snippet, query_graph, search_code) over grep/file-read; run index_repository "
+        "first if the project is not indexed.\"";
+    if ((command->len == sizeof(legacy_short) - 1U &&
+         memcmp(command->data, legacy_short, command->len) == 0) ||
+        (command->len == sizeof(legacy_released) - 1U &&
+         memcmp(command->data, legacy_released, command->len) == 0)) {
+        return 2;
+    }
+    return toml_codex_current_command_is_owned(command->data, command->len) ? 1 : 0;
+}
+static int toml_codex_inline_is_owned(const char *data, size_t start, size_t end, int event) {
+    size_t pos = start;
+    toml_string_t matcher = {0};
+    toml_string_t type = {0};
+    toml_string_t command = {0};
+    toml_string_t windows = {0};
+    const char *expected_matcher =
+        event == 0 ? "startup|resume|clear|compact" : (event == 1 ? "*" : "Bash");
+    int result = 0;
+    if (toml_codex_take(data, end, &pos, "[") != TOML_EDIT_OK ||
+        toml_codex_take(data, end, &pos, "{") != TOML_EDIT_OK)
+        goto done;
+    if (toml_codex_take_field(data, end, &pos, "matcher") != TOML_EDIT_OK ||
+        toml_codex_take_string(data, end, &pos, &matcher) != TOML_EDIT_OK)
+        goto done;
+    if (matcher.len != strlen(expected_matcher) ||
+        memcmp(matcher.data, expected_matcher, matcher.len) != 0)
+        goto done;
+    if (toml_codex_take(data, end, &pos, ",") != TOML_EDIT_OK ||
+        toml_codex_take_field(data, end, &pos, "hooks") != TOML_EDIT_OK ||
+        toml_codex_take(data, end, &pos, "[") != TOML_EDIT_OK ||
+        toml_codex_take(data, end, &pos, "{") != TOML_EDIT_OK)
+        goto done;
+    if (toml_codex_take_field(data, end, &pos, "type") != TOML_EDIT_OK ||
+        toml_codex_take_string(data, end, &pos, &type) != TOML_EDIT_OK || type.len != 7U ||
+        memcmp(type.data, "command", 7U) != 0)
+        goto done;
+    if (toml_codex_take(data, end, &pos, ",") != TOML_EDIT_OK ||
+        toml_codex_take_field(data, end, &pos, "command") != TOML_EDIT_OK ||
+        toml_codex_take_string(data, end, &pos, &command) != TOML_EDIT_OK)
+        goto done;
+    int command_kind = toml_codex_command_kind(&command);
+    if (command_kind == 1) {
+        if (toml_codex_take(data, end, &pos, ",") != TOML_EDIT_OK ||
+            toml_codex_take_field(data, end, &pos, "command_windows") != TOML_EDIT_OK ||
+            toml_codex_take_string(data, end, &pos, &windows) != TOML_EDIT_OK)
+            goto done;
+        if (!toml_codex_current_command_is_owned(windows.data, windows.len))
+            goto done;
+        if (toml_codex_take(data, end, &pos, ",") != TOML_EDIT_OK ||
+            toml_codex_take_field(data, end, &pos, "timeout") != TOML_EDIT_OK ||
+            toml_codex_take(data, end, &pos, "5") != TOML_EDIT_OK)
+            goto done;
+    } else if (command_kind != 2 || event != 0) {
+        goto done;
+    }
+    if (toml_codex_take(data, end, &pos, "}") == TOML_EDIT_OK &&
+        toml_codex_take(data, end, &pos, "]") == TOML_EDIT_OK &&
+        toml_codex_take(data, end, &pos, "}") == TOML_EDIT_OK &&
+        toml_codex_take(data, end, &pos, "]") == TOML_EDIT_OK) {
+        toml_codex_skip_space(data, end, &pos);
+        result = pos == end;
+    }
+done:
+    toml_string_dispose(&matcher);
+    toml_string_dispose(&type);
+    toml_string_dispose(&command);
+    toml_string_dispose(&windows);
+    return result;
+}
+/* include_pretool renders the current block: the lifecycle pair plus a PreToolUse
+ * Bash hook, so Codex shell searches get graph context in flow. Without it the
+ * function renders the previous block (lifecycle pair only), which installs up to
+ * v0.12 wrote and which upgrades and uninstalls must still recognize as owned. */
+static int toml_codex_build_block(const char *command, const char *command_windows,
+                                  int include_pretool, toml_buffer_t *block) {
+    char escaped[8192];
+    char escaped_windows[8192];
+    char rendered[32768];
+    if (cbm_toml_escape_basic_string(command, escaped, sizeof(escaped)) != TOML_EDIT_OK ||
+        cbm_toml_escape_basic_string(command_windows, escaped_windows, sizeof(escaped_windows)) !=
+            TOML_EDIT_OK ||
+        !toml_codex_current_command_is_owned(command, strlen(command)) ||
+        !toml_codex_current_command_is_owned(command_windows, strlen(command_windows))) {
+        return TOML_EDIT_ERR;
+    }
+    int written = snprintf(rendered, sizeof(rendered),
+                           "[[hooks.SessionStart]]\n"
+                           "matcher = \"startup|resume|clear|compact\"\n\n"
+                           "[[hooks.SessionStart.hooks]]\n"
+                           "type = \"command\"\ncommand = \"%s\"\n"
+                           "command_windows = \"%s\"\ntimeout = 5\n\n"
+                           "[[hooks.SubagentStart]]\nmatcher = \"*\"\n\n"
+                           "[[hooks.SubagentStart.hooks]]\n"
+                           "type = \"command\"\ncommand = \"%s\"\n"
+                           "command_windows = \"%s\"\ntimeout = 5\n",
+                           escaped, escaped_windows, escaped, escaped_windows);
+    if (written > 0 && (size_t)written < sizeof(rendered) && include_pretool) {
+        int more = snprintf(rendered + written, sizeof(rendered) - (size_t)written,
+                            "\n[[hooks.PreToolUse]]\nmatcher = \"Bash\"\n\n"
+                            "[[hooks.PreToolUse.hooks]]\n"
+                            "type = \"command\"\ncommand = \"%s\"\n"
+                            "command_windows = \"%s\"\ntimeout = 5\n",
+                            escaped, escaped_windows);
+        written =
+            more > 0 && (size_t)more < sizeof(rendered) - (size_t)written ? written + more : -1;
+    }
+    return written > 0 && (size_t)written < sizeof(rendered)
+               ? toml_buffer_append(block, rendered, (size_t)written)
+               : TOML_EDIT_ERR;
+}
+static size_t toml_codex_owned_span(const char *data, size_t len, const char *begin_marker,
+                                    const char *end_marker, const char *newline, int marked) {
+    toml_string_t values[2] = {{0}};
+    size_t cursor = 0U;
+    toml_line_t line;
+    size_t result = 0U;
+    while ((!values[0].data || !values[1].data) && toml_next_line(data, len, &cursor, &line)) {
+        toml_assignment_t assignment;
+        if (toml_parse_assignment(data, &line, &assignment) != TOML_EDIT_OK) {
+            goto done;
+        }
+        int kind = toml_key_path_is_single(&assignment.key, "command")
+                       ? 0
+                       : (toml_key_path_is_single(&assignment.key, "command_windows") ? 1 : -1);
+        if (assignment.present && kind >= 0 && !values[kind].data) {
+            size_t value_len = assignment.value_end - assignment.value_start;
+            if (assignment.multiline_value ||
+                toml_parse_string(data + assignment.value_start, value_len, &values[kind]) !=
+                    TOML_EDIT_OK ||
+                values[kind].consumed != value_len) {
+                toml_assignment_dispose(&assignment);
+                goto done;
+            }
+        }
+        toml_assignment_dispose(&assignment);
+    }
+    /* Either generation is ours: the current block with PreToolUse first, then the
+     * previous lifecycle-only block, so upgrade and uninstall never strand it. */
+    for (int include_pretool = 1; include_pretool >= 0 && result == 0U; --include_pretool) {
+        toml_buffer_t block = {0};
+        toml_buffer_t expected = {0};
+        if (toml_codex_current_command_is_owned(values[0].data, values[0].len) &&
+            toml_codex_current_command_is_owned(values[1].data, values[1].len) &&
+            toml_codex_build_block(values[0].data, values[1].data, include_pretool, &block) ==
+                TOML_EDIT_OK &&
+            (marked ? toml_append_managed(&expected, begin_marker, end_marker, block.data, newline)
+                    : toml_append_normalized_text(&expected, block.data, block.len, newline)) ==
+                TOML_EDIT_OK &&
+            expected.len <= len && memcmp(expected.data, data, expected.len) == 0) {
+            result = expected.len;
+        }
+        toml_buffer_dispose(&expected);
+        toml_buffer_dispose(&block);
+    }
+done:
+    toml_string_dispose(&values[0]);
+    toml_string_dispose(&values[1]);
+    return result;
+}
+static int toml_codex_add_edit(toml_codex_edit_t *edits, size_t *count, size_t start, size_t end) {
+    if (*count >= 4U || start > end)
+        return TOML_EDIT_ERR;
+    edits[(*count)++] = (toml_codex_edit_t){.start = start, .end = end};
+    return TOML_EDIT_OK;
+}
+/* Inline forms Codex may normalize our hooks to (#1432). SessionStart and
+ * SubagentStart must be ours or the edit is refused. A foreign inline PreToolUse
+ * is the user's own hook: it is kept, and *foreign_pretool tells the caller to
+ * leave PreToolUse out of the block, because TOML cannot hold an inline array and
+ * array-of-tables entries for the same key. */
+static int toml_codex_scan_inline(const char *data, size_t len, toml_codex_edit_t *edits,
+                                  size_t *edit_count, int found[3], int *foreign_pretool,
+                                  cbm_toml_codex_hook_failure_t *failure) {
+    toml_key_path_t wanted[3] = {{0}};
+    toml_key_path_t scope = {0};
+    if (toml_parse_key_path("hooks.SessionStart", 0U, strlen("hooks.SessionStart"), &wanted[0]) !=
+            TOML_EDIT_OK ||
+        toml_parse_key_path("hooks.SubagentStart", 0U, strlen("hooks.SubagentStart"), &wanted[1]) !=
+            TOML_EDIT_OK ||
+        toml_parse_key_path("hooks.PreToolUse", 0U, strlen("hooks.PreToolUse"), &wanted[2]) !=
+            TOML_EDIT_OK) {
+        toml_codex_set_failure(failure, CBM_TOML_CODEX_HOOK_FAILURE_EDIT_BUILD);
+        goto error;
+    }
+    size_t cursor = 0U;
+    toml_line_t line;
+    int multiline_state = TOML_STRING_NONE;
+    while (toml_next_line(data, len, &cursor, &line)) {
+        int in_multiline = multiline_state != TOML_STRING_NONE;
+        int header_present = 0;
+        if (!in_multiline) {
+            toml_header_t header;
+            if (toml_parse_header(data, &line, "", &header) != TOML_EDIT_OK) {
+                toml_codex_set_failure(failure, CBM_TOML_CODEX_HOOK_FAILURE_MALFORMED_CONFIG);
+                goto error;
+            }
+            header_present = header.present;
+            if (header.present) {
+                toml_key_path_dispose(&scope);
+                scope = header.path;
+                memset(&header.path, 0, sizeof(header.path));
+            }
+            toml_header_dispose(&header);
+        }
+        if (!in_multiline && !header_present) {
+            toml_assignment_t assignment;
+            if (toml_parse_assignment(data, &line, &assignment) != TOML_EDIT_OK) {
+                toml_codex_set_failure(failure, CBM_TOML_CODEX_HOOK_FAILURE_MALFORMED_CONFIG);
+                goto error;
+            }
+            if (assignment.present) {
+                toml_key_path_t full_key;
+                if (toml_key_path_join(&scope, &assignment.key, &full_key) != TOML_EDIT_OK) {
+                    toml_assignment_dispose(&assignment);
+                    toml_codex_set_failure(failure, CBM_TOML_CODEX_HOOK_FAILURE_EDIT_BUILD);
+                    goto error;
+                }
+                int event = -1;
+                for (int candidate = 0; candidate < 3 && event < 0; ++candidate) {
+                    if (toml_key_path_equal(&full_key, &wanted[candidate])) {
+                        event = candidate;
+                    }
+                }
+                toml_key_path_dispose(&full_key);
+                if (event >= 0) {
+                    size_t tail = assignment.value_end;
+                    toml_codex_skip_space(data, line.content_end, &tail);
+                    size_t payload_start = toml_codex_payload_start(data, len);
+                    size_t edit_start = line.start == 0U ? payload_start : line.start;
+                    cbm_toml_codex_hook_failure_t event_failure = CBM_TOML_CODEX_HOOK_FAILURE_NONE;
+                    int owned = !assignment.multiline_value && tail == line.content_end &&
+                                toml_codex_inline_is_owned(data, assignment.value_start,
+                                                           assignment.value_end, event);
+                    if (event == 2 && !owned) {
+                        *foreign_pretool = 1;
+                    } else if (++found[event] > 1) {
+                        event_failure = CBM_TOML_CODEX_HOOK_FAILURE_CONFLICTING_HOOKS;
+                    } else if (!owned) {
+                        event_failure = CBM_TOML_CODEX_HOOK_FAILURE_AMBIGUOUS_OWNERSHIP;
+                    } else if (toml_codex_add_edit(edits, edit_count, edit_start, line.full_end) !=
+                               TOML_EDIT_OK) {
+                        event_failure = CBM_TOML_CODEX_HOOK_FAILURE_EDIT_BUILD;
+                    }
+                    if (event_failure != CBM_TOML_CODEX_HOOK_FAILURE_NONE) {
+                        toml_codex_set_failure(failure, event_failure);
+                        toml_assignment_dispose(&assignment);
+                        goto error;
+                    }
+                }
+                toml_assignment_dispose(&assignment);
+            }
+        }
+        if (toml_scan_line_strings(data, &line, &multiline_state) != TOML_EDIT_OK) {
+            toml_codex_set_failure(failure, CBM_TOML_CODEX_HOOK_FAILURE_MALFORMED_CONFIG);
+            goto error;
+        }
+    }
+    int result = multiline_state == TOML_STRING_NONE ? TOML_EDIT_OK : TOML_EDIT_ERR;
+    if (result != TOML_EDIT_OK) {
+        toml_codex_set_failure(failure, CBM_TOML_CODEX_HOOK_FAILURE_MALFORMED_CONFIG);
+    }
+    goto done;
+error:
+    result = TOML_EDIT_ERR;
+done:
+    toml_key_path_dispose(&scope);
+    toml_key_path_dispose(&wanted[0]);
+    toml_key_path_dispose(&wanted[1]);
+    toml_key_path_dispose(&wanted[2]);
+    return result;
+}
+int cbm_toml_reconcile_codex_hooks_detailed(const char *file_path, const char *begin_marker,
+                                            const char *end_marker, const char *command,
+                                            const char *command_windows,
+                                            cbm_toml_codex_hook_action_t action, int check_only,
+                                            cbm_toml_codex_hook_failure_t *failure,
+                                            int *pretool_written) {
+    toml_codex_set_failure(failure, CBM_TOML_CODEX_HOOK_FAILURE_NONE);
+    if (pretool_written) {
+        *pretool_written = 0;
+    }
+    if (!toml_valid_path(file_path) || !toml_valid_marker(begin_marker) ||
+        !toml_valid_marker(end_marker) || strcmp(begin_marker, end_marker) == 0 || !command ||
+        !command_windows ||
+        (action != CBM_TOML_CODEX_HOOK_UPSERT && action != CBM_TOML_CODEX_HOOK_REMOVE)) {
+        toml_codex_set_failure(failure, CBM_TOML_CODEX_HOOK_FAILURE_INVALID_ARGUMENT);
+        return TOML_EDIT_ERR;
+    }
+    toml_buffer_t block = {0};
+    if (toml_codex_build_block(command, command_windows, 1, &block) != TOML_EDIT_OK) {
+        toml_buffer_dispose(&block);
+        toml_codex_set_failure(failure, CBM_TOML_CODEX_HOOK_FAILURE_COMMAND_RENDER);
+        return TOML_EDIT_ERR;
+    }
+    char *existing = NULL;
+    size_t existing_len = 0U;
+    toml_file_snapshot_t snapshot;
+    if (toml_read_file(file_path, &existing, &existing_len, &snapshot) != TOML_EDIT_OK) {
+        toml_buffer_dispose(&block);
+        free(existing);
+        toml_codex_set_failure(failure, CBM_TOML_CODEX_HOOK_FAILURE_CONFIG_READ);
+        return TOML_EDIT_ERR;
+    }
+    if (!toml_text_is_safe(existing, existing_len, 1)) {
+        toml_buffer_dispose(&block);
+        free(existing);
+        toml_codex_set_failure(failure, CBM_TOML_CODEX_HOOK_FAILURE_UNSAFE_CONTENT);
+        return TOML_EDIT_ERR;
+    }
+    const char *newline = toml_newline_style(existing, existing_len);
+    toml_buffer_t output = {0};
+    int result = TOML_EDIT_ERR;
+    toml_line_t begin_line = {0};
+    toml_line_t end_line = {0};
+    int has_pair = 0;
+    if (toml_find_markers(existing, existing_len, begin_marker, end_marker, &begin_line, &end_line,
+                          &has_pair) != TOML_EDIT_OK) {
+        toml_codex_set_failure(failure, CBM_TOML_CODEX_HOOK_FAILURE_CONFLICTING_HOOKS);
+        goto error;
+    }
+    size_t pair_start = begin_line.start;
+    if (has_pair && pair_start == 0U) {
+        pair_start = toml_codex_payload_start(existing, existing_len);
+    }
+    if (has_pair &&
+        toml_codex_owned_span(existing + pair_start, end_line.full_end - pair_start, begin_marker,
+                              end_marker, newline, 1) != end_line.full_end - pair_start) {
+        toml_codex_set_failure(failure, CBM_TOML_CODEX_HOOK_FAILURE_AMBIGUOUS_OWNERSHIP);
+        goto error;
+    }
+    toml_codex_edit_t edits[4];
+    size_t edit_count = 0U;
+    if (has_pair &&
+        toml_codex_add_edit(edits, &edit_count, pair_start, end_line.full_end) != TOML_EDIT_OK) {
+        toml_codex_set_failure(failure, CBM_TOML_CODEX_HOOK_FAILURE_EDIT_BUILD);
+        goto error;
+    }
+    size_t payload_start = toml_codex_payload_start(existing, existing_len);
+    int markerless_count = 0;
+    static const char aot_prefix[] = "[[hooks.SessionStart]]";
+    for (size_t pos = payload_start; sizeof(aot_prefix) - 1U <= existing_len - pos; ++pos) {
+        int line_start = pos == payload_start || existing[pos - 1U] == '\n';
+        int in_pair = has_pair && pos >= pair_start && pos < end_line.full_end;
+        size_t owned_len = line_start && !in_pair &&
+                                   memcmp(existing + pos, aot_prefix, sizeof(aot_prefix) - 1U) == 0
+                               ? toml_codex_owned_span(existing + pos, existing_len - pos,
+                                                       begin_marker, end_marker, newline, 0)
+                               : 0U;
+        if (owned_len) {
+            if (++markerless_count > 1) {
+                toml_codex_set_failure(failure, CBM_TOML_CODEX_HOOK_FAILURE_CONFLICTING_HOOKS);
+                goto error;
+            }
+            if (toml_codex_add_edit(edits, &edit_count, pos, pos + owned_len) != TOML_EDIT_OK) {
+                toml_codex_set_failure(failure, CBM_TOML_CODEX_HOOK_FAILURE_EDIT_BUILD);
+                goto error;
+            }
+            pos += owned_len - 1U;
+        }
+    }
+    int inline_found[3] = {0};
+    int foreign_pretool = 0;
+    if (toml_codex_scan_inline(existing, existing_len, edits, &edit_count, inline_found,
+                               &foreign_pretool, failure) != TOML_EDIT_OK) {
+        goto error;
+    }
+    if (markerless_count && (has_pair || inline_found[0] || inline_found[1] || inline_found[2])) {
+        toml_codex_set_failure(failure, CBM_TOML_CODEX_HOOK_FAILURE_CONFLICTING_HOOKS);
+        goto error;
+    }
+    if (foreign_pretool) {
+        toml_buffer_dispose(&block);
+        if (toml_codex_build_block(command, command_windows, 0, &block) != TOML_EDIT_OK) {
+            toml_codex_set_failure(failure, CBM_TOML_CODEX_HOOK_FAILURE_COMMAND_RENDER);
+            goto error;
+        }
+    }
+    for (size_t i = 0U; i < edit_count; ++i) {
+        for (size_t j = i + 1U; j < edit_count; ++j) {
+            if (edits[j].start < edits[i].start) {
+                toml_codex_edit_t swap = edits[i];
+                edits[i] = edits[j];
+                edits[j] = swap;
+            }
+        }
+        if (i > 0U && edits[i - 1U].end > edits[i].start) {
+            toml_codex_set_failure(failure, CBM_TOML_CODEX_HOOK_FAILURE_CONFLICTING_HOOKS);
+            goto error;
+        }
+    }
+    size_t cursor = 0U;
+    for (size_t i = 0U; i < edit_count; ++i) {
+        if (toml_buffer_append(&output, existing + cursor, edits[i].start - cursor) !=
+            TOML_EDIT_OK) {
+            toml_codex_set_failure(failure, CBM_TOML_CODEX_HOOK_FAILURE_EDIT_BUILD);
+            goto error;
+        }
+        cursor = edits[i].end;
+    }
+    if (toml_buffer_append(&output, existing + cursor, existing_len - cursor) != TOML_EDIT_OK) {
+        toml_codex_set_failure(failure, CBM_TOML_CODEX_HOOK_FAILURE_EDIT_BUILD);
+        goto error;
+    }
+    if (action == CBM_TOML_CODEX_HOOK_UPSERT) {
+        size_t output_payload = toml_codex_payload_start(output.data, output.len);
+        if ((output.len > output_payload && output.data[output.len - 1U] != '\n' &&
+             toml_buffer_append_cstr(&output, newline) != TOML_EDIT_OK) ||
+            toml_append_managed(&output, begin_marker, end_marker, block.data, newline) !=
+                TOML_EDIT_OK) {
+            toml_codex_set_failure(failure, CBM_TOML_CODEX_HOOK_FAILURE_EDIT_BUILD);
+            goto error;
+        }
+    }
+    result = check_only ? TOML_EDIT_OK
+                        : toml_write_atomic(file_path, existing, existing_len, output.data,
+                                            output.len, &snapshot);
+    if (result != TOML_EDIT_OK) {
+        toml_codex_set_failure(failure, CBM_TOML_CODEX_HOOK_FAILURE_CONFIG_WRITE);
+    } else if (pretool_written) {
+        *pretool_written = action == CBM_TOML_CODEX_HOOK_UPSERT && !foreign_pretool;
+    }
+error:
+    toml_buffer_dispose(&output);
+    toml_buffer_dispose(&block);
+    free(existing);
+    return result;
+}
+int cbm_toml_reconcile_codex_hooks(const char *file_path, const char *begin_marker,
+                                   const char *end_marker, const char *command,
+                                   const char *command_windows, cbm_toml_codex_hook_action_t action,
+                                   int check_only) {
+    return cbm_toml_reconcile_codex_hooks_detailed(file_path, begin_marker, end_marker, command,
+                                                   command_windows, action, check_only, NULL, NULL);
+}

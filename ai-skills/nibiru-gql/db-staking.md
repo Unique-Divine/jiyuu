@@ -77,7 +77,7 @@ This document describes the Nibiru indexer (Heart Monitor) and the staking porti
 
 ## Repo Definitions
 
-For repo locations and cross-repo routing (nibi-go-hm, nibi-ts-sdk, nibi-chain,
+For repo locations and cross-repo routing (nibi-go-hm, nibi-ts-sdk, nibiru,
 etc.), see the **repo-map** skill. It maps which repo to use for indexer schema
 changes, SDK client code, chain logic, and how they connect.
 

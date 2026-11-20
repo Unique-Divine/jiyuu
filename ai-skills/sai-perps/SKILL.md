@@ -1,78 +1,48 @@
 ---
 name: sai-perps
 description: >-
-  Query and reconcile Sai Perps data from live contracts, Sai Keeper GraphQL
-  and Postgres, and DexPal REST. Use for markets, trades, fees, open interest,
-  vaults, balances, referrals, or disagreements between on-chain and indexed
-  data. Use agent skill `sai-ops` for mutations.
+  Moved into agent skill `sai`. Query and reconcile Sai Perps data from live
+  contracts, Sai Keeper GraphQL and Postgres, and DexPal REST. Use for
+  markets, trades, fees, open interest, vaults, balances, referrals, Sai
+  Keeper Postgres tables, columns, and schema questions, or disagreements
+  between on-chain and indexed data. Load agent skill `sai` for everything
+  except the Postgres table guide, which stays here. Use agent skill
+  `sai-ops` for mutations.
 ---
 
 # Sai Perps
 
-Use this skill for Sai read/query/reconcile work across protocol state, indexed
-data, public APIs, database semantics, referral analytics, and app behavior.
+This skill moved into agent skill `sai`. Load `sai` and follow its router.
 
-## Boundaries
+If agent skill `sai` is not installed, read it from its repository at
+<https://github.com/Unique-Divine/jiyuu/tree/main/ai-skills/sai>. The `sai`
+CLI also prints its packaged copy with `sai --skill`.
 
-Use agent skill `sai-ops` when a request uploads code, migrates contracts,
-executes admin messages, creates or updates referral codes, issues trading
-credits, changes production configuration, triggers trades, mutates a sheet, or
-writes a state-change changelog. This skill can supply read-only preflight and
-postflight checks.
+| Old page in `sai-perps` | Page in `sai` |
+| --- | --- |
+| `references/sai-contracts.md` | [`references/contracts.md`](../sai/references/contracts.md) |
+| `references/sai-vaults.md` | [`references/vaults.md`](../sai/references/vaults.md) |
+| `references/sai-graphql.md` | [`references/graphql.md`](../sai/references/graphql.md) |
+| `references/sai-rest.md` | [`references/rest.md`](../sai/references/rest.md) |
+| `references/sai-referrals.md` | [`references/referrals.md`](../sai/references/referrals.md) |
+| `references/sai-reconciliation.md` | [`references/reconciliation.md`](../sai/references/reconciliation.md) |
+| `examples/sai-perps-prompts.md` | [`examples/prompts.md`](../sai/examples/prompts.md) |
 
-For a Sai Keeper Postgres schema, SQL semantics, or freshness question, read
-[`references/sai-db.md`](references/sai-db.md). For direct private database
-access, Tailscale/primary-replica routing, or any write operation, also use the
-private agent skill `sai-db`; do not infer connection details from repository
+The links above work when both skills sit in the same directory. Otherwise
+use the same paths under the repository URL.
+
+## Sai Keeper Postgres
+
+For a question about a Sai Keeper Postgres table, column, unit, migration, or
+which table feeds a GraphQL field or REST metric, read
+[`references/sai-db.md`](references/sai-db.md). That page stays in this
+skill, because agent skill `sai` ships inside the public `sai` CLI and
+carries no database material.
+
+For database access, primary and replica routing, or any write, use private
+agent skill `sai-db`. Do not infer connection details from repository
 configuration or environment variables.
 
-For Heart Monitor GraphQL transaction messages, custom Wasm events, and ordinary
-chain-indexed wallet evidence, use agent skill `nibiru-gql`. Heart Monitor event
-proof establishes the upstream chain input; it does not by itself prove the Sai
-Keeper derived-state row or the Sai app-visible balance.
+## Mutations
 
-## Reference router
-
-| Surface | Use when | Reference |
-| --- | --- | --- |
-| Live contracts | Protocol state, contract configuration, markets, collaterals, OI limits, fees, vault mappings, deposits, affiliate claimable rewards, and credit balances. | [`sai-contracts.md`](references/sai-contracts.md) |
-| SLP Vault contracts | Vault health, collateralization, share price, deposit caps, daily risk state, epochs, withdrawal timing, raw vault state, pending gov fees. | [`sai-vaults.md`](references/sai-vaults.md) |
-| Sai Keeper GraphQL | Indexed trades and LP history, app-visible oracle prices, fees, referral history, subscriptions, and user-facing entities. | [`sai-graphql.md`](references/sai-graphql.md) |
-| DexPal REST | Public product aggregates, stats, markets, yield, health checks, and date-window metrics. | [`sai-rest.md`](references/sai-rest.md) |
-| Sai Keeper Postgres | Table and column meanings, units, migrations, routines, API implementation, and aggregate freshness. | [`sai-db.md`](references/sai-db.md) |
-| Cross-source reconciliation | Explaining why chain, GraphQL, REST, DB, sheets, or boku notes disagree. | [`sai-reconciliation.md`](references/sai-reconciliation.md) |
-| Referral checks | Existing referral code ownership, redemption history, sheet metadata, EVM/Bech32 normalization, testnet balance/credit checks. | [`sai-referrals.md`](references/sai-referrals.md) |
-
-## Diagnostic Order
-
-For questions spanning multiple systems, prefer this order unless the prompt
-explicitly selects a surface:
-
-1. Identify the network, entity, and source-of-truth layer: contract address,
-   market index, token index, trader, vault, referral code, REST endpoint,
-   GraphQL field, or database table.
-2. Read live contract state when the fact controls protocol behavior.
-3. Read GraphQL or REST when the fact is about what the app/API exposes.
-4. Use database references or SQL when GraphQL/REST semantics, freshness, or
-   aggregation logic are the question.
-5. Compare sources explicitly. Say which layer owns each fact and which layer is
-   stale, derived, human-maintained, or not expected to match exactly.
-
-## Common Pitfalls
-
-- Contract query JSON uses CosmWasm `snake_case`; GraphQL fields use camelCase.
-- On-chain and database amounts are often base units. GraphQL `Int` amounts are
-  also base units. REST responses often expose human or USD values.
-- `TokenIndex(0)` is the USD quote placeholder, not collateral. Mainnet
-  collateral indices are `TokenIndex(1)` for USDC and `TokenIndex(2)` for stNIBI.
-- Some contract queries require wrapped string indices like `"MarketIndex(0)"`;
-  others require plain integers. Read the contract reference before guessing.
-- REST 24-hour windows are not all identical. `GET /dexpal/v1/stats` and
-  `GET /dexpal/v1/markets/details` can use different time anchors.
-- Sheets and boku epics are operator records, not protocol truth.
-
-## Examples and trigger tuning
-
-Use [`examples/sai-perps-prompts.md`](examples/sai-perps-prompts.md) for
-realistic prompts that should trigger this skill, plus near misses that should
-use agent skill `sai-ops` or another specialized skill.
+Contract and operator mutations belong to agent skill `sai-ops`.

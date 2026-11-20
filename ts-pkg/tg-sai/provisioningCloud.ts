@@ -403,7 +403,9 @@ export async function callDealDesk(
   input: Record<string, unknown>,
 ): Promise<unknown> {
   const key = dealDeskRequestKey(operation, input)
-  const command = ["sai-deal-desk", "chat-setups", operation, "--json-stdin"]
+  const executable = Bun.which("sai-deals") ?? Bun.which("sai-deal-desk")
+  if (!executable) throw new Error("Install the sai-deals command to use Deal Desk chat setup")
+  const command = [executable, "chat-setups", operation, "--json-stdin"]
   if (
     operation !== "view" &&
     operation !== "list" &&

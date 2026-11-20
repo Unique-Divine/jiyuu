@@ -51,7 +51,9 @@ Common recipe names to check first: `setup`, `install`, `build`, `test`, `lint`,
 - Recipe doc comments must be **exactly one** `# ...` line immediately above
   the recipe name. `just` / `just --list` use only that adjacent comment as the
   recipe description; a second `#` line replaces or truncates the intended
-  preview text.
+  preview text. After editing a justfile, run `ud lint just <path>` (a file,
+  directory, or quoted glob); it reports each violation as `path:line` and
+  exits 1.
 
 ## Common Failure Modes
 

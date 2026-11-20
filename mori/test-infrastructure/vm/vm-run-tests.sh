@@ -1,0 +1,274 @@
+#!/usr/bin/env bash
+# vm-run-tests.sh — run C test suites on the Windows VM under a CI-shaped
+# protected temp root. Runs ON the VM (MSYS2 shell), invoked by win.sh
+# test / ubsan-test / trap-ubsan-test / soak.
+#
+# Why the temp root: the daemon/coordination suites fail closed on the
+# MSYS-shared /tmp (C:\msys64\tmp), whose ancestry grants mutation rights to
+# Authenticated Users — running them there produces security refusals, not
+# test signal. CI gives the harness a per-user root under the profile with an
+# owner-stamped, protected current-SID DACL (.github/workflows/_test.yml
+# "Create protected per-user temp root"); this script mirrors that exactly so
+# the VM leg validates what CI will see.
+#
+# Why the guard: this leg once piped through `tail -40`, and a suite that
+# never validly ran looked green — 40 Windows failures reached CI unseen.
+# Output now streams in full, and a run whose log lacks the runner's
+# completion summary is a hard failure regardless of exit code.
+set -uo pipefail
+
+usage() {
+    cat <<'EOF'
+Usage: bash test-infrastructure/vm/vm-run-tests.sh <suite...> | --par | --soak <minutes>
+
+VM-side provisioning wrapper (runs ON the Windows VM, invoked by win.sh —
+call `win.sh test|test-par|soak` from the host, not this file). Supplies the
+CI-shaped protected per-user temp root (scripts/ci/new-protected-temp-root.ps1)
+and full-output logging with a completion-summary guard, then routes into the
+CANONICAL entries:
+
+  <suite...>       scripts/test.sh --suites <list>   (iteration mode)
+  --par            scripts/test.sh                   (the full venue leg)
+  --soak <mins>    scripts/soak-legs.sh              (both CI soak legs)
+
+Environment:
+  CBM_VM_RUNNER      sanitizer-variant runner path (ubsan/trap-ubsan builds);
+                     switches to direct-runner mode for those iteration tools.
+  CBM_VM_SOAK_BINARY product binary for --soak (default build/c/codebase-memory-mcp.exe)
+  CBM_VM_TEST_LOG    VM-side log path (default /tmp/win-test.log)
+
+Exit codes: 0 success · 2 usage · 90 = GUARD: no completion summary (a run
+that died without its summary must never read as green) · else the leg's code.
+EOF
+}
+case "${1:-}" in
+-h | --help) usage; exit 0 ;;
+esac
+
+# The leg's verdict, as a function so the contract test can drive the REAL
+# logic with synthetic logs instead of a copy of it that can drift
+# (tests/test_vm_verdict_contract.sh). See the two-channel note at the call
+# site for why the log outranks the exit status.
+# `mode` is "full" for the whole venue leg and "iteration" for a named subset of
+# suites. Only the full leg prints the completion marker, because only the full
+# leg HAS an end to reach: scripts/test.sh --suites finishes after the suites it
+# was given and says nothing more. Requiring the marker in both modes made every
+# `win.sh test <suites>` run report failure while passing -- 23 passed, 1
+# skipped, rc=0, called red. A guard against false greens is not allowed to
+# invent false reds.
+vm_verdict() {
+    local log="$1"
+    local rc="$2"
+    local mode="${3:-full}"
+    # -a: a NUL or UTF-16 byte anywhere makes grep call the log binary and
+    # print no matches, which would count its failures as zero.
+    if ! grep -aEq '[0-9]+ passed' "$log"; then
+        echo "GUARD: test runner produced no completion summary — the suites did" \
+            "not validly run; treating as failure (runner rc=$rc)" >&2
+        return 90
+    fi
+    local failed_total
+    local complete
+    failed_total=$(grep -aEo '[0-9]+ failed' "$log" | grep -Eo '^[0-9]+' |
+        awk '{s += $1} END {print s + 0}')
+    # The marker counts only as the last step header of the log: the full leg's
+    # own contract steps echo runner-shaped lines (a stubbed entry prints the
+    # marker), so a marker followed by another step is that step's output.
+    complete=0
+    if [ "$(grep -aE '^=== ' "$log" | tail -n 1 | tr -d '\r')" = '=== All tests passed ===' ]; then
+        complete=1
+    fi
+    if [ "${failed_total:-0}" -gt 0 ]; then
+        echo "GUARD: the log reports $failed_total failed test(s) (runner rc=$rc)" >&2
+        return 1
+    fi
+    if [ "$mode" = "full" ] && [ "$complete" -eq 0 ]; then
+        echo "GUARD: the log has a summary but no completion marker — the leg" \
+            "stopped before the end (runner rc=$rc)" >&2
+        return 1
+    fi
+    if [ "$mode" != "full" ] && [ "${rc:-1}" -ne 0 ]; then
+        # No marker to lean on here, so a non-zero status is the only evidence
+        # that the run ended badly after its last summary line. Iteration mode
+        # is a developer tool, not a gate, so it obeys rc rather than overriding
+        # it the way the full leg does.
+        echo "GUARD: suites reported no failures but the run exited $rc" >&2
+        return 1
+    fi
+    if [ "${rc:-1}" -ne 0 ]; then
+        echo "GUARD: every suite passed and the run completed, but the exit status" \
+            "came back as $rc — the ssh/msys2_shell chain lost it. Reporting the" \
+            "log's verdict; see the two-channel note in vm-run-tests.sh." >&2
+    fi
+    return 0
+}
+
+# Verdict-only mode for the contract test: decide a log WITHOUT a VM.
+if [ "${1:-}" = "--verdict" ]; then
+    if [ $# -lt 3 ] || [ $# -gt 4 ]; then
+        echo "usage: vm-run-tests.sh --verdict <log> <rc> [full|iteration]" >&2
+        exit 2
+    fi
+    vm_verdict "$2" "$3" "${4:-full}"
+    exit $?
+fi
+
+RUNNER="${CBM_VM_RUNNER:-}"
+
+# A supplied run id namespaces the log/build paths and disables shared pruning.
+CALLER_RUN_ID="${CBM_CI_RUN_ID:-}"
+if [ -n "$CALLER_RUN_ID" ]; then
+    if [[ ! "$CALLER_RUN_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]]; then
+        echo "FATAL: CBM_CI_RUN_ID must match [A-Za-z0-9][A-Za-z0-9._-]{0,63}." >&2
+        exit 2
+    fi
+    case "${CBM_CI_KEEP:-0}" in
+    0 | 1) ;;
+    *) echo "FATAL: CBM_CI_KEEP must be 0 or 1." >&2; exit 2 ;;
+    esac
+fi
+RUN_ID="${CBM_CI_RUN_ID:-$$-$(date +%s)}"
+export CBM_CI_RUN_ID="$RUN_ID"
+LOG="${CBM_VM_TEST_LOG:-/tmp/win-test-${RUN_ID}.log}"
+EFFECTIVE_BUILD_DIR=build/c
+TEMP_ROOT_ARGS=(-Prefix 'cbm-vm-tmp-' -PruneStale)
+
+# A caller that sets CBM_CI_RUN_ID is declaring concurrency, so give that run
+# its own BUILD_DIR; the default single-run path keeps the shared one and its
+# incremental reuse (a per-run build dir on the VM costs a full rebuild).
+if [ -n "$CALLER_RUN_ID" ]; then
+    EFFECTIVE_BUILD_DIR="build/vm-${RUN_ID}"
+    BUILD_ARGS=("BUILD_DIR=$EFFECTIVE_BUILD_DIR")
+    LOG="${CBM_VM_TEST_LOG:-$PWD/.vm-logs/$RUN_ID/test.log}"
+    # Neither legacy cbm-* nor cbm-vm-tmp-* cleanup can select this namespace.
+    TEMP_ROOT_ARGS=(-Prefix "vm-cbm-${RUN_ID}-")
+else
+    BUILD_ARGS=()
+fi
+
+[ $# -ge 1 ] || { echo "vm-run-tests: missing arguments. Please consult --help." >&2; exit 2; }
+if [ "$1" = "--soak" ]; then
+    [ $# -eq 2 ] || { echo "usage: vm-run-tests.sh --soak <positive-minutes>" >&2; exit 2; }
+    duration="$2"
+    case "$duration" in
+    ''|*[!0-9]*) echo "usage: vm-run-tests.sh --soak <positive-minutes>" >&2; exit 2 ;;
+    esac
+    [ "$duration" -gt 0 ] ||
+        { echo "usage: vm-run-tests.sh --soak <positive-minutes>" >&2; exit 2; }
+    binary="${CBM_VM_SOAK_BINARY:-build/c/codebase-memory-mcp.exe}"
+    [ -x "$binary" ] || { echo "ERROR: binary '$binary' missing — build first" >&2; exit 2; }
+    artifact="$binary"
+elif [ -n "$RUNNER" ]; then
+    # Explicit CBM_VM_RUNNER = the sanitizer-variant iteration mode (ubsan /
+    # trap-ubsan runners built into their own BUILD_DIRs by win.sh). Those
+    # builds carry non-default flags, so they keep the direct-runner path.
+    [ -x "$RUNNER" ] || { echo "ERROR: runner '$RUNNER' missing — build first" >&2; exit 2; }
+    artifact="$RUNNER"
+else
+    # Default path: suites run through the canonical scripts/test.sh (which
+    # builds its own runner, same as CI's test jobs). ACL-protect the build
+    # directory it will use.
+    artifact="$EFFECTIVE_BUILD_DIR/test-runner"
+fi
+
+# Shared-mode stale roots are removed up front; isolated mode never prunes.
+# The current root is kept after the run for inspection. It is created by the
+# same script CI uses (scripts/ci/new-protected-temp-root.ps1) so the two venues
+# cannot drift apart on the ACL shape the daemon suites are validated against.
+if [ -n "$CALLER_RUN_ID" ]; then
+    mkdir -p -- "$(dirname "$LOG")" || exit 2
+fi
+root_windows="$(MSYS2_ARG_CONV_EXCL='*' powershell.exe -NoProfile \
+    -ExecutionPolicy Bypass \
+    -File "$(cygpath -w scripts/ci/new-protected-temp-root.ps1)" \
+    "${TEMP_ROOT_ARGS[@]}" \
+    -ProtectDir "$(cygpath -w "$(dirname "$artifact")")" | tr -d '\r')"
+[ -n "$root_windows" ] || { echo "ERROR: protected temp root creation failed" >&2; exit 2; }
+
+TEMP="$(cygpath -m "$root_windows")"
+TMP="$TEMP"
+TMPDIR="$(cygpath -u "$root_windows")"
+export TEMP TMP TMPDIR
+
+# The runner's directory must look like a real user checkout: repos under a
+# profile carry no Authenticated-Users ACE, but C:\cbm (like CI's workspace
+# drive) inherits Modify for Authenticated Users from the drive root, which
+# the activation transaction's source-directory policy correctly refuses —
+# install-flow tests would then fail on the environment, not the code.
+# Two steps, both idempotent: protect the DIRECTORY (inheritance flags are
+# directory-only — a /T re-root leaves files with empty, deny-all DACLs),
+# then /reset the children so they re-inherit the clean set from it.
+runner_dir_w="$(cygpath -w "$(dirname "$artifact")")"
+me="$(whoami | tr -d '\r')"
+MSYS2_ARG_CONV_EXCL='*' icacls "$runner_dir_w" /inheritance:r \
+    /grant:r "${me}:(OI)(CI)F" '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' \
+    /Q >/dev/null 2>&1 || true
+MSYS2_ARG_CONV_EXCL='*' icacls "${runner_dir_w}\\*" /reset /T /C /Q >/dev/null 2>&1 || true
+
+echo "=== vm-run-tests: runner=$RUNNER temp=$TEMP suites: $* ==="
+
+if [ "$1" = "--soak" ]; then
+    # The sequence (quick + #581 query-leak) and its completion guards live in
+    # the canonical entry scripts/soak-legs.sh — the same file _soak.yml and the
+    # compose soak service run. This wrapper only supplies the CI-shaped
+    # protected temp root (above) and the persistent VM-side log.
+    echo "=== vm-run-tests: soak binary=$binary temp=$TEMP ${duration}m/leg ==="
+    scripts/soak-legs.sh "$binary" "$duration" 2>&1 | tee "$LOG"
+    exit "${PIPESTATUS[0]}"
+fi
+
+# Both paths run the CANONICAL test entry scripts/test.sh under this protected
+# environment — the same file every CI test leg runs:
+#   --par         the full venue leg (clean build + contracts + parallel suites)
+#   <suite...>    scripts/test.sh --suites — the documented iteration mode
+# Only an explicit CBM_VM_RUNNER (sanitizer-variant builds) bypasses test.sh.
+if [ -n "$RUNNER" ]; then
+    if [ "$1" = "--par" ]; then
+        bash scripts/run-tests-parallel.sh "$RUNNER" 2>&1 | tee "$LOG"
+        rc="${PIPESTATUS[0]}"
+    else
+        "$RUNNER" "$@" 2>&1 | tee "$LOG"
+        rc="${PIPESTATUS[0]}"
+    fi
+elif [ "$1" = "--par" ]; then
+    scripts/test.sh CC=clang CXX=clang++ \
+        ${BUILD_ARGS[@]+"${BUILD_ARGS[@]}"} 2>&1 | tee "$LOG"
+    rc="${PIPESTATUS[0]}"
+else
+    scripts/test.sh --suites "$*" CC=clang CXX=clang++ \
+        ${BUILD_ARGS[@]+"${BUILD_ARGS[@]}"} 2>&1 | tee "$LOG"
+    rc="${PIPESTATUS[0]}"
+fi
+
+# Tidy this run's own build dir on success; keep it on failure as the
+# post-mortem. Only ever touches a dir this run created (concurrent mode).
+if [ -n "$CALLER_RUN_ID" ] && [ "${CBM_CI_KEEP:-0}" != "1" ]; then
+    if [ "${rc:-1}" -eq 0 ]; then
+        rm -rf "build/vm-${RUN_ID}"
+    else
+        echo "vm-run-tests: kept build/vm-${RUN_ID} and $LOG for post-mortem" >&2
+    fi
+fi
+
+if ! grep -Eq '[0-9]+ passed' "$LOG"; then
+    echo "GUARD: test runner produced no completion summary — the suites did" \
+         "not validly run; treating as failure (runner rc=$rc)" >&2
+    exit 90
+fi
+
+# TWO independent channels decide this leg, because neither is trustworthy
+# alone. The exit status travels ssh -> cmd.exe -> msys2_shell.cmd, and that
+# chain loses it: on 2026-09-18 a leg that printed "7925 passed, 0 failed" and
+# "=== All tests passed ===" still exited 1, while the identical work run
+# through win.sh's other entry reported 0. A channel that can turn 0 into 1 can
+# turn 1 into 0 — and THAT direction is a false green, a red Windows leg
+# reported as passing, which is the failure this guard exists to prevent.
+#
+# So the LOG decides the test outcome (the runner writes it locally; it cannot
+# be mangled in transit) and rc decides what the log cannot see. Green requires
+# zero reported failures AND, for the full leg, the completion marker that
+# scripts/test.sh prints as its last statement — a leg that stopped early has a
+# summary but no marker. A named subset of suites prints no marker at all, so it
+# is judged on its summaries and its exit status instead.
+vm_verdict "$LOG" "$rc" "$([ "$1" = "--par" ] && echo full || echo iteration)"
+exit $?

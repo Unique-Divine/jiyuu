@@ -1,0 +1,319 @@
+#include "cbm.h"
+#include "arena.h" // CBMArena
+#include "helpers.h"
+#include "lang_specs.h"
+#include "extract_unified.h"
+#include "tree_sitter/api.h" // TSNode, ts_node_*
+#include "foundation/constants.h"
+#include "extract_node_stack.h"
+#include <stdint.h> // uint32_t
+#include <string.h>
+#include <ctype.h>
+
+// Extract type from new_expression / object_creation_expression.
+static const char *extract_new_expr_type(CBMArena *a, TSNode rhs, const char *source) {
+    TSNode type_node = ts_node_child_by_field_name(rhs, TS_FIELD("type"));
+    if (!ts_node_is_null(type_node)) {
+        const char *tk = ts_node_type(type_node);
+        if (strcmp(tk, "type_identifier") == 0 || strcmp(tk, "identifier") == 0 ||
+            strcmp(tk, "simple_identifier") == 0) {
+            return cbm_node_text(a, type_node, source);
+        }
+        if (strcmp(tk, "generic_type") == 0 && ts_node_child_count(type_node) > 0) {
+            return cbm_node_text(a, ts_node_child(type_node, 0), source);
+        }
+        return cbm_node_text(a, type_node, source);
+    }
+    // Fallback: first identifier child
+    for (uint32_t i = 0; i < ts_node_child_count(rhs); i++) {
+        TSNode child = ts_node_child(rhs, i);
+        const char *ck = ts_node_type(child);
+        if (strcmp(ck, "identifier") == 0 || strcmp(ck, "type_identifier") == 0 ||
+            strcmp(ck, "simple_identifier") == 0) {
+            return cbm_node_text(a, child, source);
+        }
+    }
+    return NULL;
+}
+
+// Extract class/type name from a constructor expression.
+// e.g., new Foo() -> "Foo", Foo() -> "Foo" (if uppercase), Foo{} -> "Foo"
+static const char *extract_constructor_type(CBMArena *a, TSNode rhs, const char *source,
+                                            CBMLanguage lang) {
+    const char *kind = ts_node_type(rhs);
+
+    if (strcmp(kind, "new_expression") == 0 || strcmp(kind, "object_creation_expression") == 0) {
+        return extract_new_expr_type(a, rhs, source);
+    }
+
+    if (strcmp(kind, "call") == 0 || strcmp(kind, "call_expression") == 0) {
+        TSNode func = ts_node_child_by_field_name(rhs, TS_FIELD("function"));
+        if (ts_node_is_null(func) && ts_node_child_count(rhs) > 0) {
+            func = ts_node_child(rhs, 0);
+        }
+        if (!ts_node_is_null(func)) {
+            char *fname = cbm_node_text(a, func, source);
+            if (fname && fname[0] >= 'A' && fname[0] <= 'Z') {
+                return fname;
+            }
+            /* Lower-cased package prefix: Go-style `pb.NewFooClient(...)` and
+             * Java-style `fooGrpc.newBlockingStub(...)`. Accept the qualified
+             * name when the last segment matches a typed-stub factory pattern.
+             * Downstream passes can use this to infer the constructed type. */
+            if (fname && fname[0]) {
+                const char *last = strrchr(fname, '.');
+                last = last ? last + 1 : fname;
+                bool is_factory = false;
+                if ((strncmp(last, "New", 3) == 0 || strncmp(last, "new", 3) == 0) && last[3]) {
+                    size_t llen = strlen(last);
+                    if ((llen > 6 && strcmp(last + llen - 6, "Client") == 0) ||
+                        (llen > 4 && strcmp(last + llen - 4, "Stub") == 0)) {
+                        is_factory = true;
+                    }
+                }
+                if (is_factory) {
+                    return fname;
+                }
+            }
+        }
+    }
+
+    if (strcmp(kind, "composite_literal") == 0) {
+        TSNode type_node = ts_node_child_by_field_name(rhs, TS_FIELD("type"));
+        if (!ts_node_is_null(type_node)) {
+            return cbm_node_text(a, type_node, source);
+        }
+    }
+
+    if (lang == CBM_LANG_RUST && strcmp(kind, "struct_expression") == 0) {
+        TSNode name = ts_node_child_by_field_name(rhs, TS_FIELD("name"));
+        if (!ts_node_is_null(name)) {
+            return cbm_node_text(a, name, source);
+        }
+    }
+
+    return NULL;
+}
+
+// Emit a type assignment if var_name and constructor type are valid.
+static void try_emit_type_assign(CBMExtractCtx *ctx, TSNode var_node, TSNode rhs_node,
+                                 const char *func_qn) {
+    char *var_name = cbm_node_text(ctx->arena, var_node, ctx->source);
+    const char *type_name =
+        extract_constructor_type(ctx->arena, rhs_node, ctx->source, ctx->language);
+    if (var_name && var_name[0] && type_name && type_name[0]) {
+        CBMTypeAssign ta = {0};
+        ta.var_name = var_name;
+        ta.type_name = type_name;
+        ta.enclosing_func_qn = func_qn;
+        cbm_typeassign_push(&ctx->result->type_assigns, ctx->arena, ta);
+    }
+}
+
+// Process assignment-type nodes (left/right fields with identifier check).
+static void process_assignment_type_assign(CBMExtractCtx *ctx, TSNode node, const char *func_qn) {
+    TSNode left = ts_node_child_by_field_name(node, TS_FIELD("left"));
+    TSNode right = ts_node_child_by_field_name(node, TS_FIELD("right"));
+    if (ts_node_is_null(right)) {
+        right = ts_node_child_by_field_name(node, TS_FIELD("value"));
+    }
+    if (!ts_node_is_null(left) && !ts_node_is_null(right)) {
+        const char *lk = ts_node_type(left);
+        if (strcmp(lk, "identifier") == 0 || strcmp(lk, "simple_identifier") == 0) {
+            try_emit_type_assign(ctx, left, right, func_qn);
+        }
+    }
+}
+
+// Process Go short_var_declaration/var_spec nodes.
+static void process_go_var_type_assign(CBMExtractCtx *ctx, TSNode node, const char *func_qn) {
+    TSNode left = ts_node_child_by_field_name(node, TS_FIELD("name"));
+    if (ts_node_is_null(left)) {
+        left = ts_node_child_by_field_name(node, TS_FIELD("left"));
+    }
+    TSNode right = ts_node_child_by_field_name(node, TS_FIELD("value"));
+    if (ts_node_is_null(right)) {
+        right = ts_node_child_by_field_name(node, TS_FIELD("right"));
+    }
+    if (!ts_node_is_null(left) && !ts_node_is_null(right)) {
+        try_emit_type_assign(ctx, left, right, func_qn);
+    }
+}
+
+// Process JS/TS variable_declarator nodes (name + value with identifier check).
+static void process_declarator_type_assign(CBMExtractCtx *ctx, TSNode node, const char *func_qn) {
+    TSNode name_node = ts_node_child_by_field_name(node, TS_FIELD("name"));
+    TSNode value_node = ts_node_child_by_field_name(node, TS_FIELD("value"));
+    if (!ts_node_is_null(name_node) && !ts_node_is_null(value_node)) {
+        const char *nk = ts_node_type(name_node);
+        if (strcmp(nk, "identifier") == 0 || strcmp(nk, "simple_identifier") == 0) {
+            try_emit_type_assign(ctx, name_node, value_node, func_qn);
+        }
+    }
+}
+
+// Process Rust let_declaration nodes (pattern + value).
+static void process_rust_let_type_assign(CBMExtractCtx *ctx, TSNode node, const char *func_qn) {
+    TSNode pat = ts_node_child_by_field_name(node, TS_FIELD("pattern"));
+    TSNode val = ts_node_child_by_field_name(node, TS_FIELD("value"));
+    if (!ts_node_is_null(pat) && !ts_node_is_null(val)) {
+        if (strcmp(ts_node_type(pat), "identifier") == 0) {
+            try_emit_type_assign(ctx, pat, val, func_qn);
+        }
+    }
+}
+
+// Process assignment nodes (assignment, short_var_declaration, variable_declarator,
+// let_declaration).
+static void process_type_assign_node(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec,
+                                     const char *func_qn) {
+    const char *kind = ts_node_type(node);
+
+    if (cbm_kind_in_set(node, spec->assignment_node_types)) {
+        process_assignment_type_assign(ctx, node, func_qn);
+    }
+    if (strcmp(kind, "short_var_declaration") == 0 || strcmp(kind, "var_spec") == 0) {
+        process_go_var_type_assign(ctx, node, func_qn);
+    }
+    if (strcmp(kind, "variable_declarator") == 0) {
+        process_declarator_type_assign(ctx, node, func_qn);
+    }
+    if (strcmp(kind, "let_declaration") == 0 && ctx->language == CBM_LANG_RUST) {
+        process_rust_let_type_assign(ctx, node, func_qn);
+    }
+}
+
+// Walk AST for assignment patterns where RHS is a constructor call.
+static void walk_type_assigns(CBMExtractCtx *ctx, TSNode root, const CBMLangSpec *spec) {
+    TSNodeStack stack;
+    ts_nstack_init(&stack, ctx, 4096);
+    ts_nstack_push(&stack, root);
+    while (stack.count > 0) {
+        TSNode node = ts_nstack_pop(&stack);
+        process_type_assign_node(ctx, node, spec, cbm_enclosing_func_qn_cached(ctx, node));
+        ts_nstack_push_children(&stack, node);
+    }
+}
+
+void cbm_extract_type_assigns(CBMExtractCtx *ctx) {
+    const CBMLangSpec *spec = cbm_lang_spec(ctx->language);
+    if (!spec) {
+        return;
+    }
+
+    walk_type_assigns(ctx, ctx->root, spec);
+}
+
+static void swift_parameter_binding(TSNode node, TSNode *name, TSNode *type) {
+    for (uint32_t i = 0; i < ts_node_child_count(node); i++) {
+        TSNode child = ts_node_child(node, i);
+        const char *field = ts_node_field_name_for_child(node, i);
+        if (!field || strcmp(field, "name") != 0) {
+            continue;
+        }
+        if (strcmp(ts_node_type(child), "simple_identifier") == 0) {
+            *name = child;
+        } else {
+            *type = child;
+        }
+    }
+}
+
+/* `try Foo(...)`, `try await make()`: the expression `try` / `await` wrap. */
+static TSNode swift_initializer_value(TSNode value) {
+    while (!ts_node_is_null(value)) {
+        const char *kind = ts_node_type(value);
+        if ((strcmp(kind, "try_expression") != 0 && strcmp(kind, "await_expression") != 0) ||
+            ts_node_named_child_count(value) == 0) {
+            return value;
+        }
+        value = ts_node_named_child(value, ts_node_named_child_count(value) - SKIP_ONE);
+    }
+    return value;
+}
+
+static bool swift_initializer_is_call(TSNode value) {
+    value = swift_initializer_value(value);
+    if (ts_node_is_null(value)) {
+        return false;
+    }
+    const char *kind = ts_node_type(value);
+    return strcmp(kind, "call_expression") == 0 || strcmp(kind, "call") == 0;
+}
+
+/* `Foo(...)` names the type it builds. Under `try` / `await` only a bare type
+ * name does: `try Foo.make()` returns what make returns, which the registry
+ * infers from the initializer call instead. */
+static const char *swift_constructor_type(CBMExtractCtx *ctx, TSNode value) {
+    if (strcmp(ts_node_type(value), "array_literal") == 0) {
+        return "[?]";
+    }
+    TSNode constructed = swift_initializer_value(value);
+    const char *type =
+        extract_constructor_type(ctx->arena, constructed, ctx->source, ctx->language);
+    if (type && !ts_node_eq(constructed, value) && strpbrk(type, ".(")) {
+        return NULL;
+    }
+    return type;
+}
+
+// --- Unified handler ---
+
+void handle_type_assigns(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec,
+                         WalkState *state) {
+    process_type_assign_node(ctx, node, spec, state->enclosing_func_qn);
+    if (ctx->language != CBM_LANG_SWIFT) {
+        return;
+    }
+    const char *kind = ts_node_type(node);
+    bool parameter = strcmp(kind, "parameter") == 0;
+    if (!parameter && strcmp(kind, "property_declaration") != 0) {
+        return;
+    }
+    TSNode name = {0};
+    TSNode type = {0};
+    TSNode value = {0};
+    if (parameter) {
+        swift_parameter_binding(node, &name, &type);
+    } else {
+        value = ts_node_child_by_field_name(node, TS_FIELD("value"));
+        TSNode pattern = ts_node_child_by_field_name(node, TS_FIELD("name"));
+        if (!ts_node_is_null(pattern)) {
+            name = cbm_find_child_by_kind(pattern, "simple_identifier");
+        }
+        TSNode annotation = cbm_find_child_by_kind(node, "type_annotation");
+        if (!ts_node_is_null(annotation)) {
+            type = ts_node_child_by_field_name(annotation, TS_FIELD("name"));
+        }
+    }
+    const char *type_name =
+        ts_node_is_null(type) ? NULL : cbm_node_text(ctx->arena, type, ctx->source);
+    if (!type_name && !parameter && !ts_node_is_null(value)) {
+        type_name = swift_constructor_type(ctx, value);
+    }
+    bool initializer_call = swift_initializer_is_call(value);
+    if (!ts_node_is_null(name) && (type_name || initializer_call)) {
+        const char *scope = state->enclosing_func_qn;
+        if (scope == ctx->module_qn && state->enclosing_class_qn) {
+            scope = state->enclosing_class_qn;
+        }
+        CBMTypeAssign assignment = {
+            .var_name = cbm_node_text(ctx->arena, name, ctx->source),
+            .type_name = type_name,
+            .enclosing_func_qn = scope,
+            /* No annotation: the type is the one the initializer call constructs. */
+            .constructed = type_name && initializer_call && ts_node_is_null(type),
+            .decl_end_byte = ts_node_end_byte(node),
+        };
+        /* A parameter's block is its function; a local's is its statements. */
+        TSNode block = ts_node_parent(node);
+        if (!ts_node_is_null(block)) {
+            assignment.scope_end_byte = ts_node_end_byte(block);
+        }
+        if (initializer_call) {
+            assignment.value_start_byte = ts_node_start_byte(value);
+            assignment.value_end_byte = ts_node_end_byte(value);
+        }
+        cbm_typeassign_push(&ctx->result->type_assigns, ctx->arena, assignment);
+    }
+}

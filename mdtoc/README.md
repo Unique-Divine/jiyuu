@@ -12,10 +12,12 @@ packages from Bun's runtime auto-install cache.
 ## Install
 
 ```sh
-bun add --global @uniquedivine/ud-mdtoc@0.1.0
+bun add --global @uniquedivine/ud-mdtoc@latest
 ud-mdtoc --version
 ud-mdtoc --help
 ```
+
+Rerun the same `bun add --global` command to update to the newest release.
 
 The package ships TypeScript source and declares its runtime dependencies.
 Installing from npm installs those dependencies independently of a Jiyuu checkout.

@@ -14,13 +14,19 @@ cases. For each question, provide your recommended answer.
    instead. If the conversation or an existing document already answers the
    question, use that answer instead of asking again.
 
-3. Record decisions as the discussion progresses. If the user is working from an
+3. Apply agent skill `lexicon-domain-lang` throughout the drill. Use the terms
+   in the project's `LEXICON.md` files and challenge a word that conflicts
+   with them or covers two ideas. When the user settles a term, record it as
+   that skill describes, including its rules on when to ask first. A drill
+   often fails on words before it fails on decisions.
+
+4. Record decisions as the discussion progresses. If the user is working from an
    existing spec, plan, issue, or design document, write resolved answers back
    into that document iteratively. If there is no obvious document, create or
    propose a short notes/spec file. Follow agent skill `md-tasks` whenever the
    document contains tasks.
 
-4. Put implementation-bearing decisions in numbered top-level sections:
+5. Put implementation-bearing decisions in numbered top-level sections:
    `## Impl 1: <Sentence>`, `## Impl 2: <Sentence case>`, and so on. Start with `## Impl 1` even
    when the document has one implementation sequence. The numbers make the
    document easy to navigate. They do not impose delivery order. Use concise
@@ -34,7 +40,7 @@ cases. For each question, provide your recommended answer.
      -> result
    ```
 
-5. When recording an answer, capture the decision, rationale, relevant codebase
+6. When recording an answer, capture the decision, rationale, relevant codebase
    or operational context, and important caveats. 
    - Write a resolved decision as ordinary prose under its relevant `## Impl N`
    section. It's crucial not only to capture the decision but also take notes on
@@ -64,7 +70,7 @@ cases. For each question, provide your recommended answer.
 
    ↑ I'm using examples of my real preferences, btw.
 
-6. Continue drilling while material design ambiguity remains for the
+7. Continue drilling while material design ambiguity remains for the
    implementation sequence being handed off. Answered questions alone do not
    make that scope ready for implementation. When the design stabilizes:
    - Follow agent skill `md-tasks` for a final normalization pass.

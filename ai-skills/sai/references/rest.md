@@ -1,0 +1,252 @@
+# Sai REST and DexPal queries
+
+Use this reference for public DexPal REST endpoints—`/dexpal/v1/*`,
+`sai-api.nibiru.fi`, and health checks—when quick aggregate statistics, markets,
+yield, referrals, date-window metrics, or service status are preferable to
+GraphQL.
+
+## REST API guide
+
+This guide covers the **REST API** — DexPal aggregated metrics and feeds (`/dexpal/v1/*`, `/health`, `/`). Use it for quick stats and health checks.
+
+- [Selecting the Right API](#selecting-the-right-api)
+- [Available Endpoints](#available-endpoints)
+  - [24-Hour Time-Window Semantics](#24-hour-time-window-semantics)
+- [Usage Examples](#usage-examples)
+  - [GET /](#get-)
+  - [GET /dexpal/v1/stats](#get-dexpalv1stats)
+  - [GET /dexpal/v1/metrics](#get-dexpalv1metrics)
+  - [GET /dexpal/v1/referrals](#get-dexpalv1referrals)
+  - [GET /dexpal/v1/markets](#get-dexpalv1markets)
+  - [GET /dexpal/v1/markets/details](#get-dexpalv1marketsdetails)
+  - [GET /dexpal/v1/yield](#get-dexpalv1yield)
+  - [GET /health](#get-health)
+- [Hosts](#hosts)
+
+## Selecting the right API
+
+Use GraphQL for indexed entity history and subscriptions. Use this REST API for
+the aggregate response that its endpoint owns; neither interface is a
+replacement for live contract state.
+
+| Environment | URL |
+| ----------- | --- |
+| **Mainnet GraphQL** | https://sai-keeper.nibiru.fi |
+| **Testnet GraphQL** | https://sai-keeper.testnet-2.nibiru.fi |
+| **Mainnet** | https://sai-api.nibiru.fi |
+| **Testnet** | https://sai-api.testnet-2.nibiru.fi |
+
+For indexed trades, LP history, Oracle prices, referrals, and subscriptions,
+read [`graphql.md`](graphql.md).
+
+## Available endpoints
+
+| Path | Description |
+|------|-------------|
+| [/](#get-) | API info. Lists all queries. |
+| [/dexpal/v1/stats](#get-dexpalv1stats) | Detailed exchange statistics (volume 24h, OI, TVL, fees, etc.) |
+| [/dexpal/v1/referrals](#get-dexpalv1referrals) | DexPal referral reports |
+| [/dexpal/v1/markets/details](#get-dexpalv1marketsdetails) | Detailed market data for all trading pairs (volume 24h longs/shorts, OI, etc.) |
+| [/dexpal/v1/yield](#get-dexpalv1yield) | Yield earning opportunities (LP vaults) |
+| [/dexpal/v1/markets](#get-dexpalv1markets) | DexPal markets feed |
+| [/dexpal/v1/metrics](#get-dexpalv1metrics) | DexPal aggregate metrics |
+| [/health](#get-health) | Health check |
+
+### 24-hour time-window semantics
+
+- **`/dexpal/v1/stats`**: live metrics use daily aggregate tables. The Keeper
+  query implementation selects recent date buckets (for example,
+  `current_date - 1` for several 24-hour aggregates) and caches the assembled
+  response for two minutes. It is not a rolling wall-clock window.
+- **`/dexpal/v1/markets/details`**: its service calculates a separate
+  24-hour market view. Do not assume it shares an anchor with `/stats`;
+  compare the two only after checking each endpoint's response for the same
+  day.
+
+## Usage examples
+
+Examples use `curl -s`; the `-s` (silent) flag suppresses curl progress output so piping to `jq` works cleanly.
+
+### GET /
+
+**Request:**
+```bash
+curl -s https://sai-api.nibiru.fi/ | jq .
+```
+
+**Response shape:**
+```json
+{
+  "service": "Sai: Stats API",
+  "version": "1.0.0",
+  "endpoints": {
+    "/dexpal/v1/markets": "GET - DexPal markets feed",
+    "/dexpal/v1/metrics": "GET - DexPal aggregate metrics",
+    "/dexpal/v1/stats": "GET - Detailed exchange statistics",
+    "/dexpal/v1/markets/details": "GET - Detailed market data for all trading pairs",
+    "/dexpal/v1/yield": "GET - Yield earning opportunities data",
+    "/dexpal/v1/referrals": "GET - DexPal referral reports",
+    "/health": "GET - Health check"
+  }
+}
+```
+
+### GET /dexpal/v1/stats
+
+**Request:**
+```bash
+# Live statistics (current window)
+curl -s https://sai-api.nibiru.fi/dexpal/v1/stats | jq .
+
+# Historical statistics for a specific date
+curl -s "https://sai-api.nibiru.fi/dexpal/v1/stats?date=2026-02-25" | jq .
+```
+
+**Query parameters:**
+- `date` (optional): The date for which to retrieve statistics in `YYYY-MM-DD` format (UTC).
+  - Omitted or `date=today`: Returns live exchange statistics.
+  - Past date: Returns historical aggregate statistics for that specific day.
+  - Future date: Returns a `400 Bad Request` error.
+  - Invalid format: Returns a `400 Bad Request` error.
+
+**Response shape:**
+```json
+{
+  "trading_volume_24h": 2584.5,
+  "trading_volume_all_time": 200418.54,
+  "total_trades_24h": 11,
+  "total_trades_all_time": 488,
+  "open_interest": 0,
+  "total_users_24h": 6,
+  "total_users_all_time": 39,
+  "total_open_positions": 31,
+  "tvl": 357801.98,
+  "accrued_trading_fees_24h": 128.86,
+  "accrued_trading_fees_all_time": 1949.43
+}
+```
+For a historical `date`, the handler returns historical aggregates; `tvl` and
+`total_open_positions` are absent or `null` because the historical calculator
+does not populate them.
+
+### GET /dexpal/v1/metrics
+
+**Request:**
+```bash
+curl -s https://sai-api.nibiru.fi/dexpal/v1/metrics | jq .
+```
+
+**Response shape:**
+```json
+{
+  "volume_24h": 2256.93,
+  "open_interest_24h": 251.9,
+  "fees_24h": 2.2,
+  "volume_all_time": 200418.54,
+  "tvl": 357801.98,
+  "traders_24h": 4,
+  "timestamp": "2026-02-18T23:33:04.883348856Z"
+}
+```
+
+### GET /dexpal/v1/referrals
+
+**Request:**
+```bash
+curl -s https://sai-api.nibiru.fi/dexpal/v1/referrals | jq .
+```
+
+**Response shape:**
+```json
+{
+  "reports": null
+}
+```
+The `reports` field can be `null` or an array of report objects.
+
+### GET /dexpal/v1/markets
+
+**Request:**
+```bash
+curl -s https://sai-api.nibiru.fi/dexpal/v1/markets | jq .
+```
+
+**Response shape:**
+```json
+{
+  "markets": [],
+  "timestamp": "2026-02-19T00:15:27.502648961Z"
+}
+```
+
+### GET /dexpal/v1/markets/details
+
+**Request:**
+```bash
+curl -s https://sai-api.nibiru.fi/dexpal/v1/markets/details | jq .
+```
+
+**Response shape:**
+```json
+{
+  "markets": null
+}
+```
+The `markets` field can be `null` or an array. Treat the displayed values as
+illustrative shapes, not current market data.
+
+### GET /dexpal/v1/yield
+
+**Request:**
+```bash
+curl -s https://sai-api.nibiru.fi/dexpal/v1/yield | jq .
+```
+
+**Response shape:**
+```json
+{
+  "yield_opportunities": [
+    {
+      "name": "SAI Liquidity Vault - nibi1m...kfej",
+      "type": "vault",
+      "description": "Provide liquidity to SAI perpetual futures trading and earn yield from trading fees and protocol revenue. Epoch-based withdrawals ensure stable liquidity.",
+      "network": "nibiru",
+      "contract_address": "nibi1mrplvu3scplnrgns96kg0j8pk3l2p9c7eaz0qdedx0kt3vmcujyqrjkfej",
+      "accepted_deposits": ["stnibi", "usdc"],
+      "tvl": 356356.08,
+      "average_apy": 0.06,
+      "reward_token": "NUSD",
+      "reward_frequency": "per_block",
+      "min_deposit": 10,
+      "max_deposit": 1000000,
+      "withdrawal_lockup_days": 9,
+      "early_withdrawal_penalty": 0,
+      "date_listed": "2025-12-19T19:29:05.788346Z",
+      "details_link": "<URL of the vault page>"
+    }
+  ]
+}
+```
+
+### GET /health
+
+**Request:**
+```bash
+curl -s https://sai-api.nibiru.fi/health
+```
+(Plain text response; omit jq.)
+
+**Response shape:**
+```
+OK
+```
+
+## Hosts
+
+GraphQL and REST use separate hosts: `sai-keeper.*` serves GraphQL
+([graphql.md](graphql.md)), and `sai-api.*` serves this REST API.
+
+| Network | REST host |
+| --- | --- |
+| Mainnet | `https://sai-api.nibiru.fi` |
+| Testnet2 | `https://sai-api.testnet-2.nibiru.fi` |

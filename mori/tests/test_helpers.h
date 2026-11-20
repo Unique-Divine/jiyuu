@@ -1,0 +1,262 @@
+/*
+ * test_helpers.h — Cross-platform test fixture helpers.
+ *
+ * Replaces system("rm -rf"), system("mkdir -p && echo >"), chmod(),
+ * and hardcoded /tmp/ paths with portable C implementations.
+ * Uses compat.h/compat_fs.h underneath — same abstraction layer
+ * as production code.
+ *
+ * All functions are static inline to avoid linker issues when
+ * included from multiple test files.
+ */
+#ifndef TEST_HELPERS_H
+#define TEST_HELPERS_H
+
+#include "../src/foundation/compat.h"
+#include "../src/foundation/compat_fs.h"
+#include "../src/foundation/platform.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#ifdef _WIN32
+#include "../src/foundation/win_utf8.h"
+#endif
+
+/* ── Path building ────────────────────────────────────────────── */
+
+/* Build a path from base + relative. Uses a static buffer — not reentrant.
+ * Usage: th_write_file(TH_PATH(base, "src/main.go"), "content"); */
+#define TH_PATH(base, rel) th_path_join(base, rel)
+
+static inline const char *th_path_join(const char *base, const char *rel) {
+    static char buf[4][1024];
+    static int idx = 0;
+    int i = idx;
+    idx = (idx + 1) & 3;
+    snprintf(buf[i], sizeof(buf[i]), "%s/%s", base, rel);
+    return buf[i];
+}
+
+/* ── File writing ─────────────────────────────────────────────── */
+
+/* Write content to a file, creating parent directories as needed. */
+static inline int th_write_file(const char *path, const char *content) {
+    /* Create parent directories */
+    char dir[1024];
+    snprintf(dir, sizeof(dir), "%s", path);
+    char *last_slash = strrchr(dir, '/');
+#ifdef _WIN32
+    char *last_bslash = strrchr(dir, '\\');
+    if (last_bslash && (!last_slash || last_bslash > last_slash)) {
+        last_slash = last_bslash;
+    }
+#endif
+    if (last_slash) {
+        *last_slash = '\0';
+        cbm_mkdir_p(dir, 0755);
+    }
+
+    FILE *f = cbm_fopen(path, "wb");
+    if (!f) {
+        return -1;
+    }
+    if (content && content[0]) {
+        fputs(content, f);
+    }
+    fclose(f);
+    return 0;
+}
+
+/* Append content to a file. */
+static inline int th_append_file(const char *path, const char *content) {
+    FILE *f = cbm_fopen(path, "ab");
+    if (!f) {
+        return -1;
+    }
+    if (content && content[0]) {
+        fputs(content, f);
+    }
+    fclose(f);
+    return 0;
+}
+
+/* ── Directory creation ───────────────────────────────────────── */
+
+/* Create a directory and all parents. Returns 0 on success. */
+static inline int th_mkdir_p(const char *path) {
+    return cbm_mkdir_p(path, 0755) ? 0 : -1;
+}
+
+/* ── Recursive directory removal ──────────────────────────────── */
+
+/* Git for Windows marks loose objects read-only. Match rm -rf semantics in
+ * test cleanup without broadening production cbm_unlink behavior. */
+static inline int th_unlink_force(const char *path) {
+    int result = cbm_unlink(path);
+#ifdef _WIN32
+    if (result != 0) {
+        wchar_t *wide = cbm_path_to_wide(path);
+        DWORD attributes = wide ? GetFileAttributesW(wide) : INVALID_FILE_ATTRIBUTES;
+        if (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_READONLY) != 0U &&
+            SetFileAttributesW(wide, attributes & ~((DWORD)FILE_ATTRIBUTE_READONLY))) {
+            result = cbm_unlink(path);
+        }
+        free(wide);
+    }
+#endif
+    return result;
+}
+
+/* Remove a file or directory tree recursively. Cross-platform rm -rf. */
+static inline int th_rmtree(const char *path) {
+    /* The platform wrappers preserve UTF-8 and add the extended-length prefix
+     * on Windows; narrow CRT stat() silently treats paths beyond MAX_PATH as
+     * absent and leaves their parents nonempty. */
+    if (!cbm_file_exists(path)) {
+        return 0; /* doesn't exist — success */
+    }
+
+    if (!cbm_is_dir(path)) {
+        return th_unlink_force(path);
+    }
+
+    /* Directory — recurse into children */
+    cbm_dir_t *d = cbm_opendir(path);
+    if (!d) {
+        return -1;
+    }
+
+    cbm_dirent_t *entry;
+    int rc = 0;
+    while ((entry = cbm_readdir(d)) != NULL) {
+        if (strcmp(entry->name, ".") == 0 || strcmp(entry->name, "..") == 0) {
+            continue;
+        }
+        char child[1024];
+        snprintf(child, sizeof(child), "%s/%s", path, entry->name);
+        if (entry->is_dir) {
+            if (th_rmtree(child) != 0) {
+                rc = -1;
+            }
+        } else {
+            if (th_unlink_force(child) != 0) {
+                rc = -1;
+            }
+        }
+    }
+    cbm_closedir(d);
+    if (cbm_rmdir(path) != 0) {
+        rc = -1;
+    }
+    return rc;
+}
+
+/* ── Temp directory creation ──────────────────────────────────── */
+
+/* Create a temporary directory. Returns static buffer with path.
+ * Pattern: prefix is used as part of the dirname. */
+static inline char *th_mktempdir(const char *prefix) {
+    static char buf[256];
+#ifdef _WIN32
+    const char *tmp = getenv("TEMP");
+    if (!tmp)
+        tmp = getenv("TMP");
+    if (!tmp)
+        tmp = "C:\\Temp";
+    snprintf(buf, sizeof(buf), "%s\\%s_XXXXXX", tmp, prefix);
+#else
+    snprintf(buf, sizeof(buf), "/tmp/%s_XXXXXX", prefix);
+#endif
+    if (!cbm_mkdtemp(buf)) {
+        return NULL;
+    }
+    return buf;
+}
+
+/* Runtime IPC validates the complete Windows directory ancestry, so an MSYS2
+ * TEMP rooted under C:/msys64/tmp is intentionally unsuitable even when the
+ * leaf made by cbm_mkdtemp() has a private DACL. Keep these security-sensitive
+ * fixtures under LocalAppData on Windows; preserve the ordinary temporary-root
+ * behavior on POSIX. */
+static inline const char *th_secure_runtime_base(void) {
+#ifdef _WIN32
+    return cbm_app_local_dir();
+#else
+    return cbm_tmpdir();
+#endif
+}
+
+static inline bool th_secure_runtime_parent_new(char *out, size_t out_cap, const char *tag) {
+    if (!out || out_cap == 0 || !tag || !tag[0]) {
+        return false;
+    }
+    const char *base = th_secure_runtime_base();
+    if (!base || !base[0]) {
+        out[0] = '\0';
+        return false;
+    }
+    int written = snprintf(out, out_cap, "%s/cbm-runtime-%s-XXXXXX", base, tag);
+    if (written <= 0 || (size_t)written >= out_cap) {
+        out[0] = '\0';
+        return false;
+    }
+    return cbm_mkdtemp(out) != NULL;
+}
+
+/* ── File permissions (no-op on Windows) ──────────────────────── */
+
+/* Make a file executable. On Windows this is a no-op (all files are
+ * "executable" if they have the right extension). */
+static inline void th_make_executable(const char *path) {
+#ifndef _WIN32
+    chmod(path, 0755);
+#else
+    (void)path;
+#endif
+}
+
+/* ── Cleanup helper ───────────────────────────────────────────── */
+
+/* Remove a temp directory tree. Safe to call with NULL. */
+static inline void th_cleanup(const char *path) {
+    if (path && path[0]) {
+        th_rmtree(path);
+    }
+}
+
+/* ── Inherited git repository environment (#2003) ─────────────── */
+
+/* Git exports repository-local variables into hooks (GIT_DIR, GIT_INDEX_FILE,
+ * ...), and they take precedence over `git -C <dir>`. A test runner started
+ * from a pre-commit hook (or any shell with GIT_DIR set) would otherwise point
+ * every fixture's git command at the caller's real repository: branches and
+ * worktrees get created there and fixture assertions fail. This is the list
+ * `git rev-parse --local-env-vars` prints; runners clear it once at startup so
+ * every spawned git (and every re-exec'd child) scopes to its fixture. */
+static const char *const th_git_repo_env_vars[] = {
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CONFIG",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_GRAFT_FILE",
+    "GIT_INDEX_FILE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_PREFIX",
+    "GIT_SHALLOW_FILE",
+    "GIT_COMMON_DIR",
+};
+
+static inline void th_clear_git_repo_env(void) {
+    for (size_t i = 0U; i < sizeof(th_git_repo_env_vars) / sizeof(th_git_repo_env_vars[0]); i++) {
+        (void)cbm_unsetenv(th_git_repo_env_vars[i]);
+    }
+}
+
+#endif /* TEST_HELPERS_H */

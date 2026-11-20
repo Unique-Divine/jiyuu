@@ -47,7 +47,13 @@ from telethon.tl.types import (
 import re
 from functools import wraps
 import telethon.errors.rpcerrorlist
-from sanitize import sanitize_user_content, sanitize_name, sanitize_dict, format_tool_result
+from sanitize import (
+    format_tool_result,
+    json_result,
+    sanitize_dict,
+    sanitize_name,
+    sanitize_user_content,
+)
 from telegram_mcp.client_identity import client_identity_kwargs
 from telegram_mcp.request_policy import (
     CLIENT_FLOOD_SLEEP_THRESHOLD,
@@ -404,13 +410,40 @@ def is_multi_mode() -> bool:
     return len(clients) > 1
 
 
-def with_account(readonly=False):
+def _parse_json_container(text: Any) -> Any:
+    """Return the JSON object or array ``text`` encodes, or None."""
+    if not isinstance(text, str):
+        return None
+    try:
+        value = json.loads(text)
+    except ValueError:
+        return None
+    return value if isinstance(value, (dict, list)) else None
+
+
+def json_account_entry(label: str, result: Any) -> Dict[str, Any]:
+    """Return one account's entry in a JSON fan-out envelope.
+
+    A JSON result goes under ``result``. A plain-text error, or the JSON
+    ``error`` object of a rate limit or timeout, goes under ``error``.
+    """
+    value = _parse_json_container(result)
+    if value is None:
+        return {"account": label, "error": result}
+    if isinstance(value, dict) and set(value) == {"error"}:
+        return {"account": label, "error": value["error"]}
+    return {"account": label, "result": value}
+
+
+def with_account(readonly=False, json_results=False):
     """Decorator that adds multi-account support to MCP tools.
 
     - In single-mode: always uses the sole client, no output tagging.
     - In multi-mode with explicit account: uses that account's client.
     - In multi-mode without account + readonly: fans out to all accounts
-      concurrently, prefixes each result with [label], concatenates.
+      concurrently, prefixes each result with [label], concatenates. With
+      ``json_results=True``, returns ``{"accounts": [...]}`` instead, one
+      entry per account from ``json_account_entry``.
     - In multi-mode without account + NOT readonly: returns an error.
 
     The wrapped function must accept ``account: str | None = None`` and use
@@ -438,6 +471,10 @@ def with_account(readonly=False):
                 return label, await fn(*args, **kw)
 
             results = await asyncio.gather(*(_call_for(label) for label in clients))
+            if json_results:
+                return json_result(
+                    {"accounts": [json_account_entry(label, r) for label, r in results]}
+                )
             return "\n\n".join(f"[{label}]\n{result}" for label, result in results)
 
         return wrapper

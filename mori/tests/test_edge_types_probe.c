@@ -1,0 +1,5015 @@
+/*
+ * test_edge_types_probe.c — Reproduce-first probe of LESS-COMMON edge types.
+ *
+ * GREEN  = works; kept as regression guard.
+ * RED    = found bug (edge not produced); kept as reproduction until fixed.
+ *
+ * Probed edge types (broadened from P6 in test_lang_contract.c):
+ *   HANDLES    — route→handler across web frameworks (Express/Fastify TS, FastAPI/Django,
+ *                Go net/http + Gin, Spring Java, ASP.NET C#, Laravel PHP, Rails Ruby,
+ *                Actix/Axum Rust).
+ *   HTTP_CALLS — outbound HTTP client call (fetch JS, axios TS, requests Python,
+ *                net/http Go, HttpClient Java, RestSharp C#, HTTParty Ruby, Guzzle PHP,
+ *                reqwest Rust).
+ *   ASYNC_CALLS— queue/pubsub dispatch (Celery Python, Sidekiq Ruby, kafkajs TS,
+ *                amazon-sqs-go Go, BullMQ JS).
+ *   THROWS     — function throws/raises a checked exception (Java, Kotlin, Python,
+ *                TypeScript, PHP, C#, Scala). Checked = no "Error"/"Panic" in name.
+ *   RAISES     — function raises a runtime error/panic (Python, Kotlin, TypeScript,
+ *                C#, PHP). Unchecked = name contains "Error"/"Panic".
+ *   WRITES     — variable assignment resolved across function boundary (Python, Go, Rust,
+ *                Java, C#, Kotlin). WRITES/READS are parallel-path only (>50 files).
+ *   DEFINES_METHOD — class→method across languages (Go, Rust, Java, C#, PHP, Ruby,
+ *                    Kotlin, TypeScript, Scala).
+ *   OVERRIDE   — Go interface satisfaction (method overrides interface method).
+ *                Parallel-path only (>50 files).
+ *
+ * Edge types that do NOT exist in the schema and are explicitly not probed:
+ *   RETURNS / RETURNS_TYPE — no such edge type in the production schema (confirmed
+ *     by searching ALL_EDGE_TYPES in test_lang_contract.c and the cli.c edge list).
+ *   DATA_FLOWS — already guarded in test_lang_contract.c (contract_edge_data_flows).
+ *
+ * Path notes:
+ *   SEQUENTIAL path (< 50 files): HANDLES, HTTP_CALLS, ASYNC_CALLS, DEFINES_METHOD,
+ *     THROWS, RAISES are produced in pass_calls.c / pass_usages.c.
+ *   PARALLEL path (≥ 50 files via index_parallel_fixture): WRITES, OVERRIDE and the
+ *     parallel variants of THROWS/RAISES/USAGE are exercised here.
+ *
+ * Registration: NOT registered in test_main.c (per task specification).
+ * Run standalone: link the suite and call suite_edge_types_probe() from a main().
+ */
+
+#include "../src/foundation/compat.h"
+#include "test_framework.h"
+#include "test_helpers.h"
+#include "cbm.h"
+#include "service_patterns.h"
+#include <mcp/mcp.h>
+#include <store/store.h>
+#include <pipeline/pipeline.h>
+#include <pipeline/pipeline_internal.h>
+#include <foundation/log.h>
+#include <sqlite3.h>
+
+#include <string.h>
+#include <stdlib.h>
+#include <time.h>
+#include <stdio.h>
+#include <unistd.h>
+#include <sys/stat.h>
+
+/* ── Fixture harness (mirrors test_lang_contract.c) ──────────────────────── */
+
+typedef struct {
+    char tmpdir[256];
+    char dbpath[512];
+    char *project;
+    cbm_mcp_server_t *srv;
+} EtProj;
+
+typedef struct {
+    const char *name;
+    const char *content;
+} EtFile;
+
+static void et_to_fwd_slashes(char *p) {
+    for (; *p; p++) {
+        if (*p == '\\') *p = '/';
+    }
+}
+
+/* Write files, then run index_repository and open the graph DB. */
+static cbm_store_t *et_index_files(EtProj *lp, const EtFile *files, int nfiles) {
+    memset(lp, 0, sizeof(*lp));
+    snprintf(lp->tmpdir, sizeof(lp->tmpdir), "/tmp/cbm_et_XXXXXX");
+    if (!cbm_mkdtemp(lp->tmpdir)) return NULL;
+    et_to_fwd_slashes(lp->tmpdir);
+
+    for (int i = 0; i < nfiles; i++) {
+        char path[700];
+        snprintf(path, sizeof(path), "%s/%s", lp->tmpdir, files[i].name);
+        char *slash = strrchr(path, '/');
+        if (slash && slash > path + strlen(lp->tmpdir)) {
+            *slash = '\0';
+            cbm_mkdir_p(path, 0755);
+            *slash = '/';
+        }
+        FILE *f = fopen(path, "wb");
+        if (!f) return NULL;
+        fputs(files[i].content, f);
+        fclose(f);
+    }
+
+    lp->project = cbm_project_name_from_path(lp->tmpdir);
+    if (!lp->project) return NULL;
+
+    const char *home = getenv("HOME");
+    if (!home) home = "/tmp";
+    char cache_dir[512];
+    snprintf(cache_dir, sizeof(cache_dir), "%s/.cache/codebase-memory-mcp", home);
+    cbm_mkdir(cache_dir);
+    snprintf(lp->dbpath, sizeof(lp->dbpath), "%s/%s.db", cache_dir, lp->project);
+    unlink(lp->dbpath);
+
+    lp->srv = cbm_mcp_server_new(NULL);
+    if (!lp->srv) return NULL;
+
+    char args[700];
+    snprintf(args, sizeof(args), "{\"repo_path\":\"%s\"}", lp->tmpdir);
+    char *resp = cbm_mcp_handle_tool(lp->srv, "index_repository", args);
+    if (resp) free(resp);
+
+    return cbm_store_open_path(lp->dbpath);
+}
+
+static void et_cleanup(EtProj *lp, cbm_store_t *store) {
+    if (store) cbm_store_close(store);
+    if (lp->srv) { cbm_mcp_server_free(lp->srv); lp->srv = NULL; }
+    free(lp->project); lp->project = NULL;
+    th_rmtree(lp->tmpdir);
+    unlink(lp->dbpath);
+    char wal[600], shm[600];
+    snprintf(wal, sizeof(wal), "%s-wal", lp->dbpath);
+    snprintf(shm, sizeof(shm), "%s-shm", lp->dbpath);
+    unlink(wal); unlink(shm);
+}
+
+/* Assert edge_type count >= floor; dump diagnostic on failure. */
+static int et_edge_present(const EtFile *files, int nfiles, const char *edge, int floor) {
+    EtProj lp;
+    cbm_store_t *store = et_index_files(&lp, files, nfiles);
+    int got = store ? cbm_store_count_edges_by_type(store, lp.project, edge) : -1;
+    if (got < floor) {
+        fprintf(stderr, "  [ET-EDGE] FAIL %-20s count=%d expected>=%d\n", edge, got, floor);
+    }
+    et_cleanup(&lp, store);
+    return got >= floor;
+}
+
+enum { ET_ROUTE_ASSERT_MAX = 16 };
+
+static cbm_store_t *et_index_parallel(EtProj *lp, const EtFile *meaningful, int n_mean);
+
+/* Assert the exact Route node set. Edge-count smoke tests cannot catch partial
+ * Spring paths such as "/orders" when the real route is "/api/orders", and a
+ * presence-only assertion would still allow stale partial Route nodes to leak.
+ * parallel pads the fixture past MIN_FILES_FOR_PARALLEL so the parallel
+ * resolver mints the routes; must_qn (optional) is a Route qualified_name that
+ * must exist -- the identity cross-repo HTTP matching joins on. */
+static int et_routes_exact_mode(const EtFile *files, int nfiles, const char **routes,
+                                bool parallel, const char *must_qn) {
+    EtProj lp;
+    cbm_store_t *store =
+        parallel ? et_index_parallel(&lp, files, nfiles) : et_index_files(&lp, files, nfiles);
+    cbm_node_t *nodes = NULL;
+    int node_count = 0;
+    int wanted = 0;
+    int found[ET_ROUTE_ASSERT_MAX] = {0};
+    int ok = store != NULL;
+
+    while (routes[wanted] && wanted < ET_ROUTE_ASSERT_MAX) {
+        wanted++;
+    }
+    if (routes[wanted]) {
+        ok = 0;
+    }
+
+    if (!store || cbm_store_find_nodes_by_label(store, lp.project, "Route", &nodes, &node_count) !=
+                      CBM_STORE_OK) {
+        ok = 0;
+    } else {
+        if (node_count != wanted) {
+            ok = 0;
+        }
+        for (int wi = 0; wi < wanted; wi++) {
+            for (int ni = 0; ni < node_count; ni++) {
+                if (nodes[ni].name && strcmp(nodes[ni].name, routes[wi]) == 0) {
+                    found[wi] = 1;
+                    break;
+                }
+            }
+            if (!found[wi]) {
+                ok = 0;
+            }
+        }
+    }
+
+    if (!ok) {
+        fprintf(stderr, "  [ET-ROUTE] FAIL expected=%d actual=%d missing:", wanted, node_count);
+        for (int wi = 0; wi < wanted; wi++) {
+            if (!found[wi]) {
+                fprintf(stderr, " %s", routes[wi]);
+            }
+        }
+        fprintf(stderr, " available:");
+        for (int ni = 0; ni < node_count && ni < ET_ROUTE_ASSERT_MAX; ni++) {
+            fprintf(stderr, " %s", nodes[ni].name ? nodes[ni].name : "<null>");
+        }
+        fprintf(stderr, "\n");
+    }
+
+    if (store && must_qn) {
+        cbm_node_t qn_node;
+        memset(&qn_node, 0, sizeof(qn_node));
+        if (cbm_store_find_node_by_qn(store, lp.project, must_qn, &qn_node) != CBM_STORE_OK) {
+            fprintf(stderr, "  [ET-ROUTE] FAIL missing qualified_name %s\n", must_qn);
+            ok = 0;
+        } else {
+            cbm_node_free_fields(&qn_node);
+        }
+    }
+
+    cbm_store_free_nodes(nodes, node_count);
+    et_cleanup(&lp, store);
+    return ok;
+}
+
+static int et_routes_exact(const EtFile *files, int nfiles, const char **routes) {
+    return et_routes_exact_mode(files, nfiles, routes, false, NULL);
+}
+
+/* Index meaningful[] plus PARALLEL_PAD_FILES trivial pad files to force the
+ * parallel pipeline path (MIN_FILES_FOR_PARALLEL = 50). */
+enum { ET_PARALLEL_PAD = 52, ET_PAD_MAX = 68 /* 52 pad + 16 meaningful */ };
+
+static cbm_store_t *et_index_parallel(EtProj *lp, const EtFile *meaningful, int n_mean) {
+    static char pad_name[ET_PARALLEL_PAD][48];
+    static char pad_body[ET_PARALLEL_PAD][64];
+    EtFile files[ET_PAD_MAX] = {0};
+    int n = 0;
+    for (int i = 0; i < n_mean; i++) files[n++] = meaningful[i];
+    for (int i = 0; i < ET_PARALLEL_PAD; i++) {
+        snprintf(pad_name[i], sizeof(pad_name[i]), "pad/pad_%02d.py", i);
+        snprintf(pad_body[i], sizeof(pad_body[i]), "def pad_%02d():\n    return %d\n", i, i);
+        files[n].name    = pad_name[i];
+        files[n].content = pad_body[i];
+        n++;
+    }
+    return et_index_files(lp, files, n);
+}
+
+/* #598: a call that resolves to a GraphQL client used to name its Route after
+ * the WHOLE operation text (minus a leading "query "/"mutation "), so an
+ * anonymous `query { ... }` became one long Route and even a named operation
+ * carried its variables and selection set in the name. GraphQL Routes are now
+ * keyed by operation name only; anonymous operations share one bounded key per
+ * operation type. The Route set is asserted exactly (QN + name). Parallel path
+ * only: GRAPHQL_CALLS is emitted by pass_parallel.c. */
+typedef struct {
+    const char *qn;
+    const char *name;
+} EtGqlRoute;
+
+static int et_graphql_routes_exact(const EtFile *files, int nfiles, const EtGqlRoute *want,
+                                   int nwant) {
+    EtProj lp;
+    cbm_store_t *store = et_index_parallel(&lp, files, nfiles);
+    cbm_node_t *nodes = NULL;
+    int node_count = 0;
+    int ok = store != NULL;
+    int got = 0;
+    if (!store || cbm_store_find_nodes_by_label(store, lp.project, "Route", &nodes, &node_count) !=
+                      CBM_STORE_OK) {
+        ok = 0;
+    }
+    for (int ni = 0; nodes && ni < node_count; ni++) {
+        const char *qn = nodes[ni].qualified_name ? nodes[ni].qualified_name : "";
+        const char *name = nodes[ni].name ? nodes[ni].name : "";
+        if (strncmp(qn, "__graphql__", 11) != 0) {
+            continue;
+        }
+        got++;
+        int matched = 0;
+        for (int wi = 0; wi < nwant; wi++) {
+            if (strcmp(qn, want[wi].qn) == 0 && strcmp(name, want[wi].name) == 0) {
+                matched = 1;
+                break;
+            }
+        }
+        /* Operation text (selection sets, variables) must never leak into a key. */
+        if (!matched || strchr(qn, '{') || strchr(name, '{') || strlen(qn) > 160) {
+            fprintf(stderr, "  [ET-GQL] unexpected Route qn='%s' name='%s'\n", qn, name);
+            ok = 0;
+        }
+    }
+    if (got != nwant) {
+        fprintf(stderr, "  [ET-GQL] FAIL graphql routes expected=%d actual=%d\n", nwant, got);
+        ok = 0;
+    }
+    int edges = store ? cbm_store_count_edges_by_type(store, lp.project, "GRAPHQL_CALLS") : -1;
+    if (edges < nwant) {
+        fprintf(stderr, "  [ET-GQL] FAIL GRAPHQL_CALLS=%d expected>=%d\n", edges, nwant);
+        ok = 0;
+    }
+    cbm_store_free_nodes(nodes, node_count);
+    et_cleanup(&lp, store);
+    return ok;
+}
+
+TEST(graphql_route_keyed_by_operation_name_issue598) {
+    static const EtFile f[] = {
+        {"graphql/client.py", "def gql(query):\n    return query\n"},
+        {"api/ops.py",
+         "from graphql.client import gql\n\n\n"
+         "def get_user():\n"
+         "    return gql('query GetUser($id: ID!) { user(id: $id) { name } }')\n\n\n"
+         "def update_user():\n"
+         "    return gql('mutation UpdateUser($id: ID!) { updateUser(id: $id) { id } }')\n\n\n"
+         "def list_users():\n"
+         "    return gql('fragment U on User { id } query ListUsers { users { ...U } }')\n\n\n"
+         "def on_event():\n"
+         "    return gql('subscription OnEvent { event { id } }')\n\n\n"
+         "def products():\n"
+         "    return gql('query { products(search: \"x\") { items { sku } } }')\n\n\n"
+         "def orders():\n"
+         "    return gql('{ orders { id total } }')\n\n\n"
+         "def logout():\n"
+         "    return gql('mutation { logout }')\n"}};
+    static const EtGqlRoute want[] = {
+        {"__graphql__GetUser", "GetUser"},
+        {"__graphql__UpdateUser", "UpdateUser"},
+        {"__graphql__ListUsers", "ListUsers"},
+        {"__graphql__OnEvent", "OnEvent"},
+        /* products + orders: `query { }` and the `{ }` shorthand are both
+         * anonymous queries and share one key. */
+        {"__graphql__query__anonymous", "(anonymous query)"},
+        {"__graphql__mutation__anonymous", "(anonymous mutation)"},
+        /* Field-path Routes, keyed by root type and at most two fields. */
+        {"__graphql__Query.user", "Query.user"},
+        {"__graphql__Query.user.name", "Query.user.name"},
+        {"__graphql__Mutation.updateUser", "Mutation.updateUser"},
+        {"__graphql__Mutation.updateUser.id", "Mutation.updateUser.id"},
+        {"__graphql__Query.users", "Query.users"},
+        {"__graphql__Subscription.event", "Subscription.event"},
+        {"__graphql__Subscription.event.id", "Subscription.event.id"},
+        {"__graphql__Query.products", "Query.products"},
+        {"__graphql__Query.products.items", "Query.products.items"},
+        {"__graphql__Query.orders", "Query.orders"},
+        {"__graphql__Query.orders.id", "Query.orders.id"},
+        {"__graphql__Query.orders.total", "Query.orders.total"},
+        {"__graphql__Mutation.logout", "Mutation.logout"},
+    };
+    ASSERT_TRUE(et_graphql_routes_exact(f, (int)(sizeof(f) / sizeof(f[0])), want,
+                                        (int)(sizeof(want) / sizeof(want[0]))));
+    PASS();
+}
+
+/* GraphQL server side: field-path Routes from a gqlgen schema, handled by its
+ * resolver methods. Modeled on sai-keeper: schema files named *.graphqls, a
+ * `perp: Perp!` root field whose type's fields have their own resolvers
+ * (perpResolver), a deprecated field, a model-bound field with no resolver
+ * (HANDLES from the schema Field) and a subscription. Routes go one level
+ * below the root, so PerpTrade's fields appear only under
+ * Subscription.perpTrades (its root return type) and never under
+ * Query.perp.trades. gqlgen's generated resolver interfaces and a lookalike
+ * outside the resolver package must not be taken for the implementations. */
+static const EtFile et_gqlgen_files[] = {
+    {"go.mod", "module keeper\n"},
+    {"graph/query.graphqls",
+     "type Query {\n"
+     "  perp: Perp!\n"
+     "  appVersion: String!\n"
+     "  oldPing: String @deprecated(reason: \"Use appVersion instead.\")\n"
+     "}\n"},
+    {"graph/perp.graphqls",
+     "type Perp @goModel(model: \"keeper/graph/model.Perp\") {\n"
+     "  trades(trader: String, limit: Int): [PerpTrade!]!\n"
+     "  realizedPnl: Float @deprecated(reason: \"Use realizedPnlUsd.\")\n"
+     "  realizedPnlUsd: Float\n"
+     "}\n\n"
+     "type PerpTrade {\n"
+     "  id: ID!\n"
+     "  trader: String!\n"
+     "}\n"},
+    {"graph/subscription.graphqls",
+     "type Subscription {\n"
+     "  perpTrades(trader: String): [PerpTrade!]!\n"
+     "}\n"},
+    {"graph/model/models.go",
+     "package model\n\n"
+     "type Perp struct {\n\tRealizedPnlUsd *float64\n}\n\n"
+     "type PerpTrade struct {\n\tID     string\n\tTrader string\n}\n"},
+    /* gqlgen's generated interfaces: Methods named like the resolvers, on
+     * `PerpResolver` / `QueryResolver`, one directory nearer the schema. */
+    {"graph/generated.go",
+     "package graph\n\n"
+     "import (\n\t\"context\"\n\n\t\"keeper/graph/model\"\n)\n\n"
+     "type PerpResolver interface {\n"
+     "\tTrades(ctx context.Context, obj *model.Perp, trader *string, limit *int) "
+     "([]*model.PerpTrade, error)\n"
+     "\tRealizedPnl(ctx context.Context, obj *model.Perp) (*float64, error)\n}\n\n"
+     "type QueryResolver interface {\n"
+     "\tPerp(ctx context.Context) (*model.Perp, error)\n"
+     "\tAppVersion(ctx context.Context) (string, error)\n}\n"},
+    /* A package that is not gqlgen's resolver package (no *.resolvers.go)
+     * with a lookalike perpResolver.Trades, as near the schema as the real
+     * one: never a candidate. */
+    {"graph/legacy/perp.go",
+     "package legacy\n\n"
+     "type perpResolver struct{}\n\n"
+     "func (r *perpResolver) Trades() int {\n\treturn 0\n}\n"},
+    {"graph/resolver/resolver.go",
+     "package resolver\n\n"
+     "type Resolver struct{}\n\n"
+     "type queryResolver struct{ *Resolver }\n"
+     "type perpResolver struct{ *Resolver }\n"
+     "type subscriptionResolver struct{ *Resolver }\n"},
+    {"graph/resolver/query.resolvers.go",
+     "package resolver\n\n"
+     "import (\n\t\"context\"\n\n\t\"keeper/graph/model\"\n)\n\n"
+     "func (r *queryResolver) Perp(ctx context.Context) (*model.Perp, error) {\n"
+     "\treturn &model.Perp{}, nil\n}\n\n"
+     "func (r *queryResolver) AppVersion(ctx context.Context) (string, error) {\n"
+     "\treturn \"v1\", nil\n}\n"},
+    {"graph/resolver/perp.resolvers.go",
+     "package resolver\n\n"
+     "import (\n\t\"context\"\n\n\t\"keeper/graph/model\"\n)\n\n"
+     "func (r *perpResolver) Trades(ctx context.Context, obj *model.Perp, trader *string, "
+     "limit *int) ([]*model.PerpTrade, error) {\n"
+     "\treturn nil, nil\n}\n\n"
+     "func (r *perpResolver) RealizedPnl(ctx context.Context, obj *model.Perp) (*float64, "
+     "error) {\n"
+     "\treturn nil, nil\n}\n"},
+    {"graph/resolver/subscription.resolvers.go",
+     "package resolver\n\n"
+     "import (\n\t\"context\"\n\n\t\"keeper/graph/model\"\n)\n\n"
+     "func (r *subscriptionResolver) PerpTrades(ctx context.Context, trader *string) "
+     "(<-chan []*model.PerpTrade, error) {\n"
+     "\treturn nil, nil\n}\n"},
+};
+
+typedef struct {
+    const char *qn;
+    const char *schema_type;
+    const char *deprecated; /* "true" or "false" */
+    const char *reason;
+    const char *handler_label;
+    const char *handler_qn_suffix;
+    const char *via;
+    int ambiguous;
+} EtGqlServerRoute;
+
+static const EtGqlServerRoute et_gqlgen_want[] = {
+    {"__graphql__Query.perp", "Perp!", "false", "", "Method", ".resolver.queryResolver.Perp",
+     "gqlgen_resolver", 0},
+    {"__graphql__Query.perp.trades", "[PerpTrade!]!", "false", "", "Method",
+     ".resolver.perpResolver.Trades", "gqlgen_resolver", 0},
+    {"__graphql__Query.perp.realizedPnl", "Float", "true", "Use realizedPnlUsd.", "Method",
+     ".resolver.perpResolver.RealizedPnl", "gqlgen_resolver", 0},
+    {"__graphql__Query.perp.realizedPnlUsd", "Float", "false", "", "Field", ".Perp.realizedPnlUsd",
+     "graphql_schema_field", 0},
+    {"__graphql__Query.appVersion", "String!", "false", "", "Method",
+     ".resolver.queryResolver.AppVersion", "gqlgen_resolver", 0},
+    {"__graphql__Query.oldPing", "String", "true", "Use appVersion instead.", "Field",
+     ".Query.oldPing", "graphql_schema_field", 0},
+    {"__graphql__Subscription.perpTrades", "[PerpTrade!]!", "false", "", "Method",
+     ".resolver.subscriptionResolver.PerpTrades", "gqlgen_resolver", 0},
+    {"__graphql__Subscription.perpTrades.id", "ID!", "false", "", "Field", ".PerpTrade.id",
+     "graphql_schema_field", 0},
+    {"__graphql__Subscription.perpTrades.trader", "String!", "false", "", "Field",
+     ".PerpTrade.trader", "graphql_schema_field", 0},
+};
+
+#define ET_NWANT(w) ((int)(sizeof(w) / sizeof((w)[0])))
+
+static int et_ends_with(const char *s, const char *suffix) {
+    size_t sl = strlen(s);
+    size_t xl = strlen(suffix);
+    return sl >= xl && strcmp(s + sl - xl, suffix) == 0;
+}
+
+/* Check one Route row against the expected table; returns 1 on a match. */
+static int et_gqlgen_row_ok(const EtGqlServerRoute *want, int nwant, const char *qn,
+                            const char *rprops, const char *eprops, const char *hlabel,
+                            const char *hqn, int *seen) {
+    for (int wi = 0; wi < nwant; wi++) {
+        const EtGqlServerRoute *w = &want[wi];
+        if (strcmp(qn, w->qn) != 0) {
+            continue;
+        }
+        seen[wi]++;
+        char want_props[4096];
+        snprintf(want_props, sizeof(want_props),
+                 "{\"source\":\"graphql_schema\",\"schema_type\":\"%s\",\"deprecated\":%s,"
+                 "\"deprecation_reason\":\"%s\"%s}",
+                 w->schema_type, w->deprecated, w->reason,
+                 w->ambiguous ? ",\"ambiguous\":true" : "");
+        char want_via[64];
+        snprintf(want_via, sizeof(want_via), "\"via\":\"%s\"", w->via);
+        int ok = strcmp(rprops, want_props) == 0 && strstr(eprops, want_via) != NULL &&
+                 strcmp(hlabel, w->handler_label) == 0 && et_ends_with(hqn, w->handler_qn_suffix);
+        if (!ok) {
+            fprintf(stderr, "  [ET-GQLS] %s props=%s handles=%s from %s %s (want %s, %s %s)\n",
+                    qn, rprops, eprops, hlabel, hqn, want_props, w->handler_label, w->via);
+        }
+        return ok;
+    }
+    fprintf(stderr, "  [ET-GQLS] unexpected Route %s\n", qn);
+    return 0;
+}
+
+/* Every schema-sourced __graphql__ Route with each of its HANDLES edges:
+ * exactly the table, one handler per Route. */
+static int et_gqlgen_routes_exact(cbm_store_t *store, const char *project,
+                                  const EtGqlServerRoute *want, int nwant) {
+    int seen[64] = {0};
+    int ok = store != NULL && nwant <= 64;
+    sqlite3_stmt *st = NULL;
+    if (!ok ||
+        sqlite3_prepare_v2(cbm_store_get_db(store),
+                           "SELECT r.qualified_name, r.properties, IFNULL(e.properties,''), "
+                           "IFNULL(h.label,''), IFNULL(h.qualified_name,'') FROM nodes r "
+                           "LEFT JOIN edges e ON e.target_id = r.id AND e.type = 'HANDLES' "
+                           "LEFT JOIN nodes h ON h.id = e.source_id "
+                           "WHERE r.project = ?1 AND r.label = 'Route' "
+                           "AND substr(r.qualified_name, 1, 11) = '__graphql__'",
+                           -1, &st, NULL) != SQLITE_OK) {
+        return 0;
+    }
+    sqlite3_bind_text(st, 1, project, -1, SQLITE_STATIC);
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        const char *col[5];
+        for (int c = 0; c < 5; c++) {
+            col[c] = (const char *)sqlite3_column_text(st, c);
+            if (!col[c]) col[c] = "";
+        }
+        ok &= et_gqlgen_row_ok(want, nwant, col[0], col[1], col[2], col[3], col[4], seen);
+    }
+    sqlite3_finalize(st);
+    for (int wi = 0; wi < nwant; wi++) {
+        if (seen[wi] != 1) {
+            fprintf(stderr, "  [ET-GQLS] %s: %d HANDLES rows, want 1\n", want[wi].qn, seen[wi]);
+            ok = 0;
+        }
+    }
+    return ok;
+}
+
+static int et_gqlgen_case(const EtFile *files, int nfiles, int parallel,
+                          const EtGqlServerRoute *want, int nwant) {
+    EtProj lp;
+    cbm_store_t *store =
+        parallel ? et_index_parallel(&lp, files, nfiles) : et_index_files(&lp, files, nfiles);
+    int ok = et_gqlgen_routes_exact(store, lp.project, want, nwant);
+    et_cleanup(&lp, store);
+    return ok;
+}
+
+TEST(graphql_gqlgen_field_routes_sequential) {
+    ASSERT_TRUE(et_gqlgen_case(et_gqlgen_files, ET_NWANT(et_gqlgen_files), 0, et_gqlgen_want,
+                               ET_NWANT(et_gqlgen_want)));
+    PASS();
+}
+
+TEST(graphql_gqlgen_field_routes_parallel) {
+    ASSERT_TRUE(et_gqlgen_case(et_gqlgen_files, ET_NWANT(et_gqlgen_files), 1, et_gqlgen_want,
+                               ET_NWANT(et_gqlgen_want)));
+    PASS();
+}
+
+/* Two gqlgen servers in one project both define Query.ping: the Route is
+ * shared, so neither resolver may claim it. It is marked ambiguous and keeps
+ * one HANDLES, from the first schema's Field. Query.pong is also defined by
+ * a schema copy without resolvers (svc_c), but only svc_a resolves it: its
+ * resolver wins and the Route is not ambiguous. */
+static const EtFile et_gqlgen_multi_files[] = {
+    {"go.mod", "module multi\n"},
+    {"svc_a/graph/schema.graphqls", "type Query {\n  ping: String\n  pong: String\n}\n"},
+    {"svc_a/graph/schema.resolvers.go",
+     "package graph\n\n"
+     "type queryResolver struct{}\n\n"
+     "func (r *queryResolver) Ping() string {\n\treturn \"a\"\n}\n\n"
+     "func (r *queryResolver) Pong() string {\n\treturn \"a\"\n}\n"},
+    {"svc_b/graph/schema.graphqls", "type Query {\n  ping: String\n}\n"},
+    {"svc_b/graph/schema.resolvers.go",
+     "package graph\n\n"
+     "type queryResolver struct{}\n\n"
+     "func (r *queryResolver) Ping() string {\n\treturn \"b\"\n}\n"},
+    {"svc_c/schema.graphql", "type Query {\n  pong: String\n}\n"},
+};
+
+static const EtGqlServerRoute et_gqlgen_multi_want[] = {
+    {"__graphql__Query.ping", "String", "false", "", "Field", ".svc_a.graph.schema.Query.ping",
+     "graphql_schema_field", 1},
+    {"__graphql__Query.pong", "String", "false", "", "Method", ".svc_a.graph.queryResolver.Pong",
+     "gqlgen_resolver", 0},
+};
+
+TEST(graphql_gqlgen_duplicate_paths_one_handler) {
+    ASSERT_TRUE(et_gqlgen_case(et_gqlgen_multi_files, ET_NWANT(et_gqlgen_multi_files), 0,
+                               et_gqlgen_multi_want, ET_NWANT(et_gqlgen_multi_want)));
+    PASS();
+}
+
+/* `schema { query: RootQuery mutation: RootMutation }` names the roots, so
+ * the type called Query is an ordinary type here; Routes still say Query and
+ * Mutation (the operation), and the resolver follows the type name
+ * (rootQueryResolver). `extend type` blocks add fields to the root and to a
+ * child type from another file. */
+static const EtFile et_gqlgen_remap_files[] = {
+    {"go.mod", "module remap\n"},
+    {"graph/schema.graphqls",
+     "schema {\n  query: RootQuery\n  mutation: RootMutation\n}\n\n"
+     "type RootQuery {\n  ping: String\n}\n\n"
+     "type RootMutation {\n  save: Boolean\n}\n\n"
+     "type Query {\n  legacy: String\n}\n"},
+    {"graph/extra.graphqls",
+     "extend type RootQuery {\n  extra: Item\n}\n\n"
+     "type Item {\n  id: ID!\n}\n\n"
+     "extend type Item {\n  name: String\n}\n"},
+    {"graph/schema.resolvers.go",
+     "package graph\n\n"
+     "type rootQueryResolver struct{}\n\n"
+     "func (r *rootQueryResolver) Extra() int {\n\treturn 0\n}\n"},
+};
+
+static const EtGqlServerRoute et_gqlgen_remap_want[] = {
+    {"__graphql__Query.ping", "String", "false", "", "Field", ".RootQuery.ping",
+     "graphql_schema_field", 0},
+    {"__graphql__Query.extra", "Item", "false", "", "Method", ".graph.rootQueryResolver.Extra",
+     "gqlgen_resolver", 0},
+    {"__graphql__Query.extra.id", "ID!", "false", "", "Field", ".Item.id", "graphql_schema_field",
+     0},
+    {"__graphql__Query.extra.name", "String", "false", "", "Field", ".Item.name",
+     "graphql_schema_field", 0},
+    {"__graphql__Mutation.save", "Boolean", "false", "", "Field", ".RootMutation.save",
+     "graphql_schema_field", 0},
+};
+
+TEST(graphql_schema_remap_and_extensions) {
+    ASSERT_TRUE(et_gqlgen_case(et_gqlgen_remap_files, ET_NWANT(et_gqlgen_remap_files), 0,
+                               et_gqlgen_remap_want, ET_NWANT(et_gqlgen_remap_want)));
+    PASS();
+}
+
+/* Names and reasons have no length limit: a 600-byte reason and a 300-byte
+ * type name survive whole, and the long type still yields its child Route. */
+TEST(graphql_long_reason_and_type_name) {
+    char reason[601];
+    char type[301];
+    memset(reason, 'r', sizeof(reason) - 1);
+    reason[sizeof(reason) - 1] = '\0';
+    memset(type, 'T', sizeof(type) - 1);
+    type[sizeof(type) - 1] = '\0';
+    char schema[2048];
+    snprintf(schema, sizeof(schema),
+             "type Query {\n  big: %s @deprecated(reason: \"%s\")\n}\n\ntype %s {\n  id: ID\n}\n",
+             type, reason, type);
+    const EtFile files[] = {{"graph/schema.graphqls", schema}};
+    const EtGqlServerRoute want[] = {
+        {"__graphql__Query.big", type, "true", reason, "Field", ".Query.big",
+         "graphql_schema_field", 0},
+        {"__graphql__Query.big.id", "ID", "false", "", "Field", ".id", "graphql_schema_field", 0},
+    };
+    ASSERT_TRUE(et_gqlgen_case(files, 1, 0, want, ET_NWANT(want)));
+    PASS();
+}
+
+/* gqlgen configs decide ownership. Two servers, each with a gqlgen.yml whose
+ * follow-schema resolvers live in internal/resolvers (no directory relation
+ * to the schema, so only the config ties them). Both define Query.ping:
+ * ambiguous. alpha and beta resolve in their own server. svc_b's resolver
+ * package has a Gamma, but gamma is svc_a's field and svc_a has no resolver
+ * for it: the Field handles it, never the other server's method. */
+static const EtFile et_gqlgen_config_two_servers_files[] = {
+    {"go.mod", "module two\n"},
+    {"svc_a/gqlgen.yml",
+     "# server A\nschema:\n  - graph/*.graphqls\nresolver:\n  layout: follow-schema\n"
+     "  dir: internal/resolvers\n  package: resolvers\n"},
+    {"svc_a/graph/schema.graphqls",
+     "type Query {\n  ping: String\n  alpha: String\n  gamma: String\n}\n"},
+    {"svc_a/internal/resolvers/schema.resolvers.go",
+     "package resolvers\n\n"
+     "type queryResolver struct{}\n\n"
+     "func (r *queryResolver) Ping() string {\n\treturn \"a\"\n}\n\n"
+     "func (r *queryResolver) Alpha() string {\n\treturn \"a\"\n}\n"},
+    {"svc_b/gqlgen.yaml",
+     "schema: [\"graph/*.graphqls\"]\nresolver:\n  layout: follow-schema # per schema file\n"
+     "  dir: ./internal/resolvers\n"},
+    {"svc_b/graph/schema.graphqls", "type Query {\n  ping: String\n  beta: String\n}\n"},
+    {"svc_b/internal/resolvers/schema.resolvers.go",
+     "package resolvers\n\n"
+     "type queryResolver struct{}\n\n"
+     "func (r *queryResolver) Ping() string {\n\treturn \"b\"\n}\n\n"
+     "func (r *queryResolver) Beta() string {\n\treturn \"b\"\n}\n\n"
+     "func (r *queryResolver) Gamma() string {\n\treturn \"b\"\n}\n"},
+};
+
+static const EtGqlServerRoute et_gqlgen_config_two_servers_want[] = {
+    {"__graphql__Query.ping", "String", "false", "", "Field", ".svc_a.graph.schema.Query.ping",
+     "graphql_schema_field", 1},
+    {"__graphql__Query.alpha", "String", "false", "", "Method",
+     ".svc_a.internal.resolvers.queryResolver.Alpha", "gqlgen_resolver", 0},
+    {"__graphql__Query.beta", "String", "false", "", "Method",
+     ".svc_b.internal.resolvers.queryResolver.Beta", "gqlgen_resolver", 0},
+    {"__graphql__Query.gamma", "String", "false", "", "Field", ".svc_a.graph.schema.Query.gamma",
+     "graphql_schema_field", 0},
+};
+
+TEST(graphql_gqlgen_config_two_servers) {
+    ASSERT_TRUE(et_gqlgen_case(et_gqlgen_config_two_servers_files,
+                               ET_NWANT(et_gqlgen_config_two_servers_files), 0,
+                               et_gqlgen_config_two_servers_want,
+                               ET_NWANT(et_gqlgen_config_two_servers_want)));
+    PASS();
+}
+
+/* A config's schema set spans sibling directories: the `schema` definition
+ * in graph/schema/ names the root declared in graph/types/. The default
+ * single-file layout puts the resolvers in the configured filename
+ * (api/resolvers.go), which no file-name heuristic would find. */
+static const EtFile et_gqlgen_config_single_file_files[] = {
+    {"go.mod", "module single\n"},
+    {"gqlgen.yml", "schema:\n  - graph/**/*.graphqls\nresolver:\n  filename: api/resolvers.go\n"},
+    {"graph/schema/schema.graphqls", "schema {\n  query: RootQuery\n}\n"},
+    {"graph/types/query.graphqls",
+     "type RootQuery {\n  ping: String\n}\n\ntype Query {\n  legacy: String\n}\n"},
+    {"api/resolvers.go",
+     "package api\n\n"
+     "type rootQueryResolver struct{}\n\n"
+     "func (r *rootQueryResolver) Ping() string {\n\treturn \"p\"\n}\n"},
+};
+
+static const EtGqlServerRoute et_gqlgen_config_single_file_want[] = {
+    {"__graphql__Query.ping", "String", "false", "", "Method", ".api.rootQueryResolver.Ping",
+     "gqlgen_resolver", 0},
+};
+
+TEST(graphql_gqlgen_config_sibling_schema_single_file) {
+    ASSERT_TRUE(et_gqlgen_case(et_gqlgen_config_single_file_files,
+                               ET_NWANT(et_gqlgen_config_single_file_files), 0,
+                               et_gqlgen_config_single_file_want,
+                               ET_NWANT(et_gqlgen_config_single_file_want)));
+    PASS();
+}
+
+/* Without a config, a resolver package owns only schema files in its own
+ * directory, below it or one level below: svc_b's queryResolver.Ping shares
+ * nothing with svc_a's schema, so svc_a's ping keeps its Field. */
+static const EtFile et_gqlgen_lone_candidate_files[] = {
+    {"go.mod", "module lone\n"},
+    {"svc_a/graph/schema.graphqls", "type Query {\n  ping: String\n}\n"},
+    {"svc_b/graph/schema.graphqls", "type Query {\n  other: String\n}\n"},
+    {"svc_b/graph/schema.resolvers.go",
+     "package graph\n\n"
+     "type queryResolver struct{}\n\n"
+     "func (r *queryResolver) Ping() string {\n\treturn \"b\"\n}\n"},
+};
+
+static const EtGqlServerRoute et_gqlgen_lone_candidate_want[] = {
+    {"__graphql__Query.ping", "String", "false", "", "Field", ".svc_a.graph.schema.Query.ping",
+     "graphql_schema_field", 0},
+    {"__graphql__Query.other", "String", "false", "", "Field", ".svc_b.graph.schema.Query.other",
+     "graphql_schema_field", 0},
+};
+
+TEST(graphql_resolver_needs_ownership_without_config) {
+    ASSERT_TRUE(et_gqlgen_case(et_gqlgen_lone_candidate_files,
+                               ET_NWANT(et_gqlgen_lone_candidate_files), 0,
+                               et_gqlgen_lone_candidate_want,
+                               ET_NWANT(et_gqlgen_lone_candidate_want)));
+    PASS();
+}
+
+/* Without a config: a `schema` definition applies across its parent
+ * directory (graph/schema/ names the root in graph/types/), and gqlgen's
+ * single-file `resolver.go` in graph/ resolves it. */
+static const EtFile et_gqlgen_sibling_noconfig_files[] = {
+    {"go.mod", "module sibling\n"},
+    {"graph/schema/schema.graphqls", "schema {\n  query: RootQuery\n}\n"},
+    {"graph/types/query.graphqls",
+     "type RootQuery {\n  ping: String\n}\n\ntype Query {\n  legacy: String\n}\n"},
+    {"graph/resolver.go",
+     "package graph\n\n"
+     "type rootQueryResolver struct{}\n\n"
+     "func (r *rootQueryResolver) Ping() string {\n\treturn \"p\"\n}\n"},
+};
+
+static const EtGqlServerRoute et_gqlgen_sibling_noconfig_want[] = {
+    {"__graphql__Query.ping", "String", "false", "", "Method", ".graph.rootQueryResolver.Ping",
+     "gqlgen_resolver", 0},
+};
+
+TEST(graphql_sibling_schema_single_file_without_config) {
+    ASSERT_TRUE(et_gqlgen_case(et_gqlgen_sibling_noconfig_files,
+                               ET_NWANT(et_gqlgen_sibling_noconfig_files), 0,
+                               et_gqlgen_sibling_noconfig_want,
+                               ET_NWANT(et_gqlgen_sibling_noconfig_want)));
+    PASS();
+}
+
+/* gqlgen config paths are relative to the config and may climb out of its
+ * directory: service/gqlgen.yml names a `../schema` glob and a resolver
+ * package `../resolvers`. Both must match the repo-relative paths, or the
+ * config claims nothing and its resolver is never a candidate. A glob
+ * climbing above the repository is dropped. */
+static const EtFile et_gqlgen_parent_relative_files[] = {
+    {"go.mod", "module parent\n"},
+    {"service/gqlgen.yml",
+     "schema:\n  - ../schema/*.graphqls\n  - ../../../outside/*.graphqls\nresolver:\n"
+     "  layout: follow-schema\n  dir: ./../resolvers\n"},
+    {"schema/schema.graphqls", "type Query {\n  ping: String\n}\n"},
+    {"resolvers/schema.resolvers.go",
+     "package resolvers\n\n"
+     "type queryResolver struct{}\n\n"
+     "func (r *queryResolver) Ping() string {\n\treturn \"p\"\n}\n"},
+};
+
+static const EtGqlServerRoute et_gqlgen_parent_relative_want[] = {
+    {"__graphql__Query.ping", "String", "false", "", "Method", ".resolvers.queryResolver.Ping",
+     "gqlgen_resolver", 0},
+};
+
+TEST(graphql_gqlgen_config_parent_relative_paths) {
+    ASSERT_TRUE(et_gqlgen_case(et_gqlgen_parent_relative_files,
+                               ET_NWANT(et_gqlgen_parent_relative_files), 0,
+                               et_gqlgen_parent_relative_want,
+                               ET_NWANT(et_gqlgen_parent_relative_want)));
+    PASS();
+}
+
+/* gqlgen's default schema, when the config omits `schema`, is
+ * schema.graphql beside the config (codegen/config/config.go). api/'s config
+ * claims api/schema.graphql and resolves it in internal/resolver.go; a
+ * graph/ glob of .graphqls files is not its default. */
+static const EtFile et_gqlgen_default_schema_files[] = {
+    {"go.mod", "module defaults\n"},
+    {"api/gqlgen.yml", "resolver:\n  filename: internal/resolver.go\n"},
+    {"api/schema.graphql", "type Query {\n  ping: String\n}\n"},
+    {"api/internal/resolver.go",
+     "package internal\n\n"
+     "type queryResolver struct{}\n\n"
+     "func (r *queryResolver) Ping() string {\n\treturn \"p\"\n}\n"},
+};
+
+static const EtGqlServerRoute et_gqlgen_default_schema_want[] = {
+    {"__graphql__Query.ping", "String", "false", "", "Method", ".internal.queryResolver.Ping",
+     "gqlgen_resolver", 0},
+};
+
+TEST(graphql_gqlgen_config_default_schema) {
+    ASSERT_TRUE(et_gqlgen_case(et_gqlgen_default_schema_files,
+                               ET_NWANT(et_gqlgen_default_schema_files), 0,
+                               et_gqlgen_default_schema_want,
+                               ET_NWANT(et_gqlgen_default_schema_want)));
+    PASS();
+}
+
+/* gqlgen names a field's resolver method with templates.ToGo: `user_count`
+ * is resolved by UserCount and `account_id` by AccountID. */
+static const EtFile et_gqlgen_underscore_files[] = {
+    {"go.mod", "module under\n"},
+    {"graph/schema.graphqls", "type Query {\n  user_count: Int\n  account_id: ID\n}\n"},
+    {"graph/schema.resolvers.go",
+     "package graph\n\n"
+     "type queryResolver struct{}\n\n"
+     "func (r *queryResolver) UserCount() int {\n\treturn 0\n}\n\n"
+     "func (r *queryResolver) AccountID() string {\n\treturn \"\"\n}\n"},
+};
+
+static const EtGqlServerRoute et_gqlgen_underscore_want[] = {
+    {"__graphql__Query.user_count", "Int", "false", "", "Method", ".graph.queryResolver.UserCount",
+     "gqlgen_resolver", 0},
+    {"__graphql__Query.account_id", "ID", "false", "", "Method", ".graph.queryResolver.AccountID",
+     "gqlgen_resolver", 0},
+};
+
+TEST(graphql_gqlgen_underscored_field_resolver) {
+    ASSERT_TRUE(et_gqlgen_case(et_gqlgen_underscore_files, ET_NWANT(et_gqlgen_underscore_files), 0,
+                               et_gqlgen_underscore_want, ET_NWANT(et_gqlgen_underscore_want)));
+    PASS();
+}
+
+/* `extend schema { mutation: Actions }` in another file adds a root to the
+ * set's `schema` definition: Actions' fields are Mutation Routes. The type
+ * named Mutation is not a root, since the definition names the roots. */
+static const EtFile et_gqlgen_schema_extension_files[] = {
+    {"graph/schema.graphqls",
+     "schema {\n  query: Query\n}\n\ntype Query {\n  ping: String\n}\n\n"
+     "type Mutation {\n  legacy: Boolean\n}\n"},
+    {"graph/actions.graphqls",
+     "extend schema {\n  mutation: Actions\n}\n\ntype Actions {\n  save: Boolean\n}\n"},
+};
+
+static const EtGqlServerRoute et_gqlgen_schema_extension_want[] = {
+    {"__graphql__Query.ping", "String", "false", "", "Field", ".Query.ping",
+     "graphql_schema_field", 0},
+    {"__graphql__Mutation.save", "Boolean", "false", "", "Field", ".Actions.save",
+     "graphql_schema_field", 0},
+};
+
+TEST(graphql_schema_extension_roots) {
+    ASSERT_TRUE(et_gqlgen_case(et_gqlgen_schema_extension_files,
+                               ET_NWANT(et_gqlgen_schema_extension_files), 0,
+                               et_gqlgen_schema_extension_want,
+                               ET_NWANT(et_gqlgen_schema_extension_want)));
+    PASS();
+}
+
+/* A federation subgraph declares its root only as `extend type Query`, with
+ * no base `type Query` anywhere in its set: the extension declares the root,
+ * and its fields (and those of their return types) are Routes resolved by
+ * queryResolver. An extension-only non-root type works the same way. */
+static const EtFile et_gqlgen_extension_only_root_files[] = {
+    {"go.mod", "module fed\n"},
+    {"graph/schema.graphqls",
+     "extend type Query {\n  me: User\n}\n\ntype User @key(fields: \"id\") {\n  id: ID!\n}\n"},
+    {"graph/more.graphqls", "extend type Query {\n  ping: String\n}\n"},
+    {"graph/schema.resolvers.go",
+     "package graph\n\n"
+     "type queryResolver struct{}\n\n"
+     "func (r *queryResolver) Me() int {\n\treturn 0\n}\n"},
+};
+
+static const EtGqlServerRoute et_gqlgen_extension_only_root_want[] = {
+    {"__graphql__Query.me", "User", "false", "", "Method", ".graph.queryResolver.Me",
+     "gqlgen_resolver", 0},
+    {"__graphql__Query.me.id", "ID!", "false", "", "Field", ".User.id", "graphql_schema_field", 0},
+    {"__graphql__Query.ping", "String", "false", "", "Field", ".Query.ping",
+     "graphql_schema_field", 0},
+};
+
+TEST(graphql_extension_only_root_type) {
+    ASSERT_TRUE(et_gqlgen_case(et_gqlgen_extension_only_root_files,
+                               ET_NWANT(et_gqlgen_extension_only_root_files), 0,
+                               et_gqlgen_extension_only_root_want,
+                               ET_NWANT(et_gqlgen_extension_only_root_want)));
+    PASS();
+}
+
+/* gqlgen's ToGo keeps one '_' between two digits: `score0_1` is resolved
+ * by Score0_1 and `score01` by Score01, two distinct methods (dropping every
+ * '_' made both keys `score01`, and both Routes ambiguous). */
+static const EtFile et_gqlgen_digit_underscore_files[] = {
+    {"go.mod", "module digits\n"},
+    {"graph/schema.graphqls", "type Query {\n  score0_1: Int\n  score01: Int\n}\n"},
+    {"graph/schema.resolvers.go",
+     "package graph\n\n"
+     "type queryResolver struct{}\n\n"
+     "func (r *queryResolver) Score0_1() int {\n\treturn 0\n}\n\n"
+     "func (r *queryResolver) Score01() int {\n\treturn 1\n}\n"},
+};
+
+static const EtGqlServerRoute et_gqlgen_digit_underscore_want[] = {
+    {"__graphql__Query.score0_1", "Int", "false", "", "Method", ".graph.queryResolver.Score0_1",
+     "gqlgen_resolver", 0},
+    {"__graphql__Query.score01", "Int", "false", "", "Method", ".graph.queryResolver.Score01",
+     "gqlgen_resolver", 0},
+};
+
+TEST(graphql_gqlgen_digit_underscore_resolvers) {
+    ASSERT_TRUE(et_gqlgen_case(et_gqlgen_digit_underscore_files,
+                               ET_NWANT(et_gqlgen_digit_underscore_files), 0,
+                               et_gqlgen_digit_underscore_want,
+                               ET_NWANT(et_gqlgen_digit_underscore_want)));
+    PASS();
+}
+
+/* Two unconfigured federation subgraphs each extend Query and User with no
+ * base types. Each service's User extensions stay with its own stand-in
+ * User: svc_b's otherValue never appears under svc_a's Query.account. */
+static const EtFile et_gqlgen_subgraphs_files[] = {
+    {"svc_a/schema.graphqls",
+     "extend type Query {\n  account: User\n}\n\nextend type User {\n  localValue: String\n}\n"},
+    {"svc_b/schema.graphqls",
+     "extend type Query {\n  me: User\n}\n\nextend type User {\n  otherValue: String\n}\n"},
+};
+
+static const EtGqlServerRoute et_gqlgen_subgraphs_want[] = {
+    {"__graphql__Query.account", "User", "false", "", "Field", ".svc_a.schema.Query.account",
+     "graphql_schema_field", 0},
+    {"__graphql__Query.account.localValue", "String", "false", "", "Field",
+     ".svc_a.schema.User.localValue", "graphql_schema_field", 0},
+    {"__graphql__Query.me", "User", "false", "", "Field", ".svc_b.schema.Query.me",
+     "graphql_schema_field", 0},
+    {"__graphql__Query.me.otherValue", "String", "false", "", "Field",
+     ".svc_b.schema.User.otherValue", "graphql_schema_field", 0},
+};
+
+TEST(graphql_extension_only_types_stay_in_their_subgraph) {
+    ASSERT_TRUE(et_gqlgen_case(et_gqlgen_subgraphs_files, ET_NWANT(et_gqlgen_subgraphs_files), 0,
+                               et_gqlgen_subgraphs_want, ET_NWANT(et_gqlgen_subgraphs_want)));
+    PASS();
+}
+
+/* A project holding a schema, its resolver and a client string that selects
+ * the deprecated field: the Route keeps the schema's type, deprecation and
+ * location and its resolver's HANDLES whatever the client side upserts for
+ * the same QN (rev-1 P1; the graph-buffer test covers the tie-break alone).
+ * Only this Route is checked, since a client may add operation Routes. */
+TEST(graphql_mixed_schema_and_client_keep_route_props) {
+    static const EtFile files[] = {
+        {"go.mod", "module mixed\n"},
+        {"graph/schema.graphqls",
+         "type Query {\n  ping: String @deprecated(reason: \"Use pong.\")\n  pong: String\n}\n"},
+        {"graph/schema.resolvers.go",
+         "package graph\n\n"
+         "type queryResolver struct{}\n\n"
+         "func (r *queryResolver) Ping() string {\n\treturn \"p\"\n}\n"},
+        {"graph/schema_test.go",
+         "package graph\n\n"
+         "import \"testing\"\n\n"
+         "type client struct{}\n\n"
+         "func (c *client) MustPost(q string, out interface{}) {}\n\n"
+         "func TestPing(t *testing.T) {\n"
+         "\tc := &client{}\n"
+         "\tvar resp struct{ Ping string }\n"
+         "\tc.MustPost(`query { ping pong }`, &resp)\n}\n"},
+    };
+    EtProj lp;
+    cbm_store_t *store = et_index_files(&lp, files, ET_NWANT(files));
+    int rows = -1;
+    sqlite3_stmt *st = NULL;
+    if (store && sqlite3_prepare_v2(cbm_store_get_db(store),
+                                    "SELECT COUNT(*) FROM nodes r JOIN edges e ON e.target_id = r.id "
+                                    "AND e.type = 'HANDLES' JOIN nodes h ON h.id = e.source_id "
+                                    "WHERE r.project = ?1 AND r.label = 'Route' AND "
+                                    "r.qualified_name = '__graphql__Query.ping' AND "
+                                    "r.file_path = 'graph/schema.graphqls' AND "
+                                    "json_extract(r.properties, '$.source') = 'graphql_schema' AND "
+                                    "json_extract(r.properties, '$.schema_type') = 'String' AND "
+                                    "json_extract(r.properties, '$.deprecated') = 1 AND "
+                                    "json_extract(r.properties, '$.deprecation_reason') = "
+                                    "'Use pong.' AND h.label = 'Method' AND h.name = 'Ping'",
+                                    -1, &st, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(st, 1, lp.project, -1, SQLITE_STATIC);
+        if (sqlite3_step(st) == SQLITE_ROW) {
+            rows = sqlite3_column_int(st, 0);
+        }
+    }
+    sqlite3_finalize(st);
+    et_cleanup(&lp, store);
+    ASSERT_EQ(rows, 1);
+    PASS();
+}
+
+/* Without a config, a schema at the repository root is owned by the root
+ * package or one directory below it, never by a resolver package deep in
+ * another service (svc/api/graph/), which every directory is "below". */
+static const EtFile et_gqlgen_root_schema_files[] = {
+    {"go.mod", "module rootschema\n"},
+    {"schema.graphqls", "type Query {\n  ping: String\n  pong: String\n}\n"},
+    {"graph/schema.resolvers.go",
+     "package graph\n\n"
+     "type queryResolver struct{}\n\n"
+     "func (r *queryResolver) Pong() string {\n\treturn \"p\"\n}\n"},
+    {"svc/api/graph/schema.resolvers.go",
+     "package graph\n\n"
+     "type queryResolver struct{}\n\n"
+     "func (r *queryResolver) Ping() string {\n\treturn \"x\"\n}\n"},
+};
+
+static const EtGqlServerRoute et_gqlgen_root_schema_want[] = {
+    {"__graphql__Query.ping", "String", "false", "", "Field", ".Query.ping",
+     "graphql_schema_field", 0},
+    {"__graphql__Query.pong", "String", "false", "", "Method", ".graph.queryResolver.Pong",
+     "gqlgen_resolver", 0},
+};
+
+TEST(graphql_root_schema_not_owned_by_deep_packages) {
+    ASSERT_TRUE(et_gqlgen_case(et_gqlgen_root_schema_files, ET_NWANT(et_gqlgen_root_schema_files),
+                               0, et_gqlgen_root_schema_want,
+                               ET_NWANT(et_gqlgen_root_schema_want)));
+    PASS();
+}
+
+/* Overwrite one fixture file in an indexed project. */
+static void et_rewrite(const EtProj *lp, const char *rel, const char *content) {
+    char path[700];
+    snprintf(path, sizeof(path), "%s/%s", lp->tmpdir, rel);
+    FILE *f = fopen(path, "wb");
+    if (f) {
+        fputs(content, f);
+        fclose(f);
+    }
+}
+
+/* Re-run index_repository on an indexed project (the incremental route);
+ * *route receives the route the run took. */
+static cbm_store_t *et_reindex(EtProj *lp, cbm_store_t *store, int *route) {
+    if (store) cbm_store_close(store);
+    char args[700];
+    snprintf(args, sizeof(args), "{\"repo_path\":\"%s\"}", lp->tmpdir);
+    char *resp = cbm_mcp_handle_tool(lp->srv, "index_repository", args);
+    if (resp) free(resp);
+    *route = (int)cbm_pipeline_incremental_test_last_route();
+    fprintf(stderr, "  [ET-GQLS] incremental route %d\n", *route);
+    return cbm_store_open_path(lp->dbpath);
+}
+
+/* Incremental reindexing keeps the Routes and HANDLES a full index makes.
+ * Editing a resolver file used to drop its HANDLES (the closure repair does
+ * not run the route pass); editing a model file still repairs in place and
+ * keeps them; editing the schema replaces its Routes. */
+TEST(graphql_gqlgen_routes_survive_incremental_edits) {
+    EtProj lp;
+    int nfiles = ET_NWANT(et_gqlgen_files);
+    cbm_store_t *store = et_index_files(&lp, et_gqlgen_files, nfiles);
+    int ok = et_gqlgen_routes_exact(store, lp.project, et_gqlgen_want, ET_NWANT(et_gqlgen_want));
+
+    const char *perp_resolvers = NULL;
+    const char *models = NULL;
+    int route = 0;
+    for (int i = 0; i < nfiles; i++) {
+        if (strcmp(et_gqlgen_files[i].name, "graph/resolver/perp.resolvers.go") == 0) {
+            perp_resolvers = et_gqlgen_files[i].content;
+        } else if (strcmp(et_gqlgen_files[i].name, "graph/model/models.go") == 0) {
+            models = et_gqlgen_files[i].content;
+        }
+    }
+    char edited[4096];
+    snprintf(edited, sizeof(edited), "%s\n// edited\n", perp_resolvers ? perp_resolvers : "");
+    et_rewrite(&lp, "graph/resolver/perp.resolvers.go", edited);
+    store = et_reindex(&lp, store, &route);
+    int after_resolver =
+        et_gqlgen_routes_exact(store, lp.project, et_gqlgen_want, ET_NWANT(et_gqlgen_want));
+
+    snprintf(edited, sizeof(edited), "%s\n// edited\n", models ? models : "");
+    et_rewrite(&lp, "graph/model/models.go", edited);
+    store = et_reindex(&lp, store, &route);
+    int after_model =
+        et_gqlgen_routes_exact(store, lp.project, et_gqlgen_want, ET_NWANT(et_gqlgen_want));
+
+    /* A surface change to the model (a field of Perp, which the resolvers
+     * use, changes type; no name is added or removed) pulls those resolver
+     * files into the closure repair. */
+    snprintf(edited, sizeof(edited),
+             "package model\n\n"
+             "type Perp struct {\n\tRealizedPnlUsd float64\n}\n\n"
+             "type PerpTrade struct {\n\tID     string\n\tTrader string\n}\n");
+    et_rewrite(&lp, "graph/model/models.go", edited);
+    store = et_reindex(&lp, store, &route);
+    int after_surface =
+        et_gqlgen_routes_exact(store, lp.project, et_gqlgen_want, ET_NWANT(et_gqlgen_want));
+
+    et_rewrite(&lp, "graph/query.graphqls",
+               "type Query {\n  perp: Perp!\n  appVersion: String!\n  newField: String\n}\n");
+    store = et_reindex(&lp, store, &route);
+    EtGqlServerRoute after_schema_want[ET_NWANT(et_gqlgen_want)];
+    int n = 0;
+    for (int i = 0; i < ET_NWANT(et_gqlgen_want); i++) {
+        if (strcmp(et_gqlgen_want[i].qn, "__graphql__Query.oldPing") != 0) {
+            after_schema_want[n++] = et_gqlgen_want[i];
+        }
+    }
+    after_schema_want[n++] = (EtGqlServerRoute){"__graphql__Query.newField", "String", "false", "",
+                                                "Field", ".Query.newField",
+                                                "graphql_schema_field", 0};
+    int after_schema = et_gqlgen_routes_exact(store, lp.project, after_schema_want, n);
+    et_cleanup(&lp, store);
+    if (!after_resolver) fprintf(stderr, "  [ET-GQLS] wrong after the resolver edit\n");
+    if (!after_model) fprintf(stderr, "  [ET-GQLS] wrong after the model edit\n");
+    if (!after_surface) fprintf(stderr, "  [ET-GQLS] wrong after the model surface edit\n");
+    if (!after_schema) fprintf(stderr, "  [ET-GQLS] wrong after the schema edit\n");
+    ASSERT_TRUE(ok && after_resolver && after_model && after_surface && after_schema);
+    PASS();
+}
+
+/* Only an edit that can change Routes or HANDLES declines the closure
+ * repair: an operation-only .graphql document and a Go helper beside the
+ * resolvers (no resolver methods) repair in place and keep the Routes; a
+ * resolver file and a schema file still rebuild in full. */
+TEST(graphql_incremental_rebuild_only_for_route_inputs) {
+    int nbase = ET_NWANT(et_gqlgen_files);
+    EtFile files[ET_NWANT(et_gqlgen_files) + 2];
+    memcpy(files, et_gqlgen_files, sizeof(et_gqlgen_files));
+    files[nbase] = (EtFile){"client/trades.graphql",
+                            "query Trades($type: String) {\n  perp {\n    trades(trader: $type) "
+                            "{\n      id\n      type: trader\n    }\n  }\n}\n"};
+    files[nbase + 1] =
+        (EtFile){"graph/resolver/helpers.go",
+                 "package resolver\n\nfunc clamp(n int) int {\n\treturn n\n}\n"};
+    EtProj lp;
+    cbm_store_t *store = et_index_files(&lp, files, nbase + 2);
+    int ok = et_gqlgen_routes_exact(store, lp.project, et_gqlgen_want, ET_NWANT(et_gqlgen_want));
+
+    int op_route = 0;
+    et_rewrite(&lp, "client/trades.graphql",
+               "# edited\nquery Trades {\n  perp {\n    trades {\n      id\n    }\n  }\n}\n");
+    store = et_reindex(&lp, store, &op_route);
+    int after_op =
+        et_gqlgen_routes_exact(store, lp.project, et_gqlgen_want, ET_NWANT(et_gqlgen_want));
+
+    int helper_route = 0;
+    et_rewrite(&lp, "graph/resolver/helpers.go",
+               "package resolver\n\nfunc clamp(n int) int {\n\treturn n + 0\n}\n");
+    store = et_reindex(&lp, store, &helper_route);
+    int after_helper =
+        et_gqlgen_routes_exact(store, lp.project, et_gqlgen_want, ET_NWANT(et_gqlgen_want));
+
+    const char *perp_resolvers = NULL;
+    for (int i = 0; i < nbase; i++) {
+        if (strcmp(files[i].name, "graph/resolver/perp.resolvers.go") == 0) {
+            perp_resolvers = files[i].content;
+        }
+    }
+    char edited[4096];
+    snprintf(edited, sizeof(edited), "%s\n// edited\n", perp_resolvers ? perp_resolvers : "");
+    int resolver_route = 0;
+    et_rewrite(&lp, "graph/resolver/perp.resolvers.go", edited);
+    store = et_reindex(&lp, store, &resolver_route);
+
+    int schema_route = 0;
+    et_rewrite(&lp, "graph/subscription.graphqls",
+               "type Subscription {\n  perpTrades(trader: String): [PerpTrade!]!\n}\n# edited\n");
+    store = et_reindex(&lp, store, &schema_route);
+    int after_schema =
+        et_gqlgen_routes_exact(store, lp.project, et_gqlgen_want, ET_NWANT(et_gqlgen_want));
+    et_cleanup(&lp, store);
+
+    ASSERT_TRUE(ok);
+    ASSERT_EQ(op_route, (int)CBM_INCREMENTAL_ROUTE_CLOSURE_REPAIR);
+    ASSERT_TRUE(after_op);
+    ASSERT_EQ(helper_route, (int)CBM_INCREMENTAL_ROUTE_CLOSURE_REPAIR);
+    ASSERT_TRUE(after_helper);
+    ASSERT_EQ(resolver_route, (int)CBM_INCREMENTAL_ROUTE_FORCED_FULL);
+    ASSERT_EQ(schema_route, (int)CBM_INCREMENTAL_ROUTE_FORCED_FULL);
+    ASSERT_TRUE(after_schema);
+    PASS();
+}
+
+/* Package ownership changes take the full rebuild. Unconfigured, graph/ is
+ * a resolver package because resolver.go declares a method (Setup, on no
+ * `...Resolver` receiver); handlers.go's queryResolver.Ping then handles
+ * Query.ping. Removing Setup makes graph/ an ordinary package and the Field
+ * handles ping, which only the route pass can tell. */
+TEST(graphql_incremental_resolver_package_ownership_change) {
+    static const EtFile files[] = {
+        {"go.mod", "module own\n"},
+        {"graph/schema.graphqls", "type Query {\n  ping: String\n}\n"},
+        {"graph/resolver.go",
+         "package graph\n\ntype Helper struct{}\n\nfunc (h *Helper) Setup() {}\n"},
+        {"graph/handlers.go",
+         "package graph\n\n"
+         "type queryResolver struct{}\n\n"
+         "func (r *queryResolver) Ping() string {\n\treturn \"p\"\n}\n"},
+    };
+    static const EtGqlServerRoute before[] = {
+        {"__graphql__Query.ping", "String", "false", "", "Method", ".graph.queryResolver.Ping",
+         "gqlgen_resolver", 0},
+    };
+    static const EtGqlServerRoute after[] = {
+        {"__graphql__Query.ping", "String", "false", "", "Field", ".Query.ping",
+         "graphql_schema_field", 0},
+    };
+    EtProj lp;
+    cbm_store_t *store = et_index_files(&lp, files, ET_NWANT(files));
+    int ok = et_gqlgen_routes_exact(store, lp.project, before, ET_NWANT(before));
+    int route = 0;
+    et_rewrite(&lp, "graph/resolver.go", "package graph\n\ntype Helper struct{}\n");
+    store = et_reindex(&lp, store, &route);
+    int after_ok = et_gqlgen_routes_exact(store, lp.project, after, ET_NWANT(after));
+    et_cleanup(&lp, store);
+    ASSERT_TRUE(ok);
+    ASSERT_EQ(route, (int)CBM_INCREMENTAL_ROUTE_FORCED_FULL);
+    ASSERT_TRUE(after_ok);
+    PASS();
+}
+
+/* A user extension mapping (.schema -> graphql) makes api.schema a schema
+ * file for the incremental guard as for the route pass: a body-only edit to
+ * its resolver rebuilds in full and keeps the resolver's HANDLES. */
+TEST(graphql_incremental_user_schema_extension) {
+    static const EtFile files[] = {
+        {".codebase-memory.json", "{\"extra_extensions\":{\".schema\":\"graphql\"}}\n"},
+        {"go.mod", "module ext\n"},
+        {"api/api.schema", "type Query {\n  ping: String\n}\n"},
+        {"api/schema.resolvers.go",
+         "package api\n\n"
+         "type queryResolver struct{}\n\n"
+         "func (r *queryResolver) Ping() string {\n\treturn \"p\"\n}\n"},
+    };
+    static const EtGqlServerRoute want[] = {
+        {"__graphql__Query.ping", "String", "false", "", "Method", ".api.queryResolver.Ping",
+         "gqlgen_resolver", 0},
+    };
+    EtProj lp;
+    cbm_store_t *store = et_index_files(&lp, files, ET_NWANT(files));
+    int ok = et_gqlgen_routes_exact(store, lp.project, want, ET_NWANT(want));
+    int route = 0;
+    et_rewrite(&lp, "api/schema.resolvers.go",
+               "package api\n\n"
+               "type queryResolver struct{}\n\n"
+               "func (r *queryResolver) Ping() string {\n\treturn \"q\"\n}\n");
+    store = et_reindex(&lp, store, &route);
+    int after_ok = et_gqlgen_routes_exact(store, lp.project, want, ET_NWANT(want));
+    et_cleanup(&lp, store);
+    ASSERT_TRUE(ok);
+    ASSERT_EQ(route, (int)CBM_INCREMENTAL_ROUTE_FORCED_FULL);
+    ASSERT_TRUE(after_ok);
+    PASS();
+}
+
+/* #598 parser edges the end-to-end fixture cannot reach through one language's
+ * string extraction: comments/strings/interpolations that contain braces, a
+ * bare word, non-document arguments and name truncation. */
+TEST(graphql_operation_identity_parser_issue598) {
+    const char *type = NULL;
+    char name[16];
+    static const struct {
+        const char *doc;
+        int named;
+        const char *type;
+        const char *name;
+    } cases[] = {
+        {"# fetch { all }\nquery Q1 { a }", 1, "query", "Q1"},
+        {"${UserFields} query WithFrag($id: ID) { u { ...UserFields } }", 1, "query", "WithFrag"},
+        {"fragment F on T @dir(x: \"{\") { a } mutation M2 { b }", 1, "mutation", "M2"},
+        {"\"\"\"doc { brace\"\"\" subscription S3 { c }", 1, "subscription", "S3"},
+        {"  query  \n ( $x: Int ) { a }", 0, "query", ""},
+        {"  { viewer { id } }", 0, "query", ""},
+        {"query GetUserByIdentifier { a }", 1, "query", "GetUserByIdenti"}, /* bounded */
+        {"data", 0, "operation", ""}, /* a bare word is not evidence of an operation */
+        {"https://api.example.com/graphql", 0, "operation", ""},
+        {"/graphql", 0, "operation", ""},
+        {"", 0, "operation", ""},
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        bool named = cbm_service_pattern_graphql_operation(cases[i].doc, &type, name, sizeof(name));
+        if ((int)named != cases[i].named || strcmp(type, cases[i].type) != 0 ||
+            strcmp(name, cases[i].name) != 0) {
+            fprintf(stderr, "  [ET-GQL] case %zu '%s' -> named=%d type=%s name=%s\n", i,
+                    cases[i].doc, (int)named, type, name);
+            ASSERT_TRUE(0);
+        }
+    }
+    ASSERT_FALSE(cbm_service_pattern_graphql_operation(NULL, &type, name, sizeof(name)));
+    ASSERT_STR_EQ(type, "operation");
+    PASS();
+}
+
+/* Field-path selection signature: the operation, its name and the field paths
+ * a server defines (root fields and one level below), never aliases, fragment
+ * spreads, inline fragments, arguments, directives or meta fields. */
+TEST(graphql_selection_signature_parser) {
+    static const struct {
+        const char *doc;
+        int require_keyword;
+        int ok;
+        const char *sig;
+    } cases[] = {
+        /* multi-line, aliases, nested arguments with object values */
+        {"\n  query PerpPortfolioStats($trader: String!) {\n    perp {\n"
+         "      stats7d: statsUserPortfolio(trader: $trader, range: \"7d\") { a }\n"
+         "      stats30d: statsUserPortfolio(trader: $trader, range: \"30d\") { a }\n"
+         "    }\n  }\n",
+         1, 1, "query|PerpPortfolioStats|perp,perp.statsUserPortfolio"},
+        {"query T($t: String!) { perp { trades(where: { trader: $t, isOpen: true }, "
+         "limit: 10) { ...PerpTradeFields id } } }",
+         1, 1, "query|T|perp,perp.trades"},
+        /* fragments before the operation, spreads and inline fragments */
+        {"fragment F on X { a { b } } query Q { ...F viewer { ... on User { name } "
+         "...G id } }",
+         1, 1, "query|Q|viewer,viewer.id"},
+        /* comments and strings with braces, directives, __typename */
+        {"# { not: a field }\nquery Q2 @live { __typename perp @include(if: true) "
+         "{ __typename trades(f: \"{x}\") { id } } }",
+         1, 1, "query|Q2|perp,perp.trades"},
+        /* depth stops at two; root scalars keep their root path */
+        {"query { appVersion perp { trade(id: 1) { state { pnl } } } }", 1, 1,
+         "query||appVersion,perp,perp.trade"},
+        {"mutation M($a: String!) { createChallenge(evmAddress: $a) { nonce } }", 1, 1,
+         "mutation|M|createChallenge,createChallenge.nonce"},
+        {"subscription { perpTrades(where: {}) { id } }", 1, 1,
+         "subscription||perpTrades,perpTrades.id"},
+        /* the `{ }` shorthand only when a keyword is not required */
+        {"{ orders { id total } }", 0, 1, "query||orders,orders.id,orders.total"},
+        {"{ orders { id total } }", 1, 0, ""},
+        /* template interpolation and string escapes are trivia */
+        {"${F}\\n query Esc {\\n  perp {\\n    borrowings { id }\\n  }\\n}", 1, 1,
+         "query|Esc|perp,perp.borrowings"},
+        /* a `${...}` interpolation ends at its own brace, not one inside a JS
+         * string, a nested template or a comment */
+        {"query T { ${helper(\"}\")} perp { trades { id } } }", 1, 1,
+         "query|T|perp,perp.trades"},
+        {"query U { ${`a}${'}'}`} perp { id } }", 1, 1, "query|U|perp,perp.id"},
+        {"query V { ${x /* } */} perp { id } }", 1, 1, "query|V|perp,perp.id"},
+        /* a `}` in a regex literal is not structure; `/` after an operand
+         * divides */
+        {"query Q { ${/}/.test(x)} user { id } }", 1, 1, "query|Q|user,user.id"},
+        {"query R { ${x ? /[}/]{1}/g : typeof /}/} user { id } }", 1, 1,
+         "query|R|user,user.id"},
+        {"query D { ${a / b} user { id } }", 1, 1, "query|D|user,user.id"},
+        {"query E { ${(a) / 2 / (b)} user { id } }", 1, 1, "query|E|user,user.id"},
+        /* every operation of a document, one record each */
+        {"query Profile { viewer { id } } mutation Save { save { ok } }", 1, 1,
+         "query|Profile|viewer,viewer.id\nmutation|Save|save,save.ok"},
+        {"query A { a } fragment F on T { x } subscription B { b { c } }", 1, 1,
+         "query|A|a\nsubscription|B|b,b.c"},
+        /* an unclosed set or a token no selection holds is no document */
+        {"query Profile { viewer.id", 1, 0, ""},
+        {"query { table = users }", 1, 0, ""},
+        {"query P { viewer { id }", 1, 0, ""},
+        {"query P { viewer { id } } }", 1, 0, ""},
+        {"query A { a: }", 1, 0, ""},
+        /* text after the document, or before it, is no document: format
+         * strings whose `{...}` are placeholders */
+        {"subscription {plan} renews on {date}", 1, 0, ""},
+        {"query {user} took too long", 1, 0, ""},
+        {"query {account} not found", 1, 0, ""},
+        {"Error: query { a }", 0, 0, ""},
+        {"query A { a } # trailing comment\n", 1, 1, "query|A|a"},
+        /* the interpolation stays a field of its own after a field head */
+        {"query I { appVersion ${field} { id } viewer { id } }", 1, 1,
+         "query|I|appVersion,viewer,viewer.id"},
+        /* skipped definitions and deeper selections must be well formed */
+        {"query Q { viewer } fragment nonsense { a", 1, 0, ""},
+        {"query Q { viewer } fragment F on T { a", 1, 0, ""},
+        {"query Q { viewer { a { b = c } } }", 1, 0, ""},
+        {"query Q { viewer { ... on User { x.y } } }", 1, 0, ""},
+        /* an escaped triple quote does not end a block string */
+        {"query Q { viewer(filter: \"\"\"literal \\\"\"\" ) } still in block\"\"\") { id } status }", 1,
+         1, "query|Q|viewer,viewer.id,status"},
+        /* an interpolated field name hides its block's field */
+        {"query I { ${field} { id } user { id } }", 1, 1, "query|I|user,user.id"},
+        /* not an operation */
+        {"query failed for user", 1, 0, ""},
+        {"https://api.example.com/graphql", 0, 0, ""},
+        {"fragment F on T { a }", 0, 0, ""},
+        {"", 0, 0, ""},
+    };
+    char sig[CBM_SZ_512];
+    int failed = 0; /* every failing case is reported, not only the first */
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        bool ok = cbm_service_pattern_graphql_signature(cases[i].doc, cases[i].require_keyword != 0,
+                                                        sig, sizeof(sig));
+        if ((int)ok != cases[i].ok || (ok && strcmp(sig, cases[i].sig) != 0)) {
+            fprintf(stderr, "  [ET-GQL] sig case %zu -> ok=%d sig='%s' want='%s'\n", i, (int)ok,
+                    sig, cases[i].sig);
+            failed++;
+        }
+    }
+    ASSERT_EQ(failed, 0);
+    /* A path that does not fit is dropped whole; the header survives. */
+    char small[24];
+    ASSERT_TRUE(cbm_service_pattern_graphql_signature("query Q { alpha beta gamma }", true, small,
+                                                      sizeof(small)));
+    ASSERT_STR_EQ(small, "query|Q|alpha,beta");
+    const char *type = NULL;
+    char name[8];
+    const char *paths =
+        cbm_service_pattern_graphql_sig_parts("mutation|LongName|a,b.c", &type, name, sizeof(name));
+    ASSERT_STR_EQ(type, "mutation");
+    ASSERT_STR_EQ(name, "LongNam");
+    ASSERT_STR_EQ(paths, "a,b.c");
+    ASSERT_TRUE(cbm_service_pattern_graphql_sig_parts("select|x|", &type, name, sizeof(name)) ==
+                NULL);
+    PASS();
+}
+
+/* 40,000 root fields, each repeated once: every path appears once, and
+ * membership is a hash lookup, not a scan of the paths written so far. */
+TEST(graphql_selection_signature_dedupe_scales) {
+    enum { FIELDS = 40000 };
+    size_t cap = (size_t)FIELDS * 16 + 64;
+    char *doc = malloc(cap);
+    ASSERT_TRUE(doc != NULL);
+    size_t len = (size_t)snprintf(doc, cap, "query Wide {");
+    for (int rep = 0; rep < 2; rep++) {
+        for (int i = 0; i < FIELDS; i++) {
+            len += (size_t)snprintf(doc + len, cap - len, " f%05d", i);
+        }
+    }
+    (void)snprintf(doc + len, cap - len, " }");
+    clock_t t0 = clock();
+    char *sig = cbm_service_pattern_graphql_signature_alloc(doc, true, NULL);
+    double secs = (double)(clock() - t0) / CLOCKS_PER_SEC;
+    free(doc);
+    ASSERT_TRUE(sig != NULL);
+    size_t commas = 0;
+    for (const char *p = sig; *p; p++) {
+        commas += *p == ',';
+    }
+    bool last = strstr(sig, ",f39999") != NULL;
+    free(sig);
+    ASSERT_EQ((int)commas, FIELDS - 1);
+    ASSERT_TRUE(last);
+    if (secs > 3.0) {
+        fprintf(stderr, "  [ET-GQL] signature of %d fields took %.2fs\n", FIELDS * 2, secs);
+        ASSERT_TRUE(0);
+    }
+    PASS();
+}
+
+/* A selection far past any fixed buffer keeps every path. */
+TEST(graphql_selection_signature_alloc_keeps_every_path) {
+    enum { FIELDS = 600 };
+    static char doc[FIELDS * 8 + 64];
+    size_t len = (size_t)snprintf(doc, sizeof(doc), "query Big { root {");
+    for (int i = 1; i <= FIELDS; i++) {
+        len += (size_t)snprintf(doc + len, sizeof(doc) - len, " f%04d", i);
+    }
+    (void)snprintf(doc + len, sizeof(doc) - len, " } }");
+    char *sig = cbm_service_pattern_graphql_signature_alloc(doc, true, NULL);
+    ASSERT_TRUE(sig != NULL);
+    bool first = strstr(sig, "root.f0001,") != NULL;
+    bool last = strstr(sig, ",root.f0600") != NULL;
+    free(sig);
+    ASSERT_TRUE(first);
+    ASSERT_TRUE(last);
+    PASS();
+}
+
+/* Every GRAPHQL_CALLS edge as "\n<source name>><target QN>" lines, plus the
+ * props of the edge into `props_qn` (when non-NULL) in props_out. */
+static int et_gql_edges(const EtFile *files, int nfiles, bool parallel, char *out, size_t out_sz,
+                        const char *props_qn, const char *props_src, char *props_out,
+                        size_t props_sz) {
+    EtProj lp;
+    cbm_store_t *store =
+        parallel ? et_index_parallel(&lp, files, nfiles) : et_index_files(&lp, files, nfiles);
+    size_t len = 0;
+    out[0] = '\0';
+    if (props_out) {
+        props_out[0] = '\0';
+    }
+    int n = 0;
+    cbm_edge_t *edges = NULL;
+    if (store && cbm_store_find_edges_by_type(store, lp.project, "GRAPHQL_CALLS", &edges, &n) ==
+                     CBM_STORE_OK) {
+        for (int i = 0; i < n; i++) {
+            cbm_node_t src;
+            cbm_node_t tgt;
+            memset(&src, 0, sizeof(src));
+            memset(&tgt, 0, sizeof(tgt));
+            if (cbm_store_find_node_by_id(store, edges[i].source_id, &src) == CBM_STORE_OK &&
+                cbm_store_find_node_by_id(store, edges[i].target_id, &tgt) == CBM_STORE_OK) {
+                int w = snprintf(out + len, out_sz - len, "\n%s>%s", src.name ? src.name : "",
+                                 tgt.qualified_name ? tgt.qualified_name : "");
+                if (w > 0 && (size_t)w < out_sz - len) {
+                    len += (size_t)w;
+                }
+                if (props_out && props_qn && tgt.qualified_name && src.name &&
+                    strcmp(tgt.qualified_name, props_qn) == 0 && strcmp(src.name, props_src) == 0) {
+                    snprintf(props_out, props_sz, "%s",
+                             edges[i].properties_json ? edges[i].properties_json : "");
+                }
+            }
+            cbm_node_free_fields(&src);
+            cbm_node_free_fields(&tgt);
+        }
+        cbm_store_free_edges(edges, n);
+    }
+    if (len + 1 < out_sz) {
+        out[len++] = '\n';
+        out[len] = '\0';
+    }
+    et_cleanup(&lp, store);
+    return n;
+}
+
+/* Each "src>qn" in want must be an edge line, each in reject must not. */
+static int et_gql_expect(const char *dump, const char *const *want, const char *const *reject) {
+    int ok = 1;
+    char line[600];
+    for (int i = 0; want && want[i]; i++) {
+        snprintf(line, sizeof(line), "\n%s\n", want[i]);
+        if (!strstr(dump, line)) {
+            fprintf(stderr, "  [ET-GQL] missing edge %s\n", want[i]);
+            ok = 0;
+        }
+    }
+    for (int i = 0; reject && reject[i]; i++) {
+        snprintf(line, sizeof(line), "\n%s\n", reject[i]);
+        if (strstr(dump, line)) {
+            fprintf(stderr, "  [ET-GQL] unexpected edge %s\n", reject[i]);
+            ok = 0;
+        }
+    }
+    if (!ok) {
+        fprintf(stderr, "  [ET-GQL] edges:%s", dump);
+    }
+    return ok;
+}
+
+/* A codegen `graphql()` from a `codegen/gql` module (graphql-codegen client
+ * preset, as in a webapp's `@/graphql-codegen/gql`): multi-line operations
+ * longer than 512 bytes with aliases, nested arguments and fragment spreads,
+ * the fragments in calls of their own. */
+static const EtFile et_gql_ts_files[] = {
+    {"client/codegen/gql.ts",
+     "export function graphql(source: string): string {\n  return source\n}\n"},
+    {"client/query/perp.ts",
+     "import { graphql } from \"../codegen/gql\"\n\n"
+     "graphql(`\n  fragment PerpTradeFields on PerpTrade {\n    id\n    trader\n  }\n`)\n\n"
+     "export const perpTraderOpenTradesQuery = graphql(`\n"
+     "  query PerpTraderOpenTrades($trader: String!, $limit: Int!, $offset: Int!) {\n"
+     "    perp {\n"
+     "      trades(\n"
+     "        where: { trader: $trader, isOpen: true }\n"
+     "        limit: $limit\n"
+     "        offset: $offset\n"
+     "        order_desc: true\n"
+     "      ) {\n"
+     "        ...PerpTradeFields\n"
+     "        collateralAmount\n        leverage\n        openPrice\n        closePrice\n"
+     "        state {\n          liquidationPrice\n          pnlCollateral\n"
+     "          pnlCollateralAfterFees\n          remainingCollateralAfterFees\n        }\n"
+     "      }\n"
+     "      stats7d: statsUserPortfolio(trader: $trader, range: \"7d\") {\n"
+     "        realizedPnlUSD\n      }\n"
+     "      stats30d: statsUserPortfolio(trader: $trader, range: \"30d\") {\n"
+     "        realizedPnlUSD\n      }\n"
+     "    }\n"
+     "    oracle {\n"
+     "      tokenPricesUsd {\n        __typename\n        priceUsd\n      }\n"
+     "    }\n"
+     "  }\n`)\n\n"
+     "export function loadTrades() {\n"
+     "  return graphql(`query LoadTrades { perp { trades { id } } }`)\n"
+     "}\n"},
+};
+
+static const char *const et_gql_ts_want[] = {
+    "perpTraderOpenTradesQuery>__graphql__PerpTraderOpenTrades",
+    "perpTraderOpenTradesQuery>__graphql__Query.perp",
+    "perpTraderOpenTradesQuery>__graphql__Query.perp.trades",
+    "perpTraderOpenTradesQuery>__graphql__Query.perp.statsUserPortfolio",
+    "perpTraderOpenTradesQuery>__graphql__Query.oracle",
+    "perpTraderOpenTradesQuery>__graphql__Query.oracle.tokenPricesUsd",
+    NULL,
+};
+
+static const char *const et_gql_ts_reject[] = {
+    /* the constant owns its document: the module adds no second copy */
+    "client/query/perp.ts>__graphql__PerpTraderOpenTrades",
+    "client/query/perp.ts>__graphql__Query.perp.trades",
+    "perpTraderOpenTradesQuery>__graphql__Query.perp.stats7d", /* an alias is not a field */
+    "perpTraderOpenTradesQuery>__graphql__Query.perp.trades.state", /* depth stops at two */
+    "perpTraderOpenTradesQuery>__graphql__Query.oracle.__typename",
+    NULL,
+};
+
+/* CALLS edges from nodes named `src_name` into nodes named `name`. */
+static int et_calls_into(const EtFile *files, int nfiles, bool parallel, const char *src_name,
+                         const char *name) {
+    EtProj lp;
+    cbm_store_t *store =
+        parallel ? et_index_parallel(&lp, files, nfiles) : et_index_files(&lp, files, nfiles);
+    int hits = 0;
+    int n = 0;
+    cbm_edge_t *edges = NULL;
+    if (store &&
+        cbm_store_find_edges_by_type(store, lp.project, "CALLS", &edges, &n) == CBM_STORE_OK) {
+        for (int i = 0; i < n; i++) {
+            cbm_node_t src;
+            cbm_node_t tgt;
+            memset(&src, 0, sizeof(src));
+            memset(&tgt, 0, sizeof(tgt));
+            if (cbm_store_find_node_by_id(store, edges[i].source_id, &src) == CBM_STORE_OK &&
+                cbm_store_find_node_by_id(store, edges[i].target_id, &tgt) == CBM_STORE_OK &&
+                src.name && strcmp(src.name, src_name) == 0 && tgt.name &&
+                strcmp(tgt.name, name) == 0) {
+                hits++;
+            }
+            cbm_node_free_fields(&src);
+            cbm_node_free_fields(&tgt);
+        }
+        cbm_store_free_edges(edges, n);
+    }
+    et_cleanup(&lp, store);
+    return hits;
+}
+
+static int et_gql_ts_case(bool parallel) {
+    char dump[CBM_SZ_8K];
+    char props[CBM_SZ_1K];
+    (void)et_gql_edges(et_gql_ts_files, (int)(sizeof(et_gql_ts_files) / sizeof(et_gql_ts_files[0])),
+                       parallel, dump, sizeof(dump), "__graphql__Query.perp.trades",
+                       "perpTraderOpenTradesQuery", props, sizeof(props));
+    int ok = et_gql_expect(dump, et_gql_ts_want, et_gql_ts_reject);
+    /* the in-project `graphql` client keeps its plain CALLS callers */
+    int calls = et_calls_into(et_gql_ts_files,
+                              (int)(sizeof(et_gql_ts_files) / sizeof(et_gql_ts_files[0])),
+                              parallel, "loadTrades", "graphql");
+    if (calls == 0) {
+        fprintf(stderr, "  [ET-GQL] no CALLS edge loadTrades -> graphql (parallel=%d)\n",
+                (int)parallel);
+        ok = 0;
+    }
+    if (!strstr(props, "\"callee\":\"graphql\"") ||
+        !strstr(props, "\"operation\":\"PerpTraderOpenTrades\"") ||
+        !strstr(props, "\"operation_type\":\"query\"") ||
+        !strstr(props, "\"field_path\":\"perp.trades\"") || !strstr(props, "\"confidence\":")) {
+        fprintf(stderr, "  [ET-GQL] field-path edge props: %s\n", props);
+        ok = 0;
+    }
+    return ok;
+}
+
+/* >50 files: the parallel resolver. */
+TEST(graphql_field_paths_multiline_ts_parallel) {
+    ASSERT_TRUE(et_gql_ts_case(true));
+    PASS();
+}
+
+/* <50 files: the sequential resolver emitted no GraphQL edge at all. */
+TEST(graphql_field_paths_multiline_ts_sequential) {
+    ASSERT_TRUE(et_gql_ts_case(false));
+    PASS();
+}
+
+/* Operations held by module constants and passed by name to a plain HTTP
+ * helper (no GraphQL client library to classify the call): the constant
+ * links. A brace literal or the word "query" alone is no operation. */
+TEST(graphql_field_paths_python_constants) {
+    static const EtFile f[] = {
+        {"sai_cli/core/keeper.py",
+         "import httpx\n\n"
+         "MARKETS = \"\"\"query { perp { borrowings { marketId baseToken { id } } } }\"\"\"\n"
+         "POSITION = \"\"\"query($trader:String!, $id:Int!) { perp { trade(trader:$trader,id:$id) "
+         "{ id } } }\"\"\"\n"
+         "ROUTE = \"\"\"query { oneClickTrading { enabled chainId } }\"\"\"\n"
+         "CHALLENGE = \"\"\"mutation($address:String!) { "
+         "createUserIntentAuthChallenge(evmAddress:$address) { nonce } }\"\"\"\n"
+         "TEMPLATE = \"{ name }\"\n"
+         "MESSAGE = \"query failed for user\"\n\n\n"
+         "def request(endpoint, query, variables=None):\n"
+         "    return httpx.post(endpoint, json={\"query\": query, \"variables\": variables})\n\n\n"
+         "def markets(endpoint):\n"
+         "    return request(endpoint, MARKETS)\n\n\n"
+         "def debug():\n"
+         "    print(\"query Dbg { user { id } }\")\n"
+         "    logging.info(\"\"\"query Dbg2 { user { id } }\"\"\")\n\n\n"
+         "NOT_FOUND = \"query {account} not found\"\n\n\n"
+         "def fail(sql):\n"
+         "    raise ValueError(f\"query {sql} failed\")\n\n\n"
+         "def fail_doc(sql):\n"
+         "    raise ValueError(f\"query {sql}\")\n"},
+    };
+    static const char *const want[] = {
+        "MARKETS>__graphql__Query.perp",
+        "MARKETS>__graphql__Query.perp.borrowings",
+        "POSITION>__graphql__Query.perp.trade",
+        "ROUTE>__graphql__Query.oneClickTrading",
+        "CHALLENGE>__graphql__Mutation.createUserIntentAuthChallenge",
+        NULL,
+    };
+    static const char *const reject[] = {
+        "TEMPLATE>__graphql__Query.name",
+        "MARKETS>__graphql__Query.perp.borrowings.baseToken",
+        NULL,
+    };
+    char dump[CBM_SZ_4K];
+    char props[CBM_SZ_1K];
+    int n = et_gql_edges(f, (int)(sizeof(f) / sizeof(f[0])), false, dump, sizeof(dump),
+                         "__graphql__Mutation.createUserIntentAuthChallenge", "CHALLENGE", props,
+                         sizeof(props));
+    ASSERT_TRUE(et_gql_expect(dump, want, reject));
+    /* 2 + 2 + 3 + 2 paths (root fields and one level below), nothing from
+     * TEMPLATE or MESSAGE */
+    ASSERT_EQ(n, 9);
+    ASSERT_TRUE(strstr(props, "\"operation\":\"(anonymous mutation)\"") != NULL);
+    ASSERT_TRUE(strstr(props, "\"operation_type\":\"mutation\"") != NULL);
+    ASSERT_TRUE(strstr(props, "\"field_path\":\"createUserIntentAuthChallenge\"") != NULL);
+    PASS();
+}
+
+/* Operations passed inline to callees the classifier does not know as
+ * GraphQL clients: a graphql-ws `client.subscribe({ query })` and a fetch body
+ * `JSON.stringify({ query })`. The enclosing function links. Other `query`
+ * members (a media query, a log message) are no operations. */
+static int et_gql_inline_case(bool parallel) {
+    static const EtFile f[] = {
+        {"app/src/pages/portfolio/balances.ts",
+         "import { createClient } from \"graphql-ws\"\n\n"
+         "export function subscribeBalances(address: string): () => void {\n"
+         "  const client = createClient({ url: \"wss://keeper.example/query\", lazy: true })\n"
+         "  return client.subscribe(\n"
+         "    {\n"
+         "      query: `subscription PortfolioBalances($user: String!) {\n"
+         "      userBalances(where: {user: $user}) {\n"
+         "        amount token_info {type name decimals}\n"
+         "      }\n"
+         "    }`,\n"
+         "      variables: { user: address },\n"
+         "    },\n"
+         "    { next: () => {}, error: () => {}, complete: () => {} }\n"
+         "  )\n"
+         "}\n"},
+        {"app/src/pages/markets/fetchMarkets.ts",
+         "export async function fetchMarkets(url: string): Promise<unknown> {\n"
+         "  const resp = await fetch(url, {\n"
+         "    method: \"POST\",\n"
+         "    body: JSON.stringify({\n"
+         "      query: `query Markets { perp { borrowings { marketId } } }`,\n"
+         "    }),\n"
+         "  })\n"
+         "  return resp.json()\n"
+         "}\n\n"
+         "export function screen(useMediaQuery: (q: object) => boolean, log: (q: object) => void) {\n"
+         "  log({ query: \"query failed for user\" })\n"
+         "  console.log(\"query Debug { user { id } }\")\n"
+         "  logger.info(`query Debug2 { user { id } }`)\n"
+         "  return useMediaQuery({ query: \"(max-width: 480px)\" })\n"
+         "}\n\n"
+         "export function fetchUser(url: string): Promise<Response> {\n"
+         "  return fetch(url, { method: \"POST\", body: JSON.stringify({\n"
+         "    query: \"query UserByName { user(name: \\\"bob\\\") { id } }\",\n"
+         "  }) })\n"
+         "}\n\n"
+         "export function lateArg(send: (a: number, b: number, c: number, q: string) => void) {\n"
+         "  send(1, 2, 3, `query Late { late { id } }`)\n"
+         "}\n\n"
+         "export function infoCall(client: { info: (q: string) => void }) {\n"
+         "  client.info(\"query InfoQ { info { id } }\")\n"
+         "}\n\n"
+         "export function logQuery(log: { query: (q: string) => void }) {\n"
+         "  log.query(`query LogQ { logs { id } }`)\n"
+         "}\n\n"
+         "export function withHelper(post: (q: string) => void, helper: (s: string) => string) {\n"
+         "  post(`query Helped { ${helper(\"a\\\"}\")} user { id } }`)\n"
+         "}\n\n"
+         "export function withRegex(post: (q: string) => void, x: string) {\n"
+         "  post(`query Rx { ${/}/.test(x) ? \"a\" : \"b\"} user { id } }`)\n"
+         "}\n\n"
+         "export function withDivision(post: (q: string) => void, a: number, b: number) {\n"
+         "  post(`query Dv { ${a / b} total { id } }`)\n"
+         "}\n\n"
+         "const NOT_FOUND = \"query {account} not found\"\n\n"
+         "export function messages(t: (s: string) => string, log: { debug: (s: string) => void }) {\n"
+         "  log.debug(\"query {user} took too long\")\n"
+         "  return t(\"subscription {plan} renews on {date}\") + NOT_FOUND\n"
+         "}\n"},
+    };
+    static const char *const want[] = {
+        "subscribeBalances>__graphql__Subscription.userBalances",
+        "subscribeBalances>__graphql__Subscription.userBalances.amount",
+        "subscribeBalances>__graphql__Subscription.userBalances.token_info",
+        "fetchMarkets>__graphql__Query.perp",
+        "fetchMarkets>__graphql__Query.perp.borrowings",
+        /* named inline documents keep their operation-name Route */
+        "subscribeBalances>__graphql__PortfolioBalances",
+        "fetchMarkets>__graphql__Markets",
+        /* an escaped quote inside a host string ends the GraphQL string */
+        "fetchUser>__graphql__Query.user",
+        "fetchUser>__graphql__Query.user.id",
+        "fetchUser>__graphql__UserByName",
+        /* the operation is the fourth argument */
+        "lateArg>__graphql__Query.late",
+        "lateArg>__graphql__Query.late.id",
+        "lateArg>__graphql__Late",
+        /* a client method named like a log level is still a client */
+        "infoCall>__graphql__Query.info.id",
+        "infoCall>__graphql__InfoQ",
+        "logQuery>__graphql__Query.logs.id",
+        "logQuery>__graphql__LogQ",
+        /* an escaped quote inside a ${...} expression is JS, not literal text */
+        "withHelper>__graphql__Query.user.id",
+        "withHelper>__graphql__Helped",
+        /* a `}` inside a regex literal in ${...} ends nothing; `/` after an
+         * operand divides */
+        "withRegex>__graphql__Query.user.id",
+        "withRegex>__graphql__Rx",
+        "withDivision>__graphql__Query.total.id",
+        "withDivision>__graphql__Dv",
+        NULL,
+    };
+    static const char *const reject[] = {
+        "subscribeBalances>__graphql__Subscription.userBalances.token_info.type",
+        "screen>__graphql__Query.user", /* console.log and logger.info only log */
+        "screen>__graphql__Debug",
+        "withRegex>__graphql__Query.test",
+        "messages>__graphql__Query.user",
+        "messages>__graphql__Subscription.plan",
+        "NOT_FOUND>__graphql__Query.account",
+        NULL,
+    };
+    char dump[CBM_SZ_4K];
+    char props[CBM_SZ_1K];
+    int n = et_gql_edges(f, (int)(sizeof(f) / sizeof(f[0])), parallel, dump, sizeof(dump),
+                         "__graphql__Subscription.userBalances", "subscribeBalances", props,
+                         sizeof(props));
+    int ok = et_gql_expect(dump, want, reject);
+    /* 3 + 2 + 2 + 2 + 2 + 2 + 2 + 2 + 2 paths and 9 operation-name Routes;
+     * nothing from screen() */
+    if (n != 28) {
+        fprintf(stderr, "  [ET-GQL] inline edges: %d, want 28%s", n, dump);
+        ok = 0;
+    }
+    if (!strstr(props, "\"callee\":\"client.subscribe\"") ||
+        !strstr(props, "\"operation\":\"PortfolioBalances\"") ||
+        !strstr(props, "\"operation_type\":\"subscription\"") ||
+        !strstr(props, "\"field_path\":\"userBalances\"")) {
+        fprintf(stderr, "  [ET-GQL] inline edge props: %s\n", props);
+        ok = 0;
+    }
+    return ok;
+}
+
+/* Two operations in one function select the same field: the one edge into
+ * that Route lists both, so neither loses its link. */
+static int et_gql_shared_case(bool parallel) {
+    static const EtFile f[] = {
+        {"app/src/pages/trades/loadBoth.ts",
+         "export async function loadBoth(url: string): Promise<void> {\n"
+         "  await fetch(url, { body: JSON.stringify({\n"
+         "    query: `query First { perp { trades { id } } }` }) })\n"
+         "  await fetch(url, { body: JSON.stringify({\n"
+         "    query: `query Second { perp { trades { id } } }` }) })\n"
+         "}\n"},
+    };
+    char dump[CBM_SZ_4K];
+    char props[CBM_SZ_1K];
+    (void)et_gql_edges(f, (int)(sizeof(f) / sizeof(f[0])), parallel, dump, sizeof(dump),
+                       "__graphql__Query.perp.trades", "loadBoth", props, sizeof(props));
+    static const char *const want[] = {
+        "loadBoth>__graphql__Query.perp.trades",
+        "loadBoth>__graphql__First",
+        "loadBoth>__graphql__Second",
+        NULL,
+    };
+    int ok = et_gql_expect(dump, want, NULL);
+    if (!strstr(props, "\"operations\":[\"First\",\"Second\"]")) {
+        fprintf(stderr, "  [ET-GQL] shared edge props: %s\n", props);
+        ok = 0;
+    }
+    return ok;
+}
+
+TEST(graphql_field_paths_shared_field_keeps_operations_sequential) {
+    ASSERT_TRUE(et_gql_shared_case(false));
+    PASS();
+}
+
+TEST(graphql_field_paths_shared_field_keeps_operations_parallel) {
+    ASSERT_TRUE(et_gql_shared_case(true));
+    PASS();
+}
+
+/* A generated-size selection (600 fields, about 7 KB of paths) links every
+ * field, the last one included. */
+TEST(graphql_field_paths_large_selection) {
+    enum { FIELDS = 600 };
+    static char src[FIELDS * 8 + 64];
+    size_t len = (size_t)snprintf(src, sizeof(src), "BIG = \"\"\"query { root {");
+    for (int i = 1; i <= FIELDS; i++) {
+        len += (size_t)snprintf(src + len, sizeof(src) - len, " f%04d", i);
+    }
+    (void)snprintf(src + len, sizeof(src) - len, " } }\"\"\"\n");
+    EtFile f[] = {{"sai_cli/core/big.py", src}};
+    static char dump[CBM_SZ_64K];
+    int n = et_gql_edges(f, 1, false, dump, sizeof(dump), NULL, NULL, NULL, 0);
+    static const char *const want[] = {
+        "BIG>__graphql__Query.root.f0001",
+        "BIG>__graphql__Query.root.f0600",
+        NULL,
+    };
+    ASSERT_TRUE(et_gql_expect(dump, want, NULL));
+    ASSERT_EQ(n, FIELDS + 1);
+    PASS();
+}
+
+/* A field path whose Route name is 511 bytes (`Query.` + 505) links with its
+ * full QN; one byte longer is skipped, never truncated into another QN. */
+TEST(graphql_field_paths_route_name_boundary) {
+    enum { FITS = 505, SKIPPED = 506 };
+    static char src[2048];
+    char fits[FITS + 1];
+    char skipped[SKIPPED + 1];
+    memset(fits, 'a', FITS);
+    fits[FITS] = '\0';
+    memset(skipped, 'b', SKIPPED);
+    skipped[SKIPPED] = '\0';
+    (void)snprintf(src, sizeof(src), "LONG = \"\"\"query { %s %s }\"\"\"\n", fits, skipped);
+    EtFile f[] = {{"sai_cli/core/long.py", src}};
+    static char dump[CBM_SZ_8K];
+    int n = et_gql_edges(f, 1, false, dump, sizeof(dump), NULL, NULL, NULL, 0);
+    char want_line[CBM_SZ_1K];
+    (void)snprintf(want_line, sizeof(want_line), "LONG>__graphql__Query.%s", fits);
+    const char *const want[] = {want_line, NULL};
+    ASSERT_TRUE(et_gql_expect(dump, want, NULL));
+    ASSERT_TRUE(strstr(dump, "bbbb") == NULL);
+    ASSERT_EQ(n, 1);
+    PASS();
+}
+
+/* `client.subscribe({ query }, sink)` and `{ query: QUERY }` name a module
+ * constant: the calling function links to that document's fields. */
+static int et_gql_binding_case(bool parallel) {
+    static const EtFile f[] = {
+        {"app/src/live/subscribe.ts",
+         "const query = `query Q { viewer { id } }`\n"
+         "const QUERY = `query P { profile { id } }`\n\n"
+         "export function load(client: any, sink: any) {\n"
+         "  return client.subscribe({ query }, sink)\n"
+         "}\n\n"
+         "export function loadExplicit(client: any) {\n"
+         "  return client.request({ query: QUERY })\n"
+         "}\n\n"
+         "export function shadowed(query: string, client: any, sink: any) {\n"
+         "  return client.subscribe({ query }, sink)\n"
+         "}\n\n"
+         "export function localDoc(client: any) {\n"
+         "  const query = `query Inner { inner { id } }`\n"
+         "  return client.subscribe({ query })\n"
+         "}\n\n"
+         "const DOCS = `query Profile { viewer { id } } mutation Save { save { ok } }`\n\n"
+         "export function saveVia(transport: any) {\n"
+         "  return transport({ query: DOCS, operationName: \"Save\" })\n"
+         "}\n"},
+    };
+    char dump[CBM_SZ_4K];
+    (void)et_gql_edges(f, (int)(sizeof(f) / sizeof(f[0])), parallel, dump, sizeof(dump), NULL,
+                       NULL, NULL, 0);
+    static const char *const want[] = {
+        "load>__graphql__Query.viewer",
+        "load>__graphql__Query.viewer.id",
+        "load>__graphql__Q",
+        "loadExplicit>__graphql__Query.profile.id",
+        "loadExplicit>__graphql__P",
+        /* a local const holding a document links that document */
+        "localDoc>__graphql__Query.inner.id",
+        /* operationName narrows a named binding's document */
+        "saveVia>__graphql__Mutation.save.ok",
+        "saveVia>__graphql__Save",
+        NULL,
+    };
+    static const char *const reject[] = {
+        "load>__graphql__Query.profile.id",
+        "loadExplicit>__graphql__Query.viewer.id",
+        /* a parameter shadows the module constant */
+        "shadowed>__graphql__Query.viewer.id",
+        "shadowed>__graphql__Q",
+        "localDoc>__graphql__Query.viewer.id",
+        "saveVia>__graphql__Query.viewer.id",
+        "saveVia>__graphql__Profile",
+        NULL,
+    };
+    return et_gql_expect(dump, want, reject);
+}
+
+/* A module constant initialized by a call owns the call's document, whatever
+ * argument holds it; a document it cannot take (the `{ }` shorthand of a
+ * tagged constant) stays with the module's classified call. Nothing is lost. */
+static int et_gql_owner_case(bool parallel) {
+    static const EtFile f[] = {
+        {"app/src/api/owners.ts",
+         "import gql from \"graphql-tag\"\n\n"
+         "declare function transport(o: object): unknown\n"
+         "declare function request(url: string, q: string): unknown\n\n"
+         "export const data = transport({ query: 'query Owned { viewer { id } }' })\n"
+         "export const pending = request(\"/graphql\", `query Q2 { perp { legacy } }`)\n"
+         "export const VIEWER = gql`{ viewer { name } }`\n"},
+        {"sai_cli/core/client.py",
+         "import requests\n\n"
+         "URL = \"https://keeper.example/query\"\n"
+         "resp = requests.post(URL, json={\"query\": \"\"\"query PyQ { perp { trades { id } } }\"\"\"})\n"},
+    };
+    char dump[CBM_SZ_4K];
+    (void)et_gql_edges(f, (int)(sizeof(f) / sizeof(f[0])), parallel, dump, sizeof(dump), NULL,
+                       NULL, NULL, 0);
+    static const char *const want[] = {
+        "data>__graphql__Query.viewer.id",
+        "data>__graphql__Owned",
+        "pending>__graphql__Query.perp.legacy",
+        "resp>__graphql__Query.perp.trades",
+        "app/src/api/owners.ts>__graphql__Query.viewer.name",
+        NULL,
+    };
+    static const char *const reject[] = {
+        "app/src/api/owners.ts>__graphql__Query.viewer.id",
+        "app/src/api/owners.ts>__graphql__Query.perp.legacy",
+        NULL,
+    };
+    return et_gql_expect(dump, want, reject);
+}
+
+TEST(graphql_field_paths_constant_owns_call_document_sequential) {
+    ASSERT_TRUE(et_gql_owner_case(false));
+    PASS();
+}
+
+TEST(graphql_field_paths_constant_owns_call_document_parallel) {
+    ASSERT_TRUE(et_gql_owner_case(true));
+    PASS();
+}
+
+TEST(graphql_field_paths_shorthand_object_binding_sequential) {
+    ASSERT_TRUE(et_gql_binding_case(false));
+    PASS();
+}
+
+TEST(graphql_field_paths_shorthand_object_binding_parallel) {
+    ASSERT_TRUE(et_gql_binding_case(true));
+    PASS();
+}
+
+/* `request(url, '{ viewer { id } }')` from the external graphql-request
+ * package: the shorthand selection links, as a keyword document would. */
+static int et_gql_external_case(bool parallel) {
+    static const EtFile f[] = {
+        {"app/src/api/viewer.ts",
+         "import { request } from \"graphql-request\"\n\n"
+         "export async function viewerId(): Promise<unknown> {\n"
+         "  return request(\"/graphql\", \"{ viewer { id } }\")\n"
+         "}\n"},
+    };
+    char dump[CBM_SZ_4K];
+    (void)et_gql_edges(f, (int)(sizeof(f) / sizeof(f[0])), parallel, dump, sizeof(dump), NULL,
+                       NULL, NULL, 0);
+    static const char *const want[] = {
+        "viewerId>__graphql__Query.viewer",
+        "viewerId>__graphql__Query.viewer.id",
+        NULL,
+    };
+    return et_gql_expect(dump, want, NULL);
+}
+
+TEST(graphql_field_paths_external_client_shorthand_sequential) {
+    ASSERT_TRUE(et_gql_external_case(false));
+    PASS();
+}
+
+TEST(graphql_field_paths_external_client_shorthand_parallel) {
+    ASSERT_TRUE(et_gql_external_case(true));
+    PASS();
+}
+
+/* Every operation of a document links; `operationName` narrows it to the
+ * one the request runs. Text that is no complete selection links nothing. */
+TEST(graphql_field_paths_every_operation_and_operation_name) {
+    static const EtFile f[] = {
+        {"app/src/api/profile.ts",
+         "const DOC = `query Profile { viewer { id } } mutation Save { save { ok } }`\n\n"
+         "export function both(url: string) {\n"
+         "  return fetch(url, { body: JSON.stringify({\n"
+         "    query: `query Profile { viewer { id } } mutation Save { save { ok } }` }) })\n"
+         "}\n\n"
+         "export function saveOnly(url: string) {\n"
+         "  return fetch(url, { body: JSON.stringify({\n"
+         "    query: `query Profile { viewer { id } } mutation Save { save { ok } }`,\n"
+         "    operationName: \"Save\" }) })\n"
+         "}\n\n"
+         "export function filterIt(setFilter: (q: string) => void) {\n"
+         "  setFilter('query { table = users }')\n"
+         "  setFilter('query Profile { viewer.id')\n"
+         "}\n"},
+    };
+    char dump[CBM_SZ_4K];
+    (void)et_gql_edges(f, (int)(sizeof(f) / sizeof(f[0])), false, dump, sizeof(dump), NULL, NULL,
+                       NULL, 0);
+    static const char *const want[] = {
+        "both>__graphql__Query.viewer.id",
+        "both>__graphql__Mutation.save.ok",
+        "both>__graphql__Profile",
+        "both>__graphql__Save",
+        "saveOnly>__graphql__Mutation.save",
+        "saveOnly>__graphql__Mutation.save.ok",
+        "saveOnly>__graphql__Save",
+        "DOC>__graphql__Mutation.save.ok",
+        NULL,
+    };
+    static const char *const reject[] = {
+        "saveOnly>__graphql__Query.viewer.id",
+        "saveOnly>__graphql__Profile",
+        "filterIt>__graphql__Query.users",
+        "filterIt>__graphql__Query.table",
+        "filterIt>__graphql__Query.viewer",
+        "filterIt>__graphql__Query.id",
+        NULL,
+    };
+    ASSERT_TRUE(et_gql_expect(dump, want, reject));
+    PASS();
+}
+
+TEST(graphql_field_paths_inline_object_arg_sequential) {
+    ASSERT_TRUE(et_gql_inline_case(false));
+    PASS();
+}
+
+TEST(graphql_field_paths_inline_object_arg_parallel) {
+    ASSERT_TRUE(et_gql_inline_case(true));
+    PASS();
+}
+
+/* #1085: count CALLS edges whose target node has `name`, indexing via the
+ * PARALLEL path (et_index_parallel pads to >50 files). The per-file TS resolver
+ * used to treat a raw tsconfig alias as a confident target. That false row made
+ * the parallel driver skip cross-file resolution, then failed graph target
+ * materialization; the guarded JSX carrier correctly refused name-only
+ * fallback, so the relationship vanished. Needs >50 files to reproduce. */
+static int et_calls_to_name_parallel(const EtFile *meaningful, int n_mean, const char *name) {
+    EtProj lp;
+    cbm_store_t *store = et_index_parallel(&lp, meaningful, n_mean);
+    int hits = 0;
+    if (store) {
+        cbm_edge_t *edges = NULL;
+        int n = 0;
+        if (cbm_store_find_edges_by_type(store, lp.project, "CALLS", &edges, &n) == CBM_STORE_OK) {
+            for (int i = 0; i < n; i++) {
+                cbm_node_t tgt;
+                if (cbm_store_find_node_by_id(store, edges[i].target_id, &tgt) != CBM_STORE_OK)
+                    continue;
+                if (tgt.name && strcmp(tgt.name, name) == 0)
+                    hits++;
+                cbm_node_free_fields(&tgt);
+            }
+            cbm_store_free_edges(edges, n);
+        }
+    }
+    et_cleanup(&lp, store);
+    return hits;
+}
+
+TEST(calls_jsx_component_via_tsconfig_alias_parallel_issue1085) {
+    static const EtFile f[] = {
+        {"tsconfig.json",
+         "{ \"compilerOptions\": { \"baseUrl\": \".\", "
+         "\"paths\": { \"@/*\": [\"./src/*\"] } } }\n"},
+        {"src/components/ui/kpi-card.tsx",
+         "export function KpiCard({ label }: { label: string }) {\n"
+         "  return <div>{label}</div>;\n}\n"},
+        {"src/app/dashboard-a.tsx",
+         "import { KpiCard } from \"@/components/ui/kpi-card\";\n"
+         "export function DashboardA() {\n  return <KpiCard label=\"a\" />;\n}\n"},
+        {"src/app/dashboard-b.tsx",
+         "import { KpiCard } from \"@/components/ui/kpi-card\";\n"
+         "export function DashboardB() {\n  return <KpiCard label=\"b\" />;\n}\n"}};
+    /* RED before the fix: 0 (parallel drops alias-JSX). GREEN: exactly one
+     * deduplicated edge from each dashboard render. */
+    int hits = et_calls_to_name_parallel(f, 4, "KpiCard");
+    if (hits != 2) {
+        fprintf(stderr,
+                "  [1085] FAIL CALLS->KpiCard on parallel path = %d (expected 2); "
+                "alias-imported JSX component edges dropped\n",
+                hits);
+    }
+    ASSERT_EQ(hits, 2);
+    PASS();
+}
+
+/* ══════════════════════════════════════════════════════════════════
+ *  HANDLES — route→handler across web frameworks
+ *
+ *  Strategy: the route_path is extracted from decorators (Python Flask/FastAPI/
+ *  Django, Java Spring) or from the resolved QN matching a framework library id
+ *  (Express, Fastify, Gin, ASP.NET MapGet/MapPost, Laravel).  Each fixture uses a
+ *  LOCAL wrapper whose QN carries the framework substring so the sequential-path
+ *  resolver (pass_calls.c → cbm_service_pattern_match → CBM_SVC_ROUTE_REG) fires.
+ *  Decorator-based frameworks (Flask, FastAPI, Django, Spring @RequestMapping) are
+ *  handled via extract_route_from_decorators which sets def.route_path in the
+ *  extraction result and creates Route+HANDLES during pass_definitions.
+ * ══════════════════════════════════════════════════════════════════ */
+
+/* Flask (Python) — already covered in test_lang_contract.c:contract_edge_handles.
+ * Included here as baseline sanity guard for this file. */
+TEST(handles_flask_python) {
+    static const EtFile f[] = {
+        {"app.py",
+         "from flask import Flask\n\napp = Flask(__name__)\n\n\n"
+         "@app.route(\"/items\")\ndef list_items():\n    return {\"items\": []}\n\n\n"
+         "@app.route(\"/items/<int:item_id>\")\ndef get_item(item_id):\n    return {\"id\": item_id}\n"}};
+    ASSERT_TRUE(et_edge_present(f, 1, "HANDLES", 1));
+    PASS();
+}
+
+/* FastAPI (Python) — @app.get / @app.post decorators */
+TEST(handles_fastapi_python) {
+    static const EtFile f[] = {
+        {"api.py",
+         "from fastapi import FastAPI\n\napp = FastAPI()\n\n\n"
+         "@app.get(\"/users\")\ndef read_users():\n    return [{\"id\": 1}]\n\n\n"
+         "@app.post(\"/users\")\ndef create_user(name: str):\n    return {\"name\": name}\n"}};
+    ASSERT_TRUE(et_edge_present(f, 1, "HANDLES", 1));
+    PASS();
+}
+
+/* DRF @action (Python) — issue #603. Before the try_drf_action_decorator
+ * extractor, an @action-decorated ViewSet method carried no route_path, so
+ * Phase 2a emitted 0 Route/HANDLES edges (this asserts >=1 → RED without the
+ * fix, GREEN with it). Direction-agnostic count via cbm_store_count_edges_by_type. */
+TEST(handles_drf_action_python) {
+    static const EtFile f[] = {
+        {"viewsets.py",
+         "from rest_framework.decorators import action\n"
+         "from rest_framework.viewsets import ViewSet\n\n"
+         "class CustomerTaskViewSet(ViewSet):\n"
+         "    @action(detail=True, methods=[\"post\"])\n"
+         "    def approve_draft_with_charge(self, request, pk=None):\n"
+         "        pass\n"}};
+    ASSERT_TRUE(et_edge_present(f, 1, "HANDLES", 1));
+    PASS();
+}
+
+/* Express (JS/TS) — route registration must resolve to a callee QN containing
+ * the "express" library substring AND pass the handler as an identifier (not an
+ * inline-object method, which is never registered as a resolvable node).  We use
+ * top-level wrapper functions defined in an "express"-pathed module so the
+ * resolved QN (project.express.router.expressGet) carries the substring → the
+ * sequential resolver classifies the call as CBM_SVC_ROUTE_REG and emits
+ * Route + HANDLES (mirrors the working handles_gin_go pattern). */
+TEST(handles_express_ts) {
+    static const EtFile f[] = {
+        {"express/router.ts",
+         "export function expressGet(p: string, h: any): any { return h; }\n"
+         "export function expressPost(p: string, h: any): any { return h; }\n"},
+        {"users.ts",
+         "import { expressGet, expressPost } from './express/router';\n\n"
+         "function listUsers(req: any, res: any) {\n    res.json([]);\n}\n\n"
+         "function createUser(req: any, res: any) {\n    res.json({});\n}\n\n"
+         "expressGet('/users', listUsers);\n"
+         "expressPost('/users', createUser);\n"}};
+    ASSERT_TRUE(et_edge_present(f, 2, "HANDLES", 1));
+    PASS();
+}
+
+/* Fastify (JS) — same as Express: route registration via top-level wrapper
+ * functions whose resolved QN carries the "fastify" substring + identifier
+ * handlers.  Inline-object methods (the previous fixture) are never registered,
+ * so router.get could not resolve and no HANDLES fired. */
+TEST(handles_fastify_js) {
+    static const EtFile f[] = {
+        {"fastify/server.js",
+         "function fastifyGet(p, h) { return h; }\n"
+         "function fastifyPost(p, h) { return h; }\n\n"
+         "function getHealth(req, reply) { reply.send({ ok: true }); }\n\n"
+         "function postOrder(req, reply) { reply.send({ created: true }); }\n\n"
+         "fastifyGet('/health', getHealth);\n"
+         "fastifyPost('/orders', postOrder);\n"}};
+    ASSERT_TRUE(et_edge_present(f, 1, "HANDLES", 1));
+    PASS();
+}
+
+/* Go net/http + gin — local gin.Engine wrapper whose QN contains "gin." */
+TEST(handles_gin_go) {
+    static const EtFile f[] = {
+        {"gin/engine.go",
+         "package gin\n\n"
+         "type Engine struct{}\n\n"
+         "func Default() *Engine {\n    return &Engine{}\n}\n\n"
+         "func (e *Engine) GET(path string, handler interface{}) {}\n"
+         "func (e *Engine) POST(path string, handler interface{}) {}\n"},
+        {"main.go",
+         "package main\n\n"
+         "import \"gin\"\n\n"
+         "func listOrders(w interface{}, r interface{}) {}\n\n"
+         "func createOrder(w interface{}, r interface{}) {}\n\n"
+         "func main() {\n"
+         "    r := gin.Default()\n"
+         "    r.GET(\"/orders\", listOrders)\n"
+         "    r.POST(\"/orders\", createOrder)\n"
+         "}\n"}};
+    ASSERT_TRUE(et_edge_present(f, 2, "HANDLES", 1));
+    PASS();
+}
+
+/* #686: Go router groups. Fiber (and Gin/Echo, same syntax) build the external
+ * path from `grp := app.Group("/admin")` plus `grp.Post("/x")`, so the full
+ * path is never one literal at the registration site. The Route must carry
+ * the composed path, including nested groups (`v1 := api.Group("/v1")`) and
+ * groups built inline (`app.Group("/x").Get(...)`). Controls: a route on the
+ * root app keeps its own path, a variable later re-bound to a different group
+ * uses the binding in effect at the call, and a non-literal group prefix
+ * leaves the route unprefixed (never guessed). Exact Route set on BOTH the
+ * sequential and the parallel pipeline. */
+static const EtFile et_fiber_groups_issue686[] = {
+    {"main.go",
+     "package main\n\n"
+     "import \"github.com/gofiber/fiber/v2\"\n\n"
+     "func health(c *fiber.Ctx) error { return nil }\n"
+     "func getUser(c *fiber.Ctx) error { return nil }\n"
+     "func updateCustomer(c *fiber.Ctx) error { return nil }\n"
+     "func listOrders(c *fiber.Ctx) error { return nil }\n"
+     "func ping(c *fiber.Ctx) error { return nil }\n"
+     "func report(c *fiber.Ctx) error { return nil }\n"
+     "func dyn(c *fiber.Ctx) error { return nil }\n\n"
+     "func main() {\n"
+     "    app := fiber.New()\n"
+     "    app.Get(\"/health\", health)\n"
+     "    api := app.Group(\"/api\")\n"
+     "    v1 := api.Group(\"/v1\", authMiddleware)\n"
+     "    v1.Get(\"/users/:id\", getUser)\n"
+     "    admin := app.Group(\"/admin\")\n"
+     "    admin.Post(\"/customers/:id\", updateCustomer)\n"
+     "    grp := api.Group(\"/shop\")\n"
+     "    grp.Get(\"/orders\", listOrders)\n"
+     "    grp = app.Group(\"/internal\")\n"
+     "    grp.Get(\"/ping\", ping)\n"
+     "    app.Group(\"/reports\").Get(\"/daily\", report)\n"
+     "    prefix := \"/p\"\n"
+     "    dg := app.Group(prefix)\n"
+     "    dg.Get(\"/dyn\", dyn)\n"
+     "    app.Listen(\":3000\")\n"
+     "}\n\n"
+     "func authMiddleware(c *fiber.Ctx) error { return c.Next() }\n"}};
+
+static const char *et_fiber_groups_issue686_routes[] = {
+    "/health",      "/api/v1/users/:id", "/admin/customers/:id", "/api/shop/orders",
+    "/internal/ping", "/reports/daily",  "/dyn",                 NULL};
+
+TEST(handles_fiber_group_prefix_sequential_issue686) {
+    ASSERT_TRUE(et_routes_exact_mode(et_fiber_groups_issue686, 1, et_fiber_groups_issue686_routes,
+                                     false, NULL));
+    PASS();
+}
+
+TEST(handles_fiber_group_prefix_parallel_issue686) {
+    ASSERT_TRUE(et_routes_exact_mode(et_fiber_groups_issue686, 1, et_fiber_groups_issue686_routes,
+                                     true, NULL));
+    PASS();
+}
+
+/* #686 control for the same mechanism on Gin: `v1 := r.Group("/v1")` with the
+ * idiomatic brace block. */
+TEST(handles_gin_group_prefix_issue686) {
+    static const EtFile f[] = {
+        {"main.go",
+         "package main\n\n"
+         "import \"github.com/gin-gonic/gin\"\n\n"
+         "func listOrders(c *gin.Context) {}\n"
+         "func createOrder(c *gin.Context) {}\n\n"
+         "func main() {\n"
+         "    r := gin.Default()\n"
+         "    v1 := r.Group(\"/v1\")\n"
+         "    {\n"
+         "        v1.GET(\"/orders\", listOrders)\n"
+         "        v1.POST(\"/orders\", createOrder)\n"
+         "    }\n"
+         "}\n"}};
+    static const char *routes[] = {"/v1/orders", "/v1/orders", NULL}; /* GET + POST */
+    ASSERT_TRUE(et_routes_exact(f, 1, routes));
+    PASS();
+}
+
+/* #686: which statement binds a group receiver. `var` lists and blocks, tuples, a name
+ * declared with no value (no prefix), a shadowing inner block, rebinding, an enclosing
+ * block reached from an inner one, a chain of groups, and a function literal (a boundary:
+ * nothing outside it binds). */
+static const EtFile et_go_group_bindings[] = {{"main.go",
+                                               "package main\n\n"
+                                               "import \"github.com/gin-gonic/gin\"\n\n"
+                                               "func h(c *gin.Context) {}\n\n"
+                                               "func main() {\n"
+                                               "    r := gin.Default()\n"
+                                               "    var a, b = r.Group(\"/a\"), r.Group(\"/b\")\n"
+                                               "    a.GET(\"/x\", h)\n"
+                                               "    b.GET(\"/y\", h)\n"
+                                               "    var (\n"
+                                               "        c1 = r.Group(\"/c\")\n"
+                                               "        d1 *gin.RouterGroup\n"
+                                               "    )\n"
+                                               "    c1.GET(\"/z\", h)\n"
+                                               "    d1.GET(\"/w\", h)\n"
+                                               "    e, f := r.Group(\"/e\"), r.Group(\"/f\")\n"
+                                               "    f.GET(\"/q\", h)\n"
+                                               "    e.GET(\"/p\", h)\n"
+                                               "    g := r.Group(\"/g1\")\n"
+                                               "    {\n"
+                                               "        g := r.Group(\"/g2\")\n"
+                                               "        g.GET(\"/in\", h)\n"
+                                               "    }\n"
+                                               "    g.GET(\"/out\", h)\n"
+                                               "    g = r.Group(\"/g3\")\n"
+                                               "    if true {\n"
+                                               "        g.GET(\"/if\", h)\n"
+                                               "    }\n"
+                                               "    m := r.Group(\"/m\")\n"
+                                               "    n := m.Group(\"/n\")\n"
+                                               "    n.GET(\"/deep\", h)\n"
+                                               "    go func() {\n"
+                                               "        g.GET(\"/lit\", h)\n"
+                                               "    }()\n"
+                                               "}\n"}};
+
+static const char *et_go_group_bindings_routes[] = {"/a/x",   "/b/y",      "/c/z",   "/w",
+                                                    "/f/q",   "/e/p",      "/g2/in", "/g1/out",
+                                                    "/g3/if", "/m/n/deep", "/lit",   NULL};
+
+TEST(handles_go_group_binding_forms_sequential_issue686) {
+    ASSERT_TRUE(
+        et_routes_exact_mode(et_go_group_bindings, 1, et_go_group_bindings_routes, false, NULL));
+    PASS();
+}
+
+TEST(handles_go_group_binding_forms_parallel_issue686) {
+    ASSERT_TRUE(
+        et_routes_exact_mode(et_go_group_bindings, 1, et_go_group_bindings_routes, true, NULL));
+    PASS();
+}
+
+/* Spring (Java) — class-level @RequestMapping must prefix method mappings.
+ * Reproduce-first: a HANDLES count alone can pass with partial routes
+ * ("/orders"), but callers/search_graph need the actual endpoint names
+ * ("/api/orders"). */
+TEST(handles_spring_java) {
+    static const char *routes[] = {"/api/orders", "/api/orders/{id}", NULL};
+    static const EtFile f[] = {
+        {"OrderController.java",
+         "package com.example;\n\n"
+         "import org.springframework.web.bind.annotation.RequestMapping;\n"
+         "import org.springframework.web.bind.annotation.GetMapping;\n\n"
+         "@RequestMapping(\"/api\")\npublic class OrderController {\n"
+         "    @GetMapping(\"/orders\")\n"
+         "    public String listOrders() {\n"
+         "        return \"orders\";\n    }\n\n"
+         "    @GetMapping(\"/orders/{id}\")\n"
+         "    public String getOrder(int id) {\n"
+         "        return \"order:\" + id;\n    }\n}\n"}};
+    ASSERT_TRUE(et_edge_present(f, 1, "HANDLES", 2));
+    ASSERT_TRUE(et_routes_exact(f, 1, routes));
+    PASS();
+}
+
+/* Spring (Java) — the path attribute may sit anywhere in the annotation.
+ * Java puts no order on annotation attributes, so `path` after `name`,
+ * `produces` and `consumes` is ordinary source. The argument scan stopped
+ * after the third attribute, so the path was never read and no Route node
+ * formed. A HANDLES count alone cannot catch that, because the class-level
+ * @RequestMapping still produces one route on its own. */
+TEST(handles_spring_java_path_attribute_fourth) {
+    static const char *routes[] = {"/api/orders", NULL};
+    static const EtFile f[] = {
+        {"OrderController.java",
+         "package com.example;\n\n"
+         "import org.springframework.web.bind.annotation.RequestMapping;\n"
+         "import org.springframework.web.bind.annotation.GetMapping;\n\n"
+         "@RequestMapping(\"/api\")\npublic class OrderController {\n"
+         "    @GetMapping(name = \"listOrders\",\n"
+         "                produces = \"application/json\",\n"
+         "                consumes = \"application/json\",\n"
+         "                path = \"/orders\")\n"
+         "    public String listOrders() {\n"
+         "        return \"orders\";\n    }\n}\n"}};
+    ASSERT_TRUE(et_routes_exact(f, 1, routes));
+    PASS();
+}
+
+/* Spring (Kotlin) — same prefix contract, including Kotlin's named array form
+ * for class-level RequestMapping values. */
+TEST(handles_spring_kotlin) {
+    static const char *routes[] = {"/internal/v1/api/orders", "/internal/v1/api/orders/{id}", NULL};
+    static const EtFile f[] = {
+        {"OrderController.kt",
+         "package com.example\n\n"
+         "import org.springframework.web.bind.annotation.RequestMapping\n"
+         "import org.springframework.web.bind.annotation.GetMapping\n\n"
+         "@RequestMapping(value = [\"/internal/v1/api\"])\nclass OrderController {\n"
+         "    @GetMapping(\"/orders\")\n"
+         "    fun listOrders(): String {\n"
+         "        return \"orders\"\n    }\n\n"
+         "    @GetMapping(\"/orders/{id}\")\n"
+         "    fun getOrder(id: Int): String {\n"
+         "        return \"order:\" + id\n    }\n}\n"}};
+    ASSERT_TRUE(et_edge_present(f, 1, "HANDLES", 2));
+    ASSERT_TRUE(et_routes_exact(f, 1, routes));
+    PASS();
+}
+
+/* JAX-RS (Java): the verb (@GET) and the path (@Path) are sibling
+ * annotations, and the class-level @Path must prefix method-level paths.
+ * Reproduce-first (#1005): the first-mapping-annotation scan dropped every
+ * method-level @Path, collapsing all methods onto a single "/" Route node;
+ * only the exact Route-name set catches that through the emission dedup. */
+TEST(handles_jaxrs_java) {
+    static const char *routes[] = {"/api/v1/widgets", "/api/v1/widgets/count", NULL};
+    static const EtFile f[] = {
+        {"WidgetResource.java",
+         "package com.example;\n\n"
+         "import jakarta.ws.rs.GET;\n"
+         "import jakarta.ws.rs.Path;\n\n"
+         "@Path(\"/api/v1/widgets\")\npublic class WidgetResource {\n"
+         "    @GET\n"
+         "    public String list() {\n"
+         "        return \"widgets\";\n    }\n\n"
+         "    @GET\n"
+         "    @Path(\"/count\")\n"
+         "    public String count() {\n"
+         "        return \"42\";\n    }\n}\n"}};
+    ASSERT_TRUE(et_edge_present(f, 1, "HANDLES", 2));
+    ASSERT_TRUE(et_routes_exact(f, 1, routes));
+    PASS();
+}
+
+/* JAX-RS (Java): @Path values are URI templates relative to the enclosing
+ * resource, and the leading slash is optional. The slash-less spelling must
+ * produce the same rooted Route set as the fixture above. */
+TEST(handles_jaxrs_java_relative_path) {
+    static const char *routes[] = {"/api/v1/widgets", "/api/v1/widgets/count", NULL};
+    static const EtFile f[] = {
+        {"WidgetResource.java",
+         "package com.example;\n\n"
+         "import jakarta.ws.rs.GET;\n"
+         "import jakarta.ws.rs.Path;\n\n"
+         "@Path(\"api/v1/widgets\")\npublic class WidgetResource {\n"
+         "    @GET\n"
+         "    public String list() {\n"
+         "        return \"widgets\";\n    }\n\n"
+         "    @GET\n"
+         "    @Path(\"count\")\n"
+         "    public String count() {\n"
+         "        return \"42\";\n    }\n}\n"}};
+    ASSERT_TRUE(et_edge_present(f, 1, "HANDLES", 2));
+    ASSERT_TRUE(et_routes_exact(f, 1, routes));
+    PASS();
+}
+
+/* Negative control: the relative-template acceptance is scoped to JAX-RS
+ * @Path. A slash-less string on a Spring mapping annotation is still not read
+ * as a route path, so the handler keeps the "/" fallback and no "/api/orders"
+ * Route node appears. */
+TEST(handles_spring_java_relative_string_not_route) {
+    static const char *routes[] = {"/", NULL};
+    static const EtFile f[] = {
+        {"OrderController.java",
+         "package com.example;\n\n"
+         "import org.springframework.web.bind.annotation.RequestMapping;\n"
+         "import org.springframework.web.bind.annotation.GetMapping;\n\n"
+         "@RequestMapping(\"api\")\npublic class OrderController {\n"
+         "    @GetMapping(\"orders\")\n"
+         "    public String listOrders() {\n"
+         "        return \"orders\";\n    }\n}\n"}};
+    ASSERT_TRUE(et_routes_exact(f, 1, routes));
+    PASS();
+}
+
+/* JAX-RS (Scala): class-level @Path must be composed with both an empty
+ * method path and a non-empty one.  Without the Scala branch in
+ * push_method_def, unrelated resources collapse onto the global verb/root
+ * Route node. */
+TEST(handles_jaxrs_scala) {
+    static const char *routes[] = {"/billingAccount", "/billingAccount/{id}",
+                                   "/billingAccount/{id}/attachment/{attachmentId}/content", NULL};
+    static const EtFile f[] = {
+        {"BillingAccountApiController.scala",
+         "package com.example\n\n"
+         "import jakarta.ws.rs.{GET, POST, Path}\n\n"
+         "@Path(\"/billingAccount\")\nclass BillingAccountApiController {\n"
+         "  @POST\n  @Path(\"\")\n"
+         "  def createBillingAccount(): String = \"created\"\n\n"
+         "  @GET\n  @Path(\"{id}\")\n"
+         "  def retrieveBillingAccount(): String = \"account\"\n\n"
+         "  @GET\n  @Path(\"{id}/attachment/{attachmentId}/content\")\n"
+         "  def retrieveAttachment(): String = \"attachment\"\n}\n"}};
+    ASSERT_TRUE(et_edge_present(f, 1, "HANDLES", 3));
+    ASSERT_TRUE(et_routes_exact(f, 1, routes));
+    PASS();
+}
+
+/* ASP.NET Minimal API (C#) — route registration via static MapGet/MapPost calls
+ * with identifier handlers, under a Microsoft/AspNetCore path so the resolved
+ * callee QN carries the "MapGet"/"Microsoft.AspNetCore" route-reg substrings.
+ * REAL BUG (CONFIRMED: still HANDLES=0 after this idiomatic, substring-correct
+ * fixture).  C# static calls resolve (S4 passes) and the substring is present,
+ * yet no Route/HANDLES is emitted — the C# route-registration path is not wired:
+ * the resolved C# static-invocation either is not run through
+ * cbm_service_pattern_match as ROUTE_REG or the handler-arg (an identifier
+ * method group) is not captured by extract_handler_arg for C#. */
+TEST(handles_aspnet_csharp) {
+    static const EtFile f[] = {
+        {"Microsoft/AspNetCore/Builder.cs",
+         "namespace Microsoft.AspNetCore {\n"
+         "    class WebApp {\n"
+         "        public static string MapGet(string path, System.Func<string> handler) { return handler(); }\n"
+         "        public static string MapPost(string path, System.Func<string> handler) { return handler(); }\n"
+         "    }\n}\n"},
+        {"Program.cs",
+         "using Microsoft.AspNetCore;\n\n"
+         "namespace App {\n"
+         "    class Program {\n"
+         "        static void Main() {\n"
+         "            WebApp.MapGet(\"/products\", GetProducts);\n"
+         "            WebApp.MapPost(\"/products\", CreateProduct);\n        }\n"
+         "        static string GetProducts() { return \"[]\"; }\n"
+         "        static string CreateProduct() { return \"{}\" ; }\n    }\n}\n"}};
+    ASSERT_TRUE(et_edge_present(f, 2, "HANDLES", 1));
+    PASS();
+}
+
+/* ASP.NET Core attribute routing (C#, #1692) — the reporter's controller shape:
+ * stacked class attributes with a relative [Route("api/[controller]")] prefix,
+ * verb attributes with and without a template, and a verb + separate method
+ * [Route]. Every action got 0 Route nodes: the route extractor knew no
+ * HttpGet/HttpPost/Route attribute, and relative templates were dropped for lacking a
+ * leading '/'. The exact Route-name set also pins the [controller] token
+ * (class name minus "Controller") and the class-prefix join. */
+TEST(handles_aspnet_attribute_routes_issue1692) {
+    static const char *routes[] = {"/api/Quotes/{symbol}", "/api/Quotes/orders/{id}/confirm",
+                                   "/api/Quotes/x/{id}", NULL};
+    static const EtFile f[] = {
+        {"Controllers/QuotesController.cs",
+         "using Microsoft.AspNetCore.Mvc;\n\n"
+         "namespace Feeder.Api.Controllers\n{\n"
+         "    [ServiceFilter(typeof(ClientIpCheckFilter))]\n"
+         "    [Route(\"api/[controller]\")]\n"
+         "    [ApiController]\n"
+         "    public class QuotesController : ControllerBase\n    {\n"
+         "        [HttpGet(\"{symbol}\")]\n"
+         "        public IActionResult Get(string symbol) { return Ok(symbol); }\n\n"
+         "        [HttpPost]\n"
+         "        [Route(\"orders/{id}/confirm\")]\n"
+         "        public IActionResult Confirm(int id) { return Ok(id); }\n\n"
+         "        [HttpPut(\"x/{id}\")]\n"
+         "        public IActionResult Update(int id) { return Ok(id); }\n    }\n}\n"}};
+    ASSERT_TRUE(et_edge_present(f, 1, "HANDLES", 3));
+    ASSERT_TRUE(et_routes_exact(f, 1, routes));
+    PASS();
+}
+
+/* ASP.NET Core (#1041) — the reporter's shape: [ApiController] before a
+ * versioned [Route("api/v1/[controller]")] and an async [HttpPost("login")]
+ * action produced no server-side Route node at all. */
+TEST(handles_aspnet_attribute_routes_issue1041) {
+    static const char *routes[] = {"/api/v1/Auth/login", NULL};
+    static const EtFile f[] = {
+        {"Controllers/AuthController.cs",
+         "using System.Threading.Tasks;\n"
+         "using Microsoft.AspNetCore.Mvc;\n\n"
+         "[ApiController]\n"
+         "[Route(\"api/v1/[controller]\")]\n"
+         "public class AuthController : ControllerBase\n{\n"
+         "    [HttpPost(\"login\")]\n"
+         "    public async Task<IActionResult> Login(LoginRequest req) { return Ok(); }\n}\n"}};
+    ASSERT_TRUE(et_edge_present(f, 1, "HANDLES", 1));
+    ASSERT_TRUE(et_routes_exact(f, 1, routes));
+    PASS();
+}
+
+/* ASP.NET Core [controller]/[action] token replacement (#1692): the action
+ * token is the method name ("Async" suffix trimmed, as ASP.NET Core does by
+ * default) or its [ActionName]; [AcceptVerbs] takes its path from Route=. */
+TEST(handles_aspnet_route_tokens_issue1692) {
+    static const char *routes[] = {"/api/Items/List", "/api/Items/Details/{id}",
+                                   "/api/Items/Find/{name}", "/api/Items/archive", NULL};
+    static const EtFile f[] = {
+        {"ItemsController.cs", "using Microsoft.AspNetCore.Mvc;\n\n"
+                               "[Route(\"api/[controller]\")]\n"
+                               "public class ItemsController : Controller\n{\n"
+                               "    [HttpGet(\"[action]\")]\n"
+                               "    public IActionResult List() { return View(); }\n\n"
+                               "    [HttpGet(\"[action]/{id}\")]\n"
+                               "    public System.Threading.Tasks.Task<IActionResult> "
+                               "DetailsAsync(int id) { return null; }\n\n"
+                               "    [HttpGet(\"[action]/{name}\")]\n"
+                               "    [ActionName(\"Find\")]\n"
+                               "    public IActionResult Search(string name) { return View(); }\n\n"
+                               "    [AcceptVerbs(\"POST\", \"PUT\", Route = \"archive\")]\n"
+                               "    public IActionResult Archive() { return View(); }\n}\n"}};
+    ASSERT_TRUE(et_routes_exact(f, 1, routes));
+    PASS();
+}
+
+/* ASP.NET Core absolute override + constraints (#1692): a method template that
+ * starts with "/" or "~/" ignores the class prefix; route constraints,
+ * optional markers and defaults are stripped to the bare parameter so the
+ * Route name matches the clients' "{id}" spelling ("{code:regex(...)}" nests
+ * braces). A controller without a class [Route] uses the method template as
+ * the whole path. */
+TEST(handles_aspnet_override_constraints_issue1692) {
+    static const char *routes[] = {
+        "/health", "/ping", "/api/Orders/{id}", "/api/Orders/{code}/{page}", "/api/ping", NULL};
+    static const EtFile f[] = {
+        {"OrdersController.cs",
+         "using Microsoft.AspNetCore.Mvc;\n\n"
+         "[Route(\"api/[controller]\")]\n"
+         "public class OrdersController : ControllerBase\n{\n"
+         "    [HttpGet(\"/health\")]\n"
+         "    public IActionResult Health() { return Ok(); }\n\n"
+         "    [Microsoft.AspNetCore.Mvc.HttpHeadAttribute(\"~/ping\")]\n"
+         "    public IActionResult Ping() { return Ok(); }\n\n"
+         "    [HttpDelete(\"{id:int:min(1)}\")]\n"
+         "    public IActionResult Delete(int id) { return Ok(); }\n\n"
+         "    [HttpGet(\"{code:regex(^\\\\d{{3}}$)}/{page=1}\")]\n"
+         "    public IActionResult ByCode(string code, int page) { return Ok(); }\n}\n"},
+        {"PingController.cs", "using Microsoft.AspNetCore.Mvc;\n\n"
+                              "public class PingController : ControllerBase\n{\n"
+                              "    [HttpGet(\"api/ping\", Name = \"PingRoute\")]\n"
+                              "    public IActionResult Get() { return Ok(); }\n}\n"}};
+    ASSERT_TRUE(et_routes_exact(f, 2, routes));
+    PASS();
+}
+
+/* Control (#1692): a C# class with ordinary attributes — including string
+ * arguments that look like paths — must not produce Route nodes. */
+TEST(handles_aspnet_non_controller_control_issue1692) {
+    static const char *routes[] = {NULL};
+    static const EtFile f[] = {{"Helper.cs", "using System;\n\n"
+                                             "[Serializable]\n"
+                                             "[Description(\"api/helper\")]\n"
+                                             "public class Helper\n{\n"
+                                             "    [Obsolete(\"/use/other\")]\n"
+                                             "    public void Run() { }\n\n"
+                                             "    [Fact]\n"
+                                             "    [Trait(\"Category\", \"api/[controller]\")]\n"
+                                             "    public void Check() { }\n}\n"}};
+    ASSERT_TRUE(et_routes_exact(f, 1, routes));
+    PASS();
+}
+
+/* Laravel (PHP) — Route facade whose QN contains "Laravel".
+ * REAL BUG: internal/cbm/extract_calls.c:extract_handler_arg only accepts an
+ * identifier/member_expression/selector_expression/attribute/field_expression as
+ * the handler argument.  Idiomatic Laravel handlers are STRINGS ('showUsers') or
+ * arrays ([Ctrl::class,'m']) — PHP also parses a bare callee as a `name` node,
+ * which extract_handler_arg does not accept.  So Route::get('/u','showUsers')
+ * yields a Route + CALLS but never a HANDLES edge. */
+TEST(handles_laravel_php) {
+    static const EtFile f[] = {
+        {"Laravel/Route.php",
+         "<?php\nnamespace Laravel;\n\n"
+         "class Route {\n"
+         "    public static function get($path, $handler) { return $handler; }\n"
+         "    public static function post($path, $handler) { return $handler; }\n}\n"},
+        {"routes/web.php",
+         "<?php\nuse Laravel\\Route;\n\n"
+         "function showUsers() { return ['users' => []]; }\n"
+         "function storeUser() { return ['stored' => true]; }\n\n"
+         "Route::get('/users', 'showUsers');\n"
+         "Route::post('/users', 'storeUser');\n"}};
+    ASSERT_TRUE(et_edge_present(f, 2, "HANDLES", 1));
+    PASS();
+}
+
+/* #952: facade-style Laravel — the ONLY style real apps use, since the
+ * Illuminate facade lives in vendor/ and is never indexed. The callee of
+ * `Route::get(...)` (scoped_call_expression) was extracted as bare "get", so
+ * the empty-resolution route fallback ("::get" suffix table) never engaged
+ * and NO Route node minted — not even for flat registrations. Grouped routes
+ * additionally need the enclosing `prefix('/x')->group(...)` chain composed
+ * (same class as Spring's #734). Exact-set assertion distinguishes
+ * prefix-dropped from missing entirely. */
+TEST(handles_laravel_facade_routes_issue952) {
+    static const char *routes[] = {"/api/welcome", "/users/me", "/users/login",
+                                   "/companies/tenants/list", NULL};
+    static const EtFile f[] = {
+        {"routes/api.php",
+         "<?php\nuse Illuminate\\Support\\Facades\\Route;\n\n"
+         "Route::get('/api/welcome', WelcomeController::class);\n"
+         "Route::prefix('/users')->middleware(DomainCheckMiddleware::class)"
+         "->group(function (): void {\n"
+         "    Route::get('/me', GetCurrentUserController::class);\n"
+         "    Route::post('/login', LoginUserController::class);\n"
+         "});\n"
+         "Route::prefix('companies')->group(function (): void {\n"
+         "    Route::prefix('tenants')->group(function (): void {\n"
+         "        Route::get('/list', ListTenantsController::class);\n"
+         "    });\n"
+         "});\n"}};
+    ASSERT_TRUE(et_routes_exact(f, 1, routes));
+    PASS();
+}
+
+/* #952 inverse guard: a non-router static call whose method name collides
+ * with a route verb (Cache::get) must NOT mint a Route node — the callee
+ * qualification is route-table-gated and the path gate requires a leading
+ * slash. */
+TEST(handles_laravel_facade_no_junk_routes_issue952) {
+    static const char *routes[] = {"/real", NULL};
+    static const EtFile f[] = {
+        {"routes/api.php",
+         "<?php\nuse Illuminate\\Support\\Facades\\Route;\n"
+         "use Illuminate\\Support\\Facades\\Cache;\n\n"
+         "Route::get('/real', RealController::class);\n"
+         "$v = Cache::get('users.count');\n"
+         "$w = Cache::get('/leading/slash/key');\n"}};
+    ASSERT_TRUE(et_routes_exact(f, 1, routes));
+    PASS();
+}
+
+/* #1146: Laravel 11+ mounts the files named in bootstrap/app.php's
+ * `->withRouting(api: ...)` under `apiPrefix` (default 'api'); the `web:` file
+ * gets no prefix. The prefix is declared in a DIFFERENT file than the routes,
+ * so per-file extraction alone minted `/users/me` where the runtime route is
+ * `/api/users/me`, and cross-repo HTTP matching (which joins on the Route
+ * qualified_name) never linked real callers. */
+#define ET_L11_BOOTSTRAP_HEAD                                                                      \
+    "<?php\n\nuse Illuminate\\Foundation\\Application;\n\n"                                        \
+    "return Application::configure(basePath: dirname(__DIR__))\n"                                  \
+    "    ->withRouting(\n"
+#define ET_L11_BOOTSTRAP_TAIL                                                                      \
+    "    )\n"                                                                                      \
+    "    ->withMiddleware(function ($middleware) {\n        //\n    })\n"                          \
+    "    ->create();\n"
+
+static const char ET_L11_API_ROUTES[] =
+    "<?php\nuse Illuminate\\Support\\Facades\\Route;\n\n"
+    "Route::prefix('/users')->middleware('auth')->group(function (): void {\n"
+    "    Route::get('/me', [UserController::class, 'me']);\n"
+    "});\n"
+    "Route::post('/orders', [OrderController::class, 'store']);\n";
+
+static const char ET_L11_WEB_ROUTES[] = "<?php\nuse Illuminate\\Support\\Facades\\Route;\n\n"
+                                        "Route::get('/dashboard', [HomeController::class, 'index']);\n";
+
+/* Default convention: `api:` given, no `apiPrefix:` -> '/api'. */
+TEST(routes_laravel_withrouting_api_default_prefix_issue1146) {
+    static const char *routes[] = {"/api/users/me", "/api/orders", NULL};
+    static const EtFile f[] = {
+        {"bootstrap/app.php", ET_L11_BOOTSTRAP_HEAD
+         "        web: __DIR__.'/../routes/web.php',\n"
+         "        api: __DIR__.'/../routes/api.php',\n"
+         "        commands: __DIR__.'/../routes/console.php',\n"
+         "        health: '/up',\n" ET_L11_BOOTSTRAP_TAIL},
+        {"routes/api.php", ET_L11_API_ROUTES}};
+    ASSERT_TRUE(et_routes_exact_mode(f, 2, routes, false, "__route__GET__/api/users/me"));
+    PASS();
+}
+
+/* Explicit `apiPrefix:` (multi-segment, array form of `api:`) replaces the
+ * default for every mounted file. */
+TEST(routes_laravel_withrouting_api_custom_prefix_issue1146) {
+    static const char *routes[] = {"/v1/api/users/me", "/v1/api/orders", "/v1/api/partners",
+                                   NULL};
+    static const EtFile f[] = {
+        {"bootstrap/app.php", ET_L11_BOOTSTRAP_HEAD
+         "        api: [__DIR__.'/../routes/api.php', __DIR__.'/../routes/partner.php'],\n"
+         "        apiPrefix: 'v1/api',\n" ET_L11_BOOTSTRAP_TAIL},
+        {"routes/api.php", ET_L11_API_ROUTES},
+        {"routes/partner.php", "<?php\nuse Illuminate\\Support\\Facades\\Route;\n\n"
+                               "Route::get('/partners', [PartnerController::class, 'index']);\n"}};
+    ASSERT_TRUE(et_routes_exact_mode(f, 3, routes, false, "__route__GET__/v1/api/partners"));
+    PASS();
+}
+
+/* The `web:` file of the same app is NOT mounted under the api prefix. */
+TEST(routes_laravel_withrouting_web_no_prefix_issue1146) {
+    static const char *routes[] = {"/dashboard", "/api/users/me", "/api/orders", NULL};
+    static const EtFile f[] = {
+        {"bootstrap/app.php", ET_L11_BOOTSTRAP_HEAD
+         "        web: __DIR__.'/../routes/web.php',\n"
+         "        api: __DIR__.'/../routes/api.php',\n" ET_L11_BOOTSTRAP_TAIL},
+        {"routes/web.php", ET_L11_WEB_ROUTES},
+        {"routes/api.php", ET_L11_API_ROUTES}};
+    ASSERT_TRUE(et_routes_exact(f, 3, routes));
+    PASS();
+}
+
+/* Control: the Laravel <= 10 RouteServiceProvider form (no withRouting, the
+ * prefix lives on a `->group(base_path(...))` call) is not composed today and
+ * must stay exactly as it is -- no filename-based `/api` inference. */
+TEST(routes_laravel_routeserviceprovider_control_issue1146) {
+    static const char *routes[] = {"/users/me", "/orders", NULL};
+    static const EtFile f[] = {
+        {"bootstrap/app.php",
+         "<?php\n\n$app = new Illuminate\\Foundation\\Application(\n"
+         "    $_ENV['APP_BASE_PATH'] ?? dirname(__DIR__)\n);\n\nreturn $app;\n"},
+        {"app/Providers/RouteServiceProvider.php",
+         "<?php\nnamespace App\\Providers;\n\n"
+         "use Illuminate\\Support\\Facades\\Route;\n\n"
+         "class RouteServiceProvider extends ServiceProvider {\n"
+         "    public function boot(): void {\n"
+         "        $this->routes(function () {\n"
+         "            Route::middleware('api')->prefix('api')"
+         "->group(base_path('routes/api.php'));\n"
+         "            Route::middleware('web')->group(base_path('routes/web.php'));\n"
+         "        });\n    }\n}\n"},
+        {"routes/api.php", ET_L11_API_ROUTES}};
+    ASSERT_TRUE(et_routes_exact(f, 3, routes));
+    PASS();
+}
+
+/* A non-literal `apiPrefix:` is unknown at index time: leave the paths alone
+ * rather than guess the default. */
+TEST(routes_laravel_withrouting_nonliteral_prefix_issue1146) {
+    static const char *routes[] = {"/users/me", "/orders", NULL};
+    static const EtFile f[] = {
+        {"bootstrap/app.php", ET_L11_BOOTSTRAP_HEAD
+         "        api: __DIR__.'/../routes/api.php',\n"
+         "        apiPrefix: config('app.api_prefix'),\n" ET_L11_BOOTSTRAP_TAIL},
+        {"routes/api.php", ET_L11_API_ROUTES}};
+    ASSERT_TRUE(et_routes_exact(f, 2, routes));
+    PASS();
+}
+
+/* Same contract on the PARALLEL resolver (> 50 files), with the Laravel app
+ * in a monorepo subdirectory: the nearest ancestor bootstrap/app.php owns it. */
+TEST(routes_laravel_withrouting_parallel_subdir_issue1146) {
+    static const char *routes[] = {"/api/users/me", "/api/orders", NULL};
+    static const EtFile f[] = {
+        {"gateway/bootstrap/app.php", ET_L11_BOOTSTRAP_HEAD
+         "        web: __DIR__.'/../routes/web.php',\n"
+         "        api: __DIR__.'/../routes/api.php',\n" ET_L11_BOOTSTRAP_TAIL},
+        {"gateway/routes/api.php", ET_L11_API_ROUTES}};
+    ASSERT_TRUE(et_routes_exact_mode(f, 2, routes, true, "__route__POST__/api/orders"));
+    PASS();
+}
+
+/* Assert the exact HANDLES edge set as "<handler-QN tail> -> <route name>"
+ * pairs. The tail is matched at a segment boundary against the handler's
+ * qualified name ("UserController.show" matches
+ * "<project>.app.Http.Controllers.UserController.UserController.show"), so a
+ * same-named method on another class never satisfies it; the total count must
+ * match too, so a fabricated extra edge fails the assertion. */
+typedef struct {
+    const char *handler_tail;
+    const char *route;
+} EtHandles;
+
+static int et_qn_has_tail(const char *qn, const char *tail) {
+    size_t ql = qn ? strlen(qn) : 0;
+    size_t tl = strlen(tail);
+    return ql >= tl && strcmp(qn + ql - tl, tail) == 0 && (ql == tl || qn[ql - tl - 1] == '.');
+}
+
+/* route_qns (optional, NULL-terminated): Route qualified_names that must
+ * exist, so a test asserting that a route gets NO handler cannot pass merely
+ * because the route itself was never extracted. */
+static int et_edges_exact_routes(const EtFile *files, int nfiles, const char *edge,
+                                 const EtHandles *want, int parallel,
+                                 const char *const *route_qns) {
+    EtProj lp;
+    cbm_store_t *store =
+        parallel ? et_index_parallel(&lp, files, nfiles) : et_index_files(&lp, files, nfiles);
+    int wanted = 0;
+    int found[ET_ROUTE_ASSERT_MAX] = {0};
+    while (want[wanted].handler_tail && wanted < ET_ROUTE_ASSERT_MAX) {
+        wanted++;
+    }
+    cbm_edge_t *edges = NULL;
+    int n = 0;
+    int ok = store != NULL &&
+             cbm_store_find_edges_by_type(store, lp.project, edge, &edges, &n) ==
+                 CBM_STORE_OK &&
+             n == wanted;
+    for (int i = 0; store && i < n; i++) {
+        cbm_node_t src = {0};
+        cbm_node_t tgt = {0};
+        int have_src = cbm_store_find_node_by_id(store, edges[i].source_id, &src) == CBM_STORE_OK;
+        int have_tgt = cbm_store_find_node_by_id(store, edges[i].target_id, &tgt) == CBM_STORE_OK;
+        int matched = 0;
+        for (int wi = 0; have_src && have_tgt && wi < wanted; wi++) {
+            if (!found[wi] && tgt.name && strcmp(tgt.name, want[wi].route) == 0 &&
+                et_qn_has_tail(src.qualified_name, want[wi].handler_tail)) {
+                found[wi] = matched = 1;
+                break;
+            }
+        }
+        if (!matched) {
+            ok = 0;
+            fprintf(stderr, "  [ET-%s] unexpected %s -> %s\n", edge,
+                    have_src && src.qualified_name ? src.qualified_name : "<?>",
+                    have_tgt && tgt.name ? tgt.name : "<?>");
+        }
+        if (have_src) cbm_node_free_fields(&src);
+        if (have_tgt) cbm_node_free_fields(&tgt);
+    }
+    for (int wi = 0; wi < wanted; wi++) {
+        if (!found[wi]) {
+            ok = 0;
+            fprintf(stderr, "  [ET-%s] missing %s -> %s\n", edge, want[wi].handler_tail,
+                    want[wi].route);
+        }
+    }
+    for (int ri = 0; route_qns && route_qns[ri]; ri++) {
+        cbm_node_t route = {0};
+        if (!store ||
+            cbm_store_find_node_by_qn(store, lp.project, route_qns[ri], &route) != CBM_STORE_OK) {
+            ok = 0;
+            fprintf(stderr, "  [ET-%s] missing Route %s\n", edge, route_qns[ri]);
+        } else {
+            cbm_node_free_fields(&route);
+        }
+    }
+    if (!ok) {
+        fprintf(stderr, "  [ET-%s] FAIL (%s path) expected=%d actual=%d\n", edge,
+                parallel ? "parallel" : "sequential", wanted, n);
+    }
+    if (edges) cbm_store_free_edges(edges, n);
+    et_cleanup(&lp, store);
+    return ok;
+}
+
+static int et_handles_exact_routes(const EtFile *files, int nfiles, const EtHandles *want,
+                                   int parallel, const char *const *route_qns) {
+    return et_edges_exact_routes(files, nfiles, "HANDLES", want, parallel, route_qns);
+}
+
+static int et_handles_exact(const EtFile *files, int nfiles, const EtHandles *want, int parallel) {
+    return et_handles_exact_routes(files, nfiles, want, parallel, NULL);
+}
+
+/* Retrofit (#2723): an interface method's @GET("...") declares a request the
+ * client makes. It was minted as a served Route with a HANDLES edge, and every
+ * path without a leading slash collapsed onto "/". The relative path is rooted
+ * (Retrofit resolves it against the base URL); a path from a constant or a
+ * template has no static value and yields no edge rather than a "/" Route. */
+static const EtFile et_retrofit_kotlin[] = {
+    {"src/main/kotlin/com/acme/client/OrderApi.kt",
+     "package com.acme.client\n\n"
+     "import retrofit2.http.Body\n"
+     "import retrofit2.http.GET\n"
+     "import retrofit2.http.POST\n"
+     "import retrofit2.http.Path\n\n"
+     "private const val ORDERS = \"/v1/orders\"\n\n"
+     "interface OrderApi {\n"
+     "    @GET(\"/v1/orders/{id}\")\n"
+     "    suspend fun getOrder(@Path(\"id\") id: String): String\n\n"
+     "    @POST(\"v1/orders\")\n"
+     "    suspend fun createOrder(@Body body: String): String\n\n"
+     "    @GET(ORDERS)\n"
+     "    suspend fun listOrders(): String\n\n"
+     "    @GET(\"$ORDERS/{id}/status\")\n"
+     "    suspend fun getOrderStatus(@Path(\"id\") id: String): String\n"
+     "}\n"}};
+
+static const EtHandles et_retrofit_kotlin_calls[] = {
+    {"OrderApi.getOrder", "/v1/orders/{id}"}, {"OrderApi.createOrder", "/v1/orders"}, {NULL, NULL}};
+
+static const EtHandles et_no_edges[] = {{NULL, NULL}};
+
+TEST(http_calls_retrofit_kotlin_interface_issue2723) {
+    static const char *const qns[] = {"__route__GET__/v1/orders/{}", "__route__POST__/v1/orders",
+                                      NULL};
+    for (int parallel = 0; parallel <= 1; parallel++) {
+        ASSERT_TRUE(et_edges_exact_routes(et_retrofit_kotlin, 1, "HTTP_CALLS",
+                                          et_retrofit_kotlin_calls, parallel, qns));
+        ASSERT_TRUE(et_handles_exact(et_retrofit_kotlin, 1, et_no_edges, parallel));
+    }
+    PASS();
+}
+
+/* Java Retrofit: the named `value =` form and a full URL are read; a
+ * concatenation is not, so none of its string fragments becomes a path. */
+TEST(http_calls_retrofit_java_interface_issue2723) {
+    static const EtFile f[] = {
+        {"src/main/java/com/acme/jclient/OrderApi.java",
+         "package com.acme.jclient;\n\n"
+         "import retrofit2.Call;\n"
+         "import retrofit2.http.Body;\n"
+         "import retrofit2.http.DELETE;\n"
+         "import retrofit2.http.GET;\n"
+         "import retrofit2.http.POST;\n"
+         "import retrofit2.http.Path;\n\n"
+         "public interface OrderApi {\n"
+         "    String BASE = \"v1\";\n\n"
+         "    @GET(\"v1/orders/{id}\")\n"
+         "    Call<String> getOrder(@Path(\"id\") String id);\n\n"
+         "    @POST(value = \"v1/orders\")\n"
+         "    Call<String> createOrder(@Body String body);\n\n"
+         "    @GET(\"https://status.acme.com/v1/health\")\n"
+         "    Call<String> health();\n\n"
+         "    @DELETE(BASE + \"/orders/{id}\")\n"
+         "    Call<Void> deleteOrder(@Path(\"id\") String id);\n"
+         "}\n"}};
+    static const EtHandles calls[] = {{"OrderApi.getOrder", "/v1/orders/{id}"},
+                                      {"OrderApi.createOrder", "/v1/orders"},
+                                      {"OrderApi.health", "https://status.acme.com/v1/health"},
+                                      {NULL, NULL}};
+    for (int parallel = 0; parallel <= 1; parallel++) {
+        ASSERT_TRUE(et_edges_exact_routes(f, 1, "HTTP_CALLS", calls, parallel, NULL));
+        ASSERT_TRUE(et_handles_exact(f, 1, et_no_edges, parallel));
+    }
+    PASS();
+}
+
+/* Control: a JAX-RS interface keeps HANDLES. Its @GET is a marker and the path
+ * is a sibling @Path, so it is not read as a Retrofit request (a verb with an
+ * argument) even though it is declared on an interface. */
+TEST(handles_jaxrs_interface_not_retrofit_issue2723) {
+    static const EtFile f[] = {
+        {"src/main/java/com/acme/api/OrderResource.java",
+         "package com.acme.api;\n\n"
+         "import jakarta.ws.rs.GET;\n"
+         "import jakarta.ws.rs.POST;\n"
+         "import jakarta.ws.rs.Path;\n\n"
+         "@Path(\"/v1/orders\")\n"
+         "public interface OrderResource {\n"
+         "    @GET\n"
+         "    @Path(\"/{id}\")\n"
+         "    String get(String id);\n\n"
+         "    @POST\n"
+         "    String create(String body);\n"
+         "}\n"}};
+    static const EtHandles handles[] = {{"OrderResource.get", "/v1/orders/{id}"},
+                                        {"OrderResource.create", "/v1/orders"},
+                                        {NULL, NULL}};
+    for (int parallel = 0; parallel <= 1; parallel++) {
+        ASSERT_TRUE(et_handles_exact(f, 1, handles, parallel));
+        ASSERT_TRUE(et_edges_exact_routes(f, 1, "HTTP_CALLS", et_no_edges, parallel, NULL));
+    }
+    PASS();
+}
+
+/* Control: Pippo and Rapidoid put the path inside @GET("/x") on a controller
+ * class. Retrofit services must be interfaces, so these keep HANDLES. */
+TEST(handles_verb_path_controller_class_not_retrofit_issue2723) {
+    static const EtFile f[] = {
+        {"src/main/java/com/acme/web/ContactsController.java",
+         "package com.acme.web;\n\n"
+         "import ro.pippo.controller.Controller;\n"
+         "import ro.pippo.controller.GET;\n"
+         "import ro.pippo.controller.POST;\n\n"
+         "public class ContactsController extends Controller {\n"
+         "    @GET(\"/contacts\")\n"
+         "    public void index() {}\n\n"
+         "    @POST(\"/contacts\")\n"
+         "    public void create() {}\n"
+         "}\n"},
+        {"src/main/kotlin/com/acme/web/StatusController.kt",
+         "package com.acme.web\n\n"
+         "import org.rapidoid.annotation.GET\n\n"
+         "class StatusController {\n"
+         "    @GET(\"/status\")\n"
+         "    fun status(): String = \"ok\"\n"
+         "}\n"}};
+    static const EtHandles handles[] = {{"ContactsController.index", "/contacts"},
+                                        {"ContactsController.create", "/contacts"},
+                                        {"StatusController.status", "/status"},
+                                        {NULL, NULL}};
+    for (int parallel = 0; parallel <= 1; parallel++) {
+        ASSERT_TRUE(et_handles_exact(f, 2, handles, parallel));
+        ASSERT_TRUE(et_edges_exact_routes(f, 2, "HTTP_CALLS", et_no_edges, parallel, NULL));
+    }
+    PASS();
+}
+
+/* The exact DATA_FLOWS set, caller -> handler by QN tail. route_qns (NULL-terminated) must
+ * exist, so a test that expects NO flow on a path cannot pass because the caller's or the
+ * handler's Route was never created; handles is the exact HANDLES count. */
+typedef struct {
+    const char *caller_tail;
+    const char *handler_tail;
+} EtFlow;
+
+static int et_flow_matches(cbm_store_t *store, const cbm_edge_t *e, const EtFlow *want,
+                           int wanted, int *found) {
+    cbm_node_t src = {0};
+    cbm_node_t tgt = {0};
+    int have_src = cbm_store_find_node_by_id(store, e->source_id, &src) == CBM_STORE_OK;
+    int have_tgt = cbm_store_find_node_by_id(store, e->target_id, &tgt) == CBM_STORE_OK;
+    int matched = 0;
+    for (int wi = 0; have_src && have_tgt && wi < wanted; wi++) {
+        if (!found[wi] && et_qn_has_tail(src.qualified_name, want[wi].caller_tail) &&
+            et_qn_has_tail(tgt.qualified_name, want[wi].handler_tail)) {
+            found[wi] = matched = 1;
+            break;
+        }
+    }
+    if (!matched) {
+        fprintf(stderr, "  [ET-FLOWS] unexpected %s -> %s\n",
+                have_src && src.qualified_name ? src.qualified_name : "<?>",
+                have_tgt && tgt.qualified_name ? tgt.qualified_name : "<?>");
+    }
+    if (have_src) cbm_node_free_fields(&src);
+    if (have_tgt) cbm_node_free_fields(&tgt);
+    return matched;
+}
+
+static int et_data_flows_exact(const EtFile *files, int nfiles, const EtFlow *want, int parallel,
+                               const char *const *route_qns, int handles) {
+    EtProj lp;
+    cbm_store_t *store =
+        parallel ? et_index_parallel(&lp, files, nfiles) : et_index_files(&lp, files, nfiles);
+    int wanted = 0;
+    int found[ET_ROUTE_ASSERT_MAX] = {0};
+    while (want[wanted].caller_tail && wanted < ET_ROUTE_ASSERT_MAX) {
+        wanted++;
+    }
+    cbm_edge_t *edges = NULL;
+    int n = 0;
+    int ok = store != NULL &&
+             cbm_store_find_edges_by_type(store, lp.project, "DATA_FLOWS", &edges, &n) ==
+                 CBM_STORE_OK &&
+             n == wanted;
+    for (int i = 0; store && i < n; i++) {
+        if (!et_flow_matches(store, &edges[i], want, wanted, found)) {
+            ok = 0;
+        }
+    }
+    for (int wi = 0; wi < wanted; wi++) {
+        if (!found[wi]) {
+            ok = 0;
+            fprintf(stderr, "  [ET-FLOWS] missing %s -> %s\n", want[wi].caller_tail,
+                    want[wi].handler_tail);
+        }
+    }
+    for (int ri = 0; route_qns && route_qns[ri]; ri++) {
+        cbm_node_t route = {0};
+        if (!store ||
+            cbm_store_find_node_by_qn(store, lp.project, route_qns[ri], &route) != CBM_STORE_OK) {
+            ok = 0;
+            fprintf(stderr, "  [ET-FLOWS] missing Route %s\n", route_qns[ri]);
+        } else {
+            cbm_node_free_fields(&route);
+        }
+    }
+    int got_handles = store ? cbm_store_count_edges_by_type(store, lp.project, "HANDLES") : -1;
+    if (got_handles != handles) {
+        ok = 0;
+        fprintf(stderr, "  [ET-FLOWS] HANDLES=%d expected %d\n", got_handles, handles);
+    }
+    if (!ok) {
+        fprintf(stderr, "  [ET-FLOWS] FAIL (%s path) expected=%d actual=%d\n",
+                parallel ? "parallel" : "sequential", wanted, n);
+    }
+    if (edges) cbm_store_free_edges(edges, n);
+    et_cleanup(&lp, store);
+    return ok;
+}
+
+/* R1 + R2 (user decision, 2026-10-18): DATA_FLOWS pair a test-file caller only with handlers in its
+ * own file, and a test-file handler only with callers in its own file. A Spring controller and a
+ * mock controller under src/test/ both answer `@RequestMapping` (any method). A production TS
+ * client and a TS test (.test.ts) call them with fetch, which names no method, so every caller and
+ * handler meets on the same __route__ANY__ node. Only the production client -> production
+ * controller pair is a data flow of the application, on the sequential and the parallel path. */
+static const EtFile et_r12_files[] = {
+    {"server/OrderController.java",
+     "package com.example;\n\n"
+     "import org.springframework.web.bind.annotation.RequestMapping;\n"
+     "import org.springframework.web.bind.annotation.RestController;\n\n"
+     "@RestController\n@RequestMapping(\"/api\")\npublic class OrderController {\n"
+     "    @RequestMapping(\"/orders\")\n"
+     "    public String orders() {\n        return \"orders\";\n    }\n}\n"},
+    {"server/src/test/java/com/example/MockPaymentController.java",
+     "package com.example;\n\n"
+     "import org.springframework.web.bind.annotation.RequestMapping;\n"
+     "import org.springframework.web.bind.annotation.RestController;\n\n"
+     "@RestController\n@RequestMapping(\"/api\")\npublic class MockPaymentController {\n"
+     "    @RequestMapping(\"/payments\")\n"
+     "    public String pay() {\n        return \"paid\";\n    }\n}\n"},
+    {"web/src/api.ts",
+     "export async function loadOrders() {\n  return fetch(\"/api/orders\");\n}\n\n"
+     "export async function loadPayments() {\n  return fetch(\"/api/payments\");\n}\n"},
+    {"web/src/api.test.ts",
+     "export async function testLoadOrders() {\n  return fetch(\"/api/orders\");\n}\n"}};
+
+static const EtFlow et_r12_flows[] = {{"api.loadOrders", "OrderController.orders"}, {NULL, NULL}};
+
+static const char *const et_r12_routes[] = {"__route__ANY__/api/orders",
+                                            "__route__ANY__/api/payments", NULL};
+
+TEST(data_flows_test_files_pair_within_their_file_sequential) {
+    ASSERT_TRUE(et_data_flows_exact(et_r12_files, 4, et_r12_flows, 0, et_r12_routes, 2));
+    PASS();
+}
+
+TEST(data_flows_test_files_pair_within_their_file_parallel) {
+    ASSERT_TRUE(et_data_flows_exact(et_r12_files, 4, et_r12_flows, 1, et_r12_routes, 2));
+    PASS();
+}
+
+/* ASP.NET Core MVC (#1692): a GET form action and its POST submit share one
+ * method name, so both overloads collapse into one Method node whose merged
+ * properties keep only one route. The parallel resolver emitted each
+ * definition's route at node creation and kept both; the sequential one rebuilt
+ * routes from the merged properties afterwards and kept only the last (28
+ * HANDLES on 6 ASP.NET corpora, 2026-10-18). Both venues keep both. */
+TEST(handles_aspnet_overload_verbs_both_venues_issue1692) {
+    static const EtHandles want[] = {{"AccountController.Login", "/Account/login"},
+                                     {"AccountController.Login", "/Account/login"},
+                                     {NULL, NULL}};
+    static const char *const route_qns[] = {"__route__GET__/Account/login",
+                                            "__route__POST__/Account/login", NULL};
+    static const EtFile f[] = {
+        {"Controllers/AccountController.cs",
+         "using Microsoft.AspNetCore.Mvc;\n\n"
+         "namespace Shop.Web.Controllers\n{\n"
+         "    [Route(\"[controller]\")]\n"
+         "    public class AccountController : Controller\n    {\n"
+         "        [HttpGet(\"login\")]\n"
+         "        public IActionResult Login() { return View(); }\n\n"
+         "        [HttpPost(\"login\")]\n"
+         "        public IActionResult Login(LoginModel model) { return Redirect(\"/\"); }\n"
+         "    }\n}\n"}};
+    ASSERT_TRUE(et_handles_exact_routes(f, 1, want, 0, route_qns));
+    ASSERT_TRUE(et_handles_exact_routes(f, 1, want, 1, route_qns));
+    PASS();
+}
+
+/* #1146: Laravel's two class-based handler forms —
+ *   Route::get('/x', [UserController::class, 'show'])   (controller method)
+ *   Route::get('/x', GetCurrentUserController::class)   (invokable: __invoke)
+ * got no HANDLES edge, because the handler scan only took identifiers and
+ * strings. The cross-repo matcher needs HANDLES on the Route, so apps written
+ * this way (the #1146 reporter's included) produced 0 CROSS_HTTP_CALLS.
+ * Controls: an Admin\UserController::show with the same short name (the `use`
+ * statement picks the class), an alias import, a fully-qualified class that is
+ * not imported, a package class under a PSR-4 root whose folder does not
+ * mirror its namespace (Acme\Blog\ -> packages/blog/src/), a decoy __invoke on
+ * another class, and two vendor classes that are not in the repo — those must
+ * get no HANDLES edge at all rather than bind to some other class's
+ * same-named method. composer.json comes first so the no-composer variant
+ * below can index the same fixture without it. */
+static const EtFile et_laravel_class_handlers[] = {
+    {"composer.json", "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"app/\", "
+                      "\"Acme\\\\Blog\\\\\": \"packages/blog/src/\"}}}\n"},
+    {"packages/blog/src/Http/PostsController.php",
+     "<?php\nnamespace Acme\\Blog\\Http;\n\n"
+     "class PostsController {\n"
+     "    public function index() { return ['posts' => []]; }\n}\n"},
+    {"app/Http/Controllers/UserController.php",
+     "<?php\nnamespace App\\Http\\Controllers;\n\n"
+     "class UserController {\n"
+     "    public function show($id) { return ['id' => $id]; }\n"
+     "    public function index() { return []; }\n}\n"},
+    {"app/Http/Controllers/Admin/UserController.php",
+     "<?php\nnamespace App\\Http\\Controllers\\Admin;\n\n"
+     "class UserController {\n"
+     "    public function show($id) { return ['admin' => $id]; }\n}\n"},
+    {"app/Http/Controllers/PostController.php",
+     "<?php\nnamespace App\\Http\\Controllers;\n\n"
+     "class PostController {\n"
+     "    public function show($id) { return ['post' => $id]; }\n}\n"},
+    {"app/Http/Controllers/GetCurrentUserController.php",
+     "<?php\nnamespace App\\Http\\Controllers;\n\n"
+     "class GetCurrentUserController {\n"
+     "    public function __invoke() { return ['me' => true]; }\n}\n"},
+    {"app/Http/Controllers/HealthController.php",
+     "<?php\nnamespace App\\Http\\Controllers;\n\n"
+     "class HealthController {\n"
+     "    public function __invoke() { return ['ok' => true]; }\n}\n"},
+    {"routes/api.php",
+     "<?php\n"
+     "use App\\Http\\Controllers\\UserController;\n"
+     "use App\\Http\\Controllers\\GetCurrentUserController as CurrentUser;\n"
+     "use Acme\\Blog\\Http\\PostsController;\n"
+     "use Illuminate\\Support\\Facades\\Route;\n\n"
+     "Route::get('/users/{id}', [UserController::class, 'show']);\n"
+     "Route::get('/me', CurrentUser::class);\n"
+     "Route::get('/posts/{id}', [\\App\\Http\\Controllers\\PostController::class, 'show']);\n"
+     "Route::get('/blog', [PostsController::class, 'index']);\n"
+     "Route::get('/vendor/{id}', [VendorController::class, 'show']);\n"
+     "Route::get('/vendor-ping', VendorInvokable::class);\n"}};
+
+enum { ET_LARAVEL_CLASS_FILES = 8 };
+
+static const EtHandles et_laravel_class_handles[] = {
+    {"Controllers.UserController.UserController.show", "/users/{id}"},
+    {"GetCurrentUserController.__invoke", "/me"},
+    {"PostController.show", "/posts/{id}"},
+    {"PostsController.index", "/blog"},
+    {NULL, NULL}};
+
+TEST(handles_laravel_class_handlers_issue1146) {
+    ASSERT_TRUE(et_handles_exact(et_laravel_class_handlers, ET_LARAVEL_CLASS_FILES,
+                                 et_laravel_class_handles, 0));
+    PASS();
+}
+
+/* Same fixture through the parallel pipeline (> MIN_FILES_FOR_PARALLEL),
+ * whose route emitter (pass_parallel.c) is a separate code path. */
+TEST(handles_laravel_class_handlers_parallel_issue1146) {
+    ASSERT_TRUE(et_handles_exact(et_laravel_class_handlers, ET_LARAVEL_CLASS_FILES,
+                                 et_laravel_class_handles, 1));
+    PASS();
+}
+
+/* Without composer.json there is no PSR-4 map: a class is placed only where
+ * its namespace mirrors the folders (App\Http\Controllers -> app/Http/
+ * Controllers). The package class, whose folder does not mirror its
+ * namespace, then gets no handler rather than a guessed one. */
+TEST(handles_laravel_class_handlers_no_composer_issue1146) {
+    static const EtHandles want[] = {
+        {"Controllers.UserController.UserController.show", "/users/{id}"},
+        {"GetCurrentUserController.__invoke", "/me"},
+        {"PostController.show", "/posts/{id}"},
+        {NULL, NULL}};
+    ASSERT_TRUE(
+        et_handles_exact(et_laravel_class_handlers + 1, ET_LARAVEL_CLASS_FILES - 1, want, 0));
+    PASS();
+}
+
+/* A PSR-4 prefix that covers a handler class decides where the class lives,
+ * as it does for the class's `use` import (#1186): when composer would load
+ * no file holding the member, the route stays without a handler. Both routes
+ * below are covered by Acme\Blog\ -> packages/blog/src/:
+ *   /blog/missing  MissingController has no class file there at all;
+ *   /blog/archive  PostsController's class file exists but has no archive().
+ * legacy/Acme/Blog/Http mirrors the namespace and holds both members, so the
+ * namespace/folder fallback would bind both routes to a class composer never
+ * loads. It must not run for a covered class. These files are added to the
+ * fixture above, whose four handlers must keep their edges. */
+static const EtFile et_laravel_psr4_absent_extra[] = {
+    {"legacy/Acme/Blog/Http/MissingController.php",
+     "<?php\nnamespace Acme\\Blog\\Http;\n\n"
+     "class MissingController {\n"
+     "    public function index() { return ['stale' => true]; }\n}\n"},
+    {"legacy/Acme/Blog/Http/PostsController.php",
+     "<?php\nnamespace Acme\\Blog\\Http;\n\n"
+     "class PostsController {\n"
+     "    public function archive() { return ['stale' => true]; }\n}\n"},
+    {"routes/blog.php",
+     "<?php\n"
+     "use Illuminate\\Support\\Facades\\Route;\n\n"
+     "Route::get('/blog/missing', [\\Acme\\Blog\\Http\\MissingController::class, 'index']);\n"
+     "Route::get('/blog/archive', [\\Acme\\Blog\\Http\\PostsController::class, 'archive']);\n"}};
+
+enum { ET_LARAVEL_PSR4_ABSENT_EXTRA = 3 };
+
+static const char *const et_laravel_psr4_absent_routes[] = {
+    "__route__GET__/blog/missing", "__route__GET__/blog/archive", NULL};
+
+static int et_laravel_psr4_absent(int parallel) {
+    EtFile f[ET_LARAVEL_CLASS_FILES + ET_LARAVEL_PSR4_ABSENT_EXTRA];
+    memcpy(f, et_laravel_class_handlers, sizeof(et_laravel_class_handlers));
+    memcpy(f + ET_LARAVEL_CLASS_FILES, et_laravel_psr4_absent_extra,
+           sizeof(et_laravel_psr4_absent_extra));
+    return et_handles_exact_routes(f, ET_LARAVEL_CLASS_FILES + ET_LARAVEL_PSR4_ABSENT_EXTRA,
+                                   et_laravel_class_handles, parallel,
+                                   et_laravel_psr4_absent_routes);
+}
+
+TEST(handles_laravel_psr4_absent_class_issue1146) {
+    ASSERT_TRUE(et_laravel_psr4_absent(0));
+    PASS();
+}
+
+TEST(handles_laravel_psr4_absent_class_parallel_issue1146) {
+    ASSERT_TRUE(et_laravel_psr4_absent(1));
+    PASS();
+}
+
+/* Assert the exact Route set as "METHOD /path" strings: the method comes from
+ * the Route QN ("__route__PUT__/articles/{}"), the path from the node name
+ * (the raw composed path). The count must match too, so a junk Route fails. */
+static int et_route_set_exact(const EtFile *files, int nfiles, const char **want, int parallel) {
+    EtProj lp;
+    cbm_store_t *store =
+        parallel ? et_index_parallel(&lp, files, nfiles) : et_index_files(&lp, files, nfiles);
+    cbm_node_t *nodes = NULL;
+    int node_count = 0;
+    int wanted = 0;
+    int found[ET_ROUTE_ASSERT_MAX] = {0};
+    while (want[wanted] && wanted < ET_ROUTE_ASSERT_MAX) {
+        wanted++;
+    }
+    int ok = store != NULL &&
+             cbm_store_find_nodes_by_label(store, lp.project, "Route", &nodes, &node_count) ==
+                 CBM_STORE_OK &&
+             node_count == wanted;
+    for (int ni = 0; store && ni < node_count; ni++) {
+        char got[512];
+        const char *qn = nodes[ni].qualified_name ? nodes[ni].qualified_name : "";
+        const char *m = strncmp(qn, "__route__", 9) == 0 ? qn + 9 : qn;
+        const char *end = strstr(m, "__");
+        snprintf(got, sizeof(got), "%.*s %s", end ? (int)(end - m) : 0, m,
+                 nodes[ni].name ? nodes[ni].name : "");
+        int matched = 0;
+        for (int wi = 0; wi < wanted; wi++) {
+            if (!found[wi] && strcmp(got, want[wi]) == 0) {
+                found[wi] = matched = 1;
+                break;
+            }
+        }
+        if (!matched) {
+            ok = 0;
+            fprintf(stderr, "  [ET-ROUTESET] unexpected %s\n", got);
+        }
+    }
+    for (int wi = 0; wi < wanted; wi++) {
+        if (!found[wi]) {
+            ok = 0;
+            fprintf(stderr, "  [ET-ROUTESET] missing %s\n", want[wi]);
+        }
+    }
+    if (!ok) {
+        fprintf(stderr, "  [ET-ROUTESET] FAIL (%s path) expected=%d actual=%d\n",
+                parallel ? "parallel" : "sequential", wanted, node_count);
+    }
+    cbm_store_free_nodes(nodes, node_count);
+    et_cleanup(&lp, store);
+    return ok;
+}
+
+/* #1146: Laravel writes most route URIs without the leading slash —
+ * Route::get('users', ...) serves /users, Route::put('{article}', ...) inside
+ * prefix('articles') serves /articles/{article}, and '' is the group root.
+ * Both route passes only minted a Route for a first argument starting with
+ * '/', so Firefly III's API (258 registrations) and laravel.io's PUT/DELETE
+ * API routes had no Route at all. Covers the facade, a facade chain
+ * (Route::middleware()->get), the $router instance, the chain-form and the
+ * array-form prefix group (Route::group(['prefix' => ...], fn)), and a
+ * trailing slash. */
+static const EtFile et_laravel_slashless[] = {
+    {"routes/api.php",
+     "<?php\nuse Illuminate\\Support\\Facades\\Route;\n\n"
+     "Route::get('users', 'UserController@index');\n"
+     "Route::post('users/', 'UserController@store');\n"
+     "Route::prefix('articles')->group(function () {\n"
+     "    Route::get('', 'ArticlesController@index');\n"
+     "    Route::put('{article}', 'ArticlesController@update');\n"
+     "    Route::delete('{article}', 'ArticlesController@delete');\n"
+     "});\n"
+     "Route::group(['prefix' => 'v1/autocomplete', 'as' => 'api.v1.'], static function (): void {\n"
+     "    Route::get('accounts', ['uses' => 'AccountController@accounts', 'as' => 'accounts']);\n"
+     "});\n"
+     "Route::middleware('auth')->get('dashboard', 'DashboardController@show');\n"
+     "$router->get('lumen/users', 'UserController@index');\n"}};
+
+static const char *et_laravel_slashless_routes[] = {"GET /users",
+                                                    "POST /users",
+                                                    "GET /articles",
+                                                    "PUT /articles/{article}",
+                                                    "DELETE /articles/{article}",
+                                                    "GET /v1/autocomplete/accounts",
+                                                    "GET /dashboard",
+                                                    "GET /lumen/users",
+                                                    NULL};
+
+TEST(routes_laravel_slashless_issue1146) {
+    ASSERT_TRUE(et_route_set_exact(et_laravel_slashless, 1, et_laravel_slashless_routes, 0));
+    PASS();
+}
+
+TEST(routes_laravel_slashless_parallel_issue1146) {
+    ASSERT_TRUE(et_route_set_exact(et_laravel_slashless, 1, et_laravel_slashless_routes, 1));
+    PASS();
+}
+
+/* The string action of a slashless registration — 'index' inside a
+ * Route::controller() group, 'UserController@store' — does not say which
+ * class owns the method, so resolving it could only guess a same-named
+ * function anywhere in the repo (on krayin/laravel-crm 'update' and 'destroy'
+ * bound a chart.js function). Such routes are minted without a guessed
+ * HANDLES edge. Decoys: a JS function and a PHP method per action name. */
+TEST(routes_laravel_slashless_no_guessed_handlers_issue1146) {
+    static const char *want[] = {"GET /leads", "PUT /leads/edit/{id}", "POST /users", NULL};
+    static const EtFile f[] = {
+        {"routes/web.php",
+         "<?php\nuse Illuminate\\Support\\Facades\\Route;\n\n"
+         "Route::controller(LeadController::class)->prefix('leads')->group(function () {\n"
+         "    Route::get('', 'index');\n"
+         "    Route::put('edit/{id}', 'update');\n"
+         "});\n"
+         "Route::post('users', 'UserController@store');\n"},
+        {"resources/js/chart.js",
+         "function index() { return 1; }\nfunction update() { return 2; }\n"},
+        {"app/Http/Controllers/ActivityController.php",
+         "<?php\nnamespace App\\Http\\Controllers;\n\n"
+         "class ActivityController {\n    public function store() { return 1; }\n}\n"}};
+    ASSERT_TRUE(et_route_set_exact(f, 3, want, 0));
+    EtProj lp;
+    cbm_store_t *store = et_index_files(&lp, f, 3);
+    int handles = store ? cbm_store_count_edges_by_type(store, lp.project, "HANDLES") : -1;
+    et_cleanup(&lp, store);
+    ASSERT_EQ(handles, 0);
+    PASS();
+}
+
+/* Precision guard for the slashless form: only a Laravel route registration
+ * (the Route facade, or $router) has its URI normalised. A string first
+ * argument of any other get/post call — a request input, a cache key, config,
+ * a collection or session lookup, a property that merely holds a router, a
+ * test client call — stays what it is and mints no Route. */
+TEST(routes_laravel_slashless_no_junk_issue1146) {
+    static const char *want[] = {"GET /real", NULL};
+    static const EtFile f[] = {
+        {"routes/web.php",
+         "<?php\nuse Illuminate\\Support\\Facades\\Route;\n"
+         "use Illuminate\\Support\\Facades\\Cache;\n\n"
+         "Route::get('real', 'RealController@show');\n\n"
+         "class UsersController {\n"
+         "    public function index($request) {\n"
+         "        $name = $request->get('name');\n"
+         "        $q = $request->query->get('q');\n"
+         "        $v = Cache::get('users.count');\n"
+         "        $c = config('app.name');\n"
+         "        $k = collect(['a' => 1])->get('a');\n"
+         "        $s = session()->get('key');\n"
+         "        $r = $this->router->get('status');\n"
+         "        $p = $this->post('login', []);\n"
+         "        return $this->get('users');\n"
+         "    }\n}\n"}};
+    ASSERT_TRUE(et_route_set_exact(f, 1, want, 0));
+    PASS();
+}
+
+/* Rails (Ruby) — ActionDispatch router.  The handler MUST be passed as a bare
+ * identifier (not the idiomatic `to: 'list_items'` string, which extract_handler_arg
+ * cannot capture).  mapper.get resolves by name to the Mapper#get method whose QN
+ * carries the "ActionDispatch" route-registration substring → ROUTE_REG → HANDLES. */
+TEST(handles_rails_ruby) {
+    static const EtFile f[] = {
+        {"ActionDispatch/Routing.rb",
+         "module ActionDispatch\n  module Routing\n"
+         "    class Mapper\n"
+         "      def get(path, handler); end\n"
+         "      def post(path, handler); end\n"
+         "    end\n  end\nend\n"},
+        {"config/routes.rb",
+         "require_relative '../ActionDispatch/Routing'\n\n"
+         "mapper = ActionDispatch::Routing::Mapper.new\n\n"
+         "def list_items; end\ndef create_item; end\n\n"
+         "mapper.get '/items', list_items\n"
+         "mapper.post '/items', create_item\n"}};
+    ASSERT_TRUE(et_edge_present(f, 2, "HANDLES", 1));
+    PASS();
+}
+
+/* Actix-web (Rust) — route registration via SAME-FILE wrapper functions whose
+ * names carry the "actix_web" substring, called by bare name with an identifier
+ * handler.  Same-file Rust calls resolve (cf. probe_rust_calls_edge); a
+ * cross-file `actix_web::get` would NOT (Rust lsp_cross unwired + '::' path not
+ * resolved by the generic resolver). */
+TEST(handles_actix_rust) {
+    static const EtFile f[] = {
+        {"actix_web_app.rs",
+         "pub fn actix_web_get(path: &str, handler: fn()) -> String {\n"
+         "    format!(\"{}\", path)\n}\n\n"
+         "pub fn actix_web_post(path: &str, handler: fn()) -> String {\n"
+         "    format!(\"{}\", path)\n}\n\n"
+         "fn list_widgets() {}\nfn create_widget() {}\n\n"
+         "fn main() {\n"
+         "    actix_web_get(\"/widgets\", list_widgets);\n"
+         "    actix_web_post(\"/widgets\", create_widget);\n}\n"}};
+    ASSERT_TRUE(et_edge_present(f, 1, "HANDLES", 1));
+    PASS();
+}
+
+/* ══════════════════════════════════════════════════════════════════
+ *  HTTP_CALLS — outbound HTTP client calls
+ *
+ *  Strategy: use a local wrapper whose QN carries the library substring
+ *  (e.g., "requests_get" contains "requests") — same approach as
+ *  test_lang_contract.c:contract_edge_http_calls.
+ * ══════════════════════════════════════════════════════════════════ */
+
+/* fetch (JavaScript) — bare `fetch` and `node_fetch` (underscore) match no
+ * library id ("node-fetch" has a hyphen that cannot appear in a JS identifier).
+ * Use top-level wrapper functions whose names carry a real JS HTTP-client lib id
+ * ("undici") and a PLAIN string URL (the previous concatenated URL was not
+ * extracted as first_string_arg) — same proven shape as http_calls_axios_ts. */
+TEST(http_calls_fetch_js) {
+    static const EtFile f[] = {
+        {"undici_client.js",
+         "function undiciGet(url) { return Promise.resolve({ json: () => ({}) }); }\n"
+         "function undiciPost(url, body) { return Promise.resolve({ json: () => ({}) }); }\n\n"
+         "async function fetchUser(id) {\n"
+         "    return undiciGet('/api/users');\n}\n\n"
+         "async function createUser(data) {\n"
+         "    return undiciPost('/api/users', data);\n}\n"}};
+    ASSERT_TRUE(et_edge_present(f, 1, "HTTP_CALLS", 1));
+    PASS();
+}
+
+/* axios (TypeScript) — "axios" substring in QN */
+TEST(http_calls_axios_ts) {
+    static const EtFile f[] = {
+        {"axios.ts",
+         "export function axiosGet(url: string): Promise<any> {\n"
+         "    return Promise.resolve({ data: {} });\n}\n\n"
+         "export function axiosPost(url: string, data: any): Promise<any> {\n"
+         "    return Promise.resolve({ data });\n}\n"},
+        {"client.ts",
+         "import { axiosGet, axiosPost } from './axios';\n\n"
+         "export async function getOrders(): Promise<any> {\n"
+         "    return axiosGet('/api/orders');\n}\n\n"
+         "export async function submitOrder(payload: any): Promise<any> {\n"
+         "    return axiosPost('/api/orders', payload);\n}\n"}};
+    ASSERT_TRUE(et_edge_present(f, 2, "HTTP_CALLS", 1));
+    PASS();
+}
+
+/* requests (Python) — already in test_lang_contract.c but uses different fixture;
+ * this variant tests cross-file import resolution */
+TEST(http_calls_requests_python) {
+    static const EtFile f[] = {
+        {"http/requests_client.py",
+         "def requests_get(url, params=None):\n    return {'url': url, 'params': params}\n\n"
+         "def requests_post(url, json=None):\n    return {'url': url, 'json': json}\n"},
+        {"services/order_service.py",
+         "from http.requests_client import requests_get, requests_post\n\n\n"
+         "def fetch_order(order_id):\n"
+         "    return requests_get('/api/orders', params={'id': order_id})\n\n\n"
+         "def place_order(payload):\n"
+         "    return requests_post('/api/orders', json=payload)\n"}};
+    ASSERT_TRUE(et_edge_present(f, 2, "HTTP_CALLS", 1));
+    PASS();
+}
+
+/* HTTP client (Go) — the "net/http" library id contains a slash that cannot
+ * appear in a Go package name, so a `nethttp` package never matched.  Use the
+ * "resty" Go HTTP client id instead: the resolved QN (project.resty.client.Get)
+ * carries the "resty" substring → HTTP_CALLS. */
+TEST(http_calls_nethttp_go) {
+    static const EtFile f[] = {
+        {"resty/client.go",
+         "package resty\n\n"
+         "func Get(url string) (interface{}, error) { return nil, nil }\n"
+         "func Post(url string, body interface{}) (interface{}, error) { return nil, nil }\n"},
+        {"catalog/service.go",
+         "package catalog\n\n"
+         "import \"resty\"\n\n"
+         "func ListProducts() (interface{}, error) {\n"
+         "    return resty.Get(\"/api/products\")\n}\n\n"
+         "func CreateProduct(body interface{}) (interface{}, error) {\n"
+         "    return resty.Post(\"/api/products\", body)\n}\n"}};
+    ASSERT_TRUE(et_edge_present(f, 2, "HTTP_CALLS", 1));
+    PASS();
+}
+
+/* RestTemplate (Java) — "RestTemplate" substring in resolved QN */
+TEST(http_calls_resttemplate_java) {
+    static const EtFile f[] = {
+        {"RestTemplate.java",
+         "package http;\n\n"
+         "public class RestTemplate {\n"
+         "    public Object getForObject(String url, Class<?> responseType) { return null; }\n"
+         "    public Object postForObject(String url, Object req, Class<?> responseType) { return null; }\n"
+         "}\n"},
+        {"OrderClient.java",
+         "package client;\n\n"
+         "import http.RestTemplate;\n\n"
+         "public class OrderClient {\n"
+         "    private RestTemplate rest = new RestTemplate();\n\n"
+         "    public Object fetchOrders() {\n"
+         "        return rest.getForObject(\"/api/orders\", Object.class);\n    }\n\n"
+         "    public Object placeOrder(Object req) {\n"
+         "        return rest.postForObject(\"/api/orders\", req, Object.class);\n    }\n}\n"}};
+    ASSERT_TRUE(et_edge_present(f, 2, "HTTP_CALLS", 1));
+    PASS();
+}
+
+/* RestSharp (C#) — static RestClient.Get call under a RestSharp/ path so the
+ * resolved QN carries the "RestSharp" substring.
+ * REAL BUG (CONFIRMED: still HTTP_CALLS=0 after switching to a static call that
+ * C# resolves, cf. S4).  Even though the call resolves and the QN contains
+ * "RestSharp", no HTTP_CALLS edge is emitted — the C# resolved-call path is not
+ * routed through cbm_service_pattern_match for HTTP classification (the C# lsp
+ * resolver likely emits the call without going through emit_classified_edge's
+ * service-pattern branch, or the resolved QN it returns lacks the path prefix). */
+TEST(http_calls_restsharp_csharp) {
+    static const EtFile f[] = {
+        {"RestSharp/Client.cs",
+         "namespace RestSharp {\n"
+         "    public class RestClient {\n"
+         "        public static string Get(string url) { return \"\"; }\n"
+         "        public static string Post(string url, object body) { return \"\"; }\n    }\n}\n"},
+        {"Services/ProductService.cs",
+         "using RestSharp;\n\n"
+         "namespace Services {\n"
+         "    class ProductService {\n"
+         "        public string GetProducts() { return RestClient.Get(\"/products\"); }\n"
+         "        public string AddProduct(object p) { return RestClient.Post(\"/products\", p); }\n"
+         "    }\n}\n"}};
+    ASSERT_TRUE(et_edge_present(f, 2, "HTTP_CALLS", 1));
+    PASS();
+}
+
+/* HTTParty (Ruby) — "HTTParty" substring in resolved QN */
+TEST(http_calls_httparty_ruby) {
+    static const EtFile f[] = {
+        {"HTTParty.rb",
+         "module HTTParty\n"
+         "  def self.get(url, opts = {}); end\n"
+         "  def self.post(url, opts = {}); end\nend\n"},
+        {"user_client.rb",
+         "require_relative 'HTTParty'\n\n"
+         "def fetch_users\n  HTTParty.get('/api/users')\nend\n\n"
+         "def create_user(body)\n  HTTParty.post('/api/users', body: body)\nend\n"}};
+    ASSERT_TRUE(et_edge_present(f, 2, "HTTP_CALLS", 1));
+    PASS();
+}
+
+/* Guzzle (PHP) — Client injected via a type-hinted constructor param (proven
+ * php/S8 field-type-hint shape).
+ * REAL BUG (CONFIRMED: still HTTP_CALLS=0).  PHP DOES resolve the Guzzle method
+ * call (cf. test_php_lsp.c:phplsp_edge_guzzle_chain, which passes resolving
+ * "Client.get"), but the PHP lsp resolver emits the SHORT resolved QN
+ * "Client.get" — it drops the namespace/path, so cbm_service_pattern_match never
+ * sees the "Guzzle"/"GuzzleHttp" substring and the call is classified as a plain
+ * CALLS instead of HTTP_CALLS.  Fix = use the full namespaced QN (or match on the
+ * class's declaring namespace) when classifying PHP service calls. */
+TEST(http_calls_guzzle_php) {
+    static const EtFile f[] = {
+        {"GuzzleHttp/Client.php",
+         "<?php\nnamespace GuzzleHttp;\n\n"
+         "class Client {\n"
+         "    public function get(string $uri): string { return ''; }\n"
+         "    public function post(string $uri, array $opts = []): string { return ''; }\n}\n"},
+        {"Services/OrderService.php",
+         "<?php\nuse GuzzleHttp\\Client;\n\n"
+         "class OrderService {\n"
+         "    private $client;\n\n"
+         "    public function __construct(Client $client) { $this->client = $client; }\n\n"
+         "    public function getOrders(): string { return $this->client->get('/orders'); }\n"
+         "    public function createOrder(array $data): string {\n"
+         "        return $this->client->post('/orders', ['json' => $data]);\n    }\n}\n"}};
+    ASSERT_TRUE(et_edge_present(f, 2, "HTTP_CALLS", 1));
+    PASS();
+}
+
+/* reqwest (Rust) — Rust lsp_cross is not wired AND the generic resolver cannot
+ * resolve a `::`-qualified cross-file path (cbm_registry_resolve splits on '.',
+ * not '::'), so reqwest::get never resolved.  Use SAME-FILE bare-name wrapper
+ * functions whose names carry the "reqwest" substring (same-file Rust calls do
+ * resolve, cf. probe_rust_calls_edge) → QN contains "reqwest" → HTTP_CALLS. */
+TEST(http_calls_reqwest_rust) {
+    static const EtFile f[] = {
+        {"reqwest_api.rs",
+         "pub fn reqwest_get(url: &str) -> String {\n    url.to_string()\n}\n\n"
+         "pub fn reqwest_post(url: &str, body: &str) -> String {\n    format!(\"{}{}\", url, body)\n}\n\n"
+         "pub fn fetch_items() -> String {\n    reqwest_get(\"/api/items\")\n}\n\n"
+         "pub fn push_item(body: &str) -> String {\n    reqwest_post(\"/api/items\", body)\n}\n"}};
+    ASSERT_TRUE(et_edge_present(f, 1, "HTTP_CALLS", 1));
+    PASS();
+}
+
+/* ══════════════════════════════════════════════════════════════════
+ *  ASYNC_CALLS — message/queue/pubsub dispatch
+ *
+ *  Strategy: local wrappers whose QN carries the broker substring
+ *  (celery, Sidekiq, kafkajs, sqs, bullmq).
+ * ══════════════════════════════════════════════════════════════════ */
+
+/* Celery (Python) — "celery" substring in resolved QN */
+TEST(async_calls_celery_python) {
+    static const EtFile f[] = {
+        {"celery/app.py",
+         "class Celery:\n"
+         "    def task(self):\n        def decorator(fn): return fn\n        return decorator\n\n"
+         "    def send_task(self, name, args=None): return (name, args)\n\n"
+         "app = Celery()\n"},
+        {"tasks/order_tasks.py",
+         "from celery.app import app\n\n\n"
+         "def dispatch_order_created(order_id):\n"
+         "    return app.send_task('order_created', args=[order_id])\n\n\n"
+         "def dispatch_order_shipped(order_id):\n"
+         "    return app.send_task('order_shipped', args=[order_id])\n"}};
+    ASSERT_TRUE(et_edge_present(f, 2, "ASYNC_CALLS", 1));
+    PASS();
+}
+
+/* RED-repro: a wall-clock / scheduling artifact must NOT drop a parseable
+ * file's defs. The CBM_TEST_WALL_STALL_ON seam forces the parse-timeout callback
+ * to read the WALL clock as (budget + 1 s) ahead while CPU time is untouched —
+ * emulating a worker descheduled under CI contention. celery/app.py DEFINES
+ * Celery.send_task; under the old wall-only 5 s budget that file is abandoned
+ * with zero defs, the "celery" QN the caller resolves against vanishes, and the
+ * ASYNC_CALLS edge count drops to 0 (the intermittent async_calls_celery_python
+ * failure). With the CPU-time budget the parse still completes (CPU under budget,
+ * wall under the generous ceiling) and the edge survives. Deterministic: the
+ * seam is a fixed offset, never real timing. Binds only under CBM_ENABLE_TEST_SEAMS
+ * (always set for the test-runner); a no-seam build exercises the plain edge. */
+TEST(async_calls_celery_wall_stall_seam) {
+    static const EtFile f[] = {
+        {"celery/app.py",
+         "class Celery:\n"
+         "    def task(self):\n        def decorator(fn): return fn\n        return decorator\n\n"
+         "    def send_task(self, name, args=None): return (name, args)\n\n"
+         "app = Celery()\n"},
+        {"tasks/order_tasks.py",
+         "from celery.app import app\n\n\n"
+         "def dispatch_order_created(order_id):\n"
+         "    return app.send_task('order_created', args=[order_id])\n\n\n"
+         "def dispatch_order_shipped(order_id):\n"
+         "    return app.send_task('order_shipped', args=[order_id])\n"}};
+    cbm_setenv("CBM_TEST_WALL_STALL_ON", "celery/app.py", 1);
+    int ok = et_edge_present(f, 2, "ASYNC_CALLS", 1);
+    cbm_unsetenv("CBM_TEST_WALL_STALL_ON");
+    ASSERT_TRUE(ok);
+    PASS();
+}
+
+/* Sidekiq (Ruby) — "Sidekiq" substring in resolved QN */
+TEST(async_calls_sidekiq_ruby) {
+    static const EtFile f[] = {
+        {"Sidekiq/Worker.rb",
+         "module Sidekiq\n  module Worker\n"
+         "    def self.perform_async(*args); end\n  end\nend\n"},
+        {"workers/notification_worker.rb",
+         "require_relative '../Sidekiq/Worker'\n\n"
+         "class NotificationWorker\n"
+         "  include Sidekiq::Worker\n\n"
+         "  def self.enqueue_welcome(user_id)\n"
+         "    Sidekiq::Worker.perform_async('welcome', user_id)\n  end\n\n"
+         "  def self.enqueue_alert(user_id)\n"
+         "    Sidekiq::Worker.perform_async('alert', user_id)\n  end\nend\n"}};
+    ASSERT_TRUE(et_edge_present(f, 2, "ASYNC_CALLS", 1));
+    PASS();
+}
+
+/* KafkaJS (TypeScript) — "kafkajs" substring in resolved QN */
+TEST(async_calls_kafkajs_ts) {
+    static const EtFile f[] = {
+        {"kafkajs/producer.ts",
+         "export function kafkajsProduce(topic: string, message: any): void {}\n"},
+        {"events/order_events.ts",
+         "import { kafkajsProduce } from '../kafkajs/producer';\n\n"
+         "export function emitOrderCreated(orderId: string): void {\n"
+         "    kafkajsProduce('order-created', { orderId });\n}\n\n"
+         "export function emitOrderCancelled(orderId: string): void {\n"
+         "    kafkajsProduce('order-cancelled', { orderId });\n}\n"}};
+    ASSERT_TRUE(et_edge_present(f, 2, "ASYNC_CALLS", 1));
+    PASS();
+}
+
+/* AWS SQS (Go) — "aws-sdk-go/service/sqs" substring in resolved QN.
+ * REAL BUG (two compounding causes, cannot be exercised by a local fixture):
+ *  1) service_patterns.c async_libraries lists the Go SQS id with SLASHES
+ *     ("aws-sdk-go/service/sqs"), but cbm_fqn_compute (internal/cbm/helpers.c)
+ *     converts path slashes to '.', so a resolved local QN is
+ *     "...aws-sdk-go.service.sqs..." and strstr never matches the slash form.
+ *  2) emit_http_async_edge (pass_calls.c) requires a URL/topic STRING arg;
+ *     SendMessage(&SendMessageInput{...}) passes a struct, no string → the call
+ *     degrades to a plain CALLS edge.  No dot-form Go SQS id exists, so the
+ *     SQS/Go async pattern is unreachable here. */
+TEST(async_calls_sqs_go) {
+    static const EtFile f[] = {
+        {"aws-sdk-go/service/sqs/api.go",
+         "package sqs\n\n"
+         "type SendMessageInput struct{ QueueUrl string; MessageBody string }\n"
+         "type SQS struct{}\n\n"
+         "func New() *SQS { return &SQS{} }\n\n"
+         "func (s *SQS) SendMessage(input *SendMessageInput) error { return nil }\n"},
+        {"queue/dispatcher.go",
+         "package queue\n\n"
+         "import \"aws-sdk-go/service/sqs\"\n\n"
+         "func DispatchOrderEvent(queueUrl, body string) error {\n"
+         "    client := sqs.New()\n"
+         "    return client.SendMessage(&sqs.SendMessageInput{\n"
+         "        QueueUrl:    queueUrl,\n"
+         "        MessageBody: body,\n    })\n}\n"}};
+    ASSERT_TRUE(et_edge_present(f, 2, "ASYNC_CALLS", 1));
+    PASS();
+}
+
+/* BullMQ (JavaScript) — "bullmq" substring in resolved QN */
+TEST(async_calls_bullmq_js) {
+    static const EtFile f[] = {
+        {"bullmq/queue.js",
+         "class bullmqQueue {\n"
+         "    add(jobName, data) { return { jobName, data }; }\n}\n\n"
+         "module.exports = { bullmqQueue };\n"},
+        {"jobs/mailer.js",
+         "const { bullmqQueue } = require('./bullmq/queue');\n\n"
+         "const mailQueue = new bullmqQueue();\n\n"
+         "function scheduleWelcomeEmail(userId) {\n"
+         "    return mailQueue.add('welcome-email', { userId });\n}\n\n"
+         "function schedulePasswordReset(userId) {\n"
+         "    return mailQueue.add('password-reset', { userId });\n}\n"}};
+    ASSERT_TRUE(et_edge_present(f, 2, "ASYNC_CALLS", 1));
+    PASS();
+}
+
+/* ══════════════════════════════════════════════════════════════════
+ *  THROWS — checked exceptions (no "Error"/"Panic" in name)
+ *
+ *  Parallel-path only (> 50 files). THROWS/RAISES require:
+ *    1. The exception CLASS is defined as a node in the registry.
+ *    2. The throw is extracted (throw_node_types or throws_clause_field).
+ *    3. pass_parallel resolves the enclosing_func_qn + exception_name.
+ *
+ *  All three conditions must hold for the edge to appear. The fixtures
+ *  define the exception class in the same file so same-module resolution
+ *  succeeds.
+ * ══════════════════════════════════════════════════════════════════ */
+
+/* Java — explicit `throw new NotFoundException()` + class in same file.
+ * is_checked_exception("NotFoundException") = true (no "Error"/"Panic"). */
+TEST(throws_java) {
+    static const EtFile meaningful[] = {
+        {"Service.java",
+         "package app;\n\n"
+         "class NotFoundException extends Exception {\n"
+         "    public NotFoundException(String msg) { super(msg); }\n}\n\n"
+         "class OrderService {\n"
+         "    public String findOrder(int id) throws NotFoundException {\n"
+         "        if (id < 0) {\n"
+         "            throw new NotFoundException(\"Order not found: \" + id);\n        }\n"
+         "        return \"order:\" + id;\n    }\n\n"
+         "    public String getUser(int id) throws NotFoundException {\n"
+         "        if (id == 0) throw new NotFoundException(\"No user zero\");\n"
+         "        return \"user:\" + id;\n    }\n}\n"}};
+    EtProj lp;
+    cbm_store_t *store =
+        et_index_parallel(&lp, meaningful, (int)(sizeof(meaningful) / sizeof(meaningful[0])));
+    int throws = store ? cbm_store_count_edges_by_type(store, lp.project, "THROWS") : -1;
+    if (throws < 1) {
+        fprintf(stderr, "  [ET-THROWS] Java: THROWS=%d\n", throws);
+    }
+    et_cleanup(&lp, store);
+    ASSERT_TRUE(throws >= 1);
+    PASS();
+}
+
+/* Kotlin — `throw NotFoundException(...)` inside a function.
+ * REAL BUG (Kotlin-specific): every other language (Java/Python/TS/C#/PHP/Scala)
+ * passes the identical throws fixture shape, but Kotlin yields THROWS=0.  The
+ * exception class is created+registered (defines_method_kotlin proves Kotlin
+ * class/method extraction works), so the gap is in the Kotlin throw path:
+ * internal/cbm/extract_semantic.c:resolve_exception_name does not recover the
+ * callee identifier from a Kotlin `throw_expression`→`call_expression` (the
+ * Kotlin call callee is the first child, not on a "function"/"type" field), so
+ * the THROWS edge resolution never gets a usable exception name. */
+TEST(throws_kotlin) {
+    static const EtFile meaningful[] = {
+        {"Service.kt",
+         "class NotFoundException(msg: String) : Exception(msg)\n\n"
+         "fun findItem(id: Int): String {\n"
+         "    if (id < 0) throw NotFoundException(\"item not found: $id\")\n"
+         "    return \"item:$id\"\n}\n\n"
+         "fun getCategory(name: String): String {\n"
+         "    if (name.isEmpty()) throw NotFoundException(\"category missing\")\n"
+         "    return name\n}\n"}};
+    EtProj lp;
+    cbm_store_t *store =
+        et_index_parallel(&lp, meaningful, (int)(sizeof(meaningful) / sizeof(meaningful[0])));
+    int throws = store ? cbm_store_count_edges_by_type(store, lp.project, "THROWS") : -1;
+    if (throws < 1) {
+        fprintf(stderr, "  [ET-THROWS] Kotlin: THROWS=%d\n", throws);
+    }
+    et_cleanup(&lp, store);
+    ASSERT_TRUE(throws >= 1);
+    PASS();
+}
+
+/* Python — `raise ValidationException(...)` — checked (no Error/Panic) */
+TEST(throws_python) {
+    static const EtFile meaningful[] = {
+        {"validate.py",
+         "class ValidationException(Exception):\n"
+         "    pass\n\n\n"
+         "def validate_email(email):\n"
+         "    if '@' not in email:\n"
+         "        raise ValidationException('invalid email: ' + email)\n"
+         "    return email\n\n\n"
+         "def validate_age(age):\n"
+         "    if age < 0:\n"
+         "        raise ValidationException('age must be non-negative')\n"
+         "    return age\n"}};
+    EtProj lp;
+    cbm_store_t *store =
+        et_index_parallel(&lp, meaningful, (int)(sizeof(meaningful) / sizeof(meaningful[0])));
+    int throws = store ? cbm_store_count_edges_by_type(store, lp.project, "THROWS") : -1;
+    if (throws < 1) {
+        fprintf(stderr, "  [ET-THROWS] Python: THROWS=%d\n", throws);
+    }
+    et_cleanup(&lp, store);
+    ASSERT_TRUE(throws >= 1);
+    PASS();
+}
+
+/* TypeScript — `throw new HttpException(...)` — checked (no Error/Panic) */
+TEST(throws_typescript) {
+    static const EtFile meaningful[] = {
+        {"exceptions.ts",
+         "export class HttpException {\n"
+         "    constructor(public status: number, public message: string) {}\n}\n"},
+        {"controller.ts",
+         "import { HttpException } from './exceptions';\n\n"
+         "export function getUser(id: number): string {\n"
+         "    if (id <= 0) throw new HttpException(404, 'User not found');\n"
+         "    return `user:${id}`;\n}\n\n"
+         "export function updateUser(id: number, name: string): string {\n"
+         "    if (!name) throw new HttpException(400, 'Name required');\n"
+         "    return `updated:${id}`;\n}\n"}};
+    EtProj lp;
+    cbm_store_t *store =
+        et_index_parallel(&lp, meaningful, (int)(sizeof(meaningful) / sizeof(meaningful[0])));
+    int throws = store ? cbm_store_count_edges_by_type(store, lp.project, "THROWS") : -1;
+    if (throws < 1) {
+        fprintf(stderr, "  [ET-THROWS] TypeScript: THROWS=%d\n", throws);
+    }
+    et_cleanup(&lp, store);
+    ASSERT_TRUE(throws >= 1);
+    PASS();
+}
+
+/* C# — `throw new NotFoundException(...)` — checked (no Error/Panic) */
+TEST(throws_csharp) {
+    static const EtFile meaningful[] = {
+        {"Services.cs",
+         "using System;\n\n"
+         "namespace App {\n"
+         "    class NotFoundException : Exception {\n"
+         "        public NotFoundException(string msg) : base(msg) {}\n    }\n\n"
+         "    class UserService {\n"
+         "        public string GetUser(int id) {\n"
+         "            if (id <= 0) throw new NotFoundException($\"User {id} not found\");\n"
+         "            return $\"user:{id}\";\n        }\n\n"
+         "        public string DeleteUser(int id) {\n"
+         "            if (id <= 0) throw new NotFoundException($\"Cannot delete {id}\");\n"
+         "            return \"deleted\";\n        }\n    }\n}\n"}};
+    EtProj lp;
+    cbm_store_t *store =
+        et_index_parallel(&lp, meaningful, (int)(sizeof(meaningful) / sizeof(meaningful[0])));
+    int throws = store ? cbm_store_count_edges_by_type(store, lp.project, "THROWS") : -1;
+    if (throws < 1) {
+        fprintf(stderr, "  [ET-THROWS] C#: THROWS=%d\n", throws);
+    }
+    et_cleanup(&lp, store);
+    ASSERT_TRUE(throws >= 1);
+    PASS();
+}
+
+/* PHP — `throw new NotFoundException(...)` — checked */
+TEST(throws_php) {
+    static const EtFile meaningful[] = {
+        {"Repository.php",
+         "<?php\n\n"
+         "class NotFoundException extends \\Exception {\n"
+         "    public function __construct(string $msg) { parent::__construct($msg); }\n}\n\n"
+         "class UserRepository {\n"
+         "    public function find(int $id): string {\n"
+         "        if ($id <= 0) throw new NotFoundException(\"User $id not found\");\n"
+         "        return \"user:$id\";\n    }\n\n"
+         "    public function remove(int $id): void {\n"
+         "        if ($id <= 0) throw new NotFoundException(\"Cannot remove $id\");\n"
+         "    }\n}\n"}};
+    EtProj lp;
+    cbm_store_t *store =
+        et_index_parallel(&lp, meaningful, (int)(sizeof(meaningful) / sizeof(meaningful[0])));
+    int throws = store ? cbm_store_count_edges_by_type(store, lp.project, "THROWS") : -1;
+    if (throws < 1) {
+        fprintf(stderr, "  [ET-THROWS] PHP: THROWS=%d\n", throws);
+    }
+    et_cleanup(&lp, store);
+    ASSERT_TRUE(throws >= 1);
+    PASS();
+}
+
+/* Scala — `throw new RecordException(...)` — checked */
+TEST(throws_scala) {
+    static const EtFile meaningful[] = {
+        {"Records.scala",
+         "class RecordException(msg: String) extends Exception(msg)\n\n"
+         "def parseRecord(raw: String): String = {\n"
+         "    if (raw.isEmpty) throw new RecordException(\"empty record\")\n"
+         "    raw.trim\n}\n\n"
+         "def validateRecord(raw: String): Boolean = {\n"
+         "    if (raw.length < 2) throw new RecordException(\"too short\")\n"
+         "    true\n}\n"}};
+    EtProj lp;
+    cbm_store_t *store =
+        et_index_parallel(&lp, meaningful, (int)(sizeof(meaningful) / sizeof(meaningful[0])));
+    int throws = store ? cbm_store_count_edges_by_type(store, lp.project, "THROWS") : -1;
+    if (throws < 1) {
+        fprintf(stderr, "  [ET-THROWS] Scala: THROWS=%d\n", throws);
+    }
+    et_cleanup(&lp, store);
+    ASSERT_TRUE(throws >= 1);
+    PASS();
+}
+
+/* ══════════════════════════════════════════════════════════════════
+ *  RAISES — runtime errors/panics (name contains "Error" or "Panic")
+ *  is_checked_exception() returns false → edge type = RAISES.
+ * ══════════════════════════════════════════════════════════════════ */
+
+/* Python — `raise ValueError(...)` — runtime exception */
+TEST(raises_python) {
+    static const EtFile meaningful[] = {
+        {"parser.py",
+         "class ValueError(Exception):\n    pass\n\n\n"
+         "def parse_int(s):\n"
+         "    if not s.isdigit():\n"
+         "        raise ValueError('not a digit: ' + s)\n"
+         "    return int(s)\n\n\n"
+         "def parse_float(s):\n"
+         "    try:\n        return float(s)\n"
+         "    except Exception:\n"
+         "        raise ValueError('not a float: ' + s)\n"}};
+    EtProj lp;
+    cbm_store_t *store =
+        et_index_parallel(&lp, meaningful, (int)(sizeof(meaningful) / sizeof(meaningful[0])));
+    int raises = store ? cbm_store_count_edges_by_type(store, lp.project, "RAISES") : -1;
+    if (raises < 1) {
+        fprintf(stderr, "  [ET-RAISES] Python: RAISES=%d\n", raises);
+    }
+    et_cleanup(&lp, store);
+    ASSERT_TRUE(raises >= 1);
+    PASS();
+}
+
+/* TypeScript — `throw new TypeError(...)` — runtime exception */
+TEST(raises_typescript) {
+    static const EtFile meaningful[] = {
+        {"validators.ts",
+         "export class TypeError {\n"
+         "    constructor(public message: string) {}\n}\n"},
+        {"parser.ts",
+         "import { TypeError } from './validators';\n\n"
+         "export function parseNumber(val: unknown): number {\n"
+         "    if (typeof val !== 'number') throw new TypeError('not a number');\n"
+         "    return val as number;\n}\n\n"
+         "export function parseString(val: unknown): string {\n"
+         "    if (typeof val !== 'string') throw new TypeError('not a string');\n"
+         "    return val as string;\n}\n"}};
+    EtProj lp;
+    cbm_store_t *store =
+        et_index_parallel(&lp, meaningful, (int)(sizeof(meaningful) / sizeof(meaningful[0])));
+    int raises = store ? cbm_store_count_edges_by_type(store, lp.project, "RAISES") : -1;
+    if (raises < 1) {
+        fprintf(stderr, "  [ET-RAISES] TypeScript: RAISES=%d\n", raises);
+    }
+    et_cleanup(&lp, store);
+    ASSERT_TRUE(raises >= 1);
+    PASS();
+}
+
+/* Kotlin — `throw IllegalArgumentError(...)` — runtime (name has "Error").
+ * REAL BUG (same Kotlin throw-extraction gap as throws_kotlin): RAISES=0 while
+ * every other language passes the identical fixture shape.  Root cause:
+ * internal/cbm/extract_semantic.c:resolve_exception_name fails to extract the
+ * exception identifier from a Kotlin throw_expression→call_expression. */
+TEST(raises_kotlin) {
+    static const EtFile meaningful[] = {
+        {"Errors.kt",
+         "class IllegalArgumentError(msg: String) : RuntimeException(msg)\n\n"
+         "fun requirePositive(n: Int): Int {\n"
+         "    if (n <= 0) throw IllegalArgumentError(\"expected positive, got $n\")\n"
+         "    return n\n}\n\n"
+         "fun requireNonEmpty(s: String): String {\n"
+         "    if (s.isEmpty()) throw IllegalArgumentError(\"string is empty\")\n"
+         "    return s\n}\n"}};
+    EtProj lp;
+    cbm_store_t *store =
+        et_index_parallel(&lp, meaningful, (int)(sizeof(meaningful) / sizeof(meaningful[0])));
+    int raises = store ? cbm_store_count_edges_by_type(store, lp.project, "RAISES") : -1;
+    if (raises < 1) {
+        fprintf(stderr, "  [ET-RAISES] Kotlin: RAISES=%d\n", raises);
+    }
+    et_cleanup(&lp, store);
+    ASSERT_TRUE(raises >= 1);
+    PASS();
+}
+
+/* C# — `throw new ArgumentError(...)` — runtime (name has "Error") */
+TEST(raises_csharp) {
+    static const EtFile meaningful[] = {
+        {"Guards.cs",
+         "using System;\n\n"
+         "namespace App {\n"
+         "    class ArgumentError : Exception {\n"
+         "        public ArgumentError(string msg) : base(msg) {}\n    }\n\n"
+         "    static class Guard {\n"
+         "        public static void NotNull(object obj, string name) {\n"
+         "            if (obj == null) throw new ArgumentError($\"{name} must not be null\");\n"
+         "        }\n"
+         "        public static void Positive(int n, string name) {\n"
+         "            if (n <= 0) throw new ArgumentError($\"{name} must be positive\");\n"
+         "        }\n    }\n}\n"}};
+    EtProj lp;
+    cbm_store_t *store =
+        et_index_parallel(&lp, meaningful, (int)(sizeof(meaningful) / sizeof(meaningful[0])));
+    int raises = store ? cbm_store_count_edges_by_type(store, lp.project, "RAISES") : -1;
+    if (raises < 1) {
+        fprintf(stderr, "  [ET-RAISES] C#: RAISES=%d\n", raises);
+    }
+    et_cleanup(&lp, store);
+    ASSERT_TRUE(raises >= 1);
+    PASS();
+}
+
+/* PHP — `throw new RuntimeError(...)` — runtime (name has "Error") */
+TEST(raises_php) {
+    static const EtFile meaningful[] = {
+        {"Exceptions.php",
+         "<?php\n\n"
+         "class RuntimeError extends \\RuntimeException {\n"
+         "    public function __construct(string $msg) { parent::__construct($msg); }\n}\n\n"
+         "function divide(int $a, int $b): float {\n"
+         "    if ($b === 0) throw new RuntimeError('division by zero');\n"
+         "    return $a / $b;\n}\n\n"
+         "function sqrt_positive(float $n): float {\n"
+         "    if ($n < 0) throw new RuntimeError('sqrt of negative');\n"
+         "    return sqrt($n);\n}\n"}};
+    EtProj lp;
+    cbm_store_t *store =
+        et_index_parallel(&lp, meaningful, (int)(sizeof(meaningful) / sizeof(meaningful[0])));
+    int raises = store ? cbm_store_count_edges_by_type(store, lp.project, "RAISES") : -1;
+    if (raises < 1) {
+        fprintf(stderr, "  [ET-RAISES] PHP: RAISES=%d\n", raises);
+    }
+    et_cleanup(&lp, store);
+    ASSERT_TRUE(raises >= 1);
+    PASS();
+}
+
+/* ══════════════════════════════════════════════════════════════════
+ *  WRITES — variable assignment: function writes to a named var
+ *  that resolves to a Variable node in the same or adjacent file.
+ *  Parallel-path only (> 50 files).
+ *
+ *  REAL BUG (all five WRITES below — single shared root cause):
+ *    Variable nodes ARE created (cbm_gbuf_upsert_node, "Variable" label) but are
+ *    NEVER added to the resolver registry — both register_and_link_def()
+ *    (src/pipeline/pass_parallel.c:781) and process_def()
+ *    (src/pipeline/pass_definitions.c:262) only cbm_registry_add() the labels
+ *    Function/Method/Class/Interface.  resolve_file_rw() resolves the written
+ *    var via cbm_registry_resolve(var_name) → always empty → no target node →
+ *    no WRITES edge for ANY language.  Fix = register "Variable" (and "Field")
+ *    defs so rw resolution can find them.  The fixtures correctly write to
+ *    module-level vars / fields that DO become nodes; the gap is registration. */
+
+/* Python — simple module-level variable assignment */
+TEST(writes_python) {
+    static const EtFile meaningful[] = {
+        {"state.py",
+         "registry = {}\n\n\n"
+         "def register(key, value):\n"
+         "    registry = {key: value}\n"
+         "    return registry\n\n\n"
+         "def clear_registry():\n"
+         "    registry = {}\n"}};
+    EtProj lp;
+    cbm_store_t *store =
+        et_index_parallel(&lp, meaningful, (int)(sizeof(meaningful) / sizeof(meaningful[0])));
+    int writes = store ? cbm_store_count_edges_by_type(store, lp.project, "WRITES") : -1;
+    if (writes < 1) {
+        fprintf(stderr, "  [ET-WRITES] Python: WRITES=%d\n", writes);
+    }
+    et_cleanup(&lp, store);
+    ASSERT_TRUE(writes >= 1);
+    PASS();
+}
+
+/* Go — short_var_declaration and assignment_statement */
+TEST(writes_go) {
+    static const EtFile meaningful[] = {
+        {"cache.go",
+         "package cache\n\n"
+         "var store map[string]string\n\n"
+         "func Set(key, value string) {\n"
+         "    store = make(map[string]string)\n"
+         "    store[key] = value\n}\n\n"
+         "func Reset() {\n"
+         "    store = nil\n}\n"}};
+    EtProj lp;
+    cbm_store_t *store =
+        et_index_parallel(&lp, meaningful, (int)(sizeof(meaningful) / sizeof(meaningful[0])));
+    int writes = store ? cbm_store_count_edges_by_type(store, lp.project, "WRITES") : -1;
+    if (writes < 1) {
+        fprintf(stderr, "  [ET-WRITES] Go: WRITES=%d\n", writes);
+    }
+    et_cleanup(&lp, store);
+    ASSERT_TRUE(writes >= 1);
+    PASS();
+}
+
+/* Java — field assignment inside a method */
+TEST(writes_java) {
+    static const EtFile meaningful[] = {
+        {"Counter.java",
+         "package app;\n\n"
+         "class Counter {\n"
+         "    private int count = 0;\n\n"
+         "    public void increment() {\n"
+         "        count = count + 1;\n    }\n\n"
+         "    public void reset() {\n"
+         "        count = 0;\n    }\n\n"
+         "    public int get() {\n        return count;\n    }\n}\n"}};
+    EtProj lp;
+    cbm_store_t *store =
+        et_index_parallel(&lp, meaningful, (int)(sizeof(meaningful) / sizeof(meaningful[0])));
+    int writes = store ? cbm_store_count_edges_by_type(store, lp.project, "WRITES") : -1;
+    if (writes < 1) {
+        fprintf(stderr, "  [ET-WRITES] Java: WRITES=%d\n", writes);
+    }
+    et_cleanup(&lp, store);
+    ASSERT_TRUE(writes >= 1);
+    PASS();
+}
+
+/* Rust — local variable assignment (assignment_expression) */
+TEST(writes_rust) {
+    static const EtFile meaningful[] = {
+        {"accumulator.rs",
+         "pub struct Accumulator {\n    pub total: i64,\n}\n\n"
+         "impl Accumulator {\n"
+         "    pub fn add(&mut self, n: i64) {\n"
+         "        let total = self.total + n;\n"
+         "        self.total = total;\n    }\n\n"
+         "    pub fn clear(&mut self) {\n"
+         "        self.total = 0;\n    }\n}\n"}};
+    EtProj lp;
+    cbm_store_t *store =
+        et_index_parallel(&lp, meaningful, (int)(sizeof(meaningful) / sizeof(meaningful[0])));
+    int writes = store ? cbm_store_count_edges_by_type(store, lp.project, "WRITES") : -1;
+    if (writes < 1) {
+        fprintf(stderr, "  [ET-WRITES] Rust: WRITES=%d\n", writes);
+    }
+    et_cleanup(&lp, store);
+    ASSERT_TRUE(writes >= 1);
+    PASS();
+}
+
+/* C# — property assignment inside methods */
+TEST(writes_csharp) {
+    static const EtFile meaningful[] = {
+        {"Config.cs",
+         "namespace App {\n"
+         "    class Config {\n"
+         "        public string Host = \"localhost\";\n"
+         "        public int Port = 8080;\n\n"
+         "        public void SetHost(string host) {\n"
+         "            Host = host;\n        }\n\n"
+         "        public void SetPort(int port) {\n"
+         "            Port = port;\n        }\n    }\n}\n"}};
+    EtProj lp;
+    cbm_store_t *store =
+        et_index_parallel(&lp, meaningful, (int)(sizeof(meaningful) / sizeof(meaningful[0])));
+    int writes = store ? cbm_store_count_edges_by_type(store, lp.project, "WRITES") : -1;
+    if (writes < 1) {
+        fprintf(stderr, "  [ET-WRITES] C#: WRITES=%d\n", writes);
+    }
+    et_cleanup(&lp, store);
+    ASSERT_TRUE(writes >= 1);
+    PASS();
+}
+
+/* ══════════════════════════════════════════════════════════════════
+ *  DEFINES_METHOD — Class/Struct→Method (structural)
+ *
+ *  Sequential path. A Class node with methods must produce DEFINES_METHOD
+ *  edges when the method's parent_class_qn resolves to the Class node.
+ *  The P6 contract in test_lang_contract.c only uses Python; we broaden
+ *  to Go (via pass_semantic.c receiver methods), Rust, Java, C#, PHP,
+ *  Ruby, Kotlin, TypeScript, and Scala.
+ * ══════════════════════════════════════════════════════════════════ */
+
+/* Go — struct with methods.
+ * REAL BUG: Go receiver methods are labelled "Method" with def.receiver set
+ * (internal/cbm/extract_defs.c:2042-2047) but def.parent_class is NEVER derived
+ * from the receiver type.  DEFINES_METHOD is only emitted when label=="Method"
+ * AND parent_class resolves (pass_definitions.c:273 / pass_parallel.c:794), so
+ * Go struct methods get no DEFINES_METHOD edge.  Fix = set def.parent_class to
+ * the receiver type's QN for Go methods. */
+TEST(defines_method_go) {
+    static const EtFile f[] = {
+        {"service.go",
+         "package svc\n\n"
+         "type OrderService struct {\n    db interface{}\n}\n\n"
+         "func (s *OrderService) Create(name string) string {\n    return name\n}\n\n"
+         "func (s *OrderService) Delete(id int) bool {\n    return id > 0\n}\n\n"
+         "func (s *OrderService) List() []string {\n    return nil\n}\n"}};
+    ASSERT_TRUE(et_edge_present(f, 1, "DEFINES_METHOD", 1));
+    PASS();
+}
+
+/* Rust — struct impl methods */
+TEST(defines_method_rust) {
+    static const EtFile f[] = {
+        {"product.rs",
+         "pub struct Product {\n    pub name: String,\n    pub price: f64,\n}\n\n"
+         "impl Product {\n"
+         "    pub fn new(name: &str, price: f64) -> Self {\n"
+         "        Product { name: name.to_owned(), price }\n    }\n\n"
+         "    pub fn discount(&self, pct: f64) -> f64 {\n"
+         "        self.price * (1.0 - pct)\n    }\n\n"
+         "    pub fn is_free(&self) -> bool {\n        self.price == 0.0\n    }\n}\n"}};
+    ASSERT_TRUE(et_edge_present(f, 1, "DEFINES_METHOD", 1));
+    PASS();
+}
+
+/* Java — class with instance and static methods */
+TEST(defines_method_java) {
+    static const EtFile f[] = {
+        {"Account.java",
+         "package bank;\n\n"
+         "public class Account {\n"
+         "    private double balance;\n\n"
+         "    public Account(double initial) { this.balance = initial; }\n\n"
+         "    public void deposit(double amount) { balance += amount; }\n"
+         "    public boolean withdraw(double amount) {\n"
+         "        if (amount > balance) return false;\n"
+         "        balance -= amount;\n        return true;\n    }\n"
+         "    public double getBalance() { return balance; }\n}\n"}};
+    ASSERT_TRUE(et_edge_present(f, 1, "DEFINES_METHOD", 1));
+    PASS();
+}
+
+/* C# — class with multiple methods */
+TEST(defines_method_csharp) {
+    static const EtFile f[] = {
+        {"Queue.cs",
+         "using System.Collections.Generic;\n\n"
+         "namespace Collections {\n"
+         "    public class Queue<T> {\n"
+         "        private List<T> items = new List<T>();\n\n"
+         "        public void Enqueue(T item) { items.Add(item); }\n"
+         "        public T Dequeue() {\n"
+         "            T item = items[0];\n"
+         "            items.RemoveAt(0);\n"
+         "            return item;\n        }\n"
+         "        public int Count() { return items.Count; }\n    }\n}\n"}};
+    ASSERT_TRUE(et_edge_present(f, 1, "DEFINES_METHOD", 1));
+    PASS();
+}
+
+/* PHP — class with methods */
+TEST(defines_method_php) {
+    static const EtFile f[] = {
+        {"Cart.php",
+         "<?php\n\n"
+         "class Cart {\n"
+         "    private array $items = [];\n\n"
+         "    public function add(string $sku, int $qty): void {\n"
+         "        $this->items[$sku] = $qty;\n    }\n\n"
+         "    public function remove(string $sku): void {\n"
+         "        unset($this->items[$sku]);\n    }\n\n"
+         "    public function total(): int {\n"
+         "        return array_sum($this->items);\n    }\n}\n"}};
+    ASSERT_TRUE(et_edge_present(f, 1, "DEFINES_METHOD", 1));
+    PASS();
+}
+
+/* Ruby — class with instance methods */
+TEST(defines_method_ruby) {
+    static const EtFile f[] = {
+        {"stack.rb",
+         "class Stack\n"
+         "  def initialize\n    @items = []\n  end\n\n"
+         "  def push(item)\n    @items.push(item)\n  end\n\n"
+         "  def pop\n    @items.pop\n  end\n\n"
+         "  def peek\n    @items.last\n  end\n\n"
+         "  def empty?\n    @items.empty?\n  end\nend\n"}};
+    ASSERT_TRUE(et_edge_present(f, 1, "DEFINES_METHOD", 1));
+    PASS();
+}
+
+/* Kotlin — class with methods */
+TEST(defines_method_kotlin) {
+    static const EtFile f[] = {
+        {"Wallet.kt",
+         "class Wallet(private var balance: Double) {\n"
+         "    fun deposit(amount: Double) {\n        balance += amount\n    }\n\n"
+         "    fun withdraw(amount: Double): Boolean {\n"
+         "        if (amount > balance) return false\n"
+         "        balance -= amount\n        return true\n    }\n\n"
+         "    fun getBalance(): Double = balance\n}\n"}};
+    ASSERT_TRUE(et_edge_present(f, 1, "DEFINES_METHOD", 1));
+    PASS();
+}
+
+/* TypeScript — class with methods and constructor */
+TEST(defines_method_typescript) {
+    static const EtFile f[] = {
+        {"Logger.ts",
+         "export class Logger {\n"
+         "    private prefix: string;\n\n"
+         "    constructor(prefix: string) {\n        this.prefix = prefix;\n    }\n\n"
+         "    info(msg: string): void {\n        console.log(`[${this.prefix}] INFO: ${msg}`);\n    }\n\n"
+         "    warn(msg: string): void {\n        console.warn(`[${this.prefix}] WARN: ${msg}`);\n    }\n\n"
+         "    error(msg: string): void {\n        console.error(`[${this.prefix}] ERR: ${msg}`);\n    }\n}\n"}};
+    ASSERT_TRUE(et_edge_present(f, 1, "DEFINES_METHOD", 1));
+    PASS();
+}
+
+/* Scala — class with methods */
+TEST(defines_method_scala) {
+    static const EtFile f[] = {
+        {"Buffer.scala",
+         "class Buffer[T] {\n"
+         "    private var items: List[T] = List.empty\n\n"
+         "    def append(item: T): Unit = {\n        items = items :+ item\n    }\n\n"
+         "    def prepend(item: T): Unit = {\n        items = item :: items\n    }\n\n"
+         "    def size: Int = items.length\n\n"
+         "    def toList: List[T] = items\n}\n"}};
+    ASSERT_TRUE(et_edge_present(f, 1, "DEFINES_METHOD", 1));
+    PASS();
+}
+
+/* ══════════════════════════════════════════════════════════════════
+ *  OVERRIDE — Go implicit interface satisfaction.
+ *  Produced by pass_semantic.c:cbm_pipeline_implements_go().
+ *  Parallel-path only (> 50 files).
+ *
+ *  REAL BUG (same root cause as defines_method_go): cbm_pipeline_implements_go
+ *  (src/pipeline/pass_semantic.c:276-301) discovers interface methods AND struct
+ *  methods exclusively via DEFINES_METHOD edges.  Because Go receiver methods get
+ *  no parent_class → no DEFINES_METHOD (see defines_method_go), the interface has
+ *  zero DEFINES_METHOD edges (continue at line 281) and the struct's method set is
+ *  invisible → neither IMPLEMENTS nor OVERRIDE is ever emitted.  Diagnostics
+ *  confirm OVERRIDE=0 IMPLEMENTS=0.  Fix the Go receiver→parent_class gap first.
+ * ══════════════════════════════════════════════════════════════════ */
+
+TEST(override_go_interface) {
+    static const EtFile meaningful[] = {
+        {"shapes.go",
+         "package shapes\n\n"
+         "type Shape interface {\n"
+         "    Area() float64\n    Perimeter() float64\n}\n\n"
+         "type Circle struct {\n    Radius float64\n}\n\n"
+         "func (c *Circle) Area() float64 {\n"
+         "    return 3.14159 * c.Radius * c.Radius\n}\n\n"
+         "func (c *Circle) Perimeter() float64 {\n"
+         "    return 2.0 * 3.14159 * c.Radius\n}\n\n"
+         "type Rectangle struct {\n    Width, Height float64\n}\n\n"
+         "func (r *Rectangle) Area() float64 {\n"
+         "    return r.Width * r.Height\n}\n\n"
+         "func (r *Rectangle) Perimeter() float64 {\n"
+         "    return 2.0 * (r.Width + r.Height)\n}\n"}};
+    EtProj lp;
+    cbm_store_t *store =
+        et_index_parallel(&lp, meaningful, (int)(sizeof(meaningful) / sizeof(meaningful[0])));
+    int override_edges = store ? cbm_store_count_edges_by_type(store, lp.project, "OVERRIDE") : -1;
+    int implements     = store ? cbm_store_count_edges_by_type(store, lp.project, "IMPLEMENTS") : -1;
+    if (override_edges < 1 || implements < 1) {
+        fprintf(stderr, "  [ET-OVERRIDE] Go: OVERRIDE=%d IMPLEMENTS=%d\n",
+                override_edges, implements);
+    }
+    et_cleanup(&lp, store);
+    /* Both IMPLEMENTS (struct→interface) and OVERRIDE (method→interface-method) expected. */
+    ASSERT_TRUE(override_edges >= 1);
+    ASSERT_TRUE(implements >= 1);
+    PASS();
+}
+
+/* ══════════════════════════════════════════════════════════════════
+ *  ROUTE REGISTRATION vs the #725 cross-language guard.
+ *
+ *  The route classifier recognises a registration by its callee
+ *  (`Route::get`, `$router->get`, `app.get`) plus a path-shaped first
+ *  argument. The registry still resolves the callee's bare name first, and in
+ *  a mixed-language repo with imports it binds `get` by suffix_match to a
+ *  same-named definition in ANOTHER language (a JS `get`, a Python `get`).
+ *  The #725 guard rightly refuses that binding — but it dropped the whole
+ *  call, before either resolver reached the route classification, so every
+ *  GET registration vanished while POST (no `post` definition to collide
+ *  with) survived: krayin/laravel-crm minted 1 of its 127 GET routes.
+ *  The guard must keep dropping the false CALLS edge; the registration must
+ *  survive. Each fixture also carries calls the guard must still drop.
+ * ══════════════════════════════════════════════════════════════════ */
+
+/* Index `files` (padded onto the parallel path when `parallel`), then require
+ * the exact Route-name set `routes` AND zero CALLS edges into any definition
+ * named `get`: every `get` in these fixtures lives in a different language
+ * than its would-be callers, so any such edge is the binding #725 refuses. */
+static int et_xlang_routes(const EtFile *files, int nfiles, bool parallel, const char **routes) {
+    EtProj lp;
+    cbm_store_t *store =
+        parallel ? et_index_parallel(&lp, files, nfiles) : et_index_files(&lp, files, nfiles);
+    cbm_node_t *nodes = NULL;
+    int node_count = 0;
+    int wanted = 0;
+    int ok = store != NULL;
+    while (routes[wanted]) {
+        wanted++;
+    }
+    if (!store || cbm_store_find_nodes_by_label(store, lp.project, "Route", &nodes, &node_count) !=
+                      CBM_STORE_OK) {
+        ok = 0;
+    } else if (node_count != wanted) {
+        ok = 0;
+    }
+    for (int wi = 0; wi < wanted; wi++) {
+        int hit = 0;
+        for (int ni = 0; ni < node_count; ni++) {
+            if (nodes[ni].name && strcmp(nodes[ni].name, routes[wi]) == 0) {
+                hit = 1;
+            }
+        }
+        if (!hit) {
+            fprintf(stderr, "  [ET-XLANG] missing Route %s\n", routes[wi]);
+            ok = 0;
+        }
+    }
+    if (!ok) {
+        fprintf(stderr, "  [ET-XLANG] expected=%d actual=%d available:", wanted, node_count);
+        for (int ni = 0; ni < node_count; ni++) {
+            fprintf(stderr, " %s", nodes[ni].name ? nodes[ni].name : "<null>");
+        }
+        fprintf(stderr, "\n");
+    }
+    int false_calls = 0;
+    cbm_node_t *gets = NULL;
+    int get_count = 0;
+    if (store &&
+        cbm_store_find_nodes_by_name(store, lp.project, "get", &gets, &get_count) == CBM_STORE_OK) {
+        for (int gi = 0; gi < get_count; gi++) {
+            cbm_edge_t *in = NULL;
+            int in_count = 0;
+            if (cbm_store_find_edges_by_target_type(store, gets[gi].id, "CALLS", &in, &in_count) ==
+                CBM_STORE_OK) {
+                false_calls += in_count;
+                cbm_store_free_edges(in, in_count);
+            }
+        }
+        cbm_store_free_nodes(gets, get_count);
+    }
+    if (false_calls != 0) {
+        fprintf(stderr, "  [ET-XLANG] %d cross-language CALLS into `get`\n", false_calls);
+        ok = 0;
+    }
+    cbm_store_free_nodes(nodes, node_count);
+    et_cleanup(&lp, store);
+    return ok;
+}
+
+/* Laravel: facade `Route::get` and `$router->get` beside two JS `get`
+ * definitions. Controls: POST is unchanged, and a bare PHP `get('/x')` (no
+ * route-registration callee) stays dropped — no Route, no CALLS into JS. */
+static const EtFile et_xlang_laravel[] = {
+    {"app/Http/Controllers/LeadController.php",
+     "<?php\nnamespace App\\Http\\Controllers;\n\n"
+     "class LeadController\n{\n"
+     "    public function index() { return []; }\n"
+     "    public function store() { return []; }\n}\n"},
+    {"routes/web.php",
+     "<?php\nuse Illuminate\\Support\\Facades\\Route;\n"
+     "use App\\Http\\Controllers\\LeadController;\n\n"
+     "Route::get('/leads', [LeadController::class, 'index']);\n"
+     "Route::post('/leads/store', [LeadController::class, 'store']);\n"
+     "$router->get('/reports', [LeadController::class, 'index']);\n\n"
+     "function report_file() { return get('/files/report'); }\n"},
+    {"resources/js/http.js", "export function get(url) {\n  return url;\n}\n"},
+    {"resources/js/store.js", "export class Store {\n  get(key) {\n    return key;\n  }\n}\n"},
+};
+static const char *et_xlang_laravel_routes[] = {"/leads", "/leads/store", "/reports", NULL};
+
+TEST(routes_laravel_get_survives_xlang_guard) {
+    ASSERT_TRUE(et_xlang_routes(et_xlang_laravel,
+                                (int)(sizeof(et_xlang_laravel) / sizeof(et_xlang_laravel[0])),
+                                false, et_xlang_laravel_routes));
+    PASS();
+}
+
+TEST(routes_laravel_get_survives_xlang_guard_parallel) {
+    ASSERT_TRUE(et_xlang_routes(et_xlang_laravel,
+                                (int)(sizeof(et_xlang_laravel) / sizeof(et_xlang_laravel[0])),
+                                true, et_xlang_laravel_routes));
+    PASS();
+}
+
+/* Express: `app.get` beside two Python `get` definitions. Controls: POST is
+ * unchanged; a member `memo.get(key)` (route suffix, no path) and a bare
+ * `get('/cache/key')` stay dropped — no Route, no CALLS into Python. */
+static const EtFile et_xlang_express[] = {
+    {"web/server.js",
+     "const express = require('express');\n"
+     "const { health } = require('./handlers');\n\n"
+     "const app = express();\n\n"
+     "app.get('/health', health);\n"
+     "app.post('/items', health);\n\n"
+     "function readCache(memo, key) {\n"
+     "  return memo.get(key) || get('/cache/key');\n"
+     "}\n"
+     "module.exports = { readCache };\n"},
+    {"web/handlers.js",
+     "function health(req, res) {\n  return res;\n}\nmodule.exports = { health };\n"},
+    {"tools/cache.py", "def get(key):\n    return key\n"},
+    {"tools/store.py", "class Store:\n    def get(self, key):\n        return key\n"},
+};
+static const char *et_xlang_express_routes[] = {"/health", "/items", NULL};
+
+TEST(routes_express_get_survives_xlang_guard) {
+    ASSERT_TRUE(et_xlang_routes(et_xlang_express,
+                                (int)(sizeof(et_xlang_express) / sizeof(et_xlang_express[0])),
+                                false, et_xlang_express_routes));
+    PASS();
+}
+
+TEST(routes_express_get_survives_xlang_guard_parallel) {
+    ASSERT_TRUE(et_xlang_routes(et_xlang_express,
+                                (int)(sizeof(et_xlang_express) / sizeof(et_xlang_express[0])),
+                                true, et_xlang_express_routes));
+    PASS();
+}
+
+/* ══════════════════════════════════════════════════════════════════
+ *  SUITE
+ * ══════════════════════════════════════════════════════════════════ */
+
+SUITE(edge_types_probe) {
+    /* HANDLES — route→handler across web frameworks */
+    RUN_TEST(calls_jsx_component_via_tsconfig_alias_parallel_issue1085);
+    RUN_TEST(graphql_route_keyed_by_operation_name_issue598);
+    RUN_TEST(graphql_operation_identity_parser_issue598);
+    RUN_TEST(graphql_gqlgen_field_routes_sequential);
+    RUN_TEST(graphql_gqlgen_field_routes_parallel);
+    RUN_TEST(graphql_gqlgen_duplicate_paths_one_handler);
+    RUN_TEST(graphql_schema_remap_and_extensions);
+    RUN_TEST(graphql_long_reason_and_type_name);
+    RUN_TEST(graphql_gqlgen_routes_survive_incremental_edits);
+    RUN_TEST(graphql_incremental_rebuild_only_for_route_inputs);
+    RUN_TEST(graphql_gqlgen_config_two_servers);
+    RUN_TEST(graphql_gqlgen_config_sibling_schema_single_file);
+    RUN_TEST(graphql_resolver_needs_ownership_without_config);
+    RUN_TEST(graphql_sibling_schema_single_file_without_config);
+    RUN_TEST(graphql_gqlgen_digit_underscore_resolvers);
+    RUN_TEST(graphql_extension_only_types_stay_in_their_subgraph);
+    RUN_TEST(graphql_mixed_schema_and_client_keep_route_props);
+    RUN_TEST(graphql_incremental_resolver_package_ownership_change);
+    RUN_TEST(graphql_incremental_user_schema_extension);
+    RUN_TEST(graphql_root_schema_not_owned_by_deep_packages);
+    RUN_TEST(graphql_extension_only_root_type);
+    RUN_TEST(graphql_schema_extension_roots);
+    RUN_TEST(graphql_gqlgen_underscored_field_resolver);
+    RUN_TEST(graphql_gqlgen_config_default_schema);
+    RUN_TEST(graphql_gqlgen_config_parent_relative_paths);
+    RUN_TEST(graphql_selection_signature_parser);
+    RUN_TEST(graphql_field_paths_multiline_ts_parallel);
+    RUN_TEST(graphql_field_paths_multiline_ts_sequential);
+    RUN_TEST(graphql_field_paths_python_constants);
+    RUN_TEST(graphql_field_paths_inline_object_arg_sequential);
+    RUN_TEST(graphql_field_paths_inline_object_arg_parallel);
+    RUN_TEST(graphql_field_paths_shared_field_keeps_operations_sequential);
+    RUN_TEST(graphql_field_paths_shared_field_keeps_operations_parallel);
+    RUN_TEST(graphql_field_paths_large_selection);
+    RUN_TEST(graphql_field_paths_route_name_boundary);
+    RUN_TEST(graphql_selection_signature_alloc_keeps_every_path);
+    RUN_TEST(graphql_selection_signature_dedupe_scales);
+    RUN_TEST(graphql_field_paths_constant_owns_call_document_sequential);
+    RUN_TEST(graphql_field_paths_constant_owns_call_document_parallel);
+    RUN_TEST(graphql_field_paths_shorthand_object_binding_sequential);
+    RUN_TEST(graphql_field_paths_shorthand_object_binding_parallel);
+    RUN_TEST(graphql_field_paths_external_client_shorthand_sequential);
+    RUN_TEST(graphql_field_paths_external_client_shorthand_parallel);
+    RUN_TEST(graphql_field_paths_every_operation_and_operation_name);
+    RUN_TEST(handles_flask_python);
+    RUN_TEST(handles_fastapi_python);
+    RUN_TEST(handles_drf_action_python);
+    RUN_TEST(handles_express_ts);
+    RUN_TEST(handles_fastify_js);
+    RUN_TEST(handles_gin_go);
+    RUN_TEST(handles_fiber_group_prefix_sequential_issue686);
+    RUN_TEST(handles_fiber_group_prefix_parallel_issue686);
+    RUN_TEST(handles_gin_group_prefix_issue686);
+    RUN_TEST(handles_go_group_binding_forms_sequential_issue686);
+    RUN_TEST(handles_go_group_binding_forms_parallel_issue686);
+    RUN_TEST(handles_spring_java);
+    RUN_TEST(data_flows_test_files_pair_within_their_file_sequential);
+    RUN_TEST(data_flows_test_files_pair_within_their_file_parallel);
+    RUN_TEST(handles_spring_java_path_attribute_fourth);
+    RUN_TEST(handles_spring_kotlin);
+    RUN_TEST(handles_jaxrs_java);
+    RUN_TEST(handles_jaxrs_java_relative_path);
+    RUN_TEST(handles_spring_java_relative_string_not_route);
+    RUN_TEST(handles_jaxrs_scala);
+    RUN_TEST(http_calls_retrofit_kotlin_interface_issue2723);
+    RUN_TEST(http_calls_retrofit_java_interface_issue2723);
+    RUN_TEST(handles_jaxrs_interface_not_retrofit_issue2723);
+    RUN_TEST(handles_verb_path_controller_class_not_retrofit_issue2723);
+    RUN_TEST(handles_aspnet_csharp);
+    RUN_TEST(handles_aspnet_attribute_routes_issue1692);
+    RUN_TEST(handles_aspnet_attribute_routes_issue1041);
+    RUN_TEST(handles_aspnet_route_tokens_issue1692);
+    RUN_TEST(handles_aspnet_override_constraints_issue1692);
+    RUN_TEST(handles_aspnet_non_controller_control_issue1692);
+    RUN_TEST(handles_aspnet_overload_verbs_both_venues_issue1692);
+    RUN_TEST(handles_laravel_php);
+    RUN_TEST(handles_laravel_facade_routes_issue952);
+    RUN_TEST(handles_laravel_facade_no_junk_routes_issue952);
+    RUN_TEST(routes_laravel_withrouting_api_default_prefix_issue1146);
+    RUN_TEST(routes_laravel_withrouting_api_custom_prefix_issue1146);
+    RUN_TEST(routes_laravel_withrouting_web_no_prefix_issue1146);
+    RUN_TEST(routes_laravel_routeserviceprovider_control_issue1146);
+    RUN_TEST(routes_laravel_withrouting_nonliteral_prefix_issue1146);
+    RUN_TEST(routes_laravel_withrouting_parallel_subdir_issue1146);
+    RUN_TEST(handles_laravel_class_handlers_issue1146);
+    RUN_TEST(handles_laravel_class_handlers_parallel_issue1146);
+    RUN_TEST(handles_laravel_class_handlers_no_composer_issue1146);
+    RUN_TEST(handles_laravel_psr4_absent_class_issue1146);
+    RUN_TEST(handles_laravel_psr4_absent_class_parallel_issue1146);
+    RUN_TEST(routes_laravel_slashless_issue1146);
+    RUN_TEST(routes_laravel_slashless_parallel_issue1146);
+    RUN_TEST(routes_laravel_slashless_no_guessed_handlers_issue1146);
+    RUN_TEST(routes_laravel_slashless_no_junk_issue1146);
+    RUN_TEST(handles_rails_ruby);
+    RUN_TEST(handles_actix_rust);
+
+    /* HTTP_CALLS — outbound HTTP clients (9 libraries × languages) */
+    RUN_TEST(http_calls_fetch_js);
+    RUN_TEST(http_calls_axios_ts);
+    RUN_TEST(http_calls_requests_python);
+    RUN_TEST(http_calls_nethttp_go);
+    RUN_TEST(http_calls_resttemplate_java);
+    RUN_TEST(http_calls_restsharp_csharp);
+    RUN_TEST(http_calls_httparty_ruby);
+    RUN_TEST(http_calls_guzzle_php);
+    RUN_TEST(http_calls_reqwest_rust);
+
+    /* ASYNC_CALLS — message queue dispatch (5 brokers × languages) */
+    RUN_TEST(async_calls_celery_python);
+    RUN_TEST(async_calls_celery_wall_stall_seam);
+    RUN_TEST(async_calls_sidekiq_ruby);
+    RUN_TEST(async_calls_kafkajs_ts);
+    RUN_TEST(async_calls_sqs_go);
+    RUN_TEST(async_calls_bullmq_js);
+
+    /* THROWS — checked exceptions (7 languages, parallel path) */
+    RUN_TEST(throws_java);
+    RUN_TEST(throws_kotlin);
+    RUN_TEST(throws_python);
+    RUN_TEST(throws_typescript);
+    RUN_TEST(throws_csharp);
+    RUN_TEST(throws_php);
+    RUN_TEST(throws_scala);
+
+    /* RAISES — runtime errors (5 languages, parallel path) */
+    RUN_TEST(raises_python);
+    RUN_TEST(raises_typescript);
+    RUN_TEST(raises_kotlin);
+    RUN_TEST(raises_csharp);
+    RUN_TEST(raises_php);
+
+    /* WRITES — variable assignment (5 languages, parallel path) */
+    RUN_TEST(writes_python);
+    RUN_TEST(writes_go);
+    RUN_TEST(writes_java);
+    RUN_TEST(writes_rust);
+    RUN_TEST(writes_csharp);
+
+    /* DEFINES_METHOD — class→method (9 languages, sequential path) */
+    RUN_TEST(defines_method_go);
+    RUN_TEST(defines_method_rust);
+    RUN_TEST(defines_method_java);
+    RUN_TEST(defines_method_csharp);
+    RUN_TEST(defines_method_php);
+    RUN_TEST(defines_method_ruby);
+    RUN_TEST(defines_method_kotlin);
+    RUN_TEST(defines_method_typescript);
+    RUN_TEST(defines_method_scala);
+
+    /* OVERRIDE — Go interface method override (parallel path) */
+    RUN_TEST(override_go_interface);
+
+    /* Route registration vs the #725 cross-language guard (both resolvers) */
+    RUN_TEST(routes_laravel_get_survives_xlang_guard);
+    RUN_TEST(routes_laravel_get_survives_xlang_guard_parallel);
+    RUN_TEST(routes_express_get_survives_xlang_guard);
+    RUN_TEST(routes_express_get_survives_xlang_guard_parallel);
+}

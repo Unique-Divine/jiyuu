@@ -1,7 +1,8 @@
-# Smithery configuration for slack-mcp-server
+# Smithery configuration for @uniquedivine/mcp-slack, maintained by Unique
+# Divine (https://uniquedivine.com). Forked from jtalk22/slack-mcp-server.
 # https://smithery.ai/docs/build/project-config/smithery-yaml
-# Slack MCP — free OSS or hosted (free tier + $9/mo Pro). 21 tools:
-# read/write Slack + workflow profile primitives + AI brain via hosted upgrade.
+# 25 Slack tools for reads, sends, reactions, and guarded edits and deletes of
+# your own messages.
 
 startCommand:
   type: stdio

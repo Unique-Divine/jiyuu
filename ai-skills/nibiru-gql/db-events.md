@@ -81,5 +81,5 @@ For a Sai deposit or trading-credit incident:
    connected wallet, client session, or UI rendering before opening an indexer
    incident.
 
-Use agent skill `sai-db` for the second step and agent skill `sai-perps` for
+Use agent skill `sai-db` for the second step and agent skill `sai` for
 live contract state and the full cross-source reconciliation.

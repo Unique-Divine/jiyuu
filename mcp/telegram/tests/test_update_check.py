@@ -13,6 +13,7 @@ from telegram_mcp.update_check import (
     UpdateNotifier,
     UpdateStatus,
     check_for_update,
+    check_latest,
     format_notice,
     is_newer,
 )
@@ -23,6 +24,15 @@ NOW = datetime(2026, 11, 17, 12, 0, tzinfo=timezone.utc)
 
 def pypi_body(version: str) -> bytes:
     return json.dumps({"info": {"name": NAME, "version": version}}).encode()
+
+
+def seed_cache(cache_dir, latest: str, checked_at: datetime) -> None:
+    payload = {"name": NAME, "latestVersion": latest, "checkedAt": checked_at.isoformat()}
+    (cache_dir / f"{NAME}.json").write_text(json.dumps(payload))
+
+
+def cached_latest(cache_dir) -> str:
+    return json.loads((cache_dir / f"{NAME}.json").read_text())["latestVersion"]
 
 
 class RecordingFetcher:
@@ -82,13 +92,24 @@ def test_running_version_newer_than_registry_means_no_update():
     assert status.update_available is False
 
 
+@pytest.mark.parametrize("latest", ["2.0.1", "2.0.0"])
+def test_pin_command_is_none_unless_latest_is_newer(latest):
+    status = UpdateStatus(NAME, "2.0.1", latest, NOW.isoformat(), "cache")
+
+    assert status.pin_command is None
+
+
+def test_cache_lasts_one_hour():
+    assert update_check.CACHE_TTL == timedelta(hours=1)
+
+
 def test_cache_miss_fetches_pypi_and_writes_cache(tmp_path):
     fetch = RecordingFetcher(pypi_body("2.1.0"))
 
     status = check_for_update(NAME, "2.0.1", fetch=fetch, env={}, cache_dir=tmp_path, now=NOW)
 
     assert fetch.urls == [f"https://pypi.org/pypi/{NAME}/json"]
-    assert status == UpdateStatus(NAME, "2.0.1", "2.1.0", "2026-11-17T12:00:00+00:00")
+    assert status == UpdateStatus(NAME, "2.0.1", "2.1.0", "2026-11-17T12:00:00+00:00", "live")
     assert status.update_available
     assert status.pin_command == f"uvx {NAME}@2.1.0"
     cached = json.loads((tmp_path / f"{NAME}.json").read_text())
@@ -99,7 +120,7 @@ def test_cache_miss_fetches_pypi_and_writes_cache(tmp_path):
     }
 
 
-def test_cache_hit_within_a_day_skips_the_registry(tmp_path):
+def test_cache_hit_within_the_hour_skips_the_registry(tmp_path):
     check_for_update(
         NAME,
         "2.0.1",
@@ -111,12 +132,13 @@ def test_cache_hit_within_a_day_skips_the_registry(tmp_path):
     fetch = RecordingFetcher(pypi_body("9.9.9"))
 
     status = check_for_update(
-        NAME, "2.0.1", fetch=fetch, env={}, cache_dir=tmp_path, now=NOW + timedelta(hours=23)
+        NAME, "2.0.1", fetch=fetch, env={}, cache_dir=tmp_path, now=NOW + timedelta(minutes=59)
     )
 
     assert fetch.urls == []
     assert status is not None and status.latest_version == "2.1.0"
     assert status.checked_at == "2026-11-17T12:00:00+00:00"
+    assert status.source == "cache"
 
 
 def test_expired_cache_fetches_again(tmp_path):
@@ -131,11 +153,67 @@ def test_expired_cache_fetches_again(tmp_path):
     fetch = RecordingFetcher(pypi_body("2.2.0"))
 
     status = check_for_update(
-        NAME, "2.0.1", fetch=fetch, env={}, cache_dir=tmp_path, now=NOW + timedelta(hours=24)
+        NAME, "2.0.1", fetch=fetch, env={}, cache_dir=tmp_path, now=NOW + timedelta(hours=1)
     )
 
     assert len(fetch.urls) == 1
     assert status is not None and status.latest_version == "2.2.0"
+    assert status.source == "live"
+
+
+def test_fresh_cache_older_than_running_version_fetches_again(tmp_path):
+    seed_cache(tmp_path, "2.0.1", NOW - timedelta(minutes=5))
+    fetch = RecordingFetcher(pypi_body("2.0.3"))
+
+    status = check_for_update(NAME, "2.0.2", fetch=fetch, env={}, cache_dir=tmp_path, now=NOW)
+
+    assert len(fetch.urls) == 1
+    assert status == UpdateStatus(NAME, "2.0.2", "2.0.3", NOW.isoformat(), "live")
+    assert cached_latest(tmp_path) == "2.0.3"
+
+
+def test_check_latest_reads_pypi_past_a_fresh_cache_and_rewrites_it(tmp_path):
+    seed_cache(tmp_path, "2.1.0", NOW - timedelta(minutes=1))
+    fetch = RecordingFetcher(pypi_body("2.2.0"))
+
+    status = check_latest(NAME, "2.0.1", fetch=fetch, env={}, cache_dir=tmp_path, now=NOW)
+
+    assert fetch.urls == [f"https://pypi.org/pypi/{NAME}/json"]
+    assert status == UpdateStatus(NAME, "2.0.1", "2.2.0", NOW.isoformat(), "live")
+    assert status.pin_command == f"uvx {NAME}@2.2.0"
+    assert cached_latest(tmp_path) == "2.2.0"
+
+
+def test_check_latest_falls_back_to_a_cache_of_any_age(tmp_path):
+    week_old = NOW - timedelta(days=7)
+    seed_cache(tmp_path, "2.1.0", week_old)
+    fetch = RecordingFetcher(error=OSError("network unreachable"))
+
+    status = check_latest(NAME, "2.0.1", fetch=fetch, env={}, cache_dir=tmp_path, now=NOW)
+
+    assert status == UpdateStatus(NAME, "2.0.1", "2.1.0", week_old.isoformat(), "cache")
+
+
+def test_check_latest_fallback_ignores_a_cache_older_than_running(tmp_path):
+    seed_cache(tmp_path, "2.0.1", NOW)
+    fetch = RecordingFetcher(b"<html>rate limited</html>")
+
+    assert check_latest(NAME, "2.0.2", fetch=fetch, env={}, cache_dir=tmp_path, now=NOW) is None
+
+
+def test_check_latest_without_pypi_or_cache_is_none(tmp_path):
+    fetch = RecordingFetcher(error=TimeoutError("timed out"))
+
+    assert check_latest(NAME, "2.0.1", fetch=fetch, env={}, cache_dir=tmp_path, now=NOW) is None
+
+
+def test_check_latest_honors_opt_out_and_unpublished_names(tmp_path):
+    fetch = RecordingFetcher(pypi_body("2.1.0"))
+    opted_out = {"JIYUU_MCP_NO_UPDATE_CHECK": "1"}
+
+    assert check_latest(NAME, "2.0.1", fetch=fetch, env=opted_out, cache_dir=tmp_path) is None
+    assert check_latest("telegram-mcp", "2.0.1", fetch=fetch, env={}, cache_dir=tmp_path) is None
+    assert fetch.urls == []
 
 
 def test_corrupt_cache_counts_as_a_miss(tmp_path):
@@ -190,6 +268,53 @@ def test_names_jiyuu_does_not_publish_are_not_checked(tmp_path):
 
     assert status is None
     assert fetch.urls == []
+
+
+def test_concurrent_cache_writes_never_expose_a_partial_file(tmp_path):
+    # The startup thread and mcp_info worker threads share one process ID, so
+    # each write needs its own temporary file.
+    path = tmp_path / f"{NAME}.json"
+    versions = [f"2.{i}.0" for i in range(16)]
+    stop = threading.Event()
+    bad_reads: list[str] = []
+
+    def writer(version: str) -> None:
+        for _ in range(200):
+            update_check.write_cache(path, NAME, version, NOW.isoformat())
+
+    def reader() -> None:
+        while not stop.is_set():
+            try:
+                text = path.read_text()
+            except FileNotFoundError:
+                continue
+            try:
+                assert json.loads(text)["latestVersion"] in versions
+            except (ValueError, KeyError, AssertionError):
+                bad_reads.append(text)
+
+    watcher = threading.Thread(target=reader)
+    watcher.start()
+    writers = [threading.Thread(target=writer, args=(v,)) for v in versions]
+    for thread in writers:
+        thread.start()
+    for thread in writers:
+        thread.join()
+    stop.set()
+    watcher.join()
+
+    assert bad_reads == []
+    assert json.loads(path.read_text())["latestVersion"] in versions
+    assert [entry.name for entry in tmp_path.iterdir()] == [path.name]
+
+
+def test_failed_cache_write_leaves_no_temporary_file(tmp_path):
+    path = tmp_path / f"{NAME}.json"
+    path.mkdir()  # Replacing a directory with a file fails.
+
+    update_check.write_cache(path, NAME, "2.1.0", NOW.isoformat())
+
+    assert [entry.name for entry in tmp_path.iterdir()] == [path.name]
 
 
 def test_default_cache_dir_follows_xdg_cache_home(tmp_path):

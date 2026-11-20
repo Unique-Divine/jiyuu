@@ -521,12 +521,12 @@ export const TOOLS = [
     }
   },
   // ============ Workflow Profile Primitives (OSS) ============
-  // Local JSON storage at ~/.slack-mcp-workflows.json. Defines the
-  // structural primitive that the hosted AI brain (smart_search,
-  // catch_me_up, triage) consumes to return structured JSON.
+  // Local JSON storage at ~/.slack-mcp-workflows.json. Profiles name the
+  // channels, people, and output shape for slack_catch_me_up and
+  // slack_triage.
   {
     name: "slack_workflow_save",
-    description: "Save or update a workflow profile that binds a workflow_kind (support_inbox | incident_room | exec_brief | product_launch_watch | custom) to channels, priority people, retention mode, and summary cadence. Stored locally at ~/.slack-mcp-workflows.json. Hosted brain reads these to return structured JSON per the workflow_kind.",
+    description: "Save or update a workflow profile that binds a workflow_kind (support_inbox | incident_room | exec_brief | product_launch_watch | custom) to channels, priority people, retention mode, and summary cadence. Stored locally at ~/.slack-mcp-workflows.json.",
     inputSchema: {
       type: "object",
       properties: {
@@ -537,7 +537,7 @@ export const TOOLS = [
         workflow_kind: {
           type: "string",
           enum: ["support_inbox", "incident_room", "exec_brief", "product_launch_watch", "custom"],
-          description: "Workflow kind. Determines structured JSON output shape from the hosted AI brain."
+          description: "Workflow kind. Determines the structured JSON output shape."
         },
         channels: {
           type: "array",
@@ -552,12 +552,12 @@ export const TOOLS = [
         retention_mode: {
           type: "string",
           enum: ["ephemeral", "persistent"],
-          description: "Token retention mode for hosted execution. Default ephemeral."
+          description: "Token retention mode. Default ephemeral."
         },
         summary_cadence: {
           type: "string",
           enum: ["on_demand", "daily_8am", "weekly_monday"],
-          description: "When the hosted brain auto-runs slack_catch_me_up against this profile. on_demand only on hosted free; daily_8am and weekly_monday require Pro or Team."
+          description: "How often slack_catch_me_up should run against this profile. This package runs nothing on a schedule; the value is stored with the profile."
         }
       },
       required: ["profile_name", "workflow_kind"]
@@ -590,13 +590,12 @@ export const TOOLS = [
       openWorldHint: false
     }
   },
-  // ============ Hosted-Only AI Tools (OSS = upgrade stubs) ============
-  // These tool definitions appear in every MCP client's tool list so users
-  // discover them. The OSS handlers return a structured upgrade message
-  // pointing at mcp.revasserlabs.com — the hosted worker actually runs them.
+  // ============ Unavailable AI Tools ============
+  // This package has no search index or model backend for these tools, so
+  // their handlers return an error. Their descriptions say so.
   {
     name: "slack_smart_search",
-    description: "Semantic + lexical hybrid search across your indexed Slack history. Returns ranked results with relevance scores, channel context, thread context, and matched terms. Hosted-only (requires Vectorize + Workers AI). Free tier ships 25 AI tool calls/month (shared across the hosted AI tools); upgrade to Pro $19/mo for unlimited at mcp.revasserlabs.com/pricing.",
+    description: "Semantic + lexical hybrid search across your indexed Slack history. Returns ranked results with relevance scores, channel context, thread context, and matched terms. Not available in this package: the call returns an error.",
     inputSchema: {
       type: "object",
       properties: {
@@ -621,7 +620,7 @@ export const TOOLS = [
       required: ["query"]
     },
     annotations: {
-      title: "Smart Search (hosted)",
+      title: "Smart Search (unavailable)",
       readOnlyHint: true,
       idempotentHint: true,
       openWorldHint: true
@@ -629,7 +628,7 @@ export const TOOLS = [
   },
   {
     name: "slack_catch_me_up",
-    description: "Run a structured catch-up against a saved workflow profile. Returns structured JSON per the profile's workflow_kind: support_inbox returns {open_threads, ack_lag, owner_gaps, escalations, next_actions}; incident_room returns {incident_summary, timeline, open_risks, owner_gaps, next_actions}; exec_brief returns {summary, decisions, risks, asks, action_items}; product_launch_watch returns {launch_signals, feedback_themes, blockers, metrics, next_actions}; custom returns {summary, highlights, open_questions, next_actions}. Hosted-only. Free tier ships 25 AI tool calls/month (shared across the hosted AI tools); Pro $19/mo unlocks unlimited.",
+    description: "Run a structured catch-up against a saved workflow profile. Returns structured JSON per the profile's workflow_kind: support_inbox returns {open_threads, ack_lag, owner_gaps, escalations, next_actions}; incident_room returns {incident_summary, timeline, open_risks, owner_gaps, next_actions}; exec_brief returns {summary, decisions, risks, asks, action_items}; product_launch_watch returns {launch_signals, feedback_themes, blockers, metrics, next_actions}; custom returns {summary, highlights, open_questions, next_actions}. Not available in this package: the call returns an error.",
     inputSchema: {
       type: "object",
       properties: {
@@ -645,7 +644,7 @@ export const TOOLS = [
       required: ["profile_name"]
     },
     annotations: {
-      title: "Catch Me Up (hosted)",
+      title: "Catch Me Up (unavailable)",
       readOnlyHint: true,
       idempotentHint: false,
       openWorldHint: true
@@ -653,7 +652,7 @@ export const TOOLS = [
   },
   {
     name: "slack_triage",
-    description: "Classify and route Slack threads against a workflow profile. Returns triage decisions per thread: priority (low|medium|high|urgent), suggested owner, escalation flag, time-sensitivity, and a routing recommendation. Hosted-only. Free tier ships 25 AI tool calls/month (shared across the hosted AI tools); Pro $19/mo unlocks unlimited.",
+    description: "Classify and route Slack threads against a workflow profile. Returns triage decisions per thread: priority (low|medium|high|urgent), suggested owner, escalation flag, time-sensitivity, and a routing recommendation. Not available in this package: the call returns an error.",
     inputSchema: {
       type: "object",
       properties: {
@@ -674,7 +673,7 @@ export const TOOLS = [
       required: ["profile_name"]
     },
     annotations: {
-      title: "Triage (hosted)",
+      title: "Triage (unavailable)",
       readOnlyHint: true,
       idempotentHint: false,
       openWorldHint: true

@@ -1,0 +1,128 @@
+/*
+ * config_toml_edit.h — Conservative TOML configuration editing helpers.
+ */
+#ifndef CBM_CONFIG_TOML_EDIT_H
+#define CBM_CONFIG_TOML_EDIT_H
+
+#include <stddef.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* Escape input for the contents of a TOML basic string. The surrounding
+ * double quotes are not written. Returns 0 on success and -1 on invalid input
+ * or insufficient output space. */
+int cbm_toml_escape_basic_string(const char *input, char *out, size_t out_size);
+
+/* Editors only rewrite missing paths or regular, single-link config files.
+ * POSIX symlinks and Windows reparse points fail closed. Existing POSIX
+ * owner/group/mode metadata is retained across the atomic replacement. The
+ * destination and synced temporary file are identity/byte revalidated
+ * immediately before publication. Portable platforms without a path-identity
+ * CAS retain a narrow interval between final verification and replacement.
+ *
+ * Insert or replace one managed, line-delimited block. block is the body
+ * between the two marker lines. Duplicate or unbalanced markers are rejected
+ * without changing the file. An existing span keeps what is not ours (#2228):
+ * keys and comments the block does not write stay in the tables it declares,
+ * with those tables' sub-tables; lines before the span's first table move
+ * above the block and any other table moves, byte for byte and in order, to
+ * just after it. Content whose ownership is ambiguous fails closed. */
+int cbm_toml_upsert_managed_block(const char *file_path, const char *begin_marker,
+                                  const char *end_marker, const char *block);
+/* Removes the whole span between the markers. */
+int cbm_toml_remove_managed_block(const char *file_path, const char *begin_marker,
+                                  const char *end_marker);
+/* Removes the markers and only the tables owned_tables declares (e.g. the
+ * block's header lines), with their keys and sub-tables; every other line of
+ * the span stays in place. Ambiguous ownership fails closed (#2228). */
+int cbm_toml_remove_managed_block_owned(const char *file_path, const char *begin_marker,
+                                        const char *end_marker, const char *owned_tables);
+
+/* Remove one pre-marker codebase-memory-mcp table only when it has the known
+ * historical schema: one owned command basename, optional empty args, optional
+ * env_vars naming only CBM_CACHE_DIR/CBM_RUNTIME_DIR, and no unknown
+ * assignments or descendant tables. A lone orphaned managed marker (left when
+ * a client rewrote the table and dropped its comments, #1720) is dropped in
+ * the same write. Returns 1 for a syntactically valid same-name foreign table
+ * and leaves the file byte-identical, 0 for removed or absent owned state, and
+ * -1 for malformed input or I/O failure. A supplied managed-marker pair makes
+ * this a successful no-op. */
+int cbm_toml_remove_legacy_table(const char *file_path, const char *table_name,
+                                 const char *begin_marker, const char *end_marker);
+
+/* Insert, replace, or remove the array table whose identity assignment equals
+ * identity_value. table_name and identity_key must be TOML bare identifiers.
+ * table_body excludes the [[table_name]] header. */
+int cbm_toml_upsert_named_array_table(const char *file_path, const char *table_name,
+                                      const char *identity_key, const char *identity_value,
+                                      const char *table_body);
+int cbm_toml_remove_named_array_table(const char *file_path, const char *table_name,
+                                      const char *identity_key, const char *identity_value);
+
+/* Ownership-aware variants for installer-managed array tables. canonical_body
+ * excludes the [[table_name]] header. A missing identity is created by upsert
+ * and is a successful no-op for removal. An existing identity is owned only
+ * when its complete direct table body and header equal the canonical rendering
+ * and it has no descendant tables. Same-name foreign state is preserved and
+ * reported distinctly from malformed input, unsafe filesystem state, I/O, or
+ * concurrency failures. */
+enum {
+    CBM_TOML_OWNED_EDIT_ERROR = -1,
+    CBM_TOML_OWNED_EDIT_OK = 0,
+    CBM_TOML_OWNED_EDIT_FOREIGN = 1
+};
+int cbm_toml_upsert_owned_named_array_table(const char *file_path, const char *table_name,
+                                            const char *identity_key, const char *identity_value,
+                                            const char *canonical_body);
+int cbm_toml_remove_owned_named_array_table(const char *file_path, const char *table_name,
+                                            const char *identity_key, const char *identity_value,
+                                            const char *canonical_body);
+typedef enum {
+    CBM_TOML_CODEX_HOOK_UPSERT = 0,
+    CBM_TOML_CODEX_HOOK_REMOVE = 1
+} cbm_toml_codex_hook_action_t;
+typedef enum {
+    CBM_TOML_CODEX_HOOK_FAILURE_NONE = 0,
+    CBM_TOML_CODEX_HOOK_FAILURE_INVALID_ARGUMENT,
+    CBM_TOML_CODEX_HOOK_FAILURE_COMMAND_RENDER,
+    CBM_TOML_CODEX_HOOK_FAILURE_CONFIG_READ,
+    CBM_TOML_CODEX_HOOK_FAILURE_UNSAFE_CONTENT,
+    CBM_TOML_CODEX_HOOK_FAILURE_MALFORMED_CONFIG,
+    CBM_TOML_CODEX_HOOK_FAILURE_AMBIGUOUS_OWNERSHIP,
+    CBM_TOML_CODEX_HOOK_FAILURE_CONFLICTING_HOOKS,
+    CBM_TOML_CODEX_HOOK_FAILURE_EDIT_BUILD,
+    CBM_TOML_CODEX_HOOK_FAILURE_CONFIG_WRITE
+} cbm_toml_codex_hook_failure_t;
+/* Returns a stable, content-free diagnostic name for a failure category. */
+const char *cbm_toml_codex_hook_failure_name(cbm_toml_codex_hook_failure_t failure);
+/* `failure` may be NULL. When non-NULL, it is reset to NONE on entry and remains
+ * NONE on success; failure categories never contain configuration content.
+ * `pretool_written` may be NULL. When non-NULL it is set to 1 after a successful
+ * upsert that wrote the PreToolUse Bash hook, and to 0 when a foreign inline
+ * hooks.PreToolUse made the upsert keep only the lifecycle pair. */
+int cbm_toml_reconcile_codex_hooks_detailed(const char *file_path, const char *begin_marker,
+                                            const char *end_marker, const char *command,
+                                            const char *command_windows,
+                                            cbm_toml_codex_hook_action_t action, int check_only,
+                                            cbm_toml_codex_hook_failure_t *failure,
+                                            int *pretool_written);
+int cbm_toml_reconcile_codex_hooks(const char *file_path, const char *begin_marker,
+                                   const char *end_marker, const char *command,
+                                   const char *command_windows, cbm_toml_codex_hook_action_t action,
+                                   int check_only);
+
+#ifdef CBM_TOML_EDIT_ENABLE_TEST_API
+typedef void (*cbm_toml_precommit_test_hook_t)(const char *file_path, void *context);
+void cbm_toml_set_precommit_hook_for_testing(cbm_toml_precommit_test_hook_t hook, void *context);
+/* Runs after the first stale-snapshot check and before final destination and
+ * temporary-file identity revalidation. */
+void cbm_toml_set_prepublish_hook_for_testing(cbm_toml_precommit_test_hook_t hook, void *context);
+#endif
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* CBM_CONFIG_TOML_EDIT_H */
