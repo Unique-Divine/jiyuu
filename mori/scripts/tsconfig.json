@@ -6,6 +6,6 @@
     "noUnusedParameters": true
   },
   "files": [],
-  "include": ["./grammars*.ts"],
+  "include": ["./grammars*.ts", "./release*.ts"],
   "references": []
 }

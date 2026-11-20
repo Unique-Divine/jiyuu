@@ -16,13 +16,10 @@ test SUITES=default_suites: grammars
     bash tests/test_language_count_contract.sh
     scripts/security-vendored.sh
 
-# Plain scripts/test.sh stops at its Step 0e contract, which reads excluded
-# files (IMPORT.md), so test-all lists the suites from the runner and runs
-# them in iteration mode.
-# Run every C suite (over an hour).
+# Run the full leg: contract checks, clean build, every C suite and the
+# production-binary checks (over an hour).
 test-all: grammars
-    scripts/test.sh --suites arena
-    scripts/test.sh --suites "$(build/c/test-runner --list-suites | tr '\n' ' ')"
+    scripts/test.sh
 
 # Test the grammar archive scripts.
 scripts-test:
