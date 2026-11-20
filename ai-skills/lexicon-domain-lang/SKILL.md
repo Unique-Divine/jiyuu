@@ -29,17 +29,25 @@ A `LEXICON.md` covers its directory and everything below it, like
 4. Two sibling lexicons may define the same word differently. Each meaning
    holds in its own directory. When discussing both, qualify the word with
    its context ("Mori's Route", "the gateway's route").
-5. If no `LEXICON.md` exists, carry on. Don't announce its absence.
+5. Outside Git, a project's boundary is not marked. Read the lexicons in the
+   ancestor directories that belong to the project and ignore any above it.
+6. If no `LEXICON.md` exists, carry on. Don't announce its absence.
 
 ```sh
 # Lexicons that apply to the current directory, outermost first.
-# Works in bash and zsh, outside Git, and through symlinks.
-d=$(pwd -P); root=$(git rev-parse --show-toplevel 2>/dev/null || echo "$d")
+# Climbs through Git submodules into the superproject. Outside Git it climbs
+# to $HOME or the filesystem root. Works in bash and zsh.
+d=$(pwd -P); out=
 while :; do
-  [ -f "$d/LEXICON.md" ] && echo "$d/LEXICON.md"
-  if [ "$d" = "$root" ] || [ "$d" = / ]; then break; fi
+  [ -f "$d/LEXICON.md" ] && out="$d/LEXICON.md
+$out"
+  if [ "$d" = "$(git -C "$d" rev-parse --show-toplevel 2>/dev/null)" ] &&
+     [ -z "$(git -C "$d" rev-parse --show-superproject-working-tree 2>/dev/null)" ]
+  then break; fi
+  if [ "$d" = / ] || [ "$d" = "$HOME" ]; then break; fi
   d=$(dirname "$d")
-done | tac
+done
+printf %s "$out"
 ```
 
 ## Using the Language

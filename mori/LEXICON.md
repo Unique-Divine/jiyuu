@@ -33,8 +33,9 @@ _Avoid_: reindex, build
 **Index depth**:
 How much an index run discovers and computes: `full`, `moderate`, or `fast`.
 _Avoid_: a bare "full"
-_See_: [pipeline.h](src/pipeline/pipeline.h): the three depths; the public
-`mode` parameter also accepts a link run
+_See_: [pipeline.h](src/pipeline/pipeline.h): the three depths.
+[CONFIGURATION.md](docs/CONFIGURATION.md): the public `mode` parameter, which
+also accepts a link run
 
 **Update path**:
 The way an index run reaches a current graph: no-op, closure repair, or full
@@ -52,7 +53,7 @@ _See_: [pipeline_incremental.c](src/pipeline/pipeline_incremental.c): how the
 subset is chosen
 
 **Closure**:
-The set of files a closure repair re-reads.
+The set of files a closure repair selects for reparsing.
 
 **Full rebuild**:
 The update path that re-reads every file in the index's scope and replaces
@@ -64,8 +65,9 @@ The policy of reusing the stored graph: a no-op when nothing relevant changed,
 closure repair when the change can be patched.
 
 **Decline**:
-Closure repair refusing a set of changes it cannot patch safely. A decline
-normally turns the index run into a full rebuild.
+Closure repair refusing a set of changes, because it cannot patch them safely
+or a full rebuild would cost less. A decline normally turns the index run into
+a full rebuild.
 _Avoid_: fall back, bail out
 
 **Decline rule**:
@@ -93,8 +95,8 @@ Route and its handler.
 _Avoid_: cross-file fact
 
 **Route**:
-A graph node for an entry point that other code calls, such as an HTTP path or
-a GraphQL field. Written with a capital.
+A graph node for an entry point that other code can call, such as an HTTP path
+or a GraphQL field. Written with a capital.
 
 **Field path**:
 A GraphQL operation kind (`Query`, `Mutation`, or `Subscription`) followed by
@@ -102,7 +104,7 @@ field names, such as `Query.perp.trades`. A client and a server share it as
 the key of a link.
 
 **Ambiguous Route**:
-A Route for which the indexer cannot pick one handler.
+A Route with more than one candidate handler and no single winner.
 
 ### Resolve Paths
 
@@ -125,10 +127,11 @@ and reads no source files.
 _Avoid_: relink, cross-repo index
 
 **Client project**:
-The project whose code makes a call.
+The project whose code uses another project's entry point, by calling it or
+sending to it.
 
 **Provider project**:
-The project whose code answers a call.
+The project whose code provides the entry point a client project uses.
 _Avoid_: server project
 
 **Client-side run**:
@@ -140,11 +143,11 @@ A link run started from the provider project.
 _Avoid_: server-side run
 
 **Forward link**:
-The edge stored in the client project that records a call to a provider
-project.
+The edge stored in the client project that records its use of a provider
+project's entry point.
 
 **Caller record**:
-The entry stored in the provider project that lists who calls one of its
+The entry stored in the provider project that lists whose code uses one of its
 entry points.
 _Avoid_: reverse edge
 

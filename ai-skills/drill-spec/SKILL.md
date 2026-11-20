@@ -15,10 +15,10 @@ cases. For each question, provide your recommended answer.
    question, use that answer instead of asking again.
 
 3. Apply agent skill `lexicon-domain-lang` throughout the drill. Use the terms
-   in the project's `LEXICON.md` files, challenge a word that conflicts with
-   them or covers two ideas, and record each term in the nearest `LEXICON.md`
-   when the user settles it. A drill often fails on words before it fails on
-   decisions.
+   in the project's `LEXICON.md` files and challenge a word that conflicts
+   with them or covers two ideas. When the user settles a term, record it as
+   that skill describes, including its rules on when to ask first. A drill
+   often fails on words before it fails on decisions.
 
 4. Record decisions as the discussion progresses. If the user is working from an
    existing spec, plan, issue, or design document, write resolved answers back
