@@ -18,27 +18,43 @@ Read [format.md](references/format.md) before creating or editing a
 A `LEXICON.md` covers its directory and everything below it, like
 `AGENTS.md`.
 
-1. Read every `LEXICON.md` from the repository root down to the directory you
-   are working in. A child adds to its parents; where it marks a term
-   `_Overrides_`, the child wins.
-2. When the task crosses into another context, follow the `Related` links at
+1. Start from the files the task touches, not only the directory the session
+   started in. For each, read every `LEXICON.md` from the repository root down
+   to that file's directory. A child adds to its ancestors; where it marks a
+   term `_Overrides_`, the child's meaning holds inside its directory.
+2. In a Git submodule, the superproject's lexicons above the submodule apply
+   too (`git rev-parse --show-superproject-working-tree`).
+3. When the task crosses into another context, follow the `Related` links at
    the top of the file and read those too.
-3. If no `LEXICON.md` exists, carry on. Don't announce its absence or create
-   an empty one.
+4. Two sibling lexicons may define the same word differently. Each meaning
+   holds in its own directory. When discussing both, qualify the word with
+   its context ("Mori's Route", "the gateway's route").
+5. If no `LEXICON.md` exists, carry on. Don't announce its absence.
 
 ```sh
 # Lexicons that apply to the current directory, outermost first.
-d=$PWD; root=$(git rev-parse --show-toplevel)
-while :; do [ -f "$d/LEXICON.md" ] && echo "$d/LEXICON.md"
-  [ "$d" = "$root" ] && break; d=$(dirname "$d"); done | tac
+# Works in bash and zsh, outside Git, and through symlinks.
+d=$(pwd -P); root=$(git rev-parse --show-toplevel 2>/dev/null || echo "$d")
+while :; do
+  [ -f "$d/LEXICON.md" ] && echo "$d/LEXICON.md"
+  if [ "$d" = "$root" ] || [ "$d" = / ]; then break; fi
+  d=$(dirname "$d")
+done | tac
 ```
 
 ## Using the Language
 
-- Name concepts with the lexicon's terms everywhere: replies, docs, commit
-  messages, issues, test names, and new identifiers in code.
-- Never use a word a lexicon lists under `_Avoid_` or `Never Say`. If the
-  user uses one, answer in the lexicon's term and say which word you mean.
+- In your own wording, name concepts with the lexicon's terms: replies, docs,
+  commit messages, issues, test names, and new identifiers in code.
+- Don't use a word a lexicon lists under `_Avoid_` or `Never Say` for the
+  concept it rules out. The rule is about that concept, not the letters:
+  quote text exactly as written, keep existing identifiers, API names, and
+  flags as they are, and use the word freely where it means something else.
+- If the user uses an avoided word, answer in the lexicon's term and say once
+  which word you mean. Raise it as a question only when the difference could
+  change the outcome. Don't correct wording repeatedly.
+- If the user asks for a specific word, use it, and say so if it conflicts
+  with a lexicon so they can decide whether to change the lexicon.
 - If you need a concept the lexicon lacks, either the project doesn't think in
   those terms (reconsider the wording) or there is a gap (raise it, below).
 
@@ -47,8 +63,8 @@ while :; do [ -f "$d/LEXICON.md" ] && echo "$d/LEXICON.md"
 Do this while designing, drilling a spec, or reviewing, whenever wording
 causes friction.
 
-- **Challenge a conflict.** "The lexicon defines *full rebuild* as re-reading
-  every file. You seem to mean index depth `full`. Which is it?"
+- **Challenge a conflict.** "The lexicon uses *full rebuild* for an update
+  path. You seem to mean index depth `full`. Which is it?"
 - **Split an overloaded word.** When one word covers two ideas, propose one
   precise term for each.
 - **Probe with scenarios.** Test a definition against concrete edge cases
@@ -59,13 +75,15 @@ causes friction.
 
 ## Recording a Term
 
-- Record a term the moment the user settles it. Don't batch terms for later.
-- Edit the `LEXICON.md` nearest the code the term belongs to. Create the file
-  only when there is a first term to write.
-- Ask before changing or removing an existing definition; other people and
-  agents rely on it.
-- Propose terms freely, but the user decides. Mark a term you coined as a
-  proposal when you ask.
+- A term is settled when the user agrees to it, not when you propose it.
+  Propose terms freely and mark the ones you coined.
+- Once the user settles a term, write it to the `LEXICON.md` nearest the code
+  it belongs to, then, not in a batch later. The user's agreement to the term
+  is the go-ahead for that entry.
+- Ask first before creating a new `LEXICON.md`, and before changing or
+  removing an existing definition; other people and agents rely on it.
+- In read-only work (a review, plan mode, an investigation), write nothing.
+  List the entries you would add.
 - After a rename, offer to update the docs and identifiers that used the old
   word.
 
@@ -84,7 +102,9 @@ causes friction.
 ## Attributions
 
 Adapted from the `domain-modeling` skill in
-[mattpocock/skills](https://github.com/mattpocock/skills) (MIT), which keeps
-a `GLOSSARY.md` per context. This skill renames the file, scopes it by
-directory, folds the context map into each file's links, and leaves decision
-records to each repository's own convention.
+[mattpocock/skills](https://github.com/mattpocock/skills), copyright (c) 2026
+Matt Pocock, used under the MIT License; the notice is in
+[THIRD_PARTY.md](THIRD_PARTY.md). That skill keeps a `GLOSSARY.md` per
+context. This one renames the file, scopes it by directory, folds the context
+map into each file's links, and leaves decision records to each repository's
+own convention.

@@ -33,7 +33,8 @@ _See_: [delivery states](docs/delivery.md)
 - **Title and description.** `# Lexicon: <Context Name>`, then one or two
   sentences on what this part of the project is.
 - **Links.** Up to three lines, each present only when it has a target:
-  - `Parent`: the lexicon one level up.
+  - `Parent`: the nearest lexicon in an ancestor directory, however many
+    levels up.
   - `Children`: lexicons in subdirectories.
   - `Related`: lexicons of other contexts, each with the shared term and one
     line on how the two contexts relate.
@@ -65,7 +66,7 @@ _See_: [delivery states](docs/delivery.md)
 ## Scope and Links
 
 - A `LEXICON.md` applies to its directory and below. A child inherits every
-  parent term and repeats none of them.
+  ancestor term and repeats none, except a term it marks `_Overrides_`.
 - The same word may mean different things in two contexts. State the
   difference in `Related` on both sides.
 - Inside a repository, link with relative paths. Across repositories, link
@@ -77,4 +78,6 @@ _See_: [delivery states](docs/delivery.md)
 - One at the repository root when the project has one shared language.
 - One in a subdirectory when that part has words of its own, such as a tool
   in a monorepo or a module with a distinct domain.
-- Create each lazily, when its first term is settled.
+- Create each lazily, when its first term is settled. One exception: a file
+  may exist with links and no terms when it is the parent that ties child
+  lexicons together.
