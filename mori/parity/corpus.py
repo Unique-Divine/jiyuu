@@ -209,3 +209,65 @@ def pin(manifest: str, ignore_dir: str | None, home: str,
     json.dump(doc, f, indent=2)
     f.write("\n")
   return doc
+
+
+def submodule_paths(root: str) -> list[str]:
+  """Initialized submodules of a checkout, relative to it."""
+  if not os.path.isfile(os.path.join(root, ".gitmodules")):
+    return []
+  out = git(root, "submodule", "status")
+  paths = []
+  for line in out.splitlines():
+    parts = line[1:].split()
+    if line[:1] != "-" and len(parts) >= 2:
+      paths.append(parts[1])
+  return paths
+
+
+def checkout_files(root: str) -> list[str]:
+  """Files an index of the checkout can see: tracked plus untracked files
+  that no ignore rule hides, recursing into initialized submodules.
+  Nested repos that are not submodules are skipped."""
+  out = git(root, "ls-files", "-z", "--cached", "--others",
+            "--exclude-standard")
+  subs = submodule_paths(root)
+  files = []
+  for rel in sorted(set(filter(None, out.split("\0")))):
+    if rel in subs or rel.rstrip("/") in subs:
+      continue
+    p = os.path.join(root, rel)
+    if os.path.isdir(p) and not os.path.islink(p):
+      continue  # an untracked nested repo shows up as a directory
+    files.append(rel)
+  for sub in subs:
+    files.extend(os.path.join(sub, f)
+                 for f in checkout_files(os.path.join(root, sub)))
+  return files
+
+
+def snapshot(repo: Repo, home: str, dest: str) -> int:
+  """Copy a checkout's indexable content to dest (mtimes kept) with the
+  pinned .cbmignore, so a repo that other work keeps editing (boku, gh)
+  holds still while both sides index it. Returns the file count."""
+  root = repo.root(home)
+  if is_git(root):
+    files = checkout_files(root)
+  else:
+    files = []
+    for dirpath, _, names in os.walk(root):
+      files.extend(os.path.relpath(os.path.join(dirpath, n), root)
+                   for n in names)
+  os.makedirs(dest, mode=0o700, exist_ok=True)
+  n = 0
+  for rel in files:
+    src = os.path.join(root, rel)
+    dst = os.path.join(dest, rel)
+    if not os.path.lexists(src):
+      continue  # deleted from the working tree but still tracked
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    shutil.copy2(src, dst, follow_symlinks=False)
+    n += 1
+  copy = repo.cbmignore_path()
+  if copy:
+    shutil.copyfile(copy, os.path.join(dest, ".cbmignore"))
+  return n

@@ -134,16 +134,22 @@ class ReplayTest(unittest.TestCase):
     b = n.output(0, "total: 2\nelapsed_ms: 9\nnew row\nindexed_at: t1\n"
                  "row a\n", "")
     rep = DiffReport()
-    calls.diff_outputs(rep, "index_status", "#0", a, b)
+    calls.diff_outputs(rep, "index_status", "call:x", "#0", a, b)
     self.assertEqual(sorted(d.key for d in rep.diffs()), [
       "index_status:$.out{*}", "index_status:$.out{indexed_at}"])
+
+  def test_call_id_ignores_key_order(self) -> None:
+    self.assertEqual(calls.call_id("q", {"a": 1, "b": 2}),
+                     calls.call_id("q", {"b": 2, "a": 1}))
+    self.assertNotEqual(calls.call_id("q", {"a": 1}),
+                        calls.call_id("q", {"a": 2}))
 
   def test_same_output_has_no_diff(self) -> None:
     n = calls.OutputNormalizer({}, {}, {})
     a = n.output(1, "error: took 3 ms", "warn 10ms")
     b = n.output(1, "error: took 7 ms", "warn 12ms")
     rep = DiffReport()
-    self.assertEqual(calls.diff_outputs(rep, "t", "#0", a, b), 0)
+    self.assertEqual(calls.diff_outputs(rep, "t", "call:x", "#0", a, b), 0)
 
 
 if __name__ == "__main__":

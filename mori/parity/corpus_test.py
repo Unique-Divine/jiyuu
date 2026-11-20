@@ -102,6 +102,22 @@ class CorpusTest(unittest.TestCase):
     write(os.path.join(self.repo, "a.py"), "x = 33\n")
     self.assertNotEqual(f1, corpus.fingerprint(self.repo))
 
+  def test_snapshot_copies_indexable_files(self) -> None:
+    write(os.path.join(self.repo, ".gitignore"), "build/\n")
+    write(os.path.join(self.repo, "build", "out.bin"), "x")
+    write(os.path.join(self.repo, "new.py"), "z = 1\n")
+    dest = os.path.join(self.home, "..", "snap", "repo")
+    n = corpus.snapshot(self.repos["repo"], self.home, dest)
+    got = sorted(os.path.relpath(os.path.join(d, f), dest)
+                 for d, _, fs in os.walk(dest) for f in fs)
+    self.assertEqual(got, [".cbmignore", ".gitignore", "a.py", "new.py"])
+    self.assertEqual(n, 3)
+    with open(os.path.join(dest, ".cbmignore")) as f:
+      self.assertEqual(f.read(), "*.json\n")
+    self.assertEqual(
+      os.stat(os.path.join(dest, "a.py")).st_mtime_ns,
+      os.stat(os.path.join(self.repo, "a.py")).st_mtime_ns)
+
 
 if __name__ == "__main__":
   unittest.main()

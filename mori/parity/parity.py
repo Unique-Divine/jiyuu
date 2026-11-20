@@ -55,6 +55,7 @@ MARKER = ".mori-parity"
 ALL_LAYERS = LAYERS + ("L4",)
 INDEX_TIMEOUT_S = 3600
 CALL_TIMEOUT_S = 300
+RETRY_PAUSE_S = 10
 
 
 def log(msg: str) -> None:
@@ -172,25 +173,40 @@ def index_valid(side: Side, root: str, retries: int) -> dict[str, Any]:
   return ix
 
 
-def run_index(side: Side, root: str) -> dict[str, Any]:
-  """Full index of one repo; retries a run that reports
-  `aborted_previous_preserved` (a leftover job from an earlier call)."""
-  for attempt in range(1, 4):
+def parse_index_output(out: str, err: str) -> dict[str, Any]:
+  """The index result JSON, from stdout or, on failure, from stderr."""
+  for text in (out, err):
+    for line in [text] + text.splitlines():
+      try:
+        res = json.loads(line)
+      except ValueError:
+        continue
+      if isinstance(res, dict) and "status" in res:
+        return res
+  return {"raw": out[-400:]}
+
+
+def run_index(side: Side, root: str, attempts: int = 3) -> dict[str, Any]:
+  """Full index of one repo. Retries, after a pause, a run that exits
+  non-zero or reports `aborted_previous_preserved`: under load a temporary
+  daemon can miss its 30 s rendezvous, and a checkout that changed while
+  indexing aborts the run."""
+  for attempt in range(1, attempts + 1):
     t0 = time.monotonic()
     code, out, err = side.cli("index_repository", {"repo_path": root},
                               INDEX_TIMEOUT_S)
     wall = time.monotonic() - t0
-    try:
-      res = json.loads(out)
-    except ValueError:
-      res = {"raw": out[-400:]}
+    res = parse_index_output(out, err)
     status = res.get("status", "?")
-    if status == "aborted_previous_preserved" and attempt < 3:
+    failed = code != 0 or status != "indexed"
+    if failed and attempt < attempts:
+      log(f"    attempt {attempt}: exit {code}, status {status}; retrying")
+      time.sleep(RETRY_PAUSE_S)
       continue
     return {"exit": code, "status": status, "wall_s": round(wall, 2),
-            "project": res.get("project"), "nodes": res.get("nodes"),
-            "edges": res.get("edges"), "stderr": err[-400:],
-            "raw": None if "status" in res else res.get("raw")}
+            "attempts": attempt, "project": res.get("project"),
+            "nodes": res.get("nodes"), "edges": res.get("edges"),
+            "stderr": err[-400:], "raw": res.get("raw")}
   raise RuntimeError("unreachable")
 
 
@@ -296,7 +312,8 @@ def replay(sides: list[Side], call_list: list[dict[str, Any]],
       stats["errors_a"] += 1
     rep = rep_by_repo.setdefault(repo, DiffReport())
     where = f"#{n} {c['tool']} {json.dumps(c['args'], sort_keys=True)}"
-    if calls_mod.diff_outputs(rep, c["tool"], where[:300], outs[0],
+    group = calls_mod.call_id(c["tool"], c["args"])
+    if calls_mod.diff_outputs(rep, c["tool"], group, where[:300], outs[0],
                               outs[1]):
       stats["differing"] += 1
   pool.shutdown()
@@ -443,9 +460,27 @@ def cmd_run(a: argparse.Namespace) -> int:
   if bad:
     log("corpus does not match its pins:\n" + "\n".join(bad))
     return 2
+  snap = set(a.snapshot.split(",")) if a.snapshot else set()
+  if "all" in snap:
+    snap = {r.dir for r in repos}
+  roots = []
+  if snap:
+    base = a.work + "-snap"
+    fresh_dir(base, marker=True)
+  for r in repos:
+    if r.dir in snap:
+      dest = os.path.join(base, r.dir)
+      t0 = time.monotonic()
+      n = corpus.snapshot(r, a.home, dest)
+      log(f"snapshot {r.dir}: {n} files in "
+          f"{time.monotonic() - t0:.1f} s -> {dest}")
+      roots.append((r.dir, dest))
+    else:
+      roots.append((r.dir, r.root(a.home)))
   call_list = None if a.skip_l4 else calls_mod.load_calls(a.calls)
-  return run([(r.dir, r.root(a.home)) for r in repos], call_list, a,
-             {"mode": "corpus", "allow_dirty": a.allow_dirty})
+  return run(roots, call_list, a,
+             {"mode": "corpus", "allow_dirty": a.allow_dirty,
+              "snapshot": sorted(snap)})
 
 
 def cmd_ci(a: argparse.Namespace) -> int:
@@ -516,6 +551,10 @@ def main(argv: list[str]) -> int:
       p.add_argument("--home", default=home)
       p.add_argument("--repos", help="comma-separated corpus dirs")
       p.add_argument("--allow-dirty", action="store_true")
+      p.add_argument("--snapshot", default="",
+                     help="comma-separated dirs (or 'all') to index from a "
+                     "frozen copy under <work>-snap; for checkouts that "
+                     "other work edits during the run")
   p = sub.add_parser("pin")
   p.add_argument("--manifest", default=os.path.join(
     home, "boku", "dotfiles", "cbm", "repos.json"))

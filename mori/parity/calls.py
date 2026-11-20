@@ -16,6 +16,7 @@ calls are counted and dropped.
 from __future__ import annotations
 
 import difflib
+import hashlib
 import json
 import os
 import re
@@ -390,12 +391,19 @@ def diff_json(a: Any, b: Any, path: str = "$"
     yield path, a, b
 
 
-def diff_outputs(rep: DiffReport, tool: str, where: str,
+def call_id(tool: str, args: dict[str, Any]) -> str:
+  """Stable id of a templated call, the L4 group, so the allow-list can
+  accept one nondeterministic call (an unordered LIMIT) by itself."""
+  digest = hashlib.sha256(canonical(tool, args).encode()).hexdigest()
+  return "call:" + digest[:12]
+
+
+def diff_outputs(rep: DiffReport, tool: str, group: str, where: str,
                  a: dict[str, Any], b: dict[str, Any]) -> int:
   """Add L4 differences for one call; returns how many paths differ."""
   n = 0
   for path, va, vb in diff_json(a, b):
-    rep.add("L4", generalize_key(f"{tool}:{path}"), "-", va, vb,
+    rep.add("L4", generalize_key(f"{tool}:{path}"), group, va, vb,
             f"{where} {path}")
     n += 1
   return n
