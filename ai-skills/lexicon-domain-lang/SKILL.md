@@ -1,6 +1,6 @@
 ---
 name: lexicon-domain-lang
-description: Keep a project's domain language consistent with LEXICON.md files (the lexicon skill). Use whenever you write about a project or name one of its concepts, and when the user asks what to call something, debates terminology, uses a vague or overloaded word, or mentions a lexicon, glossary, domain language, or ubiquitous language. Covers reading the lexicons that apply to a path, using their terms, challenging conflicting words, and recording a term when it is settled.
+description: The lexicon skill. Keep a project's domain language in LEXICON.md files. Use when the user asks for the lexicon skill, asks what to call something or which word is right, wants terminology defined or cleaned up, or mentions a lexicon, glossary, domain language, ubiquitous language, or LEXICON.md. Covers which lexicons apply to a path, using their terms, challenging conflicting words, and recording a term once it is settled.
 ---
 
 # Lexicon: Domain Language
