@@ -174,9 +174,22 @@ fn run_make(
         .env_remove("MAKEFLAGS")
         .env_remove("MFLAGS")
         .env_remove("MAKELEVEL");
+    // Cargo locks each profile separately, so `cargo build` and
+    // `cargo build --release` (or clippy beside test) can reach this point
+    // together. They share BUILD_DIR; one make at a time keeps them from
+    // racing on the same objects and archive.
+    let build_dir = mori_dir.join(build_dir_arg);
+    std::fs::create_dir_all(&build_dir)
+        .map_err(|e| format!("could not create {}: {e}", build_dir.display()))?;
+    let lock_path = build_dir.join(".libmori-c.lock");
+    let lock = std::fs::File::create(&lock_path)
+        .map_err(|e| format!("could not open {}: {e}", lock_path.display()))?;
+    lock.lock()
+        .map_err(|e| format!("could not lock {}: {e}", lock_path.display()))?;
     let output = cmd
         .output()
         .map_err(|e| format!("could not run make in mori/: {e}"))?;
+    drop(lock);
     // Stdout of a build script is cargo's channel; keep make's output on
     // stderr (shown with `cargo build -vv` or on failure).
     eprint!("{}", String::from_utf8_lossy(&output.stdout));
