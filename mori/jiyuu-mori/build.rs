@@ -17,16 +17,28 @@
 //! - `MORI_MAKE_JOBS`: make parallelism (default 4).
 //! - `MORI_C_REFERENCE=1`: also build `codebase-memory-mcp` in the same
 //!   `BUILD_DIR`, for the comparison test in `tests/linked.rs`.
-//! - `CC`, `CXX`, `CFLAGS_EXTRA`, `TEST_SEAMS`, `STATIC`: passed to make as
+//! - `CC`, `CXX`, `CFLAGS_EXTRA`, `TEST_SEAMS`: passed to make as
 //!   `scripts/build.sh` would.
+//!
+//! Build flavours that need their own link flags (`MEMWASTE*`,
+//! `TEST_COVERAGE`) are pinned off on the make command line: those flags
+//! live in the Makefile's `LDFLAGS`, which never reach the Rust link.
 
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Make variables read from the environment that change the C objects.
-const MAKE_ENV_VARS: &[&str] =
-    &["CC", "CXX", "CFLAGS_EXTRA", "TEST_SEAMS", "STATIC"];
+const MAKE_ENV_VARS: &[&str] = &["CC", "CXX", "CFLAGS_EXTRA", "TEST_SEAMS"];
+
+/// Make variables pinned on the command line, which overrides the
+/// environment: each one also needs link flags the archive cannot carry.
+const PINNED_MAKE_VARS: &[&str] = &[
+    "MEMWASTE=0",
+    "MEMWASTE_ACCESS=0",
+    "MEMWASTE_PROFILE=0",
+    "TEST_COVERAGE=0",
+];
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
@@ -170,6 +182,7 @@ fn run_make(
         .arg(format!("BUILD_DIR={build_dir_arg}"))
         .arg(format!("CC={cc}"))
         .arg(format!("CXX={cxx}"))
+        .args(PINNED_MAKE_VARS)
         // Cargo's jobserver and an outer make must not change -j.
         .env_remove("MAKEFLAGS")
         .env_remove("MFLAGS")
