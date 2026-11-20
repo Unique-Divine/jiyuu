@@ -228,6 +228,17 @@ export function publish(
       "--clobber",
       ...files,
     ])
+    // Rebuilt archives get new SHA-256s; keep the notes in step with them.
+    runChecked(run, [
+      "gh",
+      "release",
+      "edit",
+      tag,
+      "--repo",
+      repo,
+      "--notes-file",
+      join(dir, "release-notes.md"),
+    ])
     return
   }
   runChecked(run, [
@@ -240,6 +251,7 @@ export function publish(
     "--verify-tag",
     "--draft",
     "--latest=false",
+    ...(version.includes("-") ? ["--prerelease"] : []),
     "--title",
     `Mori ${version}`,
     "--notes-file",

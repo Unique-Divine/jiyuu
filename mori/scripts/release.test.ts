@@ -143,7 +143,23 @@ describe("publish", () => {
     publish("/rel", "mori/v0.13.0", "o/r", run)
     const upload = calls.find((argv) => argv[2] === "upload")!
     expect(upload).toContain("--clobber")
+    const edit = calls.find((argv) => argv[2] === "edit")!
+    expect(edit).toContain("--notes-file")
+    expect(edit).toContain("/rel/release-notes.md")
     expect(calls.some((argv) => argv[2] === "create")).toBe(false)
+  })
+
+  test("marks pre-release versions as prereleases", () => {
+    const rc = fakeGh([])
+    publish("/rel", "mori/v0.13.0-rc.1", "o/r", rc.run)
+    expect(rc.calls.find((argv) => argv[2] === "create")).toContain(
+      "--prerelease",
+    )
+    const stable = fakeGh([])
+    publish("/rel", "mori/v0.13.0", "o/r", stable.run)
+    expect(stable.calls.find((argv) => argv[2] === "create")).not.toContain(
+      "--prerelease",
+    )
   })
 
   test("refuses a published release", () => {
