@@ -496,7 +496,7 @@ jobs:
           - arch: arm64
             runner: ubuntu-24.04-arm
     env:
-      CCACHE_MAXSIZE: 4G
+      CCACHE_MAXSIZE: 1G
     steps:
       - name: Unaffected project
         if: needs.changes.outputs.mori != 'true'
@@ -513,7 +513,7 @@ jobs:
             build-essential ccache jq zlib1g-dev zstd
       - name: Install bun
         if: needs.changes.outputs.mori == 'true'
-        uses: oven-sh/setup-bun@v1
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.4.3
       - name: Install just
@@ -543,6 +543,9 @@ jobs:
       - name: Fetch grammars
         if: needs.changes.outputs.mori == 'true'
         run: just --justfile mori/justfile grammars
+      - name: Reset compiler cache statistics
+        if: needs.changes.outputs.mori == 'true'
+        run: ccache --zero-stats
       - name: Build production binary
         if: needs.changes.outputs.mori == 'true'
         run: just --justfile mori/justfile build
