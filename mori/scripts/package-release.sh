@@ -5,6 +5,12 @@
 # boundary. This script accepts one already-final executable plus its expected
 # SHA-256 and only copies that byte sequence into the release containers. A
 # hash mismatch at any boundary is fatal.
+#
+# Mori: archives carry no installer. Upstream's install.sh and install.ps1
+# downloaded DeusData's releases and were removed (IMPORT.md); Mori installs
+# from its GitHub release assets, for example through mise. Mori's release
+# workflow (.github/workflows/mori-release.yml at the Jiyuu root) passes
+# --archive-name to get versioned, mise-friendly names.
 
 set -euo pipefail
 
@@ -25,6 +31,8 @@ Required:
 Options:
   --third-party-notices FILE   pre-generated notices file (otherwise generated)
   --out-dir DIR                output directory (default: repository root)
+  --archive-name NAME          archive basename without extension (default:
+                               codebase-memory-mcp-<goos>-<goarch>)
 
 Environment:
   VERSION                      MCPB manifest version (v-prefix accepted;
@@ -35,9 +43,9 @@ Targets are the eight existing release products:
   darwin/{amd64,arm64}
   windows/{amd64,arm64}
 
-Archive contents — one executable, no sidecars:
-  unix:    codebase-memory-mcp LICENSE install.sh THIRD_PARTY_NOTICES.md (.tar.gz)
-  windows: codebase-memory-mcp.exe LICENSE install.ps1 THIRD_PARTY_NOTICES.md (.zip)
+Archive contents — one executable, no sidecars, no installer:
+  unix:    codebase-memory-mcp LICENSE NOTICE THIRD_PARTY_NOTICES.md (.tar.gz)
+  windows: codebase-memory-mcp.exe LICENSE NOTICE THIRD_PARTY_NOTICES.md (.zip)
 
 MCPB bundle (.mcpb): every darwin/windows target and static linux target.
 The executable member in every produced container is verified against
@@ -51,6 +59,7 @@ SELECTED_BINARY=""
 EXPECTED_SHA256=""
 THIRD_PARTY_NOTICES=""
 OUT_DIR="$ROOT"
+ARCHIVE_NAME=""
 expect_value=""
 for arg in "$@"; do
     case "$expect_value" in
@@ -58,6 +67,7 @@ for arg in "$@"; do
     expected-sha256) EXPECTED_SHA256="$arg"; expect_value=""; continue ;;
     third-party-notices) THIRD_PARTY_NOTICES="$arg"; expect_value=""; continue ;;
     out-dir) OUT_DIR="$arg"; expect_value=""; continue ;;
+    archive-name) ARCHIVE_NAME="$arg"; expect_value=""; continue ;;
     esac
     case "$arg" in
     -h | --help) usage; exit 0 ;;
@@ -69,6 +79,8 @@ for arg in "$@"; do
     --third-party-notices=*) THIRD_PARTY_NOTICES="${arg#--third-party-notices=}" ;;
     --out-dir) expect_value="out-dir" ;;
     --out-dir=*) OUT_DIR="${arg#--out-dir=}" ;;
+    --archive-name) expect_value="archive-name" ;;
+    --archive-name=*) ARCHIVE_NAME="${arg#--archive-name=}" ;;
     -*)
         echo "package-release: unknown option '$arg'. Please consult --help." >&2
         exit 2
@@ -129,7 +141,11 @@ if [ -n "$THIRD_PARTY_NOTICES" ]; then
     THIRD_PARTY_NOTICES="$(cd "$(dirname "$THIRD_PARTY_NOTICES")" && pwd -P)/$(basename "$THIRD_PARTY_NOTICES")"
 fi
 OUT_DIR="$(mkdir -p "$OUT_DIR" && cd "$OUT_DIR" && pwd -P)"
-NAME="codebase-memory-mcp-${GOOS}-${GOARCH}"
+NAME="${ARCHIVE_NAME:-codebase-memory-mcp-${GOOS}-${GOARCH}}"
+if ! [[ "$NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+    echo "package-release: --archive-name must be a plain file name: $NAME" >&2
+    exit 2
+fi
 
 sha256_file() {
     python3 - "$1" <<'PY'
@@ -190,11 +206,9 @@ assert_expected_hash "$SELECTED_BINARY" "selected binary" || exit 2
 
 if [ "$GOOS" = "windows" ]; then
     STAGED_BINARY_NAME="codebase-memory-mcp.exe"
-    INSTALLER="install.ps1"
     ARCHIVE_OUT="$OUT_DIR/$NAME.zip"
 else
     STAGED_BINARY_NAME="codebase-memory-mcp"
-    INSTALLER="install.sh"
     ARCHIVE_OUT="$OUT_DIR/$NAME.tar.gz"
 fi
 MCPB_OUT="$OUT_DIR/$NAME.mcpb"
@@ -239,7 +253,7 @@ bash scripts/ci/check-binary-composition.sh "$STAGED_BINARY" || exit 2
 assert_expected_hash "$STAGED_BINARY" "composition-gated binary" || exit 2
 assert_expected_hash "$SELECTED_BINARY" "selected binary after staging" || exit 2
 
-cp LICENSE "$INSTALLER" "$PACK_DIR/"
+cp LICENSE NOTICE "$PACK_DIR/"
 if [ -n "$THIRD_PARTY_NOTICES" ]; then
     cp "$THIRD_PARTY_NOTICES" "$PACK_DIR/THIRD_PARTY_NOTICES.md"
 else
@@ -251,7 +265,7 @@ if [ "$GOOS" = "windows" ]; then
     (
         cd "$PACK_DIR"
         zip -q -X "$ARCHIVE_TMP" \
-            codebase-memory-mcp.exe LICENSE install.ps1 THIRD_PARTY_NOTICES.md
+            codebase-memory-mcp.exe LICENSE NOTICE THIRD_PARTY_NOTICES.md
     )
     mkdir "$VERIFY_DIR/archive"
     extract_zip_member "$ARCHIVE_TMP" "$STAGED_BINARY_NAME" \
@@ -260,7 +274,7 @@ else
     # BSD tar otherwise materializes macOS extended attributes as hidden
     # AppleDouble `._*` members, violating the exact four-file inventory.
     COPYFILE_DISABLE=1 tar -czf "$ARCHIVE_TMP" -C "$PACK_DIR" \
-        codebase-memory-mcp LICENSE install.sh THIRD_PARTY_NOTICES.md
+        codebase-memory-mcp LICENSE NOTICE THIRD_PARTY_NOTICES.md
     mkdir "$VERIFY_DIR/archive"
     tar -xzf "$ARCHIVE_TMP" -C "$VERIFY_DIR/archive" "$STAGED_BINARY_NAME"
 fi

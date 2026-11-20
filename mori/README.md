@@ -123,6 +123,55 @@ When running the binary against a real repository during development, point
 `CBM_CACHE_DIR` and `CBM_RUNTIME_DIR` at scratch directories to keep the
 index away from `~/.cache/codebase-memory-mcp`.
 
+## Release
+
+File [VERSION](VERSION) holds Mori's version. Workflow
+[mori-release.yml](../.github/workflows/mori-release.yml) passes it to
+`scripts/build.sh --version`, which stamps it into the binary, so
+`codebase-memory-mcp --version` prints it. Local builds without `--version`
+print `dev`.
+
+To release, bump `VERSION` in a PR, merge it, then tag the merged commit:
+
+```bash
+git tag -a mori/v0.13.0 -m "Mori 0.13.0"
+git push origin mori/v0.13.0
+```
+
+The workflow fails unless the tag equals `mori/v` plus `VERSION`. It builds
+static binaries (`STATIC=1`) on Linux x64 and arm64, smoke-tests `--version`
+and a tiny index, and packages each with
+[scripts/package-release.sh](scripts/package-release.sh) as
+`codebase-memory-mcp-<version>-linux-<x64|arm64>.tar.gz`. Each archive holds
+the binary, `LICENSE`, `NOTICE` and `THIRD_PARTY_NOTICES.md` (generated from
+`THIRD_PARTY.md` and the vendored licenses). There is no installer; install
+from the release assets, for example with mise's `github:` backend, which
+picks the archive by the `linux-x64` or `linux-arm64` in its name:
+
+```toml
+[tools."github:Unique-Divine/jiyuu"]
+version = "0.13.0"
+version_prefix = "mori/v"
+```
+
+The release job attests build provenance for the archives and
+`checksums.txt`, then creates a draft release with `checksums.txt` and
+`release-metadata.json`. Publish it by hand, keeping Jiyuu's latest release
+unchanged:
+
+```bash
+gh release edit mori/v0.13.0 --draft=false --latest=false
+```
+
+Rerunning the workflow refills a draft but never changes a published
+release.
+
+To build without releasing, run the workflow by hand on any branch; the
+`dry_run` input defaults to true and uploads the archives and checksums as
+workflow artifacts. [scripts/release.ts](scripts/release.ts) holds the tag
+check, asset names, checksums and the draft step; test it with
+`bun test scripts/release.test.ts`.
+
 ## Attributions
 
 - [DeusData/codebase-memory-mcp](https://github.com/DeusData/codebase-memory-mcp),
