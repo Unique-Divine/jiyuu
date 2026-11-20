@@ -50,8 +50,12 @@ file says was made because the path was missing.
 - Removed upstream distribution files Mori does not use: `flake.nix`,
   `flake.lock`, `server.json`, `glama.json`, `install.sh` and `install.ps1`
   (see [Excluded Paths](#excluded-paths)). Nothing in the build or the C test
-  suites reads them. Scripts and contract tests that do are left unchanged
-  and listed under [Known Test Gaps](#known-test-gaps).
+  suites reads them. Release and setup scripts that do are left unchanged.
+- Removed 13 upstream contract scripts that check DeusData's release
+  machinery, their steps in `scripts/test.sh`, and the fixture
+  `tests/fixtures/select-lanes/` (see
+  [Excluded Contract Checks](#excluded-contract-checks)). `scripts/test.sh`
+  gains a comment above Step 0 that points here.
 - Added by Jiyuu: `README.md`, `IMPORT.md`, `NOTICE`, `justfile`,
   `grammars.lock.json`, and the Bun scripts `scripts/grammars-fetch.ts`,
   `scripts/grammars-lib.ts`, `scripts/grammars-pack.ts`,
@@ -121,8 +125,8 @@ no file this import modifies.
 - Upstream role: DeusData's GitHub Actions (25 workflows: PR lanes, build,
   test, lint, security, smoke, soak, CodeQL, Scorecard, release, Pages),
   issue and PR templates, labeler and Dependabot config, CODEOWNERS.
-- Effect here: contract tests that read the workflows fail; see
-  [Known Test Gaps](#known-test-gaps).
+- Effect here: the contract checks that read the workflows are removed; see
+  [Excluded Contract Checks](#excluded-contract-checks).
 - Restore: `git archive ... .github`. Workflows only run from the repository
   root, so they would need to move to Jiyuu's `.github/workflows/` and be
   rewritten for the `mori/` working directory.
@@ -211,33 +215,193 @@ no file this import modifies.
   installers or a release layout without them. The binary's `update` command
   already handles an archive with no installer beside the binary.
 
-## Known Test Gaps
+## Excluded Contract Checks
 
-`scripts/test.sh` with no arguments, and `--contracts-only`, stop at Step 0e
-because `tests/test_windows_bundle_contract.sh` reads excluded files
-(`install.ps1`, `pkg/npm/install.js`). With `set -e`, no later contract step,
-suite or prod-binary guard runs. Run every C suite with `just test-all`
-inside `mori/`.
+Step 0 of `scripts/test.sh` ran 45 static contract scripts. Thirteen of them
+check DeusData's release machinery and read paths this import excludes, so
+they failed, and with `set -e` the first one (Step 0e) stopped every later
+step and suite. They are removed with their steps; the step letters in
+`scripts/test.sh` skip where they were. Nine failed from the start of the
+import; four (Steps 0o, 0p, 0x2 and 0y3) failed once `install.sh` and
+`server.json` were removed.
 
-Run one by one, 13 of the 45 Step 0 contract scripts fail on this tree, each
-because it reads a path excluded above. Whether to remove, rewrite or guard
-them is pending a decision; they are unchanged.
+Each entry gives the upstream file, its Step 0 label, what it guarded, and
+the paths it reads. To restore one, run its restore command from the Jiyuu
+root, restore the paths it reads (see [Excluded Paths](#excluded-paths)),
+then add its two lines back to Step 0 of `scripts/test.sh`, copied from the
+[upstream `scripts/test.sh`](https://github.com/DeusData/codebase-memory-mcp/blob/cdfdf26483fa56f4f7d9d85e7c4c3924133b458b/scripts/test.sh).
 
-| Contract | Missing input |
-| --- | --- |
-| `tests/test_codeql_retrace.sh` | `.github/codeql/codeql-config.yml` |
-| `tests/test_lane_wiring_contract.sh` | `.github/workflows/dry-run.yml` |
-| `tests/test_release_gate_chain_contract.sh` | `.github/workflows/release.yml` |
-| `tests/test_security_gate_fail_closed.sh` | `.github/workflows/codeql.yml` |
-| `tests/test_select_lanes.sh` | `.github/codeql/codeql-config.yml`, read by `scripts/ci/select-lanes.sh` |
-| `tests/test_smoke_fixture_contract.sh` | `.github/workflows/pr.yml`, `install.sh` |
-| `tests/test_venue_parity_contract.sh` | `.github/workflows/release.yml` |
-| `tests/test_version_metadata_contract.sh` | `server.json`, `pkg/npm/package.json`, `pkg/pypi/pyproject.toml` |
-| `tests/test_windows_bundle_contract.sh` | `install.ps1`, `pkg/npm/install.js` |
-| `tests/test_install_android_guard.sh` | `install.sh` |
-| `tests/test_mcpb_bundle_contract.sh` | `install.sh` (through `scripts/package-release.sh`) |
-| `tests/test_mcpb_registry_entries_contract.sh` | `server.json` |
-| `tests/test_setup_scripts_contract.sh` | `install.sh` |
+- [`tests/test_windows_bundle_contract.sh`](https://github.com/DeusData/codebase-memory-mcp/blob/cdfdf26483fa56f4f7d9d85e7c4c3924133b458b/tests/test_windows_bundle_contract.sh),
+  Step 0e, "Windows launcher bundle contract"
+  - Guarded: Windows releases ship one binary with no launcher stub, and
+    `install.ps1` renames the running binary out of the way before installing
+    the new one.
+  - Reads: `install.ps1`, `pkg/npm/install.js`
+  - Restore:
 
-The first nine failed before the distribution files were removed; the last
-four fail because of that removal.
+    ```bash
+    git -C ~/codebase-memory-mcp archive cdfdf264 \
+      tests/test_windows_bundle_contract.sh | tar -x -C mori
+    ```
+
+- [`tests/test_security_gate_fail_closed.sh`](https://github.com/DeusData/codebase-memory-mcp/blob/cdfdf26483fa56f4f7d9d85e7c4c3924133b458b/tests/test_security_gate_fail_closed.sh),
+  Step 0e3, "security gate fail-closed contract"
+  - Guarded: The CodeQL alert gate in upstream's workflows fails the build when
+    it cannot read the alert API, instead of reporting zero alerts.
+  - Reads: `.github/workflows/codeql.yml`
+  - Restore:
+
+    ```bash
+    git -C ~/codebase-memory-mcp archive cdfdf264 \
+      tests/test_security_gate_fail_closed.sh | tar -x -C mori
+    ```
+
+- [`tests/test_smoke_fixture_contract.sh`](https://github.com/DeusData/codebase-memory-mcp/blob/cdfdf26483fa56f4f7d9d85e7c4c3924133b458b/tests/test_smoke_fixture_contract.sh),
+  Step 0h, "smoke release-fixture contract"
+  - Guarded: The local and PR release-fixture smoke covers the paths it depends
+    on, as decided by the PR lane selector.
+  - Reads: `.github/workflows/pr.yml`, `install.sh`
+  - Restore:
+
+    ```bash
+    git -C ~/codebase-memory-mcp archive cdfdf264 \
+      tests/test_smoke_fixture_contract.sh | tar -x -C mori
+    ```
+
+- [`tests/test_venue_parity_contract.sh`](https://github.com/DeusData/codebase-memory-mcp/blob/cdfdf26483fa56f4f7d9d85e7c4c3924133b458b/tests/test_venue_parity_contract.sh),
+  Step 0j, "venue parity contract (one harness, every venue)"
+  - Guarded: Every `run:` step in upstream's workflows only provisions machines
+    or calls a canonical leg script, so CI cannot grow its own copy of the test
+    harness.
+  - Reads: `.github/workflows/release.yml` and the other workflows
+  - Restore:
+
+    ```bash
+    git -C ~/codebase-memory-mcp archive cdfdf264 \
+      tests/test_venue_parity_contract.sh | tar -x -C mori
+    ```
+
+- [`tests/test_mcpb_bundle_contract.sh`](https://github.com/DeusData/codebase-memory-mcp/blob/cdfdf26483fa56f4f7d9d85e7c4c3924133b458b/tests/test_mcpb_bundle_contract.sh),
+  Step 0o, "MCPB bundle contract (#1246)"
+  - Guarded: `scripts/package-release.sh` builds MCPB bundles with the right
+    members, manifest, and executable bit for each target that gets one.
+  - Reads: `install.sh` (copied by `scripts/package-release.sh`)
+  - Restore:
+
+    ```bash
+    git -C ~/codebase-memory-mcp archive cdfdf264 \
+      tests/test_mcpb_bundle_contract.sh | tar -x -C mori
+    ```
+
+- [`tests/test_mcpb_registry_entries_contract.sh`](https://github.com/DeusData/codebase-memory-mcp/blob/cdfdf26483fa56f4f7d9d85e7c4c3924133b458b/tests/test_mcpb_registry_entries_contract.sh),
+  Step 0p, "MCPB registry entries contract (#1246)"
+  - Guarded: `scripts/ci/gen-mcpb-registry-entries.sh` turns `checksums.txt`
+    into the MCP Registry bundle entries in `server.json` with correct hashes.
+  - Reads: `server.json`
+  - Restore:
+
+    ```bash
+    git -C ~/codebase-memory-mcp archive cdfdf264 \
+      tests/test_mcpb_registry_entries_contract.sh | tar -x -C mori
+    ```
+
+- [`tests/test_release_gate_chain_contract.sh`](https://github.com/DeusData/codebase-memory-mcp/blob/cdfdf26483fa56f4f7d9d85e7c4c3924133b458b/tests/test_release_gate_chain_contract.sh),
+  Step 0s, "release gate-chain ordering contract"
+  - Guarded: In upstream's release workflow, skipping an optional phase does
+    not skip the phases after it, and the release draft requires smoke and soak
+    to succeed.
+  - Reads: `.github/workflows/release.yml`, `_build.yml`, `dry-run.yml`,
+    `_soak.yml`
+  - Restore:
+
+    ```bash
+    git -C ~/codebase-memory-mcp archive cdfdf264 \
+      tests/test_release_gate_chain_contract.sh | tar -x -C mori
+    ```
+
+- [`tests/test_version_metadata_contract.sh`](https://github.com/DeusData/codebase-memory-mcp/blob/cdfdf26483fa56f4f7d9d85e7c4c3924133b458b/tests/test_version_metadata_contract.sh),
+  Step 0x, "packaging version-metadata contract"
+  - Guarded: Every packaging file that states a version (`server.json`, npm,
+    PyPI, Chocolatey, Go) states a released version, and registry-facing files
+    state the newest.
+  - Reads: `server.json`, `pkg/npm/package.json`, `pkg/pypi/pyproject.toml`
+  - Restore:
+
+    ```bash
+    git -C ~/codebase-memory-mcp archive cdfdf264 \
+      tests/test_version_metadata_contract.sh | tar -x -C mori
+    ```
+
+- [`tests/test_install_android_guard.sh`](https://github.com/DeusData/codebase-memory-mcp/blob/cdfdf26483fa56f4f7d9d85e7c4c3924133b458b/tests/test_install_android_guard.sh),
+  Step 0x2, "installer Android/Termux guard contract (#1202)"
+  - Guarded: `install.sh` refuses Android/Termux before downloading anything.
+  - Reads: `install.sh`
+  - Restore:
+
+    ```bash
+    git -C ~/codebase-memory-mcp archive cdfdf264 \
+      tests/test_install_android_guard.sh | tar -x -C mori
+    ```
+
+- [`tests/test_setup_scripts_contract.sh`](https://github.com/DeusData/codebase-memory-mcp/blob/cdfdf26483fa56f4f7d9d85e7c4c3924133b458b/tests/test_setup_scripts_contract.sh),
+  Step 0y3, "setup scripts install through the installers' verified path"
+  - Guarded: `scripts/setup.sh` and `scripts/setup-windows.ps1` hand the
+    download to the installers, which verify the checksum before installing.
+  - Reads: `install.sh`, `install.ps1`
+  - Restore:
+
+    ```bash
+    git -C ~/codebase-memory-mcp archive cdfdf264 \
+      tests/test_setup_scripts_contract.sh | tar -x -C mori
+    ```
+
+- [`tests/test_select_lanes.sh`](https://github.com/DeusData/codebase-memory-mcp/blob/cdfdf26483fa56f4f7d9d85e7c4c3924133b458b/tests/test_select_lanes.sh),
+  Step 0z, "PR lane selector contract"
+  - Guarded: `scripts/ci/select-lanes.sh` picks the right PR CI lanes for a
+    change set and falls back to every lane when unsure. Also restore
+    `tests/fixtures/select-lanes/`.
+  - Reads: `.github/codeql/codeql-config.yml`, read by
+    `scripts/ci/select-lanes.sh`
+  - Restore:
+
+    ```bash
+    git -C ~/codebase-memory-mcp archive cdfdf264 \
+      tests/test_select_lanes.sh tests/fixtures/select-lanes | tar -x -C mori
+    ```
+
+- [`tests/test_codeql_retrace.sh`](https://github.com/DeusData/codebase-memory-mcp/blob/cdfdf26483fa56f4f7d9d85e7c4c3924133b458b/tests/test_codeql_retrace.sh),
+  Step 0z1, "CodeQL retraces affected prebuilt objects"
+  - Guarded: When CodeQL traces a build with prebuilt third-party objects,
+    `scripts/ci/codeql-retrace-vendored.sh` recompiles exactly the objects a
+    change affects.
+  - Reads: `.github/codeql/codeql-config.yml`
+  - Restore:
+
+    ```bash
+    git -C ~/codebase-memory-mcp archive cdfdf264 \
+      tests/test_codeql_retrace.sh | tar -x -C mori
+    ```
+
+- [`tests/test_lane_wiring_contract.sh`](https://github.com/DeusData/codebase-memory-mcp/blob/cdfdf26483fa56f4f7d9d85e7c4c3924133b458b/tests/test_lane_wiring_contract.sh),
+  Step 0z4, "lane wiring (PRs select, dry run and release run all)"
+  - Guarded: Upstream's workflows honor the lane selection on PRs and run every
+    lane on dry runs and releases.
+  - Reads: `.github/workflows/dry-run.yml`, `pr.yml`, `release.yml`
+  - Restore:
+
+    ```bash
+    git -C ~/codebase-memory-mcp archive cdfdf264 \
+      tests/test_lane_wiring_contract.sh | tar -x -C mori
+    ```
+
+`test_codeql_retrace` and `test_release_gate_chain_contract` are candidates
+for Mori's own CI. Neither has a trivial equivalent: Jiyuu has no CodeQL job
+or CodeQL config for Mori, and no Mori release workflow with optional phases.
+Port them when those exist.
+
+Upstream files that only mention a removed check are unchanged, to keep
+upstream catch-ups clean: comments in `tests/test_main.c` and
+`tests/test_shell_line_endings.sh`, `scripts/README.md`,
+`scripts/ci/README.md`, `test-infrastructure/README.md`, and the history
+fixture `scripts/test-impact/fixtures/2026-09-filesets.tsv` (file lists of
+past upstream PRs, replayed by Step 0z2 without opening the files).

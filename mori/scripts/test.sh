@@ -271,6 +271,10 @@ fi
 # Step 0: fast build/security harness regressions run before the compiler-heavy
 # suite. The Windows package surface is static here; native launcher behavior is
 # exercised by scripts/test-windows.ps1.
+# Mori (Jiyuu): the 13 upstream contract steps that check DeusData's release
+# machinery (.github/, pkg/, install.sh, server.json) are removed, so the step
+# letters skip. IMPORT.md, "Excluded Contract Checks", lists each with the
+# command that restores it.
 echo "=== Step 0a: build directory safety contract ==="
 bash "$ROOT/tests/test_build_dir_safety.sh"
 
@@ -286,14 +290,8 @@ bash "$ROOT/tests/test_soak_daemon_recovery_contract.sh"
 echo "=== Step 0d2: soak harness runtime isolation contract (#1696) ==="
 bash "$ROOT/tests/test_soak_runtime_isolation_contract.sh"
 
-echo "=== Step 0e: Windows launcher bundle contract ==="
-bash "$ROOT/tests/test_windows_bundle_contract.sh"
-
 echo "=== Step 0e2: activation refusal diagnostic contract ==="
 bash "$ROOT/tests/test_activation_diagnostic_contract.sh"
-
-echo "=== Step 0e3: security gate fail-closed contract ==="
-bash "$ROOT/tests/test_security_gate_fail_closed.sh"
 
 echo "=== Step 0e4: memory-analyzer gate warning-suffix contract (#2442) ==="
 bash "$ROOT/tests/test_lint_mem_gate.sh"
@@ -307,9 +305,6 @@ bash "$ROOT/tests/test_security_fuzz_harness.sh"
 echo "=== Step 0g2: memlab harness runtime isolation contract (#1696) ==="
 bash "$ROOT/tests/test_memlab_runtime_isolation_contract.sh"
 
-echo "=== Step 0h: smoke release-fixture contract ==="
-bash "$ROOT/tests/test_smoke_fixture_contract.sh"
-
 echo "=== Step 0i: parallel suite scheduler contract ==="
 bash "$ROOT/tests/test_parallel_harness_contract.sh"
 
@@ -321,9 +316,6 @@ bash "$ROOT/tests/test_failure_report_contract.sh"
 
 echo "=== Step 0i3: benchmark harness runtime isolation contract (#1696) ==="
 bash "$ROOT/tests/test_benchmark_runtime_isolation_contract.sh"
-
-echo "=== Step 0j: venue parity contract (one harness, every venue) ==="
-bash "$ROOT/tests/test_venue_parity_contract.sh"
 
 echo "=== Step 0k: spawn console-window contract (#1427) ==="
 bash "$ROOT/tests/test_spawn_no_window_contract.sh"
@@ -337,20 +329,11 @@ bash "$ROOT/tests/test_vt_release_notes_contract.sh"
 echo "=== Step 0n: VirusTotal gate policy contract ==="
 bash "$ROOT/tests/test_vt_gate_policy_contract.sh"
 
-echo "=== Step 0o: MCPB bundle contract (#1246) ==="
-bash "$ROOT/tests/test_mcpb_bundle_contract.sh"
-
-echo "=== Step 0p: MCPB registry entries contract (#1246) ==="
-bash "$ROOT/tests/test_mcpb_registry_entries_contract.sh"
-
 echo "=== Step 0q: release candidate derivation contract ==="
 bash "$ROOT/tests/test_release_candidate_derivation_contract.sh"
 
 echo "=== Step 0r: VirusTotal candidate-selection contract ==="
 bash "$ROOT/tests/test_vt_candidate_selection_contract.sh"
-
-echo "=== Step 0s: release gate-chain ordering contract ==="
-bash "$ROOT/tests/test_release_gate_chain_contract.sh"
 
 echo "=== Step 0t: test runtime isolation contract (#1691) ==="
 bash "$ROOT/tests/test_runtime_isolation_contract.sh"
@@ -367,12 +350,6 @@ bash "$ROOT/tests/test_nomic_blob_generator_contract.sh"
 echo "=== Step 0w: published language-count contract ==="
 bash "$ROOT/tests/test_language_count_contract.sh"
 
-echo "=== Step 0x: packaging version-metadata contract ==="
-bash "$ROOT/tests/test_version_metadata_contract.sh"
-
-echo "=== Step 0x2: installer Android/Termux guard contract (#1202) ==="
-bash "$ROOT/tests/test_install_android_guard.sh"
-
 # Step 0y: the Windows leg must not decide its verdict from an exit status that
 # the ssh/msys2_shell chain can mangle — a channel that turns 0 into 1 can turn
 # 1 into 0, and that direction reports a RED Windows leg as green. Runs
@@ -384,22 +361,10 @@ bash "$ROOT/tests/test_vm_verdict_contract.sh"
 echo "=== Step 0y2: isolated Windows venue contract ==="
 bash "$ROOT/tests/test_vm_isolation_contract.sh"
 
-echo "=== Step 0y3: setup scripts install through the installers' verified path ==="
-bash "$ROOT/tests/test_setup_scripts_contract.sh"
-
-# Step 0z: PR CI runs only the lanes scripts/ci/select-lanes.sh selects, so a
-# wrong selection is a silent gate loss. The decision table, and the replay of
-# every September 2026 PR push and real failure against it.
-echo "=== Step 0z: PR lane selector contract ==="
-bash "$ROOT/tests/test_select_lanes.sh"
-echo "=== Step 0z1: CodeQL retraces affected prebuilt objects ==="
-bash "$ROOT/tests/test_codeql_retrace.sh"
 echo "=== Step 0z2: lane selector history replay ==="
 bash "$ROOT/scripts/test-impact/replay-selector.sh"
 echo "=== Step 0z3: lane-aware aggregate gates (ci-ok, shard union) ==="
 bash "$ROOT/tests/test_lane_gate_contract.sh"
-echo "=== Step 0z4: lane wiring (PRs select, dry run and release run all) ==="
-bash "$ROOT/tests/test_lane_wiring_contract.sh"
 echo "=== Step 0z5: test-impact shadow prediction contract ==="
 bash "$ROOT/tests/test_test_impact_predict.sh"
 # Step 0z6: the per-test coverage map must never report a test as executing
