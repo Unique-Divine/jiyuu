@@ -54,7 +54,10 @@ impl Drop for Scratch {
 
 /// Runs `bin` with a minimal environment pointed at its own scratch caches.
 fn run(bin: &Path, side: &str, args: &[&str]) -> Output {
-    let scratch = Scratch::new(side);
+    run_in(bin, &Scratch::new(side), args)
+}
+
+fn run_in(bin: &Path, scratch: &Scratch, args: &[&str]) -> Output {
     Command::new(bin)
         .args(args)
         .current_dir("/")
@@ -100,4 +103,135 @@ fn list_projects_matches_c() {
 #[test]
 fn unknown_tool_error_matches_c() {
     assert_same(&["cli", "no_such_tool"]);
+}
+
+/// A small repository written by the test: Python and Go, each with one
+/// call. Both binaries index the same path, so project names match.
+struct Fixture(PathBuf);
+
+impl Fixture {
+    fn new() -> Self {
+        let dir = PathBuf::from(format!("/tmp/mori-fx{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let files = [
+            (
+                "py/app.py",
+                "def helper(x):\n    return x + 1\n\n\ndef run():\n    \
+                 return helper(2)\n",
+            ),
+            (
+                "go/calc.go",
+                "package calc\n\nfunc Add(a, b int) int {\n\treturn a + b\n\
+                 }\n\nfunc Twice(a int) int {\n\treturn Add(a, a)\n}\n",
+            ),
+            ("go/go.mod", "module example.com/calc\n\ngo 1.22\n"),
+        ];
+        for (rel, text) in files {
+            let path = dir.join(rel);
+            fs::create_dir_all(path.parent().expect("parent"))
+                .expect("create fixture dir");
+            fs::write(&path, text).expect("write fixture file");
+        }
+        Fixture(dir)
+    }
+
+    fn project(&self) -> String {
+        // Project names are the path with `/` turned into `-`.
+        self.0
+            .to_string_lossy()
+            .trim_start_matches('/')
+            .replace('/', "-")
+    }
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+/// The value of `"key":<number>` in the index result.
+fn json_number(text: &str, key: &str) -> Option<u64> {
+    let start = text.find(&format!("\"{key}\":"))? + key.len() + 3;
+    let digits: String = text[start..]
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    digits.parse().ok()
+}
+
+/// Indexes the fixture with each binary, which goes through the temporary
+/// daemon and the index worker that the binary re-executes as itself, then
+/// compares queries over the two graphs.
+#[test]
+fn index_through_worker_reexec_matches_c() {
+    let fixture = Fixture::new();
+    let project = fixture.project();
+    let repo = fixture.0.to_string_lossy().into_owned();
+    let sides = [("c", c_binary()), ("rs", PathBuf::from(MORI))];
+    let mut results = Vec::new();
+    for (side, bin) in &sides {
+        let scratch = Scratch::new(side);
+        let index = run_in(
+            bin,
+            &scratch,
+            &["cli", "--quiet", "index_repository", "--repo_path", &repo],
+        );
+        let text = String::from_utf8_lossy(&index.stdout).into_owned();
+        assert!(
+            index.status.success() && text.contains("\"status\":\"indexed\""),
+            "{side} index failed: {text}\n{}",
+            String::from_utf8_lossy(&index.stderr)
+        );
+        let counts = (json_number(&text, "nodes"), json_number(&text, "edges"));
+        assert!(counts.0.is_some_and(|n| n > 0), "{side}: {text}");
+        let queries: Vec<Output> = [
+            vec![
+                "cli",
+                "search_graph",
+                "--project",
+                &project,
+                "--name-pattern",
+                "^(Add|Twice|helper|run)$",
+                "--format",
+                "json",
+            ],
+            vec![
+                "cli",
+                "trace_path",
+                "--project",
+                &project,
+                "--function-name",
+                "Add",
+                "--direction",
+                "inbound",
+            ],
+            vec![
+                "cli",
+                "trace_path",
+                "--project",
+                &project,
+                "--function-name",
+                "helper",
+                "--direction",
+                "inbound",
+            ],
+        ]
+        .iter()
+        .map(|args| run_in(bin, &scratch, args))
+        .collect();
+        results.push((counts, queries));
+    }
+    let (c, rs) = (&results[0], &results[1]);
+    assert_eq!(c.0, rs.0, "node and edge counts differ");
+    for (c_out, rs_out) in c.1.iter().zip(&rs.1) {
+        assert!(c_out.status.success(), "{c_out:?}");
+        assert_eq!(
+            (&c_out.status.code(), &c_out.stdout, &c_out.stderr),
+            (&rs_out.status.code(), &rs_out.stdout, &rs_out.stderr),
+            "query output differs"
+        );
+    }
+    let trace = String::from_utf8_lossy(&c.1[1].stdout);
+    assert!(trace.contains(".go.Twice"), "Add caller missing: {trace}");
 }
