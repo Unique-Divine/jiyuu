@@ -1,0 +1,14 @@
+# Personal Codebase Memory MCP excludes (local only: listed in .git/info/exclude).
+# Goal: index the Astro site code and its Markdown content, not assets.
+
+# Static assets: images, covers, published files.
+public/
+legacy/images/
+assets/
+
+# Data files, build output, dependencies.
+*.json
+*.lockb
+dist/
+.astro/
+node_modules/

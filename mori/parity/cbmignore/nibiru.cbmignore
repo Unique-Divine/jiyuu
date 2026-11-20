@@ -1,0 +1,48 @@
+# Personal Codebase Memory MCP excludes (local only: listed in .git/info/exclude).
+# Goal: index the code and docs that matter for cross-repo links, not data.
+
+# JSON and other data files become thousands of Variable nodes and bury code.
+*.json
+*.jsonl
+*.csv
+*.sql
+
+# Build output, caches, and generated assets.
+dist/
+build/
+target/
+out/
+coverage/
+.next/
+*.min.js
+*.map
+logs/
+temp/
+tmp/
+
+# Forks in lib/. Nibiru is moving the parts it relies on into modules it
+# owns, so the code it builds on stays indexed (Unique, 2026-11-17):
+#   kept: lib/cosmos-sdk, lib/cosmwasm-vm, the public surface of lib/wasmvm
+#   (wvm/ and top-level Go files), lib/nibiru-std, lib/nibiru-ownable-derive.
+# Excluded: forks Nibiru doesn't change much, and test or generated code
+# that would crowd search results.
+/lib/wasmer/
+/lib/ibc-go/
+/lib/cosmwasm-optimizer/
+/lib/wasmvm/internal/
+/lib/wasmvm/libwasmvm/
+/lib/wasmvm/builders/
+/lib/cosmos-sdk/contrib/
+/lib/cosmos-sdk/docs/
+/lib/cosmos-sdk/**/testutil/
+/lib/cosmos-sdk/**/*.pb.go
+/lib/**/simulation/
+/lib/**/*_test.go
+# CometBFT fork (consensus engine), not needed for app-level questions.
+/bft/
+# Compiled contract artifacts and generated REST gateways.
+/evm/embeds/artifacts/
+*.pb.gw.go
+# Registries and reports that are data, not code.
+/token-registry/
+/security-reports/

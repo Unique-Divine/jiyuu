@@ -1,0 +1,11 @@
+# Personal Codebase Memory MCP excludes (local only: listed in .git/info/exclude).
+# Data files become thousands of Variable nodes and bury code.
+*.json
+*.jsonl
+*.csv
+# Python environments, caches, and build output.
+.venv/
+__pycache__/
+.pytest_cache/
+dist/
+build/

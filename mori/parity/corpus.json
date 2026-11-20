@@ -1,0 +1,77 @@
+{
+  "note": "Pinned by `parity.py pin`; checked before every run.",
+  "repos": [
+    {
+      "dir": "nibiru",
+      "remote": "git@github.com:SaiDotFun/nibiru.git",
+      "commit": "163f9d330ff93a19fc6b7ab5e19bc6fec7f1b03f",
+      "cbmignore": "cbmignore/nibiru.cbmignore"
+    },
+    {
+      "dir": "sai-perps",
+      "remote": "git@github.com:SaiDotFun/sai-perps.git",
+      "commit": "42182d1b891d1b460a17dcab39f7889b02759f33",
+      "cbmignore": "cbmignore/sai-perps.cbmignore"
+    },
+    {
+      "dir": "sai-keeper",
+      "remote": "git@github.com:SaiDotFun/sai-keeper.git",
+      "commit": "cc78eacaadafc46a587c4e31d98784e58f1ec496",
+      "cbmignore": "cbmignore/sai-keeper.cbmignore"
+    },
+    {
+      "dir": "sai-web",
+      "remote": "git@github.com:SaiDotFun/sai-web.git",
+      "commit": "fd26c4d7fa6e63763efa848427b9cb040f2e9d24",
+      "cbmignore": "cbmignore/sai-web.cbmignore"
+    },
+    {
+      "dir": "nibi-web",
+      "remote": "git@github.com:SaiDotFun/nibi-web.git",
+      "commit": "34d148523199e01cd88914acb3434dbab95b6bf6",
+      "cbmignore": "cbmignore/nibi-web.cbmignore"
+    },
+    {
+      "dir": "nibi-go-hm",
+      "remote": "git@github.com:NibiruChain/go-heartmonitor.git",
+      "commit": "2fe09fef078c9638c9e9ac2db203ab1e202c8d08",
+      "cbmignore": "cbmignore/nibi-go-hm.cbmignore"
+    },
+    {
+      "dir": "open-sai",
+      "remote": "git@github.com:SaiDotFun/open-sai.git",
+      "commit": "e121280a38adb9595e7b5af3f2d4b4eee63e4b5b",
+      "cbmignore": "cbmignore/open-sai.cbmignore"
+    },
+    {
+      "dir": "nibi-ts-sdk",
+      "remote": "git@github.com:SaiDotFun/ts-sdk.git",
+      "commit": "668149121c37710250a6cf02be5c790a3d9e9714",
+      "cbmignore": "cbmignore/nibi-ts-sdk.cbmignore"
+    },
+    {
+      "dir": "gh-io-ud",
+      "remote": "git@github.com:Unique-Divine/Unique-Divine.github.io.git",
+      "commit": "52d89cbc29b4316557056cbe499526cc2b33b662",
+      "cbmignore": "cbmignore/gh-io-ud.cbmignore"
+    },
+    {
+      "dir": "nibi-iac",
+      "remote": "git@github.com:NibiruChain/iac.git",
+      "commit": "e24520ee653b76f21c450c99eae08c573c2047eb",
+      "cbmignore": "cbmignore/nibi-iac.cbmignore"
+    },
+    {
+      "dir": "gh",
+      "remote": null,
+      "tree": "sha256:6c022554cd0921af53772b8b6a378abddd92990a9ba8512a50880f4b96737691",
+      "cbmignore": "cbmignore/gh.cbmignore"
+    },
+    {
+      "dir": "boku",
+      "remote": "git@github.com:Unique-Divine/boku.git",
+      "commit": "c5935f123fb225216e1a107d6a3f4eb21d04be7c",
+      "cbmignore": "cbmignore/boku.cbmignore"
+    }
+  ]
+}

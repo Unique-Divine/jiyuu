@@ -1,0 +1,9 @@
+# Personal Codebase Memory MCP excludes for ~/gh, the gh-rev review store
+# (not a git repo). Index the Markdown review ledgers: their file and URL
+# references link reviews back to code and epics.
+
+# Agent and tool state folders.
+.agents/
+.aws/
+.codex/
+*.lock

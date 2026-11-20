@@ -1,0 +1,14 @@
+# Personal Codebase Memory MCP excludes (local only: listed in .git/info/exclude).
+# Goal: index the Terraform modules, scripts, and docs that tie deployments to
+# the services they run, not data.
+
+# Grafana dashboards and other JSON are data, not code.
+*.json
+*.jsonl
+*.csv
+
+# Terraform caches and lock files.
+.terraform/
+*.tfstate
+*.tfstate.*
+.terraform.lock.hcl

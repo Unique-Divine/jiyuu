@@ -1,0 +1,56 @@
+# Codebase Memory MCP index exclusions (gitignore syntax).
+# .gitignore already applies; this adds paths that are tracked but should
+# stay out of the code graph.
+
+# Plaintext credentials, personal documents, sessions. secrets/ stays
+# indexed: every file there is GPG-encrypted, and the layout shows where
+# secrets live.
+backups/
+.env*
+*.session
+*.session-*
+
+# Submodules (dotfiles/, jiyuu/, commonplace/) stay in the graph: boku is
+# the monorepo, and cross-repo links (skills -> dotfiles, epics -> jiyuu
+# code) need them in one project.
+# Dependency and build output inside the submodules.
+**/node_modules/
+**/.venv/
+**/target/
+**/dist/
+# An untracked clone of grok-build (its own repo, 28 GB with build output)
+# sits inside dotfiles. It was 138,000 of 214,000 nodes and isn't Boku code.
+dotfiles/grok-build/
+# Herdr fork: keep its own code (src/, crates/, scripts/, tests/) and drop
+# the rest. vendor/ is vendored Ghostty (libghostty-vt, nearly all of the
+# fork's Zig and C) plus a portable-pty copy, not code Unique maintains.
+# docs/ is the .mdx site; assets/, packaging/ and distribution/ hold images
+# and release packaging.
+dotfiles/herdr/vendor/
+dotfiles/herdr/docs/
+dotfiles/herdr/assets/
+dotfiles/herdr/packaging/
+dotfiles/herdr/distribution/
+
+# Generated Notion export copies that bury search results
+epics/*/publication/
+
+# Data files: JSON keys alone were ~170,000 of the graph's Variable nodes and
+# buried code and prose. Keep scripts and Markdown; drop the data they read.
+*.json
+*.jsonl
+*.csv
+*.tsv
+*.sql
+*.log
+**/data/**
+**/evidence/**
+**/saved-txs/**
+
+# Images, PDFs, and rendered pages carry no code or prose worth linking.
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.pdf
+*.html

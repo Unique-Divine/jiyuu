@@ -1,0 +1,26 @@
+# Personal Codebase Memory MCP excludes (local only: listed in .git/info/exclude).
+# Goal: index the code and docs that matter for cross-repo links, not data.
+
+# JSON and other data files become thousands of Variable nodes and bury code.
+*.json
+*.jsonl
+*.csv
+*.sql
+
+# Build output, caches, and generated assets.
+dist/
+build/
+target/
+out/
+coverage/
+.next/
+*.min.js
+*.map
+logs/
+temp/
+tmp/
+
+# Static assets and generated Playwright output.
+**/public/**
+**/e2e-logs/**
+**/playwright-report/**

@@ -1,0 +1,15 @@
+# Personal Codebase Memory MCP excludes (local only: listed in .git/info/exclude).
+# Goal: index the hand-written SDK (sdk/, gql/, evm-core/), not generated code.
+
+# The nibiru submodule is its own indexed project (home-realu-nibiru).
+nibiru/
+
+# Generated protobuf bindings: about half the files, no hand-written logic.
+src/protojs/
+
+# Data files, build output, dependencies.
+*.json
+*.lock
+dist/
+coverage/
+node_modules/

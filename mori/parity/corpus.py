@@ -1,0 +1,211 @@
+"""The pinned parity corpus (`corpus.json`): load, pin, verify, fingerprint.
+
+Each repo is `{dir, remote, commit, cbmignore}`; `commit` is `git rev-parse
+HEAD` at pin time and `cbmignore` is a path, relative to this directory, to
+the copy of the `.cbmignore` used when indexing. A repo that is not a Git
+checkout (`gh`) carries `tree` instead of `commit`: a SHA-256 over every
+file's relative path, mode, and content.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import shutil
+import stat
+import subprocess
+from dataclasses import dataclass
+from typing import Any
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+CORPUS_JSON = os.path.join(HERE, "corpus.json")
+
+
+@dataclass(frozen=True)
+class Repo:
+  dir: str
+  remote: str | None
+  commit: str | None
+  tree: str | None
+  cbmignore: str | None
+
+  def root(self, home: str) -> str:
+    return os.path.join(home, self.dir)
+
+  def cbmignore_path(self) -> str | None:
+    """Absolute path of the pinned copy (load() resolves it against the
+    corpus.json directory)."""
+    return self.cbmignore
+
+
+def load(path: str = CORPUS_JSON) -> list[Repo]:
+  with open(path, encoding="utf-8") as f:
+    d = json.load(f)
+  base = os.path.dirname(os.path.abspath(path))
+  return [Repo(r["dir"], r.get("remote"), r.get("commit"), r.get("tree"),
+               os.path.join(base, r["cbmignore"]) if r.get("cbmignore")
+               else None) for r in d["repos"]]
+
+
+def git(root: str, *args: str) -> str:
+  p = subprocess.run(["git", "-C", root, *args], capture_output=True,
+                     text=True, check=False)
+  if p.returncode != 0:
+    raise RuntimeError(f"git {' '.join(args)} in {root}: "
+                       f"{p.stderr.strip()}")
+  return p.stdout
+
+
+def is_git(root: str) -> bool:
+  """True when root is the top of a Git work tree. `~/gh` holds an empty
+  `.git` directory, so the directory's presence is not enough."""
+  if not os.path.exists(os.path.join(root, ".git")):
+    return False
+  p = subprocess.run(["git", "-C", root, "rev-parse", "--show-toplevel"],
+                     capture_output=True, text=True, check=False)
+  return p.returncode == 0 and os.path.realpath(p.stdout.strip()) == \
+    os.path.realpath(root)
+
+
+def tree_hash(root: str) -> str:
+  """SHA-256 over sorted (relative path, kind, content hash). Symlinks
+  hash their target; directories are implied by their files."""
+  h = hashlib.sha256()
+  entries = []
+  for dirpath, dirnames, filenames in os.walk(root):
+    dirnames.sort()
+    for name in filenames:
+      p = os.path.join(dirpath, name)
+      rel = os.path.relpath(p, root)
+      st = os.lstat(p)
+      if stat.S_ISLNK(st.st_mode):
+        entries.append((rel, "l", os.readlink(p).encode()))
+      elif stat.S_ISREG(st.st_mode):
+        fh = hashlib.sha256()
+        with open(p, "rb") as f:
+          for chunk in iter(lambda: f.read(1 << 20), b""):
+            fh.update(chunk)
+        kind = "x" if st.st_mode & 0o111 else "f"
+        entries.append((rel, kind, fh.hexdigest().encode()))
+  for rel, kind, digest in sorted(entries):
+    h.update(rel.encode() + b"\0" + kind.encode() + b"\0" + digest + b"\n")
+  return "sha256:" + h.hexdigest()
+
+
+def dirty_lines(root: str) -> list[str]:
+  """`git status --porcelain` lines, without the `.cbmignore` copy that
+  setup drops into each checkout untracked."""
+  out = git(root, "status", "--porcelain=v1", "--untracked-files=normal")
+  return [l for l in out.splitlines() if l[3:] != ".cbmignore"]
+
+
+def fingerprint(root: str) -> str:
+  """Cheap identity of a checkout's current content: HEAD, status, and the
+  size and mtime of every dirty path, recursing into dirty submodules. Two
+  equal fingerprints mean nothing moved between them."""
+  if not is_git(root):
+    return tree_hash(root)
+  h = hashlib.sha256()
+  h.update(git(root, "rev-parse", "HEAD").encode())
+  for line in dirty_lines(root):
+    h.update(line.encode() + b"\n")
+    p = os.path.join(root, line[3:].split(" -> ")[-1].strip('"'))
+    if os.path.isdir(p) and is_git(p):
+      h.update(fingerprint(p).encode())
+    elif os.path.lexists(p):
+      st = os.lstat(p)
+      h.update(f"{st.st_size}:{st.st_mtime_ns}".encode())
+  return h.hexdigest()
+
+
+@dataclass
+class Check:
+  dir: str
+  ok: bool
+  dirty: bool
+  problems: list[str]
+
+
+def verify(repo: Repo, home: str, allow_dirty: bool) -> Check:
+  """Compare a checkout against its pin. A moved HEAD always fails; dirty
+  content fails unless allow_dirty."""
+  root = repo.root(home)
+  problems: list[str] = []
+  dirty = False
+  if not os.path.isdir(root):
+    return Check(repo.dir, False, False, [f"missing checkout {root}"])
+  if repo.commit:
+    if not is_git(root):
+      return Check(repo.dir, False, False, [f"{root} is not a Git checkout"])
+    head = git(root, "rev-parse", "HEAD").strip()
+    if head != repo.commit:
+      problems.append(f"HEAD {head[:12]} differs from pin "
+                      f"{repo.commit[:12]} (run `parity.py pin`)")
+    lines = dirty_lines(root)
+    if lines:
+      dirty = True
+      if not allow_dirty:
+        problems.append(f"{len(lines)} dirty paths (use --allow-dirty)")
+  elif repo.tree:
+    now = tree_hash(root)
+    if now != repo.tree:
+      dirty = True
+      if not allow_dirty:
+        problems.append(f"tree {now[:19]} differs from pin "
+                        f"{repo.tree[:19]} (pin again or --allow-dirty)")
+  else:
+    problems.append("no commit or tree pin")
+  copy = repo.cbmignore_path()
+  live = os.path.join(root, ".cbmignore")
+  if copy:
+    if not os.path.isfile(copy):
+      problems.append(f"missing .cbmignore copy {copy}")
+    elif not os.path.isfile(live) or not same_file(copy, live):
+      problems.append(f"{live} differs from the pinned copy {repo.cbmignore}")
+  return Check(repo.dir, not problems, dirty, problems)
+
+
+def same_file(a: str, b: str) -> bool:
+  with open(a, "rb") as fa, open(b, "rb") as fb:
+    return fa.read() == fb.read()
+
+
+def pin(manifest: str, ignore_dir: str | None, home: str,
+        out: str = CORPUS_JSON) -> dict[str, Any]:
+  """Write corpus.json from a repos manifest (dotfiles `cbm/repos.json`):
+  current HEAD (or tree hash), and a fresh `.cbmignore` copy for each repo,
+  taken from `ignore_dir/<dir>.cbmignore` or else the checkout's own."""
+  with open(manifest, encoding="utf-8") as f:
+    entries = json.load(f)["repos"]
+  copies = os.path.join(os.path.dirname(out), "cbmignore")
+  os.makedirs(copies, exist_ok=True)
+  repos = []
+  for e in entries:
+    d = e["dir"]
+    root = os.path.join(home, d)
+    if not os.path.isdir(root):
+      raise RuntimeError(f"pin: missing checkout {root}")
+    r: dict[str, Any] = {"dir": d, "remote": e.get("remote")}
+    if is_git(root):
+      r["commit"] = git(root, "rev-parse", "HEAD").strip()
+    else:
+      r["tree"] = tree_hash(root)
+    src = None
+    if ignore_dir and os.path.isfile(os.path.join(ignore_dir,
+                                                  f"{d}.cbmignore")):
+      src = os.path.join(ignore_dir, f"{d}.cbmignore")
+    elif os.path.isfile(os.path.join(root, ".cbmignore")):
+      src = os.path.join(root, ".cbmignore")
+    if src:
+      shutil.copyfile(src, os.path.join(copies, f"{d}.cbmignore"))
+      r["cbmignore"] = f"cbmignore/{d}.cbmignore"
+    else:
+      r["cbmignore"] = None
+    repos.append(r)
+  doc = {"note": "Pinned by `parity.py pin`; checked before every run.",
+         "repos": repos}
+  with open(out, "w", encoding="utf-8") as f:
+    json.dump(doc, f, indent=2)
+    f.write("\n")
+  return doc
