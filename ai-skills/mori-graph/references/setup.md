@@ -4,8 +4,12 @@
 
 Mori ships as `mori/v*` releases of https://github.com/Unique-Divine/jiyuu.
 The published C release `mori/v0.13.1` packages `codebase-memory-mcp`
-for Linux x64 and arm64 and macOS arm64. Install it with mise's `github:`
-backend.
+for Linux x64 and arm64 and macOS arm64. **On 0.13.1, substitute
+`codebase-memory-mcp` for the executable name `mori` throughout this page.**
+This applies to executable paths, daemon commands, MCP registration, hooks,
+indexing, and cross-repo linking. Keep the MCP server key `mori-graph`.
+
+Install 0.13.1 with mise's `github:` backend.
 
 ```toml
 # ~/.config/mise/config.toml
@@ -55,9 +59,9 @@ list tools. Claude Code hooks that run `mori hook-augment` work through the
 same binary path; [Hooks and Tool Profiles](https://github.com/Unique-Divine/jiyuu/blob/main/mori/README.md#hooks-and-tool-profiles)
 in Mori's README lists the hook entries and the `--tool-profile` option.
 
-For 0.13.1, use the `codebase-memory-mcp` executable or shim in the
-registration commands. Its inherited installer and updater contact the
-upstream project's releases.
+The installer and updater built into 0.13.1 still contact the upstream
+project's releases. Use the registration commands above and install through
+mise or the Jiyuu release archive.
 
 When switching an existing `mori-graph` entry, change its command path
 and keep its arguments and environment. The `mori` shim stays the same
