@@ -2741,8 +2741,8 @@ TEST(cli_install_preserves_manually_registered_mori_graph) {
     free(claude_after);
     free(codex_after);
     test_rmdir_r(dir);
-    ASSERT_NE(claude_rc, 0);
-    ASSERT_NE(codex_rc, 0);
+    ASSERT_NEQ(claude_rc, 0);
+    ASSERT_NEQ(codex_rc, 0);
     ASSERT_TRUE(preserved);
     PASS();
 }
