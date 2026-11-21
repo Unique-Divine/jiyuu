@@ -1829,6 +1829,57 @@ TEST(cross_repo_cancel_repair_rolls_back_peer_and_keeps_pending) {
     PASS();
 }
 
+/* A held lock outlives the repair attempt. The watcher must defer within
+ * the daemon's shutdown budget even if SQLite has no progress to report. */
+static bool cross_repo_repair_defers_under_lock(const char *provider_path, const char *lock_sql) {
+    sqlite3 *lock = NULL;
+    bool held = sqlite3_open_v2(provider_path, &lock, SQLITE_OPEN_READWRITE, NULL) == SQLITE_OK &&
+                sqlite3_exec(lock, lock_sql, NULL, NULL, NULL) == SQLITE_OK;
+    atomic_int stop = 0;
+    uint64_t started = cbm_now_ms();
+    bool deferred = held && !cbm_cross_repo_reconcile_published("busy-client", &stop);
+    uint64_t elapsed = cbm_now_ms() - started;
+    if (lock) {
+        (void)sqlite3_exec(lock, "ROLLBACK", NULL, NULL, NULL);
+        sqlite3_close(lock);
+    }
+    return held && deferred && elapsed < 5000 && cbm_cross_repo_reverse_pending("busy-client");
+}
+
+TEST(cross_repo_repair_defers_on_busy_open_and_write) {
+    cross_repo_fixture_t fixture;
+    char live[512], stage[512], provider[512];
+    bool ok = cross_repo_fixture_begin(&fixture) &&
+              cross_repo_seed_http_pair(&fixture, "busy-client", "busy-api", "/rel", "b") &&
+              cross_repo_project_path(&fixture, "busy-client", live, sizeof(live)) &&
+              cross_repo_project_path(&fixture, "_stage", stage, sizeof(stage)) &&
+              cross_repo_project_path(&fixture, "busy-api", provider, sizeof(provider));
+    if (!ok) {
+        cross_repo_fixture_end(&fixture);
+        FAIL("cannot prepare busy repair fixture");
+    }
+
+    const char *target = "busy-api";
+    cbm_cross_repo_result_t linked = cbm_cross_repo_match("busy-client", &target, 1);
+    ok = !linked.failed && cbm_store_backup_path(live, stage) == CBM_STORE_OK &&
+         cbm_cross_repo_relink_stage(live, stage, "busy-client", NULL) == CBM_STORE_OK &&
+         cbm_store_backup_path(stage, live) == CBM_STORE_OK;
+    cbm_cross_repo_result_free(&linked);
+
+    bool writer = ok && cross_repo_repair_defers_under_lock(provider, "BEGIN IMMEDIATE;");
+    bool reader = ok && cross_repo_repair_defers_under_lock(
+                            provider, "PRAGMA journal_mode=DELETE; BEGIN; SELECT * FROM projects;");
+    bool retried = cbm_cross_repo_reconcile_published("busy-client", NULL) &&
+                   !cbm_cross_repo_reverse_pending("busy-client");
+    cross_repo_fixture_end(&fixture);
+
+    ASSERT_TRUE(ok);
+    ASSERT_TRUE(writer);
+    ASSERT_TRUE(reader);
+    ASSERT_TRUE(retried);
+    PASS();
+}
+
 TEST(cross_repo_status_reports_stale_after_provider_changes) {
     cross_repo_fixture_t fixture;
     bool ok = cross_repo_fixture_begin(&fixture) &&
@@ -2187,6 +2238,7 @@ SUITE(cross_repo) {
     RUN_TEST(cross_repo_stage_rebuilds_from_legacy_selection_without_writing_provider);
     RUN_TEST(cross_repo_status_reports_stale_after_provider_changes);
     RUN_TEST(cross_repo_cancel_repair_rolls_back_peer_and_keeps_pending);
+    RUN_TEST(cross_repo_repair_defers_on_busy_open_and_write);
     RUN_TEST(cross_repo_channel_repair_preserves_other_emitters_and_forward_link);
     RUN_TEST(cross_repo_relink_removes_provably_reverse_legacy_channel);
     RUN_TEST(cross_repo_status_flags_legacy_provider_first_upgrade);

@@ -208,12 +208,13 @@ static bool cr_project_exists(const char *project) {
     return cr_project_state(project) == CR_PROJECT_USABLE;
 }
 
-static cbm_store_t *cr_open_existing_project(const char *project) {
+static cbm_store_t *cr_open_existing_project(const char *project, bool wait_for_lock) {
     char path[CR_PATH_BUF];
     if (!cr_db_path(project, path, sizeof(path))) {
         return NULL;
     }
-    cbm_store_t *store = cbm_store_open_path_existing(path);
+    cbm_store_t *store = wait_for_lock ? cbm_store_open_path_existing(path)
+                                       : cbm_store_open_path_existing_nowait(path);
     if (!cr_store_has_exact_project(store, project)) {
         cbm_store_close(store);
         return NULL;
@@ -1855,7 +1856,9 @@ static bool cr_set_reverse_pending(cbm_store_t *source, const char *project, boo
 }
 
 bool cbm_cross_repo_reverse_pending(const char *project) {
-    cbm_store_t *store = cr_open_peer(project);
+    char path[CR_PATH_BUF];
+    cbm_store_t *store =
+        cr_db_path(project, path, sizeof(path)) ? cbm_store_open_path_query_nowait(path) : NULL;
     bool pending = store && cr_reverse_pending(store, project);
     cbm_store_close(store);
     return pending;
@@ -2233,7 +2236,7 @@ bool cbm_cross_repo_reconcile_published(const char *project, const atomic_int *c
     if (cr_cancel_requested(&run)) {
         return false;
     }
-    cbm_store_t *source = cr_open_existing_project(project);
+    cbm_store_t *source = cr_open_existing_project(project, false);
     if (!source) {
         return false;
     }
@@ -2249,7 +2252,7 @@ bool cbm_cross_repo_reconcile_published(const char *project, const atomic_int *c
     while (!cr_cancel_requested(&run) && (key = yyjson_obj_iter_next(&iter))) {
         const char *target = yyjson_get_str(key);
         const char *observed = yyjson_get_str(yyjson_obj_iter_get_val(key));
-        cbm_store_t *provider = observed ? cr_open_existing_project(target) : NULL;
+        cbm_store_t *provider = observed ? cr_open_existing_project(target, false) : NULL;
         char current[CBM_GRAPH_COMPARE_GENERATION_SIZE];
         bool matched = provider &&
                        cbm_store_generation(provider, current, sizeof(current)) == CBM_STORE_OK &&
@@ -2330,7 +2333,7 @@ cbm_cross_repo_result_t cbm_cross_repo_match_cancellable(const char *project,
 
     /* Every input is known to exist before destructive source cleanup. The
      * read-write open itself also omits CREATE so a race cannot create ghosts. */
-    cbm_store_t *src_store = cr_open_existing_project(project);
+    cbm_store_t *src_store = cr_open_existing_project(project, true);
     if (!src_store) {
         result.failed = true;
         free_project_list(resolved, resolved_count);
@@ -2394,7 +2397,7 @@ cbm_cross_repo_result_t cbm_cross_repo_match_cancellable(const char *project,
         }
 
         /* Open target store read-write (for bidirectional edge writes) */
-        cbm_store_t *tgt_store = cr_open_existing_project(tgt);
+        cbm_store_t *tgt_store = cr_open_existing_project(tgt, true);
         if (!tgt_store) {
             result.failed = true;
             break;
