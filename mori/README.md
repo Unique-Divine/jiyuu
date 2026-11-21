@@ -366,6 +366,14 @@ least one owning session is connected; under a daemon started with
 failed indexes register no watch. `index_status` reports the watch in its
 `watch` object.
 
+After a successful cross-repo link run, the watcher reuses the project's
+target selection when it reindexes. The caller's `index_status` reports
+`cross_repo.status` as `stale` when a provider changes or disappears, or
+when the stored link run predates provider generation tracking. Run
+cross-repo linking again to refresh those links. The field
+`cross_repo.reverse_pending` indicates that the daemon still needs to
+update the target graphs' references to this caller.
+
 The watcher follows git projects only, unless `watch_non_git` is on. Linked
 git worktrees are indexed as their own projects unless `ignore_worktrees` is
 on, which helps when short-lived worktrees would each leave an index behind.

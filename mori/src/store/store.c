@@ -765,9 +765,12 @@ static const char ST_WRITE_CACHE_SQL[] = "PRAGMA cache_size = -65536;";
  *                and would (a) mutate the DB on every read query and (b)
  *                fail on a read-only DB file / filesystem.
  * in_memory and read_only are mutually exclusive. */
-static int configure_pragmas(cbm_store_t *s, bool in_memory, bool read_only) {
-    int rc;
-    rc = exec_sql(s, "PRAGMA foreign_keys = ON;");
+static int configure_pragmas(cbm_store_t *s, bool in_memory, bool read_only, bool wait_for_lock) {
+    /* Set this before any setup statement can touch the database. */
+    if (sqlite3_busy_timeout(s->db, wait_for_lock && !in_memory ? 10000 : 0) != SQLITE_OK) {
+        return CBM_STORE_ERR;
+    }
+    int rc = exec_sql(s, "PRAGMA foreign_keys = ON;");
     if (rc != CBM_STORE_OK) {
         return rc;
     }
@@ -780,19 +783,11 @@ static int configure_pragmas(cbm_store_t *s, bool in_memory, bool read_only) {
         rc = exec_sql(s, "PRAGMA synchronous = OFF;");
     } else if (read_only) {
         /* Non-writing pragmas only — see the function comment. */
-        rc = exec_sql(s, "PRAGMA busy_timeout = 10000;");
-        if (rc != CBM_STORE_OK) {
-            return rc;
-        }
         char mmap_sql[ST_BUF_64];
         snprintf(mmap_sql, sizeof(mmap_sql), "PRAGMA mmap_size = %lld;",
                  (long long)cbm_store_resolve_mmap_size());
         rc = exec_sql(s, mmap_sql);
     } else {
-        rc = exec_sql(s, "PRAGMA busy_timeout = 10000;");
-        if (rc != CBM_STORE_OK) {
-            return rc;
-        }
         rc = exec_sql(s, "PRAGMA journal_mode = WAL;");
         if (rc != CBM_STORE_OK) {
             return rc;
@@ -1035,7 +1030,8 @@ static int store_authorizer(void *user_data, int action, const char *p3, const c
     }
 }
 
-static cbm_store_t *store_open_internal(const char *path, bool in_memory, bool create) {
+static cbm_store_t *store_open_internal(const char *path, bool in_memory, bool create,
+                                        bool wait_for_lock) {
     cbm_store_t *s = calloc(CBM_ALLOC_ONE, sizeof(cbm_store_t));
     if (!s) {
         return NULL;
@@ -1083,8 +1079,8 @@ static cbm_store_t *store_open_internal(const char *path, bool in_memory, bool c
     sqlite3_create_function(s->db, "cbm_camel_split", SKIP_ONE, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
                             NULL, sqlite_camel_split, NULL, NULL);
 
-    if (configure_pragmas(s, in_memory, false) != CBM_STORE_OK || init_schema(s) != CBM_STORE_OK ||
-        create_user_indexes(s) != CBM_STORE_OK) {
+    if (configure_pragmas(s, in_memory, false, wait_for_lock) != CBM_STORE_OK ||
+        init_schema(s) != CBM_STORE_OK || create_user_indexes(s) != CBM_STORE_OK) {
         sqlite3_close(s->db);
         safe_str_free(&s->db_path);
         free(s);
@@ -1113,21 +1109,22 @@ static cbm_store_t *store_open_internal(const char *path, bool in_memory, bool c
  * Must run before SQLite initialises, so it is done once on the first open. */
 
 cbm_store_t *cbm_store_open_memory(void) {
-    return store_open_internal(":memory:", true, true);
+    return store_open_internal(":memory:", true, true, true);
 }
 
 cbm_store_t *cbm_store_open_path(const char *db_path) {
     if (!db_path) {
         return NULL;
     }
-    return store_open_internal(db_path, false, true);
+    return store_open_internal(db_path, false, true, true);
 }
 
 cbm_store_t *cbm_store_open_path_existing(const char *db_path) {
-    if (!db_path) {
-        return NULL;
-    }
-    return store_open_internal(db_path, false, false);
+    return db_path ? store_open_internal(db_path, false, false, true) : NULL;
+}
+
+cbm_store_t *cbm_store_open_path_existing_nowait(const char *db_path) {
+    return db_path ? store_open_internal(db_path, false, false, false) : NULL;
 }
 
 const char *cbm_store_db_path(const cbm_store_t *s) {
@@ -1207,7 +1204,7 @@ static bool build_immutable_uri(const char *path, char *out, size_t out_sz) {
  * No SQLITE_OPEN_CREATE on either path — a missing DB must return NULL
  * (no ghost .db for unknown/unindexed projects). Returns false with s->db
  * closed when the DB cannot be opened. */
-static bool query_open_first_access(cbm_store_t *s, const char *db_path) {
+static bool query_open_first_access(cbm_store_t *s, const char *db_path, bool allow_immutable) {
     char open_path[4096];
     if (!cbm_path_for_file_api(db_path, open_path, sizeof(open_path))) {
         return false;
@@ -1229,7 +1226,7 @@ static bool query_open_first_access(cbm_store_t *s, const char *db_path) {
          * only retry with the immutable URI when the file exists but could not
          * be opened (the read-only-filesystem case). This also keeps the
          * common "project not found" path to a single open attempt. */
-        if (!cbm_file_exists(db_path)) {
+        if (!allow_immutable || !cbm_file_exists(db_path)) {
             return false;
         }
         char uri[ST_QUERY_URI_MAX];
@@ -1263,7 +1260,7 @@ static void query_first_access_hook(void) {
 static void query_first_access_hook(void) {}
 #endif
 
-cbm_store_t *cbm_store_open_path_query(const char *db_path) {
+static cbm_store_t *store_open_path_query(const char *db_path, bool wait_for_lock) {
     if (!db_path) {
         return NULL;
     }
@@ -1284,8 +1281,13 @@ cbm_store_t *cbm_store_open_path_query(const char *db_path) {
      * across open + first access puts a recovery before the next connection's
      * first read. The probe is one sqlite_master read, so the hold is short. */
     sqlite3_mutex *first_access = sqlite3_mutex_alloc(SQLITE_MUTEX_STATIC_APP1);
-    sqlite3_mutex_enter(first_access);
-    bool opened = query_open_first_access(s, db_path);
+    if (wait_for_lock) {
+        sqlite3_mutex_enter(first_access);
+    } else if (sqlite3_mutex_try(first_access) != SQLITE_OK) {
+        free(s);
+        return NULL;
+    }
+    bool opened = query_open_first_access(s, db_path, wait_for_lock);
     query_first_access_hook();
     sqlite3_mutex_leave(first_access);
     if (!opened) {
@@ -1309,7 +1311,7 @@ cbm_store_t *cbm_store_open_path_query(const char *db_path) {
     sqlite3_create_function(s->db, "cbm_camel_split", SKIP_ONE, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
                             NULL, sqlite_camel_split, NULL, NULL);
 
-    if (configure_pragmas(s, false, true) != CBM_STORE_OK) {
+    if (configure_pragmas(s, false, true, wait_for_lock) != CBM_STORE_OK) {
         sqlite3_close(s->db);
         safe_str_free(&s->db_path);
         free(s);
@@ -1317,6 +1319,14 @@ cbm_store_t *cbm_store_open_path_query(const char *db_path) {
     }
 
     return s;
+}
+
+cbm_store_t *cbm_store_open_path_query(const char *db_path) {
+    return store_open_path_query(db_path, true);
+}
+
+cbm_store_t *cbm_store_open_path_query_nowait(const char *db_path) {
+    return store_open_path_query(db_path, false);
 }
 
 /* ── Integrity check ───────────────────────────────────────────── */
@@ -1512,7 +1522,7 @@ cbm_store_t *cbm_store_open(const char *project) {
     }
     char path[CBM_SZ_1K];
     snprintf(path, sizeof(path), "%s/%s.db", cdir, project);
-    return store_open_internal(path, false, true);
+    return store_open_internal(path, false, true, true);
 }
 
 static void finalize_stmt(sqlite3_stmt **s) {
