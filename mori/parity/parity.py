@@ -57,7 +57,8 @@ import allowlist  # noqa: E402
 import calls as calls_mod  # noqa: E402
 import corpus  # noqa: E402
 import fixtures  # noqa: E402
-from graph_export import LAYERS, DiffReport, diff_exports, export_db, export_mori  # noqa
+from graph_export import (LAYERS, DiffReport, diff_exports, export_db,  # noqa
+                          export_mori, same_export_value)
 
 MORI = os.path.dirname(HERE)
 DEFAULT_BIN = os.path.join(MORI, "build", "c", "codebase-memory-mcp")
@@ -205,13 +206,14 @@ class Side:
     result = export_mori(db, self.bin, self.env(), INDEX_TIMEOUT_S)
     if self.verify_export:
       reference = export_db(db)
-      if result != reference:
-        keys = sorted(key for key in result.keys() | reference.keys()
-                      if result.get(key) != reference.get(key))
+      keys = sorted(key for key in result.keys() | reference.keys()
+                    if key not in result or key not in reference or
+                    not same_export_value(result[key], reference[key]))
+      if keys:
         diffs = diff_exports(reference, result).diffs()
         details = ", ".join(f"{d.layer}:{d.key}" for d in diffs[:3])
-        raise ValueError(f"side {self.name} export differs from SQL in {keys} "
-                         f"({details})")
+        suffix = f" ({details})" if details else ""
+        raise ValueError(f"side {self.name} export differs from SQL in {keys}{suffix}")
     return result
 
 
@@ -1007,6 +1009,8 @@ def main(argv: list[str]) -> int:
   p.add_argument("--measured", required=True,
                  help="what was measured, e.g. 'C-vs-C 2026-11-21'")
   a = ap.parse_args(argv)
+  if a.cmd in ("run", "ci") and a.verify_export and a.export_a == a.export_b == "sql":
+    ap.error("--verify-export requires --export-a rust or --export-b rust")
   if getattr(a, "scratch_root", None) is None and a.cmd in ("run", "ci"):
     a.scratch_root = default_scratch_roots()
   base = None

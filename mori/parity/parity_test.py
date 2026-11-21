@@ -11,7 +11,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -28,6 +28,17 @@ class ParityTest(unittest.TestCase):
     self.addCleanup(tmp.cleanup)
     self.tmp = tmp.name
     self.roots = [self.tmp]
+
+  def test_verify_export_requires_rust_before_allocating_scratch(self) -> None:
+    for command in ("ci", "run"):
+      with self.subTest(command=command), patch.object(parity.tempfile, "mkdtemp") as mkdtemp:
+        errors = io.StringIO()
+        with redirect_stderr(errors), self.assertRaises(SystemExit) as raised:
+          parity.main([command, "--verify-export"])
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("--verify-export requires --export-a rust or --export-b rust",
+                      errors.getvalue())
+        mkdtemp.assert_not_called()
 
   def test_ci_reports_only_work_that_survives_cleanup(self) -> None:
     reports: list[str] = []

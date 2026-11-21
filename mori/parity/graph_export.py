@@ -181,21 +181,64 @@ def set_graph_counts(result: dict[str, Any]) -> None:
     k[2] for k in result["edges"]).items()))
 
 
+def same_export_value(a: Any, b: Any) -> bool:
+  """Compare normalized export values without Python's numeric coercions."""
+  if type(a) is not type(b):
+    return False
+  if isinstance(a, dict):
+    # Decoder keys are strings or tuples of strings.
+    return a.keys() == b.keys() and all(same_export_value(a[k], b[k]) for k in a)
+  if isinstance(a, (list, tuple)):
+    return len(a) == len(b) and all(same_export_value(x, y) for x, y in zip(a, b))
+  return a == b
+
+
+EXPORT_RECORD_FIELDS = {
+  "project": {"name": str, "root": str},
+  "schema": {"key": str, "sql": str},
+  "count": {"table": str, "count": int},
+  "table": {"table": str, "key": list, "count": int},
+  "row": {"table": str, "properties": dict},
+  "fts": {"term": str, "doc": int, "count": int},
+}
+
+
+def read_export_record(line: str, number: int) -> dict[str, Any]:
+  try:
+    row = json.loads(line)
+  except ValueError as e:
+    raise ValueError(f"Mori export line {number}: {e}") from e
+  if not isinstance(row, dict):
+    raise ValueError(f"Mori export line {number}: expected a JSON object")
+  kind = row.get("kind")
+  if not isinstance(kind, str) or kind not in EXPORT_RECORD_FIELDS:
+    raise ValueError(f"Mori export line {number}: unknown record kind {kind!r}")
+  for name, want in EXPORT_RECORD_FIELDS[kind].items():
+    if type(row.get(name)) is not want:
+      raise ValueError(f"Mori export line {number}: {kind}.{name} must be {want.__name__}")
+  return row
+
+
 def decode_mori_export(lines: Iterable[str]) -> dict[str, Any]:
   """Read the sorted JSON Lines emitted by `mori dev export`."""
-  stream = iter(lines)
-  first = json.loads(next(stream, "{}"))
-  if first.get("kind") != "project":
-    raise ValueError("Mori export is missing its project record")
+  stream = enumerate(lines, 1)
+  _, first_line = next(stream, (1, ""))
+  if not first_line:
+    raise ValueError("Mori export line 1: missing project record")
+  first = read_export_record(first_line, 1)
+  if first["kind"] != "project":
+    raise ValueError("Mori export line 1: expected a project record")
   result = new_export(first["name"], first["root"])
-  for line in stream:
-    row = json.loads(line)
+  for number, line in stream:
+    row = read_export_record(line, number)
     kind = row["kind"]
     if kind == "schema":
       result["schema"][row["key"]] = row["sql"]
     elif kind == "count":
       result["counts_only"][row["table"]] = row["count"]
     elif kind == "table":
+      if any(not isinstance(key, str) for key in row["key"]):
+        raise ValueError(f"Mori export line {number}: table.key must contain strings")
       result["side"][row["table"]] = {
         "key": row["key"] or None, "rows": {}, "multiset": Counter(),
         "count": row["count"],
@@ -203,19 +246,28 @@ def decode_mori_export(lines: Iterable[str]) -> dict[str, Any]:
     elif kind == "row":
       table = row["table"]
       props = row["properties"]
+      key = row.get("key")
       if table in ("nodes", "edges"):
-        result[table][tuple(row["key"])] = props
+        want = 3 if table == "nodes" else 4
+        if not isinstance(key, list) or len(key) != want or any(
+            not isinstance(value, str) for value in key):
+          raise ValueError(f"Mori export line {number}: {table} key must contain {want} strings")
+        result[table][tuple(key)] = props
       else:
-        side = result["side"][table]
+        side = result["side"].get(table)
+        if side is None:
+          raise ValueError(f"Mori export line {number}: no table record for {table!r}")
         if side["key"]:
-          key = tuple(json.dumps(value, sort_keys=True) for value in row["key"])
+          if not isinstance(key, list) or len(key) != len(side["key"]):
+            raise ValueError(f"Mori export line {number}: invalid key for {table!r}")
+          key = tuple(json.dumps(value, sort_keys=True) for value in key)
           side["rows"][key] = props
         else:
           side["multiset"][json.dumps(props, sort_keys=True)] += 1
     elif kind == "fts":
       result.setdefault("fts_vocab", {})[row["term"]] = (row["doc"], row["count"])
     else:
-      raise ValueError(f"unknown record in Mori export: {kind!r}")
+      raise ValueError(f"Mori export line {number}: unexpected {kind!r} record")
   if "nodes_fts" in result["counts_only"]:
     result.setdefault("fts_vocab", {})
   set_graph_counts(result)

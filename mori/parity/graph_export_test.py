@@ -8,10 +8,12 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from graph_export import diff_exports, export_db  # noqa: E402
+from graph_export import decode_mori_export, diff_exports, export_db  # noqa: E402
+from parity import Side  # noqa: E402
 
 SCHEMA = """
 CREATE TABLE projects (name TEXT PRIMARY KEY, indexed_at TEXT,
@@ -133,6 +135,35 @@ class ExportDiffTest(unittest.TestCase):
     ea["fts_vocab_error"] = eb["fts_vocab_error"] = "no such module"
     got = {(d.layer, d.key) for d in diff_exports(ea, eb).diffs()}
     self.assertIn(("fts", "nodes_fts.vocab_error"), got)
+
+  def test_strict_export_distinguishes_nested_booleans_from_numbers(self) -> None:
+    path = self.db("types.db", nodes=[
+      ("Function", "main", "main.go", 1, {"options": [{"active": True}]}),
+      *NODES[1:],
+    ])
+    exported = export_db(path)
+    node = exported["nodes"][("main", "Function", "main.go")]
+    side = Side("b", "unused", "unused", "unused", "rust", True)
+    with patch("parity.export_mori", return_value=exported):
+      self.assertEqual(side.export(path), exported)
+      node["properties"]["options"][0]["active"] = 1
+      with self.assertRaisesRegex(ValueError, r"export differs from SQL.*nodes"):
+        side.export(path)
+
+  def test_malformed_export_records_raise_value_error_with_line(self) -> None:
+    project = '{"kind":"project","name":"p","root":"/p"}'
+    cases = [
+      (["[]"], "line 1: expected a JSON object"),
+      ([project, "null"], "line 2: expected a JSON object"),
+      ([project, '{"kind":"count","table":"x","count":true}'], "line 2: count.count"),
+      ([project, '{"kind":"row","table":"nodes","key":[{}],"properties":{}}'],
+       "line 2: nodes key"),
+      ([project, '{"kind":"row","table":"other","properties":{}}'],
+       "line 2: no table record"),
+    ]
+    for lines, error in cases:
+      with self.subTest(lines=lines), self.assertRaisesRegex(ValueError, error):
+        decode_mori_export(lines)
 
 
 if __name__ == "__main__":
