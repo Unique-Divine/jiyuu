@@ -297,6 +297,84 @@ static cr_run_status_t delete_cross_edges(cbm_store_t *store, const char *projec
     return cr_cancel_requested(ctx) ? CR_RUN_CANCELLED : CR_RUN_OK;
 }
 
+/* Old channel rows have no direction field. When the local function both
+ * emits and listens, keep its old forward link only if the named remote
+ * listener still exists for the same channel. A stale reverse row alone
+ * cannot supply that evidence. */
+static cr_run_status_t cr_reconcile_legacy_dual_role_channels(cbm_store_t *source,
+                                                              const char *source_project,
+                                                              cbm_store_t *provider,
+                                                              const char *provider_project,
+                                                              cr_run_context_t *ctx) {
+    sqlite3 *src = cbm_store_get_db(source);
+    sqlite3 *tgt = cbm_store_get_db(provider);
+    sqlite3_stmt *next = NULL, *listener = NULL, *restore = NULL, *remove = NULL;
+    const char *next_sql =
+        "SELECT e.id, channel.name, json_extract(e.properties, '$.target_function'), "
+        "json_extract(e.properties, '$.target_file') FROM edges e "
+        "JOIN nodes channel ON channel.id=e.target_id "
+        "WHERE e.project=?1 AND e.type='CROSS_CHANNEL' AND e.id>?3 AND "
+        "json_extract(e.properties, '$.target_project')=?2 AND "
+        "json_type(e.properties, '$.callers') IS NULL AND "
+        "json_type(e.properties, '$.channel_forward') IS NULL AND "
+        "EXISTS (SELECT 1 FROM edges local WHERE local.source_id=e.source_id AND "
+        "local.target_id=e.target_id AND local.type='LISTENS_ON') AND "
+        "EXISTS (SELECT 1 FROM edges local WHERE local.source_id=e.source_id AND "
+        "local.target_id=e.target_id AND local.type='EMITS') ORDER BY e.id LIMIT 1";
+    const char *listener_sql =
+        "SELECT 1 FROM edges e JOIN nodes listener ON listener.id=e.source_id "
+        "JOIN nodes channel ON channel.id=e.target_id "
+        "WHERE e.project=?1 AND e.type='LISTENS_ON' AND channel.name=?2 AND "
+        "listener.name=?3 AND listener.file_path=?4 LIMIT 1";
+    bool ok =
+        src && tgt && sqlite3_prepare_v2(tgt, next_sql, -1, &next, NULL) == SQLITE_OK &&
+        sqlite3_prepare_v2(src, listener_sql, -1, &listener, NULL) == SQLITE_OK &&
+        sqlite3_prepare_v2(tgt,
+                           "UPDATE edges SET properties="
+                           "json_set(properties, '$.channel_forward', json(properties)) "
+                           "WHERE id=?1",
+                           -1, &restore, NULL) == SQLITE_OK &&
+        sqlite3_prepare_v2(tgt, "DELETE FROM edges WHERE id=?1", -1, &remove, NULL) == SQLITE_OK &&
+        sqlite3_bind_text(next, 1, provider_project, -1, SQLITE_STATIC) == SQLITE_OK &&
+        sqlite3_bind_text(next, 2, source_project, -1, SQLITE_STATIC) == SQLITE_OK &&
+        sqlite3_bind_text(listener, 1, source_project, -1, SQLITE_STATIC) == SQLITE_OK;
+    int64_t last_id = 0;
+    while (ok && !cr_cancel_requested(ctx)) {
+        if (sqlite3_bind_int64(next, 3, last_id) != SQLITE_OK) {
+            ok = false;
+            break;
+        }
+        int rc = sqlite3_step(next);
+        if (rc != SQLITE_ROW) {
+            ok = rc == SQLITE_DONE;
+            break;
+        }
+        last_id = sqlite3_column_int64(next, 0);
+        for (int i = 1; i <= 3 && ok; i++) {
+            ok = sqlite3_bind_text(listener, i + 1, (const char *)sqlite3_column_text(next, i), -1,
+                                   SQLITE_TRANSIENT) == SQLITE_OK;
+        }
+        ok = sqlite3_reset(next) == SQLITE_OK && ok;
+        if (!ok || cr_cancel_requested(ctx)) {
+            break;
+        }
+        rc = sqlite3_step(listener);
+        ok = sqlite3_reset(listener) == SQLITE_OK && (rc == SQLITE_ROW || rc == SQLITE_DONE);
+        if (ok && !cr_cancel_requested(ctx)) {
+            sqlite3_stmt *change = rc == SQLITE_ROW ? restore : remove;
+            ok = sqlite3_bind_int64(change, 1, last_id) == SQLITE_OK &&
+                 sqlite3_step(change) == SQLITE_DONE;
+            ok = sqlite3_reset(change) == SQLITE_OK && ok;
+            ctx->mutated = ctx->mutated || (ok && sqlite3_changes(tgt) > 0);
+        }
+    }
+    sqlite3_finalize(next);
+    sqlite3_finalize(listener);
+    sqlite3_finalize(restore);
+    sqlite3_finalize(remove);
+    return cr_cancel_requested(ctx) ? CR_RUN_CANCELLED : ok ? CR_RUN_OK : CR_RUN_FAILED;
+}
+
 /* Remove src_project's callers from the provider tgt's reverse CROSS_*
  * edges before src_project is matched again: an entry under "callers"
  * outlived the client function it names, because the store only merges
@@ -305,8 +383,14 @@ static cr_run_status_t delete_cross_edges(cbm_store_t *store, const char *projec
  * removed caller at the top level takes a remaining one. A channel row can
  * share its endpoints with a forward link; restore that link when the last
  * reverse caller goes away. The run then re-adds the current callers. */
-static cr_run_status_t cr_reconcile_reverse(cbm_store_t *tgt_store, const char *tgt_project,
-                                            const char *src_project, cr_run_context_t *ctx) {
+static cr_run_status_t cr_reconcile_reverse(cbm_store_t *src_store, const char *src_project,
+                                            cbm_store_t *tgt_store, const char *tgt_project,
+                                            cr_run_context_t *ctx) {
+    cr_run_status_t legacy =
+        cr_reconcile_legacy_dual_role_channels(src_store, src_project, tgt_store, tgt_project, ctx);
+    if (legacy != CR_RUN_OK) {
+        return legacy;
+    }
     static const char *const sql[] = {
         /* Old channels store a single top-level peer. Infer ownership only
          * when the local endpoints can represent a reverse link alone. */
@@ -2019,7 +2103,8 @@ static cr_run_status_t cr_match_project_pair(cbm_store_t *src_store, const char 
                                              cr_run_context_t *run,
                                              cbm_cross_repo_result_t *result) {
     cr_run_status_t match_status =
-        run->staging_store ? CR_RUN_OK : cr_reconcile_reverse(tgt_store, tgt, project, run);
+        run->staging_store ? CR_RUN_OK
+                           : cr_reconcile_reverse(src_store, project, tgt_store, tgt, run);
     if (match_status == CR_RUN_OK) {
         match_status = add_match_count(&result->http_edges,
                                        match_http_routes(src_store, project, tgt_store, tgt, run));
@@ -2210,7 +2295,7 @@ static bool cr_repair_peer(cbm_store_t *source, const char *project, cbm_store_t
     sqlite3 *provider_db = cbm_store_get_db(provider);
     sqlite3_progress_handler(source_db, CR_CANCEL_SQLITE_OPS, cr_sql_cancel, &run);
     sqlite3_progress_handler(provider_db, CR_CANCEL_SQLITE_OPS, cr_sql_cancel, &run);
-    bool ok = cr_reconcile_reverse(provider, target, project, &run) == CR_RUN_OK &&
+    bool ok = cr_reconcile_reverse(source, project, provider, target, &run) == CR_RUN_OK &&
               match_http_routes(source, project, provider, target, &run).status == CR_RUN_OK &&
               match_channels(source, project, provider, target, &run).status == CR_RUN_OK &&
               match_typed_routes(source, project, provider, target, "GRPC_CALLS", "service",

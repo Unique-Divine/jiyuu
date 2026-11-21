@@ -2030,6 +2030,43 @@ TEST(cross_repo_relink_removes_provably_reverse_legacy_channel) {
     PASS();
 }
 
+static bool cross_repo_legacy_dual_role(bool valid_forward) {
+    cross_repo_fixture_t fixture;
+    char live[512], stage[512];
+    bool ok = cross_repo_fixture_begin(&fixture) &&
+              cross_repo_seed_channel(&fixture, "caller", true, valid_forward) &&
+              cross_repo_seed_channel(&fixture, "provider", true, true) &&
+              cross_repo_project_path(&fixture, "caller", live, sizeof(live)) &&
+              cross_repo_project_path(&fixture, "_stage", stage, sizeof(stage));
+    if (ok) {
+        ok = cross_repo_link_channel("caller", "provider", 1) &&
+             (!valid_forward || cross_repo_link_channel("provider", "caller", 1)) &&
+             cross_repo_exec(&fixture, "provider",
+                             "UPDATE edges SET properties=json_remove(properties,"
+                             "'$.callers', '$.channel_forward') WHERE type='CROSS_CHANNEL'") &&
+             cbm_store_backup_path(live, stage) == CBM_STORE_OK &&
+             cross_repo_exec(&fixture, "_stage", "DELETE FROM edges WHERE type='EMITS'") &&
+             cbm_cross_repo_relink_stage(live, stage, "caller", NULL) == CBM_STORE_OK &&
+             cbm_store_backup_path(stage, live) == CBM_STORE_OK &&
+             cbm_cross_repo_reconcile_published("caller", NULL);
+    }
+    int links = cross_repo_count_edges(&fixture, "provider", "CROSS_CHANNEL");
+    int verified_forward = cross_repo_query_int(
+        &fixture, "provider",
+        "SELECT COUNT(*) FROM edges WHERE type='CROSS_CHANNEL' "
+        "AND json_extract(properties, '$.channel_forward.target_project')='caller'");
+    cross_repo_fixture_end(&fixture);
+
+    int expected = valid_forward ? 1 : 0;
+    return ok && links == expected && verified_forward == expected;
+}
+
+TEST(cross_repo_legacy_dual_role_checks_the_remote_listener) {
+    ASSERT_TRUE(cross_repo_legacy_dual_role(false));
+    ASSERT_TRUE(cross_repo_legacy_dual_role(true));
+    PASS();
+}
+
 TEST(cross_repo_status_flags_legacy_provider_first_upgrade) {
     cross_repo_fixture_t fixture;
     bool ok = cross_repo_fixture_begin(&fixture) &&
@@ -2241,6 +2278,7 @@ SUITE(cross_repo) {
     RUN_TEST(cross_repo_repair_defers_on_busy_open_and_write);
     RUN_TEST(cross_repo_channel_repair_preserves_other_emitters_and_forward_link);
     RUN_TEST(cross_repo_relink_removes_provably_reverse_legacy_channel);
+    RUN_TEST(cross_repo_legacy_dual_role_checks_the_remote_listener);
     RUN_TEST(cross_repo_status_flags_legacy_provider_first_upgrade);
     RUN_TEST(cross_repo_wildcard_replay_marks_missing_provider_until_return);
     RUN_TEST(cross_repo_explicit_wildcard_keeps_missing_peer_with_online_provider);
