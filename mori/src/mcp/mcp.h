@@ -297,6 +297,31 @@ void cbm_mcp_set_project_readers(cbm_mcp_project_identity_reader_fn identity,
                                  cbm_mcp_project_stats_reader_fn stats,
                                  cbm_mcp_project_metadata_reader_fn metadata);
 
+typedef struct {
+    char *name;
+    char *root_path;
+    char *db_file;
+    char *branch;
+    int nodes;
+    int edges;
+    int64_t size_bytes;
+    bool populated;
+} cbm_mcp_project_record_t;
+
+typedef struct {
+    int limit;
+    int offset;
+    int start;
+    int end;
+} cbm_mcp_project_page_t;
+
+/* Register before request threads start. The callback sorts the borrowed records
+ * in place and clamps limit/offset before returning the half-open page bounds.
+ * The array may be NULL when count is zero. C owns all records and strings. */
+typedef void (*cbm_mcp_project_page_builder_fn)(cbm_mcp_project_record_t *records, int count,
+                                                cbm_mcp_project_page_t *page);
+void cbm_mcp_set_project_page_builder(cbm_mcp_project_page_builder_fn builder);
+
 /* ── Supervised background index (RSS isolation, #832) ────────── */
 
 /* #1300: the explicit error response for a worker that exited cleanly without
