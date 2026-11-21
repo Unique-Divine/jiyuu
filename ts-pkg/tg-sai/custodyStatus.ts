@@ -1,3 +1,4 @@
+import type { DealChatPoolHealth } from "./dealChatPoolExecutor"
 import { UNKNOWN_CLOUD_OPERATION } from "./provisioningCloud"
 import { safeProvisionError } from "./provisioning"
 import type { BackgroundQueue } from "./state/background"
@@ -16,13 +17,14 @@ export interface CustodyStatusReport {
     waitS: number | null
   }[]
   /** Member adds the account made this UTC day: setup and background. */
-  addsToday: number
-  background: { pending: number; nextAt: string | null }
+  addsToday?: number
+  background?: { pending: number; nextAt: string | null }
   /**
    * Groups, supergroups, and channels the account is in, from the last
    * pool fill session that counted them. Absent when not counted yet.
    */
   groupCount?: number
+  dealChatPool?: DealChatPoolHealth
 }
 
 /** Reports go out at least this often, changed or not. */
@@ -35,9 +37,10 @@ export function buildCustodyStatus(input: {
   accountId: number
   workerVersion: string
   holds: HoldStore
-  queue: BackgroundQueue
+  queue: BackgroundQueue | null
   nowMs: number
   groupCount?: number | null
+  dealChatPool?: DealChatPoolHealth
 }): CustodyStatusReport {
   const holds = input.holds
     .activeHolds(input.accountId, input.nowMs)
@@ -48,23 +51,26 @@ export function buildCustodyStatus(input: {
       method: hold.method,
       waitS: hold.waitS,
     }))
-  const summary = input.queue.summary()
+  const summary = input.queue?.summary()
   return {
     accountId: String(input.accountId),
     workerVersion: input.workerVersion,
     observedAt: new Date(input.nowMs).toISOString(),
     holds,
-    addsToday: input.queue.addsToday(input.nowMs),
-    background: {
-      pending: summary.pending,
-      nextAt:
-        summary.pending && summary.nextAtMs !== null
-          ? new Date(summary.nextAtMs).toISOString()
-          : null,
-    },
+    ...(input.queue && summary ? {
+      addsToday: input.queue.addsToday(input.nowMs),
+      background: {
+        pending: summary.pending,
+        nextAt:
+          summary.pending && summary.nextAtMs !== null
+            ? new Date(summary.nextAtMs).toISOString()
+            : null,
+      },
+    } : {}),
     ...(typeof input.groupCount === "number"
       ? { groupCount: input.groupCount }
       : {}),
+    ...(input.dealChatPool ? { dealChatPool: input.dealChatPool } : {}),
   }
 }
 
@@ -75,6 +81,7 @@ export function custodyStatusKey(report: CustodyStatusReport): string {
     addsToday: report.addsToday,
     background: report.background,
     groupCount: report.groupCount ?? null,
+    dealChatPool: report.dealChatPool ?? null,
   })
 }
 

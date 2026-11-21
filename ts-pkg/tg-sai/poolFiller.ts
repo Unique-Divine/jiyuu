@@ -270,6 +270,9 @@ export interface PoolFillResult {
     | "failed"
     | "error"
   ref?: string
+  /** Deal Desk fill identity shared by service and worker logs. */
+  fillId?: string
+  actionId?: string
   chatId?: number
   stage?: string
   /** Deal Desk's `reason` when it did not allow a fill. */
@@ -298,7 +301,7 @@ export const IDLE_POOL_STATES: ReadonlySet<string> = new Set([
 ])
 
 /** Latest hold end on `groups`; an unreadable store holds 5 minutes. */
-function holdEnd(
+export function poolHoldEnd(
   holds: HoldStoreSource,
   accountId: number,
   groups: readonly HoldGroup[],
@@ -318,7 +321,7 @@ function holdEnd(
 }
 
 /** A flood wait, `PEER_FLOOD`, or a local hold refusal. */
-function isFloodOrHold(error: unknown): boolean {
+export function isFloodOrHold(error: unknown): boolean {
   const e = error as { text?: unknown; errorMessage?: unknown }
   const text = typeof e?.text === "string" ? e.text : e?.errorMessage
   return (
@@ -468,7 +471,7 @@ export async function fillPoolOnce(params: {
       spacedUntil(startMs) ?? 0,
     )
     if (paced > startMs) return { state: "paced", nextAtMs: paced }
-    const held = holdEnd(params.holds, accountId, POOL_HOLD_GROUPS, startMs)
+    const held = poolHoldEnd(params.holds, accountId, POOL_HOLD_GROUPS, startMs)
     if (held !== null) {
       journal.paceFill(accountId, held)
       return { state: "held", nextAtMs: held }
@@ -824,7 +827,7 @@ export async function fillPoolOnce(params: {
             "waiting",
             "add_bot:background_pending",
           )
-        const held = holdEnd(params.holds, accountId, ["invite"], nowMs)
+        const held = poolHoldEnd(params.holds, accountId, ["invite"], nowMs)
         if (held !== null) return waitUntil(held, "held")
         const spaced = spacedUntil(nowMs)
         if (spaced !== null) return waitUntil(spaced, "paced")

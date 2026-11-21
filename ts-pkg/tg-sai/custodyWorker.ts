@@ -8,6 +8,8 @@ import {
   recordingMemberAdds,
 } from "./backgroundWorker"
 import type { DrainResult } from "./backgroundWorker"
+import { DealChatPoolExecutor, dealChatPoolReason } from "./dealChatPoolExecutor"
+import type { DealChatPoolHealth } from "./dealChatPoolExecutor"
 import {
   buildCustodyStatus,
   CustodyStatusReporter,
@@ -52,6 +54,7 @@ import { poolChatPhoto } from "./poolPhoto"
 import { backgroundPacing } from "./state/background"
 import type { BackgroundQueue } from "./state/background"
 import { openStateDb, stateDbPath } from "./state/db"
+import { DealChatPoolOutbox } from "./state/dealChatPoolOutbox"
 import type { HoldStoreSource } from "./state/guard"
 import { HoldStore, remainingSeconds } from "./state/holds"
 import type { HoldGroup } from "./state/holds"
@@ -550,6 +553,7 @@ export async function runCustodyWorker(options: {
   const workerId = await stableWorkerId(root)
   // An invalid owner list disables only the filler; setups keep running.
   const poolPlan = poolFillPlan()
+  const managedPool = poolFillMode() === "managed"
   const telemetry = options.telemetry
   const clientTelemetry = telemetry?.client({
     accountId: CUSTODY_USER_ID,
@@ -623,8 +627,10 @@ export async function runCustodyWorker(options: {
       }
     const poolTelegram = <T>(
       operation: (adapter: TelegramProvisioner) => Promise<T>,
+      jobId = "pool-fill",
+      signal = options.signal,
     ): Promise<T> =>
-      withTelemetryJob("pool-fill", () =>
+      withTelemetryJob(jobId, () =>
         withProvisionTelegram(
           {
             custodyProfile: options.custodyProfile,
@@ -632,7 +638,7 @@ export async function runCustodyWorker(options: {
           },
           operation,
           clientTelemetry,
-          options.signal,
+          signal,
         ),
       )
     if (options.run && poolPlan.error) {
@@ -656,8 +662,51 @@ export async function runCustodyWorker(options: {
           error: poolPlan.error!,
         })
       : undefined
-    const fill =
-      poolJournal && queue && poolPlan.owners
+    let poolOutbox: DealChatPoolOutbox | null = null
+    if (managedPool && poolJournal)
+      try {
+        poolOutbox = DealChatPoolOutbox.open()
+      } catch {
+        // Managed execution requires a writable outbox.
+      }
+    const executor =
+      managedPool && poolJournal && poolOutbox && queue && poolPlan.owners?.includes(CUSTODY_USER_ID)
+        ? new DealChatPoolExecutor({
+            accountId: CUSTODY_USER_ID,
+            workerId,
+            legacy: poolJournal,
+            outbox: poolOutbox,
+            queue,
+            holds,
+            pacing,
+            cap,
+            groups,
+            cloud,
+            telegram: ({ fillId, actionId }, operation, leaseRemainingMs) => {
+              const leaseSignal = AbortSignal.timeout(leaseRemainingMs)
+              return poolTelegram(
+                operation,
+                `deal-chat-pool:${fillId}:${actionId}`,
+                options.signal ? AbortSignal.any([options.signal, leaseSignal]) : leaseSignal,
+              )
+            },
+            photo: poolChatPhoto,
+            signal: options.signal,
+          })
+        : null
+    let poolHealth: DealChatPoolHealth | undefined
+    if (managedPool)
+      poolHealth = executor
+        ? { mode: "managed", state: "idle" }
+        : {
+            mode: "managed",
+            state: "unavailable",
+            reason: poolPlan.error ?? (!queue || !poolJournal || !poolOutbox
+              ? "worker_state_unavailable" : "owner_account_mismatch"),
+          }
+    const fill = managedPool
+      ? executor ? () => executor.tick() : undefined
+      : poolJournal && queue && poolPlan.owners
         ? () =>
             fillPoolOnce({
               accountId: CUSTODY_USER_ID,
@@ -696,16 +745,17 @@ export async function runCustodyWorker(options: {
             ...(options.signal ? { signal: options.signal } : {}),
           })
       : undefined
-    const reporter = queue
+    const reporter = queue || (options.run && managedPool)
       ? new CustodyStatusReporter({
           build: (nowMs) =>
             buildCustodyStatus({
               accountId: CUSTODY_USER_ID,
               workerVersion: packageJson.version,
               holds: processHoldStore(),
-              queue: queue!,
+              queue,
               nowMs,
               groupCount: groups.value?.count ?? null,
+              dealChatPool: poolHealth,
             }),
           send: (report) => cloud.custodyStatus(report),
           log: (level, msg, attrs) => {
@@ -752,11 +802,20 @@ export async function runCustodyWorker(options: {
           )
           after = result.nextAfter ?? undefined
           passWork = result.requesterWork
-          const line = { ...result, observedAt: new Date().toISOString() }
+          const observedAt = new Date().toISOString()
+          if (executor) poolHealth = managedPoolHealth(result, poolHealth, observedAt)
+          const line = { ...result, observedAt }
           console.log(JSON.stringify(line))
           recordTick({ startedAt: tickStartedAt, result })
         } catch (error) {
           recordTick({ startedAt: tickStartedAt, error })
+          if (executor)
+            poolHealth = {
+              mode: "managed",
+              state: "unavailable",
+              reason: "worker_tick_failed",
+              ...(poolHealth?.lastSuccessAt ? { lastSuccessAt: poolHealth.lastSuccessAt } : {}),
+            }
           if (options.once) throw error
           const line = {
             state: "worker_tick_failed",
@@ -779,6 +838,7 @@ export async function runCustodyWorker(options: {
         })
       } while (!options.signal?.aborted)
     } finally {
+      poolOutbox?.close()
       poolJournal?.close()
       queue?.close()
       if (options.run) closeProcessHoldStores()
@@ -806,14 +866,22 @@ export const TICK_HEARTBEAT_MS = 5 * 60 * 1000
 export const POOL_FILL_ENV = "TG_SAI_POOL_FILL"
 
 /**
- * Pool filling is off unless `TG_SAI_POOL_FILL` is `1`, `true`, or `on`,
- * so a deploy never starts making chats by itself.
+ * Pool filling requires `TG_SAI_POOL_FILL`. The values `1`, `true`, and
+ * `on` select the local filler. The value `managed` selects Deal Desk's
+ * scheduler exclusively.
  */
 export function poolFillEnabled(
   env: Record<string, string | undefined> = process.env,
 ): boolean {
+  return poolFillMode(env) !== "off"
+}
+
+export function poolFillMode(
+  env: Record<string, string | undefined> = process.env,
+): "off" | "legacy" | "managed" {
   const value = env[POOL_FILL_ENV]?.trim().toLowerCase()
-  return value === "1" || value === "true" || value === "on"
+  if (value === "managed") return "managed"
+  return value === "1" || value === "true" || value === "on" ? "legacy" : "off"
 }
 
 /**
@@ -829,6 +897,50 @@ export function poolFillPlan(
     return { owners: ownerAccounts(CUSTODY_USER_ID, env), error: null }
   } catch {
     return { owners: null, error: "owner_accounts_invalid" }
+  }
+}
+
+/** Describe local executor readiness without forwarding remote error text. */
+export function managedPoolHealth(
+  tick: Awaited<ReturnType<typeof runWorkerOnce>>,
+  previous: DealChatPoolHealth | undefined,
+  observedAt: string,
+): DealChatPoolHealth {
+  const result = tick.pool
+  const lastSuccessAt = result?.state === "filled" ? observedAt : previous?.lastSuccessAt
+  const base = {
+    mode: "managed" as const,
+    ...(lastSuccessAt ? { lastSuccessAt } : {}),
+  }
+  if (!result) {
+    if (tick.requesterWork || tick.nextAfter)
+      return { ...base, state: "waiting", reason: "waiting_on_chat_setup" }
+    if (tick.background && tick.background.state !== "idle")
+      return { ...base, state: "waiting", reason: "waiting_on_background" }
+    return { ...base, state: "idle" }
+  }
+  const nextAt = result.nextAtMs === undefined
+    ? undefined : new Date(result.nextAtMs).toISOString()
+  // A local sleep after an error reports the original diagnostic.
+  if (
+    result.state === "waiting" &&
+    nextAt !== undefined &&
+    previous?.nextAt === nextAt &&
+    !result.stage
+  )
+    return previous
+  const reason = dealChatPoolReason(result.error ?? result.reason)
+  const step = dealChatPoolReason(result.stage)
+  return {
+    ...base,
+    state: result.state === "error" || result.state === "disabled"
+      ? "unavailable"
+      : result.state === "progress" || result.state === "filled"
+        ? "working"
+        : result.state === "idle" ? "idle" : "waiting",
+    ...(reason ? { reason } : {}),
+    ...(step ? { step } : {}),
+    ...(nextAt ? { nextAt } : {}),
   }
 }
 
@@ -894,6 +1006,9 @@ export function recordWorkerTick(
               ? { background: tick.result.background.state }
               : {}),
             ...(tick.result.pool ? { pool: tick.result.pool.state } : {}),
+            ...(tick.result.pool?.fillId ? { poolFillId: tick.result.pool.fillId } : {}),
+            ...(tick.result.pool?.actionId ? { poolActionId: tick.result.pool.actionId } : {}),
+            ...(tick.result.pool?.stage ? { poolStage: tick.result.pool.stage } : {}),
             ...(tick.result.pool?.alert
               ? { poolAlert: tick.result.pool.alert }
               : {}),
