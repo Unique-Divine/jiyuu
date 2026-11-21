@@ -21,6 +21,7 @@
 // Matching output alone would pass when both binaries fail the same way, so
 // each invocation also has fixed expectations on its exit code and stdout,
 // checked on both sides.
+
 import { cp, mkdir, mkdtemp, realpath, rm } from "node:fs/promises"
 import { join, resolve } from "node:path"
 
@@ -117,11 +118,7 @@ export function normalize(text: string, ctx: NormalizeContext): string {
 
 // A line diff that marks each differing line pair; enough to read a failure
 // in CI logs without a diff dependency.
-export function diffLines(
-  a: string,
-  b: string,
-  labels = ["c", "mori"],
-): string {
+export function diffLines(a: string, b: string, labels = ["c", "mori"]): string {
   const left = a.split("\n")
   const right = b.split("\n")
   const out: string[] = []
@@ -276,11 +273,7 @@ export function invocations(repo: string, project: string): Invocation[] {
       args: ["--version"],
       expect: { exit: 0, stdout: [" "] },
     },
-    {
-      name: "--help",
-      args: ["--help"],
-      expect: { exit: 0, stdout: ["Usage:"] },
-    },
+    { name: "--help", args: ["--help"], expect: { exit: 0, stdout: ["Usage:"] } },
     {
       name: "cli list_projects (empty)",
       args: ["cli", "list_projects"],
