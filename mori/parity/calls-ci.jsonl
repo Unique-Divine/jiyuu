@@ -1,0 +1,22 @@
+{"tool": "list_projects", "args": {}}
+{"tool": "index_status", "args": {"project": "{{project:fx-polyglot}}"}}
+{"tool": "get_graph_schema", "args": {"project": "{{project:fx-polyglot}}"}}
+{"tool": "search_graph", "args": {"project": "{{project:fx-polyglot}}", "name_pattern": ".*load.*", "limit": 10}}
+{"tool": "search_graph", "args": {"project": "{{project:fx-polyglot}}", "name_pattern": ".*", "limit": 3}}
+{"tool": "search_graph", "args": {"project": "{{project:fx-lib}}", "query": "mean", "limit": 5}}
+{"tool": "search_graph", "args": {"project": "{{project:fx-lib}}", "query": "mean", "limit": 1}}
+{"tool": "search_graph", "args": {"project": "{{project:fx-lib}}", "label": "Section", "limit": 10}}
+{"tool": "search_graph", "args": {"project": "{{project:fx-lib}}", "query": "sum", "format": "json"}}
+{"tool": "query_graph", "args": {"project": "{{project:fx-polyglot}}", "query": "MATCH (f:Function) RETURN f.name ORDER BY f.name LIMIT 20"}}
+{"tool": "query_graph", "args": {"project": "{{project:fx-polyglot}}", "query": "MATCH (f) RETURN f.name LIMIT 2"}}
+{"tool": "query_graph", "args": {"project": "{{project:fx-polyglot}}", "query": "MATCH (f) RETURN f.label AS l, count(*) AS c ORDER BY c DESC"}}
+{"tool": "query_graph", "args": {"project": "{{project:fx-polyglot}}", "query": "MATCH (a)-[r]->(b) RETURN type(r), count(*) ORDER BY type(r)", "format": "json"}}
+{"tool": "query_graph", "args": {"project": "{{project:fx-lib}}", "query": "MATCH (n:Function WHERE"}}
+{"tool": "trace_path", "args": {"project": "{{project:fx-lib}}", "function_name": "add", "direction": "inbound", "depth": 3}}
+{"tool": "trace_path", "args": {"project": "{{project:fx-polyglot}}", "function_name": "load_config", "direction": "both", "depth": 2}}
+{"tool": "search_code", "args": {"project": "{{project:fx-polyglot}}", "pattern": "items", "limit": 10}}
+{"tool": "check_index_coverage", "args": {"project": "{{project:fx-lib}}", "paths": ["lib/math.ts", "missing.ts"]}}
+{"tool": "get_code_snippet", "args": {"project": "{{project:fx-lib}}", "qualified_name": "mean"}}
+{"tool": "get_code_snippet", "args": {"project": "{{project:fx-lib}}", "qualified_name": "no_such_function"}}
+{"tool": "get_file_outline", "args": {"project": "{{project:fx-polyglot}}", "file_path": "app/server.py"}}
+{"tool": "get_architecture", "args": {"project": "{{project:fx-polyglot}}"}}

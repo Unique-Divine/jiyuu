@@ -534,7 +534,7 @@ async function main() {
     const ok =
         failure === null &&
         missingTestids.length === 0 &&
-        /CBM LENS/.test(report.brandText) &&
+        /MORI GRAPH/.test(report.brandText) &&
         /^v\d+\.\d+\.\d+/.test(report.versionChip) &&
         // Nachgezogen am 2026-08-29 (W7a, Nutzerauftrag): der Lauf nagelte
         // [f]ile fest, also ausgerechnet einen der vier Menuepunkte ohne

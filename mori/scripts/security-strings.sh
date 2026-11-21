@@ -119,6 +119,8 @@ ALLOWED_URLS=(
     # them as homepage/documentation fields, and the graph UI links the docs.
     "https://github.com/DeusData"
     "https://deusdata.github.io/codebase-memory-mcp"
+    # Mori's home: upgrade steps and the UI's issue link point at Jiyuu.
+    "https://github.com/Unique-Divine/jiyuu"
     "http://127.0.0.1"
     "http://localhost"
     # SQLite internal URLs (part of vendored sqlite3 strings)

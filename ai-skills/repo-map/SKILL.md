@@ -3,11 +3,11 @@ name: repo-map
 description: >-
   Maps and routes between key repositories on my machine (boku, nibiru,
   nibi-geth, nibi-go-hm, nibi-ts-sdk, sai-web, sai-perps, open-sai, nibi-iac,
-  nibi-web, gh-io-ud, and the in-tree Wasm runtime and Rust contracts). Use when the user
-  asks which repo to look at, where a feature lives, how repos connect, how
-  services are deployed (Terraform/IaC), when a task spans chain, EVM, indexer,
-  SDK, frontend, and docs, or when the user asks about the personal site, blog
-  posts, official Nibiru docs, or Astro/gh-pages.
+  nibi-web, ud-web, and the in-tree Wasm runtime and Rust contracts). Use when
+  the user asks which repo to look at, where a feature lives, how repos
+  connect, how services are deployed (Terraform/IaC), when a task spans chain,
+  EVM, indexer, SDK, frontend, and docs, or when the user asks about the
+  personal site, blog posts, official Nibiru docs, or Astro/gh-pages.
 ---
 
 # Repo Map — Nibiru and Personal Repos
@@ -92,9 +92,10 @@ frontend and API integrations. This uses the "sai-keeper" GraphQL interface.
 ### Personal, Blog, Boku Workspace
 - `~/boku`: **Personal knowledge base and project hub.** Monorepo for sandboxing, backups, and external brain. Use when working on epics, specs, Nibiru notes, focustime, or scripts that span nibiru, sai-perps, sai-web. Contains: `epics/`, `nibi/` (addr-book, cook), `free/` (todos, journal), `sde/`, `jiyuu/` (focustime, mdtoc), `scripts/`. Bun/TS + Go + Rust. Run `just test`, `just install`.
   - Boku, its `dotfiles` submodule, and Jiyuu keep one branch per machine: `ud/main` on the laptop and `ud/homebox` on homebox. Commit work in progress there, merge `origin/main` into it after a PR merges, and never check out `main` in the main checkouts. To move work to the other machine, merge one machine branch into the other.
-- `~/codebase-memory-mcp`: **Codebase Memory MCP fork (C).** The local code graph agents query; fork https://github.com/Unique-Divine/codebase-memory-mcp of DeusData/codebase-memory-mcp, built and installed from branch `ud/main` (adds GraphQL cross-repo linking). Kept beside other repos, not as a submodule. Use agent skill `codebase-memory`.
-- `~/gh-io-ud`: **Personal site (Firebase Hosting).** Astro 4 + Tailwind. Blog
-  content in `src/content/post/` (schema in `src/content/config.ts`). Site config
+- `~/boku/jiyuu/mori`: **Mori.** Code graph source and release tooling. Use agent skill `mori-graph`.
+  The older C fork checkout at `~/codebase-memory-mcp` is available for rollback and reference.
+- `~/ud-web`: **Personal site (Firebase Hosting).** Astro 7 + Tailwind. Blog
+  content in `src/content/post/` (schema in `src/content.config.ts`). Site config
   `src/config.yaml`, nav `src/navigation.js`. Run `just dev`, build `just b`,
   deploy to Firebase Hosting with `just deploy`.
 

@@ -8,6 +8,7 @@
 #include "cli/agent_profiles.h"
 
 #include "cli/config_toml_edit.h"
+#include "cli/mori_names.h"
 #include "yyjson/yyjson.h"
 
 #include <stdbool.h>
@@ -55,6 +56,31 @@ static const char *const tool_base_names[PROFILE_TOOL_COUNT] = {
     "search_graph",     "trace_path",     "get_code_snippet",     "query_graph",
     "get_architecture", "search_code",    "get_graph_schema",     "list_projects",
     "index_status",     "detect_changes", "check_index_coverage",
+};
+
+/* The names a profile mentions: the MCP server key that prefixes its tool ids,
+ * the agent skill it loads, and its display name. Current profiles say
+ * mori-graph; the legacy set reproduces what releases before the rename
+ * wrote, so install and uninstall still recognize those files as owned. */
+typedef struct {
+    const char *server_key;
+    const char *skill;
+    const char *display_names[CBM_GRAPH_TIER_COUNT];
+    const char *server_phrase;
+} profile_names_t;
+
+static const profile_names_t current_names = {
+    .server_key = CBM_MCP_SERVER_KEY,
+    .skill = "mori-graph",
+    .display_names = {"Mori Graph Scout", "Mori Graph Verify", "Mori Graph Auditor"},
+    .server_phrase = "the " CBM_MCP_SERVER_KEY " MCP server",
+};
+
+static const profile_names_t legacy_names = {
+    .server_key = CBM_MCP_SERVER_KEY_LEGACY,
+    .skill = "codebase-memory",
+    .display_names = {"Codebase Memory Scout", "Codebase Memory Verify", "Codebase Memory Auditor"},
+    .server_phrase = CBM_MCP_SERVER_KEY_LEGACY,
 };
 
 static bool tier_valid(cbm_graph_tier_t tier) {
@@ -155,13 +181,12 @@ const char *cbm_graph_tier_slug(cbm_graph_tier_t tier) {
     return tier_valid(tier) ? slugs[tier] : NULL;
 }
 
+static const char *tier_display_name(cbm_graph_tier_t tier, const profile_names_t *names) {
+    return tier_valid(tier) ? names->display_names[tier] : NULL;
+}
+
 const char *cbm_graph_tier_display_name(cbm_graph_tier_t tier) {
-    static const char *const names[CBM_GRAPH_TIER_COUNT] = {
-        "Codebase Memory Scout",
-        "Codebase Memory Verify",
-        "Codebase Memory Auditor",
-    };
-    return tier_valid(tier) ? names[tier] : NULL;
+    return tier_display_name(tier, &current_names);
 }
 
 static const char *profile_description(cbm_graph_tier_t tier, cbm_graph_access_t access) {
@@ -183,7 +208,8 @@ static const char *profile_description(cbm_graph_tier_t tier, cbm_graph_access_t
     return access == CBM_GRAPH_ACCESS_DIRECT ? direct[tier] : handoff[tier];
 }
 
-char *cbm_render_graph_prompt(cbm_graph_tier_t tier, cbm_graph_access_t access) {
+static char *render_graph_prompt(cbm_graph_tier_t tier, cbm_graph_access_t access,
+                                 const profile_names_t *names) {
     if (!tier_valid(tier) || !access_valid(access)) {
         return NULL;
     }
@@ -219,9 +245,11 @@ char *cbm_render_graph_prompt(cbm_graph_tier_t tier, cbm_graph_access_t access) 
         default:
             break;
         }
+        profile_buffer_append(&buffer, "Use ");
+        profile_buffer_append(&buffer, names->server_phrase);
         profile_buffer_append(
             &buffer,
-            "Use codebase-memory-mcp in the exact graph project. Use only read-only graph and "
+            " in the exact graph project. Use only read-only graph and "
             "source tools. Locate candidates with search_graph, "
             "inspect relationships with trace_path, and verify material definitions with "
             "get_code_snippet. Use query_graph or get_architecture only when available and "
@@ -277,6 +305,14 @@ char *cbm_render_graph_prompt(cbm_graph_tier_t tier, cbm_graph_access_t access) 
     return profile_buffer_finish(&buffer);
 }
 
+char *cbm_render_graph_prompt(cbm_graph_tier_t tier, cbm_graph_access_t access) {
+    return render_graph_prompt(tier, access, &current_names);
+}
+
+char *cbm_render_graph_prompt_legacy(cbm_graph_tier_t tier, cbm_graph_access_t access) {
+    return render_graph_prompt(tier, access, &legacy_names);
+}
+
 static void tier_tool_set(cbm_graph_tier_t tier, const profile_tool_t **tools, size_t *count) {
     if (tier == CBM_GRAPH_TIER_SCOUT) {
         *tools = scout_tools;
@@ -291,40 +327,66 @@ static const char *tier_server_profile(cbm_graph_tier_t tier) {
     return tier == CBM_GRAPH_TIER_SCOUT ? "scout" : "analysis";
 }
 
-static const char *dialect_tool_prefix(cbm_graph_profile_dialect_t dialect) {
+/* Writes the dialect's spelling of "<server key> tools" into output. */
+static bool dialect_tool_prefix(cbm_graph_profile_dialect_t dialect, const profile_names_t *names,
+                                char *output, size_t output_size) {
+    const char *format = NULL;
+    bool underscores = false;
     switch (dialect) {
     case CBM_GRAPH_DIALECT_CLAUDE:
     case CBM_GRAPH_DIALECT_QWEN:
     case CBM_GRAPH_DIALECT_QODER:
     case CBM_GRAPH_DIALECT_CODEBUDDY:
     case CBM_GRAPH_DIALECT_FACTORY:
-        return "mcp__codebase-memory-mcp__";
+        format = "mcp__%s__";
+        break;
     case CBM_GRAPH_DIALECT_CODEX:
-        return "";
+        format = "";
+        break;
     case CBM_GRAPH_DIALECT_GEMINI:
-        return "mcp_codebase-memory-mcp_";
+        format = "mcp_%s_";
+        break;
     case CBM_GRAPH_DIALECT_COPILOT:
-        return "codebase-memory-mcp/";
+        format = "%s/";
+        break;
     case CBM_GRAPH_DIALECT_OPENCODE:
     case CBM_GRAPH_DIALECT_KILO:
     case CBM_GRAPH_DIALECT_VIBE:
-        return "codebase-memory-mcp_";
+        format = "%s_";
+        break;
     case CBM_GRAPH_DIALECT_KIRO:
-        return "@codebase-memory-mcp/";
+        format = "@%s/";
+        break;
     case CBM_GRAPH_DIALECT_OMP:
-        return "mcp__codebase_memory_mcp_";
+        /* Oh My Pi spells the server key with underscores. */
+        format = "mcp__%s_";
+        underscores = true;
+        break;
     case CBM_GRAPH_DIALECT_GROK:
-        return "codebase-memory-mcp__";
+        format = "%s__";
+        break;
     default:
-        return NULL;
+        return false;
     }
+    char key[64];
+    int key_length = snprintf(key, sizeof(key), "%s", names->server_key);
+    if (key_length < 0 || (size_t)key_length >= sizeof(key)) {
+        return false;
+    }
+    for (char *c = key; underscores && *c; c++) {
+        if (*c == '-') {
+            *c = '_';
+        }
+    }
+    int written = snprintf(output, output_size, format, key);
+    return written >= 0 && (size_t)written < output_size;
 }
 
-static bool tool_identifier(cbm_graph_profile_dialect_t dialect, profile_tool_t tool, char *output,
-                            size_t output_size) {
-    const char *prefix = dialect_tool_prefix(dialect);
-    if (!prefix || tool < PROFILE_TOOL_SEARCH_GRAPH || tool >= PROFILE_TOOL_COUNT || !output ||
-        output_size == 0U) {
+static bool tool_identifier(cbm_graph_profile_dialect_t dialect, const profile_names_t *names,
+                            profile_tool_t tool, char *output, size_t output_size) {
+    char prefix[96];
+    if (tool < PROFILE_TOOL_SEARCH_GRAPH || tool >= PROFILE_TOOL_COUNT || !output ||
+        output_size == 0U || !dialect_tool_prefix(dialect, names, prefix, sizeof(prefix))) {
         return false;
     }
     int written = snprintf(output, output_size, "%s%s", prefix, tool_base_names[tool]);
@@ -332,13 +394,13 @@ static bool tool_identifier(cbm_graph_profile_dialect_t dialect, profile_tool_t 
 }
 
 static bool append_yaml_mcp_tools(profile_buffer_t *buffer, cbm_graph_profile_dialect_t dialect,
-                                  cbm_graph_tier_t tier) {
+                                  const profile_names_t *names, cbm_graph_tier_t tier) {
     const profile_tool_t *tools = NULL;
     size_t count = 0U;
     tier_tool_set(tier, &tools, &count);
     for (size_t i = 0U; i < count; i++) {
         char identifier[160];
-        if (!tool_identifier(dialect, tools[i], identifier, sizeof(identifier)) ||
+        if (!tool_identifier(dialect, names, tools[i], identifier, sizeof(identifier)) ||
             !profile_buffer_append(buffer, "  - ") || !profile_buffer_append(buffer, identifier) ||
             !profile_buffer_append(buffer, "\n")) {
             return false;
@@ -348,13 +410,13 @@ static bool append_yaml_mcp_tools(profile_buffer_t *buffer, cbm_graph_profile_di
 }
 
 static bool append_csv_mcp_tools(profile_buffer_t *buffer, cbm_graph_profile_dialect_t dialect,
-                                 cbm_graph_tier_t tier) {
+                                 const profile_names_t *names, cbm_graph_tier_t tier) {
     const profile_tool_t *tools = NULL;
     size_t count = 0U;
     tier_tool_set(tier, &tools, &count);
     for (size_t i = 0U; i < count; i++) {
         char identifier[160];
-        if (!tool_identifier(dialect, tools[i], identifier, sizeof(identifier)) ||
+        if (!tool_identifier(dialect, names, tools[i], identifier, sizeof(identifier)) ||
             (i > 0U && !profile_buffer_append(buffer, ",")) ||
             !profile_buffer_append(buffer, identifier)) {
             return false;
@@ -364,13 +426,14 @@ static bool append_csv_mcp_tools(profile_buffer_t *buffer, cbm_graph_profile_dia
 }
 
 static bool append_toml_mcp_tools(profile_buffer_t *buffer, cbm_graph_profile_dialect_t dialect,
-                                  cbm_graph_tier_t tier, bool leading_items) {
+                                  const profile_names_t *names, cbm_graph_tier_t tier,
+                                  bool leading_items) {
     const profile_tool_t *tools = NULL;
     size_t count = 0U;
     tier_tool_set(tier, &tools, &count);
     for (size_t i = 0U; i < count; i++) {
         char identifier[160];
-        if (!tool_identifier(dialect, tools[i], identifier, sizeof(identifier)) ||
+        if (!tool_identifier(dialect, names, tools[i], identifier, sizeof(identifier)) ||
             ((leading_items || i > 0U) && !profile_buffer_append(buffer, ", ")) ||
             !profile_buffer_append(buffer, "\"") || !profile_buffer_append(buffer, identifier) ||
             !profile_buffer_append(buffer, "\"")) {
@@ -382,13 +445,13 @@ static bool append_toml_mcp_tools(profile_buffer_t *buffer, cbm_graph_profile_di
 
 static bool append_permission_mcp_tools(profile_buffer_t *buffer,
                                         cbm_graph_profile_dialect_t dialect,
-                                        cbm_graph_tier_t tier) {
+                                        const profile_names_t *names, cbm_graph_tier_t tier) {
     const profile_tool_t *tools = NULL;
     size_t count = 0U;
     tier_tool_set(tier, &tools, &count);
     for (size_t i = 0U; i < count; i++) {
         char identifier[160];
-        if (!tool_identifier(dialect, tools[i], identifier, sizeof(identifier)) ||
+        if (!tool_identifier(dialect, names, tools[i], identifier, sizeof(identifier)) ||
             !profile_buffer_append(buffer, "  \"") || !profile_buffer_append(buffer, identifier) ||
             !profile_buffer_append(buffer, "\": allow\n")) {
             return false;
@@ -405,7 +468,8 @@ static bool append_yaml_identity(profile_buffer_t *buffer, const char *slug,
 }
 
 static char *render_kiro_profile(cbm_graph_tier_t tier, cbm_graph_access_t access,
-                                 const char *binary_path, const char *prompt) {
+                                 const char *binary_path, const char *prompt,
+                                 const profile_names_t *names) {
     if (access == CBM_GRAPH_ACCESS_DIRECT && (!binary_path || !binary_path[0])) {
         return NULL;
     }
@@ -432,7 +496,7 @@ static char *render_kiro_profile(cbm_graph_tier_t tier, cbm_graph_access_t acces
         tier_tool_set(tier, &tier_tools, &count);
         for (size_t i = 0U; ok && i < count; i++) {
             char identifier[160];
-            ok = tool_identifier(CBM_GRAPH_DIALECT_KIRO, tier_tools[i], identifier,
+            ok = tool_identifier(CBM_GRAPH_DIALECT_KIRO, names, tier_tools[i], identifier,
                                  sizeof(identifier)) &&
                  yyjson_mut_arr_add_strcpy(doc, tools, identifier);
         }
@@ -448,7 +512,7 @@ static char *render_kiro_profile(cbm_graph_tier_t tier, cbm_graph_access_t acces
              yyjson_mut_arr_add_str(doc, args, "--tool-profile") &&
              yyjson_mut_arr_add_strcpy(doc, args, tier_server_profile(tier)) &&
              yyjson_mut_obj_add_val(doc, server, "args", args) &&
-             yyjson_mut_obj_add_val(doc, servers, "codebase-memory-mcp", server) &&
+             yyjson_mut_obj_add_val(doc, servers, names->server_key, server) &&
              yyjson_mut_obj_add_val(doc, root, "mcpServers", servers);
     }
     char *result = ok ? yyjson_mut_write(doc, YYJSON_WRITE_PRETTY, NULL) : NULL;
@@ -462,7 +526,8 @@ static char *render_kiro_profile(cbm_graph_tier_t tier, cbm_graph_access_t acces
  * v0.9.1-rc.1 rendering so installs can migrate those files. */
 static bool append_codex_profile(profile_buffer_t *buffer, cbm_graph_tier_t tier,
                                  cbm_graph_access_t access, const char *binary_path,
-                                 const char *prompt, bool rc1_transportless) {
+                                 const char *prompt, bool rc1_transportless,
+                                 const profile_names_t *names) {
     if (!profile_buffer_append(buffer, "name = \"") ||
         !profile_buffer_append(buffer, cbm_graph_tier_slug(tier)) ||
         !profile_buffer_append(buffer, "\"\ndescription = \"") ||
@@ -475,7 +540,9 @@ static bool append_codex_profile(profile_buffer_t *buffer, cbm_graph_tier_t tier
     if (access != CBM_GRAPH_ACCESS_DIRECT) {
         return true;
     }
-    if (!profile_buffer_append(buffer, "\n[mcp_servers.codebase-memory-mcp]\n")) {
+    if (!profile_buffer_append(buffer, "\n[mcp_servers.") ||
+        !profile_buffer_append(buffer, names->server_key) ||
+        !profile_buffer_append(buffer, "]\n")) {
         return false;
     }
     if (!rc1_transportless) {
@@ -494,7 +561,7 @@ static bool append_codex_profile(profile_buffer_t *buffer, cbm_graph_tier_t tier
         }
     }
     return profile_buffer_append(buffer, "enabled_tools = [") &&
-           append_toml_mcp_tools(buffer, CBM_GRAPH_DIALECT_CODEX, tier, false) &&
+           append_toml_mcp_tools(buffer, CBM_GRAPH_DIALECT_CODEX, names, tier, false) &&
            profile_buffer_append(buffer, "]\n");
 }
 
@@ -503,7 +570,7 @@ static bool append_codex_profile(profile_buffer_t *buffer, cbm_graph_tier_t tier
  * must still recognise the older bytes as ours (#2264). */
 static bool append_opencode_profile(profile_buffer_t *buffer, cbm_graph_tier_t tier,
                                     cbm_graph_access_t access, const char *prompt,
-                                    bool before_tool_search) {
+                                    bool before_tool_search, const profile_names_t *names) {
     return profile_buffer_append(buffer, "---\ndescription: ") &&
            profile_buffer_append(buffer, profile_description(tier, access)) &&
            profile_buffer_append(buffer, "\nmode: subagent\npermission:\n  \"*\": deny\n  read: "
@@ -511,36 +578,39 @@ static bool append_opencode_profile(profile_buffer_t *buffer, cbm_graph_tier_t t
            (before_tool_search ||
             profile_buffer_append(buffer, "  tool_search: allow\n  tool_search_regex: allow\n")) &&
            (access != CBM_GRAPH_ACCESS_DIRECT ||
-            append_permission_mcp_tools(buffer, CBM_GRAPH_DIALECT_OPENCODE, tier)) &&
+            append_permission_mcp_tools(buffer, CBM_GRAPH_DIALECT_OPENCODE, names, tier)) &&
            profile_buffer_append(buffer, "---\n") && profile_buffer_append(buffer, prompt);
 }
 
 static bool render_profile_text(profile_buffer_t *buffer, cbm_graph_profile_dialect_t dialect,
                                 cbm_graph_tier_t tier, cbm_graph_access_t access,
-                                const char *binary_path, const char *prompt) {
+                                const char *binary_path, const char *prompt,
+                                const profile_names_t *names) {
     const char *slug = cbm_graph_tier_slug(tier);
-    const char *display = cbm_graph_tier_display_name(tier);
+    const char *display = tier_display_name(tier, names);
     const char *description = profile_description(tier, access);
     bool direct = access == CBM_GRAPH_ACCESS_DIRECT;
     switch (dialect) {
     case CBM_GRAPH_DIALECT_CLAUDE:
         if (!append_yaml_identity(buffer, slug, description) ||
             !profile_buffer_append(buffer, "tools:\n  - Read\n  - Grep\n  - Glob\n") ||
-            (direct && !append_yaml_mcp_tools(buffer, dialect, tier)) ||
-            (direct && !profile_buffer_append(buffer, "mcpServers: [codebase-memory-mcp]\n")) ||
-            !profile_buffer_append(buffer,
-                                   "permissionMode: plan\nskills: [codebase-memory]\n---\n") ||
-            !profile_buffer_append(buffer, prompt)) {
+            (direct && !append_yaml_mcp_tools(buffer, dialect, names, tier)) ||
+            (direct && (!profile_buffer_append(buffer, "mcpServers: [") ||
+                        !profile_buffer_append(buffer, names->server_key) ||
+                        !profile_buffer_append(buffer, "]\n"))) ||
+            !profile_buffer_append(buffer, "permissionMode: plan\nskills: [") ||
+            !profile_buffer_append(buffer, names->skill) ||
+            !profile_buffer_append(buffer, "]\n---\n") || !profile_buffer_append(buffer, prompt)) {
             return false;
         }
         return true;
     case CBM_GRAPH_DIALECT_CODEX:
-        return append_codex_profile(buffer, tier, access, binary_path, prompt, false);
+        return append_codex_profile(buffer, tier, access, binary_path, prompt, false, names);
     case CBM_GRAPH_DIALECT_GEMINI:
         if (!append_yaml_identity(buffer, slug, description) ||
             !profile_buffer_append(buffer,
                                    "kind: local\ntools:\n  - read_file\n  - grep_search\n") ||
-            (direct && !append_yaml_mcp_tools(buffer, dialect, tier)) ||
+            (direct && !append_yaml_mcp_tools(buffer, dialect, names, tier)) ||
             !profile_buffer_append(buffer, "---\n") || !profile_buffer_append(buffer, prompt)) {
             return false;
         }
@@ -550,7 +620,7 @@ static bool render_profile_text(profile_buffer_t *buffer, cbm_graph_profile_dial
             !profile_buffer_append(buffer,
                                    "model: inherit\napprovalMode: plan\ntools:\n  - read_file\n  - "
                                    "grep_search\n  - glob\n  - list_directory\n") ||
-            (direct && !append_yaml_mcp_tools(buffer, dialect, tier)) ||
+            (direct && !append_yaml_mcp_tools(buffer, dialect, names, tier)) ||
             !profile_buffer_append(buffer, "---\n") || !profile_buffer_append(buffer, prompt)) {
             return false;
         }
@@ -558,20 +628,20 @@ static bool render_profile_text(profile_buffer_t *buffer, cbm_graph_profile_dial
     case CBM_GRAPH_DIALECT_COPILOT:
         if (!append_yaml_identity(buffer, slug, description) ||
             !profile_buffer_append(buffer, "tools:\n  - read\n  - search\n") ||
-            (direct && !append_yaml_mcp_tools(buffer, dialect, tier)) ||
+            (direct && !append_yaml_mcp_tools(buffer, dialect, names, tier)) ||
             !profile_buffer_append(buffer, "---\n") || !profile_buffer_append(buffer, prompt)) {
             return false;
         }
         return true;
     case CBM_GRAPH_DIALECT_OPENCODE:
-        return append_opencode_profile(buffer, tier, access, prompt, false);
+        return append_opencode_profile(buffer, tier, access, prompt, false, names);
     case CBM_GRAPH_DIALECT_KILO:
         if (!profile_buffer_append(buffer, "---\ndescription: ") ||
             !profile_buffer_append(buffer, description) ||
             !profile_buffer_append(
                 buffer, "\nmode: subagent\npermission:\n  \"*\": deny\n  read: allow\n  grep: "
                         "allow\n  glob: allow\n") ||
-            (direct && !append_permission_mcp_tools(buffer, dialect, tier)) ||
+            (direct && !append_permission_mcp_tools(buffer, dialect, names, tier)) ||
             !profile_buffer_append(buffer, "---\n") || !profile_buffer_append(buffer, prompt)) {
             return false;
         }
@@ -599,9 +669,11 @@ static bool render_profile_text(profile_buffer_t *buffer, cbm_graph_profile_dial
         if (!append_yaml_identity(buffer, slug, description) ||
             !profile_buffer_append(buffer, "tools: Read,Grep,Glob") ||
             (direct && (!profile_buffer_append(buffer, ",") ||
-                        !append_csv_mcp_tools(buffer, dialect, tier))) ||
+                        !append_csv_mcp_tools(buffer, dialect, names, tier))) ||
             !profile_buffer_append(buffer, "\n") ||
-            (direct && !profile_buffer_append(buffer, "mcpServers:\n  - codebase-memory-mcp\n")) ||
+            (direct && (!profile_buffer_append(buffer, "mcpServers:\n  - ") ||
+                        !profile_buffer_append(buffer, names->server_key) ||
+                        !profile_buffer_append(buffer, "\n"))) ||
             !profile_buffer_append(buffer, "---\n") || !profile_buffer_append(buffer, prompt)) {
             return false;
         }
@@ -610,10 +682,10 @@ static bool render_profile_text(profile_buffer_t *buffer, cbm_graph_profile_dial
         if (!append_yaml_identity(buffer, slug, description) ||
             !profile_buffer_append(buffer, "tools: Read,Grep,Glob") ||
             (direct && (!profile_buffer_append(buffer, ",") ||
-                        !append_csv_mcp_tools(buffer, dialect, tier))) ||
-            !profile_buffer_append(
-                buffer, "\nmodel: inherit\npermissionMode: plan\nskills: codebase-memory\n---\n") ||
-            !profile_buffer_append(buffer, prompt)) {
+                        !append_csv_mcp_tools(buffer, dialect, names, tier))) ||
+            !profile_buffer_append(buffer, "\nmodel: inherit\npermissionMode: plan\nskills: ") ||
+            !profile_buffer_append(buffer, names->skill) ||
+            !profile_buffer_append(buffer, "\n---\n") || !profile_buffer_append(buffer, prompt)) {
             return false;
         }
         return true;
@@ -621,7 +693,7 @@ static bool render_profile_text(profile_buffer_t *buffer, cbm_graph_profile_dial
         if (!append_yaml_identity(buffer, slug, description) ||
             !profile_buffer_append(
                 buffer, "model: inherit\ntools: [\"Read\", \"LS\", \"Grep\", \"Glob\"") ||
-            (direct && !append_toml_mcp_tools(buffer, dialect, tier, true)) ||
+            (direct && !append_toml_mcp_tools(buffer, dialect, names, tier, true)) ||
             !profile_buffer_append(buffer, "]\n") || !profile_buffer_append(buffer, "---\n") ||
             !profile_buffer_append(buffer, prompt)) {
             return false;
@@ -635,7 +707,7 @@ static bool render_profile_text(profile_buffer_t *buffer, cbm_graph_profile_dial
             !profile_buffer_append(buffer, "\"\nsafety = \"safe\"\nsystem_prompt_id = \"") ||
             !profile_buffer_append(buffer, slug) ||
             !profile_buffer_append(buffer, "\"\nenabled_tools = [\"read_file\", \"grep_search\"") ||
-            (direct && !append_toml_mcp_tools(buffer, dialect, tier, true)) ||
+            (direct && !append_toml_mcp_tools(buffer, dialect, names, tier, true)) ||
             !profile_buffer_append(buffer, "]\n")) {
             return false;
         }
@@ -648,15 +720,17 @@ static bool render_profile_text(profile_buffer_t *buffer, cbm_graph_profile_dial
         if (!append_yaml_identity(buffer, slug, description) ||
             !profile_buffer_append(buffer, "tools: read_file, grep, list_dir") ||
             (direct && !profile_buffer_append(buffer, ", search_tool, use_tool")) ||
-            !profile_buffer_append(
-                buffer, direct ? "\nmcpInheritance:\n  named:\n    - codebase-memory-mcp\n---\n"
-                               : "\nmcpInheritance: none\n---\n") ||
+            (direct ? (!profile_buffer_append(buffer, "\nmcpInheritance:\n  named:\n    - ") ||
+                       !profile_buffer_append(buffer, names->server_key) ||
+                       !profile_buffer_append(buffer, "\n---\n"))
+                    : !profile_buffer_append(buffer, "\nmcpInheritance: none\n---\n")) ||
             (direct && (!profile_buffer_append(
                             buffer, "Reach the graph only through `search_tool`/`use_tool`. "
                                     "The only allowed tool ids are ") ||
-                        !append_csv_mcp_tools(buffer, dialect, tier) ||
-                        !profile_buffer_append(
-                            buffer, "; never call any other codebase-memory-mcp tool.\n\n"))) ||
+                        !append_csv_mcp_tools(buffer, dialect, names, tier) ||
+                        !profile_buffer_append(buffer, "; never call any other ") ||
+                        !profile_buffer_append(buffer, names->server_key) ||
+                        !profile_buffer_append(buffer, " tool.\n\n"))) ||
             !profile_buffer_append(buffer, prompt)) {
             return false;
         }
@@ -680,10 +754,10 @@ static bool render_profile_text(profile_buffer_t *buffer, cbm_graph_profile_dial
     case CBM_GRAPH_DIALECT_OMP:
         if (!append_yaml_identity(buffer, slug, description) ||
             !profile_buffer_append(buffer, "tools:\n  - read\n  - grep\n  - glob\n") ||
-            (direct && !append_yaml_mcp_tools(buffer, dialect, tier)) ||
-            !profile_buffer_append(
-                buffer, "read-summarize: false\nautoloadSkills: [codebase-memory]\n---\n") ||
-            !profile_buffer_append(buffer, prompt)) {
+            (direct && !append_yaml_mcp_tools(buffer, dialect, names, tier)) ||
+            !profile_buffer_append(buffer, "read-summarize: false\nautoloadSkills: [") ||
+            !profile_buffer_append(buffer, names->skill) ||
+            !profile_buffer_append(buffer, "]\n---\n") || !profile_buffer_append(buffer, prompt)) {
             return false;
         }
         return true;
@@ -692,30 +766,41 @@ static bool render_profile_text(profile_buffer_t *buffer, cbm_graph_profile_dial
     }
 }
 
-char *cbm_render_graph_profile(cbm_graph_profile_dialect_t dialect, cbm_graph_tier_t tier,
-                               cbm_graph_access_t access, const char *binary_path) {
+static char *render_graph_profile(cbm_graph_profile_dialect_t dialect, cbm_graph_tier_t tier,
+                                  cbm_graph_access_t access, const char *binary_path,
+                                  const profile_names_t *names) {
     if (!dialect_valid(dialect) || !tier_valid(tier) || !access_valid(access) ||
         (access == CBM_GRAPH_ACCESS_DIRECT && !cbm_graph_dialect_direct_capable(dialect))) {
         return NULL;
     }
-    char *prompt = cbm_render_graph_prompt(tier, access);
+    char *prompt = render_graph_prompt(tier, access, names);
     if (!prompt) {
         return NULL;
     }
     if (dialect == CBM_GRAPH_DIALECT_KIRO) {
-        char *result = render_kiro_profile(tier, access, binary_path, prompt);
+        char *result = render_kiro_profile(tier, access, binary_path, prompt, names);
         free(prompt);
         return result;
     }
     profile_buffer_t buffer;
     profile_buffer_init(&buffer);
-    bool ok = render_profile_text(&buffer, dialect, tier, access, binary_path, prompt);
+    bool ok = render_profile_text(&buffer, dialect, tier, access, binary_path, prompt, names);
     free(prompt);
     if (!ok) {
         profile_buffer_discard(&buffer);
         return NULL;
     }
     return profile_buffer_finish(&buffer);
+}
+
+char *cbm_render_graph_profile(cbm_graph_profile_dialect_t dialect, cbm_graph_tier_t tier,
+                               cbm_graph_access_t access, const char *binary_path) {
+    return render_graph_profile(dialect, tier, access, binary_path, &current_names);
+}
+
+char *cbm_render_graph_profile_legacy(cbm_graph_profile_dialect_t dialect, cbm_graph_tier_t tier,
+                                      cbm_graph_access_t access, const char *binary_path) {
+    return render_graph_profile(dialect, tier, access, binary_path, &legacy_names);
 }
 
 /* A released-but-superseded rendering, kept only so install/uninstall can
@@ -725,15 +810,15 @@ static char *render_released_profile(cbm_graph_profile_dialect_t dialect, cbm_gr
     if (!tier_valid(tier) || !access_valid(access)) {
         return NULL;
     }
-    char *prompt = cbm_render_graph_prompt(tier, access);
+    char *prompt = render_graph_prompt(tier, access, &legacy_names);
     if (!prompt) {
         return NULL;
     }
     profile_buffer_t buffer;
     profile_buffer_init(&buffer);
     bool ok = dialect == CBM_GRAPH_DIALECT_OPENCODE
-                  ? append_opencode_profile(&buffer, tier, access, prompt, true)
-                  : append_codex_profile(&buffer, tier, access, NULL, prompt, true);
+                  ? append_opencode_profile(&buffer, tier, access, prompt, true, &legacy_names)
+                  : append_codex_profile(&buffer, tier, access, NULL, prompt, true, &legacy_names);
     free(prompt);
     if (!ok) {
         profile_buffer_discard(&buffer);

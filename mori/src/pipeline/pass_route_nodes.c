@@ -40,6 +40,7 @@ enum {
 #include "foundation/arena.h"     /* CBMArena */
 #include "foundation/compat_fs.h" /* cbm_fopen */
 #include "foundation/mem_core.h"  /* cbm_alloc */
+#include "foundation/platform.h"  /* cbm_native_getenv */
 #include "foundation/yaml.h"      /* cbm_yaml_parse */
 
 #include <ctype.h>
@@ -1428,7 +1429,12 @@ static int gqlgen_split(const char *path, gqlgen_seg_t *segs, int max) {
     return n;
 }
 
+static bool (*gqlgen_glob_matcher)(const char *glob, const char *path);
+
 bool cbm_gqlgen_glob_match(const char *glob, const char *path) {
+    if (gqlgen_glob_matcher) {
+        return gqlgen_glob_matcher(glob, path);
+    }
     gqlgen_seg_t pat[GQLGEN_MAX_GLOB_SEGMENTS];
     gqlgen_seg_t str[GQLGEN_MAX_GLOB_SEGMENTS];
     int pn = gqlgen_split(glob, pat, GQLGEN_MAX_GLOB_SEGMENTS);
@@ -2247,27 +2253,72 @@ typedef struct {
     bool ambiguous;
 } gql_pick_t;
 
-/* Pick among the emissions [first, first + n) of one field path: the one
- * resolver method that owns any of them wins; none leaves the Field; more
- * than one is ambiguous. */
-static gql_pick_t gql_pick(gql_ctx_t *ctx, const gql_emit_t *first, int n) {
-    gql_pick_t pick = {first, NULL, n > SKIP_ONE};
-    for (int e = 0; e < n; e++) {
+typedef struct {
+    size_t field_index;
+    const cbm_gbuf_node_t *resolver;
+    bool ambiguous;
+} gql_route_plan_t;
+
+typedef gql_route_plan_t (*gql_route_planner_fn)(gql_ctx_t *ctx, const gql_emit_t *first, size_t n);
+typedef bool (*gql_resolver_visitor_fn)(size_t field_index, const cbm_gbuf_node_t *resolver,
+                                        void *context);
+static gql_route_planner_fn gql_route_planner;
+
+/* Called before C main in each linked process, including a re-execed index
+ * worker. The glob matcher remains the default in the linked binary.
+ * The Rust planner is opt-in while we check its parity with C. */
+void cbm_gqlgen_set_rust_backend(bool (*matcher)(const char *glob, const char *path),
+                                 gql_route_planner_fn planner) {
+    char configured[sizeof("rust")];
+    const char *impl = cbm_native_getenv("MORI_IMPL_GRAPHQL", configured, sizeof(configured), NULL);
+    gqlgen_glob_matcher = impl && strcmp(impl, "c") == 0 ? NULL : matcher;
+    gql_route_planner = impl && strcmp(impl, "rust") == 0 ? planner : NULL;
+}
+
+/* Visit every eligible resolver in the order of the candidate fields, then
+ * the resolver sort order. Nodes stay valid until the caller writes the
+ * selected Route, and the visitor can stop at a second distinct resolver. */
+void cbm_gqlgen_visit_route_resolvers(gql_ctx_t *ctx, const gql_emit_t *first, size_t n,
+                                      gql_resolver_visitor_fn visit, void *context) {
+    for (size_t e = 0; e < n; e++) {
         const gql_emit_t *em = &first[e];
         const char *key = gql_resolver_key(&ctx->arena, em->type_name, em->field->node->name);
         for (int i = key ? gql_resolver_lower_bound(ctx, key) : ctx->resolver_count;
              i < ctx->resolver_count && strcmp(ctx->resolvers[i].key, key) == 0; i++) {
-            const gql_resolver_t *r = &ctx->resolvers[i];
-            if (!gql_owns(ctx, r, em->field) || r->node == pick.resolver) {
-                continue;
+            const gql_resolver_t *resolver = &ctx->resolvers[i];
+            if (gql_owns(ctx, resolver, em->field) && !visit(e, resolver->node, context)) {
+                return;
             }
-            if (pick.resolver) {
-                return (gql_pick_t){first, NULL, true};
-            }
-            pick = (gql_pick_t){em, r->node, false};
         }
     }
-    return pick;
+}
+
+static bool gql_pick_c_resolver(size_t field_index, const cbm_gbuf_node_t *resolver,
+                                void *context) {
+    gql_route_plan_t *plan = context;
+    if (plan->resolver == resolver) {
+        return true;
+    }
+    if (plan->resolver) {
+        *plan = (gql_route_plan_t){.ambiguous = true};
+        return false;
+    }
+    *plan = (gql_route_plan_t){.field_index = field_index, .resolver = resolver};
+    return true;
+}
+
+/* The only owning resolver wins. With no owners, or two different owners,
+ * use the first field. Duplicate definitions without an owner are ambiguous. */
+static gql_route_plan_t gql_pick_c(gql_ctx_t *ctx, const gql_emit_t *first, size_t n) {
+    gql_route_plan_t plan = {.ambiguous = n > SKIP_ONE};
+    cbm_gqlgen_visit_route_resolvers(ctx, first, n, gql_pick_c_resolver, &plan);
+    return plan;
+}
+
+static gql_pick_t gql_pick(gql_ctx_t *ctx, const gql_emit_t *first, int n) {
+    gql_route_planner_fn planner = gql_route_planner ? gql_route_planner : gql_pick_c;
+    gql_route_plan_t plan = planner(ctx, first, (size_t)n);
+    return (gql_pick_t){&first[plan.field_index], plan.resolver, plan.ambiguous};
 }
 
 static char *gql_route_props(const gql_field_t *f, bool ambiguous) {
@@ -2326,7 +2377,7 @@ static void gql_log_summary(const gql_ctx_t *ctx) {
     (void)snprintf(b3, sizeof(b3), "%d", ctx->via_field);
     (void)snprintf(b4, sizeof(b4), "%d", ctx->ambiguous);
     cbm_log_info("pass.route_nodes.graphql", "routes", b1, "via_resolver", b2, "via_field", b3,
-                 "ambiguous", b4);
+                 "ambiguous", b4, "planner", gql_route_planner ? "rust" : "c");
     if (ctx->too_long > 0) {
         char b5[CBM_SZ_16];
         (void)snprintf(b5, sizeof(b5), "%d", ctx->too_long);

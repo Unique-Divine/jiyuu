@@ -25,7 +25,7 @@ test('AC1: design tokens and chrome are in place', () => {
     assert.ok(smoke.testids.includes(id), `data-testid ${id} wurde im Smoke nicht gesehen`);
   }
   // Archived W2 evidence predates the CBM Lens name; new smoke runs require the current brand.
-  assert.ok(/CBM LENS|CODEATLAS/.test(smoke.brandText), 'Frontend-Marke fehlt in der Kopfzeile');
+  assert.ok(/MORI GRAPH|CODEATLAS/.test(smoke.brandText), 'Frontend-Marke fehlt in der Kopfzeile');
   assert.match(smoke.versionChip, /^v\d+\.\d+\.\d+/, 'Versions-Chip fehlt oder falsch');
   // Spezifikations-Korrektur 2026-08-29 (Orchestrator, Nutzerauftrag):
   // Der Test nagelte [f]ile fest, also ausgerechnet einen der vier

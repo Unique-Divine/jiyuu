@@ -10,11 +10,15 @@ grammars *ARGS:
 build: grammars
     scripts/build.sh
 
-# Run grammar suites plus the language-count and vendored-checksum checks.
-test SUITES=default_suites: grammars
+# Fixture parity runs in its own /tmp dir, so parallel runs don't collide.
+# Run grammar suites, language-count, vendored-checksum, and parity checks.
+test SUITES=default_suites: grammars parity-test
     scripts/test.sh --suites "{{SUITES}}"
     bash tests/test_language_count_contract.sh
     scripts/security-vendored.sh
+    if [ -x build/c/codebase-memory-mcp ]; then \
+      python3 -I parity/parity.py ci && just parity-corrupt; \
+    else echo "parity-ci skipped: no build/c binary (run just build)"; fi
 
 # Run the full leg: contract checks, clean build, every C suite and the
 # production-binary checks (over an hour).
@@ -27,3 +31,28 @@ scripts-test:
 
 # Run the script tests, the build and the targeted suites.
 check: scripts-test build test
+
+# Unit tests for the parity harness (no build needed).
+parity-test:
+    python3 -I -m unittest discover -s parity -p '*_test.py'
+
+# Flags: --private-dir DIR (a private corpus), --bin-a/--bin-b, --repos,
+# --snapshot, --skip-l4.
+# Diff two builds, L0-L4 (default: C vs C on the public corpus).
+parity *ARGS:
+    python3 -I parity/parity.py run {{ARGS}}
+
+# Parity on generated fixture repos and calls-ci.jsonl (needs `just build`).
+parity-ci *ARGS: parity-test
+    python3 -I parity/parity.py ci {{ARGS}}
+
+# Needs `just build` and `just --justfile jiyuu-mori/justfile build`.
+# MODE is run (a corpus) or ci (the fixtures).
+# Diff mori (Rust, C linked) against the C build.
+parity-mori MODE="run" *ARGS:
+    python3 -I parity/parity.py {{MODE}} --bin-b ../target/release/mori {{ARGS}}
+
+# Needs `just build`. Fails unless the harness reports both corruptions.
+# Self-test: fixture parity against a deliberately wrong build.
+parity-corrupt:
+    python3 -I parity/parity.py ci --corrupt all
