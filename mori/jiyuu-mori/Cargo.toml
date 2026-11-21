@@ -24,6 +24,7 @@ c-backend = ["graphql-callbacks", "dep:serde", "dep:serde_json", "dep:sha2"]
 # Allows the C fixture runner to link the same callbacks without building
 # libmori-c again from the Rust build script.
 graphql-callbacks = ["dep:rusqlite"]
+native-graphql-fixtures = ["graphql-callbacks"]
 
 [dependencies]
 # The whole-archive link of libmori-c supplies every SQLite symbol before the
