@@ -56,7 +56,8 @@ codex mcp add mori-graph -- ~/.local/share/mise/shims/mori
 The key, not the binary, names the tools (`mcp__mori-graph__search_graph`),
 so rename it in hook matchers, permission rules, and agent profiles that
 list tools. Claude Code hooks that run `mori hook-augment` work through the
-same binary path.
+same binary path; [Hooks and Tool Profiles](https://github.com/Unique-Divine/jiyuu/blob/main/mori/README.md#hooks-and-tool-profiles)
+in Mori's README lists the hook entries and the `--tool-profile` option.
 
 Don't run `mori install` or `mori update`: they rewrite this skill,
 register the server under the old key, and fetch a build without Mori's

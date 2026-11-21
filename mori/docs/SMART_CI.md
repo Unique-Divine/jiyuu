@@ -1,16 +1,16 @@
 # Smart CI: pull-request test selection on GitHub Actions
 
 Smart CI runs, for each pull request, only the CI jobs and tests that the
-change can reach. This page explains how this repository does it and how
-another repository on GitHub Actions could do the same with the released
-`mori` binary.
+change can reach. This page explains how the workflows Mori was imported
+with do it, and how a repository on GitHub Actions could do the same with the
+released `mori` binary.
 
-The workflows described here are the ones Mori was imported with. Jiyuu's CI
-doesn't run Smart CI for Mori yet; the selection scripts under `scripts/ci/`
-are kept.
+Jiyuu's CI doesn't run Smart CI for Mori. The selection scripts under
+`scripts/ci/` and the test conventions are kept, so "this repository" below
+means the imported workflows and Mori's C test suites, not Jiyuu's CI.
 
-Status: experimental. Every answer carries `"experimental": true`. In this
-repository the selection narrows real test runs by default, fork PRs
+Status: experimental. Every answer carries `"experimental": true`. In the
+imported workflows the selection narrows real test runs by default, fork PRs
 included; the repository variable `TEST_IMPACT_MODE` set to anything but
 `gate` turns it off for same-repository PRs (fork PRs get no variables: see
 (d)), and it then runs in report-only (shadow) mode.
@@ -88,7 +88,7 @@ reports `run_all`. Static reachability alone never omits a suite.
    release's `checksums.txt`:
 
    ```bash
-   MORI_VERSION=X.Y.Z   # a release that contains the features you use (see below)
+   MORI_VERSION=X.Y.Z   # 0.14.0 or later (see the version note)
    asset=mori-$MORI_VERSION-linux-x64.tar.gz
    gh release download "mori/v$MORI_VERSION" --repo Unique-Divine/jiyuu \
      --pattern "$asset" --pattern checksums.txt --dir "$RUNNER_TEMP/cbm"
@@ -97,9 +97,12 @@ reports `run_all`. Static reachability alone never omits a suite.
    "$RUNNER_TEMP/cbm/mori" --version
    ```
 
-   **Version note.** Every Mori release (`mori/v0.13.0` and later) has
-   `test-impact select` and `publish`, with `key: "path"`, `unreferenced`,
-   `--vetoed-out` and `run_all_rules`.
+   **Version note.** The snippet needs `mori/v0.14.0` or later, the first
+   release with `mori-<version>-<target>.tar.gz` archives and a `mori`
+   binary. `mori/v0.13.x` ships `codebase-memory-mcp-<version>-<target>.tar.gz`
+   with a `codebase-memory-mcp` binary; change the asset and member names to
+   use it. Every Mori release has `test-impact select` and `publish`, with
+   `key: "path"`, `unreferenced`, `--vetoed-out` and `run_all_rules`.
 
 2. **Full git history.** Check out with `fetch-depth: 0` in every job that
    runs the engine. The engine verifies the history it diffs and refuses a

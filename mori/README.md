@@ -22,6 +22,7 @@ binary.
 - [What Mori Answers](#what-mori-answers)
 - [Install](#install)
 - [Register the MCP Server](#register-the-mcp-server)
+  ([Hooks and Tool Profiles](#hooks-and-tool-profiles))
 - [Index and Query](#index-and-query)
 - [CLI](#cli)
 - [Graph UI](#graph-ui)
@@ -234,6 +235,64 @@ profiles that list tools.
 Agent skill [`mori-graph`](../ai-skills/mori-graph/SKILL.md) in this
 repository teaches an agent when to reach for each tool, how to check index
 freshness, and how much evidence to gather before claiming absence.
+
+### Hooks and Tool Profiles
+
+`mori hook-augment` is a Claude Code hook command. It reads the hook payload
+on stdin and adds graph context to the turn: matching symbols before a
+search, coverage warnings after a file read, and graph routing at session
+and subagent start. It only adds context and fails open: on any error, a
+timeout (it stops itself after 300 ms), or a missing index, it exits 0 with
+no output, so it never blocks or changes a tool call. It needs a running
+daemon; without one it skips augmentation and says so.
+
+To wire it by hand, add these entries to `~/.claude/settings.json`, with the
+binary path you registered:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {"matcher": "Grep|Glob|Bash",
+       "hooks": [{"type": "command", "command": "/home/you/.local/share/mise/shims/mori hook-augment", "timeout": 5}]}
+    ],
+    "PostToolUse": [
+      {"matcher": "Read",
+       "hooks": [{"type": "command", "command": "/home/you/.local/share/mise/shims/mori hook-augment", "timeout": 5}]}
+    ],
+    "SessionStart": [
+      {"matcher": "startup|resume|clear|compact",
+       "hooks": [{"type": "command", "command": "/home/you/.local/share/mise/shims/mori hook-augment", "timeout": 5}]}
+    ],
+    "SubagentStart": [
+      {"matcher": "*",
+       "hooks": [{"type": "command", "command": "/home/you/.local/share/mise/shims/mori hook-augment", "timeout": 5}]}
+    ]
+  }
+}
+```
+
+These are the events, matchers, and 5-second timeout that the imported
+installer writes for Claude Code. The installer also matches graph tool calls
+in `PostToolUse` so that a graph call resets the reminder it adds after
+repeated searches, but the hook recognizes graph tools only under the old
+server key, so that reminder doesn't reset for `mori-graph`. The context
+text still names the binary `codebase-memory-mcp`.
+
+`--tool-profile` limits the tools a server exposes, for subagents that
+should only read the graph. Register a second key with the profile:
+
+```sh
+claude mcp add --scope user mori-graph-scout -- ~/.local/share/mise/shims/mori --tool-profile=scout
+```
+
+| Profile | Tools |
+| --- | --- |
+| `scout` | `search_graph`, `trace_path`, `get_code_snippet`, `get_file_outline`, `get_architecture`, `list_projects`, `index_status`, `check_index_coverage` |
+| `analysis` | The `scout` tools plus `query_graph`, `get_graph_schema`, `compare_graphs`, `search_code`, and `detect_changes` |
+
+Neither profile can index, delete projects, write the ADR, or ingest traces,
+and a profiled server never serves the graph UI.
 
 ## Index and Query
 
