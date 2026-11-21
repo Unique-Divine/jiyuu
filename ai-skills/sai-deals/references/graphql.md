@@ -1,6 +1,6 @@
 # Deal Desk GraphQL Reference
 
-The endpoint is `https://deals-api.sai.fun/graphql`. Use HTTP `POST` with a JSON
+The endpoint is `https://ops-api.sai.fun/graphql`. Use HTTP `POST` with a JSON
 body and an `Authorization: Bearer` header. Browser sign-in at `/ops` has its
 own Google session. The bearer credential is valid across Deal Desk until revoked.
 
@@ -30,7 +30,7 @@ deal_desk_query() (
   printf 'Authorization: Bearer %s\n' "$SAI_DEAL_DESK_TOKEN" |
     curl --silent --show-error --fail --max-time 30 \
       --header @- --header 'Content-Type: application/json' \
-      --data-binary "$1" https://deals-api.sai.fun/graphql |
+      --data-binary "$1" https://ops-api.sai.fun/graphql |
     jq -e 'if (.errors // [] | length) > 0 then error([.errors[].message] | join("; ")) else .data end'
 )
 
