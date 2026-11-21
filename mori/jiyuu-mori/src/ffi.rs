@@ -12,6 +12,18 @@ unsafe extern "C" {
     fn cbm_c_main(argc: c_int, argv: *mut *mut c_char) -> c_int;
 
     fn cbm_alloc_init();
+    fn cbm_gqlgen_set_glob_matcher(
+        matcher: extern "C" fn(glob: *const c_char, path: *const c_char) -> bool,
+    );
+}
+
+extern "C" fn gqlgen_glob_match(
+    glob: *const c_char,
+    path: *const c_char,
+) -> bool {
+    // SAFETY: C passes NUL-terminated strings valid for the whole call.
+    let (glob, path) = unsafe { (CStr::from_ptr(glob), CStr::from_ptr(path)) };
+    crate::gqlgen::glob_matches(glob.to_bytes(), path.to_bytes())
 }
 
 /// The process entry point. Dispatches the developer export in Rust.
@@ -40,6 +52,10 @@ pub unsafe extern "C" fn main(argc: c_int, argv: *mut *mut c_char) -> c_int {
             }));
         }
     }
+    // SAFETY: C has not started any indexing threads and the function pointer
+    // stays valid for the process lifetime, including each worker's own main.
+    unsafe { cbm_gqlgen_set_glob_matcher(gqlgen_glob_match) };
+
     // SAFETY: argc and argv come straight from the C runtime and meet the
     // contract of C main, which cbm_c_main is.
     unsafe { cbm_c_main(argc, argv) }

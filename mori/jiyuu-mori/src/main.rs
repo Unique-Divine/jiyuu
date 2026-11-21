@@ -33,6 +33,9 @@ fn rusqlite_uses_the_c_backend_sqlite() {
     assert!(omit_load_extension);
 }
 
+#[cfg(any(feature = "c-backend", test))]
+mod gqlgen;
+
 #[cfg(not(feature = "c-backend"))]
 fn main() {
     eprintln!(
