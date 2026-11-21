@@ -78,6 +78,17 @@ type ProjectStatsReader = unsafe extern "C" fn(
     nodes: *mut c_int,
     edges: *mut c_int,
 );
+type ProjectMetadataEmit = unsafe extern "C" fn(
+    context: *mut c_void,
+    root_path: *const c_char,
+    indexed_at: *const c_char,
+);
+type ProjectMetadataReader = unsafe extern "C" fn(
+    store: *mut c_void,
+    project: *const c_char,
+    emit: ProjectMetadataEmit,
+    context: *mut c_void,
+) -> bool;
 
 const STORE_OK: c_int = 0;
 const STORE_ERR: c_int = -1;
@@ -183,6 +194,7 @@ unsafe extern "C" {
     fn cbm_mcp_set_project_readers(
         identity: ProjectIdentityReader,
         stats: ProjectStatsReader,
+        metadata: ProjectMetadataReader,
     );
     fn cbm_store_get_db(store: *mut c_void) -> *mut sqlite3;
     fn cbm_store_set_file_outline_reader(reader: OutlineReader);
@@ -253,6 +265,38 @@ unsafe extern "C" fn read_project_stats(
     .unwrap_or((STORE_ERR, STORE_ERR));
     // SAFETY: C supplies distinct writable result fields in its record.
     unsafe { (*nodes, *edges) = result };
+}
+
+unsafe extern "C" fn read_project_metadata(
+    store: *mut c_void,
+    project: *const c_char,
+    emit: ProjectMetadataEmit,
+    context: *mut c_void,
+) -> bool {
+    panic::catch_unwind(|| {
+        // SAFETY: C keeps the store and project string live until return.
+        let store = unsafe { borrow_c_store(store) }?;
+        let project = unsafe { CStr::from_ptr(project) }.to_bytes();
+        let metadata = store.project_metadata(project).ok()??;
+        let root_path = metadata
+            .root_path
+            .and_then(|value| CString::new(value).ok());
+        let indexed_at = metadata
+            .indexed_at
+            .and_then(|value| CString::new(value).ok());
+        let root_path = root_path
+            .as_ref()
+            .map_or(ptr::null(), |value| value.as_ptr());
+        let indexed_at = indexed_at
+            .as_ref()
+            .map_or(ptr::null(), |value| value.as_ptr());
+        // SAFETY: the sink copies both nullable strings synchronously.
+        unsafe { emit(context, root_path, indexed_at) };
+        Some(())
+    })
+    .ok()
+    .flatten()
+    .is_some()
 }
 
 unsafe extern "C" fn read_file_outline(
@@ -604,7 +648,11 @@ pub unsafe extern "C" fn main(argc: c_int, argv: *mut *mut c_char) -> c_int {
     unsafe {
         cbm_mcp_set_read_override(read_override, release_payload);
         cbm_store_set_file_outline_reader(read_file_outline);
-        cbm_mcp_set_project_readers(read_project_identity, read_project_stats);
+        cbm_mcp_set_project_readers(
+            read_project_identity,
+            read_project_stats,
+            read_project_metadata,
+        );
         cbm_c_main(argc, argv)
     }
 }
