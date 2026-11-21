@@ -300,18 +300,34 @@ static cr_run_status_t delete_cross_edges(cbm_store_t *store, const char *projec
  * outlived the client function it names, because the store only merges
  * into a reverse row (json_patch) and delete_cross_edges clears the source
  * store alone. A row left with no caller is dropped, and a row naming a
- * removed caller at the top level takes a remaining one. Forward edges and
- * channel edges carry no "callers" and are left alone. The run then re-adds the
- * current callers. */
+ * removed caller at the top level takes a remaining one. A channel row can
+ * share its endpoints with a forward link; restore that link when the last
+ * reverse caller goes away. The run then re-adds the current callers. */
 static cr_run_status_t cr_reconcile_reverse(cbm_store_t *tgt_store, const char *tgt_project,
                                             const char *src_project, cr_run_context_t *ctx) {
     static const char *const sql[] = {
+        /* Old channels store a single top-level peer. Infer ownership only
+         * when the local endpoints can represent a reverse link alone. */
+        "DELETE FROM edges WHERE project = ?1 AND type = 'CROSS_CHANNEL' AND "
+        "json_type(properties, '$.callers') IS NULL AND "
+        "json_type(properties, '$.channel_forward') IS NULL AND "
+        "json_extract(properties, '$.target_project') = ?2 AND "
+        "EXISTS (SELECT 1 FROM edges local WHERE local.source_id=edges.source_id AND "
+        "local.target_id=edges.target_id AND local.type='LISTENS_ON') AND "
+        "NOT EXISTS (SELECT 1 FROM edges local WHERE local.source_id=edges.source_id AND "
+        "local.target_id=edges.target_id AND local.type='EMITS')",
         "UPDATE edges SET properties = json_set(properties, '$.callers', (SELECT "
         "json_group_object(c.key, json(c.value)) FROM json_each(edges.properties, '$.callers') c "
         "WHERE json_extract(c.value, '$.project') IS NOT ?2)) "
         "WHERE project = ?1 AND type LIKE 'CROSS\\_%' ESCAPE '\\' AND EXISTS (SELECT 1 FROM "
         "json_each(edges.properties, '$.callers') c WHERE json_extract(c.value, '$.project') = "
         "?2)",
+        "UPDATE edges SET properties = json_patch(json_remove(properties, '$.callers'), "
+        "json_extract(properties, '$.channel_forward')) "
+        "WHERE project = ?1 AND type = 'CROSS_CHANNEL' AND "
+        "json_type(properties, '$.channel_forward') = 'object' AND "
+        "json_type(properties, '$.callers') = 'object' AND NOT EXISTS (SELECT 1 FROM "
+        "json_each(edges.properties, '$.callers')) AND ?2 IS NOT NULL",
         "DELETE FROM edges WHERE project = ?1 AND type LIKE 'CROSS\\_%' ESCAPE '\\' AND "
         "json_type(properties, '$.callers') = 'object' AND NOT EXISTS (SELECT 1 FROM "
         "json_each(edges.properties, '$.callers')) AND ?2 IS NOT NULL",
@@ -1095,8 +1111,12 @@ static int try_match_channel_listener(cbm_store_t *src_store, const char *src_pr
     char fwd[CR_PROPS_BUF];
     build_cross_props(fwd, sizeof(fwd), tgt_project, listener_name, listener_file, channel_name,
                       "channel_name", transport);
-    if (!insert_cross_edge(src_store, src_project, emitter_id, channel_id, "CROSS_CHANNEL", fwd,
-                           ctx)) {
+    char owned_forward[CR_PROPS_BUF * 2 + CBM_SZ_32];
+    int forward_len = snprintf(owned_forward, sizeof(owned_forward), "%.*s,\"channel_forward\":%s}",
+                               (int)strlen(fwd) - 1, fwd, fwd);
+    if (forward_len <= 0 || (size_t)forward_len >= sizeof(owned_forward) ||
+        !insert_cross_edge(src_store, src_project, emitter_id, channel_id, "CROSS_CHANNEL",
+                           owned_forward, ctx)) {
         return cr_cancel_requested(ctx) ? CBM_STORE_NOT_FOUND : CBM_STORE_ERR;
     }
     if (cr_cancel_requested(ctx)) {
@@ -1107,10 +1127,17 @@ static int try_match_channel_listener(cbm_store_t *src_store, const char *src_pr
     char rev[CR_PROPS_BUF];
     build_cross_props(rev, sizeof(rev), src_project, caller_name, caller_file, channel_name,
                       "channel_name", transport);
-    return insert_cross_edge(tgt_store, tgt_project, listener_id, tgt_channel_id, "CROSS_CHANNEL",
-                             rev, ctx)
-               ? 1
-               : (cr_cancel_requested(ctx) ? CBM_STORE_NOT_FOUND : CBM_STORE_ERR);
+    bool qn_failed = false;
+    char *caller_qn = lookup_node_qn(cbm_store_get_db(src_store), emitter_id, &qn_failed);
+    char *owned_reverse =
+        caller_qn ? cr_props_with_caller(rev, src_project, caller_qn, caller_name, caller_file)
+                  : NULL;
+    free(caller_qn);
+    bool inserted =
+        owned_reverse && insert_cross_edge(tgt_store, tgt_project, listener_id, tgt_channel_id,
+                                           "CROSS_CHANNEL", owned_reverse, ctx);
+    free(owned_reverse);
+    return inserted ? 1 : (cr_cancel_requested(ctx) ? CBM_STORE_NOT_FOUND : CBM_STORE_ERR);
 }
 
 static cr_match_result_t match_channels(cbm_store_t *src_store, const char *src_project,

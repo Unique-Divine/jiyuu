@@ -1809,6 +1809,124 @@ TEST(cross_repo_status_reports_stale_after_provider_changes) {
     PASS();
 }
 
+static bool cross_repo_seed_channel(const cross_repo_fixture_t *fixture, const char *project,
+                                    bool emits, bool listens) {
+    char path[512], function_qn[256], channel_qn[256];
+    if (!cross_repo_project_path(fixture, project, path, sizeof(path))) {
+        return false;
+    }
+    cbm_store_t *store = cbm_store_open_path(path);
+    if (!store) {
+        return false;
+    }
+    snprintf(function_qn, sizeof(function_qn), "%s.run", project);
+    snprintf(channel_qn, sizeof(channel_qn), "%s.orders", project);
+    cbm_node_t function = {.project = project,
+                           .label = "Function",
+                           .name = "run",
+                           .qualified_name = function_qn,
+                           .file_path = "channel.ts"};
+    cbm_node_t channel = {.project = project,
+                          .label = "Channel",
+                          .name = "orders",
+                          .qualified_name = channel_qn,
+                          .file_path = "channel.ts",
+                          .properties_json = "{\"transport\":\"pubsub\"}"};
+    bool ok = cbm_store_upsert_project(store, project, fixture->cache) == CBM_STORE_OK;
+    cbm_edge_t edge = {.project = project,
+                       .source_id = cbm_store_upsert_node(store, &function),
+                       .target_id = cbm_store_upsert_node(store, &channel),
+                       .type = "EMITS"};
+    ok = ok && edge.source_id > 0 && edge.target_id > 0 &&
+         (!emits || cbm_store_insert_edge(store, &edge) > 0);
+    edge.type = "LISTENS_ON";
+    ok = ok && (!listens || cbm_store_insert_edge(store, &edge) > 0);
+    cbm_store_close(store);
+    return ok;
+}
+
+static bool cross_repo_link_channel(const char *project, const char *target, int expected) {
+    cbm_cross_repo_result_t linked = cbm_cross_repo_match(project, &target, 1);
+    bool ok = !linked.failed && linked.channel_edges == expected;
+    cbm_cross_repo_result_free(&linked);
+    return ok;
+}
+
+TEST(cross_repo_channel_repair_preserves_other_emitters_and_forward_link) {
+    cross_repo_fixture_t fixture;
+    char first[512], stage[512];
+    bool ok = cross_repo_fixture_begin(&fixture) &&
+              cross_repo_seed_channel(&fixture, "emitter-a", true, false) &&
+              cross_repo_seed_channel(&fixture, "emitter-b", true, false) &&
+              cross_repo_seed_channel(&fixture, "provider", true, true) &&
+              cross_repo_seed_channel(&fixture, "sink", false, true) &&
+              cross_repo_project_path(&fixture, "emitter-a", first, sizeof(first)) &&
+              cross_repo_project_path(&fixture, "_stage", stage, sizeof(stage));
+    if (!ok) {
+        cross_repo_fixture_end(&fixture);
+        FAIL("cannot prepare channel fixture");
+    }
+
+    const char *count_callers =
+        "SELECT COUNT(*) FROM edges, json_each(edges.properties, '$.callers') "
+        "WHERE type='CROSS_CHANNEL'";
+    ok = cross_repo_link_channel("provider", "sink", 1) &&
+         cross_repo_link_channel("emitter-a", "provider", 1) &&
+         cross_repo_link_channel("emitter-b", "provider", 1);
+    int both_callers = cross_repo_query_int(&fixture, "provider", count_callers);
+
+    ok = ok && cbm_store_backup_path(first, stage) == CBM_STORE_OK &&
+         cross_repo_exec(&fixture, "_stage", "DELETE FROM edges WHERE type='EMITS'") &&
+         cbm_cross_repo_relink_stage(first, stage, "emitter-a", NULL) == CBM_STORE_OK &&
+         cbm_store_backup_path(stage, first) == CBM_STORE_OK &&
+         cbm_cross_repo_reconcile_published("emitter-a");
+    int remaining_callers = cross_repo_query_int(&fixture, "provider", count_callers);
+    int remaining_peer = cross_repo_query_int(
+        &fixture, "provider",
+        "SELECT COUNT(*) FROM edges, json_each(edges.properties, '$.callers') "
+        "WHERE type='CROSS_CHANNEL' AND json_extract(value, '$.project')='emitter-b'");
+
+    ok = ok && cross_repo_exec(&fixture, "emitter-b", "DELETE FROM edges WHERE type='EMITS'") &&
+         cross_repo_link_channel("emitter-b", "provider", 0);
+    int no_callers = cross_repo_query_int(&fixture, "provider", count_callers);
+    int forward = cross_repo_query_int(&fixture, "provider",
+                                       "SELECT COUNT(*) FROM edges WHERE type='CROSS_CHANNEL' "
+                                       "AND json_extract(properties, '$.target_project')='sink'");
+    cross_repo_fixture_end(&fixture);
+
+    ASSERT_TRUE(ok);
+    ASSERT_EQ(both_callers, 2);
+    ASSERT_EQ(remaining_callers, 1);
+    ASSERT_EQ(remaining_peer, 1);
+    ASSERT_EQ(no_callers, 0);
+    ASSERT_EQ(forward, 1);
+    PASS();
+}
+
+TEST(cross_repo_relink_removes_provably_reverse_legacy_channel) {
+    cross_repo_fixture_t fixture;
+    bool ok = cross_repo_fixture_begin(&fixture) &&
+              cross_repo_seed_channel(&fixture, "emitter", true, false) &&
+              cross_repo_seed_channel(&fixture, "listener", false, true);
+    if (!ok) {
+        cross_repo_fixture_end(&fixture);
+        FAIL("cannot prepare legacy channel fixture");
+    }
+
+    ok = cross_repo_link_channel("emitter", "listener", 1) &&
+         cross_repo_exec(&fixture, "listener",
+                         "UPDATE edges SET properties=json_remove(properties, '$.callers') "
+                         "WHERE type='CROSS_CHANNEL'") &&
+         cross_repo_exec(&fixture, "emitter", "DELETE FROM edges WHERE type='EMITS'") &&
+         cross_repo_link_channel("emitter", "listener", 0);
+    int reverse = cross_repo_count_edges(&fixture, "listener", "CROSS_CHANNEL");
+    cross_repo_fixture_end(&fixture);
+
+    ASSERT_TRUE(ok);
+    ASSERT_EQ(reverse, 0);
+    PASS();
+}
+
 TEST(cross_repo_status_flags_legacy_provider_first_upgrade) {
     cross_repo_fixture_t fixture;
     bool ok = cross_repo_fixture_begin(&fixture) &&
@@ -1962,6 +2080,8 @@ SUITE(cross_repo) {
     RUN_TEST(cross_repo_watcher_publication_keeps_caller_link);
     RUN_TEST(cross_repo_stage_rebuilds_from_legacy_selection_without_writing_provider);
     RUN_TEST(cross_repo_status_reports_stale_after_provider_changes);
+    RUN_TEST(cross_repo_channel_repair_preserves_other_emitters_and_forward_link);
+    RUN_TEST(cross_repo_relink_removes_provably_reverse_legacy_channel);
     RUN_TEST(cross_repo_status_flags_legacy_provider_first_upgrade);
     RUN_TEST(cross_repo_wildcard_replay_marks_missing_provider_until_return);
     RUN_TEST(cross_repo_graphql_prefers_resolver_method_handler);
