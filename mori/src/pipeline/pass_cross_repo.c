@@ -63,14 +63,17 @@ static CBM_TLS cbm_cross_repo_after_insert_test_hook_t cr_after_insert_test_hook
 static CBM_TLS void *cr_after_insert_test_context = NULL;
 static cbm_graphql_link_policy_fn cr_graphql_link_policy;
 static cbm_graphql_delete_link_fn cr_graphql_delete_link;
+static cbm_graphql_upsert_link_fn cr_graphql_upsert_link;
 
 void cbm_cross_repo_set_graphql_backend(cbm_graphql_link_policy_fn policy,
-                                        cbm_graphql_delete_link_fn delete_link) {
+                                        cbm_graphql_delete_link_fn delete_link,
+                                        cbm_graphql_upsert_link_fn upsert_link) {
     char configured[sizeof("rust")];
     const char *impl = cbm_native_getenv("MORI_IMPL_GRAPHQL", configured, sizeof(configured), NULL);
-    bool rust = impl && strcmp(impl, "rust") == 0 && policy && delete_link;
+    bool rust = impl && strcmp(impl, "rust") == 0 && policy && delete_link && upsert_link;
     cr_graphql_link_policy = rust ? policy : NULL;
     cr_graphql_delete_link = rust ? delete_link : NULL;
+    cr_graphql_upsert_link = rust ? upsert_link : NULL;
 }
 
 void cbm_cross_repo_set_after_insert_hook_for_tests(cbm_cross_repo_after_insert_test_hook_t hook,
@@ -351,14 +354,20 @@ static bool insert_cross_edge(cbm_store_t *store, const char *project, int64_t f
     if (cr_cancel_requested(ctx)) {
         return false;
     }
-    cbm_edge_t edge = {
-        .project = project,
-        .source_id = from_id,
-        .target_id = to_id,
-        .type = edge_type,
-        .properties_json = props,
-    };
-    bool inserted = cbm_store_insert_edge(store, &edge) > 0;
+    bool inserted;
+    if (cr_graphql_upsert_link && strcmp(edge_type, "CROSS_GRAPHQL_CALLS") == 0) {
+        sqlite3_stmt *stmt = cbm_store_prepare_edge_upsert(store);
+        inserted = stmt && cr_graphql_upsert_link(stmt, project, from_id, to_id, props);
+    } else {
+        cbm_edge_t edge = {
+            .project = project,
+            .source_id = from_id,
+            .target_id = to_id,
+            .type = edge_type,
+            .properties_json = props,
+        };
+        inserted = cbm_store_insert_edge(store, &edge) > 0;
+    }
     if (inserted) {
         ctx->mutated = true;
         if (cr_after_insert_test_hook) {

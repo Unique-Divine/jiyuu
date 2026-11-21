@@ -4,9 +4,12 @@
 use std::ffi::{CStr, OsStr, c_char, c_int};
 use std::os::unix::ffi::OsStrExt;
 
-use rusqlite::{Connection, ffi::sqlite3};
+use rusqlite::{
+    Connection,
+    ffi::{sqlite3, sqlite3_stmt},
+};
 
-use crate::graphql_link::{Action, delete_stale_link, plan_link};
+use crate::graphql_link::{Action, delete_stale_link, plan_link, upsert_link};
 
 unsafe extern "C" {
     /// The C program's `main`, renamed when `src/main.c` is compiled with
@@ -22,6 +25,13 @@ unsafe extern "C" {
     fn cbm_cross_repo_set_graphql_backend(
         policy: extern "C" fn(bool, bool, bool, bool, bool) -> Action,
         delete: extern "C" fn(*mut sqlite3, i64, i64) -> c_int,
+        upsert: extern "C" fn(
+            *mut sqlite3_stmt,
+            *const c_char,
+            i64,
+            i64,
+            *const c_char,
+        ) -> bool,
     );
 }
 
@@ -44,6 +54,26 @@ extern "C" fn graphql_delete_stale_link(
     let result = unsafe { Connection::from_handle(db) }
         .and_then(|db| delete_stale_link(&db, caller, route));
     result.map(c_int::from).unwrap_or(-1)
+}
+
+extern "C" fn graphql_upsert_link(
+    stmt: *mut sqlite3_stmt,
+    project: *const c_char,
+    source: i64,
+    target: i64,
+    properties: *const c_char,
+) -> bool {
+    // SAFETY: The graph store lends a reset edge-upsert statement and the
+    // C strings are NUL-terminated and valid until the callback returns.
+    unsafe {
+        upsert_link(
+            stmt,
+            CStr::from_ptr(project),
+            source,
+            target,
+            CStr::from_ptr(properties),
+        )
+    }
 }
 
 /// The process entry point. Dispatches the developer export in Rust.
@@ -76,7 +106,11 @@ pub unsafe extern "C" fn main(argc: c_int, argv: *mut *mut c_char) -> c_int {
     // stays valid for the process lifetime, including each worker's own main.
     unsafe {
         cbm_gqlgen_set_glob_matcher(gqlgen_glob_match);
-        cbm_cross_repo_set_graphql_backend(plan_link, graphql_delete_stale_link);
+        cbm_cross_repo_set_graphql_backend(
+            plan_link,
+            graphql_delete_stale_link,
+            graphql_upsert_link,
+        );
     }
 
     // SAFETY: argc and argv come straight from the C runtime and meet the

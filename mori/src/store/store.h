@@ -703,6 +703,11 @@ int cbm_store_delete_nodes_by_label(cbm_store_t *s, const char *project, const c
 /* ── Edge CRUD ──────────────────────────────────────────────────── */
 
 /* Insert or update edge. Returns edge ID (>0) or CBM_STORE_ERR. */
+/* Borrow the store's reset, unbound edge-upsert statement. Bind project,
+ * source ID, target ID, type and properties in that order. The statement
+ * returns the edge ID. Reset it before letting the store use it again. */
+struct sqlite3_stmt *cbm_store_prepare_edge_upsert(cbm_store_t *s);
+
 int64_t cbm_store_insert_edge(cbm_store_t *s, const cbm_edge_t *e);
 
 /* Insert edges in batch. */

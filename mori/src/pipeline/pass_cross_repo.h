@@ -24,10 +24,16 @@ typedef cbm_cross_route_action_t (*cbm_graphql_link_policy_fn)(bool provider_sid
  * The caller owns the SQLite connection and its transaction. */
 typedef int (*cbm_graphql_delete_link_fn)(struct sqlite3 *db, int64_t caller_id, int64_t route_id);
 
+/* Bind, run and reset the borrowed graph-store upsert statement. */
+typedef bool (*cbm_graphql_upsert_link_fn)(struct sqlite3_stmt *stmt, const char *project,
+                                           int64_t source_id, int64_t target_id,
+                                           const char *properties);
+
 /* Register before starting C. The callbacks apply only to GraphQL link runs
  * with MORI_IMPL_GRAPHQL=rust. */
 void cbm_cross_repo_set_graphql_backend(cbm_graphql_link_policy_fn policy,
-                                        cbm_graphql_delete_link_fn delete_link);
+                                        cbm_graphql_delete_link_fn delete_link,
+                                        cbm_graphql_upsert_link_fn upsert_link);
 
 /* A store the ["*"] enumeration skipped instead of linking. */
 typedef struct {
