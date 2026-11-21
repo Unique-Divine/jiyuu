@@ -55,7 +55,6 @@ impl Fixture {
             .env("HOME", std::env::var_os("HOME").unwrap_or_default())
             .env("CBM_CACHE_DIR", self.0.join("cache"))
             .env("CBM_RUNTIME_DIR", self.0.join("rt"))
-            .env("MORI_IMPL_GRAPHQL", "rust")
             .args(["cli", "--quiet", "index_repository", &args.to_string()])
             .output()
             .expect("run Mori");

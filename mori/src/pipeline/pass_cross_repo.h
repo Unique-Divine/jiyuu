@@ -40,8 +40,7 @@ typedef cbm_graphql_handler_t (*cbm_graphql_find_handler_fn)(struct sqlite3 *db,
                                                              char *handler_name, size_t name_size,
                                                              char *handler_file, size_t file_size);
 
-/* Register before starting C. The callbacks apply only to GraphQL link runs
- * with MORI_IMPL_GRAPHQL=rust. */
+/* Register GraphQL link callbacks before starting the C runtime. */
 void cbm_cross_repo_set_graphql_backend(cbm_graphql_link_policy_fn policy,
                                         cbm_graphql_delete_link_fn delete_link,
                                         cbm_graphql_upsert_link_fn upsert_link,

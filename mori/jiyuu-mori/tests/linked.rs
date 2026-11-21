@@ -56,19 +56,11 @@ impl Drop for Scratch {
 
 /// Runs `bin` with a minimal environment pointed at its own scratch caches.
 fn run(bin: &Path, side: &str, args: &[&str]) -> Output {
-    run_in(bin, &Scratch::new(side), None, args)
+    run_in(bin, &Scratch::new(side), args)
 }
 
-fn run_in(
-    bin: &Path,
-    scratch: &Scratch,
-    graphql: Option<&str>,
-    args: &[&str],
-) -> Output {
+fn run_in(bin: &Path, scratch: &Scratch, args: &[&str]) -> Output {
     let mut command = command_in(bin, scratch);
-    if let Some(planner) = graphql {
-        command.env("MORI_IMPL_GRAPHQL", planner);
-    }
     if args.contains(&"index_repository") {
         command.env("CBM_PROFILE", "1");
     }
@@ -194,9 +186,9 @@ fn project_pages_use_internal_identity_and_preserve_projection() {
     ];
     let run_all = |bin: &Path| {
         let outputs = cases.map(|(tool, args)| {
-            run_in(bin, &scratch, None, &["cli", "--quiet", tool, args])
+            run_in(bin, &scratch, &["cli", "--quiet", tool, args])
         });
-        let stop = run_in(bin, &scratch, None, &["daemon", "stop"]);
+        let stop = run_in(bin, &scratch, &["daemon", "stop"]);
         assert!(stop.status.success(), "{stop:?}");
         outputs
     };
@@ -253,10 +245,10 @@ fn project_pages_use_internal_identity_and_preserve_projection() {
         "index_status",
         r#"{"project":"alpha","format":"json"}"#,
     ];
-    let c = run_in(&c_binary(), &scratch, None, &args);
-    let stop = run_in(&c_binary(), &scratch, None, &["daemon", "stop"]);
+    let c = run_in(&c_binary(), &scratch, &args);
+    let stop = run_in(&c_binary(), &scratch, &["daemon", "stop"]);
     assert!(stop.status.success(), "{stop:?}");
-    let rust = run_in(Path::new(MORI), &scratch, None, &args);
+    let rust = run_in(Path::new(MORI), &scratch, &args);
     assert_eq!(
         (c.status.code(), &c.stdout, &c.stderr),
         (rust.status.code(), &rust.stdout, &rust.stderr)
@@ -413,15 +405,16 @@ fn invalid_query_flag_diagnostic_matches_c() {
     assert_same(&["cli", "query_graph", "--offst", "1"]);
 }
 
-/// A small repository with Python and Go calls and a gqlgen server. Both
-/// binaries index the same path, so project names match.
+/// A small repository with Python and Go calls and an optional gqlgen server.
 struct Fixture(PathBuf);
 
 impl Fixture {
-    fn new() -> Self {
-        let dir = PathBuf::from(format!("/tmp/mori-fx{}", std::process::id()));
+    fn new(graphql: bool) -> Self {
+        let kind = if graphql { "gql" } else { "cli" };
+        let dir =
+            PathBuf::from(format!("/tmp/mori-fx{}-{kind}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
-        let files = [
+        let common_files = [
             (
                 "py/app.py",
                 "def helper(x):\n    return x + 1\n\n\ndef run():\n    \
@@ -433,6 +426,8 @@ impl Fixture {
                  }\n\nfunc Twice(a int) int {\n\treturn Add(a, a)\n}\n",
             ),
             ("go/go.mod", "module example.com/calc\n\ngo 1.22\n"),
+        ];
+        let graphql_files = [
             (
                 "gqlgen.yml",
                 "schema:\n  - graphql/**/schema?.graphqls\nresolver:\n  layout: follow-schema\n  dir: server\n",
@@ -467,7 +462,12 @@ impl Fixture {
                  func (r *queryResolver) Duplicate() int { return 2 }\n",
             ),
         ];
-        for (rel, text) in files {
+        let server_files = if graphql {
+            graphql_files.as_slice()
+        } else {
+            &[]
+        };
+        for (rel, text) in common_files.iter().chain(server_files) {
             let path = dir.join(rel);
             fs::create_dir_all(path.parent().expect("parent"))
                 .expect("create fixture dir");
@@ -491,14 +491,25 @@ impl Drop for Fixture {
     }
 }
 
-/// The value of `"key":<number>` in the index result.
-fn json_number(text: &str, key: &str) -> Option<u64> {
-    let start = text.find(&format!("\"{key}\":"))? + key.len() + 3;
-    let digits: String = text[start..]
-        .chars()
-        .take_while(char::is_ascii_digit)
-        .collect();
-    digits.parse().ok()
+fn index_fixture(
+    bin: &Path,
+    scratch: &Scratch,
+    repo: &str,
+) -> serde_json::Value {
+    let index = run_in(
+        bin,
+        scratch,
+        &["cli", "--quiet", "index_repository", "--repo_path", repo],
+    );
+    assert!(index.status.success(), "index failed: {index:?}");
+    let result: serde_json::Value = serde_json::from_slice(&index.stdout)
+        .unwrap_or_else(|error| panic!("index response: {error}: {index:?}"));
+    assert_eq!(result["status"], "indexed", "{result}");
+    assert!(
+        result["nodes"].as_u64().is_some_and(|nodes| nodes > 0),
+        "{result}"
+    );
+    result
 }
 
 fn graphql_rows(scratch: &Scratch, project: &str) -> Vec<String> {
@@ -525,195 +536,17 @@ fn graphql_rows(scratch: &Scratch, project: &str) -> Vec<String> {
         .expect("read GraphQL rows")
 }
 
-fn log_has_graphql_backend(log: &str, implementation: &str) -> bool {
-    let planner = format!("planner={implementation}");
-    let writer = format!("writer={implementation}");
-    log.lines().any(|line| {
-        line.contains("msg=pass.route_nodes.graphql")
-            && line.split_ascii_whitespace().any(|kv| kv == planner)
-            && line.split_ascii_whitespace().any(|kv| kv == writer)
-    })
-}
-
-#[test]
-fn graphql_update_paths_match_c() {
-    let work = Scratch::new("graphql-repo");
-    let repo = work.0.join("repo");
-    fs::create_dir_all(repo.join("server")).expect("create resolver directory");
-    let repo = fs::canonicalize(repo).expect("resolve repository");
-    let project = repo
-        .to_string_lossy()
-        .trim_start_matches('/')
-        .replace('/', "-");
-    let repo_path = repo.to_str().expect("UTF-8 repository path");
-    let files = [
-        (
-            "gqlgen.yml",
-            "schema:\n  - schema.graphqls\nresolver:\n  layout: follow-schema\n  dir: server\n",
-        ),
-        ("schema.graphqls", "type Query { value: Int }\n"),
-        (
-            "server/handler.go",
-            "package server\ntype queryResolver struct{}\nfunc (q *queryResolver) Value() int { return 1 }\n",
-        ),
-        ("op.graphql", "query Operation { value }\n"),
-        (
-            "server/helper.go",
-            "package server\nfunc helper() int { return 1 }\n",
-        ),
-    ];
-    let steps = [
-        (None, "msg=pipeline.route path=full", 1, true),
-        (
-            None,
-            "msg=incremental.noop reason=semantic_manifest_equal",
-            1,
-            false,
-        ),
-        (
-            Some(("op.graphql", "query OperationRenamed { value }\n")),
-            "msg=incremental.route route=closure_repair",
-            1,
-            false,
-        ),
-        (
-            Some((
-                "server/helper.go",
-                "package server\nfunc helper() int { return 2 }\n",
-            )),
-            "msg=incremental.route route=closure_repair",
-            1,
-            false,
-        ),
-        (
-            Some((
-                "schema.graphqls",
-                "type Query { value: Int another: Int }\n",
-            )),
-            "msg=incremental.force_full",
-            2,
-            true,
-        ),
-    ];
-    let mut sides = Vec::new();
-    for (label, binary, mode) in [
-        ("c", c_binary(), None),
-        ("rust", PathBuf::from(MORI), Some("rust")),
-    ] {
-        for (path, contents) in files {
-            fs::write(repo.join(path), contents).expect("reset fixture file");
-        }
-        let scratch = Scratch::new(label);
-        let mut worker_logs = std::collections::HashSet::new();
-        let mut steps_rows = Vec::new();
-        for (edit, expected, route_count, full) in steps {
-            if let Some((path, contents)) = edit {
-                fs::write(repo.join(path), contents).expect("edit fixture file");
-            }
-            let args = [
-                "cli",
-                "--quiet",
-                "index_repository",
-                "--repo_path",
-                repo_path,
-            ];
-            let index = run_in(&binary, &scratch, mode, &args);
-            assert!(
-                index.status.success()
-                    && String::from_utf8_lossy(&index.stdout)
-                        .contains("\"status\":\"indexed\""),
-                "{label} index failed: {index:?}"
-            );
-            let log = fs::read_dir(scratch.0.join("cache/logs"))
-                .expect("read worker log directory")
-                .filter_map(Result::ok)
-                .filter(|entry| {
-                    entry
-                        .file_name()
-                        .to_string_lossy()
-                        .starts_with(".worker-log-")
-                })
-                .filter(|entry| worker_logs.insert(entry.path()))
-                .map(|entry| {
-                    fs::read_to_string(entry.path())
-                        .expect("read profiled worker log")
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            assert!(
-                log.contains(expected),
-                "{label} did not report {expected}: {log}"
-            );
-            if full {
-                assert!(log.contains("msg=pipeline.route path=full"), "{log}");
-            }
-            if full && mode == Some("rust") {
-                assert!(
-                    log_has_graphql_backend(&log, "rust"),
-                    "Rust Route planner or writer missing from the full rebuild: {log}"
-                );
-            }
-            let rows = graphql_rows(&scratch, &project);
-            assert_eq!(rows.len(), route_count);
-            assert!(rows.iter().any(|row| row.contains("Query.value")
-                && row.contains("gqlgen_resolver")));
-            steps_rows.push(rows);
-        }
-        sides.push(steps_rows);
-    }
-    assert_eq!(sides[0], sides[1], "GraphQL Route or HANDLES rows differ");
-}
-
-/// Indexes the fixture with each binary, which goes through the temporary
-/// daemon and the index worker that the binary re-executes as itself. Compare
-/// graph output from standalone C and both linked GraphQL planner modes.
 #[test]
 fn index_through_worker_reexec_matches_c() {
-    let fixture = Fixture::new();
+    let fixture = Fixture::new(false);
     let project = fixture.project();
     let repo = fixture.0.to_string_lossy().into_owned();
-    let sides = [
-        ("standalone", c_binary(), None),
-        ("c", PathBuf::from(MORI), Some("c")),
-        ("rust", PathBuf::from(MORI), Some("rust")),
-    ];
+    let sides = [("c", c_binary()), ("rust", PathBuf::from(MORI))];
     let mut results = Vec::new();
-    for (side, bin, graphql) in &sides {
+    for (side, bin) in &sides {
         let scratch = Scratch::new(side);
-        let index = run_in(
-            bin,
-            &scratch,
-            *graphql,
-            &["cli", "--quiet", "index_repository", "--repo_path", &repo],
-        );
-        let text = String::from_utf8_lossy(&index.stdout).into_owned();
-        assert!(
-            index.status.success() && text.contains("\"status\":\"indexed\""),
-            "{side} index failed: {text}\n{}",
-            String::from_utf8_lossy(&index.stderr)
-        );
-        // Profiling preserves the daemon's worker log after a clean exit.
-        let implementation = graphql.unwrap_or("c");
-        let logged_implementation = fs::read_dir(scratch.0.join("cache/logs"))
-            .expect("read worker log directory")
-            .filter_map(Result::ok)
-            .filter(|entry| {
-                entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with(".worker-log-")
-            })
-            .any(|entry| {
-                fs::read_to_string(entry.path()).is_ok_and(|log| {
-                    log_has_graphql_backend(&log, implementation)
-                })
-            });
-        assert!(
-            logged_implementation,
-            "{side} worker didn't report planner={implementation} and writer={implementation}"
-        );
-        let counts = (json_number(&text, "nodes"), json_number(&text, "edges"));
-        assert!(counts.0.is_some_and(|n| n > 0), "{side}: {text}");
+        let index = index_fixture(bin, &scratch, &repo);
+        let counts = (index["nodes"].as_u64(), index["edges"].as_u64());
         // Raw CLI JSON reaches the daemon as bytes. Building these requests
         // as serde values would normalize negative zero and duplicate keys.
         let schema_negative_zero =
@@ -808,7 +641,7 @@ fn index_through_worker_reexec_matches_c() {
                 "--project",
                 &project,
                 "--query",
-                "MATCH (h)-[:HANDLES]->(r:Route) WHERE r.qualified_name = '__graphql__Query.value' RETURN h.name",
+                "MATCH (f:Function)-[:CALLS]->(g:Function) WHERE f.name = 'Twice' RETURN g.name",
                 "--max-rows=+7",
                 "--max_rows",
                 "4",
@@ -817,46 +650,196 @@ fn index_through_worker_reexec_matches_c() {
                 "--",
                 "ignored",
             ],
-            vec![
-                "cli",
-                "query_graph",
-                "--project",
-                &project,
-                "--query",
-                "MATCH (h)-[:HANDLES]->(r:Route) WHERE r.qualified_name STARTS WITH '__graphql__Query.' \
-                 RETURN r.name, h.name, h.label, r.ambiguous, r.file_path ORDER BY r.name",
-            ],
         ]
         .iter()
-        .map(|args| run_in(bin, &scratch, *graphql, args))
+        .map(|args| run_in(bin, &scratch, args))
         .collect();
-        results.push((counts, queries, graphql_rows(&scratch, &project)));
+        results.push((counts, queries));
     }
-    let (c, linked) = results.split_first().expect("standalone C result");
-    assert_eq!(c.2.len(), 4, "expected one handler per GraphQL Route");
-    assert!(c.2.iter().any(|row| row.contains("newValue")));
-    for rs in linked {
-        assert_eq!(c.0, rs.0, "node and edge counts differ");
-        assert_eq!(c.2, rs.2, "published Route or HANDLES rows differ");
-        for (c_out, rs_out) in c.1.iter().zip(&rs.1) {
-            assert!(c_out.status.success(), "{c_out:?}");
+    let [(c_counts, c_queries), (rust_counts, rust_queries)] =
+        results.as_slice()
+    else {
+        panic!("expected C and Rust index results");
+    };
+    assert_eq!(c_counts, rust_counts, "node and edge counts differ");
+    for (c_out, rust_out) in c_queries.iter().zip(rust_queries) {
+        assert!(c_out.status.success(), "{c_out:?}");
+        assert_eq!(
+            (c_out.status.code(), &c_out.stdout, &c_out.stderr),
+            (rust_out.status.code(), &rust_out.stdout, &rust_out.stderr),
+            "query output differs\nC: {c_out:?}\nRust: {rust_out:?}"
+        );
+    }
+    let trace = String::from_utf8_lossy(&c_queries[1].stdout);
+    assert!(trace.contains(".go.Twice"), "Add caller missing: {trace}");
+}
+
+fn log_has_graphql_backend(log: &str) -> bool {
+    log.lines().any(|line| {
+        line.contains("msg=pass.route_nodes.graphql")
+            && line.split_ascii_whitespace().any(|kv| kv == "planner=rust")
+            && line.split_ascii_whitespace().any(|kv| kv == "writer=rust")
+    })
+}
+
+#[test]
+fn graphql_update_paths_publish_expected_routes() {
+    let work = Scratch::new("graphql-repo");
+    let repo = work.0.join("repo");
+    fs::create_dir_all(repo.join("server")).expect("create resolver directory");
+    let repo = fs::canonicalize(repo).expect("resolve repository");
+    let project = repo
+        .to_string_lossy()
+        .trim_start_matches('/')
+        .replace('/', "-");
+    let repo_path = repo.to_str().expect("UTF-8 repository path");
+    for (path, contents) in [
+        (
+            "gqlgen.yml",
+            "schema:\n  - schema.graphqls\nresolver:\n  layout: follow-schema\n  dir: server\n",
+        ),
+        ("schema.graphqls", "type Query { value: Int }\n"),
+        (
+            "server/handler.go",
+            "package server\ntype queryResolver struct{}\nfunc (q *queryResolver) Value() int { return 1 }\n",
+        ),
+        ("op.graphql", "query Operation { value }\n"),
+        (
+            "server/helper.go",
+            "package server\nfunc helper() int { return 1 }\n",
+        ),
+    ] {
+        fs::write(repo.join(path), contents).expect("write fixture file");
+    }
+    let steps = [
+        (None, "msg=pipeline.route path=full", 1, true),
+        (
+            None,
+            "msg=incremental.noop reason=semantic_manifest_equal",
+            1,
+            false,
+        ),
+        (
+            Some(("op.graphql", "query OperationRenamed { value }\n")),
+            "msg=incremental.route route=closure_repair",
+            1,
+            false,
+        ),
+        (
+            Some((
+                "server/helper.go",
+                "package server\nfunc helper() int { return 2 }\n",
+            )),
+            "msg=incremental.route route=closure_repair",
+            1,
+            false,
+        ),
+        (
+            Some((
+                "schema.graphqls",
+                "type Query { value: Int another: Int }\n",
+            )),
+            "msg=incremental.force_full",
+            2,
+            true,
+        ),
+    ];
+    let scratch = Scratch::new("graphql-update");
+    let mut worker_logs = std::collections::HashSet::new();
+    let mut first_rows = None;
+    for (edit, expected, route_count, full) in steps {
+        if let Some((path, contents)) = edit {
+            fs::write(repo.join(path), contents).expect("edit fixture file");
+        }
+        index_fixture(Path::new(MORI), &scratch, repo_path);
+        let log = fs::read_dir(scratch.0.join("cache/logs"))
+            .expect("read worker log directory")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".worker-log-")
+            })
+            .filter(|entry| worker_logs.insert(entry.path()))
+            .map(|entry| {
+                fs::read_to_string(entry.path())
+                    .expect("read profiled worker log")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(log.contains(expected), "did not report {expected}: {log}");
+        if full {
+            assert!(log.contains("msg=pipeline.route path=full"), "{log}");
             assert!(
-                (c_out.status.code(), &c_out.stdout, &c_out.stderr)
-                    == (rs_out.status.code(), &rs_out.stdout, &rs_out.stderr),
-                "query output differs\nC: {:?}\n{}\n{}\nRust: {:?}\n{}\n{}",
-                c_out.status.code(),
-                String::from_utf8_lossy(&c_out.stdout),
-                String::from_utf8_lossy(&c_out.stderr),
-                rs_out.status.code(),
-                String::from_utf8_lossy(&rs_out.stdout),
-                String::from_utf8_lossy(&rs_out.stderr)
+                log_has_graphql_backend(&log),
+                "Rust planner or writer missing: {log}"
             );
         }
+        let rows = graphql_rows(&scratch, &project);
+        assert_eq!(rows.len(), route_count);
+        assert!(
+            rows.iter().any(|row| row.contains("Query.value")
+                && row.contains("gqlgen_resolver"))
+        );
+        if !full {
+            assert_eq!(
+                first_rows.as_ref(),
+                Some(&rows),
+                "Route or HANDLES changed"
+            );
+        } else if route_count == 1 {
+            first_rows = Some(rows);
+        } else {
+            assert!(rows.iter().any(|row| row.contains("Query.another")
+                && row.contains("graphql_schema_field")));
+        }
     }
-    let trace = String::from_utf8_lossy(&c.1[1].stdout);
-    assert!(trace.contains(".go.Twice"), "Add caller missing: {trace}");
-    let route =
-        String::from_utf8_lossy(&c.1.last().expect("route query").stdout);
+}
+
+#[test]
+fn graphql_routes_through_worker_reexec() {
+    let fixture = Fixture::new(true);
+    let project = fixture.project();
+    let repo = fixture.0.to_string_lossy().into_owned();
+    let scratch = Scratch::new("graphql");
+    index_fixture(Path::new(MORI), &scratch, &repo);
+    // Profiling preserves the daemon's worker log after a clean exit.
+    let logged_implementation = fs::read_dir(scratch.0.join("cache/logs"))
+        .expect("read worker log directory")
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".worker-log-")
+        })
+        .any(|entry| {
+            fs::read_to_string(entry.path())
+                .is_ok_and(|log| log_has_graphql_backend(&log))
+        });
+    assert!(
+        logged_implementation,
+        "worker did not report the Rust planner and writer"
+    );
+    let rows = graphql_rows(&scratch, &project);
+    assert_eq!(rows.len(), 4, "expected one handler per GraphQL Route");
+    assert!(rows.iter().any(|row| row.contains("newValue")));
+    let query = run_in(
+        Path::new(MORI),
+        &scratch,
+        &[
+            "cli",
+            "query_graph",
+            "--project",
+            &project,
+            "--query",
+            "MATCH (h)-[:HANDLES]->(r:Route) WHERE r.qualified_name STARTS WITH '__graphql__Query.' \
+             RETURN r.name, h.name, h.label, r.ambiguous, r.file_path ORDER BY r.name",
+        ],
+    );
+    assert!(query.status.success(), "{query:?}");
+    let route = String::from_utf8_lossy(&query.stdout);
     for (name, handler, label, schema) in [
         (
             "Query.value",

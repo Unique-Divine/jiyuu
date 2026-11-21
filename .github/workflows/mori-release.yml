@@ -292,7 +292,7 @@ jobs:
           test "$("$reference" --version)" = "codebase-memory-mcp 0.13.1"
           replay="$(mktemp -d /tmp/mori-release-replay.XXXXXX)"
           python3 parity/parity.py ci --bin-a "$reference" --bin-b "$BIN" \
-            --graphql-a c --graphql-b rust --export-b rust --verify-export \
+            --profile --export-b rust --verify-export \
             --work "$replay/w" --rt-prefix "$replay/r"
           grep -E 'msg=pass\.route_nodes\.graphql routes=[1-9][0-9]* .*planner=rust writer=rust' \
             "$replay"/w/b/cache/logs/.worker-log-*

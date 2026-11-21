@@ -14,7 +14,6 @@
 #include "foundation/constants.h"
 #include "foundation/log.h"
 #include "foundation/mem_core.h"
-#include "foundation/platform.h"
 #include "foundation/compat.h"
 #include "foundation/compat_fs.h"
 #include "foundation/str_util.h"
@@ -30,6 +29,7 @@
 /* ── Constants ───────────────────────────────────────────────────── */
 
 enum {
+    CR_BIND_GRAPHQL_AVAILABLE = 3,
     CR_PATH_BUF = 4096,
     CR_QN_BUF = 512,
     CR_PROPS_BUF = 2048,
@@ -72,14 +72,11 @@ void cbm_cross_repo_set_graphql_backend(cbm_graphql_link_policy_fn policy,
                                         cbm_graphql_delete_link_fn delete_link,
                                         cbm_graphql_upsert_link_fn upsert_link,
                                         cbm_graphql_find_handler_fn find_handler) {
-    char configured[sizeof("rust")];
-    const char *impl = cbm_native_getenv("MORI_IMPL_GRAPHQL", configured, sizeof(configured), NULL);
-    bool rust =
-        impl && strcmp(impl, "rust") == 0 && policy && delete_link && upsert_link && find_handler;
-    cr_graphql_link_policy = rust ? policy : NULL;
-    cr_graphql_delete_link = rust ? delete_link : NULL;
-    cr_graphql_upsert_link = rust ? upsert_link : NULL;
-    cr_graphql_find_handler = rust ? find_handler : NULL;
+    bool registered = policy && delete_link && upsert_link && find_handler;
+    cr_graphql_link_policy = registered ? policy : NULL;
+    cr_graphql_delete_link = registered ? delete_link : NULL;
+    cr_graphql_upsert_link = registered ? upsert_link : NULL;
+    cr_graphql_find_handler = registered ? find_handler : NULL;
 }
 
 void cbm_cross_repo_set_after_insert_hook_for_tests(cbm_cross_repo_after_insert_test_hook_t hook,
@@ -283,6 +280,9 @@ static cr_run_status_t delete_cross_edges(cbm_store_t *store, const char *projec
         return CR_RUN_FAILED;
     }
     for (size_t i = 0; i < sizeof(edge_types) / sizeof(edge_types[0]); i++) {
+        if (!cr_graphql_link_policy && strcmp(edge_types[i], "CROSS_GRAPHQL_CALLS") == 0) {
+            continue;
+        }
         if (cr_cancel_requested(ctx)) {
             return CR_RUN_CANCELLED;
         }
@@ -411,7 +411,8 @@ static cr_run_status_t cr_reconcile_reverse(cbm_store_t *src_store, const char *
         "UPDATE edges SET properties = json_set(properties, '$.callers', (SELECT "
         "json_group_object(c.key, json(c.value)) FROM json_each(edges.properties, '$.callers') c "
         "WHERE json_extract(c.value, '$.project') IS NOT ?2)) "
-        "WHERE project = ?1 AND type LIKE 'CROSS\\_%' ESCAPE '\\' AND EXISTS (SELECT 1 FROM "
+        "WHERE project = ?1 AND type LIKE 'CROSS\\_%' ESCAPE '\\' AND "
+        "(?3 OR type <> 'CROSS_GRAPHQL_CALLS') AND EXISTS (SELECT 1 FROM "
         "json_each(edges.properties, '$.callers') c WHERE json_extract(c.value, '$.project') = "
         "?2)",
         "UPDATE edges SET properties = json_patch(json_remove(properties, '$.callers'), "
@@ -421,6 +422,7 @@ static cr_run_status_t cr_reconcile_reverse(cbm_store_t *src_store, const char *
         "json_type(properties, '$.callers') = 'object' AND NOT EXISTS (SELECT 1 FROM "
         "json_each(edges.properties, '$.callers')) AND ?2 IS NOT NULL",
         "DELETE FROM edges WHERE project = ?1 AND type LIKE 'CROSS\\_%' ESCAPE '\\' AND "
+        "(?3 OR type <> 'CROSS_GRAPHQL_CALLS') AND "
         "json_type(properties, '$.callers') = 'object' AND NOT EXISTS (SELECT 1 FROM "
         "json_each(edges.properties, '$.callers')) AND ?2 IS NOT NULL",
         "UPDATE edges SET properties = (SELECT json_set(edges.properties, '$.target_project', "
@@ -428,6 +430,7 @@ static cr_run_status_t cr_reconcile_reverse(cbm_store_t *src_store, const char *
         "'$.function'), '$.target_file', json_extract(c.value, '$.file')) FROM "
         "json_each(edges.properties, '$.callers') c ORDER BY c.key LIMIT 1) "
         "WHERE project = ?1 AND type LIKE 'CROSS\\_%' ESCAPE '\\' AND "
+        "(?3 OR type <> 'CROSS_GRAPHQL_CALLS') AND "
         "json_extract(properties, '$.target_project') = ?2 AND json_type(properties, "
         "'$.callers') = 'object'",
     };
@@ -446,6 +449,9 @@ static cr_run_status_t cr_reconcile_reverse(cbm_store_t *src_store, const char *
                       SQLITE_OK &&
                   sqlite3_bind_text(st, PAIR_LEN, src_project, CBM_NOT_FOUND, SQLITE_STATIC) ==
                       SQLITE_OK &&
+                  (sqlite3_bind_parameter_count(st) < CR_BIND_GRAPHQL_AVAILABLE ||
+                   sqlite3_bind_int(st, CR_BIND_GRAPHQL_AVAILABLE,
+                                    cr_graphql_link_policy != NULL) == SQLITE_OK) &&
                   sqlite3_step(st) == SQLITE_DONE;
         if (sqlite3_finalize(st) != SQLITE_OK || !ok) {
             return CR_RUN_FAILED;
@@ -471,9 +477,10 @@ static bool insert_cross_edge(cbm_store_t *store, const char *project, int64_t f
         return true;
     }
     bool inserted;
-    if (cr_graphql_upsert_link && strcmp(edge_type, "CROSS_GRAPHQL_CALLS") == 0) {
+    if (strcmp(edge_type, "CROSS_GRAPHQL_CALLS") == 0) {
         sqlite3_stmt *stmt = cbm_store_prepare_edge_upsert(store);
-        inserted = stmt && cr_graphql_upsert_link(stmt, project, from_id, to_id, props);
+        inserted = stmt && cr_graphql_upsert_link &&
+                   cr_graphql_upsert_link(stmt, project, from_id, to_id, props);
     } else {
         cbm_edge_t edge = {
             .project = project,
@@ -1480,6 +1487,10 @@ static cr_match_result_t match_typed_routes(cbm_store_t *src_store, const char *
                                             const char *edge_type, const char *svc_key,
                                             const char *method_key, const char *cross_edge_type,
                                             bool provider_side, cr_run_context_t *ctx) {
+    bool graphql = strcmp(edge_type, "GRAPHQL_CALLS") == 0;
+    if (graphql && !cr_graphql_link_policy) {
+        return cr_match_finish(ctx, 0, false);
+    }
     struct sqlite3 *src_db = cbm_store_get_db(src_store);
     if (!src_db) {
         return cr_match_finish(ctx, 0, true);
@@ -1503,8 +1514,7 @@ static cr_match_result_t match_typed_routes(cbm_store_t *src_store, const char *
     int count = 0;
     int step_rc = SQLITE_DONE;
     bool failed = false;
-    bool use_rust = cr_graphql_link_policy && strcmp(edge_type, "GRAPHQL_CALLS") == 0;
-    cbm_graphql_link_policy_fn plan = use_rust ? cr_graphql_link_policy : cr_plan_typed_route;
+    cbm_graphql_link_policy_fn plan = graphql ? cr_graphql_link_policy : cr_plan_typed_route;
     while (!cr_cancel_requested(ctx) && (step_rc = sqlite3_step(s)) == SQLITE_ROW) {
         int64_t caller_id = sqlite3_column_int64(s, 0);
         int64_t route_id = sqlite3_column_int64(s, SKIP_ONE);
@@ -1543,7 +1553,7 @@ static cr_match_result_t match_typed_routes(cbm_store_t *src_store, const char *
         char handler_name[CBM_SZ_256] = {0};
         char handler_file[CBM_SZ_512] = {0};
         cbm_graphql_handler_t handler;
-        if (use_rust) {
+        if (graphql) {
             handler =
                 cr_graphql_find_handler(cbm_store_get_db(tgt_store), route_qn, handler_name,
                                         sizeof(handler_name), handler_file, sizeof(handler_file));
@@ -1570,7 +1580,7 @@ static cr_match_result_t match_typed_routes(cbm_store_t *src_store, const char *
         case CBM_CROSS_ROUTE_DROP:
             if (ctx->staging_store && src_store != ctx->staging_store) {
                 emitted = true;
-            } else if (use_rust) {
+            } else if (graphql) {
                 int deleted = cr_graphql_delete_link(src_db, caller_id, route_id);
                 emitted = deleted >= 0;
                 ctx->mutated = ctx->mutated || deleted > 0;
