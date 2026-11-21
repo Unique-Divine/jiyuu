@@ -384,6 +384,7 @@ impl Walk {
         &mut self,
         path: &Path,
         rel: &Path,
+        under_gitignore: bool,
         stack: &mut Vec<IgnoreAt>,
     ) -> io::Result<()> {
         let entries = fs::read_dir(path)?;
@@ -411,19 +412,27 @@ impl Walk {
             if kind.is_symlink() {
                 self.snapshot.ignore(&rel, "symlink");
             } else if kind.is_dir() {
-                if self.excludes_dir(&name, &rel, stack) {
-                    self.snapshot.excluded.push(rel.as_path().into());
-                } else {
-                    self.directory(&entry_path, &rel, stack)?;
-                }
-            } else if kind.is_file() {
-                self.file(
+                match self.classify_dir(
                     &name,
                     &entry_path,
                     &rel,
+                    under_gitignore,
                     stack,
-                    entry.metadata()?.len(),
-                );
+                ) {
+                    Directory::Keep => {
+                        self.directory(&entry_path, &rel, false, stack)?
+                    }
+                    Directory::GitIgnored
+                        if self.tracked.dirs.contains(&rel) =>
+                    {
+                        self.directory(&entry_path, &rel, true, stack)?;
+                    }
+                    Directory::GitIgnored | Directory::Skip => {
+                        self.snapshot.excluded.push(rel.as_path().into());
+                    }
+                }
+            } else if kind.is_file() {
+                self.file(&entry, &rel, under_gitignore, stack)?;
             }
         }
         stack.truncate(old_len);
@@ -436,12 +445,21 @@ impl Walk {
             .map_or(0, |matcher| matcher.verdict(path, is_dir))
     }
 
-    fn excludes_dir(
+    fn classify_dir(
         &self,
         name: &OsStr,
+        absolute: &Path,
         rel: &Path,
+        under_gitignore: bool,
         stack: &[IgnoreAt],
-    ) -> bool {
+    ) -> Directory {
+        if self
+            .cache
+            .as_ref()
+            .is_some_and(|cache| absolute.starts_with(cache))
+        {
+            return Directory::Skip;
+        }
         let cbm = self.cbm_verdict(rel, true);
         let name = c_path(Path::new(name));
         let native_rel = c_path(rel);
@@ -456,18 +474,24 @@ impl Walk {
                 || cbm_discover_path_has_skip_suffix(native_rel.as_ptr()))
                 && (cbm >= 0 || safety_core)
         };
-        hard_skip || cbm > 0 || git_ignored(rel, true, stack)
+        if hard_skip || cbm > 0 {
+            Directory::Skip
+        } else if under_gitignore || git_ignored(rel, true, stack) {
+            Directory::GitIgnored
+        } else {
+            Directory::Keep
+        }
     }
 
     fn file(
         &mut self,
-        name: &OsStr,
-        path: &Path,
+        entry: &fs::DirEntry,
         rel: &Path,
+        under_gitignore: bool,
         stack: &[IgnoreAt],
-        size: u64,
-    ) {
-        let name = c_path(Path::new(name));
+    ) -> io::Result<()> {
+        let name = c_path(Path::new(&entry.file_name()));
+        let size = entry.metadata()?.len();
         // SAFETY: the three filters read the live name and return a flag.
         let native_reason = unsafe {
             if cbm_has_ignored_suffix(name.as_ptr(), self.mode) {
