@@ -128,6 +128,13 @@ fn list_projects_matches_c() {
 }
 
 #[test]
+fn cli_output_controls_match_c() {
+    assert_same(&["cli", "--quiet", "list_projects"]);
+    assert_same(&["cli", "--verbose", "list_projects", "--quiet"]);
+    assert_same(&["cli", "list_projects", "--progress", "--quiet"]);
+}
+
+#[test]
 fn project_pages_use_internal_identity_and_preserve_projection() {
     let scratch = Scratch::new("projects");
     let cache = scratch.0.join("cache");

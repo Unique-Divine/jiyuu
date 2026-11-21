@@ -639,6 +639,7 @@ pub unsafe extern "C" fn main(argc: c_int, argv: *mut *mut c_char) -> c_int {
             graphql_find_handler,
         );
         crate::query_cli::c_args::register();
+        crate::cli_output::register();
         crate::initialize::c_initialize::register();
         crate::tool_list::c_tool_list::register();
     }
