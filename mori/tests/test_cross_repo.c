@@ -8,7 +8,9 @@
 #include "foundation/compat.h"
 #include "foundation/mem_core.h"
 #include "pipeline/pass_cross_repo.h"
+#include "pipeline/pipeline.h"
 #include "pipeline/pipeline_internal.h"
+#include "watcher/watcher.h"
 
 #include <sqlite3/sqlite3.h>
 #include <yyjson/yyjson.h>
@@ -1807,7 +1809,80 @@ TEST(cross_repo_status_reports_stale_after_provider_changes) {
     PASS();
 }
 
+static int cross_repo_watch_index(const char *project, const char *root, void *context) {
+    (void)context;
+    cbm_pipeline_t *pipeline = cbm_pipeline_new(root, NULL, CBM_MODE_FULL);
+    if (!pipeline) {
+        return CBM_STORE_ERR;
+    }
+    cbm_pipeline_set_background(pipeline, true);
+    int rc = cbm_pipeline_set_project_name(pipeline, project) ? cbm_pipeline_run(pipeline)
+                                                              : CBM_STORE_ERR;
+    cbm_pipeline_free(pipeline);
+    return rc;
+}
+
+TEST(cross_repo_watcher_publication_keeps_caller_link) {
+    cross_repo_fixture_t fixture;
+    if (!cross_repo_fixture_begin(&fixture)) {
+        cross_repo_fixture_end(&fixture);
+        FAIL("cannot prepare isolated index cache");
+    }
+
+    char client[512], provider[512], caller_file[1024];
+    snprintf(client, sizeof(client), "%s/client", fixture.cache);
+    snprintf(provider, sizeof(provider), "%s/provider", fixture.cache);
+    snprintf(caller_file, sizeof(caller_file), "%s/app.ts", client);
+    bool ok = th_write_file(caller_file, "export function known(): Promise<Response> {"
+                                         " return fetch(\"/api/known\"); }\n") == 0 &&
+              th_write_file(TH_PATH(provider, "app.ts"),
+                            "import express from \"express\";\n"
+                            "const app = express();\n"
+                            "function provideKnown(): void {}\n"
+                            "app.get(\"/api/known\", provideKnown);\n") == 0 &&
+              cross_repo_watch_index("watch-client", client, NULL) == 0 &&
+              cross_repo_watch_index("watch-provider", provider, NULL) == 0;
+    cbm_store_t *watch_store = ok ? cbm_store_open_memory() : NULL;
+    cbm_watcher_t *watcher =
+        watch_store ? cbm_watcher_new(watch_store, cross_repo_watch_index, NULL) : NULL;
+    if (!watcher) {
+        cbm_store_close(watch_store);
+        cross_repo_fixture_end(&fixture);
+        FAIL("cannot start watcher fixture");
+    }
+
+    cbm_watcher_set_poll_non_git(watcher, true);
+    ok = cbm_watcher_watch(watcher, "watch-client", client);
+    cbm_watcher_poll_once(watcher);
+    cbm_watcher_touch(watcher, "watch-client");
+    cbm_watcher_poll_once(watcher); /* Establish the non-Git tree signature. */
+
+    const char *target = "watch-provider";
+    cbm_cross_repo_result_t linked = cbm_cross_repo_match("watch-client", &target, 1);
+    bool initially_linked = !linked.failed && linked.http_edges == 1;
+    cbm_cross_repo_result_free(&linked);
+
+    ok = ok &&
+         th_append_file(caller_file, "export function changed(): number { return 42; }\n") == 0;
+    cbm_watcher_touch(watcher, "watch-client");
+    int reindexed = cbm_watcher_poll_once(watcher);
+    int changed = cross_repo_query_int(&fixture, "watch-client",
+                                       "SELECT COUNT(*) FROM nodes WHERE name='changed'");
+    int links = cross_repo_count_edges(&fixture, "watch-client", "CROSS_HTTP_CALLS");
+
+    cbm_watcher_free(watcher);
+    cbm_store_close(watch_store);
+    cross_repo_fixture_end(&fixture);
+    ASSERT_TRUE(ok);
+    ASSERT_TRUE(initially_linked);
+    ASSERT_EQ(reindexed, 1);
+    ASSERT_EQ(changed, 1);
+    ASSERT_EQ(links, 1);
+    PASS();
+}
+
 SUITE(cross_repo) {
+    RUN_TEST(cross_repo_watcher_publication_keeps_caller_link);
     RUN_TEST(cross_repo_stage_rebuilds_from_legacy_selection_without_writing_provider);
     RUN_TEST(cross_repo_status_reports_stale_after_provider_changes);
     RUN_TEST(cross_repo_graphql_prefers_resolver_method_handler);
