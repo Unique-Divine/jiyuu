@@ -207,6 +207,21 @@ fn unknown_tool_error_matches_c() {
     assert_same(&["cli", "no_such_tool"]);
 }
 
+fn run_stdio(bin: &Path, side: &str, args: &[&str], input: &str) -> String {
+    let scratch = Scratch::new(side);
+    let requests = scratch.0.join("requests");
+    fs::write(&requests, input).expect("write MCP requests");
+    let output = command_in(bin, &scratch)
+        .args(args)
+        .stdin(Stdio::from(
+            fs::File::open(requests).expect("open MCP requests"),
+        ))
+        .output()
+        .expect("run MCP server");
+    assert!(output.status.success(), "{side}: {output:?}");
+    String::from_utf8(output.stdout).expect("UTF-8 response")
+}
+
 #[test]
 fn stdio_mixed_framing_matches_c_after_input_eof() {
     let initialize = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"linked-test","version":"1"}}}"#;
@@ -217,21 +232,8 @@ fn stdio_mixed_framing_matches_c_after_input_eof() {
         "{initialize}\n{initialized}\nContent-Length: {}\r\n\r\n{call}",
         call.len()
     );
-    let run = |bin: &Path, side| {
-        let scratch = Scratch::new(side);
-        let requests = scratch.0.join("requests");
-        fs::write(&requests, &input).expect("write MCP requests");
-        let output = command_in(bin, &scratch)
-            .stdin(Stdio::from(
-                fs::File::open(requests).expect("open MCP requests"),
-            ))
-            .output()
-            .expect("run MCP server");
-        assert!(output.status.success(), "{side}: {output:?}");
-        String::from_utf8(output.stdout).expect("UTF-8 response")
-    };
-    let reference = run(&c_binary(), "c");
-    let linked = run(Path::new(MORI), "rs");
+    let reference = run_stdio(&c_binary(), "c", &[], &input);
+    let linked = run_stdio(Path::new(MORI), "rs", &[], &input);
     assert_eq!(linked, reference);
     let (initialize_response, framed) =
         linked.split_once('\n').expect("newline response");
@@ -241,6 +243,98 @@ fn stdio_mixed_framing_matches_c_after_input_eof() {
     assert_eq!(header, format!("Content-Length: {}", body.len()));
     assert!(body.contains("\"id\":2"));
     assert!(body.contains("projects: 0"));
+}
+
+#[test]
+fn initialize_negotiation_and_instructions_match_c() {
+    for (args, request, protocol, instruction) in [
+        (
+            &[][..],
+            r#""2024-11-05""#,
+            "2024-11-05",
+            "Mori is a code knowledge graph",
+        ),
+        (
+            &["--tool-profile=scout"][..],
+            r#""9999-01-01""#,
+            "2025-11-25",
+            "scout tool profile",
+        ),
+        (
+            &["--tool-profile=analysis"][..],
+            "null",
+            "2025-11-25",
+            "analysis tool profile",
+        ),
+    ] {
+        let input = format!(
+            "{{\"jsonrpc\":\"2.0\",\"id\":\"handshake\",\"method\":\"initialize\",\"params\":{{\"protocolVersion\":{request}}}}}\n"
+        );
+        let reference = run_stdio(&c_binary(), "c", args, &input);
+        let linked = run_stdio(Path::new(MORI), "rs", args, &input);
+        assert_eq!(linked, reference);
+        let value: serde_json::Value = serde_json::from_str(&linked).unwrap();
+        assert_eq!(value["id"], "handshake");
+        assert_eq!(value["result"]["protocolVersion"], protocol);
+        assert_eq!(value["result"]["serverInfo"]["name"], "mori-graph");
+        assert!(
+            value["result"]["instructions"]
+                .as_str()
+                .unwrap()
+                .starts_with(instruction)
+        );
+    }
+}
+
+#[test]
+fn tools_list_profiles_and_cursor_pages_match_c() {
+    let input = concat!(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/list\",\"params\":{\"cursor\":\"0\"}}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/list\",\"params\":{\"cursor\":\"8\"}}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/list\",\"params\":{\"cursor\":\"bogus\"}}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"tools/list\",\"params\":{\"cursor\":null}}\n",
+    );
+    for (args, count) in [
+        (&[][..], 17),
+        (&["--tool-profile=analysis"][..], 13),
+        (&["--tool-profile=scout"][..], 8),
+    ] {
+        let reference = run_stdio(&c_binary(), "c", args, input);
+        let linked = run_stdio(Path::new(MORI), "rs", args, input);
+        assert_eq!(linked, reference);
+        let replies: Vec<serde_json::Value> = linked
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(replies.len(), 6);
+        let full = &replies[1]["result"];
+        let tools = full["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), count);
+        assert!(full.get("nextCursor").is_none());
+        let tool = tools
+            .iter()
+            .find(|tool| tool["name"] == "search_graph")
+            .unwrap();
+        assert_eq!(tool["annotations"]["readOnlyHint"], true);
+        assert_eq!(tool["_meta"]["anthropic/alwaysLoad"], true);
+        assert_eq!(tool["inputSchema"]["type"], "object");
+
+        let first = &replies[2]["result"];
+        assert_eq!(first["tools"].as_array().unwrap(), &tools[..8]);
+        assert_eq!(first["nextCursor"].as_str(), (count > 8).then_some("8"));
+        let second = &replies[3]["result"];
+        assert_eq!(
+            second["tools"].as_array().unwrap(),
+            &tools[8..count.min(16)]
+        );
+        assert_eq!(second["nextCursor"].as_str(), (count > 16).then_some("16"));
+        for invalid in [&replies[4]["result"], &replies[5]["result"]] {
+            assert!(invalid["tools"].as_array().unwrap().is_empty());
+            assert!(invalid.get("nextCursor").is_none());
+        }
+    }
 }
 
 #[test]
