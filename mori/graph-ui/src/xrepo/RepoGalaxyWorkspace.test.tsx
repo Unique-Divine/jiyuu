@@ -88,3 +88,69 @@ it('reads nothing while hidden', async () => {
     await settle();
     expect(requests).toEqual([]);
 });
+
+/** A server with 150 links behind web -> api, served in pages. */
+function pagedServer(requests: string[]): XrepoClient {
+    return new XrepoClient(async input => {
+        const url = new URL(String(input), 'http://127.0.0.1');
+        requests.push(`${url.pathname}${url.search}`);
+        if (url.pathname === '/api/xrepo/summary') {
+            return new Response(JSON.stringify({ ...summary, links: [{ from: 'web', to: 'api', type: 'CROSS_GRAPHQL_CALLS', count: 150 }] }));
+        }
+        const offset = Number(url.searchParams.get('offset') ?? 0), limit = Number(url.searchParams.get('limit'));
+        const rows = Array.from({ length: Math.max(0, Math.min(limit, 150 - offset)) }, (_, i) => ({
+            ...links.links[0], source: { ...links.links[0].source, qualified_name: `web.op${offset + i}`, line: offset + i + 1 } }));
+        return new Response(JSON.stringify({ total: 150, limit, offset, links: rows }));
+    });
+}
+
+it('pages an arc with Show more, appending from the loaded length', async () => {
+    const requests: string[] = [];
+    await act(async () => root.render(<RepoGalaxyWorkspace active client={pagedServer(requests)} scene={ListScene} />));
+    await settle();
+    await act(async () => host.querySelector<HTMLButtonElement>('[data-scene-arc]')!.click());
+    await settle();
+    const rows = () => host.querySelectorAll('[data-testid="repo-galaxy-details"] tbody tr');
+    expect(rows()).toHaveLength(100);
+    const more = [...host.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent?.startsWith('Show more'))!;
+    expect(more.textContent).toContain('100 of 150');
+    await act(async () => more.click());
+    await settle();
+    expect(requests.at(-1)).toContain('offset=100');
+    expect(rows()).toHaveLength(150);
+    expect(rows()[149].textContent).toContain('src/orders.ts:150');
+    expect([...host.querySelectorAll('button')].some(button => button.textContent?.startsWith('Show more'))).toBe(false);
+});
+
+it('shows an alert when the summary or an arc fails to load', async () => {
+    const client = new XrepoClient(async () =>
+        new Response(JSON.stringify({ error: 'cannot read the project cache' }), { status: 500 }));
+    await act(async () => root.render(<RepoGalaxyWorkspace active client={client} scene={ListScene} />));
+    await settle();
+    expect(host.querySelector('[role="alert"]')?.textContent).toContain('cannot read the project cache');
+
+    const working = new XrepoClient(async input => String(input).startsWith('/api/xrepo/summary')
+        ? new Response(JSON.stringify(summary))
+        : new Response(JSON.stringify({ error: 'cannot read links' }), { status: 500 }));
+    await act(async () => root.render(<RepoGalaxyWorkspace active client={working} scene={ListScene} />));
+    await settle();
+    await act(async () => host.querySelector<HTMLButtonElement>('[data-scene-arc]')!.click());
+    await settle();
+    expect(host.querySelector('[data-testid="repo-galaxy-details"] [role="alert"]')?.textContent).toContain('cannot read links');
+});
+
+it('reads the summary once across hiding and showing, and again on Refresh', async () => {
+    const requests: string[] = [];
+    const client = server(requests);
+    const summaries = () => requests.filter(url => url.startsWith('/api/xrepo/summary')).length;
+    await act(async () => root.render(<RepoGalaxyWorkspace active client={client} scene={ListScene} />));
+    await settle();
+    await act(async () => root.render(<RepoGalaxyWorkspace active={false} client={client} scene={ListScene} />));
+    await act(async () => root.render(<RepoGalaxyWorkspace active client={client} scene={ListScene} />));
+    await settle();
+    expect(summaries()).toBe(1);
+    const refresh = [...host.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === 'Refresh')!;
+    await act(async () => refresh.click());
+    await settle();
+    expect(summaries()).toBe(2);
+});

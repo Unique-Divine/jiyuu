@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useState, type ComponentType } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ComponentType } from 'react';
 import { buildGalaxyModel, typeLabel, type GalaxyArc } from './repo-galaxy-model';
 import { arcColor, type GalaxyTheme, type RepoGalaxySceneProps } from './RepoGalaxyScene';
 import { XrepoClient, type XrepoLink, type XrepoSummary } from './xrepo-api';
@@ -46,17 +46,23 @@ export default function RepoGalaxyWorkspace({ active, client: given, scene: Scen
     const [selectedRepo, setSelectedRepo] = useState<string>();
     const [arcLinks, setArcLinks] = useState<ArcLinks>();
 
+    // The summary reads every project index on the server, so it is fetched
+    // once per mount (on first activation) and again only on Refresh; hiding
+    // and showing the tab keeps the last answer.
+    const loaded = useRef<{ client: XrepoClient; revision: number }>(undefined);
     useEffect(() => {
-        if (!active) return;
+        if (!active || (loaded.current?.client === client && loaded.current.revision === revision)) return;
         const abort = new AbortController();
         setLoading(true);
         client.summary(abort.signal).then(value => {
+            loaded.current = { client, revision };
             setSummary(value); setError(undefined); setLoading(false);
         }, (reason: unknown) => {
             if (abort.signal.aborted) return;
+            loaded.current = { client, revision };
             setError(reason instanceof Error ? reason.message : String(reason)); setLoading(false);
         });
-        return () => abort.abort();
+        return () => { abort.abort(); setLoading(false); };
     }, [active, client, revision]);
 
     const types = useMemo(() => summary?.types ?? [], [summary]);
@@ -152,6 +158,7 @@ export default function RepoGalaxyWorkspace({ active, client: given, scene: Scen
                             </li>)}
                         </ol>
                         {summary?.skipped.length ? <p className="repo-galaxy-note">Unreadable indexes: {summary.skipped.join(', ')}</p> : null}
+                        {summary?.truncated ? <p className="repo-galaxy-note">The cache holds more projects than one summary reads; later names are left out.</p> : null}
                     </>}
             </aside>
         </div>

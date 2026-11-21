@@ -28,6 +28,8 @@ export interface XrepoSummary {
     types: string[];
     totalLinks: number;
     skipped: string[];
+    /** The server read only the first projects by name. */
+    truncated: boolean;
 }
 
 export interface XrepoLink {
@@ -84,6 +86,7 @@ export function readXrepoSummary(value: unknown): XrepoSummary {
         types: list(value.types).map(str).filter(Boolean),
         totalLinks: num(value.total_links),
         skipped: list(value.skipped).map(str).filter(Boolean),
+        truncated: value.truncated === true,
     };
 }
 
