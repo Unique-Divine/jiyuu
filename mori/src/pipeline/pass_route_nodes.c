@@ -2262,17 +2262,36 @@ typedef struct {
 typedef gql_route_plan_t (*gql_route_planner_fn)(gql_ctx_t *ctx, const gql_emit_t *first, size_t n);
 typedef bool (*gql_resolver_visitor_fn)(size_t field_index, const cbm_gbuf_node_t *resolver,
                                         void *context);
+
+/* Borrowed strings and graph IDs for the chosen schema field. */
+typedef struct {
+    const char *path;
+    const char *qn;
+    const char *file_path;
+    const char *return_type;
+    const char *reason;
+    int64_t field_id;
+    int64_t resolver_id;
+    int start_line;
+    int end_line;
+    bool deprecated;
+    bool ambiguous;
+} gql_route_row_t;
+typedef bool (*gql_route_writer_fn)(cbm_gbuf_t *gb, const gql_route_row_t *row);
+
 static gql_route_planner_fn gql_route_planner;
+static gql_route_writer_fn gql_route_writer;
 
 /* Called before C main in each linked process, including a re-execed index
  * worker. The glob matcher remains the default in the linked binary.
- * The Rust planner is opt-in while we check its parity with C. */
+ * The Rust planner and writer are opt-in while we check parity with C. */
 void cbm_gqlgen_set_rust_backend(bool (*matcher)(const char *glob, const char *path),
-                                 gql_route_planner_fn planner) {
+                                 gql_route_planner_fn planner, gql_route_writer_fn writer) {
     char configured[sizeof("rust")];
     const char *impl = cbm_native_getenv("MORI_IMPL_GRAPHQL", configured, sizeof(configured), NULL);
     gqlgen_glob_matcher = impl && strcmp(impl, "c") == 0 ? NULL : matcher;
     gql_route_planner = impl && strcmp(impl, "rust") == 0 ? planner : NULL;
+    gql_route_writer = gql_route_planner ? writer : NULL;
 }
 
 /* Visit every eligible resolver in the order of the candidate fields, then
@@ -2341,28 +2360,58 @@ static char *gql_route_props(const gql_field_t *f, bool ambiguous) {
 }
 
 /* Upsert one Route from its pick, with its one HANDLES edge. */
-static void gql_emit_route(gql_ctx_t *ctx, gql_pick_t pick) {
+static bool gql_emit_route_c(cbm_gbuf_t *gb, gql_pick_t pick) {
     const gql_field_t *f = pick.emit->field;
     char *props = gql_route_props(f, pick.ambiguous);
     if (!props) {
-        return;
+        return false;
     }
     const cbm_gbuf_node_t *fn = f->node;
-    int64_t route_id = cbm_gbuf_upsert_node(ctx->gb, "Route", pick.emit->path, pick.emit->qn,
+    int64_t route_id = cbm_gbuf_upsert_node(gb, "Route", pick.emit->path, pick.emit->qn,
                                             fn->file_path, fn->start_line, fn->end_line, props);
     free(props);
     if (route_id == 0) {
+        return false;
+    }
+    if (pick.resolver) {
+        cbm_gbuf_insert_edge(gb, pick.resolver->id, route_id, "HANDLES",
+                             "{\"via\":\"gqlgen_resolver\"}");
+    } else {
+        cbm_gbuf_insert_edge(gb, fn->id, route_id, "HANDLES", "{\"via\":\"graphql_schema_field\"}");
+    }
+    return true;
+}
+
+static void gql_emit_route(gql_ctx_t *ctx, gql_pick_t pick) {
+    bool emitted;
+    if (gql_route_writer) {
+        const gql_field_t *field = pick.emit->field;
+        const cbm_gbuf_node_t *node = field->node;
+        const gql_route_row_t row = {
+            .path = pick.emit->path,
+            .qn = pick.emit->qn,
+            .file_path = node->file_path,
+            .return_type = field->return_type ? field->return_type : "",
+            .reason = field->reason ? field->reason : "",
+            .field_id = node->id,
+            .resolver_id = pick.resolver ? pick.resolver->id : 0,
+            .start_line = node->start_line,
+            .end_line = node->end_line,
+            .deprecated = field->deprecated,
+            .ambiguous = pick.ambiguous,
+        };
+        emitted = gql_route_writer(ctx->gb, &row);
+    } else {
+        emitted = gql_emit_route_c(ctx->gb, pick);
+    }
+    if (!emitted) {
         return;
     }
     ctx->routes++;
     ctx->ambiguous += pick.ambiguous ? SKIP_ONE : 0;
     if (pick.resolver) {
-        cbm_gbuf_insert_edge(ctx->gb, pick.resolver->id, route_id, "HANDLES",
-                             "{\"via\":\"gqlgen_resolver\"}");
         ctx->via_resolver++;
     } else {
-        cbm_gbuf_insert_edge(ctx->gb, fn->id, route_id, "HANDLES",
-                             "{\"via\":\"graphql_schema_field\"}");
         ctx->via_field++;
     }
 }
@@ -2377,7 +2426,8 @@ static void gql_log_summary(const gql_ctx_t *ctx) {
     (void)snprintf(b3, sizeof(b3), "%d", ctx->via_field);
     (void)snprintf(b4, sizeof(b4), "%d", ctx->ambiguous);
     cbm_log_info("pass.route_nodes.graphql", "routes", b1, "via_resolver", b2, "via_field", b3,
-                 "ambiguous", b4, "planner", gql_route_planner ? "rust" : "c");
+                 "ambiguous", b4, "planner", gql_route_planner ? "rust" : "c", "writer",
+                 gql_route_writer ? "rust" : "c");
     if (ctx->too_long > 0) {
         char b5[CBM_SZ_16];
         (void)snprintf(b5, sizeof(b5), "%d", ctx->too_long);
