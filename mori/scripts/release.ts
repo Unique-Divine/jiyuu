@@ -1,9 +1,10 @@
 #!/usr/bin/env bun
-// Release helper for Mori's C binary (codebase-memory-mcp).
+// Release helper for Mori's binary `mori` (crate mori/jiyuu-mori with the C
+// program linked in).
 //
 // Usage (from mori/):
 //   bun scripts/release.ts validate [mori/vX.Y.Z]
-//   bun scripts/release.ts asset-name <version> <x64|arm64>
+//   bun scripts/release.ts asset-name <version> <target>
 //   bun scripts/release.ts prepare <version> <dir> [--tag T] [--commit SHA]
 //   bun scripts/release.ts publish <mori/vX.Y.Z> <dir> --repo OWNER/NAME
 //
@@ -12,14 +13,22 @@
 // checksums.txt, release-metadata.json and release-notes.md beside the
 // archives. `publish` creates or refills a DRAFT GitHub release, never marked
 // latest, and refuses to touch a release that is already published.
+//
+// Targets are <os>-<arch> as mise's github: backend reads them: static Linux
+// x64 and arm64 builds and dynamic, ad-hoc signed macOS arm64 and x64 builds.
 
 import { readdir, readFile, writeFile } from "node:fs/promises"
 import { join, resolve } from "node:path"
 
-export const BINARY = "codebase-memory-mcp"
+export const BINARY = "mori"
 export const TAG_PREFIX = "mori/v"
-export const ARCHES = ["x64", "arm64"] as const
-export type Arch = (typeof ARCHES)[number]
+export const TARGETS = [
+  "linux-x64",
+  "linux-arm64",
+  "darwin-arm64",
+  "darwin-x64",
+] as const
+export type Target = (typeof TARGETS)[number]
 
 const SEMVER =
   /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-[0-9A-Za-z.-]+)?$/
@@ -71,8 +80,8 @@ export async function readVersionFile(root: string): Promise<string> {
   return parseVersion(await readFile(join(root, "VERSION"), "utf8"))
 }
 
-// The tag's version must equal mori/VERSION, the version build.sh stamps
-// into the binary (`codebase-memory-mcp --version`).
+// The tag's version must equal mori/VERSION, the version the release build
+// stamps into the binary (`mori --version`).
 export function checkTag(tag: string, fileVersion: string): string {
   const version = versionFromTag(tag)
   if (version !== fileVersion) {
@@ -84,15 +93,17 @@ export function checkTag(tag: string, fileVersion: string): string {
   return version
 }
 
-export function assetName(version: string, arch: string): string {
-  if (!(ARCHES as readonly string[]).includes(arch)) {
-    throw new Error(`Unsupported arch '${arch}'; expected ${ARCHES.join(", ")}`)
+export function assetName(version: string, target: string): string {
+  if (!(TARGETS as readonly string[]).includes(target)) {
+    throw new Error(
+      `Unsupported target '${target}'; expected ${TARGETS.join(", ")}`,
+    )
   }
-  return `${BINARY}-${parseVersion(version)}-linux-${arch}.tar.gz`
+  return `${BINARY}-${parseVersion(version)}-${target}.tar.gz`
 }
 
 export function releaseAssets(version: string): string[] {
-  return ARCHES.map((arch) => assetName(version, arch))
+  return TARGETS.map((target) => assetName(version, target))
 }
 
 export async function sha256File(path: string): Promise<string> {
@@ -116,8 +127,13 @@ export function releaseNotes(meta: ReleaseMetadata): string {
     `# Mori ${meta.version}`,
     "",
     `Binary \`${meta.binary}\` built from Jiyuu commit \`${meta.commit}\`.`,
-    "Static Linux builds for x64 and arm64. Each archive holds the binary,",
-    "LICENSE, NOTICE and THIRD_PARTY_NOTICES.md.",
+    "Static Linux builds for x64 and arm64, and macOS builds for Apple",
+    "silicon (arm64) and Intel (x64), for macOS 14 or later. Each archive",
+    "holds the binary, LICENSE, NOTICE and THIRD_PARTY_NOTICES.md.",
+    "",
+    "The macOS binaries are ad-hoc signed but not notarized. If macOS blocks",
+    "one after a browser download, remove the quarantine attribute:",
+    `\`xattr -d com.apple.quarantine ${meta.binary}\`.`,
     "",
     "| Asset | SHA-256 |",
     "| --- | --- |",
@@ -150,7 +166,7 @@ export async function prepare(
     tag,
     commit,
     assets,
-    targets: ARCHES.map((arch) => `linux-${arch}`),
+    targets: [...TARGETS],
   }
   await writeFile(join(dir, "checksums.txt"), formatChecksums(assets))
   await writeFile(
@@ -280,9 +296,9 @@ export async function main(argv: string[], root: string): Promise<string> {
     return tag ? checkTag(tag, fileVersion) : fileVersion
   }
   if (command === "asset-name") {
-    const [version, arch] = args
-    if (!version || !arch) throw new Error("asset-name <version> <arch>")
-    return assetName(version, arch)
+    const [version, target] = args
+    if (!version || !target) throw new Error("asset-name <version> <target>")
+    return assetName(version, target)
   }
   if (command === "prepare") {
     const tagArg = flag(args, "--tag")

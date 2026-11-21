@@ -24,6 +24,14 @@ check-linked:
   MORI_C_REFERENCE=1 cargo clippy --locked --all-targets --features c-backend -- -D warnings
   MORI_C_REFERENCE=1 cargo test --locked --all-targets --features c-backend
 
+# Builds the debug mori and the C reference binary, then runs the same
+# commands through both (mori/scripts/cli-parity.ts).
+# Compare mori's CLI output with the C binary's.
+parity:
+  MORI_C_REFERENCE=1 cargo build --locked --features c-backend
+  bun ../scripts/cli-parity.ts --mori ../../target/debug/mori \
+    --c ../build/mori-rs/codebase-memory-mcp
+
 # Build the release mori binary with the C program linked.
 build:
   cargo build --release --locked --features c-backend

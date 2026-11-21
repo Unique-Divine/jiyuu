@@ -1548,11 +1548,187 @@ TEST(cross_repo_graphql_long_route_qn_exact) {
     PASS();
 }
 
+/* One more GraphQL server project: Route `route_qn` with props
+ * `route_props`, handled by Method `handler` in `file`. */
+static bool cross_repo_seed_graphql_server(const cross_repo_fixture_t *fixture,
+                                           const char *project, const char *route_qn,
+                                           const char *route_props, const char *handler,
+                                           const char *file) {
+    char path[512];
+    if (!cross_repo_project_path(fixture, project, path, sizeof(path))) {
+        return false;
+    }
+    cbm_store_t *store = cbm_store_open_path(path);
+    bool ok = store && cbm_store_upsert_project(store, project, fixture->cache) == CBM_STORE_OK;
+    char handler_qn[256];
+    snprintf(handler_qn, sizeof(handler_qn), "%s.graph.%s", project, handler);
+    cbm_node_t route = {.project = project,
+                        .label = "Route",
+                        .name = route_qn + strlen("__graphql__"),
+                        .qualified_name = route_qn,
+                        .file_path = "graph/schema.graphqls",
+                        .properties_json = route_props};
+    cbm_node_t method = {.project = project,
+                         .label = "Method",
+                         .name = handler,
+                         .qualified_name = handler_qn,
+                         .file_path = file};
+    int64_t route_id = ok ? cbm_store_upsert_node(store, &route) : 0;
+    int64_t method_id = ok ? cbm_store_upsert_node(store, &method) : 0;
+    cbm_edge_t handles = {.project = project,
+                          .source_id = method_id,
+                          .target_id = route_id,
+                          .type = "HANDLES",
+                          .properties_json = "{\"via\":\"gqlgen_resolver\"}"};
+    ok = ok && route_id > 0 && method_id > 0 && cbm_store_insert_edge(store, &handles) > 0;
+    cbm_store_close(store);
+    return ok;
+}
+
+/* A second server exposing the same field, run from its own side with the
+ * client as a target, never redirects the client's links: the client linked
+ * gql-server, so every forward edge still names gql-server, gql-server keeps
+ * its callers, and gql-server-b gains no reverse rows. (rev-5 :1780, rev-6
+ * finding 1: the provider pass used to json_patch the client's forward rows
+ * to name gql-server-b.) */
+TEST(cross_repo_graphql_provider_run_keeps_client_target) {
+    cross_repo_fixture_t fixture;
+    bool ok = cross_repo_fixture_begin(&fixture) &&
+              cross_repo_seed_graphql(&fixture, "__graphql__Query.oracle", 3,
+                                      "{\"source\":\"graphql_schema\"}") &&
+              cross_repo_seed_graphql_server(&fixture, "gql-server-b", "__graphql__Query.oracle",
+                                             "{\"source\":\"graphql_schema\"}", "Oracle",
+                                             "graph/oracle.resolvers.go");
+    if (!ok) {
+        cross_repo_fixture_end(&fixture);
+        FAIL("failed to seed two GraphQL servers");
+    }
+    const char *server = "gql-server";
+    const char *client = "gql-client";
+    cbm_cross_repo_result_t r1 = cbm_cross_repo_match("gql-client", &server, 1);
+    bool failed = r1.failed;
+    cbm_cross_repo_result_free(&r1);
+    cbm_cross_repo_result_t r2 = cbm_cross_repo_match("gql-server-b", &client, 1);
+    failed = failed || r2.failed;
+    int b_edges = r2.graphql_edges;
+    cbm_cross_repo_result_free(&r2);
+    int to_a = cross_repo_query_int(
+        &fixture, "gql-client",
+        "SELECT COUNT(*) FROM edges WHERE type = 'CROSS_GRAPHQL_CALLS' AND "
+        "json_extract(properties, '$.target_project') = 'gql-server'");
+    int to_b = cross_repo_query_int(
+        &fixture, "gql-client",
+        "SELECT COUNT(*) FROM edges WHERE type = 'CROSS_GRAPHQL_CALLS' AND "
+        "json_extract(properties, '$.target_project') = 'gql-server-b'");
+    int a_callers = cross_repo_query_int(&fixture, "gql-server", CROSS_REPO_GQL_CALLERS);
+    int b_reverse = cross_repo_query_int(
+        &fixture, "gql-server-b", "SELECT COUNT(*) FROM edges WHERE type = 'CROSS_GRAPHQL_CALLS'");
+    cross_repo_fixture_end(&fixture);
+    ASSERT_FALSE(failed);
+    ASSERT_EQ(to_a, 3);
+    ASSERT_EQ(to_b, 0);
+    ASSERT_EQ(a_callers, 3);
+    ASSERT_EQ(b_reverse, 0);
+    ASSERT_EQ(b_edges, 0);
+    PASS();
+}
+
+/* The provider drops a field, is reindexed (its Route gone), and is
+ * relinked from its own side: the client's forward link to it goes too.
+ * (rev-5 :1724) */
+TEST(cross_repo_graphql_provider_run_drops_removed_route_link) {
+    cross_repo_fixture_t fixture;
+    bool ok = cross_repo_fixture_begin(&fixture) &&
+              cross_repo_seed_graphql(&fixture, "__graphql__Query.ping", 1,
+                                      "{\"source\":\"graphql_schema\"}");
+    if (!ok) {
+        cross_repo_fixture_end(&fixture);
+        FAIL("failed to seed GraphQL removal fixture");
+    }
+    const char *server = "gql-server";
+    const char *client = "gql-client";
+    cbm_cross_repo_result_t r1 = cbm_cross_repo_match("gql-client", &server, 1);
+    bool failed = r1.failed;
+    cbm_cross_repo_result_free(&r1);
+    int linked = cross_repo_query_int(
+        &fixture, "gql-client", "SELECT COUNT(*) FROM edges WHERE type = 'CROSS_GRAPHQL_CALLS'");
+    char server_path[512];
+    cbm_store_t *store =
+        cross_repo_project_path(&fixture, "gql-server", server_path, sizeof(server_path))
+            ? cbm_store_open_path(server_path)
+            : NULL;
+    ok = store && cbm_store_exec(store,
+                                 "DELETE FROM edges WHERE target_id IN (SELECT id FROM nodes WHERE "
+                                 "qualified_name = '__graphql__Query.ping');"
+                                 "DELETE FROM nodes WHERE qualified_name = "
+                                 "'__graphql__Query.ping';") == CBM_STORE_OK;
+    cbm_store_close(store);
+    cbm_cross_repo_result_t r2 = cbm_cross_repo_match("gql-server", &client, 1);
+    failed = failed || r2.failed;
+    cbm_cross_repo_result_free(&r2);
+    int after = cross_repo_query_int(
+        &fixture, "gql-client", "SELECT COUNT(*) FROM edges WHERE type = 'CROSS_GRAPHQL_CALLS'");
+    cross_repo_fixture_end(&fixture);
+    ASSERT_TRUE(ok);
+    ASSERT_FALSE(failed);
+    ASSERT_EQ(linked, 1);
+    ASSERT_EQ(after, 0);
+    PASS();
+}
+
+/* One client run against an ambiguous target and a resolved one, in either
+ * order: the forward row names the resolved server, with its handler and
+ * "ambiguous":false, and only it is counted. (rev-5 :1235: the flag stuck
+ * through json_patch, or the ambiguous write replaced the resolved one.) */
+static int cross_repo_ambiguous_then_resolved(bool resolved_first) {
+    cross_repo_fixture_t fixture;
+    bool ok = cross_repo_fixture_begin(&fixture) &&
+              cross_repo_seed_graphql(&fixture, "__graphql__Query.ping", 1,
+                                      "{\"source\":\"graphql_schema\",\"ambiguous\":true}") &&
+              cross_repo_seed_graphql_server(&fixture, "gql-server-b", "__graphql__Query.ping",
+                                             "{\"source\":\"graphql_schema\"}", "Ping",
+                                             "graph/b.resolvers.go");
+    if (!ok) {
+        cross_repo_fixture_end(&fixture);
+        return 0;
+    }
+    const char *targets[2] = {resolved_first ? "gql-server-b" : "gql-server",
+                              resolved_first ? "gql-server" : "gql-server-b"};
+    cbm_cross_repo_result_t r = cbm_cross_repo_match("gql-client", targets, 2);
+    bool failed = r.failed;
+    int counted = r.graphql_edges;
+    cbm_cross_repo_result_free(&r);
+    int resolved_rows = cross_repo_query_int(
+        &fixture, "gql-client",
+        "SELECT COUNT(*) FROM edges WHERE type = 'CROSS_GRAPHQL_CALLS' AND "
+        "json_extract(properties, '$.target_project') = 'gql-server-b' AND "
+        "json_extract(properties, '$.target_file') = 'graph/b.resolvers.go' AND "
+        "json_extract(properties, '$.ambiguous') = 0");
+    int rows = cross_repo_query_int(
+        &fixture, "gql-client", "SELECT COUNT(*) FROM edges WHERE type = 'CROSS_GRAPHQL_CALLS'");
+    cross_repo_fixture_end(&fixture);
+    if (failed || counted != 1 || resolved_rows != 1 || rows != 1) {
+        fprintf(stderr, "  resolved_first=%d failed=%d counted=%d resolved_rows=%d rows=%d\n",
+                resolved_first, failed, counted, resolved_rows, rows);
+        return 0;
+    }
+    return 1;
+}
+
+TEST(cross_repo_graphql_resolved_target_beats_ambiguous_in_one_run) {
+    ASSERT_TRUE(cross_repo_ambiguous_then_resolved(false));
+    ASSERT_TRUE(cross_repo_ambiguous_then_resolved(true));
+    PASS();
+}
+
 SUITE(cross_repo) {
     RUN_TEST(cross_repo_graphql_prefers_resolver_method_handler);
     RUN_TEST(cross_repo_graphql_reverse_edge_keeps_every_caller);
     RUN_TEST(cross_repo_graphql_reverse_callers_keyed_by_qualified_name);
     RUN_TEST(cross_repo_graphql_reverse_callers_follow_relinks);
+    RUN_TEST(cross_repo_graphql_provider_run_keeps_client_target);
+    RUN_TEST(cross_repo_graphql_provider_run_drops_removed_route_link);
+    RUN_TEST(cross_repo_graphql_resolved_target_beats_ambiguous_in_one_run);
     RUN_TEST(cross_repo_graphql_ambiguous_route_marked);
     RUN_TEST(cross_repo_graphql_long_route_qn_exact);
     RUN_TEST(cross_repo_caller_local_handler_blocks_cross_http_issue1459);

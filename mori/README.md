@@ -126,10 +126,10 @@ index away from `~/.cache/codebase-memory-mcp`.
 ## Release
 
 File [VERSION](VERSION) holds Mori's version. Workflow
-[mori-release.yml](../.github/workflows/mori-release.yml) passes it to
-`scripts/build.sh --version`, which stamps it into the binary, so
-`codebase-memory-mcp --version` prints it. Local builds without `--version`
-print `dev`.
+[mori-release.yml](../.github/workflows/mori-release.yml) stamps it into the
+release binary `mori`, the [jiyuu-mori](jiyuu-mori/) crate built with feature
+`c-backend`, so `mori --version` prints `mori <version>`. Local builds print
+`dev`.
 
 To release, bump `VERSION` in a PR, merge it, then tag the merged commit:
 
@@ -139,19 +139,45 @@ git push origin mori/v0.13.0
 ```
 
 The workflow fails unless the tag equals `mori/v` plus `VERSION`. It builds
-static binaries (`STATIC=1`) on Linux x64 and arm64, smoke-tests `--version`
-and a tiny index, and packages each with
+four targets, each on a native runner, with the graph UI embedded (as
+`scripts/build.sh --with-ui` does; needs npm). On each it smoke-tests
+`--version`, a tiny index and the UI index page from `mori daemon start
+--port=N`, runs the CLI parity check
+([scripts/cli-parity.ts](scripts/cli-parity.ts)) against
+`codebase-memory-mcp` from the same commit, and packages the binary with
 [scripts/package-release.sh](scripts/package-release.sh) as
-`codebase-memory-mcp-<version>-linux-<x64|arm64>.tar.gz`. Each archive holds
-the binary, `LICENSE`, `NOTICE` and `THIRD_PARTY_NOTICES.md` (generated from
-`THIRD_PARTY.md` and the vendored licenses). There is no installer; install
-from the release assets, for example with mise's `github:` backend, which
-picks the archive by the `linux-x64` or `linux-arm64` in its name:
+`mori-<version>-<target>.tar.gz`:
+
+| Target | Runner | Build |
+| --- | --- | --- |
+| `linux-x64` | `ubuntu-latest` | static (`+crt-static`) |
+| `linux-arm64` | `ubuntu-24.04-arm` | static (`+crt-static`) |
+| `darwin-arm64` | `macos-15` | dynamic, ad-hoc signed, macOS 14 or later |
+| `darwin-x64` | `macos-15-intel` | dynamic, ad-hoc signed, macOS 14 or later |
+
+Each archive holds the binary, `LICENSE`, `NOTICE` and
+`THIRD_PARTY_NOTICES.md` (generated from `THIRD_PARTY.md` and the vendored
+licenses). There is no installer; install from the release assets, for
+example with mise's `github:` backend, which picks the archive by the
+platform in its name:
 
 ```toml
 [tools."github:Unique-Divine/jiyuu"]
 version = "0.13.0"
 version_prefix = "mori/v"
+```
+
+The macOS binaries link only system libraries (`libSystem`, `libz`,
+`libc++`); static linking is Linux-only.
+
+The macOS binaries carry an ad-hoc signature, not a Developer ID signature,
+and are not notarized. Downloads through mise, `curl` or `gh release download`
+carry no quarantine attribute and run as is. If you download the archive in
+a browser, macOS Gatekeeper refuses to open the binary because Apple can't
+verify it; remove the quarantine attribute after unpacking:
+
+```bash
+xattr -d com.apple.quarantine mori
 ```
 
 The release job attests build provenance for the archives and
@@ -170,7 +196,8 @@ To build without releasing, run the workflow by hand on any branch; the
 `dry_run` input defaults to true and uploads the archives and checksums as
 workflow artifacts. [scripts/release.ts](scripts/release.ts) holds the tag
 check, asset names, checksums and the draft step; test it with
-`bun test scripts/release.test.ts`.
+`bun test scripts/release.test.ts`. Run the parity check locally with
+`just --justfile jiyuu-mori/justfile parity`.
 
 ## Attributions
 
