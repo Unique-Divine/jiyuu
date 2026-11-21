@@ -126,10 +126,10 @@ index away from `~/.cache/codebase-memory-mcp`.
 ## Release
 
 File [VERSION](VERSION) holds Mori's version. Workflow
-[mori-release.yml](../.github/workflows/mori-release.yml) passes it to
-`scripts/build.sh --version`, which stamps it into the binary, so
-`codebase-memory-mcp --version` prints it. Local builds without `--version`
-print `dev`.
+[mori-release.yml](../.github/workflows/mori-release.yml) stamps it into the
+release binary `mori`, the [jiyuu-mori](jiyuu-mori/) crate built with feature
+`c-backend`, so `mori --version` prints `mori <version>`. Local builds print
+`dev`.
 
 To release, bump `VERSION` in a PR, merge it, then tag the merged commit:
 
@@ -139,15 +139,19 @@ git push origin mori/v0.13.0
 ```
 
 The workflow fails unless the tag equals `mori/v` plus `VERSION`. It builds
-three targets, smoke-tests `--version` and a tiny index on each, and packages
-each with [scripts/package-release.sh](scripts/package-release.sh) as
-`codebase-memory-mcp-<version>-<target>.tar.gz`:
+four targets, each on a native runner. On each it smoke-tests `--version` and
+a tiny index, runs the CLI parity check
+([scripts/cli-parity.ts](scripts/cli-parity.ts)) against
+`codebase-memory-mcp` from the same commit, and packages the binary with
+[scripts/package-release.sh](scripts/package-release.sh) as
+`mori-<version>-<target>.tar.gz`:
 
 | Target | Runner | Build |
 | --- | --- | --- |
-| `linux-x64` | `ubuntu-latest` | static (`STATIC=1`) |
-| `linux-arm64` | `ubuntu-24.04-arm` | static (`STATIC=1`) |
+| `linux-x64` | `ubuntu-latest` | static (`+crt-static`) |
+| `linux-arm64` | `ubuntu-24.04-arm` | static (`+crt-static`) |
 | `darwin-arm64` | `macos-15` | dynamic, ad-hoc signed, macOS 14 or later |
+| `darwin-x64` | `macos-15-intel` | dynamic, ad-hoc signed, macOS 14 or later |
 
 Each archive holds the binary, `LICENSE`, `NOTICE` and
 `THIRD_PARTY_NOTICES.md` (generated from `THIRD_PARTY.md` and the vendored
@@ -161,17 +165,17 @@ version = "0.13.0"
 version_prefix = "mori/v"
 ```
 
-There is no Intel macOS build. The macOS binary links only system
-libraries (`libSystem`, `libz`, `libc++`); static linking is Linux-only.
+The macOS binaries link only system libraries (`libSystem`, `libz`,
+`libc++`); static linking is Linux-only.
 
-The macOS binary carries an ad-hoc signature, not a Developer ID signature,
+The macOS binaries carry an ad-hoc signature, not a Developer ID signature,
 and is not notarized. Downloads through mise, `curl` or `gh release download`
 carry no quarantine attribute and run as is. If you download the archive in
 a browser, macOS Gatekeeper refuses to open the binary because Apple can't
 verify it; remove the quarantine attribute after unpacking:
 
 ```bash
-xattr -d com.apple.quarantine codebase-memory-mcp
+xattr -d com.apple.quarantine mori
 ```
 
 The release job attests build provenance for the archives and
@@ -190,7 +194,8 @@ To build without releasing, run the workflow by hand on any branch; the
 `dry_run` input defaults to true and uploads the archives and checksums as
 workflow artifacts. [scripts/release.ts](scripts/release.ts) holds the tag
 check, asset names, checksums and the draft step; test it with
-`bun test scripts/release.test.ts`.
+`bun test scripts/release.test.ts`. Run the parity check locally with
+`just --justfile jiyuu-mori/justfile parity`.
 
 ## Attributions
 
