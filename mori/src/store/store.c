@@ -4137,17 +4137,20 @@ int cbm_store_upsert_node_batch(cbm_store_t *s, const cbm_node_t *nodes, int cou
 
 /* ── Edge CRUD ──────────────────────────────────────────────────── */
 
-int64_t cbm_store_insert_edge(cbm_store_t *s, const cbm_edge_t *e) {
+sqlite3_stmt *cbm_store_prepare_edge_upsert(cbm_store_t *s) {
     /* Conflict target includes local_name_gen (#768) so IMPORTS edges with
      * different local_name coexist while re-inserting the same import still
      * upserts. Must match the table's UNIQUE constraint in init_schema. */
-    sqlite3_stmt *stmt =
-        prepare_cached(s, &s->stmt_insert_edge,
-                       "INSERT INTO edges (project, source_id, target_id, type, properties) "
-                       "VALUES (?1, ?2, ?3, ?4, ?5) "
-                       "ON CONFLICT(source_id, target_id, type, local_name_gen) DO UPDATE SET "
-                       "properties = json_patch(properties, ?5) "
-                       "RETURNING id;");
+    return prepare_cached(s, &s->stmt_insert_edge,
+                          "INSERT INTO edges (project, source_id, target_id, type, properties) "
+                          "VALUES (?1, ?2, ?3, ?4, ?5) "
+                          "ON CONFLICT(source_id, target_id, type, local_name_gen) DO UPDATE SET "
+                          "properties = json_patch(properties, ?5) "
+                          "RETURNING id;");
+}
+
+int64_t cbm_store_insert_edge(cbm_store_t *s, const cbm_edge_t *e) {
+    sqlite3_stmt *stmt = cbm_store_prepare_edge_upsert(s);
     if (!stmt) {
         return CBM_STORE_ERR;
     }
