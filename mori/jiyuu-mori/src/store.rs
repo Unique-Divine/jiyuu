@@ -64,7 +64,7 @@ pub(crate) struct Edge {
 
 pub(crate) struct Column {
     pub(crate) name: String,
-    pub(crate) pk: usize,
+    pub(crate) pk: i64,
 }
 
 pub(crate) struct Store(Connection);
