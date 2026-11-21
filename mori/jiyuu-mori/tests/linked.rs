@@ -161,9 +161,9 @@ fn project_pages_use_internal_identity_and_preserve_projection() {
     ];
     let run_all = |bin: &Path| {
         let outputs = cases.map(|args| {
-            run_in(bin, &scratch, &["cli", "--quiet", "list_projects", args])
+            run_in(bin, &scratch, None, &["cli", "--quiet", "list_projects", args])
         });
-        let stop = run_in(bin, &scratch, &["daemon", "stop"]);
+        let stop = run_in(bin, &scratch, None, &["daemon", "stop"]);
         assert!(stop.status.success(), "{stop:?}");
         outputs
     };
