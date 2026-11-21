@@ -9,7 +9,17 @@ use rusqlite::{
     ffi::{sqlite3, sqlite3_stmt},
 };
 
-use crate::graphql_link::{Action, delete_stale_link, plan_link, upsert_link};
+use crate::graphql_link::{
+    Action, delete_stale_link, find_handler, plan_link, upsert_link,
+};
+
+/// ABI mirror of `cbm_graphql_handler_t` in `pass_cross_repo.h`.
+#[repr(C)]
+struct GraphqlHandler {
+    handler_id: i64,
+    ambiguous: bool,
+    failed: bool,
+}
 
 unsafe extern "C" {
     /// The C program's `main`, renamed when `src/main.c` is compiled with
@@ -32,6 +42,14 @@ unsafe extern "C" {
             i64,
             *const c_char,
         ) -> bool,
+        find: extern "C" fn(
+            *mut sqlite3,
+            *const c_char,
+            *mut c_char,
+            usize,
+            *mut c_char,
+            usize,
+        ) -> GraphqlHandler,
     );
 }
 
@@ -76,6 +94,44 @@ extern "C" fn graphql_upsert_link(
     }
 }
 
+extern "C" fn graphql_find_handler(
+    db: *mut sqlite3,
+    route: *const c_char,
+    name: *mut c_char,
+    name_size: usize,
+    file: *mut c_char,
+    file_size: usize,
+) -> GraphqlHandler {
+    let mut matched = GraphqlHandler {
+        handler_id: 0,
+        ambiguous: false,
+        failed: true,
+    };
+    if db.is_null() {
+        return matched;
+    }
+    // SAFETY: C lends a live connection, a NUL-terminated route and separate
+    // writable buffers for this call. Rust does not close the C connection.
+    let result = unsafe {
+        Connection::from_handle(db).and_then(|db| {
+            find_handler(
+                &db,
+                CStr::from_ptr(route),
+                std::slice::from_raw_parts_mut(name.cast(), name_size),
+                std::slice::from_raw_parts_mut(file.cast(), file_size),
+            )
+        })
+    };
+    if let Ok((handler_id, ambiguous)) = result {
+        matched = GraphqlHandler {
+            handler_id,
+            ambiguous,
+            failed: false,
+        };
+    }
+    matched
+}
+
 /// The process entry point. Dispatches the developer export in Rust.
 /// Otherwise forwards the kernel's argc and argv to C unchanged, including
 /// worker and daemon re-execs
@@ -110,6 +166,7 @@ pub unsafe extern "C" fn main(argc: c_int, argv: *mut *mut c_char) -> c_int {
             plan_link,
             graphql_delete_stale_link,
             graphql_upsert_link,
+            graphql_find_handler,
         );
     }
 

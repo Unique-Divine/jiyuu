@@ -64,16 +64,20 @@ static CBM_TLS void *cr_after_insert_test_context = NULL;
 static cbm_graphql_link_policy_fn cr_graphql_link_policy;
 static cbm_graphql_delete_link_fn cr_graphql_delete_link;
 static cbm_graphql_upsert_link_fn cr_graphql_upsert_link;
+static cbm_graphql_find_handler_fn cr_graphql_find_handler;
 
 void cbm_cross_repo_set_graphql_backend(cbm_graphql_link_policy_fn policy,
                                         cbm_graphql_delete_link_fn delete_link,
-                                        cbm_graphql_upsert_link_fn upsert_link) {
+                                        cbm_graphql_upsert_link_fn upsert_link,
+                                        cbm_graphql_find_handler_fn find_handler) {
     char configured[sizeof("rust")];
     const char *impl = cbm_native_getenv("MORI_IMPL_GRAPHQL", configured, sizeof(configured), NULL);
-    bool rust = impl && strcmp(impl, "rust") == 0 && policy && delete_link && upsert_link;
+    bool rust =
+        impl && strcmp(impl, "rust") == 0 && policy && delete_link && upsert_link && find_handler;
     cr_graphql_link_policy = rust ? policy : NULL;
     cr_graphql_delete_link = rust ? delete_link : NULL;
     cr_graphql_upsert_link = rust ? upsert_link : NULL;
+    cr_graphql_find_handler = rust ? find_handler : NULL;
 }
 
 void cbm_cross_repo_set_after_insert_hook_for_tests(cbm_cross_repo_after_insert_test_hook_t hook,
@@ -1415,11 +1419,22 @@ static cr_match_result_t match_typed_routes(cbm_store_t *src_store, const char *
         }
         char handler_name[CBM_SZ_256] = {0};
         char handler_file[CBM_SZ_512] = {0};
-        int64_t handler_id =
-            find_route_handler(tgt_store, route_qn, handler_name, sizeof(handler_name),
-                               handler_file, sizeof(handler_file), &query_failed);
-        bool ambiguous = !query_failed && handler_id != 0 &&
-                         cr_route_ambiguous(tgt_store, route_qn, &query_failed);
+        cbm_graphql_handler_t handler;
+        if (use_rust) {
+            handler =
+                cr_graphql_find_handler(cbm_store_get_db(tgt_store), route_qn, handler_name,
+                                        sizeof(handler_name), handler_file, sizeof(handler_file));
+        } else {
+            handler.handler_id =
+                find_route_handler(tgt_store, route_qn, handler_name, sizeof(handler_name),
+                                   handler_file, sizeof(handler_file), &query_failed);
+            handler.ambiguous = !query_failed && handler.handler_id != 0 &&
+                                cr_route_ambiguous(tgt_store, route_qn, &query_failed);
+            handler.failed = query_failed;
+        }
+        query_failed = handler.failed;
+        int64_t handler_id = handler.handler_id;
+        bool ambiguous = handler.ambiguous;
         bool cancelled = !query_failed && cr_cancel_requested(ctx);
         cbm_cross_route_action_t action =
             query_failed || cancelled

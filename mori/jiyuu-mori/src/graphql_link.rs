@@ -4,7 +4,10 @@
 use std::ffi::CStr;
 
 #[cfg(feature = "c-backend")]
-use rusqlite::{Connection, Result, ffi};
+use rusqlite::{
+    Connection, OptionalExtension, Result, ffi,
+    types::{ToSqlOutput, ValueRef},
+};
 
 /// ABI mirror of `cbm_cross_route_action_t` in `pass_cross_repo.h`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -35,6 +38,67 @@ pub(crate) extern "C" fn plan_link(
         }
         (true, true) => Action::LinkAmbiguous,
     }
+}
+
+#[cfg(feature = "c-backend")]
+fn copy_sqlite_text(value: ValueRef<'_>, output: &mut [u8]) {
+    if output.is_empty() {
+        return;
+    }
+    let text = match value {
+        ValueRef::Text(text) => {
+            text.split(|&byte| byte == 0).next().unwrap_or_default()
+        }
+        _ => &[],
+    };
+    let len = text.len().min(output.len() - 1);
+    output[..len].copy_from_slice(&text[..len]);
+    output[len] = 0;
+}
+
+/// Find the exact target Route, choose its first HANDLES row in the same
+/// order as C, and read the ambiguity flag only after finding a handler.
+#[cfg(feature = "c-backend")]
+pub(crate) fn find_handler(
+    db: &Connection,
+    route_qn: &CStr,
+    name: &mut [u8],
+    file: &mut [u8],
+) -> Result<(i64, bool)> {
+    // Bind SQLite TEXT without validating or rewriting its bytes.
+    let qn = ToSqlOutput::Borrowed(ValueRef::Text(route_qn.to_bytes()));
+    let id: Option<i64> = db.query_row(
+        "SELECT id FROM nodes WHERE qualified_name = ?1 AND label = 'Route' LIMIT 1",
+        (&qn,),
+        |row| row.get(0),
+    ).optional()?;
+    let Some(id) = id.filter(|&id| id != 0) else {
+        return Ok((0, false));
+    };
+    let handler: Option<i64> = db.query_row(
+        "SELECT n.id, CAST(n.name AS TEXT), CAST(n.file_path AS TEXT) FROM edges e
+         JOIN nodes n ON n.id = e.source_id
+         WHERE e.target_id = ?1 AND e.type = 'HANDLES'
+         ORDER BY CASE n.label WHEN 'Method' THEN 0 WHEN 'Function' THEN 1 ELSE 2 END,
+         n.qualified_name, n.id LIMIT 1",
+        (id,),
+        |row| {
+            copy_sqlite_text(row.get_ref(1)?, name);
+            copy_sqlite_text(row.get_ref(2)?, file);
+            row.get(0)
+        },
+    ).optional()?;
+    let Some(handler) = handler.filter(|&id| id != 0) else {
+        return Ok((0, false));
+    };
+    let ambiguous = db.query_row(
+        "SELECT CAST(json_extract(properties, '$.ambiguous') AS INTEGER) FROM nodes
+         WHERE qualified_name = ?1 AND label = 'Route' LIMIT 1",
+        (&qn,),
+        |row| row.get::<_, Option<i64>>(0),
+    ).optional()?.flatten();
+    // C reads this column with sqlite3_column_int, which keeps the low 32 bits.
+    Ok((handler, ambiguous.is_some_and(|flag| flag as i32 != 0)))
 }
 
 /// Use the caller's connection so this delete keeps its SQLite transaction
@@ -98,6 +162,38 @@ pub(crate) unsafe fn upsert_link(
 #[cfg(test)]
 mod tests {
     use super::{Action, plan_link};
+
+    #[cfg(feature = "c-backend")]
+    #[test]
+    fn lookup_keeps_handler_order_and_raw_name_bytes() {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE nodes(id INTEGER PRIMARY KEY, label, qualified_name, name, file_path, properties);
+             CREATE TABLE edges(source_id, target_id, type);
+             INSERT INTO nodes VALUES
+                 (1, 'Route', CAST(x'51ff' AS TEXT), 'route', NULL, '{\"ambiguous\":true}'),
+                 (2, 'Field', 'a', 'field', NULL, NULL),
+                 (3, 'Function', 'a', 'function', NULL, NULL),
+                 (4, 'Method', 'z', 'later', NULL, NULL),
+                 (5, 'Method', 'm', CAST(x'6eff00696c' AS TEXT), CAST(x'61fe62' AS TEXT), NULL),
+                 (6, 'Method', 'm', 'later-id', NULL, NULL);
+             INSERT INTO edges VALUES (2, 1, 'HANDLES'), (3, 1, 'HANDLES'), (4, 1, 'HANDLES'),
+                                       (6, 1, 'HANDLES'), (5, 1, 'HANDLES');",
+        ).unwrap();
+        let mut name = [0; 4];
+        let mut file = [0; 3];
+        assert_eq!(
+            super::find_handler(&db, c"Q\xff", &mut name, &mut file).unwrap(),
+            (5, true)
+        );
+        assert_eq!(&name, b"n\xff\0\0");
+        assert_eq!(&file, b"a\xfe\0");
+        db.execute("DELETE FROM edges", []).unwrap();
+        assert_eq!(
+            super::find_handler(&db, c"Q\xff", &mut name, &mut file).unwrap(),
+            (0, false)
+        );
+    }
 
     #[cfg(feature = "c-backend")]
     #[test]

@@ -29,11 +29,23 @@ typedef bool (*cbm_graphql_upsert_link_fn)(struct sqlite3_stmt *stmt, const char
                                            int64_t source_id, int64_t target_id,
                                            const char *properties);
 
+typedef struct {
+    int64_t handler_id; /* zero if the target has no matching handler */
+    bool ambiguous;
+    bool failed;
+} cbm_graphql_handler_t;
+
+typedef cbm_graphql_handler_t (*cbm_graphql_find_handler_fn)(struct sqlite3 *db,
+                                                             const char *route_qn,
+                                                             char *handler_name, size_t name_size,
+                                                             char *handler_file, size_t file_size);
+
 /* Register before starting C. The callbacks apply only to GraphQL link runs
  * with MORI_IMPL_GRAPHQL=rust. */
 void cbm_cross_repo_set_graphql_backend(cbm_graphql_link_policy_fn policy,
                                         cbm_graphql_delete_link_fn delete_link,
-                                        cbm_graphql_upsert_link_fn upsert_link);
+                                        cbm_graphql_upsert_link_fn upsert_link,
+                                        cbm_graphql_find_handler_fn find_handler);
 
 /* A store the ["*"] enumeration skipped instead of linking. */
 typedef struct {
