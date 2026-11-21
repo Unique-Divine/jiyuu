@@ -3,6 +3,8 @@
 
 use std::ffi::{c_char, c_int};
 
+use crate::stdio::c_transport;
+
 unsafe extern "C" {
     /// The C program's `main`, renamed when `src/main.c` is compiled with
     /// `-DCBM_AS_LIBRARY` (target `libmori-c` in `Makefile.cbm`). Its first
@@ -22,7 +24,10 @@ unsafe extern "C" {
 /// NULL, as for any C `main`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn main(argc: c_int, argv: *mut *mut c_char) -> c_int {
-    // SAFETY: argc and argv come straight from the C runtime and meet the
-    // contract of C main, which cbm_c_main is.
-    unsafe { cbm_c_main(argc, argv) }
+    // SAFETY: registration happens once before C startup. The process
+    // arguments come from the C runtime and obey the contract of C main.
+    unsafe {
+        c_transport::register();
+        cbm_c_main(argc, argv)
+    }
 }

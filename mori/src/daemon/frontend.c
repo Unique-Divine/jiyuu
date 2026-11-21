@@ -17,6 +17,24 @@
 #include <stdlib.h>
 #include <string.h>
 
+typedef int (*frontend_read_message_fn)(FILE *in, char **message, bool *content_length_framed);
+typedef bool (*frontend_write_response_fn)(FILE *out, const uint8_t *response, uint32_t length,
+                                           bool content_length_framed);
+
+static frontend_read_message_fn frontend_read_message = cbm_mcp_read_message;
+static frontend_write_response_fn frontend_external_write;
+
+/* The linked program registers its transport once, before C main starts the
+ * frontend. A successful read must supply a malloc-owned NUL-terminated
+ * message. The frontend owns the message from then on. */
+void cbm_daemon_frontend_set_stdio(frontend_read_message_fn read_message,
+                                   frontend_write_response_fn write_response);
+void cbm_daemon_frontend_set_stdio(frontend_read_message_fn read_message,
+                                   frontend_write_response_fn write_response) {
+    frontend_read_message = read_message;
+    frontend_external_write = write_response;
+}
+
 enum {
     FRONTEND_QUEUE_CAPACITY = 8,
     FRONTEND_QUEUE_BYTES_MAX = 12 * 1024 * 1024,
@@ -395,6 +413,9 @@ static void frontend_end_request(frontend_state_t *state, bool failed) {
 
 static bool frontend_write_response(FILE *out, const uint8_t *response, uint32_t response_length,
                                     bool content_length_framed) {
+    if (frontend_external_write) {
+        return frontend_external_write(out, response, response_length, content_length_framed);
+    }
     bool written = false;
     if (content_length_framed) {
         written = fprintf(out, "Content-Length: %u\r\n\r\n", response_length) >= 0 &&
@@ -839,7 +860,7 @@ int cbm_daemon_frontend_mcp_run(cbm_daemon_runtime_client_t *client,
     for (;;) {
         char *message = NULL;
         bool content_length_framed = false;
-        int read_status = cbm_mcp_read_message(in, &message, &content_length_framed);
+        int read_status = frontend_read_message(in, &message, &content_length_framed);
         if (read_status <= 0) {
             result = read_status < 0 ? -1 : 0;
             clean_eof = read_status == 0;

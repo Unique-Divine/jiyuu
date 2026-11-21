@@ -7,7 +7,7 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 const MORI: &str = env!("CARGO_BIN_EXE_mori");
@@ -58,16 +58,22 @@ fn run(bin: &Path, side: &str, args: &[&str]) -> Output {
 }
 
 fn run_in(bin: &Path, scratch: &Scratch, args: &[&str]) -> Output {
-    Command::new(bin)
+    command_in(bin, scratch)
         .args(args)
+        .output()
+        .expect("run binary")
+}
+
+fn command_in(bin: &Path, scratch: &Scratch) -> Command {
+    let mut command = Command::new(bin);
+    command
         .current_dir("/")
         .env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .env("HOME", std::env::var_os("HOME").unwrap_or_default())
         .env("CBM_CACHE_DIR", scratch.0.join("cache"))
-        .env("CBM_RUNTIME_DIR", scratch.0.join("rt"))
-        .output()
-        .expect("run binary")
+        .env("CBM_RUNTIME_DIR", scratch.0.join("rt"));
+    command
 }
 
 fn assert_same(args: &[&str]) {
@@ -113,6 +119,42 @@ fn list_projects_matches_c() {
 #[test]
 fn unknown_tool_error_matches_c() {
     assert_same(&["cli", "no_such_tool"]);
+}
+
+#[test]
+fn stdio_mixed_framing_matches_c_after_input_eof() {
+    let initialize = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"linked-test","version":"1"}}}"#;
+    let initialized =
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
+    let call = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_projects","arguments":{}}}"#;
+    let input = format!(
+        "{initialize}\n{initialized}\nContent-Length: {}\r\n\r\n{call}",
+        call.len()
+    );
+    let run = |bin: &Path, side| {
+        let scratch = Scratch::new(side);
+        let requests = scratch.0.join("requests");
+        fs::write(&requests, &input).expect("write MCP requests");
+        let output = command_in(bin, &scratch)
+            .stdin(Stdio::from(
+                fs::File::open(requests).expect("open MCP requests"),
+            ))
+            .output()
+            .expect("run MCP server");
+        assert!(output.status.success(), "{side}: {output:?}");
+        String::from_utf8(output.stdout).expect("UTF-8 response")
+    };
+    let reference = run(&c_binary(), "c");
+    let linked = run(Path::new(MORI), "rs");
+    assert_eq!(linked, reference);
+    let (initialize_response, framed) =
+        linked.split_once('\n').expect("newline response");
+    assert!(initialize_response.contains("\"id\":1"));
+    assert!(initialize_response.contains("\"protocolVersion\":\"2025-06-18\""));
+    let (header, body) = framed.split_once("\r\n\r\n").expect("framed response");
+    assert_eq!(header, format!("Content-Length: {}", body.len()));
+    assert!(body.contains("\"id\":2"));
+    assert!(body.contains("projects: 0"));
 }
 
 /// A small repository written by the test: Python and Go, each with one
