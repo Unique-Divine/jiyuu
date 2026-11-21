@@ -139,8 +139,10 @@ git push origin mori/v0.13.0
 ```
 
 The workflow fails unless the tag equals `mori/v` plus `VERSION`. It builds
-four targets, each on a native runner. On each it smoke-tests `--version` and
-a tiny index, runs the CLI parity check
+four targets, each on a native runner, with the graph UI embedded (as
+`scripts/build.sh --with-ui` does; needs npm). On each it smoke-tests
+`--version`, a tiny index and the UI index page from `mori daemon start
+--port=N`, runs the CLI parity check
 ([scripts/cli-parity.ts](scripts/cli-parity.ts)) against
 `codebase-memory-mcp` from the same commit, and packages the binary with
 [scripts/package-release.sh](scripts/package-release.sh) as

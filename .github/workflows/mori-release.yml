@@ -125,6 +125,10 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.4.3
+      # npm builds the graph UI (mori/graph-ui), which the binary embeds.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
       - name: Install Rust
         uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
@@ -154,7 +158,8 @@ jobs:
         run: bun scripts/grammars-fetch.ts
       # cargo's build.rs runs `make -f Makefile.cbm libmori-c` and links the
       # archive whole; MORI_C_REFERENCE=1 also builds codebase-memory-mcp
-      # from the same objects' sources for the parity check. CFLAGS_EXTRA
+      # from the same sources for the parity check. MORI_WITH_UI=1 embeds the
+      # graph UI in both, as scripts/build.sh --with-ui does. CFLAGS_EXTRA
       # stamps CBM_VERSION into both, as scripts/build.sh --version does.
       # Linux links glibc statically (+crt-static), like the C release's
       # STATIC=1, so one binary runs on any distro. macOS has no static libc:
@@ -162,6 +167,7 @@ jobs:
       - name: Build mori
         env:
           MORI_C_REFERENCE: "1"
+          MORI_WITH_UI: "1"
           CC: ${{ matrix.goos == 'linux' && 'gcc' || 'cc' }}
           CXX: ${{ matrix.goos == 'linux' && 'g++' || 'c++' }}
           MACOSX_DEPLOYMENT_TARGET: "14.0"
@@ -214,7 +220,7 @@ jobs:
             echo "::error::links a library outside the OS"
             exit 1
           fi
-      - name: Smoke-test version and a tiny index
+      - name: Smoke-test version, a tiny index and the graph UI
         run: |
           set -euo pipefail
           got="$("$BIN" --version)"
@@ -243,6 +249,20 @@ jobs:
           "$BIN" cli trace_path --project "$project" --function-name greet \
             --direction outbound | tee "$scratch/trace"
           grep -q '\.app\.helper 1$' "$scratch/trace"
+          # The embedded graph UI: a daemon on a free port serves its index.
+          port="$(python3 -c 'import socket; s = socket.socket(); \
+            s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
+          "$BIN" daemon start --port="$port"
+          trap '"$BIN" daemon stop || true' EXIT
+          for _ in $(seq 1 30); do
+            if curl -fsS "http://127.0.0.1:$port/" -o "$scratch/ui.html" \
+              2>/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          head -c 300 "$scratch/ui.html"; echo
+          grep -qi '<!doctype html>' "$scratch/ui.html"
       # The shipped (stripped, signed) mori against the C binary built from
       # the same commit: same commands, same output after normalization.
       - name: CLI parity with codebase-memory-mcp
