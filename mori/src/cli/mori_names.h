@@ -23,15 +23,17 @@
 #define CBM_MCP_TOOL_PREFIX_LEGACY "mcp__" CBM_MCP_SERVER_KEY_LEGACY "__"
 
 /* Server keys that name Mori's graph tools, in match order. */
-#define CBM_MCP_SERVER_KEYS {CBM_MCP_SERVER_KEY, CBM_MCP_SERVER_KEY_LEGACY}
+#define CBM_MCP_SERVER_KEYS \
+    { CBM_MCP_SERVER_KEY, CBM_MCP_SERVER_KEY_LEGACY }
 #define CBM_MCP_SERVER_KEY_COUNT 2U
 
 /* Where releases live and how to upgrade. */
 #define CBM_RELEASES_URL "https://github.com/Unique-Divine/jiyuu/releases?q=mori%2Fv"
 #define CBM_UPGRADE_HINT                                                                       \
     "Mori installs and upgrades through mise and the mori/v* releases of\n"                    \
-    "Unique-Divine/jiyuu. Bump the version in ~/.config/mise/config.toml:\n\n"                  \
-    "  \"github:Unique-Divine/jiyuu\" = { version = \"<x.y.z>\", version_prefix = \"mori/v\" }\n\n" \
+    "Unique-Divine/jiyuu. Bump the version in ~/.config/mise/config.toml:\n\n"                 \
+    "  \"github:Unique-Divine/jiyuu\" = { version = \"<x.y.z>\", version_prefix = \"mori/v\" " \
+    "}\n\n"                                                                                    \
     "then run:\n\n"                                                                            \
     "  mise install\n"                                                                         \
     "  " CBM_COMMAND_NAME " daemon stop   # the daemon restarts on the new binary\n\n"         \

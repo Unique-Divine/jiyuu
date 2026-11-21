@@ -2623,8 +2623,8 @@ TEST(cli_install_registers_mori_graph_without_skills) {
     snprintf(skills, sizeof(skills), "%s/.claude/skills", home);
     snprintf(agents, sizeof(agents), "%s/.claude/agents", home);
     snprintf(hooks, sizeof(hooks), "%s/.claude/hooks", home);
-    bool wrote_extras = cli_mori_path_exists(skills) || cli_mori_path_exists(agents) ||
-                        cli_mori_path_exists(hooks);
+    bool wrote_extras =
+        cli_mori_path_exists(skills) || cli_mori_path_exists(agents) || cli_mori_path_exists(hooks);
 
     bool claude_ok = claude_first && strstr(claude_first, "\"mori-graph\"") &&
                      strstr(claude_first, "\"/opt/mori/bin/mori\"") &&
@@ -7440,8 +7440,7 @@ TEST(cli_durable_profiles_follow_current_vendor_paths) {
         kiro_tools && yyjson_is_arr(kiro_tools) ? yyjson_arr_get(kiro_tools, 3U) : NULL;
     yyjson_val *include_mcp = kiro_root ? yyjson_obj_get(kiro_root, "includeMcpJson") : NULL;
     yyjson_val *kiro_servers = kiro_root ? yyjson_obj_get(kiro_root, "mcpServers") : NULL;
-    yyjson_val *kiro_server =
-        kiro_servers ? yyjson_obj_get(kiro_servers, "mori-graph") : NULL;
+    yyjson_val *kiro_server = kiro_servers ? yyjson_obj_get(kiro_servers, "mori-graph") : NULL;
     yyjson_val *kiro_command = kiro_server ? yyjson_obj_get(kiro_server, "command") : NULL;
     yyjson_val *kiro_args = kiro_server ? yyjson_obj_get(kiro_server, "args") : NULL;
     yyjson_val *kiro_profile_flag =
@@ -9514,19 +9513,17 @@ TEST(cli_registry_omp_named_profile_install_and_uninstall_preserve_user_content)
         test_file_contains_all(
             skill_path,
             (const char *const[]){"search_graph", "trace_path", "Sessions and Subagents"}, 3U) &&
-        test_file_contains_all(scout_path,
-                               (const char *const[]){"autoloadSkills: [mori-graph]",
-                                                     "mcp__mori_graph_search_graph"},
-                               2U) &&
         test_file_contains_all(
-            verify_path,
-            (const char *const[]){"read-summarize: false", "mcp__mori_graph_trace_path"},
+            scout_path,
+            (const char *const[]){"autoloadSkills: [mori-graph]", "mcp__mori_graph_search_graph"},
             2U) &&
         test_file_contains_all(
-            auditor_path,
-            (const char *const[]){"autoloadSkills: [mori-graph]",
-                                  "mcp__mori_graph_check_index_coverage"},
-            2U);
+            verify_path,
+            (const char *const[]){"read-summarize: false", "mcp__mori_graph_trace_path"}, 2U) &&
+        test_file_contains_all(auditor_path,
+                               (const char *const[]){"autoloadSkills: [mori-graph]",
+                                                     "mcp__mori_graph_check_index_coverage"},
+                               2U);
     free(installed_mcp);
     free(installed_instructions);
 
@@ -10105,8 +10102,7 @@ TEST(cli_registry_installs_codebuddy_bob_and_pochi_durable_context) {
             codebuddy_agent,
             (const char *const[]){"permissionMode: plan",
                                   "tools: Read,Grep,Glob,mcp__mori-graph__search_graph,",
-                                  "mcp__mori-graph__check_index_coverage",
-                                  "skills: mori-graph"},
+                                  "mcp__mori-graph__check_index_coverage", "skills: mori-graph"},
             4U) &&
         !test_file_contains_all(codebuddy_agent, (const char *const[]){"tools:\n"}, 1U) &&
         !test_file_contains_all(codebuddy_agent,
@@ -13226,8 +13222,7 @@ TEST(cli_read_only_agents_do_not_receive_mutating_mcp_server) {
     char *qoder = read_test_file_alloc(qoder_agent);
     char *junie = read_test_file_alloc(junie_agent);
     char *kiro = read_test_file_alloc(kiro_agent);
-    bool qoder_confined = qoder && strstr(qoder, "mcpServers:") &&
-                          strstr(qoder, "- mori-graph") &&
+    bool qoder_confined = qoder && strstr(qoder, "mcpServers:") && strstr(qoder, "- mori-graph") &&
                           strstr(qoder, "mcp__mori-graph__search_graph") &&
                           strstr(qoder, "check_index_coverage") && !strstr(qoder, "Bash") &&
                           !strstr(qoder, "Write") && !strstr(qoder, "Edit");
@@ -13236,13 +13231,13 @@ TEST(cli_read_only_agents_do_not_receive_mutating_mcp_server) {
                           strstr(junie, "tools: [\"Read\", \"Grep\", \"Glob\"]") &&
                           strstr(junie, "check_index_coverage") && !strstr(junie, "Bash") &&
                           !strstr(junie, "Write") && !strstr(junie, "Edit");
-    bool kiro_confined =
-        kiro && strstr(kiro, "\"mcpServers\"") && strstr(kiro, "\"includeMcpJson\": false") &&
-        strstr(kiro, "@mori-graph/search_graph") && strstr(kiro, "--tool-profile") &&
-        strstr(kiro, "analysis") && strstr(kiro, "check_index_coverage") &&
-        !strstr(kiro, "\"@mori-graph\"") && !strstr(kiro, "delete_project") &&
-        !strstr(kiro, "manage_adr") && !strstr(kiro, "index_repository") &&
-        !strstr(kiro, "ingest_traces");
+    bool kiro_confined = kiro && strstr(kiro, "\"mcpServers\"") &&
+                         strstr(kiro, "\"includeMcpJson\": false") &&
+                         strstr(kiro, "@mori-graph/search_graph") &&
+                         strstr(kiro, "--tool-profile") && strstr(kiro, "analysis") &&
+                         strstr(kiro, "check_index_coverage") && !strstr(kiro, "\"@mori-graph\"") &&
+                         !strstr(kiro, "delete_project") && !strstr(kiro, "manage_adr") &&
+                         !strstr(kiro, "index_repository") && !strstr(kiro, "ingest_traces");
     bool confined = qoder_confined && junie_confined && kiro_confined;
     free(qoder);
     free(junie);
@@ -14224,8 +14219,7 @@ TEST(cli_hook_augment_drift_reminder_counts_searches) {
     }
     /* Another server's tool is no graph call: after a reset and one search it
      * leaves the count alone, so the 3rd search still carries the line. */
-    ok = ok &&
-         test_drift_graph_call(srv, "drift-test-a", "mcp__mori-graph__search_graph") &&
+    ok = ok && test_drift_graph_call(srv, "drift-test-a", "mcp__mori-graph__search_graph") &&
          test_drift_search(srv, "drift-test-a", "", hit, &reminded) && !reminded &&
          test_drift_graph_call(srv, "drift-test-a", "mcp__other__search") &&
          test_drift_search(srv, "drift-test-a", "", hit, &reminded) && !reminded &&

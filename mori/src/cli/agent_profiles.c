@@ -79,8 +79,7 @@ static const profile_names_t current_names = {
 static const profile_names_t legacy_names = {
     .server_key = CBM_MCP_SERVER_KEY_LEGACY,
     .skill = "codebase-memory",
-    .display_names = {"Codebase Memory Scout", "Codebase Memory Verify",
-                      "Codebase Memory Auditor"},
+    .display_names = {"Codebase Memory Scout", "Codebase Memory Verify", "Codebase Memory Auditor"},
     .server_phrase = CBM_MCP_SERVER_KEY_LEGACY,
 };
 
@@ -394,8 +393,8 @@ static bool tool_identifier(cbm_graph_profile_dialect_t dialect, const profile_n
     return written >= 0 && (size_t)written < output_size;
 }
 
-static bool append_yaml_mcp_tools(profile_buffer_t *buffer, cbm_graph_profile_dialect_t dialect, const profile_names_t *names,
-                                  cbm_graph_tier_t tier) {
+static bool append_yaml_mcp_tools(profile_buffer_t *buffer, cbm_graph_profile_dialect_t dialect,
+                                  const profile_names_t *names, cbm_graph_tier_t tier) {
     const profile_tool_t *tools = NULL;
     size_t count = 0U;
     tier_tool_set(tier, &tools, &count);
@@ -410,8 +409,8 @@ static bool append_yaml_mcp_tools(profile_buffer_t *buffer, cbm_graph_profile_di
     return true;
 }
 
-static bool append_csv_mcp_tools(profile_buffer_t *buffer, cbm_graph_profile_dialect_t dialect, const profile_names_t *names,
-                                 cbm_graph_tier_t tier) {
+static bool append_csv_mcp_tools(profile_buffer_t *buffer, cbm_graph_profile_dialect_t dialect,
+                                 const profile_names_t *names, cbm_graph_tier_t tier) {
     const profile_tool_t *tools = NULL;
     size_t count = 0U;
     tier_tool_set(tier, &tools, &count);
@@ -427,8 +426,8 @@ static bool append_csv_mcp_tools(profile_buffer_t *buffer, cbm_graph_profile_dia
 }
 
 static bool append_toml_mcp_tools(profile_buffer_t *buffer, cbm_graph_profile_dialect_t dialect,
-                                  const profile_names_t *names,
-                                  cbm_graph_tier_t tier, bool leading_items) {
+                                  const profile_names_t *names, cbm_graph_tier_t tier,
+                                  bool leading_items) {
     const profile_tool_t *tools = NULL;
     size_t count = 0U;
     tier_tool_set(tier, &tools, &count);
@@ -445,8 +444,8 @@ static bool append_toml_mcp_tools(profile_buffer_t *buffer, cbm_graph_profile_di
 }
 
 static bool append_permission_mcp_tools(profile_buffer_t *buffer,
-                                        cbm_graph_profile_dialect_t dialect, const profile_names_t *names,
-                                        cbm_graph_tier_t tier) {
+                                        cbm_graph_profile_dialect_t dialect,
+                                        const profile_names_t *names, cbm_graph_tier_t tier) {
     const profile_tool_t *tools = NULL;
     size_t count = 0U;
     tier_tool_set(tier, &tools, &count);
@@ -601,8 +600,7 @@ static bool render_profile_text(profile_buffer_t *buffer, cbm_graph_profile_dial
                         !profile_buffer_append(buffer, "]\n"))) ||
             !profile_buffer_append(buffer, "permissionMode: plan\nskills: [") ||
             !profile_buffer_append(buffer, names->skill) ||
-            !profile_buffer_append(buffer, "]\n---\n") ||
-            !profile_buffer_append(buffer, prompt)) {
+            !profile_buffer_append(buffer, "]\n---\n") || !profile_buffer_append(buffer, prompt)) {
             return false;
         }
         return true;
@@ -687,8 +685,7 @@ static bool render_profile_text(profile_buffer_t *buffer, cbm_graph_profile_dial
                         !append_csv_mcp_tools(buffer, dialect, names, tier))) ||
             !profile_buffer_append(buffer, "\nmodel: inherit\npermissionMode: plan\nskills: ") ||
             !profile_buffer_append(buffer, names->skill) ||
-            !profile_buffer_append(buffer, "\n---\n") ||
-            !profile_buffer_append(buffer, prompt)) {
+            !profile_buffer_append(buffer, "\n---\n") || !profile_buffer_append(buffer, prompt)) {
             return false;
         }
         return true;
@@ -760,8 +757,7 @@ static bool render_profile_text(profile_buffer_t *buffer, cbm_graph_profile_dial
             (direct && !append_yaml_mcp_tools(buffer, dialect, names, tier)) ||
             !profile_buffer_append(buffer, "read-summarize: false\nautoloadSkills: [") ||
             !profile_buffer_append(buffer, names->skill) ||
-            !profile_buffer_append(buffer, "]\n---\n") ||
-            !profile_buffer_append(buffer, prompt)) {
+            !profile_buffer_append(buffer, "]\n---\n") || !profile_buffer_append(buffer, prompt)) {
             return false;
         }
         return true;

@@ -3049,7 +3049,7 @@ static bool application_async_host_missing(cbm_daemon_application_session_t *ses
 #define APPLICATION_ASYNC_NEEDS_HOST                                                              \
     "async indexing needs a daemon that outlives this command: this one-shot call is the only "   \
     "client of a temporary daemon, which stops (cancelling the job) when the command exits. Run " \
-    "`mori daemon start` (or keep an MCP session open), then retry; or call "      \
+    "`mori daemon start` (or keep an MCP session open), then retry; or call "                     \
     "without async"
 
 static char *application_index_start_async(cbm_daemon_application_session_t *session,

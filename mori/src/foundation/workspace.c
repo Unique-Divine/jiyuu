@@ -682,8 +682,7 @@ bool cbm_workspace_root_allowed(const char *canonical_path, const char *home_dir
     if (err) {
         const char *flag = ws_verdict_approval_flag(verdict);
         if (flag) {
-            snprintf(err, err_sz,
-                     "%s: %s. To index it anyway, run: mori allow-root %s %s",
+            snprintf(err, err_sz, "%s: %s. To index it anyway, run: mori allow-root %s %s",
                      canonical_path, cbm_workspace_verdict_reason(verdict), flag, canonical_path);
         } else {
             snprintf(err, err_sz, "%s: %s", canonical_path, cbm_workspace_verdict_reason(verdict));

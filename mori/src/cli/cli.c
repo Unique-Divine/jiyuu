@@ -9644,11 +9644,12 @@ static void tiered_released_profiles_collect(cbm_tiered_profile_set_t profiles,
     tiered_released_profiles_keep(
         released,
         cbm_render_graph_profile(profiles.dialect, tier, alternate_access, profiles.binary_path));
-    tiered_released_profiles_keep(released, cbm_render_graph_profile_legacy(
-                                                profiles.dialect, tier, access, profiles.binary_path));
     tiered_released_profiles_keep(
-        released, cbm_render_graph_profile_legacy(profiles.dialect, tier, alternate_access,
-                                                  profiles.binary_path));
+        released,
+        cbm_render_graph_profile_legacy(profiles.dialect, tier, access, profiles.binary_path));
+    tiered_released_profiles_keep(released, cbm_render_graph_profile_legacy(profiles.dialect, tier,
+                                                                            alternate_access,
+                                                                            profiles.binary_path));
     if (profiles.dialect == CBM_GRAPH_DIALECT_CODEX && access == CBM_GRAPH_ACCESS_DIRECT) {
         tiered_released_profiles_keep(released, cbm_render_graph_profile_codex_rc1(tier));
     }
@@ -12007,12 +12008,11 @@ int cbm_install_mori_codex_mcp(const char *binary_path, const char *config_path)
 }
 
 static void install_print_usage(FILE *out) {
-    (void)fprintf(out,
-                  "usage: " CBM_COMMAND_NAME " install [--dry-run]\n\n"
-                  "Registers this binary as the " CBM_MCP_SERVER_KEY
-                  " MCP server for Claude Code (~/.claude.json)\n"
-                  "and Codex (~/.codex/config.toml) when they are present. It downloads\n"
-                  "nothing and writes no agent skills, hooks, or agent profiles.\n");
+    (void)fprintf(out, "usage: " CBM_COMMAND_NAME " install [--dry-run]\n\n"
+                       "Registers this binary as the " CBM_MCP_SERVER_KEY
+                       " MCP server for Claude Code (~/.claude.json)\n"
+                       "and Codex (~/.codex/config.toml) when they are present. It downloads\n"
+                       "nothing and writes no agent skills, hooks, or agent profiles.\n");
 }
 
 /* One client registration: report, or write unless dry_run. Returns false on
@@ -12025,8 +12025,8 @@ static bool install_register_client(const char *label, const char *config_path,
         return true;
     }
     if (!prepare_config_parent(config_path) || upsert(binary_path, config_path) != CLI_OK) {
-        (void)fprintf(stderr, "error: %s: could not register %s in %s\n", label,
-                      CBM_MCP_SERVER_KEY, config_path);
+        (void)fprintf(stderr, "error: %s: could not register %s in %s\n", label, CBM_MCP_SERVER_KEY,
+                      config_path);
         return false;
     }
     printf("  %s: registered %s in %s\n", label, CBM_MCP_SERVER_KEY, config_path);
@@ -13596,8 +13596,9 @@ int cbm_cmd_uninstall(int argc, char **argv) {
 int cbm_cmd_update(int argc, char **argv) {
     (void)argc;
     (void)argv;
-    (void)fprintf(stderr, CBM_COMMAND_NAME " update does not download or replace binaries.\n\n"
-                          "%s",
+    (void)fprintf(stderr,
+                  CBM_COMMAND_NAME " update does not download or replace binaries.\n\n"
+                                   "%s",
                   CBM_UPGRADE_HINT);
     return CLI_TRUE;
 }

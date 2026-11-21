@@ -157,8 +157,7 @@ TEST(agent_profiles_tiers_encode_distinct_evidence_budgets) {
                 strstr(verify, "mcp__mori-graph__detect_changes") &&
                 strstr(audit, "bounded scope") && strstr(audit, "current graph generation") &&
                 strstr(audit, "complete relevant pagination") && strstr(audit, "scope coverage") &&
-                strstr(audit, "source fallback") &&
-                strstr(audit, "mcp__mori-graph__query_graph") &&
+                strstr(audit, "source fallback") && strstr(audit, "mcp__mori-graph__query_graph") &&
                 strstr(audit, "mcp__mori-graph__detect_changes");
     free(scout);
     free(verify);
@@ -179,10 +178,8 @@ TEST(agent_profiles_handoff_requires_parent_evidence_without_child_mcp) {
             int valid = strstr(profile, "parent agent must supply") &&
                         strstr(profile, "coverage evidence") &&
                         strstr(profile, "must not call or claim access to MCP") &&
-                        !strstr(profile, "mcpServers") &&
-                        !strstr(profile, "mcp__mori-graph__") &&
-                        !strstr(profile, "mcp_mori-graph_") &&
-                        !strstr(profile, "@mori-graph/") &&
+                        !strstr(profile, "mcpServers") && !strstr(profile, "mcp__mori-graph__") &&
+                        !strstr(profile, "mcp_mori-graph_") && !strstr(profile, "@mori-graph/") &&
                         !strstr(profile, "mori-graph/");
             free(profile);
             if (!valid) {
@@ -256,8 +253,7 @@ TEST(agent_profiles_kiro_is_valid_json_and_escapes_binary_path) {
                 strcmp(yyjson_get_str(profile_flag), "--tool-profile") == 0 && profile_name &&
                 yyjson_is_str(profile_name) &&
                 strcmp(yyjson_get_str(profile_name), "analysis") == 0 && tools &&
-                yyjson_is_arr(tools) &&
-                strstr(profile, "@mori-graph/check_index_coverage") != NULL;
+                yyjson_is_arr(tools) && strstr(profile, "@mori-graph/check_index_coverage") != NULL;
     yyjson_doc_free(doc);
     free(profile);
     ASSERT_TRUE(valid);
