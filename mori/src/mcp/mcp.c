@@ -3094,11 +3094,36 @@ typedef enum {
 
 static cbm_mcp_project_identity_reader_fn project_identity_reader;
 static cbm_mcp_project_stats_reader_fn project_stats_reader;
+static cbm_mcp_project_metadata_reader_fn project_metadata_reader;
 
 void cbm_mcp_set_project_readers(cbm_mcp_project_identity_reader_fn identity,
-                                 cbm_mcp_project_stats_reader_fn stats) {
+                                 cbm_mcp_project_stats_reader_fn stats,
+                                 cbm_mcp_project_metadata_reader_fn metadata) {
     project_identity_reader = identity;
     project_stats_reader = stats;
+    project_metadata_reader = metadata;
+}
+
+static void read_project_stats(cbm_store_t *store, const char *project, int *nodes, int *edges) {
+    if (project_stats_reader) {
+        project_stats_reader(store, project, nodes, edges);
+    } else {
+        *nodes = cbm_store_count_nodes(store, project);
+        *edges = cbm_store_count_edges(store, project);
+    }
+}
+
+static void copy_project_metadata(void *context, const char *root_path, const char *indexed_at) {
+    cbm_project_t *project = context;
+    project->root_path = heap_strdup(root_path);
+    project->indexed_at = heap_strdup(indexed_at);
+}
+
+static bool read_project_metadata(cbm_store_t *store, const char *project, cbm_project_t *out) {
+    if (project_metadata_reader) {
+        return project_metadata_reader(store, project, copy_project_metadata, out);
+    }
+    return cbm_store_get_project(store, project, out) == CBM_STORE_OK;
 }
 
 static int copy_project_identity(void *context, const char *name, const char *root_path) {
@@ -3183,12 +3208,7 @@ static bool populate_project_record(const char *dir_path, bool include_stats,
         if (!pstore) {
             return false;
         }
-        if (project_stats_reader) {
-            project_stats_reader(pstore, record->name, &record->nodes, &record->edges);
-        } else {
-            record->nodes = cbm_store_count_nodes(pstore, record->name);
-            record->edges = cbm_store_count_edges(pstore, record->name);
-        }
+        read_project_stats(pstore, record->name, &record->nodes, &record->edges);
         cbm_store_close(pstore);
     }
     /* Listing stays lean: only the branch (the one git fact that
@@ -8116,8 +8136,9 @@ static char *handle_index_status(cbm_mcp_server_t *srv, const char *args) {
     if (failed) {
         /* nothing to report into */
     } else if (project) {
-        int nodes = cbm_store_count_nodes(store, project);
-        int edges = cbm_store_count_edges(store, project);
+        int nodes = 0;
+        int edges = 0;
+        read_project_stats(store, project, &nodes, &edges);
         /* A negative count is a failed read (CBM_STORE_ERR), not a small
          * project. Reporting it as a count would put a bare -1 in the output,
          * and `nodes > 0 ? "ready" : "empty"` would answer "empty" for an
@@ -8130,7 +8151,7 @@ static char *handle_index_status(cbm_mcp_server_t *srv, const char *args) {
         yyjson_mut_obj_add_str(doc, root, "status",
                                counts_unreadable ? "error" : (nodes > 0 ? "ready" : "empty"));
         cbm_project_t proj_info = {0};
-        bool have_proj_info = cbm_store_get_project(store, project, &proj_info) == CBM_STORE_OK;
+        bool have_proj_info = read_project_metadata(store, project, &proj_info);
         if (have_proj_info) {
             yyjson_mut_obj_add_strcpy(doc, root, "root_path",
                                       proj_info.root_path ? proj_info.root_path : "");

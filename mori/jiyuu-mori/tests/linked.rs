@@ -139,14 +139,24 @@ fn project_pages_use_internal_identity_and_preserve_projection() {
     fs::write(cache.join("corrupt.db"), "not a SQLite database").unwrap();
 
     let cases = [
-        r#"{"format":"json"}"#,
-        r#"{"metadata_only":true,"limit":1}"#,
-        r#"{"detail":"stats","limit":1,"offset":1,"format":"json"}"#,
-        r#"{"include_details":true,"offset":99,"format":"json"}"#,
+        ("list_projects", r#"{"format":"json"}"#),
+        ("list_projects", r#"{"metadata_only":true,"limit":1}"#),
+        (
+            "list_projects",
+            r#"{"detail":"stats","limit":1,"offset":1,"format":"json"}"#,
+        ),
+        (
+            "list_projects",
+            r#"{"include_details":true,"offset":99,"format":"json"}"#,
+        ),
+        (
+            "index_status",
+            r#"{"project":"alpha","verbose":true,"diagnostics":"summary","format":"json"}"#,
+        ),
     ];
     let run_all = |bin: &Path| {
-        let outputs = cases.map(|args| {
-            run_in(bin, &scratch, &["cli", "--quiet", "list_projects", args])
+        let outputs = cases.map(|(tool, args)| {
+            run_in(bin, &scratch, &["cli", "--quiet", tool, args])
         });
         let stop = run_in(bin, &scratch, &["daemon", "stop"]);
         assert!(stop.status.success(), "{stop:?}");
@@ -178,6 +188,44 @@ fn project_pages_use_internal_identity_and_preserve_projection() {
     assert_eq!(stats["projects"][0]["name"], "beta");
     assert_eq!(stats["projects"][0]["nodes"], 2);
     assert_eq!(stats["projects"][0]["edges"], 1);
+    let status: serde_json::Value =
+        serde_json::from_slice(&rust[4].stdout).unwrap();
+    assert_eq!(status["status"], "ready");
+    assert_eq!(status["root_path"], "/tmp/graph-root");
+    assert_eq!(status["indexed_at"], "now");
+    assert_eq!(status["nodes"], 2);
+    assert_eq!(status["edges"], 1);
+
+    // A readable project with an unreadable count keeps its metadata and
+    // reports a table-specific error rather than an empty index.
+    rusqlite::Connection::open(cache.join("renamed.db"))
+        .unwrap()
+        .execute_batch("DROP TABLE edges;")
+        .unwrap();
+    let args = [
+        "cli",
+        "--quiet",
+        "index_status",
+        r#"{"project":"alpha","format":"json"}"#,
+    ];
+    let c = run_in(&c_binary(), &scratch, &args);
+    let stop = run_in(&c_binary(), &scratch, &["daemon", "stop"]);
+    assert!(stop.status.success(), "{stop:?}");
+    let rust = run_in(Path::new(MORI), &scratch, &args);
+    assert_eq!(
+        (c.status.code(), &c.stdout, &c.stderr),
+        (rust.status.code(), &rust.stdout, &rust.stderr)
+    );
+    let failed: serde_json::Value =
+        serde_json::from_slice(&rust.stdout).unwrap();
+    assert_eq!(failed["status"], "error");
+    assert_eq!(failed["indexed_at"], "now");
+    assert!(
+        failed["hint"]
+            .as_str()
+            .unwrap()
+            .contains("The edges table could not be read")
+    );
 }
 
 #[test]
