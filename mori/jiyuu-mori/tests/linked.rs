@@ -497,6 +497,125 @@ fn graphql_rows(scratch: &Scratch, project: &str) -> Vec<String> {
         .expect("read GraphQL rows")
 }
 
+#[test]
+fn graphql_update_paths_match_c() {
+    let work = Scratch::new("graphql-repo");
+    let repo = work.0.join("repo");
+    fs::create_dir_all(repo.join("server")).expect("create resolver directory");
+    let repo = fs::canonicalize(repo).expect("resolve repository");
+    let project = repo
+        .to_string_lossy()
+        .trim_start_matches('/')
+        .replace('/', "-");
+    let repo_path = repo.to_str().expect("UTF-8 repository path");
+    let files = [
+        (
+            "gqlgen.yml",
+            "schema:\n  - schema.graphqls\nresolver:\n  layout: follow-schema\n  dir: server\n",
+        ),
+        ("schema.graphqls", "type Query { value: Int }\n"),
+        (
+            "server/handler.go",
+            "package server\ntype queryResolver struct{}\nfunc (q *queryResolver) Value() int { return 1 }\n",
+        ),
+        ("op.graphql", "query Operation { value }\n"),
+        (
+            "server/helper.go",
+            "package server\nfunc helper() int { return 1 }\n",
+        ),
+    ];
+    let steps = [
+        (None, "msg=pipeline.route path=full", 1),
+        (
+            None,
+            "msg=incremental.noop reason=semantic_manifest_equal",
+            1,
+        ),
+        (
+            Some(("op.graphql", "query OperationRenamed { value }\n")),
+            "msg=incremental.route route=closure_repair",
+            1,
+        ),
+        (
+            Some((
+                "server/helper.go",
+                "package server\nfunc helper() int { return 2 }\n",
+            )),
+            "msg=incremental.route route=closure_repair",
+            1,
+        ),
+        (
+            Some((
+                "schema.graphqls",
+                "type Query { value: Int another: Int }\n",
+            )),
+            "msg=incremental.force_full",
+            2,
+        ),
+    ];
+    let mut sides = Vec::new();
+    for (label, binary, mode) in [
+        ("c", c_binary(), None),
+        ("rust", PathBuf::from(MORI), Some("rust")),
+    ] {
+        for (path, contents) in files {
+            fs::write(repo.join(path), contents).expect("reset fixture file");
+        }
+        let scratch = Scratch::new(label);
+        let mut worker_logs = std::collections::HashSet::new();
+        let mut steps_rows = Vec::new();
+        for (edit, expected, route_count) in steps {
+            if let Some((path, contents)) = edit {
+                fs::write(repo.join(path), contents).expect("edit fixture file");
+            }
+            let args = [
+                "cli",
+                "--quiet",
+                "index_repository",
+                "--repo_path",
+                repo_path,
+            ];
+            let index = run_in(&binary, &scratch, mode, &args);
+            assert!(
+                index.status.success()
+                    && String::from_utf8_lossy(&index.stdout)
+                        .contains("\"status\":\"indexed\""),
+                "{label} index failed: {index:?}"
+            );
+            let log = fs::read_dir(scratch.0.join("cache/logs"))
+                .expect("read worker log directory")
+                .filter_map(Result::ok)
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".worker-log-")
+                })
+                .filter(|entry| worker_logs.insert(entry.path()))
+                .map(|entry| {
+                    fs::read_to_string(entry.path())
+                        .expect("read profiled worker log")
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                log.contains(expected),
+                "{label} did not report {expected}: {log}"
+            );
+            if route_count == 2 {
+                assert!(log.contains("msg=pipeline.route path=full"), "{log}");
+            }
+            let rows = graphql_rows(&scratch, &project);
+            assert_eq!(rows.len(), route_count);
+            assert!(rows.iter().any(|row| row.contains("Query.value")
+                && row.contains("gqlgen_resolver")));
+            steps_rows.push(rows);
+        }
+        sides.push(steps_rows);
+    }
+    assert_eq!(sides[0], sides[1], "GraphQL Route or HANDLES rows differ");
+}
+
 /// Indexes the fixture with each binary, which goes through the temporary
 /// daemon and the index worker that the binary re-executes as itself. Compare
 /// graph output from standalone C and both linked GraphQL planner modes.
