@@ -3111,16 +3111,7 @@ static cbm_store_t *resolve_store_fallback_scan(cbm_mcp_server_t *srv, const cha
     return found;
 }
 
-typedef struct {
-    char *name;
-    char *root_path;
-    char *db_file;
-    char *branch;
-    int nodes;
-    int edges;
-    int64_t size_bytes;
-    bool populated;
-} mcp_project_record_t;
+typedef cbm_mcp_project_record_t mcp_project_record_t;
 
 static void project_record_clear(mcp_project_record_t *record) {
     if (!record) {
@@ -3150,6 +3141,34 @@ static int project_record_compare(const void *left, const void *right) {
         return by_root;
     }
     return nullable_strcmp(a->db_file, b->db_file);
+}
+
+static cbm_mcp_project_page_builder_fn project_page_builder;
+
+void cbm_mcp_set_project_page_builder(cbm_mcp_project_page_builder_fn builder) {
+    project_page_builder = builder;
+}
+
+static void build_project_page(mcp_project_record_t *records, int count,
+                               cbm_mcp_project_page_t *page) {
+    if (project_page_builder) {
+        project_page_builder(records, count, page);
+        return;
+    }
+    if (count > 1) {
+        qsort(records, (size_t)count, sizeof(*records), project_record_compare);
+    }
+    if (page->limit < 1) {
+        page->limit = 1;
+    } else if (page->limit > 500) {
+        page->limit = 500;
+    }
+    if (page->offset < 0) {
+        page->offset = 0;
+    }
+    page->start = page->offset < count ? page->offset : count;
+    int remaining = count - page->start;
+    page->end = page->start + (page->limit < remaining ? page->limit : remaining);
 }
 
 typedef enum {
@@ -3400,24 +3419,13 @@ static char *handle_list_projects(cbm_mcp_server_t *srv, const char *args) {
                                              : "out of memory while listing projects",
                                    true);
     }
-    /* An empty cache never allocates the record array, and qsort's base is
-     * declared nonnull (glibc): skip the sort when there is nothing to order. */
-    if (record_count > 1) {
-        qsort(records, (size_t)record_count, sizeof(*records), project_record_compare);
-    }
-
-    int limit = cbm_mcp_get_int_arg(args, "limit", 50);
-    int offset = cbm_mcp_get_int_arg(args, "offset", 0);
-    if (limit < 1) {
-        limit = 1;
-    } else if (limit > 500) {
-        limit = 500;
-    }
-    if (offset < 0) {
-        offset = 0;
-    }
-    int start = offset < record_count ? offset : record_count;
-    int end = start + limit < record_count ? start + limit : record_count;
+    cbm_mcp_project_page_t page = {
+        .limit = cbm_mcp_get_int_arg(args, "limit", 50),
+        .offset = cbm_mcp_get_int_arg(args, "offset", 0),
+    };
+    build_project_page(records, record_count, &page);
+    int start = page.start;
+    int end = page.end;
     if (!metadata_only) {
         for (int i = start; i < end; i++) {
             /* Populating a row reopens its database and asks git for the
@@ -3455,8 +3463,8 @@ static char *handle_list_projects(cbm_mcp_server_t *srv, const char *args) {
 
         yyjson_mut_obj_add_val(doc, root, "projects", arr);
         yyjson_mut_obj_add_int(doc, root, "total", record_count);
-        yyjson_mut_obj_add_int(doc, root, "offset", offset);
-        yyjson_mut_obj_add_int(doc, root, "limit", limit);
+        yyjson_mut_obj_add_int(doc, root, "offset", page.offset);
+        yyjson_mut_obj_add_int(doc, root, "limit", page.limit);
         yyjson_mut_obj_add_int(doc, root, "returned", end - start);
         yyjson_mut_obj_add_bool(doc, root, "has_more", end < record_count);
         if (end < record_count) {

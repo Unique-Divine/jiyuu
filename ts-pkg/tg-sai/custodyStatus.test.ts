@@ -112,8 +112,8 @@ describe("custody status report", () => {
       custodyStatusKey(buildCustodyStatus({ ...input, groupCount: 213 })),
     )
   })
-  test("the package version is 0.3.4", () => {
-    expect(packageJson.version).toBe("0.3.4")
+  test("the package version is 0.3.5", () => {
+    expect(packageJson.version).toBe("0.3.5")
   })
 })
 
@@ -151,6 +151,25 @@ describe("custody status cadence", () => {
       },
     }
   }
+  test("reports unavailable managed state without fabricating a queue count", () => {
+    const holds = HoldStore.open(":memory:")
+    const report = buildCustodyStatus({
+      accountId: ACCOUNT,
+      workerVersion: "test",
+      holds,
+      queue: null,
+      nowMs: NOW,
+      dealChatPool: {
+        mode: "managed",
+        state: "unavailable",
+        reason: "worker_state_unavailable",
+      },
+    })
+    expect(report.background).toBeUndefined()
+    expect(report.addsToday).toBeUndefined()
+    expect(report.dealChatPool?.reason).toBe("worker_state_unavailable")
+    holds.close()
+  })
   test("sends on change and at least every 5 minutes", async () => {
     const f = reporter()
     expect(await f.r.tick(NOW)).toBe(true)
@@ -161,7 +180,7 @@ describe("custody status cadence", () => {
       false,
     )
     expect(await f.r.tick(NOW + 10_000 + CUSTODY_STATUS_INTERVAL_MS)).toBe(true)
-    expect(f.sent.map((s) => s.background.pending)).toEqual([1, 2, 2])
+    expect(f.sent.map((s) => s.background?.pending)).toEqual([1, 2, 2])
   })
   test("an unknown op is logged once an hour and never thrown", async () => {
     const f = reporter({

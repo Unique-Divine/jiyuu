@@ -2,6 +2,7 @@ import { expect, test } from "bun:test"
 import { chmod, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { findSaiOps } from "./provisioningCloud"
 
 async function cliFixture(
   operation: (
@@ -11,7 +12,7 @@ async function cliFixture(
     calls: string,
     requestFile: string,
   ) => Promise<void>,
-  executable = "sai-deals",
+  executable = "sai-ops",
 ) {
   const root = await mkdtemp(join(tmpdir(), "tg-provision-cli-"))
   const calls = join(root, "calls.jsonl"),
@@ -92,12 +93,25 @@ test("prepare --run calls only the authoritative cloud prepare with typed input"
     expect(call.input.expectedUserId).toBe("10")
     expect(result.stdout).not.toContain("private-test-token")
   }))
-test("prepare --run works with the current custody worker binary", async () =>
+test("prepare --run requires sai-ops on a workstation", async () =>
   cliFixture(async (run, calls, file) => {
     const result = await run(["prepare", "--file", file, "--run"])
-    expect(result.exit).toBe(0)
-    expect(JSON.parse((await readFile(calls, "utf8")).trim()).args[1]).toBe("prepare")
+    expect(result.exit).toBe(1)
+    expect(result.stderr).toContain("Install sai-ops")
+    expect(await Bun.file(calls).exists()).toBe(false)
   }, "sai-deal-desk"))
+test("hosted workers use the current executable and can roll back to the previous release", () => {
+  const hostedRelease = "/opt/sai-deal-desk/current"
+  const current = `${hostedRelease}/sai-ops`
+  const previous = `${hostedRelease}/sai-deal-desk`
+  const path = `${hostedRelease}:/usr/bin:/bin`
+  expect(
+    findSaiOps(path, (name) => (name === "sai-ops" ? current : previous)),
+  ).toBe(current)
+  const previousOnly = (name: string) => (name === previous ? previous : null)
+  expect(findSaiOps(path, previousOnly)).toBe(previous)
+  expect(findSaiOps("/usr/bin:/bin", previousOnly)).toBeNull()
+})
 test("run defaults to cloud view only, without local session setup or claim", async () =>
   cliFixture(async (run, calls) => {
     const result = await run(["run", "--request-id", "cli-test"])
