@@ -87,6 +87,11 @@ struct yyjson_mut_val;
 bool cbm_cross_repo_add_status_json(struct yyjson_mut_doc *doc, struct yyjson_mut_val *parent,
                                     cbm_store_t *store, const char *project);
 
+/* Restore the last successful selection into a private staging graph. Only
+ * the staged store is writable; peer graphs are used as matching inputs. */
+int cbm_cross_repo_relink_stage(const char *live_path, const char *stage_path,
+                               const char *project, const atomic_int *cancelled);
+
 /* Run cross-repo matching for `project` against `target_projects`.
  * If target_count == 1 and target_projects[0] == "*", matches against all
  * indexed projects. Writes CROSS_* edges bidirectionally into both the

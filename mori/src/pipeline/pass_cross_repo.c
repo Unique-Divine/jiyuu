@@ -55,6 +55,7 @@ typedef enum {
 
 typedef struct {
     const atomic_int *cancelled;
+    cbm_store_t *staging_store; /* NULL for an explicit bidirectional run */
     bool cancellation_observed;
     bool mutated;
 } cr_run_context_t;
@@ -357,6 +358,9 @@ static bool insert_cross_edge(cbm_store_t *store, const char *project, int64_t f
                               cr_run_context_t *ctx) {
     if (cr_cancel_requested(ctx)) {
         return false;
+    }
+    if (ctx->staging_store && store != ctx->staging_store) {
+        return true;
     }
     bool inserted;
     if (cr_graphql_upsert_link && strcmp(edge_type, "CROSS_GRAPHQL_CALLS") == 0) {
@@ -1445,7 +1449,9 @@ static cr_match_result_t match_typed_routes(cbm_store_t *src_store, const char *
         case CBM_CROSS_ROUTE_KEEP:
             break;
         case CBM_CROSS_ROUTE_DROP:
-            if (use_rust) {
+            if (ctx->staging_store && src_store != ctx->staging_store) {
+                emitted = true;
+            } else if (use_rust) {
                 int deleted = cr_graphql_delete_link(src_db, caller_id, route_id);
                 emitted = deleted >= 0;
                 ctx->mutated = ctx->mutated || deleted > 0;
@@ -1671,6 +1677,96 @@ static bool cr_status_key(const char *project, char *buf, size_t bufsz) {
     return written > 0 && (size_t)written < bufsz;
 }
 
+/* A failed explicit run updates its result marker but does not replace the
+ * selection to replay on the next index. */
+static bool cr_targets_key(const char *project, char *buf, size_t size) {
+    int written = snprintf(buf, size, "cross_repo_targets:%s", project);
+    return written > 0 && (size_t)written < size;
+}
+
+static bool cr_record_targets(cbm_store_t *store, const char *project, const char **targets,
+                              int target_count) {
+    char key[CR_QN_BUF];
+    if (!cr_targets_key(project, key, sizeof(key))) {
+        return false;
+    }
+    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val *arr = doc ? yyjson_mut_arr(doc) : NULL;
+    bool ok = arr != NULL;
+    for (int i = 0; ok && i < target_count; i++) {
+        ok = yyjson_mut_arr_append(arr, yyjson_mut_strcpy(doc, targets[i]));
+    }
+    if (arr) {
+        yyjson_mut_doc_set_root(doc, arr);
+    }
+    char *json = ok ? yyjson_mut_write(doc, 0, NULL) : NULL;
+    ok = json && cbm_store_meta_put(store, key, json) == CBM_STORE_OK;
+    free(json);
+    yyjson_mut_doc_free(doc);
+    return ok;
+}
+
+/* Returns zero for an index that has not recorded a successful selection. */
+static int cr_read_targets(cbm_store_t *store, const char *project, char ***targets) {
+    *targets = NULL;
+    char key[CR_QN_BUF];
+    if (!cr_targets_key(project, key, sizeof(key))) {
+        return CBM_STORE_ERR;
+    }
+    char *json = NULL;
+    int rc = cbm_store_meta_get(store, key, &json);
+    bool legacy = rc == CBM_STORE_NOT_FOUND;
+    if (legacy) {
+        if (!cr_status_key(project, key, sizeof(key))) {
+            return CBM_STORE_ERR;
+        }
+        rc = cbm_store_meta_get(store, key, &json);
+    }
+    if (rc == CBM_STORE_NOT_FOUND) {
+        return 0;
+    }
+    if (rc != CBM_STORE_OK) {
+        return CBM_STORE_ERR;
+    }
+    yyjson_doc *doc = yyjson_read(json, strlen(json), 0);
+    cbm_free(CBM_MEM_CLASS_STORE, json);
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    yyjson_val *arr = root;
+    if (legacy) {
+        const char *outcome = yyjson_get_str(yyjson_obj_get(root, "outcome"));
+        if (!outcome || strcmp(outcome, "complete") != 0) {
+            yyjson_doc_free(doc);
+            return 0;
+        }
+        arr = yyjson_obj_get(root, "targets");
+    }
+    size_t count = yyjson_arr_size(arr);
+    if (!yyjson_is_arr(arr) || count == 0 || count > CR_MAX_PROJECTS) {
+        yyjson_doc_free(doc);
+        return CBM_STORE_ERR;
+    }
+    char **names = calloc(count, sizeof(*names));
+    size_t i = 0;
+    for (; names && i < count; i++) {
+        const char *name = yyjson_get_str(yyjson_arr_get(arr, i));
+        if (!name || (!(count == 1 && strcmp(name, "*") == 0) &&
+                      !cbm_validate_project_name(name))) {
+            break;
+        }
+        names[i] = cbm_strdup(name);
+        if (!names[i]) {
+            break;
+        }
+    }
+    yyjson_doc_free(doc);
+    if (i != count) {
+        free_project_list(names, (int)i);
+        return CBM_STORE_ERR;
+    }
+    *targets = names;
+    return (int)count;
+}
+
 /* Record this run in the SOURCE store's store_meta, next to the CROSS_*
  * edges it just rewrote: a reindex that rebuilds the store drops both
  * together, so the marker can never outlive the links it describes. Written
@@ -1678,11 +1774,11 @@ static bool cr_status_key(const char *project, char *buf, size_t bufsz) {
  * outcome, because from then on the old summary no longer matches the graph.
  * Project names are validated ([A-Za-z0-9._-]) or "*", so no JSON escaping is
  * needed. Best-effort: a marker failure is logged, never fails the run. */
-static void cr_record_last_run(cbm_store_t *src_store, const char *project, const char **targets,
+static bool cr_record_last_run(cbm_store_t *src_store, const char *project, const char **targets,
                                int target_count, const cbm_cross_repo_result_t *result) {
     char key[CR_QN_BUF];
     if (!cr_status_key(project, key, sizeof(key))) {
-        return;
+        return false;
     }
     size_t cap = CR_PROPS_BUF;
     for (int i = 0; i < target_count; i++) {
@@ -1690,7 +1786,7 @@ static void cr_record_last_run(cbm_store_t *src_store, const char *project, cons
     }
     char *json = cbm_alloc(CBM_MEM_CLASS_OTHER, cap);
     if (!json) {
-        return;
+        return false;
     }
     char when[CBM_SZ_32];
     time_t now = time(NULL);
@@ -1714,10 +1810,12 @@ static void cr_record_last_run(cbm_store_t *src_store, const char *project, cons
                                 "\"skipped_projects\":%d}",
                                 result->projects_scanned, total, result->skipped_count);
     }
-    if (len >= cap || cbm_store_meta_put(src_store, key, json) != CBM_STORE_OK) {
+    bool ok = len < cap && cbm_store_meta_put(src_store, key, json) == CBM_STORE_OK;
+    if (!ok) {
         cbm_log_warn("cross_repo.status_unrecorded", "project", project);
     }
     cbm_free(CBM_MEM_CLASS_OTHER, json);
+    return ok;
 }
 
 bool cbm_cross_repo_add_status_json(struct yyjson_mut_doc *doc, struct yyjson_mut_val *parent,
@@ -1767,6 +1865,144 @@ void cbm_cross_repo_result_free(cbm_cross_repo_result_t *result) {
 static cr_run_status_t add_match_count(int *total, cr_match_result_t matched) {
     *total += matched.count;
     return matched.status;
+}
+
+static cr_run_status_t cr_match_project_pair(cbm_store_t *src_store, const char *project,
+                                             cbm_store_t *tgt_store, const char *tgt,
+                                             cr_run_context_t *run,
+                                             cbm_cross_repo_result_t *result) {
+    cr_run_status_t match_status = run->staging_store ? CR_RUN_OK
+                           : cr_reconcile_reverse(tgt_store, tgt, project, run);
+    if (match_status == CR_RUN_OK) {
+        match_status = add_match_count(
+            &result->http_edges, match_http_routes(src_store, project, tgt_store, tgt, run));
+    }
+    /* Reverse direction: when this pass runs from the provider side, the
+     * consumer's HTTP_CALLS live in tgt, not src — the forward pass above
+     * finds nothing because the provider has no outbound calls. This also
+     * re-creates the provider-side reverse edges that delete_cross_edges
+     * just wiped, which a provider-side run previously destroyed for good.
+     * A caller edge lives in exactly one DB, so the two directions scan
+     * disjoint edge sets and never double-count a pair; the store's
+     * (source, target, type) upsert keeps re-recorded rows unique. (#523) */
+    if (match_status == CR_RUN_OK) {
+        match_status = add_match_count(
+            &result->http_edges, match_http_routes(tgt_store, tgt, src_store, project, run));
+    }
+    if (match_status == CR_RUN_OK) {
+        match_status = add_match_count(
+            &result->async_edges, match_async_routes(src_store, project, tgt_store, tgt, run));
+    }
+    if (match_status == CR_RUN_OK) {
+        match_status = add_match_count(
+            &result->channel_edges, match_channels(src_store, project, tgt_store, tgt, run));
+    }
+    if (match_status == CR_RUN_OK) {
+        match_status =
+            add_match_count(&result->grpc_edges,
+                            match_typed_routes(src_store, project, tgt_store, tgt, "GRPC_CALLS",
+                                               "service", "method", "CROSS_GRPC_CALLS", false,
+                                               run));
+    }
+    if (match_status == CR_RUN_OK) {
+        match_status = add_match_count(
+            &result->graphql_edges,
+            match_typed_routes(src_store, project, tgt_store, tgt, "GRAPHQL_CALLS", "operation",
+                               "operation", "CROSS_GRAPHQL_CALLS", false, run));
+    }
+    if (match_status == CR_RUN_OK) {
+        match_status = add_match_count(
+            &result->trpc_edges,
+            match_typed_routes(src_store, project, tgt_store, tgt, "TRPC_CALLS", "procedure",
+                               "procedure", "CROSS_TRPC_CALLS", false, run));
+    }
+    /* Provider side: the consumer's typed calls live in tgt. This run
+     * maintains only the consumer's forward rows that already name this
+     * provider (match_typed_routes, provider_side) and rewrites its own
+     * reverse rows for them, which delete_cross_edges just wiped. Unlike
+     * HTTP above, it never creates a consumer link or redirects one that
+     * names another server. */
+    if (match_status == CR_RUN_OK) {
+        match_status = add_match_count(
+            &result->grpc_edges,
+            match_typed_routes(tgt_store, tgt, src_store, project, "GRPC_CALLS", "service",
+                               "method", "CROSS_GRPC_CALLS", true, run));
+    }
+    if (match_status == CR_RUN_OK) {
+        match_status = add_match_count(
+            &result->graphql_edges,
+            match_typed_routes(tgt_store, tgt, src_store, project, "GRAPHQL_CALLS",
+                               "operation", "operation", "CROSS_GRAPHQL_CALLS", true, run));
+    }
+    if (match_status == CR_RUN_OK) {
+        match_status = add_match_count(
+            &result->trpc_edges,
+            match_typed_routes(tgt_store, tgt, src_store, project, "TRPC_CALLS", "procedure",
+                               "procedure", "CROSS_TRPC_CALLS", true, run));
+    }
+
+    return match_status;
+}
+
+/* The live generation owns the previous selection. The stage may be a new
+ * database, or an incremental copy whose link rows need to be replaced. */
+int cbm_cross_repo_relink_stage(const char *live_path, const char *stage_path,
+                               const char *project, const atomic_int *cancelled) {
+    cbm_store_t *previous = cbm_store_open_path_query(live_path);
+    if (!previous) {
+        /* Keep the normal recovery path for an unreadable serving index. */
+        return CBM_STORE_OK;
+    }
+    char **targets = NULL;
+    int target_count = cr_read_targets(previous, project, &targets);
+    cbm_store_close(previous);
+    if (target_count <= 0) {
+        return target_count < 0 ? CBM_STORE_ERR : CBM_STORE_OK;
+    }
+
+    cbm_store_t *staging = cbm_store_open_path_existing(stage_path);
+    if (!staging) {
+        free_project_list(targets, target_count);
+        return CBM_STORE_ERR;
+    }
+    cr_run_context_t run = {.cancelled = cancelled, .staging_store = staging};
+    cbm_cross_repo_result_t result = {0};
+    bool wildcard = target_count == 1 && strcmp(targets[0], "*") == 0;
+    char **resolved = NULL;
+    int count = wildcard ? collect_all_projects(&resolved, &run, &result)
+                         : collect_named_projects((const char **)targets, target_count, &resolved,
+                                                  &run);
+    bool ok = count >= 0 && delete_cross_edges(staging, project, &run) == CR_RUN_OK;
+    for (int i = 0; ok && i < count; i++) {
+        const char *target = resolved[i];
+        if (strcmp(target, project) == 0) {
+            continue;
+        }
+        char path[CR_PATH_BUF];
+        cbm_store_t *provider = cr_db_path(target, path, sizeof(path))
+                                    ? cbm_store_open_path_query(path)
+                                    : NULL;
+        if (!provider || !cr_store_has_exact_project(provider, target) ||
+            !cbm_store_edges_schema_current(provider)) {
+            cbm_store_close(provider);
+            ok = cr_record_skip(&result, target, "target_unavailable");
+            continue;
+        }
+        ok = cr_match_project_pair(staging, project, provider, target, &run, &result) ==
+             CR_RUN_OK;
+        cbm_store_close(provider);
+        if (ok) {
+            result.projects_scanned++;
+        }
+    }
+    ok = ok && !cr_cancel_requested(&run) &&
+         cr_record_targets(staging, project, (const char **)targets, target_count) &&
+         cr_record_last_run(staging, project, (const char **)targets, target_count, &result);
+    cbm_cross_repo_result_free(&result);
+    cbm_store_close(staging);
+    free_project_list(resolved, count);
+    free_project_list(targets, target_count);
+    return ok ? CBM_STORE_OK : CBM_STORE_ERR;
 }
 
 /* ── Entry point ─────────────────────────────────────────────────── */
@@ -1879,74 +2115,8 @@ cbm_cross_repo_result_t cbm_cross_repo_match_cancellable(const char *project,
             break;
         }
 
-        cr_run_status_t match_status = cr_reconcile_reverse(tgt_store, tgt, project, &run);
-        if (match_status == CR_RUN_OK) {
-            match_status = add_match_count(
-                &result.http_edges, match_http_routes(src_store, project, tgt_store, tgt, &run));
-        }
-        /* Reverse direction: when this pass runs from the provider side, the
-         * consumer's HTTP_CALLS live in tgt, not src — the forward pass above
-         * finds nothing because the provider has no outbound calls. This also
-         * re-creates the provider-side reverse edges that delete_cross_edges
-         * just wiped, which a provider-side run previously destroyed for good.
-         * A caller edge lives in exactly one DB, so the two directions scan
-         * disjoint edge sets and never double-count a pair; the store's
-         * (source, target, type) upsert keeps re-recorded rows unique. (#523) */
-        if (match_status == CR_RUN_OK) {
-            match_status = add_match_count(
-                &result.http_edges, match_http_routes(tgt_store, tgt, src_store, project, &run));
-        }
-        if (match_status == CR_RUN_OK) {
-            match_status = add_match_count(
-                &result.async_edges, match_async_routes(src_store, project, tgt_store, tgt, &run));
-        }
-        if (match_status == CR_RUN_OK) {
-            match_status = add_match_count(
-                &result.channel_edges, match_channels(src_store, project, tgt_store, tgt, &run));
-        }
-        if (match_status == CR_RUN_OK) {
-            match_status =
-                add_match_count(&result.grpc_edges,
-                                match_typed_routes(src_store, project, tgt_store, tgt, "GRPC_CALLS",
-                                                   "service", "method", "CROSS_GRPC_CALLS", false,
-                                                   &run));
-        }
-        if (match_status == CR_RUN_OK) {
-            match_status = add_match_count(
-                &result.graphql_edges,
-                match_typed_routes(src_store, project, tgt_store, tgt, "GRAPHQL_CALLS", "operation",
-                                   "operation", "CROSS_GRAPHQL_CALLS", false, &run));
-        }
-        if (match_status == CR_RUN_OK) {
-            match_status = add_match_count(
-                &result.trpc_edges,
-                match_typed_routes(src_store, project, tgt_store, tgt, "TRPC_CALLS", "procedure",
-                                   "procedure", "CROSS_TRPC_CALLS", false, &run));
-        }
-        /* Provider side: the consumer's typed calls live in tgt. This run
-         * maintains only the consumer's forward rows that already name this
-         * provider (match_typed_routes, provider_side) and rewrites its own
-         * reverse rows for them, which delete_cross_edges just wiped. Unlike
-         * HTTP above, it never creates a consumer link or redirects one that
-         * names another server. */
-        if (match_status == CR_RUN_OK) {
-            match_status = add_match_count(
-                &result.grpc_edges,
-                match_typed_routes(tgt_store, tgt, src_store, project, "GRPC_CALLS", "service",
-                                   "method", "CROSS_GRPC_CALLS", true, &run));
-        }
-        if (match_status == CR_RUN_OK) {
-            match_status = add_match_count(
-                &result.graphql_edges,
-                match_typed_routes(tgt_store, tgt, src_store, project, "GRAPHQL_CALLS",
-                                   "operation", "operation", "CROSS_GRAPHQL_CALLS", true, &run));
-        }
-        if (match_status == CR_RUN_OK) {
-            match_status = add_match_count(
-                &result.trpc_edges,
-                match_typed_routes(tgt_store, tgt, src_store, project, "TRPC_CALLS", "procedure",
-                                   "procedure", "CROSS_TRPC_CALLS", true, &run));
-        }
+        cr_run_status_t match_status =
+            cr_match_project_pair(src_store, project, tgt_store, tgt, &run, &result);
 
         cbm_store_close(tgt_store);
         if (match_status == CR_RUN_FAILED) {
@@ -1961,7 +2131,11 @@ cbm_cross_repo_result_t cbm_cross_repo_match_cancellable(const char *project,
         result.projects_scanned++;
     }
 
-    cr_record_last_run(src_store, project, target_projects, target_count, &result);
+    if (!result.failed && !result.cancelled &&
+        !cr_record_targets(src_store, project, target_projects, target_count)) {
+        result.failed = true;
+    }
+    (void)cr_record_last_run(src_store, project, target_projects, target_count, &result);
     cbm_store_close(src_store);
 
     free_project_list(resolved, resolved_count);

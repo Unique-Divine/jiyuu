@@ -6,6 +6,7 @@
 #include "test_helpers.h"
 
 #include "foundation/compat.h"
+#include "foundation/mem_core.h"
 #include "pipeline/pass_cross_repo.h"
 #include "pipeline/pipeline_internal.h"
 
@@ -1721,7 +1722,54 @@ TEST(cross_repo_graphql_resolved_target_beats_ambiguous_in_one_run) {
     PASS();
 }
 
+TEST(cross_repo_stage_rebuilds_from_legacy_selection_without_writing_provider) {
+    cross_repo_fixture_t fixture;
+    char live[512], stage[512];
+    bool ok = cross_repo_fixture_begin(&fixture) &&
+              cross_repo_seed_http_pair(&fixture, "linked-source", "provider", "/known", "known") &&
+              cross_repo_project_path(&fixture, "linked-source", live, sizeof(live)) &&
+              cross_repo_project_path(&fixture, "_stage", stage, sizeof(stage));
+    if (!ok) {
+        cross_repo_fixture_end(&fixture);
+        FAIL("cannot prepare matching project stores");
+    }
+
+    const char *target = "provider";
+    cbm_cross_repo_result_t linked = cbm_cross_repo_match("linked-source", &target, 1);
+    ok = !linked.failed && linked.http_edges == 1 &&
+         cross_repo_exec(&fixture, "linked-source",
+                         "DELETE FROM store_meta WHERE k='cross_repo_targets:linked-source'") &&
+         cbm_store_backup_path(live, stage) == CBM_STORE_OK &&
+         cross_repo_exec(&fixture, "_stage", "DELETE FROM edges WHERE type='CROSS_HTTP_CALLS'") &&
+         cross_repo_exec(&fixture, "provider", "DELETE FROM edges WHERE type='CROSS_HTTP_CALLS'");
+    cbm_cross_repo_result_free(&linked);
+
+    int relinked = ok ? cbm_cross_repo_relink_stage(live, stage, "linked-source", NULL)
+                      : CBM_STORE_ERR;
+    cbm_store_t *staged = cbm_store_open_path_query(stage);
+    int staged_links = staged ? cbm_store_count_edges_by_type(staged, "linked-source",
+                                                              "CROSS_HTTP_CALLS")
+                              : -1;
+    char *selection = NULL;
+    int recorded = staged ? cbm_store_meta_get(staged, "cross_repo_targets:linked-source",
+                                               &selection)
+                          : CBM_STORE_ERR;
+    bool migrated = recorded == CBM_STORE_OK && strcmp(selection, "[\"provider\"]") == 0;
+    cbm_free(CBM_MEM_CLASS_STORE, selection);
+    cbm_store_close(staged);
+    int provider_links = cross_repo_count_edges(&fixture, "provider", "CROSS_HTTP_CALLS");
+    cross_repo_fixture_end(&fixture);
+
+    ASSERT_TRUE(ok);
+    ASSERT_EQ(relinked, CBM_STORE_OK);
+    ASSERT_EQ(staged_links, 1);
+    ASSERT_EQ(provider_links, 0);
+    ASSERT_TRUE(migrated);
+    PASS();
+}
+
 SUITE(cross_repo) {
+    RUN_TEST(cross_repo_stage_rebuilds_from_legacy_selection_without_writing_provider);
     RUN_TEST(cross_repo_graphql_prefers_resolver_method_handler);
     RUN_TEST(cross_repo_graphql_reverse_edge_keeps_every_caller);
     RUN_TEST(cross_repo_graphql_reverse_callers_keyed_by_qualified_name);
