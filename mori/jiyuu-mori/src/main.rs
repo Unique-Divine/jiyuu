@@ -19,7 +19,7 @@ mod store;
 #[cfg(all(feature = "c-backend", not(test)))]
 mod tools;
 
-#[cfg(all(feature = "c-backend", not(test)))]
+#[cfg(feature = "c-backend")]
 mod search;
 
 #[cfg(any(feature = "c-backend", test))]

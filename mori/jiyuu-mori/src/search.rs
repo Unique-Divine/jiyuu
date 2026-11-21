@@ -14,6 +14,7 @@ const STORE_ERR: c_int = -1;
 
 type EmitRow = unsafe extern "C" fn(*mut c_void, *mut sqlite3_stmt);
 type ReportError = unsafe extern "C" fn(*mut c_void, *const c_char);
+#[cfg(not(test))]
 type PatternReader = unsafe extern "C" fn(
     *mut sqlite3,
     *const c_char,
@@ -49,6 +50,7 @@ struct RankRequest {
     candidate_limit: c_int,
 }
 
+#[cfg(not(test))]
 type RankReader = unsafe extern "C" fn(
     *mut sqlite3,
     *const RankRequest,
@@ -273,16 +275,139 @@ unsafe extern "C" fn read_ranked(
     }
 }
 
+#[cfg(not(test))]
 unsafe extern "C" {
     fn cbm_store_set_pattern_search_reader(reader: PatternReader);
     fn cbm_mcp_set_rank_search_reader(reader: RankReader);
 }
 
 /// Register during process startup, before native worker threads can start.
+#[cfg(not(test))]
 pub(crate) unsafe fn register() {
     // SAFETY: The registered function lives for the process lifetime.
     unsafe {
         cbm_store_set_pattern_search_reader(read_pattern);
         cbm_mcp_set_rank_search_reader(read_ranked);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::CStr;
+
+    use rusqlite::Connection;
+
+    use super::*;
+
+    #[derive(Default)]
+    struct ResultRows {
+        ids: Vec<i64>,
+        error: String,
+    }
+
+    unsafe extern "C" fn capture(context: *mut c_void, row: *mut sqlite3_stmt) {
+        // SAFETY: Each test passes an exclusive ResultRows pointer, and the
+        // reader lends one current row for this invocation.
+        unsafe {
+            let output = &mut *context.cast::<ResultRows>();
+            output.ids.push(ffi::sqlite3_column_int64(row, 0));
+        }
+    }
+
+    unsafe extern "C" fn error(context: *mut c_void, operation: *const c_char) {
+        // SAFETY: Each test passes an exclusive ResultRows pointer. The
+        // operation is a NUL-terminated diagnostic from read_pattern.
+        unsafe {
+            let output = &mut *context.cast::<ResultRows>();
+            output.error =
+                CStr::from_ptr(operation).to_string_lossy().into_owned();
+        }
+    }
+
+    #[test]
+    fn pattern_reader_counts_and_pages_on_the_borrowed_handle() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE nodes (id INTEGER, name TEXT);
+             INSERT INTO nodes VALUES (3,'a'), (2,'a'), (4,'b'), (1,'a');",
+        )
+        .unwrap();
+        let bind = [c"a".as_ptr()];
+        let mut total = 0;
+        let mut output = ResultRows::default();
+        // SAFETY: The connection, plan, and outputs stay live until return.
+        let status = unsafe {
+            read_pattern(
+                db.handle(),
+                c"SELECT count(*) FROM nodes WHERE name=?1".as_ptr(),
+                c"SELECT id FROM nodes WHERE name=?1 ORDER BY name,id LIMIT 1 OFFSET 1".as_ptr(),
+                bind.as_ptr(),
+                1,
+                &mut total,
+                ptr::from_mut(&mut output).cast(),
+                capture,
+                error,
+            )
+        };
+        assert_eq!(status, STORE_OK);
+        assert_eq!(total, 3);
+        assert_eq!(output.ids, [2]);
+        assert!(output.error.is_empty());
+    }
+
+    #[test]
+    fn ranked_reader_reports_a_window_and_expands_it_for_file_filters() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE VIRTUAL TABLE needle USING fts5(name, path UNINDEXED);
+             INSERT INTO needle VALUES ('needle','a'), ('needle','b'), ('needle','c');",
+        )
+        .unwrap();
+        let mut filters = RankFilters {
+            fts_query: c"needle".as_ptr(),
+            project: c"test".as_ptr(),
+            file_like: ptr::null(),
+            label: ptr::null(),
+            kind: ptr::null(),
+            namespace: ptr::null(),
+            label_weight: 1.0,
+        };
+        for (path, expected_ids, expected_total, expected_window) in [
+            (ptr::null(), &[1, 2][..], 2, true),
+            (c"c".as_ptr(), &[3][..], 1, false),
+        ] {
+            filters.file_like = path;
+            let request = RankRequest {
+                rank_sql: c"SELECT q.rowid FROM                     (SELECT rowid, path FROM needle WHERE needle MATCH ?1                      ORDER BY bm25(needle), rowid LIMIT ?5) q                      WHERE (?6 IS NULL OR path LIKE ?6) LIMIT ?3 OFFSET ?4"
+                    .as_ptr(),
+                count_sql: c"SELECT count(*) FROM                     (SELECT rowid, path FROM needle WHERE needle MATCH ?1                      ORDER BY bm25(needle), rowid LIMIT ?3) q                      WHERE (?6 IS NULL OR path LIKE ?6)"
+                    .as_ptr(),
+                probe_sql: c"SELECT rowid FROM needle WHERE needle MATCH ?1                      ORDER BY bm25(needle), rowid LIMIT 1 OFFSET ?2"
+                    .as_ptr(),
+                filters: &filters,
+                exact_query: c"needle".as_ptr(),
+                limit: 5,
+                offset: 0,
+                candidate_limit: 2,
+            };
+            let mut total = 0;
+            let mut saturated = false;
+            let mut output = ResultRows::default();
+            // SAFETY: The connection, request, and outputs stay live until return.
+            let handled = unsafe {
+                read_ranked(
+                    db.handle(),
+                    &request,
+                    &mut total,
+                    &mut saturated,
+                    ptr::from_mut(&mut output).cast(),
+                    capture,
+                )
+            };
+            assert!(handled);
+            assert_eq!(output.ids, expected_ids);
+            assert_eq!(total, expected_total);
+            assert_eq!(saturated, expected_window);
+        }
     }
 }
