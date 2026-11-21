@@ -139,19 +139,39 @@ git push origin mori/v0.13.0
 ```
 
 The workflow fails unless the tag equals `mori/v` plus `VERSION`. It builds
-static binaries (`STATIC=1`) on Linux x64 and arm64, smoke-tests `--version`
-and a tiny index, and packages each with
-[scripts/package-release.sh](scripts/package-release.sh) as
-`codebase-memory-mcp-<version>-linux-<x64|arm64>.tar.gz`. Each archive holds
-the binary, `LICENSE`, `NOTICE` and `THIRD_PARTY_NOTICES.md` (generated from
-`THIRD_PARTY.md` and the vendored licenses). There is no installer; install
-from the release assets, for example with mise's `github:` backend, which
-picks the archive by the `linux-x64` or `linux-arm64` in its name:
+three targets, smoke-tests `--version` and a tiny index on each, and packages
+each with [scripts/package-release.sh](scripts/package-release.sh) as
+`codebase-memory-mcp-<version>-<target>.tar.gz`:
+
+| Target | Runner | Build |
+| --- | --- | --- |
+| `linux-x64` | `ubuntu-latest` | static (`STATIC=1`) |
+| `linux-arm64` | `ubuntu-24.04-arm` | static (`STATIC=1`) |
+| `darwin-arm64` | `macos-15` | dynamic, ad-hoc signed, macOS 14 or later |
+
+Each archive holds the binary, `LICENSE`, `NOTICE` and
+`THIRD_PARTY_NOTICES.md` (generated from `THIRD_PARTY.md` and the vendored
+licenses). There is no installer; install from the release assets, for
+example with mise's `github:` backend, which picks the archive by the
+platform in its name:
 
 ```toml
 [tools."github:Unique-Divine/jiyuu"]
 version = "0.13.0"
 version_prefix = "mori/v"
+```
+
+There is no Intel macOS build. The macOS binary links only system
+libraries (`libSystem`, `libz`, `libc++`); static linking is Linux-only.
+
+The macOS binary carries an ad-hoc signature, not a Developer ID signature,
+and is not notarized. Downloads through mise, `curl` or `gh release download`
+carry no quarantine attribute and run as is. If you download the archive in
+a browser, Gatekeeper blocks the binary as from an unidentified developer;
+remove the quarantine attribute after unpacking:
+
+```bash
+xattr -d com.apple.quarantine codebase-memory-mcp
 ```
 
 The release job attests build provenance for the archives and
