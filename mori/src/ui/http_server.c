@@ -20,6 +20,7 @@
 #include "ui/embedded_assets.h"
 #include "ui/layout3d.h"
 #include "ui/atlas.h"
+#include "ui/xrepo.h"
 #include "mcp/mcp.h"
 #include "store/store.h"
 #include "pipeline/pass_cross_repo.h"
@@ -2410,6 +2411,63 @@ static void atlas_reply_json(cbm_http_conn_t *c, char *json, int missing_status,
     cbm_free(CBM_MEM_CLASS_OTHER, json);
 }
 
+/* GET /api/xrepo/summary — repos and cross-repo links across every project
+ * index in the cache directory (read-only query stores). */
+static void handle_xrepo_summary(cbm_http_conn_t *c) {
+    const char *dir = cbm_resolve_cache_dir();
+    atlas_reply_json(c, cbm_xrepo_summary_json(dir ? dir : cbm_tmpdir()), 500,
+                     "{\"error\":\"cannot read the project cache\"}");
+}
+
+/* True when the query string gives `key` a non-empty value. */
+static bool xrepo_query_has(const char *query, const char *key) {
+    size_t n = strlen(key);
+    for (const char *p = query; p && *p;) {
+        if (strncmp(p, key, n) == 0 && p[n] == '=' && p[n + 1] != '&' && p[n + 1] != '\0')
+            return true;
+        p = strchr(p, '&');
+        if (p)
+            p++;
+    }
+    return false;
+}
+
+/* GET /api/xrepo/links?from=A&to=B&type=CROSS_X&limit=&offset= — the
+ * individual links behind one summary arc, paged. */
+static void handle_xrepo_links(cbm_http_conn_t *c, const cbm_http_req_t *req) {
+    char from[256] = {0}, to[256] = {0}, type[64] = {0}, num[32] = {0};
+    if (!cbm_http_query_param(req->query, "from", from, (int)sizeof(from)) || !from[0]) {
+        cbm_http_replyf(c, 400, g_cors_json, "{\"error\":\"missing from parameter\"}");
+        return;
+    }
+    /* A given to/type that does not parse (too long, bad escape) is an
+     * error, not "any": widening would answer a question nobody asked. */
+    if ((xrepo_query_has(req->query, "to") &&
+         !cbm_http_query_param(req->query, "to", to, (int)sizeof(to))) ||
+        (xrepo_query_has(req->query, "type") &&
+         !cbm_http_query_param(req->query, "type", type, (int)sizeof(type)))) {
+        cbm_http_replyf(c, 400, g_cors_json, "{\"error\":\"invalid to or type\"}");
+        return;
+    }
+    int limit = 0, offset = 0;
+    if (cbm_http_query_param(req->query, "limit", num, (int)sizeof(num)))
+        limit = atoi(num);
+    if (cbm_http_query_param(req->query, "offset", num, (int)sizeof(num)))
+        offset = atoi(num);
+    const char *dir = cbm_resolve_cache_dir();
+    int status = 500;
+    char *json = cbm_xrepo_links_json(dir ? dir : cbm_tmpdir(), from, to, type, limit, offset,
+                                      &status);
+    if (!json) {
+        cbm_http_replyf(c, status, g_cors_json, "{\"error\":\"%s\"}",
+                        status == 400   ? "invalid from, to or type"
+                        : status == 404 ? "project not found"
+                                        : "cannot read links");
+        return;
+    }
+    atlas_reply_json(c, json, 500, "");
+}
+
 /* GET /api/tree?project=X&path=src/foo — Modules aggregates. */
 static void handle_atlas_tree(cbm_http_conn_t *c, const cbm_http_req_t *req) {
     char project[256] = {0};
@@ -3246,6 +3304,16 @@ static void dispatch_request(cbm_http_server_t *srv, cbm_http_conn_t *c,
     /* GET /api/layout → 3D graph layout */
     if (is_get && cbm_http_path_match(req->path, "/api/layout*")) {
         handle_layout(c, req);
+        return;
+    }
+
+    /* GET /api/xrepo/summary, /api/xrepo/links → cross-repo views */
+    if (is_get && strcmp(req->path, "/api/xrepo/summary") == 0) {
+        handle_xrepo_summary(c);
+        return;
+    }
+    if (is_get && strcmp(req->path, "/api/xrepo/links") == 0) {
+        handle_xrepo_links(c, req);
         return;
     }
 
