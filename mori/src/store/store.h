@@ -399,6 +399,12 @@ cbm_store_t *cbm_store_open_path_existing(const char *db_path);
  * exist — never creates a new .db file. */
 cbm_store_t *cbm_store_open_path_query(const char *db_path);
 
+/* Best-effort repair opens: defer on contention from the first SQLite
+ * access through subsequent statements. The query variant also avoids the
+ * immutable fallback so a busy live index is not mistaken for frozen bytes. */
+cbm_store_t *cbm_store_open_path_existing_nowait(const char *db_path);
+cbm_store_t *cbm_store_open_path_query_nowait(const char *db_path);
+
 #ifdef CBM_ENABLE_TEST_SEAMS
 /* Every following query open calls `hook(ctx)` inside its first-access
  * section (after the first read, the process-wide lock still held) until the
