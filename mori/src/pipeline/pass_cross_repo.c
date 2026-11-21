@@ -1951,13 +1951,17 @@ bool cbm_cross_repo_reverse_pending(const char *project) {
 /* Write generation observations against the same connection that the
  * matcher reads. An unavailable provider is represented by JSON null. */
 static bool cr_remember_peer(yyjson_mut_doc *peers, const char *name, cbm_store_t *provider) {
-    yyjson_mut_val *root = yyjson_mut_doc_get_root(peers);
-    if (!provider) {
-        return yyjson_mut_obj_add_null(peers, root, name);
-    }
     char generation[CBM_GRAPH_COMPARE_GENERATION_SIZE];
-    return cbm_store_generation(provider, generation, sizeof(generation)) == CBM_STORE_OK &&
-           yyjson_mut_obj_add_strcpy(peers, root, name, generation);
+    if (provider &&
+        cbm_store_generation(provider, generation, sizeof(generation)) != CBM_STORE_OK) {
+        return false;
+    }
+    /* Missing peer names can come from a previous document freed before
+     * serialization. Own both the name and generation in this document. */
+    yyjson_mut_val *key = yyjson_mut_strcpy(peers, name);
+    yyjson_mut_val *value =
+        provider ? yyjson_mut_strcpy(peers, generation) : yyjson_mut_null(peers);
+    return key && value && yyjson_mut_obj_add(yyjson_mut_doc_get_root(peers), key, value);
 }
 
 static bool cr_peer_is_stale(const char *name, const char *observed) {
