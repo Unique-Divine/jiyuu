@@ -1471,7 +1471,7 @@ static const int SUPPORTED_VERSION_COUNT =
  * questions the graph answers; facts, not commands. Claude Code cuts them at
  * 4,096 characters. */
 static const char MCP_SERVER_INSTRUCTIONS[] =
-    "codebase-memory-mcp is a code knowledge graph of the indexed repository: functions, "
+    "Mori is a code knowledge graph of the indexed repository: functions, "
     "classes, methods, routes, calls, imports, inheritance and cross-service links. It answers "
     "structural code questions: where a symbol is defined, who calls a function, what a function "
     "calls, call chains and data flow, which code a change affects, which handler serves a route, "
@@ -1533,7 +1533,7 @@ static char *cbm_mcp_initialize_response_for_profile(const char *params_json,
     yyjson_mut_obj_add_str(doc, root, "protocolVersion", version);
 
     yyjson_mut_val *impl = yyjson_mut_obj(doc);
-    yyjson_mut_obj_add_str(doc, impl, "name", "codebase-memory-mcp");
+    yyjson_mut_obj_add_str(doc, impl, "name", "mori-graph");
     yyjson_mut_obj_add_str(doc, impl, "version", cbm_cli_get_version());
     yyjson_mut_obj_add_val(doc, root, "serverInfo", impl);
 
@@ -12377,7 +12377,7 @@ static bool write_skip_logfile(const char *project, const cbm_file_error_t *errs
             partials++;
         }
     }
-    (void)fprintf(f, "# codebase-memory-mcp index coverage report\n");
+    (void)fprintf(f, "# Mori index coverage report\n");
     (void)fprintf(f, "# project=%s skipped=%d parse_partial=%d\n", project ? project : "",
                   count - partials, partials);
     (void)fprintf(f, "# columns: phase\treason\tpath\n");
@@ -13743,7 +13743,7 @@ static char *handle_index_repository(cbm_mcp_server_t *srv, const char *args) {
         index_args_free(repo_path, mode_str, name_override);
         return cbm_mcp_text_result(
             "repo_path is a linked git worktree and ignore_worktrees is enabled. Pass "
-            "index_worktree=true to index it anyway, or run: codebase-memory-mcp config set "
+            "index_worktree=true to index it anyway, or run: mori config set "
             "ignore_worktrees false",
             true);
     }
@@ -22635,7 +22635,7 @@ static void maybe_auto_index(cbm_mcp_server_t *srv) {
 
     if (!auto_index) {
         cbm_log_info("autoindex.skip", "reason", "disabled", "hint",
-                     "run: codebase-memory-mcp config set auto_index true");
+                     "run: mori config set auto_index true");
         return;
     }
 

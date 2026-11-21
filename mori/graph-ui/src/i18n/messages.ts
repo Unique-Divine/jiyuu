@@ -68,7 +68,7 @@ export const messages = {
     },
     /** Die Kopfzeile und die Flaechen, die zu keinem Panel gehoeren. */
     app: {
-        brand: 'CBM LENS',
+        brand: 'MORI GRAPH',
         releaseLabel: 'Beta',
         /** Steht in der Tab-Leiste und im Breadcrumb, wenn nichts offen ist. */
         noFileOpen: 'no file open',
@@ -148,7 +148,7 @@ export const messages = {
      *    Repository.
      */
     help: {
-        title: 'CBM LENS HELP',
+        title: 'MORI GRAPH HELP',
         subtitle: 'a reading surface over an indexed repository',
         close: '[esc] close',
         closeLabel: CLOSE,
@@ -706,7 +706,7 @@ export const messages = {
      *    das wurde am 2026-08-29 gemessen, und der Satz sagt es so.
      */
     settings: {
-        title: 'CBM LENS SETTINGS',
+        title: 'MORI GRAPH SETTINGS',
         subtitle: 'which model answers, and everything that costs computing time',
         panelLabel: 'settings',
         close: '[esc] close',
@@ -974,7 +974,7 @@ export const messages = {
      * not about one subject area.
      */
     projects: {
-        title: 'CBM LENS PROJECTS',
+        title: 'MORI GRAPH PROJECTS',
         subtitle: 'what this server has indexed, and how to give it more',
         panelLabel: 'projects',
         close: '[esc] close',

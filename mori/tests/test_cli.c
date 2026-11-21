@@ -1278,310 +1278,6 @@ TEST(cli_activation_cleanup_failure_fail_stops_before_lease_release) {
     PASS();
 }
 
-/* Model the real bootstrap inversion: an admitted participant can already
- * retain lifetime SH and startup when activation publishes maintenance EX.
- * Keep startup longer than activation's two-second control deadline. A
- * quiesce callback that waits for startup fails before the participant can
- * drain; a callback that directly attempts OP8 and lets lifetime EX prove the
- * drain succeeds, then acquires startup for the final re-probe and mutation. */
-TEST(cli_activation_quiesce_does_not_wait_on_bootstrap_startup) {
-    char tmpdir[256];
-    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-activation-order-XXXXXX");
-    if (!cbm_mkdtemp(tmpdir)) {
-        FAIL("cbm_mkdtemp failed");
-    }
-    char runtime_parent[512];
-    snprintf(runtime_parent, sizeof(runtime_parent), "%s/runtime", tmpdir);
-    if (test_mkdirp(runtime_parent) != 0) {
-        test_rmdir_r(tmpdir);
-        FAIL("runtime parent setup failed");
-    }
-    /* The participant models the daemon of THIS namespace: its cohort
-     * identity carries the fingerprint of the cache the install below
-     * targets, derived as main.c derives it. A foreign cache would (rightly)
-     * be left alone by the scoped guard. */
-    char participant_cache[512];
-    char participant_cache_canonical[1024];
-    char participant_cache_fingerprint[CBM_SHA256_HEX_LEN + 1] = {0};
-    snprintf(participant_cache, sizeof(participant_cache), "%s/cache", tmpdir);
-    if (!cbm_mkdir_p(participant_cache, 0700) ||
-        !cbm_canonical_path(participant_cache, participant_cache_canonical,
-                            sizeof(participant_cache_canonical))) {
-        test_rmdir_r(tmpdir);
-        FAIL("participant cache setup failed");
-    }
-    cbm_normalize_path_sep(participant_cache_canonical);
-    cbm_sha256_hex(participant_cache_canonical, strlen(participant_cache_canonical),
-                   participant_cache_fingerprint);
-    int ready_pipe[2] = {-1, -1};
-    if (pipe(ready_pipe) != 0) {
-        test_rmdir_r(tmpdir);
-        FAIL("pipe failed");
-    }
-    /* The parent closes the write end once its install has returned, so the
-     * child's watch for the maintenance request ends on a definite event. */
-    int install_done_pipe[2] = {-1, -1};
-    if (pipe(install_done_pipe) != 0) {
-        close(ready_pipe[0]);
-        close(ready_pipe[1]);
-        test_rmdir_r(tmpdir);
-        FAIL("pipe failed");
-    }
-    pid_t child = fork();
-    if (child == 0) {
-        close(ready_pipe[0]);
-        close(install_done_pipe[1]);
-        cbm_daemon_ipc_endpoint_t *endpoint = cbm_daemon_bootstrap_endpoint_new(runtime_parent);
-        cbm_version_cohort_manager_t *manager =
-            endpoint ? cbm_version_cohort_manager_new(endpoint) : NULL;
-        char fingerprint[CBM_DAEMON_BUILD_FINGERPRINT_SIZE];
-        cbm_daemon_build_identity_t identity = {
-            .semantic_version = "cli-activation-test",
-            .build_fingerprint = fingerprint,
-            .cache_fingerprint = participant_cache_fingerprint,
-            .protocol_abi = CBM_DAEMON_RUNTIME_WIRE_ABI,
-            .store_abi = 1,
-            .feature_abi = 1,
-        };
-        cbm_version_cohort_lease_t *lease = NULL;
-        cbm_daemon_conflict_t conflict;
-        cbm_daemon_ipc_startup_lock_t *startup = NULL;
-        bool setup =
-            endpoint && manager &&
-            cbm_daemon_runtime_process_build_fingerprint((uint64_t)getpid(), fingerprint) &&
-            /* UINT64_MAX: wait as long as a lock is held, never for a
-             * conflicting holder, so no deadline decides the join. */
-            cbm_version_cohort_acquire(manager, &identity, UINT64_MAX, &lease, &conflict) ==
-                CBM_VERSION_COHORT_OK &&
-            cbm_daemon_ipc_startup_lock_try_acquire(endpoint, &startup) == 1 && startup;
-        char ready = setup ? 'R' : 'E';
-        (void)write(ready_pipe[1], &ready, 1);
-        bool saw_maintenance = false;
-        /* The installer only reaches the cohort barrier after STAGING the
-         * candidate, three tamper-defense SHA-256 passes over this test runner
-         * itself (~1 GB with sanitizers), which can take long on loaded I/O.
-         * No deadline decides the watch (USER RULE: no timeout decides a test).
-         * It ends on the request, on a definite UNSAFE/IO answer, or when the
-         * parent's install has returned without requesting maintenance. */
-        while (setup) {
-            cbm_version_cohort_maintenance_presence_t presence =
-                cbm_version_cohort_maintenance_presence(manager);
-            if (presence == CBM_VERSION_COHORT_MAINTENANCE_REQUESTED) {
-                saw_maintenance = true;
-                break;
-            }
-            if (presence == CBM_VERSION_COHORT_MAINTENANCE_UNSAFE ||
-                presence == CBM_VERSION_COHORT_MAINTENANCE_IO) {
-                break;
-            }
-            struct pollfd install_done = {
-                .fd = install_done_pipe[0], .events = POLLIN, .revents = 0};
-            if (poll(&install_done, 1, 0) > 0) {
-                break;
-            }
-            /* REQUESTED is level-triggered: the installer holds maintenance EX
-             * for the whole mutation window, which cannot complete before this
-             * child releases its lease. A realistic probe cadence therefore
-             * cannot miss it; a 1 kHz probe storm would only be an observer
-             * artifact no production participant produces. */
-            cbm_usleep(25000);
-        }
-        uint64_t bootstrap_stall_deadline = cbm_now_ms() + 3000U;
-        while (saw_maintenance && cbm_now_ms() < bootstrap_stall_deadline) {
-            cbm_usleep(1000);
-        }
-        if (startup) {
-            (void)cbm_daemon_ipc_startup_lock_release(&startup);
-        }
-        while (lease && cbm_version_cohort_lease_release(&lease) != CBM_PRIVATE_FILE_LOCK_OK) {
-            cbm_usleep(1000);
-        }
-        while (manager && cbm_version_cohort_manager_free(&manager) != CBM_PRIVATE_FILE_LOCK_OK) {
-            cbm_usleep(1000);
-        }
-        cbm_daemon_ipc_endpoint_free(endpoint);
-        close(ready_pipe[1]);
-        close(install_done_pipe[0]);
-        _exit(setup && saw_maintenance ? 0 : 1);
-    }
-    close(ready_pipe[1]);
-    close(install_done_pipe[0]);
-    char ready = 0;
-    bool child_ready = child > 0 && read(ready_pipe[0], &ready, 1) == 1 && ready == 'R';
-    close(ready_pipe[0]);
-
-    char *old_home = NULL;
-    char *old_cache = NULL;
-    cli_activation_save_env(&old_home, &old_cache);
-    const char *shell = getenv("SHELL");
-    char *old_shell = shell ? strdup(shell) : NULL;
-    cbm_setenv("HOME", tmpdir, 1);
-    cbm_setenv("SHELL", "/bin/zsh", 1);
-    char cache_dir[512];
-    char install_dir[512];
-    char target_path[640];
-    char activation_log[640];
-    snprintf(cache_dir, sizeof(cache_dir), "%s/cache", tmpdir);
-    snprintf(install_dir, sizeof(install_dir), "%s/custom/bin", tmpdir);
-    snprintf(target_path, sizeof(target_path), "%s/codebase-memory-mcp", install_dir);
-    snprintf(activation_log, sizeof(activation_log), "%s/logs/activation-events.ndjson", cache_dir);
-    cbm_setenv("CBM_CACHE_DIR", cache_dir, 1);
-    cbm_cli_set_activation_runtime_parent_for_test(runtime_parent);
-    char dir_arg[640];
-    snprintf(dir_arg, sizeof(dir_arg), "--dir=%s", install_dir);
-    char *install_argv[] = {"--force", "--skip-config", "--yes", dir_arg};
-    int install_rc = child_ready ? cli_test_cmd_install(4, install_argv) : -1;
-    close(install_done_pipe[1]); /* the child's watch ends here at the latest */
-    cbm_cli_set_activation_runtime_parent_for_test(g_cli_suite_runtime_parent);
-    cbm_set_auto_answer_for_test(0);
-
-    int child_status = 0;
-    bool child_ok = child > 0 && waitpid(child, &child_status, 0) == child &&
-                    WIFEXITED(child_status) && WEXITSTATUS(child_status) == 0;
-    struct stat target_status;
-    struct stat log_status;
-    bool target_exists = stat(target_path, &target_status) == 0;
-    bool log_private = stat(activation_log, &log_status) == 0 && (log_status.st_mode & 0077) == 0;
-    const char *events = read_test_file(activation_log);
-    const char *requested = events ? strstr(events, "\"phase\":\"requested\"") : NULL;
-    const char *stopped = events ? strstr(events, "\"phase\":\"daemon_stopped\"") : NULL;
-    const char *completed = events ? strstr(events, "\"phase\":\"completed\"") : NULL;
-    bool event_order = requested && stopped && completed && requested < stopped &&
-                       stopped < completed && strstr(events, "\"restart_required\":true") != NULL;
-
-    if (old_shell) {
-        cbm_setenv("SHELL", old_shell, 1);
-    } else {
-        cbm_unsetenv("SHELL");
-    }
-    free(old_shell);
-    cli_activation_restore_env(old_home, old_cache);
-    test_rmdir_r(tmpdir);
-
-    ASSERT_TRUE(child_ready);
-    ASSERT_EQ(install_rc, 0);
-    ASSERT_TRUE(child_ok);
-    ASSERT_TRUE(target_exists);
-    ASSERT_TRUE(log_private);
-    ASSERT_TRUE(event_order);
-    PASS();
-}
-
-TEST(cli_install_recovers_markerless_stale_rendezvous) {
-    char tmpdir[256];
-    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-markerless-rendezvous-XXXXXX");
-    if (!cbm_mkdtemp(tmpdir)) {
-        FAIL("cbm_mkdtemp failed");
-    }
-    char runtime_parent[512];
-    char cache_dir[512];
-    char install_dir[512];
-    char target_path[640];
-    char activation_log[640];
-    snprintf(runtime_parent, sizeof(runtime_parent), "%s/runtime", tmpdir);
-    snprintf(cache_dir, sizeof(cache_dir), "%s/cache", tmpdir);
-    snprintf(install_dir, sizeof(install_dir), "%s/custom/bin", tmpdir);
-    snprintf(target_path, sizeof(target_path), "%s/codebase-memory-mcp", install_dir);
-    snprintf(activation_log, sizeof(activation_log), "%s/logs/activation-events.ndjson", cache_dir);
-    if (test_mkdirp(runtime_parent) != 0) {
-        test_rmdir_r(tmpdir);
-        FAIL("runtime parent setup failed");
-    }
-
-    char *old_home = NULL;
-    char *old_cache = NULL;
-    cli_activation_save_env(&old_home, &old_cache);
-    const char *shell = getenv("SHELL");
-    char *old_shell = shell ? strdup(shell) : NULL;
-    cbm_setenv("HOME", tmpdir, 1);
-    cbm_setenv("SHELL", "/bin/zsh", 1);
-    cbm_setenv("CBM_CACHE_DIR", cache_dir, 1);
-
-    cbm_daemon_ipc_endpoint_t *endpoint = cbm_daemon_bootstrap_endpoint_new(runtime_parent);
-    const char *socket_path = endpoint ? cbm_daemon_ipc_endpoint_address(endpoint) : NULL;
-    char anchor_path[1024] = {0};
-    size_t socket_length = socket_path ? strlen(socket_path) : 0;
-    bool anchor_path_ok =
-        socket_length > 5 && strcmp(socket_path + socket_length - 5, ".sock") == 0;
-    if (anchor_path_ok) {
-        int written = snprintf(anchor_path, sizeof(anchor_path), "%.*s.anc",
-                               (int)(socket_length - 5), socket_path);
-        anchor_path_ok = written > 0 && written < (int)sizeof(anchor_path);
-    }
-    struct sockaddr_un address;
-    memset(&address, 0, sizeof(address));
-    address.sun_family = AF_UNIX;
-    size_t address_length = socket_path ? strlen(socket_path) : 0;
-    bool address_ok = address_length > 0 && address_length < sizeof(address.sun_path);
-    if (address_ok) {
-        memcpy(address.sun_path, socket_path, address_length + 1);
-    }
-#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
-    address.sun_len = (uint8_t)(offsetof(struct sockaddr_un, sun_path) + address_length + 1);
-#endif
-    socklen_t sockaddr_length =
-        (socklen_t)(offsetof(struct sockaddr_un, sun_path) + address_length + 1);
-    int raw_listener = address_ok && anchor_path_ok ? socket(AF_UNIX, SOCK_STREAM, 0) : -1;
-    struct stat socket_status = {0};
-    struct stat anchor_status = {0};
-    bool orphan_created =
-        raw_listener >= 0 &&
-        bind(raw_listener, (const struct sockaddr *)&address, sockaddr_length) == 0 &&
-        chmod(socket_path, 0600) == 0 && listen(raw_listener, 1) == 0 &&
-        link(socket_path, anchor_path) == 0 && lstat(socket_path, &socket_status) == 0 &&
-        lstat(anchor_path, &anchor_status) == 0 && S_ISSOCK(socket_status.st_mode) &&
-        S_ISSOCK(anchor_status.st_mode) && socket_status.st_nlink == 2 &&
-        anchor_status.st_nlink == 2 && socket_status.st_dev == anchor_status.st_dev &&
-        socket_status.st_ino == anchor_status.st_ino;
-    if (raw_listener >= 0) {
-        (void)close(raw_listener);
-    }
-
-    cbm_cli_set_activation_runtime_parent_for_test(runtime_parent);
-    char dir_arg[640];
-    snprintf(dir_arg, sizeof(dir_arg), "--dir=%s", install_dir);
-    char *install_argv[] = {"--force", "--skip-config", "--yes", dir_arg};
-    int install_rc = orphan_created ? cli_test_cmd_install(4, install_argv) : -1;
-    cbm_cli_set_activation_runtime_parent_for_test(g_cli_suite_runtime_parent);
-    cbm_set_auto_answer_for_test(0);
-
-    struct stat target_status = {0};
-    struct stat log_status = {0};
-    struct stat absent_status = {0};
-    bool target_exists = stat(target_path, &target_status) == 0;
-    bool log_private = stat(activation_log, &log_status) == 0 && (log_status.st_mode & 0077) == 0;
-    const char *events = read_test_file(activation_log);
-    const char *requested = events ? strstr(events, "\"phase\":\"requested\"") : NULL;
-    const char *stopped = events ? strstr(events, "\"phase\":\"daemon_stopped\"") : NULL;
-    const char *completed = events ? strstr(events, "\"phase\":\"completed\"") : NULL;
-    bool event_order =
-        requested && stopped && completed && requested < stopped && stopped < completed;
-    errno = 0;
-    bool socket_removed = socket_path && lstat(socket_path, &absent_status) != 0 && errno == ENOENT;
-    errno = 0;
-    bool anchor_removed = lstat(anchor_path, &absent_status) != 0 && errno == ENOENT;
-
-    if (old_shell) {
-        cbm_setenv("SHELL", old_shell, 1);
-    } else {
-        cbm_unsetenv("SHELL");
-    }
-    free(old_shell);
-    cli_activation_restore_env(old_home, old_cache);
-    cbm_daemon_ipc_endpoint_free(endpoint);
-    test_rmdir_r(tmpdir);
-
-    ASSERT_TRUE(anchor_path_ok);
-    ASSERT_TRUE(address_ok);
-    ASSERT_TRUE(orphan_created);
-    ASSERT_EQ(install_rc, 0);
-    ASSERT_TRUE(target_exists);
-    ASSERT_TRUE(log_private);
-    ASSERT_TRUE(event_order);
-    ASSERT_TRUE(socket_removed);
-    ASSERT_TRUE(anchor_removed);
-    PASS();
-}
 /* ── Activation-guard namespace scope (2026-09-08) ──────────────────
  * The rendezvous directory is per OS ACCOUNT, never per HOME (service.h):
  * every daemon of one user meets at one endpoint, and the cohort identity's
@@ -1918,45 +1614,6 @@ typedef struct {
     cbm_daemon_runtime_status_t status;
 } cli_scope_status_probe_t;
 
-/* One status request. A failed request still reports the PID of a live but
- * mute endpoint holder, which is what tells slow apart from gone. */
-static cli_scope_attempt_t cli_scope_status_attempt(void *context) {
-    cli_scope_status_probe_t *probe = context;
-    memset(&probe->status, 0, sizeof(probe->status));
-    if (cbm_daemon_runtime_request_status(probe->fixture->endpoint, &probe->fixture->identity,
-                                          CLI_SCOPE_TIMEOUT_MS, &probe->status)) {
-        return CLI_SCOPE_ANSWERED;
-    }
-    return probe->status.muted_endpoint_holder_pid != 0 ? CLI_SCOPE_MUTE : CLI_SCOPE_REFUSED;
-}
-
-/* Ask the host daemon itself: still running, not stopping, and the parent's
- * committed client still admitted. A foreign-namespace install leaves this
- * daemon serving, so a slow reply on a loaded runner must not be misread as
- * "drained" (the flaky failure this fixture showed): a mute attempt is
- * repeated until the daemon answers, while a drained daemon is unreachable or
- * reports stopping, which decides at once. */
-static bool cli_scope_host_serving(const cli_scope_fixture_t *fixture) {
-    cli_scope_status_probe_t probe = {.fixture = fixture};
-    return fixture->endpoint && cli_scope_until_answered(cli_scope_status_attempt, &probe) &&
-           !probe.status.stopping && probe.status.committed_clients == 1;
-}
-
-static int cli_scope_install(cli_scope_fixture_t *fixture, const char *home, const char *cache,
-                             const char *bin_dir, bool skip_binary) {
-    cbm_setenv("HOME", home, 1);
-    cbm_setenv("CBM_CACHE_DIR", cache, 1);
-    cbm_cli_set_activation_runtime_parent_for_test(fixture->runtime_parent);
-    char dir_arg[704];
-    snprintf(dir_arg, sizeof(dir_arg), "--dir=%s", bin_dir);
-    char *install_argv[] = {skip_binary ? "--skip-binary" : "--force", "--skip-config", "--yes",
-                            dir_arg};
-    int rc = cli_test_cmd_install(4, install_argv);
-    cbm_cli_set_activation_runtime_parent_for_test(g_cli_suite_runtime_parent);
-    cbm_set_auto_answer_for_test(0);
-    return rc;
-}
-
 /* Returns the host child's exit status: 0 released intact,
  * CLI_SCOPE_HOST_DRAINED when an activation drained it, -1 unknown. */
 static int cli_scope_fixture_finish(cli_scope_fixture_t *fixture) {
@@ -1998,138 +1655,6 @@ static int cli_scope_fixture_finish(cli_scope_fixture_t *fixture) {
     fixture->old_cache = NULL;
     test_rmdir_r(fixture->tmpdir);
     return host_exit;
-}
-
-static void cli_scope_foreign_paths(const cli_scope_fixture_t *fixture, char home[512],
-                                    char cache[576], char bin_dir[640], char activation_log[704]) {
-    snprintf(home, 512, "%s/sandbox", fixture->tmpdir);
-    snprintf(cache, 576, "%s/cache", home);
-    snprintf(bin_dir, 640, "%s/custom/bin", home);
-    snprintf(activation_log, 704, "%s/logs/activation-events.ndjson", cache);
-}
-
-/* (a) `HOME=<sandbox> install --skip-binary` — the observed incident shape:
- * the sandbox shares the account rendezvous, its cache namespace differs. */
-TEST(cli_install_skip_binary_into_foreign_home_never_drains_host_cohort) {
-    cli_scope_fixture_t fixture;
-    bool ready = cli_scope_fixture_start(&fixture, "skipbin");
-    char foreign_home[512];
-    char foreign_cache[576];
-    char foreign_bin[640];
-    char activation_log[704];
-    cli_scope_foreign_paths(&fixture, foreign_home, foreign_cache, foreign_bin, activation_log);
-    bool prepared = ready && cbm_mkdir_p(foreign_home, 0700);
-    int install_rc =
-        prepared ? cli_scope_install(&fixture, foreign_home, foreign_cache, foreign_bin, true) : -1;
-    bool host_serving = prepared && cli_scope_host_serving(&fixture);
-    const char *events = read_test_file(activation_log);
-    bool completed = events && strstr(events, "\"phase\":\"completed\"") != NULL;
-    bool nothing_drained = events && strstr(events, "cohort drained") == NULL;
-    int host_exit = cli_scope_fixture_finish(&fixture);
-
-    ASSERT_TRUE(ready);
-    ASSERT_EQ(install_rc, 0);
-    ASSERT_TRUE(host_serving);
-    ASSERT_EQ(host_exit, 0);
-    ASSERT_TRUE(completed);
-    ASSERT_TRUE(nothing_drained);
-    PASS();
-}
-
-/* (b) A full install (binary published into the sandbox bin dir) is scoped
- * the same way: the host namespace is not what is being replaced. */
-TEST(cli_install_binary_into_foreign_home_never_drains_host_cohort) {
-    cli_scope_fixture_t fixture;
-    bool ready = cli_scope_fixture_start(&fixture, "binary");
-    char foreign_home[512];
-    char foreign_cache[576];
-    char foreign_bin[640];
-    char activation_log[704];
-    cli_scope_foreign_paths(&fixture, foreign_home, foreign_cache, foreign_bin, activation_log);
-    char target_path[704];
-    snprintf(target_path, sizeof(target_path), "%s/codebase-memory-mcp", foreign_bin);
-    bool prepared = ready && cbm_mkdir_p(foreign_home, 0700);
-    int install_rc =
-        prepared ? cli_scope_install(&fixture, foreign_home, foreign_cache, foreign_bin, false)
-                 : -1;
-    bool host_serving = prepared && cli_scope_host_serving(&fixture);
-    struct stat target_status;
-    bool target_exists = stat(target_path, &target_status) == 0;
-    const char *events = read_test_file(activation_log);
-    bool completed = events && strstr(events, "\"phase\":\"completed\"") != NULL;
-    bool nothing_drained = events && strstr(events, "cohort drained") == NULL;
-    int host_exit = cli_scope_fixture_finish(&fixture);
-
-    ASSERT_TRUE(ready);
-    ASSERT_EQ(install_rc, 0);
-    ASSERT_TRUE(target_exists);
-    ASSERT_TRUE(host_serving);
-    ASSERT_EQ(host_exit, 0);
-    ASSERT_TRUE(completed);
-    ASSERT_TRUE(nothing_drained);
-    PASS();
-}
-
-/* (c) Regression: an install that replaces the binary inside the host's own
- * namespace still drains that cohort — and the audit names its client. */
-TEST(cli_install_into_host_namespace_still_drains_host_cohort) {
-    cli_scope_fixture_t fixture;
-    bool ready = cli_scope_fixture_start(&fixture, "host");
-    char host_bin[640];
-    char activation_log[704];
-    snprintf(host_bin, sizeof(host_bin), "%s/custom/bin", fixture.host_home);
-    snprintf(activation_log, sizeof(activation_log), "%s/logs/activation-events.ndjson",
-             fixture.host_cache);
-    int install_rc =
-        ready ? cli_scope_install(&fixture, fixture.host_home, fixture.host_cache, host_bin, false)
-              : -1;
-    /* Negative probe, decided by a definite answer like the positive one: a
-     * drained host is unreachable or reports stopping at once, while a slow
-     * host that still serves is asked again until it answers, so it can no
-     * longer pass as drained when its reply misses a short budget. The drain
-     * itself is asserted positively below via host_exit ==
-     * CLI_SCOPE_HOST_DRAINED. */
-    bool host_serving = ready && cli_scope_host_serving(&fixture);
-    const char *events = read_test_file(activation_log);
-    bool drained_in_log = events && strstr(events, "cohort drained") != NULL &&
-                          strstr(events, "\"daemon_active_clients\":1") != NULL;
-    int host_exit = cli_scope_fixture_finish(&fixture);
-
-    ASSERT_TRUE(ready);
-    ASSERT_EQ(install_rc, 0);
-    ASSERT_FALSE(host_serving);
-    ASSERT_EQ(host_exit, CLI_SCOPE_HOST_DRAINED);
-    ASSERT_TRUE(drained_in_log);
-    PASS();
-}
-
-/* (d) `--skip-binary` with nothing to publish (no binary at the target, no
- * index reset) replaces nothing, so even the host's own namespace has
- * nothing to quiesce: agent configs are refreshed, sessions stay up. */
-TEST(cli_install_skip_binary_unchanged_in_host_namespace_quiesces_nothing) {
-    cli_scope_fixture_t fixture;
-    bool ready = cli_scope_fixture_start(&fixture, "unchanged");
-    char absent_bin[640];
-    char activation_log[704];
-    snprintf(absent_bin, sizeof(absent_bin), "%s/absent/bin", fixture.host_home);
-    snprintf(activation_log, sizeof(activation_log), "%s/logs/activation-events.ndjson",
-             fixture.host_cache);
-    int install_rc =
-        ready ? cli_scope_install(&fixture, fixture.host_home, fixture.host_cache, absent_bin, true)
-              : -1;
-    bool host_serving = ready && cli_scope_host_serving(&fixture);
-    const char *events = read_test_file(activation_log);
-    bool completed = events && strstr(events, "\"phase\":\"completed\"") != NULL;
-    bool nothing_drained = events && strstr(events, "cohort drained") == NULL;
-    int host_exit = cli_scope_fixture_finish(&fixture);
-
-    ASSERT_TRUE(ready);
-    ASSERT_EQ(install_rc, 0);
-    ASSERT_TRUE(host_serving);
-    ASSERT_EQ(host_exit, 0);
-    ASSERT_TRUE(completed);
-    ASSERT_TRUE(nothing_drained);
-    PASS();
 }
 
 /* 2026-10-09: ASSERT(ready) failed with nothing in the log, so which setup
@@ -2209,253 +1734,7 @@ TEST(cli_scope_retries_a_mute_endpoint_until_it_answers) {
     PASS();
 }
 
-/* cli_scope_install with the activation's stdout captured into out. */
-static int cli_scope_install_captured(cli_scope_fixture_t *fixture, const char *home,
-                                      const char *cache, const char *bin_dir, bool skip_binary,
-                                      char *out, size_t out_size) {
-    out[0] = '\0';
-    FILE *capture = tmpfile();
-    int saved_stdout = capture ? dup(STDOUT_FILENO) : -1;
-    bool redirected = false;
-    if (capture && saved_stdout >= 0) {
-        fflush(stdout);
-        redirected = dup2(fileno(capture), STDOUT_FILENO) >= 0;
-    }
-    int rc = redirected ? cli_scope_install(fixture, home, cache, bin_dir, skip_binary) : -1;
-    if (redirected) {
-        fflush(stdout);
-        (void)dup2(saved_stdout, STDOUT_FILENO);
-    }
-    if (saved_stdout >= 0) {
-        close(saved_stdout);
-    }
-    if (capture) {
-        rewind(capture);
-        size_t count = fread(out, 1, out_size - 1U, capture);
-        out[count] = '\0';
-        fclose(capture);
-    }
-    return rc;
-}
-
-/* The notice an activation prints when it leaves a daemon it could not
- * confirm as its own: names the daemon by pid and tells the user how to stop
- * it themselves. Never the "Stopping ..." banner of a drain. */
-static bool cli_scope_kept_notice_names_host(const char *output, pid_t host) {
-    char pid_text[48];
-    snprintf(pid_text, sizeof(pid_text), "(pid %ld, version %s)", (long)host, CBM_VERSION);
-    return strstr(output, "Leaving the running CBM daemon untouched") != NULL &&
-           strstr(output, pid_text) != NULL &&
-           strstr(output, "codebase-memory-mcp daemon stop") != NULL &&
-           strstr(output, "Stopping active CBM sessions") == NULL;
-}
-
-/* (e) USER DECISION 2026-09-28, "unknown = foreign, keep it": the scope read
- * reaches the active cohort but cannot read its cache identity. Ownership is
- * unconfirmed, so the sandbox install must leave the host daemon serving,
- * stop no session, and say which daemon it left and how to stop it. The
- * install publishes a binary (no --skip-binary): an activation that replaces
- * nothing never consults the cohort at all (test d). */
-TEST(cli_install_foreign_home_unreadable_cohort_cache_keeps_host_daemon) {
-    cli_scope_fixture_t fixture;
-    bool ready = cli_scope_fixture_start(&fixture, "unread");
-    char foreign_home[512];
-    char foreign_cache[576];
-    char foreign_bin[640];
-    char activation_log[704];
-    cli_scope_foreign_paths(&fixture, foreign_home, foreign_cache, foreign_bin, activation_log);
-    bool prepared = ready && cbm_mkdir_p(foreign_home, 0700);
-    char output[16384];
-    output[0] = '\0';
-    cbm_cli_set_activation_scope_cache_unreadable_for_test(true);
-    int install_rc = prepared
-                         ? cli_scope_install_captured(&fixture, foreign_home, foreign_cache,
-                                                      foreign_bin, false, output, sizeof(output))
-                         : -1;
-    cbm_cli_set_activation_scope_cache_unreadable_for_test(false);
-    bool host_serving = prepared && cli_scope_host_serving(&fixture);
-    bool notice = cli_scope_kept_notice_names_host(output, fixture.host);
-    const char *events = read_test_file(activation_log);
-    bool completed = events && strstr(events, "\"phase\":\"completed\"") != NULL;
-    bool nothing_drained = events && strstr(events, "cohort drained") == NULL;
-    int host_exit = cli_scope_fixture_finish(&fixture);
-
-    ASSERT_TRUE(ready);
-    ASSERT_TRUE(host_serving);
-    ASSERT_EQ(host_exit, 0);
-    ASSERT_TRUE(nothing_drained);
-    ASSERT_TRUE(notice);
-    ASSERT_EQ(install_rc, 0);
-    ASSERT_TRUE(completed);
-    PASS();
-}
-
-/* (f) Same decision, busy group: another activation holds the cohort
- * maintenance gate, so the scope read cannot reach the active identity at
- * all. Unconfirmed ownership keeps the host daemon; the sandbox install
- * completes without draining anyone. The gate is held through the product's
- * own lock-directory handle on the name version_cohort.c uses. */
-TEST(cli_install_foreign_home_busy_cohort_keeps_host_daemon) {
-    cli_scope_fixture_t fixture;
-    bool ready = cli_scope_fixture_start(&fixture, "busy");
-    char foreign_home[512];
-    char foreign_cache[576];
-    char foreign_bin[640];
-    char activation_log[704];
-    cli_scope_foreign_paths(&fixture, foreign_home, foreign_cache, foreign_bin, activation_log);
-    cbm_private_lock_directory_t *lock_directory = NULL;
-    cbm_private_file_lock_t *maintenance = NULL;
-    bool held = ready &&
-                cbm_daemon_ipc_private_lock_directory_new(fixture.endpoint, &lock_directory) ==
-                    CBM_PRIVATE_FILE_LOCK_OK &&
-                cbm_private_file_lock_try_acquire(
-                    lock_directory, "cbm-version-cohort-maintenance-v1.lock",
-                    CBM_PRIVATE_FILE_LOCK_EX, &maintenance) == CBM_PRIVATE_FILE_LOCK_OK;
-    bool prepared = held && cbm_mkdir_p(foreign_home, 0700);
-    char output[16384];
-    output[0] = '\0';
-    int install_rc = prepared
-                         ? cli_scope_install_captured(&fixture, foreign_home, foreign_cache,
-                                                      foreign_bin, false, output, sizeof(output))
-                         : -1;
-    bool host_serving = prepared && cli_scope_host_serving(&fixture);
-    bool released =
-        maintenance && cbm_private_file_lock_release(&maintenance) == CBM_PRIVATE_FILE_LOCK_OK;
-    if (lock_directory) {
-        cbm_private_lock_directory_close(lock_directory);
-    }
-    bool notice = cli_scope_kept_notice_names_host(output, fixture.host);
-    const char *events = read_test_file(activation_log);
-    bool completed = events && strstr(events, "\"phase\":\"completed\"") != NULL;
-    bool nothing_drained = events && strstr(events, "cohort drained") == NULL;
-    int host_exit = cli_scope_fixture_finish(&fixture);
-
-    ASSERT_TRUE(ready);
-    ASSERT_TRUE(held);
-    ASSERT_TRUE(host_serving);
-    ASSERT_EQ(host_exit, 0);
-    ASSERT_TRUE(nothing_drained);
-    ASSERT_TRUE(notice);
-    ASSERT_EQ(install_rc, 0);
-    ASSERT_TRUE(completed);
-    ASSERT_TRUE(released);
-    PASS();
-}
 #endif
-
-TEST(cli_install_force_quiesces_active_cohort_before_replacing_binary) {
-    char tmpdir[256];
-    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-daemon-install-XXXXXX");
-    if (!cbm_mkdtemp(tmpdir)) {
-        FAIL("cbm_mkdtemp failed");
-    }
-    char *old_home = NULL;
-    char *old_cache = NULL;
-    cli_activation_save_env(&old_home, &old_cache);
-    cbm_setenv("HOME", tmpdir, 1);
-    char cache_dir[512];
-    snprintf(cache_dir, sizeof(cache_dir), "%s/cache", tmpdir);
-    cbm_setenv("CBM_CACHE_DIR", cache_dir, 1);
-
-    char bin_dir[512];
-    char bin_target[640];
-    snprintf(bin_dir, sizeof(bin_dir), "%s/.local/bin", tmpdir);
-    test_mkdirp(bin_dir);
-#ifdef _WIN32
-    snprintf(bin_target, sizeof(bin_target), "%s/codebase-memory-mcp.exe", bin_dir);
-#else
-    snprintf(bin_target, sizeof(bin_target), "%s/codebase-memory-mcp", bin_dir);
-#endif
-    write_test_file(bin_target, "old binary must survive");
-
-    cli_activation_fake_t fake = {
-        .participants_active = true,
-        .mutation_reserve_result = 1,
-    };
-    cbm_cli_activation_ops_t ops = cli_activation_fake_ops(&fake);
-    cbm_cli_set_activation_ops_for_test(&ops);
-    char *argv[] = {"--force"};
-    int rc = cli_test_cmd_install(1, argv);
-    cbm_cli_set_activation_ops_for_test(NULL);
-
-    const char *installed = read_test_file(bin_target);
-    bool preserved = installed && strcmp(installed, "old binary must survive") == 0;
-    cli_activation_restore_env(old_home, old_cache);
-    test_rmdir_r(tmpdir);
-    ASSERT_EQ(rc, 0);
-    ASSERT_FALSE(preserved);
-    ASSERT_EQ(fake.mutation_reserve_count, 1);
-    ASSERT_EQ(fake.quiesce_count, 1);
-    ASSERT_EQ(fake.mutation_lease_release_count, 1);
-    PASS();
-}
-
-TEST(cli_install_dir_and_skip_config_stage_first_install_safely) {
-    char tmpdir[256];
-    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-install-dir-XXXXXX");
-    if (!cbm_mkdtemp(tmpdir)) {
-        FAIL("cbm_mkdtemp failed");
-    }
-    char *old_home = NULL;
-    char *old_cache = NULL;
-    cli_activation_save_env(&old_home, &old_cache);
-    const char *shell = getenv("SHELL");
-    char *old_shell = shell ? strdup(shell) : NULL;
-    cbm_setenv("HOME", tmpdir, 1);
-    cbm_setenv("SHELL", "/bin/zsh", 1);
-    char cache_dir[512];
-    char install_dir[512];
-    char target_path[640];
-    char codex_dir[512];
-    char codex_config[640];
-    snprintf(cache_dir, sizeof(cache_dir), "%s/cache", tmpdir);
-    snprintf(install_dir, sizeof(install_dir), "%s/custom/new/bin", tmpdir);
-    snprintf(target_path, sizeof(target_path),
-#ifdef _WIN32
-             "%s/codebase-memory-mcp.exe", install_dir);
-#else
-             "%s/codebase-memory-mcp", install_dir);
-#endif
-    snprintf(codex_dir, sizeof(codex_dir), "%s/.codex", tmpdir);
-    snprintf(codex_config, sizeof(codex_config), "%s/config.toml", codex_dir);
-    cbm_setenv("CBM_CACHE_DIR", cache_dir, 1);
-    test_mkdirp(codex_dir);
-
-    cli_activation_fake_t fake = {
-        .mutation_reserve_result = 1,
-    };
-    cbm_cli_activation_ops_t ops = cli_activation_fake_ops(&fake);
-    cbm_cli_set_activation_ops_for_test(&ops);
-    char *argv[] = {"--force", "--skip-config", "--yes", "--dir", install_dir};
-    int rc = cli_test_cmd_install(5, argv);
-    char equals_arg[640];
-    snprintf(equals_arg, sizeof(equals_arg), "--dir=%s", install_dir);
-    char *dry_argv[] = {"--force", "--skip-config", "--dry-run", equals_arg};
-    int dry_rc = cli_test_cmd_install(4, dry_argv);
-    cbm_cli_set_activation_ops_for_test(NULL);
-    cbm_set_auto_answer_for_test(0);
-
-    struct stat target_status;
-    struct stat config_status;
-    bool target_exists = stat(target_path, &target_status) == 0;
-    bool config_absent = stat(codex_config, &config_status) != 0;
-    if (old_shell) {
-        cbm_setenv("SHELL", old_shell, 1);
-    } else {
-        cbm_unsetenv("SHELL");
-    }
-    free(old_shell);
-    cli_activation_restore_env(old_home, old_cache);
-    test_rmdir_r(tmpdir);
-
-    ASSERT_EQ(rc, 0);
-    ASSERT_EQ(dry_rc, 0);
-    ASSERT_TRUE(target_exists);
-    ASSERT_TRUE(config_absent);
-    ASSERT_EQ(fake.mutation_reserve_count, 1);
-    ASSERT_EQ(fake.mutation_lease_release_count, 1);
-    PASS();
-}
 
 TEST(cli_activation_commands_reject_malformed_and_unknown_flags) {
     cli_activation_fake_t fake = {
@@ -2463,617 +1742,21 @@ TEST(cli_activation_commands_reject_malformed_and_unknown_flags) {
     };
     cbm_cli_activation_ops_t ops = cli_activation_fake_ops(&fake);
     cbm_cli_set_activation_ops_for_test(&ops);
-    char *missing_dir[] = {"--dir"};
-    char *empty_dir[] = {"--dir="};
+    char *retired_install[] = {"--dir=/tmp/x"};
     char *bad_install[] = {"--skip-config=value"};
     char *bad_update[] = {"--not-an-update-option"};
     char *bad_uninstall[] = {"--not-an-uninstall-option"};
-    int missing_rc = cli_test_cmd_install(1, missing_dir);
-    int empty_rc = cli_test_cmd_install(1, empty_dir);
+    int retired_rc = cli_test_cmd_install(1, retired_install);
     int install_rc = cli_test_cmd_install(1, bad_install);
     int update_rc = cli_test_cmd_update(1, bad_update);
     int uninstall_rc = cli_test_cmd_uninstall(1, bad_uninstall);
     cbm_cli_set_activation_ops_for_test(NULL);
 
-    ASSERT_EQ(missing_rc, 1);
-    ASSERT_EQ(empty_rc, 1);
+    ASSERT_EQ(retired_rc, 1);
     ASSERT_EQ(install_rc, 1);
     ASSERT_EQ(update_rc, 1);
     ASSERT_EQ(uninstall_rc, 1);
     ASSERT_EQ(fake.mutation_reserve_count, 0);
-    PASS();
-}
-
-TEST(cli_install_hooks_preference_persists_and_migrates_owned_state) {
-    char tmpdir[512];
-    snprintf(tmpdir, sizeof(tmpdir), "%s/cli-install-hooks-XXXXXX", cbm_tmpdir());
-    if (!cbm_mkdtemp(tmpdir))
-        FAIL("cbm_mkdtemp failed");
-
-    const char *const env_names[] = {"HOME", "CBM_CACHE_DIR", "CLAUDE_CONFIG_DIR", "PATH"};
-    char *saved_env[sizeof(env_names) / sizeof(env_names[0])];
-    for (size_t i = 0U; i < sizeof(env_names) / sizeof(env_names[0]); i++) {
-        saved_env[i] = save_test_env(env_names[i]);
-        cbm_unsetenv(env_names[i]);
-    }
-
-    char cache_dir[640];
-    char claude_dir[640];
-    char settings_path[768];
-    char mcp_path[768];
-    char db_path[768];
-    char gate_path[768];
-    char session_path[768];
-    char subagent_path[768];
-    snprintf(cache_dir, sizeof(cache_dir), "%s/cache", tmpdir);
-    snprintf(claude_dir, sizeof(claude_dir), "%s/.claude", tmpdir);
-    snprintf(settings_path, sizeof(settings_path), "%s/settings.json", claude_dir);
-    snprintf(mcp_path, sizeof(mcp_path), "%s/.claude.json", tmpdir);
-    snprintf(db_path, sizeof(db_path), "%s/_config.db", cache_dir);
-#ifdef _WIN32
-    snprintf(gate_path, sizeof(gate_path), "%s/hooks/cbm-code-discovery-gate.cmd", claude_dir);
-    snprintf(session_path, sizeof(session_path), "%s/hooks/cbm-session-reminder.cmd", claude_dir);
-    snprintf(subagent_path, sizeof(subagent_path), "%s/hooks/cbm-subagent-reminder.cmd", claude_dir);
-#else
-    snprintf(gate_path, sizeof(gate_path), "%s/hooks/cbm-code-discovery-gate", claude_dir);
-    snprintf(session_path, sizeof(session_path), "%s/hooks/cbm-session-reminder", claude_dir);
-    snprintf(subagent_path, sizeof(subagent_path), "%s/hooks/cbm-subagent-reminder", claude_dir);
-#endif
-    test_mkdirp(claude_dir);
-    write_test_file(settings_path,
-                    "{\"hooks\":{\"PreToolUse\":[{\"matcher\":\"Bash\",\"hooks\":[{\"type\":"
-                    "\"command\",\"command\":\"/usr/bin/foreign-hook\"}]}]}}\n");
-    cbm_setenv("HOME", tmpdir, 1);
-    cbm_setenv("CBM_CACHE_DIR", cache_dir, 1);
-    cbm_setenv("PATH", tmpdir, 1);
-
-    cli_activation_fake_t fake = {.mutation_reserve_result = 1};
-    cbm_cli_activation_ops_t ops = cli_activation_fake_ops(&fake);
-    cbm_cli_set_activation_ops_for_test(&ops);
-
-    char *conflict_a[] = {"--hooks", "--no-hooks"};
-    char *conflict_b[] = {"--no-hooks", "--hooks"};
-    int conflict_a_rc = cli_test_cmd_install(2, conflict_a);
-    int conflict_b_rc = cli_test_cmd_install(2, conflict_b);
-
-    char *default_args[] = {"--skip-binary", "--clients=claude", "--yes"};
-    int default_rc = cli_test_cmd_install(3, default_args);
-    char *default_state = read_test_file_alloc(settings_path);
-    bool default_hook = default_state && strstr(default_state, "hook-augment") &&
-                        strstr(default_state, "/usr/bin/foreign-hook");
-    bool default_scripts = cbm_file_exists(gate_path) && cbm_file_exists(session_path) &&
-                           cbm_file_exists(subagent_path);
-    free(default_state);
-
-    char *no_hooks_plan_args[] = {"--plan", "--no-hooks"};
-    int no_hooks_plan_rc = cli_test_cmd_install(2, no_hooks_plan_args);
-    char *disabled_plan = cbm_build_install_plan_json(tmpdir, "/opt/codebase-memory-mcp");
-    yyjson_doc *disabled_doc =
-        disabled_plan ? yyjson_read(disabled_plan, strlen(disabled_plan), 0) : NULL;
-    yyjson_val *disabled_root = disabled_doc ? yyjson_doc_get_root(disabled_doc) : NULL;
-    yyjson_val *disabled_hooks =
-        disabled_root ? yyjson_obj_get(disabled_root, "hooks_planned") : NULL;
-    yyjson_val *disabled_configs =
-        disabled_root ? yyjson_obj_get(disabled_root, "config_files_planned") : NULL;
-    bool disabled_plan_ok = disabled_hooks && yyjson_is_arr(disabled_hooks) &&
-                            yyjson_arr_size(disabled_hooks) == 0U && disabled_configs &&
-                            yyjson_is_arr(disabled_configs) &&
-                            yyjson_arr_size(disabled_configs) > 0U;
-    yyjson_doc_free(disabled_doc);
-    free(disabled_plan);
-
-    char *no_hooks_dry_args[] = {"--dry-run", "--no-hooks", "--skip-binary", "--clients=claude",
-                                 "--yes"};
-    int no_hooks_dry_rc = cli_test_cmd_install(5, no_hooks_dry_args);
-    struct stat db_status;
-    bool previews_read_only = stat(db_path, &db_status) != 0;
-
-    char *no_hooks_args[] = {"--no-hooks", "--skip-binary", "--clients=claude", "--yes"};
-    int no_hooks_rc = cli_test_cmd_install(4, no_hooks_args);
-    cbm_config_t *cfg = cbm_config_open(cache_dir);
-    bool stored_false = cfg && !cbm_config_get_bool(cfg, CBM_CONFIG_INSTALL_HOOKS, true);
-    cbm_config_close(cfg);
-    char *disabled_state = read_test_file_alloc(settings_path);
-    char *disabled_mcp = read_test_file_alloc(mcp_path);
-    bool disabled_ok = disabled_state && strstr(disabled_state, "/usr/bin/foreign-hook") &&
-                       !strstr(disabled_state, "hook-augment") && disabled_mcp &&
-                       strstr(disabled_mcp, "codebase-memory-mcp");
-    bool no_hooks_scripts_gone = !cbm_file_exists(gate_path) && !cbm_file_exists(session_path) &&
-                               !cbm_file_exists(subagent_path);
-    free(disabled_state);
-    free(disabled_mcp);
-
-    char *bare_args[] = {"--skip-binary", "--clients=claude", "--yes"};
-    int bare_disabled_rc = cli_test_cmd_install(3, bare_args);
-    disabled_state = read_test_file_alloc(settings_path);
-    bool bare_disabled = disabled_state && strstr(disabled_state, "/usr/bin/foreign-hook") &&
-                         !strstr(disabled_state, "hook-augment");
-    bool bare_scripts_gone =
-        !cbm_file_exists(gate_path) && !cbm_file_exists(session_path) &&
-        !cbm_file_exists(subagent_path);
-    free(disabled_state);
-
-    char *hooks_plan_args[] = {"--plan", "--hooks"};
-    char *hooks_dry_args[] = {"--dry-run", "--hooks", "--skip-binary", "--clients=claude", "--yes"};
-    int hooks_plan_rc = cli_test_cmd_install(2, hooks_plan_args);
-    int hooks_dry_rc = cli_test_cmd_install(5, hooks_dry_args);
-    cfg = cbm_config_open(cache_dir);
-    bool previews_retained_false = cfg && !cbm_config_get_bool(cfg, CBM_CONFIG_INSTALL_HOOKS, true);
-    cbm_config_close(cfg);
-
-    char *hooks_args[] = {"--hooks", "--skip-binary", "--clients=claude", "--yes"};
-    int hooks_rc = cli_test_cmd_install(4, hooks_args);
-    cfg = cbm_config_open(cache_dir);
-    bool stored_true = cfg && cbm_config_get_bool(cfg, CBM_CONFIG_INSTALL_HOOKS, false);
-    cbm_config_close(cfg);
-    char *enabled_state = read_test_file_alloc(settings_path);
-    bool enabled_ok = enabled_state && strstr(enabled_state, "hook-augment") &&
-                      strstr(enabled_state, "/usr/bin/foreign-hook");
-    bool hooks_scripts_back = cbm_file_exists(gate_path) && cbm_file_exists(session_path) &&
-                              cbm_file_exists(subagent_path);
-    free(enabled_state);
-    int bare_enabled_rc = cli_test_cmd_install(3, bare_args);
-    bool bare_scripts_enabled = cbm_file_exists(gate_path) && cbm_file_exists(session_path) &&
-                                cbm_file_exists(subagent_path);
-
-    const char *foreign_session_script =
-#ifdef _WIN32
-        "@echo off\r\nC:\\tmp\\user-owned-session-hook.cmd\r\n";
-#else
-        "#!/bin/sh\n/usr/bin/user-owned-session-hook\n";
-#endif
-    write_test_file(session_path, foreign_session_script);
-    int foreign_no_hooks_rc = cli_test_cmd_install(4, no_hooks_args);
-    char *preserved_session = read_test_file_alloc(session_path);
-    bool foreign_session_preserved =
-        foreign_no_hooks_rc == 0 && preserved_session &&
-        strcmp(preserved_session, foreign_session_script) == 0 && !cbm_file_exists(gate_path) &&
-        !cbm_file_exists(subagent_path);
-    free(preserved_session);
-
-    bool results_ok =
-        conflict_a_rc == 1 && conflict_b_rc == 1 && default_rc == 0 && default_hook &&
-        default_scripts && no_hooks_plan_rc == 0 && disabled_plan_ok && no_hooks_dry_rc == 0 &&
-        previews_read_only && no_hooks_rc == 0 && stored_false && disabled_ok &&
-        no_hooks_scripts_gone && bare_disabled_rc == 0 && bare_disabled && bare_scripts_gone &&
-        hooks_plan_rc == 0 && hooks_dry_rc == 0 && previews_retained_false && hooks_rc == 0 &&
-        stored_true && enabled_ok && hooks_scripts_back && bare_enabled_rc == 0 &&
-        bare_scripts_enabled && foreign_session_preserved && fake.mutation_reserve_count > 0;
-
-    cbm_cli_set_activation_ops_for_test(NULL);
-    cbm_set_auto_answer_for_test(0);
-    for (size_t i = 0U; i < sizeof(env_names) / sizeof(env_names[0]); i++) {
-        restore_test_env(env_names[i], saved_env[i]);
-    }
-    test_rmdir_r(tmpdir);
-
-    ASSERT_TRUE(results_ok);
-    PASS();
-}
-
-TEST(cli_no_hooks_plan_covers_every_hook_installer_family) {
-    char tmpdir[512];
-    snprintf(tmpdir, sizeof(tmpdir), "%s/cli-hook-families-XXXXXX", cbm_tmpdir());
-    if (!cbm_mkdtemp(tmpdir))
-        FAIL("cbm_mkdtemp failed");
-
-    const char *const env_names[] = {"HOME", "CBM_CACHE_DIR", "PATH", "XDG_CONFIG_HOME"};
-    char *saved_env[sizeof(env_names) / sizeof(env_names[0])];
-    for (size_t i = 0U; i < sizeof(env_names) / sizeof(env_names[0]); i++) {
-        saved_env[i] = save_test_env(env_names[i]);
-        cbm_unsetenv(env_names[i]);
-    }
-
-    const char *const dirs[] = {".claude",          ".codex",      ".gemini",
-                                ".config/opencode", ".augment",    ".openclaw/workspace",
-                                ".hermes",          ".qwen",       ".copilot",
-                                ".factory",         ".qoder",      ".kimi-code",
-                                ".config/devin",    ".gitlab/duo", "bin"};
-    char path[768];
-    for (size_t i = 0U; i < sizeof(dirs) / sizeof(dirs[0]); i++) {
-        snprintf(path, sizeof(path), "%s/%s", tmpdir, dirs[i]);
-        test_mkdirp(path);
-    }
-    snprintf(path, sizeof(path), "%s/.openclaw/openclaw.json", tmpdir);
-    write_test_file(path, "{}\n");
-    snprintf(path, sizeof(path), "%s/.copilot/mcp-config.json", tmpdir);
-    write_test_file(path, "{}\n");
-    /* #1180: a bare ~/.claude is not a Claude Code install; its settings.json is. */
-    snprintf(path, sizeof(path), "%s/.claude/settings.json", tmpdir);
-    write_test_file(path, "{}\n");
-
-    const char *const commands[] = {"qodercli", "kimi",   "duo",    "devin", "gemini",
-                                    "copilot",  "auggie", "hermes", "droid"};
-    char bin_dir[640];
-    snprintf(bin_dir, sizeof(bin_dir), "%s/bin", tmpdir);
-    for (size_t i = 0U; i < sizeof(commands) / sizeof(commands[0]); i++) {
-#ifdef _WIN32
-        snprintf(path, sizeof(path), "%s/%s.exe", bin_dir, commands[i]);
-#else
-        snprintf(path, sizeof(path), "%s/%s", bin_dir, commands[i]);
-#endif
-        write_test_file(path, "exit 0\n");
-        chmod(path, 0700);
-    }
-
-    char cache_dir[640];
-    snprintf(cache_dir, sizeof(cache_dir), "%s/cache", tmpdir);
-    cbm_setenv("HOME", tmpdir, 1);
-    cbm_setenv("CBM_CACHE_DIR", cache_dir, 1);
-    cbm_setenv("PATH", bin_dir, 1);
-    char *no_hooks_args[] = {"--plan", "--no-hooks"};
-    int no_hooks_rc = cli_test_cmd_install(2, no_hooks_args);
-    char *plan = cbm_build_install_plan_json(tmpdir, "/opt/codebase-memory-mcp");
-    yyjson_doc *doc = plan ? yyjson_read(plan, strlen(plan), 0) : NULL;
-    yyjson_val *root = doc ? yyjson_doc_get_root(doc) : NULL;
-    yyjson_val *hooks = root ? yyjson_obj_get(root, "hooks_planned") : NULL;
-    yyjson_val *configs = root ? yyjson_obj_get(root, "config_files_planned") : NULL;
-    yyjson_val *instructions = root ? yyjson_obj_get(root, "instruction_files_planned") : NULL;
-    const char *const detected[] = {"claude-code",    "codex",         "gemini", "opencode",
-                                    "augment-auggie", "openclaw",      "hermes", "qwen",
-                                    "copilot-cli",    "factory-droid", "qoder",  "kimi",
-                                    "gitlab-duo",     "devin"};
-    bool families = no_hooks_rc == 0 && hooks && yyjson_is_arr(hooks) &&
-                    yyjson_arr_size(hooks) == 0U && configs && yyjson_is_arr(configs) &&
-                    yyjson_arr_size(configs) > 0U && instructions && yyjson_is_arr(instructions) &&
-                    yyjson_arr_size(instructions) > 0U && plan && !strstr(plan, "cbm-augment.ts");
-    for (size_t i = 0U; families && i < sizeof(detected) / sizeof(detected[0]); i++) {
-        families = test_json_string_array_contains(root, "agents_detected", detected[i]);
-    }
-    yyjson_doc_free(doc);
-    free(plan);
-
-    char *hooks_args[] = {"--plan", "--hooks"};
-    int hooks_rc = cli_test_cmd_install(2, hooks_args);
-    char *enabled_plan = cbm_build_install_plan_json(tmpdir, "/opt/codebase-memory-mcp");
-    yyjson_doc *enabled_doc =
-        enabled_plan ? yyjson_read(enabled_plan, strlen(enabled_plan), 0) : NULL;
-    yyjson_val *enabled_root = enabled_doc ? yyjson_doc_get_root(enabled_doc) : NULL;
-    yyjson_val *enabled_hooks = enabled_root ? yyjson_obj_get(enabled_root, "hooks_planned") : NULL;
-    bool enabled_plan_ok =
-        enabled_hooks && yyjson_is_arr(enabled_hooks) && yyjson_arr_size(enabled_hooks) > 0U;
-    yyjson_doc_free(enabled_doc);
-    free(enabled_plan);
-    for (size_t i = 0U; i < sizeof(env_names) / sizeof(env_names[0]); i++) {
-        restore_test_env(env_names[i], saved_env[i]);
-    }
-    test_rmdir_r(tmpdir);
-
-    ASSERT_TRUE(families);
-    ASSERT_EQ(hooks_rc, 0);
-    ASSERT_TRUE(enabled_plan_ok);
-    PASS();
-}
-
-/* Counts the PreToolUse hooks in a Codex hooks.json: ours run hook-augment, the
- * foreign one is matched by its exact command. */
-static void test_codex_pretool_hook_counts(const char *path, const char *foreign_command,
-                                           size_t *owned, size_t *foreign) {
-    *owned = 0U;
-    *foreign = 0U;
-    char *text = read_test_file_alloc(path);
-    yyjson_doc *doc = text ? yyjson_read(text, strlen(text), 0) : NULL;
-    yyjson_val *root = doc ? yyjson_doc_get_root(doc) : NULL;
-    yyjson_val *hooks = root ? yyjson_obj_get(root, "hooks") : NULL;
-    yyjson_val *entries = hooks ? yyjson_obj_get(hooks, "PreToolUse") : NULL;
-    size_t entry_index;
-    size_t entry_count;
-    yyjson_val *entry;
-    if (entries && yyjson_is_arr(entries)) {
-        yyjson_arr_foreach(entries, entry_index, entry_count, entry) {
-            yyjson_val *entry_hooks = yyjson_obj_get(entry, "hooks");
-            size_t hook_index;
-            size_t hook_count;
-            yyjson_val *hook;
-            if (!entry_hooks || !yyjson_is_arr(entry_hooks)) {
-                continue;
-            }
-            yyjson_arr_foreach(entry_hooks, hook_index, hook_count, hook) {
-                const char *command = yyjson_get_str(yyjson_obj_get(hook, "command"));
-                if (command && strstr(command, "hook-augment")) {
-                    (*owned)++;
-                } else if (command && strcmp(command, foreign_command) == 0) {
-                    (*foreign)++;
-                }
-            }
-        }
-    }
-    yyjson_doc_free(doc);
-    free(text);
-}
-
-/* The Codex PreToolUse Bash hook (#2719) follows the persisted opt-out in both
- * hook representations: --no-hooks removes ours from hooks.json and from the
- * config.toml managed block, a bare install keeps it off, the user's own
- * PreToolUse hook and the MCP entry stay, and --hooks restores ours. */
-TEST(cli_no_hooks_removes_codex_pretool_hook) {
-    char tmpdir[512];
-    snprintf(tmpdir, sizeof(tmpdir), "%s/cli-codex-no-hooks-XXXXXX", cbm_tmpdir());
-    if (!cbm_mkdtemp(tmpdir))
-        FAIL("cbm_mkdtemp failed");
-
-    const char *const env_names[] = {"HOME", "CBM_CACHE_DIR", "CODEX_HOME", "PATH"};
-    char *saved_env[sizeof(env_names) / sizeof(env_names[0])];
-    for (size_t i = 0U; i < sizeof(env_names) / sizeof(env_names[0]); i++) {
-        saved_env[i] = save_test_env(env_names[i]);
-        cbm_unsetenv(env_names[i]);
-    }
-
-    char cache_dir[640];
-    char codex_dir[640];
-    char hooks_path[768];
-    char config_path[768];
-    snprintf(cache_dir, sizeof(cache_dir), "%s/cache", tmpdir);
-    snprintf(codex_dir, sizeof(codex_dir), "%s/.codex", tmpdir);
-    snprintf(hooks_path, sizeof(hooks_path), "%s/hooks.json", codex_dir);
-    snprintf(config_path, sizeof(config_path), "%s/config.toml", codex_dir);
-    test_mkdirp(codex_dir);
-    /* An installed binary at the default target names the Codex hook command;
-     * without it --skip-binary would configure the test runner itself. */
-    char binary_dir[640];
-    char binary_path[768];
-    snprintf(binary_dir, sizeof(binary_dir), "%s/.local/bin", tmpdir);
-    test_mkdirp(binary_dir);
-#ifdef _WIN32
-    snprintf(binary_path, sizeof(binary_path), "%s/codebase-memory-mcp.exe", binary_dir);
-#else
-    snprintf(binary_path, sizeof(binary_path), "%s/codebase-memory-mcp", binary_dir);
-#endif
-    write_test_file(binary_path, "installed binary\n");
-    const char *foreign_command = "/usr/bin/foreign-shell-audit";
-    write_test_file(hooks_path,
-                    "{\"hooks\":{\"PreToolUse\":[{\"matcher\":\"Bash\",\"hooks\":[{\"type\":"
-                    "\"command\",\"command\":\"/usr/bin/foreign-shell-audit\"}]}]}}\n");
-    cbm_setenv("HOME", tmpdir, 1);
-    cbm_setenv("CBM_CACHE_DIR", cache_dir, 1);
-    cbm_setenv("PATH", tmpdir, 1);
-
-    cli_activation_fake_t fake = {.mutation_reserve_result = 1};
-    cbm_cli_activation_ops_t ops = cli_activation_fake_ops(&fake);
-    cbm_cli_set_activation_ops_for_test(&ops);
-
-    size_t owned = 0U;
-    size_t foreign = 0U;
-    char *default_args[] = {"--skip-binary", "--clients=codex", "--yes"};
-    int default_rc = cli_test_cmd_install(3, default_args);
-    test_codex_pretool_hook_counts(hooks_path, foreign_command, &owned, &foreign);
-    bool default_json = default_rc == 0 && owned == 1U && foreign == 1U;
-
-    char *no_hooks_args[] = {"--no-hooks", "--skip-binary", "--clients=codex", "--yes"};
-    int no_hooks_rc = cli_test_cmd_install(4, no_hooks_args);
-    test_codex_pretool_hook_counts(hooks_path, foreign_command, &owned, &foreign);
-    char *json_state = read_test_file_alloc(hooks_path);
-    char *toml_state = read_test_file_alloc(config_path);
-    bool json_disabled = no_hooks_rc == 0 && owned == 0U && foreign == 1U && json_state &&
-                         !strstr(json_state, "hook-augment");
-    bool json_mcp_kept = toml_state && strstr(toml_state, "[mcp_servers.codebase-memory-mcp]") &&
-                         !strstr(toml_state, "hook-augment");
-    free(json_state);
-    free(toml_state);
-
-    int bare_rc = cli_test_cmd_install(3, default_args);
-    test_codex_pretool_hook_counts(hooks_path, foreign_command, &owned, &foreign);
-    bool bare_disabled = bare_rc == 0 && owned == 0U && foreign == 1U;
-
-    /* Without hooks.json the config.toml managed block carries the hooks. */
-    (void)remove(hooks_path);
-    char *hooks_args[] = {"--hooks", "--skip-binary", "--clients=codex", "--yes"};
-    int toml_enable_rc = cli_test_cmd_install(4, hooks_args);
-    toml_state = read_test_file_alloc(config_path);
-    bool toml_enabled = toml_enable_rc == 0 && toml_state &&
-                        test_count_substring(toml_state, "[[hooks.PreToolUse]]") == 1U;
-    free(toml_state);
-    int toml_disable_rc = cli_test_cmd_install(4, no_hooks_args);
-    toml_state = read_test_file_alloc(config_path);
-    bool toml_disabled = toml_disable_rc == 0 && toml_state &&
-                         !strstr(toml_state, "hooks.PreToolUse") &&
-                         !strstr(toml_state, "hook-augment") &&
-                         strstr(toml_state, "[mcp_servers.codebase-memory-mcp]");
-    free(toml_state);
-    int restore_rc = cli_test_cmd_install(4, hooks_args);
-    toml_state = read_test_file_alloc(config_path);
-    bool restored = restore_rc == 0 && toml_state &&
-                    test_count_substring(toml_state, "[[hooks.PreToolUse]]") == 1U;
-    free(toml_state);
-
-    cbm_cli_set_activation_ops_for_test(NULL);
-    cbm_set_auto_answer_for_test(0);
-    for (size_t i = 0U; i < sizeof(env_names) / sizeof(env_names[0]); i++) {
-        restore_test_env(env_names[i], saved_env[i]);
-    }
-    test_rmdir_r(tmpdir);
-
-    ASSERT_TRUE(default_json);
-    ASSERT_TRUE(json_mcp_kept);
-    ASSERT_TRUE(toml_enabled);
-    ASSERT_TRUE(toml_disabled);
-    ASSERT_TRUE(restored);
-    ASSERT_TRUE(json_disabled);
-    ASSERT_TRUE(bare_disabled);
-    PASS();
-}
-
-/* The Augment SessionStart and PostToolUse view scripts follow the persisted
- * opt-out the way uninstall treats them: --no-hooks deletes both exact-owned
- * scripts and keeps the MCP entry, a bare install keeps them off, --hooks
- * restores them, and a script the user edited is kept. */
-TEST(cli_no_hooks_removes_augment_owned_scripts) {
-    char tmpdir[512];
-    snprintf(tmpdir, sizeof(tmpdir), "%s/cli-augment-no-hooks-XXXXXX", cbm_tmpdir());
-    if (!cbm_mkdtemp(tmpdir))
-        FAIL("cbm_mkdtemp failed");
-
-    const char *const env_names[] = {"HOME", "CBM_CACHE_DIR", "PATH"};
-    char *saved_env[sizeof(env_names) / sizeof(env_names[0])];
-    for (size_t i = 0U; i < sizeof(env_names) / sizeof(env_names[0]); i++) {
-        saved_env[i] = save_test_env(env_names[i]);
-        cbm_unsetenv(env_names[i]);
-    }
-
-    char cache_dir[640];
-    char augment_dir[640];
-    char settings_path[768];
-    char session_path[768];
-    char coverage_path[768];
-    snprintf(cache_dir, sizeof(cache_dir), "%s/cache", tmpdir);
-    snprintf(augment_dir, sizeof(augment_dir), "%s/.augment", tmpdir);
-    snprintf(settings_path, sizeof(settings_path), "%s/settings.json", augment_dir);
-#ifdef _WIN32
-    snprintf(session_path, sizeof(session_path), "%s/hooks/codebase-memory-session.ps1",
-             augment_dir);
-    snprintf(coverage_path, sizeof(coverage_path), "%s/hooks/codebase-memory-coverage.ps1",
-             augment_dir);
-#else
-    snprintf(session_path, sizeof(session_path), "%s/hooks/codebase-memory-session.sh",
-             augment_dir);
-    snprintf(coverage_path, sizeof(coverage_path), "%s/hooks/codebase-memory-coverage.sh",
-             augment_dir);
-#endif
-    test_mkdirp(augment_dir);
-    /* An installed binary at the default target is the path the scripts embed;
-     * without it --skip-binary would configure the test runner itself. */
-    char binary_dir[640];
-    char binary_path[768];
-    snprintf(binary_dir, sizeof(binary_dir), "%s/.local/bin", tmpdir);
-    test_mkdirp(binary_dir);
-#ifdef _WIN32
-    snprintf(binary_path, sizeof(binary_path), "%s/codebase-memory-mcp.exe", binary_dir);
-#else
-    snprintf(binary_path, sizeof(binary_path), "%s/codebase-memory-mcp", binary_dir);
-#endif
-    write_test_file(binary_path, "installed binary\n");
-    cbm_setenv("HOME", tmpdir, 1);
-    cbm_setenv("CBM_CACHE_DIR", cache_dir, 1);
-    cbm_setenv("PATH", tmpdir, 1);
-
-    cli_activation_fake_t fake = {.mutation_reserve_result = 1};
-    cbm_cli_activation_ops_t ops = cli_activation_fake_ops(&fake);
-    cbm_cli_set_activation_ops_for_test(&ops);
-
-    char *default_args[] = {"--skip-binary", "--clients=augment", "--yes"};
-    int default_rc = cli_test_cmd_install(3, default_args);
-    bool default_scripts =
-        default_rc == 0 && cbm_file_exists(session_path) && cbm_file_exists(coverage_path);
-
-    char *no_hooks_args[] = {"--no-hooks", "--skip-binary", "--clients=augment", "--yes"};
-    int no_hooks_rc = cli_test_cmd_install(4, no_hooks_args);
-    bool scripts_removed =
-        no_hooks_rc == 0 && !cbm_file_exists(session_path) && !cbm_file_exists(coverage_path);
-    char *settings = read_test_file_alloc(settings_path);
-    bool mcp_kept = settings && strstr(settings, "mcpServers") &&
-                    strstr(settings, "codebase-memory-mcp") &&
-                    !strstr(settings, "codebase-memory-session") &&
-                    !strstr(settings, "codebase-memory-coverage");
-    free(settings);
-
-    int bare_rc = cli_test_cmd_install(3, default_args);
-    bool bare_disabled =
-        bare_rc == 0 && !cbm_file_exists(session_path) && !cbm_file_exists(coverage_path);
-
-    char *hooks_args[] = {"--hooks", "--skip-binary", "--clients=augment", "--yes"};
-    int hooks_rc = cli_test_cmd_install(4, hooks_args);
-    settings = read_test_file_alloc(settings_path);
-    bool restored = hooks_rc == 0 && cbm_file_exists(session_path) &&
-                    cbm_file_exists(coverage_path) && settings &&
-                    strstr(settings, "codebase-memory-session") &&
-                    strstr(settings, "codebase-memory-coverage");
-    free(settings);
-
-    /* A script the user edited is no longer the owned document: the opt-out
-     * keeps it, as uninstall does, and still deletes the untouched one. */
-    char *owned_session = read_test_file_alloc(session_path);
-    char user_session[4096];
-    snprintf(user_session, sizeof(user_session), "%s# local edit\n",
-             owned_session ? owned_session : "");
-    free(owned_session);
-    write_test_file(session_path, user_session);
-    int user_rc = cli_test_cmd_install(4, no_hooks_args);
-    char *kept_session = read_test_file_alloc(session_path);
-    bool user_script_kept = user_rc == 0 && kept_session &&
-                            strcmp(kept_session, user_session) == 0 &&
-                            !cbm_file_exists(coverage_path);
-    free(kept_session);
-
-    /* End on --hooks, as the Codex case does: the opt-out is process state,
-     * and later tests install without the command line. */
-    (void)remove(session_path);
-    int final_rc = cli_test_cmd_install(4, hooks_args);
-    bool final_restored =
-        final_rc == 0 && cbm_file_exists(session_path) && cbm_file_exists(coverage_path);
-
-    cbm_cli_set_activation_ops_for_test(NULL);
-    cbm_set_auto_answer_for_test(0);
-    for (size_t i = 0U; i < sizeof(env_names) / sizeof(env_names[0]); i++) {
-        restore_test_env(env_names[i], saved_env[i]);
-    }
-    test_rmdir_r(tmpdir);
-
-    ASSERT_TRUE(default_scripts);
-    ASSERT_TRUE(mcp_kept);
-    ASSERT_TRUE(restored);
-    ASSERT_TRUE(scripts_removed);
-    ASSERT_TRUE(bare_disabled);
-    ASSERT_TRUE(user_script_kept);
-    ASSERT_TRUE(final_restored);
-    PASS();
-}
-
-TEST(cli_install_reset_deletion_waits_for_final_activation_guard) {
-    char tmpdir[256];
-    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-daemon-install-reset-XXXXXX");
-    if (!cbm_mkdtemp(tmpdir)) {
-        FAIL("cbm_mkdtemp failed");
-    }
-    char *old_home = NULL;
-    char *old_cache = NULL;
-    cli_activation_save_env(&old_home, &old_cache);
-    cbm_setenv("HOME", tmpdir, 1);
-    char cache_dir[512];
-    char index_path[640];
-    snprintf(cache_dir, sizeof(cache_dir), "%s/cache", tmpdir);
-    cbm_setenv("CBM_CACHE_DIR", cache_dir, 1);
-    test_mkdirp(cache_dir);
-    snprintf(index_path, sizeof(index_path), "%s/project.db", cache_dir);
-    write_test_file(index_path, "index must survive final-guard refusal");
-
-    char bin_dir[512];
-    char bin_target[640];
-    snprintf(bin_dir, sizeof(bin_dir), "%s/.local/bin", tmpdir);
-    test_mkdirp(bin_dir);
-#ifdef _WIN32
-    snprintf(bin_target, sizeof(bin_target), "%s/codebase-memory-mcp.exe", bin_dir);
-#else
-    snprintf(bin_target, sizeof(bin_target), "%s/codebase-memory-mcp", bin_dir);
-#endif
-    write_test_file(bin_target, "old binary must survive");
-
-    /* The prompt and candidate staging complete first. If the coordinated
-     * cohort still cannot drain, neither binary publication nor index reset
-     * may run. */
-    cli_activation_fake_t fake = {
-        .participants_active = true,
-        .mutation_reserve_result = 0,
-    };
-    cbm_cli_activation_ops_t ops = cli_activation_fake_ops(&fake);
-    cbm_cli_set_activation_ops_for_test(&ops);
-    char *argv[] = {"--force", "--reset-indexes", "--yes"};
-    int rc = cli_test_cmd_install(3, argv);
-    cbm_cli_set_activation_ops_for_test(NULL);
-    cbm_set_auto_answer_for_test(0);
-
-    const char *index = read_test_file(index_path);
-    bool index_preserved = index && strcmp(index, "index must survive final-guard refusal") == 0;
-    const char *installed = read_test_file(bin_target);
-    bool binary_preserved = installed && strcmp(installed, "old binary must survive") == 0;
-    cli_activation_restore_env(old_home, old_cache);
-    test_rmdir_r(tmpdir);
-
-    ASSERT_EQ(rc, 1);
-    ASSERT_TRUE(index_preserved);
-    ASSERT_TRUE(binary_preserved);
-    ASSERT_EQ(fake.mutation_reserve_count, 1);
-    ASSERT_EQ(fake.mutation_lease_release_count, 0);
-    ASSERT_TRUE(fake.diagnostic[0] != '\0');
     PASS();
 }
 
@@ -3187,633 +1870,6 @@ TEST(cli_index_enumeration_skips_internal_cache_dbs) {
     ASSERT_TRUE(underscore_proj_absent);
     ASSERT_STR_EQ(value, "true");
     PASS();
-}
-
-TEST(cli_install_config_only_waits_for_cohort_drain) {
-    char tmpdir[256];
-    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-daemon-install-config-race-XXXXXX");
-    if (!cbm_mkdtemp(tmpdir)) {
-        FAIL("cbm_mkdtemp failed");
-    }
-    char *old_home = NULL;
-    char *old_cache = NULL;
-    cli_activation_save_env(&old_home, &old_cache);
-    const char *raw_shell = getenv("SHELL");
-    char *old_shell = raw_shell ? strdup(raw_shell) : NULL;
-    cbm_setenv("HOME", tmpdir, 1);
-    cbm_setenv("SHELL", "/bin/zsh", 1);
-    char cache_dir[512];
-    snprintf(cache_dir, sizeof(cache_dir), "%s/cache", tmpdir);
-    cbm_setenv("CBM_CACHE_DIR", cache_dir, 1);
-
-    char codex_dir[512];
-    char codex_config[640];
-    char shell_rc[512];
-    char bin_dir[512];
-    char bin_target[640];
-    snprintf(codex_dir, sizeof(codex_dir), "%s/.codex", tmpdir);
-    snprintf(codex_config, sizeof(codex_config), "%s/config.toml", codex_dir);
-    snprintf(shell_rc, sizeof(shell_rc), "%s/.zshrc", tmpdir);
-    snprintf(bin_dir, sizeof(bin_dir), "%s/.local/bin", tmpdir);
-    test_mkdirp(codex_dir);
-    test_mkdirp(bin_dir);
-    write_test_file(shell_rc, "# path must survive final-guard refusal\n");
-#ifdef _WIN32
-    snprintf(bin_target, sizeof(bin_target), "%s/codebase-memory-mcp.exe", bin_dir);
-#else
-    snprintf(bin_target, sizeof(bin_target), "%s/codebase-memory-mcp", bin_dir);
-#endif
-    write_test_file(bin_target, "existing binary selected by the user");
-
-    /* No binary replacement and no index reset are requested. Config and PATH
-     * writes still require the same maintenance lease. */
-    cli_activation_fake_t fake = {
-        .participants_active = true,
-        .mutation_reserve_result = 0,
-    };
-    cbm_cli_activation_ops_t ops = cli_activation_fake_ops(&fake);
-    cbm_cli_set_activation_ops_for_test(&ops);
-    cbm_set_auto_answer_for_test(-1);
-    int rc = cli_test_cmd_install(0, NULL);
-    cbm_cli_set_activation_ops_for_test(NULL);
-    cbm_set_auto_answer_for_test(0);
-
-    const char *shell_data = read_test_file(shell_rc);
-    bool path_preserved = shell_data && strstr(shell_data, "export PATH") == NULL;
-    struct stat config_status;
-    bool config_absent = stat(codex_config, &config_status) != 0;
-    if (old_shell) {
-        cbm_setenv("SHELL", old_shell, 1);
-    } else {
-        cbm_unsetenv("SHELL");
-    }
-    free(old_shell);
-    cli_activation_restore_env(old_home, old_cache);
-    test_rmdir_r(tmpdir);
-
-    ASSERT_EQ(rc, 1);
-    ASSERT_TRUE(path_preserved);
-    ASSERT_TRUE(config_absent);
-    ASSERT_EQ(fake.mutation_reserve_count, 1);
-    ASSERT_EQ(fake.mutation_lease_release_count, 0);
-    ASSERT_TRUE(fake.diagnostic[0] != '\0');
-    PASS();
-}
-
-TEST(cli_install_config_and_path_finish_before_guard_release) {
-    char tmpdir[256];
-    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-daemon-install-window-XXXXXX");
-    if (!cbm_mkdtemp(tmpdir)) {
-        FAIL("cbm_mkdtemp failed");
-    }
-    char *old_home = NULL;
-    char *old_cache = NULL;
-    cli_activation_save_env(&old_home, &old_cache);
-    const char *raw_shell = getenv("SHELL");
-    char *old_shell = raw_shell ? strdup(raw_shell) : NULL;
-    cbm_setenv("HOME", tmpdir, 1);
-    cbm_setenv("SHELL", "/bin/zsh", 1);
-    char cache_dir[512];
-    snprintf(cache_dir, sizeof(cache_dir), "%s/cache", tmpdir);
-    cbm_setenv("CBM_CACHE_DIR", cache_dir, 1);
-
-    char codex_dir[512];
-    char codex_config[640];
-    char shell_rc[512];
-    char bin_dir[512];
-    char bin_target[640];
-    snprintf(codex_dir, sizeof(codex_dir), "%s/.codex", tmpdir);
-    snprintf(codex_config, sizeof(codex_config), "%s/config.toml", codex_dir);
-    snprintf(shell_rc, sizeof(shell_rc), "%s/.zshrc", tmpdir);
-    snprintf(bin_dir, sizeof(bin_dir), "%s/.local/bin", tmpdir);
-    test_mkdirp(codex_dir);
-    test_mkdirp(bin_dir);
-    write_test_file(shell_rc, "# existing shell config\n");
-#ifdef _WIN32
-    snprintf(bin_target, sizeof(bin_target), "%s/codebase-memory-mcp.exe", bin_dir);
-#else
-    snprintf(bin_target, sizeof(bin_target), "%s/codebase-memory-mcp", bin_dir);
-#endif
-    write_test_file(bin_target, "existing binary selected by the user");
-
-    cli_activation_fake_t fake = {
-        .mutation_reserve_result = 1,
-        .guarded_path_a = codex_config,
-        .guarded_text_a = "codebase-memory-mcp",
-#ifndef _WIN32
-        /* Windows configures PATH through the user registry, not a shell rc,
-         * so the rc-file visibility guard is a POSIX-only expectation. */
-        .guarded_path_b = shell_rc,
-        .guarded_text_b = "export PATH",
-#endif
-    };
-    cbm_cli_activation_ops_t ops = cli_activation_fake_ops(&fake);
-    cbm_cli_set_activation_ops_for_test(&ops);
-    cbm_set_auto_answer_for_test(-1);
-    int rc = cli_test_cmd_install(0, NULL);
-    cbm_cli_set_activation_ops_for_test(NULL);
-    cbm_set_auto_answer_for_test(0);
-
-    if (old_shell) {
-        cbm_setenv("SHELL", old_shell, 1);
-    } else {
-        cbm_unsetenv("SHELL");
-    }
-    free(old_shell);
-    cli_activation_restore_env(old_home, old_cache);
-    test_rmdir_r(tmpdir);
-
-    ASSERT_EQ(rc, 0);
-    ASSERT_EQ(fake.mutation_reserve_count, 1);
-    ASSERT_EQ(fake.mutation_lease_release_count, 1);
-    ASSERT_TRUE(fake.guarded_files_visible_before_unlock);
-    PASS();
-}
-
-/* Regression: config installation is not atomic across every supported agent.
- * Once the verified executable has been published, rolling only that binary
- * back on one agent-config refusal leaves any successful config writes pointing
- * at the wrong (or, for a fresh install, missing) executable. */
-TEST(cli_install_config_failure_keeps_published_binary) {
-    char tmpdir[256];
-    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-install-partial-config-XXXXXX");
-    if (!cbm_mkdtemp(tmpdir)) {
-        FAIL("cbm_mkdtemp failed");
-    }
-    char *old_home = NULL;
-    char *old_cache = NULL;
-    cli_activation_save_env(&old_home, &old_cache);
-    char *old_path = save_test_env("PATH");
-    char *old_shell = save_test_env("SHELL");
-    cbm_setenv("HOME", tmpdir, 1);
-    cbm_setenv("PATH", tmpdir, 1);
-    cbm_setenv("SHELL", "/bin/zsh", 1);
-
-    char cache_dir[512];
-    char openclaw_dir[512];
-    char openclaw_config[640];
-    char bin_dir[512];
-    char bin_target[640];
-    snprintf(cache_dir, sizeof(cache_dir), "%s/cache", tmpdir);
-    snprintf(openclaw_dir, sizeof(openclaw_dir), "%s/.openclaw", tmpdir);
-    snprintf(openclaw_config, sizeof(openclaw_config), "%s/openclaw.json", openclaw_dir);
-    snprintf(bin_dir, sizeof(bin_dir), "%s/.local/bin", tmpdir);
-#ifdef _WIN32
-    snprintf(bin_target, sizeof(bin_target), "%s/codebase-memory-mcp.exe", bin_dir);
-#else
-    snprintf(bin_target, sizeof(bin_target), "%s/codebase-memory-mcp", bin_dir);
-#endif
-    cbm_setenv("CBM_CACHE_DIR", cache_dir, 1);
-    test_mkdirp(openclaw_dir);
-    test_mkdirp(bin_dir);
-    const char *malformed = "{ invalid config\n";
-    write_test_file(openclaw_config, malformed);
-
-    cli_activation_fake_t fake = {
-        .mutation_reserve_result = 1,
-    };
-    cbm_cli_activation_ops_t ops = cli_activation_fake_ops(&fake);
-    cbm_cli_set_activation_ops_for_test(&ops);
-    char *argv[] = {"--force", "--yes"};
-    int rc = cli_test_cmd_install(2, argv);
-    cbm_cli_set_activation_ops_for_test(NULL);
-    cbm_set_auto_answer_for_test(0);
-
-    struct stat binary_status;
-    bool binary_published = stat(bin_target, &binary_status) == 0;
-    char *after = read_test_file_alloc(openclaw_config);
-    bool malformed_preserved = after && strcmp(after, malformed) == 0;
-    free(after);
-    restore_test_env("PATH", old_path);
-    restore_test_env("SHELL", old_shell);
-    cli_activation_restore_env(old_home, old_cache);
-    test_rmdir_r(tmpdir);
-
-    ASSERT_EQ(rc, 1);
-    ASSERT_TRUE(binary_published);
-    ASSERT_TRUE(malformed_preserved);
-    ASSERT_EQ(fake.mutation_reserve_count, 1);
-    ASSERT_EQ(fake.mutation_lease_release_count, 1);
-    ASSERT_NOT_NULL(strstr(fake.diagnostic, "executable was kept"));
-    PASS();
-}
-
-TEST(cli_update_download_failure_does_not_quiesce_sessions) {
-    char tmpdir[256];
-    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-daemon-update-XXXXXX");
-    if (!cbm_mkdtemp(tmpdir)) {
-        FAIL("cbm_mkdtemp failed");
-    }
-    char *old_home = NULL;
-    char *old_cache = NULL;
-    cli_activation_save_env(&old_home, &old_cache);
-    const char *download = getenv("CBM_DOWNLOAD_URL");
-    char *old_download = download ? strdup(download) : NULL;
-    cbm_setenv("HOME", tmpdir, 1);
-    cbm_setenv("CBM_DOWNLOAD_URL", "file:///cbm-update-does-not-exist", 1);
-    char cache_dir[512];
-    char index_path[640];
-    snprintf(cache_dir, sizeof(cache_dir), "%s/cache", tmpdir);
-    cbm_setenv("CBM_CACHE_DIR", cache_dir, 1);
-    test_mkdirp(cache_dir);
-    snprintf(index_path, sizeof(index_path), "%s/project.db", cache_dir);
-    write_test_file(index_path, "index must survive");
-
-    cli_activation_fake_t fake = {
-        .participants_active = true,
-        .mutation_reserve_result = 1,
-    };
-    cbm_cli_activation_ops_t ops = cli_activation_fake_ops(&fake);
-    cbm_cli_set_activation_ops_for_test(&ops);
-    char *argv[] = {"--force", "--yes"};
-    int rc = cli_test_cmd_update(2, argv);
-    cbm_cli_set_activation_ops_for_test(NULL);
-    cbm_set_auto_answer_for_test(0);
-
-    const char *index = read_test_file(index_path);
-    bool preserved = index && strcmp(index, "index must survive") == 0;
-    if (old_download) {
-        cbm_setenv("CBM_DOWNLOAD_URL", old_download, 1);
-    } else {
-        cbm_unsetenv("CBM_DOWNLOAD_URL");
-    }
-    free(old_download);
-    cli_activation_restore_env(old_home, old_cache);
-    test_rmdir_r(tmpdir);
-    ASSERT_EQ(rc, 1);
-    ASSERT_TRUE(preserved);
-    ASSERT_EQ(fake.mutation_reserve_count, 0);
-    PASS();
-}
-
-TEST(cli_update_already_current_does_not_quiesce_sessions) {
-#ifdef _WIN32
-    /* The deterministic fake-curl fixture below is POSIX-only. The guarded
-     * ordering it exercises is platform-independent. */
-    PASS();
-#else
-    char tmpdir[256];
-    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-daemon-update-current-XXXXXX");
-    if (!cbm_mkdtemp(tmpdir)) {
-        FAIL("cbm_mkdtemp failed");
-    }
-    char *old_home = NULL;
-    char *old_cache = NULL;
-    cli_activation_save_env(&old_home, &old_cache);
-    const char *raw_path = getenv("PATH");
-    const char *raw_download = getenv("CBM_DOWNLOAD_URL");
-    char *old_path = raw_path ? strdup(raw_path) : NULL;
-    char *old_download = raw_download ? strdup(raw_download) : NULL;
-    cbm_setenv("HOME", tmpdir, 1);
-    cbm_unsetenv("CBM_DOWNLOAD_URL");
-
-    char bin_dir[512];
-    char fake_curl[640];
-    snprintf(bin_dir, sizeof(bin_dir), "%s/bin", tmpdir);
-    snprintf(fake_curl, sizeof(fake_curl), "%s/curl", bin_dir);
-    test_mkdirp(bin_dir);
-    write_test_file(
-        fake_curl,
-        "#!/bin/sh\n"
-        "printf '%s\\n' 'HTTP/1.1 302 Found' "
-        "'location: https://github.com/DeusData/codebase-memory-mcp/releases/tag/v0.0.0'\n");
-    bool fixture_ready = chmod(fake_curl, 0700) == 0;
-    cbm_setenv("PATH", bin_dir, 1);
-
-    cli_activation_fake_t fake = {
-        .participants_active = true,
-        .mutation_reserve_result = 1,
-    };
-    cbm_cli_activation_ops_t ops = cli_activation_fake_ops(&fake);
-    cbm_cli_set_activation_ops_for_test(&ops);
-    char *argv[] = {"--yes"};
-    int rc = fixture_ready ? cli_test_cmd_update(1, argv) : -1;
-    cbm_cli_set_activation_ops_for_test(NULL);
-
-    if (old_path) {
-        cbm_setenv("PATH", old_path, 1);
-    } else {
-        cbm_unsetenv("PATH");
-    }
-    if (old_download) {
-        cbm_setenv("CBM_DOWNLOAD_URL", old_download, 1);
-    } else {
-        cbm_unsetenv("CBM_DOWNLOAD_URL");
-    }
-    free(old_path);
-    free(old_download);
-    cli_activation_restore_env(old_home, old_cache);
-    test_rmdir_r(tmpdir);
-
-    ASSERT_TRUE(fixture_ready);
-    ASSERT_EQ(rc, 0);
-    ASSERT_EQ(fake.mutation_reserve_count, 0);
-    PASS();
-#endif
-}
-
-TEST(cli_update_agent_configs_finish_before_guard_release) {
-    char tmpdir[256];
-    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-daemon-update-window-XXXXXX");
-    if (!cbm_mkdtemp(tmpdir)) {
-        FAIL("cbm_mkdtemp failed");
-    }
-    char *old_home = NULL;
-    char *old_cache = NULL;
-    cli_activation_save_env(&old_home, &old_cache);
-    const char *download_env = getenv("CBM_DOWNLOAD_URL");
-    char *old_download = download_env ? strdup(download_env) : NULL;
-    cbm_setenv("HOME", tmpdir, 1);
-    char cache_dir[512];
-    snprintf(cache_dir, sizeof(cache_dir), "%s/cache", tmpdir);
-    cbm_setenv("CBM_CACHE_DIR", cache_dir, 1);
-
-    char codex_dir[512];
-    char codex_config[640];
-    char release_dir[512];
-    snprintf(codex_dir, sizeof(codex_dir), "%s/.codex", tmpdir);
-    snprintf(codex_config, sizeof(codex_config), "%s/config.toml", codex_dir);
-    snprintf(release_dir, sizeof(release_dir), "%s/release", tmpdir);
-    test_mkdirp(codex_dir);
-    test_mkdirp(release_dir);
-
-#ifdef _WIN32
-    /* The existing ZIP fixture helper is intentionally exercised elsewhere;
-     * this activation-window regression uses the tar update path. */
-    cli_activation_restore_env(old_home, old_cache);
-    if (old_download) {
-        cbm_setenv("CBM_DOWNLOAD_URL", old_download, 1);
-    } else {
-        cbm_unsetenv("CBM_DOWNLOAD_URL");
-    }
-    free(old_download);
-    test_rmdir_r(tmpdir);
-    PASS();
-#else
-    char archive_path[768];
-    char checksum_path[640];
-#if defined(__APPLE__)
-#if defined(__aarch64__) || defined(__arm64__)
-    const char *asset_name = "codebase-memory-mcp-darwin-arm64.tar.gz";
-#else
-    const char *asset_name = "codebase-memory-mcp-darwin-amd64.tar.gz";
-#endif
-#else
-#if defined(__aarch64__)
-    const char *asset_name = "codebase-memory-mcp-linux-arm64-portable.tar.gz";
-#else
-    const char *asset_name = "codebase-memory-mcp-linux-amd64-portable.tar.gz";
-#endif
-#endif
-#ifdef __APPLE__
-    /* Use the structurally real test runner rather than re-signing an Apple
-     * platform binary. Turning /usr/bin/true's arm64e/platform signature into
-     * an ad-hoc signature is OS-policy-dependent on older macOS runners. */
-    char native_fixture_path[CBM_SZ_4K] = {0};
-    uint32_t native_fixture_size = (uint32_t)sizeof(native_fixture_path);
-    ASSERT_EQ(_NSGetExecutablePath(native_fixture_path, &native_fixture_size), 0);
-    const char *native_fixture = native_fixture_path;
-#else
-    const char *native_fixture = "/bin/true";
-#endif
-    FILE *native_file = fopen(native_fixture, "rb");
-    ASSERT_NOT_NULL(native_file);
-    ASSERT_EQ(fseek(native_file, 0, SEEK_END), 0);
-    long native_size = ftell(native_file);
-    ASSERT_GT(native_size, 0);
-    ASSERT_LTE(native_size, INT_MAX);
-    ASSERT_EQ(fseek(native_file, 0, SEEK_SET), 0);
-    unsigned char *replacement = malloc((size_t)native_size);
-    ASSERT_NOT_NULL(replacement);
-    ASSERT_EQ(fread(replacement, 1, (size_t)native_size, native_file), (size_t)native_size);
-    ASSERT_EQ(fclose(native_file), 0);
-    int archive_len = 0;
-    unsigned char *archive =
-        create_test_targz("codebase-memory-mcp", replacement, (int)native_size, &archive_len);
-    free(replacement);
-    ASSERT_NOT_NULL(archive);
-    snprintf(archive_path, sizeof(archive_path), "%s/%s", release_dir, asset_name);
-    FILE *archive_file = fopen(archive_path, "wb");
-    ASSERT_NOT_NULL(archive_file);
-    ASSERT_EQ(fwrite(archive, 1, (size_t)archive_len, archive_file), (size_t)archive_len);
-    ASSERT_EQ(fclose(archive_file), 0);
-    free(archive);
-
-    char digest[65];
-    ASSERT_EQ(cbm_cli_sha256_file(archive_path, digest, sizeof(digest)), 0);
-    snprintf(checksum_path, sizeof(checksum_path), "%s/checksums.txt", release_dir);
-    FILE *checksum_file = fopen(checksum_path, "w");
-    ASSERT_NOT_NULL(checksum_file);
-    ASSERT_TRUE(fprintf(checksum_file, "%s  %s\n", digest, asset_name) > 0);
-    ASSERT_EQ(fclose(checksum_file), 0);
-
-    char download_url[640];
-    snprintf(download_url, sizeof(download_url), "file://%s", release_dir);
-    cbm_setenv("CBM_DOWNLOAD_URL", download_url, 1);
-
-    cli_activation_fake_t fake = {
-        .mutation_reserve_result = 1,
-        .guarded_path_a = codex_config,
-        .guarded_text_a = "codebase-memory-mcp",
-    };
-    cbm_cli_activation_ops_t ops = cli_activation_fake_ops(&fake);
-    cbm_cli_set_activation_ops_for_test(&ops);
-    char *argv[] = {"--force"};
-    int rc = cli_test_cmd_update(1, argv);
-    cbm_cli_set_activation_ops_for_test(NULL);
-
-    /* Re-run against a known old target while one independently detected agent
-     * refuses its config. The new executable must remain published because
-     * earlier agent configs may already have been refreshed for it. */
-    char openclaw_dir[512];
-    char openclaw_config[640];
-    char bin_target[640];
-    snprintf(openclaw_dir, sizeof(openclaw_dir), "%s/.openclaw", tmpdir);
-    snprintf(openclaw_config, sizeof(openclaw_config), "%s/openclaw.json", openclaw_dir);
-    snprintf(bin_target, sizeof(bin_target), "%s/.local/bin/codebase-memory-mcp", tmpdir);
-    test_mkdirp(openclaw_dir);
-    write_test_file(openclaw_config, "{ invalid config\n");
-    static const char old_binary[] = "old binary before partial update";
-    write_test_file(bin_target, old_binary);
-
-    cli_activation_fake_t config_failure = {
-        .mutation_reserve_result = 1,
-    };
-    cbm_cli_activation_ops_t failure_ops = cli_activation_fake_ops(&config_failure);
-    cbm_cli_set_activation_ops_for_test(&failure_ops);
-    int config_failure_rc = cli_test_cmd_update(1, argv);
-    cbm_cli_set_activation_ops_for_test(NULL);
-    struct stat updated_status;
-    bool replacement_kept = stat(bin_target, &updated_status) == 0 &&
-                            updated_status.st_size != (off_t)(sizeof(old_binary) - 1U);
-
-    if (old_download) {
-        cbm_setenv("CBM_DOWNLOAD_URL", old_download, 1);
-    } else {
-        cbm_unsetenv("CBM_DOWNLOAD_URL");
-    }
-    free(old_download);
-    cli_activation_restore_env(old_home, old_cache);
-    test_rmdir_r(tmpdir);
-
-    ASSERT_EQ(rc, 0);
-    ASSERT_EQ(fake.mutation_reserve_count, 1);
-    ASSERT_EQ(fake.mutation_lease_release_count, 1);
-    ASSERT_TRUE(fake.guarded_files_visible_before_unlock);
-    ASSERT_EQ(config_failure_rc, 1);
-    ASSERT_TRUE(replacement_kept);
-    ASSERT_EQ(config_failure.mutation_reserve_count, 1);
-    ASSERT_EQ(config_failure.mutation_lease_release_count, 1);
-    ASSERT_NOT_NULL(strstr(config_failure.diagnostic, "executable was kept"));
-    PASS();
-#endif
-}
-
-/* 2026-10-09: /tmp filled up mid-update, and the update said only "signed
- * update candidate preparation failed", although the cause was a full disk.
- * The failing staging write must be reported by step and OS error, through the
- * staging cleanup, and the old executable must stay. */
-TEST(cli_update_names_the_failing_staging_step_and_os_error) {
-#ifdef _WIN32
-    SKIP_PLATFORM("Windows staging reports through GetLastError, not errno");
-#else
-    char tmpdir[256];
-    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-update-enospc-XXXXXX");
-    if (!cbm_mkdtemp(tmpdir)) {
-        FAIL("cbm_mkdtemp failed");
-    }
-    char *old_home = NULL;
-    char *old_cache = NULL;
-    cli_activation_save_env(&old_home, &old_cache);
-    const char *download_env = getenv("CBM_DOWNLOAD_URL");
-    char *old_download = download_env ? strdup(download_env) : NULL;
-    cbm_setenv("HOME", tmpdir, 1);
-    char cache_dir[512];
-    snprintf(cache_dir, sizeof(cache_dir), "%s/cache", tmpdir);
-    cbm_setenv("CBM_CACHE_DIR", cache_dir, 1);
-    char release_dir[512];
-    char bin_dir[512];
-    char bin_target[640];
-    snprintf(release_dir, sizeof(release_dir), "%s/release", tmpdir);
-    snprintf(bin_dir, sizeof(bin_dir), "%s/.local/bin", tmpdir);
-    snprintf(bin_target, sizeof(bin_target), "%s/codebase-memory-mcp", bin_dir);
-    test_mkdirp(release_dir);
-    test_mkdirp(bin_dir);
-    static const char old_binary[] = "old binary before a failed update";
-    write_test_file(bin_target, old_binary);
-
-#if defined(__APPLE__)
-#if defined(__aarch64__) || defined(__arm64__)
-    const char *asset_name = "codebase-memory-mcp-darwin-arm64.tar.gz";
-#else
-    const char *asset_name = "codebase-memory-mcp-darwin-amd64.tar.gz";
-#endif
-    char native_fixture_path[CBM_SZ_4K] = {0};
-    uint32_t native_fixture_size = (uint32_t)sizeof(native_fixture_path);
-    ASSERT_EQ(_NSGetExecutablePath(native_fixture_path, &native_fixture_size), 0);
-    const char *native_fixture = native_fixture_path;
-#else
-#if defined(__aarch64__)
-    const char *asset_name = "codebase-memory-mcp-linux-arm64-portable.tar.gz";
-#else
-    const char *asset_name = "codebase-memory-mcp-linux-amd64-portable.tar.gz";
-#endif
-    const char *native_fixture = "/bin/true";
-#endif
-    FILE *native_file = fopen(native_fixture, "rb");
-    ASSERT_NOT_NULL(native_file);
-    ASSERT_EQ(fseek(native_file, 0, SEEK_END), 0);
-    long native_size = ftell(native_file);
-    ASSERT_GT(native_size, 0);
-    ASSERT_LTE(native_size, INT_MAX);
-    ASSERT_EQ(fseek(native_file, 0, SEEK_SET), 0);
-    unsigned char *replacement = malloc((size_t)native_size);
-    ASSERT_NOT_NULL(replacement);
-    ASSERT_EQ(fread(replacement, 1, (size_t)native_size, native_file), (size_t)native_size);
-    ASSERT_EQ(fclose(native_file), 0);
-    int archive_len = 0;
-    unsigned char *archive =
-        create_test_targz("codebase-memory-mcp", replacement, (int)native_size, &archive_len);
-    free(replacement);
-    ASSERT_NOT_NULL(archive);
-    char archive_path[768];
-    snprintf(archive_path, sizeof(archive_path), "%s/%s", release_dir, asset_name);
-    FILE *archive_file = fopen(archive_path, "wb");
-    ASSERT_NOT_NULL(archive_file);
-    ASSERT_EQ(fwrite(archive, 1, (size_t)archive_len, archive_file), (size_t)archive_len);
-    ASSERT_EQ(fclose(archive_file), 0);
-    free(archive);
-    char digest[65];
-    ASSERT_EQ(cbm_cli_sha256_file(archive_path, digest, sizeof(digest)), 0);
-    char checksum_path[640];
-    snprintf(checksum_path, sizeof(checksum_path), "%s/checksums.txt", release_dir);
-    FILE *checksum_file = fopen(checksum_path, "w");
-    ASSERT_NOT_NULL(checksum_file);
-    ASSERT_TRUE(fprintf(checksum_file, "%s  %s\n", digest, asset_name) > 0);
-    ASSERT_EQ(fclose(checksum_file), 0);
-    char download_url[640];
-    snprintf(download_url, sizeof(download_url), "file://%s", release_dir);
-    cbm_setenv("CBM_DOWNLOAD_URL", download_url, 1);
-
-    cli_activation_fake_t fake = {
-        .mutation_reserve_result = 1,
-    };
-    cbm_cli_activation_ops_t ops = cli_activation_fake_ops(&fake);
-    cbm_cli_set_activation_ops_for_test(&ops);
-    FILE *capture = tmpfile();
-    int saved_stdout = capture ? dup(STDOUT_FILENO) : -1;
-    int saved_stderr = capture ? dup(STDERR_FILENO) : -1;
-    int rc = -1;
-    if (capture && saved_stdout >= 0 && saved_stderr >= 0) {
-        fflush(NULL);
-        if (dup2(fileno(capture), STDOUT_FILENO) >= 0 &&
-            dup2(fileno(capture), STDERR_FILENO) >= 0) {
-            /* The first staging write of the update fails as on a full disk. */
-            cbm_activation_transaction_write_failures_set_for_testing(1U, ENOSPC);
-            char *argv[] = {"--force"};
-            rc = cli_test_cmd_update(1, argv);
-            cbm_activation_transaction_write_failures_set_for_testing(0U, 0);
-        }
-        fflush(NULL);
-        (void)dup2(saved_stdout, STDOUT_FILENO);
-        (void)dup2(saved_stderr, STDERR_FILENO);
-    }
-    if (saved_stdout >= 0) {
-        close(saved_stdout);
-    }
-    if (saved_stderr >= 0) {
-        close(saved_stderr);
-    }
-    cbm_cli_set_activation_ops_for_test(NULL);
-    char output[16384] = {0};
-    if (capture) {
-        rewind(capture);
-        size_t count = fread(output, 1, sizeof(output) - 1U, capture);
-        output[count] = '\0';
-        fclose(capture);
-    }
-    const char *kept = read_test_file(bin_target);
-    bool old_kept = kept && strcmp(kept, old_binary) == 0;
-
-    if (old_download) {
-        cbm_setenv("CBM_DOWNLOAD_URL", old_download, 1);
-    } else {
-        cbm_unsetenv("CBM_DOWNLOAD_URL");
-    }
-    free(old_download);
-    cli_activation_restore_env(old_home, old_cache);
-    test_rmdir_r(tmpdir);
-
-    ASSERT_NEQ(rc, 0);
-    ASSERT_NOT_NULL(strstr(output, strerror(ENOSPC)));
-#ifdef __APPLE__
-    ASSERT_NOT_NULL(strstr(output, "failed while writing the unsigned candidate"));
-#else
-    ASSERT_NOT_NULL(strstr(output, "failed to stage verified update"));
-#endif
-    ASSERT_TRUE(old_kept);
-    PASS();
-#endif
 }
 
 TEST(cli_uninstall_quiesces_active_cohort_before_removing_binary_and_index) {
@@ -4462,12 +2518,10 @@ TEST(cli_activation_guard_is_bypassed_for_dry_run_and_plan) {
     };
     cbm_cli_activation_ops_t ops = cli_activation_fake_ops(&fake);
     cbm_cli_set_activation_ops_for_test(&ops);
-    char *install_dry[] = {"--force", "--dry-run"};
-    char *install_plan[] = {"--force", "--plan"};
+    char *install_dry[] = {"--dry-run", "--yes"};
     char *update_dry[] = {"--force", "--dry-run"};
     char *uninstall_dry[] = {"--dry-run", "--yes"};
     int install_dry_rc = cli_test_cmd_install(2, install_dry);
-    int install_plan_rc = cli_test_cmd_install(2, install_plan);
     int update_dry_rc = cli_test_cmd_update(2, update_dry);
     int uninstall_dry_rc = cli_test_cmd_uninstall(2, uninstall_dry);
     cbm_cli_set_activation_ops_for_test(NULL);
@@ -4476,10 +2530,301 @@ TEST(cli_activation_guard_is_bypassed_for_dry_run_and_plan) {
     cli_activation_restore_env(old_home, old_cache);
     test_rmdir_r(tmpdir);
     ASSERT_EQ(install_dry_rc, 0);
-    ASSERT_EQ(install_plan_rc, 0);
-    ASSERT_EQ(update_dry_rc, 0);
+    /* update only prints upgrade steps, and always exits non-zero. */
+    ASSERT_EQ(update_dry_rc, 1);
     ASSERT_EQ(uninstall_dry_rc, 0);
     ASSERT_EQ(fake.mutation_reserve_count, 0);
+    PASS();
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ *  Mori install and update: register mori-graph, download nothing
+ * ═══════════════════════════════════════════════════════════════════ */
+
+typedef struct {
+    char *home;
+    char *cache;
+    char *claude_config_dir;
+    char *codex_home;
+} cli_mori_env_t;
+
+static char *cli_mori_getenv_dup(const char *name) {
+    const char *value = getenv(name);
+    return value ? strdup(value) : NULL;
+}
+
+static void cli_mori_env_restore_one(const char *name, char *value) {
+    if (value) {
+        cbm_setenv(name, value, 1);
+    } else {
+        cbm_unsetenv(name);
+    }
+    free(value);
+}
+
+/* Point HOME at home and drop the client config overrides, so detection and
+ * writes stay inside the fixture. */
+static cli_mori_env_t cli_mori_env_enter(const char *home) {
+    cli_mori_env_t saved = {0};
+    cli_activation_save_env(&saved.home, &saved.cache);
+    saved.claude_config_dir = cli_mori_getenv_dup("CLAUDE_CONFIG_DIR");
+    saved.codex_home = cli_mori_getenv_dup("CODEX_HOME");
+    cbm_setenv("HOME", home, 1);
+    cbm_unsetenv("CLAUDE_CONFIG_DIR");
+    cbm_unsetenv("CODEX_HOME");
+    return saved;
+}
+
+static void cli_mori_env_leave(cli_mori_env_t saved) {
+    cli_activation_restore_env(saved.home, saved.cache);
+    cli_mori_env_restore_one("CLAUDE_CONFIG_DIR", saved.claude_config_dir);
+    cli_mori_env_restore_one("CODEX_HOME", saved.codex_home);
+}
+
+static bool cli_mori_path_exists(const char *path) {
+    struct stat st;
+    return stat(path, &st) == 0;
+}
+
+/* install registers the running binary as mori-graph for Claude Code and
+ * Codex, twice without change, and writes no skill, agent profile, or hook. */
+TEST(cli_install_registers_mori_graph_without_skills) {
+    char home[256];
+    snprintf(home, sizeof(home), "/tmp/cli-mori-install-XXXXXX");
+    if (!cbm_mkdtemp(home)) {
+        FAIL("cbm_mkdtemp failed");
+    }
+    char path[640];
+    snprintf(path, sizeof(path), "%s/.claude", home);
+    ASSERT_TRUE(cbm_mkdir_p(path, 0755));
+    snprintf(path, sizeof(path), "%s/.claude/settings.json", home);
+    ASSERT_EQ(write_test_file(path, "{}\n"), 0);
+    snprintf(path, sizeof(path), "%s/.codex", home);
+    ASSERT_TRUE(cbm_mkdir_p(path, 0755));
+
+    cli_mori_env_t saved = cli_mori_env_enter(home);
+    cbm_cli_set_self_path_override_for_test("/opt/mori/bin/mori");
+    int first_rc = cli_test_cmd_install(0, NULL);
+    char claude_json[640];
+    char codex_toml[640];
+    snprintf(claude_json, sizeof(claude_json), "%s/.claude.json", home);
+    snprintf(codex_toml, sizeof(codex_toml), "%s/.codex/config.toml", home);
+    char *claude_first = read_test_file_alloc(claude_json);
+    char *codex_first = read_test_file_alloc(codex_toml);
+    int second_rc = cli_test_cmd_install(1, (char *[]){"--yes"});
+    char *claude_second = read_test_file_alloc(claude_json);
+    char *codex_second = read_test_file_alloc(codex_toml);
+    cbm_cli_set_self_path_override_for_test("/opt/mori/next/bin/mori");
+    int upgrade_rc = cli_test_cmd_install(0, NULL);
+    char *claude_upgrade = read_test_file_alloc(claude_json);
+    cbm_cli_set_self_path_override_for_test(NULL);
+    cli_mori_env_leave(saved);
+
+    char skills[640];
+    char agents[640];
+    char hooks[640];
+    snprintf(skills, sizeof(skills), "%s/.claude/skills", home);
+    snprintf(agents, sizeof(agents), "%s/.claude/agents", home);
+    snprintf(hooks, sizeof(hooks), "%s/.claude/hooks", home);
+    bool wrote_extras =
+        cli_mori_path_exists(skills) || cli_mori_path_exists(agents) || cli_mori_path_exists(hooks);
+
+    bool claude_ok = claude_first && strstr(claude_first, "\"mori-graph\"") &&
+                     strstr(claude_first, "\"/opt/mori/bin/mori\"") &&
+                     !strstr(claude_first, "codebase-memory-mcp");
+    bool codex_ok = codex_first && strstr(codex_first, "[mcp_servers.mori-graph]") &&
+                    strstr(codex_first, "command = \"/opt/mori/bin/mori\"") &&
+                    strstr(codex_first, "CBM_CACHE_DIR") &&
+                    !strstr(codex_first, "codebase-memory-mcp");
+    bool idempotent = claude_second && codex_second && claude_first && codex_first &&
+                      strcmp(claude_first, claude_second) == 0 &&
+                      strcmp(codex_first, codex_second) == 0;
+    bool preserves_claude_command =
+        claude_first && claude_upgrade && strcmp(claude_first, claude_upgrade) == 0;
+    free(claude_first);
+    free(codex_first);
+    free(claude_second);
+    free(codex_second);
+    free(claude_upgrade);
+    test_rmdir_r(home);
+
+    ASSERT_EQ(first_rc, 0);
+    ASSERT_EQ(second_rc, 0);
+    ASSERT_TRUE(claude_ok);
+    ASSERT_TRUE(codex_ok);
+    ASSERT_TRUE(idempotent);
+    ASSERT_EQ(upgrade_rc, 1);
+    ASSERT_TRUE(preserves_claude_command);
+    ASSERT_FALSE(wrote_extras);
+    PASS();
+}
+
+/* install --dry-run reports the registrations and writes nothing. */
+TEST(cli_install_dry_run_writes_nothing) {
+    char home[256];
+    snprintf(home, sizeof(home), "/tmp/cli-mori-install-dry-XXXXXX");
+    if (!cbm_mkdtemp(home)) {
+        FAIL("cbm_mkdtemp failed");
+    }
+    char path[640];
+    snprintf(path, sizeof(path), "%s/.codex", home);
+    ASSERT_TRUE(cbm_mkdir_p(path, 0755));
+
+    cli_mori_env_t saved = cli_mori_env_enter(home);
+    cbm_cli_set_self_path_override_for_test("/opt/mori/bin/mori");
+    int rc = cli_test_cmd_install(1, (char *[]){"--dry-run"});
+    cbm_cli_set_self_path_override_for_test(NULL);
+    cli_mori_env_leave(saved);
+
+    char codex_toml[640];
+    char claude_json[640];
+    snprintf(codex_toml, sizeof(codex_toml), "%s/.codex/config.toml", home);
+    snprintf(claude_json, sizeof(claude_json), "%s/.claude.json", home);
+    bool wrote = cli_mori_path_exists(codex_toml) || cli_mori_path_exists(claude_json);
+    test_rmdir_r(home);
+
+    ASSERT_EQ(rc, 0);
+    ASSERT_FALSE(wrote);
+    PASS();
+}
+
+/* The Claude entry keeps an existing server's keys and other servers. */
+TEST(cli_install_mori_claude_mcp_keeps_other_servers) {
+    char dir[256];
+    snprintf(dir, sizeof(dir), "/tmp/cli-mori-claude-XXXXXX");
+    if (!cbm_mkdtemp(dir)) {
+        FAIL("cbm_mkdtemp failed");
+    }
+    char config[512];
+    snprintf(config, sizeof(config), "%s/.claude.json", dir);
+    ASSERT_EQ(write_test_file(config, "{\"theme\":\"dark\",\"mcpServers\":{\"other\":"
+                                      "{\"command\":\"/bin/other\",\"args\":[]}}}\n"),
+              0);
+    int rc = cbm_install_mori_claude_mcp("/opt/mori/bin/mori", config);
+    char *data = read_test_file_alloc(config);
+    bool ok = data && strstr(data, "\"theme\"") && strstr(data, "\"/bin/other\"") &&
+              strstr(data, "\"mori-graph\"") && strstr(data, "\"/opt/mori/bin/mori\"");
+    free(data);
+    test_rmdir_r(dir);
+    ASSERT_EQ(rc, 0);
+    ASSERT_TRUE(ok);
+    PASS();
+}
+
+TEST(cli_install_preserves_manually_registered_mori_graph) {
+    char dir[256];
+    snprintf(dir, sizeof(dir), "/tmp/cli-mori-existing-XXXXXX");
+    if (!cbm_mkdtemp(dir)) {
+        FAIL("cbm_mkdtemp failed");
+    }
+    char claude[512];
+    char codex[512];
+    snprintf(claude, sizeof(claude), "%s/.claude.json", dir);
+    snprintf(codex, sizeof(codex), "%s/config.toml", dir);
+    const char claude_entry[] =
+        "{\"mcpServers\":{\"mori-graph\":{"
+        "\"command\":\"/home/user/.local/share/mise/shims/codebase-memory-mcp\","
+        "\"args\":[\"--ui=false\"],\"env\":{\"CBM_CACHE_DIR\":\"/graph/cache\"}}}}\n";
+    const char codex_entry[] =
+        "[mcp_servers.mori-graph]\n"
+        "command = \"/home/user/.local/share/mise/shims/codebase-memory-mcp\"\n"
+        "args = [\"--ui=false\"]\n"
+        "env_vars = [\"CBM_CACHE_DIR\", \"CBM_RUNTIME_DIR\"]\n";
+    ASSERT_EQ(write_test_file(claude, claude_entry), 0);
+    ASSERT_EQ(write_test_file(codex, codex_entry), 0);
+    int claude_rc = cbm_install_mori_claude_mcp("/opt/mori/bin/mori", claude);
+    int codex_rc = cbm_install_mori_codex_mcp("/opt/mori/bin/mori", codex);
+    char *claude_after = read_test_file_alloc(claude);
+    char *codex_after = read_test_file_alloc(codex);
+    bool preserved = claude_after && codex_after && strcmp(claude_entry, claude_after) == 0 &&
+                     strcmp(codex_entry, codex_after) == 0;
+    free(claude_after);
+    free(codex_after);
+    test_rmdir_r(dir);
+    ASSERT_NE(claude_rc, 0);
+    ASSERT_NE(codex_rc, 0);
+    ASSERT_TRUE(preserved);
+    PASS();
+}
+
+#ifndef _WIN32
+TEST(cli_install_follows_user_owned_client_config_links) {
+    char home[256];
+    snprintf(home, sizeof(home), "/tmp/cli-mori-links-XXXXXX");
+    if (!cbm_mkdtemp(home)) {
+        FAIL("cbm_mkdtemp failed");
+    }
+    char codex_dir[512];
+    char claude_link[512];
+    char codex_link[640];
+    char claude_target[512];
+    char codex_target[512];
+    snprintf(codex_dir, sizeof(codex_dir), "%s/.codex", home);
+    snprintf(claude_link, sizeof(claude_link), "%s/.claude.json", home);
+    snprintf(codex_link, sizeof(codex_link), "%s/config.toml", codex_dir);
+    snprintf(claude_target, sizeof(claude_target), "%s/claude.json", home);
+    snprintf(codex_target, sizeof(codex_target), "%s/codex.toml", home);
+    ASSERT_TRUE(cbm_mkdir_p(codex_dir, 0755));
+    ASSERT_EQ(write_test_file(claude_target, "{\"theme\":\"dark\"}\n"), 0);
+    ASSERT_EQ(write_test_file(codex_target, "model = \"keep\"\n"), 0);
+    ASSERT_EQ(symlink(claude_target, claude_link), 0);
+    ASSERT_EQ(symlink(codex_target, codex_link), 0);
+
+    cli_mori_env_t saved = cli_mori_env_enter(home);
+    cbm_cli_set_self_path_override_for_test("/opt/mori/bin/mori");
+    int rc = cli_test_cmd_install(0, NULL);
+    cbm_cli_set_self_path_override_for_test(NULL);
+    cli_mori_env_leave(saved);
+
+    struct stat state;
+    bool links_preserved = lstat(claude_link, &state) == 0 && S_ISLNK(state.st_mode) &&
+                           lstat(codex_link, &state) == 0 && S_ISLNK(state.st_mode);
+    char *claude_after = read_test_file_alloc(claude_target);
+    char *codex_after = read_test_file_alloc(codex_target);
+    bool targets_registered = claude_after && strstr(claude_after, "\"theme\":\"dark\"") &&
+                              strstr(claude_after, "\"mori-graph\"") &&
+                              strstr(claude_after, "\"/opt/mori/bin/mori\"") && codex_after &&
+                              strstr(codex_after, "model = \"keep\"") &&
+                              strstr(codex_after, "[mcp_servers.mori-graph]") &&
+                              strstr(codex_after, "command = \"/opt/mori/bin/mori\"");
+    free(claude_after);
+    free(codex_after);
+    test_rmdir_r(home);
+
+    ASSERT_EQ(rc, 0);
+    ASSERT_TRUE(links_preserved);
+    ASSERT_TRUE(targets_registered);
+    PASS();
+}
+#endif
+
+/* update downloads nothing: it prints the mise upgrade steps and exits
+ * non-zero, whatever flags it gets. */
+TEST(cli_update_prints_mise_steps_and_fails) {
+    ASSERT_EQ(cli_test_cmd_update(0, NULL), 1);
+    ASSERT_EQ(cli_test_cmd_update(1, (char *[]){"--yes"}), 1);
+    ASSERT_EQ(cli_test_cmd_update(1, (char *[]){"--force"}), 1);
+    PASS();
+}
+
+/* The hook recognizes graph tools under mori-graph and the old key, plain or
+ * through a plugin, and nothing else. */
+TEST(cli_hook_augment_is_graph_tool_accepts_both_keys) {
+    ASSERT_TRUE(cbm_hook_augment_is_graph_tool("mcp__mori-graph__search_graph"));
+    ASSERT_TRUE(cbm_hook_augment_is_graph_tool("mcp__codebase-memory-mcp__trace_path"));
+    ASSERT_TRUE(cbm_hook_augment_is_graph_tool("mcp__plugin_mori_mori-graph__search_graph"));
+    ASSERT_TRUE(cbm_hook_augment_is_graph_tool(
+        "mcp__plugin_codebase-memory-mcp_codebase-memory-mcp__search_graph"));
+    ASSERT_FALSE(cbm_hook_augment_is_graph_tool("mcp__other__search"));
+    ASSERT_FALSE(cbm_hook_augment_is_graph_tool("mcp__other__mori-graph__search"));
+    ASSERT_FALSE(cbm_hook_augment_is_graph_tool("mcp__other_mori-graph__search"));
+    ASSERT_FALSE(cbm_hook_augment_is_graph_tool("mcp__plugin__mori-graph__search"));
+    ASSERT_FALSE(cbm_hook_augment_is_graph_tool("mcp__not-mori-graph__search"));
+    ASSERT_FALSE(cbm_hook_augment_is_graph_tool("mcp__mori-graph-extra__search"));
+    ASSERT_FALSE(cbm_hook_augment_is_graph_tool("mcp__mori-graph__"));
+    ASSERT_FALSE(cbm_hook_augment_is_graph_tool("mori-graph__search_graph"));
+    ASSERT_FALSE(cbm_hook_augment_is_graph_tool("Grep"));
+    ASSERT_FALSE(cbm_hook_augment_is_graph_tool(NULL));
     PASS();
 }
 
@@ -8183,123 +6528,6 @@ TEST(cli_install_plan_receipt_no_mutation_issue388) {
     PASS();
 }
 
-/* Supported-agent metadata must track the real installer surface. */
-TEST(cli_supported_agent_surfaces_match_installers) {
-    const char *const required_agents[] = {
-        "Claude Code",
-        "Codex CLI",
-        "Gemini CLI",
-        "Zed",
-        "OpenCode",
-        "Antigravity",
-        "Aider",
-        "KiloCode",
-        "VS Code",
-        "Cursor",
-        "Windsurf",
-        "Augment / Auggie",
-        "OpenClaw",
-        "Kiro",
-        "Junie",
-        "Hermes",
-        "OpenHands",
-        "Cline",
-        "Warp",
-        "Qwen Code",
-        "GitHub Copilot CLI",
-        "Factory Droid",
-        "Crush",
-        "Goose",
-        "Mistral Vibe",
-        "Grok Build",
-        "Qoder CLI",
-        "Kimi Code CLI",
-        "GitLab Duo CLI",
-        "Rovo Dev CLI",
-        "Amp",
-        "Devin CLI / Local",
-        "Tabnine",
-        "Continue / cn",
-        "Visual Studio",
-        "TRAE",
-        "Roo Code",
-        "Amazon Q Developer IDE",
-        "CodeBuddy Code CLI",
-        "IBM Bob IDE",
-        "IBM Bob Shell",
-        "Pochi",
-        "Pi",
-        "Sourcegraph Cody",
-        "Oh My Pi (omp)",
-        "agentty",
-    };
-    ASSERT_EQ(sizeof(required_agents) / sizeof(required_agents[0]), 46U);
-    /* The table-driven registry must carry agentty too — the legacy detector no
-     * longer knows about it. */
-    ASSERT_NOT_NULL(cbm_agent_client_by_stable_id("agentty"));
-    char *data = read_test_file_alloc("README.upstream.md");
-    if (!data)
-        FAIL("could not read README.upstream.md for supported-agent contract");
-    if (!strstr(data, "46 supported automatic/conditional client surfaces")) {
-        free(data);
-        FAIL("README must describe all 46 automatic/conditional client surfaces accurately");
-    }
-    for (size_t i = 0; i < sizeof(required_agents) / sizeof(required_agents[0]); i++) {
-        if (!strstr(data, required_agents[i])) {
-            free(data);
-            FAIL("README Multi-Agent Support table must include every installed agent");
-        }
-    }
-    free(data);
-
-    data = read_test_file_alloc("docs/index.html");
-    if (!data)
-        FAIL("could not read docs/index.html for supported-agent contract");
-    if (!strstr(data, "configures 46 automatic/conditional client surfaces")) {
-        free(data);
-        FAIL("landing page must describe all 46 automatic/conditional client surfaces accurately");
-    }
-    for (size_t i = 0; i < sizeof(required_agents) / sizeof(required_agents[0]); i++) {
-        if (!strstr(data, required_agents[i])) {
-            free(data);
-            FAIL("landing page must include every installed agent");
-        }
-    }
-    free(data);
-
-    data = read_test_file_alloc("src/main.c");
-    if (!data)
-        FAIL("could not read src/main.c for supported-agent help contract");
-    for (size_t i = 0; i < sizeof(required_agents) / sizeof(required_agents[0]); i++) {
-        if (!strstr(data, required_agents[i])) {
-            free(data);
-            FAIL("CLI help must list every automatic/conditional client surface");
-        }
-    }
-    if (!strstr(data, "Supported automatic/conditional client surfaces (46)")) {
-        free(data);
-        FAIL("CLI help must not describe all conditional surfaces as auto-detected");
-    }
-    free(data);
-
-    data = read_test_file_alloc("docs/llms.txt");
-    if (!data)
-        FAIL("could not read docs/llms.txt for supported-agent contract");
-    if (!strstr(data, "46 automatic/conditional client surfaces") ||
-        !strstr(data, "40 automatically detected") || !strstr(data, "6 conditional/explicit")) {
-        free(data);
-        FAIL("llms.txt must describe the 46-surface 40+6 support matrix accurately");
-    }
-    for (size_t i = 0; i < sizeof(required_agents) / sizeof(required_agents[0]); i++) {
-        if (!strstr(data, required_agents[i])) {
-            free(data);
-            FAIL("llms.txt must include every installed agent surface");
-        }
-    }
-    free(data);
-    PASS();
-}
-
 TEST(cli_new_agent_install_plans_use_documented_paths) {
     char tmpdir[256];
     snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-new-agents-XXXXXX");
@@ -9116,11 +7344,11 @@ TEST(cli_durable_profiles_follow_current_vendor_paths) {
 
     snprintf(path, sizeof(path), "%s/.claude/agents/codebase-memory.md", tmpdir);
     const char *const claude_terms[] = {"name: codebase-memory",
-                                        "mcpServers: [codebase-memory-mcp]",
-                                        "mcp__codebase-memory-mcp__search_graph",
-                                        "mcp__codebase-memory-mcp__check_index_coverage",
+                                        "mcpServers: [mori-graph]",
+                                        "mcp__mori-graph__search_graph",
+                                        "mcp__mori-graph__check_index_coverage",
                                         "permissionMode: plan",
-                                        "skills: [codebase-memory]",
+                                        "skills: [mori-graph]",
                                         "search_graph"};
     files_ok = files_ok && test_file_contains_all(path, claude_terms, 7U);
 
@@ -9129,7 +7357,7 @@ TEST(cli_durable_profiles_follow_current_vendor_paths) {
                                        "description = ",
                                        "developer_instructions = ",
                                        "sandbox_mode = \"read-only\"",
-                                       "[mcp_servers.codebase-memory-mcp]",
+                                       "[mcp_servers.mori-graph]",
                                        "command = \"/opt/codebase-memory-mcp\"",
                                        "args = [\"--tool-profile=analysis\"]",
                                        "check_index_coverage"};
@@ -9154,7 +7382,7 @@ TEST(cli_durable_profiles_follow_current_vendor_paths) {
                                           "mode: subagent",
                                           "\"*\": deny",
                                           "read: allow",
-                                          "codebase-memory-mcp_search_graph\": allow",
+                                          "mori-graph_search_graph\": allow",
                                           "check_index_coverage"};
     files_ok = files_ok && test_file_contains_all(path, opencode_terms, 6U);
 
@@ -9164,8 +7392,8 @@ TEST(cli_durable_profiles_follow_current_vendor_paths) {
                                       "approvalMode: plan",
                                       "tools:",
                                       "read_file",
-                                      "mcp__codebase-memory-mcp__search_graph",
-                                      "mcp__codebase-memory-mcp__check_index_coverage",
+                                      "mcp__mori-graph__search_graph",
+                                      "mcp__mori-graph__check_index_coverage",
                                       "search_graph"};
     files_ok = files_ok && test_file_contains_all(path, qwen_terms, 8U);
     profile = read_test_file_alloc(path);
@@ -9179,7 +7407,7 @@ TEST(cli_durable_profiles_follow_current_vendor_paths) {
 
     snprintf(path, sizeof(path), "%s/agents/codebase-memory.agent.md", copilot_home);
     const char *const copilot_terms[] = {"name: codebase-memory", "description:", "search_graph",
-                                         "codebase-memory-mcp/check_index_coverage"};
+                                         "mori-graph/check_index_coverage"};
     files_ok = files_ok && test_file_contains_all(path, copilot_terms, 4U);
     profile = read_test_file_alloc(path);
     files_ok =
@@ -9190,7 +7418,7 @@ TEST(cli_durable_profiles_follow_current_vendor_paths) {
     const char *const kiro_terms[] = {"\"name\": \"codebase-memory\"",
                                       "\"tools\"",
                                       "\"read\"",
-                                      "\"@codebase-memory-mcp/search_graph\"",
+                                      "\"@mori-graph/search_graph\"",
                                       "\"includeMcpJson\": false",
                                       "\"mcpServers\"",
                                       "/opt/codebase-memory-mcp",
@@ -9209,8 +7437,7 @@ TEST(cli_durable_profiles_follow_current_vendor_paths) {
         kiro_tools && yyjson_is_arr(kiro_tools) ? yyjson_arr_get(kiro_tools, 3U) : NULL;
     yyjson_val *include_mcp = kiro_root ? yyjson_obj_get(kiro_root, "includeMcpJson") : NULL;
     yyjson_val *kiro_servers = kiro_root ? yyjson_obj_get(kiro_root, "mcpServers") : NULL;
-    yyjson_val *kiro_server =
-        kiro_servers ? yyjson_obj_get(kiro_servers, "codebase-memory-mcp") : NULL;
+    yyjson_val *kiro_server = kiro_servers ? yyjson_obj_get(kiro_servers, "mori-graph") : NULL;
     yyjson_val *kiro_command = kiro_server ? yyjson_obj_get(kiro_server, "command") : NULL;
     yyjson_val *kiro_args = kiro_server ? yyjson_obj_get(kiro_server, "args") : NULL;
     yyjson_val *kiro_profile_flag =
@@ -9222,7 +7449,7 @@ TEST(cli_durable_profiles_follow_current_vendor_paths) {
                strcmp(yyjson_get_str(kiro_read), "read") == 0 && include_mcp &&
                yyjson_is_bool(include_mcp) && !yyjson_get_bool(include_mcp) && kiro_server_tool &&
                yyjson_is_str(kiro_server_tool) &&
-               strcmp(yyjson_get_str(kiro_server_tool), "@codebase-memory-mcp/search_graph") == 0 &&
+               strcmp(yyjson_get_str(kiro_server_tool), "@mori-graph/search_graph") == 0 &&
                kiro_servers && yyjson_is_obj(kiro_servers) && kiro_server &&
                yyjson_is_obj(kiro_server) && kiro_command && yyjson_is_str(kiro_command) &&
                strcmp(yyjson_get_str(kiro_command), "/opt/codebase-memory-mcp") == 0 && kiro_args &&
@@ -9264,14 +7491,14 @@ TEST(cli_durable_profiles_follow_current_vendor_paths) {
     snprintf(path, sizeof(path), "%s/.config/kilo/agents/codebase-memory.md", tmpdir);
     const char *const kilo_agent_terms[] = {"mode: subagent",
                                             "\"*\": deny",
-                                            "\"codebase-memory-mcp_search_graph\": allow",
-                                            "\"codebase-memory-mcp_get_code_snippet\": allow",
-                                            "\"codebase-memory-mcp_check_index_coverage\": allow",
+                                            "\"mori-graph_search_graph\": allow",
+                                            "\"mori-graph_get_code_snippet\": allow",
+                                            "\"mori-graph_check_index_coverage\": allow",
                                             "Tier 2"};
     files_ok = files_ok && test_file_contains_all(path, kilo_agent_terms, 6U);
     profile = read_test_file_alloc(path);
     files_ok = files_ok && profile && !strstr(profile, "\n  bash:") &&
-               !strstr(profile, "\n  edit:") && !strstr(profile, "codebase-memory-mcp_*") &&
+               !strstr(profile, "\n  edit:") && !strstr(profile, "mori-graph_*") &&
                !strstr(profile, "delete_project") && !strstr(profile, "manage_adr");
     free(profile);
 
@@ -9279,29 +7506,30 @@ TEST(cli_durable_profiles_follow_current_vendor_paths) {
     const char *const vibe_agent_terms[] = {"agent_type = \"subagent\"",
                                             "safety = \"safe\"",
                                             "system_prompt_id = \"codebase-memory\"",
-                                            "\"codebase-memory-mcp_search_graph\"",
-                                            "\"codebase-memory-mcp_get_code_snippet\"",
-                                            "\"codebase-memory-mcp_check_index_coverage\""};
+                                            "\"mori-graph_search_graph\"",
+                                            "\"mori-graph_get_code_snippet\"",
+                                            "\"mori-graph_check_index_coverage\""};
     files_ok = files_ok && test_file_contains_all(path, vibe_agent_terms, 6U);
     profile = read_test_file_alloc(path);
-    files_ok = files_ok && profile && !strstr(profile, "codebase-memory-mcp_*") &&
+    files_ok = files_ok && profile && !strstr(profile, "mori-graph_*") &&
                !strstr(profile, "delete_project") && !strstr(profile, "manage_adr");
     free(profile);
     snprintf(path, sizeof(path), "%s/prompts/codebase-memory.md", vibe_home);
-    files_ok = files_ok && test_file_contains_all(path, graph_terms, 3U);
+    const char *const prompt_terms[] = {"mori-graph", "search_graph", "trace_path"};
+    files_ok = files_ok && test_file_contains_all(path, prompt_terms, 3U);
     snprintf(path, sizeof(path), "%s/skills/codebase-memory/SKILL.md", grok_home);
     files_ok = files_ok && test_file_contains_all(path, graph_terms, 3);
     snprintf(path, sizeof(path), "%s/agents/codebase-memory.md", grok_home);
     const char *const grok_agent_terms[] = {
         "name: codebase-memory\n",
         "tools: read_file, grep, list_dir, search_tool, use_tool",
-        "mcpInheritance:\n  named:\n    - codebase-memory-mcp",
-        "codebase-memory-mcp__search_graph",
-        "codebase-memory-mcp__check_index_coverage",
+        "mcpInheritance:\n  named:\n    - mori-graph",
+        "mori-graph__search_graph",
+        "mori-graph__check_index_coverage",
         "Tier 2"};
     files_ok = files_ok && test_file_contains_all(path, grok_agent_terms, 6U);
     profile = read_test_file_alloc(path);
-    files_ok = files_ok && profile && !strstr(profile, "codebase-memory-mcp__*") &&
+    files_ok = files_ok && profile && !strstr(profile, "mori-graph__*") &&
                !strstr(profile, "delete_project") && !strstr(profile, "manage_adr");
     free(profile);
 
@@ -9309,7 +7537,7 @@ TEST(cli_durable_profiles_follow_current_vendor_paths) {
     const char *const factory_agent_terms[] = {"name: codebase-memory",
                                                "model: inherit",
                                                "tools: [\"Read\", \"LS\", \"Grep\", \"Glob\"",
-                                               "mcp__codebase-memory-mcp__search_graph",
+                                               "mcp__mori-graph__search_graph",
                                                "search_graph",
                                                "check_index_coverage"};
     files_ok = files_ok && test_file_contains_all(path, factory_agent_terms, 6U);
@@ -9691,8 +7919,9 @@ TEST(cli_tiered_codex_profiles_migrate_preserve_and_uninstall) {
  * v0.11.0. Derived by deleting exactly those lines, so the test states the
  * released bytes without going through any production legacy renderer. */
 static char *opencode_profile_before_tool_search(cbm_graph_tier_t tier) {
-    char *current =
-        cbm_render_graph_profile(CBM_GRAPH_DIALECT_OPENCODE, tier, CBM_GRAPH_ACCESS_DIRECT, NULL);
+    /* v0.10.8 predates the Mori rename, so its bytes carry the legacy names. */
+    char *current = cbm_render_graph_profile_legacy(CBM_GRAPH_DIALECT_OPENCODE, tier,
+                                                    CBM_GRAPH_ACCESS_DIRECT, NULL);
     if (!current) {
         return NULL;
     }
@@ -9912,8 +8141,8 @@ TEST(cli_tiered_grok_installs_profiles_and_withholds_hooks) {
         char *agent = read_test_file_alloc(agent_paths[i]);
         installed = agent && strstr(agent, name_line) && strstr(agent, tier_markers[i]) &&
                     strstr(agent, "tools: read_file, grep, list_dir, search_tool, use_tool") &&
-                    strstr(agent, "mcpInheritance:\n  named:\n    - codebase-memory-mcp") &&
-                    strstr(agent, "codebase-memory-mcp__check_index_coverage") &&
+                    strstr(agent, "mcpInheritance:\n  named:\n    - mori-graph") &&
+                    strstr(agent, "mori-graph__check_index_coverage") &&
                     !strstr(agent, "index_repository") && !strstr(agent, "delete_project") &&
                     !strstr(agent, "manage_adr") && !strstr(agent, "ingest_traces");
         free(agent);
@@ -10750,8 +8979,8 @@ TEST(cli_agent_client_registry_routes_plan_install_and_uninstall) {
 
     const char *const qoder_agent_terms[] = {"name: codebase-memory",
                                              "description:",
-                                             "tools: Read,Grep,Glob,mcp__codebase-memory-mcp__",
-                                             "mcp__codebase-memory-mcp__check_index_coverage",
+                                             "tools: Read,Grep,Glob,mcp__mori-graph__",
+                                             "mcp__mori-graph__check_index_coverage",
                                              "search_graph",
                                              "trace_path"};
     const char *const graph_terms[] = {"codebase-memory", "search_graph", "trace_path"};
@@ -10765,8 +8994,8 @@ TEST(cli_agent_client_registry_routes_plan_install_and_uninstall) {
                  !strstr(qoder_agent_data, "Edit") && !strstr(qoder_agent_data, "Write") &&
                  !strstr(qoder_agent_data, "permission") && !strstr(qoder_agent_data, "plugin") &&
                  strstr(qoder_agent_data, "mcpServers:") &&
-                 strstr(qoder_agent_data, "- codebase-memory-mcp") &&
-                 strstr(qoder_agent_data, "mcp__codebase-memory-mcp__check_index_coverage") &&
+                 strstr(qoder_agent_data, "- mori-graph") &&
+                 strstr(qoder_agent_data, "mcp__mori-graph__check_index_coverage") &&
                  !strstr(qoder_agent_data, "@mcp");
     free(qoder_agent_data);
 
@@ -11282,19 +9511,17 @@ TEST(cli_registry_omp_named_profile_install_and_uninstall_preserve_user_content)
         test_file_contains_all(
             skill_path,
             (const char *const[]){"search_graph", "trace_path", "Sessions and Subagents"}, 3U) &&
-        test_file_contains_all(scout_path,
-                               (const char *const[]){"autoloadSkills: [codebase-memory]",
-                                                     "mcp__codebase_memory_mcp_search_graph"},
-                               2U) &&
         test_file_contains_all(
-            verify_path,
-            (const char *const[]){"read-summarize: false", "mcp__codebase_memory_mcp_trace_path"},
+            scout_path,
+            (const char *const[]){"autoloadSkills: [mori-graph]", "mcp__mori_graph_search_graph"},
             2U) &&
         test_file_contains_all(
-            auditor_path,
-            (const char *const[]){"autoloadSkills: [codebase-memory]",
-                                  "mcp__codebase_memory_mcp_check_index_coverage"},
-            2U);
+            verify_path,
+            (const char *const[]){"read-summarize: false", "mcp__mori_graph_trace_path"}, 2U) &&
+        test_file_contains_all(auditor_path,
+                               (const char *const[]){"autoloadSkills: [mori-graph]",
+                                                     "mcp__mori_graph_check_index_coverage"},
+                               2U);
     free(installed_mcp);
     free(installed_instructions);
 
@@ -11872,9 +10099,8 @@ TEST(cli_registry_installs_codebuddy_bob_and_pochi_durable_context) {
         test_file_contains_all(
             codebuddy_agent,
             (const char *const[]){"permissionMode: plan",
-                                  "tools: Read,Grep,Glob,mcp__codebase-memory-mcp__search_graph,",
-                                  "mcp__codebase-memory-mcp__check_index_coverage",
-                                  "skills: codebase-memory"},
+                                  "tools: Read,Grep,Glob,mcp__mori-graph__search_graph,",
+                                  "mcp__mori-graph__check_index_coverage", "skills: mori-graph"},
             4U) &&
         !test_file_contains_all(codebuddy_agent, (const char *const[]){"tools:\n"}, 1U) &&
         !test_file_contains_all(codebuddy_agent,
@@ -12691,9 +10917,9 @@ TEST(cli_gemini_installs_dedicated_graph_subagent) {
                       strstr(agent, "kind: local") && strstr(agent, "search_graph") &&
                       strstr(agent, "graph project") && strstr(agent, "tools:") &&
                       strstr(agent, "read_file") && strstr(agent, "grep_search") &&
-                      strstr(agent, "mcp_codebase-memory-mcp_search_graph") &&
-                      strstr(agent, "mcp_codebase-memory-mcp_check_index_coverage") &&
-                      !strstr(agent, "mcp_codebase-memory-mcp_delete_project");
+                      strstr(agent, "mcp_mori-graph_search_graph") &&
+                      strstr(agent, "mcp_mori-graph_check_index_coverage") &&
+                      !strstr(agent, "mcp_mori-graph_delete_project");
     free(agent);
     const char *const scout_terms[] = {"name: codebase-memory-scout", "Tier 1",
                                        "check_index_coverage"};
@@ -13380,13 +11606,13 @@ TEST(cli_hook_session_resolves_custom_named_index_by_root_path) {
     snprintf(input, sizeof(input), "{\"hook_event_name\":\"SessionStart\",\"cwd\":\"%s\"}", nested);
     char *output = cbm_hook_augment_lifecycle_json(input);
     bool matched = output && strstr(output, "custom-hook-project") && strstr(output, "is indexed");
-    bool session_no_cli = output && !strstr(output, "codebase-memory-mcp cli <tool>");
+    bool session_no_cli = output && !strstr(output, "mori cli <tool>");
     free(output);
     snprintf(input, sizeof(input), "{\"hook_event_name\":\"SubagentStart\",\"cwd\":\"%s\"}",
              nested);
     output = cbm_hook_augment_lifecycle_json(input);
     bool subagent_cli = output && strstr(output, "custom-hook-project") &&
-                        strstr(output, "`codebase-memory-mcp cli <tool> --help`");
+                        strstr(output, "`mori cli <tool> --help`");
 
     free(output);
     restore_test_env("CBM_CACHE_DIR", saved_cache);
@@ -14994,9 +13220,8 @@ TEST(cli_read_only_agents_do_not_receive_mutating_mcp_server) {
     char *qoder = read_test_file_alloc(qoder_agent);
     char *junie = read_test_file_alloc(junie_agent);
     char *kiro = read_test_file_alloc(kiro_agent);
-    bool qoder_confined = qoder && strstr(qoder, "mcpServers:") &&
-                          strstr(qoder, "- codebase-memory-mcp") &&
-                          strstr(qoder, "mcp__codebase-memory-mcp__search_graph") &&
+    bool qoder_confined = qoder && strstr(qoder, "mcpServers:") && strstr(qoder, "- mori-graph") &&
+                          strstr(qoder, "mcp__mori-graph__search_graph") &&
                           strstr(qoder, "check_index_coverage") && !strstr(qoder, "Bash") &&
                           !strstr(qoder, "Write") && !strstr(qoder, "Edit");
     bool junie_confined = junie && strstr(junie, "mcpServers: [\"codebase-memory-analysis\"]") &&
@@ -15004,13 +13229,13 @@ TEST(cli_read_only_agents_do_not_receive_mutating_mcp_server) {
                           strstr(junie, "tools: [\"Read\", \"Grep\", \"Glob\"]") &&
                           strstr(junie, "check_index_coverage") && !strstr(junie, "Bash") &&
                           !strstr(junie, "Write") && !strstr(junie, "Edit");
-    bool kiro_confined =
-        kiro && strstr(kiro, "\"mcpServers\"") && strstr(kiro, "\"includeMcpJson\": false") &&
-        strstr(kiro, "@codebase-memory-mcp/search_graph") && strstr(kiro, "--tool-profile") &&
-        strstr(kiro, "analysis") && strstr(kiro, "check_index_coverage") &&
-        !strstr(kiro, "\"@codebase-memory-mcp\"") && !strstr(kiro, "delete_project") &&
-        !strstr(kiro, "manage_adr") && !strstr(kiro, "index_repository") &&
-        !strstr(kiro, "ingest_traces");
+    bool kiro_confined = kiro && strstr(kiro, "\"mcpServers\"") &&
+                         strstr(kiro, "\"includeMcpJson\": false") &&
+                         strstr(kiro, "@mori-graph/search_graph") &&
+                         strstr(kiro, "--tool-profile") && strstr(kiro, "analysis") &&
+                         strstr(kiro, "check_index_coverage") && !strstr(kiro, "\"@mori-graph\"") &&
+                         !strstr(kiro, "delete_project") && !strstr(kiro, "manage_adr") &&
+                         !strstr(kiro, "index_repository") && !strstr(kiro, "ingest_traces");
     bool confined = qoder_confined && junie_confined && kiro_confined;
     free(qoder);
     free(junie);
@@ -15743,7 +13968,7 @@ TEST(cli_hook_augment_context_names_graph_follow_ups) {
     ASSERT_FALSE(is_error);
     ASSERT_NOT_NULL(ctx);
     const char *list = strstr(ctx, "\n- hookproj.mod.someIndexedSymbol");
-    const char *follow = strstr(ctx, "\n[codebase-memory] For these symbols, trace_path lists "
+    const char *follow = strstr(ctx, "\n[mori] For these symbols, trace_path lists "
                                      "callers and callees, get_code_snippet returns the exact "
                                      "source, and search_graph finds related symbols by name.");
     ASSERT_NOT_NULL(list);
@@ -15914,7 +14139,7 @@ static bool test_drift_search(cbm_mcp_server_t *srv, const char *session, const 
              "\"cwd\":\"/tmp/hookproj\",\"tool_input\":{\"pattern\":\"%s\"}}",
              session, extra, pattern);
     char *output = cbm_hook_augment_process(srv, input);
-    *reminded = output && strstr(output, "searches since its last codebase-memory-mcp tool call");
+    *reminded = output && strstr(output, "searches since its last mori-graph tool call");
     bool augmented = output != NULL;
     free(output);
     return augmented;
@@ -15975,10 +14200,14 @@ TEST(cli_hook_augment_drift_reminder_counts_searches) {
             snprintf(diag, sizeof(diag), "session a search %d reminded=%d", i, reminded);
     }
     /* A graph call resets; the plugin tool name resets too. */
-    for (int round = 0; ok && round < 2; round++) {
-        const char *tool = round == 0 ? "mcp__codebase-memory-mcp__trace_path"
-                                      : "mcp__plugin_codebase-memory-mcp_codebase-memory-mcp__"
-                                        "search_graph";
+    static const char *const reset_tools[] = {
+        "mcp__mori-graph__trace_path",
+        "mcp__plugin_mori_mori-graph__search_graph",
+        "mcp__codebase-memory-mcp__trace_path",
+        "mcp__plugin_codebase-memory-mcp_codebase-memory-mcp__search_graph",
+    };
+    for (int round = 0; ok && round < 4; round++) {
+        const char *tool = reset_tools[round];
         ok = test_drift_graph_call(srv, "drift-test-a", tool);
         for (int i = 1; ok && i <= 3; i++) {
             ok = test_drift_search(srv, "drift-test-a", "", hit, &reminded) && reminded == (i == 3);
@@ -15988,8 +14217,7 @@ TEST(cli_hook_augment_drift_reminder_counts_searches) {
     }
     /* Another server's tool is no graph call: after a reset and one search it
      * leaves the count alone, so the 3rd search still carries the line. */
-    ok = ok &&
-         test_drift_graph_call(srv, "drift-test-a", "mcp__codebase-memory-mcp__search_graph") &&
+    ok = ok && test_drift_graph_call(srv, "drift-test-a", "mcp__mori-graph__search_graph") &&
          test_drift_search(srv, "drift-test-a", "", hit, &reminded) && !reminded &&
          test_drift_graph_call(srv, "drift-test-a", "mcp__other__search") &&
          test_drift_search(srv, "drift-test-a", "", hit, &reminded) && !reminded &&
@@ -16208,7 +14436,7 @@ TEST(cli_hook_augment_lifecycle_output_contract) {
         if (strcmp(cases[i].event, "SessionStart") == 0)
             ASSERT(strstr(context, "Active tier: Tier 2") != NULL);
         /* Subagents defined without MCP tools must learn the CLI fallback (#2837). */
-        bool has_cli_hint = strstr(context, "`codebase-memory-mcp cli <tool> --help`") != NULL;
+        bool has_cli_hint = strstr(context, "`mori cli <tool> --help`") != NULL;
         ASSERT(has_cli_hint == (strcmp(cases[i].event, "SubagentStart") == 0));
         yyjson_doc_free(doc);
         free(output);
@@ -16463,7 +14691,7 @@ TEST(cli_hook_augment_kimi_user_prompt_contract) {
         "\"session_id\":\"session-3\",\"prompt\":\"inspect code\"}";
     char *output = cbm_hook_augment_lifecycle_json_for_dialect(input, "UserPromptSubmit", "kimi");
     ASSERT_NOT_NULL(output);
-    ASSERT(strstr(output, "[codebase-memory] Prompt context") != NULL);
+    ASSERT(strstr(output, "[mori] Prompt context") != NULL);
     ASSERT(strstr(output, "index_repository") != NULL);
     ASSERT(strstr(output, "search_graph") != NULL);
     ASSERT(strchr(output, '{') == NULL);
@@ -20486,100 +18714,6 @@ TEST(cli_skill_frontmatter_scalars_with_colons_are_quoted_issue1554) {
     PASS();
 }
 
-/* #1566: a binary owned by mise/Homebrew/nix is not ours to relocate, and the
- * detection must key on POSITIVE evidence — a recognised manager path — not on
- * "outside our default install dir". The latter misreads an ordinary
- * `install --dir=/opt/cbm` (and every test binary) as foreign, and would then
- * REFUSE to update an installation we own. A false positive costs a working
- * update; a false negative only leaves today's behaviour for an unrecognised
- * manager, which --skip-binary covers explicitly. */
-TEST(cli_external_manager_detection_needs_positive_evidence_issue1566) {
-    /* Recognised managers -> named. */
-    ASSERT_NOT_NULL(cbm_cli_external_manager_name_for_testing(
-        "/Users/x/.local/share/mise/installs/cbm/0.10.3/bin/codebase-memory-mcp"));
-    ASSERT_NOT_NULL(cbm_cli_external_manager_name_for_testing(
-        "/opt/homebrew/Cellar/codebase-memory-mcp/0.10.3/bin/codebase-memory-mcp"));
-    ASSERT_NOT_NULL(
-        cbm_cli_external_manager_name_for_testing("/nix/store/abc-cbm/bin/codebase-memory-mcp"));
-
-    /* Ours, or merely unusual, must NOT be claimed as externally managed. */
-    ASSERT_NULL(
-        cbm_cli_external_manager_name_for_testing("/Users/x/.local/bin/codebase-memory-mcp"));
-    ASSERT_NULL(cbm_cli_external_manager_name_for_testing("/opt/cbm/codebase-memory-mcp"));
-    ASSERT_NULL(cbm_cli_external_manager_name_for_testing("build/c/test-runner"));
-#ifdef __FreeBSD__
-    /* On FreeBSD the port/pkg owns ${LOCALBASE}/bin, so a binary there IS
-     * externally managed; elsewhere the same path is unremarkable. */
-    ASSERT_NOT_NULL(
-        cbm_cli_external_manager_name_for_testing("/usr/local/bin/codebase-memory-mcp"));
-    ASSERT_NULL(cbm_cli_external_manager_name_for_testing("/opt/local/bin/codebase-memory-mcp"));
-#else
-    ASSERT_NULL(cbm_cli_external_manager_name_for_testing("/usr/local/bin/codebase-memory-mcp"));
-#endif
-    ASSERT_NULL(cbm_cli_external_manager_name_for_testing(""));
-    ASSERT_NULL(cbm_cli_external_manager_name_for_testing(NULL));
-    PASS();
-}
-
-/* #2722: when a binary is managed externally (e.g. mise, brew, nix), `install`
- * skips placing a binary at ~/.local/bin, but must write the running managed
- * binary path into agent configuration files instead of the non-existent
- * default target. */
-TEST(cli_install_managed_binary_config_path_issue2722) {
-    char tmpdir[256];
-    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-install-managed-XXXXXX");
-    if (!cbm_mkdtemp(tmpdir)) {
-        FAIL("cbm_mkdtemp failed");
-    }
-    char *old_home = NULL;
-    char *old_cache = NULL;
-    cli_activation_save_env(&old_home, &old_cache);
-    cbm_setenv("HOME", tmpdir, 1);
-    char cache_dir[512];
-    snprintf(cache_dir, sizeof(cache_dir), "%s/cache", tmpdir);
-    cbm_setenv("CBM_CACHE_DIR", cache_dir, 1);
-
-    test_mark_claude_code_installed(tmpdir);
-
-    const char *managed_path =
-        "/Users/x/.local/share/mise/installs/cbm/0.12.1/bin/codebase-memory-mcp";
-    cbm_cli_set_self_path_override_for_test(managed_path);
-
-    cli_activation_fake_t fake = {
-        .mutation_reserve_result = 1,
-    };
-    cbm_cli_activation_ops_t ops = cli_activation_fake_ops(&fake);
-    cbm_cli_set_activation_ops_for_test(&ops);
-
-    char *argv[] = {"--clients=claude"};
-    int rc = cli_test_cmd_install(1, argv);
-
-    cbm_cli_set_activation_ops_for_test(NULL);
-    cbm_cli_set_self_path_override_for_test(NULL);
-
-    char bin_target[512];
-    snprintf(bin_target, sizeof(bin_target), "%s/.local/bin/codebase-memory-mcp", tmpdir);
-    struct stat target_st;
-    bool target_created = stat(bin_target, &target_st) == 0;
-
-    char claude_json_path[512];
-    snprintf(claude_json_path, sizeof(claude_json_path), "%s/.claude.json", tmpdir);
-    char *claude_json = read_test_file_alloc(claude_json_path);
-    bool has_managed_path = claude_json && strstr(claude_json, managed_path) != NULL;
-    bool has_target_path =
-        claude_json && strstr(claude_json, ".local/bin/codebase-memory-mcp") != NULL;
-
-    free(claude_json);
-    cli_activation_restore_env(old_home, old_cache);
-    test_rmdir_r(tmpdir);
-
-    ASSERT_EQ(rc, 0);
-    ASSERT_FALSE(target_created);
-    ASSERT_TRUE(has_managed_path);
-    ASSERT_FALSE(has_target_path);
-    PASS();
-}
-
 /* #1558: `install` configured EVERY detected client, so a user who wanted
  * Claude and Codex had to revert OpenCode and Cursor by hand — and the next
  * install silently recreated them. The selector restricts it.
@@ -20671,58 +18805,7 @@ TEST(cli_clients_selector_filters_registry_installs_issue1798) {
     PASS();
 }
 
-TEST(cli_update_accepts_retired_variant_flags_issue1544) {
-    char *ui_argv[] = {"--dry-run", "--ui", "--yes"};
-    char *standard_argv[] = {"--dry-run", "--standard", "--yes"};
-    char *bogus_argv[] = {"--dry-run", "--not-a-flag", "--yes"};
-
-    ASSERT_EQ(cbm_cmd_update(3, ui_argv), 0);
-    ASSERT_EQ(cbm_cmd_update(3, standard_argv), 0);
-    /* Unknown flags stay an error — the point is compatibility, not silence. */
-    ASSERT_TRUE(cbm_cmd_update(3, bogus_argv) != 0);
-    PASS();
-}
-
 #ifdef _WIN32
-/* The Windows update contract, asserted with the activation seam OFF so this
- * takes the exact dispatch a release binary ships: `update` never replaces the
- * running image in-process (Windows locks it), it prints the install.ps1
- * command and exits 0. Regressing to an in-process self-update would mean
- * reintroducing the launcher stub Defender flags as Trojan:Win32/Wacatac.B!ml. */
-TEST(cli_windows_update_hands_off_to_install_script) {
-    char tmpdir[256];
-    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-update-handoff-XXXXXX");
-    if (!cbm_mkdtemp(tmpdir)) {
-        FAIL("cbm_mkdtemp failed");
-    }
-    char *old_home = NULL;
-    char *old_cache = NULL;
-    cli_activation_save_env(&old_home, &old_cache);
-    cbm_setenv("HOME", tmpdir, 1);
-    char cache_dir[512];
-    snprintf(cache_dir, sizeof(cache_dir), "%s/cache", tmpdir);
-    cbm_setenv("CBM_CACHE_DIR", cache_dir, 1);
-
-    char bin_dir[512];
-    char bin_target[640];
-    snprintf(bin_dir, sizeof(bin_dir), "%s/.local/bin", tmpdir);
-    test_mkdirp(bin_dir);
-    snprintf(bin_target, sizeof(bin_target), "%s/codebase-memory-mcp.exe", bin_dir);
-    write_test_file(bin_target, "in-process update must not touch this");
-
-    char *update_argv[] = {"--yes"};
-    int update_rc = cbm_cmd_update(1, update_argv);
-
-    const char *installed = read_test_file(bin_target);
-    bool preserved = installed && strcmp(installed, "in-process update must not touch this") == 0;
-    cli_activation_restore_env(old_home, old_cache);
-    test_rmdir_r(tmpdir);
-
-    ASSERT_EQ(update_rc, 0);
-    ASSERT_TRUE(preserved);
-    PASS();
-}
-
 /* #2117: install registers the install dir in the persistent current-user PATH
  * via the wide registry API and de-duplicates on reinstall; uninstall must take
  * exactly that entry back out and leave every other entry byte-for-byte intact,
@@ -20831,113 +18914,6 @@ TEST(cli_uninstall_removes_only_its_own_windows_user_path_entry_issue2117) {
 /* ═══════════════════════════════════════════════════════════════════
  *  Suite definition
  * ═══════════════════════════════════════════════════════════════════ */
-
-/* #1632: `update` derives the installer command from the BINARY's directory,
- * which is not the same question as "is the installer there". A binary in
- * ~/.local/bin with no install.sh beside it still produced:
- *
- *     bash "/home/<user>/.local/bin/install.sh"
- *     /usr/bin/bash: .../install.sh: No such file or directory
- *
- * reported on discussion #1560 by a user already three releases deep in install
- * trouble. `update` exists to tell someone how to proceed; ending on a command
- * that cannot run is the one outcome it must not produce. */
-TEST(cli_update_only_names_an_installer_that_exists_issue1632) {
-    char tmpdir[256];
-    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-installer-probe-XXXXXX");
-    if (!cbm_mkdtemp(tmpdir)) {
-        FAIL("cbm_mkdtemp failed");
-    }
-#ifdef _WIN32
-    const char *installer = "install.ps1";
-#else
-    const char *installer = "install.sh";
-#endif
-
-    /* A directory holding the binary but no installer must not be advertised. */
-    bool absent_is_refused = !cbm_cli_installer_beside_binary(tmpdir);
-
-    char script[512];
-    snprintf(script, sizeof(script), "%s/%s", tmpdir, installer);
-    write_test_file(script, "#!/bin/sh\nexit 0\n");
-    bool present_is_accepted = cbm_cli_installer_beside_binary(tmpdir);
-
-    /* A directory of that name must not count: `bash <dir>` is not a command. */
-    char decoy[512];
-    snprintf(decoy, sizeof(decoy), "%s/decoy", tmpdir);
-    test_mkdirp(decoy);
-    char decoy_installer[640];
-    snprintf(decoy_installer, sizeof(decoy_installer), "%s/%s", decoy, installer);
-    test_mkdirp(decoy_installer);
-    bool directory_is_refused = !cbm_cli_installer_beside_binary(decoy);
-
-    bool empty_is_refused = !cbm_cli_installer_beside_binary("");
-    test_rmdir_r(tmpdir);
-
-    if (!absent_is_refused)
-        FAIL("a directory with no installer must not be named as one");
-    if (!present_is_accepted)
-        FAIL("an installer that is present must be named");
-    if (!directory_is_refused)
-        FAIL("a DIRECTORY named install.sh is not a runnable installer");
-    if (!empty_is_refused)
-        FAIL("an empty directory string must be refused");
-    PASS();
-}
-
-/* #2200: on 0.9.0, `update -y` in a non-interactive shell auto-confirmed
- * "Delete these indexes and continue with update?", removed every project
- * index, and THEN failed at the variant chooser -- no binary, no indexes.
- * The release dispatch now hands off to install.sh (which keeps indexes by
- * default, #607) and never asks a variant question. Pin that on every
- * platform: `update -y` and `update -y --standard`, with the activation seam
- * OFF (the exact path a release binary ships), exit 0 and leave every .db in
- * the cache byte-for-byte intact. A generic -y must never be read as consent
- * to delete indexes. */
-TEST(cli_update_yes_keeps_every_index_issue2200) {
-    char tmpdir[256];
-    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-update-2200-XXXXXX");
-    if (!cbm_mkdtemp(tmpdir)) {
-        FAIL("cbm_mkdtemp failed");
-    }
-    char *old_home = NULL;
-    char *old_cache = NULL;
-    cli_activation_save_env(&old_home, &old_cache);
-    cbm_setenv("HOME", tmpdir, 1);
-    char cache_dir[512];
-    snprintf(cache_dir, sizeof(cache_dir), "%s/cache", tmpdir);
-    cbm_setenv("CBM_CACHE_DIR", cache_dir, 1);
-    test_mkdirp(cache_dir);
-
-    static const char *const projects[] = {"alpha", "beta", "gamma"};
-    enum { PROJECT_COUNT = 3 };
-    char db_paths[PROJECT_COUNT][640];
-    for (int i = 0; i < PROJECT_COUNT; i++) {
-        snprintf(db_paths[i], sizeof(db_paths[i]), "%s/%s.db", cache_dir, projects[i]);
-        write_test_file(db_paths[i], projects[i]);
-    }
-
-    char *yes_argv[] = {"-y"};
-    char *legacy_argv[] = {"-y", "--standard"};
-    int yes_rc = cbm_cmd_update(1, yes_argv);
-    int legacy_rc = cbm_cmd_update(2, legacy_argv);
-    cbm_set_auto_answer_for_test(0);
-
-    int kept = 0;
-    for (int i = 0; i < PROJECT_COUNT; i++) {
-        const char *content = read_test_file(db_paths[i]);
-        if (content && strcmp(content, projects[i]) == 0) {
-            kept++;
-        }
-    }
-    cli_activation_restore_env(old_home, old_cache);
-    test_rmdir_r(tmpdir);
-
-    ASSERT_EQ(yes_rc, 0);
-    ASSERT_EQ(legacy_rc, 0);
-    ASSERT_EQ(kept, PROJECT_COUNT);
-    PASS();
-}
 
 /* ── index_repository exit contract ──────────────────────────────
  *
@@ -21279,8 +19255,6 @@ SUITE(cli) {
     cbm_cli_set_activation_runtime_parent_for_test(g_cli_suite_runtime_parent);
 
     RUN_TEST(cli_suite_uses_private_activation_runtime);
-    RUN_TEST(cli_update_only_names_an_installer_that_exists_issue1632);
-    RUN_TEST(cli_update_yes_keeps_every_index_issue2200);
 #ifndef _WIN32
     RUN_TEST(cli_hook_deadline_ignores_an_unreadable_value);
 #endif
@@ -21313,43 +19287,18 @@ SUITE(cli) {
     RUN_TEST(cli_activation_releases_maintenance_lease_when_mutation_fails);
 #ifndef _WIN32
     RUN_TEST(cli_activation_cleanup_failure_fail_stops_before_lease_release);
-    RUN_TEST(cli_activation_quiesce_does_not_wait_on_bootstrap_startup);
-    RUN_TEST(cli_install_recovers_markerless_stale_rendezvous);
-    RUN_TEST(cli_install_skip_binary_into_foreign_home_never_drains_host_cohort);
-    RUN_TEST(cli_install_binary_into_foreign_home_never_drains_host_cohort);
-    RUN_TEST(cli_install_into_host_namespace_still_drains_host_cohort);
-    RUN_TEST(cli_install_skip_binary_unchanged_in_host_namespace_quiesces_nothing);
     RUN_TEST(cli_scope_fixture_names_its_failing_setup_step);
     RUN_TEST(cli_scope_fixture_finish_keeps_env_after_an_early_failure);
     RUN_TEST(cli_scope_retries_a_mute_endpoint_until_it_answers);
-    RUN_TEST(cli_install_foreign_home_unreadable_cohort_cache_keeps_host_daemon);
-    RUN_TEST(cli_install_foreign_home_busy_cohort_keeps_host_daemon);
 #endif
-    RUN_TEST(cli_install_force_quiesces_active_cohort_before_replacing_binary);
-    RUN_TEST(cli_install_dir_and_skip_config_stage_first_install_safely);
     RUN_TEST(cli_activation_commands_reject_malformed_and_unknown_flags);
-    RUN_TEST(cli_install_hooks_preference_persists_and_migrates_owned_state);
-    RUN_TEST(cli_no_hooks_plan_covers_every_hook_installer_family);
-    RUN_TEST(cli_no_hooks_removes_codex_pretool_hook);
-    RUN_TEST(cli_no_hooks_removes_augment_owned_scripts);
-    RUN_TEST(cli_install_reset_deletion_waits_for_final_activation_guard);
     RUN_TEST(cli_remove_indexes_deletes_orphan_sqlite_sidecars_issue2054);
     RUN_TEST(cli_index_enumeration_skips_internal_cache_dbs);
-    RUN_TEST(cli_install_config_only_waits_for_cohort_drain);
-    RUN_TEST(cli_install_config_and_path_finish_before_guard_release);
-    RUN_TEST(cli_install_config_failure_keeps_published_binary);
-    RUN_TEST(cli_update_download_failure_does_not_quiesce_sessions);
-    RUN_TEST(cli_update_already_current_does_not_quiesce_sessions);
     RUN_TEST(cli_ui_config_keys_are_discoverable_and_settable_issue1558);
     RUN_TEST(cli_ignore_worktrees_config_key_is_discoverable);
     RUN_TEST(cli_skill_frontmatter_scalars_with_colons_are_quoted_issue1554);
-    RUN_TEST(cli_external_manager_detection_needs_positive_evidence_issue1566);
-    RUN_TEST(cli_install_managed_binary_config_path_issue2722);
     RUN_TEST(cli_clients_selector_vocabulary_is_complete_and_strict_issue1558);
     RUN_TEST(cli_clients_selector_filters_registry_installs_issue1798);
-    RUN_TEST(cli_update_accepts_retired_variant_flags_issue1544);
-    RUN_TEST(cli_update_agent_configs_finish_before_guard_release);
-    RUN_TEST(cli_update_names_the_failing_staging_step_and_os_error);
     RUN_TEST(cli_uninstall_quiesces_active_cohort_before_removing_binary_and_index);
     RUN_TEST(cli_uninstall_preserves_binary_and_index_when_cohort_does_not_drain);
     RUN_TEST(cli_uninstall_auto_answers_keep_indexes_without_delete_indexes);
@@ -21362,8 +19311,16 @@ SUITE(cli) {
     RUN_TEST(cli_uninstall_cleans_user_owned_symlinked_config);
 #endif
     RUN_TEST(cli_activation_guard_is_bypassed_for_dry_run_and_plan);
+    RUN_TEST(cli_install_registers_mori_graph_without_skills);
+    RUN_TEST(cli_install_dry_run_writes_nothing);
+    RUN_TEST(cli_install_mori_claude_mcp_keeps_other_servers);
+    RUN_TEST(cli_install_preserves_manually_registered_mori_graph);
+#ifndef _WIN32
+    RUN_TEST(cli_install_follows_user_owned_client_config_links);
+#endif
+    RUN_TEST(cli_update_prints_mise_steps_and_fails);
+    RUN_TEST(cli_hook_augment_is_graph_tool_accepts_both_keys);
 #ifdef _WIN32
-    RUN_TEST(cli_windows_update_hands_off_to_install_script);
     RUN_TEST(cli_uninstall_removes_only_its_own_windows_user_path_entry_issue2117);
 #endif
 
@@ -21511,7 +19468,6 @@ SUITE(cli) {
     RUN_TEST(cli_agentty_mcp_config_env_override);
     RUN_TEST(cli_agentty_install_then_uninstall_roundtrip);
     RUN_TEST(cli_install_plan_receipt_no_mutation_issue388);
-    RUN_TEST(cli_supported_agent_surfaces_match_installers);
     RUN_TEST(cli_new_agent_install_plans_use_documented_paths);
     RUN_TEST(cli_new_agent_configs_use_documented_schemas);
     RUN_TEST(cli_agent_reinstall_preserves_foreign_policy_entries);

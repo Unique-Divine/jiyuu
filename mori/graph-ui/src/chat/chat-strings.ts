@@ -14,7 +14,7 @@
 import { SIDECAR_PORT } from '../llm/sidecar';
 
 /** The word over the panel. */
-export const CHAT_TITLE = 'CBM LENS CHAT';
+export const CHAT_TITLE = 'MORI GRAPH CHAT';
 
 /** What the command line hint says when a question would be sent. */
 export const CHAT_HINT_READY = 'enter asks CBM Lens';

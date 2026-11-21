@@ -165,7 +165,7 @@ static void handle_ui_config(cbm_http_conn_t *c, const cbm_http_req_t *req) {
      * the /api/repo-info deep-links). */
     cbm_http_replyf(c, 200, g_cors_json,
                     "{\"lang\":\"%s\",\"version\":\"%s\",\"upstream_issues_url\":\"%s\"}", lang_buf,
-                    CBM_VERSION, "https://github.com/DeusData/codebase-memory-mcp/issues/new");
+                    CBM_VERSION, "https://github.com/Unique-Divine/jiyuu/issues/new");
 }
 
 /* ── Server state ─────────────────────────────────────────────── */

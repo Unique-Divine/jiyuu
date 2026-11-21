@@ -288,7 +288,7 @@ cbm_daemon_ipc_endpoint_t *cbm_daemon_bootstrap_endpoint_new(const char *runtime
         bootstrap_runtime_parent_resolve(runtime_parent, override_parent, sizeof(override_parent));
 #ifdef CBM_ENABLE_TEST_SEAMS
     if (!parent && g_bootstrap_default_runtime_forbidden) {
-        (void)fprintf(stderr, "codebase-memory-mcp: test run refused the default daemon runtime "
+        (void)fprintf(stderr, "mori: test run refused the default daemon runtime "
                               "directory (no explicit parent and CBM_RUNTIME_DIR unset): the "
                               "developer's live daemon listens there\n");
         return NULL;
@@ -330,7 +330,7 @@ static uint64_t bootstrap_deadline_after(uint32_t timeout_ms) {
 
 static _Noreturn void bootstrap_cleanup_fail_stop(const char *component) {
     (void)fprintf(stderr,
-                  "codebase-memory-mcp: coordination cleanup failed (%s); "
+                  "mori: coordination cleanup failed (%s); "
                   "terminating so the OS releases retained claims\n",
                   component ? component : "unknown");
     (void)fflush(stderr);
@@ -661,7 +661,7 @@ static cbm_daemon_bootstrap_status_t bootstrap_finish_probe(
                            ? connect_result->message
                            : "CBM could not start because a conflicting CBM process is active; "
                              "close all CBM sessions and commands, then retry. If a permanent "
-                             "daemon from another build is running, `codebase-memory-mcp daemon "
+                             "daemon from another build is running, `mori daemon "
                              "stop` retires it");
         if (ops->visible_diagnostic) {
             ops->visible_diagnostic(ops->context, result->message);
@@ -1372,7 +1372,7 @@ static void bootstrap_production_diagnostic(void *context, const char *message) 
     bootstrap_production_context_t *production = context;
 #ifdef _WIN32
     if (production && production->spawn_error != ERROR_SUCCESS) {
-        (void)fprintf(stderr, "codebase-memory-mcp: %s (daemon launch error %lu)\n",
+        (void)fprintf(stderr, "mori: %s (daemon launch error %lu)\n",
                       message ? message : "daemon startup failed",
                       (unsigned long)production->spawn_error);
         (void)fflush(stderr);
@@ -1380,7 +1380,7 @@ static void bootstrap_production_diagnostic(void *context, const char *message) 
     }
 #elif defined(__APPLE__)
     if (production && production->spawn_error != 0) {
-        (void)fprintf(stderr, "codebase-memory-mcp: %s (daemon launch: %s)\n",
+        (void)fprintf(stderr, "mori: %s (daemon launch: %s)\n",
                       message ? message : "daemon startup failed",
                       strerror(production->spawn_error));
         (void)fflush(stderr);
@@ -1389,7 +1389,7 @@ static void bootstrap_production_diagnostic(void *context, const char *message) 
 #else
     (void)production;
 #endif
-    (void)fprintf(stderr, "codebase-memory-mcp: %s\n", message ? message : "daemon startup failed");
+    (void)fprintf(stderr, "mori: %s\n", message ? message : "daemon startup failed");
     (void)fflush(stderr);
 }
 
