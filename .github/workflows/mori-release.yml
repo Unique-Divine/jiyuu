@@ -1,6 +1,8 @@
-# Mori release: builds the C binary codebase-memory-mcp for Linux x64 and
-# arm64 and macOS arm64, and publishes a DRAFT GitHub release for a mori/v*
-# tag. See mori/README.md "Release".
+# Mori release: builds the Rust binary mori (crate mori/jiyuu-mori with the C
+# program linked in) for Linux x64 and arm64 and macOS arm64 and x64, checks
+# its CLI against the C binary codebase-memory-mcp from the same commit, and
+# publishes a DRAFT GitHub release for a mori/v* tag. See mori/README.md
+# "Release".
 #
 # - Tag push mori/vX.Y.Z: the tag must equal mori/VERSION. Builds, packages,
 #   attests and creates a draft release that is not marked latest.
@@ -83,24 +85,38 @@ jobs:
           - target: linux-x64
             goos: linux
             goarch: amd64
+            rust_target: x86_64-unknown-linux-gnu
             runner: ubuntu-latest
           - target: linux-arm64
             goos: linux
             goarch: arm64
+            rust_target: aarch64-unknown-linux-gnu
             runner: ubuntu-24.04-arm
-          # Apple silicon. Upstream built darwin on macos-15 too; the macOS
-          # 14.0 minimum comes from Makefile.cbm, not from this runner's SDK.
+          # Apple silicon. The macOS 14.0 minimum comes from Makefile.cbm
+          # (the C objects) and MACOSX_DEPLOYMENT_TARGET (the Rust link), not
+          # from this runner's SDK.
           - target: darwin-arm64
             goos: darwin
             goarch: arm64
+            arch: arm64
+            rust_target: aarch64-apple-darwin
             runner: macos-15
+          # Intel Macs, built and smoke-tested natively on GitHub's x86_64
+          # macOS runner. Same 14.0 minimum as arm64.
+          - target: darwin-x64
+            goos: darwin
+            goarch: amd64
+            arch: x86_64
+            rust_target: x86_64-apple-darwin
+            runner: macos-15-intel
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 90
+    timeout-minutes: 120
     defaults:
       run:
         working-directory: mori
     env:
       VERSION: ${{ needs.validate.outputs.version }}
+      RUST_TARGET: ${{ matrix.rust_target }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -109,8 +125,21 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.4.3
-      - name: Name the selected binary
-        run: echo "BIN=$RUNNER_TEMP/selected/codebase-memory-mcp" >> "$GITHUB_ENV"
+      # npm builds the graph UI (mori/graph-ui), which the binary embeds.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          toolchain: stable
+          targets: ${{ matrix.rust_target }}
+      - name: Name the binaries
+        run: |
+          {
+            echo "BIN=$RUNNER_TEMP/selected/mori"
+            echo "C_BIN=$GITHUB_WORKSPACE/mori/build/mori-rs/codebase-memory-mcp"
+          } >> "$GITHUB_ENV"
       - name: Install build dependencies (Linux)
         if: matrix.goos == 'linux'
         run: |
@@ -127,23 +156,38 @@ jobs:
           key: mori-grammars-${{ hashFiles('mori/grammars.lock.json') }}
       - name: Fetch grammars
         run: bun scripts/grammars-fetch.ts
-      # STATIC=1 is upstream's portable Linux build (gcc -static on Ubuntu):
-      # no shared-library dependencies, so one binary runs on any distro.
-      # --version stamps CBM_VERSION, which `--version` prints.
-      - name: Build static binary (Linux)
-        if: matrix.goos == 'linux'
-        run: scripts/build.sh --version "$VERSION" CC=gcc CXX=g++ STATIC=1
-      # macOS has no static libc, so this build links libSystem, libz and
-      # libc++ from the OS, as upstream's darwin release did.
-      - name: Build binary (macOS)
-        if: matrix.goos == 'darwin'
-        run: scripts/build.sh --version "$VERSION" CC=cc CXX=c++
+      # cargo's build.rs runs `make -f Makefile.cbm libmori-c` and links the
+      # archive whole; MORI_C_REFERENCE=1 also builds codebase-memory-mcp
+      # from the same sources for the parity check. MORI_WITH_UI=1 embeds the
+      # graph UI in both, as scripts/build.sh --with-ui does. CFLAGS_EXTRA
+      # stamps CBM_VERSION into both, as scripts/build.sh --version does.
+      # Linux links glibc statically (+crt-static), like the C release's
+      # STATIC=1, so one binary runs on any distro. macOS has no static libc:
+      # the binary links libSystem, libz and libc++ from the OS.
+      - name: Build mori
+        env:
+          MORI_C_REFERENCE: "1"
+          MORI_WITH_UI: "1"
+          CC: ${{ matrix.goos == 'linux' && 'gcc' || 'cc' }}
+          CXX: ${{ matrix.goos == 'linux' && 'g++' || 'c++' }}
+          MACOSX_DEPLOYMENT_TARGET: "14.0"
+        run: |
+          set -euo pipefail
+          export CFLAGS_EXTRA="-DCBM_VERSION=\"\\\"$VERSION\\\"\""
+          MORI_MAKE_JOBS="$(getconf _NPROCESSORS_ONLN)"
+          export MORI_MAKE_JOBS
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            export RUSTFLAGS="-C target-feature=+crt-static"
+          fi
+          cargo build --release --locked --features c-backend \
+            --target "$RUST_TARGET" --manifest-path jiyuu-mori/Cargo.toml
+          mkdir -p "$(dirname "$BIN")"
+          cp "../target/$RUST_TARGET/release/mori" "$BIN.unstripped"
       - name: Strip and check static linking (Linux)
         if: matrix.goos == 'linux'
         run: |
           set -euo pipefail
-          mkdir -p "$(dirname "$BIN")"
-          strip --strip-all -o "$BIN" build/c/codebase-memory-mcp
+          strip --strip-all -o "$BIN" "$BIN.unstripped"
           file "$BIN"
           # ldd exits 1 on a static binary, so read its message instead.
           linkage="$(ldd "$BIN" 2>&1 || true)"
@@ -155,16 +199,17 @@ jobs:
       # and no notarization.
       - name: Strip, sign ad hoc and check linking (macOS)
         if: matrix.goos == 'darwin'
+        env:
+          ARCH: ${{ matrix.arch }}
         run: |
           set -euo pipefail
-          mkdir -p "$(dirname "$BIN")"
-          cp build/c/codebase-memory-mcp "$BIN"
+          cp "$BIN.unstripped" "$BIN"
           strip "$BIN"
           codesign --sign - --force --timestamp=none "$BIN"
           codesign --verify --strict --verbose=2 "$BIN"
           file "$BIN"
           archs="$(lipo -archs "$BIN")"
-          [ "$archs" = arm64 ]
+          [ "$archs" = "$ARCH" ]
           otool -l "$BIN" | grep -A4 LC_BUILD_VERSION
           load_cmds="$(otool -l "$BIN")"
           printf '%s\n' "$load_cmds" | grep -E 'minos 14\.0$' >/dev/null
@@ -175,11 +220,11 @@ jobs:
             echo "::error::links a library outside the OS"
             exit 1
           fi
-      - name: Smoke-test version and a tiny index
+      - name: Smoke-test version, a tiny index and the graph UI
         run: |
           set -euo pipefail
           got="$("$BIN" --version)"
-          if [[ "$got" != "codebase-memory-mcp $VERSION" ]]; then
+          if [[ "$got" != "mori $VERSION" ]]; then
             echo "::error::--version printed '$got'"
             exit 1
           fi
@@ -204,6 +249,24 @@ jobs:
           "$BIN" cli trace_path --project "$project" --function-name greet \
             --direction outbound | tee "$scratch/trace"
           grep -q '\.app\.helper 1$' "$scratch/trace"
+          # The embedded graph UI: a daemon on a free port serves its index.
+          port="$(python3 -c 'import socket; s = socket.socket(); \
+            s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
+          "$BIN" daemon start --port="$port"
+          trap '"$BIN" daemon stop || true' EXIT
+          for _ in $(seq 1 30); do
+            if curl -fsS "http://127.0.0.1:$port/" -o "$scratch/ui.html" \
+              2>/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          head -c 300 "$scratch/ui.html"; echo
+          grep -qi '<!doctype html>' "$scratch/ui.html"
+      # The shipped (stripped, signed) mori against the C binary built from
+      # the same commit: same commands, same output after normalization.
+      - name: CLI parity with codebase-memory-mcp
+        run: bun scripts/cli-parity.ts --mori "$BIN" --c "$C_BIN"
       - name: Package archive
         id: package
         env:
@@ -216,12 +279,13 @@ jobs:
           sha="$(shasum -a 256 "$BIN" | cut -d' ' -f1)"
           scripts/package-release.sh "$GOOS" "$GOARCH" \
             --selected-binary "$BIN" --expected-sha256 "$sha" \
-            --out-dir "$RUNNER_TEMP/dist" --archive-name "${asset%.tar.gz}"
+            --out-dir "$RUNNER_TEMP/dist" --archive-name "${asset%.tar.gz}" \
+            --binary-name mori
           tar -tzvf "$RUNNER_TEMP/dist/$asset"
           # C collation: macOS sort would otherwise put lowercase first.
           members="$(tar -tzf "$RUNNER_TEMP/dist/$asset" | LC_ALL=C sort \
             | tr '\n' ' ')"
-          want='LICENSE NOTICE THIRD_PARTY_NOTICES.md codebase-memory-mcp '
+          want='LICENSE NOTICE THIRD_PARTY_NOTICES.md mori '
           if [[ "$members" != "$want" ]]; then
             echo "::error::unexpected archive members: $members"
             exit 1
