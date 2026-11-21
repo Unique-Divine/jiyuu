@@ -439,6 +439,19 @@ class GateTest(unittest.TestCase):
       ("query_graph:$.rows{only_in_a}", '["add"]'),
       ("query_graph:$.rows{only_in_b}", '["adx"]')])
 
+  def test_nested_json_tables_are_gated_as_tables(self) -> None:
+    def js(rows_: list[list[Any]]) -> str:
+      return json.dumps({"cols": ["qn", "rank"], "rows": [],
+                         "semantic": {"cols": ["qn", "score"],
+                                      "rows": rows_}})
+    a = js([["p.a", 0.9], ["p.b", 0.5], ["p.c", 0.5]])
+    b = js([["p.a", 0.9], ["p.c", 0.5], ["p.b", 0.5]])
+    q = {"semantic_query": ["x"], "format": "json"}
+    self.assertEqual(keys(diff("search_graph", q, a, b)), [])
+    c = js([["p.b", 0.5], ["p.a", 0.9], ["p.c", 0.5]])
+    self.assertEqual([k for k, _ in keys(diff("search_graph", q, a, c))],
+                     ["search_graph:$.semantic{order}"])
+
   def test_labeled_lines_stay_gated(self) -> None:
     b = RANKED.replace("total: 4", "total: 5")
     self.assertEqual(keys(diff("search_graph", {"query": "m"}, RANKED, b)),

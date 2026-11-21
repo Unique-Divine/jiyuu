@@ -484,18 +484,36 @@ def compare_tables(ta: Table, tb: Table, mode: str, idx: list[int],
   return res
 
 
+def _json_table(name: str, d: Any) -> Table | None:
+  if not isinstance(d, dict):
+    return None
+  cols = d.get("cols", d.get("columns"))
+  rows = d.get("rows")
+  if not (isinstance(cols, list) and isinstance(rows, list)):
+    return None
+  return Table(name, [str(c) for c in cols],
+               [r if isinstance(r, list) else [r] for r in rows])
+
+
 def tables_of(body: Any) -> tuple[dict[str, Table], Any]:
-  """(tables, rest) of a JSON output body: its cols/columns and rows as
-  one table named `rows`; rest is what is left for the generic diff."""
-  if isinstance(body, dict):
-    cols = body.get("cols", body.get("columns"))
-    rows = body.get("rows")
-    if isinstance(cols, list) and isinstance(rows, list):
-      t = Table("rows", [str(c) for c in cols],
-                [r if isinstance(r, list) else [r] for r in rows])
-      rest = {k: v for k, v in body.items() if k != "rows"}
-      return {"rows": t}, rest
-  return {}, body
+  """(tables, rest) of a JSON output body: its own cols/columns and rows
+  as the table `rows`, and each nested object with cols and rows (the
+  `semantic` results) as a table named by its key; rest is what is left
+  for the generic diff."""
+  if not isinstance(body, dict):
+    return {}, body
+  tables: dict[str, Table] = {}
+  rest = dict(body)
+  top = _json_table("rows", body)
+  if top is not None:
+    tables["rows"] = top
+    del rest["rows"]
+  for k, v in body.items():
+    t = _json_table(k, v)
+    if t is not None and k != "rows":
+      tables[k] = t
+      rest[k] = {kk: vv for kk, vv in v.items() if kk != "rows"}
+  return tables, rest
 
 
 def fields_of(rest: Any) -> dict[str, Any]:
