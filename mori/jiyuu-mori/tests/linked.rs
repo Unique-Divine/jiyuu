@@ -208,6 +208,25 @@ fn index_through_worker_reexec_matches_c() {
         );
         let counts = (json_number(&text, "nodes"), json_number(&text, "edges"));
         assert!(counts.0.is_some_and(|n| n > 0), "{side}: {text}");
+        // Raw CLI JSON reaches the daemon as bytes. Building these requests
+        // as serde values would normalize negative zero and duplicate keys.
+        let schema_negative_zero =
+            format!(r#"{{"project":"{project}","limit":-0,"format":"json"}}"#);
+        let schema_duplicate = format!(
+            r#"{{"project":"{project}","limit":1,"limit":3,"format":"json"}}"#
+        );
+        let schema_nul = format!(
+            r#"{{"project":"{project}","diagnostics":"full\u0000suffix","format":"json"}}"#
+        );
+        let outline_page = serde_json::json!({
+            "project": project, "file_path": "./py//app.py", "labels": ["Function"],
+            "limit": 1, "offset": 1, "format": "json"
+        }).to_string();
+        let outline_end = serde_json::json!({
+            "project": project, "file_path": "py/app.py", "labels": ["Function"],
+            "limit": 1, "offset": 900, "format": "json"
+        })
+        .to_string();
         let queries: Vec<Output> = [
             vec![
                 "cli",
@@ -239,6 +258,44 @@ fn index_through_worker_reexec_matches_c() {
                 "--direction",
                 "inbound",
             ],
+            vec!["cli", "get_graph_schema", "--project", &project],
+            vec!["cli", "--quiet", "get_graph_schema", &schema_negative_zero],
+            vec!["cli", "--quiet", "get_graph_schema", &schema_duplicate],
+            vec!["cli", "--quiet", "get_graph_schema", &schema_nul],
+            vec![
+                "cli",
+                "get_graph_schema",
+                "--project",
+                &project,
+                "--format",
+                "json",
+                "--diagnostics",
+                "full",
+                "--limit",
+                "4",
+                "--offset",
+                "1",
+            ],
+            vec![
+                "cli",
+                "get_graph_schema",
+                "--project",
+                &project,
+                "--limit",
+                "1",
+                "--offset",
+                "9999",
+            ],
+            vec![
+                "cli",
+                "get_file_outline",
+                "--project",
+                &project,
+                "--file-path",
+                "py/app.py",
+            ],
+            vec!["cli", "get_file_outline", &outline_page],
+            vec!["cli", "get_file_outline", &outline_end],
             vec![
                 "cli",
                 "query_graph",
@@ -257,10 +314,16 @@ fn index_through_worker_reexec_matches_c() {
     assert_eq!(c.0, rs.0, "node and edge counts differ");
     for (c_out, rs_out) in c.1.iter().zip(&rs.1) {
         assert!(c_out.status.success(), "{c_out:?}");
-        assert_eq!(
-            (&c_out.status.code(), &c_out.stdout, &c_out.stderr),
-            (&rs_out.status.code(), &rs_out.stdout, &rs_out.stderr),
-            "query output differs"
+        assert!(
+            (c_out.status.code(), &c_out.stdout, &c_out.stderr)
+                == (rs_out.status.code(), &rs_out.stdout, &rs_out.stderr),
+            "query output differs\nC: {:?}\n{}\n{}\nRust: {:?}\n{}\n{}",
+            c_out.status.code(),
+            String::from_utf8_lossy(&c_out.stdout),
+            String::from_utf8_lossy(&c_out.stderr),
+            rs_out.status.code(),
+            String::from_utf8_lossy(&rs_out.stdout),
+            String::from_utf8_lossy(&rs_out.stderr)
         );
     }
     let trace = String::from_utf8_lossy(&c.1[1].stdout);

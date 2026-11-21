@@ -20,13 +20,14 @@ path = "src/main.rs"
 # default so `cargo test --workspace` and the pure-Rust CI job build without
 # the C toolchain or the 1.3 GB grammar tree. Without it, `mori` only reports
 # that it was built without the C backend.
-c-backend = ["dep:rusqlite", "dep:serde_json", "dep:sha2"]
+c-backend = ["dep:rusqlite", "dep:serde", "dep:serde_json", "dep:sha2"]
 
 [dependencies]
 # The whole-archive link of libmori-c supplies every SQLite symbol before the
 # linker considers rusqlite's bundled archive. Keep the bundled feature so
 # other workspace binaries can link SQLite when Cargo unifies features.
 rusqlite = { version = "0.41", default-features = false, features = ["bundled"], optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1.0.151", optional = true }
 sha2 = { version = "0.10", optional = true }
 

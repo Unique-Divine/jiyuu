@@ -3821,6 +3821,57 @@ void cbm_store_free_file_outline(cbm_file_outline_row_t *rows, int count) {
     free(rows);
 }
 
+static cbm_file_outline_reader_fn file_outline_reader;
+
+void cbm_store_set_file_outline_reader(cbm_file_outline_reader_fn reader) {
+    file_outline_reader = reader;
+}
+
+typedef struct {
+    const file_outline_cancel_guard_t *guard;
+    cbm_file_outline_row_t *rows;
+    int count;
+    int limit;
+    size_t text_bytes;
+} file_outline_page_t;
+
+static char *file_outline_copy_text(const char *bytes, size_t length) {
+    const char *nul = memchr(bytes, '\0', length);
+    if (nul) {
+        length = (size_t)(nul - bytes);
+    }
+    char *copy = malloc(length + 1U);
+    if (copy) {
+        memcpy(copy, bytes, length);
+        copy[length] = '\0';
+    }
+    return copy;
+}
+
+static int file_outline_emit(void *context, const cbm_file_outline_row_t *row,
+                             const size_t lengths[3]) {
+    file_outline_page_t *page = context;
+    if (file_outline_cancelled(page->guard)) {
+        return CBM_STORE_CANCELLED;
+    }
+    size_t text_bytes = lengths[0] + lengths[1] + lengths[2] + 3U;
+    if (page->count == page->limit ||
+        text_bytes > CBM_STORE_FILE_OUTLINE_MAX_TEXT_BYTES - page->text_bytes) {
+        return CBM_STORE_SCAN_LIMIT;
+    }
+    cbm_file_outline_row_t *copy = &page->rows[page->count++];
+    *copy = (cbm_file_outline_row_t){.name = file_outline_copy_text(row->name, lengths[0]),
+                                      .label = file_outline_copy_text(row->label, lengths[1]),
+                                      .qualified_name = file_outline_copy_text(row->qualified_name, lengths[2]),
+                                      .start_line = row->start_line,
+                                      .end_line = row->end_line};
+    if (!copy->name || !copy->label || !copy->qualified_name) {
+        return CBM_STORE_ERR;
+    }
+    page->text_bytes += text_bytes;
+    return CBM_STORE_OK;
+}
+
 int cbm_store_get_file_outline(cbm_store_t *s, const char *project, const char *file_path,
                                const char *const *labels, int label_count, int limit, int offset,
                                cbm_store_cancel_fn cancel, void *cancel_context,
@@ -3854,6 +3905,27 @@ int cbm_store_get_file_outline(cbm_store_t *s, const char *project, const char *
      * this operation's cleanup could remove a surrounding scope's handler. */
     if (!store_progress_acquire(s, &guard, 1000, file_outline_progress_cancel, &guard)) {
         return CBM_STORE_ERR;
+    }
+
+    if (file_outline_reader) {
+        file_outline_page_t page = {.guard = &guard, .limit = limit};
+        page.rows = calloc((size_t)limit, sizeof(*page.rows));
+        int status = page.rows ? file_outline_reader(s->db, project, file_path, labels,
+                                                     label_count, limit, offset, total,
+                                                     file_outline_emit, &page)
+                               : CBM_STORE_ERR;
+        if (file_outline_cancelled(&guard)) {
+            status = CBM_STORE_CANCELLED;
+        }
+        store_progress_release(s, &guard);
+        if (status != CBM_STORE_OK) {
+            cbm_store_free_file_outline(page.rows, page.count);
+            *total = 0;
+            return status;
+        }
+        *out = page.rows;
+        *count = page.count;
+        return CBM_STORE_OK;
     }
 
     char sql[ST_SQL_BUF];
