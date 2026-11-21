@@ -1428,7 +1428,18 @@ static int gqlgen_split(const char *path, gqlgen_seg_t *segs, int max) {
     return n;
 }
 
+static bool (*gqlgen_glob_matcher)(const char *glob, const char *path);
+
+/* Called by Rust before entering C main. Standalone C keeps its own matcher.
+ * The callback borrows the two NUL-terminated strings for one call. */
+void cbm_gqlgen_set_glob_matcher(bool (*matcher)(const char *glob, const char *path)) {
+    gqlgen_glob_matcher = matcher;
+}
+
 bool cbm_gqlgen_glob_match(const char *glob, const char *path) {
+    if (gqlgen_glob_matcher) {
+        return gqlgen_glob_matcher(glob, path);
+    }
     gqlgen_seg_t pat[GQLGEN_MAX_GLOB_SEGMENTS];
     gqlgen_seg_t str[GQLGEN_MAX_GLOB_SEGMENTS];
     int pn = gqlgen_split(glob, pat, GQLGEN_MAX_GLOB_SEGMENTS);
