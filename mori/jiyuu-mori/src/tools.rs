@@ -5,7 +5,10 @@ use serde_json::Value;
 
 use crate::store::{SchemaGroup, Store};
 
-const ADR_HINT: &str = "No ADR found. Use manage_adr(mode='update') to persist architectural     decisions across sessions. Run get_architecture(aspects=['all']) first.";
+const ADR_HINT: &str = concat!(
+    "No ADR found. Use manage_adr(mode='update') to persist architectural ",
+    "decisions across sessions. Run get_architecture(aspects=['all']) first."
+);
 
 #[derive(Serialize)]
 struct NodeLabel {

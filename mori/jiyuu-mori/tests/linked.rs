@@ -186,31 +186,6 @@ fn index_through_worker_reexec_matches_c() {
         let counts = (json_number(&text, "nodes"), json_number(&text, "edges"));
         assert!(counts.0.is_some_and(|n| n > 0), "{side}: {text}");
         let queries: Vec<Output> = [
-            vec!["cli", "get_graph_schema", "--project", &project],
-            vec![
-                "cli",
-                "get_graph_schema",
-                "--project",
-                &project,
-                "--format",
-                "json",
-                "--diagnostics",
-                "full",
-                "--limit",
-                "4",
-                "--offset",
-                "1",
-            ],
-            vec![
-                "cli",
-                "get_graph_schema",
-                "--project",
-                &project,
-                "--limit",
-                "1",
-                "--offset",
-                "9999",
-            ],
             vec![
                 "cli",
                 "search_graph",
@@ -241,6 +216,31 @@ fn index_through_worker_reexec_matches_c() {
                 "--direction",
                 "inbound",
             ],
+            vec!["cli", "get_graph_schema", "--project", &project],
+            vec![
+                "cli",
+                "get_graph_schema",
+                "--project",
+                &project,
+                "--format",
+                "json",
+                "--diagnostics",
+                "full",
+                "--limit",
+                "4",
+                "--offset",
+                "1",
+            ],
+            vec![
+                "cli",
+                "get_graph_schema",
+                "--project",
+                &project,
+                "--limit",
+                "1",
+                "--offset",
+                "9999",
+            ],
         ]
         .iter()
         .map(|args| run_in(bin, &scratch, args))
@@ -251,10 +251,16 @@ fn index_through_worker_reexec_matches_c() {
     assert_eq!(c.0, rs.0, "node and edge counts differ");
     for (c_out, rs_out) in c.1.iter().zip(&rs.1) {
         assert!(c_out.status.success(), "{c_out:?}");
-        assert_eq!(
-            (&c_out.status.code(), &c_out.stdout, &c_out.stderr),
-            (&rs_out.status.code(), &rs_out.stdout, &rs_out.stderr),
-            "query output differs"
+        assert!(
+            (c_out.status.code(), &c_out.stdout, &c_out.stderr)
+                == (rs_out.status.code(), &rs_out.stdout, &rs_out.stderr),
+            "query output differs\nC: {:?}\n{}\n{}\nRust: {:?}\n{}\n{}",
+            c_out.status.code(),
+            String::from_utf8_lossy(&c_out.stdout),
+            String::from_utf8_lossy(&c_out.stderr),
+            rs_out.status.code(),
+            String::from_utf8_lossy(&rs_out.stdout),
+            String::from_utf8_lossy(&rs_out.stderr)
         );
     }
     let trace = String::from_utf8_lossy(&c.1[1].stdout);
