@@ -5,6 +5,7 @@ use std::ops::ControlFlow;
 use std::os::unix::ffi::OsStrExt;
 use std::{panic, ptr};
 
+use crate::project_page::{ProjectPage, ProjectRecord, build_project_page};
 use crate::stdio::c_transport;
 use crate::store::{FileOutlineQuery, Store};
 use crate::tools;
@@ -98,6 +99,13 @@ unsafe extern "C" {
         identity: ProjectIdentityReader,
         stats: ProjectStatsReader,
         metadata: ProjectMetadataReader,
+    );
+    fn cbm_mcp_set_project_page_builder(
+        builder: unsafe extern "C" fn(
+            *mut ProjectRecord,
+            c_int,
+            *mut ProjectPage,
+        ),
     );
     fn cbm_store_get_db(store: *mut c_void) -> *mut sqlite3;
     fn cbm_store_set_file_outline_reader(reader: OutlineReader);
@@ -383,6 +391,7 @@ pub unsafe extern "C" fn main(argc: c_int, argv: *mut *mut c_char) -> c_int {
             read_project_stats,
             read_project_metadata,
         );
+        cbm_mcp_set_project_page_builder(build_project_page);
         cbm_c_main(argc, argv)
     }
 }
