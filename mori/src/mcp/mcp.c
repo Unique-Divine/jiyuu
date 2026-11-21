@@ -3331,6 +3331,81 @@ static void add_project_record_json(yyjson_mut_doc *doc, yyjson_mut_val *arr,
     yyjson_mut_arr_add_val(arr, p);
 }
 
+static cbm_mcp_project_list_renderer_fn project_list_renderer;
+static cbm_mcp_read_override_free_fn project_list_payload_free;
+
+void cbm_mcp_set_project_list_renderer(cbm_mcp_project_list_renderer_fn renderer,
+                                        cbm_mcp_read_override_free_fn release) {
+    project_list_renderer = release ? renderer : NULL;
+    project_list_payload_free = release;
+}
+
+void cbm_mcp_render_project_table(cbm_sb_t *sb, const cbm_mcp_project_record_t *records,
+                                   int page_count, bool metadata_only, bool include_stats) {
+    /* Stable union schema: branch is an explicit empty marker instead of
+     * changing each object's shape and forcing the generic tree emitter
+     * to repeat every key. Values and row order remain direct/copyable. */
+    const char *metadata_cols[] = {"name", "root_path"};
+    const char *identity_cols[] = {"name", "root_path", "branch"};
+    const char *stats_cols[] = {"name", "root_path", "branch", "nodes", "edges", "size_bytes"};
+    const char *const *cols = metadata_only   ? metadata_cols
+                              : include_stats ? stats_cols
+                                              : identity_cols;
+    int column_count = metadata_only ? 2 : include_stats ? 6 : 3;
+    size_t cell_count = (size_t)page_count * (size_t)column_count;
+    const char **cells = cell_count > 0 && cell_count <= SIZE_MAX / sizeof(*cells)
+                             ? malloc(cell_count * sizeof(*cells))
+                             : NULL;
+    char (*numbers)[32] = include_stats && page_count > 0
+                              ? malloc((size_t)page_count * 3U * sizeof(*numbers))
+                              : NULL;
+    if (cells && (!include_stats || numbers)) {
+        for (int row = 0; row < page_count; row++) {
+            const mcp_project_record_t *record = &records[row];
+            size_t base = (size_t)row * (size_t)column_count;
+            cells[base] = record->name;
+            cells[base + 1U] = record->root_path;
+            if (!metadata_only) {
+                cells[base + 2U] = record->branch ? record->branch : "";
+            }
+            if (include_stats) {
+                size_t number_base = (size_t)row * 3U;
+                snprintf(numbers[number_base], sizeof(numbers[number_base]), "%d",
+                         record->nodes);
+                snprintf(numbers[number_base + 1U], sizeof(numbers[number_base + 1U]), "%d",
+                         record->edges);
+                snprintf(numbers[number_base + 2U], sizeof(numbers[number_base + 2U]), "%lld",
+                         (long long)record->size_bytes);
+                cells[base + 3U] = numbers[number_base];
+                cells[base + 4U] = numbers[number_base + 1U];
+                cells[base + 5U] = numbers[number_base + 2U];
+            }
+        }
+        const bool string_cols[] = {true, true, true, false, false, false};
+        const bool prefix_cols[] = {false, true, false, false, false, false};
+        cbm_tree_table_rows_profiled(sb, "projects", page_count, cols, column_count, cells,
+                                     string_cols, prefix_cols);
+    } else {
+        cbm_tree_table_header(sb, "projects", page_count, cols, column_count);
+        for (int i = 0; i < page_count; i++) {
+            cbm_tree_row_begin(sb);
+            cbm_tree_cell_str(sb, records[i].name, true);
+            cbm_tree_cell_str(sb, records[i].root_path, false);
+            if (!metadata_only) {
+                cbm_tree_cell_str(sb, records[i].branch ? records[i].branch : "", false);
+            }
+            if (include_stats) {
+                cbm_tree_cell_int(sb, records[i].nodes, false);
+                cbm_tree_cell_int(sb, records[i].edges, false);
+                cbm_tree_cell_int(sb, (long long)records[i].size_bytes, false);
+            }
+            cbm_tree_row_end(sb);
+        }
+    }
+    free(numbers);
+    free(cells);
+}
+
 /* list_projects: scan cache directory for .db files.
  * Each project is a single .db file — no central registry needed. */
 static char *handle_list_projects(cbm_mcp_server_t *srv, const char *args) {
@@ -3452,13 +3527,17 @@ static char *handle_list_projects(cbm_mcp_server_t *srv, const char *args) {
 
     bool wants_json = mcp_wants_json(args);
     char *payload = NULL;
-    if (wants_json) {
+    const mcp_project_record_t *page_records = end > start ? records + start : NULL;
+    if (project_list_renderer) {
+        payload = project_list_renderer(page_records, record_count, &page, metadata_only,
+                                        include_stats, wants_json);
+    } else if (wants_json) {
         yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
         yyjson_mut_val *root = yyjson_mut_obj(doc);
         yyjson_mut_doc_set_root(doc, root);
         yyjson_mut_val *arr = yyjson_mut_arr(doc);
-        for (int i = start; i < end; i++) {
-            add_project_record_json(doc, arr, &records[i], include_stats);
+        for (int i = 0; i < end - start; i++) {
+            add_project_record_json(doc, arr, &page_records[i], include_stats);
         }
 
         yyjson_mut_obj_add_val(doc, root, "projects", arr);
@@ -3478,71 +3557,9 @@ static char *handle_list_projects(cbm_mcp_server_t *srv, const char *args) {
         payload = yy_doc_to_str(doc);
         yyjson_mut_doc_free(doc);
     } else {
-        /* Stable union schema: branch is an explicit empty marker instead of
-         * changing each object's shape and forcing the generic tree emitter
-         * to repeat every key. Values and row order remain direct/copyable. */
         cbm_sb_t sb;
         cbm_sb_init(&sb);
-        const char *metadata_cols[] = {"name", "root_path"};
-        const char *identity_cols[] = {"name", "root_path", "branch"};
-        const char *stats_cols[] = {"name", "root_path", "branch", "nodes", "edges", "size_bytes"};
-        const char *const *cols = metadata_only   ? metadata_cols
-                                  : include_stats ? stats_cols
-                                                  : identity_cols;
-        int column_count = metadata_only ? 2 : include_stats ? 6 : 3;
-        int page_count = end - start;
-        size_t cell_count = (size_t)page_count * (size_t)column_count;
-        const char **cells = cell_count > 0 && cell_count <= SIZE_MAX / sizeof(*cells)
-                                 ? malloc(cell_count * sizeof(*cells))
-                                 : NULL;
-        char (*numbers)[32] = include_stats && page_count > 0
-                                  ? malloc((size_t)page_count * 3U * sizeof(*numbers))
-                                  : NULL;
-        if (cells && (!include_stats || numbers)) {
-            for (int row = 0; row < page_count; row++) {
-                const mcp_project_record_t *record = &records[start + row];
-                size_t base = (size_t)row * (size_t)column_count;
-                cells[base] = record->name;
-                cells[base + 1U] = record->root_path;
-                if (!metadata_only) {
-                    cells[base + 2U] = record->branch ? record->branch : "";
-                }
-                if (include_stats) {
-                    size_t number_base = (size_t)row * 3U;
-                    snprintf(numbers[number_base], sizeof(numbers[number_base]), "%d",
-                             record->nodes);
-                    snprintf(numbers[number_base + 1U], sizeof(numbers[number_base + 1U]), "%d",
-                             record->edges);
-                    snprintf(numbers[number_base + 2U], sizeof(numbers[number_base + 2U]), "%lld",
-                             (long long)record->size_bytes);
-                    cells[base + 3U] = numbers[number_base];
-                    cells[base + 4U] = numbers[number_base + 1U];
-                    cells[base + 5U] = numbers[number_base + 2U];
-                }
-            }
-            const bool string_cols[] = {true, true, true, false, false, false};
-            const bool prefix_cols[] = {false, true, false, false, false, false};
-            cbm_tree_table_rows_profiled(&sb, "projects", page_count, cols, column_count, cells,
-                                         string_cols, prefix_cols);
-        } else {
-            cbm_tree_table_header(&sb, "projects", page_count, cols, column_count);
-            for (int i = start; i < end; i++) {
-                cbm_tree_row_begin(&sb);
-                cbm_tree_cell_str(&sb, records[i].name, true);
-                cbm_tree_cell_str(&sb, records[i].root_path, false);
-                if (!metadata_only) {
-                    cbm_tree_cell_str(&sb, records[i].branch ? records[i].branch : "", false);
-                }
-                if (include_stats) {
-                    cbm_tree_cell_int(&sb, records[i].nodes, false);
-                    cbm_tree_cell_int(&sb, records[i].edges, false);
-                    cbm_tree_cell_int(&sb, (long long)records[i].size_bytes, false);
-                }
-                cbm_tree_row_end(&sb);
-            }
-        }
-        free(numbers);
-        free(cells);
+        cbm_mcp_render_project_table(&sb, page_records, end - start, metadata_only, include_stats);
         cbm_tree_scalar_int(&sb, "total", record_count);
         cbm_tree_scalar_int(&sb, "returned", end - start);
         cbm_tree_scalar_bool(&sb, "has_more", end < record_count);
@@ -3562,7 +3579,11 @@ static char *handle_list_projects(cbm_mcp_server_t *srv, const char *args) {
     free(records);
 
     char *result = cbm_mcp_text_result(payload ? payload : "out of memory", payload == NULL);
-    free(payload);
+    if (payload && project_list_renderer) {
+        project_list_payload_free(payload);
+    } else {
+        free(payload);
+    }
     return result;
 }
 

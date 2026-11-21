@@ -325,6 +325,14 @@ typedef void (*cbm_mcp_project_page_builder_fn)(cbm_mcp_project_record_t *record
                                                 cbm_mcp_project_page_t *page);
 void cbm_mcp_set_project_page_builder(cbm_mcp_project_page_builder_fn builder);
 
+/* The renderer borrows the selected page and returns an owned payload. */
+typedef char *(*cbm_mcp_project_list_renderer_fn)(const cbm_mcp_project_record_t *page_records,
+                                                  int total, const cbm_mcp_project_page_t *page,
+                                                  bool metadata_only, bool include_stats,
+                                                  bool wants_json);
+void cbm_mcp_set_project_list_renderer(cbm_mcp_project_list_renderer_fn renderer,
+                                        cbm_mcp_read_override_free_fn release);
+
 /* ── Supervised background index (RSS isolation, #832) ────────── */
 
 /* #1300: the explicit error response for a worker that exited cleanly without

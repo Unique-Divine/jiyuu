@@ -5,13 +5,13 @@ use std::slice;
 // and statistics together. The C handler still frees each record.
 #[repr(C)]
 pub(crate) struct ProjectRecord {
-    name: *const c_char,
-    root_path: *const c_char,
+    pub(crate) name: *const c_char,
+    pub(crate) root_path: *const c_char,
     db_file: *const c_char,
-    branch: *const c_char,
-    nodes: c_int,
-    edges: c_int,
-    size_bytes: i64,
+    pub(crate) branch: *const c_char,
+    pub(crate) nodes: c_int,
+    pub(crate) edges: c_int,
+    pub(crate) size_bytes: i64,
     populated: bool,
 }
 
@@ -33,10 +33,10 @@ impl ProjectRecord {
 // Mirrors cbm_mcp_project_page_t.
 #[repr(C)]
 pub(crate) struct ProjectPage {
-    limit: c_int,
-    offset: c_int,
-    start: c_int,
-    end: c_int,
+    pub(crate) limit: c_int,
+    pub(crate) offset: c_int,
+    pub(crate) start: c_int,
+    pub(crate) end: c_int,
 }
 
 /// Sorts the discovered records before the C handler populates the page.

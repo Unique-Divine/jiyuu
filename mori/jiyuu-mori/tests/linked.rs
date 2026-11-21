@@ -266,6 +266,42 @@ fn project_pages_use_internal_identity_and_preserve_projection() {
 }
 
 #[test]
+fn project_page_normalizes_root_bytes_in_both_formats() {
+    let scratch = Scratch::new("project-bytes");
+    let db = Connection::open(scratch.0.join("cache/bytes.db")).unwrap();
+    db.execute_batch(
+        "CREATE TABLE projects (name TEXT PRIMARY KEY, indexed_at TEXT, root_path TEXT);
+         INSERT INTO projects VALUES ('bytes', 'now', CAST(X'2FFF00' AS TEXT));",
+    )
+    .unwrap();
+
+    let cases = [
+        (
+            r#"{"format":"json","limit":"bad","offset":-1}"#,
+            "@bytes:2fff",
+        ),
+        (r#"{"metadata_only":true,"detail":"stats"}"#, "@bytes:2fff"),
+        (r#"{"format":"json","offset":1}"#, r#""returned":0"#),
+    ];
+    let run_all = |bin: &Path| {
+        let outputs = cases.map(|(query, marker)| {
+            let output = run_in(
+                bin,
+                &scratch,
+                &["cli", "--quiet", "list_projects", query],
+            );
+            assert!(output.status.success(), "{output:?}");
+            assert!(String::from_utf8_lossy(&output.stdout).contains(marker));
+            (output.stdout, output.stderr)
+        });
+        let stop = run_in(bin, &scratch, &["daemon", "stop"]);
+        assert!(stop.status.success(), "{stop:?}");
+        outputs
+    };
+    assert_eq!(run_all(&c_binary()), run_all(Path::new(MORI)));
+}
+
+#[test]
 fn unknown_tool_error_matches_c() {
     assert_same(&["cli", "no_such_tool"]);
 }

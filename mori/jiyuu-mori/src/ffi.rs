@@ -395,6 +395,7 @@ pub unsafe extern "C" fn main(argc: c_int, argv: *mut *mut c_char) -> c_int {
             read_project_metadata,
         );
         cbm_mcp_set_project_page_builder(build_project_page);
+        crate::project_response::register_list_renderer(release_payload);
         cbm_c_main(argc, argv)
     }
 }
