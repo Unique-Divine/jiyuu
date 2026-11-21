@@ -1,12 +1,16 @@
 # Smart CI: pull-request test selection on GitHub Actions
 
 Smart CI runs, for each pull request, only the CI jobs and tests that the
-change can reach. This page explains how this repository does it and how
-another repository on GitHub Actions could do the same with the released
-`codebase-memory-mcp` binary.
+change can reach. This page explains how the workflows Mori was imported
+with do it, and how a repository on GitHub Actions could do the same with the
+released `mori` binary.
 
-Status: experimental. Every answer carries `"experimental": true`. In this
-repository the selection narrows real test runs by default, fork PRs
+Jiyuu's CI doesn't run Smart CI for Mori. The selection scripts under
+`scripts/ci/` and the test conventions are kept, so "this repository" below
+means the imported workflows and Mori's C test suites, not Jiyuu's CI.
+
+Status: experimental. Every answer carries `"experimental": true`. In the
+imported workflows the selection narrows real test runs by default, fork PRs
 included; the repository variable `TEST_IMPACT_MODE` set to anything but
 `gate` turns it off for same-repository PRs (fork PRs get no variables: see
 (d)), and it then runs in report-only (shadow) mode.
@@ -45,7 +49,7 @@ changed files ──► Layer 1: lane selector ──► which CI jobs run
                                    ▼  (every test leg in this repo; off Linux x86_64,
                                    │   platform-specific suites run whole)
 merge base + PR ─► Layer 2: test-impact engine ─► which suites / tests run
-                  (codebase-memory-mcp test-impact select
+                  (mori test-impact select
                    + team-artifact bundle from main)
 ```
 
@@ -81,30 +85,24 @@ reports `run_all`. Static reachability alone never omits a suite.
 
 1. **The binary, pinned.** Use the same release in the producer and the PR
    jobs. Download that release's Linux archive and verify it against the
-   release's `checksums.txt`, as this repository's shadow job does
-   (`scripts/ci/test-impact-shadow.sh --fetch-release`):
+   release's `checksums.txt`:
 
    ```bash
-   CBM_VERSION=vX.Y.Z   # a release that contains the features you use (see below)
-   asset=codebase-memory-mcp-linux-amd64.tar.gz
-   gh release download "$CBM_VERSION" --repo DeusData/codebase-memory-mcp \
+   MORI_VERSION=X.Y.Z   # 0.14.0 or later (see the version note)
+   asset=mori-$MORI_VERSION-linux-x64.tar.gz
+   gh release download "mori/v$MORI_VERSION" --repo Unique-Divine/jiyuu \
      --pattern "$asset" --pattern checksums.txt --dir "$RUNNER_TEMP/cbm"
    (cd "$RUNNER_TEMP/cbm" && grep " $asset\$" checksums.txt | sha256sum -c - &&
-     tar -xzf "$asset" codebase-memory-mcp)
-   "$RUNNER_TEMP/cbm/codebase-memory-mcp" --version
+     tar -xzf "$asset" mori)
+   "$RUNNER_TEMP/cbm/mori" --version
    ```
 
-   For a quick start, `install.sh` installs the latest release with the same
-   checks (HTTPS only, SHA-256 against `checksums.txt`, the archive's member
-   list, `--version`); `--skip-config` skips agent configuration, which a CI
-   runner does not need. It has no version flag, so it is not a pin.
-
-   **Version note.** `v0.12.0` and `v0.12.1` have `test-impact select`/`publish`.
-   They do not have `key: "path"`, `unreferenced`, `--vetoed-out` or
-   `run_all_rules`; those ship in a later release. With either version, a config
-   that uses those keys is invalid, and every answer is `run_all`. Until that
-   release, build the binary from source (`make -f Makefile.cbm cbm`), as this
-   repository's producer and `select-tests` jobs do.
+   **Version note.** The snippet needs `mori/v0.14.0` or later, the first
+   release with `mori-<version>-<target>.tar.gz` archives and a `mori`
+   binary. `mori/v0.13.x` ships `codebase-memory-mcp-<version>-<target>.tar.gz`
+   with a `codebase-memory-mcp` binary; change the asset and member names to
+   use it. Every Mori release has `test-impact select` and `publish`, with
+   `key: "path"`, `unreferenced`, `--vetoed-out` and `run_all_rules`.
 
 2. **Full git history.** Check out with `fetch-depth: 0` in every job that
    runs the engine. The engine verifies the history it diffs and refuses a
@@ -162,7 +160,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Install codebase-memory-mcp
+      - name: Install mori
         run: <the pinned install from Prerequisites>
       - name: Per-test coverage map            # YOURS: format 1, see coverage-map.py
         run: |
@@ -173,7 +171,7 @@ jobs:
           export CBM_CACHE_DIR="$RUNNER_TEMP/ti-cache"
           export CBM_RUNTIME_DIR="$(mktemp -d /tmp/cbm-rt.XXXXXX)"   # short: sun_path
           mkdir -p "$RUNNER_TEMP/ti-work" && chmod 700 "$RUNNER_TEMP/ti-work"
-          "$RUNNER_TEMP/cbm/codebase-memory-mcp" test-impact publish \
+          "$RUNNER_TEMP/cbm/mori" test-impact publish \
             --repo "$GITHUB_WORKSPACE" --out "$RUNNER_TEMP/bundle" \
             --work "$RUNNER_TEMP/ti-work" --coverage "$RUNNER_TEMP/coverage" \
             --observed-at "$OBSERVED" --platform linux-x86_64-clang21
@@ -214,12 +212,12 @@ than that.
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Install codebase-memory-mcp
+      - name: Install mori
         run: <the pinned install from Prerequisites>
       - name: Select with the team artifact (shadow)
         env:
           GH_TOKEN: ${{ github.token }}
-        run: scripts/ci/test-impact-select.sh --binary "$RUNNER_TEMP/cbm/codebase-memory-mcp" --out "$RUNNER_TEMP/test-impact"
+        run: scripts/ci/test-impact-select.sh --binary "$RUNNER_TEMP/cbm/mori" --out "$RUNNER_TEMP/test-impact"
       - uses: actions/upload-artifact@<pinned-sha>
         if: ${{ always() }}
         with:
@@ -268,14 +266,14 @@ everything (`builtin:test-impact-config`).
           persist-credentials: false
       # The selection scripts come from the merge base, never from the PR.
       - run: git worktree add --detach "$RUNNER_TEMP/base-tooling" HEAD^1
-      - name: Install codebase-memory-mcp
+      - name: Install mori
         run: <the pinned install from Prerequisites>
       - id: select
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           "$RUNNER_TEMP/base-tooling/scripts/ci/test-impact-select.sh" --repo "$GITHUB_WORKSPACE" \
-            --binary "$RUNNER_TEMP/cbm/codebase-memory-mcp" \
+            --binary "$RUNNER_TEMP/cbm/mori" \
             --out "$RUNNER_TEMP/test-impact" --gate "$RUNNER_TEMP/test-selection"
       - if: ${{ steps.select.outputs.selection == 'narrowed' }}
         uses: actions/upload-artifact@<pinned-sha>
