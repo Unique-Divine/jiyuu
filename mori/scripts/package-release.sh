@@ -33,6 +33,8 @@ Options:
   --out-dir DIR                output directory (default: repository root)
   --archive-name NAME          archive basename without extension (default:
                                codebase-memory-mcp-<goos>-<goarch>)
+  --binary-name NAME           executable name inside the containers (default:
+                               codebase-memory-mcp; Mori releases pass mori)
 
 Environment:
   VERSION                      MCPB manifest version (v-prefix accepted;
@@ -60,6 +62,7 @@ EXPECTED_SHA256=""
 THIRD_PARTY_NOTICES=""
 OUT_DIR="$ROOT"
 ARCHIVE_NAME=""
+BINARY_NAME="codebase-memory-mcp"
 expect_value=""
 for arg in "$@"; do
     case "$expect_value" in
@@ -68,6 +71,7 @@ for arg in "$@"; do
     third-party-notices) THIRD_PARTY_NOTICES="$arg"; expect_value=""; continue ;;
     out-dir) OUT_DIR="$arg"; expect_value=""; continue ;;
     archive-name) ARCHIVE_NAME="$arg"; expect_value=""; continue ;;
+    binary-name) BINARY_NAME="$arg"; expect_value=""; continue ;;
     esac
     case "$arg" in
     -h | --help) usage; exit 0 ;;
@@ -81,6 +85,8 @@ for arg in "$@"; do
     --out-dir=*) OUT_DIR="${arg#--out-dir=}" ;;
     --archive-name) expect_value="archive-name" ;;
     --archive-name=*) ARCHIVE_NAME="${arg#--archive-name=}" ;;
+    --binary-name) expect_value="binary-name" ;;
+    --binary-name=*) BINARY_NAME="${arg#--binary-name=}" ;;
     -*)
         echo "package-release: unknown option '$arg'. Please consult --help." >&2
         exit 2
@@ -146,6 +152,10 @@ if ! [[ "$NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
     echo "package-release: --archive-name must be a plain file name: $NAME" >&2
     exit 2
 fi
+if ! [[ "$BINARY_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+    echo "package-release: --binary-name must be a plain file name: $BINARY_NAME" >&2
+    exit 2
+fi
 
 sha256_file() {
     python3 - "$1" <<'PY'
@@ -205,10 +215,10 @@ PY
 assert_expected_hash "$SELECTED_BINARY" "selected binary" || exit 2
 
 if [ "$GOOS" = "windows" ]; then
-    STAGED_BINARY_NAME="codebase-memory-mcp.exe"
+    STAGED_BINARY_NAME="$BINARY_NAME.exe"
     ARCHIVE_OUT="$OUT_DIR/$NAME.zip"
 else
-    STAGED_BINARY_NAME="codebase-memory-mcp"
+    STAGED_BINARY_NAME="$BINARY_NAME"
     ARCHIVE_OUT="$OUT_DIR/$NAME.tar.gz"
 fi
 MCPB_OUT="$OUT_DIR/$NAME.mcpb"
@@ -265,7 +275,7 @@ if [ "$GOOS" = "windows" ]; then
     (
         cd "$PACK_DIR"
         zip -q -X "$ARCHIVE_TMP" \
-            codebase-memory-mcp.exe LICENSE NOTICE THIRD_PARTY_NOTICES.md
+            "$STAGED_BINARY_NAME" LICENSE NOTICE THIRD_PARTY_NOTICES.md
     )
     mkdir "$VERIFY_DIR/archive"
     extract_zip_member "$ARCHIVE_TMP" "$STAGED_BINARY_NAME" \
@@ -274,7 +284,7 @@ else
     # BSD tar otherwise materializes macOS extended attributes as hidden
     # AppleDouble `._*` members, violating the exact four-file inventory.
     COPYFILE_DISABLE=1 tar -czf "$ARCHIVE_TMP" -C "$PACK_DIR" \
-        codebase-memory-mcp LICENSE NOTICE THIRD_PARTY_NOTICES.md
+        "$STAGED_BINARY_NAME" LICENSE NOTICE THIRD_PARTY_NOTICES.md
     mkdir "$VERIFY_DIR/archive"
     tar -xzf "$ARCHIVE_TMP" -C "$VERIFY_DIR/archive" "$STAGED_BINARY_NAME"
 fi
