@@ -34,7 +34,9 @@ import hashlib
 import json
 import os
 import sqlite3
+import subprocess
 import sys
+import tempfile
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Iterable
@@ -165,14 +167,132 @@ def export_db(path: str) -> dict[str, Any]:
     conn.close()
 
 
+def new_export(project: str, root: str) -> dict[str, Any]:
+  return {
+    "project": project, "root": root, "schema": {}, "nodes": {},
+    "edges": {}, "side": {}, "counts_only": {}, "l0": {},
+  }
+
+
+def set_graph_counts(result: dict[str, Any]) -> None:
+  result["l0"]["nodes_by_label"] = dict(sorted(Counter(
+    k[1] for k in result["nodes"]).items()))
+  result["l0"]["edges_by_type"] = dict(sorted(Counter(
+    k[2] for k in result["edges"]).items()))
+
+
+def same_export_value(a: Any, b: Any) -> bool:
+  """Compare normalized export values without Python's numeric coercions."""
+  if type(a) is not type(b):
+    return False
+  if isinstance(a, dict):
+    # Decoder keys are strings or tuples of strings.
+    return a.keys() == b.keys() and all(same_export_value(a[k], b[k]) for k in a)
+  if isinstance(a, (list, tuple)):
+    return len(a) == len(b) and all(same_export_value(x, y) for x, y in zip(a, b))
+  return a == b
+
+
+EXPORT_RECORD_FIELDS = {
+  "project": {"name": str, "root": str},
+  "schema": {"key": str, "sql": str},
+  "count": {"table": str, "count": int},
+  "table": {"table": str, "key": list, "count": int},
+  "row": {"table": str, "properties": dict},
+  "fts": {"term": str, "doc": int, "count": int},
+}
+
+
+def read_export_record(line: str, number: int) -> dict[str, Any]:
+  try:
+    row = json.loads(line)
+  except ValueError as e:
+    raise ValueError(f"Mori export line {number}: {e}") from e
+  if not isinstance(row, dict):
+    raise ValueError(f"Mori export line {number}: expected a JSON object")
+  kind = row.get("kind")
+  if not isinstance(kind, str) or kind not in EXPORT_RECORD_FIELDS:
+    raise ValueError(f"Mori export line {number}: unknown record kind {kind!r}")
+  for name, want in EXPORT_RECORD_FIELDS[kind].items():
+    if type(row.get(name)) is not want:
+      raise ValueError(f"Mori export line {number}: {kind}.{name} must be {want.__name__}")
+  return row
+
+
+def decode_mori_export(lines: Iterable[str]) -> dict[str, Any]:
+  """Read the sorted JSON Lines emitted by `mori dev export`."""
+  stream = enumerate(lines, 1)
+  _, first_line = next(stream, (1, ""))
+  if not first_line:
+    raise ValueError("Mori export line 1: missing project record")
+  first = read_export_record(first_line, 1)
+  if first["kind"] != "project":
+    raise ValueError("Mori export line 1: expected a project record")
+  result = new_export(first["name"], first["root"])
+  for number, line in stream:
+    row = read_export_record(line, number)
+    kind = row["kind"]
+    if kind == "schema":
+      result["schema"][row["key"]] = row["sql"]
+    elif kind == "count":
+      result["counts_only"][row["table"]] = row["count"]
+    elif kind == "table":
+      if any(not isinstance(key, str) for key in row["key"]):
+        raise ValueError(f"Mori export line {number}: table.key must contain strings")
+      result["side"][row["table"]] = {
+        "key": row["key"] or None, "rows": {}, "multiset": Counter(),
+        "count": row["count"],
+      }
+    elif kind == "row":
+      table = row["table"]
+      props = row["properties"]
+      key = row.get("key")
+      if table in ("nodes", "edges"):
+        want = 3 if table == "nodes" else 4
+        if not isinstance(key, list) or len(key) != want or any(
+            not isinstance(value, str) for value in key):
+          raise ValueError(f"Mori export line {number}: {table} key must contain {want} strings")
+        result[table][tuple(key)] = props
+      else:
+        side = result["side"].get(table)
+        if side is None:
+          raise ValueError(f"Mori export line {number}: no table record for {table!r}")
+        if side["key"]:
+          if not isinstance(key, list) or len(key) != len(side["key"]):
+            raise ValueError(f"Mori export line {number}: invalid key for {table!r}")
+          key = tuple(json.dumps(value, sort_keys=True) for value in key)
+          side["rows"][key] = props
+        else:
+          side["multiset"][json.dumps(props, sort_keys=True)] += 1
+    elif kind == "fts":
+      result.setdefault("fts_vocab", {})[row["term"]] = (row["doc"], row["count"])
+    else:
+      raise ValueError(f"Mori export line {number}: unexpected {kind!r} record")
+  if "nodes_fts" in result["counts_only"]:
+    result.setdefault("fts_vocab", {})
+  set_graph_counts(result)
+  return result
+
+
+def export_mori(path: str, binary: str, env: dict[str, str], timeout: int
+                ) -> dict[str, Any]:
+  with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as rows:
+    process = subprocess.run(
+      [binary, "dev", "export", "--db", path], cwd="/", env=env,
+      stdout=rows, stderr=subprocess.PIPE, text=True, timeout=timeout,
+      stdin=subprocess.DEVNULL)
+    if process.returncode:
+      raise ValueError(f"{binary} dev export exited {process.returncode}: "
+                       f"{process.stderr.strip()}")
+    rows.seek(0)
+    return decode_mori_export(rows)
+
+
 def _export(conn: sqlite3.Connection) -> dict[str, Any]:
   project, root = project_identity(conn)
   norm = Normalizer(project, root)
   tables = table_names(conn)
-  result: dict[str, Any] = {
-    "project": project, "root": root, "schema": {}, "nodes": {},
-    "edges": {}, "side": {}, "counts_only": {}, "l0": {},
-  }
+  result = new_export(project, root)
 
   for r in conn.execute(
     "SELECT type, name, sql FROM sqlite_master ORDER BY type, name"
@@ -216,10 +336,7 @@ def _export(conn: sqlite3.Connection) -> dict[str, Any]:
       props["__duplicate_key__"] = True
     result["edges"][key] = props
 
-  result["l0"]["nodes_by_label"] = dict(sorted(Counter(
-    k[1] for k in result["nodes"]).items()))
-  result["l0"]["edges_by_type"] = dict(sorted(Counter(
-    k[2] for k in result["edges"]).items()))
+  set_graph_counts(result)
 
   # FTS logical content, independent of segment layout and rowids.
   if "nodes_fts" in tables:
