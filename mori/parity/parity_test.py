@@ -40,6 +40,40 @@ class ParityTest(unittest.TestCase):
                       errors.getvalue())
         mkdtemp.assert_not_called()
 
+  def test_graphql_mode_extends_only_the_requested_side_env(self) -> None:
+    normal = parity.Side("a", "/bin/true", "/tmp/cache-a", "/tmp/rt-a")
+    candidate = parity.Side("b", "/bin/true", "/tmp/cache-b", "/tmp/rt-b",
+                            graphql_mode="rust")
+    with patch.dict(os.environ, {"HOME": self.tmp, "MORI_IMPL_GRAPHQL": "c",
+                                 "CBM_PROFILE": "ambient"}, clear=True):
+      self.assertEqual(normal.env(), {
+        "PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": self.tmp,
+        "CBM_CACHE_DIR": "/tmp/cache-a", "CBM_RUNTIME_DIR": "/tmp/rt-a",
+      })
+      self.assertEqual(candidate.env(), {
+        "PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": self.tmp,
+        "CBM_CACHE_DIR": "/tmp/cache-b", "CBM_RUNTIME_DIR": "/tmp/rt-b",
+        "MORI_IMPL_GRAPHQL": "rust", "CBM_PROFILE": "1",
+      })
+
+  def test_graphql_modes_are_reported_only_when_requested(self) -> None:
+    for label, flags, requested in (
+        ("default", [], None),
+        ("single", ["--graphql-b", "rust"], {"b": "rust"}),
+        ("both", ["--graphql-a", "c", "--graphql-b", "rust"], {"a": "c", "b": "rust"})):
+      with self.subTest(label=label), patch.object(parity.fixtures, "write_all", return_value=[]):
+        work = os.path.join(self.tmp, label)
+        errors = io.StringIO()
+        with redirect_stdout(io.StringIO()), redirect_stderr(errors):
+          self.assertEqual(parity.main([
+            "ci", "--work", work, "--rt-prefix", work + "-rt", "--scratch-root", self.tmp,
+            "--skip-l4", "--bin-a", sys.executable, "--bin-b", sys.executable, *flags,
+          ]), 0)
+        with open(os.path.join(work, "report.json"), encoding="utf-8") as f:
+          report = json.load(f)
+        self.assertEqual(report.get("graphql_modes_requested"), requested)
+        self.assertEqual("GraphQL modes requested:" in errors.getvalue(), requested is not None)
+
   def test_ci_reports_only_work_that_survives_cleanup(self) -> None:
     reports: list[str] = []
 
