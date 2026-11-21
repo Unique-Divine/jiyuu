@@ -4886,6 +4886,7 @@ static char *bm25_search(cbm_store_t *store, const char *project, const char *qu
             bm25_output_rows_free(rows, scan.count);
             return NULL;
         }
+        cbm_log_debug("search_graph.reader", "mode", "bm25", "backend", "rust");
     } else {
         sqlite3_stmt *stmt = NULL;
         if (sqlite3_prepare_v2(db, sql, BM25_SQL_AUTO_LEN, &stmt, NULL) != SQLITE_OK) {

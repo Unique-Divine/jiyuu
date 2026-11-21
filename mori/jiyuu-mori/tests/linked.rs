@@ -749,7 +749,19 @@ fn index_through_worker_reexec_matches_c() {
             ],
         ]
         .iter()
-        .map(|args| run_in(bin, &scratch, args))
+        .map(|args| {
+            let output = run_in(bin, &scratch, args);
+            if args.last().copied() == Some(ranked_search.as_str()) {
+                let ranked: serde_json::Value = serde_json::from_slice(&output.stdout)
+                    .unwrap_or_else(|error| panic!("ranked response: {error}: {output:?}"));
+                assert_eq!(ranked["search_mode"], "bm25", "{ranked}");
+                assert!(
+                    ranked["returned"].as_u64().is_some_and(|count| count > 0),
+                    "{ranked}"
+                );
+            }
+            output
+        })
         .collect();
         let invalid =
             run_in(bin, &scratch, &["cli", "search_graph", &search_invalid]);

@@ -7823,6 +7823,7 @@ static int store_search(cbm_store_t *s, const cbm_search_params_t *params, cbm_s
         }
         int status = reader(s->db, total_sql, main_sql, values, bind_idx, &out->total, &scan,
                             search_scan_append, search_scan_error);
+        cbm_log_debug("search_graph.reader", "mode", "pattern", "backend", "rust");
         cbm_free(CBM_MEM_CLASS_STORE, ranged_count_sql);
         cbm_free(CBM_MEM_CLASS_STORE, ranged_sql);
         like_pool_free(&like_pool);
