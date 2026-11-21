@@ -17,6 +17,8 @@
 //! - `MORI_MAKE_JOBS`: make parallelism (default 4).
 //! - `MORI_C_REFERENCE=1`: also build `codebase-memory-mcp` in the same
 //!   `BUILD_DIR`, for the comparison test in `tests/linked.rs`.
+//! - `MORI_WITH_UI=1`: link the graph UI (make `LIBMORI_WITH_UI=1`, which
+//!   builds `graph-ui` with npm); the C reference is then `cbm-with-ui`.
 //! - `CC`, `CXX`, `CFLAGS_EXTRA`, `TEST_SEAMS`: passed to make as
 //!   `scripts/build.sh` would.
 //!
@@ -45,6 +47,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=MORI_C_BUILD_DIR");
     println!("cargo:rerun-if-env-changed=MORI_MAKE_JOBS");
     println!("cargo:rerun-if-env-changed=MORI_C_REFERENCE");
+    println!("cargo:rerun-if-env-changed=MORI_WITH_UI");
     if env::var_os("CARGO_FEATURE_C_BACKEND").is_none() {
         return;
     }
@@ -79,11 +82,33 @@ fn build_and_link() -> Result<(), String> {
 
     check_grammars(&mori_dir)?;
 
+    let with_ui = env::var("MORI_WITH_UI").as_deref() == Ok("1");
+    if with_ui {
+        for path in [
+            "graph-ui/src",
+            "graph-ui/index.html",
+            "graph-ui/package.json",
+            "graph-ui/package-lock.json",
+            "graph-ui/vite.config.ts",
+            "graph-ui/tsconfig.json",
+            "graph-ui/tsconfig.node.json",
+        ] {
+            let path = mori_dir.join(path);
+            println!("cargo:rerun-if-changed={}", path.display());
+        }
+    }
     let mut targets = vec!["libmori-c"];
     if env::var("MORI_C_REFERENCE").as_deref() == Ok("1") {
-        targets.push("cbm");
+        targets.push(if with_ui { "cbm-with-ui" } else { "cbm" });
     }
-    run_make(&mori_dir, &build_dir_arg, &jobs, &target_os, &targets)?;
+    run_make(
+        &mori_dir,
+        &build_dir_arg,
+        &jobs,
+        &target_os,
+        &targets,
+        with_ui,
+    )?;
 
     let archive = build_dir.join("libmori-c.a");
     if !archive.is_file() {
@@ -170,6 +195,7 @@ fn run_make(
     jobs: &str,
     target_os: &str,
     targets: &[&str],
+    with_ui: bool,
 ) -> Result<(), String> {
     let (default_cc, default_cxx) = default_compilers(target_os);
     let cc = env::var("CC").unwrap_or_else(|_| default_cc.into());
@@ -183,6 +209,7 @@ fn run_make(
         .arg(format!("CC={cc}"))
         .arg(format!("CXX={cxx}"))
         .args(PINNED_MAKE_VARS)
+        .arg(format!("LIBMORI_WITH_UI={}", u8::from(with_ui)))
         // Cargo's jobserver and an outer make must not change -j.
         .env_remove("MAKEFLAGS")
         .env_remove("MFLAGS")
@@ -220,16 +247,29 @@ fn run_make(
 /// Links the archive whole, so the binary holds the same objects as
 /// `codebase-memory-mcp`, and the libraries from `LDFLAGS` in
 /// `Makefile.cbm` (`-lm -lstdc++ -lpthread -lz`).
+///
+/// With `-C target-feature=+crt-static` (the static Linux release, like
+/// `STATIC=1` for the C binary), zlib and libstdc++ link as archives too: a
+/// `dylib` library would make the linker pick the shared object and produce
+/// a dynamic binary. libm and libpthread come with the static libc that
+/// Rust's std links under crt-static.
 fn emit_link_lines(build_dir: &Path, target_os: &str) {
+    let crt_static = env::var("CARGO_CFG_TARGET_FEATURE")
+        .is_ok_and(|features| features.split(',').any(|f| f == "crt-static"));
     println!("cargo:rustc-link-search=native={}", build_dir.display());
     println!("cargo:rustc-link-lib=static:+whole-archive=mori-c");
-    println!("cargo:rustc-link-lib=dylib=z");
-    println!("cargo:rustc-link-lib=dylib=m");
-    println!("cargo:rustc-link-lib=dylib=pthread");
-    if target_os == "macos" {
-        println!("cargo:rustc-link-lib=dylib=c++");
+    if crt_static && target_os == "linux" {
+        println!("cargo:rustc-link-lib=static=z");
+        println!("cargo:rustc-link-lib=static=stdc++");
     } else {
-        println!("cargo:rustc-link-lib=dylib=stdc++");
+        println!("cargo:rustc-link-lib=dylib=z");
+        println!("cargo:rustc-link-lib=dylib=m");
+        println!("cargo:rustc-link-lib=dylib=pthread");
+        if target_os == "macos" {
+            println!("cargo:rustc-link-lib=dylib=c++");
+        } else {
+            println!("cargo:rustc-link-lib=dylib=stdc++");
+        }
     }
     if target_os == "linux" {
         // ELF_HARDENING_FLAGS in Makefile.cbm. Rust already links with
