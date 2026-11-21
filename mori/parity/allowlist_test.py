@@ -75,6 +75,10 @@ class AllowlistTest(unittest.TestCase):
       {"layer": "L3", "key": "projects.indexed_at", "row": "abcdefghij"},
       {"layer": "L4", "key": "search_graph:$.results{unstable_count}",
        "group": CALL, "repos": ["alpha"]},
+      {"layer": "L4", "key": "search_graph:$.results{unstable_prefix_b}",
+       "group": CALL, "repos": ["alpha"]},
+      {"layer": "L4", "key": "search_graph:$.results{unstable_order_a}",
+       "group": CALL, "repos": ["alpha"], "row": '["p.lib.stats.mean"'},
       {"layer": "L4", "key": "search_graph:$.results{unstable_only_in_b}",
        "group": CALL, "repos": ["alpha"]},
     ]

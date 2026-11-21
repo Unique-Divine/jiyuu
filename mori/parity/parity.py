@@ -37,6 +37,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
 import shutil
 import sqlite3
@@ -661,7 +662,6 @@ def finish(results: list[RepoResult], l4: list[dict[str, Any]],
   path = os.path.join(work, "report.json")
   with open(path, "w", encoding="utf-8") as f:
     json.dump(report, f, indent=1)
-  print(f"\nreport: {path}")
   if any(r.error for r in results):
     return 2
   unlisted = any(not d["allowed"] for r in results for d in r.diffs)
@@ -809,6 +809,42 @@ def corrupt_bin(mode: str, real: str, path: str, roots: list[str]) -> str:
   return path
 
 
+# What each corrupt.py mode must produce among the unlisted differences:
+# (description, key pattern, required text in the call's `where`, or "").
+CORRUPT_EXPECT = {
+  "rows": [("a changed row in search_graph or query_graph",
+            re.compile(r"^(search_graph|query_graph):.*\{only_in_[ab]\}$"),
+            "")],
+  "page": [("an order or boundary difference in unranked search_graph",
+            re.compile(r"^search_graph:.*\{(order|boundary_\w+)\}$"),
+            "name_pattern")],
+}
+CORRUPT_EXPECT["all"] = CORRUPT_EXPECT["rows"] + CORRUPT_EXPECT["page"]
+
+
+def corrupt_verdict(mode: str, rc: int, report_path: str) -> int:
+  """0 when a corrupted run failed for the reasons its mode targets, so an
+  unrelated difference (setup noise, a clock) can't pass the self-test."""
+  if rc != 1:
+    log(f"corrupt {mode}: run exited {rc}, want 1")
+    return 1
+  with open(report_path, encoding="utf-8") as f:
+    rep = json.load(f)
+  diffs = [d for d in rep["l4"]["diffs"] if not d["allowed"]]
+  missing = []
+  for what, rx, where in CORRUPT_EXPECT[mode]:
+    if not any(rx.search(d["key"]) and
+               (not where or any(where in ex["where"]
+                                 for ex in d["examples"]))
+               for d in diffs):
+      missing.append(what)
+  if missing:
+    log(f"corrupt {mode}: no " + "; no ".join(missing))
+    return 1
+  print(f"corrupt {mode}: caught ({len(diffs)} unlisted L4 keys)")
+  return 0
+
+
 def cmd_ci(a: argparse.Namespace) -> int:
   a.allowlist = [ALLOWLIST] + (a.allowlist or [])
   if a.corrupt:
@@ -819,7 +855,11 @@ def cmd_ci(a: argparse.Namespace) -> int:
   repos = fixtures.write_all(base)
   call_list, dropped = (None, 0) if a.skip_l4 else \
     calls_mod.load_calls(a.calls or CALLS_CI)
-  return run(repos, call_list, dropped, a, {"mode": "fixtures"})
+  rc = run(repos, call_list, dropped, a, {"mode": "fixtures"})
+  if a.corrupt:
+    return corrupt_verdict(a.corrupt, rc,
+                           os.path.join(a.work, "report.json"))
+  return rc
 
 
 def cmd_pin(a: argparse.Namespace) -> int:
@@ -903,9 +943,10 @@ def main(argv: list[str]) -> int:
     p.add_argument("--timeout-retries", type=int, default=4,
                    help="reindexes when files hit the parse timeout")
     if name == "ci":
-      p.add_argument("--corrupt", choices=("rows", "page"),
-                     help="run side b through corrupt.py: the run must "
-                     "then exit 1 (a harness self-test)")
+      p.add_argument("--corrupt", choices=("rows", "page", "all"),
+                     help="harness self-test: run side b through "
+                     "corrupt.py; exit 0 only when the mode's corruption "
+                     "was reported")
     if name == "run":
       p.add_argument("--private-dir",
                      help="directory holding corpus.json, calls.jsonl, and "
@@ -952,9 +993,15 @@ def main(argv: list[str]) -> int:
   except (RuntimeError, OSError, ValueError) as e:
     log(f"error: {e}")
     rc = 2
+  report = os.path.join(a.work, "report.json") if a.cmd in ("run", "ci") \
+    else ""
   if base and a.cmd == "ci" and rc == 0:
-    # A clean fixture run leaves nothing worth reading behind.
+    # A passing fixture run (or caught corruption) leaves nothing worth
+    # reading behind.
     shutil.rmtree(base, ignore_errors=True)
+    print("\nfixture run passed; its work dir was removed")
+  elif report and os.path.isfile(report):
+    print(f"\nreport: {report}")
   return rc
 
 

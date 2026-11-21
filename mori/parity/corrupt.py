@@ -11,6 +11,8 @@ Modes:
   page  answer unranked search_graph with the end of the full
         `ORDER BY name, id` order instead of its start, with the same
         counts: a wrong page of the right set.
+  all   page for unranked search_graph, rows for every other table call;
+        one fixture run checks both.
 """
 
 from __future__ import annotations
@@ -25,7 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import rows  # noqa: E402
 
-MODES = ("rows", "page")
+MODES = ("rows", "page", "all")
 
 
 def run(real: str, argv: list[str]) -> tuple[int, str, str]:
@@ -77,13 +79,13 @@ def main(argv: list[str]) -> int:
   if tool not in ("search_graph", "query_graph"):
     return subprocess.run([real] + rest).returncode
   code, out, err = run(real, rest)
-  if mode == "rows":
+  args = json.loads(rest[3])
+  paged = tool == "search_graph" and "query" not in args and \
+    args.get("format") != "json"
+  if mode in ("page", "all") and paged:
+    out = wrong_page(real, rest, out)
+  elif mode == "rows" or (mode == "all" and not paged):
     out = corrupt_rows(out)
-  else:
-    args = json.loads(rest[3])
-    if tool == "search_graph" and "query" not in args and \
-        args.get("format") != "json":
-      out = wrong_page(real, rest, out)
   sys.stdout.write(out)
   sys.stderr.write(err)
   return code

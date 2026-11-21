@@ -52,13 +52,7 @@ parity-ci *ARGS: parity-test
 parity-mori MODE="run" *ARGS:
     python3 -I parity/parity.py {{MODE}} --bin-b ../target/release/mori {{ARGS}}
 
-# Needs `just build`. The harness must fail every corrupted side b.
-# Self-test: run fixture parity against deliberately wrong builds.
+# Needs `just build`. Fails unless the harness reports both corruptions.
+# Self-test: fixture parity against a deliberately wrong build.
 parity-corrupt:
-    for mode in rows page; do \
-      rc=0; python3 -I parity/parity.py ci --corrupt "$mode" \
-        > /dev/null 2>&1 || rc=$?; \
-      if [ "$rc" -ne 1 ]; then \
-        echo "parity-corrupt: mode $mode exited $rc, want 1"; exit 1; \
-      fi; echo "parity-corrupt: mode $mode caught"; \
-    done
+    python3 -I parity/parity.py ci --corrupt all

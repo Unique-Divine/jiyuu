@@ -183,8 +183,10 @@ class GateTest(unittest.TestCase):
 
     args = {"query": "x", "limit": 2}
     self.assertEqual(keys(diff("search_graph", args, a, b, rerun)), [])
-    self.assertEqual(asked, [{"query": "x", "limit": 500, "offset": 0,
-                              "max_output_tokens": 1000000}])
+    self.assertEqual(asked[0], {"query": "x", "limit": 500, "offset": 0,
+                                "max_output_tokens": 1000000})
+    self.assertEqual(asked[-1], {"query": "x", "limit": 2,
+                                 "format": "json"})
 
     # A boundary row the build made up is not in its unlimited answer.
     bad = head + r1 + "  p.zzz Function z.ts 1-2 -1\n" + tail
@@ -276,16 +278,17 @@ class GateTest(unittest.TestCase):
     b = head + "  a x\n  c z\n" + tail
     full = out("rows: 3  (cols: f.name g.name)\n  a x\n  b y\n  c z\n"
                + tail)
-    # Both cut sets come from the same candidates: one accepted-able key.
-    got = keys(diff("query_graph", q, a, b, lambda _: (full, full)))
+    # Side b's capped candidates put b y after its cut: one acceptable key.
+    full_b = out("rows: 3  (cols: f.name g.name)\n  a x\n  c z\n  b y\n"
+                 + tail)
+    got = keys(diff("query_graph", q, a, b, lambda _: (full, full_b)))
     self.assertEqual(got, [("query_graph:$.rows{unstable}", "")])
     self.assertEqual(keys(diff("query_graph", q, a, a)), [])
     # A row the other side never returns, even unlimited, is reported.
     bad = head + "  a x\n  WRONG z\n" + tail
     got = keys(diff("query_graph", q, a, bad, lambda _: (full, full)))
-    self.assertEqual(got, [
-      ("query_graph:$.rows{unstable_only_in_b}", '["WRONG", "z"]'),
-      ("query_graph:$.rows{unstable}", "")])
+    self.assertIn(
+      ("query_graph:$.rows{unstable_only_in_b}", '["WRONG", "z"]'), got)
     # A different count is never an unstable-only difference.
     short = "rows: 1  (cols: f.name g.name)\n  a x\n" + tail
     got = [k for k, _ in keys(diff("query_graph", q, a, short,
@@ -298,9 +301,67 @@ class GateTest(unittest.TestCase):
   def test_capped_bm25_total_is_gated_against_the_replay(self) -> None:
     a = RANKED.replace("total_relation: eq", "total_relation: gte")
     b = a.replace("p.docs.guide.Math", "p.docs.guide.Other")
+    other = "  p.docs.guide.Other Section docs/guide.md 6-7 -0.64\n"
+    math = "  p.docs.guide.Math Section docs/guide.md 6-7 -0.64\n"
+    full_a = a.replace("total: 4", other.rstrip("\n") + "\ntotal: 4", 1)
+    full_b = b.replace("total: 4", math.rstrip("\n") + "\ntotal: 4", 1)
     got = keys(diff("search_graph", {"query": "m"}, a, b,
-                    lambda _: (out(b), out(a))))
+                    lambda _: (out(full_a), out(full_b))))
     self.assertEqual(got, [("search_graph:$.results{unstable}", "")])
+
+  def test_ranked_text_is_also_gated_in_json(self) -> None:
+    """Two rows print the same rank in text but differ in JSON: a swap
+    between them is caught by the JSON replay."""
+    text = ("results: 2  (cols: qn label file lines rank)\n"
+            "  p.a Function a.ts 1-2 -15.3\n  p.b Function b.ts 1-2 -15.3\n"
+            "total: 2\ntotal_relation: eq\nhas_more: false\n")
+    swapped = text.replace("p.a Function a.ts", "p.x Function x.ts") \
+      .replace("p.b Function b.ts", "p.a Function a.ts") \
+      .replace("p.x Function x.ts", "p.b Function b.ts")
+    def js(order: list[tuple[str, float]]) -> dict[str, Any]:
+      return out(json.dumps({"cols": ["qn", "label", "file", "lines",
+                                      "rank"],
+                             "rows": [[q, "Function", f"{q[-1]}.ts", "1-2", r]
+                                      for q, r in order],
+                             "total": 2, "has_more": False}))
+    good = js([("p.a", -15.31), ("p.b", -15.29)])
+    bad = js([("p.b", -15.29), ("p.a", -15.31)])
+    asked = []
+
+    def rerun(args: dict[str, Any]) -> tuple[Any, Any]:
+      asked.append(args.get("format"))
+      return good, bad
+
+    got = [k for k, _ in keys(diff("search_graph", {"query": "x"}, text,
+                                   swapped, rerun))]
+    self.assertEqual(asked, ["json"])
+    self.assertEqual(got, ["search_graph:$.rows{order}"])
+
+  def test_capped_page_must_lead_its_own_replay(self) -> None:
+    """Side b answers a capped BM25 call with the bottom of its candidate
+    list, in ascending order: every row exists on both sides, the counts
+    match, and it still fails."""
+    def page(rows_: list[str]) -> str:
+      return (f"results: {len(rows_)}  (cols: qn label file lines rank)\n"
+              + "".join(f"  {r}\n" for r in rows_) +
+              "total: 4\ntotal_relation: gte\nreturned: 2\n"
+              "has_more: true\ntruncated: true\n")
+    full = ["p.top1 Function a.ts 1-2 -40.1",
+            "p.top2 Function a.ts 3-4 -30.2",
+            "p.low1 Function a.ts 5-6 -2.1",
+            "p.low2 Function a.ts 7-8 -1.05"]
+    a, b = page(full[:2]), page(list(reversed(full[2:])))
+    got = [k for k, _ in keys(diff(
+      "search_graph", {"query": "x", "limit": 2}, a, b,
+      lambda _: (out(page(full)), out(page(full)))))]
+    self.assertIn("search_graph:$.results{unstable_order_b}", got)
+    self.assertIn("search_graph:$.results{unstable_prefix_b}", got)
+    # In order but still the bottom rows: not the leading rows.
+    got = [k for k, _ in keys(diff(
+      "search_graph", {"query": "x", "limit": 2}, a, page(full[2:]),
+      lambda _: (out(page(full)), out(page(full)))))]
+    self.assertNotIn("search_graph:$.results{unstable_order_b}", got)
+    self.assertIn("search_graph:$.results{unstable_prefix_b}", got)
 
   def test_unranked_search_graph_follows_name_order(self) -> None:
     """The C store returns unranked search_graph rows ORDER BY name, id:

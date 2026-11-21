@@ -160,6 +160,29 @@ class ParityTest(unittest.TestCase):
                      [{}, {"project": "{{project:alpha}}"}])
     self.assertEqual(dropped, 2)
 
+  def test_corrupt_verdict_needs_the_targeted_keys(self) -> None:
+    path = os.path.join(self.tmp, "report.json")
+
+    def report(*diffs: dict) -> str:
+      with open(path, "w") as f:
+        json.dump({"l4": {"diffs": list(diffs)}}, f)
+      return path
+
+    rows_d = {"key": "query_graph:$.rows{only_in_b}", "allowed": None,
+              "examples": [{"where": "#9 query_graph {}"}]}
+    page_d = {"key": "search_graph:$.results{order}", "allowed": None,
+              "examples": [{"where": '#4 search_graph {"name_pattern": ".*"}'}]}
+    clock = {"key": "index_status:$.out{indexed_at}{presence}",
+             "allowed": None, "examples": [{"where": "#1"}]}
+    self.assertEqual(parity.corrupt_verdict("all", 1,
+                                            report(rows_d, page_d)), 0)
+    self.assertEqual(parity.corrupt_verdict("rows", 1, report(rows_d)), 0)
+    # An unrelated difference does not pass the self-test.
+    self.assertEqual(parity.corrupt_verdict("page", 1, report(clock)), 1)
+    self.assertEqual(parity.corrupt_verdict("all", 1, report(rows_d)), 1)
+    # Nor does a run that wasn't a clean "differences found" exit.
+    self.assertEqual(parity.corrupt_verdict("rows", 2, report(rows_d)), 1)
+
   def test_classify_and_summary(self) -> None:
     entries = allowlist.parse([
       '{"layer": "L3", "key": "projects.indexed_at", "reason": "clock"}'])

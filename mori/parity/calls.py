@@ -477,13 +477,38 @@ def diff_call(rep: DiffReport, tool: str, args: dict[str, Any],
   qualified names to node names, for search_graph's name order."""
   if tool not in rows_mod.ROW_TOOLS:
     return diff_outputs(rep, tool, group, where, a, b)
+  n = _diff_table_call(rep, tool, args, group, where, a, b, rerun, names)
+  if rerun is not None and _ranked_text(tool, args, a):
+    # Text prints ranks rounded (-15.3), so rows whose real ranks differ
+    # look tied and may swap unseen. The JSON form carries the full rank:
+    # replay it once and gate its rows too (under `$.rows`).
+    jargs = {**args, "format": "json"}
+    ja, jb = rerun([jargs, jargs])
+    n += _diff_table_call(rep, tool, jargs, group, f"{where} (json)", ja,
+                          jb, rerun, names)
+  return n
+
+
+def _ranked_text(tool: str, args: dict[str, Any], a: dict[str, Any]) -> bool:
+  if tool != "search_graph" or args.get("format") == "json" or \
+      not isinstance(a["out"], TextLines):
+    return False
+  tables, _ = split_tables(a["out"])
+  return any(t.cols and t.cols[-1] in rows_mod.RANK_COLS
+             for t in tables.values())
+
+
+def _diff_table_call(rep: DiffReport, tool: str, args: dict[str, Any],
+                     group: str, where: str, a: dict[str, Any],
+                     b: dict[str, Any], rerun: Rerun | None,
+                     names: Any) -> int:
   pa, pb = split_tables(a["out"]), split_tables(b["out"])
   n = _diff_rest(rep, tool, group, where, "$", a, b, pa[1], pb[1])
   fa, fb = rows_mod.fields_of(pa[1]), rows_mod.fields_of(pb[1])
   ua = rows_mod.unlimited_args(tool, args, fa)
   if unstable(fa) or unstable(fb):
-    return n + _diff_unstable(rep, tool, group, where, pa[0], pb[0], ua,
-                              rerun)
+    return n + _diff_unstable(rep, tool, args, group, where, pa[0], pb[0],
+                              ua, rerun, names)
   gated = _gate(rep, tool, args, group, where, "$", pa[0], pb[0],
                 rows_mod.is_truncated(tool, args, fa, _nrows(pa[0])) or
                 rows_mod.is_truncated(tool, args, fb, _nrows(pb[0])), names)
@@ -525,17 +550,21 @@ def diff_call(rep: DiffReport, tool: str, args: dict[str, Any],
   return n
 
 
-def _diff_unstable(rep: DiffReport, tool: str, group: str, where: str,
-                   ta: dict[str, rows_mod.Table],
+def _diff_unstable(rep: DiffReport, tool: str, args: dict[str, Any],
+                   group: str, where: str, ta: dict[str, rows_mod.Table],
                    tb: dict[str, rows_mod.Table], ua: Any,
-                   rerun: Rerun | None) -> int:
+                   rerun: Rerun | None, names: Any = (None, None)) -> int:
   """The engine evaluated a capped candidate set (a Cypher engine limit,
   a BM25 cap reported as `total_relation: gte`), so which rows come back
   depends on scan order (row ids). Equal rows pass. Otherwise the call
   gets one `{unstable}` difference per table, which a call-scoped entry
   may accept, and the rows are still gated: the counts must match
   (`{unstable_count}`, never accepted), and each side's rows must appear
-  in the other side's unlimited replay (`{unstable_only_in_a}` per row)."""
+  in the other side's unlimited replay (`{unstable_only_in_a}` per row),
+  and each side's page must keep its order mode
+  (`{unstable_order_a}`) and be the leading rows of its own unlimited
+  replay, ties allowed at the cut (`{unstable_prefix_a}`). The last three
+  are never accepted."""
   n = 0
   diff_keys = []
   for key in sorted(set(ta) | set(tb)):
@@ -571,6 +600,25 @@ def _diff_unstable(rep: DiffReport, tool: str, group: str, where: str,
                     sorted(r for r in set(ra) if r not in in_b))
     n += _side_rows(rep, k, group, where, "unstable_only_in", "b",
                     sorted(r for r in set(rb) if r not in in_a))
+    for side, page, ft, name_of in (("a", ta, fta, names[0]),
+                                    ("b", tb, ftb, names[1])):
+      if key not in page:
+        continue
+      t = page[key]
+      mode, idx = rows_mod.order_mode(tool, args, t.cols)
+      bad = rows_mod.out_of_order(t, mode, idx, args, name_of)
+      if bad:
+        rep.add("L4", f"{k}{{unstable_order_{side}}}", group, len(bad),
+                bad[0], where)
+        n += 1
+      full_t = ft.get(key)
+      if mode != "unordered" and full_t is not None and \
+          not rows_mod.is_leading(
+            rows_mod.classes(t.rows, mode, idx, name_of),
+            rows_mod.classes(full_t.rows, mode, idx, name_of)):
+        rep.add("L4", f"{k}{{unstable_prefix_{side}}}", group, len(t.rows),
+                len(full_t.rows), where)
+        n += 1
   return n
 
 
