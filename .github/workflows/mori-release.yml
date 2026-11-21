@@ -216,7 +216,9 @@ jobs:
             --selected-binary "$BIN" --expected-sha256 "$sha" \
             --out-dir "$RUNNER_TEMP/dist" --archive-name "${asset%.tar.gz}"
           tar -tzvf "$RUNNER_TEMP/dist/$asset"
-          members="$(tar -tzf "$RUNNER_TEMP/dist/$asset" | sort | tr '\n' ' ')"
+          # C collation: macOS sort would otherwise put lowercase first.
+          members="$(tar -tzf "$RUNNER_TEMP/dist/$asset" | LC_ALL=C sort \
+            | tr '\n' ' ')"
           want='LICENSE NOTICE THIRD_PARTY_NOTICES.md codebase-memory-mcp '
           if [[ "$members" != "$want" ]]; then
             echo "::error::unexpected archive members: $members"
