@@ -208,6 +208,15 @@ fn index_through_worker_reexec_matches_c() {
         );
         let counts = (json_number(&text, "nodes"), json_number(&text, "edges"));
         assert!(counts.0.is_some_and(|n| n > 0), "{side}: {text}");
+        let outline_page = serde_json::json!({
+            "project": project, "file_path": "./py//app.py", "labels": ["Function"],
+            "limit": 1, "offset": 1, "format": "json"
+        }).to_string();
+        let outline_end = serde_json::json!({
+            "project": project, "file_path": "py/app.py", "labels": ["Function"],
+            "limit": 1, "offset": 900, "format": "json"
+        })
+        .to_string();
         let queries: Vec<Output> = [
             vec![
                 "cli",
@@ -264,6 +273,16 @@ fn index_through_worker_reexec_matches_c() {
                 "--offset",
                 "9999",
             ],
+            vec![
+                "cli",
+                "get_file_outline",
+                "--project",
+                &project,
+                "--file-path",
+                "py/app.py",
+            ],
+            vec!["cli", "get_file_outline", &outline_page],
+            vec!["cli", "get_file_outline", &outline_end],
             vec![
                 "cli",
                 "query_graph",
