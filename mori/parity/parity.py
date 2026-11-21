@@ -178,6 +178,7 @@ class Side:
   exporter: str = "sql"
   verify_export: bool = False
   graphql_mode: Literal["c", "rust"] | None = None
+  profile: bool = False
 
   def env(self) -> dict[str, str]:
     env = {
@@ -188,6 +189,7 @@ class Side:
     }
     if self.graphql_mode is not None:
       env["MORI_IMPL_GRAPHQL"] = self.graphql_mode
+    if self.profile or self.graphql_mode is not None:
       env["CBM_PROFILE"] = "1"
     return env
 
@@ -702,12 +704,15 @@ def run(repos: list[tuple[str, str]], call_list: list[dict[str, Any]] | None,
     side.exporter = exporter
     side.verify_export = a.verify_export
     side.graphql_mode = graphql_mode
+    side.profile = a.profile
   log(f"side a: {sides[0].bin}\nside b: {sides[1].bin}\nwork: {a.work}")
   requested = {s.name: s.graphql_mode for s in sides if s.graphql_mode is not None}
   if requested:
     meta = {**meta, "graphql_modes_requested": requested}
     log("GraphQL modes requested: " + ", ".join(
       f"{name}={mode}" for name, mode in requested.items()))
+  if a.profile:
+    meta = {**meta, "worker_profiling": True}
   results = []
   t0 = time.monotonic()
   for dir_, root in repos:
@@ -966,8 +971,10 @@ def main(argv: list[str]) -> int:
       p.add_argument(f"--export-{side}", choices=("sql", "rust"), default="sql",
                      help=f"graph exporter for side {side} (default: sql)")
       p.add_argument(f"--graphql-{side}", choices=("c", "rust"),
-                     help=f"request a GraphQL backend for side {side} and "
+                     help=f"request a historical GraphQL backend for side {side} and "
                           "retain native worker profiling logs")
+    p.add_argument("--profile", action="store_true",
+                   help="retain native index-worker profiling logs for both sides")
     p.add_argument("--verify-export", action="store_true",
                    help="compare each Rust export with SQL on the same database")
     p.add_argument("--work", help="work dir (default: a new "
