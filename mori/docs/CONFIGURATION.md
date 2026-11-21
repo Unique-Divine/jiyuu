@@ -1,6 +1,6 @@
 # Configuration Reference
 
-This page documents the configuration files that `codebase-memory-mcp` reads or writes today.
+This page documents the configuration files that Mori reads or writes today.
 
 ## At a Glance
 
@@ -8,13 +8,13 @@ This page documents the configuration files that `codebase-memory-mcp` reads or 
 |---|---|---|---|
 | Global custom extension mapping | `$XDG_CONFIG_HOME/codebase-memory-mcp/config.json` | JSON | Falls back to `~/.config/codebase-memory-mcp/config.json` when `XDG_CONFIG_HOME` is unset. |
 | Per-project custom extension mapping | `{repo_root}/.codebase-memory.json` | JSON | Overrides conflicting global `extra_extensions` entries. |
-| CLI-managed runtime settings | `${CBM_CACHE_DIR:-~/.cache/codebase-memory-mcp}/_config.db` | SQLite | Written by `codebase-memory-mcp config set/reset`. |
+| CLI-managed runtime settings | `${CBM_CACHE_DIR:-~/.cache/codebase-memory-mcp}/_config.db` | SQLite | Written by `mori config set/reset`. |
 | UI settings | `${CBM_CACHE_DIR:-~/.cache/codebase-memory-mcp}/config.json` | JSON | Stores `ui_enabled` and `ui_port`. |
 | Daemon operation log | `${CBM_CACHE_DIR:-~/.cache/codebase-memory-mcp}/logs/cbm-daemon.log` | Structured log | Durable daemon lifecycle, watcher/indexing, UI, resource, and error events. |
 | Admission conflict log | `${CBM_CACHE_DIR:-~/.cache/codebase-memory-mcp}/logs/daemon-conflicts.ndjson` | NDJSON | Exact-build, ABI, and canonical-cache conflicts. |
 | Activation log | `${CBM_CACHE_DIR:-~/.cache/codebase-memory-mcp}/logs/activation-events.ndjson` | NDJSON | Install/update/uninstall activation progress and outcomes. |
 
-CBM resolves `CBM_CACHE_DIR` to a canonical per-account path before using any of these locations. The log directory and files are private to the account.
+Mori resolves `CBM_CACHE_DIR` to a canonical per-account path before using any of these locations. The log directory and files are private to the account.
 
 ## 1. Custom File Extension Mapping
 
@@ -73,13 +73,13 @@ ${CBM_CACHE_DIR:-~/.cache/codebase-memory-mcp}/_config.db
 Inspect or change values with the CLI:
 
 ```bash
-codebase-memory-mcp config list
-codebase-memory-mcp config get auto_index
-codebase-memory-mcp config set auto_index true
-codebase-memory-mcp config set auto_index_limit 50000
-codebase-memory-mcp config set watcher_enabled false
-codebase-memory-mcp config reset auto_index
-codebase-memory-mcp config get install_hooks
+mori config list
+mori config get auto_index
+mori config set auto_index true
+mori config set auto_index_limit 50000
+mori config set watcher_enabled false
+mori config reset auto_index
+mori config get install_hooks
 ```
 
 Current keys:
@@ -97,7 +97,7 @@ Current keys:
 | `index_max_source_mb` | `off` | Optional maximum accepted source size in MiB in one discovery run. |
 | `index_max_rss_mb` | `off` | Optional maximum charged memory in MiB for the complete contained index-worker process tree (`64..1048576`). On macOS this is phys_footprint, not resident size. |
 | `index_max_duration_seconds` | `off` | Optional maximum wall-clock duration in seconds for the whole index request, including crash/hang recovery (`1..86400`). Like `index_max_rss_mb`, it stops a worker only before it starts to publish the new index; see [INDEX_RESOURCE_LIMITS.md](INDEX_RESOURCE_LIMITS.md). |
-| `install_hooks` | `true` | Install CBM-managed client hooks. `install --no-hooks` persists `false`; `install --hooks` restores `true`. |
+| `install_hooks` | `true` | Install managed client hooks. `install --no-hooks` persists `false`; `install --hooks` restores `true`. |
 
 Bare installs and updates respect the stored hook preference. MCP registration, skills, instructions, and profiles remain installed when hooks are disabled.
 
@@ -132,9 +132,9 @@ has not run yet).
 >   the daemon so the next one picks the new value up:
 >
 > ```bash
-> codebase-memory-mcp config set watcher_enabled false
-> codebase-memory-mcp daemon stop     # next session starts a daemon without the watcher
-> codebase-memory-mcp daemon status   # confirm
+> mori config set watcher_enabled false
+> mori daemon stop     # next session starts a daemon without the watcher
+> mori daemon status   # confirm
 > ```
 >
 > Disabling the watcher does not disable anything else: the daemon still starts,
@@ -162,7 +162,7 @@ stored index of what is largely the same repository.
 Enable the key to keep those checkouts out of the index:
 
 ```bash
-codebase-memory-mcp config set ignore_worktrees true
+mori config set ignore_worktrees true
 ```
 
 With it enabled:
@@ -209,10 +209,10 @@ Current format:
 Notes:
 
 - If a UI-enabled binary finds its verified external asset pack and no UI config file exists yet, the UI auto-enables on first run. Missing or invalid assets leave the MCP/daemon service available and keep the UI disabled.
-- A bare `daemon start` honors the saved `ui_enabled` value, including `false`. Enable the UI with `codebase-memory-mcp config set ui_enabled true`.
+- A bare `daemon start` honors the saved `ui_enabled` value, including `false`. Enable the UI with `mori config set ui_enabled true`.
 - On a cold start, `daemon start --open` or `daemon start --port=N` explicitly enables the UI and persists that choice. An already-active daemon keeps its current settings; stop it first to change ports with `--port=N`.
 - `CBM_CACHE_DIR` changes both the UI config location and the runtime settings database location.
-- CBM resolves `CBM_CACHE_DIR` to one canonical per-account cache root. A process configured with a different root fails while any CBM session or command is active; close them before switching roots.
+- Mori resolves `CBM_CACHE_DIR` to one canonical per-account cache root. A process configured with a different root fails while any Mori session or command is active; close them before switching roots.
 
 ## 4. Environment Variables
 
@@ -225,7 +225,7 @@ These environment variables affect runtime behavior:
 | `CBM_DIAGNOSTICS` | `false` | Enable periodic `snapshot.json` and retained `trajectory.ndjson` below a fresh owner-private directory in the system temp directory. The daemon records the randomized paths in the `diagnostics.start` discovery record (a single JSON line) in `${CBM_CACHE_DIR}/logs/cbm-daemon.log`; that one record is emitted even when `CBM_LOG_LEVEL` suppresses ordinary logging, so the paths always remain discoverable. |
 | `CBM_DOWNLOAD_URL` | GitHub releases | Override the update download URL. |
 | `CBM_LOG_LEVEL` | role-aware | Set the log level to `debug`, `info`, `warn`, `error`, or `none` (or `0`-`4`). Thin MCP/CLI/hook frontends default to `warn`; the detached daemon and supervised index workers default to `info`. Physical workers retain INFO liveness records because their private logs drive the supervisor's no-progress timeout. Frontend messages use that session's stderr; detached daemon events use `${CBM_CACHE_DIR}/logs/cbm-daemon.log`. |
-| `CBM_RUNTIME_DIR` | `%LOCALAPPDATA%` (Windows), `/private/tmp` (macOS), `/tmp` (other) | Parent directory for the daemon/CLI rendezvous directory, which CBM creates inside it as `cbm-daemon-<uid>` (`cbm-daemon-<key>` on Windows). Set it when the default ancestry cannot pass the private-directory check — see below. `CBM_CACHE_DIR` does **not** move the rendezvous. |
+| `CBM_RUNTIME_DIR` | `%LOCALAPPDATA%` (Windows), `/private/tmp` (macOS), `/tmp` (other) | Parent directory for the daemon/CLI rendezvous directory, which Mori creates inside it as `cbm-daemon-<uid>` (`cbm-daemon-<key>` on Windows). Set it when the default ancestry cannot pass the private-directory check — see below. `CBM_CACHE_DIR` does **not** move the rendezvous. |
 | `CBM_WORKERS` | auto-detected | Override the indexing worker count. |
 
 ### Relocating the daemon rendezvous directory
@@ -297,7 +297,7 @@ root because they are too broad or too sensitive to index as a unit:
 A single top-level directory can still be indexed as one root on purpose, for
 example a container or build machine that keeps its project in `/work`, `/app` or
 `/src`, by approving that exact path in a terminal:
-`codebase-memory-mcp allow-root --approve-broad /work`. The approval is recorded
+`mori allow-root --approve-broad /work`. The approval is recorded
 like any other allowed root, listed as `(approved broad)` by `allow-root --list`,
 and covers no other top-level directory; as with any recorded root, indexing is
 then confined to the recorded roots. Filesystem, drive and share roots cannot be
@@ -313,7 +313,7 @@ not name is permitted.
 
 On clusters and other shared machines, home directories often live on a network
 filesystem (NFS, Lustre, GPFS, SMB/CIFS), and `~/.cache` is sometimes a symlink
-into a shared tree. Three rules keep CBM working there:
+into a shared tree. Three rules keep Mori working there:
 
 - **Put the cache and the rendezvous on local storage.** Set `CBM_CACHE_DIR` (indexes,
   `_config.db`) and, if needed, `CBM_RUNTIME_DIR` (the daemon rendezvous) to a
@@ -322,7 +322,7 @@ into a shared tree. Three rules keep CBM working there:
 - **Do not route the cache into another account's tree.** A symlinked `~/.cache` is
   resolved and allowed, but every directory on the *resolved* path must be owned
   by you or by root. If a parent such as `/shared/fs` belongs to another account,
-  that account can rename or replace anything below it, so CBM refuses the path
+  that account can rename or replace anything below it, so Mori refuses the path
   and names the directory and its owner:
 
   ```text
@@ -332,18 +332,14 @@ into a shared tree. Three rules keep CBM working there:
   This check has no override. Choose a location with a safe ancestry instead.
 - **Avoid network filesystems for the cache.** The indexes are SQLite databases in
   WAL mode, which needs shared-memory locking that network filesystems do not
-  provide reliably. On Linux, CBM logs one `daemon.cache_root_network_fs` warning
+  provide reliably. On Linux, Mori logs one `daemon.cache_root_network_fs` warning
   at startup when the cache root is on NFS, Lustre, GPFS, CIFS or SMB2. The cache
   still works there, but it can be slow, and a database can be corrupted.
 
 ## 5. Agent and Editor Integration Files
 
-The `install` command can also write MCP entries and instruction blocks into agent/editor config files such as Claude Code, Codex, Gemini, VS Code, Cursor, Zed, and others.
-
-Those target paths vary by tool and platform, so the easiest way to inspect the exact files for your machine is:
+The `install` command that came with the import writes MCP entries and instruction blocks into agent and editor config files, under the old server name. Mori doesn't use it: register the server by hand as `mori-graph` (see the [README](../README.md#register-the-mcp-server)). To see which files `install` would touch on your machine without writing anything:
 
 ```bash
-codebase-memory-mcp install --dry-run
+mori install --dry-run
 ```
-
-That prints the specific config files the installer would modify without writing anything.

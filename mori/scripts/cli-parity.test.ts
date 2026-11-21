@@ -2,7 +2,6 @@ import { describe, expect, test } from "bun:test"
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-
 import {
   checkExpectation,
   compare,
@@ -40,21 +39,31 @@ async function withDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
 // every command fail.
 function fakeBinary(
   name: string,
-  opts: { version?: string; extra?: string; exitCode?: number } = {},
+  opts: {
+    version?: string
+    extra?: string
+    exitCode?: number
+    endBeforeResponse?: 1 | 6
+  } = {},
 ): string {
   const code = opts.exitCode ?? 0
   return `#!/bin/sh
 if [ "$1" = --version ]; then echo "${name} ${opts.version ?? "0.13.0"}"; exit ${code}; fi
+project=$(pwd | sed 's#^/##; s#/#-#g')
 if [ "$#" -eq 0 ]; then
   while IFS= read -r line; do
+    ${opts.endBeforeResponse === undefined ? "" : `case "$line" in *'"id":${opts.endBeforeResponse}'*) exit ${code} ;; esac`}
     case "$line" in
-      *'"id":1'*) echo '{"jsonrpc":"2.0","id":1,"result":{"serverInfo":{}}}' ;;
+      *'"id":1'*) echo '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","serverInfo":{"name":"${name}","version":"0.13.0"}}}' ;;
       *'"id":2'*) echo '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"index_repository"},{"name":"search_graph"},{"name":"trace_path"}]}}' ;;
+      *'"id":3'*) printf '{"jsonrpc":"2.0","id":3,"result":{"projects":["%s"]}}\n' "$project" ;;
+      *'"id":4'*) printf '{"jsonrpc":"2.0","id":4,"result":{"name":"helper","qn_prefix":"%s.py.util"}}\n' "$project" ;;
+      *'"id":5'*) echo '{"jsonrpc":"2.0","id":5,"result":{"rows":["Twice Add","run helper","greet formatName"]}}' ;;
+      *'"id":6'*) echo '{"jsonrpc":"2.0","id":6,"result":{"nodes":["Function"],"edges":["CALLS"]}}' ;;
     esac
   done
   exit ${code}
 fi
-project=$(pwd | sed 's#^/##; s#/#-#g')
 echo "args: $*"
 echo "at 2026-11-21T10:00:00Z cache=$CBM_CACHE_DIR"
 echo 'Usage: projects: 0 projects: 1 "status":"indexed"'
@@ -144,7 +153,7 @@ describe("invocations", () => {
       "cli trace_path Twice outbound",
       "cli get_architecture",
       "hook-augment",
-      "mcp stdio initialize + tools/list",
+      "mcp stdio initialization and graph reads",
     ])
     expect(projectName(repo)).toBe("tmp-mori-bin-x-repo")
     expect(JSON.parse(hookPayload(repo)).cwd).toBe(repo)
@@ -225,4 +234,21 @@ describe("runParity with stand-in binaries", () => {
       ])
     })
   })
+
+  test.each([[1, "initialize"], [6, "tools/call"]] as const)(
+    "matching streams missing response %i fail with request diagnostics",
+    async (id, method) => {
+      await withDir(async (dir) => {
+        const results = await runParity(
+          await setup(dir, { endBeforeResponse: id }),
+        )
+        const failed = results.filter((r) => !passed(r))
+        expect(failed).toHaveLength(1)
+        expect(failed[0]!.failures).toEqual([
+          `c: ${method} id=${id}: EOF before response`,
+          `rs: ${method} id=${id}: EOF before response`,
+        ])
+      })
+    },
+  )
 })

@@ -14,7 +14,7 @@ Index the checkout as its own project, excluding the grammars:
 cd ~/jiyuu/mori   # your Jiyuu checkout
 echo "/internal/cbm/vendored/" >> .cbmignore
 echo /mori/.cbmignore >> "$(git rev-parse --git-path info/exclude)"
-codebase-memory-mcp cli --quiet index_repository --repo_path "$PWD"
+mori cli --quiet index_repository --repo_path "$PWD"
 ```
 
 Then ask the graph: "who calls `find_route_handler`", "trace

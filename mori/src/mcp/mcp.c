@@ -1471,7 +1471,7 @@ static const int SUPPORTED_VERSION_COUNT =
  * questions the graph answers; facts, not commands. Claude Code cuts them at
  * 4,096 characters. */
 static const char MCP_SERVER_INSTRUCTIONS[] =
-    "codebase-memory-mcp is a code knowledge graph of the indexed repository: functions, "
+    "Mori is a code knowledge graph of the indexed repository: functions, "
     "classes, methods, routes, calls, imports, inheritance and cross-service links. It answers "
     "structural code questions: where a symbol is defined, who calls a function, what a function "
     "calls, call chains and data flow, which code a change affects, which handler serves a route, "
@@ -1533,7 +1533,7 @@ static char *cbm_mcp_initialize_response_for_profile(const char *params_json,
     yyjson_mut_obj_add_str(doc, root, "protocolVersion", version);
 
     yyjson_mut_val *impl = yyjson_mut_obj(doc);
-    yyjson_mut_obj_add_str(doc, impl, "name", "codebase-memory-mcp");
+    yyjson_mut_obj_add_str(doc, impl, "name", "mori-graph");
     yyjson_mut_obj_add_str(doc, impl, "version", cbm_cli_get_version());
     yyjson_mut_obj_add_val(doc, root, "serverInfo", impl);
 
@@ -1863,6 +1863,29 @@ static char *mcp_result_from_json(const char *args_json, const char *json) {
     }
     char *result = cbm_mcp_text_result(tree, false);
     free(tree);
+    return result;
+}
+
+static cbm_mcp_read_override_fn read_override;
+static cbm_mcp_read_override_free_fn read_override_free;
+
+void cbm_mcp_set_read_override(cbm_mcp_read_override_fn handle,
+                               cbm_mcp_read_override_free_fn release) {
+    read_override = release ? handle : NULL;
+    read_override_free = release;
+}
+
+static char *try_read_override(const char *tool, const char *args, const void *options,
+                               cbm_store_t *store, const char *project) {
+    if (!read_override) {
+        return NULL;
+    }
+    char *payload = read_override(tool, options, store, project);
+    if (!payload) {
+        return NULL;
+    }
+    char *result = mcp_result_from_json(args, payload);
+    read_override_free(payload);
     return result;
 }
 
@@ -2917,6 +2940,16 @@ static bool project_has_adr(cbm_store_t *store, const char *project, const char 
     return stat(adr_path, &adr_st) == 0;
 }
 
+int cbm_mcp_project_adr_presence(cbm_store_t *store, const char *project) {
+    cbm_project_t info = {0};
+    if (cbm_store_get_project(store, project, &info) != CBM_STORE_OK) {
+        return -1;
+    }
+    int presence = info.root_path ? (int)project_has_adr(store, project, info.root_path) : -1;
+    cbm_project_free_fields(&info);
+    return presence;
+}
+
 /* ── Tool handler implementations ─────────────────────────────── */
 
 /* db_internal_project_name — see forward declaration above resolve_store. */
@@ -3059,6 +3092,54 @@ typedef enum {
     PROJECT_RECORD_OOM = -1,
 } project_record_status_t;
 
+static cbm_mcp_project_identity_reader_fn project_identity_reader;
+static cbm_mcp_project_stats_reader_fn project_stats_reader;
+
+void cbm_mcp_set_project_readers(cbm_mcp_project_identity_reader_fn identity,
+                                 cbm_mcp_project_stats_reader_fn stats) {
+    project_identity_reader = identity;
+    project_stats_reader = stats;
+}
+
+static int copy_project_identity(void *context, const char *name, const char *root_path) {
+    mcp_project_record_t *record = context;
+    record->name = heap_strdup(name);
+    record->root_path = heap_strdup(root_path);
+    return record->name && record->root_path ? PROJECT_RECORD_OK : PROJECT_RECORD_OOM;
+}
+
+static project_record_status_t read_project_identity(const char *full_path,
+                                                     mcp_project_record_t *record) {
+    if (project_identity_reader) {
+        cbm_store_t *store = cbm_store_open_path_query(full_path);
+        if (!store) {
+            return PROJECT_RECORD_SKIP;
+        }
+        int status = project_identity_reader(store, CBM_SZ_1K, copy_project_identity, record);
+        cbm_store_close(store);
+        return (project_record_status_t)status;
+    }
+
+    char project_name[CBM_SZ_1K];
+    cbm_store_t *pstore = NULL;
+    if (!db_internal_project_name(full_path, project_name, sizeof(project_name), &pstore)) {
+        return PROJECT_RECORD_SKIP;
+    }
+    record->name = heap_strdup(project_name);
+    cbm_project_t proj = {0};
+    if (cbm_store_get_project(pstore, project_name, &proj) == CBM_STORE_OK) {
+        /* Transfer the entire root path. It is used for sorting, output, and
+         * branch lookup, where a fixed-size buffer could truncate it. */
+        record->root_path = (char *)proj.root_path;
+        proj.root_path = NULL;
+        cbm_project_free_fields(&proj);
+    } else {
+        record->root_path = heap_strdup("");
+    }
+    cbm_store_close(pstore);
+    return record->name && record->root_path ? PROJECT_RECORD_OK : PROJECT_RECORD_OOM;
+}
+
 /* Open a .db file briefly and collect sortable identity only. Counts and Git
  * context are populated after paging so a 50-row response does not repeat
  * heavyweight work for every database in the cache. */
@@ -3075,38 +3156,14 @@ static project_record_status_t read_project_record_identity(const char *dir_path
      * renamed db, legacy '.'-vs-'-' username twin) would otherwise report 0
      * nodes/edges and be unresolvable. Skip ghost/empty/corrupt dbs entirely so
      * they don't appear as resolvable projects. */
-    char project_name[CBM_SZ_1K];
-    cbm_store_t *pstore = NULL;
-    if (!db_internal_project_name(full_path, project_name, sizeof(project_name), &pstore)) {
-        return PROJECT_RECORD_SKIP; /* ghost / unreadable — not resolvable */
+    project_record_status_t status = read_project_identity(full_path, record);
+    if (status != PROJECT_RECORD_OK) {
+        project_record_clear(record);
+        return status;
     }
-
-    record->name = heap_strdup(project_name);
     record->db_file = heap_strdup(name);
     record->size_bytes = size_bytes;
-    cbm_project_t proj = {0};
-    if (cbm_store_get_project(pstore, project_name, &proj) == CBM_STORE_OK) {
-        /* root_path is NOT NULL in the store schema, so a missing copy here is
-         * allocation failure rather than an empty identity. */
-        if (!proj.root_path) {
-            cbm_project_free_fields(&proj);
-            cbm_store_close(pstore);
-            project_record_clear(record);
-            return PROJECT_RECORD_OOM;
-        }
-        /* Store project fields are heap-owned by the caller. Transfer the root
-         * identity intact: it is the value used for sorting, output, and branch
-         * lookup, so routing it through a fixed buffer would silently change
-         * all three for long roots. */
-        record->root_path = (char *)proj.root_path;
-        proj.root_path = NULL;
-        cbm_project_free_fields(&proj);
-    }
-    cbm_store_close(pstore);
-    if (!record->root_path) {
-        record->root_path = heap_strdup("");
-    }
-    if (!record->name || !record->root_path || !record->db_file) {
+    if (!record->db_file) {
         project_record_clear(record);
         return PROJECT_RECORD_OOM;
     }
@@ -3126,8 +3183,12 @@ static bool populate_project_record(const char *dir_path, bool include_stats,
         if (!pstore) {
             return false;
         }
-        record->nodes = cbm_store_count_nodes(pstore, record->name);
-        record->edges = cbm_store_count_edges(pstore, record->name);
+        if (project_stats_reader) {
+            project_stats_reader(pstore, record->name, &record->nodes, &record->edges);
+        } else {
+            record->nodes = cbm_store_count_nodes(pstore, record->name);
+            record->edges = cbm_store_count_edges(pstore, record->name);
+        }
         cbm_store_close(pstore);
     }
     /* Listing stays lean: only the branch (the one git fact that
@@ -3882,13 +3943,6 @@ static char *handle_get_graph_schema(cbm_mcp_server_t *srv, const char *args) {
     bool include_properties = diagnostics && strcmp(diagnostics, "full") == 0;
     free(diagnostics);
 
-    cbm_schema_info_t schema = {0};
-    if (include_properties) {
-        cbm_store_get_schema(store, project, &schema);
-    } else {
-        cbm_store_get_schema_counts(store, project, &schema);
-    }
-
     int limit = cbm_mcp_get_int_arg(args, "limit", 50);
     int offset = cbm_mcp_get_int_arg(args, "offset", 0);
     if (limit < 1) {
@@ -3899,6 +3953,22 @@ static char *handle_get_graph_schema(cbm_mcp_server_t *srv, const char *args) {
     if (offset < 0) {
         offset = 0;
     }
+
+    cbm_mcp_graph_schema_options_t options = {.limit = limit, .offset = offset,
+                                             .include_properties = include_properties};
+    char *overridden = try_read_override("get_graph_schema", args, &options, store, project);
+    if (overridden) {
+        free(project);
+        return overridden;
+    }
+
+    cbm_schema_info_t schema = {0};
+    if (include_properties) {
+        cbm_store_get_schema(store, project, &schema);
+    } else {
+        cbm_store_get_schema_counts(store, project, &schema);
+    }
+
     int total = schema.node_label_count + schema.edge_type_count;
     size_t record_capacity = total > 0 ? (size_t)total : 1U;
     mcp_schema_record_t *records = calloc(record_capacity, sizeof(*records));
@@ -3975,9 +4045,9 @@ static char *handle_get_graph_schema(cbm_mcp_server_t *srv, const char *args) {
     }
 
     /* Check ADR presence */
-    cbm_project_t proj_info = {0};
-    if (cbm_store_get_project(store, project, &proj_info) == 0 && proj_info.root_path) {
-        bool adr_exists = project_has_adr(store, project, proj_info.root_path);
+    int adr_presence = cbm_mcp_project_adr_presence(store, project);
+    if (adr_presence >= 0) {
+        bool adr_exists = adr_presence != 0;
         yyjson_mut_obj_add_bool(doc, root, "adr_present", adr_exists);
         if (!adr_exists && include_properties) {
             yyjson_mut_obj_add_str(
@@ -3985,7 +4055,6 @@ static char *handle_get_graph_schema(cbm_mcp_server_t *srv, const char *args) {
                 "No ADR found. Use manage_adr(mode='update') to persist architectural "
                 "decisions across sessions. Run get_architecture(aspects=['all']) first.");
         }
-        cbm_project_free_fields(&proj_info);
     }
 
     char *json = yy_doc_to_str(doc);
@@ -12377,7 +12446,7 @@ static bool write_skip_logfile(const char *project, const cbm_file_error_t *errs
             partials++;
         }
     }
-    (void)fprintf(f, "# codebase-memory-mcp index coverage report\n");
+    (void)fprintf(f, "# Mori index coverage report\n");
     (void)fprintf(f, "# project=%s skipped=%d parse_partial=%d\n", project ? project : "",
                   count - partials, partials);
     (void)fprintf(f, "# columns: phase\treason\tpath\n");
@@ -13743,7 +13812,7 @@ static char *handle_index_repository(cbm_mcp_server_t *srv, const char *args) {
         index_args_free(repo_path, mode_str, name_override);
         return cbm_mcp_text_result(
             "repo_path is a linked git worktree and ignore_worktrees is enabled. Pass "
-            "index_worktree=true to index it anyway, or run: codebase-memory-mcp config set "
+            "index_worktree=true to index it anyway, or run: mori config set "
             "ignore_worktrees false",
             true);
     }
@@ -22635,7 +22704,7 @@ static void maybe_auto_index(cbm_mcp_server_t *srv) {
 
     if (!auto_index) {
         cbm_log_info("autoindex.skip", "reason", "disabled", "hint",
-                     "run: codebase-memory-mcp config set auto_index true");
+                     "run: mori config set auto_index true");
         return;
     }
 

@@ -1,5 +1,5 @@
 /*
- * agent_profiles.h — Canonical tiered codebase-memory agent profiles.
+ * agent_profiles.h — Canonical tiered Mori graph agent profiles.
  */
 #ifndef CBM_CLI_AGENT_PROFILES_H
 #define CBM_CLI_AGENT_PROFILES_H
@@ -56,6 +56,12 @@ bool cbm_graph_dialect_direct_capable(cbm_graph_profile_dialect_t dialect);
 char *cbm_render_graph_profile(cbm_graph_profile_dialect_t dialect, cbm_graph_tier_t tier,
                                cbm_graph_access_t access, const char *binary_path);
 
+/* The same profile with the names releases before the Mori rename wrote
+ * (server key codebase-memory-mcp, skill codebase-memory), kept so
+ * install/uninstall can recognize and migrate those files. */
+char *cbm_render_graph_profile_legacy(cbm_graph_profile_dialect_t dialect, cbm_graph_tier_t tier,
+                                      cbm_graph_access_t access, const char *binary_path);
+
 /* v0.9.1-rc.1 direct Codex rendering (server table without a transport), kept
  * so install/uninstall can recognize and migrate those files. */
 char *cbm_render_graph_profile_codex_rc1(cbm_graph_tier_t tier);
@@ -67,6 +73,9 @@ char *cbm_render_graph_profile_opencode_v0108(cbm_graph_tier_t tier, cbm_graph_a
 /* Vibe stores the behavioral prompt separately from its TOML agent definition.
  * Other integrations may also use this as the canonical contract text. */
 char *cbm_render_graph_prompt(cbm_graph_tier_t tier, cbm_graph_access_t access);
+
+/* The prompt with the names releases before the Mori rename wrote. */
+char *cbm_render_graph_prompt_legacy(cbm_graph_tier_t tier, cbm_graph_access_t access);
 
 #ifdef __cplusplus
 }

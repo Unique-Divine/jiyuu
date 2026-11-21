@@ -61,6 +61,13 @@ typedef struct {
 
 static CBM_TLS cbm_cross_repo_after_insert_test_hook_t cr_after_insert_test_hook = NULL;
 static CBM_TLS void *cr_after_insert_test_context = NULL;
+static cbm_graphql_link_policy_fn cr_graphql_link_policy;
+
+void cbm_cross_repo_set_graphql_link_policy(cbm_graphql_link_policy_fn policy) {
+    char configured[sizeof("rust")];
+    const char *impl = cbm_native_getenv("MORI_IMPL_GRAPHQL", configured, sizeof(configured), NULL);
+    cr_graphql_link_policy = impl && strcmp(impl, "rust") == 0 ? policy : NULL;
+}
 
 void cbm_cross_repo_set_after_insert_hook_for_tests(cbm_cross_repo_after_insert_test_hook_t hook,
                                                     void *context) {
@@ -1299,6 +1306,24 @@ static bool cr_delete_forward_row(cbm_store_t *store, int64_t caller_id, int64_t
     return ok;
 }
 
+/* Matchers call the policy after filtering out forward rows owned by another
+ * provider. On a caller's run, an ambiguous match ranks below an existing
+ * resolved match from another target. */
+static cbm_cross_route_action_t cr_plan_typed_route(bool provider_side, bool has_handler,
+                                                    bool ambiguous, bool names_other,
+                                                    bool existing_ambiguous) {
+    if (!has_handler) {
+        return provider_side ? CBM_CROSS_ROUTE_DROP : CBM_CROSS_ROUTE_KEEP;
+    }
+    if (!ambiguous) {
+        return CBM_CROSS_ROUTE_LINK_RESOLVED;
+    }
+    if (!provider_side && names_other && !existing_ambiguous) {
+        return CBM_CROSS_ROUTE_KEEP;
+    }
+    return CBM_CROSS_ROUTE_LINK_AMBIGUOUS;
+}
+
 /* Match edges of a given type against Route nodes with a given QN prefix.
  * Reuses the same infrastructure as HTTP/async matching.
  *
@@ -1338,6 +1363,9 @@ static cr_match_result_t match_typed_routes(cbm_store_t *src_store, const char *
     int count = 0;
     int step_rc = SQLITE_DONE;
     bool failed = false;
+    cbm_graphql_link_policy_fn plan =
+        cr_graphql_link_policy && strcmp(edge_type, "GRAPHQL_CALLS") == 0 ? cr_graphql_link_policy
+                                                                          : cr_plan_typed_route;
     while (!cr_cancel_requested(ctx) && (step_rc = sqlite3_step(s)) == SQLITE_ROW) {
         int64_t caller_id = sqlite3_column_int64(s, 0);
         int64_t route_id = sqlite3_column_int64(s, SKIP_ONE);
@@ -1381,20 +1409,27 @@ static cr_match_result_t match_typed_routes(cbm_store_t *src_store, const char *
         bool ambiguous = !query_failed && handler_id != 0 &&
                          cr_route_ambiguous(tgt_store, route_qn, &query_failed);
         bool cancelled = !query_failed && cr_cancel_requested(ctx);
-        /* This run already linked the row to another target as resolved:
-         * an ambiguous match does not replace it. */
-        bool keep = !provider_side && ambiguous && names_other && !row.ambiguous;
+        cbm_cross_route_action_t action =
+            query_failed || cancelled
+                ? CBM_CROSS_ROUTE_KEEP
+                : plan(provider_side, handler_id != 0, ambiguous, names_other, row.ambiguous);
         bool emitted = false;
-        if (!query_failed && !cancelled && handler_id == 0 && provider_side) {
+        switch (action) {
+        case CBM_CROSS_ROUTE_KEEP:
+            break;
+        case CBM_CROSS_ROUTE_DROP:
             emitted = cr_delete_forward_row(src_store, caller_id, route_id, cross_edge_type, ctx);
-        } else if (!query_failed && !cancelled && handler_id != 0 && !keep) {
-            emitted = ambiguous ? cr_emit_ambiguous(src_store, src_project, caller_id, route_id,
-                                                    tgt_project, svc_val, svc_key,
-                                                    cross_edge_type, ctx)
-                                : emit_cross_route_bidirectional(
-                                      src_store, src_project, src_db, caller_id, route_id,
-                                      tgt_store, tgt_project, handler_id, route_qn, handler_name,
-                                      handler_file, svc_val, svc_key, cross_edge_type, true, ctx);
+            break;
+        case CBM_CROSS_ROUTE_LINK_AMBIGUOUS:
+            emitted = cr_emit_ambiguous(src_store, src_project, caller_id, route_id, tgt_project,
+                                        svc_val, svc_key, cross_edge_type, ctx);
+            break;
+        case CBM_CROSS_ROUTE_LINK_RESOLVED:
+            emitted = emit_cross_route_bidirectional(src_store, src_project, src_db, caller_id,
+                                                     route_id, tgt_store, tgt_project, handler_id,
+                                                     route_qn, handler_name, handler_file, svc_val,
+                                                     svc_key, cross_edge_type, true, ctx);
+            break;
         }
         free(route_qn);
         if (query_failed) {
@@ -1404,7 +1439,7 @@ static cr_match_result_t match_typed_routes(cbm_store_t *src_store, const char *
         if (cancelled) {
             break;
         }
-        if (keep || (handler_id == 0 && !provider_side)) {
+        if (action == CBM_CROSS_ROUTE_KEEP) {
             continue;
         }
         if (!emitted) {
@@ -1413,7 +1448,7 @@ static cr_match_result_t match_typed_routes(cbm_store_t *src_store, const char *
         }
         /* An ambiguous Route is linked but not resolved, and a dropped row is
          * no link: neither is counted. */
-        count += (ambiguous || handler_id == 0) ? 0 : SKIP_ONE;
+        count += action == CBM_CROSS_ROUTE_LINK_RESOLVED ? SKIP_ONE : 0;
     }
     if (!failed && !cr_cancel_requested(ctx) && step_rc != SQLITE_DONE) {
         failed = true;
