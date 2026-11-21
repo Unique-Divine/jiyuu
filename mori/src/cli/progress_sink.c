@@ -36,6 +36,11 @@ static bool s_raised_log_level;
 static bool s_preserve_details;
 static cbm_mutex_t s_sink_mutex;
 static atomic_int s_sink_mutex_state = ATOMIC_VAR_INIT(LOCK_UNINITIALIZED);
+static cbm_cli_output_compactor_fn s_output_compactor;
+
+void cbm_cli_set_output_compactor(cbm_cli_output_compactor_fn compactor) {
+    s_output_compactor = compactor;
+}
 
 /* The CLI may install the sink more than once in one process (notably tests),
  * so keep one process-lifetime mutex rather than destroying it at fini. */
@@ -50,16 +55,7 @@ static void progress_sink_mutex_ensure(void) {
     while (atomic_load_explicit(&s_sink_mutex_state, memory_order_acquire) != LOCK_READY) {}
 }
 
-bool cbm_cli_output_flags_parse(int *argc, char **argv, cbm_cli_output_flags_t *flags, char *error,
-                                size_t error_size) {
-    if (!argc || !argv || !flags) {
-        return false;
-    }
-    memset(flags, 0, sizeof(*flags));
-    if (error && error_size > 0) {
-        error[0] = '\0';
-    }
-
+static void compact_output_flags(int *argc, char **argv, cbm_cli_output_flags_t *flags) {
     /* --quiet and --progress are reserved process controls wherever they
      * appear, matching the existing --progress behavior. --verbose remains
      * outer-only because tools such as index_status own a verbose input. */
@@ -84,6 +80,20 @@ bool cbm_cli_output_flags_parse(int *argc, char **argv, cbm_cli_output_flags_t *
         }
     }
     *argc = output_index;
+}
+
+bool cbm_cli_output_flags_parse(int *argc, char **argv, cbm_cli_output_flags_t *flags, char *error,
+                                size_t error_size) {
+    if (!argc || !argv || !flags) {
+        return false;
+    }
+    memset(flags, 0, sizeof(*flags));
+    if (error && error_size > 0) {
+        error[0] = '\0';
+    }
+    cbm_cli_output_compactor_fn compact = s_output_compactor ? s_output_compactor
+                                                           : compact_output_flags;
+    compact(argc, argv, flags);
 
     if (flags->quiet_requested && (flags->progress_requested || flags->verbose_requested)) {
         if (error && error_size > 0) {

@@ -56,6 +56,12 @@ class ParityTest(unittest.TestCase):
         "MORI_IMPL_GRAPHQL": "rust", "CBM_PROFILE": "1",
       })
 
+  def test_profile_retains_worker_logs_without_selecting_a_backend(self) -> None:
+    side = parity.Side("a", "/bin/true", "/tmp/cache", "/tmp/rt", profile=True)
+    with patch.dict(os.environ, {"MORI_IMPL_GRAPHQL": "c"}, clear=True):
+      self.assertEqual(side.env()["CBM_PROFILE"], "1")
+      self.assertNotIn("MORI_IMPL_GRAPHQL", side.env())
+
   def test_graphql_modes_are_reported_only_when_requested(self) -> None:
     for label, flags, requested in (
         ("default", [], None),

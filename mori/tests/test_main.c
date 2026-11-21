@@ -2263,7 +2263,11 @@ static void tf_msan_mi_output(const char *msg, void *arg) {
 }
 #endif
 
+void mori_register_graphql_callbacks(void);
+uint32_t mori_graphql_fixture_callbacks_seen(void);
+
 int main(int argc, char **argv) {
+    mori_register_graphql_callbacks();
 #ifdef TF_MSAN_MIMALLOC_OUTPUT
     mi_register_output(tf_msan_mi_output, NULL);
     tf_msan_mi_output_live = true;
@@ -2699,5 +2703,17 @@ int main(int argc, char **argv) {
 #ifdef CBM_TEST_COVERAGE
     tf_coverage_finish();
 #endif
+    if (getenv("MORI_GRAPHQL_FIXTURE_WITNESS")) {
+        /* Keep in sync with the callback bits in graphql_ffi.rs. */
+        const uint32_t required = 0x3f;
+        uint32_t seen = mori_graphql_fixture_callbacks_seen();
+        if ((seen & required) != required) {
+            fprintf(stderr, "GraphQL Rust callbacks exercised: %#x, expected %#x\n", (unsigned)seen,
+                    (unsigned)required);
+            tf_fail_count++;
+        } else {
+            printf("GraphQL Rust callbacks exercised: %#x\n", (unsigned)seen);
+        }
+    }
     TEST_SUMMARY();
 }

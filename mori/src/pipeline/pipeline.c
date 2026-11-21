@@ -23,6 +23,7 @@ enum { CBM_DIR_PERMS = 0755, PL_RING = 4, PL_RING_MASK = 3, PL_SEQ_PASSES = 7 };
 #include "pipeline/lsp_surface.h"
 #include "pipeline/lsp_resolve.h"
 #include "pipeline/pass_lsp_cross.h"
+#include "pipeline/pass_cross_repo.h"
 #include "pipeline/pass_ensemble_routing.h"
 #include "pipeline/worker_pool.h"
 #include "graph_buffer/graph_buffer.h"
@@ -5213,6 +5214,16 @@ int cbm_pipeline_run(cbm_pipeline_t *p) {
         free(final_path);
         pipeline_release_test_config(p);
         return rc;
+    }
+    if (final_existed && cbm_cross_repo_relink_stage(final_path, staging_path, p->project_name,
+                                                     p->cancelled) != CBM_STORE_OK) {
+        bool cancelled_during_relink = check_cancel(p);
+        cleanup_staging_db(staging_path);
+        free(staging_path);
+        free(final_path);
+        pipeline_release_test_config(p);
+        return cancelled_during_relink ? CBM_PIPELINE_ABORT_PRESERVE_DB
+                                       : CBM_PIPELINE_PERSIST_FAILED;
     }
     if (seal_staging_db(staging_path) != 0) {
         cleanup_staging_db(staging_path);
