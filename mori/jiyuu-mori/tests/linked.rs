@@ -75,6 +75,9 @@ fn run_in(
     if let Some(planner) = graphql {
         command.env("MORI_IMPL_GRAPHQL", planner);
     }
+    if args.contains(&"index_repository") {
+        command.env("CBM_PROFILE", "1");
+    }
     command.output().expect("run binary")
 }
 
@@ -226,16 +229,7 @@ fn index_through_worker_reexec_matches_c() {
             bin,
             &scratch,
             *graphql,
-            &["cli", "--verbose", "index_repository", "--repo_path", &repo],
-        );
-        let diagnostics = String::from_utf8_lossy(&index.stderr);
-        let planner = format!("planner={}", graphql.unwrap_or("c"));
-        assert!(
-            diagnostics
-                .lines()
-                .any(|line| line.contains("msg=pass.route_nodes.graphql")
-                    && line.contains(&planner)),
-            "{side} worker didn't report {planner}: {diagnostics}"
+            &["cli", "--quiet", "index_repository", "--repo_path", &repo],
         );
         let text = String::from_utf8_lossy(&index.stdout).into_owned();
         assert!(
@@ -243,6 +237,28 @@ fn index_through_worker_reexec_matches_c() {
             "{side} index failed: {text}\n{}",
             String::from_utf8_lossy(&index.stderr)
         );
+        // Profiling preserves the daemon's worker log after a clean exit.
+        let planner = format!("planner={}", graphql.unwrap_or("c"));
+        let logged_planner = fs::read_dir(scratch.0.join("cache/logs"))
+            .expect("read worker log directory")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".worker-log-")
+            })
+            .any(|entry| {
+                fs::read_to_string(entry.path()).is_ok_and(|log| {
+                    log.lines().any(|line| {
+                        line.contains("msg=pass.route_nodes.graphql")
+                            && line
+                                .split_ascii_whitespace()
+                                .any(|kv| kv == planner)
+                    })
+                })
+            });
+        assert!(logged_planner, "{side} worker didn't report {planner}");
         let counts = (json_number(&text, "nodes"), json_number(&text, "edges"));
         assert!(counts.0.is_some_and(|n| n > 0), "{side}: {text}");
         let queries: Vec<Output> = [
