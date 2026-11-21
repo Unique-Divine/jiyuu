@@ -2056,6 +2056,60 @@ TEST(cross_repo_wildcard_replay_marks_missing_provider_until_return) {
     PASS();
 }
 
+TEST(cross_repo_explicit_wildcard_keeps_missing_peer_with_online_provider) {
+    cross_repo_fixture_t fixture;
+    char live[512], stage[512], provider[512], withheld[512];
+    bool ok = cross_repo_fixture_begin(&fixture) &&
+              cross_repo_seed_http_pair(&fixture, "client", "api-a", "/a", "a") &&
+              cross_repo_seed_http_pair(&fixture, "client", "api-b", "/b", "b") &&
+              cross_repo_project_path(&fixture, "client", live, sizeof(live)) &&
+              cross_repo_project_path(&fixture, "_stage", stage, sizeof(stage)) &&
+              cross_repo_project_path(&fixture, "api-a", provider, sizeof(provider));
+    if (!ok) {
+        cross_repo_fixture_end(&fixture);
+        FAIL("cannot prepare two-provider wildcard fixture");
+    }
+
+    snprintf(withheld, sizeof(withheld), "%s/api-a.offline", fixture.cache);
+    const char *target = "*";
+    cbm_cross_repo_result_t initial = cbm_cross_repo_match("client", &target, 1);
+    ok = !initial.failed && initial.http_edges == 2 &&
+         cbm_rename_replace(provider, withheld) == 0 &&
+         cbm_store_backup_path(live, stage) == CBM_STORE_OK &&
+         cbm_cross_repo_relink_stage(live, stage, "client", NULL) == CBM_STORE_OK &&
+         cbm_store_backup_path(stage, live) == CBM_STORE_OK;
+    cbm_cross_repo_result_free(&initial);
+    cbm_cross_repo_result_t partial = cbm_cross_repo_match("client", &target, 1);
+    bool partial_success = !partial.failed && partial.projects_scanned == 1 &&
+                           partial.skipped_count == 1 &&
+                           strcmp(partial.skipped_projects[0].project, "api-a") == 0;
+    cbm_cross_repo_result_free(&partial);
+    bool pending = cbm_cross_repo_reverse_pending("client");
+    ok = ok && cbm_rename_replace(withheld, provider) == 0;
+    char *returned = cross_repo_status_json(&fixture, "client");
+    int before_refresh = cross_repo_count_edges(&fixture, "client", "CROSS_HTTP_CALLS");
+
+    cbm_cross_repo_result_t refreshed = cbm_cross_repo_match("client", &target, 1);
+    bool refreshed_all = !refreshed.failed && refreshed.projects_scanned == 2 &&
+                         refreshed.http_edges == 2 && !cbm_cross_repo_reverse_pending("client");
+    cbm_cross_repo_result_free(&refreshed);
+    char *after = cross_repo_status_json(&fixture, "client");
+    cross_repo_fixture_end(&fixture);
+
+    bool still_stale = returned && strstr(returned, "\"status\":\"stale\"");
+    bool fresh = after && strstr(after, "\"status\":\"ran\"");
+    free(returned);
+    free(after);
+    ASSERT_TRUE(ok);
+    ASSERT_TRUE(partial_success);
+    ASSERT_TRUE(pending);
+    ASSERT_TRUE(still_stale);
+    ASSERT_EQ(before_refresh, 1);
+    ASSERT_TRUE(refreshed_all);
+    ASSERT_TRUE(fresh);
+    PASS();
+}
+
 static int cross_repo_watch_index(const char *project, const char *root, void *context) {
     (void)context;
     cbm_pipeline_t *pipeline = cbm_pipeline_new(root, NULL, CBM_MODE_FULL);
@@ -2137,6 +2191,7 @@ SUITE(cross_repo) {
     RUN_TEST(cross_repo_relink_removes_provably_reverse_legacy_channel);
     RUN_TEST(cross_repo_status_flags_legacy_provider_first_upgrade);
     RUN_TEST(cross_repo_wildcard_replay_marks_missing_provider_until_return);
+    RUN_TEST(cross_repo_explicit_wildcard_keeps_missing_peer_with_online_provider);
     RUN_TEST(cross_repo_graphql_prefers_resolver_method_handler);
     RUN_TEST(cross_repo_graphql_reverse_edge_keeps_every_caller);
     RUN_TEST(cross_repo_graphql_reverse_callers_keyed_by_qualified_name);

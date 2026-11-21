@@ -2090,7 +2090,8 @@ static cr_run_status_t cr_match_project_pair(cbm_store_t *src_store, const char 
 /* Wildcard enumeration only returns usable projects. Keep unavailable peers
  * from the previous generation visible while the wildcard is being replayed. */
 static bool cr_record_unavailable_peers(yyjson_mut_doc *current, yyjson_doc *previous,
-                                        cr_run_context_t *run, cbm_cross_repo_result_t *result) {
+                                        cr_run_context_t *run, cbm_cross_repo_result_t *result,
+                                        bool *unavailable) {
     yyjson_mut_val *observations = yyjson_mut_doc_get_root(current);
     yyjson_obj_iter iter = yyjson_obj_iter_with(yyjson_doc_get_root(previous));
     yyjson_val *key;
@@ -2099,11 +2100,16 @@ static bool cr_record_unavailable_peers(yyjson_mut_doc *current, yyjson_doc *pre
         if (cr_cancel_requested(run)) {
             return false;
         }
-        if (cbm_validate_project_name(target) && !yyjson_mut_obj_get(observations, target) &&
-            (yyjson_mut_obj_size(observations) >= CR_MAX_PROJECTS ||
-             !cr_remember_peer(current, target, NULL) ||
-             !cr_record_skip(result, target, "target_unavailable"))) {
+        if (!cbm_validate_project_name(target) || yyjson_mut_obj_get(observations, target)) {
+            continue;
+        }
+        if (yyjson_mut_obj_size(observations) >= CR_MAX_PROJECTS ||
+            !cr_remember_peer(current, target, NULL) ||
+            !cr_record_skip(result, target, "target_unavailable")) {
             return false;
+        }
+        if (unavailable) {
+            *unavailable = true;
         }
     }
     return true;
@@ -2169,7 +2175,7 @@ int cbm_cross_repo_relink_stage(const char *live_path, const char *stage_path, c
         }
     }
     result.no_targets = result.projects_scanned == 0;
-    ok = ok && cr_record_unavailable_peers(peers, previous_peers, &run, &result) &&
+    ok = ok && cr_record_unavailable_peers(peers, previous_peers, &run, &result, NULL) &&
          !cr_cancel_requested(&run) &&
          cr_record_targets(staging, project, (const char **)targets, target_count) &&
          cr_save_peers(staging, project, peers) && cr_set_reverse_pending(staging, project, true) &&
@@ -2412,11 +2418,20 @@ cbm_cross_repo_result_t cbm_cross_repo_match_cancellable(const char *project,
         result.projects_scanned++;
     }
 
-    if (!result.failed && !result.cancelled &&
-        (!cr_save_peers(src_store, project, peers) ||
-         !cr_record_targets(src_store, project, target_projects, target_count) ||
-         !cr_set_reverse_pending(src_store, project, false))) {
-        result.failed = true;
+    if (!result.failed && !result.cancelled) {
+        bool wildcard = target_count == 1 && strcmp(target_projects[0], "*") == 0;
+        yyjson_doc *previous = wildcard ? cr_read_peers(src_store, project) : NULL;
+        bool pending = false;
+        bool peers_complete = cr_record_unavailable_peers(peers, previous, &run, &result, &pending);
+        yyjson_doc_free(previous);
+        if (cr_cancel_requested(&run)) {
+            result.cancelled = true;
+            result.partial_results = run.mutated;
+        } else if (!peers_complete || !cr_save_peers(src_store, project, peers) ||
+                   !cr_record_targets(src_store, project, target_projects, target_count) ||
+                   !cr_set_reverse_pending(src_store, project, pending)) {
+            result.failed = true;
+        }
     }
     (void)cr_record_last_run(src_store, project, target_projects, target_count, &result);
     yyjson_mut_doc_free(peers);
