@@ -78,14 +78,29 @@ describe("versions and tags", () => {
 
 describe("asset names", () => {
   test("use mise-friendly platform names", () => {
-    expect(assetName("0.13.0", "x64")).toBe(
+    expect(assetName("0.13.0", "linux-x64")).toBe(
       "codebase-memory-mcp-0.13.0-linux-x64.tar.gz",
+    )
+    expect(assetName("0.13.0", "darwin-arm64")).toBe(
+      "codebase-memory-mcp-0.13.0-darwin-arm64.tar.gz",
     )
     expect(releaseAssets("0.13.0")).toEqual([
       "codebase-memory-mcp-0.13.0-linux-x64.tar.gz",
       "codebase-memory-mcp-0.13.0-linux-arm64.tar.gz",
+      "codebase-memory-mcp-0.13.0-darwin-arm64.tar.gz",
     ])
-    expect(() => assetName("0.13.0", "amd64")).toThrow("Unsupported arch")
+  })
+
+  test("reject targets the workflow does not build", () => {
+    expect(() => assetName("0.13.0", "x64")).toThrow("Unsupported target")
+    expect(() => assetName("0.13.0", "linux-amd64")).toThrow()
+    expect(() => assetName("0.13.0", "darwin-x64")).toThrow()
+  })
+
+  test("asset-name command prints the archive name", async () => {
+    expect(await main(["asset-name", "0.13.0", "darwin-arm64"], "/")).toBe(
+      "codebase-memory-mcp-0.13.0-darwin-arm64.tar.gz",
+    )
   })
 })
 
@@ -106,9 +121,21 @@ describe("prepare", () => {
         await readFile(join(dir, "release-metadata.json"), "utf8"),
       )
       expect(written.tag).toBe("mori/v0.13.0")
-      expect(written.targets).toEqual(["linux-x64", "linux-arm64"])
+      expect(written.targets).toEqual([
+        "linux-x64",
+        "linux-arm64",
+        "darwin-arm64",
+      ])
+      const darwin = "codebase-memory-mcp-0.13.0-darwin-arm64.tar.gz"
+      expect(written.assets[darwin]).toBe(
+        await sha256File(join(dir, darwin)),
+      )
+      expect(checksums).toContain(`  ${darwin}\n`)
       const notes = await readFile(join(dir, "release-notes.md"), "utf8")
       expect(notes).toContain(COMMIT)
+      expect(notes).toContain(darwin)
+      expect(notes).toContain("not notarized")
+      expect(notes).toContain("xattr -d com.apple.quarantine")
     })
   })
 
@@ -123,6 +150,17 @@ describe("prepare", () => {
       ).rejects.toThrow("linux-arm64")
     })
   })
+
+  test("fails when only the macOS archive is missing", async () => {
+    await withDir(async (dir) => {
+      for (const target of ["linux-x64", "linux-arm64"]) {
+        await writeFile(join(dir, assetName("0.13.0", target)), "x")
+      }
+      await expect(
+        prepare(dir, "0.13.0", "mori/v0.13.0", COMMIT),
+      ).rejects.toThrow("darwin-arm64")
+    })
+  })
 })
 
 describe("publish", () => {
@@ -134,6 +172,9 @@ describe("publish", () => {
     expect(create).toContain("--latest=false")
     expect(create).toContain("--verify-tag")
     expect(create).toContain("/rel/checksums.txt")
+    expect(create).toContain(
+      "/rel/codebase-memory-mcp-0.13.0-darwin-arm64.tar.gz",
+    )
   })
 
   test("refills an existing draft", () => {

@@ -3,7 +3,7 @@
 //
 // Usage (from mori/):
 //   bun scripts/release.ts validate [mori/vX.Y.Z]
-//   bun scripts/release.ts asset-name <version> <x64|arm64>
+//   bun scripts/release.ts asset-name <version> <target>
 //   bun scripts/release.ts prepare <version> <dir> [--tag T] [--commit SHA]
 //   bun scripts/release.ts publish <mori/vX.Y.Z> <dir> --repo OWNER/NAME
 //
@@ -12,14 +12,17 @@
 // checksums.txt, release-metadata.json and release-notes.md beside the
 // archives. `publish` creates or refills a DRAFT GitHub release, never marked
 // latest, and refuses to touch a release that is already published.
+//
+// Targets are <os>-<arch> as mise's github: backend reads them: static Linux
+// x64 and arm64 builds and a dynamic, ad-hoc signed macOS arm64 build.
 
 import { readdir, readFile, writeFile } from "node:fs/promises"
 import { join, resolve } from "node:path"
 
 export const BINARY = "codebase-memory-mcp"
 export const TAG_PREFIX = "mori/v"
-export const ARCHES = ["x64", "arm64"] as const
-export type Arch = (typeof ARCHES)[number]
+export const TARGETS = ["linux-x64", "linux-arm64", "darwin-arm64"] as const
+export type Target = (typeof TARGETS)[number]
 
 const SEMVER =
   /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-[0-9A-Za-z.-]+)?$/
@@ -84,15 +87,17 @@ export function checkTag(tag: string, fileVersion: string): string {
   return version
 }
 
-export function assetName(version: string, arch: string): string {
-  if (!(ARCHES as readonly string[]).includes(arch)) {
-    throw new Error(`Unsupported arch '${arch}'; expected ${ARCHES.join(", ")}`)
+export function assetName(version: string, target: string): string {
+  if (!(TARGETS as readonly string[]).includes(target)) {
+    throw new Error(
+      `Unsupported target '${target}'; expected ${TARGETS.join(", ")}`,
+    )
   }
-  return `${BINARY}-${parseVersion(version)}-linux-${arch}.tar.gz`
+  return `${BINARY}-${parseVersion(version)}-${target}.tar.gz`
 }
 
 export function releaseAssets(version: string): string[] {
-  return ARCHES.map((arch) => assetName(version, arch))
+  return TARGETS.map((target) => assetName(version, target))
 }
 
 export async function sha256File(path: string): Promise<string> {
@@ -116,8 +121,13 @@ export function releaseNotes(meta: ReleaseMetadata): string {
     `# Mori ${meta.version}`,
     "",
     `Binary \`${meta.binary}\` built from Jiyuu commit \`${meta.commit}\`.`,
-    "Static Linux builds for x64 and arm64. Each archive holds the binary,",
+    "Static Linux builds for x64 and arm64, and a macOS arm64 (Apple",
+    "silicon) build for macOS 14 or later. Each archive holds the binary,",
     "LICENSE, NOTICE and THIRD_PARTY_NOTICES.md.",
+    "",
+    "The macOS binary is ad-hoc signed but not notarized. If macOS blocks it",
+    "after a browser download, remove the quarantine attribute:",
+    "`xattr -d com.apple.quarantine codebase-memory-mcp`.",
     "",
     "| Asset | SHA-256 |",
     "| --- | --- |",
@@ -150,7 +160,7 @@ export async function prepare(
     tag,
     commit,
     assets,
-    targets: ARCHES.map((arch) => `linux-${arch}`),
+    targets: [...TARGETS],
   }
   await writeFile(join(dir, "checksums.txt"), formatChecksums(assets))
   await writeFile(
@@ -280,9 +290,9 @@ export async function main(argv: string[], root: string): Promise<string> {
     return tag ? checkTag(tag, fileVersion) : fileVersion
   }
   if (command === "asset-name") {
-    const [version, arch] = args
-    if (!version || !arch) throw new Error("asset-name <version> <arch>")
-    return assetName(version, arch)
+    const [version, target] = args
+    if (!version || !target) throw new Error("asset-name <version> <target>")
+    return assetName(version, target)
   }
   if (command === "prepare") {
     const tagArg = flag(args, "--tag")
