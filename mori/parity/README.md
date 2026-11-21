@@ -21,8 +21,8 @@ worker log at `<work>/b/cache/logs/.worker-log-*` for the
 `msg=pass.route_nodes.graphql` event with `planner=rust` and a positive routes
 count. This establishes that the Rust server Route planner ran. If the
 reference build emits the same diagnostic, check side A for `planner=c`.
-The generated parity fixtures have no GraphQL server Routes. To confirm
-planner execution, use a native GraphQL fixture or select a corpus repo
-with server Routes. The request in the parity report records the settings
-only. The Route marker covers the server planner. Establish execution of
-client extraction or cross-repo link stages from their own evidence.
+The generated polyglot fixture includes the GraphQL Route `Query.fixtureItem`
+and its gqlgen resolver. The release workflow requires the Rust planner and
+writer marker and checks the published `HANDLES` edge. The requested mode in
+the parity report records the settings only. Verify client extraction and
+cross-repo links with separate fixtures that exercise those stages.
