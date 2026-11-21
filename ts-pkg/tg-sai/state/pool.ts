@@ -133,6 +133,17 @@ export class PoolJournal {
     return row ? fromRow(row) : null
   }
 
+  /** All unfinished legacy fills, for the managed worker cutover. */
+  openFills(accountId: number): PoolFill[] {
+    return this.db
+      .query<PoolRow, [number]>(
+        "SELECT * FROM pool_fill WHERE account_id = ? " +
+          "AND status IN ('active', 'failed') ORDER BY created_ms, ref",
+      )
+      .all(accountId)
+      .map(fromRow)
+  }
+
   /** Writes `update` to `ref`; throws when the row is missing. */
   update(ref: string, update: PoolUpdate, nowMs: number): PoolFill {
     const current = this.get(ref)
