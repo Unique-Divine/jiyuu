@@ -20,6 +20,21 @@ test SUITES=default_suites: grammars parity-test
       python3 -I parity/parity.py ci && just parity-corrupt; \
     else echo "parity-ci skipped: no build/c binary (run just build)"; fi
 
+# Reuse the native GraphQL fixtures with the Rust callbacks active.
+test-graphql-rust BUILD_DIR="build/c-graphql-rust": grammars
+    #!/usr/bin/env bash
+    set -euo pipefail
+    selection="$(mktemp)"
+    trap 'rm -f "$selection"' EXIT
+    suites=(edge_types_probe cross_repo extraction graph_buffer pipeline)
+    for suite in "${suites[@]}"; do
+        sed -n "s/^TEST(\([A-Za-z0-9_]*graphql[A-Za-z0-9_]*\)).*/$suite:\1/p" \
+            "tests/test_$suite.c" >>"$selection"
+    done
+    test -s "$selection"
+    MORI_GRAPHQL_FIXTURE_WITNESS=1 CBM_TEST_ONLY_FILE="$selection" \
+        scripts/test.sh --suites "${suites[*]}" BUILD_DIR="{{BUILD_DIR}}"
+
 # Run the full leg: contract checks, clean build, every C suite and the
 # production-binary checks (over an hour).
 test-all: grammars

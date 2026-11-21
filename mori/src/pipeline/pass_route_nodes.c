@@ -40,7 +40,6 @@ enum {
 #include "foundation/arena.h"     /* CBMArena */
 #include "foundation/compat_fs.h" /* cbm_fopen */
 #include "foundation/mem_core.h"  /* cbm_alloc */
-#include "foundation/platform.h"  /* cbm_native_getenv */
 #include "foundation/yaml.h"      /* cbm_yaml_parse */
 
 #include <ctype.h>
@@ -1030,7 +1029,6 @@ static void create_grpc_routes(cbm_gbuf_t *gb) {
 enum {
     GQLGEN_MAX_CONFIG_BYTES = CBM_SZ_256 * CBM_SZ_1K,
     GQLGEN_MAX_SCHEMA_GLOBS = 64,
-    GQLGEN_MAX_GLOB_SEGMENTS = 64,
 };
 
 static const char *const gqlgen_config_names[] = {
@@ -1385,83 +1383,10 @@ void cbm_gqlgen_config_free(cbm_gqlgen_config_t *c) {
     memset(c, 0, sizeof(*c));
 }
 
-/* Does one path segment match one glob segment (`*` and `?`, no '/')? */
-static bool gqlgen_segment_match(const char *pat, size_t pl, const char *str, size_t sl) {
-    size_t p = 0;
-    size_t s = 0;
-    size_t star = SIZE_MAX;
-    size_t mark = 0;
-    while (s < sl) {
-        if (p < pl && (pat[p] == '?' || pat[p] == str[s])) {
-            p++;
-            s++;
-        } else if (p < pl && pat[p] == '*') {
-            star = p++;
-            mark = s;
-        } else if (star != SIZE_MAX) {
-            p = star + SKIP_ONE;
-            s = ++mark;
-        } else {
-            return false;
-        }
-    }
-    while (p < pl && pat[p] == '*') {
-        p++;
-    }
-    return p == pl;
-}
-
-typedef struct {
-    const char *s;
-    size_t len;
-} gqlgen_seg_t;
-
-static int gqlgen_split(const char *path, gqlgen_seg_t *segs, int max) {
-    int n = 0;
-    for (const char *p = path; *p && n < max;) {
-        const char *slash = strchr(p, '/');
-        size_t len = slash ? (size_t)(slash - p) : strlen(p);
-        if (len > 0) {
-            segs[n++] = (gqlgen_seg_t){p, len};
-        }
-        p += len + (slash ? SKIP_ONE : 0);
-    }
-    return n;
-}
-
 static bool (*gqlgen_glob_matcher)(const char *glob, const char *path);
 
 bool cbm_gqlgen_glob_match(const char *glob, const char *path) {
-    if (gqlgen_glob_matcher) {
-        return gqlgen_glob_matcher(glob, path);
-    }
-    gqlgen_seg_t pat[GQLGEN_MAX_GLOB_SEGMENTS];
-    gqlgen_seg_t str[GQLGEN_MAX_GLOB_SEGMENTS];
-    int pn = gqlgen_split(glob, pat, GQLGEN_MAX_GLOB_SEGMENTS);
-    int sn = gqlgen_split(path, str, GQLGEN_MAX_GLOB_SEGMENTS);
-    int p = 0;
-    int s = 0;
-    int star = CBM_NOT_FOUND; /* the last `**` segment, for backtracking */
-    int mark = 0;
-    while (s < sn) {
-        bool globstar = p < pn && pat[p].len == PAIR_LEN && strncmp(pat[p].s, "**", PAIR_LEN) == 0;
-        if (globstar) {
-            star = p++;
-            mark = s;
-        } else if (p < pn && gqlgen_segment_match(pat[p].s, pat[p].len, str[s].s, str[s].len)) {
-            p++;
-            s++;
-        } else if (star >= 0) {
-            p = star + SKIP_ONE;
-            s = ++mark;
-        } else {
-            return false;
-        }
-    }
-    while (p < pn && pat[p].len == PAIR_LEN && strncmp(pat[p].s, "**", PAIR_LEN) == 0) {
-        p++;
-    }
-    return p == pn;
+    return gqlgen_glob_matcher && gqlgen_glob_matcher(glob, path);
 }
 
 /* ── Phase 4b: GraphQL schema Routes (field paths) ──────────────────
@@ -2283,15 +2208,12 @@ static gql_route_planner_fn gql_route_planner;
 static gql_route_writer_fn gql_route_writer;
 
 /* Called before C main in each linked process, including a re-execed index
- * worker. The glob matcher remains the default in the linked binary.
- * The Rust planner and writer are opt-in while we check parity with C. */
+ * worker, and by the native test runner. */
 void cbm_gqlgen_set_rust_backend(bool (*matcher)(const char *glob, const char *path),
                                  gql_route_planner_fn planner, gql_route_writer_fn writer) {
-    char configured[sizeof("rust")];
-    const char *impl = cbm_native_getenv("MORI_IMPL_GRAPHQL", configured, sizeof(configured), NULL);
-    gqlgen_glob_matcher = impl && strcmp(impl, "c") == 0 ? NULL : matcher;
-    gql_route_planner = impl && strcmp(impl, "rust") == 0 ? planner : NULL;
-    gql_route_writer = gql_route_planner ? writer : NULL;
+    gqlgen_glob_matcher = matcher;
+    gql_route_planner = planner;
+    gql_route_writer = writer;
 }
 
 /* Visit every eligible resolver in the order of the candidate fields, then
@@ -2312,99 +2234,28 @@ void cbm_gqlgen_visit_route_resolvers(gql_ctx_t *ctx, const gql_emit_t *first, s
     }
 }
 
-static bool gql_pick_c_resolver(size_t field_index, const cbm_gbuf_node_t *resolver,
-                                void *context) {
-    gql_route_plan_t *plan = context;
-    if (plan->resolver == resolver) {
-        return true;
-    }
-    if (plan->resolver) {
-        *plan = (gql_route_plan_t){.ambiguous = true};
-        return false;
-    }
-    *plan = (gql_route_plan_t){.field_index = field_index, .resolver = resolver};
-    return true;
-}
-
-/* The only owning resolver wins. With no owners, or two different owners,
- * use the first field. Duplicate definitions without an owner are ambiguous. */
-static gql_route_plan_t gql_pick_c(gql_ctx_t *ctx, const gql_emit_t *first, size_t n) {
-    gql_route_plan_t plan = {.ambiguous = n > SKIP_ONE};
-    cbm_gqlgen_visit_route_resolvers(ctx, first, n, gql_pick_c_resolver, &plan);
-    return plan;
-}
-
 static gql_pick_t gql_pick(gql_ctx_t *ctx, const gql_emit_t *first, int n) {
-    gql_route_planner_fn planner = gql_route_planner ? gql_route_planner : gql_pick_c;
-    gql_route_plan_t plan = planner(ctx, first, (size_t)n);
+    gql_route_plan_t plan = gql_route_planner(ctx, first, (size_t)n);
     return (gql_pick_t){&first[plan.field_index], plan.resolver, plan.ambiguous};
 }
 
-static char *gql_route_props(const gql_field_t *f, bool ambiguous) {
-    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
-    if (!doc) {
-        return NULL;
-    }
-    yyjson_mut_val *root = yyjson_mut_obj(doc);
-    yyjson_mut_doc_set_root(doc, root);
-    yyjson_mut_obj_add_str(doc, root, "source", "graphql_schema");
-    yyjson_mut_obj_add_str(doc, root, "schema_type", f->return_type ? f->return_type : "");
-    yyjson_mut_obj_add_bool(doc, root, "deprecated", f->deprecated);
-    yyjson_mut_obj_add_str(doc, root, "deprecation_reason", f->reason ? f->reason : "");
-    if (ambiguous) {
-        yyjson_mut_obj_add_bool(doc, root, "ambiguous", true);
-    }
-    char *json = yyjson_mut_write(doc, YYJSON_WRITE_ALLOW_INVALID_UNICODE, NULL);
-    yyjson_mut_doc_free(doc);
-    return json;
-}
-
-/* Upsert one Route from its pick, with its one HANDLES edge. */
-static bool gql_emit_route_c(cbm_gbuf_t *gb, gql_pick_t pick) {
-    const gql_field_t *f = pick.emit->field;
-    char *props = gql_route_props(f, pick.ambiguous);
-    if (!props) {
-        return false;
-    }
-    const cbm_gbuf_node_t *fn = f->node;
-    int64_t route_id = cbm_gbuf_upsert_node(gb, "Route", pick.emit->path, pick.emit->qn,
-                                            fn->file_path, fn->start_line, fn->end_line, props);
-    free(props);
-    if (route_id == 0) {
-        return false;
-    }
-    if (pick.resolver) {
-        cbm_gbuf_insert_edge(gb, pick.resolver->id, route_id, "HANDLES",
-                             "{\"via\":\"gqlgen_resolver\"}");
-    } else {
-        cbm_gbuf_insert_edge(gb, fn->id, route_id, "HANDLES", "{\"via\":\"graphql_schema_field\"}");
-    }
-    return true;
-}
-
 static void gql_emit_route(gql_ctx_t *ctx, gql_pick_t pick) {
-    bool emitted;
-    if (gql_route_writer) {
-        const gql_field_t *field = pick.emit->field;
-        const cbm_gbuf_node_t *node = field->node;
-        const gql_route_row_t row = {
-            .path = pick.emit->path,
-            .qn = pick.emit->qn,
-            .file_path = node->file_path,
-            .return_type = field->return_type ? field->return_type : "",
-            .reason = field->reason ? field->reason : "",
-            .field_id = node->id,
-            .resolver_id = pick.resolver ? pick.resolver->id : 0,
-            .start_line = node->start_line,
-            .end_line = node->end_line,
-            .deprecated = field->deprecated,
-            .ambiguous = pick.ambiguous,
-        };
-        emitted = gql_route_writer(ctx->gb, &row);
-    } else {
-        emitted = gql_emit_route_c(ctx->gb, pick);
-    }
-    if (!emitted) {
+    const gql_field_t *field = pick.emit->field;
+    const cbm_gbuf_node_t *node = field->node;
+    const gql_route_row_t row = {
+        .path = pick.emit->path,
+        .qn = pick.emit->qn,
+        .file_path = node->file_path,
+        .return_type = field->return_type ? field->return_type : "",
+        .reason = field->reason ? field->reason : "",
+        .field_id = node->id,
+        .resolver_id = pick.resolver ? pick.resolver->id : 0,
+        .start_line = node->start_line,
+        .end_line = node->end_line,
+        .deprecated = field->deprecated,
+        .ambiguous = pick.ambiguous,
+    };
+    if (!gql_route_writer(ctx->gb, &row)) {
         return;
     }
     ctx->routes++;
@@ -2426,8 +2277,7 @@ static void gql_log_summary(const gql_ctx_t *ctx) {
     (void)snprintf(b3, sizeof(b3), "%d", ctx->via_field);
     (void)snprintf(b4, sizeof(b4), "%d", ctx->ambiguous);
     cbm_log_info("pass.route_nodes.graphql", "routes", b1, "via_resolver", b2, "via_field", b3,
-                 "ambiguous", b4, "planner", gql_route_planner ? "rust" : "c", "writer",
-                 gql_route_writer ? "rust" : "c");
+                 "ambiguous", b4, "planner", "rust", "writer", "rust");
     if (ctx->too_long > 0) {
         char b5[CBM_SZ_16];
         (void)snprintf(b5, sizeof(b5), "%d", ctx->too_long);
@@ -2494,7 +2344,7 @@ static bool gql_has_graphql_file(cbm_gbuf_t *gb) {
  * schema files, with HANDLES from gqlgen resolvers or the schema Field.
  * repo_path locates the gqlgen configs (NULL: none are read). */
 void cbm_pipeline_create_graphql_routes(cbm_gbuf_t *gb, const char *repo_path) {
-    if (!gb) {
+    if (!gb || !gqlgen_glob_matcher || !gql_route_planner || !gql_route_writer) {
         return;
     }
     gql_ctx_t ctx = {.gb = gb, .repo_path = repo_path};

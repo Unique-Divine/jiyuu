@@ -2,8 +2,8 @@
 
 Each fixture is a Git repo with one commit, written fresh under a scratch
 directory, so CI needs neither the private corpus nor network access. The
-files cover calls across files, methods, imports, an HTTP route and its
-client, tests, and Markdown that mentions code.
+files cover calls across files, methods, imports, HTTP and GraphQL routes,
+tests, and Markdown that mentions code.
 """
 
 from __future__ import annotations
@@ -55,6 +55,14 @@ FIXTURES: dict[str, dict[str, str]] = {
       "package main\n\nimport \"testing\"\n\n"
       "func TestListItems(t *testing.T) {\n"
       "\tif len(listItems()) != 2 {\n\t\tt.Fatal(\"want 2\")\n\t}\n}\n"),
+    "gqlgen.yml": (
+      "schema:\n  - graph/schema.graphqls\n"
+      "resolver:\n  layout: follow-schema\n  dir: graph\n"),
+    "graph/schema.graphqls": "type Query { fixtureItem: Int }\n",
+    "graph/handlers.go": (
+      "package graph\n\n"
+      "type queryResolver struct{}\n\n"
+      "func (q *queryResolver) FixtureItem() int { return 1 }\n"),
     "web/client.ts": (
       "export interface Item {\n  name: string\n}\n\n"
       "export async function fetchItems(): Promise<Item[]> {\n"

@@ -259,8 +259,10 @@ fn emit_link_lines(build_dir: &Path, target_os: &str) {
     println!("cargo:rustc-link-search=native={}", build_dir.display());
     println!("cargo:rustc-link-lib=static:+whole-archive=mori-c");
     if crt_static && target_os == "linux" {
-        println!("cargo:rustc-link-lib=static=z");
-        println!("cargo:rustc-link-lib=static=stdc++");
+        // Resolve system archives at the final native link. Bundling them in
+        // the Rust rlib would require teaching rustc the platform's GCC paths.
+        println!("cargo:rustc-link-lib=static:-bundle=z");
+        println!("cargo:rustc-link-lib=static:-bundle=stdc++");
     } else {
         println!("cargo:rustc-link-lib=dylib=z");
         println!("cargo:rustc-link-lib=dylib=m");

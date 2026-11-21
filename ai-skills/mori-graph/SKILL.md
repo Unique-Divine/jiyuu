@@ -17,9 +17,8 @@ Mori lives in `mori/` of https://github.com/Unique-Divine/jiyuu and ships as
 `mori/v*` releases. It carries GraphQL cross-repo linking (a GraphQL client
 operation links to the gqlgen resolver that answers it). The MCP server key
 is `mori-graph`, so the tools are `mcp__mori-graph__search_graph` and so on.
-Use the executable from the published archive. Mori 0.13.1 uses
-`codebase-memory-mcp`; archives named `mori-<version>-<target>.tar.gz`
-use `mori`. Read
+Use the `mori` executable from the published archive. Mori 0.13.1 uses
+`codebase-memory-mcp` for rollback. Read
 [setup.md](references/setup.md) to install, register, and index;
 [graphql.md](references/graphql.md) for API questions across repos;
 [tool-source.md](references/tool-source.md) to work on Mori itself.
