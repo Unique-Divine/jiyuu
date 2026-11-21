@@ -8245,13 +8245,105 @@ static void add_index_freshness_json(yyjson_mut_doc *doc, yyjson_mut_val *root, 
     cbm_git_context_free(&ctx);
 }
 
+static cbm_mcp_index_status_renderer_fn index_status_renderer;
+static cbm_mcp_read_override_free_fn index_status_payload_free;
+
+void cbm_mcp_set_index_status_renderer(cbm_mcp_index_status_renderer_fn renderer,
+                                        cbm_mcp_read_override_free_fn release) {
+    index_status_renderer = release ? renderer : NULL;
+    index_status_payload_free = release;
+}
+
+static const char *index_status_hint(int nodes, int edges) {
+    if (nodes < 0 && edges < 0) {
+        return "The nodes and edges tables could not be read; the database may be "
+               "corrupt. Re-run index_repository(repo_path=...) or remove the project "
+               "cache and re-index.";
+    }
+    if (nodes < 0) {
+        return "The nodes table could not be read; the database may be corrupt. Re-run "
+               "index_repository(repo_path=...) or remove the project cache and re-index.";
+    }
+    if (edges < 0) {
+        return "The edges table could not be read; the database may be corrupt. Re-run "
+               "index_repository(repo_path=...) or remove the project cache and re-index.";
+    }
+    return nodes == 0
+               ? "Project is empty. Re-run index_repository(repo_path=...) to populate."
+               : NULL;
+}
+
+static char *render_index_status_json(cbm_mcp_server_t *srv, cbm_store_t *store,
+                                      const char *project, bool verbose, int coverage_samples) {
+    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val *root = doc ? yyjson_mut_obj(doc) : NULL;
+    if (!root) {
+        yyjson_mut_doc_free(doc);
+        return NULL;
+    }
+    yyjson_mut_doc_set_root(doc, root);
+
+    cbm_project_t metadata = {0};
+    cbm_mcp_index_status_report_t report = {.project = project};
+    bool built = true;
+    if (project) {
+        read_project_stats(store, project, &report.nodes, &report.edges);
+        report.has_metadata = read_project_metadata(store, project, &metadata);
+        report.root_path = metadata.root_path;
+        report.indexed_at = metadata.indexed_at;
+        if (!index_status_renderer) {
+            /* A failed count read must be reported as error, even if the
+             * other count is readable or the database appears empty. */
+            bool unreadable = report.nodes < 0 || report.edges < 0;
+            yyjson_mut_obj_add_str(doc, root, "project", project);
+            yyjson_mut_obj_add_int(doc, root, "nodes", unreadable ? 0 : report.nodes);
+            yyjson_mut_obj_add_int(doc, root, "edges", unreadable ? 0 : report.edges);
+            yyjson_mut_obj_add_str(doc, root, "status",
+                                   unreadable ? "error" : (report.nodes > 0 ? "ready" : "empty"));
+            if (report.has_metadata) {
+                yyjson_mut_obj_add_strcpy(doc, root, "root_path",
+                                          report.root_path ? report.root_path : "");
+                yyjson_mut_obj_add_strcpy(doc, root, "indexed_at",
+                                          report.indexed_at ? report.indexed_at : "");
+            }
+        }
+        if (report.has_metadata && verbose) {
+            add_git_context_json(doc, root, report.root_path);
+            add_index_freshness_json(doc, root, store, project, report.root_path, report.indexed_at);
+        }
+        add_coverage_report(doc, root, store, project,
+                            report.has_metadata ? report.indexed_at : NULL, coverage_samples);
+        (void)cbm_cross_repo_add_status_json(doc, root, store, project);
+        built = add_doc_links_report(doc, root, store, project,
+                                     coverage_samples == COVERAGE_FILE_CAP);
+        if (built && !index_status_renderer) {
+            const char *hint = index_status_hint(report.nodes, report.edges);
+            if (hint) {
+                yyjson_mut_obj_add_str(doc, root, "hint", hint);
+            }
+        }
+        add_watch_status_json(srv, doc, root, project);
+    } else if (!index_status_renderer) {
+        yyjson_mut_obj_add_str(doc, root, "status", "no_project");
+    }
+
+    char *json = built ? yy_doc_to_str(doc) : NULL;
+    yyjson_mut_doc_free(doc);
+    if (json && index_status_renderer) {
+        report.diagnostics = json;
+        char *assembled = index_status_renderer(&report);
+        free(json);
+        json = assembled;
+    }
+    cbm_project_free_fields(&metadata);
+    return json;
+}
+
 static char *handle_index_status(cbm_mcp_server_t *srv, const char *args) {
     char *project = get_project_arg(args);
     cbm_store_t *store = resolve_store(srv, project);
     REQUIRE_STORE(store, project);
-    /* The git context block (worktree/shadow path variants) and the freshness
-     * verdict only matter when debugging index-location issues — gate them so
-     * the common status call stays lean. */
+    /* Verbose Git context and freshness are used for index-location debugging. */
     bool verbose = cbm_mcp_get_bool_arg(args, "verbose");
     char *diagnostics = cbm_mcp_get_string_arg(args, "diagnostics");
     int coverage_samples = 0;
@@ -8262,85 +8354,14 @@ static char *handle_index_status(cbm_mcp_server_t *srv, const char *args) {
     }
     free(diagnostics);
 
-    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
-    yyjson_mut_val *root = doc ? yyjson_mut_obj(doc) : NULL;
-    /* A failed allocation or report answers with the MCP allocation-error
-     * response, through the one exit below. */
-    bool failed = !root;
-    if (root) {
-        yyjson_mut_doc_set_root(doc, root);
-    }
-
-    if (failed) {
-        /* nothing to report into */
-    } else if (project) {
-        int nodes = 0;
-        int edges = 0;
-        read_project_stats(store, project, &nodes, &edges);
-        /* A negative count is a failed read (CBM_STORE_ERR), not a small
-         * project. Reporting it as a count would put a bare -1 in the output,
-         * and `nodes > 0 ? "ready" : "empty"` would answer "empty" for an
-         * unreadable table — the false all-clear #2012 is about. Say the read
-         * failed, and name the table that could not be read. */
-        const bool counts_unreadable = nodes < 0 || edges < 0;
-        yyjson_mut_obj_add_str(doc, root, "project", project);
-        yyjson_mut_obj_add_int(doc, root, "nodes", counts_unreadable ? 0 : nodes);
-        yyjson_mut_obj_add_int(doc, root, "edges", counts_unreadable ? 0 : edges);
-        yyjson_mut_obj_add_str(doc, root, "status",
-                               counts_unreadable ? "error" : (nodes > 0 ? "ready" : "empty"));
-        cbm_project_t proj_info = {0};
-        bool have_proj_info = read_project_metadata(store, project, &proj_info);
-        if (have_proj_info) {
-            yyjson_mut_obj_add_strcpy(doc, root, "root_path",
-                                      proj_info.root_path ? proj_info.root_path : "");
-            yyjson_mut_obj_add_strcpy(doc, root, "indexed_at",
-                                      proj_info.indexed_at ? proj_info.indexed_at : "");
-            if (verbose) {
-                add_git_context_json(doc, root, proj_info.root_path);
-                add_index_freshness_json(doc, root, store, project, proj_info.root_path,
-                                         proj_info.indexed_at);
-            }
-        }
-        add_coverage_report(doc, root, store, project, have_proj_info ? proj_info.indexed_at : NULL,
-                            coverage_samples);
-        (void)cbm_cross_repo_add_status_json(doc, root, store, project);
-        bool doc_links_built =
-            add_doc_links_report(doc, root, store, project, coverage_samples == COVERAGE_FILE_CAP);
-        safe_str_free(&proj_info.name);
-        safe_str_free(&proj_info.indexed_at);
-        safe_str_free(&proj_info.root_path);
-        if (!doc_links_built) {
-            failed = true;
-        } else if (counts_unreadable) {
-            const char *hint;
-            if (nodes < 0 && edges < 0) {
-                hint = "The nodes and edges tables could not be read; the database may be "
-                       "corrupt. Re-run index_repository(repo_path=...) or remove the project "
-                       "cache and re-index.";
-            } else if (nodes < 0) {
-                hint = "The nodes table could not be read; the database may be corrupt. Re-run "
-                       "index_repository(repo_path=...) or remove the project cache and re-index.";
-            } else {
-                hint = "The edges table could not be read; the database may be corrupt. Re-run "
-                       "index_repository(repo_path=...) or remove the project cache and re-index.";
-            }
-            yyjson_mut_obj_add_str(doc, root, "hint", hint);
-        } else if (nodes == 0) {
-            yyjson_mut_obj_add_str(
-                doc, root, "hint",
-                "Project is empty. Re-run index_repository(repo_path=...) to populate.");
-        }
-        add_watch_status_json(srv, doc, root, project);
-    } else {
-        yyjson_mut_obj_add_str(doc, root, "status", "no_project");
-    }
-
-    char *json = failed ? NULL : yy_doc_to_str(doc);
-    yyjson_mut_doc_free(doc);
+    char *json = render_index_status_json(srv, store, project, verbose, coverage_samples);
     free(project);
-
     char *result = mcp_result_from_json(args, json);
-    free(json);
+    if (json && index_status_renderer) {
+        index_status_payload_free(json);
+    } else {
+        free(json);
+    }
     return result;
 }
 

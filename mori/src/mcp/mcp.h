@@ -362,6 +362,22 @@ typedef char *(*cbm_mcp_project_list_renderer_fn)(const cbm_mcp_project_record_t
 void cbm_mcp_set_project_list_renderer(cbm_mcp_project_list_renderer_fn renderer,
                                         cbm_mcp_read_override_free_fn release);
 
+/* Diagnostic JSON is an ordered object produced by native collectors. Strings
+ * and the report are borrowed for the render call. */
+typedef struct {
+    const char *project;
+    const char *root_path;
+    const char *indexed_at;
+    const char *diagnostics;
+    int nodes;
+    int edges;
+    bool has_metadata;
+} cbm_mcp_index_status_report_t;
+
+typedef char *(*cbm_mcp_index_status_renderer_fn)(const cbm_mcp_index_status_report_t *report);
+void cbm_mcp_set_index_status_renderer(cbm_mcp_index_status_renderer_fn renderer,
+                                        cbm_mcp_read_override_free_fn release);
+
 /* ── Supervised background index (RSS isolation, #832) ────────── */
 
 /* #1300: the explicit error response for a worker that exited cleanly without

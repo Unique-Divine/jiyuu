@@ -302,6 +302,95 @@ fn project_page_normalizes_root_bytes_in_both_formats() {
 }
 
 #[test]
+fn index_status_preserves_diagnostics_and_freshness_in_both_formats() {
+    let scratch = Scratch::new("index-status");
+    let repo = scratch.0.join("repo");
+    fs::create_dir(&repo).unwrap();
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .current_dir(&repo)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+    };
+    git(&["init", "-q"]);
+    git(&[
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.com",
+        "-c",
+        "commit.gpgsign=false",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "commit",
+        "--allow-empty",
+        "-qm",
+        "fixture",
+    ]);
+
+    let db = Connection::open(scratch.0.join("cache/fixture.db")).unwrap();
+    db.execute_batch(
+        "CREATE TABLE projects (name TEXT PRIMARY KEY, indexed_at TEXT, root_path TEXT);
+         CREATE TABLE nodes (project TEXT);
+         CREATE TABLE edges (project TEXT);
+         CREATE TABLE index_coverage (project TEXT, rel_path TEXT, kind TEXT, detail TEXT);
+         CREATE TABLE index_coverage_meta (
+             project TEXT, generation TEXT, index_mode TEXT, recorded_at TEXT,
+             recording_status TEXT, ignored_files_stored INTEGER, ignored_files_total INTEGER,
+             coverage_version INTEGER, hash_records_complete INTEGER,
+             unresolved_calls_complete INTEGER
+         );
+         CREATE TABLE index_checkout (project TEXT, indexed_checkout_sha TEXT);
+         INSERT INTO index_coverage_meta VALUES ('fixture', 'now', 'full', 'now', 'complete',
+                                                  0, 0, 1, 1, 1);
+         INSERT INTO index_checkout VALUES ('fixture', '0000000000000000000000000000000000000000');
+         INSERT INTO index_coverage VALUES ('fixture', 'partial.rs', 'parse_partial', '1-2');",
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO projects VALUES ('fixture', 'now', ?1)",
+        [repo.to_str().unwrap()],
+    )
+    .unwrap();
+
+    let queries = [
+        r#"{"project":"fixture","verbose":true,"diagnostics":"full","format":"json"}"#,
+        r#"{"project":"fixture","verbose":true,"diagnostics":"summary"}"#,
+        r#"{"project":"missing","format":"json"}"#,
+    ];
+    let run_all = |bin: &Path| {
+        let outputs = queries.map(|query| {
+            let output = run_in(
+                bin,
+                &scratch,
+                &["cli", "--quiet", "index_status", query],
+            );
+            (output.status.code(), output.stdout, output.stderr)
+        });
+        let stop = run_in(bin, &scratch, &["daemon", "stop"]);
+        assert!(stop.status.success(), "{stop:?}");
+        outputs
+    };
+    let c = run_all(&c_binary());
+    let rust = run_all(Path::new(MORI));
+    assert_eq!(c, rust);
+    assert_eq!(rust[0].0, Some(0));
+    let report: serde_json::Value = serde_json::from_slice(&rust[0].1).unwrap();
+    assert_eq!(report["status"], "empty");
+    assert_eq!(report["freshness"]["verdict"], "stale");
+    assert_eq!(report["parse_partial"]["files"][0]["path"], "partial.rs");
+    assert_eq!(report["watch"]["watched"], false);
+    assert!(
+        report["hint"]
+            .as_str()
+            .unwrap()
+            .contains("Project is empty")
+    );
+}
+
+#[test]
 fn unknown_tool_error_matches_c() {
     assert_same(&["cli", "no_such_tool"]);
 }
