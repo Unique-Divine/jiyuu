@@ -1,5 +1,4 @@
-//! The only module that knows about C. Deleting the C program later means
-//! deleting this module and its callers.
+//! Rust startup for the linked C program.
 
 use std::ffi::{CStr, CString, OsStr, c_char, c_int, c_void};
 use std::ops::ControlFlow;
@@ -56,6 +55,8 @@ type OutlineReader = unsafe extern "C" fn(
 const STORE_OK: c_int = 0;
 const STORE_ERR: c_int = -1;
 const STORE_CANCELLED: c_int = -3;
+
+use crate::stdio::c_transport;
 
 unsafe extern "C" {
     /// The C program's `main`, renamed when `src/main.c` is compiled with
@@ -256,7 +257,10 @@ pub unsafe extern "C" fn main(argc: c_int, argv: *mut *mut c_char) -> c_int {
     }
     // SAFETY: C has not started any indexing threads and the function pointer
     // stays valid for the process lifetime, including each worker's own main.
-    unsafe { cbm_gqlgen_set_glob_matcher(gqlgen_glob_match) };
+    unsafe {
+        cbm_gqlgen_set_glob_matcher(gqlgen_glob_match);
+        c_transport::register();
+    }
 
     // SAFETY: argc and argv come straight from the C runtime and meet the
     // contract of C main, which cbm_c_main is.
