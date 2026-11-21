@@ -22886,15 +22886,64 @@ static long long mcp_elapsed_us(struct timespec start, struct timespec end) {
            ((long long)(end.tv_nsec - start.tv_nsec) / MCP_MS_TO_US);
 }
 
+/* Keep values aligned with mcp_dispatch.rs in the linked build. */
+enum {
+    MCP_METHOD_UNKNOWN = 0,
+    MCP_METHOD_INITIALIZE,
+    MCP_METHOD_PING,
+    MCP_METHOD_RESOURCES_LIST,
+    MCP_METHOD_RESOURCE_TEMPLATES_LIST,
+    MCP_METHOD_PROMPTS_LIST,
+    MCP_METHOD_PROMPTS_GET,
+    MCP_METHOD_TOOLS_LIST,
+    MCP_METHOD_TOOLS_CALL,
+    MCP_METHOD_CANCELLED,
+    MCP_METHOD_DISCOVER,
+};
+
+static cbm_mcp_method_selector_fn mcp_method_selector;
+
+void cbm_mcp_set_method_selector(cbm_mcp_method_selector_fn select) {
+    mcp_method_selector = select;
+}
+
+static int select_mcp_method(const char *method) {
+    if (mcp_method_selector) {
+        return mcp_method_selector(method);
+    }
+    static const struct {
+        const char *name;
+        int kind;
+    } methods[] = {
+        {"initialize", MCP_METHOD_INITIALIZE},
+        {"ping", MCP_METHOD_PING},
+        {"resources/list", MCP_METHOD_RESOURCES_LIST},
+        {"resources/templates/list", MCP_METHOD_RESOURCE_TEMPLATES_LIST},
+        {"prompts/list", MCP_METHOD_PROMPTS_LIST},
+        {"prompts/get", MCP_METHOD_PROMPTS_GET},
+        {"tools/list", MCP_METHOD_TOOLS_LIST},
+        {"tools/call", MCP_METHOD_TOOLS_CALL},
+        {"notifications/cancelled", MCP_METHOD_CANCELLED},
+        {"server/discover", MCP_METHOD_DISCOVER},
+    };
+    for (size_t i = 0; method && i < sizeof(methods) / sizeof(methods[0]); i++) {
+        if (strcmp(method, methods[i].name) == 0) {
+            return methods[i].kind;
+        }
+    }
+    return MCP_METHOD_UNKNOWN;
+}
+
 char *cbm_mcp_server_handle(cbm_mcp_server_t *srv, const char *line) {
     cbm_jsonrpc_request_t req = {0};
     if (cbm_jsonrpc_parse(line, &req) < 0) {
         return cbm_jsonrpc_format_error(0, JSONRPC_PARSE_ERROR, "Parse error");
     }
 
+    int method = select_mcp_method(req.method);
     /* Notifications (no id) → handle cancellation, then no response */
     if (!req.has_id) {
-        if (req.method && strcmp(req.method, "notifications/cancelled") == 0) {
+        if (method == MCP_METHOD_CANCELLED) {
             if (cbm_mcp_cancel_request_matches(req.params_raw, srv->active_request_id,
                                                srv->active_request_id_str) &&
                 cbm_mcp_server_cancel_active(srv)) {
@@ -22922,28 +22971,36 @@ char *cbm_mcp_server_handle(cbm_mcp_server_t *srv, const char *line) {
     bool request_cancelled = false;
     bool request_timed_out = false;
 
-    if (strcmp(req.method, "initialize") == 0) {
+    switch (method) {
+    case MCP_METHOD_INITIALIZE:
         result_json = cbm_mcp_initialize_response_for_profile(req.params_raw, srv->tool_profile);
         detect_session(srv);
         if (srv->background_tasks && srv->tool_profile == CBM_MCP_TOOL_PROFILE_ALL) {
             maybe_auto_index(srv);
         }
-    } else if (strcmp(req.method, "ping") == 0) {
+        break;
+    case MCP_METHOD_PING:
         result_json = heap_strdup("{}");
-    } else if (strcmp(req.method, "resources/list") == 0) {
+        break;
+    case MCP_METHOD_RESOURCES_LIST:
         /* This server exposes no resources, but clients probe these on
          * connect regardless of declared capabilities and surface -32601 as
          * a failed connection (#958). Empty lists are interoperable. */
         result_json = heap_strdup("{\"resources\":[]}");
-    } else if (strcmp(req.method, "resources/templates/list") == 0) {
+        break;
+    case MCP_METHOD_RESOURCE_TEMPLATES_LIST:
         result_json = heap_strdup("{\"resourceTemplates\":[]}");
-    } else if (strcmp(req.method, "prompts/list") == 0) {
+        break;
+    case MCP_METHOD_PROMPTS_LIST:
         result_json = cbm_mcp_prompts_list();
-    } else if (strcmp(req.method, "prompts/get") == 0) {
+        break;
+    case MCP_METHOD_PROMPTS_GET:
         result_json = cbm_mcp_prompt_get(req.params_raw, &request_error_json);
-    } else if (strcmp(req.method, "tools/list") == 0) {
+        break;
+    case MCP_METHOD_TOOLS_LIST:
         result_json = cbm_mcp_tools_list_page(srv->tool_profile, req.params_raw);
-    } else if (strcmp(req.method, "tools/call") == 0) {
+        break;
+    case MCP_METHOD_TOOLS_CALL: {
         char *tool_name = req.params_raw ? cbm_mcp_get_tool_name(req.params_raw) : NULL;
         char *tool_args =
             req.params_raw ? cbm_mcp_get_arguments(req.params_raw) : heap_strdup("{}");
@@ -22970,7 +23027,9 @@ char *cbm_mcp_server_handle(cbm_mcp_server_t *srv, const char *line) {
             result_json && strstr(result_json, "\"code\":\"request_timeout\"") != NULL;
 
         free(tool_args);
-    } else {
+        break;
+    }
+    default: {
         /* Echo the original id (string or numeric, issue #253) on the error. */
         char err_obj[160];
         snprintf(err_obj, sizeof(err_obj), "{\"code\":%d,\"message\":\"Method not found\"}",
@@ -22992,11 +23051,12 @@ char *cbm_mcp_server_handle(cbm_mcp_server_t *srv, const char *line) {
         long long duration_us = mcp_elapsed_us(req_t0, serialize_t1);
         /* server/discover is the modern connect probe. -32601 stays so the
          * client falls back to initialize; that miss is not an error (#2433). */
-        cbm_log_mcp_request(req.method, NULL, strcmp(req.method, "server/discover") != 0,
+        cbm_log_mcp_request(req.method, NULL, method != MCP_METHOD_DISCOVER,
                             duration_us, handler_us, serialization_us, false, false);
         cbm_mcp_server_request_scope_end(srv);
         cbm_jsonrpc_request_free(&req);
         return err;
+    }
     }
 
     if (request_error_json) {
