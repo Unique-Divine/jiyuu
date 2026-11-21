@@ -1,0 +1,43 @@
+{"tool": "index_status", "args": {"project": "{{project:jiyuu}}"}}
+{"tool": "get_graph_schema", "args": {"project": "{{project:jiyuu}}"}}
+{"tool": "get_architecture", "args": {"project": "{{project:jiyuu}}"}}
+{"tool": "query_graph", "args": {"project": "{{project:jiyuu}}", "query": "MATCH (a)-[r]->(b) RETURN type(r), count(*) ORDER BY type(r)"}}
+{"tool": "query_graph", "args": {"project": "{{project:jiyuu}}", "query": "MATCH (n) RETURN n.label AS l, count(*) AS c ORDER BY c DESC"}}
+{"tool": "query_graph", "args": {"project": "{{project:jiyuu}}", "query": "MATCH (f:Function) RETURN f.name, f.file_path LIMIT 25"}}
+{"tool": "query_graph", "args": {"project": "{{project:jiyuu}}", "query": "MATCH (f:Function)-[:CALLS]->(g:Function) WHERE f.name STARTS WITH 'parse' RETURN f.name, g.name ORDER BY f.name, g.name LIMIT 50"}}
+{"tool": "search_graph", "args": {"project": "{{project:jiyuu}}", "label": "Function", "limit": 20}}
+{"tool": "search_graph", "args": {"project": "{{project:jiyuu}}", "name_pattern": ".*[Tt]est.*", "limit": 15}}
+{"tool": "index_status", "args": {"project": "{{project:cobra}}"}}
+{"tool": "get_graph_schema", "args": {"project": "{{project:cobra}}"}}
+{"tool": "get_architecture", "args": {"project": "{{project:cobra}}"}}
+{"tool": "query_graph", "args": {"project": "{{project:cobra}}", "query": "MATCH (a)-[r]->(b) RETURN type(r), count(*) ORDER BY type(r)"}}
+{"tool": "query_graph", "args": {"project": "{{project:cobra}}", "query": "MATCH (n) RETURN n.label AS l, count(*) AS c ORDER BY c DESC"}}
+{"tool": "query_graph", "args": {"project": "{{project:cobra}}", "query": "MATCH (f:Function) RETURN f.name, f.file_path LIMIT 25"}}
+{"tool": "query_graph", "args": {"project": "{{project:cobra}}", "query": "MATCH (f:Function)-[:CALLS]->(g:Function) WHERE f.name STARTS WITH 'parse' RETURN f.name, g.name ORDER BY f.name, g.name LIMIT 50"}}
+{"tool": "search_graph", "args": {"project": "{{project:cobra}}", "label": "Function", "limit": 20}}
+{"tool": "search_graph", "args": {"project": "{{project:cobra}}", "name_pattern": ".*[Tt]est.*", "limit": 15}}
+{"tool": "index_status", "args": {"project": "{{project:requests}}"}}
+{"tool": "get_graph_schema", "args": {"project": "{{project:requests}}"}}
+{"tool": "get_architecture", "args": {"project": "{{project:requests}}"}}
+{"tool": "query_graph", "args": {"project": "{{project:requests}}", "query": "MATCH (a)-[r]->(b) RETURN type(r), count(*) ORDER BY type(r)"}}
+{"tool": "query_graph", "args": {"project": "{{project:requests}}", "query": "MATCH (n) RETURN n.label AS l, count(*) AS c ORDER BY c DESC"}}
+{"tool": "query_graph", "args": {"project": "{{project:requests}}", "query": "MATCH (f:Function) RETURN f.name, f.file_path LIMIT 25"}}
+{"tool": "query_graph", "args": {"project": "{{project:requests}}", "query": "MATCH (f:Function)-[:CALLS]->(g:Function) WHERE f.name STARTS WITH 'parse' RETURN f.name, g.name ORDER BY f.name, g.name LIMIT 50"}}
+{"tool": "search_graph", "args": {"project": "{{project:requests}}", "label": "Function", "limit": 20}}
+{"tool": "search_graph", "args": {"project": "{{project:requests}}", "name_pattern": ".*[Tt]est.*", "limit": 15}}
+{"tool": "search_graph", "args": {"project": "{{project:jiyuu}}", "query": "cypher parser", "limit": 10}}
+{"tool": "search_graph", "args": {"project": "{{project:jiyuu}}", "query": "graphql route", "limit": 10}}
+{"tool": "search_graph", "args": {"project": "{{project:jiyuu}}", "query": "cypher execute", "limit": 20}}
+{"tool": "search_code", "args": {"project": "{{project:jiyuu}}", "pattern": "cbm_pipeline_run", "limit": 10}}
+{"tool": "trace_path", "args": {"project": "{{project:jiyuu}}", "function_name": "cbm_pipeline_run", "direction": "inbound", "depth": 2}}
+{"tool": "get_code_snippet", "args": {"project": "{{project:jiyuu}}", "qualified_name": "cbm_pipeline_run"}}
+{"tool": "search_graph", "args": {"project": "{{project:cobra}}", "query": "execute command", "limit": 10}}
+{"tool": "trace_path", "args": {"project": "{{project:cobra}}", "function_name": "ExecuteC", "direction": "outbound", "depth": 2}}
+{"tool": "get_code_snippet", "args": {"project": "{{project:cobra}}", "qualified_name": "ExecuteC"}}
+{"tool": "search_code", "args": {"project": "{{project:cobra}}", "pattern": "PersistentFlags", "limit": 10}}
+{"tool": "search_graph", "args": {"project": "{{project:requests}}", "query": "session request", "limit": 10}}
+{"tool": "trace_path", "args": {"project": "{{project:requests}}", "function_name": "merge_setting", "direction": "inbound", "depth": 2}}
+{"tool": "get_file_outline", "args": {"project": "{{project:requests}}", "file_path": "src/requests/sessions.py"}}
+{"tool": "query_graph", "args": {"project": "{{project:requests}}", "query": "MATCH (c:Class)-[:DEFINES_METHOD]->(m:Method) RETURN c.name, count(m) AS n ORDER BY n DESC LIMIT 10"}}
+{"tool": "check_index_coverage", "args": {"project": "{{project:requests}}", "paths": ["src/requests/api.py", "missing.py"]}}
+{"tool": "list_projects", "args": {}}

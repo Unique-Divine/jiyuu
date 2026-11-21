@@ -120,3 +120,11 @@ mori-rs-check-linked:
 # Build the release mori binary with the C program linked.
 mori-rs-build:
   just --justfile mori/jiyuu-mori/justfile build
+
+# Diff two Mori builds, L0-L4 (default: C vs C on the public corpus).
+mori-parity *ARGS:
+  just --justfile mori/justfile parity {{ARGS}}
+
+# Mori parity on generated fixture repos (needs `just mori-build`).
+mori-parity-ci *ARGS:
+  just --justfile mori/justfile parity-ci {{ARGS}}
