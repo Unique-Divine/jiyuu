@@ -36,7 +36,12 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any
 
-ROW_TOOLS = {"search_graph", "query_graph"}
+ROW_TOOLS = {"search_graph", "query_graph", "list_projects"}
+# Columns whose values vary between identical index runs. They are
+# compared on their own, under a labeled key the allow-list can name, and
+# left out of the row text.
+VOLATILE_COLS = {"size_bytes"}
+REF_RULE_RE = re.compile(r"^[A-Za-z_][\w.-]*_ref_rule: ")
 HEADER_RE = re.compile(r"^([A-Za-z_][\w.-]*): (\d+)  \(cols: (.*)\)$")
 # search_graph's grouped form: rows under `prefix (file):` group lines.
 GROUPED_RE = re.compile(
@@ -162,7 +167,9 @@ def parse_text(lines: list[str]) -> Parsed:
 
 def expand_refs(p: Parsed) -> None:
   """Replace `@N+suffix` cells with their prefix and drop `<key>_refs`
-  tables, whose content depends on which rows were kept."""
+  tables and `<key>_ref_rule` lines, whose presence and content depend on
+  which rows were kept."""
+  p.other = [l for l in p.other if not REF_RULE_RE.match(l)]
   for key in [k for k in p.tables if k.endswith("_refs")]:
     refs = p.tables.pop(key)
     base = key[:-len("_refs")]
@@ -220,6 +227,8 @@ def order_mode(tool: str, args: dict[str, Any], cols: list[str]
                ) -> tuple[str, list[int]]:
   """("ranked", [i]) | ("keyed", [i...]) | ("strict", []) |
   ("unordered", [])."""
+  if tool == "list_projects":
+    return "strict", []
   if tool == "search_graph":
     if cols and cols[-1] in RANK_COLS:
       return "ranked", [len(cols) - 1]

@@ -550,6 +550,7 @@ def _gate(rep: DiffReport, tool: str, args: dict[str, Any], group: str,
       rep.add("L4", k + "{cols}", group, t1.cols, t2.cols, where)
       n += 1
       continue
+    n += _split_volatile(rep, k, group, where, t1, t2)
     mode, idx = rows_mod.order_mode(tool, args, t1.cols)
     res = rows_mod.compare_tables(t1, t2, mode, idx, trunc)
     for d in res.diffs:
@@ -558,6 +559,26 @@ def _gate(rep: DiffReport, tool: str, args: dict[str, Any], group: str,
     if trunc or res.boundary["a"] or res.boundary["b"]:
       need.append((k, res, mode, idx))
   return n, need
+
+
+def _split_volatile(rep: DiffReport, k: str, group: str, where: str,
+                    t1: rows_mod.Table, t2: rows_mod.Table) -> int:
+  """Compare volatile columns (rows.VOLATILE_COLS) row by row under
+  `<key>{col:<name>}` and remove them from both tables, so a database
+  size never turns a row into a row difference."""
+  n = 0
+  for col in [c for c in t1.cols if c in rows_mod.VOLATILE_COLS]:
+    i = t1.cols.index(col)
+    for r1, r2 in zip(t1.rows, t2.rows):
+      v1 = rows_mod.cells(r1)[i] if i < len(r1) else None
+      v2 = rows_mod.cells(r2)[i] if i < len(r2) else None
+      if v1 != v2:
+        rep.add("L4", f"{k}{{col:{col}}}", group, v1, v2, where)
+        n += 1
+    for t in (t1, t2):
+      t.rows = [r[:i] + r[i + 1:] for r in t.rows]
+      t.cols = t.cols[:i] + t.cols[i + 1:]
+  return n
 
 
 def _fetch_full(tool: str, ua: dict[str, Any], rerun: Rerun,

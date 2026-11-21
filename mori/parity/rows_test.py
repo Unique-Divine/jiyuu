@@ -80,9 +80,7 @@ class ParseTest(unittest.TestCase):
                      ["p.web.client.Item", "Interface", "web/client.ts",
                       "1-3", "1", "0"])
     self.assertEqual(rows.cells(tables["results"].rows[1])[0], "@0+literal")
-    self.assertEqual(list(rest), [
-      "results_ref_rule: @N+suffix=prefix+suffix",
-      "results: 2", "total: 2"])
+    self.assertEqual(list(rest), ["results: 2", "total: 2"])
 
   def test_grouped_and_flat_forms_compare_equal(self) -> None:
     grouped = ('results: 3  (rows: name label lines in out; group prefix '
@@ -318,6 +316,26 @@ class GateTest(unittest.TestCase):
     b = RANKED.replace("total: 4", "total: 5")
     self.assertEqual(keys(diff("search_graph", {"query": "m"}, RANKED, b)),
                      [("search_graph:$.out{total}", "")])
+
+  def test_ref_rule_line_follows_the_rows(self) -> None:
+    a = ("rows_ref_rule: @N+suffix=prefix+suffix\n"
+         "rows: 1  (cols: f.name)\n  add\nreturned: 1\n")
+    b = "rows: 1  (cols: f.name)\n  add\nreturned: 1\n"
+    self.assertEqual(keys(diff("query_graph", {"query": "MATCH (f) "
+                                               "RETURN f.name"}, a, b)), [])
+
+  def test_volatile_column_is_compared_by_itself(self) -> None:
+    head = ("projects: 1  (cols: name root_path branch nodes edges "
+            "size_bytes)\n")
+    a = head + "  p /r - 10 20 4096\ntotal: 1\n"
+    got = keys(diff("list_projects", {"detail": "stats"}, a,
+                    a.replace("4096", "8192")))
+    self.assertEqual(got, [("list_projects:$.projects{col:size_bytes}", "")])
+    got = keys(diff("list_projects", {"detail": "stats"}, a,
+                    a.replace(" 20 ", " 21 ")))
+    self.assertEqual([k for k, _ in got], [
+      "list_projects:$.projects{only_in_a}",
+      "list_projects:$.projects{only_in_b}"])
 
   def test_other_tools_keep_row_order(self) -> None:
     a = "callers: 2  (cols: qn)\n  p.a 2\n  p.b 2\n"
