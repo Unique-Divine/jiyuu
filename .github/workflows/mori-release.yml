@@ -1,6 +1,6 @@
 # Mori release: builds the C binary codebase-memory-mcp for Linux x64 and
-# arm64 and publishes a DRAFT GitHub release for a mori/v* tag. See
-# mori/README.md "Release".
+# arm64 and macOS arm64, and publishes a DRAFT GitHub release for a mori/v*
+# tag. See mori/README.md "Release".
 #
 # - Tag push mori/vX.Y.Z: the tag must equal mori/VERSION. Builds, packages,
 #   attests and creates a draft release that is not marked latest.
@@ -80,12 +80,20 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - arch: x64
+          - target: linux-x64
+            goos: linux
             goarch: amd64
             runner: ubuntu-latest
-          - arch: arm64
+          - target: linux-arm64
+            goos: linux
             goarch: arm64
             runner: ubuntu-24.04-arm
+          # Apple silicon. Upstream built darwin on macos-15 too; the macOS
+          # 14.0 minimum comes from Makefile.cbm, not from this runner's SDK.
+          - target: darwin-arm64
+            goos: darwin
+            goarch: arm64
+            runner: macos-15
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     defaults:
@@ -101,10 +109,17 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.4.3
-      - name: Install build dependencies
+      - name: Name the selected binary
+        run: echo "BIN=$RUNNER_TEMP/selected/codebase-memory-mcp" >> "$GITHUB_ENV"
+      - name: Install build dependencies (Linux)
+        if: matrix.goos == 'linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y zlib1g-dev zstd
+      # The macOS SDK ships zlib; the image usually has zstd already.
+      - name: Install build dependencies (macOS)
+        if: matrix.goos == 'darwin'
+        run: command -v zstd || brew install zstd
       - name: Cache grammar archive
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -115,31 +130,63 @@ jobs:
       # STATIC=1 is upstream's portable Linux build (gcc -static on Ubuntu):
       # no shared-library dependencies, so one binary runs on any distro.
       # --version stamps CBM_VERSION, which `--version` prints.
-      - name: Build static binary
+      - name: Build static binary (Linux)
+        if: matrix.goos == 'linux'
         run: scripts/build.sh --version "$VERSION" CC=gcc CXX=g++ STATIC=1
-      - name: Strip and check static linking
+      # macOS has no static libc, so this build links libSystem, libz and
+      # libc++ from the OS, as upstream's darwin release did.
+      - name: Build binary (macOS)
+        if: matrix.goos == 'darwin'
+        run: scripts/build.sh --version "$VERSION" CC=cc CXX=c++
+      - name: Strip and check static linking (Linux)
+        if: matrix.goos == 'linux'
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/selected"
-          bin="$RUNNER_TEMP/selected/codebase-memory-mcp"
-          strip --strip-all -o "$bin" build/c/codebase-memory-mcp
-          file "$bin"
+          mkdir -p "$(dirname "$BIN")"
+          strip --strip-all -o "$BIN" build/c/codebase-memory-mcp
+          file "$BIN"
           # ldd exits 1 on a static binary, so read its message instead.
-          linkage="$(ldd "$bin" 2>&1 || true)"
+          linkage="$(ldd "$BIN" 2>&1 || true)"
           echo "$linkage"
           grep -Eq 'not a dynamic executable|statically linked' <<< "$linkage"
+      # Apple's strip rejects --strip-all, and stripping breaks the linker's
+      # ad-hoc signature, which arm64 macOS needs to run the binary at all.
+      # Re-sign ad hoc, as upstream did. There is no Developer ID signature
+      # and no notarization.
+      - name: Strip, sign ad hoc and check linking (macOS)
+        if: matrix.goos == 'darwin'
+        run: |
+          set -euo pipefail
+          mkdir -p "$(dirname "$BIN")"
+          cp build/c/codebase-memory-mcp "$BIN"
+          strip "$BIN"
+          codesign --sign - --force --timestamp=none "$BIN"
+          codesign --verify --strict --verbose=2 "$BIN"
+          file "$BIN"
+          archs="$(lipo -archs "$BIN")"
+          [ "$archs" = arm64 ]
+          otool -l "$BIN" | grep -A4 LC_BUILD_VERSION
+          load_cmds="$(otool -l "$BIN")"
+          printf '%s\n' "$load_cmds" | grep -E 'minos 14\.0$' >/dev/null
+          # Only libraries every Mac has: nothing from Homebrew or elsewhere.
+          libs="$(otool -L "$BIN" | tail -n +2 | awk '{print $1}')"
+          echo "$libs"
+          if grep -Ev '^(/usr/lib/|/System/Library/)' <<< "$libs"; then
+            echo "::error::links a library outside the OS"
+            exit 1
+          fi
       - name: Smoke-test version and a tiny index
         run: |
           set -euo pipefail
-          bin="$RUNNER_TEMP/selected/codebase-memory-mcp"
-          got="$("$bin" --version)"
+          got="$("$BIN" --version)"
           if [[ "$got" != "codebase-memory-mcp $VERSION" ]]; then
             echo "::error::--version printed '$got'"
             exit 1
           fi
           # The runtime dir must exist and stay short: it holds the CLI
-          # coordination socket.
-          scratch="$(mktemp -d)"
+          # coordination socket, and macOS caps socket paths at 104 bytes,
+          # which its default mktemp dir under /var/folders nearly fills.
+          scratch="$(mktemp -d /tmp/mori.XXXXXX)"
           repo="$scratch/repo"
           mkdir -p "$repo" "$scratch/home"
           mkdir -m 700 "$scratch/run"
@@ -150,37 +197,41 @@ jobs:
           export HOME="$scratch/home"
           export CBM_CACHE_DIR="$scratch/cache"
           export CBM_RUNTIME_DIR="$scratch/run"
-          "$bin" cli index_repository --repo-path "$repo" \
+          "$BIN" cli index_repository --repo-path "$repo" \
             | tee "$scratch/index.json"
           project="$(jq -r .project "$scratch/index.json")"
           test "$(jq -r .status "$scratch/index.json")" = indexed
-          "$bin" cli trace_path --project "$project" --function-name greet \
+          "$BIN" cli trace_path --project "$project" --function-name greet \
             --direction outbound | tee "$scratch/trace"
           grep -q '\.app\.helper 1$' "$scratch/trace"
       - name: Package archive
         id: package
         env:
-          ARCH: ${{ matrix.arch }}
+          TARGET: ${{ matrix.target }}
+          GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
         run: |
           set -euo pipefail
-          asset="$(bun scripts/release.ts asset-name "$VERSION" "$ARCH")"
-          bin="$RUNNER_TEMP/selected/codebase-memory-mcp"
-          sha="$(sha256sum "$bin" | cut -d' ' -f1)"
-          scripts/package-release.sh linux "$GOARCH" \
-            --selected-binary "$bin" --expected-sha256 "$sha" \
+          asset="$(bun scripts/release.ts asset-name "$VERSION" "$TARGET")"
+          sha="$(shasum -a 256 "$BIN" | cut -d' ' -f1)"
+          scripts/package-release.sh "$GOOS" "$GOARCH" \
+            --selected-binary "$BIN" --expected-sha256 "$sha" \
             --out-dir "$RUNNER_TEMP/dist" --archive-name "${asset%.tar.gz}"
           tar -tzvf "$RUNNER_TEMP/dist/$asset"
-          members="$(tar -tzf "$RUNNER_TEMP/dist/$asset" | sort | tr '\n' ' ')"
+          # C collation: macOS sort would otherwise put lowercase first.
+          members="$(tar -tzf "$RUNNER_TEMP/dist/$asset" | LC_ALL=C sort \
+            | tr '\n' ' ')"
           want='LICENSE NOTICE THIRD_PARTY_NOTICES.md codebase-memory-mcp '
           if [[ "$members" != "$want" ]]; then
             echo "::error::unexpected archive members: $members"
             exit 1
           fi
           echo "asset=$asset" >> "$GITHUB_OUTPUT"
+      # Only the .tar.gz ships. package-release.sh also writes an .mcpb
+      # bundle for darwin, which this upload leaves out.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: mori-linux-${{ matrix.arch }}
+          name: mori-build-${{ matrix.target }}
           path: ${{ runner.temp }}/dist/${{ steps.package.outputs.asset }}
           if-no-files-found: error
 
@@ -200,7 +251,7 @@ jobs:
           bun-version: 1.4.3
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          pattern: mori-linux-*
+          pattern: mori-build-*
           path: release-assets
           merge-multiple: true
       - name: Write checksums and metadata
