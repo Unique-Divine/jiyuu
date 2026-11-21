@@ -244,7 +244,7 @@ static void main_local_maintenance_finish(cbm_daemon_maintenance_monitor_t **mon
 static _Noreturn void main_coordination_cleanup_fail_stop(const char *component) {
     cbm_log_error("coordination.cleanup_timeout", "component", component, "action", "process_exit");
     (void)fprintf(stderr,
-                  "codebase-memory-mcp: coordination cleanup timed out (%s); "
+                  "mori: coordination cleanup timed out (%s); "
                   "terminating so the OS releases retained claims\n",
                   component ? component : "unknown");
     (void)fflush(stdout);
@@ -1141,25 +1141,25 @@ static int run_cli(int argc, char **argv, cbm_project_lock_manager_t *project_lo
 /* ── Help ───────────────────────────────────────────────────────── */
 
 static void print_help(void) {
-    printf("codebase-memory-mcp %s\n\n", CBM_VERSION);
+    printf("mori %s\n\n", CBM_VERSION);
     printf("Usage:\n");
-    printf("  codebase-memory-mcp              Run MCP server on stdio\n");
-    printf("  codebase-memory-mcp cli [--quiet] [--progress] [--verbose] [--json] <tool> "
+    printf("  mori              Run the mori-graph MCP server on stdio\n");
+    printf("  mori cli [--quiet] [--progress] [--verbose] [--json] <tool> "
            "[args]\n");
     printf("                                      Run one tool locally, then exit\n");
-    printf("  codebase-memory-mcp install [-y|-n] [--force] [--dry-run] "
-           "[--dir=<path>] [--skip-config] [--hooks|--no-hooks]\n");
-    printf("                                      [--clients=<tokens>]  Run "
-           "'install --clients' to list tokens\n");
-    printf("  codebase-memory-mcp uninstall [-y|-n] [--dry-run] [--delete-indexes]\n");
-    printf("  codebase-memory-mcp update [-y|-n]\n");
-    printf("  codebase-memory-mcp config <list|get|set|reset>\n");
-    printf("  codebase-memory-mcp daemon <start|stop|status>\n");
+    printf("  mori install [--dry-run]\n");
+    printf("                                      Register this binary as the mori-graph\n");
+    printf("                                      MCP server for Claude Code and Codex\n");
+    printf("  mori uninstall [-y|-n] [--dry-run] [--delete-indexes]\n");
+    printf("                                      Remove configs written by older installs\n");
+    printf("  mori update       Print the upgrade steps (mise and mori/v* releases)\n");
+    printf("  mori config <list|get|set|reset>\n");
+    printf("  mori daemon <start|stop|status>\n");
     printf("                                      start keeps a daemon warm: CLI calls skip\n");
     printf("                                      the per-command start-up, and hooks add\n");
     printf("                                      graph context only while a daemon runs\n");
-    printf("  codebase-memory-mcp --version    Print version\n");
-    printf("  codebase-memory-mcp --help       Print this help\n");
+    printf("  mori --version    Print version\n");
+    printf("  mori --help       Print this help\n");
     printf("\nCLI output options:\n");
     printf("  --quiet       Show errors only; disable automatic terminal progress\n");
     printf("  --progress    Show lifecycle progress even with redirected stderr\n");
@@ -1171,21 +1171,6 @@ static void print_help(void) {
     printf("  --ui=false   Disable HTTP graph visualization (persisted)\n");
     printf("  --port=N     Set UI port (default 9749, persisted)\n");
     printf("  --tool-profile=analysis|scout  Expose a restricted inspection surface\n");
-    printf("\nSupported automatic/conditional client surfaces (46):\n");
-    printf("  Claude Code, Codex CLI, Gemini CLI, Zed, OpenCode,\n");
-    printf("  Antigravity, Aider, KiloCode, VS Code, Cursor, Windsurf,\n");
-    printf("  Augment / Auggie, OpenClaw, Kiro, Junie, Hermes, OpenHands,\n");
-    printf("  Cline, Warp, Qwen Code, GitHub Copilot CLI, Factory Droid, Crush,\n");
-    printf("  Goose, Mistral Vibe, Grok Build, Qoder CLI, Kimi Code CLI, GitLab Duo CLI,\n");
-    printf("  Rovo Dev CLI, Amp, Devin CLI / Local, Tabnine, Continue / cn,\n");
-    printf("  Visual Studio, TRAE, Roo Code, Amazon Q Developer IDE,\n");
-    printf("  CodeBuddy Code CLI, IBM Bob IDE, IBM Bob Shell, Pochi, Pi,\n");
-    printf("  Sourcegraph Cody, Oh My Pi (omp), agentty\n");
-    printf("  Conditional/explicit targets are changed only when their documented\n");
-    printf("  platform, marker, or explicit existing config path is present.\n");
-    printf("  Manual/UI MCP boundaries: Qodo, Warp, JetBrains AI/ACP, Replit,\n");
-    printf("  Plandex, SWE-agent, BLACKBOX, GitHub cloud agents, Jules,\n");
-    printf("  CodeRabbit.\n");
     /* Rendered from the MCP tool registry: a hand-maintained copy here
      * omitted check_index_coverage (#1361) and could silently drift again. */
     char *tools_help = cbm_mcp_tools_help_list();
@@ -1250,11 +1235,10 @@ static int main_run_allow_root(int argc, char **argv) {
                    "always-refused roots (see docs/CONFIGURATION.md)\n");
         }
         if (!path && !list_only) {
-            (void)fprintf(stderr,
-                          "usage: codebase-memory-mcp allow-root [--approve-sensitive | "
-                          "--approve-broad] <path>\n"
-                          "       codebase-memory-mcp allow-root --approve-manifest <project>\n"
-                          "       codebase-memory-mcp allow-root --list\n");
+            (void)fprintf(stderr, "usage: mori allow-root [--approve-sensitive | "
+                                  "--approve-broad] <path>\n"
+                                  "       mori allow-root --approve-manifest <project>\n"
+                                  "       mori allow-root --list\n");
             return EXIT_FAILURE;
         }
         return 0;
@@ -1814,7 +1798,7 @@ static void main_report_client_failure(cbm_daemon_process_role_t role, const cha
                       escaped);
         (void)fflush(stdout);
     }
-    (void)fprintf(stderr, "codebase-memory-mcp: %s\n", detail);
+    (void)fprintf(stderr, "mori: %s\n", detail);
 }
 
 static void main_report_client_bootstrap_failure(cbm_daemon_process_role_t role,
@@ -1875,7 +1859,7 @@ static cbm_daemon_bootstrap_status_t main_client_bootstrap_with_upgrade(
     }
     if (report_lifecycle) {
         (void)fprintf(stderr,
-                      "codebase-memory-mcp: retiring the active permanent daemon (%s, pid %lu) "
+                      "mori: retiring the active permanent daemon (%s, pid %lu) "
                       "for this newer build (%s)\n",
                       active.semantic_version, (unsigned long)active.daemon_pid,
                       config->identity->semantic_version);
@@ -1885,8 +1869,8 @@ static cbm_daemon_bootstrap_status_t main_client_bootstrap_with_upgrade(
                                                         CBM_DAEMON_RUNTIME_ACTIVATION_UPDATE,
                                                         main_startup_timeout_ms(), &drain) ||
         !drain.accepted) {
-        (void)fprintf(stderr, "codebase-memory-mcp: the active daemon did not accept the "
-                              "upgrade drain; run `codebase-memory-mcp daemon stop`\n");
+        (void)fprintf(stderr, "mori: the active daemon did not accept the "
+                              "upgrade drain; run `mori daemon stop`\n");
         main_conflict_remedy_probe(config->endpoint, config->identity, &active, result->remedy,
                                    sizeof(result->remedy));
         return status;
@@ -1945,7 +1929,7 @@ static char *main_local_cli_daemon_execute(const char *tool_name, const char *ar
          * stderr line rather than a structured record whose value escaping
          * would turn `daemon start` into `daemon_start`. */
         (void)fprintf(stderr, "hint: this command started a temporary CBM daemon. "
-                              "`codebase-memory-mcp daemon start` keeps one warm and removes this "
+                              "`mori daemon start` keeps one warm and removes this "
                               "startup cost from every CLI command.\n");
     }
     char session_root[MAIN_PATH_CAP];
@@ -2039,9 +2023,9 @@ static void main_hook_report_absent_daemon(const char *hook_dialect) {
     if (!main_hook_absent_notice_due()) {
         return;
     }
-    (void)fprintf(stderr, "codebase-memory-mcp: no CBM daemon is running, so graph "
+    (void)fprintf(stderr, "mori: no CBM daemon is running, so graph "
                           "augmentation is skipped. Start an MCP session or run "
-                          "`codebase-memory-mcp daemon start` to enable it.\n");
+                          "`mori daemon start` to enable it.\n");
     const char *notice = cbm_hook_admission_notice(CBM_HOOK_ADMISSION_DAEMON_ABSENT, hook_dialect);
     if (notice) {
         (void)fputs(notice, stdout);
@@ -2602,7 +2586,7 @@ static int main_run_daemon_ctl(int argc, char **argv, const cbm_daemon_ipc_endpo
         }
     }
     if (!arguments_valid || !subcommand) {
-        (void)fprintf(stderr, "usage: codebase-memory-mcp daemon <start|stop|status> "
+        (void)fprintf(stderr, "usage: mori daemon <start|stop|status> "
                               "[--open] [--port=N]\n");
         return EXIT_FAILURE;
     }
@@ -2622,12 +2606,12 @@ static int main_run_daemon_ctl(int argc, char **argv, const cbm_daemon_ipc_endpo
                        (unsigned long long)status.muted_endpoint_holder_pid);
                 printf("hint: that process holds the daemon endpoint but answered nothing; "
                        "its runtime is likely dead. Terminate pid %llu, then run "
-                       "`codebase-memory-mcp daemon start`.\n",
+                       "`mori daemon start`.\n",
                        (unsigned long long)status.muted_endpoint_holder_pid);
                 return EXIT_FAILURE;
             }
             printf("daemon: not running\n");
-            printf("hint: `codebase-memory-mcp daemon start` keeps a daemon warm so CLI "
+            printf("hint: `mori daemon start` keeps a daemon warm so CLI "
                    "commands and hooks skip the per-command startup cost.\n");
             return EXIT_FAILURE;
         }
@@ -2744,7 +2728,7 @@ static int main_run_daemon_ctl(int argc, char **argv, const cbm_daemon_ipc_endpo
                                               : "the permanent daemon could not be started");
         if (start_status == CBM_DAEMON_BOOTSTRAP_CONFLICT) {
             (void)fprintf(stderr, "hint: a daemon of a different build is active; "
-                                  "`codebase-memory-mcp daemon stop` retires it.\n");
+                                  "`mori daemon stop` retires it.\n");
         }
         return EXIT_FAILURE;
     }
@@ -2810,7 +2794,7 @@ static int main_run_daemon_ctl(int argc, char **argv, const cbm_daemon_ipc_endpo
     } else {
         printf("daemon: started (permanent)\n");
     }
-    printf("It survives idle periods and session ends; `codebase-memory-mcp daemon stop` "
+    printf("It survives idle periods and session ends; `mori daemon stop` "
            "retires it.\n");
     if (CBM_EMBEDDED_FILE_COUNT > 0 && !ui_requested) {
         main_daemon_ctl_print_ui_configuration();
@@ -2865,7 +2849,7 @@ int main(int argc, char **argv) {
         cbm_log_set_crash_durable(true);
     }
     if (role == CBM_DAEMON_PROCESS_INVALID) {
-        (void)fprintf(stderr, "codebase-memory-mcp: invalid internal process arguments\n");
+        (void)fprintf(stderr, "mori: invalid internal process arguments\n");
         return EXIT_FAILURE;
     }
 #ifndef _WIN32
@@ -2880,7 +2864,7 @@ int main(int argc, char **argv) {
         configure_stateless) {
         const char *settings_cache = cbm_resolve_cache_dir();
         if (settings_cache && !cbm_runtime_settings_init(settings_cache)) {
-            (void)fprintf(stderr, "codebase-memory-mcp: could not load saved runtime settings\n");
+            (void)fprintf(stderr, "mori: could not load saved runtime settings\n");
             return EXIT_FAILURE;
         }
     }
@@ -2903,7 +2887,7 @@ int main(int argc, char **argv) {
     cbm_mcp_tool_profile_t tool_profile = CBM_MCP_TOOL_PROFILE_ALL;
     if (role == CBM_DAEMON_PROCESS_MCP_CLIENT &&
         cbm_mcp_parse_tool_profile_args(argc, (const char *const *)argv, &tool_profile) != 0) {
-        (void)fprintf(stderr, "codebase-memory-mcp: --tool-profile requires the supported value "
+        (void)fprintf(stderr, "mori: --tool-profile requires the supported value "
                               "'analysis' or 'scout'\n");
         return 2;
     }
@@ -3010,10 +2994,9 @@ int main(int argc, char **argv) {
              * right it granted — and the daemon-endpoint path a few hundred
              * lines below has printed it since #1582. This path did not. */
             const char *why = cbm_daemon_ipc_validation_detail();
-            (void)fprintf(
-                stderr,
-                "codebase-memory-mcp: secure CLI coordination could not be created (%s)%s%s\n",
-                coordination_failure, (why && why[0]) ? ": " : "", (why && why[0]) ? why : "");
+            (void)fprintf(stderr, "mori: secure CLI coordination could not be created (%s)%s%s\n",
+                          coordination_failure, (why && why[0]) ? ": " : "",
+                          (why && why[0]) ? why : "");
             goto local_cli_cleanup;
         }
         cbm_http_server_set_binary_path(local_executable);
@@ -3031,7 +3014,7 @@ int main(int argc, char **argv) {
                 main_conflict_remedy_probe(local_endpoint, &local_identity, NULL, remedy,
                                            sizeof(remedy));
             }
-            (void)fprintf(stderr, "codebase-memory-mcp: %s%s%s\n",
+            (void)fprintf(stderr, "mori: %s%s%s\n",
                           formatted ? message
                                     : "CLI exact-build admission could not be verified; retry "
                                       "after active CBM operations exit",
@@ -3044,8 +3027,7 @@ int main(int argc, char **argv) {
             cbm_daemon_maintenance_monitor_start(cohort_manager, main_local_command_cancel,
                                                  &maintenance_context, EXIT_FAILURE, "CLI command");
         if (!maintenance_monitor) {
-            (void)fprintf(stderr,
-                          "codebase-memory-mcp: CLI maintenance observer could not start safely\n");
+            (void)fprintf(stderr, "mori: CLI maintenance observer could not start safely\n");
             goto local_cli_cleanup;
         }
 
@@ -3059,14 +3041,14 @@ int main(int argc, char **argv) {
                  * that the OS has not reclaimed. "Busy" alone sent reporters
                  * hunting for a CBM session that had already exited. */
                 (void)fprintf(stderr,
-                              "codebase-memory-mcp: CLI startup coordination stayed busy for "
+                              "mori: CLI startup coordination stayed busy for "
                               "%d seconds. Either another CBM command is still running, or a "
                               "previous one was force-killed and the operating system has not "
                               "released its lock yet. Check for running CBM processes; if there "
                               "are none, retry shortly.\n",
                               MAIN_STARTUP_CONTENTION_CEILING_MS / 1000);
             } else {
-                (void)fprintf(stderr, "codebase-memory-mcp: CLI startup coordination could not "
+                (void)fprintf(stderr, "mori: CLI startup coordination could not "
                                       "be verified safely; retry after active CBM sessions "
                                       "exit\n");
             }
@@ -3077,7 +3059,7 @@ int main(int argc, char **argv) {
             if (seal_status == 0) {
                 (void)cbm_version_cohort_log_uncoordinated_daemon(&local_identity);
             }
-            (void)fprintf(stderr, "codebase-memory-mcp: CBM CLI could not start because a "
+            (void)fprintf(stderr, "mori: CBM CLI could not start because a "
                                   "pre-coordination or unverified CBM generation is active; close "
                                   "all CBM sessions and commands, then retry\n");
             goto local_cli_cleanup;
@@ -3090,19 +3072,19 @@ int main(int argc, char **argv) {
             daemon_presence != CBM_VERSION_COHORT_DAEMON_COORDINATED) {
             if (daemon_presence == CBM_VERSION_COHORT_DAEMON_UNCOORDINATED) {
                 (void)cbm_version_cohort_log_uncoordinated_daemon(&local_identity);
-                (void)fprintf(stderr, "codebase-memory-mcp: CBM CLI could not start because "
+                (void)fprintf(stderr, "mori: CBM CLI could not start because "
                                       "an active pre-coordination or unverified CBM daemon is "
                                       "running. Close all CBM sessions and commands, then "
                                       "retry.\n");
             } else {
-                (void)fprintf(stderr, "codebase-memory-mcp: active daemon coordination could "
+                (void)fprintf(stderr, "mori: active daemon coordination could "
                                       "not be verified safely; retry after active CBM sessions "
                                       "exit\n");
             }
             goto local_cli_cleanup;
         }
         if (!cbm_daemon_ipc_local_transition_begin_work(local_transition)) {
-            (void)fprintf(stderr, "codebase-memory-mcp: CLI startup coordination could not enter "
+            (void)fprintf(stderr, "mori: CLI startup coordination could not enter "
                                   "local work safely\n");
             goto local_cli_cleanup;
         }
@@ -3130,16 +3112,15 @@ int main(int argc, char **argv) {
     char executable_path[MAIN_PATH_CAP];
     cbm_daemon_build_identity_t identity;
     if (!main_resolve_executable(argv[0], executable_path)) {
-        (void)fprintf(stderr,
-                      "codebase-memory-mcp: exact executable identity could not be verified "
-                      "(executable-path)\n");
+        (void)fprintf(stderr, "mori: exact executable identity could not be verified "
+                              "(executable-path)\n");
         return role == CBM_DAEMON_PROCESS_HOOK_CLIENT ? EXIT_SUCCESS : EXIT_FAILURE;
     }
     main_build_identity_status_t identity_status = main_build_identity(&identity);
     if (identity_status != MAIN_BUILD_IDENTITY_OK) {
         const char *validation_detail = cbm_daemon_ipc_validation_detail();
         (void)fprintf(stderr,
-                      "codebase-memory-mcp: exact executable identity could not be verified "
+                      "mori: exact executable identity could not be verified "
                       "(%s)%s%s\n",
                       main_build_identity_status_name(identity_status),
                       validation_detail[0] ? " - " : "", validation_detail);
@@ -3366,7 +3347,7 @@ int main(int argc, char **argv) {
                 main_conflict_remedy_probe(endpoint, &identity, NULL, remedy, sizeof(remedy));
             }
         }
-        (void)fprintf(stderr, "codebase-memory-mcp: %s%s%s\n",
+        (void)fprintf(stderr, "mori: %s%s%s\n",
                       formatted ? message : "client exact-build admission failed",
                       remedy[0] ? " " : "", remedy);
         if (role == CBM_DAEMON_PROCESS_HOOK_CLIENT &&
@@ -3389,7 +3370,7 @@ int main(int argc, char **argv) {
                 char conflict_detail[CBM_DAEMON_CONFLICT_MESSAGE_SIZE];
                 if (cbm_daemon_conflict_format(&hook_connect.conflict, conflict_detail,
                                                sizeof(conflict_detail))) {
-                    (void)fprintf(stderr, "codebase-memory-mcp: %s\n", conflict_detail);
+                    (void)fprintf(stderr, "mori: %s\n", conflict_detail);
                 }
                 main_hook_report_conflicted_daemon(hook_dialect);
             } else {
@@ -3448,7 +3429,7 @@ int main(int argc, char **argv) {
                                    tool_profile, NULL, NULL, bootstrap_config.startup_timeout_ms)
                              : CBM_DAEMON_RUNTIME_APPLICATION_REJECTED;
         if (context_status != CBM_DAEMON_RUNTIME_APPLICATION_OK) {
-            (void)fprintf(stderr, "codebase-memory-mcp: daemon session context was rejected\n");
+            (void)fprintf(stderr, "mori: daemon session context was rejected\n");
             (void)cbm_daemon_runtime_client_close(g_daemon_client, MAIN_CLOSE_TIMEOUT_MS);
             g_daemon_client = NULL;
             cbm_daemon_ipc_endpoint_free(endpoint);
@@ -3472,7 +3453,7 @@ int main(int argc, char **argv) {
             cbm_daemon_application_client_set_ui_config(
                 g_daemon_client, mcp_ui_update_mask, mcp_ui_enabled, mcp_ui_port,
                 bootstrap_config.startup_timeout_ms) != CBM_DAEMON_RUNTIME_APPLICATION_OK) {
-            (void)fprintf(stderr, "codebase-memory-mcp: daemon UI configuration update failed\n");
+            (void)fprintf(stderr, "mori: daemon UI configuration update failed\n");
             (void)cbm_daemon_runtime_client_close(g_daemon_client, MAIN_CLOSE_TIMEOUT_MS);
             g_daemon_client = NULL;
             cbm_daemon_ipc_endpoint_free(endpoint);
@@ -3480,7 +3461,7 @@ int main(int argc, char **argv) {
             return EXIT_FAILURE;
         }
         if (explicitly_enabled && !(CBM_EMBEDDED_FILE_COUNT > 0)) {
-            (void)fprintf(stderr, "codebase-memory-mcp: --ui requested, but this binary was built "
+            (void)fprintf(stderr, "mori: --ui requested, but this binary was built "
                                   "without UI support; rebuild with `make -f Makefile.cbm "
                                   "cbm-with-ui`.\n");
         }
@@ -3489,7 +3470,7 @@ int main(int argc, char **argv) {
      * failure handling as POSIX (fail-closed — a client that cannot arm its
      * parent watchdog would linger as an orphan after the editor dies). */
     if (!client_start_parent_watchdog(process_initial_ppid)) {
-        (void)fprintf(stderr, "codebase-memory-mcp: parent-death watchdog could not start\n");
+        (void)fprintf(stderr, "mori: parent-death watchdog could not start\n");
         (void)cbm_daemon_runtime_client_close(g_daemon_client, MAIN_CLOSE_TIMEOUT_MS);
         g_daemon_client = NULL;
         cbm_daemon_ipc_endpoint_free(endpoint);
