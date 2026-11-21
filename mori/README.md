@@ -1234,6 +1234,13 @@ licenses). There is no installer; users install from the release assets as
 signing and Gatekeeper behavior are covered under
 [Download a Release](#download-a-release).
 
+On Linux x64, Linux arm64, and macOS arm64, the workflow also replays graph
+fixtures against the published C 0.13.1 binary. It checks the downloaded
+reference archive against a pinned SHA-256 digest and compares the
+candidate's Rust graph export with its SQL export. Intel macOS runs the
+same-commit CLI comparison and smoke tests. C 0.13.1 has no Intel macOS
+archive.
+
 The release job attests build provenance for the archives and
 `checksums.txt`, then creates a draft release with `checksums.txt` and
 `release-metadata.json`. Publish it by hand, keeping Jiyuu's latest release
