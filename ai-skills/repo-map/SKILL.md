@@ -91,8 +91,8 @@ frontend and API integrations. This uses the "sai-keeper" GraphQL interface.
 
 ### Personal, Blog, Boku Workspace
 - `~/boku`: **Personal knowledge base and project hub.** Monorepo for sandboxing, backups, and external brain. Use when working on epics, specs, Nibiru notes, focustime, or scripts that span nibiru, sai-perps, sai-web. Contains: `epics/`, `nibi/` (addr-book, cook), `free/` (todos, journal), `sde/`, `jiyuu/` (focustime, mdtoc), `scripts/`. Bun/TS + Go + Rust. Run `just test`, `just install`.
-- `~/ud-web`: **Personal site (Firebase Hosting).** Astro 4 + Tailwind. Blog
-  content in `src/content/post/` (schema in `src/content/config.ts`). Site config
+- `~/ud-web`: **Personal site (Firebase Hosting).** Astro 7 + Tailwind. Blog
+  content in `src/content/post/` (schema in `src/content.config.ts`). Site config
   `src/config.yaml`, nav `src/navigation.js`. Run `just dev`, build `just b`,
   deploy to Firebase Hosting with `just deploy`.
 
