@@ -3,28 +3,24 @@
 ## Install From a Release
 
 Mori ships as `mori/v*` releases of https://github.com/Unique-Divine/jiyuu.
-Each release has one archive per target, `mori-<version>-<target>.tar.gz`,
-for `linux-x64`, `linux-arm64`, `darwin-arm64`, and `darwin-x64`, plus a
-`checksums.txt` and build provenance attestations. Install with mise's
-`github:` backend, which picks the archive for the platform:
+The published C release `mori/v0.13.1` packages `codebase-memory-mcp`
+for Linux x64 and arm64 and macOS arm64. Install it with mise's `github:`
+backend.
 
 ```toml
 # ~/.config/mise/config.toml
 [tools]
-"github:Unique-Divine/jiyuu" = { version = "0.14.0", version_prefix = "mori/v" }
+"github:Unique-Divine/jiyuu" = { version = "0.13.1", version_prefix = "mori/v" }
 ```
 
 ```sh
-mise lock --platform linux-arm64,linux-x64,macos-arm64,macos-x64   # with lockfile = true
 mise install
-mori --version   # mori 0.14.0
+codebase-memory-mcp --version  # codebase-memory-mcp 0.13.1
 ```
 
-The archive holds one binary, `mori`, with the graph UI embedded; mise
-exposes it through its shim. `mori` replaces `codebase-memory-mcp` from
-0.14.0: 0.13.x releases shipped `codebase-memory-mcp-<version>-<target>.tar.gz`
-with a binary of that name. After upgrading from 0.13.x, update every MCP
-registration and hook that names the old binary or shim.
+For a published release with a `mori-<version>-<target>.tar.gz` archive,
+pin that version and use its `mori` executable. With `lockfile = true`,
+lock the platforms you use before installing.
 
 To upgrade, bump `version`, relock, install, then restart the background
 daemon, which keeps the old binary until it restarts:
@@ -59,10 +55,20 @@ list tools. Claude Code hooks that run `mori hook-augment` work through the
 same binary path; [Hooks and Tool Profiles](https://github.com/Unique-Divine/jiyuu/blob/main/mori/README.md#hooks-and-tool-profiles)
 in Mori's README lists the hook entries and the `--tool-profile` option.
 
-Don't run `mori install` or `mori update`: they rewrite this skill,
-register the server under the old key, and fetch a build without Mori's
-GraphQL linking. If a project blocks the mise shim, register the path from
-`mise which mori` and update it after upgrading.
+For 0.13.1, use the `codebase-memory-mcp` executable or shim in the
+registration commands. Its inherited installer and updater contact the
+upstream project's releases.
+
+When switching an existing `mori-graph` entry, change its command path
+and keep its arguments and environment. The `mori` shim stays the same
+across Mori upgrades. If the shim is unavailable, register the executable
+from `mise which mori` and update its path on upgrades. On rollback across
+the rename, restore the previous `codebase-memory-mcp` command and hook paths.
+
+In Claude Code, update the graph-tool `PostToolUse` matcher to
+`Read|mcp__.*(mori-graph|codebase-memory-mcp)__.*` with the Mori hook.
+Otherwise the legacy matcher misses `mori-graph` calls that reset the
+search reminder. Keep the original matcher for rollback.
 
 ## Build From Source
 

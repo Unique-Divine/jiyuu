@@ -109,9 +109,10 @@ clean result means no recorded gap, not a complete index.
 ## Install
 
 Mori ships as `mori/v*` releases of
-[Unique-Divine/jiyuu](https://github.com/Unique-Divine/jiyuu/releases). Each
-release has one archive per target, named `mori-<version>-<target>.tar.gz`,
-plus `checksums.txt` and build provenance attestations:
+[Unique-Divine/jiyuu](https://github.com/Unique-Divine/jiyuu/releases).
+Releases that package `mori` have archives named
+`mori-<version>-<target>.tar.gz`, plus `checksums.txt` and build provenance
+attestations.
 
 | Target | Platform |
 | --- | --- |
@@ -120,12 +121,10 @@ plus `checksums.txt` and build provenance attestations:
 | `darwin-arm64` | macOS on Apple silicon, macOS 14 or later |
 | `darwin-x64` | macOS on Intel, macOS 14 or later |
 
-An archive holds the `mori` binary, with the graph UI embedded, and
-`LICENSE`, `NOTICE`, and `THIRD_PARTY_NOTICES.md`. The first release of
-`mori` is 0.14.0. Releases 0.13.x named the binary `codebase-memory-mcp`,
-shipped `codebase-memory-mcp-<version>-<target>.tar.gz` for three targets,
-and had no UI; after upgrading from one, update every MCP registration and
-hook that names the old binary or shim.
+An archive holds the executable, licenses, and notices. The published C
+release `mori/v0.13.1` packages `codebase-memory-mcp` for Linux x64 and
+arm64 and macOS arm64. Use that executable in place of `mori` when
+following the commands below on 0.13.1. The MCP key stays `mori-graph`.
 
 There are no Windows builds.
 
@@ -136,16 +135,18 @@ mise's `github:` backend picks the archive for your platform:
 ```toml
 # ~/.config/mise/config.toml
 [tools."github:Unique-Divine/jiyuu"]
-version = "0.14.0"
+version = "0.13.1"
 version_prefix = "mori/v"
 ```
 
 ```sh
 mise install
-mori --version
+codebase-memory-mcp --version  # codebase-memory-mcp 0.13.1
 ```
 
-With `lockfile = true`, lock every platform you use before installing:
+For a published release with a `mori` archive, pin its version and run
+`mori --version`. With `lockfile = true`, lock the platforms you use before
+installing. For a release with all four targets:
 
 ```sh
 mise lock --platform linux-arm64,linux-x64,macos-arm64,macos-x64
@@ -165,15 +166,16 @@ Remove any hand-built binary earlier on `PATH` (for example in
 
 Download the archive for your target from the
 [releases page](https://github.com/Unique-Divine/jiyuu/releases), check it
-against `checksums.txt`, and put `mori` on your `PATH`:
+against `checksums.txt`, and put its executable on your `PATH`. For a
+release that packages `mori`, set `binary=mori` and use its published version.
 
 ```sh
-version=0.14.0 target=linux-x64
+version=0.13.1 target=linux-x64 binary=codebase-memory-mcp
 gh release download "mori/v$version" --repo Unique-Divine/jiyuu \
-  --pattern "mori-$version-$target.tar.gz" --pattern checksums.txt
+  --pattern "$binary-$version-$target.tar.gz" --pattern checksums.txt
 sha256sum --check --ignore-missing checksums.txt
-tar -xzf "mori-$version-$target.tar.gz" mori
-install -m 755 mori "$HOME/.local/bin/mori"
+tar -xzf "$binary-$version-$target.tar.gz" "$binary"
+install -m 755 "$binary" "$HOME/.local/bin/$binary"
 ```
 
 On macOS, use `shasum -a 256 --check --ignore-missing checksums.txt`.
@@ -182,7 +184,7 @@ To check that GitHub Actions in Jiyuu built an archive, verify its
 attestation:
 
 ```sh
-gh attestation verify "mori-$version-$target.tar.gz" --repo Unique-Divine/jiyuu
+gh attestation verify "$binary-$version-$target.tar.gz" --repo Unique-Divine/jiyuu
 ```
 
 The macOS binaries have an ad-hoc signature, not a Developer ID signature,
@@ -193,17 +195,12 @@ binary because Apple can't verify it. Remove the quarantine attribute after
 unpacking:
 
 ```sh
-xattr -d com.apple.quarantine mori
+xattr -d com.apple.quarantine "$binary"
 ```
 
-### Skip `mori install` and `mori update`
-
-The binary still carries the installer commands it was imported with.
-`mori install` writes agent configuration under the old server name, and
-`mori install` and `mori update` fetch builds from the original project,
-which lack Mori's GraphQL linking. Install and upgrade through the releases
-above instead. If the daemon shows an update notice that points elsewhere,
-ignore it.
+Use mise or a release archive for binary installation and upgrades.
+The 0.13.1 executable also has inherited installer and updater commands
+that contact the upstream project's releases.
 
 ## Register the MCP Server
 
@@ -216,8 +213,16 @@ claude mcp add --scope user mori-graph -- ~/.local/share/mise/shims/mori
 codex mcp add mori-graph -- ~/.local/share/mise/shims/mori
 ```
 
-If a client or project can't use the shim, register the path from
-`mise which mori` instead, and update it after each upgrade.
+The examples use the `mori` shim. On 0.13.1, use the
+`codebase-memory-mcp` shim. If the client cannot use a shim, register the
+path from `mise which` for that executable and update it after each upgrade.
+
+To switch an existing `mori-graph` registration, update its command in
+the client config and keep its arguments and environment. The `mori`
+shim path stays the same across Mori upgrades. To roll back across the
+rename, restore the previous `codebase-memory-mcp` command and hook paths.
+If `mori install --help` lists the new registration behavior, it can add
+a fresh Claude Code or Codex entry using the running binary's absolute path.
 
 For clients configured through JSON, such as `~/.claude.json` or a project
 `.mcp.json`:
@@ -263,7 +268,7 @@ binary path you registered:
        "hooks": [{"type": "command", "command": "/home/you/.local/share/mise/shims/mori hook-augment", "timeout": 5}]}
     ],
     "PostToolUse": [
-      {"matcher": "Read",
+      {"matcher": "Read|mcp__.*(mori-graph|codebase-memory-mcp)__.*",
        "hooks": [{"type": "command", "command": "/home/you/.local/share/mise/shims/mori hook-augment", "timeout": 5}]}
     ],
     "SessionStart": [
@@ -278,12 +283,11 @@ binary path you registered:
 }
 ```
 
-These are the events, matchers, and 5-second timeout that the imported
-installer writes for Claude Code. The installer also matches graph tool calls
-in `PostToolUse` so that a graph call resets the reminder it adds after
-repeated searches, but the hook recognizes graph tools only under the old
-server key, so that reminder doesn't reset for `mori-graph`. The context
-text still names the binary `codebase-memory-mcp`.
+When migrating an existing Claude Code setup, update the hook executable
+path and the legacy graph-tool `PostToolUse` matcher. With a Mori build
+that recognizes both keys, the matcher above lets a graph call reset
+the reminder after repeated searches. Keep the original matcher for a
+rollback to the legacy executable.
 
 `--tool-profile` limits the tools a server exposes, for subagents that
 should only read the graph. Register a second key with the profile:

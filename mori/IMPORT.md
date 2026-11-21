@@ -40,9 +40,9 @@ file says was made because the path was missing.
 - Upstream `README.md` is replaced by Mori's `README.md`, which folds in its
   usage content and images. See
   [Upstream Project Documents](#upstream-project-documents).
-- `tests/test_cli.c` checks the supported-agent list against `src/main.c`
-  only. Its checks of upstream `README.md`, `docs/index.html`, `docs/llms.txt`
-  and `pkg/npm/README.md` are dropped.
+- `tests/test_cli.c` covers registration for Claude Code and Codex, and
+  retains tests for legacy client cleanup. The old installer's supported-
+  agent assertions against upstream documents and CLI help are removed.
 - `tests/test_language_count_contract.sh` checks one surface, Mori's
   `README.md`, instead of two (upstream `README.md` and the Chocolatey nuspec
   under `pkg/`).
