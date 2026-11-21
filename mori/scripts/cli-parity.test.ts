@@ -113,6 +113,8 @@ describe("invocations", () => {
     ])
     expect(projectName(repo)).toBe("tmp-mori-bin-x-repo")
     expect(JSON.parse(hookPayload(repo)).cwd).toBe(repo)
+    const hook = invocations(repo, "p").find((i) => i.name === "hook-augment")
+    expect(hook?.env).toEqual({ CBM_HOOK_DEADLINE_MS: "10000" })
   })
 
   test("side environment holds only PATH and scratch dirs", () => {

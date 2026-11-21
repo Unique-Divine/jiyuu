@@ -26,6 +26,8 @@ export interface Invocation {
   name: string
   args: string[]
   stdin?: string
+  // Extra environment for this invocation only.
+  env?: Record<string, string>
   // MCP stdio session: `args` start the server; `mcp` holds the requests.
   mcp?: McpRequest[]
 }
@@ -178,10 +180,14 @@ export function invocations(repo: string, project: string): Invocation[] {
     q("trace_path", "--function-name", "helper", "--direction", "inbound"),
     q("trace_path", "--function-name", "Twice", "--direction", "outbound"),
     q("get_architecture"),
+    // The hook stops at a wall-clock deadline (2 s by default) and prints
+    // only a timeout notice; a slow cold start on one side then reads as a
+    // difference. The maximum deadline keeps the output deterministic.
     {
       name: "hook-augment",
       args: ["hook-augment"],
       stdin: hookPayload(repo),
+      env: { CBM_HOOK_DEADLINE_MS: "10000" },
     },
     { name: "mcp stdio initialize + tools/list", args: [], mcp: MCP_REQUESTS },
   ]
@@ -318,7 +324,8 @@ export async function runParity(opts: ParityOptions): Promise<Comparison[]> {
     for (const inv of invocations(repo, projectName(repo))) {
       const outs: string[] = []
       for (const side of sides) {
-        const raw = await runOne(side, inv, repo, sideEnv(side, path))
+        const env = { ...sideEnv(side, path), ...inv.env }
+        const raw = await runOne(side, inv, repo, env)
         outs.push(
           normalize(formatResult(raw), {
             bin: side.bin,
