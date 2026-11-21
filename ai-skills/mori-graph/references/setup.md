@@ -3,35 +3,35 @@
 ## Install From a Release
 
 Mori ships as `mori/v*` releases of https://github.com/Unique-Divine/jiyuu.
-The published C release `mori/v0.13.1` packages `codebase-memory-mcp`
-for Linux x64 and arm64 and macOS arm64. **On 0.13.1, substitute
-`codebase-memory-mcp` for the executable name `mori` throughout this page.**
-This applies to executable paths, daemon commands, MCP registration, hooks,
-indexing, and cross-repo linking. Keep the MCP server key `mori-graph`.
-
-Install 0.13.1 with mise's `github:` backend.
+Install Mori 0.14.0 with mise's `github:` backend. Keep the MCP server key
+`mori-graph`.
 
 ```toml
 # ~/.config/mise/config.toml
 [tools]
-"github:Unique-Divine/jiyuu" = { version = "0.13.1", version_prefix = "mori/v" }
+"github:Unique-Divine/jiyuu" = { version = "0.14.0", version_prefix = "mori/v" }
 ```
 
 ```sh
 mise install
-codebase-memory-mcp --version  # codebase-memory-mcp 0.13.1
+mori --version  # mori 0.14.0
 ```
 
 For a published release with a `mori-<version>-<target>.tar.gz` archive,
 pin that version and use its `mori` executable. With `lockfile = true`,
 lock the platforms you use before installing.
 
-To upgrade, bump `version`, relock, install, then restart the background
-daemon, which keeps the old binary until it restarts:
+To upgrade, stop the daemon with its current executable and its runtime
+environment, then bump `version`, relock, and install. The next client
+session starts the daemon for the selected version:
 
 ```sh
 mori daemon stop
 ```
+
+When upgrading from C 0.13.1, stop its daemon with `codebase-memory-mcp`.
+Keep its mise pin and paths for rollback. After installing 0.14.0, update
+the MCP command and hooks as described below.
 
 Remove any hand-built `mori` or `codebase-memory-mcp` earlier on `PATH`
 (for example in `~/.local/bin`), or it keeps shadowing the release.
