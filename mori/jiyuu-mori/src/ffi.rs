@@ -13,11 +13,18 @@ use crate::tools;
 
 type ReadOverride = unsafe extern "C" fn(
     tool: *const c_char,
-    args: *const c_char,
+    options: *const c_void,
     store: *mut c_void,
     project: *const c_char,
 ) -> *mut c_char;
 type ReleasePayload = unsafe extern "C" fn(payload: *mut c_char);
+
+#[repr(C)]
+struct GraphSchemaOptions {
+    limit: c_int,
+    offset: c_int,
+    include_properties: bool,
+}
 
 #[repr(C)]
 struct OutlineRow {
@@ -154,11 +161,15 @@ unsafe extern "C" fn read_file_outline(
 
 unsafe extern "C" fn read_override(
     tool: *const c_char,
-    args: *const c_char,
+    options: *const c_void,
     store: *mut c_void,
     project: *const c_char,
 ) -> *mut c_char {
-    if tool.is_null() || args.is_null() || store.is_null() || project.is_null() {
+    if tool.is_null()
+        || options.is_null()
+        || store.is_null()
+        || project.is_null()
+    {
         return ptr::null_mut();
     }
     let result = panic::catch_unwind(|| {
@@ -168,9 +179,9 @@ unsafe extern "C" fn read_override(
         if tool.to_bytes() != b"get_graph_schema" {
             return None;
         }
-        let args =
-            serde_json::from_slice(unsafe { CStr::from_ptr(args) }.to_bytes())
-                .ok()?;
+        // SAFETY: the C dispatcher attaches normalized schema settings to
+        // this tool name and keeps them live until the callback returns.
+        let options = unsafe { &*options.cast::<GraphSchemaOptions>() };
         let project_name = unsafe { CStr::from_ptr(project) }.to_str().ok()?;
         let adr_present =
             match unsafe { cbm_mcp_project_adr_presence(store, project) } {
@@ -186,8 +197,14 @@ unsafe extern "C" fn read_override(
         // connection open, and Rust finalizes its own statements on return.
         let store =
             Store::from_connection(unsafe { Connection::from_handle(db) }.ok()?);
-        let payload =
-            tools::graph_schema(&store, project_name, &args, adr_present)?;
+        let payload = tools::graph_schema(
+            &store,
+            project_name,
+            options.limit as usize,
+            options.offset as usize,
+            options.include_properties,
+            adr_present,
+        )?;
         CString::new(payload).ok()
     });
     result

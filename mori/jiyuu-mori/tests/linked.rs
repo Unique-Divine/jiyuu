@@ -208,6 +208,16 @@ fn index_through_worker_reexec_matches_c() {
         );
         let counts = (json_number(&text, "nodes"), json_number(&text, "edges"));
         assert!(counts.0.is_some_and(|n| n > 0), "{side}: {text}");
+        // Raw CLI JSON reaches the daemon as bytes. Building these requests
+        // as serde values would normalize negative zero and duplicate keys.
+        let schema_negative_zero =
+            format!(r#"{{"project":"{project}","limit":-0,"format":"json"}}"#);
+        let schema_duplicate = format!(
+            r#"{{"project":"{project}","limit":1,"limit":3,"format":"json"}}"#
+        );
+        let schema_nul = format!(
+            r#"{{"project":"{project}","diagnostics":"full\u0000suffix","format":"json"}}"#
+        );
         let outline_page = serde_json::json!({
             "project": project, "file_path": "./py//app.py", "labels": ["Function"],
             "limit": 1, "offset": 1, "format": "json"
@@ -249,6 +259,9 @@ fn index_through_worker_reexec_matches_c() {
                 "inbound",
             ],
             vec!["cli", "get_graph_schema", "--project", &project],
+            vec!["cli", "--quiet", "get_graph_schema", &schema_negative_zero],
+            vec!["cli", "--quiet", "get_graph_schema", &schema_duplicate],
+            vec!["cli", "--quiet", "get_graph_schema", &schema_nul],
             vec![
                 "cli",
                 "get_graph_schema",

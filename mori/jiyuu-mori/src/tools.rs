@@ -1,7 +1,6 @@
 //! Read tools implemented against the existing graph database.
 
 use serde::Serialize;
-use serde_json::Value;
 
 use crate::store::{SchemaGroup, Store};
 
@@ -42,23 +41,14 @@ struct GraphSchema {
     adr_hint: Option<&'static str>,
 }
 
-fn int_arg(args: &Value, key: &str, default: i32) -> i32 {
-    args[key]
-        .as_i64()
-        .and_then(|value| i32::try_from(value).ok())
-        .unwrap_or(default)
-}
-
 pub(crate) fn graph_schema(
     store: &Store,
     project: &str,
-    args: &Value,
+    limit: usize,
+    offset: usize,
+    include_properties: bool,
     adr_present: Option<bool>,
 ) -> Option<String> {
-    let include_properties = args["diagnostics"] == "full";
-    let limit = int_arg(args, "limit", 50).clamp(1, 500) as usize;
-    let offset = int_arg(args, "offset", 0).max(0) as usize;
-
     let labels = store.schema_counts(project, SchemaGroup::NodeLabel).ok()?;
     let types = store.schema_counts(project, SchemaGroup::EdgeType).ok()?;
     let total = labels.len() + types.len();

@@ -1875,12 +1875,12 @@ void cbm_mcp_set_read_override(cbm_mcp_read_override_fn handle,
     read_override_free = release;
 }
 
-static char *try_read_override(const char *tool, const char *args, cbm_store_t *store,
-                               const char *project) {
+static char *try_read_override(const char *tool, const char *args, const void *options,
+                               cbm_store_t *store, const char *project) {
     if (!read_override) {
         return NULL;
     }
-    char *payload = read_override(tool, args, store, project);
+    char *payload = read_override(tool, options, store, project);
     if (!payload) {
         return NULL;
     }
@@ -3911,22 +3911,9 @@ static char *handle_get_graph_schema(cbm_mcp_server_t *srv, const char *args) {
         return not_indexed;
     }
 
-    char *overridden = try_read_override("get_graph_schema", args, store, project);
-    if (overridden) {
-        free(project);
-        return overridden;
-    }
-
     char *diagnostics = cbm_mcp_get_string_arg(args, "diagnostics");
     bool include_properties = diagnostics && strcmp(diagnostics, "full") == 0;
     free(diagnostics);
-
-    cbm_schema_info_t schema = {0};
-    if (include_properties) {
-        cbm_store_get_schema(store, project, &schema);
-    } else {
-        cbm_store_get_schema_counts(store, project, &schema);
-    }
 
     int limit = cbm_mcp_get_int_arg(args, "limit", 50);
     int offset = cbm_mcp_get_int_arg(args, "offset", 0);
@@ -3938,6 +3925,22 @@ static char *handle_get_graph_schema(cbm_mcp_server_t *srv, const char *args) {
     if (offset < 0) {
         offset = 0;
     }
+
+    cbm_mcp_graph_schema_options_t options = {.limit = limit, .offset = offset,
+                                             .include_properties = include_properties};
+    char *overridden = try_read_override("get_graph_schema", args, &options, store, project);
+    if (overridden) {
+        free(project);
+        return overridden;
+    }
+
+    cbm_schema_info_t schema = {0};
+    if (include_properties) {
+        cbm_store_get_schema(store, project, &schema);
+    } else {
+        cbm_store_get_schema_counts(store, project, &schema);
+    }
+
     int total = schema.node_label_count + schema.edge_type_count;
     size_t record_capacity = total > 0 ? (size_t)total : 1U;
     mcp_schema_record_t *records = calloc(record_capacity, sizeof(*records));
