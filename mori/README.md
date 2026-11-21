@@ -1187,12 +1187,12 @@ Twelve upstream contract checks that test DeusData's release machinery are
 removed; [IMPORT.md](IMPORT.md#excluded-contract-checks) lists them with
 their restore commands.
 
-Set `MORI_IMPL_GRAPHQL=rust` before starting the linked `mori` process to
-test Rust's planning and writing for GraphQL server Routes and their
-`HANDLES` edges. Set `MORI_IMPL_GRAPHQL=c` to use the C reference. If you
-leave the variable unset, the linked binary uses the Rust schema-glob matcher
-and the C planner and writer. Give each side its own cache and runtime
-directories when comparing them.
+The `mori` executable uses Rust for gqlgen schema glob matching, server
+Route and `HANDLES` planning and writes, and GraphQL cross-repo link
+selection and writes. Run `just test-graphql-rust` to exercise the same
+callbacks through the native fixtures. For release comparisons, use the
+published C 0.13.1 executable as the reference and give each binary its own
+cache and runtime directories. See [GraphQL parity](parity/README.md).
 
 ## Release
 
