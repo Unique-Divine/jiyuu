@@ -1,10 +1,13 @@
 //! Compare a Rust walk to C discovery without entering the indexer.
 
+use std::collections::HashSet;
 use std::ffi::{CStr, CString, OsStr, c_char, c_int, c_void};
+use std::fmt;
 use std::fs;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::ptr::{NonNull, null, null_mut};
 use std::time::Instant;
 
@@ -78,6 +81,7 @@ unsafe extern "C" {
     fn cbm_matches_fast_pattern(name: *const c_char, mode: Mode) -> bool;
     fn cbm_language_for_file(name: *const c_char, path: *const c_char) -> c_int;
     fn cbm_language_name(language: c_int) -> *const c_char;
+    fn cbm_workspace_cache_dir() -> *const c_char;
 }
 
 fn c_path(path: &Path) -> CString {
@@ -183,8 +187,14 @@ impl Drop for NativeWalk {
 
 // Keep raw Unix path bytes so the comparison cannot alias different names
 // that happen to have the same lossy UTF-8 rendering.
-#[derive(Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Eq, Ord, PartialEq, PartialOrd)]
 struct RelativePath(Vec<u8>);
+
+impl fmt::Debug for RelativePath {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        OsStr::from_bytes(&self.0).fmt(formatter)
+    }
+}
 
 impl From<Vec<u8>> for RelativePath {
     fn from(bytes: Vec<u8>) -> Self {
@@ -262,22 +272,111 @@ struct IgnoreAt {
     matcher: Ignore,
 }
 
+#[derive(Default)]
+struct Tracked {
+    files: HashSet<PathBuf>,
+    dirs: HashSet<PathBuf>,
+}
+
+impl Tracked {
+    fn load(root: &Path) -> Self {
+        let Some(bytes) =
+            git(root, &["-c", "core.fsmonitor=false", "ls-files", "-z"])
+        else {
+            return Self::default();
+        };
+        let mut tracked = Self::default();
+        for raw in bytes
+            .split(|&byte| byte == 0)
+            .filter(|path| !path.is_empty())
+        {
+            let path = Path::new(OsStr::from_bytes(raw));
+            tracked.files.insert(path.to_owned());
+            for parent in path
+                .ancestors()
+                .skip(1)
+                .take_while(|path| !path.as_os_str().is_empty())
+            {
+                tracked.dirs.insert(parent.to_owned());
+            }
+        }
+        tracked
+    }
+}
+
+fn git(root: &Path, args: &[&str]) -> Option<Vec<u8>> {
+    let mut command = Command::new("git");
+    // Keep an inherited Git command's repository and index out of this walk.
+    for var in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_COMMON_DIR",
+        "GIT_PREFIX",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    ] {
+        command.env_remove(var);
+    }
+    let out = command.current_dir(root).args(args).output().ok()?;
+    out.status.success().then_some(out.stdout)
+}
+
+fn git_common_dir(root: &Path) -> Option<PathBuf> {
+    if !root.join(".git").exists() {
+        return None;
+    }
+    let mut raw = git(
+        root,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )?;
+    if raw.pop() != Some(b'\n') {
+        return None;
+    }
+    Some(PathBuf::from(OsStr::from_bytes(&raw)))
+}
+
+enum Directory {
+    Keep,
+    Skip,
+    GitIgnored,
+}
+
 struct Walk {
     mode: Mode,
     size_cap: u64,
     cbmignore: Option<Ignore>,
+    info_exclude: Option<PathBuf>,
+    tracked: Tracked,
+    cache: Option<PathBuf>,
     snapshot: Snapshot,
 }
 
 impl Walk {
     fn run(root: &Path, mode: Mode, size_cap: u64) -> io::Result<Snapshot> {
+        let common = git_common_dir(root);
+        // SAFETY: the getter returns null or a live NUL-terminated path.
+        // Copy before another native call can modify its backing buffer.
+        let cache =
+            unsafe { cbm_workspace_cache_dir().as_ref().map(|ptr| c_text(ptr)) }
+                .filter(|path| !path.is_empty())
+                .map(|path| PathBuf::from(OsStr::from_bytes(&path)));
         let mut walk = Self {
             mode,
             size_cap,
             cbmignore: Ignore::load(&root.join(".cbmignore")),
+            info_exclude: common
+                .as_ref()
+                .map(|common| common.join("info/exclude")),
+            tracked: if common.is_some() {
+                Tracked::load(root)
+            } else {
+                Tracked::default()
+            },
+            cache,
             snapshot: Snapshot::default(),
         };
-        walk.directory(root, Path::new(""), &mut Vec::new())?;
+        walk.directory(root, Path::new(""), false, &mut Vec::new())?;
         Ok(walk.snapshot)
     }
 
@@ -289,11 +388,18 @@ impl Walk {
     ) -> io::Result<()> {
         let entries = fs::read_dir(path)?;
         let old_len = stack.len();
-        if let Some(matcher) = Ignore::load(&path.join(".gitignore")) {
-            stack.push(IgnoreAt {
-                base: rel.to_owned(),
-                matcher,
-            });
+        let gitignore = path.join(".gitignore");
+        let info_exclude = self
+            .info_exclude
+            .as_deref()
+            .filter(|_| rel.as_os_str().is_empty());
+        for source in Some(gitignore.as_path()).into_iter().chain(info_exclude) {
+            if let Some(matcher) = Ignore::load(source) {
+                stack.push(IgnoreAt {
+                    base: rel.to_owned(),
+                    matcher,
+                });
+            }
         }
 
         for entry in entries {
@@ -375,7 +481,9 @@ impl Walk {
             }
         };
         let ignore_reason = native_reason.or_else(|| {
-            if git_ignored(rel, false, stack) {
+            if !self.tracked.files.contains(rel)
+                && (under_gitignore || git_ignored(rel, false, stack))
+            {
                 Some("gitignore")
             } else if self.cbm_verdict(rel, false) > 0 {
                 Some("cbmignore")
@@ -387,10 +495,10 @@ impl Walk {
         });
         if let Some(reason) = ignore_reason {
             self.snapshot.ignore(rel, reason);
-            return;
+            return Ok(());
         }
 
-        let path = c_path(path);
+        let path = c_path(&entry.path());
         // SAFETY: the classifier reads both live strings and returns a
         // CBMLanguage value. cbm_language_name serves a static string.
         let (language, known) = unsafe {
@@ -406,6 +514,7 @@ impl Walk {
                 size,
             });
         }
+        Ok(())
     }
 }
 
@@ -425,7 +534,7 @@ struct Scratch(PathBuf);
 
 impl Scratch {
     fn new() -> Self {
-        let out = std::process::Command::new("mktemp")
+        let out = Command::new("mktemp")
             .arg("-d")
             .arg(std::env::temp_dir().join("mori-discovery-XXXXXXXX"))
             .output()
@@ -502,6 +611,66 @@ fn matches_c_filters_in_all_modes() {
 }
 
 #[test]
+fn matches_c_tracked_paths_and_info_exclude() {
+    let scratch = Scratch::new();
+    assert!(git(&scratch.0, &["init", "-q"]).is_some());
+    scratch.write(".git/info/exclude", "/cache/\n!keep.rs\n");
+    scratch.write(".gitignore", "/generated/\nkeep.rs\n");
+    scratch.write(".cbmignore", "generated/hide.rs\n");
+    for path in [
+        "generated/keep.rs",
+        "generated/hide.rs",
+        "generated/untracked.rs",
+        "generated/nested/untracked.rs",
+        "cache/ignored.rs",
+        "keep.rs",
+    ] {
+        scratch.write(path, "fn sample() {}\n");
+    }
+    assert!(
+        git(
+            &scratch.0,
+            &["add", "-f", "generated/keep.rs", "generated/hide.rs"]
+        )
+        .is_some()
+    );
+
+    let mut native = NativeWalk::run(&scratch.0, Mode::Full, 0).snapshot();
+    let mut rust = Walk::run(&scratch.0, Mode::Full, 0).unwrap();
+    native.sort();
+    rust.sort();
+    assert_eq!(
+        rust.files
+            .iter()
+            .map(|file| file.path.0.as_slice())
+            .collect::<Vec<_>>(),
+        [b"generated/keep.rs".as_slice(), b"keep.rs".as_slice()]
+    );
+    assert_eq!(native, rust);
+}
+
+#[test]
+fn identifies_sphinx_suffix_gap() {
+    let scratch = Scratch::new();
+    scratch.write(
+        "docs/conf.py",
+        "source_suffix = {'.customdoc': 'restructuredtext'}\n",
+    );
+    scratch.write("docs/overview.customdoc", "Example\n=======\n");
+
+    let native = NativeWalk::run(&scratch.0, Mode::Full, 0).snapshot();
+    let rust = Walk::run(&scratch.0, Mode::Full, 0).unwrap();
+    let has_overview = |snapshot: &Snapshot| {
+        snapshot
+            .files
+            .iter()
+            .any(|file| file.path.0 == b"docs/overview.customdoc")
+    };
+    assert!(has_overview(&native));
+    assert!(!has_overview(&rust));
+}
+
+#[test]
 #[ignore = "requires MORI_DISCOVERY_ROOT"]
 fn corpus() {
     let root = PathBuf::from(
@@ -573,18 +742,29 @@ fn corpus() {
     }
 }
 
-fn report_diff<T: Ord>(label: &str, native: &[T], rust: &[T]) {
-    let only_native = native
-        .iter()
-        .filter(|item| rust.binary_search(item).is_err())
-        .count();
-    let only_rust = rust
-        .iter()
-        .filter(|item| native.binary_search(item).is_err())
-        .count();
+fn report_diff<T: fmt::Debug + Ord>(label: &str, native: &[T], rust: &[T]) {
+    let only_native = || {
+        native
+            .iter()
+            .filter(|item| rust.binary_search(item).is_err())
+    };
+    let only_rust = || {
+        rust.iter()
+            .filter(|item| native.binary_search(item).is_err())
+    };
     eprintln!(
-        "{label}: c={} rust={} only_c={only_native} only_rust={only_rust}",
+        "{label}: c={} rust={} only_c={} only_rust={}",
         native.len(),
-        rust.len()
+        rust.len(),
+        only_native().count(),
+        only_rust().count()
     );
+    if std::env::var_os("MORI_DISCOVERY_SHOW_DIFF").is_some() {
+        for item in only_native().take(10) {
+            eprintln!("  only C: {item:?}");
+        }
+        for item in only_rust().take(10) {
+            eprintln!("  only Rust: {item:?}");
+        }
+    }
 }
