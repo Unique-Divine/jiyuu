@@ -286,6 +286,36 @@ fn run_stdio(bin: &Path, side: &str, args: &[&str], input: &str) -> String {
 }
 
 #[test]
+fn mcp_method_dispatch_matches_c() {
+    let input = concat!(
+        "{\"jsonrpc\":\"2.0\",\"id\":\"ping\",\"method\":\"ping\"}\n",
+        "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":\"resources\",\"method\":\"resources/list\"}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":\"templates\",\"method\":\"resources/templates/list\"}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":\"discover\",\"method\":\"server/discover\"}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":\"unknown\",\"method\":\"ping/extra\"}\n",
+    );
+    let reference = run_stdio(&c_binary(), "c", &[], input);
+    let linked = run_stdio(Path::new(MORI), "rs", &[], input);
+    assert_eq!(linked, reference);
+    let replies: Vec<serde_json::Value> = linked
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("parse response"))
+        .collect();
+    assert_eq!(replies.len(), 5, "{linked}");
+    assert_eq!(replies[0]["result"], serde_json::json!({}));
+    assert_eq!(replies[1]["result"]["resources"], serde_json::json!([]));
+    assert_eq!(
+        replies[2]["result"]["resourceTemplates"],
+        serde_json::json!([])
+    );
+    for (reply, id) in replies[3..].iter().zip(["discover", "unknown"]) {
+        assert_eq!(reply["id"], id);
+        assert_eq!(reply["error"]["code"], -32601);
+    }
+}
+
+#[test]
 fn stdio_mixed_framing_matches_c_after_input_eof() {
     let initialize = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"linked-test","version":"1"}}}"#;
     let initialized =
