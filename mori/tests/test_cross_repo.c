@@ -2030,7 +2030,7 @@ TEST(cross_repo_relink_removes_provably_reverse_legacy_channel) {
     PASS();
 }
 
-static bool cross_repo_legacy_dual_role(bool valid_forward) {
+static bool cross_repo_legacy_dual_role(bool valid_forward, bool long_identity) {
     cross_repo_fixture_t fixture;
     char live[512], stage[512];
     bool ok = cross_repo_fixture_begin(&fixture) &&
@@ -2038,9 +2038,26 @@ static bool cross_repo_legacy_dual_role(bool valid_forward) {
               cross_repo_seed_channel(&fixture, "provider", true, true) &&
               cross_repo_project_path(&fixture, "caller", live, sizeof(live)) &&
               cross_repo_project_path(&fixture, "_stage", stage, sizeof(stage));
+    if (ok && long_identity) {
+        /* The UTF-8 suffix crosses a character count but fits exactly at the
+         * legacy byte boundaries after C copies the name and file path. */
+        ok = cross_repo_exec(
+            &fixture, "caller",
+            "UPDATE nodes SET name=replace(printf('%253s',''),' ','n') || char(233) || 'tail', "
+            "file_path=replace(printf('%509s',''),' ','p') || char(233) || 'tail' "
+            "WHERE label='Function'");
+    }
     if (ok) {
         ok = cross_repo_link_channel("caller", "provider", 1) &&
-             (!valid_forward || cross_repo_link_channel("provider", "caller", 1)) &&
+             (!valid_forward || cross_repo_link_channel("provider", "caller", 1));
+        if (ok && long_identity) {
+            ok = cross_repo_query_int(
+                     &fixture, "provider",
+                     "SELECT COUNT(*) FROM edges WHERE type='CROSS_CHANNEL' AND "
+                     "length(CAST(json_extract(properties,'$.target_function') AS BLOB))=255 AND "
+                     "length(CAST(json_extract(properties,'$.target_file') AS BLOB))=511") == 1;
+        }
+        ok = ok &&
              cross_repo_exec(&fixture, "provider",
                              "UPDATE edges SET properties=json_remove(properties,"
                              "'$.callers', '$.channel_forward') WHERE type='CROSS_CHANNEL'") &&
@@ -2062,8 +2079,14 @@ static bool cross_repo_legacy_dual_role(bool valid_forward) {
 }
 
 TEST(cross_repo_legacy_dual_role_checks_the_remote_listener) {
-    ASSERT_TRUE(cross_repo_legacy_dual_role(false));
-    ASSERT_TRUE(cross_repo_legacy_dual_role(true));
+    ASSERT_TRUE(cross_repo_legacy_dual_role(false, false));
+    ASSERT_TRUE(cross_repo_legacy_dual_role(true, false));
+    PASS();
+}
+
+TEST(cross_repo_legacy_dual_role_preserves_truncated_listener_identity) {
+    ASSERT_TRUE(cross_repo_legacy_dual_role(false, true));
+    ASSERT_TRUE(cross_repo_legacy_dual_role(true, true));
     PASS();
 }
 
@@ -2279,6 +2302,7 @@ SUITE(cross_repo) {
     RUN_TEST(cross_repo_channel_repair_preserves_other_emitters_and_forward_link);
     RUN_TEST(cross_repo_relink_removes_provably_reverse_legacy_channel);
     RUN_TEST(cross_repo_legacy_dual_role_checks_the_remote_listener);
+    RUN_TEST(cross_repo_legacy_dual_role_preserves_truncated_listener_identity);
     RUN_TEST(cross_repo_status_flags_legacy_provider_first_upgrade);
     RUN_TEST(cross_repo_wildcard_replay_marks_missing_provider_until_return);
     RUN_TEST(cross_repo_explicit_wildcard_keeps_missing_peer_with_online_provider);

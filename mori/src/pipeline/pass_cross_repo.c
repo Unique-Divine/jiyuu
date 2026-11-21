@@ -325,7 +325,8 @@ static cr_run_status_t cr_reconcile_legacy_dual_role_channels(cbm_store_t *sourc
         "SELECT 1 FROM edges e JOIN nodes listener ON listener.id=e.source_id "
         "JOIN nodes channel ON channel.id=e.target_id "
         "WHERE e.project=?1 AND e.type='LISTENS_ON' AND channel.name=?2 AND "
-        "listener.name=?3 AND listener.file_path=?4 LIMIT 1";
+        "substr(CAST(listener.name AS BLOB), 1, ?5)=CAST(?3 AS BLOB) AND "
+        "substr(CAST(listener.file_path AS BLOB), 1, ?6)=CAST(?4 AS BLOB) LIMIT 1";
     bool ok =
         src && tgt && sqlite3_prepare_v2(tgt, next_sql, -1, &next, NULL) == SQLITE_OK &&
         sqlite3_prepare_v2(src, listener_sql, -1, &listener, NULL) == SQLITE_OK &&
@@ -337,7 +338,12 @@ static cr_run_status_t cr_reconcile_legacy_dual_role_channels(cbm_store_t *sourc
         sqlite3_prepare_v2(tgt, "DELETE FROM edges WHERE id=?1", -1, &remove, NULL) == SQLITE_OK &&
         sqlite3_bind_text(next, 1, provider_project, -1, SQLITE_STATIC) == SQLITE_OK &&
         sqlite3_bind_text(next, 2, source_project, -1, SQLITE_STATIC) == SQLITE_OK &&
-        sqlite3_bind_text(listener, 1, source_project, -1, SQLITE_STATIC) == SQLITE_OK;
+        sqlite3_bind_text(listener, 1, source_project, -1, SQLITE_STATIC) == SQLITE_OK &&
+        /* Legacy channel writes took byte prefixes from C buffers. If
+         * several listeners share those prefixes, any is sufficient
+         * evidence to preserve the forward row. */
+        sqlite3_bind_int(listener, 5, CBM_SZ_256 - 1) == SQLITE_OK &&
+        sqlite3_bind_int(listener, 6, CBM_SZ_512 - 1) == SQLITE_OK;
     int64_t last_id = 0;
     while (ok && !cr_cancel_requested(ctx)) {
         if (sqlite3_bind_int64(next, 3, last_id) != SQLITE_OK) {
