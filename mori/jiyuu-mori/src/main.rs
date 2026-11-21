@@ -19,6 +19,9 @@ mod store;
 #[cfg(all(feature = "c-backend", not(test)))]
 mod tools;
 
+#[cfg(all(feature = "c-backend", not(test)))]
+mod search;
+
 #[cfg(any(feature = "c-backend", test))]
 mod stdio;
 

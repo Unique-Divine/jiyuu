@@ -5910,7 +5910,15 @@ static char *handle_search_graph(cbm_mcp_server_t *srv, const char *args) {
     bool semantic_only = sq_present && !has_filters;
     cbm_search_output_t out = {0};
     char search_error[CBM_SZ_512] = "";
-    if (!semantic_only && cbm_store_search(store, &params, &out) != CBM_STORE_OK) {
+    bool basic_pattern = !sq_present && !include_connected && !relationship &&
+                         !exclude_entry_points && min_degree < 0 && max_degree < 0 &&
+                         !(kind_arg && kind_arg[0]) && !(ns_arg && ns_arg[0]);
+    int search_status = CBM_STORE_OK;
+    if (!semantic_only) {
+        search_status = basic_pattern ? cbm_store_search_pattern(store, &params, &out)
+                                      : cbm_store_search(store, &params, &out);
+    }
+    if (search_status != CBM_STORE_OK) {
         /* A refused or invalid regex aborts the row scan inside SQLite; the
          * store's reason is the caller's only hint about the pattern. */
         snprintf(search_error, sizeof(search_error), "search_graph: %s", cbm_store_error(store));

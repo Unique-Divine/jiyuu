@@ -596,6 +596,19 @@ fn index_through_worker_reexec_matches_c() {
             "limit": 1, "offset": 900, "format": "json"
         })
         .to_string();
+        let search_page = serde_json::json!({
+            "project": project, "name_pattern": "^h", "label": "Function",
+            "limit": 1, "offset": 1, "format": "json"
+        })
+        .to_string();
+        let search_path = serde_json::json!({
+            "project": project, "qn_pattern": r"\.helper$", "file_pattern": "**/app.py",
+            "max_output_tokens": 128
+        }).to_string();
+        let search_invalid = serde_json::json!({
+            "project": project, "name_pattern": "["
+        })
+        .to_string();
         let queries: Vec<Output> = [
             vec![
                 "cli",
@@ -665,6 +678,8 @@ fn index_through_worker_reexec_matches_c() {
             ],
             vec!["cli", "get_file_outline", &outline_page],
             vec!["cli", "get_file_outline", &outline_end],
+            vec!["cli", "search_graph", &search_page],
+            vec!["cli", "search_graph", &search_path],
             vec![
                 "cli",
                 "query_graph",
@@ -684,10 +699,15 @@ fn index_through_worker_reexec_matches_c() {
         .iter()
         .map(|args| run_in(bin, &scratch, args))
         .collect();
-        results.push((counts, queries));
+        let invalid =
+            run_in(bin, &scratch, &["cli", "search_graph", &search_invalid]);
+        assert!(!invalid.status.success(), "{invalid:?}");
+        results.push((counts, queries, invalid));
     }
-    let [(c_counts, c_queries), (rust_counts, rust_queries)] =
-        results.as_slice()
+    let [
+        (c_counts, c_queries, c_invalid),
+        (rust_counts, rust_queries, rust_invalid),
+    ] = results.as_slice()
     else {
         panic!("expected C and Rust index results");
     };
@@ -700,6 +720,8 @@ fn index_through_worker_reexec_matches_c() {
             "query output differs\nC: {c_out:?}\nRust: {rust_out:?}"
         );
     }
+    assert_eq!(c_invalid.stdout, rust_invalid.stdout);
+    assert_eq!(c_invalid.stderr, rust_invalid.stderr);
     let trace = String::from_utf8_lossy(&c_queries[1].stdout);
     assert!(trace.contains(".go.Twice"), "Add caller missing: {trace}");
 }
