@@ -666,12 +666,15 @@ static char *cr_props_with_caller(const char *rev, const char *project, const ch
     return out;
 }
 
-/* Mark cross-edge props (a JSON object in buf) "ambiguous":true. */
-static void cr_mark_ambiguous(char *buf, size_t bufsz) {
-    static const char mark[] = ",\"ambiguous\":true}";
+/* Set "ambiguous" on cross-edge props (a JSON object in buf), true or false.
+ * A typed-route forward row is upserted with json_patch, so the flag is
+ * always written, or a resolved write would keep an earlier `true`. */
+static void cr_set_ambiguous(char *buf, size_t bufsz, bool ambiguous) {
+    const char *mark = ambiguous ? ",\"ambiguous\":true}" : ",\"ambiguous\":false}";
+    size_t mark_size = strlen(mark) + SKIP_ONE;
     size_t len = strlen(buf);
-    if (len > 0 && buf[len - SKIP_ONE] == '}' && len - SKIP_ONE + sizeof(mark) <= bufsz) {
-        memcpy(buf + len - SKIP_ONE, mark, sizeof(mark));
+    if (len > 0 && buf[len - SKIP_ONE] == '}' && len - SKIP_ONE + mark_size <= bufsz) {
+        memcpy(buf + len - SKIP_ONE, mark, mark_size);
     }
 }
 
@@ -681,11 +684,14 @@ static bool emit_cross_route_bidirectional(
     cbm_store_t *src_store, const char *src_project, struct sqlite3 *src_db, int64_t caller_id,
     int64_t local_route_id, cbm_store_t *tgt_store, const char *tgt_project, int64_t handler_id,
     const char *route_qn, const char *handler_name, const char *handler_file, const char *url_path,
-    const char *method, const char *edge_type, cr_run_context_t *ctx) {
+    const char *method, const char *edge_type, bool resolved_flag, cr_run_context_t *ctx) {
     /* Forward: caller → local Route in source DB */
     char fwd[CR_PROPS_BUF];
     build_cross_props(fwd, sizeof(fwd), tgt_project, handler_name, handler_file, url_path,
                       "url_path", method);
+    if (resolved_flag) {
+        cr_set_ambiguous(fwd, sizeof(fwd), false);
+    }
     if (!insert_cross_edge(src_store, src_project, caller_id, local_route_id, edge_type, fwd,
                            ctx)) {
         return false;
@@ -902,7 +908,7 @@ static cr_match_result_t match_http_routes(cbm_store_t *src_store, const char *s
         if (!emit_cross_route_bidirectional(src_store, src_project, src_db, caller_id, route_id,
                                             tgt_store, tgt_project, handler_id, hit.qn, hit.name,
                                             hit.file, url_path, method, "CROSS_HTTP_CALLS",
-                                            ctx)) {
+                                            false, ctx)) {
             failed = !cr_cancel_requested(ctx);
             break;
         }
@@ -1231,18 +1237,84 @@ static bool cr_emit_ambiguous(cbm_store_t *src_store, const char *src_project, i
                               cr_run_context_t *ctx) {
     char fwd[CR_PROPS_BUF];
     build_cross_props(fwd, sizeof(fwd), tgt_project, "", "", url_path, "url_path", method);
-    cr_mark_ambiguous(fwd, sizeof(fwd));
+    cr_set_ambiguous(fwd, sizeof(fwd), true);
     return insert_cross_edge(src_store, src_project, caller_id, local_route_id, edge_type, fwd,
                              ctx);
 }
 
+/* The forward row a client already holds for (caller, local Route, type):
+ * whether it exists, the project it names and its ambiguous flag. False on
+ * a query error. */
+typedef struct {
+    bool exists;
+    bool ambiguous;
+    char project[CBM_SZ_256];
+} cr_forward_row_t;
+
+static bool cr_forward_row(struct sqlite3 *db, int64_t caller_id, int64_t route_id,
+                           const char *edge_type, cr_forward_row_t *row) {
+    memset(row, 0, sizeof(*row));
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(db,
+                           "SELECT json_extract(properties, '$.target_project'), "
+                           "json_extract(properties, '$.ambiguous') FROM edges WHERE "
+                           "source_id = ?1 AND target_id = ?2 AND type = ?3 LIMIT 1",
+                           CBM_NOT_FOUND, &st, NULL) != SQLITE_OK) {
+        return false;
+    }
+    bool ok = sqlite3_bind_int64(st, SKIP_ONE, caller_id) == SQLITE_OK &&
+              sqlite3_bind_int64(st, PAIR_LEN, route_id) == SQLITE_OK &&
+              sqlite3_bind_text(st, CBM_SZ_3, edge_type, CBM_NOT_FOUND, SQLITE_STATIC) == SQLITE_OK;
+    int step_rc = ok ? sqlite3_step(st) : SQLITE_ERROR;
+    if (step_rc == SQLITE_ROW) {
+        const char *project = (const char *)sqlite3_column_text(st, 0);
+        row->exists = true;
+        row->ambiguous = sqlite3_column_int(st, SKIP_ONE) != 0;
+        snprintf(row->project, sizeof(row->project), "%s", project ? project : "");
+    }
+    ok = (step_rc == SQLITE_ROW || step_rc == SQLITE_DONE) && sqlite3_finalize(st) == SQLITE_OK;
+    return ok;
+}
+
+/* Drop a client's forward row (its provider no longer serves the call). */
+static bool cr_delete_forward_row(cbm_store_t *store, int64_t caller_id, int64_t route_id,
+                                  const char *edge_type, cr_run_context_t *ctx) {
+    struct sqlite3 *db = cbm_store_get_db(store);
+    sqlite3_stmt *st = NULL;
+    if (!db || sqlite3_prepare_v2(db,
+                                  "DELETE FROM edges WHERE source_id = ?1 AND target_id = ?2 AND "
+                                  "type = ?3",
+                                  CBM_NOT_FOUND, &st, NULL) != SQLITE_OK) {
+        return false;
+    }
+    bool ok = sqlite3_bind_int64(st, SKIP_ONE, caller_id) == SQLITE_OK &&
+              sqlite3_bind_int64(st, PAIR_LEN, route_id) == SQLITE_OK &&
+              sqlite3_bind_text(st, CBM_SZ_3, edge_type, CBM_NOT_FOUND, SQLITE_STATIC) ==
+                  SQLITE_OK &&
+              sqlite3_step(st) == SQLITE_DONE;
+    ok = sqlite3_finalize(st) == SQLITE_OK && ok;
+    if (ok && sqlite3_changes(db) > 0) {
+        ctx->mutated = true;
+    }
+    return ok;
+}
+
 /* Match edges of a given type against Route nodes with a given QN prefix.
- * Reuses the same infrastructure as HTTP/async matching. */
+ * Reuses the same infrastructure as HTTP/async matching.
+ *
+ * provider_side: this run belongs to the provider (tgt_*) and src_* is a
+ * client store. The client chose its targets on its own runs, so the
+ * provider only maintains the forward rows that already name it: it
+ * refreshes them (and rewrites its own reverse rows, which its run's
+ * cleanup removed), drops them when it no longer serves the call, and never
+ * creates a row or touches one naming another server. On the client's own
+ * run (provider_side false) a resolved target wins over an ambiguous one
+ * for the same row, and the flag is written both ways. */
 static cr_match_result_t match_typed_routes(cbm_store_t *src_store, const char *src_project,
                                             cbm_store_t *tgt_store, const char *tgt_project,
                                             const char *edge_type, const char *svc_key,
                                             const char *method_key, const char *cross_edge_type,
-                                            cr_run_context_t *ctx) {
+                                            bool provider_side, cr_run_context_t *ctx) {
     struct sqlite3 *src_db = cbm_store_get_db(src_store);
     if (!src_db) {
         return cr_match_finish(ctx, 0, true);
@@ -1290,6 +1362,17 @@ static cr_match_result_t match_typed_routes(cbm_store_t *src_store, const char *
             continue;
         }
 
+        cr_forward_row_t row;
+        if (!cr_forward_row(src_db, caller_id, route_id, cross_edge_type, &row)) {
+            free(route_qn);
+            failed = true;
+            break;
+        }
+        bool names_other = row.exists && strcmp(row.project, tgt_project) != 0;
+        if (provider_side && (!row.exists || names_other)) {
+            free(route_qn); /* not this provider's link to maintain */
+            continue;
+        }
         char handler_name[CBM_SZ_256] = {0};
         char handler_file[CBM_SZ_512] = {0};
         int64_t handler_id =
@@ -1297,34 +1380,40 @@ static cr_match_result_t match_typed_routes(cbm_store_t *src_store, const char *
                                handler_file, sizeof(handler_file), &query_failed);
         bool ambiguous = !query_failed && handler_id != 0 &&
                          cr_route_ambiguous(tgt_store, route_qn, &query_failed);
-        bool cancelled = !query_failed && handler_id != 0 && cr_cancel_requested(ctx);
+        bool cancelled = !query_failed && cr_cancel_requested(ctx);
+        /* This run already linked the row to another target as resolved:
+         * an ambiguous match does not replace it. */
+        bool keep = !provider_side && ambiguous && names_other && !row.ambiguous;
         bool emitted = false;
-        if (!query_failed && handler_id != 0 && !cancelled) {
+        if (!query_failed && !cancelled && handler_id == 0 && provider_side) {
+            emitted = cr_delete_forward_row(src_store, caller_id, route_id, cross_edge_type, ctx);
+        } else if (!query_failed && !cancelled && handler_id != 0 && !keep) {
             emitted = ambiguous ? cr_emit_ambiguous(src_store, src_project, caller_id, route_id,
                                                     tgt_project, svc_val, svc_key,
                                                     cross_edge_type, ctx)
                                 : emit_cross_route_bidirectional(
                                       src_store, src_project, src_db, caller_id, route_id,
                                       tgt_store, tgt_project, handler_id, route_qn, handler_name,
-                                      handler_file, svc_val, svc_key, cross_edge_type, ctx);
+                                      handler_file, svc_val, svc_key, cross_edge_type, true, ctx);
         }
         free(route_qn);
         if (query_failed) {
             failed = true;
             break;
         }
-        if (handler_id == 0) {
-            continue;
-        }
         if (cancelled) {
             break;
+        }
+        if (keep || (handler_id == 0 && !provider_side)) {
+            continue;
         }
         if (!emitted) {
             failed = !cr_cancel_requested(ctx);
             break;
         }
-        /* An ambiguous Route is linked but not resolved: not counted. */
-        count += ambiguous ? 0 : SKIP_ONE;
+        /* An ambiguous Route is linked but not resolved, and a dropped row is
+         * no link: neither is counted. */
+        count += (ambiguous || handler_id == 0) ? 0 : SKIP_ONE;
     }
     if (!failed && !cr_cancel_requested(ctx) && step_rc != SQLITE_DONE) {
         failed = true;
@@ -1750,41 +1839,44 @@ cbm_cross_repo_result_t cbm_cross_repo_match_cancellable(const char *project,
             match_status =
                 add_match_count(&result.grpc_edges,
                                 match_typed_routes(src_store, project, tgt_store, tgt, "GRPC_CALLS",
-                                                   "service", "method", "CROSS_GRPC_CALLS", &run));
+                                                   "service", "method", "CROSS_GRPC_CALLS", false,
+                                                   &run));
         }
         if (match_status == CR_RUN_OK) {
             match_status = add_match_count(
                 &result.graphql_edges,
                 match_typed_routes(src_store, project, tgt_store, tgt, "GRAPHQL_CALLS", "operation",
-                                   "operation", "CROSS_GRAPHQL_CALLS", &run));
+                                   "operation", "CROSS_GRAPHQL_CALLS", false, &run));
         }
         if (match_status == CR_RUN_OK) {
             match_status = add_match_count(
                 &result.trpc_edges,
                 match_typed_routes(src_store, project, tgt_store, tgt, "TRPC_CALLS", "procedure",
-                                   "procedure", "CROSS_TRPC_CALLS", &run));
+                                   "procedure", "CROSS_TRPC_CALLS", false, &run));
         }
-        /* Provider side, as for HTTP above: the consumer's typed calls live in
-         * tgt. Without this a provider-side run deleted its gRPC, GraphQL
-         * and tRPC reverse edges (delete_cross_edges) and never recreated
-         * them. */
+        /* Provider side: the consumer's typed calls live in tgt. This run
+         * maintains only the consumer's forward rows that already name this
+         * provider (match_typed_routes, provider_side) and rewrites its own
+         * reverse rows for them, which delete_cross_edges just wiped. Unlike
+         * HTTP above, it never creates a consumer link or redirects one that
+         * names another server. */
         if (match_status == CR_RUN_OK) {
             match_status = add_match_count(
                 &result.grpc_edges,
                 match_typed_routes(tgt_store, tgt, src_store, project, "GRPC_CALLS", "service",
-                                   "method", "CROSS_GRPC_CALLS", &run));
+                                   "method", "CROSS_GRPC_CALLS", true, &run));
         }
         if (match_status == CR_RUN_OK) {
             match_status = add_match_count(
                 &result.graphql_edges,
                 match_typed_routes(tgt_store, tgt, src_store, project, "GRAPHQL_CALLS",
-                                   "operation", "operation", "CROSS_GRAPHQL_CALLS", &run));
+                                   "operation", "operation", "CROSS_GRAPHQL_CALLS", true, &run));
         }
         if (match_status == CR_RUN_OK) {
             match_status = add_match_count(
                 &result.trpc_edges,
                 match_typed_routes(tgt_store, tgt, src_store, project, "TRPC_CALLS", "procedure",
-                                   "procedure", "CROSS_TRPC_CALLS", &run));
+                                   "procedure", "CROSS_TRPC_CALLS", true, &run));
         }
 
         cbm_store_close(tgt_store);
