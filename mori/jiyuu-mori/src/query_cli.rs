@@ -1,0 +1,181 @@
+//! Flag-form arguments for `mori cli query_graph`.
+
+use std::ffi::c_long;
+
+use serde_json::Value;
+
+fn decimal(value: &str) -> Option<c_long> {
+    // The C CLI uses strtol in base 10. It accepts leading C whitespace
+    // and saturates on overflow, but a trailing byte makes the value a string.
+    let number = value
+        .trim_start_matches(|ch: char| ch.is_ascii_whitespace() || ch == '\x0b');
+    let digits = number.strip_prefix(['+', '-']).unwrap_or(number);
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    Some(number.parse().unwrap_or_else(|_| {
+        if number.starts_with('-') {
+            c_long::MIN
+        } else {
+            c_long::MAX
+        }
+    }))
+}
+
+fn build_args<'a>(
+    schema: &str,
+    flags: impl Iterator<Item = &'a str>,
+) -> Option<Vec<u8>> {
+    let schema: Value = serde_json::from_str(schema).ok()?;
+    let properties = schema.get("properties")?.as_object()?;
+    let mut flags = flags.peekable();
+    let mut args = vec![b'{'];
+    while let Some(flag) = flags.next() {
+        if flag == "--" {
+            break;
+        }
+        let flag = flag.strip_prefix("--")?;
+        let (key, value) = if let Some((key, value)) = flag.split_once('=') {
+            (key, value)
+        } else if flags.peek().is_some_and(|next| !next.starts_with("--")) {
+            (flag, flags.next()?)
+        } else {
+            (flag, "")
+        };
+        let key = key.replace('-', "_");
+        let kind = properties.get(&key)?.get("type")?.as_str()?;
+        let value = match kind {
+            "integer" => {
+                decimal(value).map_or_else(|| Value::from(value), Value::from)
+            }
+            "string" => Value::from(value),
+            // A schema change can keep using C until Rust supports its type.
+            _ => return None,
+        };
+
+        // The legacy CLI emits repeated keys in argv order. A JSON map would
+        // silently drop duplicates before the daemon receives the request.
+        if args.len() > 1 {
+            args.push(b',');
+        }
+        serde_json::to_writer(&mut args, &key).ok()?;
+        args.push(b':');
+        serde_json::to_writer(&mut args, &value).ok()?;
+    }
+    args.push(b'}');
+    Some(args)
+}
+
+#[cfg(all(feature = "c-backend", not(test)))]
+pub(crate) mod c_args {
+    use std::ffi::{CStr, CString, c_char, c_int};
+    use std::{ptr, slice};
+
+    type QueryArgsBuilder = unsafe extern "C" fn(
+        *const c_char,
+        c_int,
+        *mut *mut c_char,
+    ) -> *mut c_char;
+
+    unsafe extern "C" {
+        fn cbm_cli_set_query_args_builder(builder: QueryArgsBuilder);
+        fn strdup(s: *const c_char) -> *mut c_char;
+    }
+
+    unsafe extern "C" fn build(
+        schema: *const c_char,
+        argc: c_int,
+        argv: *mut *mut c_char,
+    ) -> *mut c_char {
+        // SAFETY: C supplies its live tool schema and all remaining argv slots.
+        let schema = unsafe { CStr::from_ptr(schema) };
+        let argv = unsafe { slice::from_raw_parts(argv, argc as usize) };
+        let Ok(schema) = schema.to_str() else {
+            return ptr::null_mut();
+        };
+        let flags = argv
+            .iter()
+            .map(|&arg| {
+                // SAFETY: every live argv slot points to a C string.
+                unsafe { CStr::from_ptr(arg) }.to_str()
+            })
+            .collect::<Result<Vec<_>, _>>();
+        let Some(args) = flags.ok().and_then(|flags| {
+            super::build_args(schema, flags.into_iter())
+                .and_then(|json| CString::new(json).ok())
+        }) else {
+            return ptr::null_mut();
+        };
+        // SAFETY: strdup reads args before it drops and gives C a buffer
+        // compatible with the caller's free.
+        unsafe { strdup(args.as_ptr()) }
+    }
+
+    pub(crate) unsafe fn register() {
+        // SAFETY: caller registers the process-global pointer before C starts.
+        unsafe { cbm_cli_set_query_args_builder(build) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SCHEMA: &str = r#"{
+      "properties": {
+        "query": {"type": "string"},
+        "project": {"type": "string"},
+        "max_rows": {"type": "integer"},
+        "offset": {"type": "integer"},
+        "future_field": {"type": "array"}
+      }
+    }"#;
+
+    fn parse(flags: &[&str]) -> Option<String> {
+        build_args(SCHEMA, flags.iter().copied())
+            .map(|json| String::from_utf8(json).unwrap())
+    }
+
+    #[test]
+    fn preserves_aliases_values_and_duplicate_keys() {
+        assert_eq!(
+            parse(&[
+                "--project=desk",
+                "--query",
+                "MATCH (n) WHERE n.name = \"Mori\" RETURN n",
+                "--max-rows=+7",
+                "--max_rows",
+                "-4",
+                "--offset",
+                "--",
+                "--ignored",
+            ]),
+            Some(
+                r#"{"project":"desk","query":"MATCH (n) WHERE n.name = \"Mori\" RETURN n","max_rows":7,"max_rows":-4,"offset":""}"#
+                    .into()
+            ),
+        );
+        assert_eq!(
+            parse(&["--query=--value", "--project"]),
+            Some(r#"{"query":"--value","project":""}"#.into()),
+        );
+    }
+
+    #[test]
+    fn matches_c_integer_coercion() {
+        assert_eq!(decimal(" \x0b\t+42"), Some(42));
+        assert_eq!(decimal("999999999999999999999999"), Some(c_long::MAX));
+        assert_eq!(decimal("-999999999999999999999999"), Some(c_long::MIN));
+        assert_eq!(decimal("1 "), None);
+        assert_eq!(decimal("0x2"), None);
+        assert_eq!(decimal("999999999999999999999999x"), None);
+        assert_eq!(parse(&["--offset=1 "]), Some(r#"{"offset":"1 "}"#.into()),);
+    }
+
+    #[test]
+    fn leaves_diagnostics_and_unsupported_types_to_c() {
+        assert_eq!(parse(&["--max-row=1"]), None);
+        assert_eq!(parse(&["--project=desk", "unexpected"]), None);
+        assert_eq!(parse(&["--future-field=[]"]), None);
+    }
+}

@@ -399,6 +399,7 @@ pub unsafe extern "C" fn main(argc: c_int, argv: *mut *mut c_char) -> c_int {
         cbm_gqlgen_set_rust_backend(gqlgen_glob_match, plan_graphql_route);
         c_transport::register();
         cbm_cross_repo_set_graphql_link_policy(plan_link);
+        crate::query_cli::c_args::register();
     }
 
     // SAFETY: argc and argv come straight from the C runtime and meet the

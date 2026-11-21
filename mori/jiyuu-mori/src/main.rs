@@ -46,6 +46,9 @@ mod stdio;
 #[cfg(any(feature = "c-backend", test))]
 mod graphql_link;
 
+#[cfg(any(feature = "c-backend", test))]
+mod query_cli;
+
 #[cfg(not(feature = "c-backend"))]
 fn main() {
     eprintln!(

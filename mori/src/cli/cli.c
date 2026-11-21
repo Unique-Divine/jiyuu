@@ -13887,6 +13887,17 @@ bool cbm_cli_stdin_allowed_for_schema_for_test(const char *schema_str,
 }
 #endif
 
+/* The linked executable may build query_graph flag arguments in Rust. A
+ * non-NULL result goes straight to the existing daemon request as JSON. The
+ * legacy parser still owns diagnostics for inputs the callback declines. */
+typedef char *(*cli_query_args_builder_fn)(const char *schema, int argc, char **argv);
+static cli_query_args_builder_fn cli_query_args_builder;
+
+void cbm_cli_set_query_args_builder(cli_query_args_builder_fn builder);
+void cbm_cli_set_query_args_builder(cli_query_args_builder_fn builder) {
+    cli_query_args_builder = builder;
+}
+
 char *cbm_cli_build_args_json(const char *tool_name, int argc, char **argv, char **err_out) {
     if (err_out) {
         *err_out = NULL;
@@ -13895,6 +13906,12 @@ char *cbm_cli_build_args_json(const char *tool_name, int argc, char **argv, char
     /* The tool's input_schema (may be NULL for an unknown tool — then every
      * value is treated as a string). Static lifetime; do not free. */
     const char *schema_str = cbm_mcp_tool_input_schema(tool_name);
+    if (schema_str && cli_query_args_builder && strcmp(tool_name, "query_graph") == 0) {
+        char *rust_json = cli_query_args_builder(schema_str, argc, argv);
+        if (rust_json) {
+            return rust_json;
+        }
+    }
     yyjson_doc *schema_doc = NULL;
     yyjson_val *props = NULL;
     if (schema_str) {

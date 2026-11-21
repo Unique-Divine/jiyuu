@@ -236,6 +236,11 @@ fn stdio_mixed_framing_matches_c_after_input_eof() {
     assert!(body.contains("projects: 0"));
 }
 
+#[test]
+fn invalid_query_flag_diagnostic_matches_c() {
+    assert_same(&["cli", "query_graph", "--offst", "1"]);
+}
+
 /// A small repository with Python and Go calls and a gqlgen server. Both
 /// binaries index the same path, so project names match.
 struct Fixture(PathBuf);
@@ -459,6 +464,21 @@ fn index_through_worker_reexec_matches_c() {
             ],
             vec!["cli", "get_file_outline", &outline_page],
             vec!["cli", "get_file_outline", &outline_end],
+            vec![
+                "cli",
+                "query_graph",
+                "--project",
+                &project,
+                "--query",
+                "MATCH (h)-[:HANDLES]->(r:Route) WHERE r.qualified_name = '__graphql__Query.value' RETURN h.name",
+                "--max-rows=+7",
+                "--max_rows",
+                "4",
+                "--offset",
+                "0",
+                "--",
+                "ignored",
+            ],
             vec![
                 "cli",
                 "query_graph",
