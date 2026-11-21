@@ -1,6 +1,7 @@
 //! `mori`: the Mori command. With feature `c-backend`, the whole C program
 //! (`codebase-memory-mcp`) is linked in as `libmori-c` and module [`ffi`]
-//! exports the process entry point. See Strategy A in the Rust port design.
+//! exports the process entry point. Rust handles the developer export before
+//! dispatching the other commands to the C program.
 
 // With the C program linked, `ffi::main` is the C `main` symbol: the C
 // runtime calls it with the kernel's argc and argv, and Rust's own start-up
@@ -10,7 +11,11 @@
 #![cfg_attr(all(feature = "c-backend", not(test)), no_main)]
 
 #[cfg(all(feature = "c-backend", not(test)))]
+mod export;
+#[cfg(all(feature = "c-backend", not(test)))]
 mod ffi;
+#[cfg(all(feature = "c-backend", not(test)))]
+mod store;
 
 #[cfg(not(feature = "c-backend"))]
 fn main() {
