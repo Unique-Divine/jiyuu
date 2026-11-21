@@ -88,6 +88,10 @@ fn build_and_link() -> Result<(), String> {
             "graph-ui/src",
             "graph-ui/index.html",
             "graph-ui/package.json",
+            "graph-ui/package-lock.json",
+            "graph-ui/vite.config.ts",
+            "graph-ui/tsconfig.json",
+            "graph-ui/tsconfig.node.json",
         ] {
             let path = mori_dir.join(path);
             println!("cargo:rerun-if-changed={}", path.display());

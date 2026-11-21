@@ -171,7 +171,7 @@ The macOS binaries link only system libraries (`libSystem`, `libz`,
 `libc++`); static linking is Linux-only.
 
 The macOS binaries carry an ad-hoc signature, not a Developer ID signature,
-and is not notarized. Downloads through mise, `curl` or `gh release download`
+and are not notarized. Downloads through mise, `curl` or `gh release download`
 carry no quarantine attribute and run as is. If you download the archive in
 a browser, macOS Gatekeeper refuses to open the binary because Apple can't
 verify it; remove the quarantine attribute after unpacking:
