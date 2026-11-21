@@ -79,27 +79,29 @@ describe("versions and tags", () => {
 describe("asset names", () => {
   test("use mise-friendly platform names", () => {
     expect(assetName("0.13.0", "linux-x64")).toBe(
-      "codebase-memory-mcp-0.13.0-linux-x64.tar.gz",
+      "mori-0.13.0-linux-x64.tar.gz",
     )
     expect(assetName("0.13.0", "darwin-arm64")).toBe(
-      "codebase-memory-mcp-0.13.0-darwin-arm64.tar.gz",
+      "mori-0.13.0-darwin-arm64.tar.gz",
     )
     expect(releaseAssets("0.13.0")).toEqual([
-      "codebase-memory-mcp-0.13.0-linux-x64.tar.gz",
-      "codebase-memory-mcp-0.13.0-linux-arm64.tar.gz",
-      "codebase-memory-mcp-0.13.0-darwin-arm64.tar.gz",
+      "mori-0.13.0-linux-x64.tar.gz",
+      "mori-0.13.0-linux-arm64.tar.gz",
+      "mori-0.13.0-darwin-arm64.tar.gz",
+      "mori-0.13.0-darwin-x64.tar.gz",
     ])
   })
 
   test("reject targets the workflow does not build", () => {
     expect(() => assetName("0.13.0", "x64")).toThrow("Unsupported target")
     expect(() => assetName("0.13.0", "linux-amd64")).toThrow()
-    expect(() => assetName("0.13.0", "darwin-x64")).toThrow()
+    expect(() => assetName("0.13.0", "darwin-amd64")).toThrow()
+    expect(() => assetName("0.13.0", "windows-x64")).toThrow()
   })
 
   test("asset-name command prints the archive name", async () => {
     expect(await main(["asset-name", "0.13.0", "darwin-arm64"], "/")).toBe(
-      "codebase-memory-mcp-0.13.0-darwin-arm64.tar.gz",
+      "mori-0.13.0-darwin-arm64.tar.gz",
     )
   })
 })
@@ -113,7 +115,7 @@ describe("prepare", () => {
       const meta = await prepare(dir, "0.13.0", "mori/v0.13.0", COMMIT)
       const checksums = await readFile(join(dir, "checksums.txt"), "utf8")
       expect(checksums).toBe(formatChecksums(meta.assets))
-      const x64 = "codebase-memory-mcp-0.13.0-linux-x64.tar.gz"
+      const x64 = "mori-0.13.0-linux-x64.tar.gz"
       expect(checksums).toContain(
         `${await sha256File(join(dir, x64))}  ${x64}\n`,
       )
@@ -125,8 +127,9 @@ describe("prepare", () => {
         "linux-x64",
         "linux-arm64",
         "darwin-arm64",
+        "darwin-x64",
       ])
-      const darwin = "codebase-memory-mcp-0.13.0-darwin-arm64.tar.gz"
+      const darwin = "mori-0.13.0-darwin-arm64.tar.gz"
       expect(written.assets[darwin]).toBe(
         await sha256File(join(dir, darwin)),
       )
@@ -135,14 +138,15 @@ describe("prepare", () => {
       expect(notes).toContain(COMMIT)
       expect(notes).toContain(darwin)
       expect(notes).toContain("not notarized")
-      expect(notes).toContain("xattr -d com.apple.quarantine")
+      expect(notes).toContain("xattr -d com.apple.quarantine mori")
+      expect(notes).toContain("Binary `mori`")
     })
   })
 
   test("fails when an archive is missing", async () => {
     await withDir(async (dir) => {
       await writeFile(
-        join(dir, "codebase-memory-mcp-0.13.0-linux-x64.tar.gz"),
+        join(dir, "mori-0.13.0-linux-x64.tar.gz"),
         "x",
       )
       await expect(
@@ -161,6 +165,24 @@ describe("prepare", () => {
       ).rejects.toThrow("darwin-arm64")
     })
   })
+
+  test("fails when only the Intel macOS archive is missing", async () => {
+    await withDir(async (dir) => {
+      for (const target of ["linux-x64", "linux-arm64", "darwin-arm64"]) {
+        await writeFile(join(dir, assetName("0.13.0", target)), "x")
+      }
+      const error = await prepare(
+        dir,
+        "0.13.0",
+        "mori/v0.13.0",
+        COMMIT,
+      ).catch((e: unknown) => e as Error)
+      expect(error).toBeInstanceOf(Error)
+      expect((error as Error).message).toBe(
+        "Missing release archives: mori-0.13.0-darwin-x64.tar.gz",
+      )
+    })
+  })
 })
 
 describe("publish", () => {
@@ -173,7 +195,7 @@ describe("publish", () => {
     expect(create).toContain("--verify-tag")
     expect(create).toContain("/rel/checksums.txt")
     expect(create).toContain(
-      "/rel/codebase-memory-mcp-0.13.0-darwin-arm64.tar.gz",
+      "/rel/mori-0.13.0-darwin-arm64.tar.gz",
     )
   })
 
