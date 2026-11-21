@@ -1744,20 +1744,25 @@ TEST(cross_repo_stage_rebuilds_from_legacy_selection_without_writing_provider) {
          cross_repo_exec(&fixture, "provider", "DELETE FROM edges WHERE type='CROSS_HTTP_CALLS'");
     cbm_cross_repo_result_free(&linked);
 
-    int relinked = ok ? cbm_cross_repo_relink_stage(live, stage, "linked-source", NULL)
-                      : CBM_STORE_ERR;
+    int relinked =
+        ok ? cbm_cross_repo_relink_stage(live, stage, "linked-source", NULL) : CBM_STORE_ERR;
     cbm_store_t *staged = cbm_store_open_path_query(stage);
-    int staged_links = staged ? cbm_store_count_edges_by_type(staged, "linked-source",
-                                                              "CROSS_HTTP_CALLS")
-                              : -1;
+    int staged_links =
+        staged ? cbm_store_count_edges_by_type(staged, "linked-source", "CROSS_HTTP_CALLS") : -1;
     char *selection = NULL;
-    int recorded = staged ? cbm_store_meta_get(staged, "cross_repo_targets:linked-source",
-                                               &selection)
-                          : CBM_STORE_ERR;
+    int recorded = staged
+                       ? cbm_store_meta_get(staged, "cross_repo_targets:linked-source", &selection)
+                       : CBM_STORE_ERR;
     bool migrated = recorded == CBM_STORE_OK && strcmp(selection, "[\"provider\"]") == 0;
     cbm_free(CBM_MEM_CLASS_STORE, selection);
     cbm_store_close(staged);
     int provider_links = cross_repo_count_edges(&fixture, "provider", "CROSS_HTTP_CALLS");
+    bool repaired = cbm_store_backup_path(stage, live) == CBM_STORE_OK &&
+                    cbm_cross_repo_reverse_pending("linked-source") &&
+                    cbm_cross_repo_reconcile_published("linked-source") &&
+                    cbm_cross_repo_reconcile_published("linked-source") &&
+                    !cbm_cross_repo_reverse_pending("linked-source");
+    int reverse_links = cross_repo_count_edges(&fixture, "provider", "CROSS_HTTP_CALLS");
     cross_repo_fixture_end(&fixture);
 
     ASSERT_TRUE(ok);
@@ -1765,11 +1770,46 @@ TEST(cross_repo_stage_rebuilds_from_legacy_selection_without_writing_provider) {
     ASSERT_EQ(staged_links, 1);
     ASSERT_EQ(provider_links, 0);
     ASSERT_TRUE(migrated);
+    ASSERT_TRUE(repaired);
+    ASSERT_EQ(reverse_links, 1);
+    PASS();
+}
+
+TEST(cross_repo_status_reports_stale_after_provider_changes) {
+    cross_repo_fixture_t fixture;
+    bool ok = cross_repo_fixture_begin(&fixture) &&
+              cross_repo_seed_http_pair(&fixture, "client", "api", "/known", "known");
+    if (!ok) {
+        cross_repo_fixture_end(&fixture);
+        FAIL("cannot prepare matching project stores");
+    }
+
+    const char *target = "api";
+    cbm_cross_repo_result_t linked = cbm_cross_repo_match("client", &target, 1);
+    ok = !linked.failed &&
+         cross_repo_exec(&fixture, "api", "UPDATE store_meta SET v='999' WHERE k='mutation_gen'");
+    cbm_cross_repo_result_free(&linked);
+    char *changed = cross_repo_status_json(&fixture, "client");
+    linked = cbm_cross_repo_match("client", &target, 1);
+    ok = ok && !linked.failed;
+    cbm_cross_repo_result_free(&linked);
+    char *relinked = cross_repo_status_json(&fixture, "client");
+    cross_repo_fixture_end(&fixture);
+
+    bool stale = changed && strstr(changed, "\"status\":\"stale\"");
+    bool fresh = relinked && strstr(relinked, "\"status\":\"ran\"");
+    free(changed);
+    free(relinked);
+
+    ASSERT_TRUE(ok);
+    ASSERT_TRUE(stale);
+    ASSERT_TRUE(fresh);
     PASS();
 }
 
 SUITE(cross_repo) {
     RUN_TEST(cross_repo_stage_rebuilds_from_legacy_selection_without_writing_provider);
+    RUN_TEST(cross_repo_status_reports_stale_after_provider_changes);
     RUN_TEST(cross_repo_graphql_prefers_resolver_method_handler);
     RUN_TEST(cross_repo_graphql_reverse_edge_keeps_every_caller);
     RUN_TEST(cross_repo_graphql_reverse_callers_keyed_by_qualified_name);

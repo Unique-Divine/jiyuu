@@ -1749,8 +1749,8 @@ static int cr_read_targets(cbm_store_t *store, const char *project, char ***targ
     size_t i = 0;
     for (; names && i < count; i++) {
         const char *name = yyjson_get_str(yyjson_arr_get(arr, i));
-        if (!name || (!(count == 1 && strcmp(name, "*") == 0) &&
-                      !cbm_validate_project_name(name))) {
+        if (!name ||
+            (!(count == 1 && strcmp(name, "*") == 0) && !cbm_validate_project_name(name))) {
             break;
         }
         names[i] = cbm_strdup(name);
@@ -1765,6 +1765,104 @@ static int cr_read_targets(cbm_store_t *store, const char *project, char ***targ
     }
     *targets = names;
     return (int)count;
+}
+
+static bool cr_peers_key(const char *project, char *buf, size_t size) {
+    int written = snprintf(buf, size, "cross_repo_peers:%s", project);
+    return written > 0 && (size_t)written < size;
+}
+
+static cbm_store_t *cr_open_peer(const char *name) {
+    char path[CR_PATH_BUF];
+    return cr_db_path(name, path, sizeof(path)) ? cbm_store_open_path_query(path) : NULL;
+}
+
+static bool cr_save_peers(cbm_store_t *source, const char *project, yyjson_mut_doc *peers) {
+    char key[CR_QN_BUF];
+    if (!cr_peers_key(project, key, sizeof(key))) {
+        return false;
+    }
+    char *json = yyjson_mut_write(peers, 0, NULL);
+    bool ok = json && cbm_store_meta_put(source, key, json) == CBM_STORE_OK;
+    free(json);
+    return ok;
+}
+
+static yyjson_doc *cr_read_peers(cbm_store_t *source, const char *project) {
+    char key[CR_QN_BUF];
+    char *json = NULL;
+    if (!cr_peers_key(project, key, sizeof(key)) ||
+        cbm_store_meta_get(source, key, &json) != CBM_STORE_OK) {
+        return NULL;
+    }
+    yyjson_doc *doc = yyjson_read(json, strlen(json), 0);
+    cbm_free(CBM_MEM_CLASS_STORE, json);
+    return doc;
+}
+
+static bool cr_reverse_pending_key(const char *project, char *buf, size_t size) {
+    int written = snprintf(buf, size, "cross_repo_reverse_pending:%s", project);
+    return written > 0 && (size_t)written < size;
+}
+
+static bool cr_reverse_pending(cbm_store_t *source, const char *project) {
+    char key[CR_QN_BUF];
+    char *value = NULL;
+    bool pending = cr_reverse_pending_key(project, key, sizeof(key)) &&
+                   cbm_store_meta_get(source, key, &value) == CBM_STORE_OK &&
+                   strcmp(value, "1") == 0;
+    cbm_free(CBM_MEM_CLASS_STORE, value);
+    return pending;
+}
+
+static bool cr_set_reverse_pending(cbm_store_t *source, const char *project, bool pending) {
+    char key[CR_QN_BUF];
+    return cr_reverse_pending_key(project, key, sizeof(key)) &&
+           cbm_store_meta_put(source, key, pending ? "1" : "0") == CBM_STORE_OK;
+}
+
+bool cbm_cross_repo_reverse_pending(const char *project) {
+    cbm_store_t *store = cr_open_peer(project);
+    bool pending = store && cr_reverse_pending(store, project);
+    cbm_store_close(store);
+    return pending;
+}
+
+/* Write generation observations against the same connection that the
+ * matcher reads. An unavailable provider is represented by JSON null. */
+static bool cr_remember_peer(yyjson_mut_doc *peers, const char *name, cbm_store_t *provider) {
+    yyjson_mut_val *root = yyjson_mut_doc_get_root(peers);
+    if (!provider) {
+        return yyjson_mut_obj_add_null(peers, root, name);
+    }
+    char generation[CBM_GRAPH_COMPARE_GENERATION_SIZE];
+    return cbm_store_generation(provider, generation, sizeof(generation)) == CBM_STORE_OK &&
+           yyjson_mut_obj_add_strcpy(peers, root, name, generation);
+}
+
+static bool cr_peer_is_stale(const char *name, const char *observed) {
+    if (!observed) {
+        return true;
+    }
+    cbm_store_t *peer = cr_open_peer(name);
+    char generation[CBM_GRAPH_COMPARE_GENERATION_SIZE];
+    bool same = peer &&
+                cbm_store_generation(peer, generation, sizeof(generation)) == CBM_STORE_OK &&
+                strcmp(observed, generation) == 0;
+    cbm_store_close(peer);
+    return !same;
+}
+
+static bool cr_has_stale_peers(cbm_store_t *store, const char *project) {
+    yyjson_doc *peers = cr_read_peers(store, project);
+    yyjson_obj_iter iter = yyjson_obj_iter_with(yyjson_doc_get_root(peers));
+    bool stale = false;
+    yyjson_val *key;
+    while (!stale && (key = yyjson_obj_iter_next(&iter))) {
+        stale = cr_peer_is_stale(yyjson_get_str(key), yyjson_get_str(yyjson_obj_iter_get_val(key)));
+    }
+    yyjson_doc_free(peers);
+    return stale;
 }
 
 /* Record this run in the SOURCE store's store_meta, next to the CROSS_*
@@ -1843,10 +1941,14 @@ bool cbm_cross_repo_add_status_json(struct yyjson_mut_doc *doc, struct yyjson_mu
     /* "never_run" is the honest reading of an absent marker: no run with this
      * project as the source has completed its cleanup since the store was
      * (re)built. A target-side run still leaves its CROSS_* edges here. */
-    const char *state = rc == CBM_STORE_NOT_FOUND         ? "never_run"
-                        : yyjson_mut_obj_size(status) > 0 ? "ran"
-                                                          : "unavailable";
+    const char *state = cr_has_stale_peers(store, project) ? "stale"
+                        : rc == CBM_STORE_NOT_FOUND        ? "never_run"
+                        : yyjson_mut_obj_size(status) > 0  ? "ran"
+                                                           : "unavailable";
     yyjson_mut_obj_add_str(doc, status, "status", state);
+    if (cr_reverse_pending(store, project)) {
+        yyjson_mut_obj_add_bool(doc, status, "reverse_pending", true);
+    }
     return yyjson_mut_obj_add_val(doc, parent, "cross_repo", status);
 }
 
@@ -1871,11 +1973,11 @@ static cr_run_status_t cr_match_project_pair(cbm_store_t *src_store, const char 
                                              cbm_store_t *tgt_store, const char *tgt,
                                              cr_run_context_t *run,
                                              cbm_cross_repo_result_t *result) {
-    cr_run_status_t match_status = run->staging_store ? CR_RUN_OK
-                           : cr_reconcile_reverse(tgt_store, tgt, project, run);
+    cr_run_status_t match_status =
+        run->staging_store ? CR_RUN_OK : cr_reconcile_reverse(tgt_store, tgt, project, run);
     if (match_status == CR_RUN_OK) {
-        match_status = add_match_count(
-            &result->http_edges, match_http_routes(src_store, project, tgt_store, tgt, run));
+        match_status = add_match_count(&result->http_edges,
+                                       match_http_routes(src_store, project, tgt_store, tgt, run));
     }
     /* Reverse direction: when this pass runs from the provider side, the
      * consumer's HTTP_CALLS live in tgt, not src — the forward pass above
@@ -1886,35 +1988,34 @@ static cr_run_status_t cr_match_project_pair(cbm_store_t *src_store, const char 
      * disjoint edge sets and never double-count a pair; the store's
      * (source, target, type) upsert keeps re-recorded rows unique. (#523) */
     if (match_status == CR_RUN_OK) {
-        match_status = add_match_count(
-            &result->http_edges, match_http_routes(tgt_store, tgt, src_store, project, run));
+        match_status = add_match_count(&result->http_edges,
+                                       match_http_routes(tgt_store, tgt, src_store, project, run));
     }
     if (match_status == CR_RUN_OK) {
-        match_status = add_match_count(
-            &result->async_edges, match_async_routes(src_store, project, tgt_store, tgt, run));
+        match_status = add_match_count(&result->async_edges,
+                                       match_async_routes(src_store, project, tgt_store, tgt, run));
     }
     if (match_status == CR_RUN_OK) {
-        match_status = add_match_count(
-            &result->channel_edges, match_channels(src_store, project, tgt_store, tgt, run));
+        match_status = add_match_count(&result->channel_edges,
+                                       match_channels(src_store, project, tgt_store, tgt, run));
     }
     if (match_status == CR_RUN_OK) {
-        match_status =
-            add_match_count(&result->grpc_edges,
-                            match_typed_routes(src_store, project, tgt_store, tgt, "GRPC_CALLS",
-                                               "service", "method", "CROSS_GRPC_CALLS", false,
-                                               run));
+        match_status = add_match_count(&result->grpc_edges,
+                                       match_typed_routes(src_store, project, tgt_store, tgt,
+                                                          "GRPC_CALLS", "service", "method",
+                                                          "CROSS_GRPC_CALLS", false, run));
     }
     if (match_status == CR_RUN_OK) {
-        match_status = add_match_count(
-            &result->graphql_edges,
-            match_typed_routes(src_store, project, tgt_store, tgt, "GRAPHQL_CALLS", "operation",
-                               "operation", "CROSS_GRAPHQL_CALLS", false, run));
+        match_status = add_match_count(&result->graphql_edges,
+                                       match_typed_routes(src_store, project, tgt_store, tgt,
+                                                          "GRAPHQL_CALLS", "operation", "operation",
+                                                          "CROSS_GRAPHQL_CALLS", false, run));
     }
     if (match_status == CR_RUN_OK) {
-        match_status = add_match_count(
-            &result->trpc_edges,
-            match_typed_routes(src_store, project, tgt_store, tgt, "TRPC_CALLS", "procedure",
-                               "procedure", "CROSS_TRPC_CALLS", false, run));
+        match_status = add_match_count(&result->trpc_edges,
+                                       match_typed_routes(src_store, project, tgt_store, tgt,
+                                                          "TRPC_CALLS", "procedure", "procedure",
+                                                          "CROSS_TRPC_CALLS", false, run));
     }
     /* Provider side: the consumer's typed calls live in tgt. This run
      * maintains only the consumer's forward rows that already name this
@@ -1923,22 +2024,22 @@ static cr_run_status_t cr_match_project_pair(cbm_store_t *src_store, const char 
      * HTTP above, it never creates a consumer link or redirects one that
      * names another server. */
     if (match_status == CR_RUN_OK) {
-        match_status = add_match_count(
-            &result->grpc_edges,
-            match_typed_routes(tgt_store, tgt, src_store, project, "GRPC_CALLS", "service",
-                               "method", "CROSS_GRPC_CALLS", true, run));
+        match_status =
+            add_match_count(&result->grpc_edges,
+                            match_typed_routes(tgt_store, tgt, src_store, project, "GRPC_CALLS",
+                                               "service", "method", "CROSS_GRPC_CALLS", true, run));
     }
     if (match_status == CR_RUN_OK) {
-        match_status = add_match_count(
-            &result->graphql_edges,
-            match_typed_routes(tgt_store, tgt, src_store, project, "GRAPHQL_CALLS",
-                               "operation", "operation", "CROSS_GRAPHQL_CALLS", true, run));
+        match_status = add_match_count(&result->graphql_edges,
+                                       match_typed_routes(tgt_store, tgt, src_store, project,
+                                                          "GRAPHQL_CALLS", "operation", "operation",
+                                                          "CROSS_GRAPHQL_CALLS", true, run));
     }
     if (match_status == CR_RUN_OK) {
-        match_status = add_match_count(
-            &result->trpc_edges,
-            match_typed_routes(tgt_store, tgt, src_store, project, "TRPC_CALLS", "procedure",
-                               "procedure", "CROSS_TRPC_CALLS", true, run));
+        match_status = add_match_count(&result->trpc_edges,
+                                       match_typed_routes(tgt_store, tgt, src_store, project,
+                                                          "TRPC_CALLS", "procedure", "procedure",
+                                                          "CROSS_TRPC_CALLS", true, run));
     }
 
     return match_status;
@@ -1946,8 +2047,8 @@ static cr_run_status_t cr_match_project_pair(cbm_store_t *src_store, const char 
 
 /* The live generation owns the previous selection. The stage may be a new
  * database, or an incremental copy whose link rows need to be replaced. */
-int cbm_cross_repo_relink_stage(const char *live_path, const char *stage_path,
-                               const char *project, const atomic_int *cancelled) {
+int cbm_cross_repo_relink_stage(const char *live_path, const char *stage_path, const char *project,
+                                const atomic_int *cancelled) {
     cbm_store_t *previous = cbm_store_open_path_query(live_path);
     if (!previous) {
         /* Keep the normal recovery path for an unreadable serving index. */
@@ -1969,27 +2070,33 @@ int cbm_cross_repo_relink_stage(const char *live_path, const char *stage_path,
     cbm_cross_repo_result_t result = {0};
     bool wildcard = target_count == 1 && strcmp(targets[0], "*") == 0;
     char **resolved = NULL;
-    int count = wildcard ? collect_all_projects(&resolved, &run, &result)
-                         : collect_named_projects((const char **)targets, target_count, &resolved,
-                                                  &run);
-    bool ok = count >= 0 && delete_cross_edges(staging, project, &run) == CR_RUN_OK;
+    int count = wildcard
+                    ? collect_all_projects(&resolved, &run, &result)
+                    : collect_named_projects((const char **)targets, target_count, &resolved, &run);
+    yyjson_mut_doc *peers = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val *observations = peers ? yyjson_mut_obj(peers) : NULL;
+    if (observations) {
+        yyjson_mut_doc_set_root(peers, observations);
+    }
+    bool ok = count >= 0 && observations && delete_cross_edges(staging, project, &run) == CR_RUN_OK;
     for (int i = 0; ok && i < count; i++) {
         const char *target = resolved[i];
         if (strcmp(target, project) == 0) {
             continue;
         }
-        char path[CR_PATH_BUF];
-        cbm_store_t *provider = cr_db_path(target, path, sizeof(path))
-                                    ? cbm_store_open_path_query(path)
-                                    : NULL;
+        cbm_store_t *provider = cr_open_peer(target);
         if (!provider || !cr_store_has_exact_project(provider, target) ||
             !cbm_store_edges_schema_current(provider)) {
             cbm_store_close(provider);
-            ok = cr_record_skip(&result, target, "target_unavailable");
+            ok = cr_record_skip(&result, target, "target_unavailable") &&
+                 cr_remember_peer(peers, target, NULL);
             continue;
         }
-        ok = cr_match_project_pair(staging, project, provider, target, &run, &result) ==
-             CR_RUN_OK;
+        cbm_store_read_scope_t *scope = NULL;
+        ok = cbm_store_read_scope_open(provider, NULL, NULL, &scope) == CBM_STORE_OK &&
+             cr_remember_peer(peers, target, provider) &&
+             cr_match_project_pair(staging, project, provider, target, &run, &result) == CR_RUN_OK;
+        ok = cbm_store_read_scope_close(scope) == CBM_STORE_OK && ok;
         cbm_store_close(provider);
         if (ok) {
             result.projects_scanned++;
@@ -1997,12 +2104,75 @@ int cbm_cross_repo_relink_stage(const char *live_path, const char *stage_path,
     }
     ok = ok && !cr_cancel_requested(&run) &&
          cr_record_targets(staging, project, (const char **)targets, target_count) &&
+         cr_save_peers(staging, project, peers) && cr_set_reverse_pending(staging, project, true) &&
          cr_record_last_run(staging, project, (const char **)targets, target_count, &result);
+    yyjson_mut_doc_free(peers);
     cbm_cross_repo_result_free(&result);
     cbm_store_close(staging);
     free_project_list(resolved, count);
     free_project_list(targets, target_count);
     return ok ? CBM_STORE_OK : CBM_STORE_ERR;
+}
+
+/* Repair only the provider's reverse references. The source generation is
+ * already published and its outgoing links must survive a repair failure.
+ * Typed matches restrict this pass to the provider the source selected. */
+static bool cr_repair_peer(cbm_store_t *source, const char *project, cbm_store_t *provider,
+                           const char *target) {
+    cr_run_context_t run = {.staging_store = provider};
+    if (cbm_store_begin(provider) != CBM_STORE_OK) {
+        return false;
+    }
+    bool ok = cr_reconcile_reverse(provider, target, project, &run) == CR_RUN_OK &&
+              match_http_routes(source, project, provider, target, &run).status == CR_RUN_OK &&
+              match_channels(source, project, provider, target, &run).status == CR_RUN_OK &&
+              match_typed_routes(source, project, provider, target, "GRPC_CALLS", "service",
+                                 "method", "CROSS_GRPC_CALLS", true, &run)
+                      .status == CR_RUN_OK &&
+              match_typed_routes(source, project, provider, target, "GRAPHQL_CALLS", "operation",
+                                 "operation", "CROSS_GRAPHQL_CALLS", true, &run)
+                      .status == CR_RUN_OK &&
+              match_typed_routes(source, project, provider, target, "TRPC_CALLS", "procedure",
+                                 "procedure", "CROSS_TRPC_CALLS", true, &run)
+                      .status == CR_RUN_OK;
+    if (ok && cbm_store_commit(provider) == CBM_STORE_OK) {
+        return true;
+    }
+    (void)cbm_store_rollback(provider);
+    return false;
+}
+
+bool cbm_cross_repo_reconcile_published(const char *project) {
+    cbm_store_t *source = cr_open_existing_project(project);
+    if (!source) {
+        return false;
+    }
+    if (!cr_reverse_pending(source, project)) {
+        cbm_store_close(source);
+        return true;
+    }
+    yyjson_doc *peers = cr_read_peers(source, project);
+    yyjson_val *expected = yyjson_doc_get_root(peers);
+    bool ok = yyjson_is_obj(expected);
+    yyjson_obj_iter iter = yyjson_obj_iter_with(expected);
+    yyjson_val *key;
+    while ((key = yyjson_obj_iter_next(&iter))) {
+        const char *target = yyjson_get_str(key);
+        const char *observed = yyjson_get_str(yyjson_obj_iter_get_val(key));
+        cbm_store_t *provider = observed ? cr_open_existing_project(target) : NULL;
+        char current[CBM_GRAPH_COMPARE_GENERATION_SIZE];
+        bool matched =
+            provider && cbm_store_generation(provider, current, sizeof(current)) == CBM_STORE_OK &&
+            strcmp(current, observed) == 0 && cr_repair_peer(source, project, provider, target);
+        cbm_store_close(provider);
+        ok = matched && ok;
+    }
+    yyjson_doc_free(peers);
+    if (ok) {
+        ok = cr_set_reverse_pending(source, project, false);
+    }
+    cbm_store_close(source);
+    return ok;
 }
 
 /* ── Entry point ─────────────────────────────────────────────────── */
@@ -2085,12 +2255,38 @@ cbm_cross_repo_result_t cbm_cross_repo_match_cancellable(const char *project,
         return result;
     }
 
+    char **previous_targets = NULL;
+    int previous_count = cr_read_targets(src_store, project, &previous_targets);
+    bool saved_previous =
+        previous_count == 0 ||
+        (previous_count > 0 &&
+         cr_record_targets(src_store, project, (const char **)previous_targets, previous_count));
+    free_project_list(previous_targets, previous_count);
+    if (!saved_previous) {
+        result.failed = true;
+        cbm_store_close(src_store);
+        free_project_list(resolved, resolved_count);
+        return result;
+    }
+
+    yyjson_mut_doc *peers = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val *observations = peers ? yyjson_mut_obj(peers) : NULL;
+    if (!observations) {
+        result.failed = true;
+        yyjson_mut_doc_free(peers);
+        cbm_store_close(src_store);
+        free_project_list(resolved, resolved_count);
+        return result;
+    }
+    yyjson_mut_doc_set_root(peers, observations);
+
     /* Clean existing CROSS_* edges for this project */
     cr_run_status_t cleanup_status = delete_cross_edges(src_store, project, &run);
     if (cleanup_status != CR_RUN_OK) {
         result.cancelled = cleanup_status == CR_RUN_CANCELLED;
         result.partial_results = result.cancelled && run.mutated;
         result.failed = cleanup_status == CR_RUN_FAILED;
+        yyjson_mut_doc_free(peers);
         cbm_store_close(src_store);
         free_project_list(resolved, resolved_count);
         return result;
@@ -2116,7 +2312,9 @@ cbm_cross_repo_result_t cbm_cross_repo_match_cancellable(const char *project,
         }
 
         cr_run_status_t match_status =
-            cr_match_project_pair(src_store, project, tgt_store, tgt, &run, &result);
+            cr_remember_peer(peers, tgt, tgt_store)
+                ? cr_match_project_pair(src_store, project, tgt_store, tgt, &run, &result)
+                : CR_RUN_FAILED;
 
         cbm_store_close(tgt_store);
         if (match_status == CR_RUN_FAILED) {
@@ -2132,10 +2330,13 @@ cbm_cross_repo_result_t cbm_cross_repo_match_cancellable(const char *project,
     }
 
     if (!result.failed && !result.cancelled &&
-        !cr_record_targets(src_store, project, target_projects, target_count)) {
+        (!cr_save_peers(src_store, project, peers) ||
+         !cr_record_targets(src_store, project, target_projects, target_count) ||
+         !cr_set_reverse_pending(src_store, project, false))) {
         result.failed = true;
     }
     (void)cr_record_last_run(src_store, project, target_projects, target_count, &result);
+    yyjson_mut_doc_free(peers);
     cbm_store_close(src_store);
 
     free_project_list(resolved, resolved_count);

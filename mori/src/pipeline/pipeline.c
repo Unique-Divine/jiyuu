@@ -5215,9 +5215,8 @@ int cbm_pipeline_run(cbm_pipeline_t *p) {
         pipeline_release_test_config(p);
         return rc;
     }
-    if (final_existed &&
-        cbm_cross_repo_relink_stage(final_path, staging_path, p->project_name, p->cancelled) !=
-            CBM_STORE_OK) {
+    if (final_existed && cbm_cross_repo_relink_stage(final_path, staging_path, p->project_name,
+                                                     p->cancelled) != CBM_STORE_OK) {
         bool cancelled_during_relink = check_cancel(p);
         cleanup_staging_db(staging_path);
         free(staging_path);

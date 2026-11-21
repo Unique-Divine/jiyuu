@@ -22,6 +22,7 @@
 #include "mcp/mcp.h"
 #include "mcp/mcp_internal.h"
 #include "pipeline/pipeline.h"
+#include "pipeline/pass_cross_repo.h"
 #include "store/graph_mem.h"
 #include "ui/config.h"
 #include "watcher/watcher.h"
@@ -2040,7 +2041,6 @@ static void application_job_publish(cbm_daemon_application_job_t *job,
                               (execution->unsafe_terminal && execution->have_last_result &&
                                !execution->last_result.cancellation_requested);
     job->terminal = true;
-    job->thread_done = true;
     application_index_watch_publish_locked(job);
     application_index_record_finish_locked(job);
     if (job->async_owned) {
@@ -2061,7 +2061,6 @@ static void application_job_publish(cbm_daemon_application_job_t *job,
         }
     }
     application_auto_index_retry_pending_locked(application);
-    cbm_mem_class_flush_thread();
     cbm_mutex_unlock(&application->mutex);
 }
 
@@ -2101,6 +2100,22 @@ static void *application_job_thread(void *opaque) {
         }
     }
     application_job_publish(job, &execution);
+
+    /* The worker and its source lease are gone, and the published job is
+     * terminal. Multi-project writes take the same wildcard lease as an
+     * explicit wildcard relink. On contention, leave the pending marker. */
+    cbm_daemon_application_t *application = job->application;
+    if (execution.successful && cbm_cross_repo_reverse_pending(job->project_key) &&
+        cbm_daemon_application_project_mutation_try_begin(application, "*")) {
+        if (!cbm_cross_repo_reconcile_published(job->project_key)) {
+            cbm_log_info("cross_repo.reverse_pending", "project", job->project_key);
+        }
+        cbm_daemon_application_project_mutation_end(application, "*");
+    }
+    cbm_mem_class_flush_thread();
+    cbm_mutex_lock(&application->mutex);
+    job->thread_done = true;
+    cbm_mutex_unlock(&application->mutex);
     return NULL;
 }
 
