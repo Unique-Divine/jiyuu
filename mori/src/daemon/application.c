@@ -246,7 +246,7 @@ struct cbm_daemon_application {
     bool update_thread_started;
     bool update_thread_done;
     bool update_thread_joining;
-    bool stopping;
+    atomic_int stopping; /* Also observed by post-publication link repair. */
     /* See cbm_daemon_application_set_permanent. */
     bool permanent;
     uint8_t ui_readiness_secret[CBM_SHA256_DIGEST_LEN];
@@ -2107,7 +2107,7 @@ static void *application_job_thread(void *opaque) {
     cbm_daemon_application_t *application = job->application;
     if (execution.successful && cbm_cross_repo_reverse_pending(job->project_key) &&
         cbm_daemon_application_project_mutation_try_begin(application, "*")) {
-        if (!cbm_cross_repo_reconcile_published(job->project_key)) {
+        if (!cbm_cross_repo_reconcile_published(job->project_key, &application->stopping)) {
             cbm_log_info("cross_repo.reverse_pending", "project", job->project_key);
         }
         cbm_daemon_application_project_mutation_end(application, "*");
@@ -3833,6 +3833,7 @@ cbm_daemon_application_t *cbm_daemon_application_new(
         return NULL;
     }
     cbm_mutex_init(&application->mutex);
+    atomic_init(&application->stopping, 0);
     application->physical_job_limit = APPLICATION_DEFAULT_PHYSICAL_JOB_LIMIT;
     size_t aggregate_memory_budget_bytes = cbm_mem_budget();
     if (config) {

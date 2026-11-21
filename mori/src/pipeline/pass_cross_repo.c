@@ -39,6 +39,7 @@ enum {
     CR_MAX_CACHE_ENTRIES = 16384,
     CR_COL_3 = 3,
     CR_COL_4 = 4,
+    CR_CANCEL_SQLITE_OPS = 1000,
     CR_SCHEME_SKIP = 3,      /* strlen("://") */
     CR_ROUTE_PREFIX_LEN = 9, /* strlen("__route__") */
     CR_ANY_LEN = 3,          /* strlen("ANY") */
@@ -2177,15 +2178,24 @@ int cbm_cross_repo_relink_stage(const char *live_path, const char *stage_path, c
     return ok ? CBM_STORE_OK : CBM_STORE_ERR;
 }
 
+static int cr_sql_cancel(void *context) {
+    cr_run_context_t *run = context;
+    return cr_cancel_requested(run) ? 1 : 0;
+}
+
 /* Repair only the provider's reverse references. The source generation is
  * already published and its outgoing links must survive a repair failure.
  * Typed matches restrict this pass to the provider the source selected. */
 static bool cr_repair_peer(cbm_store_t *source, const char *project, cbm_store_t *provider,
-                           const char *target) {
-    cr_run_context_t run = {.staging_store = provider};
-    if (cbm_store_begin(provider) != CBM_STORE_OK) {
+                           const char *target, const atomic_int *cancelled) {
+    cr_run_context_t run = {.cancelled = cancelled, .staging_store = provider};
+    if (cr_cancel_requested(&run) || cbm_store_begin(provider) != CBM_STORE_OK) {
         return false;
     }
+    sqlite3 *source_db = cbm_store_get_db(source);
+    sqlite3 *provider_db = cbm_store_get_db(provider);
+    sqlite3_progress_handler(source_db, CR_CANCEL_SQLITE_OPS, cr_sql_cancel, &run);
+    sqlite3_progress_handler(provider_db, CR_CANCEL_SQLITE_OPS, cr_sql_cancel, &run);
     bool ok = cr_reconcile_reverse(provider, target, project, &run) == CR_RUN_OK &&
               match_http_routes(source, project, provider, target, &run).status == CR_RUN_OK &&
               match_channels(source, project, provider, target, &run).status == CR_RUN_OK &&
@@ -2198,14 +2208,20 @@ static bool cr_repair_peer(cbm_store_t *source, const char *project, cbm_store_t
               match_typed_routes(source, project, provider, target, "TRPC_CALLS", "procedure",
                                  "procedure", "CROSS_TRPC_CALLS", true, &run)
                       .status == CR_RUN_OK;
-    if (ok && cbm_store_commit(provider) == CBM_STORE_OK) {
+    sqlite3_progress_handler(source_db, 0, NULL, NULL);
+    sqlite3_progress_handler(provider_db, 0, NULL, NULL);
+    if (ok && !cr_cancel_requested(&run) && cbm_store_commit(provider) == CBM_STORE_OK) {
         return true;
     }
     (void)cbm_store_rollback(provider);
     return false;
 }
 
-bool cbm_cross_repo_reconcile_published(const char *project) {
+bool cbm_cross_repo_reconcile_published(const char *project, const atomic_int *cancelled) {
+    cr_run_context_t run = {.cancelled = cancelled};
+    if (cr_cancel_requested(&run)) {
+        return false;
+    }
     cbm_store_t *source = cr_open_existing_project(project);
     if (!source) {
         return false;
@@ -2219,21 +2235,20 @@ bool cbm_cross_repo_reconcile_published(const char *project) {
     bool ok = yyjson_is_obj(expected);
     yyjson_obj_iter iter = yyjson_obj_iter_with(expected);
     yyjson_val *key;
-    while ((key = yyjson_obj_iter_next(&iter))) {
+    while (!cr_cancel_requested(&run) && (key = yyjson_obj_iter_next(&iter))) {
         const char *target = yyjson_get_str(key);
         const char *observed = yyjson_get_str(yyjson_obj_iter_get_val(key));
         cbm_store_t *provider = observed ? cr_open_existing_project(target) : NULL;
         char current[CBM_GRAPH_COMPARE_GENERATION_SIZE];
-        bool matched =
-            provider && cbm_store_generation(provider, current, sizeof(current)) == CBM_STORE_OK &&
-            strcmp(current, observed) == 0 && cr_repair_peer(source, project, provider, target);
+        bool matched = provider &&
+                       cbm_store_generation(provider, current, sizeof(current)) == CBM_STORE_OK &&
+                       strcmp(current, observed) == 0 &&
+                       cr_repair_peer(source, project, provider, target, cancelled);
         cbm_store_close(provider);
         ok = matched && ok;
     }
     yyjson_doc_free(peers);
-    if (ok) {
-        ok = cr_set_reverse_pending(source, project, false);
-    }
+    ok = ok && !cr_cancel_requested(&run) && cr_set_reverse_pending(source, project, false);
     cbm_store_close(source);
     return ok;
 }

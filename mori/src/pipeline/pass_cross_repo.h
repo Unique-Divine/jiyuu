@@ -98,8 +98,9 @@ int cbm_cross_repo_relink_stage(const char *live_path, const char *stage_path, c
 bool cbm_cross_repo_reverse_pending(const char *project);
 
 /* Complete peer-side writes after publication. Caller must hold the wildcard
- * project mutation lease. Success leaves the consumer's forward rows intact. */
-bool cbm_cross_repo_reconcile_published(const char *project);
+ * project mutation lease. A cancellation rolls back the current peer write
+ * and leaves the repair pending. */
+bool cbm_cross_repo_reconcile_published(const char *project, const atomic_int *cancelled);
 
 /* Run cross-repo matching for `project` against `target_projects`.
  * If target_count == 1 and target_projects[0] == "*", matches against all
