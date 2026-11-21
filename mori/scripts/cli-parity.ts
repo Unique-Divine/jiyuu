@@ -21,7 +21,6 @@
 // Matching output alone would pass when both binaries fail the same way, so
 // each invocation also has fixed expectations on its exit code and stdout,
 // checked on both sides.
-
 import { cp, mkdir, mkdtemp, realpath, rm } from "node:fs/promises"
 import { join, resolve } from "node:path"
 
@@ -48,12 +47,14 @@ export interface McpRequest {
   method: string
   id?: number
   params?: Record<string, unknown>
+  expect?: string[]
 }
 
 export interface RunResult {
   exitCode: number | null
   stdout: string
   stderr: string
+  failures?: string[]
 }
 
 export interface Side {
@@ -116,7 +117,11 @@ export function normalize(text: string, ctx: NormalizeContext): string {
 
 // A line diff that marks each differing line pair; enough to read a failure
 // in CI logs without a diff dependency.
-export function diffLines(a: string, b: string, labels = ["c", "mori"]): string {
+export function diffLines(
+  a: string,
+  b: string,
+  labels = ["c", "mori"],
+): string {
   const left = a.split("\n")
   const right = b.split("\n")
   const out: string[] = []
@@ -162,7 +167,7 @@ export function checkExpectation(
   result: RunResult,
   expect: Expectation,
 ): string[] {
-  const reasons: string[] = []
+  const reasons = [...(result.failures ?? [])]
   if (result.exitCode !== expect.exit) {
     reasons.push(`exit ${result.exitCode}, expected ${expect.exit}`)
   }
@@ -183,10 +188,64 @@ export const MCP_REQUESTS: McpRequest[] = [
       capabilities: {},
       clientInfo: { name: "cli-parity", version: "1" },
     },
+    expect: ['"serverInfo"', '"protocolVersion": "2025-06-18"'],
   },
   { method: "notifications/initialized" },
-  { method: "tools/list", id: 2, params: {} },
+  {
+    method: "tools/list",
+    id: 2,
+    params: {},
+    expect: [
+      '"name": "index_repository"',
+      '"name": "search_graph"',
+      '"name": "trace_path"',
+    ],
+  },
 ]
+
+function mcpReadRequests(project: string): McpRequest[] {
+  return [
+    ...MCP_REQUESTS,
+    {
+      method: "tools/call",
+      id: 3,
+      params: { name: "list_projects", arguments: { format: "json" } },
+      expect: [project],
+    },
+    {
+      method: "tools/call",
+      id: 4,
+      params: {
+        name: "search_graph",
+        arguments: { project, name_pattern: "^helper$", format: "json" },
+      },
+      expect: [`${project}.py.util`, '"helper"'],
+    },
+    {
+      method: "tools/call",
+      id: 5,
+      params: {
+        name: "query_graph",
+        arguments: {
+          project,
+          query:
+            "MATCH (f:Function)-[:CALLS]->(g:Function) " +
+            "RETURN f.name, g.name ORDER BY f.name, g.name",
+        },
+      },
+      expect: ["Twice Add", "run helper", "greet formatName"],
+    },
+    {
+      method: "tools/call",
+      id: 6,
+      params: {
+        name: "get_graph_schema",
+        arguments: { project, format: "json" },
+      },
+      expect: ["Function", "CALLS"],
+    },
+  ]
+}
 
 export function hookPayload(repo: string): string {
   return JSON.stringify({
@@ -217,7 +276,11 @@ export function invocations(repo: string, project: string): Invocation[] {
       args: ["--version"],
       expect: { exit: 0, stdout: [" "] },
     },
-    { name: "--help", args: ["--help"], expect: { exit: 0, stdout: ["Usage:"] } },
+    {
+      name: "--help",
+      args: ["--help"],
+      expect: { exit: 0, stdout: ["Usage:"] },
+    },
     {
       name: "cli list_projects (empty)",
       args: ["cli", "list_projects"],
@@ -285,18 +348,10 @@ export function invocations(repo: string, project: string): Invocation[] {
       expect: { exit: 0 },
     },
     {
-      name: "mcp stdio initialize + tools/list",
+      name: "mcp stdio initialization and graph reads",
       args: [],
-      mcp: MCP_REQUESTS,
-      expect: {
-        exit: 0,
-        stdout: [
-          '"serverInfo"',
-          '"name": "index_repository"',
-          '"name": "search_graph"',
-          '"name": "trace_path"',
-        ],
-      },
+      mcp: mcpReadRequests(project),
+      expect: { exit: 0 },
     },
   ]
 }
@@ -361,6 +416,7 @@ async function runMcp(
   const decoder = new TextDecoder()
   let buffer = ""
   const responses: string[] = []
+  const failures: string[] = []
   const nextLine = async (): Promise<string | undefined> => {
     for (;;) {
       const nl = buffer.indexOf("\n")
@@ -376,20 +432,68 @@ async function runMcp(
   }
   try {
     for (const req of inv.mcp ?? []) {
-      const msg = { jsonrpc: "2.0", ...req }
+      const { expect, ...request } = req
+      const msg = { jsonrpc: "2.0", ...request }
       proc.stdin.write(JSON.stringify(msg) + "\n")
       await proc.stdin.flush()
       if (req.id === undefined) continue
       for (;;) {
         const line = await nextLine()
         if (line === undefined) {
-          responses.push(`<EOF before response ${req.id}>`)
+          failures.push(`${req.method} id=${req.id}: EOF before response`)
           break
         }
         if (!line.trim()) continue
-        const parsed = JSON.parse(line) as { id?: number }
+        const parsed = JSON.parse(line) as {
+          id?: number
+          error?: unknown
+          result?: { isError?: boolean; serverInfo?: { name: string } }
+        }
         if (parsed.id === req.id) {
-          responses.push(JSON.stringify(parsed, null, 2))
+          const failure = `${req.method} id=${req.id}`
+          if (
+            parsed.error !== undefined ||
+            !parsed.result ||
+            parsed.result.isError
+          ) {
+            failures.push(`${failure} returned an error`)
+            responses.push(line)
+            break
+          }
+          const server = parsed.result.serverInfo
+          if (
+            req.method === "initialize" &&
+            server &&
+            [...PROGRAM_NAMES, "mori-graph"].some(
+              (name) => server.name === name,
+            )
+          ) {
+            server.name = "<PROGRAM>"
+          }
+          // The JSON-RPC response is a JSON object. Its property order does not
+          // change the result, including tool input schema objects.
+          const serialized = JSON.stringify(
+            parsed,
+            (_key, value: unknown) => {
+              if (
+                value === null ||
+                typeof value !== "object" ||
+                Array.isArray(value)
+              ) {
+                return value
+              }
+              return Object.fromEntries(
+                Object.entries(value).sort(([a], [b]) => a.localeCompare(b)),
+              )
+            },
+            2,
+          )
+          for (const needle of expect ?? []) {
+            if (!serialized.includes(needle)) {
+              failures.push(`${failure} lacks ${JSON.stringify(needle)}`)
+            }
+          }
+          responses.push(serialized)
           break
         }
       }
@@ -398,7 +502,12 @@ async function runMcp(
     await proc.stdin.end()
   }
   const exitCode = await proc.exited
-  return { exitCode, stdout: responses.join("\n"), stderr: await stderrText }
+  return {
+    exitCode,
+    stdout: responses.join("\n"),
+    stderr: await stderrText,
+    failures,
+  }
 }
 
 async function makeSide(label: string, bin: string, scratch: string) {
