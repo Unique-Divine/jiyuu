@@ -52,6 +52,9 @@ mod graphql_link;
 mod query_cli;
 
 #[cfg(any(feature = "c-backend", test))]
+mod cli_output;
+
+#[cfg(any(feature = "c-backend", test))]
 mod initialize;
 #[cfg(any(feature = "c-backend", test))]
 mod project_page;
