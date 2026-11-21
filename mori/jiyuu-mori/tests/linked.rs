@@ -497,6 +497,16 @@ fn graphql_rows(scratch: &Scratch, project: &str) -> Vec<String> {
         .expect("read GraphQL rows")
 }
 
+fn log_has_graphql_backend(log: &str, implementation: &str) -> bool {
+    let planner = format!("planner={implementation}");
+    let writer = format!("writer={implementation}");
+    log.lines().any(|line| {
+        line.contains("msg=pass.route_nodes.graphql")
+            && line.split_ascii_whitespace().any(|kv| kv == planner)
+            && line.split_ascii_whitespace().any(|kv| kv == writer)
+    })
+}
+
 #[test]
 fn graphql_update_paths_match_c() {
     let work = Scratch::new("graphql-repo");
@@ -525,16 +535,18 @@ fn graphql_update_paths_match_c() {
         ),
     ];
     let steps = [
-        (None, "msg=pipeline.route path=full", 1),
+        (None, "msg=pipeline.route path=full", 1, true),
         (
             None,
             "msg=incremental.noop reason=semantic_manifest_equal",
             1,
+            false,
         ),
         (
             Some(("op.graphql", "query OperationRenamed { value }\n")),
             "msg=incremental.route route=closure_repair",
             1,
+            false,
         ),
         (
             Some((
@@ -543,6 +555,7 @@ fn graphql_update_paths_match_c() {
             )),
             "msg=incremental.route route=closure_repair",
             1,
+            false,
         ),
         (
             Some((
@@ -551,6 +564,7 @@ fn graphql_update_paths_match_c() {
             )),
             "msg=incremental.force_full",
             2,
+            true,
         ),
     ];
     let mut sides = Vec::new();
@@ -564,7 +578,7 @@ fn graphql_update_paths_match_c() {
         let scratch = Scratch::new(label);
         let mut worker_logs = std::collections::HashSet::new();
         let mut steps_rows = Vec::new();
-        for (edit, expected, route_count) in steps {
+        for (edit, expected, route_count, full) in steps {
             if let Some((path, contents)) = edit {
                 fs::write(repo.join(path), contents).expect("edit fixture file");
             }
@@ -602,8 +616,14 @@ fn graphql_update_paths_match_c() {
                 log.contains(expected),
                 "{label} did not report {expected}: {log}"
             );
-            if route_count == 2 {
+            if full {
                 assert!(log.contains("msg=pipeline.route path=full"), "{log}");
+            }
+            if full && mode == Some("rust") {
+                assert!(
+                    log_has_graphql_backend(&log, "rust"),
+                    "Rust Route planner or writer missing from the full rebuild: {log}"
+                );
             }
             let rows = graphql_rows(&scratch, &project);
             assert_eq!(rows.len(), route_count);
@@ -646,8 +666,6 @@ fn index_through_worker_reexec_matches_c() {
         );
         // Profiling preserves the daemon's worker log after a clean exit.
         let implementation = graphql.unwrap_or("c");
-        let planner = format!("planner={implementation}");
-        let writer = format!("writer={implementation}");
         let logged_implementation = fs::read_dir(scratch.0.join("cache/logs"))
             .expect("read worker log directory")
             .filter_map(Result::ok)
@@ -659,20 +677,12 @@ fn index_through_worker_reexec_matches_c() {
             })
             .any(|entry| {
                 fs::read_to_string(entry.path()).is_ok_and(|log| {
-                    log.lines().any(|line| {
-                        line.contains("msg=pass.route_nodes.graphql")
-                            && line
-                                .split_ascii_whitespace()
-                                .any(|kv| kv == planner)
-                            && line
-                                .split_ascii_whitespace()
-                                .any(|kv| kv == writer)
-                    })
+                    log_has_graphql_backend(&log, implementation)
                 })
             });
         assert!(
             logged_implementation,
-            "{side} worker didn't report {planner} and {writer}"
+            "{side} worker didn't report planner={implementation} and writer={implementation}"
         );
         let counts = (json_number(&text, "nodes"), json_number(&text, "edges"));
         assert!(counts.0.is_some_and(|n| n > 0), "{side}: {text}");
