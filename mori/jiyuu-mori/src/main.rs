@@ -14,6 +14,8 @@ mod ffi;
 
 #[cfg(any(feature = "c-backend", test))]
 mod gqlgen;
+#[cfg(any(feature = "c-backend", test))]
+mod link;
 
 #[cfg(not(feature = "c-backend"))]
 fn main() {

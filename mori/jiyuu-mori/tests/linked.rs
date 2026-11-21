@@ -54,20 +54,28 @@ impl Drop for Scratch {
 
 /// Runs `bin` with a minimal environment pointed at its own scratch caches.
 fn run(bin: &Path, side: &str, args: &[&str]) -> Output {
-    run_in(bin, &Scratch::new(side), args)
+    run_in(bin, &Scratch::new(side), None, args)
 }
 
-fn run_in(bin: &Path, scratch: &Scratch, args: &[&str]) -> Output {
-    Command::new(bin)
+fn run_in(
+    bin: &Path,
+    scratch: &Scratch,
+    graphql: Option<&str>,
+    args: &[&str],
+) -> Output {
+    let mut command = Command::new(bin);
+    command
         .args(args)
         .current_dir("/")
         .env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .env("HOME", std::env::var_os("HOME").unwrap_or_default())
         .env("CBM_CACHE_DIR", scratch.0.join("cache"))
-        .env("CBM_RUNTIME_DIR", scratch.0.join("rt"))
-        .output()
-        .expect("run binary")
+        .env("CBM_RUNTIME_DIR", scratch.0.join("rt"));
+    if let Some(planner) = graphql {
+        command.env("MORI_IMPL_GRAPHQL", planner);
+    }
+    command.output().expect("run binary")
 }
 
 fn assert_same(args: &[&str]) {
@@ -141,12 +149,27 @@ impl Fixture {
             ),
             (
                 "graphql/nested/deep/schema1.graphqls",
-                "type Query { value: Int }\n",
+                "type Query { value: Int oneOwner: Int duplicate: Int noOwner: Int }\n",
             ),
             (
                 "server/handlers.go",
                 "package server\n\ntype queryResolver struct{}\n\n\
-                 func (r *queryResolver) Value() int { return 1 }\n",
+                 func (r *queryResolver) Value() int { return 1 }\n\
+                 func (r *queryResolver) Duplicate() int { return 1 }\n",
+            ),
+            (
+                "other/gqlgen.yml",
+                "schema:\n  - schema.graphqls\nresolver:\n  layout: follow-schema\n  dir: resolver\n",
+            ),
+            (
+                "other/schema.graphqls",
+                "type Query { oneOwner: Int duplicate: Int noOwner: Int }\n",
+            ),
+            (
+                "other/resolver/handlers.go",
+                "package resolver\n\ntype queryResolver struct{}\n\n\
+                 func (r *queryResolver) OneOwner() int { return 2 }\n\
+                 func (r *queryResolver) Duplicate() int { return 2 }\n",
             ),
         ];
         for (rel, text) in files {
@@ -184,21 +207,35 @@ fn json_number(text: &str, key: &str) -> Option<u64> {
 }
 
 /// Indexes the fixture with each binary, which goes through the temporary
-/// daemon and the index worker that the binary re-executes as itself, then
-/// compares queries over the two graphs.
+/// daemon and the index worker that the binary re-executes as itself. Compare
+/// graph output from standalone C and both linked GraphQL planner modes.
 #[test]
 fn index_through_worker_reexec_matches_c() {
     let fixture = Fixture::new();
     let project = fixture.project();
     let repo = fixture.0.to_string_lossy().into_owned();
-    let sides = [("c", c_binary()), ("rs", PathBuf::from(MORI))];
+    let sides = [
+        ("standalone", c_binary(), None),
+        ("c", PathBuf::from(MORI), Some("c")),
+        ("rust", PathBuf::from(MORI), Some("rust")),
+    ];
     let mut results = Vec::new();
-    for (side, bin) in &sides {
+    for (side, bin, graphql) in &sides {
         let scratch = Scratch::new(side);
         let index = run_in(
             bin,
             &scratch,
-            &["cli", "--quiet", "index_repository", "--repo_path", &repo],
+            *graphql,
+            &["cli", "--verbose", "index_repository", "--repo_path", &repo],
+        );
+        let diagnostics = String::from_utf8_lossy(&index.stderr);
+        let planner = format!("planner={}", graphql.unwrap_or("c"));
+        assert!(
+            diagnostics
+                .lines()
+                .any(|line| line.contains("msg=pass.route_nodes.graphql")
+                    && line.contains(&planner)),
+            "{side} worker didn't report {planner}: {diagnostics}"
         );
         let text = String::from_utf8_lossy(&index.stdout).into_owned();
         assert!(
@@ -245,27 +282,62 @@ fn index_through_worker_reexec_matches_c() {
                 "--project",
                 &project,
                 "--query",
-                "MATCH (h)-[:HANDLES]->(r:Route) WHERE r.qualified_name = '__graphql__Query.value' RETURN h.name",
+                "MATCH (h)-[:HANDLES]->(r:Route) WHERE r.qualified_name STARTS WITH '__graphql__Query.' \
+                 RETURN r.name, h.name, h.label, r.ambiguous, r.file_path ORDER BY r.name",
             ],
         ]
         .iter()
-        .map(|args| run_in(bin, &scratch, args))
+        .map(|args| run_in(bin, &scratch, *graphql, args))
         .collect();
         results.push((counts, queries));
     }
-    let (c, rs) = (&results[0], &results[1]);
-    assert_eq!(c.0, rs.0, "node and edge counts differ");
-    for (c_out, rs_out) in c.1.iter().zip(&rs.1) {
-        assert!(c_out.status.success(), "{c_out:?}");
-        assert_eq!(
-            (&c_out.status.code(), &c_out.stdout, &c_out.stderr),
-            (&rs_out.status.code(), &rs_out.stdout, &rs_out.stderr),
-            "query output differs"
-        );
+    let (c, linked) = results.split_first().expect("standalone C result");
+    for rs in linked {
+        assert_eq!(c.0, rs.0, "node and edge counts differ");
+        for (c_out, rs_out) in c.1.iter().zip(&rs.1) {
+            assert!(c_out.status.success(), "{c_out:?}");
+            assert_eq!(
+                (&c_out.status.code(), &c_out.stdout, &c_out.stderr),
+                (&rs_out.status.code(), &rs_out.stdout, &rs_out.stderr),
+                "query output differs"
+            );
+        }
     }
     let trace = String::from_utf8_lossy(&c.1[1].stdout);
     assert!(trace.contains(".go.Twice"), "Add caller missing: {trace}");
     let route =
         String::from_utf8_lossy(&c.1.last().expect("route query").stdout);
-    assert!(route.contains("Value"), "gqlgen resolver missing: {route}");
+    for (name, handler, label, schema) in [
+        (
+            "Query.value",
+            "Value",
+            "Method",
+            "graphql/nested/deep/schema1.graphqls",
+        ),
+        (
+            "Query.oneOwner",
+            "OneOwner",
+            "Method",
+            "other/schema.graphqls",
+        ),
+        (
+            "Query.duplicate",
+            "duplicate",
+            "Field",
+            "graphql/nested/deep/schema1.graphqls",
+        ),
+        (
+            "Query.noOwner",
+            "noOwner",
+            "Field",
+            "graphql/nested/deep/schema1.graphqls",
+        ),
+    ] {
+        assert!(
+            route.lines().any(|line| [name, handler, label, schema]
+                .iter()
+                .all(|value| line.contains(value))),
+            "unexpected handler for {name}: {route}"
+        );
+    }
 }

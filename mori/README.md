@@ -123,6 +123,13 @@ When running the binary against a real repository during development, point
 `CBM_CACHE_DIR` and `CBM_RUNTIME_DIR` at scratch directories to keep the
 index away from `~/.cache/codebase-memory-mcp`.
 
+Set `MORI_IMPL_GRAPHQL=rust` before starting the linked `mori` process to
+test Rust's choice of schema field and `HANDLES` edge for each GraphQL server
+Route. Set `MORI_IMPL_GRAPHQL=c` to compare with the C reference. If you leave
+the variable unset, the linked binary uses the Rust schema-glob matcher and
+the C Route planner. Index each side with its own cache and runtime directory
+so each process builds the Routes with its selected planner.
+
 ## Release
 
 File [VERSION](VERSION) holds Mori's version. Workflow
