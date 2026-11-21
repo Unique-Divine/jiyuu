@@ -12012,7 +12012,11 @@ static void install_print_usage(FILE *out) {
                        "Registers this binary as the " CBM_MCP_SERVER_KEY
                        " MCP server for Claude Code (~/.claude.json)\n"
                        "and Codex (~/.codex/config.toml) when they are present. It downloads\n"
-                       "nothing and writes no agent skills, hooks, or agent profiles.\n");
+                       "nothing and writes no agent skills, hooks, or agent profiles.\n"
+                       "The registration uses this binary's absolute path. To keep the same\n"
+                       "registration across mise upgrades, register the mise shim from your\n"
+                       "MCP client instead. For a direct path, update it in the client after\n"
+                       "each upgrade.\n");
 }
 
 /* One client registration: report, or write unless dry_run. Returns false on

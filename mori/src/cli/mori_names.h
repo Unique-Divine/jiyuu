@@ -37,6 +37,8 @@
     "then run:\n\n"                                                                            \
     "  mise install\n"                                                                         \
     "  " CBM_COMMAND_NAME " daemon stop   # the daemon restarts on the new binary\n\n"         \
+    "If an MCP client points to a versioned binary, update its command path\n"                 \
+    "and restart the client.\n\n"                                                              \
     "Releases: " CBM_RELEASES_URL "\n"
 
 #endif /* CBM_MORI_NAMES_H */
