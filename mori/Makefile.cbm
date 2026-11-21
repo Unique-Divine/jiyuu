@@ -1413,11 +1413,13 @@ cbm: $(BUILD_DIR)/codebase-memory-mcp
 #
 # libmori-c holds the whole C program: every source and object the product
 # binary above links, compiled with the same CFLAGS_PROD, with src/main.c built
-# under -DCBM_AS_LIBRARY so its main is named cbm_c_main. mori/jiyuu-mori's
-# build.rs runs this target and links the archive whole (+whole-archive), so
-# the Rust binary contains the same objects as codebase-memory-mcp. The binary
-# rule compiles first-party code in one compiler call; the library needs one
-# object per source, so those get their own rule here under LIBMORI_DIR.
+# under -DCBM_AS_LIBRARY so its main is named cbm_c_main (and with
+# CBM_PROGRAM_NAME "mori", so `mori --version` prints `mori <version>`).
+# mori/jiyuu-mori's build.rs runs this target and links the archive whole
+# (+whole-archive), so the Rust binary contains the same objects as
+# codebase-memory-mcp. The binary rule compiles first-party code in one
+# compiler call; the library needs one object per source, so those get their
+# own rule here under LIBMORI_DIR.
 # Members are appended with `ar q`, which keeps two members of the same base
 # name, and the archive is rebuilt from scratch so no stale member survives.
 LIBMORI_DIR = $(BUILD_DIR)/libmori
@@ -1432,7 +1434,7 @@ $(LIBMORI_DIR)/%.o: %.c $(BUILD_DIR)/.build-config $(PROJECT_HDRS) | $(BUILD_DIR
 
 $(LIBMORI_MAIN_OBJ): $(MAIN_SRC) $(BUILD_DIR)/.build-config $(PROJECT_HDRS) | $(BUILD_DIR)
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS_PROD) -DCBM_AS_LIBRARY=1 -c -o $@ $<
+	$(CC) $(CFLAGS_PROD) -DCBM_AS_LIBRARY=1 -DCBM_PROGRAM_NAME='"mori"' -c -o $@ $<
 
 $(LIBMORI_A): $(LIBMORI_MAIN_OBJ) $(LIBMORI_OBJS) $(OBJS_VENDORED_PROD)
 	rm -f $@ $@.tmp
