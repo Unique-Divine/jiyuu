@@ -957,15 +957,41 @@ static void mcp_add_json_schema(yyjson_mut_doc *doc, yyjson_mut_val *obj, const 
     }
 }
 
-static void mcp_add_tool_def(yyjson_mut_doc *doc, yyjson_mut_val *tools, int i) {
+typedef struct {
+    const char *name;
+    const char *description;
+    const char *input_schema;
+    bool read_only;
+    bool destructive;
+    bool idempotent;
+    bool open_world;
+    bool load_upfront;
+} mcp_tool_page_entry_t;
+
+static mcp_tool_page_entry_t mcp_tool_page_entry(int i) {
+    const tool_annotation_def_t *def = mcp_tool_annotations(TOOLS[i].name);
+    return (mcp_tool_page_entry_t){
+        .name = TOOLS[i].name,
+        .description = TOOLS[i].description,
+        .input_schema = TOOLS[i].input_schema,
+        .read_only = def ? def->read_only : false,
+        .destructive = def ? def->destructive : true,
+        .idempotent = def ? def->idempotent : false,
+        .open_world = def ? def->open_world : true,
+        .load_upfront = def ? def->load_upfront : false,
+    };
+}
+
+static void mcp_add_tool_def(yyjson_mut_doc *doc, yyjson_mut_val *tools,
+                             const mcp_tool_page_entry_t *entry) {
     yyjson_mut_val *tool = yyjson_mut_obj(doc);
-    yyjson_mut_obj_add_str(doc, tool, "name", TOOLS[i].name);
+    yyjson_mut_obj_add_str(doc, tool, "name", entry->name);
     /* MCP title is optional and clients fall back to name. These titles only
      * repeated the snake_case name with spaces, so omit their recurring
      * discovery cost and retain the behavioral description instead. */
-    yyjson_mut_obj_add_str(doc, tool, "description", TOOLS[i].description);
+    yyjson_mut_obj_add_str(doc, tool, "description", entry->description);
 
-    mcp_add_json_schema(doc, tool, "inputSchema", TOOLS[i].input_schema);
+    mcp_add_json_schema(doc, tool, "inputSchema", entry->input_schema);
     /* Deliberately NO outputSchema. Tool output is format-parameter-polymorphic
      * (tree text by default, a JSON object under format:"json"), so no static
      * schema is truthful — and a declared schema makes spec-honoring clients
@@ -974,15 +1000,14 @@ static void mcp_add_tool_def(yyjson_mut_doc *doc, yyjson_mut_val *tools, int i) 
      * The blanket {"type":"object","additionalProperties":true} it replaced
      * validated anything and informed nobody. */
 
-    const tool_annotation_def_t *def = mcp_tool_annotations(TOOLS[i].name);
     yyjson_mut_val *annotations = yyjson_mut_obj(doc);
-    yyjson_mut_obj_add_bool(doc, annotations, "readOnlyHint", def ? def->read_only : false);
-    yyjson_mut_obj_add_bool(doc, annotations, "destructiveHint", def ? def->destructive : true);
-    yyjson_mut_obj_add_bool(doc, annotations, "idempotentHint", def ? def->idempotent : false);
-    yyjson_mut_obj_add_bool(doc, annotations, "openWorldHint", def ? def->open_world : true);
+    yyjson_mut_obj_add_bool(doc, annotations, "readOnlyHint", entry->read_only);
+    yyjson_mut_obj_add_bool(doc, annotations, "destructiveHint", entry->destructive);
+    yyjson_mut_obj_add_bool(doc, annotations, "idempotentHint", entry->idempotent);
+    yyjson_mut_obj_add_bool(doc, annotations, "openWorldHint", entry->open_world);
     yyjson_mut_obj_add_val(doc, tool, "annotations", annotations);
 
-    if (def && def->load_upfront) {
+    if (entry->load_upfront) {
         yyjson_mut_val *meta = yyjson_mut_obj(doc);
         yyjson_mut_obj_add_bool(doc, meta, "anthropic/alwaysLoad", true);
         yyjson_mut_obj_add_val(doc, tool, "_meta", meta);
@@ -1083,14 +1108,19 @@ static int mcp_allowed_tool_count(cbm_mcp_tool_profile_t profile) {
     return count;
 }
 
+typedef char *(*mcp_tool_list_builder_fn)(const mcp_tool_page_entry_t *entries, size_t count,
+                                          int next_cursor);
+static mcp_tool_list_builder_fn mcp_tool_list_builder;
+
+/* Before startup, the linked binary can register an encoder for the
+ * profile-filtered page. It returns a free-compatible buffer or NULL. */
+void cbm_mcp_set_tool_list_builder(mcp_tool_list_builder_fn builder);
+void cbm_mcp_set_tool_list_builder(mcp_tool_list_builder_fn builder) {
+    mcp_tool_list_builder = builder;
+}
+
 static char *cbm_mcp_tools_list_range(cbm_mcp_tool_profile_t profile, int offset, int limit,
                                       bool include_next_cursor) {
-    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
-    yyjson_mut_val *root = yyjson_mut_obj(doc);
-    yyjson_mut_doc_set_root(doc, root);
-
-    yyjson_mut_val *tools = yyjson_mut_arr(doc);
-
     if (offset < 0) {
         offset = 0;
     }
@@ -1107,21 +1137,38 @@ static char *cbm_mcp_tools_list_range(cbm_mcp_tool_profile_t profile, int offset
         end = allowed_count;
     }
 
+    mcp_tool_page_entry_t entries[sizeof(TOOLS) / sizeof(TOOLS[0])];
+    size_t count = 0;
     int visible = 0;
     for (int i = 0; i < TOOL_COUNT && visible < end; i++) {
         if (!mcp_tool_allowed(profile, TOOLS[i].name)) {
             continue;
         }
         if (visible >= offset) {
-            mcp_add_tool_def(doc, tools, i);
+            entries[count++] = mcp_tool_page_entry(i);
         }
         visible++;
     }
 
+    int next_cursor = include_next_cursor && end < allowed_count ? end : CBM_NOT_FOUND;
+    if (mcp_tool_list_builder) {
+        char *result = mcp_tool_list_builder(entries, count, next_cursor);
+        if (result) {
+            return result;
+        }
+    }
+
+    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val *root = yyjson_mut_obj(doc);
+    yyjson_mut_doc_set_root(doc, root);
+    yyjson_mut_val *tools = yyjson_mut_arr(doc);
+    for (size_t i = 0; i < count; i++) {
+        mcp_add_tool_def(doc, tools, &entries[i]);
+    }
     yyjson_mut_obj_add_val(doc, root, "tools", tools);
-    if (include_next_cursor && end < allowed_count) {
+    if (next_cursor != CBM_NOT_FOUND) {
         char cursor[32];
-        snprintf(cursor, sizeof(cursor), "%d", end);
+        snprintf(cursor, sizeof(cursor), "%d", next_cursor);
         yyjson_mut_obj_add_strcpy(doc, root, "nextCursor", cursor);
     }
 

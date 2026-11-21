@@ -51,6 +51,8 @@ mod query_cli;
 
 #[cfg(any(feature = "c-backend", test))]
 mod initialize;
+#[cfg(any(feature = "c-backend", test))]
+mod tool_list;
 
 #[cfg(not(feature = "c-backend"))]
 fn main() {

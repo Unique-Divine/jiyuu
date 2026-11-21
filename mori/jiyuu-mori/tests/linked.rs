@@ -285,6 +285,57 @@ fn initialize_negotiation_and_instructions_match_c() {
 }
 
 #[test]
+fn tools_list_profiles_and_cursor_pages_match_c() {
+    let input = concat!(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/list\",\"params\":{\"cursor\":\"0\"}}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/list\",\"params\":{\"cursor\":\"8\"}}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/list\",\"params\":{\"cursor\":\"bogus\"}}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"tools/list\",\"params\":{\"cursor\":null}}\n",
+    );
+    for (args, count) in [
+        (&[][..], 17),
+        (&["--tool-profile=analysis"][..], 13),
+        (&["--tool-profile=scout"][..], 8),
+    ] {
+        let reference = run_stdio(&c_binary(), "c", args, input);
+        let linked = run_stdio(Path::new(MORI), "rs", args, input);
+        assert_eq!(linked, reference);
+        let replies: Vec<serde_json::Value> = linked
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(replies.len(), 6);
+        let full = &replies[1]["result"];
+        let tools = full["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), count);
+        assert!(full.get("nextCursor").is_none());
+        let tool = tools
+            .iter()
+            .find(|tool| tool["name"] == "search_graph")
+            .unwrap();
+        assert_eq!(tool["annotations"]["readOnlyHint"], true);
+        assert_eq!(tool["_meta"]["anthropic/alwaysLoad"], true);
+        assert_eq!(tool["inputSchema"]["type"], "object");
+
+        let first = &replies[2]["result"];
+        assert_eq!(first["tools"].as_array().unwrap(), &tools[..8]);
+        assert_eq!(first["nextCursor"].as_str(), (count > 8).then_some("8"));
+        let second = &replies[3]["result"];
+        assert_eq!(
+            second["tools"].as_array().unwrap(),
+            &tools[8..count.min(16)]
+        );
+        assert_eq!(second["nextCursor"].as_str(), (count > 16).then_some("16"));
+        for invalid in [&replies[4]["result"], &replies[5]["result"]] {
+            assert!(invalid["tools"].as_array().unwrap().is_empty());
+            assert!(invalid.get("nextCursor").is_none());
+        }
+    }
+}
+
+#[test]
 fn invalid_query_flag_diagnostic_matches_c() {
     assert_same(&["cli", "query_graph", "--offst", "1"]);
 }
