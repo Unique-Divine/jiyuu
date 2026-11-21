@@ -162,7 +162,7 @@ describe('AtlasChrome', () => {
 
     it('zeigt Marke und Versions-Chip in der Kopfzeile', async () => {
         await render(props());
-        expect(container.querySelector('.atlas-brand')?.textContent).toBe('CBM LENS Beta');
+        expect(container.querySelector('.atlas-brand')?.textContent).toBe('MORI GRAPH Beta');
         expect(container.querySelector('.atlas-brand-beta')?.textContent).toBe('Beta');
         expect(testId('atlas-version')?.textContent).toBe('v0.0.0');
     });
