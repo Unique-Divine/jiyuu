@@ -342,8 +342,8 @@ class GateTest(unittest.TestCase):
                              "rows": [[q, "Function", f"{q[-1]}.ts", "1-2", r]
                                       for q, r in order],
                              "total": 2, "has_more": False}))
-    good = js([("p.a", -15.31), ("p.b", -15.29)])
-    bad = js([("p.b", -15.29), ("p.a", -15.31)])
+    good = js([("p.a", -15.3000001), ("p.b", -15.3)])
+    bad = js([("p.b", -15.3), ("p.a", -15.3000001)])
     asked = []
 
     def rerun(args: dict[str, Any]) -> tuple[Any, Any]:
@@ -380,6 +380,18 @@ class GateTest(unittest.TestCase):
       lambda _: (out(page(full)), out(page(full)))))]
     self.assertNotIn("search_graph:$.results{unstable_order_b}", got)
     self.assertIn("search_graph:$.results{unstable_prefix_b}", got)
+
+  def test_capped_offset_page_still_checks_rank_order(self) -> None:
+    def page(rows_: list[list[Any]]) -> str:
+      return json.dumps({"cols": ["qn", "rank"], "rows": rows_,
+                         "total_relation": "gte", "has_more": True})
+
+    ranked = [["p.a", -3], ["p.b", -2]]
+    got = [k for k, _ in keys(diff(
+      "search_graph", {"query": "x", "offset": 1, "format": "json"},
+      page(ranked), page(ranked[::-1])))]
+    self.assertEqual(got, ["search_graph:$.rows{unstable_order_b}",
+                           "search_graph:$.rows{unstable}"])
 
   def test_unranked_search_graph_follows_name_order(self) -> None:
     """The C store returns unranked search_graph rows ORDER BY name, id:
@@ -457,6 +469,23 @@ class GateTest(unittest.TestCase):
       ("query_graph:$.rows{only_in_a}", '["add"]'),
       ("query_graph:$.rows{only_in_b}", '["adx"]')])
 
+  def test_json_row_cells_keep_timing_keys_and_literal_strings(self) -> None:
+    def page(value: int, elapsed: int) -> str:
+      data = {"execution_ms": value}
+      return json.dumps({"columns": ["data", "text"],
+                         "rows": [[data, json.dumps(data)]],
+                         "elapsed_ms": elapsed})
+
+    a = page(100, 1)
+    q = {"query": "MATCH (n) RETURN n.data, n.text", "format": "json"}
+    self.assertEqual(keys(diff("query_graph", q, a, page(100, 2))), [])
+    got = keys(diff("query_graph", q, a, page(200, 1)))
+    self.assertEqual(got, [
+      ("query_graph:$.rows{only_in_a}",
+       '[{"execution_ms": 100}, "{\\"execution_ms\\": 100}"]'),
+      ("query_graph:$.rows{only_in_b}",
+       '[{"execution_ms": 200}, "{\\"execution_ms\\": 200}"]')])
+
   def test_nested_json_tables_are_gated_as_tables(self) -> None:
     def js(rows_: list[list[Any]]) -> str:
       return json.dumps({"cols": ["qn", "rank"], "rows": [],
@@ -469,6 +498,32 @@ class GateTest(unittest.TestCase):
     c = js([["p.b", 0.5], ["p.a", 0.9], ["p.c", 0.5]])
     self.assertEqual([k for k, _ in keys(diff("search_graph", q, a, c))],
                      ["search_graph:$.semantic{order}"])
+
+  def test_nested_semantic_table_follows_its_own_offset(self) -> None:
+    def page(rows_: list[list[Any]], next_offset: int | None) -> str:
+      body = {"cols": ["qn"], "rows": [], "has_more": False,
+              "semantic": {"cols": ["qn", "score"], "rows": rows_},
+              "semantic_has_more": next_offset is not None,
+              "semantic_total": 2, "semantic_total_relation": "eq"}
+      if next_offset is not None:
+        body["semantic_next_offset"] = next_offset
+      return json.dumps(body)
+
+    a, b = ["p.a", 0.8], ["p.b", 0.8]
+    asked = []
+
+    def rerun(args: dict[str, Any]) -> tuple[Any, Any]:
+      asked.append((args["offset"], args["semantic_offset"],
+                    args["semantic_limit"]))
+      full = out(page([a], 1)) if args["semantic_offset"] == 0 else \
+        out(page([b], None))
+      return full, full
+
+    q = {"semantic_query": ["x"], "format": "json", "offset": 7,
+         "semantic_limit": 1}
+    self.assertEqual(keys(diff("search_graph", q, page([a], 1),
+                               page([b], 1), rerun)), [])
+    self.assertEqual(asked, [(7, 0, 500), (7, 1, 500)])
 
   def test_labeled_lines_stay_gated(self) -> None:
     b = RANKED.replace("total: 4", "total: 5")

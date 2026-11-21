@@ -21,6 +21,7 @@ import json
 import os
 import re
 import shlex
+from collections import Counter
 from typing import Any, Callable, Iterable, Iterator
 
 import rows as rows_mod
@@ -323,21 +324,24 @@ class OutputNormalizer:
         s = s.replace(old, new)
     return s
 
-  def value(self, v: Any) -> Any:
+  def value(self, v: Any, row_cell: bool = False) -> Any:
     if isinstance(v, dict):
-      return {k: self.value(x) for k, x in sorted(v.items())
-              if not TIMING_KEY_RE.match(k)}
+      has_rows = isinstance(v.get("cols", v.get("columns")), list) and \
+        isinstance(v.get("rows"), list)
+      return {k: self.value(x, row_cell or (has_rows and k == "rows"))
+              for k, x in sorted(v.items())
+              if row_cell or not TIMING_KEY_RE.match(k)}
     if isinstance(v, list):
-      return [self.value(x) for x in v]
+      return [self.value(x, row_cell) for x in v]
     if isinstance(v, str):
       inner = v.strip()
-      if inner[:1] in ("{", "[") and inner[-1:] in ("}", "]"):
+      if not row_cell and inner[:1] in ("{", "[") and inner[-1:] in ("}", "]"):
         try:
           return {"__json__": self.value(json.loads(inner))}
         except ValueError:
           pass
       return self.text(v)
-    if isinstance(v, float):
+    if isinstance(v, float) and not row_cell:
       return round(v, 6)
     return v
 
@@ -504,19 +508,39 @@ def _diff_table_call(rep: DiffReport, tool: str, args: dict[str, Any],
                      names: Any) -> int:
   pa, pb = split_tables(a["out"]), split_tables(b["out"])
   n = _diff_rest(rep, tool, group, where, "$", a, b, pa[1], pb[1])
-  fa, fb = rows_mod.fields_of(pa[1]), rows_mod.fields_of(pb[1])
-  ua = rows_mod.unlimited_args(tool, args, fa)
+  # Search may return a lexical table and a semantic table. Each has its
+  # own limit, offset, and continuation fields.
+  for semantic in ((False, True) if tool == "search_graph" else (False,)):
+    ta, tb = (_tables_for_page(p[0], semantic) if tool == "search_graph"
+              else p[0] for p in (pa, pb))
+    if ta or tb:
+      n += _diff_tables(rep, tool, args, group, where, ta, tb,
+                       rows_mod.fields_of(pa[1], semantic),
+                       rows_mod.fields_of(pb[1], semantic), rerun, names,
+                       semantic)
+  return n
+
+
+def _tables_for_page(tables: dict[str, rows_mod.Table], semantic: bool
+                     ) -> dict[str, rows_mod.Table]:
+  return {key: t for key, t in tables.items() if (key == "semantic") == semantic}
+
+
+def _diff_tables(rep: DiffReport, tool: str, args: dict[str, Any],
+                 group: str, where: str, ta: dict[str, rows_mod.Table],
+                 tb: dict[str, rows_mod.Table], fa: dict[str, Any],
+                 fb: dict[str, Any], rerun: Rerun | None, names: Any,
+                 semantic: bool) -> int:
+  ua = rows_mod.unlimited_args(tool, args, fa, semantic)
   if unstable(fa) or unstable(fb):
-    return n + _diff_unstable(rep, tool, args, group, where, pa[0], pb[0],
-                              ua, rerun, names)
-  gated = _gate(rep, tool, args, group, where, "$", pa[0], pb[0],
-                rows_mod.is_truncated(tool, args, fa, _nrows(pa[0])) or
-                rows_mod.is_truncated(tool, args, fb, _nrows(pb[0])), names)
-  n += gated[0]
-  need = gated[1]
+    return _diff_unstable(rep, tool, args, group, where, ta, tb,
+                          ua, rerun, names, semantic)
+  n, need = _gate(rep, tool, args, group, where, "$", ta, tb,
+                  rows_mod.is_truncated(tool, args, fa, _nrows(ta)) or
+                  rows_mod.is_truncated(tool, args, fb, _nrows(tb)), names)
   if not need:
     return n
-  full = _fetch_full(tool, ua, rerun, rep, group, where) \
+  full = _fetch_full(tool, ua, rerun, rep, group, where, semantic) \
     if ua is not None and rerun is not None else None
   if full is None:
     for k, res, _, _ in need:
@@ -553,7 +577,8 @@ def _diff_table_call(rep: DiffReport, tool: str, args: dict[str, Any],
 def _diff_unstable(rep: DiffReport, tool: str, args: dict[str, Any],
                    group: str, where: str, ta: dict[str, rows_mod.Table],
                    tb: dict[str, rows_mod.Table], ua: Any,
-                   rerun: Rerun | None, names: Any = (None, None)) -> int:
+                   rerun: Rerun | None, names: Any = (None, None),
+                   semantic: bool = False) -> int:
   """The engine evaluated a capped candidate set (a Cypher engine limit,
   a BM25 cap reported as `total_relation: gte`), so which rows come back
   depends on scan order (row ids). Equal rows pass. Otherwise the call
@@ -581,25 +606,22 @@ def _diff_unstable(rep: DiffReport, tool: str, args: dict[str, Any],
     diff_keys.append((key, k, ra, rb))
   if not diff_keys:
     return n
-  full = _fetch_full(tool, ua, rerun, rep, group, where) \
+  full = _fetch_full(tool, ua, rerun, rep, group, where, semantic) \
     if ua is not None and rerun is not None else None
+  (fta, ftb), _, dn = full if full is not None else (({}, {}), False, 0)
+  n += dn
   for key, k, ra, rb in diff_keys:
     if full is None:
       n += _side_rows(rep, k, group, where, "unstable_unverified", "a",
-                      sorted(set(ra) - set(rb)))
+                      sorted((Counter(ra) - Counter(rb)).elements()))
       n += _side_rows(rep, k, group, where, "unstable_unverified", "b",
-                      sorted(set(rb) - set(ra)))
-      continue
-    (fta, ftb), _, dn = full
-    n += dn
-    in_b = {rows_mod.row_text(r) for r in ftb[key].rows} if key in ftb \
-      else set()
-    in_a = {rows_mod.row_text(r) for r in fta[key].rows} if key in fta \
-      else set()
-    n += _side_rows(rep, k, group, where, "unstable_only_in", "a",
-                    sorted(r for r in set(ra) if r not in in_b))
-    n += _side_rows(rep, k, group, where, "unstable_only_in", "b",
-                    sorted(r for r in set(rb) if r not in in_a))
+                      sorted((Counter(rb) - Counter(ra)).elements()))
+    else:
+      for side, page, other in (("a", ra, ftb), ("b", rb, fta)):
+        have = Counter(rows_mod.row_text(r) for r in other[key].rows) \
+          if key in other else Counter()
+        n += _side_rows(rep, k, group, where, "unstable_only_in", side,
+                        sorted((Counter(page) - have).elements()))
     for side, page, ft, name_of in (("a", ta, fta, names[0]),
                                     ("b", tb, ftb, names[1])):
       if key not in page:
@@ -698,7 +720,7 @@ def _split_volatile(rep: DiffReport, k: str, group: str, where: str,
 
 
 def _fetch_full(tool: str, ua: dict[str, Any], rerun: Rerun,
-                rep: DiffReport, group: str, where: str
+                rep: DiffReport, group: str, where: str, semantic: bool = False
                 ) -> tuple[tuple[dict[str, rows_mod.Table],
                                  dict[str, rows_mod.Table]], bool, int]:
   """Run the unlimited call on both sides, each following its own pages,
@@ -727,10 +749,14 @@ def _fetch_full(tool: str, ua: dict[str, Any], rerun: Rerun,
         pending[i] = None
         continue
       tables, rest = split_tables(o["out"])
+      if tool == "search_graph":
+        tables = _tables_for_page(tables, semantic)
       for key, t in tables.items():
         m = merged[i].setdefault(key, rows_mod.Table(key, t.cols))
         m.rows.extend(t.rows)
-      pending[i] = rows_mod.next_page(pending[i], rows_mod.fields_of(rest))
+      pending[i] = rows_mod.next_page(pending[i],
+                                     rows_mod.fields_of(rest, semantic),
+                                     semantic)
   more = pending != [None, None]
   return (merged[0], merged[1]), more, n
 

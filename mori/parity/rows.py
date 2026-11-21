@@ -378,15 +378,20 @@ MAX_OUTPUT_TOKENS = 1000000  # both tools' largest output budget
 MAX_PAGES = 200
 
 
-def unlimited_args(tool: str, args: dict[str, Any], fields: dict[str, Any]
+def unlimited_args(tool: str, args: dict[str, Any], fields: dict[str, Any],
+                   semantic: bool = False
                    ) -> dict[str, Any] | None:
   """The first page of the same call without its limit and with the
   largest output budget, or None when it can't be built (an offset,
   cursor, or SKIP, which page instead of cutting). Later pages follow
   each side's own `next_offset` (next_page)."""
+  big = {"max_output_tokens": MAX_OUTPUT_TOKENS}
+  if semantic:
+    if args.get("semantic_offset"):
+      return None
+    return {**args, **big, "semantic_limit": SEARCH_PAGE, "semantic_offset": 0}
   if args.get("offset") or args.get("cursor"):
     return None
-  big = {"max_output_tokens": MAX_OUTPUT_TOKENS}
   if tool == "search_graph":
     return {**args, **big, "limit": SEARCH_PAGE, "offset": 0}
   if tool == "query_graph":
@@ -398,7 +403,8 @@ def unlimited_args(tool: str, args: dict[str, Any], fields: dict[str, Any]
   return None
 
 
-def next_page(args: dict[str, Any], fields: dict[str, Any]
+def next_page(args: dict[str, Any], fields: dict[str, Any],
+              semantic: bool = False
               ) -> dict[str, Any] | None:
   """The next page for one side: its own `next_offset` while it reports
   more rows. The byte budget can cut two sides at different rows, so each
@@ -409,9 +415,10 @@ def next_page(args: dict[str, Any], fields: dict[str, Any]
     nxt = int(str(fields.get("next_offset", "")))
   except ValueError:
     return None
-  if nxt <= int(args.get("offset", 0)):
+  offset = "semantic_offset" if semantic else "offset"
+  if nxt <= int(args.get(offset, 0)):
     return None
-  return {**args, "offset": nxt}
+  return {**args, offset: nxt}
 
 
 # ---------------------------------------------------------------------------
@@ -502,9 +509,14 @@ def tables_of(body: Any) -> tuple[dict[str, Table], Any]:
   return tables, rest
 
 
-def fields_of(rest: Any) -> dict[str, Any]:
+def fields_of(rest: Any, semantic: bool = False) -> dict[str, Any]:
   if isinstance(rest, dict):
-    return rest
-  if isinstance(rest, list):
-    return labeled(rest)
-  return {}
+    fields = rest
+  elif isinstance(rest, list):
+    fields = labeled(rest)
+  else:
+    return {}
+  if semantic:
+    return {k.removeprefix("semantic_"): v for k, v in fields.items()
+            if k.startswith("semantic_")}
+  return fields
