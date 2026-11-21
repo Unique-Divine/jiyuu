@@ -172,20 +172,20 @@ pub(crate) mod c_transport {
         );
         fn fgetc(stream: Stream) -> c_int;
         fn fread(
-            buf: *mut u8,
+            buf: *mut c_void,
             size: usize,
             count: usize,
             stream: Stream,
         ) -> usize;
         fn fwrite(
-            buf: *const u8,
+            buf: *const c_void,
             size: usize,
             count: usize,
             stream: Stream,
         ) -> usize;
         fn ferror(stream: Stream) -> c_int;
         fn fflush(stream: Stream) -> c_int;
-        fn malloc(size: usize) -> *mut u8;
+        fn malloc(size: usize) -> *mut c_void;
     }
 
     // C owns the FILE and gives each callback exclusive access for its duration.
@@ -204,7 +204,7 @@ pub(crate) mod c_transport {
                         1
                     }
                 } else {
-                    fread(buf.as_mut_ptr(), 1, buf.len(), self.0)
+                    fread(buf.as_mut_ptr().cast(), 1, buf.len(), self.0)
                 }
             };
             // SAFETY: the stream remains valid until the callback returns.
@@ -220,7 +220,7 @@ pub(crate) mod c_transport {
         fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
             // SAFETY: C borrowed this live stream and the byte range is valid.
             let count =
-                unsafe { fwrite(bytes.as_ptr(), 1, bytes.len(), self.0) };
+                unsafe { fwrite(bytes.as_ptr().cast(), 1, bytes.len(), self.0) };
             if count != bytes.len() {
                 Err(io::Error::other("writing MCP stdio failed"))
             } else {
@@ -257,7 +257,7 @@ pub(crate) mod c_transport {
         // SAFETY: C uses free for the message, so allocate with the same
         // allocator. The parser caps bytes.len() and rejects embedded NULs.
         unsafe {
-            let output = malloc(bytes.len() + 1);
+            let output = malloc(bytes.len() + 1).cast::<u8>();
             if output.is_null() {
                 return -1;
             }
