@@ -5,9 +5,15 @@ use std::ops::ControlFlow;
 use std::os::unix::ffi::OsStrExt;
 use std::{panic, ptr};
 
-use rusqlite::{Connection, ffi::sqlite3};
+use rusqlite::{
+    Connection,
+    ffi::{sqlite3, sqlite3_stmt},
+};
 
-use crate::graphql_link::{Action, plan_link};
+use crate::graphql_link::{
+    Action, delete_stale_link, find_handler, plan_link, upsert_link,
+};
+
 use crate::link::RoutePlan;
 use crate::stdio::c_transport;
 use crate::store::{FileOutlineQuery, Store};
@@ -72,6 +78,17 @@ type ProjectStatsReader = unsafe extern "C" fn(
     nodes: *mut c_int,
     edges: *mut c_int,
 );
+type ProjectMetadataEmit = unsafe extern "C" fn(
+    context: *mut c_void,
+    root_path: *const c_char,
+    indexed_at: *const c_char,
+);
+type ProjectMetadataReader = unsafe extern "C" fn(
+    store: *mut c_void,
+    project: *const c_char,
+    emit: ProjectMetadataEmit,
+    context: *mut c_void,
+) -> bool;
 
 const STORE_OK: c_int = 0;
 const STORE_ERR: c_int = -1;
@@ -89,6 +106,32 @@ type RoutePlanner =
 type ResolverVisitor =
     unsafe extern "C" fn(usize, *const c_void, *mut c_void) -> bool;
 
+#[repr(C)]
+struct GraphqlRouteRow {
+    path: *const c_char,
+    qn: *const c_char,
+    file_path: *const c_char,
+    return_type: *const c_char,
+    reason: *const c_char,
+    field_id: i64,
+    resolver_id: i64,
+    start_line: c_int,
+    end_line: c_int,
+    deprecated: bool,
+    ambiguous: bool,
+}
+
+type RouteWriter =
+    unsafe extern "C" fn(*mut c_void, *const GraphqlRouteRow) -> bool;
+
+/// ABI mirror of `cbm_graphql_handler_t` in `pass_cross_repo.h`.
+#[repr(C)]
+struct GraphqlHandler {
+    handler_id: i64,
+    ambiguous: bool,
+    failed: bool,
+}
+
 unsafe extern "C" {
     /// The C program's `main`, renamed when `src/main.c` is compiled with
     /// `-DCBM_AS_LIBRARY` (target `libmori-c` in `Makefile.cbm`). Its first
@@ -100,9 +143,26 @@ unsafe extern "C" {
     fn cbm_gqlgen_set_rust_backend(
         matcher: extern "C" fn(glob: *const c_char, path: *const c_char) -> bool,
         planner: RoutePlanner,
+        writer: RouteWriter,
     );
-    fn cbm_cross_repo_set_graphql_link_policy(
+    fn cbm_cross_repo_set_graphql_backend(
         policy: extern "C" fn(bool, bool, bool, bool, bool) -> Action,
+        delete: extern "C" fn(*mut sqlite3, i64, i64) -> c_int,
+        upsert: extern "C" fn(
+            *mut sqlite3_stmt,
+            *const c_char,
+            i64,
+            i64,
+            *const c_char,
+        ) -> bool,
+        find: extern "C" fn(
+            *mut sqlite3,
+            *const c_char,
+            *mut c_char,
+            usize,
+            *mut c_char,
+            usize,
+        ) -> GraphqlHandler,
     );
 
     fn cbm_gqlgen_visit_route_resolvers(
@@ -112,10 +172,29 @@ unsafe extern "C" {
         visit: ResolverVisitor,
         user: *mut c_void,
     );
+
+    fn cbm_gbuf_upsert_node(
+        gb: *mut c_void,
+        label: *const c_char,
+        name: *const c_char,
+        qualified_name: *const c_char,
+        file_path: *const c_char,
+        start_line: c_int,
+        end_line: c_int,
+        properties: *const c_char,
+    ) -> i64;
+    fn cbm_gbuf_insert_edge(
+        gb: *mut c_void,
+        source: i64,
+        target: i64,
+        kind: *const c_char,
+        properties: *const c_char,
+    ) -> i64;
     fn cbm_mcp_set_read_override(handle: ReadOverride, release: ReleasePayload);
     fn cbm_mcp_set_project_readers(
         identity: ProjectIdentityReader,
         stats: ProjectStatsReader,
+        metadata: ProjectMetadataReader,
     );
     fn cbm_store_get_db(store: *mut c_void) -> *mut sqlite3;
     fn cbm_store_set_file_outline_reader(reader: OutlineReader);
@@ -186,6 +265,38 @@ unsafe extern "C" fn read_project_stats(
     .unwrap_or((STORE_ERR, STORE_ERR));
     // SAFETY: C supplies distinct writable result fields in its record.
     unsafe { (*nodes, *edges) = result };
+}
+
+unsafe extern "C" fn read_project_metadata(
+    store: *mut c_void,
+    project: *const c_char,
+    emit: ProjectMetadataEmit,
+    context: *mut c_void,
+) -> bool {
+    panic::catch_unwind(|| {
+        // SAFETY: C keeps the store and project string live until return.
+        let store = unsafe { borrow_c_store(store) }?;
+        let project = unsafe { CStr::from_ptr(project) }.to_bytes();
+        let metadata = store.project_metadata(project).ok()??;
+        let root_path = metadata
+            .root_path
+            .and_then(|value| CString::new(value).ok());
+        let indexed_at = metadata
+            .indexed_at
+            .and_then(|value| CString::new(value).ok());
+        let root_path = root_path
+            .as_ref()
+            .map_or(ptr::null(), |value| value.as_ptr());
+        let indexed_at = indexed_at
+            .as_ref()
+            .map_or(ptr::null(), |value| value.as_ptr());
+        // SAFETY: the sink copies both nullable strings synchronously.
+        unsafe { emit(context, root_path, indexed_at) };
+        Some(())
+    })
+    .ok()
+    .flatten()
+    .is_some()
 }
 
 unsafe extern "C" fn read_file_outline(
@@ -367,6 +478,125 @@ unsafe extern "C" fn consider_graphql_resolver(
     plan.consider(field_index, resolver)
 }
 
+unsafe extern "C" fn write_graphql_route(
+    gb: *mut c_void,
+    row: *const GraphqlRouteRow,
+) -> bool {
+    // SAFETY: The route pass lends its live graph and this row for the call.
+    // The schema type and reason always point to NUL-terminated strings.
+    let row = unsafe { &*row };
+    let (return_type, reason) =
+        unsafe { (CStr::from_ptr(row.return_type), CStr::from_ptr(row.reason)) };
+    let props = crate::route_writer::route_properties(
+        return_type.to_bytes(),
+        reason.to_bytes(),
+        row.deprecated,
+        row.ambiguous,
+    );
+    // SAFETY: All strings are valid for this call and the buffer copies them.
+    let route_id = unsafe {
+        cbm_gbuf_upsert_node(
+            gb,
+            c"Route".as_ptr(),
+            row.path,
+            row.qn,
+            row.file_path,
+            row.start_line,
+            row.end_line,
+            props.as_ptr().cast(),
+        )
+    };
+    if route_id == 0 {
+        return false;
+    }
+    let (handler, via) = if row.resolver_id == 0 {
+        (row.field_id, c"{\"via\":\"graphql_schema_field\"}")
+    } else {
+        (row.resolver_id, c"{\"via\":\"gqlgen_resolver\"}")
+    };
+    // SAFETY: Both IDs come from this graph. The buffer copies the strings.
+    unsafe {
+        cbm_gbuf_insert_edge(
+            gb,
+            handler,
+            route_id,
+            c"HANDLES".as_ptr(),
+            via.as_ptr(),
+        );
+    }
+    true
+}
+
+extern "C" fn graphql_delete_stale_link(
+    db: *mut sqlite3,
+    caller: i64,
+    route: i64,
+) -> c_int {
+    // SAFETY: C passes a live connection owned by this run. The non-owning
+    // wrapper and its statements are dropped before C resumes using it.
+    let result = unsafe { Connection::from_handle(db) }
+        .and_then(|db| delete_stale_link(&db, caller, route));
+    result.map(c_int::from).unwrap_or(-1)
+}
+
+extern "C" fn graphql_upsert_link(
+    stmt: *mut sqlite3_stmt,
+    project: *const c_char,
+    source: i64,
+    target: i64,
+    properties: *const c_char,
+) -> bool {
+    // SAFETY: The graph store lends a reset edge-upsert statement and the
+    // C strings are NUL-terminated and valid until the callback returns.
+    unsafe {
+        upsert_link(
+            stmt,
+            CStr::from_ptr(project),
+            source,
+            target,
+            CStr::from_ptr(properties),
+        )
+    }
+}
+
+extern "C" fn graphql_find_handler(
+    db: *mut sqlite3,
+    route: *const c_char,
+    name: *mut c_char,
+    name_size: usize,
+    file: *mut c_char,
+    file_size: usize,
+) -> GraphqlHandler {
+    let mut matched = GraphqlHandler {
+        handler_id: 0,
+        ambiguous: false,
+        failed: true,
+    };
+    if db.is_null() {
+        return matched;
+    }
+    // SAFETY: C lends a live connection, a NUL-terminated route and separate
+    // writable buffers for this call. Rust does not close the C connection.
+    let result = unsafe {
+        Connection::from_handle(db).and_then(|db| {
+            find_handler(
+                &db,
+                CStr::from_ptr(route),
+                std::slice::from_raw_parts_mut(name.cast(), name_size),
+                std::slice::from_raw_parts_mut(file.cast(), file_size),
+            )
+        })
+    };
+    if let Ok((handler_id, ambiguous)) = result {
+        matched = GraphqlHandler {
+            handler_id,
+            ambiguous,
+            failed: false,
+        };
+    }
+    matched
+}
+
 /// The process entry point. Dispatches the developer export in Rust.
 /// Otherwise forwards the kernel's argc and argv to C unchanged, including
 /// worker and daemon re-execs
@@ -396,10 +626,21 @@ pub unsafe extern "C" fn main(argc: c_int, argv: *mut *mut c_char) -> c_int {
     // SAFETY: C has not started any indexing threads and the function pointer
     // stays valid for the process lifetime, including each worker's own main.
     unsafe {
-        cbm_gqlgen_set_rust_backend(gqlgen_glob_match, plan_graphql_route);
+        cbm_gqlgen_set_rust_backend(
+            gqlgen_glob_match,
+            plan_graphql_route,
+            write_graphql_route,
+        );
         c_transport::register();
-        cbm_cross_repo_set_graphql_link_policy(plan_link);
+        cbm_cross_repo_set_graphql_backend(
+            plan_link,
+            graphql_delete_stale_link,
+            graphql_upsert_link,
+            graphql_find_handler,
+        );
         crate::query_cli::c_args::register();
+        crate::initialize::c_initialize::register();
+        crate::tool_list::c_tool_list::register();
     }
 
     // SAFETY: argc and argv come straight from the C runtime and meet the
@@ -407,7 +648,11 @@ pub unsafe extern "C" fn main(argc: c_int, argv: *mut *mut c_char) -> c_int {
     unsafe {
         cbm_mcp_set_read_override(read_override, release_payload);
         cbm_store_set_file_outline_reader(read_file_outline);
-        cbm_mcp_set_project_readers(read_project_identity, read_project_stats);
+        cbm_mcp_set_project_readers(
+            read_project_identity,
+            read_project_stats,
+            read_project_metadata,
+        );
         cbm_c_main(argc, argv)
     }
 }

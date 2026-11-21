@@ -28,8 +28,8 @@ Each side gets its own scratch CBM_CACHE_DIR under --work and a short
 CBM_RUNTIME_DIR (`<rt-prefix>-a`, `-b`; long paths break the Unix
 socket). Every directory the harness creates or deletes must sit inside a
 scratch root (`--scratch-root`, default /tmp and the system temp dir).
-Subprocesses get PATH, HOME, and those two variables only, so the live
-cache and daemon are never touched.
+Subprocesses get PATH, HOME, and those two variables. An explicit GraphQL
+mode adds the selected backend and profiling in that side only.
 """
 
 from __future__ import annotations
@@ -48,7 +48,7 @@ import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -57,7 +57,8 @@ import allowlist  # noqa: E402
 import calls as calls_mod  # noqa: E402
 import corpus  # noqa: E402
 import fixtures  # noqa: E402
-from graph_export import LAYERS, DiffReport, diff_exports, export_db  # noqa
+from graph_export import (LAYERS, DiffReport, diff_exports, export_db,  # noqa
+                          export_mori, same_export_value)
 
 MORI = os.path.dirname(HERE)
 DEFAULT_BIN = os.path.join(MORI, "build", "c", "codebase-memory-mcp")
@@ -174,14 +175,21 @@ class Side:
   bin: str
   cache: str
   rt: str
+  exporter: str = "sql"
+  verify_export: bool = False
+  graphql_mode: Literal["c", "rust"] | None = None
 
   def env(self) -> dict[str, str]:
-    return {
+    env = {
       "PATH": "/usr/local/bin:/usr/bin:/bin",
       "HOME": os.environ.get("HOME", "/tmp"),
       "CBM_CACHE_DIR": self.cache,
       "CBM_RUNTIME_DIR": self.rt,
     }
+    if self.graphql_mode is not None:
+      env["MORI_IMPL_GRAPHQL"] = self.graphql_mode
+      env["CBM_PROFILE"] = "1"
+    return env
 
   def cli(self, tool: str, args: dict[str, Any], timeout: int
           ) -> tuple[int, str, str]:
@@ -196,6 +204,22 @@ class Side:
                        env=self.env(), capture_output=True, text=True,
                        timeout=120, stdin=subprocess.DEVNULL)
     return p.returncode
+
+  def export(self, db: str) -> dict[str, Any]:
+    if self.exporter == "sql":
+      return export_db(db)
+    result = export_mori(db, self.bin, self.env(), INDEX_TIMEOUT_S)
+    if self.verify_export:
+      reference = export_db(db)
+      keys = sorted(key for key in result.keys() | reference.keys()
+                    if key not in result or key not in reference or
+                    not same_export_value(result[key], reference[key]))
+      if keys:
+        diffs = diff_exports(reference, result).diffs()
+        details = ", ".join(f"{d.layer}:{d.key}" for d in diffs[:3])
+        suffix = f" ({details})" if details else ""
+        raise ValueError(f"side {self.name} export differs from SQL in {keys}{suffix}")
+    return result
 
 
 def make_sides(bin_a: str, bin_b: str, work: str, rt_prefix: str,
@@ -453,8 +477,8 @@ def compare_repo(sides: list[Side], dir_: str, root: str,
   identity_diffs(rep, r.index, {"a": project_rows(dba),
                                 "b": project_rows(dbb)})
   t0 = time.monotonic()
-  ea = export_db(dba)
-  eb = export_db(dbb)
+  ea = sides[0].export(dba)
+  eb = sides[1].export(dbb)
   r.counts = {"nodes": len(ea["nodes"]), "edges": len(ea["edges"])}
   graph = diff_exports(ea, eb).diffs()
   del ea, eb
@@ -673,7 +697,17 @@ def run(repos: list[tuple[str, str]], call_list: list[dict[str, Any]] | None,
         dropped: int, a: argparse.Namespace, meta: dict[str, Any]) -> int:
   entries = allowlist.load_all(a.allowlist)
   sides = make_sides(a.bin_a, a.bin_b, a.work, a.rt_prefix, a.scratch_root)
+  for side, exporter, graphql_mode in zip(
+      sides, (a.export_a, a.export_b), (a.graphql_a, a.graphql_b)):
+    side.exporter = exporter
+    side.verify_export = a.verify_export
+    side.graphql_mode = graphql_mode
   log(f"side a: {sides[0].bin}\nside b: {sides[1].bin}\nwork: {a.work}")
+  requested = {s.name: s.graphql_mode for s in sides if s.graphql_mode is not None}
+  if requested:
+    meta = {**meta, "graphql_modes_requested": requested}
+    log("GraphQL modes requested: " + ", ".join(
+      f"{name}={mode}" for name, mode in requested.items()))
   results = []
   t0 = time.monotonic()
   for dir_, root in repos:
@@ -681,7 +715,7 @@ def run(repos: list[tuple[str, str]], call_list: list[dict[str, Any]] | None,
     try:
       results.append(compare_repo(sides, dir_, root, entries,
                                   a.timeout_retries))
-    except (sqlite3.Error, OSError, ValueError, KeyError) as e:
+    except (sqlite3.Error, OSError, ValueError, KeyError, subprocess.TimeoutExpired) as e:
       log(f"  {dir_}: comparison failed: {e!r}")
       r = RepoResult(dir_, root)
       r.error = f"comparison failed: {e!r}"[:300]
@@ -706,6 +740,8 @@ def run(repos: list[tuple[str, str]], call_list: list[dict[str, Any]] | None,
         if ok:
           s.daemon("stop")
   meta = {**meta, "bin_a": sides[0].bin, "bin_b": sides[1].bin,
+          "export_a": a.export_a, "export_b": a.export_b,
+          "verify_export": a.verify_export,
           "allowlists": a.allowlist,
           "total_s": round(time.monotonic() - t0, 1)}
   return finish(results, l4, l4_stats, a.work, meta)
@@ -926,6 +962,14 @@ def main(argv: list[str]) -> int:
     p = sub.add_parser(name)
     p.add_argument("--bin-a", default=DEFAULT_BIN)
     p.add_argument("--bin-b", default=DEFAULT_BIN)
+    for side in ("a", "b"):
+      p.add_argument(f"--export-{side}", choices=("sql", "rust"), default="sql",
+                     help=f"graph exporter for side {side} (default: sql)")
+      p.add_argument(f"--graphql-{side}", choices=("c", "rust"),
+                     help=f"request a GraphQL backend for side {side} and "
+                          "retain native worker profiling logs")
+    p.add_argument("--verify-export", action="store_true",
+                   help="compare each Rust export with SQL on the same database")
     p.add_argument("--work", help="work dir (default: a new "
                    "/tmp/mori-parity-XXXX/w per run, so runs never share "
                    "or delete each other's dirs)")
@@ -980,6 +1024,8 @@ def main(argv: list[str]) -> int:
   p.add_argument("--measured", required=True,
                  help="what was measured, e.g. 'C-vs-C 2026-11-21'")
   a = ap.parse_args(argv)
+  if a.cmd in ("run", "ci") and a.verify_export and a.export_a == a.export_b == "sql":
+    ap.error("--verify-export requires --export-a rust or --export-b rust")
   if getattr(a, "scratch_root", None) is None and a.cmd in ("run", "ci"):
     a.scratch_root = default_scratch_roots()
   base = None
