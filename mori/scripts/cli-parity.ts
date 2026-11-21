@@ -22,7 +22,7 @@
 // each invocation also has fixed expectations on its exit code and stdout,
 // checked on both sides.
 
-import { cp, mkdir, mkdtemp, rm } from "node:fs/promises"
+import { cp, mkdir, mkdtemp, realpath, rm } from "node:fs/promises"
 import { join, resolve } from "node:path"
 
 export const PROGRAM_NAMES = ["mori", "codebase-memory-mcp"] as const
@@ -419,7 +419,9 @@ export interface ParityOptions {
 
 export async function runParity(opts: ParityOptions): Promise<Comparison[]> {
   const log = opts.log ?? (() => {})
-  const scratch = await mkdtemp("/tmp/mori-bin-")
+  // Canonical, because the binaries name projects after the resolved repo
+  // path: on macOS /tmp is a symlink to /private/tmp.
+  const scratch = await realpath(await mkdtemp("/tmp/mori-bin-"))
   try {
     const repo = join(scratch, "repo")
     await cp(opts.fixture, repo, { recursive: true })
