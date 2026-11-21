@@ -144,6 +144,12 @@ static uint32_t main_startup_timeout_ms(void) {
 #define CBM_VERSION "dev"
 #endif
 
+/* The name `--version` prints. libmori-c (Makefile.cbm) sets it to "mori" for
+ * the Rust binary. */
+#ifndef CBM_PROGRAM_NAME
+#define CBM_PROGRAM_NAME "codebase-memory-mcp"
+#endif
+
 /* ── Globals for signal handling ────────────────────────────────── */
 
 static atomic_int g_shutdown = 0;
@@ -1293,7 +1299,7 @@ static int handle_subcommand(int argc, char **argv, cbm_project_lock_manager_t *
     }
     for (int i = SKIP_ONE; i < argc; i++) {
         if (strcmp(argv[i], "--version") == 0) {
-            printf("codebase-memory-mcp %s\n", CBM_VERSION);
+            printf("%s %s\n", CBM_PROGRAM_NAME, CBM_VERSION);
             return 0;
         }
         if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
