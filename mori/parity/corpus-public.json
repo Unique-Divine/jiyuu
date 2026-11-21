@@ -1,0 +1,26 @@
+{
+  "note": "Public repos only, each fetched at its pinned commit and indexed from an extracted copy. A private corpus stays outside this repository (see parity.py --private-dir).",
+  "repos": [
+    {
+      "dir": "jiyuu",
+      "remote": "https://github.com/Unique-Divine/jiyuu.git",
+      "commit": "cd217b97ff6e8491d4a620f93af19e952a533c9d",
+      "source": "archive",
+      "cbmignore": null
+    },
+    {
+      "dir": "cobra",
+      "remote": "https://github.com/spf13/cobra.git",
+      "commit": "adbc8813901bba65827259daa8e22ff94ec1f30e",
+      "source": "archive",
+      "cbmignore": null
+    },
+    {
+      "dir": "requests",
+      "remote": "https://github.com/psf/requests.git",
+      "commit": "3c7baaa05ab4aa49cc819ce3a819d260de19c157",
+      "source": "archive",
+      "cbmignore": null
+    }
+  ]
+}
