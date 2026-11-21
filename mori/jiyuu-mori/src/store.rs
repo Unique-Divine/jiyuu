@@ -88,6 +88,11 @@ pub(crate) struct Column {
 
 pub(crate) struct Store(Connection);
 
+pub(crate) struct ProjectIdentity {
+    pub(crate) name: Vec<u8>,
+    pub(crate) root_path: Option<Vec<u8>>,
+}
+
 pub(crate) struct FileOutlineQuery<'a> {
     pub(crate) project: &'a [u8],
     pub(crate) path: &'a [u8],
@@ -123,6 +128,10 @@ pub(crate) fn quote_identifier(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
 
+fn c_string_bytes(bytes: &[u8]) -> &[u8] {
+    bytes.split(|&byte| byte == 0).next().unwrap_or_default()
+}
+
 fn collect<T>(
     connection: &Connection,
     sql: &str,
@@ -143,6 +152,73 @@ fn properties(row: &Row<'_>, skip: &[&str]) -> rusqlite::Result<Cells> {
 impl Store {
     pub(crate) fn from_connection(connection: Connection) -> Self {
         Self(connection)
+    }
+
+    pub(crate) fn project_identity(
+        &self,
+        name_capacity: usize,
+    ) -> rusqlite::Result<Option<ProjectIdentity>> {
+        let mut statement = self.0.prepare(
+            "SELECT CAST(name AS TEXT), indexed_at, root_path FROM projects ORDER BY name",
+        )?;
+        let mut rows = statement.query([])?;
+        let mut primary = None;
+        while let Some(row) = rows.next()? {
+            let ValueRef::Text(name) = row.get_ref(0)? else {
+                continue;
+            };
+            let name = c_string_bytes(name);
+            if name.is_empty() || name.windows(2).any(|pair| pair == b"::") {
+                continue;
+            }
+            if primary.is_some() {
+                return Ok(None);
+            }
+            // Keep the legacy list_projects name buffer limit. The value
+            // used for the root lookup and counts is the same display name.
+            primary = Some(
+                name[..name.len().min(name_capacity.saturating_sub(1))].to_vec(),
+            );
+        }
+        let Some(name) = primary else { return Ok(None) };
+        drop(rows);
+
+        let root_path = self
+            .0
+            .query_row(
+                "SELECT CAST(root_path AS TEXT) FROM projects WHERE name = ?1",
+                [ToSqlOutput::Borrowed(ValueRef::Text(&name))],
+                |row| {
+                    Ok(match row.get_ref(0)? {
+                        ValueRef::Text(path) => {
+                            Some(c_string_bytes(path).to_vec())
+                        }
+                        _ => None,
+                    })
+                },
+            )
+            .optional();
+        let root_path = match root_path {
+            Ok(Some(value)) => value,
+            _ => Some(Vec::new()),
+        };
+        Ok(Some(ProjectIdentity { name, root_path }))
+    }
+
+    pub(crate) fn project_stats(&self, project: &[u8]) -> (i32, i32) {
+        let count = |sql| {
+            self.0
+                .query_row(
+                    sql,
+                    [ToSqlOutput::Borrowed(ValueRef::Text(project))],
+                    |row| Ok(row.get::<_, i64>(0)? as i32),
+                )
+                .unwrap_or(-1)
+        };
+        (
+            count("SELECT COUNT(*) FROM nodes WHERE project = ?1"),
+            count("SELECT COUNT(*) FROM edges WHERE project = ?1"),
+        )
     }
 
     pub(crate) fn file_outline(

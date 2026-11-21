@@ -111,6 +111,76 @@ fn list_projects_matches_c() {
 }
 
 #[test]
+fn project_pages_use_internal_identity_and_preserve_projection() {
+    let scratch = Scratch::new("projects");
+    let cache = scratch.0.join("cache");
+    let create_project_db = |file: &str, name: &str, extra: &str| {
+        let db = rusqlite::Connection::open(cache.join(file)).unwrap();
+        db.execute_batch(
+            "CREATE TABLE projects (name TEXT PRIMARY KEY, indexed_at TEXT, root_path TEXT);
+             CREATE TABLE nodes (project TEXT);
+             CREATE TABLE edges (project TEXT);",
+        ).unwrap();
+        for project in [name, extra] {
+            db.execute(
+                "INSERT INTO projects VALUES (?1, 'now', '/tmp/graph-root')",
+                [project],
+            )
+            .unwrap();
+            db.execute("INSERT INTO nodes VALUES (?1), (?1)", [project])
+                .unwrap();
+            db.execute("INSERT INTO edges VALUES (?1)", [project])
+                .unwrap();
+        }
+    };
+    create_project_db("renamed.db", "alpha", "alpha::missed");
+    create_project_db("second.db", "beta", "beta::missed");
+    create_project_db("ambiguous.db", "skip-one", "skip-two");
+    fs::write(cache.join("corrupt.db"), "not a SQLite database").unwrap();
+
+    let cases = [
+        r#"{"format":"json"}"#,
+        r#"{"metadata_only":true,"limit":1}"#,
+        r#"{"detail":"stats","limit":1,"offset":1,"format":"json"}"#,
+        r#"{"include_details":true,"offset":99,"format":"json"}"#,
+    ];
+    let run_all = |bin: &Path| {
+        let outputs = cases.map(|args| {
+            run_in(bin, &scratch, &["cli", "--quiet", "list_projects", args])
+        });
+        let stop = run_in(bin, &scratch, &["daemon", "stop"]);
+        assert!(stop.status.success(), "{stop:?}");
+        outputs
+    };
+    let c = run_all(&c_binary());
+    let rust = run_all(Path::new(MORI));
+    for (reference, candidate) in c.iter().zip(&rust) {
+        assert!(reference.status.success(), "{reference:?}");
+        assert_eq!(
+            (
+                reference.status.code(),
+                &reference.stdout,
+                &reference.stderr
+            ),
+            (
+                candidate.status.code(),
+                &candidate.stdout,
+                &candidate.stderr
+            )
+        );
+    }
+    let identity: serde_json::Value =
+        serde_json::from_slice(&rust[0].stdout).unwrap();
+    assert_eq!(identity["total"], 2);
+    assert_eq!(identity["projects"][0]["name"], "alpha");
+    let stats: serde_json::Value =
+        serde_json::from_slice(&rust[2].stdout).unwrap();
+    assert_eq!(stats["projects"][0]["name"], "beta");
+    assert_eq!(stats["projects"][0]["nodes"], 2);
+    assert_eq!(stats["projects"][0]["edges"], 1);
+}
+
+#[test]
 fn unknown_tool_error_matches_c() {
     assert_same(&["cli", "no_such_tool"]);
 }

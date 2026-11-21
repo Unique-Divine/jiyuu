@@ -3092,6 +3092,54 @@ typedef enum {
     PROJECT_RECORD_OOM = -1,
 } project_record_status_t;
 
+static cbm_mcp_project_identity_reader_fn project_identity_reader;
+static cbm_mcp_project_stats_reader_fn project_stats_reader;
+
+void cbm_mcp_set_project_readers(cbm_mcp_project_identity_reader_fn identity,
+                                 cbm_mcp_project_stats_reader_fn stats) {
+    project_identity_reader = identity;
+    project_stats_reader = stats;
+}
+
+static int copy_project_identity(void *context, const char *name, const char *root_path) {
+    mcp_project_record_t *record = context;
+    record->name = heap_strdup(name);
+    record->root_path = heap_strdup(root_path);
+    return record->name && record->root_path ? PROJECT_RECORD_OK : PROJECT_RECORD_OOM;
+}
+
+static project_record_status_t read_project_identity(const char *full_path,
+                                                     mcp_project_record_t *record) {
+    if (project_identity_reader) {
+        cbm_store_t *store = cbm_store_open_path_query(full_path);
+        if (!store) {
+            return PROJECT_RECORD_SKIP;
+        }
+        int status = project_identity_reader(store, CBM_SZ_1K, copy_project_identity, record);
+        cbm_store_close(store);
+        return (project_record_status_t)status;
+    }
+
+    char project_name[CBM_SZ_1K];
+    cbm_store_t *pstore = NULL;
+    if (!db_internal_project_name(full_path, project_name, sizeof(project_name), &pstore)) {
+        return PROJECT_RECORD_SKIP;
+    }
+    record->name = heap_strdup(project_name);
+    cbm_project_t proj = {0};
+    if (cbm_store_get_project(pstore, project_name, &proj) == CBM_STORE_OK) {
+        /* Transfer the entire root path. It is used for sorting, output, and
+         * branch lookup, where a fixed-size buffer could truncate it. */
+        record->root_path = (char *)proj.root_path;
+        proj.root_path = NULL;
+        cbm_project_free_fields(&proj);
+    } else {
+        record->root_path = heap_strdup("");
+    }
+    cbm_store_close(pstore);
+    return record->name && record->root_path ? PROJECT_RECORD_OK : PROJECT_RECORD_OOM;
+}
+
 /* Open a .db file briefly and collect sortable identity only. Counts and Git
  * context are populated after paging so a 50-row response does not repeat
  * heavyweight work for every database in the cache. */
@@ -3108,38 +3156,14 @@ static project_record_status_t read_project_record_identity(const char *dir_path
      * renamed db, legacy '.'-vs-'-' username twin) would otherwise report 0
      * nodes/edges and be unresolvable. Skip ghost/empty/corrupt dbs entirely so
      * they don't appear as resolvable projects. */
-    char project_name[CBM_SZ_1K];
-    cbm_store_t *pstore = NULL;
-    if (!db_internal_project_name(full_path, project_name, sizeof(project_name), &pstore)) {
-        return PROJECT_RECORD_SKIP; /* ghost / unreadable — not resolvable */
+    project_record_status_t status = read_project_identity(full_path, record);
+    if (status != PROJECT_RECORD_OK) {
+        project_record_clear(record);
+        return status;
     }
-
-    record->name = heap_strdup(project_name);
     record->db_file = heap_strdup(name);
     record->size_bytes = size_bytes;
-    cbm_project_t proj = {0};
-    if (cbm_store_get_project(pstore, project_name, &proj) == CBM_STORE_OK) {
-        /* root_path is NOT NULL in the store schema, so a missing copy here is
-         * allocation failure rather than an empty identity. */
-        if (!proj.root_path) {
-            cbm_project_free_fields(&proj);
-            cbm_store_close(pstore);
-            project_record_clear(record);
-            return PROJECT_RECORD_OOM;
-        }
-        /* Store project fields are heap-owned by the caller. Transfer the root
-         * identity intact: it is the value used for sorting, output, and branch
-         * lookup, so routing it through a fixed buffer would silently change
-         * all three for long roots. */
-        record->root_path = (char *)proj.root_path;
-        proj.root_path = NULL;
-        cbm_project_free_fields(&proj);
-    }
-    cbm_store_close(pstore);
-    if (!record->root_path) {
-        record->root_path = heap_strdup("");
-    }
-    if (!record->name || !record->root_path || !record->db_file) {
+    if (!record->db_file) {
         project_record_clear(record);
         return PROJECT_RECORD_OOM;
     }
@@ -3159,8 +3183,12 @@ static bool populate_project_record(const char *dir_path, bool include_stats,
         if (!pstore) {
             return false;
         }
-        record->nodes = cbm_store_count_nodes(pstore, record->name);
-        record->edges = cbm_store_count_edges(pstore, record->name);
+        if (project_stats_reader) {
+            project_stats_reader(pstore, record->name, &record->nodes, &record->edges);
+        } else {
+            record->nodes = cbm_store_count_nodes(pstore, record->name);
+            record->edges = cbm_store_count_edges(pstore, record->name);
+        }
         cbm_store_close(pstore);
     }
     /* Listing stays lean: only the branch (the one git fact that

@@ -278,6 +278,19 @@ typedef struct {
  * project has no root path. */
 int cbm_mcp_project_adr_presence(cbm_store_t *store, const char *project);
 
+/* Project readers borrow an open, query-only store. The identity reader
+ * returns 0 to skip the database, 1 on success, or -1 on allocation failure.
+ * Its sink copies the supplied strings before the callback returns. */
+typedef int (*cbm_mcp_project_identity_emit_fn)(void *context, const char *name,
+                                                const char *root_path);
+typedef int (*cbm_mcp_project_identity_reader_fn)(cbm_store_t *store, size_t name_capacity,
+                                                  cbm_mcp_project_identity_emit_fn emit,
+                                                  void *context);
+typedef void (*cbm_mcp_project_stats_reader_fn)(cbm_store_t *store, const char *project, int *nodes,
+                                                int *edges);
+void cbm_mcp_set_project_readers(cbm_mcp_project_identity_reader_fn identity,
+                                 cbm_mcp_project_stats_reader_fn stats);
+
 /* ── Supervised background index (RSS isolation, #832) ────────── */
 
 /* #1300: the explicit error response for a worker that exited cleanly without
