@@ -309,6 +309,24 @@ class GateTest(unittest.TestCase):
                     lambda _: (out(full_a), out(full_b))))
     self.assertEqual(got, [("search_graph:$.results{unstable}", "")])
 
+  def test_capped_cypher_uses_the_replay_order_for_mixed_values(self) -> None:
+    q = {"query": "MATCH (n) RETURN n.name, n.file_path ORDER BY n.name DESC LIMIT 3",
+         "format": "json"}
+    rows_ = [["a", "a.ts"], ["2", "b.ts"], ["10", "c.ts"], ["10", "d.ts"]]
+
+    def result(page: list[list[str]]) -> str:
+      return json.dumps({"columns": ["n.name", "n.file_path"], "rows": page,
+                         "truncation_reason": "engine_limit"})
+
+    full = out(result(rows_))
+    got = keys(diff("query_graph", q, result(rows_[:3]),
+                    result(rows_[:2] + rows_[3:]), lambda _: (full, full)))
+    self.assertEqual(got, [("query_graph:$.rows{unstable}", "")])
+    swapped = result([rows_[0], rows_[2], rows_[1]])
+    got = keys(diff("query_graph", q, result(rows_[:3]), swapped,
+                    lambda _: (full, full)))
+    self.assertIn(("query_graph:$.rows{unstable_prefix_b}", ""), got)
+
   def test_ranked_text_is_also_gated_in_json(self) -> None:
     """Two rows print the same rank in text but differ in JSON: a swap
     between them is caught by the JSON replay."""

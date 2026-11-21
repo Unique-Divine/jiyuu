@@ -296,43 +296,29 @@ def _num(v: Any) -> Any:
     return (1, str(v))
 
 
-def order_directions(args: dict[str, Any], n: int) -> list[bool]:
-  """Per ORDER BY item, True when descending."""
-  m = ORDER_RE.search(str(args.get("query", "")))
-  items = split_top(m.group(1)) if m else []
-  out = [bool(re.search(r"\s(DESC|DESCENDING)$", i, re.IGNORECASE))
-         for i in items]
-  return (out + [False] * n)[:n]
-
-
-def out_of_order(t: Table, mode: str, idx: list[int], args: dict[str, Any],
+def out_of_order(t: Table, mode: str, idx: list[int],
                  name_of: NameOf | None = None) -> list[str]:
-  """Rows that break the order the tool promises for this mode: rank
-  ascending (BM25 `rank`) or score descending, ORDER BY keys in their
-  directions, node names ascending. Empty for strict and unordered."""
-  if mode not in ("ranked", "keyed", "named"):
+  """Validate search result ordering. For Cypher, compare against the
+  replay: C chooses numeric or text sorting from values before sorting,
+  which the output page does not expose."""
+  if mode not in ("ranked", "named"):
     return []
-  desc = [t.cols[idx[0]] == "score"] if mode == "ranked" else \
-    order_directions(args, len(idx)) if mode == "keyed" else [False]
+  col = idx[0]
+  desc = mode == "ranked" and t.cols[col] == "score"
   prev = None
   bad = []
   for row in t.rows:
     vals = cells(row)
     if mode == "named":
-      qn = str(vals[idx[0]]) if idx and idx[0] < len(vals) else ""
+      qn = str(vals[col]) if col < len(vals) else ""
       name = name_of(qn) if name_of else None
       if name is None:
         continue
-      key = [(1, name.encode())]
+      key = (1, name.encode())
     else:
-      key = [_num(vals[i]) if i < len(vals) else (2, "") for i in idx]
-    if prev is not None:
-      for k, p, d in zip(key, prev, desc):
-        if k == p:
-          continue
-        if (k < p) != d:
-          bad.append(row_text(row))
-        break
+      key = _num(vals[col]) if col < len(vals) else (2, "")
+    if prev is not None and (key > prev if desc else key < prev):
+      bad.append(row_text(row))
     prev = key
   return bad
 

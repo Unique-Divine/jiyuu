@@ -996,12 +996,12 @@ def main(argv: list[str]) -> int:
   report = os.path.join(a.work, "report.json") if a.cmd in ("run", "ci") \
     else ""
   if base and a.cmd == "ci" and rc == 0:
-    # A passing fixture run (or caught corruption) leaves nothing worth
-    # reading behind.
+    # Remove only the automatically allocated directories on success.
     shutil.rmtree(base, ignore_errors=True)
-    print("\nfixture run passed; its work dir was removed")
-  elif report and os.path.isfile(report):
+  if report and os.path.isfile(report):
     print(f"\nreport: {report}")
+  elif base and a.cmd == "ci" and rc == 0:
+    print("\nfixture run passed; its temporary work dir was removed")
   return rc
 
 

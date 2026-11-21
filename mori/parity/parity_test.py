@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import argparse
+import io
 import json
 import os
 import socket
@@ -9,6 +11,8 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -24,6 +28,30 @@ class ParityTest(unittest.TestCase):
     self.addCleanup(tmp.cleanup)
     self.tmp = tmp.name
     self.roots = [self.tmp]
+
+  def test_ci_reports_only_work_that_survives_cleanup(self) -> None:
+    reports: list[str] = []
+
+    def fake_ci(args: argparse.Namespace) -> int:
+      work = args.work
+      os.mkdir(work)
+      report = os.path.join(work, "report.json")
+      with open(report, "w", encoding="utf-8") as f:
+        json.dump({}, f)
+      reports.append(report)
+      return 0
+
+    with patch.object(parity, "cmd_ci", fake_ci):
+      kept = io.StringIO()
+      with redirect_stdout(kept):
+        self.assertEqual(parity.main(["ci", "--work", self.tmp + "/saved"]), 0)
+      self.assertIn(f"report: {reports[0]}", kept.getvalue())
+      self.assertTrue(os.path.isfile(reports[0]))
+      removed = io.StringIO()
+      with redirect_stdout(removed):
+        self.assertEqual(parity.main(["ci"]), 0)
+      self.assertNotIn(reports[1], removed.getvalue())
+      self.assertFalse(os.path.exists(reports[1]))
 
   def test_parse_timeouts_counts_dropped_files(self) -> None:
     db = os.path.join(self.tmp, "p.db")

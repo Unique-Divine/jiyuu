@@ -561,8 +561,8 @@ def _diff_unstable(rep: DiffReport, tool: str, args: dict[str, Any],
   may accept, and the rows are still gated: the counts must match
   (`{unstable_count}`, never accepted), and each side's rows must appear
   in the other side's unlimited replay (`{unstable_only_in_a}` per row),
-  and each side's page must keep its order mode
-  (`{unstable_order_a}`) and be the leading rows of its own unlimited
+  and search pages must keep their order mode
+  (`{unstable_order_a}`). Every ordered page must lead its own unlimited
   replay, ties allowed at the cut (`{unstable_prefix_a}`). The last three
   are never accepted."""
   n = 0
@@ -606,7 +606,7 @@ def _diff_unstable(rep: DiffReport, tool: str, args: dict[str, Any],
         continue
       t = page[key]
       mode, idx = rows_mod.order_mode(tool, args, t.cols)
-      bad = rows_mod.out_of_order(t, mode, idx, args, name_of)
+      bad = rows_mod.out_of_order(t, mode, idx, name_of)
       if bad:
         rep.add("L4", f"{k}{{unstable_order_{side}}}", group, len(bad),
                 bad[0], where)
