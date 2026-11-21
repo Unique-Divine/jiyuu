@@ -288,8 +288,14 @@ typedef int (*cbm_mcp_project_identity_reader_fn)(cbm_store_t *store, size_t nam
                                                   void *context);
 typedef void (*cbm_mcp_project_stats_reader_fn)(cbm_store_t *store, const char *project, int *nodes,
                                                 int *edges);
+typedef void (*cbm_mcp_project_metadata_emit_fn)(void *context, const char *root_path,
+                                                  const char *indexed_at);
+typedef bool (*cbm_mcp_project_metadata_reader_fn)(cbm_store_t *store, const char *project,
+                                                    cbm_mcp_project_metadata_emit_fn emit,
+                                                    void *context);
 void cbm_mcp_set_project_readers(cbm_mcp_project_identity_reader_fn identity,
-                                 cbm_mcp_project_stats_reader_fn stats);
+                                 cbm_mcp_project_stats_reader_fn stats,
+                                 cbm_mcp_project_metadata_reader_fn metadata);
 
 /* ── Supervised background index (RSS isolation, #832) ────────── */
 

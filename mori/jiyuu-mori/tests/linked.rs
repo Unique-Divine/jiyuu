@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use rusqlite::{Connection, OpenFlags};
+
 const MORI: &str = env!("CARGO_BIN_EXE_mori");
 
 fn c_binary() -> PathBuf {
@@ -154,19 +156,24 @@ fn project_pages_use_internal_identity_and_preserve_projection() {
     fs::write(cache.join("corrupt.db"), "not a SQLite database").unwrap();
 
     let cases = [
-        r#"{"format":"json"}"#,
-        r#"{"metadata_only":true,"limit":1}"#,
-        r#"{"detail":"stats","limit":1,"offset":1,"format":"json"}"#,
-        r#"{"include_details":true,"offset":99,"format":"json"}"#,
+        ("list_projects", r#"{"format":"json"}"#),
+        ("list_projects", r#"{"metadata_only":true,"limit":1}"#),
+        (
+            "list_projects",
+            r#"{"detail":"stats","limit":1,"offset":1,"format":"json"}"#,
+        ),
+        (
+            "list_projects",
+            r#"{"include_details":true,"offset":99,"format":"json"}"#,
+        ),
+        (
+            "index_status",
+            r#"{"project":"alpha","verbose":true,"diagnostics":"summary","format":"json"}"#,
+        ),
     ];
     let run_all = |bin: &Path| {
-        let outputs = cases.map(|args| {
-            run_in(
-                bin,
-                &scratch,
-                None,
-                &["cli", "--quiet", "list_projects", args],
-            )
+        let outputs = cases.map(|(tool, args)| {
+            run_in(bin, &scratch, None, &["cli", "--quiet", tool, args])
         });
         let stop = run_in(bin, &scratch, None, &["daemon", "stop"]);
         assert!(stop.status.success(), "{stop:?}");
@@ -198,11 +205,64 @@ fn project_pages_use_internal_identity_and_preserve_projection() {
     assert_eq!(stats["projects"][0]["name"], "beta");
     assert_eq!(stats["projects"][0]["nodes"], 2);
     assert_eq!(stats["projects"][0]["edges"], 1);
+    let status: serde_json::Value =
+        serde_json::from_slice(&rust[4].stdout).unwrap();
+    assert_eq!(status["status"], "ready");
+    assert_eq!(status["root_path"], "/tmp/graph-root");
+    assert_eq!(status["indexed_at"], "now");
+    assert_eq!(status["nodes"], 2);
+    assert_eq!(status["edges"], 1);
+
+    // A readable project with an unreadable count keeps its metadata and
+    // reports a table-specific error rather than an empty index.
+    rusqlite::Connection::open(cache.join("renamed.db"))
+        .unwrap()
+        .execute_batch("DROP TABLE edges;")
+        .unwrap();
+    let args = [
+        "cli",
+        "--quiet",
+        "index_status",
+        r#"{"project":"alpha","format":"json"}"#,
+    ];
+    let c = run_in(&c_binary(), &scratch, None, &args);
+    let stop = run_in(&c_binary(), &scratch, None, &["daemon", "stop"]);
+    assert!(stop.status.success(), "{stop:?}");
+    let rust = run_in(Path::new(MORI), &scratch, None, &args);
+    assert_eq!(
+        (c.status.code(), &c.stdout, &c.stderr),
+        (rust.status.code(), &rust.stdout, &rust.stderr)
+    );
+    let failed: serde_json::Value =
+        serde_json::from_slice(&rust.stdout).unwrap();
+    assert_eq!(failed["status"], "error");
+    assert_eq!(failed["indexed_at"], "now");
+    assert!(
+        failed["hint"]
+            .as_str()
+            .unwrap()
+            .contains("The edges table could not be read")
+    );
 }
 
 #[test]
 fn unknown_tool_error_matches_c() {
     assert_same(&["cli", "no_such_tool"]);
+}
+
+fn run_stdio(bin: &Path, side: &str, args: &[&str], input: &str) -> String {
+    let scratch = Scratch::new(side);
+    let requests = scratch.0.join("requests");
+    fs::write(&requests, input).expect("write MCP requests");
+    let output = command_in(bin, &scratch)
+        .args(args)
+        .stdin(Stdio::from(
+            fs::File::open(requests).expect("open MCP requests"),
+        ))
+        .output()
+        .expect("run MCP server");
+    assert!(output.status.success(), "{side}: {output:?}");
+    String::from_utf8(output.stdout).expect("UTF-8 response")
 }
 
 #[test]
@@ -215,21 +275,8 @@ fn stdio_mixed_framing_matches_c_after_input_eof() {
         "{initialize}\n{initialized}\nContent-Length: {}\r\n\r\n{call}",
         call.len()
     );
-    let run = |bin: &Path, side| {
-        let scratch = Scratch::new(side);
-        let requests = scratch.0.join("requests");
-        fs::write(&requests, &input).expect("write MCP requests");
-        let output = command_in(bin, &scratch)
-            .stdin(Stdio::from(
-                fs::File::open(requests).expect("open MCP requests"),
-            ))
-            .output()
-            .expect("run MCP server");
-        assert!(output.status.success(), "{side}: {output:?}");
-        String::from_utf8(output.stdout).expect("UTF-8 response")
-    };
-    let reference = run(&c_binary(), "c");
-    let linked = run(Path::new(MORI), "rs");
+    let reference = run_stdio(&c_binary(), "c", &[], &input);
+    let linked = run_stdio(Path::new(MORI), "rs", &[], &input);
     assert_eq!(linked, reference);
     let (initialize_response, framed) =
         linked.split_once('\n').expect("newline response");
@@ -239,6 +286,98 @@ fn stdio_mixed_framing_matches_c_after_input_eof() {
     assert_eq!(header, format!("Content-Length: {}", body.len()));
     assert!(body.contains("\"id\":2"));
     assert!(body.contains("projects: 0"));
+}
+
+#[test]
+fn initialize_negotiation_and_instructions_match_c() {
+    for (args, request, protocol, instruction) in [
+        (
+            &[][..],
+            r#""2024-11-05""#,
+            "2024-11-05",
+            "Mori is a code knowledge graph",
+        ),
+        (
+            &["--tool-profile=scout"][..],
+            r#""9999-01-01""#,
+            "2025-11-25",
+            "scout tool profile",
+        ),
+        (
+            &["--tool-profile=analysis"][..],
+            "null",
+            "2025-11-25",
+            "analysis tool profile",
+        ),
+    ] {
+        let input = format!(
+            "{{\"jsonrpc\":\"2.0\",\"id\":\"handshake\",\"method\":\"initialize\",\"params\":{{\"protocolVersion\":{request}}}}}\n"
+        );
+        let reference = run_stdio(&c_binary(), "c", args, &input);
+        let linked = run_stdio(Path::new(MORI), "rs", args, &input);
+        assert_eq!(linked, reference);
+        let value: serde_json::Value = serde_json::from_str(&linked).unwrap();
+        assert_eq!(value["id"], "handshake");
+        assert_eq!(value["result"]["protocolVersion"], protocol);
+        assert_eq!(value["result"]["serverInfo"]["name"], "mori-graph");
+        assert!(
+            value["result"]["instructions"]
+                .as_str()
+                .unwrap()
+                .starts_with(instruction)
+        );
+    }
+}
+
+#[test]
+fn tools_list_profiles_and_cursor_pages_match_c() {
+    let input = concat!(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/list\",\"params\":{\"cursor\":\"0\"}}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/list\",\"params\":{\"cursor\":\"8\"}}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/list\",\"params\":{\"cursor\":\"bogus\"}}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"tools/list\",\"params\":{\"cursor\":null}}\n",
+    );
+    for (args, count) in [
+        (&[][..], 17),
+        (&["--tool-profile=analysis"][..], 13),
+        (&["--tool-profile=scout"][..], 8),
+    ] {
+        let reference = run_stdio(&c_binary(), "c", args, input);
+        let linked = run_stdio(Path::new(MORI), "rs", args, input);
+        assert_eq!(linked, reference);
+        let replies: Vec<serde_json::Value> = linked
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(replies.len(), 6);
+        let full = &replies[1]["result"];
+        let tools = full["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), count);
+        assert!(full.get("nextCursor").is_none());
+        let tool = tools
+            .iter()
+            .find(|tool| tool["name"] == "search_graph")
+            .unwrap();
+        assert_eq!(tool["annotations"]["readOnlyHint"], true);
+        assert_eq!(tool["_meta"]["anthropic/alwaysLoad"], true);
+        assert_eq!(tool["inputSchema"]["type"], "object");
+
+        let first = &replies[2]["result"];
+        assert_eq!(first["tools"].as_array().unwrap(), &tools[..8]);
+        assert_eq!(first["nextCursor"].as_str(), (count > 8).then_some("8"));
+        let second = &replies[3]["result"];
+        assert_eq!(
+            second["tools"].as_array().unwrap(),
+            &tools[8..count.min(16)]
+        );
+        assert_eq!(second["nextCursor"].as_str(), (count > 16).then_some("16"));
+        for invalid in [&replies[4]["result"], &replies[5]["result"]] {
+            assert!(invalid["tools"].as_array().unwrap().is_empty());
+            assert!(invalid.get("nextCursor").is_none());
+        }
+    }
 }
 
 #[test]
@@ -272,7 +411,12 @@ impl Fixture {
             ),
             (
                 "graphql/nested/deep/schema1.graphqls",
-                "type Query { value: Int oneOwner: Int duplicate: Int noOwner: Int }\n",
+                r#"type Query {
+                    value: Int @deprecated(reason: "use \"newValue\"\non a new line")
+                    oneOwner: Int
+                    duplicate: Int
+                    noOwner: Int
+                }"#,
             ),
             (
                 "server/handlers.go",
@@ -329,6 +473,30 @@ fn json_number(text: &str, key: &str) -> Option<u64> {
     digits.parse().ok()
 }
 
+fn graphql_rows(scratch: &Scratch, project: &str) -> Vec<String> {
+    let db = Connection::open_with_flags(
+        scratch.0.join("cache").join(format!("{project}.db")),
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .expect("open fixture graph");
+    let mut query = db
+        .prepare(
+            "SELECT json_array(r.qualified_name, r.name, r.file_path, r.start_line, r.end_line,
+                               r.properties, h.qualified_name, h.label, e.properties)
+             FROM nodes AS r
+             LEFT JOIN edges AS e ON e.target_id = r.id AND e.type = 'HANDLES'
+             LEFT JOIN nodes AS h ON h.id = e.source_id
+             WHERE r.label = 'Route' AND substr(r.qualified_name, 1, 11) = '__graphql__'
+             ORDER BY r.qualified_name, h.qualified_name",
+        )
+        .expect("prepare GraphQL row query");
+    query
+        .query_map([], |row| row.get(0))
+        .expect("query GraphQL rows")
+        .collect::<rusqlite::Result<_>>()
+        .expect("read GraphQL rows")
+}
+
 /// Indexes the fixture with each binary, which goes through the temporary
 /// daemon and the index worker that the binary re-executes as itself. Compare
 /// graph output from standalone C and both linked GraphQL planner modes.
@@ -358,8 +526,10 @@ fn index_through_worker_reexec_matches_c() {
             String::from_utf8_lossy(&index.stderr)
         );
         // Profiling preserves the daemon's worker log after a clean exit.
-        let planner = format!("planner={}", graphql.unwrap_or("c"));
-        let logged_planner = fs::read_dir(scratch.0.join("cache/logs"))
+        let implementation = graphql.unwrap_or("c");
+        let planner = format!("planner={implementation}");
+        let writer = format!("writer={implementation}");
+        let logged_implementation = fs::read_dir(scratch.0.join("cache/logs"))
             .expect("read worker log directory")
             .filter_map(Result::ok)
             .filter(|entry| {
@@ -375,10 +545,16 @@ fn index_through_worker_reexec_matches_c() {
                             && line
                                 .split_ascii_whitespace()
                                 .any(|kv| kv == planner)
+                            && line
+                                .split_ascii_whitespace()
+                                .any(|kv| kv == writer)
                     })
                 })
             });
-        assert!(logged_planner, "{side} worker didn't report {planner}");
+        assert!(
+            logged_implementation,
+            "{side} worker didn't report {planner} and {writer}"
+        );
         let counts = (json_number(&text, "nodes"), json_number(&text, "edges"));
         assert!(counts.0.is_some_and(|n| n > 0), "{side}: {text}");
         // Raw CLI JSON reaches the daemon as bytes. Building these requests
@@ -497,11 +673,14 @@ fn index_through_worker_reexec_matches_c() {
         .iter()
         .map(|args| run_in(bin, &scratch, *graphql, args))
         .collect();
-        results.push((counts, queries));
+        results.push((counts, queries, graphql_rows(&scratch, &project)));
     }
     let (c, linked) = results.split_first().expect("standalone C result");
+    assert_eq!(c.2.len(), 4, "expected one handler per GraphQL Route");
+    assert!(c.2.iter().any(|row| row.contains("newValue")));
     for rs in linked {
         assert_eq!(c.0, rs.0, "node and edge counts differ");
+        assert_eq!(c.2, rs.2, "published Route or HANDLES rows differ");
         for (c_out, rs_out) in c.1.iter().zip(&rs.1) {
             assert!(c_out.status.success(), "{c_out:?}");
             assert!(

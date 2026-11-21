@@ -93,6 +93,11 @@ pub(crate) struct ProjectIdentity {
     pub(crate) root_path: Option<Vec<u8>>,
 }
 
+pub(crate) struct ProjectMetadata {
+    pub(crate) root_path: Option<Vec<u8>>,
+    pub(crate) indexed_at: Option<Vec<u8>>,
+}
+
 pub(crate) struct FileOutlineQuery<'a> {
     pub(crate) project: &'a [u8],
     pub(crate) path: &'a [u8],
@@ -130,6 +135,16 @@ pub(crate) fn quote_identifier(name: &str) -> String {
 
 fn c_string_bytes(bytes: &[u8]) -> &[u8] {
     bytes.split(|&byte| byte == 0).next().unwrap_or_default()
+}
+
+fn copied_sql_text(
+    row: &Row<'_>,
+    index: usize,
+) -> rusqlite::Result<Option<Vec<u8>>> {
+    Ok(match row.get_ref(index)? {
+        ValueRef::Text(text) => Some(c_string_bytes(text).to_vec()),
+        _ => None,
+    })
 }
 
 fn collect<T>(
@@ -183,26 +198,27 @@ impl Store {
         let Some(name) = primary else { return Ok(None) };
         drop(rows);
 
-        let root_path = self
-            .0
-            .query_row(
-                "SELECT CAST(root_path AS TEXT) FROM projects WHERE name = ?1",
-                [ToSqlOutput::Borrowed(ValueRef::Text(&name))],
-                |row| {
-                    Ok(match row.get_ref(0)? {
-                        ValueRef::Text(path) => {
-                            Some(c_string_bytes(path).to_vec())
-                        }
-                        _ => None,
-                    })
-                },
-            )
-            .optional();
-        let root_path = match root_path {
-            Ok(Some(value)) => value,
+        let root_path = match self.project_metadata(&name) {
+            Ok(Some(metadata)) => metadata.root_path,
             _ => Some(Vec::new()),
         };
         Ok(Some(ProjectIdentity { name, root_path }))
+    }
+
+    pub(crate) fn project_metadata(
+        &self,
+        project: &[u8],
+    ) -> rusqlite::Result<Option<ProjectMetadata>> {
+        self.0.query_row(
+            "SELECT CAST(root_path AS TEXT), CAST(indexed_at AS TEXT) FROM projects WHERE name = ?1",
+            [ToSqlOutput::Borrowed(ValueRef::Text(project))],
+            |row| {
+                Ok(ProjectMetadata {
+                    root_path: copied_sql_text(row, 0)?,
+                    indexed_at: copied_sql_text(row, 1)?,
+                })
+            },
+        ).optional()
     }
 
     pub(crate) fn project_stats(&self, project: &[u8]) -> (i32, i32) {

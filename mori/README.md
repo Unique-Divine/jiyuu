@@ -1188,11 +1188,11 @@ removed; [IMPORT.md](IMPORT.md#excluded-contract-checks) lists them with
 their restore commands.
 
 Set `MORI_IMPL_GRAPHQL=rust` before starting the linked `mori` process to
-test Rust's choice of schema field and `HANDLES` edge for each GraphQL server
-Route. Set `MORI_IMPL_GRAPHQL=c` to compare with the C reference. If you leave
-the variable unset, the linked binary uses the Rust schema-glob matcher and
-the C Route planner. Index each side with its own cache and runtime directory
-so each process builds the Routes with its selected planner.
+test Rust's planning and writing for GraphQL server Routes and their
+`HANDLES` edges. Set `MORI_IMPL_GRAPHQL=c` to use the C reference. If you
+leave the variable unset, the linked binary uses the Rust schema-glob matcher
+and the C planner and writer. Give each side its own cache and runtime
+directories when comparing them.
 
 ## Release
 

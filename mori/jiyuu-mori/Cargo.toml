@@ -28,11 +28,12 @@ c-backend = ["dep:rusqlite", "dep:serde", "dep:serde_json", "dep:sha2"]
 # other workspace binaries can link SQLite when Cargo unifies features.
 rusqlite = { version = "0.41", default-features = false, features = ["bundled"], optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
-serde_json = { version = "1.0.151", optional = true }
+serde_json = { version = "1.0.151", features = ["raw_value"], optional = true }
 sha2 = { version = "0.10", optional = true }
 
 [build-dependencies]
 serde_json = "1.0.151"
 
 [dev-dependencies]
-serde_json = "1.0.151"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1.0.151", features = ["raw_value"] }
