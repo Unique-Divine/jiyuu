@@ -7,6 +7,11 @@ import type {
   Setup,
 } from "./provisioning"
 import { validateRequest } from "./provisioning"
+import type {
+  DealChatPoolCloud,
+  DealChatPoolResult,
+  LegacyDealChatPoolScan,
+} from "./dealChatPoolExecutor"
 import type { CustodyStatusReport } from "./custodyStatus"
 import type {
   PoolCloud,
@@ -27,9 +32,13 @@ export type CloudOperation =
   | "pool-status"
   | "pool-register"
   | "pool-fail"
+  | "deal-chat-pool-claim"
+  | "deal-chat-pool-result"
+  | "deal-chat-pool-import"
 export type CloudCall = (
   operation: CloudOperation,
   input: Record<string, unknown>,
+  requestKey?: string,
 ) => Promise<unknown>
 
 export function cloudRequest(
@@ -132,7 +141,7 @@ export function poolStatusFromCloud(raw: unknown): PoolStatusReply {
   }
 }
 
-export class CliProvisionCloud implements ProvisionCloud, PoolCloud {
+export class CliProvisionCloud implements ProvisionCloud, PoolCloud, DealChatPoolCloud {
   constructor(private call: CloudCall = callDealDesk) {}
   async pending(input: {
     expectedUserId: number
@@ -216,6 +225,20 @@ export class CliProvisionCloud implements ProvisionCloud, PoolCloud {
   async poolFail(input: PoolFailure): Promise<unknown> {
     return this.call("pool-fail", { ...input })
   }
+  claimDealChatPoolAction(
+    input: { accountId: string; workerId: string },
+    requestKey: string,
+  ): Promise<unknown> {
+    return this.call("deal-chat-pool-claim", input, requestKey)
+  }
+
+  recordDealChatPoolActionResult(input: DealChatPoolResult): Promise<unknown> {
+    return this.call("deal-chat-pool-result", { ...input })
+  }
+
+  importDealChatPoolFill(input: LegacyDealChatPoolScan): Promise<unknown> {
+    return this.call("deal-chat-pool-import", { ...input })
+  }
   async resolve(
     requestId: string,
     chatId: number,
@@ -256,6 +279,9 @@ export const POOL_REFUSAL_CODES = [
   "POOL_REFUSED_TRANSITION",
   "POOL_MISSING_RIGHTS",
   "POOL_STALE_VERIFIED_AT",
+  "DEAL_CHAT_POOL_STALE_LEASE",
+  "DEAL_CHAT_POOL_INVALID",
+  "DEAL_CHAT_POOL_IMPORT_REQUIRED",
 ] as const
 export type PoolRefusalCode = (typeof POOL_REFUSAL_CODES)[number]
 
@@ -357,7 +383,18 @@ export const CLOUD_MUTATION_FIELDS: Partial<Record<CloudOperation, string>> =
     "pool-status": "poolStatus",
     "pool-register": "poolRegister",
     "pool-fail": "poolFail",
+    "deal-chat-pool-claim": "claimNextDealChatPoolAction",
+    "deal-chat-pool-result": "recordDealChatPoolActionResult",
+    "deal-chat-pool-import": "importDealChatPoolFill",
   }
+
+function managedPoolOperation(operation: CloudOperation): string | undefined {
+  switch (operation) {
+    case "deal-chat-pool-claim": return "claim"
+    case "deal-chat-pool-result": return "result"
+    case "deal-chat-pool-import": return "import"
+  }
+}
 
 /**
  * Whether Deal Desk's stderr says it does not know `operation` itself:
@@ -371,6 +408,12 @@ export function isUnknownOperationOutput(
   stderr: string,
 ): boolean {
   if (stderr.includes(`invalid value '${operation}'`)) return true
+  const workerAction = managedPoolOperation(operation)
+  if (workerAction && (
+    stderr.includes(`unrecognized subcommand '${workerAction}'`) ||
+    stderr.includes("unrecognized subcommand 'chats'") ||
+    stderr.includes("unrecognized subcommand 'worker'")
+  )) return true
   const field = CLOUD_MUTATION_FIELDS[operation]
   if (!field) return false
   return new RegExp(
@@ -392,7 +435,8 @@ export function dealDeskRequestKey(
   if (
     operation === "claim" ||
     operation === "progress" ||
-    operation === "pool-register"
+    operation === "pool-register" ||
+    operation === "deal-chat-pool-claim"
   )
     return `tg-provision:${operation}:${randomUUID()}`
   return `tg-provision:${createHash("sha256").update(JSON.stringify({ operation, input })).digest("hex")}`
@@ -416,12 +460,16 @@ export function findSaiOps(
 export async function callDealDesk(
   operation: CloudOperation,
   input: Record<string, unknown>,
+  requestKey?: string,
 ): Promise<unknown> {
-  const key = dealDeskRequestKey(operation, input)
+  const key = requestKey ?? dealDeskRequestKey(operation, input)
   const executable = findSaiOps()
   if (!executable)
     throw new Error("Install sai-ops to use Deal Desk chat setup")
-  const command = [executable, "chat-setups", operation, "--json-stdin"]
+  const workerAction = managedPoolOperation(operation)
+  const command = workerAction
+    ? [executable, "chats", "pool", "worker", workerAction, "--json-stdin"]
+    : [executable, "chat-setups", operation, "--json-stdin"]
   if (
     operation !== "view" &&
     operation !== "list" &&
