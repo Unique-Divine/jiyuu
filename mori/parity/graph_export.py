@@ -345,6 +345,10 @@ def diff_exports(a: dict[str, Any], b: dict[str, Any],
       if pa != pb:
         diff_props(rep, "L2", table, k[gi], " | ".join(map(str, k)), pa, pb)
 
+  ea, eb = a.get("fts_vocab_error"), b.get("fts_vocab_error")
+  if ea or eb:
+    # FTS content went unchecked: a difference even when both failed.
+    rep.add("fts", "nodes_fts.vocab_error", "-", ea, eb)
   va, vb = a.get("fts_vocab"), b.get("fts_vocab")
   if (va is None) != (vb is None):
     rep.add("fts", "nodes_fts.vocab_presence", "-", va is not None,

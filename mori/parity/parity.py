@@ -37,6 +37,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import shutil
 import sqlite3
 import stat
@@ -461,6 +462,32 @@ def compare_repo(sides: list[Side], dir_: str, root: str,
   return r
 
 
+def node_names(side: Side, projects: dict[str, str],
+               norm: calls_mod.OutputNormalizer) -> dict[str, str]:
+  """{normalized qualified name: node name} over the side's databases,
+  for search_graph's `ORDER BY name, id` (a qualified name doesn't show
+  where the name starts). A qualified name with two names maps to none."""
+  out: dict[str, str] = {}
+  dup: set[str] = set()
+  for project in projects.values():
+    db = os.path.join(side.cache, f"{project}.db")
+    if not os.path.isfile(db):
+      continue
+    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    try:
+      for qn, name in conn.execute(
+          "SELECT qualified_name, name FROM nodes"):
+        k = norm.text(qn or "")
+        if k in out and out[k] != name:
+          dup.add(k)
+        out[k] = name
+    finally:
+      conn.close()
+  for k in dup:
+    del out[k]
+  return out
+
+
 def replay(sides: list[Side], call_list: list[dict[str, Any]],
            roots: dict[str, str], projects: list[dict[str, str]],
            entries: list[allowlist.Entry]
@@ -474,6 +501,8 @@ def replay(sides: list[Side], call_list: list[dict[str, Any]],
   norms = [calls_mod.OutputNormalizer(
     roots, projects[i], {"cache": s.cache, "rt": s.rt})
     for i, s in enumerate(sides)]
+  names = [node_names(s, projects[i], norms[i])
+           for i, s in enumerate(sides)]
   t0 = time.monotonic()
   pool = ThreadPoolExecutor(max_workers=len(sides))
 
@@ -522,7 +551,8 @@ def replay(sides: list[Side], call_list: list[dict[str, Any]],
       return run_sides(per_side, tool)
 
     if calls_mod.diff_call(rep, tool, c["args"], group, where[:300],
-                           outs[0], outs[1], rerun):
+                           outs[0], outs[1], rerun,
+                           (names[0].get, names[1].get)):
       stats["differing"] += 1
   pool.shutdown()
   stats["wall_s"] = round(time.monotonic() - t0, 1)
@@ -768,8 +798,22 @@ def cmd_run(a: argparse.Namespace) -> int:
               "allow_dirty": a.allow_dirty, "snapshot": sorted(snap)})
 
 
+def corrupt_bin(mode: str, real: str, path: str, roots: list[str]) -> str:
+  """A side-b executable that runs `real` through corrupt.py MODE."""
+  check_scratch(path, roots)
+  with open(path, "w", encoding="utf-8") as f:
+    f.write("#!/bin/sh\nexec python3 -I " +
+            shlex.quote(os.path.join(HERE, "corrupt.py")) + f" {mode} " +
+            shlex.quote(os.path.abspath(real)) + ' "$@"\n')
+  os.chmod(path, 0o700)
+  return path
+
+
 def cmd_ci(a: argparse.Namespace) -> int:
   a.allowlist = [ALLOWLIST] + (a.allowlist or [])
+  if a.corrupt:
+    a.bin_b = corrupt_bin(a.corrupt, a.bin_b, a.work + "-corrupt.sh",
+                          a.scratch_root)
   base = a.work + "-fixtures"
   fresh_work_dir(base, a.scratch_root)
   repos = fixtures.write_all(base)
@@ -842,10 +886,11 @@ def main(argv: list[str]) -> int:
     p = sub.add_parser(name)
     p.add_argument("--bin-a", default=DEFAULT_BIN)
     p.add_argument("--bin-b", default=DEFAULT_BIN)
-    p.add_argument("--work", default="/tmp/mori-parity" +
-                   ("" if name == "run" else "-ci"))
-    p.add_argument("--rt-prefix", default="/tmp/mori-par" +
-                   ("" if name == "run" else "-ci"))
+    p.add_argument("--work", help="work dir (default: a new "
+                   "/tmp/mori-parity-XXXX/w per run, so runs never share "
+                   "or delete each other's dirs)")
+    p.add_argument("--rt-prefix", help="runtime dir prefix (default: "
+                   "beside the default work dir; keep it short)")
     p.add_argument("--scratch-root", action="append",
                    help="directory the harness may create and delete "
                    "inside (repeatable; default /tmp and the system temp "
@@ -857,6 +902,10 @@ def main(argv: list[str]) -> int:
     p.add_argument("--skip-l4", action="store_true")
     p.add_argument("--timeout-retries", type=int, default=4,
                    help="reindexes when files hit the parse timeout")
+    if name == "ci":
+      p.add_argument("--corrupt", choices=("rows", "page"),
+                     help="run side b through corrupt.py: the run must "
+                     "then exit 1 (a harness self-test)")
     if name == "run":
       p.add_argument("--private-dir",
                      help="directory holding corpus.json, calls.jsonl, and "
@@ -892,12 +941,21 @@ def main(argv: list[str]) -> int:
   a = ap.parse_args(argv)
   if getattr(a, "scratch_root", None) is None and a.cmd in ("run", "ci"):
     a.scratch_root = default_scratch_roots()
+  base = None
+  if a.cmd in ("run", "ci") and (a.work is None or a.rt_prefix is None):
+    base = tempfile.mkdtemp(prefix="mori-parity-", dir="/tmp")
+    a.work = a.work or os.path.join(base, "w")
+    a.rt_prefix = a.rt_prefix or os.path.join(base, "rt")
   try:
-    return {"run": cmd_run, "ci": cmd_ci, "pin": cmd_pin,
-            "calls": cmd_calls, "seed": cmd_seed}[a.cmd](a)
+    rc = {"run": cmd_run, "ci": cmd_ci, "pin": cmd_pin,
+          "calls": cmd_calls, "seed": cmd_seed}[a.cmd](a)
   except (RuntimeError, OSError, ValueError) as e:
     log(f"error: {e}")
-    return 2
+    rc = 2
+  if base and a.cmd == "ci" and rc == 0:
+    # A clean fixture run leaves nothing worth reading behind.
+    shutil.rmtree(base, ignore_errors=True)
+  return rc
 
 
 if __name__ == "__main__":

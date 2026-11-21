@@ -140,7 +140,7 @@ class ReplayTest(unittest.TestCase):
     rep = DiffReport()
     calls.diff_outputs(rep, "index_status", "call:x", "#0", a, b)
     self.assertEqual(sorted(d.key for d in rep.diffs()), [
-      "index_status:$.out{*}", "index_status:$.out{indexed_at}"])
+      "index_status:$.out{*}{presence}", "index_status:$.out{indexed_at}"])
 
   def test_call_id_ignores_key_order(self) -> None:
     self.assertEqual(calls.call_id("q", {"a": 1, "b": 2}),
@@ -150,10 +150,26 @@ class ReplayTest(unittest.TestCase):
 
   def test_same_output_has_no_diff(self) -> None:
     n = calls.OutputNormalizer({}, {}, {})
-    a = n.output(1, "error: took 3 ms", "warn 10ms")
-    b = n.output(1, "error: took 7 ms", "warn 12ms")
+    a = n.output(1, "error: x\nelapsed_ms: 3", "warn took 10ms")
+    b = n.output(1, "error: x\nelapsed_ms: 7", "warn took 12ms")
     rep = DiffReport()
     self.assertEqual(calls.diff_outputs(rep, "t", "call:x", "#0", a, b), 0)
+
+  def test_stdout_durations_are_data(self) -> None:
+    n = calls.OutputNormalizer({}, {}, {})
+    a = n.output(0, "  sleep(10s) in jobs/10s.txt", "")
+    b = n.output(0, "  sleep(20s) in jobs/20s.txt", "")
+    rep = DiffReport()
+    self.assertEqual(calls.diff_outputs(rep, "t", "call:x", "#0", a, b), 1)
+
+  def test_a_missing_value_line_is_not_a_changed_value(self) -> None:
+    n = calls.OutputNormalizer({}, {}, {})
+    a = n.output(0, "indexed_at: t0\ntotal: 1", "")
+    b = n.output(0, "total: 1", "")
+    rep = DiffReport()
+    calls.diff_outputs(rep, "index_status", "call:x", "#0", a, b)
+    self.assertEqual([d.key for d in rep.diffs()],
+                     ["index_status:$.out{indexed_at}{presence}"])
 
 
 if __name__ == "__main__":

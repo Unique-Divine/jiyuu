@@ -73,6 +73,10 @@ class AllowlistTest(unittest.TestCase):
        "repos": ["alpha"]},
       {"layer": "L1", "key": "nodes.only_in_b", "group": "*"},
       {"layer": "L3", "key": "projects.indexed_at", "row": "abcdefghij"},
+      {"layer": "L4", "key": "search_graph:$.results{unstable_count}",
+       "group": CALL, "repos": ["alpha"]},
+      {"layer": "L4", "key": "search_graph:$.results{unstable_only_in_b}",
+       "group": CALL, "repos": ["alpha"]},
     ]
     for d in broad:
       self.assertTrue(allowlist.lint_entry(d), d)

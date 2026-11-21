@@ -127,6 +127,13 @@ class ExportDiffTest(unittest.TestCase):
     c.close()
     self.assertEqual(self.keys(a, b), {("L2", "nodes.name", "Function")})
 
+  def test_fts_vocab_failure_is_a_difference_on_both_sides(self) -> None:
+    ea = export_db(self.db("a.db"))
+    eb = export_db(self.db("b.db"))
+    ea["fts_vocab_error"] = eb["fts_vocab_error"] = "no such module"
+    got = {(d.layer, d.key) for d in diff_exports(ea, eb).diffs()}
+    self.assertIn(("fts", "nodes_fts.vocab_error"), got)
+
 
 if __name__ == "__main__":
   unittest.main()

@@ -341,16 +341,20 @@ class OutputNormalizer:
       return round(v, 6)
     return v
 
-  def lines(self, text: str) -> list[str]:
+  def lines(self, text: str, inline: bool = False) -> list[str]:
     """Text output as lines; a `key: value` line whose key is a duration
-    loses its value, and inline durations become `<duration>`. Row order
+    (TIMING_KEY_RE) loses its value. Inline durations (`took 3 ms`)
+    become `<duration>` only when `inline` is set, which is for stderr:
+    in stdout a `10s` can be a file name or a source literal. Row order
     is kept: tie handling belongs to the row comparison (rows.py)."""
     out = []
     for line in self.text(text).splitlines():
       m = TEXT_KEY_RE.match(line)
       if m and TIMING_KEY_RE.match(m.group(1)):
         line = line[:m.end()] + "<duration>"
-      out.append(TEXT_TIMING_RE.sub("<duration>", line))
+      elif inline:
+        line = TEXT_TIMING_RE.sub("<duration>", line)
+      out.append(line)
     return out
 
   def output(self, exit_code: int, stdout: str, stderr: str
@@ -360,7 +364,7 @@ class OutputNormalizer:
     except ValueError:
       body = TextLines(self.lines(stdout))
     return {"exit": exit_code, "out": body,
-            "err": TextLines(self.lines(stderr))}
+            "err": TextLines(self.lines(stderr, inline=True))}
 
 
 class TextLines(list):
@@ -420,12 +424,25 @@ def call_id(tool: str, args: dict[str, Any]) -> str:
   return "call:" + digest[:12]
 
 
+def l4_key(tool: str, path: str, va: Any, vb: Any) -> str:
+  """The L4 key of one value difference. A line or field present on only
+  one side gets `{presence}`, so an entry for a changing value (a wall
+  clock) never accepts a value that went missing."""
+  key = generalize_key(f"{tool}:{path}")
+  if ABSENT in (va, vb):
+    key += "{presence}"
+  return key
+
+
+ABSENT = "<absent>"
+
+
 def diff_outputs(rep: DiffReport, tool: str, group: str, where: str,
                  a: dict[str, Any], b: dict[str, Any]) -> int:
   """Add L4 differences for one call; returns how many paths differ."""
   n = 0
   for path, va, vb in diff_json(a, b):
-    rep.add("L4", generalize_key(f"{tool}:{path}"), group, va, vb,
+    rep.add("L4", l4_key(tool, path, va, vb), group, va, vb,
             f"{where} {path}")
     n += 1
   return n
@@ -435,76 +452,125 @@ def diff_outputs(rep: DiffReport, tool: str, group: str, where: str,
 Rerun = Callable[[list[Any]], list[Any]]
 
 
+def _side_rows(rep: DiffReport, k: str, group: str, where: str,
+               kind: str, side: str, rows: list[str]) -> int:
+  for r in rows:
+    rep.add("L4", f"{k}{{{kind}_{side}}}", group,
+            r if side == "a" else ABSENT, r if side == "b" else ABSENT,
+            where, row=r)
+  return len(rows)
+
+
 def diff_call(rep: DiffReport, tool: str, args: dict[str, Any],
               group: str, where: str, a: dict[str, Any], b: dict[str, Any],
-              rerun: Rerun | None = None) -> int:
+              rerun: Rerun | None = None,
+              names: Any = (None, None)) -> int:
   """Add L4 differences for one call; returns how many were added.
 
-  Tools without result tables get the line or JSON diff. For
-  `search_graph` and `query_graph`, every row is compared (rows.py): each
-  differing row is its own difference, keyed `<tool>:$.<table>{only_in_a}`
-  with the row text, so an allow-list entry must name it. A cut output
-  is replayed without its limit (`rerun`, paging as needed); the full
-  sets are gated under `$.full`, and boundary rows that differ between
-  the cut outputs must be members of their side's full set."""
+  Tools without result tables get the line or JSON diff. For the table
+  tools (rows.ROW_TOOLS), every row is compared (rows.py): each differing
+  row is its own difference, keyed `<tool>:$.<table>{only_in_a}` with the
+  row text, so an allow-list entry must name it. A cut output is replayed
+  without its limit (`rerun`, paging as needed); the full sets are gated
+  under `$.full`, and boundary rows that differ between the cut outputs
+  must be members of their side's full set. `names` maps each side's
+  qualified names to node names, for search_graph's name order."""
   if tool not in rows_mod.ROW_TOOLS:
     return diff_outputs(rep, tool, group, where, a, b)
   pa, pb = split_tables(a["out"]), split_tables(b["out"])
   n = _diff_rest(rep, tool, group, where, "$", a, b, pa[1], pb[1])
   fa, fb = rows_mod.fields_of(pa[1]), rows_mod.fields_of(pb[1])
+  ua = rows_mod.unlimited_args(tool, args, fa)
   if unstable(fa) or unstable(fb):
-    # The engine evaluated a capped candidate set (a Cypher engine limit,
-    # a BM25 candidate cap reported as `total_relation: gte`), so which
-    # rows come back depends on scan order (row ids). Equal rows pass;
-    # otherwise the call is one difference per table that only a
-    # call-scoped entry can accept.
-    for key in sorted(set(pa[0]) | set(pb[0])):
-      ra = [rows_mod.row_text(r) for r in pa[0][key].rows] \
-        if key in pa[0] else None
-      rb = [rows_mod.row_text(r) for r in pb[0][key].rows] \
-        if key in pb[0] else None
-      if ra != rb:
-        rep.add("L4", f"{tool}:$.{key}{{unstable}}", group,
-                len(ra) if ra is not None else None,
-                len(rb) if rb is not None else None, where)
-        n += 1
-    return n
+    return n + _diff_unstable(rep, tool, group, where, pa[0], pb[0], ua,
+                              rerun)
   gated = _gate(rep, tool, args, group, where, "$", pa[0], pb[0],
                 rows_mod.is_truncated(tool, args, fa, _nrows(pa[0])) or
-                rows_mod.is_truncated(tool, args, fb, _nrows(pb[0])))
+                rows_mod.is_truncated(tool, args, fb, _nrows(pb[0])), names)
   n += gated[0]
   need = gated[1]
   if not need:
     return n
-  ua = rows_mod.unlimited_args(tool, args, fa)
   full = _fetch_full(tool, ua, rerun, rep, group, where) \
     if ua is not None and rerun is not None else None
   if full is None:
     for k, res, _, _ in need:
       for side in ("a", "b"):
-        for _, r in res.boundary[side]:
-          rep.add("L4", f"{k}{{boundary_unverified_{side}}}", group,
-                  r if side == "a" else "<absent>",
-                  r if side == "b" else "<absent>", where, row=r)
-          n += 1
+        n += _side_rows(rep, k, group, where, "boundary_unverified", side,
+                        [r for _, r in res.boundary[side]])
     return n
   (fta, ftb), more, dn = full
   n += dn
-  n += _gate(rep, tool, ua, group, f"{where} (unlimited)", "$.full", fta,
-             ftb, more)[0] if fta or ftb else 0
+  if fta or ftb:
+    fn, fneed = _gate(rep, tool, ua, group, f"{where} (unlimited)",
+                      "$.full", fta, ftb, more, names)
+    n += fn
+    if more:
+      # The last class of the full sets was never seen to its end.
+      for fk, _, _, _ in fneed:
+        rep.add("L4", f"{fk}{{full_incomplete}}", group, True, True,
+                f"{where} (unlimited, {rows_mod.MAX_PAGES} pages)")
+        n += 1
   for k, res, mode, idx in need:
     key = k.rsplit(".", 1)[1]
-    for side, tf in (("a", fta), ("b", ftb)):
+    for side, tf, name_of in (("a", fta, names[0]), ("b", ftb, names[1])):
       have = set()
       if key in tf:
         have = {(ck, r) for ck, rs in
-                rows_mod.classes(tf[key].rows, mode, idx) for r in rs}
-      for ck, r in res.boundary[side]:
-        if (ck, r) not in have:
-          rep.add("L4", f"{k}{{boundary_only_in_{side}}}", group,
-                  r if side == "a" else "<absent>",
-                  r if side == "b" else "<absent>", where, row=r)
-          n += 1
+                rows_mod.classes(tf[key].rows, mode, idx, name_of)
+                for r in rs}
+      n += _side_rows(rep, k, group, where, "boundary_only_in", side,
+                      [r for ck, r in res.boundary[side]
+                       if (ck, r) not in have])
+  return n
+
+
+def _diff_unstable(rep: DiffReport, tool: str, group: str, where: str,
+                   ta: dict[str, rows_mod.Table],
+                   tb: dict[str, rows_mod.Table], ua: Any,
+                   rerun: Rerun | None) -> int:
+  """The engine evaluated a capped candidate set (a Cypher engine limit,
+  a BM25 cap reported as `total_relation: gte`), so which rows come back
+  depends on scan order (row ids). Equal rows pass. Otherwise the call
+  gets one `{unstable}` difference per table, which a call-scoped entry
+  may accept, and the rows are still gated: the counts must match
+  (`{unstable_count}`, never accepted), and each side's rows must appear
+  in the other side's unlimited replay (`{unstable_only_in_a}` per row)."""
+  n = 0
+  diff_keys = []
+  for key in sorted(set(ta) | set(tb)):
+    ra = [rows_mod.row_text(r) for r in ta[key].rows] if key in ta else []
+    rb = [rows_mod.row_text(r) for r in tb[key].rows] if key in tb else []
+    if ra == rb:
+      continue
+    k = f"{tool}:$.{key}"
+    rep.add("L4", k + "{unstable}", group, len(ra), len(rb), where)
+    n += 1
+    if len(ra) != len(rb):
+      rep.add("L4", k + "{unstable_count}", group, len(ra), len(rb), where)
+      n += 1
+    diff_keys.append((key, k, ra, rb))
+  if not diff_keys:
+    return n
+  full = _fetch_full(tool, ua, rerun, rep, group, where) \
+    if ua is not None and rerun is not None else None
+  for key, k, ra, rb in diff_keys:
+    if full is None:
+      n += _side_rows(rep, k, group, where, "unstable_unverified", "a",
+                      sorted(set(ra) - set(rb)))
+      n += _side_rows(rep, k, group, where, "unstable_unverified", "b",
+                      sorted(set(rb) - set(ra)))
+      continue
+    (fta, ftb), _, dn = full
+    n += dn
+    in_b = {rows_mod.row_text(r) for r in ftb[key].rows} if key in ftb \
+      else set()
+    in_a = {rows_mod.row_text(r) for r in fta[key].rows} if key in fta \
+      else set()
+    n += _side_rows(rep, k, group, where, "unstable_only_in", "a",
+                    sorted(r for r in set(ra) if r not in in_b))
+    n += _side_rows(rep, k, group, where, "unstable_only_in", "b",
+                    sorted(r for r in set(rb) if r not in in_a))
   return n
 
 
@@ -524,7 +590,7 @@ def _diff_rest(rep: DiffReport, tool: str, group: str, where: str,
   n = 0
   for p, va, vb in diff_json({**a, "out": rest_a}, {**b, "out": rest_b},
                              path):
-    rep.add("L4", generalize_key(f"{tool}:{p}"), group, va, vb,
+    rep.add("L4", l4_key(tool, p, va, vb), group, va, vb,
             f"{where} {p}")
     n += 1
   return n
@@ -532,7 +598,8 @@ def _diff_rest(rep: DiffReport, tool: str, group: str, where: str,
 
 def _gate(rep: DiffReport, tool: str, args: dict[str, Any], group: str,
           where: str, path: str, ta: dict[str, rows_mod.Table],
-          tb: dict[str, rows_mod.Table], trunc: bool
+          tb: dict[str, rows_mod.Table], trunc: bool,
+          names: Any = (None, None)
           ) -> tuple[int, list[tuple[str, Any, str, list[int]]]]:
   """Compare tables row by row. Returns (differences added, tables that
   need the full replay: (key, result, mode, idx))."""
@@ -552,7 +619,8 @@ def _gate(rep: DiffReport, tool: str, args: dict[str, Any], group: str,
       continue
     n += _split_volatile(rep, k, group, where, t1, t2)
     mode, idx = rows_mod.order_mode(tool, args, t1.cols)
-    res = rows_mod.compare_tables(t1, t2, mode, idx, trunc)
+    res = rows_mod.compare_tables(t1, t2, mode, idx, trunc, names[0],
+                                  names[1])
     for d in res.diffs:
       rep.add("L4", f"{k}{{{d.kind}}}", group, d.a, d.b, where, row=d.row)
       n += 1

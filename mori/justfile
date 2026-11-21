@@ -10,14 +10,14 @@ grammars *ARGS:
 build: grammars
     scripts/build.sh
 
-# Also runs the parity harness tests, and fixture parity when build/c exists.
-# Run grammar suites plus the language-count and vendored-checksum checks.
+# Fixture parity runs in its own /tmp dir, so parallel runs don't collide.
+# Run grammar suites, language-count, vendored-checksum, and parity checks.
 test SUITES=default_suites: grammars parity-test
     scripts/test.sh --suites "{{SUITES}}"
     bash tests/test_language_count_contract.sh
     scripts/security-vendored.sh
     if [ -x build/c/codebase-memory-mcp ]; then \
-      python3 -I parity/parity.py ci; \
+      python3 -I parity/parity.py ci && just parity-corrupt; \
     else echo "parity-ci skipped: no build/c binary (run just build)"; fi
 
 # Run the full leg: contract checks, clean build, every C suite and the
@@ -51,3 +51,14 @@ parity-ci *ARGS: parity-test
 # Diff mori (Rust, C linked) against the C build.
 parity-mori MODE="run" *ARGS:
     python3 -I parity/parity.py {{MODE}} --bin-b ../target/release/mori {{ARGS}}
+
+# Needs `just build`. The harness must fail every corrupted side b.
+# Self-test: run fixture parity against deliberately wrong builds.
+parity-corrupt:
+    for mode in rows page; do \
+      rc=0; python3 -I parity/parity.py ci --corrupt "$mode" \
+        > /dev/null 2>&1 || rc=$?; \
+      if [ "$rc" -ne 1 ]; then \
+        echo "parity-corrupt: mode $mode exited $rc, want 1"; exit 1; \
+      fi; echo "parity-corrupt: mode $mode caught"; \
+    done

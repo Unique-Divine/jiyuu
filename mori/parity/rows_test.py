@@ -120,7 +120,7 @@ class ParseTest(unittest.TestCase):
     self.assertEqual(rows.order_mode("search_graph", {}, ["qn", "rank"]),
                      ("ranked", [1]))
     self.assertEqual(rows.order_mode("search_graph", {}, ["qn", "in"]),
-                     ("unordered", []))
+                     ("named", [0]))
 
   def test_unlimited_args(self) -> None:
     self.assertEqual(rows.unlimited_args(
@@ -266,22 +266,88 @@ class GateTest(unittest.TestCase):
       "search_graph:$.full.results{only_in_a}",
       "search_graph:$.full.results{only_in_b}"])
 
-  def test_engine_limit_is_one_call_scoped_difference(self) -> None:
+  def test_engine_limit_rows_are_still_gated(self) -> None:
     q = {"query": "MATCH (f)-[:CALLS]->(g) RETURN f.name, g.name "
                   "ORDER BY f.name, g.name LIMIT 2"}
     tail = ("returned: 2\ntotal: 2\ntotal_relation: gte\nhas_more: true\n"
             "truncated: true\ntruncation_reason: engine_limit\n")
-    a = "rows: 2  (cols: f.name g.name)\n  a x\n  b y\n" + tail
-    b = "rows: 2  (cols: f.name g.name)\n  a x\n  c z\n" + tail
-    got = keys(diff("query_graph", q, a, b, lambda _: self.fail("replay")))
+    head = "rows: 2  (cols: f.name g.name)\n"
+    a = head + "  a x\n  b y\n" + tail
+    b = head + "  a x\n  c z\n" + tail
+    full = out("rows: 3  (cols: f.name g.name)\n  a x\n  b y\n  c z\n"
+               + tail)
+    # Both cut sets come from the same candidates: one accepted-able key.
+    got = keys(diff("query_graph", q, a, b, lambda _: (full, full)))
     self.assertEqual(got, [("query_graph:$.rows{unstable}", "")])
     self.assertEqual(keys(diff("query_graph", q, a, a)), [])
+    # A row the other side never returns, even unlimited, is reported.
+    bad = head + "  a x\n  WRONG z\n" + tail
+    got = keys(diff("query_graph", q, a, bad, lambda _: (full, full)))
+    self.assertEqual(got, [
+      ("query_graph:$.rows{unstable_only_in_b}", '["WRONG", "z"]'),
+      ("query_graph:$.rows{unstable}", "")])
+    # A different count is never an unstable-only difference.
+    short = "rows: 1  (cols: f.name g.name)\n  a x\n" + tail
+    got = [k for k, _ in keys(diff("query_graph", q, a, short,
+                                   lambda _: (full, full)))]
+    self.assertIn("query_graph:$.rows{unstable_count}", got)
+    # Without a replay the differing rows stay unverified.
+    got = [k for k, _ in keys(diff("query_graph", q, a, b))]
+    self.assertIn("query_graph:$.rows{unstable_unverified_b}", got)
 
-  def test_capped_bm25_total_is_one_call_scoped_difference(self) -> None:
+  def test_capped_bm25_total_is_gated_against_the_replay(self) -> None:
     a = RANKED.replace("total_relation: eq", "total_relation: gte")
     b = a.replace("p.docs.guide.Math", "p.docs.guide.Other")
-    got = keys(diff("search_graph", {"query": "m"}, a, b))
+    got = keys(diff("search_graph", {"query": "m"}, a, b,
+                    lambda _: (out(b), out(a))))
     self.assertEqual(got, [("search_graph:$.results{unstable}", "")])
+
+  def test_unranked_search_graph_follows_name_order(self) -> None:
+    """The C store returns unranked search_graph rows ORDER BY name, id:
+    a build that returns another page of the same set must fail."""
+    head = "results: 2  (cols: qn label file lines in out)\n"
+    tail = "total: 4\nreturned: 2\nhas_more: true\nnext_offset: 2\n"
+    rows_ = ["  p.a.add Function a.ts 1-2 0 0\n",
+             "  p.b.mean Function b.ts 1-2 0 0\n",
+             "  p.c.sum Function c.ts 1-2 0 0\n",
+             "  p.d.zip Function d.ts 1-2 0 0\n"]
+    names = {"p.a.add": "add", "p.b.mean": "mean", "p.c.sum": "sum",
+             "p.d.zip": "zip"}
+    full = out("results: 4  (cols: qn label file lines in out)\n" +
+               "".join(rows_) + "total: 4\nhas_more: false\n")
+    first = head + rows_[0] + rows_[1] + tail
+    last = head + rows_[3] + rows_[2] + tail  # the end of the order
+    rep = DiffReport()
+    calls.diff_call(rep, "search_graph", {"name_pattern": ".*", "limit": 2},
+                    "call:000000000000", "#0", out(first), out(last),
+                    both(lambda _: (full, full)),
+                    (names.get, names.get))
+    got = sorted(d.key for d in rep.diffs())
+    self.assertTrue(got)
+    self.assertIn("search_graph:$.results{only_in_b}", got)
+    # Equal names may come in either order (C breaks the tie by node id).
+    twin = head + "  p.x.add Function x.ts 1-2 0 0\n" + rows_[0] + tail
+    swap = head + rows_[0] + "  p.x.add Function x.ts 1-2 0 0\n" + tail
+    names["p.x.add"] = "add"
+    rep = DiffReport()
+    calls.diff_call(rep, "search_graph", {"name_pattern": "add"},
+                    "call:000000000000", "#0", out(twin), out(swap),
+                    both(lambda _: (out(twin), out(swap))),
+                    (names.get, names.get))
+    self.assertEqual([d.key for d in rep.diffs()], [])
+
+  def test_unchecked_pages_are_reported(self) -> None:
+    q = {"name_pattern": ".*", "limit": 1}
+    head = "results: 1  (cols: qn label file lines in out)\n"
+    cut = head + "  p.a Function a.ts 1-2 0 0\nhas_more: true\n"
+
+    def endless(args: dict[str, Any]) -> tuple[Any, Any]:
+      o = out(head + f"  p.r{args['offset']} Function a.ts 1-2 0 0\n"
+              f"has_more: true\nnext_offset: {args['offset'] + 500}\n")
+      return o, o
+
+    got = [k for k, _ in keys(diff("search_graph", q, cut, cut, endless))]
+    self.assertIn("search_graph:$.full.results{full_incomplete}", got)
 
   def test_order_by_ties_may_reorder(self) -> None:
     q = {"query": "MATCH (f) RETURN f.label AS l, count(*) AS c "

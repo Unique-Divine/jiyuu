@@ -14,12 +14,17 @@ Every row is compared, after refs are expanded. Rows are grouped into tie
 classes, consecutive rows the tool may order freely among themselves:
 
 - ranked (`search_graph` with a `rank` or `score` column): rows with the
-  same score;
+  same score (C breaks rank ties by node id, which differs per index);
+- named (`search_graph` without a rank): rows whose nodes have the same
+  name. The C store returns them `ORDER BY name, id` (src/store/store.c),
+  so pages are contractual; the name of each row's `qn` comes from the
+  side's own database (NameOf), since a qualified name doesn't show where
+  the name starts;
 - keyed (`query_graph` with ORDER BY on returned columns): rows with the
   same ORDER BY values;
 - strict (`query_graph` with ORDER BY on anything else): every row alone;
-- unordered (`search_graph` without a rank, `query_graph` without ORDER
-  BY): all rows in one class.
+- unordered (`query_graph` without ORDER BY, which promises no order):
+  all rows in one class.
 
 Inside a class the rows are compared as a multiset; the classes must come
 in the same order. When the output was cut (a `limit`, a Cypher `LIMIT`),
@@ -34,7 +39,10 @@ import json
 import re
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
+
+# Maps a row's (normalized) qualified name to its node name, or None.
+NameOf = Callable[[str], "str | None"]
 
 ROW_TOOLS = {"search_graph", "query_graph", "list_projects"}
 # Columns whose values vary between identical index runs. They are
@@ -225,14 +233,14 @@ def split_top(s: str) -> list[str]:
 
 def order_mode(tool: str, args: dict[str, Any], cols: list[str]
                ) -> tuple[str, list[int]]:
-  """("ranked", [i]) | ("keyed", [i...]) | ("strict", []) |
-  ("unordered", [])."""
+  """("ranked", [i]) | ("named", [qn col]) | ("keyed", [i...]) |
+  ("strict", []) | ("unordered", [])."""
   if tool == "list_projects":
     return "strict", []
   if tool == "search_graph":
     if cols and cols[-1] in RANK_COLS:
       return "ranked", [len(cols) - 1]
-    return "unordered", []
+    return "named", [cols.index("qn") if "qn" in cols else 0]
   q = str(args.get("query", ""))
   m = ORDER_RE.search(q)
   if not m:
@@ -255,9 +263,11 @@ def order_mode(tool: str, args: dict[str, Any], cols: list[str]
   return "keyed", idx
 
 
-def classes(rows: list[list[Any]], mode: str, idx: list[int]
-            ) -> list[tuple[str, list[str]]]:
-  """Tie classes in output order: (class key, row texts)."""
+def classes(rows: list[list[Any]], mode: str, idx: list[int],
+            name_of: NameOf | None = None) -> list[tuple[str, list[str]]]:
+  """Tie classes in output order: (class key, row texts). In named mode a
+  row whose name is unknown is keyed by its whole qualified name, which
+  is stricter than the C contract, never looser."""
   out: list[tuple[str, list[str]]] = []
   for row in rows:
     vals = cells(row)
@@ -266,6 +276,10 @@ def classes(rows: list[list[Any]], mode: str, idx: list[int]
       key = ""
     elif mode == "strict":
       key = text
+    elif mode == "named":
+      qn = str(vals[idx[0]]) if idx and idx[0] < len(vals) else text
+      name = name_of(qn) if name_of else None
+      key = json.dumps(["name", name] if name is not None else ["qn", qn])
     else:
       key = json.dumps([vals[i] if i < len(vals) else None for i in idx])
     if out and out[-1][0] == key and mode != "strict":
@@ -384,9 +398,10 @@ class TableResult:
 
 
 def compare_tables(ta: Table, tb: Table, mode: str, idx: list[int],
-                   truncated: bool) -> TableResult:
-  ca = classes(ta.rows, mode, idx)
-  cb = classes(tb.rows, mode, idx)
+                   truncated: bool, name_a: NameOf | None = None,
+                   name_b: NameOf | None = None) -> TableResult:
+  ca = classes(ta.rows, mode, idx, name_a)
+  cb = classes(tb.rows, mode, idx, name_b)
   res = TableResult([], {"a": [], "b": []})
   if truncated and ca and cb and mode != "strict":
     (ka, ra), (kb, rb) = ca[-1], cb[-1]

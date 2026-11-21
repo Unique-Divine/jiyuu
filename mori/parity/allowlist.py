@@ -24,9 +24,12 @@ from dataclasses import dataclass
 from typing import Any, Iterable
 
 REQUIRED = ("layer", "key", "reason")
-ROW_KEY_RE = re.compile(r"\{(only_in_[ab]|boundary_\w+)\}$")
+ROW_KEY_RE = re.compile(r"\{(only_in_[ab]|boundary_\w+|unstable_\w+_[ab])\}$")
 TABLE_KEY_RE = re.compile(r"\{(only_in_[ab]|order|boundary_\w+|"
-                          r"table_presence|cols|unstable)\}$")
+                          r"table_presence|cols|unstable\w*|"
+                          r"full_incomplete)\}$")
+# Differences no entry may accept.
+NEVER_KEY_RE = re.compile(r"\{unstable_count\}$")
 CALL_GROUP_RE = re.compile(r"^call:[0-9a-f]{12}$")
 MIN_ROW_LITERAL = 8
 
@@ -68,6 +71,8 @@ def lint_entry(d: dict[str, Any]) -> list[str]:
   repos = d.get("repos") or []
   if not key.replace("*", "").strip(".:$[]{} "):
     out.append("key is only wildcards")
+  if NEVER_KEY_RE.search(key):
+    out.append("a row-count change of a capped call can't be accepted")
   if "{*}" in key:
     out.append("key accepts every unlabeled output line ({*})")
   if layer == "L4":
