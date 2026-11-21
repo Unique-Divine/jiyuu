@@ -34,7 +34,9 @@ import hashlib
 import json
 import os
 import sqlite3
+import subprocess
 import sys
+import tempfile
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Iterable
@@ -165,14 +167,80 @@ def export_db(path: str) -> dict[str, Any]:
     conn.close()
 
 
+def new_export(project: str, root: str) -> dict[str, Any]:
+  return {
+    "project": project, "root": root, "schema": {}, "nodes": {},
+    "edges": {}, "side": {}, "counts_only": {}, "l0": {},
+  }
+
+
+def set_graph_counts(result: dict[str, Any]) -> None:
+  result["l0"]["nodes_by_label"] = dict(sorted(Counter(
+    k[1] for k in result["nodes"]).items()))
+  result["l0"]["edges_by_type"] = dict(sorted(Counter(
+    k[2] for k in result["edges"]).items()))
+
+
+def decode_mori_export(lines: Iterable[str]) -> dict[str, Any]:
+  """Read the sorted JSON Lines emitted by `mori dev export`."""
+  stream = iter(lines)
+  first = json.loads(next(stream, "{}"))
+  if first.get("kind") != "project":
+    raise ValueError("Mori export is missing its project record")
+  result = new_export(first["name"], first["root"])
+  for line in stream:
+    row = json.loads(line)
+    kind = row["kind"]
+    if kind == "schema":
+      result["schema"][row["key"]] = row["sql"]
+    elif kind == "count":
+      result["counts_only"][row["table"]] = row["count"]
+    elif kind == "table":
+      result["side"][row["table"]] = {
+        "key": row["key"] or None, "rows": {}, "multiset": Counter(),
+        "count": row["count"],
+      }
+    elif kind == "row":
+      table = row["table"]
+      props = row["properties"]
+      if table in ("nodes", "edges"):
+        result[table][tuple(row["key"])] = props
+      else:
+        side = result["side"][table]
+        if side["key"]:
+          key = tuple(json.dumps(value, sort_keys=True) for value in row["key"])
+          side["rows"][key] = props
+        else:
+          side["multiset"][json.dumps(props, sort_keys=True)] += 1
+    elif kind == "fts":
+      result.setdefault("fts_vocab", {})[row["term"]] = (row["doc"], row["count"])
+    else:
+      raise ValueError(f"unknown record in Mori export: {kind!r}")
+  if "nodes_fts" in result["counts_only"]:
+    result.setdefault("fts_vocab", {})
+  set_graph_counts(result)
+  return result
+
+
+def export_mori(path: str, binary: str, env: dict[str, str], timeout: int
+                ) -> dict[str, Any]:
+  with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as rows:
+    process = subprocess.run(
+      [binary, "dev", "export", "--db", path], cwd="/", env=env,
+      stdout=rows, stderr=subprocess.PIPE, text=True, timeout=timeout,
+      stdin=subprocess.DEVNULL)
+    if process.returncode:
+      raise ValueError(f"{binary} dev export exited {process.returncode}: "
+                       f"{process.stderr.strip()}")
+    rows.seek(0)
+    return decode_mori_export(rows)
+
+
 def _export(conn: sqlite3.Connection) -> dict[str, Any]:
   project, root = project_identity(conn)
   norm = Normalizer(project, root)
   tables = table_names(conn)
-  result: dict[str, Any] = {
-    "project": project, "root": root, "schema": {}, "nodes": {},
-    "edges": {}, "side": {}, "counts_only": {}, "l0": {},
-  }
+  result = new_export(project, root)
 
   for r in conn.execute(
     "SELECT type, name, sql FROM sqlite_master ORDER BY type, name"
@@ -216,10 +284,7 @@ def _export(conn: sqlite3.Connection) -> dict[str, Any]:
       props["__duplicate_key__"] = True
     result["edges"][key] = props
 
-  result["l0"]["nodes_by_label"] = dict(sorted(Counter(
-    k[1] for k in result["nodes"]).items()))
-  result["l0"]["edges_by_type"] = dict(sorted(Counter(
-    k[2] for k in result["edges"]).items()))
+  set_graph_counts(result)
 
   # FTS logical content, independent of segment layout and rowids.
   if "nodes_fts" in tables:
