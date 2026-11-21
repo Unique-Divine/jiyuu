@@ -290,8 +290,29 @@ jobs:
           tar -xzf "$reference_dir/$archive" -C "$reference_dir" codebase-memory-mcp
           reference="$reference_dir/codebase-memory-mcp"
           test "$("$reference" --version)" = "codebase-memory-mcp 0.13.1"
+          replay="$(mktemp -d /tmp/mori-release-replay.XXXXXX)"
           python3 parity/parity.py ci --bin-a "$reference" --bin-b "$BIN" \
-            --graphql-a c --graphql-b rust --export-b rust --verify-export
+            --graphql-a c --graphql-b rust --export-b rust --verify-export \
+            --work "$replay/w" --rt-prefix "$replay/r"
+          grep -E 'msg=pass\.route_nodes\.graphql routes=[1-9][0-9]* .*planner=rust writer=rust' \
+            "$replay"/w/b/cache/logs/.worker-log-*
+          python3 - "$replay/w/b/cache" <<'PY'
+          from pathlib import Path
+          import sqlite3
+          import sys
+
+          [graph] = Path(sys.argv[1]).glob("*-fx-polyglot.db")
+          with sqlite3.connect(graph.as_uri() + "?mode=ro", uri=True) as database:
+              row = database.execute("""
+                  SELECT h.name
+                  FROM edges AS e
+                  JOIN nodes AS h ON h.id = e.source_id
+                  JOIN nodes AS r ON r.id = e.target_id
+                  WHERE e.type = 'HANDLES' AND r.qualified_name = '__graphql__Query.fixtureItem'
+              """).fetchone()
+          if row != ("FixtureItem",):
+              raise SystemExit(f"FixtureItem resolver missing from the graph: {row}")
+          PY
       - name: Package archive
         id: package
         env:

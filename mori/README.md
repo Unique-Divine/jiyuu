@@ -1237,7 +1237,9 @@ signing and Gatekeeper behavior are covered under
 On Linux x64, Linux arm64, and macOS arm64, the workflow also replays graph
 fixtures against the published C 0.13.1 binary. It checks the downloaded
 reference archive against a pinned SHA-256 digest and compares the
-candidate's Rust graph export with its SQL export. Intel macOS runs the
+candidate's Rust graph export with its SQL export. The GraphQL fixture
+requires the candidate's Rust planner and writer to emit a Route to its
+gqlgen resolver. Intel macOS runs the
 same-commit CLI comparison and smoke tests. C 0.13.1 has no Intel macOS
 archive.
 
