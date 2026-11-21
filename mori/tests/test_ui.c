@@ -11,6 +11,7 @@
 #include "ui/embedded_assets.h"
 #include "ui/layout3d.h"
 #include "ui/atlas.h"
+#include "ui/xrepo.h"
 #include "cli/cli.h"
 #include "store/store.h"
 #include "foundation/subprocess.h"
@@ -2960,6 +2961,141 @@ TEST(atlas_why_extracts_guard_chains) {
     PASS();
 }
 
+/* ── Cross-repo views (xrepo.c) ───────────────────────────────── */
+
+/* One project index in dir with a caller (or listener) node, a local target
+ * node and one CROSS_* edge carrying props. Returns false on failure. */
+static bool xrepo_seed(const char *dir, const char *project, const char *type, const char *props,
+                       const char *second_type) {
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/%s.db", dir, project);
+    cbm_store_t *s = cbm_store_open_path(path);
+    if (!s)
+        return false;
+    cbm_store_upsert_project(s, project, "/tmp/xrepo");
+    char qn_a[128], qn_b[128];
+    snprintf(qn_a, sizeof(qn_a), "%s.client.fetchOrders", project);
+    snprintf(qn_b, sizeof(qn_b), "%s.__route__orders", project);
+    cbm_node_t a = {.project = project, .label = "Function", .name = "fetchOrders",
+                    .qualified_name = qn_a, .file_path = "src/client.ts", .start_line = 12,
+                    .end_line = 20};
+    cbm_node_t b = {.project = project, .label = "Route", .name = "orders",
+                    .qualified_name = qn_b, .file_path = "", .start_line = 0, .end_line = 0};
+    int64_t ia = cbm_store_upsert_node(s, &a), ib = cbm_store_upsert_node(s, &b);
+    bool ok = ia > 0 && ib > 0;
+    if (ok && type) {
+        cbm_edge_t e = {.project = project, .source_id = ia, .target_id = ib, .type = type,
+                        .properties_json = props};
+        ok = cbm_store_insert_edge(s, &e) > 0;
+    }
+    if (ok && second_type) {
+        cbm_edge_t e = {.project = project, .source_id = ia, .target_id = ib,
+                        .type = second_type};
+        ok = cbm_store_insert_edge(s, &e) > 0;
+    }
+    cbm_store_close(s);
+    return ok;
+}
+
+TEST(xrepo_summary_counts_caller_side_links_once) {
+    char tmpl[256] = "/tmp/cbm_xrepo_XXXXXX";
+    char *dir = cbm_mkdtemp(tmpl);
+    ASSERT_NOT_NULL(dir);
+    /* web calls api over GraphQL; api holds the provider-side copy with a
+     * "callers" object, which must not count a second time. */
+    ASSERT_TRUE(xrepo_seed(dir, "web", "CROSS_GRAPHQL_CALLS",
+                           "{\"target_project\":\"api\",\"target_function\":\"orders\","
+                           "\"target_file\":\"graph/orders.go\",\"operation\":\"Orders\"}",
+                           NULL));
+    ASSERT_TRUE(xrepo_seed(dir, "api", "CROSS_GRAPHQL_CALLS",
+                           "{\"target_project\":\"web\",\"target_function\":\"fetchOrders\","
+                           "\"callers\":{\"web:x\":{\"project\":\"web\"}}}",
+                           NULL));
+    /* bus emits on a channel its listener in api hears; api's copy is the
+     * listener's (no EMITS), so only bus's counts. */
+    ASSERT_TRUE(xrepo_seed(dir, "bus", "CROSS_CHANNEL",
+                           "{\"target_project\":\"api\",\"channel_name\":\"orders\"}", "EMITS"));
+    ASSERT_TRUE(xrepo_seed(dir, "lone", NULL, NULL, NULL));
+    /* Another store in the cache directory: not a repository. */
+    char other[1024];
+    snprintf(other, sizeof(other), "%s/activity.db", dir);
+    sqlite3 *odb = NULL;
+    ASSERT_EQ(sqlite3_open(other, &odb), SQLITE_OK);
+    ASSERT_EQ(sqlite3_exec(odb, "CREATE TABLE agent_events (id INTEGER)", NULL, NULL, NULL),
+              SQLITE_OK);
+    sqlite3_close(odb);
+
+    char *json = cbm_xrepo_summary_json(dir);
+    ASSERT_NOT_NULL(json);
+    yyjson_doc *doc = yyjson_read(json, strlen(json), 0);
+    ASSERT_NOT_NULL(doc);
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    ASSERT_EQ(yyjson_get_int(yyjson_obj_get(root, "total_links")), 2);
+    yyjson_val *links = yyjson_obj_get(root, "links");
+    ASSERT_EQ((int)yyjson_arr_size(links), 2);
+    bool graphql = false, channel = false;
+    size_t idx, max;
+    yyjson_val *link;
+    yyjson_arr_foreach(links, idx, max, link) {
+        const char *from = yyjson_get_str(yyjson_obj_get(link, "from"));
+        const char *type = yyjson_get_str(yyjson_obj_get(link, "type"));
+        ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(link, "to")), "api");
+        graphql |= strcmp(from, "web") == 0 && strcmp(type, "CROSS_GRAPHQL_CALLS") == 0;
+        channel |= strcmp(from, "bus") == 0 && strcmp(type, "CROSS_CHANNEL") == 0;
+    }
+    ASSERT_TRUE(graphql);
+    ASSERT_TRUE(channel);
+    yyjson_val *repos = yyjson_obj_get(root, "repos");
+    ASSERT_EQ((int)yyjson_arr_size(repos), 4);
+    ASSERT_EQ((int)yyjson_arr_size(yyjson_obj_get(root, "skipped")), 0);
+    yyjson_val *repo;
+    yyjson_arr_foreach(repos, idx, max, repo) {
+        const char *name = yyjson_get_str(yyjson_obj_get(repo, "name"));
+        ASSERT_TRUE(yyjson_get_bool(yyjson_obj_get(repo, "indexed")));
+        ASSERT_EQ(yyjson_get_int(yyjson_obj_get(repo, "nodes")), 2);
+        if (strcmp(name, "api") == 0)
+            ASSERT_EQ(yyjson_get_int(yyjson_obj_get(repo, "links_in")), 2);
+        if (strcmp(name, "lone") == 0)
+            ASSERT_EQ(yyjson_get_int(yyjson_obj_get(repo, "links_out")), 0);
+    }
+    yyjson_doc_free(doc);
+    cbm_free(CBM_MEM_CLASS_OTHER, json);
+
+    int status = 0;
+    json = cbm_xrepo_links_json(dir, "web", "api", "CROSS_GRAPHQL_CALLS", 10, 0, &status);
+    ASSERT_NOT_NULL(json);
+    ASSERT_EQ(status, 200);
+    doc = yyjson_read(json, strlen(json), 0);
+    ASSERT_NOT_NULL(doc);
+    root = yyjson_doc_get_root(doc);
+    ASSERT_EQ(yyjson_get_int(yyjson_obj_get(root, "total")), 1);
+    link = yyjson_arr_get_first(yyjson_obj_get(root, "links"));
+    ASSERT_NOT_NULL(link);
+    ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(link, "via")), "Orders");
+    ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(link, "target_file")), "graph/orders.go");
+    yyjson_val *source = yyjson_obj_get(link, "source");
+    ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(source, "file_path")), "src/client.ts");
+    ASSERT_EQ(yyjson_get_int(yyjson_obj_get(source, "line")), 12);
+    yyjson_doc_free(doc);
+    cbm_free(CBM_MEM_CLASS_OTHER, json);
+
+    /* The provider side lists nothing: its copy is the reverse edge. */
+    json = cbm_xrepo_links_json(dir, "api", NULL, NULL, 0, 0, &status);
+    ASSERT_NOT_NULL(json);
+    ASSERT_TRUE(strstr(json, "\"total\":0") != NULL);
+    cbm_free(CBM_MEM_CLASS_OTHER, json);
+
+    ASSERT_NULL(cbm_xrepo_links_json(dir, "../web", NULL, NULL, 0, 0, &status));
+    ASSERT_EQ(status, 400);
+    ASSERT_NULL(cbm_xrepo_links_json(dir, "web", NULL, "CALLS", 0, 0, &status));
+    ASSERT_EQ(status, 400);
+    ASSERT_NULL(cbm_xrepo_links_json(dir, "missing", NULL, NULL, 0, 0, &status));
+    ASSERT_EQ(status, 404);
+    ASSERT_NULL(cbm_xrepo_summary_json("/nonexistent/cbm-xrepo"));
+    (void)th_rmtree(dir);
+    PASS();
+}
+
 /* ── Suite ────────────────────────────────────────────────────── */
 
 SUITE(ui) {
@@ -3019,4 +3155,7 @@ SUITE(ui) {
     RUN_TEST(atlas_impact_completed_worker_memory_returns_to_caller_baseline);
     RUN_TEST(atlas_selection_impact_git_filters_and_worktree);
     RUN_TEST(atlas_repository_map_snapshot_evidence);
+
+    /* Cross-repo views */
+    RUN_TEST(xrepo_summary_counts_caller_side_links_once);
 }
