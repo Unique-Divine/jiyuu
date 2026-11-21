@@ -1853,10 +1853,12 @@ static bool cr_peer_is_stale(const char *name, const char *observed) {
     return !same;
 }
 
-static bool cr_has_stale_peers(cbm_store_t *store, const char *project) {
+static bool cr_has_stale_peers(cbm_store_t *store, const char *project,
+                               bool observations_required) {
     yyjson_doc *peers = cr_read_peers(store, project);
-    yyjson_obj_iter iter = yyjson_obj_iter_with(yyjson_doc_get_root(peers));
-    bool stale = false;
+    yyjson_val *observations = yyjson_doc_get_root(peers);
+    yyjson_obj_iter iter = yyjson_obj_iter_with(observations);
+    bool stale = observations_required && !yyjson_is_obj(observations);
     yyjson_val *key;
     while (!stale && (key = yyjson_obj_iter_next(&iter))) {
         stale = cr_peer_is_stale(yyjson_get_str(key), yyjson_get_str(yyjson_obj_iter_get_val(key)));
@@ -1893,7 +1895,10 @@ static bool cr_record_last_run(cbm_store_t *src_store, const char *project, cons
         strftime(when, sizeof(when), "%Y-%m-%dT%H:%M:%SZ", &tm_now) == 0) {
         when[0] = '\0';
     }
-    const char *outcome = result->failed ? "failed" : result->cancelled ? "cancelled" : "complete";
+    const char *outcome = result->failed       ? "failed"
+                          : result->cancelled  ? "cancelled"
+                          : result->no_targets ? "incomplete"
+                                               : "complete";
     size_t len = (size_t)snprintf(
         json, cap, "{\"last_run_at\":\"%s\",\"outcome\":\"%s\",\"targets\":[", when, outcome);
     for (int i = 0; i < target_count && len < cap; i++) {
@@ -1926,7 +1931,10 @@ bool cbm_cross_repo_add_status_json(struct yyjson_mut_doc *doc, struct yyjson_mu
     int rc = cbm_store_meta_get(store, key, &raw);
     yyjson_doc *recorded = rc == CBM_STORE_OK ? yyjson_read(raw, strlen(raw), 0) : NULL;
     cbm_free(CBM_MEM_CLASS_STORE, raw);
-    yyjson_val *recorded_root = recorded ? yyjson_doc_get_root(recorded) : NULL;
+    yyjson_val *recorded_root = yyjson_doc_get_root(recorded);
+    const char *outcome = yyjson_get_str(yyjson_obj_get(recorded_root, "outcome"));
+    bool complete = outcome && strcmp(outcome, "complete") == 0;
+    bool incomplete = outcome && strcmp(outcome, "incomplete") == 0;
     yyjson_mut_val *status = NULL;
     if (yyjson_is_obj(recorded_root)) {
         status = yyjson_val_mut_copy(doc, recorded_root);
@@ -1941,10 +1949,11 @@ bool cbm_cross_repo_add_status_json(struct yyjson_mut_doc *doc, struct yyjson_mu
     /* "never_run" is the honest reading of an absent marker: no run with this
      * project as the source has completed its cleanup since the store was
      * (re)built. A target-side run still leaves its CROSS_* edges here. */
-    const char *state = cr_has_stale_peers(store, project) ? "stale"
-                        : rc == CBM_STORE_NOT_FOUND        ? "never_run"
-                        : yyjson_mut_obj_size(status) > 0  ? "ran"
-                                                           : "unavailable";
+    bool stale = incomplete || cr_has_stale_peers(store, project, complete);
+    const char *state = stale                             ? "stale"
+                        : rc == CBM_STORE_NOT_FOUND       ? "never_run"
+                        : yyjson_mut_obj_size(status) > 0 ? "ran"
+                                                          : "unavailable";
     yyjson_mut_obj_add_str(doc, status, "status", state);
     if (cr_reverse_pending(store, project)) {
         yyjson_mut_obj_add_bool(doc, status, "reverse_pending", true);
@@ -2045,6 +2054,28 @@ static cr_run_status_t cr_match_project_pair(cbm_store_t *src_store, const char 
     return match_status;
 }
 
+/* Wildcard enumeration only returns usable projects. Keep unavailable peers
+ * from the previous generation visible while the wildcard is being replayed. */
+static bool cr_record_unavailable_peers(yyjson_mut_doc *current, yyjson_doc *previous,
+                                        cr_run_context_t *run, cbm_cross_repo_result_t *result) {
+    yyjson_mut_val *observations = yyjson_mut_doc_get_root(current);
+    yyjson_obj_iter iter = yyjson_obj_iter_with(yyjson_doc_get_root(previous));
+    yyjson_val *key;
+    while ((key = yyjson_obj_iter_next(&iter))) {
+        const char *target = yyjson_get_str(key);
+        if (cr_cancel_requested(run)) {
+            return false;
+        }
+        if (cbm_validate_project_name(target) && !yyjson_mut_obj_get(observations, target) &&
+            (yyjson_mut_obj_size(observations) >= CR_MAX_PROJECTS ||
+             !cr_remember_peer(current, target, NULL) ||
+             !cr_record_skip(result, target, "target_unavailable"))) {
+            return false;
+        }
+    }
+    return true;
+}
+
 /* The live generation owns the previous selection. The stage may be a new
  * database, or an incremental copy whose link rows need to be replaced. */
 int cbm_cross_repo_relink_stage(const char *live_path, const char *stage_path, const char *project,
@@ -2056,6 +2087,8 @@ int cbm_cross_repo_relink_stage(const char *live_path, const char *stage_path, c
     }
     char **targets = NULL;
     int target_count = cr_read_targets(previous, project, &targets);
+    bool wildcard = target_count == 1 && strcmp(targets[0], "*") == 0;
+    yyjson_doc *previous_peers = wildcard ? cr_read_peers(previous, project) : NULL;
     cbm_store_close(previous);
     if (target_count <= 0) {
         return target_count < 0 ? CBM_STORE_ERR : CBM_STORE_OK;
@@ -2063,12 +2096,12 @@ int cbm_cross_repo_relink_stage(const char *live_path, const char *stage_path, c
 
     cbm_store_t *staging = cbm_store_open_path_existing(stage_path);
     if (!staging) {
+        yyjson_doc_free(previous_peers);
         free_project_list(targets, target_count);
         return CBM_STORE_ERR;
     }
     cr_run_context_t run = {.cancelled = cancelled, .staging_store = staging};
     cbm_cross_repo_result_t result = {0};
-    bool wildcard = target_count == 1 && strcmp(targets[0], "*") == 0;
     char **resolved = NULL;
     int count = wildcard
                     ? collect_all_projects(&resolved, &run, &result)
@@ -2102,11 +2135,14 @@ int cbm_cross_repo_relink_stage(const char *live_path, const char *stage_path, c
             result.projects_scanned++;
         }
     }
-    ok = ok && !cr_cancel_requested(&run) &&
+    result.no_targets = result.projects_scanned == 0;
+    ok = ok && cr_record_unavailable_peers(peers, previous_peers, &run, &result) &&
+         !cr_cancel_requested(&run) &&
          cr_record_targets(staging, project, (const char **)targets, target_count) &&
          cr_save_peers(staging, project, peers) && cr_set_reverse_pending(staging, project, true) &&
          cr_record_last_run(staging, project, (const char **)targets, target_count, &result);
     yyjson_mut_doc_free(peers);
+    yyjson_doc_free(previous_peers);
     cbm_cross_repo_result_free(&result);
     cbm_store_close(staging);
     free_project_list(resolved, count);
