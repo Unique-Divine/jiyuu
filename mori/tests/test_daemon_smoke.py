@@ -7,8 +7,12 @@ invocations may skip an occupied endpoint; the Make target requires a clean
 rendezvous and fails instead of reporting a false-green skip.
 Linux and macOS are covered; Windows named-pipe/mutex behavior remains covered
 by the deterministic C IPC/runtime tests.
+
+Pass --uninstall-only to run the legacy activation case in a private
+rendezvous and cache. Build the supplied executable with TEST_SEAMS=1.
 """
 
+import argparse
 import hashlib
 import json
 import os
@@ -640,6 +644,166 @@ def assert_no_activation_artifacts(directory, label):
     check(not artifacts, label + " left transaction artifacts: " + repr(artifacts))
 
 
+def copy_different_build(binary, destination):
+    shutil.copy2(binary, destination)
+    if sys.platform == "darwin":
+        # Current Apple linkers ad-hoc sign arm64 executables. Appending
+        # bytes corrupts that Mach-O before codesign can replace the
+        # signature, so create a valid exact-build mismatch by signing
+        # the copy with a distinct identifier instead.
+        signed = subprocess.run(
+            [
+                "codesign",
+                "--force",
+                "--sign",
+                "-",
+                "--identifier",
+                "com.deusdata.cbm.daemon-smoke-conflict",
+                str(destination),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+        check(
+            signed.returncode == 0,
+            "could not ad-hoc sign conflict binary: " + signed.stderr,
+        )
+    else:
+        # ELF permits trailing bytes, giving the fixture a different
+        # exact build fingerprint while preserving executability.
+        with destination.open("ab") as stream:
+            stream.write(b"\x00cbm-daemon-smoke-conflicting-build")
+
+
+def run_legacy_uninstall_smoke(binary):
+    # Keep the socket path short enough for macOS and use a distinct rendezvous
+    # so the activation cannot drain a workstation daemon.
+    with tempfile.TemporaryDirectory(prefix="mori-uninstall-", dir="/tmp") as raw_tmpdir:
+        tmpdir = Path(raw_tmpdir).resolve()
+        home = tmpdir / "home"
+        target = home / ".local/bin/codebase-memory-mcp"
+        home.mkdir(mode=0o700)
+        (home / ".local").mkdir(mode=0o700)
+        target.parent.mkdir(mode=0o700)
+        cache = tmpdir / "cache"
+        cache.mkdir(mode=0o700)
+        index = cache / "smoke-project.db"
+        index.write_bytes(b"index sentinel\n")
+        repo = tmpdir / "repo"
+        repo.mkdir(mode=0o700)
+        (repo / "hang_me.py").write_text("def smoke():\n    return 1\n", encoding="utf-8")
+        runtime_parent = tmpdir / "run"
+        runtime_parent.mkdir(mode=0o700)
+        runtime_dir = runtime_parent / ("cbm-daemon-" + str(os.geteuid()))
+        socket_path = runtime_dir / ("cbm-" + RENDEZVOUS_KEY + ".sock")
+        locks = (
+            (socket_path.with_suffix(".lock"), False),
+            (socket_path.with_suffix(".lifetime.lock"), True),
+            (runtime_dir / "cbm-version-cohort-admission-v1.lock", True),
+            (runtime_dir / "cbm-version-cohort-lifetime-v1.lock", True),
+            (runtime_dir / "cbm-version-cohort-maintenance-v1.lock", True),
+            (runtime_dir / "cbm-version-cohort-daemon-v1.lock", True),
+        )
+        daemon_log = cache / "logs/cbm-daemon.log"
+        activation_log = cache / "logs/activation-events.ndjson"
+        descendant_marker = tmpdir / "worker-descendant.pid"
+        worker_marker = tmpdir / "worker-lock.pid"
+        env = {
+            "PATH": os.environ.get("PATH", os.defpath),
+            "HOME": str(home),
+            "CBM_CACHE_DIR": str(cache),
+            "CBM_RUNTIME_DIR": str(runtime_parent),
+            "CBM_LOG_FORMAT": "json",
+            "CBM_LOG_LEVEL": "info",
+            "CBM_TEST_HANG_ON": "hang_me",
+            "CBM_TEST_WORKER_DESCENDANT_PID_FILE": str(descendant_marker),
+            "CBM_TEST_WORKER_PROJECT_LOCK_PID_FILE": str(worker_marker),
+        }
+        source_build = sha256_file(binary)
+        copy_different_build(binary, target)
+        target.chmod(0o700)
+        check(sha256_file(target) != source_build, "uninstall fixture uses the same build")
+        clients = []
+        cli = None
+        args = {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {"name": "mori-uninstall-smoke", "version": "1"},
+        }
+        try:
+            client = start_ready_mcp_client(
+                target,
+                env,
+                tmpdir / "uninstall-client.err",
+                clients,
+                args,
+                1,
+                "legacy uninstall target",
+            )
+            wait_until(
+                lambda: json_events(daemon_log, "daemon.start"),
+                START_TIMEOUT,
+                "uninstall fixture daemon startup",
+            )
+            daemon_pid = int(json_events(daemon_log, "daemon.start")[-1]["pid"])
+            cli = subprocess.Popen(
+                [str(target), "cli", "--json", "index_repository", "--repo-path", str(repo)],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env,
+            )
+            wait_until(
+                lambda: read_private_pid_fields(descendant_marker, 1) is not None
+                and read_private_pid_fields(worker_marker, 2) is not None,
+                OPERATION_TIMEOUT,
+                "uninstall fixture's active indexing worker",
+            )
+            (descendant_pid,) = read_private_pid_fields(descendant_marker, 1)
+            worker_pid, worker_pgid = read_private_pid_fields(worker_marker, 2)
+            check(
+                cli.poll() is None
+                and worker_tree_identity_matches(daemon_pid, worker_pid, worker_pgid, descendant_pid),
+                "uninstall fixture did not own an active worker tree",
+            )
+            records = run_successful_uninstall(binary, env, tmpdir, activation_log, source_build)
+            _, cli_stderr = cli.communicate(timeout=10)
+            check(cli.returncode != 0, "cancelled indexing CLI reported success: " + cli_stderr)
+            check(
+                all("target_build" not in record for record in records),
+                "uninstall audit claimed a replacement target build",
+            )
+            check(client.wait(timeout=15) >= 0, "uninstall killed the MCP client with a signal")
+            wait_until(
+                lambda: process_gone_or_zombie(descendant_pid),
+                SHUTDOWN_TIMEOUT,
+                "uninstall worker cleanup",
+            )
+            assert_coordination_idle(socket_path, locks, "uninstall coordination cleanup")
+            assert_no_activation_artifacts(target.parent, "uninstall activation")
+            check(not target.exists(), "uninstall did not remove its target")
+            check(index.read_bytes() == b"index sentinel\n", "uninstall removed an index")
+            check(sha256_file(binary) == source_build, "uninstall modified its source")
+            print(
+                "ok: cross-build uninstall drained MCP and CLI work, kept indexes, "
+                "and removed the legacy executable"
+            )
+        finally:
+            if cli and cli.poll() is None:
+                cli.terminate()
+                try:
+                    cli.communicate(timeout=5)
+                except subprocess.TimeoutExpired:
+                    cli.kill()
+                    cli.communicate(timeout=5)
+            for client in clients:
+                client.cleanup()
+
+
 def main():
     if os.name == "nt" or sys.platform.startswith(("cygwin", "msys")):
         if os.environ.get("CBM_DAEMON_SMOKE_REQUIRE_RUN") == "1":
@@ -651,9 +815,21 @@ def main():
         return 0
 
     root = Path(__file__).resolve().parent.parent
-    binary = Path(sys.argv[1] if len(sys.argv) > 1 else root / "build/c/codebase-memory-mcp")
-    binary = binary.resolve()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "binary", nargs="?", type=Path, default=root / "build/c/codebase-memory-mcp"
+    )
+    parser.add_argument(
+        "--uninstall-only",
+        action="store_true",
+        help="Run the cross-build legacy uninstall smoke in a private runtime.",
+    )
+    args = parser.parse_args()
+    binary = args.binary.resolve()
     check(binary.is_file() and os.access(binary, os.X_OK), "missing executable: " + str(binary))
+    if args.uninstall_only:
+        run_legacy_uninstall_smoke(binary)
+        return 0
 
     runtime_parent = Path("/private/tmp" if sys.platform == "darwin" else "/tmp")
     runtime_dir = runtime_parent / ("cbm-daemon-" + str(os.geteuid()))
@@ -698,7 +874,6 @@ def main():
         retargeted_cache = tmpdir / "retargeted-cache"
         repo = tmpdir / "repo"
         success_repo = tmpdir / "success-repo"
-        target_dir = home / ".local/bin"
         for directory in (
             home,
             cache,
@@ -706,7 +881,6 @@ def main():
             retargeted_cache,
             repo,
             success_repo,
-            target_dir,
         ):
             directory.mkdir(parents=True, exist_ok=True)
         # Exercise startup hardening of an existing user-selected root, not
@@ -717,13 +891,9 @@ def main():
         (success_repo / "tiny.py").write_text(
             "def daemon_index_smoke():\n    return 1\n", encoding="utf-8"
         )
-        target_binary = target_dir / "codebase-memory-mcp"
-        index_path = cache / "smoke-project.db"
-        index_path.write_bytes(b"index sentinel\n")
         descendant_pid_path = tmpdir / "worker-descendant.pid"
         daemon_log = cache / "logs/cbm-daemon.log"
         conflict_log = cache / "logs/daemon-conflicts.ndjson"
-        activation_log = cache / "logs/activation-events.ndjson"
 
         env = {
             "PATH": os.environ.get("PATH", os.defpath),
@@ -742,10 +912,6 @@ def main():
         cli_first_worker_stopped = False
         cli_first_competitor = None
         cli_first_competitor_stderr = None
-        activation_local_process = None
-        activation_local_descendant_pid = None
-        activation_local_worker_pid = None
-        activation_local_worker_pgid = None
         try:
             version_result = subprocess.run(
                 [str(binary), "--version"],
@@ -1081,37 +1247,7 @@ def main():
             )
 
             conflict_binary = tmpdir / "codebase-memory-mcp-conflict"
-            shutil.copy2(binary, conflict_binary)
-            if sys.platform == "darwin":
-                # Current Apple linkers ad-hoc sign arm64 executables. Appending
-                # bytes corrupts that Mach-O before codesign can replace the
-                # signature, so create a valid exact-build mismatch by signing
-                # the copy with a distinct identifier instead.
-                signed = subprocess.run(
-                    [
-                        "codesign",
-                        "--force",
-                        "--sign",
-                        "-",
-                        "--identifier",
-                        "com.deusdata.cbm.daemon-smoke-conflict",
-                        str(conflict_binary),
-                    ],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    timeout=20,
-                    check=False,
-                )
-                check(
-                    signed.returncode == 0,
-                    "could not ad-hoc sign conflict binary: " + signed.stderr,
-                )
-            else:
-                # ELF permits trailing bytes, giving the fixture a different
-                # exact build fingerprint while preserving executability.
-                with conflict_binary.open("ab") as stream:
-                    stream.write(b"\x00cbm-daemon-smoke-conflicting-build")
+            copy_different_build(binary, conflict_binary)
             requested_fingerprint = sha256_file(conflict_binary)
             check(
                 active_fingerprint != requested_fingerprint,
@@ -1848,152 +1984,9 @@ def main():
                 + repr(daemon_lifecycle_sequence(daemon_log)),
             )
 
-            # Seed the legacy install with a distinct build. Uninstall from
-            # the original executable while the target has a live MCP session
-            # and a local CLI worker. Both must release their leases first.
-            shutil.copy2(conflict_binary, target_binary)
-            check(
-                sha256_file(target_binary) == requested_fingerprint,
-                "legacy uninstall fixture does not match its source build",
-            )
-            uninstall_pid_path = tmpdir / "activation-uninstall-worker-descendant.pid"
-            uninstall_lock_owner_path = tmpdir / "activation-uninstall-worker-lock.pid"
-            activation_local_env = env.copy()
-            activation_local_env["CBM_TEST_WORKER_DESCENDANT_PID_FILE"] = str(
-                uninstall_pid_path
-            )
-            activation_local_env["CBM_TEST_WORKER_PROJECT_LOCK_PID_FILE"] = str(
-                uninstall_lock_owner_path
-            )
-
-            uninstall_starts = len(json_events(daemon_log, "daemon.start"))
-            uninstall_stops = len(json_events(daemon_log, "daemon.stop"))
-            uninstall_client = start_ready_mcp_client(
-                target_binary,
-                env,
-                tmpdir / "activation-uninstall-client.err",
-                clients,
-                initialize_params,
-                401,
-                "activation uninstall client",
-            )
-            wait_until(
-                lambda: len(json_events(daemon_log, "daemon.start"))
-                == uninstall_starts + 1,
-                START_TIMEOUT,
-                "uninstall activation daemon generation",
-            )
-            activation_local_process = subprocess.Popen(
-                [
-                    str(target_binary),
-                    "cli",
-                    "--progress",
-                    "--json",
-                    "index_repository",
-                    "--repo-path",
-                    str(repo),
-                    "--name",
-                    "smoke-activation-uninstall",
-                    "--mode",
-                    "fast",
-                ],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                env=activation_local_env,
-            )
-            wait_until(
-                lambda: read_private_pid_fields(uninstall_pid_path, 1) is not None,
-                OPERATION_TIMEOUT,
-                "activation-cancelled CLI worker descendant",
-            )
-            wait_until(
-                lambda: read_private_pid_fields(uninstall_lock_owner_path, 2)
-                is not None,
-                OPERATION_TIMEOUT,
-                "activation-cancelled CLI worker lock owner",
-            )
-            (activation_local_descendant_pid,) = read_private_pid_fields(
-                uninstall_pid_path, 1
-            )
-            activation_local_worker_pid, activation_local_worker_pgid = (
-                read_private_pid_fields(uninstall_lock_owner_path, 2)
-            )
-            check(
-                activation_local_process.poll() is None
-                and worker_tree_identity_matches(
-                    activation_local_process.pid,
-                    activation_local_worker_pid,
-                    activation_local_worker_pgid,
-                    activation_local_descendant_pid,
-                ),
-                "activation CLI marker did not identify its isolated worker tree",
-            )
-
-            uninstall_activation_records = run_successful_uninstall(
-                binary, env, tmpdir, activation_log, active_fingerprint
-            )
-            local_stdout, local_stderr = activation_local_process.communicate(
-                timeout=10
-            )
-            (tmpdir / "activation-local-cli.out").write_text(
-                local_stdout, encoding="utf-8"
-            )
-            (tmpdir / "activation-local-cli.err").write_text(
-                local_stderr, encoding="utf-8"
-            )
-            check(
-                activation_local_process.returncode != 0,
-                "maintenance-cancelled local CLI reported success",
-            )
-            wait_until(
-                lambda: process_gone_or_zombie(activation_local_descendant_pid),
-                20,
-                "maintenance-cancelled local CLI worker tree",
-            )
-            check(
-                all(
-                    "target_build" not in record
-                    for record in uninstall_activation_records
-                ),
-                "uninstall audit claimed a replacement target build",
-            )
-            check(
-                uninstall_client.wait(timeout=15) >= 0,
-                "uninstall activation MCP frontend was killed by a signal",
-            )
-            wait_until(
-                lambda: len(json_events(daemon_log, "daemon.stop"))
-                == uninstall_stops + 1,
-                10,
-                "uninstall activation daemon.stop",
-            )
-            assert_coordination_idle(
-                socket_path,
-                coordination_locks,
-                "uninstall activation coordination cleanup",
-            )
-            assert_no_activation_artifacts(target_dir, "uninstall activation")
-            check(not target_binary.exists(), "uninstall did not remove its target")
-            check(
-                index_path.read_bytes() == b"index sentinel\n",
-                "uninstall without --delete-indexes removed an index",
-            )
-            check(
-                sha256_file(binary) == active_fingerprint
-                and sha256_file(conflict_binary) == requested_fingerprint,
-                "uninstall activation modified a source executable",
-            )
-            check(
-                len(json_events(daemon_log, "daemon.start"))
-                == len(json_events(daemon_log, "daemon.stop")),
-                "activation smoke left an unmatched daemon generation",
-            )
-
+            run_legacy_uninstall_smoke(binary)
             print(
                 "ok: shared daemon lifecycle, bidirectional version conflicts, "
-                "coordinated uninstall, CLI maintenance cancellation, "
                 "and session cancellation passed"
             )
             return 0
@@ -2044,25 +2037,6 @@ def main():
                     os.killpg(cli_first_worker_pgid, signal.SIGKILL)
                 except OSError:
                     pass
-            if activation_local_process and activation_local_process.poll() is None:
-                activation_local_process.terminate()
-                try:
-                    activation_local_process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    activation_local_process.kill()
-                    activation_local_process.wait(timeout=5)
-            if (
-                activation_local_descendant_pid
-                and not process_gone_or_zombie(activation_local_descendant_pid)
-                and worker_group_contains_descendant(
-                    activation_local_worker_pgid,
-                    activation_local_descendant_pid,
-                )
-            ):
-                try:
-                    os.killpg(activation_local_worker_pgid, signal.SIGKILL)
-                except OSError:
-                    pass
             for client in clients:
                 client.cleanup()
             if failed:
@@ -2074,11 +2048,6 @@ def main():
                     tmpdir / "client-2.err",
                     tmpdir / "turnover-client.err",
                     tmpdir / "cli-first-overlap-client.err",
-                    activation_log,
-                    tmpdir / "activation-uninstall-client.err",
-                    tmpdir / "activation-local-cli.err",
-                    tmpdir / "activation-uninstall.out",
-                    tmpdir / "activation-uninstall.err",
                 ):
                     if not path.exists():
                         continue
