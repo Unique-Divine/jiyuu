@@ -50,7 +50,7 @@ parity-ci *ARGS: parity-test
 # MODE is run (a corpus) or ci (the fixtures).
 # Diff mori (Rust, C linked) against the C build.
 parity-mori MODE="run" *ARGS:
-    python3 -I parity/parity.py {{MODE}} --bin-b ../target/release/mori {{ARGS}}
+    python3 -I parity/parity.py {{MODE}} --bin-b ../target/release/mori --export-b rust {{ARGS}}
 
 # Needs `just build`. Fails unless the harness reports both corruptions.
 # Self-test: fixture parity against a deliberately wrong build.
