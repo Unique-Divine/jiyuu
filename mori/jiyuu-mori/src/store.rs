@@ -84,7 +84,6 @@ fn collect<T>(
 fn properties(row: &Row<'_>, skip: &[&str]) -> rusqlite::Result<Cells> {
     row.as_ref()
         .column_names()
-        .into_iter()
         .enumerate()
         .filter(|(_, name)| !skip.contains(name))
         .map(|(index, name)| Ok((name.to_owned(), Cell::read(row, index)?)))
