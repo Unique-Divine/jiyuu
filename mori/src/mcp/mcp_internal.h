@@ -3,10 +3,15 @@
 
 #include "foundation/index_policy.h"
 #include "mcp/mcp.h"
+#include "mcp/compact_out.h"
 #include "pipeline/pipeline.h" /* cbm_changed_hunk_t */
 #include "store/store.h"       /* cbm_node_t */
 
 #include <yyjson/yyjson.h>
+
+/* Shared compact transport for the C and Rust project response writers. */
+void cbm_mcp_render_project_table(cbm_sb_t *sb, const cbm_mcp_project_record_t *records,
+                                   int page_count, bool metadata_only, bool include_stats);
 
 /* White-box fault injection for deterministic cross-platform quarantine
  * safety tests. This header is internal and is not part of the MCP API. */

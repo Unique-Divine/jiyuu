@@ -998,6 +998,19 @@ void cbm_store_free_doc_link_reasons(cbm_doc_link_reason_count_t *reasons, int c
 
 int cbm_store_search(cbm_store_t *s, const cbm_search_params_t *params, cbm_search_output_t *out);
 
+/* The MCP pattern path can supply a reader for these two bound statements.
+ * Pointers are borrowed for the call. The row callback copies the current
+ * SQLite row, and the error callback captures the diagnostic before finalize. */
+typedef void (*cbm_search_read_row_fn)(void *context, struct sqlite3_stmt *row);
+typedef void (*cbm_search_read_error_fn)(void *context, const char *operation);
+typedef int (*cbm_pattern_search_reader_fn)(
+    struct sqlite3 *db, const char *count_sql, const char *page_sql, const char *const *binds,
+    int bind_count, int *total, void *context, cbm_search_read_row_fn row,
+    cbm_search_read_error_fn error);
+void cbm_store_set_pattern_search_reader(cbm_pattern_search_reader_fn reader);
+int cbm_store_search_pattern(cbm_store_t *s, const cbm_search_params_t *params,
+                             cbm_search_output_t *out);
+
 /* Free a search output's allocated memory. */
 void cbm_store_search_free(cbm_search_output_t *out);
 
