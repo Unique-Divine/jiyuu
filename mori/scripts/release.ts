@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
-// Release helper for Mori's C binary (codebase-memory-mcp).
+// Release helper for Mori's binary `mori` (crate mori/jiyuu-mori with the C
+// program linked in).
 //
 // Usage (from mori/):
 //   bun scripts/release.ts validate [mori/vX.Y.Z]
@@ -14,14 +15,19 @@
 // latest, and refuses to touch a release that is already published.
 //
 // Targets are <os>-<arch> as mise's github: backend reads them: static Linux
-// x64 and arm64 builds and a dynamic, ad-hoc signed macOS arm64 build.
+// x64 and arm64 builds and dynamic, ad-hoc signed macOS arm64 and x64 builds.
 
 import { readdir, readFile, writeFile } from "node:fs/promises"
 import { join, resolve } from "node:path"
 
-export const BINARY = "codebase-memory-mcp"
+export const BINARY = "mori"
 export const TAG_PREFIX = "mori/v"
-export const TARGETS = ["linux-x64", "linux-arm64", "darwin-arm64"] as const
+export const TARGETS = [
+  "linux-x64",
+  "linux-arm64",
+  "darwin-arm64",
+  "darwin-x64",
+] as const
 export type Target = (typeof TARGETS)[number]
 
 const SEMVER =
@@ -74,8 +80,8 @@ export async function readVersionFile(root: string): Promise<string> {
   return parseVersion(await readFile(join(root, "VERSION"), "utf8"))
 }
 
-// The tag's version must equal mori/VERSION, the version build.sh stamps
-// into the binary (`codebase-memory-mcp --version`).
+// The tag's version must equal mori/VERSION, the version the release build
+// stamps into the binary (`mori --version`).
 export function checkTag(tag: string, fileVersion: string): string {
   const version = versionFromTag(tag)
   if (version !== fileVersion) {
@@ -121,13 +127,13 @@ export function releaseNotes(meta: ReleaseMetadata): string {
     `# Mori ${meta.version}`,
     "",
     `Binary \`${meta.binary}\` built from Jiyuu commit \`${meta.commit}\`.`,
-    "Static Linux builds for x64 and arm64, and a macOS arm64 (Apple",
-    "silicon) build for macOS 14 or later. Each archive holds the binary,",
-    "LICENSE, NOTICE and THIRD_PARTY_NOTICES.md.",
+    "Static Linux builds for x64 and arm64, and macOS builds for Apple",
+    "silicon (arm64) and Intel (x64), for macOS 14 or later. Each archive",
+    "holds the binary, LICENSE, NOTICE and THIRD_PARTY_NOTICES.md.",
     "",
-    "The macOS binary is ad-hoc signed but not notarized. If macOS blocks it",
-    "after a browser download, remove the quarantine attribute:",
-    "`xattr -d com.apple.quarantine codebase-memory-mcp`.",
+    "The macOS binaries are ad-hoc signed but not notarized. If macOS blocks",
+    "one after a browser download, remove the quarantine attribute:",
+    `\`xattr -d com.apple.quarantine ${meta.binary}\`.`,
     "",
     "| Asset | SHA-256 |",
     "| --- | --- |",

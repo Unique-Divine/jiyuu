@@ -57,8 +57,8 @@ git clone git@github.com:Unique-Divine/boku.git boku
 
 git clone git@github.com:Unique-Divine/open-sai.git open-sai
 
-# gh-io-ud: replace with your fork if different
-git clone git@github.com:Unique-Divine/gh-io-ud.git gh-io-ud
+# ud-web: replace with your fork if different
+git clone git@github.com:Unique-Divine/ud-web.git ud-web
 ```
 
 ## Optional: idempotent **`clone`** function
