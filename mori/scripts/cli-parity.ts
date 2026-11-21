@@ -13,9 +13,14 @@
 // to the binaries is built from scratch: only PATH comes from the caller.
 //
 // Normalization replaces the binary path and scratch directories with
-// placeholders, `<name> <version>` with `<PROGRAM> <VERSION>` for the two
-// program names, and ISO-8601 timestamps and elapsed-time fields with
-// placeholders. Everything else, including exit codes and stderr, must match.
+// placeholders, the program name before a version with `<PROGRAM>` (the
+// version itself must match), and ISO-8601 timestamps and elapsed-time
+// fields with placeholders. Everything else, including exit codes and
+// stderr, must match.
+//
+// Matching output alone would pass when both binaries fail the same way, so
+// each invocation also has fixed expectations on its exit code and stdout,
+// checked on both sides.
 
 import { cp, mkdir, mkdtemp, rm } from "node:fs/promises"
 import { join, resolve } from "node:path"
@@ -30,6 +35,13 @@ export interface Invocation {
   env?: Record<string, string>
   // MCP stdio session: `args` start the server; `mcp` holds the requests.
   mcp?: McpRequest[]
+  expect: Expectation
+}
+
+export interface Expectation {
+  exit: number
+  // Each string must appear in stdout.
+  stdout?: string[]
 }
 
 export interface McpRequest {
@@ -61,12 +73,15 @@ export interface Comparison {
   name: string
   same: boolean
   diff: string
+  // Unmet expectations, as `<side>: <reason>`.
+  failures: string[]
 }
 
 const ISO_TIME =
   /\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?/g
-// JSON fields that carry wall-clock durations.
-const ELAPSED_FIELD = /("(?:[a-z_]*_ms|elapsed[a-z_]*|duration[a-z_]*)":)\d+(\.\d+)?/g
+// JSON fields that carry wall-clock durations. Configuration values such as
+// `timeout_ms` stay compared.
+const ELAPSED_FIELD = /("(?:elapsed|duration)[a-z_]*":)\d+(\.\d+)?/g
 
 function escapeRegExp(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
@@ -88,8 +103,11 @@ export function normalize(text: string, ctx: NormalizeContext): string {
   out = out.split(dashed(ctx.scratch)).join("<SCRATCH>")
   const names = PROGRAM_NAMES.map(escapeRegExp).join("|")
   out = out.replace(
-    new RegExp(`\\b(?:${names}) (?:v?\\d+\\.\\d+\\.\\d+[0-9A-Za-z.+-]*|dev)\\b`, "g"),
-    "<PROGRAM> <VERSION>",
+    new RegExp(
+      `\\b(?:${names})(?= (?:v?\\d+\\.\\d+\\.\\d+[0-9A-Za-z.+-]*|dev)\\b)`,
+      "g",
+    ),
+    "<PROGRAM>",
   )
   out = out.replace(ISO_TIME, "<TIME>")
   out = out.replace(ELAPSED_FIELD, "$1<MS>")
@@ -121,8 +139,39 @@ export function formatResult(r: RunResult): string {
   ].join("\n")
 }
 
-export function compare(name: string, c: string, mori: string): Comparison {
-  return { name, same: c === mori, diff: c === mori ? "" : diffLines(c, mori) }
+export function compare(
+  name: string,
+  c: string,
+  mori: string,
+  failures: string[] = [],
+): Comparison {
+  return {
+    name,
+    same: c === mori,
+    diff: c === mori ? "" : diffLines(c, mori),
+    failures,
+  }
+}
+
+export function passed(cmp: Comparison): boolean {
+  return cmp.same && cmp.failures.length === 0
+}
+
+// Reasons `result` misses `expect`; empty when it meets it.
+export function checkExpectation(
+  result: RunResult,
+  expect: Expectation,
+): string[] {
+  const reasons: string[] = []
+  if (result.exitCode !== expect.exit) {
+    reasons.push(`exit ${result.exitCode}, expected ${expect.exit}`)
+  }
+  for (const needle of expect.stdout ?? []) {
+    if (!result.stdout.includes(needle)) {
+      reasons.push(`stdout lacks ${JSON.stringify(needle)}`)
+    }
+  }
+  return reasons
 }
 
 export const MCP_REQUESTS: McpRequest[] = [
@@ -149,47 +198,106 @@ export function hookPayload(repo: string): string {
   })
 }
 
-// The fixed command list. `project` is the fixture's project name.
+// The fixed command list, with what each must print on the fixture.
+// `project` is the fixture's project name.
 export function invocations(repo: string, project: string): Invocation[] {
-  const q = (tool: string, ...rest: string[]) => ({
-    name: `cli ${tool}`,
+  const q = (
+    name: string,
+    tool: string,
+    rest: string[],
+    stdout: string[],
+  ): Invocation => ({
+    name,
     args: ["cli", tool, "--project", project, ...rest],
+    expect: { exit: 0, stdout },
   })
   return [
-    { name: "--version", args: ["--version"] },
-    { name: "--help", args: ["--help"] },
-    { name: "cli list_projects (empty)", args: ["cli", "list_projects"] },
+    {
+      name: "--version",
+      args: ["--version"],
+      expect: { exit: 0, stdout: [" "] },
+    },
+    { name: "--help", args: ["--help"], expect: { exit: 0, stdout: ["Usage:"] } },
+    {
+      name: "cli list_projects (empty)",
+      args: ["cli", "list_projects"],
+      expect: { exit: 0, stdout: ["projects: 0"] },
+    },
     {
       name: "cli index_repository",
       args: ["cli", "--quiet", "index_repository", "--repo-path", repo],
+      expect: { exit: 0, stdout: ['"status":"indexed"'] },
     },
-    { name: "cli list_projects", args: ["cli", "list_projects"] },
+    {
+      name: "cli list_projects",
+      args: ["cli", "list_projects"],
+      expect: { exit: 0, stdout: ["projects: 1", project] },
+    },
     q(
+      "cli search_graph",
       "search_graph",
-      "--name-pattern",
-      "^(Add|Twice|helper|run|greet|formatName)$",
-      "--format",
-      "json",
+      [
+        "--name-pattern",
+        "^(Add|Twice|helper|run|greet|formatName)$",
+        "--format",
+        "json",
+      ],
+      ['["Twice","Function"', '["helper","Function"', '["greet","Function"'],
     ),
     q(
+      "cli query_graph",
       "query_graph",
-      "--query",
-      "MATCH (f:Function)-[:CALLS]->(g:Function) " +
-        "RETURN f.name, g.name ORDER BY f.name, g.name",
+      [
+        "--query",
+        "MATCH (f:Function)-[:CALLS]->(g:Function) " +
+          "RETURN f.name, g.name ORDER BY f.name, g.name",
+      ],
+      ["Twice Add", "run helper", "greet formatName"],
     ),
-    q("trace_path", "--function-name", "helper", "--direction", "inbound"),
-    q("trace_path", "--function-name", "Twice", "--direction", "outbound"),
-    q("get_architecture"),
+    q(
+      "cli trace_path helper inbound",
+      "trace_path",
+      ["--function-name", "helper", "--direction", "inbound"],
+      ["callers: 2", `${project}.py.app.run 1`],
+    ),
+    q(
+      "cli trace_path Twice outbound",
+      "trace_path",
+      ["--function-name", "Twice", "--direction", "outbound"],
+      ["callees: 1", `${project}.go.Add 1`],
+    ),
+    q(
+      "cli get_architecture",
+      "get_architecture",
+      [],
+      [`project: ${project}`, "Function", "Python"],
+    ),
     // The hook stops at a wall-clock deadline (2 s by default) and prints
     // only a timeout notice; a slow cold start on one side then reads as a
-    // difference. The maximum deadline keeps the output deterministic.
+    // difference. The maximum deadline keeps the output deterministic. With
+    // no daemon running it adds no graph context, so only the exit code is
+    // fixed.
     {
       name: "hook-augment",
       args: ["hook-augment"],
       stdin: hookPayload(repo),
       env: { CBM_HOOK_DEADLINE_MS: "10000" },
+      expect: { exit: 0 },
     },
-    { name: "mcp stdio initialize + tools/list", args: [], mcp: MCP_REQUESTS },
+    {
+      name: "mcp stdio initialize + tools/list",
+      args: [],
+      mcp: MCP_REQUESTS,
+      expect: {
+        exit: 0,
+        stdout: [
+          '"serverInfo"',
+          '"name": "index_repository"',
+          '"name": "search_graph"',
+          '"name": "trace_path"',
+        ],
+      },
+    },
   ]
 }
 
@@ -323,9 +431,13 @@ export async function runParity(opts: ParityOptions): Promise<Comparison[]> {
     const results: Comparison[] = []
     for (const inv of invocations(repo, projectName(repo))) {
       const outs: string[] = []
+      const failures: string[] = []
       for (const side of sides) {
         const env = { ...sideEnv(side, path), ...inv.env }
         const raw = await runOne(side, inv, repo, env)
+        for (const reason of checkExpectation(raw, inv.expect)) {
+          failures.push(`${side.label}: ${reason}`)
+        }
         outs.push(
           normalize(formatResult(raw), {
             bin: side.bin,
@@ -334,10 +446,13 @@ export async function runParity(opts: ParityOptions): Promise<Comparison[]> {
           }),
         )
       }
-      const cmp = compare(inv.name, outs[0]!, outs[1]!)
+      const cmp = compare(inv.name, outs[0]!, outs[1]!, failures)
       results.push(cmp)
-      log(`${cmp.same ? "same" : "DIFF"}  ${inv.name}`)
+      const status = !cmp.same ? "DIFF" : failures.length ? "FAIL" : "same"
+      log(`${status}  ${inv.name}`)
       if (!cmp.same) log(cmp.diff)
+      for (const failure of failures) log(`  ${failure}`)
+      if (failures.length) log(outs[0]!)
     }
     return results
   } finally {
@@ -374,9 +489,10 @@ if (import.meta.main) {
   try {
     const opts = parseArgs(process.argv.slice(2), root)
     const results = await runParity({ ...opts, log: console.log })
-    const failed = results.filter((r) => !r.same)
+    const failed = results.filter((r) => !passed(r))
     console.log(
-      `${results.length - failed.length}/${results.length} invocations match`,
+      `${results.length - failed.length}/${results.length} invocations ` +
+        "match and meet their expectations",
     )
     if (failed.length > 0) process.exitCode = 1
   } catch (error: unknown) {
