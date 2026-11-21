@@ -220,16 +220,29 @@ fn run_make(
 /// Links the archive whole, so the binary holds the same objects as
 /// `codebase-memory-mcp`, and the libraries from `LDFLAGS` in
 /// `Makefile.cbm` (`-lm -lstdc++ -lpthread -lz`).
+///
+/// With `-C target-feature=+crt-static` (the static Linux release, like
+/// `STATIC=1` for the C binary), zlib and libstdc++ link as archives too: a
+/// `dylib` library would make the linker pick the shared object and produce
+/// a dynamic binary. libm and libpthread come with the static libc that
+/// Rust's std links under crt-static.
 fn emit_link_lines(build_dir: &Path, target_os: &str) {
+    let crt_static = env::var("CARGO_CFG_TARGET_FEATURE")
+        .is_ok_and(|features| features.split(',').any(|f| f == "crt-static"));
     println!("cargo:rustc-link-search=native={}", build_dir.display());
     println!("cargo:rustc-link-lib=static:+whole-archive=mori-c");
-    println!("cargo:rustc-link-lib=dylib=z");
-    println!("cargo:rustc-link-lib=dylib=m");
-    println!("cargo:rustc-link-lib=dylib=pthread");
-    if target_os == "macos" {
-        println!("cargo:rustc-link-lib=dylib=c++");
+    if crt_static && target_os == "linux" {
+        println!("cargo:rustc-link-lib=static=z");
+        println!("cargo:rustc-link-lib=static=stdc++");
     } else {
-        println!("cargo:rustc-link-lib=dylib=stdc++");
+        println!("cargo:rustc-link-lib=dylib=z");
+        println!("cargo:rustc-link-lib=dylib=m");
+        println!("cargo:rustc-link-lib=dylib=pthread");
+        if target_os == "macos" {
+            println!("cargo:rustc-link-lib=dylib=c++");
+        } else {
+            println!("cargo:rustc-link-lib=dylib=stdc++");
+        }
     }
     if target_os == "linux" {
         // ELF_HARDENING_FLAGS in Makefile.cbm. Rust already links with
