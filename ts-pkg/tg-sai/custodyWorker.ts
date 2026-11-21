@@ -929,11 +929,14 @@ export function managedPoolHealth(
     !result.stage
   )
     return previous
-  const reason = dealChatPoolReason(result.error ?? result.reason)
+  const blocked = result.state === "blocked"
+  const reason = dealChatPoolReason(
+    blocked ? result.reason : result.error ?? result.reason,
+  )
   const step = dealChatPoolReason(result.stage)
   return {
     ...base,
-    state: result.state === "error" || result.state === "disabled"
+    state: blocked || result.state === "error" || result.state === "disabled"
       ? "unavailable"
       : result.state === "progress" || result.state === "filled"
         ? "working"

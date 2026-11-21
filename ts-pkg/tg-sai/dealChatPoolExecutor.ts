@@ -86,6 +86,13 @@ type ClaimReply = {
   nextAt?: string
 }
 
+type AcknowledgedState = "pending" | "filled" | "retired" | "blocked"
+
+interface ResultAcknowledgement {
+  state: AcknowledgedState
+  nextAtMs?: number
+}
+
 export interface DealChatPoolCloud {
   claimDealChatPoolAction(
     input: { accountId: string; workerId: string },
@@ -200,6 +207,27 @@ function claimFromCloud(raw: unknown, accountId: number): ClaimReply {
   return { action, cap, groupStopAt }
 }
 
+function acknowledgementFromCloud(
+  raw: unknown,
+  result: DealChatPoolResult,
+): ResultAcknowledgement {
+  const reply = raw as Record<string, unknown> | null
+  if (
+    reply?.accepted !== true ||
+    reply.fillId !== result.fillId ||
+    reply.actionId !== result.actionId ||
+    (reply.state !== "pending" &&
+      reply.state !== "filled" &&
+      reply.state !== "retired" &&
+      reply.state !== "blocked")
+  )
+    throw new Error("Invalid deal chat pool result acknowledgement")
+  if (reply.nextAt == null) return { state: reply.state }
+  const nextAt = timestamp(reply.nextAt)
+  if (!nextAt) throw new Error("Invalid deal chat pool retry time")
+  return { state: reply.state, nextAtMs: Date.parse(nextAt) }
+}
+
 const ROOM_RPC_FAILURES = new Set([
   "CHAT_ID_INVALID",
   "CHANNEL_INVALID",
@@ -310,7 +338,10 @@ export class DealChatPoolExecutor {
         ? Date.parse(claim.nextAt)
         : now + POOL_RETRY_MS
       return {
-        state: "not_allowed",
+        state:
+          claim.reason === "operator_action_required"
+            ? "blocked"
+            : "not_allowed",
         reason: claim.reason ?? null,
         nextAtMs: this.nextAtMs,
       }
@@ -359,11 +390,12 @@ export class DealChatPoolExecutor {
       // Keep the result in memory. On restart Rust reconciles the action.
       return this.apiUnavailable("worker_receipt_unavailable")
     }
+    let acknowledgement: ResultAcknowledgement
     try {
-      const response =
-        await this.deps.cloud.recordDealChatPoolActionResult(result)
-      if ((response as { accepted?: unknown } | null)?.accepted !== true)
-        throw new Error("Invalid deal chat pool result acknowledgement")
+      acknowledgement = acknowledgementFromCloud(
+        await this.deps.cloud.recordDealChatPoolActionResult(result),
+        result,
+      )
     } catch (error) {
       const code = (error as { refusal?: unknown } | null)?.refusal
       if (
@@ -381,22 +413,27 @@ export class DealChatPoolExecutor {
     }
     if (!this.clearResult())
       return this.apiUnavailable("worker_receipt_unavailable")
-    const nextAtMs = result.retryAt ? Date.parse(result.retryAt) : undefined
+    const { state: committed, nextAtMs } = acknowledgement
     this.nextAtMs = nextAtMs ?? 0
     const state =
-      result.outcome === "succeeded"
-        ? step === "verify"
-          ? "filled"
-          : "progress"
-        : result.outcome === "room_failed"
+      committed === "filled"
+        ? "filled"
+        : committed === "retired"
           ? "failed"
-          : "waiting"
+          : committed === "blocked"
+            ? "blocked"
+            : result.outcome === "succeeded"
+              ? "progress"
+              : "waiting"
     return {
       state,
       ref,
       fillId: result.fillId,
       actionId: result.actionId,
       stage: step,
+      ...(committed === "blocked"
+        ? { reason: "operator_action_required" }
+        : {}),
       ...(result.errorCode ? { error: result.errorCode } : {}),
       ...(nextAtMs === undefined ? {} : { nextAtMs }),
     }
@@ -654,9 +691,12 @@ export class DealChatPoolExecutor {
       now,
     )
     if (hold !== null) throw new NoWrite("hold", hold)
+    const legacyPace = legacy.nextFillMs(accountId)
+    // An old pacing timestamp only informs the next day's schedule. A
+    // longer live Telegram wait is enforced by the hold store above.
     const paced = Math.max(
       spacedAfterMs(queue.lastAddMs(), pacing) ?? 0,
-      legacy.nextFillMs(accountId),
+      legacyPace <= now + 86_400_000 ? legacyPace : 0,
     )
     if (paced > now) throw new NoWrite("paced", paced)
     if (queue.addsToday(now) >= cap.current(now))

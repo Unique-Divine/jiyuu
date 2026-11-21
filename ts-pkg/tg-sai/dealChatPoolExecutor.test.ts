@@ -58,6 +58,7 @@ function fixture(outbox = DealChatPoolOutbox.open(":memory:")) {
   let now = NOW
   const replies: unknown[] = []
   const results: DealChatPoolResult[] = []
+  const acknowledgements: { state: string; nextAt?: string | null }[] = []
   const imports: LegacyDealChatPoolScan[] = []
   const claimKeys: string[] = []
   const telegramJobs: string[] = []
@@ -161,7 +162,18 @@ function fixture(outbox = DealChatPoolOutbox.open(":memory:")) {
           "DEAL_CHAT_POOL_STALE_LEASE",
         )
       }
-      return { accepted: true }
+      return {
+        accepted: true,
+        fillId: result.fillId,
+        actionId: result.actionId,
+        state: result.verifiedAt
+          ? "filled"
+          : result.outcome === "room_failed"
+            ? "retired"
+            : "pending",
+        nextAt: result.retryAt,
+        ...acknowledgements.shift(),
+      }
     },
   }
   const run = (holds = HoldStore.fromDb(db)) =>
@@ -190,6 +202,7 @@ function fixture(outbox = DealChatPoolOutbox.open(":memory:")) {
     queue,
     replies,
     results,
+    acknowledgements,
     imports,
     claimKeys,
     telegramJobs,
@@ -419,6 +432,78 @@ describe("Rust-managed deal chat pool executor", () => {
       botRights: { addAdmins: true, manageCall: true },
     })
     expect(f.writes).toEqual(["history", "photo"])
+  })
+
+  test("reports retirement when a successful verification lost the room", async () => {
+    const f = fixture()
+    f.setMember({ role: "admin", rights: { ...POOL_BOT_RIGHTS } })
+    const read = f.adapter.chatInfo!
+    f.adapter.chatInfo = async (id) => ({
+      ...(await read(id)),
+      hiddenHistory: false,
+    })
+    f.replies.push(claim("verify"))
+    f.acknowledgements.push({ state: "retired", nextAt: null })
+    const tick = await f.run().tick()
+    expect(f.results[0]?.outcome).toBe("succeeded")
+    expect(tick.state).toBe("failed")
+    expect(f.writes).toEqual([])
+  })
+
+  test("reports operator action when a read-only create lookup becomes blocked", async () => {
+    const f = fixture()
+    f.replies.push(claim("create", true))
+    f.acknowledgements.push({ state: "blocked", nextAt: null })
+    const pool = await f.run().tick()
+    expect(pool).toMatchObject({
+      state: "blocked",
+      reason: "operator_action_required",
+      stage: "create",
+      fillId: "7",
+    })
+    expect(
+      managedPoolHealth(
+        {
+          pool,
+          results: [],
+          dryRun: false,
+          requesterWork: false,
+          nextAfter: null,
+        },
+        undefined,
+        new Date(NOW).toISOString(),
+      ),
+    ).toMatchObject({
+      state: "unavailable",
+      reason: "operator_action_required",
+      step: "create",
+    })
+    expect(f.results[0]?.outcome).toBe("not_found")
+    expect(f.writes).toEqual([])
+  })
+
+  test("uses the acknowledged retry time rather than the local request", async () => {
+    const f = fixture()
+    f.adapter.create = async () => {
+      throw { code: 420, text: "FLOOD_WAIT_600" }
+    }
+    f.replies.push(claim("create"))
+    const next = NOW + 120_000
+    f.acknowledgements.push({
+      state: "pending",
+      nextAt: new Date(next).toISOString(),
+    })
+    const tick = await f.run().tick()
+    expect(tick.nextAtMs).toBe(next)
+    expect(Date.parse(f.results[0]!.retryAt!)).toBeGreaterThan(next)
+  })
+
+  test("a long legacy pacing delay does not prevent managed catch-up", async () => {
+    const f = fixture()
+    f.journal.paceFill(ACCOUNT, NOW + 2 * 86_400_000)
+    f.replies.push(claim("create"))
+    expect((await f.run().tick()).state).toBe("progress")
+    expect(f.writes).toEqual(["create"])
   })
 
   test("an unreadable local hold store refuses before a Telegram write", async () => {
