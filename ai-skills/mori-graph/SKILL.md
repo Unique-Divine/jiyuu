@@ -38,6 +38,7 @@ on Mori itself.
 | Who calls X? | `trace_path(direction="inbound")` |
 | What does X call? | `trace_path(direction="outbound")` |
 | Find a symbol | `search_graph(name_pattern=".*Name.*")`, then `get_code_snippet` |
+| Find the lexicon term that references a symbol | `query_graph` on `MENTIONS` from `Section` to the symbol. See [Graph Links](../lexicon-domain-lang/references/graph.md). |
 | Exact text | `search_code` |
 | Calls between services or repos | `query_graph` with Cypher on `HTTP_CALLS`, `GRAPHQL_CALLS`, `CROSS_*` |
 | Effect of local changes | `detect_changes()` |

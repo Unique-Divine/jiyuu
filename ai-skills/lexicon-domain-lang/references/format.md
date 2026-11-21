@@ -14,14 +14,17 @@ Ordering receives customer orders and tracks them until delivery.
 
 ## Terms
 
-**Order**:
-A customer's request to buy one or more items.
-_Avoid_: purchase, transaction
+### Order
 
-**Delivered**:
+A customer's request to buy one or more items.
+_See_ Rust struct `src/orders.rs::Order`.
+
+### Delivered
+
 The carrier confirmed handover to the customer.
-_Avoid_: shipped, completed
-_See_: [delivery states](docs/delivery.md)
+_Avoid_ Shipped, completed
+
+_See_ [Delivery states](docs/delivery.md)
 
 ## Never Say
 
@@ -38,11 +41,12 @@ _See_: [delivery states](docs/delivery.md)
   - `Children`: lexicons in subdirectories.
   - `Related`: lexicons of other contexts, each with the shared term and one
     line on how the two contexts relate.
-- **Terms.** One entry per concept:
-  - `**Term**:` then one or two sentences saying what the thing is.
-  - `_Avoid_:` the other words people use for it. Optional.
-  - `_See_:` links to the specs, ADRs, or docs that explain or decide it,
-    each with a few words on what it holds. Optional.
+- **Terms.** Give each canonical concept its own heading under `## Terms`.
+  Follow it with one or two sentences defining the concept.
+  - `_Also called_` lists genuine aliases. Optional.
+  - `_Avoid_` lists familiar wording the project discourages. Optional.
+  - `_See_` links to specs, ADRs, docs, or source symbols. For source
+    references that resolve in the code graph, see [Graph Links](graph.md).
   - `_Overrides_:` a link to the parent lexicon, when this context gives a
     parent's term a different meaning. Optional and rare.
 - **Never Say.** Words ruled out that have no single replacement, each with
@@ -50,14 +54,15 @@ _See_: [delivery states](docs/delivery.md)
 
 ## Rules
 
-- **One word per idea.** Pick the best word; list the rest under `_Avoid_`.
+- **One heading per idea.** Put aliases in the entry body. Give two distinct
+  concepts separate headings even when one is a kind of the other.
 - **Define what it is, not how it works.** One or two sentences.
 - **Project terms only.** A general programming word belongs only if the
   project gives it a specific meaning.
 - **No implementation detail.** No line numbers, signatures, or algorithms.
   Put those behind a `_See_` link.
-- **Group when clusters appear.** Use `###` subheadings under `## Terms` once
-  a file passes about ten terms. A short file stays flat.
+- **Use H3 for terms in a flat lexicon.** If groups help readers scan a longer
+  lexicon, use H3 for groups and H4 for individual terms.
 - **Sort for the reader.** Order terms so each builds on the ones above it;
   alphabetical order is a fallback.
 - **Keep it short.** A lexicon is read at the start of many tasks. Remove a

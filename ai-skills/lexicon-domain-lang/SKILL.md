@@ -12,6 +12,9 @@ call them. This is the "ubiquitous language" of domain-driven design.
 
 Read [format.md](references/format.md) before creating or editing a
 `LEXICON.md`.
+Use one heading per canonical term. When a source symbol implements or stores
+the concept, add a qualified reference under _See_. For graph navigation and
+verification, read [Graph Links](references/graph.md).
 
 ## Which Lexicons Apply
 
