@@ -7518,7 +7518,8 @@ TEST(cli_durable_profiles_follow_current_vendor_paths) {
                !strstr(profile, "delete_project") && !strstr(profile, "manage_adr");
     free(profile);
     snprintf(path, sizeof(path), "%s/prompts/codebase-memory.md", vibe_home);
-    files_ok = files_ok && test_file_contains_all(path, graph_terms, 3U);
+    const char *const prompt_terms[] = {"mori-graph", "search_graph", "trace_path"};
+    files_ok = files_ok && test_file_contains_all(path, prompt_terms, 3U);
     snprintf(path, sizeof(path), "%s/skills/codebase-memory/SKILL.md", grok_home);
     files_ok = files_ok && test_file_contains_all(path, graph_terms, 3);
     snprintf(path, sizeof(path), "%s/agents/codebase-memory.md", grok_home);
