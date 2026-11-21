@@ -1490,14 +1490,24 @@ bool cbm_hook_augment_is_graph_tool(const char *tool) {
     if (!tool || strncmp(tool, mcp_prefix, sizeof(mcp_prefix) - 1U) != 0) {
         return false;
     }
+    const char *server = tool + sizeof(mcp_prefix) - 1U;
+    const char *separator = strstr(server, "__");
+    if (!separator || !separator[2]) {
+        return false;
+    }
+    static const char plugin_prefix[] = "plugin_";
+    size_t server_len = (size_t)(separator - server);
+    bool plugin = strncmp(server, plugin_prefix, sizeof(plugin_prefix) - 1U) == 0;
     for (size_t i = 0U; i < CBM_MCP_SERVER_KEY_COUNT; i++) {
         size_t key_len = strlen(keys[i]);
-        /* Start at the '_' before the server name so at[-1] is in bounds. */
-        for (const char *at = strstr(tool + sizeof(mcp_prefix) - 1U, keys[i]); at;
-             at = strstr(at + 1, keys[i])) {
-            if (at[-1] == '_' && strncmp(at + key_len, "__", 2U) == 0) {
-                return true;
-            }
+        if (server_len == key_len && memcmp(server, keys[i], key_len) == 0) {
+            return true;
+        }
+        /* A plugin namespace has a nonempty plugin name before the server key. */
+        if (plugin && server_len > sizeof(plugin_prefix) + key_len &&
+            *(separator - key_len - 1) == '_' &&
+            memcmp(separator - key_len, keys[i], key_len) == 0) {
+            return true;
         }
     }
     return false;

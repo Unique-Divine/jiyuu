@@ -2721,8 +2721,12 @@ TEST(cli_hook_augment_is_graph_tool_accepts_both_keys) {
     ASSERT_TRUE(cbm_hook_augment_is_graph_tool(
         "mcp__plugin_codebase-memory-mcp_codebase-memory-mcp__search_graph"));
     ASSERT_FALSE(cbm_hook_augment_is_graph_tool("mcp__other__search"));
+    ASSERT_FALSE(cbm_hook_augment_is_graph_tool("mcp__other__mori-graph__search"));
+    ASSERT_FALSE(cbm_hook_augment_is_graph_tool("mcp__other_mori-graph__search"));
+    ASSERT_FALSE(cbm_hook_augment_is_graph_tool("mcp__plugin__mori-graph__search"));
     ASSERT_FALSE(cbm_hook_augment_is_graph_tool("mcp__not-mori-graph__search"));
     ASSERT_FALSE(cbm_hook_augment_is_graph_tool("mcp__mori-graph-extra__search"));
+    ASSERT_FALSE(cbm_hook_augment_is_graph_tool("mcp__mori-graph__"));
     ASSERT_FALSE(cbm_hook_augment_is_graph_tool("mori-graph__search_graph"));
     ASSERT_FALSE(cbm_hook_augment_is_graph_tool("Grep"));
     ASSERT_FALSE(cbm_hook_augment_is_graph_tool(NULL));
