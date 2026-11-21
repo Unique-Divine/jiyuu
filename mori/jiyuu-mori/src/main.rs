@@ -12,6 +12,9 @@
 #[cfg(all(feature = "c-backend", not(test)))]
 mod ffi;
 
+#[cfg(any(feature = "c-backend", test))]
+mod gqlgen;
+
 #[cfg(not(feature = "c-backend"))]
 fn main() {
     eprintln!(
