@@ -641,6 +641,19 @@ fn index_through_worker_reexec_matches_c() {
             "project": project, "qn_pattern": r"\.helper$", "file_pattern": "**/app.py",
             "max_output_tokens": 128
         }).to_string();
+        let ranked_search = serde_json::json!({
+            "project": project, "query": "helper", "format": "json"
+        })
+        .to_string();
+        let ranked_page = serde_json::json!({
+            "project": project, "query": "helper", "file_pattern": "**/app.py",
+            "label": "Function", "limit": 1, "offset": 1, "max_output_tokens": 128
+        })
+        .to_string();
+        let no_rank_tokens = serde_json::json!({
+            "project": project, "query": "!!!", "name_pattern": "^h", "format": "json"
+        })
+        .to_string();
         let search_invalid = serde_json::json!({
             "project": project, "name_pattern": "["
         })
@@ -716,6 +729,9 @@ fn index_through_worker_reexec_matches_c() {
             vec!["cli", "get_file_outline", &outline_end],
             vec!["cli", "search_graph", &search_page],
             vec!["cli", "search_graph", &search_path],
+            vec!["cli", "search_graph", &ranked_search],
+            vec!["cli", "search_graph", &ranked_page],
+            vec!["cli", "search_graph", &no_rank_tokens],
             vec![
                 "cli",
                 "query_graph",

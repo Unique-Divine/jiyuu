@@ -26,6 +26,38 @@ type PatternReader = unsafe extern "C" fn(
     ReportError,
 ) -> c_int;
 
+#[repr(C)]
+struct RankFilters {
+    fts_query: *const c_char,
+    project: *const c_char,
+    file_like: *const c_char,
+    label: *const c_char,
+    kind: *const c_char,
+    namespace: *const c_char,
+    label_weight: f64,
+}
+
+#[repr(C)]
+struct RankRequest {
+    rank_sql: *const c_char,
+    count_sql: *const c_char,
+    probe_sql: *const c_char,
+    filters: *const RankFilters,
+    exact_query: *const c_char,
+    limit: c_int,
+    offset: c_int,
+    candidate_limit: c_int,
+}
+
+type RankReader = unsafe extern "C" fn(
+    *mut sqlite3,
+    *const RankRequest,
+    *mut c_int,
+    *mut bool,
+    *mut c_void,
+    EmitRow,
+) -> bool;
+
 struct Statement(*mut sqlite3_stmt);
 
 impl Statement {
@@ -40,21 +72,30 @@ impl Statement {
         (status == ffi::SQLITE_OK && !stmt.is_null()).then(|| Self(stmt))
     }
 
-    // The caller owns each value until the prepared statement is finalized.
-    unsafe fn bind_texts(&self, values: &[*const c_char]) {
-        for (index, value) in values.iter().enumerate() {
-            // SAFETY: SQLite reads NUL-terminated strings from the native plan
-            // and copies them. Binding null has the same semantics as native.
-            unsafe {
-                ffi::sqlite3_bind_text(
-                    self.0,
-                    index as c_int + 1,
-                    *value,
-                    -1,
-                    ffi::SQLITE_TRANSIENT(),
-                );
-            }
+    // The caller lends a NUL-terminated string, or NULL for a SQL NULL.
+    unsafe fn bind_text(&self, index: c_int, value: *const c_char) {
+        // SAFETY: SQLite copies the native plan's string before returning.
+        unsafe {
+            ffi::sqlite3_bind_text(
+                self.0,
+                index,
+                value,
+                -1,
+                ffi::SQLITE_TRANSIENT(),
+            );
         }
+    }
+
+    unsafe fn bind_texts(&self, binds: &[*const c_char]) {
+        for (index, value) in binds.iter().enumerate() {
+            // SAFETY: The native plan lends its bound values for the query.
+            unsafe { self.bind_text(index as c_int + 1, *value) };
+        }
+    }
+
+    fn bind_int(&self, index: c_int, value: c_int) {
+        // SAFETY: Self owns a live SQLite statement.
+        unsafe { ffi::sqlite3_bind_int(self.0, index, value) };
     }
 
     fn step(&self) -> c_int {
@@ -116,12 +157,132 @@ unsafe extern "C" fn read_pattern(
     })
 }
 
+// Parameter positions shared by the native BM25 statements. The count uses
+// slot 3 for its candidate window, while the page uses slot 5.
+const QUERY: c_int = 1;
+const PROJECT: c_int = 2;
+const LIMIT: c_int = 3;
+const OFFSET: c_int = 4;
+const WINDOW: c_int = 5;
+const FILE: c_int = 6;
+const LABEL: c_int = 7;
+const EXACT: c_int = 8;
+const KIND: c_int = 9;
+const NAMESPACE: c_int = 10;
+const LABEL_WEIGHT: c_int = 11;
+const ALL_CANDIDATES: c_int = -1;
+
+unsafe fn present(value: *const c_char) -> bool {
+    // SAFETY: The native plan stores either NULL or a valid C string.
+    !value.is_null() && unsafe { *value != 0 }
+}
+
+impl RankFilters {
+    unsafe fn bind(&self, stmt: &Statement) {
+        // SAFETY: The request lends these strings through finalization.
+        unsafe {
+            stmt.bind_text(QUERY, self.fts_query);
+            stmt.bind_text(PROJECT, self.project);
+            for (index, value) in [
+                (FILE, self.file_like),
+                (LABEL, self.label),
+                (KIND, self.kind),
+                (NAMESPACE, self.namespace),
+            ] {
+                stmt.bind_text(
+                    index,
+                    if present(value) { value } else { ptr::null() },
+                );
+            }
+            ffi::sqlite3_bind_double(stmt.0, LABEL_WEIGHT, self.label_weight);
+        }
+    }
+}
+
+unsafe fn count_candidates(
+    db: *mut sqlite3,
+    sql: *const c_char,
+    filters: &RankFilters,
+    window: c_int,
+) -> c_int {
+    // SAFETY: The native request lends the connection, SQL, and filters.
+    unsafe {
+        let Some(count) = Statement::prepare(db, sql) else {
+            return 0;
+        };
+        filters.bind(&count);
+        count.bind_int(LIMIT, window);
+        if count.step() == ffi::SQLITE_ROW {
+            ffi::sqlite3_column_int(count.0, 0)
+        } else {
+            0
+        }
+    }
+}
+
+unsafe extern "C" fn read_ranked(
+    db: *mut sqlite3,
+    request: *const RankRequest,
+    total: *mut c_int,
+    window_saturated: *mut bool,
+    context: *mut c_void,
+    emit: EmitRow,
+) -> bool {
+    // SAFETY: The native caller provides a live connection, request, output
+    // pointers, and bounded row collector. We finalize before returning.
+    unsafe {
+        let request = &*request;
+        let filters = &*request.filters;
+        let Some(ranked) = Statement::prepare(db, request.rank_sql) else {
+            // Older or lean databases can lack the FTS table.
+            return false;
+        };
+        let saturated =
+            Statement::prepare(db, request.probe_sql).is_none_or(|probe| {
+                probe.bind_text(QUERY, filters.fts_query);
+                probe.bind_int(2, request.candidate_limit);
+                probe.step() != ffi::SQLITE_DONE
+            });
+        let has_post_filter = !filters.file_like.is_null()
+            || present(filters.kind)
+            || present(filters.namespace);
+        let mut window = if saturated && has_post_filter {
+            ALL_CANDIDATES
+        } else {
+            request.candidate_limit
+        };
+        *total = count_candidates(db, request.count_sql, filters, window);
+        if saturated && *total == 0 && window != ALL_CANDIDATES {
+            window = ALL_CANDIDATES;
+            *total = count_candidates(db, request.count_sql, filters, window);
+        }
+        *window_saturated = saturated && window != ALL_CANDIDATES;
+
+        filters.bind(&ranked);
+        ranked.bind_int(LIMIT, request.limit);
+        ranked.bind_int(OFFSET, request.offset);
+        ranked.bind_int(WINDOW, window);
+        ranked.bind_text(EXACT, request.exact_query);
+        for _ in 0..request.limit {
+            if ranked.step() != ffi::SQLITE_ROW {
+                break;
+            }
+            emit(context, ranked.0);
+        }
+        true
+    }
+}
+
 unsafe extern "C" {
     fn cbm_store_set_pattern_search_reader(reader: PatternReader);
+    fn cbm_mcp_set_rank_search_reader(reader: RankReader);
 }
 
 /// Register during process startup, before native worker threads can start.
 pub(crate) unsafe fn register() {
     // SAFETY: The registered function lives for the process lifetime.
-    unsafe { cbm_store_set_pattern_search_reader(read_pattern) };
+    unsafe {
+        cbm_store_set_pattern_search_reader(read_pattern);
+        cbm_mcp_set_rank_search_reader(read_ranked);
+    }
 }
