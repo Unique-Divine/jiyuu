@@ -50,7 +50,7 @@ fi
 # docs/llms.txt, pkg/npm/README.md, scripts/package-release.sh and server.json;
 # section 4 below still fails if any of them states a count again unregistered.
 SURFACES=(
-    README.upstream.md
+    README.md
 )
 
 # Files that legitimately say "<N> languages" about something OTHER than the

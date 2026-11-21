@@ -11,7 +11,8 @@ cdfdf26483fa56f4f7d9d85e7c4c3924133b458b without Git history.
 Modified by Unique Divine in 2026. Changes include fetching the vendored
 Tree-sitter grammars at build time from a sha256-pinned archive instead of
 committing them, removing upstream CI, package-publishing wrappers and
-installers, test adjustments for those removals, build recipes and
+installers, removing upstream's project documents and website, test
+adjustments for those removals, build recipes, release automation and
 documentation.
 
 The original MIT License, with its copyright notice, is reproduced in LICENSE.

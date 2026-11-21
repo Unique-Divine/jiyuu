@@ -1,4 +1,7 @@
-# CBM Lens Beta README captures
+# Graph UI Captures
+
+The graph UI was called CBM Lens Beta upstream, and the captures below were
+made there, before Mori imported the code.
 
 These are screenshots and browser recordings of the real application using public source from this repository. The application data and text were not retouched. The GIFs were refreshed on 20 October 2026; the still images preserve the earlier captures from 12–13 October.
 
@@ -10,7 +13,7 @@ These are screenshots and browser recordings of the real application using publi
 - Capture: built-in browser screenshots on macOS, English locale, native viewport **1600 × 1000**, **12 frames per second**
 - Encoding: JPEG screenshot frames converted to GIF with one 256-color palette per recording, no dithering, infinite looping; no upscaling, sharpening or pointer overlays
 
-The `v0.0.1` label is the frontend package version, not the backend release version. Standard native releases include Lens; using a source build for these recordings is a capture-provenance detail, not an installation requirement.
+The `v0.0.1` label is the frontend package version, not the backend release version. Mori's release binaries embed the UI; see the [README](../../README.md#graph-ui).
 
 ### Data and interaction
 
@@ -24,7 +27,7 @@ The index reported 81,190 nodes and 411,072 edges. These counts describe this so
 | [lens-galaxy.gif](lens-galaxy.gif) | 12 seconds | Expanding outgoing relationships around `cbm_arena_alloc`, switching to the hierarchy and tracing the two-hop call path `cbm_arena_alloc → arena_grow → cbm_alloc`. |
 | [lens-chat.gif](lens-chat.gif) | 11.5 seconds | `arena_grow` selected in Galaxy, with caller and callee questions answered directly from the indexed graph. |
 
-All three GIFs are 1600 × 1000. Their frames and playback duration were decoded and checked after export. README and website use these same files.
+All three GIFs are 1600 × 1000. Their frames and playback duration were decoded and checked after export. Mori's README uses these same files.
 
 ### Local chat check
 
@@ -34,7 +37,7 @@ The optional Qwen2.5 Coder 0.5B model was downloaded and loaded through the appl
 
 Bernhard Jackiewicz captured the PNG stills on 12 October 2026, from commit `4d9592b5` on `main` after [PR #2068](https://github.com/DeusData/codebase-memory-mcp/pull/2068). The build used `scripts/build.sh --with-ui`; headless Chromium on macOS used English locale, a 1440 × 900 viewport and device scale factor 1. Experimental agent activity was disabled.
 
-The indexed project was a public `git archive` export of that commit in `full` mode, with 75,037 nodes and 361,349 edges. The PNG stills are 1440 × 900, except the chat still at 1440 × 1200 so the explanation and answer fit together. These are historical application views, also used as reduced-motion alternatives on the website; they are not extracted from the new GIFs.
+The indexed project was a public `git archive` export of that commit in `full` mode, with 75,037 nodes and 361,349 edges. The PNG stills are 1440 × 900, except the chat still at 1440 × 1200 so the explanation and answer fit together. These are historical application views; they are not extracted from the new GIFs.
 
 | Still | What it shows |
 |-------|---------------|
@@ -45,7 +48,7 @@ The indexed project was a public `git archive` export of that commit in `full` m
 
 ## Refreshed still images: 13 October
 
-`lens-explore.jpg` and `lens-galaxy.jpg` are unedited browser captures at 1280 × 720 from the locally served CBM Lens Beta UI. The running binary reports `dev`; its exact build commit is unavailable, so these captures do not certify an exact source revision. The local project is named `cbm-triage-main-20260919`; the screenshots show public CBM source and indexed relationships.
+`lens-explore.jpg` and `lens-galaxy.jpg` are unedited browser captures at 1280 × 720 from the locally served CBM Lens Beta UI. The running binary reports `dev`; its exact build commit is unavailable, so these captures do not certify an exact source revision. The local project is named `cbm-triage-main-20260919`; the screenshots show public upstream source and indexed relationships.
 
 - **[Explore](lens-explore.jpg):** `src/foundation/limits.c`, its compact file impact summary and direct dependencies (24 nodes, 26 edges). The UI's freshness, sampling and coverage notices remain visible.
 - **[Galaxy](lens-galaxy.jpg):** `cbm_max_file_bytes`, both directions, all edge types, two layers (160 nodes, 218 edges).

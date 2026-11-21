@@ -7,6 +7,7 @@
 #include "cli/agent_clients.h"
 #include "cli/agent_profiles.h"
 #include "cli/cli.h"
+#include "cli/mori_names.h"
 #include "cli/activation_transaction.h"
 #include "cli/config_edit_path.h"
 #include "cli/config_json_like.h"
@@ -245,7 +246,7 @@ static const char CLI_ACTIVATION_BUSY_MESSAGE[] =
     "error: active CBM sessions and operations could not be stopped safely; "
     "no activation was committed.\n"
     "error: something is still using CBM. If an editor or agent is running an "
-    "MCP server, close it and retry; 'codebase-memory-mcp daemon status' lists "
+    "MCP server, close it and retry; 'mori daemon status' lists "
     "the holders when a cbm binary is still installed.";
 static const char CLI_ACTIVATION_REFUSED_MESSAGE[] =
     "error: activation could not reserve exclusive access; no activation was "
@@ -675,7 +676,7 @@ static cli_activation_scope_t cli_activation_scope_unconfirmed(
                "serve the cache it targets (%s).\n",
                action, reason);
     }
-    printf("If it is yours, close its CBM sessions and run `codebase-memory-mcp daemon stop` "
+    printf("If it is yours, close its CBM sessions and run `mori daemon stop` "
            "to stop it yourself.\n");
     (void)fflush(stdout);
     return CLI_ACTIVATION_SCOPE_UNCONFIRMED;
@@ -8224,7 +8225,7 @@ int cbm_cmd_config(int argc, char **argv) {
      * inner `argv &&` shielded only the help comparison) and dereferenced
      * argv[0] below -- caught by the clang-analyzer lane. */
     if (argc == 0 || !argv || strcmp(argv[0], "--help") == 0 || strcmp(argv[0], "-h") == 0) {
-        printf("Usage: codebase-memory-mcp config <command> [args]\n\n");
+        printf("Usage: mori config <command> [args]\n\n");
         printf("Commands:\n");
         printf("  list             Show all config values\n");
         printf("  get <key>        Get a config value\n");
@@ -8590,181 +8591,6 @@ int cbm_cli_checksum_manifest_digest(const char *manifest_path, const char *arch
     memcpy(out, selected, sizeof(selected));
     return CLI_OK;
 }
-
-/* ── Download helper (shell-free curl via exec) ───────────────── */
-
-#ifdef CBM_CLI_ENABLE_TEST_API
-static bool cli_download_is_explicit_file_override(const char *url) {
-    char override_buffer[CLI_BUF_512];
-    const char *override =
-        cbm_safe_getenv("CBM_DOWNLOAD_URL", override_buffer, sizeof(override_buffer), NULL);
-    if (!url || !override || strncmp(override, "file://", 7) != 0) {
-        return false;
-    }
-    size_t override_length = strlen(override);
-    return override_length > 0 && strncmp(url, override, override_length) == 0 &&
-           (url[override_length] == '\0' || url[override_length] == '/' ||
-            override[override_length - 1U] == '/');
-}
-
-static const char *cli_download_protocol(const char *url) {
-    if (url && strncmp(url, "https://", 8) == 0) {
-        return "=https";
-    }
-    if (url && strncmp(url, "file://", 7) == 0 && cli_download_is_explicit_file_override(url)) {
-        return "=file";
-    }
-    return NULL;
-}
-
-/* Download primitives: update was their only caller. */
-static int cbm_download_to_file(const char *url, const char *dest) {
-    const char *protocol = cli_download_protocol(url);
-    if (!protocol || !dest) {
-        (void)fprintf(stderr, "error: update downloads require HTTPS (file:// is "
-                              "reserved for an explicit CBM_DOWNLOAD_URL test "
-                              "override)\n");
-        return CLI_TRUE;
-    }
-    const char *argv[] = {"curl",    "-fSL",   "--progress-bar",
-                          "--proto", protocol, "--proto-redir",
-                          protocol,  "-o",     dest,
-                          url,       NULL};
-    return cbm_exec_no_shell(argv);
-}
-
-static int cbm_download_to_file_quiet(const char *url, const char *dest) {
-    const char *protocol = cli_download_protocol(url);
-    if (!protocol || !dest) {
-        (void)fprintf(stderr, "error: checksum downloads require HTTPS (file:// is "
-                              "reserved for an explicit CBM_DOWNLOAD_URL test "
-                              "override)\n");
-        return CLI_TRUE;
-    }
-    const char *argv[] = {"curl",   "-fsSL", "--proto", protocol, "--proto-redir",
-                          protocol, "-o",    dest,      url,      NULL};
-    return cbm_exec_no_shell(argv);
-}
-
-#endif /* CBM_CLI_ENABLE_TEST_API */
-
-/* ── macOS ad-hoc signing ─────────────────────────────────────── */
-
-#ifdef __APPLE__
-static int cbm_macos_adhoc_sign(const char *binary_path) {
-    /* Remove quarantine xattr (best effort — may not exist) */
-    const char *xattr_argv[] = {"/usr/bin/xattr", "-d", "com.apple.quarantine", binary_path, NULL};
-    (void)cbm_exec_no_shell(xattr_argv);
-
-    /* Ad-hoc sign (required for arm64, harmless for x86_64) */
-    const char *sign_argv[] = {"/usr/bin/codesign", "--sign", "-", "--force", binary_path, NULL};
-    return cbm_exec_no_shell(sign_argv);
-}
-#endif
-
-#ifdef CBM_CLI_ENABLE_TEST_API
-/* Download checksums.txt and verify the archive integrity. Every non-zero
- * result is a fail-closed refusal; verification is never optional. */
-static int verify_download_checksum(const char *archive_path, const char *archive_name) {
-    char checksum_file[CLI_BUF_256];
-    int checksum_path_length =
-        snprintf(checksum_file, sizeof(checksum_file), "%s/cbm-checksums-XXXXXX", cbm_tmpdir());
-    if (checksum_path_length <= 0 || (size_t)checksum_path_length >= sizeof(checksum_file)) {
-        return CLI_ERR;
-    }
-    int checksum_descriptor = cbm_mkstemp(checksum_file);
-    if (checksum_descriptor < 0) {
-        return CLI_ERR;
-    }
-#ifdef _WIN32
-    int checksum_close_status = _close(checksum_descriptor);
-#else
-    int checksum_close_status = close(checksum_descriptor);
-#endif
-    if (checksum_close_status != 0) {
-        cbm_unlink(checksum_file);
-        return CLI_ERR;
-    }
-
-    char dl_base_buf[CLI_BUF_512];
-    const char *dl_base =
-        cbm_safe_getenv("CBM_DOWNLOAD_URL", dl_base_buf, sizeof(dl_base_buf), NULL);
-    char checksum_url[CLI_BUF_512];
-    int checksum_url_length;
-    if (dl_base && dl_base[0]) {
-        checksum_url_length =
-            snprintf(checksum_url, sizeof(checksum_url), "%s/checksums.txt", dl_base);
-    } else {
-        checksum_url_length =
-            snprintf(checksum_url, sizeof(checksum_url), "%s",
-                     "https://github.com/DeusData/codebase-memory-mcp/releases/latest/"
-                     "download/checksums.txt");
-    }
-    if (checksum_url_length <= 0 || (size_t)checksum_url_length >= sizeof(checksum_url)) {
-        cbm_unlink(checksum_file);
-        return CLI_ERR;
-    }
-    int rc = cbm_download_to_file_quiet(checksum_url, checksum_file);
-    if (rc != 0) {
-        (void)fprintf(stderr, "error: could not download checksums.txt for mandatory "
-                              "verification\n");
-        cbm_unlink(checksum_file);
-        return CLI_ERR;
-    }
-
-    char expected[SHA256_BUF_SIZE] = {0};
-    int manifest_status =
-        cbm_cli_checksum_manifest_digest(checksum_file, archive_name, expected, sizeof(expected));
-    cbm_unlink(checksum_file);
-    if (manifest_status != CLI_OK) {
-        (void)fprintf(stderr,
-                      "error: checksums.txt has no single valid SHA-256 entry "
-                      "for exact artifact %s\n",
-                      archive_name);
-        return CLI_ERR;
-    }
-
-    char actual[SHA256_BUF_SIZE] = {0};
-    if (cbm_cli_sha256_file(archive_path, actual, sizeof(actual)) != 0) {
-        (void)fprintf(stderr, "error: could not compute archive checksum\n");
-        return CLI_ERR;
-    }
-
-    if (strcmp(expected, actual) != 0) {
-        (void)fprintf(stderr, "error: CHECKSUM MISMATCH — downloaded binary may be compromised!\n");
-        (void)fprintf(stderr, "  expected: %s\n", expected);
-        (void)fprintf(stderr, "  actual:   %s\n", actual);
-        return CLI_TRUE;
-    }
-
-    printf("Checksum verified: %s\n", actual);
-    return 0;
-}
-
-#endif /* CBM_CLI_ENABLE_TEST_API */
-
-/* ── Detect OS/arch for download URL ──────────────────────────── */
-
-#ifdef CBM_CLI_ENABLE_TEST_API
-static const char *detect_os(void) {
-#ifdef _WIN32
-    return "windows";
-#elif defined(__APPLE__)
-    return "darwin";
-#else
-    return "linux";
-#endif
-}
-
-static const char *detect_arch(void) {
-#if defined(__aarch64__) || defined(_M_ARM64)
-    return "arm64";
-#else
-    return "amd64";
-#endif
-}
-
-#endif /* CBM_CLI_ENABLE_TEST_API */
 
 /* ── Agent config install/refresh (shared by install + update) ── */
 
@@ -9792,12 +9618,13 @@ static cbm_graph_access_t cbm_tiered_profile_set_access(cbm_tiered_profile_set_t
 }
 
 /* Every earlier rendering of one tier's profile that install/uninstall must
- * still recognise as ours: the other access mode, the v0.9.1-rc.1 Codex
- * shape, the pre-tier Verify file, and the v0.10.8 OpenCode shape (#2264). */
+ * still recognise as ours: the other access mode, both access modes under the
+ * names used before the Mori rename, the v0.9.1-rc.1 Codex shape, the
+ * pre-tier Verify file, and the v0.10.8 OpenCode shape (#2264). */
 typedef struct {
-    char *owned[4];
+    char *owned[6];
     size_t owned_count;
-    const char *content[5];
+    const char *content[7];
     size_t count;
 } tiered_released_profiles_t;
 
@@ -9817,6 +9644,12 @@ static void tiered_released_profiles_collect(cbm_tiered_profile_set_t profiles,
     tiered_released_profiles_keep(
         released,
         cbm_render_graph_profile(profiles.dialect, tier, alternate_access, profiles.binary_path));
+    tiered_released_profiles_keep(
+        released,
+        cbm_render_graph_profile_legacy(profiles.dialect, tier, access, profiles.binary_path));
+    tiered_released_profiles_keep(released, cbm_render_graph_profile_legacy(profiles.dialect, tier,
+                                                                            alternate_access,
+                                                                            profiles.binary_path));
     if (profiles.dialect == CBM_GRAPH_DIALECT_CODEX && access == CBM_GRAPH_ACCESS_DIRECT) {
         tiered_released_profiles_keep(released, cbm_render_graph_profile_codex_rc1(tier));
     }
@@ -9940,11 +9773,20 @@ static void install_tiered_profile_prompts(const char *label, const char *verify
             record_agent_config_error(false, label, "prompt_render", path);
             continue;
         }
-        const char *released[] = {legacy_verify_content};
-        size_t released_count = tier == CBM_GRAPH_TIER_VERIFY && legacy_verify_content ? 1U : 0U;
+        /* The prompt as releases before the Mori rename wrote it is ours too. */
+        char *legacy = cbm_render_graph_prompt_legacy(tier, access);
+        const char *released[2];
+        size_t released_count = 0U;
+        if (legacy) {
+            released[released_count++] = legacy;
+        }
+        if (tier == CBM_GRAPH_TIER_VERIFY && legacy_verify_content) {
+            released[released_count++] = legacy_verify_content;
+        }
         int result = prepare_config_parent(path)
                          ? cbm_text_migrate_owned_document(path, current, released, released_count)
                          : CLI_ERR;
+        free(legacy);
         free(current);
         if (result != CLI_OK) {
             if (result > CLI_OK) {
@@ -9977,9 +9819,17 @@ static void uninstall_tiered_profile_prompts(const char *label, const char *veri
             record_agent_config_error(true, label, "prompt_render", path);
             continue;
         }
-        const char *released[] = {legacy_verify_content};
-        size_t released_count = tier == CBM_GRAPH_TIER_VERIFY && legacy_verify_content ? 1U : 0U;
+        char *legacy = cbm_render_graph_prompt_legacy(tier, access);
+        const char *released[2];
+        size_t released_count = 0U;
+        if (legacy) {
+            released[released_count++] = legacy;
+        }
+        if (tier == CBM_GRAPH_TIER_VERIFY && legacy_verify_content) {
+            released[released_count++] = legacy_verify_content;
+        }
         int result = cbm_text_remove_owned_document_any(path, current, released, released_count);
+        free(legacy);
         free(current);
         if (result < CLI_OK) {
             record_agent_config_error(true, label, "prompt_uninstall", path);
@@ -11669,16 +11519,6 @@ static int cbm_install_agent_configs_in_scope(const char *home, const char *bina
     return g_agent_install_errors == 0 ? CLI_OK : CLI_ERR;
 }
 
-static int cbm_install_agent_configs_with_previous(const char *home, const char *binary_path,
-                                                   const char *previous_managed_binary_path,
-                                                   bool force, bool dry_run) {
-    const char *saved = g_previous_managed_mcp_command;
-    g_previous_managed_mcp_command = previous_managed_binary_path;
-    int result = cbm_install_agent_configs(home, binary_path, force, dry_run);
-    g_previous_managed_mcp_command = saved;
-    return result;
-}
-
 /* Count project index .db files in the cache directory (internal stores excluded). */
 static int count_db_indexes(const char *home) {
     const char *cache_dir = get_cache_dir(home);
@@ -11997,130 +11837,6 @@ static bool cbm_detect_self_path(char *buf, size_t buf_sz, const char *home) {
     return exact;
 }
 
-/* Is the running binary owned by an external package manager rather than by us?
- *
- * #1566: cbm's installer does two separable jobs — place the binary (and put its
- * directory on PATH), and configure the agents. For someone who installed
- * through mise, Homebrew or nix, the first job is not merely redundant: it drops
- * a SECOND copy into ~/.local/bin that shadows the managed one depending on PATH
- * order, and appends to a shell rc file the package manager never asked us to
- * touch. They wanted the agent configs refreshed and nothing else.
- *
- * The signal is simply that the OS says we are running from somewhere other than
- * the directory we install into. We only infer when the OS REPORTED the path
- * (exact): the ~/.local/bin fallback is a guess, and guessing here would refuse
- * to install for someone who has no binary at all. Naming the manager is
- * best-effort — the behaviour does not depend on recognising it, only the
- * wording does. */
-static const char *cli_external_manager_name(const char *self_path) {
-    if (!self_path || !self_path[0]) {
-        return NULL;
-    }
-    if (strstr(self_path, "/mise/") || strstr(self_path, "/.mise/")) {
-        return "mise";
-    }
-    if (strstr(self_path, "/Cellar/") || strstr(self_path, "/homebrew/") ||
-        strstr(self_path, "/linuxbrew/")) {
-        return "Homebrew";
-    }
-    if (strstr(self_path, "/nix/store/")) {
-        return "nix";
-    }
-    if (strstr(self_path, "/.asdf/")) {
-        return "asdf";
-    }
-    if (strstr(self_path, "/.cargo/bin/")) {
-        return "cargo";
-    }
-#ifdef __FreeBSD__
-    /* FreeBSD ports/pkg install under ${LOCALBASE} (default /usr/local). pkg owns
-     * that file, so install must not drop a second copy in ~/.local/bin or edit a
-     * shell rc, and update must defer to pkg(8). Anchor at the start so a manual
-     * `install --dir=/opt/...` elsewhere is still treated as ours; --force-binary
-     * is the escape hatch for anyone who really does self-manage that prefix.
-     *
-     * LOCALBASE is configurable, so the port passes its real PREFIX via
-     * -DCBM_PKG_PREFIX; when it is absent we fall back to the documented default. */
-#ifdef CBM_PKG_PREFIX
-    if (strncmp(self_path, CBM_PKG_PREFIX "/bin/", sizeof(CBM_PKG_PREFIX "/bin/") - 1) == 0 ||
-        strncmp(self_path, CBM_PKG_PREFIX "/sbin/", sizeof(CBM_PKG_PREFIX "/sbin/") - 1) == 0) {
-        return "FreeBSD pkg";
-    }
-#else
-    if (strncmp(self_path, "/usr/local/bin/", 15) == 0 ||
-        strncmp(self_path, "/usr/local/sbin/", 16) == 0) {
-        return "FreeBSD pkg";
-    }
-#endif
-#endif
-    return NULL;
-}
-
-#ifdef CBM_CLI_ENABLE_TEST_API
-const char *cbm_cli_external_manager_name_for_testing(const char *self_path) {
-    return cli_external_manager_name(self_path);
-}
-#endif
-
-static bool cli_binary_is_externally_managed(const char *self_path, bool self_path_exact,
-                                             const char *bin_dir) {
-    (void)bin_dir;
-    if (!self_path_exact || !self_path || !self_path[0]) {
-        return false;
-    }
-    /* POSITIVE evidence only: the path must look like a known package manager's.
-     *
-     * The tempting rule — "anything outside the directory we install into" —
-     * is wrong, and the test suite proved it immediately: a test binary runs
-     * from build/, and a perfectly ordinary `install --dir=/opt/cbm` also lives
-     * outside the default. Both would be misread as foreign, and `update` would
-     * refuse to update an installation we own.
-     *
-     * The asymmetry decides it. A false positive REFUSES a legitimate update; a
-     * false negative just leaves today's behaviour in place for an unrecognised
-     * manager, which --skip-binary covers explicitly. So we only infer when we
-     * can name the owner. */
-    return cli_external_manager_name(self_path) != NULL;
-}
-
-static int cli_resolve_install_hooks(bool override_set, bool override_value) {
-    bool enabled = true;
-    if (!override_set) {
-        const char *cache_dir = cbm_resolve_cache_dir();
-        char db_path[CLI_BUF_1K];
-        int written =
-            cache_dir ? snprintf(db_path, sizeof(db_path), "%s/_config.db", cache_dir) : CLI_ERR;
-        if (written <= 0 || (size_t)written >= sizeof(db_path)) {
-            (void)fprintf(stderr, "error: config database path is unavailable\n");
-            return CLI_ERR;
-        }
-        if (cbm_file_exists(db_path)) {
-            cbm_config_t *cfg = cbm_config_open(cache_dir);
-            if (!cfg) {
-                (void)fprintf(stderr, "error: cannot read install_hooks preference\n");
-                return CLI_ERR;
-            }
-            enabled = cbm_config_get_bool(cfg, CBM_CONFIG_INSTALL_HOOKS, true);
-            cbm_config_close(cfg);
-        }
-    } else {
-        enabled = override_value;
-    }
-    g_install_hooks = enabled;
-    return CLI_OK;
-}
-
-static int cli_persist_install_hooks(void) {
-    const char *cache_dir = cbm_resolve_cache_dir();
-    cbm_config_t *cfg = cache_dir ? cbm_config_open(cache_dir) : NULL;
-    if (!cfg) {
-        return CLI_ERR;
-    }
-    int result = cbm_config_set(cfg, CBM_CONFIG_INSTALL_HOOKS, g_install_hooks ? "true" : "false");
-    cbm_config_close(cfg);
-    return result;
-}
-
 /* Build the agent.install.plan.v1 receipt (#388): a machine-readable list of
  * the config / instruction / skill / agent / hook files `install` WOULD write, produced by
  * running the real install dispatch in record-only mode (no mutation, no
@@ -12252,227 +11968,98 @@ char *cbm_build_install_plan_json(const char *home, const char *binary_path) {
     return cbm_build_install_plan_json_options(home, binary_path, false);
 }
 
-typedef struct {
-    const char *bin_target;
-    const char *config_binary;
-    const char *bin_dir;
-    const char *home;
-    const char *shell_rc;
-    const char *prepared_candidate;
-    cbm_activation_transaction_t *binary_transaction;
-    cli_binary_validator_t binary_validator;
-    bool has_binary_validator;
-    bool copy_binary;
-    /* #1566: true when the binary is not ours to place — suppresses the PATH
-     * edit too, since adding a directory to PATH for a binary we did not
-     * install is exactly the unasked-for change that was complained about. */
-    bool skip_binary;
-    bool delete_indexes;
-    bool skip_config;
-    bool persist_install_hooks;
-    bool force;
-    bool dry_run;
-} cli_install_activation_t;
+/* Codex user config block for the mori-graph server. Its markers differ from
+ * the codebase-memory-mcp block an older install wrote, so both can coexist
+ * until `uninstall` removes the old one. */
+#define MORI_CODEX_TABLE "mcp_servers." CBM_MCP_SERVER_KEY
+#define MORI_CODEX_SECTION "[" MORI_CODEX_TABLE "]"
+#define MORI_CODEX_MCP_BEGIN "# >>> " CBM_MCP_SERVER_KEY " MCP >>>"
+#define MORI_CODEX_MCP_END "# <<< " CBM_MCP_SERVER_KEY " MCP <<<"
 
-static int cli_install_activate(void *opaque) {
-    cli_install_activation_t *activation = opaque;
-    if (!activation || !activation->bin_target || !activation->bin_dir || !activation->home ||
-        !activation->shell_rc) {
-        return CLI_TRUE;
+int cbm_install_mori_claude_mcp(const char *binary_path, const char *config_path) {
+    static const char *const path[] = {"mcpServers"};
+    return cbm_upsert_json_named_mcp(binary_path, config_path, path, 1U, CBM_JSON_MCP_STANDARD,
+                                     CBM_MCP_SERVER_KEY, NULL);
+}
+
+int cbm_install_mori_codex_mcp(const char *binary_path, const char *config_path) {
+    if (!binary_path || !config_path) {
+        return CLI_ERR;
     }
-    const char *config_binary =
-        activation->config_binary ? activation->config_binary : activation->bin_target;
-    char previous_managed_binary[CLI_BUF_1K] = {0};
-    bool previous_managed_binary_exact = cbm_detect_self_path(
-        previous_managed_binary, sizeof(previous_managed_binary), activation->home);
-    if (activation->copy_binary) {
-        if (activation->dry_run) {
-            printf("Would install binary -> %s\n\n", activation->bin_target);
-        }
+    char escaped[CLI_BUF_8K];
+    if (cbm_toml_escape_basic_string(binary_path, escaped, sizeof(escaped)) != 0) {
+        return CLI_ERR;
     }
-    if (!activation->dry_run && !activation->binary_transaction && activation->prepared_candidate) {
-        if (!cbm_mkdir_p(activation->bin_dir, CLI_OCTAL_PERM)) {
-            (void)fprintf(stderr, "error: cannot create install directory %s\n",
-                          activation->bin_dir);
-            return CLI_TRUE;
-        }
-        cbm_activation_transaction_status_t stage_status = cbm_activation_transaction_stage_file(
-            activation->bin_target, activation->prepared_candidate,
-            &activation->binary_transaction);
-        cli_binary_validator_t restaged_validator = {{0}};
-        if (stage_status != CBM_ACTIVATION_TRANSACTION_OK || !activation->binary_transaction ||
-            !cli_activation_transaction_expected_build(activation->binary_transaction,
-                                                       &restaged_validator) ||
-            !activation->has_binary_validator ||
-            strcmp(restaged_validator.fingerprint, activation->binary_validator.fingerprint) != 0) {
-            (void)fprintf(stderr, "error: verified install candidate could not be "
-                                  "re-staged on the target filesystem\n");
-            cli_activation_transaction_abort_or_fail_stop(&activation->binary_transaction,
-                                                          "install_transaction_restaging_cleanup");
-            return CLI_TRUE;
-        }
+    /* Codex forwards only the listed variables to stdio servers; both decide
+     * which cache and daemon the server talks to (#1562, #1664). */
+    char block[CLI_BUF_8K];
+    int written = snprintf(block, sizeof(block),
+                           MORI_CODEX_SECTION "\ncommand = \"%s\"\nargs = []\n"
+                                              "env_vars = [\"CBM_CACHE_DIR\", "
+                                              "\"CBM_RUNTIME_DIR\"]\n",
+                           escaped);
+    if (written < 0 || (size_t)written >= sizeof(block)) {
+        return CLI_ERR;
     }
-    if (!activation->dry_run && activation->binary_transaction) {
-        if (cli_activation_transaction_commit_validated(
-                activation->binary_transaction,
-                activation->has_binary_validator ? &activation->binary_validator : NULL,
-                CLI_OCTAL_PERM) != CLI_OK) {
-            cli_activation_transaction_abort_or_fail_stop(&activation->binary_transaction,
-                                                          "install_transaction_publish_recovery");
-            (void)fprintf(stderr, "error: failed to publish the staged binary to %s\n",
-                          activation->bin_target);
-            return CLI_TRUE;
-        }
-        printf("Installed binary -> %s\n\n", activation->bin_target);
+    return cbm_toml_upsert_managed_block(config_path, MORI_CODEX_MCP_BEGIN, MORI_CODEX_MCP_END,
+                                         block) == 0
+               ? CLI_OK
+               : CLI_ERR;
+}
+
+static void install_print_usage(FILE *out) {
+    (void)fprintf(out, "usage: " CBM_COMMAND_NAME " install [--dry-run]\n\n"
+                       "Registers this binary as the " CBM_MCP_SERVER_KEY
+                       " MCP server for Claude Code (~/.claude.json)\n"
+                       "and Codex (~/.codex/config.toml) when they are present. It downloads\n"
+                       "nothing and writes no agent skills, hooks, or agent profiles.\n"
+                       "The registration uses this binary's absolute path. To migrate a\n"
+                       "manual registration, edit its command in the client config. The default\n"
+                       "mise shim path is ~/.local/share/mise/shims/mori. It stays the same\n"
+                       "across Mori upgrades. Restore the previous codebase-memory-mcp path\n"
+                       "if you roll back across the executable rename.\n\n"
+                       "In Claude Code, also update the hook-augment command and its graph\n"
+                       "PostToolUse matcher to Read|mcp__.*(mori-graph|codebase-memory-mcp)__.*\n");
+}
+
+/* One client registration: report, or write unless dry_run. Returns false on
+ * a failed write. */
+static bool install_register_client(const char *label, const char *config_path,
+                                    const char *binary_path, bool dry_run,
+                                    int (*upsert)(const char *, const char *)) {
+    if (dry_run) {
+        printf("  %s: would register %s in %s\n", label, CBM_MCP_SERVER_KEY, config_path);
+        return true;
     }
-    if (!activation->dry_run && activation->persist_install_hooks &&
-        cli_persist_install_hooks() != CLI_OK) {
-        cli_activation_transaction_finalize_committed_or_fail_stop(
-            &activation->binary_transaction, "install_transaction_config_failure_finalize");
-        (void)fprintf(stderr, "error: cannot persist install_hooks preference\n");
-        return CLI_ACTIVATION_PARTIAL;
+    if (!prepare_config_parent(config_path) || upsert(binary_path, config_path) != CLI_OK) {
+        (void)fprintf(stderr, "error: %s: could not register %s in %s\n", label, CBM_MCP_SERVER_KEY,
+                      config_path);
+        (void)fprintf(stderr,
+                      "If %s is already configured, edit its command in that file and\n"
+                      "keep its arguments and environment. Use the installed Mori shim\n"
+                      "(default: ~/.local/share/mise/shims/mori, with ~ expanded) or\n"
+                      "the absolute path from `mise which mori`. Restart the client.\n",
+                      CBM_MCP_SERVER_KEY);
+        return false;
     }
-    /* Config and PATH refreshes are install mutations too. Keep them in this
-     * callback so the startup lock covers the complete filesystem window,
-     * including same-binary and non-force installs. */
-    int agent_config_rc = CLI_OK;
-    if (!activation->skip_config) {
-        const char *prev = previous_managed_binary_exact ? previous_managed_binary : NULL;
-        if (config_binary != activation->bin_target &&
-            (!prev || strcmp(prev, config_binary) == 0)) {
-            prev = activation->bin_target;
-        }
-        agent_config_rc = cbm_install_agent_configs_with_previous(
-            activation->home, config_binary, prev, activation->force, activation->dry_run);
-    }
-    if (agent_config_rc != CLI_OK) {
-        cli_activation_transaction_finalize_committed_or_fail_stop(
-            &activation->binary_transaction, "install_transaction_partial_finalize");
-        (void)fprintf(stderr, "error: one or more agent configurations failed; the "
-                              "published/current executable was kept, and PATH/index cleanup "
-                              "was not attempted\n");
-        return CLI_ACTIVATION_PARTIAL;
-    }
-    int path_rc = CLI_TRUE;
-    /* #1566: only touch PATH when WE placed the binary. Appending to a shell rc
-     * for a binary installed by someone else is an unasked-for change to a file
-     * we do not own, and the directory we would add may hold nothing at all. */
-    if (activation->skip_binary) {
-        cli_activation_transaction_finalize_committed_or_fail_stop(&activation->binary_transaction,
-                                                                   "install_transaction_finalize");
-        return CLI_OK;
-    }
-#ifdef _WIN32
-    path_rc = cli_ensure_windows_user_path(activation->bin_dir,
-                                           activation->dry_run || g_cli_activation_test_ops_set);
-    if (path_rc == CLI_OK) {
-        printf("\nAdded %s to the current-user PATH\n", activation->bin_dir);
-    } else if (path_rc == CLI_TRUE) {
-        printf("\nPATH already includes %s\n", activation->bin_dir);
-    }
-#else
-    if (activation->shell_rc[0]) {
-        path_rc = cbm_ensure_path(activation->bin_dir, activation->shell_rc, activation->dry_run);
-        if (path_rc == 0) {
-            printf("\nAdded %s to PATH in %s\n", activation->bin_dir, activation->shell_rc);
-        } else if (path_rc == CLI_TRUE) {
-            printf("\nPATH already includes %s\n", activation->bin_dir);
-        }
-    }
-#endif
-    if (path_rc == CLI_ERR) {
-        cli_activation_transaction_finalize_committed_or_fail_stop(
-            &activation->binary_transaction, "install_transaction_path_failure_finalize");
-        (void)fprintf(stderr, "error: PATH configuration failed; the published/current "
-                              "executable was kept, and index cleanup was not attempted\n");
-        return CLI_ACTIVATION_PARTIAL;
-    }
-    if (!activation->dry_run && activation->delete_indexes) {
-        int expected = count_db_indexes(activation->home);
-        int removed = cbm_remove_indexes(activation->home);
-        printf("Removed %d index(es).\n\n", removed);
-        if (removed != expected) {
-            cli_activation_transaction_finalize_committed_or_fail_stop(
-                &activation->binary_transaction, "install_transaction_index_failure_finalize");
-            (void)fprintf(stderr, "error: only %d of %d indexes could be removed\n", removed,
-                          expected);
-            return CLI_ACTIVATION_PARTIAL;
-        }
-    }
-    cli_activation_transaction_finalize_committed_or_fail_stop(&activation->binary_transaction,
-                                                               "install_transaction_finalize");
-    return CLI_OK;
+    printf("  %s: registered %s in %s\n", label, CBM_MCP_SERVER_KEY, config_path);
+    return true;
 }
 
 int cbm_cmd_install(int argc, char **argv) {
-    parse_auto_answer(argc, argv);
-    g_client_selection = NULL;
     bool dry_run = false;
-    bool force = false;
-    bool plan = false;
-    bool reset_indexes = false;
-    bool skip_config = false;
-    bool skip_binary = false;
-    bool force_binary = false;
-    bool hooks_flag = false;
-    bool no_hooks_flag = false;
-    const char *requested_clients = NULL;
-    const char *requested_bin_dir = NULL;
     for (int i = 0; i < argc; i++) {
         if (strcmp(argv[i], "--dry-run") == 0) {
             dry_run = true;
-        } else if (strcmp(argv[i], "--force") == 0) {
-            force = true;
-        } else if (strcmp(argv[i], "--plan") == 0) {
-            plan = true;
-        } else if (strcmp(argv[i], "--reset-indexes") == 0) {
-            reset_indexes = true;
-        } else if (strcmp(argv[i], "--skip-config") == 0) {
-            skip_config = true;
-        } else if (strcmp(argv[i], "--hooks") == 0) {
-            hooks_flag = true;
-        } else if (strcmp(argv[i], "--no-hooks") == 0) {
-            no_hooks_flag = true;
-        } else if (strncmp(argv[i], "--clients=", SLEN("--clients=")) == 0) {
-            requested_clients = argv[i] + SLEN("--clients=");
-            if (!requested_clients[0]) {
-                (void)fprintf(stderr, "error: --clients requires a value\n\n");
-                cli_clients_print_list(stderr);
-                return CLI_TRUE;
-            }
-        } else if (strcmp(argv[i], "--clients") == 0) {
-            /* Bare `--clients` (and `--clients=help`/`list`) print the
-             * vocabulary, including tokens users would not readily guess. */
-            cli_clients_print_list(stdout);
+        } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+            install_print_usage(stdout);
             return 0;
-        } else if (strcmp(argv[i], "--skip-binary") == 0) {
-            /* #1566: the mirror of --skip-config. Configure the agents, leave
-             * the binary and PATH alone. */
-            skip_binary = true;
-        } else if (strcmp(argv[i], "--force-binary") == 0) {
-            force_binary = true;
-        } else if (strncmp(argv[i], "--dir=", SLEN("--dir=")) == 0) {
-            requested_bin_dir = argv[i] + SLEN("--dir=");
-            if (!requested_bin_dir[0]) {
-                (void)fprintf(stderr, "error: --dir requires a non-empty path\n");
-                return CLI_TRUE;
-            }
-        } else if (strcmp(argv[i], "--dir") == 0) {
-            if (i + 1 >= argc || !argv[i + 1] || !argv[i + 1][0] || argv[i + 1][0] == '-') {
-                (void)fprintf(stderr, "error: --dir requires a non-empty path\n");
-                return CLI_TRUE;
-            }
-            requested_bin_dir = argv[++i];
         } else if (strcmp(argv[i], "-y") != 0 && strcmp(argv[i], "--yes") != 0 &&
                    strcmp(argv[i], "-n") != 0 && strcmp(argv[i], "--no") != 0) {
-            (void)fprintf(stderr, "error: unknown install option: %s\n", argv[i]);
+            (void)fprintf(stderr, "error: unknown install option: %s\n\n", argv[i]);
+            install_print_usage(stderr);
             return CLI_TRUE;
         }
-    }
-
-    if (hooks_flag && no_hooks_flag) {
-        (void)fprintf(stderr, "error: --hooks and --no-hooks cannot be used together\n");
-        return CLI_TRUE;
     }
 
     const char *home = cbm_get_home_dir();
@@ -12480,327 +12067,55 @@ int cbm_cmd_install(int argc, char **argv) {
         (void)fprintf(stderr, "error: HOME not set (use USERPROFILE on Windows)\n");
         return CLI_TRUE;
     }
-    if (cli_resolve_install_hooks(hooks_flag || no_hooks_flag, hooks_flag) != CLI_OK) {
-        return CLI_TRUE;
-    }
-
-    char bin_dir[CLI_BUF_1K];
-    int bin_dir_length = requested_bin_dir
-                             ? snprintf(bin_dir, sizeof(bin_dir), "%s", requested_bin_dir)
-                             : snprintf(bin_dir, sizeof(bin_dir), "%s/.local/bin", home);
-    if (bin_dir_length <= 0 || (size_t)bin_dir_length >= sizeof(bin_dir)) {
-        (void)fprintf(stderr, "error: install directory path is too long\n");
-        return CLI_TRUE;
-    }
-    cbm_normalize_path_sep(bin_dir);
-    char bin_target[CLI_BUF_1K];
-#ifdef _WIN32
-    int target_length =
-        snprintf(bin_target, sizeof(bin_target), "%s/codebase-memory-mcp.exe", bin_dir);
-#else
-    int target_length = snprintf(bin_target, sizeof(bin_target), "%s/codebase-memory-mcp", bin_dir);
-#endif
-    if (target_length <= 0 || (size_t)target_length >= sizeof(bin_target)) {
-        (void)fprintf(stderr, "error: install target path is too long\n");
-        return CLI_TRUE;
-    }
-
     char self_path[CLI_BUF_1K] = {0};
-    bool self_path_exact = cbm_detect_self_path(self_path, sizeof(self_path), home);
-
-    /* #1566: a binary owned by mise/Homebrew/nix is not ours to relocate. Infer
-     * it, and let either flag override the inference in either direction. */
-    bool externally_managed =
-        !force_binary && cli_binary_is_externally_managed(self_path, self_path_exact, bin_dir);
-    bool explicit_skip_binary = skip_binary;
-    if (externally_managed) {
-        skip_binary = true;
-    }
-
-    /* NOT stat(): on Windows it goes through the ANSI code page, so an
-     * extended-length or non-ASCII target reports "absent" and a non-force
-     * install silently overwrites bytes the user asked to keep. */
-    cbm_path_info_t target_status;
-    bool target_exists = cbm_path_info_utf8(bin_target, &target_status) == 0;
-    bool same_binary = cbm_same_file(self_path, bin_target);
-
-    /* #2722: when a binary is managed externally (mise, brew, nix, etc.),
-     * do not write the non-existent default target into agent configurations.
-     * Use the running managed binary path instead. */
-    const char *config_binary = bin_target;
-    if (externally_managed && self_path_exact && self_path[0]) {
-        config_binary = self_path;
-    } else if (skip_binary && !target_exists && self_path_exact && self_path[0]) {
-        config_binary = self_path;
-    }
-
-    /* --plan: emit the machine-readable install receipt and exit WITHOUT
-     * mutating anything (no config writes, no index deletion, no network) so
-     * an agent can inspect exactly what install would touch first (#388). */
-    if (plan) {
-        char *json = cbm_build_install_plan_json_options(home, config_binary, skip_config);
-        if (!json) {
-            (void)fprintf(stderr, "error: failed to build install plan\n");
-            return CLI_TRUE;
-        }
-        printf("%s\n", json);
-        free(json);
-        return 0;
-    }
-
-    /* #1558: validate the client tokens BEFORE anything is written, so a typo
-     * fails immediately instead of part-way through configuring. */
-    if (requested_clients) {
-        cbm_detected_agents_t probe = cbm_detect_agents(home);
-        if (!cli_clients_apply_selection(requested_clients, &probe)) {
-            return CLI_TRUE;
-        }
-        g_client_selection = requested_clients;
-    }
-
-    printf("codebase-memory-mcp install %s\n\n", CBM_VERSION);
-
-    if (externally_managed || explicit_skip_binary) {
-        const char *manager = cli_external_manager_name(self_path);
-        if (explicit_skip_binary) {
-            printf("Skipping binary placement (--skip-binary); configuring agents only.\n\n");
-        } else {
-            printf("Binary is managed elsewhere%s%s:\n  %s\n"
-                   "Leaving it and your PATH untouched; configuring agents only.\n"
-                   "  (use --force-binary to install a copy into %s anyway)\n\n",
-                   manager ? " by " : "", manager ? manager : "", self_path, bin_dir);
-        }
-    }
-
-    bool do_copy = !skip_binary && !same_binary && (!target_exists || force);
-
-    /* (#607) Default: preserve existing indexes. `--reset-indexes` opts into
-     * the old prompt-and-delete behaviour. The helper returns 0 only when the
-     * user declines the reset prompt, in which case we abort the install. */
-    bool delete_indexes = false;
-    if (cbm_install_prepare_existing_indexes(home, reset_indexes, dry_run, &delete_indexes) == 0) {
+    if (!cbm_detect_self_path(self_path, sizeof(self_path), home) || !self_path[0]) {
+        (void)fprintf(stderr, "error: cannot determine this binary's path; register the "
+                              "server by hand:\n  claude mcp add --scope user " CBM_MCP_SERVER_KEY
+                              " -- <path to " CBM_COMMAND_NAME ">\n");
         return CLI_TRUE;
     }
 
-    /* Step 1c: Place the running binary at the canonical install target.
-     * Previously install only re-signed whatever was already at the target, so
-     * `install --force` from a freshly built binary silently kept the OLD file
-     * — operators ran stale code believing they had upgraded (#472). Copy the
-     * running binary to ~/.local/bin (unless we ARE that file), then sign it. */
-    if (!same_binary && target_exists && !force) {
-        printf("A different binary already exists at:\n  %s\n", bin_target);
-        if (prompt_yn("Replace it with the binary you ran install from?")) {
-            do_copy = true;
-            force = true; /* user approved replacement for this run */
-        } else {
-            printf("Keeping existing binary; configs will point at it.\n\n");
-        }
-    }
-#ifdef __APPLE__
-    /* A freshly clang-built arm64 binary is linker-signed (flags=0x20002)
-     * and gets Killed:9 when spawned by an MCP host. Sign the private staged
-     * candidate before disrupting sessions, then publish those exact verified
-     * bytes inside the activation window. */
-    bool sign_binary = do_copy || target_exists;
-    bool prepare_binary = sign_binary;
-#else
-    bool prepare_binary = do_copy;
-#endif
-    cbm_activation_transaction_t *binary_transaction = NULL;
-    cli_binary_validator_t binary_validator = {{0}};
-    bool has_binary_validator = false;
-    char prepared_dir[CLI_BUF_1K] = {0};
-    char prepared_candidate[CLI_BUF_1K] = {0};
-    if (!dry_run && prepare_binary) {
-#ifdef __APPLE__
-        const char *candidate = do_copy ? self_path : bin_target;
-#else
-        /* Non-macOS activation reaches this block only for a real copy. */
-        const char *candidate = self_path;
-#endif
-        bool target_parent_exists = cbm_is_dir(bin_dir);
-        bool prepare_out_of_line = !target_parent_exists;
-#ifdef __APPLE__
-        /* codesign may replace the file's inode. Sign a private published copy
-         * first, then open the final transaction over those immutable bytes;
-         * mutating a transaction-owned stage invalidates its identity snapshot. */
-        prepare_out_of_line = prepare_out_of_line || sign_binary;
-#endif
-        const char *stage_target = bin_target;
-        if (prepare_out_of_line) {
-            int dir_length =
-                snprintf(prepared_dir, sizeof(prepared_dir), "%s/cbm-install-XXXXXX", cbm_tmpdir());
-            if (dir_length <= 0 || (size_t)dir_length >= sizeof(prepared_dir) ||
-                !cbm_mkdtemp(prepared_dir)) {
-                (void)fprintf(stderr, "error: cannot create private install staging "
-                                      "directory\n");
-                return CLI_TRUE;
-            }
-#ifdef _WIN32
-            int candidate_length = snprintf(prepared_candidate, sizeof(prepared_candidate),
-                                            "%s/codebase-memory-mcp.exe", prepared_dir);
-#else
-            int candidate_length = snprintf(prepared_candidate, sizeof(prepared_candidate),
-                                            "%s/codebase-memory-mcp", prepared_dir);
-#endif
-            if (candidate_length <= 0 || (size_t)candidate_length >= sizeof(prepared_candidate)) {
-                (void)cbm_rmdir(prepared_dir);
-                (void)fprintf(stderr, "error: private install staging path is too long\n");
-                return CLI_TRUE;
-            }
-            stage_target = prepared_candidate;
-        }
-        cbm_activation_transaction_status_t stage_status =
-            cbm_activation_transaction_stage_file(stage_target, candidate, &binary_transaction);
-        cli_binary_validator_t staged_validator = {{0}};
-        if (stage_status != CBM_ACTIVATION_TRANSACTION_OK || !binary_transaction ||
-            !cli_activation_transaction_expected_build(binary_transaction, &staged_validator)) {
-            const char *stage_refusal = cbm_activation_transaction_refusal_note();
-            (void)fprintf(stderr, "error: failed to stage install candidate: %s%s%s\n",
-                          cbm_activation_transaction_status_message(stage_status),
-                          stage_refusal[0] ? ": " : "", stage_refusal);
-            (void)cli_activation_transaction_abort(&binary_transaction);
-            if (prepared_dir[0]) {
-                (void)cbm_rmdir(prepared_dir);
-            }
-            return CLI_TRUE;
-        }
-        if (prepare_out_of_line) {
-            if (cli_activation_transaction_commit_validated(binary_transaction, &staged_validator,
-                                                            CLI_OCTAL_PERM) != CLI_OK ||
-                cli_activation_transaction_finalize_close(&binary_transaction) != CLI_OK) {
-                (void)cli_activation_transaction_abort(&binary_transaction);
-                (void)cbm_unlink(prepared_candidate);
-                (void)cbm_rmdir(prepared_dir);
-                (void)fprintf(stderr, "error: private install candidate preparation "
-                                      "failed\n");
-                return CLI_TRUE;
-            }
-#ifdef __APPLE__
-            if (sign_binary && cbm_macos_adhoc_sign(prepared_candidate) != 0) {
-                (void)fprintf(stderr, "error: ad-hoc signing the private macOS candidate failed\n");
-                (void)cbm_unlink(prepared_candidate);
-                (void)cbm_rmdir(prepared_dir);
-                return CLI_TRUE;
-            }
-#endif
-            has_binary_validator =
-                cbm_daemon_build_fingerprint_file(prepared_candidate, binary_validator.fingerprint);
-            if (has_binary_validator && !g_cli_activation_test_ops_set) {
-                const char *candidate_argv[] = {prepared_candidate, "--version", NULL};
-                has_binary_validator = cbm_exec_no_shell(candidate_argv) == CLI_OK;
-            }
-            if (!has_binary_validator) {
-                (void)fprintf(stderr, "error: prepared install candidate could not be "
-                                      "verified\n");
-                (void)cbm_unlink(prepared_candidate);
-                (void)cbm_rmdir(prepared_dir);
-                return CLI_TRUE;
-            }
-            if (target_parent_exists) {
-                stage_status = cbm_activation_transaction_stage_file(bin_target, prepared_candidate,
-                                                                     &binary_transaction);
-                cli_binary_validator_t final_validator = {{0}};
-                if (stage_status != CBM_ACTIVATION_TRANSACTION_OK || !binary_transaction ||
-                    !cli_activation_transaction_expected_build(binary_transaction,
-                                                               &final_validator) ||
-                    strcmp(final_validator.fingerprint, binary_validator.fingerprint) != 0) {
-                    (void)fprintf(stderr, "error: signed install candidate could not be staged "
-                                          "on the target filesystem\n");
-                    (void)cli_activation_transaction_abort(&binary_transaction);
-                    (void)cbm_unlink(prepared_candidate);
-                    (void)cbm_rmdir(prepared_dir);
-                    return CLI_TRUE;
-                }
-                binary_validator = final_validator;
-            }
-        } else {
-            binary_validator = staged_validator;
-            has_binary_validator = true;
-        }
-        if (!has_binary_validator) {
-            (void)fprintf(stderr, "error: staged install candidate could not be verified\n");
-            if (binary_transaction) {
-                (void)cli_activation_transaction_abort(&binary_transaction);
-            }
-            if (prepared_candidate[0]) {
-                (void)cbm_unlink(prepared_candidate);
-            }
-            if (prepared_dir[0]) {
-                (void)cbm_rmdir(prepared_dir);
-            }
-            return CLI_TRUE;
-        }
-    }
-    char shell_rc[CLI_BUF_1K] = {0};
-#ifndef _WIN32
-    snprintf(shell_rc, sizeof(shell_rc), "%s", cbm_detect_shell_rc(home));
-#endif
-    cli_install_activation_t activation = {
-        .bin_target = bin_target,
-        .config_binary = config_binary,
-        .bin_dir = bin_dir,
-        .home = home,
-        .shell_rc = shell_rc,
-        .prepared_candidate = prepared_candidate[0] ? prepared_candidate : NULL,
-        .binary_transaction = binary_transaction,
-        .binary_validator = binary_validator,
-        .has_binary_validator = has_binary_validator,
-        .copy_binary = do_copy,
-        .delete_indexes = delete_indexes,
-        .skip_config = skip_config,
-        .persist_install_hooks = hooks_flag || no_hooks_flag,
-        .skip_binary = skip_binary,
-        .force = force,
-        .dry_run = dry_run,
-    };
-    /* What this install replaces decides whether any session must stop: with
-     * the published binary untouched (--skip-binary, or an externally managed
-     * binary) and no index reset, agent configs are refreshed while every
-     * session stays up. */
-    bool quiesce_required = has_binary_validator || delete_indexes;
-    int activation_rc = dry_run ? cli_install_activate(&activation)
-                                : cli_activation_guard_scoped(
-                                      CBM_DAEMON_RUNTIME_ACTIVATION_INSTALL, CBM_VERSION,
-                                      has_binary_validator ? binary_validator.fingerprint : NULL,
-                                      quiesce_required, cli_install_activate, &activation);
-    if (activation.binary_transaction) {
-        (void)cli_activation_transaction_abort(&activation.binary_transaction);
-    }
-    if (prepared_candidate[0]) {
-        (void)cbm_unlink(prepared_candidate);
-    }
-    if (prepared_dir[0]) {
-        (void)cbm_rmdir(prepared_dir);
-    }
-    if (activation_rc != CLI_OK) {
-        /* A dry-run mutates nothing (every mutation is guarded by !dry_run),
-         * so a non-OK here is a plan-side check (agent-config / PATH probe)
-         * and must still report that it was a dry-run - on Windows it was
-         * silently skipping the summary and reading as a hard failure. Emit
-         * the dry-run indicator, and name the underlying status for triage.
-         *
-         * The status itself still travels: `--dry-run` exists to answer "would
-         * this install work?", so a refused plan check has to be visible to a
-         * caller that only sees the exit code. Reporting success here made a
-         * fail-closed PATH probe indistinguishable from a clean plan. */
-        if (dry_run) {
-            (void)fprintf(stderr, "note: install --dry-run plan check returned %d\n",
-                          activation_rc);
-            printf("\n(dry-run — no files were modified)\n");
-        }
-        return CLI_TRUE;
+    printf("Registering %s as the %s MCP server.\n\n", self_path, CBM_MCP_SERVER_KEY);
+    bool any_client = false;
+    bool ok = true;
+    cli_config_follow_begin(home);
+
+    if (cbm_claude_code_detected(home)) {
+        char user_root[CLI_BUF_1K];
+        cbm_claude_user_root(home, user_root, sizeof(user_root));
+        char config_path[CLI_BUF_1K];
+        snprintf(config_path, sizeof(config_path), "%s/.claude.json", user_root);
+        any_client = true;
+        ok = install_register_client("Claude Code", config_path, self_path, dry_run,
+                                     cbm_install_mori_claude_mcp) &&
+             ok;
     }
 
-    printf("\nInstall complete. Please restart your coding-agent sessions to "
-           "properly take this into account.\n");
-#ifndef _WIN32
-    printf("Restart your shell or run:\n  source %s\n", shell_rc);
-#endif
+    char codex_dir[CLI_BUF_1K];
+    cbm_codex_config_dir(home, codex_dir, sizeof(codex_dir));
+    if (codex_dir[0] && (dir_exists(codex_dir) || cbm_agent_cli_exists("codex", home))) {
+        char config_path[CLI_BUF_1K];
+        snprintf(config_path, sizeof(config_path), "%s/config.toml", codex_dir);
+        any_client = true;
+        ok = install_register_client("Codex", config_path, self_path, dry_run,
+                                     cbm_install_mori_codex_mcp) &&
+             ok;
+    }
+    cbm_config_edit_path_follow_clear();
+
+    if (!any_client) {
+        printf("No Claude Code or Codex setup found. Register the server by hand:\n"
+               "  claude mcp add --scope user %s -- %s\n"
+               "  codex mcp add %s -- %s\n",
+               CBM_MCP_SERVER_KEY, self_path, CBM_MCP_SERVER_KEY, self_path);
+    }
+    printf("\nAgent skills and hooks are not installed. Use the %s agent skill from\n"
+           "Jiyuu's ai-skills, and `%s update` for upgrade steps.\n",
+           CBM_MCP_SERVER_KEY, CBM_COMMAND_NAME);
     if (dry_run) {
         printf("\n(dry-run — no files were modified)\n");
     }
-    return 0;
+    return ok ? 0 : CLI_TRUE;
 }
 
 /* ── Subcommand: uninstall ────────────────────────────────────── */
@@ -14148,8 +13463,11 @@ int cbm_cmd_uninstall(int argc, char **argv) {
     for (int i = 0; i < argc; i++) {
         if (argv && argv[i] && (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0)) {
             printf(
-                "Usage: codebase-memory-mcp uninstall [options]\n\n"
-                "Removes the codebase-memory-mcp binary and its agent configurations.\n"
+                "Usage: mori uninstall [options]\n\n"
+                "Removes what older codebase-memory-mcp installs wrote: the binary in\n"
+                "~/.local/bin and its agent configurations. The mori-graph entries that\n"
+                "`mori install` writes stay; remove them with `claude mcp remove mori-graph`\n"
+                "and `codex mcp remove mori-graph`.\n"
                 "THIS IS DESTRUCTIVE. Project indexes are kept by default. An interactive\n"
                 "terminal is asked separately; the default answer is to keep them.\n\n"
                 "Options:\n"
@@ -14205,7 +13523,7 @@ int cbm_cmd_uninstall(int argc, char **argv) {
         return CLI_TRUE;
     }
 
-    printf("codebase-memory-mcp uninstall\n\n");
+    printf("mori uninstall\n\n");
 
     g_agent_uninstall_errors = 0;
     agent_uninstall_failures_reset();
@@ -14290,767 +13608,14 @@ int cbm_cmd_uninstall(int argc, char **argv) {
 
 /* ── Subcommand: update ───────────────────────────────────────── */
 
-/* Read archive from disk, extract binary (tar.gz or zip), write to bin_dest.
- * Returns 0 on success, 1 on failure. Cleans up tmp_archive. */
-
-typedef struct {
-    const char *tmp_archive;
-    const char *ext;
-    const char *bin_dest;
-    const char *home;
-    bool delete_indexes;
-} extract_install_args_t;
-
-#ifdef CBM_CLI_ENABLE_TEST_API
-typedef struct {
-    const char *bin_dest;
-    const char *home;
-    cbm_activation_transaction_t *binary_transaction;
-    cli_binary_validator_t binary_validator;
-    bool delete_indexes;
-} cli_update_activation_t;
-
-static int cli_update_activate_binary(void *opaque) {
-    cli_update_activation_t *activation = opaque;
-    if (!activation || !activation->bin_dest || !activation->binary_transaction) {
-        return CLI_TRUE;
-    }
-    char previous_managed_binary[CLI_BUF_1K] = {0};
-    bool previous_managed_binary_exact = cbm_detect_self_path(
-        previous_managed_binary, sizeof(previous_managed_binary), activation->home);
-    if (cli_activation_transaction_commit_validated(activation->binary_transaction,
-                                                    &activation->binary_validator,
-                                                    CLI_OCTAL_PERM) != CLI_OK) {
-        cli_activation_transaction_abort_or_fail_stop(&activation->binary_transaction,
-                                                      "update_transaction_publish_recovery");
-        (void)fprintf(stderr, "error: cannot publish staged update to %s\n", activation->bin_dest);
-        return CLI_TRUE;
-    }
-    /* Agent configs must never observe a replacement binary outside the same
-     * exact-build activation window. Otherwise another CBM process can start
-     * after the binary swap but before its MCP/hook entries are refreshed. */
-    printf("Refreshing agent configurations...\n");
-    if (cbm_install_agent_configs_with_previous(
-            activation->home, activation->bin_dest,
-            previous_managed_binary_exact ? previous_managed_binary : NULL, true,
-            false) != CLI_OK) {
-        cli_activation_transaction_finalize_committed_or_fail_stop(
-            &activation->binary_transaction, "update_transaction_config_failure_finalize");
-        (void)fprintf(stderr, "error: one or more agent configurations failed; the "
-                              "published update was kept. Review the errors above and "
-                              "rerun update\n");
-        return CLI_ACTIVATION_PARTIAL;
-    }
-    if (activation->delete_indexes) {
-        int expected = count_db_indexes(activation->home);
-        int removed = cbm_remove_indexes(activation->home);
-        printf("Removed %d index(es).\n\n", removed);
-        if (removed != expected) {
-            cli_activation_transaction_finalize_committed_or_fail_stop(
-                &activation->binary_transaction, "update_transaction_index_failure_finalize");
-            (void)fprintf(stderr, "error: only %d of %d indexes could be removed\n", removed,
-                          expected);
-            return CLI_ACTIVATION_PARTIAL;
-        }
-    }
-    cli_activation_transaction_finalize_committed_or_fail_stop(&activation->binary_transaction,
-                                                               "update_transaction_finalize");
-    return CLI_OK;
-}
-
-#ifdef __APPLE__
-/* The first step of the signed-candidate preparation that failed. One boolean
- * used to cover all of them, so a full disk read exactly like a broken
- * codesign: "candidate preparation failed", and nothing else. */
-typedef struct {
-    const char *step;
-    int os_error;       /* errno left by an OS-level step; 0 when none applies */
-    const char *detail; /* the reason when no OS error applies, or NULL */
-} cli_update_prep_failure_t;
-
-/* Records the first failing step. An OS-level step keeps the errno it left; a
- * step that succeeds clears errno so the next one starts clean. Returns ok, so
- * the steps chain with &&. */
-static bool cli_update_prep_step(bool ok, const char *step, bool os_level, const char *detail,
-                                 cli_update_prep_failure_t *failure) {
-    if (ok) {
-        errno = 0;
-        return true;
-    }
-    if (!failure->step) {
-        failure->step = step;
-        failure->os_error = os_level ? errno : 0;
-        failure->detail = detail;
-    }
-    return false;
-}
-
-static void cli_update_prep_report(const cli_update_prep_failure_t *failure) {
-    const char *step = failure->step ? failure->step : "an unrecorded step";
-    const char *reason = failure->os_error != 0 ? strerror(failure->os_error) : failure->detail;
-    if (reason) {
-        (void)fprintf(stderr, "error: signed update candidate preparation failed while %s: %s\n",
-                      step, reason);
-    } else {
-        (void)fprintf(stderr, "error: signed update candidate preparation failed while %s\n", step);
-    }
-}
-#endif
-
-static int extract_and_install_binary(extract_install_args_t args) {
-    const char *tmp_archive = args.tmp_archive;
-    const char *ext = args.ext;
-    const char *bin_dest = args.bin_dest;
-    FILE *f = fopen(tmp_archive, "rb");
-    if (!f) {
-        (void)fprintf(stderr, "error: cannot open %s\n", tmp_archive);
-        return CLI_TRUE;
-    }
-    if (fseek(f, 0, SEEK_END) != 0) {
-        (void)fclose(f);
-        cbm_unlink(tmp_archive);
-        return CLI_TRUE;
-    }
-    long fsize = ftell(f);
-    if (fsize <= 0 || fsize > INT_MAX || fseek(f, 0, SEEK_SET) != 0) {
-        (void)fclose(f);
-        cbm_unlink(tmp_archive);
-        return CLI_TRUE;
-    }
-
-    unsigned char *data = malloc((size_t)fsize);
-    if (!data) {
-        (void)fclose(f);
-        cbm_unlink(tmp_archive);
-        return CLI_TRUE;
-    }
-    size_t bytes_read = fread(data, CLI_ELEM_SIZE, (size_t)fsize, f);
-    int close_status = fclose(f);
-    if (bytes_read != (size_t)fsize || close_status != 0) {
-        free(data);
-        cbm_unlink(tmp_archive);
-        return CLI_TRUE;
-    }
-
-    int bin_len = 0;
-    unsigned char *bin_data = NULL;
-    if (strcmp(ext, "tar.gz") == 0) {
-        bin_data = cbm_extract_binary_from_targz(data, (int)fsize, &bin_len);
-    } else {
-        bin_data = cbm_extract_binary_from_zip(data, (int)fsize, &bin_len);
-    }
-    free(data);
-    cbm_unlink(tmp_archive);
-
-    if (!bin_data || bin_len <= 0) {
-        (void)fprintf(stderr, "error: binary not found in archive\n");
-        free(bin_data);
-        return CLI_TRUE;
-    }
-
-    cbm_activation_transaction_t *binary_transaction = NULL;
-    cbm_activation_transaction_status_t stage_status;
-    cli_binary_validator_t validator = {{0}};
-#ifdef __APPLE__
-    /* codesign replaces the signed file on current macOS releases. Publish and
-     * sign a disposable private copy first, then stage the resulting immutable
-     * bytes into the final transaction. Every step records why it failed, so a
-     * full disk is reported as one and not as a signing failure. */
-    cli_update_prep_failure_t failure = {0};
-    char prepared_dir[CLI_BUF_1K];
-    char prepared_candidate[CLI_BUF_1K];
-    int prepared_dir_length =
-        snprintf(prepared_dir, sizeof(prepared_dir), "%s/cbm-update-sign-XXXXXX", cbm_tmpdir());
-    errno = 0;
-    bool prepared = cli_update_prep_step(prepared_dir_length > 0 &&
-                                             (size_t)prepared_dir_length < sizeof(prepared_dir) &&
-                                             cbm_mkdtemp(prepared_dir) != NULL,
-                                         "creating its private directory", true, NULL, &failure);
-    int prepared_candidate_length = prepared
-                                        ? snprintf(prepared_candidate, sizeof(prepared_candidate),
-                                                   "%s/codebase-memory-mcp", prepared_dir)
-                                        : CLI_ERR;
-    prepared = prepared && cli_update_prep_step(prepared_candidate_length > 0 &&
-                                                    (size_t)prepared_candidate_length <
-                                                        sizeof(prepared_candidate),
-                                                "naming the candidate file", false, NULL, &failure);
-    cbm_activation_transaction_t *preparation = NULL;
-    stage_status = prepared ? cbm_activation_transaction_stage_bytes(prepared_candidate, bin_data,
-                                                                     (size_t)bin_len, &preparation)
-                            : CBM_ACTIVATION_TRANSACTION_IO;
-    prepared = prepared &&
-               cli_update_prep_step(
-                   stage_status == CBM_ACTIVATION_TRANSACTION_OK && preparation,
-                   "writing the unsigned candidate", stage_status == CBM_ACTIVATION_TRANSACTION_IO,
-                   cbm_activation_transaction_status_message(stage_status), &failure);
-    free(bin_data);
-    cli_binary_validator_t unsigned_validator = {{0}};
-    prepared = prepared &&
-               cli_update_prep_step(
-                   cli_activation_transaction_expected_build(preparation, &unsigned_validator),
-                   "fingerprinting the unsigned candidate", true, NULL, &failure) &&
-               cli_update_prep_step(cli_activation_transaction_commit_validated(
-                                        preparation, &unsigned_validator, CLI_OCTAL_PERM) == CLI_OK,
-                                    "publishing the unsigned candidate", false, NULL, &failure) &&
-               cli_update_prep_step(
-                   cli_activation_transaction_finalize_close(&preparation) == CLI_OK,
-                   "closing the unsigned candidate's transaction", false, NULL, &failure) &&
-               cli_update_prep_step(cbm_macos_adhoc_sign(prepared_candidate) == CLI_OK,
-                                    "signing the candidate ad hoc", false, NULL, &failure) &&
-               cli_update_prep_step(
-                   cbm_daemon_build_fingerprint_file(prepared_candidate, validator.fingerprint),
-                   "fingerprinting the signed candidate", true, NULL, &failure);
-    const char *prepared_argv[] = {prepared_candidate, "--version", NULL};
-    int version_rc = prepared ? cbm_exec_no_shell(prepared_argv) : CLI_OK;
-    char version_detail[80];
-    if (version_rc == CBM_NOT_FOUND) {
-        snprintf(version_detail, sizeof(version_detail), "it could not run or was killed");
-    } else {
-        snprintf(version_detail, sizeof(version_detail), "--version exited with status %d",
-                 version_rc);
-    }
-    prepared =
-        prepared && cli_update_prep_step(version_rc == CLI_OK, "running the signed candidate",
-                                         false, version_detail, &failure);
-    if (prepared) {
-        stage_status = cbm_activation_transaction_stage_file(bin_dest, prepared_candidate,
-                                                             &binary_transaction);
-        cli_binary_validator_t staged_validator = {{0}};
-        prepared =
-            cli_update_prep_step(
-                stage_status == CBM_ACTIVATION_TRANSACTION_OK && binary_transaction,
-                "staging the signed candidate", stage_status == CBM_ACTIVATION_TRANSACTION_IO,
-                cbm_activation_transaction_status_message(stage_status), &failure) &&
-            cli_update_prep_step(
-                cli_activation_transaction_expected_build(binary_transaction, &staged_validator),
-                "fingerprinting the staged candidate", true, NULL, &failure) &&
-            cli_update_prep_step(strcmp(staged_validator.fingerprint, validator.fingerprint) == 0,
-                                 "comparing the staged and signed candidates", false,
-                                 "their fingerprints differ", &failure);
-        if (prepared) {
-            validator = staged_validator;
-        }
-    }
-    (void)cli_activation_transaction_abort(&preparation);
-    if (prepared_candidate_length > 0 &&
-        (size_t)prepared_candidate_length < sizeof(prepared_candidate)) {
-        (void)cbm_unlink(prepared_candidate);
-    }
-    if (prepared_dir_length > 0 && (size_t)prepared_dir_length < sizeof(prepared_dir)) {
-        (void)cbm_rmdir(prepared_dir);
-    }
-    if (!prepared) {
-        cli_update_prep_report(&failure);
-        (void)cli_activation_transaction_abort(&binary_transaction);
-        return CLI_TRUE;
-    }
-#else
-    errno = 0;
-    stage_status = cbm_activation_transaction_stage_bytes(bin_dest, bin_data, (size_t)bin_len,
-                                                          &binary_transaction);
-    /* POSIX only: Windows staging reports through GetLastError, not errno. */
-#ifdef _WIN32
-    int stage_error = 0;
-#else
-    int stage_error = stage_status == CBM_ACTIVATION_TRANSACTION_IO ? errno : 0;
-#endif
-    free(bin_data);
-    if (stage_status != CBM_ACTIVATION_TRANSACTION_OK || !binary_transaction) {
-        if (stage_error != 0) {
-            (void)fprintf(stderr, "error: failed to stage verified update: %s: %s\n",
-                          cbm_activation_transaction_status_message(stage_status),
-                          strerror(stage_error));
-        } else {
-            (void)fprintf(stderr, "error: failed to stage verified update: %s\n",
-                          cbm_activation_transaction_status_message(stage_status));
-        }
-        (void)cli_activation_transaction_abort(&binary_transaction);
-        return CLI_TRUE;
-    }
-    if (!cli_activation_transaction_expected_build(binary_transaction, &validator)) {
-        (void)fprintf(stderr, "error: failed to fingerprint the staged update\n");
-        (void)cli_activation_transaction_abort(&binary_transaction);
-        return CLI_TRUE;
-    }
-#ifndef _WIN32
-    const char *staged = cbm_activation_transaction_staged_path(binary_transaction);
-    const char *candidate_argv[] = {staged, "--version", NULL};
-    if (!staged || cbm_exec_no_shell(candidate_argv) != 0) {
-        (void)fprintf(stderr, "error: staged update candidate failed its execution check\n");
-        (void)cli_activation_transaction_abort(&binary_transaction);
-        return CLI_TRUE;
-    }
-#endif
-#endif
-    cli_update_activation_t activation = {
-        .bin_dest = bin_dest,
-        .home = args.home,
-        .binary_transaction = binary_transaction,
-        .binary_validator = validator,
-        .delete_indexes = args.delete_indexes,
-    };
-    int activation_rc =
-        cli_activation_guard(CBM_DAEMON_RUNTIME_ACTIVATION_UPDATE, NULL, validator.fingerprint,
-                             cli_update_activate_binary, &activation);
-    if (activation.binary_transaction) {
-        (void)cli_activation_transaction_abort(&activation.binary_transaction);
-    }
-    return activation_rc == CLI_OK ? CLI_OK : CLI_TRUE;
-}
-
-#endif /* CBM_CLI_ENABLE_TEST_API */
-
-#ifdef CBM_CLI_ENABLE_TEST_API
-/* Update-only helpers. The release build hands updating to the install
- * script, so none of this ships: no release URL construction, no archive
- * download, no extract-and-exec. Retained for the C suite, which still
- * covers the flow through the activation test seam. */
-/* Build the download URL for the update command. */
-static void build_update_url(char *url, int url_sz, const char *os, const char *arch,
-                             const char *ext) {
-    char base_url_buf[CLI_BUF_512];
-    const char *base_url =
-        cbm_safe_getenv("CBM_DOWNLOAD_URL", base_url_buf, sizeof(base_url_buf), NULL);
-    if (!base_url || !base_url[0]) {
-        base_url = "https://github.com/DeusData/codebase-memory-mcp/releases/latest/download";
-    }
-    /* Linux ships a fully-static "-portable" build; the standard linux binary
-     * dynamically links glibc 2.38+ and fails on older distros. macOS/Windows
-     * have no such variant. Keep in sync with install.sh / install.js / pypi
-     * _cli.py. */
-    const char *portable = (strcmp(os, "linux") == 0) ? "-portable" : "";
-    snprintf(url, url_sz, "%s/codebase-memory-mcp-%s-%s%s.%s", base_url, os, arch, portable, ext);
-}
-
-/* Confirm index deletion before network I/O, but defer the deletion itself to
- * the final guarded activation after the verified binary is ready. Returns 0
- * to continue and 1 to abort. */
-static int update_prepare_clear_indexes(const char *home, bool dry_run, bool *delete_indexes_out) {
-    if (delete_indexes_out) {
-        *delete_indexes_out = false;
-    }
-    int index_count = count_db_indexes(home);
-    if (index_count == 0) {
-        return 0;
-    }
-    printf("Found %d existing index(es) that must be rebuilt after update:\n", index_count);
-    cbm_list_indexes(home);
-    printf("\n");
-    if (dry_run) {
-        printf("(dry-run — indexes would be deleted)\n\n");
-        return 0;
-    }
-    if (!prompt_yn("Delete these indexes and continue with update?")) {
-        printf("Update cancelled.\n");
-        return CLI_TRUE;
-    }
-    if (delete_indexes_out) {
-        *delete_indexes_out = true;
-    }
-    return 0;
-}
-
-/* Download and verify before disruption, then activate under daemon locks. */
-static int download_verify_install(const char *url, const char *ext, const char *os,
-                                   const char *arch, const char *bin_dest, const char *home,
-                                   bool delete_indexes) {
-    char tmp_archive[CLI_BUF_256];
-    int archive_path_length =
-        snprintf(tmp_archive, sizeof(tmp_archive), "%s/cbm-update-XXXXXX", cbm_tmpdir());
-    if (archive_path_length <= 0 || (size_t)archive_path_length >= sizeof(tmp_archive)) {
-        return CLI_TRUE;
-    }
-    int archive_descriptor = cbm_mkstemp(tmp_archive);
-    if (archive_descriptor < 0) {
-        return CLI_TRUE;
-    }
-#ifdef _WIN32
-    int archive_close_status = _close(archive_descriptor);
-#else
-    int archive_close_status = close(archive_descriptor);
-#endif
-    if (archive_close_status != 0) {
-        cbm_unlink(tmp_archive);
-        return CLI_TRUE;
-    }
-
-    int rc = cbm_download_to_file(url, tmp_archive);
-    if (rc != 0) {
-        (void)fprintf(stderr, "error: download failed (exit %d)\n", rc);
-        cbm_unlink(tmp_archive);
-        return CLI_TRUE;
-    }
-
-    char archive_name[CLI_BUF_256];
-    /* Must match build_update_url: linux uses the static "-portable" asset. */
-    const char *portable = (strcmp(os, "linux") == 0) ? "-portable" : "";
-    snprintf(archive_name, sizeof(archive_name), "codebase-memory-mcp-%s-%s%s.%s", os, arch,
-             portable, ext);
-    /* Fail closed: install only a positively-verified download. A mismatch,
-     * a missing checksum entry, or an unavailable hash tool (crc != 0) all
-     * abort rather than install an unverified binary. */
-    int crc = verify_download_checksum(tmp_archive, archive_name);
-    if (crc != 0) {
-        (void)fprintf(stderr, "error: refusing to install an unverified download\n");
-        cbm_unlink(tmp_archive);
-        return CLI_TRUE;
-    }
-
-    if (extract_and_install_binary((extract_install_args_t){
-            .tmp_archive = tmp_archive,
-            .ext = ext,
-            .bin_dest = bin_dest,
-            .home = home,
-            .delete_indexes = delete_indexes,
-        }) != 0) {
-        return CLI_TRUE;
-    }
-    return 0;
-}
-
-/* Case-insensitive prefix match (portable — no strncasecmp dependency). */
-static bool prefix_icase(const char *s, const char *prefix) {
-    while (*prefix) {
-        if (tolower((unsigned char)*s) != tolower((unsigned char)*prefix)) {
-            return false;
-        }
-        s++;
-        prefix++;
-    }
-    return true;
-}
-
-/* Fetch latest release tag from GitHub via redirect header.
- * Returns heap-allocated tag (e.g. "v0.5.7") or NULL on failure. */
-static char *fetch_latest_tag(void) {
-    FILE *fp = cbm_popen(
-        "curl -sfI https://github.com/DeusData/codebase-memory-mcp/releases/latest 2>/dev/null",
-        "r");
-    if (!fp) {
-        return NULL;
-    }
-    char line[CBM_SZ_512];
-    char *tag = NULL;
-    while (fgets(line, sizeof(line), fp)) {
-        if (!prefix_icase(line, "location:")) {
-            continue;
-        }
-        char *slash = strrchr(line, '/');
-        if (!slash) {
-            break;
-        }
-        slash++;
-        size_t len = strlen(slash);
-        while (len > 0 && (slash[len - SKIP_ONE] == '\r' || slash[len - SKIP_ONE] == '\n' ||
-                           slash[len - SKIP_ONE] == ' ')) {
-            slash[--len] = '\0';
-        }
-        if (len > 0) {
-            tag = strdup(slash);
-        }
-        break;
-    }
-    cbm_pclose(fp);
-    return tag;
-}
-
-/* Check if current version is already latest. Returns true to skip update. */
-static bool check_already_latest(void) {
-    char dl_env[CBM_SZ_256] = "";
-    cbm_safe_getenv("CBM_DOWNLOAD_URL", dl_env, sizeof(dl_env), NULL);
-    if (dl_env[0]) {
-        return false; /* testing override — always update */
-    }
-    char *latest = fetch_latest_tag();
-    if (!latest) {
-        (void)fprintf(stderr, "warning: could not check latest version (network unavailable?). "
-                              "Proceeding with update.\n");
-        return false;
-    }
-    int cmp = cbm_compare_versions(latest, CBM_VERSION);
-    if (cmp <= 0) {
-        if (cmp < 0) {
-            printf("Already up to date (%s, ahead of latest %s).\n", CBM_VERSION, latest);
-        } else {
-            printf("Already up to date (%s).\n", CBM_VERSION);
-        }
-        free(latest);
-        return true;
-    }
-    printf("Update available: %s -> %s\n", CBM_VERSION, latest);
-    free(latest);
-    return false;
-}
-
-#endif /* CBM_CLI_ENABLE_TEST_API */
-
-/* Is the installer script actually present beside the binary? (#1632)
- *
- * `update` hands off to install.sh / install.ps1 and prints the command to run.
- * It derived that path from the binary's own location, which is not the same
- * question: the installer is placed beside the binary by install.sh, but a
- * binary moved, packaged, or built from source has no installer next to it, and
- * we still printed the path. The user's session then ended on a command that
- * cannot run.
- *
- * Checked with cbm_path_info_utf8 so a non-ASCII install path resolves on
- * Windows. A symlink counts: it is reported rather than followed, and the shell
- * will run it perfectly well. */
-bool cbm_cli_installer_beside_binary(const char *dir) {
-    if (!dir || !dir[0]) {
-        return false;
-    }
-    char script[CLI_BUF_1K];
-#ifdef _WIN32
-    const char *name = "install.ps1";
-#else
-    const char *name = "install.sh";
-#endif
-    int written = snprintf(script, sizeof(script), "%s/%s", dir, name);
-    if (written <= 0 || (size_t)written >= sizeof(script)) {
-        return false;
-    }
-    cbm_path_info_t info;
-    return cbm_path_info_utf8(script, &info) == 0 && !info.is_directory;
-}
-
 int cbm_cmd_update(int argc, char **argv) {
-    parse_auto_answer(argc, argv);
-
-    bool dry_run = false;
-    bool force = false;
-    bool legacy_variant_flag = false;
-    for (int i = 0; i < argc; i++) {
-        if (strcmp(argv[i], "--dry-run") == 0) {
-            dry_run = true;
-        } else if (strcmp(argv[i], "--force") == 0) {
-            force = true;
-        } else if (strcmp(argv[i], "--ui") == 0 || strcmp(argv[i], "--standard") == 0) {
-            /* v0.10.2 deleted the ui/standard chooser and, with it, these flags —
-             * which turned `update --ui` from a working command into a hard
-             * error for everyone who had it in a script, an alias, or muscle
-             * memory (#1544). Removing a CHOICE is fine; removing the WORDS
-             * people type is a break we owe them nothing for. Accept both,
-             * ignore them, and say once why they no longer mean anything. */
-            legacy_variant_flag = true;
-        } else if (strcmp(argv[i], "-y") != 0 && strcmp(argv[i], "--yes") != 0 &&
-                   strcmp(argv[i], "-n") != 0 && strcmp(argv[i], "--no") != 0) {
-            (void)fprintf(stderr, "error: unknown update option: %s\n", argv[i]);
-            return CLI_TRUE;
-        }
-    }
-    if (legacy_variant_flag) {
-        (void)fprintf(stderr, "note: --ui/--standard are accepted but no longer do anything; since "
-                              "v0.10.0 there is one build per platform and it always includes the "
-                              "graph UI.\n");
-    }
-    if (cli_resolve_install_hooks(false, true) != CLI_OK) {
-        return CLI_TRUE;
-    }
-
-    /* #1566: we cannot update a binary a package manager owns, and pretending
-     * otherwise is the dishonest-success pattern this project keeps fixing:
-     * reporting that an update ran while changing nothing leaves the user
-     * convinced they are current. Refuse, and name the command that WILL work. */
-    {
-        char self_path[CLI_BUF_1K] = {0};
-        const char *home = cbm_get_home_dir();
-        bool self_exact = home && cbm_detect_self_path(self_path, sizeof(self_path), home);
-        char managed_dir[CLI_BUF_1K] = {0};
-        if (self_exact && home) {
-            snprintf(managed_dir, sizeof(managed_dir), "%s/.local/bin", home);
-        }
-        if (self_exact && cli_binary_is_externally_managed(self_path, true, managed_dir)) {
-            const char *manager = cli_external_manager_name(self_path);
-            (void)fprintf(stderr,
-                          "error: this binary is managed by %s, so `update` cannot replace it:\n"
-                          "  %s\n",
-                          manager ? manager : "another installer", self_path);
-            if (manager && strcmp(manager, "mise") == 0) {
-                (void)fprintf(stderr, "  update it with: mise upgrade codebase-memory-mcp\n");
-            } else if (manager && strcmp(manager, "Homebrew") == 0) {
-                (void)fprintf(stderr, "  update it with: brew upgrade codebase-memory-mcp\n");
-            } else if (manager && strcmp(manager, "FreeBSD pkg") == 0) {
-                (void)fprintf(stderr, "  update it with: pkg upgrade codebase-memory-mcp\n");
-            } else {
-                (void)fprintf(stderr, "  update it through whichever tool installed it.\n");
-            }
-            (void)fprintf(stderr, "  to refresh only the agent configurations, run: "
-                                  "codebase-memory-mcp install --skip-binary\n");
-            return CLI_TRUE;
-        }
-    }
-
-    /* Updates run from the install script, not from this process — on every
-     * platform.
-     *
-     * Windows forced the split first: a running .exe cannot replace itself, so
-     * an in-process updater needed a second resident binary to swap the first
-     * one out, and that launcher stub was exactly the shape Defender's ML
-     * scores as a dropper.
-     *
-     * The rest followed for the same reason rather than a different one. An
-     * in-process updater is, structurally, a downloader: it fetches a remote
-     * archive, extracts it, marks the result executable and runs it. That is
-     * the behaviour Microsoft's Wacatac family describes almost verbatim, and
-     * carrying it in the product binary put download/extract/chmod/exec in
-     * every shipped artifact for a command most users run a handful of times.
-     *
-     * The install script already does all of it, is idempotent -- so re-running
-     * it IS the update -- and runs while cbm is NOT running. Print the exact
-     * command instead of feigning self-update. */
-#ifndef CBM_CLI_ENABLE_TEST_API
-    /* A release build has nothing to do but hand off. The flags are still
-     * parsed and validated above, so `update --dry-run` and friends keep
-     * rejecting typos instead of silently accepting them. */
-    (void)dry_run;
-    (void)force;
-#endif
-#ifdef CBM_CLI_ENABLE_TEST_API
-    if (g_cli_activation_test_ops_set) {
-        (void)fprintf(stderr, "*** cbm test seam: portable update flow engaged; the "
-                              "script-update handoff is bypassed (test builds only) ***\n");
-    } else
-#endif
-    {
-        char self_dir[CLI_BUF_1K] = {0};
-        bool have_dir = false;
-        /* cbm_detect_self_path resolves wide on Windows (non-ASCII install
-         * paths survive) and normalizes to forward separators on every
-         * platform, so one branch serves both. */
-        char *last_sep = cbm_detect_self_path(self_dir, sizeof(self_dir), cbm_get_home_dir())
-                             ? strrchr(self_dir, '/')
-                             : NULL;
-        if (last_sep) {
-            *last_sep = '\0';
-            have_dir = true;
-        }
-        printf("codebase-memory-mcp update (current: %s)\n\n", CBM_VERSION);
-#ifdef _WIN32
-        /* The printed command deliberately carries NO execution-policy override.
-         * A policy-bypass invocation is one of the most heavily weighted
-         * malicious-script patterns there is, and emitting it as a literal put
-         * that signature inside every Windows artifact we distribute — to save
-         * the user one documented step. Pointing at Unblock-File reaches the
-         * same outcome and leaves the policy decision with them. README's
-         * Windows install section carries the override for the
-         * restricted-policy case: documentation is the right place to hand out
-         * that incantation, a shipped binary is not. */
-        printf("The update runs from install.ps1, not from this process. Close any\n"
-               "running sessions, then run\n\n");
-        if (have_dir) {
-            printf("  powershell -File \"%s/install.ps1\"\n\n", self_dir);
-        } else {
-            printf("  powershell -File install.ps1\n"
-                   "  (ships in the release archive, and is placed beside the\n"
-                   "  binary on install)\n\n");
-        }
-        printf("It downloads the latest release, verifies its checksum, and replaces\n"
-               "this binary in place. If PowerShell refuses to run the script, it is\n"
-               "usually because the file arrived from the internet: run\n"
-               "'Unblock-File install.ps1' first. If your execution policy still\n"
-               "blocks it, the README's Windows install section lists the options.\n");
-#else
-        printf("The update runs from install.sh, not from this process. Run\n\n");
-        if (have_dir) {
-            printf("  bash \"%s/install.sh\"\n\n", self_dir);
-        } else {
-            printf("  install.sh (ships in the release archive, and is placed\n"
-                   "  beside the binary on install)\n\n");
-        }
-        printf("It downloads the latest release, verifies its checksum, and replaces\n"
-               "this binary in place. install.sh is idempotent, so re-running it IS\n"
-               "the update. One build per platform — the graph UI is always\n"
-               "included.\n");
-#endif
-        return 0;
-    }
-
-    /* Everything below is the in-process updater and is excluded from release
-     * builds entirely -- that exclusion, not dead-code elimination, is what
-     * keeps download/extract/chmod/exec and the release URLs out of the
-     * shipped artifact. */
-#ifdef CBM_CLI_ENABLE_TEST_API
-    const char *home = cbm_get_home_dir();
-    if (!home) {
-        (void)fprintf(stderr, "error: HOME not set (use USERPROFILE on Windows)\n");
-        return CLI_TRUE;
-    }
-
-    printf("codebase-memory-mcp update (current: %s)\n\n", CBM_VERSION);
-
-    /* Version check — skip download if already on latest (not in dry-run). */
-    if (!force && !dry_run && check_already_latest()) {
-        return 0;
-    }
-
-    /* Step 1: Check for existing indexes */
-    bool delete_indexes = false;
-    if (update_prepare_clear_indexes(home, dry_run, &delete_indexes) != 0) {
-        return CLI_TRUE;
-    }
-
-    const char *os = detect_os();
-    const char *arch = detect_arch();
-    const char *ext = strcmp(os, "windows") == 0 ? "zip" : "tar.gz";
-
-    char url[CLI_BUF_512];
-    build_update_url(url, sizeof(url), os, arch, ext);
-
-    if (dry_run) {
-        printf("\nWould download the binary for %s/%s ...\n", os, arch);
-    } else {
-        printf("\nDownloading the binary for %s/%s ...\n", os, arch);
-    }
-    printf("  %s\n", url);
-
-    if (dry_run) {
-        printf("\n(dry-run — skipping download, extraction, and binary replacement)\n");
-#ifdef _WIN32
-        printf("  target: %s/.local/bin/codebase-memory-mcp.exe\n", home);
-#else
-        printf("  target: %s/.local/bin/codebase-memory-mcp\n", home);
-#endif
-        printf("  os/arch: %s/%s\n", os, arch);
-        printf("\nUpdate dry-run complete.\n");
-        return 0;
-    }
-
-    /* Step 4-5: Download, verify, and install binary */
-    char bin_dest_storage[CLI_BUF_1K];
-    const char *bin_dest = bin_dest_storage;
-#ifdef _WIN32
-    snprintf(bin_dest_storage, sizeof(bin_dest_storage), "%s/.local/bin/codebase-memory-mcp.exe",
-             home);
-#else
-    snprintf(bin_dest_storage, sizeof(bin_dest_storage), "%s/.local/bin/codebase-memory-mcp", home);
-#endif
-    char bin_dir[CLI_BUF_1K];
-    snprintf(bin_dir, sizeof(bin_dir), "%s/.local/bin", home);
-    if (!cbm_mkdir_p(bin_dir, CLI_OCTAL_PERM)) {
-        (void)fprintf(stderr, "error: cannot prepare update directory %s\n", bin_dir);
-        return CLI_TRUE;
-    }
-
-    int rc = download_verify_install(url, ext, os, arch, bin_dest, home, delete_indexes);
-    if (rc != 0) {
-        return CLI_TRUE;
-    }
-
-    /* Step 6: Agent configs were refreshed inside the protected activation
-     * callback. Verify the new version only after that complete mutation. */
-    printf("\nUpdate complete. Verifying:\n");
-    {
-        const char *ver_argv[] = {bin_dest, "--version", NULL};
-        (void)cbm_exec_no_shell(ver_argv);
-    }
-
-    printf("\nAll project indexes were cleared. They will be rebuilt\n");
-    printf("automatically when you next use the MCP server.\n");
-    printf("\nUpdate complete. Please restart your coding-agent sessions to "
-           "properly take this into account.\n");
-    return 0;
-#endif /* CBM_CLI_ENABLE_TEST_API */
+    (void)argc;
+    (void)argv;
+    (void)fprintf(stderr,
+                  CBM_COMMAND_NAME " update does not download or replace binaries.\n\n"
+                                   "%s",
+                  CBM_UPGRADE_HINT);
+    return CLI_TRUE;
 }
 
 /* ── CLI tool arguments (flags / --args-file / --help) ────────────── */
@@ -15322,6 +13887,17 @@ bool cbm_cli_stdin_allowed_for_schema_for_test(const char *schema_str,
 }
 #endif
 
+/* The linked executable may build query_graph flag arguments in Rust. A
+ * non-NULL result goes straight to the existing daemon request as JSON. The
+ * legacy parser still owns diagnostics for inputs the callback declines. */
+typedef char *(*cli_query_args_builder_fn)(const char *schema, int argc, char **argv);
+static cli_query_args_builder_fn cli_query_args_builder;
+
+void cbm_cli_set_query_args_builder(cli_query_args_builder_fn builder);
+void cbm_cli_set_query_args_builder(cli_query_args_builder_fn builder) {
+    cli_query_args_builder = builder;
+}
+
 char *cbm_cli_build_args_json(const char *tool_name, int argc, char **argv, char **err_out) {
     if (err_out) {
         *err_out = NULL;
@@ -15330,6 +13906,12 @@ char *cbm_cli_build_args_json(const char *tool_name, int argc, char **argv, char
     /* The tool's input_schema (may be NULL for an unknown tool — then every
      * value is treated as a string). Static lifetime; do not free. */
     const char *schema_str = cbm_mcp_tool_input_schema(tool_name);
+    if (schema_str && cli_query_args_builder && strcmp(tool_name, "query_graph") == 0) {
+        char *rust_json = cli_query_args_builder(schema_str, argc, argv);
+        if (rust_json) {
+            return rust_json;
+        }
+    }
     yyjson_doc *schema_doc = NULL;
     yyjson_val *props = NULL;
     if (schema_str) {
@@ -15470,10 +14052,10 @@ int cbm_cli_print_tool_help(const char *tool_name) {
     yyjson_val *required = root ? yyjson_obj_get(root, "required") : NULL;
 
     printf("Usage:\n");
-    printf("  codebase-memory-mcp cli %s --flag value [--flag2 value2 ...]\n", tool_name);
-    printf("  codebase-memory-mcp cli %s --args-file <path-to-json>\n", tool_name);
-    printf("  echo '<json>' | codebase-memory-mcp cli %s\n", tool_name);
-    printf("  codebase-memory-mcp cli %s '<raw-json-args>'\n", tool_name);
+    printf("  mori cli %s --flag value [--flag2 value2 ...]\n", tool_name);
+    printf("  mori cli %s --args-file <path-to-json>\n", tool_name);
+    printf("  echo '<json>' | mori cli %s\n", tool_name);
+    printf("  mori cli %s '<raw-json-args>'\n", tool_name);
 
     printf("\nFlags:\n");
     if (props && yyjson_is_obj(props)) {

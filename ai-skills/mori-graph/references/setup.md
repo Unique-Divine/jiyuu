@@ -2,54 +2,77 @@
 
 ## Install From a Release
 
-Mori ships as `mori/v*` releases of https://github.com/Unique-Divine/jiyuu,
-with archives for `linux-x64`, `linux-arm64`, and `darwin-arm64`, a
-`checksums.txt`, and build provenance attestations. Install with mise's
-`github:` backend, which picks the archive for the platform:
+Mori ships as `mori/v*` releases of https://github.com/Unique-Divine/jiyuu.
+The published C release `mori/v0.13.1` packages `codebase-memory-mcp`
+for Linux x64 and arm64 and macOS arm64. **On 0.13.1, substitute
+`codebase-memory-mcp` for the executable name `mori` throughout this page.**
+This applies to executable paths, daemon commands, MCP registration, hooks,
+indexing, and cross-repo linking. Keep the MCP server key `mori-graph`.
+
+Install 0.13.1 with mise's `github:` backend.
 
 ```toml
 # ~/.config/mise/config.toml
 [tools]
-"github:Unique-Divine/jiyuu" = { version = "0.13.0", version_prefix = "mori/v" }
+"github:Unique-Divine/jiyuu" = { version = "0.13.1", version_prefix = "mori/v" }
 ```
 
 ```sh
-mise lock --platform linux-arm64,linux-x64,macos-arm64   # with lockfile = true
 mise install
-codebase-memory-mcp --version   # codebase-memory-mcp 0.13.0
+codebase-memory-mcp --version  # codebase-memory-mcp 0.13.1
 ```
 
-The archive holds one binary, `codebase-memory-mcp`, which mise exposes
-through its shim. To upgrade, bump `version`, relock, install, then restart
-the background daemon, which keeps the old binary until it restarts:
+For a published release with a `mori-<version>-<target>.tar.gz` archive,
+pin that version and use its `mori` executable. With `lockfile = true`,
+lock the platforms you use before installing.
+
+To upgrade, bump `version`, relock, install, then restart the background
+daemon, which keeps the old binary until it restarts:
 
 ```sh
-codebase-memory-mcp daemon stop
+mori daemon stop
 ```
 
-Remove any hand-built `codebase-memory-mcp` earlier on `PATH` (for example in
-`~/.local/bin`), or it keeps shadowing the release.
+Remove any hand-built `mori` or `codebase-memory-mcp` earlier on `PATH`
+(for example in `~/.local/bin`), or it keeps shadowing the release.
+
+Without mise, download the archive from the release page, check it against
+`checksums.txt`, and unpack `mori` onto `PATH`. On macOS, a browser download
+needs `xattr -d com.apple.quarantine mori` before Gatekeeper runs it; see
+[Install](https://github.com/Unique-Divine/jiyuu/blob/main/mori/README.md#install) in
+Mori's README.
 
 ## Register the MCP Server
 
 Register the server once per client under the key `mori-graph`, with the
 binary path and no arguments. Use a path that survives upgrades, such as
-the mise shim (`~/.local/share/mise/shims/codebase-memory-mcp`) or a link to
-it:
+the mise shim (`~/.local/share/mise/shims/mori`) or a link to it:
 
 ```sh
-claude mcp add --scope user mori-graph -- ~/.local/share/mise/shims/codebase-memory-mcp
-codex mcp add mori-graph -- ~/.local/share/mise/shims/codebase-memory-mcp
+claude mcp add --scope user mori-graph -- ~/.local/share/mise/shims/mori
+codex mcp add mori-graph -- ~/.local/share/mise/shims/mori
 ```
 
 The key, not the binary, names the tools (`mcp__mori-graph__search_graph`),
 so rename it in hook matchers, permission rules, and agent profiles that
-list tools. Claude Code hooks that run `codebase-memory-mcp hook-augment`
-keep working through the same binary path.
+list tools. Claude Code hooks that run `mori hook-augment` work through the
+same binary path; [Hooks and Tool Profiles](https://github.com/Unique-Divine/jiyuu/blob/main/mori/README.md#hooks-and-tool-profiles)
+in Mori's README lists the hook entries and the `--tool-profile` option.
 
-Don't run `codebase-memory-mcp install` or `update`: they rewrite this
-skill, register the server as `codebase-memory-mcp`, and fetch a build
-without Mori's GraphQL linking.
+The installer and updater built into 0.13.1 still contact the upstream
+project's releases. Use the registration commands above and install through
+mise or the Jiyuu release archive.
+
+When switching an existing `mori-graph` entry, change its command path
+and keep its arguments and environment. The `mori` shim stays the same
+across Mori upgrades. If the shim is unavailable, register the executable
+from `mise which mori` and update its path on upgrades. On rollback across
+the rename, restore the previous `codebase-memory-mcp` command and hook paths.
+
+In Claude Code, update the graph-tool `PostToolUse` matcher to
+`Read|mcp__.*(mori-graph|codebase-memory-mcp)__.*` with the Mori hook.
+Otherwise the legacy matcher misses `mori-graph` calls that reset the
+search reminder. Keep the original matcher for rollback.
 
 ## Build From Source
 
@@ -60,16 +83,17 @@ separate cache rather than installing it over the release.
 ## Index a Repo
 
 ```sh
-codebase-memory-mcp cli --quiet index_repository --repo_path ~/some-repo
+mori cli --quiet index_repository --repo_path ~/some-repo
 ```
 
 - **Exclude data and build output** with a `.cbmignore` (gitignore syntax) at
   the repo root. JSON keys alone can outnumber code nodes ten to one. In repos
   you don't own, keep the file out of git with
   `echo /.cbmignore >> "$(git rev-parse --git-path info/exclude)"`.
-- **Map extra extensions** in `~/.config/codebase-memory-mcp/config.json`, for
-  example `{"extra_extensions": {".graphqls": "graphql"}}` on builds that
-  don't map it already.
+- **Map extra extensions** in `~/.config/codebase-memory-mcp/config.json`
+  (the path keeps its imported name), for example
+  `{"extra_extensions": {".graphqls": "graphql"}}` on builds that don't map it
+  already.
 - **Retry a busy repo.** `aborted_previous_preserved` means files changed
   while indexing; the old index keeps serving. Run it again.
 - **Never test with "gql" in a repo's path.** GraphQL calls are recognized by
@@ -81,7 +105,7 @@ codebase-memory-mcp cli --quiet index_repository --repo_path ~/some-repo
 Cross-repo links are a separate pass, run per source project:
 
 ```sh
-codebase-memory-mcp cli --quiet index_repository \
+mori cli --quiet index_repository \
   '{"repo_path":"/path/to/client-repo","mode":"cross-repo-intelligence","target_projects":["server-project"]}'
 ```
 

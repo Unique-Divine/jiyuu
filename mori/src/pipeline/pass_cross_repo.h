@@ -9,6 +9,21 @@
 
 #include <stdatomic.h>
 
+typedef enum {
+    CBM_CROSS_ROUTE_KEEP,
+    CBM_CROSS_ROUTE_DROP,
+    CBM_CROSS_ROUTE_LINK_AMBIGUOUS,
+    CBM_CROSS_ROUTE_LINK_RESOLVED,
+} cbm_cross_route_action_t;
+
+typedef cbm_cross_route_action_t (*cbm_graphql_link_policy_fn)(bool provider_side, bool has_handler,
+                                                               bool ambiguous, bool names_other,
+                                                               bool existing_ambiguous);
+
+/* Register before starting C. The policy applies to GraphQL link runs when
+ * MORI_IMPL_GRAPHQL=rust. The C binary and other protocols use the C policy. */
+void cbm_cross_repo_set_graphql_link_policy(cbm_graphql_link_policy_fn policy);
+
 /* A store the ["*"] enumeration skipped instead of linking. */
 typedef struct {
     char *project;      /* heap-owned */

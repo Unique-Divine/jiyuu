@@ -16,6 +16,8 @@ mod export;
 mod ffi;
 #[cfg(all(feature = "c-backend", not(test)))]
 mod store;
+#[cfg(all(feature = "c-backend", not(test)))]
+mod tools;
 
 #[cfg(all(feature = "c-backend", test))]
 #[test]
@@ -35,6 +37,17 @@ fn rusqlite_uses_the_c_backend_sqlite() {
 
 #[cfg(any(feature = "c-backend", test))]
 mod gqlgen;
+#[cfg(any(feature = "c-backend", test))]
+mod link;
+
+#[cfg(any(feature = "c-backend", test))]
+mod stdio;
+
+#[cfg(any(feature = "c-backend", test))]
+mod graphql_link;
+
+#[cfg(any(feature = "c-backend", test))]
+mod query_cli;
 
 #[cfg(not(feature = "c-backend"))]
 fn main() {
