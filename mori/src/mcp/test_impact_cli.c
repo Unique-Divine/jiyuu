@@ -72,10 +72,10 @@ static const char *tic_work(const char *requested, char *buf, size_t cap) {
 
 static int tic_usage(void) {
     (void)fprintf(stderr,
-                  "usage: codebase-memory-mcp test-impact publish --repo DIR --out DIR\n"
+                  "usage: mori test-impact publish --repo DIR --out DIR\n"
                   "           [--previous BUNDLE] [--coverage DIR --observed-at EPOCH]\n"
                   "           [--platform LABEL] [--config FILE] [--work DIR] [--deadline-s N]\n"
-                  "       codebase-memory-mcp test-impact select --repo DIR --base REF\n"
+                  "       mori test-impact select --repo DIR --base REF\n"
                   "           [--config FILE] [--artifact BUNDLE --artifact-commit SHA\n"
                   "           --artifact-verified] [--platform LABEL] [--work DIR]\n"
                   "           [--deadline-s N] [--vetoed-out FILE]\n");

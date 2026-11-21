@@ -30,7 +30,7 @@ const char *cbm_cli_get_version(void);
 /* Top-level `cli --help` text printed by run_cli() in src/main.c.
  * Documents tool-level --format without adding a session-wide flag (#2102). */
 #define CBM_CLI_USAGE                                                                         \
-    "Usage: codebase-memory-mcp cli [--quiet] [--progress] [--verbose] [--json] <tool_name> " \
+    "Usage: mori cli [--quiet] [--progress] [--verbose] [--json] <tool_name> " \
     "[json_args]\n"                                                                           \
     "  --quiet     Show errors only; cannot combine with --progress or outer --verbose\n"     \
     "  --progress  Show lifecycle progress even when stderr is redirected\n"                  \
@@ -302,10 +302,6 @@ bool cbm_cli_selects_registry_client_for_testing(const char *stable_id);
 #endif
 
 #ifdef CBM_CLI_ENABLE_TEST_API
-/* #1566: name the package manager that owns a binary path, or NULL when it is
- * not recognisably foreign. Detection must be positive evidence — see the
- * implementation comment. */
-const char *cbm_cli_external_manager_name_for_testing(const char *self_path);
 /* #2722: override runtime binary self-path detection for testing. */
 void cbm_cli_set_self_path_override_for_test(const char *self_path);
 /* #1558: expose the config-key table so a test can prove a key is discoverable
@@ -615,21 +611,21 @@ void cbm_cli_set_activation_scope_cache_unreadable_for_test(bool unreadable);
 
 /* ── Subcommands (wired from main.c) ─────────────────────────── */
 
-/* install: copy binary, install skills, install editor MCP configs, ensure PATH.
- * Prompts to delete old indexes if any exist — rejects on "no". */
+/* install: register the running binary as the mori-graph MCP server for
+ * Claude Code and Codex when present. Downloads nothing and writes no skills,
+ * hooks, or agent profiles. */
 int cbm_cmd_install(int argc, char **argv);
+
+/* Write the mori-graph server entry into Claude Code's .claude.json
+ * (mcpServers) or Codex's config.toml (a managed block). Exposed for testing. */
+int cbm_install_mori_claude_mcp(const char *binary_path, const char *config_path);
+int cbm_install_mori_codex_mcp(const char *binary_path, const char *config_path);
 
 /* uninstall: remove skills, remove editor MCP configs, remove binary. */
 int cbm_cmd_uninstall(int argc, char **argv);
 
-/* update: check latest release, prompt for index deletion, prompt for ui/standard,
- * download and replace binary. */
-/* True when the installer script (install.sh / install.ps1 on Windows) is
- * present beside the binary. `update` prints a command built from this;
- * naming a path that does not exist ends the interaction on a failing
- * command (#1632). Exposed for testing. */
-bool cbm_cli_installer_beside_binary(const char *dir);
-
+/* update: print how to upgrade through mise and the mori/v* releases, and
+ * exit non-zero. It downloads nothing. */
 int cbm_cmd_update(int argc, char **argv);
 
 /* config: get/set/list/reset runtime config values. */
@@ -689,6 +685,11 @@ const char *cbm_hook_admission_notice(cbm_hook_admission_t reason, const char *h
  * augmentation. This is the daemon entry; it never arms a process-global
  * timer and never constructs a second store/session. */
 char *cbm_hook_augment_process(cbm_mcp_server_t *srv, const char *input_json);
+
+/* Whether a Claude tool name (mcp__<server>__<tool>, or a plugin's
+ * mcp__plugin_<plugin>_<server>__<tool>) names a Mori graph tool, under the
+ * mori-graph key or the old codebase-memory-mcp key. */
+bool cbm_hook_augment_is_graph_tool(const char *tool);
 
 /* Dialect-aware daemon entry. forced_event and dialect_name are borrowed and
  * may be NULL for the ordinary event dialect. Unsupported combinations fail

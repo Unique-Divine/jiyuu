@@ -1202,7 +1202,7 @@ def main():
                 "conflicting one-shot CLI unexpectedly ran beside the active daemon",
             )
             check(
-                "codebase-memory-mcp: " + expected_conflict
+                "mori: " + expected_conflict
                 in conflict_cli_result.stderr,
                 "conflicting one-shot CLI did not emit the exact visible diagnostic: "
                 + repr(conflict_cli_result.stderr),

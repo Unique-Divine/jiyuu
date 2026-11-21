@@ -657,7 +657,7 @@ bool cbm_workspace_root_allowed(const char *canonical_path, const char *home_dir
              * substituted. */
             snprintf(err, err_sz,
                      "%s is outside the allowed root. To allow it, run: "
-                     "codebase-memory-mcp allow-root %s",
+                     "mori allow-root %s",
                      canonical_path, canonical_path);
         }
         return false;
@@ -683,7 +683,7 @@ bool cbm_workspace_root_allowed(const char *canonical_path, const char *home_dir
         const char *flag = ws_verdict_approval_flag(verdict);
         if (flag) {
             snprintf(err, err_sz,
-                     "%s: %s. To index it anyway, run: codebase-memory-mcp allow-root %s %s",
+                     "%s: %s. To index it anyway, run: mori allow-root %s %s",
                      canonical_path, cbm_workspace_verdict_reason(verdict), flag, canonical_path);
         } else {
             snprintf(err, err_sz, "%s: %s", canonical_path, cbm_workspace_verdict_reason(verdict));
