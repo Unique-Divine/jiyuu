@@ -76,9 +76,9 @@ search reminder. Keep the original matcher for rollback.
 
 ## Build From Source
 
-For development, build from `mori/` in a Jiyuu checkout; see
-[tool-source.md](tool-source.md). Run the dev binary from `build/c/` with a
-separate cache rather than installing it over the release.
+Fetch the pinned grammars and build the linked `mori` in a Jiyuu checkout.
+Run `target/release/mori` with a separate cache and runtime. See
+[tool-source.md](tool-source.md) for the commands.
 
 ## Index a Repo
 
@@ -109,8 +109,10 @@ mori cli --quiet index_repository \
   '{"repo_path":"/path/to/client-repo","mode":"cross-repo-intelligence","target_projects":["server-project"]}'
 ```
 
-- **Reindex, then relink.** A full reindex drops the project's cross-repo
-  links. Rerun linking for it and for every project that links to it.
+- **Check for stale links.** After the first link run, reindexing the client
+  recomputes links using its saved targets. If a provider changes and
+  `index_status` reports `cross_repo.status` as `stale`, rerun the link command
+  for the affected client.
 - **One run per project, every target in it.** A link run replaces that
   project's earlier links, so a client calling two servers lists both in
   `target_projects` in a single run.

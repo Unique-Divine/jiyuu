@@ -18,11 +18,11 @@ settings to each subprocess explicitly.
 
 On a repository with GraphQL server Routes, inspect the matching index
 worker log at `<work>/b/cache/logs/.worker-log-*` for the
-\`msg=pass.route_nodes.graphql\` event with \`planner=rust\`, \`writer=rust\`, and a
+`msg=pass.route_nodes.graphql` event with `planner=rust`, `writer=rust`, and a
 positive Route count. If the reference build emits the same diagnostic,
-check side A for \`planner=c\`.
+check side A for `planner=c`.
 
-The polyglot fixture includes the GraphQL Route \`Query.fixtureItem\` and its
+The polyglot fixture includes the GraphQL Route `Query.fixtureItem` and its
 gqlgen resolver. The release workflow checks the worker marker and the
-published \`HANDLES\` edge. Verify client and cross-repo links with fixtures
+published `HANDLES` edge. Verify client and cross-repo links with fixtures
 that exercise those stages.

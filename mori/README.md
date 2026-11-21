@@ -638,13 +638,11 @@ echo '{"repo_path":"/path/to/client-repo","mode":"cross-repo-intelligence","targ
 - **Name the target** when two servers share field or route names.
   `["*"]` works when names are unique across projects; it skips indexes too
   old to link and lists them under `skipped_projects`.
-- **Reindex, then relink.** A full reindex drops the project's links. Rerun
-  the link run for it and for every project that links to it.
-- **Check the result.** `index_status` carries a `cross_repo` object:
-  `{"status":"never_run"}` until a link run has used the project as its
-  source, then `"ran"` with `last_run_at`, `outcome`, `targets`,
-  `projects_scanned`, `total_cross_edges`, and `skipped_projects`. That tells
-  "never linked" apart from "linked, nothing matched".
+- **Check the result.** `index_status` reports `cross_repo.status` as
+  `never_run` before the first link run and `ran` after a link run. It also
+  reports the targets, outcome, and edge count. A client reindex recomputes
+  links using its saved targets. If a provider changes and the client
+  reports `stale`, rerun the link command for that client.
 
 ### GraphQL Clients and gqlgen Resolvers
 
@@ -1097,26 +1095,22 @@ Terms used in Mori's code and design docs are in [LEXICON.md](LEXICON.md).
 
 ## Build
 
-Requirements: `gcc` (or `clang`), `make`, zlib development headers
-(`zlib1g-dev` on Debian and Ubuntu), `zstd`, `tar`, `git` and
-[Bun](https://bun.sh). The test scripts also use `bash` and `python3`.
+Install Rust, `gcc` or `clang`, `make`, zlib development headers
+(`zlib1g-dev` on Debian or Ubuntu), `zstd`, `tar`, `git`, and Bun. The test
+scripts also use `bash` and `python3`. [Bun](https://bun.sh)
+
+From the Jiyuu root, fetch the pinned grammars and build Mori.
 
 ```bash
-just mori-build      # from the Jiyuu root
-# or, inside mori/
-just build
+just --justfile mori/justfile grammars
+just mori-rs-build
+target/release/mori --version
 ```
 
-The binary is written to `build/c/codebase-memory-mcp`.
-
-```bash
-build/c/codebase-memory-mcp --version
-```
-
-The C build keeps the imported binary name. `just mori-rs-build` builds the
-`mori` binary from crate [`jiyuu-mori`](jiyuu-mori) with the C program
-linked in; `just mori-rs-check` runs the crate's pure-Rust checks. To embed
-the graph UI, see [Graph UI](#graph-ui).
+The [`jiyuu-mori`](jiyuu-mori) crate links the C graph engine.
+`just mori-rs-check` runs the pure Rust checks. `just mori-build` builds the
+standalone C comparison binary at `mori/build/c/codebase-memory-mcp`. For
+the embedded web interface, see [Graph UI](#graph-ui).
 
 ## Grammar Archive
 
