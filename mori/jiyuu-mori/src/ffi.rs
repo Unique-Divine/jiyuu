@@ -55,6 +55,24 @@ type OutlineReader = unsafe extern "C" fn(
     context: *mut c_void,
 ) -> c_int;
 
+type ProjectIdentityEmit = unsafe extern "C" fn(
+    context: *mut c_void,
+    name: *const c_char,
+    root_path: *const c_char,
+) -> c_int;
+type ProjectIdentityReader = unsafe extern "C" fn(
+    store: *mut c_void,
+    name_capacity: usize,
+    emit: ProjectIdentityEmit,
+    context: *mut c_void,
+) -> c_int;
+type ProjectStatsReader = unsafe extern "C" fn(
+    store: *mut c_void,
+    project: *const c_char,
+    nodes: *mut c_int,
+    edges: *mut c_int,
+);
+
 const STORE_OK: c_int = 0;
 const STORE_ERR: c_int = -1;
 const STORE_CANCELLED: c_int = -3;
@@ -95,12 +113,79 @@ unsafe extern "C" {
         user: *mut c_void,
     );
     fn cbm_mcp_set_read_override(handle: ReadOverride, release: ReleasePayload);
+    fn cbm_mcp_set_project_readers(
+        identity: ProjectIdentityReader,
+        stats: ProjectStatsReader,
+    );
     fn cbm_store_get_db(store: *mut c_void) -> *mut sqlite3;
     fn cbm_store_set_file_outline_reader(reader: OutlineReader);
     fn cbm_mcp_project_adr_presence(
         store: *mut c_void,
         project: *const c_char,
     ) -> c_int;
+}
+
+// The returned wrapper must be dropped before C releases its store.
+unsafe fn borrow_c_store(store: *mut c_void) -> Option<Store> {
+    // SAFETY: callers pass the live C store and use the wrapper within the
+    // callback. from_handle does not close the C connection on drop.
+    let db = unsafe { cbm_store_get_db(store) };
+    if db.is_null() {
+        return None;
+    }
+    Some(Store::from_connection(
+        unsafe { Connection::from_handle(db) }.ok()?,
+    ))
+}
+
+unsafe extern "C" fn read_project_identity(
+    store: *mut c_void,
+    name_capacity: usize,
+    emit: ProjectIdentityEmit,
+    context: *mut c_void,
+) -> c_int {
+    const SKIP: c_int = 0;
+    const MISSING_ROOT: c_int = -1;
+    panic::catch_unwind(|| {
+        // SAFETY: C passes an open query-only store and keeps it live until
+        // the callback returns.
+        let Some(store) = (unsafe { borrow_c_store(store) }) else {
+            return SKIP;
+        };
+        let Ok(Some(identity)) = store.project_identity(name_capacity) else {
+            return SKIP;
+        };
+        let Some(root_path) = identity.root_path else {
+            return MISSING_ROOT;
+        };
+        let (Ok(name), Ok(root_path)) =
+            (CString::new(identity.name), CString::new(root_path))
+        else {
+            return SKIP;
+        };
+        // SAFETY: C copies both strings synchronously into its project record.
+        unsafe { emit(context, name.as_ptr(), root_path.as_ptr()) }
+    })
+    .unwrap_or(SKIP)
+}
+
+unsafe extern "C" fn read_project_stats(
+    store: *mut c_void,
+    project: *const c_char,
+    nodes: *mut c_int,
+    edges: *mut c_int,
+) {
+    let result = panic::catch_unwind(|| {
+        // SAFETY: C keeps the store and project string live until return.
+        let store = unsafe { borrow_c_store(store) }?;
+        let project = unsafe { CStr::from_ptr(project) }.to_bytes();
+        Some(store.project_stats(project))
+    })
+    .ok()
+    .flatten()
+    .unwrap_or((STORE_ERR, STORE_ERR));
+    // SAFETY: C supplies distinct writable result fields in its record.
+    unsafe { (*nodes, *edges) = result };
 }
 
 unsafe extern "C" fn read_file_outline(
@@ -215,14 +300,7 @@ unsafe extern "C" fn read_override(
                 1 => Some(true),
                 _ => None,
             };
-        let db = unsafe { cbm_store_get_db(store) };
-        if db.is_null() {
-            return None;
-        }
-        // SAFETY: C retains ownership; from_handle leaves the existing
-        // connection open, and Rust finalizes its own statements on return.
-        let store =
-            Store::from_connection(unsafe { Connection::from_handle(db) }.ok()?);
+        let store = unsafe { borrow_c_store(store) }?;
         let payload = tools::graph_schema(
             &store,
             project_name,
@@ -328,6 +406,7 @@ pub unsafe extern "C" fn main(argc: c_int, argv: *mut *mut c_char) -> c_int {
     unsafe {
         cbm_mcp_set_read_override(read_override, release_payload);
         cbm_store_set_file_outline_reader(read_file_outline);
+        cbm_mcp_set_project_readers(read_project_identity, read_project_stats);
         cbm_c_main(argc, argv)
     }
 }
