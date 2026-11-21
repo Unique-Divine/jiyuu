@@ -23,9 +23,10 @@ path = "src/main.rs"
 c-backend = ["dep:rusqlite", "dep:serde", "dep:serde_json", "dep:sha2"]
 
 [dependencies]
-# This uses SQLite from libmori-c. `in_gecko` supplies bindings without
-# adding another SQLite build or a system-library link.
-rusqlite = { version = "0.41", default-features = false, features = ["in_gecko"], optional = true }
+# The whole-archive link of libmori-c supplies every SQLite symbol before the
+# linker considers rusqlite's bundled archive. Keep the bundled feature so
+# other workspace binaries can link SQLite when Cargo unifies features.
+rusqlite = { version = "0.41", default-features = false, features = ["bundled"], optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1.0.151", optional = true }
 sha2 = { version = "0.10", optional = true }

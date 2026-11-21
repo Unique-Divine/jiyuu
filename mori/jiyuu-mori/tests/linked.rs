@@ -90,9 +90,19 @@ fn assert_same(args: &[&str]) {
     );
 }
 
+/// `mori --version` names `mori`; the version and everything else match C.
 #[test]
 fn version_matches_c() {
-    assert_same(&["--version"]);
+    let c = run(&c_binary(), "c", &["--version"]);
+    let rs = run(Path::new(MORI), "rs", &["--version"]);
+    assert!(c.status.success() && rs.status.success());
+    let c_out = String::from_utf8_lossy(&c.stdout);
+    let rs_out = String::from_utf8_lossy(&rs.stdout);
+    let version = c_out
+        .strip_prefix("codebase-memory-mcp ")
+        .unwrap_or_else(|| panic!("C --version printed {c_out:?}"));
+    assert_eq!(rs_out, format!("mori {version}"));
+    assert_eq!(c.stderr, rs.stderr);
 }
 
 #[test]
@@ -105,8 +115,8 @@ fn unknown_tool_error_matches_c() {
     assert_same(&["cli", "no_such_tool"]);
 }
 
-/// A small repository written by the test: Python and Go, each with one
-/// call. Both binaries index the same path, so project names match.
+/// A small repository with Python and Go calls and a gqlgen server. Both
+/// binaries index the same path, so project names match.
 struct Fixture(PathBuf);
 
 impl Fixture {
@@ -125,6 +135,19 @@ impl Fixture {
                  }\n\nfunc Twice(a int) int {\n\treturn Add(a, a)\n}\n",
             ),
             ("go/go.mod", "module example.com/calc\n\ngo 1.22\n"),
+            (
+                "gqlgen.yml",
+                "schema:\n  - graphql/**/schema?.graphqls\nresolver:\n  layout: follow-schema\n  dir: server\n",
+            ),
+            (
+                "graphql/nested/deep/schema1.graphqls",
+                "type Query { value: Int }\n",
+            ),
+            (
+                "server/handlers.go",
+                "package server\n\ntype queryResolver struct{}\n\n\
+                 func (r *queryResolver) Value() int { return 1 }\n",
+            ),
         ];
         for (rel, text) in files {
             let path = dir.join(rel);
@@ -241,6 +264,14 @@ fn index_through_worker_reexec_matches_c() {
                 "--offset",
                 "9999",
             ],
+            vec![
+                "cli",
+                "query_graph",
+                "--project",
+                &project,
+                "--query",
+                "MATCH (h)-[:HANDLES]->(r:Route) WHERE r.qualified_name = '__graphql__Query.value' RETURN h.name",
+            ],
         ]
         .iter()
         .map(|args| run_in(bin, &scratch, args))
@@ -265,4 +296,7 @@ fn index_through_worker_reexec_matches_c() {
     }
     let trace = String::from_utf8_lossy(&c.1[1].stdout);
     assert!(trace.contains(".go.Twice"), "Add caller missing: {trace}");
+    let route =
+        String::from_utf8_lossy(&c.1.last().expect("route query").stdout);
+    assert!(route.contains("Value"), "gqlgen resolver missing: {route}");
 }

@@ -9,8 +9,9 @@ use serde_json::{Value, json};
 
 const MORI: &str = env!("CARGO_BIN_EXE_mori");
 
-fn fixture(path: &Path) {
+fn fixture(path: &Path) -> Value {
     let script = r#"
+import json
 import sqlite3
 import sys
 with sqlite3.connect(sys.argv[1]) as db:
@@ -27,12 +28,19 @@ with sqlite3.connect(sys.argv[1]) as db:
         INSERT INTO projects VALUES ('demo', '/example/demo/');
         INSERT INTO nodes VALUES (9, 'demo', 'Function', 'demo.z', 'src/z', '{"x":0.12345678}', NULL);
         INSERT INTO nodes VALUES (29, 'demo', 'File', 'demo.a', 'src\\a', '{{"bad"}', 1);
+        INSERT INTO nodes VALUES (39, 'demo', 'File', CAST(x'64656d6f2e6f6464ff2e7079' AS TEXT),
+            CAST(x'6f6464ff2e7079' AS TEXT), '{}', 1);
         INSERT INTO edges (id, project, source_id, target_id, type, properties)
             VALUES (21, 'demo', 9, 29, 'IMPORTS', '{"local_name":"a","root":"/example/demo/src/a"}');
         INSERT INTO file_hashes VALUES ('demo', 'src/a', x'616263');
         INSERT INTO nodes_fts VALUES ('one two'), ('one');
         UPDATE nodes SET properties = CAST(x'41E381' AS TEXT) WHERE id = 29;
     """)
+    db.text_factory = lambda value: value.decode("utf-8", "backslashreplace")
+    qn, label, path = db.execute(
+        "SELECT qualified_name, label, file_path FROM nodes WHERE id = 39"
+    ).fetchone()
+    print(json.dumps([qn.removeprefix("demo."), label, path.replace("\\", "/")]))
 "#;
     let output = Command::new("python3")
         .args(["-c", script])
@@ -44,6 +52,7 @@ with sqlite3.connect(sys.argv[1]) as db:
         "fixture: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    serde_json::from_slice(&output.stdout).unwrap()
 }
 
 #[test]
@@ -52,7 +61,7 @@ fn export_is_read_only_and_normalizes_graph_rows() {
         std::env::temp_dir().join(format!("mori-export-{}", std::process::id()));
     fs::create_dir(&dir).unwrap();
     let db = dir.join("graph with spaces.db");
-    fixture(&db);
+    let odd_file_key = fixture(&db);
     let before = fs::read(&db).unwrap();
 
     let run = |extra: &[&str]| {
@@ -81,8 +90,9 @@ fn export_is_read_only_and_normalizes_graph_rows() {
         rows.iter().filter(|row| row["table"] == "nodes").collect();
     assert_eq!(nodes[0]["key"], json!(["a", "File", "src/a"]));
     assert_eq!(nodes[0]["properties"]["properties"], "A\\xe3\\x81");
-    assert_eq!(nodes[1]["key"], json!(["z", "Function", "src/z"]));
-    assert_eq!(nodes[1]["properties"]["properties"]["x"], 0.123457);
+    assert_eq!(nodes[1]["key"], odd_file_key);
+    assert_eq!(nodes[2]["key"], json!(["z", "Function", "src/z"]));
+    assert_eq!(nodes[2]["properties"]["properties"]["x"], 0.123457);
     let edge = rows.iter().find(|row| row["table"] == "edges").unwrap();
     assert_eq!(edge["key"], json!(["z", "a", "IMPORTS", "a"]));
     assert_eq!(edge["properties"]["properties"]["root"], "{{root}}/src/a");
@@ -100,7 +110,7 @@ fn export_is_read_only_and_normalizes_graph_rows() {
 
     let only = run(&["--tables", "nodes"]);
     assert!(only.status.success());
-    assert_eq!(String::from_utf8(only.stdout).unwrap().lines().count(), 2);
+    assert_eq!(String::from_utf8(only.stdout).unwrap().lines().count(), 3);
     assert!(!run(&["--tables", "unknown"]).status.success());
 
     fs::remove_dir_all(dir).unwrap();
