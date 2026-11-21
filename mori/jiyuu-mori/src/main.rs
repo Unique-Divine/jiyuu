@@ -57,6 +57,8 @@ mod cli_output;
 #[cfg(any(feature = "c-backend", test))]
 mod initialize;
 #[cfg(any(feature = "c-backend", test))]
+mod project_page;
+#[cfg(any(feature = "c-backend", test))]
 mod tool_list;
 
 #[cfg(not(feature = "c-backend"))]

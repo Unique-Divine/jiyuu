@@ -138,7 +138,7 @@ fn cli_output_controls_match_c() {
 fn project_pages_use_internal_identity_and_preserve_projection() {
     let scratch = Scratch::new("projects");
     let cache = scratch.0.join("cache");
-    let create_project_db = |file: &str, name: &str, extra: &str| {
+    let create_project_db = |file: &str, name: &str, extra: &str, root: &str| {
         let db = rusqlite::Connection::open(cache.join(file)).unwrap();
         db.execute_batch(
             "CREATE TABLE projects (name TEXT PRIMARY KEY, indexed_at TEXT, root_path TEXT);
@@ -147,8 +147,8 @@ fn project_pages_use_internal_identity_and_preserve_projection() {
         ).unwrap();
         for project in [name, extra] {
             db.execute(
-                "INSERT INTO projects VALUES (?1, 'now', '/tmp/graph-root')",
-                [project],
+                "INSERT INTO projects VALUES (?1, 'now', ?2)",
+                [project, root],
             )
             .unwrap();
             db.execute("INSERT INTO nodes VALUES (?1), (?1)", [project])
@@ -157,14 +157,24 @@ fn project_pages_use_internal_identity_and_preserve_projection() {
                 .unwrap();
         }
     };
-    create_project_db("renamed.db", "alpha", "alpha::missed");
-    create_project_db("second.db", "beta", "beta::missed");
-    create_project_db("ambiguous.db", "skip-one", "skip-two");
+    create_project_db("renamed.db", "alpha", "alpha::missed", "/tmp/graph-root");
+    create_project_db("second.db", "beta", "beta::missed", "/tmp/graph-root");
+    create_project_db("a-copy.db", "beta", "beta::missed", "/tmp/graph-root");
+    create_project_db("0-copy.db", "beta", "beta::missed", "/tmp/z-graph-root");
+    rusqlite::Connection::open(cache.join("a-copy.db"))
+        .unwrap()
+        .execute("INSERT INTO nodes VALUES ('beta')", [])
+        .unwrap();
+    create_project_db("ambiguous.db", "skip-one", "skip-two", "/tmp/graph-root");
+    fs::write(cache.join("empty.db"), "").unwrap();
     fs::write(cache.join("corrupt.db"), "not a SQLite database").unwrap();
 
     let cases = [
         ("list_projects", r#"{"format":"json"}"#),
-        ("list_projects", r#"{"metadata_only":true,"limit":1}"#),
+        (
+            "list_projects",
+            r#"{"metadata_only":true,"detail":"stats","include_details":true,"limit":0,"offset":-1}"#,
+        ),
         (
             "list_projects",
             r#"{"detail":"stats","limit":1,"offset":1,"format":"json"}"#,
@@ -176,6 +186,10 @@ fn project_pages_use_internal_identity_and_preserve_projection() {
         (
             "index_status",
             r#"{"project":"alpha","verbose":true,"diagnostics":"summary","format":"json"}"#,
+        ),
+        (
+            "list_projects",
+            r#"{"include_details":true,"offset":2,"limit":501,"format":"json"}"#,
         ),
     ];
     let run_all = |bin: &Path| {
@@ -205,13 +219,20 @@ fn project_pages_use_internal_identity_and_preserve_projection() {
     }
     let identity: serde_json::Value =
         serde_json::from_slice(&rust[0].stdout).unwrap();
-    assert_eq!(identity["total"], 2);
+    assert_eq!(identity["total"], 4);
     assert_eq!(identity["projects"][0]["name"], "alpha");
     let stats: serde_json::Value =
         serde_json::from_slice(&rust[2].stdout).unwrap();
     assert_eq!(stats["projects"][0]["name"], "beta");
-    assert_eq!(stats["projects"][0]["nodes"], 2);
+    assert_eq!(stats["projects"][0]["nodes"], 3);
     assert_eq!(stats["projects"][0]["edges"], 1);
+    assert_eq!(stats["next_offset"], 2);
+    let tail: serde_json::Value =
+        serde_json::from_slice(&rust[5].stdout).unwrap();
+    assert_eq!(tail["limit"], 500);
+    assert_eq!(tail["returned"], 2);
+    assert_eq!(tail["projects"][0]["nodes"], 2);
+    assert_eq!(tail["projects"][1]["root_path"], "/tmp/z-graph-root");
     let status: serde_json::Value =
         serde_json::from_slice(&rust[4].stdout).unwrap();
     assert_eq!(status["status"], "ready");
