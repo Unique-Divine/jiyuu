@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use rusqlite::{Connection, OpenFlags};
+
 const MORI: &str = env!("CARGO_BIN_EXE_mori");
 
 fn c_binary() -> PathBuf {
@@ -272,7 +274,12 @@ impl Fixture {
             ),
             (
                 "graphql/nested/deep/schema1.graphqls",
-                "type Query { value: Int oneOwner: Int duplicate: Int noOwner: Int }\n",
+                r#"type Query {
+                    value: Int @deprecated(reason: "use \"newValue\"\non a new line")
+                    oneOwner: Int
+                    duplicate: Int
+                    noOwner: Int
+                }"#,
             ),
             (
                 "server/handlers.go",
@@ -329,6 +336,30 @@ fn json_number(text: &str, key: &str) -> Option<u64> {
     digits.parse().ok()
 }
 
+fn graphql_rows(scratch: &Scratch, project: &str) -> Vec<String> {
+    let db = Connection::open_with_flags(
+        scratch.0.join("cache").join(format!("{project}.db")),
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .expect("open fixture graph");
+    let mut query = db
+        .prepare(
+            "SELECT json_array(r.qualified_name, r.name, r.file_path, r.start_line, r.end_line,
+                               r.properties, h.qualified_name, h.label, e.properties)
+             FROM nodes AS r
+             LEFT JOIN edges AS e ON e.target_id = r.id AND e.type = 'HANDLES'
+             LEFT JOIN nodes AS h ON h.id = e.source_id
+             WHERE r.label = 'Route' AND substr(r.qualified_name, 1, 11) = '__graphql__'
+             ORDER BY r.qualified_name, h.qualified_name",
+        )
+        .expect("prepare GraphQL row query");
+    query
+        .query_map([], |row| row.get(0))
+        .expect("query GraphQL rows")
+        .collect::<rusqlite::Result<_>>()
+        .expect("read GraphQL rows")
+}
+
 /// Indexes the fixture with each binary, which goes through the temporary
 /// daemon and the index worker that the binary re-executes as itself. Compare
 /// graph output from standalone C and both linked GraphQL planner modes.
@@ -358,8 +389,10 @@ fn index_through_worker_reexec_matches_c() {
             String::from_utf8_lossy(&index.stderr)
         );
         // Profiling preserves the daemon's worker log after a clean exit.
-        let planner = format!("planner={}", graphql.unwrap_or("c"));
-        let logged_planner = fs::read_dir(scratch.0.join("cache/logs"))
+        let implementation = graphql.unwrap_or("c");
+        let planner = format!("planner={implementation}");
+        let writer = format!("writer={implementation}");
+        let logged_implementation = fs::read_dir(scratch.0.join("cache/logs"))
             .expect("read worker log directory")
             .filter_map(Result::ok)
             .filter(|entry| {
@@ -375,10 +408,16 @@ fn index_through_worker_reexec_matches_c() {
                             && line
                                 .split_ascii_whitespace()
                                 .any(|kv| kv == planner)
+                            && line
+                                .split_ascii_whitespace()
+                                .any(|kv| kv == writer)
                     })
                 })
             });
-        assert!(logged_planner, "{side} worker didn't report {planner}");
+        assert!(
+            logged_implementation,
+            "{side} worker didn't report {planner} and {writer}"
+        );
         let counts = (json_number(&text, "nodes"), json_number(&text, "edges"));
         assert!(counts.0.is_some_and(|n| n > 0), "{side}: {text}");
         // Raw CLI JSON reaches the daemon as bytes. Building these requests
@@ -497,11 +536,14 @@ fn index_through_worker_reexec_matches_c() {
         .iter()
         .map(|args| run_in(bin, &scratch, *graphql, args))
         .collect();
-        results.push((counts, queries));
+        results.push((counts, queries, graphql_rows(&scratch, &project)));
     }
     let (c, linked) = results.split_first().expect("standalone C result");
+    assert_eq!(c.2.len(), 4, "expected one handler per GraphQL Route");
+    assert!(c.2.iter().any(|row| row.contains("newValue")));
     for rs in linked {
         assert_eq!(c.0, rs.0, "node and edge counts differ");
+        assert_eq!(c.2, rs.2, "published Route or HANDLES rows differ");
         for (c_out, rs_out) in c.1.iter().zip(&rs.1) {
             assert!(c_out.status.success(), "{c_out:?}");
             assert!(
