@@ -35,6 +35,8 @@ fn rusqlite_uses_the_c_backend_sqlite() {
 
 #[cfg(any(feature = "c-backend", test))]
 mod gqlgen;
+#[cfg(any(feature = "c-backend", test))]
+mod query_cli;
 
 #[cfg(not(feature = "c-backend"))]
 fn main() {

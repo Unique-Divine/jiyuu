@@ -115,6 +115,11 @@ fn unknown_tool_error_matches_c() {
     assert_same(&["cli", "no_such_tool"]);
 }
 
+#[test]
+fn invalid_query_flag_diagnostic_matches_c() {
+    assert_same(&["cli", "query_graph", "--offst", "1"]);
+}
+
 /// A small repository with Python and Go calls and a gqlgen server. Both
 /// binaries index the same path, so project names match.
 struct Fixture(PathBuf);
@@ -246,6 +251,13 @@ fn index_through_worker_reexec_matches_c() {
                 &project,
                 "--query",
                 "MATCH (h)-[:HANDLES]->(r:Route) WHERE r.qualified_name = '__graphql__Query.value' RETURN h.name",
+                "--max-rows=+7",
+                "--max_rows",
+                "4",
+                "--offset",
+                "0",
+                "--",
+                "ignored",
             ],
         ]
         .iter()

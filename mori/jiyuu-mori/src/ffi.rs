@@ -54,7 +54,10 @@ pub unsafe extern "C" fn main(argc: c_int, argv: *mut *mut c_char) -> c_int {
     }
     // SAFETY: C has not started any indexing threads and the function pointer
     // stays valid for the process lifetime, including each worker's own main.
-    unsafe { cbm_gqlgen_set_glob_matcher(gqlgen_glob_match) };
+    unsafe {
+        cbm_gqlgen_set_glob_matcher(gqlgen_glob_match);
+        crate::query_cli::c_args::register();
+    }
 
     // SAFETY: argc and argv come straight from the C runtime and meet the
     // contract of C main, which cbm_c_main is.
