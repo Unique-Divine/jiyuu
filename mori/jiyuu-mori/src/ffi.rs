@@ -4,7 +4,9 @@
 use std::ffi::{CStr, OsStr, c_char, c_int};
 use std::os::unix::ffi::OsStrExt;
 
-use crate::graphql_link::{Action, plan_link};
+use rusqlite::{Connection, ffi::sqlite3};
+
+use crate::graphql_link::{Action, delete_stale_link, plan_link};
 
 unsafe extern "C" {
     /// The C program's `main`, renamed when `src/main.c` is compiled with
@@ -17,8 +19,9 @@ unsafe extern "C" {
     fn cbm_gqlgen_set_glob_matcher(
         matcher: extern "C" fn(glob: *const c_char, path: *const c_char) -> bool,
     );
-    fn cbm_cross_repo_set_graphql_link_policy(
+    fn cbm_cross_repo_set_graphql_backend(
         policy: extern "C" fn(bool, bool, bool, bool, bool) -> Action,
+        delete: extern "C" fn(*mut sqlite3, i64, i64) -> c_int,
     );
 }
 
@@ -29,6 +32,18 @@ extern "C" fn gqlgen_glob_match(
     // SAFETY: C passes NUL-terminated strings valid for the whole call.
     let (glob, path) = unsafe { (CStr::from_ptr(glob), CStr::from_ptr(path)) };
     crate::gqlgen::glob_matches(glob.to_bytes(), path.to_bytes())
+}
+
+extern "C" fn graphql_delete_stale_link(
+    db: *mut sqlite3,
+    caller: i64,
+    route: i64,
+) -> c_int {
+    // SAFETY: C passes a live connection owned by this run. The non-owning
+    // wrapper and its statements are dropped before C resumes using it.
+    let result = unsafe { Connection::from_handle(db) }
+        .and_then(|db| delete_stale_link(&db, caller, route));
+    result.map(c_int::from).unwrap_or(-1)
 }
 
 /// The process entry point. Dispatches the developer export in Rust.
@@ -61,7 +76,7 @@ pub unsafe extern "C" fn main(argc: c_int, argv: *mut *mut c_char) -> c_int {
     // stays valid for the process lifetime, including each worker's own main.
     unsafe {
         cbm_gqlgen_set_glob_matcher(gqlgen_glob_match);
-        cbm_cross_repo_set_graphql_link_policy(plan_link);
+        cbm_cross_repo_set_graphql_backend(plan_link, graphql_delete_stale_link);
     }
 
     // SAFETY: argc and argv come straight from the C runtime and meet the

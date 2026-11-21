@@ -62,11 +62,15 @@ typedef struct {
 static CBM_TLS cbm_cross_repo_after_insert_test_hook_t cr_after_insert_test_hook = NULL;
 static CBM_TLS void *cr_after_insert_test_context = NULL;
 static cbm_graphql_link_policy_fn cr_graphql_link_policy;
+static cbm_graphql_delete_link_fn cr_graphql_delete_link;
 
-void cbm_cross_repo_set_graphql_link_policy(cbm_graphql_link_policy_fn policy) {
+void cbm_cross_repo_set_graphql_backend(cbm_graphql_link_policy_fn policy,
+                                        cbm_graphql_delete_link_fn delete_link) {
     char configured[sizeof("rust")];
     const char *impl = cbm_native_getenv("MORI_IMPL_GRAPHQL", configured, sizeof(configured), NULL);
-    cr_graphql_link_policy = impl && strcmp(impl, "rust") == 0 ? policy : NULL;
+    bool rust = impl && strcmp(impl, "rust") == 0 && policy && delete_link;
+    cr_graphql_link_policy = rust ? policy : NULL;
+    cr_graphql_delete_link = rust ? delete_link : NULL;
 }
 
 void cbm_cross_repo_set_after_insert_hook_for_tests(cbm_cross_repo_after_insert_test_hook_t hook,
@@ -1363,9 +1367,8 @@ static cr_match_result_t match_typed_routes(cbm_store_t *src_store, const char *
     int count = 0;
     int step_rc = SQLITE_DONE;
     bool failed = false;
-    cbm_graphql_link_policy_fn plan =
-        cr_graphql_link_policy && strcmp(edge_type, "GRAPHQL_CALLS") == 0 ? cr_graphql_link_policy
-                                                                          : cr_plan_typed_route;
+    bool use_rust = cr_graphql_link_policy && strcmp(edge_type, "GRAPHQL_CALLS") == 0;
+    cbm_graphql_link_policy_fn plan = use_rust ? cr_graphql_link_policy : cr_plan_typed_route;
     while (!cr_cancel_requested(ctx) && (step_rc = sqlite3_step(s)) == SQLITE_ROW) {
         int64_t caller_id = sqlite3_column_int64(s, 0);
         int64_t route_id = sqlite3_column_int64(s, SKIP_ONE);
@@ -1418,7 +1421,14 @@ static cr_match_result_t match_typed_routes(cbm_store_t *src_store, const char *
         case CBM_CROSS_ROUTE_KEEP:
             break;
         case CBM_CROSS_ROUTE_DROP:
-            emitted = cr_delete_forward_row(src_store, caller_id, route_id, cross_edge_type, ctx);
+            if (use_rust) {
+                int deleted = cr_graphql_delete_link(src_db, caller_id, route_id);
+                emitted = deleted >= 0;
+                ctx->mutated = ctx->mutated || deleted > 0;
+            } else {
+                emitted =
+                    cr_delete_forward_row(src_store, caller_id, route_id, cross_edge_type, ctx);
+            }
             break;
         case CBM_CROSS_ROUTE_LINK_AMBIGUOUS:
             emitted = cr_emit_ambiguous(src_store, src_project, caller_id, route_id, tgt_project,
