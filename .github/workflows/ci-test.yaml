@@ -574,8 +574,6 @@ jobs:
         run: just --justfile mori/justfile build
       - name: Run grammar and extraction suites
         if: needs.changes.outputs.mori == 'true'
-        env:
-          MORI_GRAPHQL_TESTS: "1"
         run: >-
           just --justfile mori/justfile test
           "edge_types_probe lang_contract cross_repo extraction graph_buffer pipeline yaml language"
