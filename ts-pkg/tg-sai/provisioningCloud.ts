@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto"
+import { delimiter } from "node:path"
 import type {
   Progress,
   ProvisionCloud,
@@ -397,14 +398,29 @@ export function dealDeskRequestKey(
   return `tg-provision:${createHash("sha256").update(JSON.stringify({ operation, input })).digest("hex")}`
 }
 
-/** Spawn argv directly; credentials stay in the existing Deal Desk client environment. */
+const hostedReleaseDir = "/opt/sai-deal-desk/current"
+
+export function findSaiOps(
+  path = process.env.PATH,
+  which = Bun.which,
+): string | null {
+  const executable = which("sai-ops", { PATH: path })
+  if (executable) return executable
+  // Only the hosted worker's previous release layout is needed for rollback.
+  if (path?.split(delimiter).includes(hostedReleaseDir))
+    return which(`${hostedReleaseDir}/sai-deal-desk`)
+  return null
+}
+
+/** Spawn argv directly. Credentials stay in the existing client environment. */
 export async function callDealDesk(
   operation: CloudOperation,
   input: Record<string, unknown>,
 ): Promise<unknown> {
   const key = dealDeskRequestKey(operation, input)
-  const executable = Bun.which("sai-deals") ?? Bun.which("sai-deal-desk")
-  if (!executable) throw new Error("Install the sai-deals command to use Deal Desk chat setup")
+  const executable = findSaiOps()
+  if (!executable)
+    throw new Error("Install sai-ops to use Deal Desk chat setup")
   const command = [executable, "chat-setups", operation, "--json-stdin"]
   if (
     operation !== "view" &&
