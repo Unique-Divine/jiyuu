@@ -12013,10 +12013,13 @@ static void install_print_usage(FILE *out) {
                        " MCP server for Claude Code (~/.claude.json)\n"
                        "and Codex (~/.codex/config.toml) when they are present. It downloads\n"
                        "nothing and writes no agent skills, hooks, or agent profiles.\n"
-                       "The registration uses this binary's absolute path. To keep the same\n"
-                       "registration across mise upgrades, register the mise shim from your\n"
-                       "MCP client instead. For a direct path, update it in the client after\n"
-                       "each upgrade.\n");
+                       "The registration uses this binary's absolute path. To migrate a\n"
+                       "manual registration, edit its command in the client config. The default\n"
+                       "mise shim path is ~/.local/share/mise/shims/mori. It stays the same\n"
+                       "across Mori upgrades. Restore the previous codebase-memory-mcp path\n"
+                       "if you roll back across the executable rename.\n\n"
+                       "In Claude Code, also update the hook-augment command and its graph\n"
+                       "PostToolUse matcher to Read|mcp__.*(mori-graph|codebase-memory-mcp)__.*\n");
 }
 
 /* One client registration: report, or write unless dry_run. Returns false on
@@ -12031,6 +12034,12 @@ static bool install_register_client(const char *label, const char *config_path,
     if (!prepare_config_parent(config_path) || upsert(binary_path, config_path) != CLI_OK) {
         (void)fprintf(stderr, "error: %s: could not register %s in %s\n", label, CBM_MCP_SERVER_KEY,
                       config_path);
+        (void)fprintf(stderr,
+                      "If %s is already configured, edit its command in that file and\n"
+                      "keep its arguments and environment. Use the installed Mori shim\n"
+                      "(default: ~/.local/share/mise/shims/mori, with ~ expanded) or\n"
+                      "the absolute path from `mise which mori`. Restart the client.\n",
+                      CBM_MCP_SERVER_KEY);
         return false;
     }
     printf("  %s: registered %s in %s\n", label, CBM_MCP_SERVER_KEY, config_path);
@@ -12069,6 +12078,7 @@ int cbm_cmd_install(int argc, char **argv) {
     printf("Registering %s as the %s MCP server.\n\n", self_path, CBM_MCP_SERVER_KEY);
     bool any_client = false;
     bool ok = true;
+    cli_config_follow_begin(home);
 
     if (cbm_claude_code_detected(home)) {
         char user_root[CLI_BUF_1K];
@@ -12091,6 +12101,7 @@ int cbm_cmd_install(int argc, char **argv) {
                                      cbm_install_mori_codex_mcp) &&
              ok;
     }
+    cbm_config_edit_path_follow_clear();
 
     if (!any_client) {
         printf("No Claude Code or Codex setup found. Register the server by hand:\n"

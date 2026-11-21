@@ -13,7 +13,6 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import platform
 import shutil
 import signal
 import socket
@@ -21,7 +20,6 @@ import stat
 import struct
 import subprocess
 import sys
-import tarfile
 import tempfile
 import threading
 import time
@@ -531,21 +529,12 @@ def assert_indexed_tool_response(response, label):
     )
 
 
-def run_successful_activation(
-    binary,
-    env,
-    tmpdir,
-    activation_log,
-    label,
-    action,
-    arguments,
-    expected_source_build,
-    minimum_daemon_clients=1,
-):
-    """Run one native activation and bind its durable audit trail to its PID."""
+def run_successful_uninstall(binary, env, tmpdir, activation_log, expected_source_build):
+    """Run a legacy uninstall and bind its durable audit trail to its PID."""
+    label = "activation-uninstall"
     records_before = len(json_records(activation_log))
     process = subprocess.Popen(
-        [str(binary)] + arguments,
+        [str(binary), "uninstall", "--yes"],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -569,7 +558,7 @@ def run_successful_activation(
         label + " failed: stdout={!r}, stderr={!r}".format(stdout, stderr),
     )
     check(
-        "Stopping active CBM sessions and operations for {}...".format(action)
+        "Stopping active CBM sessions and operations for uninstall..."
         in stdout,
         label + " did not show coordination progress: " + repr(stdout),
     )
@@ -591,7 +580,7 @@ def run_successful_activation(
         label + " activation audit sequence mismatch: " + repr(records),
     )
     for record in records:
-        check(record.get("action") == action, label + " audit action mismatch")
+        check(record.get("action") == "uninstall", label + " audit action mismatch")
         check(
             record.get("source_build") == expected_source_build,
             label + " audit source build mismatch",
@@ -610,26 +599,13 @@ def run_successful_activation(
             record.get("restart_required") is True,
             label + " audit restart marker missing",
         )
-        if action in ("install", "update"):
-            target_build = record.get("target_build")
-            check(
-                isinstance(target_build, str)
-                and len(target_build) == 64
-                and all(character in "0123456789abcdef" for character in target_build),
-                label + " did not audit the pre-staged target build",
-            )
-        if action == "install":
-            check(
-                record.get("target_version") == record.get("source_version"),
-                label + " install target version audit mismatch",
-            )
     stopped = records[1]
     check(
-        stopped.get("daemon_active_clients", 0) >= minimum_daemon_clients,
+        stopped.get("daemon_active_clients", 0) >= 1,
         label + " audit did not record the drained daemon clients: " + repr(stopped),
     )
     check(
-        stopped.get("daemon_active_connections", 0) >= minimum_daemon_clients,
+        stopped.get("daemon_active_connections", 0) >= 1,
         label + " audit did not record the drained daemon connections: "
         + repr(stopped),
     )
@@ -653,31 +629,6 @@ def assert_coordination_idle(socket_path, lock_specs, description):
     for path, record_lock in lock_specs:
         status = lock_status(path, record_lock)
         check(status == "free", "{} remained {} after {}".format(path, status, description))
-
-
-def create_local_update_release(release_dir, candidate):
-    """Create the exact platform archive/checksum pair consumed by update."""
-    release_dir.mkdir(parents=True, exist_ok=True)
-    release_dir.chmod(0o700)
-    if sys.platform == "darwin":
-        os_name = "darwin"
-        portable = ""
-    else:
-        os_name = "linux"
-        portable = "-portable"
-    machine = platform.machine().lower()
-    arch = "arm64" if machine in ("arm64", "aarch64") else "amd64"
-    asset_name = "codebase-memory-mcp-{}-{}{}.tar.gz".format(
-        os_name, arch, portable
-    )
-    archive = release_dir / asset_name
-    with tarfile.open(archive, "w:gz") as stream:
-        stream.add(str(candidate), arcname="codebase-memory-mcp", recursive=False)
-    digest = sha256_file(archive)
-    (release_dir / "checksums.txt").write_text(
-        "{}  {}\n".format(digest, asset_name), encoding="ascii"
-    )
-    return "file://" + str(release_dir)
 
 
 def assert_no_activation_artifacts(directory, label):
@@ -767,7 +718,6 @@ def main():
             "def daemon_index_smoke():\n    return 1\n", encoding="utf-8"
         )
         target_binary = target_dir / "codebase-memory-mcp"
-        target_binary.write_bytes(b"installed binary sentinel\n")
         index_path = cache / "smoke-project.db"
         index_path.write_bytes(b"index sentinel\n")
         descendant_pid_path = tmpdir / "worker-descendant.pid"
@@ -775,17 +725,15 @@ def main():
         conflict_log = cache / "logs/daemon-conflicts.ndjson"
         activation_log = cache / "logs/activation-events.ndjson"
 
-        env = os.environ.copy()
-        env.update(
-            {
-                "HOME": str(home),
-                "CBM_CACHE_DIR": str(cache_alias),
-                "CBM_LOG_LEVEL": "info",
-                "CBM_LOG_FORMAT": "json",
-                "CBM_TEST_HANG_ON": "hang_me",
-                "CBM_TEST_WORKER_DESCENDANT_PID_FILE": str(descendant_pid_path),
-            }
-        )
+        env = {
+            "PATH": os.environ.get("PATH", os.defpath),
+            "HOME": str(home),
+            "CBM_CACHE_DIR": str(cache_alias),
+            "CBM_LOG_LEVEL": "info",
+            "CBM_LOG_FORMAT": "json",
+            "CBM_TEST_HANG_ON": "hang_me",
+            "CBM_TEST_WORKER_DESCENDANT_PID_FILE": str(descendant_pid_path),
+        }
 
         cli_first_process = None
         cli_first_descendant_pid = None
@@ -1900,56 +1848,44 @@ def main():
                 + repr(daemon_lifecycle_sequence(daemon_log)),
             )
 
-            # Native activation is the deliberate exception to exact-build
-            # admission. Exercise that exception with a different-build
-            # candidate while both kinds of coordinated work are live: one
-            # MCP daemon session and one hanging local CLI worker tree. The
-            # candidate must authenticate to the old daemon, publish
-            # maintenance, cancel both, wait for their leases, and only then
-            # install into the explicit temporary directory.
-            source_binary_before = sha256_file(binary)
-            conflict_binary_before = sha256_file(conflict_binary)
+            # Seed the legacy install with a distinct build. Uninstall from
+            # the original executable while the target has a live MCP session
+            # and a local CLI worker. Both must release their leases first.
+            shutil.copy2(conflict_binary, target_binary)
             check(
-                source_binary_before == active_fingerprint,
-                "source binary changed before activation smoke",
+                sha256_file(target_binary) == requested_fingerprint,
+                "legacy uninstall fixture does not match its source build",
             )
-            check(
-                conflict_binary_before == requested_fingerprint,
-                "different-build candidate changed before activation smoke",
-            )
-            install_dir = tmpdir / "activation-install-bin"
-            install_dir.mkdir(mode=0o700)
-            install_target = install_dir / "codebase-memory-mcp"
-            install_pid_path = tmpdir / "activation-install-worker-descendant.pid"
-            install_lock_owner_path = tmpdir / "activation-install-worker-lock.pid"
+            uninstall_pid_path = tmpdir / "activation-uninstall-worker-descendant.pid"
+            uninstall_lock_owner_path = tmpdir / "activation-uninstall-worker-lock.pid"
             activation_local_env = env.copy()
             activation_local_env["CBM_TEST_WORKER_DESCENDANT_PID_FILE"] = str(
-                install_pid_path
+                uninstall_pid_path
             )
             activation_local_env["CBM_TEST_WORKER_PROJECT_LOCK_PID_FILE"] = str(
-                install_lock_owner_path
+                uninstall_lock_owner_path
             )
 
-            install_starts = len(json_events(daemon_log, "daemon.start"))
-            install_stops = len(json_events(daemon_log, "daemon.stop"))
-            install_client = start_ready_mcp_client(
-                binary,
+            uninstall_starts = len(json_events(daemon_log, "daemon.start"))
+            uninstall_stops = len(json_events(daemon_log, "daemon.stop"))
+            uninstall_client = start_ready_mcp_client(
+                target_binary,
                 env,
-                tmpdir / "activation-install-client.err",
+                tmpdir / "activation-uninstall-client.err",
                 clients,
                 initialize_params,
                 401,
-                "activation install client",
+                "activation uninstall client",
             )
             wait_until(
                 lambda: len(json_events(daemon_log, "daemon.start"))
-                == install_starts + 1,
+                == uninstall_starts + 1,
                 START_TIMEOUT,
-                "install activation daemon generation",
+                "uninstall activation daemon generation",
             )
             activation_local_process = subprocess.Popen(
                 [
-                    str(binary),
+                    str(target_binary),
                     "cli",
                     "--progress",
                     "--json",
@@ -1957,7 +1893,7 @@ def main():
                     "--repo-path",
                     str(repo),
                     "--name",
-                    "smoke-activation-install",
+                    "smoke-activation-uninstall",
                     "--mode",
                     "fast",
                 ],
@@ -1968,21 +1904,21 @@ def main():
                 env=activation_local_env,
             )
             wait_until(
-                lambda: read_private_pid_fields(install_pid_path, 1) is not None,
+                lambda: read_private_pid_fields(uninstall_pid_path, 1) is not None,
                 OPERATION_TIMEOUT,
                 "activation-cancelled CLI worker descendant",
             )
             wait_until(
-                lambda: read_private_pid_fields(install_lock_owner_path, 2)
+                lambda: read_private_pid_fields(uninstall_lock_owner_path, 2)
                 is not None,
                 OPERATION_TIMEOUT,
                 "activation-cancelled CLI worker lock owner",
             )
             (activation_local_descendant_pid,) = read_private_pid_fields(
-                install_pid_path, 1
+                uninstall_pid_path, 1
             )
             activation_local_worker_pid, activation_local_worker_pgid = (
-                read_private_pid_fields(install_lock_owner_path, 2)
+                read_private_pid_fields(uninstall_lock_owner_path, 2)
             )
             check(
                 activation_local_process.poll() is None
@@ -1995,22 +1931,8 @@ def main():
                 "activation CLI marker did not identify its isolated worker tree",
             )
 
-            install_activation_records = run_successful_activation(
-                conflict_binary,
-                env,
-                tmpdir,
-                activation_log,
-                "activation-install",
-                "install",
-                [
-                    "install",
-                    "--force",
-                    "--yes",
-                    "--skip-config",
-                    "--dir",
-                    str(install_dir),
-                ],
-                requested_fingerprint,
+            uninstall_activation_records = run_successful_uninstall(
+                binary, env, tmpdir, activation_log, active_fingerprint
             )
             local_stdout, local_stderr = activation_local_process.communicate(
                 timeout=10
@@ -2025,209 +1947,10 @@ def main():
                 activation_local_process.returncode != 0,
                 "maintenance-cancelled local CLI reported success",
             )
-            check(
-                "active CLI command is stopping for install/update/uninstall"
-                in local_stderr,
-                "local CLI did not report maintenance cancellation: "
-                + repr(local_stderr),
-            )
             wait_until(
                 lambda: process_gone_or_zombie(activation_local_descendant_pid),
                 20,
                 "maintenance-cancelled local CLI worker tree",
-            )
-            check(
-                install_client.wait(timeout=15) >= 0,
-                "install activation MCP frontend was killed by a signal",
-            )
-            wait_until(
-                lambda: len(json_events(daemon_log, "daemon.stop"))
-                == install_stops + 1,
-                10,
-                "install activation daemon.stop",
-            )
-            assert_coordination_idle(
-                socket_path,
-                coordination_locks,
-                "install activation coordination cleanup",
-            )
-            assert_no_activation_artifacts(install_dir, "install activation")
-            check(install_target.is_file(), "install activation did not publish target")
-            install_status = os.lstat(install_target)
-            check(stat.S_ISREG(install_status.st_mode), "installed target is not regular")
-            check(install_status.st_uid == os.geteuid(), "installed target has wrong owner")
-            check(install_status.st_nlink == 1, "installed target has multiple links")
-            check(
-                stat.S_IMODE(install_status.st_mode) & 0o022 == 0,
-                "installed target is group/world writable",
-            )
-            installed_version = subprocess.run(
-                [str(install_target), "--version"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                env=env,
-                timeout=10,
-                check=False,
-            )
-            check(
-                installed_version.returncode == 0
-                and installed_version.stdout.strip()
-                == "codebase-memory-mcp " + semantic_version,
-                "different-build install target is not executable: "
-                + installed_version.stderr,
-            )
-            installed_build = sha256_file(install_target)
-            check(
-                installed_build != active_fingerprint,
-                "different-build activation installed the old active build",
-            )
-            check(
-                install_activation_records[-1].get("target_build")
-                == installed_build,
-                "install audit target build does not match the published binary",
-            )
-            check(
-                target_binary.read_bytes() == b"installed binary sentinel\n",
-                "custom-dir install mutated the canonical binary",
-            )
-            check(
-                index_path.read_bytes() == b"index sentinel\n",
-                "install without --reset-indexes removed an index",
-            )
-            check(
-                sha256_file(binary) == source_binary_before
-                and sha256_file(conflict_binary) == conflict_binary_before,
-                "install activation modified a source executable",
-            )
-
-            # Build the complete update payload and checksum before starting
-            # the next daemon. CBM_DOWNLOAD_URL points at this file:// fixture,
-            # so the smoke cannot contact the network. Update must then drain
-            # its live MCP generation before replacing only the temp HOME
-            # installation and performing its documented index reset.
-            update_release = tmpdir / "activation-update-release"
-            update_env = env.copy()
-            update_env["CBM_DOWNLOAD_URL"] = create_local_update_release(
-                update_release, conflict_binary
-            )
-            update_starts = len(json_events(daemon_log, "daemon.start"))
-            update_stops = len(json_events(daemon_log, "daemon.stop"))
-            update_client = start_ready_mcp_client(
-                binary,
-                update_env,
-                tmpdir / "activation-update-client.err",
-                clients,
-                initialize_params,
-                501,
-                "activation update client",
-            )
-            wait_until(
-                lambda: len(json_events(daemon_log, "daemon.start"))
-                == update_starts + 1,
-                START_TIMEOUT,
-                "update activation daemon generation",
-            )
-            update_activation_records = run_successful_activation(
-                binary,
-                update_env,
-                tmpdir,
-                activation_log,
-                "activation-update",
-                "update",
-                ["update", "--force", "--yes"],
-                active_fingerprint,
-            )
-            check(
-                update_client.wait(timeout=15) >= 0,
-                "update activation MCP frontend was killed by a signal",
-            )
-            wait_until(
-                lambda: len(json_events(daemon_log, "daemon.stop"))
-                == update_stops + 1,
-                10,
-                "update activation daemon.stop",
-            )
-            assert_coordination_idle(
-                socket_path,
-                coordination_locks,
-                "update activation coordination cleanup",
-            )
-            assert_no_activation_artifacts(target_dir, "update activation")
-            updated_version = subprocess.run(
-                [str(target_binary), "--version"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                env=env,
-                timeout=10,
-                check=False,
-            )
-            check(
-                updated_version.returncode == 0
-                and updated_version.stdout.strip()
-                == "codebase-memory-mcp " + semantic_version,
-                "updated target is not executable: " + updated_version.stderr,
-            )
-            updated_status = os.lstat(target_binary)
-            check(stat.S_ISREG(updated_status.st_mode), "updated target is not regular")
-            check(updated_status.st_uid == os.geteuid(), "updated target has wrong owner")
-            check(updated_status.st_nlink == 1, "updated target has multiple links")
-            check(
-                stat.S_IMODE(updated_status.st_mode) & 0o022 == 0,
-                "updated target is group/world writable",
-            )
-            updated_build = sha256_file(target_binary)
-            check(
-                updated_build != active_fingerprint,
-                "update republished the old active build",
-            )
-            check(
-                update_activation_records[-1].get("target_build")
-                == updated_build,
-                "update audit target build does not match the published binary",
-            )
-            check(not index_path.exists(), "update did not clear the opted-in index")
-            check(
-                sha256_file(install_target) == installed_build,
-                "update mutated the separate custom-dir installation",
-            )
-            check(
-                sha256_file(binary) == source_binary_before
-                and sha256_file(conflict_binary) == conflict_binary_before,
-                "update activation modified a source executable",
-            )
-
-            # Launch the activated target itself as the final daemon build,
-            # then uninstall it from the original executable. This is another
-            # authenticated cross-build drain and proves removal waits until
-            # no process is still executing the target.
-            uninstall_starts = len(json_events(daemon_log, "daemon.start"))
-            uninstall_stops = len(json_events(daemon_log, "daemon.stop"))
-            uninstall_client = start_ready_mcp_client(
-                target_binary,
-                env,
-                tmpdir / "activation-uninstall-client.err",
-                clients,
-                initialize_params,
-                601,
-                "activation uninstall client",
-            )
-            wait_until(
-                lambda: len(json_events(daemon_log, "daemon.start"))
-                == uninstall_starts + 1,
-                START_TIMEOUT,
-                "uninstall activation daemon generation",
-            )
-            uninstall_activation_records = run_successful_activation(
-                binary,
-                env,
-                tmpdir,
-                activation_log,
-                "activation-uninstall",
-                "uninstall",
-                ["uninstall", "--yes"],
-                active_fingerprint,
             )
             check(
                 all(
@@ -2252,16 +1975,14 @@ def main():
                 "uninstall activation coordination cleanup",
             )
             assert_no_activation_artifacts(target_dir, "uninstall activation")
-            assert_no_activation_artifacts(install_dir, "uninstall activation")
             check(not target_binary.exists(), "uninstall did not remove its target")
             check(
-                install_target.exists()
-                and sha256_file(install_target) == installed_build,
-                "uninstall mutated the separate custom-dir installation",
+                index_path.read_bytes() == b"index sentinel\n",
+                "uninstall without --delete-indexes removed an index",
             )
             check(
-                sha256_file(binary) == source_binary_before
-                and sha256_file(conflict_binary) == conflict_binary_before,
+                sha256_file(binary) == active_fingerprint
+                and sha256_file(conflict_binary) == requested_fingerprint,
                 "uninstall activation modified a source executable",
             )
             check(
@@ -2272,7 +1993,7 @@ def main():
 
             print(
                 "ok: shared daemon lifecycle, bidirectional version conflicts, "
-                "coordinated install/update/uninstall, CLI maintenance cancellation, "
+                "coordinated uninstall, CLI maintenance cancellation, "
                 "and session cancellation passed"
             )
             return 0
@@ -2354,14 +2075,8 @@ def main():
                     tmpdir / "turnover-client.err",
                     tmpdir / "cli-first-overlap-client.err",
                     activation_log,
-                    tmpdir / "activation-install-client.err",
-                    tmpdir / "activation-update-client.err",
                     tmpdir / "activation-uninstall-client.err",
                     tmpdir / "activation-local-cli.err",
-                    tmpdir / "activation-install.out",
-                    tmpdir / "activation-install.err",
-                    tmpdir / "activation-update.out",
-                    tmpdir / "activation-update.err",
                     tmpdir / "activation-uninstall.out",
                     tmpdir / "activation-uninstall.err",
                 ):

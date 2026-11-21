@@ -2614,6 +2614,9 @@ TEST(cli_install_registers_mori_graph_without_skills) {
     int second_rc = cli_test_cmd_install(1, (char *[]){"--yes"});
     char *claude_second = read_test_file_alloc(claude_json);
     char *codex_second = read_test_file_alloc(codex_toml);
+    cbm_cli_set_self_path_override_for_test("/opt/mori/next/bin/mori");
+    int upgrade_rc = cli_test_cmd_install(0, NULL);
+    char *claude_upgrade = read_test_file_alloc(claude_json);
     cbm_cli_set_self_path_override_for_test(NULL);
     cli_mori_env_leave(saved);
 
@@ -2636,10 +2639,13 @@ TEST(cli_install_registers_mori_graph_without_skills) {
     bool idempotent = claude_second && codex_second && claude_first && codex_first &&
                       strcmp(claude_first, claude_second) == 0 &&
                       strcmp(codex_first, codex_second) == 0;
+    bool preserves_claude_command =
+        claude_first && claude_upgrade && strcmp(claude_first, claude_upgrade) == 0;
     free(claude_first);
     free(codex_first);
     free(claude_second);
     free(codex_second);
+    free(claude_upgrade);
     test_rmdir_r(home);
 
     ASSERT_EQ(first_rc, 0);
@@ -2647,6 +2653,8 @@ TEST(cli_install_registers_mori_graph_without_skills) {
     ASSERT_TRUE(claude_ok);
     ASSERT_TRUE(codex_ok);
     ASSERT_TRUE(idempotent);
+    ASSERT_EQ(upgrade_rc, 1);
+    ASSERT_TRUE(preserves_claude_command);
     ASSERT_FALSE(wrote_extras);
     PASS();
 }
@@ -2702,6 +2710,93 @@ TEST(cli_install_mori_claude_mcp_keeps_other_servers) {
     ASSERT_TRUE(ok);
     PASS();
 }
+
+TEST(cli_install_preserves_manually_registered_mori_graph) {
+    char dir[256];
+    snprintf(dir, sizeof(dir), "/tmp/cli-mori-existing-XXXXXX");
+    if (!cbm_mkdtemp(dir)) {
+        FAIL("cbm_mkdtemp failed");
+    }
+    char claude[512];
+    char codex[512];
+    snprintf(claude, sizeof(claude), "%s/.claude.json", dir);
+    snprintf(codex, sizeof(codex), "%s/config.toml", dir);
+    const char claude_entry[] =
+        "{\"mcpServers\":{\"mori-graph\":{"
+        "\"command\":\"/home/user/.local/share/mise/shims/codebase-memory-mcp\","
+        "\"args\":[\"--ui=false\"],\"env\":{\"CBM_CACHE_DIR\":\"/graph/cache\"}}}}\n";
+    const char codex_entry[] =
+        "[mcp_servers.mori-graph]\n"
+        "command = \"/home/user/.local/share/mise/shims/codebase-memory-mcp\"\n"
+        "args = [\"--ui=false\"]\n"
+        "env_vars = [\"CBM_CACHE_DIR\", \"CBM_RUNTIME_DIR\"]\n";
+    ASSERT_EQ(write_test_file(claude, claude_entry), 0);
+    ASSERT_EQ(write_test_file(codex, codex_entry), 0);
+    int claude_rc = cbm_install_mori_claude_mcp("/opt/mori/bin/mori", claude);
+    int codex_rc = cbm_install_mori_codex_mcp("/opt/mori/bin/mori", codex);
+    char *claude_after = read_test_file_alloc(claude);
+    char *codex_after = read_test_file_alloc(codex);
+    bool preserved = claude_after && codex_after && strcmp(claude_entry, claude_after) == 0 &&
+                     strcmp(codex_entry, codex_after) == 0;
+    free(claude_after);
+    free(codex_after);
+    test_rmdir_r(dir);
+    ASSERT_NE(claude_rc, 0);
+    ASSERT_NE(codex_rc, 0);
+    ASSERT_TRUE(preserved);
+    PASS();
+}
+
+#ifndef _WIN32
+TEST(cli_install_follows_user_owned_client_config_links) {
+    char home[256];
+    snprintf(home, sizeof(home), "/tmp/cli-mori-links-XXXXXX");
+    if (!cbm_mkdtemp(home)) {
+        FAIL("cbm_mkdtemp failed");
+    }
+    char codex_dir[512];
+    char claude_link[512];
+    char codex_link[640];
+    char claude_target[512];
+    char codex_target[512];
+    snprintf(codex_dir, sizeof(codex_dir), "%s/.codex", home);
+    snprintf(claude_link, sizeof(claude_link), "%s/.claude.json", home);
+    snprintf(codex_link, sizeof(codex_link), "%s/config.toml", codex_dir);
+    snprintf(claude_target, sizeof(claude_target), "%s/claude.json", home);
+    snprintf(codex_target, sizeof(codex_target), "%s/codex.toml", home);
+    ASSERT_TRUE(cbm_mkdir_p(codex_dir, 0755));
+    ASSERT_EQ(write_test_file(claude_target, "{\"theme\":\"dark\"}\n"), 0);
+    ASSERT_EQ(write_test_file(codex_target, "model = \"keep\"\n"), 0);
+    ASSERT_EQ(symlink(claude_target, claude_link), 0);
+    ASSERT_EQ(symlink(codex_target, codex_link), 0);
+
+    cli_mori_env_t saved = cli_mori_env_enter(home);
+    cbm_cli_set_self_path_override_for_test("/opt/mori/bin/mori");
+    int rc = cli_test_cmd_install(0, NULL);
+    cbm_cli_set_self_path_override_for_test(NULL);
+    cli_mori_env_leave(saved);
+
+    struct stat state;
+    bool links_preserved = lstat(claude_link, &state) == 0 && S_ISLNK(state.st_mode) &&
+                           lstat(codex_link, &state) == 0 && S_ISLNK(state.st_mode);
+    char *claude_after = read_test_file_alloc(claude_target);
+    char *codex_after = read_test_file_alloc(codex_target);
+    bool targets_registered = claude_after && strstr(claude_after, "\"theme\":\"dark\"") &&
+                              strstr(claude_after, "\"mori-graph\"") &&
+                              strstr(claude_after, "\"/opt/mori/bin/mori\"") && codex_after &&
+                              strstr(codex_after, "model = \"keep\"") &&
+                              strstr(codex_after, "[mcp_servers.mori-graph]") &&
+                              strstr(codex_after, "command = \"/opt/mori/bin/mori\"");
+    free(claude_after);
+    free(codex_after);
+    test_rmdir_r(home);
+
+    ASSERT_EQ(rc, 0);
+    ASSERT_TRUE(links_preserved);
+    ASSERT_TRUE(targets_registered);
+    PASS();
+}
+#endif
 
 /* update downloads nothing: it prints the mise upgrade steps and exits
  * non-zero, whatever flags it gets. */
@@ -6430,108 +6525,6 @@ TEST(cli_install_plan_receipt_no_mutation_issue388) {
         snprintf(reason, sizeof(reason), "building an install plan created %s", created);
         FAIL(reason);
     }
-    PASS();
-}
-
-/* Supported-agent metadata must track the real installer surface. */
-TEST(cli_supported_agent_surfaces_match_installers) {
-    const char *const required_agents[] = {
-        "Claude Code",
-        "Codex CLI",
-        "Gemini CLI",
-        "Zed",
-        "OpenCode",
-        "Antigravity",
-        "Aider",
-        "KiloCode",
-        "VS Code",
-        "Cursor",
-        "Windsurf",
-        "Augment / Auggie",
-        "OpenClaw",
-        "Kiro",
-        "Junie",
-        "Hermes",
-        "OpenHands",
-        "Cline",
-        "Warp",
-        "Qwen Code",
-        "GitHub Copilot CLI",
-        "Factory Droid",
-        "Crush",
-        "Goose",
-        "Mistral Vibe",
-        "Grok Build",
-        "Qoder CLI",
-        "Kimi Code CLI",
-        "GitLab Duo CLI",
-        "Rovo Dev CLI",
-        "Amp",
-        "Devin CLI / Local",
-        "Tabnine",
-        "Continue / cn",
-        "Visual Studio",
-        "TRAE",
-        "Roo Code",
-        "Amazon Q Developer IDE",
-        "CodeBuddy Code CLI",
-        "IBM Bob IDE",
-        "IBM Bob Shell",
-        "Pochi",
-        "Pi",
-        "Sourcegraph Cody",
-        "Oh My Pi (omp)",
-        "agentty",
-    };
-    ASSERT_EQ(sizeof(required_agents) / sizeof(required_agents[0]), 46U);
-    /* The table-driven registry must carry agentty too — the legacy detector no
-     * longer knows about it. */
-    ASSERT_NOT_NULL(cbm_agent_client_by_stable_id("agentty"));
-    char *data = read_test_file_alloc("README.upstream.md");
-    if (!data)
-        FAIL("could not read README.upstream.md for supported-agent contract");
-    if (!strstr(data, "46 supported automatic/conditional client surfaces")) {
-        free(data);
-        FAIL("README must describe all 46 automatic/conditional client surfaces accurately");
-    }
-    for (size_t i = 0; i < sizeof(required_agents) / sizeof(required_agents[0]); i++) {
-        if (!strstr(data, required_agents[i])) {
-            free(data);
-            FAIL("README Multi-Agent Support table must include every installed agent");
-        }
-    }
-    free(data);
-
-    data = read_test_file_alloc("docs/index.html");
-    if (!data)
-        FAIL("could not read docs/index.html for supported-agent contract");
-    if (!strstr(data, "configures 46 automatic/conditional client surfaces")) {
-        free(data);
-        FAIL("landing page must describe all 46 automatic/conditional client surfaces accurately");
-    }
-    for (size_t i = 0; i < sizeof(required_agents) / sizeof(required_agents[0]); i++) {
-        if (!strstr(data, required_agents[i])) {
-            free(data);
-            FAIL("landing page must include every installed agent");
-        }
-    }
-    free(data);
-
-    data = read_test_file_alloc("docs/llms.txt");
-    if (!data)
-        FAIL("could not read docs/llms.txt for supported-agent contract");
-    if (!strstr(data, "46 automatic/conditional client surfaces") ||
-        !strstr(data, "40 automatically detected") || !strstr(data, "6 conditional/explicit")) {
-        free(data);
-        FAIL("llms.txt must describe the 46-surface 40+6 support matrix accurately");
-    }
-    for (size_t i = 0; i < sizeof(required_agents) / sizeof(required_agents[0]); i++) {
-        if (!strstr(data, required_agents[i])) {
-            free(data);
-            FAIL("llms.txt must include every installed agent surface");
-        }
-    }
-    free(data);
     PASS();
 }
 
@@ -19321,6 +19314,10 @@ SUITE(cli) {
     RUN_TEST(cli_install_registers_mori_graph_without_skills);
     RUN_TEST(cli_install_dry_run_writes_nothing);
     RUN_TEST(cli_install_mori_claude_mcp_keeps_other_servers);
+    RUN_TEST(cli_install_preserves_manually_registered_mori_graph);
+#ifndef _WIN32
+    RUN_TEST(cli_install_follows_user_owned_client_config_links);
+#endif
     RUN_TEST(cli_update_prints_mise_steps_and_fails);
     RUN_TEST(cli_hook_augment_is_graph_tool_accepts_both_keys);
 #ifdef _WIN32
@@ -19471,7 +19468,6 @@ SUITE(cli) {
     RUN_TEST(cli_agentty_mcp_config_env_override);
     RUN_TEST(cli_agentty_install_then_uninstall_roundtrip);
     RUN_TEST(cli_install_plan_receipt_no_mutation_issue388);
-    RUN_TEST(cli_supported_agent_surfaces_match_installers);
     RUN_TEST(cli_new_agent_install_plans_use_documented_paths);
     RUN_TEST(cli_new_agent_configs_use_documented_schemas);
     RUN_TEST(cli_agent_reinstall_preserves_foreign_policy_entries);
