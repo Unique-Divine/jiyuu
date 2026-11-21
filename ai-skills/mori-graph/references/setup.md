@@ -17,7 +17,7 @@ your platform. The mise `github:` backend selects that archive.
 
 ```sh
 mise install
-codebase-memory-mcp --version
+codebase-memory-mcp --version  # codebase-memory-mcp 0.13.1
 ```
 
 For a release that packages `mori`, pin its published version and run
