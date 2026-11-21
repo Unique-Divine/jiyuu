@@ -1,7 +1,8 @@
 //! The only module that knows about C. Deleting the C program later means
 //! deleting this module and its callers.
 
-use std::ffi::{CStr, c_char, c_int};
+use std::ffi::{CStr, OsStr, c_char, c_int};
+use std::os::unix::ffi::OsStrExt;
 
 unsafe extern "C" {
     /// The C program's `main`, renamed when `src/main.c` is compiled with
@@ -10,6 +11,7 @@ unsafe extern "C" {
     /// mimalloc.
     fn cbm_c_main(argc: c_int, argv: *mut *mut c_char) -> c_int;
 
+    fn cbm_alloc_init();
     fn cbm_gqlgen_set_glob_matcher(
         matcher: extern "C" fn(glob: *const c_char, path: *const c_char) -> bool,
     );
@@ -24,8 +26,9 @@ extern "C" fn gqlgen_glob_match(
     crate::gqlgen::glob_matches(glob.to_bytes(), path.to_bytes())
 }
 
-/// The process entry point. Forwards the kernel's argc and argv to the C
-/// program unchanged, including the worker and daemon re-execs
+/// The process entry point. Dispatches the developer export in Rust.
+/// Otherwise forwards the kernel's argc and argv to C unchanged, including
+/// worker and daemon re-execs
 /// (`cli --index-worker ...`, the hidden daemon argument), which C
 /// classifies itself. Returning hands the code to the C runtime's `exit`.
 ///
@@ -35,6 +38,20 @@ extern "C" fn gqlgen_glob_match(
 /// NULL, as for any C `main`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn main(argc: c_int, argv: *mut *mut c_char) -> c_int {
+    // SAFETY: the C runtime provides argc initialized, non-null argv slots.
+    let args = unsafe { std::slice::from_raw_parts(argv, argc as usize) };
+    if let Some(first) = args.get(1) {
+        // SAFETY: each argv slot points to a NUL-terminated string.
+        if unsafe { CStr::from_ptr(*first) }.to_bytes() == b"dev" {
+            // SAFETY: SQLite has not been used yet. Initialize the same
+            // allocator as C main before the exporter opens the database.
+            unsafe { cbm_alloc_init() };
+            return crate::export::run(args[2..].iter().map(|&arg| {
+                // SAFETY: the same argv contract applies to remaining slots.
+                OsStr::from_bytes(unsafe { CStr::from_ptr(arg) }.to_bytes())
+            }));
+        }
+    }
     // SAFETY: C has not started any indexing threads and the function pointer
     // stays valid for the process lifetime, including each worker's own main.
     unsafe { cbm_gqlgen_set_glob_matcher(gqlgen_glob_match) };
