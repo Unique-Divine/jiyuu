@@ -33,8 +33,8 @@ file says was made because the path was missing.
 ## Local Modifications
 
 - Imported as directory `mori/` of the Jiyuu monorepo and renamed Mori. The
-  C build keeps the binary name `codebase-memory-mcp`; releases ship `mori`
-  from 0.14.0.
+  reference C build and the 0.13.1 release use the binary name
+  `codebase-memory-mcp`. The Rust-built release executable is named `mori`.
 - The vendored Tree-sitter grammars are not committed. They are fetched at
   build time (see [Vendored Grammars](#vendored-grammars)).
 - Upstream `README.md` is replaced by Mori's `README.md`, which folds in its

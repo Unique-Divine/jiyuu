@@ -109,21 +109,26 @@ clean result means no recorded gap, not a complete index.
 ## Install
 
 Mori ships as `mori/v*` releases of
-[Unique-Divine/jiyuu](https://github.com/Unique-Divine/jiyuu/releases). Each
-release has one archive per target, named `mori-<version>-<target>.tar.gz`,
-plus `checksums.txt` and build provenance attestations:
+[Unique-Divine/jiyuu](https://github.com/Unique-Divine/jiyuu/releases). The
+published C release `mori/v0.13.1` packages `codebase-memory-mcp` for Linux
+x64 and arm64 and macOS arm64. Use that executable name in commands and
+client paths. The release tag prefix stays `mori/v`, and the MCP key
+stays `mori-graph`.
+
+For releases that package the `mori` executable, download
+`mori-<version>-<target>.tar.gz` for your platform. Releases include
+`checksums.txt` and build provenance attestations.
 
 | Target | Platform |
 | --- | --- |
 | `linux-x64` | Linux x86-64, static |
 | `linux-arm64` | Linux ARM64, static |
 | `darwin-arm64` | macOS on Apple silicon, macOS 14 or later |
-| `darwin-x64` | macOS on Intel |
+| `darwin-x64` | macOS on Intel, macOS 14 or later |
 
 An archive holds the `mori` binary, `LICENSE`, `NOTICE`, and
-`THIRD_PARTY_NOTICES.md`. From 0.14.0 the binary is `mori`; 0.13.x releases
-named it `codebase-memory-mcp` and shipped
-`codebase-memory-mcp-<version>-<target>.tar.gz`.
+`THIRD_PARTY_NOTICES.md`. Pick the version, executable name, and targets
+from the release assets before pinning a version.
 
 There are no Windows builds.
 
@@ -134,16 +139,19 @@ mise's `github:` backend picks the archive for your platform:
 ```toml
 # ~/.config/mise/config.toml
 [tools."github:Unique-Divine/jiyuu"]
-version = "0.14.0"
+version = "0.13.1"
 version_prefix = "mori/v"
 ```
 
 ```sh
 mise install
-mori --version
+codebase-memory-mcp --version
 ```
 
-With `lockfile = true`, lock every platform you use before installing:
+For a release that packages `mori`, set `version` to its published
+version and run `mori --version` after upgrading. With
+`lockfile = true`, lock the platforms you use before installing. For a
+release with all four targets:
 
 ```sh
 mise lock --platform linux-arm64,linux-x64,macos-arm64,macos-x64
@@ -163,15 +171,17 @@ Remove any hand-built binary earlier on `PATH` (for example in
 
 Download the archive for your target from the
 [releases page](https://github.com/Unique-Divine/jiyuu/releases), check it
-against `checksums.txt`, and put `mori` on your `PATH`:
+against `checksums.txt`, and put its executable on your `PATH`.
+For a release that packages `mori`, set `binary=mori` and use its
+published version.
 
 ```sh
-version=0.14.0 target=linux-x64
+version=0.13.1 target=linux-x64 binary=codebase-memory-mcp
 gh release download "mori/v$version" --repo Unique-Divine/jiyuu \
-  --pattern "mori-$version-$target.tar.gz" --pattern checksums.txt
+  --pattern "$binary-$version-$target.tar.gz" --pattern checksums.txt
 sha256sum --check --ignore-missing checksums.txt
-tar -xzf "mori-$version-$target.tar.gz" mori
-install -m 755 mori ~/.local/bin/mori
+tar -xzf "$binary-$version-$target.tar.gz" "$binary"
+install -m 755 "$binary" "$HOME/.local/bin/$binary"
 ```
 
 On macOS, use `shasum -a 256 --check --ignore-missing checksums.txt`.
@@ -180,7 +190,7 @@ To check that GitHub Actions in Jiyuu built an archive, verify its
 attestation:
 
 ```sh
-gh attestation verify "mori-$version-$target.tar.gz" --repo Unique-Divine/jiyuu
+gh attestation verify "$binary-$version-$target.tar.gz" --repo Unique-Divine/jiyuu
 ```
 
 The macOS binary has an ad-hoc signature, not a Developer ID signature, and
@@ -190,28 +200,28 @@ a browser, macOS Gatekeeper refuses to open the binary because Apple can't
 verify it. Remove the quarantine attribute after unpacking:
 
 ```sh
-xattr -d com.apple.quarantine mori
+xattr -d com.apple.quarantine "$binary"
 ```
 
-### Skip `mori install` and `mori update`
-
-The binary still carries the installer commands it was imported with.
-`mori install` writes agent configuration under the old server name, and
-`mori install` and `mori update` fetch builds from the original project,
-which lack Mori's GraphQL linking. Install and upgrade through the releases
-above instead. If the daemon shows an update notice that points elsewhere,
-ignore it.
+Install and upgrade `mori/v0.13.1` through mise or its archive to avoid the
+inherited Codebase Memory installer and updater.
 
 ## Register the MCP Server
 
 Run `mori` with no arguments and it serves MCP over stdio. Register it once
 per client under the key `mori-graph`. Use a path that survives upgrades,
-such as the mise shim:
+such as the mise shim, in projects mise trusts. For `0.13.1`, the shim
+is named `codebase-memory-mcp`. When your install provides the `mori` shim:
 
 ```sh
 claude mcp add --scope user mori-graph -- ~/.local/share/mise/shims/mori
 codex mcp add mori-graph -- ~/.local/share/mise/shims/mori
 ```
+
+If the client cannot use the shim, get the executable path with
+`mise which mori` and update the client after each upgrade. When
+`mori install --help` describes registering `mori-graph`, that command
+can write the running executable's absolute path for Claude Code and Codex.
 
 For clients configured through JSON, such as `~/.claude.json` or a project
 `.mcp.json`:
@@ -477,16 +487,17 @@ mori --version
 
 ## Graph UI
 
-The graph UI is a browser app for reading source beside the graph. It came
-from upstream as CBM Lens, built on
-[CodeAtlasWeb](graph-ui/README.md) by
-[Bernhard Jackiewicz](https://github.com/BernhardJackiewicz), and the app
-still shows that name. It runs on loopback and edits nothing in your
-repositories.
+The graph UI is a loopback browser app for reading source beside the
+graph. It derives from CBM Lens and
+[Bernhard Jackiewicz's CodeAtlasWeb](graph-ui/README.md).
 
-Release archives don't include the UI. Build a binary with it embedded
-from a Jiyuu checkout (needs Node.js 22 or later), then start the daemon
-with that binary:
+If your release embeds the UI, start the daemon with the release binary.
+For a build without the UI, use the source build command below. The source
+build needs Node.js 22 or later.
+
+```sh
+mori daemon start --open --port=9749
+```
 
 ```sh
 cd mori

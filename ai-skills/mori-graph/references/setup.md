@@ -3,28 +3,28 @@
 ## Install From a Release
 
 Mori ships as `mori/v*` releases of https://github.com/Unique-Divine/jiyuu.
-Each release has one archive per target, `mori-<version>-<target>.tar.gz`,
-for `linux-x64`, `linux-arm64`, `darwin-arm64`, and `darwin-x64`, plus a
-`checksums.txt` and build provenance attestations. Install with mise's
-`github:` backend, which picks the archive for the platform:
+The published C release `mori/v0.13.1` uses
+`codebase-memory-mcp-<version>-<target>.tar.gz` for Linux x64 and arm64
+and macOS arm64. Releases with a `mori-<version>-<target>.tar.gz` archive
+use the `mori` executable. Pick a published version with the archive for
+your platform. The mise `github:` backend selects that archive.
 
 ```toml
 # ~/.config/mise/config.toml
 [tools]
-"github:Unique-Divine/jiyuu" = { version = "0.14.0", version_prefix = "mori/v" }
+"github:Unique-Divine/jiyuu" = { version = "0.13.1", version_prefix = "mori/v" }
 ```
 
 ```sh
-mise lock --platform linux-arm64,linux-x64,macos-arm64,macos-x64   # with lockfile = true
 mise install
-mori --version   # mori 0.14.0
+codebase-memory-mcp --version
 ```
 
-The archive holds one binary, `mori`, which mise exposes through its shim.
-`mori` replaces `codebase-memory-mcp` from 0.14.0: 0.13.x releases shipped
-`codebase-memory-mcp-<version>-<target>.tar.gz` with a binary of that name.
-After upgrading from 0.13.x, update every MCP registration and hook that
-names the old binary or shim.
+For a release that packages `mori`, pin its published version and run
+`mori --version` after installing. With `lockfile = true`, run
+`mise lock --platform` with the platforms you use before installing. When
+the executable name changes, update the MCP registrations and hooks that
+point to the previous name.
 
 To upgrade, bump `version`, relock, install, then restart the background
 daemon, which keeps the old binary until it restarts:
@@ -59,9 +59,11 @@ list tools. Claude Code hooks that run `mori hook-augment` work through the
 same binary path; [Hooks and Tool Profiles](https://github.com/Unique-Divine/jiyuu/blob/main/mori/README.md#hooks-and-tool-profiles)
 in Mori's README lists the hook entries and the `--tool-profile` option.
 
-Don't run `mori install` or `mori update`: they rewrite this skill,
-register the server under the old key, and fetch a build without Mori's
-GraphQL linking.
+For 0.13.1, use the `codebase-memory-mcp` executable or shim in the
+registration commands and skip its inherited `install` and `update`
+commands. If a project blocks the mise shim, use `mise which mori` or
+`mise which codebase-memory-mcp` to get the installed executable path.
+Update direct paths after upgrading.
 
 ## Build From Source
 

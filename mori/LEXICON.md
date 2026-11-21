@@ -27,7 +27,7 @@ The build whose output counts as correct in a comparison.
 **Graph UI**:
 The browser app the daemon serves from a binary built with the UI embedded,
 with workspaces such as Explore, Galaxy, and Repos.
-_Avoid_: Lens, CBM Lens (upstream's name, still shown in the app)
+_Avoid_: Lens, CBM Lens (upstream's name)
 
 ### Index Runs
 
