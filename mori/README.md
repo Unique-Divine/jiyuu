@@ -167,8 +167,8 @@ libraries (`libSystem`, `libz`, `libc++`); static linking is Linux-only.
 The macOS binary carries an ad-hoc signature, not a Developer ID signature,
 and is not notarized. Downloads through mise, `curl` or `gh release download`
 carry no quarantine attribute and run as is. If you download the archive in
-a browser, Gatekeeper blocks the binary as from an unidentified developer;
-remove the quarantine attribute after unpacking:
+a browser, macOS Gatekeeper refuses to open the binary because Apple can't
+verify it; remove the quarantine attribute after unpacking:
 
 ```bash
 xattr -d com.apple.quarantine codebase-memory-mcp

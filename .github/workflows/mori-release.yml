@@ -163,9 +163,11 @@ jobs:
           codesign --sign - --force --timestamp=none "$BIN"
           codesign --verify --strict --verbose=2 "$BIN"
           file "$BIN"
-          lipo -archs "$BIN" | grep -qx arm64
+          archs="$(lipo -archs "$BIN")"
+          [ "$archs" = arm64 ]
           otool -l "$BIN" | grep -A4 LC_BUILD_VERSION
-          otool -l "$BIN" | grep -Eq 'minos 14\.0$'
+          load_cmds="$(otool -l "$BIN")"
+          printf '%s\n' "$load_cmds" | grep -E 'minos 14\.0$' >/dev/null
           # Only libraries every Mac has: nothing from Homebrew or elsewhere.
           libs="$(otool -L "$BIN" | tail -n +2 | awk '{print $1}')"
           echo "$libs"
