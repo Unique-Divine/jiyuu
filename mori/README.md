@@ -109,15 +109,9 @@ clean result means no recorded gap, not a complete index.
 ## Install
 
 Mori ships as `mori/v*` releases of
-[Unique-Divine/jiyuu](https://github.com/Unique-Divine/jiyuu/releases). The
-published C release `mori/v0.13.1` packages `codebase-memory-mcp` for Linux
-x64 and arm64 and macOS arm64. Use that executable name in commands and
-client paths. The release tag prefix stays `mori/v`, and the MCP key
-stays `mori-graph`.
-
-For releases that package the `mori` executable, download
-`mori-<version>-<target>.tar.gz` for your platform. Releases include
-`checksums.txt` and build provenance attestations.
+[Unique-Divine/jiyuu](https://github.com/Unique-Divine/jiyuu/releases). Each
+release has one archive per target, named `mori-<version>-<target>.tar.gz`,
+plus `checksums.txt` and build provenance attestations:
 
 | Target | Platform |
 | --- | --- |
@@ -126,9 +120,12 @@ For releases that package the `mori` executable, download
 | `darwin-arm64` | macOS on Apple silicon, macOS 14 or later |
 | `darwin-x64` | macOS on Intel, macOS 14 or later |
 
-An archive holds the `mori` binary, `LICENSE`, `NOTICE`, and
-`THIRD_PARTY_NOTICES.md`. Pick the version, executable name, and targets
-from the release assets before pinning a version.
+An archive holds the `mori` binary, with the graph UI embedded, and
+`LICENSE`, `NOTICE`, and `THIRD_PARTY_NOTICES.md`. The first release of
+`mori` is 0.14.0. Releases 0.13.x named the binary `codebase-memory-mcp`,
+shipped `codebase-memory-mcp-<version>-<target>.tar.gz` for three targets,
+and had no UI; after upgrading from one, update every MCP registration and
+hook that names the old binary or shim.
 
 There are no Windows builds.
 
@@ -139,19 +136,16 @@ mise's `github:` backend picks the archive for your platform:
 ```toml
 # ~/.config/mise/config.toml
 [tools."github:Unique-Divine/jiyuu"]
-version = "0.13.1"
+version = "0.14.0"
 version_prefix = "mori/v"
 ```
 
 ```sh
 mise install
-codebase-memory-mcp --version
+mori --version
 ```
 
-For a release that packages `mori`, set `version` to its published
-version and run `mori --version` after upgrading. With
-`lockfile = true`, lock the platforms you use before installing. For a
-release with all four targets:
+With `lockfile = true`, lock every platform you use before installing:
 
 ```sh
 mise lock --platform linux-arm64,linux-x64,macos-arm64,macos-x64
@@ -171,17 +165,15 @@ Remove any hand-built binary earlier on `PATH` (for example in
 
 Download the archive for your target from the
 [releases page](https://github.com/Unique-Divine/jiyuu/releases), check it
-against `checksums.txt`, and put its executable on your `PATH`.
-For a release that packages `mori`, set `binary=mori` and use its
-published version.
+against `checksums.txt`, and put `mori` on your `PATH`:
 
 ```sh
-version=0.13.1 target=linux-x64 binary=codebase-memory-mcp
+version=0.14.0 target=linux-x64
 gh release download "mori/v$version" --repo Unique-Divine/jiyuu \
-  --pattern "$binary-$version-$target.tar.gz" --pattern checksums.txt
+  --pattern "mori-$version-$target.tar.gz" --pattern checksums.txt
 sha256sum --check --ignore-missing checksums.txt
-tar -xzf "$binary-$version-$target.tar.gz" "$binary"
-install -m 755 "$binary" "$HOME/.local/bin/$binary"
+tar -xzf "mori-$version-$target.tar.gz" mori
+install -m 755 mori "$HOME/.local/bin/mori"
 ```
 
 On macOS, use `shasum -a 256 --check --ignore-missing checksums.txt`.
@@ -190,38 +182,42 @@ To check that GitHub Actions in Jiyuu built an archive, verify its
 attestation:
 
 ```sh
-gh attestation verify "$binary-$version-$target.tar.gz" --repo Unique-Divine/jiyuu
+gh attestation verify "mori-$version-$target.tar.gz" --repo Unique-Divine/jiyuu
 ```
 
-The macOS binary has an ad-hoc signature, not a Developer ID signature, and
-is not notarized. Downloads through mise, `curl`, or `gh release download`
-carry no quarantine attribute and run as is. If you download the archive in
-a browser, macOS Gatekeeper refuses to open the binary because Apple can't
-verify it. Remove the quarantine attribute after unpacking:
+The macOS binaries have an ad-hoc signature, not a Developer ID signature,
+and are not notarized. Downloads through mise, `curl`, or
+`gh release download` carry no quarantine attribute and run as is. If you
+download the archive in a browser, macOS Gatekeeper refuses to open the
+binary because Apple can't verify it. Remove the quarantine attribute after
+unpacking:
 
 ```sh
-xattr -d com.apple.quarantine "$binary"
+xattr -d com.apple.quarantine mori
 ```
 
-Install and upgrade `mori/v0.13.1` through mise or its archive to avoid the
-inherited Codebase Memory installer and updater.
+### Skip `mori install` and `mori update`
+
+The binary still carries the installer commands it was imported with.
+`mori install` writes agent configuration under the old server name, and
+`mori install` and `mori update` fetch builds from the original project,
+which lack Mori's GraphQL linking. Install and upgrade through the releases
+above instead. If the daemon shows an update notice that points elsewhere,
+ignore it.
 
 ## Register the MCP Server
 
 Run `mori` with no arguments and it serves MCP over stdio. Register it once
 per client under the key `mori-graph`. Use a path that survives upgrades,
-such as the mise shim, in projects mise trusts. For `0.13.1`, the shim
-is named `codebase-memory-mcp`. When your install provides the `mori` shim:
+such as the mise shim:
 
 ```sh
 claude mcp add --scope user mori-graph -- ~/.local/share/mise/shims/mori
 codex mcp add mori-graph -- ~/.local/share/mise/shims/mori
 ```
 
-If the client cannot use the shim, get the executable path with
-`mise which mori` and update the client after each upgrade. When
-`mori install --help` describes registering `mori-graph`, that command
-can write the running executable's absolute path for Claude Code and Codex.
+If a client or project can't use the shim, register the path from
+`mise which mori` instead, and update it after each upgrade.
 
 For clients configured through JSON, such as `~/.claude.json` or a project
 `.mcp.json`:
@@ -487,17 +483,25 @@ mori --version
 
 ## Graph UI
 
-The graph UI is a loopback browser app for reading source beside the
-graph. It derives from CBM Lens and
-[Bernhard Jackiewicz's CodeAtlasWeb](graph-ui/README.md).
+The graph UI is a browser app for reading source beside the graph. It came
+from upstream as CBM Lens, built on
+[CodeAtlasWeb](graph-ui/README.md) by
+[Bernhard Jackiewicz](https://github.com/BernhardJackiewicz), and the app
+still shows that name. It runs on loopback and edits nothing in your
+repositories.
 
-If your release embeds the UI, start the daemon with the release binary.
-For a build without the UI, use the source build command below. The source
-build needs Node.js 22 or later.
+Release binaries embed the UI. Start a daemon that serves it:
 
 ```sh
 mori daemon start --open --port=9749
 ```
+
+The browser opens `http://127.0.0.1:9749`. A permanent daemon keeps the UI
+up after the command exits; stop it with `mori daemon stop`. An MCP session
+started with `--ui=true --port=9749` serves the same UI.
+
+To try UI changes from a Jiyuu checkout, build a binary with the UI
+embedded (needs Node.js 22 or later):
 
 ```sh
 cd mori
@@ -506,10 +510,9 @@ scripts/build.sh --with-ui
 build/c/codebase-memory-mcp daemon start --open --port=9749
 ```
 
-The browser opens `http://127.0.0.1:9749`. An MCP session started with
-`--ui=true --port=9749` serves the same UI. All clients of one daemon must
-run the same build, so point your agents at this binary while you use the
-UI, or use a separate `CBM_CACHE_DIR`.
+All clients of one daemon must run the same build, so stop the release
+daemon first, or give the dev build its own `CBM_CACHE_DIR` and
+`CBM_RUNTIME_DIR`.
 
 To open a repository, choose **Add project index** in the project menu
 (`Alt+P`), pick a local folder, and name the index. Files stay in place.
@@ -1180,10 +1183,6 @@ Twelve upstream contract checks that test DeusData's release machinery are
 removed; [IMPORT.md](IMPORT.md#excluded-contract-checks) lists them with
 their restore commands.
 
-When running the binary against a real repository during development, point
-`CBM_CACHE_DIR` and `CBM_RUNTIME_DIR` at scratch directories to keep the
-index away from `~/.cache/codebase-memory-mcp`.
-
 ## Release
 
 File [VERSION](VERSION) holds Mori's version. Workflow
@@ -1195,8 +1194,8 @@ release binary `mori`, the [jiyuu-mori](jiyuu-mori/) crate built with feature
 To release, bump `VERSION` in a PR, merge it, then tag the merged commit:
 
 ```bash
-git tag -a mori/v0.13.0 -m "Mori 0.13.0"
-git push origin mori/v0.13.0
+git tag -a mori/v0.14.0 -m "Mori 0.14.0"
+git push origin mori/v0.14.0
 ```
 
 The workflow fails unless the tag equals `mori/v` plus `VERSION`. It builds
@@ -1218,28 +1217,11 @@ four targets, each on a native runner, with the graph UI embedded (as
 
 Each archive holds the binary, `LICENSE`, `NOTICE` and
 `THIRD_PARTY_NOTICES.md` (generated from `THIRD_PARTY.md` and the vendored
-licenses). There is no installer; install from the release assets, for
-example with mise's `github:` backend, which picks the archive by the
-platform in its name:
-
-```toml
-[tools."github:Unique-Divine/jiyuu"]
-version = "0.13.0"
-version_prefix = "mori/v"
-```
-
-The macOS binaries link only system libraries (`libSystem`, `libz`,
-`libc++`); static linking is Linux-only.
-
-The macOS binaries carry an ad-hoc signature, not a Developer ID signature,
-and are not notarized. Downloads through mise, `curl` or `gh release download`
-carry no quarantine attribute and run as is. If you download the archive in
-a browser, macOS Gatekeeper refuses to open the binary because Apple can't
-verify it; remove the quarantine attribute after unpacking:
-
-```bash
-xattr -d com.apple.quarantine mori
-```
+licenses). There is no installer; users install from the release assets as
+[Install](#install) describes. The macOS binaries link only system libraries
+(`libSystem`, `libz`, `libc++`); static linking is Linux-only, and their
+signing and Gatekeeper behavior are covered under
+[Download a Release](#download-a-release).
 
 The release job attests build provenance for the archives and
 `checksums.txt`, then creates a draft release with `checksums.txt` and
@@ -1247,7 +1229,7 @@ The release job attests build provenance for the archives and
 unchanged:
 
 ```bash
-gh release edit mori/v0.13.0 --draft=false --latest=false
+gh release edit mori/v0.14.0 --draft=false --latest=false
 ```
 
 Rerunning the workflow refills a draft but never changes a published

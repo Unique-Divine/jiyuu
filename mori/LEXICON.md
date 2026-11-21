@@ -25,8 +25,8 @@ _See_: [jiyuu-mori](jiyuu-mori): the crate and how it relates to the C
 The build whose output counts as correct in a comparison.
 
 **Graph UI**:
-The browser app the daemon serves from a binary built with the UI embedded,
-with workspaces such as Explore, Galaxy, and Repos.
+The browser app the daemon serves from a binary with the UI embedded, such
+as a release `mori`, with workspaces such as Explore, Galaxy, and Repos.
 _Avoid_: Lens, CBM Lens (upstream's name)
 
 ### Index Runs

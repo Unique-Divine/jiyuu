@@ -1,11 +1,10 @@
 # Graph UI
 
 The graph UI, titled CBM Lens Beta in the app, is the local exploration frontend
-served by a build with the UI embedded: `scripts/build.sh --with-ui` writes
-`build/c/codebase-memory-mcp`, which serves it with `daemon start --open` or
-`--ui=true`. Release binaries include the UI only once the release lane
-([jiyuu#219](https://github.com/Unique-Divine/jiyuu/pull/219)) builds them with
-it; see [Graph UI](../README.md#graph-ui) in Mori's README.
+served by the `mori` release binaries (`mori daemon start --open` or
+`--ui=true`), which embed it. For a local build, `scripts/build.sh --with-ui`
+writes `build/c/codebase-memory-mcp` with the UI embedded. See
+[Graph UI](../README.md#graph-ui) in Mori's README.
 It combines source, the indexed graph and optional browser inference. Source files
 are read-only; project architecture decisions can be edited in the ADR workspace.
 The frontend was contributed by Bernhard Jackiewicz as CodeAtlasWeb.

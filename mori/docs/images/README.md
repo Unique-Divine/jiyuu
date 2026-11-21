@@ -13,7 +13,7 @@ These are screenshots and browser recordings of the real application using publi
 - Capture: built-in browser screenshots on macOS, English locale, native viewport **1600 × 1000**, **12 frames per second**
 - Encoding: JPEG screenshot frames converted to GIF with one 256-color palette per recording, no dithering, infinite looping; no upscaling, sharpening or pointer overlays
 
-The `v0.0.1` label is the frontend package version, not the backend release version. Mori releases don't include the UI; build it from source as the [README](../../README.md#graph-ui) describes.
+The `v0.0.1` label is the frontend package version, not the backend release version. Mori's release binaries embed the UI; see the [README](../../README.md#graph-ui).
 
 ### Data and interaction
 
