@@ -225,10 +225,10 @@ fn project_pages_use_internal_identity_and_preserve_projection() {
         "index_status",
         r#"{"project":"alpha","format":"json"}"#,
     ];
-    let c = run_in(&c_binary(), &scratch, &args);
-    let stop = run_in(&c_binary(), &scratch, &["daemon", "stop"]);
+    let c = run_in(&c_binary(), &scratch, None, &args);
+    let stop = run_in(&c_binary(), &scratch, None, &["daemon", "stop"]);
     assert!(stop.status.success(), "{stop:?}");
-    let rust = run_in(Path::new(MORI), &scratch, &args);
+    let rust = run_in(Path::new(MORI), &scratch, None, &args);
     assert_eq!(
         (c.status.code(), &c.stdout, &c.stderr),
         (rust.status.code(), &rust.stdout, &rust.stderr)
