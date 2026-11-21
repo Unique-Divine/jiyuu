@@ -1,0 +1,137 @@
+/* Repos workspace: its own light and dark surfaces, set by data-theme. */
+.repo-galaxy {
+    --rg-bg: #0b1311;
+    --rg-panel: #0f1714;
+    --rg-line: #27443e;
+    --rg-fg: #deece7;
+    --rg-dim: #91ada7;
+    --rg-accent: #6be7ba;
+    --rg-label-bg: rgb(11 19 17 / 82%);
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 480px;
+    background: var(--rg-bg);
+    color: var(--rg-fg);
+    font: 13px/1.4 system-ui, sans-serif;
+}
+
+.repo-galaxy[data-theme="light"] {
+    --rg-bg: #f5f7f6;
+    --rg-panel: #ffffff;
+    --rg-line: #d3ddd8;
+    --rg-fg: #14211c;
+    --rg-dim: #56665f;
+    --rg-accent: #1d7a55;
+    --rg-label-bg: rgb(255 255 255 / 88%);
+}
+
+.repo-galaxy button {
+    font: inherit;
+    color: inherit;
+    background: transparent;
+    border: 1px solid var(--rg-line);
+    border-radius: 6px;
+    padding: 3px 9px;
+    cursor: pointer;
+}
+
+.repo-galaxy button[aria-pressed="true"] {
+    border-color: var(--rg-accent);
+    color: var(--rg-accent);
+}
+
+.repo-galaxy-bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px 16px;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--rg-line);
+    background: var(--rg-panel);
+}
+
+.repo-galaxy-title h2 { margin: 0; font-size: 15px; }
+.repo-galaxy-title p { margin: 0; color: var(--rg-dim); }
+.repo-galaxy-chips, .repo-galaxy-theme { display: flex; flex-wrap: wrap; gap: 6px; }
+
+.repo-galaxy-chip { display: inline-flex; align-items: center; gap: 6px; }
+.repo-galaxy-chip span {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--chip);
+}
+.repo-galaxy-chip[aria-pressed="false"] { opacity: 0.45; }
+.repo-galaxy-chip[aria-pressed="false"] span { background: transparent; border: 1px solid var(--chip); }
+.repo-galaxy-chip small, .repo-galaxy-arcs small, .repo-galaxy-details small { color: var(--rg-dim); }
+
+.repo-galaxy-toggle { display: inline-flex; gap: 6px; align-items: center; color: var(--rg-dim); }
+
+.repo-galaxy-body { display: flex; flex: 1; min-height: 0; }
+.repo-galaxy-stage { position: relative; flex: 1; min-width: 0; }
+.repo-galaxy-scene, .repo-galaxy-scene canvas { position: absolute; inset: 0; }
+
+.repo-galaxy-panel {
+    width: min(420px, 42%);
+    overflow: auto;
+    padding: 12px 14px;
+    border-left: 1px solid var(--rg-line);
+    background: var(--rg-panel);
+}
+.repo-galaxy-panel h3 { display: flex; align-items: center; gap: 8px; margin: 4px 0 6px; font-size: 14px; }
+
+.repo-galaxy-arcs { list-style: none; margin: 6px 0; padding: 0; }
+.repo-galaxy-arcs button {
+    display: grid;
+    grid-template-columns: 12px 1fr;
+    gap: 0 8px;
+    width: 100%;
+    text-align: left;
+    border: 0;
+    border-radius: 4px;
+    padding: 5px 6px;
+}
+.repo-galaxy-arcs button:hover { background: color-mix(in srgb, var(--rg-accent) 10%, transparent); }
+.repo-galaxy-arcs small { grid-column: 2; }
+
+.repo-galaxy-swatch { display: inline-block; width: 12px; height: 4px; margin-top: 8px; border-radius: 2px; }
+
+.repo-galaxy-link { border: 0 !important; padding: 0 !important; color: var(--rg-accent) !important; }
+
+.repo-galaxy-details table { width: 100%; border-collapse: collapse; margin: 8px 0; }
+.repo-galaxy-details th, .repo-galaxy-details td {
+    padding: 5px 4px;
+    border-bottom: 1px solid var(--rg-line);
+    text-align: left;
+    vertical-align: top;
+    overflow-wrap: anywhere;
+}
+.repo-galaxy-details th { color: var(--rg-dim); font-weight: 500; }
+.repo-galaxy-details td small { display: block; }
+.repo-galaxy-details code { font: 12px/1.35 ui-monospace, monospace; }
+
+.repo-galaxy-note { margin: 12px; color: var(--rg-dim); }
+.repo-galaxy-stage .repo-galaxy-note { position: absolute; z-index: 1; max-width: 520px; }
+
+.repo-galaxy-label {
+    display: inline-flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2px 7px;
+    border: 1px solid var(--rg-line);
+    border-radius: 6px;
+    background: var(--rg-label-bg);
+    color: var(--rg-fg);
+    font: 600 12px/1.25 system-ui, sans-serif;
+    white-space: nowrap;
+}
+.repo-galaxy-label small { font-weight: 400; color: var(--rg-dim); }
+.repo-galaxy-label[data-selected="true"] { border-color: var(--rg-accent); }
+
+@media (max-width: 720px) {
+    .repo-galaxy-body { flex-direction: column; }
+    .repo-galaxy-stage { min-height: 360px; }
+    .repo-galaxy-panel { width: auto; border-left: 0; border-top: 1px solid var(--rg-line); }
+}
+.repo-galaxy-host { height: 100%; }
