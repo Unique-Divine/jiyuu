@@ -13,6 +13,29 @@ use crate::graphql_link::{
 };
 use crate::link::RoutePlan;
 
+#[cfg(feature = "native-graphql-fixtures")]
+mod fixture_witness {
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    pub(super) const GLOB: u32 = 1 << 0;
+    pub(super) const ROUTE_PLAN: u32 = 1 << 1;
+    pub(super) const ROUTE_WRITE: u32 = 1 << 2;
+    pub(super) const LINK_FIND: u32 = 1 << 3;
+    pub(super) const LINK_UPSERT: u32 = 1 << 4;
+    pub(super) const LINK_DELETE: u32 = 1 << 5;
+
+    static VISITED: AtomicU32 = AtomicU32::new(0);
+
+    pub(super) fn mark(callback: u32) {
+        VISITED.fetch_or(callback, Ordering::Relaxed);
+    }
+
+    #[unsafe(no_mangle)]
+    extern "C" fn mori_graphql_fixture_callbacks_seen() -> u32 {
+        VISITED.load(Ordering::Relaxed)
+    }
+}
+
 #[repr(C)]
 struct GraphqlRoutePlan {
     field_index: usize,
@@ -108,6 +131,8 @@ extern "C" fn gqlgen_glob_match(
     glob: *const c_char,
     path: *const c_char,
 ) -> bool {
+    #[cfg(feature = "native-graphql-fixtures")]
+    fixture_witness::mark(fixture_witness::GLOB);
     // SAFETY: C passes NUL-terminated strings valid for the whole call.
     let (glob, path) = unsafe { (CStr::from_ptr(glob), CStr::from_ptr(path)) };
     crate::gqlgen::glob_matches(glob.to_bytes(), path.to_bytes())
@@ -118,6 +143,8 @@ unsafe extern "C" fn plan_graphql_route(
     first: *const c_void,
     count: usize,
 ) -> GraphqlRoutePlan {
+    #[cfg(feature = "native-graphql-fixtures")]
+    fixture_witness::mark(fixture_witness::ROUTE_PLAN);
     let mut plan = RoutePlan::<*const c_void>::new(count);
     // SAFETY: C passes its initialized context and a nonempty candidate
     // array. It visits candidates synchronously and never retains user data.
@@ -152,6 +179,8 @@ unsafe extern "C" fn write_graphql_route(
     gb: *mut c_void,
     row: *const GraphqlRouteRow,
 ) -> bool {
+    #[cfg(feature = "native-graphql-fixtures")]
+    fixture_witness::mark(fixture_witness::ROUTE_WRITE);
     // SAFETY: The route pass lends its live graph and this row for the call.
     // The schema type and reason always point to NUL-terminated strings.
     let row = unsafe { &*row };
@@ -202,6 +231,8 @@ extern "C" fn graphql_delete_stale_link(
     caller: i64,
     route: i64,
 ) -> c_int {
+    #[cfg(feature = "native-graphql-fixtures")]
+    fixture_witness::mark(fixture_witness::LINK_DELETE);
     // SAFETY: C passes a live connection owned by this run. The non-owning
     // wrapper and its statements are dropped before C resumes using it.
     let result = unsafe { Connection::from_handle(db) }
@@ -216,6 +247,8 @@ extern "C" fn graphql_upsert_link(
     target: i64,
     properties: *const c_char,
 ) -> bool {
+    #[cfg(feature = "native-graphql-fixtures")]
+    fixture_witness::mark(fixture_witness::LINK_UPSERT);
     // SAFETY: The graph store lends a reset edge-upsert statement and the
     // C strings are NUL-terminated and valid until the callback returns.
     unsafe {
@@ -237,6 +270,8 @@ extern "C" fn graphql_find_handler(
     file: *mut c_char,
     file_size: usize,
 ) -> GraphqlHandler {
+    #[cfg(feature = "native-graphql-fixtures")]
+    fixture_witness::mark(fixture_witness::LINK_FIND);
     let mut matched = GraphqlHandler {
         handler_id: 0,
         ambiguous: false,
