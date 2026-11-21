@@ -367,9 +367,10 @@ failed indexes register no watch. `index_status` reports the watch in its
 `watch` object.
 
 After a successful cross-repo link run, the watcher reuses the project's
-target selection when it reindexes. If a target graph changes after the
-link run, `index_status` reports `cross_repo.status` as `stale` for the
-caller. Run cross-repo linking again to refresh those links. The field
+target selection when it reindexes. The caller's `index_status` reports
+`cross_repo.status` as `stale` when a provider changes or disappears, or
+when the stored link run predates provider generation tracking. Run
+cross-repo linking again to refresh those links. The field
 `cross_repo.reverse_pending` indicates that the daemon still needs to
 update the target graphs' references to this caller.
 

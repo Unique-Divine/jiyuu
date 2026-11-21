@@ -1538,6 +1538,11 @@ static bool cr_record_skip(cbm_cross_repo_result_t *result, const char *project,
     if (!result) {
         return true;
     }
+    for (int i = 0; i < result->skipped_count; i++) {
+        if (strcmp(result->skipped_projects[i].project, project) == 0) {
+            return true;
+        }
+    }
     cbm_cross_repo_skip_t *grown =
         cbm_realloc(CBM_MEM_CLASS_OTHER, result->skipped_projects,
                     ((size_t)result->skipped_count + 1U) * sizeof(*result->skipped_projects));
@@ -1886,7 +1891,7 @@ static bool cr_has_stale_peers(cbm_store_t *store, const char *project,
     yyjson_doc *peers = cr_read_peers(store, project);
     yyjson_val *observations = yyjson_doc_get_root(peers);
     yyjson_obj_iter iter = yyjson_obj_iter_with(observations);
-    bool stale = observations_required && !yyjson_is_obj(observations);
+    bool stale = observations_required && yyjson_obj_size(observations) == 0;
     yyjson_val *key;
     while (!stale && (key = yyjson_obj_iter_next(&iter))) {
         stale = cr_peer_is_stale(yyjson_get_str(key), yyjson_get_str(yyjson_obj_iter_get_val(key)));
