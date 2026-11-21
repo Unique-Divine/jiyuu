@@ -8237,37 +8237,9 @@ TEST(cli_supported_agent_surfaces_match_installers) {
     /* The table-driven registry must carry agentty too — the legacy detector no
      * longer knows about it. */
     ASSERT_NOT_NULL(cbm_agent_client_by_stable_id("agentty"));
-    char *data = read_test_file_alloc("README.upstream.md");
-    if (!data)
-        FAIL("could not read README.upstream.md for supported-agent contract");
-    if (!strstr(data, "46 supported automatic/conditional client surfaces")) {
-        free(data);
-        FAIL("README must describe all 46 automatic/conditional client surfaces accurately");
-    }
-    for (size_t i = 0; i < sizeof(required_agents) / sizeof(required_agents[0]); i++) {
-        if (!strstr(data, required_agents[i])) {
-            free(data);
-            FAIL("README Multi-Agent Support table must include every installed agent");
-        }
-    }
-    free(data);
-
-    data = read_test_file_alloc("docs/index.html");
-    if (!data)
-        FAIL("could not read docs/index.html for supported-agent contract");
-    if (!strstr(data, "configures 46 automatic/conditional client surfaces")) {
-        free(data);
-        FAIL("landing page must describe all 46 automatic/conditional client surfaces accurately");
-    }
-    for (size_t i = 0; i < sizeof(required_agents) / sizeof(required_agents[0]); i++) {
-        if (!strstr(data, required_agents[i])) {
-            free(data);
-            FAIL("landing page must include every installed agent");
-        }
-    }
-    free(data);
-
-    data = read_test_file_alloc("src/main.c");
+    /* Mori dropped the upstream README, landing page and llms.txt that
+     * listed these surfaces; the CLI help is the remaining surface. */
+    char *data = read_test_file_alloc("src/main.c");
     if (!data)
         FAIL("could not read src/main.c for supported-agent help contract");
     for (size_t i = 0; i < sizeof(required_agents) / sizeof(required_agents[0]); i++) {
@@ -8282,21 +8254,6 @@ TEST(cli_supported_agent_surfaces_match_installers) {
     }
     free(data);
 
-    data = read_test_file_alloc("docs/llms.txt");
-    if (!data)
-        FAIL("could not read docs/llms.txt for supported-agent contract");
-    if (!strstr(data, "46 automatic/conditional client surfaces") ||
-        !strstr(data, "40 automatically detected") || !strstr(data, "6 conditional/explicit")) {
-        free(data);
-        FAIL("llms.txt must describe the 46-surface 40+6 support matrix accurately");
-    }
-    for (size_t i = 0; i < sizeof(required_agents) / sizeof(required_agents[0]); i++) {
-        if (!strstr(data, required_agents[i])) {
-            free(data);
-            FAIL("llms.txt must include every installed agent surface");
-        }
-    }
-    free(data);
     PASS();
 }
 
