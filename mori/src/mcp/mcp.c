@@ -1866,6 +1866,29 @@ static char *mcp_result_from_json(const char *args_json, const char *json) {
     return result;
 }
 
+static cbm_mcp_read_override_fn read_override;
+static cbm_mcp_read_override_free_fn read_override_free;
+
+void cbm_mcp_set_read_override(cbm_mcp_read_override_fn handle,
+                               cbm_mcp_read_override_free_fn release) {
+    read_override = release ? handle : NULL;
+    read_override_free = release;
+}
+
+static char *try_read_override(const char *tool, const char *args, cbm_store_t *store,
+                               const char *project) {
+    if (!read_override) {
+        return NULL;
+    }
+    char *payload = read_override(tool, args, store, project);
+    if (!payload) {
+        return NULL;
+    }
+    char *result = mcp_result_from_json(args, payload);
+    read_override_free(payload);
+    return result;
+}
+
 /* ══════════════════════════════════════════════════════════════════
  *  MCP SERVER
  * ══════════════════════════════════════════════════════════════════ */
@@ -2917,6 +2940,16 @@ static bool project_has_adr(cbm_store_t *store, const char *project, const char 
     return stat(adr_path, &adr_st) == 0;
 }
 
+int cbm_mcp_project_adr_presence(cbm_store_t *store, const char *project) {
+    cbm_project_t info = {0};
+    if (cbm_store_get_project(store, project, &info) != CBM_STORE_OK) {
+        return -1;
+    }
+    int presence = info.root_path ? (int)project_has_adr(store, project, info.root_path) : -1;
+    cbm_project_free_fields(&info);
+    return presence;
+}
+
 /* ── Tool handler implementations ─────────────────────────────── */
 
 /* db_internal_project_name — see forward declaration above resolve_store. */
@@ -3878,6 +3911,12 @@ static char *handle_get_graph_schema(cbm_mcp_server_t *srv, const char *args) {
         return not_indexed;
     }
 
+    char *overridden = try_read_override("get_graph_schema", args, store, project);
+    if (overridden) {
+        free(project);
+        return overridden;
+    }
+
     char *diagnostics = cbm_mcp_get_string_arg(args, "diagnostics");
     bool include_properties = diagnostics && strcmp(diagnostics, "full") == 0;
     free(diagnostics);
@@ -3975,9 +4014,9 @@ static char *handle_get_graph_schema(cbm_mcp_server_t *srv, const char *args) {
     }
 
     /* Check ADR presence */
-    cbm_project_t proj_info = {0};
-    if (cbm_store_get_project(store, project, &proj_info) == 0 && proj_info.root_path) {
-        bool adr_exists = project_has_adr(store, project, proj_info.root_path);
+    int adr_presence = cbm_mcp_project_adr_presence(store, project);
+    if (adr_presence >= 0) {
+        bool adr_exists = adr_presence != 0;
         yyjson_mut_obj_add_bool(doc, root, "adr_present", adr_exists);
         if (!adr_exists && include_properties) {
             yyjson_mut_obj_add_str(
@@ -3985,7 +4024,6 @@ static char *handle_get_graph_schema(cbm_mcp_server_t *srv, const char *args) {
                 "No ADR found. Use manage_adr(mode='update') to persist architectural "
                 "decisions across sessions. Run get_architecture(aspects=['all']) first.");
         }
-        cbm_project_free_fields(&proj_info);
     }
 
     char *json = yy_doc_to_str(doc);

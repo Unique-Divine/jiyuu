@@ -16,6 +16,8 @@ mod export;
 mod ffi;
 #[cfg(all(feature = "c-backend", not(test)))]
 mod store;
+#[cfg(all(feature = "c-backend", not(test)))]
+mod tools;
 
 #[cfg(not(feature = "c-backend"))]
 fn main() {

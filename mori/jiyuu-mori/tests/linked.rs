@@ -186,6 +186,31 @@ fn index_through_worker_reexec_matches_c() {
         let counts = (json_number(&text, "nodes"), json_number(&text, "edges"));
         assert!(counts.0.is_some_and(|n| n > 0), "{side}: {text}");
         let queries: Vec<Output> = [
+            vec!["cli", "get_graph_schema", "--project", &project],
+            vec![
+                "cli",
+                "get_graph_schema",
+                "--project",
+                &project,
+                "--format",
+                "json",
+                "--diagnostics",
+                "full",
+                "--limit",
+                "4",
+                "--offset",
+                "1",
+            ],
+            vec![
+                "cli",
+                "get_graph_schema",
+                "--project",
+                &project,
+                "--limit",
+                "1",
+                "--offset",
+                "9999",
+            ],
             vec![
                 "cli",
                 "search_graph",

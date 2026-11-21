@@ -258,6 +258,19 @@ char *cbm_mcp_server_handle(cbm_mcp_server_t *srv, const char *line);
 /* Handle a tools/call request. Returns MCP tool result JSON. */
 char *cbm_mcp_handle_tool(cbm_mcp_server_t *srv, const char *tool_name, const char *args_json);
 
+/* Register before any request threads start. A handler returns an owned JSON
+ * payload, or NULL to use the C implementation. The store is borrowed until
+ * the callback returns. C applies the regular tool result format. */
+typedef char *(*cbm_mcp_read_override_fn)(const char *tool, const char *args,
+                                         cbm_store_t *store, const char *project);
+typedef void (*cbm_mcp_read_override_free_fn)(char *payload);
+void cbm_mcp_set_read_override(cbm_mcp_read_override_fn handle,
+                               cbm_mcp_read_override_free_fn release);
+
+/* Returns 1 for an ADR, 0 for an indexed project without one, or -1 if the
+ * project has no root path. */
+int cbm_mcp_project_adr_presence(cbm_store_t *store, const char *project);
+
 /* ── Supervised background index (RSS isolation, #832) ────────── */
 
 /* #1300: the explicit error response for a worker that exited cleanly without

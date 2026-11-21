@@ -69,6 +69,21 @@ pub(crate) struct Column {
 
 pub(crate) struct Store(Connection);
 
+#[derive(Clone, Copy)]
+pub(crate) enum SchemaGroup {
+    NodeLabel,
+    EdgeType,
+}
+
+impl SchemaGroup {
+    fn table_and_column(self) -> (&'static str, &'static str) {
+        match self {
+            Self::NodeLabel => ("nodes", "label"),
+            Self::EdgeType => ("edges", "type"),
+        }
+    }
+}
+
 pub(crate) fn quote_identifier(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
@@ -91,6 +106,77 @@ fn properties(row: &Row<'_>, skip: &[&str]) -> rusqlite::Result<Cells> {
 }
 
 impl Store {
+    pub(crate) fn from_connection(connection: Connection) -> Self {
+        Self(connection)
+    }
+
+    pub(crate) fn schema_counts(
+        &self,
+        project: &str,
+        group: SchemaGroup,
+    ) -> rusqlite::Result<Vec<(String, i32)>> {
+        let (table, column) = group.table_and_column();
+        // Seek to each distinct value and count its index range. GROUP BY
+        // scans every index entry before finding the next distinct value.
+        let sql = format!(
+            "WITH RECURSIVE v(x) AS (
+                SELECT MIN({column}) FROM {table} WHERE project = ?1
+                UNION ALL
+                SELECT (SELECT MIN({column}) FROM {table} WHERE project = ?1 AND {column} > v.x)
+                FROM v WHERE v.x IS NOT NULL
+            )
+            SELECT x, (SELECT COUNT(*) FROM {table} WHERE project = ?1 AND {column} = v.x) AS count
+            FROM v WHERE x IS NOT NULL ORDER BY count DESC, x"
+        );
+        self.0
+            .prepare(&sql)?
+            .query_map([project], |row| {
+                Ok((row.get(0)?, row.get::<_, i64>(1)? as i32))
+            })?
+            .collect()
+    }
+
+    pub(crate) fn schema_properties(
+        &self,
+        project: &str,
+        group: SchemaGroup,
+        name: &str,
+    ) -> rusqlite::Result<Vec<String>> {
+        let (table, column) = group.table_and_column();
+        let base: &[&str] = match group {
+            SchemaGroup::NodeLabel => &[
+                "name",
+                "qualified_name",
+                "file_path",
+                "start_line",
+                "end_line",
+            ],
+            SchemaGroup::EdgeType => &["source_id", "target_id"],
+        };
+        let sql = format!(
+            "SELECT CAST(key AS TEXT) FROM (
+                SELECT DISTINCT property.key FROM {table}, json_each({table}.properties) AS property
+                WHERE {table}.project = ?1 AND {table}.{column} = ?2 AND {table}.properties != '{{}}'
+                ORDER BY property.key LIMIT 50
+            )"
+        );
+        let mut properties =
+            base.iter().map(|key| (*key).to_owned()).collect::<Vec<_>>();
+        let mut query = self.0.prepare(&sql)?;
+        let keys =
+            query.query_map([project, name], |row| row.get::<_, String>(0))?;
+        for key in keys {
+            let key = key?;
+            if matches!(group, SchemaGroup::NodeLabel)
+                && matches!(key.as_str(), "fp" | "sp" | "bt")
+            {
+                continue;
+            }
+            properties.push(key);
+        }
+        Ok(properties)
+    }
+
     pub(crate) fn open(path: &Path) -> rusqlite::Result<Self> {
         let connection =
             Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;

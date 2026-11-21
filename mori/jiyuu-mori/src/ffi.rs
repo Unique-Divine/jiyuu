@@ -1,8 +1,22 @@
 //! The only module that knows about C. Deleting the C program later means
 //! deleting this module and its callers.
 
-use std::ffi::{CStr, OsStr, c_char, c_int};
+use std::ffi::{CStr, CString, OsStr, c_char, c_int, c_void};
 use std::os::unix::ffi::OsStrExt;
+use std::{panic, ptr};
+
+use rusqlite::{Connection, ffi::sqlite3};
+
+use crate::store::Store;
+use crate::tools;
+
+type ReadOverride = unsafe extern "C" fn(
+    tool: *const c_char,
+    args: *const c_char,
+    store: *mut c_void,
+    project: *const c_char,
+) -> *mut c_char;
+type ReleasePayload = unsafe extern "C" fn(payload: *mut c_char);
 
 unsafe extern "C" {
     /// The C program's `main`, renamed when `src/main.c` is compiled with
@@ -12,6 +26,62 @@ unsafe extern "C" {
     fn cbm_c_main(argc: c_int, argv: *mut *mut c_char) -> c_int;
 
     fn cbm_alloc_init();
+    fn cbm_mcp_set_read_override(handle: ReadOverride, release: ReleasePayload);
+    fn cbm_store_get_db(store: *mut c_void) -> *mut sqlite3;
+    fn cbm_mcp_project_adr_presence(
+        store: *mut c_void,
+        project: *const c_char,
+    ) -> c_int;
+}
+
+unsafe extern "C" fn read_override(
+    tool: *const c_char,
+    args: *const c_char,
+    store: *mut c_void,
+    project: *const c_char,
+) -> *mut c_char {
+    if tool.is_null() || args.is_null() || store.is_null() || project.is_null() {
+        return ptr::null_mut();
+    }
+    let result = panic::catch_unwind(|| {
+        // SAFETY: the C dispatch borrows valid NUL-terminated strings and a
+        // request-owned C store for the duration of this synchronous call.
+        let tool = unsafe { CStr::from_ptr(tool) };
+        if tool.to_bytes() != b"get_graph_schema" {
+            return None;
+        }
+        let args =
+            serde_json::from_slice(unsafe { CStr::from_ptr(args) }.to_bytes())
+                .ok()?;
+        let project_name = unsafe { CStr::from_ptr(project) }.to_str().ok()?;
+        let adr_present =
+            match unsafe { cbm_mcp_project_adr_presence(store, project) } {
+                0 => Some(false),
+                1 => Some(true),
+                _ => None,
+            };
+        let db = unsafe { cbm_store_get_db(store) };
+        if db.is_null() {
+            return None;
+        }
+        // SAFETY: C retains ownership; from_handle leaves the existing
+        // connection open, and Rust finalizes its own statements on return.
+        let store =
+            Store::from_connection(unsafe { Connection::from_handle(db) }.ok()?);
+        let payload =
+            tools::graph_schema(&store, project_name, &args, adr_present)?;
+        CString::new(payload).ok()
+    });
+    result
+        .ok()
+        .flatten()
+        .map_or(ptr::null_mut(), CString::into_raw)
+}
+
+unsafe extern "C" fn release_payload(payload: *mut c_char) {
+    // SAFETY: C calls this once for each non-null pointer read_override
+    // returns via CString::into_raw, without modifying the allocation.
+    drop(unsafe { CString::from_raw(payload) });
 }
 
 /// The process entry point. Dispatches the developer export in Rust.
@@ -42,5 +112,8 @@ pub unsafe extern "C" fn main(argc: c_int, argv: *mut *mut c_char) -> c_int {
     }
     // SAFETY: argc and argv come straight from the C runtime and meet the
     // contract of C main, which cbm_c_main is.
-    unsafe { cbm_c_main(argc, argv) }
+    unsafe {
+        cbm_mcp_set_read_override(read_override, release_payload);
+        cbm_c_main(argc, argv)
+    }
 }
