@@ -39,7 +39,7 @@ Remove any hand-built `mori` or `codebase-memory-mcp` earlier on `PATH`
 Without mise, download the archive from the release page, check it against
 `checksums.txt`, and unpack `mori` onto `PATH`. On macOS, a browser download
 needs `xattr -d com.apple.quarantine mori` before Gatekeeper runs it; see
-[Install](https://github.com/Unique-Divine/jiyuu/tree/main/mori#install) in
+[Install](https://github.com/Unique-Divine/jiyuu/blob/main/mori/README.md#install) in
 Mori's README.
 
 ## Register the MCP Server

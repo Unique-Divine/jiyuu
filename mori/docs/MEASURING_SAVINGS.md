@@ -186,7 +186,7 @@ system temporary directory. Do not assume or construct an old predictable
 `${CBM_CACHE_DIR}/logs/cbm-daemon.log` (the default cache directory is
 `~/.cache/codebase-memory-mcp`). The record is emitted even when the configured
 log level suppresses ordinary logging. The README's
-[diagnostics section](../README.md#troubleshooting--diagnostics) explains the
+[diagnostics section](../README.md#troubleshooting) explains the
 files and retention behavior.
 
 The live `snapshot.json` includes CBM-side `query_count`, `query_errors`,
