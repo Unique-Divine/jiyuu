@@ -90,9 +90,19 @@ fn assert_same(args: &[&str]) {
     );
 }
 
+/// `mori --version` names `mori`; the version and everything else match C.
 #[test]
 fn version_matches_c() {
-    assert_same(&["--version"]);
+    let c = run(&c_binary(), "c", &["--version"]);
+    let rs = run(Path::new(MORI), "rs", &["--version"]);
+    assert!(c.status.success() && rs.status.success());
+    let c_out = String::from_utf8_lossy(&c.stdout);
+    let rs_out = String::from_utf8_lossy(&rs.stdout);
+    let version = c_out
+        .strip_prefix("codebase-memory-mcp ")
+        .unwrap_or_else(|| panic!("C --version printed {c_out:?}"));
+    assert_eq!(rs_out, format!("mori {version}"));
+    assert_eq!(c.stderr, rs.stderr);
 }
 
 #[test]
