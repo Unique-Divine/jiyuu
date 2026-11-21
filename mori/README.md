@@ -121,10 +121,8 @@ attestations.
 | `darwin-arm64` | macOS on Apple silicon, macOS 14 or later |
 | `darwin-x64` | macOS on Intel, macOS 14 or later |
 
-An archive holds the executable, licenses, and notices. The published C
-release `mori/v0.13.1` packages `codebase-memory-mcp` for Linux x64 and
-arm64 and macOS arm64. Use that executable in place of `mori` when
-following the commands below on 0.13.1. The MCP key stays `mori-graph`.
+An archive holds the executable, licenses, and notices. Mori 0.14.0
+ships the `mori` executable and keeps the MCP key `mori-graph`.
 
 There are no Windows builds.
 
@@ -135,13 +133,13 @@ mise's `github:` backend picks the archive for your platform:
 ```toml
 # ~/.config/mise/config.toml
 [tools."github:Unique-Divine/jiyuu"]
-version = "0.13.1"
+version = "0.14.0"
 version_prefix = "mori/v"
 ```
 
 ```sh
 mise install
-codebase-memory-mcp --version  # codebase-memory-mcp 0.13.1
+mori --version  # mori 0.14.0
 ```
 
 For a published release with a `mori` archive, pin its version and run
@@ -152,8 +150,9 @@ installing. For a release with all four targets:
 mise lock --platform linux-arm64,linux-x64,macos-arm64,macos-x64
 ```
 
-To upgrade, bump `version`, relock, run `mise install`, then stop the
-background daemon so the next session starts the new binary:
+To upgrade, stop the background daemon with the current executable, then
+bump `version`, relock, and run `mise install`. The next session starts the
+daemon for the selected version:
 
 ```sh
 mori daemon stop
@@ -161,6 +160,18 @@ mori daemon stop
 
 Remove any hand-built binary earlier on `PATH` (for example in
 `~/.local/bin`), or it keeps shadowing the release.
+
+### Upgrade From C 0.13.1
+
+Install Mori 0.14.0 and stop the 0.13.1 daemon with the old executable
+and the environment it used. Keep the MCP key `mori-graph` and point its
+command and any `hook-augment` commands at the same `mori` shim. Open a new
+client session and check a graph query before retiring the old setup.
+
+To roll back, stop the Mori 0.14.0 daemon, restore the 0.13.1 mise pin and
+lock, and restore the previous MCP and hook command paths and cache
+settings. Release `mori/v0.13.1` ships `codebase-memory-mcp` for Linux x64
+and arm64 and macOS arm64.
 
 ### Download a Release
 
@@ -170,7 +181,7 @@ against `checksums.txt`, and put its executable on your `PATH`. For a
 release that packages `mori`, set `binary=mori` and use its published version.
 
 ```sh
-version=0.13.1 target=linux-x64 binary=codebase-memory-mcp
+version=0.14.0 target=linux-x64 binary=mori
 gh release download "mori/v$version" --repo Unique-Divine/jiyuu \
   --pattern "$binary-$version-$target.tar.gz" --pattern checksums.txt
 sha256sum --check --ignore-missing checksums.txt
@@ -365,6 +376,14 @@ least one owning session is connected; under a daemon started with
 `mori daemon start`, it lasts until that daemon stops. CLI indexing and
 failed indexes register no watch. `index_status` reports the watch in its
 `watch` object.
+
+After a successful cross-repo link run, the watcher reuses the project's
+target selection when it reindexes. The caller's `index_status` reports
+`cross_repo.status` as `stale` when a provider changes or disappears, or
+when the stored link run predates provider generation tracking. Run
+cross-repo linking again to refresh those links. The field
+`cross_repo.reverse_pending` indicates that the daemon still needs to
+update the target graphs' references to this caller.
 
 The watcher follows git projects only, unless `watch_non_git` is on. Linked
 git worktrees are indexed as their own projects unless `ignore_worktrees` is
@@ -619,13 +638,11 @@ echo '{"repo_path":"/path/to/client-repo","mode":"cross-repo-intelligence","targ
 - **Name the target** when two servers share field or route names.
   `["*"]` works when names are unique across projects; it skips indexes too
   old to link and lists them under `skipped_projects`.
-- **Reindex, then relink.** A full reindex drops the project's links. Rerun
-  the link run for it and for every project that links to it.
-- **Check the result.** `index_status` carries a `cross_repo` object:
-  `{"status":"never_run"}` until a link run has used the project as its
-  source, then `"ran"` with `last_run_at`, `outcome`, `targets`,
-  `projects_scanned`, `total_cross_edges`, and `skipped_projects`. That tells
-  "never linked" apart from "linked, nothing matched".
+- **Check the result.** `index_status` reports `cross_repo.status` as
+  `never_run` before the first link run and `ran` after a link run. It also
+  reports the targets, outcome, and edge count. A client reindex recomputes
+  links using its saved targets. If a provider changes and the client
+  reports `stale`, rerun the link command for that client.
 
 ### GraphQL Clients and gqlgen Resolvers
 
@@ -1078,26 +1095,22 @@ Terms used in Mori's code and design docs are in [LEXICON.md](LEXICON.md).
 
 ## Build
 
-Requirements: `gcc` (or `clang`), `make`, zlib development headers
-(`zlib1g-dev` on Debian and Ubuntu), `zstd`, `tar`, `git` and
-[Bun](https://bun.sh). The test scripts also use `bash` and `python3`.
+Install Rust, `gcc` or `clang`, `make`, zlib development headers
+(`zlib1g-dev` on Debian or Ubuntu), `zstd`, `tar`, `git`, and Bun. The test
+scripts also use `bash` and `python3`. [Bun](https://bun.sh)
+
+From the Jiyuu root, fetch the pinned grammars and build Mori.
 
 ```bash
-just mori-build      # from the Jiyuu root
-# or, inside mori/
-just build
+just --justfile mori/justfile grammars
+just mori-rs-build
+target/release/mori --version
 ```
 
-The binary is written to `build/c/codebase-memory-mcp`.
-
-```bash
-build/c/codebase-memory-mcp --version
-```
-
-The C build keeps the imported binary name. `just mori-rs-build` builds the
-`mori` binary from crate [`jiyuu-mori`](jiyuu-mori) with the C program
-linked in; `just mori-rs-check` runs the crate's pure-Rust checks. To embed
-the graph UI, see [Graph UI](#graph-ui).
+The [`jiyuu-mori`](jiyuu-mori) crate links the C graph engine.
+`just mori-rs-check` runs the pure Rust checks. `just mori-build` builds the
+standalone C comparison binary at `mori/build/c/codebase-memory-mcp`. For
+the embedded web interface, see [Graph UI](#graph-ui).
 
 ## Grammar Archive
 
@@ -1187,12 +1200,12 @@ Twelve upstream contract checks that test DeusData's release machinery are
 removed; [IMPORT.md](IMPORT.md#excluded-contract-checks) lists them with
 their restore commands.
 
-Set `MORI_IMPL_GRAPHQL=rust` before starting the linked `mori` process to
-test Rust's planning and writing for GraphQL server Routes and their
-`HANDLES` edges. Set `MORI_IMPL_GRAPHQL=c` to use the C reference. If you
-leave the variable unset, the linked binary uses the Rust schema-glob matcher
-and the C planner and writer. Give each side its own cache and runtime
-directories when comparing them.
+The `mori` executable uses Rust for gqlgen schema glob matching, server
+Route and `HANDLES` planning and writes, and GraphQL cross-repo link
+selection and writes. Run `just test-graphql-rust` to exercise the same
+callbacks through the native fixtures. For release comparisons, use the
+published C 0.13.1 executable as the reference and give each binary its own
+cache and runtime directories. See [GraphQL parity](parity/README.md).
 
 ## Release
 
@@ -1233,6 +1246,15 @@ licenses). There is no installer; users install from the release assets as
 (`libSystem`, `libz`, `libc++`); static linking is Linux-only, and their
 signing and Gatekeeper behavior are covered under
 [Download a Release](#download-a-release).
+
+On Linux x64, Linux arm64, and macOS arm64, the workflow also replays graph
+fixtures against the published C 0.13.1 binary. It checks the downloaded
+reference archive against a pinned SHA-256 digest and compares the
+candidate's Rust graph export with its SQL export. The GraphQL fixture
+requires the candidate's Rust planner and writer to emit a Route to its
+gqlgen resolver. Intel macOS runs the
+same-commit CLI comparison and smoke tests. C 0.13.1 has no Intel macOS
+archive.
 
 The release job attests build provenance for the archives and
 `checksums.txt`, then creates a draft release with `checksums.txt` and

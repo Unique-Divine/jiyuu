@@ -268,6 +268,9 @@ typedef void (*cbm_mcp_read_override_free_fn)(char *payload);
 void cbm_mcp_set_read_override(cbm_mcp_read_override_fn handle,
                                cbm_mcp_read_override_free_fn release);
 
+typedef int (*cbm_mcp_method_selector_fn)(const char *method);
+void cbm_mcp_set_method_selector(cbm_mcp_method_selector_fn select);
+
 typedef struct {
     int limit;
     int offset;

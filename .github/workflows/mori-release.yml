@@ -1,6 +1,7 @@
 # Mori release: builds the Rust binary mori (crate mori/jiyuu-mori with the C
 # program linked in) for Linux x64 and arm64 and macOS arm64 and x64, checks
-# its CLI against the C binary codebase-memory-mcp from the same commit, and
+# its CLI against the C binary codebase-memory-mcp from the same commit,
+# replays graph fixtures against the published C 0.13.1 where available, and
 # publishes a DRAFT GitHub release for a mori/v* tag. See mori/README.md
 # "Release".
 #
@@ -87,11 +88,13 @@ jobs:
             goarch: amd64
             rust_target: x86_64-unknown-linux-gnu
             runner: ubuntu-latest
+            c_reference_sha256: ba3cbc562e6c41585144e78857a54a51badae99bdb5e6050cedc79089817ed07
           - target: linux-arm64
             goos: linux
             goarch: arm64
             rust_target: aarch64-unknown-linux-gnu
             runner: ubuntu-24.04-arm
+            c_reference_sha256: a4984606e39dcdf6e5d4a86f31ceea4d0f49761fe4dc3eb91544cdc86e26e1bb
           # Apple silicon. The macOS 14.0 minimum comes from Makefile.cbm
           # (the C objects) and MACOSX_DEPLOYMENT_TARGET (the Rust link), not
           # from this runner's SDK.
@@ -101,6 +104,7 @@ jobs:
             arch: arm64
             rust_target: aarch64-apple-darwin
             runner: macos-15
+            c_reference_sha256: 3fb0ebdf5416fbabfb81e48754275b5f01088faac3dc5f015cbe6a84d743e837
           # Intel Macs, built and smoke-tested natively on GitHub's x86_64
           # macOS runner. Same 14.0 minimum as arm64.
           - target: darwin-x64
@@ -267,6 +271,48 @@ jobs:
       # the same commit: same commands, same output after normalization.
       - name: CLI parity with codebase-memory-mcp
         run: bun scripts/cli-parity.ts --mori "$BIN" --c "$C_BIN"
+      # 0.13.1 had no Intel macOS archive. That target still has the native
+      # smoke and same-commit CLI comparison above.
+      - name: Replay graph fixtures against the published C 0.13.1
+        if: matrix.c_reference_sha256 != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET: ${{ matrix.target }}
+          REFERENCE_SHA256: ${{ matrix.c_reference_sha256 }}
+        run: |
+          set -euo pipefail
+          reference_dir="$(mktemp -d "$RUNNER_TEMP/mori-reference.XXXXXX")"
+          trap 'rm -rf "$reference_dir"' EXIT
+          archive="codebase-memory-mcp-0.13.1-$TARGET.tar.gz"
+          gh release download mori/v0.13.1 --repo "$GITHUB_REPOSITORY" \
+            --pattern "$archive" --dir "$reference_dir"
+          printf '%s  %s\n' "$REFERENCE_SHA256" "$reference_dir/$archive" | shasum -a 256 -c
+          tar -xzf "$reference_dir/$archive" -C "$reference_dir" codebase-memory-mcp
+          reference="$reference_dir/codebase-memory-mcp"
+          test "$("$reference" --version)" = "codebase-memory-mcp 0.13.1"
+          replay="$(mktemp -d /tmp/mori-release-replay.XXXXXX)"
+          python3 parity/parity.py ci --bin-a "$reference" --bin-b "$BIN" \
+            --profile --export-b rust --verify-export \
+            --work "$replay/w" --rt-prefix "$replay/r"
+          grep -E 'msg=pass\.route_nodes\.graphql routes=[1-9][0-9]* .*planner=rust writer=rust' \
+            "$replay"/w/b/cache/logs/.worker-log-*
+          python3 - "$replay/w/b/cache" <<'PY'
+          from pathlib import Path
+          import sqlite3
+          import sys
+
+          [graph] = Path(sys.argv[1]).glob("*-fx-polyglot.db")
+          with sqlite3.connect(graph.as_uri() + "?mode=ro", uri=True) as database:
+              row = database.execute("""
+                  SELECT h.name
+                  FROM edges AS e
+                  JOIN nodes AS h ON h.id = e.source_id
+                  JOIN nodes AS r ON r.id = e.target_id
+                  WHERE e.type = 'HANDLES' AND r.qualified_name = '__graphql__Query.fixtureItem'
+              """).fetchone()
+          if row != ("FixtureItem",):
+              raise SystemExit(f"FixtureItem resolver missing from the graph: {row}")
+          PY
       - name: Package archive
         id: package
         env:

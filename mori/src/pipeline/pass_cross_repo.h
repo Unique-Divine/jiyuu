@@ -40,8 +40,7 @@ typedef cbm_graphql_handler_t (*cbm_graphql_find_handler_fn)(struct sqlite3 *db,
                                                              char *handler_name, size_t name_size,
                                                              char *handler_file, size_t file_size);
 
-/* Register before starting C. The callbacks apply only to GraphQL link runs
- * with MORI_IMPL_GRAPHQL=rust. */
+/* Register GraphQL link callbacks before starting the C runtime. */
 void cbm_cross_repo_set_graphql_backend(cbm_graphql_link_policy_fn policy,
                                         cbm_graphql_delete_link_fn delete_link,
                                         cbm_graphql_upsert_link_fn upsert_link,
@@ -82,10 +81,25 @@ struct yyjson_mut_val;
  *   {"status":"never_run"}  -- no run recorded since the store was (re)built
  *   {"status":"ran","last_run_at","outcome","targets","projects_scanned",
  *    "total_cross_edges","skipped_projects"}
+ *   {"status":"stale", ...} -- a recorded provider generation changed
+ *   "reverse_pending": true -- a staged publication still needs reverse repair
  * Read-only (works on a query store). Returns false only on invalid input or
  * allocation failure. */
 bool cbm_cross_repo_add_status_json(struct yyjson_mut_doc *doc, struct yyjson_mut_val *parent,
                                     cbm_store_t *store, const char *project);
+
+/* Restore the last successful selection into a private staging graph. Only
+ * the staged store is writable; peer graphs are used as matching inputs. */
+int cbm_cross_repo_relink_stage(const char *live_path, const char *stage_path, const char *project,
+                                const atomic_int *cancelled);
+
+/* Check whether this published generation still needs peer-side writes. */
+bool cbm_cross_repo_reverse_pending(const char *project);
+
+/* Complete peer-side writes after publication. Caller must hold the wildcard
+ * project mutation lease. A cancellation rolls back the current peer write
+ * and leaves the repair pending. */
+bool cbm_cross_repo_reconcile_published(const char *project, const atomic_int *cancelled);
 
 /* Run cross-repo matching for `project` against `target_projects`.
  * If target_count == 1 and target_projects[0] == "*", matches against all

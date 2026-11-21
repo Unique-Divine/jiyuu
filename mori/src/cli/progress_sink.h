@@ -23,6 +23,9 @@ typedef struct {
     bool verbose_requested;
 } cbm_cli_output_flags_t;
 
+typedef void (*cbm_cli_output_compactor_fn)(int *argc, char **argv, cbm_cli_output_flags_t *flags);
+void cbm_cli_set_output_compactor(cbm_cli_output_compactor_fn compactor);
+
 /* Parse process-level output controls without consuming a tool's own
  * `--verbose` argument. The argv array is compacted in place. */
 bool cbm_cli_output_flags_parse(int *argc, char **argv, cbm_cli_output_flags_t *flags, char *error,

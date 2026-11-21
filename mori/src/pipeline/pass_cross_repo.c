@@ -14,7 +14,6 @@
 #include "foundation/constants.h"
 #include "foundation/log.h"
 #include "foundation/mem_core.h"
-#include "foundation/platform.h"
 #include "foundation/compat.h"
 #include "foundation/compat_fs.h"
 #include "foundation/str_util.h"
@@ -30,6 +29,7 @@
 /* ── Constants ───────────────────────────────────────────────────── */
 
 enum {
+    CR_BIND_GRAPHQL_AVAILABLE = 3,
     CR_PATH_BUF = 4096,
     CR_QN_BUF = 512,
     CR_PROPS_BUF = 2048,
@@ -39,6 +39,7 @@ enum {
     CR_MAX_CACHE_ENTRIES = 16384,
     CR_COL_3 = 3,
     CR_COL_4 = 4,
+    CR_CANCEL_SQLITE_OPS = 1000,
     CR_SCHEME_SKIP = 3,      /* strlen("://") */
     CR_ROUTE_PREFIX_LEN = 9, /* strlen("__route__") */
     CR_ANY_LEN = 3,          /* strlen("ANY") */
@@ -55,6 +56,7 @@ typedef enum {
 
 typedef struct {
     const atomic_int *cancelled;
+    cbm_store_t *staging_store; /* NULL for an explicit bidirectional run */
     bool cancellation_observed;
     bool mutated;
 } cr_run_context_t;
@@ -70,14 +72,11 @@ void cbm_cross_repo_set_graphql_backend(cbm_graphql_link_policy_fn policy,
                                         cbm_graphql_delete_link_fn delete_link,
                                         cbm_graphql_upsert_link_fn upsert_link,
                                         cbm_graphql_find_handler_fn find_handler) {
-    char configured[sizeof("rust")];
-    const char *impl = cbm_native_getenv("MORI_IMPL_GRAPHQL", configured, sizeof(configured), NULL);
-    bool rust =
-        impl && strcmp(impl, "rust") == 0 && policy && delete_link && upsert_link && find_handler;
-    cr_graphql_link_policy = rust ? policy : NULL;
-    cr_graphql_delete_link = rust ? delete_link : NULL;
-    cr_graphql_upsert_link = rust ? upsert_link : NULL;
-    cr_graphql_find_handler = rust ? find_handler : NULL;
+    bool registered = policy && delete_link && upsert_link && find_handler;
+    cr_graphql_link_policy = registered ? policy : NULL;
+    cr_graphql_delete_link = registered ? delete_link : NULL;
+    cr_graphql_upsert_link = registered ? upsert_link : NULL;
+    cr_graphql_find_handler = registered ? find_handler : NULL;
 }
 
 void cbm_cross_repo_set_after_insert_hook_for_tests(cbm_cross_repo_after_insert_test_hook_t hook,
@@ -206,12 +205,13 @@ static bool cr_project_exists(const char *project) {
     return cr_project_state(project) == CR_PROJECT_USABLE;
 }
 
-static cbm_store_t *cr_open_existing_project(const char *project) {
+static cbm_store_t *cr_open_existing_project(const char *project, bool wait_for_lock) {
     char path[CR_PATH_BUF];
     if (!cr_db_path(project, path, sizeof(path))) {
         return NULL;
     }
-    cbm_store_t *store = cbm_store_open_path_existing(path);
+    cbm_store_t *store = wait_for_lock ? cbm_store_open_path_existing(path)
+                                       : cbm_store_open_path_existing_nowait(path);
     if (!cr_store_has_exact_project(store, project)) {
         cbm_store_close(store);
         return NULL;
@@ -280,6 +280,9 @@ static cr_run_status_t delete_cross_edges(cbm_store_t *store, const char *projec
         return CR_RUN_FAILED;
     }
     for (size_t i = 0; i < sizeof(edge_types) / sizeof(edge_types[0]); i++) {
+        if (!cr_graphql_link_policy && strcmp(edge_types[i], "CROSS_GRAPHQL_CALLS") == 0) {
+            continue;
+        }
         if (cr_cancel_requested(ctx)) {
             return CR_RUN_CANCELLED;
         }
@@ -294,24 +297,132 @@ static cr_run_status_t delete_cross_edges(cbm_store_t *store, const char *projec
     return cr_cancel_requested(ctx) ? CR_RUN_CANCELLED : CR_RUN_OK;
 }
 
+/* Old channel rows have no direction field. When the local function both
+ * emits and listens, keep its old forward link only if the named remote
+ * listener still exists for the same channel. A stale reverse row alone
+ * cannot supply that evidence. */
+static cr_run_status_t cr_reconcile_legacy_dual_role_channels(cbm_store_t *source,
+                                                              const char *source_project,
+                                                              cbm_store_t *provider,
+                                                              const char *provider_project,
+                                                              cr_run_context_t *ctx) {
+    sqlite3 *src = cbm_store_get_db(source);
+    sqlite3 *tgt = cbm_store_get_db(provider);
+    sqlite3_stmt *next = NULL, *listener = NULL, *restore = NULL, *remove = NULL;
+    const char *next_sql =
+        "SELECT e.id, channel.name, json_extract(e.properties, '$.target_function'), "
+        "json_extract(e.properties, '$.target_file') FROM edges e "
+        "JOIN nodes channel ON channel.id=e.target_id "
+        "WHERE e.project=?1 AND e.type='CROSS_CHANNEL' AND e.id>?3 AND "
+        "json_extract(e.properties, '$.target_project')=?2 AND "
+        "json_type(e.properties, '$.callers') IS NULL AND "
+        "json_type(e.properties, '$.channel_forward') IS NULL AND "
+        "EXISTS (SELECT 1 FROM edges local WHERE local.source_id=e.source_id AND "
+        "local.target_id=e.target_id AND local.type='LISTENS_ON') AND "
+        "EXISTS (SELECT 1 FROM edges local WHERE local.source_id=e.source_id AND "
+        "local.target_id=e.target_id AND local.type='EMITS') ORDER BY e.id LIMIT 1";
+    const char *listener_sql =
+        "SELECT 1 FROM edges e JOIN nodes listener ON listener.id=e.source_id "
+        "JOIN nodes channel ON channel.id=e.target_id "
+        "WHERE e.project=?1 AND e.type='LISTENS_ON' AND channel.name=?2 AND "
+        "substr(CAST(listener.name AS BLOB), 1, ?5)=CAST(?3 AS BLOB) AND "
+        "substr(CAST(listener.file_path AS BLOB), 1, ?6)=CAST(?4 AS BLOB) LIMIT 1";
+    bool ok =
+        src && tgt && sqlite3_prepare_v2(tgt, next_sql, -1, &next, NULL) == SQLITE_OK &&
+        sqlite3_prepare_v2(src, listener_sql, -1, &listener, NULL) == SQLITE_OK &&
+        sqlite3_prepare_v2(tgt,
+                           "UPDATE edges SET properties="
+                           "json_set(properties, '$.channel_forward', json(properties)) "
+                           "WHERE id=?1",
+                           -1, &restore, NULL) == SQLITE_OK &&
+        sqlite3_prepare_v2(tgt, "DELETE FROM edges WHERE id=?1", -1, &remove, NULL) == SQLITE_OK &&
+        sqlite3_bind_text(next, 1, provider_project, -1, SQLITE_STATIC) == SQLITE_OK &&
+        sqlite3_bind_text(next, 2, source_project, -1, SQLITE_STATIC) == SQLITE_OK &&
+        sqlite3_bind_text(listener, 1, source_project, -1, SQLITE_STATIC) == SQLITE_OK &&
+        /* Legacy channel writes took byte prefixes from C buffers. If
+         * several listeners share those prefixes, any is sufficient
+         * evidence to preserve the forward row. */
+        sqlite3_bind_int(listener, 5, CBM_SZ_256 - 1) == SQLITE_OK &&
+        sqlite3_bind_int(listener, 6, CBM_SZ_512 - 1) == SQLITE_OK;
+    int64_t last_id = 0;
+    while (ok && !cr_cancel_requested(ctx)) {
+        if (sqlite3_bind_int64(next, 3, last_id) != SQLITE_OK) {
+            ok = false;
+            break;
+        }
+        int rc = sqlite3_step(next);
+        if (rc != SQLITE_ROW) {
+            ok = rc == SQLITE_DONE;
+            break;
+        }
+        last_id = sqlite3_column_int64(next, 0);
+        for (int i = 1; i <= 3 && ok; i++) {
+            ok = sqlite3_bind_text(listener, i + 1, (const char *)sqlite3_column_text(next, i), -1,
+                                   SQLITE_TRANSIENT) == SQLITE_OK;
+        }
+        ok = sqlite3_reset(next) == SQLITE_OK && ok;
+        if (!ok || cr_cancel_requested(ctx)) {
+            break;
+        }
+        rc = sqlite3_step(listener);
+        ok = sqlite3_reset(listener) == SQLITE_OK && (rc == SQLITE_ROW || rc == SQLITE_DONE);
+        if (ok && !cr_cancel_requested(ctx)) {
+            sqlite3_stmt *change = rc == SQLITE_ROW ? restore : remove;
+            ok = sqlite3_bind_int64(change, 1, last_id) == SQLITE_OK &&
+                 sqlite3_step(change) == SQLITE_DONE;
+            ok = sqlite3_reset(change) == SQLITE_OK && ok;
+            ctx->mutated = ctx->mutated || (ok && sqlite3_changes(tgt) > 0);
+        }
+    }
+    sqlite3_finalize(next);
+    sqlite3_finalize(listener);
+    sqlite3_finalize(restore);
+    sqlite3_finalize(remove);
+    return cr_cancel_requested(ctx) ? CR_RUN_CANCELLED : ok ? CR_RUN_OK : CR_RUN_FAILED;
+}
+
 /* Remove src_project's callers from the provider tgt's reverse CROSS_*
  * edges before src_project is matched again: an entry under "callers"
  * outlived the client function it names, because the store only merges
  * into a reverse row (json_patch) and delete_cross_edges clears the source
  * store alone. A row left with no caller is dropped, and a row naming a
- * removed caller at the top level takes a remaining one. Forward edges and
- * channel edges carry no "callers" and are left alone. The run then re-adds the
- * current callers. */
-static cr_run_status_t cr_reconcile_reverse(cbm_store_t *tgt_store, const char *tgt_project,
-                                            const char *src_project, cr_run_context_t *ctx) {
+ * removed caller at the top level takes a remaining one. A channel row can
+ * share its endpoints with a forward link; restore that link when the last
+ * reverse caller goes away. The run then re-adds the current callers. */
+static cr_run_status_t cr_reconcile_reverse(cbm_store_t *src_store, const char *src_project,
+                                            cbm_store_t *tgt_store, const char *tgt_project,
+                                            cr_run_context_t *ctx) {
+    cr_run_status_t legacy =
+        cr_reconcile_legacy_dual_role_channels(src_store, src_project, tgt_store, tgt_project, ctx);
+    if (legacy != CR_RUN_OK) {
+        return legacy;
+    }
     static const char *const sql[] = {
+        /* Old channels store a single top-level peer. Infer ownership only
+         * when the local endpoints can represent a reverse link alone. */
+        "DELETE FROM edges WHERE project = ?1 AND type = 'CROSS_CHANNEL' AND "
+        "json_type(properties, '$.callers') IS NULL AND "
+        "json_type(properties, '$.channel_forward') IS NULL AND "
+        "json_extract(properties, '$.target_project') = ?2 AND "
+        "EXISTS (SELECT 1 FROM edges local WHERE local.source_id=edges.source_id AND "
+        "local.target_id=edges.target_id AND local.type='LISTENS_ON') AND "
+        "NOT EXISTS (SELECT 1 FROM edges local WHERE local.source_id=edges.source_id AND "
+        "local.target_id=edges.target_id AND local.type='EMITS')",
         "UPDATE edges SET properties = json_set(properties, '$.callers', (SELECT "
         "json_group_object(c.key, json(c.value)) FROM json_each(edges.properties, '$.callers') c "
         "WHERE json_extract(c.value, '$.project') IS NOT ?2)) "
-        "WHERE project = ?1 AND type LIKE 'CROSS\\_%' ESCAPE '\\' AND EXISTS (SELECT 1 FROM "
+        "WHERE project = ?1 AND type LIKE 'CROSS\\_%' ESCAPE '\\' AND "
+        "(?3 OR type <> 'CROSS_GRAPHQL_CALLS') AND EXISTS (SELECT 1 FROM "
         "json_each(edges.properties, '$.callers') c WHERE json_extract(c.value, '$.project') = "
         "?2)",
+        "UPDATE edges SET properties = json_patch(json_remove(properties, '$.callers'), "
+        "json_extract(properties, '$.channel_forward')) "
+        "WHERE project = ?1 AND type = 'CROSS_CHANNEL' AND "
+        "json_type(properties, '$.channel_forward') = 'object' AND "
+        "json_type(properties, '$.callers') = 'object' AND NOT EXISTS (SELECT 1 FROM "
+        "json_each(edges.properties, '$.callers')) AND ?2 IS NOT NULL",
         "DELETE FROM edges WHERE project = ?1 AND type LIKE 'CROSS\\_%' ESCAPE '\\' AND "
+        "(?3 OR type <> 'CROSS_GRAPHQL_CALLS') AND "
         "json_type(properties, '$.callers') = 'object' AND NOT EXISTS (SELECT 1 FROM "
         "json_each(edges.properties, '$.callers')) AND ?2 IS NOT NULL",
         "UPDATE edges SET properties = (SELECT json_set(edges.properties, '$.target_project', "
@@ -319,6 +430,7 @@ static cr_run_status_t cr_reconcile_reverse(cbm_store_t *tgt_store, const char *
         "'$.function'), '$.target_file', json_extract(c.value, '$.file')) FROM "
         "json_each(edges.properties, '$.callers') c ORDER BY c.key LIMIT 1) "
         "WHERE project = ?1 AND type LIKE 'CROSS\\_%' ESCAPE '\\' AND "
+        "(?3 OR type <> 'CROSS_GRAPHQL_CALLS') AND "
         "json_extract(properties, '$.target_project') = ?2 AND json_type(properties, "
         "'$.callers') = 'object'",
     };
@@ -337,6 +449,9 @@ static cr_run_status_t cr_reconcile_reverse(cbm_store_t *tgt_store, const char *
                       SQLITE_OK &&
                   sqlite3_bind_text(st, PAIR_LEN, src_project, CBM_NOT_FOUND, SQLITE_STATIC) ==
                       SQLITE_OK &&
+                  (sqlite3_bind_parameter_count(st) < CR_BIND_GRAPHQL_AVAILABLE ||
+                   sqlite3_bind_int(st, CR_BIND_GRAPHQL_AVAILABLE,
+                                    cr_graphql_link_policy != NULL) == SQLITE_OK) &&
                   sqlite3_step(st) == SQLITE_DONE;
         if (sqlite3_finalize(st) != SQLITE_OK || !ok) {
             return CR_RUN_FAILED;
@@ -358,10 +473,14 @@ static bool insert_cross_edge(cbm_store_t *store, const char *project, int64_t f
     if (cr_cancel_requested(ctx)) {
         return false;
     }
+    if (ctx->staging_store && store != ctx->staging_store) {
+        return true;
+    }
     bool inserted;
-    if (cr_graphql_upsert_link && strcmp(edge_type, "CROSS_GRAPHQL_CALLS") == 0) {
+    if (strcmp(edge_type, "CROSS_GRAPHQL_CALLS") == 0) {
         sqlite3_stmt *stmt = cbm_store_prepare_edge_upsert(store);
-        inserted = stmt && cr_graphql_upsert_link(stmt, project, from_id, to_id, props);
+        inserted = stmt && cr_graphql_upsert_link &&
+                   cr_graphql_upsert_link(stmt, project, from_id, to_id, props);
     } else {
         cbm_edge_t edge = {
             .project = project,
@@ -1091,8 +1210,12 @@ static int try_match_channel_listener(cbm_store_t *src_store, const char *src_pr
     char fwd[CR_PROPS_BUF];
     build_cross_props(fwd, sizeof(fwd), tgt_project, listener_name, listener_file, channel_name,
                       "channel_name", transport);
-    if (!insert_cross_edge(src_store, src_project, emitter_id, channel_id, "CROSS_CHANNEL", fwd,
-                           ctx)) {
+    char owned_forward[CR_PROPS_BUF * 2 + CBM_SZ_32];
+    int forward_len = snprintf(owned_forward, sizeof(owned_forward), "%.*s,\"channel_forward\":%s}",
+                               (int)strlen(fwd) - 1, fwd, fwd);
+    if (forward_len <= 0 || (size_t)forward_len >= sizeof(owned_forward) ||
+        !insert_cross_edge(src_store, src_project, emitter_id, channel_id, "CROSS_CHANNEL",
+                           owned_forward, ctx)) {
         return cr_cancel_requested(ctx) ? CBM_STORE_NOT_FOUND : CBM_STORE_ERR;
     }
     if (cr_cancel_requested(ctx)) {
@@ -1103,10 +1226,17 @@ static int try_match_channel_listener(cbm_store_t *src_store, const char *src_pr
     char rev[CR_PROPS_BUF];
     build_cross_props(rev, sizeof(rev), src_project, caller_name, caller_file, channel_name,
                       "channel_name", transport);
-    return insert_cross_edge(tgt_store, tgt_project, listener_id, tgt_channel_id, "CROSS_CHANNEL",
-                             rev, ctx)
-               ? 1
-               : (cr_cancel_requested(ctx) ? CBM_STORE_NOT_FOUND : CBM_STORE_ERR);
+    bool qn_failed = false;
+    char *caller_qn = lookup_node_qn(cbm_store_get_db(src_store), emitter_id, &qn_failed);
+    char *owned_reverse =
+        caller_qn ? cr_props_with_caller(rev, src_project, caller_qn, caller_name, caller_file)
+                  : NULL;
+    free(caller_qn);
+    bool inserted =
+        owned_reverse && insert_cross_edge(tgt_store, tgt_project, listener_id, tgt_channel_id,
+                                           "CROSS_CHANNEL", owned_reverse, ctx);
+    free(owned_reverse);
+    return inserted ? 1 : (cr_cancel_requested(ctx) ? CBM_STORE_NOT_FOUND : CBM_STORE_ERR);
 }
 
 static cr_match_result_t match_channels(cbm_store_t *src_store, const char *src_project,
@@ -1357,6 +1487,10 @@ static cr_match_result_t match_typed_routes(cbm_store_t *src_store, const char *
                                             const char *edge_type, const char *svc_key,
                                             const char *method_key, const char *cross_edge_type,
                                             bool provider_side, cr_run_context_t *ctx) {
+    bool graphql = strcmp(edge_type, "GRAPHQL_CALLS") == 0;
+    if (graphql && !cr_graphql_link_policy) {
+        return cr_match_finish(ctx, 0, false);
+    }
     struct sqlite3 *src_db = cbm_store_get_db(src_store);
     if (!src_db) {
         return cr_match_finish(ctx, 0, true);
@@ -1380,8 +1514,7 @@ static cr_match_result_t match_typed_routes(cbm_store_t *src_store, const char *
     int count = 0;
     int step_rc = SQLITE_DONE;
     bool failed = false;
-    bool use_rust = cr_graphql_link_policy && strcmp(edge_type, "GRAPHQL_CALLS") == 0;
-    cbm_graphql_link_policy_fn plan = use_rust ? cr_graphql_link_policy : cr_plan_typed_route;
+    cbm_graphql_link_policy_fn plan = graphql ? cr_graphql_link_policy : cr_plan_typed_route;
     while (!cr_cancel_requested(ctx) && (step_rc = sqlite3_step(s)) == SQLITE_ROW) {
         int64_t caller_id = sqlite3_column_int64(s, 0);
         int64_t route_id = sqlite3_column_int64(s, SKIP_ONE);
@@ -1420,7 +1553,7 @@ static cr_match_result_t match_typed_routes(cbm_store_t *src_store, const char *
         char handler_name[CBM_SZ_256] = {0};
         char handler_file[CBM_SZ_512] = {0};
         cbm_graphql_handler_t handler;
-        if (use_rust) {
+        if (graphql) {
             handler =
                 cr_graphql_find_handler(cbm_store_get_db(tgt_store), route_qn, handler_name,
                                         sizeof(handler_name), handler_file, sizeof(handler_file));
@@ -1445,7 +1578,9 @@ static cr_match_result_t match_typed_routes(cbm_store_t *src_store, const char *
         case CBM_CROSS_ROUTE_KEEP:
             break;
         case CBM_CROSS_ROUTE_DROP:
-            if (use_rust) {
+            if (ctx->staging_store && src_store != ctx->staging_store) {
+                emitted = true;
+            } else if (graphql) {
                 int deleted = cr_graphql_delete_link(src_db, caller_id, route_id);
                 emitted = deleted >= 0;
                 ctx->mutated = ctx->mutated || deleted > 0;
@@ -1503,6 +1638,11 @@ static bool cr_record_skip(cbm_cross_repo_result_t *result, const char *project,
                            const char *reason) {
     if (!result) {
         return true;
+    }
+    for (int i = 0; i < result->skipped_count; i++) {
+        if (strcmp(result->skipped_projects[i].project, project) == 0) {
+            return true;
+        }
     }
     cbm_cross_repo_skip_t *grown =
         cbm_realloc(CBM_MEM_CLASS_OTHER, result->skipped_projects,
@@ -1671,6 +1811,202 @@ static bool cr_status_key(const char *project, char *buf, size_t bufsz) {
     return written > 0 && (size_t)written < bufsz;
 }
 
+/* A failed explicit run updates its result marker but does not replace the
+ * selection to replay on the next index. */
+static bool cr_targets_key(const char *project, char *buf, size_t size) {
+    int written = snprintf(buf, size, "cross_repo_targets:%s", project);
+    return written > 0 && (size_t)written < size;
+}
+
+static bool cr_record_targets(cbm_store_t *store, const char *project, const char **targets,
+                              int target_count) {
+    char key[CR_QN_BUF];
+    if (!cr_targets_key(project, key, sizeof(key))) {
+        return false;
+    }
+    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val *arr = doc ? yyjson_mut_arr(doc) : NULL;
+    bool ok = arr != NULL;
+    for (int i = 0; ok && i < target_count; i++) {
+        ok = yyjson_mut_arr_append(arr, yyjson_mut_strcpy(doc, targets[i]));
+    }
+    if (arr) {
+        yyjson_mut_doc_set_root(doc, arr);
+    }
+    char *json = ok ? yyjson_mut_write(doc, 0, NULL) : NULL;
+    ok = json && cbm_store_meta_put(store, key, json) == CBM_STORE_OK;
+    free(json);
+    yyjson_mut_doc_free(doc);
+    return ok;
+}
+
+/* Returns zero for an index that has not recorded a successful selection. */
+static int cr_read_targets(cbm_store_t *store, const char *project, char ***targets) {
+    *targets = NULL;
+    char key[CR_QN_BUF];
+    if (!cr_targets_key(project, key, sizeof(key))) {
+        return CBM_STORE_ERR;
+    }
+    char *json = NULL;
+    int rc = cbm_store_meta_get(store, key, &json);
+    bool legacy = rc == CBM_STORE_NOT_FOUND;
+    if (legacy) {
+        if (!cr_status_key(project, key, sizeof(key))) {
+            return CBM_STORE_ERR;
+        }
+        rc = cbm_store_meta_get(store, key, &json);
+    }
+    if (rc == CBM_STORE_NOT_FOUND) {
+        return 0;
+    }
+    if (rc != CBM_STORE_OK) {
+        return CBM_STORE_ERR;
+    }
+    yyjson_doc *doc = yyjson_read(json, strlen(json), 0);
+    cbm_free(CBM_MEM_CLASS_STORE, json);
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    yyjson_val *arr = root;
+    if (legacy) {
+        const char *outcome = yyjson_get_str(yyjson_obj_get(root, "outcome"));
+        if (!outcome || strcmp(outcome, "complete") != 0) {
+            yyjson_doc_free(doc);
+            return 0;
+        }
+        arr = yyjson_obj_get(root, "targets");
+    }
+    size_t count = yyjson_arr_size(arr);
+    if (!yyjson_is_arr(arr) || count == 0 || count > CR_MAX_PROJECTS) {
+        yyjson_doc_free(doc);
+        return CBM_STORE_ERR;
+    }
+    char **names = calloc(count, sizeof(*names));
+    size_t i = 0;
+    for (; names && i < count; i++) {
+        const char *name = yyjson_get_str(yyjson_arr_get(arr, i));
+        if (!name ||
+            (!(count == 1 && strcmp(name, "*") == 0) && !cbm_validate_project_name(name))) {
+            break;
+        }
+        names[i] = cbm_strdup(name);
+        if (!names[i]) {
+            break;
+        }
+    }
+    yyjson_doc_free(doc);
+    if (i != count) {
+        free_project_list(names, (int)i);
+        return CBM_STORE_ERR;
+    }
+    *targets = names;
+    return (int)count;
+}
+
+static bool cr_peers_key(const char *project, char *buf, size_t size) {
+    int written = snprintf(buf, size, "cross_repo_peers:%s", project);
+    return written > 0 && (size_t)written < size;
+}
+
+static cbm_store_t *cr_open_peer(const char *name) {
+    char path[CR_PATH_BUF];
+    return cr_db_path(name, path, sizeof(path)) ? cbm_store_open_path_query(path) : NULL;
+}
+
+static bool cr_save_peers(cbm_store_t *source, const char *project, yyjson_mut_doc *peers) {
+    char key[CR_QN_BUF];
+    if (!cr_peers_key(project, key, sizeof(key))) {
+        return false;
+    }
+    char *json = yyjson_mut_write(peers, 0, NULL);
+    bool ok = json && cbm_store_meta_put(source, key, json) == CBM_STORE_OK;
+    free(json);
+    return ok;
+}
+
+static yyjson_doc *cr_read_peers(cbm_store_t *source, const char *project) {
+    char key[CR_QN_BUF];
+    char *json = NULL;
+    if (!cr_peers_key(project, key, sizeof(key)) ||
+        cbm_store_meta_get(source, key, &json) != CBM_STORE_OK) {
+        return NULL;
+    }
+    yyjson_doc *doc = yyjson_read(json, strlen(json), 0);
+    cbm_free(CBM_MEM_CLASS_STORE, json);
+    return doc;
+}
+
+static bool cr_reverse_pending_key(const char *project, char *buf, size_t size) {
+    int written = snprintf(buf, size, "cross_repo_reverse_pending:%s", project);
+    return written > 0 && (size_t)written < size;
+}
+
+static bool cr_reverse_pending(cbm_store_t *source, const char *project) {
+    char key[CR_QN_BUF];
+    char *value = NULL;
+    bool pending = cr_reverse_pending_key(project, key, sizeof(key)) &&
+                   cbm_store_meta_get(source, key, &value) == CBM_STORE_OK &&
+                   strcmp(value, "1") == 0;
+    cbm_free(CBM_MEM_CLASS_STORE, value);
+    return pending;
+}
+
+static bool cr_set_reverse_pending(cbm_store_t *source, const char *project, bool pending) {
+    char key[CR_QN_BUF];
+    return cr_reverse_pending_key(project, key, sizeof(key)) &&
+           cbm_store_meta_put(source, key, pending ? "1" : "0") == CBM_STORE_OK;
+}
+
+bool cbm_cross_repo_reverse_pending(const char *project) {
+    char path[CR_PATH_BUF];
+    cbm_store_t *store =
+        cr_db_path(project, path, sizeof(path)) ? cbm_store_open_path_query_nowait(path) : NULL;
+    bool pending = store && cr_reverse_pending(store, project);
+    cbm_store_close(store);
+    return pending;
+}
+
+/* Write generation observations against the same connection that the
+ * matcher reads. An unavailable provider is represented by JSON null. */
+static bool cr_remember_peer(yyjson_mut_doc *peers, const char *name, cbm_store_t *provider) {
+    char generation[CBM_GRAPH_COMPARE_GENERATION_SIZE];
+    if (provider &&
+        cbm_store_generation(provider, generation, sizeof(generation)) != CBM_STORE_OK) {
+        return false;
+    }
+    /* Missing peer names can come from a previous document freed before
+     * serialization. Own both the name and generation in this document. */
+    yyjson_mut_val *key = yyjson_mut_strcpy(peers, name);
+    yyjson_mut_val *value =
+        provider ? yyjson_mut_strcpy(peers, generation) : yyjson_mut_null(peers);
+    return key && value && yyjson_mut_obj_add(yyjson_mut_doc_get_root(peers), key, value);
+}
+
+static bool cr_peer_is_stale(const char *name, const char *observed) {
+    if (!observed) {
+        return true;
+    }
+    cbm_store_t *peer = cr_open_peer(name);
+    char generation[CBM_GRAPH_COMPARE_GENERATION_SIZE];
+    bool same = peer &&
+                cbm_store_generation(peer, generation, sizeof(generation)) == CBM_STORE_OK &&
+                strcmp(observed, generation) == 0;
+    cbm_store_close(peer);
+    return !same;
+}
+
+static bool cr_has_stale_peers(cbm_store_t *store, const char *project,
+                               bool observations_required) {
+    yyjson_doc *peers = cr_read_peers(store, project);
+    yyjson_val *observations = yyjson_doc_get_root(peers);
+    yyjson_obj_iter iter = yyjson_obj_iter_with(observations);
+    bool stale = observations_required && yyjson_obj_size(observations) == 0;
+    yyjson_val *key;
+    while (!stale && (key = yyjson_obj_iter_next(&iter))) {
+        stale = cr_peer_is_stale(yyjson_get_str(key), yyjson_get_str(yyjson_obj_iter_get_val(key)));
+    }
+    yyjson_doc_free(peers);
+    return stale;
+}
+
 /* Record this run in the SOURCE store's store_meta, next to the CROSS_*
  * edges it just rewrote: a reindex that rebuilds the store drops both
  * together, so the marker can never outlive the links it describes. Written
@@ -1678,11 +2014,11 @@ static bool cr_status_key(const char *project, char *buf, size_t bufsz) {
  * outcome, because from then on the old summary no longer matches the graph.
  * Project names are validated ([A-Za-z0-9._-]) or "*", so no JSON escaping is
  * needed. Best-effort: a marker failure is logged, never fails the run. */
-static void cr_record_last_run(cbm_store_t *src_store, const char *project, const char **targets,
+static bool cr_record_last_run(cbm_store_t *src_store, const char *project, const char **targets,
                                int target_count, const cbm_cross_repo_result_t *result) {
     char key[CR_QN_BUF];
     if (!cr_status_key(project, key, sizeof(key))) {
-        return;
+        return false;
     }
     size_t cap = CR_PROPS_BUF;
     for (int i = 0; i < target_count; i++) {
@@ -1690,7 +2026,7 @@ static void cr_record_last_run(cbm_store_t *src_store, const char *project, cons
     }
     char *json = cbm_alloc(CBM_MEM_CLASS_OTHER, cap);
     if (!json) {
-        return;
+        return false;
     }
     char when[CBM_SZ_32];
     time_t now = time(NULL);
@@ -1699,7 +2035,10 @@ static void cr_record_last_run(cbm_store_t *src_store, const char *project, cons
         strftime(when, sizeof(when), "%Y-%m-%dT%H:%M:%SZ", &tm_now) == 0) {
         when[0] = '\0';
     }
-    const char *outcome = result->failed ? "failed" : result->cancelled ? "cancelled" : "complete";
+    const char *outcome = result->failed       ? "failed"
+                          : result->cancelled  ? "cancelled"
+                          : result->no_targets ? "incomplete"
+                                               : "complete";
     size_t len = (size_t)snprintf(
         json, cap, "{\"last_run_at\":\"%s\",\"outcome\":\"%s\",\"targets\":[", when, outcome);
     for (int i = 0; i < target_count && len < cap; i++) {
@@ -1714,10 +2053,12 @@ static void cr_record_last_run(cbm_store_t *src_store, const char *project, cons
                                 "\"skipped_projects\":%d}",
                                 result->projects_scanned, total, result->skipped_count);
     }
-    if (len >= cap || cbm_store_meta_put(src_store, key, json) != CBM_STORE_OK) {
+    bool ok = len < cap && cbm_store_meta_put(src_store, key, json) == CBM_STORE_OK;
+    if (!ok) {
         cbm_log_warn("cross_repo.status_unrecorded", "project", project);
     }
     cbm_free(CBM_MEM_CLASS_OTHER, json);
+    return ok;
 }
 
 bool cbm_cross_repo_add_status_json(struct yyjson_mut_doc *doc, struct yyjson_mut_val *parent,
@@ -1730,7 +2071,10 @@ bool cbm_cross_repo_add_status_json(struct yyjson_mut_doc *doc, struct yyjson_mu
     int rc = cbm_store_meta_get(store, key, &raw);
     yyjson_doc *recorded = rc == CBM_STORE_OK ? yyjson_read(raw, strlen(raw), 0) : NULL;
     cbm_free(CBM_MEM_CLASS_STORE, raw);
-    yyjson_val *recorded_root = recorded ? yyjson_doc_get_root(recorded) : NULL;
+    yyjson_val *recorded_root = yyjson_doc_get_root(recorded);
+    const char *outcome = yyjson_get_str(yyjson_obj_get(recorded_root, "outcome"));
+    bool complete = outcome && strcmp(outcome, "complete") == 0;
+    bool incomplete = outcome && strcmp(outcome, "incomplete") == 0;
     yyjson_mut_val *status = NULL;
     if (yyjson_is_obj(recorded_root)) {
         status = yyjson_val_mut_copy(doc, recorded_root);
@@ -1745,10 +2089,15 @@ bool cbm_cross_repo_add_status_json(struct yyjson_mut_doc *doc, struct yyjson_mu
     /* "never_run" is the honest reading of an absent marker: no run with this
      * project as the source has completed its cleanup since the store was
      * (re)built. A target-side run still leaves its CROSS_* edges here. */
-    const char *state = rc == CBM_STORE_NOT_FOUND         ? "never_run"
+    bool stale = incomplete || cr_has_stale_peers(store, project, complete);
+    const char *state = stale                             ? "stale"
+                        : rc == CBM_STORE_NOT_FOUND       ? "never_run"
                         : yyjson_mut_obj_size(status) > 0 ? "ran"
                                                           : "unavailable";
     yyjson_mut_obj_add_str(doc, status, "status", state);
+    if (cr_reverse_pending(store, project)) {
+        yyjson_mut_obj_add_bool(doc, status, "reverse_pending", true);
+    }
     return yyjson_mut_obj_add_val(doc, parent, "cross_repo", status);
 }
 
@@ -1767,6 +2116,260 @@ void cbm_cross_repo_result_free(cbm_cross_repo_result_t *result) {
 static cr_run_status_t add_match_count(int *total, cr_match_result_t matched) {
     *total += matched.count;
     return matched.status;
+}
+
+static cr_run_status_t cr_match_project_pair(cbm_store_t *src_store, const char *project,
+                                             cbm_store_t *tgt_store, const char *tgt,
+                                             cr_run_context_t *run,
+                                             cbm_cross_repo_result_t *result) {
+    cr_run_status_t match_status =
+        run->staging_store ? CR_RUN_OK
+                           : cr_reconcile_reverse(src_store, project, tgt_store, tgt, run);
+    if (match_status == CR_RUN_OK) {
+        match_status = add_match_count(&result->http_edges,
+                                       match_http_routes(src_store, project, tgt_store, tgt, run));
+    }
+    /* Reverse direction: when this pass runs from the provider side, the
+     * consumer's HTTP_CALLS live in tgt, not src — the forward pass above
+     * finds nothing because the provider has no outbound calls. This also
+     * re-creates the provider-side reverse edges that delete_cross_edges
+     * just wiped, which a provider-side run previously destroyed for good.
+     * A caller edge lives in exactly one DB, so the two directions scan
+     * disjoint edge sets and never double-count a pair; the store's
+     * (source, target, type) upsert keeps re-recorded rows unique. (#523) */
+    if (match_status == CR_RUN_OK) {
+        match_status = add_match_count(&result->http_edges,
+                                       match_http_routes(tgt_store, tgt, src_store, project, run));
+    }
+    if (match_status == CR_RUN_OK) {
+        match_status = add_match_count(&result->async_edges,
+                                       match_async_routes(src_store, project, tgt_store, tgt, run));
+    }
+    if (match_status == CR_RUN_OK) {
+        match_status = add_match_count(&result->channel_edges,
+                                       match_channels(src_store, project, tgt_store, tgt, run));
+    }
+    if (match_status == CR_RUN_OK) {
+        match_status = add_match_count(&result->grpc_edges,
+                                       match_typed_routes(src_store, project, tgt_store, tgt,
+                                                          "GRPC_CALLS", "service", "method",
+                                                          "CROSS_GRPC_CALLS", false, run));
+    }
+    if (match_status == CR_RUN_OK) {
+        match_status = add_match_count(&result->graphql_edges,
+                                       match_typed_routes(src_store, project, tgt_store, tgt,
+                                                          "GRAPHQL_CALLS", "operation", "operation",
+                                                          "CROSS_GRAPHQL_CALLS", false, run));
+    }
+    if (match_status == CR_RUN_OK) {
+        match_status = add_match_count(&result->trpc_edges,
+                                       match_typed_routes(src_store, project, tgt_store, tgt,
+                                                          "TRPC_CALLS", "procedure", "procedure",
+                                                          "CROSS_TRPC_CALLS", false, run));
+    }
+    /* Provider side: the consumer's typed calls live in tgt. This run
+     * maintains only the consumer's forward rows that already name this
+     * provider (match_typed_routes, provider_side) and rewrites its own
+     * reverse rows for them, which delete_cross_edges just wiped. Unlike
+     * HTTP above, it never creates a consumer link or redirects one that
+     * names another server. */
+    if (match_status == CR_RUN_OK) {
+        match_status =
+            add_match_count(&result->grpc_edges,
+                            match_typed_routes(tgt_store, tgt, src_store, project, "GRPC_CALLS",
+                                               "service", "method", "CROSS_GRPC_CALLS", true, run));
+    }
+    if (match_status == CR_RUN_OK) {
+        match_status = add_match_count(&result->graphql_edges,
+                                       match_typed_routes(tgt_store, tgt, src_store, project,
+                                                          "GRAPHQL_CALLS", "operation", "operation",
+                                                          "CROSS_GRAPHQL_CALLS", true, run));
+    }
+    if (match_status == CR_RUN_OK) {
+        match_status = add_match_count(&result->trpc_edges,
+                                       match_typed_routes(tgt_store, tgt, src_store, project,
+                                                          "TRPC_CALLS", "procedure", "procedure",
+                                                          "CROSS_TRPC_CALLS", true, run));
+    }
+
+    return match_status;
+}
+
+/* Wildcard enumeration only returns usable projects. Keep unavailable peers
+ * from the previous generation visible while the wildcard is being replayed. */
+static bool cr_record_unavailable_peers(yyjson_mut_doc *current, yyjson_doc *previous,
+                                        cr_run_context_t *run, cbm_cross_repo_result_t *result,
+                                        bool *unavailable) {
+    yyjson_mut_val *observations = yyjson_mut_doc_get_root(current);
+    yyjson_obj_iter iter = yyjson_obj_iter_with(yyjson_doc_get_root(previous));
+    yyjson_val *key;
+    while ((key = yyjson_obj_iter_next(&iter))) {
+        const char *target = yyjson_get_str(key);
+        if (cr_cancel_requested(run)) {
+            return false;
+        }
+        if (!cbm_validate_project_name(target) || yyjson_mut_obj_get(observations, target)) {
+            continue;
+        }
+        if (yyjson_mut_obj_size(observations) >= CR_MAX_PROJECTS ||
+            !cr_remember_peer(current, target, NULL) ||
+            !cr_record_skip(result, target, "target_unavailable")) {
+            return false;
+        }
+        if (unavailable) {
+            *unavailable = true;
+        }
+    }
+    return true;
+}
+
+/* The live generation owns the previous selection. The stage may be a new
+ * database, or an incremental copy whose link rows need to be replaced. */
+int cbm_cross_repo_relink_stage(const char *live_path, const char *stage_path, const char *project,
+                                const atomic_int *cancelled) {
+    cbm_store_t *previous = cbm_store_open_path_query(live_path);
+    if (!previous) {
+        /* Keep the normal recovery path for an unreadable serving index. */
+        return CBM_STORE_OK;
+    }
+    char **targets = NULL;
+    int target_count = cr_read_targets(previous, project, &targets);
+    bool wildcard = target_count == 1 && strcmp(targets[0], "*") == 0;
+    yyjson_doc *previous_peers = wildcard ? cr_read_peers(previous, project) : NULL;
+    cbm_store_close(previous);
+    if (target_count <= 0) {
+        return target_count < 0 ? CBM_STORE_ERR : CBM_STORE_OK;
+    }
+
+    cbm_store_t *staging = cbm_store_open_path_existing(stage_path);
+    if (!staging) {
+        yyjson_doc_free(previous_peers);
+        free_project_list(targets, target_count);
+        return CBM_STORE_ERR;
+    }
+    cr_run_context_t run = {.cancelled = cancelled, .staging_store = staging};
+    cbm_cross_repo_result_t result = {0};
+    char **resolved = NULL;
+    int count = wildcard
+                    ? collect_all_projects(&resolved, &run, &result)
+                    : collect_named_projects((const char **)targets, target_count, &resolved, &run);
+    yyjson_mut_doc *peers = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val *observations = peers ? yyjson_mut_obj(peers) : NULL;
+    if (observations) {
+        yyjson_mut_doc_set_root(peers, observations);
+    }
+    bool ok = count >= 0 && observations && delete_cross_edges(staging, project, &run) == CR_RUN_OK;
+    for (int i = 0; ok && i < count; i++) {
+        const char *target = resolved[i];
+        if (strcmp(target, project) == 0) {
+            continue;
+        }
+        cbm_store_t *provider = cr_open_peer(target);
+        if (!provider || !cr_store_has_exact_project(provider, target) ||
+            !cbm_store_edges_schema_current(provider)) {
+            cbm_store_close(provider);
+            ok = cr_record_skip(&result, target, "target_unavailable") &&
+                 cr_remember_peer(peers, target, NULL);
+            continue;
+        }
+        cbm_store_read_scope_t *scope = NULL;
+        ok = cbm_store_read_scope_open(provider, NULL, NULL, &scope) == CBM_STORE_OK &&
+             cr_remember_peer(peers, target, provider) &&
+             cr_match_project_pair(staging, project, provider, target, &run, &result) == CR_RUN_OK;
+        ok = cbm_store_read_scope_close(scope) == CBM_STORE_OK && ok;
+        cbm_store_close(provider);
+        if (ok) {
+            result.projects_scanned++;
+        }
+    }
+    result.no_targets = result.projects_scanned == 0;
+    ok = ok && cr_record_unavailable_peers(peers, previous_peers, &run, &result, NULL) &&
+         !cr_cancel_requested(&run) &&
+         cr_record_targets(staging, project, (const char **)targets, target_count) &&
+         cr_save_peers(staging, project, peers) && cr_set_reverse_pending(staging, project, true) &&
+         cr_record_last_run(staging, project, (const char **)targets, target_count, &result);
+    yyjson_mut_doc_free(peers);
+    yyjson_doc_free(previous_peers);
+    cbm_cross_repo_result_free(&result);
+    cbm_store_close(staging);
+    free_project_list(resolved, count);
+    free_project_list(targets, target_count);
+    return ok ? CBM_STORE_OK : CBM_STORE_ERR;
+}
+
+static int cr_sql_cancel(void *context) {
+    cr_run_context_t *run = context;
+    return cr_cancel_requested(run) ? 1 : 0;
+}
+
+/* Repair only the provider's reverse references. The source generation is
+ * already published and its outgoing links must survive a repair failure.
+ * Typed matches restrict this pass to the provider the source selected. */
+static bool cr_repair_peer(cbm_store_t *source, const char *project, cbm_store_t *provider,
+                           const char *target, const atomic_int *cancelled) {
+    cr_run_context_t run = {.cancelled = cancelled, .staging_store = provider};
+    if (cr_cancel_requested(&run) || cbm_store_begin(provider) != CBM_STORE_OK) {
+        return false;
+    }
+    sqlite3 *source_db = cbm_store_get_db(source);
+    sqlite3 *provider_db = cbm_store_get_db(provider);
+    sqlite3_progress_handler(source_db, CR_CANCEL_SQLITE_OPS, cr_sql_cancel, &run);
+    sqlite3_progress_handler(provider_db, CR_CANCEL_SQLITE_OPS, cr_sql_cancel, &run);
+    bool ok = cr_reconcile_reverse(source, project, provider, target, &run) == CR_RUN_OK &&
+              match_http_routes(source, project, provider, target, &run).status == CR_RUN_OK &&
+              match_channels(source, project, provider, target, &run).status == CR_RUN_OK &&
+              match_typed_routes(source, project, provider, target, "GRPC_CALLS", "service",
+                                 "method", "CROSS_GRPC_CALLS", true, &run)
+                      .status == CR_RUN_OK &&
+              match_typed_routes(source, project, provider, target, "GRAPHQL_CALLS", "operation",
+                                 "operation", "CROSS_GRAPHQL_CALLS", true, &run)
+                      .status == CR_RUN_OK &&
+              match_typed_routes(source, project, provider, target, "TRPC_CALLS", "procedure",
+                                 "procedure", "CROSS_TRPC_CALLS", true, &run)
+                      .status == CR_RUN_OK;
+    sqlite3_progress_handler(source_db, 0, NULL, NULL);
+    sqlite3_progress_handler(provider_db, 0, NULL, NULL);
+    if (ok && !cr_cancel_requested(&run) && cbm_store_commit(provider) == CBM_STORE_OK) {
+        return true;
+    }
+    (void)cbm_store_rollback(provider);
+    return false;
+}
+
+bool cbm_cross_repo_reconcile_published(const char *project, const atomic_int *cancelled) {
+    cr_run_context_t run = {.cancelled = cancelled};
+    if (cr_cancel_requested(&run)) {
+        return false;
+    }
+    cbm_store_t *source = cr_open_existing_project(project, false);
+    if (!source) {
+        return false;
+    }
+    if (!cr_reverse_pending(source, project)) {
+        cbm_store_close(source);
+        return true;
+    }
+    yyjson_doc *peers = cr_read_peers(source, project);
+    yyjson_val *expected = yyjson_doc_get_root(peers);
+    bool ok = yyjson_is_obj(expected);
+    yyjson_obj_iter iter = yyjson_obj_iter_with(expected);
+    yyjson_val *key;
+    while (!cr_cancel_requested(&run) && (key = yyjson_obj_iter_next(&iter))) {
+        const char *target = yyjson_get_str(key);
+        const char *observed = yyjson_get_str(yyjson_obj_iter_get_val(key));
+        cbm_store_t *provider = observed ? cr_open_existing_project(target, false) : NULL;
+        char current[CBM_GRAPH_COMPARE_GENERATION_SIZE];
+        bool matched = provider &&
+                       cbm_store_generation(provider, current, sizeof(current)) == CBM_STORE_OK &&
+                       strcmp(current, observed) == 0 &&
+                       cr_repair_peer(source, project, provider, target, cancelled);
+        cbm_store_close(provider);
+        ok = matched && ok;
+    }
+    yyjson_doc_free(peers);
+    ok = ok && !cr_cancel_requested(&run) && cr_set_reverse_pending(source, project, false);
+    cbm_store_close(source);
+    return ok;
 }
 
 /* ── Entry point ─────────────────────────────────────────────────── */
@@ -1835,7 +2438,7 @@ cbm_cross_repo_result_t cbm_cross_repo_match_cancellable(const char *project,
 
     /* Every input is known to exist before destructive source cleanup. The
      * read-write open itself also omits CREATE so a race cannot create ghosts. */
-    cbm_store_t *src_store = cr_open_existing_project(project);
+    cbm_store_t *src_store = cr_open_existing_project(project, true);
     if (!src_store) {
         result.failed = true;
         free_project_list(resolved, resolved_count);
@@ -1849,12 +2452,38 @@ cbm_cross_repo_result_t cbm_cross_repo_match_cancellable(const char *project,
         return result;
     }
 
+    char **previous_targets = NULL;
+    int previous_count = cr_read_targets(src_store, project, &previous_targets);
+    bool saved_previous =
+        previous_count == 0 ||
+        (previous_count > 0 &&
+         cr_record_targets(src_store, project, (const char **)previous_targets, previous_count));
+    free_project_list(previous_targets, previous_count);
+    if (!saved_previous) {
+        result.failed = true;
+        cbm_store_close(src_store);
+        free_project_list(resolved, resolved_count);
+        return result;
+    }
+
+    yyjson_mut_doc *peers = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val *observations = peers ? yyjson_mut_obj(peers) : NULL;
+    if (!observations) {
+        result.failed = true;
+        yyjson_mut_doc_free(peers);
+        cbm_store_close(src_store);
+        free_project_list(resolved, resolved_count);
+        return result;
+    }
+    yyjson_mut_doc_set_root(peers, observations);
+
     /* Clean existing CROSS_* edges for this project */
     cr_run_status_t cleanup_status = delete_cross_edges(src_store, project, &run);
     if (cleanup_status != CR_RUN_OK) {
         result.cancelled = cleanup_status == CR_RUN_CANCELLED;
         result.partial_results = result.cancelled && run.mutated;
         result.failed = cleanup_status == CR_RUN_FAILED;
+        yyjson_mut_doc_free(peers);
         cbm_store_close(src_store);
         free_project_list(resolved, resolved_count);
         return result;
@@ -1873,80 +2502,16 @@ cbm_cross_repo_result_t cbm_cross_repo_match_cancellable(const char *project,
         }
 
         /* Open target store read-write (for bidirectional edge writes) */
-        cbm_store_t *tgt_store = cr_open_existing_project(tgt);
+        cbm_store_t *tgt_store = cr_open_existing_project(tgt, true);
         if (!tgt_store) {
             result.failed = true;
             break;
         }
 
-        cr_run_status_t match_status = cr_reconcile_reverse(tgt_store, tgt, project, &run);
-        if (match_status == CR_RUN_OK) {
-            match_status = add_match_count(
-                &result.http_edges, match_http_routes(src_store, project, tgt_store, tgt, &run));
-        }
-        /* Reverse direction: when this pass runs from the provider side, the
-         * consumer's HTTP_CALLS live in tgt, not src — the forward pass above
-         * finds nothing because the provider has no outbound calls. This also
-         * re-creates the provider-side reverse edges that delete_cross_edges
-         * just wiped, which a provider-side run previously destroyed for good.
-         * A caller edge lives in exactly one DB, so the two directions scan
-         * disjoint edge sets and never double-count a pair; the store's
-         * (source, target, type) upsert keeps re-recorded rows unique. (#523) */
-        if (match_status == CR_RUN_OK) {
-            match_status = add_match_count(
-                &result.http_edges, match_http_routes(tgt_store, tgt, src_store, project, &run));
-        }
-        if (match_status == CR_RUN_OK) {
-            match_status = add_match_count(
-                &result.async_edges, match_async_routes(src_store, project, tgt_store, tgt, &run));
-        }
-        if (match_status == CR_RUN_OK) {
-            match_status = add_match_count(
-                &result.channel_edges, match_channels(src_store, project, tgt_store, tgt, &run));
-        }
-        if (match_status == CR_RUN_OK) {
-            match_status =
-                add_match_count(&result.grpc_edges,
-                                match_typed_routes(src_store, project, tgt_store, tgt, "GRPC_CALLS",
-                                                   "service", "method", "CROSS_GRPC_CALLS", false,
-                                                   &run));
-        }
-        if (match_status == CR_RUN_OK) {
-            match_status = add_match_count(
-                &result.graphql_edges,
-                match_typed_routes(src_store, project, tgt_store, tgt, "GRAPHQL_CALLS", "operation",
-                                   "operation", "CROSS_GRAPHQL_CALLS", false, &run));
-        }
-        if (match_status == CR_RUN_OK) {
-            match_status = add_match_count(
-                &result.trpc_edges,
-                match_typed_routes(src_store, project, tgt_store, tgt, "TRPC_CALLS", "procedure",
-                                   "procedure", "CROSS_TRPC_CALLS", false, &run));
-        }
-        /* Provider side: the consumer's typed calls live in tgt. This run
-         * maintains only the consumer's forward rows that already name this
-         * provider (match_typed_routes, provider_side) and rewrites its own
-         * reverse rows for them, which delete_cross_edges just wiped. Unlike
-         * HTTP above, it never creates a consumer link or redirects one that
-         * names another server. */
-        if (match_status == CR_RUN_OK) {
-            match_status = add_match_count(
-                &result.grpc_edges,
-                match_typed_routes(tgt_store, tgt, src_store, project, "GRPC_CALLS", "service",
-                                   "method", "CROSS_GRPC_CALLS", true, &run));
-        }
-        if (match_status == CR_RUN_OK) {
-            match_status = add_match_count(
-                &result.graphql_edges,
-                match_typed_routes(tgt_store, tgt, src_store, project, "GRAPHQL_CALLS",
-                                   "operation", "operation", "CROSS_GRAPHQL_CALLS", true, &run));
-        }
-        if (match_status == CR_RUN_OK) {
-            match_status = add_match_count(
-                &result.trpc_edges,
-                match_typed_routes(tgt_store, tgt, src_store, project, "TRPC_CALLS", "procedure",
-                                   "procedure", "CROSS_TRPC_CALLS", true, &run));
-        }
+        cr_run_status_t match_status =
+            cr_remember_peer(peers, tgt, tgt_store)
+                ? cr_match_project_pair(src_store, project, tgt_store, tgt, &run, &result)
+                : CR_RUN_FAILED;
 
         cbm_store_close(tgt_store);
         if (match_status == CR_RUN_FAILED) {
@@ -1961,7 +2526,23 @@ cbm_cross_repo_result_t cbm_cross_repo_match_cancellable(const char *project,
         result.projects_scanned++;
     }
 
-    cr_record_last_run(src_store, project, target_projects, target_count, &result);
+    if (!result.failed && !result.cancelled) {
+        bool wildcard = target_count == 1 && strcmp(target_projects[0], "*") == 0;
+        yyjson_doc *previous = wildcard ? cr_read_peers(src_store, project) : NULL;
+        bool pending = false;
+        bool peers_complete = cr_record_unavailable_peers(peers, previous, &run, &result, &pending);
+        yyjson_doc_free(previous);
+        if (cr_cancel_requested(&run)) {
+            result.cancelled = true;
+            result.partial_results = run.mutated;
+        } else if (!peers_complete || !cr_save_peers(src_store, project, peers) ||
+                   !cr_record_targets(src_store, project, target_projects, target_count) ||
+                   !cr_set_reverse_pending(src_store, project, pending)) {
+            result.failed = true;
+        }
+    }
+    (void)cr_record_last_run(src_store, project, target_projects, target_count, &result);
+    yyjson_mut_doc_free(peers);
     cbm_store_close(src_store);
 
     free_project_list(resolved, resolved_count);

@@ -1,9 +1,9 @@
 //! GraphQL cross-repo link decisions and edge writes.
 
-#[cfg(feature = "c-backend")]
+#[cfg(feature = "graphql-callbacks")]
 use std::ffi::CStr;
 
-#[cfg(feature = "c-backend")]
+#[cfg(feature = "graphql-callbacks")]
 use rusqlite::{
     Connection, OptionalExtension, Result, ffi,
     types::{ToSqlOutput, ValueRef},
@@ -40,7 +40,7 @@ pub(crate) extern "C" fn plan_link(
     }
 }
 
-#[cfg(feature = "c-backend")]
+#[cfg(feature = "graphql-callbacks")]
 fn copy_sqlite_text(value: ValueRef<'_>, output: &mut [u8]) {
     if output.is_empty() {
         return;
@@ -58,7 +58,7 @@ fn copy_sqlite_text(value: ValueRef<'_>, output: &mut [u8]) {
 
 /// Find the exact target Route, choose its first HANDLES row in the same
 /// order as C, and read the ambiguity flag only after finding a handler.
-#[cfg(feature = "c-backend")]
+#[cfg(feature = "graphql-callbacks")]
 pub(crate) fn find_handler(
     db: &Connection,
     route_qn: &CStr,
@@ -103,7 +103,7 @@ pub(crate) fn find_handler(
 
 /// Use the caller's connection so this delete keeps its SQLite transaction
 /// and progress handler. The link pass has already checked provider ownership.
-#[cfg(feature = "c-backend")]
+#[cfg(feature = "graphql-callbacks")]
 pub(crate) fn delete_stale_link(
     db: &Connection,
     caller: i64,
@@ -120,7 +120,7 @@ pub(crate) fn delete_stale_link(
 ///
 /// The caller lends a live, reset edge-upsert statement and retains exclusive
 /// ownership for the whole call. This function resets it before returning.
-#[cfg(feature = "c-backend")]
+#[cfg(feature = "graphql-callbacks")]
 pub(crate) unsafe fn upsert_link(
     stmt: *mut ffi::sqlite3_stmt,
     project: &CStr,
@@ -163,7 +163,7 @@ pub(crate) unsafe fn upsert_link(
 mod tests {
     use super::{Action, plan_link};
 
-    #[cfg(feature = "c-backend")]
+    #[cfg(feature = "graphql-callbacks")]
     #[test]
     fn lookup_keeps_handler_order_and_raw_name_bytes() {
         let db = rusqlite::Connection::open_in_memory().unwrap();
@@ -195,7 +195,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "c-backend")]
+    #[cfg(feature = "graphql-callbacks")]
     #[test]
     fn upsert_reuses_one_edge_and_keeps_both_callers() {
         use rusqlite::{Connection, ffi};
@@ -259,7 +259,7 @@ mod tests {
         assert_eq!(count, 0);
     }
 
-    #[cfg(feature = "c-backend")]
+    #[cfg(feature = "graphql-callbacks")]
     #[test]
     fn deletes_only_the_requested_graphql_edge_in_the_existing_transaction() {
         let mut db = rusqlite::Connection::open_in_memory().unwrap();
