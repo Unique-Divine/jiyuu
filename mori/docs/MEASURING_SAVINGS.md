@@ -1,15 +1,15 @@
 # Measuring quality, latency, and agent savings
 
-This guide describes how to measure codebase-memory-mcp (CBM) on your own
+This guide describes how to measure Mori on your own
 repository without mixing three different questions:
 
 1. Does the agent give a better answer?
-2. Is CBM fast and stable under the workload?
+2. Is Mori fast and stable under the workload?
 3. Does graph-assisted exploration use fewer model tokens or tool calls than
    file-by-file exploration?
 
 Measure and report those classes separately. A fast graph query does not prove
-that the final answer is correct, and CBM's query counters do not reveal the
+that the final answer is correct, and Mori's query counters do not reveal the
 agent's model-token or total tool-call consumption. The README's published
 [performance figures](../README.md#performance), the
 [language benchmark](BENCHMARK.md) and the more detailed
@@ -28,7 +28,7 @@ Before either condition runs, record:
 
 - the repository URL or local identity and exact Git commit SHA;
 - the question set and expected scope of each answer;
-- the CBM version, index mode, operating system, and machine details;
+- the Mori version, index mode, operating system, and machine details;
 - the agent model/version, system prompt, tool instructions, context limits,
   and per-question budget;
 - which condition runs first, plus any warm-up policy;
@@ -86,7 +86,7 @@ GRAPH_SHA=$(git -C "$GRAPH_REPO" rev-parse HEAD) || exit 1
 GRAPH_STATUS=$(git -C "$GRAPH_REPO" status --porcelain=v1 --untracked-files=all) || exit 1
 test "$GRAPH_SHA" = "$SHA" || exit 1
 test -z "$GRAPH_STATUS" || exit 1
-codebase-memory-mcp cli index_repository \
+mori cli index_repository \
   --repo-path "$GRAPH_REPO" \
   --mode "$MODE" || exit 1
 GRAPH_SHA_AFTER=$(git -C "$GRAPH_REPO" rev-parse HEAD) || exit 1
@@ -99,8 +99,8 @@ Take `PROJECT_NAME` from the successful indexing response. A verbose status call
 is useful only as a root/current-HEAD cross-check:
 
 ```bash
-codebase-memory-mcp cli list_projects
-codebase-memory-mcp cli index_status --project PROJECT_NAME --verbose
+mori cli list_projects
+mori cli index_status --project PROJECT_NAME --verbose
 ```
 
 Confirm that `root_path` is `GRAPH_REPO`, `git.head_sha` is `SHA`, and the Git
@@ -113,7 +113,7 @@ Finally, run one or more representative queries whose expected symbols you
 have verified directly at the recorded SHA:
 
 ```bash
-codebase-memory-mcp cli search_graph \
+mori cli search_graph \
   --project PROJECT_NAME \
   --name-pattern 'KNOWN_SYMBOL_PATTERN' \
   --limit 10
@@ -137,7 +137,7 @@ Run two isolated conditions:
 
 | Condition | Allowed exploration tools |
 |-----------|---------------------------|
-| Graph | CBM graph tools such as `search_graph`, `trace_path`, `query_graph`, `get_code_snippet`, `get_architecture`, and `search_code` |
+| Graph | Mori graph tools such as `search_graph`, `trace_path`, `query_graph`, `get_code_snippet`, `get_architecture`, and `search_code` |
 | File-by-file baseline | File listing, text search, and targeted file reads only |
 
 Grade the final answers against the source at the frozen SHA, not against how
@@ -164,7 +164,7 @@ attempt alone, or an `artifact.import` record containing `skip` or `err`, does
 not prove that the artifact was used. For queries, use the same fixed workload
 in the same order, identify warm-up calls in advance, and retain per-call
 durations and exit status rather than only a single average. Report the machine,
-OS, CBM version, repository SHA, index mode, question set, index-run class, and
+OS, Mori version, repository SHA, index mode, question set, index-run class, and
 whether query results are cold or warm.
 
 ### Built-in diagnostics
@@ -179,7 +179,7 @@ environment contract.
 export CBM_DIAGNOSTICS=1
 ```
 
-CBM creates a fresh randomized, owner-private diagnostics directory below the
+Mori creates a fresh randomized, owner-private diagnostics directory below the
 system temporary directory. Do not assume or construct an old predictable
 `/tmp` filename. Discover the exact `snapshot` and `trajectory` paths from the
 `diagnostics.start` JSON record in
@@ -192,8 +192,8 @@ files and retention behavior.
 The live `snapshot.json` includes CBM-side `query_count`, `query_errors`,
 `query_total_us`, `query_avg_us`, and `query_max_us`, along with process resource
 counters. The retained `trajectory.ndjson` provides the resource and query-count
-trend over time. These are useful for CBM latency and stability analysis, but
-they are not a record of an agent's model usage or of non-CBM tools.
+trend over time. These are useful for Mori latency and stability analysis, but
+they are not a record of an agent's model usage or of non-Mori tools.
 Because a daemon can be shared by multiple sessions, use an otherwise idle
 daemon and record before/after values (or start a dedicated run) when attributing
 its counters to one workload.
@@ -218,14 +218,14 @@ timestamp,uptime_s,rss_bytes,heap_committed,fd_count,query_count,query_max_us
 ```
 
 Do not invoke `scripts/soak-test.sh` directly; `soak-legs.sh` owns the
-release-gating sequence. Treat these artifacts as stability and CBM latency
+release-gating sequence. Treat these artifacts as stability and Mori latency
 evidence, not as answer-quality or model-token evidence.
 
 ## 3. Measure token and tool-call savings
 
 Run the Graph and file-by-file conditions on the same frozen inputs described
 above. The MCP client or evaluation harness must capture agent usage because
-CBM cannot know the final model input/output token count or the agent's total
+Mori cannot know the final model input/output token count or the agent's total
 tool-call consumption.
 
 Define each `run_id` as one paired experimental replicate. Each
@@ -239,7 +239,7 @@ run_id,condition,repo_sha,question_id,window,input_tokens,output_tokens,total_to
 In each row, `tool_calls` is the count of every client tool invocation inside
 that same window, including orchestration calls and the graph or file tools
 permitted for that condition, plus retries, errors, and zero-result calls. Do
-not count only CBM calls. Candidate windows are:
+not count only Mori calls. Candidate windows are:
 
 - **Answering tokens:** input plus output tokens between fixed markers around
   the question-answering phase.
@@ -247,7 +247,7 @@ not count only CBM calls. Candidate windows are:
   initial probes, dead ends, and answer formatting.
 
 The full-session value best represents an adopter's total cost; the answering
-window helps explain where a difference arose. Do not substitute CBM's
+window helps explain where a difference arose. Do not substitute Mori's
 `query_count` for either `tool_calls` value: it cannot see file searches, file
 reads, or other client tools.
 
@@ -281,12 +281,12 @@ machine into a universal savings claim.
 
 - Repository identity and exact SHA are recorded; each condition uses a clean,
   detached worktree with no tracked or untracked changes.
-- CBM version, index mode, project name, and preflight outputs are retained.
+- Mori version, index mode, project name, and preflight outputs are retained.
 - Every Graph run follows a successful fresh index of the frozen worktree and
   mode; verbose status is only a root/current-HEAD cross-check.
 - Questions, ground truth, prompts, budgets, and condition order are frozen.
 - Graph and file-by-file runs use isolated sessions and the same controls.
-- Quality, CBM latency/stability, and agent savings are reported separately.
+- Quality, Mori latency/stability, and agent savings are reported separately.
 - Usage counts come directly from the client or evaluation harness; each
   condition run is one isolated question/session, common windows use separate
   rows, and unsupported windows are omitted or N/A rather than inferred.

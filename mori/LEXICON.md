@@ -24,6 +24,11 @@ _See_: [jiyuu-mori](jiyuu-mori): the crate and how it relates to the C
 **Reference**:
 The build whose output counts as correct in a comparison.
 
+**Graph UI**:
+The browser app the daemon serves from a binary built with the UI embedded,
+with workspaces such as Explore, Galaxy, and Repos.
+_Avoid_: Lens, CBM Lens (upstream's name, still shown in the app)
+
 ### Index Runs
 
 **Index run**:
@@ -34,7 +39,7 @@ _Avoid_: reindex, build
 How much an index run discovers and computes: `full`, `moderate`, or `fast`.
 _Avoid_: a bare "full"
 _See_: [pipeline.h](src/pipeline/pipeline.h): the three depths.
-[README.upstream.md](README.upstream.md): the public `mode` parameter, which
+[README.md](README.md#index-and-query): the public `mode` parameter, which
 also accepts a link run
 
 **Update path**:

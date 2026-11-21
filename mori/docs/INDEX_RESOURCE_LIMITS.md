@@ -14,9 +14,9 @@ by default so existing large-repository workloads retain their current behavior.
 Set or reset them with the normal configuration command:
 
 ```bash
-codebase-memory-mcp config set index_max_files 250000
-codebase-memory-mcp config set index_max_source_mb 16384
-codebase-memory-mcp config reset index_max_files
+mori config set index_max_files 250000
+mori config set index_max_source_mb 16384
+mori config reset index_max_files
 ```
 
 Values use base-10 integers. MiB means 1,048,576 bytes. Empty values, zero,
@@ -31,8 +31,8 @@ ranges are rejected without changing the stored value.
 | `index_max_duration_seconds` | `off` | `off` or `1..86400` | Wall-clock duration of the whole index request |
 
 ```bash
-codebase-memory-mcp config set index_max_rss_mb 8192
-codebase-memory-mcp config set index_max_duration_seconds 3600
+mori config set index_max_rss_mb 8192
+mori config set index_max_duration_seconds 3600
 ```
 
 RSS is the charged memory of the contained worker and every descendant, not
@@ -53,7 +53,7 @@ quarantine can name the in-flight file, so the next attempt may hang on the
 same file.
 
 Equality is allowed. The first RSS or elapsed-duration observation above its
-limit starts the existing graceful-to-force process-tree shutdown. CBM reports
+limit starts the existing graceful-to-force process-tree shutdown. Mori reports
 terminal only after the tree is quiescent or a bounded containment failure is
 explicitly surfaced. Resource termination is not retried and does not
 quarantine a source file.
@@ -71,7 +71,7 @@ completion. The supervisor then logs `index.supervisor.resource_limit_after_publ
 instead of stopping it. With both worker limits `off` there is no claim.
 
 If RSS is enabled and three consecutive probes cannot obtain any trustworthy
-tree measurement while the root worker is still running, CBM fails closed with
+tree measurement while the root worker is still running, Mori fails closed with
 `code=resource_probe_failed`. A probe is untrustworthy as soon as one member of
 the tree cannot be measured: only a process that exits between the listing and
 its measurement is skipped, because a total without a live member would
@@ -86,7 +86,7 @@ per-file size rule. `index_max_source_mb` sums the filesystem sizes of that same
 accepted set.
 
 Equality is allowed. The first file or byte that makes an observed value greater
-than its limit stops discovery. CBM discards the partial file list and does not
+than its limit stops discovery. Mori discards the partial file list and does not
 publish a partial graph as a complete index.
 
 For an explicit MCP request the error payload contains:

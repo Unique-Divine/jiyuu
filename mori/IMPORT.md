@@ -32,31 +32,41 @@ file says was made because the path was missing.
 
 ## Local Modifications
 
-- Imported as directory `mori/` of the Jiyuu monorepo. The project is being
-  renamed Mori; the C binary keeps the name `codebase-memory-mcp`.
+- Imported as directory `mori/` of the Jiyuu monorepo and renamed Mori. The
+  C build keeps the binary name `codebase-memory-mcp`; releases ship `mori`
+  from 0.14.0.
 - The vendored Tree-sitter grammars are not committed. They are fetched at
   build time (see [Vendored Grammars](#vendored-grammars)).
-- Upstream `README.md` is kept as `README.upstream.md`. `README.md` is Jiyuu's.
-- `tests/test_cli.c` reads `README.upstream.md` for the supported-agent
-  contract and drops its `pkg/npm/README.md` assertions (the 46-surface
-  sentence and the per-agent list).
-- `tests/test_language_count_contract.sh` checks one surface,
-  `README.upstream.md`, instead of two (`README.md` and the Chocolatey nuspec
+- Upstream `README.md` is replaced by Mori's `README.md`, which folds in its
+  usage content and images. See
+  [Upstream Project Documents](#upstream-project-documents).
+- `tests/test_cli.c` checks the supported-agent list against `src/main.c`
+  only. Its checks of upstream `README.md`, `docs/index.html`, `docs/llms.txt`
+  and `pkg/npm/README.md` are dropped.
+- `tests/test_language_count_contract.sh` checks one surface, Mori's
+  `README.md`, instead of two (upstream `README.md` and the Chocolatey nuspec
   under `pkg/`).
-- `tests/test_vt_gate_policy_contract.sh` reads `README.upstream.md` in place
-  of `README.md` in both of its README checks.
+- `tests/test_vt_gate_policy_contract.sh` drops its checks of the VirusTotal
+  policy wording in upstream `README.md`, `SECURITY.md` and
+  `docs/index.html`; its checks of the gate scripts stay.
+- `SECURITY.md` is replaced by a short Mori policy (report through a GitHub
+  security advisory on Jiyuu).
 - `.gitignore` gains a Jiyuu block that ignores the fetched
   `internal/cbm/vendored/grammars/`, `.grammars.stamp` and `.grammars-tmp-*/`.
 - Removed upstream distribution files Mori does not use: `flake.nix`,
-  `flake.lock`, `server.json`, `glama.json`, `install.sh` and `install.ps1`
-  (see [Excluded Paths](#excluded-paths)). Nothing in the build or the C test
-  suites reads them. Release and setup scripts that do are left unchanged.
+  `flake.lock`, `server.json`, `glama.json`, `install.sh`, `install.ps1`,
+  `scripts/setup.sh` and `scripts/setup-windows.ps1` (see
+  [Excluded Paths](#excluded-paths)). Nothing in the build or the C test
+  suites reads them.
+- Removed upstream project documents, website files and contribution tooling
+  (see [Upstream Project Documents](#upstream-project-documents)).
 - Removed 12 upstream contract scripts that check DeusData's release
   machinery, their steps in `scripts/test.sh`, and the fixture
   `tests/fixtures/select-lanes/` (see
   [Excluded Contract Checks](#excluded-contract-checks)). `scripts/test.sh`
   gains a comment above Step 0 that points here.
-- Added by Jiyuu: `README.md`, `IMPORT.md`, `NOTICE`, `justfile`,
+- Added by Jiyuu: `README.md`, `SECURITY.md`, `LEXICON.md`, `IMPORT.md`,
+  `NOTICE`, `justfile`,
   `grammars.lock.json`, and the Bun scripts `scripts/grammars-fetch.ts`,
   `scripts/grammars-lib.ts`, `scripts/grammars-pack.ts`,
   `scripts/grammars.test.ts` and `scripts/tsconfig.json`.
@@ -209,12 +219,43 @@ a file this import modifies.
   installer beside the binary, and `codebase-memory-mcp update` points at it.
 - Restore: `git archive ... install.sh install.ps1`, then change `REPO` and
   the asset names to Mori's releases.
-- Effect here: `scripts/package-release.sh` copies the installer into every
-  release archive and stops without it; `scripts/smoke-local.sh`,
-  `scripts/setup.sh` and `scripts/setup-windows.ps1` also expect it. None of
-  them runs from a Jiyuu recipe. A Mori release needs either its own
-  installers or a release layout without them. The binary's `update` command
-  already handles an archive with no installer beside the binary.
+- Effect here: [jiyuu#163](https://github.com/Unique-Divine/jiyuu/pull/163)
+  dropped the installer from the release archives. `scripts/smoke-local.sh`
+  still expects it; no Jiyuu recipe runs that script. The binary's `update`
+  command handles an archive with no installer beside the binary.
+
+### `scripts/setup.sh` and `scripts/setup-windows.ps1`
+
+- Upstream:
+  [`scripts/setup.sh`](https://github.com/DeusData/codebase-memory-mcp/blob/cdfdf26483fa56f4f7d9d85e7c4c3924133b458b/scripts/setup.sh)
+  and
+  [`scripts/setup-windows.ps1`](https://github.com/DeusData/codebase-memory-mcp/blob/cdfdf26483fa56f4f7d9d85e7c4c3924133b458b/scripts/setup-windows.ps1)
+- Upstream role: setup scripts that download upstream's `install.sh` or
+  `install.ps1` and run it to install the latest upstream release, or build
+  from source with `--from-source`.
+- Effect here: only comments name them (`tests/test_parse_coverage.c`,
+  `internal/cbm/cbm.c` and `scripts/hooks/pre-commit`). Their contract check,
+  Step 0y3, was already removed.
+- Restore: `git archive ... scripts/setup.sh scripts/setup-windows.ps1`, then
+  point them at Mori's releases.
+
+### Upstream Project Documents
+
+Removed because they describe upstream's project, maintainers, community,
+website or release process rather than how to use Mori. Restore any of them
+with `git archive` at the source commit.
+
+| Path | Upstream role |
+| --- | --- |
+| [`README.md`](https://github.com/DeusData/codebase-memory-mcp/blob/cdfdf26483fa56f4f7d9d85e7c4c3924133b458b/README.md) | Upstream's README, kept as `README.upstream.md` until its usage content, screenshots and GIFs moved into Mori's `README.md`. Left out: badges, the one-line installers, npm, PyPI, AUR, Nix and Claude Code plugin installs, the 46-client install matrix, the VirusTotal release evidence, and the community links. |
+| [`MAINTAINERS.md`](https://github.com/DeusData/codebase-memory-mcp/blob/cdfdf26483fa56f4f7d9d85e7c4c3924133b458b/MAINTAINERS.md) | Upstream's maintainers and roles. |
+| [`CONTRIBUTING.md`](https://github.com/DeusData/codebase-memory-mcp/blob/cdfdf26483fa56f4f7d9d85e7c4c3924133b458b/CONTRIBUTING.md) | How to contribute upstream, including the DCO sign-off rule. |
+| [`CODE_OF_CONDUCT.md`](https://github.com/DeusData/codebase-memory-mcp/blob/cdfdf26483fa56f4f7d9d85e7c4c3924133b458b/CODE_OF_CONDUCT.md) | Contributor Covenant with upstream's enforcement contact. |
+| [`DCO`](https://github.com/DeusData/codebase-memory-mcp/blob/cdfdf26483fa56f4f7d9d85e7c4c3924133b458b/DCO), [`scripts/check-dco.sh`](https://github.com/DeusData/codebase-memory-mcp/blob/cdfdf26483fa56f4f7d9d85e7c4c3924133b458b/scripts/check-dco.sh), [`scripts/install-git-hooks.sh`](https://github.com/DeusData/codebase-memory-mcp/blob/cdfdf26483fa56f4f7d9d85e7c4c3924133b458b/scripts/install-git-hooks.sh), [`scripts/git-hooks/commit-msg`](https://github.com/DeusData/codebase-memory-mcp/blob/cdfdf26483fa56f4f7d9d85e7c4c3924133b458b/scripts/git-hooks/commit-msg) | The Developer Certificate of Origin and the tooling that enforces upstream's sign-off rule on commits. No Jiyuu recipe or CI job ran them. `scripts/ci/select-lanes.sh` and `tests/test_test_impact.c` still list the paths. |
+| [`SECURITY.md`](https://github.com/DeusData/codebase-memory-mcp/blob/cdfdf26483fa56f4f7d9d85e7c4c3924133b458b/SECURITY.md) | Upstream's reporting channel, release verification (VirusTotal, cosign, SLSA) and antivirus notes. Replaced by Mori's short policy. |
+| [`docs/SECURITY-DISCLOSURE.md`](https://github.com/DeusData/codebase-memory-mcp/blob/cdfdf26483fa56f4f7d9d85e7c4c3924133b458b/docs/SECURITY-DISCLOSURE.md) | Upstream's handling process for security reports. |
+| [`docs/index.html`](https://github.com/DeusData/codebase-memory-mcp/blob/cdfdf26483fa56f4f7d9d85e7c4c3924133b458b/docs/index.html), [`docs/llms.txt`](https://github.com/DeusData/codebase-memory-mcp/blob/cdfdf26483fa56f4f7d9d85e7c4c3924133b458b/docs/llms.txt), [`docs/robots.txt`](https://github.com/DeusData/codebase-memory-mcp/blob/cdfdf26483fa56f4f7d9d85e7c4c3924133b458b/docs/robots.txt), [`docs/sitemap.xml`](https://github.com/DeusData/codebase-memory-mcp/blob/cdfdf26483fa56f4f7d9d85e7c4c3924133b458b/docs/sitemap.xml) | Upstream's GitHub Pages website. `tests/test_cli.c` and `tests/test_vt_gate_policy_contract.sh` read `index.html` and `llms.txt`; those checks are dropped. |
+| [`docs/WINDOWS_TROUBLESHOOTING.md`](https://github.com/DeusData/codebase-memory-mcp/blob/cdfdf26483fa56f4f7d9d85e7c4c3924133b458b/docs/WINDOWS_TROUBLESHOOTING.md) | Known issues of upstream's Windows releases, by upstream version and issue number. Mori has no Windows release. |
 
 ## Excluded Contract Checks
 
@@ -404,10 +445,9 @@ past upstream PRs, replayed by Step 0z2 without opening the files).
 ## Follow-Ups
 
 - [ ] Rewrite or remove the upstream scripts that still fetch or run the
-  excluded installers: `scripts/setup.sh` and `scripts/setup-windows.ps1`
-  (download through `install.sh` / `install.ps1`), `scripts/smoke-local.sh`
-  and `scripts/smoke-wrappers.sh` (stage `install.sh` in the release
-  fixture), and Phase 13 of `scripts/smoke-test.sh` (skips without
-  `install.sh`).
+  excluded installers: `scripts/smoke-local.sh` and
+  `scripts/smoke-wrappers.sh` (stage `install.sh` in the release fixture),
+  and Phase 13 of `scripts/smoke-test.sh` (skips without `install.sh`).
+  `scripts/setup.sh` and `scripts/setup-windows.ps1` are removed.
   - Why: no Jiyuu recipe or Step 0 check runs them, so they fail only when
     called by hand; the removed Steps 0h and 0y3 were their only checks.

@@ -1,6 +1,7 @@
-# CBM Lens Beta
+# Graph UI
 
-CBM Lens is the local exploration frontend served by `codebase-memory-mcp --ui=true`.
+The graph UI, titled CBM Lens Beta in the app, is the local exploration frontend
+served by `mori --ui=true` from a binary built with the UI embedded.
 It combines source, the indexed graph and optional browser inference. Source files
 are read-only; project architecture decisions can be edited in the ADR workspace.
 The frontend was contributed by Bernhard Jackiewicz as CodeAtlasWeb.
