@@ -3,6 +3,8 @@
 
 use std::ffi::{CStr, c_char, c_int};
 
+use crate::graphql_link::{Action, plan_link};
+
 unsafe extern "C" {
     /// The C program's `main`, renamed when `src/main.c` is compiled with
     /// `-DCBM_AS_LIBRARY` (target `libmori-c` in `Makefile.cbm`). Its first
@@ -12,6 +14,9 @@ unsafe extern "C" {
 
     fn cbm_gqlgen_set_glob_matcher(
         matcher: extern "C" fn(glob: *const c_char, path: *const c_char) -> bool,
+    );
+    fn cbm_cross_repo_set_graphql_link_policy(
+        policy: extern "C" fn(bool, bool, bool, bool, bool) -> Action,
     );
 }
 
@@ -37,7 +42,10 @@ extern "C" fn gqlgen_glob_match(
 pub unsafe extern "C" fn main(argc: c_int, argv: *mut *mut c_char) -> c_int {
     // SAFETY: C has not started any indexing threads and the function pointer
     // stays valid for the process lifetime, including each worker's own main.
-    unsafe { cbm_gqlgen_set_glob_matcher(gqlgen_glob_match) };
+    unsafe {
+        cbm_gqlgen_set_glob_matcher(gqlgen_glob_match);
+        cbm_cross_repo_set_graphql_link_policy(plan_link);
+    }
 
     // SAFETY: argc and argv come straight from the C runtime and meet the
     // contract of C main, which cbm_c_main is.

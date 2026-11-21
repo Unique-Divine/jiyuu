@@ -15,6 +15,9 @@ mod ffi;
 #[cfg(any(feature = "c-backend", test))]
 mod gqlgen;
 
+#[cfg(any(feature = "c-backend", test))]
+mod graphql_link;
+
 #[cfg(not(feature = "c-backend"))]
 fn main() {
     eprintln!(
