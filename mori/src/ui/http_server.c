@@ -2419,6 +2419,19 @@ static void handle_xrepo_summary(cbm_http_conn_t *c) {
                      "{\"error\":\"cannot read the project cache\"}");
 }
 
+/* True when the query string gives `key` a non-empty value. */
+static bool xrepo_query_has(const char *query, const char *key) {
+    size_t n = strlen(key);
+    for (const char *p = query; p && *p;) {
+        if (strncmp(p, key, n) == 0 && p[n] == '=' && p[n + 1] != '&' && p[n + 1] != '\0')
+            return true;
+        p = strchr(p, '&');
+        if (p)
+            p++;
+    }
+    return false;
+}
+
 /* GET /api/xrepo/links?from=A&to=B&type=CROSS_X&limit=&offset= — the
  * individual links behind one summary arc, paged. */
 static void handle_xrepo_links(cbm_http_conn_t *c, const cbm_http_req_t *req) {
@@ -2427,8 +2440,15 @@ static void handle_xrepo_links(cbm_http_conn_t *c, const cbm_http_req_t *req) {
         cbm_http_replyf(c, 400, g_cors_json, "{\"error\":\"missing from parameter\"}");
         return;
     }
-    cbm_http_query_param(req->query, "to", to, (int)sizeof(to));
-    cbm_http_query_param(req->query, "type", type, (int)sizeof(type));
+    /* A given to/type that does not parse (too long, bad escape) is an
+     * error, not "any": widening would answer a question nobody asked. */
+    if ((xrepo_query_has(req->query, "to") &&
+         !cbm_http_query_param(req->query, "to", to, (int)sizeof(to))) ||
+        (xrepo_query_has(req->query, "type") &&
+         !cbm_http_query_param(req->query, "type", type, (int)sizeof(type)))) {
+        cbm_http_replyf(c, 400, g_cors_json, "{\"error\":\"invalid to or type\"}");
+        return;
+    }
     int limit = 0, offset = 0;
     if (cbm_http_query_param(req->query, "limit", num, (int)sizeof(num)))
         limit = atoi(num);

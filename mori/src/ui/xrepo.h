@@ -27,14 +27,18 @@
 
 /* GET /api/xrepo/summary: every project in cache_dir with node and edge
  * counts, and caller-side cross-repo links aggregated per (from, to, type).
- * NULL when cache_dir cannot be read or on allocation failure. */
+ * Project databases that fail to read are named in "skipped"; "truncated"
+ * is true when the cache holds more projects than one summary reads (the
+ * first ones by name are kept). NULL when cache_dir cannot be read or on
+ * allocation failure. */
 char *cbm_xrepo_summary_json(const char *cache_dir);
 
 /* GET /api/xrepo/links: the individual caller-side links stored in the
  * `from` project, optionally narrowed to one target project and one edge
  * type, ordered by type, target, file and line, and paged. NULL `to` or
  * `type` (or "") means any. *status receives the HTTP status: 200, 400 for
- * an invalid name or type, 404 when `from` has no index, 500 on failure. */
+ * an invalid name or type, 404 when `from` names no project index, 500 on
+ * failure. */
 char *cbm_xrepo_links_json(const char *cache_dir, const char *from, const char *to,
                            const char *type, int limit, int offset, int *status);
 

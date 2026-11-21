@@ -25,14 +25,24 @@
  * (project, type) index answers the range. */
 #define XREPO_TYPE_RANGE "e.type >= 'CROSS_' AND e.type < 'CROSS`'"
 
-/* The caller-side copy of a link. Route-style links (HTTP, async, gRPC,
- * GraphQL, tRPC) carry a "callers" object only on the provider's copy.
- * Channel links carry none; the emitter's copy is the one whose source
- * EMITS into the same channel node. */
+/* The caller-side copy of a link. The pass writes each link twice:
+ *
+ *   caller DB:   caller  -[CROSS_X]-> local Route    (counted)
+ *   provider DB: handler -[CROSS_X]-> served Route   (skipped)
+ *
+ * The provider copy's source HANDLES its target, and since 2026-11-18 it also
+ * carries a "callers" object; either marks it, so copies written before the
+ * object existed are still skipped. Channel links: the emitter's copy is the
+ * one whose source EMITS into the same channel node; the listener's copy
+ * (listener -> its Channel, LISTENS_ON) is skipped. A function that both
+ * emits and listens on one channel cannot be told apart this way, and its
+ * listener copy counts in the reverse direction too. */
 #define XREPO_CALLER_SIDE                                                              \
     "(CASE WHEN e.type = 'CROSS_CHANNEL' THEN EXISTS (SELECT 1 FROM edges x "         \
     "WHERE x.source_id = e.source_id AND x.target_id = e.target_id AND x.type = "     \
-    "'EMITS') ELSE json_type(e.properties, '$.callers') IS NULL END)"
+    "'EMITS') ELSE json_type(e.properties, '$.callers') IS NULL AND NOT EXISTS ("     \
+    "SELECT 1 FROM edges h WHERE h.source_id = e.source_id AND h.target_id = "        \
+    "e.target_id AND h.type = 'HANDLES') END)"
 
 #define XREPO_TARGET "coalesce(json_extract(e.properties, '$.target_project'), '')"
 
@@ -138,14 +148,17 @@ static bool read_project(xrepo_acc_t *acc, const char *cache_dir, const char *pr
     sqlite3_stmt *st = NULL;
     int64_t counts[3] = {0};
     /* Other stores share the cache directory (activity.db, for one); only a
-     * database with the index tables can hold a project. */
-    bool has_tables = false;
+     * database with the index tables can hold a project. A probe that fails
+     * (corrupt file, busy) reports the database as unreadable. */
+    bool has_tables = false, probed = false;
     if (ok && sqlite3_prepare_v2(db,
                                  "SELECT count(*) = 3 FROM sqlite_master WHERE type = 'table' "
                                  "AND name IN ('projects', 'nodes', 'edges')",
                                  -1, &st, NULL) == SQLITE_OK &&
-        sqlite3_step(st) == SQLITE_ROW)
+        sqlite3_step(st) == SQLITE_ROW) {
         has_tables = sqlite3_column_int(st, 0) != 0;
+        probed = true;
+    }
     sqlite3_finalize(st);
     st = NULL;
     ok = ok && has_tables &&
@@ -193,20 +206,31 @@ static bool read_project(xrepo_acc_t *acc, const char *cache_dir, const char *pr
     if (db)
         sqlite3_exec(db, "COMMIT", NULL, NULL, NULL);
     cbm_store_close(store);
-    return ok || (db && !has_tables);
+    return ok || (probed && !has_tables);
 }
 
-/* Project names (file stems) of the project indexes in cache_dir, sorted. */
-static int list_projects(const char *cache_dir, char (**out)[XREPO_NAME_MAX]) {
+static int name_order(const void *a, const void *b) {
+    return strcmp((const char *)a, (const char *)b);
+}
+
+/* Project names (file stems) of the project indexes in cache_dir: all of
+ * them are collected and sorted before the cap, so a cache above it keeps
+ * the same first XREPO_MAX_PROJECTS names whatever the directory order, and
+ * *truncated says that some were left out. */
+static int list_projects(const char *cache_dir, char (**out)[XREPO_NAME_MAX], bool *truncated) {
     *out = NULL;
+    *truncated = false;
     cbm_dir_t *d = cbm_opendir(cache_dir);
     if (!d)
         return -1;
     char (*names)[XREPO_NAME_MAX] = NULL;
     int count = 0, cap = 0, scanned = 0;
     cbm_dirent_t *ent;
-    while ((ent = cbm_readdir(d)) != NULL && ++scanned <= XREPO_MAX_ENTRIES &&
-           count < XREPO_MAX_PROJECTS) {
+    while ((ent = cbm_readdir(d)) != NULL) {
+        if (++scanned > XREPO_MAX_ENTRIES) {
+            *truncated = true;
+            break;
+        }
         if (!cbm_is_project_index_db(ent->name))
             continue;
         size_t stem = strlen(ent->name) - 3U; /* ".db" */
@@ -223,7 +247,12 @@ static int list_projects(const char *cache_dir, char (**out)[XREPO_NAME_MAX]) {
             count++;
     }
     cbm_closedir(d);
-    qsort(names, (size_t)count, sizeof(*names), (int (*)(const void *, const void *))strcmp);
+    if (names)
+        qsort(names, (size_t)count, sizeof(*names), name_order);
+    if (count > XREPO_MAX_PROJECTS) {
+        count = XREPO_MAX_PROJECTS;
+        *truncated = true;
+    }
     *out = names;
     return count;
 }
@@ -249,7 +278,8 @@ char *cbm_xrepo_summary_json(const char *cache_dir) {
     if (!cache_dir)
         return NULL;
     char (*names)[XREPO_NAME_MAX] = NULL;
-    int count = list_projects(cache_dir, &names);
+    bool truncated = false;
+    int count = list_projects(cache_dir, &names, &truncated);
     if (count < 0)
         return NULL;
     xrepo_acc_t acc = {0};
@@ -308,6 +338,7 @@ char *cbm_xrepo_summary_json(const char *cache_dir) {
     yyjson_mut_obj_add_val(doc, root, "types", types);
     yyjson_mut_obj_add_int(doc, root, "total_links", total);
     yyjson_mut_obj_add_val(doc, root, "skipped", skipped);
+    yyjson_mut_obj_add_bool(doc, root, "truncated", truncated);
     yyjson_mut_obj_add_str(doc, root, "scope",
                            "caller-side CROSS_* edges stored by the cross-repo pass");
     json = write_doc(doc);
@@ -350,10 +381,11 @@ char *cbm_xrepo_links_json(const char *cache_dir, const char *from, const char *
         limit = CBM_XREPO_LINKS_MAX_LIMIT;
     if (offset < 0)
         offset = 0;
-    char path[1024];
+    char path[1024], file[XREPO_NAME_MAX + 4];
     db_path_in(cache_dir, from, path, sizeof(path));
+    snprintf(file, sizeof(file), "%s.db", from);
     *status = 404;
-    if (!cbm_file_exists(path))
+    if (!cbm_is_project_index_db(file) || !cbm_file_exists(path))
         return NULL;
     *status = 500;
     cbm_store_t *store = cbm_store_open_path_query(path);
