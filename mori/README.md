@@ -121,10 +121,8 @@ attestations.
 | `darwin-arm64` | macOS on Apple silicon, macOS 14 or later |
 | `darwin-x64` | macOS on Intel, macOS 14 or later |
 
-An archive holds the executable, licenses, and notices. The published C
-release `mori/v0.13.1` packages `codebase-memory-mcp` for Linux x64 and
-arm64 and macOS arm64. Use that executable in place of `mori` when
-following the commands below on 0.13.1. The MCP key stays `mori-graph`.
+An archive holds the executable, licenses, and notices. Mori 0.14.0
+ships the `mori` executable and keeps the MCP key `mori-graph`.
 
 There are no Windows builds.
 
@@ -135,13 +133,13 @@ mise's `github:` backend picks the archive for your platform:
 ```toml
 # ~/.config/mise/config.toml
 [tools."github:Unique-Divine/jiyuu"]
-version = "0.13.1"
+version = "0.14.0"
 version_prefix = "mori/v"
 ```
 
 ```sh
 mise install
-codebase-memory-mcp --version  # codebase-memory-mcp 0.13.1
+mori --version  # mori 0.14.0
 ```
 
 For a published release with a `mori` archive, pin its version and run
@@ -152,8 +150,9 @@ installing. For a release with all four targets:
 mise lock --platform linux-arm64,linux-x64,macos-arm64,macos-x64
 ```
 
-To upgrade, bump `version`, relock, run `mise install`, then stop the
-background daemon so the next session starts the new binary:
+To upgrade, stop the background daemon with the current executable, then
+bump `version`, relock, and run `mise install`. The next session starts the
+daemon for the selected version:
 
 ```sh
 mori daemon stop
@@ -161,6 +160,18 @@ mori daemon stop
 
 Remove any hand-built binary earlier on `PATH` (for example in
 `~/.local/bin`), or it keeps shadowing the release.
+
+### Upgrade From C 0.13.1
+
+Install Mori 0.14.0 and stop the 0.13.1 daemon with the old executable
+and the environment it used. Keep the MCP key `mori-graph` and point its
+command and any `hook-augment` commands at the same `mori` shim. Open a new
+client session and check a graph query before retiring the old setup.
+
+To roll back, stop the Mori 0.14.0 daemon, restore the 0.13.1 mise pin and
+lock, and restore the previous MCP and hook command paths and cache
+settings. Release `mori/v0.13.1` ships `codebase-memory-mcp` for Linux x64
+and arm64 and macOS arm64.
 
 ### Download a Release
 
@@ -170,7 +181,7 @@ against `checksums.txt`, and put its executable on your `PATH`. For a
 release that packages `mori`, set `binary=mori` and use its published version.
 
 ```sh
-version=0.13.1 target=linux-x64 binary=codebase-memory-mcp
+version=0.14.0 target=linux-x64 binary=mori
 gh release download "mori/v$version" --repo Unique-Divine/jiyuu \
   --pattern "$binary-$version-$target.tar.gz" --pattern checksums.txt
 sha256sum --check --ignore-missing checksums.txt
