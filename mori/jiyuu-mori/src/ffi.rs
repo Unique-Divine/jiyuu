@@ -7,6 +7,7 @@ use std::{panic, ptr};
 
 use rusqlite::{Connection, ffi::sqlite3};
 
+use crate::graphql_link::{Action, plan_link};
 use crate::link::RoutePlan;
 use crate::stdio::c_transport;
 use crate::store::{FileOutlineQuery, Store};
@@ -81,6 +82,9 @@ unsafe extern "C" {
     fn cbm_gqlgen_set_rust_backend(
         matcher: extern "C" fn(glob: *const c_char, path: *const c_char) -> bool,
         planner: RoutePlanner,
+    );
+    fn cbm_cross_repo_set_graphql_link_policy(
+        policy: extern "C" fn(bool, bool, bool, bool, bool) -> Action,
     );
 
     fn cbm_gqlgen_visit_route_resolvers(
@@ -316,6 +320,7 @@ pub unsafe extern "C" fn main(argc: c_int, argv: *mut *mut c_char) -> c_int {
     unsafe {
         cbm_gqlgen_set_rust_backend(gqlgen_glob_match, plan_graphql_route);
         c_transport::register();
+        cbm_cross_repo_set_graphql_link_policy(plan_link);
     }
 
     // SAFETY: argc and argv come straight from the C runtime and meet the

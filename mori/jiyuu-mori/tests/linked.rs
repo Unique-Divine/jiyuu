@@ -57,19 +57,20 @@ fn run(bin: &Path, side: &str, args: &[&str]) -> Output {
     run_in(bin, &Scratch::new(side), None, args)
 }
 
-fn run_in(bin: &Path, scratch: &Scratch, graphql: Option<&str>, args: &[&str]) -> Output {
+fn run_in(
+    bin: &Path,
+    scratch: &Scratch,
+    graphql: Option<&str>,
+    args: &[&str],
+) -> Output {
     let mut command = command_in(bin, scratch);
-    command.args(args);
     if let Some(planner) = graphql {
         command.env("MORI_IMPL_GRAPHQL", planner);
     }
     if args.contains(&"index_repository") {
         command.env("CBM_PROFILE", "1");
     }
-    command
-        .args(args)
-        .output()
-        .expect("run binary")
+    command.args(args).output().expect("run binary")
 }
 
 fn command_in(bin: &Path, scratch: &Scratch) -> Command {
