@@ -1,6 +1,6 @@
 import { experimentalAgentsEnabled } from './feature-flags';
 
-export type Workspace = 'explore' | 'galaxy' | 'architecture' | 'adr' | 'agents' | 'coverage' | 'system';
+export type Workspace = 'explore' | 'galaxy' | 'repos' | 'architecture' | 'adr' | 'agents' | 'coverage' | 'system';
 export type Guidance = 'brief' | 'explained';
 
 export const workspaceStrings = {
@@ -8,6 +8,7 @@ export const workspaceStrings = {
     workspaces: [
         { id: 'explore' as const, label: 'Explore' },
         { id: 'galaxy' as const, label: 'Galaxy' },
+        { id: 'repos' as const, label: 'Repos' },
         { id: 'architecture' as const, label: 'Architecture' },
         { id: 'adr' as const, label: 'ADR' },
         { id: 'agents' as const, label: 'Agents' },
@@ -39,6 +40,7 @@ export const workspaceStrings = {
     descriptions: {
         explore: 'Read source with graph context.',
         galaxy: 'Explore the whole graph and its coverage shadow.',
+        repos: 'See how indexed repositories link to each other.',
         architecture: 'See modules, dependencies, and entry points.',
         adr: 'Read and edit the project’s architecture decisions.',
         agents: 'Inspect recorded activity and touched code.',

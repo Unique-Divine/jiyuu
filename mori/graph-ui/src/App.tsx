@@ -138,6 +138,7 @@ import { readerChatContext, type ReaderSourceOrigin } from './browser-ai/reader-
 import type { BrowserChatContext } from './browser-ai/chat-model';
 import { selectionEvidenceContext } from './galaxy/selection-evidence';
 import SystemWorkspace from './system/SystemWorkspace';
+import RepoGalaxyWorkspace from './xrepo/RepoGalaxyWorkspace';
 import type { Workspace, Guidance } from './app/workspace-strings';
 import { allowedWorkspace, initialWorkspace, workspaceStrings as workspaceText } from './app/workspace-strings';
 import { experimentalAgentsEnabled } from './app/feature-flags';
@@ -4874,6 +4875,9 @@ function ProjectWindowView({ projectWindow }: { projectWindow: ProjectWindow<Win
                 </div>}
                 <div className="atlas-adr-host" hidden={workspace !== 'adr'}>
                     <AdrWorkspace key={project} project={project} source={projectsSource} active={workspace === 'adr'} />
+                </div>
+                <div className="repo-galaxy-host" hidden={workspace !== 'repos'}>
+                    <RepoGalaxyWorkspace active={workspace === 'repos'} />
                 </div>
                 <div hidden={workspace !== 'system'}>
                     <SystemWorkspace api={api} listProjects={projectsSource.listProjects} project={project} active={workspace === 'system'} version={ATLAS_VERSION}

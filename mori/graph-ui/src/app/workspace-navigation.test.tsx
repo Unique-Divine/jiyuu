@@ -29,7 +29,7 @@ it('offers the Galaxy workspace and reports the selected task', async () => {
         workspace: 'explore', onWorkspaceChange,
     }} />));
     const tabs = [...host.querySelectorAll<HTMLButtonElement>('[data-workspace-tab]')];
-    expect(tabs.map(tab => tab.textContent?.trim())).toEqual(['Explore', 'Galaxy', 'Architecture', 'ADR', 'Coverage', 'System']);
+    expect(tabs.map(tab => tab.textContent?.trim())).toEqual(['Explore', 'Galaxy', 'Repos', 'Architecture', 'ADR', 'Coverage', 'System']);
     expect(tabs[0].getAttribute('aria-selected')).toBe('true');
     await act(async () => tabs[1].click());
     expect(onWorkspaceChange).toHaveBeenCalledWith('galaxy');
