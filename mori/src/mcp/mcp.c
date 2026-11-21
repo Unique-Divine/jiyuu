@@ -1504,27 +1504,52 @@ static const char MCP_SCOUT_SERVER_INSTRUCTIONS[] =
     "check_index_coverage tells whether a cited file was fully indexed. Findings are "
     "provisional.";
 
+typedef char *(*mcp_initialize_builder_fn)(const char *requested, const char *const *supported,
+                                           size_t count, const char *name, const char *version,
+                                           const char *instructions);
+static mcp_initialize_builder_fn mcp_initialize_builder;
+
+/* Register before the linked process starts the C daemon. The callback
+ * returns a buffer compatible with free, or NULL for the C fallback. */
+void cbm_mcp_set_initialize_builder(mcp_initialize_builder_fn builder);
+void cbm_mcp_set_initialize_builder(mcp_initialize_builder_fn builder) {
+    mcp_initialize_builder = builder;
+}
+
 static char *cbm_mcp_initialize_response_for_profile(const char *params_json,
                                                      cbm_mcp_tool_profile_t profile) {
-    /* Determine protocol version: if client requests a version we support,
-     * echo it back; otherwise respond with our latest. */
-    const char *version = SUPPORTED_PROTOCOL_VERSIONS[0]; /* default: latest */
-    if (params_json) {
-        yyjson_doc *pdoc = yyjson_read(params_json, strlen(params_json), 0);
-        if (pdoc) {
-            yyjson_val *pv = yyjson_obj_get(yyjson_doc_get_root(pdoc), "protocolVersion");
-            if (pv && yyjson_is_str(pv)) {
-                const char *requested = yyjson_get_str(pv);
-                for (int i = 0; i < SUPPORTED_VERSION_COUNT; i++) {
-                    if (strcmp(requested, SUPPORTED_PROTOCOL_VERSIONS[i]) == 0) {
-                        version = SUPPORTED_PROTOCOL_VERSIONS[i];
-                        break;
-                    }
-                }
-            }
+    const char *instructions = MCP_SERVER_INSTRUCTIONS;
+    if (profile == CBM_MCP_TOOL_PROFILE_ANALYSIS) {
+        instructions = MCP_ANALYSIS_SERVER_INSTRUCTIONS;
+    } else if (profile == CBM_MCP_TOOL_PROFILE_SCOUT) {
+        instructions = MCP_SCOUT_SERVER_INSTRUCTIONS;
+    }
+    const char *server_name = "mori-graph";
+    const char *server_version = cbm_cli_get_version();
+    yyjson_doc *pdoc = params_json ? yyjson_read(params_json, strlen(params_json), 0) : NULL;
+    yyjson_val *pv = pdoc ? yyjson_obj_get(yyjson_doc_get_root(pdoc), "protocolVersion") : NULL;
+    const char *requested = pv && yyjson_is_str(pv) ? yyjson_get_str(pv) : NULL;
+    if (mcp_initialize_builder) {
+        char *result = mcp_initialize_builder(requested, SUPPORTED_PROTOCOL_VERSIONS,
+                                              (size_t)SUPPORTED_VERSION_COUNT, server_name,
+                                              server_version, instructions);
+        if (result) {
             yyjson_doc_free(pdoc);
+            return result;
         }
     }
+
+    /* Echo a supported request, otherwise advertise the newest version. */
+    const char *version = SUPPORTED_PROTOCOL_VERSIONS[0]; /* default: latest */
+    if (requested) {
+        for (int i = 0; i < SUPPORTED_VERSION_COUNT; i++) {
+            if (strcmp(requested, SUPPORTED_PROTOCOL_VERSIONS[i]) == 0) {
+                version = SUPPORTED_PROTOCOL_VERSIONS[i];
+                break;
+            }
+        }
+    }
+    yyjson_doc_free(pdoc);
 
     yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
     yyjson_mut_val *root = yyjson_mut_obj(doc);
@@ -1533,8 +1558,8 @@ static char *cbm_mcp_initialize_response_for_profile(const char *params_json,
     yyjson_mut_obj_add_str(doc, root, "protocolVersion", version);
 
     yyjson_mut_val *impl = yyjson_mut_obj(doc);
-    yyjson_mut_obj_add_str(doc, impl, "name", "mori-graph");
-    yyjson_mut_obj_add_str(doc, impl, "version", cbm_cli_get_version());
+    yyjson_mut_obj_add_str(doc, impl, "name", server_name);
+    yyjson_mut_obj_add_str(doc, impl, "version", server_version);
     yyjson_mut_obj_add_val(doc, root, "serverInfo", impl);
 
     yyjson_mut_val *caps = yyjson_mut_obj(doc);
@@ -1545,12 +1570,6 @@ static char *cbm_mcp_initialize_response_for_profile(const char *params_json,
     yyjson_mut_obj_add_bool(doc, prompts_cap, "listChanged", false);
     yyjson_mut_obj_add_val(doc, caps, "prompts", prompts_cap);
     yyjson_mut_obj_add_val(doc, root, "capabilities", caps);
-    const char *instructions = MCP_SERVER_INSTRUCTIONS;
-    if (profile == CBM_MCP_TOOL_PROFILE_ANALYSIS) {
-        instructions = MCP_ANALYSIS_SERVER_INSTRUCTIONS;
-    } else if (profile == CBM_MCP_TOOL_PROFILE_SCOUT) {
-        instructions = MCP_SCOUT_SERVER_INSTRUCTIONS;
-    }
     yyjson_mut_obj_add_str(doc, root, "instructions", instructions);
 
     char *out = yy_doc_to_str(doc);

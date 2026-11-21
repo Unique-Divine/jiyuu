@@ -161,7 +161,12 @@ fn project_pages_use_internal_identity_and_preserve_projection() {
     ];
     let run_all = |bin: &Path| {
         let outputs = cases.map(|args| {
-            run_in(bin, &scratch, None, &["cli", "--quiet", "list_projects", args])
+            run_in(
+                bin,
+                &scratch,
+                None,
+                &["cli", "--quiet", "list_projects", args],
+            )
         });
         let stop = run_in(bin, &scratch, None, &["daemon", "stop"]);
         assert!(stop.status.success(), "{stop:?}");
@@ -200,6 +205,21 @@ fn unknown_tool_error_matches_c() {
     assert_same(&["cli", "no_such_tool"]);
 }
 
+fn run_stdio(bin: &Path, side: &str, args: &[&str], input: &str) -> String {
+    let scratch = Scratch::new(side);
+    let requests = scratch.0.join("requests");
+    fs::write(&requests, input).expect("write MCP requests");
+    let output = command_in(bin, &scratch)
+        .args(args)
+        .stdin(Stdio::from(
+            fs::File::open(requests).expect("open MCP requests"),
+        ))
+        .output()
+        .expect("run MCP server");
+    assert!(output.status.success(), "{side}: {output:?}");
+    String::from_utf8(output.stdout).expect("UTF-8 response")
+}
+
 #[test]
 fn stdio_mixed_framing_matches_c_after_input_eof() {
     let initialize = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"linked-test","version":"1"}}}"#;
@@ -210,21 +230,8 @@ fn stdio_mixed_framing_matches_c_after_input_eof() {
         "{initialize}\n{initialized}\nContent-Length: {}\r\n\r\n{call}",
         call.len()
     );
-    let run = |bin: &Path, side| {
-        let scratch = Scratch::new(side);
-        let requests = scratch.0.join("requests");
-        fs::write(&requests, &input).expect("write MCP requests");
-        let output = command_in(bin, &scratch)
-            .stdin(Stdio::from(
-                fs::File::open(requests).expect("open MCP requests"),
-            ))
-            .output()
-            .expect("run MCP server");
-        assert!(output.status.success(), "{side}: {output:?}");
-        String::from_utf8(output.stdout).expect("UTF-8 response")
-    };
-    let reference = run(&c_binary(), "c");
-    let linked = run(Path::new(MORI), "rs");
+    let reference = run_stdio(&c_binary(), "c", &[], &input);
+    let linked = run_stdio(Path::new(MORI), "rs", &[], &input);
     assert_eq!(linked, reference);
     let (initialize_response, framed) =
         linked.split_once('\n').expect("newline response");
@@ -234,6 +241,47 @@ fn stdio_mixed_framing_matches_c_after_input_eof() {
     assert_eq!(header, format!("Content-Length: {}", body.len()));
     assert!(body.contains("\"id\":2"));
     assert!(body.contains("projects: 0"));
+}
+
+#[test]
+fn initialize_negotiation_and_instructions_match_c() {
+    for (args, request, protocol, instruction) in [
+        (
+            &[][..],
+            r#""2024-11-05""#,
+            "2024-11-05",
+            "Mori is a code knowledge graph",
+        ),
+        (
+            &["--tool-profile=scout"][..],
+            r#""9999-01-01""#,
+            "2025-11-25",
+            "scout tool profile",
+        ),
+        (
+            &["--tool-profile=analysis"][..],
+            "null",
+            "2025-11-25",
+            "analysis tool profile",
+        ),
+    ] {
+        let input = format!(
+            "{{\"jsonrpc\":\"2.0\",\"id\":\"handshake\",\"method\":\"initialize\",\"params\":{{\"protocolVersion\":{request}}}}}\n"
+        );
+        let reference = run_stdio(&c_binary(), "c", args, &input);
+        let linked = run_stdio(Path::new(MORI), "rs", args, &input);
+        assert_eq!(linked, reference);
+        let value: serde_json::Value = serde_json::from_str(&linked).unwrap();
+        assert_eq!(value["id"], "handshake");
+        assert_eq!(value["result"]["protocolVersion"], protocol);
+        assert_eq!(value["result"]["serverInfo"]["name"], "mori-graph");
+        assert!(
+            value["result"]["instructions"]
+                .as_str()
+                .unwrap()
+                .starts_with(instruction)
+        );
+    }
 }
 
 #[test]
