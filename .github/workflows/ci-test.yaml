@@ -601,7 +601,7 @@ jobs:
         run: just --justfile mori/jiyuu-mori/justfile check
     needs: changes
   # jiyuu-mori with feature c-backend: links the whole C program and compares
-  # mori with the C reference binary. Shares the grammar archive cache with
+  # mori with the C reference binary (Rust tests, then the CLI parity check). Shares the grammar archive cache with
   # mori-c and falls back to its compiler cache.
   jiyuu-mori-linked:
     name: jiyuu-mori linked / ${{ matrix.arch }}
@@ -685,6 +685,11 @@ jobs:
       - name: Check linked
         if: needs.changes.outputs.mori_linked == 'true'
         run: just --justfile mori/jiyuu-mori/justfile check-linked
+      # The same CLI commands through mori and codebase-memory-mcp from the
+      # build above (mori/scripts/cli-parity.ts).
+      - name: CLI parity
+        if: needs.changes.outputs.mori_linked == 'true'
+        run: just --justfile mori/jiyuu-mori/justfile parity
       - name: Compiler cache statistics
         if: always() && needs.changes.outputs.mori_linked == 'true'
         run: ccache --show-stats || true
