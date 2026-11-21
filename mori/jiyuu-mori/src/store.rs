@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use rusqlite::types::ValueRef;
+use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ValueRef};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Row};
 
 pub(crate) type Cells = BTreeMap<String, Cell>;
@@ -44,6 +44,20 @@ fn decode_text(mut bytes: &[u8]) -> String {
     }
     result.push_str(&String::from_utf8_lossy(bytes));
     result
+}
+
+// Text in the published graph can originate in filesystem paths and source
+// bytes. Decode it for export while keeping SQL identifiers and CLI arguments
+// on their existing paths.
+struct GraphText(String);
+
+impl FromSql for GraphText {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        match value {
+            ValueRef::Text(bytes) => Ok(Self(decode_text(bytes))),
+            _ => Err(FromSqlError::InvalidType),
+        }
+    }
 }
 
 pub(crate) struct Node {
@@ -127,7 +141,7 @@ impl Store {
         self.0.query_row(
             "SELECT name, root_path FROM projects ORDER BY length(name), name LIMIT 1",
             [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get::<_, GraphText>(0)?.0, row.get::<_, GraphText>(1)?.0)),
         ).optional().map(Option::unwrap_or_default)
     }
 
@@ -135,10 +149,11 @@ impl Store {
         collect(&self.0, "SELECT * FROM nodes", |row| {
             Ok(Node {
                 id: row.get("id")?,
-                qualified_name: row.get("qualified_name")?,
-                label: row.get("label")?,
+                qualified_name: row.get::<_, GraphText>("qualified_name")?.0,
+                label: row.get::<_, GraphText>("label")?.0,
                 file_path: row
-                    .get::<_, Option<String>>("file_path")?
+                    .get::<_, Option<GraphText>>("file_path")?
+                    .map(|value| value.0)
                     .unwrap_or_default(),
                 properties: properties(
                     row,
@@ -155,7 +170,8 @@ impl Store {
             .any(|column| column.name == "local_name_gen");
         collect(&self.0, "SELECT * FROM edges", |row| {
             let local_name = if has_local_name {
-                row.get::<_, Option<String>>("local_name_gen")?
+                row.get::<_, Option<GraphText>>("local_name_gen")?
+                    .map(|value| value.0)
                     .unwrap_or_default()
             } else {
                 String::new()
@@ -163,7 +179,7 @@ impl Store {
             Ok(Edge {
                 source_id: row.get("source_id")?,
                 target_id: row.get("target_id")?,
-                kind: row.get("type")?,
+                kind: row.get::<_, GraphText>("type")?.0,
                 local_name,
                 properties: properties(
                     row,
@@ -222,7 +238,7 @@ impl Store {
         collect(
             &self.0,
             "SELECT term, doc, cnt FROM temp.mori_export_vocab ORDER BY term",
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get::<_, GraphText>(0)?.0, row.get(1)?, row.get(2)?)),
         )
     }
 }
