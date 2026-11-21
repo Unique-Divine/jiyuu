@@ -43,7 +43,7 @@ function fakeBinary(
     version?: string
     extra?: string
     exitCode?: number
-    noSchema?: boolean
+    endBeforeResponse?: 1 | 6
   } = {},
 ): string {
   const code = opts.exitCode ?? 0
@@ -52,13 +52,14 @@ if [ "$1" = --version ]; then echo "${name} ${opts.version ?? "0.13.0"}"; exit $
 project=$(pwd | sed 's#^/##; s#/#-#g')
 if [ "$#" -eq 0 ]; then
   while IFS= read -r line; do
+    ${opts.endBeforeResponse === undefined ? "" : `case "$line" in *'"id":${opts.endBeforeResponse}'*) exit ${code} ;; esac`}
     case "$line" in
       *'"id":1'*) echo '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","serverInfo":{"name":"${name}","version":"0.13.0"}}}' ;;
       *'"id":2'*) echo '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"index_repository"},{"name":"search_graph"},{"name":"trace_path"}]}}' ;;
       *'"id":3'*) printf '{"jsonrpc":"2.0","id":3,"result":{"projects":["%s"]}}\n' "$project" ;;
       *'"id":4'*) printf '{"jsonrpc":"2.0","id":4,"result":{"name":"helper","qn_prefix":"%s.py.util"}}\n' "$project" ;;
       *'"id":5'*) echo '{"jsonrpc":"2.0","id":5,"result":{"rows":["Twice Add","run helper","greet formatName"]}}' ;;
-      *'"id":6'*) ${opts.noSchema ? `exit ${code}` : `echo '{"jsonrpc":"2.0","id":6,"result":{"nodes":["Function"],"edges":["CALLS"]}}'`} ;;
+      *'"id":6'*) echo '{"jsonrpc":"2.0","id":6,"result":{"nodes":["Function"],"edges":["CALLS"]}}' ;;
     esac
   done
   exit ${code}
@@ -234,15 +235,20 @@ describe("runParity with stand-in binaries", () => {
     })
   })
 
-  test("matching streams with a missing tool result fail", async () => {
-    await withDir(async (dir) => {
-      const results = await runParity(await setup(dir, { noSchema: true }))
-      const failed = results.filter((r) => !passed(r))
-      expect(failed).toHaveLength(1)
-      expect(failed[0]!.failures).toEqual([
-        "c: tools/call id=6: EOF before response",
-        "rs: tools/call id=6: EOF before response",
-      ])
-    })
-  })
+  test.each([[1, "initialize"], [6, "tools/call"]] as const)(
+    "matching streams missing response %i fail with request diagnostics",
+    async (id, method) => {
+      await withDir(async (dir) => {
+        const results = await runParity(
+          await setup(dir, { endBeforeResponse: id }),
+        )
+        const failed = results.filter((r) => !passed(r))
+        expect(failed).toHaveLength(1)
+        expect(failed[0]!.failures).toEqual([
+          `c: ${method} id=${id}: EOF before response`,
+          `rs: ${method} id=${id}: EOF before response`,
+        ])
+      })
+    },
+  )
 })

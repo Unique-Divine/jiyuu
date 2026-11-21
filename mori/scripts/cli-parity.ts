@@ -424,17 +424,25 @@ async function runMcp(
     }
   }
   try {
-    for (const req of inv.mcp ?? []) {
+    requests: for (const req of inv.mcp ?? []) {
       const { expect, ...request } = req
       const msg = { jsonrpc: "2.0", ...request }
-      proc.stdin.write(JSON.stringify(msg) + "\n")
-      await proc.stdin.flush()
+      const invocation = req.id === undefined
+        ? req.method
+        : `${req.method} id=${req.id}`
+      try {
+        proc.stdin.write(JSON.stringify(msg) + "\n")
+        await proc.stdin.flush()
+      } catch (error) {
+        failures.push(`${invocation}: could not write request: ${String(error)}`)
+        break
+      }
       if (req.id === undefined) continue
       for (;;) {
         const line = await nextLine()
         if (line === undefined) {
-          failures.push(`${req.method} id=${req.id}: EOF before response`)
-          break
+          failures.push(`${invocation}: EOF before response`)
+          break requests
         }
         if (!line.trim()) continue
         const parsed = JSON.parse(line) as {
@@ -443,13 +451,12 @@ async function runMcp(
           result?: { isError?: boolean; serverInfo?: { name: string } }
         }
         if (parsed.id === req.id) {
-          const failure = `${req.method} id=${req.id}`
           if (
             parsed.error !== undefined ||
             !parsed.result ||
             parsed.result.isError
           ) {
-            failures.push(`${failure} returned an error`)
+            failures.push(`${invocation} returned an error`)
             responses.push(line)
             break
           }
@@ -483,7 +490,7 @@ async function runMcp(
           )
           for (const needle of expect ?? []) {
             if (!serialized.includes(needle)) {
-              failures.push(`${failure} lacks ${JSON.stringify(needle)}`)
+              failures.push(`${invocation} lacks ${JSON.stringify(needle)}`)
             }
           }
           responses.push(serialized)
@@ -492,7 +499,12 @@ async function runMcp(
       }
     }
   } finally {
-    await proc.stdin.end()
+    try {
+      await proc.stdin.end()
+    } catch (error) {
+      // Keep the request diagnostic when the peer closes before its reply.
+      if (failures.length === 0) throw error
+    }
   }
   const exitCode = await proc.exited
   return {
