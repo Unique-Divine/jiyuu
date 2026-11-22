@@ -432,6 +432,16 @@ fn linear_query_reference_keeps_order_and_duplicate_projections() {
             json!([["caller.other", "first"], ["caller.kept", "target"]]),
         ),
         (
+            "MATCH (a:Caller)-[r:CALLS]->(b:Service) RETURN a.qualified_name, r.tag LIMIT 4",
+            json!(["a.qualified_name", "r.tag"]),
+            json!([
+                ["caller.other", "first"],
+                ["caller.kept", "target"],
+                ["caller.kept", "peer"],
+                ["caller.last", "last"]
+            ]),
+        ),
+        (
             "MATCH (a:Caller)-[:CALLS]->(b:Service) RETURN b.name LIMIT 0",
             json!(["b.name"]),
             json!([]),
@@ -572,6 +582,8 @@ fn unsupported_syntax_and_supported_storage_errors_are_distinct() {
         "MATCH (a)-[:CALLS]->(b) RETURN b.name ORDER BY b.name",
         "MATCH (a)-[:CALLS*1..2]->(b) RETURN b.name",
         "MATCH (a)-[:CALLS]-(b) RETURN b.name",
+        "MATCH (a)-[:CALLS]- >(b) RETURN b.name",
+        "MATCH (count)-[:CALLS]->(b) RETURN b.name",
         "MATCH (a)-[:CALLS]->(b) WHERE a.name = 'x' OR b.name = 'y' RETURN b.name",
         "MATCH (a)-[:CALLS]->(b) RETURN count(b)",
         "MATCH (a)-[:CALLS]->(b) RETURN typo.name",

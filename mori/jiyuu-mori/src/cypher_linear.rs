@@ -18,6 +18,8 @@ enum Token<'a> {
     Literal(&'a str),
     Number(&'a str),
     Symbol(u8),
+    ArrowIn,
+    ArrowOut,
 }
 
 fn tokens(mut query: &str) -> Result<Vec<Token<'_>>, Unsupported> {
@@ -47,11 +49,15 @@ fn tokens(mut query: &str) -> Result<Vec<Token<'_>>, Unsupported> {
                     .ok_or(Unsupported)?
                     + 1;
                 let value = &query[1..length];
-                if value.bytes().any(|c| c == b'\\' || c.is_ascii_control()) {
+                if value.len() >= 4096
+                    || value.bytes().any(|c| c == b'\\' || c.is_ascii_control())
+                {
                     return Err(Unsupported);
                 }
                 (Token::Literal(value), length + 1)
             }
+            b'<' if query.starts_with("<-") => (Token::ArrowIn, 2),
+            b'-' if query.starts_with("->") => (Token::ArrowOut, 2),
             b'(' | b')' | b'[' | b']' | b'{' | b'}' | b':' | b'-' | b'<'
             | b'>' | b'.' | b'=' | b',' => (Token::Symbol(first), 1),
             _ => return Err(Unsupported),
@@ -173,15 +179,18 @@ impl<'a> Parser<'a> {
         index: usize,
         inbound: bool,
     ) -> Result<Hop<'a>, Unsupported> {
-        self.symbol(b'-')?;
+        if !inbound {
+            self.symbol(b'-')?;
+        }
         self.symbol(b'[')?;
         self.alias(Binding::Edge(index))?;
         self.symbol(b':')?;
         let kind = self.name()?;
         self.symbol(b']')?;
-        self.symbol(b'-')?;
-        if !inbound {
-            self.symbol(b'>')?;
+        if inbound {
+            self.symbol(b'-')?;
+        } else if self.tokens.next() != Some(Token::ArrowOut) {
+            return Err(Unsupported);
         }
         Ok(Hop { kind, inbound })
     }
@@ -194,7 +203,7 @@ impl<'a> Parser<'a> {
 
 fn valid_name(name: &str) -> bool {
     // Skip reserved lexer keywords and native's generated anonymous aliases.
-    const RESERVED: &str = "MATCH OPTIONAL WHERE RETURN LIMIT AND OR XOR NOT AS IN IS NULL TRUE FALSE CONTAINS STARTS ENDS WITH ORDER BY DESC ASC SKIP DISTINCT UNWIND UNION ALL CASE WHEN THEN ELSE END EXISTS CREATE DELETE REMOVE SET MERGE CALL YIELD";
+    const RESERVED: &str = "MATCH OPTIONAL WHERE RETURN LIMIT AND OR XOR NOT AS IN IS NULL TRUE FALSE CONTAINS STARTS ENDS WITH ORDER BY DESC ASC SKIP DISTINCT UNWIND UNION ALL CASE WHEN THEN ELSE END EXISTS CREATE DELETE REMOVE SET MERGE CALL YIELD COUNT SUM AVG MIN MAX COLLECT TOLOWER TOUPPER TOSTRING DETACH MANDATORY FOREACH ON ADD CONSTRAINT DO DROP FOR FROM GRAPH OF REQUIRE SCALAR UNIQUE";
     name.len() < 64
         && !name.starts_with('_')
         && !RESERVED
@@ -222,9 +231,12 @@ pub(crate) fn classify(source: &str) -> Result<Query<'_>, Unsupported> {
     let mut nodes = vec![parser.node(0)?];
     let mut hops = Vec::new();
     while hops.len() < 2
-        && matches!(parser.tokens.peek(), Some(Token::Symbol(b'-' | b'<')))
+        && matches!(
+            parser.tokens.peek(),
+            Some(Token::Symbol(b'-') | Token::ArrowIn)
+        )
     {
-        let inbound = parser.consume(b'<');
+        let inbound = parser.tokens.next_if_eq(&Token::ArrowIn).is_some();
         hops.push(parser.hop(hops.len(), inbound)?);
         nodes.push(parser.node(nodes.len())?);
     }
@@ -352,7 +364,11 @@ impl Node {
         if !value.is_empty() {
             return Ok(value.to_owned());
         }
-        property(&self.properties, name)
+        if self.properties.starts_with('{') {
+            property(&self.properties, name)
+        } else {
+            Ok(String::new())
+        }
     }
 
     fn matches(&self, filters: &[Filter<'_>]) -> rusqlite::Result<bool> {
