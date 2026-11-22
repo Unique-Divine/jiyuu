@@ -1,4 +1,7 @@
 //! Prototype provider-triggered link repair against published fixture graphs.
+//! The fixture supplies publication events explicitly and runs an in-memory
+//! queue. Production dispatch, quiescence, and restart recovery need their
+//! own integration tests.
 #![cfg(all(feature = "c-backend", unix))]
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -26,6 +29,10 @@ struct Repairs {
     clients: BTreeSet<String>,
 }
 
+fn named_targets(targets: &[String]) -> bool {
+    !targets.is_empty() && targets.iter().all(|target| target != "*")
+}
+
 impl Repairs {
     fn notify(
         &mut self,
@@ -38,7 +45,8 @@ impl Repairs {
                 .into_iter()
                 .filter(|(client, targets)| {
                     client != provider
-                        && (targets == &["*"] || targets.contains(provider))
+                        && named_targets(targets)
+                        && targets.contains(provider)
                 })
                 .map(|(client, _)| client),
         );
@@ -50,7 +58,9 @@ impl Repairs {
         mut link: impl FnMut(&str, &[String]) -> bool,
     ) {
         self.clients.retain(|client| {
-            saved_targets(client).is_none_or(|targets| !link(client, &targets))
+            saved_targets(client).is_none_or(|targets| {
+                named_targets(&targets) && !link(client, &targets)
+            })
         });
     }
 }
@@ -181,19 +191,6 @@ impl Fixture {
         reply["cross_repo"].clone()
     }
 
-    fn has_graph(&self, project: &str) -> bool {
-        let Ok(db) = Connection::open_with_flags(
-            self.db_path(project),
-            OpenFlags::SQLITE_OPEN_READ_ONLY,
-        ) else {
-            return false;
-        };
-        db.query_row("SELECT 1 FROM projects WHERE name = ?", [project], |_| {
-            Ok(())
-        })
-        .is_ok()
-    }
-
     fn db(&self, project: &str) -> Connection {
         Connection::open_with_flags(
             self.db_path(project),
@@ -317,6 +314,9 @@ fn published_provider_repair_preserves_other_links_without_client_sources() {
     );
     let initial_callers = fixture.callers(FIRST, "schema.graphqls");
     let secondary_callers = fixture.callers(SECOND, "schema.graphqls");
+    let reciprocal_forward =
+        BTreeMap::from([(CLIENT.to_owned(), "schema.graphqls".to_owned())]);
+    assert_eq!(fixture.forward_targets(FIRST), reciprocal_forward);
     let reciprocal_callers = fixture.callers(CLIENT, "schema.graphqls");
     let unrelated_edges = fixture.cross_edges(UNRELATED);
     assert_eq!(initial_callers.len(), 1, "{initial_callers:?}");
@@ -346,6 +346,11 @@ fn published_provider_repair_preserves_other_links_without_client_sources() {
     assert_eq!(repairs.clients, BTreeSet::from([CLIENT.to_owned()]));
     assert_eq!(fixture.cross_status(CLIENT)["status"], "stale");
     assert_eq!(fixture.forward_targets(CLIENT), initial_forward);
+    assert_eq!(fixture.forward_targets(FIRST), reciprocal_forward);
+    assert_eq!(
+        fixture.callers(CLIENT, "schema.graphqls"),
+        reciprocal_callers
+    );
 
     // Keep the repo path admissible for the CLI, but make all original
     // client files unavailable until the repair has finished.
@@ -359,31 +364,51 @@ fn published_provider_repair_preserves_other_links_without_client_sources() {
     let second_graph = fixture.db_path(SECOND);
     let saved_graph = fixture.0.join("secondary-offline");
     fs::rename(&second_graph, &saved_graph).unwrap();
-    let mut attempts = Vec::new();
-    let mut link = |client: &str, targets: &[String]| {
-        if targets
-            .iter()
-            .any(|target| target != "*" && !fixture.has_graph(target))
-        {
-            return false;
-        }
-        attempts.push((client.to_owned(), targets.to_vec()));
-        fixture.link(client, targets).is_ok_and(|reply| {
-            reply["status"] == "success"
-                && reply["skipped_projects"].is_null()
-                && fixture.cross_status(client)["reverse_pending"] != true
-        })
+    let run = |repairs: &mut Repairs| {
+        let mut attempts = Vec::new();
+        repairs.run(
+            |client| fixture.saved_targets(client),
+            |client, targets| {
+                let result = fixture.link(client, targets);
+                let complete = result.as_ref().is_ok_and(|reply| {
+                    reply["status"] == "success"
+                        && reply["skipped_projects"].is_null()
+                        && fixture.cross_status(client)["reverse_pending"]
+                            != true
+                });
+                attempts.push((client.to_owned(), targets.to_vec(), result));
+                complete
+            },
+        );
+        attempts
     };
-    repairs.run(|client| fixture.saved_targets(client), &mut link);
+    let missing = run(&mut repairs);
+    let expected_targets = names(&[FIRST, SECOND]);
+    let [(client, targets, Err(error))] = missing.as_slice() else {
+        panic!("expected one native link failure: {missing:?}");
+    };
+    assert_eq!(client, CLIENT);
+    assert_eq!(targets, &expected_targets);
+    assert!(error.contains("cross-repo source or target project is missing, invalid, or not indexed"), "{error}");
     assert_eq!(repairs.clients, BTreeSet::from([CLIENT.to_owned()]));
     assert_eq!(fixture.cross_status(CLIENT)["status"], "stale");
     assert_eq!(fixture.forward_targets(CLIENT), initial_forward);
+    assert_eq!(
+        fixture.saved_targets(CLIENT),
+        Some(expected_targets.clone())
+    );
 
     fs::rename(saved_graph, second_graph).unwrap();
-    repairs.run(|client| fixture.saved_targets(client), &mut link);
+    let retried = run(&mut repairs);
+    let [(client, targets, Ok(reply))] = retried.as_slice() else {
+        panic!("expected one successful native retry: {retried:?}");
+    };
+    assert_eq!(client, CLIENT);
+    assert_eq!(targets, &expected_targets);
+    assert_eq!(reply["status"], "success");
     assert!(repairs.clients.is_empty(), "{:?}", repairs.clients);
-    assert_eq!(attempts, [(CLIENT.to_owned(), names(&[FIRST, SECOND]))]);
-    assert_eq!(fixture.saved_targets(CLIENT), Some(names(&[FIRST, SECOND])));
+    assert_eq!(fixture.cross_status(CLIENT)["status"], "ran");
+    assert_eq!(fixture.saved_targets(CLIENT), Some(expected_targets));
     assert_eq!(fixture.publication_id(CLIENT), client_id);
     assert_eq!(fixture.publication_id(FIRST), provider_id);
     assert_eq!(
@@ -395,6 +420,7 @@ fn published_provider_repair_preserves_other_links_without_client_sources() {
     );
     assert!(fixture.callers(FIRST, "schema.graphqls").is_empty());
     assert_eq!(fixture.callers(FIRST, "moved.graphqls"), initial_callers);
+    assert_eq!(fixture.forward_targets(FIRST), reciprocal_forward);
     assert_eq!(
         fixture.callers(SECOND, "schema.graphqls"),
         secondary_callers
@@ -408,12 +434,14 @@ fn published_provider_repair_preserves_other_links_without_client_sources() {
 }
 
 #[test]
-fn pending_client_rereads_saved_targets_and_jobs_run_in_name_order() {
+fn pending_named_clients_reread_saved_targets_and_run_in_name_order() {
     let mut repairs = Repairs::default();
     let saved = [
         ("z-client".to_owned(), names(&["old", "provider"])),
-        ("a-client".to_owned(), names(&["*"])),
-        ("provider".to_owned(), names(&["*"])),
+        ("a-client".to_owned(), names(&["provider"])),
+        ("wildcard".to_owned(), names(&["*"])),
+        ("switches-to-wildcard".to_owned(), names(&["provider"])),
+        ("provider".to_owned(), names(&["provider"])),
     ];
     repairs.notify(
         &SourcePublication {
@@ -421,13 +449,22 @@ fn pending_client_rereads_saved_targets_and_jobs_run_in_name_order() {
         },
         saved,
     );
+    assert_eq!(
+        repairs.clients,
+        BTreeSet::from_iter(names(&[
+            "a-client",
+            "switches-to-wildcard",
+            "z-client"
+        ]))
+    );
     let mut actual = Vec::new();
     repairs.run(
         |client| {
-            Some(if client == "z-client" {
-                names(&["provider", "new"])
-            } else {
-                names(&["*"])
+            Some(match client {
+                "a-client" => names(&["provider"]),
+                "z-client" => names(&["provider", "new"]),
+                "switches-to-wildcard" => names(&["*"]),
+                _ => panic!("unexpected pending job: {client}"),
             })
         },
         |client, targets| {
@@ -438,7 +475,7 @@ fn pending_client_rereads_saved_targets_and_jobs_run_in_name_order() {
     assert_eq!(
         actual,
         [
-            ("a-client".to_owned(), names(&["*"])),
+            ("a-client".to_owned(), names(&["provider"])),
             ("z-client".to_owned(), names(&["provider", "new"])),
         ]
     );
