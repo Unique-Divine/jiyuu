@@ -82,7 +82,7 @@ bool cbm_watcher_watch(cbm_watcher_t *w, const char *project_name, const char *r
  * the checkout disappears. Clearing named ownership leaves the watch active
  * for any sessions still subscribed to it. */
 bool cbm_watcher_watch_named(cbm_watcher_t *w, const char *project_name, const char *root_path);
-void cbm_watcher_clear_named(cbm_watcher_t *w, const char *project_name);
+bool cbm_watcher_set_named(cbm_watcher_t *w, const char *project_name, bool named);
 
 /* Remove a project from the watch list. Any not-yet-admitted callback in the
  * current poll snapshot is invalidated before this function returns. */

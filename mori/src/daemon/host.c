@@ -25,6 +25,7 @@
 #include "ui/embedded_assets.h"
 #include "ui/http_server.h"
 #include "watcher/watcher.h"
+#include "yyjson/yyjson.h"
 
 #include <stdbool.h>
 #include <stdatomic.h>
@@ -52,6 +53,8 @@ enum {
     HOST_HTTP_RETRY_INITIAL_MS = 1000,
     HOST_HTTP_RETRY_MAX_MS = 30000,
     HOST_WATCH_INTERVAL_MS = 5000,
+    HOST_NAMED_WATCH_CONFIG_POLL_MS = 1000,
+    HOST_NAMED_WATCH_CONFIG_CAP = 64 * 1024,
     /* Age-based temp cleaners need days of inactivity (macOS tmp_cleaner: 3);
      * a minute bounds the blind window after a long sleep (#2178). */
     HOST_COORDINATION_TOUCH_MS = 60000,
@@ -93,6 +96,12 @@ struct host_state {
     cbm_thread_t watcher_thread;
     cbm_thread_t http_thread;
     bool watcher_started;
+    char named_watch_path[HOST_PATH_CAP];
+    uint64_t named_watch_next_load_ms;
+    int64_t named_watch_size;
+    int64_t named_watch_mtime_ns;
+    bool named_watch_seen;
+    bool named_watch_unavailable;
     bool http_started;
     bool http_retiring;
     bool http_config_loaded;
@@ -112,6 +121,7 @@ static cbm_mutex_t g_host_log_mutex;
 static bool g_host_log_mutex_initialized = false;
 
 static _Noreturn void host_force_terminate(const char *component);
+static uint64_t host_deadline_from(uint64_t now_ms, uint32_t delay_ms);
 
 static void host_log_sink(const char *line) {
     cbm_ui_log_append(line);
@@ -314,6 +324,76 @@ static int host_watcher_index(const char *project_name, const char *root_path, v
     return host && host->application
                ? cbm_daemon_application_watcher_index(project_name, root_path, host->application)
                : -1;
+}
+
+static bool host_named_watch_apply(host_state_t *host, const char *text, size_t length) {
+    yyjson_doc *doc = yyjson_read(text, length, 0);
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    size_t count = yyjson_arr_size(root);
+    bool accepted = yyjson_is_arr(root) && count <= CBM_DAEMON_NAMED_WATCH_LIMIT;
+    cbm_daemon_named_watch_t entries[CBM_DAEMON_NAMED_WATCH_LIMIT];
+    for (size_t i = 0; accepted && i < count; i++) {
+        yyjson_val *item = yyjson_arr_get(root, i);
+        yyjson_val *project = yyjson_obj_get(item, "project");
+        yyjson_val *path = yyjson_obj_get(item, "root");
+        entries[i].project = yyjson_get_str(project);
+        entries[i].root = yyjson_get_str(path);
+        accepted = yyjson_obj_size(item) == 2 && entries[i].project && entries[i].root &&
+                   strlen(entries[i].project) == yyjson_get_len(project) &&
+                   strlen(entries[i].root) == yyjson_get_len(path);
+    }
+    if (accepted) {
+        accepted =
+            cbm_daemon_application_reconcile_named_watches(host->application, entries, count);
+    }
+    yyjson_doc_free(doc);
+    return accepted;
+}
+
+static void host_named_watch_reload_at(host_state_t *host, uint64_t now_ms) {
+    if (!host->named_watch_path[0] || now_ms < host->named_watch_next_load_ms) {
+        return;
+    }
+    host->named_watch_next_load_ms = host_deadline_from(now_ms, HOST_NAMED_WATCH_CONFIG_POLL_MS);
+    cbm_path_info_t info;
+    if (cbm_path_info_utf8(host->named_watch_path, &info) != CBM_PATH_INFO_OK || !info.is_regular ||
+        info.size < 0 || info.size >= HOST_NAMED_WATCH_CONFIG_CAP) {
+        if (!host->named_watch_unavailable) {
+            cbm_log_warn("daemon.named_watch.file_unavailable", "path", host->named_watch_path);
+            host->named_watch_unavailable = true;
+        }
+        return;
+    }
+    if (!host->named_watch_unavailable && host->named_watch_seen &&
+        info.size == host->named_watch_size && info.mtime_ns == host->named_watch_mtime_ns) {
+        return;
+    }
+    FILE *input = cbm_fopen(host->named_watch_path, "rb");
+    if (!input) {
+        if (!host->named_watch_unavailable) {
+            cbm_log_warn("daemon.named_watch.file_unavailable", "path", host->named_watch_path);
+            host->named_watch_unavailable = true;
+        }
+        return;
+    }
+    char text[HOST_NAMED_WATCH_CONFIG_CAP];
+    size_t length = fread(text, 1, sizeof(text), input);
+    bool stable = !ferror(input) && (int64_t)length == info.size;
+    fclose(input);
+    cbm_path_info_t after;
+    if (!stable || cbm_path_info_utf8(host->named_watch_path, &after) != CBM_PATH_INFO_OK ||
+        !after.is_regular || after.size != info.size || after.mtime_ns != info.mtime_ns) {
+        return;
+    }
+    host->named_watch_unavailable = false;
+    host->named_watch_seen = true;
+    host->named_watch_size = info.size;
+    host->named_watch_mtime_ns = info.mtime_ns;
+    if (host_named_watch_apply(host, text, length)) {
+        cbm_log_info("daemon.named_watch.applied", "path", host->named_watch_path);
+    } else {
+        cbm_log_warn("daemon.named_watch.invalid_snapshot", "path", host->named_watch_path);
+    }
 }
 
 static int host_ui_index(void *opaque, const char *root_path, const char *project_name) {
@@ -633,6 +713,16 @@ static bool host_state_prepare(host_state_t *host, const cbm_daemon_ipc_endpoint
     host->application = cbm_daemon_application_new(&application_config);
     if (host->application && host->permanent) {
         cbm_daemon_application_set_permanent(host->application, true);
+        const char *path = cbm_safe_getenv("MORI_NAMED_WATCH_FILE", host->named_watch_path,
+                                           sizeof(host->named_watch_path), NULL);
+        if (path && path[0]) {
+            (void)cbm_daemon_application_reconcile_named_watches(host->application, NULL, 0);
+            if (!cbm_hook_path_is_abs(path)) {
+                cbm_log_warn("daemon.named_watch.file_unavailable", "reason",
+                             "absolute_path_required");
+                host->named_watch_path[0] = '\0';
+            }
+        }
     }
     if (!host->project_locks || !host->application) {
         return false;
@@ -868,6 +958,7 @@ static bool host_background_start(host_state_t *host) {
     /* No watcher object when watcher_enabled=false (#335) — nothing to run, and
      * the daemon must still come up with its remaining subsystems. */
     if (host->watcher) {
+        host_named_watch_reload_at(host, cbm_now_ms());
         if (cbm_thread_create(&host->watcher_thread, 0, host_watcher_thread, host->watcher) != 0) {
             return false;
         }
@@ -983,7 +1074,9 @@ static bool host_wait_for_lifetime(cbm_daemon_runtime_service_t *service,
                 }
             }
         }
-        host_http_reconcile_at(host, cbm_now_ms(), false);
+        uint64_t now_ms = cbm_now_ms();
+        host_http_reconcile_at(host, now_ms, false);
+        host_named_watch_reload_at(host, now_ms);
         /* Retire an ephemeral generation that lingered for cold-storm cohort
          * participants once they drain, or once its bounded linger elapses.
          * A no-op unless a cohort-participant hook armed a linger. */
