@@ -73,6 +73,12 @@ enum {
 typedef struct host_state host_state_t;
 
 typedef struct {
+    yyjson_doc *document;
+    size_t count;
+    cbm_daemon_named_watch_t entries[CBM_DAEMON_NAMED_WATCH_LIMIT];
+} host_named_watch_snapshot_t;
+
+typedef struct {
     void *context;
     void (*config_load)(void *context, cbm_ui_config_t *config_out);
     cbm_http_server_t *(*server_new)(void *context, int port);
@@ -98,10 +104,13 @@ struct host_state {
     bool watcher_started;
     char named_watch_path[HOST_PATH_CAP];
     uint64_t named_watch_next_load_ms;
-    int64_t named_watch_size;
-    int64_t named_watch_mtime_ns;
-    bool named_watch_seen;
+    char named_watch_digest[CBM_SHA256_HEX_LEN + 1];
+    host_named_watch_snapshot_t *named_watch_candidate;
+    host_named_watch_snapshot_t *named_watch_accepted;
     bool named_watch_unavailable;
+    bool named_watch_apply_warned;
+    bool named_watch_pending;
+    bool named_watch_suspended;
     bool http_started;
     bool http_retiring;
     bool http_config_loaded;
@@ -326,54 +335,66 @@ static int host_watcher_index(const char *project_name, const char *root_path, v
                : -1;
 }
 
-static bool host_named_watch_apply(host_state_t *host, const char *text, size_t length) {
+static void host_named_watch_free(host_named_watch_snapshot_t *snapshot) {
+    if (snapshot) {
+        yyjson_doc_free(snapshot->document);
+        free(snapshot);
+    }
+}
+
+static host_named_watch_snapshot_t *host_named_watch_parse(const char *text, size_t length) {
     yyjson_doc *doc = yyjson_read(text, length, 0);
     yyjson_val *root = yyjson_doc_get_root(doc);
     size_t count = yyjson_arr_size(root);
-    bool accepted = yyjson_is_arr(root) && count <= CBM_DAEMON_NAMED_WATCH_LIMIT;
-    cbm_daemon_named_watch_t entries[CBM_DAEMON_NAMED_WATCH_LIMIT];
-    for (size_t i = 0; accepted && i < count; i++) {
+    if (!yyjson_is_arr(root) || count > CBM_DAEMON_NAMED_WATCH_LIMIT) {
+        yyjson_doc_free(doc);
+        return NULL;
+    }
+    host_named_watch_snapshot_t *snapshot = calloc(1, sizeof(*snapshot));
+    if (!snapshot) {
+        yyjson_doc_free(doc);
+        return NULL;
+    }
+    snapshot->document = doc;
+    snapshot->count = count;
+    for (size_t i = 0; i < count; i++) {
         yyjson_val *item = yyjson_arr_get(root, i);
         yyjson_val *project = yyjson_obj_get(item, "project");
         yyjson_val *path = yyjson_obj_get(item, "root");
-        entries[i].project = yyjson_get_str(project);
-        entries[i].root = yyjson_get_str(path);
-        accepted = yyjson_obj_size(item) == 2 && entries[i].project && entries[i].root &&
-                   strlen(entries[i].project) == yyjson_get_len(project) &&
-                   strlen(entries[i].root) == yyjson_get_len(path);
+        const char *project_name = yyjson_get_str(project);
+        const char *root_path = yyjson_get_str(path);
+        if (yyjson_obj_size(item) != 2 || !project_name || !root_path ||
+            strlen(project_name) != yyjson_get_len(project) ||
+            strlen(root_path) != yyjson_get_len(path)) {
+            host_named_watch_free(snapshot);
+            return NULL;
+        }
+        snapshot->entries[i] =
+            (cbm_daemon_named_watch_t){.project = project_name, .root = root_path};
     }
-    if (accepted) {
-        accepted =
-            cbm_daemon_application_reconcile_named_watches(host->application, entries, count);
-    }
-    yyjson_doc_free(doc);
-    return accepted;
+    return snapshot;
 }
 
-static void host_named_watch_reload_at(host_state_t *host, uint64_t now_ms) {
-    if (!host->named_watch_path[0] || now_ms < host->named_watch_next_load_ms) {
-        return;
+static void host_named_watch_unavailable(host_state_t *host) {
+    if (!host->named_watch_unavailable) {
+        cbm_log_warn("daemon.named_watch.file_unavailable", "path", host->named_watch_path);
+        host->named_watch_unavailable = true;
+        host_named_watch_free(host->named_watch_candidate);
+        host->named_watch_candidate = NULL;
+        host->named_watch_digest[0] = '\0';
     }
-    host->named_watch_next_load_ms = host_deadline_from(now_ms, HOST_NAMED_WATCH_CONFIG_POLL_MS);
+}
+
+static void host_named_watch_read(host_state_t *host) {
     cbm_path_info_t info;
     if (cbm_path_info_utf8(host->named_watch_path, &info) != CBM_PATH_INFO_OK || !info.is_regular ||
         info.size < 0 || info.size >= HOST_NAMED_WATCH_CONFIG_CAP) {
-        if (!host->named_watch_unavailable) {
-            cbm_log_warn("daemon.named_watch.file_unavailable", "path", host->named_watch_path);
-            host->named_watch_unavailable = true;
-        }
-        return;
-    }
-    if (!host->named_watch_unavailable && host->named_watch_seen &&
-        info.size == host->named_watch_size && info.mtime_ns == host->named_watch_mtime_ns) {
+        host_named_watch_unavailable(host);
         return;
     }
     FILE *input = cbm_fopen(host->named_watch_path, "rb");
     if (!input) {
-        if (!host->named_watch_unavailable) {
-            cbm_log_warn("daemon.named_watch.file_unavailable", "path", host->named_watch_path);
-            host->named_watch_unavailable = true;
-        }
+        host_named_watch_unavailable(host);
         return;
     }
     char text[HOST_NAMED_WATCH_CONFIG_CAP];
@@ -383,16 +404,82 @@ static void host_named_watch_reload_at(host_state_t *host, uint64_t now_ms) {
     cbm_path_info_t after;
     if (!stable || cbm_path_info_utf8(host->named_watch_path, &after) != CBM_PATH_INFO_OK ||
         !after.is_regular || after.size != info.size || after.mtime_ns != info.mtime_ns) {
+        host_named_watch_unavailable(host);
         return;
     }
     host->named_watch_unavailable = false;
-    host->named_watch_seen = true;
-    host->named_watch_size = info.size;
-    host->named_watch_mtime_ns = info.mtime_ns;
-    if (host_named_watch_apply(host, text, length)) {
-        cbm_log_info("daemon.named_watch.applied", "path", host->named_watch_path);
-    } else {
+
+    /* Equal size and mtime do not identify an atomically replaced file. */
+    char digest[CBM_SHA256_HEX_LEN + 1];
+    cbm_sha256_hex(text, length, digest);
+    if (strcmp(digest, host->named_watch_digest) == 0) {
+        return;
+    }
+    host_named_watch_free(host->named_watch_candidate);
+    host->named_watch_candidate = host_named_watch_parse(text, length);
+    if (!host->named_watch_candidate) {
         cbm_log_warn("daemon.named_watch.invalid_snapshot", "path", host->named_watch_path);
+    }
+    memcpy(host->named_watch_digest, digest, sizeof(digest));
+    host->named_watch_apply_warned = false;
+}
+
+static void host_named_watch_report_missing(const host_named_watch_snapshot_t *snapshot) {
+    for (size_t i = 0; i < snapshot->count; i++) {
+        const cbm_daemon_named_watch_t *entry = &snapshot->entries[i];
+        cbm_path_info_t info;
+        if (cbm_path_info_utf8(entry->root, &info) == CBM_PATH_INFO_ABSENT) {
+            cbm_log_warn("daemon.named_watch.root_missing", "project", entry->project, "path",
+                         entry->root);
+        }
+    }
+}
+
+static void host_named_watch_reload_at(host_state_t *host, uint64_t now_ms) {
+    if (!host->named_watch_path[0] || now_ms < host->named_watch_next_load_ms) {
+        return;
+    }
+    host->named_watch_next_load_ms = host_deadline_from(now_ms, HOST_NAMED_WATCH_CONFIG_POLL_MS);
+    host_named_watch_read(host);
+    if (!cbm_config_get_bool(host->runtime_config, CBM_CONFIG_AUTO_WATCH, true)) {
+        if (!host->named_watch_suspended) {
+            (void)cbm_daemon_application_reconcile_named_watches(host->application, NULL, 0, NULL);
+            host->named_watch_suspended = true;
+            cbm_log_info("daemon.named_watch.suspended");
+        }
+        return;
+    }
+
+    host_named_watch_snapshot_t *candidate = host->named_watch_candidate;
+    bool pending = false;
+    if (candidate) {
+        if (cbm_daemon_application_reconcile_named_watches(host->application, candidate->entries,
+                                                           candidate->count, &pending)) {
+            host_named_watch_free(host->named_watch_accepted);
+            host->named_watch_accepted = candidate;
+            host->named_watch_candidate = NULL;
+            host->named_watch_pending = pending;
+            host->named_watch_suspended = false;
+            if (pending) {
+                host_named_watch_report_missing(candidate);
+            }
+            cbm_log_info("daemon.named_watch.applied", "path", host->named_watch_path);
+            return;
+        }
+        if (!host->named_watch_apply_warned) {
+            cbm_log_warn("daemon.named_watch.apply_pending", "path", host->named_watch_path);
+            host->named_watch_apply_warned = true;
+        }
+    }
+    host_named_watch_snapshot_t *accepted = host->named_watch_accepted;
+    if (accepted && (host->named_watch_suspended || host->named_watch_pending) &&
+        cbm_daemon_application_reconcile_named_watches(host->application, accepted->entries,
+                                                       accepted->count, &pending)) {
+        if (host->named_watch_suspended) {
+            cbm_log_info("daemon.named_watch.resumed");
+        }
+        host->named_watch_pending = pending;
+        host->named_watch_suspended = false;
     }
 }
 
@@ -635,6 +722,8 @@ static bool host_project_lock_manager_free_once(void *context) {
 }
 
 static void host_state_free(host_state_t *host) {
+    host_named_watch_free(host->named_watch_candidate);
+    host_named_watch_free(host->named_watch_accepted);
     if (!host_http_stop_join_free(host)) {
         /* The retained server or one of its callbacks can still borrow every
          * dependency below. Process containment is the only safe teardown. */
@@ -716,7 +805,7 @@ static bool host_state_prepare(host_state_t *host, const cbm_daemon_ipc_endpoint
         const char *path = cbm_safe_getenv("MORI_NAMED_WATCH_FILE", host->named_watch_path,
                                            sizeof(host->named_watch_path), NULL);
         if (path && path[0]) {
-            (void)cbm_daemon_application_reconcile_named_watches(host->application, NULL, 0);
+            (void)cbm_daemon_application_reconcile_named_watches(host->application, NULL, 0, NULL);
             if (!cbm_hook_path_is_abs(path)) {
                 cbm_log_warn("daemon.named_watch.file_unavailable", "reason",
                              "absolute_path_required");

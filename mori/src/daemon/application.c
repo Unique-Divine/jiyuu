@@ -3858,7 +3858,8 @@ static bool application_named_watch_cache_matches(const char *project, const cha
 }
 
 static bool application_named_watch_valid(cbm_daemon_application_t *application,
-                                          const cbm_daemon_named_watch_t *entries, size_t at) {
+                                          const cbm_daemon_named_watch_t *entries, size_t at,
+                                          bool *present) {
     const cbm_daemon_named_watch_t *entry = &entries[at];
     if (!entry->project || !entry->project[0] || !entry->root ||
         !cbm_hook_path_is_abs(entry->root)) {
@@ -3873,15 +3874,13 @@ static bool application_named_watch_valid(cbm_daemon_application_t *application,
     char canonical[APPLICATION_PATH_CAP];
     cbm_path_info_t info;
     int status = cbm_path_info_utf8(entry->root, &info);
-    if (status != CBM_PATH_INFO_ABSENT &&
+    *present = status != CBM_PATH_INFO_ABSENT;
+    if (*present &&
         (status != CBM_PATH_INFO_OK || !info.is_directory ||
          !cbm_canonical_path(entry->root, canonical, sizeof(canonical)) ||
-         !application_watch_root_matches(canonical, entry->root))) {
-        return false;
-    }
-    if (!cbm_workspace_root_allowed(entry->root, cbm_workspace_home_dir(),
-                                    cbm_workspace_cache_dir(), getenv("CBM_ALLOWED_ROOT"), NULL,
-                                    0)) {
+         !application_watch_root_matches(canonical, entry->root) ||
+         !cbm_workspace_root_allowed(canonical, cbm_workspace_home_dir(), cbm_workspace_cache_dir(),
+                                     getenv("CBM_ALLOWED_ROOT"), NULL, 0))) {
         return false;
     }
     for (size_t i = 0; i < at; i++) {
@@ -3923,7 +3922,10 @@ static bool application_named_watch_list_contains(const cbm_daemon_named_watch_t
 
 bool cbm_daemon_application_reconcile_named_watches(cbm_daemon_application_t *application,
                                                     const cbm_daemon_named_watch_t *entries,
-                                                    size_t count) {
+                                                    size_t count, bool *pending) {
+    if (pending) {
+        *pending = false;
+    }
     if (!application || (!entries && count) || count > CBM_DAEMON_NAMED_WATCH_LIMIT) {
         return false;
     }
@@ -3937,9 +3939,9 @@ bool cbm_daemon_application_reconcile_named_watches(cbm_daemon_application_t *ap
         cbm_mutex_unlock(&application->mutex);
         return count == 0;
     }
+    bool present[CBM_DAEMON_NAMED_WATCH_LIMIT];
     for (size_t i = 0; i < count; i++) {
-        if (!application_named_watch_valid(application, entries, i)) {
-            cbm_log_warn("daemon.named_watch.rejected", "project", entries[i].project);
+        if (!application_named_watch_valid(application, entries, i, &present[i])) {
             cbm_mutex_unlock(&application->mutex);
             return false;
         }
@@ -3951,6 +3953,12 @@ bool cbm_daemon_application_reconcile_named_watches(cbm_daemon_application_t *ap
         cbm_daemon_application_watch_t *watch =
             application_find_watch_locked(application, entries[i].project);
         if (watch && watch->named) {
+            continue;
+        }
+        if (!present[i] && !watch) {
+            if (pending) {
+                *pending = true;
+            }
             continue;
         }
         if (watch) {

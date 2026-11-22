@@ -116,10 +116,11 @@ enum { CBM_DAEMON_NAMED_WATCH_LIMIT = 128 };
 
 /* Enable named ownership in a permanent daemon and apply a full snapshot.
  * A rejected registration leaves the previous membership intact. Empty
- * snapshots leave only session-owned watches. */
+ * snapshots leave only session-owned watches. Reports missing checkouts in
+ * pending when the caller should retry the accepted snapshot. */
 bool cbm_daemon_application_reconcile_named_watches(cbm_daemon_application_t *application,
                                                     const cbm_daemon_named_watch_t *entries,
-                                                    size_t count);
+                                                    size_t count, bool *pending);
 
 /* Cancel and reap all daemon-owned operations within timeout_ms. Normal final
  * client shutdown calls this before watcher/store teardown. Idempotent. */

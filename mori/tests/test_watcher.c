@@ -516,6 +516,39 @@ TEST(watcher_prunes_sustained_missing_root) {
     PASS();
 }
 
+TEST(watcher_named_watch_retains_cache_through_sustained_missing_root) {
+    prune_fixture_t f;
+    ASSERT_TRUE(prune_fixture_setup(&f, "0"));
+    cbm_store_t *store = cbm_store_open_memory();
+    cbm_watcher_t *watcher = cbm_watcher_new(store, index_callback, NULL);
+    ASSERT_TRUE(cbm_watcher_watch_named(watcher, "stale-project", f.rootdir));
+    index_call_count = 0;
+    ASSERT_EQ(cbm_watcher_poll_once(watcher), 0);
+    cbm_watcher_touch(watcher, "stale-project");
+    ASSERT_EQ(cbm_watcher_poll_once(watcher), 1);
+
+    th_rmtree(f.rootdir);
+    for (int i = 0; i < 4; i++) {
+        cbm_watcher_touch(watcher, "stale-project");
+        ASSERT_EQ(cbm_watcher_poll_once(watcher), 0);
+    }
+    ASSERT_EQ(cbm_watcher_watch_count(watcher), 1);
+    ASSERT_EQ(access(f.db_path, F_OK), 0);
+    ASSERT_EQ(access(f.wal_path, F_OK), 0);
+    ASSERT_EQ(access(f.shm_path, F_OK), 0);
+
+    ASSERT_TRUE(cbm_mkdir_p(f.rootdir, 0700));
+    cbm_watcher_touch(watcher, "stale-project");
+    ASSERT_EQ(cbm_watcher_poll_once(watcher), 0);
+    cbm_watcher_touch(watcher, "stale-project");
+    ASSERT_EQ(cbm_watcher_poll_once(watcher), 1);
+    ASSERT_EQ(index_call_count, 2);
+    cbm_watcher_free(watcher);
+    cbm_store_close(store);
+    prune_fixture_teardown(&f);
+    PASS();
+}
+
 TEST(watcher_prune_waits_for_daemon_project_mutation) {
     /* The daemon application owns project-operation coordination. Supplying
      * its watcher must route destructive stale-root pruning through that
@@ -4214,6 +4247,7 @@ SUITE(watcher) {
     RUN_TEST(watcher_poll_no_projects);
     RUN_TEST(watcher_poll_nonexistent_path);
     RUN_TEST(watcher_prunes_sustained_missing_root);
+    RUN_TEST(watcher_named_watch_retains_cache_through_sustained_missing_root);
     RUN_TEST(watcher_prune_waits_for_daemon_project_mutation);
     RUN_TEST(watcher_prune_guard_denial_and_success_are_balanced);
     RUN_TEST(watcher_prune_restats_root_after_guard_acquisition);
