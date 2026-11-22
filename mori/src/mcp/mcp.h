@@ -271,6 +271,35 @@ void cbm_mcp_set_read_override(cbm_mcp_read_override_fn handle,
 typedef int (*cbm_mcp_method_selector_fn)(const char *method);
 void cbm_mcp_set_method_selector(cbm_mcp_method_selector_fn select);
 
+/* Search SQL and bound values borrowed from one MCP request. */
+struct sqlite3;
+struct sqlite3_stmt;
+typedef struct {
+    const char *fts_query;
+    const char *project;
+    const char *file_like;
+    const char *label;
+    const char *kind;
+    const char *ns;
+    double label_weight;
+} cbm_rank_search_filters_t;
+typedef struct {
+    const char *rank_sql;
+    const char *count_sql;
+    const char *probe_sql;
+    const cbm_rank_search_filters_t *filters;
+    const char *exact_query;
+    int limit;
+    int offset;
+    int candidate_limit;
+} cbm_rank_search_request_t;
+typedef void (*cbm_rank_search_row_fn)(void *context, struct sqlite3_stmt *row);
+/* False means FTS is unavailable and the caller can use the pattern path. */
+typedef bool (*cbm_rank_search_reader_fn)(
+    struct sqlite3 *db, const cbm_rank_search_request_t *request, int *total,
+    bool *window_saturated, void *context, cbm_rank_search_row_fn emit);
+void cbm_mcp_set_rank_search_reader(cbm_rank_search_reader_fn reader);
+
 typedef struct {
     int limit;
     int offset;
@@ -324,6 +353,30 @@ typedef struct {
 typedef void (*cbm_mcp_project_page_builder_fn)(cbm_mcp_project_record_t *records, int count,
                                                 cbm_mcp_project_page_t *page);
 void cbm_mcp_set_project_page_builder(cbm_mcp_project_page_builder_fn builder);
+
+/* The renderer borrows the selected page and returns an owned payload. */
+typedef char *(*cbm_mcp_project_list_renderer_fn)(const cbm_mcp_project_record_t *page_records,
+                                                  int total, const cbm_mcp_project_page_t *page,
+                                                  bool metadata_only, bool include_stats,
+                                                  bool wants_json);
+void cbm_mcp_set_project_list_renderer(cbm_mcp_project_list_renderer_fn renderer,
+                                        cbm_mcp_read_override_free_fn release);
+
+/* Diagnostic JSON is an ordered object produced by native collectors. Strings
+ * and the report are borrowed for the render call. */
+typedef struct {
+    const char *project;
+    const char *root_path;
+    const char *indexed_at;
+    const char *diagnostics;
+    int nodes;
+    int edges;
+    bool has_metadata;
+} cbm_mcp_index_status_report_t;
+
+typedef char *(*cbm_mcp_index_status_renderer_fn)(const cbm_mcp_index_status_report_t *report);
+void cbm_mcp_set_index_status_renderer(cbm_mcp_index_status_renderer_fn renderer,
+                                        cbm_mcp_read_override_free_fn release);
 
 /* ── Supervised background index (RSS isolation, #832) ────────── */
 

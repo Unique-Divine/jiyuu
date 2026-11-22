@@ -30,3 +30,6 @@ fn rusqlite_uses_the_c_backend_sqlite() {
     // rusqlite archive includes it, so this checks which SQLite was linked.
     assert!(omit_load_extension);
 }
+
+#[cfg(all(feature = "c-backend", test, unix))]
+mod discovery_spike;

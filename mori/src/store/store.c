@@ -7703,7 +7703,39 @@ static bool search_build_ranged_sql(const char *select_cols, const char *where,
     return true;
 }
 
-int cbm_store_search(cbm_store_t *s, const cbm_search_params_t *params, cbm_search_output_t *out) {
+static cbm_pattern_search_reader_fn pattern_search_reader;
+
+void cbm_store_set_pattern_search_reader(cbm_pattern_search_reader_fn reader) {
+    pattern_search_reader = reader;
+}
+
+typedef struct {
+    cbm_store_t *store;
+    cbm_search_output_t *output;
+    int capacity;
+} search_scan_t;
+
+static void search_scan_append(void *context, sqlite3_stmt *row) {
+    search_scan_t *scan = context;
+    cbm_search_output_t *out = scan->output;
+    if (out->count == scan->capacity) {
+        scan->capacity = scan->capacity == 0 ? ST_INIT_CAP_16 : scan->capacity * ST_GROWTH;
+        out->results = safe_realloc(out->results, scan->capacity * sizeof(*out->results));
+    }
+    cbm_search_result_t *result = &out->results[out->count++];
+    memset(result, 0, sizeof(*result));
+    scan_node(row, &result->node);
+    result->in_degree = sqlite3_column_int(row, ST_COL_9);
+    result->out_degree = sqlite3_column_int(row, CBM_DECIMAL_BASE);
+}
+
+static void search_scan_error(void *context, const char *operation) {
+    search_scan_t *scan = context;
+    store_set_error_sqlite(scan->store, operation);
+}
+
+static int store_search(cbm_store_t *s, const cbm_search_params_t *params, cbm_search_output_t *out,
+                         cbm_pattern_search_reader_fn reader) {
     memset(out, 0, sizeof(*out));
     if (!s || !s->db) {
         return CBM_STORE_ERR;
@@ -7783,6 +7815,21 @@ int cbm_store_search(cbm_store_t *s, const cbm_search_params_t *params, cbm_sear
     const char *main_sql = ranged_sql ? ranged_sql : sql;
     const char *total_sql = ranged_count_sql ? ranged_count_sql : count_sql;
 
+    search_scan_t scan = {.store = s, .output = out};
+    if (reader) {
+        const char *values[ST_SEARCH_MAX_BINDS];
+        for (int i = 0; i < bind_idx; i++) {
+            values[i] = binds[i].text;
+        }
+        int status = reader(s->db, total_sql, main_sql, values, bind_idx, &out->total, &scan,
+                            search_scan_append, search_scan_error);
+        cbm_log_debug("search_graph.reader", "mode", "pattern", "backend", "rust");
+        cbm_free(CBM_MEM_CLASS_STORE, ranged_count_sql);
+        cbm_free(CBM_MEM_CLASS_STORE, ranged_sql);
+        like_pool_free(&like_pool);
+        return status;
+    }
+
     /* Execute count query */
     sqlite3_stmt *cnt_stmt = NULL;
     int rc = sqlite3_prepare_v2(s->db, total_sql, CBM_NOT_FOUND, &cnt_stmt, NULL);
@@ -7811,37 +7858,25 @@ int cbm_store_search(cbm_store_t *s, const cbm_search_params_t *params, cbm_sear
         bind_text(main_stmt, i + SKIP_ONE, binds[i].text);
     }
 
-    int cap = ST_INIT_CAP_16;
-    int n = 0;
-    cbm_search_result_t *results = malloc(cap * sizeof(cbm_search_result_t));
-
     int scan_rc13;
     while ((scan_rc13 = sqlite3_step(main_stmt)) == SQLITE_ROW) {
-        if (n >= cap) {
-            cap *= ST_GROWTH;
-            results = safe_realloc(results, cap * sizeof(cbm_search_result_t));
-        }
-        memset(&results[n], 0, sizeof(cbm_search_result_t));
-        scan_node(main_stmt, &results[n].node);
-        results[n].in_degree = sqlite3_column_int(main_stmt, ST_COL_9);
-        results[n].out_degree = sqlite3_column_int(main_stmt, CBM_DECIMAL_BASE);
-        n++;
+        search_scan_append(&scan, main_stmt);
     }
     if (scan_rc13 != SQLITE_DONE) { /* SCANCHK:13:main_stmt */
-        store_set_error_sqlite(s, "row scan aborted");
-        sqlite3_finalize(main_stmt);
-        like_pool_free(&like_pool);
-        out->results = results;
-        out->count = n;
-        return CBM_STORE_ERR;
+        search_scan_error(&scan, "row scan aborted");
     }
-
     sqlite3_finalize(main_stmt);
     like_pool_free(&like_pool);
+    return scan_rc13 == SQLITE_DONE ? CBM_STORE_OK : CBM_STORE_ERR;
+}
 
-    out->results = results;
-    out->count = n;
-    return CBM_STORE_OK;
+int cbm_store_search(cbm_store_t *s, const cbm_search_params_t *params, cbm_search_output_t *out) {
+    return store_search(s, params, out, NULL);
+}
+
+int cbm_store_search_pattern(cbm_store_t *s, const cbm_search_params_t *params,
+                             cbm_search_output_t *out) {
+    return store_search(s, params, out, pattern_search_reader);
 }
 
 void cbm_store_search_free(cbm_search_output_t *out) {

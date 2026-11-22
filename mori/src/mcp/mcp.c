@@ -3331,6 +3331,81 @@ static void add_project_record_json(yyjson_mut_doc *doc, yyjson_mut_val *arr,
     yyjson_mut_arr_add_val(arr, p);
 }
 
+static cbm_mcp_project_list_renderer_fn project_list_renderer;
+static cbm_mcp_read_override_free_fn project_list_payload_free;
+
+void cbm_mcp_set_project_list_renderer(cbm_mcp_project_list_renderer_fn renderer,
+                                        cbm_mcp_read_override_free_fn release) {
+    project_list_renderer = release ? renderer : NULL;
+    project_list_payload_free = release;
+}
+
+void cbm_mcp_render_project_table(cbm_sb_t *sb, const cbm_mcp_project_record_t *records,
+                                   int page_count, bool metadata_only, bool include_stats) {
+    /* Stable union schema: branch is an explicit empty marker instead of
+     * changing each object's shape and forcing the generic tree emitter
+     * to repeat every key. Values and row order remain direct/copyable. */
+    const char *metadata_cols[] = {"name", "root_path"};
+    const char *identity_cols[] = {"name", "root_path", "branch"};
+    const char *stats_cols[] = {"name", "root_path", "branch", "nodes", "edges", "size_bytes"};
+    const char *const *cols = metadata_only   ? metadata_cols
+                              : include_stats ? stats_cols
+                                              : identity_cols;
+    int column_count = metadata_only ? 2 : include_stats ? 6 : 3;
+    size_t cell_count = (size_t)page_count * (size_t)column_count;
+    const char **cells = cell_count > 0 && cell_count <= SIZE_MAX / sizeof(*cells)
+                             ? malloc(cell_count * sizeof(*cells))
+                             : NULL;
+    char (*numbers)[32] = include_stats && page_count > 0
+                              ? malloc((size_t)page_count * 3U * sizeof(*numbers))
+                              : NULL;
+    if (cells && (!include_stats || numbers)) {
+        for (int row = 0; row < page_count; row++) {
+            const mcp_project_record_t *record = &records[row];
+            size_t base = (size_t)row * (size_t)column_count;
+            cells[base] = record->name;
+            cells[base + 1U] = record->root_path;
+            if (!metadata_only) {
+                cells[base + 2U] = record->branch ? record->branch : "";
+            }
+            if (include_stats) {
+                size_t number_base = (size_t)row * 3U;
+                snprintf(numbers[number_base], sizeof(numbers[number_base]), "%d",
+                         record->nodes);
+                snprintf(numbers[number_base + 1U], sizeof(numbers[number_base + 1U]), "%d",
+                         record->edges);
+                snprintf(numbers[number_base + 2U], sizeof(numbers[number_base + 2U]), "%lld",
+                         (long long)record->size_bytes);
+                cells[base + 3U] = numbers[number_base];
+                cells[base + 4U] = numbers[number_base + 1U];
+                cells[base + 5U] = numbers[number_base + 2U];
+            }
+        }
+        const bool string_cols[] = {true, true, true, false, false, false};
+        const bool prefix_cols[] = {false, true, false, false, false, false};
+        cbm_tree_table_rows_profiled(sb, "projects", page_count, cols, column_count, cells,
+                                     string_cols, prefix_cols);
+    } else {
+        cbm_tree_table_header(sb, "projects", page_count, cols, column_count);
+        for (int i = 0; i < page_count; i++) {
+            cbm_tree_row_begin(sb);
+            cbm_tree_cell_str(sb, records[i].name, true);
+            cbm_tree_cell_str(sb, records[i].root_path, false);
+            if (!metadata_only) {
+                cbm_tree_cell_str(sb, records[i].branch ? records[i].branch : "", false);
+            }
+            if (include_stats) {
+                cbm_tree_cell_int(sb, records[i].nodes, false);
+                cbm_tree_cell_int(sb, records[i].edges, false);
+                cbm_tree_cell_int(sb, (long long)records[i].size_bytes, false);
+            }
+            cbm_tree_row_end(sb);
+        }
+    }
+    free(numbers);
+    free(cells);
+}
+
 /* list_projects: scan cache directory for .db files.
  * Each project is a single .db file — no central registry needed. */
 static char *handle_list_projects(cbm_mcp_server_t *srv, const char *args) {
@@ -3452,13 +3527,17 @@ static char *handle_list_projects(cbm_mcp_server_t *srv, const char *args) {
 
     bool wants_json = mcp_wants_json(args);
     char *payload = NULL;
-    if (wants_json) {
+    const mcp_project_record_t *page_records = end > start ? records + start : NULL;
+    if (project_list_renderer) {
+        payload = project_list_renderer(page_records, record_count, &page, metadata_only,
+                                        include_stats, wants_json);
+    } else if (wants_json) {
         yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
         yyjson_mut_val *root = yyjson_mut_obj(doc);
         yyjson_mut_doc_set_root(doc, root);
         yyjson_mut_val *arr = yyjson_mut_arr(doc);
-        for (int i = start; i < end; i++) {
-            add_project_record_json(doc, arr, &records[i], include_stats);
+        for (int i = 0; i < end - start; i++) {
+            add_project_record_json(doc, arr, &page_records[i], include_stats);
         }
 
         yyjson_mut_obj_add_val(doc, root, "projects", arr);
@@ -3478,71 +3557,9 @@ static char *handle_list_projects(cbm_mcp_server_t *srv, const char *args) {
         payload = yy_doc_to_str(doc);
         yyjson_mut_doc_free(doc);
     } else {
-        /* Stable union schema: branch is an explicit empty marker instead of
-         * changing each object's shape and forcing the generic tree emitter
-         * to repeat every key. Values and row order remain direct/copyable. */
         cbm_sb_t sb;
         cbm_sb_init(&sb);
-        const char *metadata_cols[] = {"name", "root_path"};
-        const char *identity_cols[] = {"name", "root_path", "branch"};
-        const char *stats_cols[] = {"name", "root_path", "branch", "nodes", "edges", "size_bytes"};
-        const char *const *cols = metadata_only   ? metadata_cols
-                                  : include_stats ? stats_cols
-                                                  : identity_cols;
-        int column_count = metadata_only ? 2 : include_stats ? 6 : 3;
-        int page_count = end - start;
-        size_t cell_count = (size_t)page_count * (size_t)column_count;
-        const char **cells = cell_count > 0 && cell_count <= SIZE_MAX / sizeof(*cells)
-                                 ? malloc(cell_count * sizeof(*cells))
-                                 : NULL;
-        char (*numbers)[32] = include_stats && page_count > 0
-                                  ? malloc((size_t)page_count * 3U * sizeof(*numbers))
-                                  : NULL;
-        if (cells && (!include_stats || numbers)) {
-            for (int row = 0; row < page_count; row++) {
-                const mcp_project_record_t *record = &records[start + row];
-                size_t base = (size_t)row * (size_t)column_count;
-                cells[base] = record->name;
-                cells[base + 1U] = record->root_path;
-                if (!metadata_only) {
-                    cells[base + 2U] = record->branch ? record->branch : "";
-                }
-                if (include_stats) {
-                    size_t number_base = (size_t)row * 3U;
-                    snprintf(numbers[number_base], sizeof(numbers[number_base]), "%d",
-                             record->nodes);
-                    snprintf(numbers[number_base + 1U], sizeof(numbers[number_base + 1U]), "%d",
-                             record->edges);
-                    snprintf(numbers[number_base + 2U], sizeof(numbers[number_base + 2U]), "%lld",
-                             (long long)record->size_bytes);
-                    cells[base + 3U] = numbers[number_base];
-                    cells[base + 4U] = numbers[number_base + 1U];
-                    cells[base + 5U] = numbers[number_base + 2U];
-                }
-            }
-            const bool string_cols[] = {true, true, true, false, false, false};
-            const bool prefix_cols[] = {false, true, false, false, false, false};
-            cbm_tree_table_rows_profiled(&sb, "projects", page_count, cols, column_count, cells,
-                                         string_cols, prefix_cols);
-        } else {
-            cbm_tree_table_header(&sb, "projects", page_count, cols, column_count);
-            for (int i = start; i < end; i++) {
-                cbm_tree_row_begin(&sb);
-                cbm_tree_cell_str(&sb, records[i].name, true);
-                cbm_tree_cell_str(&sb, records[i].root_path, false);
-                if (!metadata_only) {
-                    cbm_tree_cell_str(&sb, records[i].branch ? records[i].branch : "", false);
-                }
-                if (include_stats) {
-                    cbm_tree_cell_int(&sb, records[i].nodes, false);
-                    cbm_tree_cell_int(&sb, records[i].edges, false);
-                    cbm_tree_cell_int(&sb, (long long)records[i].size_bytes, false);
-                }
-                cbm_tree_row_end(&sb);
-            }
-        }
-        free(numbers);
-        free(cells);
+        cbm_mcp_render_project_table(&sb, page_records, end - start, metadata_only, include_stats);
         cbm_tree_scalar_int(&sb, "total", record_count);
         cbm_tree_scalar_int(&sb, "returned", end - start);
         cbm_tree_scalar_bool(&sb, "has_more", end < record_count);
@@ -3562,7 +3579,11 @@ static char *handle_list_projects(cbm_mcp_server_t *srv, const char *args) {
     free(records);
 
     char *result = cbm_mcp_text_result(payload ? payload : "out of memory", payload == NULL);
-    free(payload);
+    if (payload && project_list_renderer) {
+        project_list_payload_free(payload);
+    } else {
+        free(payload);
+    }
     return result;
 }
 
@@ -4629,17 +4650,11 @@ static char *bm25_render(const bm25_output_row_t *rows, int returned, int total,
     return json;
 }
 
-/* The MATCH expression and the filters the ranked and the count query share.
- * One binder for both keeps them on identical parameters. */
-typedef struct {
-    const char *fts_query;
-    const char *project;
-    const char *file_like;
-    const char *label;
-    const char *kind;
-    const char *ns;
-    double label_weight;
-} bm25_filters_t;
+static cbm_rank_search_reader_fn rank_search_reader;
+
+void cbm_mcp_set_rank_search_reader(cbm_rank_search_reader_fn reader) {
+    rank_search_reader = reader;
+}
 
 static void bm25_bind_opt_text(sqlite3_stmt *st, int idx, const char *value) {
     if (value && value[0]) {
@@ -4649,7 +4664,7 @@ static void bm25_bind_opt_text(sqlite3_stmt *st, int idx, const char *value) {
     }
 }
 
-static void bm25_bind_filters(sqlite3_stmt *st, const bm25_filters_t *f) {
+static void bm25_bind_filters(sqlite3_stmt *st, const cbm_rank_search_filters_t *f) {
     sqlite3_bind_text(st, BM25_BIND_QUERY, f->fts_query, BM25_SQL_AUTO_LEN, MCP_SQLITE_TRANSIENT);
     sqlite3_bind_text(st, BM25_BIND_PROJECT, f->project, BM25_SQL_AUTO_LEN, MCP_SQLITE_TRANSIENT);
     bm25_bind_opt_text(st, BM25_BIND_FILE, f->file_like);
@@ -4665,12 +4680,14 @@ static void bm25_bind_filters(sqlite3_stmt *st, const bm25_filters_t *f) {
  * label-scoped MATCH but is otherwise global to the FTS table; saturation is
  * therefore conservatively reported even when later project/path filters
  * might discard the hidden candidates. */
+static const char bm25_probe_sql[] =
+    "SELECT rowid FROM nodes_fts WHERE nodes_fts MATCH ?1 "
+    "ORDER BY bm25(nodes_fts), rowid LIMIT 1 OFFSET ?2";
+
 static bool bm25_window_saturated(sqlite3 *db, const char *fts_query) {
     enum { PROBE_BIND_OFFSET = 2 };
-    const char *probe_sql = "SELECT rowid FROM nodes_fts WHERE nodes_fts MATCH ?1 "
-                            "ORDER BY bm25(nodes_fts), rowid LIMIT 1 OFFSET ?2";
     sqlite3_stmt *probe = NULL;
-    if (sqlite3_prepare_v2(db, probe_sql, BM25_SQL_AUTO_LEN, &probe, NULL) != SQLITE_OK) {
+    if (sqlite3_prepare_v2(db, bm25_probe_sql, BM25_SQL_AUTO_LEN, &probe, NULL) != SQLITE_OK) {
         return true;
     }
     sqlite3_bind_text(probe, BM25_BIND_QUERY, fts_query, BM25_SQL_AUTO_LEN, MCP_SQLITE_TRANSIENT);
@@ -4683,31 +4700,32 @@ static bool bm25_window_saturated(sqlite3 *db, const char *fts_query) {
 /* Count the candidates that pass the filters among the top `inner_limit`
  * (BM25_INNER_ALL: among all of them), with the ranked query's subquery shape
  * so FTS5 drives the scan here too. */
-static int bm25_count_candidates(sqlite3 *db, const bm25_filters_t *f, int inner_limit) {
-    const char *count_sql =
-        "SELECT COUNT(*) FROM ("
-        "    SELECT fts.rowid FROM ("
-        "        SELECT rowid FROM nodes_fts WHERE nodes_fts MATCH ?1"
-        "        ORDER BY " BM25_WEIGHTS " LIMIT ?3"
-        "    ) fts "
-        "    JOIN nodes n ON n.id = fts.rowid "
-        "    WHERE n.project = ?2 "
-        /* MIRRORS the ranked query's filter verbatim — same weights, same
-         * label exclusions. Changing one alone reports a total that does
-         * not describe the rows returned. */
-        "      AND " BM25_UNLABELLED_EXCLUSION " "
-        "      AND (?6 IS NULL OR n.file_path LIKE ?6)"
-        "      AND (?7 IS NULL OR n.label = ?7)"
-        "      AND (?9 IS NULL OR (CASE WHEN json_valid(n.properties) "
-        "           THEN json_extract(n.properties,'$.kind') END) = ?9)"
-        "      AND (?10 IS NULL OR (CASE WHEN json_valid(n.properties) "
-        "           THEN json_extract(n.properties,'$.obj_key') END) "
-        "           LIKE ('%/%/' || replace(replace(replace(?10,'\\','\\\\'),'%','\\%'),"
-        "           '_','\\_') || '/%') ESCAPE '\\')"
-        ")";
+static const char bm25_count_sql[] =
+    "SELECT COUNT(*) FROM ("
+    "    SELECT fts.rowid FROM ("
+    "        SELECT rowid FROM nodes_fts WHERE nodes_fts MATCH ?1"
+    "        ORDER BY " BM25_WEIGHTS " LIMIT ?3"
+    "    ) fts "
+    "    JOIN nodes n ON n.id = fts.rowid "
+    "    WHERE n.project = ?2 "
+    /* MIRRORS the ranked query's filter verbatim — same weights, same
+     * label exclusions. Changing one alone reports a total that does
+     * not describe the rows returned. */
+    "      AND " BM25_UNLABELLED_EXCLUSION " "
+    "      AND (?6 IS NULL OR n.file_path LIKE ?6)"
+    "      AND (?7 IS NULL OR n.label = ?7)"
+    "      AND (?9 IS NULL OR (CASE WHEN json_valid(n.properties) "
+    "           THEN json_extract(n.properties,'$.kind') END) = ?9)"
+    "      AND (?10 IS NULL OR (CASE WHEN json_valid(n.properties) "
+    "           THEN json_extract(n.properties,'$.obj_key') END) "
+    "           LIKE ('%/%/' || replace(replace(replace(?10,'\\','\\\\'),'%','\\%'),"
+    "           '_','\\_') || '/%') ESCAPE '\\')"
+    ")";
+
+static int bm25_count_candidates(sqlite3 *db, const cbm_rank_search_filters_t *f, int inner_limit) {
     int total = 0;
     sqlite3_stmt *cs = NULL;
-    if (sqlite3_prepare_v2(db, count_sql, BM25_SQL_AUTO_LEN, &cs, NULL) != SQLITE_OK) {
+    if (sqlite3_prepare_v2(db, bm25_count_sql, BM25_SQL_AUTO_LEN, &cs, NULL) != SQLITE_OK) {
         return 0;
     }
     bm25_bind_filters(cs, f);
@@ -4717,6 +4735,25 @@ static int bm25_count_candidates(sqlite3 *db, const bm25_filters_t *f, int inner
     }
     sqlite3_finalize(cs);
     return total;
+}
+
+typedef struct {
+    bm25_output_row_t *rows;
+    int count;
+} bm25_scan_t;
+
+static void bm25_scan_append(void *context, sqlite3_stmt *stmt) {
+    bm25_scan_t *scan = context;
+    bm25_output_row_t *row = &scan->rows[scan->count++];
+    const char *qn = (const char *)sqlite3_column_text(stmt, BM25_COL_QN);
+    const char *label = (const char *)sqlite3_column_text(stmt, BM25_COL_LABEL);
+    const char *file = (const char *)sqlite3_column_text(stmt, BM25_COL_FILE);
+    row->qualified_name = heap_strdup(qn ? qn : "");
+    row->label = heap_strdup(label ? label : "");
+    row->file_path = heap_strdup(file ? file : "");
+    row->start_line = sqlite3_column_int(stmt, BM25_COL_START);
+    row->end_line = sqlite3_column_int(stmt, BM25_COL_END);
+    row->rank = sqlite3_column_double(stmt, BM25_COL_RANK);
 }
 
 /* Run the BM25 full-text search path and return the JSON result string.
@@ -4801,23 +4838,26 @@ static char *bm25_search(cbm_store_t *store, const char *project, const char *qu
         "ORDER BY rank, n.id "
         "LIMIT ?3 OFFSET ?4";
 
-    sqlite3_stmt *stmt = NULL;
-    if (sqlite3_prepare_v2(db, sql, BM25_SQL_AUTO_LEN, &stmt, NULL) != SQLITE_OK) {
+    const cbm_rank_search_filters_t filters = {
+        .fts_query = fts_query,
+        .project = project,
+        .file_like = file_like,
+        .label = label,
+        .kind = kind,
+        .ns = ns,
+        .label_weight = label_weight,
+    };
+    int row_cap = limit > 0 ? limit : BM25_DEFAULT_LIMIT;
+    int row_offset = offset > 0 ? offset : 0;
+    int total = 0;
+    bool candidate_window_saturated = false;
+    bm25_output_row_t *rows =
+        (bm25_output_row_t *)cbm_calloc(CBM_MEM_CLASS_OTHER, (size_t)row_cap * sizeof(*rows));
+    if (!rows) {
         free(file_like);
-        return NULL;
+        return heap_strdup("out of memory");
     }
-    const bm25_filters_t filters = {.fts_query = fts_query,
-                                    .project = project,
-                                    .file_like = file_like,
-                                    .label = label,
-                                    .kind = kind,
-                                    .ns = ns,
-                                    .label_weight = label_weight};
-    bm25_bind_filters(stmt, &filters);
-    sqlite3_bind_int(stmt, BM25_BIND_LIMIT, limit > 0 ? limit : BM25_DEFAULT_LIMIT);
-    sqlite3_bind_int(stmt, BM25_BIND_OFFSET, offset > 0 ? offset : 0);
-    sqlite3_bind_text(stmt, BM25_BIND_EXACT, query, BM25_SQL_AUTO_LEN, MCP_SQLITE_TRANSIENT);
-
+    bm25_scan_t scan = {.rows = rows};
     /* file_pattern, kind and namespace cannot be put into the MATCH the way
      * the label is, so they filter AFTER the candidate window. When more
      * candidates exist beyond it, a narrow filter can find none of its rows in
@@ -4829,39 +4869,55 @@ static char *bm25_search(cbm_store_t *store, const char *project, const char *qu
      * orders every match), and the total becomes exact. The decision depends
      * only on the query, never on the page, so offset pages stay consistent.
      * Unfiltered and label-only queries that find rows keep the window. */
-    bool saturated = bm25_window_saturated(db, fts_query);
-    bool post_window_filter = file_like || (kind && kind[0]) || (ns && ns[0]);
-    int inner_limit = saturated && post_window_filter ? BM25_INNER_ALL : BM25_INNER_LIMIT;
-    int total = bm25_count_candidates(db, &filters, inner_limit);
-    if (saturated && total == 0 && inner_limit != BM25_INNER_ALL) {
-        inner_limit = BM25_INNER_ALL;
+    if (rank_search_reader) {
+        const cbm_rank_search_request_t request = {
+            .rank_sql = sql,
+            .count_sql = bm25_count_sql,
+            .probe_sql = bm25_probe_sql,
+            .filters = &filters,
+            .exact_query = query,
+            .limit = row_cap,
+            .offset = row_offset,
+            .candidate_limit = BM25_INNER_LIMIT,
+        };
+        if (!rank_search_reader(db, &request, &total, &candidate_window_saturated, &scan,
+                                bm25_scan_append)) {
+            free(file_like);
+            bm25_output_rows_free(rows, scan.count);
+            return NULL;
+        }
+        cbm_log_debug("search_graph.reader", "mode", "bm25", "backend", "rust");
+    } else {
+        sqlite3_stmt *stmt = NULL;
+        if (sqlite3_prepare_v2(db, sql, BM25_SQL_AUTO_LEN, &stmt, NULL) != SQLITE_OK) {
+            free(file_like);
+            bm25_output_rows_free(rows, scan.count);
+            return NULL;
+        }
+        bm25_bind_filters(stmt, &filters);
+        sqlite3_bind_int(stmt, BM25_BIND_LIMIT, row_cap);
+        sqlite3_bind_int(stmt, BM25_BIND_OFFSET, row_offset);
+        sqlite3_bind_text(stmt, BM25_BIND_EXACT, query, BM25_SQL_AUTO_LEN, MCP_SQLITE_TRANSIENT);
+
+        bool saturated = bm25_window_saturated(db, fts_query);
+        bool post_window_filter = file_like || (kind && kind[0]) || (ns && ns[0]);
+        int inner_limit = saturated && post_window_filter ? BM25_INNER_ALL : BM25_INNER_LIMIT;
         total = bm25_count_candidates(db, &filters, inner_limit);
-    }
-    bool candidate_window_saturated = saturated && inner_limit != BM25_INNER_ALL;
-    sqlite3_bind_int(stmt, BM25_BIND_INNER, inner_limit);
+        if (saturated && total == 0 && inner_limit != BM25_INNER_ALL) {
+            inner_limit = BM25_INNER_ALL;
+            total = bm25_count_candidates(db, &filters, inner_limit);
+        }
+        candidate_window_saturated = saturated && inner_limit != BM25_INNER_ALL;
+        sqlite3_bind_int(stmt, BM25_BIND_INNER, inner_limit);
 
-    int row_cap = limit > 0 ? limit : BM25_DEFAULT_LIMIT;
-    bm25_output_row_t *rows =
-        (bm25_output_row_t *)cbm_calloc(CBM_MEM_CLASS_OTHER, (size_t)row_cap * sizeof(*rows));
-    int row_count = 0;
-    while (rows && row_count < row_cap && sqlite3_step(stmt) == SQLITE_ROW) {
-        const char *qn = (const char *)sqlite3_column_text(stmt, BM25_COL_QN);
-        const char *row_label = (const char *)sqlite3_column_text(stmt, BM25_COL_LABEL);
-        const char *file = (const char *)sqlite3_column_text(stmt, BM25_COL_FILE);
-        rows[row_count].qualified_name = heap_strdup(qn ? qn : "");
-        rows[row_count].label = heap_strdup(row_label ? row_label : "");
-        rows[row_count].file_path = heap_strdup(file ? file : "");
-        rows[row_count].start_line = sqlite3_column_int(stmt, BM25_COL_START);
-        rows[row_count].end_line = sqlite3_column_int(stmt, BM25_COL_END);
-        rows[row_count].rank = sqlite3_column_double(stmt, BM25_COL_RANK);
-        row_count++;
+        while (scan.count < row_cap && sqlite3_step(stmt) == SQLITE_ROW) {
+            bm25_scan_append(&scan, stmt);
+        }
+        sqlite3_finalize(stmt);
     }
-    sqlite3_finalize(stmt);
     free(file_like);
+    int row_count = scan.count;
 
-    if (!rows) {
-        return heap_strdup("out of memory");
-    }
     /* Never a silent zero for a label the index spells differently. */
     char *zero_hint = total == 0 ? bm25_label_zero_hint(db, project, label) : NULL;
 
@@ -5910,7 +5966,15 @@ static char *handle_search_graph(cbm_mcp_server_t *srv, const char *args) {
     bool semantic_only = sq_present && !has_filters;
     cbm_search_output_t out = {0};
     char search_error[CBM_SZ_512] = "";
-    if (!semantic_only && cbm_store_search(store, &params, &out) != CBM_STORE_OK) {
+    bool basic_pattern = !sq_present && !include_connected && !relationship &&
+                         !exclude_entry_points && min_degree < 0 && max_degree < 0 &&
+                         !(kind_arg && kind_arg[0]) && !(ns_arg && ns_arg[0]);
+    int search_status = CBM_STORE_OK;
+    if (!semantic_only) {
+        search_status = basic_pattern ? cbm_store_search_pattern(store, &params, &out)
+                                      : cbm_store_search(store, &params, &out);
+    }
+    if (search_status != CBM_STORE_OK) {
         /* A refused or invalid regex aborts the row scan inside SQLite; the
          * store's reason is the caller's only hint about the pattern. */
         snprintf(search_error, sizeof(search_error), "search_graph: %s", cbm_store_error(store));
@@ -8181,13 +8245,105 @@ static void add_index_freshness_json(yyjson_mut_doc *doc, yyjson_mut_val *root, 
     cbm_git_context_free(&ctx);
 }
 
+static cbm_mcp_index_status_renderer_fn index_status_renderer;
+static cbm_mcp_read_override_free_fn index_status_payload_free;
+
+void cbm_mcp_set_index_status_renderer(cbm_mcp_index_status_renderer_fn renderer,
+                                        cbm_mcp_read_override_free_fn release) {
+    index_status_renderer = release ? renderer : NULL;
+    index_status_payload_free = release;
+}
+
+static const char *index_status_hint(int nodes, int edges) {
+    if (nodes < 0 && edges < 0) {
+        return "The nodes and edges tables could not be read; the database may be "
+               "corrupt. Re-run index_repository(repo_path=...) or remove the project "
+               "cache and re-index.";
+    }
+    if (nodes < 0) {
+        return "The nodes table could not be read; the database may be corrupt. Re-run "
+               "index_repository(repo_path=...) or remove the project cache and re-index.";
+    }
+    if (edges < 0) {
+        return "The edges table could not be read; the database may be corrupt. Re-run "
+               "index_repository(repo_path=...) or remove the project cache and re-index.";
+    }
+    return nodes == 0
+               ? "Project is empty. Re-run index_repository(repo_path=...) to populate."
+               : NULL;
+}
+
+static char *render_index_status_json(cbm_mcp_server_t *srv, cbm_store_t *store,
+                                      const char *project, bool verbose, int coverage_samples) {
+    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val *root = doc ? yyjson_mut_obj(doc) : NULL;
+    if (!root) {
+        yyjson_mut_doc_free(doc);
+        return NULL;
+    }
+    yyjson_mut_doc_set_root(doc, root);
+
+    cbm_project_t metadata = {0};
+    cbm_mcp_index_status_report_t report = {.project = project};
+    bool built = true;
+    if (project) {
+        read_project_stats(store, project, &report.nodes, &report.edges);
+        report.has_metadata = read_project_metadata(store, project, &metadata);
+        report.root_path = metadata.root_path;
+        report.indexed_at = metadata.indexed_at;
+        if (!index_status_renderer) {
+            /* A failed count read must be reported as error, even if the
+             * other count is readable or the database appears empty. */
+            bool unreadable = report.nodes < 0 || report.edges < 0;
+            yyjson_mut_obj_add_str(doc, root, "project", project);
+            yyjson_mut_obj_add_int(doc, root, "nodes", unreadable ? 0 : report.nodes);
+            yyjson_mut_obj_add_int(doc, root, "edges", unreadable ? 0 : report.edges);
+            yyjson_mut_obj_add_str(doc, root, "status",
+                                   unreadable ? "error" : (report.nodes > 0 ? "ready" : "empty"));
+            if (report.has_metadata) {
+                yyjson_mut_obj_add_strcpy(doc, root, "root_path",
+                                          report.root_path ? report.root_path : "");
+                yyjson_mut_obj_add_strcpy(doc, root, "indexed_at",
+                                          report.indexed_at ? report.indexed_at : "");
+            }
+        }
+        if (report.has_metadata && verbose) {
+            add_git_context_json(doc, root, report.root_path);
+            add_index_freshness_json(doc, root, store, project, report.root_path, report.indexed_at);
+        }
+        add_coverage_report(doc, root, store, project,
+                            report.has_metadata ? report.indexed_at : NULL, coverage_samples);
+        (void)cbm_cross_repo_add_status_json(doc, root, store, project);
+        built = add_doc_links_report(doc, root, store, project,
+                                     coverage_samples == COVERAGE_FILE_CAP);
+        if (built && !index_status_renderer) {
+            const char *hint = index_status_hint(report.nodes, report.edges);
+            if (hint) {
+                yyjson_mut_obj_add_str(doc, root, "hint", hint);
+            }
+        }
+        add_watch_status_json(srv, doc, root, project);
+    } else if (!index_status_renderer) {
+        yyjson_mut_obj_add_str(doc, root, "status", "no_project");
+    }
+
+    char *json = built ? yy_doc_to_str(doc) : NULL;
+    yyjson_mut_doc_free(doc);
+    if (json && index_status_renderer) {
+        report.diagnostics = json;
+        char *assembled = index_status_renderer(&report);
+        free(json);
+        json = assembled;
+    }
+    cbm_project_free_fields(&metadata);
+    return json;
+}
+
 static char *handle_index_status(cbm_mcp_server_t *srv, const char *args) {
     char *project = get_project_arg(args);
     cbm_store_t *store = resolve_store(srv, project);
     REQUIRE_STORE(store, project);
-    /* The git context block (worktree/shadow path variants) and the freshness
-     * verdict only matter when debugging index-location issues — gate them so
-     * the common status call stays lean. */
+    /* Verbose Git context and freshness are used for index-location debugging. */
     bool verbose = cbm_mcp_get_bool_arg(args, "verbose");
     char *diagnostics = cbm_mcp_get_string_arg(args, "diagnostics");
     int coverage_samples = 0;
@@ -8198,85 +8354,14 @@ static char *handle_index_status(cbm_mcp_server_t *srv, const char *args) {
     }
     free(diagnostics);
 
-    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
-    yyjson_mut_val *root = doc ? yyjson_mut_obj(doc) : NULL;
-    /* A failed allocation or report answers with the MCP allocation-error
-     * response, through the one exit below. */
-    bool failed = !root;
-    if (root) {
-        yyjson_mut_doc_set_root(doc, root);
-    }
-
-    if (failed) {
-        /* nothing to report into */
-    } else if (project) {
-        int nodes = 0;
-        int edges = 0;
-        read_project_stats(store, project, &nodes, &edges);
-        /* A negative count is a failed read (CBM_STORE_ERR), not a small
-         * project. Reporting it as a count would put a bare -1 in the output,
-         * and `nodes > 0 ? "ready" : "empty"` would answer "empty" for an
-         * unreadable table — the false all-clear #2012 is about. Say the read
-         * failed, and name the table that could not be read. */
-        const bool counts_unreadable = nodes < 0 || edges < 0;
-        yyjson_mut_obj_add_str(doc, root, "project", project);
-        yyjson_mut_obj_add_int(doc, root, "nodes", counts_unreadable ? 0 : nodes);
-        yyjson_mut_obj_add_int(doc, root, "edges", counts_unreadable ? 0 : edges);
-        yyjson_mut_obj_add_str(doc, root, "status",
-                               counts_unreadable ? "error" : (nodes > 0 ? "ready" : "empty"));
-        cbm_project_t proj_info = {0};
-        bool have_proj_info = read_project_metadata(store, project, &proj_info);
-        if (have_proj_info) {
-            yyjson_mut_obj_add_strcpy(doc, root, "root_path",
-                                      proj_info.root_path ? proj_info.root_path : "");
-            yyjson_mut_obj_add_strcpy(doc, root, "indexed_at",
-                                      proj_info.indexed_at ? proj_info.indexed_at : "");
-            if (verbose) {
-                add_git_context_json(doc, root, proj_info.root_path);
-                add_index_freshness_json(doc, root, store, project, proj_info.root_path,
-                                         proj_info.indexed_at);
-            }
-        }
-        add_coverage_report(doc, root, store, project, have_proj_info ? proj_info.indexed_at : NULL,
-                            coverage_samples);
-        (void)cbm_cross_repo_add_status_json(doc, root, store, project);
-        bool doc_links_built =
-            add_doc_links_report(doc, root, store, project, coverage_samples == COVERAGE_FILE_CAP);
-        safe_str_free(&proj_info.name);
-        safe_str_free(&proj_info.indexed_at);
-        safe_str_free(&proj_info.root_path);
-        if (!doc_links_built) {
-            failed = true;
-        } else if (counts_unreadable) {
-            const char *hint;
-            if (nodes < 0 && edges < 0) {
-                hint = "The nodes and edges tables could not be read; the database may be "
-                       "corrupt. Re-run index_repository(repo_path=...) or remove the project "
-                       "cache and re-index.";
-            } else if (nodes < 0) {
-                hint = "The nodes table could not be read; the database may be corrupt. Re-run "
-                       "index_repository(repo_path=...) or remove the project cache and re-index.";
-            } else {
-                hint = "The edges table could not be read; the database may be corrupt. Re-run "
-                       "index_repository(repo_path=...) or remove the project cache and re-index.";
-            }
-            yyjson_mut_obj_add_str(doc, root, "hint", hint);
-        } else if (nodes == 0) {
-            yyjson_mut_obj_add_str(
-                doc, root, "hint",
-                "Project is empty. Re-run index_repository(repo_path=...) to populate.");
-        }
-        add_watch_status_json(srv, doc, root, project);
-    } else {
-        yyjson_mut_obj_add_str(doc, root, "status", "no_project");
-    }
-
-    char *json = failed ? NULL : yy_doc_to_str(doc);
-    yyjson_mut_doc_free(doc);
+    char *json = render_index_status_json(srv, store, project, verbose, coverage_samples);
     free(project);
-
     char *result = mcp_result_from_json(args, json);
-    free(json);
+    if (json && index_status_renderer) {
+        index_status_payload_free(json);
+    } else {
+        free(json);
+    }
     return result;
 }
 
