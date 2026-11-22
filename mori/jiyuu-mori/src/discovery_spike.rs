@@ -11,6 +11,8 @@ use std::process::Command;
 use std::ptr::{NonNull, null, null_mut};
 use std::time::Instant;
 
+mod git_excludes;
+
 const IGNORED_CAP: usize = 2_000;
 
 #[derive(Clone, Copy, Debug)]
@@ -355,6 +357,7 @@ struct Walk {
     mode: Mode,
     size_cap: u64,
     cbmignore: Option<Ignore>,
+    user_ignore: Option<Ignore>,
     tracked: Tracked,
     cache: Option<PathBuf>,
     snapshot: Snapshot,
@@ -400,6 +403,11 @@ impl Walk {
             mode,
             size_cap,
             cbmignore: Ignore::load(&root.join(".cbmignore")),
+            user_ignore: repository
+                .as_ref()
+                .filter(|(_, common)| common.join("config").is_file())
+                .and_then(|_| git_excludes::user_ignore_path())
+                .and_then(|path| Ignore::load(&path)),
             tracked: if repository.is_some() {
                 Tracked::load(&root)
             } else {
@@ -467,6 +475,12 @@ impl Walk {
             .map_or(0, |matcher| matcher.verdict(path, is_dir))
     }
 
+    fn user_ignored(&self, rel: &Path, is_dir: bool) -> bool {
+        self.user_ignore
+            .as_ref()
+            .is_some_and(|matcher| matcher.verdict(rel, is_dir) > 0)
+    }
+
     fn classify_dir(
         &self,
         name: &OsStr,
@@ -498,7 +512,10 @@ impl Walk {
         };
         if hard_skip || cbm > 0 {
             Directory::Skip
-        } else if under_gitignore || git_ignored(absolute, true, stack) {
+        } else if under_gitignore
+            || git_ignored(absolute, true, stack)
+            || (cbm >= 0 && self.user_ignored(rel, true))
+        {
             Directory::GitIgnored
         } else {
             Directory::Keep
@@ -528,14 +545,19 @@ impl Walk {
             }
         };
         let ignore_reason = native_reason.or_else(|| {
-            if !self.tracked.files.contains(rel)
+            let tracked = self.tracked.files.contains(rel);
+            if !tracked
                 && (under_gitignore || git_ignored(absolute, false, stack))
             {
-                Some("gitignore")
-            } else if self.cbm_verdict(rel, false) > 0 {
+                return Some("gitignore");
+            }
+            let cbm = self.cbm_verdict(rel, false);
+            if cbm > 0 {
                 Some("cbmignore")
             } else if self.size_cap > 0 && size > self.size_cap {
                 Some("size-cap")
+            } else if !tracked && cbm >= 0 && self.user_ignored(rel, false) {
+                Some("gitignore")
             } else {
                 None
             }
@@ -764,6 +786,100 @@ fn matches_c_ignores_from_enclosing_repository() {
             ],
             "{mode:?}"
         );
+    }
+}
+
+#[test]
+fn matches_c_user_git_excludes() {
+    const FIXTURE: &str = "MORI_DISCOVERY_USER_EXCLUDES_FIXTURE";
+    let Some(root) = std::env::var_os(FIXTURE) else {
+        let scratch = Scratch::new();
+        // A separate process gives C and Rust the same isolated user config
+        // without changing the other tests' environment.
+        let result = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "discovery_spike::matches_c_user_git_excludes"])
+            .env(FIXTURE, &scratch.0)
+            .env("HOME", scratch.0.join("home"))
+            .env("XDG_CONFIG_HOME", scratch.0.join("xdg"))
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        return;
+    };
+    // The parent owns this scratch directory and removes it after the child exits.
+    let scratch = std::mem::ManuallyDrop::new(Scratch(root.into()));
+    let repo = scratch.0.join("repo");
+    fs::create_dir(&repo).unwrap();
+    assert!(git(&repo, &["init", "-q"]).is_some());
+    scratch.write("home/.gitconfig", "[CoRe]\n excludesFile = ~/unused\n ExcludesFILE = \"~/custom #ignore\" ; comment\n");
+    scratch.write("home/custom #ignore", "home.rs\ntracked.rs\nrescued.rs\ncbm-owned.rs\ntoo-large.rs\nglobal-dir/\nrescued-dir/\n");
+    scratch.write("xdg/git/config", "[core]\n excludesFile = ~/xdg-ignore\n");
+    scratch.write("home/xdg-ignore", "xdg-config.rs\n");
+    scratch.write("xdg/git/ignore", "xdg-default.rs\n");
+    scratch.write(
+        "repo/.cbmignore",
+        "!rescued.rs\ncbm-owned.rs\n!rescued-dir/\n",
+    );
+    scratch.write("repo/.gitignore", "!home.rs\n");
+    for path in [
+        "home.rs",
+        "xdg-config.rs",
+        "xdg-default.rs",
+        "tracked.rs",
+        "rescued.rs",
+        "cbm-owned.rs",
+        "global-dir/filtered.rs",
+        "rescued-dir/kept.rs",
+    ] {
+        scratch.write(&format!("repo/{path}"), "fn sample() {}\n");
+    }
+    scratch.write("repo/too-large.rs", [b'x'; 128]);
+    assert!(git(&repo, &["add", "-f", "tracked.rs"]).is_some());
+
+    for (precedence, excluded_file) in [
+        ("home/.gitconfig", "home.rs"),
+        ("xdg/git/config", "xdg-config.rs"),
+        ("xdg/git/ignore", "xdg-default.rs"),
+    ] {
+        for mode in Mode::ALL {
+            let mut native = NativeWalk::run(&repo, mode, 64).snapshot();
+            let mut rust = Walk::run(&repo, mode, 64).unwrap();
+            native.sort();
+            rust.sort();
+            assert_eq!(native, rust, "{precedence} {mode:?}");
+            for (path, reason) in [
+                (excluded_file, "gitignore"),
+                ("cbm-owned.rs", "cbmignore"),
+                ("too-large.rs", "size-cap"),
+            ] {
+                assert!(
+                    rust.ignored
+                        .iter()
+                        .any(|(file, why)| file.0 == path.as_bytes()
+                            && why == reason.as_bytes()),
+                    "{precedence} {mode:?}: {rust:?}"
+                );
+            }
+            for retained in ["tracked.rs", "rescued.rs", "rescued-dir/kept.rs"] {
+                assert!(
+                    rust.files
+                        .iter()
+                        .any(|file| file.path.0 == retained.as_bytes()),
+                    "{precedence} {mode:?}: {rust:?}"
+                );
+            }
+            let global_directory = RelativePath::from(Path::new("global-dir"));
+            assert_eq!(
+                rust.excluded.contains(&global_directory),
+                precedence == "home/.gitconfig"
+            );
+        }
+        fs::remove_file(scratch.0.join(precedence)).unwrap();
     }
 }
 
