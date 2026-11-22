@@ -4932,9 +4932,32 @@ TEST(daemon_application_named_snapshot_replaces_ownership_atomically) {
     fixture.session = NULL;
     int after_close = cbm_watcher_watch_count(fixture.watcher);
 
+    app_watcher_index_thread_t background = {
+        .application = fixture.application,
+        .project = fixture.project,
+        .root = fixture.root,
+        .result = -1,
+    };
+    atomic_init(&background.ready, false);
+    atomic_init(&background.proceed, true);
+    atomic_init(&background.done, false);
+    app_index_thread_t explicit = {
+        .application = fixture.application,
+        .project = fixture.project,
+        .root = fixture.root,
+        .result = -1,
+    };
+    cbm_thread_t background_thread, explicit_thread;
+    bool background_started =
+        cbm_thread_create(&background_thread, 0, app_watcher_index_thread, &background) == 0;
+    bool worker_started = background_started && app_wait_for_atomic_int(&fixture.fake.starts, 1);
+    bool explicit_started =
+        worker_started && cbm_thread_create(&explicit_thread, 0, app_index_thread, &explicit) == 0;
+    bool shared =
+        explicit_started && app_wait_for_subscribers(fixture.application, fixture.project, 2);
     atomic_store(&fixture.fake.allow_completion, true);
-    int indexed =
-        cbm_daemon_application_watcher_index(fixture.project, fixture.root, fixture.application);
+    bool background_joined = background_started && cbm_thread_join(&background_thread) == 0;
+    bool explicit_joined = explicit_started && cbm_thread_join(&explicit_thread) == 0;
     int starts = atomic_load(&fixture.fake.starts);
     bool removed = cbm_daemon_application_reconcile_named_watches(fixture.application, NULL, 0);
     int after_empty = cbm_watcher_watch_count(fixture.watcher);
@@ -4944,7 +4967,11 @@ TEST(daemon_application_named_snapshot_replaces_ownership_atomically) {
     ASSERT_TRUE(loaded);
     ASSERT_TRUE(rejected);
     ASSERT_EQ(after_close, 1);
-    ASSERT_EQ(indexed, 0);
+    ASSERT_TRUE(shared);
+    ASSERT_TRUE(background_joined);
+    ASSERT_TRUE(explicit_joined);
+    ASSERT_EQ(background.result, 0);
+    ASSERT_EQ(explicit.result, 0);
     ASSERT_EQ(starts, 1);
     ASSERT_TRUE(removed);
     ASSERT_EQ(after_empty, 0);

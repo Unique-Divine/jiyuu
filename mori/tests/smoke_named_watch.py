@@ -1,0 +1,252 @@
+#!/usr/bin/env python3
+"""Exercise opt-in named watches against an isolated Mori daemon."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shutil
+import sqlite3
+import subprocess
+import tempfile
+import time
+from collections.abc import Callable
+from contextlib import closing
+from pathlib import Path
+
+
+def run(command: list[str], env: dict[str, str], cwd: Path) -> str:
+    result = subprocess.run(
+        command,
+        cwd=cwd,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=45,
+    )
+    if result.returncode:
+        raise RuntimeError(
+            f"{command[:3]} exited {result.returncode}\n{result.stderr[-2400:]}"
+        )
+    return result.stdout
+
+
+def wait_for(
+    description: str, condition: Callable[[], bool], timeout: float = 30
+) -> float:
+    start = time.monotonic()
+    while time.monotonic() - start < timeout:
+        if condition():
+            return time.monotonic() - start
+        time.sleep(0.15)
+    raise AssertionError(f"Timed out waiting for {description}")
+
+
+def write_source(root: Path, symbol: str) -> None:
+    (root / "test.py").write_text(f"def {symbol}():\n    return 42\n", encoding="utf-8")
+
+
+def checkout(root: Path, symbol: str, env: dict[str, str]) -> None:
+    root.mkdir()
+    run(["git", "init", "-q"], env, root)
+    write_source(root, symbol)
+    run(["git", "add", "test.py"], env, root)
+    commit(root, env)
+
+
+def commit(root: Path, env: dict[str, str]) -> None:
+    run(
+        [
+            "git",
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.test",
+            "commit",
+            "-qam",
+            "fixture",
+        ],
+        env,
+        root,
+    )
+
+
+def replace_snapshot(path: Path, content: str) -> None:
+    temporary = path.with_suffix(".new")
+    temporary.write_text(content, encoding="utf-8")
+    temporary.replace(path)
+
+
+def indexed(cache: Path, project: str, symbol: str) -> bool:
+    database = cache / f"{project}.db"
+    try:
+        with closing(
+            sqlite3.connect(database.as_uri() + "?mode=ro", uri=True, timeout=0.1)
+        ) as db:
+            return (
+                db.execute(
+                    "SELECT 1 FROM nodes WHERE name = ? LIMIT 1", (symbol,)
+                ).fetchone()
+                is not None
+            )
+    except sqlite3.OperationalError:
+        # The first generation may be unpublished or the writer may be replacing it.
+        return False
+
+
+def cpu_seconds(pid: int) -> float | None:
+    stat = Path(f"/proc/{pid}/stat")
+    if not stat.exists():
+        return None
+    # Include reaped git children so the measurement covers poll commands.
+    fields = stat.read_text().rsplit(")", 1)[-1].split()
+    return sum(map(int, fields[11:15])) / os.sysconf("SC_CLK_TCK")
+
+
+def smoke(binary: Path, root: Path) -> None:
+    env = {
+        "PATH": os.environ.get("PATH", os.defpath),
+        "HOME": str(root),
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "CBM_ALLOWED_ROOT": str(root),
+        "CBM_CACHE_DIR": str(root / "cache"),
+        "CBM_RUNTIME_DIR": str(root / "run"),
+        "MORI_NAMED_WATCH_FILE": str(root / "watches.json"),
+    }
+    named = root / "named"
+    missing = root / "missing"
+    unlisted = root / "unlisted"
+    cache = Path(env["CBM_CACHE_DIR"])
+    cache.mkdir(mode=0o700)
+    Path(env["CBM_RUNTIME_DIR"]).mkdir(mode=0o700)
+    checkout(named, "initial_name", env)
+    run(["git", "worktree", "add", "--detach", str(unlisted), "HEAD"], env, named)
+    snapshot = Path(env["MORI_NAMED_WATCH_FILE"])
+    log = cache / "logs/cbm-daemon.log"
+
+    def daemon(action: str) -> str:
+        return run([str(binary), "daemon", action], env, root)
+
+    def log_count(event: str, project: str | None = None) -> int:
+        try:
+            return sum(
+                event in line and (not project or f"project={project}" in line)
+                for line in log.read_text(encoding="utf-8").splitlines()
+            )
+        except FileNotFoundError:
+            return 0
+
+    def set_named(paths: dict[str, Path]) -> None:
+        replace_snapshot(
+            snapshot,
+            json.dumps(
+                [{"project": name, "root": str(path)} for name, path in paths.items()]
+            ),
+        )
+
+    def wait_index(project: str, symbol: str) -> float:
+        return wait_for(f"{project}.{symbol}", lambda: indexed(cache, project, symbol))
+
+    set_named({"named": named, "missing": missing})
+    try:
+        started = daemon("start")
+        match = re.search(r"pid (\d+)", started)
+        assert match, "Daemon start did not report a PID"
+        pid = int(match.group(1))
+        wait_index("named", "initial_name")
+        wait_for(
+            "missing checkout report",
+            lambda: log_count("watcher.root_missing", "missing") > 0,
+        )
+        assert not (cache / "missing.db").exists()
+
+        # Observe enough time for at least two unchanged scans.
+        starts = log_count("daemon.index.worker_budget", "named")
+        initial_cpu = cpu_seconds(pid)
+        idle_start = time.monotonic()
+        time.sleep(11)
+        idle_elapsed = time.monotonic() - idle_start
+        final_cpu = cpu_seconds(pid)
+        assert log_count("daemon.index.worker_budget", "named") == starts
+        if initial_cpu is not None and final_cpu is not None:
+            print(
+                f"Idle CPU {final_cpu - initial_cpu:.3f}s over {idle_elapsed:.3f}s",
+                flush=True,
+            )
+        print("Unchanged polls started no index worker", flush=True)
+
+        write_source(named, "intermediate_save")
+        write_source(named, "closed_clients_edit")
+        latency = wait_index("named", "closed_clients_edit")
+        print(f"Closed-client edit published in {latency:.3f}s", flush=True)
+        write_source(unlisted, "unlisted_edit")
+        checkout(missing, "restored_checkout", env)
+        wait_index("missing", "restored_checkout")
+        assert not (cache / "unlisted.db").exists()
+        print(
+            "Missing checkout restored and unlisted worktree stayed inactive",
+            flush=True,
+        )
+
+        # An older persisted graph must catch up even at a clean Git HEAD.
+        daemon("stop")
+        write_source(named, "clean_offline_commit")
+        commit(named, env)
+        assert not run(["git", "status", "--porcelain"], env, named).strip()
+        assert not indexed(cache, "named", "clean_offline_commit")
+        daemon("start")
+        latency = wait_index("named", "clean_offline_commit")
+        print(
+            f"Restart published the clean offline commit in {latency:.3f}s", flush=True
+        )
+
+        rejected = log_count("daemon.named_watch.invalid_snapshot")
+        replace_snapshot(snapshot, "[")
+        wait_for(
+            "invalid reload rejection",
+            lambda: log_count("daemon.named_watch.invalid_snapshot") > rejected,
+        )
+        write_source(named, "rejected_reload_edit")
+        wait_index("named", "rejected_reload_edit")
+        print("Invalid snapshot preserved the previous membership", flush=True)
+
+        applied = log_count("daemon.named_watch.applied")
+        set_named({"missing": missing})
+        wait_for(
+            "replacement snapshot",
+            lambda: log_count("daemon.named_watch.applied") > applied,
+        )
+        write_source(named, "removed_watch_edit")
+        write_source(missing, "retained_watch_edit")
+        wait_index("missing", "retained_watch_edit")
+        assert not indexed(cache, "named", "removed_watch_edit")
+        assert indexed(cache, "named", "rejected_reload_edit")
+        print(
+            "Valid reload removed the named watch and preserved its cached graph",
+            flush=True,
+        )
+    finally:
+        daemon("stop")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--mori", type=Path, required=True)
+    parser.add_argument("--daemon-log", type=Path)
+    args = parser.parse_args()
+    with tempfile.TemporaryDirectory(prefix="mnw-", dir="/tmp") as temporary:
+        root = Path(temporary).resolve()
+        try:
+            smoke(args.mori.resolve(strict=True), root)
+        finally:
+            log = root / "cache/logs/cbm-daemon.log"
+            if args.daemon_log and log.is_file():
+                shutil.copyfile(log, args.daemon_log)
+
+
+if __name__ == "__main__":
+    main()
