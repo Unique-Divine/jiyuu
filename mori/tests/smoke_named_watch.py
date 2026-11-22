@@ -178,8 +178,6 @@ def smoke(binary: Path, root: Path) -> None:
             "named",
             "--status",
             "true",
-            "--format",
-            "json",
         ]
         wait_for(
             "named job status",
