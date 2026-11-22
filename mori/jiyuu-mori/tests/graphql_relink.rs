@@ -10,6 +10,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use rusqlite::{Connection, OpenFlags, params};
 use serde_json::{Value, json};
 
+#[path = "../src/cypher_linear.rs"]
+mod cypher_linear;
+
 const CLIENT: &str = "client";
 const MORI: &str = env!("CARGO_BIN_EXE_mori");
 
@@ -99,7 +102,8 @@ impl Fixture {
     }
 
     fn query(&self, bin: &Path, project: &str, cypher: &str) -> Value {
-        let args = json!({"project": project, "query": cypher, "format": "json"});
+        let args =
+            json!({"project": project, "query": cypher, "format": "json"});
         let output = self
             .command(bin)
             .args(["cli", "--quiet", "query_graph", &args.to_string()])
@@ -115,9 +119,29 @@ impl Fixture {
         serde_json::from_slice(&output.stdout).expect("parse query response")
     }
 
+    fn compare_rust_query(
+        &self,
+        project: &str,
+        cypher: &str,
+        reference: &Value,
+    ) {
+        let db = self.0.join("cache").join(format!("{project}.db"));
+        let query = cypher_linear::classify(cypher)
+            .expect("query belongs to the Rust subset");
+        let answer = query.execute(&db, project).expect("execute in Rust");
+        assert_eq!(reference["columns"], json!(answer.columns), "{cypher}");
+        assert_eq!(reference["rows"], json!(answer.rows), "{cypher}");
+        assert_eq!(reference["total"], answer.rows.len(), "{cypher}");
+        assert_eq!(
+            reference["total_relation"],
+            if answer.truncated { "gte" } else { "eq" }
+        );
+    }
+
     fn query_reference(&self, project: &str, cypher: &str) -> Value {
         if option_env!("MORI_C_REFERENCE") == Some("1") {
-            let reference = Path::new(env!("MORI_C_BUILD_DIR")).join("codebase-memory-mcp");
+            let reference =
+                Path::new(env!("MORI_C_BUILD_DIR")).join("codebase-memory-mcp");
             return self.query(&reference, project, cypher);
         }
         self.query(Path::new(MORI), project, cypher)
@@ -358,8 +382,22 @@ fn linear_query_reference_keeps_order_and_duplicate_projections() {
     let first = node(&db, CLIENT, "Caller", "other", "caller.other", "z.py");
     let second = node(&db, CLIENT, "Caller", "kept", "caller.kept", "a.py");
     let last = node(&db, CLIENT, "Caller", "kept", "caller.last", "b.py");
-    let target = node(&db, CLIENT, "Service", "served", "service.served", "service.py");
-    let peer = node(&db, CLIENT, "Service", "served", "service.other", "other.py");
+    let target = node(
+        &db,
+        CLIENT,
+        "Service",
+        "served",
+        "service.served",
+        "service.py",
+    );
+    let peer = node(
+        &db,
+        CLIENT,
+        "Service",
+        "served",
+        "service.other",
+        "other.py",
+    );
     // Edge insertion order differs from the outbound index's target-id order.
     for (source, destination, tag) in [
         (first, target, "first"),
@@ -367,7 +405,14 @@ fn linear_query_reference_keeps_order_and_duplicate_projections() {
         (second, target, "target"),
         (last, target, "last"),
     ] {
-        edge(&db, CLIENT, source, destination, "CALLS", json!({"tag": tag}));
+        edge(
+            &db,
+            CLIENT,
+            source,
+            destination,
+            "CALLS",
+            json!({"tag": tag}),
+        );
     }
     drop(db);
 
@@ -375,7 +420,11 @@ fn linear_query_reference_keeps_order_and_duplicate_projections() {
         (
             "MATCH (a:Caller)-[r:CALLS]->(b:Service) WHERE a.name = 'kept' AND b.name = 'served' RETURN a, b.name, r.missing LIMIT 3",
             json!(["a", "b.name", "r.missing"]),
-            json!([["kept", "served", ""], ["kept", "served", ""], ["kept", "served", ""]]),
+            json!([
+                ["kept", "served", ""],
+                ["kept", "served", ""],
+                ["kept", "served", ""]
+            ]),
         ),
         (
             "MATCH (a:Caller)-[r:CALLS]->(b:Service {qualified_name: 'service.served'}) RETURN a.qualified_name, r.tag LIMIT 2",
@@ -394,6 +443,7 @@ fn linear_query_reference_keeps_order_and_duplicate_projections() {
         ),
     ] {
         let result = fixture.query_reference(CLIENT, query);
+        fixture.compare_rust_query(CLIENT, query, &result);
         assert_eq!(result["columns"], columns, "{query}");
         assert_eq!(result["rows"], rows, "{query}");
         assert_eq!(result["total"], rows.as_array().unwrap().len(), "{query}");
@@ -468,6 +518,7 @@ RETURN rt.name, h.name, h.file_path, x.callers LIMIT 100"#;
 
     let result: Value =
         serde_json::from_slice(&linked.stdout).expect("parse query result");
+    fixture.compare_rust_query(PROVIDER, QUERY, &result);
     assert_eq!(
         result["columns"],
         json!(["rt.name", "h.name", "h.file_path", "x.callers"])
@@ -489,4 +540,51 @@ RETURN rt.name, h.name, h.file_path, x.callers LIMIT 100"#;
             "client:client.B.load": {"project": CLIENT, "qualified_name": "client.B.load", "function": "load", "file": "client.ts"},
         })
     );
+
+    // Add callers to the same provider edge to cross the native cell cap.
+    // Keep that clipped value in parity until the public contract changes.
+    let db = fixture.db(PROVIDER);
+    let mut expanded = callers;
+    for n in 0..12 {
+        let qualified = format!("client.Extra{n}.load");
+        expanded[format!("client:{qualified}")] = json!({"project": CLIENT, "qualified_name": qualified, "function": "load", "file": "long/client/path.ts"});
+    }
+    assert_eq!(
+        db.execute(
+            "UPDATE edges SET properties = ? WHERE type = 'CROSS_GRAPHQL_CALLS'",
+            [json!({"callers": expanded}).to_string()],
+        )
+        .unwrap(),
+        1,
+    );
+    drop(db);
+    let reference = fixture.query_reference(PROVIDER, QUERY);
+    let caller_cell = reference["rows"][0][3].as_str().unwrap();
+    assert_eq!(caller_cell.len(), 511);
+    assert!(serde_json::from_str::<Value>(caller_cell).is_err());
+    fixture.compare_rust_query(PROVIDER, QUERY, &reference);
+}
+
+#[test]
+fn unsupported_syntax_and_supported_storage_errors_are_distinct() {
+    for query in [
+        "MATCH (a) RETURN a.name",
+        "MATCH (a)-[:CALLS]->(b) RETURN b.name ORDER BY b.name",
+        "MATCH (a)-[:CALLS*1..2]->(b) RETURN b.name",
+        "MATCH (a)-[:CALLS]-(b) RETURN b.name",
+        "MATCH (a)-[:CALLS]->(b) WHERE a.name = 'x' OR b.name = 'y' RETURN b.name",
+        "MATCH (a)-[:CALLS]->(b) RETURN count(b)",
+        "MATCH (a)-[:CALLS]->(b) RETURN typo.name",
+        "MATCH (a)-[:CALLS]->(b) RETURN a.name MATCH (n)",
+        "MATCH (a {name: '.*'})-[:CALLS]->(b) RETURN b.name",
+    ] {
+        assert!(cypher_linear::classify(query).is_err(), "{query}");
+    }
+
+    let fixture = Fixture::new();
+    let path = fixture.0.join("missing.db");
+    let query = cypher_linear::classify("MATCH (a)-[:CALLS]->(b) RETURN b.name")
+        .unwrap();
+    assert!(query.execute(&path, CLIENT).is_err());
+    assert!(!path.exists(), "execution must not silently create a cache");
 }
