@@ -167,6 +167,26 @@ def smoke(binary: Path, root: Path) -> None:
 
         # Observe enough time for at least two unchanged scans.
         starts = log_count("daemon.index.worker_budget", "named")
+        assert starts == 1, "Startup did not reserve the configured project name"
+        status_command = [
+            str(binary),
+            "cli",
+            "index_repository",
+            "--repo-path",
+            str(named),
+            "--name",
+            "named",
+            "--status",
+            "true",
+            "--format",
+            "json",
+        ]
+        wait_for(
+            "named job status",
+            lambda: (
+                json.loads(run(status_command, env, root)).get("state") == "succeeded"
+            ),
+        )
         initial_cpu = cpu_seconds(pid)
         idle_start = time.monotonic()
         time.sleep(11)

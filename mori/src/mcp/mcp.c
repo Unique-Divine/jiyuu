@@ -12873,8 +12873,7 @@ static char *build_worker_unsafe_terminal_response(const char *args, cbm_proc_ou
 static bool index_args_serving_index_servable(const char *args) {
     char *repo_path = cbm_mcp_get_string_arg(args, "repo_path");
     char *name_override = cbm_mcp_get_string_arg(args, "name");
-    char *project_name =
-        cbm_project_name_from_path(name_override && name_override[0] ? name_override : repo_path);
+    char *project_name = cbm_project_name_with_override(repo_path, name_override);
     bool servable = false;
     if (project_name) {
         char db_path[CBM_SZ_1K] = {0};
@@ -13871,7 +13870,7 @@ static char *index_status_project_key(cbm_mcp_server_t *srv, const char *args, c
                                       size_t error_size) {
     char *name = cbm_mcp_get_string_arg(args, "name");
     if (name && name[0]) {
-        char *key = cbm_project_name_from_path(name);
+        char *key = cbm_project_name_with_override(NULL, name);
         safe_free(name);
         return key;
     }
@@ -13912,8 +13911,7 @@ static char *index_status_project_key(cbm_mcp_server_t *srv, const char *args, c
         safe_free(repo_path);
         return NULL;
     }
-    const char *key_source = owner ? owner : repo_path;
-    char *key = key_source ? cbm_project_name_from_path(key_source) : NULL;
+    char *key = owner || repo_path ? cbm_project_name_with_override(repo_path, owner) : NULL;
     safe_free(owner);
     safe_free(repo_path);
     if (!key) {
@@ -14083,8 +14081,7 @@ static char *handle_index_repository(cbm_mcp_server_t *srv, const char *args) {
      * execution. A supervised worker owns the OS mutation lease itself: if the
      * CLI parent is killed, the worker must keep project exclusion until its
      * parent-death watchdog reaps the complete worker tree. */
-    char *mutation_project =
-        cbm_project_name_from_path(name_override && name_override[0] ? name_override : repo_path);
+    char *mutation_project = cbm_project_name_with_override(repo_path, name_override);
     if (!mutation_project) {
         index_args_free(repo_path, mode_str, name_override);
         return cbm_mcp_text_result("could not resolve index project name", true);

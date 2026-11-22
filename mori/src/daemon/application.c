@@ -2150,7 +2150,7 @@ static char *application_index_project_key(const char *root_path, const char *ar
     yyjson_doc *doc = yyjson_read_opts((char *)args_json, strlen(args_json), 0,
                                        cbm_json_writer_allocator(), NULL);
     const char *override = yyjson_get_str(yyjson_obj_get(yyjson_doc_get_root(doc), "name"));
-    char *key = cbm_project_name_from_path(override && override[0] ? override : root_path);
+    char *key = cbm_project_name_with_override(root_path, override);
     yyjson_doc_free(doc);
     return key;
 }
