@@ -414,6 +414,10 @@ fn linear_query_reference_keeps_order_and_duplicate_projections() {
             json!({"tag": tag}),
         );
     }
+    for (source, destination) in [(peer, last), (target, last), (target, first)]
+    {
+        edge(&db, CLIENT, source, destination, "HANDLES", json!({}));
+    }
     drop(db);
 
     for (query, columns, rows) in [
@@ -439,6 +443,15 @@ fn linear_query_reference_keeps_order_and_duplicate_projections() {
                 ["caller.kept", "peer"],
                 ["caller.kept", "target"],
                 ["caller.last", "last"]
+            ]),
+        ),
+        (
+            "MATCH (a:Caller)-[:CALLS]->(b:Service)-[:HANDLES]->(c:Caller) WHERE a.qualified_name = 'caller.kept' RETURN b.qualified_name, c.qualified_name LIMIT 3",
+            json!(["b.qualified_name", "c.qualified_name"]),
+            json!([
+                ["service.other", "caller.last"],
+                ["service.served", "caller.last"],
+                ["service.served", "caller.other"]
             ]),
         ),
         (
