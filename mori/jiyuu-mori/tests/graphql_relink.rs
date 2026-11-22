@@ -3,7 +3,7 @@
 
 use std::fs::{self, DirBuilder};
 use std::os::unix::fs::DirBuilderExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -11,6 +11,7 @@ use rusqlite::{Connection, OpenFlags, params};
 use serde_json::{Value, json};
 
 const CLIENT: &str = "client";
+const MORI: &str = env!("CARGO_BIN_EXE_mori");
 
 struct Fixture(PathBuf);
 
@@ -47,14 +48,21 @@ impl Fixture {
         self.db(project)
     }
 
-    fn cli(&self, args: Value) -> Value {
-        let output = Command::new(env!("CARGO_BIN_EXE_mori"))
+    fn command(&self, bin: &Path) -> Command {
+        let mut command = Command::new(bin);
+        command
             .current_dir("/")
             .env_clear()
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
             .env("HOME", std::env::var_os("HOME").unwrap_or_default())
             .env("CBM_CACHE_DIR", self.0.join("cache"))
-            .env("CBM_RUNTIME_DIR", self.0.join("rt"))
+            .env("CBM_RUNTIME_DIR", self.0.join("rt"));
+        command
+    }
+
+    fn cli(&self, args: Value) -> Value {
+        let output = self
+            .command(Path::new(MORI))
             .args(["cli", "--quiet", "index_repository", &args.to_string()])
             .output()
             .expect("run Mori");
@@ -316,4 +324,95 @@ fn graphql_relinks_keep_exact_resolver_and_reconcile_callers() {
             .expect("count local GraphQL calls");
         assert_eq!(calls, 1, "relink must preserve the remaining source call");
     }
+}
+
+#[test]
+fn documented_trades_query_returns_resolver_and_named_client_callers() {
+    const PROVIDER: &str = "provider";
+    const FIELD_PATH: &str = "Query.perp.trades";
+    const ROUTE: &str = "__graphql__Query.perp.trades";
+    // Keep this query in sync with "Who uses a resolver" in Mori's README.
+    const QUERY: &str = r#"MATCH (h)-[:HANDLES]->(rt:Route)<-[x:CROSS_GRAPHQL_CALLS]-()
+WHERE h.name = "Trades" AND rt.qualified_name = "__graphql__Query.perp.trades"
+RETURN rt.name, h.name, h.file_path, x.callers LIMIT 100"#;
+
+    let fixture = Fixture::new();
+    seed_client(&fixture.index(CLIENT), ROUTE);
+    let provider = fixture.index(PROVIDER);
+    let route = node(
+        &provider,
+        PROVIDER,
+        "Route",
+        FIELD_PATH,
+        ROUTE,
+        "schema.graphqls",
+    );
+    let resolver = node(
+        &provider,
+        PROVIDER,
+        "Method",
+        "Trades",
+        "provider.resolver.perpResolver.Trades",
+        "resolver.go",
+    );
+    edge(
+        &provider,
+        PROVIDER,
+        resolver,
+        route,
+        "HANDLES",
+        json!({"via": "gqlgen_resolver"}),
+    );
+    drop(provider);
+    fixture.relink(CLIENT, &[PROVIDER], 2);
+
+    let args = json!({"project": PROVIDER, "query": QUERY, "format": "json"})
+        .to_string();
+    let query = |bin: &Path| {
+        let output = fixture
+            .command(bin)
+            .args(["cli", "--quiet", "query_graph", &args])
+            .output()
+            .expect("query the provider graph");
+        let stop = fixture
+            .command(bin)
+            .args(["daemon", "stop"])
+            .output()
+            .expect("stop fixture daemon");
+        assert!(stop.status.success(), "{stop:?}");
+        assert!(output.status.success(), "{output:?}");
+        output
+    };
+    let linked = query(Path::new(MORI));
+    if option_env!("MORI_C_REFERENCE") == Some("1") {
+        let reference_bin =
+            Path::new(env!("MORI_C_BUILD_DIR")).join("codebase-memory-mcp");
+        let reference = query(&reference_bin);
+        assert_eq!(linked.stdout, reference.stdout);
+        assert_eq!(linked.stderr, reference.stderr);
+    }
+
+    let result: Value =
+        serde_json::from_slice(&linked.stdout).expect("parse query result");
+    assert_eq!(
+        result["columns"],
+        json!(["rt.name", "h.name", "h.file_path", "x.callers"])
+    );
+    assert_eq!(result["total"], 1, "{result}");
+    let [row] = result["rows"].as_array().expect("query rows").as_slice() else {
+        panic!("expected one resolver row: {result}");
+    };
+    assert_eq!(row[0], FIELD_PATH);
+    assert_eq!(row[1], "Trades");
+    assert_eq!(row[2], "resolver.go");
+    let callers: Value =
+        serde_json::from_str(row[3].as_str().expect("caller record cell"))
+            .expect("parse caller records");
+    assert_eq!(
+        callers,
+        json!({
+            "client:client.A.load": {"project": CLIENT, "qualified_name": "client.A.load", "function": "load", "file": "client.ts"},
+            "client:client.B.load": {"project": CLIENT, "qualified_name": "client.B.load", "function": "load", "file": "client.ts"},
+        })
+    );
 }
