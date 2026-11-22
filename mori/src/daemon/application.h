@@ -107,6 +107,20 @@ cbm_daemon_application_t *cbm_daemon_application_new(const cbm_daemon_applicatio
  * stop/drain paths latch it stopping. */
 void cbm_daemon_application_set_permanent(cbm_daemon_application_t *application, bool permanent);
 
+typedef struct {
+    const char *project;
+    const char *root;
+} cbm_daemon_named_watch_t;
+
+enum { CBM_DAEMON_NAMED_WATCH_LIMIT = 128 };
+
+/* Enable named ownership in a permanent daemon and apply a full snapshot.
+ * A rejected registration leaves the previous membership intact. Empty
+ * snapshots leave only session-owned watches. */
+bool cbm_daemon_application_reconcile_named_watches(cbm_daemon_application_t *application,
+                                                    const cbm_daemon_named_watch_t *entries,
+                                                    size_t count);
+
 /* Cancel and reap all daemon-owned operations within timeout_ms. Normal final
  * client shutdown calls this before watcher/store teardown. Idempotent. */
 bool cbm_daemon_application_shutdown(cbm_daemon_application_t *application, uint32_t timeout_ms);

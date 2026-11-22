@@ -1293,17 +1293,19 @@ bool cbm_watcher_watch_named(cbm_watcher_t *w, const char *project_name, const c
     return watcher_watch(w, project_name, root_path, true);
 }
 
-void cbm_watcher_clear_named(cbm_watcher_t *w, const char *project_name) {
+bool cbm_watcher_set_named(cbm_watcher_t *w, const char *project_name, bool named) {
     if (!w || !project_name) {
-        return;
+        return false;
     }
     cbm_mutex_lock(&w->projects_lock);
     project_state_t *s = cbm_ht_get(w->projects, project_name);
     if (s) {
-        atomic_store(&s->named, false);
-        atomic_store(&s->catch_up, false);
+        if (atomic_exchange(&s->named, named) != named) {
+            atomic_store(&s->catch_up, named);
+        }
     }
     cbm_mutex_unlock(&w->projects_lock);
+    return s != NULL;
 }
 
 void cbm_watcher_unwatch(cbm_watcher_t *w, const char *project_name) {
@@ -1733,6 +1735,10 @@ static void poll_project(const char *key, void *val, void *ud) {
 
     /* Initialize baseline on first poll */
     if (!s->baseline_done) {
+        (void)init_baseline(ctx->w, s);
+        return;
+    }
+    if (!s->is_git && !s->tree_poll && atomic_load(&s->named)) {
         (void)init_baseline(ctx->w, s);
         return;
     }
