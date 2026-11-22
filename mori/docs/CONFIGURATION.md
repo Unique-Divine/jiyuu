@@ -16,6 +16,34 @@ This page documents the configuration files that Mori reads or writes today.
 
 Mori resolves `CBM_CACHE_DIR` to a canonical per-account path before using any of these locations. The log directory and files are private to the account.
 
+### Named Watches Prototype
+
+Set `MORI_NAMED_WATCH_FILE` to an absolute JSON file path when you start a
+permanent daemon with `mori daemon start`. In this mode, only listed projects
+remain watched after their last client disconnects. An unlisted project can
+still have a session watch.
+
+Each entry has a unique `project` name and canonical absolute `root` path.
+Reuse the name and root from `mori cli list_projects` for an existing graph.
+The daemon rejects a name that already belongs to a different checkout.
+
+```json
+[
+  {"project": "my-project", "root": "/home/you/src/my-project"}
+]
+```
+
+Write updates to a temporary file in the same directory and replace the
+configured file. The daemon checks for replacements once per second and
+keeps the last accepted list if a snapshot is malformed or unavailable.
+Replace it with `[]` to remove all named watches. Removing a watch leaves
+its cached graph available. A listed checkout that disappears keeps its cache
+and catches up when it returns. The first poll after startup catches up even
+when the repository is clean.
+
+Run `python3 -I mori/tests/smoke_named_watch.py --mori target/release/mori` from
+the Jiyuu root to check the lifecycle with a temporary cache and daemon.
+
 ## 1. Custom File Extension Mapping
 
 Two optional JSON files let you map additional file extensions to built-in languages.
