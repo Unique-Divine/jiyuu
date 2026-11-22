@@ -4924,10 +4924,11 @@ TEST(daemon_application_named_snapshot_replaces_ownership_atomically) {
     ASSERT_TRUE(app_watch_race_fixture_init(&fixture, 57));
     cbm_daemon_application_set_permanent(fixture.application, true);
     const cbm_daemon_named_watch_t named = {.project = fixture.project, .root = fixture.root};
-    bool loaded = cbm_daemon_application_reconcile_named_watches(fixture.application, &named, 1);
+    bool loaded =
+        cbm_daemon_application_reconcile_named_watches(fixture.application, &named, 1, NULL);
     const cbm_daemon_named_watch_t invalid[] = {named, named};
     bool rejected =
-        !cbm_daemon_application_reconcile_named_watches(fixture.application, invalid, 2);
+        !cbm_daemon_application_reconcile_named_watches(fixture.application, invalid, 2, NULL);
     fixture.callbacks.session_close(fixture.callbacks.context, fixture.session);
     fixture.session = NULL;
     int after_close = cbm_watcher_watch_count(fixture.watcher);
@@ -4959,7 +4960,8 @@ TEST(daemon_application_named_snapshot_replaces_ownership_atomically) {
     bool background_joined = background_started && cbm_thread_join(&background_thread) == 0;
     bool explicit_joined = explicit_started && cbm_thread_join(&explicit_thread) == 0;
     int starts = atomic_load(&fixture.fake.starts);
-    bool removed = cbm_daemon_application_reconcile_named_watches(fixture.application, NULL, 0);
+    bool removed =
+        cbm_daemon_application_reconcile_named_watches(fixture.application, NULL, 0, NULL);
     int after_empty = cbm_watcher_watch_count(fixture.watcher);
     int skipped =
         cbm_daemon_application_watcher_index(fixture.project, fixture.root, fixture.application);
@@ -4984,7 +4986,8 @@ TEST(daemon_application_unlisted_watch_ends_with_session_in_named_mode) {
     app_watch_race_fixture_t fixture;
     ASSERT_TRUE(app_watch_race_fixture_init(&fixture, 58));
     cbm_daemon_application_set_permanent(fixture.application, true);
-    bool loaded = cbm_daemon_application_reconcile_named_watches(fixture.application, NULL, 0);
+    bool loaded =
+        cbm_daemon_application_reconcile_named_watches(fixture.application, NULL, 0, NULL);
     int before_close = cbm_watcher_watch_count(fixture.watcher);
     fixture.callbacks.session_close(fixture.callbacks.context, fixture.session);
     fixture.session = NULL;

@@ -26,6 +26,8 @@ still have a session watch.
 Each entry has a unique `project` name and canonical absolute `root` path.
 Reuse the name and root from `mori cli list_projects` for an existing graph.
 The daemon rejects a name that already belongs to a different checkout.
+For a checkout without an index, pass the configured name to any manual
+`index_repository` request so it shares the named watch's job.
 
 ```json
 [
@@ -34,12 +36,14 @@ The daemon rejects a name that already belongs to a different checkout.
 ```
 
 Write updates to a temporary file in the same directory and replace the
-configured file. The daemon checks for replacements once per second and
-keeps the last accepted list if a snapshot is malformed or unavailable.
+configured file. While the daemon is running, it checks for replacements once
+per second and keeps the last accepted list if a snapshot is malformed or
+unavailable.
 Replace it with `[]` to remove all named watches. Removing a watch leaves
 its cached graph available. A listed checkout that disappears keeps its cache
-and catches up when it returns. The first poll after startup catches up even
-when the repository is clean.
+and catches up when it returns. Startup schedules a catch-up index run even
+when the repository is clean. Re-enabling `auto_watch` restores the accepted
+list.
 
 Run `python3 -I mori/tests/smoke_named_watch.py --mori target/release/mori` from
 the Jiyuu root to check the lifecycle with a temporary cache and daemon.

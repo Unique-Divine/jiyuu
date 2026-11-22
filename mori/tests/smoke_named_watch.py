@@ -74,9 +74,11 @@ def commit(root: Path, env: dict[str, str]) -> None:
     )
 
 
-def replace_snapshot(path: Path, content: str) -> None:
+def replace_snapshot(path: Path, content: str, mtime_ns: int | None = None) -> None:
     temporary = path.with_suffix(".new")
     temporary.write_text(content, encoding="utf-8")
+    if mtime_ns is not None:
+        os.utime(temporary, ns=(time.time_ns(), mtime_ns))
     temporary.replace(path)
 
 
@@ -140,18 +142,16 @@ def smoke(binary: Path, root: Path) -> None:
         except FileNotFoundError:
             return 0
 
-    def set_named(paths: dict[str, Path]) -> None:
-        replace_snapshot(
-            snapshot,
-            json.dumps(
-                [{"project": name, "root": str(path)} for name, path in paths.items()]
-            ),
+    def snapshot_text(paths: dict[str, Path]) -> str:
+        return json.dumps(
+            [{"project": name, "root": str(path)} for name, path in paths.items()]
         )
 
     def wait_index(project: str, symbol: str) -> float:
         return wait_for(f"{project}.{symbol}", lambda: indexed(cache, project, symbol))
 
-    set_named({"named": named, "missing": missing})
+    complete = snapshot_text({"named": named, "missing": missing})
+    replace_snapshot(snapshot, complete)
     try:
         started = daemon("start")
         match = re.search(r"pid (\d+)", started)
@@ -160,7 +160,7 @@ def smoke(binary: Path, root: Path) -> None:
         wait_index("named", "initial_name")
         wait_for(
             "missing checkout report",
-            lambda: log_count("watcher.root_missing", "missing") > 0,
+            lambda: log_count("daemon.named_watch.root_missing", "missing") > 0,
         )
         assert not (cache / "missing.db").exists()
 
@@ -214,8 +214,31 @@ def smoke(binary: Path, root: Path) -> None:
         wait_index("named", "rejected_reload_edit")
         print("Invalid snapshot preserved the previous membership", flush=True)
 
+        suspended = log_count("daemon.named_watch.suspended")
+        run([str(binary), "config", "set", "auto_watch", "false"], env, root)
+        wait_for(
+            "watch suspension",
+            lambda: log_count("daemon.named_watch.suspended") > suspended,
+        )
+        write_source(named, "suspended_edit")
+        assert not indexed(cache, "named", "suspended_edit")
+        run([str(binary), "config", "set", "auto_watch", "true"], env, root)
+        wait_index("named", "suspended_edit")
+        print("Re-enabling auto_watch restored the accepted membership", flush=True)
+
         applied = log_count("daemon.named_watch.applied")
-        set_named({"missing": missing})
+        replace_snapshot(snapshot, complete)
+        wait_for(
+            "valid snapshot after invalid reload",
+            lambda: log_count("daemon.named_watch.applied") > applied,
+        )
+        applied = log_count("daemon.named_watch.applied")
+        initial = snapshot.stat()
+        updated = snapshot_text({"missing": missing}).ljust(len(complete))
+        replace_snapshot(snapshot, updated, initial.st_mtime_ns)
+        replacement = snapshot.stat()
+        assert replacement.st_size == initial.st_size
+        assert replacement.st_mtime_ns == initial.st_mtime_ns
         wait_for(
             "replacement snapshot",
             lambda: log_count("daemon.named_watch.applied") > applied,
@@ -224,9 +247,9 @@ def smoke(binary: Path, root: Path) -> None:
         write_source(missing, "retained_watch_edit")
         wait_index("missing", "retained_watch_edit")
         assert not indexed(cache, "named", "removed_watch_edit")
-        assert indexed(cache, "named", "rejected_reload_edit")
+        assert indexed(cache, "named", "suspended_edit")
         print(
-            "Valid reload removed the named watch and preserved its cached graph",
+            "Equal-metadata replacement removed the watch and preserved its graph",
             flush=True,
         )
     finally:
