@@ -683,9 +683,15 @@ RETURN c.name, c.file_path, r.operation LIMIT 100
 Who uses a resolver, from the server project:
 
 ```cypher
-MATCH (h)-[:HANDLES]->(rt:Route)<-[x:CROSS_GRAPHQL_CALLS]-(c)
-WHERE h.name = "Trades" RETURN rt.name, c.name, c.file_path LIMIT 100
+MATCH (h)-[:HANDLES]->(rt:Route)<-[x:CROSS_GRAPHQL_CALLS]-()
+WHERE h.name = "Trades" AND rt.qualified_name = "__graphql__Query.perp.trades"
+RETURN rt.name, h.name, h.file_path, x.callers LIMIT 100
 ```
+
+The provider stores caller records in `x.callers`, keyed by client project
+and qualified name. Each record includes the caller's function and file.
+The C query engine returns at most 511 bytes when projecting `x.callers`.
+A larger caller map can appear as truncated JSON.
 
 Map schema files if your build doesn't already, with
 `{"extra_extensions": {".graphqls": "graphql"}}` (see
