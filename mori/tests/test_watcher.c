@@ -1736,6 +1736,33 @@ TEST(watcher_no_change_no_reindex) {
     PASS();
 }
 
+TEST(watcher_named_clean_checkout_catches_up_once) {
+    char tmpdir[] = "/tmp/cbm_watcher_named_XXXXXX";
+    ASSERT_NOT_NULL(cbm_mkdtemp(tmpdir));
+    ASSERT_EQ(wt_git(tmpdir, "init -q"), 0);
+    char path[300];
+    th_write_file(wt_path(path, sizeof(path), tmpdir, "file.txt"), "hello\n");
+    ASSERT_EQ(wt_git(tmpdir, "add file.txt"), 0);
+    ASSERT_EQ(wt_git(tmpdir, "commit -q -m init"), 0);
+
+    cbm_store_t *store = cbm_store_open_memory();
+    cbm_watcher_t *watcher = cbm_watcher_new(store, index_callback, NULL);
+    ASSERT_NOT_NULL(watcher);
+    index_call_count = 0;
+    ASSERT_TRUE(cbm_watcher_watch_named(watcher, "named", tmpdir));
+    ASSERT_EQ(cbm_watcher_poll_once(watcher), 0);
+    cbm_watcher_touch(watcher, "named");
+    ASSERT_EQ(cbm_watcher_poll_once(watcher), 1);
+    ASSERT_TRUE(cbm_watcher_watch_named(watcher, "named", tmpdir));
+    cbm_watcher_touch(watcher, "named");
+    ASSERT_EQ(cbm_watcher_poll_once(watcher), 0);
+    ASSERT_EQ(index_call_count, 1);
+    cbm_watcher_free(watcher);
+    cbm_store_close(store);
+    th_rmtree(tmpdir);
+    PASS();
+}
+
 /* #1953: the reindex's OWN OUTPUT must never count as a change. After every
  * publish the pipeline re-exports <root>/.codebase-memory/graph.db.zst (plus
  * artifact.json) whenever an artifact already lives there — a `persistence:
@@ -4207,6 +4234,7 @@ SUITE(watcher) {
     RUN_TEST(watcher_identical_watch_preserves_dirty_baseline);
     RUN_TEST(watcher_detects_new_file);
     RUN_TEST(watcher_no_change_no_reindex);
+    RUN_TEST(watcher_named_clean_checkout_catches_up_once);
     RUN_TEST(watcher_own_artifact_export_does_not_retrigger_issue1953);
     RUN_TEST(watcher_dirty_state_reindexes_once_issue937);
     RUN_TEST(watcher_failed_reindex_retries_issue937);
