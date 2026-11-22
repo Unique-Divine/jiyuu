@@ -7776,9 +7776,8 @@ static const char *coverage_status(const cbm_coverage_row_t *rows, int count,
     return "no_recorded_issue";
 }
 
-static const char *coverage_recommended_action(const char *status, const char *freshness,
-                                               bool content_verified) {
-    if (!coverage_freshness_current(freshness, content_verified)) {
+static const char *coverage_recommended_action(const char *status, bool content_current) {
+    if (!content_current) {
         return "read_source_and_reindex";
     }
     if (strcmp(status, "partial") == 0) {
@@ -7802,6 +7801,29 @@ static const char *coverage_recommended_action(const char *status, const char *f
         return "use_graph_with_best_effort_caveat";
     }
     return "read_source_and_reindex";
+}
+
+static cbm_mcp_coverage_verdict_reader_fn coverage_verdict_reader;
+
+void cbm_mcp_set_coverage_verdict_reader(cbm_mcp_coverage_verdict_reader_fn reader) {
+    coverage_verdict_reader = reader;
+}
+
+static cbm_mcp_coverage_verdict_t coverage_path_verdict(
+    const cbm_mcp_coverage_path_request_t *request) {
+    if (coverage_verdict_reader) {
+        return coverage_verdict_reader(request);
+    }
+    const char *status =
+        request->outside
+            ? "outside_project"
+            : coverage_status(request->rows, (int)request->row_count, request->requested_path,
+                              request->recording_status, request->generation_matches,
+                              request->lookup_ok, request->exact_path_verified);
+    return (cbm_mcp_coverage_verdict_t){
+        .status = status,
+        .recommended_action = coverage_recommended_action(status, request->content_current),
+    };
 }
 
 static char *handle_check_index_coverage(cbm_mcp_server_t *srv, const char *args) {
@@ -7919,18 +7941,23 @@ static char *handle_check_index_coverage(cbm_mcp_server_t *srv, const char *args
             const char *freshness =
                 coverage_path_freshness(store, project, have_project ? proj.root_path : NULL, rel,
                                         &outside, &content_verified);
-            bool exact_path_verified = have_meta && meta.hash_records_complete &&
-                                       coverage_freshness_current(freshness, content_verified);
-            const char *status =
-                outside ? "outside_project"
-                        : coverage_status(rows, row_count, rel, recording_status,
-                                          generation_matches, lookup_ok, exact_path_verified);
-            yyjson_mut_obj_add_strcpy(doc, item, "status", status);
+            bool content_current = coverage_freshness_current(freshness, content_verified);
+            const cbm_mcp_coverage_path_request_t request = {
+                .rows = rows,
+                .row_count = (size_t)row_count,
+                .requested_path = rel,
+                .recording_status = recording_status,
+                .outside = outside,
+                .lookup_ok = lookup_ok,
+                .generation_matches = generation_matches,
+                .exact_path_verified = have_meta && meta.hash_records_complete && content_current,
+                .content_current = content_current,
+            };
+            cbm_mcp_coverage_verdict_t verdict = coverage_path_verdict(&request);
+            yyjson_mut_obj_add_strcpy(doc, item, "status", verdict.status);
             yyjson_mut_obj_add_strcpy(doc, item, "freshness", freshness);
             yyjson_mut_obj_add_bool(doc, item, "content_verified", content_verified);
-            yyjson_mut_obj_add_strcpy(
-                doc, item, "recommended_action",
-                coverage_recommended_action(status, freshness, content_verified));
+            yyjson_mut_obj_add_strcpy(doc, item, "recommended_action", verdict.recommended_action);
             yyjson_mut_val *coverage = yyjson_mut_arr(doc);
             for (int i = 0; i < row_count; i++) {
                 coverage_add_row_json(doc, coverage, &rows[i], rel, diagnostics_full);
