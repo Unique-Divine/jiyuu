@@ -121,6 +121,7 @@ def smoke(binary: Path, root: Path) -> None:
     }
     named = root / "named"
     missing = root / "missing"
+    denied = root / "denied"
     unlisted = root / "unlisted"
     cache = Path(env["CBM_CACHE_DIR"])
     cache.mkdir(mode=0o700)
@@ -150,7 +151,7 @@ def smoke(binary: Path, root: Path) -> None:
     def wait_index(project: str, symbol: str) -> float:
         return wait_for(f"{project}.{symbol}", lambda: indexed(cache, project, symbol))
 
-    complete = snapshot_text({"named": named, "missing": missing})
+    complete = snapshot_text({"named": named, "missing": missing, "denied": denied})
     replace_snapshot(snapshot, complete)
     try:
         started = daemon("start")
@@ -184,9 +185,12 @@ def smoke(binary: Path, root: Path) -> None:
         latency = wait_index("named", "closed_clients_edit")
         print(f"Closed-client edit published in {latency:.3f}s", flush=True)
         write_source(unlisted, "unlisted_edit")
+        denied.symlink_to(unlisted, target_is_directory=True)
         checkout(missing, "restored_checkout", env)
         wait_index("missing", "restored_checkout")
         assert not (cache / "unlisted.db").exists()
+        assert not (cache / "denied.db").exists()
+        denied.unlink()
         print(
             "Missing checkout restored and unlisted worktree stayed inactive",
             flush=True,
@@ -214,6 +218,7 @@ def smoke(binary: Path, root: Path) -> None:
         wait_index("named", "rejected_reload_edit")
         print("Invalid snapshot preserved the previous membership", flush=True)
 
+        denied.symlink_to(unlisted, target_is_directory=True)
         suspended = log_count("daemon.named_watch.suspended")
         run([str(binary), "config", "set", "auto_watch", "false"], env, root)
         wait_for(
@@ -224,6 +229,8 @@ def smoke(binary: Path, root: Path) -> None:
         assert not indexed(cache, "named", "suspended_edit")
         run([str(binary), "config", "set", "auto_watch", "true"], env, root)
         wait_index("named", "suspended_edit")
+        assert not (cache / "denied.db").exists()
+        denied.unlink()
         print("Re-enabling auto_watch restored the accepted membership", flush=True)
 
         applied = log_count("daemon.named_watch.applied")

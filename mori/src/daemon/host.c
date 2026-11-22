@@ -472,7 +472,10 @@ static void host_named_watch_reload_at(host_state_t *host, uint64_t now_ms) {
         }
     }
     host_named_watch_snapshot_t *accepted = host->named_watch_accepted;
-    if (accepted && (host->named_watch_suspended || host->named_watch_pending) &&
+    if (accepted &&
+        (host->named_watch_suspended || host->named_watch_pending ||
+         !cbm_daemon_application_named_watches_match(host->application, accepted->entries,
+                                                     accepted->count)) &&
         cbm_daemon_application_reconcile_named_watches(host->application, accepted->entries,
                                                        accepted->count, &pending)) {
         if (host->named_watch_suspended) {

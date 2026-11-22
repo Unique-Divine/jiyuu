@@ -3911,9 +3911,10 @@ static void application_clear_named_watch_locked(cbm_daemon_application_t *appli
 }
 
 static bool application_named_watch_list_contains(const cbm_daemon_named_watch_t *entries,
-                                                  size_t count, const char *project) {
+                                                  const bool *deferred, size_t count,
+                                                  const char *project) {
     for (size_t i = 0; i < count; i++) {
-        if (strcmp(entries[i].project, project) == 0) {
+        if (!deferred[i] && strcmp(entries[i].project, project) == 0) {
             return true;
         }
     }
@@ -3921,8 +3922,8 @@ static bool application_named_watch_list_contains(const cbm_daemon_named_watch_t
 }
 
 bool cbm_daemon_application_reconcile_named_watches(cbm_daemon_application_t *application,
-                                                    const cbm_daemon_named_watch_t *entries,
-                                                    size_t count, bool *pending) {
+                                                    cbm_daemon_named_watch_t *entries, size_t count,
+                                                    bool *pending) {
     if (pending) {
         *pending = false;
     }
@@ -3940,25 +3941,30 @@ bool cbm_daemon_application_reconcile_named_watches(cbm_daemon_application_t *ap
         return count == 0;
     }
     bool present[CBM_DAEMON_NAMED_WATCH_LIMIT];
+    bool deferred[CBM_DAEMON_NAMED_WATCH_LIMIT] = {0};
     for (size_t i = 0; i < count; i++) {
         if (!application_named_watch_valid(application, entries, i, &present[i])) {
-            cbm_mutex_unlock(&application->mutex);
-            return false;
+            if (!entries[i].pending) {
+                cbm_mutex_unlock(&application->mutex);
+                return false;
+            }
+            deferred[i] = true;
         }
     }
 
     cbm_daemon_application_watch_t *added[CBM_DAEMON_NAMED_WATCH_LIMIT];
     size_t added_count = 0;
     for (size_t i = 0; i < count; i++) {
+        if (deferred[i]) {
+            continue;
+        }
         cbm_daemon_application_watch_t *watch =
             application_find_watch_locked(application, entries[i].project);
         if (watch && watch->named) {
             continue;
         }
         if (!present[i] && !watch) {
-            if (pending) {
-                *pending = true;
-            }
+            deferred[i] = true;
             continue;
         }
         if (watch) {
@@ -3982,13 +3988,39 @@ bool cbm_daemon_application_reconcile_named_watches(cbm_daemon_application_t *ap
     }
     for (cbm_daemon_application_watch_t *watch = application->watches; watch;) {
         cbm_daemon_application_watch_t *next = watch->next;
-        if (!application_named_watch_list_contains(entries, count, watch->project)) {
+        if (!application_named_watch_list_contains(entries, deferred, count, watch->project)) {
             application_clear_named_watch_locked(application, watch);
         }
         watch = next;
     }
+    for (size_t i = 0; i < count; i++) {
+        entries[i].pending = deferred[i];
+        if (pending && deferred[i]) {
+            *pending = true;
+        }
+    }
     cbm_mutex_unlock(&application->mutex);
     return true;
+}
+
+bool cbm_daemon_application_named_watches_match(cbm_daemon_application_t *application,
+                                                const cbm_daemon_named_watch_t *entries,
+                                                size_t count) {
+    if (!application || (!entries && count)) {
+        return false;
+    }
+    cbm_mutex_lock(&application->mutex);
+    bool matches = true;
+    for (size_t i = 0; matches && i < count; i++) {
+        if (!entries[i].pending) {
+            cbm_daemon_application_watch_t *watch =
+                application_find_watch_locked(application, entries[i].project);
+            matches = watch && watch->named &&
+                      application_watch_root_matches(watch->root, entries[i].root);
+        }
+    }
+    cbm_mutex_unlock(&application->mutex);
+    return matches;
 }
 
 cbm_daemon_application_t *cbm_daemon_application_new(

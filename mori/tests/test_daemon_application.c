@@ -4923,10 +4923,10 @@ TEST(daemon_application_named_snapshot_replaces_ownership_atomically) {
     app_watch_race_fixture_t fixture;
     ASSERT_TRUE(app_watch_race_fixture_init(&fixture, 57));
     cbm_daemon_application_set_permanent(fixture.application, true);
-    const cbm_daemon_named_watch_t named = {.project = fixture.project, .root = fixture.root};
+    cbm_daemon_named_watch_t named = {.project = fixture.project, .root = fixture.root};
     bool loaded =
         cbm_daemon_application_reconcile_named_watches(fixture.application, &named, 1, NULL);
-    const cbm_daemon_named_watch_t invalid[] = {named, named};
+    cbm_daemon_named_watch_t invalid[] = {named, named};
     bool rejected =
         !cbm_daemon_application_reconcile_named_watches(fixture.application, invalid, 2, NULL);
     fixture.callbacks.session_close(fixture.callbacks.context, fixture.session);
@@ -4960,6 +4960,15 @@ TEST(daemon_application_named_snapshot_replaces_ownership_atomically) {
     bool background_joined = background_started && cbm_thread_join(&background_thread) == 0;
     bool explicit_joined = explicit_started && cbm_thread_join(&explicit_thread) == 0;
     int starts = atomic_load(&fixture.fake.starts);
+    bool disabled = cbm_config_set(fixture.config, CBM_CONFIG_AUTO_WATCH, "false") == 0;
+    int skipped_disabled =
+        cbm_daemon_application_watcher_index(fixture.project, fixture.root, fixture.application);
+    bool enabled = cbm_config_set(fixture.config, CBM_CONFIG_AUTO_WATCH, "true") == 0;
+    bool registry_detects_loss =
+        !cbm_daemon_application_named_watches_match(fixture.application, &named, 1);
+    bool restored =
+        cbm_daemon_application_reconcile_named_watches(fixture.application, &named, 1, NULL) &&
+        cbm_daemon_application_named_watches_match(fixture.application, &named, 1);
     bool removed =
         cbm_daemon_application_reconcile_named_watches(fixture.application, NULL, 0, NULL);
     int after_empty = cbm_watcher_watch_count(fixture.watcher);
@@ -4975,6 +4984,11 @@ TEST(daemon_application_named_snapshot_replaces_ownership_atomically) {
     ASSERT_EQ(background.result, 0);
     ASSERT_EQ(explicit.result, 0);
     ASSERT_EQ(starts, 1);
+    ASSERT_TRUE(disabled);
+    ASSERT_EQ(skipped_disabled, 1);
+    ASSERT_TRUE(enabled);
+    ASSERT_TRUE(registry_detects_loss);
+    ASSERT_TRUE(restored);
     ASSERT_TRUE(removed);
     ASSERT_EQ(after_empty, 0);
     ASSERT_EQ(skipped, 1);
