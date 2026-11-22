@@ -266,6 +266,131 @@ fn project_pages_use_internal_identity_and_preserve_projection() {
 }
 
 #[test]
+fn project_page_normalizes_root_bytes_in_both_formats() {
+    let scratch = Scratch::new("project-bytes");
+    let db = Connection::open(scratch.0.join("cache/bytes.db")).unwrap();
+    db.execute_batch(
+        "CREATE TABLE projects (name TEXT PRIMARY KEY, indexed_at TEXT, root_path TEXT);
+         INSERT INTO projects VALUES ('bytes', 'now', CAST(X'2FFF00' AS TEXT));",
+    )
+    .unwrap();
+
+    let cases = [
+        (
+            r#"{"format":"json","limit":"bad","offset":-1}"#,
+            "@bytes:2fff",
+        ),
+        (r#"{"metadata_only":true,"detail":"stats"}"#, "@bytes:2fff"),
+        (r#"{"format":"json","offset":1}"#, r#""returned":0"#),
+    ];
+    let run_all = |bin: &Path| {
+        let outputs = cases.map(|(query, marker)| {
+            let output = run_in(
+                bin,
+                &scratch,
+                &["cli", "--quiet", "list_projects", query],
+            );
+            assert!(output.status.success(), "{output:?}");
+            assert!(String::from_utf8_lossy(&output.stdout).contains(marker));
+            (output.stdout, output.stderr)
+        });
+        let stop = run_in(bin, &scratch, &["daemon", "stop"]);
+        assert!(stop.status.success(), "{stop:?}");
+        outputs
+    };
+    assert_eq!(run_all(&c_binary()), run_all(Path::new(MORI)));
+}
+
+#[test]
+fn index_status_preserves_diagnostics_and_freshness_in_both_formats() {
+    let scratch = Scratch::new("index-status");
+    let repo = scratch.0.join("repo");
+    fs::create_dir(&repo).unwrap();
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .current_dir(&repo)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+    };
+    git(&["init", "-q"]);
+    git(&[
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.com",
+        "-c",
+        "commit.gpgsign=false",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "commit",
+        "--allow-empty",
+        "-qm",
+        "fixture",
+    ]);
+
+    let db = Connection::open(scratch.0.join("cache/fixture.db")).unwrap();
+    db.execute_batch(
+        "CREATE TABLE projects (name TEXT PRIMARY KEY, indexed_at TEXT, root_path TEXT);
+         CREATE TABLE nodes (project TEXT);
+         CREATE TABLE edges (project TEXT);
+         CREATE TABLE index_coverage (project TEXT, rel_path TEXT, kind TEXT, detail TEXT);
+         CREATE TABLE index_coverage_meta (
+             project TEXT, generation TEXT, index_mode TEXT, recorded_at TEXT,
+             recording_status TEXT, ignored_files_stored INTEGER, ignored_files_total INTEGER,
+             coverage_version INTEGER, hash_records_complete INTEGER,
+             unresolved_calls_complete INTEGER
+         );
+         CREATE TABLE index_checkout (project TEXT, indexed_checkout_sha TEXT);
+         INSERT INTO index_coverage_meta VALUES ('fixture', 'now', 'full', 'now', 'complete',
+                                                  0, 0, 1, 1, 1);
+         INSERT INTO index_checkout VALUES ('fixture', '0000000000000000000000000000000000000000');
+         INSERT INTO index_coverage VALUES ('fixture', 'partial.rs', 'parse_partial', '1-2');",
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO projects VALUES ('fixture', 'now', ?1)",
+        [repo.to_str().unwrap()],
+    )
+    .unwrap();
+
+    let queries = [
+        r#"{"project":"fixture","verbose":true,"diagnostics":"full","format":"json"}"#,
+        r#"{"project":"fixture","verbose":true,"diagnostics":"summary"}"#,
+        r#"{"project":"missing","format":"json"}"#,
+    ];
+    let run_all = |bin: &Path| {
+        let outputs = queries.map(|query| {
+            let output = run_in(
+                bin,
+                &scratch,
+                &["cli", "--quiet", "index_status", query],
+            );
+            (output.status.code(), output.stdout, output.stderr)
+        });
+        let stop = run_in(bin, &scratch, &["daemon", "stop"]);
+        assert!(stop.status.success(), "{stop:?}");
+        outputs
+    };
+    let c = run_all(&c_binary());
+    let rust = run_all(Path::new(MORI));
+    assert_eq!(c, rust);
+    assert_eq!(rust[0].0, Some(0));
+    let report: serde_json::Value = serde_json::from_slice(&rust[0].1).unwrap();
+    assert_eq!(report["status"], "empty");
+    assert_eq!(report["freshness"]["verdict"], "stale");
+    assert_eq!(report["parse_partial"]["files"][0]["path"], "partial.rs");
+    assert_eq!(report["watch"]["watched"], false);
+    assert!(
+        report["hint"]
+            .as_str()
+            .unwrap()
+            .contains("Project is empty")
+    );
+}
+
+#[test]
 fn unknown_tool_error_matches_c() {
     assert_same(&["cli", "no_such_tool"]);
 }
@@ -596,6 +721,32 @@ fn index_through_worker_reexec_matches_c() {
             "limit": 1, "offset": 900, "format": "json"
         })
         .to_string();
+        let search_page = serde_json::json!({
+            "project": project, "name_pattern": "^h", "label": "Function",
+            "limit": 1, "offset": 1, "format": "json"
+        })
+        .to_string();
+        let search_path = serde_json::json!({
+            "project": project, "qn_pattern": r"\.helper$", "file_pattern": "**/app.py",
+            "max_output_tokens": 128
+        }).to_string();
+        let ranked_search = serde_json::json!({
+            "project": project, "query": "helper", "format": "json"
+        })
+        .to_string();
+        let ranked_page = serde_json::json!({
+            "project": project, "query": "helper", "file_pattern": "**/app.py",
+            "label": "Function", "limit": 1, "offset": 1, "max_output_tokens": 128
+        })
+        .to_string();
+        let no_rank_tokens = serde_json::json!({
+            "project": project, "query": "!!!", "name_pattern": "^h", "format": "json"
+        })
+        .to_string();
+        let search_invalid = serde_json::json!({
+            "project": project, "name_pattern": "["
+        })
+        .to_string();
         let queries: Vec<Output> = [
             vec![
                 "cli",
@@ -665,6 +816,11 @@ fn index_through_worker_reexec_matches_c() {
             ],
             vec!["cli", "get_file_outline", &outline_page],
             vec!["cli", "get_file_outline", &outline_end],
+            vec!["cli", "search_graph", &search_page],
+            vec!["cli", "search_graph", &search_path],
+            vec!["cli", "search_graph", &ranked_search],
+            vec!["cli", "search_graph", &ranked_page],
+            vec!["cli", "search_graph", &no_rank_tokens],
             vec![
                 "cli",
                 "query_graph",
@@ -682,12 +838,29 @@ fn index_through_worker_reexec_matches_c() {
             ],
         ]
         .iter()
-        .map(|args| run_in(bin, &scratch, args))
+        .map(|args| {
+            let output = run_in(bin, &scratch, args);
+            if args.last().copied() == Some(ranked_search.as_str()) {
+                let ranked: serde_json::Value = serde_json::from_slice(&output.stdout)
+                    .unwrap_or_else(|error| panic!("ranked response: {error}: {output:?}"));
+                assert_eq!(ranked["search_mode"], "bm25", "{ranked}");
+                assert!(
+                    ranked["returned"].as_u64().is_some_and(|count| count > 0),
+                    "{ranked}"
+                );
+            }
+            output
+        })
         .collect();
-        results.push((counts, queries));
+        let invalid =
+            run_in(bin, &scratch, &["cli", "search_graph", &search_invalid]);
+        assert!(!invalid.status.success(), "{invalid:?}");
+        results.push((counts, queries, invalid));
     }
-    let [(c_counts, c_queries), (rust_counts, rust_queries)] =
-        results.as_slice()
+    let [
+        (c_counts, c_queries, c_invalid),
+        (rust_counts, rust_queries, rust_invalid),
+    ] = results.as_slice()
     else {
         panic!("expected C and Rust index results");
     };
@@ -700,6 +873,8 @@ fn index_through_worker_reexec_matches_c() {
             "query output differs\nC: {c_out:?}\nRust: {rust_out:?}"
         );
     }
+    assert_eq!(c_invalid.stdout, rust_invalid.stdout);
+    assert_eq!(c_invalid.stderr, rust_invalid.stderr);
     let trace = String::from_utf8_lossy(&c_queries[1].stdout);
     assert!(trace.contains(".go.Twice"), "Add caller missing: {trace}");
 }
