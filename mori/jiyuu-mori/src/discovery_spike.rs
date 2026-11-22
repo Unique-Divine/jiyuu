@@ -268,8 +268,17 @@ impl Drop for Ignore {
 }
 
 struct IgnoreAt {
-    base: PathBuf,
+    directory: PathBuf,
     matcher: Ignore,
+}
+
+impl IgnoreAt {
+    fn load(directory: &Path, source: &Path) -> Option<Self> {
+        Ignore::load(source).map(|matcher| Self {
+            directory: directory.to_owned(),
+            matcher,
+        })
+    }
 }
 
 #[derive(Default)]
@@ -346,7 +355,6 @@ struct Walk {
     mode: Mode,
     size_cap: u64,
     cbmignore: Option<Ignore>,
-    info_exclude: Option<PathBuf>,
     tracked: Tracked,
     cache: Option<PathBuf>,
     snapshot: Snapshot,
@@ -354,7 +362,34 @@ struct Walk {
 
 impl Walk {
     fn run(root: &Path, mode: Mode, size_cap: u64) -> io::Result<Snapshot> {
-        let common = git_common_dir(root);
+        let root = root.canonicalize()?;
+        let repository = root.ancestors().find_map(|directory| {
+            git_common_dir(directory).map(|common| (directory, common))
+        });
+        let rule_root = repository
+            .as_ref()
+            .map_or(root.as_path(), |(path, _)| *path);
+        let ancestors: Vec<_> = root
+            .ancestors()
+            .take_while(|directory| directory.starts_with(rule_root))
+            .collect();
+        let mut stack = Vec::new();
+        // The last matching rule wins. Paths stay relative to the directory
+        // that owns each rule. C reads info/exclude after the root .gitignore.
+        for directory in ancestors.into_iter().rev() {
+            stack.extend(IgnoreAt::load(
+                directory,
+                &directory.join(".gitignore"),
+            ));
+            if let Some((git_root, common)) = &repository
+                && directory == *git_root
+            {
+                stack.extend(IgnoreAt::load(
+                    directory,
+                    &common.join("info/exclude"),
+                ));
+            }
+        }
         // SAFETY: the getter returns null or a live NUL-terminated path.
         // Copy before another native call can modify its backing buffer.
         let cache =
@@ -365,18 +400,15 @@ impl Walk {
             mode,
             size_cap,
             cbmignore: Ignore::load(&root.join(".cbmignore")),
-            info_exclude: common
-                .as_ref()
-                .map(|common| common.join("info/exclude")),
-            tracked: if common.is_some() {
-                Tracked::load(root)
+            tracked: if repository.is_some() {
+                Tracked::load(&root)
             } else {
                 Tracked::default()
             },
             cache,
             snapshot: Snapshot::default(),
         };
-        walk.directory(root, Path::new(""), false, &mut Vec::new())?;
+        walk.directory(&root, Path::new(""), false, &mut stack)?;
         Ok(walk.snapshot)
     }
 
@@ -389,18 +421,8 @@ impl Walk {
     ) -> io::Result<()> {
         let entries = fs::read_dir(path)?;
         let old_len = stack.len();
-        let gitignore = path.join(".gitignore");
-        let info_exclude = self
-            .info_exclude
-            .as_deref()
-            .filter(|_| rel.as_os_str().is_empty());
-        for source in Some(gitignore.as_path()).into_iter().chain(info_exclude) {
-            if let Some(matcher) = Ignore::load(source) {
-                stack.push(IgnoreAt {
-                    base: rel.to_owned(),
-                    matcher,
-                });
-            }
+        if !rel.as_os_str().is_empty() {
+            stack.extend(IgnoreAt::load(path, &path.join(".gitignore")));
         }
 
         for entry in entries {
@@ -432,7 +454,7 @@ impl Walk {
                     }
                 }
             } else if kind.is_file() {
-                self.file(&entry, &rel, under_gitignore, stack)?;
+                self.file(&entry, &entry_path, &rel, under_gitignore, stack)?;
             }
         }
         stack.truncate(old_len);
@@ -476,7 +498,7 @@ impl Walk {
         };
         if hard_skip || cbm > 0 {
             Directory::Skip
-        } else if under_gitignore || git_ignored(rel, true, stack) {
+        } else if under_gitignore || git_ignored(absolute, true, stack) {
             Directory::GitIgnored
         } else {
             Directory::Keep
@@ -486,6 +508,7 @@ impl Walk {
     fn file(
         &mut self,
         entry: &fs::DirEntry,
+        absolute: &Path,
         rel: &Path,
         under_gitignore: bool,
         stack: &[IgnoreAt],
@@ -506,7 +529,7 @@ impl Walk {
         };
         let ignore_reason = native_reason.or_else(|| {
             if !self.tracked.files.contains(rel)
-                && (under_gitignore || git_ignored(rel, false, stack))
+                && (under_gitignore || git_ignored(absolute, false, stack))
             {
                 Some("gitignore")
             } else if self.cbm_verdict(rel, false) > 0 {
@@ -522,7 +545,7 @@ impl Walk {
             return Ok(());
         }
 
-        let path = c_path(&entry.path());
+        let path = c_path(absolute);
         // SAFETY: the classifier reads both live strings and returns a
         // CBMLanguage value. cbm_language_name serves a static string.
         let (language, known) = unsafe {
@@ -542,13 +565,15 @@ impl Walk {
     }
 }
 
-fn git_ignored(rel: &Path, is_dir: bool, stack: &[IgnoreAt]) -> bool {
+fn git_ignored(absolute: &Path, is_dir: bool, stack: &[IgnoreAt]) -> bool {
     stack
         .iter()
         .rev()
         .map(|rule| {
-            rule.matcher
-                .verdict(rel.strip_prefix(&rule.base).unwrap(), is_dir)
+            let relative = absolute
+                .strip_prefix(&rule.directory)
+                .expect("ignore anchor is an ancestor of the entry");
+            rule.matcher.verdict(relative, is_dir)
         })
         .find(|&verdict| verdict != 0)
         .is_some_and(|verdict| verdict > 0)
@@ -671,6 +696,75 @@ fn matches_c_tracked_paths_and_info_exclude() {
         [b"generated/keep.rs".as_slice(), b"keep.rs".as_slice()]
     );
     assert_eq!(native, rust);
+}
+
+#[test]
+fn matches_c_ignores_from_enclosing_repository() {
+    let scratch = Scratch::new();
+    assert!(git(&scratch.0, &["init", "-q"]).is_some());
+    scratch.write(
+        ".gitignore",
+        "/secret.rs\n*.gen.rs\n/pkg/run/conflict.rs\n/pkg/run/tracked/\n",
+    );
+    scratch.write(
+        ".git/info/exclude",
+        "!/pkg/run/conflict.rs\n/pkg/run/excluded.rs\n",
+    );
+    scratch.write("pkg/.gitignore", "!/run/revived.gen.rs\n/run/scratch/\n");
+    scratch.write("pkg/run/.gitignore", "!local.gen.rs\n");
+    for path in [
+        "conflict.rs",
+        "excluded.rs",
+        "filtered.gen.rs",
+        "local.gen.rs",
+        "revived.gen.rs",
+        "scratch/hidden.rs",
+        "secret.rs",
+        "tracked/keep.rs",
+        "tracked/untracked.rs",
+    ] {
+        scratch.write(&format!("pkg/run/{path}"), "fn sample() {}\n");
+    }
+    assert!(
+        git(&scratch.0, &["add", "-f", "pkg/run/tracked/keep.rs"]).is_some()
+    );
+
+    let root = scratch.0.join("pkg/run");
+    for mode in Mode::ALL {
+        let mut native = NativeWalk::run(&root, mode, 0).snapshot();
+        let mut rust = Walk::run(&root, mode, 0).unwrap();
+        native.sort();
+        rust.sort();
+        assert_eq!(native, rust, "{mode:?}");
+        assert_eq!(
+            rust.files
+                .iter()
+                .filter(|file| file.path.0.ends_with(b".rs"))
+                .map(|file| file.path.0.as_slice())
+                .collect::<Vec<_>>(),
+            [
+                b"conflict.rs".as_slice(),
+                b"local.gen.rs",
+                b"revived.gen.rs",
+                b"secret.rs",
+                b"tracked/keep.rs",
+            ],
+            "{mode:?}"
+        );
+        assert_eq!(rust.excluded, [RelativePath::from(Path::new("scratch"))]);
+        assert_eq!(
+            rust.ignored
+                .iter()
+                .map(|(path, reason)| (path.0.as_slice(), reason.as_slice()))
+                .collect::<Vec<_>>(),
+            [
+                (b"excluded.rs".as_slice(), b"gitignore".as_slice()),
+                (b"filtered.gen.rs", b"gitignore"),
+                (b"tracked/untracked.rs", b"gitignore"),
+            ],
+            "{mode:?}"
+        );
+    }
 }
 
 #[test]
