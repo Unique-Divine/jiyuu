@@ -398,7 +398,7 @@ fn linear_query_reference_keeps_order_and_duplicate_projections() {
         "service.other",
         "other.py",
     );
-    // Edge insertion order differs from the outbound index's target-id order.
+    // Insert the higher-id target first so sorting by node ID changes the answer.
     for (source, destination, tag) in [
         (first, target, "first"),
         (second, peer, "peer"),
