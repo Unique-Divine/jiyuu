@@ -3,14 +3,18 @@
 
 use std::fs::{self, DirBuilder};
 use std::os::unix::fs::DirBuilderExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use rusqlite::{Connection, OpenFlags, params};
 use serde_json::{Value, json};
 
+#[path = "../src/cypher_linear.rs"]
+mod cypher_linear;
+
 const CLIENT: &str = "client";
+const MORI: &str = env!("CARGO_BIN_EXE_mori");
 
 struct Fixture(PathBuf);
 
@@ -47,14 +51,21 @@ impl Fixture {
         self.db(project)
     }
 
-    fn cli(&self, args: Value) -> Value {
-        let output = Command::new(env!("CARGO_BIN_EXE_mori"))
+    fn command(&self, bin: &Path) -> Command {
+        let mut command = Command::new(bin);
+        command
             .current_dir("/")
             .env_clear()
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
             .env("HOME", std::env::var_os("HOME").unwrap_or_default())
             .env("CBM_CACHE_DIR", self.0.join("cache"))
-            .env("CBM_RUNTIME_DIR", self.0.join("rt"))
+            .env("CBM_RUNTIME_DIR", self.0.join("rt"));
+        command
+    }
+
+    fn cli(&self, args: Value) -> Value {
+        let output = self
+            .command(Path::new(MORI))
             .args(["cli", "--quiet", "index_repository", &args.to_string()])
             .output()
             .expect("run Mori");
@@ -88,6 +99,52 @@ impl Fixture {
         db.execute_batch("PRAGMA foreign_keys = ON;")
             .expect("enable foreign keys");
         db
+    }
+
+    fn query(&self, bin: &Path, project: &str, cypher: &str) -> Value {
+        let args =
+            json!({"project": project, "query": cypher, "format": "json"});
+        let output = self
+            .command(bin)
+            .args(["cli", "--quiet", "query_graph", &args.to_string()])
+            .output()
+            .expect("query the graph");
+        let stop = self
+            .command(bin)
+            .args(["daemon", "stop"])
+            .output()
+            .expect("stop fixture daemon");
+        assert!(stop.status.success(), "{stop:?}");
+        assert!(output.status.success(), "{output:?}");
+        serde_json::from_slice(&output.stdout).expect("parse query response")
+    }
+
+    fn compare_rust_query(
+        &self,
+        project: &str,
+        cypher: &str,
+        reference: &Value,
+    ) {
+        let db = self.0.join("cache").join(format!("{project}.db"));
+        let query = cypher_linear::classify(cypher)
+            .expect("query belongs to the Rust subset");
+        let answer = query.execute(&db, project).expect("execute in Rust");
+        assert_eq!(reference["columns"], json!(answer.columns), "{cypher}");
+        assert_eq!(reference["rows"], json!(answer.rows), "{cypher}");
+        assert_eq!(reference["total"], answer.rows.len(), "{cypher}");
+        assert_eq!(
+            reference["total_relation"],
+            if answer.truncated { "gte" } else { "eq" }
+        );
+    }
+
+    fn query_reference(&self, project: &str, cypher: &str) -> Value {
+        if option_env!("MORI_C_REFERENCE") == Some("1") {
+            let reference =
+                Path::new(env!("MORI_C_BUILD_DIR")).join("codebase-memory-mcp");
+            return self.query(&reference, project, cypher);
+        }
+        self.query(Path::new(MORI), project, cypher)
     }
 
     fn cross_links(&self, project: &str) -> Vec<Value> {
@@ -316,4 +373,243 @@ fn graphql_relinks_keep_exact_resolver_and_reconcile_callers() {
             .expect("count local GraphQL calls");
         assert_eq!(calls, 1, "relink must preserve the remaining source call");
     }
+}
+
+#[test]
+fn linear_query_reference_keeps_order_and_duplicate_projections() {
+    let fixture = Fixture::new();
+    let db = fixture.index(CLIENT);
+    let first = node(&db, CLIENT, "Caller", "other", "caller.other", "z.py");
+    let second = node(&db, CLIENT, "Caller", "kept", "caller.kept", "a.py");
+    let last = node(&db, CLIENT, "Caller", "kept", "caller.last", "b.py");
+    let target = node(
+        &db,
+        CLIENT,
+        "Service",
+        "served",
+        "service.served",
+        "service.py",
+    );
+    let peer = node(
+        &db,
+        CLIENT,
+        "Service",
+        "served",
+        "service.other",
+        "other.py",
+    );
+    // Insert the higher-id target first so sorting by node ID changes the answer.
+    for (source, destination, tag) in [
+        (first, target, "first"),
+        (second, peer, "peer"),
+        (second, target, "target"),
+        (last, target, "last"),
+    ] {
+        edge(
+            &db,
+            CLIENT,
+            source,
+            destination,
+            "CALLS",
+            json!({"tag": tag}),
+        );
+    }
+    for (source, destination) in [(peer, last), (target, last), (target, first)]
+    {
+        edge(&db, CLIENT, source, destination, "HANDLES", json!({}));
+    }
+    drop(db);
+
+    for (query, columns, rows) in [
+        (
+            "MATCH (a:Caller)-[r:CALLS]->(b:Service) WHERE a.name = 'kept' AND b.name = 'served' RETURN a, b.name, r.missing LIMIT 3",
+            json!(["a", "b.name", "r.missing"]),
+            json!([
+                ["kept", "served", ""],
+                ["kept", "served", ""],
+                ["kept", "served", ""]
+            ]),
+        ),
+        (
+            "MATCH (a:Caller)-[r:CALLS]->(b:Service {qualified_name: 'service.served'}) RETURN a.qualified_name, r.tag LIMIT 2",
+            json!(["a.qualified_name", "r.tag"]),
+            json!([["caller.other", "first"], ["caller.kept", "target"]]),
+        ),
+        (
+            "MATCH (a:Caller)-[r:CALLS]->(b:Service) RETURN a.qualified_name, r.tag LIMIT 4",
+            json!(["a.qualified_name", "r.tag"]),
+            json!([
+                ["caller.other", "first"],
+                ["caller.kept", "peer"],
+                ["caller.kept", "target"],
+                ["caller.last", "last"]
+            ]),
+        ),
+        (
+            "MATCH (a:Caller)-[:CALLS]->(b:Service)-[:HANDLES]->(c:Caller) WHERE a.qualified_name = 'caller.kept' RETURN b.qualified_name, c.qualified_name LIMIT 3",
+            json!(["b.qualified_name", "c.qualified_name"]),
+            json!([
+                ["service.other", "caller.last"],
+                ["service.served", "caller.last"],
+                ["service.served", "caller.other"]
+            ]),
+        ),
+        (
+            "MATCH (a:Caller)-[:CALLS]->(b:Service) RETURN b.name LIMIT 0",
+            json!(["b.name"]),
+            json!([]),
+        ),
+        (
+            "MATCH (a:Caller)<-[:CALLS]-(b:Service) RETURN b.name",
+            json!(["b.name"]),
+            json!([]),
+        ),
+    ] {
+        let result = fixture.query_reference(CLIENT, query);
+        fixture.compare_rust_query(CLIENT, query, &result);
+        assert_eq!(result["columns"], columns, "{query}");
+        assert_eq!(result["rows"], rows, "{query}");
+        assert_eq!(result["total"], rows.as_array().unwrap().len(), "{query}");
+    }
+}
+
+#[test]
+fn documented_trades_query_returns_resolver_and_named_client_callers() {
+    const PROVIDER: &str = "provider";
+    const FIELD_PATH: &str = "Query.perp.trades";
+    const ROUTE: &str = "__graphql__Query.perp.trades";
+    // Keep this query in sync with "Who uses a resolver" in Mori's README.
+    const QUERY: &str = r#"MATCH (h)-[:HANDLES]->(rt:Route)<-[x:CROSS_GRAPHQL_CALLS]-()
+WHERE h.name = "Trades" AND rt.qualified_name = "__graphql__Query.perp.trades"
+RETURN rt.name, h.name, h.file_path, x.callers LIMIT 100"#;
+
+    let fixture = Fixture::new();
+    seed_client(&fixture.index(CLIENT), ROUTE);
+    let provider = fixture.index(PROVIDER);
+    let route = node(
+        &provider,
+        PROVIDER,
+        "Route",
+        FIELD_PATH,
+        ROUTE,
+        "schema.graphqls",
+    );
+    let resolver = node(
+        &provider,
+        PROVIDER,
+        "Method",
+        "Trades",
+        "provider.resolver.perpResolver.Trades",
+        "resolver.go",
+    );
+    edge(
+        &provider,
+        PROVIDER,
+        resolver,
+        route,
+        "HANDLES",
+        json!({"via": "gqlgen_resolver"}),
+    );
+    drop(provider);
+    fixture.relink(CLIENT, &[PROVIDER], 2);
+
+    let args = json!({"project": PROVIDER, "query": QUERY, "format": "json"})
+        .to_string();
+    let query = |bin: &Path| {
+        let output = fixture
+            .command(bin)
+            .args(["cli", "--quiet", "query_graph", &args])
+            .output()
+            .expect("query the provider graph");
+        let stop = fixture
+            .command(bin)
+            .args(["daemon", "stop"])
+            .output()
+            .expect("stop fixture daemon");
+        assert!(stop.status.success(), "{stop:?}");
+        assert!(output.status.success(), "{output:?}");
+        output
+    };
+    let linked = query(Path::new(MORI));
+    if option_env!("MORI_C_REFERENCE") == Some("1") {
+        let reference_bin =
+            Path::new(env!("MORI_C_BUILD_DIR")).join("codebase-memory-mcp");
+        let reference = query(&reference_bin);
+        assert_eq!(linked.stdout, reference.stdout);
+        assert_eq!(linked.stderr, reference.stderr);
+    }
+
+    let result: Value =
+        serde_json::from_slice(&linked.stdout).expect("parse query result");
+    fixture.compare_rust_query(PROVIDER, QUERY, &result);
+    assert_eq!(
+        result["columns"],
+        json!(["rt.name", "h.name", "h.file_path", "x.callers"])
+    );
+    assert_eq!(result["total"], 1, "{result}");
+    let [row] = result["rows"].as_array().expect("query rows").as_slice() else {
+        panic!("expected one resolver row: {result}");
+    };
+    assert_eq!(row[0], FIELD_PATH);
+    assert_eq!(row[1], "Trades");
+    assert_eq!(row[2], "resolver.go");
+    let callers: Value =
+        serde_json::from_str(row[3].as_str().expect("caller record cell"))
+            .expect("parse caller records");
+    assert_eq!(
+        callers,
+        json!({
+            "client:client.A.load": {"project": CLIENT, "qualified_name": "client.A.load", "function": "load", "file": "client.ts"},
+            "client:client.B.load": {"project": CLIENT, "qualified_name": "client.B.load", "function": "load", "file": "client.ts"},
+        })
+    );
+
+    // Add callers to the same provider edge to cross the native cell cap.
+    // Keep that clipped value in parity until the public contract changes.
+    let db = fixture.db(PROVIDER);
+    let mut expanded = callers;
+    for n in 0..12 {
+        let qualified = format!("client.Extra{n}.load");
+        expanded[format!("client:{qualified}")] = json!({"project": CLIENT, "qualified_name": qualified, "function": "load", "file": "long/client/path.ts"});
+    }
+    assert_eq!(
+        db.execute(
+            "UPDATE edges SET properties = ? WHERE type = 'CROSS_GRAPHQL_CALLS'",
+            [json!({"callers": expanded}).to_string()],
+        )
+        .unwrap(),
+        1,
+    );
+    drop(db);
+    let reference = fixture.query_reference(PROVIDER, QUERY);
+    let caller_cell = reference["rows"][0][3].as_str().unwrap();
+    assert_eq!(caller_cell.len(), 511);
+    assert!(serde_json::from_str::<Value>(caller_cell).is_err());
+    fixture.compare_rust_query(PROVIDER, QUERY, &reference);
+}
+
+#[test]
+fn unsupported_syntax_and_supported_storage_errors_are_distinct() {
+    for query in [
+        "MATCH (a) RETURN a.name",
+        "MATCH (a)-[:CALLS]->(b) RETURN b.name ORDER BY b.name",
+        "MATCH (a)-[:CALLS*1..2]->(b) RETURN b.name",
+        "MATCH (a)-[:CALLS]-(b) RETURN b.name",
+        "MATCH (a)-[:CALLS]- >(b) RETURN b.name",
+        "MATCH (count)-[:CALLS]->(b) RETURN b.name",
+        "MATCH (a)-[:CALLS]->(b) WHERE a.name = 'x' OR b.name = 'y' RETURN b.name",
+        "MATCH (a)-[:CALLS]->(b) RETURN count(b)",
+        "MATCH (a)-[:CALLS]->(b) RETURN typo.name",
+        "MATCH (a)-[:CALLS]->(b) RETURN a.name MATCH (n)",
+        "MATCH (a {name: '.*'})-[:CALLS]->(b) RETURN b.name",
+    ] {
+        assert!(cypher_linear::classify(query).is_err(), "{query}");
+    }
+
+    let fixture = Fixture::new();
+    let path = fixture.0.join("missing.db");
+    let query = cypher_linear::classify("MATCH (a)-[:CALLS]->(b) RETURN b.name")
+        .unwrap();
+    assert!(query.execute(&path, CLIENT).is_err());
+    assert!(!path.exists(), "execution must not silently create a cache");
 }

@@ -260,16 +260,50 @@ freshness, and how much evidence to gather before claiming absence.
 
 ### Hooks and Tool Profiles
 
-`mori hook-augment` is a Claude Code hook command. It reads the hook payload
-on stdin and adds graph context to the turn: matching symbols before a
-search, coverage warnings after a file read, and graph routing at session
-and subagent start. It only adds context and fails open: on any error, a
-timeout (it stops itself after 300 ms), or a missing index, it exits 0 with
-no output, so it never blocks or changes a tool call. It needs a running
-daemon; without one it skips augmentation and says so.
+The command `mori hook-augment` reads a hook payload on standard input and
+adds graph context. At session start it names the indexed project or explains
+how to index the working directory. The hook needs a running Mori daemon
+and exits successfully when it cannot supply context.
 
-To wire it by hand, add these entries to `~/.claude/settings.json`, with the
-binary path you registered:
+#### Codex CLI
+
+To add context at session start, append this matcher group to
+`hooks.SessionStart` in `~/.codex/hooks.json`, or in `$CODEX_HOME/hooks.json`
+if you set `CODEX_HOME`. Create the `hooks` object and `SessionStart` array
+if they are missing. Use the same executable and cache settings as the
+`mori-graph` MCP server.
+
+```json
+{
+  "matcher": "startup|resume|clear|compact|fork",
+  "hooks": [
+    {
+      "type": "command",
+      "command": "/home/you/.local/share/mise/shims/mori hook-augment",
+      "timeout": 5
+    }
+  ]
+}
+```
+
+Open Codex, review and trust the Mori command in the `/hooks` menu, then
+start a fresh session. If the daemon is down at session start, run
+`mori daemon start` with the same executable and cache settings before
+opening Codex.
+
+From the Jiyuu repository root, run the smoke test to check context delivery
+with your installed Codex CLI. The test uses a temporary Codex configuration,
+a private Mori cache, and a local mock model endpoint.
+
+```sh
+python3 mori/tests/smoke_codex_session_hook.py --mori "$(mise which mori)"
+```
+
+#### Claude Code
+
+The Claude Code hooks also add matching symbols before a search, coverage
+warnings after a file read, and context at subagent start. Add these entries
+to `~/.claude/settings.json` using the binary path you registered.
 
 ```json
 {
@@ -683,9 +717,15 @@ RETURN c.name, c.file_path, r.operation LIMIT 100
 Who uses a resolver, from the server project:
 
 ```cypher
-MATCH (h)-[:HANDLES]->(rt:Route)<-[x:CROSS_GRAPHQL_CALLS]-(c)
-WHERE h.name = "Trades" RETURN rt.name, c.name, c.file_path LIMIT 100
+MATCH (h)-[:HANDLES]->(rt:Route)<-[x:CROSS_GRAPHQL_CALLS]-()
+WHERE h.name = "Trades" AND rt.qualified_name = "__graphql__Query.perp.trades"
+RETURN rt.name, h.name, h.file_path, x.callers LIMIT 100
 ```
+
+The provider stores caller records in `x.callers`, keyed by client project
+and qualified name. Each record includes the caller's function and file.
+The C query engine returns at most 511 bytes when projecting `x.callers`.
+A larger caller map can appear as truncated JSON.
 
 Map schema files if your build doesn't already, with
 `{"extra_extensions": {".graphqls": "graphql"}}` (see

@@ -16,6 +16,7 @@
 /* ── Forward declarations ─────────────────────────────────────── */
 
 typedef struct cbm_store cbm_store_t; /* from store/store.h */
+struct cbm_coverage_row;              /* from store/store.h */
 struct cbm_watcher;                   /* from watcher/watcher.h */
 struct cbm_config;                    /* from cli/cli.h */
 
@@ -377,6 +378,29 @@ typedef struct {
 typedef char *(*cbm_mcp_index_status_renderer_fn)(const cbm_mcp_index_status_report_t *report);
 void cbm_mcp_set_index_status_renderer(cbm_mcp_index_status_renderer_fn renderer,
                                         cbm_mcp_read_override_free_fn release);
+
+/* The request and its strings and rows are borrowed for the call. Each
+ * returned string has static lifetime. Register before request threads start. */
+typedef struct {
+    const struct cbm_coverage_row *rows;
+    size_t row_count;
+    const char *requested_path;
+    const char *recording_status;
+    bool outside;
+    bool lookup_ok;
+    bool generation_matches;
+    bool exact_path_verified;
+    bool content_current;
+} cbm_mcp_coverage_path_request_t;
+
+typedef struct {
+    const char *status;
+    const char *recommended_action;
+} cbm_mcp_coverage_verdict_t;
+
+typedef cbm_mcp_coverage_verdict_t (*cbm_mcp_coverage_verdict_reader_fn)(
+    const cbm_mcp_coverage_path_request_t *request);
+void cbm_mcp_set_coverage_verdict_reader(cbm_mcp_coverage_verdict_reader_fn reader);
 
 /* ── Supervised background index (RSS isolation, #832) ────────── */
 

@@ -52,9 +52,15 @@ edges show the same callers from the server's side.
 **Who uses a resolver**: from the handler to its Route, then to callers:
 
 ```cypher
-MATCH (h)-[:HANDLES]->(rt:Route)<-[x:CROSS_GRAPHQL_CALLS]-(c)
-WHERE h.name = "Trades" RETURN rt.name, c.name, c.file_path LIMIT 100
+MATCH (h)-[:HANDLES]->(rt:Route)<-[x:CROSS_GRAPHQL_CALLS]-()
+WHERE h.name = "Trades" AND rt.qualified_name = "__graphql__Query.perp.trades"
+RETURN rt.name, h.name, h.file_path, x.callers LIMIT 100
 ```
+
+The provider stores caller records in `x.callers`, keyed by client project
+and qualified name. Each record includes the caller's function and file.
+The C query engine returns at most 511 bytes when projecting `x.callers`.
+A larger caller map can appear as truncated JSON.
 
 **Unused API surface**: server field Routes with no incoming cross-repo edge:
 
@@ -76,8 +82,8 @@ project, then look for callers of those names:
 ```cypher
 MATCH (rt:Route) WHERE rt.deprecated = true
 RETURN rt.qualified_name, rt.deprecation_reason LIMIT 100
-MATCH (c)-[:CROSS_GRAPHQL_CALLS]->(rt:Route) WHERE rt.deprecated = true
-RETURN rt.name, c.name LIMIT 200
+MATCH ()-[x:CROSS_GRAPHQL_CALLS]->(rt:Route) WHERE rt.deprecated = true
+RETURN rt.name, x.callers LIMIT 200
 ```
 
 Route props (`deprecated`, `deprecation_reason`, `schema_type`, `source`) are

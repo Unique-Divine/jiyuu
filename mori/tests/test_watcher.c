@@ -516,6 +516,39 @@ TEST(watcher_prunes_sustained_missing_root) {
     PASS();
 }
 
+TEST(watcher_named_watch_retains_cache_through_sustained_missing_root) {
+    prune_fixture_t f;
+    ASSERT_TRUE(prune_fixture_setup(&f, "0"));
+    cbm_store_t *store = cbm_store_open_memory();
+    cbm_watcher_t *watcher = cbm_watcher_new(store, index_callback, NULL);
+    ASSERT_TRUE(cbm_watcher_watch_named(watcher, "stale-project", f.rootdir));
+    index_call_count = 0;
+    ASSERT_EQ(cbm_watcher_poll_once(watcher), 0);
+    cbm_watcher_touch(watcher, "stale-project");
+    ASSERT_EQ(cbm_watcher_poll_once(watcher), 1);
+
+    th_rmtree(f.rootdir);
+    for (int i = 0; i < 4; i++) {
+        cbm_watcher_touch(watcher, "stale-project");
+        ASSERT_EQ(cbm_watcher_poll_once(watcher), 0);
+    }
+    ASSERT_EQ(cbm_watcher_watch_count(watcher), 1);
+    ASSERT_EQ(access(f.db_path, F_OK), 0);
+    ASSERT_EQ(access(f.wal_path, F_OK), 0);
+    ASSERT_EQ(access(f.shm_path, F_OK), 0);
+
+    ASSERT_TRUE(cbm_mkdir_p(f.rootdir, 0700));
+    cbm_watcher_touch(watcher, "stale-project");
+    ASSERT_EQ(cbm_watcher_poll_once(watcher), 0);
+    cbm_watcher_touch(watcher, "stale-project");
+    ASSERT_EQ(cbm_watcher_poll_once(watcher), 1);
+    ASSERT_EQ(index_call_count, 2);
+    cbm_watcher_free(watcher);
+    cbm_store_close(store);
+    prune_fixture_teardown(&f);
+    PASS();
+}
+
 TEST(watcher_prune_waits_for_daemon_project_mutation) {
     /* The daemon application owns project-operation coordination. Supplying
      * its watcher must route destructive stale-root pruning through that
@@ -1731,6 +1764,33 @@ TEST(watcher_no_change_no_reindex) {
 
     /* Cleanup */
     cbm_watcher_free(w);
+    cbm_store_close(store);
+    th_rmtree(tmpdir);
+    PASS();
+}
+
+TEST(watcher_named_clean_checkout_catches_up_once) {
+    char tmpdir[] = "/tmp/cbm_watcher_named_XXXXXX";
+    ASSERT_NOT_NULL(cbm_mkdtemp(tmpdir));
+    ASSERT_EQ(wt_git(tmpdir, "init -q"), 0);
+    char path[300];
+    th_write_file(wt_path(path, sizeof(path), tmpdir, "file.txt"), "hello\n");
+    ASSERT_EQ(wt_git(tmpdir, "add file.txt"), 0);
+    ASSERT_EQ(wt_git(tmpdir, "commit -q -m init"), 0);
+
+    cbm_store_t *store = cbm_store_open_memory();
+    cbm_watcher_t *watcher = cbm_watcher_new(store, index_callback, NULL);
+    ASSERT_NOT_NULL(watcher);
+    index_call_count = 0;
+    ASSERT_TRUE(cbm_watcher_watch_named(watcher, "named", tmpdir));
+    ASSERT_EQ(cbm_watcher_poll_once(watcher), 0);
+    cbm_watcher_touch(watcher, "named");
+    ASSERT_EQ(cbm_watcher_poll_once(watcher), 1);
+    ASSERT_TRUE(cbm_watcher_watch_named(watcher, "named", tmpdir));
+    cbm_watcher_touch(watcher, "named");
+    ASSERT_EQ(cbm_watcher_poll_once(watcher), 0);
+    ASSERT_EQ(index_call_count, 1);
+    cbm_watcher_free(watcher);
     cbm_store_close(store);
     th_rmtree(tmpdir);
     PASS();
@@ -4187,6 +4247,7 @@ SUITE(watcher) {
     RUN_TEST(watcher_poll_no_projects);
     RUN_TEST(watcher_poll_nonexistent_path);
     RUN_TEST(watcher_prunes_sustained_missing_root);
+    RUN_TEST(watcher_named_watch_retains_cache_through_sustained_missing_root);
     RUN_TEST(watcher_prune_waits_for_daemon_project_mutation);
     RUN_TEST(watcher_prune_guard_denial_and_success_are_balanced);
     RUN_TEST(watcher_prune_restats_root_after_guard_acquisition);
@@ -4207,6 +4268,7 @@ SUITE(watcher) {
     RUN_TEST(watcher_identical_watch_preserves_dirty_baseline);
     RUN_TEST(watcher_detects_new_file);
     RUN_TEST(watcher_no_change_no_reindex);
+    RUN_TEST(watcher_named_clean_checkout_catches_up_once);
     RUN_TEST(watcher_own_artifact_export_does_not_retrigger_issue1953);
     RUN_TEST(watcher_dirty_state_reindexes_once_issue937);
     RUN_TEST(watcher_failed_reindex_retries_issue937);

@@ -667,6 +667,99 @@ fn index_fixture(
     result
 }
 
+#[test]
+fn exact_path_coverage_verdicts_match_c_on_one_cache() {
+    let scratch = Scratch::new("coverage");
+    let repo = scratch.0.join("repo");
+    fs::create_dir_all(repo.join("nested")).unwrap();
+    for path in ["nested/partial.py", "verified.py", "changed.py"] {
+        fs::write(repo.join(path), "def sample():\n    return 1\n").unwrap();
+    }
+    let c = c_binary();
+    let index = index_fixture(&c, &scratch, repo.to_str().unwrap());
+    let project = index["project"].as_str().expect("indexed project");
+    let stop = |bin: &Path| {
+        let output = run_in(bin, &scratch, &["daemon", "stop"]);
+        assert!(output.status.success(), "{output:?}");
+    };
+    stop(&c);
+
+    // Use one generation for both binaries, with both parse kinds in store
+    // order and an ancestor row that applies only without an exact row.
+    let db =
+        Connection::open(scratch.0.join("cache").join(format!("{project}.db")))
+            .unwrap();
+    db.execute("DELETE FROM index_coverage WHERE project = ?", [project])
+        .unwrap();
+    for (path, kind, detail) in [
+        ("nested/partial.py", "parse_partial", "1"),
+        ("nested/partial.py", "parse_unusable", "1-2"),
+        ("nested", "not_indexed_dir", "ignored"),
+    ] {
+        db.execute(
+            "INSERT INTO index_coverage (project, rel_path, kind, detail) VALUES (?, ?, ?, ?)",
+            [project, path, kind, detail],
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        db.execute(
+            "UPDATE index_coverage_meta SET recording_status = 'truncated',
+             hash_records_complete = 1 WHERE project = ?",
+            [project],
+        )
+        .unwrap(),
+        1
+    );
+    drop(db);
+    fs::write(
+        repo.join("changed.py"),
+        "def changed_source():\n    return 23\n",
+    )
+    .unwrap();
+
+    let requests = ["json", "tree"].map(|format| {
+        serde_json::json!({
+            "project": project,
+            "paths": ["nested/partial.py", "nested/missing.py", "verified.py", "changed.py"],
+            "scopes": ["nested"], "scope_limit": 1, "format": format
+        })
+        .to_string()
+    });
+    let read = |bin: &Path| {
+        let outputs = requests.each_ref().map(|args| {
+            run_in(
+                bin,
+                &scratch,
+                &["cli", "--quiet", "check_index_coverage", args],
+            )
+        });
+        stop(bin);
+        outputs
+    };
+    let reference = read(&c);
+    let linked = read(Path::new(MORI));
+    for (reference, linked) in reference.iter().zip(&linked) {
+        assert!(reference.status.success() && linked.status.success());
+        assert_eq!(reference.stdout, linked.stdout);
+        assert_eq!(reference.stderr, linked.stderr);
+    }
+    let json: serde_json::Value =
+        serde_json::from_slice(&linked[0].stdout).unwrap();
+    let paths = json["paths"].as_array().unwrap();
+    assert_eq!(paths[0]["status"], "partial");
+    assert_eq!(
+        paths[0]["recommended_action"],
+        "read_ranges_and_verify_scope"
+    );
+    assert_eq!(paths[1]["status"], "excluded");
+    assert_eq!(paths[1]["coverage"][0]["match"], "ancestor");
+    assert_eq!(paths[2]["status"], "no_recorded_issue");
+    assert_eq!(paths[2]["content_verified"], true);
+    assert_eq!(paths[3]["status"], "coverage_unavailable");
+    assert_eq!(paths[3]["recommended_action"], "read_source_and_reindex");
+}
+
 fn graphql_rows(scratch: &Scratch, project: &str) -> Vec<String> {
     let db = Connection::open_with_flags(
         scratch.0.join("cache").join(format!("{project}.db")),

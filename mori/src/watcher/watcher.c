@@ -60,6 +60,8 @@ typedef struct {
      * released. Unwatch/replacement tombstones a removed state so a later
      * snapshot entry cannot admit new indexing work. */
     atomic_bool registered;
+    atomic_bool named;
+    atomic_bool catch_up;
     /* Published only while one supervised Git command is active. Access is
      * serialized by watcher->projects_lock; cancellation itself is atomic. */
     cbm_subprocess_t *active_git;
@@ -963,7 +965,7 @@ static bool tree_signature(const char *root_path, uint64_t *sig_out, int *count_
 
 static void state_free(project_state_t *s);
 
-static project_state_t *state_new(const char *name, const char *root_path) {
+static project_state_t *state_new(const char *name, const char *root_path, bool named) {
     project_state_t *s = calloc(CBM_ALLOC_ONE, sizeof(*s));
     if (!s) {
         return NULL;
@@ -975,6 +977,8 @@ static project_state_t *state_new(const char *name, const char *root_path) {
         return NULL;
     }
     atomic_init(&s->registered, true);
+    atomic_init(&s->named, named);
+    atomic_init(&s->catch_up, named);
     s->interval_ms = POLL_BASE_MS;
     atomic_init(&s->status_strategy, CBM_WATCHER_STRATEGY_PENDING);
     atomic_init(&s->status_interval_ms, POLL_BASE_MS);
@@ -1208,13 +1212,14 @@ void cbm_watcher_set_project_mutation_guard(cbm_watcher_t *w,
 
 /* ── Watch list management ──────────────────────────────────────── */
 
-bool cbm_watcher_watch(cbm_watcher_t *w, const char *project_name, const char *root_path) {
+static bool watcher_watch(cbm_watcher_t *w, const char *project_name, const char *root_path,
+                          bool named) {
     if (!w || !project_name || !project_name[0] || !root_path || !root_path[0] ||
         atomic_load_explicit(&w->stopped, memory_order_acquire)) {
         return false;
     }
 
-    project_state_t *s = state_new(project_name, root_path);
+    project_state_t *s = state_new(project_name, root_path, named);
     if (!s) {
         cbm_log_warn("watcher.watch.oom", "project", project_name, "path", root_path);
         return false;
@@ -1231,6 +1236,9 @@ bool cbm_watcher_watch(cbm_watcher_t *w, const char *project_name, const char *r
         /* Multiple daemon sessions may subscribe to the same canonical
          * project/root. Re-registering that identical watch must not discard
          * its git baseline, pending dirty signature, or immediate-touch state. */
+        if (named && !atomic_exchange(&old->named, true)) {
+            atomic_store(&old->catch_up, true);
+        }
         cbm_mutex_unlock(&w->projects_lock);
         state_free(s);
         return true;
@@ -1275,6 +1283,29 @@ bool cbm_watcher_watch(cbm_watcher_t *w, const char *project_name, const char *r
     }
     cbm_log_info("watcher.watch", "project", project_name, "path", root_path);
     return true;
+}
+
+bool cbm_watcher_watch(cbm_watcher_t *w, const char *project_name, const char *root_path) {
+    return watcher_watch(w, project_name, root_path, false);
+}
+
+bool cbm_watcher_watch_named(cbm_watcher_t *w, const char *project_name, const char *root_path) {
+    return watcher_watch(w, project_name, root_path, true);
+}
+
+bool cbm_watcher_set_named(cbm_watcher_t *w, const char *project_name, bool named) {
+    if (!w || !project_name) {
+        return false;
+    }
+    cbm_mutex_lock(&w->projects_lock);
+    project_state_t *s = cbm_ht_get(w->projects, project_name);
+    if (s) {
+        if (atomic_exchange(&s->named, named) != named) {
+            atomic_store(&s->catch_up, named);
+        }
+    }
+    cbm_mutex_unlock(&w->projects_lock);
+    return s != NULL;
 }
 
 void cbm_watcher_unwatch(cbm_watcher_t *w, const char *project_name) {
@@ -1459,7 +1490,8 @@ static bool init_baseline(cbm_watcher_t *w, project_state_t *s) {
         s->interval_ms = cbm_watcher_poll_interval_ms(s->file_count);
         cbm_log_info("watcher.baseline", "project", s->project_name, "strategy", "git", "files",
                      s->file_count > 0 ? "yes" : "0");
-    } else if (atomic_load_explicit(&w->poll_non_git, memory_order_acquire)) {
+    } else if (atomic_load(&s->named) ||
+               atomic_load_explicit(&w->poll_non_git, memory_order_acquire)) {
         /* #1948 opt-in. last_tree_sig stays 0 ("unknown"): nothing records
          * which tree state the DB holds (edits made while the daemon was down
          * are exactly the silent-staleness case), so the first poll reindexes
@@ -1588,7 +1620,7 @@ static void prune_missing_project(cbm_watcher_t *w, project_state_t *s) {
     int stat_errno = 0;
     uint64_t now_ms = cbm_now_ms();
     bool still_eligible =
-        current == s && strcmp(current->root_path, root_path) == 0 &&
+        current == s && !atomic_load(&s->named) && strcmp(current->root_path, root_path) == 0 &&
         current->missing_root_count >= MISSING_ROOT_DELETE_AFTER && current->first_missing_ms > 0 &&
         now_ms - current->first_missing_ms >= (uint64_t)prune_grace_s() * CBM_MSEC_PER_SEC &&
         root_status(root_path, &stat_errno) == ROOT_MISSING;
@@ -1674,6 +1706,14 @@ static void poll_project(const char *key, void *val, void *ud) {
         if (s->missing_root_count == 0) {
             s->first_missing_ms = now_ms;
         }
+        if (atomic_load(&s->named)) {
+            if (s->missing_root_count == 0) {
+                cbm_log_warn("watcher.root_missing", "project", s->project_name, "path",
+                             s->root_path);
+            }
+            s->missing_root_count = 1;
+            return;
+        }
         s->missing_root_count++;
         cbm_log_warn("watcher.root_missing", "project", s->project_name, "path", s->root_path,
                      "polls", itoa_buf(s->missing_root_count));
@@ -1687,6 +1727,10 @@ static void poll_project(const char *key, void *val, void *ud) {
         cbm_log_info("watcher.root_restored", "project", s->project_name, "path", s->root_path);
         s->missing_root_count = 0;
         s->first_missing_ms = 0;
+        if (atomic_load(&s->named)) {
+            s->baseline_done = false;
+            atomic_store(&s->catch_up, true);
+        }
     }
 
     /* Initialize baseline on first poll */
@@ -1694,10 +1738,17 @@ static void poll_project(const char *key, void *val, void *ud) {
         (void)init_baseline(ctx->w, s);
         return;
     }
+    if (!s->is_git && !s->tree_poll && atomic_load(&s->named)) {
+        (void)init_baseline(ctx->w, s);
+        return;
+    }
 
     /* Non-git projects are skipped unless the watch_non_git opt-in turned on
      * tree polling for them at baseline (#1948). */
     if (!s->is_git && !s->tree_poll) {
+        return;
+    }
+    if (s->tree_poll && !atomic_load(&s->named) && !atomic_load(&ctx->w->poll_non_git)) {
         return;
     }
 
@@ -1712,7 +1763,8 @@ static void poll_project(const char *key, void *val, void *ud) {
         return;
     }
     publish_status(s, true);
-    if (!changed) {
+    bool catch_up = atomic_load(&s->catch_up);
+    if (!changed && !catch_up) {
         s->next_poll_ns = ctx->now + ((int64_t)s->interval_ms * US_PER_MS);
         return;
     }
@@ -1734,6 +1786,9 @@ static void poll_project(const char *key, void *val, void *ud) {
         if (rc == 0) {
             ctx->reindexed++;
             s->index_failures = 0;
+            if (catch_up) {
+                atomic_store(&s->catch_up, false);
+            }
             commit_baselines(ctx->w, s);
             anchor_ns = now_ns();
             delay_ms =

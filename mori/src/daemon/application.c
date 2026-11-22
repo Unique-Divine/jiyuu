@@ -108,6 +108,7 @@ struct cbm_daemon_application_watch {
     bool persistence;
     bool has_doc_candidates;
     bool doc_candidates;
+    bool named;
     size_t subscribers;
     cbm_daemon_application_watch_t *next;
 };
@@ -249,6 +250,7 @@ struct cbm_daemon_application {
     atomic_int stopping; /* Also observed by post-publication link repair. */
     /* See cbm_daemon_application_set_permanent. */
     bool permanent;
+    bool named_watch_mode;
     uint8_t ui_readiness_secret[CBM_SHA256_DIGEST_LEN];
     bool ui_readiness_secret_set;
 };
@@ -585,21 +587,13 @@ static void application_release_session_watch_locked(cbm_daemon_application_sess
     application_watch_job_unsubscribe_session_locked(session, NULL);
 
     /*
-     * A permanent daemon owns the physical project watch independently of
-     * individual client sessions. Session disconnect releases only that
-     * session's logical subscription; the watcher remains available for
-     * background change detection while the daemon generation is alive.
-     *
-     * Non-permanent applications retain the historical session-scoped
-     * lifecycle and remove the physical watch after the final subscriber.
-     * A release decided by workspace policy (session_ending false: the
-     * session's root is no longer allowed) is not a disconnect and removes
-     * the watch in both modes. Daemon shutdown and auto_watch=false remove
-     * persistent watches through their own paths; a deleted project's watch
-     * ends at its next watcher callback
-     * (application_permanent_watch_orphaned_locked).
+     * A configured watch keeps its own ownership after session release.
+     * Without a named list, a permanent daemon retains session watches
+     * after disconnect. A workspace policy release ends those session
+     * watches as usual.
      */
-    bool daemon_keeps_watch = session_ending && session->application->permanent;
+    bool daemon_keeps_watch = session_ending && session->application->permanent &&
+                              !session->application->named_watch_mode;
     while (session->watches) {
         application_watch_membership_t *membership = session->watches;
         cbm_daemon_application_watch_t *watch = membership->watch;
@@ -607,7 +601,7 @@ static void application_release_session_watch_locked(cbm_daemon_application_sess
         cbm_free(CBM_MEM_CLASS_OTHER, membership);
         if (watch->subscribers > 0) {
             watch->subscribers--;
-            if (!daemon_keeps_watch && watch->subscribers == 0) {
+            if (!daemon_keeps_watch && !watch->named && watch->subscribers == 0) {
                 application_remove_watch_locked(session->application, watch);
             }
         }
@@ -681,6 +675,30 @@ static bool application_watch_registration_allowed(const cbm_daemon_application_
                                       sizeof(boundary_error));
 }
 
+static cbm_daemon_application_watch_t *application_create_watch_locked(
+    cbm_daemon_application_t *application, const char *project, const char *root,
+    const char *args_json, bool named) {
+    cbm_daemon_application_watch_t *watch = cbm_calloc(CBM_MEM_CLASS_OTHER, sizeof(*watch));
+    if (!watch) {
+        return NULL;
+    }
+    watch->project = strdup(project);
+    watch->root = strdup(root);
+    watch->named = named;
+    if (!watch->project || !watch->root || !application_watch_set_options(watch, args_json) ||
+        !(named ? cbm_watcher_watch_named(application->watcher, project, root)
+                : cbm_watcher_watch(application->watcher, project, root))) {
+        free(watch->project);
+        free(watch->root);
+        cbm_free(CBM_MEM_CLASS_OTHER, watch->index_mode);
+        cbm_free(CBM_MEM_CLASS_OTHER, watch);
+        return NULL;
+    }
+    watch->next = application->watches;
+    application->watches = watch;
+    return watch;
+}
+
 static void application_register_watch_locked(cbm_daemon_application_session_t *session,
                                               const char *project, const char *root,
                                               const char *args_json) {
@@ -691,7 +709,7 @@ static void application_register_watch_locked(cbm_daemon_application_session_t *
     }
     cbm_daemon_application_watch_t *watch = application_find_watch_locked(application, project);
     if (!application_regular_db_exists(project)) {
-        if (watch) {
+        if (watch && !watch->named) {
             application_remove_watch_locked(application, watch);
         }
         return;
@@ -719,26 +737,12 @@ static void application_register_watch_locked(cbm_daemon_application_session_t *
             return;
         }
     } else {
-        watch = cbm_calloc(CBM_MEM_CLASS_OTHER, sizeof(*watch));
-        if (watch) {
-            watch->project = strdup(project);
-            watch->root = strdup(root);
-        }
-        if (!watch || !watch->project || !watch->root ||
-            !application_watch_set_options(watch, args_json) ||
-            !cbm_watcher_watch(application->watcher, project, root)) {
-            if (watch) {
-                free(watch->project);
-                free(watch->root);
-                cbm_free(CBM_MEM_CLASS_OTHER, watch->index_mode);
-                cbm_free(CBM_MEM_CLASS_OTHER, watch);
-            }
+        watch = application_create_watch_locked(application, project, root, args_json, false);
+        if (!watch) {
             cbm_free(CBM_MEM_CLASS_OTHER, membership);
             cbm_log_warn("daemon.watch.registration_failed", "project", project, "action", "retry");
             return;
         }
-        watch->next = application->watches;
-        application->watches = watch;
     }
     watch->subscribers++;
     membership->watch = watch;
@@ -2146,7 +2150,7 @@ static char *application_index_project_key(const char *root_path, const char *ar
     yyjson_doc *doc = yyjson_read_opts((char *)args_json, strlen(args_json), 0,
                                        cbm_json_writer_allocator(), NULL);
     const char *override = yyjson_get_str(yyjson_obj_get(yyjson_doc_get_root(doc), "name"));
-    char *key = cbm_project_name_from_path(override && override[0] ? override : root_path);
+    char *key = cbm_project_name_with_override(root_path, override);
     yyjson_doc_free(doc);
     return key;
 }
@@ -3826,6 +3830,199 @@ void cbm_daemon_application_set_permanent(cbm_daemon_application_t *application,
     cbm_mutex_unlock(&application->mutex);
 }
 
+static bool application_named_watch_cache_matches(const char *project, const char *root) {
+    const char *cache = cbm_resolve_cache_dir();
+    if (!cache) {
+        return false;
+    }
+    char path[APPLICATION_PATH_CAP];
+    int written = snprintf(path, sizeof(path), "%s/%s.db", cache, project);
+    if (written <= 0 || (size_t)written >= sizeof(path)) {
+        return false;
+    }
+    cbm_path_info_t info;
+    int status = cbm_path_info_utf8(path, &info);
+    if (status == CBM_PATH_INFO_ABSENT) {
+        return true;
+    }
+    if (status != CBM_PATH_INFO_OK || !info.is_regular) {
+        return false;
+    }
+    cbm_store_t *store = cbm_store_open_path_query_nowait(path);
+    cbm_project_t cached = {0};
+    bool matches = store && cbm_store_get_project(store, project, &cached) == CBM_STORE_OK &&
+                   cached.root_path && application_watch_root_matches(cached.root_path, root);
+    cbm_project_free_fields(&cached);
+    cbm_store_close(store);
+    return matches;
+}
+
+static bool application_named_watch_valid(cbm_daemon_application_t *application,
+                                          const cbm_daemon_named_watch_t *entries, size_t at,
+                                          bool *present) {
+    const cbm_daemon_named_watch_t *entry = &entries[at];
+    if (!entry->project || !entry->project[0] || !entry->root ||
+        !cbm_hook_path_is_abs(entry->root)) {
+        return false;
+    }
+    char *safe_name = cbm_project_name_sanitize(entry->project);
+    bool valid = safe_name && strcmp(safe_name, entry->project) == 0;
+    free(safe_name);
+    if (!valid) {
+        return false;
+    }
+    char canonical[APPLICATION_PATH_CAP];
+    cbm_path_info_t info;
+    int status = cbm_path_info_utf8(entry->root, &info);
+    *present = status != CBM_PATH_INFO_ABSENT;
+    if (*present &&
+        (status != CBM_PATH_INFO_OK || !info.is_directory ||
+         !cbm_canonical_path(entry->root, canonical, sizeof(canonical)) ||
+         !application_watch_root_matches(canonical, entry->root) ||
+         !cbm_workspace_root_allowed(canonical, cbm_workspace_home_dir(), cbm_workspace_cache_dir(),
+                                     getenv("CBM_ALLOWED_ROOT"), NULL, 0))) {
+        return false;
+    }
+    for (size_t i = 0; i < at; i++) {
+        if (strcmp(entries[i].project, entry->project) == 0 ||
+            application_watch_root_matches(entries[i].root, entry->root)) {
+            return false;
+        }
+    }
+    cbm_daemon_application_watch_t *existing =
+        application_find_watch_locked(application, entry->project);
+    if (existing) {
+        return application_watch_root_matches(existing->root, entry->root);
+    }
+    cbm_daemon_application_job_t *job =
+        application_find_active_job_locked(application, entry->project);
+    return job ? application_watch_root_matches(job->root_path, entry->root)
+               : application_named_watch_cache_matches(entry->project, entry->root);
+}
+
+static void application_clear_named_watch_locked(cbm_daemon_application_t *application,
+                                                 cbm_daemon_application_watch_t *watch) {
+    if (watch->subscribers == 0) {
+        application_remove_watch_locked(application, watch);
+    } else {
+        watch->named = false;
+        (void)cbm_watcher_set_named(application->watcher, watch->project, false);
+    }
+}
+
+static bool application_named_watch_list_contains(const cbm_daemon_named_watch_t *entries,
+                                                  const bool *deferred, size_t count,
+                                                  const char *project) {
+    for (size_t i = 0; i < count; i++) {
+        if (!deferred[i] && strcmp(entries[i].project, project) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool cbm_daemon_application_reconcile_named_watches(cbm_daemon_application_t *application,
+                                                    cbm_daemon_named_watch_t *entries, size_t count,
+                                                    bool *pending) {
+    if (pending) {
+        *pending = false;
+    }
+    if (!application || (!entries && count) || count > CBM_DAEMON_NAMED_WATCH_LIMIT) {
+        return false;
+    }
+    cbm_mutex_lock(&application->mutex);
+    if (!application->permanent || application->stopping) {
+        cbm_mutex_unlock(&application->mutex);
+        return false;
+    }
+    application->named_watch_mode = true;
+    if (!application->watcher || application_watches_disabled_locked(application)) {
+        cbm_mutex_unlock(&application->mutex);
+        return count == 0;
+    }
+    bool present[CBM_DAEMON_NAMED_WATCH_LIMIT];
+    bool deferred[CBM_DAEMON_NAMED_WATCH_LIMIT] = {0};
+    for (size_t i = 0; i < count; i++) {
+        if (!application_named_watch_valid(application, entries, i, &present[i])) {
+            if (!entries[i].pending) {
+                cbm_mutex_unlock(&application->mutex);
+                return false;
+            }
+            deferred[i] = true;
+        }
+    }
+
+    cbm_daemon_application_watch_t *added[CBM_DAEMON_NAMED_WATCH_LIMIT];
+    size_t added_count = 0;
+    for (size_t i = 0; i < count; i++) {
+        if (deferred[i]) {
+            continue;
+        }
+        cbm_daemon_application_watch_t *watch =
+            application_find_watch_locked(application, entries[i].project);
+        if (watch && watch->named) {
+            continue;
+        }
+        if (!present[i] && !watch) {
+            deferred[i] = true;
+            continue;
+        }
+        if (watch) {
+            if (cbm_watcher_set_named(application->watcher, watch->project, true)) {
+                watch->named = true;
+            } else {
+                watch = NULL;
+            }
+        } else {
+            watch = application_create_watch_locked(application, entries[i].project,
+                                                    entries[i].root, NULL, true);
+        }
+        if (!watch) {
+            while (added_count) {
+                application_clear_named_watch_locked(application, added[--added_count]);
+            }
+            cbm_mutex_unlock(&application->mutex);
+            return false;
+        }
+        added[added_count++] = watch;
+    }
+    for (cbm_daemon_application_watch_t *watch = application->watches; watch;) {
+        cbm_daemon_application_watch_t *next = watch->next;
+        if (!application_named_watch_list_contains(entries, deferred, count, watch->project)) {
+            application_clear_named_watch_locked(application, watch);
+        }
+        watch = next;
+    }
+    for (size_t i = 0; i < count; i++) {
+        entries[i].pending = deferred[i];
+        if (pending && deferred[i]) {
+            *pending = true;
+        }
+    }
+    cbm_mutex_unlock(&application->mutex);
+    return true;
+}
+
+bool cbm_daemon_application_named_watches_match(cbm_daemon_application_t *application,
+                                                const cbm_daemon_named_watch_t *entries,
+                                                size_t count) {
+    if (!application || (!entries && count)) {
+        return false;
+    }
+    cbm_mutex_lock(&application->mutex);
+    bool matches = true;
+    for (size_t i = 0; matches && i < count; i++) {
+        if (!entries[i].pending) {
+            cbm_daemon_application_watch_t *watch =
+                application_find_watch_locked(application, entries[i].project);
+            matches = watch && watch->named &&
+                      application_watch_root_matches(watch->root, entries[i].root);
+        }
+    }
+    cbm_mutex_unlock(&application->mutex);
+    return matches;
+}
+
 cbm_daemon_application_t *cbm_daemon_application_new(
     const cbm_daemon_application_config_t *config) {
     cbm_daemon_application_t *application = calloc(1, sizeof(*application));
@@ -4363,7 +4560,7 @@ static void application_watch_encode_index_args_locked(const cbm_daemon_applicat
 static bool application_permanent_watch_orphaned_locked(cbm_daemon_application_t *application,
                                                         const cbm_daemon_application_watch_t *watch,
                                                         const char *project_key) {
-    return application->permanent && watch->subscribers == 0 &&
+    return application->permanent && !watch->named && watch->subscribers == 0 &&
            !application_find_active_job_locked(application, project_key) &&
            !application_regular_db_exists(watch->project);
 }
@@ -4387,9 +4584,11 @@ static cbm_daemon_application_job_t *application_background_index_admit(
         application_remove_watch_locked(application, watch);
         watch = NULL;
     }
+    bool daemon_owns_watch =
+        watch && (watch->named || (application->permanent && !application->named_watch_mode));
     bool watch_live = !require_live_watch ||
                       (watch && application_watch_root_matches(watch->root, canonical_root) &&
-                       (watch->subscribers > 0 || application->permanent));
+                       (watch->subscribers > 0 || daemon_owns_watch));
     if (require_live_watch && watch_live) {
         application_watch_encode_index_args_locked(watch, document, root, args);
     }
@@ -4408,7 +4607,7 @@ static cbm_daemon_application_job_t *application_background_index_admit(
             subscribe_status = APPLICATION_JOB_SUBSCRIBE_ALLOCATION_FAILED;
             application_job_unsubscribe_locked(job);
             job = NULL;
-        } else if (application->permanent) {
+        } else if (daemon_owns_watch) {
             /*
              * The ordinary subscription acquired above is retained as daemon
              * ownership. This allows the physical watcher to run indexing even

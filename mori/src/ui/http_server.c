@@ -1643,8 +1643,7 @@ void cbm_http_server_set_binary_path(const char *path) {
  * daemon application that owns its callback context. */
 static void *index_thread_fn(void *arg) {
     index_job_t *job = arg;
-    char *project =
-        cbm_project_name_from_path(job->project_name[0] ? job->project_name : job->root_path);
+    char *project = cbm_project_name_with_override(job->root_path, job->project_name);
     cbm_log_info("ui.index.start", "project", project ? project : "", "path", job->root_path);
     cbm_http_server_t *server = job->server;
     int result = server && server->index_executor
