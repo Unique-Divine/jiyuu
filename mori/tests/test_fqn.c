@@ -8,6 +8,8 @@
 #include "../src/pipeline/pipeline.h"
 #include "../src/foundation/str_util.h"
 #include "../src/foundation/arena.h"
+#include "../src/foundation/compat.h"
+#include "../src/foundation/compat_fs.h"
 #include "helpers.h"
 
 #include <stdlib.h>
@@ -560,6 +562,27 @@ TEST(project_name_single_segment) {
     PASS();
 }
 
+TEST(project_name_override_is_literal_when_checkout_matches) {
+    char name[] = "mori-name-collision-XXXXXX";
+    ASSERT_NOT_NULL(cbm_mkdtemp(name));
+    char path[sizeof(name) + 2];
+    snprintf(path, sizeof(path), "./%s", name);
+    char *literal = cbm_project_name_with_override("/unused", name);
+    char *derived = cbm_project_name_with_override(name, NULL);
+    char *legacy = cbm_project_name_with_override("/unused", path);
+    bool is_literal = literal && strcmp(literal, name) == 0;
+    bool is_derived = derived && strcmp(derived, name) != 0;
+    bool path_unchanged = derived && legacy && strcmp(derived, legacy) == 0;
+    free(literal);
+    free(derived);
+    free(legacy);
+    ASSERT_EQ(cbm_rmdir(name), 0);
+    ASSERT_TRUE(is_literal);
+    ASSERT_TRUE(is_derived);
+    ASSERT_TRUE(path_unchanged);
+    PASS();
+}
+
 TEST(project_name_mixed_separators) {
     /* Mix of forward slash, backslash, colon */
     ASSERT_FQN(cbm_project_name_from_path("C:\\Users/dev:proj"), "C-Users-dev-proj");
@@ -814,6 +837,7 @@ SUITE(fqn) {
     RUN_TEST(project_name_null);
     RUN_TEST(project_name_all_slashes);
     RUN_TEST(project_name_single_segment);
+    RUN_TEST(project_name_override_is_literal_when_checkout_matches);
     RUN_TEST(project_name_mixed_separators);
     RUN_TEST(project_name_already_dashed);
     RUN_TEST(project_name_deep_path);

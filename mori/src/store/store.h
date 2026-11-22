@@ -801,7 +801,7 @@ int cbm_store_delete_file_hashes(cbm_store_t *s, const char *project);
  * array of caller, leaf, source byte span, and reason). Stored in the separate
  * index_coverage table — coverage is metadata ABOUT the graph, never mixed
  * into the graph itself. */
-typedef struct {
+typedef struct cbm_coverage_row {
     const char *rel_path;
     const char *kind;
     const char *detail;

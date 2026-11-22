@@ -267,6 +267,11 @@ char *cbm_project_name_from_path(const char *abs_path);
  * encoded exactly like the segment it came from (#1827). Caller frees. */
 char *cbm_project_name_sanitize(const char *name_path);
 
+/* Resolve an index identity from its root or explicit name. A valid project
+ * name is independent of the process working directory. Legacy path-shaped
+ * overrides still use the path-derived naming rules. Caller frees. */
+char *cbm_project_name_with_override(const char *root_path, const char *name);
+
 /* ── Function Registry ──────────────────────────────────────────── */
 
 typedef struct cbm_registry cbm_registry_t;

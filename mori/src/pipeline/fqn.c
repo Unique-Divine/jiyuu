@@ -8,6 +8,7 @@
 #include "foundation/compat_fs.h"
 #include "foundation/constants.h"
 #include "foundation/platform.h"
+#include "foundation/str_util.h"
 
 #include <stdbool.h>
 #include <stddef.h> // NULL
@@ -468,6 +469,14 @@ char *cbm_project_name_from_path(const char *abs_path) {
         name_path = real;
     }
     return cbm_project_name_sanitize(name_path);
+}
+
+char *cbm_project_name_with_override(const char *root_path, const char *name) {
+    if (!name || !name[0]) {
+        return cbm_project_name_from_path(root_path);
+    }
+    return cbm_validate_project_name(name) ? cbm_project_name_sanitize(name)
+                                           : cbm_project_name_from_path(name);
 }
 
 char *cbm_project_name_sanitize(const char *name_path) {

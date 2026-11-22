@@ -22,6 +22,9 @@ mod tools;
 #[cfg(feature = "c-backend")]
 mod search;
 
+#[cfg(feature = "c-backend")]
+mod path_verdict;
+
 #[cfg(any(feature = "c-backend", test))]
 mod stdio;
 

@@ -11,6 +11,11 @@ use std::process::Command;
 use std::ptr::{NonNull, null, null_mut};
 use std::time::Instant;
 
+mod git_excludes;
+mod sphinx;
+
+use sphinx::Suffixes;
+
 const IGNORED_CAP: usize = 2_000;
 
 #[derive(Clone, Copy, Debug)]
@@ -80,6 +85,14 @@ unsafe extern "C" {
     fn cbm_should_skip_filename(name: *const c_char, mode: Mode) -> bool;
     fn cbm_matches_fast_pattern(name: *const c_char, mode: Mode) -> bool;
     fn cbm_language_for_file(name: *const c_char, path: *const c_char) -> c_int;
+    fn cbm_language_classify_with(
+        config: *const c_void,
+        name: *const c_char,
+        head: *const u8,
+        head_len: usize,
+        more: bool,
+        readable: bool,
+    ) -> c_int;
     fn cbm_language_name(language: c_int) -> *const c_char;
     fn cbm_workspace_cache_dir() -> *const c_char;
 }
@@ -268,8 +281,17 @@ impl Drop for Ignore {
 }
 
 struct IgnoreAt {
-    base: PathBuf,
+    directory: PathBuf,
     matcher: Ignore,
+}
+
+impl IgnoreAt {
+    fn load(directory: &Path, source: &Path) -> Option<Self> {
+        Ignore::load(source).map(|matcher| Self {
+            directory: directory.to_owned(),
+            matcher,
+        })
+    }
 }
 
 #[derive(Default)]
@@ -346,7 +368,7 @@ struct Walk {
     mode: Mode,
     size_cap: u64,
     cbmignore: Option<Ignore>,
-    info_exclude: Option<PathBuf>,
+    user_ignore: Option<Ignore>,
     tracked: Tracked,
     cache: Option<PathBuf>,
     snapshot: Snapshot,
@@ -354,7 +376,34 @@ struct Walk {
 
 impl Walk {
     fn run(root: &Path, mode: Mode, size_cap: u64) -> io::Result<Snapshot> {
-        let common = git_common_dir(root);
+        let root = root.canonicalize()?;
+        let repository = root.ancestors().find_map(|directory| {
+            git_common_dir(directory).map(|common| (directory, common))
+        });
+        let rule_root = repository
+            .as_ref()
+            .map_or(root.as_path(), |(path, _)| *path);
+        let ancestors: Vec<_> = root
+            .ancestors()
+            .take_while(|directory| directory.starts_with(rule_root))
+            .collect();
+        let mut stack = Vec::new();
+        // The last matching rule wins. Paths stay relative to the directory
+        // that owns each rule. C reads info/exclude after the root .gitignore.
+        for directory in ancestors.into_iter().rev() {
+            stack.extend(IgnoreAt::load(
+                directory,
+                &directory.join(".gitignore"),
+            ));
+            if let Some((git_root, common)) = &repository
+                && directory == *git_root
+            {
+                stack.extend(IgnoreAt::load(
+                    directory,
+                    &common.join("info/exclude"),
+                ));
+            }
+        }
         // SAFETY: the getter returns null or a live NUL-terminated path.
         // Copy before another native call can modify its backing buffer.
         let cache =
@@ -365,18 +414,26 @@ impl Walk {
             mode,
             size_cap,
             cbmignore: Ignore::load(&root.join(".cbmignore")),
-            info_exclude: common
+            user_ignore: repository
                 .as_ref()
-                .map(|common| common.join("info/exclude")),
-            tracked: if common.is_some() {
-                Tracked::load(root)
+                .filter(|(_, common)| common.join("config").is_file())
+                .and_then(|_| git_excludes::user_ignore_path())
+                .and_then(|path| Ignore::load(&path)),
+            tracked: if repository.is_some() {
+                Tracked::load(&root)
             } else {
                 Tracked::default()
             },
             cache,
             snapshot: Snapshot::default(),
         };
-        walk.directory(root, Path::new(""), false, &mut Vec::new())?;
+        walk.directory(
+            &root,
+            Path::new(""),
+            false,
+            &mut stack,
+            &Suffixes::default(),
+        )?;
         Ok(walk.snapshot)
     }
 
@@ -386,22 +443,15 @@ impl Walk {
         rel: &Path,
         under_gitignore: bool,
         stack: &mut Vec<IgnoreAt>,
+        inherited_suffixes: &Suffixes,
     ) -> io::Result<()> {
         let entries = fs::read_dir(path)?;
         let old_len = stack.len();
-        let gitignore = path.join(".gitignore");
-        let info_exclude = self
-            .info_exclude
-            .as_deref()
-            .filter(|_| rel.as_os_str().is_empty());
-        for source in Some(gitignore.as_path()).into_iter().chain(info_exclude) {
-            if let Some(matcher) = Ignore::load(source) {
-                stack.push(IgnoreAt {
-                    base: rel.to_owned(),
-                    matcher,
-                });
-            }
+        if !rel.as_os_str().is_empty() {
+            stack.extend(IgnoreAt::load(path, &path.join(".gitignore")));
         }
+        let local_suffixes = Suffixes::read(path);
+        let suffixes = local_suffixes.as_ref().unwrap_or(inherited_suffixes);
 
         for entry in entries {
             let entry = entry?;
@@ -419,20 +469,37 @@ impl Walk {
                     under_gitignore,
                     stack,
                 ) {
-                    Directory::Keep => {
-                        self.directory(&entry_path, &rel, false, stack)?
-                    }
+                    Directory::Keep => self.directory(
+                        &entry_path,
+                        &rel,
+                        false,
+                        stack,
+                        suffixes,
+                    )?,
                     Directory::GitIgnored
                         if self.tracked.dirs.contains(&rel) =>
                     {
-                        self.directory(&entry_path, &rel, true, stack)?;
+                        self.directory(
+                            &entry_path,
+                            &rel,
+                            true,
+                            stack,
+                            suffixes,
+                        )?;
                     }
                     Directory::GitIgnored | Directory::Skip => {
                         self.snapshot.excluded.push(rel.as_path().into());
                     }
                 }
             } else if kind.is_file() {
-                self.file(&entry, &rel, under_gitignore, stack)?;
+                self.file(
+                    &entry,
+                    &entry_path,
+                    &rel,
+                    under_gitignore,
+                    stack,
+                    suffixes,
+                )?;
             }
         }
         stack.truncate(old_len);
@@ -443,6 +510,12 @@ impl Walk {
         self.cbmignore
             .as_ref()
             .map_or(0, |matcher| matcher.verdict(path, is_dir))
+    }
+
+    fn user_ignored(&self, rel: &Path, is_dir: bool) -> bool {
+        self.user_ignore
+            .as_ref()
+            .is_some_and(|matcher| matcher.verdict(rel, is_dir) > 0)
     }
 
     fn classify_dir(
@@ -476,7 +549,10 @@ impl Walk {
         };
         if hard_skip || cbm > 0 {
             Directory::Skip
-        } else if under_gitignore || git_ignored(rel, true, stack) {
+        } else if under_gitignore
+            || git_ignored(absolute, true, stack)
+            || (cbm >= 0 && self.user_ignored(rel, true))
+        {
             Directory::GitIgnored
         } else {
             Directory::Keep
@@ -486,9 +562,11 @@ impl Walk {
     fn file(
         &mut self,
         entry: &fs::DirEntry,
+        absolute: &Path,
         rel: &Path,
         under_gitignore: bool,
         stack: &[IgnoreAt],
+        suffixes: &Suffixes,
     ) -> io::Result<()> {
         let name = c_path(Path::new(&entry.file_name()));
         let size = entry.metadata()?.len();
@@ -505,14 +583,19 @@ impl Walk {
             }
         };
         let ignore_reason = native_reason.or_else(|| {
-            if !self.tracked.files.contains(rel)
-                && (under_gitignore || git_ignored(rel, false, stack))
+            let tracked = self.tracked.files.contains(rel);
+            if !tracked
+                && (under_gitignore || git_ignored(absolute, false, stack))
             {
-                Some("gitignore")
-            } else if self.cbm_verdict(rel, false) > 0 {
+                return Some("gitignore");
+            }
+            let cbm = self.cbm_verdict(rel, false);
+            if cbm > 0 {
                 Some("cbmignore")
             } else if self.size_cap > 0 && size > self.size_cap {
                 Some("size-cap")
+            } else if !tracked && cbm >= 0 && self.user_ignored(rel, false) {
+                Some("gitignore")
             } else {
                 None
             }
@@ -522,16 +605,31 @@ impl Walk {
             return Ok(());
         }
 
-        let path = c_path(&entry.path());
+        let path = c_path(absolute);
         // SAFETY: the classifier reads both live strings and returns a
         // CBMLanguage value. cbm_language_name serves a static string.
-        let (language, known) = unsafe {
+        let language = unsafe {
             let language = cbm_language_for_file(name.as_ptr(), path.as_ptr());
             let known = CStr::from_ptr(cbm_language_name(language)).to_bytes()
                 != b"Unknown";
-            (language, known)
+            if known {
+                Some(language)
+            } else if suffixes.matches(name.as_bytes()) {
+                // The C fallback uses the built-in reStructuredText ID even
+                // when a user has overridden the normal .rst classification.
+                Some(cbm_language_classify_with(
+                    null(),
+                    c"page.rst".as_ptr(),
+                    null(),
+                    0,
+                    false,
+                    false,
+                ))
+            } else {
+                None
+            }
         };
-        if known {
+        if let Some(language) = language {
             self.snapshot.files.push(File {
                 path: rel.into(),
                 language,
@@ -542,13 +640,15 @@ impl Walk {
     }
 }
 
-fn git_ignored(rel: &Path, is_dir: bool, stack: &[IgnoreAt]) -> bool {
+fn git_ignored(absolute: &Path, is_dir: bool, stack: &[IgnoreAt]) -> bool {
     stack
         .iter()
         .rev()
         .map(|rule| {
-            rule.matcher
-                .verdict(rel.strip_prefix(&rule.base).unwrap(), is_dir)
+            let relative = absolute
+                .strip_prefix(&rule.directory)
+                .expect("ignore anchor is an ancestor of the entry");
+            rule.matcher.verdict(relative, is_dir)
         })
         .find(|&verdict| verdict != 0)
         .is_some_and(|verdict| verdict > 0)
@@ -674,24 +774,236 @@ fn matches_c_tracked_paths_and_info_exclude() {
 }
 
 #[test]
-fn identifies_sphinx_suffix_gap() {
+fn matches_c_ignores_from_enclosing_repository() {
+    let scratch = Scratch::new();
+    assert!(git(&scratch.0, &["init", "-q"]).is_some());
+    scratch.write(
+        ".gitignore",
+        "/secret.rs\n*.gen.rs\n/pkg/run/conflict.rs\n/pkg/run/tracked/\n",
+    );
+    scratch.write(
+        ".git/info/exclude",
+        "!/pkg/run/conflict.rs\n/pkg/run/excluded.rs\n",
+    );
+    scratch.write("pkg/.gitignore", "!/run/revived.gen.rs\n/run/scratch/\n");
+    scratch.write("pkg/run/.gitignore", "!local.gen.rs\n");
+    for path in [
+        "conflict.rs",
+        "excluded.rs",
+        "filtered.gen.rs",
+        "local.gen.rs",
+        "revived.gen.rs",
+        "scratch/hidden.rs",
+        "secret.rs",
+        "tracked/keep.rs",
+        "tracked/untracked.rs",
+    ] {
+        scratch.write(&format!("pkg/run/{path}"), "fn sample() {}\n");
+    }
+    assert!(
+        git(&scratch.0, &["add", "-f", "pkg/run/tracked/keep.rs"]).is_some()
+    );
+
+    let root = scratch.0.join("pkg/run");
+    for mode in Mode::ALL {
+        let mut native = NativeWalk::run(&root, mode, 0).snapshot();
+        let mut rust = Walk::run(&root, mode, 0).unwrap();
+        native.sort();
+        rust.sort();
+        assert_eq!(native, rust, "{mode:?}");
+        assert_eq!(
+            rust.files
+                .iter()
+                .filter(|file| file.path.0.ends_with(b".rs"))
+                .map(|file| file.path.0.as_slice())
+                .collect::<Vec<_>>(),
+            [
+                b"conflict.rs".as_slice(),
+                b"local.gen.rs",
+                b"revived.gen.rs",
+                b"secret.rs",
+                b"tracked/keep.rs",
+            ],
+            "{mode:?}"
+        );
+        assert_eq!(rust.excluded, [RelativePath::from(Path::new("scratch"))]);
+        assert_eq!(
+            rust.ignored
+                .iter()
+                .map(|(path, reason)| (path.0.as_slice(), reason.as_slice()))
+                .collect::<Vec<_>>(),
+            [
+                (b"excluded.rs".as_slice(), b"gitignore".as_slice()),
+                (b"filtered.gen.rs", b"gitignore"),
+                (b"tracked/untracked.rs", b"gitignore"),
+            ],
+            "{mode:?}"
+        );
+    }
+}
+
+#[test]
+fn matches_c_user_git_excludes() {
+    const FIXTURE: &str = "MORI_DISCOVERY_USER_EXCLUDES_FIXTURE";
+    let Some(root) = std::env::var_os(FIXTURE) else {
+        let scratch = Scratch::new();
+        // A separate process gives C and Rust the same isolated user config
+        // without changing the other tests' environment.
+        let result = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "discovery_spike::matches_c_user_git_excludes"])
+            .env(FIXTURE, &scratch.0)
+            .env("HOME", scratch.0.join("home"))
+            .env("XDG_CONFIG_HOME", scratch.0.join("xdg"))
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        return;
+    };
+    // The parent owns this scratch directory and removes it after the child exits.
+    let scratch = std::mem::ManuallyDrop::new(Scratch(root.into()));
+    let repo = scratch.0.join("repo");
+    fs::create_dir(&repo).unwrap();
+    assert!(git(&repo, &["init", "-q"]).is_some());
+    scratch.write("home/.gitconfig", "[CoRe]\n excludesFile = ~/unused\n ExcludesFILE = \"~/custom #ignore\" ; comment\n");
+    scratch.write("home/custom #ignore", "home.rs\ntracked.rs\nrescued.rs\ncbm-owned.rs\ntoo-large.rs\nglobal-dir/\nrescued-dir/\n");
+    scratch.write("xdg/git/config", "[core]\n excludesFile = ~/xdg-ignore\n");
+    scratch.write("home/xdg-ignore", "xdg-config.rs\n");
+    scratch.write("xdg/git/ignore", "xdg-default.rs\n");
+    scratch.write(
+        "repo/.cbmignore",
+        "!rescued.rs\ncbm-owned.rs\n!rescued-dir/\n",
+    );
+    scratch.write("repo/.gitignore", "!home.rs\n");
+    for path in [
+        "home.rs",
+        "xdg-config.rs",
+        "xdg-default.rs",
+        "tracked.rs",
+        "rescued.rs",
+        "cbm-owned.rs",
+        "global-dir/filtered.rs",
+        "rescued-dir/kept.rs",
+    ] {
+        scratch.write(&format!("repo/{path}"), "fn sample() {}\n");
+    }
+    scratch.write("repo/too-large.rs", [b'x'; 128]);
+    assert!(git(&repo, &["add", "-f", "tracked.rs"]).is_some());
+
+    for (precedence, excluded_file) in [
+        ("home/.gitconfig", "home.rs"),
+        ("xdg/git/config", "xdg-config.rs"),
+        ("xdg/git/ignore", "xdg-default.rs"),
+    ] {
+        for mode in Mode::ALL {
+            let mut native = NativeWalk::run(&repo, mode, 64).snapshot();
+            let mut rust = Walk::run(&repo, mode, 64).unwrap();
+            native.sort();
+            rust.sort();
+            assert_eq!(native, rust, "{precedence} {mode:?}");
+            for (path, reason) in [
+                (excluded_file, "gitignore"),
+                ("cbm-owned.rs", "cbmignore"),
+                ("too-large.rs", "size-cap"),
+            ] {
+                assert!(
+                    rust.ignored
+                        .iter()
+                        .any(|(file, why)| file.0 == path.as_bytes()
+                            && why == reason.as_bytes()),
+                    "{precedence} {mode:?}: {rust:?}"
+                );
+            }
+            for retained in ["tracked.rs", "rescued.rs", "rescued-dir/kept.rs"] {
+                assert!(
+                    rust.files
+                        .iter()
+                        .any(|file| file.path.0 == retained.as_bytes()),
+                    "{precedence} {mode:?}: {rust:?}"
+                );
+            }
+            let global_directory = RelativePath::from(Path::new("global-dir"));
+            assert_eq!(
+                rust.excluded.contains(&global_directory),
+                precedence == "home/.gitconfig"
+            );
+        }
+        fs::remove_file(scratch.0.join(precedence)).unwrap();
+    }
+}
+
+#[test]
+fn matches_c_sphinx_suffixes() {
     let scratch = Scratch::new();
     scratch.write(
-        "docs/conf.py",
-        "source_suffix = {'.customdoc': 'restructuredtext'}\n",
+        "guide/conf.py",
+        "raise RuntimeError('do not execute this file')\n\
+         source_suffix = {\n\
+             '.note': 'restructuredtext',\n\
+             '.mdonly': 'markdown',\n\
+             '.rst': 'restructuredtext',\n\
+             '.py': 'restructuredtext',\n\
+             '.bad.name': 'restructuredtext',\n\
+         }\n\
+         source_suffix = '.later'\n",
     );
-    scratch.write("docs/overview.customdoc", "Example\n=======\n");
+    scratch.write(
+        "guide/nested/conf.py",
+        "source_suffix = ['.nested', '.rst']\n",
+    );
+    scratch.write("guide/scalar/conf.py", "source_suffix = '.scalar'\n");
+    let mut padded = vec![b'#'; 65_536];
+    padded.extend_from_slice(b"\nsource_suffix = '.late'\n");
+    scratch.write("guide/padded/conf.py", padded);
+    for path in [
+        "guide/overview.note",
+        "guide/sub/chapter.note",
+        "guide/code.py",
+        "guide/markdown.mdonly",
+        "guide/second.later",
+        "guide/invalid.bad.name",
+        "guide/nested/inherited.note",
+        "guide/nested/override.nested",
+        "guide/scalar/content.scalar",
+        "guide/padded/beyond.late",
+        "guide/padded/inherited.note",
+        "outside.note",
+    ] {
+        scratch.write(path, "Example\n=======\n");
+    }
 
-    let native = NativeWalk::run(&scratch.0, Mode::Full, 0).snapshot();
-    let rust = Walk::run(&scratch.0, Mode::Full, 0).unwrap();
-    let has_overview = |snapshot: &Snapshot| {
-        snapshot
+    for mode in Mode::ALL {
+        let mut native = NativeWalk::run(&scratch.0, mode, 0).snapshot();
+        let mut rust = Walk::run(&scratch.0, mode, 0).unwrap();
+        native.sort();
+        rust.sort();
+        assert_eq!(native, rust, "{mode:?}");
+        let rst_paths: Vec<_> = rust
             .files
             .iter()
-            .any(|file| file.path.0 == b"docs/overview.customdoc")
-    };
-    assert!(has_overview(&native));
-    assert!(!has_overview(&rust));
+            .filter_map(|file| {
+                // SAFETY: discovery returns native language IDs, and the name
+                // function returns a static NUL-terminated string for each ID.
+                let name =
+                    unsafe { CStr::from_ptr(cbm_language_name(file.language)) };
+                (name == c"reStructuredText").then_some(file.path.0.as_slice())
+            })
+            .collect();
+        assert_eq!(
+            rst_paths,
+            [
+                b"guide/nested/override.nested".as_slice(),
+                b"guide/overview.note",
+                b"guide/scalar/content.scalar",
+                b"guide/sub/chapter.note",
+            ],
+            "{mode:?}"
+        );
+    }
 }
 
 #[test]

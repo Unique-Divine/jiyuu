@@ -18,7 +18,13 @@ cargo test --locked -p jiyuu-mori --features c-backend --lib discovery_spike
 The fixtures compare full, moderate, and fast discovery. They exercise
 nested `.gitignore` files, `.cbmignore` negation, `info/exclude`, tracked
 files in ignored directories, a size limit, symlinks, shebang detection, and
-unsupported extensions.
+unsupported extensions. The enclosing-repository fixture indexes a package
+subdirectory. It checks ancestor rules against their original directories,
+deeper negations, the repository's `info/exclude`, and tracked files.
+The user excludes fixture checks `~/.gitconfig`, the XDG Git config, and
+the XDG `git/ignore` default in order, in an isolated process.
+The Sphinx fixture checks custom reStructuredText suffixes inherited from
+`conf.py`, nested overrides, and the 64 KiB config read limit.
 
 ## Compare and Measure a Repository
 
@@ -52,12 +58,6 @@ the native result retains a traversal-order sample.
 
 ## Limits
 
-- The Sphinx fixture documents a known mismatch. C indexes a custom
-  reStructuredText extension defined in `conf.py`. The Rust walk skips
-  the same file as an unsupported extension.
-- The comparison covers discovery rooted at a checkout or a plain directory.
-  An enclosing repository's ignore chain and user Git ignore configuration
-  still need coverage in the Rust walk.
 - The Rust walk stops on read errors. C file discovery can skip an
   unreadable entry or directory. Bounded admission walks, aggregate
   resource limits, and changes during a walk need separate tests before
