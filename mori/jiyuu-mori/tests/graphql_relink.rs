@@ -436,8 +436,8 @@ fn linear_query_reference_keeps_order_and_duplicate_projections() {
             json!(["a.qualified_name", "r.tag"]),
             json!([
                 ["caller.other", "first"],
-                ["caller.kept", "target"],
                 ["caller.kept", "peer"],
+                ["caller.kept", "target"],
                 ["caller.last", "last"]
             ]),
         ),
