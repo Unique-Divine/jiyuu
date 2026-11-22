@@ -13,9 +13,97 @@ import tempfile
 import threading
 from pathlib import Path
 from queue import Queue
-from typing import cast
+from typing import TypedDict, cast
 
 ModelRequest = dict[str, list[dict[str, object]]]
+UNTRUSTED_CONTEXT = "unexpected untrusted smoke hook context"
+
+
+class HookEntry(TypedDict):
+    key: str
+    sourcePath: str
+    eventName: str
+    command: str | None
+    currentHash: str
+    trustStatus: str
+    enabled: bool
+
+
+class HookInventory(TypedDict):
+    cwd: str
+    hooks: list[HookEntry]
+
+
+def hook_inventory(
+    codex: str, env: dict[str, str], directories: list[Path]
+) -> list[HookInventory]:
+    with subprocess.Popen(
+        [codex, "app-server", "--listen", "stdio://"],
+        env=env,
+        cwd=directories[0],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    ) as process:
+        assert process.stdin is not None and process.stdout is not None
+        input_stream, output_stream = process.stdin, process.stdout
+
+        def send(message: dict[str, object]) -> None:
+            input_stream.write(json.dumps(message) + "\n")
+            input_stream.flush()
+
+        def receive(request_id: int) -> dict[str, object]:
+            for line in output_stream:
+                message = cast(dict[str, object], json.loads(line))
+                if message.get("id") == request_id:
+                    return cast(dict[str, object], message["result"])
+            raise RuntimeError("Codex app server closed without a hook inventory")
+
+        timer = threading.Timer(15, process.kill)
+        timer.start()
+        try:
+            client = {"name": "mori-hook-smoke", "version": "1"}
+            send({"id": 0, "method": "initialize", "params": {"clientInfo": client}})
+            receive(0)
+            send({"method": "initialized"})
+            params = {"cwds": [str(directory) for directory in directories]}
+            send({"id": 1, "method": "hooks/list", "params": params})
+            inventory = cast(list[HookInventory], receive(1)["data"])
+            if {entry["cwd"] for entry in inventory} != set(params["cwds"]):
+                raise RuntimeError(
+                    "Codex did not list hooks for each smoke test directory"
+                )
+            return inventory
+        finally:
+            process.kill()
+            timer.cancel()
+
+
+def trust_fixture_hook(
+    inventory: list[HookInventory], config: Path, hook_source: Path, hook_command: str
+) -> None:
+    approvals: set[tuple[str, str]] = set()
+    for directory in inventory:
+        matched = False
+        for hook in directory["hooks"]:
+            if (
+                hook["sourcePath"] == str(hook_source)
+                and hook["eventName"] == "sessionStart"
+                and hook["command"] == hook_command
+            ):
+                matched = True
+                approvals.add((hook["key"], hook["currentHash"]))
+            elif hook["enabled"] and hook["trustStatus"] in {"trusted", "managed"}:
+                raise RuntimeError("An external Codex hook is active in the smoke test")
+        if not matched:
+            raise RuntimeError("Codex did not discover the Mori fixture hook")
+    if len(approvals) != 1:
+        raise RuntimeError("Expected one Mori fixture hook approval")
+    key, content_hash = approvals.pop()
+    with config.open("a", encoding="utf-8") as stream:
+        stream.write(f"\n[hooks.state.{json.dumps(key, ensure_ascii=False)}]\n")
+        stream.write(f"trusted_hash = {json.dumps(content_hash)}\n")
 
 
 def response_body() -> bytes:
@@ -38,7 +126,9 @@ def response_body() -> bytes:
     ).encode()
 
 
-def run(command: list[str], env: dict[str, str], cwd: Path) -> None:
+def run(
+    command: list[str], env: dict[str, str], cwd: Path, *, report_stderr: bool = False
+) -> None:
     result = subprocess.run(
         command,
         env=env,
@@ -49,7 +139,10 @@ def run(command: list[str], env: dict[str, str], cwd: Path) -> None:
         timeout=45,
     )
     if result.returncode:
-        raise RuntimeError(f"{shlex.join(command)} exited {result.returncode}")
+        problem = f"{shlex.join(command)} exited {result.returncode}"
+        if report_stderr and result.stderr:
+            problem += f"\n{result.stderr.strip()[:2000]}"
+        raise RuntimeError(problem)
 
 
 def developer_context(request: ModelRequest) -> list[str]:
@@ -83,47 +176,68 @@ def smoke(mori: Path, codex: str) -> None:
 
     with (
         tempfile.TemporaryDirectory(prefix="mori-hook-") as temporary,
+        # The daemon socket needs a short path even when TMPDIR is long.
+        tempfile.TemporaryDirectory(prefix="mh-", dir="/tmp") as runtime_temporary,
         http.server.ThreadingHTTPServer(("127.0.0.1", 0), Responses) as server,
     ):
-        root = Path(temporary)
-        indexed, unindexed, codex_home, cache, runtime = (
-            root / name
-            for name in ("indexed", "unindexed", "codex", "cache", "runtime")
+        root = Path(temporary).resolve()
+        indexed, unindexed, codex_home, cache = (
+            root / name for name in ("indexed", "unindexed", "codex", "cache")
         )
-        for directory in (indexed, unindexed, codex_home, cache, runtime):
+        for directory in (indexed, unindexed, codex_home, cache):
             directory.mkdir(mode=0o700)
         (indexed / "example.py").write_text(
             "def example():\n    return 'example'\n", encoding="utf-8"
         )
         env = {
-            **os.environ,
+            **{
+                key: value
+                for key, value in os.environ.items()
+                if key.lower() not in {"http_proxy", "https_proxy", "all_proxy"}
+            },
             "CODEX_HOME": str(codex_home),
             "CBM_CACHE_DIR": str(cache),
-            "CBM_RUNTIME_DIR": str(runtime),
+            "CBM_RUNTIME_DIR": str(Path(runtime_temporary).resolve()),
         }
-        (codex_home / "config.toml").write_text(
+        config = codex_home / "config.toml"
+        config.write_text(
             f'\nmodel = "gpt-5"\nmodel_provider = "probe"\n'
             f'\n[model_providers.probe]\nname = "Mori probe"\n'
             f'base_url = "http://127.0.0.1:{server.server_port}/v1"\n'
             'wire_api = "responses"\nsupports_websockets = false\n',
             encoding="utf-8",
         )
-        hook = {
+        hook_command = shlex.join([str(mori), "hook-augment"])
+        mori_hook = {
             "type": "command",
-            "command": shlex.join([str(mori), "hook-augment"]),
+            "command": hook_command,
+            "timeout": 5,
+        }
+        untrusted_hook = {
+            "type": "command",
+            "command": shlex.join(["printf", "%s\\n", UNTRUSTED_CONTEXT]),
             "timeout": 5,
         }
         matcher = "startup|resume|clear|compact|fork"
         hook_config = {
-            "hooks": {"SessionStart": [{"matcher": matcher, "hooks": [hook]}]}
+            "hooks": {
+                "SessionStart": [
+                    {"matcher": matcher, "hooks": [mori_hook, untrusted_hook]}
+                ]
+            }
         }
-        (codex_home / "hooks.json").write_text(
-            json.dumps(hook_config), encoding="utf-8"
+        hook_source = codex_home / "hooks.json"
+        hook_source.write_text(json.dumps(hook_config), encoding="utf-8")
+        trust_fixture_hook(
+            hook_inventory(codex, env, [indexed, unindexed]),
+            config,
+            hook_source,
+            hook_command,
         )
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
-            run([str(mori), "daemon", "start"], env, indexed)
+            run([str(mori), "daemon", "start"], env, indexed, report_stderr=True)
             try:
                 run(
                     [
@@ -139,6 +253,7 @@ def smoke(mori: Path, codex: str) -> None:
                     ],
                     env,
                     indexed,
+                    report_stderr=True,
                 )
                 for cwd, expected in (
                     (indexed, 'indexed as graph project "codex-probe"'),
@@ -147,12 +262,10 @@ def smoke(mori: Path, codex: str) -> None:
                         "no indexed graph project matched this working directory",
                     ),
                 ):
-                    # This isolated Codex home contains only the hook above.
                     run(
                         [
                             codex,
                             "exec",
-                            "--dangerously-bypass-hook-trust",
                             "--skip-git-repo-check",
                             "-C",
                             str(cwd),
@@ -161,16 +274,20 @@ def smoke(mori: Path, codex: str) -> None:
                         env,
                         cwd,
                     )
-                    if received.empty() or not any(
-                        expected in content
-                        for content in developer_context(received.get_nowait())
-                    ):
+                    contexts = (
+                        []
+                        if received.empty()
+                        else developer_context(received.get_nowait())
+                    )
+                    if not any(expected in content for content in contexts):
                         raise AssertionError(
                             f"Codex did not send Mori developer context for {cwd.name}"
                         )
+                    if any(UNTRUSTED_CONTEXT in content for content in contexts):
+                        raise AssertionError("Codex ran an untrusted smoke test hook")
                     print(f"PASS Codex SessionStart in {cwd.name} directory")
             finally:
-                run([str(mori), "daemon", "stop"], env, indexed)
+                run([str(mori), "daemon", "stop"], env, indexed, report_stderr=True)
         finally:
             server.shutdown()
             thread.join()
