@@ -19,6 +19,9 @@ mod store;
 #[cfg(all(feature = "c-backend", not(test)))]
 mod tools;
 
+#[cfg(feature = "c-backend")]
+mod search;
+
 #[cfg(any(feature = "c-backend", test))]
 mod stdio;
 
@@ -35,6 +38,8 @@ mod initialize;
 mod mcp_dispatch;
 #[cfg(any(feature = "c-backend", test))]
 mod project_page;
+#[cfg(all(feature = "c-backend", not(test)))]
+mod project_response;
 #[cfg(any(feature = "c-backend", test))]
 mod tool_list;
 
