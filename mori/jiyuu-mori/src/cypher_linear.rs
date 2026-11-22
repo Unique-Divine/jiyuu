@@ -429,7 +429,7 @@ fn property(json: &str, name: &str) -> rusqlite::Result<String> {
     }
     tail.get(start..end)
         .map(str::to_owned)
-        .ok_or_else(|| rusqlite::Error::InvalidQuery)
+        .ok_or(rusqlite::Error::InvalidQuery)
 }
 
 #[derive(Debug, PartialEq)]

@@ -17,6 +17,9 @@ the C evaluator and response encoder.
 ## Boundaries
 
 The Rust evaluator classifies the entire query before opening storage.
+The first slice accepts plain quoted strings, at most one anonymous node,
+and explicit limits up to 100,000. Escape sequences, inline regex-like
+patterns, repeated aliases, and virtual degree properties stay on C.
 Supported execution uses the provider's stored adjacency, preserves the
 native scan and expansion order, and preserves projection duplicates.
 A supported query that fails to read the cache returns a storage error.
