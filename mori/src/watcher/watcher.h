@@ -78,6 +78,12 @@ void cbm_watcher_set_poll_non_git(cbm_watcher_t *w, bool enabled);
  * A stopped watcher rejects new registrations. */
 bool cbm_watcher_watch(cbm_watcher_t *w, const char *project_name, const char *root_path);
 
+/* Named watches catch up on their first scan and preserve their cache when
+ * the checkout disappears. Clearing named ownership leaves the watch active
+ * for any sessions still subscribed to it. */
+bool cbm_watcher_watch_named(cbm_watcher_t *w, const char *project_name, const char *root_path);
+void cbm_watcher_clear_named(cbm_watcher_t *w, const char *project_name);
+
 /* Remove a project from the watch list. Any not-yet-admitted callback in the
  * current poll snapshot is invalidated before this function returns. */
 void cbm_watcher_unwatch(cbm_watcher_t *w, const char *project_name);
