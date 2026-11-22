@@ -98,6 +98,31 @@ impl Fixture {
         db
     }
 
+    fn query(&self, bin: &Path, project: &str, cypher: &str) -> Value {
+        let args = json!({"project": project, "query": cypher, "format": "json"});
+        let output = self
+            .command(bin)
+            .args(["cli", "--quiet", "query_graph", &args.to_string()])
+            .output()
+            .expect("query the graph");
+        let stop = self
+            .command(bin)
+            .args(["daemon", "stop"])
+            .output()
+            .expect("stop fixture daemon");
+        assert!(stop.status.success(), "{stop:?}");
+        assert!(output.status.success(), "{output:?}");
+        serde_json::from_slice(&output.stdout).expect("parse query response")
+    }
+
+    fn query_reference(&self, project: &str, cypher: &str) -> Value {
+        if option_env!("MORI_C_REFERENCE") == Some("1") {
+            let reference = Path::new(env!("MORI_C_BUILD_DIR")).join("codebase-memory-mcp");
+            return self.query(&reference, project, cypher);
+        }
+        self.query(Path::new(MORI), project, cypher)
+    }
+
     fn cross_links(&self, project: &str) -> Vec<Value> {
         let db = self.db(project);
         let mut rows = db
@@ -323,6 +348,55 @@ fn graphql_relinks_keep_exact_resolver_and_reconcile_callers() {
             )
             .expect("count local GraphQL calls");
         assert_eq!(calls, 1, "relink must preserve the remaining source call");
+    }
+}
+
+#[test]
+fn linear_query_reference_keeps_order_and_duplicate_projections() {
+    let fixture = Fixture::new();
+    let db = fixture.index(CLIENT);
+    let first = node(&db, CLIENT, "Caller", "other", "caller.other", "z.py");
+    let second = node(&db, CLIENT, "Caller", "kept", "caller.kept", "a.py");
+    let last = node(&db, CLIENT, "Caller", "kept", "caller.last", "b.py");
+    let target = node(&db, CLIENT, "Service", "served", "service.served", "service.py");
+    let peer = node(&db, CLIENT, "Service", "served", "service.other", "other.py");
+    // Edge insertion order differs from the outbound index's target-id order.
+    for (source, destination, tag) in [
+        (first, target, "first"),
+        (second, peer, "peer"),
+        (second, target, "target"),
+        (last, target, "last"),
+    ] {
+        edge(&db, CLIENT, source, destination, "CALLS", json!({"tag": tag}));
+    }
+    drop(db);
+
+    for (query, columns, rows) in [
+        (
+            "MATCH (a:Caller)-[r:CALLS]->(b:Service) WHERE a.name = 'kept' AND b.name = 'served' RETURN a, b.name, r.missing LIMIT 3",
+            json!(["a", "b.name", "r.missing"]),
+            json!([["kept", "served", ""], ["kept", "served", ""], ["kept", "served", ""]]),
+        ),
+        (
+            "MATCH (a:Caller)-[r:CALLS]->(b:Service {qualified_name: 'service.served'}) RETURN a.qualified_name, r.tag LIMIT 2",
+            json!(["a.qualified_name", "r.tag"]),
+            json!([["caller.other", "first"], ["caller.kept", "target"]]),
+        ),
+        (
+            "MATCH (a:Caller)-[:CALLS]->(b:Service) RETURN b.name LIMIT 0",
+            json!(["b.name"]),
+            json!([]),
+        ),
+        (
+            "MATCH (a:Caller)<-[:CALLS]-(b:Service) RETURN b.name",
+            json!(["b.name"]),
+            json!([]),
+        ),
+    ] {
+        let result = fixture.query_reference(CLIENT, query);
+        assert_eq!(result["columns"], columns, "{query}");
+        assert_eq!(result["rows"], rows, "{query}");
+        assert_eq!(result["total"], rows.as_array().unwrap().len(), "{query}");
     }
 }
 
