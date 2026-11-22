@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use rusqlite::{Connection, OpenFlags, Row, params};
+use rusqlite::{Connection, OpenFlags, Row, Statement, params};
 
 const ENGINE_LIMIT: usize = 100_000;
 const PROPERTY_LIMIT: usize = 511;
@@ -466,6 +466,7 @@ impl Query<'_> {
         } else {
             statement.query([project])?
         };
+        let mut adjacency = Adjacency::new(&connection)?;
         let mut rows = Vec::new();
         let mut truncated = false;
         let limit = self.limit.unwrap_or(ENGINE_LIMIT);
@@ -476,14 +477,12 @@ impl Query<'_> {
             }
             let mut hop = self.hops[0];
             hop.inbound ^= reversed;
-            for (next, edge) in neighbors(&connection, start.id, hop)? {
+            for (next, edge) in adjacency.neighbors(start.id, hop)? {
                 if !self.matches_node(second_index, &next)? {
                     continue;
                 }
                 if let Some(&hop) = self.hops.get(1) {
-                    for (last, last_edge) in
-                        neighbors(&connection, next.id, hop)?
-                    {
+                    for (last, last_edge) in adjacency.neighbors(next.id, hop)? {
                         if self.matches_node(2, &last)?
                             && self.conditions(&[&start, &next, &last])?
                         {
@@ -594,41 +593,57 @@ struct Edge {
     properties: String,
 }
 
-fn neighbors(
-    connection: &Connection,
-    id: i64,
-    hop: Hop<'_>,
-) -> rusqlite::Result<Vec<(Node, Edge)>> {
-    // Match native prepared edge lookups, then fetch their endpoints by id.
-    // A join can change the SQLite query plan and therefore the row order.
-    let (filter, neighbor_column) = if hop.inbound {
-        ("target_id", 2)
-    } else {
-        ("source_id", 3)
-    };
-    let sql = format!(
-        "SELECT id, project, source_id, target_id, type, properties FROM edges WHERE {filter} = ?1 AND type = ?2"
-    );
-    let mut edge_statement = connection.prepare_cached(&sql)?;
-    let mut edges = edge_statement.query(params![id, hop.kind])?;
-    let mut node_statement = connection.prepare_cached(&format!(
-        "SELECT {NODE_COLUMNS} FROM nodes n WHERE id = ?1"
-    ))?;
-    let mut neighbors = Vec::new();
-    while let Some(edge) = edges.next()? {
-        let neighbor: i64 = edge.get(neighbor_column)?;
-        let mut nodes = node_statement.query([neighbor])?;
-        if let Some(row) = nodes.next()? {
-            neighbors.push((
-                Node::read(row, 0)?,
-                Edge {
-                    kind: edge.get(4)?,
-                    properties: edge
-                        .get::<_, Option<String>>(5)?
-                        .unwrap_or_else(|| "{}".to_owned()),
-                },
-            ));
-        }
+struct Adjacency<'a> {
+    incoming: Statement<'a>,
+    outgoing: Statement<'a>,
+    node: Statement<'a>,
+}
+
+impl<'a> Adjacency<'a> {
+    fn new(connection: &'a Connection) -> rusqlite::Result<Self> {
+        // Match native prepared edge lookups, then fetch endpoints by id.
+        // A join can change the SQLite query plan and therefore the row order.
+        let edges = "SELECT id, project, source_id, target_id, type, properties FROM edges";
+        Ok(Self {
+            incoming: connection.prepare(&format!(
+                "{edges} WHERE target_id = ?1 AND type = ?2"
+            ))?,
+            outgoing: connection.prepare(&format!(
+                "{edges} WHERE source_id = ?1 AND type = ?2"
+            ))?,
+            node: connection.prepare(&format!(
+                "SELECT {NODE_COLUMNS} FROM nodes n WHERE id = ?1"
+            ))?,
+        })
     }
-    Ok(neighbors)
+
+    fn neighbors(
+        &mut self,
+        id: i64,
+        hop: Hop<'_>,
+    ) -> rusqlite::Result<Vec<(Node, Edge)>> {
+        let (statement, neighbor_column) = if hop.inbound {
+            (&mut self.incoming, 2)
+        } else {
+            (&mut self.outgoing, 3)
+        };
+        let mut edges = statement.query(params![id, hop.kind])?;
+        let mut neighbors = Vec::new();
+        while let Some(edge) = edges.next()? {
+            let neighbor: i64 = edge.get(neighbor_column)?;
+            let mut nodes = self.node.query([neighbor])?;
+            if let Some(row) = nodes.next()? {
+                neighbors.push((
+                    Node::read(row, 0)?,
+                    Edge {
+                        kind: edge.get(4)?,
+                        properties: edge
+                            .get::<_, Option<String>>(5)?
+                            .unwrap_or_else(|| "{}".to_owned()),
+                    },
+                ));
+            }
+        }
+        Ok(neighbors)
+    }
 }
