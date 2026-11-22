@@ -23,6 +23,8 @@ subdirectory. It checks ancestor rules against their original directories,
 deeper negations, the repository's `info/exclude`, and tracked files.
 The user excludes fixture checks `~/.gitconfig`, the XDG Git config, and
 the XDG `git/ignore` default in order, in an isolated process.
+The Sphinx fixture checks custom reStructuredText suffixes inherited from
+`conf.py`, nested overrides, and the 64 KiB config read limit.
 
 ## Compare and Measure a Repository
 
@@ -56,9 +58,6 @@ the native result retains a traversal-order sample.
 
 ## Limits
 
-- The Sphinx fixture documents a known mismatch. C indexes a custom
-  reStructuredText extension defined in `conf.py`. The Rust walk skips
-  the same file as an unsupported extension.
 - The Rust walk stops on read errors. C file discovery can skip an
   unreadable entry or directory. Bounded admission walks, aggregate
   resource limits, and changes during a walk need separate tests before

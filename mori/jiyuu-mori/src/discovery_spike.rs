@@ -12,6 +12,9 @@ use std::ptr::{NonNull, null, null_mut};
 use std::time::Instant;
 
 mod git_excludes;
+mod sphinx;
+
+use sphinx::Suffixes;
 
 const IGNORED_CAP: usize = 2_000;
 
@@ -82,6 +85,14 @@ unsafe extern "C" {
     fn cbm_should_skip_filename(name: *const c_char, mode: Mode) -> bool;
     fn cbm_matches_fast_pattern(name: *const c_char, mode: Mode) -> bool;
     fn cbm_language_for_file(name: *const c_char, path: *const c_char) -> c_int;
+    fn cbm_language_classify_with(
+        config: *const c_void,
+        name: *const c_char,
+        head: *const u8,
+        head_len: usize,
+        more: bool,
+        readable: bool,
+    ) -> c_int;
     fn cbm_language_name(language: c_int) -> *const c_char;
     fn cbm_workspace_cache_dir() -> *const c_char;
 }
@@ -416,7 +427,13 @@ impl Walk {
             cache,
             snapshot: Snapshot::default(),
         };
-        walk.directory(&root, Path::new(""), false, &mut stack)?;
+        walk.directory(
+            &root,
+            Path::new(""),
+            false,
+            &mut stack,
+            &Suffixes::default(),
+        )?;
         Ok(walk.snapshot)
     }
 
@@ -426,12 +443,15 @@ impl Walk {
         rel: &Path,
         under_gitignore: bool,
         stack: &mut Vec<IgnoreAt>,
+        inherited_suffixes: &Suffixes,
     ) -> io::Result<()> {
         let entries = fs::read_dir(path)?;
         let old_len = stack.len();
         if !rel.as_os_str().is_empty() {
             stack.extend(IgnoreAt::load(path, &path.join(".gitignore")));
         }
+        let local_suffixes = Suffixes::read(path);
+        let suffixes = local_suffixes.as_ref().unwrap_or(inherited_suffixes);
 
         for entry in entries {
             let entry = entry?;
@@ -449,20 +469,37 @@ impl Walk {
                     under_gitignore,
                     stack,
                 ) {
-                    Directory::Keep => {
-                        self.directory(&entry_path, &rel, false, stack)?
-                    }
+                    Directory::Keep => self.directory(
+                        &entry_path,
+                        &rel,
+                        false,
+                        stack,
+                        suffixes,
+                    )?,
                     Directory::GitIgnored
                         if self.tracked.dirs.contains(&rel) =>
                     {
-                        self.directory(&entry_path, &rel, true, stack)?;
+                        self.directory(
+                            &entry_path,
+                            &rel,
+                            true,
+                            stack,
+                            suffixes,
+                        )?;
                     }
                     Directory::GitIgnored | Directory::Skip => {
                         self.snapshot.excluded.push(rel.as_path().into());
                     }
                 }
             } else if kind.is_file() {
-                self.file(&entry, &entry_path, &rel, under_gitignore, stack)?;
+                self.file(
+                    &entry,
+                    &entry_path,
+                    &rel,
+                    under_gitignore,
+                    stack,
+                    suffixes,
+                )?;
             }
         }
         stack.truncate(old_len);
@@ -529,6 +566,7 @@ impl Walk {
         rel: &Path,
         under_gitignore: bool,
         stack: &[IgnoreAt],
+        suffixes: &Suffixes,
     ) -> io::Result<()> {
         let name = c_path(Path::new(&entry.file_name()));
         let size = entry.metadata()?.len();
@@ -570,13 +608,28 @@ impl Walk {
         let path = c_path(absolute);
         // SAFETY: the classifier reads both live strings and returns a
         // CBMLanguage value. cbm_language_name serves a static string.
-        let (language, known) = unsafe {
+        let language = unsafe {
             let language = cbm_language_for_file(name.as_ptr(), path.as_ptr());
             let known = CStr::from_ptr(cbm_language_name(language)).to_bytes()
                 != b"Unknown";
-            (language, known)
+            if known {
+                Some(language)
+            } else if suffixes.matches(name.as_bytes()) {
+                // The C fallback uses the built-in reStructuredText ID even
+                // when a user has overridden the normal .rst classification.
+                Some(cbm_language_classify_with(
+                    null(),
+                    c"page.rst".as_ptr(),
+                    null(),
+                    0,
+                    false,
+                    false,
+                ))
+            } else {
+                None
+            }
         };
-        if known {
+        if let Some(language) = language {
             self.snapshot.files.push(File {
                 path: rel.into(),
                 language,
@@ -884,24 +937,73 @@ fn matches_c_user_git_excludes() {
 }
 
 #[test]
-fn identifies_sphinx_suffix_gap() {
+fn matches_c_sphinx_suffixes() {
     let scratch = Scratch::new();
     scratch.write(
-        "docs/conf.py",
-        "source_suffix = {'.customdoc': 'restructuredtext'}\n",
+        "guide/conf.py",
+        "raise RuntimeError('do not execute this file')\n\
+         source_suffix = {\n\
+             '.note': 'restructuredtext',\n\
+             '.mdonly': 'markdown',\n\
+             '.rst': 'restructuredtext',\n\
+             '.py': 'restructuredtext',\n\
+             '.bad.name': 'restructuredtext',\n\
+         }\n\
+         source_suffix = '.later'\n",
     );
-    scratch.write("docs/overview.customdoc", "Example\n=======\n");
+    scratch.write(
+        "guide/nested/conf.py",
+        "source_suffix = ['.nested', '.rst']\n",
+    );
+    scratch.write("guide/scalar/conf.py", "source_suffix = '.scalar'\n");
+    let mut padded = vec![b'#'; 65_536];
+    padded.extend_from_slice(b"\nsource_suffix = '.late'\n");
+    scratch.write("guide/padded/conf.py", padded);
+    for path in [
+        "guide/overview.note",
+        "guide/sub/chapter.note",
+        "guide/code.py",
+        "guide/markdown.mdonly",
+        "guide/second.later",
+        "guide/invalid.bad.name",
+        "guide/nested/inherited.note",
+        "guide/nested/override.nested",
+        "guide/scalar/content.scalar",
+        "guide/padded/beyond.late",
+        "guide/padded/inherited.note",
+        "outside.note",
+    ] {
+        scratch.write(path, "Example\n=======\n");
+    }
 
-    let native = NativeWalk::run(&scratch.0, Mode::Full, 0).snapshot();
-    let rust = Walk::run(&scratch.0, Mode::Full, 0).unwrap();
-    let has_overview = |snapshot: &Snapshot| {
-        snapshot
+    for mode in Mode::ALL {
+        let mut native = NativeWalk::run(&scratch.0, mode, 0).snapshot();
+        let mut rust = Walk::run(&scratch.0, mode, 0).unwrap();
+        native.sort();
+        rust.sort();
+        assert_eq!(native, rust, "{mode:?}");
+        let rst_paths: Vec<_> = rust
             .files
             .iter()
-            .any(|file| file.path.0 == b"docs/overview.customdoc")
-    };
-    assert!(has_overview(&native));
-    assert!(!has_overview(&rust));
+            .filter_map(|file| {
+                // SAFETY: discovery returns native language IDs, and the name
+                // function returns a static NUL-terminated string for each ID.
+                let name =
+                    unsafe { CStr::from_ptr(cbm_language_name(file.language)) };
+                (name == c"reStructuredText").then_some(file.path.0.as_slice())
+            })
+            .collect();
+        assert_eq!(
+            rst_paths,
+            [
+                b"guide/nested/override.nested".as_slice(),
+                b"guide/overview.note",
+                b"guide/scalar/content.scalar",
+                b"guide/sub/chapter.note",
+            ],
+            "{mode:?}"
+        );
+    }
 }
 
 #[test]
