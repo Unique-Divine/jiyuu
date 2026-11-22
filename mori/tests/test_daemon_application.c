@@ -4960,6 +4960,8 @@ TEST(daemon_application_named_snapshot_replaces_ownership_atomically) {
     bool background_joined = background_started && cbm_thread_join(&background_thread) == 0;
     bool explicit_joined = explicit_started && cbm_thread_join(&explicit_thread) == 0;
     int starts = atomic_load(&fixture.fake.starts);
+    bool published = app_test_seed_project_db(fixture.cache, fixture.project, fixture.root,
+                                              fixture.db_path, sizeof(fixture.db_path));
     bool disabled = cbm_config_set(fixture.config, CBM_CONFIG_AUTO_WATCH, "false") == 0;
     int skipped_disabled =
         cbm_daemon_application_watcher_index(fixture.project, fixture.root, fixture.application);
@@ -4984,6 +4986,7 @@ TEST(daemon_application_named_snapshot_replaces_ownership_atomically) {
     ASSERT_EQ(background.result, 0);
     ASSERT_EQ(explicit.result, 0);
     ASSERT_EQ(starts, 1);
+    ASSERT_TRUE(published);
     ASSERT_TRUE(disabled);
     ASSERT_EQ(skipped_disabled, 1);
     ASSERT_TRUE(enabled);
