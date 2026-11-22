@@ -21,6 +21,8 @@ files in ignored directories, a size limit, symlinks, shebang detection, and
 unsupported extensions. The enclosing-repository fixture indexes a package
 subdirectory. It checks ancestor rules against their original directories,
 deeper negations, the repository's `info/exclude`, and tracked files.
+The user excludes fixture checks `~/.gitconfig`, the XDG Git config, and
+the XDG `git/ignore` default in order, in an isolated process.
 
 ## Compare and Measure a Repository
 
@@ -57,7 +59,6 @@ the native result retains a traversal-order sample.
 - The Sphinx fixture documents a known mismatch. C indexes a custom
   reStructuredText extension defined in `conf.py`. The Rust walk skips
   the same file as an unsupported extension.
-- User Git ignore configuration still needs coverage in the Rust walk.
 - The Rust walk stops on read errors. C file discovery can skip an
   unreadable entry or directory. Bounded admission walks, aggregate
   resource limits, and changes during a walk need separate tests before
