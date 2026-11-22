@@ -992,7 +992,7 @@ bool cbm_pipeline_set_project_name(cbm_pipeline_t *p, const char *name) {
         return false;
     }
 
-    char *normalized = cbm_project_name_from_path(name);
+    char *normalized = cbm_project_name_with_override(NULL, name);
     if (!normalized) {
         return false;
     }
