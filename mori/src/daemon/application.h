@@ -110,17 +110,23 @@ void cbm_daemon_application_set_permanent(cbm_daemon_application_t *application,
 typedef struct {
     const char *project;
     const char *root;
+    bool pending;
 } cbm_daemon_named_watch_t;
 
 enum { CBM_DAEMON_NAMED_WATCH_LIMIT = 128 };
 
 /* Enable named ownership in a permanent daemon and apply a full snapshot.
  * A rejected registration leaves the previous membership intact. Empty
- * snapshots leave only session-owned watches. Reports missing checkouts in
- * pending when the caller should retry the accepted snapshot. */
+ * snapshots leave only session-owned watches. Set every entry's pending
+ * field to false for a replacement snapshot. Reconciliation sets that
+ * field for missing checkouts so later retries can defer an ineligible
+ * checkout without blocking the rest of the accepted list. */
 bool cbm_daemon_application_reconcile_named_watches(cbm_daemon_application_t *application,
-                                                    const cbm_daemon_named_watch_t *entries,
-                                                    size_t count, bool *pending);
+                                                    cbm_daemon_named_watch_t *entries, size_t count,
+                                                    bool *pending);
+bool cbm_daemon_application_named_watches_match(cbm_daemon_application_t *application,
+                                                const cbm_daemon_named_watch_t *entries,
+                                                size_t count);
 
 /* Cancel and reap all daemon-owned operations within timeout_ms. Normal final
  * client shutdown calls this before watcher/store teardown. Idempotent. */
