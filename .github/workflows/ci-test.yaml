@@ -621,8 +621,10 @@ jobs:
         include:
           - arch: x64
             runner: ubuntu-latest
+            reference_sha256: ba3cbc562e6c41585144e78857a54a51badae99bdb5e6050cedc79089817ed07
           - arch: arm64
             runner: ubuntu-24.04-arm
+            reference_sha256: a4984606e39dcdf6e5d4a86f31ceea4d0f49761fe4dc3eb91544cdc86e26e1bb
     env:
       CCACHE_MAXSIZE: 1G
       # As mori/scripts/env.sh sets it: a hit is the identical compilation.
@@ -698,13 +700,28 @@ jobs:
       - name: CLI parity
         if: needs.changes.outputs.mori_linked == 'true'
         run: just --justfile mori/jiyuu-mori/justfile parity
+      # The release reference includes the accepted GraphQL fixture behavior.
       - name: Public graph and tool replay
         if: needs.changes.outputs.mori_linked == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARCH: ${{ matrix.arch }}
+          REFERENCE_SHA256: ${{ matrix.reference_sha256 }}
         run: |
+          set -euo pipefail
+          scratch="$(mktemp -d /tmp/mori-pr-replay.XXXXXX)"
+          trap 'rm -rf "$scratch"' EXIT
+          archive="codebase-memory-mcp-0.13.1-linux-$ARCH.tar.gz"
+          gh release download mori/v0.13.1 --repo Unique-Divine/jiyuu \
+            --pattern "$archive" --dir "$scratch"
+          printf '%s  %s\n' "$REFERENCE_SHA256" "$scratch/$archive" | sha256sum --check
+          tar -xzf "$scratch/$archive" -C "$scratch" codebase-memory-mcp
           just mori-parity-ci \
-            --bin-a "$PWD/mori/build/mori-rs/codebase-memory-mcp" \
-            --bin-b "$PWD/target/debug/mori" \
-            --export-b rust --verify-export
+            --bin-a "$scratch/codebase-memory-mcp" --bin-b "$PWD/target/debug/mori" \
+            --profile --export-b rust --verify-export \
+            --work "$scratch/w" --rt-prefix "$scratch/r"
+          grep -E 'msg=pass\.route_nodes\.graphql routes=[1-9][0-9]* .*planner=rust writer=rust' \
+            "$scratch"/w/b/cache/logs/.worker-log-*
       - name: Compiler cache statistics
         if: always() && needs.changes.outputs.mori_linked == 'true'
         run: ccache --show-stats || true
