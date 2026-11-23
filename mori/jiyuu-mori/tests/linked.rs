@@ -184,10 +184,51 @@ fn project_pages_use_internal_identity_and_preserve_projection() {
             r#"{"include_details":true,"offset":2,"limit":501,"format":"json"}"#,
         ),
     ];
+    let flag_cases: &[(&[&str], usize)] = &[
+        (
+            &[
+                "list_projects",
+                "--include-details=yes",
+                "--metadata_only=",
+                "--limit",
+                "+1",
+                "--offset=1",
+                "--offset",
+                "-1",
+                "--format=json",
+                "--",
+                "ignored",
+            ],
+            2,
+        ),
+        (
+            &[
+                "index_status",
+                "--project",
+                "alpha",
+                "--verbose",
+                "--diagnostics=summary",
+                "--format",
+                "json",
+            ],
+            4,
+        ),
+    ];
     let run_all = |bin: &Path| {
         let outputs = cases.map(|(tool, args)| {
             run_in(bin, &scratch, &["cli", "--quiet", tool, args])
         });
+        for &(flags, index) in flag_cases {
+            let mut args = vec!["cli", "--quiet"];
+            args.extend_from_slice(flags);
+            let output = run_in(bin, &scratch, &args);
+            let expected = &outputs[index];
+            assert_eq!(
+                (output.status.code(), &output.stdout, &output.stderr),
+                (expected.status.code(), &expected.stdout, &expected.stderr),
+                "{flags:?}",
+            );
+        }
         let stop = run_in(bin, &scratch, &["daemon", "stop"]);
         assert!(stop.status.success(), "{stop:?}");
         outputs
@@ -556,8 +597,11 @@ fn tools_list_profiles_and_cursor_pages_match_c() {
 }
 
 #[test]
-fn invalid_query_flag_diagnostic_matches_c() {
+fn invalid_read_flag_diagnostics_match_c() {
     assert_same(&["cli", "query_graph", "--offst", "1"]);
+    assert_same(&["cli", "list_projects", "--offst", "1"]);
+    assert_same(&["cli", "index_status", "--verbos", "true"]);
+    assert_same(&["cli", "index_status", "--verbose=true", "stray"]);
 }
 
 /// A small repository with Python and Go calls and an optional gqlgen server.
