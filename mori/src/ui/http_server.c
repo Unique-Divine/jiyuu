@@ -116,18 +116,20 @@ static bool origin_matches_host(const char *origin, const char *host, int port) 
 
 /* Foreign origins are rejected before this runs. Reflect only the exact
  * same-server origin; a different localhost port is a different principal. */
-static void update_cors(const cbm_http_req_t *req, int port) {
+static void update_cors(const cbm_http_req_t *req, int port, bool read_only) {
+    const char *methods = read_only ? "POST, GET, OPTIONS" : "POST, GET, DELETE, OPTIONS";
     if (req->origin[0] != '\0' && origin_is_same_server(req->origin, port)) {
         snprintf(g_cors, sizeof(g_cors),
                  "Access-Control-Allow-Origin: %s\r\n"
-                 "Access-Control-Allow-Methods: POST, GET, DELETE, OPTIONS\r\n"
+                 "Access-Control-Allow-Methods: %s\r\n"
                  "Access-Control-Allow-Headers: Content-Type\r\n",
-                 req->origin);
+                 req->origin, methods);
     } else {
         /* No Access-Control-Allow-Origin → browser blocks cross-origin access */
         snprintf(g_cors, sizeof(g_cors),
-                 "Access-Control-Allow-Methods: POST, GET, DELETE, OPTIONS\r\n"
-                 "Access-Control-Allow-Headers: Content-Type\r\n");
+                 "Access-Control-Allow-Methods: %s\r\n"
+                 "Access-Control-Allow-Headers: Content-Type\r\n",
+                 methods);
     }
     snprintf(g_cors_json, sizeof(g_cors_json), "%sContent-Type: application/json\r\n", g_cors);
     snprintf(g_cors_html, sizeof(g_cors_html), "%sContent-Type: text/html; charset=utf-8\r\n",
@@ -215,6 +217,7 @@ struct cbm_http_server {
     atomic_int run_state;
     int port;
     bool listener_ok;
+    bool read_only;
     uint8_t readiness_secret[CBM_SHA256_DIGEST_LEN];
     bool readiness_secret_set;
 };
@@ -240,6 +243,20 @@ static bool serve_embedded(cbm_http_conn_t *c, const char *path) {
 
     cbm_http_reply_buf(c, 200, hdrs, f->data, (size_t)f->size);
     return true;
+}
+
+static void serve_ui_home(cbm_http_conn_t *c) {
+    const cbm_embedded_file_t *f = cbm_embedded_lookup("/index.html");
+    if (!f) {
+        cbm_http_replyf(c, 404, g_cors, "no frontend embedded");
+        return;
+    }
+    char html_hdrs[1024];
+    snprintf(html_hdrs, sizeof(html_hdrs),
+             "%sContent-Type: text/html; charset=utf-8\r\nCache-Control: no-cache\r\n"
+             "X-Content-Type-Options: nosniff\r\n" CBM_UI_CSP,
+             g_cors);
+    cbm_http_reply_buf(c, 200, html_hdrs, f->data, (size_t)f->size);
 }
 
 /* Build DB path for a project: <cache_dir>/<project>.db */
@@ -3077,7 +3094,21 @@ static bool rpc_manage_adr_is_read(yyjson_val *params) {
     return true;
 }
 
-static bool rpc_is_allowed_for_ui(const char *body, size_t body_len) {
+/* Test impact builds a temporary graph. Standalone UI only reads existing graphs. */
+static bool rpc_detect_changes_is_read(yyjson_val *params) {
+    yyjson_val *arguments = json_unique_member(params, "arguments");
+    if (!arguments)
+        return yyjson_obj_get(params, "arguments") == NULL;
+    if (!yyjson_is_obj(arguments))
+        return false;
+    yyjson_val *scope = json_unique_member(arguments, "scope");
+    if (!scope)
+        return yyjson_obj_get(arguments, "scope") == NULL;
+    const char *text = yyjson_get_str(scope);
+    return text && strcmp(text, "tests") != 0;
+}
+
+static bool rpc_is_allowed_for_ui(const char *body, size_t body_len, bool read_only) {
     yyjson_doc *document = yyjson_read(body, body_len, 0);
     if (!document)
         return false;
@@ -3090,7 +3121,8 @@ static bool rpc_is_allowed_for_ui(const char *body, size_t body_len) {
     bool allowed = false;
     if (method_text && strcmp(method_text, "tools/call") == 0 && name_text) {
         if (rpc_tool_is_read_only(name_text))
-            allowed = true;
+            allowed = !read_only || strcmp(name_text, "detect_changes") != 0 ||
+                      rpc_detect_changes_is_read(params);
         else if (strcmp(name_text, "manage_adr") == 0)
             allowed = rpc_manage_adr_is_read(params);
     }
@@ -3098,7 +3130,7 @@ static bool rpc_is_allowed_for_ui(const char *body, size_t body_len) {
     return allowed;
 }
 
-static void handle_rpc(cbm_http_conn_t *c, const cbm_http_req_t *req, cbm_mcp_server_t *mcp) {
+static void handle_rpc(cbm_http_server_t *srv, cbm_http_conn_t *c, const cbm_http_req_t *req) {
     if (req->body_len == 0 || req->body_len > MAX_BODY_SIZE || !req->body) {
         cbm_http_replyf(c, 400, g_cors_json,
                         "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32600,"
@@ -3106,7 +3138,7 @@ static void handle_rpc(cbm_http_conn_t *c, const cbm_http_req_t *req, cbm_mcp_se
         return;
     }
 
-    if (!rpc_is_allowed_for_ui(req->body, req->body_len)) {
+    if (!rpc_is_allowed_for_ui(req->body, req->body_len, srv->read_only)) {
         cbm_http_replyf(c, 403, g_cors_json,
                         "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32601,"
                         "\"message\":\"UI RPC method is not allowed\"},\"id\":null}");
@@ -3114,7 +3146,7 @@ static void handle_rpc(cbm_http_conn_t *c, const cbm_http_req_t *req, cbm_mcp_se
     }
 
     /* req->body is NUL-terminated by the transport */
-    char *response = cbm_mcp_server_handle(mcp, req->body);
+    char *response = cbm_mcp_server_handle(srv->mcp, req->body);
 
     if (response) {
         cbm_http_replyf(c, 200, g_cors_json, "%s", response);
@@ -3246,7 +3278,7 @@ static bool request_passes_http_security(cbm_http_server_t *srv, cbm_http_conn_t
         cbm_http_replyf(c, 403, "", "%s", "{\"error\":\"forbidden origin\"}");
         return false;
     }
-    update_cors(req, srv->port);
+    update_cors(req, srv->port, srv->read_only);
     bool is_post = strcmp(req->method, "POST") == 0;
     if (route_is_protected(req->path) && is_post && !content_type_is_json(req->content_type)) {
         cbm_http_replyf(c, 415, g_cors_json, "%s", "{\"error\":\"application/json required\"}");
@@ -3255,10 +3287,47 @@ static bool request_passes_http_security(cbm_http_server_t *srv, cbm_http_conn_t
     return true;
 }
 
+static void dispatch_read_only_request(cbm_http_server_t *srv, cbm_http_conn_t *c,
+                                       const cbm_http_req_t *req) {
+    if (strcmp(req->method, "OPTIONS") == 0) {
+        cbm_http_replyf(c, 204, g_cors, "%s", "");
+        return;
+    }
+    if (strcmp(req->method, "POST") == 0 && strcmp(req->path, "/rpc") == 0) {
+        handle_rpc(srv, c, req);
+        return;
+    }
+    if (strcmp(req->method, "GET") == 0) {
+        if (strcmp(req->path, "/api/tree") == 0) {
+            handle_atlas_tree(c, req);
+            return;
+        }
+        if (strcmp(req->path, "/api/xrepo/summary") == 0) {
+            handle_xrepo_summary(c);
+            return;
+        }
+        if (strcmp(req->path, "/api/xrepo/links") == 0) {
+            handle_xrepo_links(c, req);
+            return;
+        }
+        if (strcmp(req->path, "/") == 0) {
+            serve_ui_home(c);
+            return;
+        }
+        if (serve_embedded(c, req->path))
+            return;
+    }
+    cbm_http_replyf(c, 404, g_cors, "not found");
+}
+
 static void dispatch_request(cbm_http_server_t *srv, cbm_http_conn_t *c,
                              const cbm_http_req_t *req) {
     if (!request_passes_http_security(srv, c, req))
         return;
+    if (srv->read_only) {
+        dispatch_read_only_request(srv, c, req);
+        return;
+    }
 
     bool is_get = strcmp(req->method, "GET") == 0;
     bool is_post = strcmp(req->method, "POST") == 0;
@@ -3296,7 +3365,7 @@ static void dispatch_request(cbm_http_server_t *srv, cbm_http_conn_t *c,
 
     /* POST /rpc → JSON-RPC dispatch (reuses existing MCP tools) */
     if (is_post && cbm_http_path_match(req->path, "/rpc")) {
-        handle_rpc(c, req, srv->mcp);
+        handle_rpc(srv, c, req);
         return;
     }
 
@@ -3494,17 +3563,7 @@ static void dispatch_request(cbm_http_server_t *srv, cbm_http_conn_t *c,
 
     /* GET / → index.html (no-cache so browser always gets latest) */
     if (cbm_http_path_match(req->path, "/")) {
-        const cbm_embedded_file_t *f = cbm_embedded_lookup("/index.html");
-        if (f) {
-            char html_hdrs[1024];
-            snprintf(html_hdrs, sizeof(html_hdrs),
-                     "%sContent-Type: text/html; charset=utf-8\r\nCache-Control: no-cache\r\n"
-                     "X-Content-Type-Options: nosniff\r\n" CBM_UI_CSP,
-                     g_cors);
-            cbm_http_reply_buf(c, 200, html_hdrs, f->data, (size_t)f->size);
-            return;
-        }
-        cbm_http_replyf(c, 404, g_cors, "no frontend embedded");
+        serve_ui_home(c);
         return;
     }
 
@@ -3527,12 +3586,13 @@ static char *http_read_only_index_rejected(void *context, const char *repo_path,
                                true);
 }
 
-cbm_http_server_t *cbm_http_server_new(int port) {
+static cbm_http_server_t *http_server_new(int port, bool read_only) {
     cbm_http_server_t *srv = calloc(1, sizeof(*srv));
     if (!srv)
         return NULL;
 
     srv->port = port;
+    srv->read_only = read_only;
     atomic_init(&srv->stop_flag, 0);
     atomic_init(&srv->run_state, HTTP_RUN_IDLE);
 
@@ -3568,6 +3628,14 @@ cbm_http_server_t *cbm_http_server_new(int port) {
     cbm_log_info("ui.serving", "url", url, "port", port_str);
 
     return srv;
+}
+
+cbm_http_server_t *cbm_http_server_new(int port) {
+    return http_server_new(port, false);
+}
+
+cbm_http_server_t *cbm_http_server_new_read_only(int port) {
+    return http_server_new(port, true);
 }
 
 bool cbm_http_server_free(cbm_http_server_t *srv) {

@@ -872,6 +872,65 @@ static bool ui_adr_equals(const ui_delete_fixture_t *fx, const char *project,
     return equal;
 }
 
+TEST(ui_server_standalone_rejects_writes) {
+    ui_delete_fixture_t fx;
+    ASSERT_EQ(ui_delete_fixture_init(&fx), 0);
+    ASSERT_EQ(ui_adr_seed(&fx, "standalone", "original ADR"), CBM_STORE_OK);
+
+    th_server_t server = {.srv = cbm_http_server_new_read_only(0)};
+    ASSERT_NOT_NULL(server.srv);
+    ASSERT_EQ(th_server_thread_start(&server.tid, server.srv), 0);
+    int port = cbm_http_server_port(server.srv);
+    char response[8192];
+    char request[1024];
+    ASSERT_GT(
+        ui_delete_request(&server, "/api/project?name=standalone", response, sizeof(response)), 0);
+    ASSERT_EQ(th_status(response), 404);
+    ASSERT_GT(
+        ui_adr_post_request(&server, "standalone", "replacement ADR", response, sizeof(response)),
+        0);
+    ASSERT_EQ(th_status(response), 404);
+
+    static const struct {
+        const char *path;
+        const char *body;
+        int status;
+    } cases[] = {
+        {"/api/config", "{}", 404},
+        {"/api/index", "{}", 404},
+        {"/api/agent-events", "{}", 404},
+        {"/api/ui-log", "{}", 404},
+        {"/rpc",
+         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\","
+         "\"params\":{\"name\":\"manage_adr\",\"arguments\":{\"mode\":\"update\"}}}",
+         403},
+        {"/rpc",
+         "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\","
+         "\"params\":{\"name\":\"detect_changes\",\"arguments\":{\"scope\":\"tests\"}}}",
+         403},
+        {"/rpc",
+         "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\","
+         "\"params\":{\"name\":\"list_projects\"}}",
+         200},
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        snprintf(request, sizeof(request),
+                 "POST %s HTTP/1.1\r\nContent-Type: application/json\r\nContent-Length: "
+                 "%zu\r\n\r\n%s",
+                 cases[i].path, strlen(cases[i].body), cases[i].body);
+        ASSERT_GT(th_http(port, request, response, sizeof(response)), 0);
+        ASSERT_EQ(th_status(response), cases[i].status);
+    }
+
+    th_server_stop(&server);
+    ASSERT_TRUE(ui_adr_equals(&fx, "standalone", "original ADR"));
+    char config_path[1024];
+    snprintf(config_path, sizeof(config_path), "%s/_config.db", fx.cache_dir);
+    ASSERT_FALSE(cbm_file_exists(config_path));
+    ui_delete_fixture_cleanup(&fx);
+    PASS();
+}
+
 TEST(ui_server_readiness_proof_is_exact_and_generation_bound) {
     static const char challenge[] =
         "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f";
@@ -4119,6 +4178,7 @@ SUITE(httpd) {
     RUN_TEST(ui_server_mutations_require_json_content_type);
     RUN_TEST(ui_server_rpc_rejects_duplicate_adr_arguments);
     RUN_TEST(ui_server_rpc_allows_only_ui_read_tools);
+    RUN_TEST(ui_server_standalone_rejects_writes);
     RUN_TEST(ui_server_atlas_routes_are_wired);
     RUN_TEST(ui_server_retained_cache_memory_is_flushed_before_thread_exit);
     RUN_TEST(ui_server_oversized_body_rejected);
