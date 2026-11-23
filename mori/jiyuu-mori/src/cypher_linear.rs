@@ -1,5 +1,6 @@
 //! Bounded Cypher evaluator for a verified subset of query patterns.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 #[cfg(test)]
 use std::path::Path;
@@ -13,6 +14,7 @@ const ENGINE_LIMIT: usize = 100_000;
 const DEADLINE: Duration = Duration::from_secs(30);
 const CHECK_INTERVAL: usize = 1024;
 const PROPERTY_LIMIT: usize = 511;
+const NATIVE_PROPERTY_BUFFERS: usize = 8;
 const NODE_COLUMNS: &str = "n.id, n.label, n.name, n.qualified_name, n.file_path, n.start_line, n.end_line, n.properties";
 
 #[derive(Debug)]
@@ -111,6 +113,7 @@ pub(crate) struct Query<'a> {
     nodes: Vec<NodePattern<'a>>,
     hops: Vec<Hop<'a>>,
     filters: Vec<(usize, Filter<'a>)>,
+    any_filter: bool,
     projections: Vec<Projection<'a>>,
     limit: Option<usize>,
 }
@@ -248,19 +251,20 @@ pub(crate) fn classify(source: &str) -> Result<Query<'_>, Unsupported> {
     }
     // Native binds all anonymous targets to the same synthetic name. Support a
     // single anonymous endpoint so we never reinterpret that implicit join.
-    if hops.is_empty()
-        || nodes.len()
-            - parser
-                .names
-                .values()
-                .filter(|b| matches!(b, Binding::Node(_)))
-                .count()
-            > 1
+    if nodes.len()
+        - parser
+            .names
+            .values()
+            .filter(|b| matches!(b, Binding::Node(_)))
+            .count()
+        > 1
     {
         return Err(Unsupported);
     }
     let mut filters = Vec::new();
+    let mut any_filter = false;
     if parser.keyword("WHERE") {
+        let mut disjunction = None;
         loop {
             let (_, Binding::Node(node)) = parser.reference()? else {
                 return Err(Unsupported);
@@ -269,10 +273,21 @@ pub(crate) fn classify(source: &str) -> Result<Query<'_>, Unsupported> {
             let property = node_property(parser.name()?)?;
             parser.symbol(b'=')?;
             filters.push((node, (property, parser.literal()?)));
-            if !parser.keyword("AND") {
+            let next_any = if hops.is_empty() && parser.keyword("OR") {
+                true
+            } else if parser.keyword("AND") {
+                false
+            } else {
                 break;
+            };
+            // Keep mixed operators and disjunctions over multiple bindings
+            // in C. The Graph UI emits a flat OR over one node.
+            if disjunction.is_some_and(|previous| previous != next_any) {
+                return Err(Unsupported);
             }
+            disjunction = Some(next_any);
         }
+        any_filter = disjunction.unwrap_or(false);
     }
     if !parser.keyword("RETURN") {
         return Err(Unsupported);
@@ -301,6 +316,14 @@ pub(crate) fn classify(source: &str) -> Result<Query<'_>, Unsupported> {
     if projections.len() > 32 {
         return Err(Unsupported);
     }
+    // Native node properties can share eight rotating buffers within a row.
+    // Leave wider property projections to C where those cells can alias.
+    if hops.is_empty()
+        && projections.iter().filter(|p| p.property.is_some()).count()
+            > NATIVE_PROPERTY_BUFFERS
+    {
+        return Err(Unsupported);
+    }
     let limit = if parser.keyword("LIMIT") {
         let Some(Token::Number(limit)) = parser.tokens.next() else {
             return Err(Unsupported);
@@ -320,6 +343,7 @@ pub(crate) fn classify(source: &str) -> Result<Query<'_>, Unsupported> {
         nodes,
         hops,
         filters,
+        any_filter,
         projections,
         limit,
     })
@@ -357,23 +381,23 @@ impl Node {
         })
     }
 
-    fn property(&self, name: &str) -> rusqlite::Result<String> {
+    fn property(&self, name: &str) -> rusqlite::Result<Cow<'_, str>> {
         let value: &str = match name {
             "label" => &self.label,
             "name" => &self.name,
             "qualified_name" | "qn" => &self.qualified_name,
             "file_path" | "file" | "path" => &self.file_path,
-            "start_line" => return Ok(self.start_line.to_string()),
-            "end_line" => return Ok(self.end_line.to_string()),
+            "start_line" => return Ok(self.start_line.to_string().into()),
+            "end_line" => return Ok(self.end_line.to_string().into()),
             _ => "",
         };
         if !value.is_empty() {
-            return Ok(value.to_owned());
+            return Ok(value.into());
         }
         if self.properties.starts_with('{') {
-            property(&self.properties, name)
+            property(&self.properties, name).map(Cow::Borrowed)
         } else {
-            Ok(String::new())
+            Ok("".into())
         }
     }
 
@@ -389,9 +413,9 @@ impl Node {
 
 // The C projection returns the stored spelling of scalar/container values.
 // Keep raw bytes and the native extraction limit so JSON is not reformatted.
-fn property(json: &str, name: &str) -> rusqlite::Result<String> {
+fn property<'a>(json: &'a str, name: &str) -> rusqlite::Result<&'a str> {
     let Some((_, tail)) = json.split_once(&format!("\"{name}\":")) else {
-        return Ok(String::new());
+        return Ok("");
     };
     let tail = tail.trim_start_matches([' ', '\t']);
     let bytes = tail.as_bytes();
@@ -433,9 +457,7 @@ fn property(json: &str, name: &str) -> rusqlite::Result<String> {
         }
         end += 1;
     }
-    tail.get(start..end)
-        .map(str::to_owned)
-        .ok_or(rusqlite::Error::InvalidQuery)
+    tail.get(start..end).ok_or(rusqlite::Error::InvalidQuery)
 }
 
 #[derive(Debug, PartialEq)]
@@ -541,6 +563,8 @@ impl Query<'_> {
         } else {
             ""
         };
+        // Use the same unordered lookup as C. Its paged scan follows this
+        // lookup's index order and uses the lookup directly for other plans.
         let sql = format!(
             "SELECT {NODE_COLUMNS} FROM nodes n WHERE n.project = ?1{condition}"
         );
@@ -550,15 +574,31 @@ impl Query<'_> {
         } else {
             statement.query([project])?
         };
-        let mut adjacency = Adjacency::new(connection)?;
+        let mut adjacency = (!self.hops.is_empty())
+            .then(|| Adjacency::new(connection))
+            .transpose()?;
         let mut rows = Vec::new();
         let limit = self.limit.unwrap_or(ENGINE_LIMIT);
-        'starts: while let Some(row) = start_nodes.next()? {
+        'starts: loop {
+            if adjacency.is_none() && rows.len() == limit {
+                break;
+            }
+            let Some(row) = start_nodes.next()? else {
+                break;
+            };
             budget.step()?;
             let start = Node::read(row, 0)?;
             if !self.matches_node(start_index, &start)? {
                 continue;
             }
+            let Some(adjacency) = &mut adjacency else {
+                rows.push(self.project(&[&start], &[])?);
+                if rows.len() == ENGINE_LIMIT {
+                    budget.check()?;
+                    return Err(ExecutionError::RowCeiling);
+                }
+                continue;
+            };
             let mut hop = self.hops[0];
             hop.inbound ^= reversed;
             for (next, edge) in adjacency.neighbors(start.id, hop, budget)? {
@@ -641,11 +681,14 @@ impl Query<'_> {
         // The classifier accepts single-binding predicates. Evaluate each
         // when its node is bound so rejected nodes never expand adjacency.
         for &(target, (property, value)) in &self.filters {
-            if target == index && node.property(property)? != value {
-                return Ok(false);
+            if target == index {
+                let matches = node.property(property)? == value;
+                if matches == self.any_filter {
+                    return Ok(matches);
+                }
             }
         }
-        Ok(true)
+        Ok(!self.any_filter)
     }
 
     fn project(
@@ -658,7 +701,7 @@ impl Query<'_> {
             .map(|column| match (column.binding, column.property) {
                 (Binding::Node(index), None) => Ok(nodes[index].name.clone()),
                 (Binding::Node(index), Some(name)) => {
-                    nodes[index].property(name)
+                    nodes[index].property(name).map(Cow::into_owned)
                 }
                 (Binding::Edge(index), None) => {
                     Ok(edges[index].properties.clone())
@@ -667,7 +710,7 @@ impl Query<'_> {
                     Ok(edges[index].kind.clone())
                 }
                 (Binding::Edge(index), Some(name)) => {
-                    property(&edges[index].properties, name)
+                    property(&edges[index].properties, name).map(str::to_owned)
                 }
             })
             .collect()

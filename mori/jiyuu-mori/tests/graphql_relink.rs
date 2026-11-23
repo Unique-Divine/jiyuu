@@ -146,6 +146,28 @@ impl Fixture {
         self.query(Self::reference_binary(), project, cypher)
     }
 
+    fn start_query_daemon(&self, bin: &Path, backend: &str) {
+        let output = self
+            .command(bin)
+            .env("MORI_IMPL_QUERY", backend)
+            .env("CBM_LOG_LEVEL", "debug")
+            .args(["daemon", "start"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+    }
+
+    fn rust_query_count(&self) -> usize {
+        fs::read_to_string(self.0.join("cache/logs/cbm-daemon.log"))
+            .unwrap()
+            .lines()
+            .filter(|line| {
+                line.contains("query_graph.evaluator")
+                    && line.contains("backend=rust")
+            })
+            .count()
+    }
+
     fn reference_binary() -> &'static Path {
         if option_env!("MORI_C_REFERENCE") == Some("1") {
             return Path::new(concat!(
@@ -910,6 +932,211 @@ fn opt_in_rust_query_preserves_cursor_and_daemon_dispatch() {
 }
 
 #[test]
+fn zero_hop_impact_query_uses_rust_and_matches_c_pages() {
+    // Graph UI declarationsInFiles("Function", ["a.py", "z.py"]).
+    const IMPACT: &str = r#"MATCH (n:Function) WHERE n.file_path = "a.py" OR n.file_path = "z.py" RETURN n.name, n.qualified_name, n.file_path, n.start_line, n.end_line, n.is_test LIMIT 1000"#;
+    let fixture = Fixture::new();
+    let db = fixture.index(CLIENT);
+    let z = node(&db, CLIENT, "Function", "zeta", "client.zeta", "z.py");
+    db.execute(
+        r#"UPDATE nodes SET start_line = 7, end_line = 11, properties = '{"is_test":true}' WHERE id = ?"#,
+        [z],
+    )
+    .unwrap();
+    node(&db, CLIENT, "Function", "alpha", "client.alpha", "a.py");
+    node(
+        &db,
+        CLIENT,
+        "Function",
+        "excluded",
+        "client.excluded",
+        "b.py",
+    );
+    node(&db, CLIENT, "Method", "method", "client.method", "a.py");
+    drop(db);
+
+    let cases = [
+        (IMPACT, 0, true),
+        (IMPACT, 1, true),
+        (
+            "MATCH (n) WHERE n.name = 'alpha' OR n.name = 'zeta' RETURN n, n.file, n.name",
+            0,
+            true,
+        ),
+        (
+            "MATCH (n:Function {file_path: 'a.py'}) WHERE n.name = 'alpha' AND n.is_test = '' RETURN n.name",
+            0,
+            true,
+        ),
+        ("MATCH (n:Missing) RETURN n.name", 0, true),
+        ("MATCH (n:Function) RETURN n.name LIMIT 0", 0, true),
+        (
+            "MATCH (n:Function) WHERE n.file_path = 'a.py' OR n.file_path = 'z.py' RETURN n.name LIMIT 1",
+            0,
+            true,
+        ),
+        ("MATCH (n:Function) RETURN n.name ORDER BY n.name", 0, false),
+        (
+            "MATCH (n:Function) WHERE n.name = 'alpha' OR n.name = 'zeta' AND n.file_path = 'z.py' RETURN n.name",
+            0,
+            false,
+        ),
+        ("MATCH (n:Function) RETURN count(n)", 0, false),
+    ];
+    let bin = Path::new(MORI);
+    let run = |bin: &Path, backend: &str| {
+        fixture.start_query_daemon(bin, backend);
+        let outputs: Vec<_> = cases.iter().map(|&(query, offset, supported)| {
+            let before = fixture.rust_query_count();
+            let args = json!({"project": CLIENT, "query": query, "format": "json", "max_rows": 1, "offset": offset});
+            let output = fixture.command(bin)
+                .args(["cli", "--quiet", "query_graph", &args.to_string()])
+                .output().unwrap();
+            assert!(output.status.success(), "{query}: {output:?}");
+            assert_eq!(
+                fixture.rust_query_count() - before,
+                usize::from(backend == "rust" && supported),
+                "{query}"
+            );
+            output.stdout
+        }).collect();
+        let stop = fixture
+            .command(bin)
+            .args(["daemon", "stop"])
+            .output()
+            .unwrap();
+        assert!(stop.status.success(), "{stop:?}");
+        outputs
+    };
+    let reference = run(Fixture::reference_binary(), "c");
+    let candidate = run(bin, "rust");
+    for ((query, offset, _), (c, rust)) in
+        cases.iter().zip(reference.iter().zip(&candidate))
+    {
+        assert_eq!(c, rust, "{query}, offset {offset}");
+    }
+    let page =
+        |i: usize| serde_json::from_slice::<Value>(&candidate[i]).unwrap();
+    let first = page(0);
+    assert_eq!(
+        first["columns"],
+        json!([
+            "n.name",
+            "n.qualified_name",
+            "n.file_path",
+            "n.start_line",
+            "n.end_line",
+            "n.is_test"
+        ])
+    );
+    assert_eq!(
+        first["rows"],
+        json!([["zeta", "client.zeta", "z.py", "7", "11", "true"]])
+    );
+    assert_eq!(first["total"], 2);
+    assert_eq!(first["has_more"], true);
+    assert_eq!(
+        page(1)["rows"],
+        json!([["alpha", "client.alpha", "a.py", "0", "0", ""]])
+    );
+    assert_eq!(page(2)["rows"], json!([["alpha", "a.py", "alpha"]]));
+    assert_eq!(page(3)["rows"], json!([["alpha"]]));
+    assert_eq!(page(4)["rows"], json!([]));
+    assert_eq!(page(5)["rows"], json!([]));
+    assert_eq!(page(6)["rows"], json!([["zeta"]]));
+    assert_eq!(page(6)["total"], 1);
+}
+
+#[test]
+fn zero_hop_scan_checks_budget_and_matches_native_row_ceiling() {
+    use cypher_linear::{ExecutionBudget, ExecutionError};
+
+    const MATCH: &str = "MATCH (n:Ceiling) RETURN n.name";
+    let fixture = Fixture::new();
+    let db = fixture.index(CLIENT);
+    db.execute_batch(
+        "WITH RECURSIVE seq(n) AS (VALUES(1) UNION ALL SELECT n + 1 FROM seq WHERE n < 100000)
+         INSERT INTO nodes(project, label, name, qualified_name)
+         SELECT 'client', 'Ceiling', 'node', printf('node%d', n) FROM seq;",
+    )
+    .expect("seed the scan");
+    let candidate = |query: &str| {
+        let bin = Path::new(MORI);
+        fixture.start_query_daemon(bin, "rust");
+        let before = fixture.rust_query_count();
+        let output = fixture.query_output(bin, CLIENT, query);
+        assert_eq!(fixture.rust_query_count() - before, 1, "{query}");
+        output
+    };
+    let reference_bin = Fixture::reference_binary();
+    let below = format!("{MATCH} LIMIT 99999");
+    let c = fixture.query_output(reference_bin, CLIENT, &below);
+    let rust = candidate(&below);
+    assert!(
+        c.status.success() && rust.status.success(),
+        "{c:?}\n{rust:?}"
+    );
+    assert_eq!(c.stdout, rust.stdout);
+    let result: Value = serde_json::from_slice(&rust.stdout).unwrap();
+    assert_eq!(result["total"], 99_999);
+
+    for query in [MATCH, &format!("{MATCH} LIMIT 100000")] {
+        let c = fixture.query_output(reference_bin, CLIENT, query);
+        let rust = candidate(query);
+        assert_eq!(c.status.code(), Some(1), "{c:?}");
+        assert_eq!(rust.status.code(), c.status.code(), "{rust:?}");
+        assert_eq!(rust.stdout, c.stdout);
+        for output in [c, rust] {
+            assert!(
+                String::from_utf8_lossy(&output.stderr)
+                    .contains("result exceeded 100k rows"),
+                "{output:?}"
+            );
+        }
+    }
+
+    // All predicates miss. A budget check only at the end of the scan would
+    // reach this unreadable row and report a storage error first.
+    db.execute(
+        "UPDATE nodes SET properties = X'FF' WHERE qualified_name = 'node2048'",
+        [],
+    )
+    .expect("make the tail of the scan unreadable");
+    let query = cypher_linear::classify(
+        "MATCH (n:Ceiling) WHERE n.name = 'absent' RETURN n.name LIMIT 1",
+    )
+    .unwrap();
+    assert!(matches!(
+        query.execute_on(&db, CLIENT),
+        Err(ExecutionError::Storage(_))
+    ));
+    let checks = Cell::new(0);
+    let cancelled = || {
+        checks.set(checks.get() + 1);
+        checks.get() == 2
+    };
+    let mut budget = ExecutionBudget::new(&Instant::now, &cancelled);
+    assert!(matches!(
+        query.execute_with_budget(&db, CLIENT, &mut budget),
+        Err(ExecutionError::Cancelled)
+    ));
+    assert_eq!(checks.get(), 2);
+
+    let checks = Cell::new(0);
+    let start = Instant::now();
+    let clock = || {
+        checks.set(checks.get() + 1);
+        start + Duration::from_secs(if checks.get() >= 3 { 30 } else { 0 })
+    };
+    let mut budget = ExecutionBudget::new(&clock, &|| false);
+    assert!(matches!(
+        query.execute_with_budget(&db, CLIENT, &mut budget),
+        Err(ExecutionError::Deadline)
+    ));
+    assert_eq!(checks.get(), 3);
+}
+
+#[test]
 fn linear_cypher_matches_the_native_result_ceiling() {
     const MATCH: &str = "MATCH (a:Caller)-[:CALLS]->(b:Service)-[:HANDLES]->(c:Target) RETURN c.name";
     let fixture = Fixture::new();
@@ -965,7 +1192,8 @@ fn linear_cypher_matches_the_native_result_ceiling() {
 #[test]
 fn unsupported_syntax_and_supported_storage_errors_are_distinct() {
     for query in [
-        "MATCH (a) RETURN a.name",
+        "MATCH (a) RETURN a.in_degree",
+        "MATCH (a) RETURN a.one, a.two, a.three, a.four, a.five, a.six, a.seven, a.eight, a.nine",
         "MATCH (a)-[:CALLS]->(b) RETURN b.name ORDER BY b.name",
         "MATCH (a)-[:CALLS*1..2]->(b) RETURN b.name",
         "MATCH (a)-[:CALLS]-(b) RETURN b.name",
