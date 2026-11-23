@@ -26,7 +26,9 @@ test('AC1: design tokens and chrome are in place', () => {
   }
   // Archived W2 evidence predates the CBM Lens name; new smoke runs require the current brand.
   assert.ok(/MORI GRAPH|CODEATLAS/.test(smoke.brandText), 'Frontend-Marke fehlt in der Kopfzeile');
-  assert.match(smoke.versionChip, /^v\d+\.\d+\.\d+/, 'Versions-Chip fehlt oder falsch');
+  // Archived evidence predates removal of the version badge.
+  if (typeof smoke.versionChip === 'string') assert.match(smoke.versionChip, /^v\d+\.\d+\.\d+/);
+  else assert.equal(smoke.versionChip, 0);
   // Spezifikations-Korrektur 2026-08-29 (Orchestrator, Nutzerauftrag):
   // Der Test nagelte [f]ile fest, also ausgerechnet einen der vier
   // Menuepunkte ohne Verdrahtung. Eine Attrappe darf kein Abnahmekriterium

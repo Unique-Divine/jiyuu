@@ -162,10 +162,6 @@ export interface AtlasChromeProps {
     workspacePanel?: ReactNode;
     workspaceStatus?: ReactNode;
     guidance?: Guidance;
-    /** Versions-Chip, zur Buildzeit injiziert. Nur die Fassung, ohne Zusatz. */
-    version: string;
-    /** Build diagnostics are accepted for compatibility but not shown in the header. */
-    buildSuffix?: string;
     chips: Chip[];
     tabs: TabDescriptor[];
     onSelectTab: (path: string) => void;
@@ -616,10 +612,7 @@ export default function AtlasChrome(props: AtlasChromeProps): JSX.Element {
     return (
         <div className="atlas-shell" data-workspace={props.workspace ?? 'explore'} data-guidance={props.guidance ?? 'brief'} data-chat-open={showChatColumn} data-has-status={props.workspaceStatus !== undefined}>
             <header className="atlas-header" data-testid="atlas-header">
-                <h1 className="atlas-brand">{messages.app.brand}{' '}<span className="atlas-brand-beta">{messages.app.releaseLabel}</span></h1>
-                <span className="atlas-version" data-testid="atlas-version">
-                    {props.version.replace(/-dirty$/, '')}
-                </span>
+                <h1 className="atlas-brand">{messages.app.brand}</h1>
                 {/*
                   * Sechs Eintraege, EINE Gestalt.
                   *

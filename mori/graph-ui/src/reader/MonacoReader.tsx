@@ -143,7 +143,7 @@ export default function MonacoReader(props: MonacoReaderProps): JSX.Element {
             domReadOnly: true,
             automaticLayout: true,
             fontFamily:
-                'ui-monospace, SFMono-Regular, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace',
+                getComputedStyle(host).getPropertyValue('--atlas-mono').trim(),
             fontSize: 13,
             lineHeight: 20,
             minimap: { enabled: false },
