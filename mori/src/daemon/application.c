@@ -2068,6 +2068,16 @@ static void application_job_publish(cbm_daemon_application_job_t *job,
     cbm_mutex_unlock(&application->mutex);
 }
 
+static void application_log_provider_repair(void *context, const char *client,
+                                            const char *const *targets, int target_count) {
+    const char *provider = context;
+    char count[CBM_SZ_32];
+    (void)targets;
+    snprintf(count, sizeof(count), "%d", target_count);
+    cbm_log_info("cross_repo.repair_candidate", "provider", provider, "client", client, "targets",
+                 count);
+}
+
 static void *application_job_thread(void *opaque) {
     cbm_daemon_application_job_t *job = opaque;
     application_job_execution_t execution;
@@ -2086,9 +2096,19 @@ static void *application_job_thread(void *opaque) {
      * coalesces identical requests and blocks same-project daemon mutations.
      * The physical worker is the sole owner of the cross-process project lock,
      * so the daemon must not pre-acquire that same native lease here. */
+    char repair_mode[CBM_SZ_32];
+    bool observe_repairs =
+        cbm_safe_getenv("MORI_OBSERVE_PROVIDER_REPAIR", repair_mode, sizeof(repair_mode), NULL) &&
+        strcmp(repair_mode, "1") == 0;
+    char prior_generation[CBM_GRAPH_COMPARE_GENERATION_SIZE];
+    bool have_prior_generation = false;
     if (!application_job_wait_for_mutations(job)) {
         application_job_execution_cancel(&execution);
     } else {
+        if (observe_repairs) {
+            have_prior_generation = cbm_cross_repo_read_generation(
+                job->project_key, prior_generation, sizeof(prior_generation));
+        }
         application_attempt_t attempt;
         application_attempt_status_t status =
             application_job_run_attempt(job, NULL, NULL, &attempt);
@@ -2115,6 +2135,16 @@ static void *application_job_thread(void *opaque) {
             cbm_log_info("cross_repo.reverse_pending", "project", job->project_key);
         }
         cbm_daemon_application_project_mutation_end(application, "*");
+    }
+    if (have_prior_generation && execution.successful) {
+        char current[CBM_GRAPH_COMPARE_GENERATION_SIZE];
+        if (cbm_cross_repo_read_generation(job->project_key, current, sizeof(current)) &&
+            strcmp(prior_generation, current) != 0) {
+            cbm_cross_repo_visit_stale_clients(job->project_key, current,
+                                               application_log_provider_repair, job->project_key,
+                                               &application->stopping);
+            cbm_log_info("cross_repo.repair_scan_complete", "provider", job->project_key);
+        }
     }
     cbm_mem_class_flush_thread();
     cbm_mutex_lock(&application->mutex);
@@ -3138,6 +3168,22 @@ static char *application_index_execute(void *context, const char *root_path, con
                  : application_index_run_sync(session, root_path, args_json);
 }
 
+static bool application_index_named_owner(void *context, const char *root, char **owner) {
+    cbm_daemon_application_session_t *session = context;
+    cbm_daemon_application_t *application = session->application;
+    bool copied = true;
+    cbm_mutex_lock(&application->mutex);
+    for (cbm_daemon_application_watch_t *watch = application->watches; watch; watch = watch->next) {
+        if (watch->named && application_watch_root_matches(watch->root, root)) {
+            *owner = strdup(watch->project);
+            copied = *owner != NULL;
+            break;
+        }
+    }
+    cbm_mutex_unlock(&application->mutex);
+    return copied;
+}
+
 static void application_status_add_record(yyjson_mut_doc *doc, yyjson_mut_val *root,
                                           const cbm_daemon_application_index_record_t *record) {
     yyjson_mut_obj_add_bool(doc, root, "async", record->async);
@@ -3238,6 +3284,7 @@ static cbm_daemon_runtime_application_session_t *application_session_open(
     cbm_mcp_server_set_watch_status_provider(session->mcp, application_watch_status, session);
     cbm_mcp_server_set_index_executor(session->mcp, application_index_execute, session);
     cbm_mcp_server_set_index_status_provider(session->mcp, application_index_status, session);
+    cbm_mcp_server_set_index_named_owner(session->mcp, application_index_named_owner, session);
     cbm_mcp_server_set_project_mutation_guard(session->mcp, application_session_mutation_begin,
                                               application_session_mutation_end, session);
     cbm_mcp_server_set_project_mutation_try_guard(session->mcp,

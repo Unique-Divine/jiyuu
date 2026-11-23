@@ -4,10 +4,12 @@
 //! the indexed name ranges and the connection's custom regex functions. The
 //! native output callbacks keep allocation and rendering on the C side.
 
+use std::collections::HashMap;
 use std::ffi::{c_char, c_int, c_void};
 use std::{panic, ptr};
 
 use rusqlite::ffi::{self, sqlite3, sqlite3_stmt};
+use rusqlite::{Connection, ToSql, params_from_iter};
 
 const STORE_OK: c_int = 0;
 const STORE_ERR: c_int = -1;
@@ -59,6 +61,87 @@ type RankReader = unsafe extern "C" fn(
     *mut c_void,
     EmitRow,
 ) -> bool;
+
+#[cfg(not(test))]
+type CodeDegreeReader = unsafe extern "C" fn(
+    *mut sqlite3,
+    *const i64,
+    c_int,
+    *mut c_int,
+    *mut c_int,
+) -> bool;
+
+fn count_call_degrees(
+    connection: &Connection,
+    ids: &[i64],
+    inbound: &mut [c_int],
+    outbound: &mut [c_int],
+) -> rusqlite::Result<()> {
+    let mut positions = HashMap::new();
+    for (index, &id) in ids.iter().enumerate() {
+        // Match the native reader if an ID occurs twice.
+        positions.entry(id).or_insert(index);
+    }
+    let placeholders = vec!["?"; ids.len()].join(",");
+    let edge_type = "CALLS";
+    for (column, counts) in [("target_id", inbound), ("source_id", outbound)] {
+        let sql = format!(
+            "SELECT {column}, COUNT(*) FROM edges \
+             WHERE {column} IN ({placeholders}) AND type = ? GROUP BY {column}"
+        );
+        let parameters = ids
+            .iter()
+            .map(|id| id as &dyn ToSql)
+            .chain(std::iter::once(&edge_type as &dyn ToSql));
+        let mut statement = connection.prepare(&sql)?;
+        let mut rows = statement.query(params_from_iter(parameters))?;
+        while let Some(row) = rows.next()? {
+            let node_id = row.get::<_, i64>(0)?;
+            if let Some(&index) = positions.get(&node_id) {
+                // sqlite3_column_int returns the low 32 bits of the count.
+                counts[index] = row.get::<_, i64>(1)? as c_int;
+            }
+        }
+    }
+    Ok(())
+}
+
+unsafe extern "C" fn read_code_degrees(
+    db: *mut sqlite3,
+    ids: *const i64,
+    count: c_int,
+    inbound: *mut c_int,
+    outbound: *mut c_int,
+) -> bool {
+    let Ok(count) = usize::try_from(count) else {
+        return false;
+    };
+    if count == 0
+        || db.is_null()
+        || ids.is_null()
+        || inbound.is_null()
+        || outbound.is_null()
+    {
+        return false;
+    }
+    panic::catch_unwind(|| {
+        // SAFETY: C lends a live connection, initialized IDs and separate
+        // writable output buffers. from_handle does not close the connection.
+        unsafe {
+            let connection = Connection::from_handle(db)?;
+            let ids = std::slice::from_raw_parts(ids, count);
+            inbound.write_bytes(0, count);
+            outbound.write_bytes(0, count);
+            count_call_degrees(
+                &connection,
+                ids,
+                std::slice::from_raw_parts_mut(inbound, count),
+                std::slice::from_raw_parts_mut(outbound, count),
+            )
+        }
+    })
+    .is_ok_and(|result| result.is_ok())
+}
 
 struct Statement(*mut sqlite3_stmt);
 
@@ -279,6 +362,7 @@ unsafe extern "C" fn read_ranked(
 unsafe extern "C" {
     fn cbm_store_set_pattern_search_reader(reader: PatternReader);
     fn cbm_mcp_set_rank_search_reader(reader: RankReader);
+    fn cbm_mcp_set_search_code_degrees_reader(reader: CodeDegreeReader);
 }
 
 /// Register during process startup, before native worker threads can start.
@@ -288,6 +372,7 @@ pub(crate) unsafe fn register() {
     unsafe {
         cbm_store_set_pattern_search_reader(read_pattern);
         cbm_mcp_set_rank_search_reader(read_ranked);
+        cbm_mcp_set_search_code_degrees_reader(read_code_degrees);
     }
 }
 
@@ -298,6 +383,34 @@ mod tests {
     use rusqlite::Connection;
 
     use super::*;
+
+    #[test]
+    fn search_code_counts_calls_in_input_order_and_keeps_zero_degrees() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE edges(source_id INTEGER, target_id INTEGER, type TEXT);
+                 INSERT INTO edges VALUES (1,2,'CALLS'), (1,3,'CALLS'),
+                 (2,1,'CALLS'), (1,2,'USAGE'), (4,2,'CALLS');",
+            )
+            .unwrap();
+        let ids = [2_i64, 1, 2, 5];
+        let mut inbound = [-1; 4];
+        let mut outbound = [-1; 4];
+        // SAFETY: All buffers and the borrowed handle live through the call.
+        let handled = unsafe {
+            read_code_degrees(
+                connection.handle(),
+                ids.as_ptr(),
+                4,
+                inbound.as_mut_ptr(),
+                outbound.as_mut_ptr(),
+            )
+        };
+        assert!(handled);
+        assert_eq!(inbound, [2, 1, 0, 0]);
+        assert_eq!(outbound, [1, 2, 0, 0]);
+    }
 
     #[derive(Default)]
     struct ResultRows {

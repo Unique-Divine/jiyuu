@@ -11,6 +11,10 @@
 #![cfg_attr(all(feature = "c-backend", not(test)), no_main)]
 
 #[cfg(all(feature = "c-backend", not(test)))]
+mod cypher_ffi;
+#[cfg(all(feature = "c-backend", not(test)))]
+mod cypher_linear;
+#[cfg(all(feature = "c-backend", not(test)))]
 mod export;
 #[cfg(all(feature = "c-backend", not(test)))]
 mod ffi;
@@ -26,6 +30,9 @@ mod search;
 mod path_verdict;
 
 #[cfg(all(feature = "c-backend", not(test)))]
+mod index_manifest;
+
+#[cfg(all(feature = "c-backend", not(test)))]
 mod snippet_window;
 
 #[cfg(any(feature = "c-backend", test))]
@@ -39,6 +46,9 @@ mod cli_output;
 
 #[cfg(any(feature = "c-backend", test))]
 mod initialize;
+
+#[cfg(any(feature = "c-backend", test))]
+mod ingest_trace;
 
 #[cfg(any(feature = "c-backend", test))]
 mod mcp_dispatch;

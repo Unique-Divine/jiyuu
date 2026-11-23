@@ -26,8 +26,9 @@ still have a session watch.
 Each entry has a unique `project` name and canonical absolute `root` path.
 Reuse the name and root from `mori cli list_projects` for an existing graph.
 The daemon rejects a name that already belongs to a different checkout.
-For a checkout without an index, pass the configured name to any manual
-`index_repository` request so it shares the named watch's job.
+Once the daemon registers a named watch for a checkout without an index,
+an unnamed `index_repository` request uses that name. Start and status
+requests then address the same job before the first graph publishes.
 
 ```json
 [
@@ -47,6 +48,8 @@ list.
 
 Run `python3 -I mori/tests/smoke_named_watch.py --mori target/release/mori` from
 the Jiyuu root to check the lifecycle with a temporary cache and daemon.
+Use `--cold-join` with a `TEST_SEAMS=1` build to hold the first index worker
+while an unnamed request joins it.
 
 ## 1. Custom File Extension Mapping
 

@@ -4346,6 +4346,12 @@ static bool incr_doc_links_current(cbm_store_t *store, const char *project) {
     return current;
 }
 
+static cbm_noop_manifest_equal_fn noop_manifest_equal;
+
+void cbm_pipeline_set_noop_manifest_equal(cbm_noop_manifest_equal_fn implementation) {
+    noop_manifest_equal = implementation;
+}
+
 /* The exact no-op test: the stored generation's metadata is current for this
  * mode, its doc-link layer is usable, and its recorded semantic manifest
  * equals the baseline byte for byte. Read-only. The two out flags report the
@@ -4362,8 +4368,16 @@ static bool incr_generation_exact(cbm_pipeline_t *p, cbm_store_t *store, const c
      * current even with identical inputs: index_status tells the user to
      * re-run, and the re-run has to rebuild. */
     bool doc_links_current = metadata_current && incr_doc_links_current(store, project);
-    bool exact = doc_links_current && cbm_pipeline_semantic_manifests_equal(
-                                          stored, stored_count, baseline_manifest, baseline_count);
+    bool exact = false;
+    if (doc_links_current) {
+        if (noop_manifest_equal) {
+            exact = noop_manifest_equal(stored, stored_count, baseline_manifest, baseline_count);
+            cbm_log_info("incremental.manifest_compare", "implementation", "rust");
+        } else {
+            exact = cbm_pipeline_semantic_manifests_equal(stored, stored_count, baseline_manifest,
+                                                         baseline_count);
+        }
+    }
     cbm_store_coverage_meta_clear(&meta);
     *metadata_current_out = metadata_current;
     *doc_links_current_out = doc_links_current;

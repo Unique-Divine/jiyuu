@@ -3795,7 +3795,7 @@ static int publish_generation_impl(const cbm_pipeline_generation_t *generation,
         return CBM_PIPELINE_PERSIST_FAILED;
     }
 
-    int dump_rc = cbm_gbuf_dump_to_sqlite(generation->gbuf, stage_path);
+    int dump_rc = cbm_gbuf_dump_to_sqlite_staged(generation->gbuf, stage_path);
     if (dump_rc != 0) {
         discard_generation_frozen(stage_path, frozen);
         free(stage_path);

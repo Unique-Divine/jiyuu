@@ -437,18 +437,26 @@ fn unknown_tool_error_matches_c() {
 }
 
 fn run_stdio(bin: &Path, side: &str, args: &[&str], input: &str) -> String {
-    let scratch = Scratch::new(side);
+    let output = run_stdio_in(bin, &Scratch::new(side), args, input);
+    assert!(output.status.success(), "{side}: {output:?}");
+    String::from_utf8(output.stdout).expect("UTF-8 response")
+}
+
+fn run_stdio_in(
+    bin: &Path,
+    scratch: &Scratch,
+    args: &[&str],
+    input: &str,
+) -> Output {
     let requests = scratch.0.join("requests");
     fs::write(&requests, input).expect("write MCP requests");
-    let output = command_in(bin, &scratch)
+    command_in(bin, scratch)
         .args(args)
         .stdin(Stdio::from(
             fs::File::open(requests).expect("open MCP requests"),
         ))
         .output()
-        .expect("run MCP server");
-    assert!(output.status.success(), "{side}: {output:?}");
-    String::from_utf8(output.stdout).expect("UTF-8 response")
+        .expect("run MCP server")
 }
 
 #[test]
@@ -478,6 +486,235 @@ fn mcp_method_dispatch_matches_c() {
     for (reply, id) in replies[3..].iter().zip(["discover", "unknown"]) {
         assert_eq!(reply["id"], id);
         assert_eq!(reply["error"]["code"], -32601);
+    }
+}
+
+#[test]
+fn mcp_tools_call_params_and_ids_match_c_through_daemon() {
+    // Keep the duplicate keys in the wire input so a JSON map cannot
+    // collapse them before the server sees the request.
+    let input = [
+        r#"{"jsonrpc":"2.0","id":0,"method":"initialize"}"#,
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        r#"{"jsonrpc":"2.0","id":"missing","method":"tools/call"}"#,
+        r#"{"jsonrpc":"2.0","id":"null","method":"tools/call","params":null}"#,
+        r#"{"jsonrpc":"2.0","id":"array","method":"tools/call","params":[]}"#,
+        r#"{"jsonrpc":"2.0","id":"wrong-name","method":"tools/call","params":{"name":null,"name":"list_projects"}}"#,
+        r#"{"jsonrpc":"2.0","id":"no-args","method":"tools/call","params":{"name":"list_projects"}}"#,
+        r#"{"jsonrpc":"2.0","id":"null-args","method":"tools/call","params":{"name":"list_projects","arguments":null}}"#,
+        r#"{"jsonrpc":"2.0","id":"scalar-args","method":"tools/call","params":{"name":"list_projects","arguments":1}}"#,
+        r#"{"jsonrpc":"2.0","id":"duplicate-name","method":"tools/call","params":{"name":"list_projects","name":"unknown","arguments":{"format":"json"}}}"#,
+        r#"{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"list_projects","arguments":{"format":"json","format":"tree"},"arguments":{"format":"tree"}}}"#,
+        r#"{"jsonrpc":"2.0","method":"tools/call","params":{"name":"list_projects"}}"#,
+        r#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"9"}}"#,
+        r#"{"jsonrpc":"2.0","id":"end","method":"ping"}"#,
+        "",
+    ]
+    .join("\n");
+
+    let forwarded = |bin: &Path, side: &str, rust: bool| {
+        let scratch = Scratch::new(side);
+        let start = command_in(bin, &scratch)
+            .env("CBM_LOG_LEVEL", "debug")
+            .args(["daemon", "start"])
+            .output()
+            .unwrap();
+        assert!(start.status.success(), "{start:?}");
+        let output = run_stdio_in(bin, &scratch, &[], &input);
+        let stop = run_in(bin, &scratch, &["daemon", "stop"]);
+        assert!(stop.status.success(), "{stop:?}");
+        assert!(output.status.success(), "{output:?}");
+
+        let log =
+            fs::read_to_string(scratch.0.join("cache/logs/cbm-daemon.log"))
+                .unwrap();
+        assert_eq!(
+            log.lines()
+                .filter(|line| line.contains(
+                    "msg=mcp.request protocol=jsonrpc method=tools/call"
+                ))
+                .count(),
+            9,
+            "{side} daemon must handle each request with an ID exactly once",
+        );
+        assert_eq!(
+            log.lines()
+                .filter(|line| line
+                    .contains("msg=mcp.tools_call.decode backend=rust"))
+                .count(),
+            if rust { 9 } else { 0 },
+            "{side} decoder must handle each request with an ID exactly once",
+        );
+        output.stdout
+    };
+
+    let reference = forwarded(&c_binary(), "c", false);
+    let linked = forwarded(Path::new(MORI), "rs", true);
+    assert_eq!(linked, reference);
+    let replies: Vec<serde_json::Value> = std::str::from_utf8(&linked)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("parse response"))
+        .collect();
+    let ids: Vec<_> = replies.iter().map(|reply| reply["id"].clone()).collect();
+    assert_eq!(
+        ids,
+        &serde_json::json!([
+            0,
+            "missing",
+            "null",
+            "array",
+            "wrong-name",
+            "no-args",
+            "null-args",
+            "scalar-args",
+            "duplicate-name",
+            9,
+            "end",
+        ])
+        .as_array()
+        .unwrap()[..],
+    );
+    for reply in &replies[1..5] {
+        assert_eq!(reply["result"]["isError"], true);
+        assert_eq!(
+            reply["result"]["structuredContent"]["error"],
+            "missing tool name"
+        );
+    }
+    for reply in &replies[5..8] {
+        assert_eq!(reply["result"]["isError"], false);
+        assert!(
+            reply["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("projects: 0")
+        );
+    }
+    for reply in &replies[8..10] {
+        assert_eq!(
+            reply["result"]["structuredContent"]["projects"],
+            serde_json::json!([])
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires the opt-in C worker test seams"]
+fn mcp_matching_cancellation_ids_match_c_through_daemon() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::process::Child;
+    use std::sync::mpsc::{self, RecvTimeoutError};
+    use std::time::{Duration, Instant};
+
+    use serde_json::{Value, json};
+
+    struct Frontend(Child);
+    impl Drop for Frontend {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    assert_eq!(
+        option_env!("TEST_SEAMS"),
+        Some("1"),
+        "build both binaries with TEST_SEAMS=1 to enable the worker marker"
+    );
+    let c = c_binary();
+    for id in [json!(17), json!("17")] {
+        let run = |bin: &Path, side: &str| {
+            let scratch = Scratch::new(side);
+            let repo = scratch.0.join("repo");
+            fs::create_dir(&repo).expect("create test repository");
+            fs::write(repo.join("hang_me.py"), "def smoke(): return 1\n")
+                .expect("write worker hang fixture");
+            let marker = scratch.0.join("worker-descendant.pid");
+
+            // An MCP frontend starts its own isolated daemon. Only the
+            // worker spawned for the held index run writes the marker.
+            let mut frontend = Frontend(
+                command_in(bin, &scratch)
+                    .env("CBM_TEST_HANG_ON", "hang_me")
+                    .env("CBM_TEST_WORKER_DESCENDANT_PID_FILE", &marker)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .spawn()
+                    .expect("start MCP frontend"),
+            );
+            let mut stdin = frontend.0.stdin.take().expect("MCP stdin");
+            let stdout = frontend.0.stdout.take().expect("MCP stdout");
+            let (send, receive) = mpsc::channel();
+            let reader = std::thread::spawn(move || {
+                for line in BufReader::new(stdout).lines() {
+                    if send.send(line).is_err() {
+                        break;
+                    }
+                }
+            });
+
+            let mut request = |message: Value| {
+                writeln!(stdin, "{message}").expect("send MCP request");
+                stdin.flush().expect("flush MCP stdin");
+            };
+            let response = || -> Value {
+                let line = receive
+                    .recv_timeout(Duration::from_secs(20))
+                    .expect("wait for MCP response")
+                    .expect("read MCP response");
+                serde_json::from_str(&line).expect("parse MCP response")
+            };
+
+            request(json!({"jsonrpc":"2.0","id":"init","method":"initialize"}));
+            let initialized = response();
+            assert_eq!(initialized["id"], "init");
+            assert!(initialized.get("result").is_some(), "{initialized}");
+            request(
+                json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+            );
+            request(json!({
+                "jsonrpc":"2.0", "id":id, "method":"tools/call",
+                "params":{"name":"index_repository", "arguments":{"repo_path":repo,"mode":"fast"}},
+            }));
+
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while !marker.is_file() {
+                assert!(
+                    Instant::now() < deadline,
+                    "{side} worker did not start"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            request(json!({
+                "jsonrpc":"2.0","method":"notifications/cancelled",
+                "params":{"requestId":id},
+            }));
+            request(json!({"jsonrpc":"2.0","id":"after","method":"ping"}));
+            let cancelled = response();
+            assert_eq!(cancelled["id"], id);
+            assert_eq!(cancelled["error"]["code"], -32800);
+            assert!(cancelled.get("result").is_none(), "{cancelled}");
+            assert_eq!(
+                response(),
+                json!({"jsonrpc":"2.0","id":"after","result":{}}),
+                "cancellation must leave the session open and have no reply of its own"
+            );
+
+            drop(stdin);
+            assert!(
+                matches!(
+                    receive.recv_timeout(Duration::from_secs(20)),
+                    Err(RecvTimeoutError::Disconnected)
+                ),
+                "expected EOF after the ping reply"
+            );
+            reader.join().expect("join MCP stdout reader");
+            assert!(frontend.0.wait().expect("wait for MCP frontend").success());
+            cancelled
+        };
+
+        assert_eq!(run(&c, "c"), run(Path::new(MORI), "rs"));
     }
 }
 
@@ -715,6 +952,132 @@ fn index_fixture(
 }
 
 #[test]
+fn trace_ingestion_matches_native_replies_and_stored_observations() {
+    use serde_json::{Value, json};
+
+    let fixture = Scratch::new("trace-input");
+    let repo = fixture.0.join("repo");
+    fs::create_dir(&repo).unwrap();
+    fs::write(
+        repo.join("app.py"),
+        "def caller():\n    return callee()\n\ndef callee():\n    return 1\n",
+    )
+    .unwrap();
+
+    let exercise = |bin: &Path, side: &str| {
+        let scratch = Scratch::new(side);
+        let index = index_fixture(bin, &scratch, repo.to_str().unwrap());
+        let project = index["project"].as_str().unwrap();
+        let db = Connection::open_with_flags(
+            scratch.0.join("cache").join(format!("{project}.db")),
+            OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let symbol_name = |name: &str| {
+            db.query_row(
+                "SELECT qualified_name FROM nodes WHERE label = 'Function' AND name = ?1",
+                [name],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap()
+        };
+        let caller = symbol_name("caller");
+        let callee = symbol_name("callee");
+
+        let start = command_in(bin, &scratch)
+            .env("CBM_LOG_LEVEL", "debug")
+            .args(["daemon", "start"])
+            .output()
+            .unwrap();
+        assert!(start.status.success(), "{start:?}");
+
+        let arguments = json!({
+            "project": project,
+            "traces": [
+                {"path": [&caller, &callee, &caller], "count": 3},
+                {"caller": &caller, "callee": &callee, "count": -5},
+                {"caller": &caller, "callee": &callee, "count": "8", "path": null},
+                {"path": [&caller, "missing", &callee]},
+                {"path": [&caller], "caller": &caller, "callee": &callee},
+                {"path": [&caller, false]},
+                {"path": vec![&caller; 257]},
+            ],
+        });
+        let ingest = run_in(
+            bin,
+            &scratch,
+            &["cli", "--quiet", "ingest_traces", &arguments.to_string()],
+        );
+        let stop = run_in(bin, &scratch, &["daemon", "stop"]);
+        assert!(stop.status.success(), "{stop:?}");
+        assert!(ingest.status.success(), "{ingest:?}");
+
+        let reply: Value = serde_json::from_slice(&ingest.stdout).unwrap();
+        let rows = |sql: &str| {
+            let mut query = db.prepare(sql).unwrap();
+            query
+                .query_map([], |row| row.get::<_, String>(0))
+                .unwrap()
+                .map(|row| serde_json::from_str::<Value>(&row.unwrap()).unwrap())
+                .collect::<Vec<_>>()
+        };
+        let pairs = rows(
+            "SELECT json_array(caller_qn, callee_qn, label, count) FROM observed_calls
+             ORDER BY caller_qn, callee_qn",
+        );
+        let paths = rows(
+            "SELECT json_array(json(path_json), label, count) FROM observed_paths
+             ORDER BY path_json",
+        );
+        let log =
+            fs::read_to_string(scratch.0.join("cache/logs/cbm-daemon.log"))
+                .unwrap();
+        let used_rust = log.lines().any(|line| {
+            line.contains("ingest_traces.normalize")
+                && line.contains("backend=rust")
+        });
+        assert_eq!(
+            reply,
+            json!({
+                "status": "stored",
+                "label": "unlabeled",
+                "pairs_stored": 4,
+                "paths_stored": 2,
+                "pairs_unmatched": 2,
+                "unmatched_sample": ["missing"],
+                "malformed": 3,
+                "pair_total": 2,
+            })
+        );
+        assert_eq!(
+            pairs,
+            [
+                json!([&callee, &caller, "unlabeled", 3]),
+                json!([&caller, &callee, "unlabeled", 5]),
+            ],
+        );
+        assert_eq!(
+            paths,
+            [
+                json!([[&caller, &callee, &caller], "unlabeled", 3]),
+                json!([null, "unlabeled", 1]),
+            ],
+        );
+        (reply, pairs, paths, used_rust)
+    };
+
+    let (native_reply, native_pairs, native_paths, native_rust) =
+        exercise(&c_binary(), "trace-c");
+    let (rust_reply, rust_pairs, rust_paths, rust_used) =
+        exercise(Path::new(MORI), "trace-rust");
+    assert_eq!(
+        (native_reply, native_pairs, native_paths),
+        (rust_reply, rust_pairs, rust_paths),
+    );
+    assert!(!native_rust && rust_used);
+}
+
+#[test]
 fn scalar_read_flags_match_json_and_c_on_one_cache() {
     let scratch = Scratch::new("scalar-read");
     let repo = scratch.0.join("repo");
@@ -877,8 +1240,10 @@ fn exact_path_coverage_verdicts_match_c_on_one_cache() {
     let requests = ["json", "tree"].map(|format| {
         serde_json::json!({
             "project": project,
-            "paths": ["nested/partial.py", "nested/missing.py", "verified.py", "changed.py"],
-            "scopes": ["nested"], "scope_limit": 1, "format": format
+            "paths": ["./nested\\partial.py", "nested/missing.py", "verified.py", "changed.py",
+                      "nested/../partial.py", "C:relative.py", "nested/bad\n.py", ".", "", null],
+            "scopes": ["./nested//", ".", "/outside", "nested/../scope"],
+            "scope_limit": 1, "format": format
         })
         .to_string()
     });
@@ -894,7 +1259,14 @@ fn exact_path_coverage_verdicts_match_c_on_one_cache() {
         outputs
     };
     let reference = read(&c);
-    let linked = read(Path::new(MORI));
+    let rust = Path::new(MORI);
+    let start = command_in(rust, &scratch)
+        .env("CBM_LOG_LEVEL", "debug")
+        .args(["daemon", "start"])
+        .output()
+        .unwrap();
+    assert!(start.status.success(), "{start:?}");
+    let linked = read(rust);
     for (reference, linked) in reference.iter().zip(&linked) {
         assert!(reference.status.success() && linked.status.success());
         assert_eq!(reference.stdout, linked.stdout);
@@ -903,6 +1275,7 @@ fn exact_path_coverage_verdicts_match_c_on_one_cache() {
     let json: serde_json::Value =
         serde_json::from_slice(&linked[0].stdout).unwrap();
     let paths = json["paths"].as_array().unwrap();
+    assert_eq!(paths[0]["path"], "nested/partial.py");
     assert_eq!(paths[0]["status"], "partial");
     assert_eq!(
         paths[0]["recommended_action"],
@@ -914,6 +1287,23 @@ fn exact_path_coverage_verdicts_match_c_on_one_cache() {
     assert_eq!(paths[2]["content_verified"], true);
     assert_eq!(paths[3]["status"], "coverage_unavailable");
     assert_eq!(paths[3]["recommended_action"], "read_source_and_reindex");
+    assert_eq!(paths[4]["status"], "outside_project");
+    assert_eq!(paths[5]["status"], "outside_project");
+    assert_eq!(paths[6]["status"], "invalid_path");
+    assert_eq!(paths[7]["status"], "invalid_path");
+    assert_eq!(paths[8]["status"], "outside_project");
+    assert_eq!(paths[9]["status"], "invalid_path");
+    let scopes = json["scopes"].as_array().unwrap();
+    assert_eq!(scopes[0]["scope"], "nested");
+    assert_eq!(scopes[1]["scope"], ".");
+    assert_eq!(scopes[2]["status"], "outside_project");
+    assert_eq!(scopes[3]["status"], "outside_project");
+    let log =
+        fs::read_to_string(scratch.0.join("cache/logs/cbm-daemon.log")).unwrap();
+    assert!(log.lines().any(|line| {
+        line.contains("check_index_coverage.normalize")
+            && line.contains("backend=rust")
+    }));
 }
 
 #[test]
@@ -1087,6 +1477,97 @@ fn graphql_rows(scratch: &Scratch, project: &str) -> Vec<String> {
         .expect("query GraphQL rows")
         .collect::<rusqlite::Result<_>>()
         .expect("read GraphQL rows")
+}
+
+#[test]
+fn search_code_ranking_reads_call_degrees_in_rust() {
+    let scratch = Scratch::new("search-degrees");
+    let repo = scratch.0.join("repo");
+    fs::create_dir(&repo).unwrap();
+    fs::write(
+        repo.join("app.py"),
+        "def alpha():\n    return 'mori_search_needle'\n\n\
+         def zeta():\n    return 'mori_search_needle'\n\n\
+         def zero():\n    return 'mori_search_needle'\n",
+    )
+    .unwrap();
+    let c = c_binary();
+    let rust = Path::new(MORI);
+    let index = index_fixture(&c, &scratch, repo.to_str().unwrap());
+    let project = index["project"].as_str().unwrap();
+    let stop = |bin: &Path| {
+        let output = run_in(bin, &scratch, &["daemon", "stop"]);
+        assert!(output.status.success(), "{output:?}");
+    };
+    stop(&c);
+
+    let db =
+        Connection::open(scratch.0.join("cache").join(format!("{project}.db")))
+            .unwrap();
+    let id = |name: &str| -> i64 {
+        db.query_row(
+            "SELECT id FROM nodes WHERE project = ? AND label = 'Function' AND name = ?",
+            [project, name],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    for (source, target, kind) in
+        [("alpha", "zeta", "CALLS"), ("zeta", "zero", "USAGE")]
+    {
+        db.execute(
+            "INSERT INTO edges (project, source_id, target_id, type, properties) \
+             VALUES (?1, ?2, ?3, ?4, '{}')",
+            rusqlite::params![project, id(source), id(target), kind],
+        )
+        .unwrap();
+    }
+    drop(db);
+
+    let read = |bin: &Path, limit: usize| {
+        let args = serde_json::json!({"project": project, "pattern": "mori_search_needle",
+                                     "format": "json", "result_limit": limit});
+        let output = run_in(
+            bin,
+            &scratch,
+            &["cli", "--quiet", "search_code", &args.to_string()],
+        );
+        assert!(output.status.success(), "{output:?}");
+        let mut response: serde_json::Value =
+            serde_json::from_slice(&output.stdout).unwrap();
+        response.as_object_mut().unwrap().remove("elapsed_ms");
+        response
+    };
+    let reference = [read(&c, 8), read(&c, 1)];
+    stop(&c);
+    let start = command_in(rust, &scratch)
+        .env("CBM_LOG_LEVEL", "debug")
+        .args(["daemon", "start"])
+        .output()
+        .unwrap();
+    assert!(start.status.success(), "{start:?}");
+    let candidate = [read(rust, 8), read(rust, 1)];
+    stop(rust);
+    assert_eq!(candidate, reference);
+    let rows = candidate[0]["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 3);
+    for (row, (name, inbound, outbound)) in
+        rows.iter()
+            .zip([("zeta", 1, 0), ("alpha", 0, 1), ("zero", 0, 0)])
+    {
+        assert!(
+            row[0].as_str().unwrap().ends_with(&format!(".{name}")),
+            "{row}"
+        );
+        assert_eq!(row[6], inbound, "{row}");
+        assert_eq!(row[7], outbound, "{row}");
+    }
+    assert_eq!(candidate[1]["rows"], serde_json::json!([rows[0]]));
+    let log =
+        fs::read_to_string(scratch.0.join("cache/logs/cbm-daemon.log")).unwrap();
+    assert!(log.lines().any(|line| {
+        line.contains("search_code.degrees") && line.contains("backend=rust")
+    }));
 }
 
 #[test]

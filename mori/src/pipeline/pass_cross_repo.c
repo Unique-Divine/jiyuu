@@ -1661,7 +1661,9 @@ static bool cr_record_skip(cbm_cross_repo_result_t *result, const char *project,
     return true;
 }
 
-/* When target_projects = ["*"], scan the cache directory for all .db files. */
+/* Enumerate project database names. For a wildcard link run, result also
+ * requests validation of each store and receives any skipped legacy entries.
+ * The publication observer checks its candidates with nonwaiting reads. */
 static int collect_all_projects(char ***out, cr_run_context_t *ctx,
                                 cbm_cross_repo_result_t *result) {
     *out = NULL;
@@ -1714,13 +1716,15 @@ static int collect_all_projects(char ***out, cr_run_context_t *ctx,
         if (!cbm_validate_project_name(project)) {
             continue;
         }
-        cr_project_state_t state = cr_project_state(project);
-        if (state == CR_PROJECT_LEGACY && !cr_record_skip(result, project, "pre_768_schema")) {
-            failed = true;
-            break;
-        }
-        if (state != CR_PROJECT_USABLE) {
-            continue;
+        if (result) {
+            cr_project_state_t state = cr_project_state(project);
+            if (state == CR_PROJECT_LEGACY && !cr_record_skip(result, project, "pre_768_schema")) {
+                failed = true;
+                break;
+            }
+            if (state != CR_PROJECT_USABLE) {
+                continue;
+            }
         }
         if (count >= cap) {
             cap *= PAIR_LEN;
@@ -1978,6 +1982,67 @@ static bool cr_remember_peer(yyjson_mut_doc *peers, const char *name, cbm_store_
     yyjson_mut_val *value =
         provider ? yyjson_mut_strcpy(peers, generation) : yyjson_mut_null(peers);
     return key && value && yyjson_mut_obj_add(yyjson_mut_doc_get_root(peers), key, value);
+}
+
+bool cbm_cross_repo_read_generation(const char *project, char *generation, size_t capacity) {
+    char path[CR_PATH_BUF];
+    cbm_store_t *store =
+        cr_db_path(project, path, sizeof(path)) ? cbm_store_open_path_query_nowait(path) : NULL;
+    bool ok = store && cbm_store_generation(store, generation, capacity) == CBM_STORE_OK;
+    cbm_store_close(store);
+    return ok;
+}
+
+static bool cr_stale_named_client(const char *client, const char *provider, const char *generation,
+                                  char ***targets, int *count) {
+    char path[CR_PATH_BUF];
+    cbm_store_t *store =
+        cr_db_path(client, path, sizeof(path)) ? cbm_store_open_path_query_nowait(path) : NULL;
+    if (!store || !cbm_store_read_batch_begin(store)) {
+        cbm_store_close(store);
+        return false;
+    }
+
+    if (cr_store_has_exact_project(store, client) && cbm_store_edges_schema_current(store)) {
+        *count = cr_read_targets(store, client, targets);
+    }
+    bool stale = false;
+    for (int i = 0; i < *count; i++) {
+        if (strcmp((*targets)[i], provider) == 0) {
+            yyjson_doc *peers = cr_read_peers(store, client);
+            const char *observed =
+                yyjson_get_str(yyjson_obj_get(yyjson_doc_get_root(peers), provider));
+            stale = !observed || strcmp(observed, generation) != 0;
+            yyjson_doc_free(peers);
+            break;
+        }
+    }
+    cbm_store_read_batch_end(store);
+    cbm_store_close(store);
+    return stale;
+}
+
+void cbm_cross_repo_visit_stale_clients(const char *provider, const char *generation,
+                                        cbm_cross_repo_client_visitor_t visitor, void *context,
+                                        const atomic_int *cancelled) {
+    if (!provider || !generation || !visitor) {
+        return;
+    }
+    cr_run_context_t run = {.cancelled = cancelled};
+    char **clients = NULL;
+    int client_count = collect_all_projects(&clients, &run, NULL);
+    for (int i = 0; i < client_count && !cr_cancel_requested(&run); i++) {
+        if (strcmp(clients[i], provider) == 0) {
+            continue;
+        }
+        char **targets = NULL;
+        int count = 0;
+        if (cr_stale_named_client(clients[i], provider, generation, &targets, &count)) {
+            visitor(context, clients[i], (const char *const *)targets, count);
+        }
+        free_project_list(targets, count);
+    }
+    free_project_list(clients, client_count);
 }
 
 static bool cr_peer_is_stale(const char *name, const char *observed) {

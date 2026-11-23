@@ -1662,6 +1662,21 @@ char *cbm_mcp_get_arguments(const char *params_json) {
     return result ? result : heap_strdup("{}");
 }
 
+static cbm_mcp_tool_call_decoder_fn mcp_tool_call_decoder;
+
+void cbm_mcp_set_tool_call_decoder(cbm_mcp_tool_call_decoder_fn decode) {
+    mcp_tool_call_decoder = decode;
+}
+
+static void mcp_decode_tool_call(const char *params, char **name, char **args) {
+    if (mcp_tool_call_decoder && mcp_tool_call_decoder(params, name, args)) {
+        cbm_log_debug("mcp.tools_call.decode", "backend", "rust");
+        return;
+    }
+    *name = params ? cbm_mcp_get_tool_name(params) : NULL;
+    *args = params ? cbm_mcp_get_arguments(params) : heap_strdup("{}");
+}
+
 char *cbm_mcp_get_string_arg(const char *args_json, const char *key) {
     yyjson_doc *doc = yyjson_read(args_json, strlen(args_json), 0);
     if (!doc) {
@@ -1987,6 +2002,8 @@ struct cbm_mcp_server {
     void *index_executor_context;
     cbm_mcp_index_status_fn index_status_provider; /* #2144; NULL outside the daemon */
     void *index_status_context;
+    cbm_mcp_index_named_owner_fn index_named_owner;
+    void *index_named_owner_context;
     cbm_proc_log_cb index_log_callback;
     void *index_log_context;
     cbm_mcp_project_mutation_begin_fn mutation_begin;
@@ -2163,6 +2180,14 @@ void cbm_mcp_server_set_index_status_provider(cbm_mcp_server_t *srv,
     if (srv) {
         srv->index_status_provider = provider;
         srv->index_status_context = context;
+    }
+}
+
+void cbm_mcp_server_set_index_named_owner(cbm_mcp_server_t *srv,
+                                          cbm_mcp_index_named_owner_fn resolve, void *context) {
+    if (srv) {
+        srv->index_named_owner = resolve;
+        srv->index_named_owner_context = context;
     }
 }
 
@@ -6533,6 +6558,112 @@ static char *query_graph_budget_floor_text(const cbm_cypher_result_t *result, in
     return cbm_sb_finish(&sb);
 }
 
+static cbm_mcp_cypher_evaluator_fn rust_cypher_evaluator;
+
+void cbm_mcp_set_cypher_evaluator(cbm_mcp_cypher_evaluator_fn evaluate) {
+    rust_cypher_evaluator = evaluate;
+}
+
+static char *copy_cypher_cell(cbm_mcp_cypher_cell_t cell) {
+    char *copy = malloc(cell.len + 1);
+    if (copy) {
+        memcpy(copy, cell.data, cell.len);
+        copy[cell.len] = '\0';
+    }
+    return copy;
+}
+
+static const char **copy_cypher_cells(const cbm_mcp_cypher_cell_t *cells, size_t count) {
+    const char **copy = calloc(count, sizeof(*copy));
+    if (!copy) {
+        return NULL;
+    }
+    for (size_t index = 0; index < count; index++) {
+        copy[index] = copy_cypher_cell(cells[index]);
+        if (!copy[index]) {
+            for (size_t prior = 0; prior < index; prior++) {
+                free((void *)copy[prior]);
+            }
+            free(copy);
+            return NULL;
+        }
+    }
+    return copy;
+}
+
+static bool cypher_sink_begin(void *context, const cbm_mcp_cypher_cell_t *columns,
+                              size_t column_count, size_t row_capacity) {
+    cbm_cypher_result_t *result = context;
+    result->columns = copy_cypher_cells(columns, column_count);
+    if (!result->columns) {
+        return false;
+    }
+    result->col_count = (int)column_count;
+    if (row_capacity) {
+        result->rows = calloc(row_capacity, sizeof(*result->rows));
+        if (!result->rows) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool cypher_sink_row(void *context, const cbm_mcp_cypher_cell_t *cells) {
+    cbm_cypher_result_t *result = context;
+    const char **row = copy_cypher_cells(cells, (size_t)result->col_count);
+    if (!row) {
+        return false;
+    }
+    result->rows[result->row_count++] = row;
+    return true;
+}
+
+static void cypher_sink_storage_error(void *context, cbm_mcp_cypher_cell_t detail) {
+    cbm_cypher_result_t *result = context;
+    result->error = copy_cypher_cell(detail);
+}
+
+static bool cypher_request_cancelled(void *context) {
+    return mcp_request_cancelled(context);
+}
+
+/* The Rust evaluator receives the same read-batched connection from which
+ * the query handler obtained the generation. The C handler owns pagination
+ * and rendering for both evaluators. */
+static int evaluate_mcp_cypher(cbm_mcp_server_t *srv, cbm_store_t *store, const char *query,
+                               const char *project, cbm_cypher_result_t *result) {
+    const char *backend = cbm_runtime_getenv("MORI_IMPL_QUERY");
+    if (rust_cypher_evaluator && project && backend && strcmp(backend, "rust") == 0) {
+        const cbm_mcp_cypher_sink_t sink = {
+            .context = result,
+            .begin = cypher_sink_begin,
+            .row = cypher_sink_row,
+            .storage_error = cypher_sink_storage_error,
+        };
+        int status = rust_cypher_evaluator(cbm_store_get_db(store), query, project,
+                                           cypher_request_cancelled, srv, &sink);
+        if (status != CBM_MCP_CYPHER_UNSUPPORTED) {
+            cbm_log_debug("query_graph.evaluator", "backend", "rust");
+            switch (status) {
+            case CBM_MCP_CYPHER_OK:
+                return 0;
+            case CBM_MCP_CYPHER_DEADLINE:
+                result->error = heap_strdup(CBM_CYPHER_DEADLINE_ERROR);
+                break;
+            case CBM_MCP_CYPHER_CANCELLED:
+                result->error = heap_strdup("query_graph cancelled for this request");
+                break;
+            case CBM_MCP_CYPHER_ROW_CEILING:
+                result->truncated = true;
+                result->error = heap_strdup(CBM_CYPHER_ROW_CEILING_ERROR);
+                break;
+            }
+            return CBM_NOT_FOUND;
+        }
+    }
+    return cbm_cypher_execute(store, query, project, 0, result);
+}
+
 static char *handle_query_graph(cbm_mcp_server_t *srv, const char *args) {
     char *query = cbm_mcp_get_string_arg(args, "query");
     char *project = get_project_arg(args);
@@ -6641,7 +6772,7 @@ static char *handle_query_graph(cbm_mcp_server_t *srv, const char *args) {
      * Executing at visible_limit+1 corrupts ORDER BY, DISTINCT, aggregation,
      * and SKIP semantics before serialization gets a chance to trim rows.
      * Zero preserves the engine's established 100k safety ceiling. */
-    int rc = cbm_cypher_execute(store, query, cypher_project, 0, &result);
+    int rc = evaluate_mcp_cypher(srv, store, query, cypher_project, &result);
 
     if (rc < 0) {
         char *err_msg = result.error ? result.error : "query execution failed";
@@ -7330,12 +7461,6 @@ enum {
 
 bool cbm_path_within_root(const char *root_path, const char *abs_path); /* defined below */
 
-typedef enum {
-    COVERAGE_PATH_OK = 0,
-    COVERAGE_PATH_OUTSIDE,
-    COVERAGE_PATH_INVALID,
-} coverage_path_result_t;
-
 /* Normalize an untrusted repository-relative path without touching the
  * filesystem. Absolute paths, drive/UNC paths, control bytes, and any `..`
  * component are rejected. A root scope (`.`) normalizes to the empty prefix. */
@@ -7389,6 +7514,21 @@ static coverage_path_result_t coverage_normalize_rel(const char *input, bool all
     }
     out[written] = '\0';
     return written > 0U || allow_root ? COVERAGE_PATH_OK : COVERAGE_PATH_INVALID;
+}
+
+static cbm_mcp_coverage_path_normalizer_fn coverage_path_normalizer;
+
+void cbm_mcp_set_coverage_path_normalizer(cbm_mcp_coverage_path_normalizer_fn normalizer) {
+    coverage_path_normalizer = normalizer;
+}
+
+static coverage_path_result_t coverage_normalize_request_path(const char *input, bool allow_root,
+                                                              char *out, size_t out_size) {
+    if (coverage_path_normalizer) {
+        cbm_log_debug("check_index_coverage.normalize", "backend", "rust");
+        return coverage_path_normalizer(input, allow_root, out, out_size);
+    }
+    return coverage_normalize_rel(input, allow_root, out, out_size);
 }
 
 /* #2585: the store generation ("u<db_uid>g<mutation_gen>") advances on every
@@ -7915,7 +8055,7 @@ static char *handle_check_index_coverage(cbm_mcp_server_t *srv, const char *args
             yyjson_mut_obj_add_strcpy(doc, item, "requested_path", input ? input : "");
             char rel[CBM_SZ_4K];
             coverage_path_result_t normalized =
-                coverage_normalize_rel(input, false, rel, sizeof(rel));
+                coverage_normalize_request_path(input, false, rel, sizeof(rel));
             if (normalized != COVERAGE_PATH_OK) {
                 yyjson_mut_obj_add_str(doc, item, "status",
                                        normalized == COVERAGE_PATH_OUTSIDE ? "outside_project"
@@ -7997,7 +8137,7 @@ static char *handle_check_index_coverage(cbm_mcp_server_t *srv, const char *args
             yyjson_mut_obj_add_strcpy(doc, item, "requested_scope", input ? input : "");
             char scope[CBM_SZ_4K];
             coverage_path_result_t normalized =
-                coverage_normalize_rel(input, true, scope, sizeof(scope));
+                coverage_normalize_request_path(input, true, scope, sizeof(scope));
             if (normalized != COVERAGE_PATH_OK) {
                 yyjson_mut_obj_add_str(doc, item, "status",
                                        normalized == COVERAGE_PATH_OUTSIDE ? "outside_project"
@@ -13739,7 +13879,22 @@ static bool index_root_owner_append(char **list, size_t *len, size_t *cap, const
     return true;
 }
 
-static bool index_root_owner_resolve(const char *repo_path, char **owner_out, char **error_out) {
+static bool index_root_named_owner(cbm_mcp_server_t *srv, const char *repo_path,
+                                   const char *derived, char **owner_out, char **error_out) {
+    if (!srv->index_named_owner ||
+        srv->index_named_owner(srv->index_named_owner_context, repo_path, owner_out)) {
+        /* A watch using the path-derived name sends no name to the worker. */
+        if (*owner_out && strcmp(*owner_out, derived) == 0) {
+            safe_free(*owner_out);
+        }
+        return true;
+    }
+    *error_out = heap_strdup("could not copy the named watch project");
+    return false;
+}
+
+static bool index_root_owner_resolve(cbm_mcp_server_t *srv, const char *repo_path, char **owner_out,
+                                     char **error_out) {
     *owner_out = NULL;
     *error_out = NULL;
     char *derived = cbm_project_name_from_path(repo_path);
@@ -13756,8 +13911,9 @@ static bool index_root_owner_resolve(const char *repo_path, char **owner_out, ch
     cache_dir(dir_path, sizeof(dir_path));
     cbm_dir_t *d = cbm_opendir(dir_path);
     if (!d) {
+        bool resolved = index_root_named_owner(srv, repo_path, derived, owner_out, error_out);
         safe_free(derived);
-        return true;
+        return resolved;
     }
     char *owner = NULL;
     char *owners = NULL;
@@ -13794,18 +13950,21 @@ static bool index_root_owner_resolve(const char *repo_path, char **owner_out, ch
         project_record_clear(&record);
     }
     cbm_closedir(d);
+    if (ok && (derived_exists || owner_count == 0)) {
+        bool resolved =
+            derived_exists || index_root_named_owner(srv, repo_path, derived, owner_out, error_out);
+        safe_free(derived);
+        safe_free(owner);
+        cbm_free(CBM_MEM_CLASS_OTHER, owners);
+        return resolved;
+    }
     safe_free(derived);
-
-    if (ok && !derived_exists && owner_count == 1) {
+    if (ok && owner_count == 1) {
         cbm_free(CBM_MEM_CLASS_OTHER, owners);
         *owner_out = owner;
         return true;
     }
     safe_free(owner);
-    if (ok && (derived_exists || owner_count == 0)) {
-        cbm_free(CBM_MEM_CLASS_OTHER, owners);
-        return true;
-    }
     char msg[CBM_SZ_4K];
     if (ok) {
         snprintf(msg, sizeof(msg),
@@ -13904,7 +14063,8 @@ static char *index_status_project_key(cbm_mcp_server_t *srv, const char *args, c
      * same owner, and fail on the same ambiguity, or it never finds the job. */
     char *owner = NULL;
     char *owner_error = NULL;
-    if (repo_path && repo_path[0] && !index_root_owner_resolve(repo_path, &owner, &owner_error)) {
+    if (repo_path && repo_path[0] &&
+        !index_root_owner_resolve(srv, repo_path, &owner, &owner_error)) {
         (void)snprintf(error_out, error_size, "%s",
                        owner_error ? owner_error : "could not resolve index project name");
         safe_free(owner_error);
@@ -14040,7 +14200,7 @@ static char *handle_index_repository(cbm_mcp_server_t *srv, const char *args) {
     if ((!name_override || !name_override[0]) && repo_path && repo_path[0]) {
         char *owner = NULL;
         char *owner_error = NULL;
-        if (!index_root_owner_resolve(repo_path, &owner, &owner_error)) {
+        if (!index_root_owner_resolve(srv, repo_path, &owner, &owner_error)) {
             index_args_free(repo_path, mode_str, name_override);
             char *result = cbm_mcp_text_result(
                 owner_error ? owner_error : "could not resolve index project name", true);
@@ -15972,6 +16132,26 @@ static int search_result_cmp(const void *a, const void *b) {
         return ra->end_line < rb->end_line ? -1 : 1;
     }
     return 0;
+}
+
+static cbm_mcp_search_code_degrees_fn search_code_degrees_reader;
+
+void cbm_mcp_set_search_code_degrees_reader(cbm_mcp_search_code_degrees_fn reader) {
+    search_code_degrees_reader = reader;
+}
+
+static bool search_code_read_degrees(cbm_store_t *store, const int64_t *ids, int count,
+                                     int *in_degrees, int *out_degrees) {
+    /* The C degree query fits at most 2047 bindings in its placeholder
+     * buffer. Keep larger requests on the same implementation during parity. */
+    const int native_batch_limit = CBM_SZ_4K / 2 - 1;
+    if (search_code_degrees_reader && count <= native_batch_limit &&
+        search_code_degrees_reader(cbm_store_get_db(store), ids, count, in_degrees, out_degrees)) {
+        cbm_log_debug("search_code.degrees", "backend", "rust");
+        return true;
+    }
+    return cbm_store_batch_count_degrees(store, ids, count, "CALLS", in_degrees, out_degrees) ==
+           CBM_STORE_OK;
 }
 
 #define SEARCH_CODE_PATH_HINT                                                            \
@@ -18841,8 +19021,7 @@ static char *handle_search_code(cbm_mcp_server_t *srv, const char *args) {
         for (int j = 0; j < sr_count; j++) {
             ids[j] = sr[j].node_id;
         }
-        if (cbm_store_batch_count_degrees(store, ids, sr_count, "CALLS", in_degs, out_degs) ==
-            CBM_STORE_OK) {
+        if (search_code_read_degrees(store, ids, sr_count, in_degs, out_degs)) {
             for (int j = 0; j < sr_count; j++) {
                 sr[j].in_degree = in_degs[j];
                 sr[j].out_degree = out_degs[j];
@@ -22346,6 +22525,30 @@ enum {
     INGEST_EVICT_MAX_ROUNDS = 32, /* runaway guard for the eviction loop */
 };
 
+static cbm_mcp_ingest_trace_normalizer_fn ingest_trace_normalizer;
+
+void cbm_mcp_set_ingest_trace_normalizer(cbm_mcp_ingest_trace_normalizer_fn normalize) {
+    ingest_trace_normalizer = normalize;
+}
+
+static bool normalize_ingest_trace(const char *const *hops, size_t hop_count, int64_t *count) {
+    if (ingest_trace_normalizer) {
+        return ingest_trace_normalizer(hops, hop_count, count);
+    }
+    if (hop_count < 2 || hop_count > INGEST_PATH_MAX) {
+        return false;
+    }
+    for (size_t h = 0; h < hop_count; h++) {
+        if (!hops[h] || !hops[h][0]) {
+            return false;
+        }
+    }
+    if (*count <= 0) {
+        *count = 1;
+    }
+    return true;
+}
+
 /* Observed runtime calls: paths of qualified names (adjacent elements are
  * caller→callee) or bare {caller, callee} pairs — stored qn-keyed in
  * observed_calls/observed_paths (reindex-proof), per run label. The
@@ -22420,43 +22623,36 @@ static char *handle_ingest_traces(cbm_mcp_server_t *srv, const char *args) {
     int unmatched_sample_count = 0;
     (void)sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL);
 
+    bool normalized_in_rust = false;
     size_t ti, tmax;
     yyjson_val *trace;
     yyjson_arr_foreach(traces, ti, tmax, trace) {
         const char *hops[INGEST_PATH_MAX];
-        size_t hop_count = 0;
-        long long count = 1;
+        size_t hop_count = 2;
         yyjson_val *count_val = yyjson_obj_get(trace, "count");
-        if (yyjson_is_int(count_val) && yyjson_get_int(count_val) > 0)
-            count = yyjson_get_int(count_val);
+        int64_t count = yyjson_is_int(count_val) ? yyjson_get_int(count_val) : 0;
 
         yyjson_val *path = yyjson_obj_get(trace, "path");
         if (path && yyjson_is_arr(path)) {
+            hop_count = yyjson_arr_size(path);
+            if (hop_count > INGEST_PATH_MAX) {
+                malformed++;
+                continue;
+            }
             size_t hi, hmax;
             yyjson_val *hop;
-            bool ok = yyjson_arr_size(path) >= 2 && yyjson_arr_size(path) <= INGEST_PATH_MAX;
             yyjson_arr_foreach(path, hi, hmax, hop) {
-                const char *qn = yyjson_get_str(hop);
-                if (!qn || !qn[0] || hop_count >= INGEST_PATH_MAX) {
-                    ok = false;
-                    break;
-                }
-                hops[hop_count++] = qn;
-            }
-            if (!ok) {
-                malformed++;
-                continue;
+                hops[hi] = yyjson_get_str(hop);
             }
         } else {
-            const char *caller = yyjson_get_str(yyjson_obj_get(trace, "caller"));
-            const char *callee = yyjson_get_str(yyjson_obj_get(trace, "callee"));
-            if (!caller || !caller[0] || !callee || !callee[0]) {
-                malformed++;
-                continue;
-            }
-            hops[0] = caller;
-            hops[1] = callee;
-            hop_count = 2;
+            hops[0] = yyjson_get_str(yyjson_obj_get(trace, "caller"));
+            hops[1] = yyjson_get_str(yyjson_obj_get(trace, "callee"));
+        }
+        bool valid = normalize_ingest_trace(hops, hop_count, &count);
+        normalized_in_rust = normalized_in_rust || ingest_trace_normalizer != NULL;
+        if (!valid) {
+            malformed++;
+            continue;
         }
 
         /* Resolve every hop before storing anything from this trace: a
@@ -22498,6 +22694,9 @@ static char *handle_ingest_traces(cbm_mcp_server_t *srv, const char *args) {
                 cbm_free(CBM_MEM_CLASS_OTHER, path_json);
             }
         }
+    }
+    if (normalized_in_rust) {
+        cbm_log_debug("ingest_traces.normalize", "backend", "rust");
     }
     sqlite3_finalize(exists);
     (void)sqlite3_exec(db, "COMMIT", NULL, NULL, NULL);
@@ -23137,9 +23336,9 @@ char *cbm_mcp_server_handle(cbm_mcp_server_t *srv, const char *line) {
         result_json = cbm_mcp_tools_list_page(srv->tool_profile, req.params_raw);
         break;
     case MCP_METHOD_TOOLS_CALL: {
-        char *tool_name = req.params_raw ? cbm_mcp_get_tool_name(req.params_raw) : NULL;
-        char *tool_args =
-            req.params_raw ? cbm_mcp_get_arguments(req.params_raw) : heap_strdup("{}");
+        char *tool_name;
+        char *tool_args;
+        mcp_decode_tool_call(req.params_raw, &tool_name, &tool_args);
         request_tool_name = tool_name;
         srv->active_request_id = req.id;
         free(srv->active_request_id_str);

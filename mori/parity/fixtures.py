@@ -123,3 +123,19 @@ def write_all(base: str) -> list[tuple[str, str]]:
     write_repo(root, files)
     out.append((name, root))
   return out
+
+
+def write_path_fixture(root: str) -> tuple[str, str]:
+  # Exceed the native 50-file split with recognized source files. Keep the
+  # cross-file calls, GraphQL field Route, and handler from the polyglot repo.
+  files = {
+    **FIXTURES["fx-polyglot"],
+    **{
+      f"svc/helper_{i:02}.go": (
+        f"package main\n\nfunc helper{i}() []Item {{ return listItems() }}\n"
+      )
+      for i in range(51)
+    },
+  }
+  write_repo(root, files)
+  return "fx-worker-paths", root

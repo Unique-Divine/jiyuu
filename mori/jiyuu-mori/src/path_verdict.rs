@@ -1,6 +1,79 @@
-//! Exact-path coverage policy for the MCP tool check_index_coverage.
+//! Path normalization and exact-path policy for check_index_coverage.
 
 use std::ffi::{CStr, c_char};
+use std::mem::MaybeUninit;
+
+#[repr(C)]
+#[derive(Debug, PartialEq, Eq)]
+enum PathNormalization {
+    Ok,
+    Outside,
+    Invalid,
+}
+
+fn normalize_path(
+    input: &[u8],
+    allow_root: bool,
+    output: &mut [MaybeUninit<u8>],
+) -> PathNormalization {
+    let separator = |byte| matches!(byte, b'/' | b'\\');
+    if input.is_empty()
+        || input.len() >= output.len()
+        || separator(input[0])
+        || (input[0].is_ascii_alphabetic() && input.get(1) == Some(&b':'))
+    {
+        return PathNormalization::Outside;
+    }
+
+    let mut written = 0;
+    for part in input.split(|&byte| separator(byte)) {
+        match part {
+            b"" | b"." => continue,
+            b".." => return PathNormalization::Outside,
+            _ if part.iter().any(|&byte| byte < b' ') => {
+                return PathNormalization::Invalid;
+            }
+            _ => {}
+        }
+        // Joining components can only shorten the input, which fits in the
+        // output with room for the terminator.
+        if written > 0 {
+            output[written].write(b'/');
+            written += 1;
+        }
+        for &byte in part {
+            output[written].write(byte);
+            written += 1;
+        }
+    }
+    output[written].write(0);
+    if written > 0 || allow_root {
+        PathNormalization::Ok
+    } else {
+        PathNormalization::Invalid
+    }
+}
+
+unsafe extern "C" fn normalize_request_path(
+    input: *const c_char,
+    allow_root: bool,
+    output: *mut c_char,
+    output_size: usize,
+) -> PathNormalization {
+    if input.is_null() || output.is_null() || output_size == 0 {
+        return PathNormalization::Invalid;
+    }
+    // SAFETY: C borrows a live NUL-terminated input and an independent
+    // output buffer. The output bytes need not be initialized.
+    let input = unsafe { CStr::from_ptr(input) }.to_bytes();
+    let output = unsafe {
+        std::slice::from_raw_parts_mut(
+            output.cast::<MaybeUninit<u8>>(),
+            output_size,
+        )
+    };
+    normalize_path(input, allow_root, output)
+}
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -146,19 +219,79 @@ unsafe extern "C" {
     fn cbm_mcp_set_coverage_verdict_reader(
         reader: unsafe extern "C" fn(*const PathRequest) -> PathVerdict,
     );
+    fn cbm_mcp_set_coverage_path_normalizer(
+        normalize: unsafe extern "C" fn(
+            *const c_char,
+            bool,
+            *mut c_char,
+            usize,
+        ) -> PathNormalization,
+    );
 }
 
 /// Register before C starts request threads.
 #[cfg(not(test))]
 pub(crate) unsafe fn register() {
     // SAFETY: The registered function lives for the process lifetime.
-    unsafe { cbm_mcp_set_coverage_verdict_reader(decide_path) };
+    unsafe {
+        cbm_mcp_set_coverage_verdict_reader(decide_path);
+        cbm_mcp_set_coverage_path_normalizer(normalize_request_path);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::ptr;
+
+    #[test]
+    fn normalizes_path_bytes_and_preserves_native_status_codes() {
+        let cases: &[(&CStr, bool, PathNormalization, Option<&[u8]>)] = &[
+            (
+                c"./src\\x\xff.py//",
+                false,
+                PathNormalization::Ok,
+                Some(b"src/x\xff.py"),
+            ),
+            (c"./.", true, PathNormalization::Ok, Some(b"")),
+            (c".", false, PathNormalization::Invalid, None),
+            (c"src/bad\x1f.py", false, PathNormalization::Invalid, None),
+            (c"src/../file.py", false, PathNormalization::Outside, None),
+            (c"C:relative.py", false, PathNormalization::Outside, None),
+            (c"\\\\host\\repo", false, PathNormalization::Outside, None),
+            (c"", true, PathNormalization::Outside, None),
+        ];
+        for &(input, allow_root, ref status, expected) in cases {
+            let mut out = [MaybeUninit::<c_char>::uninit(); 32];
+            // SAFETY: The input and writable output are live and independent.
+            let actual = unsafe {
+                normalize_request_path(
+                    input.as_ptr(),
+                    allow_root,
+                    out.as_mut_ptr().cast(),
+                    out.len(),
+                )
+            };
+            assert_eq!(&actual, status, "input {input:?}");
+            if let Some(expected) = expected {
+                // SAFETY: A successful normalization NUL-terminates the bytes.
+                assert_eq!(
+                    unsafe { CStr::from_ptr(out.as_ptr().cast()) }.to_bytes(),
+                    expected
+                );
+            }
+        }
+
+        let mut out = [MaybeUninit::uninit(); 3];
+        assert_eq!(
+            normalize_path(b"./x", false, &mut out),
+            PathNormalization::Outside
+        );
+        assert_eq!(
+            normalize_path(b"ab", false, &mut out),
+            PathNormalization::Ok
+        );
+    }
 
     fn request(rows: &[CoverageRow]) -> PathRequest {
         PathRequest {
