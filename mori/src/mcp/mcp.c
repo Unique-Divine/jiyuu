@@ -2002,6 +2002,8 @@ struct cbm_mcp_server {
     void *index_executor_context;
     cbm_mcp_index_status_fn index_status_provider; /* #2144; NULL outside the daemon */
     void *index_status_context;
+    cbm_mcp_index_named_owner_fn index_named_owner;
+    void *index_named_owner_context;
     cbm_proc_log_cb index_log_callback;
     void *index_log_context;
     cbm_mcp_project_mutation_begin_fn mutation_begin;
@@ -2178,6 +2180,14 @@ void cbm_mcp_server_set_index_status_provider(cbm_mcp_server_t *srv,
     if (srv) {
         srv->index_status_provider = provider;
         srv->index_status_context = context;
+    }
+}
+
+void cbm_mcp_server_set_index_named_owner(cbm_mcp_server_t *srv,
+                                          cbm_mcp_index_named_owner_fn resolve, void *context) {
+    if (srv) {
+        srv->index_named_owner = resolve;
+        srv->index_named_owner_context = context;
     }
 }
 
@@ -13869,7 +13879,22 @@ static bool index_root_owner_append(char **list, size_t *len, size_t *cap, const
     return true;
 }
 
-static bool index_root_owner_resolve(const char *repo_path, char **owner_out, char **error_out) {
+static bool index_root_named_owner(cbm_mcp_server_t *srv, const char *repo_path,
+                                   const char *derived, char **owner_out, char **error_out) {
+    if (!srv->index_named_owner ||
+        srv->index_named_owner(srv->index_named_owner_context, repo_path, owner_out)) {
+        /* A watch using the path-derived name sends no name to the worker. */
+        if (*owner_out && strcmp(*owner_out, derived) == 0) {
+            safe_free(*owner_out);
+        }
+        return true;
+    }
+    *error_out = heap_strdup("could not copy the named watch project");
+    return false;
+}
+
+static bool index_root_owner_resolve(cbm_mcp_server_t *srv, const char *repo_path, char **owner_out,
+                                     char **error_out) {
     *owner_out = NULL;
     *error_out = NULL;
     char *derived = cbm_project_name_from_path(repo_path);
@@ -13886,8 +13911,9 @@ static bool index_root_owner_resolve(const char *repo_path, char **owner_out, ch
     cache_dir(dir_path, sizeof(dir_path));
     cbm_dir_t *d = cbm_opendir(dir_path);
     if (!d) {
+        bool resolved = index_root_named_owner(srv, repo_path, derived, owner_out, error_out);
         safe_free(derived);
-        return true;
+        return resolved;
     }
     char *owner = NULL;
     char *owners = NULL;
@@ -13924,18 +13950,21 @@ static bool index_root_owner_resolve(const char *repo_path, char **owner_out, ch
         project_record_clear(&record);
     }
     cbm_closedir(d);
+    if (ok && (derived_exists || owner_count == 0)) {
+        bool resolved =
+            derived_exists || index_root_named_owner(srv, repo_path, derived, owner_out, error_out);
+        safe_free(derived);
+        safe_free(owner);
+        cbm_free(CBM_MEM_CLASS_OTHER, owners);
+        return resolved;
+    }
     safe_free(derived);
-
-    if (ok && !derived_exists && owner_count == 1) {
+    if (ok && owner_count == 1) {
         cbm_free(CBM_MEM_CLASS_OTHER, owners);
         *owner_out = owner;
         return true;
     }
     safe_free(owner);
-    if (ok && (derived_exists || owner_count == 0)) {
-        cbm_free(CBM_MEM_CLASS_OTHER, owners);
-        return true;
-    }
     char msg[CBM_SZ_4K];
     if (ok) {
         snprintf(msg, sizeof(msg),
@@ -14034,7 +14063,8 @@ static char *index_status_project_key(cbm_mcp_server_t *srv, const char *args, c
      * same owner, and fail on the same ambiguity, or it never finds the job. */
     char *owner = NULL;
     char *owner_error = NULL;
-    if (repo_path && repo_path[0] && !index_root_owner_resolve(repo_path, &owner, &owner_error)) {
+    if (repo_path && repo_path[0] &&
+        !index_root_owner_resolve(srv, repo_path, &owner, &owner_error)) {
         (void)snprintf(error_out, error_size, "%s",
                        owner_error ? owner_error : "could not resolve index project name");
         safe_free(owner_error);
@@ -14170,7 +14200,7 @@ static char *handle_index_repository(cbm_mcp_server_t *srv, const char *args) {
     if ((!name_override || !name_override[0]) && repo_path && repo_path[0]) {
         char *owner = NULL;
         char *owner_error = NULL;
-        if (!index_root_owner_resolve(repo_path, &owner, &owner_error)) {
+        if (!index_root_owner_resolve(srv, repo_path, &owner, &owner_error)) {
             index_args_free(repo_path, mode_str, name_override);
             char *result = cbm_mcp_text_result(
                 owner_error ? owner_error : "could not resolve index project name", true);
