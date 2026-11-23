@@ -1324,15 +1324,15 @@ wheels = [
 
 [[package]]
 name = "telethon"
-version = "1.42.0"
+version = "1.46.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "pyaes" },
     { name = "rsa" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/8c/10/8c8c9476bfce767a856d8aaf9eae8ea1869df4e970da16f1c5b638fd1b0c/telethon-1.42.0.tar.gz", hash = "sha256:032e95511261d5ead719f75494c6c85ece2ce71816b54f3c65d6ccc371d6994d", size = 672734, upload-time = "2025-11-05T19:15:19.849Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/e4/e9/b0a7b4af3ad1302845cce64e62cfd9040d6ae2d8b49c391a51dddc347eea/telethon-1.46.0.tar.gz", hash = "sha256:8357f5719376a9c1ddf0999136a44594a5b21b453647f1e146c169483b6a67df", size = 766624, upload-time = "2026-11-17T19:46:48.924Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/e4/e4/8ce0ff55251381966a7c3f88bd5b34abda79b225a8e7fb51ddef3b849c94/telethon-1.42.0-py3-none-any.whl", hash = "sha256:cf361c94586bcacd6d0fc8959a2bce509d1bb37007fe6476a80c4fb4a2decc29", size = 748466, upload-time = "2025-11-05T19:15:18.241Z" },
+    { url = "https://files.pythonhosted.org/packages/82/33/30d84b58c52231ae6b3e6b918cee4a8a040338eef814e4e57217e849f18a/telethon-1.46.0-py3-none-any.whl", hash = "sha256:c56e55e4a1f95fde556fe13459a542fc758e8ba501c0bf76f2fc5d8409fa81cb", size = 836173, upload-time = "2026-11-17T19:46:46.848Z" },
 ]
 
 [[package]]
@@ -1498,7 +1498,7 @@ requires-dist = [
     { name = "python-json-logger", specifier = ">=3.3.0,<5" },
     { name = "python-socks", marker = "extra == 'proxy'", specifier = ">=2.4.3" },
     { name = "qrcode", specifier = ">=8.2,<9" },
-    { name = "telethon", specifier = ">=1.42.0,<2" },
+    { name = "telethon", specifier = ">=1.46.0,<2" },
     { name = "tomlkit", specifier = ">=0.13,<1" },
 ]
 provides-extras = ["proxy"]

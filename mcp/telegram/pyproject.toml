@@ -33,7 +33,7 @@ dependencies = [
     "python-dotenv>=1.1.0,<2",
     "python-json-logger>=3.3.0,<5",
     "qrcode>=8.2,<9",
-    "telethon>=1.42.0,<2",
+    "telethon>=1.46.0,<2",
     "tomlkit>=0.13,<1",
 ]
 
