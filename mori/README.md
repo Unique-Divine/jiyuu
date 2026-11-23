@@ -459,6 +459,15 @@ C owns the passes, extraction and resolution, and the final publication
 transaction. The full-build selector also works with
 `MORI_IMPL_GRAPH_WRITER=rust` when the linked build supports that writer.
 
+### Source Publication
+
+Set `MORI_IMPL_SOURCE_PUBLISH=rust` when starting the daemon to opt in to
+Rust decisions after a staged source index. The `pipeline.source_publish`
+worker log records the selection and the staged result. Rust orders the
+checks through the publication lease. C owns the stage, file operations,
+and the destination prepare, rename, and rollback transaction. C remains
+the default.
+
 ### Sharing a Graph With a Team
 
 `index_repository` with `persistence: true` writes
