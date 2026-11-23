@@ -62,6 +62,36 @@ class ParityTest(unittest.TestCase):
       self.assertEqual(side.env()["CBM_PROFILE"], "1")
       self.assertNotIn("MORI_IMPL_GRAPHQL", side.env())
 
+  def test_path_parity_uses_one_worker_on_side_a(self) -> None:
+    sides = [parity.Side(n, "/bin/true", self.tmp + "-cache-" + n,
+                         self.tmp + "-rt-" + n) for n in ("a", "b")]
+    with (patch.object(parity, "make_sides", return_value=sides),
+          patch.object(parity, "finish", return_value=0)):
+      work = self.tmp + "/work"
+      with redirect_stderr(io.StringIO()):
+        args = argparse.Namespace(allowlist=[], bin_a="/bin/true", bin_b="/bin/true",
+                                  work=work, rt_prefix=work + "-rt", scratch_root=self.roots,
+                                  export_a="sql", export_b="sql", graphql_a=None, graphql_b=None,
+                                  verify_export=False, profile=True, path_parity=True)
+        self.assertEqual(parity.run([], None, 0, args, {}), 0)
+      self.assertEqual(sides[0].env()["CBM_WORKERS"], "1")
+      with patch.dict(os.environ, {"CBM_WORKERS": "2"}):
+        self.assertNotIn("CBM_WORKERS", sides[1].env())
+
+  def test_path_parity_checks_the_observed_worker_paths(self) -> None:
+    sides = [parity.Side(n, "/bin/true", os.path.join(self.tmp, n), self.tmp)
+             for n in ("a", "b")]
+    for side in sides:
+      os.makedirs(os.path.join(side.cache, "logs"))
+      with open(os.path.join(side.cache, "logs", ".worker-log-1"), "w",
+                encoding="utf-8") as f:
+        f.write("level=info msg=pipeline.mode mode=sequential files=62\n")
+    self.assertIn("side b expected parallel", parity.verify_worker_paths(sides) or "")
+    with open(os.path.join(sides[1].cache, "logs", ".worker-log-1"), "w",
+              encoding="utf-8") as f:
+      f.write("level=info msg=pipeline.mode mode=parallel workers=12 files=62\n")
+    self.assertIsNone(parity.verify_worker_paths(sides))
+
   def test_graphql_modes_are_reported_only_when_requested(self) -> None:
     for label, flags, requested in (
         ("default", [], None),

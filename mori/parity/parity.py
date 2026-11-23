@@ -29,7 +29,8 @@ CBM_RUNTIME_DIR (`<rt-prefix>-a`, `-b`; long paths break the Unix
 socket). Every directory the harness creates or deletes must sit inside a
 scratch root (`--scratch-root`, default /tmp and the system temp dir).
 Subprocesses get PATH, HOME, and those two variables. An explicit GraphQL
-mode adds the selected backend and profiling in that side only.
+mode adds the selected backend and profiling in that side only. Path
+parity pins side A to one worker and retains worker logs for both sides.
 """
 
 from __future__ import annotations
@@ -48,6 +49,7 @@ import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Literal
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -179,6 +181,7 @@ class Side:
   verify_export: bool = False
   graphql_mode: Literal["c", "rust"] | None = None
   profile: bool = False
+  workers: int | None = None
 
   def env(self) -> dict[str, str]:
     env = {
@@ -189,6 +192,8 @@ class Side:
     }
     if self.graphql_mode is not None:
       env["MORI_IMPL_GRAPHQL"] = self.graphql_mode
+    if self.workers is not None:
+      env["CBM_WORKERS"] = str(self.workers)
     if self.profile or self.graphql_mode is not None:
       env["CBM_PROFILE"] = "1"
     return env
@@ -695,6 +700,21 @@ def finish(results: list[RepoResult], l4: list[dict[str, Any]],
   return 1 if unlisted else 0
 
 
+def verify_worker_paths(sides: list[Side]) -> str | None:
+  for side, expected in zip(sides, ("sequential", "parallel")):
+    log_dir = Path(side.cache) / "logs"
+    observed = {
+      mode
+      for worker_log in log_dir.glob(".worker-log-*")
+      for mode in re.findall(r"msg=pipeline\.mode mode=(sequential|parallel)\b",
+                             worker_log.read_text(encoding="utf-8", errors="replace"))
+    }
+    if observed != {expected}:
+      reported = ", ".join(sorted(observed)) or "none"
+      return f"side {side.name} expected {expected} worker path, observed {reported}"
+  return None
+
+
 def run(repos: list[tuple[str, str]], call_list: list[dict[str, Any]] | None,
         dropped: int, a: argparse.Namespace, meta: dict[str, Any]) -> int:
   entries = allowlist.load_all(a.allowlist)
@@ -705,6 +725,9 @@ def run(repos: list[tuple[str, str]], call_list: list[dict[str, Any]] | None,
     side.verify_export = a.verify_export
     side.graphql_mode = graphql_mode
     side.profile = a.profile
+  if a.path_parity:
+    sides[0].workers = 1
+    meta = {**meta, "workers": {"a": 1, "b": "default"}}
   log(f"side a: {sides[0].bin}\nside b: {sides[1].bin}\nwork: {a.work}")
   requested = {s.name: s.graphql_mode for s in sides if s.graphql_mode is not None}
   if requested:
@@ -718,8 +741,10 @@ def run(repos: list[tuple[str, str]], call_list: list[dict[str, Any]] | None,
   for dir_, root in repos:
     log(f"repo {dir_} ({root})")
     try:
-      results.append(compare_repo(sides, dir_, root, entries,
-                                  a.timeout_retries))
+      result = compare_repo(sides, dir_, root, entries, a.timeout_retries)
+      if a.cmd == "ci" and a.path_parity and not result.error:
+        result.error = verify_worker_paths(sides)
+      results.append(result)
     except (sqlite3.Error, OSError, ValueError, KeyError, subprocess.TimeoutExpired) as e:
       log(f"  {dir_}: comparison failed: {e!r}")
       r = RepoResult(dir_, root)
@@ -893,7 +918,7 @@ def cmd_ci(a: argparse.Namespace) -> int:
                           a.scratch_root)
   base = a.work + "-fixtures"
   fresh_work_dir(base, a.scratch_root)
-  repos = fixtures.write_all(base)
+  repos = [fixtures.write_path_fixture(base)] if a.path_parity else fixtures.write_all(base)
   call_list, dropped = (None, 0) if a.skip_l4 else \
     calls_mod.load_calls(a.calls or CALLS_CI)
   rc = run(repos, call_list, dropped, a, {"mode": "fixtures"})
@@ -991,6 +1016,9 @@ def main(argv: list[str]) -> int:
                    "(repeatable)")
     p.add_argument("--calls")
     p.add_argument("--skip-l4", action="store_true")
+    p.add_argument("--path-parity", action="store_true",
+                   help="compare one worker on side a with defaults on side b; "
+                        "ci uses a fixture with more than 50 files")
     p.add_argument("--timeout-retries", type=int, default=4,
                    help="reindexes when files hit the parse timeout")
     if name == "ci":
@@ -1033,6 +1061,11 @@ def main(argv: list[str]) -> int:
   a = ap.parse_args(argv)
   if a.cmd in ("run", "ci") and a.verify_export and a.export_a == a.export_b == "sql":
     ap.error("--verify-export requires --export-a rust or --export-b rust")
+  if a.cmd in ("run", "ci") and a.path_parity:
+    if a.calls or (a.cmd == "ci" and a.corrupt):
+      ap.error("--path-parity compares graph rows without call replay")
+    a.profile = True
+    a.skip_l4 = True
   if getattr(a, "scratch_root", None) is None and a.cmd in ("run", "ci"):
     a.scratch_root = default_scratch_roots()
   base = None
