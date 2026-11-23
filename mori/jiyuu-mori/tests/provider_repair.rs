@@ -10,6 +10,7 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde_json::{Value, json};
@@ -145,6 +146,56 @@ impl Fixture {
             .map_err(|error| format!("{tool} {args}: {error}: {stdout}"))
     }
 
+    fn observe_provider_repairs(&self) {
+        let output = self
+            .command()
+            .env("MORI_OBSERVE_PROVIDER_REPAIR", "1")
+            .args(["daemon", "start"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+    }
+
+    fn expect_repair_candidate(
+        &self,
+        provider: &str,
+        client: &str,
+        count: usize,
+    ) {
+        let log_path = self.0.join("cache/logs/cbm-daemon.log");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let log = fs::read_to_string(&log_path).unwrap_or_default();
+            let candidates: Vec<_> = log
+                .lines()
+                .filter(|line| line.contains("cross_repo.repair_candidate"))
+                .collect();
+            if !candidates.is_empty() {
+                let [candidate] = candidates.as_slice() else {
+                    panic!("expected one candidate: {candidates:?}");
+                };
+                assert!(
+                    candidate.contains(&format!("provider={provider}")),
+                    "{candidate}"
+                );
+                assert!(
+                    candidate.contains(&format!("client={client}")),
+                    "{candidate}"
+                );
+                assert!(
+                    candidate.contains(&format!("targets={count}")),
+                    "{candidate}"
+                );
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "no repair candidate in {log_path:?}"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
     fn publication_id(&self, project: &str) -> Option<(u64, u64)> {
         // A source index publishes by replacing the serving database.
         // Link runs update its SQLite rows without replacing that file.
@@ -277,6 +328,7 @@ fn names(items: &[&str]) -> Vec<String> {
 #[test]
 fn published_provider_repair_preserves_other_links_without_client_sources() {
     let fixture = Fixture::new();
+    fixture.observe_provider_repairs();
     fixture.client(CLIENT, &["first", "second"]);
     fixture.write(
         CLIENT,
@@ -340,6 +392,7 @@ fn published_provider_repair_preserves_other_links_without_client_sources() {
     )
     .unwrap();
     let published = fixture.publish(FIRST).expect("provider-only publication");
+    fixture.expect_repair_candidate(FIRST, CLIENT, 2);
     let mut repairs = Repairs::default();
     repairs.notify(&published, fixture.saved_clients());
     repairs.notify(&published, fixture.saved_clients());

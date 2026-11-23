@@ -1980,6 +1980,65 @@ static bool cr_remember_peer(yyjson_mut_doc *peers, const char *name, cbm_store_
     return key && value && yyjson_mut_obj_add(yyjson_mut_doc_get_root(peers), key, value);
 }
 
+bool cbm_cross_repo_read_generation(const char *project, char *generation, size_t capacity) {
+    char path[CR_PATH_BUF];
+    cbm_store_t *store =
+        cr_db_path(project, path, sizeof(path)) ? cbm_store_open_path_query_nowait(path) : NULL;
+    bool ok = store && cbm_store_generation(store, generation, capacity) == CBM_STORE_OK;
+    cbm_store_close(store);
+    return ok;
+}
+
+static bool cr_stale_named_client(const char *client, const char *provider, const char *generation,
+                                  char ***targets, int *count) {
+    char path[CR_PATH_BUF];
+    cbm_store_t *store =
+        cr_db_path(client, path, sizeof(path)) ? cbm_store_open_path_query_nowait(path) : NULL;
+    if (!store || !cbm_store_read_batch_begin(store)) {
+        cbm_store_close(store);
+        return false;
+    }
+
+    *count = cr_read_targets(store, client, targets);
+    bool stale = false;
+    for (int i = 0; i < *count; i++) {
+        if (strcmp((*targets)[i], provider) == 0) {
+            yyjson_doc *peers = cr_read_peers(store, client);
+            const char *observed =
+                yyjson_get_str(yyjson_obj_get(yyjson_doc_get_root(peers), provider));
+            stale = !observed || strcmp(observed, generation) != 0;
+            yyjson_doc_free(peers);
+            break;
+        }
+    }
+    cbm_store_read_batch_end(store);
+    cbm_store_close(store);
+    return stale;
+}
+
+void cbm_cross_repo_visit_stale_clients(const char *provider, const char *generation,
+                                        cbm_cross_repo_client_visitor_t visitor, void *context,
+                                        const atomic_int *cancelled) {
+    if (!provider || !generation || !visitor) {
+        return;
+    }
+    cr_run_context_t run = {.cancelled = cancelled};
+    char **clients = NULL;
+    int client_count = collect_all_projects(&clients, &run, NULL);
+    for (int i = 0; i < client_count && !cr_cancel_requested(&run); i++) {
+        if (strcmp(clients[i], provider) == 0) {
+            continue;
+        }
+        char **targets = NULL;
+        int count = 0;
+        if (cr_stale_named_client(clients[i], provider, generation, &targets, &count)) {
+            visitor(context, clients[i], (const char *const *)targets, count);
+        }
+        free_project_list(targets, count);
+    }
+    free_project_list(clients, client_count);
+}
+
 static bool cr_peer_is_stale(const char *name, const char *observed) {
     if (!observed) {
         return true;
