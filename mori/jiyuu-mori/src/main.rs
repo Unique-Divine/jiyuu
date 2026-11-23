@@ -45,6 +45,9 @@ mod cli_output;
 mod initialize;
 
 #[cfg(any(feature = "c-backend", test))]
+mod ingest_trace;
+
+#[cfg(any(feature = "c-backend", test))]
 mod mcp_dispatch;
 #[cfg(any(feature = "c-backend", test))]
 mod project_page;

@@ -952,6 +952,132 @@ fn index_fixture(
 }
 
 #[test]
+fn trace_ingestion_matches_native_replies_and_stored_observations() {
+    use serde_json::{Value, json};
+
+    let fixture = Scratch::new("trace-input");
+    let repo = fixture.0.join("repo");
+    fs::create_dir(&repo).unwrap();
+    fs::write(
+        repo.join("app.py"),
+        "def caller():\n    return callee()\n\ndef callee():\n    return 1\n",
+    )
+    .unwrap();
+
+    let exercise = |bin: &Path, side: &str| {
+        let scratch = Scratch::new(side);
+        let index = index_fixture(bin, &scratch, repo.to_str().unwrap());
+        let project = index["project"].as_str().unwrap();
+        let db = Connection::open_with_flags(
+            scratch.0.join("cache").join(format!("{project}.db")),
+            OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let symbol_name = |name: &str| {
+            db.query_row(
+                "SELECT qualified_name FROM nodes WHERE label = 'Function' AND name = ?1",
+                [name],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap()
+        };
+        let caller = symbol_name("caller");
+        let callee = symbol_name("callee");
+
+        let start = command_in(bin, &scratch)
+            .env("CBM_LOG_LEVEL", "debug")
+            .args(["daemon", "start"])
+            .output()
+            .unwrap();
+        assert!(start.status.success(), "{start:?}");
+
+        let arguments = json!({
+            "project": project,
+            "traces": [
+                {"path": [&caller, &callee, &caller], "count": 3},
+                {"caller": &caller, "callee": &callee, "count": -5},
+                {"caller": &caller, "callee": &callee, "count": "8", "path": null},
+                {"path": [&caller, "missing", &callee]},
+                {"path": [&caller], "caller": &caller, "callee": &callee},
+                {"path": [&caller, false]},
+                {"path": vec![&caller; 257]},
+            ],
+        });
+        let ingest = run_in(
+            bin,
+            &scratch,
+            &["cli", "--quiet", "ingest_traces", &arguments.to_string()],
+        );
+        let stop = run_in(bin, &scratch, &["daemon", "stop"]);
+        assert!(stop.status.success(), "{stop:?}");
+        assert!(ingest.status.success(), "{ingest:?}");
+
+        let reply: Value = serde_json::from_slice(&ingest.stdout).unwrap();
+        let rows = |sql: &str| {
+            let mut query = db.prepare(sql).unwrap();
+            query
+                .query_map([], |row| row.get::<_, String>(0))
+                .unwrap()
+                .map(|row| serde_json::from_str::<Value>(&row.unwrap()).unwrap())
+                .collect::<Vec<_>>()
+        };
+        let pairs = rows(
+            "SELECT json_array(caller_qn, callee_qn, label, count) FROM observed_calls
+             ORDER BY caller_qn, callee_qn",
+        );
+        let paths = rows(
+            "SELECT json_array(json(path_json), label, count) FROM observed_paths
+             ORDER BY path_json",
+        );
+        let log =
+            fs::read_to_string(scratch.0.join("cache/logs/cbm-daemon.log"))
+                .unwrap();
+        let used_rust = log.lines().any(|line| {
+            line.contains("ingest_traces.normalize")
+                && line.contains("backend=rust")
+        });
+        assert_eq!(
+            reply,
+            json!({
+                "status": "stored",
+                "label": "unlabeled",
+                "pairs_stored": 4,
+                "paths_stored": 2,
+                "pairs_unmatched": 2,
+                "unmatched_sample": ["missing"],
+                "malformed": 3,
+                "pair_total": 2,
+            })
+        );
+        assert_eq!(
+            pairs,
+            [
+                json!([&callee, &caller, "unlabeled", 3]),
+                json!([&caller, &callee, "unlabeled", 5]),
+            ],
+        );
+        assert_eq!(
+            paths,
+            [
+                json!([[&caller, &callee, &caller], "unlabeled", 3]),
+                json!([null, "unlabeled", 1]),
+            ],
+        );
+        (reply, pairs, paths, used_rust)
+    };
+
+    let (native_reply, native_pairs, native_paths, native_rust) =
+        exercise(&c_binary(), "trace-c");
+    let (rust_reply, rust_pairs, rust_paths, rust_used) =
+        exercise(Path::new(MORI), "trace-rust");
+    assert_eq!(
+        (native_reply, native_pairs, native_paths),
+        (rust_reply, rust_pairs, rust_paths),
+    );
+    assert!(!native_rust && rust_used);
+}
+
+#[test]
 fn scalar_read_flags_match_json_and_c_on_one_cache() {
     let scratch = Scratch::new("scalar-read");
     let repo = scratch.0.join("repo");
