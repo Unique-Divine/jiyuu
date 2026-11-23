@@ -39,3 +39,6 @@ mod staged_graph;
 
 #[cfg(all(feature = "c-backend", not(test), unix))]
 pub use staged_graph::native::register as mori_register_staged_graph_writer;
+
+#[cfg(all(feature = "c-backend", test))]
+mod index_manifest;
