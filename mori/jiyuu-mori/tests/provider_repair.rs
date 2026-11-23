@@ -2,15 +2,17 @@
 #![cfg(all(feature = "c-backend", unix))]
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{self, DirBuilder};
+use std::fs::{self, DirBuilder, File};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 const CLIENT: &str = "client";
 const FIRST: &str = "primary";
@@ -128,6 +130,21 @@ impl Fixture {
     fn stop_daemon(&self) {
         let output = self.command().args(["daemon", "stop"]).output().unwrap();
         assert!(output.status.success(), "{output:?}");
+    }
+
+    fn hold_shared_project_set_lease(&self) -> File {
+        // Source workers can share this lease. The wildcard mutation needs
+        // exclusive ownership of the same native lock.
+        let hash = Sha256::digest(b"cbm-project-set-v1");
+        let lock = format!("cbm-{hash:x}.rw");
+        let path = fs::read_dir(self.root.join("rt"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path().join(&lock))
+            .find(|path| path.is_file())
+            .expect("project-set lock");
+        let file = File::open(path).unwrap();
+        file.lock_shared().unwrap();
+        file
     }
 
     fn log(&self) -> String {
@@ -518,6 +535,73 @@ fn opted_in_daemon_retries_a_client_with_pending_reverse_links() {
             (SECOND.to_owned(), "schema.graphqls".to_owned()),
         ])
     );
+}
+
+#[test]
+fn blocked_wildcard_retries_the_first_provider_after_another_publishes() {
+    let fixture = Fixture::new();
+    fixture.start_daemon(Some("MORI_PROVIDER_REPAIR"), None);
+    fixture.client(CLIENT, &["first"]);
+    fixture.write(FIRST, "schema.graphqls", "type Query { first: String }\n");
+    fixture.write(SECOND, "schema.graphqls", "type Query { second: String }\n");
+    for project in [CLIENT, FIRST, SECOND] {
+        fixture.publish(project);
+        fixture.wait_for_log(&[
+            "cross_repo.repair_scan_complete",
+            &format!("provider={project}"),
+        ]);
+    }
+    fixture.link(CLIENT, &names(&[FIRST])).unwrap();
+    let initial_links = fixture.forward_targets(CLIENT);
+    let callers = fixture.callers(FIRST, "schema.graphqls");
+    assert_eq!(callers.len(), 1);
+    let generation = fixture.generation(CLIENT);
+    fs::rename(fixture.repo(CLIENT), fixture.root.join("client-offline"))
+        .unwrap();
+
+    std::thread::scope(|scope| {
+        let lease = fixture.hold_shared_project_set_lease();
+        for project in [FIRST, SECOND] {
+            fs::rename(
+                fixture.repo(project).join("schema.graphqls"),
+                fixture.repo(project).join("moved.graphqls"),
+            )
+            .unwrap();
+        }
+        let (sent, received) = mpsc::channel();
+        let fixture = &fixture;
+        scope.spawn(move || {
+            fixture.publish(FIRST);
+            fixture.wait_for_log(&[
+                "cross_repo.repair_deferred",
+                "provider=primary",
+                "reason=lease",
+            ]);
+            fixture.publish(SECOND);
+            sent.send(()).unwrap();
+        });
+        received.recv_timeout(Duration::from_secs(25)).expect(
+            "both index replies arrive while the wildcard lease is blocked",
+        );
+        assert_eq!(fixture.cross_status(CLIENT)["status"], "stale");
+        assert_eq!(fixture.forward_targets(CLIENT), initial_links);
+        drop(lease);
+    });
+
+    fixture.wait_for_log(&[
+        "cross_repo.repair_result",
+        "provider=primary",
+        "client=client",
+        "targets=1",
+        "status=repaired",
+    ]);
+    assert_eq!(fixture.cross_status(CLIENT)["status"], "ran");
+    assert_eq!(fixture.generation(CLIENT), generation);
+    assert_eq!(
+        fixture.forward_targets(CLIENT),
+        BTreeMap::from([(FIRST.to_owned(), "moved.graphqls".to_owned())])
+    );
+    assert_eq!(fixture.callers(FIRST, "moved.graphqls"), callers);
 }
 
 #[test]
