@@ -656,6 +656,12 @@ fn linear_cypher_matches_the_native_result_ceiling() {
         String::from_utf8_lossy(&output.stderr)
             .contains("result exceeded 100k rows")
     );
+
+    // Reading the next start node would fail in Rust. At the ceiling the
+    // result is already known, so the evaluator must stop before that read.
+    let tail = node(&db, CLIENT, "Caller", "tail", "tail", "caller.py");
+    db.execute("UPDATE nodes SET properties = X'FF' WHERE id = ?", [tail])
+        .expect("add a start node with unreadable properties");
     for cypher in [&at_ceiling, MATCH] {
         let query = cypher_linear::classify(cypher).expect("classify query");
         assert!(matches!(
