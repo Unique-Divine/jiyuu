@@ -253,6 +253,28 @@ int cbm_discover_ex2(const char *repo_path, const cbm_discover_opts_t *opts, cbm
                      cbm_ignored_file_t **ignored_out, int *ignored_count_out,
                      int *ignored_total_out);
 
+/* Ordinary discovery can delegate directory iteration and child scheduling.
+ * The callback borrows the walk and root for its duration. Prepare each frame
+ * before reading its directory, pass each basename to walk_entry, and free
+ * every non-null child it returns. A stopped walk or a false callback result
+ * discards partial output through the usual discovery cleanup. */
+typedef struct cbm_discover_walk cbm_discover_walk_t;
+typedef struct cbm_discover_frame cbm_discover_frame_t;
+typedef bool (*cbm_discover_walk_fn)(cbm_discover_walk_t *walk, cbm_discover_frame_t *root);
+
+bool cbm_discover_walk_prepare(cbm_discover_walk_t *walk, cbm_discover_frame_t *frame);
+const char *cbm_discover_frame_path(const cbm_discover_frame_t *frame);
+cbm_discover_frame_t *cbm_discover_walk_entry(cbm_discover_walk_t *walk,
+                                              const cbm_discover_frame_t *frame, const char *name);
+void cbm_discover_frame_free(cbm_discover_frame_t *frame);
+bool cbm_discover_walk_stopped(cbm_discover_walk_t *walk);
+
+int cbm_discover_ex2_with_walk(const char *repo_path, const cbm_discover_opts_t *opts,
+                               cbm_file_info_t **out, int *count, char ***excluded_out,
+                               int *excluded_count_out, cbm_ignored_file_t **ignored_out,
+                               int *ignored_count_out, int *ignored_total_out,
+                               cbm_discover_walk_fn walker);
+
 /* Free an array of file info results. NULL-safe. */
 void cbm_discover_free(cbm_file_info_t *files, int count);
 
