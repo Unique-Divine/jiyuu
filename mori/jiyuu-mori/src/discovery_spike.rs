@@ -706,6 +706,7 @@ fn matches_c_when_a_child_cannot_be_read_or_statted() {
         .unwrap();
     let read_error = fs::read_dir(&blocked_read).err();
     let stat_error = fs::symlink_metadata(blocked_stat.join("hidden.rs")).err();
+    let blocked_root = Walk::run(&blocked_read, Mode::Full, 0);
     let snapshots = Mode::ALL.map(|mode| {
         let native = NativeWalk::run(&scratch.0, mode, 0).snapshot();
         (mode, native, Walk::run(&scratch.0, mode, 0))
@@ -721,6 +722,10 @@ fn matches_c_when_a_child_cannot_be_read_or_statted() {
     }
     assert_eq!(read_error.unwrap().kind(), io::ErrorKind::PermissionDenied);
     assert_eq!(stat_error.unwrap().kind(), io::ErrorKind::PermissionDenied);
+    assert!(matches!(
+        blocked_root,
+        Err(error) if error.kind() == io::ErrorKind::PermissionDenied
+    ));
     for (mode, mut native, rust) in snapshots {
         assert_eq!(native.files.len(), 1, "{mode:?}");
         assert_eq!(native.files[0].path.0, b"src/main.rs");
