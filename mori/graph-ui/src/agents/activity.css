@@ -8,7 +8,7 @@
 .cbm-activity button:hover { border-color: var(--atlas-phosphor-mute); }
 .cbm-activity-connection { display: flex; align-items: center; gap: 12px; }
 .cbm-activity-connection > span { color: var(--atlas-dim); font-size: 12px; }
-.cbm-activity-connection > span[data-state=connected] { color: var(--atlas-phosphor); }
+.cbm-activity-connection > span[data-state=connected] { color: var(--atlas-success); }
 .cbm-activity-metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 20px; }
 .cbm-activity-metrics > div { background: var(--atlas-panel); border: 1px solid var(--atlas-line); border-radius: 8px; padding: 16px 20px; display: flex; flex-direction: column; }
 .cbm-activity-metrics strong { font-size: 24px; font-weight: 500; }

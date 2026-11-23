@@ -10,8 +10,8 @@ import type { GalaxyArc, GalaxyModel } from './repo-galaxy-model';
 export type GalaxyTheme = 'light' | 'dark';
 
 export const GALAXY_PALETTE: Record<GalaxyTheme, { background: string; sphere: string; sphereMissing: string; selected: string; light: string }> = {
-    dark: { background: '#0b1311', sphere: '#8fc0aa', sphereMissing: '#5d6b66', selected: '#effff8', light: '#dcfff3' },
-    light: { background: '#f5f7f6', sphere: '#3f7d66', sphereMissing: '#a3aca8', selected: '#0d2b21', light: '#ffffff' },
+    dark: { background: '#101720', sphere: '#91c6df', sphereMissing: '#627384', selected: '#eaf9ff', light: '#e0f5ff' },
+    light: { background: '#f3f8fc', sphere: '#2f7193', sphereMissing: '#9eafbd', selected: '#123b52', light: '#ffffff' },
 };
 
 /** Edge hues are tuned for a dark ground; darken them on a light one. */

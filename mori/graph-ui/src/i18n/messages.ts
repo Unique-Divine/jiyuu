@@ -69,7 +69,6 @@ export const messages = {
     /** Die Kopfzeile und die Flaechen, die zu keinem Panel gehoeren. */
     app: {
         brand: 'MORI GRAPH',
-        releaseLabel: 'Beta',
         /** Steht in der Tab-Leiste und im Breadcrumb, wenn nichts offen ist. */
         noFileOpen: 'no file open',
         /** Der Name, den eine Oberflaeche ohne Projekt traegt. */
