@@ -343,6 +343,10 @@ typedef bool (*cbm_rank_search_reader_fn)(
     bool *window_saturated, void *context, cbm_rank_search_row_fn emit);
 void cbm_mcp_set_rank_search_reader(cbm_rank_search_reader_fn reader);
 
+typedef bool (*cbm_mcp_search_code_degrees_fn)(struct sqlite3 *db, const int64_t *node_ids,
+                                               int count, int *in_degrees, int *out_degrees);
+void cbm_mcp_set_search_code_degrees_reader(cbm_mcp_search_code_degrees_fn reader);
+
 typedef struct {
     int limit;
     int offset;

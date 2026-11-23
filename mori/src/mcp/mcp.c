@@ -16134,6 +16134,26 @@ static int search_result_cmp(const void *a, const void *b) {
     return 0;
 }
 
+static cbm_mcp_search_code_degrees_fn search_code_degrees_reader;
+
+void cbm_mcp_set_search_code_degrees_reader(cbm_mcp_search_code_degrees_fn reader) {
+    search_code_degrees_reader = reader;
+}
+
+static bool search_code_read_degrees(cbm_store_t *store, const int64_t *ids, int count,
+                                     int *in_degrees, int *out_degrees) {
+    /* The C degree query fits at most 2047 bindings in its placeholder
+     * buffer. Keep larger requests on the same implementation during parity. */
+    const int native_batch_limit = CBM_SZ_4K / 2 - 1;
+    if (search_code_degrees_reader && count <= native_batch_limit &&
+        search_code_degrees_reader(cbm_store_get_db(store), ids, count, in_degrees, out_degrees)) {
+        cbm_log_debug("search_code.degrees", "backend", "rust");
+        return true;
+    }
+    return cbm_store_batch_count_degrees(store, ids, count, "CALLS", in_degrees, out_degrees) ==
+           CBM_STORE_OK;
+}
+
 #define SEARCH_CODE_PATH_HINT                                                            \
     "no results; a file_pattern with '/' must match the whole repo-relative path (e.g. " \
     "src/**/*.c); to scope by folder you can also use path_filter (regex on the "        \
@@ -19001,8 +19021,7 @@ static char *handle_search_code(cbm_mcp_server_t *srv, const char *args) {
         for (int j = 0; j < sr_count; j++) {
             ids[j] = sr[j].node_id;
         }
-        if (cbm_store_batch_count_degrees(store, ids, sr_count, "CALLS", in_degs, out_degs) ==
-            CBM_STORE_OK) {
+        if (search_code_read_degrees(store, ids, sr_count, in_degs, out_degs)) {
             for (int j = 0; j < sr_count; j++) {
                 sr[j].in_degree = in_degs[j];
                 sr[j].out_degree = out_degs[j];
