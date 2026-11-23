@@ -17,7 +17,10 @@ const FIRST: &str = "primary";
 const SECOND: &str = "secondary";
 const UNRELATED: &str = "unrelated";
 
-struct Fixture(PathBuf);
+struct Fixture {
+    root: PathBuf,
+    cli_repair_opt_in: bool,
+}
 
 impl Fixture {
     fn new() -> Self {
@@ -29,21 +32,24 @@ impl Fixture {
         ));
         let mut builder = DirBuilder::new();
         builder.mode(0o700).create(&root).expect("create fixture");
-        let fixture = Self(root);
+        let fixture = Self {
+            root,
+            cli_repair_opt_in: false,
+        };
         for dir in ["cache", "rt"] {
             builder
-                .create(fixture.0.join(dir))
+                .create(fixture.root.join(dir))
                 .expect("create fixture directory");
         }
         fixture
     }
 
     fn repo(&self, project: &str) -> PathBuf {
-        self.0.join("inputs").join(project)
+        self.root.join("inputs").join(project)
     }
 
     fn db_path(&self, project: &str) -> PathBuf {
-        self.0.join("cache").join(format!("{project}.db"))
+        self.root.join("cache").join(format!("{project}.db"))
     }
 
     fn write(&self, project: &str, path: &str, source: &str) {
@@ -75,8 +81,11 @@ impl Fixture {
             .env_clear()
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
             .env("HOME", std::env::var_os("HOME").unwrap_or_default())
-            .env("CBM_CACHE_DIR", self.0.join("cache"))
-            .env("CBM_RUNTIME_DIR", self.0.join("rt"));
+            .env("CBM_CACHE_DIR", self.root.join("cache"))
+            .env("CBM_RUNTIME_DIR", self.root.join("rt"));
+        if self.cli_repair_opt_in {
+            command.env("MORI_PROVIDER_REPAIR", "1");
+        }
         command
     }
 
@@ -97,25 +106,32 @@ impl Fixture {
             .map_err(|error| format!("{tool} {args}: {error}: {stdout}"))
     }
 
-    fn start_watcher(&self, project: &str) {
-        let watch = self.0.join("watch.json");
-        fs::write(
-            &watch,
-            json!([{"project": project, "root": self.repo(project)}])
-                .to_string(),
-        )
-        .unwrap();
-        let output = self
-            .command()
-            .env("MORI_NAMED_WATCH_FILE", watch)
-            .args(["daemon", "start"])
-            .output()
+    fn start_daemon(&self, selector: Option<&str>, watch_project: Option<&str>) {
+        let mut command = self.command();
+        if let Some(selector) = selector {
+            command.env(selector, "1");
+        }
+        if let Some(project) = watch_project {
+            let watch = self.root.join("watch.json");
+            fs::write(
+                &watch,
+                json!([{"project": project, "root": self.repo(project)}])
+                    .to_string(),
+            )
             .unwrap();
+            command.env("MORI_NAMED_WATCH_FILE", watch);
+        }
+        let output = command.args(["daemon", "start"]).output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+    }
+
+    fn stop_daemon(&self) {
+        let output = self.command().args(["daemon", "stop"]).output().unwrap();
         assert!(output.status.success(), "{output:?}");
     }
 
     fn log(&self) -> String {
-        fs::read_to_string(self.0.join("cache/logs/cbm-daemon.log"))
+        fs::read_to_string(self.root.join("cache/logs/cbm-daemon.log"))
             .unwrap_or_default()
     }
 
@@ -274,7 +290,7 @@ impl Fixture {
 impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = self.command().args(["daemon", "stop"]).output();
-        let _ = fs::remove_dir_all(&self.0);
+        let _ = fs::remove_dir_all(&self.root);
     }
 }
 
@@ -296,7 +312,7 @@ fn published_provider_repair_preserves_other_links_without_client_sources() {
     fixture.write(SECOND, "schema.graphqls", "type Query { second: String }\n");
     fixture.client(UNRELATED, &["second"]);
 
-    fixture.start_watcher(FIRST);
+    fixture.start_daemon(Some("MORI_PROVIDER_REPAIR"), Some(FIRST));
     for project in [CLIENT, SECOND, UNRELATED] {
         fixture.publish(project);
     }
@@ -348,13 +364,13 @@ fn published_provider_repair_preserves_other_links_without_client_sources() {
 
     // Withhold the client source and one of its two published provider graphs.
     let client_source = fixture.repo(CLIENT);
-    fs::rename(&client_source, fixture.0.join("client-offline")).unwrap();
+    fs::rename(&client_source, fixture.root.join("client-offline")).unwrap();
     let client_id = fixture.publication_id(CLIENT);
     let client_generation = fixture.generation(CLIENT);
     let original_provider_generation = fixture.generation(FIRST);
 
     let second_graph = fixture.db_path(SECOND);
-    let saved_graph = fixture.0.join("secondary-offline");
+    let saved_graph = fixture.root.join("secondary-offline");
     fs::rename(&second_graph, &saved_graph).unwrap();
     fs::rename(
         fixture.repo(FIRST).join("schema.graphqls"),
@@ -433,8 +449,9 @@ fn published_provider_repair_preserves_other_links_without_client_sources() {
 }
 
 #[test]
-fn one_shot_publication_retries_a_client_with_pending_reverse_links() {
+fn opted_in_daemon_retries_a_client_with_pending_reverse_links() {
     let fixture = Fixture::new();
+    fixture.start_daemon(Some("MORI_PROVIDER_REPAIR"), None);
     fixture.client(CLIENT, &["first", "second"]);
     fixture.write(FIRST, "schema.graphqls", "type Query { first: String }\n");
     fixture.write(SECOND, "schema.graphqls", "type Query { second: String }\n");
@@ -446,12 +463,17 @@ fn one_shot_publication_retries_a_client_with_pending_reverse_links() {
 
     // A normal source publication records reverse work when its saved provider
     // is unavailable. Hold that marker through a failed automatic repair.
-    fs::rename(fixture.db_path(SECOND), fixture.0.join("secondary-offline"))
-        .unwrap();
+    fs::rename(
+        fixture.db_path(SECOND),
+        fixture.root.join("secondary-offline"),
+    )
+    .unwrap();
     fixture.client(CLIENT, &["second", "first"]);
     fixture.publish(CLIENT);
+    fixture.wait_for_log(&["cross_repo.reverse_pending", "project=client"]);
     assert_eq!(fixture.cross_status(CLIENT)["reverse_pending"], true);
-    fs::rename(fixture.repo(CLIENT), fixture.0.join("client-offline")).unwrap();
+    fs::rename(fixture.repo(CLIENT), fixture.root.join("client-offline"))
+        .unwrap();
     let generation = fixture.generation(CLIENT);
 
     fs::rename(
@@ -478,6 +500,12 @@ fn one_shot_publication_retries_a_client_with_pending_reverse_links() {
 
     // The return of the missing provider supplies the next notification.
     fixture.publish(SECOND);
+    fixture.wait_for_log(&[
+        "cross_repo.repair_result",
+        "provider=secondary",
+        "client=client",
+        "status=repaired",
+    ]);
     let repaired = fixture.cross_status(CLIENT);
     assert_eq!(repaired["status"], "ran");
     assert!(repaired["reverse_pending"].is_null());
@@ -490,4 +518,70 @@ fn one_shot_publication_retries_a_client_with_pending_reverse_links() {
             (SECOND.to_owned(), "schema.graphqls".to_owned()),
         ])
     );
+}
+
+#[test]
+fn provider_repair_is_off_by_default_and_observation_only_logs_candidates() {
+    let fixture = Fixture::new();
+    fixture.start_daemon(None, None);
+    fixture.client(CLIENT, &["first"]);
+    fixture.write(FIRST, "schema.graphqls", "type Query { first: String }\n");
+    for project in [CLIENT, FIRST] {
+        fixture.publish(project);
+    }
+    fixture.link(CLIENT, &names(&[FIRST])).unwrap();
+    let links = fixture.forward_targets(CLIENT);
+    let generation = fixture.generation(CLIENT);
+
+    fs::rename(
+        fixture.repo(FIRST).join("schema.graphqls"),
+        fixture.repo(FIRST).join("intermediate.graphqls"),
+    )
+    .unwrap();
+    fixture.publish(FIRST);
+    assert_eq!(fixture.cross_status(CLIENT)["status"], "stale");
+    assert_eq!(fixture.forward_targets(CLIENT), links);
+    assert!(!fixture.log().contains("cross_repo.repair_scan_complete"));
+    fixture.stop_daemon();
+
+    fixture.start_daemon(Some("MORI_OBSERVE_PROVIDER_REPAIR"), None);
+    fs::rename(
+        fixture.repo(FIRST).join("intermediate.graphqls"),
+        fixture.repo(FIRST).join("moved.graphqls"),
+    )
+    .unwrap();
+    fixture.publish(FIRST);
+    fixture
+        .wait_for_log(&["cross_repo.repair_scan_complete", "provider=primary"]);
+    let log = fixture.log();
+    assert!(log.lines().any(|line| {
+        line.contains("cross_repo.repair_candidate")
+            && line.contains("provider=primary client=client targets=1")
+    }));
+    assert!(!log.contains("cross_repo.repair_result"), "{log}");
+    assert_eq!(fixture.cross_status(CLIENT)["status"], "stale");
+    assert_eq!(fixture.forward_targets(CLIENT), links);
+    assert_eq!(fixture.generation(CLIENT), generation);
+}
+
+#[test]
+fn provider_repair_opt_in_does_not_apply_to_a_one_shot_daemon() {
+    let mut fixture = Fixture::new();
+    fixture.cli_repair_opt_in = true;
+    fixture.client(CLIENT, &["first"]);
+    fixture.write(FIRST, "schema.graphqls", "type Query { first: String }\n");
+    for project in [CLIENT, FIRST] {
+        fixture.publish(project);
+    }
+    fixture.link(CLIENT, &names(&[FIRST])).unwrap();
+    let links = fixture.forward_targets(CLIENT);
+    fs::rename(
+        fixture.repo(FIRST).join("schema.graphqls"),
+        fixture.repo(FIRST).join("moved.graphqls"),
+    )
+    .unwrap();
+    fixture.publish(FIRST);
+    assert_eq!(fixture.cross_status(CLIENT)["status"], "stale");
+    assert_eq!(fixture.forward_targets(CLIENT), links);
+    assert!(!fixture.log().contains("cross_repo.repair_scan_complete"));
 }
