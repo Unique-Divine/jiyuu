@@ -428,6 +428,11 @@ typedef cbm_mcp_snippet_window_t (*cbm_mcp_snippet_window_planner_fn)(
 /* Register before request threads start. */
 void cbm_mcp_set_snippet_window_planner(cbm_mcp_snippet_window_planner_fn planner);
 
+typedef bool (*cbm_mcp_ingest_trace_normalizer_fn)(const char *const *hops, size_t hop_count,
+                                                   int64_t *count);
+/* Register before request threads start. */
+void cbm_mcp_set_ingest_trace_normalizer(cbm_mcp_ingest_trace_normalizer_fn normalize);
+
 /* ── Supervised background index (RSS isolation, #832) ────────── */
 
 /* #1300: the explicit error response for a worker that exited cleanly without

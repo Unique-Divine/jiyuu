@@ -22346,6 +22346,30 @@ enum {
     INGEST_EVICT_MAX_ROUNDS = 32, /* runaway guard for the eviction loop */
 };
 
+static cbm_mcp_ingest_trace_normalizer_fn ingest_trace_normalizer;
+
+void cbm_mcp_set_ingest_trace_normalizer(cbm_mcp_ingest_trace_normalizer_fn normalize) {
+    ingest_trace_normalizer = normalize;
+}
+
+static bool normalize_ingest_trace(const char *const *hops, size_t hop_count, int64_t *count) {
+    if (ingest_trace_normalizer) {
+        return ingest_trace_normalizer(hops, hop_count, count);
+    }
+    if (hop_count < 2 || hop_count > INGEST_PATH_MAX) {
+        return false;
+    }
+    for (size_t h = 0; h < hop_count; h++) {
+        if (!hops[h] || !hops[h][0]) {
+            return false;
+        }
+    }
+    if (*count <= 0) {
+        *count = 1;
+    }
+    return true;
+}
+
 /* Observed runtime calls: paths of qualified names (adjacent elements are
  * caller→callee) or bare {caller, callee} pairs — stored qn-keyed in
  * observed_calls/observed_paths (reindex-proof), per run label. The
@@ -22420,43 +22444,36 @@ static char *handle_ingest_traces(cbm_mcp_server_t *srv, const char *args) {
     int unmatched_sample_count = 0;
     (void)sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL);
 
+    bool normalized_in_rust = false;
     size_t ti, tmax;
     yyjson_val *trace;
     yyjson_arr_foreach(traces, ti, tmax, trace) {
         const char *hops[INGEST_PATH_MAX];
-        size_t hop_count = 0;
-        long long count = 1;
+        size_t hop_count = 2;
         yyjson_val *count_val = yyjson_obj_get(trace, "count");
-        if (yyjson_is_int(count_val) && yyjson_get_int(count_val) > 0)
-            count = yyjson_get_int(count_val);
+        int64_t count = yyjson_is_int(count_val) ? yyjson_get_int(count_val) : 0;
 
         yyjson_val *path = yyjson_obj_get(trace, "path");
         if (path && yyjson_is_arr(path)) {
+            hop_count = yyjson_arr_size(path);
+            if (hop_count > INGEST_PATH_MAX) {
+                malformed++;
+                continue;
+            }
             size_t hi, hmax;
             yyjson_val *hop;
-            bool ok = yyjson_arr_size(path) >= 2 && yyjson_arr_size(path) <= INGEST_PATH_MAX;
             yyjson_arr_foreach(path, hi, hmax, hop) {
-                const char *qn = yyjson_get_str(hop);
-                if (!qn || !qn[0] || hop_count >= INGEST_PATH_MAX) {
-                    ok = false;
-                    break;
-                }
-                hops[hop_count++] = qn;
-            }
-            if (!ok) {
-                malformed++;
-                continue;
+                hops[hi] = yyjson_get_str(hop);
             }
         } else {
-            const char *caller = yyjson_get_str(yyjson_obj_get(trace, "caller"));
-            const char *callee = yyjson_get_str(yyjson_obj_get(trace, "callee"));
-            if (!caller || !caller[0] || !callee || !callee[0]) {
-                malformed++;
-                continue;
-            }
-            hops[0] = caller;
-            hops[1] = callee;
-            hop_count = 2;
+            hops[0] = yyjson_get_str(yyjson_obj_get(trace, "caller"));
+            hops[1] = yyjson_get_str(yyjson_obj_get(trace, "callee"));
+        }
+        bool valid = normalize_ingest_trace(hops, hop_count, &count);
+        normalized_in_rust = normalized_in_rust || ingest_trace_normalizer != NULL;
+        if (!valid) {
+            malformed++;
+            continue;
         }
 
         /* Resolve every hop before storing anything from this trace: a
@@ -22498,6 +22515,9 @@ static char *handle_ingest_traces(cbm_mcp_server_t *srv, const char *args) {
                 cbm_free(CBM_MEM_CLASS_OTHER, path_json);
             }
         }
+    }
+    if (normalized_in_rust) {
+        cbm_log_debug("ingest_traces.normalize", "backend", "rust");
     }
     sqlite3_finalize(exists);
     (void)sqlite3_exec(db, "COMMIT", NULL, NULL, NULL);
