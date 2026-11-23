@@ -1,11 +1,13 @@
 #include "git/git_context.h"
 
+#include "foundation/compat.h"
 #include "foundation/compat_fs.h"
 #include "foundation/constants.h"
 #include "foundation/log.h"
 #include "foundation/mem_core.h"
 #include "foundation/platform.h"
 #include "foundation/str_util.h"
+#include "foundation/subprocess.h"
 
 #include <ctype.h>
 #include <stdarg.h>
@@ -56,6 +58,77 @@ static bool git_validate_repo_path(const char *repo_path) {
     return cbm_validate_shell_path_arg(repo_path);
 }
 
+#ifndef _WIN32
+static CBM_TLS bool (*capture_cancelled)(void *);
+static CBM_TLS void *capture_cancel_context;
+
+void cbm_git_context_set_capture_cancel(bool (*cancelled)(void *), void *context) {
+    capture_cancelled = cancelled;
+    capture_cancel_context = context;
+}
+
+static FILE *git_capture_supervised(const char *repo_path, const char *git_args,
+                                    int64_t output_limit) {
+    if (capture_cancelled(capture_cancel_context))
+        return NULL;
+
+    /* git_args is a fixed list of Git words from the callers below. */
+    char args[GIT_CMD_MAX];
+    int length = snprintf(args, sizeof(args), "%s", git_args);
+    if (length < 0 || (size_t)length >= sizeof(args))
+        return NULL;
+    const char *argv[10] = {"git", "-C", repo_path};
+    char *save = NULL;
+    size_t i = 3;
+    for (char *word = strtok_r(args, " ", &save); word; word = strtok_r(NULL, " ", &save)) {
+        if (i == sizeof(argv) / sizeof(argv[0]) - 1)
+            return NULL;
+        argv[i++] = word;
+    }
+
+    char path[CBM_SZ_4K];
+    length = snprintf(path, sizeof(path), "%s/mori-git-capture-XXXXXX", cbm_tmpdir());
+    if (length < 0 || (size_t)length >= sizeof(path))
+        return NULL;
+    int fd = cbm_mkstemp(path);
+    if (fd < 0)
+        return NULL;
+    (void)close(fd);
+    const char *const env[] = {"GIT_OPTIONAL_LOCKS=0", "GIT_NO_LAZY_FETCH=1",
+                               "GIT_ALLOW_PROTOCOL=", "GIT_TERMINAL_PROMPT=0", NULL};
+    cbm_proc_opts_t options = {.bin = "git",
+                               .argv = argv,
+                               .env_overrides = env,
+                               .stdout_file = path,
+                               .strip_git_repo_env = true,
+                               .cancel_grace_ms = 100};
+    cbm_subprocess_t *process = NULL;
+    FILE *fp = NULL;
+    if (cbm_subprocess_spawn(&options, &process) == 0) {
+        cbm_proc_result_t result = {0};
+        uint64_t deadline = cbm_now_ms() + 2000;
+        cbm_proc_poll_t poll;
+        while ((poll = cbm_subprocess_poll(process, &result)) == CBM_PROC_POLL_RUNNING) {
+            if (capture_cancelled(capture_cancel_context) || cbm_now_ms() >= deadline ||
+                cbm_file_size(path) > output_limit) {
+                (void)cbm_subprocess_request_cancel(process);
+            }
+            cbm_usleep(5000);
+        }
+        int64_t size = cbm_file_size(path);
+        if (poll == CBM_PROC_POLL_TERMINAL && result.outcome == CBM_PROC_CLEAN &&
+            !result.cancellation_requested && !result.supervision_failed && size >= 0 &&
+            size <= output_limit)
+            fp = cbm_fopen(path, "rb");
+        if (result.supervision_failed)
+            cbm_log_error("git.capture", "error", "process tree termination failed");
+        cbm_subprocess_destroy(process);
+    }
+    (void)cbm_unlink(path);
+    return fp;
+}
+#endif
+
 /* Run `git -C repo_path git_args` and copy the first output line (newlines
  * trimmed) into buf. Returns 0 only when git exited 0 with a non-empty line. */
 static int git_capture_into(const char *repo_path, const char *git_args, char *buf,
@@ -67,6 +140,17 @@ static int git_capture_into(const char *repo_path, const char *git_args, char *b
     if (!repo_path || !git_args || !git_validate_repo_path(repo_path)) {
         return CBM_NOT_FOUND;
     }
+#ifndef _WIN32
+    if (capture_cancelled) {
+        FILE *fp = git_capture_supervised(repo_path, git_args, CBM_SZ_16K);
+        if (fp) {
+            if (fgets(buf, (int)buf_size, fp))
+                trim_newlines(buf);
+            (void)fclose(fp);
+        }
+        return buf[0] ? 0 : CBM_NOT_FOUND;
+    }
+#endif
 
     char cmd[GIT_CMD_MAX];
 #ifdef _WIN32
@@ -813,7 +897,20 @@ int cbm_git_worktree_status(const char *validated_root, int max_samples,
 
     /* An inherited GIT_DIR/GIT_WORK_TREE (a git hook, an editor) overrides
      * `git -C`, which would report another repository's worktree here. */
-    FILE *fp = cbm_popen_git(cmd);
+    FILE *fp;
+#ifndef _WIN32
+    bool supervised = capture_cancelled != NULL;
+    if (supervised) {
+        const int64_t max_capture_bytes = 64 * 1024 * 1024;
+        fp = git_capture_supervised(validated_root,
+                                    "-c core.fsmonitor=false status --porcelain=v1 -z "
+                                    "--untracked-files=all",
+                                    max_capture_bytes);
+    } else
+#endif
+    {
+        fp = cbm_popen_git(cmd);
+    }
     if (!fp) {
         return 0; /* out is zeroed: available=false */
     }
@@ -828,12 +925,22 @@ int cbm_git_worktree_status(const char *validated_root, int max_samples,
     size_t got;
     bool io_error = false;
     while (parser.parse_ok && (got = fread(chunk, 1, sizeof(chunk), fp)) > 0) {
+#ifndef _WIN32
+        if (supervised && capture_cancelled(capture_cancel_context)) {
+            io_error = true;
+            break;
+        }
+#endif
         status_feed(&parser, chunk, got);
     }
     if (ferror(fp)) {
         io_error = true;
     }
+#ifndef _WIN32
+    int rc = supervised ? fclose(fp) : cbm_pclose(fp);
+#else
     int rc = cbm_pclose(fp);
+#endif
 
     if (rc != 0 || !parser.parse_ok || io_error || parser.partial_len > 0) {
         /* Fail closed: any deviation from a clean, complete status stream is a

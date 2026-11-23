@@ -1472,6 +1472,7 @@ dependencies = [
 name = "jiyuu-mori"
 version = "0.14.0-dev"
 dependencies = [
+ "libc",
  "rusqlite",
  "serde",
  "serde_json",

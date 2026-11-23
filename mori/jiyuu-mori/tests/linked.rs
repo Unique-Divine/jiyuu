@@ -1159,6 +1159,149 @@ fn index_fixture(
 }
 
 #[test]
+#[ignore = "requires an embedded UI build with MORI_WITH_UI=1"]
+fn standalone_ui_signals_cancel_active_reads() {
+    use std::io::Write;
+    use std::net::{Ipv4Addr, TcpListener, TcpStream};
+    use std::process::Child;
+    use std::thread::sleep;
+    use std::time::{Duration, Instant};
+
+    struct Ui(Child);
+    impl Drop for Ui {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    let bin = Path::new(MORI);
+    let writer = Scratch::new("ui-index");
+    let repo = writer.0.join("repo");
+    fs::create_dir(&repo).unwrap();
+    fs::write(repo.join("app.py"), "def main(): return 1\n").unwrap();
+    let index = index_fixture(bin, &writer, repo.to_str().unwrap());
+    let project = index["project"].as_str().unwrap();
+    let stopped = run_in(bin, &writer, &["daemon", "stop"]);
+    assert!(stopped.status.success(), "{stopped:?}");
+    let db_file = format!("{project}.db");
+    let graph_db = writer.0.join("cache").join(&db_file);
+
+    let projects = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "list_projects", "arguments": {"format": "json"}}
+    })
+    .to_string();
+    let repo_info = format!("/api/repo-info?project={project}");
+    let impact = format!("/api/impact-analysis?project={project}&file=app.py");
+
+    for (signal, method, target, body) in [
+        (libc::SIGINT, "POST", "/rpc", projects.as_str()),
+        (libc::SIGTERM, "POST", "/rpc", projects.as_str()),
+        (libc::SIGTERM, "GET", repo_info.as_str(), ""),
+        (libc::SIGTERM, "GET", impact.as_str(), ""),
+    ] {
+        let scratch = Scratch::new("ui-signal");
+        fs::copy(&graph_db, scratch.0.join("cache").join(&db_file)).unwrap();
+        let fixture_bin = scratch.0.join("bin");
+        fs::create_dir(&fixture_bin).unwrap();
+        let git = fixture_bin.join("git");
+        fs::write(
+            &git,
+            r#"#!/bin/sh
+[ "$3" = rev-parse ] || [ "$1" = --no-optional-locks ] || exit 2
+printf '%s\n' "$$" > "$MORI_TEST_GIT_ENTERED"
+exec /bin/sleep 30
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(&git, fs::Permissions::from_mode(0o700)).unwrap();
+        let entered = scratch.0.join("git-entered");
+        let log = scratch.0.join("ui.log");
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let mut ui = Ui(command_in(bin, &scratch)
+            .args(["ui", "--port", &addr.port().to_string()])
+            .env("PATH", &fixture_bin)
+            .env("CBM_LOG_LEVEL", "info")
+            .env("CBM_LOG_FORMAT", "text")
+            .env("TMPDIR", &scratch.0)
+            .env("MORI_TEST_GIT_ENTERED", &entered)
+            .stderr(fs::File::create(&log).unwrap())
+            .spawn()
+            .unwrap());
+
+        let log_text = || fs::read_to_string(&log).unwrap_or_default();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut conn = loop {
+            if let Ok(conn) = TcpStream::connect(addr) {
+                break conn;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "UI did not start: {}",
+                log_text()
+            );
+            sleep(Duration::from_millis(10));
+        };
+        write!(
+            conn,
+            "{method} {target} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\n\
+             Content-Length: {}\r\n\r\n{body}",
+            body.len(),
+        )
+        .unwrap();
+        let git_pid: libc::pid_t = loop {
+            if let Some(pid) = fs::read_to_string(&entered)
+                .ok()
+                .and_then(|marker| marker.trim().parse().ok())
+            {
+                break pid;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "Git was not entered: {}",
+                log_text()
+            );
+            sleep(Duration::from_millis(10));
+        };
+
+        // SAFETY: the child is owned by ui and has not been reaped.
+        assert_eq!(unsafe { libc::kill(ui.0.id() as libc::pid_t, signal) }, 0);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let status = loop {
+            if let Some(status) = ui.0.try_wait().unwrap() {
+                break status;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "UI did not cancel: {}",
+                log_text()
+            );
+            sleep(Duration::from_millis(10));
+        };
+        let logs = log_text();
+        assert!(status.success(), "{status}: {logs}");
+        if method == "POST" {
+            assert!(
+                logs.lines().any(|line| line.contains("tool=list_projects")
+                    && line.contains("cancelled=true")
+                    && line.contains("timed_out=false")),
+                "{logs}"
+            );
+        }
+        // SAFETY: signal 0 only probes the child PID recorded by our fixture.
+        assert_eq!(unsafe { libc::kill(git_pid, 0) }, -1, "{logs}");
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+        assert_eq!(fs::read_dir(scratch.0.join("rt")).unwrap().count(), 0);
+    }
+}
+
+#[test]
 fn trace_ingestion_matches_native_replies_and_stored_observations() {
     use serde_json::{Value, json};
 
