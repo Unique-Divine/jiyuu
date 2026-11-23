@@ -12,6 +12,7 @@ import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -62,6 +63,63 @@ class ParityTest(unittest.TestCase):
       self.assertEqual(side.env()["CBM_PROFILE"], "1")
       self.assertNotIn("MORI_IMPL_GRAPHQL", side.env())
 
+  def test_require_rust_query_requires_replay(self) -> None:
+    for flags in (["--skip-l4"], ["--path-parity"]):
+      with (self.subTest(flags=flags), redirect_stderr(io.StringIO()) as errors,
+            self.assertRaises(SystemExit) as raised):
+        parity.main(["ci", "--require-rust-query", "call:unknown", *flags])
+      self.assertEqual(raised.exception.code, 2)
+      self.assertIn("--require-rust-query requires tool-call replay",
+                    errors.getvalue())
+
+  def test_rust_query_replay_checks_execution_even_when_replies_match(self) -> None:
+    args = {"query": "MATCH (f) RETURN f.name", "format": "json"}
+    call = {"tool": "query_graph", "args": args}
+    call_id = calls.call_id("query_graph", args)
+    sides = [parity.Side(n, "/bin/true", os.path.join(self.tmp, n), self.tmp)
+             for n in ("a", "b")]
+    log_dir = os.path.join(sides[1].cache, "logs")
+    os.makedirs(log_dir)
+    log_path = os.path.join(log_dir, "cbm-daemon.log")
+    marker = parity.RUST_QUERY_LOG + b"\n"
+
+    for events, required, expected_failures in (
+        (0, False, 0), (1, True, 0), (0, True, 1), (2, True, 1)):
+      with self.subTest(events=events, required=required):
+        # A valid marker from an earlier request cannot prove this request.
+        with open(log_path, "wb") as log_file:
+          log_file.write(marker)
+
+        reply = (0, '{"columns":["f.name"],"rows":[["one"]]}', "")
+
+        def candidate(*_):
+          with open(log_path, "ab") as log_file:
+            log_file.write(marker * events)
+          return reply
+
+        with (patch.object(sides[0], "cli", return_value=reply),
+              patch.object(sides[1], "cli", side_effect=candidate)):
+          diffs, stats = parity.replay(
+            sides, [call], {}, [{}, {}], [],
+            frozenset({call_id}) if required else frozenset())
+        self.assertEqual(len(diffs), expected_failures)
+        self.assertEqual(stats.get("rust_query_checks"), 1 if required else None)
+        if expected_failures:
+          self.assertEqual(diffs[0]["key"], "query_graph:$.rust_dispatch")
+          self.assertEqual(diffs[0]["group"], call_id)
+          self.assertIsNone(diffs[0]["allowed"])
+          self.assertNotIn(args["query"], json.dumps(diffs))
+
+  def test_rust_query_replay_rejects_replaced_log(self) -> None:
+    log_path = Path(self.tmp) / "cbm-daemon.log"
+    marker = parity.RUST_QUERY_LOG + b"\n"
+    log_path.write_bytes(marker)
+    previous = parity.query_log_position(log_path)
+    replacement = log_path.with_suffix(".new")
+    replacement.write_bytes(marker * 2)
+    replacement.replace(log_path)
+    self.assertIsNone(parity.rust_query_events(log_path, previous))
+
   def test_path_parity_uses_one_worker_on_side_a(self) -> None:
     sides = [parity.Side(n, "/bin/true", self.tmp + "-cache-" + n,
                          self.tmp + "-rt-" + n) for n in ("a", "b")]
@@ -72,7 +130,8 @@ class ParityTest(unittest.TestCase):
         args = argparse.Namespace(allowlist=[], bin_a="/bin/true", bin_b="/bin/true",
                                   work=work, rt_prefix=work + "-rt", scratch_root=self.roots,
                                   export_a="sql", export_b="sql", graphql_a=None, graphql_b=None,
-                                  verify_export=False, profile=True, path_parity=True)
+                                  verify_export=False, profile=True, path_parity=True,
+                                  require_rust_query=[])
         self.assertEqual(parity.run([], None, 0, args, {}), 0)
       self.assertEqual(sides[0].env()["CBM_WORKERS"], "1")
       with patch.dict(os.environ, {"CBM_WORKERS": "2"}):
