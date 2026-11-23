@@ -725,9 +725,21 @@ fn scalar_read_flags_match_json_and_c_on_one_cache() {
     )
     .unwrap();
     let c = c_binary();
+    let rust = Path::new(MORI);
+    let rust_runtime = Scratch::new("scalar-rust");
+    // Read calls can start a daemon. Share the graph cache, with one runtime
+    // per binary so each call reaches its own implementation.
+    let invoke = |bin: &Path, args: &[&str]| {
+        let runtime = if bin == rust { &rust_runtime } else { &scratch };
+        command_in(bin, runtime)
+            .env("CBM_CACHE_DIR", scratch.0.join("cache"))
+            .args(args)
+            .output()
+            .unwrap()
+    };
     let index = index_fixture(&c, &scratch, repo.to_str().unwrap());
     let project = index["project"].as_str().expect("indexed project");
-    let stop = run_in(&c, &scratch, &["daemon", "stop"]);
+    let stop = invoke(&c, &["daemon", "stop"]);
     assert!(stop.status.success(), "{stop:?}");
 
     let cases = [
@@ -776,7 +788,7 @@ fn scalar_read_flags_match_json_and_c_on_one_cache() {
             r#"{{"project":{},"format":"json",{raw_options}}}"#,
             serde_json::to_string(project).unwrap()
         );
-        let reference = run_in(&c, &scratch, &argv);
+        let reference = invoke(&c, &argv);
         let stdout = String::from_utf8_lossy(&reference.stdout);
         assert!(
             reference.status.success() && stdout.contains(expected),
@@ -794,9 +806,9 @@ fn scalar_read_flags_match_json_and_c_on_one_cache() {
         };
         let expected_stdout = stable_stdout(&reference);
         let json_argv = ["cli", "--quiet", tool, &json_args];
-        for bin in [c.as_path(), Path::new(MORI)] {
+        for bin in [c.as_path(), rust] {
             for args in [argv.as_slice(), &json_argv] {
-                let actual = run_in(bin, &scratch, args);
+                let actual = invoke(bin, args);
                 assert_eq!(
                     (actual.status, &stable_stdout(&actual), &actual.stderr),
                     (reference.status, &expected_stdout, &reference.stderr),
@@ -804,6 +816,10 @@ fn scalar_read_flags_match_json_and_c_on_one_cache() {
                 );
             }
         }
+    }
+    for bin in [c.as_path(), rust] {
+        let stop = invoke(bin, &["daemon", "stop"]);
+        assert!(stop.status.success(), "{bin:?}: {stop:?}");
     }
 }
 
