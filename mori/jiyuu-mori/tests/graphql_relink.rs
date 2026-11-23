@@ -4,7 +4,7 @@
 use std::fs::{self, DirBuilder};
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use rusqlite::{Connection, OpenFlags, params};
@@ -101,7 +101,7 @@ impl Fixture {
         db
     }
 
-    fn query(&self, bin: &Path, project: &str, cypher: &str) -> Value {
+    fn query_output(&self, bin: &Path, project: &str, cypher: &str) -> Output {
         let args =
             json!({"project": project, "query": cypher, "format": "json"});
         let output = self
@@ -115,6 +115,11 @@ impl Fixture {
             .output()
             .expect("stop fixture daemon");
         assert!(stop.status.success(), "{stop:?}");
+        output
+    }
+
+    fn query(&self, bin: &Path, project: &str, cypher: &str) -> Value {
+        let output = self.query_output(bin, project, cypher);
         assert!(output.status.success(), "{output:?}");
         serde_json::from_slice(&output.stdout).expect("parse query response")
     }
@@ -132,19 +137,21 @@ impl Fixture {
         assert_eq!(reference["columns"], json!(answer.columns), "{cypher}");
         assert_eq!(reference["rows"], json!(answer.rows), "{cypher}");
         assert_eq!(reference["total"], answer.rows.len(), "{cypher}");
-        assert_eq!(
-            reference["total_relation"],
-            if answer.truncated { "gte" } else { "eq" }
-        );
+        assert_eq!(reference["total_relation"], "eq");
     }
 
     fn query_reference(&self, project: &str, cypher: &str) -> Value {
+        self.query(Self::reference_binary(), project, cypher)
+    }
+
+    fn reference_binary() -> &'static Path {
         if option_env!("MORI_C_REFERENCE") == Some("1") {
-            let reference =
-                Path::new(env!("MORI_C_BUILD_DIR")).join("codebase-memory-mcp");
-            return self.query(&reference, project, cypher);
+            return Path::new(concat!(
+                env!("MORI_C_BUILD_DIR"),
+                "/codebase-memory-mcp"
+            ));
         }
-        self.query(Path::new(MORI), project, cypher)
+        Path::new(MORI)
     }
 
     fn cross_links(&self, project: &str) -> Vec<Value> {
@@ -612,6 +619,53 @@ fn linear_cypher_reads_through_the_callers_transaction() {
 }
 
 #[test]
+fn linear_cypher_matches_the_native_result_ceiling() {
+    const MATCH: &str = "MATCH (a:Caller)-[:CALLS]->(b:Service)-[:HANDLES]->(c:Target) RETURN c.name";
+    let fixture = Fixture::new();
+    let mut db = fixture.index(CLIENT);
+    let tx = db.transaction().expect("begin fixture write");
+    let service = node(&tx, CLIENT, "Service", "relay", "relay", "relay.py");
+    // 650 edges expand to exactly 100,000 two-hop result rows.
+    for n in 0..250 {
+        let name = format!("caller{n}");
+        let caller = node(&tx, CLIENT, "Caller", &name, &name, "caller.py");
+        edge(&tx, CLIENT, caller, service, "CALLS", json!({}));
+    }
+    for n in 0..400 {
+        let name = format!("target{n}");
+        let target = node(&tx, CLIENT, "Target", &name, &name, "target.py");
+        edge(&tx, CLIENT, service, target, "HANDLES", json!({}));
+    }
+    tx.commit().expect("publish fixture data");
+
+    let below_ceiling = format!("{MATCH} LIMIT 99999");
+    let reference = fixture.query_reference(CLIENT, &below_ceiling);
+    let query = cypher_linear::classify(&below_ceiling).expect("classify query");
+    let answer = query
+        .execute_on(&db, CLIENT)
+        .expect("execute below ceiling");
+    assert_eq!(reference["total"], answer.rows.len());
+    assert_eq!(answer.rows.len(), 99_999);
+    assert_eq!(reference["total_relation"], "eq");
+
+    let at_ceiling = format!("{MATCH} LIMIT 100000");
+    let output =
+        fixture.query_output(Fixture::reference_binary(), CLIENT, &at_ceiling);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("result exceeded 100k rows")
+    );
+    for cypher in [&at_ceiling, MATCH] {
+        let query = cypher_linear::classify(cypher).expect("classify query");
+        assert!(matches!(
+            query.execute_on(&db, CLIENT),
+            Err(cypher_linear::ExecutionError::RowCeiling)
+        ));
+    }
+}
+
+#[test]
 fn unsupported_syntax_and_supported_storage_errors_are_distinct() {
     for query in [
         "MATCH (a) RETURN a.name",
@@ -633,6 +687,12 @@ fn unsupported_syntax_and_supported_storage_errors_are_distinct() {
     let path = fixture.0.join("missing.db");
     let query = cypher_linear::classify("MATCH (a)-[:CALLS]->(b) RETURN b.name")
         .unwrap();
-    assert!(query.execute(&path, CLIENT).is_err());
+    let Err(cypher_linear::ExecutionError::Storage(
+        rusqlite::Error::SqliteFailure(error, _),
+    )) = query.execute(&path, CLIENT)
+    else {
+        panic!("missing database must be a storage failure");
+    };
+    assert_eq!(error.code, rusqlite::ErrorCode::CannotOpen);
     assert!(!path.exists(), "execution must not silently create a cache");
 }
