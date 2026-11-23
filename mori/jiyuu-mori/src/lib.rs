@@ -33,3 +33,6 @@ fn rusqlite_uses_the_c_backend_sqlite() {
 
 #[cfg(all(feature = "c-backend", test, unix))]
 mod discovery_spike;
+
+#[cfg(all(feature = "c-backend", test))]
+mod index_manifest;
