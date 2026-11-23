@@ -139,6 +139,7 @@ impl Fixture {
         assert_eq!(reference["columns"], json!(answer.columns), "{cypher}");
         assert_eq!(reference["rows"], json!(utf8_rows(&answer)), "{cypher}");
         assert_eq!(reference["total"], answer.rows.len(), "{cypher}");
+        assert!(!answer.truncated, "{cypher}");
         assert_eq!(reference["total_relation"], "eq");
     }
 
@@ -1392,6 +1393,36 @@ fn ordered_aliases_keep_lexical_keys_and_raw_split_bytes() {
 }
 
 #[test]
+fn unordered_aliases_fall_back_for_rotating_edge_property_buffers() {
+    const WIDE: &str = "MATCH (a:AliasSource)-[r:CALLS]->(b) RETURN r.one AS first, r.two, r.three, r.four, r.five, r.six, r.seven, r.eight, r.nine AS last";
+    const NARROW: &str = "MATCH (a:AliasSource)-[r:CALLS]->(b) RETURN r.one AS first, r.nine AS last";
+    let fixture = Fixture::new();
+    let db = fixture.index(CLIENT);
+    let caller =
+        node(&db, CLIENT, "AliasSource", "caller", "caller", "calls.py");
+    let target = node(&db, CLIENT, "Function", "target", "target", "calls.py");
+    edge(
+        &db,
+        CLIENT,
+        caller,
+        target,
+        "CALLS",
+        json!({"nine": "ninth"}),
+    );
+    drop(db);
+
+    let pages =
+        fixture.compare_query_pages(&[(WIDE, 0, false), (NARROW, 0, true)]);
+    // In C the ninth lookup reuses the first empty property's buffer.
+    assert_eq!(
+        pages[0]["rows"],
+        json!([["ninth", "", "", "", "", "", "", "", "ninth"]])
+    );
+    assert_eq!(pages[1]["columns"], json!(["first", "last"]));
+    assert_eq!(pages[1]["rows"], json!([["", "ninth"]]));
+}
+
+#[test]
 fn zero_hop_scan_checks_budget_and_matches_native_row_ceiling() {
     use cypher_linear::{ExecutionBudget, ExecutionError};
 
@@ -1401,7 +1432,8 @@ fn zero_hop_scan_checks_budget_and_matches_native_row_ceiling() {
     db.execute_batch(
         "WITH RECURSIVE seq(n) AS (VALUES(1) UNION ALL SELECT n + 1 FROM seq WHERE n < 100000)
          INSERT INTO nodes(project, label, name, qualified_name)
-         SELECT 'client', 'Ceiling', 'node', printf('node%d', n) FROM seq;",
+         SELECT 'client', 'Ceiling', CASE n WHEN 100000 THEN 'best' ELSE 'node' END,
+                printf('node%d', n) FROM seq;",
     )
     .expect("seed the scan");
     let candidate = |query: &str| {
@@ -1441,7 +1473,7 @@ fn zero_hop_scan_checks_budget_and_matches_native_row_ceiling() {
 
     let ordered = format!("{MATCH} ORDER BY n.name LIMIT 1");
     let at_limit = fixture.compare_query_pages(&[(&ordered, 0, true)]);
-    assert_eq!(at_limit[0]["rows"], json!([["node"]]));
+    assert_eq!(at_limit[0]["rows"], json!([["best"]]));
     assert_eq!(at_limit[0]["total_relation"], "eq");
 
     let query = cypher_linear::classify(&ordered).unwrap();
@@ -1459,10 +1491,27 @@ fn zero_hop_scan_checks_budget_and_matches_native_row_ceiling() {
     ));
 
     node(&db, CLIENT, "Ceiling", "aaa", "node100001", "ceiling.py");
-    let over_limit = fixture.compare_query_pages(&[(&ordered, 0, false)]);
-    assert_eq!(over_limit[0]["rows"], json!([["node"]]));
-    assert_eq!(over_limit[0]["total_relation"], "gte");
-    assert_eq!(over_limit[0]["truncation_reason"], "engine_limit");
+    let two = format!("{MATCH} ORDER BY n.name LIMIT 2");
+    let zero = format!("{MATCH} ORDER BY n.name LIMIT 0");
+    let over_limit = fixture.compare_query_pages(&[
+        (&two, 0, true),
+        (&two, 1, true),
+        (&zero, 0, true),
+    ]);
+    assert_eq!(over_limit[0]["rows"], json!([["best"]]));
+    assert_eq!(over_limit[1]["rows"], json!([["node"]]));
+    assert_eq!(over_limit[0]["total"], 2);
+    assert_eq!(over_limit[1]["total"], 2);
+    assert_eq!(over_limit[0]["truncation_reason"], "page_limit");
+    assert_eq!(over_limit[1]["truncation_reason"], "engine_limit");
+    assert_eq!(over_limit[2]["rows"], json!([]));
+    assert_eq!(over_limit[2]["total"], 0);
+    assert_eq!(over_limit[2]["truncation_reason"], "engine_limit");
+    for page in over_limit {
+        assert_eq!(page["total_relation"], "gte");
+        assert_eq!(page["has_more"], true);
+        assert_eq!(page["truncated"], true);
+    }
 
     // All predicates miss. A budget check only at the end of the scan would
     // reach this unreadable row and report a storage error first.

@@ -26,7 +26,13 @@ impl From<&[u8]> for Cell {
 #[repr(C)]
 struct Sink {
     context: *mut c_void,
-    begin: unsafe extern "C" fn(*mut c_void, *const Cell, usize, usize) -> bool,
+    begin: unsafe extern "C" fn(
+        *mut c_void,
+        *const Cell,
+        usize,
+        usize,
+        bool,
+    ) -> bool,
     row: unsafe extern "C" fn(*mut c_void, *const Cell) -> bool,
     storage_error: unsafe extern "C" fn(*mut c_void, Cell),
 }
@@ -96,7 +102,6 @@ unsafe extern "C" fn evaluate(
             Err(ExecutionError::Deadline) => Status::Deadline,
             Err(ExecutionError::Cancelled) => Status::Cancelled,
             Err(ExecutionError::RowCeiling) => Status::RowCeiling,
-            Err(ExecutionError::OrderedInputCeiling) => Status::Unsupported,
             Err(ExecutionError::Storage(error)) => {
                 let detail =
                     format!("query aborted: reading the graph failed ({error})");
@@ -126,6 +131,7 @@ impl Sink {
                 cells.as_ptr(),
                 cells.len(),
                 result.rows.len(),
+                result.truncated,
             )
         } {
             return Status::Error;

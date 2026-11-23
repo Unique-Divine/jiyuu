@@ -327,22 +327,22 @@ pub(crate) fn classify(source: &str) -> Result<Query<'_>, Unsupported> {
     if projections.len() > 32 {
         return Err(Unsupported);
     }
+    // C can retain a pointer to an empty edge-property buffer while
+    // projecting later columns. A ninth lookup can overwrite that cell.
+    if projections
+        .iter()
+        .filter(|p| {
+            matches!(p.binding, Binding::Edge(_))
+                && p.property.is_some_and(|name| name != "type")
+        })
+        .count()
+        > NATIVE_EDGE_PROPERTY_BUFFERS
+    {
+        return Err(Unsupported);
+    }
     let mut order = Vec::new();
     if parser.keyword("ORDER") {
         if hops.len() > 1 || !parser.keyword("BY") {
-            return Err(Unsupported);
-        }
-        // C can retain a pointer to an empty edge-property buffer while
-        // projecting later columns. A ninth lookup can overwrite that cell.
-        if projections
-            .iter()
-            .filter(|p| {
-                matches!(p.binding, Binding::Edge(_))
-                    && p.property.is_some_and(|name| name != "type")
-            })
-            .count()
-            > NATIVE_EDGE_PROPERTY_BUFFERS
-        {
             return Err(Unsupported);
         }
         loop {
@@ -508,13 +508,13 @@ pub(crate) struct ResultRows {
     // Cells can end on a split UTF-8 scalar. C hashes and budgets these bytes
     // before rendering the response.
     pub(crate) rows: Vec<Vec<Vec<u8>>>,
+    pub(crate) truncated: bool,
 }
 
 #[derive(Debug)]
 pub(crate) enum ExecutionError {
     Storage(rusqlite::Error),
     RowCeiling,
-    OrderedInputCeiling,
     Deadline,
     Cancelled,
 }
@@ -622,12 +622,20 @@ impl Query<'_> {
         let mut adjacency = (!self.hops.is_empty())
             .then(|| Adjacency::new(connection))
             .transpose()?;
-        let mut rows = Vec::new();
+        let mut result = ResultRows {
+            columns: self
+                .projections
+                .iter()
+                .map(|column| column.name.clone())
+                .collect(),
+            rows: Vec::new(),
+            truncated: false,
+        };
         let limit = self.limit.unwrap_or(ENGINE_LIMIT);
         'starts: loop {
             if adjacency.is_none()
                 && self.order.is_empty()
-                && rows.len() == limit
+                && result.rows.len() == limit
             {
                 break;
             }
@@ -640,7 +648,7 @@ impl Query<'_> {
                 continue;
             }
             let Some(adjacency) = &mut adjacency else {
-                if !self.collect_row(&mut rows, &[&start], &[], budget)? {
+                if !self.collect_row(&mut result, &[&start], &[], budget)? {
                     break;
                 }
                 continue;
@@ -661,7 +669,7 @@ impl Query<'_> {
                             continue;
                         }
                         if !self.collect_row(
-                            &mut rows,
+                            &mut result,
                             &[&start, &next, &last],
                             &[&edge, &last_edge],
                             budget,
@@ -675,7 +683,12 @@ impl Query<'_> {
                     } else {
                         [&start, &next]
                     };
-                    if !self.collect_row(&mut rows, &nodes, &[&edge], budget)? {
+                    if !self.collect_row(
+                        &mut result,
+                        &nodes,
+                        &[&edge],
+                        budget,
+                    )? {
                         break 'starts;
                     }
                 }
@@ -683,35 +696,30 @@ impl Query<'_> {
         }
         budget.check()?;
         if !self.order.is_empty() {
-            order_rows(&mut rows, &self.order, limit, budget)?;
+            order_rows(&mut result.rows, &self.order, limit, budget)?;
         }
-        let columns = self
-            .projections
-            .iter()
-            .map(|column| column.name.clone())
-            .collect();
-        Ok(ResultRows { columns, rows })
+        Ok(result)
     }
 
     fn collect_row(
         &self,
-        rows: &mut Vec<Vec<Vec<u8>>>,
+        result: &mut ResultRows,
         nodes: &[&Node],
         edges: &[&Edge],
         budget: &ExecutionBudget<'_>,
     ) -> Result<bool, ExecutionError> {
         let limit = self.limit.unwrap_or(ENGINE_LIMIT);
-        if self.order.is_empty() && rows.len() == limit {
+        if self.order.is_empty() && result.rows.len() == limit {
             return Ok(false);
         }
-        if rows.len() == ENGINE_LIMIT {
-            budget.check()?;
+        if result.rows.len() == ENGINE_LIMIT {
             // Native sorts the capped prefix and reports a lower bound when
-            // another match exists. Let C own that partial result and metadata.
-            return Err(ExecutionError::OrderedInputCeiling);
+            // another match exists. Keep the prefix under this request budget.
+            result.truncated = true;
+            return Ok(false);
         }
-        rows.push(self.project(nodes, edges));
-        if rows.len() == ENGINE_LIMIT && limit == ENGINE_LIMIT {
+        result.rows.push(self.project(nodes, edges));
+        if result.rows.len() == ENGINE_LIMIT && limit == ENGINE_LIMIT {
             budget.check()?;
             return Err(ExecutionError::RowCeiling);
         }

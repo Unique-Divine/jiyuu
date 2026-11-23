@@ -6592,13 +6592,14 @@ static const char **copy_cypher_cells(const cbm_mcp_cypher_cell_t *cells, size_t
 }
 
 static bool cypher_sink_begin(void *context, const cbm_mcp_cypher_cell_t *columns,
-                              size_t column_count, size_t row_capacity) {
+                              size_t column_count, size_t row_capacity, bool truncated) {
     cbm_cypher_result_t *result = context;
     result->columns = copy_cypher_cells(columns, column_count);
     if (!result->columns) {
         return false;
     }
     result->col_count = (int)column_count;
+    result->truncated = truncated;
     if (row_capacity) {
         result->rows = calloc(row_capacity, sizeof(*result->rows));
         if (!result->rows) {
