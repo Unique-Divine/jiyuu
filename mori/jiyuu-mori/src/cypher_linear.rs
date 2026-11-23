@@ -1,10 +1,13 @@
-//! Bounded Cypher evaluator compiled only by the linked acceptance test.
+//! Bounded Cypher evaluator for a verified subset of query patterns.
 
 use std::collections::HashMap;
+#[cfg(test)]
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use rusqlite::{Connection, OpenFlags, Row, Statement, params};
+#[cfg(test)]
+use rusqlite::OpenFlags;
+use rusqlite::{Connection, Row, Statement, params};
 
 const ENGINE_LIMIT: usize = 100_000;
 const DEADLINE: Duration = Duration::from_secs(30);
@@ -496,6 +499,7 @@ impl<'a> ExecutionBudget<'a> {
 }
 
 impl Query<'_> {
+    #[cfg(test)]
     pub(crate) fn execute(
         &self,
         db: &Path,
@@ -506,7 +510,7 @@ impl Query<'_> {
         self.execute_on(&connection, project)
     }
 
-    /// Read from the graph and snapshot the caller has already selected.
+    #[cfg(test)]
     pub(crate) fn execute_on(
         &self,
         connection: &Connection,
@@ -519,6 +523,7 @@ impl Query<'_> {
         )
     }
 
+    /// Read from the graph and snapshot the caller has already selected.
     pub(crate) fn execute_with_budget(
         &self,
         connection: &Connection,

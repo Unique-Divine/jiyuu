@@ -5,7 +5,7 @@ use std::cell::Cell;
 use std::fs::{self, DirBuilder};
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
@@ -736,6 +736,108 @@ fn linear_cypher_keeps_its_graph_when_a_replacement_publishes() {
         .expect("read the published replacement");
     assert_eq!(replacement.rows.len(), 1024);
     assert!(replacement.rows.iter().all(|row| row == &["new"]));
+}
+
+#[test]
+fn opt_in_rust_query_preserves_cursor_and_daemon_dispatch() {
+    const QUERY: &str = "MATCH (a:Caller)-[:CALLS]->(b:Target) RETURN b.name";
+    const ORDERED: &str =
+        "MATCH (a:Caller)-[:CALLS]->(b:Target) RETURN b.name ORDER BY b.name";
+    let fixture = Fixture::new();
+    let db = fixture.index(CLIENT);
+    let caller = node(&db, CLIENT, "Caller", "a", "a", "a.py");
+    for name in ["b", "c"] {
+        let callee = node(&db, CLIENT, "Target", name, name, "b.py");
+        edge(&db, CLIENT, caller, callee, "CALLS", json!({}));
+    }
+    drop(db);
+
+    let request = json!({"project": CLIENT, "query": QUERY, "format": "json", "max_rows": 1});
+    let reference_bin = Fixture::reference_binary();
+    let reference = fixture
+        .command(reference_bin)
+        .args(["cli", "--quiet", "query_graph", &request.to_string()])
+        .output()
+        .unwrap();
+    assert!(reference.status.success(), "{reference:?}");
+    let reference: Value = serde_json::from_slice(&reference.stdout).unwrap();
+    let stop = |binary| {
+        let result = fixture
+            .command(binary)
+            .args(["daemon", "stop"])
+            .output()
+            .unwrap();
+        assert!(result.status.success(), "{result:?}");
+    };
+    stop(reference_bin);
+    let reference_ordered = fixture.query_reference(CLIENT, ORDERED);
+
+    let candidate_bin = Path::new(MORI);
+    let start = fixture
+        .command(candidate_bin)
+        .env("MORI_IMPL_QUERY", "rust")
+        .env("CBM_LOG_LEVEL", "debug")
+        .args(["daemon", "start"])
+        .output()
+        .unwrap();
+    assert!(start.status.success(), "{start:?}");
+    let candidate = fixture
+        .command(candidate_bin)
+        .args(["cli", "--quiet", "query_graph", &request.to_string()])
+        .output()
+        .unwrap();
+    assert!(candidate.status.success(), "{candidate:?}");
+    let candidate: Value = serde_json::from_slice(&candidate.stdout).unwrap();
+    assert_eq!(candidate, reference);
+    let cursor = candidate["next_cursor"].as_str().expect("cursor");
+
+    let next = json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
+        "name": "query_graph",
+        "arguments": {"project": CLIENT, "query": QUERY, "cursor": cursor, "format": "json"}
+    }});
+    let ordered = json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {
+        "name": "query_graph",
+        "arguments": {"project": CLIENT, "query": ORDERED, "format": "json"}
+    }});
+    let requests = fixture.0.join("query-requests");
+    fs::write(
+        &requests,
+        format!(
+            "{}\n{}\n{next}\n{ordered}\n",
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"query-test","version":"1"}}}"#,
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        ),
+    )
+    .unwrap();
+    let forwarded = fixture
+        .command(candidate_bin)
+        .stdin(Stdio::from(fs::File::open(requests).unwrap()))
+        .output()
+        .unwrap();
+    stop(candidate_bin);
+    assert!(forwarded.status.success(), "{forwarded:?}");
+    let output = String::from_utf8(forwarded.stdout).unwrap();
+    let responses: Vec<Value> = output
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let result = |id| -> Value {
+        let reply = responses.iter().find(|reply| reply["id"] == id).unwrap();
+        let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+        serde_json::from_str(text).unwrap()
+    };
+    assert_eq!(result(2)["rows"], json!([["c"]]));
+    assert_eq!(result(3), reference_ordered);
+    let log =
+        fs::read_to_string(fixture.0.join("cache/logs/cbm-daemon.log")).unwrap();
+    assert_eq!(
+        log.lines()
+            .filter(|line| line.contains("query_graph.evaluator")
+                && line.contains("backend=rust"))
+            .count(),
+        2,
+        "the CLI and MCP cursor used Rust, and ORDER BY used C: {log}"
+    );
 }
 
 #[test]

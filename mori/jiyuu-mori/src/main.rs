@@ -11,6 +11,10 @@
 #![cfg_attr(all(feature = "c-backend", not(test)), no_main)]
 
 #[cfg(all(feature = "c-backend", not(test)))]
+mod cypher_ffi;
+#[cfg(all(feature = "c-backend", not(test)))]
+mod cypher_linear;
+#[cfg(all(feature = "c-backend", not(test)))]
 mod export;
 #[cfg(all(feature = "c-backend", not(test)))]
 mod ffi;

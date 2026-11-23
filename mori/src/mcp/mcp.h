@@ -275,6 +275,36 @@ void cbm_mcp_set_method_selector(cbm_mcp_method_selector_fn select);
 /* Search SQL and bound values borrowed from one MCP request. */
 struct sqlite3;
 struct sqlite3_stmt;
+
+typedef struct {
+    const char *data;
+    size_t len;
+} cbm_mcp_cypher_cell_t;
+
+/* These callbacks copy borrowed cells into the native response owner.
+ * The evaluator emits the header once before emitting complete rows. */
+typedef struct {
+    void *context;
+    bool (*begin)(void *context, const cbm_mcp_cypher_cell_t *columns, size_t column_count,
+                  size_t row_capacity);
+    bool (*row)(void *context, const cbm_mcp_cypher_cell_t *cells);
+    void (*storage_error)(void *context, cbm_mcp_cypher_cell_t detail);
+} cbm_mcp_cypher_sink_t;
+
+enum {
+    CBM_MCP_CYPHER_OK,
+    CBM_MCP_CYPHER_UNSUPPORTED,
+    CBM_MCP_CYPHER_DEADLINE,
+    CBM_MCP_CYPHER_CANCELLED,
+    CBM_MCP_CYPHER_ROW_CEILING,
+    CBM_MCP_CYPHER_ERROR,
+};
+
+typedef int (*cbm_mcp_cypher_evaluator_fn)(struct sqlite3 *db, const char *query,
+                                           const char *project, bool (*cancelled)(void *),
+                                           void *cancel_context, const cbm_mcp_cypher_sink_t *sink);
+void cbm_mcp_set_cypher_evaluator(cbm_mcp_cypher_evaluator_fn evaluate);
+
 typedef struct {
     const char *fts_query;
     const char *project;
