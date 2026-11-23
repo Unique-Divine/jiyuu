@@ -7451,12 +7451,6 @@ enum {
 
 bool cbm_path_within_root(const char *root_path, const char *abs_path); /* defined below */
 
-typedef enum {
-    COVERAGE_PATH_OK = 0,
-    COVERAGE_PATH_OUTSIDE,
-    COVERAGE_PATH_INVALID,
-} coverage_path_result_t;
-
 /* Normalize an untrusted repository-relative path without touching the
  * filesystem. Absolute paths, drive/UNC paths, control bytes, and any `..`
  * component are rejected. A root scope (`.`) normalizes to the empty prefix. */
@@ -7510,6 +7504,21 @@ static coverage_path_result_t coverage_normalize_rel(const char *input, bool all
     }
     out[written] = '\0';
     return written > 0U || allow_root ? COVERAGE_PATH_OK : COVERAGE_PATH_INVALID;
+}
+
+static cbm_mcp_coverage_path_normalizer_fn coverage_path_normalizer;
+
+void cbm_mcp_set_coverage_path_normalizer(cbm_mcp_coverage_path_normalizer_fn normalizer) {
+    coverage_path_normalizer = normalizer;
+}
+
+static coverage_path_result_t coverage_normalize_request_path(const char *input, bool allow_root,
+                                                              char *out, size_t out_size) {
+    if (coverage_path_normalizer) {
+        cbm_log_debug("check_index_coverage.normalize", "backend", "rust");
+        return coverage_path_normalizer(input, allow_root, out, out_size);
+    }
+    return coverage_normalize_rel(input, allow_root, out, out_size);
 }
 
 /* #2585: the store generation ("u<db_uid>g<mutation_gen>") advances on every
@@ -8036,7 +8045,7 @@ static char *handle_check_index_coverage(cbm_mcp_server_t *srv, const char *args
             yyjson_mut_obj_add_strcpy(doc, item, "requested_path", input ? input : "");
             char rel[CBM_SZ_4K];
             coverage_path_result_t normalized =
-                coverage_normalize_rel(input, false, rel, sizeof(rel));
+                coverage_normalize_request_path(input, false, rel, sizeof(rel));
             if (normalized != COVERAGE_PATH_OK) {
                 yyjson_mut_obj_add_str(doc, item, "status",
                                        normalized == COVERAGE_PATH_OUTSIDE ? "outside_project"
@@ -8118,7 +8127,7 @@ static char *handle_check_index_coverage(cbm_mcp_server_t *srv, const char *args
             yyjson_mut_obj_add_strcpy(doc, item, "requested_scope", input ? input : "");
             char scope[CBM_SZ_4K];
             coverage_path_result_t normalized =
-                coverage_normalize_rel(input, true, scope, sizeof(scope));
+                coverage_normalize_request_path(input, true, scope, sizeof(scope));
             if (normalized != COVERAGE_PATH_OK) {
                 yyjson_mut_obj_add_str(doc, item, "status",
                                        normalized == COVERAGE_PATH_OUTSIDE ? "outside_project"

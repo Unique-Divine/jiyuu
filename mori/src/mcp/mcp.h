@@ -438,6 +438,18 @@ typedef cbm_mcp_coverage_verdict_t (*cbm_mcp_coverage_verdict_reader_fn)(
     const cbm_mcp_coverage_path_request_t *request);
 void cbm_mcp_set_coverage_verdict_reader(cbm_mcp_coverage_verdict_reader_fn reader);
 
+/* Path result codes are shared with the Rust coverage normalizer. */
+typedef enum {
+    COVERAGE_PATH_OK = 0,
+    COVERAGE_PATH_OUTSIDE,
+    COVERAGE_PATH_INVALID,
+} coverage_path_result_t;
+
+typedef coverage_path_result_t (*cbm_mcp_coverage_path_normalizer_fn)(const char *input,
+                                                                      bool allow_root, char *out,
+                                                                      size_t out_size);
+void cbm_mcp_set_coverage_path_normalizer(cbm_mcp_coverage_path_normalizer_fn normalizer);
+
 typedef struct {
     int node_start;
     int node_end;
