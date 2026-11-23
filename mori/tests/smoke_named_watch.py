@@ -286,7 +286,7 @@ def smoke(binary: Path, root: Path) -> None:
         daemon("stop")
 
 
-def smoke_cold_join(binary: Path, root: Path) -> None:
+def smoke_cold_join(binary: Path, root: Path, *, use_path_name: bool = False) -> None:
     env = fixture_environment(root)
     checkout_path = root / "checkout"
     checkout(checkout_path, "cold_checkout", env)
@@ -294,7 +294,12 @@ def smoke_cold_join(binary: Path, root: Path) -> None:
     run(["git", "add", "-A"], env, checkout_path)
     commit(checkout_path, env)
 
-    project = "configured-name"
+    # The fixed checkout suffix and short temporary path use only ASCII.
+    project = (
+        str(checkout_path).strip("/").replace("/", "-")
+        if use_path_name
+        else "configured-name"
+    )
     cache = Path(env["CBM_CACHE_DIR"])
     snapshot = Path(env["MORI_NAMED_WATCH_FILE"])
     replace_snapshot(
@@ -370,8 +375,14 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="mnw-", dir="/tmp") as temporary:
         root = Path(temporary).resolve()
         try:
-            check = smoke_cold_join if args.cold_join else smoke
-            check(args.mori.resolve(strict=True), root)
+            binary = args.mori.resolve(strict=True)
+            if args.cold_join:
+                smoke_cold_join(binary, root)
+                derived_root = root / "path-derived"
+                derived_root.mkdir()
+                smoke_cold_join(binary, derived_root, use_path_name=True)
+            else:
+                smoke(binary, root)
         finally:
             log = root / "cache/logs/cbm-daemon.log"
             if args.daemon_log and log.is_file():
