@@ -38,10 +38,17 @@ use a `sai-ops` build that supports reader mode. Check the published
 `sai-ops/v0.1.0` release is available. Use the named release and its
 `install-sai-ops.sh` and `SHA256SUMS` assets. The installer selects and
 verifies the platform archive. From a directory containing the reviewed
-installer, run `sh install-sai-ops.sh 0.1.0`, then check the command
-with `sai-ops --version` and view reader commands with
-`sai-ops --reader --help`. Use GraphQL if you have no verified reader
-binary.
+installer, run these commands in your shell:
+
+```sh
+sh install-sai-ops.sh 0.1.0
+export PATH="$HOME/.local/bin:$PATH"
+sai-ops --version
+sai-ops --reader --help
+```
+
+Add the directory to your shell startup file if you want it in future
+sessions. Use GraphQL if you have no verified reader binary.
 
 ## Connect the Agent
 
