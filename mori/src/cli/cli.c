@@ -13908,7 +13908,8 @@ char *cbm_cli_build_args_json(const char *tool_name, int argc, char **argv, char
     const char *schema_str = cbm_mcp_tool_input_schema(tool_name);
     if (schema_str && cli_query_args_builder &&
         (strcmp(tool_name, "query_graph") == 0 || strcmp(tool_name, "list_projects") == 0 ||
-         strcmp(tool_name, "index_status") == 0)) {
+         strcmp(tool_name, "index_status") == 0 || strcmp(tool_name, "get_graph_schema") == 0 ||
+         strcmp(tool_name, "get_code_snippet") == 0 || strcmp(tool_name, "search_code") == 0)) {
         char *rust_json = cli_query_args_builder(schema_str, argc, argv);
         if (rust_json) {
             return rust_json;
