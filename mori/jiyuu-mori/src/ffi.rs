@@ -375,6 +375,8 @@ pub unsafe extern "C" fn main(argc: c_int, argv: *mut *mut c_char) -> c_int {
     // stays valid for the process lifetime, including each worker's own main.
     unsafe {
         jiyuu_mori::mori_register_graphql_callbacks();
+        #[cfg(unix)]
+        jiyuu_mori::mori_register_staged_graph_writer();
         c_transport::register();
         crate::query_cli::c_args::register();
         crate::cli_output::register();

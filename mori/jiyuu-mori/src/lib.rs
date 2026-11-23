@@ -34,5 +34,8 @@ fn rusqlite_uses_the_c_backend_sqlite() {
 #[cfg(all(feature = "c-backend", test, unix))]
 mod discovery_spike;
 
-#[cfg(all(feature = "c-backend", test, unix))]
+#[cfg(all(feature = "c-backend", unix))]
 mod staged_graph;
+
+#[cfg(all(feature = "c-backend", not(test), unix))]
+pub use staged_graph::native::register as mori_register_staged_graph_writer;

@@ -2806,7 +2806,13 @@ static void release_and_remap_vectors(cbm_gbuf_t *gb, const int64_t *temp_to_fin
     CBM_PROF_END_N("dump", "5_vector_remap_sort", t_vec_remap, gb->dump_vector_count);
 }
 
-int cbm_gbuf_dump_to_sqlite(cbm_gbuf_t *gb, const char *path) {
+static cbm_staged_graph_writer_fn staged_graph_writer;
+
+void cbm_gbuf_set_staged_writer(cbm_staged_graph_writer_fn writer) {
+    staged_graph_writer = writer;
+}
+
+static int dump_to_sqlite(cbm_gbuf_t *gb, const char *path, bool allow_staged_writer) {
     if (!gb || !path) {
         return CBM_NOT_FOUND;
     }
@@ -2842,6 +2848,28 @@ int cbm_gbuf_dump_to_sqlite(cbm_gbuf_t *gb, const char *path) {
 
     char indexed_at[CBM_SZ_64];
     generate_iso_timestamp(indexed_at, sizeof(indexed_at));
+
+    if (allow_staged_writer && staged_graph_writer) {
+        if (gb->dump_vector_count == 0 && gb->dump_token_vec_count == 0) {
+            int edge_count = 0;
+            char **url_paths = NULL;
+            char **local_names = NULL;
+            CBMDumpEdge *edges = build_dump_edges(gb, temp_to_final, max_temp_id, &edge_count,
+                                                   &url_paths, &local_names);
+            int rc = staged_graph_writer(path, gb->project, indexed_at, gb->root_path, dump_nodes,
+                                         node_idx, edges, edge_count);
+            if (rc == 0) {
+                cbm_log_info("gbuf.dump_writer", "implementation", "rust");
+                log_dump_summary(node_idx, edge_count);
+            } else {
+                log_dump_failed(rc, 0, node_idx, edge_count);
+            }
+            free_dump_resources(url_paths, local_names, edge_count, edges, dump_nodes, temp_to_final);
+            cbm_free(CBM_MEM_CLASS_DUMP, src_nodes);
+            return rc;
+        }
+        cbm_log_info("gbuf.dump_writer", "implementation", "c", "reason", "semantic_vectors");
+    }
 
     /* Stream node rows to the DB in partitions. Under memory pressure, free each
      * partition's heavy properties_json once persisted — the heavy column is
@@ -2922,6 +2950,14 @@ int cbm_gbuf_dump_to_sqlite(cbm_gbuf_t *gb, const char *path) {
     free_dump_resources(url_paths, local_names, edge_idx, dump_edges, dump_nodes, temp_to_final);
     cbm_free(CBM_MEM_CLASS_DUMP, src_nodes);
     return rc;
+}
+
+int cbm_gbuf_dump_to_sqlite(cbm_gbuf_t *gb, const char *path) {
+    return dump_to_sqlite(gb, path, false);
+}
+
+int cbm_gbuf_dump_to_sqlite_staged(cbm_gbuf_t *gb, const char *stage_path) {
+    return dump_to_sqlite(gb, stage_path, true);
 }
 
 int cbm_gbuf_flush_to_store(cbm_gbuf_t *gb, cbm_store_t *store) {
