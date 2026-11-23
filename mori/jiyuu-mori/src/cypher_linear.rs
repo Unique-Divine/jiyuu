@@ -1,7 +1,9 @@
 //! Bounded Cypher evaluator for a verified subset of query patterns.
 
 use std::borrow::Cow;
+use std::cmp::Ordering;
 use std::collections::HashMap;
+use std::ffi::c_long;
 #[cfg(test)]
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -14,6 +16,8 @@ const ENGINE_LIMIT: usize = 100_000;
 const DEADLINE: Duration = Duration::from_secs(30);
 const CHECK_INTERVAL: usize = 1024;
 const PROPERTY_LIMIT: usize = 511;
+const ORDER_KEYS_MAX: usize = 8;
+const NATIVE_EDGE_PROPERTY_BUFFERS: usize = 8;
 const NODE_COLUMNS: &str = "n.id, n.label, n.name, n.qualified_name, n.file_path, n.start_line, n.end_line, n.properties";
 
 #[derive(Debug)]
@@ -108,12 +112,19 @@ struct Projection<'a> {
 }
 
 #[derive(Debug)]
+struct OrderKey {
+    column: usize,
+    descending: bool,
+}
+
+#[derive(Debug)]
 pub(crate) struct Query<'a> {
     nodes: Vec<NodePattern<'a>>,
     hops: Vec<Hop<'a>>,
     filters: Vec<(usize, Filter<'a>)>,
     any_filter: bool,
     projections: Vec<Projection<'a>>,
+    order: Vec<OrderKey>,
     limit: Option<usize>,
 }
 
@@ -299,10 +310,11 @@ pub(crate) fn classify(source: &str) -> Result<Query<'_>, Unsupported> {
         if let (Binding::Node(_), Some(property)) = (binding, property) {
             node_property(property)?;
         }
-        let name = property.map_or_else(
-            || name.to_owned(),
-            |property| format!("{name}.{property}"),
-        );
+        let name = if parser.keyword("AS") {
+            parser.name()?.to_owned()
+        } else {
+            projection_name(name, property)
+        };
         projections.push(Projection {
             binding,
             property,
@@ -314,6 +326,46 @@ pub(crate) fn classify(source: &str) -> Result<Query<'_>, Unsupported> {
     }
     if projections.len() > 32 {
         return Err(Unsupported);
+    }
+    // C can retain a pointer to an empty edge-property buffer while
+    // projecting later columns. A ninth lookup can overwrite that cell.
+    if projections
+        .iter()
+        .filter(|p| {
+            matches!(p.binding, Binding::Edge(_))
+                && p.property.is_some_and(|name| name != "type")
+        })
+        .count()
+        > NATIVE_EDGE_PROPERTY_BUFFERS
+    {
+        return Err(Unsupported);
+    }
+    let mut order = Vec::new();
+    if parser.keyword("ORDER") {
+        if hops.len() > 1 || !parser.keyword("BY") {
+            return Err(Unsupported);
+        }
+        loop {
+            if order.len() == ORDER_KEYS_MAX {
+                return Err(Unsupported);
+            }
+            let name = parser.name()?;
+            let property =
+                parser.consume(b'.').then(|| parser.name()).transpose()?;
+            let name = projection_name(name, property);
+            let column = projections
+                .iter()
+                .position(|p| p.name == name)
+                .ok_or(Unsupported)?;
+            let descending = parser.keyword("DESC");
+            if !descending {
+                parser.keyword("ASC");
+            }
+            order.push(OrderKey { column, descending });
+            if !parser.consume(b',') {
+                break;
+            }
+        }
     }
     let limit = if parser.keyword("LIMIT") {
         let Some(Token::Number(limit)) = parser.tokens.next() else {
@@ -336,8 +388,14 @@ pub(crate) fn classify(source: &str) -> Result<Query<'_>, Unsupported> {
         filters,
         any_filter,
         projections,
+        order,
         limit,
     })
+}
+
+fn projection_name(name: &str, property: Option<&str>) -> String {
+    property
+        .map_or_else(|| name.to_owned(), |property| format!("{name}.{property}"))
 }
 
 #[derive(Debug)]
@@ -450,6 +508,7 @@ pub(crate) struct ResultRows {
     // Cells can end on a split UTF-8 scalar. C hashes and budgets these bytes
     // before rendering the response.
     pub(crate) rows: Vec<Vec<Vec<u8>>>,
+    pub(crate) truncated: bool,
 }
 
 #[derive(Debug)]
@@ -563,10 +622,21 @@ impl Query<'_> {
         let mut adjacency = (!self.hops.is_empty())
             .then(|| Adjacency::new(connection))
             .transpose()?;
-        let mut rows = Vec::new();
+        let mut result = ResultRows {
+            columns: self
+                .projections
+                .iter()
+                .map(|column| column.name.clone())
+                .collect(),
+            rows: Vec::new(),
+            truncated: false,
+        };
         let limit = self.limit.unwrap_or(ENGINE_LIMIT);
         'starts: loop {
-            if adjacency.is_none() && rows.len() == limit {
+            if adjacency.is_none()
+                && self.order.is_empty()
+                && result.rows.len() == limit
+            {
                 break;
             }
             let Some(row) = start_nodes.next()? else {
@@ -578,10 +648,8 @@ impl Query<'_> {
                 continue;
             }
             let Some(adjacency) = &mut adjacency else {
-                rows.push(self.project(&[&start], &[]));
-                if rows.len() == ENGINE_LIMIT {
-                    budget.check()?;
-                    return Err(ExecutionError::RowCeiling);
+                if !self.collect_row(&mut result, &[&start], &[], budget)? {
+                    break;
                 }
                 continue;
             };
@@ -600,15 +668,13 @@ impl Query<'_> {
                         if !self.matches_node(2, &last) {
                             continue;
                         }
-                        if rows.len() == limit {
-                            break 'starts;
-                        }
-                        rows.push(self.project(
+                        if !self.collect_row(
+                            &mut result,
                             &[&start, &next, &last],
                             &[&edge, &last_edge],
-                        ));
-                        if rows.len() == ENGINE_LIMIT {
-                            return Err(ExecutionError::RowCeiling);
+                            budget,
+                        )? {
+                            break 'starts;
                         }
                     }
                 } else {
@@ -617,23 +683,47 @@ impl Query<'_> {
                     } else {
                         [&start, &next]
                     };
-                    if rows.len() == limit {
+                    if !self.collect_row(
+                        &mut result,
+                        &nodes,
+                        &[&edge],
+                        budget,
+                    )? {
                         break 'starts;
-                    }
-                    rows.push(self.project(&nodes, &[&edge]));
-                    if rows.len() == ENGINE_LIMIT {
-                        return Err(ExecutionError::RowCeiling);
                     }
                 }
             }
         }
         budget.check()?;
-        let columns = self
-            .projections
-            .iter()
-            .map(|column| column.name.clone())
-            .collect();
-        Ok(ResultRows { columns, rows })
+        if !self.order.is_empty() {
+            order_rows(&mut result.rows, &self.order, limit, budget)?;
+        }
+        Ok(result)
+    }
+
+    fn collect_row(
+        &self,
+        result: &mut ResultRows,
+        nodes: &[&Node],
+        edges: &[&Edge],
+        budget: &ExecutionBudget<'_>,
+    ) -> Result<bool, ExecutionError> {
+        let limit = self.limit.unwrap_or(ENGINE_LIMIT);
+        if self.order.is_empty() && result.rows.len() == limit {
+            return Ok(false);
+        }
+        if result.rows.len() == ENGINE_LIMIT {
+            // Native sorts the capped prefix and reports a lower bound when
+            // another match exists. Keep the prefix under this request budget.
+            result.truncated = true;
+            return Ok(false);
+        }
+        result.rows.push(self.project(nodes, edges));
+        if result.rows.len() == ENGINE_LIMIT && limit == ENGINE_LIMIT {
+            budget.check()?;
+            return Err(ExecutionError::RowCeiling);
+        }
+        Ok(true)
     }
 
     fn selectivity(&self, index: usize) -> u8 {
@@ -702,6 +792,97 @@ impl Query<'_> {
             })
             .collect()
     }
+}
+
+fn order_rows(
+    rows: &mut Vec<Vec<Vec<u8>>>,
+    keys: &[OrderKey],
+    limit: usize,
+    budget: &mut ExecutionBudget<'_>,
+) -> Result<(), ExecutionError> {
+    if rows.len() < 2 || limit == 0 {
+        rows.truncate(limit);
+        return Ok(());
+    }
+    let mut numeric = [false; ORDER_KEYS_MAX];
+    for (index, key) in keys.iter().enumerate() {
+        for row in rows.iter() {
+            budget.step()?;
+            let cell = c_string_bytes(&row[key.column]);
+            if !cell.is_empty() {
+                let digits = cell.strip_prefix(b"-").unwrap_or(cell);
+                numeric[index] =
+                    !digits.is_empty() && digits.iter().all(u8::is_ascii_digit);
+                break;
+            }
+        }
+    }
+
+    let mut sortable = Vec::with_capacity(rows.len());
+    for row in rows.drain(..) {
+        budget.step()?;
+        let mut numbers = [0; ORDER_KEYS_MAX];
+        for (index, key) in keys.iter().enumerate() {
+            if numeric[index] {
+                numbers[index] =
+                    native_sort_integer(c_string_bytes(&row[key.column]));
+            }
+        }
+        sortable.push((row, numbers));
+    }
+    budget.check()?;
+    // Stable ties preserve the scan's node and adjacency order.
+    sortable.sort_by(|(left, lhs), (right, rhs)| {
+        for (index, key) in keys.iter().enumerate() {
+            let comparison = if numeric[index] {
+                lhs[index].cmp(&rhs[index])
+            } else {
+                c_string_bytes(&left[key.column])
+                    .cmp(c_string_bytes(&right[key.column]))
+            };
+            if comparison != Ordering::Equal {
+                return if key.descending {
+                    comparison.reverse()
+                } else {
+                    comparison
+                };
+            }
+        }
+        Ordering::Equal
+    });
+    budget.check()?;
+    rows.extend(sortable.into_iter().take(limit).map(|(row, _)| row));
+    Ok(())
+}
+
+fn c_string_bytes(cell: &[u8]) -> &[u8] {
+    cell.split(|&byte| byte == 0).next().unwrap_or_default()
+}
+
+// C picks the numeric mode from the first nonempty cell. Later cells follow
+// (int)strtol, including leading whitespace, prefixes and overflow saturation.
+fn native_sort_integer(cell: &[u8]) -> i32 {
+    let start = cell
+        .iter()
+        .position(|&byte| !matches!(byte, b' ' | b'\t'..=b'\r'))
+        .unwrap_or(cell.len());
+    let cell = &cell[start..];
+    let negative = cell.starts_with(b"-");
+    let digits = cell
+        .strip_prefix(b"-")
+        .or_else(|| cell.strip_prefix(b"+"))
+        .unwrap_or(cell);
+    let mut number: c_long = 0;
+    for &digit in digits.iter().take_while(|digit| digit.is_ascii_digit()) {
+        let digit = c_long::from(digit - b'0');
+        number = number.saturating_mul(10);
+        number = if negative {
+            number.saturating_sub(digit)
+        } else {
+            number.saturating_add(digit)
+        };
+    }
+    number as i32
 }
 
 struct Edge {
