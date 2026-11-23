@@ -1,11 +1,13 @@
 //! Exercises explicit GraphQL relinks through the linked Mori executable.
 #![cfg(feature = "c-backend")]
 
+use std::cell::Cell;
 use std::fs::{self, DirBuilder};
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 use rusqlite::{Connection, OpenFlags, params};
 use serde_json::{Value, json};
@@ -616,6 +618,295 @@ fn linear_cypher_reads_through_the_callers_transaction() {
     snapshot.rollback().expect("caller owns transaction");
     let answer = query.execute_on(&db, CLIENT).expect("read after rollback");
     assert!(answer.rows.is_empty());
+}
+
+#[test]
+fn linear_cypher_stops_inside_high_fanout_adjacency() {
+    use cypher_linear::{ExecutionBudget, ExecutionError};
+
+    let fixture = Fixture::new();
+    let mut db = fixture.index(CLIENT);
+    let tx = db.transaction().expect("begin fixture write");
+    let caller = node(&tx, CLIENT, "Caller", "a", "a", "a.py");
+    let relay = node(&tx, CLIENT, "Relay", "b", "b", "b.py");
+    edge(&tx, CLIENT, caller, relay, "CALLS", json!({}));
+    for n in 0..2048 {
+        let name = format!("target{n}");
+        let target = node(&tx, CLIENT, "Other", &name, &name, "c.py");
+        edge(&tx, CLIENT, relay, target, "CALLS", json!({}));
+    }
+    tx.commit().expect("publish fixture data");
+
+    let query = cypher_linear::classify(
+        "MATCH (a:Caller)-[:CALLS]->(b:Relay)-[:CALLS]->(c:Wanted) RETURN c.name",
+    )
+    .expect("classify bounded query");
+    assert!(query.execute_on(&db, CLIENT).unwrap().rows.is_empty());
+
+    // If the budget were tested only after collecting adjacency, the scan
+    // would return this storage error instead of the deadline or cancellation.
+    db.execute(
+        "UPDATE nodes SET properties = X'FF' WHERE name = 'target2047'",
+        [],
+    )
+    .expect("make a tail endpoint unreadable");
+    assert!(matches!(
+        query.execute_on(&db, CLIENT),
+        Err(ExecutionError::Storage(_))
+    ));
+
+    let start = Instant::now();
+    let checks = Cell::new(0);
+    let clock = || {
+        checks.set(checks.get() + 1);
+        start
+            + Duration::from_secs(match checks.get() {
+                1 => 0,
+                2 => 29,
+                _ => 30,
+            })
+    };
+    let mut deadline = ExecutionBudget::new(&clock, &|| false);
+    assert!(matches!(
+        query.execute_with_budget(&db, CLIENT, &mut deadline),
+        Err(ExecutionError::Deadline)
+    ));
+    assert_eq!(checks.get(), 3);
+
+    let checks = Cell::new(0);
+    let cancelled = || {
+        checks.set(checks.get() + 1);
+        checks.get() == 2
+    };
+    let now = || start;
+    let mut budget = ExecutionBudget::new(&now, &cancelled);
+    assert!(matches!(
+        query.execute_with_budget(&db, CLIENT, &mut budget),
+        Err(ExecutionError::Cancelled)
+    ));
+    assert_eq!(checks.get(), 2);
+}
+
+#[test]
+fn linear_cypher_filters_each_bound_node_before_expanding_it() {
+    let fixture = Fixture::new();
+    let mut db = fixture.index(CLIENT);
+    let tx = db.transaction().expect("begin fixture write");
+    let rejected_start =
+        node(&tx, CLIENT, "Start", "ignored", "start.skip", "a.py");
+    let start = node(&tx, CLIENT, "Start", "selected", "start.keep", "a.py");
+    let rejected_end =
+        node(&tx, CLIENT, "Finish", "ignored", "finish.skip", "b.py");
+    let end = node(&tx, CLIENT, "Finish", "selected", "finish.keep", "b.py");
+    let rejected_relay =
+        node(&tx, CLIENT, "Relay", "ignored", "relay.skip", "c.py");
+    let relay = node(&tx, CLIENT, "Relay", "selected", "relay.keep", "c.py");
+    let target = node(&tx, CLIENT, "Target", "answer", "target", "d.py");
+    for n in 0..3072 {
+        let name = format!("other{n}");
+        let other = node(&tx, CLIENT, "Other", &name, &name, "other.py");
+        edge(&tx, CLIENT, rejected_start, other, "FWD", json!({}));
+        edge(&tx, CLIENT, other, rejected_end, "REV", json!({}));
+        edge(&tx, CLIENT, rejected_relay, other, "TAIL_LINK", json!({}));
+    }
+    edge(&tx, CLIENT, start, target, "FWD", json!({}));
+    edge(&tx, CLIENT, start, end, "REV", json!({}));
+    edge(&tx, CLIENT, start, rejected_relay, "JOIN", json!({}));
+    edge(&tx, CLIENT, start, relay, "JOIN", json!({}));
+    edge(&tx, CLIENT, relay, target, "TAIL_LINK", json!({}));
+    tx.commit().expect("publish fixture data");
+
+    for (cypher, expected) in [
+        (
+            "MATCH (a:Start)-[:FWD]->(b:Target) WHERE a.name = 'selected' RETURN b.name",
+            "answer",
+        ),
+        (
+            "MATCH (a:Start)-[:REV]->(b:Finish) WHERE a.file_path = 'a.py' AND b.name = 'selected' RETURN a.name",
+            "selected",
+        ),
+        (
+            "MATCH (a:Start)-[:JOIN]->(b:Relay)-[:TAIL_LINK]->(c:Target) WHERE b.name = 'selected' RETURN c.name",
+            "answer",
+        ),
+    ] {
+        let started = Instant::now();
+        let checks = Cell::new(0);
+        let clock = || {
+            checks.set(checks.get() + 1);
+            if checks.get() <= 3 {
+                started
+            } else {
+                started + Duration::from_secs(30)
+            }
+        };
+        let mut budget = cypher_linear::ExecutionBudget::new(&clock, &|| false);
+        let query = cypher_linear::classify(cypher)
+            .unwrap_or_else(|_| panic!("classify bounded query: {cypher}"));
+        let answer = query
+            .execute_with_budget(&db, CLIENT, &mut budget)
+            .unwrap_or_else(|error| panic!("{cypher}: {error:?}"));
+        assert_eq!(answer.rows, [[expected]], "{cypher}");
+        assert_eq!(checks.get(), 3, "expanded rejected adjacency: {cypher}");
+        assert_eq!(
+            fixture.query_reference(CLIENT, cypher)["rows"],
+            json!(answer.rows),
+            "{cypher}",
+        );
+    }
+}
+
+#[test]
+fn linear_cypher_keeps_its_graph_when_a_replacement_publishes() {
+    let fixture = Fixture::new();
+    let mut db = fixture.index(CLIENT);
+    db.execute_batch("PRAGMA journal_mode = DELETE;")
+        .expect("use a single-file database");
+    let tx = db.transaction().expect("begin fixture write");
+    let caller = node(&tx, CLIENT, "Caller", "a", "a", "a.py");
+    for n in 0..1024 {
+        let qualified_name = format!("target{n}");
+        let target = node(&tx, CLIENT, "Target", "old", &qualified_name, "b.py");
+        edge(&tx, CLIENT, caller, target, "CALLS", json!({}));
+    }
+    tx.commit().expect("publish fixture data");
+
+    let live_path = fixture.0.join("cache").join("client.db");
+    let staged_path = live_path.with_extension("stage");
+    fs::copy(&live_path, &staged_path).expect("copy the staged generation");
+    let staged = Connection::open(&staged_path).expect("open staged generation");
+    staged
+        .execute("UPDATE nodes SET name = 'new' WHERE label = 'Target'", [])
+        .expect("prepare the replacement graph");
+    drop(staged);
+
+    let query = cypher_linear::classify(
+        "MATCH (a:Caller)-[:CALLS]->(b:Target) RETURN b.name",
+    )
+    .expect("classify bounded query");
+    let start = Instant::now();
+    let checks = Cell::new(0);
+    let clock = || {
+        checks.set(checks.get() + 1);
+        if checks.get() == 3 {
+            fs::rename(&staged_path, &live_path).expect("publish replacement");
+        }
+        start
+    };
+    let mut budget = cypher_linear::ExecutionBudget::new(&clock, &|| false);
+    let original = query
+        .execute_with_budget(&db, CLIENT, &mut budget)
+        .expect("read the caller's graph during publication");
+    assert!(checks.get() > 3, "publish inside adjacency traversal");
+    assert_eq!(original.rows.len(), 1024);
+    assert!(original.rows.iter().all(|row| row == &["old"]));
+    let replacement = query
+        .execute(&live_path, CLIENT)
+        .expect("read the published replacement");
+    assert_eq!(replacement.rows.len(), 1024);
+    assert!(replacement.rows.iter().all(|row| row == &["new"]));
+}
+
+#[test]
+fn opt_in_rust_query_preserves_cursor_and_daemon_dispatch() {
+    const QUERY: &str = "MATCH (a:Caller)-[:CALLS]->(b:Target) RETURN b.name";
+    const ORDERED: &str =
+        "MATCH (a:Caller)-[:CALLS]->(b:Target) RETURN b.name ORDER BY b.name";
+    let fixture = Fixture::new();
+    let db = fixture.index(CLIENT);
+    let caller = node(&db, CLIENT, "Caller", "a", "a", "a.py");
+    for name in ["b", "c"] {
+        let callee = node(&db, CLIENT, "Target", name, name, "b.py");
+        edge(&db, CLIENT, caller, callee, "CALLS", json!({}));
+    }
+    drop(db);
+
+    let request = json!({"project": CLIENT, "query": QUERY, "format": "json", "max_rows": 1});
+    let reference_bin = Fixture::reference_binary();
+    let reference = fixture
+        .command(reference_bin)
+        .args(["cli", "--quiet", "query_graph", &request.to_string()])
+        .output()
+        .unwrap();
+    assert!(reference.status.success(), "{reference:?}");
+    let reference: Value = serde_json::from_slice(&reference.stdout).unwrap();
+    let stop = |binary| {
+        let result = fixture
+            .command(binary)
+            .args(["daemon", "stop"])
+            .output()
+            .unwrap();
+        assert!(result.status.success(), "{result:?}");
+    };
+    stop(reference_bin);
+    let reference_ordered = fixture.query_reference(CLIENT, ORDERED);
+
+    let candidate_bin = Path::new(MORI);
+    let start = fixture
+        .command(candidate_bin)
+        .env("MORI_IMPL_QUERY", "rust")
+        .env("CBM_LOG_LEVEL", "debug")
+        .args(["daemon", "start"])
+        .output()
+        .unwrap();
+    assert!(start.status.success(), "{start:?}");
+    let candidate = fixture
+        .command(candidate_bin)
+        .args(["cli", "--quiet", "query_graph", &request.to_string()])
+        .output()
+        .unwrap();
+    assert!(candidate.status.success(), "{candidate:?}");
+    let candidate: Value = serde_json::from_slice(&candidate.stdout).unwrap();
+    assert_eq!(candidate, reference);
+    let cursor = candidate["next_cursor"].as_str().expect("cursor");
+
+    let next = json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
+        "name": "query_graph",
+        "arguments": {"project": CLIENT, "query": QUERY, "cursor": cursor, "format": "json"}
+    }});
+    let ordered = json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {
+        "name": "query_graph",
+        "arguments": {"project": CLIENT, "query": ORDERED, "format": "json"}
+    }});
+    let requests = fixture.0.join("query-requests");
+    fs::write(
+        &requests,
+        format!(
+            "{}\n{}\n{next}\n{ordered}\n",
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"query-test","version":"1"}}}"#,
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        ),
+    )
+    .unwrap();
+    let forwarded = fixture
+        .command(candidate_bin)
+        .stdin(Stdio::from(fs::File::open(requests).unwrap()))
+        .output()
+        .unwrap();
+    stop(candidate_bin);
+    assert!(forwarded.status.success(), "{forwarded:?}");
+    let output = String::from_utf8(forwarded.stdout).unwrap();
+    let responses: Vec<Value> = output
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let result = |id| -> Value {
+        let reply = responses.iter().find(|reply| reply["id"] == id).unwrap();
+        let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+        serde_json::from_str(text).unwrap()
+    };
+    assert_eq!(result(2)["rows"], json!([["c"]]));
+    assert_eq!(result(3), reference_ordered);
+    let log =
+        fs::read_to_string(fixture.0.join("cache/logs/cbm-daemon.log")).unwrap();
+    assert_eq!(
+        log.lines()
+            .filter(|line| line.contains("query_graph.evaluator")
+                && line.contains("backend=rust"))
+            .count(),
+        2,
+        "the CLI and MCP cursor used Rust, and ORDER BY used C: {log}"
+    );
 }
 
 #[test]

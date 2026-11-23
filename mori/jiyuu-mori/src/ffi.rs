@@ -375,16 +375,20 @@ pub unsafe extern "C" fn main(argc: c_int, argv: *mut *mut c_char) -> c_int {
     // stays valid for the process lifetime, including each worker's own main.
     unsafe {
         jiyuu_mori::mori_register_graphql_callbacks();
+        #[cfg(unix)]
+        jiyuu_mori::mori_register_staged_graph_writer();
         c_transport::register();
         crate::index_manifest::register();
         crate::query_cli::c_args::register();
         crate::cli_output::register();
         crate::initialize::c_initialize::register();
         crate::mcp_dispatch::register();
+        crate::cypher_ffi::register();
         crate::tool_list::c_tool_list::register();
         crate::search::register();
         crate::path_verdict::register();
         crate::snippet_window::register();
+        crate::ingest_trace::register();
     }
 
     // SAFETY: argc and argv come straight from the C runtime and meet the

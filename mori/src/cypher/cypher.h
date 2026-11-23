@@ -338,6 +338,11 @@ typedef struct {
     char *warning;
 } cbm_cypher_result_t;
 
+#define CBM_CYPHER_DEADLINE_ERROR                                                  \
+    "query exceeded the execution time limit — narrow the pattern with a WHERE " \
+    "filter, use a directed MATCH instead of an unbounded OPTIONAL MATCH, or add LIMIT"
+#define CBM_CYPHER_ROW_CEILING_ERROR "result exceeded 100k rows — use narrower filters or add LIMIT"
+
 /* Execute a Cypher query against a store.
  * max_rows: limit on output rows; 0 or any value above the 100k ceiling uses
  *   the ceiling.

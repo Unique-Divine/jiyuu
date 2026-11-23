@@ -272,9 +272,45 @@ void cbm_mcp_set_read_override(cbm_mcp_read_override_fn handle,
 typedef int (*cbm_mcp_method_selector_fn)(const char *method);
 void cbm_mcp_set_method_selector(cbm_mcp_method_selector_fn select);
 
+/* Decode validated parameters for tools/call. The callback can return
+ * false to use the C decoder. C frees the returned name and arguments. */
+typedef bool (*cbm_mcp_tool_call_decoder_fn)(const char *params_json, char **name_out,
+                                            char **arguments_out);
+void cbm_mcp_set_tool_call_decoder(cbm_mcp_tool_call_decoder_fn decode);
+
 /* Search SQL and bound values borrowed from one MCP request. */
 struct sqlite3;
 struct sqlite3_stmt;
+
+typedef struct {
+    const char *data;
+    size_t len;
+} cbm_mcp_cypher_cell_t;
+
+/* These callbacks copy borrowed cells into the native response owner.
+ * The evaluator emits the header once before emitting complete rows. */
+typedef struct {
+    void *context;
+    bool (*begin)(void *context, const cbm_mcp_cypher_cell_t *columns, size_t column_count,
+                  size_t row_capacity);
+    bool (*row)(void *context, const cbm_mcp_cypher_cell_t *cells);
+    void (*storage_error)(void *context, cbm_mcp_cypher_cell_t detail);
+} cbm_mcp_cypher_sink_t;
+
+enum {
+    CBM_MCP_CYPHER_OK,
+    CBM_MCP_CYPHER_UNSUPPORTED,
+    CBM_MCP_CYPHER_DEADLINE,
+    CBM_MCP_CYPHER_CANCELLED,
+    CBM_MCP_CYPHER_ROW_CEILING,
+    CBM_MCP_CYPHER_ERROR,
+};
+
+typedef int (*cbm_mcp_cypher_evaluator_fn)(struct sqlite3 *db, const char *query,
+                                           const char *project, bool (*cancelled)(void *),
+                                           void *cancel_context, const cbm_mcp_cypher_sink_t *sink);
+void cbm_mcp_set_cypher_evaluator(cbm_mcp_cypher_evaluator_fn evaluate);
+
 typedef struct {
     const char *fts_query;
     const char *project;
@@ -402,6 +438,18 @@ typedef cbm_mcp_coverage_verdict_t (*cbm_mcp_coverage_verdict_reader_fn)(
     const cbm_mcp_coverage_path_request_t *request);
 void cbm_mcp_set_coverage_verdict_reader(cbm_mcp_coverage_verdict_reader_fn reader);
 
+/* Path result codes are shared with the Rust coverage normalizer. */
+typedef enum {
+    COVERAGE_PATH_OK = 0,
+    COVERAGE_PATH_OUTSIDE,
+    COVERAGE_PATH_INVALID,
+} coverage_path_result_t;
+
+typedef coverage_path_result_t (*cbm_mcp_coverage_path_normalizer_fn)(const char *input,
+                                                                      bool allow_root, char *out,
+                                                                      size_t out_size);
+void cbm_mcp_set_coverage_path_normalizer(cbm_mcp_coverage_path_normalizer_fn normalizer);
+
 typedef struct {
     int node_start;
     int node_end;
@@ -427,6 +475,11 @@ typedef cbm_mcp_snippet_window_t (*cbm_mcp_snippet_window_planner_fn)(
     const cbm_mcp_snippet_window_request_t *request);
 /* Register before request threads start. */
 void cbm_mcp_set_snippet_window_planner(cbm_mcp_snippet_window_planner_fn planner);
+
+typedef bool (*cbm_mcp_ingest_trace_normalizer_fn)(const char *const *hops, size_t hop_count,
+                                                   int64_t *count);
+/* Register before request threads start. */
+void cbm_mcp_set_ingest_trace_normalizer(cbm_mcp_ingest_trace_normalizer_fn normalize);
 
 /* ── Supervised background index (RSS isolation, #832) ────────── */
 
