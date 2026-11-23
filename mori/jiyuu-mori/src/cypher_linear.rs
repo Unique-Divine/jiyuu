@@ -512,6 +512,9 @@ impl Query<'_> {
                                 &[&start, &next, &last],
                                 &[&edge, &last_edge],
                             )?);
+                            if rows.len() == ENGINE_LIMIT {
+                                return Err(ExecutionError::RowCeiling);
+                            }
                         }
                     }
                 } else {
@@ -525,14 +528,12 @@ impl Query<'_> {
                             break 'starts;
                         }
                         rows.push(self.project(&nodes, &[&edge])?);
+                        if rows.len() == ENGINE_LIMIT {
+                            return Err(ExecutionError::RowCeiling);
+                        }
                     }
                 }
             }
-        }
-        // The native evaluator rejects a materialized result at the engine
-        // ceiling, including a result with an explicit LIMIT at that value.
-        if rows.len() == ENGINE_LIMIT {
-            return Err(ExecutionError::RowCeiling);
         }
         let columns = self
             .projections
