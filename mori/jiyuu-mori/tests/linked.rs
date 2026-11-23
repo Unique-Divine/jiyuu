@@ -542,12 +542,24 @@ fn run_stdio_in(
     let requests = scratch.0.join("requests");
     fs::write(&requests, input).expect("write MCP requests");
     command_in(bin, scratch)
+        .env("CBM_LOG_LEVEL", "debug")
         .args(args)
         .stdin(Stdio::from(
             fs::File::open(requests).expect("open MCP requests"),
         ))
         .output()
         .expect("run MCP server")
+}
+
+fn assert_frontend_receive(stderr: &[u8], rust: bool, status: &str) {
+    let log = String::from_utf8_lossy(stderr);
+    let marker = "msg=mcp.frontend.receive backend=rust";
+    let events: Vec<_> =
+        log.lines().filter(|line| line.contains(marker)).collect();
+    assert_eq!(events.len(), usize::from(rust), "{log}");
+    if rust {
+        assert!(events[0].ends_with(&format!("status={status}")), "{log}");
+    }
 }
 
 #[test]
@@ -632,6 +644,7 @@ fn mcp_tools_call_params_and_ids_match_c_through_daemon() {
         let stop = run_in(bin, &scratch, &["daemon", "stop"]);
         assert!(stop.status.success(), "{stop:?}");
         assert!(output.status.success(), "{output:?}");
+        assert_frontend_receive(&output.stderr, rust, "eof");
 
         let log =
             fs::read_to_string(scratch.0.join("cache/logs/cbm-daemon.log"))
@@ -781,15 +794,18 @@ fn mcp_queued_and_active_cancellation_match_c_through_daemon() {
             fs::write(repo.join("hang_me.py"), "def smoke(): return 1\n")
                 .expect("write worker hang fixture");
             let marker = scratch.0.join("worker-descendant.pid");
+            let stderr = scratch.0.join("frontend.stderr");
 
             // An MCP frontend starts its own isolated daemon. Only the
             // worker spawned for the held index run writes the marker.
             let mut frontend = Frontend(
                 command_in(bin, &scratch)
+                    .env("CBM_LOG_LEVEL", "debug")
                     .env("CBM_TEST_HANG_ON", "hang_me")
                     .env("CBM_TEST_WORKER_DESCENDANT_PID_FILE", &marker)
                     .stdin(Stdio::piped())
                     .stdout(Stdio::piped())
+                    .stderr(Stdio::from(fs::File::create(&stderr).unwrap()))
                     .spawn()
                     .expect("start MCP frontend"),
             );
@@ -836,9 +852,12 @@ fn mcp_queued_and_active_cancellation_match_c_through_daemon() {
                 );
                 std::thread::sleep(Duration::from_millis(10));
             }
-            // The first request is still running. Queue a different ID with
-            // the same spelling, then cancel it before releasing the worker.
+            // The first request is still running. Fill all eight queue
+            // slots, then send cancellations for the queued and active IDs.
             request(json!({"jsonrpc":"2.0","id":queued_id,"method":"ping"}));
+            for filler in 100..107 {
+                request(json!({"jsonrpc":"2.0","id":filler,"method":"ping"}));
+            }
             request(json!({
                 "jsonrpc":"2.0","method":"notifications/cancelled",
                 "params":{"requestId":queued_id},
@@ -856,6 +875,12 @@ fn mcp_queued_and_active_cancellation_match_c_through_daemon() {
             assert_eq!(queued["id"], queued_id);
             assert_eq!(queued["error"]["code"], -32800);
             assert!(queued.get("result").is_none(), "{queued}");
+            for filler in 100..107 {
+                assert_eq!(
+                    response(),
+                    json!({"jsonrpc":"2.0","id":filler,"result":{}})
+                );
+            }
             assert_eq!(
                 response(),
                 json!({"jsonrpc":"2.0","id":"after","result":{}}),
@@ -872,6 +897,11 @@ fn mcp_queued_and_active_cancellation_match_c_through_daemon() {
             );
             reader.join().expect("join MCP stdout reader");
             assert!(frontend.0.wait().expect("wait for MCP frontend").success());
+            assert_frontend_receive(
+                &fs::read(stderr).unwrap(),
+                side == "rs",
+                "eof",
+            );
             [cancelled, queued]
         };
 
@@ -881,25 +911,65 @@ fn mcp_queued_and_active_cancellation_match_c_through_daemon() {
 
 #[test]
 fn stdio_mixed_framing_matches_c_after_input_eof() {
+    use std::fmt::Write;
+
     let initialize = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"linked-test","version":"1"}}}"#;
     let initialized =
         r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
     let call = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_projects","arguments":{}}}"#;
-    let input = format!(
+    let mut input = format!(
         "{initialize}\n{initialized}\nContent-Length: {}\r\n\r\n{call}",
         call.len()
     );
-    let reference = run_stdio(&c_binary(), "c", &[], &input);
-    let linked = run_stdio(Path::new(MORI), "rs", &[], &input);
-    assert_eq!(linked, reference);
+    for id in 3..15 {
+        writeln!(
+            input,
+            "{{\"jsonrpc\":\"2.0\",\"id\":{id},\"method\":\"ping\"}}"
+        )
+        .unwrap();
+    }
+    let reference = run_stdio_in(&c_binary(), &Scratch::new("c"), &[], &input);
+    let linked = run_stdio_in(Path::new(MORI), &Scratch::new("rs"), &[], &input);
+    assert!(reference.status.success(), "{reference:?}");
+    assert!(linked.status.success(), "{linked:?}");
+    assert_frontend_receive(&reference.stderr, false, "eof");
+    assert_frontend_receive(&linked.stderr, true, "eof");
+    assert_eq!(linked.stdout, reference.stdout);
+    let linked = String::from_utf8(linked.stdout).unwrap();
     let (initialize_response, framed) =
         linked.split_once('\n').expect("newline response");
     assert!(initialize_response.contains("\"id\":1"));
     assert!(initialize_response.contains("\"protocolVersion\":\"2025-06-18\""));
-    let (header, body) = framed.split_once("\r\n\r\n").expect("framed response");
-    assert_eq!(header, format!("Content-Length: {}", body.len()));
+    let (header, bytes) =
+        framed.split_once("\r\n\r\n").expect("framed response");
+    let length = header
+        .strip_prefix("Content-Length: ")
+        .unwrap()
+        .parse()
+        .unwrap();
+    let (body, tail) = bytes.split_at(length);
     assert!(body.contains("\"id\":2"));
     assert!(body.contains("projects: 0"));
+    let tail_ids: Vec<_> = tail
+        .lines()
+        .map(|line| {
+            serde_json::from_str::<serde_json::Value>(line).unwrap()["id"]
+                .as_i64()
+                .unwrap()
+        })
+        .collect();
+    assert_eq!(tail_ids, (3..15).collect::<Vec<_>>());
+}
+
+#[test]
+fn stdio_incomplete_frame_fails_through_frontend_loop() {
+    let input = "Content-Length: 20\r\n\r\n{}";
+    for (bin, rust) in [(c_binary(), false), (PathBuf::from(MORI), true)] {
+        let output = run_stdio_in(&bin, &Scratch::new("truncated"), &[], input);
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        assert!(output.stdout.is_empty(), "{output:?}");
+        assert_frontend_receive(&output.stderr, rust, "error");
+    }
 }
 
 #[test]
