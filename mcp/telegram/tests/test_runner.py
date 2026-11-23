@@ -38,3 +38,25 @@ async def test_connect_authorized_client_rejects_unauthorized_session():
 
     assert client.connected is True
     assert client.started is False
+
+
+@pytest.mark.asyncio
+async def test_legacy_saved_authorization_uses_same_broker_lock(monkeypatch, tmp_path):
+    import os
+    from contextlib import AsyncExitStack
+    from types import SimpleNamespace
+    from telethon.crypto.authkey import AuthKey
+    from telethon.sessions import StringSession
+    from telegram_mcp.session_store import State, StoreError, lock_authorization
+
+    monkeypatch.setenv("BOKU_HOME", os.fspath(tmp_path / "boku"))
+    session = StringSession()
+    session.auth_key = AuthKey(b"f" * 256)
+    monkeypatch.setattr(runner, "clients", {"legacy": SimpleNamespace(session=session)})
+    async with AsyncExitStack() as stack:
+        runner._lock_saved_authorizations(stack, None)
+        with pytest.raises(StoreError, match="already in use"):
+            with lock_authorization(State.discover(), session):
+                pytest.fail("broker acquired the legacy session lock twice")
+    with lock_authorization(State.discover(), session):
+        pass

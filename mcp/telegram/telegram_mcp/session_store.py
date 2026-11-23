@@ -16,6 +16,7 @@ import sys
 
 from telethon import TelegramClient
 from telethon.sessions import StringSession
+from telethon.sessions.abstract import Session
 
 MAX_PROFILE_BYTES = 4096
 CUSTODY_ID = 8274304175
@@ -155,10 +156,10 @@ def read_profile(state: State, name: str) -> Profile:
     return Profile.parse(_helper(state, "get", name))
 
 
-def lock_authorization(state: State, session: StringSession):
+def lock_authorization(state: State, session: Session):
     """Prevent use of the same saved authorization by another local broker."""
     key = session.auth_key
-    if key is None:
+    if key is None or not key.key or len(key.key) != 256:
         raise StoreError("Telegram profile has no authorization")
     digest = hashlib.sha256(key.key).hexdigest()
     return lock_file(

@@ -36,6 +36,22 @@ async def _connect_authorized_client(label, client) -> None:
     )
 
 
+def _lock_saved_authorizations(stack: AsyncExitStack, state: State | None) -> None:
+    if state is not None:
+        for profile in _runtime.STORED_PROFILES.values():
+            stack.enter_context(lock_authorization(state, profile.session()))
+    elif os.name == "posix":
+        sessions = []
+        for client in clients.values():
+            session = client.session
+            if session is not None and session.auth_key is not None and session.auth_key.key:
+                sessions.append(session)
+        if sessions:
+            legacy_state = State.discover()
+            for session in sessions:
+                stack.enter_context(lock_authorization(legacy_state, session))
+
+
 async def _main() -> None:
     state = _runtime.STORED_STATE
     broker_enabled = os.environ.get("TELEGRAM_BROKER") == "1"
@@ -48,9 +64,7 @@ async def _main() -> None:
                 state, {profile.user_id for profile in _runtime.STORED_PROFILES.values()}
             )
         async with AsyncExitStack() as stack:
-            if state is not None:
-                for profile in _runtime.STORED_PROFILES.values():
-                    stack.enter_context(lock_authorization(state, profile.session()))
+            _lock_saved_authorizations(stack, state)
             stack.push_async_callback(_disconnect_clients)
             labels = ", ".join(clients.keys())
             print(f"Starting {len(clients)} Telegram client(s) ({labels})...", file=sys.stderr)
