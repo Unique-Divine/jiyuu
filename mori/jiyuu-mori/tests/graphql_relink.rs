@@ -688,6 +688,75 @@ fn linear_cypher_stops_inside_high_fanout_adjacency() {
 }
 
 #[test]
+fn linear_cypher_filters_each_bound_node_before_expanding_it() {
+    let fixture = Fixture::new();
+    let mut db = fixture.index(CLIENT);
+    let tx = db.transaction().expect("begin fixture write");
+    let rejected_start =
+        node(&tx, CLIENT, "Start", "ignored", "start.skip", "a.py");
+    let start = node(&tx, CLIENT, "Start", "selected", "start.keep", "a.py");
+    let rejected_end =
+        node(&tx, CLIENT, "Finish", "ignored", "finish.skip", "b.py");
+    let end = node(&tx, CLIENT, "Finish", "selected", "finish.keep", "b.py");
+    let rejected_relay =
+        node(&tx, CLIENT, "Relay", "ignored", "relay.skip", "c.py");
+    let relay = node(&tx, CLIENT, "Relay", "selected", "relay.keep", "c.py");
+    let target = node(&tx, CLIENT, "Target", "answer", "target", "d.py");
+    for n in 0..3072 {
+        let name = format!("other{n}");
+        let other = node(&tx, CLIENT, "Other", &name, &name, "other.py");
+        edge(&tx, CLIENT, rejected_start, other, "FWD", json!({}));
+        edge(&tx, CLIENT, other, rejected_end, "REV", json!({}));
+        edge(&tx, CLIENT, rejected_relay, other, "END", json!({}));
+    }
+    edge(&tx, CLIENT, start, target, "FWD", json!({}));
+    edge(&tx, CLIENT, start, end, "REV", json!({}));
+    edge(&tx, CLIENT, start, rejected_relay, "JOIN", json!({}));
+    edge(&tx, CLIENT, start, relay, "JOIN", json!({}));
+    edge(&tx, CLIENT, relay, target, "END", json!({}));
+    tx.commit().expect("publish fixture data");
+
+    for (cypher, expected) in [
+        (
+            "MATCH (a:Start)-[:FWD]->(b:Target) WHERE a.name = 'selected' RETURN b.name",
+            "answer",
+        ),
+        (
+            "MATCH (a:Start)-[:REV]->(b:Finish) WHERE a.file_path = 'a.py' AND b.name = 'selected' RETURN a.name",
+            "selected",
+        ),
+        (
+            "MATCH (a:Start)-[:JOIN]->(b:Relay)-[:END]->(c:Target) WHERE b.name = 'selected' RETURN c.name",
+            "answer",
+        ),
+    ] {
+        let started = Instant::now();
+        let checks = Cell::new(0);
+        let clock = || {
+            checks.set(checks.get() + 1);
+            if checks.get() <= 3 {
+                started
+            } else {
+                started + Duration::from_secs(30)
+            }
+        };
+        let mut budget = cypher_linear::ExecutionBudget::new(&clock, &|| false);
+        let query =
+            cypher_linear::classify(cypher).expect("classify bounded query");
+        let answer = query
+            .execute_with_budget(&db, CLIENT, &mut budget)
+            .unwrap_or_else(|error| panic!("{cypher}: {error:?}"));
+        assert_eq!(answer.rows, [[expected]], "{cypher}");
+        assert_eq!(checks.get(), 3, "expanded rejected adjacency: {cypher}");
+        assert_eq!(
+            fixture.query_reference(CLIENT, cypher)["rows"],
+            json!(answer.rows),
+            "{cypher}",
+        );
+    }
+}
+
+#[test]
 fn linear_cypher_keeps_its_graph_when_a_replacement_publishes() {
     let fixture = Fixture::new();
     let mut db = fixture.index(CLIENT);

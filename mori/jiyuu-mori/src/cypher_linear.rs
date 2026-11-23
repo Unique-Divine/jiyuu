@@ -556,7 +556,7 @@ impl Query<'_> {
         'starts: while let Some(row) = start_nodes.next()? {
             budget.step()?;
             let start = Node::read(row, 0)?;
-            if !start.matches(&self.nodes[start_index].inline)? {
+            if !self.matches_node(start_index, &start)? {
                 continue;
             }
             let mut hop = self.hops[0];
@@ -571,19 +571,18 @@ impl Query<'_> {
                         adjacency.neighbors(next.id, hop, budget)?
                     {
                         budget.step()?;
-                        if self.matches_node(2, &last)?
-                            && self.conditions(&[&start, &next, &last])?
-                        {
-                            if rows.len() == limit {
-                                break 'starts;
-                            }
-                            rows.push(self.project(
-                                &[&start, &next, &last],
-                                &[&edge, &last_edge],
-                            )?);
-                            if rows.len() == ENGINE_LIMIT {
-                                return Err(ExecutionError::RowCeiling);
-                            }
+                        if !self.matches_node(2, &last)? {
+                            continue;
+                        }
+                        if rows.len() == limit {
+                            break 'starts;
+                        }
+                        rows.push(self.project(
+                            &[&start, &next, &last],
+                            &[&edge, &last_edge],
+                        )?);
+                        if rows.len() == ENGINE_LIMIT {
+                            return Err(ExecutionError::RowCeiling);
                         }
                     }
                 } else {
@@ -592,14 +591,12 @@ impl Query<'_> {
                     } else {
                         [&start, &next]
                     };
-                    if self.conditions(&nodes)? {
-                        if rows.len() == limit {
-                            break 'starts;
-                        }
-                        rows.push(self.project(&nodes, &[&edge])?);
-                        if rows.len() == ENGINE_LIMIT {
-                            return Err(ExecutionError::RowCeiling);
-                        }
+                    if rows.len() == limit {
+                        break 'starts;
+                    }
+                    rows.push(self.project(&nodes, &[&edge])?);
+                    if rows.len() == ENGINE_LIMIT {
+                        return Err(ExecutionError::RowCeiling);
                     }
                 }
             }
@@ -636,15 +633,15 @@ impl Query<'_> {
 
     fn matches_node(&self, index: usize, node: &Node) -> rusqlite::Result<bool> {
         let pattern = &self.nodes[index];
-        if pattern.label.is_some_and(|label| label != node.label) {
+        if pattern.label.is_some_and(|label| label != node.label)
+            || !node.matches(&pattern.inline)?
+        {
             return Ok(false);
         }
-        node.matches(&pattern.inline)
-    }
-
-    fn conditions(&self, nodes: &[&Node]) -> rusqlite::Result<bool> {
-        for &(index, (property, value)) in &self.filters {
-            if nodes[index].property(property)? != value {
+        // The classifier accepts single-binding predicates. Evaluate each
+        // when its node is bound so rejected nodes never expand adjacency.
+        for &(target, (property, value)) in &self.filters {
+            if target == index && node.property(property)? != value {
                 return Ok(false);
             }
         }
