@@ -2199,15 +2199,22 @@ static yyjson_doc *application_repair_read_meta(cbm_store_t *store, const char *
     return doc;
 }
 
-static bool application_wildcard_has_unknown_peer(yyjson_doc *observations) {
+static const char *application_wildcard_recovery_block(yyjson_doc *observations, bool *missing) {
     yyjson_obj_iter iter = yyjson_obj_iter_with(yyjson_doc_get_root(observations));
     yyjson_val *key;
     while ((key = yyjson_obj_iter_next(&iter)) != NULL) {
-        if (yyjson_is_null(yyjson_obj_iter_get_val(key))) {
-            return true;
+        const char *observed = yyjson_get_str(yyjson_obj_iter_get_val(key));
+        if (!observed) {
+            return "wildcard_unknown_peer";
+        }
+        char current[CBM_GRAPH_COMPARE_GENERATION_SIZE];
+        if (!cbm_cross_repo_read_generation(yyjson_get_str(key), current, sizeof(current))) {
+            *missing = true;
+        } else if (strcmp(observed, current) != 0) {
+            return "wildcard_generation_changed";
         }
     }
-    return false;
+    return NULL;
 }
 
 /* Called under the wildcard lease. Snapshot the saved selection and
@@ -2285,13 +2292,14 @@ static bool application_recover_repair_project(cbm_daemon_application_t *applica
     } else if (ok && stale) {
         ok = application_match_saved_targets(application, "recovery", project, (int)count);
     } else if (ok && reverse_pending) {
-        if (wildcard && application_wildcard_has_unknown_peer(observations)) {
-            /* Reverse-only reconciliation requires a recorded generation.
+        const char *reason =
+            wildcard ? application_wildcard_recovery_block(observations, &missing) : NULL;
+        if (reason) {
+            /* Reverse-only reconciliation requires matching generations.
              * An explicit wildcard relink can refresh the selection. */
-            cbm_log_info("cross_repo.recovery_skipped", "project", project, "reason",
-                         "wildcard_unknown_peer");
+            cbm_log_info("cross_repo.recovery_skipped", "project", project, "reason", reason);
         } else {
-            ok = application_reconcile_reverse(application, project);
+            ok = !missing && application_reconcile_reverse(application, project);
         }
     }
     yyjson_doc_free(observations);

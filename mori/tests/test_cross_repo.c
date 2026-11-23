@@ -6,6 +6,7 @@
 #include "test_helpers.h"
 
 #include "foundation/compat.h"
+#include "foundation/compat_thread.h"
 #include "foundation/mem_core.h"
 #include "pipeline/pass_cross_repo.h"
 #include "pipeline/pipeline.h"
@@ -1997,6 +1998,23 @@ TEST(cross_repo_saved_repair_rolls_back_client_and_keeps_legacy_caller) {
     PASS();
 }
 
+typedef struct {
+    atomic_bool held;
+    atomic_bool release;
+} cross_repo_first_access_t;
+
+static void *cross_repo_hold_first_access(void *opaque) {
+    cross_repo_first_access_t *lock = opaque;
+    sqlite3_mutex *first_access = sqlite3_mutex_alloc(SQLITE_MUTEX_STATIC_APP1);
+    sqlite3_mutex_enter(first_access);
+    atomic_store(&lock->held, true);
+    while (!atomic_load(&lock->release)) {
+        cbm_usleep(1000);
+    }
+    sqlite3_mutex_leave(first_access);
+    return NULL;
+}
+
 TEST(cross_repo_pending_snapshot_survives_first_access_contention) {
     cross_repo_fixture_t fixture;
     char live[512], stage[512];
@@ -2021,12 +2039,21 @@ TEST(cross_repo_pending_snapshot_survives_first_access_contention) {
     bool pending = false;
     bool reopened = false;
     bool checked = false;
-    if (pinned) {
-        sqlite3_mutex *first_access = sqlite3_mutex_alloc(SQLITE_MUTEX_STATIC_APP1);
-        sqlite3_mutex_enter(first_access);
-        reopened = cbm_cross_repo_reverse_pending("client");
-        checked = cbm_cross_repo_read_reverse_pending(source, "client", &pending);
-        sqlite3_mutex_leave(first_access);
+    cross_repo_first_access_t lock = {0};
+    cbm_thread_t thread;
+    bool started =
+        pinned && cbm_thread_create(&thread, 0, cross_repo_hold_first_access, &lock) == 0;
+    if (started) {
+        uint64_t deadline = cbm_now_ms() + 5000;
+        while (!atomic_load(&lock.held) && cbm_now_ms() < deadline) {
+            cbm_usleep(1000);
+        }
+        if (atomic_load(&lock.held)) {
+            reopened = cbm_cross_repo_reverse_pending("client");
+            checked = cbm_cross_repo_read_reverse_pending(source, "client", &pending);
+        }
+        atomic_store(&lock.release, true);
+        (void)cbm_thread_join(&thread);
     }
     cbm_store_read_scope_close(scope);
     cbm_store_close(source);
@@ -2035,6 +2062,7 @@ TEST(cross_repo_pending_snapshot_survives_first_access_contention) {
     cross_repo_fixture_end(&fixture);
 
     ASSERT_TRUE(pinned);
+    ASSERT_TRUE(started);
     ASSERT_FALSE(reopened);
     ASSERT_TRUE(checked);
     ASSERT_TRUE(pending);
