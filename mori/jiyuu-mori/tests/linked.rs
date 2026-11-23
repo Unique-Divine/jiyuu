@@ -4,7 +4,9 @@
 //! a pure-Rust `cargo test` compiles this file to nothing.
 #![cfg(feature = "c-backend")]
 
+use std::ffi::OsStr;
 use std::fs;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -112,6 +114,95 @@ fn version_matches_c() {
         .unwrap_or_else(|| panic!("C --version printed {c_out:?}"));
     assert_eq!(rs_out, format!("mori {version}"));
     assert_eq!(c.stderr, rs.stderr);
+}
+
+#[test]
+fn top_level_command_precedence_matches_c() {
+    for args in [
+        &["--profile", "--help", "cli"][..],
+        &["cli", "--help", "--version"],
+        &["cli", "list_projects", "--help"],
+        &["daemon", "--help"],
+        &["daemon", "cli", "--help"],
+        &["config", "--help"],
+        &["allow-root", "--help"],
+        &["cli", "--version"],
+        &["hook-augment", "--event", "invalid"],
+        &["--tool-profile=invalid"],
+    ] {
+        assert_same(args);
+    }
+}
+
+#[test]
+fn malformed_internal_roles_are_rejected_before_dispatch() {
+    let fingerprint = "0123456789abcdef".repeat(4);
+    let worker = [
+        "cli",
+        "--index-worker",
+        "--index-worker-build",
+        &fingerprint,
+        "index_repository",
+        "{}",
+        "--response-out",
+        "response",
+    ];
+    let mut worker_with_daemon_marker = worker;
+    worker_with_daemon_marker[7] = "--cbm-daemon-internal";
+    let overflow = format!("{}0", usize::MAX);
+    let cases = [
+        vec!["--help", "--cbm-daemon-internal"],
+        vec!["--cbm-daemon-internal", "--cbm-daemon-permanent", "--help"],
+        vec!["--help", "--index-worker"],
+        worker_with_daemon_marker.to_vec(),
+        [&worker[..], &["--index-worker-memory-budget-bytes", "0"]].concat(),
+        [
+            &worker[..],
+            &["--index-worker-memory-budget-bytes", &overflow],
+        ]
+        .concat(),
+        [
+            &worker[..],
+            &[
+                "--index-worker-publish-fence",
+                "fence",
+                "--index-worker-quarantine",
+                "quarantine",
+            ],
+        ]
+        .concat(),
+    ];
+    for bin in [&c_binary(), Path::new(MORI)] {
+        for args in &cases {
+            let output = run(bin, "invalid-role", args);
+            assert_eq!(output.status.code(), Some(1), "{bin:?} {args:?}");
+            assert!(output.stdout.is_empty(), "{bin:?} {args:?}");
+            assert_eq!(
+                output.stderr, b"mori: invalid internal process arguments\n",
+                "{bin:?} {args:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn top_level_selection_preserves_non_utf8_argv() {
+    for bin in [&c_binary(), Path::new(MORI)] {
+        let output = command_in(bin, &Scratch::new("argv"))
+            .args([
+                "cli".as_ref(),
+                OsStr::from_bytes(b"tool-\xff"),
+                "--help".as_ref(),
+            ])
+            .output()
+            .expect("run binary");
+        assert_eq!(output.status.code(), Some(1), "{bin:?}");
+        assert!(output.stdout.is_empty(), "{bin:?}");
+        assert_eq!(
+            output.stderr, b"error: unknown tool 'tool-\xff'\n",
+            "{bin:?}"
+        );
+    }
 }
 
 #[test]
