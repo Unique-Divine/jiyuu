@@ -172,6 +172,8 @@ struct cbm_daemon_application_job {
     bool cancelled;
     bool cancel_requested;
     bool supervision_failed;
+    bool repair_pending;
+    bool source_changed;
     /* #2144: an async index_repository holds one subscriber reference on
      * the application's behalf, released only at terminal publish, so the
      * job outlives the request and session that started it. */
@@ -247,6 +249,7 @@ struct cbm_daemon_application {
     bool update_thread_started;
     bool update_thread_done;
     bool update_thread_joining;
+    bool repair_draining;
     atomic_int stopping; /* Also observed by post-publication link repair. */
     /* See cbm_daemon_application_set_permanent. */
     bool permanent;
@@ -1032,17 +1035,16 @@ static void application_index_record_cut_short_locked(cbm_daemon_application_job
     }
 }
 
-/* Reap completed job threads only after every logical demand subscription and
- * watcher callback storage waiter has released the job. Exactly one caller
- * removes a job under the mutex. */
+/* Reap completed jobs after their subscribers, watcher waiters and repair
+ * drain have released them. Exactly one caller removes a job under the mutex. */
 static void application_jobs_reap_completed(cbm_daemon_application_t *application) {
     for (;;) {
         cbm_daemon_application_job_t *reap = NULL;
         cbm_mutex_lock(&application->mutex);
         cbm_daemon_application_job_t **cursor = &application->jobs;
         while (*cursor) {
-            if ((*cursor)->thread_done && (*cursor)->subscribers == 0 &&
-                (*cursor)->watcher_waiters == 0) {
+            if ((*cursor)->thread_done && !(*cursor)->repair_pending &&
+                (*cursor)->subscribers == 0 && (*cursor)->watcher_waiters == 0) {
                 reap = *cursor;
                 *cursor = reap->next;
                 reap->next = NULL;
@@ -2020,8 +2022,9 @@ static void application_auto_index_retry_pending_locked(cbm_daemon_application_t
     }
 }
 
-static void application_job_publish(cbm_daemon_application_job_t *job,
-                                    application_job_execution_t *execution) {
+static bool application_job_publish(cbm_daemon_application_job_t *job,
+                                    application_job_execution_t *execution, bool source_changed,
+                                    bool reverse_pending) {
     if (!execution->response) {
         execution->response = application_job_failure_response(
             execution->have_last_result ? &execution->last_result : NULL,
@@ -2045,6 +2048,10 @@ static void application_job_publish(cbm_daemon_application_job_t *job,
                               (execution->unsafe_terminal && execution->have_last_result &&
                                !execution->last_result.cancellation_requested);
     job->terminal = true;
+    job->source_changed = source_changed;
+    job->repair_pending = !application->stopping && (source_changed || reverse_pending);
+    bool drain_repairs = job->repair_pending && !application->repair_draining;
+    application->repair_draining |= drain_repairs;
     application_index_watch_publish_locked(job);
     application_index_record_finish_locked(job);
     if (job->async_owned) {
@@ -2066,16 +2073,88 @@ static void application_job_publish(cbm_daemon_application_job_t *job,
     }
     application_auto_index_retry_pending_locked(application);
     cbm_mutex_unlock(&application->mutex);
+    return drain_repairs;
 }
 
-static void application_log_provider_repair(void *context, const char *client,
-                                            const char *const *targets, int target_count) {
-    const char *provider = context;
+typedef struct {
+    cbm_daemon_application_t *application;
+    const char *provider;
+    yyjson_mut_doc *attempted;
+} application_repair_batch_t;
+
+/* The scan reads the complete saved selection while the wildcard write
+ * lease is held. A repair never admits an index job or publishes a source. */
+static void application_repair_client(void *context, const char *client, const char *const *targets,
+                                      int target_count) {
+    application_repair_batch_t *batch = context;
+    yyjson_mut_val *attempted = yyjson_mut_doc_get_root(batch->attempted);
+    if (yyjson_mut_obj_get(attempted, client)) {
+        return;
+    }
+    yyjson_mut_val *key = yyjson_mut_strcpy(batch->attempted, client);
+    yyjson_mut_val *value = yyjson_mut_true(batch->attempted);
+    if (!yyjson_mut_obj_add(attempted, key, value)) {
+        cbm_log_warn("cross_repo.repair_deferred", "client", client, "reason", "allocation");
+        return;
+    }
+    cbm_cross_repo_result_t result = cbm_cross_repo_match_cancellable(
+        client, (const char **)targets, target_count, &batch->application->stopping);
+    bool complete = !result.failed && !result.cancelled && result.skipped_count == 0;
     char count[CBM_SZ_32];
-    (void)targets;
     snprintf(count, sizeof(count), "%d", target_count);
-    cbm_log_info("cross_repo.repair_candidate", "provider", provider, "client", client, "targets",
-                 count);
+    cbm_log_info("cross_repo.repair_result", "provider", batch->provider, "client", client,
+                 "targets", count, "status", complete ? "repaired" : "pending");
+    cbm_cross_repo_result_free(&result);
+}
+
+/* One terminal index thread owns the drain. Other publishers leave their
+ * jobs linked until it consumes their notifications. Acquire the wildcard
+ * lease only after the publishing jobs stop reserving their projects. */
+static void application_drain_repairs(cbm_daemon_application_t *application) {
+    bool leased = application_mutation_begin_internal(application, NULL, "*", true);
+    yyjson_mut_doc *attempted = leased ? yyjson_mut_doc_new(NULL) : NULL;
+    if (attempted) {
+        yyjson_mut_doc_set_root(attempted, yyjson_mut_obj(attempted));
+    }
+    if (!application->stopping && (!leased || !yyjson_mut_doc_get_root(attempted))) {
+        cbm_log_warn("cross_repo.repair_deferred", "reason", leased ? "allocation" : "lease");
+    }
+    for (;;) {
+        cbm_mutex_lock(&application->mutex);
+        cbm_daemon_application_job_t *job = application->jobs;
+        while (job && !job->repair_pending) {
+            job = job->next;
+        }
+        if (!job) {
+            application->repair_draining = false;
+            cbm_mutex_unlock(&application->mutex);
+            break;
+        }
+        cbm_mutex_unlock(&application->mutex);
+
+        if (leased) {
+            if (cbm_cross_repo_reverse_pending(job->project_key) &&
+                !cbm_cross_repo_reconcile_published(job->project_key, &application->stopping)) {
+                cbm_log_info("cross_repo.reverse_pending", "project", job->project_key);
+            }
+            char generation[CBM_GRAPH_COMPARE_GENERATION_SIZE];
+            if (job->source_changed && yyjson_mut_doc_get_root(attempted) &&
+                cbm_cross_repo_read_generation(job->project_key, generation, sizeof(generation))) {
+                application_repair_batch_t batch = {application, job->project_key, attempted};
+                cbm_cross_repo_visit_stale_clients(job->project_key, generation,
+                                                   application_repair_client, &batch,
+                                                   &application->stopping);
+                cbm_log_info("cross_repo.repair_scan_complete", "provider", job->project_key);
+            }
+        }
+        cbm_mutex_lock(&application->mutex);
+        job->repair_pending = false;
+        cbm_mutex_unlock(&application->mutex);
+    }
+    yyjson_mut_doc_free(attempted);
+    if (leased) {
+        cbm_daemon_application_project_mutation_end(application, "*");
+    }
 }
 
 static void *application_job_thread(void *opaque) {
@@ -2096,19 +2175,13 @@ static void *application_job_thread(void *opaque) {
      * coalesces identical requests and blocks same-project daemon mutations.
      * The physical worker is the sole owner of the cross-process project lock,
      * so the daemon must not pre-acquire that same native lease here. */
-    char repair_mode[CBM_SZ_32];
-    bool observe_repairs =
-        cbm_safe_getenv("MORI_OBSERVE_PROVIDER_REPAIR", repair_mode, sizeof(repair_mode), NULL) &&
-        strcmp(repair_mode, "1") == 0;
     char prior_generation[CBM_GRAPH_COMPARE_GENERATION_SIZE];
     bool have_prior_generation = false;
     if (!application_job_wait_for_mutations(job)) {
         application_job_execution_cancel(&execution);
     } else {
-        if (observe_repairs) {
-            have_prior_generation = cbm_cross_repo_read_generation(
-                job->project_key, prior_generation, sizeof(prior_generation));
-        }
+        have_prior_generation = cbm_cross_repo_read_generation(job->project_key, prior_generation,
+                                                               sizeof(prior_generation));
         application_attempt_t attempt;
         application_attempt_status_t status =
             application_job_run_attempt(job, NULL, NULL, &attempt);
@@ -2123,28 +2196,16 @@ static void *application_job_thread(void *opaque) {
             }
         }
     }
-    application_job_publish(job, &execution);
-
-    /* The worker and its source lease are gone, and the published job is
-     * terminal. Multi-project writes take the same wildcard lease as an
-     * explicit wildcard relink. On contention, leave the pending marker. */
     cbm_daemon_application_t *application = job->application;
-    if (execution.successful && cbm_cross_repo_reverse_pending(job->project_key) &&
-        cbm_daemon_application_project_mutation_try_begin(application, "*")) {
-        if (!cbm_cross_repo_reconcile_published(job->project_key, &application->stopping)) {
-            cbm_log_info("cross_repo.reverse_pending", "project", job->project_key);
-        }
-        cbm_daemon_application_project_mutation_end(application, "*");
-    }
-    if (have_prior_generation && execution.successful) {
-        char current[CBM_GRAPH_COMPARE_GENERATION_SIZE];
-        if (cbm_cross_repo_read_generation(job->project_key, current, sizeof(current)) &&
-            strcmp(prior_generation, current) != 0) {
-            cbm_cross_repo_visit_stale_clients(job->project_key, current,
-                                               application_log_provider_repair, job->project_key,
-                                               &application->stopping);
-            cbm_log_info("cross_repo.repair_scan_complete", "provider", job->project_key);
-        }
+    char current[CBM_GRAPH_COMPARE_GENERATION_SIZE];
+    bool source_changed =
+        execution.successful &&
+        cbm_cross_repo_read_generation(job->project_key, current, sizeof(current)) &&
+        (!have_prior_generation || strcmp(prior_generation, current) != 0);
+    bool reverse_pending =
+        execution.successful && !source_changed && cbm_cross_repo_reverse_pending(job->project_key);
+    if (application_job_publish(job, &execution, source_changed, reverse_pending)) {
+        application_drain_repairs(application);
     }
     cbm_mem_class_flush_thread();
     cbm_mutex_lock(&application->mutex);
@@ -2928,7 +2989,9 @@ static char *application_job_wait_for_session(cbm_daemon_application_session_t *
             return cbm_mcp_text_result(
                 "index operation cancelled for this session. " CBM_MCP_INDEX_ASYNC_HINT, true);
         }
-        if (job->terminal) {
+        /* A one-shot CLI can be the last session in an on-demand daemon.
+         * Keep it connected until this publication's repair has run. */
+        if (job->terminal && (application->permanent || !job->repair_pending)) {
             char *response = job->response ? strdup(job->response) : NULL;
             session->active_job = NULL;
             session->active_job_subscribed = false;
