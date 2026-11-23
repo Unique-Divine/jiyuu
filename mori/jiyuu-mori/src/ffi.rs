@@ -546,8 +546,8 @@ unsafe extern "C" fn cbm_rust_main_subcommand(
     Subcommand::None
 }
 
-/// The C runtime calls this entry point. Rust handles developer export here,
-/// then the C startup routine calls the Rust selectors with prepared argv.
+/// The C runtime calls this entry point. Rust handles developer export and
+/// standalone UI here. Other commands enter C startup and use the Rust selectors.
 /// Returning hands the exit code to the C runtime.
 ///
 /// # Safety
@@ -558,7 +558,8 @@ unsafe extern "C" fn cbm_rust_main_subcommand(
 pub unsafe extern "C" fn main(argc: c_int, argv: *mut *mut c_char) -> c_int {
     // SAFETY: the C runtime provides argc initialized, non-null argv slots.
     let mut args = unsafe { argv_bytes(argc, argv) }.skip(1);
-    if args.next() == Some(b"dev") {
+    let command = args.next();
+    if command == Some(b"dev") {
         // SAFETY: SQLite has not been used yet. Initialize the same
         // allocator as C main before the exporter opens the database.
         unsafe { cbm_alloc_init() };
@@ -584,8 +585,7 @@ pub unsafe extern "C" fn main(argc: c_int, argv: *mut *mut c_char) -> c_int {
         crate::ingest_trace::register();
     }
 
-    // SAFETY: argc and argv come straight from the C runtime and meet the
-    // contract of C main, which cbm_c_main is.
+    // SAFETY: these process-wide callbacks are registered before C starts any work.
     unsafe {
         cbm_mcp_set_read_override(read_override, release_payload);
         cbm_store_set_file_outline_reader(read_file_outline);
@@ -596,6 +596,10 @@ pub unsafe extern "C" fn main(argc: c_int, argv: *mut *mut c_char) -> c_int {
         );
         cbm_mcp_set_project_page_builder(build_project_page);
         crate::project_response::register_renderers(release_payload);
-        cbm_c_main(argc, argv)
     }
+    if command == Some(b"ui") {
+        return crate::ui::run(&args.collect::<Vec<_>>());
+    }
+    // SAFETY: the original C runtime arguments meet cbm_c_main's contract.
+    unsafe { cbm_c_main(argc, argv) }
 }
