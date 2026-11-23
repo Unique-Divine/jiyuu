@@ -144,7 +144,7 @@ import { allowedWorkspace, initialWorkspace, workspaceStrings as workspaceText }
 import { experimentalAgentsEnabled } from './app/feature-flags';
 import type { Chip, MenuExtra, MenuWiring, TabDescriptor } from './app/AtlasChrome';
 import { AtlasApi, TREE_ROUTE } from './app/atlas-api';
-import { ATLAS_BUILD_SUFFIX, ATLAS_VERSION } from './app/build-info';
+import { ATLAS_VERSION } from './app/build-info';
 import { messages } from './i18n/messages';
 import {
     KEY_LISTENER_OPTIONS,
@@ -4894,8 +4894,6 @@ function ProjectWindowView({ projectWindow }: { projectWindow: ProjectWindow<Win
                         onCoverage={reading => { setCoverage(reading.index); setCoverageMeta({ ...reading.answer.metadata }); setCoverageAsked(true); setCoverageError(''); setOverviewRevision(value => value + 1); }} />
                 </div>
             </>}
-            version={ATLAS_VERSION}
-            buildSuffix={ATLAS_BUILD_SUFFIX}
             chips={chips}
             tabs={tabDescriptors}
             onSelectTab={openFile}

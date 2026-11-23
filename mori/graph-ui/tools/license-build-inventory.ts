@@ -67,7 +67,7 @@ export function licenseBuildInventory(root: string): { app: Plugin; workers: () 
       for (const path of this.getWatchFiles()) record(path);
       for (const [name, output] of Object.entries(bundle)) {
         if (output.type === 'chunk') chunks.add(name);
-        else if (name === 'index.html' || name.endsWith('.css')) {
+        else if (name === 'index.html' || name.endsWith('.css') || name.endsWith('.woff2')) {
           // Only bundler outputs qualify. Files copied from public never
           // enter this hook; record bytes before inspecting the dist tree.
           generatedAssets[name] = createHash('sha256').update(output.source).digest('hex');
@@ -89,6 +89,14 @@ export function licenseBuildInventory(root: string): { app: Plugin; workers: () 
         if (/\.(wasm|m?js)$/.test(name)) {
           const source = runtimeHashes.get(outputs[name]);
           if (source) runtimeInputs[name] = record(source)!;
+        }
+      }
+      // Map emitted fonts to the byte-identical, licensed source files.
+      const fontDir = join(root, 'src/styles/fonts');
+      if (existsSync(fontDir)) for (const input of files(fontDir)) {
+        const source = record(input);
+        if (source) for (const [name, expected] of Object.entries(outputs)) {
+          if (name.endsWith('.woff2') && expected === inputs[source]) runtimeInputs[name] = source;
         }
       }
       // Public copies are not Rollup modules. Record their inputs, while the

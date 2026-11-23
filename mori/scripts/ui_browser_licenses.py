@@ -87,6 +87,12 @@ def validate_browser_build(ui_dir):
                     source.startswith("node_modules/onnxruntime-web/dist/") and
                     inputs.get(source) == expected):
                 continue
+            if (suffix == ".woff2" and source in {
+                    "src/styles/fonts/archivo-latin-wght-normal.woff2",
+                    "src/styles/fonts/geist-latin-wght-normal.woff2",
+                    "src/styles/fonts/jetbrains-mono-latin-wght-normal.woff2"
+            } and generated == expected and inputs.get(source) == expected):
+                continue
             raise ValueError(f"browser asset has unknown provenance: {name}")
     except (OSError, KeyError, TypeError, json.JSONDecodeError) as exc:
         raise ValueError("browser build evidence is missing or incomplete; run npm run build") from exc

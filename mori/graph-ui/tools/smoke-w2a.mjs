@@ -334,7 +334,7 @@ async function main() {
             [...document.querySelectorAll('[data-testid]')].map((node) => node.getAttribute('data-testid')),
         );
         report.brandText = (await page.locator('.atlas-brand').textContent())?.trim() ?? '';
-        report.versionChip = (await page.locator('[data-testid="atlas-version"]').textContent())?.trim() ?? '';
+        report.versionChip = await page.locator('[data-testid="atlas-version"]').count();
         report.menuText = (await page.locator('[data-testid="atlas-menu"]').innerText()).replace(/\s+/g, ' ').trim();
         report.commandPlaceholder =
             (await page.locator('[data-testid="atlas-command-input"]').getAttribute('placeholder')) ?? '';
@@ -535,7 +535,7 @@ async function main() {
         failure === null &&
         missingTestids.length === 0 &&
         /MORI GRAPH/.test(report.brandText) &&
-        /^v\d+\.\d+\.\d+/.test(report.versionChip) &&
+        report.versionChip === 0 &&
         // Nachgezogen am 2026-08-29 (W7a, Nutzerauftrag): der Lauf nagelte
         // [f]ile fest, also ausgerechnet einen der vier Menuepunkte ohne
         // Verdrahtung. Eine Attrappe darf keine Zusicherung sein. Verlangt
