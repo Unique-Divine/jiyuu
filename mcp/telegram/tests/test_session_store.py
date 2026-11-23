@@ -50,7 +50,7 @@ def test_helper_uses_pipes_and_discards_its_diagnostics(monkeypatch, tmp_path):
 
     def helper(arguments, **options):
         seen.append((arguments, options))
-        return SimpleNamespace(stdout=demo_profile())
+        return SimpleNamespace(stdout=demo_profile(), stderr=b"", returncode=0)
 
     monkeypatch.setattr(store.shutil, "which", lambda _: "/private/local-secret-store")
     monkeypatch.setattr(store.subprocess, "run", helper)
@@ -67,6 +67,13 @@ def test_helper_uses_pipes_and_discards_its_diagnostics(monkeypatch, tmp_path):
     assert seen[1][1]["input"] == demo_profile()
     assert seen[1][1]["env"] == {}
     assert "sessionString" not in " ".join(seen[1][0])
+    monkeypatch.setattr(
+        store.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(stdout=b"", stderr=demo_profile(), returncode=1),
+    )
+    with pytest.raises(store.StoreError, match="^Encrypted profile operation failed$"):
+        store.read_profile(state, "test")
 
 
 @pytest.mark.asyncio
@@ -80,7 +87,7 @@ async def test_import_only_stores_live_verified_account(monkeypatch, tmp_path):
     class Client:
         def __init__(self, session, api_id, api_hash, **kwargs):
             assert api_id == 123
-            assert kwargs == {"request_retries": 0}
+            assert kwargs["request_retries"] == kwargs["flood_sleep_threshold"] == 0
 
         async def connect(self):
             events.append("connect")
@@ -93,7 +100,7 @@ async def test_import_only_stores_live_verified_account(monkeypatch, tmp_path):
 
     monkeypatch.setattr(store, "TelegramClient", Client)
     monkeypatch.setattr(store, "_helper", lambda *_: events.append("put"))
-    with pytest.raises(store.StoreError, match="could not be verified"):
+    with pytest.raises(store.StoreError, match="does not match"):
         await store.import_profile(state, "test", profile)
     assert events == ["connect", "disconnect"]
     user.id = 42

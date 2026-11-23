@@ -27,6 +27,10 @@ class StoreError(Exception):
     """A safe diagnostic that can be shown without credential values."""
 
 
+class ProfileMissing(StoreError):
+    """The helper confirmed that there is no entry for this label."""
+
+
 def valid_name(name: str) -> str:
     if NAME.fullmatch(name) is None:
         raise StoreError("Invalid stored profile name")
@@ -142,13 +146,20 @@ def _helper(state: State, operation: str, name: str, data: bytes = b"") -> bytes
             ],
             input=data,
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
             timeout=15,
-            check=True,
+            check=False,
             env={},
         )
     except (OSError, subprocess.SubprocessError):
         raise StoreError("Encrypted profile operation failed") from None
+    if result.returncode != 0:
+        if (
+            operation == "get"
+            and result.stderr == b"local-secret-store: encrypted entry does not exist\n"
+        ):
+            raise ProfileMissing("Encrypted Telegram MCP profile does not exist")
+        raise StoreError("Encrypted profile operation failed")
     return result.stdout
 
 
@@ -192,29 +203,56 @@ def lock_file(state: State, filename: str, conflict: str):
         os.close(fd)
 
 
+async def verify_authorization(session: StringSession, api_id: int, api_hash: str) -> int:
+    # Keep transport diagnostics out of migration and import output.
+    import logging
+
+    logger = logging.Logger("telegram-profile-verification")
+    logger.addHandler(logging.NullHandler())
+    client = TelegramClient(
+        session, api_id, api_hash, request_retries=0, flood_sleep_threshold=0, base_logger=logger
+    )
+
+    async def check() -> int:
+        await client.connect()
+        user = await client.get_me()
+        user_id = getattr(user, "id", None)
+        if type(user_id) is not int or not 0 < user_id < 2**63:
+            raise StoreError("Telegram user identity could not be verified")
+        validate_identity(user, user_id)
+        return user_id
+
+    try:
+        return await asyncio.wait_for(check(), timeout=20)
+    except Exception:
+        raise StoreError("Telegram authorization could not be verified") from None
+    finally:
+        try:
+            await asyncio.wait_for(client.disconnect(), timeout=5)
+        except Exception:
+            raise StoreError("Telegram authorization could not disconnect safely") from None
+
+
+def lock_profile_writes(state: State):
+    return lock_file(
+        state, "profile-writes.lock", "Another Telegram profile update is in progress"
+    )
+
+
+def write_profile(state: State, name: str, profile: Profile) -> None:
+    _helper(state, "put", name, profile.encoded())
+
+
 async def import_profile(state: State, name: str, profile: Profile) -> None:
     valid_name(name)
     session = profile.session()
-    with lock_authorization(state, session):
-        client = TelegramClient(session, profile.api_id, profile.api_hash, request_retries=0)
-        try:
-
-            async def check() -> None:
-                await client.connect()
-                user = await client.get_me()
-                if user is None or not hasattr(user, "bot"):
-                    raise StoreError("Telegram user identity could not be verified")
-                validate_identity(user, profile.user_id)
-
-            await asyncio.wait_for(check(), timeout=20)
-        except Exception:
-            raise StoreError("Telegram authorization could not be verified") from None
-        finally:
-            try:
-                await asyncio.wait_for(client.disconnect(), timeout=5)
-            except Exception:
-                raise StoreError("Telegram authorization could not disconnect safely") from None
-        _helper(state, "put", name, profile.encoded())
+    with lock_profile_writes(state), lock_authorization(state, session):
+        if (
+            await verify_authorization(session, profile.api_id, profile.api_hash)
+            != profile.user_id
+        ):
+            raise StoreError("Telegram authorization does not match the approved human profile")
+        write_profile(state, name, profile)
 
 
 def main() -> None:
