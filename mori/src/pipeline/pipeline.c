@@ -3243,14 +3243,33 @@ static void materialize_stage_backup(cbm_pipeline_t *p) {
     p->existing_generation = p->backup_succeeded;
 }
 
+typedef struct {
+    cbm_pipeline_t *pipeline;
+    cbm_file_info_t *files;
+    int file_count;
+    const cbm_file_hash_t *baseline;
+    int baseline_count;
+    bool force_full_on_mismatch;
+    cbm_index_staged_route_fn choose_staged;
+} existing_generation_route_t;
+
+static cbm_index_live_route_fn index_live_route;
+static cbm_index_staged_route_fn index_staged_route;
+
+void cbm_pipeline_set_index_route(cbm_index_live_route_fn live, cbm_index_staged_route_fn staged) {
+    index_live_route = live;
+    index_staged_route = staged;
+}
+
 /* The live generation is provably current: read-only, it passes the shallow
  * integrity and format checks the staged route applies to its copy, and the
  * exact semantic-manifest test the staged route would answer no-op with. A
  * copy of it would route to that no-op and publish the same database again,
  * so the run ends here with nothing copied, sealed or renamed. Any doubt
  * answers false and the run copies and routes exactly as before. */
-static bool live_generation_current(cbm_pipeline_t *p, const cbm_file_hash_t *baseline_manifest,
-                                    int baseline_count) {
+static bool live_generation_current(void *data) {
+    const existing_generation_route_t *route = data;
+    cbm_pipeline_t *p = route->pipeline;
     struct stat db_st;
     if (!p->live_db_path || stat(p->live_db_path, &db_st) != 0) {
         return false;
@@ -3263,29 +3282,34 @@ static bool live_generation_current(cbm_pipeline_t *p, const cbm_file_hash_t *ba
     bool current = cbm_store_check_integrity(store);
     if (current) {
         cbm_store_get_format_version(store, &fmt);
-        current =
-            fmt == CBM_INDEX_FORMAT_VERSION &&
-            cbm_pipeline_incremental_generation_exact(p, store, baseline_manifest, baseline_count);
+        current = fmt == CBM_INDEX_FORMAT_VERSION &&
+                  cbm_pipeline_incremental_generation_exact(p, store, route->baseline,
+                                                            route->baseline_count);
     }
     cbm_store_close(store);
     return current;
 }
 
-/* Route an existing generation. Full rebuilds never delete the live DB here:
- * publication owns the eventual atomic replacement after every pass and
- * metadata write has succeeded. */
-static int try_incremental_or_delete_db(cbm_pipeline_t *p, cbm_file_info_t *files, int file_count,
-                                        const cbm_file_hash_t *baseline_manifest,
-                                        int baseline_count, bool force_full_on_mismatch) {
+static int finish_live_route(void *data) {
+    const existing_generation_route_t *route = data;
+    cbm_pipeline_t *p = route->pipeline;
+    if (route->choose_staged) {
+        cbm_log_info("pipeline.index_route", "implementation", "rust", "generation", "live",
+                     "outcome", "noop");
+    }
+    p->stage_backup_pending = false;
+    p->live_noop = true;
+    cbm_log_info("pipeline.route", "path", "incremental_manifest", "generation", "live");
+    cbm_log_info("incremental.noop", "reason", "semantic_manifest_equal", "generation", "live");
+    return 0;
+}
+
+/* Full rebuilds only remove the staging copy. Publication owns the eventual
+ * atomic replacement of the live DB. */
+static int route_existing_stage(void *data) {
+    const existing_generation_route_t *route = data;
+    cbm_pipeline_t *p = route->pipeline;
     if (p->stage_backup_pending) {
-        if (live_generation_current(p, baseline_manifest, baseline_count)) {
-            p->stage_backup_pending = false;
-            p->live_noop = true;
-            cbm_log_info("pipeline.route", "path", "incremental_manifest", "generation", "live");
-            cbm_log_info("incremental.noop", "reason", "semantic_manifest_equal", "generation",
-                         "live");
-            return 0;
-        }
         materialize_stage_backup(p);
     }
     if (!p->existing_generation) {
@@ -3344,8 +3368,9 @@ static int try_incremental_or_delete_db(cbm_pipeline_t *p, cbm_file_info_t *file
     }
 
     cbm_log_info("pipeline.route", "path", "incremental_manifest");
-    int rc = cbm_pipeline_run_incremental(p, db_path, files, file_count, baseline_manifest,
-                                          baseline_count, force_full_on_mismatch);
+    int rc = cbm_pipeline_run_incremental(p, db_path, route->files, route->file_count,
+                                          route->baseline, route->baseline_count,
+                                          route->force_full_on_mismatch, route->choose_staged);
     /* Delete the existing generation ONLY when we are about to rebuild it.
      * On main this was guarded by an early `return rc` for the incremental
      * path; this function has no such early return, so the delete must be
@@ -3366,6 +3391,30 @@ static int try_incremental_or_delete_db(cbm_pipeline_t *p, cbm_file_info_t *file
     }
     free(db_path);
     return rc;
+}
+
+static int try_incremental_or_delete_db(cbm_pipeline_t *p, cbm_file_info_t *files, int file_count,
+                                        const cbm_file_hash_t *baseline_manifest,
+                                        int baseline_count, bool force_full_on_mismatch) {
+    bool rust_route =
+        !p->frozen && p->existing_generation && index_live_route && index_staged_route;
+    existing_generation_route_t route = {
+        .pipeline = p,
+        .files = files,
+        .file_count = file_count,
+        .baseline = baseline_manifest,
+        .baseline_count = baseline_count,
+        .force_full_on_mismatch = force_full_on_mismatch,
+        .choose_staged = rust_route ? index_staged_route : NULL,
+    };
+    if (rust_route) {
+        return index_live_route(&route, p->stage_backup_pending, live_generation_current,
+                                finish_live_route, route_existing_stage);
+    }
+    if (p->stage_backup_pending && live_generation_current(&route)) {
+        return finish_live_route(&route);
+    }
+    return route_existing_stage(&route);
 }
 
 static const char *pipeline_mode_name(cbm_index_mode_t mode) {

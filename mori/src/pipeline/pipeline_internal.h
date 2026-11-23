@@ -1666,12 +1666,42 @@ extern _Atomic uint64_t g_sh_candidates;
 
 /* ── Incremental pipeline (pipeline_incremental.c) ───────────────── */
 
-/* Run incremental re-index on an existing disk DB.
- * Classifies files by mtime+size, deletes changed nodes, re-parses changed
- * files, merges into disk DB. Returns 0 on success. */
+typedef enum {
+    CBM_INDEX_PLAN_DECLINED,
+    CBM_INDEX_PLAN_READY,
+    CBM_INDEX_PLAN_FATAL,
+} cbm_index_plan_result_t;
+
+typedef enum {
+    CBM_INDEX_ROUTE_NOOP,
+    CBM_INDEX_ROUTE_CLOSURE,
+    CBM_INDEX_ROUTE_FULL_MODE,
+    CBM_INDEX_ROUTE_FULL_DECLINED,
+    CBM_INDEX_ROUTE_FATAL,
+} cbm_index_route_t;
+
+typedef bool (*cbm_index_exact_fn)(void *proof);
+typedef cbm_index_plan_result_t (*cbm_index_plan_fn)(void *proof);
+typedef int (*cbm_index_route_action_fn)(void *proof);
+typedef int (*cbm_index_live_route_fn)(void *proof, bool live_pending, cbm_index_exact_fn exact,
+                                       cbm_index_route_action_fn noop,
+                                       cbm_index_route_action_fn staged);
+typedef cbm_index_route_t (*cbm_index_staged_route_fn)(void *proof, bool force_full_on_mismatch,
+                                                       cbm_index_exact_fn exact,
+                                                       cbm_index_plan_fn plan);
+
+/* Install both callbacks before indexing threads start. C lends each proof
+ * context for the synchronous call. For live routing, call exact only when
+ * live_pending, then return the selected action's result verbatim. For staged
+ * routing, call exact once and call plan at most once, only on a mismatch
+ * eligible for closure. C owns all handles and executes the staged decision. */
+void cbm_pipeline_set_index_route(cbm_index_live_route_fn live, cbm_index_staged_route_fn staged);
+
+/* Route a stage with a loaded manifest, then execute a selected repair. */
 int cbm_pipeline_run_incremental(cbm_pipeline_t *p, const char *db_path, cbm_file_info_t *files,
                                  int file_count, const cbm_file_hash_t *baseline_manifest,
-                                 int baseline_count, bool force_full_on_mismatch);
+                                 int baseline_count, bool force_full_on_mismatch,
+                                 cbm_index_staged_route_fn choose_route);
 
 /* The exact no-op test cbm_pipeline_run_incremental routes by, read-only on
  * an already opened generation: true when that generation is current for the

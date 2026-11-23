@@ -32,6 +32,9 @@ mod path_verdict;
 #[cfg(all(feature = "c-backend", not(test)))]
 mod index_manifest;
 
+#[cfg(any(feature = "c-backend", test))]
+mod index_route;
+
 #[cfg(all(feature = "c-backend", not(test)))]
 mod snippet_window;
 
