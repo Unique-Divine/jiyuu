@@ -16,6 +16,7 @@ beforeEach(() => {
 afterEach(async () => { await act(async () => root.unmount()); host.remove(); });
 
 const makeProps = (): AtlasChromeProps => ({
+    chips: [], tabs: [], onSelectTab: vi.fn(), onCloseTab: vi.fn(),
     tree: { projectName: 'sample', rows: [], cursor: 0, activePath: '', note: '',
         onCursorChange: vi.fn(), onOpen: vi.fn(), onToggle: vi.fn(), onKeyDown: vi.fn() },
     breadcrumb: [], children: <input aria-label="Preserved reader" defaultValue="selected source" />,
