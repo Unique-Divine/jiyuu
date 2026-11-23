@@ -2,10 +2,13 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use rusqlite::{Connection, OpenFlags, Row, Statement, params};
 
 const ENGINE_LIMIT: usize = 100_000;
+const DEADLINE: Duration = Duration::from_secs(30);
+const CHECK_INTERVAL: usize = 1024;
 const PROPERTY_LIMIT: usize = 511;
 const NODE_COLUMNS: &str = "n.id, n.label, n.name, n.qualified_name, n.file_path, n.start_line, n.end_line, n.properties";
 
@@ -442,11 +445,53 @@ pub(crate) struct ResultRows {
 pub(crate) enum ExecutionError {
     Storage(rusqlite::Error),
     RowCeiling,
+    Deadline,
+    Cancelled,
 }
 
 impl From<rusqlite::Error> for ExecutionError {
     fn from(error: rusqlite::Error) -> Self {
         Self::Storage(error)
+    }
+}
+
+pub(crate) struct ExecutionBudget<'a> {
+    deadline: Instant,
+    now: &'a dyn Fn() -> Instant,
+    cancelled: &'a dyn Fn() -> bool,
+    remaining: usize,
+}
+
+impl<'a> ExecutionBudget<'a> {
+    pub(crate) fn new(
+        now: &'a dyn Fn() -> Instant,
+        cancelled: &'a dyn Fn() -> bool,
+    ) -> Self {
+        Self {
+            deadline: now() + DEADLINE,
+            now,
+            cancelled,
+            remaining: CHECK_INTERVAL,
+        }
+    }
+
+    fn check(&self) -> Result<(), ExecutionError> {
+        if (self.cancelled)() {
+            return Err(ExecutionError::Cancelled);
+        }
+        if (self.now)() >= self.deadline {
+            return Err(ExecutionError::Deadline);
+        }
+        Ok(())
+    }
+
+    fn step(&mut self) -> Result<(), ExecutionError> {
+        self.remaining -= 1;
+        if self.remaining == 0 {
+            self.remaining = CHECK_INTERVAL;
+            self.check()?;
+        }
+        Ok(())
     }
 }
 
@@ -467,6 +512,20 @@ impl Query<'_> {
         connection: &Connection,
         project: &str,
     ) -> Result<ResultRows, ExecutionError> {
+        self.execute_with_budget(
+            connection,
+            project,
+            &mut ExecutionBudget::new(&Instant::now, &|| false),
+        )
+    }
+
+    pub(crate) fn execute_with_budget(
+        &self,
+        connection: &Connection,
+        project: &str,
+        budget: &mut ExecutionBudget<'_>,
+    ) -> Result<ResultRows, ExecutionError> {
+        budget.check()?;
         let reversed =
             self.hops.len() == 1 && self.selectivity(1) > self.selectivity(0);
         let start_index = usize::from(reversed);
@@ -490,18 +549,23 @@ impl Query<'_> {
         let mut rows = Vec::new();
         let limit = self.limit.unwrap_or(ENGINE_LIMIT);
         'starts: while let Some(row) = start_nodes.next()? {
+            budget.step()?;
             let start = Node::read(row, 0)?;
             if !start.matches(&self.nodes[start_index].inline)? {
                 continue;
             }
             let mut hop = self.hops[0];
             hop.inbound ^= reversed;
-            for (next, edge) in adjacency.neighbors(start.id, hop)? {
+            for (next, edge) in adjacency.neighbors(start.id, hop, budget)? {
+                budget.step()?;
                 if !self.matches_node(second_index, &next)? {
                     continue;
                 }
                 if let Some(&hop) = self.hops.get(1) {
-                    for (last, last_edge) in adjacency.neighbors(next.id, hop)? {
+                    for (last, last_edge) in
+                        adjacency.neighbors(next.id, hop, budget)?
+                    {
+                        budget.step()?;
                         if self.matches_node(2, &last)?
                             && self.conditions(&[&start, &next, &last])?
                         {
@@ -535,6 +599,7 @@ impl Query<'_> {
                 }
             }
         }
+        budget.check()?;
         let columns = self
             .projections
             .iter()
@@ -640,7 +705,8 @@ impl<'a> Adjacency<'a> {
         &mut self,
         id: i64,
         hop: Hop<'_>,
-    ) -> rusqlite::Result<Vec<(Node, Edge)>> {
+        budget: &mut ExecutionBudget<'_>,
+    ) -> Result<Vec<(Node, Edge)>, ExecutionError> {
         let (statement, neighbor_column) = if hop.inbound {
             (&mut self.incoming, 2)
         } else {
@@ -649,6 +715,7 @@ impl<'a> Adjacency<'a> {
         let mut edges = statement.query(params![id, hop.kind])?;
         let mut neighbors = Vec::new();
         while let Some(edge) = edges.next()? {
+            budget.step()?;
             let neighbor: i64 = edge.get(neighbor_column)?;
             let mut nodes = self.node.query([neighbor])?;
             if let Some(row) = nodes.next()? {
