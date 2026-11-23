@@ -3,18 +3,18 @@
 ## Install From a Release
 
 Mori ships as `mori/v*` releases of https://github.com/Unique-Divine/jiyuu.
-Install Mori 0.14.0 with mise's `github:` backend. Keep the MCP server key
+Install Mori 0.14.1 with mise's `github:` backend. Keep the MCP server key
 `mori-graph`.
 
 ```toml
 # ~/.config/mise/config.toml
 [tools]
-"github:Unique-Divine/jiyuu" = { version = "0.14.0", version_prefix = "mori/v" }
+"github:Unique-Divine/jiyuu" = { version = "0.14.1", version_prefix = "mori/v" }
 ```
 
 ```sh
 mise install
-mori --version  # mori 0.14.0
+mori --version  # mori 0.14.1
 ```
 
 For a published release with a `mori-<version>-<target>.tar.gz` archive,
@@ -30,8 +30,8 @@ mori daemon stop
 ```
 
 When upgrading from C 0.13.1, stop its daemon with `codebase-memory-mcp`.
-Keep its mise pin and paths for rollback. After installing 0.14.0, update
-the MCP command and hooks as described below.
+Keep its mise pin and paths for rollback. After installing the new release,
+update the MCP command and hooks as described below.
 
 Remove any hand-built `mori` or `codebase-memory-mcp` earlier on `PATH`
 (for example in `~/.local/bin`), or it keeps shadowing the release.
