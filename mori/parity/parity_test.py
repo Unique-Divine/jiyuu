@@ -79,18 +79,56 @@ class ParityTest(unittest.TestCase):
         self.assertNotIn("CBM_WORKERS", sides[1].env())
 
   def test_path_parity_checks_the_observed_worker_paths(self) -> None:
-    sides = [parity.Side(n, "/bin/true", os.path.join(self.tmp, n), self.tmp)
-             for n in ("a", "b")]
-    for side in sides:
-      os.makedirs(os.path.join(side.cache, "logs"))
-      with open(os.path.join(side.cache, "logs", ".worker-log-1"), "w",
-                encoding="utf-8") as f:
-        f.write("level=info msg=pipeline.mode mode=sequential files=62\n")
-    self.assertIn("side b expected parallel", parity.verify_worker_paths(sides) or "")
-    with open(os.path.join(sides[1].cache, "logs", ".worker-log-1"), "w",
-              encoding="utf-8") as f:
+    side = parity.Side("b", "/bin/true", self.tmp, self.tmp)
+    log_dir = os.path.join(side.cache, "logs")
+    os.makedirs(log_dir)
+    before = os.path.join(log_dir, ".worker-log-before")
+    with open(before, "w", encoding="utf-8") as f:
+      f.write("level=info msg=pipeline.mode mode=sequential files=10\n")
+    previous = parity.worker_log_paths(side)
+    after = os.path.join(log_dir, ".worker-log-after")
+    with open(after, "w", encoding="utf-8") as f:
       f.write("level=info msg=pipeline.mode mode=parallel workers=12 files=62\n")
-    self.assertIsNone(parity.verify_worker_paths(sides))
+    observed = parity.observe_worker_paths(side, previous)
+    self.assertEqual(observed, [{"mode": "parallel", "files": 62}])
+
+    index = {"a": {"worker_paths": [{"mode": "sequential", "files": 62}]},
+             "b": {"worker_paths": observed}}
+    self.assertIsNone(parity.verify_worker_paths(index, fixture=True))
+    index["b"]["worker_paths"] = [{"mode": "sequential", "files": 10}]
+    self.assertIsNone(parity.verify_worker_paths(index, fixture=False))
+    self.assertIn("side b expected parallel",
+                  parity.verify_worker_paths(index, fixture=True) or "")
+    index["b"]["worker_paths"] = [{"mode": "sequential", "files": 62}]
+    self.assertIn("side b expected parallel",
+                  parity.verify_worker_paths(index, fixture=False) or "")
+
+  def test_path_parity_requires_a_parallel_repository(self) -> None:
+    def compare(sides, name, root, entries, retries):
+      for side in sides:
+        log_dir = os.path.join(side.cache, "logs")
+        os.makedirs(log_dir)
+        with open(os.path.join(log_dir, ".worker-log-fixture"), "w",
+                  encoding="utf-8") as f:
+          f.write("level=info msg=pipeline.mode mode=sequential files=10\n")
+      return parity.RepoResult(name, root)
+
+    repo = parity.corpus.Repo("small", None, None, None, None)
+    with (patch.object(parity.corpus, "load", return_value=[repo]),
+          patch.object(parity.corpus, "verify", return_value=parity.corpus.Check(
+            "small", True, False, [])),
+          patch.object(parity, "compare_repo", side_effect=compare),
+          redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO())):
+      work = self.tmp + "/work"
+      self.assertEqual(parity.main([
+        "run", "--path-parity", "--work", work, "--rt-prefix", work + "-rt",
+        "--scratch-root", self.tmp, "--bin-a", sys.executable, "--bin-b", sys.executable,
+      ]), 2)
+    with open(work + "/report.json", encoding="utf-8") as f:
+      report = json.load(f)
+    self.assertIn("requires at least one observed parallel", report["worker_path_error"])
+    self.assertEqual(report["repos"][0]["index"]["b"]["worker_paths"],
+                     [{"mode": "sequential", "files": 10}])
 
   def test_graphql_modes_are_reported_only_when_requested(self) -> None:
     for label, flags, requested in (

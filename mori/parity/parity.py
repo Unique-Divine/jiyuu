@@ -693,25 +693,39 @@ def finish(results: list[RepoResult], l4: list[dict[str, Any]],
   path = os.path.join(work, "report.json")
   with open(path, "w", encoding="utf-8") as f:
     json.dump(report, f, indent=1)
-  if any(r.error for r in results):
+  if any(r.error for r in results) or meta.get("worker_path_error"):
     return 2
   unlisted = any(not d["allowed"] for r in results for d in r.diffs)
   unlisted = unlisted or any(not d["allowed"] for d in l4)
   return 1 if unlisted else 0
 
 
-def verify_worker_paths(sides: list[Side]) -> str | None:
-  for side, expected in zip(sides, ("sequential", "parallel")):
-    log_dir = Path(side.cache) / "logs"
-    observed = {
-      mode
-      for worker_log in log_dir.glob(".worker-log-*")
-      for mode in re.findall(r"msg=pipeline\.mode mode=(sequential|parallel)\b",
-                             worker_log.read_text(encoding="utf-8", errors="replace"))
-    }
-    if observed != {expected}:
-      reported = ", ".join(sorted(observed)) or "none"
-      return f"side {side.name} expected {expected} worker path, observed {reported}"
+def worker_log_paths(side: Side) -> set[Path]:
+  return set((Path(side.cache) / "logs").glob(".worker-log-*"))
+
+
+def observe_worker_paths(side: Side, previous_logs: set[Path]
+                         ) -> list[dict[str, str | int]]:
+  observed = {
+    (mode, int(files))
+    for worker_log in worker_log_paths(side) - previous_logs
+    for mode, files in re.findall(
+      r"msg=pipeline\.mode mode=(sequential|parallel)(?: workers=\d+)? files=(\d+)\b",
+      worker_log.read_text(encoding="utf-8", errors="replace"))
+  }
+  return [{"mode": mode, "files": files} for mode, files in sorted(observed)]
+
+
+def verify_worker_paths(index: dict[str, dict[str, Any]], fixture: bool) -> str | None:
+  for name in ("a", "b"):
+    observations = index.get(name, {}).get("worker_paths", [])
+    if not observations:
+      return f"side {name} has no worker path evidence"
+    for observation in observations:
+      require_parallel = name == "b" and (fixture or observation["files"] > 50)
+      expected = "parallel" if require_parallel else "sequential"
+      if observation["mode"] != expected:
+        return f"side {name} expected {expected} worker path, observed {observation['mode']}"
   return None
 
 
@@ -737,19 +751,33 @@ def run(repos: list[tuple[str, str]], call_list: list[dict[str, Any]] | None,
   if a.profile:
     meta = {**meta, "worker_profiling": True}
   results = []
+  saw_parallel = False
   t0 = time.monotonic()
   for dir_, root in repos:
     log(f"repo {dir_} ({root})")
     try:
+      previous_logs = {s.name: worker_log_paths(s) for s in sides} if a.path_parity else {}
       result = compare_repo(sides, dir_, root, entries, a.timeout_retries)
-      if a.cmd == "ci" and a.path_parity and not result.error:
-        result.error = verify_worker_paths(sides)
+      if a.path_parity:
+        for side in sides:
+          observed = observe_worker_paths(side, previous_logs[side.name])
+          result.index.setdefault(side.name, {})["worker_paths"] = observed
+          description = ", ".join(f"{p['mode']} ({p['files']} files)" for p in observed)
+          log(f"    side {side.name} worker paths: {description or 'none'}")
+        result.error = result.error or verify_worker_paths(result.index, a.cmd == "ci")
+        if not result.error:
+          saw_parallel = saw_parallel or any(
+            p["mode"] == "parallel" for p in result.index["b"]["worker_paths"])
       results.append(result)
     except (sqlite3.Error, OSError, ValueError, KeyError, subprocess.TimeoutExpired) as e:
       log(f"  {dir_}: comparison failed: {e!r}")
       r = RepoResult(dir_, root)
       r.error = f"comparison failed: {e!r}"[:300]
       results.append(r)
+  if a.path_parity and not saw_parallel:
+    error = "path parity requires at least one observed parallel index on side b"
+    log(error)
+    meta = {**meta, "worker_path_error": error}
   l4: list[dict[str, Any]] = []
   l4_stats = None
   if call_list is not None:

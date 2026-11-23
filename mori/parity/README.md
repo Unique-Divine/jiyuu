@@ -42,4 +42,8 @@ and a GraphQL Route. On a host with at least two default workers, the run
 requires the sequential and parallel path markers in the worker logs. It
 compares the normalized graph with the usual allow-lists. Use
 `just parity --path-parity` with the same binary flags to compare a pinned
-corpus. Both commands skip tool-call replay.
+corpus. The report records each repository's observed worker path and file
+count per side. A corpus may include small repositories that take the
+sequential path on both sides. It must also contain at least one
+repository where side B takes the parallel path. Both commands skip
+tool-call replay.
