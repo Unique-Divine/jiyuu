@@ -3094,20 +3094,6 @@ static bool rpc_manage_adr_is_read(yyjson_val *params) {
     return true;
 }
 
-/* Test impact builds a temporary graph. Standalone UI only reads existing graphs. */
-static bool rpc_detect_changes_is_read(yyjson_val *params) {
-    yyjson_val *arguments = json_unique_member(params, "arguments");
-    if (!arguments)
-        return yyjson_obj_get(params, "arguments") == NULL;
-    if (!yyjson_is_obj(arguments))
-        return false;
-    yyjson_val *scope = json_unique_member(arguments, "scope");
-    if (!scope)
-        return yyjson_obj_get(arguments, "scope") == NULL;
-    const char *text = yyjson_get_str(scope);
-    return text && strcmp(text, "tests") != 0;
-}
-
 static bool rpc_is_allowed_for_ui(const char *body, size_t body_len, bool read_only) {
     yyjson_doc *document = yyjson_read(body, body_len, 0);
     if (!document)
@@ -3120,9 +3106,10 @@ static bool rpc_is_allowed_for_ui(const char *body, size_t body_len, bool read_o
     const char *name_text = yyjson_is_str(name) ? yyjson_get_str(name) : NULL;
     bool allowed = false;
     if (method_text && strcmp(method_text, "tools/call") == 0 && name_text) {
+        /* Worktree diff can hydrate partial clones and invoke clean filters.
+         * Standalone permits reads of the existing graph only. */
         if (rpc_tool_is_read_only(name_text))
-            allowed = !read_only || strcmp(name_text, "detect_changes") != 0 ||
-                      rpc_detect_changes_is_read(params);
+            allowed = !read_only || strcmp(name_text, "detect_changes") != 0;
         else if (strcmp(name_text, "manage_adr") == 0)
             allowed = rpc_manage_adr_is_read(params);
     }
@@ -3643,7 +3630,6 @@ static cbm_http_server_t *http_server_new(int port, bool read_only) {
         return NULL;
     }
     cbm_mcp_server_set_background_tasks(srv->mcp, false);
-    cbm_mcp_server_set_read_only_git(srv->mcp, read_only);
     cbm_mcp_server_set_index_executor(srv->mcp, http_read_only_index_rejected, srv);
 
     /* Bind to localhost only (httpd refuses anything else by construction) */

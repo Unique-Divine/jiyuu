@@ -3,7 +3,6 @@
 #include "foundation/compat.h"
 #include "foundation/compat_fs.h"
 #include "foundation/constants.h"
-#include "foundation/git_env.h"
 #include "foundation/log.h"
 #include "foundation/mem_core.h"
 #include "foundation/platform.h"
@@ -95,9 +94,11 @@ static FILE *git_capture_supervised(const char *repo_path, const char *git_args,
     if (fd < 0)
         return NULL;
     (void)close(fd);
+    const char *const env[] = {"GIT_OPTIONAL_LOCKS=0", "GIT_NO_LAZY_FETCH=1",
+                               "GIT_ALLOW_PROTOCOL=", "GIT_TERMINAL_PROMPT=0", NULL};
     cbm_proc_opts_t options = {.bin = "git",
                                .argv = argv,
-                               .env_overrides = cbm_git_read_only_env,
+                               .env_overrides = env,
                                .stdout_file = path,
                                .strip_git_repo_env = true,
                                .cancel_grace_ms = 100};

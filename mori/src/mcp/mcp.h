@@ -218,9 +218,6 @@ const char *cbm_mcp_server_allowed_root(const cbm_mcp_server_t *srv);
  * coordinator owns background work. */
 void cbm_mcp_server_set_background_tasks(cbm_mcp_server_t *srv, bool enabled);
 
-/* Restrict shell-backed Git reads for the standalone UI. Set before serving. */
-void cbm_mcp_server_set_read_only_git(cbm_mcp_server_t *srv, bool enabled);
-
 void cbm_mcp_server_set_index_executor(cbm_mcp_server_t *srv, cbm_mcp_index_executor_fn executor,
                                        void *context);
 

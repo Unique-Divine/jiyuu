@@ -1141,27 +1141,19 @@ fn standalone_ui_signals_cancel_active_reads() {
     let db_file = format!("{project}.db");
     let graph_db = writer.0.join("cache").join(&db_file);
 
-    let changes = serde_json::json!({
-        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-        "params": {"name": "detect_changes", "arguments": {
-            "project": project, "scope": "files", "base_branch": "HEAD"
-        }}
-    })
-    .to_string();
     let projects = serde_json::json!({
-        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
         "params": {"name": "list_projects", "arguments": {"format": "json"}}
     })
     .to_string();
     let repo_info = format!("/api/repo-info?project={project}");
     let impact = format!("/api/impact-analysis?project={project}&file=app.py");
 
-    for (signal, method, target, body, cancelled_rpc) in [
-        (libc::SIGINT, "POST", "/rpc", changes.as_str(), true),
-        (libc::SIGTERM, "POST", "/rpc", changes.as_str(), true),
-        (libc::SIGINT, "POST", "/rpc", projects.as_str(), false),
-        (libc::SIGTERM, "GET", repo_info.as_str(), "", false),
-        (libc::SIGTERM, "GET", impact.as_str(), "", false),
+    for (signal, method, target, body) in [
+        (libc::SIGINT, "POST", "/rpc", projects.as_str()),
+        (libc::SIGTERM, "POST", "/rpc", projects.as_str()),
+        (libc::SIGTERM, "GET", repo_info.as_str(), ""),
+        (libc::SIGTERM, "GET", impact.as_str(), ""),
     ] {
         let scratch = Scratch::new("ui-signal");
         fs::copy(&graph_db, scratch.0.join("cache").join(&db_file)).unwrap();
@@ -1172,8 +1164,6 @@ fn standalone_ui_signals_cancel_active_reads() {
             &git,
             r#"#!/bin/sh
 [ "$3" = rev-parse ] || [ "$1" = --no-optional-locks ] || exit 2
-[ "${GIT_ALLOW_PROTOCOL-unset}" = "" ] && [ "$GIT_NO_LAZY_FETCH" = 1 ] &&
-    [ "$GIT_OPTIONAL_LOCKS" = 0 ] && [ "$GIT_TERMINAL_PROMPT" = 0 ] || exit 3
 printf '%s\n' "$$" > "$MORI_TEST_GIT_ENTERED"
 exec /bin/sleep 30
 "#,
@@ -1190,10 +1180,6 @@ exec /bin/sleep 30
             .env("PATH", &fixture_bin)
             .env("CBM_LOG_LEVEL", "info")
             .env("CBM_LOG_FORMAT", "text")
-            .env("GIT_ALLOW_PROTOCOL", "file")
-            .env("GIT_NO_LAZY_FETCH", "0")
-            .env("GIT_OPTIONAL_LOCKS", "1")
-            .env("GIT_TERMINAL_PROMPT", "1")
             .env("TMPDIR", &scratch.0)
             .env("MORI_TEST_GIT_ENTERED", &entered)
             .stderr(fs::File::create(&log).unwrap())
@@ -1251,21 +1237,20 @@ exec /bin/sleep 30
         };
         let logs = log_text();
         assert!(status.success(), "{status}: {logs}");
-        if cancelled_rpc {
+        if method == "POST" {
             assert!(
-                logs.lines().any(|line| line.contains("tool=detect_changes")
+                logs.lines().any(|line| line.contains("tool=list_projects")
                     && line.contains("cancelled=true")
                     && line.contains("timed_out=false")),
                 "{logs}"
             );
-        } else {
-            // SAFETY: signal 0 only probes the child PID recorded by our fixture.
-            assert_eq!(unsafe { libc::kill(git_pid, 0) }, -1, "{logs}");
-            assert_eq!(
-                std::io::Error::last_os_error().raw_os_error(),
-                Some(libc::ESRCH)
-            );
         }
+        // SAFETY: signal 0 only probes the child PID recorded by our fixture.
+        assert_eq!(unsafe { libc::kill(git_pid, 0) }, -1, "{logs}");
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
         assert_eq!(fs::read_dir(scratch.0.join("rt")).unwrap().count(), 0);
     }
 }

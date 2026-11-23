@@ -911,6 +911,18 @@ TEST(ui_server_standalone_rejects_writes) {
          403},
         {"/rpc",
          "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\","
+         "\"params\":{\"name\":\"detect_changes\",\"arguments\":{\"scope\":\"files\"}}}",
+         403},
+        {"/rpc",
+         "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\","
+         "\"params\":{\"name\":\"detect_changes\",\"arguments\":{\"scope\":\"impact\"}}}",
+         403},
+        {"/rpc",
+         "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\","
+         "\"params\":{\"name\":\"detect_changes\"}}",
+         403},
+        {"/rpc",
+         "{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"tools/call\","
          "\"params\":{\"name\":\"list_projects\"}}",
          200},
     };
