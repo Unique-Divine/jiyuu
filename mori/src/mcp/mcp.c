@@ -23221,7 +23221,7 @@ static long long mcp_elapsed_us(struct timespec start, struct timespec end) {
            ((long long)(end.tv_nsec - start.tv_nsec) / MCP_MS_TO_US);
 }
 
-/* Keep values aligned with mcp_dispatch.rs in the linked build. */
+/* Method selection for the C reference path. */
 enum {
     MCP_METHOD_UNKNOWN = 0,
     MCP_METHOD_INITIALIZE,
@@ -23269,176 +23269,235 @@ static int select_mcp_method(const char *method) {
     return MCP_METHOD_UNKNOWN;
 }
 
+typedef struct {
+    cbm_mcp_server_t *srv;
+    cbm_jsonrpc_request_t req;
+    struct timespec started_at;
+    char *result_json;
+    char *error_json;
+    char *tool_name;
+    long long tool_handler_us;
+    bool is_error;
+    bool cancelled;
+    bool timed_out;
+    bool method_not_found;
+} mcp_request_context_t;
+
+static void mcp_request_initialize(mcp_request_context_t *ctx) {
+    cbm_mcp_server_t *srv = ctx->srv;
+    ctx->result_json = cbm_mcp_initialize_response_for_profile(ctx->req.params_raw, srv->tool_profile);
+    detect_session(srv);
+    if (srv->background_tasks && srv->tool_profile == CBM_MCP_TOOL_PROFILE_ALL) {
+        maybe_auto_index(srv);
+    }
+}
+
+static void mcp_request_ping(mcp_request_context_t *ctx) {
+    ctx->result_json = heap_strdup("{}");
+}
+
+static void mcp_request_resources_list(mcp_request_context_t *ctx) {
+    /* Clients probe even when capabilities omit resources. An empty list
+     * avoids treating -32601 as a failed connection (#958). */
+    ctx->result_json = heap_strdup("{\"resources\":[]}");
+}
+
+static void mcp_request_resource_templates_list(mcp_request_context_t *ctx) {
+    ctx->result_json = heap_strdup("{\"resourceTemplates\":[]}");
+}
+
+static void mcp_request_prompts_list(mcp_request_context_t *ctx) {
+    ctx->result_json = cbm_mcp_prompts_list();
+}
+
+static void mcp_request_prompts_get(mcp_request_context_t *ctx) {
+    ctx->result_json = cbm_mcp_prompt_get(ctx->req.params_raw, &ctx->error_json);
+}
+
+static void mcp_request_tools_list(mcp_request_context_t *ctx) {
+    ctx->result_json = cbm_mcp_tools_list_page(ctx->srv->tool_profile, ctx->req.params_raw);
+}
+
+static void mcp_request_tools_call(mcp_request_context_t *ctx) {
+    cbm_mcp_server_t *srv = ctx->srv;
+    char *tool_args;
+    mcp_decode_tool_call(ctx->req.params_raw, &ctx->tool_name, &tool_args);
+    srv->active_request_id = ctx->req.id;
+    free(srv->active_request_id_str);
+    srv->active_request_id_str = ctx->req.id_str ? heap_strdup(ctx->req.id_str) : NULL;
+
+    struct timespec t0;
+    cbm_clock_gettime(CLOCK_MONOTONIC, &t0);
+    ctx->result_json = cbm_mcp_handle_tool(srv, ctx->tool_name, tool_args);
+    srv->active_request_id = CBM_NOT_FOUND;
+    free(srv->active_request_id_str);
+    srv->active_request_id_str = NULL;
+    struct timespec t1;
+    cbm_clock_gettime(CLOCK_MONOTONIC, &t1);
+    ctx->is_error = ctx->result_json && strstr(ctx->result_json, "\"isError\":true") != NULL;
+    cbm_diag_record_query(mcp_elapsed_us(t0, t1), ctx->is_error);
+    ctx->tool_handler_us = mcp_elapsed_us(ctx->started_at, t1);
+    ctx->cancelled = mcp_request_cancelled(srv);
+    ctx->timed_out = ctx->result_json &&
+                     strstr(ctx->result_json, "\"code\":\"request_timeout\"") != NULL;
+    free(tool_args);
+}
+
+static void mcp_request_cancel_notification(mcp_request_context_t *ctx) {
+    cbm_mcp_server_t *srv = ctx->srv;
+    if (cbm_mcp_cancel_request_matches(ctx->req.params_raw, srv->active_request_id,
+                                       srv->active_request_id_str) &&
+        cbm_mcp_server_cancel_active(srv)) {
+        cbm_log_info("mcp.cancelled", "match", "true");
+    }
+}
+
+static void mcp_request_unknown(mcp_request_context_t *ctx, bool discover) {
+    ctx->method_not_found = true;
+    /* The discovery probe receives -32601 so the client falls back to
+     * initialize. Treat the probe as expected in diagnostics (#2433). */
+    ctx->is_error = !discover;
+}
+
+/* Keep this table in sync with RequestOps in mcp_dispatch.rs. The callback
+ * borrows ctx for this call only. C owns the parsed request and all outputs. */
+typedef struct {
+    void (*initialize)(mcp_request_context_t *);
+    void (*ping)(mcp_request_context_t *);
+    void (*resources_list)(mcp_request_context_t *);
+    void (*resource_templates_list)(mcp_request_context_t *);
+    void (*prompts_list)(mcp_request_context_t *);
+    void (*prompts_get)(mcp_request_context_t *);
+    void (*tools_list)(mcp_request_context_t *);
+    void (*tools_call)(mcp_request_context_t *);
+    void (*cancel_notification)(mcp_request_context_t *);
+    void (*unknown)(mcp_request_context_t *, bool discover);
+} mcp_request_ops_t;
+
+typedef void (*mcp_dispatch_fn)(const char *method, bool has_id, mcp_request_context_t *,
+                                const mcp_request_ops_t *);
+static mcp_dispatch_fn mcp_dispatch;
+
+/* Rust registers before any request threads start. */
+void cbm_mcp_set_dispatch(mcp_dispatch_fn dispatch) {
+    mcp_dispatch = dispatch;
+}
+
+static void mcp_dispatch_c(mcp_request_context_t *ctx) {
+    int method = select_mcp_method(ctx->req.method);
+    if (!ctx->req.has_id) {
+        if (method == MCP_METHOD_CANCELLED) {
+            mcp_request_cancel_notification(ctx);
+        }
+        return;
+    }
+
+    switch (method) {
+    case MCP_METHOD_INITIALIZE:
+        mcp_request_initialize(ctx);
+        break;
+    case MCP_METHOD_PING:
+        mcp_request_ping(ctx);
+        break;
+    case MCP_METHOD_RESOURCES_LIST:
+        mcp_request_resources_list(ctx);
+        break;
+    case MCP_METHOD_RESOURCE_TEMPLATES_LIST:
+        mcp_request_resource_templates_list(ctx);
+        break;
+    case MCP_METHOD_PROMPTS_LIST:
+        mcp_request_prompts_list(ctx);
+        break;
+    case MCP_METHOD_PROMPTS_GET:
+        mcp_request_prompts_get(ctx);
+        break;
+    case MCP_METHOD_TOOLS_LIST:
+        mcp_request_tools_list(ctx);
+        break;
+    case MCP_METHOD_TOOLS_CALL:
+        mcp_request_tools_call(ctx);
+        break;
+    default:
+        mcp_request_unknown(ctx, method == MCP_METHOD_DISCOVER);
+        break;
+    }
+}
+
+static void mcp_dispatch_request(mcp_request_context_t *ctx) {
+    static const mcp_request_ops_t ops = {
+        .initialize = mcp_request_initialize,
+        .ping = mcp_request_ping,
+        .resources_list = mcp_request_resources_list,
+        .resource_templates_list = mcp_request_resource_templates_list,
+        .prompts_list = mcp_request_prompts_list,
+        .prompts_get = mcp_request_prompts_get,
+        .tools_list = mcp_request_tools_list,
+        .tools_call = mcp_request_tools_call,
+        .cancel_notification = mcp_request_cancel_notification,
+        .unknown = mcp_request_unknown,
+    };
+    if (mcp_dispatch) {
+        const char *method = ctx->req.method ? ctx->req.method : "";
+        mcp_dispatch(method, ctx->req.has_id, ctx, &ops);
+        cbm_log_debug("mcp.dispatch", "backend", "rust", "method", method,
+                      "has_id", ctx->req.has_id ? "true" : "false");
+    } else {
+        mcp_dispatch_c(ctx);
+    }
+}
+
 char *cbm_mcp_server_handle(cbm_mcp_server_t *srv, const char *line) {
-    cbm_jsonrpc_request_t req = {0};
-    if (cbm_jsonrpc_parse(line, &req) < 0) {
+    mcp_request_context_t ctx = {.srv = srv};
+    if (cbm_jsonrpc_parse(line, &ctx.req) < 0) {
         return cbm_jsonrpc_format_error(0, JSONRPC_PARSE_ERROR, "Parse error");
     }
 
-    int method = select_mcp_method(req.method);
-    /* Notifications (no id) → handle cancellation, then no response */
-    if (!req.has_id) {
-        if (method == MCP_METHOD_CANCELLED) {
-            if (cbm_mcp_cancel_request_matches(req.params_raw, srv->active_request_id,
-                                               srv->active_request_id_str) &&
-                cbm_mcp_server_cancel_active(srv)) {
-                cbm_log_info("mcp.cancelled", "match", "true");
-            }
-        }
-        cbm_jsonrpc_request_free(&req);
+    if (!ctx.req.has_id) {
+        mcp_dispatch_request(&ctx);
+        cbm_jsonrpc_request_free(&ctx.req);
         return NULL;
     }
 
     if (!cbm_mcp_server_request_scope_begin(srv)) {
-        int64_t request_id = req.id;
-        cbm_jsonrpc_request_free(&req);
+        int64_t request_id = ctx.req.id;
+        cbm_jsonrpc_request_free(&ctx.req);
         return cbm_jsonrpc_format_error(request_id, JSONRPC_INTERNAL_ERROR,
                                         "Request cancellation scope unavailable");
     }
 
-    struct timespec req_t0;
-    cbm_clock_gettime(CLOCK_MONOTONIC, &req_t0);
-    char *result_json = NULL;
-    char *request_error_json = NULL;
-    char *request_tool_name = NULL;
-    long long handler_duration_us = 0;
-    bool request_is_error = false;
-    bool request_cancelled = false;
-    bool request_timed_out = false;
-
-    switch (method) {
-    case MCP_METHOD_INITIALIZE:
-        result_json = cbm_mcp_initialize_response_for_profile(req.params_raw, srv->tool_profile);
-        detect_session(srv);
-        if (srv->background_tasks && srv->tool_profile == CBM_MCP_TOOL_PROFILE_ALL) {
-            maybe_auto_index(srv);
-        }
-        break;
-    case MCP_METHOD_PING:
-        result_json = heap_strdup("{}");
-        break;
-    case MCP_METHOD_RESOURCES_LIST:
-        /* This server exposes no resources, but clients probe these on
-         * connect regardless of declared capabilities and surface -32601 as
-         * a failed connection (#958). Empty lists are interoperable. */
-        result_json = heap_strdup("{\"resources\":[]}");
-        break;
-    case MCP_METHOD_RESOURCE_TEMPLATES_LIST:
-        result_json = heap_strdup("{\"resourceTemplates\":[]}");
-        break;
-    case MCP_METHOD_PROMPTS_LIST:
-        result_json = cbm_mcp_prompts_list();
-        break;
-    case MCP_METHOD_PROMPTS_GET:
-        result_json = cbm_mcp_prompt_get(req.params_raw, &request_error_json);
-        break;
-    case MCP_METHOD_TOOLS_LIST:
-        result_json = cbm_mcp_tools_list_page(srv->tool_profile, req.params_raw);
-        break;
-    case MCP_METHOD_TOOLS_CALL: {
-        char *tool_name;
-        char *tool_args;
-        mcp_decode_tool_call(req.params_raw, &tool_name, &tool_args);
-        request_tool_name = tool_name;
-        srv->active_request_id = req.id;
-        free(srv->active_request_id_str);
-        srv->active_request_id_str = req.id_str ? heap_strdup(req.id_str) : NULL;
-
-        struct timespec t0;
-        cbm_clock_gettime(CLOCK_MONOTONIC, &t0);
-        result_json = cbm_mcp_handle_tool(srv, tool_name, tool_args);
-        srv->active_request_id = CBM_NOT_FOUND;
-        free(srv->active_request_id_str);
-        srv->active_request_id_str = NULL;
-        struct timespec t1;
-        cbm_clock_gettime(CLOCK_MONOTONIC, &t1);
-        long long dur_us = mcp_elapsed_us(t0, t1);
-        bool is_err = (result_json != NULL) && (strstr(result_json, "\"isError\":true") != NULL);
-        cbm_diag_record_query(dur_us, is_err);
-        handler_duration_us = mcp_elapsed_us(req_t0, t1);
-        request_is_error = is_err;
-        request_cancelled = mcp_request_cancelled(srv);
-        request_timed_out =
-            result_json && strstr(result_json, "\"code\":\"request_timeout\"") != NULL;
-
-        free(tool_args);
-        break;
-    }
-    default: {
-        /* Echo the original id (string or numeric, issue #253) on the error. */
-        char err_obj[160];
-        snprintf(err_obj, sizeof(err_obj), "{\"code\":%d,\"message\":\"Method not found\"}",
-                 JSONRPC_METHOD_NOT_FOUND);
-        cbm_jsonrpc_response_t err_resp = {
-            .id = req.id,
-            .id_str = req.id_str,
-            .error_json = err_obj,
-        };
-        struct timespec t1;
-        cbm_clock_gettime(CLOCK_MONOTONIC, &t1);
-        long long handler_us = mcp_elapsed_us(req_t0, t1);
-        struct timespec serialize_t0;
-        cbm_clock_gettime(CLOCK_MONOTONIC, &serialize_t0);
-        char *err = cbm_jsonrpc_format_response(&err_resp);
-        struct timespec serialize_t1;
-        cbm_clock_gettime(CLOCK_MONOTONIC, &serialize_t1);
-        long long serialization_us = mcp_elapsed_us(serialize_t0, serialize_t1);
-        long long duration_us = mcp_elapsed_us(req_t0, serialize_t1);
-        /* server/discover is the modern connect probe. -32601 stays so the
-         * client falls back to initialize; that miss is not an error (#2433). */
-        cbm_log_mcp_request(req.method, NULL, method != MCP_METHOD_DISCOVER,
-                            duration_us, handler_us, serialization_us, false, false);
-        cbm_mcp_server_request_scope_end(srv);
-        cbm_jsonrpc_request_free(&req);
-        return err;
-    }
-    }
-
-    if (request_error_json) {
-        cbm_jsonrpc_response_t err_resp = {
-            .id = req.id,
-            .id_str = req.id_str,
-            .error_json = request_error_json,
-        };
-        struct timespec serialize_t0;
-        cbm_clock_gettime(CLOCK_MONOTONIC, &serialize_t0);
-        char *err = cbm_jsonrpc_format_response(&err_resp);
-        struct timespec serialize_t1;
-        cbm_clock_gettime(CLOCK_MONOTONIC, &serialize_t1);
-        long long handler_us = mcp_elapsed_us(req_t0, serialize_t0);
-        long long serialization_us = mcp_elapsed_us(serialize_t0, serialize_t1);
-        long long duration_us = mcp_elapsed_us(req_t0, serialize_t1);
-        cbm_log_mcp_request(req.method, NULL, true, duration_us, handler_us, serialization_us,
-                            false, false);
-        free(request_error_json);
-        cbm_mcp_server_request_scope_end(srv);
-        cbm_jsonrpc_request_free(&req);
-        return err;
-    }
+    cbm_clock_gettime(CLOCK_MONOTONIC, &ctx.started_at);
+    mcp_dispatch_request(&ctx);
 
     cbm_jsonrpc_response_t resp = {
-        .id = req.id,
-        .id_str = req.id_str,
-        .result_json = result_json,
+        .id = ctx.req.id,
+        .id_str = ctx.req.id_str,
+        .result_json = ctx.result_json,
+        .error_json = ctx.error_json,
     };
+    char method_error[160];
+    if (ctx.method_not_found) {
+        snprintf(method_error, sizeof(method_error), "{\"code\":%d,\"message\":\"Method not found\"}",
+                 JSONRPC_METHOD_NOT_FOUND);
+        resp.error_json = method_error;
+    }
+
     struct timespec serialize_t0;
     cbm_clock_gettime(CLOCK_MONOTONIC, &serialize_t0);
     char *out = cbm_jsonrpc_format_response(&resp);
     struct timespec serialize_t1;
     cbm_clock_gettime(CLOCK_MONOTONIC, &serialize_t1);
     long long serialization_us = mcp_elapsed_us(serialize_t0, serialize_t1);
-    long long duration_us = mcp_elapsed_us(req_t0, serialize_t1);
-    request_is_error = request_is_error || out == NULL;
-    if (!request_tool_name) {
-        handler_duration_us = duration_us - serialization_us;
-    }
-    cbm_log_mcp_request(req.method, request_tool_name, request_is_error, duration_us,
-                        handler_duration_us, serialization_us, request_cancelled,
-                        request_timed_out);
-    free(request_tool_name);
-    free(result_json);
+    long long duration_us = mcp_elapsed_us(ctx.started_at, serialize_t1);
+    long long handler_us = ctx.tool_name ? ctx.tool_handler_us
+                                        : mcp_elapsed_us(ctx.started_at, serialize_t0);
+    bool is_error = ctx.is_error || ctx.error_json || (!ctx.method_not_found && !out);
+    cbm_log_mcp_request(ctx.req.method, ctx.tool_name, is_error, duration_us, handler_us,
+                        serialization_us, ctx.cancelled, ctx.timed_out);
+    free(ctx.tool_name);
+    free(ctx.result_json);
+    free(ctx.error_json);
     cbm_mcp_server_request_scope_end(srv);
-    cbm_jsonrpc_request_free(&req);
+    cbm_jsonrpc_request_free(&ctx.req);
     return out;
 }
 
