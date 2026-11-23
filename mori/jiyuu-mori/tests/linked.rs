@@ -1578,7 +1578,7 @@ fn search_code_attributes_hits_like_native() {
     fs::create_dir(&repo).unwrap();
     fs::write(
         repo.join("app.py"),
-        "+class Outer:
+        "class Outer:
     # attribution_needle
     def inner(self):
         value = 'attribution_needle'
