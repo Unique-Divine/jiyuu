@@ -108,7 +108,7 @@ def cpu_seconds(pid: int) -> float | None:
     return sum(map(int, fields[11:15])) / os.sysconf("SC_CLK_TCK")
 
 
-def smoke(binary: Path, root: Path) -> None:
+def fixture_environment(root: Path) -> dict[str, str]:
     env = {
         "PATH": os.environ.get("PATH", os.defpath),
         "HOME": str(root),
@@ -119,13 +119,18 @@ def smoke(binary: Path, root: Path) -> None:
         "CBM_RUNTIME_DIR": str(root / "run"),
         "MORI_NAMED_WATCH_FILE": str(root / "watches.json"),
     }
+    Path(env["CBM_CACHE_DIR"]).mkdir(mode=0o700)
+    Path(env["CBM_RUNTIME_DIR"]).mkdir(mode=0o700)
+    return env
+
+
+def smoke(binary: Path, root: Path) -> None:
+    env = fixture_environment(root)
     named = root / "named"
     missing = root / "missing"
     denied = root / "denied"
     unlisted = root / "unlisted"
     cache = Path(env["CBM_CACHE_DIR"])
-    cache.mkdir(mode=0o700)
-    Path(env["CBM_RUNTIME_DIR"]).mkdir(mode=0o700)
     checkout(named, "initial_name", env)
     run(["git", "worktree", "add", "--detach", str(unlisted), "HEAD"], env, named)
     snapshot = Path(env["MORI_NAMED_WATCH_FILE"])
@@ -281,15 +286,92 @@ def smoke(binary: Path, root: Path) -> None:
         daemon("stop")
 
 
+def smoke_cold_join(binary: Path, root: Path) -> None:
+    env = fixture_environment(root)
+    checkout_path = root / "checkout"
+    checkout(checkout_path, "cold_checkout", env)
+    (checkout_path / "test.py").rename(checkout_path / "hang_me.py")
+    run(["git", "add", "-A"], env, checkout_path)
+    commit(checkout_path, env)
+
+    project = "configured-name"
+    cache = Path(env["CBM_CACHE_DIR"])
+    snapshot = Path(env["MORI_NAMED_WATCH_FILE"])
+    replace_snapshot(
+        snapshot, json.dumps([{"project": project, "root": str(checkout_path)}])
+    )
+    marker = root / "worker-lock.pid"
+    env["CBM_TEST_HANG_ON"] = "hang_me.py"
+    env["CBM_TEST_WORKER_PROJECT_LOCK_PID_FILE"] = str(marker)
+    index_command = [
+        str(binary),
+        "cli",
+        "--json",
+        "index_repository",
+        "--repo-path",
+        str(checkout_path),
+    ]
+
+    try:
+        run([str(binary), "daemon", "start"], env, root)
+
+        def worker_has_lease() -> bool:
+            return marker.is_file() and marker.read_text(encoding="utf-8").endswith(
+                "\n"
+            )
+
+        wait_for(
+            "the first worker's project lease (requires TEST_SEAMS=1)", worker_has_lease
+        )
+        assert not list(cache.glob("*.db")), (
+            "The cold graph published before the request"
+        )
+
+        status = json.loads(run([*index_command, "--status", "true"], env, root))
+        assert status["project"] == project, status
+        assert status["state"] == "running", status
+
+        result = json.loads(run([*index_command, "--async", "true"], env, root))
+        assert result["project"] == project, result
+        assert result["joined"] is True, result
+
+        log = (cache / "logs/cbm-daemon.log").read_text(encoding="utf-8")
+        starts = [
+            line for line in log.splitlines() if "daemon.index.worker_budget" in line
+        ]
+        assert len(starts) == 1 and f"project={project}" in starts[0], starts
+        assert not list(cache.glob("*.db")), "A worker published during the join check"
+    finally:
+        run([str(binary), "daemon", "stop"], env, root)
+
+    del env["CBM_TEST_HANG_ON"]
+    del env["CBM_TEST_WORKER_PROJECT_LOCK_PID_FILE"]
+    try:
+        run([str(binary), "daemon", "start"], env, root)
+        wait_for(
+            "the named graph after restart",
+            lambda: indexed(cache, project, "cold_checkout"),
+        )
+        assert sorted(path.name for path in cache.glob("*.db")) == [f"{project}.db"]
+    finally:
+        run([str(binary), "daemon", "stop"], env, root)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mori", type=Path, required=True)
     parser.add_argument("--daemon-log", type=Path)
+    parser.add_argument(
+        "--cold-join",
+        action="store_true",
+        help="check a cold named watch with a TEST_SEAMS=1 build",
+    )
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="mnw-", dir="/tmp") as temporary:
         root = Path(temporary).resolve()
         try:
-            smoke(args.mori.resolve(strict=True), root)
+            check = smoke_cold_join if args.cold_join else smoke
+            check(args.mori.resolve(strict=True), root)
         finally:
             log = root / "cache/logs/cbm-daemon.log"
             if args.daemon_log and log.is_file():

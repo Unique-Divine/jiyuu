@@ -224,6 +224,12 @@ void cbm_mcp_server_set_index_executor(cbm_mcp_server_t *srv, cbm_mcp_index_exec
 void cbm_mcp_server_set_index_status_provider(cbm_mcp_server_t *srv,
                                               cbm_mcp_index_status_fn provider, void *context);
 
+/* Resolve an active named watch when the root has no published project.
+ * The resolver returns an owned name, NULL when absent, or false on failure. */
+typedef bool (*cbm_mcp_index_named_owner_fn)(void *context, const char *root, char **owner);
+void cbm_mcp_server_set_index_named_owner(cbm_mcp_server_t *srv,
+                                          cbm_mcp_index_named_owner_fn resolve, void *context);
+
 /* Relay supervised worker logs to one local request (for CLI progress). The
  * callback/context are borrowed until the synchronous tool call returns. */
 void cbm_mcp_server_set_index_log_callback(cbm_mcp_server_t *srv, cbm_proc_log_cb callback,

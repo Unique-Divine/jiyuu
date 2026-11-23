@@ -3138,6 +3138,22 @@ static char *application_index_execute(void *context, const char *root_path, con
                  : application_index_run_sync(session, root_path, args_json);
 }
 
+static bool application_index_named_owner(void *context, const char *root, char **owner) {
+    cbm_daemon_application_session_t *session = context;
+    cbm_daemon_application_t *application = session->application;
+    bool copied = true;
+    cbm_mutex_lock(&application->mutex);
+    for (cbm_daemon_application_watch_t *watch = application->watches; watch; watch = watch->next) {
+        if (watch->named && application_watch_root_matches(watch->root, root)) {
+            *owner = strdup(watch->project);
+            copied = *owner != NULL;
+            break;
+        }
+    }
+    cbm_mutex_unlock(&application->mutex);
+    return copied;
+}
+
 static void application_status_add_record(yyjson_mut_doc *doc, yyjson_mut_val *root,
                                           const cbm_daemon_application_index_record_t *record) {
     yyjson_mut_obj_add_bool(doc, root, "async", record->async);
@@ -3238,6 +3254,7 @@ static cbm_daemon_runtime_application_session_t *application_session_open(
     cbm_mcp_server_set_watch_status_provider(session->mcp, application_watch_status, session);
     cbm_mcp_server_set_index_executor(session->mcp, application_index_execute, session);
     cbm_mcp_server_set_index_status_provider(session->mcp, application_index_status, session);
+    cbm_mcp_server_set_index_named_owner(session->mcp, application_index_named_owner, session);
     cbm_mcp_server_set_project_mutation_guard(session->mcp, application_session_mutation_begin,
                                               application_session_mutation_end, session);
     cbm_mcp_server_set_project_mutation_try_guard(session->mcp,
