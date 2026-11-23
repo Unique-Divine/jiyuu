@@ -14,18 +14,19 @@ Start with [Install and Connect](../references/install.md). Use the
    Use the [evidence rules](../references/evidence.md) when dates, payment
    forms, and coverage differ.
 
-For a configured CLI, run the following commands with the selected identifiers.
+For a live brief, replace `DEAL_SELECTOR` with a referral code, wallet, or
+stable deal ID. Use the stable `DEAL_ID` returned by `deals view` and a
+`RECORD_ID` from `comms list`.
 
 ```bash
 sai-ops --reader health
-sai-ops --reader deals view EXAMPLE-ATLAS
-sai-ops --reader comms list --deal deal-example-atlas --first 2
-sai-ops --reader comms show --deal deal-example-atlas completed_note:comms-atlas-paid
+sai-ops --reader deals view DEAL_SELECTOR
+sai-ops --reader comms list --deal DEAL_ID --first 2
+sai-ops --reader comms show --deal DEAL_ID RECORD_ID
 ```
 
 When `pageInfo.hasNextPage` is true, keep the deal fixed and pass the returned
-`pageInfo.endCursor` to `comms list --after CURSOR`. Copy the record ID from
-that list before running `comms show`.
+`pageInfo.endCursor` to `comms list --after CURSOR`.
 
 Return a short brief with the stable deal ID, the agreement, what was measured,
 what executed, what was communicated, and one next step. Give record IDs and

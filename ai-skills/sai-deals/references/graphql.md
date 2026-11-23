@@ -31,6 +31,11 @@ deal_desk_query '{"query":"query { credential }"}' |
 
 ## Read a Deal Brief
 
+The examples use IDs from the [synthetic deal exercise](../examples/atlas.md).
+Before querying the hosted API, replace `EXAMPLE-ATLAS` with a live selector,
+then use the deal and communications IDs returned by your queries in place
+of the fixture IDs.
+
 Use a referral code, stable deal ID, or EVM or Nibiru wallet address. When
 starting with a trader name, use directory lookup or [Ops](https://sai.fun/ops)
 to identify a selector. GraphQL field `view` returns JSON, with columns
@@ -93,12 +98,13 @@ to interpret record types, dates, and links.
 
 ## Find Follow-Ups
 
-The query below selects payments and actions without directly linked comms.
-Follow it with deal-scoped typed comms reads to check unlinked and deal-level
-notes. Use the event date to filter by the requested time window.
+Read payments and actions, then filter by the requested event dates. Use a
+deal-scoped communications read to verify delivery for each candidate.
+The `hasComms` filter tests whether a record has a direct communications
+link. Omit it so linked notes with uncertain delivery stay in scope.
 
 ```bash
-deal_desk_query '{"query":"query FollowUps { payments: records(input: {entity: PAYMENTS, hasComms: false}) actions: records(input: {entity: ACTIONS, hasComms: false}) }"}'
+deal_desk_query '{"query":"query FollowUps { payments: records(input: {entity: PAYMENTS}) actions: records(input: {entity: ACTIONS}) }"}'
 ```
 
 Add a stable `dealId` to each input for a deal-scoped review. A response-limit
