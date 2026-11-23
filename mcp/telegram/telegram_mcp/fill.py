@@ -14,6 +14,7 @@ from time import monotonic
 from typing import Any
 
 from telethon import TelegramClient, errors, functions, hints, types, utils
+from telethon.requestiter import RequestIter
 
 from telegram_mcp.broker import BrokerError, PeerConnected
 from telegram_mcp.bot_identity import BotIdentity
@@ -44,6 +45,8 @@ RIGHTS = {
 }
 MAX_RPC_SECONDS = 30
 CAPACITY_OBSERVATION_SECONDS = 30
+DIALOG_SCAN_LIMIT = 6500
+DIALOG_PAGE_SPACING_SECONDS = 1
 DAY_MS = 86_400_000
 ADD_GAP_MS = 1_200_000
 
@@ -352,7 +355,10 @@ class PoolTransport:
         if self.journal.held(group) is not None:
             raise BrokerError("account_held")
         try:
-            async for dialog in self.client.iter_dialogs(limit=limit + 1):
+            dialogs = self.client.iter_dialogs(limit=limit + 1)
+            if isinstance(dialogs, RequestIter):
+                dialogs.wait_time = DIALOG_PAGE_SPACING_SECONDS
+            async for dialog in dialogs:
                 if limit == 0:
                     raise BrokerError("group_count_unavailable")
                 limit -= 1
@@ -365,7 +371,7 @@ class PoolTransport:
     async def count(self) -> int:
         count = 0
         with raise_flood_waits():
-            async for dialog in self.dialogs(2000):
+            async for dialog in self.dialogs(DIALOG_SCAN_LIMIT):
                 if isinstance(
                     dialog.entity,
                     (types.Channel, types.Chat, types.ChannelForbidden, types.ChatForbidden),

@@ -51,6 +51,23 @@ def test_journal_scopes_cap_and_dispatch_identity_to_the_owner(monkeypatch, tmp_
 
 
 @pytest.mark.asyncio
+async def test_capacity_snapshot_counts_groups_after_two_thousand_direct_dialogs(monkeypatch, tmp_path):
+    class FakeClient:
+        async def get_me(self):
+            return SimpleNamespace(id=42, bot=False)
+
+        async def iter_dialogs(self, *, limit):
+            async_dialogs = [SimpleNamespace(entity=object())] * 2100
+            async_dialogs.append(SimpleNamespace(entity=types.ChatForbidden(id=90, title="Group")))
+            for dialog in async_dialogs[:limit]:
+                yield dialog
+
+    state = fixture_state(monkeypatch, tmp_path)
+    transport = PoolTransport(cast(TelegramClient, FakeClient()), state, "42", b"")
+    assert (await transport.snapshot())["groupCount"] == 1
+
+
+@pytest.mark.asyncio
 async def test_lost_create_stays_uncertain_and_never_sends_twice(monkeypatch, tmp_path):
     state = fixture_state(monkeypatch, tmp_path)
     sends = []
