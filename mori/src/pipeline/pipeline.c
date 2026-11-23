@@ -2752,7 +2752,7 @@ static void run_predump_passes(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx) {
         {predump_sem, "semantic_edges", PREDUMP_FAST_DOC_CANDIDATES},
         {predump_complexity, "complexity", PREDUMP_EVERY_MODE},
         /* Importance runs LAST: it reads CALLS/USAGE (extraction) and TESTS
-         * (pass_tests, which run_post_extraction runs before this loop), so
+         * (pass_tests, which the full-build driver runs before this loop), so
          * every edge type its score depends on already exists here. */
         {predump_importance, "importance", PREDUMP_EVERY_MODE},
     };
@@ -3243,14 +3243,33 @@ static void materialize_stage_backup(cbm_pipeline_t *p) {
     p->existing_generation = p->backup_succeeded;
 }
 
+typedef struct {
+    cbm_pipeline_t *pipeline;
+    cbm_file_info_t *files;
+    int file_count;
+    const cbm_file_hash_t *baseline;
+    int baseline_count;
+    bool force_full_on_mismatch;
+    cbm_index_staged_route_fn choose_staged;
+} existing_generation_route_t;
+
+static cbm_index_live_route_fn index_live_route;
+static cbm_index_staged_route_fn index_staged_route;
+
+void cbm_pipeline_set_index_route(cbm_index_live_route_fn live, cbm_index_staged_route_fn staged) {
+    index_live_route = live;
+    index_staged_route = staged;
+}
+
 /* The live generation is provably current: read-only, it passes the shallow
  * integrity and format checks the staged route applies to its copy, and the
  * exact semantic-manifest test the staged route would answer no-op with. A
  * copy of it would route to that no-op and publish the same database again,
  * so the run ends here with nothing copied, sealed or renamed. Any doubt
  * answers false and the run copies and routes exactly as before. */
-static bool live_generation_current(cbm_pipeline_t *p, const cbm_file_hash_t *baseline_manifest,
-                                    int baseline_count) {
+static bool live_generation_current(void *data) {
+    const existing_generation_route_t *route = data;
+    cbm_pipeline_t *p = route->pipeline;
     struct stat db_st;
     if (!p->live_db_path || stat(p->live_db_path, &db_st) != 0) {
         return false;
@@ -3263,29 +3282,34 @@ static bool live_generation_current(cbm_pipeline_t *p, const cbm_file_hash_t *ba
     bool current = cbm_store_check_integrity(store);
     if (current) {
         cbm_store_get_format_version(store, &fmt);
-        current =
-            fmt == CBM_INDEX_FORMAT_VERSION &&
-            cbm_pipeline_incremental_generation_exact(p, store, baseline_manifest, baseline_count);
+        current = fmt == CBM_INDEX_FORMAT_VERSION &&
+                  cbm_pipeline_incremental_generation_exact(p, store, route->baseline,
+                                                            route->baseline_count);
     }
     cbm_store_close(store);
     return current;
 }
 
-/* Route an existing generation. Full rebuilds never delete the live DB here:
- * publication owns the eventual atomic replacement after every pass and
- * metadata write has succeeded. */
-static int try_incremental_or_delete_db(cbm_pipeline_t *p, cbm_file_info_t *files, int file_count,
-                                        const cbm_file_hash_t *baseline_manifest,
-                                        int baseline_count, bool force_full_on_mismatch) {
+static int finish_live_route(void *data) {
+    const existing_generation_route_t *route = data;
+    cbm_pipeline_t *p = route->pipeline;
+    if (route->choose_staged) {
+        cbm_log_info("pipeline.index_route", "implementation", "rust", "generation", "live",
+                     "outcome", "noop");
+    }
+    p->stage_backup_pending = false;
+    p->live_noop = true;
+    cbm_log_info("pipeline.route", "path", "incremental_manifest", "generation", "live");
+    cbm_log_info("incremental.noop", "reason", "semantic_manifest_equal", "generation", "live");
+    return 0;
+}
+
+/* Full rebuilds only remove the staging copy. Publication owns the eventual
+ * atomic replacement of the live DB. */
+static int route_existing_stage(void *data) {
+    const existing_generation_route_t *route = data;
+    cbm_pipeline_t *p = route->pipeline;
     if (p->stage_backup_pending) {
-        if (live_generation_current(p, baseline_manifest, baseline_count)) {
-            p->stage_backup_pending = false;
-            p->live_noop = true;
-            cbm_log_info("pipeline.route", "path", "incremental_manifest", "generation", "live");
-            cbm_log_info("incremental.noop", "reason", "semantic_manifest_equal", "generation",
-                         "live");
-            return 0;
-        }
         materialize_stage_backup(p);
     }
     if (!p->existing_generation) {
@@ -3344,8 +3368,9 @@ static int try_incremental_or_delete_db(cbm_pipeline_t *p, cbm_file_info_t *file
     }
 
     cbm_log_info("pipeline.route", "path", "incremental_manifest");
-    int rc = cbm_pipeline_run_incremental(p, db_path, files, file_count, baseline_manifest,
-                                          baseline_count, force_full_on_mismatch);
+    int rc = cbm_pipeline_run_incremental(p, db_path, route->files, route->file_count,
+                                          route->baseline, route->baseline_count,
+                                          route->force_full_on_mismatch, route->choose_staged);
     /* Delete the existing generation ONLY when we are about to rebuild it.
      * On main this was guarded by an early `return rc` for the incremental
      * path; this function has no such early return, so the delete must be
@@ -3366,6 +3391,30 @@ static int try_incremental_or_delete_db(cbm_pipeline_t *p, cbm_file_info_t *file
     }
     free(db_path);
     return rc;
+}
+
+static int try_incremental_or_delete_db(cbm_pipeline_t *p, cbm_file_info_t *files, int file_count,
+                                        const cbm_file_hash_t *baseline_manifest,
+                                        int baseline_count, bool force_full_on_mismatch) {
+    bool rust_route =
+        !p->frozen && p->existing_generation && index_live_route && index_staged_route;
+    existing_generation_route_t route = {
+        .pipeline = p,
+        .files = files,
+        .file_count = file_count,
+        .baseline = baseline_manifest,
+        .baseline_count = baseline_count,
+        .force_full_on_mismatch = force_full_on_mismatch,
+        .choose_staged = rust_route ? index_staged_route : NULL,
+    };
+    if (rust_route) {
+        return index_live_route(&route, p->stage_backup_pending, live_generation_current,
+                                finish_live_route, route_existing_stage);
+    }
+    if (p->stage_backup_pending && live_generation_current(&route)) {
+        return finish_live_route(&route);
+    }
+    return route_existing_stage(&route);
 }
 
 static const char *pipeline_mode_name(cbm_index_mode_t mode) {
@@ -4279,104 +4328,202 @@ static int run_githistory(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx) {
 
 /* ── Pipeline run ────────────────────────────────────────────────── */
 
-/* Run tests + git history. Returns 0 on success. */
-static int run_tests_and_history(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
-                                 const cbm_file_info_t *files, int file_count) {
+#define MIN_FILES_FOR_PARALLEL 50
+
+struct cbm_full_build {
+    cbm_pipeline_t *pipeline;
+    cbm_pipeline_ctx_t *ctx;
+    const cbm_file_info_t *files;
+    int file_count;
+    const cbm_file_hash_t *baseline;
+    int baseline_count;
+    cbm_stem_marks_t marks;
     struct timespec t;
-    cbm_clock_gettime(CLOCK_MONOTONIC, &t);
-    CBM_PROF_START(t_tests);
-    int rc = cbm_pipeline_pass_tests(ctx, files, file_count);
-    CBM_PROF_END_N("pipeline", "pass_tests", t_tests, file_count);
-    cbm_log_info("pass.timing", "pass", "tests", "elapsed_ms", itoa_buf((int)elapsed_ms(t)));
-    pipeline_phase_mark("tests");
-    if (rc == 0 && !check_cancel(p)) {
-        CBM_PROF_START(t_gh);
-        rc = run_githistory(p, ctx);
-        CBM_PROF_END("pipeline", "pass_githistory", t_gh);
+};
+
+static int full_structure(cbm_full_build_t *run) {
+    cbm_clock_gettime(CLOCK_MONOTONIC, &run->t);
+    CBM_PROF_START(t_struct);
+    pass_structure(run->pipeline, run->ctx->stem_marks, run->files, run->file_count);
+    CBM_PROF_END_N("pipeline", "pass_structure", t_struct, run->file_count);
+    cbm_log_info("pass.timing", "pass", "structure", "elapsed_ms",
+                 itoa_buf((int)elapsed_ms(run->t)));
+    pipeline_phase_mark("structure");
+    return check_cancel(run->pipeline);
+}
+
+static int full_workers(cbm_full_build_t *run) {
+    cbm_pipeline_t *p = run->pipeline;
+    if (p->frozen) {
+        frozen_observe(p, 0, 1);
+        return 1;
     }
-    if (check_cancel(p)) {
-        return CBM_NOT_FOUND;
+    return cbm_pipeline_worker_count(p);
+}
+
+static void full_release_stem_marks(cbm_full_build_t *run) {
+    if (run->ctx->stem_marks) {
+        run->ctx->stem_marks = NULL;
+        cbm_stem_marks_free(&run->marks);
     }
+}
+
+static int full_extract(cbm_full_build_t *run, int workers, bool parallel) {
+    cbm_pipeline_t *p = run->pipeline;
+    CBM_PROF_START(t_extract_total);
+    int rc = parallel
+                 ? run_parallel_pipeline(p, run->ctx, run->files, run->file_count, workers, &run->t)
+                 : run_sequential_pipeline(p, run->ctx, run->files, run->file_count, &run->t);
+    CBM_PROF_END_N("pipeline", "2_extraction_total", t_extract_total, run->file_count);
+    if (rc != CBM_PIPELINE_ABORT_PRESERVE_DB) {
+        if (check_cancel(p)) {
+            rc = CBM_NOT_FOUND;
+        } else {
+            /* Drop Images whose edges all went to their components (P4.2b). */
+            (void)cbm_gbuf_delete_unreferenced(p->gbuf, "Image", DK_IMAGE_EDGES);
+        }
+    }
+    full_release_stem_marks(run);
     return rc;
 }
 
-/* Run tests, git history, predump passes, and dump+persist. */
-static int run_post_extraction(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
-                               const cbm_file_info_t *files, int file_count,
-                               const cbm_file_hash_t *baseline_manifest, int baseline_count) {
-    int rc = run_tests_and_history(p, ctx, files, file_count);
-    if (rc != 0) {
-        return rc;
+static int full_tests(cbm_full_build_t *run) {
+    struct timespec t;
+    cbm_clock_gettime(CLOCK_MONOTONIC, &t);
+    CBM_PROF_START(t_tests);
+    int rc = cbm_pipeline_pass_tests(run->ctx, run->files, run->file_count);
+    CBM_PROF_END_N("pipeline", "pass_tests", t_tests, run->file_count);
+    cbm_log_info("pass.timing", "pass", "tests", "elapsed_ms", itoa_buf((int)elapsed_ms(t)));
+    pipeline_phase_mark("tests");
+    return rc != 0 && check_cancel(run->pipeline) ? CBM_NOT_FOUND : rc;
+}
+
+static int full_history(cbm_full_build_t *run) {
+    cbm_pipeline_t *p = run->pipeline;
+    int rc = 0;
+    if (!check_cancel(p)) {
+        CBM_PROF_START(t_gh);
+        rc = run_githistory(p, run->ctx);
+        CBM_PROF_END("pipeline", "pass_githistory", t_gh);
     }
+    return check_cancel(p) ? CBM_NOT_FOUND : rc;
+}
 
+static void full_predump(cbm_full_build_t *run) {
     CBM_PROF_START(t_predump);
-    run_predump_passes(p, ctx);
+    run_predump_passes(run->pipeline, run->ctx);
     CBM_PROF_END("pipeline", "3_predump_passes_total", t_predump);
+}
 
+static int full_fence(cbm_full_build_t *run) {
+    cbm_pipeline_t *p = run->pipeline;
 #if defined(CBM_INCREMENTAL_TEST_API) && CBM_INCREMENTAL_TEST_API
     if (cbm_pipeline_persist_test_take_cancel_after_predump()) {
         atomic_store(p->cancelled, 1);
     }
 #endif
+    return check_cancel(p) ? CBM_PIPELINE_ABORT_PRESERVE_DB : 0;
+}
 
-    if (check_cancel(p)) {
-        return CBM_PIPELINE_ABORT_PRESERVE_DB;
-    }
-
+static int full_stage_write(cbm_full_build_t *run) {
     struct timespec t;
     CBM_PROF_START(t_dump);
-    rc = dump_and_persist_hashes(p, baseline_manifest, baseline_count, &t);
+    int rc = dump_and_persist_hashes(run->pipeline, run->baseline, run->baseline_count, &t);
     CBM_PROF_END("pipeline", "4_dump_and_persist", t_dump);
     return rc;
 }
 
-#define MIN_FILES_FOR_PARALLEL 50
-
-/* Run structure + extraction passes (parallel or sequential). */
-static int run_structure_and_extraction(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
-                                        const cbm_file_info_t *files, int file_count) {
-    struct timespec t;
-    cbm_clock_gettime(CLOCK_MONOTONIC, &t);
-    CBM_PROF_START(t_struct);
-    pass_structure(p, ctx->stem_marks, files, file_count);
-    CBM_PROF_END_N("pipeline", "pass_structure", t_struct, file_count);
-    cbm_log_info("pass.timing", "pass", "structure", "elapsed_ms", itoa_buf((int)elapsed_ms(t)));
-    pipeline_phase_mark("structure");
-    if (check_cancel(p)) {
-        return CBM_NOT_FOUND;
-    }
-
-    int worker_count = p->frozen ? 1 : cbm_pipeline_worker_count(p);
-    if (p->frozen)
-        frozen_observe(p, 0, 1);
-    CBM_PROF_START(t_extract_total);
-    int rc = (worker_count > SKIP_ONE && file_count > MIN_FILES_FOR_PARALLEL)
-                 ? run_parallel_pipeline(p, ctx, files, file_count, worker_count, &t)
-                 : run_sequential_pipeline(p, ctx, files, file_count, &t);
-    CBM_PROF_END_N("pipeline", "2_extraction_total", t_extract_total, file_count);
-    if (rc == CBM_PIPELINE_ABORT_PRESERVE_DB) {
+static int run_full_build_c(cbm_full_build_t *run) {
+    int rc = full_structure(run);
+    if (rc != 0)
         return rc;
+    int workers = full_workers(run);
+    rc = full_extract(run, workers, workers > 1 && run->file_count > MIN_FILES_FOR_PARALLEL);
+    if (rc != 0)
+        return rc;
+    rc = full_tests(run);
+    if (rc != 0)
+        return rc;
+    rc = full_history(run);
+    if (rc != 0)
+        return rc;
+    full_predump(run);
+    rc = full_fence(run);
+    return rc != 0 ? rc : full_stage_write(run);
+}
+
+static cbm_full_build_driver_fn full_build_driver;
+
+void cbm_pipeline_set_full_build_driver(cbm_full_build_driver_fn driver) {
+    full_build_driver = driver;
+}
+
+static int run_full_build(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files,
+                          int file_count, const cbm_file_hash_t *baseline, int baseline_count) {
+    static const cbm_full_build_ops_t ops = {
+        .structure = full_structure,
+        .workers = full_workers,
+        .extract = full_extract,
+        .tests = full_tests,
+        .history = full_history,
+        .predump = full_predump,
+        .fence = full_fence,
+        .stage_write = full_stage_write,
+    };
+    cbm_full_build_t run = {
+        .pipeline = p,
+        .ctx = ctx,
+        .files = files,
+        .file_count = file_count,
+        .baseline = baseline,
+        .baseline_count = baseline_count,
+    };
+    /* Folder and Module QNs share the same stem collisions through extraction. */
+    cbm_stem_marks_init(&run.marks, p->project_name, files, file_count);
+    ctx->stem_marks = &run.marks;
+    int rc;
+    if (full_build_driver) {
+        cbm_log_info("pipeline.full_build_driver", "implementation", "rust", "files",
+                     itoa_buf(file_count));
+        rc = full_build_driver(&run, &ops, file_count, MIN_FILES_FOR_PARALLEL);
+    } else {
+        rc = run_full_build_c(&run);
     }
-    if (check_cancel(p)) {
-        return CBM_NOT_FOUND;
-    }
-    /* A repository Image whose edges all went to its components (pass_docker.c
-     * P4.2b) is left without any: it goes, as on the incremental routes. */
-    (void)cbm_gbuf_delete_unreferenced(p->gbuf, "Image", DK_IMAGE_EDGES);
+    full_release_stem_marks(&run); /* structure may have returned before extraction */
     return rc;
 }
 
-/* The stem collisions decide Folder QNs (structure) and Module QNs
- * (extraction); both phases read the one set. */
-static int run_extraction_phase(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
-                                const cbm_file_info_t *files, int file_count) {
-    cbm_stem_marks_t marks;
-    cbm_stem_marks_init(&marks, p->project_name, files, file_count);
-    ctx->stem_marks = &marks;
-    int rc = run_structure_and_extraction(p, ctx, files, file_count);
-    ctx->stem_marks = NULL;
-    cbm_stem_marks_free(&marks);
-    return rc;
+static cbm_discover_walk_fn g_pipeline_discover_walk;
+
+void cbm_pipeline_set_discover_walk(cbm_discover_walk_fn walker) {
+    g_pipeline_discover_walk = walker;
+}
+
+static int pipeline_discover(cbm_pipeline_t *p, const cbm_discover_opts_t *opts, const char *phase,
+                             cbm_file_info_t **files, int *file_count) {
+    const char *selector = cbm_runtime_getenv("MORI_IMPL_DISCOVERY");
+    const bool requested = selector && strcmp(selector, "rust") == 0;
+    const bool listed = cbm_pipeline_frozen_has_file_list(p);
+    const char *reason = listed                      ? "frozen_file_list"
+                         : p->frozen                 ? "frozen"
+                         : opts->resource_policy     ? "resource_policy"
+                         : !requested                ? "default"
+                         : !g_pipeline_discover_walk ? "unavailable"
+                                                     : "selected";
+    cbm_discover_walk_fn walker =
+        requested && !p->frozen && !opts->resource_policy ? g_pipeline_discover_walk : NULL;
+    cbm_log_debug("pipeline.discovery_backend", "phase", phase, "mode",
+                  pipeline_mode_name(opts->mode), "backend",
+                  listed   ? "frozen_list"
+                  : walker ? "rust"
+                           : "c",
+                  "reason", reason);
+    if (listed) {
+        return cbm_pipeline_frozen_listed_files(p, files, file_count);
+    }
+    return cbm_discover_ex2_with_walk(p->repo_path, opts, files, file_count, &p->excluded_dirs,
+                                      &p->excluded_count, &p->ignored_files, &p->ignored_count,
+                                      &p->ignored_total, walker);
 }
 
 static int cbm_pipeline_run_staged(cbm_pipeline_t *p) {
@@ -4451,12 +4598,7 @@ static int cbm_pipeline_run_staged(cbm_pipeline_t *p) {
     p->ignored_files = NULL;
     p->ignored_count = 0;
     p->ignored_total = 0;
-    /* A frozen build with a classified file list walks no directory. */
-    int rc = cbm_pipeline_frozen_has_file_list(p)
-                 ? cbm_pipeline_frozen_listed_files(p, &files, &file_count)
-                 : cbm_discover_ex2(p->repo_path, &opts, &files, &file_count, &p->excluded_dirs,
-                                    &p->excluded_count, &p->ignored_files, &p->ignored_count,
-                                    &p->ignored_total);
+    int rc = pipeline_discover(p, &opts, "initial", &files, &file_count);
     if (rc != 0) {
         cbm_log_error("pipeline.err", "phase", "discover", "rc", itoa_buf(rc));
     }
@@ -4526,11 +4668,7 @@ static int cbm_pipeline_run_staged(cbm_pipeline_t *p) {
         p->ignored_total = 0;
 
         opts.mode = p->mode;
-        rc = cbm_pipeline_frozen_has_file_list(p)
-                 ? cbm_pipeline_frozen_listed_files(p, &files, &file_count)
-                 : cbm_discover_ex2(p->repo_path, &opts, &files, &file_count, &p->excluded_dirs,
-                                    &p->excluded_count, &p->ignored_files, &p->ignored_count,
-                                    &p->ignored_total);
+        rc = pipeline_discover(p, &opts, "rediscover", &files, &file_count);
         cbm_log_info("pipeline.rediscover", "requested_mode", pipeline_mode_name(p->requested_mode),
                      "effective_mode", pipeline_mode_name(p->mode), "files", itoa_buf(file_count));
         if (rc != 0 || check_cancel(p)) {
@@ -4572,12 +4710,7 @@ static int cbm_pipeline_run_staged(cbm_pipeline_t *p) {
         .excluded_count = p->excluded_count,
     };
 
-    rc = run_extraction_phase(p, &ctx, files, file_count);
-    if (rc != 0) {
-        goto cleanup;
-    }
-
-    rc = run_post_extraction(p, &ctx, files, file_count, baseline_manifest, baseline_count);
+    rc = run_full_build(p, &ctx, files, file_count, baseline_manifest, baseline_count);
     if (rc != 0) {
         goto cleanup;
     }

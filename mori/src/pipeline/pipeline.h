@@ -24,6 +24,10 @@
 #include "foundation/constants.h"  /* CBM_SZ_512 */
 #include "foundation/hash_table.h" /* CBMHashTable (#1355 pkgmap lookup) */
 
+/* Register the optional pipeline walker once, before the process starts
+ * indexing threads. */
+void cbm_pipeline_set_discover_walk(cbm_discover_walk_fn walker);
+
 /* Forward declarations */
 typedef struct cbm_store cbm_store_t;
 typedef struct cbm_gbuf cbm_gbuf_t;

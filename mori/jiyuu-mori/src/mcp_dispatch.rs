@@ -1,52 +1,10 @@
-//! Select the MCP method handler and decode tool call parameters.
+//! Dispatch MCP methods to C operations and decode tool call parameters.
 
-use std::ffi::{CStr, c_char, c_int};
 use std::fmt;
 
 use serde::Deserialize;
 use serde::de::{MapAccess, Visitor};
 use serde_json::value::RawValue;
-
-/// Handler IDs shared by `cbm_mcp_server_handle` in `mcp.c`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(i32)]
-enum Method {
-    Unknown,
-    Initialize,
-    Ping,
-    ResourcesList,
-    ResourceTemplatesList,
-    PromptsList,
-    PromptsGet,
-    ToolsList,
-    ToolsCall,
-    Cancelled,
-    Discover,
-}
-
-fn select(method: &[u8]) -> Method {
-    match method {
-        b"initialize" => Method::Initialize,
-        b"ping" => Method::Ping,
-        b"resources/list" => Method::ResourcesList,
-        b"resources/templates/list" => Method::ResourceTemplatesList,
-        b"prompts/list" => Method::PromptsList,
-        b"prompts/get" => Method::PromptsGet,
-        b"tools/list" => Method::ToolsList,
-        b"tools/call" => Method::ToolsCall,
-        b"notifications/cancelled" => Method::Cancelled,
-        b"server/discover" => Method::Discover,
-        _ => Method::Unknown,
-    }
-}
-
-unsafe extern "C" fn select_c(method: *const c_char) -> c_int {
-    if method.is_null() {
-        return Method::Unknown as c_int;
-    }
-    // SAFETY: C retains the parsed NUL-terminated method until we return.
-    select(unsafe { CStr::from_ptr(method) }.to_bytes()) as c_int
-}
 
 #[derive(Default)]
 struct ToolCall<'a> {
@@ -112,25 +70,98 @@ fn decode_tool_call(params: &str) -> serde_json::Result<ToolCall<'_>> {
     }
 }
 
-#[cfg(all(feature = "c-backend", not(test)))]
+#[cfg(any(feature = "c-backend", test))]
 mod linked {
-    use std::ffi::{CStr, CString, c_char, c_int};
+    #[cfg(all(test, feature = "c-backend"))]
+    mod native_tests;
+
+    #[cfg(feature = "c-backend")]
+    use std::ffi::CString;
+    use std::ffi::{CStr, c_char};
+    #[cfg(feature = "c-backend")]
     use std::{panic, ptr};
 
+    /// C owns the request and its outputs. Only the C operations may
+    /// dereference this pointer, and only while dispatch is running.
+    #[repr(C)]
+    struct RequestContext {
+        _opaque: [u8; 0],
+    }
+
+    type RequestOp = unsafe extern "C" fn(*mut RequestContext);
+
+    /// Mirrors mcp_request_ops_t in mcp.c.
+    #[repr(C)]
+    struct RequestOps {
+        initialize: RequestOp,
+        ping: RequestOp,
+        resources_list: RequestOp,
+        resource_templates_list: RequestOp,
+        prompts_list: RequestOp,
+        prompts_get: RequestOp,
+        tools_list: RequestOp,
+        tools_call: RequestOp,
+        cancel_notification: RequestOp,
+        unknown: unsafe extern "C" fn(*mut RequestContext, bool),
+    }
+
+    #[cfg(feature = "c-backend")]
+    type Dispatch = unsafe extern "C" fn(
+        method: *const c_char,
+        has_id: bool,
+        ctx: *mut RequestContext,
+        ops: *const RequestOps,
+    );
+
+    #[cfg(feature = "c-backend")]
     type ToolCallDecoder = unsafe extern "C" fn(
         params: *const c_char,
         name_out: *mut *mut c_char,
         args_out: *mut *mut c_char,
     ) -> bool;
 
+    #[cfg(feature = "c-backend")]
     unsafe extern "C" {
-        fn cbm_mcp_set_method_selector(
-            select: unsafe extern "C" fn(*const c_char) -> c_int,
-        );
+        fn cbm_mcp_set_dispatch(dispatch: Dispatch);
         fn cbm_mcp_set_tool_call_decoder(decode: ToolCallDecoder);
         fn strdup(s: *const c_char) -> *mut c_char;
     }
 
+    unsafe extern "C" fn dispatch(
+        method: *const c_char,
+        has_id: bool,
+        ctx: *mut RequestContext,
+        ops: *const RequestOps,
+    ) {
+        // SAFETY: C supplies the parsed method, live request, and matching
+        // operation table for the duration of this synchronous callback.
+        unsafe {
+            let method = CStr::from_ptr(method).to_bytes();
+            let ops = &*ops;
+            if !has_id {
+                if method == b"notifications/cancelled" {
+                    (ops.cancel_notification)(ctx);
+                }
+                return;
+            }
+
+            match method {
+                b"initialize" => (ops.initialize)(ctx),
+                b"ping" => (ops.ping)(ctx),
+                b"resources/list" => (ops.resources_list)(ctx),
+                b"resources/templates/list" => {
+                    (ops.resource_templates_list)(ctx)
+                }
+                b"prompts/list" => (ops.prompts_list)(ctx),
+                b"prompts/get" => (ops.prompts_get)(ctx),
+                b"tools/list" => (ops.tools_list)(ctx),
+                b"tools/call" => (ops.tools_call)(ctx),
+                _ => (ops.unknown)(ctx, method == b"server/discover"),
+            }
+        }
+    }
+
+    #[cfg(feature = "c-backend")]
     unsafe extern "C" fn decode(
         params: *const c_char,
         name_out: *mut *mut c_char,
@@ -167,11 +198,69 @@ mod linked {
         true
     }
 
+    #[cfg(feature = "c-backend")]
     pub(crate) unsafe fn register() {
         // SAFETY: the caller registers once, before starting request threads.
         unsafe {
-            cbm_mcp_set_method_selector(super::select_c);
+            cbm_mcp_set_dispatch(dispatch);
             cbm_mcp_set_tool_call_decoder(decode);
+        }
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn dispatches_cancel_only_as_a_notification() {
+        #[derive(Debug, PartialEq)]
+        enum Operation {
+            None,
+            Cancel,
+            Unknown,
+            Unexpected,
+        }
+
+        unsafe extern "C" fn unexpected(ctx: *mut RequestContext) {
+            // SAFETY: The test passes a writable Operation as its context.
+            unsafe { *ctx.cast() = Operation::Unexpected };
+        }
+        unsafe extern "C" fn cancel(ctx: *mut RequestContext) {
+            // SAFETY: The test passes a writable Operation as its context.
+            unsafe { *ctx.cast() = Operation::Cancel };
+        }
+        unsafe extern "C" fn unknown(ctx: *mut RequestContext, _: bool) {
+            // SAFETY: The test passes a writable Operation as its context.
+            unsafe { *ctx.cast() = Operation::Unknown };
+        }
+
+        let ops = RequestOps {
+            initialize: unexpected,
+            ping: unexpected,
+            resources_list: unexpected,
+            resource_templates_list: unexpected,
+            prompts_list: unexpected,
+            prompts_get: unexpected,
+            tools_list: unexpected,
+            tools_call: unexpected,
+            cancel_notification: cancel,
+            unknown,
+        };
+        for (method, has_id, expected) in [
+            (c"notifications/cancelled", false, Operation::Cancel),
+            (c"notifications/cancelled", true, Operation::Unknown),
+            (c"initialize", false, Operation::None),
+            (c"tools/call", false, Operation::None),
+        ] {
+            let mut observed = Operation::None;
+            // SAFETY: The method and table are live, and the test operations
+            // cast the borrowed pointer back to its original type.
+            unsafe {
+                dispatch(
+                    method.as_ptr(),
+                    has_id,
+                    (&raw mut observed).cast(),
+                    &ops,
+                );
+            }
+            assert_eq!(observed, expected, "{method:?}, has_id={has_id}");
         }
     }
 }
@@ -208,29 +297,5 @@ mod tests {
             assert!(call.name.is_none(), "{input}");
             assert!(call.arguments.is_none(), "{input}");
         }
-    }
-
-    #[test]
-    fn matches_exact_method_names_and_preserves_handler_ids() {
-        for (method, handler_id) in [
-            (c"initialize", 1),
-            (c"ping", 2),
-            (c"resources/list", 3),
-            (c"resources/templates/list", 4),
-            (c"prompts/list", 5),
-            (c"prompts/get", 6),
-            (c"tools/list", 7),
-            (c"tools/call", 8),
-            (c"notifications/cancelled", 9),
-            (c"server/discover", 10),
-            (c"tools/CALL", 0),
-            (c"ping/extra", 0),
-            (c"\xff", 0),
-        ] {
-            // SAFETY: The pointer comes from a static C string.
-            assert_eq!(unsafe { select_c(method.as_ptr()) }, handler_id);
-        }
-        // SAFETY: A null method is supported and classified as unknown.
-        assert_eq!(unsafe { select_c(std::ptr::null()) }, 0);
     }
 }

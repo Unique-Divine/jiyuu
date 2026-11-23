@@ -4414,9 +4414,81 @@ bool cbm_pipeline_incremental_generation_exact(cbm_pipeline_t *p, cbm_store_t *s
     return exact;
 }
 
+typedef struct {
+    cbm_pipeline_t *pipeline;
+    cbm_store_t *store;
+    const char *project;
+    cbm_file_info_t *files;
+    int file_count;
+    const cbm_file_hash_t *stored;
+    int stored_count;
+    const cbm_file_hash_t *baseline;
+    int baseline_count;
+    closure_plan_t *closure;
+    bool metadata_current;
+    bool doc_links_current;
+} staged_generation_proof_t;
+
+static bool staged_generation_current(void *data) {
+    staged_generation_proof_t *proof = data;
+    return incr_generation_exact(proof->pipeline, proof->store, proof->project, proof->stored,
+                                 proof->stored_count, proof->baseline, proof->baseline_count,
+                                 &proof->metadata_current, &proof->doc_links_current);
+}
+
+static cbm_index_plan_result_t staged_generation_plan(void *data) {
+    staged_generation_proof_t *proof = data;
+    /* SwiftPM target paths are global resolution inputs. Compare them before
+     * allowing a source-only closure repair. */
+    proof->metadata_current =
+        closure_metadata_current(proof->metadata_current, proof->stored, proof->stored_count,
+                                 proof->baseline, proof->baseline_count);
+    if (proof->metadata_current &&
+        closure_try_plan(proof->pipeline, proof->store, proof->project, proof->files,
+                         proof->file_count, proof->stored, proof->stored_count, proof->baseline,
+                         proof->baseline_count, proof->closure)) {
+        return CBM_INDEX_PLAN_READY;
+    }
+    return proof->closure->fatal_rc ? CBM_INDEX_PLAN_FATAL : CBM_INDEX_PLAN_DECLINED;
+}
+
+static cbm_index_route_t choose_staged_route_c(void *proof, bool force_full_on_mismatch) {
+    if (staged_generation_current(proof)) {
+        return CBM_INDEX_ROUTE_NOOP;
+    }
+    if (force_full_on_mismatch) {
+        return CBM_INDEX_ROUTE_FULL_MODE;
+    }
+    switch (staged_generation_plan(proof)) {
+    case CBM_INDEX_PLAN_READY:
+        return CBM_INDEX_ROUTE_CLOSURE;
+    case CBM_INDEX_PLAN_FATAL:
+        return CBM_INDEX_ROUTE_FATAL;
+    case CBM_INDEX_PLAN_DECLINED:
+        return CBM_INDEX_ROUTE_FULL_DECLINED;
+    }
+    return CBM_INDEX_ROUTE_FATAL;
+}
+
+static const char *staged_route_name(cbm_index_route_t route) {
+    switch (route) {
+    case CBM_INDEX_ROUTE_NOOP:
+        return "noop";
+    case CBM_INDEX_ROUTE_CLOSURE:
+        return "closure";
+    case CBM_INDEX_ROUTE_FULL_MODE:
+    case CBM_INDEX_ROUTE_FULL_DECLINED:
+        return "full";
+    case CBM_INDEX_ROUTE_FATAL:
+        return "fatal";
+    }
+    return "unknown";
+}
+
 int cbm_pipeline_run_incremental(cbm_pipeline_t *p, const char *db_path, cbm_file_info_t *files,
                                  int file_count, const cbm_file_hash_t *baseline_manifest,
-                                 int baseline_count, bool force_full_on_mismatch) {
+                                 int baseline_count, bool force_full_on_mismatch,
+                                 cbm_index_staged_route_fn choose_route) {
     struct timespec t0;
     cbm_clock_gettime(CLOCK_MONOTONIC, &t0);
     closure_plan_t closure_plan = {0};
@@ -4454,66 +4526,59 @@ int cbm_pipeline_run_incremental(cbm_pipeline_t *p, const char *db_path, cbm_fil
         return CBM_PIPELINE_ABORT_PRESERVE_DB;
     }
 
-    /* Production incremental routing is deliberately binary: an exact
-     * semantic-manifest match is a no-op; any byte/set/mode/migration delta
-     * rebuilds the complete graph. This avoids partial LSP/package/config
-     * convergence gaps while retaining the common unchanged-repo fast path. */
+    /* The exact proof and closure planner share a borrowed, read-only
+     * generation. Only the selected closure reaches the repair executor. */
     if (!force_legacy_partial) {
-        bool metadata_current = false;
-        bool doc_links_current = false;
-        bool exact =
-            incr_generation_exact(p, store, project, stored, stored_count, baseline_manifest,
-                                  baseline_count, &metadata_current, &doc_links_current);
-        if (exact) {
-            cbm_store_free_file_hashes(stored, stored_count);
-            cbm_store_close(store);
-#if defined(CBM_INCREMENTAL_TEST_API) && CBM_INCREMENTAL_TEST_API
-            incr_test_set_last_route(CBM_INCREMENTAL_ROUTE_NOOP);
-#endif
-            cbm_log_info("incremental.noop", "reason", "semantic_manifest_equal");
-            return 0;
+        staged_generation_proof_t proof = {
+            .pipeline = p,
+            .store = store,
+            .project = project,
+            .files = files,
+            .file_count = file_count,
+            .stored = stored,
+            .stored_count = stored_count,
+            .baseline = baseline_manifest,
+            .baseline_count = baseline_count,
+            .closure = &closure_plan,
+        };
+        cbm_index_route_t route =
+            choose_route ? choose_route(&proof, force_full_on_mismatch, staged_generation_current,
+                                        staged_generation_plan)
+                         : choose_staged_route_c(&proof, force_full_on_mismatch);
+        if (choose_route) {
+            cbm_log_info("pipeline.index_route", "implementation", "rust", "generation", "staged",
+                         "outcome", staged_route_name(route));
         }
-        if (force_full_on_mismatch) {
-            cbm_store_free_file_hashes(stored, stored_count);
-            cbm_store_close(store);
-#if defined(CBM_INCREMENTAL_TEST_API) && CBM_INCREMENTAL_TEST_API
-            incr_test_set_last_route(CBM_INCREMENTAL_ROUTE_FORCED_FULL);
-#endif
-            cbm_log_info("incremental.force_full", "reason", "mode_downgrade_changed");
-            return CBM_PIPELINE_FORCE_FULL_REINDEX;
-        }
-        /* Manifest delta. Closure repair recomputes exactly the changed
-         * files plus the recorded consumers of any changed SURFACE; every
-         * uncertain case declines inside the planner, making the pre-plan
-         * behaviour (full rebuild) the unconditional fallback. */
-        /* Package.swift is also discovered source, but its target paths are
-         * global resolution inputs, not a file-local declaration surface.
-         * Compare their SwiftPM subsets before allowing any source-only
-         * closure repair, independently of database row order. */
-        metadata_current = closure_metadata_current(metadata_current, stored, stored_count,
-                                                    baseline_manifest, baseline_count);
-        if (metadata_current &&
-            closure_try_plan(p, store, project, files, file_count, stored, stored_count,
-                             baseline_manifest, baseline_count, &closure_plan)) {
+
+        if (route == CBM_INDEX_ROUTE_CLOSURE) {
             closure_active = true;
 #if defined(CBM_INCREMENTAL_TEST_API) && CBM_INCREMENTAL_TEST_API
             incr_test_set_last_route(CBM_INCREMENTAL_ROUTE_CLOSURE_REPAIR);
 #endif
             cbm_log_info("incremental.route", "route", "closure_repair", "files",
                          itoa_buf(closure_plan.count));
-            /* Fall through into the shared repair tail below. */
         } else {
             cbm_store_free_file_hashes(stored, stored_count);
             cbm_store_close(store);
+            if (route == CBM_INDEX_ROUTE_NOOP) {
+#if defined(CBM_INCREMENTAL_TEST_API) && CBM_INCREMENTAL_TEST_API
+                incr_test_set_last_route(CBM_INCREMENTAL_ROUTE_NOOP);
+#endif
+                cbm_log_info("incremental.noop", "reason", "semantic_manifest_equal");
+                return 0;
+            }
 #if defined(CBM_INCREMENTAL_TEST_API) && CBM_INCREMENTAL_TEST_API
             incr_test_set_last_route(CBM_INCREMENTAL_ROUTE_FORCED_FULL);
 #endif
-            if (closure_plan.fatal_rc) {
-                return closure_plan.fatal_rc;
+            if (route == CBM_INDEX_ROUTE_FATAL) {
+                return closure_plan.fatal_rc ? closure_plan.fatal_rc
+                                             : CBM_PIPELINE_ABORT_PRESERVE_DB;
             }
-            cbm_log_info("incremental.force_full", "reason",
-                         metadata_current && !doc_links_current ? "doc_links_not_current"
-                                                                : "semantic_manifest_changed");
+            const char *reason = route == CBM_INDEX_ROUTE_FULL_MODE ? "mode_downgrade_changed"
+                                 : proof.metadata_current && !proof.doc_links_current
+                                     ? "doc_links_not_current"
+                                     : "semantic_manifest_changed";
+            cbm_log_info("incremental.force_full", "reason", reason);
             return CBM_PIPELINE_FORCE_FULL_REINDEX;
         }
     }
