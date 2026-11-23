@@ -380,6 +380,7 @@ pub unsafe extern "C" fn main(argc: c_int, argv: *mut *mut c_char) -> c_int {
         crate::cli_output::register();
         crate::initialize::c_initialize::register();
         crate::mcp_dispatch::register();
+        crate::cypher_ffi::register();
         crate::tool_list::c_tool_list::register();
         crate::search::register();
         crate::path_verdict::register();

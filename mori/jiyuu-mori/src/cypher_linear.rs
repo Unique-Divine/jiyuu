@@ -1,10 +1,13 @@
-//! Bounded Cypher evaluator compiled only by the linked acceptance test.
+//! Bounded Cypher evaluator for a verified subset of query patterns.
 
 use std::collections::HashMap;
+#[cfg(test)]
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use rusqlite::{Connection, OpenFlags, Row, Statement, params};
+#[cfg(test)]
+use rusqlite::OpenFlags;
+use rusqlite::{Connection, Row, Statement, params};
 
 const ENGINE_LIMIT: usize = 100_000;
 const DEADLINE: Duration = Duration::from_secs(30);
@@ -496,6 +499,7 @@ impl<'a> ExecutionBudget<'a> {
 }
 
 impl Query<'_> {
+    #[cfg(test)]
     pub(crate) fn execute(
         &self,
         db: &Path,
@@ -506,7 +510,7 @@ impl Query<'_> {
         self.execute_on(&connection, project)
     }
 
-    /// Read from the graph and snapshot the caller has already selected.
+    #[cfg(test)]
     pub(crate) fn execute_on(
         &self,
         connection: &Connection,
@@ -519,6 +523,7 @@ impl Query<'_> {
         )
     }
 
+    /// Read from the graph and snapshot the caller has already selected.
     pub(crate) fn execute_with_budget(
         &self,
         connection: &Connection,
@@ -551,7 +556,7 @@ impl Query<'_> {
         'starts: while let Some(row) = start_nodes.next()? {
             budget.step()?;
             let start = Node::read(row, 0)?;
-            if !start.matches(&self.nodes[start_index].inline)? {
+            if !self.matches_node(start_index, &start)? {
                 continue;
             }
             let mut hop = self.hops[0];
@@ -566,19 +571,18 @@ impl Query<'_> {
                         adjacency.neighbors(next.id, hop, budget)?
                     {
                         budget.step()?;
-                        if self.matches_node(2, &last)?
-                            && self.conditions(&[&start, &next, &last])?
-                        {
-                            if rows.len() == limit {
-                                break 'starts;
-                            }
-                            rows.push(self.project(
-                                &[&start, &next, &last],
-                                &[&edge, &last_edge],
-                            )?);
-                            if rows.len() == ENGINE_LIMIT {
-                                return Err(ExecutionError::RowCeiling);
-                            }
+                        if !self.matches_node(2, &last)? {
+                            continue;
+                        }
+                        if rows.len() == limit {
+                            break 'starts;
+                        }
+                        rows.push(self.project(
+                            &[&start, &next, &last],
+                            &[&edge, &last_edge],
+                        )?);
+                        if rows.len() == ENGINE_LIMIT {
+                            return Err(ExecutionError::RowCeiling);
                         }
                     }
                 } else {
@@ -587,14 +591,12 @@ impl Query<'_> {
                     } else {
                         [&start, &next]
                     };
-                    if self.conditions(&nodes)? {
-                        if rows.len() == limit {
-                            break 'starts;
-                        }
-                        rows.push(self.project(&nodes, &[&edge])?);
-                        if rows.len() == ENGINE_LIMIT {
-                            return Err(ExecutionError::RowCeiling);
-                        }
+                    if rows.len() == limit {
+                        break 'starts;
+                    }
+                    rows.push(self.project(&nodes, &[&edge])?);
+                    if rows.len() == ENGINE_LIMIT {
+                        return Err(ExecutionError::RowCeiling);
                     }
                 }
             }
@@ -631,15 +633,15 @@ impl Query<'_> {
 
     fn matches_node(&self, index: usize, node: &Node) -> rusqlite::Result<bool> {
         let pattern = &self.nodes[index];
-        if pattern.label.is_some_and(|label| label != node.label) {
+        if pattern.label.is_some_and(|label| label != node.label)
+            || !node.matches(&pattern.inline)?
+        {
             return Ok(false);
         }
-        node.matches(&pattern.inline)
-    }
-
-    fn conditions(&self, nodes: &[&Node]) -> rusqlite::Result<bool> {
-        for &(index, (property, value)) in &self.filters {
-            if nodes[index].property(property)? != value {
+        // The classifier accepts single-binding predicates. Evaluate each
+        // when its node is bound so rejected nodes never expand adjacency.
+        for &(target, (property, value)) in &self.filters {
+            if target == index && node.property(property)? != value {
                 return Ok(false);
             }
         }

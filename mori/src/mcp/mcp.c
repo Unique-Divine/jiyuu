@@ -6533,6 +6533,112 @@ static char *query_graph_budget_floor_text(const cbm_cypher_result_t *result, in
     return cbm_sb_finish(&sb);
 }
 
+static cbm_mcp_cypher_evaluator_fn rust_cypher_evaluator;
+
+void cbm_mcp_set_cypher_evaluator(cbm_mcp_cypher_evaluator_fn evaluate) {
+    rust_cypher_evaluator = evaluate;
+}
+
+static char *copy_cypher_cell(cbm_mcp_cypher_cell_t cell) {
+    char *copy = malloc(cell.len + 1);
+    if (copy) {
+        memcpy(copy, cell.data, cell.len);
+        copy[cell.len] = '\0';
+    }
+    return copy;
+}
+
+static const char **copy_cypher_cells(const cbm_mcp_cypher_cell_t *cells, size_t count) {
+    const char **copy = calloc(count, sizeof(*copy));
+    if (!copy) {
+        return NULL;
+    }
+    for (size_t index = 0; index < count; index++) {
+        copy[index] = copy_cypher_cell(cells[index]);
+        if (!copy[index]) {
+            for (size_t prior = 0; prior < index; prior++) {
+                free((void *)copy[prior]);
+            }
+            free(copy);
+            return NULL;
+        }
+    }
+    return copy;
+}
+
+static bool cypher_sink_begin(void *context, const cbm_mcp_cypher_cell_t *columns,
+                              size_t column_count, size_t row_capacity) {
+    cbm_cypher_result_t *result = context;
+    result->columns = copy_cypher_cells(columns, column_count);
+    if (!result->columns) {
+        return false;
+    }
+    result->col_count = (int)column_count;
+    if (row_capacity) {
+        result->rows = calloc(row_capacity, sizeof(*result->rows));
+        if (!result->rows) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool cypher_sink_row(void *context, const cbm_mcp_cypher_cell_t *cells) {
+    cbm_cypher_result_t *result = context;
+    const char **row = copy_cypher_cells(cells, (size_t)result->col_count);
+    if (!row) {
+        return false;
+    }
+    result->rows[result->row_count++] = row;
+    return true;
+}
+
+static void cypher_sink_storage_error(void *context, cbm_mcp_cypher_cell_t detail) {
+    cbm_cypher_result_t *result = context;
+    result->error = copy_cypher_cell(detail);
+}
+
+static bool cypher_request_cancelled(void *context) {
+    return mcp_request_cancelled(context);
+}
+
+/* The Rust evaluator receives the same read-batched connection from which
+ * the query handler obtained the generation. The C handler owns pagination
+ * and rendering for both evaluators. */
+static int evaluate_mcp_cypher(cbm_mcp_server_t *srv, cbm_store_t *store, const char *query,
+                               const char *project, cbm_cypher_result_t *result) {
+    const char *backend = cbm_runtime_getenv("MORI_IMPL_QUERY");
+    if (rust_cypher_evaluator && project && backend && strcmp(backend, "rust") == 0) {
+        const cbm_mcp_cypher_sink_t sink = {
+            .context = result,
+            .begin = cypher_sink_begin,
+            .row = cypher_sink_row,
+            .storage_error = cypher_sink_storage_error,
+        };
+        int status = rust_cypher_evaluator(cbm_store_get_db(store), query, project,
+                                           cypher_request_cancelled, srv, &sink);
+        if (status != CBM_MCP_CYPHER_UNSUPPORTED) {
+            cbm_log_debug("query_graph.evaluator", "backend", "rust");
+            switch (status) {
+            case CBM_MCP_CYPHER_OK:
+                return 0;
+            case CBM_MCP_CYPHER_DEADLINE:
+                result->error = heap_strdup(CBM_CYPHER_DEADLINE_ERROR);
+                break;
+            case CBM_MCP_CYPHER_CANCELLED:
+                result->error = heap_strdup("query_graph cancelled for this request");
+                break;
+            case CBM_MCP_CYPHER_ROW_CEILING:
+                result->truncated = true;
+                result->error = heap_strdup(CBM_CYPHER_ROW_CEILING_ERROR);
+                break;
+            }
+            return CBM_NOT_FOUND;
+        }
+    }
+    return cbm_cypher_execute(store, query, project, 0, result);
+}
+
 static char *handle_query_graph(cbm_mcp_server_t *srv, const char *args) {
     char *query = cbm_mcp_get_string_arg(args, "query");
     char *project = get_project_arg(args);
@@ -6641,7 +6747,7 @@ static char *handle_query_graph(cbm_mcp_server_t *srv, const char *args) {
      * Executing at visible_limit+1 corrupts ORDER BY, DISTINCT, aggregation,
      * and SKIP semantics before serialization gets a chance to trim rows.
      * Zero preserves the engine's established 100k safety ceiling. */
-    int rc = cbm_cypher_execute(store, query, cypher_project, 0, &result);
+    int rc = evaluate_mcp_cypher(srv, store, query, cypher_project, &result);
 
     if (rc < 0) {
         char *err_msg = result.error ? result.error : "query execution failed";
