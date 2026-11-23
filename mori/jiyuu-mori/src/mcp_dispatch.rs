@@ -72,10 +72,13 @@ fn decode_tool_call(params: &str) -> serde_json::Result<ToolCall<'_>> {
 
 #[cfg(any(feature = "c-backend", test))]
 mod linked {
-    #[cfg(not(test))]
+    #[cfg(all(test, feature = "c-backend"))]
+    mod native_tests;
+
+    #[cfg(feature = "c-backend")]
     use std::ffi::CString;
     use std::ffi::{CStr, c_char};
-    #[cfg(not(test))]
+    #[cfg(feature = "c-backend")]
     use std::{panic, ptr};
 
     /// C owns the request and its outputs. Only the C operations may
@@ -102,7 +105,7 @@ mod linked {
         unknown: unsafe extern "C" fn(*mut RequestContext, bool),
     }
 
-    #[cfg(not(test))]
+    #[cfg(feature = "c-backend")]
     type Dispatch = unsafe extern "C" fn(
         method: *const c_char,
         has_id: bool,
@@ -110,14 +113,14 @@ mod linked {
         ops: *const RequestOps,
     );
 
-    #[cfg(not(test))]
+    #[cfg(feature = "c-backend")]
     type ToolCallDecoder = unsafe extern "C" fn(
         params: *const c_char,
         name_out: *mut *mut c_char,
         args_out: *mut *mut c_char,
     ) -> bool;
 
-    #[cfg(not(test))]
+    #[cfg(feature = "c-backend")]
     unsafe extern "C" {
         fn cbm_mcp_set_dispatch(dispatch: Dispatch);
         fn cbm_mcp_set_tool_call_decoder(decode: ToolCallDecoder);
@@ -158,7 +161,7 @@ mod linked {
         }
     }
 
-    #[cfg(not(test))]
+    #[cfg(feature = "c-backend")]
     unsafe extern "C" fn decode(
         params: *const c_char,
         name_out: *mut *mut c_char,
@@ -195,7 +198,7 @@ mod linked {
         true
     }
 
-    #[cfg(not(test))]
+    #[cfg(feature = "c-backend")]
     pub(crate) unsafe fn register() {
         // SAFETY: the caller registers once, before starting request threads.
         unsafe {
