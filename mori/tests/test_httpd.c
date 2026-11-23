@@ -898,6 +898,7 @@ TEST(ui_server_standalone_rejects_writes) {
     } cases[] = {
         {"/api/config", "{}", 404},
         {"/api/index", "{}", 404},
+        {"/api/repository-map?project=standalone", "{}", 404},
         {"/api/agent-events", "{}", 404},
         {"/api/ui-log", "{}", 404},
         {"/rpc",
@@ -927,6 +928,67 @@ TEST(ui_server_standalone_rejects_writes) {
     char config_path[1024];
     snprintf(config_path, sizeof(config_path), "%s/_config.db", fx.cache_dir);
     ASSERT_FALSE(cbm_file_exists(config_path));
+    ui_delete_fixture_cleanup(&fx);
+    PASS();
+}
+
+TEST(ui_server_standalone_serves_project_readers) {
+    const char *project = "standalone";
+    ui_delete_fixture_t fx;
+    ASSERT_EQ(ui_delete_fixture_init(&fx), 0);
+    ASSERT_EQ(ui_adr_seed(&fx, project, "original ADR"), CBM_STORE_OK);
+    char path[1024];
+    ui_delete_db_path(&fx, project, path, sizeof(path));
+    cbm_store_t *store = cbm_store_open_path(path);
+    ASSERT_NOT_NULL(store);
+    ASSERT_EQ(cbm_store_upsert_project(store, project, fx.root_dir), CBM_STORE_OK);
+    cbm_node_t node = {.project = project,
+                       .label = "Function",
+                       .name = "entry",
+                       .qualified_name = "standalone.reader.entry",
+                       .file_path = "reader.c",
+                       .start_line = 1,
+                       .end_line = 3,
+                       .properties_json = "{}"};
+    ASSERT_GT(cbm_store_upsert_node(store, &node), 0);
+    cbm_store_close(store);
+
+    th_server_t server = {.srv = cbm_http_server_new_read_only(0)};
+    ASSERT_NOT_NULL(server.srv);
+    ASSERT_EQ(th_server_thread_start(&server.tid, server.srv), 0);
+    int port = cbm_http_server_port(server.srv);
+    static const struct {
+        const char *target;
+        int status;
+        const char *text;
+    } reads[] = {
+        {"/api/repository-map?project=standalone", 200, "standalone.reader.entry"},
+        {"/api/adr?project=standalone", 200, "original ADR"},
+        {"/api/impact-analysis?project=standalone", 200,
+         "A relative indexed file path is required"},
+        {"/api/layout?project=standalone", 200, "\"nodes\""},
+        {"/api/repo-info?project=standalone", 200, "\"root_path\""},
+        {"/api/trace?project=standalone", 400, "missing from/to parameter"},
+        {"/api/flows?project=standalone", 200, "\"flows\""},
+        {"/api/flow?project=standalone&id=999", 404, "unknown flow"},
+        {"/api/project-health?name=standalone", 200, "\"status\":\"healthy\""},
+        {"/api/index-status", 200, "\r\n\r\n[]"},
+        {"/api/repository-map-extra?project=standalone", 404, "not found"},
+        {"/api/config", 404, "not found"},
+        {"/api/logs", 404, "not found"},
+    };
+    char request[512], response[16384];
+    for (size_t i = 0; i < sizeof(reads) / sizeof(reads[0]); i++) {
+        snprintf(request, sizeof(request), "GET %s HTTP/1.1\r\n\r\n", reads[i].target);
+        ASSERT_GT(th_http(port, request, response, sizeof(response)), 0);
+        ASSERT_EQ(th_status(response), reads[i].status);
+        ASSERT_NOT_NULL(strstr(response, reads[i].text));
+    }
+    th_server_stop(&server);
+    snprintf(path, sizeof(path), "%s/_config.db", fx.cache_dir);
+    ASSERT_FALSE(cbm_file_exists(path));
+    snprintf(path, sizeof(path), "%s/activity.db", fx.cache_dir);
+    ASSERT_FALSE(cbm_file_exists(path));
     ui_delete_fixture_cleanup(&fx);
     PASS();
 }
@@ -4179,6 +4241,7 @@ SUITE(httpd) {
     RUN_TEST(ui_server_rpc_rejects_duplicate_adr_arguments);
     RUN_TEST(ui_server_rpc_allows_only_ui_read_tools);
     RUN_TEST(ui_server_standalone_rejects_writes);
+    RUN_TEST(ui_server_standalone_serves_project_readers);
     RUN_TEST(ui_server_atlas_routes_are_wired);
     RUN_TEST(ui_server_retained_cache_memory_is_flushed_before_thread_exit);
     RUN_TEST(ui_server_oversized_body_rejected);

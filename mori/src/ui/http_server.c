@@ -3298,16 +3298,39 @@ static void dispatch_read_only_request(cbm_http_server_t *srv, cbm_http_conn_t *
         return;
     }
     if (strcmp(req->method, "GET") == 0) {
-        if (strcmp(req->path, "/api/tree") == 0) {
-            handle_atlas_tree(c, req);
-            return;
+        /* Exact graph reader routes. Settings and activity GET handlers can
+         * create or migrate their stores, so stay on the daemon router. */
+        static const struct {
+            const char *path;
+            void (*handle)(cbm_http_conn_t *, const cbm_http_req_t *);
+        } reads[] = {
+            {"/api/adr", handle_adr_get},
+            {"/api/flow", handle_atlas_flow},
+            {"/api/flows", handle_atlas_flows},
+            {"/api/impact-analysis", handle_atlas_impact_analysis},
+            {"/api/layout", handle_layout},
+            {"/api/repo-info", handle_repo_info},
+            {"/api/repository-map", handle_atlas_repository},
+            {"/api/trace", handle_atlas_trace},
+            {"/api/tree", handle_atlas_tree},
+            {"/api/xrepo/links", handle_xrepo_links},
+        };
+        for (size_t i = 0; i < sizeof(reads) / sizeof(reads[0]); i++) {
+            if (strcmp(req->path, reads[i].path) == 0) {
+                reads[i].handle(c, req);
+                return;
+            }
         }
         if (strcmp(req->path, "/api/xrepo/summary") == 0) {
             handle_xrepo_summary(c);
             return;
         }
-        if (strcmp(req->path, "/api/xrepo/links") == 0) {
-            handle_xrepo_links(c, req);
+        if (strcmp(req->path, "/api/project-health") == 0) {
+            handle_project_health(c, req, srv);
+            return;
+        }
+        if (strcmp(req->path, "/api/index-status") == 0) {
+            handle_index_status(srv, c);
             return;
         }
         if (strcmp(req->path, "/") == 0) {
