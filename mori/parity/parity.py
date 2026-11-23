@@ -525,6 +525,7 @@ def node_names(side: Side, projects: dict[str, str],
 
 
 RUST_QUERY_LOG = b"level=debug msg=query_graph.evaluator backend=rust"
+RUST_DISPATCH_KEY = "query_graph:$.rust_dispatch"
 
 
 def query_log_position(path: Path) -> tuple[int, int, int] | None:
@@ -570,6 +571,7 @@ def replay(sides: list[Side], call_list: list[dict[str, Any]],
            "unlimited_replays": 0, "timeouts": 0, "wall_s": 0.0}
   if require_rust:
     stats["rust_query_checks"] = 0
+    stats["rust_query_failures"] = 0
   query_log = Path(sides[1].cache) / "logs/cbm-daemon.log"
   norms = [calls_mod.OutputNormalizer(
     roots, projects[i], {"cache": s.cache, "rt": s.rt})
@@ -617,7 +619,9 @@ def replay(sides: list[Side], call_list: list[dict[str, Any]],
     if any(d not in roots for d in dirs):
       stats["skipped"] += 1
       if check_rust:
-        dispatch.add("L4", "query_graph:$.rust_dispatch", group, 1,
+        stats["rust_query_checks"] += 1
+        stats["rust_query_failures"] += 1
+        dispatch.add("L4", RUST_DISPATCH_KEY, group, 1,
                      "query skipped", "initial request")
       continue
     repo = ",".join(dirs) or "-"
@@ -628,20 +632,17 @@ def replay(sides: list[Side], call_list: list[dict[str, Any]],
     rep = rep_by_repo.setdefault(repo, DiffReport())
     where = f"#{n} {tool} {group}" if check_rust else (
       f"#{n} {tool} {json.dumps(c['args'], sort_keys=True)}")
-    dispatch_failed = False
-
     def check_dispatch(output: dict[str, Any] | None, request: str) -> None:
-      nonlocal dispatch_failed
       if not check_rust or output is None:
         return
       stats["rust_query_checks"] += 1
       events = output.pop("rust_query_events", None)
       if events != 1:
-        dispatch_failed = True
+        stats["rust_query_failures"] += 1
         observed = "evidence unavailable" if events is None else events
         if side_b_timed_out:
           observed = "evidence unavailable after side B timeout"
-        dispatch.add("L4", "query_graph:$.rust_dispatch", group, 1,
+        dispatch.add("L4", RUST_DISPATCH_KEY, group, 1,
                      observed, request)
 
     check_dispatch(outs[1], "initial request")
@@ -664,7 +665,7 @@ def replay(sides: list[Side], call_list: list[dict[str, Any]],
     changed = calls_mod.diff_call(rep, tool, c["args"], group, where[:300],
                                   outs[0], outs[1], rerun,
                                   (names[0].get, names[1].get))
-    if changed or dispatch_failed:
+    if changed:
       stats["differing"] += 1
   pool.shutdown()
   stats["wall_s"] = round(time.monotonic() - t0, 1)
@@ -735,16 +736,19 @@ def print_summary(results: list[RepoResult], l4: list[dict[str, Any]],
     for f in flags:
       print(f"  {f}")
   if l4_stats is not None:
-    s = layer_summary(l4)["L4"]
+    reply_diffs = [d for d in l4 if d["key"] != RUST_DISPATCH_KEY]
+    s = layer_summary(reply_diffs)["L4"]
     print(f"\nL4: {l4_stats['calls']} calls replayed, "
           f"{l4_stats['unlimited_replays']} unlimited replay pages, "
           f"{l4_stats['skipped']} skipped (repo not in run), "
           f"{l4_stats.get('dropped', 0)} dropped (project not a corpus "
           f"placeholder), {l4_stats['errors_a']} error results, "
           f"{l4_stats['timeouts']} call timeouts, {l4_stats['differing']} "
-          f"differing, {l4_stats['wall_s']} s: {cell(s)}")
+          f"with reply differences, {l4_stats['wall_s']} s: {cell(s)}")
     if "rust_query_checks" in l4_stats:
-      print(f"Rust execution checks on side b: {l4_stats['rust_query_checks']}")
+      failed = l4_stats["rust_query_failures"]
+      passed = l4_stats["rust_query_checks"] - failed
+      print(f"Rust execution checks on side B: {passed} passed, {failed} failed")
   unlisted = [d for r in results for d in r.diffs if not d["allowed"]]
   unlisted += [d for d in l4 if not d["allowed"]]
   if unlisted:

@@ -105,6 +105,8 @@ class ParityTest(unittest.TestCase):
             frozenset({call_id}) if required else frozenset())
         self.assertEqual(len(diffs), expected_failures)
         self.assertEqual(stats.get("rust_query_checks"), 1 if required else None)
+        self.assertEqual(stats.get("rust_query_failures"), expected_failures if required else None)
+        self.assertEqual(stats["differing"], 0)
         if expected_failures:
           self.assertEqual(diffs[0]["key"], "query_graph:$.rust_dispatch")
           self.assertEqual(diffs[0]["group"], call_id)
@@ -140,6 +142,7 @@ class ParityTest(unittest.TestCase):
 
     self.assertEqual(stats["timeouts"], 1)
     self.assertEqual(stats["rust_query_checks"], 1)
+    self.assertEqual(stats["rust_query_failures"], 1)
     self.assertEqual([d["key"] for d in diffs],
                      ["query_graph:$.timed_out", "query_graph:$.rust_dispatch"])
     self.assertEqual(diffs[0]["allowed"], "known timeout")
