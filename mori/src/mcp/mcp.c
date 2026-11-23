@@ -1662,6 +1662,21 @@ char *cbm_mcp_get_arguments(const char *params_json) {
     return result ? result : heap_strdup("{}");
 }
 
+static cbm_mcp_tool_call_decoder_fn mcp_tool_call_decoder;
+
+void cbm_mcp_set_tool_call_decoder(cbm_mcp_tool_call_decoder_fn decode) {
+    mcp_tool_call_decoder = decode;
+}
+
+static void mcp_decode_tool_call(const char *params, char **name, char **args) {
+    if (mcp_tool_call_decoder && mcp_tool_call_decoder(params, name, args)) {
+        cbm_log_debug("mcp.tools_call.decode", "backend", "rust");
+        return;
+    }
+    *name = params ? cbm_mcp_get_tool_name(params) : NULL;
+    *args = params ? cbm_mcp_get_arguments(params) : heap_strdup("{}");
+}
+
 char *cbm_mcp_get_string_arg(const char *args_json, const char *key) {
     yyjson_doc *doc = yyjson_read(args_json, strlen(args_json), 0);
     if (!doc) {
@@ -23243,9 +23258,9 @@ char *cbm_mcp_server_handle(cbm_mcp_server_t *srv, const char *line) {
         result_json = cbm_mcp_tools_list_page(srv->tool_profile, req.params_raw);
         break;
     case MCP_METHOD_TOOLS_CALL: {
-        char *tool_name = req.params_raw ? cbm_mcp_get_tool_name(req.params_raw) : NULL;
-        char *tool_args =
-            req.params_raw ? cbm_mcp_get_arguments(req.params_raw) : heap_strdup("{}");
+        char *tool_name;
+        char *tool_args;
+        mcp_decode_tool_call(req.params_raw, &tool_name, &tool_args);
         request_tool_name = tool_name;
         srv->active_request_id = req.id;
         free(srv->active_request_id_str);
