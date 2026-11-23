@@ -105,8 +105,11 @@ async def _main() -> None:
                 except Exception:
                     print("Telegram entity cache warm failed", file=sys.stderr)
 
-            warm_task = asyncio.create_task(_warm_caches())
-            stack.push_async_callback(_cancel_cache_warm, warm_task)
+            # The owner worker scans dialogs for its first capacity report.
+            # A concurrent startup scan hits the same Telegram read limit.
+            if not broker_enabled:
+                warm_task = asyncio.create_task(_warm_caches())
+                stack.push_async_callback(_cancel_cache_warm, warm_task)
             print(f"Telegram client(s) started ({labels}). Running MCP server...", file=sys.stderr)
             if shared_http and state is not None:
                 await serve_mcp(state, mcp)

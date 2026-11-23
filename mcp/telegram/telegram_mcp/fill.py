@@ -10,6 +10,7 @@ import os
 import re
 import sqlite3
 import stat
+from time import monotonic
 from typing import Any
 
 from telethon import TelegramClient, errors, functions, hints, types, utils
@@ -42,6 +43,7 @@ RIGHTS = {
     "other": "other",
 }
 MAX_RPC_SECONDS = 30
+CAPACITY_OBSERVATION_SECONDS = 30
 DAY_MS = 86_400_000
 ADD_GAP_MS = 1_200_000
 
@@ -337,6 +339,7 @@ class PoolTransport:
         self.journal = Journal(state, account)
         self.photo = photo
         self.latest_budget: tuple[int, int] | None = None
+        self.capacity_observation: tuple[float, int] | None = None
 
     async def identity(self) -> None:
         with raise_flood_waits():
@@ -370,6 +373,15 @@ class PoolTransport:
                     count += 1
         return count
 
+    async def group_count_for_create(self) -> int:
+        if self.journal.held("method:messages.getDialogs") is not None:
+            raise BrokerError("account_held")
+        if self.capacity_observation is not None:
+            observed, groups = self.capacity_observation
+            if monotonic() - observed <= CAPACITY_OBSERVATION_SECONDS:
+                return groups
+        return await self.count()
+
     async def dispatch(
         self, body: dict[str, Any], peer_connected: PeerConnected | None = None
     ) -> dict[str, Any]:
@@ -383,6 +395,7 @@ class PoolTransport:
     async def snapshot(self) -> dict[str, Any]:
         await self.identity()
         groups = await self.count()
+        self.capacity_observation = (monotonic(), groups)
         observed = now_ms()
         return {
             "accountId": self.account,
@@ -516,7 +529,7 @@ class PoolTransport:
                 if refusal is not None:
                     return refusal
                 if action.step == "create":
-                    if await self.count() >= action.groups:
+                    if await self.group_count_for_create() >= action.groups:
                         return retry("group_limit")
                     request = functions.channels.CreateChannelRequest(
                         TITLE, f"Chat with the Sai team. Ref: {action.ref}", megagroup=True
@@ -576,6 +589,8 @@ class PoolTransport:
                 if not await still_connected(peer_connected):
                     return retry("broker_peer_gone")
                 dispatched = True
+                if action.step == "create":
+                    self.capacity_observation = None
                 try:
                     with single_request():
                         answer = await asyncio.wait_for(

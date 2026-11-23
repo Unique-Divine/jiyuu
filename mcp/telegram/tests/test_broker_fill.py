@@ -54,12 +54,15 @@ def test_journal_scopes_cap_and_dispatch_identity_to_the_owner(monkeypatch, tmp_
 async def test_lost_create_stays_uncertain_and_never_sends_twice(monkeypatch, tmp_path):
     state = fixture_state(monkeypatch, tmp_path)
     sends = []
+    dialog_scans = 0
 
     class FakeClient:
         async def get_me(self):
             return SimpleNamespace(id=42, bot=False)
 
         async def iter_dialogs(self, *, limit):
+            nonlocal dialog_scans
+            dialog_scans += 1
             if False:
                 yield
 
@@ -73,16 +76,19 @@ async def test_lost_create_stays_uncertain_and_never_sends_twice(monkeypatch, tm
     first = PoolTransport(client, state, "42", b"")
     broker = Broker({"42": first.snapshot}, {"42": first.dispatch})
     async with listen(state, broker):
+        snapshot = {k: request[k] for k in ("v", "id", "accountId")} | {"op": "account.snapshot"}
+        assert json.loads(await bridge(state, frame(snapshot)))["result"]["groupCount"] == 0
         assert json.loads(await bridge(state, frame(request)))["result"] == {
             "outcome": "uncertain"
         }
-        snapshot = {k: request[k] for k in ("v", "id", "accountId")} | {"op": "account.snapshot"}
+        assert dialog_scans == 1
         assert json.loads(await bridge(state, frame(snapshot)))["result"] == {
             "accountId": "42",
             "groupCount": 0,
             "addsToday": 0,
             "holds": [],
         }
+        assert dialog_scans == 2
     restarted = PoolTransport(client, state, "42", b"")
     broker = Broker({"42": restarted.snapshot}, {"42": restarted.dispatch})
     async with listen(state, broker):
