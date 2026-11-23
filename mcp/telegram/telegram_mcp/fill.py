@@ -6,11 +6,11 @@ from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import io
-import logging
 import os
 import re
 import sqlite3
 import stat
+import sys
 from time import monotonic
 import traceback
 from typing import Any
@@ -51,7 +51,6 @@ DIALOG_SCAN_LIMIT = 12000
 DIALOG_PAGE_SPACING_SECONDS = 3
 CAPACITY_READ_SECONDS = 480
 CAPACITY_MAX_WAIT_SECONDS = 240
-LOGGER = logging.getLogger(__name__)
 DAY_MS = 86_400_000
 ADD_GAP_MS = 1_200_000
 
@@ -449,9 +448,10 @@ class PoolTransport:
             raise
         except Exception as error:
             frame = traceback.extract_tb(error.__traceback__)[-1]
-            LOGGER.warning(
-                "Chat pool capacity read failed (%s at %s:%s)",
-                type(error).__name__, os.path.basename(frame.filename), frame.lineno,
+            print(
+                f"Chat pool capacity read failed ({type(error).__name__} at "
+                f"{os.path.basename(frame.filename)}:{frame.lineno})",
+                file=sys.stderr,
             )
             raise BrokerError("group_count_unavailable") from None
 
