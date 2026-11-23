@@ -13,46 +13,52 @@ impl ToSql for SqlText<'_> {
     }
 }
 
-struct GraphRecords {
-    project: Vec<u8>,
-    indexed_at: String,
-    root_path: Vec<u8>,
-    nodes: Vec<NodeRecord>,
-    edges: Vec<EdgeRecord>,
+struct ProjectRecord<'a> {
+    name: &'a [u8],
+    indexed_at: &'a [u8],
+    root_path: &'a [u8],
 }
 
-struct NodeRecord {
+#[derive(Clone, Copy)]
+struct NodeRecord<'a> {
     id: i64,
-    label: Vec<u8>,
-    name: Vec<u8>,
-    qualified_name: Vec<u8>,
-    file_path: Vec<u8>,
+    label: &'a [u8],
+    name: &'a [u8],
+    qualified_name: &'a [u8],
+    file_path: &'a [u8],
     start_line: i32,
     end_line: i32,
-    properties: Vec<u8>,
+    properties: &'a [u8],
 }
 
-struct EdgeRecord {
+#[derive(Clone, Copy)]
+struct EdgeRecord<'a> {
     id: i64,
     source_id: i64,
     target_id: i64,
-    kind: Vec<u8>,
-    properties: Vec<u8>,
+    kind: &'a [u8],
+    properties: &'a [u8],
 }
 
 /// Insert the graph into an empty stage initialized with Mori's store schema.
 /// IDs are final. Edges refer to those IDs. Keep graph records and generated
 /// edge keys in one transaction so a failed insert leaves no partial graph.
-fn write_graph_records(
+fn write_graph_records<'a>(
     stage: &mut Connection,
-    graph: &GraphRecords,
+    project: ProjectRecord<'a>,
+    nodes: impl IntoIterator<Item = NodeRecord<'a>>,
+    edges: impl IntoIterator<Item = EdgeRecord<'a>>,
 ) -> rusqlite::Result<()> {
     stage.pragma_update(None, "foreign_keys", true)?;
     let tx = stage.transaction()?;
-    let project = SqlText(&graph.project);
+    let project_name = SqlText(project.name);
     tx.execute(
         "INSERT INTO projects (name, indexed_at, root_path) VALUES (?1, ?2, ?3)",
-        params![project, graph.indexed_at, SqlText(&graph.root_path)],
+        params![
+            project_name,
+            SqlText(project.indexed_at),
+            SqlText(project.root_path)
+        ],
     )?;
     {
         let mut insert_node = tx.prepare(
@@ -60,17 +66,17 @@ fn write_graph_records(
                                     start_line, end_line, properties)\
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         )?;
-        for node in &graph.nodes {
+        for node in nodes {
             insert_node.execute(params![
                 node.id,
-                project,
-                SqlText(&node.label),
-                SqlText(&node.name),
-                SqlText(&node.qualified_name),
-                SqlText(&node.file_path),
+                project_name,
+                SqlText(node.label),
+                SqlText(node.name),
+                SqlText(node.qualified_name),
+                SqlText(node.file_path),
                 node.start_line,
                 node.end_line,
-                SqlText(&node.properties),
+                SqlText(node.properties),
             ])?;
         }
 
@@ -78,19 +84,22 @@ fn write_graph_records(
             "INSERT INTO edges (id, project, source_id, target_id, type, properties)\
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         )?;
-        for edge in &graph.edges {
+        for edge in edges {
             insert_edge.execute(params![
                 edge.id,
-                project,
+                project_name,
                 edge.source_id,
                 edge.target_id,
-                SqlText(&edge.kind),
-                SqlText(&edge.properties),
+                SqlText(edge.kind),
+                SqlText(edge.properties),
             ])?;
         }
     }
     tx.commit()
 }
+
+#[cfg(not(test))]
+pub(crate) mod native;
 
 #[cfg(test)]
 mod tests {
@@ -154,31 +163,48 @@ mod tests {
         }
     }
 
-    fn fixture() -> GraphRecords {
-        let node = |id, name: &str, path: &[u8]| NodeRecord {
+    struct GraphRecords<'a> {
+        project: ProjectRecord<'a>,
+        nodes: Vec<NodeRecord<'a>>,
+        edges: Vec<EdgeRecord<'a>>,
+    }
+
+    impl GraphRecords<'_> {
+        fn write(self, stage: &mut Connection) -> rusqlite::Result<()> {
+            write_graph_records(stage, self.project, self.nodes, self.edges)
+        }
+    }
+
+    fn fixture<'a>() -> GraphRecords<'a> {
+        let node = |id,
+                    name: &'a [u8],
+                    qualified_name: &'a [u8],
+                    file_path: &'a [u8]| NodeRecord {
             id,
-            label: b"Function".to_vec(),
-            name: name.as_bytes().to_vec(),
-            qualified_name: format!("comparison.{name}").into_bytes(),
-            file_path: path.to_vec(),
+            label: b"Function",
+            name,
+            qualified_name,
+            file_path,
             start_line: 3,
             end_line: 8,
-            properties: br#"{"exported":true}"#.to_vec(),
+            properties: br#"{"exported":true}"#,
         };
-        let edge = |id, kind: &[u8], properties: &[u8]| EdgeRecord {
+        let edge = |id, kind: &'a [u8], properties: &'a [u8]| EdgeRecord {
             id,
             source_id: 1,
             target_id: 2,
-            kind: kind.to_vec(),
-            properties: properties.to_vec(),
+            kind,
+            properties,
         };
         GraphRecords {
-            project: b"comparison".to_vec(),
-            indexed_at: "2026-01-01T00:00:00Z".to_owned(),
-            root_path: b"/fixture".to_vec(),
+            project: ProjectRecord {
+                name: b"comparison",
+                indexed_at: b"2026-01-01T00:00:00Z",
+                root_path: b"/fixture",
+            },
             nodes: vec![
-                node(1, "serve", b"main.rs"),
-                node(2, "client", b"client_\xff.rs"),
+                node(1, b"serve", b"comparison.serve", b"main.rs"),
+                node(2, b"client", b"comparison.client", b"client_\xff.rs"),
             ],
             edges: vec![
                 edge(1, b"IMPORTS", br#"{"local_name":"one"}"#),
@@ -217,9 +243,9 @@ mod tests {
         }
     }
 
-    fn native_dump(path: &Path, input: &GraphRecords) {
-        let project = c_text(&input.project);
-        let root_path = c_text(&input.root_path);
+    fn native_dump(path: &Path, input: &GraphRecords<'_>) {
+        let project = c_text(input.project.name);
+        let root_path = c_text(input.project.root_path);
         // SAFETY: both NUL-terminated strings remain live through construction.
         let graph = NativeGraph(unsafe {
             cbm_gbuf_new(project.as_ptr(), root_path.as_ptr())
@@ -230,13 +256,13 @@ mod tests {
             .iter()
             .map(|node| {
                 let [label, name, qn, file, properties] = [
-                    &node.label,
-                    &node.name,
-                    &node.qualified_name,
-                    &node.file_path,
-                    &node.properties,
+                    node.label,
+                    node.name,
+                    node.qualified_name,
+                    node.file_path,
+                    node.properties,
                 ]
-                .map(|bytes| c_text(bytes));
+                .map(c_text);
                 // SAFETY: the buffer is live and C copies each NUL-terminated field.
                 let id = unsafe {
                     cbm_gbuf_upsert_node(
@@ -255,8 +281,8 @@ mod tests {
             })
             .collect();
         for edge in &input.edges {
-            let kind = c_text(&edge.kind);
-            let properties = c_text(&edge.properties);
+            let kind = c_text(edge.kind);
+            let properties = c_text(edge.properties);
             // SAFETY: the graph buffer owns both endpoint IDs. The strings
             // stay live through the insert, which copies them into the buffer.
             let inserted = unsafe {
@@ -300,12 +326,13 @@ mod tests {
         let mut graph = fixture();
         native_dump(&native_path, &graph);
         let reference = Connection::open(native_path).unwrap();
-        graph.indexed_at = reference
+        let reference_time: String = reference
             .query_row("SELECT indexed_at FROM projects", [], |row| row.get(0))
             .unwrap();
 
         let mut stage = open_empty_stage(&scratch.0.join("rust.db"));
-        write_graph_records(&mut stage, &graph).unwrap();
+        graph.project.indexed_at = reference_time.as_bytes();
+        graph.write(&mut stage).unwrap();
         for sql in [
             "SELECT name, indexed_at, root_path FROM projects ORDER BY name",
             "SELECT id, project, label, name, qualified_name, CAST(file_path AS BLOB), start_line, end_line, properties FROM nodes ORDER BY id",
@@ -326,7 +353,7 @@ mod tests {
         let mut stage = open_empty_stage(&scratch.0.join("rust.db"));
         let mut graph = fixture();
         graph.edges[2].target_id = 999;
-        let err = write_graph_records(&mut stage, &graph).unwrap_err();
+        let err = graph.write(&mut stage).unwrap_err();
         assert_eq!(
             err.sqlite_error_code(),
             Some(rusqlite::ErrorCode::ConstraintViolation)
@@ -338,7 +365,6 @@ mod tests {
         ] {
             assert!(rows(&stage, sql).is_empty(), "{sql}");
         }
-        graph.edges[2].target_id = 2;
-        write_graph_records(&mut stage, &graph).unwrap();
+        fixture().write(&mut stage).unwrap();
     }
 }

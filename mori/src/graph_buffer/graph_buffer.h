@@ -200,6 +200,10 @@ int cbm_gbuf_store_token_vector(cbm_gbuf_t *gb, const char *token, const uint8_t
  * Returns 0 on success, -1 on error. */
 int cbm_gbuf_dump_to_sqlite(cbm_gbuf_t *gb, const char *path);
 
+/* Dump into an exclusive, empty stage created by the pipeline. May use the
+ * opt-in writer for records without semantic vectors. Publication is separate. */
+int cbm_gbuf_dump_to_sqlite_staged(cbm_gbuf_t *gb, const char *stage_path);
+
 /* Flush the buffer to an existing store via the store API.
  * Deletes existing project data first. Returns 0 on success. */
 int cbm_gbuf_flush_to_store(cbm_gbuf_t *gb, cbm_store_t *store);
