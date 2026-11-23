@@ -1,6 +1,8 @@
 # Example Prompts
 
-Replace the example referral codes with the identifiers for your task.
+Replace the example referral codes with the identifiers for your task. To
+practice the first prompt without a credential, use the [synthetic
+deal](atlas.md).
 
 ## Before Replying to a Trader
 

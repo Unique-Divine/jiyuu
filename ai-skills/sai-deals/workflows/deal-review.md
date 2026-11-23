@@ -1,11 +1,34 @@
-# Review a Deal
+# Brief One Deal
 
-Use this procedure for a trader brief, a status question before a reply, or a reconciliation of what was promised and what was delivered. Start with the [deal brief query](../references/graphql.md#read-a-deal-brief).
+Start with [Install and Connect](../references/install.md). Use the
+[GraphQL examples](../references/graphql.md) or the configured reader CLI.
 
-1. Resolve the referral code, stable deal ID, or EVM or Nibiru wallet address. Check `matchedSelectors` and `view.errors`. A wallet may match several deals, and several aliases may match the same deal. Ask the user to pick when the result is ambiguous. Group the records by stable deal ID so alias matches cannot duplicate events.
-2. Read `signals` for the agreement. Record the specific condition, date window, denomination, and payment form. Check when a note or agreement was recorded before treating it as current. A historical promise or complaint is evidence of the discussion. A current obligation needs supporting terms or a current decision.
-3. Read `latestEvaluations`, `missingEvaluationSignalIds`, and any recorded coverage. An evaluation is an observation with a cutoff. A missing evaluation, stale measurement, or incomplete payment history leaves the outcome unknown. A recorded zero with sufficient coverage is evidence of zero within that window.
-4. Read `payments`, `completions`, and `actions` for what happened. Tie the event to the relevant term when the link exists. Cite a receipt, transaction hash, or recorded execution evidence where available. Distinguish an evaluation outcome, a completed action, a payment record, and evidence that the payment executed. Keep amounts as exact decimal strings and distinguish USDC trading credits, withdrawable Sai deposits, and cash payments.
-5. Check `comms` before claiming a trader heard an update. Inspect both direct event links and deal-level notes. A draft or a record of uncertain delivery supports a limited claim. Say what the communication record establishes.
+1. Resolve the code, wallet, or stable deal ID. Check lookup errors and matched
+   selectors. If several deals match, show their IDs and ask which one to use.
+   Group multiple aliases for one deal by its stable ID.
+2. Read the accepted terms and the saved evaluation. Name its cutoff and the
+   part of the requested period it covers. Tie payments and actions to the
+   corresponding term when a link exists.
+3. Read delivery details for the relevant communications. Check all relevant
+   pages and inspect notes linked to the deal as well as individual events.
+   Use the [evidence rules](../references/evidence.md) when dates, payment
+   forms, and coverage differ.
 
-Return a short summary with the stable deal ID, followed by the agreement, evidence, and any open decision. For evidence, include the record ID, the recorded time or cutoff, and the supported conclusion. Flag a missing source or unresolved match rather than filling it in from an old summary.
+For a configured CLI, run the following commands with the selected identifiers.
+
+```bash
+sai-ops --reader health
+sai-ops --reader deals view EXAMPLE-ATLAS
+sai-ops --reader comms list --deal deal-example-atlas --first 2
+sai-ops --reader comms show --deal deal-example-atlas completed_note:comms-atlas-paid
+```
+
+When `pageInfo.hasNextPage` is true, keep the deal fixed and pass the returned
+`pageInfo.endCursor` to `comms list --after CURSOR`. Copy the record ID from
+that list before running `comms show`.
+
+Return a short brief with the stable deal ID, the agreement, what was measured,
+what executed, what was communicated, and one next step. Give record IDs and
+dates or cutoffs for material claims. Name any source, missing page, ambiguous
+match, or coverage gap that limits the answer. For a practice run, use the
+[synthetic deal](../examples/atlas.md).
