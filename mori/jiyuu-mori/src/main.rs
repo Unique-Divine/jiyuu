@@ -25,6 +25,9 @@ mod search;
 #[cfg(feature = "c-backend")]
 mod path_verdict;
 
+#[cfg(feature = "c-backend")]
+mod index_manifest;
+
 #[cfg(all(feature = "c-backend", not(test)))]
 mod snippet_window;
 
