@@ -369,6 +369,25 @@ typedef struct {
 void cbm_mcp_set_search_code_attribution(const cbm_mcp_search_code_attribution_t *reader);
 
 typedef struct {
+    int64_t id;
+    int hop;
+    int edge_index; /* -1 when no captured edge precedes the row */
+} cbm_mcp_trace_hop_t;
+
+typedef struct {
+    int64_t source_id;
+    int64_t target_id;
+    const char *type;
+} cbm_mcp_trace_edge_t;
+
+/* Borrow the visible hops, roots, and captured edges of one trace leg. On
+ * success the planner fills edge_index and sorts hops by id for lookup. */
+typedef bool (*cbm_mcp_trace_predecessor_planner_fn)(
+    bool inbound, const int64_t *roots, size_t root_count, cbm_mcp_trace_hop_t *hops,
+    size_t hop_count, const cbm_mcp_trace_edge_t *edges, size_t edge_count);
+void cbm_mcp_set_trace_predecessor_planner(cbm_mcp_trace_predecessor_planner_fn planner);
+
+typedef struct {
     int limit;
     int offset;
     bool include_properties;

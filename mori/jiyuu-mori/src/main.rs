@@ -29,6 +29,9 @@ mod search;
 #[cfg(feature = "c-backend")]
 mod path_verdict;
 
+#[cfg(feature = "c-backend")]
+mod trace_predecessor;
+
 #[cfg(all(feature = "c-backend", not(test)))]
 mod index_manifest;
 
