@@ -9,6 +9,8 @@ except UnsafeInstallationError as exc:
 
 from contextlib import AsyncExitStack
 from importlib.resources import files as resource_files
+from pathlib import Path
+from traceback import extract_tb
 
 from telegram_mcp.broker import Broker, listen
 from telegram_mcp.bot_identity import BotIdentity, for_broker
@@ -119,7 +121,12 @@ async def _main() -> None:
         if isinstance(error, StoreError):
             print(str(error), file=sys.stderr)
         elif state is not None:
-            print("Stored Telegram session could not start", file=sys.stderr)
+            frame = extract_tb(error.__traceback__)[-1]
+            print(
+                f"Stored Telegram session could not start ({type(error).__name__} at "
+                f"{Path(frame.filename).name}:{frame.lineno})",
+                file=sys.stderr,
+            )
         else:
             print(f"Error starting client: {error}", file=sys.stderr)
             if isinstance(error, sqlite3.OperationalError) and "database is locked" in str(error):
