@@ -437,18 +437,26 @@ fn unknown_tool_error_matches_c() {
 }
 
 fn run_stdio(bin: &Path, side: &str, args: &[&str], input: &str) -> String {
-    let scratch = Scratch::new(side);
+    let output = run_stdio_in(bin, &Scratch::new(side), args, input);
+    assert!(output.status.success(), "{side}: {output:?}");
+    String::from_utf8(output.stdout).expect("UTF-8 response")
+}
+
+fn run_stdio_in(
+    bin: &Path,
+    scratch: &Scratch,
+    args: &[&str],
+    input: &str,
+) -> Output {
     let requests = scratch.0.join("requests");
     fs::write(&requests, input).expect("write MCP requests");
-    let output = command_in(bin, &scratch)
+    command_in(bin, scratch)
         .args(args)
         .stdin(Stdio::from(
             fs::File::open(requests).expect("open MCP requests"),
         ))
         .output()
-        .expect("run MCP server");
-    assert!(output.status.success(), "{side}: {output:?}");
-    String::from_utf8(output.stdout).expect("UTF-8 response")
+        .expect("run MCP server")
 }
 
 #[test]
@@ -478,6 +486,108 @@ fn mcp_method_dispatch_matches_c() {
     for (reply, id) in replies[3..].iter().zip(["discover", "unknown"]) {
         assert_eq!(reply["id"], id);
         assert_eq!(reply["error"]["code"], -32601);
+    }
+}
+
+#[test]
+fn mcp_tools_call_params_and_ids_match_c_through_daemon() {
+    // Keep the duplicate keys in the wire input so a JSON map cannot
+    // collapse them before the server sees the request.
+    let input = [
+        r#"{"jsonrpc":"2.0","id":0,"method":"initialize"}"#,
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        r#"{"jsonrpc":"2.0","id":"missing","method":"tools/call"}"#,
+        r#"{"jsonrpc":"2.0","id":"null","method":"tools/call","params":null}"#,
+        r#"{"jsonrpc":"2.0","id":"array","method":"tools/call","params":[]}"#,
+        r#"{"jsonrpc":"2.0","id":"wrong-name","method":"tools/call","params":{"name":null,"name":"list_projects"}}"#,
+        r#"{"jsonrpc":"2.0","id":"no-args","method":"tools/call","params":{"name":"list_projects"}}"#,
+        r#"{"jsonrpc":"2.0","id":"null-args","method":"tools/call","params":{"name":"list_projects","arguments":null}}"#,
+        r#"{"jsonrpc":"2.0","id":"scalar-args","method":"tools/call","params":{"name":"list_projects","arguments":1}}"#,
+        r#"{"jsonrpc":"2.0","id":"duplicate-name","method":"tools/call","params":{"name":"list_projects","name":"unknown","arguments":{"format":"json"}}}"#,
+        r#"{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"list_projects","arguments":{"format":"json","format":"tree"},"arguments":{"format":"tree"}}}"#,
+        r#"{"jsonrpc":"2.0","method":"tools/call","params":{"name":"list_projects"}}"#,
+        r#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"9"}}"#,
+        r#"{"jsonrpc":"2.0","id":"end","method":"ping"}"#,
+        "",
+    ]
+    .join("\n");
+
+    let forwarded = |bin: &Path, side: &str| {
+        let scratch = Scratch::new(side);
+        let start = command_in(bin, &scratch)
+            .env("CBM_LOG_LEVEL", "info")
+            .args(["daemon", "start"])
+            .output()
+            .unwrap();
+        assert!(start.status.success(), "{start:?}");
+        let output = run_stdio_in(bin, &scratch, &[], &input);
+        let stop = run_in(bin, &scratch, &["daemon", "stop"]);
+        assert!(stop.status.success(), "{stop:?}");
+        assert!(output.status.success(), "{output:?}");
+
+        let log =
+            fs::read_to_string(scratch.0.join("cache/logs/cbm-daemon.log"))
+                .unwrap();
+        assert_eq!(
+            log.lines()
+                .filter(|line| line.contains(
+                    "msg=mcp.request protocol=jsonrpc method=tools/call"
+                ))
+                .count(),
+            9,
+            "{side} daemon must handle each request with an ID exactly once",
+        );
+        output.stdout
+    };
+
+    let reference = forwarded(&c_binary(), "c");
+    let linked = forwarded(Path::new(MORI), "rs");
+    assert_eq!(linked, reference);
+    let replies: Vec<serde_json::Value> = std::str::from_utf8(&linked)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("parse response"))
+        .collect();
+    let ids: Vec<_> = replies.iter().map(|reply| reply["id"].clone()).collect();
+    assert_eq!(
+        ids,
+        &serde_json::json!([
+            0,
+            "missing",
+            "null",
+            "array",
+            "wrong-name",
+            "no-args",
+            "null-args",
+            "scalar-args",
+            "duplicate-name",
+            9,
+            "end",
+        ])
+        .as_array()
+        .unwrap()[..],
+    );
+    for reply in &replies[1..5] {
+        assert_eq!(reply["result"]["isError"], true);
+        assert_eq!(
+            reply["result"]["structuredContent"]["error"],
+            "missing tool name"
+        );
+    }
+    for reply in &replies[5..8] {
+        assert_eq!(reply["result"]["isError"], false);
+        assert!(
+            reply["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("projects: 0")
+        );
+    }
+    for reply in &replies[8..10] {
+        assert_eq!(
+            reply["result"]["structuredContent"]["projects"],
+            serde_json::json!([])
+        );
     }
 }
 
