@@ -1732,6 +1732,167 @@ fn search_code_ranking_reads_call_degrees_in_rust() {
 }
 
 #[test]
+fn search_code_attributes_hits_like_native() {
+    let native_cache = Scratch::new("search-attribution-c");
+    let rust_runtime = Scratch::new("search-attribution-rust");
+    let repo = native_cache.0.join("repo");
+    fs::create_dir(&repo).unwrap();
+    fs::write(
+        repo.join("app.py"),
+        "class Outer:
+    # attribution_needle
+    def inner(self):
+        value = 'attribution_needle'
+        return 'attribution_needle' + value
+
+def tail():
+    return 'attribution_needle'
+",
+    )
+    .unwrap();
+    fs::write(repo.join("raw.py"), "# attribution_needle\n").unwrap();
+
+    let c = c_binary();
+    let rust = Path::new(MORI);
+    let index = index_fixture(&c, &native_cache, repo.to_str().unwrap());
+    let project = index["project"].as_str().unwrap();
+    let command = |binary: &Path| {
+        let scratch = if binary == rust {
+            &rust_runtime
+        } else {
+            &native_cache
+        };
+        let mut command = command_in(binary, scratch);
+        command.env("CBM_CACHE_DIR", native_cache.0.join("cache"));
+        command
+    };
+    let stop = |binary: &Path| {
+        let output = command(binary).args(["daemon", "stop"]).output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+    };
+    stop(&c);
+    // Python emits a Module span even for a comment-only file. Keep the
+    // indexed path in the scan scope and remove its matchable spans.
+    let db = Connection::open(
+        native_cache.0.join("cache").join(format!("{project}.db")),
+    )
+    .unwrap();
+    assert!(
+        db.execute(
+            "UPDATE nodes SET start_line = 0, end_line = 0 WHERE project = ?1 AND file_path = 'raw.py'",
+            [project],
+        )
+        .unwrap()
+            > 0
+    );
+    drop(db);
+    let start = command(rust)
+        .env("CBM_LOG_LEVEL", "debug")
+        .args(["daemon", "start"])
+        .output()
+        .unwrap();
+    assert!(start.status.success(), "{start:?}");
+
+    let read = |binary, args: &serde_json::Value| {
+        command(binary)
+            .args(["cli", "--quiet", "search_code", &args.to_string()])
+            .output()
+            .unwrap()
+    };
+    let normalize = |bytes: &[u8], marker: &str| {
+        let mut text = String::from_utf8(bytes.to_vec()).unwrap();
+        let start = text.rfind(marker).unwrap() + marker.len();
+        let digits =
+            text[start..].bytes().take_while(u8::is_ascii_digit).count();
+        assert!(digits > 0, "{text}");
+        text.replace_range(start..start + digits, "0");
+        text
+    };
+    let cases = [
+        (
+            serde_json::json!({"format":"json","match_limit":1}),
+            Some("\"elapsed_ms\":"),
+        ),
+        (
+            serde_json::json!({"format":"json","mode":"full","result_offset":1,"raw_limit":0}),
+            Some("\"elapsed_ms\":"),
+        ),
+        (serde_json::json!({}), Some("elapsed_ms: ")),
+        (
+            serde_json::json!({"mode":"files","file_pattern":"*.py"}),
+            Some("elapsed_ms: "),
+        ),
+        (
+            serde_json::json!({"format":"json","path_filter":"^missing/"}),
+            Some("\"elapsed_ms\":"),
+        ),
+        (serde_json::json!({"pattern":"(", "regex":true}), None),
+    ];
+    let replies = cases.map(|(mut args, timing)| {
+        args["project"] = serde_json::json!(project);
+        if args.get("pattern").is_none() {
+            args["pattern"] = serde_json::json!("attribution_needle");
+        }
+        let reference = read(&c, &args);
+        let candidate = read(rust, &args);
+        (args, timing, reference, candidate)
+    });
+    stop(&c);
+    stop(rust);
+    for (case, (args, timing, reference, candidate)) in
+        replies.into_iter().enumerate()
+    {
+        assert_eq!(candidate.status, reference.status, "{args}");
+        assert_eq!(candidate.stderr, reference.stderr, "{args}");
+        if let Some(marker) = timing {
+            assert!(candidate.status.success(), "{args}: {candidate:?}");
+            assert_eq!(
+                normalize(&candidate.stdout, marker),
+                normalize(&reference.stdout, marker),
+                "{args}"
+            );
+        } else {
+            assert_eq!(candidate.stdout, reference.stdout, "{args}");
+            assert!(
+                String::from_utf8_lossy(&candidate.stdout)
+                    .contains("invalid regex")
+                    || String::from_utf8_lossy(&candidate.stderr)
+                        .contains("invalid regex")
+            );
+        }
+        if case == 0 {
+            let result: serde_json::Value =
+                serde_json::from_slice(&candidate.stdout).unwrap();
+            assert_eq!(result["total_grep_matches"], 5, "{result}");
+            assert_eq!(result["raw_match_count"], 1, "{result}");
+            let rows = result["rows"].as_array().unwrap();
+            assert_eq!(rows.len(), 3, "{result}");
+            for (name, label, line, omitted) in [
+                ("Outer", "Class", 2, 0),
+                ("inner", "Method", 4, 1),
+                ("tail", "Function", 8, 0),
+            ] {
+                let row = rows
+                    .iter()
+                    .find(|row| {
+                        row[0].as_str().unwrap().ends_with(&format!(".{name}"))
+                    })
+                    .unwrap_or_else(|| panic!("missing {name}: {result}"));
+                assert_eq!(row[1], label, "{row}");
+                assert_eq!(row[4], serde_json::json!([line]), "{row}");
+                assert_eq!(row[5], omitted, "{row}");
+            }
+        }
+    }
+    let log =
+        fs::read_to_string(native_cache.0.join("cache/logs/cbm-daemon.log"))
+            .unwrap();
+    assert!(log.lines().any(|line| {
+        line.contains("search_code.attribution") && line.contains("backend=rust")
+    }));
+}
+
+#[test]
 fn index_through_worker_reexec_matches_c() {
     let fixture = Fixture::new(false);
     let project = fixture.project();
