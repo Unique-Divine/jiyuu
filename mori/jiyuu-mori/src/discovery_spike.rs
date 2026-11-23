@@ -445,7 +445,12 @@ impl Walk {
         stack: &mut Vec<IgnoreAt>,
         inherited_suffixes: &Suffixes,
     ) -> io::Result<()> {
-        let entries = fs::read_dir(path)?;
+        let entries = match fs::read_dir(path) {
+            Ok(entries) => entries,
+            // The ordinary C walk abandons a child it cannot open.
+            Err(_) if !rel.as_os_str().is_empty() => return Ok(()),
+            Err(error) => return Err(error),
+        };
         let old_len = stack.len();
         if !rel.as_os_str().is_empty() {
             stack.extend(IgnoreAt::load(path, &path.join(".gitignore")));
@@ -458,7 +463,11 @@ impl Walk {
             let name = entry.file_name();
             let rel = rel.join(&name);
             let entry_path = entry.path();
-            let kind = entry.file_type()?;
+            let Ok(metadata) = fs::symlink_metadata(&entry_path) else {
+                // The ordinary C walk also skips entries that fail lstat.
+                continue;
+            };
+            let kind = metadata.file_type();
             if kind.is_symlink() {
                 self.snapshot.ignore(&rel, "symlink");
             } else if kind.is_dir() {
@@ -493,13 +502,13 @@ impl Walk {
                 }
             } else if kind.is_file() {
                 self.file(
-                    &entry,
                     &entry_path,
                     &rel,
+                    metadata.len(),
                     under_gitignore,
                     stack,
                     suffixes,
-                )?;
+                );
             }
         }
         stack.truncate(old_len);
@@ -561,15 +570,14 @@ impl Walk {
 
     fn file(
         &mut self,
-        entry: &fs::DirEntry,
         absolute: &Path,
         rel: &Path,
+        size: u64,
         under_gitignore: bool,
         stack: &[IgnoreAt],
         suffixes: &Suffixes,
-    ) -> io::Result<()> {
-        let name = c_path(Path::new(&entry.file_name()));
-        let size = entry.metadata()?.len();
+    ) {
+        let name = c_path(Path::new(rel.file_name().expect("file has a name")));
         // SAFETY: the three filters read the live name and return a flag.
         let native_reason = unsafe {
             if cbm_has_ignored_suffix(name.as_ptr(), self.mode) {
@@ -602,7 +610,7 @@ impl Walk {
         });
         if let Some(reason) = ignore_reason {
             self.snapshot.ignore(rel, reason);
-            return Ok(());
+            return;
         }
 
         let path = c_path(absolute);
@@ -636,7 +644,6 @@ impl Walk {
                 size,
             });
         }
-        Ok(())
     }
 }
 
