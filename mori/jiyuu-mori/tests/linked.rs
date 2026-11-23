@@ -1172,6 +1172,8 @@ fn standalone_ui_signals_cancel_active_reads() {
             &git,
             r#"#!/bin/sh
 [ "$3" = rev-parse ] || [ "$1" = --no-optional-locks ] || exit 2
+[ "${GIT_ALLOW_PROTOCOL-unset}" = "" ] && [ "$GIT_NO_LAZY_FETCH" = 1 ] &&
+    [ "$GIT_OPTIONAL_LOCKS" = 0 ] && [ "$GIT_TERMINAL_PROMPT" = 0 ] || exit 3
 printf '%s\n' "$$" > "$MORI_TEST_GIT_ENTERED"
 exec /bin/sleep 30
 "#,
@@ -1188,6 +1190,10 @@ exec /bin/sleep 30
             .env("PATH", &fixture_bin)
             .env("CBM_LOG_LEVEL", "info")
             .env("CBM_LOG_FORMAT", "text")
+            .env("GIT_ALLOW_PROTOCOL", "file")
+            .env("GIT_NO_LAZY_FETCH", "0")
+            .env("GIT_OPTIONAL_LOCKS", "1")
+            .env("GIT_TERMINAL_PROMPT", "1")
             .env("TMPDIR", &scratch.0)
             .env("MORI_TEST_GIT_ENTERED", &entered)
             .stderr(fs::File::create(&log).unwrap())

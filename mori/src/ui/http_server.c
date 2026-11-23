@@ -3643,6 +3643,7 @@ static cbm_http_server_t *http_server_new(int port, bool read_only) {
         return NULL;
     }
     cbm_mcp_server_set_background_tasks(srv->mcp, false);
+    cbm_mcp_server_set_read_only_git(srv->mcp, read_only);
     cbm_mcp_server_set_index_executor(srv->mcp, http_read_only_index_rejected, srv);
 
     /* Bind to localhost only (httpd refuses anything else by construction) */

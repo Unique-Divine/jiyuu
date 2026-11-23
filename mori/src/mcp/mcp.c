@@ -72,6 +72,7 @@ enum {
 #include "pipeline/doc_links.h" /* cbm_doclink_reason_name: the reasons the layer writes */
 #include "pipeline/pass_cross_repo.h"
 #include "git/git_context.h"
+#include "foundation/git_env.h"
 #include "cli/cli.h"
 #include "watcher/watcher.h"
 #include "foundation/mem.h"
@@ -1993,6 +1994,7 @@ struct cbm_mcp_server {
     char *allowed_root;               /* explicit per-session boundary (heap, nullable) */
     bool allowed_root_policy_set;     /* true even when explicit policy is unrestricted */
     bool background_tasks;            /* per-server update/auto-index work enabled */
+    bool read_only_git;               /* disable Git fetch, optional writes and external helpers */
     struct cbm_watcher *watcher;      /* external watcher ref (not owned) */
     struct cbm_config *config;        /* external config ref (not owned) */
     /* index_status watch visibility (#2167) */
@@ -2165,6 +2167,11 @@ void cbm_mcp_server_set_background_tasks(cbm_mcp_server_t *srv, bool enabled) {
     if (srv) {
         srv->background_tasks = enabled;
     }
+}
+
+void cbm_mcp_server_set_read_only_git(cbm_mcp_server_t *srv, bool enabled) {
+    if (srv)
+        srv->read_only_git = enabled;
 }
 
 void cbm_mcp_server_set_index_executor(cbm_mcp_server_t *srv, cbm_mcp_index_executor_fn executor,
@@ -19361,6 +19368,7 @@ static mcp_scan_cause_t mcp_run_shell_command_cancellable_bounded(
         .cancel_grace_ms = CBM_SUBPROCESS_DEFAULT_CANCEL_GRACE_MS,
         .delete_log_on_exit = false,
         .strip_git_repo_env = git_child,
+        .env_overrides = git_child && srv->read_only_git ? cbm_git_read_only_env : NULL,
     };
     pre_spawn_cause =
         mcp_scan_pre_spawn_cause(srv, output_path, output_limit, deadline_ms, deadline_enabled,
@@ -20965,17 +20973,22 @@ static char *handle_detect_changes(cbm_mcp_server_t *srv, const char *args) {
     bool changed_path_oom = false;
     bool changed_path_malformed = false;
 
-    char diff_cmd[CBM_SZ_2K];
+    /* External diff and textconv programs bypass Git's transport policy. */
+    const char *diff_flags = srv->read_only_git ? " --no-ext-diff --no-textconv" : "";
+    const char *index_read_flags = srv->read_only_git ? " -c core.fsmonitor=false" : "";
+    char diff_cmd[CBM_SZ_4K];
 #ifdef _WIN32
     snprintf(diff_cmd, sizeof(diff_cmd),
-             "git -c core.quotePath=false -C \"%s\" diff --name-only -z \"%s\" \"%s\" -- 2>NUL "
-             "&& git -c core.quotePath=false -C \"%s\" diff --name-only -z -- 2>NUL",
-             root_path, merge_base, head_oid, root_path);
+             "git%s -c core.quotePath=false -C \"%s\" diff%s --name-only -z \"%s\" \"%s\" -- 2>NUL "
+             "&& git%s -c core.quotePath=false -C \"%s\" diff%s --name-only -z -- 2>NUL",
+             index_read_flags, root_path, diff_flags, merge_base, head_oid, index_read_flags,
+             root_path, diff_flags);
 #else
     snprintf(diff_cmd, sizeof(diff_cmd),
-             "git -c core.quotePath=false -C '%s' diff --name-only -z '%s' '%s' -- 2>/dev/null "
-             "&& git -c core.quotePath=false -C '%s' diff --name-only -z -- 2>/dev/null",
-             root_path, merge_base, head_oid, root_path);
+             "git%s -c core.quotePath=false -C '%s' diff%s --name-only -z '%s' '%s' -- 2>/dev/null "
+             "&& git%s -c core.quotePath=false -C '%s' diff%s --name-only -z -- 2>/dev/null",
+             index_read_flags, root_path, diff_flags, merge_base, head_oid, index_read_flags,
+             root_path, diff_flags);
 #endif
     char diff_output_path[CBM_SZ_2K] = {0};
     cbm_proc_result_t diff_result = {0};
@@ -21040,14 +21053,14 @@ static char *handle_detect_changes(cbm_mcp_server_t *srv, const char *args) {
     char status_cmd[CBM_SZ_2K];
 #ifdef _WIN32
     snprintf(status_cmd, sizeof(status_cmd),
-             "git --no-optional-locks -c core.quotePath=false -C \"%s\" status "
+             "git --no-optional-locks%s -c core.quotePath=false -C \"%s\" status "
              "--porcelain=v1 -z --untracked-files=all -- 2>NUL",
-             root_path);
+             index_read_flags, root_path);
 #else
     snprintf(status_cmd, sizeof(status_cmd),
-             "git --no-optional-locks -c core.quotePath=false -C '%s' status "
+             "git --no-optional-locks%s -c core.quotePath=false -C '%s' status "
              "--porcelain=v1 -z --untracked-files=all -- 2>/dev/null",
-             root_path);
+             index_read_flags, root_path);
 #endif
     char status_output_path[CBM_SZ_2K] = {0};
     cbm_proc_result_t status_result = {0};
@@ -21229,17 +21242,19 @@ static char *handle_detect_changes(cbm_mcp_server_t *srv, const char *args) {
     cbm_changed_hunk_t *hunks = NULL;
     int hunk_count = 0;
     if (!seed_rows.failed && (want_symbols || seed_req.list)) {
-        char hunk_cmd[CBM_SZ_2K];
+        char hunk_cmd[CBM_SZ_4K];
 #ifdef _WIN32
         snprintf(hunk_cmd, sizeof(hunk_cmd),
-                 "git -C \"%s\" diff --relative --unified=0 \"%s\" \"%s\" -- 2>NUL && "
-                 "git -C \"%s\" diff --relative --unified=0 -- 2>NUL",
-                 root_path, merge_base, head_oid, root_path);
+                 "git%s -C \"%s\" diff%s --relative --unified=0 \"%s\" \"%s\" -- 2>NUL && "
+                 "git%s -C \"%s\" diff%s --relative --unified=0 -- 2>NUL",
+                 index_read_flags, root_path, diff_flags, merge_base, head_oid, index_read_flags,
+                 root_path, diff_flags);
 #else
         snprintf(hunk_cmd, sizeof(hunk_cmd),
-                 "git -C '%s' diff --relative --unified=0 '%s' '%s' -- 2>/dev/null && "
-                 "git -C '%s' diff --relative --unified=0 -- 2>/dev/null",
-                 root_path, merge_base, head_oid, root_path);
+                 "git%s -C '%s' diff%s --relative --unified=0 '%s' '%s' -- 2>/dev/null && "
+                 "git%s -C '%s' diff%s --relative --unified=0 -- 2>/dev/null",
+                 index_read_flags, root_path, diff_flags, merge_base, head_oid, index_read_flags,
+                 root_path, diff_flags);
 #endif
         char hunk_output_path[CBM_SZ_2K] = {0};
         cbm_proc_result_t hunk_result = {0};

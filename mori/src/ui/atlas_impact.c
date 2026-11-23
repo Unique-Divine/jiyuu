@@ -5,6 +5,7 @@
 #include "foundation/compat.h"
 #include "foundation/compat_thread.h"
 #include "foundation/constants.h"
+#include "foundation/git_env.h"
 #include "foundation/json_writer.h"
 #include "ui/atlas.h"
 #include "cli/cli.h"
@@ -250,11 +251,6 @@ static char *ia_git(const char *root, const char *const *args, size_t *size, tim
         return NULL;
     char log[512];
     snprintf(log, sizeof(log), "%s/output", dir);
-    /* Git before 2.44 rejects --no-lazy-fetch. The environment form is safe
-     * to pass to older Git; an empty protocol allowlist also denies every
-     * fetch transport, even when repository configuration enables one. */
-    const char *const git_env[] = {"GIT_NO_LAZY_FETCH=1",
-                                   "GIT_ALLOW_PROTOCOL=", "GIT_TERMINAL_PROMPT=0", NULL};
     const char *argv[40] = {git,  "--no-optional-locks",
                             "-c", "protocol.allow=never",
                             "-c", "core.fsmonitor=false",
@@ -266,7 +262,7 @@ static char *ia_git(const char *root, const char *const *args, size_t *size, tim
     argv[n] = NULL;
     cbm_proc_opts_t opts = {.bin = git,
                             .argv = argv,
-                            .env_overrides = git_env,
+                            .env_overrides = cbm_git_read_only_env,
                             .strip_git_repo_env = true,
                             .log_file = log,
                             .quiet_timeout_ms = 2000,

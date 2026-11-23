@@ -26,6 +26,11 @@
 enum { CBM_GIT_REPO_ENV_VAR_COUNT = 15 };
 extern const char *const cbm_git_repo_env_vars[CBM_GIT_REPO_ENV_VAR_COUNT];
 
+/* Child-only overrides for readers that must leave the checkout and object
+ * store alone. The empty transport allowlist also covers older Git versions
+ * that do not honor GIT_NO_LAZY_FETCH. */
+extern const char *const cbm_git_read_only_env[];
+
 /* True when a "NAME=value" environment entry names one of the variables above.
  * The name compare is case-insensitive on Windows (its environment is). */
 bool cbm_git_env_entry_is_repo_local(const char *entry);

@@ -34,6 +34,14 @@ const char *const cbm_git_repo_env_vars[CBM_GIT_REPO_ENV_VAR_COUNT] = {
     "GIT_COMMON_DIR",
 };
 
+const char *const cbm_git_read_only_env[] = {
+    "GIT_OPTIONAL_LOCKS=0",
+    "GIT_NO_LAZY_FETCH=1",
+    "GIT_ALLOW_PROTOCOL=",
+    "GIT_TERMINAL_PROMPT=0",
+    NULL,
+};
+
 static char git_env_fold(char c) {
 #ifdef _WIN32
     return (c >= 'a' && c <= 'z') ? (char)(c - 'a' + 'A') : c;
