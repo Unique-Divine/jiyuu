@@ -382,6 +382,7 @@ pub unsafe extern "C" fn main(argc: c_int, argv: *mut *mut c_char) -> c_int {
         c_transport::register();
         crate::index_manifest::register();
         crate::index_route::register();
+        crate::full_build_driver::register();
         crate::query_cli::c_args::register();
         crate::cli_output::register();
         crate::initialize::c_initialize::register();

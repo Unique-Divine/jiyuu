@@ -447,6 +447,18 @@ C is the default. It owns the proofs, executes the selected route, and
 handles pass scheduling and publication. `MORI_IMPL_INDEX_MANIFEST`
 selects the exact manifest comparison independently.
 
+### Full-Build Scheduling
+
+Set `MORI_IMPL_FULL_BUILD_DRIVER=rust` when starting the daemon to opt in
+to Rust scheduling of full builds. The `pipeline.full_build_driver` worker
+log records the selection. Rust schedules the top-level passes and chooses
+parallel extraction when discovery supplies more than 50 files and the
+effective worker count exceeds one. Frozen builds use one worker.
+
+C owns the passes, extraction and resolution, and the final publication
+transaction. The full-build selector also works with
+`MORI_IMPL_GRAPH_WRITER=rust` when the linked build supports that writer.
+
 ### Sharing a Graph With a Team
 
 `index_repository` with `persistence: true` writes

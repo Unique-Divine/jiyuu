@@ -35,6 +35,7 @@ fn index(
     run_dir: &Path,
     depth: &str,
     writer: &str,
+    driver: &str,
 ) -> (Connection, String) {
     let cache = run_dir.join("cache");
     let runtime = run_dir.join("rt");
@@ -53,7 +54,9 @@ fn index(
             .env("CBM_RUNTIME_DIR", &runtime)
             .env("CBM_PROFILE", "1")
             .env("CBM_LOG_LEVEL", "info")
-            .env("MORI_IMPL_GRAPH_WRITER", writer);
+            .env("MORI_IMPL_GRAPH_WRITER", writer)
+            .env("MORI_IMPL_FULL_BUILD_DRIVER", driver)
+            .env("CBM_WORKERS", "2");
         command
     };
     let indexed = command()
@@ -147,9 +150,10 @@ func Inspect(input string) string {
     )
     .unwrap();
 
-    let (reference, _) = index(&repo, &scratch.0.join("control"), "fast", "c");
+    let (reference, _) =
+        index(&repo, &scratch.0.join("control"), "fast", "c", "c");
     let (rust_graph, logs) =
-        index(&repo, &scratch.0.join("candidate"), "fast", "rust");
+        index(&repo, &scratch.0.join("candidate"), "fast", "rust", "c");
     assert!(
         logs.lines().any(|line| line.contains("gbuf.dump_writer")
             && line.contains("implementation=rust")),
@@ -167,13 +171,22 @@ func Inspect(input string) string {
         );
     }
 
-    let (semantic_reference, _) =
-        index(&repo, &scratch.0.join("semantic-reference"), "full", "c");
+    let (semantic_reference, _) = index(
+        &repo,
+        &scratch.0.join("semantic-reference"),
+        "full",
+        "c",
+        "c",
+    );
     let (semantic, logs) =
-        index(&repo, &scratch.0.join("semantic"), "full", "rust");
+        index(&repo, &scratch.0.join("semantic"), "full", "rust", "rust");
     assert!(
         logs.lines().any(|line| line.contains("gbuf.dump_writer")
             && line.contains("implementation=rust")),
+        "{logs}"
+    );
+    assert!(
+        logs.contains("msg=pipeline.full_build_driver implementation=rust"),
         "{logs}"
     );
     assert_published(&semantic);
@@ -184,5 +197,64 @@ func Inspect(input string) string {
         let expected = graph_rows(&semantic_reference, query);
         assert!(!expected.is_empty(), "{query}");
         assert_eq!(graph_rows(&semantic, query), expected, "{query}");
+    }
+}
+
+#[test]
+fn full_build_driver_matches_c_at_the_extraction_boundary() {
+    let scratch = Scratch::new();
+    let repo = scratch.0.join("source");
+    fs::create_dir(&repo).unwrap();
+    for file in 0..50 {
+        fs::write(
+            repo.join(format!("part_{file}.py")),
+            format!("def part_{file}():\n    return {file}\n"),
+        )
+        .unwrap();
+    }
+
+    for (count, mode) in [(50, "sequential"), (51, "parallel")] {
+        if count == 51 {
+            fs::write(
+                repo.join("extra.py"),
+                "from part_0 import part_0\ndef extra():\n    return part_0()\n",
+            )
+            .unwrap();
+        }
+        let (c, c_logs) = index(
+            &repo,
+            &scratch.0.join(format!("c-{count}")),
+            "fast",
+            "c",
+            "c",
+        );
+        let (rust, rust_logs) = index(
+            &repo,
+            &scratch.0.join(format!("rust-{count}")),
+            "fast",
+            "c",
+            "rust",
+        );
+        let evidence = if count == 51 {
+            "msg=pipeline.mode mode=parallel workers=2 files=51".to_owned()
+        } else {
+            format!("msg=pipeline.mode mode={mode} files={count}")
+        };
+        assert!(c_logs.contains(&evidence), "{c_logs}");
+        assert!(
+            !c_logs.contains("msg=pipeline.full_build_driver"),
+            "{c_logs}"
+        );
+        assert!(rust_logs.contains(&evidence), "{rust_logs}");
+        assert!(rust_logs.contains(&format!("msg=pipeline.full_build_driver implementation=rust files={count}")), "{rust_logs}");
+        for sql in [
+            "SELECT label, name, qualified_name, file_path, start_line, end_line, properties FROM nodes ORDER BY qualified_name",
+            "SELECT s.qualified_name, t.qualified_name, e.type, e.properties FROM edges e JOIN nodes s ON s.id=e.source_id JOIN nodes t ON t.id=e.target_id ORDER BY 1, 2, 3, 4",
+            "SELECT rel_path, sha256, size, mtime_ns FROM file_hashes ORDER BY rel_path",
+        ] {
+            let expected = graph_rows(&c, sql);
+            assert!(!expected.is_empty(), "{sql}");
+            assert_eq!(expected, graph_rows(&rust, sql), "{sql}");
+        }
     }
 }

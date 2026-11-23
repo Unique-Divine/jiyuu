@@ -1664,6 +1664,28 @@ extern _Atomic uint64_t g_k8s_candidates;
 extern _Atomic uint64_t g_op_candidates;
 extern _Atomic uint64_t g_sh_candidates;
 
+/* The full-build driver borrows this context and operation table for one
+ * synchronous call. C owns the stage, graph, per-pass state and lifetimes.
+ * Call structure first, workers after structure, then extract once. Stop on
+ * any nonzero status. Check the fence after predump and before stage_write. */
+typedef struct cbm_full_build cbm_full_build_t;
+typedef struct {
+    int (*structure)(cbm_full_build_t *);
+    int (*workers)(cbm_full_build_t *);
+    int (*extract)(cbm_full_build_t *, int workers, bool parallel);
+    int (*tests)(cbm_full_build_t *);
+    int (*history)(cbm_full_build_t *);
+    void (*predump)(cbm_full_build_t *);
+    int (*fence)(cbm_full_build_t *);
+    int (*stage_write)(cbm_full_build_t *);
+} cbm_full_build_ops_t;
+
+typedef int (*cbm_full_build_driver_fn)(cbm_full_build_t *, const cbm_full_build_ops_t *,
+                                        int file_count, int parallel_threshold);
+
+/* Register before any pipeline workers start. */
+void cbm_pipeline_set_full_build_driver(cbm_full_build_driver_fn driver);
+
 /* ── Incremental pipeline (pipeline_incremental.c) ───────────────── */
 
 typedef enum {
