@@ -916,6 +916,155 @@ fn exact_path_coverage_verdicts_match_c_on_one_cache() {
     assert_eq!(paths[3]["recommended_action"], "read_source_and_reindex");
 }
 
+#[test]
+fn snippet_source_windows_match_c_in_cli_and_forwarded_mcp() {
+    let scratch = Scratch::new("snippet-window");
+    let repo = scratch.0.join("repo");
+    fs::create_dir(&repo).unwrap();
+    let file = repo.join("app.py");
+    let mut source = "class Big:\n    def first(self): return 1\n".to_owned();
+    source.push_str(&"    # filler\n".repeat(600));
+    source.push_str("    def last(self): return 2\n");
+    fs::write(&file, &source).unwrap();
+
+    let c = c_binary();
+    let rust = Path::new(MORI);
+    let index = index_fixture(&c, &scratch, repo.to_str().unwrap());
+    let project = index["project"].as_str().unwrap();
+    let stop = |bin: &Path| {
+        let output = run_in(bin, &scratch, &["daemon", "stop"]);
+        assert!(output.status.success(), "{output:?}");
+    };
+    stop(&c);
+    let graph = Connection::open_with_flags(
+        scratch.0.join("cache").join(format!("{project}.db")),
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let qualified_name = |name: &str| -> String {
+        graph
+            .query_row(
+                "SELECT qualified_name FROM nodes WHERE name = ?",
+                [name],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    let big = qualified_name("Big");
+    let first = qualified_name("first");
+    drop(graph);
+
+    let requests = [
+        serde_json::json!({"qualified_name": big}),
+        serde_json::json!({"qualified_name": big, "source_mode": "full"}),
+        serde_json::json!({
+            "qualified_name": big, "source_mode": "full",
+            "start_line": 200, "max_lines": 3, "max_output_tokens": 1,
+        }),
+        serde_json::json!({
+            "qualified_name": big, "source_mode": "outline",
+            "start_line": 200, "max_lines": 3,
+        }),
+        serde_json::json!({
+            "qualified_name": first, "start_line": 999,
+        }),
+        serde_json::json!({"qualified_name": "unknown_symbol"}),
+    ]
+    .map(|mut args| {
+        args["project"] = serde_json::json!(project);
+        args["format"] = serde_json::json!("json");
+        args
+    });
+    let read = |bin: &Path, args: &serde_json::Value| {
+        run_in(
+            bin,
+            &scratch,
+            &["cli", "--quiet", "get_code_snippet", &args.to_string()],
+        )
+    };
+    let assert_parity = |args| {
+        let reference = read(&c, args);
+        let candidate = read(rust, args);
+        assert_eq!(candidate.status.code(), reference.status.code(), "{args}");
+        assert_eq!(candidate.stdout, reference.stdout, "{args}");
+        assert_eq!(candidate.stderr, reference.stderr, "{args}");
+        candidate
+    };
+    let responses = requests.each_ref().map(assert_parity);
+    let json = |output: &Output| -> serde_json::Value {
+        assert!(output.status.success(), "{output:?}");
+        serde_json::from_slice(&output.stdout).unwrap()
+    };
+    assert_eq!(json(&responses[0])["source_mode"], "outline");
+    let full = json(&responses[1]);
+    assert_eq!(full["end_line"], 500);
+    assert_eq!(full["next_start_line"], 501);
+    assert_eq!(full["content_verified"], true);
+    let page = json(&responses[2]);
+    assert_eq!(page["start_line"], 200);
+    assert_eq!(page["end_line"], 202);
+    assert_eq!(page["next_start_line"], 203);
+    assert_eq!(json(&responses[3])["start_line"], 1);
+    let one_line = json(&responses[4]);
+    assert_eq!(one_line["start_line"], one_line["end_line"]);
+    assert!(
+        String::from_utf8_lossy(&responses[5].stderr)
+            .contains("symbol not found")
+            || String::from_utf8_lossy(&responses[5].stdout)
+                .contains("symbol not found")
+    );
+
+    // Repeat a successful request through MCP stdio. The debug marker is
+    // written by the daemon only after the Rust callback returns.
+    let startup = command_in(rust, &scratch)
+        .env("CBM_LOG_LEVEL", "debug")
+        .args(["daemon", "start"])
+        .output()
+        .unwrap();
+    assert!(startup.status.success(), "{startup:?}");
+    let rpc = scratch.0.join("requests");
+    let call = serde_json::json!({
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": {"name": "get_code_snippet", "arguments": requests[2]},
+    });
+    fs::write(
+        &rpc,
+        format!(
+            "{}\n{}\n{call}\n",
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"linked-test","version":"1"}}}"#,
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        ),
+    )
+    .unwrap();
+    let forwarded = command_in(rust, &scratch)
+        .stdin(Stdio::from(fs::File::open(rpc).unwrap()))
+        .output()
+        .unwrap();
+    stop(rust);
+    assert!(forwarded.status.success(), "{forwarded:?}");
+    let reply: serde_json::Value = String::from_utf8(forwarded.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .find(|reply| reply["id"] == 2)
+        .unwrap();
+    let forwarded_result: serde_json::Value = serde_json::from_str(
+        reply["result"]["content"][0]["text"].as_str().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(forwarded_result, page);
+    let log =
+        fs::read_to_string(scratch.0.join("cache/logs/cbm-daemon.log")).unwrap();
+    assert!(log.lines().any(|line| {
+        line.contains("get_code_snippet.window") && line.contains("backend=rust")
+    }));
+
+    fs::write(&file, format!("# shifted\n{source}")).unwrap();
+    let drift = json(&assert_parity(&requests[2]));
+    assert_eq!(drift["source_drift"], true);
+    assert_eq!(drift["source"], "(source not available)");
+}
+
 fn graphql_rows(scratch: &Scratch, project: &str) -> Vec<String> {
     let db = Connection::open_with_flags(
         scratch.0.join("cache").join(format!("{project}.db")),
