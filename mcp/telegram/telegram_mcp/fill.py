@@ -6,11 +6,13 @@ from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import io
+import logging
 import os
 import re
 import sqlite3
 import stat
 from time import monotonic
+import traceback
 from typing import Any
 
 from telethon import TelegramClient, errors, functions, hints, types, utils
@@ -49,6 +51,7 @@ DIALOG_SCAN_LIMIT = 12000
 DIALOG_PAGE_SPACING_SECONDS = 3
 CAPACITY_READ_SECONDS = 480
 CAPACITY_MAX_WAIT_SECONDS = 240
+LOGGER = logging.getLogger(__name__)
 DAY_MS = 86_400_000
 ADD_GAP_MS = 1_200_000
 
@@ -434,14 +437,23 @@ class PoolTransport:
         return await self.execute(action, peer_connected)
 
     async def snapshot(self) -> dict[str, Any]:
-        await self.identity()
-        groups = await self.read_capacity()
-        observed = now_ms()
-        return {
-            "accountId": self.account,
-            "groupCount": groups,
-            **self.journal.snapshot(observed),
-        }
+        try:
+            await self.identity()
+            groups = await self.read_capacity()
+            return {
+                "accountId": self.account,
+                "groupCount": groups,
+                **self.journal.snapshot(now_ms()),
+            }
+        except BrokerError:
+            raise
+        except Exception as error:
+            frame = traceback.extract_tb(error.__traceback__)[-1]
+            LOGGER.warning(
+                "Chat pool capacity read failed (%s at %s:%s)",
+                type(error).__name__, os.path.basename(frame.filename), frame.lineno,
+            )
+            raise BrokerError("group_count_unavailable") from None
 
     async def read_room(self, selector: hints.EntityLike, ref: str):
         peer = await self.client.get_input_entity(selector)
