@@ -447,6 +447,15 @@ impl Query<'_> {
     ) -> rusqlite::Result<ResultRows> {
         let connection =
             Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        self.execute_on(&connection, project)
+    }
+
+    /// Read from the graph and snapshot the caller has already selected.
+    pub(crate) fn execute_on(
+        &self,
+        connection: &Connection,
+        project: &str,
+    ) -> rusqlite::Result<ResultRows> {
         let reversed =
             self.hops.len() == 1 && self.selectivity(1) > self.selectivity(0);
         let start_index = usize::from(reversed);
@@ -466,7 +475,7 @@ impl Query<'_> {
         } else {
             statement.query([project])?
         };
-        let mut adjacency = Adjacency::new(&connection)?;
+        let mut adjacency = Adjacency::new(connection)?;
         let mut rows = Vec::new();
         let mut truncated = false;
         let limit = self.limit.unwrap_or(ENGINE_LIMIT);

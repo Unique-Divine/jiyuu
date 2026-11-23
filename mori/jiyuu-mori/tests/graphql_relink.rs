@@ -589,6 +589,29 @@ RETURN rt.name, h.name, h.file_path, x.callers LIMIT 100"#;
 }
 
 #[test]
+fn linear_cypher_reads_through_the_callers_transaction() {
+    let fixture = Fixture::new();
+    let mut db = fixture.index(CLIENT);
+    let snapshot = db.transaction().expect("begin caller's transaction");
+    let caller = node(&snapshot, CLIENT, "Caller", "a", "caller.a", "a.py");
+    let callee = node(&snapshot, CLIENT, "Callee", "b", "callee.b", "b.py");
+    edge(&snapshot, CLIENT, caller, callee, "CALLS", json!({}));
+
+    let query = cypher_linear::classify(
+        "MATCH (a:Caller)-[:CALLS]->(b:Callee) RETURN b.name",
+    )
+    .expect("classify bounded query");
+    let answer = query
+        .execute_on(&snapshot, CLIENT)
+        .expect("read caller's snapshot");
+    assert_eq!(answer.rows, [["b"]]);
+
+    snapshot.rollback().expect("caller owns transaction");
+    let answer = query.execute_on(&db, CLIENT).expect("read after rollback");
+    assert!(answer.rows.is_empty());
+}
+
+#[test]
 fn unsupported_syntax_and_supported_storage_errors_are_distinct() {
     for query in [
         "MATCH (a) RETURN a.name",
