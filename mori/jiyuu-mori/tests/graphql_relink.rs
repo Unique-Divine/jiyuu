@@ -707,13 +707,13 @@ fn linear_cypher_filters_each_bound_node_before_expanding_it() {
         let other = node(&tx, CLIENT, "Other", &name, &name, "other.py");
         edge(&tx, CLIENT, rejected_start, other, "FWD", json!({}));
         edge(&tx, CLIENT, other, rejected_end, "REV", json!({}));
-        edge(&tx, CLIENT, rejected_relay, other, "END", json!({}));
+        edge(&tx, CLIENT, rejected_relay, other, "TAIL_LINK", json!({}));
     }
     edge(&tx, CLIENT, start, target, "FWD", json!({}));
     edge(&tx, CLIENT, start, end, "REV", json!({}));
     edge(&tx, CLIENT, start, rejected_relay, "JOIN", json!({}));
     edge(&tx, CLIENT, start, relay, "JOIN", json!({}));
-    edge(&tx, CLIENT, relay, target, "END", json!({}));
+    edge(&tx, CLIENT, relay, target, "TAIL_LINK", json!({}));
     tx.commit().expect("publish fixture data");
 
     for (cypher, expected) in [
@@ -726,7 +726,7 @@ fn linear_cypher_filters_each_bound_node_before_expanding_it() {
             "selected",
         ),
         (
-            "MATCH (a:Start)-[:JOIN]->(b:Relay)-[:END]->(c:Target) WHERE b.name = 'selected' RETURN c.name",
+            "MATCH (a:Start)-[:JOIN]->(b:Relay)-[:TAIL_LINK]->(c:Target) WHERE b.name = 'selected' RETURN c.name",
             "answer",
         ),
     ] {
@@ -741,8 +741,8 @@ fn linear_cypher_filters_each_bound_node_before_expanding_it() {
             }
         };
         let mut budget = cypher_linear::ExecutionBudget::new(&clock, &|| false);
-        let query =
-            cypher_linear::classify(cypher).expect("classify bounded query");
+        let query = cypher_linear::classify(cypher)
+            .unwrap_or_else(|_| panic!("classify bounded query: {cypher}"));
         let answer = query
             .execute_with_budget(&db, CLIENT, &mut budget)
             .unwrap_or_else(|error| panic!("{cypher}: {error:?}"));
