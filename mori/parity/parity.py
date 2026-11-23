@@ -578,15 +578,18 @@ def replay(sides: list[Side], call_list: list[dict[str, Any]],
            for i, s in enumerate(sides)]
   t0 = time.monotonic()
   pool = ThreadPoolExecutor(max_workers=len(sides))
+  side_b_timed_out = False
 
   def run_sides(per_side: list[dict[str, Any] | None], tool: str,
                 check_rust: bool
                 ) -> list[dict[str, Any] | None]:
+    nonlocal side_b_timed_out
+
     def one(i: int) -> dict[str, Any] | None:
       if per_side[i] is None:
         return None
       args = calls_mod.resolve(per_side[i], roots, projects[i])
-      observe = check_rust and i == 1
+      observe = check_rust and i == 1 and not side_b_timed_out
       position = query_log_position(query_log) if observe else None
       try:
         code, out, err = sides[i].cli(tool, args, CALL_TIMEOUT_S)
@@ -598,7 +601,12 @@ def replay(sides: list[Side], call_list: list[dict[str, Any]],
         output["rust_query_events"] = rust_query_events(query_log, position)
       return output
     # Both sides run at once: they share nothing but the machine.
-    return list(pool.map(one, range(len(sides))))
+    outputs = list(pool.map(one, range(len(sides))))
+    if require_rust and outputs[1] is not None and outputs[1].get("timed_out"):
+      # The daemon can finish a timed-out request after the CLI has exited.
+      # An event appended by that work cannot prove a subsequent dispatch.
+      side_b_timed_out = True
+    return outputs
 
   for n, c in enumerate(call_list):
     tool = c["tool"]
@@ -630,9 +638,11 @@ def replay(sides: list[Side], call_list: list[dict[str, Any]],
       events = output.pop("rust_query_events", None)
       if events != 1:
         dispatch_failed = True
+        observed = "evidence unavailable" if events is None else events
+        if side_b_timed_out:
+          observed = "evidence unavailable after side B timeout"
         dispatch.add("L4", "query_graph:$.rust_dispatch", group, 1,
-                     "evidence unavailable" if events is None else events,
-                     request)
+                     observed, request)
 
     check_dispatch(outs[1], "initial request")
     if any(o.get("timed_out") for o in outs):

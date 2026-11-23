@@ -8,6 +8,7 @@ import json
 import os
 import socket
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -109,6 +110,43 @@ class ParityTest(unittest.TestCase):
           self.assertEqual(diffs[0]["group"], call_id)
           self.assertIsNone(diffs[0]["allowed"])
           self.assertNotIn(args["query"], json.dumps(diffs))
+
+  def test_rust_query_replay_ignores_late_event_after_unselected_timeout(self) -> None:
+    previous = {"tool": "query_graph", "args": {"query": "MATCH (a) RETURN a"}}
+    args = {"query": "MATCH (b) RETURN b", "format": "json"}
+    selected = {"tool": "query_graph", "args": args}
+    call_id = calls.call_id("query_graph", args)
+    prior_call_id = calls.call_id("query_graph", previous["args"])
+    entries = [allowlist.Entry("L4", "query_graph:$.timed_out", prior_call_id,
+                               "known timeout")]
+    sides = [parity.Side(n, "/bin/true", os.path.join(self.tmp, n), self.tmp)
+             for n in ("a", "b")]
+    log_path = Path(sides[1].cache) / "logs/cbm-daemon.log"
+    log_path.parent.mkdir(parents=True)
+    log_path.touch()
+    reply = (0, '{"columns":["b"],"rows":[["one"]]}', "")
+
+    def candidate(tool, request, timeout):
+      if request == previous["args"]:
+        raise subprocess.TimeoutExpired(tool, timeout)
+      with log_path.open("ab") as log_file:
+        log_file.write(parity.RUST_QUERY_LOG + b"\n")
+      return reply
+
+    with (patch.object(sides[0], "cli", return_value=reply),
+          patch.object(sides[1], "cli", side_effect=candidate)):
+      diffs, stats = parity.replay(
+        sides, [previous, selected], {}, [{}, {}], entries, frozenset({call_id}))
+
+    self.assertEqual(stats["timeouts"], 1)
+    self.assertEqual(stats["rust_query_checks"], 1)
+    self.assertEqual([d["key"] for d in diffs],
+                     ["query_graph:$.timed_out", "query_graph:$.rust_dispatch"])
+    self.assertEqual(diffs[0]["allowed"], "known timeout")
+    self.assertEqual(diffs[1]["group"], call_id)
+    self.assertIsNone(diffs[1]["allowed"])
+    self.assertIn("evidence unavailable after side B timeout",
+                  diffs[1]["examples"][0]["b"])
 
   def test_rust_query_replay_rejects_replaced_log(self) -> None:
     log_path = Path(self.tmp) / "cbm-daemon.log"

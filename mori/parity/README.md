@@ -64,4 +64,6 @@ side B replay daemon. The runner looks for exactly one
 each selected request, including any extra pages the comparison needs.
 Missing or ambiguous evidence fails the run even when both replies match.
 An output allow-list cannot waive this check. The dispatch diagnostic
-records the call ID and event count.
+records the call ID and event count. After a side B timeout, later Rust
+execution checks fail because the timed-out request may still write to the
+daemon log.
