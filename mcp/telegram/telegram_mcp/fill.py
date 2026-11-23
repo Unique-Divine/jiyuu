@@ -392,10 +392,8 @@ class PoolTransport:
         count = 0
         with raise_flood_waits():
             async for dialog in self.dialogs(DIALOG_SCAN_LIMIT, wait_for_capacity=True):
-                if isinstance(
-                    dialog.entity,
-                    (types.Channel, types.Chat, types.ChannelForbidden, types.ChatForbidden),
-                ):
+                # Telegram's creation limit uses joined channels and supergroups.
+                if isinstance(dialog.entity, types.Channel) and not dialog.entity.left:
                     count += 1
         return count
 

@@ -58,9 +58,13 @@ async def test_capacity_snapshot_counts_groups_after_two_thousand_direct_dialogs
             return SimpleNamespace(id=42, bot=False)
 
         async def iter_dialogs(self, *, limit):
-            async_dialogs = [SimpleNamespace(entity=object())] * 2100
-            async_dialogs.append(SimpleNamespace(entity=types.ChatForbidden(id=90, title="Group")))
-            for dialog in async_dialogs[:limit]:
+            dialogs = [SimpleNamespace(entity=object())] * 2100
+            dialogs.extend([
+                SimpleNamespace(entity=types.ChatForbidden(id=90, title="Old basic group")),
+                SimpleNamespace(entity=types.Channel(91, "Left channel", types.ChatPhotoEmpty(), None, left=True)),
+                SimpleNamespace(entity=types.Channel(92, "Joined channel", types.ChatPhotoEmpty(), None)),
+            ])
+            for dialog in dialogs[:limit]:
                 yield dialog
 
     state = fixture_state(monkeypatch, tmp_path)
@@ -93,7 +97,7 @@ async def test_capacity_scan_resumes_after_the_recorded_wait(monkeypatch, tmp_pa
                 raise errors.FloodWaitError(request=None, capture=2)
             if self.calls > 3:
                 raise StopAsyncIteration
-            return SimpleNamespace(entity=types.ChatForbidden(id=self.calls, title="Group"))
+            return SimpleNamespace(entity=types.Channel(self.calls, "Group", types.ChatPhotoEmpty(), None))
 
     class FakeClient:
         async def get_me(self):
