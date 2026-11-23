@@ -555,10 +555,13 @@ fn mcp_method_dispatch_matches_c() {
     let input = concat!(
         "{\"jsonrpc\":\"2.0\",\"id\":\"ping\",\"method\":\"ping\"}\n",
         "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":null,\"method\":\"ping\"}\n",
+        "{\"jsonrpc\":\"2.0\",\"method\":\"ping\"}\n",
         "{\"jsonrpc\":\"2.0\",\"id\":\"resources\",\"method\":\"resources/list\"}\n",
         "{\"jsonrpc\":\"2.0\",\"id\":\"templates\",\"method\":\"resources/templates/list\"}\n",
         "{\"jsonrpc\":\"2.0\",\"id\":\"discover\",\"method\":\"server/discover\"}\n",
         "{\"jsonrpc\":\"2.0\",\"id\":\"unknown\",\"method\":\"ping/extra\"}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":\"cancel-request\",\"method\":\"notifications/cancelled\"}\n",
     );
     let reference = run_stdio(&c_binary(), "c", &[], input);
     let linked = run_stdio(Path::new(MORI), "rs", &[], input);
@@ -567,14 +570,22 @@ fn mcp_method_dispatch_matches_c() {
         .lines()
         .map(|line| serde_json::from_str(line).expect("parse response"))
         .collect();
-    assert_eq!(replies.len(), 5, "{linked}");
+    assert_eq!(replies.len(), 7, "{linked}");
+    assert_eq!(replies[0]["id"], "ping");
     assert_eq!(replies[0]["result"], serde_json::json!({}));
-    assert_eq!(replies[1]["result"]["resources"], serde_json::json!([]));
+    // The C envelope uses -1 for a present null ID. A missing ID is silent.
+    assert_eq!(replies[1]["id"], -1);
+    assert_eq!(replies[1]["result"], serde_json::json!({}));
+    assert_eq!(replies[2]["result"]["resources"], serde_json::json!([]));
     assert_eq!(
-        replies[2]["result"]["resourceTemplates"],
+        replies[3]["result"]["resourceTemplates"],
         serde_json::json!([])
     );
-    for (reply, id) in replies[3..].iter().zip(["discover", "unknown"]) {
+    for (reply, id) in
+        replies[4..]
+            .iter()
+            .zip(["discover", "unknown", "cancel-request"])
+    {
         assert_eq!(reply["id"], id);
         assert_eq!(reply["error"]["code"], -32601);
     }
@@ -599,6 +610,12 @@ fn mcp_tools_call_params_and_ids_match_c_through_daemon() {
         r#"{"jsonrpc":"2.0","method":"tools/call","params":{"name":"list_projects"}}"#,
         r#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"9"}}"#,
         r#"{"jsonrpc":"2.0","id":"end","method":"ping"}"#,
+        r#"{"jsonrpc":"2.0","id":"tools","method":"tools/list"}"#,
+        r#"{"jsonrpc":"2.0","id":"prompts","method":"prompts/list"}"#,
+        r#"{"jsonrpc":"2.0","id":"prompt","method":"prompts/get","params":{"name":"explore_codebase","arguments":{"project":"payments","question":"How are refunds routed?"}}}"#,
+        r#"{"jsonrpc":"2.0","id":"bad-prompt","method":"prompts/get","params":{"name":"explore_codebase","arguments":[]}}"#,
+        r#"{"jsonrpc":"2.0","id":"probe","method":"server/discover"}"#,
+        r#"{"jsonrpc":"2.0","id":"unknown","method":"unknown"}"#,
         "",
     ]
     .join("\n");
@@ -619,6 +636,31 @@ fn mcp_tools_call_params_and_ids_match_c_through_daemon() {
         let log =
             fs::read_to_string(scratch.0.join("cache/logs/cbm-daemon.log"))
                 .unwrap();
+        for (method, count) in [
+            ("initialize", 1),
+            ("tools/call", 9),
+            ("tools/list", 1),
+            ("prompts/list", 1),
+            ("prompts/get", 2),
+            ("server/discover", 1),
+            ("unknown", 1),
+            ("ping", 1),
+        ] {
+            let event = format!(
+                "msg=mcp.dispatch backend=rust method={method} has_id=true"
+            );
+            assert_eq!(
+                log.lines().filter(|line| line.contains(&event)).count(),
+                if rust { count } else { 0 },
+                "{side}: {method} dispatch count",
+            );
+        }
+        for (method, status) in [("server/discover", "ok"), ("unknown", "error")]
+        {
+            assert!(log.contains(&format!(
+                "msg=mcp.request protocol=jsonrpc method={method} status={status}"
+            )));
+        }
         assert_eq!(
             log.lines()
                 .filter(|line| line.contains(
@@ -662,6 +704,12 @@ fn mcp_tools_call_params_and_ids_match_c_through_daemon() {
             "duplicate-name",
             9,
             "end",
+            "tools",
+            "prompts",
+            "prompt",
+            "bad-prompt",
+            "probe",
+            "unknown",
         ])
         .as_array()
         .unwrap()[..],
@@ -688,11 +736,22 @@ fn mcp_tools_call_params_and_ids_match_c_through_daemon() {
             serde_json::json!([])
         );
     }
+    assert!(replies[11]["result"]["tools"].is_array());
+    assert!(replies[12]["result"]["prompts"].is_array());
+    assert!(
+        replies[13]["result"]["messages"][0]["content"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("How are refunds routed?")
+    );
+    assert_eq!(replies[14]["error"]["code"], -32602);
+    assert_eq!(replies[15]["error"]["code"], -32601);
+    assert_eq!(replies[16]["error"]["code"], -32601);
 }
 
 #[test]
 #[ignore = "requires the opt-in C worker test seams"]
-fn mcp_matching_cancellation_ids_match_c_through_daemon() {
+fn mcp_queued_and_active_cancellation_match_c_through_daemon() {
     use std::io::{BufRead, BufReader, Write};
     use std::process::Child;
     use std::sync::mpsc::{self, RecvTimeoutError};
@@ -714,7 +773,7 @@ fn mcp_matching_cancellation_ids_match_c_through_daemon() {
         "build both binaries with TEST_SEAMS=1 to enable the worker marker"
     );
     let c = c_binary();
-    for id in [json!(17), json!("17")] {
+    for (id, queued_id) in [(json!(17), json!("17")), (json!("17"), json!(17))] {
         let run = |bin: &Path, side: &str| {
             let scratch = Scratch::new(side);
             let repo = scratch.0.join("repo");
@@ -777,6 +836,13 @@ fn mcp_matching_cancellation_ids_match_c_through_daemon() {
                 );
                 std::thread::sleep(Duration::from_millis(10));
             }
+            // The first request is still running. Queue a different ID with
+            // the same spelling, then cancel it before releasing the worker.
+            request(json!({"jsonrpc":"2.0","id":queued_id,"method":"ping"}));
+            request(json!({
+                "jsonrpc":"2.0","method":"notifications/cancelled",
+                "params":{"requestId":queued_id},
+            }));
             request(json!({
                 "jsonrpc":"2.0","method":"notifications/cancelled",
                 "params":{"requestId":id},
@@ -786,6 +852,10 @@ fn mcp_matching_cancellation_ids_match_c_through_daemon() {
             assert_eq!(cancelled["id"], id);
             assert_eq!(cancelled["error"]["code"], -32800);
             assert!(cancelled.get("result").is_none(), "{cancelled}");
+            let queued = response();
+            assert_eq!(queued["id"], queued_id);
+            assert_eq!(queued["error"]["code"], -32800);
+            assert!(queued.get("result").is_none(), "{queued}");
             assert_eq!(
                 response(),
                 json!({"jsonrpc":"2.0","id":"after","result":{}}),
@@ -802,7 +872,7 @@ fn mcp_matching_cancellation_ids_match_c_through_daemon() {
             );
             reader.join().expect("join MCP stdout reader");
             assert!(frontend.0.wait().expect("wait for MCP frontend").success());
-            cancelled
+            [cancelled, queued]
         };
 
         assert_eq!(run(&c, "c"), run(Path::new(MORI), "rs"));
