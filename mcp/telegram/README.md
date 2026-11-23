@@ -280,9 +280,12 @@ The ordinary MCP entrypoint and environment-based profiles still work.
    Streamable HTTP at `/mcp` through the private `mcp.sock` in the same
    directory as the fill socket below. Clients can reconnect while the
    process keeps the Telegram connection and incoming-message tools active.
-   Broker mode permits ordinary MCP writes. It reserves group creation,
-   joins, and direct adds for the managed workflow to protect the account's
-   capacity. Admin grants require an existing member.
+   Broker mode permits ordinary MCP writes. A direct invite takes one
+   user at a time and shares the worker's add journal and hold checks. An
+   invite needs a current Deal Desk action cap for that account. If the
+   previous outcome is unknown, the tool checks membership before allowing
+   any further action on that target. Group creation, joins, and batch
+   invites stay gated. Admin grants require an existing member.
 3. Point the managed worker at
    `${BOKU_HOME:-$HOME/.boku}/telegram-mcp/run/broker-v1.sock`. The socket
    accepts the local user's UID. For a worker on another host, forward that
@@ -294,8 +297,9 @@ The encrypted entries and their key live under `telegram-mcp/secrets/`.
 Keep that directory across reinstalls. MCP logs go to `telegram-mcp/logs/`
 and the socket, lock files, and fill journal go to `telegram-mcp/run/`.
 The service keeps the broker and Telegram clients alive across MCP client
-disconnects. A second local process cannot use the same saved authorization
-through this setup. The designated custody
+disconnects. The regular POSIX MCP runner takes the same lock for an existing
+authorization it can read before connecting. A lock applies on the host
+running the Telegram connection and within the selected BOKU_HOME. The designated custody
 account remains on its dedicated service.
 
 

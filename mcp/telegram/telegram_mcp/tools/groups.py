@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Tuple
 
 from telethon import errors
 
+from telegram_mcp import manual_invites
 from telegram_mcp.runtime import *
 
 
@@ -258,6 +259,32 @@ async def invite_to_group(
                 return f"Error: User with ID {user_id} could not be found. {e}"
 
         users_to_add = _distinct_users(users_to_add)
+        if os.environ.get("TELEGRAM_BROKER") == "1":
+            owner = manual_invites.active.get(id(cl))
+            if owner is None:
+                return "Error: the shared invite budget is unavailable."
+            if len(users_to_add) != 1 or not isinstance(entity, (types.Channel, types.Chat)):
+                return (
+                    "Error: shared mode accepts one user invite to a group or channel at a time."
+                )
+            user = users_to_add[0]
+            if not isinstance(user, types.User):
+                return "Error: the invite target is not a verified Telegram user."
+            outcome = await manual_invites.invite(owner, entity, user, history_messages)
+            if outcome in ("added", "already_member", "uncertain", "privacy_restricted"):
+                result = _invite_report(
+                    entity,
+                    1,
+                    [(user.id, "privacy restriction")] if outcome == "privacy_restricted" else [],
+                    [user.id] if outcome == "already_member" else [],
+                    [user.id] if outcome == "uncertain" else [],
+                )
+                return json_result(result)
+            if outcome == "prior_outcome_unknown":
+                return "Error: the previous invite is unconfirmed. Check the user's membership before retrying."
+            if outcome == "budget_unavailable":
+                return "Error: a current Deal Desk add cap is needed for a shared Telegram invite."
+            return f"Error: shared Telegram invite paused ({outcome})."
         if isinstance(entity, Chat):
             return await _invite_to_basic_group(
                 cl, entity, users_to_add, history_messages, group_id, user_ids

@@ -158,6 +158,16 @@ class Journal:
                     PRIMARY KEY (account,fill,action)
                 );
                 CREATE INDEX IF NOT EXISTS dispatch_v1_usage ON dispatch_v1(account,step,at_ms);
+                CREATE TABLE IF NOT EXISTS manual_invite_v1 (
+                    id INTEGER PRIMARY KEY,
+                    account TEXT NOT NULL, chat INTEGER NOT NULL, target INTEGER NOT NULL,
+                    at_ms INTEGER NOT NULL, outcome TEXT NOT NULL
+                        CHECK(outcome IN ('uncertain','added','refused'))
+                );
+                CREATE INDEX IF NOT EXISTS manual_invite_v1_usage
+                    ON manual_invite_v1(account,at_ms);
+                CREATE UNIQUE INDEX IF NOT EXISTS manual_invite_v1_pending
+                    ON manual_invite_v1(account,chat,target) WHERE outcome='uncertain';
                 CREATE TABLE IF NOT EXISTS hold_v1 (
                     account TEXT NOT NULL, grp TEXT NOT NULL, until_ms INTEGER NOT NULL,
                     source TEXT NOT NULL, method TEXT NOT NULL, wait_s INTEGER NOT NULL,
@@ -171,12 +181,70 @@ class Journal:
         with closing(sqlite3.connect(self.path, timeout=1)) as db:
             yield db
 
+    def _usage(self, db: sqlite3.Connection, now: int) -> tuple[int, int | None]:
+        return db.execute(
+            """SELECT COALESCE(SUM(at_ms>=?), 0), MAX(at_ms) FROM (
+                SELECT at_ms FROM dispatch_v1 WHERE account=? AND step='add_bot'
+                UNION ALL SELECT at_ms FROM manual_invite_v1 WHERE account=?
+            )""",
+            (now // DAY_MS * DAY_MS, self.account, self.account),
+        ).fetchone()
+
+    def _add_block(self, db: sqlite3.Connection, now: int, cap: int) -> dict[str, Any] | None:
+        daily, latest = self._usage(db, now)
+        if daily >= cap:
+            return retry("daily_cap", (now // DAY_MS + 1) * DAY_MS)
+        if latest is not None and latest + ADD_GAP_MS > now:
+            return retry("add_spacing", latest + ADD_GAP_MS)
+        return None
+
+    def reserve_manual(
+        self, chat: int, target: int, cap: int, expires: int
+    ) -> tuple[int | None, str]:
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            now = now_ms()
+            if now >= expires:
+                return None, "budget_unavailable"
+            if db.execute(
+                "SELECT 1 FROM manual_invite_v1 WHERE account=? AND chat=? AND target=? AND outcome='uncertain'",
+                (self.account, chat, target),
+            ).fetchone():
+                return None, "prior_outcome_unknown"
+            if db.execute(
+                "SELECT 1 FROM hold_v1 WHERE account=? AND until_ms>? AND grp='invite'",
+                (self.account, now),
+            ).fetchone():
+                return None, "hold"
+            block = self._add_block(db, now, cap)
+            if block is not None:
+                return None, block["errorCode"]
+            cursor = db.execute(
+                "INSERT INTO manual_invite_v1(account,chat,target,at_ms,outcome) VALUES (?,?,?,?,'uncertain')",
+                (self.account, chat, target, now),
+            )
+            db.commit()
+            return cursor.lastrowid, "reserved"
+
+    def observe_manual_member(self, chat: int, target: int) -> None:
+        with self.connect() as db:
+            db.execute(
+                "UPDATE manual_invite_v1 SET outcome='added' WHERE account=? AND chat=? AND target=? AND outcome='uncertain'",
+                (self.account, chat, target),
+            )
+            db.commit()
+
+    def refuse_manual(self, row: int) -> None:
+        with self.connect() as db:
+            db.execute(
+                "UPDATE manual_invite_v1 SET outcome='refused' WHERE account=? AND id=? AND outcome='uncertain'",
+                (self.account, row),
+            )
+            db.commit()
+
     def snapshot(self, now: int) -> dict[str, Any]:
         with self.connect() as db:
-            row = db.execute(
-                "SELECT COUNT(*) FROM dispatch_v1 WHERE account=? AND step='add_bot' AND at_ms>=?",
-                (self.account, now // DAY_MS * DAY_MS),
-            ).fetchone()
+            count, _ = self._usage(db, now)
             holds = [
                 {
                     "group": group,
@@ -190,7 +258,7 @@ class Journal:
                     (self.account, now),
                 )
             ]
-        return {"addsToday": row[0], "holds": holds}
+        return {"addsToday": count, "holds": holds}
 
     def guard(self, action: Action, now: int, *, reserve: bool) -> dict[str, Any] | None:
         if now >= action.expires:
@@ -205,14 +273,9 @@ class Journal:
             if blocked is not None:
                 return retry("hold", blocked)
             if action.step in ("create", "add_bot"):
-                daily, latest = db.execute(
-                    "SELECT COALESCE(SUM(at_ms>=?), 0), MAX(at_ms) FROM dispatch_v1 WHERE account=? AND step='add_bot'",
-                    (now // DAY_MS * DAY_MS, self.account),
-                ).fetchone()
-                if daily >= action.cap:
-                    return retry("daily_cap", (now // DAY_MS + 1) * DAY_MS)
-                if latest is not None and latest + ADD_GAP_MS > now:
-                    return retry("add_spacing", latest + ADD_GAP_MS)
+                block = self._add_block(db, now, action.cap)
+                if block is not None:
+                    return block
             if not reserve:
                 return None
             inserted = db.execute(
@@ -273,6 +336,7 @@ class PoolTransport:
         self.account = account
         self.journal = Journal(state, account)
         self.photo = photo
+        self.latest_budget: tuple[int, int] | None = None
 
     async def identity(self) -> None:
         with raise_flood_waits():
@@ -310,6 +374,8 @@ class PoolTransport:
         self, body: dict[str, Any], peer_connected: PeerConnected | None = None
     ) -> dict[str, Any]:
         action = Action.parse(body)
+        if action.expires > now_ms():
+            self.latest_budget = (action.cap, action.expires)
         if body["op"] == "fill.observe":
             return await self.observe(action)
         return await self.execute(action, peer_connected)

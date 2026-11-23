@@ -17,7 +17,7 @@ from telegram_mcp.http_service import serve_mcp
 from telegram_mcp.session_store import lock_authorization, validate_identity
 
 from telegram_mcp import runtime as _runtime
-from telegram_mcp import server_info
+from telegram_mcp import manual_invites, server_info
 from telegram_mcp.runtime import *
 import telegram_mcp.tools  # noqa: F401 - registers MCP tools via decorators
 
@@ -84,6 +84,10 @@ async def _main() -> None:
                 }
                 if len(accounts) != len(_runtime.STORED_PROFILES):
                     raise StoreError("Telegram broker profiles must identify distinct accounts")
+                manual_invites.active.update(
+                    (id(owner.client), owner) for owner in accounts.values()
+                )
+                stack.callback(manual_invites.active.clear)
                 await stack.enter_async_context(
                     listen(
                         state,
@@ -139,7 +143,6 @@ def _configure_broker_tools(server: FastMCP) -> None:
         "create_group",
         "create_channel",
         "subscribe_public_channel",
-        "invite_to_group",
         "join_chat_by_link",
         "import_chat_invite",
     ):

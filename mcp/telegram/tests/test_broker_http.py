@@ -102,6 +102,7 @@ def test_shared_mcp_keeps_non_quota_tools_and_gates_member_adds():
         "promote_admin",
         "wait_for_new_message",
         "export_chat_invite",
+        "invite_to_group",
     }
 
 
