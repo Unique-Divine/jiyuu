@@ -1,6 +1,17 @@
 //! Write resolved graph records to a private staging database.
 
-use rusqlite::{Connection, params, types::ValueRef};
+use rusqlite::{
+    Connection, params,
+    types::{ToSql, ToSqlOutput, ValueRef},
+};
+
+struct SqlText<'a>(&'a [u8]);
+
+impl ToSql for SqlText<'_> {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        Ok(ToSqlOutput::Borrowed(ValueRef::Text(self.0)))
+    }
+}
 
 struct GraphRecords {
     project: Vec<u8>,
@@ -38,10 +49,10 @@ fn write_graph_records(
 ) -> rusqlite::Result<()> {
     stage.pragma_update(None, "foreign_keys", true)?;
     let tx = stage.transaction()?;
-    let project = ValueRef::Text(&graph.project);
+    let project = SqlText(&graph.project);
     tx.execute(
         "INSERT INTO projects (name, indexed_at, root_path) VALUES (?1, ?2, ?3)",
-        params![project, graph.indexed_at, ValueRef::Text(&graph.root_path)],
+        params![project, graph.indexed_at, SqlText(&graph.root_path)],
     )?;
     {
         let mut insert_node = tx.prepare(
@@ -53,13 +64,13 @@ fn write_graph_records(
             insert_node.execute(params![
                 node.id,
                 project,
-                ValueRef::Text(&node.label),
-                ValueRef::Text(&node.name),
-                ValueRef::Text(&node.qualified_name),
-                ValueRef::Text(&node.file_path),
+                SqlText(&node.label),
+                SqlText(&node.name),
+                SqlText(&node.qualified_name),
+                SqlText(&node.file_path),
                 node.start_line,
                 node.end_line,
-                ValueRef::Text(&node.properties),
+                SqlText(&node.properties),
             ])?;
         }
 
@@ -73,8 +84,8 @@ fn write_graph_records(
                 project,
                 edge.source_id,
                 edge.target_id,
-                ValueRef::Text(&edge.kind),
-                ValueRef::Text(&edge.properties),
+                SqlText(&edge.kind),
+                SqlText(&edge.properties),
             ])?;
         }
     }
@@ -304,7 +315,7 @@ mod tests {
         }
         assert_eq!(
             rows(&stage, "PRAGMA integrity_check"),
-            vec![vec!["ok".to_owned().into()]]
+            vec![vec![rusqlite::types::Value::Text("ok".to_owned())]]
         );
         assert!(rows(&stage, "PRAGMA foreign_key_check").is_empty());
     }
