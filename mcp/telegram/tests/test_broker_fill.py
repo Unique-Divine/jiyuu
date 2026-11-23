@@ -8,6 +8,7 @@ import pytest
 from telethon import TelegramClient, errors, functions, types
 
 from telegram_mcp.broker import Broker, BrokerError, bridge, frame, listen
+from telegram_mcp import fill as fill_module
 from telegram_mcp.fill import Action, Journal, PoolTransport, now_ms, timestamp
 from telegram_mcp.session_store import State
 
@@ -65,6 +66,45 @@ async def test_capacity_snapshot_counts_groups_after_two_thousand_direct_dialogs
     state = fixture_state(monkeypatch, tmp_path)
     transport = PoolTransport(cast(TelegramClient, FakeClient()), state, "42", b"")
     assert (await transport.snapshot())["groupCount"] == 1
+
+
+@pytest.mark.asyncio
+async def test_capacity_scan_resumes_after_the_recorded_wait(monkeypatch, tmp_path):
+    now = 1_800_000_000_000
+    slept = []
+
+    async def sleep(seconds):
+        nonlocal now
+        slept.append(seconds)
+        now += int(seconds * 1000)
+
+    monkeypatch.setattr(fill_module, "now_ms", lambda: now)
+    monkeypatch.setattr(fill_module.asyncio, "sleep", sleep)
+
+    class Dialogs:
+        calls = 0
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            self.calls += 1
+            if self.calls == 2:
+                raise errors.FloodWaitError(request=None, capture=2)
+            if self.calls > 3:
+                raise StopAsyncIteration
+            return SimpleNamespace(entity=types.ChatForbidden(id=self.calls, title="Group"))
+
+    class FakeClient:
+        async def get_me(self):
+            return SimpleNamespace(id=42, bot=False)
+
+        def iter_dialogs(self, *, limit):
+            return Dialogs()
+
+    transport = PoolTransport(cast(TelegramClient, FakeClient()), fixture_state(monkeypatch, tmp_path), "42", b"")
+    assert (await transport.snapshot())["groupCount"] == 2
+    assert slept == [33.0]
 
 
 @pytest.mark.asyncio

@@ -47,6 +47,8 @@ MAX_RPC_SECONDS = 30
 CAPACITY_OBSERVATION_SECONDS = 30
 DIALOG_SCAN_LIMIT = 6500
 DIALOG_PAGE_SPACING_SECONDS = 1
+CAPACITY_READ_SECONDS = 155
+CAPACITY_MAX_WAIT_SECONDS = 65
 DAY_MS = 86_400_000
 ADD_GAP_MS = 1_200_000
 
@@ -343,35 +345,51 @@ class PoolTransport:
         self.photo = photo
         self.latest_budget: tuple[int, int] | None = None
         self.capacity_observation: tuple[float, int] | None = None
+        self.capacity_scan: asyncio.Task[int] | None = None
 
     async def identity(self) -> None:
         with raise_flood_waits():
             user = await self.client.get_me()
         validate_identity(user, int(self.account))
 
-    async def dialogs(self, limit: int):
+    async def dialogs(self, limit: int, *, wait_for_capacity: bool = False):
         method = "messages.getDialogs"
         group = f"method:{method}"
         if self.journal.held(group) is not None:
             raise BrokerError("account_held")
-        try:
-            dialogs = self.client.iter_dialogs(limit=limit + 1)
-            if isinstance(dialogs, RequestIter):
-                dialogs.wait_time = DIALOG_PAGE_SPACING_SECONDS
-            async for dialog in dialogs:
-                if limit == 0:
-                    raise BrokerError("group_count_unavailable")
-                limit -= 1
-                yield dialog
-        except Exception as error:
-            if self.journal.wait(method, group, error) is not None:
+        dialogs = self.client.iter_dialogs(limit=limit + 1)
+        if isinstance(dialogs, RequestIter):
+            dialogs.wait_time = DIALOG_PAGE_SPACING_SECONDS
+        iterator = aiter(dialogs)
+        deadline = monotonic() + CAPACITY_READ_SECONDS
+        wait_budget = CAPACITY_MAX_WAIT_SECONDS if wait_for_capacity else 0
+        while True:
+            try:
+                dialog = await anext(iterator)
+            except StopAsyncIteration:
+                return
+            except Exception as error:
+                if self.journal.wait(method, group, error) is None:
+                    raise
+                if isinstance(error, errors.FloodWaitError):
+                    held_until = self.journal.held(group)
+                    delay = (held_until - now_ms()) / 1000 + 1 if held_until is not None else 0
+                    if 0 < delay <= wait_budget and monotonic() + delay < deadline:
+                        # Keep the same pagination cursor after the recorded wait.
+                        await asyncio.sleep(delay)
+                        wait_budget -= delay
+                        if self.journal.held(group) is None:
+                            continue
                 raise BrokerError("account_held") from None
-            raise
+            if limit == 0:
+                raise BrokerError("group_count_unavailable")
+            limit -= 1
+            yield dialog
 
     async def count(self) -> int:
         count = 0
         with raise_flood_waits():
-            async for dialog in self.dialogs(DIALOG_SCAN_LIMIT):
+            async for dialog in self.dialogs(DIALOG_SCAN_LIMIT, wait_for_capacity=True):
                 if isinstance(
                     dialog.entity,
                     (types.Channel, types.Chat, types.ChannelForbidden, types.ChatForbidden),
@@ -382,11 +400,28 @@ class PoolTransport:
     async def group_count_for_create(self) -> int:
         if self.journal.held("method:messages.getDialogs") is not None:
             raise BrokerError("account_held")
+        return await self.read_capacity()
+
+    async def read_capacity(self) -> int:
         if self.capacity_observation is not None:
             observed, groups = self.capacity_observation
             if monotonic() - observed <= CAPACITY_OBSERVATION_SECONDS:
                 return groups
-        return await self.count()
+        if self.capacity_scan is None:
+            self.capacity_scan = asyncio.create_task(self.record_capacity())
+        scan = self.capacity_scan
+        try:
+            # A health request can time out before a read-only scan finishes.
+            # Keep its cursor so the next request does not start another scan.
+            return await asyncio.shield(scan)
+        finally:
+            if self.capacity_scan is scan and scan.done():
+                self.capacity_scan = None
+
+    async def record_capacity(self) -> int:
+        groups = await asyncio.wait_for(self.count(), CAPACITY_READ_SECONDS)
+        self.capacity_observation = (monotonic(), groups)
+        return groups
 
     async def dispatch(
         self, body: dict[str, Any], peer_connected: PeerConnected | None = None
@@ -400,8 +435,7 @@ class PoolTransport:
 
     async def snapshot(self) -> dict[str, Any]:
         await self.identity()
-        groups = await self.count()
-        self.capacity_observation = (monotonic(), groups)
+        groups = await self.read_capacity()
         observed = now_ms()
         return {
             "accountId": self.account,
