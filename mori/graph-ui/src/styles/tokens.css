@@ -1,44 +1,32 @@
-/*
- * Die Farben und der Schriftstapel des CODEATLAS-Terminals, an einer Stelle.
- *
- * Gemeinsame Farben und Schriften fuer die Terminal-Oberflaeche. Die Werte stehen hier
- * als Tokens und nicht in den Komponenten, weil das Design in W2b (Twin) und
- * W3 (Galaxy) weitere Flaechen bekommt und eine zweite Farbtabelle die erste
- * still falsch machen wuerde.
- *
- * Die Namen sind Rollen, keine Farben: --atlas-phosphor ist "der eine Akzent,
- * den das Auge sucht", nicht "gruen". Wer eine Flaeche neu baut, greift die
- * Rolle und nicht den Hexwert.
- *
- * Source, paths, and aligned technical values retain monospace. Interface
- * controls and explanations use the system font for readable navigation.
- */
+/* Shared Graph UI colors and type. Sai Perps' Dark, DarkHover, Outlines,
+ * and Brand300 tokens anchor this palette. Monaco mirrors the surface colors. */
 
 :root {
-    /* Grundflaechen: fast schwarz, die Panels nur eine Spur abgesetzt. */
-    --atlas-bg: #0a0e0d;
-    --atlas-panel: #0f1513;
-    --atlas-panel-raised: #131b18;
-    --atlas-line: #243a30;
+    /* Base and raised surfaces. */
+    --atlas-bg: #101720;
+    --atlas-panel: #16212e;
+    --atlas-panel-raised: #1b2938;
+    --atlas-line: #2e3848;
 
-    /* Der eine Akzent. Marke, aktiver Tab, Primaeraktionen, Schritt-Badges. */
-    --atlas-phosphor: #33ff99;
-    --atlas-phosphor-mute: #1f7f4c;
+    /* Brand, selection, and primary actions. */
+    --atlas-phosphor: #63c9eb;
+    --atlas-phosphor-mute: #72a8bd;
     --atlas-grid: color-mix(in srgb, var(--atlas-phosphor) 4%, transparent);
     --atlas-glow: color-mix(in srgb, var(--atlas-phosphor) 16%, transparent);
 
-    /* Gedaempftes Gruen-Grau: alles, was da ist, aber nicht ruft. */
-    --atlas-dim: #9eb5a8;
-    --atlas-fg: #dce8e1;
+    /* Text on dark surfaces. */
+    --atlas-dim: #a4b7c6;
+    --atlas-fg: #dbe7f1;
 
-    /* Sekundaerakzent: Symbolnamen, Bezeichner, Verweise. */
-    --atlas-cyan: #66d9e8;
+    /* Symbol names and references. */
+    --atlas-cyan: #9be2f1;
 
-    /* Sparsam: Fehlerpfade, "may raise", verweigerte Faehigkeiten. */
+    /* Status colors. */
     --atlas-alarm: #ff5f8f;
+    --atlas-success: #33ff99;
 
-    /* Aktive Zeile im Baum und im Editor: dunkelgruener Balken. */
-    --atlas-select: #12251d;
+    /* Active tree and editor rows. */
+    --atlas-select: #193446;
 
     --atlas-mono: ui-monospace, SFMono-Regular, "SF Mono", "JetBrains Mono",
         Menlo, Consolas, "Liberation Mono", monospace;

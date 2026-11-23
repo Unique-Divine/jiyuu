@@ -5042,8 +5042,8 @@ button.atlas-pseudocode-target:focus-visible {
     background-image:
         linear-gradient(to bottom, var(--atlas-scroll-ground) 40%, transparent),
         linear-gradient(to top, var(--atlas-scroll-ground) 40%, transparent),
-        linear-gradient(to bottom, rgba(51, 255, 153, 0.22), transparent),
-        linear-gradient(to top, rgba(51, 255, 153, 0.22), transparent);
+        linear-gradient(to bottom, color-mix(in srgb, var(--atlas-phosphor) 22%, transparent), transparent),
+        linear-gradient(to top, color-mix(in srgb, var(--atlas-phosphor) 22%, transparent), transparent);
     background-position: center top, center bottom, center top, center bottom;
     background-size: 100% 14px, 100% 14px, 100% 6px, 100% 6px;
     background-repeat: no-repeat;

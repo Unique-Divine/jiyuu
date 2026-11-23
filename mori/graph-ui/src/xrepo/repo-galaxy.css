@@ -1,12 +1,12 @@
 /* Repos workspace: its own light and dark surfaces, set by data-theme. */
 .repo-galaxy {
-    --rg-bg: #0b1311;
-    --rg-panel: #0f1714;
-    --rg-line: #27443e;
-    --rg-fg: #deece7;
-    --rg-dim: #91ada7;
-    --rg-accent: #6be7ba;
-    --rg-label-bg: rgb(11 19 17 / 82%);
+    --rg-bg: var(--atlas-bg);
+    --rg-panel: var(--atlas-panel);
+    --rg-line: var(--atlas-line);
+    --rg-fg: var(--atlas-fg);
+    --rg-dim: var(--atlas-dim);
+    --rg-accent: var(--atlas-phosphor);
+    --rg-label-bg: color-mix(in srgb, var(--rg-bg) 82%, transparent);
     display: flex;
     flex-direction: column;
     height: 100%;
@@ -17,12 +17,12 @@
 }
 
 .repo-galaxy[data-theme="light"] {
-    --rg-bg: #f5f7f6;
+    --rg-bg: #f3f8fc;
     --rg-panel: #ffffff;
-    --rg-line: #d3ddd8;
-    --rg-fg: #14211c;
-    --rg-dim: #56665f;
-    --rg-accent: #1d7a55;
+    --rg-line: #cddae4;
+    --rg-fg: #16212e;
+    --rg-dim: #4b6174;
+    --rg-accent: #037285;
     --rg-label-bg: rgb(255 255 255 / 88%);
 }
 
