@@ -21,6 +21,7 @@ REQUEST_TIMEOUT = 95
 ID = re.compile(r"[a-zA-Z0-9._:-]{1,96}")
 OPERATIONS = frozenset({"account.snapshot", "fill.observe", "fill.execute"})
 Snapshot = Callable[[], Awaitable[dict[str, Any]]]
+Fill = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 
 
 class BrokerError(Exception):
@@ -65,11 +66,20 @@ def request(data: bytes) -> dict[str, Any]:
 
 
 class Broker:
-    def __init__(self, snapshots: Mapping[str, Snapshot]):
+    def __init__(self, snapshots: Mapping[str, Snapshot], fills: Mapping[str, Fill] | None = None):
         self.snapshots = snapshots
+        self.fills = fills or {}
         self.locks = {account: asyncio.Lock() for account in snapshots}
+        self.handlers: set[asyncio.Task] = set()
+
+    async def drain(self) -> None:
+        if self.handlers:
+            await asyncio.gather(*self.handlers, return_exceptions=True)
 
     async def handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        active = asyncio.current_task()
+        if active is not None:
+            self.handlers.add(active)
         request_id = None
         reply = None
         try:
@@ -81,13 +91,18 @@ class Broker:
             account = body["accountId"]
             if account not in self.snapshots:
                 raise BrokerError("account_unavailable")
-            if body["op"] != "account.snapshot":
-                raise BrokerError("operation_unavailable")
             lock = self.locks[account]
             if lock.locked():
                 raise BrokerError("account_busy")
             async with lock:
-                result = await asyncio.wait_for(self.snapshots[account](), REQUEST_TIMEOUT)
+                if body["op"] == "account.snapshot":
+                    requested = self.snapshots[account]()
+                else:
+                    fill = self.fills.get(account)
+                    if fill is None:
+                        raise BrokerError("operation_unavailable")
+                    requested = fill(body)
+                result = await asyncio.wait_for(requested, REQUEST_TIMEOUT)
             reply = {"v": 1, "id": request_id, "result": result}
         except BrokerError as error:
             reply = {"v": 1, "id": request_id, "error": {"code": error.code}}
@@ -103,9 +118,12 @@ class Broker:
             finally:
                 writer.close()
                 try:
-                    await writer.wait_closed()
-                except OSError:
+                    await asyncio.wait_for(writer.wait_closed(), READ_TIMEOUT)
+                except (OSError, asyncio.TimeoutError):
                     pass
+                finally:
+                    if active is not None:
+                        self.handlers.discard(active)
 
 
 def same_user(writer: asyncio.StreamWriter) -> bool:
@@ -138,7 +156,10 @@ async def listen(state: State, broker: Broker):
             async with server:
                 yield
         finally:
-            state.socket.unlink(missing_ok=True)
+            try:
+                await broker.drain()
+            finally:
+                state.socket.unlink(missing_ok=True)
 
 
 async def bridge(state: State, raw: bytes) -> bytes:

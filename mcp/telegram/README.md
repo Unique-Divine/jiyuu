@@ -261,3 +261,35 @@ Issues and changes are maintained in
 do not imply an upstream security review. The version continues from upstream
 2.0.1. Table `[tool.jiyuu.upstream]` in file `pyproject.toml` records that
 baseline.
+
+## Share an account with tg-sai
+
+The local broker lets Telegram MCP and a managed fill worker use the same
+Telethon connection. It is opt-in and currently requires Linux Unix sockets.
+The ordinary MCP entrypoint and environment-based profiles still work.
+
+1. Install Boku's `local-secret-store` executable on `PATH`. Supply one
+   existing Telethon profile through a private stdin pipe to
+   `python -m telegram_mcp.session_store PROFILE`. The profile object has
+   `apiId`, `apiHash`, `sessionString`, and numeric `userId` fields. The
+   importer checks the Telegram user ID before saving the entry.
+2. Stop other processes using that saved authorization. Configure your
+   standard MCP runner with `TELEGRAM_STORED_ACCOUNTS=PROFILE` and
+   `TELEGRAM_BROKER=1`. Separate multiple profile names with commas.
+   Broker mode exposes the MCP's read-only tools and incoming message tools.
+   The broker handles the managed fill writes and shares one add journal
+   across those writes. Keep this profile's other adds out of Telegram
+   clients that do not share that journal.
+3. Point the managed worker at
+   `${BOKU_HOME:-$HOME/.boku}/telegram-mcp/run/broker-v1.sock`. The socket
+   accepts the local user's UID. For a worker on another host, forward that
+   Unix socket through SSH. Use the host that already holds the session.
+   The operator can also run `python -m telegram_mcp.broker bridge` on
+   that host to relay one versioned request through stdin and stdout.
+
+The encrypted entries and their key live under `telegram-mcp/secrets/`.
+Keep that directory across reinstalls. MCP logs go to `telegram-mcp/logs/`
+and the socket, lock files, and fill journal go to `telegram-mcp/run/`.
+The broker stops with the MCP process. A second local process cannot use
+the same saved authorization through this setup. The designated custody
+account remains on its dedicated service.

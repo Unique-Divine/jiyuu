@@ -52,6 +52,9 @@ proxy = [
 py-modules = ["main", "sanitize", "session_string_generator"]
 packages = ["telegram_mcp", "telegram_mcp.tools"]
 
+[tool.setuptools.package-data]
+telegram_mcp = ["sai-chat-photo.jpg"]
+
 [project.scripts]
 telegram-mcp = "main:main"
 uniquedivine-telegram-mcp = "main:main"

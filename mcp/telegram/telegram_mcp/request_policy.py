@@ -61,6 +61,18 @@ _flood_sleep_override: ContextVar[Optional[int]] = ContextVar(
 )
 
 
+_single_request: ContextVar[bool] = ContextVar("telegram_mcp_single_request", default=False)
+
+
+@contextlib.contextmanager
+def single_request() -> Generator[None, None, None]:
+    token = _single_request.set(True)
+    try:
+        yield
+    finally:
+        _single_request.reset(token)
+
+
 class PolicyTelegramClient(TelegramClient):
     """TelegramClient whose flood-sleep threshold a task can lower to 0.
 
@@ -68,6 +80,14 @@ class PolicyTelegramClient(TelegramClient):
     request, so a context variable scopes the override to that task without
     affecting concurrent tool calls on the same client.
     """
+
+    @property
+    def _request_retries(self) -> int:
+        return 0 if _single_request.get() else self._configured_request_retries
+
+    @_request_retries.setter
+    def _request_retries(self, value: int) -> None:
+        self._configured_request_retries = value
 
     @property
     def flood_sleep_threshold(self):

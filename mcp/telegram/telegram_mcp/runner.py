@@ -8,10 +8,10 @@ except UnsafeInstallationError as exc:
     raise SystemExit(str(exc)) from None
 
 from contextlib import AsyncExitStack
-from datetime import datetime, timezone
-from functools import partial
+from importlib.resources import files as resource_files
 
-from telegram_mcp.broker import Broker, BrokerError, listen
+from telegram_mcp.broker import Broker, listen
+from telegram_mcp.fill import PoolTransport
 from telegram_mcp.session_store import lock_authorization, validate_identity
 
 from telegram_mcp import runtime as _runtime
@@ -32,38 +32,6 @@ async def _connect_authorized_client(label, client) -> None:
         "TELEGRAM_SESSION_STRING or TELEGRAM_SESSION_STRING_<LABEL> in .env. "
         "For existing file sessions, run the login outside the MCP server first."
     )
-
-
-async def _snapshot(label: str) -> dict:
-    client = clients[label]
-    profile = _runtime.STORED_PROFILES[label]
-    with raise_flood_waits():
-        user = await client.get_me()
-        if not isinstance(user, User):
-            raise BrokerError("account_unavailable")
-        validate_identity(user, profile.user_id)
-        dialogs = client.iter_dialogs(limit=2001)
-        count = 0
-        async for index, dialog in _enumerate(dialogs):
-            if index == 2000:
-                raise BrokerError("group_count_unavailable")
-            if isinstance(
-                dialog.entity, (Chat, Channel, types.ChatForbidden, types.ChannelForbidden)
-            ):
-                count += 1
-    return {
-        "accountId": str(profile.user_id),
-        "groupCount": count,
-        "observedAt": datetime.now(timezone.utc).isoformat(),
-        "budgetAvailable": False,
-    }
-
-
-async def _enumerate(values):
-    index = 0
-    async for value in values:
-        yield index, value
-        index += 1
 
 
 async def _main() -> None:
@@ -87,13 +55,24 @@ async def _main() -> None:
                 for label, profile in _runtime.STORED_PROFILES.items():
                     validate_identity(await clients[label].get_me(), profile.user_id)
             if broker_enabled and state is not None:
-                snapshots = {
-                    str(profile.user_id): partial(_snapshot, label)
+                photo = resource_files("telegram_mcp").joinpath("sai-chat-photo.jpg").read_bytes()
+                accounts = {
+                    str(profile.user_id): PoolTransport(
+                        clients[label], state, str(profile.user_id), photo
+                    )
                     for label, profile in _runtime.STORED_PROFILES.items()
                 }
-                if len(snapshots) != len(_runtime.STORED_PROFILES):
+                if len(accounts) != len(_runtime.STORED_PROFILES):
                     raise StoreError("Telegram broker profiles must identify distinct accounts")
-                await stack.enter_async_context(listen(state, Broker(snapshots)))
+                await stack.enter_async_context(
+                    listen(
+                        state,
+                        Broker(
+                            {key: account.snapshot for key, account in accounts.items()},
+                            {key: account.dispatch for key, account in accounts.items()},
+                        ),
+                    )
+                )
 
             async def _warm_caches() -> None:
                 try:
@@ -131,7 +110,9 @@ async def _cancel_cache_warm(task: asyncio.Task) -> None:
 
 def main() -> None:
     _configure_allowed_roots_from_cli(sys.argv[1:])
-    _runtime._apply_exposed_tools_mode()
+    _runtime._apply_exposed_tools_mode(
+        mode="read-only" if os.environ.get("TELEGRAM_BROKER") == "1" else None
+    )
     # Read the latest release in the background; the first tool result after
     # it lands carries a one-line notice if this version is behind.
     server_info.update_notifier().start()
