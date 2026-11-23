@@ -2,20 +2,18 @@
 
 ## Install the Skill
 
-Install `ai-skills/sai-deals` from [Jiyuu](https://github.com/Unique-Divine/jiyuu/tree/main/ai-skills/sai-deals).
-Use the reviewed Jiyuu commit SHA as the source ref. Preserve the entire
-directory so the workflow and example links resolve. On Linux and macOS,
-Codex discovers the user skill under `~/.agents/skills/sai-deals`. Other agent
-clients can use the same directory in their configured skill location.
+Install the [public `sai-deals` skill](https://github.com/Unique-Divine/jiyuu/tree/main/ai-skills/sai-deals)
+from Jiyuu's `main` branch. Give your agent's skill installer the directory
+link, or copy the complete `ai-skills/sai-deals` directory into the agent's
+skills directory. The workflow and example files belong with `SKILL.md`.
 
-For a manual Codex install, set `SAI_DEALS_SKILL_COMMIT` to the reviewed
-40-character commit SHA. This command stages that commit's skill in a temporary
-directory. Move an existing skill out of the destination before replacing it.
+On Linux and macOS, this command installs the skill for Codex under
+`~/.agents/skills/sai-deals`. Move an existing installation aside before
+replacing it.
 
 ```bash
 (
   set -eu
-  : "${SAI_DEALS_SKILL_COMMIT:?Set the reviewed Jiyuu commit SHA}"
   destination="$HOME/.agents/skills/sai-deals"
   if [ -e "$destination" ] || [ -L "$destination" ]; then
     printf 'Skill location already exists: %s\n' "$destination" >&2
@@ -23,8 +21,8 @@ directory. Move an existing skill out of the destination before replacing it.
   fi
   stage="$(mktemp -d)"
   trap 'rm -rf -- "$stage"' EXIT
-  git clone --quiet --no-checkout https://github.com/Unique-Divine/jiyuu.git "$stage/repo"
-  git -C "$stage/repo" checkout --quiet --detach "$SAI_DEALS_SKILL_COMMIT"
+  git clone --quiet --depth 1 --branch main \
+    https://github.com/Unique-Divine/jiyuu.git "$stage/repo"
   mkdir -p "$HOME/.agents/skills"
   cp -R "$stage/repo/ai-skills/sai-deals" "$destination"
 )
@@ -32,23 +30,22 @@ directory. Move an existing skill out of the destination before replacing it.
 
 ## Choose a Reader
 
-Use [Deal Desk GraphQL](graphql.md) with `curl` and `jq`. For a native CLI,
-use a `sai-ops` build that supports reader mode. Check the published
-[Jiyuu releases](https://github.com/Unique-Divine/jiyuu/releases) when the
-`sai-ops/v0.1.0` release is available. Use the named release and its
-`install-sai-ops.sh` and `SHA256SUMS` assets. The installer selects and
-verifies the platform archive. From a directory containing the reviewed
-installer, run these commands in your shell:
+Use [Deal Desk GraphQL](graphql.md) with `curl` and `jq` without a native
+install. To use the `sai-ops` CLI, open the `sai-ops/v0.1.0` release when it
+appears on [Jiyuu Releases](https://github.com/Unique-Divine/jiyuu/releases).
+Download the `install-sai-ops.sh` asset and run the commands below in its
+download directory. The installer fetches the release's checksum manifest
+and verifies the archive for your platform.
 
 ```sh
-sh install-sai-ops.sh 0.1.0
+sh ./install-sai-ops.sh 0.1.0
 export PATH="$HOME/.local/bin:$PATH"
 sai-ops --version
 sai-ops --reader --help
 ```
 
-Add the directory to your shell startup file if you want it in future
-sessions. Use GraphQL if you have no verified reader binary.
+Add `~/.local/bin` to your shell startup file to keep `sai-ops` on `PATH`
+in future sessions.
 
 ## Connect the Agent
 
