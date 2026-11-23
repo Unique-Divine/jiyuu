@@ -402,6 +402,32 @@ typedef cbm_mcp_coverage_verdict_t (*cbm_mcp_coverage_verdict_reader_fn)(
     const cbm_mcp_coverage_path_request_t *request);
 void cbm_mcp_set_coverage_verdict_reader(cbm_mcp_coverage_verdict_reader_fn reader);
 
+typedef struct {
+    int node_start;
+    int node_end;
+    int requested_start;
+    int max_lines;
+    int max_output_tokens;
+    bool explicit_full;
+    bool explicit_outline;
+    bool container;
+} cbm_mcp_snippet_window_request_t;
+
+typedef struct {
+    int original_start;
+    int original_end;
+    int start;
+    int end;
+    int max_output_tokens;
+    bool outline;
+    bool clipped;
+} cbm_mcp_snippet_window_t;
+
+typedef cbm_mcp_snippet_window_t (*cbm_mcp_snippet_window_planner_fn)(
+    const cbm_mcp_snippet_window_request_t *request);
+/* Register before request threads start. */
+void cbm_mcp_set_snippet_window_planner(cbm_mcp_snippet_window_planner_fn planner);
+
 /* ── Supervised background index (RSS isolation, #832) ────────── */
 
 /* #1300: the explicit error response for a worker that exited cleanly without

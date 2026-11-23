@@ -15104,35 +15104,44 @@ static void file_doc_candidates_tree(cbm_sb_t *sb, cbm_store_t *store, const cha
     yyjson_mut_doc_free(doc);
 }
 
-static char *build_snippet_response(cbm_mcp_server_t *srv, cbm_node_t *node,
-                                    const char *match_method, bool include_neighbors,
-                                    cbm_node_t *alternatives, int alt_count, const char *args) {
-    char *root_path = get_project_root(srv, node->project);
+static cbm_mcp_snippet_window_planner_fn snippet_window_planner;
 
-    int original_start = node->start_line > 0 ? node->start_line : SKIP_ONE;
-    /* A one-line symbol legitimately has end == start. Treat only missing or
-     * inverted end metadata as unknown; expanding a valid one-line node by 50
-     * lines both wastes output and lies about the continuation range. */
-    int original_end =
-        node->end_line >= original_start ? node->end_line : original_start + SNIPPET_DEFAULT_LINES;
-    char *source_mode = cbm_mcp_get_string_arg(args, "source_mode");
-    bool explicit_full = source_mode && strcmp(source_mode, "full") == 0;
-    bool explicit_outline = source_mode && strcmp(source_mode, "outline") == 0;
-    bool container =
-        node->label && (strcmp(node->label, "File") == 0 || strcmp(node->label, "Module") == 0 ||
-                        strcmp(node->label, "Class") == 0 || strcmp(node->label, "Interface") == 0);
-    bool outline =
-        explicit_outline || (!explicit_full && container && original_end - original_start >= 200);
-    free(source_mode);
+void cbm_mcp_set_snippet_window_planner(cbm_mcp_snippet_window_planner_fn planner) {
+    snippet_window_planner = planner;
+}
 
-    int start = outline ? original_start : cbm_mcp_get_int_arg(args, "start_line", original_start);
-    if (start < original_start || start > original_end) {
+static cbm_mcp_snippet_window_t snippet_window(const cbm_mcp_snippet_window_request_t *request) {
+    if (snippet_window_planner) {
+        cbm_mcp_snippet_window_t window = snippet_window_planner(request);
+        cbm_log_debug("get_code_snippet.window", "backend", "rust");
+        return window;
+    }
+    int original_start = request->node_start > 0 ? request->node_start : SKIP_ONE;
+    /* A one-line node has a valid end equal to its start. */
+    int original_end = request->node_end;
+    if (original_end < original_start) {
+        original_end = original_start > INT_MAX - SNIPPET_DEFAULT_LINES
+                           ? INT_MAX
+                           : original_start + SNIPPET_DEFAULT_LINES;
+    }
+    bool outline = request->explicit_outline ||
+                   (!request->explicit_full && request->container &&
+                    original_end - original_start >= 200);
+    int start = request->requested_start;
+    if (outline || start < original_start || start > original_end) {
         start = original_start;
     }
     int end = original_end;
-    int max_lines = cbm_mcp_get_int_arg(args, "max_lines", 0);
-    int max_output_tokens =
-        cbm_mcp_get_int_arg(args, "max_output_tokens", explicit_full ? 0 : 2500);
+    int max_lines = request->max_lines;
+    if (max_lines <= 0 || max_lines > MCP_SNIPPET_MAX_LINES) {
+        max_lines = MCP_SNIPPET_MAX_LINES;
+    }
+    /* Cap whole-file reads. Compare the span before adding to avoid overflowing
+     * the line number. */
+    if (!outline && end - start >= max_lines) {
+        end = start + (max_lines - 1);
+    }
+    int max_output_tokens = request->max_output_tokens;
     if (max_output_tokens < 0) {
         max_output_tokens = 0;
     } else if (max_output_tokens > 0 && max_output_tokens < 128) {
@@ -15140,25 +15149,43 @@ static char *build_snippet_response(cbm_mcp_server_t *srv, cbm_node_t *node,
     } else if (max_output_tokens > 1000000) {
         max_output_tokens = 1000000;
     }
-    if (max_lines > MCP_SNIPPET_MAX_LINES) {
-        max_lines = MCP_SNIPPET_MAX_LINES;
-    }
-    if (!outline && max_lines > 0 && start + max_lines - 1 < end) {
-        end = start + max_lines - 1;
-    }
-    /* Context-bomb guard: a structural node (Module/File) spans its whole file,
-     * so an unclipped read returned the ENTIRE source — a field-eval agent that
-     * fell back to a Module snippet pulled 400KB in one call. Cap the line span
-     * (far above any real function) and flag it; the exact range is still in
-     * start_line/end_line for a targeted re-read. */
-    bool snippet_clipped = false;
-    if (!outline && end - start + 1 > MCP_SNIPPET_MAX_LINES) {
-        end = start + MCP_SNIPPET_MAX_LINES - 1;
-        snippet_clipped = true;
-    }
-    if (!outline && end < original_end) {
-        snippet_clipped = true;
-    }
+    return (cbm_mcp_snippet_window_t){.original_start = original_start,
+                                      .original_end = original_end,
+                                      .start = start,
+                                      .end = end,
+                                      .max_output_tokens = max_output_tokens,
+                                      .outline = outline,
+                                      .clipped = end < original_end};
+}
+
+static char *build_snippet_response(cbm_mcp_server_t *srv, cbm_node_t *node,
+                                    const char *match_method, bool include_neighbors,
+                                    cbm_node_t *alternatives, int alt_count, const char *args) {
+    char *root_path = get_project_root(srv, node->project);
+
+    char *source_mode = cbm_mcp_get_string_arg(args, "source_mode");
+    bool explicit_full = source_mode && strcmp(source_mode, "full") == 0;
+    cbm_mcp_snippet_window_request_t request = {
+        .node_start = node->start_line,
+        .node_end = node->end_line,
+        .requested_start = cbm_mcp_get_int_arg(args, "start_line", 0),
+        .max_lines = cbm_mcp_get_int_arg(args, "max_lines", 0),
+        .max_output_tokens = cbm_mcp_get_int_arg(args, "max_output_tokens", explicit_full ? 0 : 2500),
+        .explicit_full = explicit_full,
+        .explicit_outline = source_mode && strcmp(source_mode, "outline") == 0,
+        .container = node->label &&
+                     (strcmp(node->label, "File") == 0 || strcmp(node->label, "Module") == 0 ||
+                      strcmp(node->label, "Class") == 0 || strcmp(node->label, "Interface") == 0),
+    };
+    free(source_mode);
+    cbm_mcp_snippet_window_t window = snippet_window(&request);
+    int original_start = window.original_start;
+    int original_end = window.original_end;
+    int start = window.start;
+    int end = window.end;
+    int max_output_tokens = window.max_output_tokens;
+    bool outline = window.outline;
+    bool snippet_clipped = window.clipped;
     /* #2585: start/end are indexed line numbers. Slice the file only when its
      * bytes are the indexed bytes; otherwise the same range can hold another
      * symbol's code. The file is read once: the slice comes from the same

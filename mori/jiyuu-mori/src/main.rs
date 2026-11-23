@@ -25,6 +25,9 @@ mod search;
 #[cfg(feature = "c-backend")]
 mod path_verdict;
 
+#[cfg(all(feature = "c-backend", not(test)))]
+mod snippet_window;
+
 #[cfg(any(feature = "c-backend", test))]
 mod stdio;
 

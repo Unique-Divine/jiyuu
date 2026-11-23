@@ -436,7 +436,18 @@ fn property(json: &str, name: &str) -> rusqlite::Result<String> {
 pub(crate) struct ResultRows {
     pub(crate) columns: Vec<String>,
     pub(crate) rows: Vec<Vec<String>>,
-    pub(crate) truncated: bool,
+}
+
+#[derive(Debug)]
+pub(crate) enum ExecutionError {
+    Storage(rusqlite::Error),
+    RowCeiling,
+}
+
+impl From<rusqlite::Error> for ExecutionError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Storage(error)
+    }
 }
 
 impl Query<'_> {
@@ -444,9 +455,18 @@ impl Query<'_> {
         &self,
         db: &Path,
         project: &str,
-    ) -> rusqlite::Result<ResultRows> {
+    ) -> Result<ResultRows, ExecutionError> {
         let connection =
             Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        self.execute_on(&connection, project)
+    }
+
+    /// Read from the graph and snapshot the caller has already selected.
+    pub(crate) fn execute_on(
+        &self,
+        connection: &Connection,
+        project: &str,
+    ) -> Result<ResultRows, ExecutionError> {
         let reversed =
             self.hops.len() == 1 && self.selectivity(1) > self.selectivity(0);
         let start_index = usize::from(reversed);
@@ -466,9 +486,8 @@ impl Query<'_> {
         } else {
             statement.query([project])?
         };
-        let mut adjacency = Adjacency::new(&connection)?;
+        let mut adjacency = Adjacency::new(connection)?;
         let mut rows = Vec::new();
-        let mut truncated = false;
         let limit = self.limit.unwrap_or(ENGINE_LIMIT);
         'starts: while let Some(row) = start_nodes.next()? {
             let start = Node::read(row, 0)?;
@@ -487,13 +506,15 @@ impl Query<'_> {
                             && self.conditions(&[&start, &next, &last])?
                         {
                             if rows.len() == limit {
-                                truncated = self.limit.is_none();
                                 break 'starts;
                             }
                             rows.push(self.project(
                                 &[&start, &next, &last],
                                 &[&edge, &last_edge],
                             )?);
+                            if rows.len() == ENGINE_LIMIT {
+                                return Err(ExecutionError::RowCeiling);
+                            }
                         }
                     }
                 } else {
@@ -504,10 +525,12 @@ impl Query<'_> {
                     };
                     if self.conditions(&nodes)? {
                         if rows.len() == limit {
-                            truncated = self.limit.is_none();
                             break 'starts;
                         }
                         rows.push(self.project(&nodes, &[&edge])?);
+                        if rows.len() == ENGINE_LIMIT {
+                            return Err(ExecutionError::RowCeiling);
+                        }
                     }
                 }
             }
@@ -517,11 +540,7 @@ impl Query<'_> {
             .iter()
             .map(|column| column.name.clone())
             .collect();
-        Ok(ResultRows {
-            columns,
-            rows,
-            truncated,
-        })
+        Ok(ResultRows { columns, rows })
     }
 
     fn selectivity(&self, index: usize) -> u8 {
