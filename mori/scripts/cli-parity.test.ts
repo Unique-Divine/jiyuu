@@ -151,6 +151,7 @@ describe("invocations", () => {
       "cli query_graph",
       "cli trace_path helper inbound",
       "cli trace_path Twice outbound",
+      "cli trace_path with repeated and literal edge types",
       "cli get_architecture",
       "hook-augment",
       "mcp stdio initialization and graph reads",
@@ -201,7 +202,7 @@ describe("runParity with stand-in binaries", () => {
     await withDir(async (dir) => {
       const results = await runParity(await setup(dir))
       expect(results.filter((r) => !passed(r))).toEqual([])
-      expect(results.length).toBe(12)
+      expect(results.length).toBe(13)
     })
   })
 
@@ -209,7 +210,7 @@ describe("runParity with stand-in binaries", () => {
     await withDir(async (dir) => {
       const opts = await setup(dir, {}, { extra: 'echo "only in mori" >&2' })
       const failed = (await runParity(opts)).filter((r) => !r.same)
-      expect(failed.length).toBe(10)
+      expect(failed.length).toBe(11)
       expect(failed[0]!.diff).toContain("+mori: only in mori")
     })
   })

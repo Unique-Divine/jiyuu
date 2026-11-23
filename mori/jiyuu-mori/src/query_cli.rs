@@ -29,7 +29,7 @@ fn build_args<'a>(
     let schema: Value = serde_json::from_str(schema).ok()?;
     let properties = schema.get("properties")?.as_object()?;
     let mut flags = flags.peekable();
-    let mut args = vec![b'{'];
+    let mut fields: Vec<(String, Value)> = Vec::new();
     while let Some(flag) = flags.next() {
         if flag == "--" {
             break;
@@ -45,6 +45,33 @@ fn build_args<'a>(
         let key = key.replace('-', "_");
         let kind = properties.get(&key)?.get("type")?.as_str()?;
         let text = value.unwrap_or_default();
+        if kind == "array" {
+            let value = value?;
+            let elements = if value.starts_with('[') {
+                let Value::Array(elements) = serde_json::from_str(value).ok()?
+                else {
+                    return None;
+                };
+                // C copies array strings as NUL-terminated text. Leave
+                // other JSON types and embedded NULs with the native parser.
+                if !elements.iter().all(|element| {
+                    element.as_str().is_some_and(|text| !text.contains('\0'))
+                }) {
+                    return None;
+                }
+                elements
+            } else {
+                vec![Value::from(value)]
+            };
+            if let Some((_, Value::Array(existing))) =
+                fields.iter_mut().find(|(name, _)| *name == key)
+            {
+                existing.extend(elements);
+            } else {
+                fields.push((key, Value::Array(elements)));
+            }
+            continue;
+        }
         let typed_value = match kind {
             // A bare C boolean flag is true. An explicit empty value is false.
             "boolean" => {
@@ -60,12 +87,17 @@ fn build_args<'a>(
 
         // The legacy CLI emits repeated keys in argv order. A JSON map would
         // silently drop duplicates before the daemon receives the request.
+        fields.push((key, typed_value));
+    }
+
+    let mut args = vec![b'{'];
+    for (key, value) in fields {
         if args.len() > 1 {
             args.push(b',');
         }
         serde_json::to_writer(&mut args, &key).ok()?;
         args.push(b':');
-        serde_json::to_writer(&mut args, &typed_value).ok()?;
+        serde_json::to_writer(&mut args, &value).ok()?;
     }
     args.push(b'}');
     Some(args)
@@ -201,9 +233,31 @@ mod tests {
     }
 
     #[test]
-    fn leaves_diagnostics_and_unsupported_types_to_c() {
+    fn leaves_diagnostics_and_unhandled_array_values_to_c() {
         assert_eq!(parse(&["--max-row=1"]), None);
         assert_eq!(parse(&["--project=desk", "unexpected"]), None);
-        assert_eq!(parse(&["--future-field=[]"]), None);
+        for flag in ["--future-field", "--future-field=[", "--future-field=[1]"]
+        {
+            assert_eq!(parse(&[flag]), None, "{flag}");
+        }
+    }
+
+    #[test]
+    fn combines_repeated_array_flags_in_input_order() {
+        assert_eq!(
+            parse(&[
+                "--future-field=[]",
+                "--project=desk",
+                "--future_field",
+                "first",
+                r#"--future-field=["second","third"]"#,
+                "--future-field=",
+                "--project=other",
+            ]),
+            Some(
+                r#"{"future_field":["first","second","third",""],"project":"desk","project":"other"}"#
+                    .into()
+            ),
+        );
     }
 }
