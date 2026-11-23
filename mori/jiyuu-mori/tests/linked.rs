@@ -512,10 +512,10 @@ fn mcp_tools_call_params_and_ids_match_c_through_daemon() {
     ]
     .join("\n");
 
-    let forwarded = |bin: &Path, side: &str| {
+    let forwarded = |bin: &Path, side: &str, rust: bool| {
         let scratch = Scratch::new(side);
         let start = command_in(bin, &scratch)
-            .env("CBM_LOG_LEVEL", "info")
+            .env("CBM_LOG_LEVEL", "debug")
             .args(["daemon", "start"])
             .output()
             .unwrap();
@@ -537,11 +537,19 @@ fn mcp_tools_call_params_and_ids_match_c_through_daemon() {
             9,
             "{side} daemon must handle each request with an ID exactly once",
         );
+        assert_eq!(
+            log.lines()
+                .filter(|line| line
+                    .contains("msg=mcp.tools_call.decode backend=rust"))
+                .count(),
+            if rust { 9 } else { 0 },
+            "{side} decoder must handle each request with an ID exactly once",
+        );
         output.stdout
     };
 
-    let reference = forwarded(&c_binary(), "c");
-    let linked = forwarded(Path::new(MORI), "rs");
+    let reference = forwarded(&c_binary(), "c", false);
+    let linked = forwarded(Path::new(MORI), "rs", true);
     assert_eq!(linked, reference);
     let replies: Vec<serde_json::Value> = std::str::from_utf8(&linked)
         .unwrap()
