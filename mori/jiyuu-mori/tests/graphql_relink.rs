@@ -678,7 +678,8 @@ fn linear_cypher_stops_inside_high_fanout_adjacency() {
         checks.set(checks.get() + 1);
         checks.get() == 2
     };
-    let mut budget = ExecutionBudget::new(&|| start, &cancelled);
+    let now = || start;
+    let mut budget = ExecutionBudget::new(&now, &cancelled);
     assert!(matches!(
         query.execute_with_budget(&db, CLIENT, &mut budget),
         Err(ExecutionError::Cancelled)
