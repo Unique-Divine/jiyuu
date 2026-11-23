@@ -62,6 +62,74 @@ class ParityTest(unittest.TestCase):
       self.assertEqual(side.env()["CBM_PROFILE"], "1")
       self.assertNotIn("MORI_IMPL_GRAPHQL", side.env())
 
+  def test_path_parity_uses_one_worker_on_side_a(self) -> None:
+    sides = [parity.Side(n, "/bin/true", self.tmp + "-cache-" + n,
+                         self.tmp + "-rt-" + n) for n in ("a", "b")]
+    with (patch.object(parity, "make_sides", return_value=sides),
+          patch.object(parity, "finish", return_value=0)):
+      work = self.tmp + "/work"
+      with redirect_stderr(io.StringIO()):
+        args = argparse.Namespace(allowlist=[], bin_a="/bin/true", bin_b="/bin/true",
+                                  work=work, rt_prefix=work + "-rt", scratch_root=self.roots,
+                                  export_a="sql", export_b="sql", graphql_a=None, graphql_b=None,
+                                  verify_export=False, profile=True, path_parity=True)
+        self.assertEqual(parity.run([], None, 0, args, {}), 0)
+      self.assertEqual(sides[0].env()["CBM_WORKERS"], "1")
+      with patch.dict(os.environ, {"CBM_WORKERS": "2"}):
+        self.assertNotIn("CBM_WORKERS", sides[1].env())
+
+  def test_path_parity_checks_the_observed_worker_paths(self) -> None:
+    side = parity.Side("b", "/bin/true", self.tmp, self.tmp)
+    log_dir = os.path.join(side.cache, "logs")
+    os.makedirs(log_dir)
+    before = os.path.join(log_dir, ".worker-log-before")
+    with open(before, "w", encoding="utf-8") as f:
+      f.write("level=info msg=pipeline.mode mode=sequential files=10\n")
+    previous = parity.worker_log_paths(side)
+    after = os.path.join(log_dir, ".worker-log-after")
+    with open(after, "w", encoding="utf-8") as f:
+      f.write("level=info msg=pipeline.mode mode=parallel workers=12 files=62\n")
+    observed = parity.observe_worker_paths(side, previous)
+    self.assertEqual(observed, [{"mode": "parallel", "files": 62}])
+
+    index = {"a": {"worker_paths": [{"mode": "sequential", "files": 62}]},
+             "b": {"worker_paths": observed}}
+    self.assertIsNone(parity.verify_worker_paths(index, fixture=True))
+    index["b"]["worker_paths"] = [{"mode": "sequential", "files": 10}]
+    self.assertIsNone(parity.verify_worker_paths(index, fixture=False))
+    self.assertIn("side b expected parallel",
+                  parity.verify_worker_paths(index, fixture=True) or "")
+    index["b"]["worker_paths"] = [{"mode": "sequential", "files": 62}]
+    self.assertIn("side b expected parallel",
+                  parity.verify_worker_paths(index, fixture=False) or "")
+
+  def test_path_parity_requires_a_parallel_repository(self) -> None:
+    def compare(sides, name, root, entries, retries):
+      for side in sides:
+        log_dir = os.path.join(side.cache, "logs")
+        os.makedirs(log_dir)
+        with open(os.path.join(log_dir, ".worker-log-fixture"), "w",
+                  encoding="utf-8") as f:
+          f.write("level=info msg=pipeline.mode mode=sequential files=10\n")
+      return parity.RepoResult(name, root)
+
+    repo = parity.corpus.Repo("small", None, None, None, None)
+    with (patch.object(parity.corpus, "load", return_value=[repo]),
+          patch.object(parity.corpus, "verify", return_value=parity.corpus.Check(
+            "small", True, False, [])),
+          patch.object(parity, "compare_repo", side_effect=compare),
+          redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO())):
+      work = self.tmp + "/work"
+      self.assertEqual(parity.main([
+        "run", "--path-parity", "--work", work, "--rt-prefix", work + "-rt",
+        "--scratch-root", self.tmp, "--bin-a", sys.executable, "--bin-b", sys.executable,
+      ]), 2)
+    with open(work + "/report.json", encoding="utf-8") as f:
+      report = json.load(f)
+    self.assertIn("requires at least one observed parallel", report["worker_path_error"])
+    self.assertEqual(report["repos"][0]["index"]["b"]["worker_paths"],
+                     [{"mode": "sequential", "files": 10}])
+
   def test_graphql_modes_are_reported_only_when_requested(self) -> None:
     for label, flags, requested in (
         ("default", [], None),
