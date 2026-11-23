@@ -286,6 +286,16 @@ def smoke(binary: Path, root: Path) -> None:
         daemon("stop")
 
 
+def project_databases(cache: Path) -> list[str]:
+    # The daemon opens internal SQLite files before any project publishes.
+    return sorted(
+        path.name
+        for path in cache.glob("*.db")
+        if path.name not in {"_config.db", "_cross_repo.db", "activity.db"}
+        and not path.name.endswith(".adr.db")
+    )
+
+
 def smoke_cold_join(binary: Path, root: Path, *, use_path_name: bool = False) -> None:
     env = fixture_environment(root)
     checkout_path = root / "checkout"
@@ -311,7 +321,7 @@ def smoke_cold_join(binary: Path, root: Path, *, use_path_name: bool = False) ->
     index_command = [
         str(binary),
         "cli",
-        "--json",
+        "--quiet",
         "index_repository",
         "--repo-path",
         str(checkout_path),
@@ -328,24 +338,27 @@ def smoke_cold_join(binary: Path, root: Path, *, use_path_name: bool = False) ->
         wait_for(
             "the first worker's project lease (requires TEST_SEAMS=1)", worker_has_lease
         )
-        assert not list(cache.glob("*.db")), (
-            "The cold graph published before the request"
+        databases = project_databases(cache)
+        assert not databases, (
+            f"Unexpected graph databases before the request: {databases}"
         )
 
         status = json.loads(run([*index_command, "--status", "true"], env, root))
-        assert status["project"] == project, status
-        assert status["state"] == "running", status
+        assert status.get("project") == project, status
+        assert status.get("state") == "running", status
 
         result = json.loads(run([*index_command, "--async", "true"], env, root))
-        assert result["project"] == project, result
-        assert result["joined"] is True, result
+        assert result.get("project") == project, result
+        assert result.get("joined") is True, result
 
         log = (cache / "logs/cbm-daemon.log").read_text(encoding="utf-8")
         starts = [
             line for line in log.splitlines() if "daemon.index.worker_budget" in line
         ]
         assert len(starts) == 1 and f"project={project}" in starts[0], starts
-        assert not list(cache.glob("*.db")), "A worker published during the join check"
+        assert project_databases(cache) == [], (
+            "A worker published during the join check"
+        )
     finally:
         run([str(binary), "daemon", "stop"], env, root)
 
@@ -357,7 +370,7 @@ def smoke_cold_join(binary: Path, root: Path, *, use_path_name: bool = False) ->
             "the named graph after restart",
             lambda: indexed(cache, project, "cold_checkout"),
         )
-        assert sorted(path.name for path in cache.glob("*.db")) == [f"{project}.db"]
+        assert project_databases(cache) == [f"{project}.db"]
     finally:
         run([str(binary), "daemon", "stop"], env, root)
 
