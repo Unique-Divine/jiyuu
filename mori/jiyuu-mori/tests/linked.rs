@@ -782,13 +782,24 @@ fn scalar_read_flags_match_json_and_c_on_one_cache() {
             reference.status.success() && stdout.contains(expected),
             "{tool}: {reference:?}"
         );
+        let stable_stdout = |output: &Output| {
+            if tool != "search_code" {
+                return output.stdout.clone();
+            }
+            let mut result: serde_json::Value =
+                serde_json::from_slice(&output.stdout).unwrap();
+            let elapsed = result.as_object_mut().unwrap().remove("elapsed_ms");
+            assert!(elapsed.is_some_and(|value| value.is_number()));
+            serde_json::to_vec(&result).unwrap()
+        };
+        let expected_stdout = stable_stdout(&reference);
         let json_argv = ["cli", "--quiet", tool, &json_args];
         for bin in [c.as_path(), Path::new(MORI)] {
             for args in [argv.as_slice(), &json_argv] {
                 let actual = run_in(bin, &scratch, args);
                 assert_eq!(
-                    (actual.status, &actual.stdout, &actual.stderr),
-                    (reference.status, &reference.stdout, &reference.stderr),
+                    (actual.status, &stable_stdout(&actual), &actual.stderr),
+                    (reference.status, &expected_stdout, &reference.stderr),
                     "{bin:?} {args:?}"
                 );
             }
