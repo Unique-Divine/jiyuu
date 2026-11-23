@@ -1893,6 +1893,177 @@ def tail():
 }
 
 #[test]
+fn trace_path_predecessors_match_native_on_ties_cycles_and_pages() {
+    let scratch = Scratch::new("trace-c");
+    let rust_runtime = Scratch::new("trace-rs");
+    let repo = scratch.0.join("repo");
+    fs::create_dir(&repo).unwrap();
+    fs::write(repo.join("seed.py"), "def seed():\n    return 1\n").unwrap();
+    let c = c_binary();
+    let rust = Path::new(MORI);
+    let index = index_fixture(&c, &scratch, repo.to_str().unwrap());
+    let project = index["project"].as_str().unwrap();
+    let command = |binary: &Path| {
+        let runtime = if binary == rust {
+            &rust_runtime
+        } else {
+            &scratch
+        };
+        let mut command = command_in(binary, runtime);
+        command.env("CBM_CACHE_DIR", scratch.0.join("cache"));
+        command
+    };
+    let stop = |binary: &Path| {
+        let output = command(binary).args(["daemon", "stop"]).output().unwrap();
+        assert!(output.status.success(), "{binary:?}: {output:?}");
+    };
+    stop(&c);
+
+    let db =
+        Connection::open(scratch.0.join("cache").join(format!("{project}.db")))
+            .unwrap();
+    db.execute(
+        "INSERT INTO projects (name, indexed_at, root_path) VALUES ('upstream', 'fixture', ?1)",
+        [repo.to_str().unwrap()],
+    )
+    .unwrap();
+    let node = |owner: &str, name: &str, file: &str| -> i64 {
+        db.query_row(
+            "INSERT INTO nodes (project, label, name, qualified_name, file_path, start_line, end_line)
+             VALUES (?1, 'Function', ?2, ?1 || '.' || ?2, ?3, 1, 2) RETURNING id",
+            [owner, name, file],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    let root = node(project, "root", "src/root.py");
+    let left = node(project, "left", "src/left.py");
+    let right = node(project, "right", "src/right.py");
+    let remote = node("upstream", "remote", "src/remote.py");
+    let caller = node(project, "caller", "src/caller.py");
+    let hidden = node(project, "hidden", "tests/hidden.py");
+    let leaf = node(project, "leaf", "src/leaf.py");
+    for (from, to, kind, marker) in [
+        (root, left, "DATA_FLOWS", "type_loser"),
+        (root, left, "CALLS", "type_winner"),
+        (root, right, "CALLS", "right_arm"),
+        (right, remote, "CALLS", "id_loser"),
+        (left, remote, "CROSS_HTTP_CALLS", "cross_id_winner"),
+        (remote, root, "CALLS", "cycle"),
+        (caller, root, "CALLS", "direct_caller"),
+        (caller, right, "CALLS", "sideways"),
+        (root, hidden, "CALLS", "to_test"),
+        (hidden, leaf, "CALLS", "from_test"),
+    ] {
+        let properties = serde_json::json!({
+            "args": [{"e": marker}], "strategy": "lsp_fixture", "confidence": 0.9
+        });
+        db.execute(
+            "INSERT INTO edges (project, source_id, target_id, type, properties)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![project, from, to, kind, properties.to_string()],
+        )
+        .unwrap();
+    }
+    drop(db);
+
+    let trace = |binary: &Path, args: &serde_json::Value| {
+        let output = command(binary)
+            .args(["cli", "--quiet", "trace_path", &args.to_string()])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{args}: {output:?}");
+        (output.stdout, output.stderr)
+    };
+    let replay = |binary: &Path| {
+        let start = command(binary)
+            .env("CBM_LOG_LEVEL", "debug")
+            .args(["daemon", "start"])
+            .output()
+            .unwrap();
+        assert!(start.status.success(), "{start:?}");
+        let mut request = serde_json::json!({
+            "project": project, "function_name": "root", "direction": "both",
+            "depth": 3, "mode": "data_flow", "include_evidence": true,
+            "edge_types": ["CALLS", "DATA_FLOWS", "CROSS_HTTP_CALLS"], "format": "json"
+        });
+        let mut replies = vec![trace(binary, &request)];
+        for (direction, mode) in
+            [("inbound", "data_flow"), ("outbound", "cross_service")]
+        {
+            let text = serde_json::json!({
+                "project": project, "function_name": "root", "direction": direction,
+                "depth": 3, "mode": mode, "include_evidence": true
+            });
+            replies.push(trace(binary, &text));
+        }
+        let mut tight = request.clone();
+        tight["max_output_tokens"] = serde_json::json!(128);
+        replies.push(trace(binary, &tight));
+        let mut plain = request.clone();
+        plain["mode"] = serde_json::json!("calls");
+        plain["include_evidence"] = serde_json::json!(false);
+        replies.push(trace(binary, &plain));
+        request["limit"] = serde_json::json!(2);
+        for _ in 0..10 {
+            let reply = trace(binary, &request);
+            let page: serde_json::Value =
+                serde_json::from_slice(&reply.0).unwrap();
+            replies.push(reply);
+            let Some(cursor) = page["next_cursor"].as_str() else {
+                stop(binary);
+                return replies;
+            };
+            request["cursor"] = serde_json::json!(cursor);
+        }
+        stop(binary);
+        panic!("trace pages never drained");
+    };
+
+    let native = replay(&c);
+    let rust = replay(rust);
+    assert_eq!(rust, native);
+    assert!(rust.len() > 7);
+    assert!(String::from_utf8_lossy(&rust[6].0).contains("cross_id_winner"));
+    let full: serde_json::Value = serde_json::from_slice(&rust[0].0).unwrap();
+    let row = |leg: &str, name: &str| {
+        full[leg]["groups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|group| group["rows"].as_array().unwrap())
+            .find(|row| row[0] == name)
+            .unwrap_or_else(|| panic!("missing {leg} row {name}: {full}"))
+    };
+    for (leg, name, hop, marker) in [
+        ("callees", "left", 1, "type_winner"),
+        ("callees", "remote", 2, "cross_id_winner"),
+        ("callees", "root", 3, "cycle"),
+        ("callers", "caller", 1, "direct_caller"),
+    ] {
+        let row = row(leg, name);
+        assert_eq!(row[1], hop, "{row}");
+        assert_eq!(row[2], "lsp", "{row}");
+        assert_eq!(row[4][0]["e"], marker, "{row}");
+    }
+    assert_eq!(row("callees", "leaf")[2], serde_json::Value::Null);
+    let log =
+        fs::read_to_string(scratch.0.join("cache/logs/cbm-daemon.log")).unwrap();
+    for backend in ["native", "rust"] {
+        for direction in ["inbound", "outbound"] {
+            assert!(
+                log.lines().any(|line| {
+                    line.contains("trace_path.predecessor")
+                        && line.contains(&format!("backend={backend}"))
+                        && line.contains(&format!("direction={direction}"))
+                }),
+                "missing {backend} {direction} projection"
+            );
+        }
+    }
+}
+
+#[test]
 fn index_through_worker_reexec_matches_c() {
     let fixture = Fixture::new(false);
     let project = fixture.project();

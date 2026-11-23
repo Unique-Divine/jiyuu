@@ -583,6 +583,7 @@ pub unsafe extern "C" fn main(argc: c_int, argv: *mut *mut c_char) -> c_int {
         crate::tool_list::c_tool_list::register();
         crate::search::register();
         crate::path_verdict::register();
+        crate::trace_predecessor::register();
         crate::snippet_window::register();
         crate::ingest_trace::register();
     }

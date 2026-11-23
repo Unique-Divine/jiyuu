@@ -9917,7 +9917,62 @@ typedef struct {
     const cbm_node_t *roots;
     int root_count;
     bool inbound;
+    cbm_mcp_trace_hop_t *projection;
 } trace_edge_context_t;
+
+static cbm_mcp_trace_predecessor_planner_fn trace_predecessor_planner;
+
+void cbm_mcp_set_trace_predecessor_planner(cbm_mcp_trace_predecessor_planner_fn planner) {
+    trace_predecessor_planner = planner;
+}
+
+static void trace_prepare_predecessors(cbm_mcp_server_t *srv, trace_edge_context_t *ctx) {
+    const cbm_traverse_result_t *full = ctx->full;
+    if (full->visited_count == 0 || full->edge_count == 0) {
+        return;
+    }
+    if (trace_predecessor_planner && ctx->root_count > 0 &&
+        ctx->root_count <= MCP_BFS_LIMIT_MAX && !mcp_request_cancelled(srv)) {
+        size_t root_count = (size_t)ctx->root_count;
+        size_t hop_count = (size_t)full->visited_count;
+        size_t edge_count = (size_t)full->edge_count;
+        int64_t *roots = malloc(root_count * sizeof(*roots));
+        cbm_mcp_trace_hop_t *hops = malloc(hop_count * sizeof(*hops));
+        cbm_mcp_trace_edge_t *edges = malloc(edge_count * sizeof(*edges));
+        if (roots && hops && edges) {
+            for (size_t i = 0; i < root_count; i++) {
+                roots[i] = ctx->roots[i].id;
+            }
+            for (size_t i = 0; i < hop_count; i++) {
+                hops[i] = (cbm_mcp_trace_hop_t){.id = full->visited[i].node.id,
+                                              .hop = full->visited[i].hop,
+                                              .edge_index = CBM_NOT_FOUND};
+            }
+            for (size_t i = 0; i < edge_count; i++) {
+                edges[i] = (cbm_mcp_trace_edge_t){.source_id = full->edges[i].source_id,
+                                                .target_id = full->edges[i].target_id,
+                                                .type = full->edges[i].type};
+            }
+            if (trace_predecessor_planner(ctx->inbound, roots, root_count, hops, hop_count,
+                                          edges, edge_count) &&
+                !mcp_request_cancelled(srv)) {
+                ctx->projection = hops;
+                hops = NULL;
+            }
+        }
+        free(roots);
+        free(hops);
+        free(edges);
+    }
+    cbm_log_debug("trace_path.predecessor", "backend", ctx->projection ? "rust" : "native",
+                  "direction", ctx->inbound ? "inbound" : "outbound");
+}
+
+static int trace_projection_id_cmp(const void *left, const void *right) {
+    const cbm_mcp_trace_hop_t *a = left;
+    const cbm_mcp_trace_hop_t *b = right;
+    return (a->id > b->id) - (a->id < b->id);
+}
 
 static bool trace_root_contains(const trace_edge_context_t *ctx, int64_t node_id) {
     for (int i = 0; ctx && i < ctx->root_count; i++) {
@@ -9949,6 +10004,15 @@ static const cbm_edge_info_t *trace_predecessor_edge(const trace_edge_context_t 
                                                      const cbm_node_hop_t *hop_node) {
     if (!ctx || !ctx->full || !hop_node || hop_node->hop <= 0) {
         return NULL;
+    }
+    if (ctx->projection) {
+        cbm_mcp_trace_hop_t key = {.id = hop_node->node.id};
+        const cbm_mcp_trace_hop_t *row =
+            bsearch(&key, ctx->projection, (size_t)ctx->full->visited_count,
+                    sizeof(*ctx->projection), trace_projection_id_cmp);
+        if (row && row->hop == hop_node->hop) {
+            return row->edge_index < 0 ? NULL : &ctx->full->edges[row->edge_index];
+        }
     }
     const cbm_edge_info_t *best = NULL;
     int64_t best_predecessor = INT64_MAX;
@@ -11734,6 +11798,17 @@ static char *handle_trace_call_path(cbm_mcp_server_t *srv, const char *args) {
     const char *out_relation = unresolved_out ? "unknown" : (tr_out.truncated ? "gte" : "eq");
     const char *in_relation = unresolved_in ? "unknown" : (tr_in.truncated ? "gte" : "eq");
 
+    trace_edge_context_t out_edge_ctx = {
+        .full = &tr_out, .roots = nodes, .root_count = node_count, .inbound = false};
+    trace_edge_context_t in_edge_ctx = {
+        .full = &tr_in, .roots = nodes, .root_count = node_count, .inbound = true};
+    if (need_edge_data && requested_out_len > 0) {
+        trace_prepare_predecessors(srv, &out_edge_ctx);
+    }
+    if (need_edge_data && requested_in_len > 0) {
+        trace_prepare_predecessors(srv, &in_edge_ctx);
+    }
+
 render_trace_output:;
     int rows_left = row_target;
     out_len = requested_out_len < rows_left ? requested_out_len : rows_left;
@@ -11781,10 +11856,6 @@ render_trace_output:;
     cbm_traverse_result_t view_in = tr_in;
     view_in.visited = tr_in.visited ? tr_in.visited + in_start : NULL;
     view_in.visited_count = in_len;
-    trace_edge_context_t out_edge_ctx = {
-        .full = &tr_out, .roots = nodes, .root_count = node_count, .inbound = false};
-    trace_edge_context_t in_edge_ctx = {
-        .full = &tr_in, .roots = nodes, .root_count = node_count, .inbound = true};
 
     /* Totals must count what the caller can actually enumerate: when
      * include_tests=false the tables hide test-file rows, so raw
@@ -12093,6 +12164,8 @@ render_trace_output:;
 trace_output_ready:
 
     /* Now safe to free traversal data */
+    free(out_edge_ctx.projection);
+    free(in_edge_ctx.projection);
     if (do_outbound) {
         cbm_store_traverse_free(&tr_out);
     }
