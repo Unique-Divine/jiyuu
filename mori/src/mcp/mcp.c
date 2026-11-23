@@ -13749,10 +13749,14 @@ static bool index_root_owner_append(char **list, size_t *len, size_t *cap, const
     return true;
 }
 
-static bool index_root_named_owner(cbm_mcp_server_t *srv, const char *repo_path, char **owner_out,
-                                   char **error_out) {
+static bool index_root_named_owner(cbm_mcp_server_t *srv, const char *repo_path,
+                                   const char *derived, char **owner_out, char **error_out) {
     if (!srv->index_named_owner ||
         srv->index_named_owner(srv->index_named_owner_context, repo_path, owner_out)) {
+        /* A watch using the path-derived name sends no name to the worker. */
+        if (*owner_out && strcmp(*owner_out, derived) == 0) {
+            safe_free(*owner_out);
+        }
         return true;
     }
     *error_out = heap_strdup("could not copy the named watch project");
@@ -13777,8 +13781,9 @@ static bool index_root_owner_resolve(cbm_mcp_server_t *srv, const char *repo_pat
     cache_dir(dir_path, sizeof(dir_path));
     cbm_dir_t *d = cbm_opendir(dir_path);
     if (!d) {
+        bool resolved = index_root_named_owner(srv, repo_path, derived, owner_out, error_out);
         safe_free(derived);
-        return index_root_named_owner(srv, repo_path, owner_out, error_out);
+        return resolved;
     }
     char *owner = NULL;
     char *owners = NULL;
@@ -13815,18 +13820,21 @@ static bool index_root_owner_resolve(cbm_mcp_server_t *srv, const char *repo_pat
         project_record_clear(&record);
     }
     cbm_closedir(d);
+    if (ok && (derived_exists || owner_count == 0)) {
+        bool resolved =
+            derived_exists || index_root_named_owner(srv, repo_path, derived, owner_out, error_out);
+        safe_free(derived);
+        safe_free(owner);
+        cbm_free(CBM_MEM_CLASS_OTHER, owners);
+        return resolved;
+    }
     safe_free(derived);
-
-    if (ok && !derived_exists && owner_count == 1) {
+    if (ok && owner_count == 1) {
         cbm_free(CBM_MEM_CLASS_OTHER, owners);
         *owner_out = owner;
         return true;
     }
     safe_free(owner);
-    if (ok && (derived_exists || owner_count == 0)) {
-        cbm_free(CBM_MEM_CLASS_OTHER, owners);
-        return derived_exists || index_root_named_owner(srv, repo_path, owner_out, error_out);
-    }
     char msg[CBM_SZ_4K];
     if (ok) {
         snprintf(msg, sizeof(msg),
