@@ -7,6 +7,7 @@ use std::ptr::{self, NonNull};
 use std::thread;
 
 const DEFAULT_PORT: u16 = 9749;
+const SHUTDOWN_GRACE_SECONDS: libc::c_uint = 5;
 
 unsafe extern "C" {
     fn cbm_alloc_init();
@@ -57,9 +58,13 @@ impl Server {
             let mut signal = 0;
             // SAFETY: the signal set is initialized and blocked in both threads.
             let status = unsafe { libc::sigwait(signals, &mut signal) };
-            // SAFETY: the scoped worker still borrows the live listener. stop
-            // interrupts the active socket, and scope joins the worker.
-            unsafe { cbm_http_server_stop(server) };
+            // SAFETY: the worker still borrows the live server. A process
+            // alarm bounds cancellation, join and cleanup even if a native
+            // reader ignores cancellation. The process exits after this command.
+            unsafe {
+                libc::alarm(SHUTDOWN_GRACE_SECONDS);
+                cbm_http_server_stop(server);
+            }
             signal_result(status)
                 .map_err(|error| format!("could not wait for shutdown: {error}"))
         })
@@ -108,9 +113,21 @@ fn block_shutdown_signals() -> io::Result<libc::sigset_t> {
         // dispositions with both signals blocked so sigwait can consume them.
         if libc::signal(libc::SIGINT, libc::SIG_DFL) == libc::SIG_ERR
             || libc::signal(libc::SIGTERM, libc::SIG_DFL) == libc::SIG_ERR
+            || libc::signal(libc::SIGALRM, libc::SIG_DFL) == libc::SIG_ERR
         {
             return Err(io::Error::last_os_error());
         }
+        let mut alarm = MaybeUninit::zeroed();
+        if libc::sigemptyset(alarm.as_mut_ptr()) != 0
+            || libc::sigaddset(alarm.as_mut_ptr(), libc::SIGALRM) != 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        signal_result(libc::pthread_sigmask(
+            libc::SIG_UNBLOCK,
+            alarm.as_ptr(),
+            ptr::null_mut(),
+        ))?;
         Ok(signals)
     }
 }

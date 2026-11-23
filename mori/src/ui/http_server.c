@@ -3145,8 +3145,24 @@ static void handle_rpc(cbm_http_server_t *srv, cbm_http_conn_t *c, const cbm_htt
         return;
     }
 
+    /* Keep a standalone request scope open before checking stop_flag. A
+     * concurrent stop either sees this scope or the check prevents dispatch.
+     * Nested MCP scopes preserve cancellation set before the handler begins. */
+    if (srv->read_only) {
+        if (!cbm_mcp_server_request_scope_begin(srv->mcp)) {
+            cbm_http_replyf(c, 503, g_cors_json, "%s", "{\"error\":\"RPC scope unavailable\"}");
+            return;
+        }
+        if (atomic_load(&srv->stop_flag)) {
+            cbm_mcp_server_request_scope_end(srv->mcp);
+            return;
+        }
+    }
+
     /* req->body is NUL-terminated by the transport */
     char *response = cbm_mcp_server_handle(srv->mcp, req->body);
+    if (srv->read_only)
+        cbm_mcp_server_request_scope_end(srv->mcp);
 
     if (response) {
         cbm_http_replyf(c, 200, g_cors_json, "%s", response);
@@ -3689,6 +3705,8 @@ bool cbm_http_server_free(cbm_http_server_t *srv) {
 void cbm_http_server_stop(cbm_http_server_t *srv) {
     if (srv) {
         atomic_store(&srv->stop_flag, 1);
+        if (srv->read_only)
+            (void)cbm_mcp_server_cancel_active(srv->mcp);
         cbm_httpd_interrupt(srv->listener);
     }
 }
