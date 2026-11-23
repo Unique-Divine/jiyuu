@@ -2131,14 +2131,12 @@ static void application_repair_client(void *context, const char *client, const c
         cbm_log_warn("cross_repo.repair_deferred", "client", client, "reason", "allocation");
         return;
     }
-    cbm_cross_repo_result_t result = cbm_cross_repo_match_cancellable(
-        client, (const char **)targets, target_count, &batch->application->stopping);
-    bool complete = !result.failed && !result.cancelled && result.skipped_count == 0;
+    (void)targets;
+    bool complete = cbm_cross_repo_repair_saved(client, &batch->application->stopping);
     char count[CBM_SZ_32];
     snprintf(count, sizeof(count), "%d", target_count);
     cbm_log_info("cross_repo.repair_result", "provider", batch->provider, "client", client,
                  "targets", count, "status", complete ? "repaired" : "pending");
-    cbm_cross_repo_result_free(&result);
 }
 
 static bool application_repair_wait_for_lease(cbm_daemon_application_job_t *owner) {
