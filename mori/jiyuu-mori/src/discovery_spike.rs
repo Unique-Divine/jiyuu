@@ -9,8 +9,10 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::ptr::{NonNull, null, null_mut};
+use std::rc::Rc;
 use std::time::Instant;
 
+mod admission;
 mod git_excludes;
 mod sphinx;
 
@@ -55,6 +57,13 @@ struct IgnoredFile {
 }
 
 unsafe extern "C" {
+    fn cbm_discover_count_bounded(
+        repo_path: *const c_char,
+        opts: *const Options,
+        max_files: c_int,
+        deadline_ms: u64,
+        count: *mut c_int,
+    ) -> c_int;
     fn cbm_discover_ex2(
         repo_path: *const c_char,
         opts: *const Options,
@@ -280,16 +289,20 @@ impl Drop for Ignore {
     }
 }
 
+type IgnoreStack = Vec<Rc<IgnoreAt>>;
+
 struct IgnoreAt {
     directory: PathBuf,
     matcher: Ignore,
 }
 
 impl IgnoreAt {
-    fn load(directory: &Path, source: &Path) -> Option<Self> {
-        Ignore::load(source).map(|matcher| Self {
-            directory: directory.to_owned(),
-            matcher,
+    fn load(directory: &Path, source: &Path) -> Option<Rc<Self>> {
+        Ignore::load(source).map(|matcher| {
+            Rc::new(Self {
+                directory: directory.to_owned(),
+                matcher,
+            })
         })
     }
 }
@@ -364,6 +377,12 @@ enum Directory {
     GitIgnored,
 }
 
+enum FileVerdict {
+    Include(c_int),
+    Ignore(&'static str),
+    Unknown,
+}
+
 struct Walk {
     mode: Mode,
     size_cap: u64,
@@ -376,6 +395,22 @@ struct Walk {
 
 impl Walk {
     fn run(root: &Path, mode: Mode, size_cap: u64) -> io::Result<Snapshot> {
+        let (mut walk, root, mut stack) = Self::prepare(root, mode, size_cap)?;
+        walk.directory(
+            &root,
+            Path::new(""),
+            false,
+            &mut stack,
+            &Suffixes::default(),
+        )?;
+        Ok(walk.snapshot)
+    }
+
+    fn prepare(
+        root: &Path,
+        mode: Mode,
+        size_cap: u64,
+    ) -> io::Result<(Self, PathBuf, IgnoreStack)> {
         let root = root.canonicalize()?;
         let repository = root.ancestors().find_map(|directory| {
             git_common_dir(directory).map(|common| (directory, common))
@@ -410,7 +445,7 @@ impl Walk {
             unsafe { cbm_workspace_cache_dir().as_ref().map(|ptr| c_text(ptr)) }
                 .filter(|path| !path.is_empty())
                 .map(|path| PathBuf::from(OsStr::from_bytes(&path)));
-        let mut walk = Self {
+        let walk = Self {
             mode,
             size_cap,
             cbmignore: Ignore::load(&root.join(".cbmignore")),
@@ -427,14 +462,7 @@ impl Walk {
             cache,
             snapshot: Snapshot::default(),
         };
-        walk.directory(
-            &root,
-            Path::new(""),
-            false,
-            &mut stack,
-            &Suffixes::default(),
-        )?;
-        Ok(walk.snapshot)
+        Ok((walk, root, stack))
     }
 
     fn directory(
@@ -442,7 +470,7 @@ impl Walk {
         path: &Path,
         rel: &Path,
         under_gitignore: bool,
-        stack: &mut Vec<IgnoreAt>,
+        stack: &mut IgnoreStack,
         inherited_suffixes: &Suffixes,
     ) -> io::Result<()> {
         let entries = match fs::read_dir(path) {
@@ -501,14 +529,27 @@ impl Walk {
                     }
                 }
             } else if kind.is_file() {
-                self.file(
+                let size = metadata.len();
+                match self.classify_file(
                     &entry_path,
                     &rel,
-                    metadata.len(),
+                    size,
                     under_gitignore,
                     stack,
                     suffixes,
-                );
+                ) {
+                    FileVerdict::Include(language) => {
+                        self.snapshot.files.push(File {
+                            path: rel.as_path().into(),
+                            language,
+                            size,
+                        })
+                    }
+                    FileVerdict::Ignore(reason) => {
+                        self.snapshot.ignore(&rel, reason)
+                    }
+                    FileVerdict::Unknown => {}
+                }
             }
         }
         stack.truncate(old_len);
@@ -533,7 +574,7 @@ impl Walk {
         absolute: &Path,
         rel: &Path,
         under_gitignore: bool,
-        stack: &[IgnoreAt],
+        stack: &[Rc<IgnoreAt>],
     ) -> Directory {
         if self
             .cache
@@ -568,15 +609,15 @@ impl Walk {
         }
     }
 
-    fn file(
-        &mut self,
+    fn classify_file(
+        &self,
         absolute: &Path,
         rel: &Path,
         size: u64,
         under_gitignore: bool,
-        stack: &[IgnoreAt],
+        stack: &[Rc<IgnoreAt>],
         suffixes: &Suffixes,
-    ) {
+    ) -> FileVerdict {
         let name = c_path(Path::new(rel.file_name().expect("file has a name")));
         // SAFETY: the three filters read the live name and return a flag.
         let native_reason = unsafe {
@@ -609,8 +650,7 @@ impl Walk {
             }
         });
         if let Some(reason) = ignore_reason {
-            self.snapshot.ignore(rel, reason);
-            return;
+            return FileVerdict::Ignore(reason);
         }
 
         let path = c_path(absolute);
@@ -637,17 +677,11 @@ impl Walk {
                 None
             }
         };
-        if let Some(language) = language {
-            self.snapshot.files.push(File {
-                path: rel.into(),
-                language,
-                size,
-            });
-        }
+        language.map_or(FileVerdict::Unknown, FileVerdict::Include)
     }
 }
 
-fn git_ignored(absolute: &Path, is_dir: bool, stack: &[IgnoreAt]) -> bool {
+fn git_ignored(absolute: &Path, is_dir: bool, stack: &[Rc<IgnoreAt>]) -> bool {
     stack
         .iter()
         .rev()
@@ -686,6 +720,116 @@ impl Scratch {
 impl Drop for Scratch {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+fn native_admission(
+    root: &Path,
+    mode: Mode,
+    max_files: c_int,
+    deadline_ms: u64,
+) -> (c_int, c_int) {
+    let path = c_path(root);
+    let options = Options {
+        mode,
+        ignore_file: null(),
+        max_file_size: 0,
+        resource_policy: null(),
+        resource_violation: null_mut(),
+    };
+    let mut count = -2;
+    // SAFETY: the path, options, and count remain live for the native call.
+    let status = unsafe {
+        cbm_discover_count_bounded(
+            path.as_ptr(),
+            &options,
+            max_files,
+            deadline_ms,
+            &mut count,
+        )
+    };
+    (status, count)
+}
+
+#[test]
+fn admission_counts_indexable_files_up_to_the_ceiling() {
+    let scratch = Scratch::new();
+    scratch.write(".gitignore", "ignored.rs\n");
+    scratch.write("ignored.rs", "fn ignored() {}\n");
+    scratch.write("src/first.rs", "fn first() {}\n");
+    scratch.write("src/second.rs", "fn second() {}\n");
+    std::os::unix::fs::symlink("src/first.rs", scratch.0.join("link.rs"))
+        .unwrap();
+
+    for mode in Mode::ALL {
+        for (max_files, expected) in [(0, (1, 0)), (1, (1, 1)), (2, (0, 2))] {
+            assert_eq!(
+                native_admission(&scratch.0, mode, max_files, 0),
+                expected
+            );
+            let count = max_files as usize;
+            let expected = if expected.0 == 0 {
+                admission::Count::Exact(count)
+            } else {
+                admission::Count::LimitExceeded(count)
+            };
+            assert_eq!(
+                admission::count_bounded(&scratch.0, mode, count, 0).unwrap(),
+                expected
+            );
+        }
+        assert_eq!(native_admission(&scratch.0, mode, 2, 1), (-1, -1));
+        let expired = admission::count_bounded(&scratch.0, mode, 2, 1);
+        assert_eq!(expired.unwrap_err().kind(), io::ErrorKind::TimedOut);
+    }
+}
+
+#[test]
+fn admission_refuses_an_unobservable_child() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let scratch = Scratch::new();
+    scratch.write("visible.rs", "fn visible() {}\n");
+    scratch.write("child/hidden.rs", "fn hidden() {}\n");
+    let child = scratch.0.join("child");
+
+    for (mode_bits, expected_error) in
+        [(0o100, "open child directory"), (0o400, "stat child entry")]
+    {
+        fs::set_permissions(&child, fs::Permissions::from_mode(mode_bits))
+            .unwrap();
+        let error = if mode_bits == 0o100 {
+            fs::read_dir(&child).err()
+        } else {
+            fs::symlink_metadata(child.join("hidden.rs")).err()
+        };
+        let outcomes =
+            Mode::ALL.map(|mode| native_admission(&scratch.0, mode, 2, 0));
+        let rust_outcomes = Mode::ALL
+            .map(|mode| admission::count_bounded(&scratch.0, mode, 2, 0));
+        let native_limit = native_admission(&scratch.0, Mode::Full, 0, 0);
+        let rust_limit = admission::count_bounded(&scratch.0, Mode::Full, 0, 0);
+        fs::set_permissions(&child, fs::Permissions::from_mode(0o700)).unwrap();
+
+        // The root file exceeds the ceiling before the walk opens the child.
+        assert_eq!(native_limit, (1, 0));
+        assert_eq!(rust_limit.unwrap(), admission::Count::LimitExceeded(0));
+        // A privileged process may be able to observe both paths.
+        if let Some(error) = error {
+            assert_eq!(
+                error.kind(),
+                io::ErrorKind::PermissionDenied,
+                "{expected_error}"
+            );
+            assert_eq!(outcomes, [(-1, -1); 3], "{expected_error}");
+            for outcome in rust_outcomes {
+                assert_eq!(
+                    outcome.unwrap_err().kind(),
+                    io::ErrorKind::PermissionDenied,
+                    "{expected_error}"
+                );
+            }
+        }
     }
 }
 

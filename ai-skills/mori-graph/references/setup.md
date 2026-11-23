@@ -3,18 +3,18 @@
 ## Install From a Release
 
 Mori ships as `mori/v*` releases of https://github.com/Unique-Divine/jiyuu.
-Install Mori 0.14.1 with mise's `github:` backend. Keep the MCP server key
+Install Mori 0.14.2 with mise's `github:` backend. Keep the MCP server key
 `mori-graph`.
 
 ```toml
 # ~/.config/mise/config.toml
 [tools]
-"github:Unique-Divine/jiyuu" = { version = "0.14.1", version_prefix = "mori/v" }
+"github:Unique-Divine/jiyuu" = { version = "0.14.2", version_prefix = "mori/v" }
 ```
 
 ```sh
 mise install
-mori --version  # mori 0.14.1
+mori --version  # mori 0.14.2
 ```
 
 For a published release with a `mori-<version>-<target>.tar.gz` archive,

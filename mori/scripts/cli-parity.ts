@@ -323,6 +323,20 @@ export function invocations(repo: string, project: string): Invocation[] {
       ["callees: 1", `${project}.go.Add 1`],
     ),
     q(
+      "cli trace_path with repeated and literal edge types",
+      "trace_path",
+      [
+        "--function-name",
+        "Twice",
+        "--direction",
+        "outbound",
+        "--edge-types",
+        "CALLS",
+        '--edge_types=["USAGE","CALL_REFERENCE"]',
+      ],
+      [`${project}.go.Add`],
+    ),
+    q(
       "cli get_architecture",
       "get_architecture",
       [],

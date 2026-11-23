@@ -6712,10 +6712,7 @@ int cbm_cypher_execute(cbm_store_t *store, const char *query, const char *projec
         rb_free(&rb);
         cbm_query_free(q);
         out->truncated = g_cypher_truncated;
-        out->error =
-            heap_strdup("query exceeded the execution time limit — narrow the pattern with a WHERE "
-                        "filter, use a directed MATCH instead of an unbounded OPTIONAL MATCH, or "
-                        "add LIMIT");
+        out->error = heap_strdup(CBM_CYPHER_DEADLINE_ERROR);
         return CBM_NOT_FOUND;
     }
 
@@ -6725,7 +6722,7 @@ int cbm_cypher_execute(cbm_store_t *store, const char *query, const char *projec
         rb_free(&rb);
         cbm_query_free(q);
         out->truncated = true;
-        out->error = heap_strdup("result exceeded 100k rows — use narrower filters or add LIMIT");
+        out->error = heap_strdup(CBM_CYPHER_ROW_CEILING_ERROR);
         return CBM_NOT_FOUND;
     }
 

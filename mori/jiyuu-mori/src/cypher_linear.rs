@@ -1,11 +1,17 @@
-//! Bounded Cypher evaluator compiled only by the linked acceptance test.
+//! Bounded Cypher evaluator for a verified subset of query patterns.
 
 use std::collections::HashMap;
+#[cfg(test)]
 use std::path::Path;
+use std::time::{Duration, Instant};
 
-use rusqlite::{Connection, OpenFlags, Row, Statement, params};
+#[cfg(test)]
+use rusqlite::OpenFlags;
+use rusqlite::{Connection, Row, Statement, params};
 
 const ENGINE_LIMIT: usize = 100_000;
+const DEADLINE: Duration = Duration::from_secs(30);
+const CHECK_INTERVAL: usize = 1024;
 const PROPERTY_LIMIT: usize = 511;
 const NODE_COLUMNS: &str = "n.id, n.label, n.name, n.qualified_name, n.file_path, n.start_line, n.end_line, n.properties";
 
@@ -442,6 +448,8 @@ pub(crate) struct ResultRows {
 pub(crate) enum ExecutionError {
     Storage(rusqlite::Error),
     RowCeiling,
+    Deadline,
+    Cancelled,
 }
 
 impl From<rusqlite::Error> for ExecutionError {
@@ -450,7 +458,48 @@ impl From<rusqlite::Error> for ExecutionError {
     }
 }
 
+pub(crate) struct ExecutionBudget<'a> {
+    deadline: Instant,
+    now: &'a dyn Fn() -> Instant,
+    cancelled: &'a dyn Fn() -> bool,
+    remaining: usize,
+}
+
+impl<'a> ExecutionBudget<'a> {
+    pub(crate) fn new(
+        now: &'a dyn Fn() -> Instant,
+        cancelled: &'a dyn Fn() -> bool,
+    ) -> Self {
+        Self {
+            deadline: now() + DEADLINE,
+            now,
+            cancelled,
+            remaining: CHECK_INTERVAL,
+        }
+    }
+
+    fn check(&self) -> Result<(), ExecutionError> {
+        if (self.cancelled)() {
+            return Err(ExecutionError::Cancelled);
+        }
+        if (self.now)() >= self.deadline {
+            return Err(ExecutionError::Deadline);
+        }
+        Ok(())
+    }
+
+    fn step(&mut self) -> Result<(), ExecutionError> {
+        self.remaining -= 1;
+        if self.remaining == 0 {
+            self.remaining = CHECK_INTERVAL;
+            self.check()?;
+        }
+        Ok(())
+    }
+}
+
 impl Query<'_> {
+    #[cfg(test)]
     pub(crate) fn execute(
         &self,
         db: &Path,
@@ -461,12 +510,27 @@ impl Query<'_> {
         self.execute_on(&connection, project)
     }
 
-    /// Read from the graph and snapshot the caller has already selected.
+    #[cfg(test)]
     pub(crate) fn execute_on(
         &self,
         connection: &Connection,
         project: &str,
     ) -> Result<ResultRows, ExecutionError> {
+        self.execute_with_budget(
+            connection,
+            project,
+            &mut ExecutionBudget::new(&Instant::now, &|| false),
+        )
+    }
+
+    /// Read from the graph and snapshot the caller has already selected.
+    pub(crate) fn execute_with_budget(
+        &self,
+        connection: &Connection,
+        project: &str,
+        budget: &mut ExecutionBudget<'_>,
+    ) -> Result<ResultRows, ExecutionError> {
+        budget.check()?;
         let reversed =
             self.hops.len() == 1 && self.selectivity(1) > self.selectivity(0);
         let start_index = usize::from(reversed);
@@ -490,31 +554,35 @@ impl Query<'_> {
         let mut rows = Vec::new();
         let limit = self.limit.unwrap_or(ENGINE_LIMIT);
         'starts: while let Some(row) = start_nodes.next()? {
+            budget.step()?;
             let start = Node::read(row, 0)?;
-            if !start.matches(&self.nodes[start_index].inline)? {
+            if !self.matches_node(start_index, &start)? {
                 continue;
             }
             let mut hop = self.hops[0];
             hop.inbound ^= reversed;
-            for (next, edge) in adjacency.neighbors(start.id, hop)? {
+            for (next, edge) in adjacency.neighbors(start.id, hop, budget)? {
+                budget.step()?;
                 if !self.matches_node(second_index, &next)? {
                     continue;
                 }
                 if let Some(&hop) = self.hops.get(1) {
-                    for (last, last_edge) in adjacency.neighbors(next.id, hop)? {
-                        if self.matches_node(2, &last)?
-                            && self.conditions(&[&start, &next, &last])?
-                        {
-                            if rows.len() == limit {
-                                break 'starts;
-                            }
-                            rows.push(self.project(
-                                &[&start, &next, &last],
-                                &[&edge, &last_edge],
-                            )?);
-                            if rows.len() == ENGINE_LIMIT {
-                                return Err(ExecutionError::RowCeiling);
-                            }
+                    for (last, last_edge) in
+                        adjacency.neighbors(next.id, hop, budget)?
+                    {
+                        budget.step()?;
+                        if !self.matches_node(2, &last)? {
+                            continue;
+                        }
+                        if rows.len() == limit {
+                            break 'starts;
+                        }
+                        rows.push(self.project(
+                            &[&start, &next, &last],
+                            &[&edge, &last_edge],
+                        )?);
+                        if rows.len() == ENGINE_LIMIT {
+                            return Err(ExecutionError::RowCeiling);
                         }
                     }
                 } else {
@@ -523,18 +591,17 @@ impl Query<'_> {
                     } else {
                         [&start, &next]
                     };
-                    if self.conditions(&nodes)? {
-                        if rows.len() == limit {
-                            break 'starts;
-                        }
-                        rows.push(self.project(&nodes, &[&edge])?);
-                        if rows.len() == ENGINE_LIMIT {
-                            return Err(ExecutionError::RowCeiling);
-                        }
+                    if rows.len() == limit {
+                        break 'starts;
+                    }
+                    rows.push(self.project(&nodes, &[&edge])?);
+                    if rows.len() == ENGINE_LIMIT {
+                        return Err(ExecutionError::RowCeiling);
                     }
                 }
             }
         }
+        budget.check()?;
         let columns = self
             .projections
             .iter()
@@ -566,15 +633,15 @@ impl Query<'_> {
 
     fn matches_node(&self, index: usize, node: &Node) -> rusqlite::Result<bool> {
         let pattern = &self.nodes[index];
-        if pattern.label.is_some_and(|label| label != node.label) {
+        if pattern.label.is_some_and(|label| label != node.label)
+            || !node.matches(&pattern.inline)?
+        {
             return Ok(false);
         }
-        node.matches(&pattern.inline)
-    }
-
-    fn conditions(&self, nodes: &[&Node]) -> rusqlite::Result<bool> {
-        for &(index, (property, value)) in &self.filters {
-            if nodes[index].property(property)? != value {
+        // The classifier accepts single-binding predicates. Evaluate each
+        // when its node is bound so rejected nodes never expand adjacency.
+        for &(target, (property, value)) in &self.filters {
+            if target == index && node.property(property)? != value {
                 return Ok(false);
             }
         }
@@ -640,7 +707,8 @@ impl<'a> Adjacency<'a> {
         &mut self,
         id: i64,
         hop: Hop<'_>,
-    ) -> rusqlite::Result<Vec<(Node, Edge)>> {
+        budget: &mut ExecutionBudget<'_>,
+    ) -> Result<Vec<(Node, Edge)>, ExecutionError> {
         let (statement, neighbor_column) = if hop.inbound {
             (&mut self.incoming, 2)
         } else {
@@ -649,6 +717,7 @@ impl<'a> Adjacency<'a> {
         let mut edges = statement.query(params![id, hop.kind])?;
         let mut neighbors = Vec::new();
         while let Some(edge) = edges.next()? {
+            budget.step()?;
             let neighbor: i64 = edge.get(neighbor_column)?;
             let mut nodes = self.node.query([neighbor])?;
             if let Some(row) = nodes.next()? {

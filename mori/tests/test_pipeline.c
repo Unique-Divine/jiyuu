@@ -37,6 +37,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include "graph_buffer/graph_buffer.h"
+#include "mcp/mcp.h"
 #include "yyjson/yyjson.h"
 #include "sqlite3.h" /* vendored/sqlite3 — PRAGMA integrity_check on dumped DBs */
 
@@ -35027,7 +35028,87 @@ TEST(pipeline_inc_c_family_fragments) {
     th_rmtree(tmp);
     PASS();
 }
+#ifdef CBM_ENABLE_TEST_SEAMS
+TEST(pipeline_publishes_parse_timeout_coverage) {
+    char repo[CBM_SZ_512];
+    char cache[CBM_SZ_512];
+    snprintf(repo, sizeof(repo), "%s/cbm-parse-timeout-repo-XXXXXX", cbm_tmpdir());
+    snprintf(cache, sizeof(cache), "%s/cbm-parse-timeout-cache-XXXXXX", cbm_tmpdir());
+    ASSERT_NOT_NULL(cbm_mkdtemp(repo));
+    ASSERT_NOT_NULL(cbm_mkdtemp(cache));
+    cbm_normalize_path_sep(repo);
+
+    char path[CBM_SZ_1K];
+    snprintf(path, sizeof(path), "%s/timeout.py", repo);
+    FILE *source = fopen(path, "w");
+    ASSERT_NOT_NULL(source);
+    /* Give Tree-sitter enough work to call the progress callback. */
+    for (int i = 0; i < 128; i++) {
+        fprintf(source, "def delayed_%d(value):\n    return value + 1\n\n", i);
+    }
+    fclose(source);
+    snprintf(path, sizeof(path), "%s/healthy.py", repo);
+    ASSERT_EQ(th_write_file(path, "def healthy():\n    return 1\n"), 0);
+
+    const char *saved = getenv("CBM_CACHE_DIR");
+    char *saved_copy = saved ? strdup(saved) : NULL;
+    cbm_setenv("CBM_CACHE_DIR", cache, 1);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+    char args[CBM_SZ_1K];
+    snprintf(args, sizeof(args),
+             "{\"repo_path\":\"%s\",\"name\":\"timeout-fixture\",\"mode\":\"fast\"}", repo);
+    cbm_setenv("CBM_TEST_PARSE_TIMEOUT_ON", "timeout.py", 1);
+    char *indexed = cbm_mcp_handle_tool(srv, "index_repository", args);
+    cbm_unsetenv("CBM_TEST_PARSE_TIMEOUT_ON");
+    cbm_mcp_server_free(srv);
+
+    /* Read coverage from the published graph through a fresh server. */
+    srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+    char *status = cbm_mcp_handle_tool(srv, "index_status",
+                                       "{\"project\":\"timeout-fixture\",\"diagnostics\":\"full\","
+                                       "\"format\":\"json\"}");
+    cbm_mcp_server_free(srv);
+    if (saved_copy) {
+        cbm_setenv("CBM_CACHE_DIR", saved_copy, 1);
+    } else {
+        cbm_unsetenv("CBM_CACHE_DIR");
+    }
+    free(saved_copy);
+    th_rmtree(cache);
+    th_rmtree(repo);
+
+    const char *reports[] = {indexed, status};
+    for (size_t i = 0; i < sizeof(reports) / sizeof(reports[0]); i++) {
+        ASSERT_NOT_NULL(reports[i]);
+        yyjson_doc *doc = yyjson_read(reports[i], strlen(reports[i]), 0);
+        ASSERT_NOT_NULL(doc);
+        yyjson_val *root = yyjson_doc_get_root(doc);
+        ASSERT_FALSE(yyjson_get_bool(yyjson_obj_get(root, "isError")));
+        yyjson_val *payload = yyjson_obj_get(root, "structuredContent");
+        if (i == 0) {
+            ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(payload, "status")), "indexed");
+            ASSERT_EQ(yyjson_get_int(yyjson_obj_get(payload, "skipped_count")), 1);
+        }
+        yyjson_val *skipped = yyjson_obj_get(payload, "skipped");
+        ASSERT_EQ(yyjson_get_int(yyjson_obj_get(skipped, "count")), 1);
+        yyjson_val *file = yyjson_arr_get(yyjson_obj_get(skipped, "files"), 0);
+        ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(file, "path")), "timeout.py");
+        ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(file, "reason")), "parse timeout");
+        ASSERT_STR_EQ(yyjson_get_str(yyjson_obj_get(file, "phase")), "extract");
+        yyjson_doc_free(doc);
+    }
+    free(status);
+    free(indexed);
+    PASS();
+}
+#endif
+
 SUITE(pipeline) {
+#ifdef CBM_ENABLE_TEST_SEAMS
+    RUN_TEST(pipeline_publishes_parse_timeout_coverage);
+#endif
     RUN_TEST(pipeline_inc_c_family_fragments);
     RUN_TEST(pipeline_python_module_callers_sequential);
     RUN_TEST(pipeline_python_module_callers_parallel);

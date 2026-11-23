@@ -4033,6 +4033,10 @@ static CBMFileResult *extract_file_ex_body(const char *source, int source_len, C
             // survives): budget + 1 s, deterministic, no real timing involved.
             tl_parse_wall_seam_offset_ns = budget_ns + NSEC_PER_SEC;
         }
+        const char *timeout_on = getenv("CBM_TEST_PARSE_TIMEOUT_ON");
+        if (timeout_on && rel_path && strcmp(rel_path, timeout_on) == 0) {
+            budget.wall_ceiling_ns = 0;
+        }
 #endif
     }
 

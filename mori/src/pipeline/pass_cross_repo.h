@@ -93,6 +93,21 @@ bool cbm_cross_repo_add_status_json(struct yyjson_mut_doc *doc, struct yyjson_mu
 int cbm_cross_repo_relink_stage(const char *live_path, const char *stage_path, const char *project,
                                 const atomic_int *cancelled);
 
+/* Read the current indexed generation into a CBM_GRAPH_COMPARE_GENERATION_SIZE
+ * buffer. A missing, busy, or unreadable graph returns false. */
+bool cbm_cross_repo_read_generation(const char *project, char *generation, size_t capacity);
+
+typedef void (*cbm_cross_repo_client_visitor_t)(void *context, const char *client,
+                                                const char *const *targets, int target_count);
+
+/* Visit clients with an explicit saved target set that includes this provider
+ * and records an unknown or older provider generation. The visitor borrows
+ * each client name and its complete targets for the duration of the call.
+ * Selection is advisory. Dispatch must reread the graph under its write lease. */
+void cbm_cross_repo_visit_stale_clients(const char *provider, const char *generation,
+                                        cbm_cross_repo_client_visitor_t visitor, void *context,
+                                        const atomic_int *cancelled);
+
 /* Check whether this published generation still needs peer-side writes. */
 bool cbm_cross_repo_reverse_pending(const char *project);
 
