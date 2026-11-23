@@ -1,4 +1,4 @@
-//! Flag-form arguments for `mori cli query_graph`.
+//! Schema-driven flag arguments for selected read-only `mori cli` tools.
 
 use std::ffi::c_long;
 
@@ -36,19 +36,24 @@ fn build_args<'a>(
         }
         let flag = flag.strip_prefix("--")?;
         let (key, value) = if let Some((key, value)) = flag.split_once('=') {
-            (key, value)
+            (key, Some(value))
         } else if flags.peek().is_some_and(|next| !next.starts_with("--")) {
-            (flag, flags.next()?)
+            (flag, flags.next())
         } else {
-            (flag, "")
+            (flag, None)
         };
         let key = key.replace('-', "_");
         let kind = properties.get(&key)?.get("type")?.as_str()?;
-        let value = match kind {
-            "integer" => {
-                decimal(value).map_or_else(|| Value::from(value), Value::from)
+        let text = value.unwrap_or_default();
+        let typed_value = match kind {
+            // A bare C boolean flag is true. An explicit empty value is false.
+            "boolean" => {
+                Value::from(matches!(value, None | Some("true" | "1" | "yes")))
             }
-            "string" => Value::from(value),
+            "integer" => {
+                decimal(text).map_or_else(|| Value::from(text), Value::from)
+            }
+            "string" => Value::from(text),
             // A schema change can keep using C until Rust supports its type.
             _ => return None,
         };
@@ -60,7 +65,7 @@ fn build_args<'a>(
         }
         serde_json::to_writer(&mut args, &key).ok()?;
         args.push(b':');
-        serde_json::to_writer(&mut args, &value).ok()?;
+        serde_json::to_writer(&mut args, &typed_value).ok()?;
     }
     args.push(b'}');
     Some(args)
@@ -127,6 +132,7 @@ mod tests {
         "project": {"type": "string"},
         "max_rows": {"type": "integer"},
         "offset": {"type": "integer"},
+        "include_details": {"type": "boolean"},
         "future_field": {"type": "array"}
       }
     }"#;
@@ -170,6 +176,28 @@ mod tests {
         assert_eq!(decimal("0x2"), None);
         assert_eq!(decimal("999999999999999999999999x"), None);
         assert_eq!(parse(&["--offset=1 "]), Some(r#"{"offset":"1 "}"#.into()),);
+    }
+
+    #[test]
+    fn matches_c_boolean_coercion() {
+        assert_eq!(
+            parse(&["--include-details"]),
+            Some(r#"{"include_details":true}"#.into()),
+        );
+        for (value, expected) in [
+            ("true", true),
+            ("1", true),
+            ("yes", true),
+            ("", false),
+            ("false", false),
+            ("0", false),
+            ("TRUE", false),
+            ("arbitrary", false),
+        ] {
+            let flag = format!("--include_details={value}");
+            let expected = format!(r#"{{"include_details":{expected}}}"#);
+            assert_eq!(parse(&[&flag]), Some(expected), "{flag}");
+        }
     }
 
     #[test]

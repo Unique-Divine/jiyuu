@@ -445,7 +445,12 @@ impl Walk {
         stack: &mut Vec<IgnoreAt>,
         inherited_suffixes: &Suffixes,
     ) -> io::Result<()> {
-        let entries = fs::read_dir(path)?;
+        let entries = match fs::read_dir(path) {
+            Ok(entries) => entries,
+            // The ordinary C walk abandons a child it cannot open.
+            Err(_) if !rel.as_os_str().is_empty() => return Ok(()),
+            Err(error) => return Err(error),
+        };
         let old_len = stack.len();
         if !rel.as_os_str().is_empty() {
             stack.extend(IgnoreAt::load(path, &path.join(".gitignore")));
@@ -458,7 +463,11 @@ impl Walk {
             let name = entry.file_name();
             let rel = rel.join(&name);
             let entry_path = entry.path();
-            let kind = entry.file_type()?;
+            let Ok(metadata) = fs::symlink_metadata(&entry_path) else {
+                // The ordinary C walk also skips entries that fail lstat.
+                continue;
+            };
+            let kind = metadata.file_type();
             if kind.is_symlink() {
                 self.snapshot.ignore(&rel, "symlink");
             } else if kind.is_dir() {
@@ -493,13 +502,13 @@ impl Walk {
                 }
             } else if kind.is_file() {
                 self.file(
-                    &entry,
                     &entry_path,
                     &rel,
+                    metadata.len(),
                     under_gitignore,
                     stack,
                     suffixes,
-                )?;
+                );
             }
         }
         stack.truncate(old_len);
@@ -561,15 +570,14 @@ impl Walk {
 
     fn file(
         &mut self,
-        entry: &fs::DirEntry,
         absolute: &Path,
         rel: &Path,
+        size: u64,
         under_gitignore: bool,
         stack: &[IgnoreAt],
         suffixes: &Suffixes,
-    ) -> io::Result<()> {
-        let name = c_path(Path::new(&entry.file_name()));
-        let size = entry.metadata()?.len();
+    ) {
+        let name = c_path(Path::new(rel.file_name().expect("file has a name")));
         // SAFETY: the three filters read the live name and return a flag.
         let native_reason = unsafe {
             if cbm_has_ignored_suffix(name.as_ptr(), self.mode) {
@@ -602,7 +610,7 @@ impl Walk {
         });
         if let Some(reason) = ignore_reason {
             self.snapshot.ignore(rel, reason);
-            return Ok(());
+            return;
         }
 
         let path = c_path(absolute);
@@ -636,7 +644,6 @@ impl Walk {
                 size,
             });
         }
-        Ok(())
     }
 }
 
@@ -679,6 +686,53 @@ impl Scratch {
 impl Drop for Scratch {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+#[test]
+fn matches_c_when_a_child_cannot_be_read_or_statted() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let scratch = Scratch::new();
+    scratch.write("src/main.rs", "fn main() {}\n");
+    scratch.write("blocked-read/hidden.rs", "fn hidden() {}\n");
+    scratch.write("blocked-stat/hidden.rs", "fn hidden() {}\n");
+    let blocked_read = scratch.0.join("blocked-read");
+    let blocked_stat = scratch.0.join("blocked-stat");
+
+    fs::set_permissions(&blocked_read, fs::Permissions::from_mode(0o100))
+        .unwrap();
+    fs::set_permissions(&blocked_stat, fs::Permissions::from_mode(0o400))
+        .unwrap();
+    let read_error = fs::read_dir(&blocked_read).err();
+    let stat_error = fs::symlink_metadata(blocked_stat.join("hidden.rs")).err();
+    let blocked_root = Walk::run(&blocked_read, Mode::Full, 0);
+    let snapshots = Mode::ALL.map(|mode| {
+        let native = NativeWalk::run(&scratch.0, mode, 0).snapshot();
+        (mode, native, Walk::run(&scratch.0, mode, 0))
+    });
+    fs::set_permissions(&blocked_read, fs::Permissions::from_mode(0o700))
+        .unwrap();
+    fs::set_permissions(&blocked_stat, fs::Permissions::from_mode(0o700))
+        .unwrap();
+
+    // A test process with DAC override can read both paths.
+    if read_error.is_none() && stat_error.is_none() {
+        return;
+    }
+    assert_eq!(read_error.unwrap().kind(), io::ErrorKind::PermissionDenied);
+    assert_eq!(stat_error.unwrap().kind(), io::ErrorKind::PermissionDenied);
+    assert!(matches!(
+        blocked_root,
+        Err(error) if error.kind() == io::ErrorKind::PermissionDenied
+    ));
+    for (mode, mut native, rust) in snapshots {
+        assert_eq!(native.files.len(), 1, "{mode:?}");
+        assert_eq!(native.files[0].path.0, b"src/main.rs");
+        let mut rust = rust.unwrap();
+        native.sort();
+        rust.sort();
+        assert_eq!(native, rust, "{mode:?}");
     }
 }
 
