@@ -13,7 +13,6 @@ import shutil
 import stat
 import subprocess
 import sys
-from typing import Protocol
 
 from telethon import TelegramClient
 from telethon.sessions import StringSession
@@ -118,13 +117,12 @@ class Profile:
         return StringSession(self.session_string)
 
 
-class SessionIdentity(Protocol):
-    id: int
-    bot: bool | None
-
-
-def validate_identity(user: SessionIdentity | None, expected: int) -> None:
-    if user is None or user.id != expected or user.bot or expected == CUSTODY_ID:
+def validate_identity(user: object, expected: int) -> None:
+    if (
+        getattr(user, "id", None) != expected
+        or getattr(user, "bot", True)
+        or expected == CUSTODY_ID
+    ):
         raise StoreError("Telegram authorization does not match the approved human profile")
 
 
@@ -157,16 +155,24 @@ def read_profile(state: State, name: str) -> Profile:
     return Profile.parse(_helper(state, "get", name))
 
 
-@contextmanager
 def lock_authorization(state: State, session: StringSession):
     """Prevent use of the same saved authorization by another local broker."""
-    import fcntl
-
     key = session.auth_key
     if key is None:
         raise StoreError("Telegram profile has no authorization")
     digest = hashlib.sha256(key.key).hexdigest()
-    path = state.tool / "run" / f"authorization-{digest}.lock"
+    return lock_file(
+        state,
+        f"authorization-{digest}.lock",
+        "Telegram authorization is already in use by this broker",
+    )
+
+
+@contextmanager
+def lock_file(state: State, filename: str, conflict: str):
+    import fcntl
+
+    path = state.tool / "run" / filename
     fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
         info = os.fstat(fd)
@@ -179,7 +185,7 @@ def lock_authorization(state: State, session: StringSession):
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            raise StoreError("Telegram authorization is already in use by this broker") from None
+            raise StoreError(conflict) from None
         yield
     finally:
         os.close(fd)

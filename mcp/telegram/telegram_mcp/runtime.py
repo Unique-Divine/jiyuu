@@ -54,6 +54,7 @@ from sanitize import (
     sanitize_name,
     sanitize_user_content,
 )
+from telegram_mcp.session_store import Profile, State, StoreError, read_profile, valid_name
 from telegram_mcp.client_identity import client_identity_kwargs
 from telegram_mcp.request_policy import (
     CLIENT_FLOOD_SLEEP_THRESHOLD,
@@ -122,12 +123,21 @@ def get_entity_filter_type(entity: Any) -> Optional[str]:
 
 load_dotenv()
 
+_stored_names = os.environ.get("TELEGRAM_STORED_ACCOUNTS", "").strip()
+STORED_STATE: State | None = State.discover() if _stored_names else None
+STORED_PROFILES: dict[str, Profile] = {}
+if STORED_STATE is not None:
+    names = tuple(valid_name(name.strip()) for name in _stored_names.split(","))
+    if len(names) != len(set(names)):
+        raise StoreError("Stored profile names must be distinct")
+    STORED_PROFILES = {name: read_profile(STORED_STATE, name) for name in names}
+
 _api_id = os.getenv("TELEGRAM_API_ID")
 _api_hash = os.getenv("TELEGRAM_API_HASH")
-if not _api_id or not _api_hash:
+if not STORED_PROFILES and (not _api_id or not _api_hash):
     raise ValidationError("TELEGRAM_API_ID and TELEGRAM_API_HASH must be set.")
-TELEGRAM_API_ID = int(_api_id)
-TELEGRAM_API_HASH: str = _api_hash
+TELEGRAM_API_ID = int(_api_id) if _api_id and not STORED_PROFILES else 0
+TELEGRAM_API_HASH: str = _api_hash or ""
 
 mcp = FastMCP(
     "telegram",
@@ -329,7 +339,7 @@ def _build_proxy_for_label(label: str) -> tuple[Optional[Any], Optional[Any]]:
     return proxy, None
 
 
-def _build_client(session: Any, label: str) -> TelegramClient:
+def _build_client(session: Any, label: str, profile: Profile | None = None) -> TelegramClient:
     """Construct a ``TelegramClient`` honoring per-label proxy configuration."""
     proxy, connection = _build_proxy_for_label(label)
     kwargs: dict[str, Any] = {}
@@ -341,7 +351,9 @@ def _build_client(session: Any, label: str) -> TelegramClient:
     # Absorb short waits in transfers and paginated reads; run_limited lowers
     # this to 0 for bounded requests so a timeout never cancels a wait.
     kwargs["flood_sleep_threshold"] = CLIENT_FLOOD_SLEEP_THRESHOLD
-    return PolicyTelegramClient(session, TELEGRAM_API_ID, TELEGRAM_API_HASH, **kwargs)
+    api_id = profile.api_id if profile is not None else TELEGRAM_API_ID
+    api_hash = profile.api_hash if profile is not None else TELEGRAM_API_HASH
+    return PolicyTelegramClient(session, api_id, api_hash, **kwargs)
 
 
 def _discover_accounts() -> dict[str, TelegramClient]:
@@ -355,6 +367,12 @@ def _discover_accounts() -> dict[str, TelegramClient]:
     Each client is constructed via :func:`_build_client`, which applies any
     matching ``TELEGRAM_PROXY_*`` configuration (optionally per-label).
     """
+    if STORED_PROFILES:
+        return {
+            name: _build_client(profile.session(), name, profile)
+            for name, profile in STORED_PROFILES.items()
+        }
+
     accounts: dict[str, TelegramClient] = {}
 
     prefix_str = "TELEGRAM_SESSION_STRING_"
@@ -595,9 +613,16 @@ console_handler.setLevel(logging.ERROR)  # Set to ERROR for production, INFO for
 # top-level main.py, even though runtime code now lives inside telegram_mcp/.
 package_dir = os.path.dirname(os.path.abspath(__file__))
 script_dir = os.path.dirname(package_dir)
-log_file_path = os.path.join(script_dir, "mcp_errors.log")
+log_file_path = (
+    os.fspath(STORED_STATE.tool / "logs" / "mcp_errors.log")
+    if STORED_STATE
+    else os.path.join(script_dir, "mcp_errors.log")
+)
 
 try:
+    if STORED_STATE:
+        fd = os.open(log_file_path, os.O_APPEND | os.O_CREAT | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+        os.close(fd)
     file_handler = logging.FileHandler(log_file_path, mode="a")  # Append mode
     file_handler.setLevel(logging.ERROR)
 
