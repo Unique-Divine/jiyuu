@@ -96,6 +96,20 @@ class ExportDiffTest(unittest.TestCase):
     b = self.db("b.db", id_offset=100)
     self.assertEqual(self.keys(a, b), set())
 
+  def test_final_table_delimiter_allows_formatting_only(self) -> None:
+    a = export_db(self.db("a.db"))
+    b = export_db(self.db("b.db"))
+    key = "table:fixture"
+    a["schema"][key] = "CREATE TABLE fixture (name TEXT DEFAULT 'x )' )"
+    b["schema"][key] = "CREATE TABLE fixture (name TEXT DEFAULT 'x )')"
+    self.assertEqual(diff_exports(a, b).diffs(), [])
+
+    b["schema"][key] = "CREATE TABLE fixture (name TEXT DEFAULT 'x)')"
+    self.assertEqual(
+      [(diff.layer, diff.key) for diff in diff_exports(a, b).diffs()],
+      [("schema", "sqlite_master.table:fixture")],
+    )
+
   def test_property_change_is_l2(self) -> None:
     a = self.db("a.db")
     b = self.db("b.db", edges=[("main", "helper", "CALLS",
