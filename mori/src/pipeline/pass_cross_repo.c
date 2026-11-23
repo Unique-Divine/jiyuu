@@ -1988,9 +1988,12 @@ static bool cr_peers_key(const char *project, char *buf, size_t size) {
     return written > 0 && (size_t)written < size;
 }
 
-static cbm_store_t *cr_open_peer(const char *name) {
+static cbm_store_t *cr_open_peer(const char *name, bool wait_for_lock) {
     char path[CR_PATH_BUF];
-    return cr_db_path(name, path, sizeof(path)) ? cbm_store_open_path_query(path) : NULL;
+    if (!cr_db_path(name, path, sizeof(path))) {
+        return NULL;
+    }
+    return wait_for_lock ? cbm_store_open_path_query(path) : cbm_store_open_path_query_nowait(path);
 }
 
 static bool cr_save_peers(cbm_store_t *source, const char *project, yyjson_mut_doc *peers) {
@@ -2021,10 +2024,16 @@ static bool cr_reverse_pending_key(const char *project, char *buf, size_t size) 
     return written > 0 && (size_t)written < size;
 }
 
+static bool cr_reverse_mode_key(const char *project, char *buf, size_t size) {
+    int written = snprintf(buf, size, "cross_repo_reverse_mode:%s", project);
+    return written > 0 && (size_t)written < size;
+}
+
 typedef enum {
     CR_REVERSE_COMPLETE,
     CR_REVERSE_PUBLISHED,
     CR_REVERSE_AUTOMATIC,
+    CR_REVERSE_LEGACY_AUTOMATIC,
 } cr_reverse_state_t;
 
 static cr_reverse_state_t cr_reverse_pending(cbm_store_t *source, const char *project) {
@@ -2036,21 +2045,50 @@ static cr_reverse_state_t cr_reverse_pending(cbm_store_t *source, const char *pr
         if (strcmp(value, "1") == 0) {
             state = CR_REVERSE_PUBLISHED;
         } else if (strcmp(value, "2") == 0) {
-            state = CR_REVERSE_AUTOMATIC;
+            state = CR_REVERSE_LEGACY_AUTOMATIC;
         }
     }
     cbm_free(CBM_MEM_CLASS_STORE, value);
+    if (state == CR_REVERSE_PUBLISHED && cr_reverse_mode_key(project, key, sizeof(key)) &&
+        cbm_store_meta_get(source, key, &value) == CBM_STORE_OK) {
+        if (strcmp(value, "automatic") == 0) {
+            state = CR_REVERSE_AUTOMATIC;
+        }
+        cbm_free(CBM_MEM_CLASS_STORE, value);
+    }
     return state;
+}
+
+static bool cr_delete_reverse_mode(cbm_store_t *source, const char *key) {
+    sqlite3_stmt *stmt = NULL;
+    bool ok = sqlite3_prepare_v2(cbm_store_get_db(source), "DELETE FROM store_meta WHERE k=?1", -1,
+                                 &stmt, NULL) == SQLITE_OK &&
+              sqlite3_bind_text(stmt, 1, key, -1, SQLITE_STATIC) == SQLITE_OK &&
+              sqlite3_step(stmt) == SQLITE_DONE;
+    return sqlite3_finalize(stmt) == SQLITE_OK && ok;
 }
 
 static bool cr_set_reverse_pending(cbm_store_t *source, const char *project,
                                    cr_reverse_state_t state) {
-    char key[CR_QN_BUF];
-    const char *value = state == CR_REVERSE_AUTOMATIC   ? "2"
-                        : state == CR_REVERSE_PUBLISHED ? "1"
-                                                        : "0";
-    return cr_reverse_pending_key(project, key, sizeof(key)) &&
-           cbm_store_meta_put(source, key, value) == CBM_STORE_OK;
+    char pending[CR_QN_BUF], mode[CR_QN_BUF];
+    if (!cr_reverse_pending_key(project, pending, sizeof(pending)) ||
+        !cr_reverse_mode_key(project, mode, sizeof(mode)) ||
+        cbm_store_exec(source, "SAVEPOINT cr_reverse_state") != CBM_STORE_OK) {
+        return false;
+    }
+    /* Keep the pending value readable by releases that predate the mode key. */
+    bool ok = cbm_store_meta_put(source, pending, state == CR_REVERSE_COMPLETE ? "0" : "1") ==
+                  CBM_STORE_OK &&
+              (state == CR_REVERSE_AUTOMATIC
+                   ? cbm_store_meta_put(source, mode, "automatic") == CBM_STORE_OK
+                   : cr_delete_reverse_mode(source, mode));
+    if (ok && cbm_store_exec(source, "RELEASE cr_reverse_state") == CBM_STORE_OK) {
+        return true;
+    }
+    if (!sqlite3_get_autocommit(cbm_store_get_db(source))) {
+        (void)cbm_store_exec(source, "ROLLBACK TO cr_reverse_state; RELEASE cr_reverse_state");
+    }
+    return false;
 }
 
 bool cbm_cross_repo_reverse_pending(const char *project) {
@@ -2106,8 +2144,11 @@ static bool cr_stale_named_client(const char *client, const char *provider, cons
             yyjson_doc *peers = cr_read_peers(store, client);
             const char *observed =
                 yyjson_get_str(yyjson_obj_get(yyjson_doc_get_root(peers), provider));
-            stale = !observed || strcmp(observed, generation) != 0 ||
-                    cr_reverse_pending(store, client) == CR_REVERSE_AUTOMATIC;
+            stale = !observed || strcmp(observed, generation) != 0;
+            if (!stale) {
+                cr_reverse_state_t state = cr_reverse_pending(store, client);
+                stale = state == CR_REVERSE_AUTOMATIC || state == CR_REVERSE_LEGACY_AUTOMATIC;
+            }
             yyjson_doc_free(peers);
             break;
         }
@@ -2144,7 +2185,7 @@ static bool cr_peer_is_stale(const char *name, const char *observed) {
     if (!observed) {
         return true;
     }
-    cbm_store_t *peer = cr_open_peer(name);
+    cbm_store_t *peer = cr_open_peer(name, true);
     char generation[CBM_GRAPH_COMPARE_GENERATION_SIZE];
     bool same = peer &&
                 cbm_store_generation(peer, generation, sizeof(generation)) == CBM_STORE_OK &&
@@ -2437,7 +2478,7 @@ int cbm_cross_repo_relink_stage(const char *live_path, const char *stage_path, c
         if (strcmp(target, project) == 0) {
             continue;
         }
-        cbm_store_t *provider = cr_open_peer(target);
+        cbm_store_t *provider = cr_open_peer(target, true);
         if (!provider || !cr_store_has_exact_project(provider, target) ||
             !cbm_store_edges_schema_current(provider)) {
             cbm_store_close(provider);
@@ -2527,6 +2568,14 @@ bool cbm_cross_repo_reconcile_published(const char *project, const atomic_int *c
         cbm_store_close(source);
         return true;
     }
+    if (state == CR_REVERSE_LEGACY_AUTOMATIC) {
+        if (cr_cancel_requested(&run) ||
+            !cr_set_reverse_pending(source, project, CR_REVERSE_AUTOMATIC)) {
+            cbm_store_close(source);
+            return false;
+        }
+        state = CR_REVERSE_AUTOMATIC;
+    }
     yyjson_doc *peers = cr_read_peers(source, project);
     yyjson_val *expected = yyjson_doc_get_root(peers);
     bool ok = yyjson_is_obj(expected);
@@ -2585,7 +2634,7 @@ bool cbm_cross_repo_repair_saved(const char *project, const atomic_int *cancelle
         if (strcmp(target, project) == 0) {
             continue;
         }
-        cbm_store_t *provider = cr_open_peer(target);
+        cbm_store_t *provider = cr_open_peer(target, false);
         cbm_store_read_scope_t *scope = NULL;
         ok = provider &&
              cbm_store_read_scope_open(provider, cr_cancel_read, &run, &scope) == CBM_STORE_OK &&
