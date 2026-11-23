@@ -62,7 +62,8 @@ impl IndexSession {
             .env("CBM_PROFILE", "1")
             .env("CBM_LOG_LEVEL", "info")
             .env("MORI_IMPL_INDEX_MANIFEST", self.implementation)
-            .env("MORI_IMPL_INDEX_ROUTE", self.implementation);
+            .env("MORI_IMPL_INDEX_ROUTE", self.implementation)
+            .env("MORI_IMPL_FULL_BUILD_DRIVER", self.implementation);
         command
     }
 
@@ -127,6 +128,13 @@ impl IndexSession {
         assert_eq!(output["status"], "indexed", "{output}");
         let logs = self.take_worker_logs();
         self.check_route(&logs, step.decision);
+        let rust_full = self.implementation == "rust"
+            && matches!(step.decision, None | Some(("staged", "full")));
+        assert_eq!(
+            logs.contains("msg=pipeline.full_build_driver implementation=rust"),
+            rust_full,
+            "{logs}"
+        );
         assert!(logs.contains(step.log), "{logs}");
         let used_rust = logs
             .contains("msg=incremental.manifest_compare implementation=rust");
@@ -218,6 +226,7 @@ impl IndexSession {
         let logs = self.take_worker_logs();
         self.check_route(&logs, Some(("staged", "full")));
         assert!(logs.contains("reason=adr_migrate_failed"), "{logs}");
+        assert!(!logs.contains("msg=pipeline.full_build_driver"), "{logs}");
         assert_eq!(self.state(name), before);
         assert!(
             fs::read(&db_path).unwrap() == before_graph,
@@ -328,6 +337,9 @@ fn rust_routing_preserves_native_update_paths_and_generation() {
             eprintln!(
                 "Closure repair matched clean full nodes, edges, and file hashes"
             );
+        }
+        if step.decision == Some(("staged", "full")) {
+            assert_eq!(rust.graph(&name), native.graph(&name));
         }
         project = Some(name);
         assert_eq!(native_generation != previous_native, step.publishes);

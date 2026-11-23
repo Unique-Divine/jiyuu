@@ -2752,7 +2752,7 @@ static void run_predump_passes(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx) {
         {predump_sem, "semantic_edges", PREDUMP_FAST_DOC_CANDIDATES},
         {predump_complexity, "complexity", PREDUMP_EVERY_MODE},
         /* Importance runs LAST: it reads CALLS/USAGE (extraction) and TESTS
-         * (pass_tests, which run_post_extraction runs before this loop), so
+         * (pass_tests, which the full-build driver runs before this loop), so
          * every edge type its score depends on already exists here. */
         {predump_importance, "importance", PREDUMP_EVERY_MODE},
     };
@@ -4328,103 +4328,168 @@ static int run_githistory(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx) {
 
 /* ── Pipeline run ────────────────────────────────────────────────── */
 
-/* Run tests + git history. Returns 0 on success. */
-static int run_tests_and_history(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
-                                 const cbm_file_info_t *files, int file_count) {
+#define MIN_FILES_FOR_PARALLEL 50
+
+struct cbm_full_build {
+    cbm_pipeline_t *pipeline;
+    cbm_pipeline_ctx_t *ctx;
+    const cbm_file_info_t *files;
+    int file_count;
+    const cbm_file_hash_t *baseline;
+    int baseline_count;
+    cbm_stem_marks_t marks;
     struct timespec t;
-    cbm_clock_gettime(CLOCK_MONOTONIC, &t);
-    CBM_PROF_START(t_tests);
-    int rc = cbm_pipeline_pass_tests(ctx, files, file_count);
-    CBM_PROF_END_N("pipeline", "pass_tests", t_tests, file_count);
-    cbm_log_info("pass.timing", "pass", "tests", "elapsed_ms", itoa_buf((int)elapsed_ms(t)));
-    pipeline_phase_mark("tests");
-    if (rc == 0 && !check_cancel(p)) {
-        CBM_PROF_START(t_gh);
-        rc = run_githistory(p, ctx);
-        CBM_PROF_END("pipeline", "pass_githistory", t_gh);
+};
+
+static int full_structure(cbm_full_build_t *run) {
+    cbm_clock_gettime(CLOCK_MONOTONIC, &run->t);
+    CBM_PROF_START(t_struct);
+    pass_structure(run->pipeline, run->ctx->stem_marks, run->files, run->file_count);
+    CBM_PROF_END_N("pipeline", "pass_structure", t_struct, run->file_count);
+    cbm_log_info("pass.timing", "pass", "structure", "elapsed_ms",
+                 itoa_buf((int)elapsed_ms(run->t)));
+    pipeline_phase_mark("structure");
+    return check_cancel(run->pipeline);
+}
+
+static int full_workers(cbm_full_build_t *run) {
+    cbm_pipeline_t *p = run->pipeline;
+    if (p->frozen) {
+        frozen_observe(p, 0, 1);
+        return 1;
     }
-    if (check_cancel(p)) {
-        return CBM_NOT_FOUND;
+    return cbm_pipeline_worker_count(p);
+}
+
+static void full_release_stem_marks(cbm_full_build_t *run) {
+    if (run->ctx->stem_marks) {
+        run->ctx->stem_marks = NULL;
+        cbm_stem_marks_free(&run->marks);
     }
+}
+
+static int full_extract(cbm_full_build_t *run, int workers, bool parallel) {
+    cbm_pipeline_t *p = run->pipeline;
+    CBM_PROF_START(t_extract_total);
+    int rc = parallel
+                 ? run_parallel_pipeline(p, run->ctx, run->files, run->file_count, workers, &run->t)
+                 : run_sequential_pipeline(p, run->ctx, run->files, run->file_count, &run->t);
+    CBM_PROF_END_N("pipeline", "2_extraction_total", t_extract_total, run->file_count);
+    if (rc != CBM_PIPELINE_ABORT_PRESERVE_DB) {
+        if (check_cancel(p)) {
+            rc = CBM_NOT_FOUND;
+        } else {
+            /* Drop Images whose edges all went to their components (P4.2b). */
+            (void)cbm_gbuf_delete_unreferenced(p->gbuf, "Image", DK_IMAGE_EDGES);
+        }
+    }
+    full_release_stem_marks(run);
     return rc;
 }
 
-/* Run tests, git history, predump passes, and dump+persist. */
-static int run_post_extraction(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
-                               const cbm_file_info_t *files, int file_count,
-                               const cbm_file_hash_t *baseline_manifest, int baseline_count) {
-    int rc = run_tests_and_history(p, ctx, files, file_count);
-    if (rc != 0) {
-        return rc;
+static int full_tests(cbm_full_build_t *run) {
+    struct timespec t;
+    cbm_clock_gettime(CLOCK_MONOTONIC, &t);
+    CBM_PROF_START(t_tests);
+    int rc = cbm_pipeline_pass_tests(run->ctx, run->files, run->file_count);
+    CBM_PROF_END_N("pipeline", "pass_tests", t_tests, run->file_count);
+    cbm_log_info("pass.timing", "pass", "tests", "elapsed_ms", itoa_buf((int)elapsed_ms(t)));
+    pipeline_phase_mark("tests");
+    return rc != 0 && check_cancel(run->pipeline) ? CBM_NOT_FOUND : rc;
+}
+
+static int full_history(cbm_full_build_t *run) {
+    cbm_pipeline_t *p = run->pipeline;
+    int rc = 0;
+    if (!check_cancel(p)) {
+        CBM_PROF_START(t_gh);
+        rc = run_githistory(p, run->ctx);
+        CBM_PROF_END("pipeline", "pass_githistory", t_gh);
     }
+    return check_cancel(p) ? CBM_NOT_FOUND : rc;
+}
 
+static void full_predump(cbm_full_build_t *run) {
     CBM_PROF_START(t_predump);
-    run_predump_passes(p, ctx);
+    run_predump_passes(run->pipeline, run->ctx);
     CBM_PROF_END("pipeline", "3_predump_passes_total", t_predump);
+}
 
+static int full_fence(cbm_full_build_t *run) {
+    cbm_pipeline_t *p = run->pipeline;
 #if defined(CBM_INCREMENTAL_TEST_API) && CBM_INCREMENTAL_TEST_API
     if (cbm_pipeline_persist_test_take_cancel_after_predump()) {
         atomic_store(p->cancelled, 1);
     }
 #endif
+    return check_cancel(p) ? CBM_PIPELINE_ABORT_PRESERVE_DB : 0;
+}
 
-    if (check_cancel(p)) {
-        return CBM_PIPELINE_ABORT_PRESERVE_DB;
-    }
-
+static int full_stage_write(cbm_full_build_t *run) {
     struct timespec t;
     CBM_PROF_START(t_dump);
-    rc = dump_and_persist_hashes(p, baseline_manifest, baseline_count, &t);
+    int rc = dump_and_persist_hashes(run->pipeline, run->baseline, run->baseline_count, &t);
     CBM_PROF_END("pipeline", "4_dump_and_persist", t_dump);
     return rc;
 }
 
-#define MIN_FILES_FOR_PARALLEL 50
-
-/* Run structure + extraction passes (parallel or sequential). */
-static int run_structure_and_extraction(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
-                                        const cbm_file_info_t *files, int file_count) {
-    struct timespec t;
-    cbm_clock_gettime(CLOCK_MONOTONIC, &t);
-    CBM_PROF_START(t_struct);
-    pass_structure(p, ctx->stem_marks, files, file_count);
-    CBM_PROF_END_N("pipeline", "pass_structure", t_struct, file_count);
-    cbm_log_info("pass.timing", "pass", "structure", "elapsed_ms", itoa_buf((int)elapsed_ms(t)));
-    pipeline_phase_mark("structure");
-    if (check_cancel(p)) {
-        return CBM_NOT_FOUND;
-    }
-
-    int worker_count = p->frozen ? 1 : cbm_pipeline_worker_count(p);
-    if (p->frozen)
-        frozen_observe(p, 0, 1);
-    CBM_PROF_START(t_extract_total);
-    int rc = (worker_count > SKIP_ONE && file_count > MIN_FILES_FOR_PARALLEL)
-                 ? run_parallel_pipeline(p, ctx, files, file_count, worker_count, &t)
-                 : run_sequential_pipeline(p, ctx, files, file_count, &t);
-    CBM_PROF_END_N("pipeline", "2_extraction_total", t_extract_total, file_count);
-    if (rc == CBM_PIPELINE_ABORT_PRESERVE_DB) {
+static int run_full_build_c(cbm_full_build_t *run) {
+    int rc = full_structure(run);
+    if (rc != 0)
         return rc;
-    }
-    if (check_cancel(p)) {
-        return CBM_NOT_FOUND;
-    }
-    /* A repository Image whose edges all went to its components (pass_docker.c
-     * P4.2b) is left without any: it goes, as on the incremental routes. */
-    (void)cbm_gbuf_delete_unreferenced(p->gbuf, "Image", DK_IMAGE_EDGES);
-    return rc;
+    int workers = full_workers(run);
+    rc = full_extract(run, workers, workers > 1 && run->file_count > MIN_FILES_FOR_PARALLEL);
+    if (rc != 0)
+        return rc;
+    rc = full_tests(run);
+    if (rc != 0)
+        return rc;
+    rc = full_history(run);
+    if (rc != 0)
+        return rc;
+    full_predump(run);
+    rc = full_fence(run);
+    return rc != 0 ? rc : full_stage_write(run);
 }
 
-/* The stem collisions decide Folder QNs (structure) and Module QNs
- * (extraction); both phases read the one set. */
-static int run_extraction_phase(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
-                                const cbm_file_info_t *files, int file_count) {
-    cbm_stem_marks_t marks;
-    cbm_stem_marks_init(&marks, p->project_name, files, file_count);
-    ctx->stem_marks = &marks;
-    int rc = run_structure_and_extraction(p, ctx, files, file_count);
-    ctx->stem_marks = NULL;
-    cbm_stem_marks_free(&marks);
+static cbm_full_build_driver_fn full_build_driver;
+
+void cbm_pipeline_set_full_build_driver(cbm_full_build_driver_fn driver) {
+    full_build_driver = driver;
+}
+
+static int run_full_build(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files,
+                          int file_count, const cbm_file_hash_t *baseline, int baseline_count) {
+    static const cbm_full_build_ops_t ops = {
+        .structure = full_structure,
+        .workers = full_workers,
+        .extract = full_extract,
+        .tests = full_tests,
+        .history = full_history,
+        .predump = full_predump,
+        .fence = full_fence,
+        .stage_write = full_stage_write,
+    };
+    cbm_full_build_t run = {
+        .pipeline = p,
+        .ctx = ctx,
+        .files = files,
+        .file_count = file_count,
+        .baseline = baseline,
+        .baseline_count = baseline_count,
+    };
+    /* Folder and Module QNs share the same stem collisions through extraction. */
+    cbm_stem_marks_init(&run.marks, p->project_name, files, file_count);
+    ctx->stem_marks = &run.marks;
+    int rc;
+    if (full_build_driver) {
+        cbm_log_info("pipeline.full_build_driver", "implementation", "rust", "files",
+                     itoa_buf(file_count));
+        rc = full_build_driver(&run, &ops, file_count, MIN_FILES_FOR_PARALLEL);
+    } else {
+        rc = run_full_build_c(&run);
+    }
+    full_release_stem_marks(&run); /* structure may have returned before extraction */
     return rc;
 }
 
@@ -4645,12 +4710,7 @@ static int cbm_pipeline_run_staged(cbm_pipeline_t *p) {
         .excluded_count = p->excluded_count,
     };
 
-    rc = run_extraction_phase(p, &ctx, files, file_count);
-    if (rc != 0) {
-        goto cleanup;
-    }
-
-    rc = run_post_extraction(p, &ctx, files, file_count, baseline_manifest, baseline_count);
+    rc = run_full_build(p, &ctx, files, file_count, baseline_manifest, baseline_count);
     if (rc != 0) {
         goto cleanup;
     }
