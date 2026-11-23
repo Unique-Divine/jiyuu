@@ -1,11 +1,13 @@
 //! Exercises explicit GraphQL relinks through the linked Mori executable.
 #![cfg(feature = "c-backend")]
 
+use std::cell::Cell;
 use std::fs::{self, DirBuilder};
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 use rusqlite::{Connection, OpenFlags, params};
 use serde_json::{Value, json};
@@ -616,6 +618,124 @@ fn linear_cypher_reads_through_the_callers_transaction() {
     snapshot.rollback().expect("caller owns transaction");
     let answer = query.execute_on(&db, CLIENT).expect("read after rollback");
     assert!(answer.rows.is_empty());
+}
+
+#[test]
+fn linear_cypher_stops_inside_high_fanout_adjacency() {
+    use cypher_linear::{ExecutionBudget, ExecutionError};
+
+    let fixture = Fixture::new();
+    let mut db = fixture.index(CLIENT);
+    let tx = db.transaction().expect("begin fixture write");
+    let caller = node(&tx, CLIENT, "Caller", "a", "a", "a.py");
+    let relay = node(&tx, CLIENT, "Relay", "b", "b", "b.py");
+    edge(&tx, CLIENT, caller, relay, "CALLS", json!({}));
+    for n in 0..2048 {
+        let name = format!("target{n}");
+        let target = node(&tx, CLIENT, "Other", &name, &name, "c.py");
+        edge(&tx, CLIENT, relay, target, "CALLS", json!({}));
+    }
+    tx.commit().expect("publish fixture data");
+
+    let query = cypher_linear::classify(
+        "MATCH (a:Caller)-[:CALLS]->(b:Relay)-[:CALLS]->(c:Wanted) RETURN c.name",
+    )
+    .expect("classify bounded query");
+    assert!(query.execute_on(&db, CLIENT).unwrap().rows.is_empty());
+
+    // If the budget were tested only after collecting adjacency, the scan
+    // would return this storage error instead of the deadline or cancellation.
+    db.execute(
+        "UPDATE nodes SET properties = X'FF' WHERE name = 'target2047'",
+        [],
+    )
+    .expect("make a tail endpoint unreadable");
+    assert!(matches!(
+        query.execute_on(&db, CLIENT),
+        Err(ExecutionError::Storage(_))
+    ));
+
+    let start = Instant::now();
+    let checks = Cell::new(0);
+    let clock = || {
+        checks.set(checks.get() + 1);
+        start
+            + Duration::from_secs(match checks.get() {
+                1 => 0,
+                2 => 29,
+                _ => 30,
+            })
+    };
+    let mut deadline = ExecutionBudget::new(&clock, &|| false);
+    assert!(matches!(
+        query.execute_with_budget(&db, CLIENT, &mut deadline),
+        Err(ExecutionError::Deadline)
+    ));
+    assert_eq!(checks.get(), 3);
+
+    let checks = Cell::new(0);
+    let cancelled = || {
+        checks.set(checks.get() + 1);
+        checks.get() == 2
+    };
+    let now = || start;
+    let mut budget = ExecutionBudget::new(&now, &cancelled);
+    assert!(matches!(
+        query.execute_with_budget(&db, CLIENT, &mut budget),
+        Err(ExecutionError::Cancelled)
+    ));
+    assert_eq!(checks.get(), 2);
+}
+
+#[test]
+fn linear_cypher_keeps_its_graph_when_a_replacement_publishes() {
+    let fixture = Fixture::new();
+    let mut db = fixture.index(CLIENT);
+    db.execute_batch("PRAGMA journal_mode = DELETE;")
+        .expect("use a single-file database");
+    let tx = db.transaction().expect("begin fixture write");
+    let caller = node(&tx, CLIENT, "Caller", "a", "a", "a.py");
+    for n in 0..1024 {
+        let qualified_name = format!("target{n}");
+        let target = node(&tx, CLIENT, "Target", "old", &qualified_name, "b.py");
+        edge(&tx, CLIENT, caller, target, "CALLS", json!({}));
+    }
+    tx.commit().expect("publish fixture data");
+
+    let live_path = fixture.0.join("cache").join("client.db");
+    let staged_path = live_path.with_extension("stage");
+    fs::copy(&live_path, &staged_path).expect("copy the staged generation");
+    let staged = Connection::open(&staged_path).expect("open staged generation");
+    staged
+        .execute("UPDATE nodes SET name = 'new' WHERE label = 'Target'", [])
+        .expect("prepare the replacement graph");
+    drop(staged);
+
+    let query = cypher_linear::classify(
+        "MATCH (a:Caller)-[:CALLS]->(b:Target) RETURN b.name",
+    )
+    .expect("classify bounded query");
+    let start = Instant::now();
+    let checks = Cell::new(0);
+    let clock = || {
+        checks.set(checks.get() + 1);
+        if checks.get() == 3 {
+            fs::rename(&staged_path, &live_path).expect("publish replacement");
+        }
+        start
+    };
+    let mut budget = cypher_linear::ExecutionBudget::new(&clock, &|| false);
+    let original = query
+        .execute_with_budget(&db, CLIENT, &mut budget)
+        .expect("read the caller's graph during publication");
+    assert!(checks.get() > 3, "publish inside adjacency traversal");
+    assert_eq!(original.rows.len(), 1024);
+    assert!(original.rows.iter().all(|row| row == &["old"]));
+    let replacement = query
+        .execute(&live_path, CLIENT)
+        .expect("read the published replacement");
+    assert_eq!(replacement.rows.len(), 1024);
+    assert!(replacement.rows.iter().all(|row| row == &["new"]));
 }
 
 #[test]
