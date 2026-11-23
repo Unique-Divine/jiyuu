@@ -1114,7 +1114,7 @@ fn index_fixture(
 
 #[test]
 #[ignore = "requires an embedded UI build with MORI_WITH_UI=1"]
-fn standalone_ui_signals_cancel_active_rpc() {
+fn standalone_ui_signals_cancel_active_reads() {
     use std::io::Write;
     use std::net::{Ipv4Addr, TcpListener, TcpStream};
     use std::process::Child;
@@ -1141,15 +1141,28 @@ fn standalone_ui_signals_cancel_active_rpc() {
     let db_file = format!("{project}.db");
     let graph_db = writer.0.join("cache").join(&db_file);
 
-    let body = serde_json::json!({
+    let changes = serde_json::json!({
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
         "params": {"name": "detect_changes", "arguments": {
             "project": project, "scope": "files", "base_branch": "HEAD"
         }}
     })
     .to_string();
+    let projects = serde_json::json!({
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": {"name": "list_projects", "arguments": {"format": "json"}}
+    })
+    .to_string();
+    let repo_info = format!("/api/repo-info?project={project}");
+    let impact = format!("/api/impact-analysis?project={project}&file=app.py");
 
-    for signal in [libc::SIGINT, libc::SIGTERM] {
+    for (signal, method, target, body, cancelled_rpc) in [
+        (libc::SIGINT, "POST", "/rpc", changes.as_str(), true),
+        (libc::SIGTERM, "POST", "/rpc", changes.as_str(), true),
+        (libc::SIGINT, "POST", "/rpc", projects.as_str(), false),
+        (libc::SIGTERM, "GET", repo_info.as_str(), "", false),
+        (libc::SIGTERM, "GET", impact.as_str(), "", false),
+    ] {
         let scratch = Scratch::new("ui-signal");
         fs::copy(&graph_db, scratch.0.join("cache").join(&db_file)).unwrap();
         let fixture_bin = scratch.0.join("bin");
@@ -1158,8 +1171,8 @@ fn standalone_ui_signals_cancel_active_rpc() {
         fs::write(
             &git,
             r#"#!/bin/sh
-[ "$3" = rev-parse ] || exit 2
-: > "$MORI_TEST_GIT_ENTERED"
+[ "$3" = rev-parse ] || [ "$1" = --no-optional-locks ] || exit 2
+printf '%s\n' "$$" > "$MORI_TEST_GIT_ENTERED"
 exec /bin/sleep 30
 "#,
         )
@@ -1175,6 +1188,7 @@ exec /bin/sleep 30
             .env("PATH", &fixture_bin)
             .env("CBM_LOG_LEVEL", "info")
             .env("CBM_LOG_FORMAT", "text")
+            .env("TMPDIR", &scratch.0)
             .env("MORI_TEST_GIT_ENTERED", &entered)
             .stderr(fs::File::create(&log).unwrap())
             .spawn()
@@ -1195,19 +1209,25 @@ exec /bin/sleep 30
         };
         write!(
             conn,
-            "POST /rpc HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\n\
+            "{method} {target} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\n\
              Content-Length: {}\r\n\r\n{body}",
             body.len(),
         )
         .unwrap();
-        while !entered.is_file() {
+        let git_pid: libc::pid_t = loop {
+            if let Some(pid) = fs::read_to_string(&entered)
+                .ok()
+                .and_then(|marker| marker.trim().parse().ok())
+            {
+                break pid;
+            }
             assert!(
                 Instant::now() < deadline,
                 "Git was not entered: {}",
                 log_text()
             );
             sleep(Duration::from_millis(10));
-        }
+        };
 
         // SAFETY: the child is owned by ui and has not been reaped.
         assert_eq!(unsafe { libc::kill(ui.0.id() as libc::pid_t, signal) }, 0);
@@ -1225,12 +1245,21 @@ exec /bin/sleep 30
         };
         let logs = log_text();
         assert!(status.success(), "{status}: {logs}");
-        assert!(
-            logs.lines().any(|line| line.contains("tool=detect_changes")
-                && line.contains("cancelled=true")
-                && line.contains("timed_out=false")),
-            "{logs}"
-        );
+        if cancelled_rpc {
+            assert!(
+                logs.lines().any(|line| line.contains("tool=detect_changes")
+                    && line.contains("cancelled=true")
+                    && line.contains("timed_out=false")),
+                "{logs}"
+            );
+        } else {
+            // SAFETY: signal 0 only probes the child PID recorded by our fixture.
+            assert_eq!(unsafe { libc::kill(git_pid, 0) }, -1, "{logs}");
+            assert_eq!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::ESRCH)
+            );
+        }
         assert_eq!(fs::read_dir(scratch.0.join("rt")).unwrap().count(), 0);
     }
 }

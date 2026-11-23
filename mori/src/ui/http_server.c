@@ -3705,8 +3705,10 @@ bool cbm_http_server_free(cbm_http_server_t *srv) {
 void cbm_http_server_stop(cbm_http_server_t *srv) {
     if (srv) {
         atomic_store(&srv->stop_flag, 1);
-        if (srv->read_only)
+        if (srv->read_only) {
             (void)cbm_mcp_server_cancel_active(srv->mcp);
+            cbm_atlas_impact_analysis_cancel();
+        }
         cbm_httpd_interrupt(srv->listener);
     }
 }
@@ -3727,6 +3729,13 @@ bool cbm_http_server_cancel_scheduled_run(cbm_http_server_t *srv) {
                                                    memory_order_acq_rel, memory_order_acquire);
 }
 
+#ifndef _WIN32
+static bool standalone_git_cancelled(void *context) {
+    cbm_http_server_t *srv = context;
+    return atomic_load(&srv->stop_flag) != 0;
+}
+#endif
+
 void cbm_http_server_run(cbm_http_server_t *srv) {
     if (!srv)
         return;
@@ -3740,6 +3749,10 @@ void cbm_http_server_run(cbm_http_server_t *srv) {
         return;
     }
 
+#ifndef _WIN32
+    if (srv->read_only)
+        cbm_git_context_set_capture_cancel(standalone_git_cancelled, srv);
+#endif
     while (!atomic_load(&srv->stop_flag)) {
         cbm_http_conn_t *conn = cbm_httpd_accept(srv->listener, 200);
         if (!conn)
@@ -3771,6 +3784,10 @@ void cbm_http_server_run(cbm_http_server_t *srv) {
         /* Retained response caches can be released by a different thread. */
         cbm_mem_class_flush_thread();
     }
+#ifndef _WIN32
+    if (srv->read_only)
+        cbm_git_context_set_capture_cancel(NULL, NULL);
+#endif
     cbm_mem_class_flush_thread();
     atomic_store_explicit(&srv->run_state, HTTP_RUN_COMPLETED, memory_order_release);
 }

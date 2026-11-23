@@ -13,6 +13,7 @@
 #include "foundation/platform.h"
 #include <pthread.h>
 #include <errno.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <sqlite3.h>
 #include <yyjson/yyjson.h>
@@ -20,6 +21,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+
+static atomic_bool ia_cancelled;
 
 enum {
     IA_SEEDS = 128,
@@ -227,7 +230,7 @@ typedef struct {
 static char *ia_git(const char *root, const char *const *args, size_t *size, time_t deadline,
                     bool *bounded) {
     *size = 0;
-    if (time(NULL) >= deadline) {
+    if (atomic_load(&ia_cancelled) || time(NULL) >= deadline) {
         *bounded = true;
         return NULL;
     }
@@ -275,7 +278,8 @@ static char *ia_git(const char *root, const char *const *args, size_t *size, tim
         goto cleanup;
     cbm_proc_poll_t poll;
     while ((poll = cbm_subprocess_poll(process, &result)) == CBM_PROC_POLL_RUNNING) {
-        if (time(NULL) >= deadline || cbm_file_size(log) > IA_OUTPUT_CAP) {
+        if (atomic_load(&ia_cancelled) || time(NULL) >= deadline ||
+            cbm_file_size(log) > IA_OUTPUT_CAP) {
             *bounded = true;
             cbm_subprocess_request_cancel(process);
         }
@@ -738,5 +742,10 @@ void cbm_atlas_impact_analysis_shutdown(void) {
     }
     pthread_mutex_lock(&ia_mu);
     ia_clear_completed_locked();
+    atomic_store(&ia_cancelled, false);
     pthread_mutex_unlock(&ia_mu);
+}
+
+void cbm_atlas_impact_analysis_cancel(void) {
+    atomic_store(&ia_cancelled, true);
 }
