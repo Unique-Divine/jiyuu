@@ -150,23 +150,21 @@ fn write_response(
     written.and(flushed)
 }
 
-#[cfg(all(feature = "c-backend", not(test)))]
-pub(crate) mod c_transport {
+#[cfg(any(feature = "c-backend", test))]
+mod frontend_receive {
     use std::ffi::{c_char, c_int, c_void};
     use std::ptr;
-    use std::slice;
 
-    use super::*;
+    use super::{Framing, Read, read_message};
 
-    type Stream = *mut c_void;
     #[repr(C)]
-    struct FrontendState {
+    pub(super) struct FrontendState {
         _opaque: [u8; 0],
     }
 
     /// Mirrors frontend_receive_ops_t in frontend.c.
     #[repr(C)]
-    struct ReceiveOps {
+    pub(super) struct ReceiveOps {
         alloc_message: unsafe extern "C" fn(usize) -> *mut c_void,
         free_message: unsafe extern "C" fn(*mut c_void),
         route_cancellation: unsafe extern "C" fn(
@@ -180,6 +178,67 @@ pub(crate) mod c_transport {
         stop_begin: unsafe extern "C" fn(*mut FrontendState) -> bool,
     }
 
+    pub(super) unsafe fn receive_loop(
+        input: &mut impl Read,
+        state: *mut FrontendState,
+        ops: &ReceiveOps,
+        stop_begun: &mut bool,
+    ) -> c_int {
+        // SAFETY: The caller keeps the opaque state live for the operations.
+        unsafe {
+            loop {
+                let (bytes, framing) = match read_message(input) {
+                    Ok(None) => return 0,
+                    Ok(Some(frame)) => frame,
+                    Err(_) => return -1,
+                };
+
+                // The decoder bounds the length and rejects embedded NULs.
+                // Use the native allocator because the queue frees the copy.
+                let message = (ops.alloc_message)(bytes.len() + 1).cast::<u8>();
+                if message.is_null() {
+                    return -1;
+                }
+                ptr::copy_nonoverlapping(bytes.as_ptr(), message, bytes.len());
+                *message.add(bytes.len()) = 0;
+                drop(bytes);
+
+                // Route cancellation before enqueue can block on a full queue.
+                let mut active = false;
+                if (ops.route_cancellation)(state, message.cast(), &mut active) {
+                    (ops.free_message)(message.cast());
+                    if active && !(ops.cancel_active)(state) {
+                        *stop_begun = (ops.stop_begin)(state);
+                        return -1;
+                    }
+                    continue;
+                }
+
+                if !(ops.enqueue)(
+                    state,
+                    message.cast(),
+                    framing == Framing::ContentLength,
+                ) {
+                    (ops.free_message)(message.cast());
+                    return -1;
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests;
+}
+
+#[cfg(all(feature = "c-backend", not(test)))]
+pub(crate) mod c_transport {
+    use std::ffi::{c_int, c_void};
+    use std::slice;
+
+    use super::frontend_receive::{FrontendState, ReceiveOps, receive_loop};
+    use super::*;
+
+    type Stream = *mut c_void;
     type Receive = unsafe extern "C" fn(
         Stream,
         *mut FrontendState,
@@ -265,48 +324,9 @@ pub(crate) mod c_transport {
         stop_begun: *mut bool,
     ) -> c_int {
         let mut input = FileStream(stream);
-        // SAFETY: C keeps the stream, opaque state, operation table, and
-        // writable close flag live until this synchronous callback returns.
-        unsafe {
-            let ops = &*ops;
-            loop {
-                let (bytes, framing) = match read_message(&mut input) {
-                    Ok(None) => return 0,
-                    Ok(Some(frame)) => frame,
-                    Err(_) => return -1,
-                };
-
-                // The decoder bounds the length and rejects embedded NULs.
-                // Use the native allocator because the queue frees the copy.
-                let message = (ops.alloc_message)(bytes.len() + 1).cast::<u8>();
-                if message.is_null() {
-                    return -1;
-                }
-                ptr::copy_nonoverlapping(bytes.as_ptr(), message, bytes.len());
-                *message.add(bytes.len()) = 0;
-                drop(bytes);
-
-                // Route cancellation before enqueue can block on a full queue.
-                let mut active = false;
-                if (ops.route_cancellation)(state, message.cast(), &mut active) {
-                    (ops.free_message)(message.cast());
-                    if active && !(ops.cancel_active)(state) {
-                        *stop_begun = (ops.stop_begin)(state);
-                        return -1;
-                    }
-                    continue;
-                }
-
-                if !(ops.enqueue)(
-                    state,
-                    message.cast(),
-                    framing == Framing::ContentLength,
-                ) {
-                    (ops.free_message)(message.cast());
-                    return -1;
-                }
-            }
-        }
+        // SAFETY: C lends the live FILE, state, table, and writable close
+        // flag for the duration of this synchronous call.
+        unsafe { receive_loop(&mut input, state, &*ops, &mut *stop_begun) }
     }
 
     unsafe extern "C" fn write(

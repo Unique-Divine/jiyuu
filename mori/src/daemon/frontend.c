@@ -6,7 +6,6 @@
 #include "daemon/application.h"
 #include "foundation/compat.h"
 #include "foundation/compat_thread.h"
-#include "foundation/log.h"
 #include "foundation/platform.h"
 #include "foundation/subprocess.h"
 #include "mcp/mcp.h"
@@ -903,12 +902,11 @@ int cbm_daemon_frontend_mcp_run(cbm_daemon_runtime_client_t *client,
     int result;
     if (frontend_external_receive) {
         result = frontend_external_receive(in, &state, &receive_ops, &stop_begun);
-        cbm_log_debug("mcp.frontend.receive", "backend", "rust",
-                      "status", result == 0 ? "eof" : "error");
     } else {
         result = frontend_receive_c(in, &state, &stop_begun);
     }
 
+    /* Enter teardown directly. Host stderr may be blocked. */
     if (result == 0 && !stop_begun) {
         frontend_input_closed(&state);
         /* EOF ends INPUT, not accepted work: as long as queued items keep
