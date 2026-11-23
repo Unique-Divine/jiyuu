@@ -168,6 +168,35 @@ impl Fixture {
             .count()
     }
 
+    fn mcp_query_text(&self, bin: &Path, args: Value) -> String {
+        let call = json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+            "name":"query_graph","arguments":args
+        }});
+        let requests = self.0.join("mcp-query-requests");
+        fs::write(&requests, format!(
+            "{}\n{}\n{call}\n",
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"query-test","version":"1"}}}"#,
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        )).unwrap();
+        let output = self
+            .command(bin)
+            .stdin(Stdio::from(fs::File::open(requests).unwrap()))
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let response = stdout
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .find(|response| response["id"] == 2)
+            .unwrap();
+        assert_ne!(response["result"]["isError"], true, "{response}");
+        response["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+
     fn compare_query_pages(&self, cases: &[(&str, usize, bool)]) -> Vec<Value> {
         let run = |bin: &Path, backend: &str| {
             self.start_query_daemon(bin, backend);
@@ -887,8 +916,7 @@ fn linear_cypher_keeps_its_graph_when_a_replacement_publishes() {
 #[test]
 fn opt_in_rust_query_preserves_cursor_and_daemon_dispatch() {
     const QUERY: &str = "MATCH (a:Caller)-[:CALLS]->(b:Target) RETURN b.name";
-    const ORDERED: &str =
-        "MATCH (a:Caller)-[:CALLS]->(b:Target) RETURN b.name ORDER BY b.name";
+    const ORDERED: &str = "MATCH (a:Caller)-[:CALLS]->(b:Target) RETURN b.name ORDER BY b.file_path";
     let fixture = Fixture::new();
     let db = fixture.index(CLIENT);
     let caller = node(&db, CLIENT, "Caller", "a", "a", "a.py");
@@ -982,7 +1010,7 @@ fn opt_in_rust_query_preserves_cursor_and_daemon_dispatch() {
                 && line.contains("backend=rust"))
             .count(),
         2,
-        "the CLI and MCP cursor used Rust, and ORDER BY used C: {log}"
+        "the CLI and MCP cursor used Rust, and the unprojected sort key used C: {log}"
     );
 }
 
@@ -1030,7 +1058,11 @@ fn zero_hop_impact_query_uses_rust_and_matches_c_pages() {
             0,
             true,
         ),
-        ("MATCH (n:Function) RETURN n.name ORDER BY n.name", 0, false),
+        (
+            "MATCH (n:Function) RETURN n.name ORDER BY n.start_line",
+            0,
+            false,
+        ),
         (
             "MATCH (n:Function) WHERE n.name = 'alpha' OR n.name = 'zeta' AND n.file_path = 'z.py' RETURN n.name",
             0,
@@ -1161,34 +1193,7 @@ fn split_projection_uses_native_mcp_serialization_and_cursor() {
     let run = |bin: &Path, backend: &str| {
         fixture.start_query_daemon(bin, backend);
         let before = fixture.rust_query_count();
-        let query = |args: Value| {
-            let call = json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
-                "name":"query_graph","arguments":args
-            }});
-            let requests = fixture.0.join("split-projection-requests");
-            fs::write(&requests, format!(
-                "{}\n{}\n{call}\n",
-                r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"query-test","version":"1"}}}"#,
-                r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
-            )).unwrap();
-            let output = fixture
-                .command(bin)
-                .stdin(Stdio::from(fs::File::open(requests).unwrap()))
-                .output()
-                .unwrap();
-            assert!(output.status.success(), "{output:?}");
-            let stdout = String::from_utf8(output.stdout).unwrap();
-            let response = stdout
-                .lines()
-                .map(|line| serde_json::from_str::<Value>(line).unwrap())
-                .find(|response| response["id"] == 2)
-                .unwrap();
-            assert_ne!(response["result"]["isError"], true, "{response}");
-            response["result"]["content"][0]["text"]
-                .as_str()
-                .unwrap()
-                .to_owned()
-        };
+        let query = |args| fixture.mcp_query_text(bin, args);
         let first_page = query(
             json!({"project":CLIENT,"query":QUERY,"format":"json","max_rows":1}),
         );
@@ -1229,6 +1234,161 @@ fn split_projection_uses_native_mcp_serialization_and_cursor() {
         json!([[format!("@bytes:{}e2", "62".repeat(510))]])
     );
     assert_eq!(page(3)["truncation_reason"], "output_budget");
+}
+
+#[test]
+fn ordered_graph_ui_calls_match_native_ties_limits_and_cursor_pages() {
+    // callsOut("client.caller", 4) and callsIn("client.target", 4).
+    const OUT: &str = r#"MATCH (a)-[r:CALLS]->(b) WHERE a.qualified_name = "client.caller" RETURN b.name, b.qualified_name, b.file_path, b.start_line, r.line ORDER BY r.line LIMIT 4"#;
+    const IN: &str = r#"MATCH (a)-[r:CALLS]->(b) WHERE b.qualified_name = "client.target" RETURN a.name, a.qualified_name, a.file_path, a.start_line, a.is_test, r.line ORDER BY r.line LIMIT 4"#;
+    const ALIASED: &str = r#"MATCH (a)-[r:CALLS]->(b) WHERE b.qualified_name = "client.target" RETURN a.name AS symbol, r.line AS line ORDER BY line DESC, symbol ASC LIMIT 4"#;
+    let fixture = Fixture::new();
+    let db = fixture.index(CLIENT);
+    let caller = node(
+        &db,
+        CLIENT,
+        "Function",
+        "caller",
+        "client.caller",
+        "calls.py",
+    );
+    let target = node(
+        &db,
+        CLIENT,
+        "Function",
+        "target",
+        "client.target",
+        "calls.py",
+    );
+    for (name, props) in [
+        ("ten", json!({"line": 10})),
+        ("two-z", json!({"line": 2})),
+        ("two-a", json!({"line": "02"})),
+        ("negative", json!({"line": -1})),
+        ("missing", json!({})),
+        ("prefix", json!({"line": "2x"})),
+    ] {
+        let called = node(
+            &db,
+            CLIENT,
+            "Function",
+            name,
+            &format!("out.{name}"),
+            "calls.py",
+        );
+        edge(&db, CLIENT, caller, called, "CALLS", props.clone());
+        let calling = node(
+            &db,
+            CLIENT,
+            "Function",
+            name,
+            &format!("in.{name}"),
+            "calls.py",
+        );
+        edge(&db, CLIENT, calling, target, "CALLS", props);
+    }
+    drop(db);
+
+    let run = |bin: &Path, backend: &str| {
+        fixture.start_query_daemon(bin, backend);
+        let query = |args| {
+            let before = fixture.rust_query_count();
+            let page = fixture.mcp_query_text(bin, args);
+            assert_eq!(
+                fixture.rust_query_count() - before,
+                usize::from(backend == "rust")
+            );
+            page
+        };
+        let mut pages = Vec::new();
+        for cypher in [OUT, IN, ALIASED] {
+            let first = query(
+                json!({"project":CLIENT,"query":cypher,"format":"json","max_rows":2}),
+            );
+            let page: Value = serde_json::from_str(&first).unwrap();
+            let cursor = page["next_cursor"].as_str().expect("ordered cursor");
+            let second = query(
+                json!({"project":CLIENT,"query":cypher,"format":"json","max_rows":2,"cursor":cursor}),
+            );
+            pages.push([first, second]);
+        }
+        let stop = fixture
+            .command(bin)
+            .args(["daemon", "stop"])
+            .output()
+            .unwrap();
+        assert!(stop.status.success(), "{stop:?}");
+        pages
+    };
+    let reference = run(Fixture::reference_binary(), "c");
+    let candidate = run(Path::new(MORI), "rust");
+    assert_eq!(candidate, reference);
+    for (index, pages) in candidate.iter().enumerate() {
+        let [first, second] = pages
+            .each_ref()
+            .map(|page| serde_json::from_str::<Value>(page).unwrap());
+        assert_eq!(first["total"], 4);
+        assert_eq!(first["has_more"], true);
+        assert_eq!(second["offset"], 2);
+        assert_eq!(second["has_more"], false);
+        let names: Vec<_> = [&first, &second]
+            .into_iter()
+            .flat_map(|page| {
+                page["rows"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|row| row[0].as_str().unwrap())
+            })
+            .collect();
+        if index == 2 {
+            assert_eq!(first["columns"], json!(["symbol", "line"]));
+            assert_eq!(names, ["ten", "prefix", "two-a", "two-z"]);
+        } else {
+            assert_eq!(names, ["negative", "missing", "two-z", "two-a"]);
+        }
+    }
+}
+
+#[test]
+fn ordered_aliases_keep_lexical_keys_and_raw_split_bytes() {
+    const QUERY: &str = "MATCH (n:SortProbe) RETURN n.name AS symbol, n.value AS key ORDER BY key ASC";
+    let fixture = Fixture::new();
+    let db = fixture.index(CLIENT);
+    let prefix = "a".repeat(510);
+    for (name, key) in [
+        ("euro", format!("{prefix}€")),
+        ("accent", format!("{prefix}é")),
+        ("two", "2".to_owned()),
+        ("ten", "10".to_owned()),
+    ] {
+        let id = node(&db, CLIENT, "SortProbe", name, name, "sort.py");
+        db.execute(
+            "UPDATE nodes SET properties = ? WHERE id = ?",
+            params![json!({"value": key}).to_string(), id],
+        )
+        .unwrap();
+    }
+    drop(db);
+    let empty = format!("{QUERY} LIMIT 0");
+    let pages = fixture.compare_query_pages(&[
+        (QUERY, 0, true),
+        (QUERY, 1, true),
+        (QUERY, 2, true),
+        (QUERY, 3, true),
+        (&empty, 0, true),
+    ]);
+    assert_eq!(pages[0]["rows"], json!([["ten", "10"]]));
+    assert_eq!(pages[1]["rows"], json!([["two", "2"]]));
+    assert_eq!(
+        pages[2]["rows"],
+        json!([["accent", format!("@bytes:{}c3", "61".repeat(510))]])
+    );
+    assert_eq!(
+        pages[3]["rows"],
+        json!([["euro", format!("@bytes:{}e2", "61".repeat(510))]])
+    );
+    assert_eq!(pages[4]["rows"], json!([]));
 }
 
 #[test]
@@ -1278,6 +1438,31 @@ fn zero_hop_scan_checks_budget_and_matches_native_row_ceiling() {
             );
         }
     }
+
+    let ordered = format!("{MATCH} ORDER BY n.name LIMIT 1");
+    let at_limit = fixture.compare_query_pages(&[(&ordered, 0, true)]);
+    assert_eq!(at_limit[0]["rows"], json!([["node"]]));
+    assert_eq!(at_limit[0]["total_relation"], "eq");
+
+    let query = cypher_linear::classify(&ordered).unwrap();
+    let checks = Cell::new(0);
+    // Initial check, one per 1024 scanned rows, then the pre-sort check.
+    // Cancel at the next poll while preparing the sort keys.
+    let cancelled = || {
+        checks.set(checks.get() + 1);
+        checks.get() == 3 + 100_000 / 1024
+    };
+    let mut budget = ExecutionBudget::new(&Instant::now, &cancelled);
+    assert!(matches!(
+        query.execute_with_budget(&db, CLIENT, &mut budget),
+        Err(ExecutionError::Cancelled)
+    ));
+
+    node(&db, CLIENT, "Ceiling", "aaa", "node100001", "ceiling.py");
+    let over_limit = fixture.compare_query_pages(&[(&ordered, 0, false)]);
+    assert_eq!(over_limit[0]["rows"], json!([["node"]]));
+    assert_eq!(over_limit[0]["total_relation"], "gte");
+    assert_eq!(over_limit[0]["truncation_reason"], "engine_limit");
 
     // All predicates miss. A budget check only at the end of the scan would
     // reach this unreadable row and report a storage error first.
@@ -1377,7 +1562,11 @@ fn linear_cypher_matches_the_native_result_ceiling() {
 fn unsupported_syntax_and_supported_storage_errors_are_distinct() {
     for query in [
         "MATCH (a) RETURN a.in_degree",
-        "MATCH (a)-[:CALLS]->(b) RETURN b.name ORDER BY b.name",
+        "MATCH (a)-[:CALLS]->(b) RETURN b.name ORDER BY b.file_path",
+        "MATCH (a)-[:CALLS]->(b)-[:CALLS]->(c) RETURN c.name ORDER BY c.name",
+        "MATCH (a)-[r:CALLS]->(b) RETURN r.one, r.two, r.three, r.four, r.five, r.six, r.seven, r.eight, r.nine ORDER BY r.one",
+        "MATCH (a) RETURN a.name AS x ORDER BY a.name",
+        "MATCH (a) RETURN count(a) AS n ORDER BY n",
         "MATCH (a)-[:CALLS*1..2]->(b) RETURN b.name",
         "MATCH (a)-[:CALLS]-(b) RETURN b.name",
         "MATCH (a)-[:CALLS]- >(b) RETURN b.name",

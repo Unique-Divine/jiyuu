@@ -96,6 +96,7 @@ unsafe extern "C" fn evaluate(
             Err(ExecutionError::Deadline) => Status::Deadline,
             Err(ExecutionError::Cancelled) => Status::Cancelled,
             Err(ExecutionError::RowCeiling) => Status::RowCeiling,
+            Err(ExecutionError::OrderedInputCeiling) => Status::Unsupported,
             Err(ExecutionError::Storage(error)) => {
                 let detail =
                     format!("query aborted: reading the graph failed ({error})");
