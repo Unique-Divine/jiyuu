@@ -433,6 +433,32 @@ mori config set auto_index_limit 50000   # skip repos with more files
 `auto_index` is off by default. See [Configuration](#configuration) for
 `auto_watch`, `watcher_enabled`, and the other settings.
 
+### Existing-Generation Routing
+
+Set `MORI_IMPL_INDEX_ROUTE=rust` when starting the daemon, or use a fresh
+`CBM_RUNTIME_DIR` so the worker inherits the setting. Rust selects the
+existing-generation route for an ordinary reindex. An exact live match
+ends the run without a copy. After C loads the staged manifest, Rust
+selects no-op, closure repair, full rebuild, or fatal failure. The
+`pipeline.index_route` worker log records the Rust decision. Use
+`CBM_PROFILE=1` to keep worker logs.
+
+C is the default. It owns the proofs, executes the selected route, and
+handles pass scheduling and publication. `MORI_IMPL_INDEX_MANIFEST`
+selects the exact manifest comparison independently.
+
+### Full-Build Scheduling
+
+Set `MORI_IMPL_FULL_BUILD_DRIVER=rust` when starting the daemon to opt in
+to Rust scheduling of full builds. The `pipeline.full_build_driver` worker
+log records the selection. Rust schedules the top-level passes and chooses
+parallel extraction when discovery supplies more than 50 files and the
+effective worker count exceeds one. Frozen builds use one worker.
+
+C owns the passes, extraction and resolution, and the final publication
+transaction. The full-build selector also works with
+`MORI_IMPL_GRAPH_WRITER=rust` when the linked build supports that writer.
+
 ### Sharing a Graph With a Team
 
 `index_repository` with `persistence: true` writes
