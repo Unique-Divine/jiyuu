@@ -61,6 +61,7 @@ telegram-mcp = "main:main"
 uniquedivine-telegram-mcp = "main:main"
 telegram-mcp-generate-session = "session_string_generator:main"
 telegram-mcp-migrate = "telegram_mcp.migrate:main"
+telegram-mcp-bridge = "telegram_mcp.stdio_bridge:main"
 
 [tool.jiyuu.upstream]
 repository = "chigwell/telegram-mcp"

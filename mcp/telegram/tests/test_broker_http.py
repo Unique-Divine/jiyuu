@@ -1,7 +1,11 @@
 import asyncio
 import os
+import subprocess
+import sys
 
 import httpx
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
 from mcp.server.fastmcp import FastMCP
 import pytest
 
@@ -76,6 +80,62 @@ async def test_native_mcp_sessions_reconnect_without_stopping_the_shared_service
         stop.set()
         await asyncio.wait_for(service, 5)
     assert not path.exists()
+
+
+@pytest.mark.asyncio
+async def test_two_stdio_bridges_share_one_private_service(monkeypatch, tmp_path):
+    monkeypatch.setenv("BOKU_HOME", os.fspath(tmp_path / "boku"))
+    state = State.discover()
+    app = FastMCP("fixture", json_response=True)
+    calls = []
+
+    @app.tool()
+    def counter(client: str) -> str:
+        calls.append(client)
+        return client
+
+    async def query(label):
+        parameters = StdioServerParameters(
+            command=sys.executable,
+            args=["-m", "telegram_mcp.stdio_bridge"],
+            env={"BOKU_HOME": os.fspath(tmp_path / "boku")},
+        )
+        async with stdio_client(parameters) as (reader, writer):
+            async with ClientSession(reader, writer) as client:
+                await client.initialize()
+                result = await client.call_tool("counter", {"client": label})
+                assert not result.isError
+                assert result.structuredContent == {"result": label}
+
+    stop = asyncio.Event()
+    service = asyncio.create_task(serve_mcp(state, app, stop=stop))
+    try:
+        for _ in range(100):
+            if (state.tool / "run" / "mcp.sock").is_socket():
+                break
+            await asyncio.sleep(0.01)
+        await asyncio.wait_for(asyncio.gather(query("first"), query("second")), 10)
+        await asyncio.wait_for(query("reconnected"), 10)
+        assert sorted(calls) == ["first", "reconnected", "second"]
+    finally:
+        stop.set()
+        await asyncio.wait_for(service, 5)
+
+
+def test_encrypted_only_launch_does_not_load_dotenv(tmp_path):
+    sentinel = "fixture_dotenv_value"
+    (tmp_path / ".env").write_text(f"TELEGRAM_STORED_ACCOUNTS={sentinel}\n")
+    result = subprocess.run(
+        [sys.executable, "-c", "import telegram_mcp.runtime"],
+        cwd=tmp_path,
+        env={"TELEGRAM_REQUIRE_STORED_ACCOUNTS": "1", "TELEGRAM_API_HASH": sentinel},
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode != 0
+    assert "Set TELEGRAM_STORED_ACCOUNTS to start in encrypted-only mode" in result.stderr
+    assert sentinel not in result.stdout + result.stderr
 
 
 def test_shared_mcp_keeps_non_quota_tools_and_gates_member_adds():

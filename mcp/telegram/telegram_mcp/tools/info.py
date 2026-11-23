@@ -24,7 +24,12 @@ async def mcp_info() -> str:
     else:
         status, git = await status_task, None
     report = server_info.build_mcp_info(
-        identity, status=status, git=git, clients=clients, env=os.environ
+        identity,
+        status=status,
+        git=git,
+        clients=clients,
+        env=os.environ,
+        stored_accounts=STORED_PROFILES,
     )
     return json.dumps(report, indent=2)
 

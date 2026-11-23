@@ -301,6 +301,25 @@ Migration removes the selected plaintext copies. Previously shared session
 strings and old backups may still contain a usable Telegram authorization.
 Revoke an exposed session in Telegram and enroll a fresh session.
 
+### Share an Encrypted Session Across Local MCP Clients
+
+A saved authorization allows one local Telegram connection at a time.
+Run `telegram-mcp` under a user service with these environment settings.
+
+```sh
+TELEGRAM_REQUIRE_STORED_ACCOUNTS=1
+TELEGRAM_STORED_ACCOUNTS=default
+TELEGRAM_MCP_SHARED=1
+```
+
+Encrypted-only mode requires `TELEGRAM_STORED_ACCOUNTS` and skips dotenv
+loading. Set the service's tool exposure with `TELEGRAM_EXPOSED_TOOLS`.
+Register `telegram-mcp-bridge` as the local MCP client's stdio command.
+The bridge and service must run as the same user with the same `BOKU_HOME`.
+The bridge connects to a private Unix socket. Restarting an MCP client leaves
+the Telegram authorization open in the service. Use the `mcp_info` tool to
+check that each account reports `sessionKind` as `encrypted`.
+
 ## Share an account with tg-sai
 
 The local broker lets Telegram MCP and a managed fill worker use the same

@@ -55,9 +55,10 @@ def _lock_saved_authorizations(stack: AsyncExitStack, state: State | None) -> No
 async def _main() -> None:
     state = _runtime.STORED_STATE
     broker_enabled = os.environ.get("TELEGRAM_BROKER") == "1"
+    shared_http = broker_enabled or os.environ.get("TELEGRAM_MCP_SHARED") == "1"
     try:
-        if broker_enabled and state is None:
-            raise StoreError("Telegram broker requires explicitly selected encrypted profiles")
+        if shared_http and state is None:
+            raise StoreError("Shared Telegram MCP requires explicitly selected encrypted profiles")
         bot = BotIdentity()
         if broker_enabled and state is not None:
             bot = for_broker(
@@ -107,7 +108,7 @@ async def _main() -> None:
             warm_task = asyncio.create_task(_warm_caches())
             stack.push_async_callback(_cancel_cache_warm, warm_task)
             print(f"Telegram client(s) started ({labels}). Running MCP server...", file=sys.stderr)
-            if broker_enabled and state is not None:
+            if shared_http and state is not None:
                 await serve_mcp(state, mcp)
             else:
                 await mcp.run_stdio_async()

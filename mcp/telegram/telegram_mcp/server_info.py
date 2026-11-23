@@ -15,7 +15,7 @@ import sys
 from dataclasses import dataclass
 from importlib import metadata
 from pathlib import Path
-from typing import Any, Callable, Mapping, Optional
+from typing import Any, Callable, Collection, Mapping, Optional
 
 from telegram_mcp.update_check import (
     UpdateNotifier,
@@ -157,10 +157,12 @@ def _session_env_name(label: str, env: Mapping[str, str]) -> Optional[str]:
     return next((name for name in names if env.get(name)), None)
 
 
-def account_info(label: str, client: Any, env: Mapping[str, str]) -> dict[str, Any]:
+def account_info(
+    label: str, client: Any, env: Mapping[str, str], *, stored: bool = False
+) -> dict[str, Any]:
     """Describe one account by device identity and session fingerprint."""
     init = getattr(client, "_init_request", None)
-    env_name = _session_env_name(label, env)
+    env_name = None if stored else _session_env_name(label, env)
     session_value = env.get(env_name, "") if env_name else ""
     return {
         "label": label,
@@ -169,7 +171,13 @@ def account_info(label: str, client: Any, env: Mapping[str, str]) -> dict[str, A
         "appVersion": getattr(init, "app_version", None),
         "sessionEnvVar": env_name,
         "sessionKind": (
-            "string" if env_name and "SESSION_STRING" in env_name else "file" if env_name else None
+            "encrypted"
+            if stored
+            else (
+                "string"
+                if env_name and "SESSION_STRING" in env_name
+                else "file" if env_name else None
+            )
         ),
         "sessionFingerprint": fingerprint(session_value) if session_value else None,
     }
@@ -205,6 +213,7 @@ def build_mcp_info(
     git: Optional[dict[str, Any]],
     clients: Mapping[str, Any],
     env: Mapping[str, str],
+    stored_accounts: Collection[str] = (),
 ) -> dict[str, Any]:
     """Assemble the ``mcp_info`` report from already-gathered facts."""
     return {
@@ -223,7 +232,10 @@ def build_mcp_info(
             "executable": sys.executable,
             "pid": os.getpid(),
         },
-        "accounts": [account_info(label, client, env) for label, client in clients.items()],
+        "accounts": [
+            account_info(label, client, env, stored=label in stored_accounts)
+            for label, client in clients.items()
+        ],
         "envVarsSet": sorted(
             name for name, value in env.items() if name.startswith("TELEGRAM_") and value
         ),

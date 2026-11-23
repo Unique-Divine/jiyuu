@@ -121,9 +121,13 @@ def get_entity_filter_type(entity: Any) -> Optional[str]:
     return None
 
 
-load_dotenv()
+STORED_ONLY = os.environ.get("TELEGRAM_REQUIRE_STORED_ACCOUNTS") == "1"
+if not STORED_ONLY:
+    load_dotenv()
 
 _stored_names = os.environ.get("TELEGRAM_STORED_ACCOUNTS", "").strip()
+if STORED_ONLY and not _stored_names:
+    raise StoreError("Set TELEGRAM_STORED_ACCOUNTS to start in encrypted-only mode")
 STORED_STATE: State | None = State.discover() if _stored_names else None
 STORED_PROFILES: dict[str, Profile] = {}
 if STORED_STATE is not None:
@@ -132,8 +136,8 @@ if STORED_STATE is not None:
         raise StoreError("Stored profile names must be distinct")
     STORED_PROFILES = {name: read_profile(STORED_STATE, name) for name in names}
 
-_api_id = os.getenv("TELEGRAM_API_ID")
-_api_hash = os.getenv("TELEGRAM_API_HASH")
+_api_id = None if STORED_PROFILES else os.getenv("TELEGRAM_API_ID")
+_api_hash = None if STORED_PROFILES else os.getenv("TELEGRAM_API_HASH")
 if not STORED_PROFILES and (not _api_id or not _api_hash):
     raise ValidationError("TELEGRAM_API_ID and TELEGRAM_API_HASH must be set.")
 TELEGRAM_API_ID = int(_api_id) if _api_id and not STORED_PROFILES else 0
