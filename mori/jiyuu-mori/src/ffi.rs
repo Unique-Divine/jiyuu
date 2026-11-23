@@ -570,6 +570,8 @@ pub unsafe extern "C" fn main(argc: c_int, argv: *mut *mut c_char) -> c_int {
         jiyuu_mori::mori_register_graphql_callbacks();
         #[cfg(unix)]
         jiyuu_mori::mori_register_staged_graph_writer();
+        #[cfg(unix)]
+        jiyuu_mori::mori_register_discover_walk();
         c_transport::register();
         crate::index_manifest::register();
         crate::query_cli::c_args::register();
