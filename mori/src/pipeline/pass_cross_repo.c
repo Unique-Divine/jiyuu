@@ -2036,27 +2036,66 @@ typedef enum {
     CR_REVERSE_LEGACY_AUTOMATIC,
 } cr_reverse_state_t;
 
+static bool cr_read_reverse_state(cbm_store_t *source, const char *project,
+                                  cr_reverse_state_t *state) {
+    char pending[CR_QN_BUF], mode[CR_QN_BUF];
+    *state = CR_REVERSE_COMPLETE;
+    if (!source || !cr_reverse_pending_key(project, pending, sizeof(pending)) ||
+        !cr_reverse_mode_key(project, mode, sizeof(mode))) {
+        return false;
+    }
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(cbm_store_get_db(source),
+                                "SELECT k,v FROM store_meta WHERE k IN (?1,?2)", -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        sqlite3_finalize(stmt);
+        /* Older graphs can lack store_meta. Other read errors leave work
+         * indeterminate, including a failed read of an existing table. */
+        char generation[CBM_GRAPH_COMPARE_GENERATION_SIZE];
+        return rc == SQLITE_ERROR &&
+               cbm_store_generation(source, generation, sizeof(generation)) == CBM_STORE_OK &&
+               strcmp(generation, "legacy") == 0;
+    }
+    if (sqlite3_bind_text(stmt, 1, pending, -1, SQLITE_STATIC) != SQLITE_OK ||
+        sqlite3_bind_text(stmt, 2, mode, -1, SQLITE_STATIC) != SQLITE_OK) {
+        sqlite3_finalize(stmt);
+        return false;
+    }
+    cr_reverse_state_t observed = CR_REVERSE_COMPLETE;
+    bool automatic = false;
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+        const char *key = (const char *)sqlite3_column_text(stmt, 0);
+        const char *value = (const char *)sqlite3_column_text(stmt, 1);
+        if (key && value && strcmp(key, pending) == 0) {
+            if (strcmp(value, "1") == 0) {
+                observed = CR_REVERSE_PUBLISHED;
+            } else if (strcmp(value, "2") == 0) {
+                observed = CR_REVERSE_LEGACY_AUTOMATIC;
+            }
+        } else if (key && value && strcmp(key, mode) == 0) {
+            automatic = strcmp(value, "automatic") == 0;
+        }
+    }
+    if (sqlite3_finalize(stmt) != SQLITE_OK || rc != SQLITE_DONE) {
+        return false;
+    }
+    *state = automatic && observed == CR_REVERSE_PUBLISHED ? CR_REVERSE_AUTOMATIC : observed;
+    return true;
+}
+
 static cr_reverse_state_t cr_reverse_pending(cbm_store_t *source, const char *project) {
-    char key[CR_QN_BUF];
-    char *value = NULL;
-    cr_reverse_state_t state = CR_REVERSE_COMPLETE;
-    if (cr_reverse_pending_key(project, key, sizeof(key)) &&
-        cbm_store_meta_get(source, key, &value) == CBM_STORE_OK) {
-        if (strcmp(value, "1") == 0) {
-            state = CR_REVERSE_PUBLISHED;
-        } else if (strcmp(value, "2") == 0) {
-            state = CR_REVERSE_LEGACY_AUTOMATIC;
-        }
-    }
-    cbm_free(CBM_MEM_CLASS_STORE, value);
-    if (state == CR_REVERSE_PUBLISHED && cr_reverse_mode_key(project, key, sizeof(key)) &&
-        cbm_store_meta_get(source, key, &value) == CBM_STORE_OK) {
-        if (strcmp(value, "automatic") == 0) {
-            state = CR_REVERSE_AUTOMATIC;
-        }
-        cbm_free(CBM_MEM_CLASS_STORE, value);
-    }
+    cr_reverse_state_t state;
+    (void)cr_read_reverse_state(source, project, &state);
     return state;
+}
+
+bool cbm_cross_repo_read_reverse_pending(cbm_store_t *store, const char *project, bool *pending) {
+    cr_reverse_state_t state;
+    if (!store || !pending || !cr_read_reverse_state(store, project, &state)) {
+        return false;
+    }
+    *pending = state != CR_REVERSE_COMPLETE;
+    return true;
 }
 
 static bool cr_delete_reverse_mode(cbm_store_t *source, const char *key) {
@@ -2125,60 +2164,90 @@ bool cbm_cross_repo_read_generation(const char *project, char *generation, size_
     return ok;
 }
 
+bool cbm_cross_repo_open_graph_snapshot(cbm_store_t *store, cbm_store_read_scope_t **scope) {
+    if (!scope) {
+        return false;
+    }
+    *scope = NULL;
+    if (!store) {
+        return false;
+    }
+    /* The cache can also contain readable non-graph databases, such as
+     * activity.db. Keep these out of the pending work list. */
+    sqlite3_stmt *probe = NULL;
+    int rc = sqlite3_prepare_v2(cbm_store_get_db(store),
+                                "SELECT count(*) FROM sqlite_schema "
+                                "WHERE type='table' AND name IN ('projects','nodes')",
+                                -1, &probe, NULL);
+    bool read = rc == SQLITE_OK && sqlite3_step(probe) == SQLITE_ROW;
+    bool graph = read && sqlite3_column_int(probe, 0) == 2;
+    return sqlite3_finalize(probe) == SQLITE_OK && read &&
+           (!graph || cbm_store_read_scope_open(store, NULL, NULL, scope) == CBM_STORE_OK);
+}
+
 static bool cr_stale_named_client(const char *client, const char *provider, const char *generation,
-                                  char ***targets, int *count) {
+                                  char ***targets, int *count, bool *stale) {
     char path[CR_PATH_BUF];
     cbm_store_t *store =
         cr_db_path(client, path, sizeof(path)) ? cbm_store_open_path_query_nowait(path) : NULL;
-    if (!store || !cbm_store_read_batch_begin(store)) {
+    cbm_store_read_scope_t *scope = NULL;
+    bool checked = cbm_cross_repo_open_graph_snapshot(store, &scope);
+    if (!scope) {
         cbm_store_close(store);
-        return false;
+        return checked;
     }
 
     if (cr_store_has_exact_project(store, client) && cbm_store_edges_schema_current(store)) {
         *count = cr_read_targets(store, client, targets);
     }
-    bool stale = false;
+    checked = *count >= 0;
     for (int i = 0; i < *count; i++) {
         if (strcmp((*targets)[i], provider) == 0) {
             yyjson_doc *peers = cr_read_peers(store, client);
             const char *observed =
                 yyjson_get_str(yyjson_obj_get(yyjson_doc_get_root(peers), provider));
-            stale = !observed || strcmp(observed, generation) != 0;
-            if (!stale) {
-                cr_reverse_state_t state = cr_reverse_pending(store, client);
-                stale = state == CR_REVERSE_AUTOMATIC || state == CR_REVERSE_LEGACY_AUTOMATIC;
+            *stale = !observed || strcmp(observed, generation) != 0;
+            if (!*stale) {
+                cr_reverse_state_t state;
+                checked = cr_read_reverse_state(store, client, &state);
+                *stale = state == CR_REVERSE_AUTOMATIC || state == CR_REVERSE_LEGACY_AUTOMATIC;
             }
             yyjson_doc_free(peers);
             break;
         }
     }
-    cbm_store_read_batch_end(store);
+    checked = cbm_store_read_scope_close(scope) == CBM_STORE_OK && checked;
     cbm_store_close(store);
-    return stale;
+    return checked;
 }
 
-void cbm_cross_repo_visit_stale_clients(const char *provider, const char *generation,
+bool cbm_cross_repo_visit_stale_clients(const char *provider, const char *generation,
                                         cbm_cross_repo_client_visitor_t visitor, void *context,
                                         const atomic_int *cancelled) {
     if (!provider || !generation || !visitor) {
-        return;
+        return false;
     }
     cr_run_context_t run = {.cancelled = cancelled};
     char **clients = NULL;
     int client_count = collect_all_projects(&clients, &run, NULL);
+    bool complete = client_count >= 0;
     for (int i = 0; i < client_count && !cr_cancel_requested(&run); i++) {
         if (strcmp(clients[i], provider) == 0) {
             continue;
         }
         char **targets = NULL;
         int count = 0;
-        if (cr_stale_named_client(clients[i], provider, generation, &targets, &count)) {
+        bool stale = false;
+        bool checked =
+            cr_stale_named_client(clients[i], provider, generation, &targets, &count, &stale);
+        if (checked && stale) {
             visitor(context, clients[i], (const char *const *)targets, count);
         }
+        complete &= checked;
         free_project_list(targets, count);
     }
     free_project_list(clients, client_count);
+    return complete && !cr_cancel_requested(&run);
 }
 
 static bool cr_peer_is_stale(const char *name, const char *observed) {
@@ -2563,7 +2632,11 @@ bool cbm_cross_repo_reconcile_published(const char *project, const atomic_int *c
     if (!source) {
         return false;
     }
-    cr_reverse_state_t state = cr_reverse_pending(source, project);
+    cr_reverse_state_t state;
+    if (!cr_read_reverse_state(source, project, &state)) {
+        cbm_store_close(source);
+        return false;
+    }
     if (state == CR_REVERSE_COMPLETE) {
         cbm_store_close(source);
         return true;

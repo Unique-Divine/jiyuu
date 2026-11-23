@@ -247,6 +247,13 @@ impl Fixture {
         .expect("open project graph")
     }
 
+    fn lock_graph_exclusive(&self, project: &str) -> Connection {
+        let db = Connection::open(self.db_path(project)).unwrap();
+        db.execute_batch("PRAGMA journal_mode=DELETE; BEGIN EXCLUSIVE;")
+            .unwrap();
+        db
+    }
+
     fn saved_targets(&self, project: &str) -> Option<Vec<String>> {
         let value: Option<String> = self
             .db(project)
@@ -806,5 +813,146 @@ fn startup_retry_repairs_a_restored_provider_without_a_publication() {
     assert_eq!(fixture.cross_status(CLIENT)["status"], "ran");
     assert_eq!(fixture.generation(CLIENT), client_generation);
     assert_eq!(fixture.callers(FIRST, "moved.graphqls").len(), 1);
+    assert_no_source_worker(&fixture, &previous_log);
+}
+
+#[test]
+fn provider_scan_retries_a_locked_client_without_another_publication() {
+    let fixture = Fixture::new();
+    fixture.start_daemon(Some("MORI_PROVIDER_REPAIR"), None);
+    fixture.client(CLIENT, &["first"]);
+    fixture.write(FIRST, "schema.graphqls", "type Query { first: String }\n");
+    for project in [CLIENT, FIRST] {
+        fixture.publish(project);
+        fixture.wait_for_log(&[
+            "cross_repo.repair_scan_complete",
+            &format!("provider={project}"),
+        ]);
+    }
+    fixture.link(CLIENT, &names(&[FIRST])).unwrap();
+    let generation = fixture.generation(CLIENT);
+    let callers = fixture.callers(FIRST, "schema.graphqls");
+    assert_eq!(callers.len(), 1);
+    let lock = fixture.lock_graph_exclusive(CLIENT);
+    fs::rename(
+        fixture.repo(FIRST).join("schema.graphqls"),
+        fixture.repo(FIRST).join("moved.graphqls"),
+    )
+    .unwrap();
+    fixture.publish(FIRST);
+    fixture.wait_for_log(&[
+        "cross_repo.repair_deferred",
+        "provider=primary",
+        "reason=client_scan",
+    ]);
+    fixture.wait_for_log(&["cross_repo.recovery_scan_complete", "pending=1"]);
+    let previous_log = fixture.log();
+    drop(lock);
+    fixture.wait_for_log(&[
+        "cross_repo.repair_result",
+        "provider=recovery",
+        "client=client",
+        "status=repaired",
+    ]);
+    assert_eq!(fixture.cross_status(CLIENT)["status"], "ran");
+    assert_eq!(fixture.generation(CLIENT), generation);
+    assert_eq!(fixture.callers(FIRST, "moved.graphqls"), callers);
+    let log = fixture.log();
+    assert!(
+        !log.strip_prefix(&previous_log)
+            .unwrap()
+            .contains("daemon.index.result")
+    );
+}
+
+#[test]
+fn startup_leaves_wildcard_null_peer_pending_without_retries() {
+    let fixture = Fixture::new();
+    fixture.start_daemon(Some("MORI_OBSERVE_PROVIDER_REPAIR"), None);
+    fixture.client(CLIENT, &["first", "second"]);
+    fixture.write(FIRST, "schema.graphqls", "type Query { first: String }\n");
+    fixture.write(SECOND, "schema.graphqls", "type Query { second: String }\n");
+    for project in [CLIENT, FIRST, SECOND] {
+        fixture.publish(project);
+    }
+    fixture.link(CLIENT, &names(&["*"])).unwrap();
+    let offline = fixture.root.join("secondary-offline.db");
+    fs::rename(fixture.db_path(SECOND), &offline).unwrap();
+    fixture.write(CLIENT, "extra.ts", "export const extra = 1;\n");
+    fixture.publish(CLIENT);
+    fixture
+        .wait_for_log(&["cross_repo.repair_scan_complete", "provider=client"]);
+    let generation = fixture.generation(CLIENT);
+    let links = fixture.forward_targets(CLIENT);
+    fixture.stop_daemon();
+    let previous_log = fixture.log();
+
+    fixture.start_daemon(Some("MORI_PROVIDER_REPAIR"), None);
+    fixture.wait_for_log(&[
+        "cross_repo.recovery_skipped",
+        "project=client",
+        "reason=wildcard_unknown_peer",
+    ]);
+    fixture.wait_for_log(&["cross_repo.recovery_scan_complete", "pending=0"]);
+    fs::rename(offline, fixture.db_path(SECOND)).unwrap();
+    let status = fixture.cross_status(CLIENT);
+    assert_eq!(status["status"], "stale");
+    assert_eq!(status["reverse_pending"], true);
+    assert_eq!(fixture.saved_targets(CLIENT), Some(names(&["*"])));
+    assert_eq!(fixture.forward_targets(CLIENT), links);
+    assert_eq!(fixture.generation(CLIENT), generation);
+    assert_no_source_worker(&fixture, &previous_log);
+
+    // The explicit wildcard relink is the supported way to refresh this set.
+    // Its new links come from both online provider graphs.
+    fixture.link(CLIENT, &names(&["*"])).unwrap();
+    assert_eq!(fixture.cross_status(CLIENT)["status"], "ran");
+    assert_eq!(fixture.forward_targets(CLIENT).len(), 2);
+}
+
+#[test]
+fn startup_retries_a_locked_current_generation_reverse_marker() {
+    let fixture = Fixture::new();
+    fixture.start_daemon(Some("MORI_OBSERVE_PROVIDER_REPAIR"), None);
+    fixture.client(CLIENT, &["first"]);
+    fixture.write(FIRST, "schema.graphqls", "type Query { first: String }\n");
+    for project in [CLIENT, FIRST] {
+        fixture.publish(project);
+    }
+    fixture.link(CLIENT, &names(&[FIRST])).unwrap();
+    fixture.write(CLIENT, "extra.ts", "export const extra = 1;\n");
+    {
+        let _lease = fixture.hold_shared_project_set_lease();
+        fixture.publish(CLIENT);
+        fixture.wait_for_log(&[
+            "cross_repo.repair_scan_complete",
+            "provider=client",
+        ]);
+    }
+    let status = fixture.cross_status(CLIENT);
+    assert_eq!(status["status"], "ran");
+    assert_eq!(status["reverse_pending"], true);
+    fixture.stop_daemon();
+    let previous_log = fixture.log();
+    let generation = fixture.generation(CLIENT);
+    let links = fixture.forward_targets(CLIENT);
+    let lock = fixture.lock_graph_exclusive(CLIENT);
+
+    fixture.start_daemon(Some("MORI_PROVIDER_REPAIR"), None);
+    fixture.wait_for_log(&["cross_repo.recovery_scan_complete", "pending=1"]);
+    drop(lock);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let status = fixture.cross_status(CLIENT);
+        if status["reverse_pending"].is_null() {
+            assert_eq!(status["status"], "ran");
+            break;
+        }
+        assert!(Instant::now() < deadline, "{status}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(fixture.generation(CLIENT), generation);
+    assert_eq!(fixture.forward_targets(CLIENT), links);
+    assert_eq!(fixture.callers(FIRST, "schema.graphqls").len(), 1);
     assert_no_source_worker(&fixture, &previous_log);
 }

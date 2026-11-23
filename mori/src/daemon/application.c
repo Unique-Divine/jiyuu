@@ -2199,6 +2199,17 @@ static yyjson_doc *application_repair_read_meta(cbm_store_t *store, const char *
     return doc;
 }
 
+static bool application_wildcard_has_unknown_peer(yyjson_doc *observations) {
+    yyjson_obj_iter iter = yyjson_obj_iter_with(yyjson_doc_get_root(observations));
+    yyjson_val *key;
+    while ((key = yyjson_obj_iter_next(&iter)) != NULL) {
+        if (yyjson_is_null(yyjson_obj_iter_get_val(key))) {
+            return true;
+        }
+    }
+    return false;
+}
+
 /* Called under the wildcard lease. Snapshot the saved selection and
  * observations, then close the reader before any repair writes. */
 static bool application_recover_repair_project(cbm_daemon_application_t *application,
@@ -2219,8 +2230,11 @@ static bool application_recover_repair_project(cbm_daemon_application_t *applica
         return true;
     }
     cbm_store_t *store = cbm_store_open_path_query_nowait(path);
-    if (!store) {
-        return false;
+    cbm_store_read_scope_t *scope = NULL;
+    bool readable = cbm_cross_repo_open_graph_snapshot(store, &scope);
+    if (!scope) {
+        cbm_store_close(store);
+        return readable;
     }
     bool ok = true;
     yyjson_doc *selection = application_repair_read_meta(store, "cross_repo_targets", project, &ok);
@@ -2237,6 +2251,9 @@ static bool application_recover_repair_project(cbm_daemon_application_t *applica
         yyjson_arr_size(targets)
             ? application_repair_read_meta(store, "cross_repo_peers", project, &ok)
             : NULL;
+    bool reverse_pending = false;
+    ok = ok && cbm_cross_repo_read_reverse_pending(store, project, &reverse_pending);
+    ok = cbm_store_read_scope_close(scope) == CBM_STORE_OK && ok;
     cbm_store_close(store);
 
     size_t count = yyjson_arr_size(targets);
@@ -2267,8 +2284,15 @@ static bool application_recover_repair_project(cbm_daemon_application_t *applica
         ok = false;
     } else if (ok && stale) {
         ok = application_match_saved_targets(application, "recovery", project, (int)count);
-    } else if (ok && cbm_cross_repo_reverse_pending(project)) {
-        ok = application_reconcile_reverse(application, project);
+    } else if (ok && reverse_pending) {
+        if (wildcard && application_wildcard_has_unknown_peer(observations)) {
+            /* Reverse-only reconciliation requires a recorded generation.
+             * An explicit wildcard relink can refresh the selection. */
+            cbm_log_info("cross_repo.recovery_skipped", "project", project, "reason",
+                         "wildcard_unknown_peer");
+        } else {
+            ok = application_reconcile_reverse(application, project);
+        }
     }
     yyjson_doc_free(observations);
     yyjson_doc_free(selection);
@@ -2427,14 +2451,18 @@ static void application_drain_repairs(cbm_daemon_application_job_t *owner) {
             cbm_cross_repo_read_generation(job->project_key, generation, sizeof(generation))) {
             application_repair_batch_t batch = {
                 .application = application, .provider = job->project_key, .attempted = attempted};
-            cbm_cross_repo_visit_stale_clients(job->project_key, generation,
-                                               application_repair_client, &batch,
-                                               &application->stopping);
-            cbm_log_info("cross_repo.repair_scan_complete", "provider", job->project_key);
-            retry |= batch.retry;
+            bool complete = cbm_cross_repo_visit_stale_clients(job->project_key, generation,
+                                                               application_repair_client, &batch,
+                                                               &application->stopping);
+            if (complete) {
+                cbm_log_info("cross_repo.repair_scan_complete", "provider", job->project_key);
+            } else if (!application->stopping) {
+                cbm_log_info("cross_repo.repair_deferred", "provider", job->project_key, "reason",
+                             "client_scan");
+            }
+            retry |= !complete || batch.retry;
         } else if (!application->stopping) {
-            /* The next publication or an explicit relink can retry using
-             * the persisted selections and generation observations. */
+            /* Recovery can retry using the saved selections and observations. */
             const char *reason = !can_scan ? "allocation" : "generation";
             cbm_log_warn("cross_repo.repair_deferred", "provider", job->project_key, "reason",
                          reason);
@@ -2523,10 +2551,12 @@ static void *application_job_thread(void *opaque) {
         application_request_repair_recovery(application);
     }
     if (observe_repair && source_changed) {
-        cbm_cross_repo_visit_stale_clients(job->project_key, current,
-                                           application_log_provider_repair, job->project_key,
-                                           &application->stopping);
-        cbm_log_info("cross_repo.repair_scan_complete", "provider", job->project_key);
+        bool complete = cbm_cross_repo_visit_stale_clients(
+            job->project_key, current, application_log_provider_repair, job->project_key,
+            &application->stopping);
+        cbm_log_info(complete ? "cross_repo.repair_scan_complete"
+                              : "cross_repo.repair_scan_incomplete",
+                     "provider", job->project_key);
     }
     cbm_mem_class_flush_thread();
     cbm_mutex_lock(&application->mutex);
