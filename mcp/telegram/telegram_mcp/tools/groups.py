@@ -665,6 +665,27 @@ def _admin_action(action: str, chat_id: Union[int, str], user_id: Union[int, str
     )
 
 
+async def _broker_admin_target_is_member(client, channel, user) -> bool:
+    """Prevent EditAdmin from adding someone outside the fill add journal."""
+    if os.environ.get("TELEGRAM_BROKER") != "1":
+        return True
+    try:
+        participant = await client(
+            functions.channels.GetParticipantRequest(channel=channel, participant=user)
+        )
+    except errors.UserNotParticipantError:
+        return False
+    return isinstance(
+        participant.participant,
+        (
+            types.ChannelParticipant,
+            types.ChannelParticipantSelf,
+            types.ChannelParticipantAdmin,
+            types.ChannelParticipantCreator,
+        ),
+    )
+
+
 @mcp.tool(
     annotations=ToolAnnotations(
         title="Promote Admin", openWorldHint=True, destructiveHint=True, idempotentHint=True
@@ -692,6 +713,9 @@ async def promote_admin(
         cl = get_client(account)
         chat = await resolve_entity(group_id, cl)
         user = await resolve_entity(user_id, cl)
+
+        if not await _broker_admin_target_is_member(cl, chat, user):
+            return "Error: an admin target must already be a chat member in broker mode."
 
         # Set default admin rights if not provided
         if not rights:
@@ -1116,6 +1140,24 @@ async def edit_admin_rights(
             manage_topics=manage_topics,
             other=other,
         )
+        if any(
+            (
+                change_info,
+                post_messages,
+                edit_messages,
+                delete_messages,
+                ban_users,
+                invite_users,
+                pin_messages,
+                add_admins,
+                anonymous,
+                manage_call,
+                manage_topics,
+                other,
+            )
+        ):
+            if not await _broker_admin_target_is_member(cl, entity, user):
+                return "Error: an admin target must already be a chat member in broker mode."
         await cl(
             functions.channels.EditAdminRequest(
                 channel=entity, user_id=user, admin_rights=admin_rights, rank=rank

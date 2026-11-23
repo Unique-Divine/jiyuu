@@ -131,3 +131,41 @@ async def test_flood_on_readback_after_a_create_always_remains_uncertain(monkeyp
     account = PoolTransport(cast(TelegramClient, ResultClient()), state, "42", b"")
     assert await account.dispatch(create_request()) == {"outcome": "uncertain"}
     assert account.journal.snapshot(now_ms())["holds"] == []
+
+
+@pytest.mark.asyncio
+async def test_disconnected_peer_is_fenced_after_delayed_preflight(monkeypatch, tmp_path):
+    import asyncio
+
+    entered = asyncio.Event()
+    released = asyncio.Event()
+    seen = []
+
+    class DelayedClient:
+        async def get_me(self):
+            entered.set()
+            await released.wait()
+            return SimpleNamespace(id=42, bot=False)
+
+        async def iter_dialogs(self, *, limit):
+            if False:
+                yield
+
+        async def __call__(self, request):
+            seen.append(request)
+            return SimpleNamespace(chats=[])
+
+    state = fixture_state(monkeypatch, tmp_path)
+    owner = PoolTransport(cast(TelegramClient, DelayedClient()), state, "42", b"")
+    broker = Broker({"42": owner.snapshot}, {"42": owner.dispatch})
+    async with listen(state, broker):
+        _, writer = await asyncio.open_unix_connection(state.socket)
+        writer.write(frame(create_request()))
+        await writer.drain()
+        await asyncio.wait_for(entered.wait(), 1)
+        writer.close()
+        await writer.wait_closed()
+        released.set()
+    assert seen == []
+    with owner.journal.connect() as db:
+        assert db.execute("SELECT count(*) FROM dispatch_v1").fetchone()[0] == 0

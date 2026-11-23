@@ -21,7 +21,8 @@ REQUEST_TIMEOUT = 95
 ID = re.compile(r"[a-zA-Z0-9._:-]{1,96}")
 OPERATIONS = frozenset({"account.snapshot", "fill.observe", "fill.execute"})
 Snapshot = Callable[[], Awaitable[dict[str, Any]]]
-Fill = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
+PeerConnected = Callable[[], bool]
+Fill = Callable[[dict[str, Any], PeerConnected], Awaitable[dict[str, Any]]]
 
 
 class BrokerError(Exception):
@@ -82,6 +83,7 @@ class Broker:
             self.handlers.add(active)
         request_id = None
         reply = None
+        peer_read: asyncio.Task[bytes] | None = None
         try:
             if not same_user(writer):
                 return
@@ -101,7 +103,17 @@ class Broker:
                     fill = self.fills.get(account)
                     if fill is None:
                         raise BrokerError("operation_unavailable")
-                    requested = fill(body)
+                    # One frame per connection. An extra byte or EOF fences
+                    # off any write that has not yet been sent.
+                    peer_read = asyncio.create_task(reader.read(1))
+                    requested = fill(
+                        body,
+                        lambda: not (
+                            writer.is_closing()
+                            or reader.at_eof()
+                            or (peer_read is not None and peer_read.done())
+                        ),
+                    )
                 result = await asyncio.wait_for(requested, REQUEST_TIMEOUT)
             reply = {"v": 1, "id": request_id, "result": result}
         except BrokerError as error:
@@ -109,6 +121,9 @@ class Broker:
         except Exception:
             reply = {"v": 1, "id": request_id, "error": {"code": "broker_unavailable"}}
         finally:
+            if peer_read is not None:
+                peer_read.cancel()
+                await asyncio.gather(peer_read, return_exceptions=True)
             try:
                 if reply is not None:
                     writer.write(frame(reply))

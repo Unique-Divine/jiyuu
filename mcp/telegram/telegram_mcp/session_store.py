@@ -209,7 +209,10 @@ async def import_profile(state: State, name: str, profile: Profile) -> None:
         except Exception:
             raise StoreError("Telegram authorization could not be verified") from None
         finally:
-            await asyncio.wait_for(client.disconnect(), timeout=5)
+            try:
+                await asyncio.wait_for(client.disconnect(), timeout=5)
+            except Exception:
+                raise StoreError("Telegram authorization could not disconnect safely") from None
         _helper(state, "put", name, profile.encoded())
 
 

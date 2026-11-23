@@ -12,6 +12,7 @@ from importlib.resources import files as resource_files
 
 from telegram_mcp.broker import Broker, listen
 from telegram_mcp.fill import PoolTransport
+from telegram_mcp.http_service import serve_mcp
 from telegram_mcp.session_store import lock_authorization, validate_identity
 
 from telegram_mcp import runtime as _runtime
@@ -36,7 +37,6 @@ async def _connect_authorized_client(label, client) -> None:
 
 async def _main() -> None:
     state = _runtime.STORED_STATE
-    warm_task = None
     broker_enabled = os.environ.get("TELEGRAM_BROKER") == "1"
     try:
         if broker_enabled and state is None:
@@ -83,7 +83,10 @@ async def _main() -> None:
             warm_task = asyncio.create_task(_warm_caches())
             stack.push_async_callback(_cancel_cache_warm, warm_task)
             print(f"Telegram client(s) started ({labels}). Running MCP server...", file=sys.stderr)
-            await mcp.run_stdio_async()
+            if broker_enabled and state is not None:
+                await serve_mcp(state, mcp)
+            else:
+                await mcp.run_stdio_async()
     except Exception as error:
         if isinstance(error, StoreError):
             print(str(error), file=sys.stderr)
@@ -108,11 +111,27 @@ async def _cancel_cache_warm(task: asyncio.Task) -> None:
     await asyncio.gather(task, return_exceptions=True)
 
 
+def _configure_broker_tools(server: FastMCP) -> None:
+    # These tools create groups, add members, or join chats outside the
+    # managed journal. Existing messaging, photo, invite-link, and admin
+    # tools remain available under the user's configured exposure mode.
+    for name in (
+        "create_group",
+        "create_channel",
+        "subscribe_public_channel",
+        "invite_to_group",
+        "join_chat_by_link",
+        "import_chat_invite",
+    ):
+        if server._tool_manager.get_tool(name) is not None:
+            server._tool_manager.remove_tool(name)
+
+
 def main() -> None:
     _configure_allowed_roots_from_cli(sys.argv[1:])
-    _runtime._apply_exposed_tools_mode(
-        mode="read-only" if os.environ.get("TELEGRAM_BROKER") == "1" else None
-    )
+    _runtime._apply_exposed_tools_mode()
+    if os.environ.get("TELEGRAM_BROKER") == "1":
+        _configure_broker_tools(mcp)
     # Read the latest release in the background; the first tool result after
     # it lands carries a one-line notice if this version is behind.
     server_info.update_notifier().start()

@@ -273,13 +273,16 @@ The ordinary MCP entrypoint and environment-based profiles still work.
    `python -m telegram_mcp.session_store PROFILE`. The profile object has
    `apiId`, `apiHash`, `sessionString`, and numeric `userId` fields. The
    importer checks the Telegram user ID before saving the entry.
-2. Stop other processes using that saved authorization. Configure your
-   standard MCP runner with `TELEGRAM_STORED_ACCOUNTS=PROFILE` and
-   `TELEGRAM_BROKER=1`. Separate multiple profile names with commas.
-   Broker mode exposes the MCP's read-only tools and incoming message tools.
-   The broker handles the managed fill writes and shares one add journal
-   across those writes. Keep this profile's other adds out of Telegram
-   clients that do not share that journal.
+2. Stop other processes using that saved authorization. Run
+   `telegram-mcp` as a supervised process with
+   `TELEGRAM_STORED_ACCOUNTS=PROFILE` and `TELEGRAM_BROKER=1`.
+   Separate multiple profile names with commas. Connect MCP clients using
+   Streamable HTTP at `/mcp` through the private `mcp.sock` in the same
+   directory as the fill socket below. Clients can reconnect while the
+   process keeps the Telegram connection and incoming-message tools active.
+   Broker mode permits ordinary MCP writes. It reserves group creation,
+   joins, and direct adds for the managed workflow to protect the account's
+   capacity. Admin grants require an existing member.
 3. Point the managed worker at
    `${BOKU_HOME:-$HOME/.boku}/telegram-mcp/run/broker-v1.sock`. The socket
    accepts the local user's UID. For a worker on another host, forward that
@@ -290,6 +293,7 @@ The ordinary MCP entrypoint and environment-based profiles still work.
 The encrypted entries and their key live under `telegram-mcp/secrets/`.
 Keep that directory across reinstalls. MCP logs go to `telegram-mcp/logs/`
 and the socket, lock files, and fill journal go to `telegram-mcp/run/`.
-The broker stops with the MCP process. A second local process cannot use
-the same saved authorization through this setup. The designated custody
+The service keeps the broker and Telegram clients alive across MCP client
+disconnects. A second local process cannot use the same saved authorization
+through this setup. The designated custody
 account remains on its dedicated service.

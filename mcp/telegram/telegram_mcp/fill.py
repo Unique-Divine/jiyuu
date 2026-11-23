@@ -14,7 +14,7 @@ from typing import Any
 
 from telethon import TelegramClient, errors, functions, hints, types, utils
 
-from telegram_mcp.broker import BrokerError
+from telegram_mcp.broker import BrokerError, PeerConnected
 from telegram_mcp.request_policy import raise_flood_waits, single_request
 from telegram_mcp.session_store import State, validate_identity
 
@@ -298,11 +298,13 @@ class PoolTransport:
                     count += 1
         return count
 
-    async def dispatch(self, body: dict[str, Any]) -> dict[str, Any]:
+    async def dispatch(
+        self, body: dict[str, Any], peer_connected: PeerConnected | None = None
+    ) -> dict[str, Any]:
         action = Action.parse(body)
         if body["op"] == "fill.observe":
             return await self.observe(action)
-        return await self.execute(action)
+        return await self.execute(action, peer_connected)
 
     async def snapshot(self) -> dict[str, Any]:
         await self.identity()
@@ -425,7 +427,11 @@ class PoolTransport:
             "verifiedAt": timestamp(now_ms()),
         }
 
-    async def execute(self, action: Action) -> dict[str, Any]:
+    async def execute(
+        self,
+        action: Action,
+        peer_connected: PeerConnected | None = None,
+    ) -> dict[str, Any]:
         if action.reconcile or action.step == "verify":
             return retry("invalid_action_binding")
         dispatched = False
@@ -477,6 +483,8 @@ class PoolTransport:
                     else:
                         if not self.photo:
                             return retry("photo_upload_unavailable")
+                        if not await still_connected(peer_connected):
+                            return retry("broker_peer_gone")
                         uploaded = await asyncio.wait_for(
                             self.client.upload_file(
                                 io.BytesIO(self.photo), file_name="sai-chat-photo.jpg"
@@ -486,9 +494,13 @@ class PoolTransport:
                         request = functions.channels.EditPhotoRequest(
                             peer, types.InputChatUploadedPhoto(file=uploaded)
                         )
+                if not await still_connected(peer_connected):
+                    return retry("broker_peer_gone")
                 refusal = self.journal.guard(action, now_ms(), reserve=True)
                 if refusal is not None:
                     return refusal
+                if not await still_connected(peer_connected):
+                    return retry("broker_peer_gone")
                 dispatched = True
                 try:
                     with single_request():
@@ -515,3 +527,12 @@ class PoolTransport:
             if not dispatched:
                 return retry("room_preflight_unavailable")
         return {"outcome": "uncertain"}
+
+
+async def still_connected(peer_connected: PeerConnected | None) -> bool:
+    if peer_connected is None:
+        return True
+    # Give the Unix transport a turn to consume EOF delivered during a
+    # synchronous journal operation.
+    await asyncio.sleep(0)
+    return peer_connected()
