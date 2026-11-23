@@ -11,6 +11,7 @@ from contextlib import AsyncExitStack
 from importlib.resources import files as resource_files
 
 from telegram_mcp.broker import Broker, listen
+from telegram_mcp.bot_identity import BotIdentity, for_broker
 from telegram_mcp.fill import PoolTransport
 from telegram_mcp.http_service import serve_mcp
 from telegram_mcp.session_store import lock_authorization, validate_identity
@@ -41,6 +42,11 @@ async def _main() -> None:
     try:
         if broker_enabled and state is None:
             raise StoreError("Telegram broker requires explicitly selected encrypted profiles")
+        bot = BotIdentity()
+        if broker_enabled and state is not None:
+            bot = for_broker(
+                state, {profile.user_id for profile in _runtime.STORED_PROFILES.values()}
+            )
         async with AsyncExitStack() as stack:
             if state is not None:
                 for profile in _runtime.STORED_PROFILES.values():
@@ -58,7 +64,7 @@ async def _main() -> None:
                 photo = resource_files("telegram_mcp").joinpath("sai-chat-photo.jpg").read_bytes()
                 accounts = {
                     str(profile.user_id): PoolTransport(
-                        clients[label], state, str(profile.user_id), photo
+                        clients[label], state, str(profile.user_id), photo, bot
                     )
                     for label, profile in _runtime.STORED_PROFILES.items()
                 }

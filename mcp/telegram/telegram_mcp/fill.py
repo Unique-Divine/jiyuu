@@ -15,11 +15,11 @@ from typing import Any
 from telethon import TelegramClient, errors, functions, hints, types, utils
 
 from telegram_mcp.broker import BrokerError, PeerConnected
+from telegram_mcp.bot_identity import BotIdentity
 from telegram_mcp.request_policy import raise_flood_waits, single_request
 from telegram_mcp.session_store import State, validate_identity
 
 TITLE = "Sai deal chat (available)"
-BOT = 8983431101
 REFERENCE = re.compile(r"[a-f0-9]{8}")
 POSITIVE = re.compile(r"[1-9][0-9]{0,18}")
 ROOM = re.compile(r"-[1-9][0-9]{12,18}")
@@ -260,8 +260,16 @@ class Journal:
 
 
 class PoolTransport:
-    def __init__(self, client: TelegramClient, state: State, account: str, photo: bytes):
+    def __init__(
+        self,
+        client: TelegramClient,
+        state: State,
+        account: str,
+        photo: bytes,
+        bot: BotIdentity = BotIdentity(),
+    ):
         self.client = client
+        self.bot = bot
         self.account = account
         self.journal = Journal(state, account)
         self.photo = photo
@@ -346,8 +354,8 @@ class PoolTransport:
         return channel, full.full_chat
 
     async def read_bot(self, room):
-        bot = await self.client.get_entity("SaiTeam_bot")
-        if not isinstance(bot, types.User) or bot.id != BOT or not bot.bot:
+        bot = await self.client.get_entity(self.bot.username)
+        if not isinstance(bot, types.User) or bot.id != self.bot.id or not bot.bot:
             raise BrokerError("invalid_bot")
         if bot.access_hash is None:
             raise BrokerError("invalid_bot")

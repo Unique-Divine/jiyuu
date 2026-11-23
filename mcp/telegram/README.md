@@ -297,3 +297,10 @@ The service keeps the broker and Telegram clients alive across MCP client
 disconnects. A second local process cannot use the same saved authorization
 through this setup. The designated custody
 account remains on its dedicated service.
+
+
+For staging, use a separate `BOKU_HOME` and set `SAI_STAGING_BOT_ID`,
+`SAI_STAGING_BOT_USERNAME`, `SAI_STAGING_CUSTODY_ID`, and
+`SAI_STAGING_OWNER_ID` to the Deal Desk staging identities. Select only
+the staging owner's profile. The process checks these pins before opening
+Telegram and rejects a store already marked for production.
