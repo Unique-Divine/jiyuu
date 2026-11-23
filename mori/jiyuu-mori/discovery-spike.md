@@ -1,4 +1,21 @@
-# Rust Directory Walk Comparison
+# Rust Directory Walk
+
+On Unix, a linked `mori` build can use `MORI_IMPL_DISCOVERY=rust` for the
+ordinary pipeline walk. Set it when starting the daemon or use a fresh
+`CBM_RUNTIME_DIR` so the index worker inherits it. Both initial discovery and
+rediscovery at a stored depth use the selector. Set `CBM_LOG_LEVEL=debug` and
+`CBM_PROFILE=1` to keep the worker log. Its `pipeline.discovery_backend`
+event records the phase, mode, actual backend, and reason.
+
+Rust reads each directory and owns the pending directory stack. It visits
+children in reverse enumeration order after scanning their parent. Native
+code prepares the ignore rules, classifies entries, and builds the result
+arrays, including native mtimes and the ordered ignore sample. C is the
+default and handles bounded admission, discovery with aggregate resource
+limits, fresh semantic-manifest checks, and frozen builds that need a walk.
+A frozen build with its own file list reports `frozen_list` as the backend.
+
+## Independent Prototype Comparison
 
 The linked test module compares a Rust walk with C function
 `cbm_discover_ex2`. Both use Mori's native language classifier, built-in
@@ -56,9 +73,6 @@ total and retained count of ignored paths. For at most 2,000 ignored paths
 per walk it also compares the ignored paths and reasons. Beyond that cap,
 the native result retains a traversal-order sample.
 
-## Limits
-
-- The Rust walk stops on read errors. C file discovery can skip an
-  unreadable entry or directory. Bounded admission walks, aggregate
-  resource limits, and changes during a walk need separate tests before
-  the Rust walk can drive indexing.
+Set `MORI_DISCOVERY_BACKEND=pipeline-compare` to check the production walk
+against C. This compares the results in order, including absolute paths,
+native mtimes, and the retained ignore sample even when it hits the cap.
