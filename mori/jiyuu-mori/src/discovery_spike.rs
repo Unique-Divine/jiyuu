@@ -683,6 +683,48 @@ impl Drop for Scratch {
 }
 
 #[test]
+fn matches_c_when_a_child_cannot_be_read_or_statted() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let scratch = Scratch::new();
+    scratch.write("src/main.rs", "fn main() {}\n");
+    scratch.write("blocked-read/hidden.rs", "fn hidden() {}\n");
+    scratch.write("blocked-stat/hidden.rs", "fn hidden() {}\n");
+    let blocked_read = scratch.0.join("blocked-read");
+    let blocked_stat = scratch.0.join("blocked-stat");
+
+    fs::set_permissions(&blocked_read, fs::Permissions::from_mode(0o100))
+        .unwrap();
+    fs::set_permissions(&blocked_stat, fs::Permissions::from_mode(0o400))
+        .unwrap();
+    let read_error = fs::read_dir(&blocked_read).err();
+    let stat_error = fs::symlink_metadata(blocked_stat.join("hidden.rs")).err();
+    let snapshots = Mode::ALL.map(|mode| {
+        let native = NativeWalk::run(&scratch.0, mode, 0).snapshot();
+        (mode, native, Walk::run(&scratch.0, mode, 0))
+    });
+    fs::set_permissions(&blocked_read, fs::Permissions::from_mode(0o700))
+        .unwrap();
+    fs::set_permissions(&blocked_stat, fs::Permissions::from_mode(0o700))
+        .unwrap();
+
+    // A test process with DAC override can read both paths.
+    if read_error.is_none() && stat_error.is_none() {
+        return;
+    }
+    assert_eq!(read_error.unwrap().kind(), io::ErrorKind::PermissionDenied);
+    assert_eq!(stat_error.unwrap().kind(), io::ErrorKind::PermissionDenied);
+    for (mode, mut native, rust) in snapshots {
+        assert_eq!(native.files.len(), 1, "{mode:?}");
+        assert_eq!(native.files[0].path.0, b"src/main.rs");
+        let mut rust = rust.unwrap();
+        native.sort();
+        rust.sort();
+        assert_eq!(native, rust, "{mode:?}");
+    }
+}
+
+#[test]
 fn matches_c_filters_in_all_modes() {
     let scratch = Scratch::new();
     scratch.write(".gitignore", "/nested/root.cpp\n*.gen.ts\n");
