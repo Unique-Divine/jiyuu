@@ -108,13 +108,19 @@ void cbm_cross_repo_visit_stale_clients(const char *provider, const char *genera
                                         cbm_cross_repo_client_visitor_t visitor, void *context,
                                         const atomic_int *cancelled);
 
-/* Check whether this published generation still needs peer-side writes. */
+/* Check whether the graph still needs peer-side writes. */
 bool cbm_cross_repo_reverse_pending(const char *project);
 
-/* Complete peer-side writes after publication. Caller must hold the wildcard
- * project mutation lease. A cancellation rolls back the current peer write
- * and leaves the repair pending. */
+/* Complete peer-side writes after publication or automatic repair. Caller
+ * must hold the wildcard project mutation lease. Cancellation rolls back
+ * the current peer write and leaves the repair pending. */
 bool cbm_cross_repo_reconcile_published(const char *project, const atomic_int *cancelled);
+
+/* Refresh a client's explicit saved targets in place, preserving incoming
+ * callers and the published source generation. Caller must hold the wildcard
+ * project mutation lease. Returns false if the forward refresh rolls back or
+ * if committed forward links still have pending reverse work. */
+bool cbm_cross_repo_repair_saved(const char *project, const atomic_int *cancelled);
 
 /* Run cross-repo matching for `project` against `target_projects`.
  * If target_count == 1 and target_projects[0] == "*", matches against all

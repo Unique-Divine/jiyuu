@@ -2132,16 +2132,12 @@ static bool application_reconcile_reverse(cbm_daemon_application_t *application,
 
 static bool application_match_saved_targets(cbm_daemon_application_t *application,
                                             const char *provider, const char *client,
-                                            const char **targets, int target_count) {
-    cbm_cross_repo_result_t result =
-        cbm_cross_repo_match_cancellable(client, targets, target_count, &application->stopping);
-    bool complete = !result.failed && !result.cancelled && result.skipped_count == 0 &&
-                    !cbm_cross_repo_reverse_pending(client);
+                                            int target_count) {
+    bool complete = cbm_cross_repo_repair_saved(client, &application->stopping);
     char count[CBM_SZ_32];
     snprintf(count, sizeof(count), "%d", target_count);
     cbm_log_info("cross_repo.repair_result", "provider", provider, "client", client, "targets",
                  count, "status", complete ? "repaired" : "pending");
-    cbm_cross_repo_result_free(&result);
     return complete;
 }
 
@@ -2161,8 +2157,9 @@ static void application_repair_client(void *context, const char *client, const c
         cbm_log_warn("cross_repo.repair_deferred", "client", client, "reason", "allocation");
         return;
     }
+    (void)targets;
     if (!application_match_saved_targets(batch->application, batch->provider, client,
-                                         (const char **)targets, target_count)) {
+                                         target_count)) {
         batch->retry = true;
     }
 }
@@ -2243,12 +2240,10 @@ static bool application_recover_repair_project(cbm_daemon_application_t *applica
     cbm_store_close(store);
 
     size_t count = yyjson_arr_size(targets);
-    const char **names =
-        count && count <= APPLICATION_REPAIR_MAX_TARGETS ? calloc(count, sizeof(*names)) : NULL;
     bool stale = false;
     bool missing = false;
     bool wildcard = count == 1 && yyjson_equals_str(yyjson_arr_get(targets, 0), "*");
-    ok = ok && (!count || names);
+    ok = ok && count <= APPLICATION_REPAIR_MAX_TARGETS;
     for (size_t i = 0; ok && !wildcard && i < count; i++) {
         yyjson_val *target = yyjson_arr_get(targets, i);
         const char *name = yyjson_get_str(target);
@@ -2256,7 +2251,6 @@ static bool application_recover_repair_project(cbm_daemon_application_t *applica
         if (!ok) {
             break;
         }
-        names[i] = name;
         if (strcmp(name, project) == 0) {
             continue;
         }
@@ -2272,11 +2266,10 @@ static bool application_recover_repair_project(cbm_daemon_application_t *applica
     if (ok && missing) {
         ok = false;
     } else if (ok && stale) {
-        ok = application_match_saved_targets(application, "recovery", project, names, (int)count);
+        ok = application_match_saved_targets(application, "recovery", project, (int)count);
     } else if (ok && cbm_cross_repo_reverse_pending(project)) {
         ok = application_reconcile_reverse(application, project);
     }
-    free(names);
     yyjson_doc_free(observations);
     yyjson_doc_free(selection);
     return ok;
