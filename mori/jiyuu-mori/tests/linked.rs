@@ -877,8 +877,10 @@ fn exact_path_coverage_verdicts_match_c_on_one_cache() {
     let requests = ["json", "tree"].map(|format| {
         serde_json::json!({
             "project": project,
-            "paths": ["nested/partial.py", "nested/missing.py", "verified.py", "changed.py"],
-            "scopes": ["nested"], "scope_limit": 1, "format": format
+            "paths": ["./nested\\partial.py", "nested/missing.py", "verified.py", "changed.py",
+                      "nested/../partial.py", "C:relative.py", "nested/bad\n.py", ".", "", null],
+            "scopes": ["./nested//", ".", "/outside", "nested/../scope"],
+            "scope_limit": 1, "format": format
         })
         .to_string()
     });
@@ -894,7 +896,14 @@ fn exact_path_coverage_verdicts_match_c_on_one_cache() {
         outputs
     };
     let reference = read(&c);
-    let linked = read(Path::new(MORI));
+    let rust = Path::new(MORI);
+    let start = command_in(rust, &scratch)
+        .env("CBM_LOG_LEVEL", "debug")
+        .args(["daemon", "start"])
+        .output()
+        .unwrap();
+    assert!(start.status.success(), "{start:?}");
+    let linked = read(rust);
     for (reference, linked) in reference.iter().zip(&linked) {
         assert!(reference.status.success() && linked.status.success());
         assert_eq!(reference.stdout, linked.stdout);
@@ -903,6 +912,7 @@ fn exact_path_coverage_verdicts_match_c_on_one_cache() {
     let json: serde_json::Value =
         serde_json::from_slice(&linked[0].stdout).unwrap();
     let paths = json["paths"].as_array().unwrap();
+    assert_eq!(paths[0]["path"], "nested/partial.py");
     assert_eq!(paths[0]["status"], "partial");
     assert_eq!(
         paths[0]["recommended_action"],
@@ -914,6 +924,23 @@ fn exact_path_coverage_verdicts_match_c_on_one_cache() {
     assert_eq!(paths[2]["content_verified"], true);
     assert_eq!(paths[3]["status"], "coverage_unavailable");
     assert_eq!(paths[3]["recommended_action"], "read_source_and_reindex");
+    assert_eq!(paths[4]["status"], "outside_project");
+    assert_eq!(paths[5]["status"], "outside_project");
+    assert_eq!(paths[6]["status"], "invalid_path");
+    assert_eq!(paths[7]["status"], "invalid_path");
+    assert_eq!(paths[8]["status"], "outside_project");
+    assert_eq!(paths[9]["status"], "invalid_path");
+    let scopes = json["scopes"].as_array().unwrap();
+    assert_eq!(scopes[0]["scope"], "nested");
+    assert_eq!(scopes[1]["scope"], ".");
+    assert_eq!(scopes[2]["status"], "outside_project");
+    assert_eq!(scopes[3]["status"], "outside_project");
+    let log =
+        fs::read_to_string(scratch.0.join("cache/logs/cbm-daemon.log")).unwrap();
+    assert!(log.lines().any(|line| {
+        line.contains("check_index_coverage.normalize")
+            && line.contains("backend=rust")
+    }));
 }
 
 #[test]
