@@ -4379,6 +4379,39 @@ static int run_extraction_phase(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
     return rc;
 }
 
+static cbm_discover_walk_fn g_pipeline_discover_walk;
+
+void cbm_pipeline_set_discover_walk(cbm_discover_walk_fn walker) {
+    g_pipeline_discover_walk = walker;
+}
+
+static int pipeline_discover(cbm_pipeline_t *p, const cbm_discover_opts_t *opts, const char *phase,
+                             cbm_file_info_t **files, int *file_count) {
+    const char *selector = cbm_runtime_getenv("MORI_IMPL_DISCOVERY");
+    const bool requested = selector && strcmp(selector, "rust") == 0;
+    const bool listed = cbm_pipeline_frozen_has_file_list(p);
+    const char *reason = listed                      ? "frozen_file_list"
+                         : p->frozen                 ? "frozen"
+                         : opts->resource_policy     ? "resource_policy"
+                         : !requested                ? "default"
+                         : !g_pipeline_discover_walk ? "unavailable"
+                                                     : "selected";
+    cbm_discover_walk_fn walker =
+        requested && !p->frozen && !opts->resource_policy ? g_pipeline_discover_walk : NULL;
+    cbm_log_debug("pipeline.discovery_backend", "phase", phase, "mode",
+                  pipeline_mode_name(opts->mode), "backend",
+                  listed   ? "frozen_list"
+                  : walker ? "rust"
+                           : "c",
+                  "reason", reason);
+    if (listed) {
+        return cbm_pipeline_frozen_listed_files(p, files, file_count);
+    }
+    return cbm_discover_ex2_with_walk(p->repo_path, opts, files, file_count, &p->excluded_dirs,
+                                      &p->excluded_count, &p->ignored_files, &p->ignored_count,
+                                      &p->ignored_total, walker);
+}
+
 static int cbm_pipeline_run_staged(cbm_pipeline_t *p) {
     if (!p) {
         return CBM_NOT_FOUND;
@@ -4451,12 +4484,7 @@ static int cbm_pipeline_run_staged(cbm_pipeline_t *p) {
     p->ignored_files = NULL;
     p->ignored_count = 0;
     p->ignored_total = 0;
-    /* A frozen build with a classified file list walks no directory. */
-    int rc = cbm_pipeline_frozen_has_file_list(p)
-                 ? cbm_pipeline_frozen_listed_files(p, &files, &file_count)
-                 : cbm_discover_ex2(p->repo_path, &opts, &files, &file_count, &p->excluded_dirs,
-                                    &p->excluded_count, &p->ignored_files, &p->ignored_count,
-                                    &p->ignored_total);
+    int rc = pipeline_discover(p, &opts, "initial", &files, &file_count);
     if (rc != 0) {
         cbm_log_error("pipeline.err", "phase", "discover", "rc", itoa_buf(rc));
     }
@@ -4526,11 +4554,7 @@ static int cbm_pipeline_run_staged(cbm_pipeline_t *p) {
         p->ignored_total = 0;
 
         opts.mode = p->mode;
-        rc = cbm_pipeline_frozen_has_file_list(p)
-                 ? cbm_pipeline_frozen_listed_files(p, &files, &file_count)
-                 : cbm_discover_ex2(p->repo_path, &opts, &files, &file_count, &p->excluded_dirs,
-                                    &p->excluded_count, &p->ignored_files, &p->ignored_count,
-                                    &p->ignored_total);
+        rc = pipeline_discover(p, &opts, "rediscover", &files, &file_count);
         cbm_log_info("pipeline.rediscover", "requested_mode", pipeline_mode_name(p->requested_mode),
                      "effective_mode", pipeline_mode_name(p->mode), "files", itoa_buf(file_count));
         if (rc != 0 || check_cancel(p)) {
