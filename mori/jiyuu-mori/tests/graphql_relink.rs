@@ -168,6 +168,46 @@ impl Fixture {
             .count()
     }
 
+    fn compare_query_pages(&self, cases: &[(&str, usize, bool)]) -> Vec<Value> {
+        let run = |bin: &Path, backend: &str| {
+            self.start_query_daemon(bin, backend);
+            let mut pages = Vec::new();
+            for &(query, offset, supported) in cases {
+                let before = self.rust_query_count();
+                let args = json!({
+                    "project": CLIENT, "query": query, "format": "json",
+                    "max_rows": 1, "offset": offset,
+                });
+                let output = self
+                    .command(bin)
+                    .args(["cli", "--quiet", "query_graph", &args.to_string()])
+                    .output()
+                    .unwrap();
+                assert!(output.status.success(), "{query}: {output:?}");
+                assert_eq!(
+                    self.rust_query_count() - before,
+                    usize::from(backend == "rust" && supported),
+                    "{query}",
+                );
+                pages.push(output.stdout);
+            }
+            let stop =
+                self.command(bin).args(["daemon", "stop"]).output().unwrap();
+            assert!(stop.status.success(), "{stop:?}");
+            pages
+        };
+        let reference = run(Self::reference_binary(), "c");
+        let candidate = run(Path::new(MORI), "rust");
+        cases
+            .iter()
+            .zip(reference.iter().zip(&candidate))
+            .map(|((query, offset, _), (c, rust))| {
+                assert_eq!(c, rust, "{query}, offset {offset}");
+                serde_json::from_slice(rust).expect("parse matched query page")
+            })
+            .collect()
+    }
+
     fn reference_binary() -> &'static Path {
         if option_env!("MORI_C_REFERENCE") == Some("1") {
             return Path::new(concat!(
@@ -983,40 +1023,8 @@ fn zero_hop_impact_query_uses_rust_and_matches_c_pages() {
         ),
         ("MATCH (n:Function) RETURN count(n)", 0, false),
     ];
-    let bin = Path::new(MORI);
-    let run = |bin: &Path, backend: &str| {
-        fixture.start_query_daemon(bin, backend);
-        let outputs: Vec<_> = cases.iter().map(|&(query, offset, supported)| {
-            let before = fixture.rust_query_count();
-            let args = json!({"project": CLIENT, "query": query, "format": "json", "max_rows": 1, "offset": offset});
-            let output = fixture.command(bin)
-                .args(["cli", "--quiet", "query_graph", &args.to_string()])
-                .output().unwrap();
-            assert!(output.status.success(), "{query}: {output:?}");
-            assert_eq!(
-                fixture.rust_query_count() - before,
-                usize::from(backend == "rust" && supported),
-                "{query}"
-            );
-            output.stdout
-        }).collect();
-        let stop = fixture
-            .command(bin)
-            .args(["daemon", "stop"])
-            .output()
-            .unwrap();
-        assert!(stop.status.success(), "{stop:?}");
-        outputs
-    };
-    let reference = run(Fixture::reference_binary(), "c");
-    let candidate = run(bin, "rust");
-    for ((query, offset, _), (c, rust)) in
-        cases.iter().zip(reference.iter().zip(&candidate))
-    {
-        assert_eq!(c, rust, "{query}, offset {offset}");
-    }
-    let page =
-        |i: usize| serde_json::from_slice::<Value>(&candidate[i]).unwrap();
+    let candidate = fixture.compare_query_pages(&cases);
+    let page = |i: usize| &candidate[i];
     let first = page(0);
     assert_eq!(
         first["columns"],
@@ -1045,6 +1053,76 @@ fn zero_hop_impact_query_uses_rust_and_matches_c_pages() {
     assert_eq!(page(5)["rows"], json!([]));
     assert_eq!(page(6)["rows"], json!([["zeta"]]));
     assert_eq!(page(6)["total"], 1);
+}
+
+#[test]
+fn zero_hop_property_byte_boundaries_and_wide_projection_match_c() {
+    use cypher_linear::ExecutionError;
+
+    let fixture = Fixture::new();
+    let db = fixture.index(CLIENT);
+    let split = format!("{}é", "a".repeat(510));
+    let exact = format!("{}é", "a".repeat(509));
+    let capped = "a".repeat(511);
+    for (name, value) in [
+        ("split", split.clone()),
+        ("exact", exact.clone()),
+        ("capped", format!("{capped}é")),
+    ] {
+        let id = node(&db, CLIENT, "Boundary", name, name, "boundary.py");
+        db.execute(
+            "UPDATE nodes SET properties = ? WHERE id = ?",
+            params![json!({"value": value}).to_string(), id],
+        )
+        .unwrap();
+    }
+
+    let keys = (0..32).map(|i| format!("prop{i}"));
+    let values: Vec<_> = (0..32).map(|i| format!("value{i}")).collect();
+    let properties: serde_json::Map<_, _> = keys
+        .clone()
+        .zip(values.iter().map(|value| json!(value)))
+        .collect();
+    let id = node(&db, CLIENT, "Wide", "wide", "wide", "wide.py");
+    db.execute(
+        "UPDATE nodes SET properties = ? WHERE id = ?",
+        params![Value::Object(properties).to_string(), id],
+    )
+    .unwrap();
+    let columns: Vec<_> = keys.map(|key| format!("n.{key}")).collect();
+    let wide = format!("MATCH (n:Wide) RETURN {}", columns.join(", "));
+    assert!(cypher_linear::classify(&format!("{wide}, n.name")).is_err());
+
+    let no_match =
+        format!("MATCH (n:Boundary) WHERE n.value = '{split}' RETURN n.name");
+    let exact_match = format!(
+        "MATCH (n:Boundary) WHERE n.value = '{exact}' RETURN n.name, n.value"
+    );
+    let capped_match = format!(
+        "MATCH (n:Boundary {{value: '{capped}'}}) RETURN n.name, n.value"
+    );
+    let pages = fixture.compare_query_pages(&[
+        (&no_match, 0, true),
+        (&exact_match, 0, true),
+        (&capped_match, 0, true),
+        (&wide, 0, true),
+    ]);
+    assert_eq!(pages[0]["rows"], json!([]));
+    assert_eq!(pages[1]["rows"], json!([["exact", exact]]));
+    assert_eq!(pages[2]["rows"], json!([["capped", capped]]));
+    assert_eq!(pages[3]["columns"], json!(columns));
+    assert_eq!(pages[3]["rows"], json!([values]));
+
+    // The split byte is valid input to native equality but cannot be
+    // projected as a UTF-8 result cell.
+    let query = cypher_linear::classify(
+        "MATCH (n:Boundary) WHERE n.name = 'split' RETURN n.value",
+    )
+    .unwrap();
+    assert!(matches!(
+        query.execute_on(&db, CLIENT),
+        Err(ExecutionError::Storage(rusqlite::Error::InvalidQuery))
+    ));
 }
 
 #[test]
@@ -1193,7 +1271,6 @@ fn linear_cypher_matches_the_native_result_ceiling() {
 fn unsupported_syntax_and_supported_storage_errors_are_distinct() {
     for query in [
         "MATCH (a) RETURN a.in_degree",
-        "MATCH (a) RETURN a.one, a.two, a.three, a.four, a.five, a.six, a.seven, a.eight, a.nine",
         "MATCH (a)-[:CALLS]->(b) RETURN b.name ORDER BY b.name",
         "MATCH (a)-[:CALLS*1..2]->(b) RETURN b.name",
         "MATCH (a)-[:CALLS]-(b) RETURN b.name",

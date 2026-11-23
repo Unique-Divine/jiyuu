@@ -14,7 +14,6 @@ const ENGINE_LIMIT: usize = 100_000;
 const DEADLINE: Duration = Duration::from_secs(30);
 const CHECK_INTERVAL: usize = 1024;
 const PROPERTY_LIMIT: usize = 511;
-const NATIVE_PROPERTY_BUFFERS: usize = 8;
 const NODE_COLUMNS: &str = "n.id, n.label, n.name, n.qualified_name, n.file_path, n.start_line, n.end_line, n.properties";
 
 #[derive(Debug)]
@@ -316,14 +315,6 @@ pub(crate) fn classify(source: &str) -> Result<Query<'_>, Unsupported> {
     if projections.len() > 32 {
         return Err(Unsupported);
     }
-    // Native node properties can share eight rotating buffers within a row.
-    // Leave wider property projections to C where those cells can alias.
-    if hops.is_empty()
-        && projections.iter().filter(|p| p.property.is_some()).count()
-            > NATIVE_PROPERTY_BUFFERS
-    {
-        return Err(Unsupported);
-    }
     let limit = if parser.keyword("LIMIT") {
         let Some(Token::Number(limit)) = parser.tokens.next() else {
             return Err(Unsupported);
@@ -381,41 +372,34 @@ impl Node {
         })
     }
 
-    fn property(&self, name: &str) -> rusqlite::Result<Cow<'_, str>> {
+    fn property_bytes(&self, name: &str) -> Cow<'_, [u8]> {
         let value: &str = match name {
             "label" => &self.label,
             "name" => &self.name,
             "qualified_name" | "qn" => &self.qualified_name,
             "file_path" | "file" | "path" => &self.file_path,
-            "start_line" => return Ok(self.start_line.to_string().into()),
-            "end_line" => return Ok(self.end_line.to_string().into()),
+            "start_line" => {
+                return self.start_line.to_string().into_bytes().into();
+            }
+            "end_line" => return self.end_line.to_string().into_bytes().into(),
             _ => "",
         };
         if !value.is_empty() {
-            return Ok(value.into());
+            return value.as_bytes().into();
         }
         if self.properties.starts_with('{') {
-            property(&self.properties, name).map(Cow::Borrowed)
+            json_property_bytes(&self.properties, name).into()
         } else {
-            Ok("".into())
+            Cow::Borrowed(b"")
         }
-    }
-
-    fn matches(&self, filters: &[Filter<'_>]) -> rusqlite::Result<bool> {
-        for &(name, expected) in filters {
-            if self.property(name)? != expected {
-                return Ok(false);
-            }
-        }
-        Ok(true)
     }
 }
 
-// The C projection returns the stored spelling of scalar/container values.
-// Keep raw bytes and the native extraction limit so JSON is not reformatted.
-fn property<'a>(json: &'a str, name: &str) -> rusqlite::Result<&'a str> {
+// C compares the raw extraction, including when its byte cap splits UTF-8.
+// Validate UTF-8 only when projecting a cell into the string result.
+fn json_property_bytes<'a>(json: &'a str, name: &str) -> &'a [u8] {
     let Some((_, tail)) = json.split_once(&format!("\"{name}\":")) else {
-        return Ok("");
+        return b"";
     };
     let tail = tail.trim_start_matches([' ', '\t']);
     let bytes = tail.as_bytes();
@@ -457,7 +441,12 @@ fn property<'a>(json: &'a str, name: &str) -> rusqlite::Result<&'a str> {
         }
         end += 1;
     }
-    tail.get(start..end).ok_or(rusqlite::Error::InvalidQuery)
+    &bytes[start..end]
+}
+
+fn project_property(bytes: Cow<'_, [u8]>) -> rusqlite::Result<String> {
+    String::from_utf8(bytes.into_owned())
+        .map_err(|_| rusqlite::Error::InvalidQuery)
 }
 
 #[derive(Debug, PartialEq)]
@@ -588,7 +577,7 @@ impl Query<'_> {
             };
             budget.step()?;
             let start = Node::read(row, 0)?;
-            if !self.matches_node(start_index, &start)? {
+            if !self.matches_node(start_index, &start) {
                 continue;
             }
             let Some(adjacency) = &mut adjacency else {
@@ -603,7 +592,7 @@ impl Query<'_> {
             hop.inbound ^= reversed;
             for (next, edge) in adjacency.neighbors(start.id, hop, budget)? {
                 budget.step()?;
-                if !self.matches_node(second_index, &next)? {
+                if !self.matches_node(second_index, &next) {
                     continue;
                 }
                 if let Some(&hop) = self.hops.get(1) {
@@ -611,7 +600,7 @@ impl Query<'_> {
                         adjacency.neighbors(next.id, hop, budget)?
                     {
                         budget.step()?;
-                        if !self.matches_node(2, &last)? {
+                        if !self.matches_node(2, &last) {
                             continue;
                         }
                         if rows.len() == limit {
@@ -671,24 +660,27 @@ impl Query<'_> {
             .unwrap_or(u8::from(node.label.is_some()))
     }
 
-    fn matches_node(&self, index: usize, node: &Node) -> rusqlite::Result<bool> {
+    fn matches_node(&self, index: usize, node: &Node) -> bool {
         let pattern = &self.nodes[index];
         if pattern.label.is_some_and(|label| label != node.label)
-            || !node.matches(&pattern.inline)?
+            || !pattern.inline.iter().all(|&(name, expected)| {
+                node.property_bytes(name).as_ref() == expected.as_bytes()
+            })
         {
-            return Ok(false);
+            return false;
         }
         // The classifier accepts single-binding predicates. Evaluate each
         // when its node is bound so rejected nodes never expand adjacency.
         for &(target, (property, value)) in &self.filters {
             if target == index {
-                let matches = node.property(property)? == value;
+                let matches =
+                    node.property_bytes(property).as_ref() == value.as_bytes();
                 if matches == self.any_filter {
-                    return Ok(matches);
+                    return matches;
                 }
             }
         }
-        Ok(!self.any_filter)
+        !self.any_filter
     }
 
     fn project(
@@ -701,7 +693,7 @@ impl Query<'_> {
             .map(|column| match (column.binding, column.property) {
                 (Binding::Node(index), None) => Ok(nodes[index].name.clone()),
                 (Binding::Node(index), Some(name)) => {
-                    nodes[index].property(name).map(Cow::into_owned)
+                    project_property(nodes[index].property_bytes(name))
                 }
                 (Binding::Edge(index), None) => {
                     Ok(edges[index].properties.clone())
@@ -709,9 +701,9 @@ impl Query<'_> {
                 (Binding::Edge(index), Some("type")) => {
                     Ok(edges[index].kind.clone())
                 }
-                (Binding::Edge(index), Some(name)) => {
-                    property(&edges[index].properties, name).map(str::to_owned)
-                }
+                (Binding::Edge(index), Some(name)) => project_property(
+                    json_property_bytes(&edges[index].properties, name).into(),
+                ),
             })
             .collect()
     }
