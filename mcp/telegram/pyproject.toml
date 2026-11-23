@@ -34,6 +34,7 @@ dependencies = [
     "python-json-logger>=3.3.0,<5",
     "qrcode>=8.2,<9",
     "telethon>=1.42.0,<2",
+    "tomlkit>=0.13,<1",
 ]
 
 [project.optional-dependencies]
@@ -59,6 +60,7 @@ telegram_mcp = ["sai-chat-photo.jpg"]
 telegram-mcp = "main:main"
 uniquedivine-telegram-mcp = "main:main"
 telegram-mcp-generate-session = "session_string_generator:main"
+telegram-mcp-migrate = "telegram_mcp.migrate:main"
 
 [tool.jiyuu.upstream]
 repository = "chigwell/telegram-mcp"

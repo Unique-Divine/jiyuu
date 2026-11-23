@@ -152,6 +152,12 @@ def _configure_broker_tools(server: FastMCP) -> None:
 
 def main() -> None:
     _configure_allowed_roots_from_cli(sys.argv[1:])
+    if not _runtime.STORED_PROFILES:
+        print(
+            "Telegram MCP is using legacy credentials. Run telegram-mcp-migrate --help "
+            "to move them into encrypted profiles.",
+            file=sys.stderr,
+        )
     _runtime._apply_exposed_tools_mode()
     if os.environ.get("TELEGRAM_BROKER") == "1":
         _configure_broker_tools(mcp)

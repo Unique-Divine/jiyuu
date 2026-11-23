@@ -262,6 +262,45 @@ do not imply an upstream security review. The version continues from upstream
 2.0.1. Table `[tool.jiyuu.upstream]` in file `pyproject.toml` records that
 baseline.
 
+## Migrate Legacy Telegram MCP Credentials
+
+Run `telegram-mcp-migrate` on a POSIX host under the same user and with the same
+`BOKU_HOME` setting that runs Telegram MCP. The preview lists inherited
+Telegram credential variable names, counts the planned changes, and leaves
+files and profiles untouched. Supply paths to the command and keep credential
+values out of your shell arguments and support logs.
+
+```sh
+telegram-mcp-migrate --env-file /path/to/.env
+telegram-mcp-migrate --mcp-config /path/to/config.toml --server telegram
+```
+
+The command accepts a dotenv file, a named local server entry in Codex TOML
+or Cursor or Claude Desktop JSON, or both for the same launch. Each selected
+file receives the combined account list. Use `--session default=/path/to/legacy.session`
+for an unlabeled Telethon SQLite session, or replace `default` with the account
+label for a suffixed session setting. Add `--cwd` with the old launch directory
+if the legacy session setting is a relative path.
+
+Install the `local-secret-store` executable on `PATH` and stop clients using
+the selected Telegram authorizations. Rerun the preview command with `--apply`.
+The command checks each legacy authorization with Telegram, saves the human
+account profile in `${BOKU_HOME:-$HOME/.boku}/telegram-mcp/secrets`, and verifies
+the encrypted readback. It then replaces the migrated assignments with
+`TELEGRAM_STORED_ACCOUNTS`. Run the same command again to resume after an
+interruption. Keep the store and its key across upgrades.
+
+Pass `--remove-session-files` with `--apply` to unlink the explicitly selected
+SQLite files and their sidecars after verification. If you leave the files in
+place on the first run, you can pass the same session selections on a later
+run to remove them. The command leaves proxy and 2FA settings in place.
+Remove any inherited credential assignments from their shell or service
+configuration before restarting the MCP host.
+
+Migration removes the selected plaintext copies. Previously shared session
+strings and old backups may still contain a usable Telegram authorization.
+Revoke an exposed session in Telegram and enroll a fresh session.
+
 ## Share an account with tg-sai
 
 The local broker lets Telegram MCP and a managed fill worker use the same
