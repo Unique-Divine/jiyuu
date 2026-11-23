@@ -262,7 +262,7 @@ mod tests {
                     node.file_path,
                     node.properties,
                 ]
-                .map(|bytes| c_text(bytes));
+                .map(c_text);
                 // SAFETY: the buffer is live and C copies each NUL-terminated field.
                 let id = unsafe {
                     cbm_gbuf_upsert_node(
