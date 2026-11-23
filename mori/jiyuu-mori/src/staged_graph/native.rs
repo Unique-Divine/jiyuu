@@ -1,6 +1,9 @@
 //! Bridge from the native graph buffer's normalized dump records.
 
-use super::{EdgeRecord, NodeRecord, ProjectRecord, write_graph_records};
+use super::{
+    EdgeRecord, NodeRecord, NodeVector, ProjectRecord, TokenVector,
+    write_graph_records,
+};
 use rusqlite::{Connection, ffi::sqlite3};
 use std::ffi::{CStr, OsStr, c_char, c_int, c_void};
 use std::io::Write;
@@ -31,18 +34,43 @@ struct DumpEdge {
     local_name: *const c_char,
 }
 
+#[repr(C)]
+struct DumpVector {
+    node_id: i64,
+    project: *const c_char,
+    vector: *const u8,
+    vector_len: c_int,
+}
+
+#[repr(C)]
+struct DumpTokenVector {
+    id: i64,
+    project: *const c_char,
+    token: *const c_char,
+    vector: *const u8,
+    vector_len: c_int,
+    idf: f32,
+}
+
+#[repr(C)]
+struct Dump {
+    path: *const c_char,
+    project: *const c_char,
+    indexed_at: *const c_char,
+    root_path: *const c_char,
+    nodes: *const DumpNode,
+    node_count: c_int,
+    edges: *const DumpEdge,
+    edge_count: c_int,
+    vectors: *const DumpVector,
+    vector_count: c_int,
+    tokens: *const DumpTokenVector,
+    token_count: c_int,
+}
+
 unsafe extern "C" {
     fn cbm_gbuf_set_staged_writer(
-        writer: unsafe extern "C" fn(
-            path: *const c_char,
-            project: *const c_char,
-            indexed_at: *const c_char,
-            root_path: *const c_char,
-            nodes: *const DumpNode,
-            node_count: c_int,
-            edges: *const DumpEdge,
-            edge_count: c_int,
-        ) -> c_int,
+        writer: unsafe extern "C" fn(dump: *const Dump) -> c_int,
     );
     fn cbm_store_open_path(path: *const c_char) -> *mut c_void;
     fn cbm_store_get_db(store: *mut c_void) -> *mut sqlite3;
@@ -69,56 +97,63 @@ unsafe fn text<'a>(value: *const c_char) -> &'a [u8] {
     }
 }
 
-unsafe extern "C" fn write(
-    path: *const c_char,
-    project: *const c_char,
-    indexed_at: *const c_char,
-    root_path: *const c_char,
-    nodes: *const DumpNode,
-    node_count: c_int,
-    edges: *const DumpEdge,
-    edge_count: c_int,
-) -> c_int {
-    if path.is_null()
-        || node_count < 0
-        || edge_count < 0
-        || (node_count > 0 && nodes.is_null())
-        || (edge_count > 0 && edges.is_null())
-    {
-        return -1;
+// SAFETY: nonempty arrays must be allocated and initialized for `count` rows by C.
+unsafe fn records<'a, T>(ptr: *const T, count: c_int) -> Option<&'a [T]> {
+    if count == 0 {
+        return Some(&[]);
     }
-    // SAFETY: C supplies a path for its private staging file. The connection
-    // borrows the native store's SQLite handle, so the store must outlive it.
-    let Some(store) =
-        NonNull::new(unsafe { cbm_store_open_path(path) }).map(Store)
-    else {
-        return -1;
-    };
-    let Ok(mut connection) =
-        (unsafe { Connection::from_handle(cbm_store_get_db(store.0.as_ptr())) })
-    else {
-        return -1;
-    };
+    if ptr.is_null() || count < 0 {
+        return None;
+    }
+    // SAFETY: the caller ensures C owns these rows for the lifetime of the borrow.
+    Some(unsafe { std::slice::from_raw_parts(ptr, count as usize) })
+}
 
-    // SAFETY: the graph buffer owns the normalized arrays and their strings.
-    // C invokes the callback synchronously, before freeing any record.
+unsafe extern "C" fn write(dump: *const Dump) -> c_int {
+    // SAFETY: the graph buffer owns all of these arrays and any bytes they
+    // borrow. C invokes the callback synchronously, before freeing any record.
     let result = unsafe {
-        let nodes = if node_count > 0 {
-            std::slice::from_raw_parts(nodes, node_count as usize)
-        } else {
-            &[]
+        let Some(dump) = dump.as_ref() else {
+            return -1;
         };
-        let edges = if edge_count > 0 {
-            std::slice::from_raw_parts(edges, edge_count as usize)
-        } else {
-            &[]
+        let (Some(nodes), Some(edges), Some(vectors), Some(tokens)) = (
+            records(dump.nodes, dump.node_count),
+            records(dump.edges, dump.edge_count),
+            records(dump.vectors, dump.vector_count),
+            records(dump.tokens, dump.token_count),
+        ) else {
+            return -1;
+        };
+        if dump.path.is_null()
+            || vectors
+                .iter()
+                .any(|value| value.vector_len <= 0 || value.vector.is_null())
+            || tokens.iter().any(|value| {
+                value.vector_len <= 0
+                    || value.vector.is_null()
+                    || !value.idf.is_finite()
+            })
+        {
+            return -1;
+        }
+
+        // The Rust connection borrows from the native store and gets dropped first.
+        let Some(store) =
+            NonNull::new(cbm_store_open_path(dump.path)).map(Store)
+        else {
+            return -1;
+        };
+        let Ok(mut connection) =
+            Connection::from_handle(cbm_store_get_db(store.0.as_ptr()))
+        else {
+            return -1;
         };
         write_graph_records(
             &mut connection,
             ProjectRecord {
-                name: text(project),
-                indexed_at: text(indexed_at),
-                root_path: text(root_path),
+                name: text(dump.project),
+                indexed_at: text(dump.indexed_at),
+                root_path: text(dump.root_path),
             },
             nodes.iter().map(|node| NodeRecord {
                 id: node.id,
@@ -136,6 +171,22 @@ unsafe extern "C" fn write(
                 target_id: edge.target_id,
                 kind: text(edge.kind),
                 properties: text(edge.properties),
+            }),
+            vectors.iter().map(|value| NodeVector {
+                node_id: value.node_id,
+                bytes: std::slice::from_raw_parts(
+                    value.vector,
+                    value.vector_len as usize,
+                ),
+            }),
+            tokens.iter().map(|value| TokenVector {
+                id: value.id,
+                token: text(value.token),
+                bytes: std::slice::from_raw_parts(
+                    value.vector,
+                    value.vector_len as usize,
+                ),
+                idf: value.idf,
             }),
         )
     };
