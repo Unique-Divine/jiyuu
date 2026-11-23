@@ -1,0 +1,357 @@
+{
+  "credential": {
+    "label": "Synthetic reader",
+    "permissions": [
+      "records:read"
+    ],
+    "revoked": false
+  },
+  "views": {
+    "EXAMPLE-ATLAS": {
+      "generatedAt": "2026-11-23T00:00:00Z",
+      "selectors": [
+        "EXAMPLE-ATLAS"
+      ],
+      "deals": [
+        {
+          "deal": {
+            "id": "deal-example-atlas",
+            "name": "Example Atlas"
+          },
+          "signals": [
+            {
+              "id": "term-atlas-volume",
+              "kind": "initial_grant",
+              "params": {
+                "amountUsdc": "250.00",
+                "form": "trading_credit"
+              }
+            },
+            {
+              "id": "term-atlas-unlock",
+              "kind": "unlock",
+              "params": {
+                "thresholdUsd": "10000.00"
+              }
+            }
+          ],
+          "latestEvaluations": [
+            {
+              "id": "eval-atlas-volume",
+              "signalId": "term-atlas-unlock",
+              "measurement": {
+                "network": "cataclysm-1",
+                "chainHeight": 100,
+                "chainBlockTime": "2026-11-20T00:00:00Z",
+                "volumeUsd": "8100.00",
+                "indexedThroughTime": null
+              }
+            }
+          ],
+          "missingEvaluationSignalIds": ["term-atlas-volume"],
+          "payments": [
+            {
+              "id": "payment-atlas-1",
+              "signalId": "term-atlas-volume",
+              "amountUsdc": "250.00",
+              "form": "trading_credit",
+              "paidAt": "2026-11-18T16:00:00Z",
+              "executions": [
+                {
+                  "txHash": "fixture-atlas-payment-receipt"
+                }
+              ]
+            }
+          ],
+          "actions": [
+            {
+              "id": "action-atlas-setup",
+              "completedAt": "2026-11-18T15:42:00Z",
+              "actionType": "referral_setup",
+              "evidence": "fixture-atlas-setup-receipt"
+            }
+          ],
+          "completions": [],
+          "directory": [
+            {
+              "saiCode": "EXAMPLE-ATLAS",
+              "addrEvm": "0x1111111111111111111111111111111111111111"
+            }
+          ],
+          "matchedSelectors": [
+            "EXAMPLE-ATLAS"
+          ],
+          "note": null
+        }
+      ],
+      "errors": []
+    },
+    "0x1111111111111111111111111111111111111111": {
+      "generatedAt": "2026-11-23T00:00:00Z",
+      "selectors": [
+        "0x1111111111111111111111111111111111111111"
+      ],
+      "deals": [
+        {
+          "deal": {
+            "id": "deal-example-atlas",
+            "name": "Example Atlas"
+          },
+          "signals": [
+            {
+              "id": "term-atlas-volume",
+              "kind": "initial_grant",
+              "params": {
+                "amountUsdc": "250.00",
+                "form": "trading_credit"
+              }
+            },
+            {
+              "id": "term-atlas-unlock",
+              "kind": "unlock",
+              "params": {
+                "thresholdUsd": "10000.00"
+              }
+            }
+          ],
+          "latestEvaluations": [
+            {
+              "id": "eval-atlas-volume",
+              "signalId": "term-atlas-unlock",
+              "measurement": {
+                "network": "cataclysm-1",
+                "chainHeight": 100,
+                "chainBlockTime": "2026-11-20T00:00:00Z",
+                "volumeUsd": "8100.00",
+                "indexedThroughTime": null
+              }
+            }
+          ],
+          "missingEvaluationSignalIds": ["term-atlas-volume"],
+          "payments": [
+            {
+              "id": "payment-atlas-1",
+              "signalId": "term-atlas-volume",
+              "amountUsdc": "250.00",
+              "form": "trading_credit",
+              "paidAt": "2026-11-18T16:00:00Z",
+              "executions": [
+                {
+                  "txHash": "fixture-atlas-payment-receipt"
+                }
+              ]
+            }
+          ],
+          "actions": [
+            {
+              "id": "action-atlas-setup",
+              "completedAt": "2026-11-18T15:42:00Z",
+              "actionType": "referral_setup",
+              "evidence": "fixture-atlas-setup-receipt"
+            }
+          ],
+          "completions": [],
+          "directory": [
+            {
+              "saiCode": "EXAMPLE-ATLAS",
+              "addrEvm": "0x1111111111111111111111111111111111111111"
+            }
+          ],
+          "matchedSelectors": [
+            "0x1111111111111111111111111111111111111111"
+          ],
+          "note": null
+        },
+        {
+          "deal": {
+            "id": "deal-example-boreal",
+            "name": "Example Boreal"
+          },
+          "matchedSelectors": [
+            "0x1111111111111111111111111111111111111111"
+          ]
+        }
+      ],
+      "errors": []
+    }
+  },
+  "commsPages": {
+    "": {
+      "nodes": [
+        {
+          "id": "workflow:comms-atlas-check",
+          "sourceId": "comms-atlas-check",
+          "recordType": "WORKFLOW",
+          "status": "NEEDS_REVIEW",
+          "reviewReason": "Delivery outcome uncertain",
+          "platform": "telegram",
+          "chatId": "fixture-atlas-chat",
+          "bodyMarkdown": "A draft asks the trader to confirm recent volume.",
+          "notes": null,
+          "createdAt": "2026-11-22T00:00:00Z",
+          "updatedAt": "2026-11-22T00:00:00Z",
+          "deliveredAt": null,
+          "paymentIds": [],
+          "actionIds": [],
+          "dealIds": [
+            "deal-example-atlas"
+          ]
+        },
+        {
+          "id": "completed_note:comms-atlas-note",
+          "sourceId": "comms-atlas-note",
+          "recordType": "COMPLETED_NOTE",
+          "status": "SENT",
+          "reviewReason": null,
+          "platform": "telegram",
+          "chatId": "fixture-atlas-chat",
+          "bodyMarkdown": null,
+          "notes": "A historical note discussed the unlock. Its delivery time is unknown.",
+          "createdAt": "2026-11-19T00:00:00Z",
+          "updatedAt": "2026-11-19T00:00:00Z",
+          "deliveredAt": null,
+          "paymentIds": [],
+          "actionIds": [],
+          "dealIds": [
+            "deal-example-atlas"
+          ]
+        }
+      ],
+      "pageInfo": {
+        "endCursor": "fixture-cursor-atlas-2",
+        "hasNextPage": true
+      }
+    },
+    "fixture-cursor-atlas-2": {
+      "nodes": [
+        {
+          "id": "completed_note:comms-atlas-paid",
+          "sourceId": "comms-atlas-paid",
+          "recordType": "COMPLETED_NOTE",
+          "status": "SENT",
+          "reviewReason": null,
+          "platform": "telegram",
+          "chatId": "fixture-atlas-chat",
+          "bodyMarkdown": null,
+          "notes": "Confirmed that the trading-credit payment issued.",
+          "createdAt": "2026-11-18T16:00:00Z",
+          "updatedAt": "2026-11-18T16:12:00Z",
+          "deliveredAt": "2026-11-18T16:12:00Z",
+          "paymentIds": [
+            "payment-atlas-1"
+          ],
+          "actionIds": [],
+          "dealIds": [
+            "deal-example-atlas"
+          ]
+        }
+      ],
+      "pageInfo": {
+        "endCursor": "fixture-cursor-atlas-end",
+        "hasNextPage": false
+      }
+    }
+  },
+  "commsDetails": {
+    "workflow:comms-atlas-check": {
+      "id": "workflow:comms-atlas-check",
+      "sourceId": "comms-atlas-check",
+      "recordType": "WORKFLOW",
+      "status": "NEEDS_REVIEW",
+      "reviewReason": "Delivery outcome uncertain",
+      "platform": "telegram",
+      "chatId": "fixture-atlas-chat",
+      "bodyMarkdown": "A draft asks the trader to confirm recent volume.",
+      "notes": null,
+      "createdAt": "2026-11-22T00:00:00Z",
+      "updatedAt": "2026-11-22T00:00:00Z",
+      "deliveredAt": null,
+      "paymentIds": [],
+      "actionIds": [],
+      "dealIds": [
+        "deal-example-atlas"
+      ],
+      "history": [],
+      "historyTruncated": false,
+      "deliveryEvidence": [
+        {
+          "id": "attempt-atlas-uncertain",
+          "status": "UNCERTAIN",
+          "chatId": "fixture-atlas-chat",
+          "messageId": null,
+          "deliveredAt": null,
+          "createdAt": "2026-11-22T00:00:00Z",
+          "updatedAt": "2026-11-22T00:00:00Z"
+        }
+      ],
+      "deliveryEvidenceTruncated": false
+    },
+    "completed_note:comms-atlas-note": {
+      "id": "completed_note:comms-atlas-note",
+      "sourceId": "comms-atlas-note",
+      "recordType": "COMPLETED_NOTE",
+      "status": "SENT",
+      "reviewReason": null,
+      "platform": "telegram",
+      "chatId": "fixture-atlas-chat",
+      "bodyMarkdown": null,
+      "notes": "A historical note discussed the unlock. Its delivery time is unknown.",
+      "createdAt": "2026-11-19T00:00:00Z",
+      "updatedAt": "2026-11-19T00:00:00Z",
+      "deliveredAt": null,
+      "paymentIds": [],
+      "actionIds": [],
+      "dealIds": [
+        "deal-example-atlas"
+      ],
+      "history": [],
+      "historyTruncated": false,
+      "deliveryEvidence": [],
+      "deliveryEvidenceTruncated": false
+    },
+    "completed_note:comms-atlas-paid": {
+      "id": "completed_note:comms-atlas-paid",
+      "sourceId": "comms-atlas-paid",
+      "recordType": "COMPLETED_NOTE",
+      "status": "SENT",
+      "reviewReason": null,
+      "platform": "telegram",
+      "chatId": "fixture-atlas-chat",
+      "bodyMarkdown": null,
+      "notes": "Confirmed that the trading-credit payment issued.",
+      "createdAt": "2026-11-18T16:00:00Z",
+      "updatedAt": "2026-11-18T16:12:00Z",
+      "deliveredAt": "2026-11-18T16:12:00Z",
+      "paymentIds": [
+        "payment-atlas-1"
+      ],
+      "actionIds": [],
+      "dealIds": [
+        "deal-example-atlas"
+      ],
+      "history": [],
+      "historyTruncated": false,
+      "deliveryEvidence": [
+        {
+          "id": "attempt-atlas-completed",
+          "status": "COMPLETED",
+          "chatId": "fixture-atlas-chat",
+          "messageId": "fixture-atlas-message-1",
+          "deliveredAt": "2026-11-18T16:12:00Z",
+          "createdAt": "2026-11-18T16:00:00Z",
+          "updatedAt": "2026-11-18T16:12:00Z"
+        }
+      ],
+      "deliveryEvidenceTruncated": false
+    }
+  },
+  "keeperCheck": {
+    "network": "cataclysm-1",
+    "saiCode": "EXAMPLE-ATLAS",
+    "chainHeight": 100,
+    "cutoff": "2026-11-20T00:00:00Z",
+    "contractVolumeBaseUnits": "8100000000",
+    "keeperVolumeBaseUnits": "8000000000",
+    "indexedThroughTime": null
+  }
+}
