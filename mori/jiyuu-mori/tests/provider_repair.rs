@@ -166,11 +166,14 @@ impl Fixture {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             let log = fs::read_to_string(&log_path).unwrap_or_default();
-            let candidates: Vec<_> = log
-                .lines()
-                .filter(|line| line.contains("cross_repo.repair_candidate"))
-                .collect();
-            if !candidates.is_empty() {
+            if log.lines().any(|line| {
+                line.contains("cross_repo.repair_scan_complete")
+                    && line.contains(&format!("provider={provider}"))
+            }) {
+                let candidates: Vec<_> = log
+                    .lines()
+                    .filter(|line| line.contains("cross_repo.repair_candidate"))
+                    .collect();
                 let [candidate] = candidates.as_slice() else {
                     panic!("expected one candidate: {candidates:?}");
                 };
@@ -190,7 +193,7 @@ impl Fixture {
             }
             assert!(
                 Instant::now() < deadline,
-                "no repair candidate in {log_path:?}"
+                "no completed repair scan in {log_path:?}"
             );
             std::thread::sleep(Duration::from_millis(50));
         }

@@ -2143,6 +2143,7 @@ static void *application_job_thread(void *opaque) {
             cbm_cross_repo_visit_stale_clients(job->project_key, current,
                                                application_log_provider_repair, job->project_key,
                                                &application->stopping);
+            cbm_log_info("cross_repo.repair_scan_complete", "provider", job->project_key);
         }
     }
     cbm_mem_class_flush_thread();

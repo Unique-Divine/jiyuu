@@ -1661,7 +1661,9 @@ static bool cr_record_skip(cbm_cross_repo_result_t *result, const char *project,
     return true;
 }
 
-/* When target_projects = ["*"], scan the cache directory for all .db files. */
+/* Enumerate project database names. For a wildcard link run, result also
+ * requests validation of each store and receives any skipped legacy entries.
+ * The publication observer checks its candidates with nonwaiting reads. */
 static int collect_all_projects(char ***out, cr_run_context_t *ctx,
                                 cbm_cross_repo_result_t *result) {
     *out = NULL;
@@ -1714,13 +1716,15 @@ static int collect_all_projects(char ***out, cr_run_context_t *ctx,
         if (!cbm_validate_project_name(project)) {
             continue;
         }
-        cr_project_state_t state = cr_project_state(project);
-        if (state == CR_PROJECT_LEGACY && !cr_record_skip(result, project, "pre_768_schema")) {
-            failed = true;
-            break;
-        }
-        if (state != CR_PROJECT_USABLE) {
-            continue;
+        if (result) {
+            cr_project_state_t state = cr_project_state(project);
+            if (state == CR_PROJECT_LEGACY && !cr_record_skip(result, project, "pre_768_schema")) {
+                failed = true;
+                break;
+            }
+            if (state != CR_PROJECT_USABLE) {
+                continue;
+            }
         }
         if (count >= cap) {
             cap *= PAIR_LEN;
@@ -1999,7 +2003,9 @@ static bool cr_stale_named_client(const char *client, const char *provider, cons
         return false;
     }
 
-    *count = cr_read_targets(store, client, targets);
+    if (cr_store_has_exact_project(store, client) && cbm_store_edges_schema_current(store)) {
+        *count = cr_read_targets(store, client, targets);
+    }
     bool stale = false;
     for (int i = 0; i < *count; i++) {
         if (strcmp((*targets)[i], provider) == 0) {
