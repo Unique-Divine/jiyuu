@@ -2850,25 +2850,36 @@ static int dump_to_sqlite(cbm_gbuf_t *gb, const char *path, bool allow_staged_wr
     generate_iso_timestamp(indexed_at, sizeof(indexed_at));
 
     if (allow_staged_writer && staged_graph_writer) {
-        if (gb->dump_vector_count == 0 && gb->dump_token_vec_count == 0) {
-            int edge_count = 0;
-            char **url_paths = NULL;
-            char **local_names = NULL;
-            CBMDumpEdge *edges = build_dump_edges(gb, temp_to_final, max_temp_id, &edge_count,
-                                                   &url_paths, &local_names);
-            int rc = staged_graph_writer(path, gb->project, indexed_at, gb->root_path, dump_nodes,
-                                         node_idx, edges, edge_count);
-            if (rc == 0) {
-                cbm_log_info("gbuf.dump_writer", "implementation", "rust");
-                log_dump_summary(node_idx, edge_count);
-            } else {
-                log_dump_failed(rc, 0, node_idx, edge_count);
-            }
-            free_dump_resources(url_paths, local_names, edge_count, edges, dump_nodes, temp_to_final);
-            cbm_free(CBM_MEM_CLASS_DUMP, src_nodes);
-            return rc;
+        int edge_count = 0;
+        char **url_paths = NULL;
+        char **local_names = NULL;
+        CBMDumpEdge *edges = build_dump_edges(gb, temp_to_final, max_temp_id, &edge_count,
+                                               &url_paths, &local_names);
+        release_and_remap_vectors(gb, temp_to_final, max_temp_id);
+        cbm_staged_graph_dump_t dump = {
+            .path = path,
+            .project = gb->project,
+            .indexed_at = indexed_at,
+            .root_path = gb->root_path,
+            .nodes = dump_nodes,
+            .node_count = node_idx,
+            .edges = edges,
+            .edge_count = edge_count,
+            .vectors = gb->dump_vectors,
+            .vector_count = gb->dump_vector_count,
+            .tokens = gb->dump_token_vecs,
+            .token_count = gb->dump_token_vec_count,
+        };
+        int rc = staged_graph_writer(&dump);
+        if (rc == 0) {
+            cbm_log_info("gbuf.dump_writer", "implementation", "rust");
+            log_dump_summary(node_idx, edge_count);
+        } else {
+            log_dump_failed(rc, 0, node_idx, edge_count);
         }
-        cbm_log_info("gbuf.dump_writer", "implementation", "c", "reason", "semantic_vectors");
+        free_dump_resources(url_paths, local_names, edge_count, edges, dump_nodes, temp_to_final);
+        cbm_free(CBM_MEM_CLASS_DUMP, src_nodes);
+        return rc;
     }
 
     /* Stream node rows to the DB in partitions. Under memory pressure, free each

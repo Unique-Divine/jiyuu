@@ -32,16 +32,6 @@ typedef struct {
                             // integrity_check reports the row missing from the index.
 } CBMDumpEdge;
 
-/* Optional writer for a private stage. Graph-buffer records, strings, and the
- * stage path remain borrowed for this synchronous callback. */
-typedef int (*cbm_staged_graph_writer_fn)(const char *path, const char *project,
-                                          const char *indexed_at, const char *root_path,
-                                          const CBMDumpNode *nodes, int node_count,
-                                          const CBMDumpEdge *edges, int edge_count);
-
-/* Install before starting the runtime. The caller retains the callback. */
-void cbm_gbuf_set_staged_writer(cbm_staged_graph_writer_fn writer);
-
 typedef struct {
     int64_t node_id; // final sequential ID (matches nodes.id)
     const char *project;
@@ -57,6 +47,28 @@ typedef struct {
     int vector_len;        // length in bytes (e.g. 256 for d=256)
     float idf;             // inverse document frequency weight
 } CBMDumpTokenVec;
+
+/* Optional writer for a private stage. Graph-buffer records, strings, and
+ * the stage path remain borrowed for this synchronous callback. */
+typedef struct {
+    const char *path;
+    const char *project;
+    const char *indexed_at;
+    const char *root_path;
+    const CBMDumpNode *nodes;
+    int node_count;
+    const CBMDumpEdge *edges;
+    int edge_count;
+    const CBMDumpVector *vectors;
+    int vector_count;
+    const CBMDumpTokenVec *tokens;
+    int token_count;
+} cbm_staged_graph_dump_t;
+
+typedef int (*cbm_staged_graph_writer_fn)(const cbm_staged_graph_dump_t *dump);
+
+/* Install before starting the runtime. The caller retains the callback. */
+void cbm_gbuf_set_staged_writer(cbm_staged_graph_writer_fn writer);
 
 // --- Public API ---
 

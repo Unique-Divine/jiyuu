@@ -119,7 +119,7 @@ fn assert_published(db: &Connection) {
 }
 
 #[test]
-fn rust_writes_graph_only_rebuilds_and_c_writes_semantic_vectors() {
+fn rust_writes_graph_records_and_vectors_during_full_rebuilds() {
     let scratch = Scratch::new();
     let repo = scratch.0.join("source");
     fs::create_dir(&repo).unwrap();
@@ -167,13 +167,22 @@ func Inspect(input string) string {
         );
     }
 
+    let (semantic_reference, _) =
+        index(&repo, &scratch.0.join("semantic-reference"), "full", "c");
     let (semantic, logs) =
         index(&repo, &scratch.0.join("semantic"), "full", "rust");
     assert!(
         logs.lines().any(|line| line.contains("gbuf.dump_writer")
-            && line.contains("reason=semantic_vectors")),
+            && line.contains("implementation=rust")),
         "{logs}"
     );
     assert_published(&semantic);
-    assert!(count(&semantic, "SELECT count(*) FROM node_vectors") > 0);
+    for query in [
+        "SELECT node_id, project, vector FROM node_vectors ORDER BY node_id",
+        "SELECT project, token, vector, idf FROM token_vectors ORDER BY project, token",
+    ] {
+        let expected = graph_rows(&semantic_reference, query);
+        assert!(!expected.is_empty(), "{query}");
+        assert_eq!(graph_rows(&semantic, query), expected, "{query}");
+    }
 }
