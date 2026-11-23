@@ -1090,6 +1090,97 @@ fn graphql_rows(scratch: &Scratch, project: &str) -> Vec<String> {
 }
 
 #[test]
+fn search_code_ranking_reads_call_degrees_in_rust() {
+    let scratch = Scratch::new("search-degrees");
+    let repo = scratch.0.join("repo");
+    fs::create_dir(&repo).unwrap();
+    fs::write(
+        repo.join("app.py"),
+        "def alpha():\n    return 'mori_search_needle'\n\n\
+         def zeta():\n    return 'mori_search_needle'\n\n\
+         def zero():\n    return 'mori_search_needle'\n",
+    )
+    .unwrap();
+    let c = c_binary();
+    let rust = Path::new(MORI);
+    let index = index_fixture(&c, &scratch, repo.to_str().unwrap());
+    let project = index["project"].as_str().unwrap();
+    let stop = |bin: &Path| {
+        let output = run_in(bin, &scratch, &["daemon", "stop"]);
+        assert!(output.status.success(), "{output:?}");
+    };
+    stop(&c);
+
+    let db =
+        Connection::open(scratch.0.join("cache").join(format!("{project}.db")))
+            .unwrap();
+    let id = |name: &str| -> i64 {
+        db.query_row(
+            "SELECT id FROM nodes WHERE project = ? AND label = 'Function' AND name = ?",
+            [project, name],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    for (source, target, kind) in
+        [("alpha", "zeta", "CALLS"), ("zeta", "zero", "USAGE")]
+    {
+        db.execute(
+            "INSERT INTO edges (project, source_id, target_id, type, properties) \
+             VALUES (?1, ?2, ?3, ?4, '{}')",
+            rusqlite::params![project, id(source), id(target), kind],
+        )
+        .unwrap();
+    }
+    drop(db);
+
+    let read = |bin: &Path, limit: usize| {
+        let args = serde_json::json!({"project": project, "pattern": "mori_search_needle",
+                                     "format": "json", "result_limit": limit});
+        let output = run_in(
+            bin,
+            &scratch,
+            &["cli", "--quiet", "search_code", &args.to_string()],
+        );
+        assert!(output.status.success(), "{output:?}");
+        let mut response: serde_json::Value =
+            serde_json::from_slice(&output.stdout).unwrap();
+        response.as_object_mut().unwrap().remove("elapsed_ms");
+        response
+    };
+    let reference = [read(&c, 8), read(&c, 1)];
+    stop(&c);
+    let start = command_in(rust, &scratch)
+        .env("CBM_LOG_LEVEL", "debug")
+        .args(["daemon", "start"])
+        .output()
+        .unwrap();
+    assert!(start.status.success(), "{start:?}");
+    let candidate = [read(rust, 8), read(rust, 1)];
+    stop(rust);
+    assert_eq!(candidate, reference);
+    let rows = candidate[0]["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 3);
+    for (row, (name, inbound, outbound)) in
+        rows.iter()
+            .zip([("zeta", 1, 0), ("alpha", 0, 1), ("zero", 0, 0)])
+    {
+        assert!(
+            row[0].as_str().unwrap().ends_with(&format!(".{name}")),
+            "{row}"
+        );
+        assert_eq!(row[6], inbound, "{row}");
+        assert_eq!(row[7], outbound, "{row}");
+    }
+    assert_eq!(candidate[1]["rows"], serde_json::json!([rows[0]]));
+    let log =
+        fs::read_to_string(scratch.0.join("cache/logs/cbm-daemon.log")).unwrap();
+    assert!(log.lines().any(|line| {
+        line.contains("search_code.degrees") && line.contains("backend=rust")
+    }));
+}
+
+#[test]
 fn index_through_worker_reexec_matches_c() {
     let fixture = Fixture::new(false);
     let project = fixture.project();
