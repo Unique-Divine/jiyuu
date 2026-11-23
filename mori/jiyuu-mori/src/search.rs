@@ -11,6 +11,9 @@ use std::{panic, ptr};
 use rusqlite::ffi::{self, sqlite3, sqlite3_stmt};
 use rusqlite::{Connection, ToSql, params_from_iter};
 
+#[path = "search_code.rs"]
+mod search_code;
+
 const STORE_OK: c_int = 0;
 const STORE_ERR: c_int = -1;
 
@@ -158,7 +161,7 @@ impl Statement {
     }
 
     // The caller lends a NUL-terminated string, or NULL for a SQL NULL.
-    unsafe fn bind_text(&self, index: c_int, value: *const c_char) {
+    unsafe fn bind_text(&self, index: c_int, value: *const c_char) -> c_int {
         // SAFETY: SQLite copies the native plan's string before returning.
         unsafe {
             ffi::sqlite3_bind_text(
@@ -167,7 +170,7 @@ impl Statement {
                 value,
                 -1,
                 ffi::SQLITE_TRANSIENT(),
-            );
+            )
         }
     }
 
@@ -373,6 +376,7 @@ pub(crate) unsafe fn register() {
         cbm_store_set_pattern_search_reader(read_pattern);
         cbm_mcp_set_rank_search_reader(read_ranked);
         cbm_mcp_set_search_code_degrees_reader(read_code_degrees);
+        search_code::register();
     }
 }
 

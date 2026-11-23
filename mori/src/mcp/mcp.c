@@ -16091,6 +16091,12 @@ static void free_search_dirs(search_dir_count_t *directories, int count) {
 enum { SCORE_FUNC = 10, SCORE_ROUTE = 15, SCORE_VENDORED = -50, SCORE_TEST = -5 };
 enum { MAX_LINE_SPAN = 999999 };
 
+static const cbm_mcp_search_code_attribution_t *search_code_attribution;
+
+void cbm_mcp_set_search_code_attribution(const cbm_mcp_search_code_attribution_t *reader) {
+    search_code_attribution = reader;
+}
+
 static int compute_search_score(const search_result_t *r) {
     int score = r->in_degree;
     if (strcmp(r->label, "Function") == 0 || strcmp(r->label, "Method") == 0) {
@@ -17537,7 +17543,7 @@ static bool search_result_index_reserve(search_result_index_t *index) {
 
 /* Add a grep hit to the search result set (merge into existing or create new). */
 static bool add_to_search_results(search_result_t **sr, int *sr_count, int *sr_cap,
-                                  search_result_index_t *index, cbm_node_t *n, int line) {
+                                  search_result_index_t *index, const cbm_node_t *n, int line) {
     int existing = search_result_index_find(index, n->id);
     if (existing >= 0) {
         return append_search_match_line(&(*sr)[existing], line);
@@ -17573,15 +17579,14 @@ static bool add_to_search_results(search_result_t **sr, int *sr_count, int *sr_c
     return true;
 }
 
-/* Match a single grep hit to the tightest containing node, then add to sr or raw. */
-static bool classify_grep_hit(grep_match_t *hit, cbm_node_t *file_nodes, int file_node_count,
+/* Add a hit to its containing node or retain it as a raw match. */
+static bool classify_grep_hit(grep_match_t *hit, const cbm_node_t *node,
                               search_result_t **sr, int *sr_count, int *sr_cap,
                               search_result_index_t *sr_index, grep_match_t **raw, int raw_offset,
                               int raw_limit, int *raw_count, int *raw_stored_count, int *raw_cap,
                               int *raw_content_truncated) {
-    int best = find_tightest_node(file_nodes, file_node_count, hit->line);
-    if (best >= 0) {
-        return add_to_search_results(sr, sr_count, sr_cap, sr_index, &file_nodes[best], hit->line);
+    if (node) {
+        return add_to_search_results(sr, sr_count, sr_cap, sr_index, node, hit->line);
     } else {
         if (*raw_count == INT_MAX) {
             return false;
@@ -17678,6 +17683,11 @@ static bool scan_and_classify_grep_matches(
     cbm_regex_t content_regex;
     bool content_regex_ready = use_regex && pattern &&
                                cbm_regcomp(&content_regex, pattern, CBM_REG_EXTENDED) == CBM_REG_OK;
+    void *attribution =
+        store && search_code_attribution ? search_code_attribution->open(cbm_store_get_db(store))
+                                         : NULL;
+    bool rust_file = false;
+    bool used_rust = false;
     bool ok = true;
 
     for (;;) {
@@ -17729,9 +17739,14 @@ static bool scan_and_classify_grep_matches(
                 break;
             }
             current_file_inside = search_hit_file_within_root(&containment, root_path, file);
+            rust_file = false;
             if (store && current_file_inside) {
-                (void)cbm_store_find_nodes_by_file(store, project, file, &file_nodes,
-                                                   &file_node_count);
+                rust_file = attribution && search_code_attribution->load(attribution, project, file);
+                used_rust = used_rust || rust_file;
+                if (!rust_file) {
+                    (void)cbm_store_find_nodes_by_file(store, project, file, &file_nodes,
+                                                       &file_node_count);
+                }
             }
         }
         if (!current_file_inside) {
@@ -17760,7 +17775,27 @@ static bool scan_and_classify_grep_matches(
                                                &match_start, &match_end);
         search_raw_preview(&hit, content, raw_content_offset_set, raw_content_offset, match_known,
                            match_start, match_end);
-        if (!classify_grep_hit(&hit, file_nodes, file_node_count, sr, sr_count, sr_cap, &sr_index,
+        const cbm_node_t *node = NULL;
+        cbm_node_t rust_node;
+        if (rust_file) {
+            cbm_mcp_search_code_node_t identity;
+            if (search_code_attribution->find(attribution, hit.line, &identity)) {
+                rust_node = (cbm_node_t){.id = identity.id,
+                                        .label = identity.label,
+                                        .name = identity.name,
+                                        .qualified_name = identity.qualified_name,
+                                        .file_path = identity.file_path,
+                                        .start_line = identity.start_line,
+                                        .end_line = identity.end_line};
+                node = &rust_node;
+            }
+        } else {
+            int best = find_tightest_node(file_nodes, file_node_count, hit.line);
+            if (best >= 0) {
+                node = &file_nodes[best];
+            }
+        }
+        if (!classify_grep_hit(&hit, node, sr, sr_count, sr_cap, &sr_index,
                                raw, raw_offset, raw_limit, raw_count, raw_stored_count, raw_cap,
                                raw_content_truncated)) {
             free(hit.file);
@@ -17770,6 +17805,12 @@ static bool scan_and_classify_grep_matches(
         free(hit.file);
     }
 
+    if (attribution) {
+        search_code_attribution->close(attribution);
+    }
+    if (used_rust) {
+        cbm_log_debug("search_code.attribution", "backend", "rust");
+    }
     search_result_index_free(&sr_index);
     root_containment_free(&containment);
     if (content_regex_ready) {
