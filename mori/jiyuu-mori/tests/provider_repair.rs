@@ -458,7 +458,10 @@ fn published_provider_repair_preserves_other_links_without_client_sources() {
     assert_eq!(indexed(FIRST), 3, "{log}");
     assert_eq!(
         log.lines()
-            .filter(|line| line.contains("cross_repo.repair_result"))
+            .filter(|line| {
+                line.contains("cross_repo.repair_result")
+                    && line.contains("provider=primary client=client")
+            })
             .count(),
         2,
         "{log}"
@@ -519,7 +522,6 @@ fn opted_in_daemon_retries_a_client_with_pending_reverse_links() {
     fixture.publish(SECOND);
     fixture.wait_for_log(&[
         "cross_repo.repair_result",
-        "provider=secondary",
         "client=client",
         "status=repaired",
     ]);
@@ -668,4 +670,141 @@ fn provider_repair_opt_in_does_not_apply_to_a_one_shot_daemon() {
     assert_eq!(fixture.cross_status(CLIENT)["status"], "stale");
     assert_eq!(fixture.forward_targets(CLIENT), links);
     assert!(!fixture.log().contains("cross_repo.repair_scan_complete"));
+}
+
+fn assert_no_source_worker(fixture: &Fixture, previous_log: &str) {
+    let log = fixture.log();
+    let startup = log
+        .strip_prefix(previous_log)
+        .expect("startup log appended");
+    assert!(startup.contains("daemon.start "), "{startup}");
+    for event in [
+        "daemon.index.worker_budget",
+        "daemon.index.result",
+        "index.supervisor.reap",
+    ] {
+        assert!(!startup.contains(event), "{startup}");
+    }
+}
+
+#[test]
+fn startup_repairs_stale_and_reverse_pending_graphs_without_a_source_worker() {
+    let fixture = Fixture::new();
+    fixture.start_daemon(Some("MORI_OBSERVE_PROVIDER_REPAIR"), None);
+    fixture.client(CLIENT, &["first", "second"]);
+    fixture.client(UNRELATED, &["second"]);
+    fixture.write(FIRST, "schema.graphqls", "type Query { first: String }\n");
+    fixture.write(SECOND, "schema.graphqls", "type Query { second: String }\n");
+    for project in [CLIENT, FIRST, SECOND, UNRELATED] {
+        fixture.publish(project);
+    }
+    fixture.link(CLIENT, &names(&[FIRST, SECOND])).unwrap();
+    fixture.link(UNRELATED, &names(&[SECOND])).unwrap();
+    let initial_links = fixture.forward_targets(CLIENT);
+    let callers = fixture.callers(FIRST, "schema.graphqls");
+    let secondary_callers = fixture.callers(SECOND, "schema.graphqls");
+    assert_eq!(callers.len(), 1);
+    assert_eq!(secondary_callers.len(), 2);
+
+    fixture.write(UNRELATED, "extra.ts", "export const extra = 1;\n");
+    {
+        // The source can publish its new generation, but the daemon cannot
+        // clear the staged reverse marker while this shared lease is held.
+        let _lease = fixture.hold_shared_project_set_lease();
+        fixture.publish(UNRELATED);
+        fixture.wait_for_log(&[
+            "cross_repo.repair_scan_complete",
+            "provider=unrelated",
+        ]);
+        let status = fixture.cross_status(UNRELATED);
+        assert_eq!(status["status"], "ran");
+        assert_eq!(status["reverse_pending"], true);
+    }
+    fs::rename(
+        fixture.repo(FIRST).join("schema.graphqls"),
+        fixture.repo(FIRST).join("moved.graphqls"),
+    )
+    .unwrap();
+    fixture.publish(FIRST);
+    fixture
+        .wait_for_log(&["cross_repo.repair_scan_complete", "provider=primary"]);
+    assert_eq!(fixture.cross_status(CLIENT)["status"], "stale");
+    assert_eq!(fixture.forward_targets(CLIENT), initial_links);
+    assert!(fixture.callers(FIRST, "moved.graphqls").is_empty());
+    fs::rename(fixture.repo(CLIENT), fixture.root.join("client-offline"))
+        .unwrap();
+
+    fixture.stop_daemon();
+    let generations = [CLIENT, FIRST, SECOND, UNRELATED]
+        .map(|project| fixture.generation(project));
+    let client_id = fixture.publication_id(CLIENT);
+    let previous_log = fixture.log();
+    {
+        let _lease = fixture.hold_shared_project_set_lease();
+        fixture.start_daemon(Some("MORI_PROVIDER_REPAIR"), None);
+        assert_eq!(fixture.cross_status(CLIENT)["status"], "stale");
+    }
+    fixture.wait_for_log(&["cross_repo.recovery_scan_complete", "pending=0"]);
+    assert_eq!(
+        fixture.forward_targets(CLIENT),
+        BTreeMap::from([
+            (FIRST.to_owned(), "moved.graphqls".to_owned()),
+            (SECOND.to_owned(), "schema.graphqls".to_owned()),
+        ])
+    );
+    assert_eq!(fixture.callers(FIRST, "moved.graphqls"), callers);
+    assert_eq!(
+        fixture.callers(SECOND, "schema.graphqls"),
+        secondary_callers
+    );
+    assert_eq!(fixture.cross_status(CLIENT)["status"], "ran");
+    assert!(fixture.cross_status(UNRELATED)["reverse_pending"].is_null());
+    assert_eq!(
+        [CLIENT, FIRST, SECOND, UNRELATED]
+            .map(|project| fixture.generation(project)),
+        generations
+    );
+    assert_eq!(fixture.publication_id(CLIENT), client_id);
+    assert_no_source_worker(&fixture, &previous_log);
+}
+
+#[test]
+fn startup_retry_repairs_a_restored_provider_without_a_publication() {
+    let fixture = Fixture::new();
+    fixture.start_daemon(None, None);
+    fixture.client(CLIENT, &["first", "second"]);
+    fixture.write(FIRST, "schema.graphqls", "type Query { first: String }\n");
+    fixture.write(SECOND, "schema.graphqls", "type Query { second: String }\n");
+    for project in [CLIENT, FIRST, SECOND] {
+        fixture.publish(project);
+    }
+    fixture.link(CLIENT, &names(&[FIRST, SECOND])).unwrap();
+    let initial_links = fixture.forward_targets(CLIENT);
+    let client_generation = fixture.generation(CLIENT);
+    fs::rename(
+        fixture.repo(FIRST).join("schema.graphqls"),
+        fixture.repo(FIRST).join("moved.graphqls"),
+    )
+    .unwrap();
+    fixture.publish(FIRST);
+    fixture.stop_daemon();
+    let previous_log = fixture.log();
+    let offline = fixture.root.join("secondary-offline.db");
+    fs::rename(fixture.db_path(SECOND), &offline).unwrap();
+
+    fixture.start_daemon(Some("MORI_PROVIDER_REPAIR"), None);
+    fixture.wait_for_log(&["cross_repo.recovery_scan_complete", "pending=1"]);
+    assert_eq!(fixture.cross_status(CLIENT)["status"], "stale");
+    assert_eq!(fixture.forward_targets(CLIENT), initial_links);
+    fs::rename(offline, fixture.db_path(SECOND)).unwrap();
+    fixture.wait_for_log(&[
+        "cross_repo.repair_result",
+        "provider=recovery",
+        "client=client",
+        "status=repaired",
+    ]);
+    assert_eq!(fixture.cross_status(CLIENT)["status"], "ran");
+    assert_eq!(fixture.generation(CLIENT), client_generation);
+    assert_eq!(fixture.callers(FIRST, "moved.graphqls").len(), 1);
+    assert_no_source_worker(&fixture, &previous_log);
 }
