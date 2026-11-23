@@ -1,6 +1,27 @@
 /* Shared Graph UI colors and type. Sai Perps' Dark, DarkHover, Outlines,
  * and Brand300 tokens anchor this palette. Monaco mirrors the surface colors. */
 
+@font-face {
+    font-family: "Geist Variable";
+    src: url("./fonts/geist-latin-wght-normal.woff2") format("woff2");
+    font-weight: 100 900;
+    font-display: swap;
+}
+
+@font-face {
+    font-family: "Archivo Variable";
+    src: url("./fonts/archivo-latin-wght-normal.woff2") format("woff2");
+    font-weight: 100 900;
+    font-display: swap;
+}
+
+@font-face {
+    font-family: "JetBrains Mono Variable";
+    src: url("./fonts/jetbrains-mono-latin-wght-normal.woff2") format("woff2");
+    font-weight: 100 800;
+    font-display: swap;
+}
+
 :root {
     /* Base and raised surfaces. */
     --atlas-bg: #101720;
@@ -28,12 +49,17 @@
     /* Active tree and editor rows. */
     --atlas-select: #193446;
 
-    --atlas-mono: ui-monospace, SFMono-Regular, "SF Mono", "JetBrains Mono",
+    --atlas-mono: "JetBrains Mono Variable", ui-monospace, SFMono-Regular, "SF Mono", "JetBrains Mono",
         Menlo, Consolas, "Liberation Mono", monospace;
-    --atlas-ui-font: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    --atlas-heading-font: "Archivo Variable", var(--atlas-ui-font);
+    --atlas-ui-font: "Geist Variable", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     --atlas-font: var(--atlas-ui-font);
     --atlas-font-size: 13px;
     --atlas-line-height: 1.6;
 
     color-scheme: dark;
+}
+
+.atlas-shell :is(h1, h2, h3, h4, h5, h6) {
+    font-family: var(--atlas-heading-font);
 }

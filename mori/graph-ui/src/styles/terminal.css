@@ -88,26 +88,6 @@ body {
     color: var(--atlas-phosphor);
 }
 
-.atlas-brand-beta {
-    padding: 3px 6px;
-    border: 1px solid rgb(200 173 114 / 28%);
-    border-radius: 4px;
-    background: rgb(200 173 114 / 7%);
-    color: #c8ad72;
-    font-size: 10px;
-    font-weight: 600;
-    line-height: 1.2;
-    letter-spacing: 0.06em;
-    text-shadow: none;
-}
-
-.atlas-version {
-    color: var(--atlas-dim);
-    opacity: 0.65;
-    font-size: 9px;
-    letter-spacing: 0.06em;
-}
-
 /*
  * Die Menuezeile: sechs Knoepfe, die auch wie sechs Knoepfe aussehen.
  *

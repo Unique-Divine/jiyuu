@@ -44,7 +44,6 @@ const fileRow: TreeRow = {
 
 function props(overrides: Partial<AtlasChromeProps> = {}): AtlasChromeProps {
     return {
-        version: 'v0.0.0-dirty',
         chips: [{ label: 'project', value: 'atlas-sample' }],
         tabs: [],
         onSelectTab: vi.fn(),
@@ -160,11 +159,11 @@ describe('AtlasChrome', () => {
         }
     });
 
-    it('zeigt Marke und Versions-Chip in der Kopfzeile', async () => {
+    it('shows the brand without release badges', async () => {
         await render(props());
-        expect(container.querySelector('.atlas-brand')?.textContent).toBe('MORI GRAPH Beta');
-        expect(container.querySelector('.atlas-brand-beta')?.textContent).toBe('Beta');
-        expect(testId('atlas-version')?.textContent).toBe('v0.0.0');
+        expect(container.querySelector('.atlas-brand')?.textContent).toBe('MORI GRAPH');
+        expect(container.querySelector('.atlas-brand-beta')).toBeNull();
+        expect(testId('atlas-version')).toBeNull();
     });
 
     it('keeps project switching at the end of the header without a duplicate project chip', async () => {
@@ -176,18 +175,6 @@ describe('AtlasChrome', () => {
         expect(header?.lastElementChild?.textContent).toBe('Switch project: atlas-sample');
         expect(header?.querySelector('[data-chip="project"]')).toBeNull();
         expect(header?.querySelector('[data-chip="sym"]')?.textContent).toContain('76');
-    });
-
-    it('omits build diagnostics from the header', async () => {
-        await render(props({ version: 'v1.0.0', buildSuffix: 'dirty' }));
-        expect(testId('atlas-version')?.textContent).toBe('v1.0.0');
-        expect(testId('atlas-version-suffix')).toBeNull();
-    });
-
-    it('zeigt gar kein Zusatz-Element, wenn der Baum sauber war', async () => {
-        await render(props({ version: 'v1.0.0', buildSuffix: '' }));
-        expect(testId('atlas-version')?.textContent).toBe('v1.0.0');
-        expect(testId('atlas-version-suffix')).toBeNull();
     });
 
     it.each(['on', 'off'] as const)('keeps removed tool menus absent even when legacy actions are supplied (%s)', async state => {
