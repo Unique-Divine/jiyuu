@@ -602,6 +602,9 @@ fn invalid_read_flag_diagnostics_match_c() {
     assert_same(&["cli", "list_projects", "--offst", "1"]);
     assert_same(&["cli", "index_status", "--verbos", "true"]);
     assert_same(&["cli", "index_status", "--verbose=true", "stray"]);
+    assert_same(&["cli", "get_graph_schema", "--limt", "1"]);
+    assert_same(&["cli", "get_code_snippet", "--source-mod", "full"]);
+    assert_same(&["cli", "search_code", "--patten", "hello"]);
 }
 
 /// A small repository with Python and Go calls and an optional gqlgen server.
@@ -709,6 +712,88 @@ fn index_fixture(
         "{result}"
     );
     result
+}
+
+#[test]
+fn scalar_read_flags_match_json_and_c_on_one_cache() {
+    let scratch = Scratch::new("scalar-read");
+    let repo = scratch.0.join("repo");
+    fs::create_dir(&repo).unwrap();
+    fs::write(
+        repo.join("app.py"),
+        "def sample():\n    return 'mori_scalar_read'\n",
+    )
+    .unwrap();
+    let c = c_binary();
+    let index = index_fixture(&c, &scratch, repo.to_str().unwrap());
+    let project = index["project"].as_str().expect("indexed project");
+    let stop = run_in(&c, &scratch, &["daemon", "stop"]);
+    assert!(stop.status.success(), "{stop:?}");
+
+    let cases = [
+        (
+            "get_graph_schema",
+            vec!["--diagnostics=full", "--limit", "+2", "--limit=1"],
+            r#""diagnostics":"full","limit":2,"limit":1"#,
+            "node_labels",
+        ),
+        (
+            "get_code_snippet",
+            vec![
+                "--qualified-name",
+                "sample",
+                "--source-mode=full",
+                "--include-neighbors=",
+                "--max-lines=2",
+            ],
+            r#""qualified_name":"sample","source_mode":"full","include_neighbors":false,"max_lines":2"#,
+            "mori_scalar_read",
+        ),
+        (
+            "search_code",
+            vec![
+                "--pattern=^def sample",
+                "--regex",
+                "--mode=files",
+                "--file-pattern=*.py",
+                "--result-limit=1",
+            ],
+            r#""pattern":"^def sample","regex":true,"mode":"files","file_pattern":"*.py","result_limit":1"#,
+            "app.py",
+        ),
+    ];
+    for (tool, flags, raw_options, expected) in cases {
+        let mut argv = vec![
+            "cli",
+            "--quiet",
+            tool,
+            "--project",
+            project,
+            "--format=json",
+        ];
+        argv.extend(flags);
+        let json_args = format!(
+            r#"{{"project":{},"format":"json",{raw_options}}}"#,
+            serde_json::to_string(project).unwrap()
+        );
+        let reference = run_in(&c, &scratch, &argv);
+        let stdout = String::from_utf8_lossy(&reference.stdout);
+        assert!(
+            reference.status.success() && stdout.contains(expected),
+            "{tool}: {reference:?}"
+        );
+        let json_argv = ["cli", "--quiet", tool, &json_args];
+        for bin in [c.as_path(), Path::new(MORI)] {
+            for args in [argv.as_slice(), &json_argv] {
+                let actual = run_in(bin, &scratch, args);
+                assert_eq!(
+                    (actual.status, &actual.stdout, &actual.stderr),
+                    (reference.status, &reference.stdout, &reference.stderr),
+                    "{bin:?} {args:?}"
+                );
+            }
+        }
+    }
 }
 
 #[test]
