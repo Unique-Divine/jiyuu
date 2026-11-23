@@ -348,6 +348,46 @@ typedef bool (*cbm_mcp_search_code_degrees_fn)(struct sqlite3 *db, const int64_t
 void cbm_mcp_set_search_code_degrees_reader(cbm_mcp_search_code_degrees_fn reader);
 
 typedef struct {
+    int64_t id;
+    const char *label;
+    const char *name;
+    const char *qualified_name;
+    const char *file_path;
+    int start_line;
+    int end_line;
+} cbm_mcp_search_code_node_t;
+
+/* Request-local reader borrows the store's db. A successful load replaces
+ * the previous file, and find lends strings until the next load or close.
+ * A failed open/load lets the caller use the native lookup for that file. */
+typedef struct {
+    void *(*open)(struct sqlite3 *db);
+    bool (*load)(void *reader, const char *project, const char *file);
+    bool (*find)(const void *reader, int line, cbm_mcp_search_code_node_t *node);
+    void (*close)(void *reader);
+} cbm_mcp_search_code_attribution_t;
+void cbm_mcp_set_search_code_attribution(const cbm_mcp_search_code_attribution_t *reader);
+
+typedef struct {
+    int64_t id;
+    int hop;
+    int edge_index; /* -1 when no captured edge precedes the row */
+} cbm_mcp_trace_hop_t;
+
+typedef struct {
+    int64_t source_id;
+    int64_t target_id;
+    const char *type;
+} cbm_mcp_trace_edge_t;
+
+/* Borrow the visible hops, roots, and captured edges of one trace leg. On
+ * success the planner fills edge_index and sorts hops by id for lookup. */
+typedef bool (*cbm_mcp_trace_predecessor_planner_fn)(
+    bool inbound, const int64_t *roots, size_t root_count, cbm_mcp_trace_hop_t *hops,
+    size_t hop_count, const cbm_mcp_trace_edge_t *edges, size_t edge_count);
+void cbm_mcp_set_trace_predecessor_planner(cbm_mcp_trace_predecessor_planner_fn planner);
+
+typedef struct {
     int limit;
     int offset;
     bool include_properties;

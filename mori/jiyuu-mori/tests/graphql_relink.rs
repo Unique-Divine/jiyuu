@@ -137,13 +137,75 @@ impl Fixture {
             .expect("query belongs to the Rust subset");
         let answer = query.execute(&db, project).expect("execute in Rust");
         assert_eq!(reference["columns"], json!(answer.columns), "{cypher}");
-        assert_eq!(reference["rows"], json!(answer.rows), "{cypher}");
+        assert_eq!(reference["rows"], json!(utf8_rows(&answer)), "{cypher}");
         assert_eq!(reference["total"], answer.rows.len(), "{cypher}");
         assert_eq!(reference["total_relation"], "eq");
     }
 
     fn query_reference(&self, project: &str, cypher: &str) -> Value {
         self.query(Self::reference_binary(), project, cypher)
+    }
+
+    fn start_query_daemon(&self, bin: &Path, backend: &str) {
+        let output = self
+            .command(bin)
+            .env("MORI_IMPL_QUERY", backend)
+            .env("CBM_LOG_LEVEL", "debug")
+            .args(["daemon", "start"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+    }
+
+    fn rust_query_count(&self) -> usize {
+        fs::read_to_string(self.0.join("cache/logs/cbm-daemon.log"))
+            .unwrap()
+            .lines()
+            .filter(|line| {
+                line.contains("query_graph.evaluator")
+                    && line.contains("backend=rust")
+            })
+            .count()
+    }
+
+    fn compare_query_pages(&self, cases: &[(&str, usize, bool)]) -> Vec<Value> {
+        let run = |bin: &Path, backend: &str| {
+            self.start_query_daemon(bin, backend);
+            let mut pages = Vec::new();
+            for &(query, offset, supported) in cases {
+                let before = self.rust_query_count();
+                let args = json!({
+                    "project": CLIENT, "query": query, "format": "json",
+                    "max_rows": 1, "offset": offset,
+                });
+                let output = self
+                    .command(bin)
+                    .args(["cli", "--quiet", "query_graph", &args.to_string()])
+                    .output()
+                    .unwrap();
+                assert!(output.status.success(), "{query}: {output:?}");
+                assert_eq!(
+                    self.rust_query_count() - before,
+                    usize::from(backend == "rust" && supported),
+                    "{query}",
+                );
+                pages.push(output.stdout);
+            }
+            let stop =
+                self.command(bin).args(["daemon", "stop"]).output().unwrap();
+            assert!(stop.status.success(), "{stop:?}");
+            pages
+        };
+        let reference = run(Self::reference_binary(), "c");
+        let candidate = run(Path::new(MORI), "rust");
+        cases
+            .iter()
+            .zip(reference.iter().zip(&candidate))
+            .map(|((query, offset, _), (c, rust))| {
+                assert_eq!(c, rust, "{query}, offset {offset}");
+                serde_json::from_slice(rust).expect("parse matched query page")
+            })
+            .collect()
     }
 
     fn reference_binary() -> &'static Path {
@@ -169,6 +231,20 @@ impl Fixture {
             })
             .collect()
     }
+}
+
+fn utf8_rows(result: &cypher_linear::ResultRows) -> Vec<Vec<&str>> {
+    result
+        .rows
+        .iter()
+        .map(|row| {
+            row.iter()
+                .map(|cell| {
+                    std::str::from_utf8(cell).expect("UTF-8 fixture cell")
+                })
+                .collect()
+        })
+        .collect()
 }
 
 impl Drop for Fixture {
@@ -613,7 +689,7 @@ fn linear_cypher_reads_through_the_callers_transaction() {
     let answer = query
         .execute_on(&snapshot, CLIENT)
         .expect("read caller's snapshot");
-    assert_eq!(answer.rows, [["b"]]);
+    assert_eq!(utf8_rows(&answer), [["b"]]);
 
     snapshot.rollback().expect("caller owns transaction");
     let answer = query.execute_on(&db, CLIENT).expect("read after rollback");
@@ -746,11 +822,12 @@ fn linear_cypher_filters_each_bound_node_before_expanding_it() {
         let answer = query
             .execute_with_budget(&db, CLIENT, &mut budget)
             .unwrap_or_else(|error| panic!("{cypher}: {error:?}"));
-        assert_eq!(answer.rows, [[expected]], "{cypher}");
+        let rows = utf8_rows(&answer);
+        assert_eq!(rows, [[expected]], "{cypher}");
         assert_eq!(checks.get(), 3, "expanded rejected adjacency: {cypher}");
         assert_eq!(
             fixture.query_reference(CLIENT, cypher)["rows"],
-            json!(answer.rows),
+            json!(rows),
             "{cypher}",
         );
     }
@@ -799,12 +876,12 @@ fn linear_cypher_keeps_its_graph_when_a_replacement_publishes() {
         .expect("read the caller's graph during publication");
     assert!(checks.get() > 3, "publish inside adjacency traversal");
     assert_eq!(original.rows.len(), 1024);
-    assert!(original.rows.iter().all(|row| row == &["old"]));
+    assert!(utf8_rows(&original).iter().all(|row| row == &["old"]));
     let replacement = query
         .execute(&live_path, CLIENT)
         .expect("read the published replacement");
     assert_eq!(replacement.rows.len(), 1024);
-    assert!(replacement.rows.iter().all(|row| row == &["new"]));
+    assert!(utf8_rows(&replacement).iter().all(|row| row == &["new"]));
 }
 
 #[test]
@@ -910,6 +987,340 @@ fn opt_in_rust_query_preserves_cursor_and_daemon_dispatch() {
 }
 
 #[test]
+fn zero_hop_impact_query_uses_rust_and_matches_c_pages() {
+    // Graph UI declarationsInFiles("Function", ["a.py", "z.py"]).
+    const IMPACT: &str = r#"MATCH (n:Function) WHERE n.file_path = "a.py" OR n.file_path = "z.py" RETURN n.name, n.qualified_name, n.file_path, n.start_line, n.end_line, n.is_test LIMIT 1000"#;
+    let fixture = Fixture::new();
+    let db = fixture.index(CLIENT);
+    let z = node(&db, CLIENT, "Function", "zeta", "client.zeta", "z.py");
+    db.execute(
+        r#"UPDATE nodes SET start_line = 7, end_line = 11, properties = '{"is_test":true}' WHERE id = ?"#,
+        [z],
+    )
+    .unwrap();
+    node(&db, CLIENT, "Function", "alpha", "client.alpha", "a.py");
+    node(
+        &db,
+        CLIENT,
+        "Function",
+        "excluded",
+        "client.excluded",
+        "b.py",
+    );
+    node(&db, CLIENT, "Method", "method", "client.method", "a.py");
+    drop(db);
+
+    let cases = [
+        (IMPACT, 0, true),
+        (IMPACT, 1, true),
+        (
+            "MATCH (n) WHERE n.name = 'alpha' OR n.name = 'zeta' RETURN n, n.file, n.name",
+            0,
+            true,
+        ),
+        (
+            "MATCH (n:Function {file_path: 'a.py'}) WHERE n.name = 'alpha' AND n.is_test = '' RETURN n.name",
+            0,
+            true,
+        ),
+        ("MATCH (n:Missing) RETURN n.name", 0, true),
+        ("MATCH (n:Function) RETURN n.name LIMIT 0", 0, true),
+        (
+            "MATCH (n:Function) WHERE n.file_path = 'a.py' OR n.file_path = 'z.py' RETURN n.name LIMIT 1",
+            0,
+            true,
+        ),
+        ("MATCH (n:Function) RETURN n.name ORDER BY n.name", 0, false),
+        (
+            "MATCH (n:Function) WHERE n.name = 'alpha' OR n.name = 'zeta' AND n.file_path = 'z.py' RETURN n.name",
+            0,
+            false,
+        ),
+        ("MATCH (n:Function) RETURN count(n)", 0, false),
+    ];
+    let candidate = fixture.compare_query_pages(&cases);
+    let page = |i: usize| &candidate[i];
+    let first = page(0);
+    assert_eq!(
+        first["columns"],
+        json!([
+            "n.name",
+            "n.qualified_name",
+            "n.file_path",
+            "n.start_line",
+            "n.end_line",
+            "n.is_test"
+        ])
+    );
+    assert_eq!(
+        first["rows"],
+        json!([["zeta", "client.zeta", "z.py", "7", "11", "true"]])
+    );
+    assert_eq!(first["total"], 2);
+    assert_eq!(first["has_more"], true);
+    assert_eq!(
+        page(1)["rows"],
+        json!([["alpha", "client.alpha", "a.py", "0", "0", ""]])
+    );
+    assert_eq!(page(2)["rows"], json!([["alpha", "a.py", "alpha"]]));
+    assert_eq!(page(3)["rows"], json!([["alpha"]]));
+    assert_eq!(page(4)["rows"], json!([]));
+    assert_eq!(page(5)["rows"], json!([]));
+    assert_eq!(page(6)["rows"], json!([["zeta"]]));
+    assert_eq!(page(6)["total"], 1);
+}
+
+#[test]
+fn zero_hop_property_byte_boundaries_and_wide_projection_match_c() {
+    let fixture = Fixture::new();
+    let db = fixture.index(CLIENT);
+    let split = format!("{}é", "a".repeat(510));
+    let exact = format!("{}é", "a".repeat(509));
+    let capped = "a".repeat(511);
+    for (name, value) in [
+        ("split", split.clone()),
+        ("exact", exact.clone()),
+        ("capped", format!("{capped}é")),
+    ] {
+        let id = node(&db, CLIENT, "Boundary", name, name, "boundary.py");
+        db.execute(
+            "UPDATE nodes SET properties = ? WHERE id = ?",
+            params![json!({"value": value}).to_string(), id],
+        )
+        .unwrap();
+    }
+
+    let keys = (0..32).map(|i| format!("prop{i}"));
+    let values: Vec<_> = (0..32).map(|i| format!("value{i}")).collect();
+    let properties: serde_json::Map<_, _> = keys
+        .clone()
+        .zip(values.iter().map(|value| json!(value)))
+        .collect();
+    let id = node(&db, CLIENT, "Wide", "wide", "wide", "wide.py");
+    db.execute(
+        "UPDATE nodes SET properties = ? WHERE id = ?",
+        params![Value::Object(properties).to_string(), id],
+    )
+    .unwrap();
+    let columns: Vec<_> = keys.map(|key| format!("n.{key}")).collect();
+    let wide = format!("MATCH (n:Wide) RETURN {}", columns.join(", "));
+    assert!(cypher_linear::classify(&format!("{wide}, n.name")).is_err());
+
+    let no_match =
+        format!("MATCH (n:Boundary) WHERE n.value = '{split}' RETURN n.name");
+    let exact_match = format!(
+        "MATCH (n:Boundary) WHERE n.value = '{exact}' RETURN n.name, n.value"
+    );
+    let capped_match = format!(
+        "MATCH (n:Boundary {{value: '{capped}'}}) RETURN n.name, n.value"
+    );
+    let pages = fixture.compare_query_pages(&[
+        (&no_match, 0, true),
+        (&exact_match, 0, true),
+        (&capped_match, 0, true),
+        (&wide, 0, true),
+    ]);
+    assert_eq!(pages[0]["rows"], json!([]));
+    assert_eq!(pages[1]["rows"], json!([["exact", exact]]));
+    assert_eq!(pages[2]["rows"], json!([["capped", capped]]));
+    assert_eq!(pages[3]["columns"], json!(columns));
+    assert_eq!(pages[3]["rows"], json!([values]));
+}
+
+#[test]
+fn split_projection_uses_native_mcp_serialization_and_cursor() {
+    const QUERY: &str = "MATCH (n:Projection) RETURN n.value";
+    let fixture = Fixture::new();
+    let db = fixture.index(CLIENT);
+    let first = "a".repeat(510);
+    let second = "b".repeat(510);
+    for (name, value) in [
+        ("first", format!("{first}é")),
+        ("second", format!("{second}€")),
+    ] {
+        let id = node(&db, CLIENT, "Projection", name, name, "projection.py");
+        db.execute(
+            "UPDATE nodes SET properties = ? WHERE id = ?",
+            params![json!({"value": value}).to_string(), id],
+        )
+        .unwrap();
+    }
+    let materialized = cypher_linear::classify(QUERY)
+        .unwrap()
+        .execute_on(&db, CLIENT)
+        .unwrap();
+    assert_eq!(
+        materialized.rows,
+        [
+            [[first.as_bytes(), &[0xc3]].concat()],
+            [[second.as_bytes(), &[0xe2]].concat()],
+        ]
+    );
+    drop(db);
+
+    let run = |bin: &Path, backend: &str| {
+        fixture.start_query_daemon(bin, backend);
+        let before = fixture.rust_query_count();
+        let query = |args: Value| {
+            let call = json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+                "name":"query_graph","arguments":args
+            }});
+            let requests = fixture.0.join("split-projection-requests");
+            fs::write(&requests, format!(
+                "{}\n{}\n{call}\n",
+                r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"query-test","version":"1"}}}"#,
+                r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+            )).unwrap();
+            let output = fixture
+                .command(bin)
+                .stdin(Stdio::from(fs::File::open(requests).unwrap()))
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            let stdout = String::from_utf8(output.stdout).unwrap();
+            let response = stdout
+                .lines()
+                .map(|line| serde_json::from_str::<Value>(line).unwrap())
+                .find(|response| response["id"] == 2)
+                .unwrap();
+            assert_ne!(response["result"]["isError"], true, "{response}");
+            response["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        let first_page = query(
+            json!({"project":CLIENT,"query":QUERY,"format":"json","max_rows":1}),
+        );
+        let page: Value = serde_json::from_str(&first_page).unwrap();
+        let cursor = page["next_cursor"].as_str().expect("first page cursor");
+        let next_page = query(
+            json!({"project":CLIENT,"query":QUERY,"format":"json","cursor":cursor}),
+        );
+        let text = query(json!({"project":CLIENT,"query":QUERY}));
+        let budget = query(
+            json!({"project":CLIENT,"query":QUERY,"format":"json","max_output_tokens":128}),
+        );
+        assert_eq!(
+            fixture.rust_query_count() - before,
+            if backend == "rust" { 4 } else { 0 }
+        );
+
+        let stop = fixture
+            .command(bin)
+            .args(["daemon", "stop"])
+            .output()
+            .unwrap();
+        assert!(stop.status.success(), "{stop:?}");
+        [first_page, next_page, text, budget]
+    };
+    let reference = run(Fixture::reference_binary(), "c");
+    let candidate = run(Path::new(MORI), "rust");
+    assert_eq!(candidate, reference);
+    let page =
+        |index: usize| serde_json::from_str::<Value>(&candidate[index]).unwrap();
+    // The native MCP tool payload encodes invalid UTF-8 losslessly.
+    assert_eq!(
+        page(0)["rows"],
+        json!([[format!("@bytes:{}c3", "61".repeat(510))]])
+    );
+    assert_eq!(
+        page(1)["rows"],
+        json!([[format!("@bytes:{}e2", "62".repeat(510))]])
+    );
+    assert_eq!(page(3)["truncation_reason"], "output_budget");
+}
+
+#[test]
+fn zero_hop_scan_checks_budget_and_matches_native_row_ceiling() {
+    use cypher_linear::{ExecutionBudget, ExecutionError};
+
+    const MATCH: &str = "MATCH (n:Ceiling) RETURN n.name";
+    let fixture = Fixture::new();
+    let db = fixture.index(CLIENT);
+    db.execute_batch(
+        "WITH RECURSIVE seq(n) AS (VALUES(1) UNION ALL SELECT n + 1 FROM seq WHERE n < 100000)
+         INSERT INTO nodes(project, label, name, qualified_name)
+         SELECT 'client', 'Ceiling', 'node', printf('node%d', n) FROM seq;",
+    )
+    .expect("seed the scan");
+    let candidate = |query: &str| {
+        let bin = Path::new(MORI);
+        fixture.start_query_daemon(bin, "rust");
+        let before = fixture.rust_query_count();
+        let output = fixture.query_output(bin, CLIENT, query);
+        assert_eq!(fixture.rust_query_count() - before, 1, "{query}");
+        output
+    };
+    let reference_bin = Fixture::reference_binary();
+    let below = format!("{MATCH} LIMIT 99999");
+    let c = fixture.query_output(reference_bin, CLIENT, &below);
+    let rust = candidate(&below);
+    assert!(
+        c.status.success() && rust.status.success(),
+        "{c:?}\n{rust:?}"
+    );
+    assert_eq!(c.stdout, rust.stdout);
+    let result: Value = serde_json::from_slice(&rust.stdout).unwrap();
+    assert_eq!(result["total"], 99_999);
+
+    for query in [MATCH, &format!("{MATCH} LIMIT 100000")] {
+        let c = fixture.query_output(reference_bin, CLIENT, query);
+        let rust = candidate(query);
+        assert_eq!(c.status.code(), Some(1), "{c:?}");
+        assert_eq!(rust.status.code(), c.status.code(), "{rust:?}");
+        assert_eq!(rust.stdout, c.stdout);
+        for output in [c, rust] {
+            assert!(
+                String::from_utf8_lossy(&output.stderr)
+                    .contains("result exceeded 100k rows"),
+                "{output:?}"
+            );
+        }
+    }
+
+    // All predicates miss. A budget check only at the end of the scan would
+    // reach this unreadable row and report a storage error first.
+    db.execute(
+        "UPDATE nodes SET properties = X'FF' WHERE qualified_name = 'node2048'",
+        [],
+    )
+    .expect("make the tail of the scan unreadable");
+    let query = cypher_linear::classify(
+        "MATCH (n:Ceiling) WHERE n.name = 'absent' RETURN n.name LIMIT 1",
+    )
+    .unwrap();
+    assert!(matches!(
+        query.execute_on(&db, CLIENT),
+        Err(ExecutionError::Storage(_))
+    ));
+    let checks = Cell::new(0);
+    let cancelled = || {
+        checks.set(checks.get() + 1);
+        checks.get() == 2
+    };
+    let mut budget = ExecutionBudget::new(&Instant::now, &cancelled);
+    assert!(matches!(
+        query.execute_with_budget(&db, CLIENT, &mut budget),
+        Err(ExecutionError::Cancelled)
+    ));
+    assert_eq!(checks.get(), 2);
+
+    let checks = Cell::new(0);
+    let start = Instant::now();
+    let clock = || {
+        checks.set(checks.get() + 1);
+        start + Duration::from_secs(if checks.get() >= 3 { 30 } else { 0 })
+    };
+    let mut budget = ExecutionBudget::new(&clock, &|| false);
+    assert!(matches!(
+        query.execute_with_budget(&db, CLIENT, &mut budget),
+        Err(ExecutionError::Deadline)
+    ));
+    assert_eq!(checks.get(), 3);
+}
+
+#[test]
 fn linear_cypher_matches_the_native_result_ceiling() {
     const MATCH: &str = "MATCH (a:Caller)-[:CALLS]->(b:Service)-[:HANDLES]->(c:Target) RETURN c.name";
     let fixture = Fixture::new();
@@ -965,7 +1376,7 @@ fn linear_cypher_matches_the_native_result_ceiling() {
 #[test]
 fn unsupported_syntax_and_supported_storage_errors_are_distinct() {
     for query in [
-        "MATCH (a) RETURN a.name",
+        "MATCH (a) RETURN a.in_degree",
         "MATCH (a)-[:CALLS]->(b) RETURN b.name ORDER BY b.name",
         "MATCH (a)-[:CALLS*1..2]->(b) RETURN b.name",
         "MATCH (a)-[:CALLS]-(b) RETURN b.name",

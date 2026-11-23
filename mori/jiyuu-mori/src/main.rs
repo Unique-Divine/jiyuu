@@ -29,8 +29,17 @@ mod search;
 #[cfg(feature = "c-backend")]
 mod path_verdict;
 
+#[cfg(feature = "c-backend")]
+mod trace_predecessor;
+
 #[cfg(all(feature = "c-backend", not(test)))]
 mod index_manifest;
+
+#[cfg(any(feature = "c-backend", test))]
+mod index_route;
+
+#[cfg(any(feature = "c-backend", test))]
+mod full_build_driver;
 
 #[cfg(all(feature = "c-backend", not(test)))]
 mod snippet_window;

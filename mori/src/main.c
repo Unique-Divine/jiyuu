@@ -1289,52 +1289,100 @@ static int main_run_allow_root(int argc, char **argv) {
     return 0;
 }
 
+/* Keep the values in sync with Subcommand in jiyuu-mori/src/ffi.rs. */
+typedef enum {
+    MAIN_SUBCOMMAND_NONE = 0,
+    MAIN_SUBCOMMAND_VERSION,
+    MAIN_SUBCOMMAND_HELP,
+    MAIN_SUBCOMMAND_ALLOW_ROOT,
+    MAIN_SUBCOMMAND_CLI,
+    MAIN_SUBCOMMAND_HOOK_AUGMENT,
+    MAIN_SUBCOMMAND_TEST_IMPACT,
+    MAIN_SUBCOMMAND_INSTALL,
+    MAIN_SUBCOMMAND_UNINSTALL,
+    MAIN_SUBCOMMAND_UPDATE,
+    MAIN_SUBCOMMAND_CONFIG,
+} main_subcommand_t;
+
+#ifdef CBM_AS_LIBRARY
+extern cbm_daemon_process_role_t cbm_rust_main_role(int argc, char *const argv[]);
+extern main_subcommand_t cbm_rust_main_subcommand(int argc, char *const argv[], int *next_arg);
+#else
+static main_subcommand_t main_c_subcommand(int argc, char *const argv[], int *next_arg) {
+    static const struct {
+        const char *name;
+        main_subcommand_t subcommand;
+    } commands[] = {
+        {"--version", MAIN_SUBCOMMAND_VERSION},
+        {"--help", MAIN_SUBCOMMAND_HELP},
+        {"-h", MAIN_SUBCOMMAND_HELP},
+        {"allow-root", MAIN_SUBCOMMAND_ALLOW_ROOT},
+        {"cli", MAIN_SUBCOMMAND_CLI},
+        {"hook-augment", MAIN_SUBCOMMAND_HOOK_AUGMENT},
+        {"test-impact", MAIN_SUBCOMMAND_TEST_IMPACT},
+        {"install", MAIN_SUBCOMMAND_INSTALL},
+        {"uninstall", MAIN_SUBCOMMAND_UNINSTALL},
+        {"update", MAIN_SUBCOMMAND_UPDATE},
+        {"config", MAIN_SUBCOMMAND_CONFIG},
+    };
+    for (int i = SKIP_ONE; i < argc; i++) {
+        for (size_t j = 0; j < sizeof(commands) / sizeof(commands[0]); j++) {
+            if (strcmp(argv[i], commands[j].name) == 0) {
+                *next_arg = i + SKIP_ONE;
+                return commands[j].subcommand;
+            }
+        }
+    }
+    *next_arg = argc;
+    return MAIN_SUBCOMMAND_NONE;
+}
+#endif
+
 static int handle_subcommand(int argc, char **argv, cbm_project_lock_manager_t *project_locks,
                              main_local_maintenance_context_t *maintenance_context) {
-    /* First scan: global flags */
+    /* Apply --profile even when it follows the selected command. */
     for (int i = SKIP_ONE; i < argc; i++) {
         if (strcmp(argv[i], "--profile") == 0) {
             cbm_profile_enable();
         }
     }
-    for (int i = SKIP_ONE; i < argc; i++) {
-        if (strcmp(argv[i], "--version") == 0) {
-            printf("%s %s\n", CBM_PROGRAM_NAME, CBM_VERSION);
-            return 0;
-        }
-        if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
-            print_help();
-            return 0;
-        }
-        if (strcmp(argv[i], "allow-root") == 0) {
-            return main_run_allow_root(argc - i - SKIP_ONE, argv + i + SKIP_ONE);
-        }
-        if (strcmp(argv[i], "cli") == 0) {
-            cbm_mem_init_with_cap(cbm_mem_ram_fraction_for_total(cbm_system_info().total_ram),
-                                  cbm_index_worker_memory_budget_bytes());
-            return run_cli(argc - i - SKIP_ONE, argv + i + SKIP_ONE, project_locks,
-                           maintenance_context);
-        }
-        if (strcmp(argv[i], "hook-augment") == 0) {
-            cbm_mem_init(cbm_mem_ram_fraction_for_total(cbm_system_info().total_ram));
-            return cbm_cmd_hook_augment(argc - i - SKIP_ONE, argv + i + SKIP_ONE);
-        }
-        if (strcmp(argv[i], "test-impact") == 0) {
-            cbm_mem_init(cbm_mem_ram_fraction_for_total(cbm_system_info().total_ram));
-            return cbm_test_impact_cli(argc - i - SKIP_ONE, argv + i + SKIP_ONE);
-        }
-        if (strcmp(argv[i], "install") == 0) {
-            return cbm_cmd_install(argc - i - SKIP_ONE, argv + i + SKIP_ONE);
-        }
-        if (strcmp(argv[i], "uninstall") == 0) {
-            return cbm_cmd_uninstall(argc - i - SKIP_ONE, argv + i + SKIP_ONE);
-        }
-        if (strcmp(argv[i], "update") == 0) {
-            return cbm_cmd_update(argc - i - SKIP_ONE, argv + i + SKIP_ONE);
-        }
-        if (strcmp(argv[i], "config") == 0) {
-            return cbm_cmd_config(argc - i - SKIP_ONE, argv + i + SKIP_ONE);
-        }
+    int next_arg;
+#ifdef CBM_AS_LIBRARY
+    main_subcommand_t subcommand = cbm_rust_main_subcommand(argc, argv, &next_arg);
+#else
+    main_subcommand_t subcommand = main_c_subcommand(argc, argv, &next_arg);
+#endif
+    argc -= next_arg;
+    argv += next_arg;
+    switch (subcommand) {
+    case MAIN_SUBCOMMAND_VERSION:
+        printf("%s %s\n", CBM_PROGRAM_NAME, CBM_VERSION);
+        return 0;
+    case MAIN_SUBCOMMAND_HELP:
+        print_help();
+        return 0;
+    case MAIN_SUBCOMMAND_ALLOW_ROOT:
+        return main_run_allow_root(argc, argv);
+    case MAIN_SUBCOMMAND_CLI:
+        cbm_mem_init_with_cap(cbm_mem_ram_fraction_for_total(cbm_system_info().total_ram),
+                              cbm_index_worker_memory_budget_bytes());
+        return run_cli(argc, argv, project_locks, maintenance_context);
+    case MAIN_SUBCOMMAND_HOOK_AUGMENT:
+        cbm_mem_init(cbm_mem_ram_fraction_for_total(cbm_system_info().total_ram));
+        return cbm_cmd_hook_augment(argc, argv);
+    case MAIN_SUBCOMMAND_TEST_IMPACT:
+        cbm_mem_init(cbm_mem_ram_fraction_for_total(cbm_system_info().total_ram));
+        return cbm_test_impact_cli(argc, argv);
+    case MAIN_SUBCOMMAND_INSTALL:
+        return cbm_cmd_install(argc, argv);
+    case MAIN_SUBCOMMAND_UNINSTALL:
+        return cbm_cmd_uninstall(argc, argv);
+    case MAIN_SUBCOMMAND_UPDATE:
+        return cbm_cmd_update(argc, argv);
+    case MAIN_SUBCOMMAND_CONFIG:
+        return cbm_cmd_config(argc, argv);
+    case MAIN_SUBCOMMAND_NONE:
+        return CBM_NOT_FOUND;
     }
     return CBM_NOT_FOUND;
 }
@@ -2812,8 +2860,7 @@ static int main_run_daemon_ctl(int argc, char **argv, const cbm_daemon_ipc_endpo
 }
 
 #ifdef CBM_AS_LIBRARY
-/* libmori-c (Makefile.cbm) builds this file for the Rust `mori` binary, whose
- * main forwards argv here. Only the name changes; the body is the same. */
+/* Rust main enters here for native process setup and command execution. */
 int cbm_c_main(int argc, char **argv);
 int cbm_c_main(int argc, char **argv) {
 #else
@@ -2839,7 +2886,11 @@ int main(int argc, char **argv) {
         }
     }
 #endif
+#ifdef CBM_AS_LIBRARY
+    cbm_daemon_process_role_t role = cbm_rust_main_role(argc, argv);
+#else
     cbm_daemon_process_role_t role = cbm_daemon_process_role(argc, argv);
+#endif
     if (role == CBM_DAEMON_PROCESS_WORKER) {
         /* Before this process writes ANYTHING. A worker's stderr is a file the
          * supervisor keeps for post-mortem, and setvbuf only binds before a
