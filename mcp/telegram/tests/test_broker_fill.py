@@ -169,3 +169,100 @@ async def test_disconnected_peer_is_fenced_after_delayed_preflight(monkeypatch, 
     assert seen == []
     with owner.journal.connect() as db:
         assert db.execute("SELECT count(*) FROM dispatch_v1").fetchone()[0] == 0
+
+
+@pytest.mark.asyncio
+async def test_configuration_writes_use_verified_room_and_read_back(monkeypatch, tmp_path):
+    from telegram_mcp.bot_identity import BotIdentity
+    from telegram_mcp.fill import RIGHTS, TITLE
+
+    class RoomClient:
+        def __init__(self):
+            self.member = False
+            self.rights = None
+            self.hidden = True
+            self.photo = False
+            self.operations = []
+
+        async def get_me(self):
+            return SimpleNamespace(id=42, bot=False)
+
+        async def get_input_entity(self, selector):
+            assert selector == -1000000001234
+            return types.InputPeerChannel(1234, 12)
+
+        async def get_entity(self, username):
+            assert username == "FixtureBot"
+            return types.User(id=55, bot=True, access_hash=56)
+
+        async def upload_file(self, stream, *, file_name):
+            assert stream.read() == b"fixture-photo"
+            assert file_name == "sai-chat-photo.jpg"
+            return types.InputFile(1, 1, file_name, "fixture")
+
+        async def __call__(self, request):
+            channel = functions.channels
+            if isinstance(request, channel.GetFullChannelRequest):
+                room = types.Channel(
+                    1234, TITLE, types.ChatPhotoEmpty(), None, creator=True, megagroup=True
+                )
+                full = SimpleNamespace(
+                    about="Chat with the Sai team. Ref: abcdef01",
+                    hidden_prehistory=self.hidden,
+                    chat_photo=(
+                        types.PhotoEmpty(1)
+                        if not self.photo
+                        else types.Photo(1, 1, b"", None, [], 1)
+                    ),
+                )
+                return SimpleNamespace(chats=[room], full_chat=full)
+            if isinstance(request, channel.GetParticipantRequest):
+                assert request.participant.user_id == 55
+                if not self.member:
+                    raise errors.UserNotParticipantError(request)
+                return SimpleNamespace(
+                    participant=(
+                        types.ChannelParticipant(55, None)
+                        if self.rights is None
+                        else types.ChannelParticipantAdmin(55, 42, None, self.rights)
+                    )
+                )
+            self.operations.append(type(request).__name__)
+            if isinstance(request, channel.InviteToChannelRequest):
+                assert request.users[0].user_id == 55
+                self.member = True
+            elif isinstance(request, channel.EditAdminRequest):
+                assert request.user_id.user_id == 55
+                self.rights = request.admin_rights
+            elif isinstance(request, channel.TogglePreHistoryHiddenRequest):
+                self.hidden = request.enabled
+            elif isinstance(request, channel.EditPhotoRequest):
+                self.photo = True
+            else:
+                raise AssertionError("unexpected request")
+            return object()
+
+    state = fixture_state(monkeypatch, tmp_path)
+    client = RoomClient()
+    owner = PoolTransport(
+        cast(TelegramClient, client), state, "42", b"fixture-photo", BotIdentity(55, "FixtureBot")
+    )
+    action = Action.parse(create_request())
+    for index, step in enumerate(("add_bot", "promote_bot", "show_history", "set_photo"), 10):
+        result = await owner.execute(
+            replace(action, action=str(index), chat="-1000000001234", step=step)
+        )
+        assert result["outcome"] == "succeeded", (step, result)
+    result = await owner.observe(
+        replace(action, action="450", chat="-1000000001234", step="verify")
+    )
+    assert result["outcome"] == "succeeded"
+    assert result["botRights"] == dict.fromkeys(RIGHTS, True)
+    assert result["photoSet"] is True
+    assert client.operations == [
+        "InviteToChannelRequest",
+        "EditAdminRequest",
+        "TogglePreHistoryHiddenRequest",
+        "EditPhotoRequest",
+    ]
+    assert owner.journal.snapshot(now_ms())["addsToday"] == 1
