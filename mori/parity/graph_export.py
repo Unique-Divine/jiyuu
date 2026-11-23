@@ -441,6 +441,11 @@ def diff_exports(a: dict[str, Any], b: dict[str, Any],
   rep = DiffReport(examples)
   for k in sorted(set(a["schema"]) | set(b["schema"])):
     sa, sb = a["schema"].get(k, "<absent>"), b["schema"].get(k, "<absent>")
+    # The page writer formats a space before the final table delimiter.
+    # Both exporters preserve it after collapsing internal whitespace.
+    if (k.startswith("table:") and sa.endswith(")") and sb.endswith(")")
+        and sa[:-1].rstrip() == sb[:-1].rstrip()):
+      continue
     if sa != sb:
       rep.add("schema", f"sqlite_master.{k}", k.split(":")[0], sa, sb, k)
 
