@@ -600,6 +600,125 @@ fn mcp_tools_call_params_and_ids_match_c_through_daemon() {
 }
 
 #[test]
+#[ignore = "requires the opt-in C worker test seams"]
+fn mcp_matching_cancellation_ids_match_c_through_daemon() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::process::Child;
+    use std::sync::mpsc::{self, RecvTimeoutError};
+    use std::time::{Duration, Instant};
+
+    use serde_json::{Value, json};
+
+    struct Frontend(Child);
+    impl Drop for Frontend {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    assert_eq!(
+        option_env!("TEST_SEAMS"),
+        Some("1"),
+        "build both binaries with TEST_SEAMS=1 to enable the worker marker"
+    );
+    let c = c_binary();
+    for id in [json!(17), json!("17")] {
+        let run = |bin: &Path, side: &str| {
+            let scratch = Scratch::new(side);
+            let repo = scratch.0.join("repo");
+            fs::create_dir(&repo).expect("create test repository");
+            fs::write(repo.join("hang_me.py"), "def smoke(): return 1\n")
+                .expect("write worker hang fixture");
+            let marker = scratch.0.join("worker-descendant.pid");
+
+            // An MCP frontend starts its own isolated daemon. Only the
+            // worker spawned for the held index run writes the marker.
+            let mut frontend = Frontend(
+                command_in(bin, &scratch)
+                    .env("CBM_TEST_HANG_ON", "hang_me")
+                    .env("CBM_TEST_WORKER_DESCENDANT_PID_FILE", &marker)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .spawn()
+                    .expect("start MCP frontend"),
+            );
+            let mut stdin = frontend.0.stdin.take().expect("MCP stdin");
+            let stdout = frontend.0.stdout.take().expect("MCP stdout");
+            let (send, receive) = mpsc::channel();
+            let reader = std::thread::spawn(move || {
+                for line in BufReader::new(stdout).lines() {
+                    if send.send(line).is_err() {
+                        break;
+                    }
+                }
+            });
+
+            let mut request = |message: Value| {
+                writeln!(stdin, "{message}").expect("send MCP request");
+                stdin.flush().expect("flush MCP stdin");
+            };
+            let response = || -> Value {
+                let line = receive
+                    .recv_timeout(Duration::from_secs(20))
+                    .expect("wait for MCP response")
+                    .expect("read MCP response");
+                serde_json::from_str(&line).expect("parse MCP response")
+            };
+
+            request(json!({"jsonrpc":"2.0","id":"init","method":"initialize"}));
+            let initialized = response();
+            assert_eq!(initialized["id"], "init");
+            assert!(initialized.get("result").is_some(), "{initialized}");
+            request(
+                json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+            );
+            request(json!({
+                "jsonrpc":"2.0", "id":id, "method":"tools/call",
+                "params":{"name":"index_repository", "arguments":{"repo_path":repo,"mode":"fast"}},
+            }));
+
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while !marker.is_file() {
+                assert!(
+                    Instant::now() < deadline,
+                    "{side} worker did not start"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            request(json!({
+                "jsonrpc":"2.0","method":"notifications/cancelled",
+                "params":{"requestId":id},
+            }));
+            request(json!({"jsonrpc":"2.0","id":"after","method":"ping"}));
+            let cancelled = response();
+            assert_eq!(cancelled["id"], id);
+            assert_eq!(cancelled["error"]["code"], -32800);
+            assert!(cancelled.get("result").is_none(), "{cancelled}");
+            assert_eq!(
+                response(),
+                json!({"jsonrpc":"2.0","id":"after","result":{}}),
+                "cancellation must leave the session open and have no reply of its own"
+            );
+
+            drop(stdin);
+            assert!(
+                matches!(
+                    receive.recv_timeout(Duration::from_secs(20)),
+                    Err(RecvTimeoutError::Disconnected)
+                ),
+                "expected EOF after the ping reply"
+            );
+            reader.join().expect("join MCP stdout reader");
+            assert!(frontend.0.wait().expect("wait for MCP frontend").success());
+            cancelled
+        };
+
+        assert_eq!(run(&c, "c"), run(Path::new(MORI), "rs"));
+    }
+}
+
+#[test]
 fn stdio_mixed_framing_matches_c_after_input_eof() {
     let initialize = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"linked-test","version":"1"}}}"#;
     let initialized =
