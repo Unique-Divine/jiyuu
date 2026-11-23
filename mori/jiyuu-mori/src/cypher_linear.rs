@@ -395,8 +395,8 @@ impl Node {
     }
 }
 
-// C compares the raw extraction, including when its byte cap splits UTF-8.
-// Validate UTF-8 only when projecting a cell into the string result.
+// C compares and projects the raw extraction, including when its byte cap
+// splits UTF-8. The native result sink handles serialization.
 fn json_property_bytes<'a>(json: &'a str, name: &str) -> &'a [u8] {
     let Some((_, tail)) = json.split_once(&format!("\"{name}\":")) else {
         return b"";
@@ -444,15 +444,12 @@ fn json_property_bytes<'a>(json: &'a str, name: &str) -> &'a [u8] {
     &bytes[start..end]
 }
 
-fn project_property(bytes: Cow<'_, [u8]>) -> rusqlite::Result<String> {
-    String::from_utf8(bytes.into_owned())
-        .map_err(|_| rusqlite::Error::InvalidQuery)
-}
-
 #[derive(Debug, PartialEq)]
 pub(crate) struct ResultRows {
     pub(crate) columns: Vec<String>,
-    pub(crate) rows: Vec<Vec<String>>,
+    // Cells can end on a split UTF-8 scalar. C hashes and budgets these bytes
+    // before rendering the response.
+    pub(crate) rows: Vec<Vec<Vec<u8>>>,
 }
 
 #[derive(Debug)]
@@ -581,7 +578,7 @@ impl Query<'_> {
                 continue;
             }
             let Some(adjacency) = &mut adjacency else {
-                rows.push(self.project(&[&start], &[])?);
+                rows.push(self.project(&[&start], &[]));
                 if rows.len() == ENGINE_LIMIT {
                     budget.check()?;
                     return Err(ExecutionError::RowCeiling);
@@ -609,7 +606,7 @@ impl Query<'_> {
                         rows.push(self.project(
                             &[&start, &next, &last],
                             &[&edge, &last_edge],
-                        )?);
+                        ));
                         if rows.len() == ENGINE_LIMIT {
                             return Err(ExecutionError::RowCeiling);
                         }
@@ -623,7 +620,7 @@ impl Query<'_> {
                     if rows.len() == limit {
                         break 'starts;
                     }
-                    rows.push(self.project(&nodes, &[&edge])?);
+                    rows.push(self.project(&nodes, &[&edge]));
                     if rows.len() == ENGINE_LIMIT {
                         return Err(ExecutionError::RowCeiling);
                     }
@@ -683,27 +680,25 @@ impl Query<'_> {
         !self.any_filter
     }
 
-    fn project(
-        &self,
-        nodes: &[&Node],
-        edges: &[&Edge],
-    ) -> rusqlite::Result<Vec<String>> {
+    fn project(&self, nodes: &[&Node], edges: &[&Edge]) -> Vec<Vec<u8>> {
         self.projections
             .iter()
             .map(|column| match (column.binding, column.property) {
-                (Binding::Node(index), None) => Ok(nodes[index].name.clone()),
+                (Binding::Node(index), None) => {
+                    nodes[index].name.as_bytes().to_vec()
+                }
                 (Binding::Node(index), Some(name)) => {
-                    project_property(nodes[index].property_bytes(name))
+                    nodes[index].property_bytes(name).into_owned()
                 }
                 (Binding::Edge(index), None) => {
-                    Ok(edges[index].properties.clone())
+                    edges[index].properties.as_bytes().to_vec()
                 }
                 (Binding::Edge(index), Some("type")) => {
-                    Ok(edges[index].kind.clone())
+                    edges[index].kind.as_bytes().to_vec()
                 }
-                (Binding::Edge(index), Some(name)) => project_property(
-                    json_property_bytes(&edges[index].properties, name).into(),
-                ),
+                (Binding::Edge(index), Some(name)) => {
+                    json_property_bytes(&edges[index].properties, name).to_vec()
+                }
             })
             .collect()
     }

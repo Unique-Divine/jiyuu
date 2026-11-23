@@ -14,8 +14,8 @@ struct Cell {
     len: usize,
 }
 
-impl From<&str> for Cell {
-    fn from(value: &str) -> Self {
+impl From<&[u8]> for Cell {
+    fn from(value: &[u8]) -> Self {
         Self {
             data: value.as_ptr().cast(),
             len: value.len(),
@@ -101,7 +101,7 @@ unsafe extern "C" fn evaluate(
                     format!("query aborted: reading the graph failed ({error})");
                 // SAFETY: C copies the detail during the call.
                 unsafe {
-                    (sink.storage_error)(sink.context, detail.as_str().into())
+                    (sink.storage_error)(sink.context, detail.as_bytes().into())
                 };
                 Status::Error
             }
@@ -115,7 +115,7 @@ impl Sink {
         let mut cells: Vec<_> = result
             .columns
             .iter()
-            .map(|text| text.as_str().into())
+            .map(|text| text.as_bytes().into())
             .collect();
         // SAFETY: callbacks copy cells synchronously and keep no Rust
         // pointers. The header determines the width of each following row.
@@ -131,7 +131,7 @@ impl Sink {
         }
         for row in &result.rows {
             cells.clear();
-            cells.extend(row.iter().map(|text| Cell::from(text.as_str())));
+            cells.extend(row.iter().map(|bytes| Cell::from(bytes.as_slice())));
             if !unsafe { (self.row)(self.context, cells.as_ptr()) } {
                 return Status::Error;
             }
