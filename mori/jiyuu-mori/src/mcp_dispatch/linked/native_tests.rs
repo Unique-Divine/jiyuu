@@ -13,7 +13,6 @@ type MutationBegin = unsafe extern "C" fn(*mut c_void, *const c_char) -> bool;
 type MutationEnd = unsafe extern "C" fn(*mut c_void, *const c_char);
 
 unsafe extern "C" {
-    fn cbm_alloc_init();
     fn cbm_mcp_set_method_selector(
         select: Option<unsafe extern "C" fn(*const c_char) -> c_int>,
     );
@@ -100,11 +99,12 @@ fn native_cancellation_dispatch_respects_active_request_scope() {
     // SAFETY: This is the only binary unit test that installs MCP dispatch
     // callbacks. It owns the server and invokes all requests on this thread.
     unsafe {
-        cbm_alloc_init();
         super::register();
         // If the handler falls back to C, even the outer tool call fails.
         cbm_mcp_set_method_selector(Some(reject_in_c_reference));
 
+        // Use the embedded server's in-memory store. Other unit tests in
+        // this process can already have initialized SQLite.
         let fixture = Fixture(cbm_mcp_server_new(ptr::null()));
         let server = fixture.0;
         assert!(!server.is_null());
