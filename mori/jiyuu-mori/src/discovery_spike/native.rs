@@ -22,6 +22,8 @@ pub(super) type Walker = unsafe extern "C" fn(*mut Walk, *mut Frame) -> bool;
 unsafe extern "C" {
     #[cfg(not(test))]
     fn cbm_pipeline_set_discover_walk(walker: Walker);
+    #[cfg(not(test))]
+    fn cbm_discover_set_admission_walk(walker: Walker);
     fn cbm_discover_walk_prepare(walk: *mut Walk, frame: *mut Frame) -> bool;
     fn cbm_discover_frame_path(frame: *const Frame) -> *const c_char;
     fn cbm_discover_walk_entry(
@@ -51,15 +53,36 @@ impl Drop for Child {
 pub unsafe fn register() {
     // SAFETY: the binary calls this during process startup, and the callback
     // lives for the process lifetime.
-    unsafe { cbm_pipeline_set_discover_walk(walk) };
+    unsafe {
+        cbm_pipeline_set_discover_walk(walk);
+        if std::env::var_os("MORI_IMPL_ADMISSION").as_deref()
+            == Some(OsStr::new("rust"))
+        {
+            cbm_discover_set_admission_walk(walk_bounded);
+        }
+    }
 }
 
 pub(super) unsafe extern "C" fn walk(walk: *mut Walk, root: *mut Frame) -> bool {
+    run_walk(walk, root, false)
+}
+
+pub(super) unsafe extern "C" fn walk_bounded(
+    walk: *mut Walk,
+    root: *mut Frame,
+) -> bool {
+    run_walk(walk, root, true)
+}
+
+fn run_walk(walk: *mut Walk, root: *mut Frame, count_only: bool) -> bool {
     // SAFETY: C lends the walk state and root until the callback returns.
     // Keep the root borrowed and release all owned children before returning.
     catch_unwind(|| unsafe {
+        if count_only && cbm_discover_walk_stopped(walk) {
+            return true;
+        }
         let mut pending: Vec<Child> = Vec::new();
-        if !scan_directory(walk, root, &mut pending) {
+        if !scan_directory(walk, root, &mut pending, count_only) {
             return false;
         }
         // C scans the parent completely and visits children in reverse
@@ -68,7 +91,8 @@ pub(super) unsafe extern "C" fn walk(walk: *mut Walk, root: *mut Frame) -> bool 
             if cbm_discover_walk_stopped(walk) {
                 break;
             }
-            if !scan_directory(walk, child.0.as_ptr(), &mut pending) {
+            if !scan_directory(walk, child.0.as_ptr(), &mut pending, count_only)
+            {
                 return false;
             }
         }
@@ -81,6 +105,7 @@ unsafe fn scan_directory(
     walk: *mut Walk,
     frame: *mut Frame,
     pending: &mut Vec<Child>,
+    count_only: bool,
 ) -> bool {
     // SAFETY: walk and frame are valid for this scan. The path borrows the
     // frame. Native policy copies the name before it returns.
@@ -90,10 +115,10 @@ unsafe fn scan_directory(
         }
         let path = CStr::from_ptr(cbm_discover_frame_path(frame));
         let path = Path::new(OsStr::from_bytes(path.to_bytes()));
-        // Ordinary C discovery treats an unopenable directory as empty and
-        // stops reading the current directory if readdir fails.
+        // Bounded admission fails if a directory cannot be opened. Both
+        // native walkers stop reading the current directory on a readdir error.
         let Ok(mut entries) = fs::read_dir(path) else {
-            return true;
+            return !count_only;
         };
         while !cbm_discover_walk_stopped(walk) {
             let Some(Ok(entry)) = entries.next() else {
