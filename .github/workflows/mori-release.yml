@@ -189,26 +189,33 @@ jobs:
           fi
           mkdir -p "$(dirname "$BIN")"
           cp "../target/$RUST_TARGET/release/mori" "$BIN.unstripped"
-      - name: Verify FTS retirement in the unstripped release
+      - name: Verify retired native implementations before stripping
         run: |
           set -euo pipefail
           archive_members="$(ar t build/mori-rs/libmori-c.a)"
-          if grep -Fxq fts_writer_reference.o <<< "$archive_members"; then
-            echo "::error::release archive includes the retired C FTS writer"
-            exit 1
-          fi
+          for object in fts_writer_reference.o config_text_edit.o pass_complexity.o \
+            pass_similarity.o pass_doclinks.o doc_links_pdf.o; do
+            if grep -Fxq "$object" <<< "$archive_members"; then
+              echo "::error::release archive includes retired object $object"
+              exit 1
+            fi
+          done
           defined_symbols="$(nm "$BIN.unstripped" | awk 'NF >= 3 && $2 ~ /^[Tt]$/ {sub(/^_/, "", $NF); print $NF}')"
-          if ! grep -Fxq mori_fts_write <<< "$defined_symbols"; then
-            echo "::error::release executable is missing the Rust FTS writer"
-            exit 1
-          fi
+          for symbol in mori_fts_write cbm_text_upsert_managed_block \
+            mori_complexity_buffer mori_complexity_stage mori_similarity_buffer \
+            mori_explicit_override mori_doc_file_links_run mori_pdf_links_resolve \
+            cbm_rust_watcher_poll mori_ipc_frame_header_decode; do
+            if ! grep -Fxq "$symbol" <<< "$defined_symbols"; then
+              echo "::error::release executable is missing $symbol"
+              exit 1
+            fi
+          done
           if grep -Fxq cbm_store_fts_write_reference <<< "$defined_symbols"; then
             echo "::error::release executable includes the retired C FTS writer"
             exit 1
           fi
           {
-            echo "### FTS retirement on \`$RUST_TARGET\`"
-            echo "Release link includes \`mori_fts_write\` and excludes the legacy C writer."
+            printf '### Native retirement on %s\n' "$RUST_TARGET"
             shasum -a 256 "$BIN.unstripped" build/mori-rs/libmori-c.a
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Strip and check static linking (Linux)
