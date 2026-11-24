@@ -421,8 +421,12 @@ fn default_rust_routing_preserves_native_update_paths_and_generation() {
         },
     ];
 
+    // The release archive omits the legacy full-build and publication drivers.
+    // It can still compare C and Rust routing against the same Rust writers.
+    let c_driver = (option_env!("MORI_WITHOUT_C_INDEX_DRIVERS") != Some("1"))
+        .then_some("c");
     let mut native =
-        IndexSession::new(fixture.0.join("control"), Some("c"), Some("c"));
+        IndexSession::new(fixture.0.join("control"), Some("c"), c_driver);
     let mut rust = IndexSession::new(fixture.0.join("candidate"), None, None);
     let mut previous_native = String::new();
     let mut previous_rust = String::new();
@@ -445,11 +449,10 @@ fn default_rust_routing_preserves_native_update_paths_and_generation() {
         assert!(native_fts.rankings.iter().all(|rows| !rows.is_empty()));
         assert_eq!(rust.fts(&name), native_fts);
         if step.decision == Some(("staged", "closure")) {
-            // Unrecognized driver settings continue to select the C implementations.
             let mut clean = IndexSession::new(
                 fixture.0.join("clean"),
                 Some("unrecognized"),
-                Some("unrecognized"),
+                c_driver.map(|_| "unrecognized"),
             );
             let (clean_name, clean_generation, _) = clean.index(&repo, &fresh);
             assert_eq!(clean_name, name);
@@ -474,9 +477,13 @@ fn default_rust_routing_preserves_native_update_paths_and_generation() {
         previous_rust = rust_generation;
     }
 
+    if c_driver.is_none() {
+        return;
+    }
+
     let stopped = rust.command().args(["daemon", "stop"]).output().unwrap();
     assert!(stopped.status.success(), "{stopped:?}");
-    rust.driver_override = Some("c");
+    rust.driver_override = c_driver;
     rust.rust_manifest = true;
     fs::write(
         repo.join("schema.graphqls"),
