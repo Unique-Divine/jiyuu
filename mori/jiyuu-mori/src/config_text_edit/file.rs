@@ -15,7 +15,7 @@ mod platform;
 mod platform;
 
 #[derive(Debug, PartialEq, Eq)]
-pub(super) struct Snapshot {
+pub(crate) struct Snapshot {
     metadata: Option<platform::Identity>,
     bytes: Vec<u8>,
 }
@@ -36,7 +36,7 @@ impl Snapshot {
         })
     }
 
-    pub(super) fn content(&self) -> Option<&[u8]> {
+    pub(crate) fn content(&self) -> Option<&[u8]> {
         self.metadata.as_ref().map(|_| self.bytes.as_slice())
     }
 
@@ -52,7 +52,18 @@ impl Snapshot {
     }
 }
 
-pub(super) struct Target<'a> {
+#[derive(Clone, Copy)]
+enum WriteKind {
+    Text(Option<u32>),
+    Toml,
+}
+
+pub(crate) enum WritePhase {
+    Precommit,
+    Prepublish,
+}
+
+pub(crate) struct Target<'a> {
     requested: &'a Path,
     resolved: platform::Target,
 }
@@ -60,13 +71,21 @@ pub(super) struct Target<'a> {
 impl<'a> Target<'a> {
     pub(super) fn open(requested: &'a Path) -> io::Result<Self> {
         single_line(requested.as_os_str().as_encoded_bytes(), 32768)?;
+        #[cfg(windows)]
+        if requested.as_os_str().as_encoded_bytes().len() >= 4096 {
+            return Err(invalid("configuration path is too long"));
+        }
+        Self::open_validated(requested)
+    }
+
+    pub(crate) fn open_validated(requested: &'a Path) -> io::Result<Self> {
         Ok(Self {
             requested,
             resolved: platform::Target::open(requested)?,
         })
     }
 
-    pub(super) fn read(&self) -> io::Result<Snapshot> {
+    pub(crate) fn read(&self) -> io::Result<Snapshot> {
         match self.resolved.reader()? {
             Some(mut file) => Snapshot::from_file(&mut file),
             None => Ok(Snapshot {
@@ -77,7 +96,7 @@ impl<'a> Target<'a> {
     }
 
     fn revalidate(&self, old: &Snapshot) -> io::Result<()> {
-        let current = Self::open(self.requested)?;
+        let current = Self::open_validated(self.requested)?;
         if !self.resolved.same_location(&current.resolved)
             || current.read()? != *old
         {
@@ -92,9 +111,43 @@ impl<'a> Target<'a> {
         updated: &[u8],
         mode: Option<u32>,
     ) -> io::Result<()> {
+        self.write_staged(old, updated, WriteKind::Text(mode), |_, _| {})
+    }
+
+    pub(crate) fn write_toml(
+        &self,
+        old: &Snapshot,
+        updated: &[u8],
+        hooks: impl FnMut(WritePhase, &Path),
+    ) -> io::Result<()> {
+        #[cfg(windows)]
+        {
+            const PATH_CAPACITY: usize = 4096;
+            const SUFFIX_LEN: usize = 7;
+            let len = self.requested.as_os_str().as_encoded_bytes().len();
+            if len >= PATH_CAPACITY
+                || (updated != old.bytes && len + SUFFIX_LEN >= PATH_CAPACITY)
+            {
+                return Err(invalid("configuration path is too long"));
+            }
+        }
+        self.write_staged(old, updated, WriteKind::Toml, hooks)
+    }
+
+    fn write_staged(
+        &self,
+        old: &Snapshot,
+        updated: &[u8],
+        kind: WriteKind,
+        mut hooks: impl FnMut(WritePhase, &Path),
+    ) -> io::Result<()> {
         if updated.len() > MAX_BYTES {
             return Err(invalid("replacement exceeds the document limit"));
         }
+        let mode = match kind {
+            WriteKind::Text(mode) => mode,
+            WriteKind::Toml => None,
+        };
         if old.bytes == updated
             && mode.is_none_or(|mode| {
                 old.metadata
@@ -104,7 +157,7 @@ impl<'a> Target<'a> {
         {
             return Ok(());
         }
-        let (mut temp, mut file) = Temp::create(&self.resolved)?;
+        let (mut temp, mut file) = Temp::create(&self.resolved, kind)?;
         file.write_all(updated)?;
         platform::prepare(&file, old.metadata.as_ref(), mode)?;
         file.sync_all()?;
@@ -116,11 +169,13 @@ impl<'a> Target<'a> {
             }
         }
         platform::close(file)?;
-        #[cfg(any(test, feature = "native-engine-fixtures"))]
-        super::test_hooks::run_hook(
-            super::test_hooks::Phase::TempClosed,
-            &temp.path,
-        );
+        #[cfg(any(test, feature = "native-engine-test-seams"))]
+        if matches!(kind, WriteKind::Text(_)) {
+            super::test_hooks::run_hook(
+                super::test_hooks::Phase::TempClosed,
+                &temp.path,
+            );
+        }
         let reopened = temp.read()?;
         if !reopened
             .metadata
@@ -130,17 +185,23 @@ impl<'a> Target<'a> {
         {
             return Err(invalid("staged replacement changed after close"));
         }
-        #[cfg(any(test, feature = "native-engine-fixtures"))]
-        super::test_hooks::run_hook(
-            super::test_hooks::Phase::Precommit,
-            self.requested,
-        );
+        #[cfg(any(test, feature = "native-engine-test-seams"))]
+        if matches!(kind, WriteKind::Text(_)) {
+            super::test_hooks::run_hook(
+                super::test_hooks::Phase::Precommit,
+                self.requested,
+            );
+        }
+        hooks(WritePhase::Precommit, self.resolved.path());
         self.revalidate(old)?;
-        #[cfg(any(test, feature = "native-engine-fixtures"))]
-        super::test_hooks::run_hook(
-            super::test_hooks::Phase::Prepublish,
-            self.requested,
-        );
+        #[cfg(any(test, feature = "native-engine-test-seams"))]
+        if matches!(kind, WriteKind::Text(_)) {
+            super::test_hooks::run_hook(
+                super::test_hooks::Phase::Prepublish,
+                self.requested,
+            );
+        }
+        hooks(WritePhase::Prepublish, self.resolved.path());
         self.revalidate(old)?;
         if temp.read()? != reopened {
             return Err(invalid(
@@ -153,13 +214,13 @@ impl<'a> Target<'a> {
     }
 
     pub(super) fn delete(&self, old: &Snapshot) -> io::Result<()> {
-        #[cfg(any(test, feature = "native-engine-fixtures"))]
+        #[cfg(any(test, feature = "native-engine-test-seams"))]
         super::test_hooks::run_hook(
             super::test_hooks::Phase::Precommit,
             self.requested,
         );
         self.revalidate(old)?;
-        #[cfg(any(test, feature = "native-engine-fixtures"))]
+        #[cfg(any(test, feature = "native-engine-test-seams"))]
         super::test_hooks::run_hook(
             super::test_hooks::Phase::Prepublish,
             self.requested,
@@ -178,15 +239,27 @@ struct Temp<'a> {
 }
 
 impl<'a> Temp<'a> {
-    fn create(target: &'a platform::Target) -> io::Result<(Self, File)> {
+    fn create(target: &'a platform::Target, kind: WriteKind) -> io::Result<(Self, File)> {
         static SEQUENCE: AtomicU32 = AtomicU32::new(1);
-        for _ in 0..64 {
-            let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        for attempt in 0..64 {
             let mut name = target.path().as_os_str().to_owned();
-            name.push(format!(
-                ".cbm-text-{}-{sequence}.tmp",
-                std::process::id()
-            ));
+            match kind {
+                WriteKind::Text(_) => {
+                    let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+                    name.push(format!(".cbm-text-{}-{sequence}.tmp", std::process::id()));
+                }
+                #[cfg(unix)]
+                WriteKind::Toml if target.followed() => {
+                    name.push(format!(".cbm-toml-{attempt}.tmp"));
+                }
+                WriteKind::Toml => {
+                    let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+                    let id = std::process::id().wrapping_mul(0x9e37_79b9) ^ sequence;
+                    name.push(format!(".{:06x}", id & 0x00ff_ffff));
+                }
+            }
+            #[cfg(windows)]
+            let _ = attempt;
             let path = PathBuf::from(name);
             match target.create_temp(&path) {
                 Ok(file) => {

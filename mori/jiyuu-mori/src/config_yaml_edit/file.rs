@@ -131,28 +131,28 @@ fn suffix_path(path: &CStr, suffix: &[u8]) -> Result<CString> {
 // Release binaries have no mutable hooks or setter symbols.
 mod hooks {
     use super::*;
-    #[cfg(feature = "native-engine-test-hooks")]
+    #[cfg(feature = "native-engine-test-seams")]
     use std::{ffi::c_void, sync::Mutex};
 
-    #[cfg(feature = "native-engine-test-hooks")]
+    #[cfg(feature = "native-engine-test-seams")]
     type Callback = unsafe extern "C" fn(*const c_char, *mut c_void);
 
-    #[cfg(feature = "native-engine-test-hooks")]
+    #[cfg(feature = "native-engine-test-seams")]
     pub(super) struct Hook(Mutex<Option<(Callback, usize)>>);
 
-    #[cfg(not(feature = "native-engine-test-hooks"))]
+    #[cfg(not(feature = "native-engine-test-seams"))]
     pub(super) struct Hook;
 
     impl Hook {
         const fn new() -> Self {
-            #[cfg(feature = "native-engine-test-hooks")]
+            #[cfg(feature = "native-engine-test-seams")]
             return Self(Mutex::new(None));
-            #[cfg(not(feature = "native-engine-test-hooks"))]
+            #[cfg(not(feature = "native-engine-test-seams"))]
             Self
         }
 
         pub(super) fn run(&self, _path: &CStr) {
-            #[cfg(feature = "native-engine-test-hooks")]
+            #[cfg(feature = "native-engine-test-seams")]
             {
                 let hook = *self.0.lock().unwrap_or_else(|err| err.into_inner());
                 if let Some((callback, context)) = hook {
@@ -162,7 +162,7 @@ mod hooks {
             }
         }
 
-        #[cfg(feature = "native-engine-test-hooks")]
+        #[cfg(feature = "native-engine-test-seams")]
         fn set(&self, callback: Option<Callback>, context: *mut c_void) {
             *self.0.lock().unwrap_or_else(|err| err.into_inner()) =
                 callback.map(|callback| (callback, context as usize));
@@ -173,7 +173,7 @@ mod hooks {
     pub(super) static PREPUBLISH: Hook = Hook::new();
     pub(super) static LOCK_POSTCREATE: Hook = Hook::new();
 
-    #[cfg(feature = "native-engine-test-hooks")]
+    #[cfg(feature = "native-engine-test-seams")]
     #[unsafe(no_mangle)]
     extern "C" fn cbm_yaml_set_precommit_hook_for_testing(
         hook: Option<Callback>,
@@ -182,7 +182,7 @@ mod hooks {
         PRECOMMIT.set(hook, context);
     }
 
-    #[cfg(feature = "native-engine-test-hooks")]
+    #[cfg(feature = "native-engine-test-seams")]
     #[unsafe(no_mangle)]
     extern "C" fn cbm_yaml_set_prepublish_hook_for_testing(
         hook: Option<Callback>,
@@ -191,7 +191,7 @@ mod hooks {
         PREPUBLISH.set(hook, context);
     }
 
-    #[cfg(feature = "native-engine-test-hooks")]
+    #[cfg(feature = "native-engine-test-seams")]
     #[unsafe(no_mangle)]
     extern "C" fn cbm_yaml_set_lock_postcreate_hook_for_testing(
         hook: Option<Callback>,

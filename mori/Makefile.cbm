@@ -600,8 +600,7 @@ GIT_SRCS = src/git/git_context.c
 # CLI module (new)
 CLI_SRCS = src/cli/cli.c src/cli/runtime_settings.c src/cli/progress_sink.c src/cli/hook_augment.c src/cli/client_adapter.c \
 	src/cli/agent_clients.c src/cli/agent_profiles.c \
-	src/cli/config_json_like.c src/cli/config_toml_edit.c src/cli/config_yaml_edit.c \
-	src/cli/config_edit_path.c src/cli/activation_transaction.c
+	src/cli/config_edit_path.c
 
 # UI module (graph visualization)
 UI_SRCS = \
@@ -1096,7 +1095,7 @@ $(BUILD_DIR):
 $(NATIVE_ENGINE_ARCHIVE): NATIVE_ENGINE_CARGO_DIR := $(NATIVE_ENGINE_TARGET_DIR)
 $(NATIVE_ENGINE_ARCHIVE): NATIVE_ENGINE_CARGO_FEATURES := native-engine-abi
 $(NATIVE_ENGINE_TEST_ARCHIVE): NATIVE_ENGINE_CARGO_DIR := $(NATIVE_ENGINE_TEST_TARGET_DIR)
-$(NATIVE_ENGINE_TEST_ARCHIVE): NATIVE_ENGINE_CARGO_FEATURES := native-engine-fixtures
+$(NATIVE_ENGINE_TEST_ARCHIVE): NATIVE_ENGINE_CARGO_FEATURES := native-engine-test-seams
 $(NATIVE_ENGINE_ARCHIVE) $(NATIVE_ENGINE_TEST_ARCHIVE): $(NATIVE_ENGINE_TEST_SOURCES) Makefile.cbm | $(BUILD_DIR)
 	env -u CARGO_FEATURE_C_BACKEND -u CARGO_MAKEFLAGS -u MAKEFLAGS -u MFLAGS \
 		CARGO_BUILD_JOBS="$(or $(CARGO_BUILD_JOBS),$(patsubst -j%,%,$(filter-out -j,$(filter -j%,$(MAKEFLAGS)))),2)" \

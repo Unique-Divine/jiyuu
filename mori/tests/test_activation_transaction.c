@@ -6,6 +6,7 @@
 #include "foundation/compat_fs.h"
 #include "foundation/platform.h"
 
+#include <errno.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -22,7 +23,6 @@
 #endif
 
 #ifdef __APPLE__
-#include <errno.h>
 #include <membership.h>
 #include <sys/acl.h>
 #endif
@@ -1239,11 +1239,96 @@ TEST(activation_transaction_revalidates_macos_target_file_acl_before_commit) {
     PASS();
 }
 
+TEST(activation_transaction_close_keeps_recoverable_backup_on_conflict) {
+    char directory[ACTIVATION_TEST_PATH_CAP];
+    char target[ACTIVATION_TEST_PATH_CAP];
+    char moved_candidate[ACTIVATION_TEST_PATH_CAP];
+    ASSERT_TRUE(activation_test_fixture(directory));
+    ASSERT_TRUE(activation_test_path(target, directory, "mori"));
+    ASSERT_TRUE(activation_test_path(moved_candidate, directory, "moved-candidate"));
+    ASSERT_TRUE(activation_test_write(target, "old"));
+
+    cbm_activation_transaction_t *transaction = NULL;
+    ASSERT_EQ(cbm_activation_transaction_stage_bytes(target, "new", 3, &transaction),
+              CBM_ACTIVATION_TRANSACTION_OK);
+    const char *backup = cbm_activation_transaction_backup_path(transaction);
+    ASSERT_NOT_NULL(backup);
+    ASSERT_EQ(cbm_activation_transaction_commit(transaction, NULL, NULL),
+              CBM_ACTIVATION_TRANSACTION_OK);
+    ASSERT_EQ(cbm_rename_replace(target, moved_candidate), 0);
+    ASSERT_TRUE(activation_test_write(target, "winner"));
+    ASSERT_EQ(cbm_activation_transaction_close(&transaction),
+              CBM_ACTIVATION_TRANSACTION_ROLLBACK_FAILED);
+    ASSERT_NOT_NULL(transaction);
+    char observed[ACTIVATION_TEST_CONTENT_CAP];
+    ASSERT_TRUE(activation_test_read(target, observed));
+    ASSERT_STR_EQ(observed, "winner");
+    ASSERT_TRUE(activation_test_read(backup, observed));
+    ASSERT_STR_EQ(observed, "old");
+
+    ASSERT_EQ(cbm_unlink(target), 0);
+    ASSERT_EQ(cbm_activation_transaction_close(&transaction), CBM_ACTIVATION_TRANSACTION_OK);
+    ASSERT_NULL(transaction);
+    ASSERT_TRUE(activation_test_read(target, observed));
+    ASSERT_STR_EQ(observed, "old");
+    ASSERT_EQ(th_rmtree(directory), 0);
+    PASS();
+}
+
+#if !defined(_WIN32) && defined(CBM_ENABLE_TEST_SEAMS)
+TEST(activation_transaction_failed_writes_preserve_errno_and_remove_temps) {
+    char directory[ACTIVATION_TEST_PATH_CAP];
+    char target[ACTIVATION_TEST_PATH_CAP];
+    char source[ACTIVATION_TEST_PATH_CAP];
+    ASSERT_TRUE(activation_test_fixture(directory));
+    ASSERT_TRUE(activation_test_path(target, directory, "mori"));
+    ASSERT_TRUE(activation_test_path(source, directory, "candidate"));
+    ASSERT_TRUE(activation_test_write(target, "old"));
+    ASSERT_TRUE(activation_test_write(source, "candidate"));
+
+    cbm_activation_transaction_t *transaction = NULL;
+    cbm_activation_transaction_write_failures_set_for_testing(1, ENOSPC);
+    int status = cbm_activation_transaction_stage_bytes(target, "bytes", 5, &transaction);
+    int error = errno;
+    cbm_activation_transaction_write_failures_set_for_testing(0, 0);
+    ASSERT_EQ(status, CBM_ACTIVATION_TRANSACTION_IO);
+    ASSERT_EQ(error, ENOSPC);
+    ASSERT_NULL(transaction);
+
+    cbm_activation_transaction_write_failures_set_for_testing(1, ENOSPC);
+    status = cbm_activation_transaction_stage_file(target, source, &transaction);
+    error = errno;
+    cbm_activation_transaction_write_failures_set_for_testing(0, 0);
+    ASSERT_EQ(status, CBM_ACTIVATION_TRANSACTION_IO);
+    ASSERT_EQ(error, ENOSPC);
+    ASSERT_NULL(transaction);
+
+    cbm_dir_t *entries = cbm_opendir(directory);
+    ASSERT_NOT_NULL(entries);
+    cbm_dirent_t *entry;
+    bool leftover = false;
+    while ((entry = cbm_readdir(entries)) != NULL) {
+        leftover |= strncmp(entry->name, ".cbm-", 5) == 0;
+    }
+    cbm_closedir(entries);
+    ASSERT_FALSE(leftover);
+    char observed[ACTIVATION_TEST_CONTENT_CAP];
+    ASSERT_TRUE(activation_test_read(target, observed));
+    ASSERT_STR_EQ(observed, "old");
+    ASSERT_EQ(th_rmtree(directory), 0);
+    PASS();
+}
+#endif
+
 SUITE(activation_transaction) {
     RUN_TEST(activation_transaction_stages_same_directory_private_executable_and_aborts);
     RUN_TEST(activation_transaction_commit_keeps_backup_until_finalize);
     RUN_TEST(activation_transaction_validation_failure_restores_previous_target);
     RUN_TEST(activation_transaction_explicit_rollback_restores_previous_target);
+    RUN_TEST(activation_transaction_close_keeps_recoverable_backup_on_conflict);
+#if !defined(_WIN32) && defined(CBM_ENABLE_TEST_SEAMS)
+    RUN_TEST(activation_transaction_failed_writes_preserve_errno_and_remove_temps);
+#endif
     RUN_TEST(activation_transaction_stage_file_installs_new_target);
     RUN_TEST(activation_transaction_stage_file_survives_long_target_path);
     RUN_TEST(activation_transaction_removal_can_rollback_or_finalize);

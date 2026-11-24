@@ -112,9 +112,6 @@ pub(super) struct Target(PathBuf);
 
 impl Target {
     pub(super) fn open(path: &Path) -> io::Result<Self> {
-        if path.as_os_str().as_encoded_bytes().len() >= 4096 {
-            return Err(invalid("configuration path is too long"));
-        }
         Ok(Self(path.to_owned()))
     }
 

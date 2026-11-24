@@ -6,7 +6,7 @@ use std::path::Path;
 
 use crate::config_text_edit::file::{Snapshot, Target};
 
-#[cfg(feature = "native-engine-test-hooks")]
+#[cfg(feature = "native-engine-test-seams")]
 mod test_hooks {
     use std::cell::Cell;
     use std::ffi::{CString, c_char, c_void};
@@ -75,9 +75,9 @@ impl<'a> ConfigFile<'a> {
     }
 
     pub fn write(&self, data: &[u8]) -> io::Result<()> {
-        #[cfg(feature = "native-engine-test-hooks")]
+        #[cfg(feature = "native-engine-test-seams")]
         let run = test_hooks::run;
-        #[cfg(not(feature = "native-engine-test-hooks"))]
+        #[cfg(not(feature = "native-engine-test-seams"))]
         let run = |_, _: &Path| {};
         self.target.write_toml(&self.snapshot, data, run)
     }

@@ -171,12 +171,12 @@ fn publish(path: &CStr, old: &Snapshot, updated: &[u8]) -> io::Result<()> {
         return Err(invalid_path());
     }
 
-    #[cfg(feature = "native-json-editor-fixtures")]
+    #[cfg(feature = "native-engine-test-seams")]
     super::abi::run_precommit(resolved);
     if Snapshot::read(resolved)? != *old {
         return Err(invalid_path());
     }
-    #[cfg(feature = "native-json-editor-fixtures")]
+    #[cfg(feature = "native-engine-test-seams")]
     super::abi::run_prepublish(resolved);
     if Snapshot::read(resolved)? != *old || Snapshot::read(&temp.name)? != staged
     {

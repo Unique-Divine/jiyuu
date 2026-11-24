@@ -130,7 +130,7 @@ impl Target {
         &self.path
     }
 
-    fn followed(&self) -> bool {
+    pub(super) fn followed(&self) -> bool {
         self.raw.status == 1
     }
 

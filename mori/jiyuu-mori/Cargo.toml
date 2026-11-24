@@ -23,10 +23,10 @@ path = "src/main.rs"
 c-backend = ["native-engine-abi"]
 # Shared engine entry points link into the Rust executable and the native
 # C test targets. Enabling this does not make build.rs call back into Make.
-native-engine-abi = ["graphql-callbacks", "dep:libc", "dep:serde", "dep:serde_json", "dep:sha2"]
+native-engine-abi = ["graphql-callbacks", "dep:libc", "dep:serde", "dep:serde_json", "dep:sha2", "dep:windows-sys"]
 graphql-callbacks = ["dep:rusqlite"]
 native-graphql-fixtures = ["native-engine-abi"]
-native-engine-fixtures = ["native-graphql-fixtures"]
+native-engine-test-seams = ["native-graphql-fixtures"]
 
 [dependencies]
 libc = { version = "0.2", optional = true }
@@ -37,6 +37,15 @@ rusqlite = { version = "0.41", default-features = false, features = ["bundled"],
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1.0.151", features = ["raw_value"], optional = true }
 sha2 = { version = "0.10", optional = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", optional = true, features = [
+    "Win32_Security",
+    "Win32_Security_Authentication_Identity",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Threading",
+] }
 
 [build-dependencies]
 serde_json = "1.0.151"

@@ -560,7 +560,7 @@ pub unsafe extern "C" fn cbm_json_like_match_object_entry(
     })())
 }
 
-#[cfg(feature = "native-json-editor-fixtures")]
+#[cfg(feature = "native-engine-test-seams")]
 mod hooks {
     use super::*;
     use std::cell::Cell;
@@ -607,5 +607,5 @@ mod hooks {
     }
 }
 
-#[cfg(feature = "native-json-editor-fixtures")]
+#[cfg(feature = "native-engine-test-seams")]
 pub(super) use hooks::{run_precommit, run_prepublish};
