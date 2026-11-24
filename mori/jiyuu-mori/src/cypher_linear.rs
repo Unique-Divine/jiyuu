@@ -19,7 +19,8 @@ const CHECK_INTERVAL: usize = 1024;
 const PROPERTY_LIMIT: usize = 511;
 const ORDER_KEYS_MAX: usize = 8;
 const NATIVE_EDGE_PROPERTY_BUFFERS: usize = 8;
-const NODE_COLUMNS: &str = "n.id, n.label, n.name, n.qualified_name, n.file_path, n.start_line, n.end_line, n.properties";
+// CAST uses SQLite's integer conversion, as sqlite3_column_int does in C.
+const NODE_COLUMNS: &str = "n.id, n.label, n.name, n.qualified_name, n.file_path, CAST(n.start_line AS INTEGER), CAST(n.end_line AS INTEGER), n.properties";
 
 #[derive(Debug)]
 pub(crate) struct Unsupported;
@@ -601,6 +602,11 @@ struct Node {
 
 impl Node {
     fn read(row: &Row<'_>, offset: usize) -> rusqlite::Result<Self> {
+        // Native decodes both values as a C int, keeping the low 32 bits.
+        let line = |index| {
+            row.get::<_, Option<i64>>(index)
+                .map(|value| value.unwrap_or_default() as i32)
+        };
         Ok(Self {
             id: row.get(offset)?,
             label: read_text_bytes(row, offset + 1)?.unwrap_or_default(),
@@ -608,10 +614,8 @@ impl Node {
             qualified_name: read_text_bytes(row, offset + 3)?
                 .unwrap_or_default(),
             file_path: read_text_bytes(row, offset + 4)?.unwrap_or_default(),
-            start_line: row
-                .get::<_, Option<i32>>(offset + 5)?
-                .unwrap_or_default(),
-            end_line: row.get::<_, Option<i32>>(offset + 6)?.unwrap_or_default(),
+            start_line: line(offset + 5)?,
+            end_line: line(offset + 6)?,
             properties: read_text_bytes(row, offset + 7)?.unwrap_or_default(),
         })
     }
@@ -724,26 +728,46 @@ pub(crate) struct ResultRows {
     pub(crate) truncated: bool,
 }
 
+struct CountGroups {
+    column: usize,
+    max_groups: usize,
+    // Each map value records the group's first-seen position and count.
+    groups: HashMap<Vec<u8>, (usize, usize)>,
+}
+
+impl CountGroups {
+    fn record(&mut self, key: &[u8]) {
+        // Native clips grouped cells before grouping and output.
+        let key = c_string_bytes(key);
+        let key = &key[..key.len().min(PROPERTY_LIMIT)];
+        if let Some((_, count)) = self.groups.get_mut(key) {
+            *count += 1;
+        } else if self.groups.len() < self.max_groups {
+            self.groups.insert(key.to_vec(), (self.groups.len(), 1));
+        }
+    }
+}
+
 enum CountRows {
     Total(usize),
-    Grouped {
-        column: usize,
-        // Each map value records the group's first-seen position and count.
-        groups: HashMap<Vec<u8>, (usize, usize)>,
-    },
+    Grouped(CountGroups),
 }
 
 impl CountRows {
     fn rows(
         self,
         columns: usize,
+        limit: usize,
         budget: &mut ExecutionBudget<'_>,
     ) -> Result<Vec<Vec<Vec<u8>>>, ExecutionError> {
         match self {
             Self::Total(count) => {
                 Ok(vec![vec![count.to_string().into_bytes(); columns]])
             }
-            Self::Grouped { column, groups } => {
+            Self::Grouped(CountGroups { column, groups, .. }) => {
+                if limit == ENGINE_LIMIT && groups.len() >= ENGINE_LIMIT {
+                    return Err(ExecutionError::RowCeiling);
+                }
                 let mut rows = vec![Vec::new(); groups.len()];
                 for (key, (index, count)) in groups {
                     budget.step()?;
@@ -952,11 +976,7 @@ impl Query<'_> {
         }
         budget.check()?;
         if let Some(counts) = counts {
-            result.rows = counts.rows(result.columns.len(), budget)?;
-            if result.rows.len() >= ENGINE_LIMIT && limit == ENGINE_LIMIT {
-                budget.check()?;
-                return Err(ExecutionError::RowCeiling);
-            }
+            result.rows = counts.rows(result.columns.len(), limit, budget)?;
             if self.order.is_empty() {
                 result.rows.truncate(limit);
             }
@@ -982,10 +1002,21 @@ impl Query<'_> {
                         )
                     })
                 {
-                    CountRows::Grouped {
+                    let limit = self.limit.unwrap_or(ENGINE_LIMIT);
+                    // A small ordered limit needs every key to rank groups.
+                    // An unordered limit keeps first-seen keys. At the
+                    // engine ceiling, extra keys cannot change the error.
+                    let max_groups =
+                        if self.order.is_empty() || limit == ENGINE_LIMIT {
+                            limit
+                        } else {
+                            usize::MAX
+                        };
+                    CountRows::Grouped(CountGroups {
                         column,
+                        max_groups,
                         groups: HashMap::new(),
-                    }
+                    })
                 } else {
                     CountRows::Total(0)
                 }
@@ -1005,19 +1036,11 @@ impl Query<'_> {
                 *count += 1;
                 return Ok(true);
             }
-            Some(CountRows::Grouped { column, groups }) => {
-                let key = self.projections[*column]
+            Some(CountRows::Grouped(counts)) => {
+                let key = self.projections[counts.column]
                     .expression
                     .field_value(nodes, edges);
-                // Native copies grouped cells into a 512-byte C string before
-                // storing the key and the first row's visible value.
-                let key = c_string_bytes(&key);
-                let key = &key[..key.len().min(PROPERTY_LIMIT)];
-                if let Some((_, count)) = groups.get_mut(key) {
-                    *count += 1;
-                } else {
-                    groups.insert(key.to_vec(), (groups.len(), 1));
-                }
+                counts.record(&key);
                 return Ok(true);
             }
             None => {}
@@ -1245,5 +1268,51 @@ impl<'a> Adjacency<'a> {
             }
         }
         Ok(neighbors)
+    }
+}
+
+#[cfg(test)]
+mod count_tests {
+    use super::*;
+
+    #[test]
+    fn unordered_count_limit_keeps_only_first_keys_and_counts_late_matches() {
+        let query =
+            classify("MATCH (n) RETURN n.name, count(*) LIMIT 1").unwrap();
+        let Some(CountRows::Grouped(mut counts)) = query.count_rows() else {
+            panic!("expected grouped count");
+        };
+        for key in [
+            b"alpha".as_slice(),
+            b"discarded",
+            b"discarded-again",
+            b"alpha",
+        ] {
+            counts.record(key);
+        }
+        assert_eq!(counts.groups.len(), 1);
+        assert_eq!(counts.groups.get(b"alpha".as_slice()), Some(&(0, 2)));
+    }
+
+    #[test]
+    fn group_ceiling_fails_before_rendering() {
+        let query = classify(
+            "MATCH (n) RETURN n.name, count(*) AS total ORDER BY total",
+        )
+        .unwrap();
+        let Some(CountRows::Grouped(mut counts)) = query.count_rows() else {
+            panic!("expected grouped count");
+        };
+        for index in 0..=ENGINE_LIMIT {
+            counts.record(&index.to_string().into_bytes());
+        }
+        assert_eq!(counts.groups.len(), ENGINE_LIMIT);
+        let mut budget = ExecutionBudget::new(&Instant::now, &|| true);
+        // Any rendering work would consume the next budget step.
+        budget.remaining = 1;
+        assert!(matches!(
+            CountRows::Grouped(counts).rows(2, ENGINE_LIMIT, &mut budget),
+            Err(ExecutionError::RowCeiling)
+        ));
     }
 }

@@ -1429,6 +1429,13 @@ fn bounded_count_projects_native_groups_and_empty_results_in_rust() {
             params![json!({"bucket":bucket}).to_string(), id],
         )
         .unwrap();
+        if name == "one" {
+            db.execute(
+                "UPDATE nodes SET start_line = ?1, end_line = ?2 WHERE id = ?3",
+                params![2147483648_i64, b"17 lines".as_slice(), id],
+            )
+            .unwrap();
+        }
         edge(&db, CLIENT, first, id, "CALLS", json!({}));
     }
     // The GROUP BY cell clips direct string fields at the same boundary as
@@ -1446,6 +1453,9 @@ fn bounded_count_projects_native_groups_and_empty_results_in_rust() {
     let ties =
         "MATCH (n:CountProbe) RETURN n.bucket, COUNT(*) ORDER BY COUNT(*) DESC";
     let one_hop = "MATCH (a:SourceProbe)-[:CALLS]->(b) RETURN b.bucket AS key, count(b) AS total ORDER BY total DESC, key LIMIT 2";
+    let first_group = "MATCH (n:CountProbe) RETURN n.bucket, count(*) LIMIT 1";
+    let wide_count = "MATCH (n:CountProbe) WHERE n.name = 'one' RETURN count(*)";
+    let wide_lines = "MATCH (n:CountProbe) WHERE n.name = 'one' RETURN n.start_line, n.end_line";
     let missing_prop = "MATCH (n:CountProbe) RETURN count(n.missing)";
     let empty = "MATCH (n:MissingProbe) RETURN count(*) AS total";
     let empty_group = "MATCH (n:MissingProbe) RETURN n.label, count(*)";
@@ -1459,6 +1469,9 @@ fn bounded_count_projects_native_groups_and_empty_results_in_rust() {
         ((ties, 1, true), json!([["alpha", "2"]])),
         ((one_hop, 0, true), json!([["alpha", "2"]])),
         ((one_hop, 1, true), json!([["beta", "2"]])),
+        ((first_group, 0, true), json!([["beta", "2"]])),
+        ((wide_count, 0, true), json!([["1"]])),
+        ((wide_lines, 0, true), json!([["-2147483648", "17"]])),
         ((missing_prop, 0, true), json!([["5"]])),
         ((empty, 0, true), json!([["0"]])),
         ((empty_group, 0, true), json!([])),
