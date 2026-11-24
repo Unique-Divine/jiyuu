@@ -111,8 +111,6 @@ struct GraphqlRouteRow {
 type RouteWriter =
     unsafe extern "C" fn(*mut c_void, *const GraphqlRouteRow) -> bool;
 
-type SignatureSink = unsafe extern "C" fn(*mut c_void, *const u8, usize) -> bool;
-
 /// ABI mirror of `cbm_graphql_handler_t` in `pass_cross_repo.h`.
 #[repr(C)]
 struct GraphqlHandler {
@@ -186,36 +184,9 @@ unsafe extern "C" {
     ) -> i64;
 }
 
-/// Encode a NUL-terminated GraphQL document and copy it via a synchronous C sink.
-#[unsafe(no_mangle)]
-unsafe extern "C" fn mori_graphql_encode_document(
-    source: *const c_char,
-    require_keyword: bool,
-    capacity: usize,
-    shorthand: *mut bool,
-    sink: SignatureSink,
-    context: *mut c_void,
-) -> bool {
-    #[cfg(feature = "native-graphql-fixtures")]
+#[cfg(feature = "native-graphql-fixtures")]
+pub(super) fn mark_document_fixture() {
     fixture_witness::mark(fixture_witness::DOCUMENT);
-
-    // SAFETY: The C entry points check the input before lending it to Rust.
-    let source = unsafe { CStr::from_ptr(source) }.to_bytes();
-    let mut short = false;
-    let signature = crate::graphql_document::signature(
-        source,
-        require_keyword,
-        capacity,
-        &mut short,
-    );
-    // SAFETY: The optional flag is writable and the sink borrows the bytes
-    // and its context synchronously, without retaining either pointer.
-    unsafe {
-        if let Some(shorthand) = shorthand.as_mut() {
-            *shorthand = short;
-        }
-        signature.is_some_and(|bytes| sink(context, bytes.as_ptr(), bytes.len()))
-    }
 }
 
 extern "C" fn gqlgen_glob_match(
