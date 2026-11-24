@@ -2,6 +2,8 @@
 
 pub mod ipc;
 
+#[cfg(feature = "native-engine-abi")]
+mod architecture_projection;
 #[cfg(any(feature = "native-engine-abi", test))]
 mod complexity;
 #[cfg(feature = "native-engine-abi")]
@@ -12,6 +14,8 @@ mod explicit_override;
 mod pdf_doc_links;
 #[cfg(any(feature = "native-engine-abi", test))]
 mod similarity;
+#[cfg(feature = "native-engine-abi")]
+mod test_impact_git;
 
 #[cfg(any(feature = "native-engine-abi", test))]
 mod config_cli;
