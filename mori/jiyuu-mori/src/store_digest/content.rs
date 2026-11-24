@@ -173,7 +173,7 @@ unsafe fn digest(
     // SAFETY: The C caller lends a live store and terminated project name,
     // and provides at least 32 writable bytes for a successful result.
     unsafe {
-        let Some(db) = NonNull::new(cbm_store_get_db(store)) else {
+        let Some(db) = NonNull::new(cbm_store_get_db(store.cast())) else {
             return STORE_ERR;
         };
         let project = CStr::from_ptr(project);

@@ -3,7 +3,7 @@
 mod content;
 mod graph;
 
-use std::ffi::{CStr, c_int};
+use std::ffi::{CStr, c_int, c_void};
 use std::ptr::{NonNull, null_mut};
 use std::slice;
 
@@ -24,7 +24,7 @@ struct ReadScope {
 }
 
 unsafe extern "C" {
-    fn cbm_store_get_db(store: *mut Store) -> *mut sql::sqlite3;
+    fn cbm_store_get_db(store: *mut c_void) -> *mut sql::sqlite3;
     fn cbm_store_read_scope_store(scope: *const ReadScope) -> *mut Store;
     fn cbm_store_read_scope_check(scope: *mut ReadScope) -> c_int;
     fn cbm_store_read_scope_fail(scope: *mut ReadScope, status: c_int) -> c_int;

@@ -716,8 +716,9 @@ unsafe extern "C" fn cbm_store_graph_digest(
     }
     // SAFETY: The live scope owns this borrowed store and its pinned SQLite handle.
     let db = unsafe {
-        NonNull::new(cbm_store_read_scope_store(ptr.as_ptr()))
-            .and_then(|store| NonNull::new(cbm_store_get_db(store.as_ptr())))
+        NonNull::new(cbm_store_read_scope_store(ptr.as_ptr())).and_then(
+            |store| NonNull::new(cbm_store_get_db(store.as_ptr().cast())),
+        )
     };
     let Some(db) = db else {
         return scope.latch(Status::Error) as c_int;
