@@ -1,4 +1,6 @@
-//! Rust GraphQL implementation and registration for the C graph engine.
+//! Rust implementations and registration for the C graph engine.
+
+pub mod ipc;
 
 #[cfg(any(feature = "native-engine-abi", test))]
 mod complexity;
@@ -15,6 +17,11 @@ mod graphql_link;
 mod link;
 #[cfg(any(feature = "graphql-callbacks", test))]
 mod route_writer;
+
+#[cfg(any(feature = "native-engine-abi", test))]
+mod job_recovery;
+#[cfg(any(feature = "native-engine-abi", test))]
+mod watcher;
 
 #[cfg(all(feature = "graphql-callbacks", not(test)))]
 mod graphql_ffi;

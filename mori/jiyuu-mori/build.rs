@@ -7,8 +7,8 @@
 //! the network: `just --justfile mori/justfile grammars` installs the
 //! grammars, and this script only compares `mori/.grammars.stamp` with
 //! `mori/grammars.lock.json` and the installed tree. `Makefile.cbm` stays the
-//! source of truth for C flags, so the C inside `mori` is compiled exactly
-//! like `codebase-memory-mcp`.
+//! source of truth for C flags. The daemon IPC codec, watcher policy, and
+//! index worker recovery call Rust in linked and native fixture builds.
 //!
 //! Environment:
 //! - `MORI_C_BUILD_DIR`: make `BUILD_DIR`, relative to `mori/` or absolute

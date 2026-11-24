@@ -2,6 +2,7 @@
  * ipc.c — Authenticated, owner-scoped local transport for the CBM daemon.
  */
 #include "daemon/ipc.h"
+#include "daemon/ipc_codec.h"
 #include "daemon/ipc_internal.h"
 
 #include "foundation/compat.h"
@@ -184,18 +185,8 @@ bool cbm_daemon_ipc_listen_failure_detail(cbm_daemon_ipc_listen_failure_t *out) 
 }
 
 static bool instance_key_valid(const char *key) {
-    if (!key) {
-        return false;
-    }
-    for (size_t i = 0; i < 16; i++) {
-        char ch = key[i];
-        bool decimal = ch >= '0' && ch <= '9';
-        bool lower = ch >= 'a' && ch <= 'f';
-        if (!decimal && !lower) {
-            return false;
-        }
-    }
-    return key[16] == '\0';
+    return key && strnlen(key, CBM_DAEMON_KEY_SIZE) == CBM_DAEMON_KEY_SIZE - 1U &&
+           mori_ipc_instance_key_valid((const uint8_t *)key);
 }
 
 static char *string_copy(const char *value) {
@@ -2241,31 +2232,6 @@ FILE *cbm_daemon_ipc_private_log_open(const char *directory_path, const char *ba
     return stream;
 }
 
-static void posix_u32_encode(uint8_t out[4], uint32_t value) {
-    out[0] = (uint8_t)(value & 0xffU);
-    out[1] = (uint8_t)((value >> 8U) & 0xffU);
-    out[2] = (uint8_t)((value >> 16U) & 0xffU);
-    out[3] = (uint8_t)((value >> 24U) & 0xffU);
-}
-
-static uint32_t posix_u32_decode(const uint8_t in[4]) {
-    return (uint32_t)in[0] | ((uint32_t)in[1] << 8U) | ((uint32_t)in[2] << 16U) |
-           ((uint32_t)in[3] << 24U);
-}
-
-static void posix_u64_encode(uint8_t out[8], uint64_t value) {
-    for (size_t index = 0; index < 8; index++) {
-        out[index] = (uint8_t)(value >> (index * 8U));
-    }
-}
-
-static uint64_t posix_u64_decode(const uint8_t in[8]) {
-    uint64_t value = 0;
-    for (size_t index = 0; index < 8; index++) {
-        value |= (uint64_t)in[index] << (index * 8U);
-    }
-    return value;
-}
 
 static bool posix_stat_ctime(const struct stat *status, int64_t *seconds_out,
                              uint32_t *nanoseconds_out) {
@@ -2334,64 +2300,42 @@ static bool posix_socket_status_secure_transport(const struct stat *status) {
 static bool posix_socket_record_encode(const uint8_t magic[POSIX_SOCKET_RECORD_MAGIC_SIZE],
                                        const posix_socket_record_t *source,
                                        uint8_t record[POSIX_SOCKET_RECORD_SIZE]) {
-    if (!magic || !source || !record || source->identity.ctime_seconds < 0 ||
-        source->identity.ctime_nanoseconds >= 1000000000U) {
+    if (!magic || !source || !record) {
         return false;
     }
-    size_t anchor_length = strnlen(source->anchor_name, POSIX_SOCKET_ANCHOR_NAME_CAP);
-    uint64_t device = (uint64_t)source->identity.device;
-    uint64_t inode = (uint64_t)source->identity.inode;
-    if ((dev_t)device != source->identity.device || (ino_t)inode != source->identity.inode ||
-        anchor_length == 0 || anchor_length >= POSIX_SOCKET_ANCHOR_NAME_CAP ||
-        strchr(source->anchor_name, '/')) {
+    mori_ipc_socket_identity_t identity = {
+        .device = (uint64_t)source->identity.device,
+        .inode = (uint64_t)source->identity.inode,
+        .ctime_seconds = source->identity.ctime_seconds,
+        .ctime_nanoseconds = source->identity.ctime_nanoseconds,
+    };
+    if ((dev_t)identity.device != source->identity.device ||
+        (ino_t)identity.inode != source->identity.inode) {
         return false;
     }
-    memset(record, 0, POSIX_SOCKET_RECORD_SIZE);
-    memcpy(record, magic, POSIX_SOCKET_RECORD_MAGIC_SIZE);
-    posix_u64_encode(record + POSIX_SOCKET_IDENTITY_DEVICE_OFFSET, device);
-    posix_u64_encode(record + POSIX_SOCKET_IDENTITY_INODE_OFFSET, inode);
-    posix_u64_encode(record + POSIX_SOCKET_IDENTITY_CTIME_SECONDS_OFFSET,
-                     (uint64_t)source->identity.ctime_seconds);
-    posix_u32_encode(record + POSIX_SOCKET_IDENTITY_CTIME_NANOSECONDS_OFFSET,
-                     source->identity.ctime_nanoseconds);
-    memcpy(record + POSIX_SOCKET_ANCHOR_NAME_OFFSET, source->anchor_name, anchor_length + 1U);
-    return true;
+    return mori_ipc_socket_record_encode(
+        magic, &identity, (const uint8_t *)source->anchor_name,
+        strnlen(source->anchor_name, POSIX_SOCKET_ANCHOR_NAME_CAP), record);
 }
 
 static bool posix_socket_record_decode(const uint8_t record[POSIX_SOCKET_RECORD_SIZE],
                                        const uint8_t magic[POSIX_SOCKET_RECORD_MAGIC_SIZE],
                                        posix_socket_record_t *record_out) {
-    if (!record || !magic || !record_out ||
-        memcmp(record, magic, POSIX_SOCKET_RECORD_MAGIC_SIZE) != 0 ||
-        posix_u32_decode(record + POSIX_SOCKET_IDENTITY_RESERVED_OFFSET) != 0) {
+    if (!record || !magic || !record_out) {
         return false;
     }
-    uint64_t device = posix_u64_decode(record + POSIX_SOCKET_IDENTITY_DEVICE_OFFSET);
-    uint64_t inode = posix_u64_decode(record + POSIX_SOCKET_IDENTITY_INODE_OFFSET);
-    uint64_t seconds = posix_u64_decode(record + POSIX_SOCKET_IDENTITY_CTIME_SECONDS_OFFSET);
-    uint32_t nanoseconds =
-        posix_u32_decode(record + POSIX_SOCKET_IDENTITY_CTIME_NANOSECONDS_OFFSET);
-    if ((dev_t)device != device || (ino_t)inode != inode || seconds > (uint64_t)INT64_MAX ||
-        nanoseconds >= 1000000000U) {
+    mori_ipc_socket_identity_t identity;
+    char anchor[POSIX_SOCKET_ANCHOR_NAME_CAP];
+    if (!mori_ipc_socket_record_decode(magic, record, &identity, anchor) ||
+        (dev_t)identity.device != identity.device || (ino_t)identity.inode != identity.inode) {
         return false;
-    }
-    const uint8_t *anchor = record + POSIX_SOCKET_ANCHOR_NAME_OFFSET;
-    const uint8_t *terminator = memchr(anchor, 0, POSIX_SOCKET_ANCHOR_NAME_CAP);
-    if (!terminator || terminator == anchor || memchr(anchor, '/', (size_t)(terminator - anchor))) {
-        return false;
-    }
-    size_t anchor_length = (size_t)(terminator - anchor);
-    for (size_t index = anchor_length + 1U; index < POSIX_SOCKET_ANCHOR_NAME_CAP; index++) {
-        if (anchor[index] != 0) {
-            return false;
-        }
     }
     memset(record_out, 0, sizeof(*record_out));
-    record_out->identity.device = (dev_t)device;
-    record_out->identity.inode = (ino_t)inode;
-    record_out->identity.ctime_seconds = (int64_t)seconds;
-    record_out->identity.ctime_nanoseconds = nanoseconds;
-    memcpy(record_out->anchor_name, anchor, anchor_length + 1U);
+    record_out->identity.device = (dev_t)identity.device;
+    record_out->identity.inode = (ino_t)identity.inode;
+    record_out->identity.ctime_seconds = identity.ctime_seconds;
+    record_out->identity.ctime_nanoseconds = identity.ctime_nanoseconds;
+    memcpy(record_out->anchor_name, anchor, sizeof(anchor));
     return true;
 }
 
@@ -7392,14 +7336,8 @@ int cbm_daemon_ipc_receive_frame_bounded(cbm_daemon_ipc_connection_t *connection
         return result;
     }
     cbm_daemon_frame_t frame;
-    if (!cbm_daemon_frame_header_decode(header, &frame)) {
-        atomic_store_explicit(&connection->poisoned, true, memory_order_release);
-        return -1;
-    }
-    if (frame.length > max_payload_length) {
-        /* The fixed unauthenticated envelope limit is enforced from the header
-         * before allocating or reading attacker-controlled payload bytes. The
-         * unread stream is necessarily unusable and is closed by its owner. */
+    /* Enforce the caller's limit before allocating or reading payload bytes. */
+    if (!cbm_daemon_frame_header_decode_bounded(header, max_payload_length, &frame)) {
         atomic_store_explicit(&connection->poisoned, true, memory_order_release);
         return -1;
     }

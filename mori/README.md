@@ -475,11 +475,12 @@ packaged driver changes.
 
 ### Index Worker Recovery
 
-Set `MORI_IMPL_JOB_RECOVERY=rust` when starting the daemon to run the
-Rust worker recovery driver. It enforces the retry budget and decides
-when the daemon can attempt a partial index after a contained worker
-failure. The debug log event `daemon.index.recovery_driver` identifies
-the backend. The default driver is C.
+The linked `mori` daemon uses Rust to enforce the worker retry budget and
+decide when to attempt a partial index after a contained worker failure.
+C still executes each attempt under the daemon's existing job reservation.
+The debug log event `daemon.index.recovery_driver` identifies the driver.
+The native candidate test runner calls the same Rust driver. The pinned
+C comparison build retains its own retry loop.
 
 ### Named Watch Reconciliation
 

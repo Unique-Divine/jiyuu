@@ -1,7 +1,5 @@
 //! Retry contained index worker failures without releasing the daemon's job reservation.
 
-#[cfg(not(test))]
-use std::ffi::OsStr;
 use std::ffi::c_int;
 
 const CANCELLED: u8 = 1;
@@ -30,6 +28,7 @@ struct RecoveryOps {
     try_partial: unsafe extern "C" fn(*mut JobRecovery),
 }
 
+#[unsafe(export_name = "mori_daemon_job_recover")]
 unsafe extern "C" fn recover(
     run: *mut JobRecovery,
     ops: *const RecoveryOps,
@@ -66,32 +65,6 @@ unsafe extern "C" fn recover(
     }
 }
 
-#[cfg(not(test))]
-unsafe extern "C" {
-    fn cbm_daemon_application_set_job_recovery_driver(
-        driver: unsafe extern "C" fn(
-            *mut JobRecovery,
-            *const RecoveryOps,
-            c_int,
-        ),
-    );
-}
-
-/// Select the Rust driver at process startup.
-///
-/// # Safety
-///
-/// Call before any daemon thread can use the callback.
-#[cfg(not(test))]
-pub unsafe fn register() {
-    if std::env::var_os("MORI_IMPL_JOB_RECOVERY").as_deref()
-        == Some(OsStr::new("rust"))
-    {
-        // SAFETY: The caller guarantees startup registration.
-        unsafe { cbm_daemon_application_set_job_recovery_driver(recover) };
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -108,8 +81,15 @@ mod tests {
         Partial,
     }
 
+    #[derive(PartialEq, Eq)]
+    enum Fault {
+        CancelBeforeAttempt(usize),
+        ClearMarker,
+        RecordSuspects,
+    }
+
     struct Harness {
-        cancel_at_check: Option<usize>,
+        fault: Option<Fault>,
         checks: usize,
         attempts: VecDeque<u8>,
         summary: Summary,
@@ -122,7 +102,7 @@ mod tests {
         harness.calls.push(Call::CheckCancellation);
         let check = harness.checks;
         harness.checks += 1;
-        harness.cancel_at_check == Some(check)
+        harness.fault == Some(Fault::CancelBeforeAttempt(check))
     }
 
     unsafe extern "C" fn mark_cancelled(run: *mut JobRecovery) {
@@ -134,8 +114,9 @@ mod tests {
 
     unsafe extern "C" fn clear_marker(run: *mut JobRecovery) -> bool {
         // SAFETY: The test lends a live Harness to every operation.
-        unsafe { (*run.cast::<Harness>()).calls.push(Call::ClearMarker) };
-        true
+        let harness = unsafe { &mut *run.cast::<Harness>() };
+        harness.calls.push(Call::ClearMarker);
+        harness.fault != Some(Fault::ClearMarker)
     }
 
     unsafe extern "C" fn attempt(run: *mut JobRecovery) -> u8 {
@@ -150,8 +131,9 @@ mod tests {
         index: c_int,
     ) -> bool {
         // SAFETY: The test lends a live Harness to every operation.
-        unsafe { (*run.cast::<Harness>()).calls.push(Call::Record(index)) };
-        true
+        let harness = unsafe { &mut *run.cast::<Harness>() };
+        harness.calls.push(Call::Record(index));
+        harness.fault != Some(Fault::RecordSuspects)
     }
 
     unsafe extern "C" fn finish_attempts(run: *mut JobRecovery) -> Summary {
@@ -170,10 +152,10 @@ mod tests {
         attempts: impl Into<VecDeque<u8>>,
         cap: c_int,
         summary: Summary,
-        cancel_at_check: Option<usize>,
+        fault: Option<Fault>,
     ) -> Vec<Call> {
         let mut harness = Harness {
-            cancel_at_check,
+            fault,
             checks: 0,
             attempts: attempts.into(),
             summary,
@@ -252,7 +234,7 @@ mod tests {
                 unsafe_terminal: false,
                 quarantined: true,
             },
-            Some(1),
+            Some(Fault::CancelBeforeAttempt(1)),
         );
         assert_eq!(
             calls,
@@ -266,5 +248,77 @@ mod tests {
                 Call::FinishAttempts,
             ],
         );
+    }
+
+    #[test]
+    fn marker_failure_prevents_worker_spawn() {
+        let calls = run(
+            [RETRY],
+            2,
+            Summary {
+                has_response: false,
+                unsafe_terminal: false,
+                quarantined: false,
+            },
+            Some(Fault::ClearMarker),
+        );
+        assert_eq!(
+            calls,
+            [
+                Call::CheckCancellation,
+                Call::ClearMarker,
+                Call::FinishAttempts
+            ]
+        );
+    }
+
+    #[test]
+    fn retries_stop_when_the_worker_yields_no_more_suspects() {
+        let calls = run(
+            [RETRY, RETRY],
+            2,
+            Summary {
+                has_response: false,
+                unsafe_terminal: false,
+                quarantined: true,
+            },
+            Some(Fault::RecordSuspects),
+        );
+        assert_eq!(
+            calls,
+            [
+                Call::CheckCancellation,
+                Call::ClearMarker,
+                Call::Attempt,
+                Call::Record(0),
+                Call::FinishAttempts,
+                Call::Partial,
+            ]
+        );
+    }
+
+    #[test]
+    fn terminal_worker_results_bypass_retries_and_partial_indexing() {
+        for (has_response, unsafe_terminal) in [(true, false), (false, true)] {
+            let calls = run(
+                [0, RETRY],
+                2,
+                Summary {
+                    has_response,
+                    unsafe_terminal,
+                    quarantined: true,
+                },
+                None,
+            );
+            assert_eq!(
+                calls,
+                [
+                    Call::CheckCancellation,
+                    Call::ClearMarker,
+                    Call::Attempt,
+                    Call::FinishAttempts,
+                ]
+            );
+        }
     }
 }
