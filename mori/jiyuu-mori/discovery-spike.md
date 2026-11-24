@@ -8,10 +8,12 @@ rediscovery at a stored depth use the selector. Set `CBM_LOG_LEVEL=debug` and
 event records the phase, mode, actual backend, and reason.
 
 Rust reads each directory and owns the pending directory stack. It visits
-children in reverse enumeration order after scanning their parent. C prepares
-the ignore rules, classifies entries, and builds the result arrays with
-native mtimes and the ordered ignore sample. Rust checks aggregate file and
-byte limits before C appends each selected source file.
+children in reverse enumeration order after scanning their parent. Rust
+decides whether to descend into each directory and which ignore reason to
+report for each skipped file. C supplies raw ignore opinions, tracked-path
+membership, built-in filters, and language detection. Rust checks aggregate
+file and byte limits before C appends each selected source file. C owns the
+result arrays, which include native mtimes and the ordered ignore sample.
 
 The linked Unix executable defaults to Rust for the bounded count before MCP
 automatic indexing. Set `MORI_IMPL_ADMISSION=c` at daemon startup to run the
@@ -41,9 +43,11 @@ C fallback.
 
 After the standalone oracle is frozen and every caller selects Rust, remove
 functions `walk_native`, `walk_push_frame`, `admit_native`, and
-`file_list_should_stop` together with the C walk stack and its counters.
-The C entry classifier, tracked paths, ignore rules, and output allocator
-still serve the Rust walker.
+`file_list_should_stop` together with the C walk stack and its counters. The
+precedence functions `select_dir_native`, `directory_verdict`, and
+`file_skip_reason` can go in the same retirement. The C metadata and
+language classifiers, tracked-path lookup, ignore matchers, and output
+allocator still serve the Rust walker.
 
 ## Independent Prototype Comparison
 

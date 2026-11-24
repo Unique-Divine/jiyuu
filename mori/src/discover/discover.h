@@ -274,12 +274,53 @@ typedef struct {
 typedef bool (*cbm_discover_admit_fn)(void *state, int64_t size,
                                       cbm_index_resource_violation_t *violation);
 
+typedef struct cbm_discover_selection cbm_discover_selection_t;
+
+typedef enum {
+    CBM_DISCOVER_CACHE_TREE,
+    CBM_DISCOVER_HARDCODED_DIR,
+    CBM_DISCOVER_SAFETY_CORE,
+    CBM_DISCOVER_IGNORED_SUFFIX,
+    CBM_DISCOVER_SKIP_FILENAME,
+    CBM_DISCOVER_FAST_PATTERN,
+    CBM_DISCOVER_TRACKED,
+    CBM_DISCOVER_PARENT_IGNORED,
+    CBM_DISCOVER_GIT_IGNORE,
+    CBM_DISCOVER_GLOBAL_IGNORE,
+    CBM_DISCOVER_CBM_IGNORE,
+    CBM_DISCOVER_OVER_SIZE,
+} cbm_discover_check_t;
+
+typedef enum {
+    CBM_DISCOVER_KEEP_ENTRY,
+    CBM_DISCOVER_KEEP_TRACKED_DIR,
+    CBM_DISCOVER_SKIP_DIR,
+    CBM_DISCOVER_SKIP_SUFFIX,
+    CBM_DISCOVER_SKIP_NAME,
+    CBM_DISCOVER_SKIP_PATTERN,
+    CBM_DISCOVER_SKIP_GIT,
+    CBM_DISCOVER_SKIP_CBM,
+    CBM_DISCOVER_SKIP_SIZE,
+} cbm_discover_selection_result_t;
+
+/* Each query returns zero or one, except CBM_IGNORE, whose negative value
+ * means a negation. The selection is borrowed until the selector returns. */
+int cbm_discover_selection_check(const cbm_discover_selection_t *selection,
+                                  cbm_discover_check_t check);
+typedef cbm_discover_selection_result_t (*cbm_discover_select_fn)(
+    const cbm_discover_selection_t *selection, bool is_dir);
+
+typedef struct {
+    cbm_discover_admit_fn admit;
+    cbm_discover_select_fn select;
+} cbm_discover_entry_ops_t;
+
 void cbm_discover_walk_limits(const cbm_discover_walk_t *walk, cbm_discover_walk_limits_t *limits);
 bool cbm_discover_walk_prepare(cbm_discover_walk_t *walk, cbm_discover_frame_t *frame);
 const char *cbm_discover_frame_path(const cbm_discover_frame_t *frame);
 cbm_discover_frame_t *cbm_discover_walk_entry(cbm_discover_walk_t *walk,
                                               const cbm_discover_frame_t *frame, const char *name,
-                                              cbm_discover_admit_fn admit, void *state);
+                                              const cbm_discover_entry_ops_t *ops, void *state);
 void cbm_discover_frame_free(cbm_discover_frame_t *frame);
 /* Failure or refusal recorded by C. The callback polls its own deadline. */
 bool cbm_discover_walk_stopped(cbm_discover_walk_t *walk);

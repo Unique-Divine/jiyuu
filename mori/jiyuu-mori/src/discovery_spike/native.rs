@@ -1,9 +1,11 @@
-//! Rust directory iteration and admission over native discovery filters.
+//! Rust directory iteration, selection, and admission over native inputs.
 
 mod budget;
+mod selection;
 
 use budget::{Budget, Limits, Violation};
-use std::ffi::{CStr, CString, OsStr, c_char, c_long, c_void};
+use selection::{Check, Decision};
+use std::ffi::{CStr, CString, OsStr, c_char, c_int, c_long, c_void};
 use std::fs;
 use std::mem::MaybeUninit;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
@@ -21,8 +23,20 @@ pub(super) struct Frame {
     _opaque: [u8; 0],
 }
 
+#[repr(C)]
+struct Selection {
+    _opaque: [u8; 0],
+}
+
 pub(super) type Walker = unsafe extern "C" fn(*mut Walk, *mut Frame) -> bool;
-type Admit = unsafe extern "C" fn(*mut c_void, i64, *mut Violation) -> bool;
+
+#[repr(C)]
+struct EntryOps {
+    admit: unsafe extern "C" fn(*mut c_void, i64, *mut Violation) -> bool,
+    select: unsafe extern "C" fn(*const Selection, bool) -> Decision,
+}
+
+static ENTRY_OPS: EntryOps = EntryOps { admit, select };
 
 unsafe extern "C" {
     #[cfg(not(test))]
@@ -36,11 +50,15 @@ unsafe extern "C" {
         walk: *mut Walk,
         frame: *const Frame,
         name: *const c_char,
-        admit: Admit,
+        ops: *const EntryOps,
         state: *mut c_void,
     ) -> *mut Frame;
     fn cbm_discover_frame_free(frame: *mut Frame);
     fn cbm_discover_walk_stopped(walk: *mut Walk) -> bool;
+    fn cbm_discover_selection_check(
+        entry: *const Selection,
+        check: Check,
+    ) -> c_int;
     fn cbm_now_ms() -> u64;
     fn cbm_max_file_bytes() -> c_long;
 }
@@ -68,29 +86,19 @@ pub unsafe fn register() {
         if std::env::var_os("MORI_IMPL_ADMISSION").as_deref()
             != Some(OsStr::new("c"))
         {
-            cbm_discover_set_admission_walk(walk_bounded);
+            cbm_discover_set_admission_walk(walk);
         }
     }
 }
 
 pub(super) unsafe extern "C" fn walk(walk: *mut Walk, root: *mut Frame) -> bool {
-    run_walk(walk, root, false)
-}
-
-pub(super) unsafe extern "C" fn walk_bounded(
-    walk: *mut Walk,
-    root: *mut Frame,
-) -> bool {
-    run_walk(walk, root, true)
-}
-
-fn run_walk(walk: *mut Walk, root: *mut Frame, count_only: bool) -> bool {
     // SAFETY: C lends the walk state and root until the callback returns.
     // Keep the root borrowed and release all owned children before returning.
     catch_unwind(|| unsafe {
         let mut limits = MaybeUninit::uninit();
         cbm_discover_walk_limits(walk, limits.as_mut_ptr());
         let mut budget = Budget::new(limits.assume_init());
+        let count_only = budget.limits.max_files >= 0;
         if budget.deadline_expired(|| cbm_now_ms()) {
             return false;
         }
@@ -158,7 +166,7 @@ unsafe fn scan_directory(
                 walk,
                 frame,
                 name.as_ptr(),
-                admit,
+                &ENTRY_OPS,
                 std::ptr::from_mut(budget).cast(),
             ))
             .map(Child)
@@ -170,6 +178,17 @@ unsafe fn scan_directory(
             }
         }
         true
+    }
+}
+
+unsafe extern "C" fn select(entry: *const Selection, is_dir: bool) -> Decision {
+    // SAFETY: C lends the selection and its referenced paths and metadata
+    // until this callback returns.
+    let check = |check| unsafe { cbm_discover_selection_check(entry, check) };
+    if is_dir {
+        selection::directory(check)
+    } else {
+        selection::file(check)
     }
 }
 

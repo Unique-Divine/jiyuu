@@ -834,7 +834,7 @@ fn compare_admission(
         mode,
         max_files,
         deadline_ms,
-        Some(discover_walk::walk_bounded),
+        Some(discover_walk::walk),
         None,
     );
     assert_eq!(rust, c);
@@ -895,7 +895,7 @@ fn admission_reports_resource_limit_details() {
         },
         ..ResourcePolicy::default()
     };
-    for walker in [None, Some(discover_walk::walk_bounded as Walker)] {
+    for walker in [None, Some(discover_walk::walk as Walker)] {
         for (policy, violation) in [
             (
                 &max_files,
@@ -1170,6 +1170,8 @@ fn matches_c_tracked_paths_and_info_exclude() {
         [b"generated/keep.rs".as_slice(), b"keep.rs".as_slice()]
     );
     assert_eq!(native, rust);
+    assert_eq!(compare_admission(&scratch.0, Mode::Full, 2, 0), (0, 2));
+    assert_eq!(compare_admission(&scratch.0, Mode::Full, 1, 0), (1, 1));
 }
 
 #[test]
