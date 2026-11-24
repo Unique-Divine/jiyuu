@@ -815,6 +815,47 @@ TEST(config_json_like_preserves_jsonc_comments) {
     PASS();
 }
 
+TEST(config_json_like_replaces_only_raw_field_in_snapshot) {
+    jl_fixture_t fixture;
+    ASSERT_EQ(jl_fixture_open(&fixture), 0);
+    const char *path[] = {"mcp"};
+    const char *original =
+        "{mcp:{owned:{command: /* keep */ 'before', enabled: false,},},}\r\n";
+    const char *updated =
+        "{mcp:{owned:{command: /* keep */ [\"after\"], enabled: false,},},}\r\n";
+    ASSERT_EQ(jl_write(fixture.path, original), 0);
+
+    char *snapshot = NULL;
+    size_t snapshot_length = 0U;
+    ASSERT_EQ(cbm_json_like_read_document(fixture.path, &snapshot, &snapshot_length), 0);
+    ASSERT_NOT_NULL(snapshot);
+    ASSERT_EQ(snapshot_length, strlen(original));
+    ASSERT_EQ(cbm_json_like_replace_field_raw_if_unchanged(
+                  fixture.path, path, 1U, "owned", "command", "  [\"after\"]  ", snapshot,
+                  snapshot_length), 0);
+    ASSERT_EQ(cbm_json_like_replace_field_raw_if_unchanged(
+                  fixture.path, path, 1U, "owned", "command", "false", snapshot,
+                  snapshot_length), -1);
+    free(snapshot);
+
+    char *entry = NULL;
+    size_t entry_length = 0U;
+    const char *expected_entry = "{command: /* keep */ [\"after\"], enabled: false,}";
+    ASSERT_EQ(cbm_json_like_get_raw_entry(fixture.path, path, 1U, "owned", &entry, &entry_length),
+              0);
+    ASSERT_NOT_NULL(entry);
+    ASSERT_EQ(entry_length, strlen(expected_entry));
+    ASSERT_STR_EQ(entry, expected_entry);
+    free(entry);
+
+    char *content = jl_read(fixture.path);
+    ASSERT_NOT_NULL(content);
+    ASSERT_STR_EQ(content, updated);
+    free(content);
+    jl_fixture_close(&fixture);
+    PASS();
+}
+
 TEST(config_json_like_openclaw_json5_nested_servers) {
     jl_fixture_t fixture;
     ASSERT_EQ(jl_fixture_open(&fixture), 0);
@@ -1574,6 +1615,7 @@ SUITE(config_json_like) {
     RUN_TEST(config_json_like_rejects_json5_decimal_escapes_byte_identical);
     RUN_TEST(config_json_like_fresh_strict_upsert_replace_remove);
     RUN_TEST(config_json_like_preserves_jsonc_comments);
+    RUN_TEST(config_json_like_replaces_only_raw_field_in_snapshot);
     RUN_TEST(config_json_like_openclaw_json5_nested_servers);
     RUN_TEST(config_json_like_creates_missing_nested_path);
     RUN_TEST(config_json_like_rejects_duplicate_path_byte_identical);
