@@ -244,9 +244,28 @@ fn full_build_driver_preserves_the_extraction_boundary() {
         };
         assert!(rust_logs.contains(&evidence), "{rust_logs}");
         assert!(rust_logs.contains(&format!("msg=pipeline.full_build_driver implementation=rust files={files}")), "{rust_logs}");
+        let mut functions: Vec<_> = (0..50)
+            .map(|file| (format!("part_{file}.py"), format!("part_{file}")))
+            .collect();
+        if files == 51 {
+            functions.push(("extra.py".to_owned(), "extra".to_owned()));
+        }
+        // The Python resolver seeds these even when the fixture never calls them.
+        functions.extend(
+            ["len", "print"]
+                .map(|name| ("<python-builtins>".to_owned(), name.to_owned())),
+        );
+        functions.sort_unstable();
+        let expected: Vec<_> = functions
+            .into_iter()
+            .map(|(file, name)| vec![Value::Text(file), Value::Text(name)])
+            .collect();
         assert_eq!(
-            files,
-            count(&rust, "SELECT count(*) FROM nodes WHERE label='Function'")
+            graph_rows(
+                &rust,
+                "SELECT file_path, name FROM nodes WHERE label='Function' ORDER BY file_path, name"
+            ),
+            expected
         );
         assert!(
             count(
