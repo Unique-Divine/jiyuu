@@ -627,7 +627,7 @@ unsafe fn alloc(ix: *mut Index, n: usize) -> *mut c_void {
         if (n) != 0 { n } else { SKIP_ONE as usize },
     );
     (*ix).oom = ((*ix).oom) || (p.is_null());
-    return p;
+    p
 }
 
 unsafe fn strdup(ix: *mut Index, s: *const c_char) -> *mut c_char {
@@ -636,7 +636,7 @@ unsafe fn strdup(ix: *mut Index, s: *const c_char) -> *mut c_char {
         if !(s).is_null() { s } else { c"".as_ptr() },
     );
     (*ix).oom = ((*ix).oom) || (p.is_null());
-    return p;
+    p
 }
 
 unsafe fn ilist_push(ix: *mut Index, l: *mut IntList, v: i32) -> bool {
@@ -669,7 +669,7 @@ unsafe fn ilist_push(ix: *mut Index, l: *mut IntList, v: i32) -> bool {
             previous
         }) as isize,
     ) = v;
-    return true;
+    true
 }
 
 unsafe fn ht_ilist(
@@ -690,7 +690,7 @@ unsafe fn ht_ilist(
     }
     clear_bytes(l as *mut c_void, 0, size_of::<IntList>());
     cbm_ht_set(ht, k as *const c_char, l as *mut c_void);
-    return l;
+    l
 }
 
 // Add `key` to a name set; false when memory ran out.
@@ -703,7 +703,7 @@ unsafe fn mark(ix: *mut Index, ht: *mut HashTable, key: *const c_char) -> bool {
         return false;
     }
     cbm_ht_set(ht, k as *const c_char, k as *mut c_void);
-    return true;
+    true
 }
 
 unsafe fn ci_equal(s: *const c_char, n: usize, word: *const c_char) -> bool {
@@ -711,13 +711,11 @@ unsafe fn ci_equal(s: *const c_char, n: usize, word: *const c_char) -> bool {
         return false;
     }
     for i in 0..n {
-        if tolower(((*s.offset(i as isize)) as u8) as i32)
-            != ((*word.offset(i as isize)) as i32)
-        {
+        if tolower(((*s.add(i)) as u8) as i32) != ((*word.add(i)) as i32) {
             return false;
         }
     }
-    return true;
+    true
 }
 
 unsafe fn ci_contains(s: *const c_char, n: usize, word: *const c_char) -> bool {
@@ -727,8 +725,8 @@ unsafe fn ci_contains(s: *const c_char, n: usize, word: *const c_char) -> bool {
         while (i + wl) <= n {
             let mut k: usize = 0;
             while (k < wl)
-                && (tolower(((*s.offset((i + k) as isize)) as u8) as i32)
-                    == ((*word.offset(k as isize)) as i32))
+                && (tolower(((*s.add(i + k)) as u8) as i32)
+                    == ((*word.add(k)) as i32))
             {
                 k += 1;
             }
@@ -739,7 +737,7 @@ unsafe fn ci_contains(s: *const c_char, n: usize, word: *const c_char) -> bool {
             i += 1;
         }
     }
-    return false;
+    false
 }
 
 // True when one word of the directory name s[0, n) says test code: the name
@@ -759,15 +757,13 @@ unsafe fn test_dir_name(s: *const c_char, n: usize) -> bool {
     ];
     let mut start: usize = 0;
     for i in 0..=n {
-        let sep: bool = (((i == n)
-            || (((*s.offset(i as isize)) as i32) == b'-' as i32))
-            || (((*s.offset(i as isize)) as i32) == b'_' as i32))
-            || (((*s.offset(i as isize)) as i32) == b'.' as i32);
+        let sep: bool = (((i == n) || (((*s.add(i)) as i32) == b'-' as i32))
+            || (((*s.add(i)) as i32) == b'_' as i32))
+            || (((*s.add(i)) as i32) == b'.' as i32);
         let step: bool = (((!(sep)) && (i > start))
-            && ((isupper(((*s.offset(i as isize)) as u8) as i32)) != 0))
-            && ((isupper(
-                ((*s.offset((i - (SKIP_ONE as usize)) as isize)) as u8) as i32,
-            )) == 0);
+            && ((isupper(((*s.add(i)) as u8) as i32)) != 0))
+            && ((isupper(((*s.add(i - (SKIP_ONE as usize))) as u8) as i32))
+                == 0);
         if (!(sep)) && (!(step)) {
             continue;
         }
@@ -776,7 +772,7 @@ unsafe fn test_dir_name(s: *const c_char, n: usize) -> bool {
             while w
                 < (size_of::<[*const c_char; 8]>() / size_of::<*const c_char>())
             {
-                if ci_equal(s.offset(start as isize), i - start, words[w]) {
+                if ci_equal(s.add(start), i - start, words[w]) {
                     return true;
                 }
 
@@ -785,7 +781,7 @@ unsafe fn test_dir_name(s: *const c_char, n: usize) -> bool {
         }
         start = if sep { i + (SKIP_ONE as usize) } else { i };
     }
-    return false;
+    false
 }
 
 // Test code, by where a build puts it:
@@ -812,7 +808,7 @@ unsafe fn is_test_path(rel: *const c_char) -> bool {
                 && (memcmp(
                     p as *const c_void,
                     (c"src".as_ptr() as *mut c_char) as *const c_void,
-                    3 as usize,
+                    3_usize,
                 ) == 0)
             {
                 let next: *const c_char = slash.offset(SKIP_ONE as isize);
@@ -848,7 +844,7 @@ unsafe fn is_test_path(rel: *const c_char) -> bool {
             p = slash.offset(SKIP_ONE as isize);
         }
     }
-    return false;
+    false
 }
 
 // Split `s` in place at tabs into at most `max` fields; returns the count.
@@ -880,7 +876,7 @@ unsafe fn split(s: *mut c_char, out: *mut *mut c_char, max: i32) -> i32 {
             p = p.offset(1);
         }
     }
-    return n;
+    n
 }
 
 // True when name[0, nl) is one of the ','-joined names of `list`. An entry may
@@ -916,7 +912,7 @@ unsafe fn listed_n(
                     *(bound) = if !(colon).is_null() {
                         colon.offset(SKIP_ONE as isize)
                     } else {
-                        p.offset(n as isize)
+                        p.add(n)
                     };
                     *(blen) = if !(colon).is_null() {
                         (n - name_len) - (SKIP_ONE as usize)
@@ -933,17 +929,11 @@ unsafe fn listed_n(
             };
         }
     }
-    return false;
+    false
 }
 
 unsafe fn listed(list: *const c_char, name: *const c_char) -> bool {
-    return listed_n(
-        list,
-        name,
-        strlen(name),
-        (ptr::null_mut()) as *mut *const c_char,
-        ptr::null_mut(),
-    );
+    listed_n(list, name, strlen(name), ptr::null_mut(), ptr::null_mut())
 }
 
 // ── Scope parsing ─────────────────────────────────────────────────
@@ -951,11 +941,11 @@ unsafe fn import_cmp(a: *const c_void, b: *const c_void) -> i32 {
     let x: *const Import = a as *const Import;
     let y: *const Import = b as *const Import;
     let c: i32 = strcmp((*x).alias, (*y).alias);
-    return if (c) != 0 {
+    if (c) != 0 {
         c
     } else {
         strcmp((*x).target, (*y).target)
-    };
+    }
 }
 
 unsafe fn member_cmp(a: *const c_void, b: *const c_void) -> i32 {
@@ -968,8 +958,7 @@ unsafe fn member_cmp(a: *const c_void, b: *const c_void) -> i32 {
     if (c) != 0 {
         return c;
     }
-    return (i32::from((*x).order > (*y).order))
-        - (i32::from((*x).order < (*y).order));
+    (i32::from((*x).order > (*y).order)) - (i32::from((*x).order < (*y).order))
 }
 
 #[derive(Clone, Copy)]
@@ -990,8 +979,7 @@ unsafe fn start_cmp(a: *const c_void, b: *const c_void) -> i32 {
     if (*x).start != (*y).start {
         return if (*x).start < (*y).start { -(1) } else { 1 };
     }
-    return (i32::from((*x).order > (*y).order))
-        - (i32::from((*x).order < (*y).order));
+    (i32::from((*x).order > (*y).order)) - (i32::from((*x).order < (*y).order))
 }
 
 unsafe fn lines_cmp(a: *const c_void, b: *const c_void) -> i32 {
@@ -1000,7 +988,7 @@ unsafe fn lines_cmp(a: *const c_void, b: *const c_void) -> i32 {
     if (*x).from != (*y).from {
         return if (*x).from < (*y).from { -(1) } else { 1 };
     }
-    return (i32::from((*x).to > (*y).to)) - (i32::from((*x).to < (*y).to));
+    (i32::from((*x).to > (*y).to)) - (i32::from((*x).to < (*y).to))
 }
 
 unsafe fn parse_type(
@@ -1012,16 +1000,10 @@ unsafe fn parse_type(
     let t: *mut TypeDecl =
         addr_of_mut!(*((*f).types).offset(((*f).ntypes) as isize));
     clear_bytes(t as *mut c_void, 0, size_of::<TypeDecl>());
-    (*t).start = (strtoul(
-        (*fld.offset(1)) as *const c_char,
-        (ptr::null_mut()) as *mut *mut c_char,
-        10,
-    )) as u32;
-    (*t).end = (strtoul(
-        (*fld.offset(2)) as *const c_char,
-        (ptr::null_mut()) as *mut *mut c_char,
-        10,
-    )) as u32;
+    (*t).start =
+        (strtoul((*fld.offset(1)) as *const c_char, ptr::null_mut(), 10)) as u32;
+    (*t).end =
+        (strtoul((*fld.offset(2)) as *const c_char, ptr::null_mut(), 10)) as u32;
     (*t).kind = *(*fld.offset(3)).offset(0);
     (*t).incomplete = ((*(*fld.offset(3)).offset(0)) != 0)
         && (((*(*fld.offset(3)).offset(1)) as i32) == b'!' as i32);
@@ -1085,16 +1067,13 @@ unsafe fn parse_member(f: *mut File, fld: *mut *mut c_char) -> bool {
     let m: *mut Member =
         addr_of_mut!(*((*f).members).offset(((*f).nmembers) as isize));
     clear_bytes(m as *mut c_void, 0, size_of::<Member>());
-    (*m).start = (strtoul(
-        (*fld.offset(1)) as *const c_char,
-        (ptr::null_mut()) as *mut *mut c_char,
-        10,
-    )) as u32;
+    (*m).start =
+        (strtoul((*fld.offset(1)) as *const c_char, ptr::null_mut(), 10)) as u32;
     (*m).kind = *(*fld.offset(2)).offset(0);
-    (*m).ctor = strchr((*fld.offset(3)) as *const c_char, b'K' as i32)
-        != (ptr::null_mut());
-    (*m).component = strchr((*fld.offset(3)) as *const c_char, b'p' as i32)
-        != (ptr::null_mut());
+    (*m).ctor =
+        !strchr((*fld.offset(3)) as *const c_char, b'K' as i32).is_null();
+    (*m).component =
+        !strchr((*fld.offset(3)) as *const c_char, b'p' as i32).is_null();
     (*m).owner = if strcmp((*fld.offset(4)) as *const c_char, c"-".as_ptr()) == 0
     {
         JR_NONE
@@ -1126,7 +1105,7 @@ unsafe fn parse_member(f: *mut File, fld: *mut *mut c_char) -> bool {
     (*m).shares = JR_NONE;
     (*m).recv_entity = JR_NONE;
     (*f).nmembers += 1;
-    return true;
+    true
 }
 
 // Which member's node each member shares. A value has its own or none.
@@ -1336,34 +1315,33 @@ unsafe fn parse_scope(
                     ) = Lines {
                         from: ((strtoul(
                             (fld[1]) as *const c_char,
-                            (ptr::null_mut()) as *mut *mut c_char,
+                            ptr::null_mut(),
                             10,
                         )) as u32),
                         to: ((strtoul(
                             (fld[2]) as *const c_char,
-                            (ptr::null_mut()) as *mut *mut c_char,
+                            ptr::null_mut(),
                             10,
                         )) as u32),
                     };
                 }
-            } else if ((*line.offset(0)) as i32) == b'Q' as i32 {
-                if (split(
+            } else if ((*line.offset(0)) as i32) == b'Q' as i32
+                && (split(
                     line,
                     addr_of_mut!(fld).cast::<*mut c_char>(),
                     PAIR_LEN,
                 ) == PAIR_LEN)
-                    && ((*(fld[1]).offset(0)) != 0)
-                {
-                    ok = mark(
-                        ix,
-                        if (*f).is_test {
-                            (*ix).quarantine_test
-                        } else {
-                            (*ix).quarantine
-                        },
-                        (fld[1]) as *const c_char,
-                    );
-                }
+                && ((*(fld[1]).offset(0)) != 0)
+            {
+                ok = mark(
+                    ix,
+                    if (*f).is_test {
+                        (*ix).quarantine_test
+                    } else {
+                        (*ix).quarantine
+                    },
+                    (fld[1]) as *const c_char,
+                );
             }
             line = if !(nl).is_null() {
                 nl.offset(SKIP_ONE as isize)
@@ -1455,7 +1433,7 @@ unsafe fn parse_scope(
         *((*f).by_start).offset(i as isize) = (*keys.offset(i as isize)).idx;
     }
     cbm_free(CBM_MEM_CLASS_OTHER, keys as *mut c_void);
-    return true;
+    true
 }
 
 // ── Entities ──────────────────────────────────────────────────────
@@ -1518,11 +1496,11 @@ unsafe fn pair_key(
 unsafe fn find_entity(ix: *const Index, fqn: *const c_char) -> i32 {
     let v: isize =
         (cbm_ht_get(((*ix).ent_by_fqn) as *const HashTable, fqn)) as isize;
-    return if v > 0 {
+    if v > 0 {
         (v - (SKIP_ONE as isize)) as i32
     } else {
         JR_NONE
-    };
+    }
 }
 
 // The entity `fqn`, created on first sight.
@@ -1579,7 +1557,7 @@ unsafe fn entity_get(
         (*e).fqn,
         ((id + SKIP_ONE) as isize) as *mut c_void,
     );
-    return id;
+    id
 }
 
 unsafe fn entity_add_decl(
@@ -1616,17 +1594,14 @@ unsafe fn entity_add_decl(
             *value += 1;
             previous
         }) as isize,
-    ) = Decl {
-        file: file,
-        type_index: type_index,
-    };
+    ) = Decl { file, type_index };
     (*e).any_prod =
         ((*e).any_prod) || (!((*((*ix).files).offset(file as isize)).is_test));
     (*e).incomplete = ((*e).incomplete)
         || ((*((*((*ix).files).offset(file as isize)).types)
             .offset(type_index as isize))
         .incomplete);
-    return true;
+    true
 }
 
 unsafe fn mark_package(ix: *mut Index, package: *const c_char) -> bool {
@@ -1661,7 +1636,7 @@ unsafe fn mark_package(ix: *mut Index, package: *const c_char) -> bool {
             );
         }
     }
-    return true;
+    true
 }
 
 // The entities of every declared type and the package tables. Files come in
@@ -1799,7 +1774,7 @@ unsafe fn build_entities(ix: *mut Index, skipped: *mut i32) -> bool {
             }
         }
     }
-    return true;
+    true
 }
 
 // ── The languages' own implicit imports ─────────────────────────────
@@ -2270,24 +2245,24 @@ impl Default for ResolveContext {
 }
 
 unsafe fn edge(n: *const GraphNode, exact: bool) -> Resolution {
-    return Resolution {
+    Resolution {
         st: JR_OK,
         node: n,
-        exact: exact,
+        exact,
         ..Resolution::default()
-    };
+    }
 }
 
 unsafe fn unres(reason: i32) -> Resolution {
-    return Resolution {
+    Resolution {
         st: JR_UNRES,
-        reason: reason,
+        reason,
         ..Resolution::default()
-    };
+    }
 }
 
 unsafe fn visible(c: &ResolveContext, ent: i32) -> bool {
-    return (!(c.prod)) || ((*((*c.ix).ents).offset(ent as isize)).any_prod);
+    (!(c.prod)) || ((*((*c.ix).ents).offset(ent as isize)).any_prod)
 }
 
 // The enclosing types of type `t` of the context's file, `t` first.
@@ -2376,11 +2351,11 @@ unsafe fn pkg_type(
         ((*ix).pkg_types) as *const HashTable,
         (addr_of_mut!(key).cast::<c_char>()) as *const c_char,
     )) as isize;
-    return if v > 0 {
+    if v > 0 {
         (v - (SKIP_ONE as isize)) as i32
     } else {
         JR_NONE
-    };
+    }
 }
 
 // The type `name` nested directly in entity `ent`.
@@ -2394,10 +2369,7 @@ unsafe fn nested(ix: *const Index, ent: i32, name: *const c_char) -> i32 {
     )) {
         return JR_NONE;
     }
-    return find_entity(
-        ix,
-        (addr_of_mut!(fqn).cast::<c_char>()) as *const c_char,
-    );
+    find_entity(ix, (addr_of_mut!(fqn).cast::<c_char>()) as *const c_char)
 }
 
 // The member type `name` of `ent`: its own, else the one of the nearest
@@ -2415,7 +2387,7 @@ unsafe fn member_type(c: &ResolveContext, ent: i32, name: *const c_char) -> i32 
             return n;
         }
     }
-    return JR_NONE;
+    JR_NONE
 }
 
 unsafe fn open(ix: *const Index, ent: i32) -> bool {
@@ -2431,7 +2403,7 @@ unsafe fn open(ix: *const Index, ent: i32) -> bool {
             return true;
         }
     }
-    return false;
+    false
 }
 
 // True when `sup` is `ent` or one of its supertypes.
@@ -2446,7 +2418,7 @@ unsafe fn is_or_extends(ix: *const Index, ent: i32, sup: i32) -> bool {
             return true;
         }
     }
-    return false;
+    false
 }
 
 // ── Node binding ──────────────────────────────────────────────────
@@ -2497,19 +2469,19 @@ unsafe fn decl_better(
     if cmp != 0 {
         return cmp < 0;
     }
-    return oa < ob;
+    oa < ob
 }
 
 unsafe fn label_callable(l: *const c_char) -> bool {
-    return (!(l).is_null())
+    (!(l).is_null())
         && ((strcmp(l, c"Method".as_ptr()) == 0)
-            || (strcmp(l, c"Function".as_ptr()) == 0));
+            || (strcmp(l, c"Function".as_ptr()) == 0))
 }
 
 unsafe fn label_value(l: *const c_char) -> bool {
-    return (!(l).is_null())
+    (!(l).is_null())
         && ((strcmp(l, c"Field".as_ptr()) == 0)
-            || (strcmp(l, c"Variable".as_ptr()) == 0));
+            || (strcmp(l, c"Variable".as_ptr()) == 0))
 }
 
 // The node at "<module>.<tail>" when it is this file's own: one node per
@@ -2531,13 +2503,13 @@ unsafe fn node_at(
         c.g,
         (addr_of_mut!(qn).cast::<c_char>()) as *const c_char,
     );
-    return if ((!(n).is_null()) && (!((*n).file_path).is_null()))
+    if ((!(n).is_null()) && (!((*n).file_path).is_null()))
         && (strcmp(((*n).file_path) as *const c_char, (*f).rel_path) == 0)
     {
         n
     } else {
         ptr::null()
-    };
+    }
 }
 
 // The node of a type declaration; NULL when it has none of its own.
@@ -2560,13 +2532,13 @@ unsafe fn type_node(c: &ResolveContext, d: Decl) -> *const GraphNode {
             (*t).slot
         },
     );
-    return if (!(n).is_null())
+    if (!(n).is_null())
         && (cbm_label_is_type_like(((*n).label) as *const c_char))
     {
         n
     } else {
         ptr::null()
-    };
+    }
 }
 
 // The node of a member: its own, or the one the overloads of its name share.
@@ -2601,7 +2573,7 @@ unsafe fn member_node(
     if n.is_null() {
         return ptr::null();
     }
-    return if (if (((*o).kind) as i32) == b'c' as i32 {
+    if (if (((*o).kind) as i32) == b'c' as i32 {
         i32::from(label_callable(((*n).label) as *const c_char))
     } else {
         i32::from(label_value(((*n).label) as *const c_char))
@@ -2610,7 +2582,7 @@ unsafe fn member_node(
         n
     } else {
         ptr::null()
-    };
+    }
 }
 
 // The entity's representative node: never a test declaration for product
@@ -2645,11 +2617,11 @@ unsafe fn type_result(c: &ResolveContext, ent: i32, exact: bool) -> Resolution {
             bo = (*((*e).decls).offset(d as isize)).type_index;
         }
     }
-    return if !(best).is_null() {
+    if !(best).is_null() {
         edge(best, exact)
     } else {
         unres(CBM_DOCLINK_REASON_GRAPH_GAP)
-    };
+    }
 }
 
 // ── Reference syntax ──────────────────────────────────────────────
@@ -2728,13 +2700,13 @@ unsafe fn parse_params(params: &[u8], r: *mut Reference) -> bool {
     }
     let mut start = 0;
     let mut depth = 0;
-    for (end, byte) in params.iter().copied().chain([b',']).enumerate() {
+    for (end, byte) in params.iter().copied().chain(*b",").enumerate() {
         match byte {
             b'<' | b'(' | b'[' => depth += 1,
             b'>' | b')' | b']' => depth -= 1,
             b',' if depth <= 0 => {
                 let Some(normalized) =
-                    (&mut (*r).params).get_mut((*r).nparams as usize)
+                    (*r).params.get_mut((*r).nparams as usize)
                 else {
                     return false;
                 };
@@ -2901,21 +2873,19 @@ unsafe fn member_lower(
             hi = mid;
         }
     }
-    return lo;
+    lo
 }
 
 // The suffix of a normalized type that says how many array levels it has.
 unsafe fn array_suffix(s: *const c_char, n: usize) -> usize {
     let mut e: usize = n;
     while ((e >= (PAIR_LEN as usize))
-        && (((*s.offset((e - (PAIR_LEN as usize)) as isize)) as i32)
-            == b'[' as i32))
-        && (((*s.offset((e - (SKIP_ONE as usize)) as isize)) as i32)
-            == b']' as i32)
+        && (((*s.add(e - (PAIR_LEN as usize))) as i32) == b'[' as i32))
+        && (((*s.add(e - (SKIP_ONE as usize))) as i32) == b']' as i32)
     {
         e -= PAIR_LEN as usize;
     }
-    return e;
+    e
 }
 
 // True when `name[0, n)` is a type variable in scope of a member of type
@@ -2952,7 +2922,7 @@ unsafe fn is_tvar(
             t = (*((*f).types).offset(t as isize)).outer;
         }
     }
-    return false;
+    false
 }
 
 // One written parameter type against one declared type: the same name, or
@@ -3001,9 +2971,8 @@ unsafe fn param_match(
         bound = addr_of!(object).cast::<c_char>();
         blen = size_of::<[c_char; 7]>() - (SKIP_ONE as usize);
     }
-    return (wb == blen)
-        && (memcmp(written as *const c_void, bound as *const c_void, blen)
-            == 0);
+    (wb == blen)
+        && (memcmp(written as *const c_void, bound as *const c_void, blen) == 0)
 }
 
 // True when the written parameter list is the canonical one of the record
@@ -3066,7 +3035,7 @@ unsafe fn canonical_match(
         }
         last_order = (*next).order;
     }
-    return true;
+    true
 }
 
 // The written parameter types against a declared signature.
@@ -3106,11 +3075,11 @@ unsafe fn sig_match(
             ptr::null()
         };
     }
-    return (if (*r).nparams == 0 {
+    (if (*r).nparams == 0 {
         i32::from(((*((*m).sig).offset(0)) as i32) == b'\0' as i32)
     } else {
-        i32::from(p == (ptr::null()))
-    }) != 0;
+        i32::from(p.is_null())
+    }) != 0
 }
 
 // Count member `m` of `file` among the selected ones.
@@ -3219,7 +3188,7 @@ unsafe fn members(
             addr_of_mut!(out),
         );
     }
-    return out;
+    out
 }
 
 // The top-level declarations named `name` of package `pkg`, across its
@@ -3260,7 +3229,7 @@ unsafe fn top_members(
             i += 1;
         }
     }
-    return out;
+    out
 }
 
 // Join the members found under one name in two places. Members of different
@@ -3309,11 +3278,11 @@ unsafe fn found_add(
 // The selected members as a result: their node, or a graph gap when the
 // source declares them and the graph has no node for them.
 unsafe fn found_result(found: *const Found, exact: bool) -> Resolution {
-    return if !((*found).node).is_null() {
+    if !((*found).node).is_null() {
         edge((*found).node, exact)
     } else {
         unres(CBM_DOCLINK_REASON_GRAPH_GAP)
-    };
+    }
 }
 
 // ── Type paths ────────────────────────────────────────────────────
@@ -3340,11 +3309,11 @@ impl Default for TypePath {
 }
 
 unsafe fn tp_res(r: Resolution) -> TypePath {
-    return TypePath {
+    TypePath {
         st: (TP_RES),
         res: r,
         ..TypePath::default()
-    };
+    }
 }
 
 unsafe fn join(
@@ -3384,7 +3353,7 @@ unsafe fn walk_nested(
                 st: (TP_PARTIAL),
                 ent: cur,
 
-                exact: exact,
+                exact,
                 ..TypePath::default()
             };
         }
@@ -3393,12 +3362,12 @@ unsafe fn walk_nested(
         }
         cur = next;
     }
-    return TypePath {
+    TypePath {
         st: (TP_OK),
         ent: cur,
-        exact: exact,
+        exact,
         ..TypePath::default()
-    };
+    }
 }
 
 // The file's single import of the simple name `name` with one of `kinds`;
@@ -3408,9 +3377,8 @@ unsafe fn import_next(
     name: *const c_char,
     prev: *const Import,
 ) -> *const Import {
-    let i: i32;
-    if !(prev).is_null() {
-        i = ((prev.offset_from((*f).imports)) as i32) + SKIP_ONE;
+    let i: i32 = if !(prev).is_null() {
+        ((prev.offset_from((*f).imports)) as i32) + SKIP_ONE
     } else {
         let mut lo: i32 = 0;
         let mut hi: i32 = (*f).nimports;
@@ -3422,22 +3390,21 @@ unsafe fn import_next(
                 hi = mid;
             }
         }
-        i = lo;
-    }
-    return (if (i < (*f).nimports)
+        lo
+    };
+    (if (i < (*f).nimports)
         && (strcmp((*((*f).imports).offset(i as isize)).alias, name) == 0)
     {
         addr_of_mut!(*((*f).imports).offset(i as isize))
     } else {
         ptr::null_mut()
-    }) as *const Import;
+    }) as *const Import
 }
 
 // True when the repository declares package `p`.
 unsafe fn is_package(ix: *const Index, p: *const c_char) -> bool {
-    return ((*p.offset(0)) != 0)
-        && (cbm_ht_get(((*ix).packages) as *const HashTable, p)
-            != ptr::null_mut());
+    ((*p.offset(0)) != 0)
+        && !cbm_ht_get(((*ix).packages) as *const HashTable, p).is_null()
 }
 
 // The package part of a qualified name: everything before its last name.
@@ -3453,7 +3420,7 @@ unsafe fn package_of(fqn: *const c_char, out: *mut c_char, cap: usize) -> bool {
         (dot.offset_from(fqn)) as usize,
     );
     *out.offset(dot.offset_from(fqn)) = b'\0' as c_char;
-    return true;
+    true
 }
 
 // True when the file's scope is open: an on-demand import of a package the
@@ -3468,7 +3435,7 @@ unsafe fn scope_open(c: &ResolveContext) -> bool {
             return true;
         }
     }
-    return false;
+    false
 }
 
 // True when package `pkg` lies in a directory the indexer never reads, below
@@ -3500,8 +3467,7 @@ unsafe fn not_indexed(ix: *const Index, pkg: *const c_char) -> bool {
         // buf: the prefix through this segment; buf + seg: the segment
         if (owned)
             && (cbm_should_skip_dir(
-                ((addr_of_mut!(buf).cast::<c_char>()).offset(seg as isize))
-                    as *const c_char,
+                ((addr_of_mut!(buf).cast::<c_char>()).add(seg)) as *const c_char,
                 (*ix).mode,
             ))
         {
@@ -3521,7 +3487,7 @@ unsafe fn not_indexed(ix: *const Index, pkg: *const c_char) -> bool {
         buf[i] = keep;
         seg = i + (SKIP_ONE as usize);
     }
-    return false;
+    false
 }
 
 // What a name that no scope shows is, by its package: declared by the
@@ -3535,15 +3501,15 @@ unsafe fn unseen_kind(ix: *const Index, pkg: *const c_char) -> c_char {
     {
         return b'G' as c_char;
     }
-    return (if not_indexed(ix, pkg) {
+    (if not_indexed(ix, pkg) {
         b'N' as i32
     } else {
         b'X' as i32
-    }) as c_char;
+    }) as c_char
 }
 
 unsafe fn kind_reason(kind: c_char) -> i32 {
-    return if (kind as i32) == b'G' as i32 {
+    if (kind as i32) == b'G' as i32 {
         CBM_DOCLINK_REASON_GRAPH_GAP
     } else {
         if (kind as i32) == b'N' as i32 {
@@ -3551,7 +3517,7 @@ unsafe fn kind_reason(kind: c_char) -> i32 {
         } else {
             CBM_DOCLINK_REASON_EXTERNAL
         }
-    };
+    }
 }
 
 // What an explicit import of `fqn` names: the type, or what unseen_kind
@@ -3601,7 +3567,7 @@ unsafe fn unfound_simple(c: &ResolveContext, name: *const c_char) -> Resolution 
             i += 1;
         }
     }
-    return unres(CBM_DOCLINK_REASON_MISSING);
+    unres(CBM_DOCLINK_REASON_MISSING)
 }
 
 // True when the file imports something of package `pkg` (or the package
@@ -3618,13 +3584,11 @@ unsafe fn imports_outside(c: &ResolveContext, pkg: *const c_char) -> bool {
     }
     for i in 0..(*c.f).nimports {
         let t: *const c_char = (*((*c.f).imports).offset(i as isize)).target;
-        if (strncmp(t, pkg, pl) == 0)
-            && (((*t.offset(pl as isize)) as i32) == b'.' as i32)
-        {
+        if (strncmp(t, pkg, pl) == 0) && (((*t.add(pl)) as i32) == b'.' as i32) {
             return true;
         }
     }
-    return false;
+    false
 }
 
 // A qualified name that is no type, no member and no top-level declaration.
@@ -3725,7 +3689,7 @@ unsafe fn unfound_path(
             i -= 1;
         }
     }
-    return unres(CBM_DOCLINK_REASON_MISSING);
+    unres(CBM_DOCLINK_REASON_MISSING)
 }
 
 // The members every type has without declaring them, in either language:
@@ -3744,8 +3708,8 @@ unsafe fn implicit_member(
         return (named(&JR_JAVA_ENUM_MEMBERS, name))
             || (named(&JR_KOTLIN_ENUM_MEMBERS, name));
     }
-    return ((kind as i32) == b'a' as i32)
-        && (strcmp(name, c"annotationType".as_ptr()) == 0);
+    ((kind as i32) == b'a' as i32)
+        && (strcmp(name, c"annotationType".as_ptr()) == 0)
 }
 
 // True when the type `ent`, a type around the documented definition of a
@@ -3758,9 +3722,9 @@ unsafe fn given_member(
     name: *const c_char,
 ) -> bool {
     let kind: c_char = (*((*c.ix).ents).offset(ent as isize)).kind;
-    return (named(&JR_ANY_MEMBERS, name))
+    (named(&JR_ANY_MEMBERS, name))
         || (((kind as i32) == b'e' as i32)
-            && (named(&JR_KOTLIN_ENUM_MEMBERS, name)));
+            && (named(&JR_KOTLIN_ENUM_MEMBERS, name)))
 }
 
 type LookupKind = i32;
@@ -3787,12 +3751,10 @@ unsafe fn object_method(name: *const c_char, r: *const Reference) -> bool {
                             addr_of!(((*r).params)[k as usize]).cast::<c_char>(),
                             n,
                         ) == 0))
-                        && ((((*p.offset(n as isize)) as i32) == b'|' as i32)
-                            || (((*p.offset(n as isize)) as i32)
-                                == b'\0' as i32));
+                        && ((((*p.add(n)) as i32) == b'|' as i32)
+                            || (((*p.add(n)) as i32) == b'\0' as i32));
                     p = p.offset(if same {
-                        (n + ((if ((*p.offset(n as isize)) as i32) == b'|' as i32
-                        {
+                        (n + ((if ((*p.add(n)) as i32) == b'|' as i32 {
                             SKIP_ONE
                         } else {
                             0
@@ -3811,7 +3773,7 @@ unsafe fn object_method(name: *const c_char, r: *const Reference) -> bool {
             i += 1;
         }
     }
-    return false;
+    false
 }
 
 // ── Context ───────────────────────────────────────────────────────
@@ -3833,10 +3795,9 @@ unsafe fn slot_is(
         return strcmp(name, tail) == 0;
     }
     let ol: usize = strlen(owner_path);
-    return ((strncmp(tail, owner_path, ol) == 0)
-        && (((*tail.offset(ol as isize)) as i32) == b'.' as i32))
-        && (strcmp((tail.offset(ol as isize)).offset(SKIP_ONE as isize), name)
-            == 0);
+    ((strncmp(tail, owner_path, ol) == 0)
+        && (((*tail.add(ol)) as i32) == b'.' as i32))
+        && (strcmp((tail.add(ol)).offset(SKIP_ONE as isize), name) == 0)
 }
 
 // The scope of the definition a reference is written on: the documented
@@ -3866,9 +3827,9 @@ unsafe fn ctx_init(
     let qn: *const c_char = (*link).source_qn;
     let tail: *const c_char = if ((!(qn).is_null())
         && (strncmp(qn, (*f).module_qn, ml) == 0))
-        && (((*qn.offset(ml as isize)) as i32) == b'.' as i32)
+        && (((*qn.add(ml)) as i32) == b'.' as i32)
     {
-        (qn.offset(ml as isize)).offset(SKIP_ONE as isize)
+        (qn.add(ml)).offset(SKIP_ONE as isize)
     } else {
         ptr::null()
     };
@@ -4048,11 +4009,11 @@ unsafe fn header_type(
             n,
         )
     };
-    return if ((tp.st) as u32) == (TP_OK as u32) {
+    if ((tp.st) as u32) == (TP_OK as u32) {
         tp.ent
     } else {
         JR_NONE
-    };
+    }
 }
 
 // True when a declaration header of the context's file writes, with
@@ -4079,20 +4040,20 @@ unsafe fn root_super(
     {
         return true;
     }
-    return (((len == strlen(simple))
+    (((len == strlen(simple))
         && (memcmp(name as *const c_void, simple as *const c_void, len) == 0))
         && ((import_next(c.f, simple, ptr::null())).is_null()))
-        && (!(scope_open(c)));
+        && (!(scope_open(c)))
 }
 
 // True when the repository's type `step` is an interface to javadoc (an
 // annotation type is one).
 unsafe fn walk_iface(ix: *const Index, step: i32) -> bool {
-    return (step >= 0)
+    (step >= 0)
         && (((((*((*ix).ents).offset(step as isize)).kind) as i32)
             == b'i' as i32)
             || ((((*((*ix).ents).offset(step as isize)).kind) as i32)
-                == b'a' as i32));
+                == b'a' as i32))
 }
 
 // The steps of javadoc's search for a method (walk) at one declaration of
@@ -4186,7 +4147,7 @@ unsafe fn walk_steps(
         }
     }
     *(n) = w;
-    return sup;
+    sup
 }
 
 // One declaration's steps into its type's: the first declaration sets them,
@@ -4238,7 +4199,7 @@ unsafe fn walk_decl(
         (*e).wsuper = JR_W_OUTSIDE;
         (*e).nwifaces = 0;
     }
-    return true;
+    true
 }
 
 // The type around declaration `t` of `f`, as the scope chain has it.
@@ -4247,11 +4208,11 @@ unsafe fn walk_encl(f: *const File, t: *const TypeDecl) -> i32 {
     while (o != JR_NONE) && ((*((*f).types).offset(o as isize)).entity < 0) {
         o = (*((*f).types).offset(o as isize)).outer;
     }
-    return if o == JR_NONE {
+    if o == JR_NONE {
         JR_NONE
     } else {
         (*((*f).types).offset(o as isize)).entity
-    };
+    }
 }
 
 // The direct supertypes of every type (each declaration's list, bound in that
@@ -4348,7 +4309,7 @@ unsafe fn resolve_supers(ix: *mut Index, g: *const Graph) -> bool {
                                     (ncap as usize) * size_of::<i32>(),
                                 ))
                                     as *mut i32;
-                                ok = grown != (ptr::null_mut());
+                                ok = !grown.is_null();
                                 if (ok) && (nd > 0) {
                                     memcpy(
                                         grown as *mut c_void,
@@ -4405,7 +4366,7 @@ unsafe fn resolve_supers(ix: *mut Index, g: *const Graph) -> bool {
             if (ok) && (nb > 0) {
                 (*e).bases =
                     (alloc(ix, (nb as usize) * size_of::<i32>())) as *mut i32;
-                ok = (*e).bases != (ptr::null_mut());
+                ok = !(*e).bases.is_null();
                 if ok {
                     memcpy(
                         ((*e).bases) as *mut c_void,
@@ -4483,7 +4444,7 @@ unsafe fn resolve_supers(ix: *mut Index, g: *const Graph) -> bool {
             if tail > 0 {
                 (*e).closure =
                     (alloc(ix, (tail as usize) * size_of::<i32>())) as *mut i32;
-                ok = (*e).closure != (ptr::null_mut());
+                ok = !(*e).closure.is_null();
                 if ok {
                     memcpy(
                         ((*e).closure) as *mut c_void,
@@ -4500,7 +4461,7 @@ unsafe fn resolve_supers(ix: *mut Index, g: *const Graph) -> bool {
     cbm_free(CBM_MEM_CLASS_OTHER, seen as *mut c_void);
     cbm_free(CBM_MEM_CLASS_OTHER, queue as *mut c_void);
     cbm_free(CBM_MEM_CLASS_OTHER, steps as *mut c_void);
-    return ok;
+    ok
 }
 
 // The receiver of every Kotlin extension, bound in its file's scope, and the
@@ -4560,7 +4521,7 @@ unsafe fn build_extensions(ix: *mut Index, g: *const Graph) -> bool {
             }
         }
     }
-    return true;
+    true
 }
 
 // ── Index lifecycle and the resolver hooks ────────────────────────
@@ -4639,14 +4600,13 @@ unsafe fn build_fail(ix: *mut Index, step: *const c_char) -> *mut c_void {
         ptr::null::<c_char>(),
     );
     destroy(ix as *mut c_void);
-    return ptr::null_mut();
+    ptr::null_mut()
 }
 
 unsafe fn has_suffix(s: *const c_char, sfx: *const c_char) -> bool {
     let n: usize = strlen(s);
     let sl: usize = strlen(sfx);
-    return (n >= sl)
-        && (strcmp((s.offset(n as isize)).offset(-(sl as isize)), sfx) == 0);
+    (n >= sl) && (strcmp((s.add(n)).offset(-(sl as isize)), sfx) == 0)
 }
 
 unsafe extern "C" fn build(input: *const BuildInput) -> *mut c_void {
@@ -4718,7 +4678,7 @@ unsafe extern "C" fn build(input: *const BuildInput) -> *mut c_void {
         (*f).scoped =
             (!((*src).scope).is_null()) && (parse_scope(ix, f, (*src).scope));
         if !((*f).scoped) {
-            bad_scopes += i32::from((*src).scope != (ptr::null()));
+            bad_scopes += i32::from(!(*src).scope.is_null());
             (*f).nimports = {
                 let assigned = {
                     let assigned = {
@@ -4810,7 +4770,7 @@ unsafe extern "C" fn build(input: *const BuildInput) -> *mut c_void {
         b[4].as_ptr().cast::<c_char>(),
         ptr::null::<c_char>(),
     );
-    return ix as *mut c_void;
+    ix as *mut c_void
 }
 
 // True when the documented definition has a node of its own (or shares the
@@ -4827,23 +4787,23 @@ unsafe fn source_has_node(c: &ResolveContext, link: *const DocLink) -> bool {
         // the File node: the core finds it
     }
     if !(c.member).is_null() {
-        return member_node(c, c.file, c.member) != (ptr::null());
+        return !member_node(c, c.file, c.member).is_null();
     }
     if !(c.type_index).is_null() {
         let d: Decl = Decl {
             file: c.file,
             type_index: (((c.type_index).offset_from((*c.f).types)) as i32),
         };
-        return type_node(c, d) != (ptr::null());
+        return !type_node(c, d).is_null();
     }
     let n: *const GraphNode = if !((*link).source_qn).is_null() {
         cbm_gbuf_find_by_qn(c.g, (*link).source_qn)
     } else {
         ptr::null()
     };
-    return (((!(n).is_null()) && (!((*n).file_path).is_null()))
+    (((!(n).is_null()) && (!((*n).file_path).is_null()))
         && (strcmp(((*n).file_path) as *const c_char, (*c.f).rel_path) == 0))
-        && ((*n).start_line == (((*link).def_line) as i32));
+        && ((*n).start_line == (((*link).def_line) as i32))
 }
 
 // True when `line` lies in a part of the file the scan could not place.
@@ -4858,8 +4818,8 @@ unsafe fn unplaced_line(f: *const File, line: u32) -> bool {
             hi = mid;
         }
     }
-    return (lo < (*f).nunplaced)
-        && ((*((*f).unplaced).offset(lo as isize)).from <= line);
+    (lo < (*f).nunplaced)
+        && ((*((*f).unplaced).offset(lo as isize)).from <= line)
 }
 
 unsafe extern "C" fn resolve(
@@ -4913,15 +4873,17 @@ unsafe extern "C" fn resolve(
     {
         let mut i: i32 = 0;
         while (!(unplaced)) && (i < r.nsegs) {
-            unplaced = (cbm_ht_get(
+            unplaced = !cbm_ht_get(
                 ((*ix).quarantine) as *const HashTable,
                 ((r.segs)[i as usize]) as *const c_char,
-            ) != ptr::null_mut())
+            )
+            .is_null()
                 || ((((*f).is_test) || (sample))
-                    && (cbm_ht_get(
+                    && !cbm_ht_get(
                         ((*ix).quarantine_test) as *const HashTable,
                         ((r.segs)[i as usize]) as *const c_char,
-                    ) != ptr::null_mut()));
+                    )
+                    .is_null());
 
             i += 1;
         }
@@ -4956,7 +4918,7 @@ unsafe extern "C" fn resolve(
     if (res.st == JR_LOCAL) || (plain_text) {
         if plain_text {
             (*(addr_of_mut!((*(*ix).stats).plain_text)))
-                .fetch_add(1 as i64, Ordering::Relaxed);
+                .fetch_add(1_i64, Ordering::Relaxed);
         }
         (*out).kind = CBM_DOCLINK_LOCAL;
         return;
@@ -4966,7 +4928,7 @@ unsafe extern "C" fn resolve(
             // resolved, with nowhere to leave from: the documented definition
             // is the one without a node
             (*(addr_of_mut!((*(*ix).stats).source_gaps)))
-                .fetch_add(1 as i64, Ordering::Relaxed);
+                .fetch_add(1_i64, Ordering::Relaxed);
             (*out).reason = CBM_DOCLINK_REASON_GRAPH_GAP;
             return;
         }

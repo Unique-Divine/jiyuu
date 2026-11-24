@@ -31,13 +31,13 @@ impl Default for KotlinLevel {
 }
 
 unsafe fn kl_any(lv: *const KotlinLevel) -> bool {
-    return ((((*lv).types).count > 0) || (((*lv).vals).count > 0))
-        || (((*lv).calls).count > 0);
+    ((((*lv).types).count > 0) || (((*lv).vals).count > 0))
+        || (((*lv).calls).count > 0)
 }
 
 unsafe fn kl_invisible(lv: *const KotlinLevel) -> bool {
-    return ((((*lv).types).invisible) || (((*lv).vals).invisible))
-        || (((*lv).calls).invisible);
+    ((((*lv).types).invisible) || (((*lv).vals).invisible))
+        || (((*lv).calls).invisible)
 }
 
 // The members `name` of type `ent`, joined to the level.
@@ -97,7 +97,7 @@ unsafe fn kotlin_nested(ix: *const Index, ent: i32, name: *const c_char) -> i32 
     {
         n = nested(ix, *((*e).closure).offset(0), name);
     }
-    return n;
+    n
 }
 
 // What type `ent` holds under `name` itself: a nested type, its members, and
@@ -272,7 +272,7 @@ unsafe fn kl_import(
 // further up.
 unsafe fn scope_unknown(ix: *const Index, ent: i32) -> bool {
     let comp: i32 = (*((*ix).ents).offset(ent as isize)).companion;
-    return (open(ix, ent)) || ((comp != JR_NONE) && (open(ix, comp)));
+    (open(ix, ent)) || ((comp != JR_NONE) && (open(ix, comp)))
 }
 
 // Why a Kotlin lookup passed an enclosing type that may have the member
@@ -503,7 +503,7 @@ unsafe fn kotlin_lookup(
     }
     invisible =
         (invisible) || (kl_invisible((addr_of_mut!(lv)) as *const KotlinLevel));
-    return if invisible { LK_INVISIBLE } else { LK_NONE };
+    if invisible { LK_INVISIBLE } else { LK_NONE }
 }
 
 // What a level with candidates is: one type, one property or one function.
@@ -538,10 +538,10 @@ unsafe fn kl_result(
     {
         let type_index: Resolution = type_result(c, ((*lv).types).ent, exact);
         (*(addr_of_mut!((*(*c.ix).stats).type_and_function)))
-            .fetch_add(1 as i64, Ordering::Relaxed);
+            .fetch_add(1_i64, Ordering::Relaxed);
         if type_index.st == JR_OK {
             (*(addr_of_mut!((*(*c.ix).stats).type_and_function_node)))
-                .fetch_add(1 as i64, Ordering::Relaxed);
+                .fetch_add(1_i64, Ordering::Relaxed);
         }
         return type_index;
     }
@@ -560,11 +560,11 @@ unsafe fn kl_result(
     } else {
         addr_of!((*lv).calls)
     };
-    return if (*m).several {
+    if (*m).several {
         unres(CBM_DOCLINK_REASON_AMBIGUOUS)
     } else {
         found_result(m, exact)
-    };
+    }
 }
 
 // A simple KDoc name.
@@ -621,7 +621,7 @@ unsafe fn kotlin_simple(c: &ResolveContext, name: *const c_char) -> Resolution {
             } else {
                 addr_of_mut!((*st).kotlin_open)
             }))
-            .fetch_add(1 as i64, Ordering::Relaxed);
+            .fetch_add(1_i64, Ordering::Relaxed);
             return unres(CBM_DOCLINK_REASON_EXTERNAL);
         }
         return kl_result(c, (addr_of_mut!(lv)) as *const KotlinLevel, exact);
@@ -631,11 +631,11 @@ unsafe fn kotlin_simple(c: &ResolveContext, name: *const c_char) -> Resolution {
         // the member that type may have
     }
     let res: Resolution = unfound_simple(c, name);
-    return if (gap) && (res.reason == CBM_DOCLINK_REASON_MISSING) {
+    if (gap) && (res.reason == CBM_DOCLINK_REASON_MISSING) {
         unres(CBM_DOCLINK_REASON_GRAPH_GAP)
     } else {
         res
-    };
+    }
 }
 
 // A (qualified) type name in a Kotlin file: the head through the scope or,
@@ -726,7 +726,7 @@ pub(super) unsafe fn kotlin_type_path(
                 st: (TP_PARTIAL),
                 ent: cur,
 
-                exact: exact,
+                exact,
                 ..TypePath::default()
             };
         }
@@ -735,12 +735,12 @@ pub(super) unsafe fn kotlin_type_path(
         }
         cur = next;
     }
-    return TypePath {
+    TypePath {
         st: (TP_OK),
         ent: cur,
-        exact: exact,
+        exact,
         ..TypePath::default()
-    };
+    }
 }
 
 pub(super) unsafe fn ext_key(
@@ -794,9 +794,9 @@ unsafe fn ext_in_scope(c: &ResolveContext, file: i32, m: *const Member) -> bool 
             } else {
                 i32::from(
                     ((strncmp(t, (*xf).package, pl) == 0)
-                        && (((*t.offset(pl as isize)) as i32) == b'.' as i32))
+                        && (((*t.add(pl)) as i32) == b'.' as i32))
                         && (strcmp(
-                            (t.offset(pl as isize)).offset(SKIP_ONE as isize),
+                            (t.add(pl)).offset(SKIP_ONE as isize),
                             (*m).name,
                         ) == 0),
                 )
@@ -808,7 +808,7 @@ unsafe fn ext_in_scope(c: &ResolveContext, file: i32, m: *const Member) -> bool 
             imp = import_next(c.f, (*m).name, imp);
         }
     }
-    return false;
+    false
 }
 
 // The extensions `name` in scope whose receiver is `ent`, else one of its
@@ -895,7 +895,7 @@ unsafe fn kotlin_extension(
             return true;
         }
     }
-    return false;
+    false
 }
 
 // `name` in the type `ent`, named explicitly: what the type holds itself
@@ -993,7 +993,7 @@ unsafe fn kotlin_in_type(
     if scope_unknown(ix, ent) {
         if has_ext {
             (*(addr_of_mut!((*(*ix).stats).kotlin_extension)))
-                .fetch_add(1 as i64, Ordering::Relaxed);
+                .fetch_add(1_i64, Ordering::Relaxed);
             return unres(CBM_DOCLINK_REASON_EXTERNAL);
         }
         return unres(if invisible {
@@ -1005,11 +1005,11 @@ unsafe fn kotlin_in_type(
     if has_ext {
         return ext;
     }
-    return unres(if invisible {
+    unres(if invisible {
         CBM_DOCLINK_REASON_TEST_ONLY
     } else {
         CBM_DOCLINK_REASON_MISSING
-    });
+    })
 }
 
 // True when `name` is a parameter or type parameter of the documented
@@ -1028,7 +1028,7 @@ unsafe fn kotlin_local(c: &ResolveContext, name: *const c_char) -> bool {
             return true;
         }
     }
-    return strcmp(name, c"this".as_ptr()) == 0;
+    strcmp(name, c"this".as_ptr()) == 0
 }
 
 // A dotted KDoc name. The qualifier is a type (found through the scope, or
@@ -1102,16 +1102,16 @@ unsafe fn kotlin_qualified(
     if kl_invisible((addr_of_mut!(lv)) as *const KotlinLevel) {
         return unres(CBM_DOCLINK_REASON_TEST_ONLY);
     }
-    return unfound_path(c, addr_of!((*r).segs).cast::<*mut c_char>(), n);
+    unfound_path(c, addr_of!((*r).segs).cast::<*mut c_char>(), n)
 }
 
 pub(super) unsafe fn kotlin_resolve(
     c: &ResolveContext,
     r: *const Reference,
 ) -> Resolution {
-    return if (*r).nsegs == SKIP_ONE {
+    if (*r).nsegs == SKIP_ONE {
         kotlin_simple(c, (((*r).segs)[0]) as *const c_char)
     } else {
         kotlin_qualified(c, r)
-    };
+    }
 }

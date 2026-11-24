@@ -297,7 +297,7 @@ unsafe fn walk_own(
         return true;
     }
     (*out).ent = JR_NONE;
-    return false;
+    false
 }
 
 // A step that is no type of the repository, taken from type `owner`. True
@@ -337,7 +337,7 @@ unsafe fn walk_marker(
     }
     (*out).kind = WK_GIVEN;
     (*out).ent = given;
-    return true;
+    true
 }
 
 // Whether the search ends where *out says. A method is linked where it is
@@ -372,7 +372,14 @@ unsafe fn walk_ends(
         (*out).kind = WK_NONE;
         (*out).ent = JR_NONE;
     }
-    return !(pass);
+    !(pass)
+}
+
+#[derive(Clone, Copy)]
+struct MethodQuery {
+    name: *const c_char,
+    selection: i32,
+    reference: *const Reference,
 }
 
 // Search own methods, the superclass, the interfaces in source order,
@@ -381,13 +388,16 @@ unsafe fn walk_ends(
 unsafe fn walk(
     c: &ResolveContext,
     start: i32,
-    name: *const c_char,
-    sel: i32,
-    r: *const Reference,
+    query: MethodQuery,
     cf: i32,
     peek: bool,
     out: *mut Walk,
 ) {
+    let MethodQuery {
+        name,
+        selection: sel,
+        reference: r,
+    } = query;
     let ix = c.ix;
     let mut slots = [0; WALK_SLOTS];
     let mut stack = [WalkFrame::new(start); WALK_LIMIT];
@@ -464,7 +474,7 @@ unsafe fn level_done(
     }
     *(invisible) = (*(invisible)) || ((*lv).invisible);
     clear_bytes(lv as *mut c_void, 0, size_of::<Candidates>());
-    return false;
+    false
 }
 
 // True when the type `ent` has a declaration in file `file`.
@@ -476,7 +486,7 @@ unsafe fn declared_in(ix: *const Index, ent: i32, file: i32) -> bool {
             return true;
         }
     }
-    return false;
+    false
 }
 
 // The member types an on-demand import of `target` offers under `name`.
@@ -620,7 +630,7 @@ unsafe fn java_type_lookup(
     if level_done(addr_of_mut!(lv), out, addr_of_mut!(invisible)) {
         return LK_FOUND;
     }
-    return if invisible { LK_INVISIBLE } else { LK_NONE };
+    if invisible { LK_INVISIBLE } else { LK_NONE }
 }
 
 // A (qualified) type name in a Java file: the head through the scope, the
@@ -683,7 +693,7 @@ pub(super) unsafe fn java_type_path(
         }
         return walk_nested(c, ent, segs, i + SKIP_ONE, n, true);
     }
-    return tp_res(unfound_path(c, segs, n));
+    tp_res(unfound_path(c, segs, n))
 }
 
 // True when a record declaration of `ent` has exactly the written parameter
@@ -715,7 +725,7 @@ unsafe fn record_canonical(
             return true;
         }
     }
-    return false;
+    false
 }
 
 // `Type#Type(..)` and `#Type(..)`: the constructors of that type alone; none
@@ -766,7 +776,7 @@ unsafe fn java_ctor(
     {
         return unres(CBM_DOCLINK_REASON_GRAPH_GAP);
     }
-    return unres(CBM_DOCLINK_REASON_MISSING);
+    unres(CBM_DOCLINK_REASON_MISSING)
 }
 
 // A method reference's outcome from javadoc's search `w` from `base`; `vs`:
@@ -776,13 +786,16 @@ unsafe fn java_ctor(
 unsafe fn java_method(
     c: &ResolveContext,
     base: i32,
-    name: *const c_char,
-    sel: i32,
-    r: *const Reference,
+    query: MethodQuery,
     w: *const Walk,
     vs: *const MemberSearch,
     exact: bool,
 ) -> Resolution {
+    let MethodQuery {
+        name,
+        selection: sel,
+        ..
+    } = query;
     if (((*w).kind) as u32) == (WK_FOUND as u32) {
         // without a list, several signatures are an overload group
         return if ((sel & JR_SEL_SIG) == 0) && (((*w).found).several) {
@@ -806,7 +819,7 @@ unsafe fn java_method(
         || ((((*w).kind) as u32) == (WK_OUTSIDE as u32))
     {
         let mut further: Walk = Walk::default();
-        walk(c, base, name, sel, r, JR_NONE, true, addr_of_mut!(further));
+        walk(c, base, query, JR_NONE, true, addr_of_mut!(further));
         if ((further.kind) as u32) == (WK_FOUND as u32) {
             let st: *mut Stats = (*c.ix).stats;
             (*(if (((*w).kind) as u32) == (WK_GIVEN as u32) {
@@ -814,7 +827,7 @@ unsafe fn java_method(
             } else {
                 addr_of_mut!((*st).java_open)
             }))
-            .fetch_add(1 as i64, Ordering::Relaxed);
+            .fetch_add(1_i64, Ordering::Relaxed);
         }
         return unres(CBM_DOCLINK_REASON_EXTERNAL);
     }
@@ -822,7 +835,7 @@ unsafe fn java_method(
     {
         return unres(CBM_DOCLINK_REASON_EXTERNAL);
     }
-    return unres(CBM_DOCLINK_REASON_MISSING);
+    unres(CBM_DOCLINK_REASON_MISSING)
 }
 
 // A field `vs` that javadoc's field search found for a reference without a
@@ -866,9 +879,11 @@ unsafe fn java_field(
     walk(
         c,
         start,
-        name,
-        JR_SEL_CALLABLES,
-        r,
+        MethodQuery {
+            name,
+            selection: JR_SEL_CALLABLES,
+            reference: r,
+        },
         cf,
         false,
         addr_of_mut!(w),
@@ -911,7 +926,7 @@ unsafe fn java_field(
         reason = CBM_DOCLINK_REASON_GRAPH_GAP;
     }
     *(yielded) = reason == CBM_DOCLINK_REASON_EXTERNAL;
-    return unres(reason);
+    unres(reason)
 }
 
 // The scope of `Type#x`: the type named and the types around it, innermost
@@ -974,19 +989,21 @@ unsafe fn java_member(
     {
         return java_ctor(c, base, r, exact);
     }
-    let sel: i32 = JR_SEL_CALLABLES | (if params { JR_SEL_SIG } else { 0 });
+    let query = MethodQuery {
+        name,
+        selection: JR_SEL_CALLABLES | if params { JR_SEL_SIG } else { 0 },
+        reference: r,
+    };
     let mut mw: Walk = Walk::default();
     // the method, as javadoc searches for it
     clear_bytes((addr_of_mut!(mw)) as *mut c_void, 0, size_of::<Walk>());
     mw.ent = JR_NONE;
     if params {
-        walk(c, base, name, sel, r, JR_NONE, false, addr_of_mut!(mw));
+        walk(c, base, query, JR_NONE, false, addr_of_mut!(mw));
         return java_method(
             c,
             base,
-            name,
-            sel,
-            r,
+            query,
             (addr_of_mut!(mw)) as *const Walk,
             ptr::null(),
             exact,
@@ -1046,7 +1063,7 @@ unsafe fn java_member(
             } else {
                 addr_of_mut!((*(*ix).stats).java_field_named)
             }))
-            .fetch_add(1 as i64, Ordering::Relaxed);
+            .fetch_add(1_i64, Ordering::Relaxed);
         }
         return res;
     }
@@ -1055,18 +1072,16 @@ unsafe fn java_member(
         // a hidden field would come first
     }
     if !(values_only) {
-        walk(c, base, name, sel, r, JR_NONE, false, addr_of_mut!(mw));
+        walk(c, base, query, JR_NONE, false, addr_of_mut!(mw));
     }
-    return java_method(
+    java_method(
         c,
         base,
-        name,
-        sel,
-        r,
+        query,
         (addr_of_mut!(mw)) as *const Walk,
         (addr_of_mut!(vs)) as *const MemberSearch,
         exact,
-    );
+    )
 }
 
 pub(super) unsafe fn java_resolve(
@@ -1137,5 +1152,5 @@ pub(super) unsafe fn java_resolve(
             return m;
         }
     }
-    return tp.res;
+    tp.res
 }
