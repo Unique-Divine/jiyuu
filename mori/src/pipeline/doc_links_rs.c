@@ -3,6 +3,8 @@
  *
  * The index is built from the scope blobs of the repository's Rust files and
  * Cargo manifests (internal/cbm/doclink_rs.c); nothing is read from disk.
+ * Rust builds the Cargo topology, walks paths, and chooses link outcomes.
+ * This adapter owns source-scope decoding and the native binding tables.
  * Graph nodes are looked up by qualified name only, and a node is taken only
  * when its label and file are the declaration's, so the closure-repair route
  * (line-less proxy nodes) resolves exactly as a full build does.
@@ -64,7 +66,6 @@
 #include "foundation/log.h"
 #include "foundation/mem_core.h"
 
-#include <ctype.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -77,8 +78,6 @@ enum {
     RS_NS_ALL = 7,
     RS_NS_COUNT = 3,
 };
-
-static const int RS_NS_LIST[RS_NS_COUNT] = {RS_NS_TYPE, RS_NS_VALUE, RS_NS_MACRO};
 
 /* What a path names. */
 enum {
@@ -94,40 +93,18 @@ enum {
 enum {
     RS_SET_CAP = 8,        /* distinct candidates kept; more is ambiguous either way */
     RS_ROOTS_KEPT = 4,     /* crate roots kept per file; a file of more has no single crate */
-    RS_IMPORT_PASSES = 32, /* an import behind a longer chain of imports is not followed */
     RS_ALIAS_HOPS = 8,     /* a chain of type aliases; longer is not followed */
     RS_UP_STEPS = 256,     /* module ancestors walked for one question; more is unknown */
     RS_GLOB_VISIT = 64,    /* modules reached through globs for one name; more is unknown */
     RS_IMPL_SCAN = 256,    /* trait impls of one type searched for a default item */
-    RS_QN_BUF = 2048,
-    RS_PATH_BUF = 1024,
-    RS_PATH_DEPTH = RS_PATH_BUF / 2, /* inline modules around a `mod x;` */
     RS_FIELDS_MAX = 9,
-    RS_TAIL = 4, /* path components read from the end */
-    RS_EDITION_2015 = 2015,
-    RS_EDITION_2018 = 2018,
     RS_EDITION_UNKNOWN = 0,
-    RS_EDITION_INHERITED = -1,
-    RS_EDITION_UNREADABLE = -2,
     RS_PKG_NONE = -1,
-    RS_PKG_CONFLICT = -2,
-    RS_VIEW_A = 1, /* out-of-line children are read beside the file */
-    RS_VIEW_B = 2, /* ... from the directory named like the file */
-    RS_RS_EXT = 3, /* strlen(".rs") */
 };
 
 enum { RS_FILE_OTHER = 0, RS_FILE_SOURCE, RS_FILE_MANIFEST };
 enum { RS_BIND_ITEM = 0, RS_BIND_CHILD, RS_BIND_IMPORT, RS_BIND_MAYBE };
 enum { RS_STATE_NEW = 0, RS_STATE_DONE };
-enum {
-    RS_TARGET_LIB = 0,
-    RS_TARGET_BIN,
-    RS_TARGET_EXAMPLE,
-    RS_TARGET_TEST,
-    RS_TARGET_BENCH,
-    RS_TARGET_BUILD
-};
-
 typedef struct {
     uint8_t kind;    /* RS_E_* */
     bool via_import; /* bound by a named import: an exact naming */
@@ -313,12 +290,8 @@ typedef struct {
     bool test_path;
     bool broken; /* its modules may declare names the blob does not show */
     bool fresh;  /* re-extracted in this run: its blob has line numbers */
-    bool crate_root;
-    bool queued;
     bool roots_top; /* more crate roots than are kept */
     bool in_lib;    /* some crate root of it is a package's lib target */
-    uint8_t views;  /* RS_VIEW_* its `mod x;` declarations are read under */
-    uint8_t views_done;
     uint32_t err_line; /* first line whose definitions have no scope; 0: none */
     int mod_base;      /* its root module */
     int nmods;
@@ -343,42 +316,17 @@ typedef struct {
 } rs_file_t;
 
 typedef struct {
-    char kind; /* d dependencies, v dev, b build, w workspace.dependencies */
-    const char *name;
-    const char *attr; /* "-", "path", "package", "workspace" */
-    const char *value;
-    int seq;
-} rs_rawdep_t;
-
-typedef struct {
     const char *key; /* the crate's name in scope */
     rs_ent_t target;
 } rs_dep_t;
 
 typedef struct {
-    int file;
-    const char *dir; /* "" for the repository root */
-    const char *name;
-    const char *lib_name; /* the lib crate's name; NULL when it has none that is known */
-    const char *lib_path;
-    const char *build;
-    bool has_package;
-    bool is_workspace;
-    bool broken;
-    bool no_autobins;
-    bool no_autoexamples;
-    bool no_autotests;
-    bool no_autobenches;
+    const char *lib_name;
+    int lib_root;
     int edition;
-    int ws_edition;
-    rs_rawdep_t *raw;
-    int nraw;
-    const char **targets; /* explicit target paths, as written */
-    int ntargets;
+    bool broken;
     rs_dep_t *deps; /* sorted by key */
     int ndeps;
-    int lib_root; /* the lib target's root module, CBM_NOT_FOUND when it has none */
-    int ws;       /* its workspace root's package, CBM_NOT_FOUND */
 } rs_pkg_t;
 
 typedef struct {
@@ -395,7 +343,6 @@ typedef struct {
     rs_decl_t *decls;
     int ndecls;
     rs_attach_t *attach;
-    int nattach;
     rs_item_t *items;
     int nitems;
     rs_member_t *members;
@@ -433,8 +380,6 @@ typedef struct {
     int ntest_lines;
     rs_pkg_t *pkgs;
     int npkgs;
-    CBMHashTable *file_by_path; /* rel_path -> file + 1 */
-    CBMHashTable *pkg_by_dir;   /* directory -> package + 1 */
     CBMHashTable *blanket;      /* names of members of impls for no named type */
     int crate_roots;
     int orphans;
@@ -497,58 +442,6 @@ static bool rs_ends_with(const char *s, const char *suffix) {
 static const char *rs_basename(const char *rel) {
     const char *slash = strrchr(rel, '/');
     return slash ? slash + SKIP_ONE : rel;
-}
-
-/* Append "/" and s[0..n) to the path in out[0..*w); nothing when n is 0. false
- * when it does not fit. */
-static bool rs_path_put(char *out, size_t cap, size_t *w, const char *s, size_t n) {
-    if (n == 0) {
-        return true;
-    }
-    if (*w + n + PAIR_LEN >= cap) {
-        return false;
-    }
-    if (*w > 0) {
-        out[(*w)++] = '/';
-    }
-    memcpy(out + *w, s, n);
-    *w += n;
-    out[*w] = '\0';
-    return true;
-}
-
-/* Normalize `dir`/`path` (repository-relative): "." and ".." segments, doubled
- * and trailing slashes. false when it leaves the repository or does not fit. */
-static bool rs_join_path(const char *dir, const char *path, char *out, size_t cap) {
-    char tmp[RS_PATH_BUF];
-    int k = (path[0] == '/') ? CBM_NOT_FOUND
-                             : snprintf(tmp, sizeof(tmp), "%s%s%s", dir, dir[0] ? "/" : "", path);
-    if (k < 0 || (size_t)k >= sizeof(tmp)) {
-        return false;
-    }
-    size_t w = 0;
-    out[0] = '\0';
-    for (const char *p = tmp; *p;) {
-        const char *slash = strchr(p, '/');
-        size_t len = slash ? (size_t)(slash - p) : strlen(p);
-        const char *next = slash ? slash + SKIP_ONE : p + len;
-        if (len == PAIR_LEN && p[0] == '.' && p[1] == '.') {
-            if (w == 0) {
-                return false;
-            }
-            while (w > 0 && out[w - SKIP_ONE] != '/') {
-                w--;
-            }
-            w = w > 0 ? w - SKIP_ONE : 0;
-            out[w] = '\0';
-        } else if (len > 0 && !(len == SKIP_ONE && p[0] == '.')) {
-            if (!rs_path_put(out, cap, &w, p, len)) {
-                return false;
-            }
-        }
-        p = next;
-    }
-    return true;
 }
 
 static bool rs_is_test_dir(const char *seg, size_t n) {
@@ -676,18 +569,6 @@ static bool rs_set_has(const rs_set_t *s, rs_ent_t e) {
     return false;
 }
 
-static bool rs_set_equal(const rs_set_t *a, const rs_set_t *b) {
-    if (a->n != b->n || a->overflow || b->overflow) {
-        return false;
-    }
-    for (int i = 0; i < a->n; i++) {
-        if (!rs_set_has(b, a->v[i])) {
-            return false;
-        }
-    }
-    return true;
-}
-
 /* ── Scope blobs: counting ───────────────────────────────────────── */
 
 typedef struct {
@@ -700,8 +581,6 @@ typedef struct {
     int maybes;
     int locals;
     int unowned;
-    int deps;
-    int targets;
     int macuses;
     int macdecls;
 } rs_counts_t;
@@ -751,12 +630,6 @@ static void rs_count_blob(const char *blob, rs_counts_t *c) {
             break;
         case 'Z':
             c->unowned++;
-            break;
-        case 'X':
-            c->deps++;
-            break;
-        case 'a':
-            c->targets++;
             break;
         default:
             break;
@@ -1124,677 +997,179 @@ static void rs_read_source(rs_index_t *ix, int fi, const char *blob) {
     }
 }
 
-/* ── Scope blobs: a Cargo manifest ───────────────────────────────── */
-
-static int rs_parse_edition(const char *value) {
-    char *end = NULL;
-    long year = strtol(value, &end, CBM_DECIMAL_BASE);
-    if (end == value || *end || year < RS_EDITION_2015) {
-        return RS_EDITION_UNREADABLE;
-    }
-    return (int)year;
-}
-
-static bool rs_is_false(const char *value) {
-    return strcmp(value, "false") == 0;
-}
-
-static void rs_package_key(rs_pkg_t *p, const char *key, const char *value) {
-    if (strcmp(key, "name") == 0) {
-        p->name = strcmp(value, "?") != 0 ? value : NULL;
-    } else if (strcmp(key, "edition") == 0) {
-        p->edition = rs_parse_edition(value);
-    } else if (strcmp(key, "edition.workspace") == 0) {
-        p->edition = RS_EDITION_INHERITED;
-    } else if (strcmp(key, "build") == 0) {
-        p->build = value;
-    } else if (strcmp(key, "autobins") == 0) {
-        p->no_autobins = rs_is_false(value);
-    } else if (strcmp(key, "autoexamples") == 0) {
-        p->no_autoexamples = rs_is_false(value);
-    } else if (strcmp(key, "autotests") == 0) {
-        p->no_autotests = rs_is_false(value);
-    } else if (strcmp(key, "autobenches") == 0) {
-        p->no_autobenches = rs_is_false(value);
-    }
-}
-
-static void rs_manifest_key(rs_pkg_t *p, const char *table, const char *key, const char *value) {
-    if (strcmp(table, "package") == 0) {
-        p->has_package = true;
-        rs_package_key(p, key, value);
-    } else if (strcmp(table, "lib") == 0) {
-        if (strcmp(key, "name") == 0) {
-            p->lib_name = value;
-        } else if (strcmp(key, "path") == 0) {
-            p->lib_path = value;
-        }
-    } else if (strcmp(table, "workspace.package") == 0 && strcmp(key, "edition") == 0) {
-        p->ws_edition = rs_parse_edition(value);
-    }
-}
-
-static void rs_manifest_record(rs_pkg_t *p, char *line) {
-    enum { F_1 = 1, F_2, F_3, F_4, K_FIELDS = 4, A_FIELDS = 3, X_FIELDS = 5 };
-    char *fld[X_FIELDS];
-    char tag = line[0];
-    int n = rs_fields(line, fld, X_FIELDS);
-    if (tag == 'K' && n == K_FIELDS) {
-        rs_manifest_key(p, fld[F_1], fld[F_2], fld[F_3]);
-    } else if (tag == 'a' && n == A_FIELDS && strcmp(fld[F_1], "path") == 0) {
-        p->targets[p->ntargets++] = fld[F_2];
-    } else if (tag == 'W') {
-        p->is_workspace = true;
-    } else if (tag == 'X' && n == X_FIELDS && fld[F_1][0]) {
-        p->raw[p->nraw] = (rs_rawdep_t){.kind = fld[F_1][0],
-                                        .name = fld[F_2],
-                                        .attr = fld[F_3],
-                                        .value = fld[F_4],
-                                        .seq = p->nraw};
-        p->nraw++;
-    } else if (tag == 'B') {
-        p->broken = true;
-    }
-}
-
-static void rs_read_manifest(rs_index_t *ix, int fi, const char *blob) {
-    rs_pkg_t *p = &ix->pkgs[ix->npkgs];
-    const char *rel = ix->files[fi].rel_path;
-    const char *slash = strrchr(rel, '/');
-    rs_counts_t c = {0};
-    rs_count_blob(blob, &c);
-    memset(p, 0, sizeof(*p));
-    p->file = fi;
-    p->dir = ix_strndup(ix, rel, slash ? (size_t)(slash - rel) : 0);
-    p->lib_root = CBM_NOT_FOUND;
-    p->ws = CBM_NOT_FOUND;
-    p->raw = (rs_rawdep_t *)ix_alloc(ix, (size_t)c.deps * sizeof(rs_rawdep_t));
-    p->targets = (const char **)ix_alloc(ix, (size_t)c.targets * sizeof(char *));
-    char *buf = ix_strdup(ix, blob);
-    if (!buf || !p->dir || !p->raw || !p->targets) {
-        return;
-    }
-    int skipped = 0;
-    for (char *line = buf; line && *line;) {
-        char *nl = strchr(line, '\n');
-        if (nl) {
-            *nl = '\0';
-        }
-        if (skipped >= PAIR_LEN) { /* after the tag line and the "C" line */
-            rs_manifest_record(p, line);
-        }
-        skipped++;
-        line = nl ? nl + SKIP_ONE : NULL;
-    }
-    ix->npkgs++;
-}
-
-/* ── Paths -> files and packages ─────────────────────────────────── */
-
-static int rs_file_at(const rs_index_t *ix, const char *rel) {
-    return (int)(intptr_t)cbm_ht_get(ix->file_by_path, rel) - SKIP_ONE;
-}
-
-/* The source file at `rel`, CBM_NOT_FOUND when none is indexed. */
-static int rs_source_at(const rs_index_t *ix, const char *rel) {
-    int fi = rs_file_at(ix, rel);
-    return (fi >= 0 && ix->files[fi].kind == RS_FILE_SOURCE) ? fi : CBM_NOT_FOUND;
-}
-
-/* The package whose manifest is in directory `dir` ("" at the root). */
-static int rs_pkg_at(const rs_index_t *ix, const char *dir) {
-    return (int)(intptr_t)cbm_ht_get(ix->pkg_by_dir, dir[0] ? dir : ".") - SKIP_ONE;
-}
-
-/* `-` in a package name is `_` in the crate's name. */
-static const char *rs_crate_name(rs_index_t *ix, const char *name) {
-    char *out = ix_strdup(ix, name);
-    for (char *p = out; p && *p; p++) {
-        if (*p == '-') {
-            *p = '_';
-        }
-    }
-    return out;
-}
-
-/* The workspace root of package `pi`: the nearest manifest with a [workspace]
- * table at or above its directory. */
-static int rs_workspace_of(const rs_index_t *ix, int pi) {
-    char dir[RS_PATH_BUF];
-    if (snprintf(dir, sizeof(dir), "%s", ix->pkgs[pi].dir) >= (int)sizeof(dir)) {
-        return CBM_NOT_FOUND;
-    }
-    for (;;) {
-        int q = rs_pkg_at(ix, dir);
-        if (q >= 0 && ix->pkgs[q].is_workspace) {
-            return q;
-        }
-        if (!dir[0]) {
-            return CBM_NOT_FOUND;
-        }
-        char *slash = strrchr(dir, '/');
-        if (slash) {
-            *slash = '\0';
-        } else {
-            dir[0] = '\0';
-        }
-    }
-}
-
-/* The edition of package `pkg`: a year, or RS_EDITION_UNKNOWN. A manifest
- * without the key is edition 2015 (Cargo's default). */
-static int rs_edition(const rs_index_t *ix, int pkg) {
-    if (pkg < 0) {
-        return RS_EDITION_UNKNOWN;
-    }
-    const rs_pkg_t *p = &ix->pkgs[pkg];
-    int edition = p->edition;
-    if (edition == RS_EDITION_INHERITED) {
-        edition = p->ws >= 0 ? ix->pkgs[p->ws].ws_edition : RS_EDITION_UNREADABLE;
-    }
-    if (edition == 0) {
-        return p->broken ? RS_EDITION_UNKNOWN : RS_EDITION_2015;
-    }
-    return edition > 0 ? edition : RS_EDITION_UNKNOWN;
-}
-
-/* ── Crate roots ─────────────────────────────────────────────────── */
-
-static void rs_mark_root(rs_index_t *ix, int fi, int pi, bool lib) {
-    rs_file_t *f = &ix->files[fi];
-    if (!f->crate_root) {
-        f->crate_root = true;
-        f->root_pkg = pi;
-        ix->crate_roots++;
-    } else if (f->root_pkg != pi) {
-        f->root_pkg = RS_PKG_CONFLICT; /* a target of two packages */
-    }
-    if (lib && ix->pkgs[pi].lib_root < 0) {
-        ix->pkgs[pi].lib_root = f->mod_base;
-    }
-}
-
-/* A target path written in a manifest. */
-static void rs_claim_path(rs_index_t *ix, int pi, const char *path, bool lib) {
-    char rel[RS_PATH_BUF];
-    if (strcmp(path, "?") == 0 || !rs_join_path(ix->pkgs[pi].dir, path, rel, sizeof(rel))) {
-        return;
-    }
-    int fi = rs_source_at(ix, rel);
-    if (fi >= 0) {
-        rs_mark_root(ix, fi, pi, lib);
-    }
-}
-
-static void rs_explicit_roots(rs_index_t *ix, int pi) {
-    const rs_pkg_t *p = &ix->pkgs[pi];
-    if (!p->has_package) {
-        return;
-    }
-    if (p->lib_path) {
-        rs_claim_path(ix, pi, p->lib_path, true);
-    }
-    for (int i = 0; i < p->ntargets; i++) {
-        rs_claim_path(ix, pi, p->targets[i], false);
-    }
-    if (p->build && !rs_is_false(p->build) && strcmp(p->build, "true") != 0) {
-        rs_claim_path(ix, pi, p->build, false);
-    }
-}
-
-/* The last components of a path, c[0] the file name. */
+/* The Rust topology builder borrows the resolver's source and manifest facts.
+ * Its output is copied into the native lookup index before worker threads run. */
 typedef struct {
-    const char *c[RS_TAIL];
-    size_t len[RS_TAIL];
-    int n;
-} rs_tail_t;
+    rs_index_t *ix;
+    const cbm_doclink_build_in_t *in;
+} rs_cargo_host_t;
 
-static void rs_tail(const char *rel, rs_tail_t *t) {
-    memset(t, 0, sizeof(*t));
-    const char *end = rel + strlen(rel);
-    while (t->n < RS_TAIL && end > rel) {
-        const char *s = end;
-        while (s > rel && s[-SKIP_ONE] != '/') {
-            s--;
-        }
-        t->c[t->n] = s;
-        t->len[t->n] = (size_t)(end - s);
-        t->n++;
-        end = s > rel ? s - SKIP_ONE : rel;
-    }
-}
-
-static bool rs_tail_is(const rs_tail_t *t, int k, const char *name) {
-    return k < t->n && strlen(name) == t->len[k] && memcmp(t->c[k], name, t->len[k]) == 0;
-}
-
-/* The package whose directory holds component `k` of `rel`. */
-static int rs_pkg_before(const rs_index_t *ix, const char *rel, const rs_tail_t *t, int k) {
-    char dir[RS_PATH_BUF];
-    if (k >= t->n) {
-        return CBM_NOT_FOUND;
-    }
-    size_t dl = (size_t)(t->c[k] - rel);
-    size_t n = dl > 0 ? dl - SKIP_ONE : 0;
-    if (n >= sizeof(dir)) {
-        return CBM_NOT_FOUND;
-    }
-    memcpy(dir, rel, n);
-    dir[n] = '\0';
-    return rs_pkg_at(ix, dir);
-}
-
-/* A file where Cargo discovers a target of package `pi` on its own. */
-static void rs_claim_auto(rs_index_t *ix, int fi, int pi, int target) {
-    if (pi < 0 || !ix->pkgs[pi].has_package) {
-        return;
-    }
-    const rs_pkg_t *p = &ix->pkgs[pi];
-    bool off =
-        (target == RS_TARGET_LIB && p->lib_path) || (target == RS_TARGET_BIN && p->no_autobins) ||
-        (target == RS_TARGET_EXAMPLE && p->no_autoexamples) ||
-        (target == RS_TARGET_TEST && p->no_autotests) ||
-        (target == RS_TARGET_BENCH && p->no_autobenches) || (target == RS_TARGET_BUILD && p->build);
-    if (!off) {
-        rs_mark_root(ix, fi, pi, target == RS_TARGET_LIB);
-    }
-}
-
-/* Cargo's target auto-discovery, read off the file's own path. */
-static void rs_auto_roots(rs_index_t *ix, int fi) {
-    static const struct {
-        const char *dir;
-        int target;
-    } dirs[] = {
-        {"examples", RS_TARGET_EXAMPLE}, {"tests", RS_TARGET_TEST}, {"benches", RS_TARGET_BENCH}};
-    enum { C0 = 0, C1, C2, C3 };
-    const char *rel = ix->files[fi].rel_path;
-    rs_tail_t t;
-    rs_tail(rel, &t);
-    bool main_rs = rs_tail_is(&t, C0, "main.rs");
-    if (rs_tail_is(&t, C1, "src")) {
-        if (rs_tail_is(&t, C0, "lib.rs")) {
-            rs_claim_auto(ix, fi, rs_pkg_before(ix, rel, &t, C1), RS_TARGET_LIB);
-        }
-        if (main_rs) {
-            rs_claim_auto(ix, fi, rs_pkg_before(ix, rel, &t, C1), RS_TARGET_BIN);
-        }
-    }
-    if (rs_tail_is(&t, C1, "bin") && rs_tail_is(&t, C2, "src")) {
-        rs_claim_auto(ix, fi, rs_pkg_before(ix, rel, &t, C2), RS_TARGET_BIN);
-    }
-    if (main_rs && rs_tail_is(&t, C2, "bin") && rs_tail_is(&t, C3, "src")) {
-        rs_claim_auto(ix, fi, rs_pkg_before(ix, rel, &t, C3), RS_TARGET_BIN);
-    }
-    for (size_t i = 0; i < sizeof(dirs) / sizeof(dirs[0]); i++) {
-        if (rs_tail_is(&t, C1, dirs[i].dir)) {
-            rs_claim_auto(ix, fi, rs_pkg_before(ix, rel, &t, C1), dirs[i].target);
-        }
-        if (main_rs && rs_tail_is(&t, C2, dirs[i].dir)) {
-            rs_claim_auto(ix, fi, rs_pkg_before(ix, rel, &t, C2), dirs[i].target);
-        }
-    }
-    if (rs_tail_is(&t, C0, "build.rs")) {
-        rs_claim_auto(ix, fi, rs_pkg_before(ix, rel, &t, C0), RS_TARGET_BUILD);
-    }
-}
-
-static void rs_crate_roots(rs_index_t *ix) {
-    for (int pi = 0; pi < ix->npkgs; pi++) {
-        ix->pkgs[pi].ws = rs_workspace_of(ix, pi);
-        rs_explicit_roots(ix, pi);
-    }
-    for (int fi = 0; fi < ix->nfiles; fi++) {
-        if (ix->files[fi].kind == RS_FILE_SOURCE) {
-            rs_auto_roots(ix, fi);
-        }
-    }
-    for (int pi = 0; pi < ix->npkgs; pi++) {
-        rs_pkg_t *p = &ix->pkgs[pi];
-        const char *name = p->lib_name ? p->lib_name : p->name;
-        p->lib_name = (name && strcmp(name, "?") != 0) ? rs_crate_name(ix, name) : NULL;
-    }
-}
-
-/* ── `mod x;` -> file ────────────────────────────────────────────── */
-
-/* The directory the file of declaration `d` is looked for in, under view
- * `view` of the declaring file: the file's directory, the file's stem (view
- * B), then the inline modules around the declaration. A `#[path]` directly in
- * a file is relative to the file's directory under either view. false when
- * it is not known (a `#[path]` on an inline module) or too long to be a path. */
-static bool rs_decl_dir(const rs_index_t *ix, const rs_decl_t *d, int view, char *out, size_t cap) {
-    const char *names[RS_PATH_DEPTH];
-    int n = 0;
-    int m = d->mod;
-    while (ix->mods[m].parent >= 0) {
-        if (ix->mods[m].path_attr || n >= RS_PATH_DEPTH) {
-            return false;
-        }
-        names[n++] = ix->mods[m].name;
-        m = ix->mods[m].parent;
-    }
-    const char *rel = ix->files[ix->mods[m].file].rel_path;
-    const char *base = rs_basename(rel);
-    size_t w = 0;
-    out[0] = '\0';
-    if (base > rel && !rs_path_put(out, cap, &w, rel, (size_t)(base - rel) - SKIP_ONE)) {
-        return false;
-    }
-    bool stem = view == RS_VIEW_B && !(d->path && n == 0);
-    size_t bl = strlen(base);
-    if (stem && (bl <= RS_RS_EXT || !rs_path_put(out, cap, &w, base, bl - RS_RS_EXT))) {
-        return false;
-    }
-    for (int i = n - SKIP_ONE; i >= 0; i--) {
-        if (!rs_path_put(out, cap, &w, names[i], strlen(names[i]))) {
-            return false;
-        }
-    }
-    return true;
-}
-
-/* A file a declaration can name, and the view the file is then read under. */
 typedef struct {
+    const char *path;
+    const char *scope;
+    uint8_t kind;
+    bool test_path;
+    int first_module;
+    int module_count;
+    int first_decl;
+    int decl_count;
+} rs_cargo_file_t;
+
+typedef struct {
+    const char *name;
     int file;
-    uint8_t implies;
-} rs_cand_t;
-
-static int rs_cand_add(const rs_index_t *ix, const char *rel, uint8_t implies, rs_cand_t *out,
-                       int n) {
-    int fi = rs_source_at(ix, rel);
-    if (fi >= 0) {
-        out[n++] = (rs_cand_t){.file = fi, .implies = implies};
-    }
-    return n;
-}
-
-/* The indexed files declaration `d` can name under `view`: rustc reads
- * `<dir>/<name>.rs` (its own children then live under `<name>/`) or
- * `<dir>/<name>/mod.rs`, or the `#[path]` file (children beside it). */
-static int rs_decl_cands(const rs_index_t *ix, const rs_decl_t *d, int view,
-                         rs_cand_t out[PAIR_LEN]) {
-    char dir[RS_PATH_BUF];
-    char path[RS_PATH_BUF];
-    int n = 0;
-    if (d->cond_path || !rs_decl_dir(ix, d, view, dir, sizeof(dir))) {
-        return 0;
-    }
-    if (d->path) {
-        if (rs_join_path(dir, d->path, path, sizeof(path))) {
-            n = rs_cand_add(ix, path, RS_VIEW_A, out, n);
-        }
-        return n;
-    }
-    const char *sep = dir[0] ? "/" : "";
-    if (snprintf(path, sizeof(path), "%s%s%s.rs", dir, sep, d->name) < (int)sizeof(path)) {
-        n = rs_cand_add(ix, path, RS_VIEW_B, out, n);
-    }
-    if (snprintf(path, sizeof(path), "%s%s%s/mod.rs", dir, sep, d->name) < (int)sizeof(path)) {
-        n = rs_cand_add(ix, path, RS_VIEW_A, out, n);
-    }
-    return n;
-}
+    int parent;
+    bool path_attr;
+    bool cfg_test;
+} rs_cargo_module_t;
 
 typedef struct {
-    int *v;
-    int n;
-} rs_stack_t;
+    const char *name;
+    const char *path;
+    int module;
+    bool cond_path;
+    bool cfg_test;
+} rs_cargo_decl_t;
 
-static void rs_views_push(rs_index_t *ix, rs_stack_t *st, int fi, uint8_t bits) {
-    rs_file_t *f = &ix->files[fi];
-    if ((f->views | bits) == f->views) {
+typedef struct {
+    int root_package;
+    int package;
+    int roots[RS_ROOTS_KEPT];
+    int count;
+    bool overflow;
+    bool in_lib;
+} rs_cargo_reach_t;
+
+enum { RS_CARGO_DEP_MODULE = 1, RS_CARGO_DEP_EXTERNAL, RS_CARGO_DEP_GAP };
+
+typedef struct {
+    const char *key;
+    size_t key_len;
+    uint8_t kind;
+    int module;
+} rs_cargo_dep_t;
+
+typedef struct {
+    rs_cargo_file_t (*file)(const rs_cargo_host_t *, int);
+    rs_cargo_module_t (*module)(const rs_cargo_host_t *, int);
+    rs_cargo_decl_t (*decl)(const rs_cargo_host_t *, int);
+    void (*set_reach)(rs_cargo_host_t *, int, rs_cargo_reach_t);
+    void (*set_product)(rs_cargo_host_t *, int, bool);
+    void (*set_attachments)(rs_cargo_host_t *, const rs_attach_t *, size_t);
+    void (*set_package)(rs_cargo_host_t *, int, int, bool, int, const char *, size_t,
+                        const rs_cargo_dep_t *, size_t);
+} rs_cargo_ops_t;
+
+_Static_assert(RS_FILE_SOURCE == 1 && RS_FILE_MANIFEST == 2 && RS_ROOTS_KEPT == 4 &&
+                   RS_PKG_NONE == -1,
+               "Rust doc link Cargo ABI");
+
+int mori_rust_doc_cargo_build(rs_cargo_host_t *host, const rs_cargo_ops_t *ops, int files,
+                              int modules, int declarations);
+
+static rs_cargo_file_t rs_cargo_file(const rs_cargo_host_t *host, int id) {
+    const rs_file_t *f = &host->ix->files[id];
+    return (rs_cargo_file_t){
+        .path = f->rel_path,
+        .scope = host->in->files[id].scope,
+        .kind = f->kind,
+        .test_path = f->test_path,
+        .first_module = f->mod_base,
+        .module_count = f->nmods,
+        .first_decl = f->decl_first,
+        .decl_count = f->decl_count,
+    };
+}
+
+static rs_cargo_module_t rs_cargo_module(const rs_cargo_host_t *host, int id) {
+    const rs_mod_t *m = &host->ix->mods[id];
+    return (rs_cargo_module_t){m->name, m->file, m->parent, m->path_attr, m->cfg_test};
+}
+
+static rs_cargo_decl_t rs_cargo_decl(const rs_cargo_host_t *host, int id) {
+    const rs_decl_t *d = &host->ix->decls[id];
+    return (rs_cargo_decl_t){d->name, d->path, d->mod, d->cond_path, d->cfg_test};
+}
+
+static void rs_cargo_set_reach(rs_cargo_host_t *host, int id, rs_cargo_reach_t reach) {
+    rs_file_t *f = &host->ix->files[id];
+    f->root_pkg = reach.root_package;
+    f->pkg = reach.package;
+    memcpy(f->roots, reach.roots, sizeof(f->roots));
+    f->nroots = reach.count;
+    f->roots_top = reach.overflow;
+    f->in_lib = reach.in_lib;
+    host->ix->crate_roots += f->root_pkg != RS_PKG_NONE;
+}
+
+static void rs_cargo_set_product(rs_cargo_host_t *host, int id, bool product) {
+    host->ix->mods[id].product = product;
+}
+
+static void rs_cargo_set_attachments(rs_cargo_host_t *host, const rs_attach_t *attach, size_t n) {
+    if (n == 0) {
         return;
     }
-    f->views |= bits;
-    if (!f->queued) {
-        f->queued = true;
-        st->v[st->n++] = fi;
-    }
-}
-
-/* Propagate views until nothing changes. A file is processed once per view it
- * gains, so the work is linear in the declarations. */
-static void rs_views_run(rs_index_t *ix, rs_stack_t *st) {
-    while (st->n > 0) {
-        int fi = st->v[--st->n];
-        rs_file_t *f = &ix->files[fi];
-        f->queued = false;
-        uint8_t todo = f->views & (uint8_t)~f->views_done;
-        f->views_done |= todo;
-        for (int view = RS_VIEW_A; view <= RS_VIEW_B; view++) {
-            for (int d = f->decl_first; (todo & view) && d < f->decl_first + f->decl_count; d++) {
-                rs_cand_t c[PAIR_LEN];
-                int n = rs_decl_cands(ix, &ix->decls[d], view, c);
-                for (int k = 0; k < n; k++) {
-                    rs_views_push(ix, st, c[k].file, c[k].implies);
-                }
-            }
-        }
-    }
-}
-
-/* The one file declaration `d` names under the views of its file, or
- * CBM_NOT_FOUND when there is none or more than one. */
-static int rs_decl_file(const rs_index_t *ix, const rs_decl_t *d) {
-    const rs_file_t *f = &ix->files[ix->mods[d->mod].file];
-    int found = CBM_NOT_FOUND;
-    for (int view = RS_VIEW_A; view <= RS_VIEW_B; view++) {
-        rs_cand_t c[PAIR_LEN];
-        int n = (f->views & view) ? rs_decl_cands(ix, d, view, c) : 0;
-        for (int k = 0; k < n; k++) {
-            if (found >= 0 && found != c[k].file) {
-                return CBM_NOT_FOUND;
-            }
-            found = c[k].file;
-        }
-    }
-    return found;
-}
-
-static int rs_attach_cmp(const void *a, const void *b) {
-    const rs_attach_t *x = (const rs_attach_t *)a;
-    const rs_attach_t *y = (const rs_attach_t *)b;
-    if (x->child != y->child) {
-        return x->child < y->child ? -1 : 1;
-    }
-    return (x->decl > y->decl) - (x->decl < y->decl);
-}
-
-/* Decide which file every `mod x;` names.
- *
- * Where rustc looks depends on how the DECLARING file was reached: beside it
- * (view A: a crate root, a mod.rs, a `#[path]` file) or under a directory
- * named like it (view B: `name.rs` found by its parent). Views are propagated
- * from the crate roots to a fixed point; a file nothing reaches may be either,
- * and so may one reached both ways. Under both views a declaration names a
- * file only when exactly one indexed file fits. */
-static void rs_module_tree(rs_index_t *ix) {
-    rs_stack_t st = {.v = (int *)ix_alloc(ix, (size_t)ix->nfiles * sizeof(int))};
-    ix->attach = (rs_attach_t *)ix_alloc(ix, (size_t)ix->ndecls * sizeof(rs_attach_t));
-    if (!st.v || !ix->attach) {
+    rs_index_t *ix = host->ix;
+    ix->attach = ix_alloc(ix, n * sizeof(*attach));
+    if (!ix->attach) {
         return;
     }
-    for (int fi = 0; fi < ix->nfiles; fi++) {
-        const rs_file_t *f = &ix->files[fi];
-        bool beside = f->crate_root || strcmp(rs_basename(f->rel_path), "mod.rs") == 0;
-        if (f->kind == RS_FILE_SOURCE && beside) {
-            rs_views_push(ix, &st, fi, RS_VIEW_A);
+    memcpy(ix->attach, attach, n * sizeof(*attach));
+    for (size_t i = 0; i < n; i++) {
+        ix->decls[attach[i].decl].child = attach[i].child;
+        rs_mod_t *mod = &ix->mods[attach[i].child];
+        if (mod->attach_count == 0) {
+            mod->attach_first = (int)i;
         }
-    }
-    rs_views_run(ix, &st);
-    for (int fi = 0; fi < ix->nfiles; fi++) {
-        if (ix->files[fi].kind == RS_FILE_SOURCE && ix->files[fi].views == 0) {
-            rs_views_push(ix, &st, fi, RS_VIEW_A | RS_VIEW_B);
-        }
-    }
-    rs_views_run(ix, &st);
-    for (int d = 0; d < ix->ndecls; d++) {
-        int fi = rs_decl_file(ix, &ix->decls[d]);
-        if (fi >= 0) {
-            ix->decls[d].child = ix->files[fi].mod_base;
-            ix->attach[ix->nattach++] = (rs_attach_t){.child = ix->files[fi].mod_base, .decl = d};
-        }
-    }
-    if (ix->nattach > SKIP_ONE) {
-        qsort(ix->attach, (size_t)ix->nattach, sizeof(rs_attach_t), rs_attach_cmp);
-    }
-    for (int i = 0; i < ix->nattach; i++) {
-        rs_mod_t *child = &ix->mods[ix->attach[i].child];
-        if (child->attach_count == 0) {
-            child->attach_first = i;
-        }
-        child->attach_count++;
+        mod->attach_count++;
     }
 }
 
-/* ── Crate roots of every file, product code ─────────────────────── */
-
-static int rs_pkg_join(int a, int b) {
-    if (a == RS_PKG_NONE || a == b) {
-        return b;
-    }
-    return b == RS_PKG_NONE ? a : RS_PKG_CONFLICT;
-}
-
-static bool rs_roots_add(rs_file_t *f, int root) {
-    for (int i = 0; i < f->nroots; i++) {
-        if (f->roots[i] == root) {
-            return false;
-        }
-    }
-    if (f->nroots >= RS_ROOTS_KEPT) {
-        bool changed = !f->roots_top;
-        f->roots_top = true;
-        return changed;
-    }
-    f->roots[f->nroots++] = root;
-    return true;
-}
-
-/* What file `c` takes over from a file that declares it. true on a change. */
-static bool rs_file_inherit(rs_file_t *c, const rs_file_t *p) {
-    bool changed = p->roots_top && !c->roots_top;
-    c->roots_top = c->roots_top || p->roots_top;
-    for (int i = 0; i < p->nroots; i++) {
-        changed = rs_roots_add(c, p->roots[i]) || changed;
-    }
-    int pkg = rs_pkg_join(c->pkg, p->pkg);
-    changed = changed || pkg != c->pkg || (p->in_lib && !c->in_lib);
-    c->pkg = pkg;
-    c->in_lib = c->in_lib || p->in_lib;
-    return changed;
-}
-
-/* The crate roots, the package and the lib membership of every file: a
- * fixed point over the `mod x;` edges. Each value only grows and is bounded,
- * so a file is revisited a bounded number of times. */
-static void rs_file_roots(rs_index_t *ix) {
-    rs_stack_t st = {.v = (int *)ix_alloc(ix, (size_t)ix->nfiles * sizeof(int))};
-    if (!st.v) {
+static void rs_cargo_set_package(rs_cargo_host_t *host, int id, int edition, bool broken,
+                                 int lib_root, const char *lib_name, size_t lib_name_len,
+                                 const rs_cargo_dep_t *deps, size_t n) {
+    rs_index_t *ix = host->ix;
+    rs_pkg_t *p = &ix->pkgs[id];
+    p->edition = edition;
+    p->broken = broken;
+    p->lib_root = lib_root;
+    p->lib_name = lib_name ? ix_strndup(ix, lib_name_len ? lib_name : "", lib_name_len) : NULL;
+    p->deps = ix_alloc(ix, n * sizeof(*p->deps));
+    if (!p->deps) {
         return;
     }
-    for (int fi = 0; fi < ix->nfiles; fi++) {
-        rs_file_t *f = &ix->files[fi];
-        if (f->kind != RS_FILE_SOURCE || !f->crate_root) {
-            continue;
+    p->ndeps = (int)n;
+    for (size_t i = 0; i < n; i++) {
+        rs_ent_t target = rs_ent(RS_E_GAP, 0);
+        if (deps[i].kind == RS_CARGO_DEP_MODULE) {
+            target = rs_ent(RS_E_MOD, deps[i].module);
+        } else if (deps[i].kind == RS_CARGO_DEP_EXTERNAL) {
+            target = rs_ent(RS_E_EXTERNAL, 0);
         }
-        f->roots[f->nroots++] = f->mod_base;
-        f->pkg = f->root_pkg;
-        f->in_lib = f->root_pkg >= 0 && ix->pkgs[f->root_pkg].lib_root == f->mod_base;
-        f->queued = true;
-        st.v[st.n++] = fi;
-    }
-    while (st.n > 0) {
-        int fi = st.v[--st.n];
-        rs_file_t *f = &ix->files[fi];
-        f->queued = false;
-        for (int d = f->decl_first; d < f->decl_first + f->decl_count; d++) {
-            int child = ix->decls[d].child;
-            if (child < 0) {
-                continue;
-            }
-            rs_file_t *c = &ix->files[ix->mods[child].file];
-            if (rs_file_inherit(c, f) && !c->queued) {
-                c->queued = true;
-                st.v[st.n++] = ix->mods[child].file;
-            }
-        }
+        p->deps[i] = (rs_dep_t){
+            .key = ix_strndup(ix, deps[i].key_len ? deps[i].key : "", deps[i].key_len),
+            .target = target,
+        };
     }
 }
 
-/* A file no crate root reaches still lies in some package's directory: its
- * dependencies are that package's. Which target it would belong to (and so
- * what `crate` is) stays unknown. */
-static void rs_orphan_packages(rs_index_t *ix) {
-    for (int fi = 0; fi < ix->nfiles; fi++) {
-        rs_file_t *f = &ix->files[fi];
-        char dir[RS_PATH_BUF];
-        const char *base = rs_basename(f->rel_path);
-        size_t dl = base > f->rel_path ? (size_t)(base - f->rel_path) - SKIP_ONE : 0;
-        if (f->kind != RS_FILE_SOURCE || f->nroots > 0 || f->pkg != RS_PKG_NONE ||
-            dl >= sizeof(dir)) {
-            continue;
-        }
-        memcpy(dir, f->rel_path, dl);
-        dir[dl] = '\0';
-        for (;;) {
-            int q = rs_pkg_at(ix, dir);
-            if (q >= 0 && ix->pkgs[q].has_package) {
-                f->pkg = q;
-                break;
-            }
-            char *slash = strrchr(dir, '/');
-            if (!dir[0]) {
-                break;
-            }
-            dir[slash ? (size_t)(slash - dir) : 0] = '\0';
-        }
-    }
+static void rs_cargo_build(rs_index_t *ix, const cbm_doclink_build_in_t *in) {
+    static const rs_cargo_ops_t ops = {
+        .file = rs_cargo_file,
+        .module = rs_cargo_module,
+        .decl = rs_cargo_decl,
+        .set_reach = rs_cargo_set_reach,
+        .set_product = rs_cargo_set_product,
+        .set_attachments = rs_cargo_set_attachments,
+        .set_package = rs_cargo_set_package,
+    };
+    rs_cargo_host_t host = {ix, in};
+    ix->orphans = mori_rust_doc_cargo_build(&host, &ops, ix->nfiles, ix->nmods, ix->ndecls);
 }
 
-static void rs_product_seed(rs_index_t *ix, rs_stack_t *st, int fi) {
-    const rs_file_t *f = &ix->files[fi];
-    rs_mod_t *root = &ix->mods[f->mod_base];
-    if (root->product || f->test_path) {
-        return;
-    }
-    root->product = true;
-    st->v[st->n++] = fi;
-}
-
-/* Product code: what is reached from a crate root (or an orphan file) outside
- * the test directories without passing a `#[cfg(test)]` module or
- * declaration. Everything else is test-only. */
-static void rs_product(rs_index_t *ix) {
-    rs_stack_t st = {.v = (int *)ix_alloc(ix, (size_t)ix->nfiles * sizeof(int))};
-    if (!st.v) {
-        return;
-    }
-    for (int fi = 0; fi < ix->nfiles; fi++) {
-        const rs_file_t *f = &ix->files[fi];
-        if (f->kind != RS_FILE_SOURCE) {
-            continue;
-        }
-        bool orphan = !f->crate_root && ix->mods[f->mod_base].attach_count == 0;
-        ix->orphans += orphan;
-        if (f->crate_root || orphan) {
-            rs_product_seed(ix, &st, fi);
-        }
-    }
-    while (st.n > 0) {
-        const rs_file_t *f = &ix->files[st.v[--st.n]];
-        for (int m = SKIP_ONE; m < f->nmods; m++) {
-            rs_mod_t *mod = &ix->mods[f->mod_base + m];
-            mod->product = mod->parent >= 0 && ix->mods[mod->parent].product && !mod->cfg_test;
-        }
-        for (int d = f->decl_first; d < f->decl_first + f->decl_count; d++) {
-            const rs_decl_t *decl = &ix->decls[d];
-            if (decl->child >= 0 && !decl->cfg_test && ix->mods[decl->mod].product) {
-                rs_product_seed(ix, &st, ix->mods[decl->child].file);
-            }
-        }
-    }
+static int rs_edition(const rs_index_t *ix, int pkg) {
+    return pkg < 0 ? RS_EDITION_UNKNOWN : ix->pkgs[pkg].edition;
 }
 
 /* ── Lookup: state ───────────────────────────────────────────────── */
@@ -1901,7 +1276,7 @@ static void rs_parents(const rs_index_t *ix, int m, rs_set_t *out) {
         return;
     }
     if (mod->attach_count > RS_SET_CAP ||
-        (mod->attach_count == 0 && !ix->files[mod->file].crate_root)) {
+        (mod->attach_count == 0 && ix->files[mod->file].root_pkg == RS_PKG_NONE)) {
         rs_set_add(out, rs_weak(RS_E_GAP));
         return;
     }
@@ -1930,7 +1305,8 @@ static int rs_mod_within(const rs_index_t *ix, int m, int ancestor) {
             stack[sp++] = mod->parent;
             continue;
         }
-        unknown = unknown || (mod->attach_count == 0 && !ix->files[mod->file].crate_root);
+        unknown =
+            unknown || (mod->attach_count == 0 && ix->files[mod->file].root_pkg == RS_PKG_NONE);
         for (int i = 0; i < mod->attach_count; i++) {
             stack[sp++] = ix->decls[ix->attach[mod->attach_first + i].decl].mod;
         }
@@ -2431,76 +1807,7 @@ static void rs_textual_macro(const rs_index_t *ix, int m, const char *name, rs_s
     rs_set_add(out, rs_weak(RS_E_GAP)); /* deeper than is walked: not known */
 }
 
-/* The lexical lookup of a name: levels 1 to 4, the first that binds it in the
- * namespace.
- *
- * Level 2 can hold a name without showing it: a glob of something outside the
- * repository, a glob that cannot be followed, and (while imports are being
- * resolved) a glob that is not resolved yet. What then follows depends on
- * whose path it is:
- *   - an import path may look on. rustc rejects an import path whose first
- *     name is brought in by a glob AND bound further out (E0659), so in
- *     source that compiles a name found at level 3 or 4 is not in the glob;
- *   - any other path (a doc link, a type) may not: there a glob's name
- *     silently wins over the preludes. The lookup ends with a weak answer.
- * A name found nowhere waits for an unresolved glob, which may still bring
- * it in. */
-static void rs_lexical(const rs_at_t *at, const char *name, int ns, rs_set_t *out) {
-    rs_look_t *lk = at->lk;
-    rs_own_opt_t opt = {.skip = at->skip, .from = CBM_NOT_FOUND};
-    rs_glob_flags_t fl = {0};
-    rs_set_t outer = {0};
-    bool unknown = false;
-    rs_own(lk, at->mod, name, ns, &opt, out);
-    if (rs_set_empty(out) && ns == RS_NS_MACRO) {
-        rs_textual_macro(lk->ix, at->mod, name, out);
-    }
-    if (!rs_set_empty(out)) {
-        if (out->v[0].weak && at->skip >= 0 && ns == RS_NS_TYPE) {
-            /* an import path in a module that may declare more than it shows:
-             * a crate of the extern prelude stands all the same, because an
-             * import path whose first name is both a local name and a crate
-             * is an error (E0659) */
-            rs_extern(at, name, &outer, &unknown);
-            if (!rs_set_empty(&outer)) {
-                *out = outer;
-            }
-        }
-        return;
-    }
-    rs_globs(lk, at->mod, name, ns, at->skip, out, &fl);
-    if (out->n > 0 && !out->v[0].weak) {
-        return; /* brought in by a glob that is resolved */
-    }
-    bool hidden = fl.open || fl.pending || !rs_set_empty(out);
-    if (!hidden || at->skip >= 0) {
-        if (ns == RS_NS_TYPE) {
-            rs_extern(at, name, &outer, &unknown);
-        }
-        if (rs_set_empty(&outer) && rs_std_name(name, ns)) {
-            rs_set_add(&outer, rs_ent(RS_E_EXTERNAL, 0));
-        }
-        if (!rs_set_empty(&outer)) {
-            *out = outer;
-            return;
-        }
-    }
-    if (fl.pending) {
-        memset(out, 0, sizeof(*out));
-        lk->blocked = true;
-        return;
-    }
-    if (rs_set_empty(out) && (fl.open || unknown)) {
-        rs_set_add(out, rs_weak(fl.open ? RS_E_EXTERNAL : RS_E_GAP));
-    }
-    if (rs_set_empty(out) && at->skip >= 0 && ns == RS_NS_TYPE && at->pkg >= 0) {
-        /* the first name of an import path, bound nowhere: the module shows
-         * everything it declares (else the answer above was a gap), so what
-         * is left is a crate of the extern prelude under a name the manifest
-         * does not give (a lib target named unlike its package) */
-        rs_set_add(out, rs_weak(RS_E_EXTERNAL));
-    }
-}
+static void rs_lexical(const rs_at_t *at, const char *name, int ns, rs_set_t *out);
 
 /* ── Lookup: associated items ────────────────────────────────────── */
 
@@ -2787,151 +2094,117 @@ static void rs_member(const rs_at_t *at, rs_ent_t owner, const char *name, int n
 
 /* ── Lookup: a whole path ────────────────────────────────────────── */
 
-/* The modules or the type that the keywords a path starts with name: `crate`,
- * `self`, `super` (repeatable), `Self`, or a leading `::`. Returns how many
- * segments they are; 0 when the path starts with a plain name. */
-static int rs_path_head(const rs_at_t *at, const rs_path_t *p, rs_ent_t self, rs_set_t *cur) {
-    const rs_index_t *ix = at->lk->ix;
-    const char *first = p->segs[0];
-    int i = SKIP_ONE;
-    if (p->global) {
-        bool unknown = false;
-        rs_extern(at, first, cur, &unknown);
-        if (rs_set_empty(cur) && (unknown || at->edition < RS_EDITION_2018)) {
-            rs_set_add(cur, rs_weak(RS_E_GAP)); /* before 2018 `::name` is crate-relative */
-        }
-    } else if (rs_is(first, "crate")) {
-        rs_set_add(cur, at->root >= 0 ? rs_ent(RS_E_MOD, at->root) : rs_weak(RS_E_GAP));
-    } else if (rs_is(first, "self")) {
-        rs_set_add(cur, rs_ent(RS_E_MOD, at->mod));
-    } else if (rs_is(first, "super")) {
-        rs_parents(ix, at->mod, cur);
-    } else if (rs_is(first, "Self")) {
-        rs_set_add(cur, self);
-    } else {
-        return 0;
-    }
-    for (; i < p->n && rs_is(p->segs[i], "super"); i++) {
-        rs_set_t up = {0};
-        for (int k = 0; k < cur->n; k++) {
-            if (cur->v[k].kind == RS_E_MOD) {
-                rs_parents(ix, cur->v[k].idx, &up);
-            } else {
-                rs_set_add(&up, rs_weak(RS_E_GAP));
-            }
-        }
-        up.overflow = up.overflow || cur->overflow;
-        *cur = up;
-    }
-    return i;
+/* Rust controls path precedence. The callbacks read the existing sorted
+ * declaration, import, and associated-item tables. */
+typedef struct {
+    int module;
+    int root;
+    int package;
+    int edition;
+    bool import;
+} rs_walk_context_t;
+
+typedef struct {
+    bool open;
+    bool pending;
+} rs_walk_globs_t;
+
+typedef struct {
+    void (*own)(const rs_at_t *, const char *, int, rs_set_t *);
+    void (*textual_macro)(const rs_at_t *, const char *, rs_set_t *);
+    rs_walk_globs_t (*globs)(const rs_at_t *, const char *, int, rs_set_t *);
+    bool (*external)(const rs_at_t *, const char *, rs_set_t *);
+    bool (*prelude)(const char *, int);
+    bool (*builtin)(const char *);
+    bool (*primitive)(const char *);
+    void (*parents)(const rs_at_t *, int, rs_set_t *);
+    void (*root_member)(const rs_at_t *, const char *, int, rs_set_t *);
+    void (*member)(const rs_at_t *, rs_ent_t, const char *, int, rs_set_t *);
+    void (*collapse)(const rs_at_t *, rs_set_t *);
+    void (*block_import)(const rs_at_t *);
+} rs_walk_ops_t;
+
+void mori_rust_doc_walk(const rs_at_t *at, const rs_walk_ops_t *ops,
+                        const rs_walk_context_t *context, const char *const *segments, int count,
+                        bool global, int mask, rs_ent_t self, rs_found_t *out);
+
+void mori_rust_doc_lexical(const rs_at_t *at, const rs_walk_ops_t *ops,
+                           const rs_walk_context_t *context, const char *name, int ns,
+                           rs_set_t *out);
+
+static void rs_walk_own(const rs_at_t *at, const char *name, int ns, rs_set_t *out) {
+    rs_own_opt_t opt = {.skip = at->skip, .from = CBM_NOT_FOUND};
+    rs_own(at->lk, at->mod, name, ns, &opt, out);
 }
 
-/* A name looked up from the crate root: an edition-2015 `use` path. */
-static void rs_crate_relative(const rs_at_t *at, const char *name, int ns, rs_set_t *out) {
+static void rs_walk_macro(const rs_at_t *at, const char *name, rs_set_t *out) {
+    rs_textual_macro(at->lk->ix, at->mod, name, out);
+}
+
+static rs_walk_globs_t rs_walk_globs(const rs_at_t *at, const char *name, int ns, rs_set_t *out) {
+    rs_glob_flags_t flags = {0};
+    rs_globs(at->lk, at->mod, name, ns, at->skip, out, &flags);
+    return (rs_walk_globs_t){flags.open, flags.pending};
+}
+
+static bool rs_walk_extern(const rs_at_t *at, const char *name, rs_set_t *out) {
     bool unknown = false;
-    if (ns == RS_NS_TYPE && RS_IN(RS_BUILTIN_CRATES, name)) {
-        rs_set_add(out, rs_ent(RS_E_EXTERNAL, 0));
-        return;
-    }
-    if (at->root < 0) {
-        rs_set_add(out, rs_weak(RS_E_GAP));
-        return;
-    }
+    rs_extern(at, name, out, &unknown);
+    return unknown;
+}
+
+static bool rs_walk_builtin(const char *name) {
+    return RS_IN(RS_BUILTIN_CRATES, name);
+}
+
+static bool rs_walk_primitive(const char *name) {
+    return RS_IN(RS_PRIMITIVES, name);
+}
+
+static void rs_walk_parents(const rs_at_t *at, int mod, rs_set_t *out) {
+    rs_parents(at->lk->ix, mod, out);
+}
+
+static void rs_walk_root_member(const rs_at_t *at, const char *name, int ns, rs_set_t *out) {
     rs_mod_member(at->lk, at->root, name, ns, at->skip, out);
-    if (rs_set_empty(out) && ns == RS_NS_TYPE) {
-        rs_extern(at, name, out, &unknown);
-    }
-    if (rs_set_empty(out) && unknown) {
-        rs_set_add(out, rs_weak(RS_E_GAP));
-    }
 }
 
-/* The first segment of a path that starts with a plain name. A doc link, a
- * type path and an edition-2018 import look it up lexically; an edition-2015
- * import starts at the crate root. With the edition unknown both must agree. */
-static void rs_first(const rs_at_t *at, const char *name, int ns, bool import, rs_set_t *out) {
-    if (!import || at->edition >= RS_EDITION_2018) {
-        rs_lexical(at, name, ns, out);
-        return;
-    }
-    rs_set_t rooted = {0};
-    rs_crate_relative(at, name, ns, &rooted);
-    if (at->edition == RS_EDITION_2015) {
-        *out = rooted;
-        return;
-    }
-    rs_lexical(at, name, ns, out);
-    if (!rs_set_equal(out, &rooted)) {
-        memset(out, 0, sizeof(*out));
-        rs_set_add(out, rs_weak(RS_E_GAP));
-    }
+static void rs_walk_collapse(const rs_at_t *at, rs_set_t *out) {
+    rs_collapse(at->lk->ix, out);
 }
 
-/* One segment before the last: what `name` is, as a type or module, inside
- * each thing of `cur`. false when one of them holds several. */
-static bool rs_walk_step(const rs_at_t *at, const rs_set_t *cur, const char *name, rs_set_t *next) {
-    for (int k = 0; k < cur->n; k++) {
-        rs_set_t one = {0};
-        rs_member(at, cur->v[k], name, RS_NS_TYPE, &one);
-        rs_collapse(at->lk->ix, &one);
-        if (one.n > SKIP_ONE || one.overflow) {
-            return false;
-        }
-        rs_set_merge(next, &one);
-    }
-    return true;
+static void rs_walk_block_import(const rs_at_t *at) {
+    at->lk->blocked = true;
 }
 
-/* Resolve path `p` written at `at`: the candidates of its last segment in
- * every namespace of `mask`. */
-static void rs_walk(const rs_at_t *at, const rs_path_t *p, int mask, rs_ent_t self, bool import,
+static const rs_walk_ops_t RS_WALK_OPS = {
+    .own = rs_walk_own,
+    .textual_macro = rs_walk_macro,
+    .globs = rs_walk_globs,
+    .external = rs_walk_extern,
+    .prelude = rs_std_name,
+    .builtin = rs_walk_builtin,
+    .primitive = rs_walk_primitive,
+    .parents = rs_walk_parents,
+    .root_member = rs_walk_root_member,
+    .member = rs_member,
+    .collapse = rs_walk_collapse,
+    .block_import = rs_walk_block_import,
+};
+
+static rs_walk_context_t rs_walk_context(const rs_at_t *at) {
+    return (rs_walk_context_t){at->mod, at->root, at->pkg, at->edition, at->skip >= 0};
+}
+
+static void rs_lexical(const rs_at_t *at, const char *name, int ns, rs_set_t *out) {
+    rs_walk_context_t context = rs_walk_context(at);
+    mori_rust_doc_lexical(at, &RS_WALK_OPS, &context, name, ns, out);
+}
+
+static void rs_walk(const rs_at_t *at, const rs_path_t *p, int mask, rs_ent_t self,
                     rs_found_t *out) {
-    rs_set_t cur = {0};
-    int i = rs_path_head(at, p, self, &cur);
-    if (i == 0 && p->n == SKIP_ONE) {
-        for (int k = 0; k < RS_NS_COUNT; k++) {
-            if (mask & RS_NS_LIST[k]) {
-                rs_first(at, p->segs[0], RS_NS_LIST[k], import, &out->ns[k]);
-            }
-        }
-        return;
-    }
-    if (i == 0) {
-        rs_first(at, p->segs[0], RS_NS_TYPE, import, &cur);
-        rs_collapse(at->lk->ix, &cur);
-        if (cur.n > SKIP_ONE) {
-            out->ambiguous = true;
-            return;
-        }
-        if (rs_set_empty(&cur) && RS_IN(RS_PRIMITIVES, p->segs[0])) {
-            rs_set_add(&cur, rs_ent(RS_E_EXTERNAL, 0)); /* `str::len`: of a primitive type */
-        }
-        i = SKIP_ONE;
-    }
-    if (cur.overflow) {
-        out->ambiguous = true;
-        return;
-    }
-    if (i == p->n) { /* the keywords are the whole path */
-        if (mask & RS_NS_TYPE) {
-            rs_set_merge(&out->ns[0], &cur);
-        }
-        return;
-    }
-    for (; i + SKIP_ONE < p->n && !rs_set_empty(&cur); i++) {
-        rs_set_t next = {0};
-        if (!rs_walk_step(at, &cur, p->segs[i], &next)) {
-            out->ambiguous = true;
-            return;
-        }
-        cur = next;
-    }
-    for (int k = 0; k < RS_NS_COUNT; k++) {
-        for (int e = 0; (mask & RS_NS_LIST[k]) && e < cur.n; e++) {
-            rs_member(at, cur.v[e], p->segs[p->n - SKIP_ONE], RS_NS_LIST[k], &out->ns[k]);
-        }
-    }
-    out->owners = cur;
+    rs_walk_context_t context = rs_walk_context(at);
+    mori_rust_doc_walk(at, &RS_WALK_OPS, &context, p->segs, p->n, p->global, mask, self, out);
 }
 
 /* The contexts a path written in module `mod` is resolved under: one per
@@ -2971,7 +2244,7 @@ static void rs_resolve_path(rs_look_t *lk, int mod, const rs_path_t *p, int mask
     for (int i = 0; i < n; i++) {
         rs_found_t one;
         memset(&one, 0, sizeof(one));
-        rs_walk(&at[i], p, mask, self, import >= 0, &one);
+        rs_walk(&at[i], p, mask, self, &one);
         for (int k = 0; k < RS_NS_COUNT; k++) {
             rs_set_merge(&out->ns[k], &one.ns[k]);
         }
@@ -3005,148 +2278,6 @@ static uint8_t rs_only_weak(const rs_set_t *s) {
         }
     }
     return kind;
-}
-
-/* ── Build: dependencies ─────────────────────────────────────────── */
-
-static int rs_rawdep_cmp(const void *a, const void *b) {
-    const rs_rawdep_t *x = (const rs_rawdep_t *)a;
-    const rs_rawdep_t *y = (const rs_rawdep_t *)b;
-    int c = strcmp(x->name, y->name);
-    return c ? c : (x->seq > y->seq) - (x->seq < y->seq);
-}
-
-static int rs_dep_cmp(const void *a, const void *b) {
-    return strcmp(((const rs_dep_t *)a)->key, ((const rs_dep_t *)b)->key);
-}
-
-/* What the dependency tables of a manifest say about one dependency. */
-typedef struct {
-    const char *name;
-    const char *path;    /* NULL: none written */
-    const char *package; /* set: `name` is a rename */
-    bool workspace;      /* inherited from the workspace table */
-    bool conflict;       /* two tables give it different paths */
-} rs_depspec_t;
-
-static void rs_depspec_add(rs_depspec_t *spec, const rs_rawdep_t *r) {
-    if (rs_is(r->attr, "path")) {
-        spec->conflict = spec->conflict || (spec->path && !rs_is(spec->path, r->value));
-        spec->path = r->value;
-    } else if (rs_is(r->attr, "package")) {
-        spec->package = r->value;
-    } else if (rs_is(r->attr, "workspace") && rs_is(r->value, "true")) {
-        spec->workspace = true;
-    }
-}
-
-/* The entry `name` of the [workspace.dependencies] table of `ws` (its raw
- * records are sorted by name). false when there is none. */
-static bool rs_ws_dep(const rs_pkg_t *ws, const char *name, rs_depspec_t *spec) {
-    int lo = 0;
-    int hi = ws->nraw;
-    bool found = false;
-    while (lo < hi) {
-        int mid = lo + ((hi - lo) / PAIR_LEN);
-        if (strcmp(ws->raw[mid].name, name) < 0) {
-            lo = mid + SKIP_ONE;
-        } else {
-            hi = mid;
-        }
-    }
-    for (int i = lo; i < ws->nraw && rs_is(ws->raw[i].name, name); i++) {
-        if (ws->raw[i].kind == 'w') {
-            found = true;
-            rs_depspec_add(spec, &ws->raw[i]);
-        }
-    }
-    return found;
-}
-
-/* The crate a dependency brings into the extern prelude. Only a `path`
- * dependency names a crate of the repository; one whose path, manifest or
- * lib target is not known is a gap, never matched by name. */
-static rs_dep_t rs_dep_make(rs_index_t *ix, const rs_pkg_t *p, rs_depspec_t spec) {
-    rs_dep_t dep = {.key = rs_crate_name(ix, spec.name), .target = rs_ent(RS_E_GAP, 0)};
-    const char *base = p->dir;
-    char dir[RS_PATH_BUF];
-    if (spec.workspace) {
-        const rs_pkg_t *ws = p->ws >= 0 ? &ix->pkgs[p->ws] : NULL;
-        rs_depspec_t inherited = {.name = spec.name};
-        if (!ws || !rs_ws_dep(ws, spec.name, &inherited)) {
-            return dep;
-        }
-        base = ws->dir;
-        spec = inherited;
-    }
-    if (spec.conflict) {
-        return dep;
-    }
-    if (!spec.path) {
-        dep.target = rs_ent(RS_E_EXTERNAL, 0);
-        return dep;
-    }
-    if (rs_is(spec.path, "?") || !rs_join_path(base, spec.path, dir, sizeof(dir))) {
-        return dep;
-    }
-    int q = rs_pkg_at(ix, dir);
-    if (q < 0 || !ix->pkgs[q].has_package || ix->pkgs[q].lib_root < 0) {
-        return dep;
-    }
-    dep.target = rs_ent(RS_E_MOD, ix->pkgs[q].lib_root);
-    if (!spec.package && ix->pkgs[q].lib_name) {
-        dep.key = ix->pkgs[q].lib_name; /* not renamed: the lib crate's own name */
-    }
-    return dep;
-}
-
-static void rs_pkg_deps(rs_index_t *ix, int pi) {
-    rs_pkg_t *p = &ix->pkgs[pi];
-    p->deps = (rs_dep_t *)ix_alloc(ix, (size_t)p->nraw * sizeof(rs_dep_t));
-    if (!p->deps) {
-        return;
-    }
-    for (int i = 0; i < p->nraw;) {
-        rs_depspec_t spec = {.name = p->raw[i].name};
-        bool own = false;
-        int j = i;
-        for (; j < p->nraw && rs_is(p->raw[j].name, spec.name); j++) {
-            if (p->raw[j].kind != 'w') {
-                own = true;
-                rs_depspec_add(&spec, &p->raw[j]);
-            }
-        }
-        if (own) {
-            p->deps[p->ndeps++] = rs_dep_make(ix, p, spec);
-        }
-        i = j;
-    }
-    if (p->ndeps > SKIP_ONE) {
-        qsort(p->deps, (size_t)p->ndeps, sizeof(rs_dep_t), rs_dep_cmp);
-    }
-    int w = 0; /* one crate name for two targets: which one is not known */
-    for (int i = 0; i < p->ndeps; i++) {
-        if (w > 0 && rs_is(p->deps[w - SKIP_ONE].key, p->deps[i].key)) {
-            if (!rs_ent_same(p->deps[w - SKIP_ONE].target, p->deps[i].target)) {
-                p->deps[w - SKIP_ONE].target = rs_ent(RS_E_GAP, 0);
-            }
-            continue;
-        }
-        p->deps[w++] = p->deps[i];
-    }
-    p->ndeps = w;
-}
-
-static void rs_deps(rs_index_t *ix) {
-    for (int pi = 0; pi < ix->npkgs; pi++) {
-        rs_pkg_t *p = &ix->pkgs[pi];
-        if (p->nraw > SKIP_ONE) {
-            qsort(p->raw, (size_t)p->nraw, sizeof(rs_rawdep_t), rs_rawdep_cmp);
-        }
-    }
-    for (int pi = 0; pi < ix->npkgs; pi++) {
-        rs_pkg_deps(ix, pi);
-    }
 }
 
 /* ── Build: bindings ─────────────────────────────────────────────── */
@@ -3356,31 +2487,14 @@ static void rs_import_resolve(rs_index_t *ix, int idx, int pass, bool last) {
     rs_import_store(ix, imp, &found, pass);
 }
 
-/* Resolve every import. Imports depend on each other (a path can run through
- * an imported name or a glob), so they are resolved in passes: a pass reads
- * only what EARLIER passes resolved, which makes the result independent of
- * the order of the imports. What is still waiting after the last pass (a
- * cycle, or a chain longer than the passes) is not followed. */
-static void rs_imports(rs_index_t *ix) {
-    int pending = ix->nimports;
-    int pass = SKIP_ONE;
-    for (; pass <= RS_IMPORT_PASSES && pending > 0; pass++) {
-        int before = pending;
-        for (int i = 0; i < ix->nimports; i++) {
-            if (ix->imports[i].state != RS_STATE_DONE) {
-                rs_import_resolve(ix, i, pass, false);
-                pending -= ix->imports[i].state == RS_STATE_DONE;
-            }
-        }
-        if (pending == before) {
-            break;
-        }
+void mori_rust_doc_imports(rs_index_t *ix, int count,
+                           bool (*attempt)(rs_index_t *, int, int, bool));
+
+static bool rs_import_attempt(rs_index_t *ix, int id, int pass, bool last) {
+    if (ix->imports[id].state != RS_STATE_DONE) {
+        rs_import_resolve(ix, id, pass, last);
     }
-    for (int i = 0; pending > 0 && i < ix->nimports; i++) {
-        if (ix->imports[i].state != RS_STATE_DONE) {
-            rs_import_resolve(ix, i, pass + SKIP_ONE, true);
-        }
-    }
+    return ix->imports[id].state == RS_STATE_DONE;
 }
 
 /* ── Build: aliases and impls ────────────────────────────────────── */
@@ -3684,7 +2798,6 @@ static bool rs_alloc_tables(rs_index_t *ix, const rs_counts_t *c, int manifests)
 /* Read every file's scope blob into the index. */
 static bool rs_load(rs_index_t *ix, const cbm_doclink_build_in_t *in) {
     rs_counts_t sum = {0};
-    int manifests = 0;
     ix->nfiles = in->file_count;
     ix->files = (rs_file_t *)ix_calloc(ix, (size_t)in->file_count, sizeof(rs_file_t));
     if (!ix->files) {
@@ -3696,7 +2809,6 @@ static bool rs_load(rs_index_t *ix, const cbm_doclink_build_in_t *in) {
         f->rel_path = src->rel_path;
         f->root_pkg = RS_PKG_NONE;
         f->pkg = RS_PKG_NONE;
-        cbm_ht_set(ix->file_by_path, f->rel_path, (void *)(intptr_t)(i + SKIP_ONE));
         if (src->run_file >= 0 && src->run_file < in->run_file_count) {
             ix->run_to_file[src->run_file] = i;
         }
@@ -3705,17 +2817,14 @@ static bool rs_load(rs_index_t *ix, const cbm_doclink_build_in_t *in) {
         } else if (rs_is(rs_basename(src->rel_path), "Cargo.toml") &&
                    rs_blob_is_manifest(src->scope)) {
             f->kind = RS_FILE_MANIFEST;
-            manifests++;
+            ix->npkgs++;
         }
     }
-    if (!rs_alloc_tables(ix, &sum, manifests)) {
+    if (!rs_alloc_tables(ix, &sum, ix->npkgs)) {
         return false;
     }
     for (int i = 0; i < in->file_count; i++) {
         rs_file_t *f = &ix->files[i];
-        if (f->kind == RS_FILE_MANIFEST) {
-            rs_read_manifest(ix, i, in->files[i].scope);
-        }
         for (int m = 0; f->kind == RS_FILE_SOURCE && m < f->nmods; m++) {
             ix->mods[f->mod_base + m].file = i;
             ix->mods[f->mod_base + m].parent = CBM_NOT_FOUND;
@@ -3723,10 +2832,6 @@ static bool rs_load(rs_index_t *ix, const cbm_doclink_build_in_t *in) {
         if (f->kind == RS_FILE_SOURCE) {
             rs_read_source(ix, i, rs_source_blob(in->files[i].scope));
         }
-    }
-    for (int pi = 0; pi < ix->npkgs; pi++) {
-        const char *dir = ix->pkgs[pi].dir;
-        cbm_ht_set(ix->pkg_by_dir, dir[0] ? dir : ".", (void *)(intptr_t)(pi + SKIP_ONE));
     }
     if (ix->nmacuses > SKIP_ONE) {
         qsort(ix->macuses, (size_t)ix->nmacuses, sizeof(rs_macuse_t), rs_macuse_cmp);
@@ -3742,8 +2847,6 @@ static void rs_destroy(void *index) {
     if (!ix) {
         return;
     }
-    cbm_ht_free(ix->file_by_path);
-    cbm_ht_free(ix->pkg_by_dir);
     cbm_ht_free(ix->blanket);
     cbm_free(CBM_MEM_CLASS_OTHER, ix->run_to_file);
     cbm_arena_destroy(&ix->arena);
@@ -3773,14 +2876,12 @@ static void *rs_build(const cbm_doclink_build_in_t *in) {
     }
     cbm_arena_init(&ix->arena);
     ix->project = in->ctx->project_name;
-    ix->file_by_path = cbm_ht_create(CBM_SZ_4K);
-    ix->pkg_by_dir = cbm_ht_create(CBM_SZ_64);
     ix->blanket = cbm_ht_create(CBM_SZ_256);
     ix->run_count = in->run_file_count;
     ix->run_to_file = (int *)cbm_alloc(
         CBM_MEM_CLASS_OTHER,
         (size_t)(in->run_file_count ? in->run_file_count : SKIP_ONE) * sizeof(int));
-    if (!ix->file_by_path || !ix->pkg_by_dir || !ix->blanket || !ix->run_to_file) {
+    if (!ix->blanket || !ix->run_to_file) {
         cbm_log_error("doc_links.rs.error", "step", "tables", "reason", "alloc");
         rs_destroy(ix);
         return NULL;
@@ -3789,17 +2890,14 @@ static void *rs_build(const cbm_doclink_build_in_t *in) {
         ix->run_to_file[i] = CBM_NOT_FOUND;
     }
     if (rs_load(ix, in)) {
-        rs_crate_roots(ix);
-        rs_module_tree(ix);
-        rs_file_roots(ix);
-        rs_orphan_packages(ix);
-        rs_product(ix);
-        rs_deps(ix);
+        rs_cargo_build(ix, in);
+    }
+    if (!ix->oom) {
         rs_sort_members(ix);
         rs_bindings(ix);
     }
     if (!ix->oom) {
-        rs_imports(ix);
+        mori_rust_doc_imports(ix, ix->nimports, rs_import_attempt);
         rs_types(ix);
         rs_line_indexes(ix);
     }
@@ -3972,214 +3070,6 @@ static const char *rs_label_name(char code) {
     return NULL;
 }
 
-/* The node of a declaration of file `fi`: looked up by qualified name, and
- * taken only when its label and file are the declaration's (another
- * definition can own that name: a same-named item of another kind, another
- * file's module). */
-static const cbm_gbuf_node_t *rs_node(const rs_index_t *ix, const cbm_gbuf_t *graph, int fi,
-                                      const char *label, const char *qn) {
-    const cbm_gbuf_node_t *n = (label && qn) ? cbm_gbuf_find_by_qn(graph, qn) : NULL;
-    if (!n || !n->label || !n->file_path || !rs_is(n->label, label) ||
-        !rs_is(n->file_path, ix->files[fi].rel_path)) {
-        return NULL;
-    }
-    return n;
-}
-
-static const cbm_gbuf_node_t *rs_decl_node(const rs_index_t *ix, const cbm_gbuf_t *graph, int fi,
-                                           char label, const char *suffix) {
-    char qn[RS_QN_BUF];
-    if (!label || !suffix ||
-        snprintf(qn, sizeof(qn), "%s%s", ix->files[fi].item_prefix, suffix) >= (int)sizeof(qn)) {
-        return NULL;
-    }
-    return rs_node(ix, graph, fi, rs_label_name(label), qn);
-}
-
-/* The outcome for the one entity a reference names. */
-static void rs_outcome(const rs_link_t *q, const cbm_gbuf_t *graph, rs_ent_t e,
-                       cbm_doclink_outcome_t *out) {
-    const rs_index_t *ix = q->ix;
-    const cbm_gbuf_node_t *node = NULL;
-    bool product = true;
-    out->reason = CBM_DOCLINK_REASON_GRAPH_GAP;
-    if (e.kind == RS_E_ITEM) {
-        const rs_item_t *it = &ix->items[e.idx];
-        product = ix->mods[it->mod].product && !it->test;
-        node = rs_decl_node(ix, graph, it->file, it->label, it->suffix);
-    } else if (e.kind == RS_E_MEMBER) {
-        const rs_member_t *m = &ix->members[e.idx];
-        product = ix->mods[m->mod].product && !m->owner_test;
-        node = rs_decl_node(ix, graph, m->file, m->label, m->suffix);
-    } else if (e.kind == RS_E_MOD) {
-        const rs_mod_t *mod = &ix->mods[e.idx];
-        product = mod->product;
-        node = mod->parent < 0
-                   ? rs_node(ix, graph, mod->file, "Module", ix->files[mod->file].module_qn)
-                   : NULL; /* an inline module has no node */
-    } else {
-        bool external = e.kind == RS_E_EXTERNAL ||
-                        (e.kind == RS_E_IMPL && ix->impls[e.idx].self_ent.kind == RS_E_EXTERNAL);
-        out->reason = external ? CBM_DOCLINK_REASON_EXTERNAL : CBM_DOCLINK_REASON_GRAPH_GAP;
-        return;
-    }
-    if (q->product && !product) {
-        out->reason = CBM_DOCLINK_REASON_TEST_ONLY;
-    } else if (node) {
-        out->kind = CBM_DOCLINK_EDGE;
-        out->target = node;
-    }
-}
-
-/* The namespaces a disambiguator or suffix asks for. */
-static int rs_dis_mask(int dis) {
-    switch (dis) {
-    case CBM_DOCLINK_RS_DIS_NONE:
-        return RS_NS_ALL;
-    case CBM_DOCLINK_RS_DIS_CONST:
-    case CBM_DOCLINK_RS_DIS_STATIC:
-    case CBM_DOCLINK_RS_DIS_FN:
-    case CBM_DOCLINK_RS_DIS_FIELD:
-    case CBM_DOCLINK_RS_DIS_VALUE_NS:
-        return RS_NS_VALUE;
-    case CBM_DOCLINK_RS_DIS_DERIVE:
-    case CBM_DOCLINK_RS_DIS_MACRO_BANG:
-    case CBM_DOCLINK_RS_DIS_MACRO_NS:
-        return RS_NS_MACRO;
-    default:
-        return RS_NS_TYPE;
-    }
-}
-
-/* The item kinds and member kinds a disambiguator accepts ("" for none, NULL
- * for any). */
-static void rs_dis_kinds(int dis, const char **items, const char **members, bool *mod) {
-    *items = "";
-    *members = "";
-    *mod = false;
-    switch (dis) {
-    case CBM_DOCLINK_RS_DIS_NONE:
-    case CBM_DOCLINK_RS_DIS_TYPE_NS:
-    case CBM_DOCLINK_RS_DIS_VALUE_NS:
-    case CBM_DOCLINK_RS_DIS_MACRO_NS:
-        *items = NULL;
-        *members = NULL;
-        *mod = true;
-        break;
-    case CBM_DOCLINK_RS_DIS_STRUCT:
-        *items = "S";
-        break;
-    case CBM_DOCLINK_RS_DIS_ENUM:
-        *items = "E";
-        break;
-    case CBM_DOCLINK_RS_DIS_TRAIT:
-        *items = "R";
-        break;
-    case CBM_DOCLINK_RS_DIS_UNION:
-        *items = "U";
-        break;
-    case CBM_DOCLINK_RS_DIS_TYALIAS:
-        *items = "A";
-        break;
-    case CBM_DOCLINK_RS_DIS_MOD:
-        *mod = true;
-        break;
-    case CBM_DOCLINK_RS_DIS_CONST:
-        *items = "C";
-        *members = "c";
-        break;
-    case CBM_DOCLINK_RS_DIS_STATIC:
-        *items = "G";
-        break;
-    case CBM_DOCLINK_RS_DIS_FN:
-        *items = "F";
-        *members = "f";
-        break;
-    case CBM_DOCLINK_RS_DIS_DERIVE:
-        *items = "V";
-        break;
-    case CBM_DOCLINK_RS_DIS_FIELD:
-        *members = "d";
-        break;
-    case CBM_DOCLINK_RS_DIS_VARIANT:
-        *members = "v";
-        break;
-    case CBM_DOCLINK_RS_DIS_MACRO_BANG:
-        *items = "MP";
-        break;
-    default:
-        break;
-    }
-}
-
-/* Drop the candidates of another kind than the disambiguator names. What is
- * outside the repository or not placed has no known kind and stays. */
-static void rs_filter_dis(const rs_index_t *ix, rs_set_t *s, int dis) {
-    const char *items = NULL;
-    const char *members = NULL;
-    bool mod = false;
-    int w = 0;
-    rs_dis_kinds(dis, &items, &members, &mod);
-    for (int i = 0; i < s->n; i++) {
-        rs_ent_t e = s->v[i];
-        bool keep = true;
-        if (e.kind == RS_E_ITEM) {
-            keep = !items || strchr(items, ix->items[e.idx].kind) != NULL;
-        } else if (e.kind == RS_E_MEMBER) {
-            keep = !members || strchr(members, ix->members[e.idx].kind) != NULL;
-        } else if (e.kind == RS_E_MOD) {
-            keep = mod;
-        }
-        if (keep) {
-            s->v[w++] = e;
-        }
-    }
-    s->n = w;
-}
-
-/* rustdoc: a trait and a derive macro of one name are the trait. A derive
- * macro of another crate is known only as something external of that name. */
-static void rs_trait_wins(const rs_index_t *ix, rs_set_t *s) {
-    if (s->overflow || s->n != PAIR_LEN) {
-        return;
-    }
-    for (int i = 0; i < PAIR_LEN; i++) {
-        rs_ent_t a = s->v[i];
-        rs_ent_t b = s->v[SKIP_ONE - i];
-        bool trait = a.kind == RS_E_ITEM && ix->items[a.idx].kind == 'R';
-        bool derive =
-            b.kind == RS_E_EXTERNAL || (b.kind == RS_E_ITEM && ix->items[b.idx].kind == 'V');
-        if (trait && derive) {
-            s->v[0] = a;
-            s->n = SKIP_ONE;
-            return;
-        }
-    }
-}
-
-/* The candidates of a reference: what was really found in any namespace, or,
- * when nothing was, the one weak answer (`*weak`). */
-static void rs_candidates(const rs_index_t *ix, const rs_found_t *found, rs_set_t *out,
-                          bool *weak) {
-    uint8_t w = RS_E_NONE;
-    for (int k = 0; k < RS_NS_COUNT; k++) {
-        const rs_set_t *s = &found->ns[k];
-        uint8_t wk = rs_only_weak(s);
-        for (int i = 0; i < s->n; i++) {
-            if (!s->v[i].weak) {
-                rs_set_add(out, s->v[i]);
-            }
-        }
-        out->overflow = out->overflow || s->overflow;
-        w = (w == RS_E_GAP || wk == RS_E_NONE) ? w : wk;
-    }
-    rs_collapse(ix, out);
-    *weak = rs_set_empty(out) && w != RS_E_NONE;
-    if (*weak) {
-        rs_set_add(out, rs_ent(w, 0));
-    }
-}
-
 /* True when one of the standard derives in the comma-joined list `derives`
  * generates a method `name` (the methods of the trait each one implements:
  * defined by the language). What a derive of another crate generates is not
@@ -4232,59 +3122,162 @@ static bool rs_assoc_hidden(const rs_index_t *ix, int item, const char *name) {
            it->impl_count > RS_IMPL_SCAN || cbm_ht_get(ix->blanket, name) != NULL;
 }
 
-/* A reference that names nothing that was found. */
-static void rs_link_miss(const rs_link_t *q, const rs_set_t *owners, bool mismatch,
-                         cbm_doclink_outcome_t *out) {
-    const char *last = q->segs[q->path.n - SKIP_ONE];
-    bool hidden = false;
-    for (int i = 0; !mismatch && i < owners->n && !hidden; i++) {
-        hidden = owners->v[i].kind == RS_E_ITEM && rs_assoc_hidden(q->ix, owners->v[i].idx, last);
+typedef struct {
+    const char *path;
+    const char *prefix;
+    const char *suffix;
+    const char *label;
+    bool product;
+    bool external;
+} rs_target_facts_t;
+
+typedef struct {
+    const cbm_gbuf_node_t *node;
+    const char *path;
+    const char *label;
+} rs_graph_node_t;
+
+typedef struct {
+    int dis;
+    bool single;
+    bool product;
+    const char *first;
+    const char *last;
+} rs_link_context_t;
+
+typedef struct {
+    void (*find)(const rs_link_t *, int, rs_found_t *);
+    void (*collapse)(const rs_link_t *, rs_set_t *);
+    uint8_t (*entity_kind)(const rs_link_t *, rs_ent_t);
+    rs_target_facts_t (*target)(const rs_link_t *, rs_ent_t);
+    rs_graph_node_t (*by_qn)(const cbm_gbuf_t *, const char *);
+    bool (*hidden)(const rs_link_t *, int, const char *);
+    bool (*local)(const rs_link_t *, const char *);
+    bool (*unowned)(const rs_link_t *);
+} rs_link_ops_t;
+
+typedef struct {
+    const cbm_gbuf_node_t *target;
+    int reason;
+    bool exact;
+    bool local;
+} rs_link_outcome_t;
+
+rs_link_outcome_t mori_rust_doc_choose(const rs_link_t *q, const cbm_gbuf_t *graph,
+                                       const rs_link_ops_t *ops, const rs_link_context_t *context,
+                                       bool primitive);
+
+_Static_assert(RS_E_NONE == 0 && RS_E_ITEM == 1 && RS_E_MOD == 2 && RS_E_MEMBER == 3 &&
+                   RS_E_EXTERNAL == 5 && RS_E_GAP == 6 && RS_SET_CAP == 8 && RS_NS_COUNT == 3 &&
+                   RS_NS_TYPE == 1 && RS_NS_VALUE == 2 && RS_NS_MACRO == 4,
+               "Rust doc link candidate ABI");
+_Static_assert(CBM_DOCLINK_RS_DIS_NONE == 0 && CBM_DOCLINK_RS_DIS_STRUCT == 1 &&
+                   CBM_DOCLINK_RS_DIS_ENUM == 2 && CBM_DOCLINK_RS_DIS_TRAIT == 3 &&
+                   CBM_DOCLINK_RS_DIS_UNION == 4 && CBM_DOCLINK_RS_DIS_TYALIAS == 5 &&
+                   CBM_DOCLINK_RS_DIS_MOD == 6 && CBM_DOCLINK_RS_DIS_CONST == 7 &&
+                   CBM_DOCLINK_RS_DIS_STATIC == 8 && CBM_DOCLINK_RS_DIS_FN == 9 &&
+                   CBM_DOCLINK_RS_DIS_DERIVE == 10 && CBM_DOCLINK_RS_DIS_FIELD == 11 &&
+                   CBM_DOCLINK_RS_DIS_VARIANT == 12 && CBM_DOCLINK_RS_DIS_MACRO_BANG == 13 &&
+                   CBM_DOCLINK_RS_DIS_TYPE_NS == 14 && CBM_DOCLINK_RS_DIS_VALUE_NS == 15 &&
+                   CBM_DOCLINK_RS_DIS_MACRO_NS == 16 && CBM_DOCLINK_RS_DIS_PRIM == 17,
+               "Rust doc link disambiguator ABI");
+_Static_assert(CBM_DOCLINK_REASON_MISSING == 0 && CBM_DOCLINK_REASON_AMBIGUOUS == 1 &&
+                   CBM_DOCLINK_REASON_EXTERNAL == 2 && CBM_DOCLINK_REASON_TEST_ONLY == 3 &&
+                   CBM_DOCLINK_REASON_GRAPH_GAP == 5,
+               "Rust doc link reason ABI");
+
+static void rs_link_find(const rs_link_t *q, int mask, rs_found_t *out) {
+    rs_look_t lk = {.ix = q->ix, .assoc = true};
+    rs_resolve_path(&lk, q->mod, &q->path, mask, q->self, CBM_NOT_FOUND, out);
+}
+
+static void rs_link_collapse(const rs_link_t *q, rs_set_t *set) {
+    rs_collapse(q->ix, set);
+}
+
+static uint8_t rs_link_entity_kind(const rs_link_t *q, rs_ent_t e) {
+    if (e.kind == RS_E_ITEM) {
+        return (uint8_t)q->ix->items[e.idx].kind;
     }
-    if (hidden) {
-        out->reason = CBM_DOCLINK_REASON_GRAPH_GAP;
-    } else if (!mismatch && q->single && rs_is_local(q, q->segs[0])) {
-        out->kind = CBM_DOCLINK_LOCAL;
+    return e.kind == RS_E_MEMBER ? (uint8_t)q->ix->members[e.idx].kind : 0;
+}
+
+static rs_target_facts_t rs_link_target(const rs_link_t *q, rs_ent_t e) {
+    const rs_index_t *ix = q->ix;
+    if (e.kind == RS_E_ITEM) {
+        const rs_item_t *it = &ix->items[e.idx];
+        const rs_file_t *f = &ix->files[it->file];
+        return (rs_target_facts_t){
+            .path = f->rel_path,
+            .prefix = f->item_prefix,
+            .suffix = it->suffix,
+            .label = rs_label_name(it->label),
+            .product = ix->mods[it->mod].product && !it->test,
+        };
     }
+    if (e.kind == RS_E_MEMBER) {
+        const rs_member_t *m = &ix->members[e.idx];
+        const rs_file_t *f = &ix->files[m->file];
+        return (rs_target_facts_t){
+            .path = f->rel_path,
+            .prefix = f->item_prefix,
+            .suffix = m->suffix,
+            .label = rs_label_name(m->label),
+            .product = ix->mods[m->mod].product && !m->owner_test,
+        };
+    }
+    if (e.kind == RS_E_MOD) {
+        const rs_mod_t *mod = &ix->mods[e.idx];
+        const rs_file_t *f = &ix->files[mod->file];
+        return (rs_target_facts_t){
+            .path = f->rel_path,
+            .suffix = mod->parent < 0 ? f->module_qn : NULL,
+            .label = "Module",
+            .product = mod->product,
+        };
+    }
+    return (rs_target_facts_t){
+        .product = true,
+        .external = e.kind == RS_E_EXTERNAL ||
+                    (e.kind == RS_E_IMPL && ix->impls[e.idx].self_ent.kind == RS_E_EXTERNAL),
+    };
+}
+
+static rs_graph_node_t rs_link_by_qn(const cbm_gbuf_t *graph, const char *qn) {
+    const cbm_gbuf_node_t *node = cbm_gbuf_find_by_qn(graph, qn);
+    return node ? (rs_graph_node_t){node, node->file_path, node->label} : (rs_graph_node_t){0};
+}
+
+static bool rs_link_hidden(const rs_link_t *q, int item, const char *name) {
+    return rs_assoc_hidden(q->ix, item, name);
+}
+
+static bool rs_link_unowned(const rs_link_t *q) {
+    return !q->file_level && rs_unowned(q->ix, q->f, q->link);
 }
 
 static void rs_link_decide(const rs_link_t *q, const cbm_gbuf_t *graph,
                            cbm_doclink_outcome_t *out) {
-    const rs_index_t *ix = q->ix;
-    rs_look_t lk = {.ix = ix, .assoc = true};
-    rs_found_t found;
-    rs_set_t cand = {0};
-    bool weak = false;
-    bool prim = q->single && RS_IN(RS_PRIMITIVES, q->segs[0]);
-    bool any_type = q->dis == CBM_DOCLINK_RS_DIS_NONE || q->dis == CBM_DOCLINK_RS_DIS_TYPE_NS;
-    rs_resolve_path(&lk, q->mod, &q->path, rs_dis_mask(q->dis), q->self, CBM_NOT_FOUND, &found);
-    if (found.ambiguous) {
-        out->reason = CBM_DOCLINK_REASON_AMBIGUOUS;
-        return;
-    }
-    rs_candidates(ix, &found, &cand, &weak);
-    if (q->dis == CBM_DOCLINK_RS_DIS_PRIM || (prim && (weak || rs_set_empty(&cand)))) {
-        /* a primitive type: rustdoc's fallback when the path names nothing */
-        out->reason = prim ? CBM_DOCLINK_REASON_EXTERNAL : CBM_DOCLINK_REASON_MISSING;
-        return;
-    }
-    if (prim && any_type) {
-        out->reason = CBM_DOCLINK_REASON_AMBIGUOUS; /* the primitive, or what the name binds */
-        return;
-    }
-    bool had = !rs_set_empty(&cand);
-    rs_filter_dis(ix, &cand, q->dis);
-    rs_trait_wins(ix, &cand);
-    if (cand.overflow || cand.n > SKIP_ONE) {
-        out->reason = CBM_DOCLINK_REASON_AMBIGUOUS;
-        return;
-    }
-    if (cand.n == 0) {
-        rs_link_miss(q, &found.owners, had, out);
-        return;
-    }
-    rs_outcome(q, graph, cand.v[0], out);
-    out->exact = !q->single || cand.v[0].via_import;
-    if (weak && cand.v[0].kind == RS_E_GAP && q->single && rs_is_local(q, q->segs[0])) {
+    static const rs_link_ops_t ops = {
+        .find = rs_link_find,
+        .collapse = rs_link_collapse,
+        .entity_kind = rs_link_entity_kind,
+        .target = rs_link_target,
+        .by_qn = rs_link_by_qn,
+        .hidden = rs_link_hidden,
+        .local = rs_is_local,
+        .unowned = rs_link_unowned,
+    };
+    rs_link_context_t context = {q->dis, q->single, q->product, q->segs[0],
+                                 q->segs[q->path.n - SKIP_ONE]};
+    rs_link_outcome_t result =
+        mori_rust_doc_choose(q, graph, &ops, &context, q->single && rs_walk_primitive(q->segs[0]));
+    out->target = result.target;
+    out->exact = result.exact;
+    out->reason = result.reason;
+    if (result.target) {
+        out->kind = CBM_DOCLINK_EDGE;
+    } else if (result.local) {
         out->kind = CBM_DOCLINK_LOCAL;
     }
 }
@@ -4292,7 +3285,7 @@ static void rs_link_decide(const rs_link_t *q, const cbm_gbuf_t *graph,
 /* One reference of run file `run_file`. */
 static void rs_resolve(const void *index, void *state, int run_file, const CBMDocLink *link,
                        const cbm_gbuf_t *graph, cbm_doclink_outcome_t *out) {
-    (void)state; /* Rust keeps no per-file working state */
+    (void)state;
     const rs_index_t *ix = (const rs_index_t *)index;
     CBMDocLinkRsPath parsed;
     out->kind = CBM_DOCLINK_UNRESOLVED;
@@ -4333,108 +3326,15 @@ static void rs_resolve(const void *index, void *state, int run_file, const CBMDo
     }
     q.product = rs_source_product(&q);
     rs_link_decide(&q, graph, out);
-    if (out->kind == CBM_DOCLINK_EDGE && !q.file_level && rs_unowned(ix, f, link)) {
-        out->kind = CBM_DOCLINK_UNRESOLVED; /* no node of its own to leave from */
-        out->reason = CBM_DOCLINK_REASON_GRAPH_GAP;
-        out->target = NULL;
-        out->exact = false;
-    }
 }
 
 /* ── Incremental scope rules ─────────────────────────────────────── */
 
-/* The next line of a blob; false at the end. */
-static bool rs_delta_line(const char **cursor, const char **line, size_t *len) {
-    const char *p = *cursor;
-    if (!p || !*p) {
-        return false;
-    }
-    const char *nl = strchr(p, '\n');
-    *line = p;
-    *len = nl ? (size_t)(nl - p) : strlen(p);
-    *cursor = nl ? nl + SKIP_ONE : p + *len;
-    return true;
-}
+_Static_assert(CBM_DOCLINK_DELTA_LOCAL == 0 && CBM_DOCLINK_DELTA_GLOBAL == 1 && CBM_NOT_FOUND == -1,
+               "Rust doc link scope delta ABI");
 
-/* The name of an `M start kind name node` line whose member no path can reach
- * under another name: a function, a constant, a type or a field (not a
- * variant, which `use` can rename). The name must be one the incremental
- * route can find in an unresolved reference: ASCII letters, digits and `_`. */
-static bool rs_delta_member(const char *line, size_t len, const char **name, size_t *nlen) {
-    enum { F_KIND = 2, F_NAME = 3 };
-    const char *field[F_NAME + PAIR_LEN];
-    int n = 0;
-    field[n++] = line;
-    for (size_t i = 0; i < len && n < F_NAME + PAIR_LEN; i++) {
-        if (line[i] == '\t') {
-            field[n++] = line + i + SKIP_ONE;
-        }
-    }
-    if (line[0] != 'M' || n != F_NAME + PAIR_LEN || field[F_NAME] - field[F_KIND] != PAIR_LEN ||
-        !strchr("fctd", field[F_KIND][0])) {
-        return false;
-    }
-    const char *s = field[F_NAME];
-    size_t sl = (size_t)(field[F_NAME + SKIP_ONE] - s) - SKIP_ONE;
-    if (sl > PAIR_LEN && s[0] == 'r' && s[1] == '#') {
-        s += PAIR_LEN;
-        sl -= PAIR_LEN;
-    }
-    for (size_t i = 0; i < sl; i++) {
-        if (!(isalnum((unsigned char)s[i]) || s[i] == '_')) {
-            return false;
-        }
-    }
-    *name = s;
-    *nlen = sl;
-    return sl > 0;
-}
-
-/* Compare a changed file's stored and fresh scopes line by line, in order
- * (both in the persisted form: no line numbers, no per-definition records).
- *
- * Equal scopes leave every other file's resolution alone: other files see a
- * file only through these records.
- *
- * One difference does too: a member (function, constant, type, field of a
- * type, trait or impl) the fresh scope no longer has. A member is reached
- * only by a path that ends in its name, so a reference that depended on it
- * either bound it (an edge into this file: re-resolved with the closure) or
- * names it in its unresolved row: the name is reported.
- *
- * Everything else is GLOBAL: a new or changed line; a removed item, module,
- * import or variant (`use` can bring any of them into another file under
- * another name, so no name finds the references that depended on it); a
- * changed order (same-named declarations own their node by order); and any
- * change of a manifest. */
-static int rs_scope_delta(const char *stored, const char *fresh, cbm_doclink_name_fn removed,
-                          void *ud) {
-    const char *sp = stored;
-    const char *fp = fresh;
-    const char *sl = NULL;
-    const char *fl = NULL;
-    size_t slen = 0;
-    size_t flen = 0;
-    bool hs = rs_delta_line(&sp, &sl, &slen);
-    bool hf = rs_delta_line(&fp, &fl, &flen);
-    while (hs || hf) {
-        if (hs && hf && slen == flen && memcmp(sl, fl, slen) == 0) {
-            hs = rs_delta_line(&sp, &sl, &slen);
-            hf = rs_delta_line(&fp, &fl, &flen);
-            continue;
-        }
-        const char *name = NULL;
-        size_t nlen = 0;
-        if (!hs || !rs_delta_member(sl, slen, &name, &nlen)) {
-            return CBM_DOCLINK_DELTA_GLOBAL;
-        }
-        if (!removed || !removed(ud, name, nlen)) {
-            return CBM_NOT_FOUND;
-        }
-        hs = rs_delta_line(&sp, &sl, &slen);
-    }
-    return CBM_DOCLINK_DELTA_LOCAL;
-}
+int mori_rust_doc_scope_delta(const char *stored, const char *fresh, cbm_doclink_name_fn removed,
+                              void *ud);
 
 const cbm_doclink_resolver_t cbm_doclink_rs_resolver = {
     .langs = {CBM_LANG_RUST, CBM_LANG_TOML},
@@ -4443,5 +3343,5 @@ const cbm_doclink_resolver_t cbm_doclink_rs_resolver = {
     .build = rs_build,
     .destroy = rs_destroy,
     .resolve = rs_resolve,
-    .scope_delta = rs_scope_delta,
+    .scope_delta = mori_rust_doc_scope_delta,
 };

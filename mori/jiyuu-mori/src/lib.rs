@@ -21,6 +21,10 @@ mod native_graph_buffer;
 #[cfg(feature = "native-engine-abi")]
 mod pdf_doc_links;
 #[cfg(feature = "native-engine-abi")]
+mod rust_doc_cargo;
+#[cfg(feature = "native-engine-abi")]
+mod rust_doc_path;
+#[cfg(feature = "native-engine-abi")]
 mod shell_pass;
 #[cfg(any(feature = "native-engine-abi", test))]
 mod similarity;
