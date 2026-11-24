@@ -1553,11 +1553,21 @@ TEST(pipeline_frozen_keeps_an_explicit_empty_file_list) {
     bool built = pf_source_write(&f, "unlisted.c", pf_ordinary) &&
                  pf_create_listed(&f, &empty_list_marker, 0, &owner) == CBM_PIPELINE_FROZEN_OK &&
                  cbm_pipeline_frozen_build(owner) == CBM_PIPELINE_FROZEN_OK;
-    bool unlisted_absent = built && !pf_has_qn(f.db, PF_PROJECT ".unlisted.ordinary");
+    cbm_store_t *store = built ? cbm_store_open_path_query(f.db) : NULL;
+    cbm_node_t *nodes = NULL;
+    int count = 0;
+    int scan_rc = store ? cbm_store_find_nodes_by_file(store, PF_PROJECT, "unlisted.c", &nodes,
+                                                       &count)
+                        : CBM_STORE_ERR;
+    cbm_store_free_nodes(nodes, count);
+    if (store) {
+        cbm_store_close(store);
+    }
     cbm_pipeline_frozen_free(owner);
     ASSERT_TRUE(pf_close(&f));
     ASSERT_TRUE(built);
-    ASSERT_TRUE(unlisted_absent);
+    ASSERT_EQ(scan_rc, CBM_STORE_OK);
+    ASSERT_EQ(count, 0);
     PASS();
 }
 
