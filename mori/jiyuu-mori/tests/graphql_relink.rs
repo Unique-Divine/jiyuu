@@ -1363,6 +1363,55 @@ fn ordered_graph_ui_calls_match_native_ties_limits_and_cursor_pages() {
 }
 
 #[test]
+fn graph_ui_span_and_string_predicates_execute_in_rust() {
+    let fixture = Fixture::new();
+    let db = fixture.index(CLIENT);
+    for (name, path, start, end) in [
+        ("parse_outer", "span.py", 1, 40),
+        ("parse_inner", "span.py", 10, 10),
+        ("parse_after", "span.py", 11, 20),
+        ("helper_inner", "other.py", 10, 10),
+    ] {
+        let id = node(&db, CLIENT, "SpanProbe", name, name, path);
+        db.execute(
+            "UPDATE nodes SET start_line = ?, end_line = ? WHERE id = ?",
+            params![start, end, id],
+        )
+        .unwrap();
+    }
+    let caller = node(&db, CLIENT, "TextProbe", "caller", "caller", "span.py");
+    for name in ["parse_first", "parse_second", "skip"] {
+        let callee = node(&db, CLIENT, "TextProbe", name, name, "span.py");
+        edge(&db, CLIENT, caller, callee, "CALLS", json!({}));
+    }
+    drop(db);
+
+    // Matches the Graph UI enclosing-symbol query, including span boundaries.
+    let span = "MATCH (n:SpanProbe) WHERE n.file_path = 'span.py' AND n.start_line <= 10 AND n.end_line >= 10 RETURN n.name, n.start_line ORDER BY n.start_line DESC LIMIT 10";
+    // The depth-one replay shape exercises a non-equality predicate on the far
+    // binding, where it must not act as a seed equality.
+    let prefix = "MATCH (a:TextProbe)-[:CALLS]->(b) WHERE b.name STARTS WITH 'parse' RETURN b.name ORDER BY b.name LIMIT 10";
+    let text = "MATCH (n:SpanProbe) WHERE n.name CONTAINS 'inner' AND n.name ENDS WITH 'inner' AND n.name <> 'helper_inner' AND NOT n.name STARTS WITH 'helper' RETURN n.name";
+    let strict = "MATCH (n:SpanProbe) WHERE n.start_line > 10 AND n.end_line < 40 AND n.file_path != 'other.py' RETURN n.name";
+    let empty = "MATCH (n:SpanProbe) WHERE n.name CONTAINS '' OR n.name STARTS WITH 'absent' RETURN n.name ORDER BY n.name LIMIT 1";
+    let cases = [
+        ((span, 0, true), json!([["parse_inner", "10"]])),
+        ((span, 1, true), json!([["parse_outer", "1"]])),
+        ((prefix, 0, true), json!([["parse_first"]])),
+        ((prefix, 1, true), json!([["parse_second"]])),
+        ((text, 0, true), json!([["parse_inner"]])),
+        ((strict, 0, true), json!([["parse_after"]])),
+        ((empty, 0, true), json!([["helper_inner"]])),
+    ];
+    let inputs: Vec<_> = cases.iter().map(|(case, _)| *case).collect();
+    for (page, ((query, _, _), rows)) in
+        fixture.compare_query_pages(&inputs).iter().zip(cases)
+    {
+        assert_eq!(page["rows"], rows, "{query}");
+    }
+}
+
+#[test]
 fn ordered_aliases_keep_lexical_keys_and_raw_split_bytes() {
     const QUERY: &str = "MATCH (n:SortProbe) RETURN n.name AS symbol, n.value AS key ORDER BY key ASC";
     let fixture = Fixture::new();

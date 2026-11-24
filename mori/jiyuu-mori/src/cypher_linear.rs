@@ -32,6 +32,9 @@ enum Token<'a> {
     Symbol(u8),
     ArrowIn,
     ArrowOut,
+    NotEqual,
+    LessOrEqual,
+    GreaterOrEqual,
 }
 
 fn tokens(mut query: &str) -> Result<Vec<Token<'_>>, Unsupported> {
@@ -70,6 +73,10 @@ fn tokens(mut query: &str) -> Result<Vec<Token<'_>>, Unsupported> {
             }
             b'<' if query.starts_with("<-") => (Token::ArrowIn, 2),
             b'-' if query.starts_with("->") => (Token::ArrowOut, 2),
+            b'<' if query.starts_with("<=") => (Token::LessOrEqual, 2),
+            b'>' if query.starts_with(">=") => (Token::GreaterOrEqual, 2),
+            b'<' if query.starts_with("<>") => (Token::NotEqual, 2),
+            b'!' if query.starts_with("!=") => (Token::NotEqual, 2),
             b'(' | b')' | b'[' | b']' | b'{' | b'}' | b':' | b'-' | b'<'
             | b'>' | b'.' | b'=' | b',' => (Token::Symbol(first), 1),
             _ => return Err(Unsupported),
@@ -91,12 +98,70 @@ enum Binding {
     Edge(usize),
 }
 
-type Filter<'a> = (&'a str, &'a str);
+#[derive(Debug)]
+enum Comparison<'a> {
+    Equal(&'a str),
+    NotEqual(&'a str),
+    Contains(&'a str),
+    StartsWith(&'a str),
+    EndsWith(&'a str),
+    Line(Ordering, bool, i32),
+}
+
+#[derive(Debug)]
+struct Predicate<'a> {
+    node: usize,
+    property: &'a str,
+    comparison: Comparison<'a>,
+    negated: bool,
+}
+
+impl Predicate<'_> {
+    fn is_seed_equality(&self) -> bool {
+        !self.negated && matches!(self.comparison, Comparison::Equal(_))
+    }
+
+    fn matches(&self, node: &Node) -> bool {
+        let matches = match self.comparison {
+            Comparison::Line(direction, inclusive, expected) => {
+                let actual = if self.property == "start_line" {
+                    node.start_line
+                } else {
+                    node.end_line
+                };
+                let order = actual.cmp(&expected);
+                order == direction || (inclusive && order == Ordering::Equal)
+            }
+            Comparison::Equal(expected) => {
+                node.property_bytes(self.property).as_ref()
+                    == expected.as_bytes()
+            }
+            Comparison::NotEqual(expected) => {
+                node.property_bytes(self.property).as_ref()
+                    != expected.as_bytes()
+            }
+            Comparison::StartsWith(expected) => node
+                .property_bytes(self.property)
+                .starts_with(expected.as_bytes()),
+            Comparison::EndsWith(expected) => node
+                .property_bytes(self.property)
+                .ends_with(expected.as_bytes()),
+            Comparison::Contains(expected) => {
+                expected.is_empty()
+                    || node
+                        .property_bytes(self.property)
+                        .windows(expected.len())
+                        .any(|part| part == expected.as_bytes())
+            }
+        };
+        matches != self.negated
+    }
+}
 
 #[derive(Debug)]
 struct NodePattern<'a> {
     label: Option<&'a str>,
-    inline: Vec<Filter<'a>>,
+    inline: Vec<(&'a str, &'a str)>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -122,7 +187,7 @@ struct OrderKey {
 pub(crate) struct Query<'a> {
     nodes: Vec<NodePattern<'a>>,
     hops: Vec<Hop<'a>>,
-    filters: Vec<(usize, Filter<'a>)>,
+    filters: Vec<Predicate<'a>>,
     any_filter: bool,
     projections: Vec<Projection<'a>>,
     order: Vec<OrderKey>,
@@ -219,6 +284,58 @@ impl<'a> Parser<'a> {
         let name = self.name()?;
         Ok((name, *self.names.get(name).ok_or(Unsupported)?))
     }
+
+    fn predicate(&mut self) -> Result<Predicate<'a>, Unsupported> {
+        let negated = self.keyword("NOT");
+        let (_, Binding::Node(node)) = self.reference()? else {
+            return Err(Unsupported);
+        };
+        self.symbol(b'.')?;
+        let property = node_property(self.name()?)?;
+        let comparison = match self.tokens.next().ok_or(Unsupported)? {
+            Token::Symbol(b'=') => Comparison::Equal(self.literal()?),
+            Token::NotEqual => Comparison::NotEqual(self.literal()?),
+            Token::Word(word) if word.eq_ignore_ascii_case("CONTAINS") => {
+                Comparison::Contains(self.literal()?)
+            }
+            Token::Word(word) if word.eq_ignore_ascii_case("STARTS") => {
+                if !self.keyword("WITH") {
+                    return Err(Unsupported);
+                }
+                Comparison::StartsWith(self.literal()?)
+            }
+            Token::Word(word) if word.eq_ignore_ascii_case("ENDS") => {
+                if !self.keyword("WITH") {
+                    return Err(Unsupported);
+                }
+                Comparison::EndsWith(self.literal()?)
+            }
+            op if matches!(property, "start_line" | "end_line") => {
+                let (direction, inclusive) = match op {
+                    Token::Symbol(b'<') => (Ordering::Less, false),
+                    Token::LessOrEqual => (Ordering::Less, true),
+                    Token::Symbol(b'>') => (Ordering::Greater, false),
+                    Token::GreaterOrEqual => (Ordering::Greater, true),
+                    _ => return Err(Unsupported),
+                };
+                let Some(Token::Number(value)) = self.tokens.next() else {
+                    return Err(Unsupported);
+                };
+                Comparison::Line(
+                    direction,
+                    inclusive,
+                    value.parse().map_err(|_| Unsupported)?,
+                )
+            }
+            _ => return Err(Unsupported),
+        };
+        Ok(Predicate {
+            node,
+            property,
+            comparison,
+            negated,
+        })
+    }
 }
 
 fn valid_name(name: &str) -> bool {
@@ -277,13 +394,7 @@ pub(crate) fn classify(source: &str) -> Result<Query<'_>, Unsupported> {
     if parser.keyword("WHERE") {
         let mut disjunction = None;
         loop {
-            let (_, Binding::Node(node)) = parser.reference()? else {
-                return Err(Unsupported);
-            };
-            parser.symbol(b'.')?;
-            let property = node_property(parser.name()?)?;
-            parser.symbol(b'=')?;
-            filters.push((node, (property, parser.literal()?)));
+            filters.push(parser.predicate()?);
             let next_any = if hops.is_empty() && parser.keyword("OR") {
                 true
             } else if parser.keyword("AND") {
@@ -755,14 +866,17 @@ impl Query<'_> {
         let node = &self.nodes[index];
         node.inline
             .iter()
+            .map(|(name, _)| *name)
             .chain(
                 self.filters
                     .iter()
-                    .filter(|(target, _)| *target == index)
-                    .map(|(_, filter)| filter),
+                    .filter(|filter| {
+                        filter.node == index && filter.is_seed_equality()
+                    })
+                    .map(|filter| filter.property),
             )
-            .map(|(name, _)| {
-                if matches!(*name, "name" | "qualified_name") {
+            .map(|name| {
+                if matches!(name, "name" | "qualified_name") {
                     3
                 } else {
                     2
@@ -785,13 +899,12 @@ impl Query<'_> {
         }
         // The classifier accepts single-binding predicates. Evaluate each
         // when its node is bound so rejected nodes never expand adjacency.
-        for &(target, (property, value)) in &self.filters {
-            if target == index {
-                let matches =
-                    node.property_bytes(property).as_ref() == value.as_bytes();
-                if matches == self.any_filter {
-                    return matches;
-                }
+        for predicate in
+            self.filters.iter().filter(|filter| filter.node == index)
+        {
+            let matches = predicate.matches(node);
+            if matches == self.any_filter {
+                return matches;
             }
         }
         !self.any_filter
