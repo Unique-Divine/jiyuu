@@ -5779,10 +5779,24 @@ TEST(doc_mentions_scope_delta_rules) {
             FAIL("scope delta");
         }
     }
+    const char *extra_using = "using Acme.More;\n";
+    char based_before[512];
+    char based_after[512];
+    snprintf(based_before, sizeof(based_before), "%s%s", extra_using, base);
+    snprintf(based_after, sizeof(based_after), "%s%s%s", DM_DELTA_HEAD, extra_using,
+             DM_DELTA_OPEN DM_DELTA_RUN_INT DM_DELTA_RUN_STR DM_DELTA_SIZE DM_DELTA_CLOSE);
+    ASSERT_EQ(dm_delta(based_before, based_after, names, sizeof(names)), CBM_DOCLINK_DELTA_GLOBAL);
     /* A file that declares no type with a base list: its own usings scope
      * nothing but the file itself, which is re-extracted anyway. */
 #define DM_DELTA_PLAIN "namespace N\n{\n    public class W\n    {\n"
     const char *plain = DM_DELTA_HEAD DM_DELTA_PLAIN DM_DELTA_RUN_INT DM_DELTA_SIZE DM_DELTA_CLOSE;
+    char plain_before[512];
+    char plain_after[512];
+    snprintf(plain_before, sizeof(plain_before), "%s%s", extra_using, plain);
+    snprintf(plain_after, sizeof(plain_after), "%s%s%s", DM_DELTA_HEAD, extra_using,
+             DM_DELTA_PLAIN DM_DELTA_RUN_INT DM_DELTA_SIZE DM_DELTA_CLOSE);
+    ASSERT_EQ(dm_delta(plain_before, plain_after, names, sizeof(names)), CBM_DOCLINK_DELTA_LOCAL);
+    ASSERT_STR_EQ(names, "");
     struct {
         const char *what;
         const char *after;
