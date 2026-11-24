@@ -4,14 +4,14 @@ pub mod ipc;
 
 #[cfg(any(feature = "native-engine-abi", test))]
 mod complexity;
-#[cfg(any(feature = "native-engine-abi", test))]
-mod explicit_override;
-#[cfg(any(feature = "native-engine-abi", test))]
-mod similarity;
 #[cfg(feature = "native-engine-abi")]
 mod doc_file_links;
+#[cfg(any(feature = "native-engine-abi", test))]
+mod explicit_override;
 #[cfg(feature = "native-engine-abi")]
 mod pdf_doc_links;
+#[cfg(any(feature = "native-engine-abi", test))]
+mod similarity;
 
 #[cfg(any(feature = "graphql-callbacks", test))]
 mod gqlgen;

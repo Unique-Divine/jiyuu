@@ -45,10 +45,8 @@ fn fingerprint(properties: &[u8]) -> Option<Fingerprint> {
     }
 
     let mut fingerprint = [0; WORDS];
-    for (num, chunk) in fingerprint
-        .iter_mut()
-        .zip(value[..end].chunks_exact(HEX_PER_WORD))
-    {
+    let (chunks, _) = value[..end].as_chunks::<HEX_PER_WORD>();
+    for (num, chunk) in fingerprint.iter_mut().zip(chunks) {
         *num = hex_word(chunk);
     }
     Some(fingerprint)
