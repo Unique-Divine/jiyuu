@@ -475,11 +475,12 @@ packaged driver changes.
 
 ### Index Worker Recovery
 
-Set `MORI_IMPL_JOB_RECOVERY=rust` when starting the daemon to run the
-Rust worker recovery driver. It enforces the retry budget and decides
-when the daemon can attempt a partial index after a contained worker
-failure. The debug log event `daemon.index.recovery_driver` identifies
-the backend. The default driver is C.
+The linked `mori` daemon uses Rust to enforce the worker retry budget and
+decide when to attempt a partial index after a contained worker failure.
+C still executes each attempt under the daemon's existing job reservation.
+The debug log event `daemon.index.recovery_driver` identifies the driver.
+The native candidate test runner calls the same Rust driver. The pinned
+C comparison build retains its own retry loop.
 
 ### Named Watch Reconciliation
 
@@ -1350,7 +1351,7 @@ four targets, each on a native runner, with the graph UI embedded (as
 `--version`, a tiny index and the UI index page from `mori daemon start
 --port=N`, runs the CLI parity check
 ([scripts/cli-parity.ts](scripts/cli-parity.ts)) against
-`codebase-memory-mcp` from the same commit, and packages the binary with
+`codebase-memory-mcp`, and packages the binary with
 [scripts/package-release.sh](scripts/package-release.sh) as
 `mori-<version>-<target>.tar.gz`:
 
@@ -1369,14 +1370,16 @@ licenses). There is no installer; users install from the release assets as
 signing and Gatekeeper behavior are covered under
 [Download a Release](#download-a-release).
 
+The workflow builds `codebase-memory-mcp` from C source pinned in
+[the release workflow](../.github/workflows/mori-release.yml) on all four
+targets. It uses the candidate version string for the `--version` comparison.
+
 On Linux x64, Linux arm64, and macOS arm64, the workflow also replays graph
 fixtures against the published C 0.13.1 binary. It checks the downloaded
 reference archive against a pinned SHA-256 digest and compares the
 candidate's Rust graph export with its SQL export. The GraphQL fixture
 requires the candidate's Rust planner and writer to emit a Route to its
-gqlgen resolver. Intel macOS runs the
-same-commit CLI comparison and smoke tests. C 0.13.1 has no Intel macOS
-archive.
+gqlgen resolver. C 0.13.1 has no Intel macOS archive.
 
 The release job attests build provenance for the archives and
 `checksums.txt`, then creates a draft release with `checksums.txt` and

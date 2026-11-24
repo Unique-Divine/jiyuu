@@ -1,13 +1,33 @@
-//! Rust GraphQL implementation and registration for the C graph engine.
+//! Rust implementations and registration for the C graph engine.
+
+pub mod ipc;
+
+#[cfg(any(feature = "native-engine-abi", test))]
+mod complexity;
+#[cfg(feature = "native-engine-abi")]
+mod doc_file_links;
+#[cfg(any(feature = "native-engine-abi", test))]
+mod explicit_override;
+#[cfg(feature = "native-engine-abi")]
+mod pdf_doc_links;
+#[cfg(any(feature = "native-engine-abi", test))]
+mod similarity;
 
 #[cfg(any(feature = "graphql-callbacks", test))]
 mod gqlgen;
+#[cfg(any(all(feature = "graphql-callbacks", not(test)), test))]
+mod graphql_document;
 #[cfg(any(feature = "graphql-callbacks", test))]
 mod graphql_link;
 #[cfg(any(feature = "graphql-callbacks", test))]
 mod link;
 #[cfg(any(feature = "graphql-callbacks", test))]
 mod route_writer;
+
+#[cfg(any(feature = "native-engine-abi", test))]
+mod job_recovery;
+#[cfg(any(feature = "native-engine-abi", test))]
+mod watcher;
 
 #[cfg(all(feature = "graphql-callbacks", not(test)))]
 mod graphql_ffi;
@@ -83,11 +103,10 @@ mod ts_static_imports;
 #[cfg(feature = "c-backend")]
 pub use ts_static_imports::register as mori_register_ts_static_imports;
 
-#[cfg(feature = "c-backend")]
+#[cfg(feature = "native-engine-abi")]
+mod config_text_edit;
+#[cfg(feature = "native-engine-abi")]
 mod fts_writer;
-
-#[cfg(feature = "c-backend")]
-pub use fts_writer::register as mori_register_fts_writer;
 
 #[cfg(feature = "c-backend")]
 mod source_publish;

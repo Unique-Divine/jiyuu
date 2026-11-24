@@ -4,8 +4,9 @@
 #   - Produces portable Linux binaries that run on any distro
 #
 # Build:  docker build -f test-infrastructure/Dockerfile.alpine -t cbm-alpine test-infrastructure/
-# Run:    docker run --rm -v $(pwd):/src cbm-alpine
+# Run:    docker run --rm -v $(git rev-parse --show-toplevel):/workspace cbm-alpine
 
+FROM rust:1.89.0-alpine3.21@sha256:8f717b9506b922815d461317b6ac40d2cddc0f77867809509a5f1d32b8372ea4 AS rust-toolchain
 FROM alpine:3.21@sha256:a8560b36e8b8210634f77d9f7f9efd7ffa463e380b75e2e74aff4511df3ef88c
 
 RUN apk add --no-cache \
@@ -21,7 +22,13 @@ RUN apk add --no-cache \
     npm \
     ca-certificates
 
-WORKDIR /src
+COPY --from=rust-toolchain /usr/local/cargo /usr/local/cargo
+COPY --from=rust-toolchain /usr/local/rustup /usr/local/rustup
+ENV CARGO_HOME=/usr/local/cargo RUSTUP_HOME=/usr/local/rustup
+ENV PATH="/usr/local/cargo/bin:${PATH}"
+
+RUN git config --system --add safe.directory /workspace
+WORKDIR /workspace/mori
 
 ENTRYPOINT ["bash", "scripts/build.sh"]
 CMD ["CC=gcc", "CXX=g++", "STATIC=1"]

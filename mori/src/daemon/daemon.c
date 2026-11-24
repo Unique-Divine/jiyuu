@@ -2,6 +2,8 @@
  * daemon.c — Process-local coordination and wire framing for the CBM daemon.
  */
 #include "daemon/daemon.h"
+#include "foundation/sanitized.h"
+#include "daemon/ipc_codec.h"
 
 #include "foundation/compat_thread.h"
 
@@ -70,24 +72,6 @@ typedef struct {
     void *context;
 } cbm_daemon_callback_batch_t;
 
-enum {
-    FRAME_MAGIC_0 = 0,
-    FRAME_MAGIC_1 = 1,
-    FRAME_MAGIC_2 = 2,
-    FRAME_MAGIC_3 = 3,
-    FRAME_VERSION = 4,
-    FRAME_TYPE = 5,
-    FRAME_FLAGS_HI = 6,
-    FRAME_FLAGS_LO = 7,
-    FRAME_LENGTH_3 = 8,
-    FRAME_LENGTH_2 = 9,
-    FRAME_LENGTH_1 = 10,
-    FRAME_LENGTH_0 = 11,
-};
-
-static bool frame_type_valid(cbm_daemon_frame_type_t type) {
-    return type == CBM_DAEMON_FRAME_REQUEST || type == CBM_DAEMON_FRAME_RESPONSE;
-}
 
 static char *daemon_string_dup(const char *value) {
     size_t length = strlen(value);
@@ -827,43 +811,32 @@ bool cbm_daemon_should_exit(cbm_daemon_coordinator_t *coordinator, uint64_t now_
 
 bool cbm_daemon_frame_header_encode(uint8_t header[CBM_DAEMON_FRAME_HEADER_SIZE],
                                     cbm_daemon_frame_type_t type, uint16_t flags, uint32_t length) {
-    if (!header || !frame_type_valid(type) || length > CBM_DAEMON_MAX_FRAME_SIZE) {
+    if (!mori_ipc_frame_header_encode(header, (int)type, flags, length)) {
         return false;
     }
-    header[FRAME_MAGIC_0] = 'C';
-    header[FRAME_MAGIC_1] = 'B';
-    header[FRAME_MAGIC_2] = 'M';
-    header[FRAME_MAGIC_3] = 'D';
-    header[FRAME_VERSION] = CBM_DAEMON_RENDEZVOUS_FRAME_VERSION;
-    header[FRAME_TYPE] = (uint8_t)type;
-    header[FRAME_FLAGS_HI] = (uint8_t)(flags >> 8);
-    header[FRAME_FLAGS_LO] = (uint8_t)flags;
-    header[FRAME_LENGTH_3] = (uint8_t)(length >> 24);
-    header[FRAME_LENGTH_2] = (uint8_t)(length >> 16);
-    header[FRAME_LENGTH_1] = (uint8_t)(length >> 8);
-    header[FRAME_LENGTH_0] = (uint8_t)length;
+    CBM_MSAN_WRITTEN(header, CBM_DAEMON_FRAME_HEADER_SIZE);
     return true;
 }
 
 bool cbm_daemon_frame_header_decode(const uint8_t header[CBM_DAEMON_FRAME_HEADER_SIZE],
                                     cbm_daemon_frame_t *frame) {
-    if (!header || !frame || header[FRAME_MAGIC_0] != 'C' || header[FRAME_MAGIC_1] != 'B' ||
-        header[FRAME_MAGIC_2] != 'M' || header[FRAME_MAGIC_3] != 'D' ||
-        header[FRAME_VERSION] != CBM_DAEMON_RENDEZVOUS_FRAME_VERSION) {
+    return cbm_daemon_frame_header_decode_bounded(header, CBM_DAEMON_MAX_FRAME_SIZE, frame);
+}
+
+bool cbm_daemon_frame_header_decode_bounded(const uint8_t header[CBM_DAEMON_FRAME_HEADER_SIZE],
+                                           uint32_t max_payload_length, cbm_daemon_frame_t *frame) {
+    uint8_t type;
+    uint16_t flags;
+    uint32_t length;
+    if (!frame ||
+        !mori_ipc_frame_header_decode(header, max_payload_length, &type, &flags, &length)) {
         return false;
     }
-
-    cbm_daemon_frame_type_t type = (cbm_daemon_frame_type_t)header[FRAME_TYPE];
-    uint32_t length = ((uint32_t)header[FRAME_LENGTH_3] << 24) |
-                      ((uint32_t)header[FRAME_LENGTH_2] << 16) |
-                      ((uint32_t)header[FRAME_LENGTH_1] << 8) | (uint32_t)header[FRAME_LENGTH_0];
-    if (!frame_type_valid(type) || length > CBM_DAEMON_MAX_FRAME_SIZE) {
-        return false;
-    }
-
-    frame->type = type;
-    frame->flags =
-        (uint16_t)(((uint16_t)header[FRAME_FLAGS_HI] << 8) | (uint16_t)header[FRAME_FLAGS_LO]);
+    CBM_MSAN_WRITTEN(&type, sizeof(type));
+    CBM_MSAN_WRITTEN(&flags, sizeof(flags));
+    CBM_MSAN_WRITTEN(&length, sizeof(length));
+    frame->type = (cbm_daemon_frame_type_t)type;
+    frame->flags = flags;
     frame->length = length;
     return true;
 }

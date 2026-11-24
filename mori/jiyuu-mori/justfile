@@ -17,20 +17,38 @@ test:
 # Run every pure-Rust check, as the jiyuu-mori CI job does.
 check: fmt-check lint test
 
-# Build mori with the C program linked, plus the C reference binary, and
-# compare the two. Needs bun, make, a C toolchain and the pinned grammars
-# (fetched by build.rs). MORI_MAKE_JOBS caps make parallelism (default 4).
-check-linked:
-  MORI_C_REFERENCE=1 cargo clippy --locked --all-targets --features c-backend -- -D warnings
-  MORI_C_REFERENCE=1 cargo test --locked --all-targets --features c-backend
+# Build the pinned C reference at an absolute path for reuse by linked checks.
+[positional-arguments]
+build-c-reference BIN:
+  bash ../scripts/build-c-reference.sh "$1"
 
-# Builds the debug mori and the C reference binary, then runs the same
-# commands through both (mori/scripts/cli-parity.ts).
-# Compare mori's CLI output with the C binary's.
+# Run a command using MORI_C_REFERENCE_BIN or a temporary pinned C build.
+[positional-arguments]
+with-c-reference +COMMAND:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  if [[ -z "${MORI_C_REFERENCE_BIN:-}" ]]; then
+    scratch="$(mktemp -d "${TMPDIR:-/tmp}/mori-linked.XXXXXX")"
+    trap 'rm -rf "$scratch"' EXIT
+    export MORI_C_REFERENCE_BIN="$scratch/codebase-memory-mcp"
+    bash ../scripts/build-c-reference.sh "$MORI_C_REFERENCE_BIN"
+  fi
+  if [[ "$MORI_C_REFERENCE_BIN" != /* || ! -f "$MORI_C_REFERENCE_BIN" || ! -x "$MORI_C_REFERENCE_BIN" ]]; then
+    printf 'MORI_C_REFERENCE_BIN must name an absolute executable path, got %s\n' "$MORI_C_REFERENCE_BIN" >&2
+    exit 2
+  fi
+  "$@"
+
+# Install the candidate's grammars first. MORI_MAKE_JOBS defaults to 4.
+# Check the Rust-linked binary against the pinned C reference.
+check-linked:
+  cargo clippy --locked --all-targets --features c-backend -- -D warnings
+  just with-c-reference cargo test --locked --all-targets --features c-backend
+
+# Compare the debug mori CLI with the pinned C reference.
 parity:
-  MORI_C_REFERENCE=1 cargo build --locked --features c-backend
-  bun ../scripts/cli-parity.ts --mori ../../target/debug/mori \
-    --c ../build/mori-rs/codebase-memory-mcp
+  cargo build --locked --features c-backend
+  just with-c-reference bash -c 'bun ../scripts/cli-parity.ts --mori ../../target/debug/mori --c "$MORI_C_REFERENCE_BIN"'
 
 # Build the release mori binary with the C program linked.
 build:
