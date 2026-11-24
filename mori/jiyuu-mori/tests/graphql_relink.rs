@@ -1412,6 +1412,75 @@ fn graph_ui_span_and_string_predicates_execute_in_rust() {
 }
 
 #[test]
+fn bounded_count_projects_native_groups_and_empty_results_in_rust() {
+    let fixture = Fixture::new();
+    let db = fixture.index(CLIENT);
+    let first = node(&db, CLIENT, "SourceProbe", "seed", "seed", "group.py");
+    for (name, bucket) in [
+        ("one", "beta"),
+        ("two", "alpha"),
+        ("three", "beta"),
+        ("four", "gamma"),
+        ("five", "alpha"),
+    ] {
+        let id = node(&db, CLIENT, "CountProbe", name, name, "group.py");
+        db.execute(
+            "UPDATE nodes SET properties = ? WHERE id = ?",
+            params![json!({"bucket":bucket}).to_string(), id],
+        )
+        .unwrap();
+        edge(&db, CLIENT, first, id, "CALLS", json!({}));
+    }
+    // The GROUP BY cell clips direct string fields at the same boundary as
+    // native, even when the prefix ends midway through a UTF-8 scalar.
+    let prefix = "a".repeat(510);
+    for (name, qn) in [
+        (format!("{prefix}é"), "one_clip"),
+        (format!("{prefix}ê"), "two_clip"),
+    ] {
+        node(&db, CLIENT, "ClipProbe", &name, qn, "group.py");
+    }
+    drop(db);
+
+    let grouped = "MATCH (n) WHERE n.file_path = 'group.py' RETURN n.label AS label, count(*) AS total ORDER BY total DESC, label";
+    let ties =
+        "MATCH (n:CountProbe) RETURN n.bucket, COUNT(*) ORDER BY COUNT(*) DESC";
+    let one_hop = "MATCH (a:SourceProbe)-[:CALLS]->(b) RETURN b.bucket AS key, count(b) AS total ORDER BY total DESC, key LIMIT 2";
+    let missing_prop = "MATCH (n:CountProbe) RETURN count(n.missing)";
+    let empty = "MATCH (n:MissingProbe) RETURN count(*) AS total";
+    let empty_group = "MATCH (n:MissingProbe) RETURN n.label, count(*)";
+    let zero_limit = "MATCH (n:CountProbe) RETURN count(*) LIMIT 0";
+    let clip = "MATCH (n:ClipProbe) RETURN n.name, COUNT(n)";
+    let compound = "MATCH (n:CountProbe) RETURN n.label, n.file_path, count(*)";
+    let cases = [
+        ((grouped, 0, true), json!([["CountProbe", "5"]])),
+        ((grouped, 1, true), json!([["ClipProbe", "2"]])),
+        ((ties, 0, true), json!([["beta", "2"]])),
+        ((ties, 1, true), json!([["alpha", "2"]])),
+        ((one_hop, 0, true), json!([["alpha", "2"]])),
+        ((one_hop, 1, true), json!([["beta", "2"]])),
+        ((missing_prop, 0, true), json!([["5"]])),
+        ((empty, 0, true), json!([["0"]])),
+        ((empty_group, 0, true), json!([])),
+        ((zero_limit, 0, true), json!([])),
+        (
+            (clip, 0, true),
+            json!([[format!("@bytes:{}c3", "61".repeat(510)), "2"]]),
+        ),
+        (
+            (compound, 0, false),
+            json!([["CountProbe", "group.py", "5"]]),
+        ),
+    ];
+    let inputs: Vec<_> = cases.iter().map(|(case, _)| *case).collect();
+    for (page, ((query, _, _), rows)) in
+        fixture.compare_query_pages(&inputs).iter().zip(cases)
+    {
+        assert_eq!(page["rows"], rows, "{query}");
+    }
+}
+
+#[test]
 fn ordered_aliases_keep_lexical_keys_and_raw_split_bytes() {
     const QUERY: &str = "MATCH (n:SortProbe) RETURN n.name AS symbol, n.value AS key ORDER BY key ASC";
     let fixture = Fixture::new();
@@ -1780,13 +1849,13 @@ fn unsupported_syntax_and_supported_storage_errors_are_distinct() {
         "MATCH (a)-[:CALLS]->(b)-[:CALLS]->(c) RETURN c.name ORDER BY c.name",
         "MATCH (a)-[r:CALLS]->(b) RETURN r.one, r.two, r.three, r.four, r.five, r.six, r.seven, r.eight, r.nine ORDER BY r.one",
         "MATCH (a) RETURN a.name AS x ORDER BY a.name",
-        "MATCH (a) RETURN count(a) AS n ORDER BY n",
+        "MATCH (a) RETURN count(DISTINCT a) AS n ORDER BY n",
         "MATCH (a)-[:CALLS*1..2]->(b) RETURN b.name",
         "MATCH (a)-[:CALLS]-(b) RETURN b.name",
         "MATCH (a)-[:CALLS]- >(b) RETURN b.name",
         "MATCH (count)-[:CALLS]->(b) RETURN b.name",
         "MATCH (a)-[:CALLS]->(b) WHERE a.name = 'x' OR b.name = 'y' RETURN b.name",
-        "MATCH (a)-[:CALLS]->(b) RETURN count(b)",
+        "MATCH (a)-[:CALLS]->(b) RETURN count(DISTINCT b)",
         "MATCH (a)-[:CALLS]->(b) RETURN typo.name",
         "MATCH (a)-[:CALLS]->(b) RETURN a.name MATCH (n)",
         "MATCH (a {name: '.*'})-[:CALLS]->(b) RETURN b.name",
