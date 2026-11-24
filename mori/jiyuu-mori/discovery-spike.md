@@ -11,9 +11,15 @@ Rust reads each directory and owns the pending directory stack. It visits
 children in reverse enumeration order after scanning their parent. Native
 code prepares the ignore rules, classifies entries, and builds the result
 arrays, including native mtimes and the ordered ignore sample. C is the
-default and handles bounded admission, discovery with aggregate resource
-limits, fresh semantic-manifest checks, and frozen builds that need a walk.
-A frozen build with its own file list reports `frozen_list` as the backend.
+default. It handles pipeline walks with aggregate resource limits, fresh
+semantic-manifest checks, and frozen builds that need a walk. A frozen build
+with its own file list reports `frozen_list` as the backend.
+
+Set `MORI_IMPL_ADMISSION=rust` on the linked Unix executable to use Rust
+directory iteration for the bounded count before MCP automatic indexing.
+The daemon inherits the setting at startup. C still applies the same ignore,
+language, file count, deadline, and resource checks. The
+`discover.admission_backend` debug event records which implementation ran.
 
 ## Independent Prototype Comparison
 
