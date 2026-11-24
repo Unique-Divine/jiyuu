@@ -4,7 +4,7 @@
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicI32, AtomicI64, Ordering::Relaxed};
 
-#[cfg(feature = "c-backend")]
+#[cfg(feature = "native-engine-abi")]
 mod native;
 
 const BASE_INTERVAL_MS: i32 = 5_000;

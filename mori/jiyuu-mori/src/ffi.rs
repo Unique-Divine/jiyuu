@@ -596,7 +596,6 @@ pub unsafe extern "C" fn main(argc: c_int, argv: *mut *mut c_char) -> c_int {
         c_transport::register();
         crate::repair_recovery::register();
         crate::named_watch::register();
-        crate::job_recovery::register();
         crate::index_manifest::register();
         crate::index_route::register();
         crate::full_build_driver::register();

@@ -11,7 +11,9 @@ mod link;
 #[cfg(any(feature = "graphql-callbacks", test))]
 mod route_writer;
 
-#[cfg(any(feature = "c-backend", test))]
+#[cfg(any(feature = "native-engine-abi", test))]
+mod job_recovery;
+#[cfg(any(feature = "native-engine-abi", test))]
 mod watcher;
 
 #[cfg(all(feature = "graphql-callbacks", not(test)))]

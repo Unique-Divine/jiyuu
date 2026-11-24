@@ -1433,8 +1433,7 @@ MAIN_SRC = src/main.c
 # which during this bisect produced a "crashes without sanitizers too" result
 # that was pure artifact and sent the investigation down the wrong path.
 LIBMORI_WITHOUT_C_INDEX_DRIVERS ?= 0
-LIBMORI_WITH_RUST_IPC ?= 0
-BUILD_CONFIG_SIG := TEST_SEAMS=$(TEST_SEAMS)|CFLAGS_EXTRA=$(CFLAGS_EXTRA)|SANITIZE=$(SANITIZE)|MEMWASTE=$(MEMWASTE)|MEMWASTE_ACCESS=$(MEMWASTE_ACCESS)|MEMWASTE_PROFILE=$(MEMWASTE_PROFILE)|TEST_COVERAGE=$(TEST_COVERAGE)|LIBMORI_WITH_UI=$(LIBMORI_WITH_UI)|LIBMORI_WITHOUT_C_INDEX_DRIVERS=$(LIBMORI_WITHOUT_C_INDEX_DRIVERS)|LIBMORI_WITH_RUST_IPC=$(LIBMORI_WITH_RUST_IPC)
+BUILD_CONFIG_SIG := TEST_SEAMS=$(TEST_SEAMS)|CFLAGS_EXTRA=$(CFLAGS_EXTRA)|SANITIZE=$(SANITIZE)|MEMWASTE=$(MEMWASTE)|MEMWASTE_ACCESS=$(MEMWASTE_ACCESS)|MEMWASTE_PROFILE=$(MEMWASTE_PROFILE)|TEST_COVERAGE=$(TEST_COVERAGE)|LIBMORI_WITH_UI=$(LIBMORI_WITH_UI)|LIBMORI_WITHOUT_C_INDEX_DRIVERS=$(LIBMORI_WITHOUT_C_INDEX_DRIVERS)
 .PHONY: build-config-check
 build-config-check:
 $(BUILD_DIR)/.build-config: build-config-check | $(BUILD_DIR)
@@ -1486,24 +1485,14 @@ ifeq ($(LIBMORI_WITHOUT_C_INDEX_DRIVERS),1)
 LIBMORI_PROD_SRCS := $(filter-out $(C_INDEX_DRIVERS_SRC),$(LIBMORI_PROD_SRCS))
 LIBMORI_INDEX_DRIVER_FLAGS = $(if $(filter src/pipeline/pipeline.c,$<),-DCBM_WITHOUT_C_INDEX_DRIVERS=1)
 endif
-# Cargo supplies the Rust byte codecs. Standalone C retains the reference.
-LIBMORI_IPC_FLAGS =
-ifeq ($(LIBMORI_WITH_RUST_IPC),1)
-LIBMORI_IPC_FLAGS = $(if $(filter src/daemon/daemon.c src/daemon/ipc.c,$<),-DCBM_WITH_RUST_IPC=1)
-endif
 LIBMORI_SRCS = $(LIBMORI_PROD_SRCS) $(EXTRACTION_SRCS) $(AC_LZ4_SRCS) $(ZSTD_SRCS) $(SQLITE_WRITER_SRC)
 LIBMORI_OBJS = $(patsubst %.c,$(LIBMORI_DIR)/%.o,$(LIBMORI_SRCS))
 LIBMORI_MAIN_OBJ = $(LIBMORI_DIR)/cbm_c_main.o
 LIBMORI_A = $(BUILD_DIR)/libmori-c.a
 
-# The standalone C reference and C tests retain the original poll policy.
-$(LIBMORI_DIR)/src/watcher/watcher.o: Makefile.cbm
-
 $(LIBMORI_DIR)/%.o: %.c $(BUILD_DIR)/.build-config $(PROJECT_HDRS) | $(BUILD_DIR)
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS_PROD) $(LIBMORI_INDEX_DRIVER_FLAGS) $(LIBMORI_IPC_FLAGS) \
-		$(if $(filter src/daemon/application.c,$<),-DCBM_WITH_RUST_JOB_RECOVERY=1) \
-		$(if $(filter src/watcher/watcher.c,$<),-DCBM_RUST_WATCHER=1) -c -o $@ $<
+	$(CC) $(CFLAGS_PROD) $(LIBMORI_INDEX_DRIVER_FLAGS) -c -o $@ $<
 
 $(LIBMORI_MAIN_OBJ): $(MAIN_SRC) $(BUILD_DIR)/.build-config $(PROJECT_HDRS) | $(BUILD_DIR)
 	@mkdir -p $(dir $@)

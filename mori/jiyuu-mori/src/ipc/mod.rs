@@ -4,7 +4,7 @@
 mod frame;
 mod socket_record;
 
-#[cfg(feature = "c-backend")]
+#[cfg(feature = "native-engine-abi")]
 mod native;
 #[cfg(test)]
 mod tests;

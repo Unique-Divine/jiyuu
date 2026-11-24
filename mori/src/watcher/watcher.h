@@ -131,8 +131,7 @@ int cbm_watcher_watch_count(cbm_watcher_t *w);
  * hard error, reset on success) can be asserted directly rather than inferred
  * from the poll deadline it feeds.
  *
- * The Rust poll policy exposes an atomic snapshot for diagnostics. The
- * standalone C reference requires the caller to read between poll cycles. */
+ * The Rust poll policy exposes an atomic snapshot for diagnostics. */
 int cbm_watcher_index_failure_count(cbm_watcher_t *w, const char *project_name);
 
 #if defined(CBM_ENABLE_TEST_SEAMS) && CBM_ENABLE_TEST_SEAMS

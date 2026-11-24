@@ -479,7 +479,8 @@ The linked `mori` daemon uses Rust to enforce the worker retry budget and
 decide when to attempt a partial index after a contained worker failure.
 C still executes each attempt under the daemon's existing job reservation.
 The debug log event `daemon.index.recovery_driver` identifies the driver.
-The standalone `codebase-memory-mcp` reference uses the C retry loop.
+The native candidate test runner calls the same Rust driver. The pinned
+C comparison build retains its own retry loop.
 
 ### Named Watch Reconciliation
 

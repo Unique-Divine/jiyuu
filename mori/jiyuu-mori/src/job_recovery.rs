@@ -28,6 +28,7 @@ struct RecoveryOps {
     try_partial: unsafe extern "C" fn(*mut JobRecovery),
 }
 
+#[unsafe(export_name = "mori_daemon_job_recover")]
 unsafe extern "C" fn recover(
     run: *mut JobRecovery,
     ops: *const RecoveryOps,
@@ -62,28 +63,6 @@ unsafe extern "C" fn recover(
             (ops.try_partial)(run);
         }
     }
-}
-
-#[cfg(not(test))]
-unsafe extern "C" {
-    fn cbm_daemon_application_set_job_recovery_driver(
-        driver: unsafe extern "C" fn(
-            *mut JobRecovery,
-            *const RecoveryOps,
-            c_int,
-        ),
-    );
-}
-
-/// Install the worker retry driver at process startup.
-///
-/// # Safety
-///
-/// Call before any daemon thread can use the callback.
-#[cfg(not(test))]
-pub unsafe fn register() {
-    // SAFETY: The caller guarantees startup registration.
-    unsafe { cbm_daemon_application_set_job_recovery_driver(recover) };
 }
 
 #[cfg(test)]

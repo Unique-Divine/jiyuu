@@ -24,9 +24,7 @@
  */
 #include <stdint.h>
 #include "watcher/watcher.h"
-#ifdef CBM_RUST_WATCHER
 #include "watcher/rust_poll.h"
-#endif
 #include "store/store.h"
 #include "foundation/constants.h"
 #include "foundation/log.h"
@@ -68,43 +66,7 @@ typedef struct {
     /* Published only while one supervised Git command is active. Access is
      * serialized by watcher->projects_lock; cancellation itself is atomic. */
     cbm_subprocess_t *active_git;
-#ifdef CBM_RUST_WATCHER
     cbm_rust_watcher_state_t *poll_state;
-#else
-    /* Standalone C reference and C tests. */
-    /* Room for Git's 64-hex SHA-256 object ID plus newline/NUL while reading. */
-    char last_head[CBM_SZ_128]; /* git HEAD hash (committed baseline) */
-    bool is_git;                /* false → tree-polled if tree_poll, else skipped */
-    bool tree_poll;             /* non-git root polled by tree signature (#1948) */
-    bool baseline_done;         /* true after first poll */
-    int missing_root_count;     /* consecutive polls where root was missing (ENOENT/ENOTDIR) */
-    uint64_t first_missing_ms;  /* cbm_now_ms() of the streak's first miss (0 = no streak) */
-    int file_count;             /* approximate, for interval calc */
-    int interval_ms;            /* adaptive poll interval */
-    int64_t next_poll_ns;       /* next poll time (monotonic ns) */
-    /* Dirty-state signature (#937): a persistently dirty worktree must
-     * reindex once per DISTINCT dirty state, not on every poll. Baselines
-     * are committed only after a SUCCESSFUL reindex (busy-skips and failed
-     * runs retry); check_changes stages its observations in the pending_*
-     * fields. 0 = clean tree. */
-    uint64_t last_dirty_sig;    /* committed dirty-state signature */
-    uint64_t pending_dirty_sig; /* observed at check time */
-    /* Non-git tree signature (#1948), same commit discipline as the dirty
-     * signature. 0 = unknown: the baseline never adopts the tree as already
-     * indexed, so the first poll reindexes once (at-least-once, like a tree
-     * that is already dirty at a git baseline). Signatures are never 0. */
-    uint64_t last_tree_sig;
-    uint64_t pending_tree_sig;
-    char pending_head[CBM_SZ_128]; /* HEAD observed at check time */
-    /* Consecutive hard index failures (index_fn < 0). A hard error is
-     * usually persistent — a poisoned coordination endpoint, an unreadable
-     * DB — so retrying it at the plain poll interval re-forks a worker that
-     * fails identically, for as long as the daemon lives. #937 deliberately
-     * leaves the baseline uncommitted so the change is never lost; this
-     * decays the retry cadence so "never lost" does not also mean "retried
-     * forever". Reset to 0 by any successful reindex. */
-    int index_failures;
-#endif
     /* Hop from root_path up to the repository root ("" when they are the same),
      * from `rev-parse --show-cdup`. Porcelain paths are repository-relative, so
      * the signature needs this to stat them. Resolved once at baseline. */
@@ -134,9 +96,7 @@ struct cbm_watcher {
     void *mutation_context;
     atomic_int stopped;
     atomic_bool running;
-#ifdef CBM_RUST_WATCHER
     atomic_bool polling; /* Only one snapshot may refer to deferred states. */
-#endif
     /* Opt-in (#1948): poll non-git roots by tree signature. Default false —
      * non-git roots are not watched. Read at each project's baseline. */
     atomic_bool poll_non_git;
@@ -153,37 +113,6 @@ struct cbm_watcher {
 
 /* Adaptive poll interval parameters (ms) */
 #define POLL_BASE_MS 5000
-#ifndef CBM_RUST_WATCHER
-#define US_PER_MS 1000000LL
-#define POLL_FILE_STEP 500 /* add 1s per this many files */
-#define POLL_MAX_MS 60000
-
-/* Hard index-failure backoff. Doubling per consecutive failure, capped, so a
- * persistently failing project costs ~12 attempts/hour instead of ~480 while
- * still recovering on its own within the ceiling once the cause clears. The
- * shift cap keeps the intermediate value well inside int64 for any interval. */
-#define INDEX_FAIL_SHIFT_MAX 6
-#define INDEX_FAIL_CEILING_MS 300000 /* 5 min */
-/* Log a distinct line once the failures are clearly not transient, so the
- * daemon log names the stuck project instead of only repeating the warning. */
-#define INDEX_FAIL_SUSTAINED 10
-
-/* Success cooldown (#2835): after a successful re-index the next poll waits
- * INDEX_COOLDOWN_FACTOR x the index's own duration, counted from when the
- * index finished, so short rebuilds spend at most ~1/(K+1) of wall time
- * indexing one project. Sub-second indexes stay at the plain cadence. The
- * cooldown is capped at INDEX_FAIL_CEILING_MS (5 min) so that, under
- * continuous writes, a project never falls more than one rebuild plus five
- * minutes behind. */
-#define INDEX_COOLDOWN_FACTOR 3
-
-/* Stale-root pruning (#286): a watched project whose root directory stays
- * missing is pruned — its cached DB is deleted and the watch entry removed.
- * Deletion is destructive (the DB can hold user-authored data such as the
- * ADR), so it requires BOTH a streak of consecutive missing polls AND a
- * sustained-absence grace window measured from the streak's first miss. */
-#define MISSING_ROOT_DELETE_AFTER 3
-#endif
 #define PRUNE_GRACE_DEFAULT_S 600 /* 10 min; override: CBM_WATCHER_PRUNE_GRACE_S */
 
 /* Sleep chunk for responsive shutdown (ms) */
@@ -217,50 +146,6 @@ static int64_t now_ns(void) {
 
 /* ── Adaptive interval ──────────────────────────────────────────── */
 
-#ifndef CBM_RUST_WATCHER
-int cbm_watcher_index_backoff_ms(int interval_ms, int consecutive_failures) {
-    if (interval_ms < 0) {
-        interval_ms = 0;
-    }
-    if (consecutive_failures <= 0) {
-        return interval_ms;
-    }
-    int shift =
-        consecutive_failures < INDEX_FAIL_SHIFT_MAX ? consecutive_failures : INDEX_FAIL_SHIFT_MAX;
-    int64_t delay = (int64_t)interval_ms << shift;
-    if (delay > INDEX_FAIL_CEILING_MS) {
-        delay = INDEX_FAIL_CEILING_MS;
-    }
-    /* Backing off must never schedule SOONER than the project's own cadence.
-     * Unreachable today (POLL_MAX_MS < the ceiling), but clamping here keeps
-     * the function monotonic for every input rather than only for the inputs
-     * the current constants can produce — the caller's contract is "a delay
-     * that never shrinks as failures accumulate". */
-    return (int)(delay < interval_ms ? interval_ms : delay);
-}
-
-int cbm_watcher_success_delay_ms(int interval_ms, int64_t index_elapsed_ms) {
-    if (interval_ms < 0) {
-        interval_ms = 0;
-    }
-    if (index_elapsed_ms <= 0) {
-        return interval_ms;
-    }
-    /* Divide instead of multiply so a huge elapsed cannot overflow. */
-    int64_t cooldown = index_elapsed_ms > INDEX_FAIL_CEILING_MS / INDEX_COOLDOWN_FACTOR
-                           ? INDEX_FAIL_CEILING_MS
-                           : index_elapsed_ms * INDEX_COOLDOWN_FACTOR;
-    return (int)(cooldown > interval_ms ? cooldown : interval_ms);
-}
-
-int cbm_watcher_poll_interval_ms(int file_count) {
-    int ms = POLL_BASE_MS + ((file_count / POLL_FILE_STEP) * CBM_MSEC_PER_SEC);
-    if (ms > POLL_MAX_MS) {
-        ms = POLL_MAX_MS;
-    }
-    return ms;
-}
-#endif
 
 /* ── Git helpers ────────────────────────────────────────────────── */
 
@@ -994,15 +879,11 @@ static project_state_t *state_new(const char *name, const char *root_path, bool 
     atomic_init(&s->registered, true);
     atomic_init(&s->named, named);
     atomic_init(&s->catch_up, named);
-#ifdef CBM_RUST_WATCHER
     s->poll_state = cbm_rust_watcher_new();
     if (!s->poll_state) {
         state_free(s);
         return NULL;
     }
-#else
-    s->interval_ms = POLL_BASE_MS;
-#endif
     atomic_init(&s->status_strategy, CBM_WATCHER_STRATEGY_PENDING);
     atomic_init(&s->status_interval_ms, POLL_BASE_MS);
     atomic_init(&s->status_last_scan_s, 0);
@@ -1013,9 +894,7 @@ static void state_free(project_state_t *s) {
     if (!s) {
         return;
     }
-#ifdef CBM_RUST_WATCHER
     cbm_rust_watcher_free(s->poll_state);
-#endif
     free(s->project_name);
     free(s->root_path);
     free(s);
@@ -1188,9 +1067,7 @@ cbm_watcher_t *cbm_watcher_new(cbm_store_t *store, cbm_index_fn index_fn, void *
     cbm_mutex_init(&w->coordination_lock);
     atomic_init(&w->stopped, 0);
     atomic_init(&w->running, false);
-#ifdef CBM_RUST_WATCHER
     atomic_init(&w->polling, false);
-#endif
     atomic_init(&w->poll_non_git, false);
     return w;
 }
@@ -1368,11 +1245,7 @@ void cbm_watcher_touch(cbm_watcher_t *w, const char *project_name) {
     project_state_t *s = cbm_ht_get(w->projects, project_name);
     if (s) {
         /* Reset backoff — poll immediately on next cycle */
-#ifdef CBM_RUST_WATCHER
         cbm_rust_watcher_touch(s->poll_state);
-#else
-        s->next_poll_ns = 0;
-#endif
     }
     cbm_mutex_unlock(&w->projects_lock);
 }
@@ -1398,11 +1271,7 @@ int cbm_watcher_index_failure_count(cbm_watcher_t *w, const char *project_name) 
     }
     cbm_mutex_lock(&w->projects_lock);
     project_state_t *s = cbm_ht_get(w->projects, project_name);
-#ifdef CBM_RUST_WATCHER
     int failures = s ? cbm_rust_watcher_failures(s->poll_state) : -1;
-#else
-    int failures = s ? s->index_failures : -1;
-#endif
     cbm_mutex_unlock(&w->projects_lock);
     return failures;
 }
@@ -1438,186 +1307,6 @@ int cbm_watcher_watch_count(cbm_watcher_t *w) {
 
 /* ── Single poll cycle ──────────────────────────────────────────── */
 
-#ifndef CBM_RUST_WATCHER
-/* Publish what index_status reports: the strategy, the current cadence and,
- * when a check just completed, the wall-clock time of that scan. A non-git
- * root is "tree" when watch_non_git polls it (#1948), else "none". */
-static void publish_status(project_state_t *s, bool scanned) {
-    cbm_watcher_strategy_t strategy = CBM_WATCHER_STRATEGY_NONE;
-    if (s->is_git) {
-        strategy = CBM_WATCHER_STRATEGY_GIT;
-    } else if (s->tree_poll) {
-        strategy = CBM_WATCHER_STRATEGY_TREE;
-    }
-    atomic_store(&s->status_strategy, strategy);
-    atomic_store(&s->status_interval_ms, s->interval_ms);
-    if (scanned) {
-        atomic_store(&s->status_last_scan_s, (int64_t)time(NULL));
-    }
-}
-
-/* Init baseline for a project: check if git, get HEAD, count files */
-static bool init_baseline(cbm_watcher_t *w, project_state_t *s) {
-    cbm_path_info_t info;
-    if (watcher_path_info(s->root_path, &info) != CBM_PATH_INFO_OK || !info.is_directory) {
-        cbm_log_warn("watcher.root_gone", "project", s->project_name, "path", s->root_path);
-        s->baseline_done = true;
-        s->is_git = false;
-        publish_status(s, false);
-        return true;
-    }
-
-    watcher_git_status_t repository_status = git_repo_status(w, s);
-    if (repository_status != WATCHER_GIT_OK && repository_status != WATCHER_GIT_COMMAND_FAILED) {
-        return false;
-    }
-    s->is_git = repository_status == WATCHER_GIT_OK;
-
-    /* `rev-parse --git-dir` walks UP, so an ordinary folder that merely happens
-     * to live under some unrelated repository answers yes. Treating it as a git
-     * project is what produced the runaway churn: it inherits the ancestor's
-     * dirty state, which is permanently non-empty and has nothing to do with
-     * this directory, so every poll looked like a change.
-     *
-     * A directory is only really git-managed here if it carries its own .git,
-     * or the ancestor repository actually tracks something inside it. A
-     * genuine sub-package of a monorepo passes the second test; a scratch or
-     * gitignored folder sitting under a repo fails both and is treated as a
-     * non-git root: NOT polled by default, or polled by its own tree signature
-     * when the watch_non_git opt-in is on (#1948). Either way the ancestor's
-     * dirty state never reaches it. */
-    if (s->is_git && !git_has_own_dot_git(s->root_path)) {
-        bool tracked = false;
-        watcher_git_status_t tracked_status = git_tracks_anything_here(w, s, &tracked);
-        if (tracked_status != WATCHER_GIT_OK && tracked_status != WATCHER_GIT_COMMAND_FAILED) {
-            return false;
-        }
-        if (!tracked) {
-            s->is_git = false;
-            cbm_log_info("watcher.nested_non_git", "project", s->project_name, "path",
-                         s->root_path);
-        }
-    }
-
-    s->baseline_done = true;
-
-    if (s->is_git) {
-        watcher_git_status_t cdup_status = git_repo_cdup(w, s, s->repo_cdup, sizeof(s->repo_cdup));
-        if (cdup_status != WATCHER_GIT_OK && cdup_status != WATCHER_GIT_COMMAND_FAILED) {
-            s->baseline_done = false;
-            return false;
-        }
-        watcher_git_status_t head_status = git_head(w, s, s->last_head, sizeof(s->last_head));
-        if (head_status != WATCHER_GIT_OK && head_status != WATCHER_GIT_COMMAND_FAILED) {
-            s->baseline_done = false;
-            return false;
-        }
-        /* last_dirty_sig stays 0 ("clean known"): a tree that is ALREADY
-         * dirty at baseline reindexes once on the first poll — the watcher
-         * cannot know whether that state made it into the DB (e.g. server
-         * restart with a stale artifact). At-least-once, then the signature
-         * gates further polls (#937). */
-        int file_count = 0;
-        watcher_git_status_t file_count_status = git_file_count(w, s, &file_count);
-        if (file_count_status != WATCHER_GIT_OK &&
-            file_count_status != WATCHER_GIT_COMMAND_FAILED) {
-            s->baseline_done = false;
-            return false;
-        }
-        s->file_count = file_count;
-        s->interval_ms = cbm_watcher_poll_interval_ms(s->file_count);
-        cbm_log_info("watcher.baseline", "project", s->project_name, "strategy", "git", "files",
-                     s->file_count > 0 ? "yes" : "0");
-    } else if (atomic_load(&s->named) ||
-               atomic_load_explicit(&w->poll_non_git, memory_order_acquire)) {
-        /* #1948 opt-in. last_tree_sig stays 0 ("unknown"): nothing records
-         * which tree state the DB holds (edits made while the daemon was down
-         * are exactly the silent-staleness case), so the first poll reindexes
-         * once and the signature gates every poll after it. The interval is
-         * sized from the file count of each signature walk. */
-        s->tree_poll = true;
-        cbm_log_info("watcher.baseline", "project", s->project_name, "strategy", "tree");
-    } else {
-        cbm_log_info("watcher.baseline", "project", s->project_name, "strategy", "none");
-    }
-
-    s->next_poll_ns = now_ns() + ((int64_t)s->interval_ms * US_PER_MS);
-    publish_status(s, true);
-    return true;
-}
-
-/* Check if a project has changes. Returns true if reindex needed.
- * Must NOT mutate the committed baselines (last_head, last_dirty_sig):
- * poll_project commits them only after a SUCCESSFUL reindex so that
- * busy-skips and failed runs retry instead of silently losing the change
- * (#937). Observations are staged in the pending_* fields. */
-/* Non-git leg of check_changes (#1948). A failed walk reports "no verdict"
- * (false) so the committed baseline is kept and a later poll retries. */
-static bool check_tree_changes(project_state_t *s, bool *changed_out) {
-    uint64_t sig = 0;
-    int file_count = 0;
-    if (!tree_signature(s->root_path, &sig, &file_count)) {
-        cbm_log_warn("watcher.tree_walk_failed", "project", s->project_name, "path", s->root_path);
-        /* Retry at the regular cadence, not on every run-loop tick. */
-        s->next_poll_ns = now_ns() + ((int64_t)s->interval_ms * US_PER_MS);
-        return false;
-    }
-    s->pending_tree_sig = sig;
-    s->file_count = file_count;
-    s->interval_ms = cbm_watcher_poll_interval_ms(file_count);
-    *changed_out = sig != s->last_tree_sig;
-    return true;
-}
-
-static bool check_changes(cbm_watcher_t *w, project_state_t *s, bool *changed_out) {
-    if (!changed_out) {
-        return false;
-    }
-    *changed_out = false;
-    if (!s->is_git) {
-        return s->tree_poll ? check_tree_changes(s, changed_out) : true;
-    }
-
-    bool changed = false;
-
-    /* Check HEAD movement (commit, checkout, pull) */
-    s->pending_head[0] = '\0';
-    char head[CBM_SZ_128] = {0};
-    watcher_git_status_t head_status = git_head(w, s, head, sizeof(head));
-    if (head_status == WATCHER_GIT_OK) {
-        if (s->last_head[0] == '\0') {
-            /* First observed HEAD: adopt as baseline, not a change. */
-            snprintf(s->last_head, sizeof(s->last_head), "%s", head);
-        } else if (strcmp(head, s->last_head) != 0) {
-            changed = true;
-        }
-        snprintf(s->pending_head, sizeof(s->pending_head), "%s", head);
-    } else if (head_status != WATCHER_GIT_COMMAND_FAILED) {
-        return false;
-    }
-
-    /* Working tree: reindex only when the DIRTY STATE ITSELF changed —
-     * a persistently dirty tree polled while idle must not re-trigger
-     * full reindex/write cycles (#937 write amplification). */
-    uint64_t sig = 0;
-    watcher_git_status_t signature_status = git_dirty_signature(w, s, &sig);
-    if (signature_status == WATCHER_GIT_COMMAND_FAILED) {
-        /* The repository may have been removed between baseline and poll.
-         * Preserve committed observations and wait for a later clean probe. */
-        return true;
-    }
-    if (signature_status != WATCHER_GIT_OK) {
-        return false;
-    }
-    if (sig != s->last_dirty_sig) {
-        changed = true;
-    }
-    s->pending_dirty_sig = sig;
-
-    *changed_out = changed;
-    return true;
-}
-#endif
 
 /* Context for poll_once foreach callback */
 typedef struct {
@@ -1626,11 +1315,7 @@ typedef struct {
     int reindexed;
 } poll_ctx_t;
 
-#ifdef CBM_RUST_WATCHER
 static void prune_missing_project(cbm_watcher_t *w, project_state_t *s, uint64_t first_missing_ms) {
-#else
-static void prune_missing_project(cbm_watcher_t *w, project_state_t *s) {
-#endif
     if (!w || !s || !s->project_name) {
         return;
     }
@@ -1664,14 +1349,9 @@ static void prune_missing_project(cbm_watcher_t *w, project_state_t *s) {
     uint64_t now_ms = cbm_now_ms();
     bool still_eligible =
         current == s && !atomic_load(&s->named) && strcmp(current->root_path, root_path) == 0 &&
-#ifdef CBM_RUST_WATCHER
         !atomic_load_explicit(&w->stopped, memory_order_acquire) &&
         now_ms >= first_missing_ms &&
         (now_ms - first_missing_ms) / CBM_MSEC_PER_SEC >= (uint64_t)prune_grace_s() &&
-#else
-        current->missing_root_count >= MISSING_ROOT_DELETE_AFTER && current->first_missing_ms > 0 &&
-        now_ms - current->first_missing_ms >= (uint64_t)prune_grace_s() * CBM_MSEC_PER_SEC &&
-#endif
         root_status(root_path, &stat_errno) == ROOT_MISSING;
     if (still_eligible && defer_state_free(w, s)) {
         if (delete_cached_project_db(project_name)) {
@@ -1701,182 +1381,6 @@ static void prune_missing_project(cbm_watcher_t *w, project_state_t *s) {
     free(root_path);
 }
 
-#ifndef CBM_RUST_WATCHER
-/* After a SUCCESSFUL reindex, commit the baselines OBSERVED AT CHECK TIME —
- * the state whose reindex just succeeded. A commit/edit landing during the
- * reindex is deliberately not absorbed: the next poll sees it as a new delta
- * (at-least-once, never lost). */
-static void commit_baselines(cbm_watcher_t *w, project_state_t *s) {
-    if (!s->is_git) {
-        /* Tree strategy (#1948): the walk already refreshed the file count. */
-        s->last_tree_sig = s->pending_tree_sig;
-        return;
-    }
-    if (s->pending_head[0] != '\0') {
-        snprintf(s->last_head, sizeof(s->last_head), "%s", s->pending_head);
-    }
-    s->last_dirty_sig = s->pending_dirty_sig;
-    /* Refresh file count for interval */
-    int file_count = 0;
-    if (git_file_count(w, s, &file_count) == WATCHER_GIT_OK) {
-        s->file_count = file_count;
-        s->interval_ms = cbm_watcher_poll_interval_ms(s->file_count);
-        publish_status(s, false);
-    }
-}
-
-static void poll_project(const char *key, void *val, void *ud) {
-    (void)key;
-    poll_ctx_t *ctx = ud;
-    project_state_t *s = val;
-    if (!s || !atomic_load_explicit(&s->registered, memory_order_acquire)) {
-        return;
-    }
-
-    /* Stale-root pruning (#286): classify the root BEFORE the baseline /
-     * is_git / interval gates so vanished roots are noticed even for
-     * non-git projects and regardless of adaptive backoff. */
-    int stat_errno = 0;
-    root_status_t rs = root_status(s->root_path, &stat_errno);
-    if (rs == ROOT_UNCERTAIN) {
-        /* EACCES / EIO / network blip / TCC revocation — the root may still
-         * exist. Never count toward pruning; restart the streak so only an
-         * uninterrupted run of genuine ENOENT/ENOTDIR observations can
-         * delete user data. */
-        if (s->missing_root_count > 0) {
-            s->missing_root_count = 0;
-            s->first_missing_ms = 0;
-        }
-        cbm_log_warn("watcher.root_stat_error", "project", s->project_name, "path", s->root_path,
-                     "errno", itoa_buf(stat_errno));
-        return;
-    }
-    if (rs == ROOT_MISSING) {
-        uint64_t now_ms = cbm_now_ms();
-        if (s->missing_root_count == 0) {
-            s->first_missing_ms = now_ms;
-        }
-        if (atomic_load(&s->named)) {
-            if (s->missing_root_count == 0) {
-                cbm_log_warn("watcher.root_missing", "project", s->project_name, "path",
-                             s->root_path);
-            }
-            s->missing_root_count = 1;
-            return;
-        }
-        s->missing_root_count++;
-        cbm_log_warn("watcher.root_missing", "project", s->project_name, "path", s->root_path,
-                     "polls", itoa_buf(s->missing_root_count));
-        if (s->missing_root_count >= MISSING_ROOT_DELETE_AFTER &&
-            now_ms - s->first_missing_ms >= (uint64_t)prune_grace_s() * CBM_MSEC_PER_SEC) {
-            prune_missing_project(ctx->w, s);
-        }
-        return;
-    }
-    if (s->missing_root_count > 0) {
-        cbm_log_info("watcher.root_restored", "project", s->project_name, "path", s->root_path);
-        s->missing_root_count = 0;
-        s->first_missing_ms = 0;
-        if (atomic_load(&s->named)) {
-            s->baseline_done = false;
-            atomic_store(&s->catch_up, true);
-        }
-    }
-
-    /* Initialize baseline on first poll */
-    if (!s->baseline_done) {
-        (void)init_baseline(ctx->w, s);
-        return;
-    }
-    if (!s->is_git && !s->tree_poll && atomic_load(&s->named)) {
-        (void)init_baseline(ctx->w, s);
-        return;
-    }
-
-    /* Non-git projects are skipped unless the watch_non_git opt-in turned on
-     * tree polling for them at baseline (#1948). */
-    if (!s->is_git && !s->tree_poll) {
-        return;
-    }
-    if (s->tree_poll && !atomic_load(&s->named) && !atomic_load(&ctx->w->poll_non_git)) {
-        return;
-    }
-
-    /* Respect adaptive interval */
-    if (ctx->now < s->next_poll_ns) {
-        return;
-    }
-
-    /* Check for changes */
-    bool changed = false;
-    if (!check_changes(ctx->w, s, &changed)) {
-        return;
-    }
-    publish_status(s, true);
-    bool catch_up = atomic_load(&s->catch_up);
-    if (!changed && !catch_up) {
-        s->next_poll_ns = ctx->now + ((int64_t)s->interval_ms * US_PER_MS);
-        return;
-    }
-
-    /* Trigger reindex */
-    if (!atomic_load_explicit(&s->registered, memory_order_acquire)) {
-        /* Git inspection can take long enough for the final owning daemon
-         * session to disconnect. Unwatch tombstones the snapshot state; do
-         * not admit an index callback after that ownership boundary. */
-        return;
-    }
-    cbm_log_info("watcher.changed", "project", s->project_name, "strategy",
-                 s->is_git ? "git" : "tree");
-    int delay_ms = -1;            /* < 0: use the failure-backoff cadence below */
-    int64_t anchor_ns = ctx->now; /* success re-anchors to when the index finished */
-    if (ctx->w->index_fn) {
-        int64_t index_start = now_ns();
-        int rc = ctx->w->index_fn(s->project_name, s->root_path, ctx->w->user_data);
-        if (rc == 0) {
-            ctx->reindexed++;
-            s->index_failures = 0;
-            if (catch_up) {
-                atomic_store(&s->catch_up, false);
-            }
-            commit_baselines(ctx->w, s);
-            anchor_ns = now_ns();
-            delay_ms =
-                cbm_watcher_success_delay_ms(s->interval_ms, (anchor_ns - index_start) / US_PER_MS);
-            if (delay_ms > s->interval_ms) {
-                cbm_log_info("watcher.cooldown", "project", s->project_name, "delay_ms",
-                             itoa_buf(delay_ms));
-            }
-        } else if (rc > 0) {
-            /* Busy-skip: baseline stays uncommitted, next poll retries. */
-            cbm_log_info("watcher.index.retry", "project", s->project_name);
-        } else {
-            /* itoa_buf returns one shared per-thread buffer, so two of them
-             * in one call would print the same value twice. */
-            char rc_text[CBM_SZ_32];
-            char streak_text[CBM_SZ_32];
-            if (s->index_failures < INT_MAX) {
-                s->index_failures++;
-            }
-            snprintf(rc_text, sizeof(rc_text), "%d", rc);
-            snprintf(streak_text, sizeof(streak_text), "%d", s->index_failures);
-            cbm_log_warn("watcher.index.err", "project", s->project_name, "rc", rc_text,
-                         "consecutive", streak_text);
-            if (s->index_failures == INDEX_FAIL_SUSTAINED) {
-                cbm_log_warn("watcher.index.sustained_failure", "project", s->project_name,
-                             "consecutive", streak_text);
-            }
-        }
-    }
-
-    /* Success pays back the index's cost; failures back off; busy-skip keeps
-     * the adaptive cadence. */
-    if (delay_ms < 0) {
-        delay_ms = cbm_watcher_index_backoff_ms(s->interval_ms, s->index_failures);
-    }
-    s->next_poll_ns = anchor_ns + ((int64_t)delay_ms * US_PER_MS);
-}
-#else
 
 /* The host keeps repository I/O, diagnostics, and daemon callbacks. The Rust
  * state belongs to this physical registration and never borrows its strings. */
@@ -2046,7 +1550,6 @@ static void poll_project(const char *key, void *val, void *ud) {
         ctx->reindexed++;
     }
 }
-#endif
 
 /* Callback to snapshot project state pointers into an array. */
 typedef struct {
@@ -2067,11 +1570,9 @@ int cbm_watcher_poll_once(cbm_watcher_t *w) {
     if (!w) {
         return 0;
     }
-#ifdef CBM_RUST_WATCHER
     if (atomic_exchange_explicit(&w->polling, true, memory_order_acquire)) {
         return 0;
     }
-#endif
 
     /* Snapshot project pointers under lock, then poll without holding it.
      * This keeps the critical section small — poll_project does git I/O
@@ -2087,17 +1588,13 @@ int cbm_watcher_poll_once(cbm_watcher_t *w) {
     int n = cbm_ht_count(w->projects);
     if (n == 0) {
         cbm_mutex_unlock(&w->projects_lock);
-#ifdef CBM_RUST_WATCHER
         atomic_store_explicit(&w->polling, false, memory_order_release);
-#endif
         return 0;
     }
     project_state_t **snap = malloc(n * sizeof(project_state_t *));
     if (!snap) {
         cbm_mutex_unlock(&w->projects_lock);
-#ifdef CBM_RUST_WATCHER
         atomic_store_explicit(&w->polling, false, memory_order_release);
-#endif
         return 0;
     }
     snapshot_ctx_t sc = {.items = snap, .count = 0, .cap = n};
@@ -2113,9 +1610,7 @@ int cbm_watcher_poll_once(cbm_watcher_t *w) {
         poll_project(NULL, snap[i], &ctx);
     }
     free(snap);
-#ifdef CBM_RUST_WATCHER
     atomic_store_explicit(&w->polling, false, memory_order_release);
-#endif
     return ctx.reindexed;
 }
 
@@ -2189,25 +1684,11 @@ int cbm_watcher_test_dirty_sigs(cbm_watcher_t *w, const char *project, uint64_t 
     if (!w || !project) {
         return -1;
     }
-#ifdef CBM_RUST_WATCHER
     cbm_mutex_lock(&w->projects_lock);
     project_state_t *s = cbm_ht_get(w->projects, project);
     int rc = s ? cbm_rust_watcher_dirty_sigs(s->poll_state, last_out, pending_out) : -1;
     cbm_mutex_unlock(&w->projects_lock);
     return rc;
-#else
-    project_state_t *s = cbm_ht_get(w->projects, project);
-    if (!s) {
-        return -1;
-    }
-    if (last_out) {
-        *last_out = s->last_dirty_sig;
-    }
-    if (pending_out) {
-        *pending_out = s->pending_dirty_sig;
-    }
-    return 0;
-#endif
 }
 
 int cbm_watcher_test_pending_free_count(cbm_watcher_t *w) {
@@ -2230,11 +1711,7 @@ int64_t cbm_watcher_test_next_poll_ns(cbm_watcher_t *w, const char *project) {
     }
     cbm_mutex_lock(&w->projects_lock);
     project_state_t *s = cbm_ht_get(w->projects, project);
-#ifdef CBM_RUST_WATCHER
     int64_t next = s ? cbm_rust_watcher_next_poll_ns(s->poll_state) : -1;
-#else
-    int64_t next = s ? s->next_poll_ns : -1;
-#endif
     cbm_mutex_unlock(&w->projects_lock);
     return next;
 }
