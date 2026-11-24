@@ -1876,3 +1876,77 @@ fn unsupported_syntax_and_supported_storage_errors_are_distinct() {
     assert_eq!(error.code, rusqlite::ErrorCode::CannotOpen);
     assert!(!path.exists(), "execution must not silently create a cache");
 }
+
+#[test]
+fn graphql_field_extraction_matches_c_with_escaped_schema_text() {
+    fn index(backend: &str) -> (Vec<(String, String)>, String) {
+        let fixture = Fixture::new();
+        let repo = fixture.0.join("schema");
+        fs::create_dir(&repo).expect("create schema repository");
+        fs::write(
+            repo.join("schema.graphqls"),
+            r#"type Query {
+  old: [String!]! @deprecated(reason: "Use \"new\"")
+  later: Int
+}
+extend type Query {
+  cafe: String @deprecated(reason: "caf\u00e9")
+}
+"#,
+        )
+        .expect("write SDL");
+        let args = json!({"repo_path": repo, "name": "schema"});
+        let output = fixture
+            .command(Path::new(MORI))
+            .env("CBM_PROFILE", "1")
+            .env("CBM_LOG_LEVEL", "debug")
+            .env("MORI_IMPL_GRAPHQL_EXTRACT", backend)
+            .args(["cli", "--quiet", "index_repository", &args.to_string()])
+            .output()
+            .expect("index schema");
+        assert!(output.status.success(), "{output:?}");
+        let response: Value =
+            serde_json::from_slice(&output.stdout).expect("index response");
+        assert_eq!(response["status"], "indexed", "{response}");
+        let db = fixture.db("schema");
+        let mut statement = db
+            .prepare("SELECT name, properties FROM nodes WHERE label = 'Field' ORDER BY name")
+            .expect("select fields");
+        let fields = statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .expect("read fields")
+            .collect::<Result<_, _>>()
+            .expect("field rows");
+        let mut logs = String::new();
+        for entry in
+            fs::read_dir(fixture.0.join("cache/logs")).expect("worker logs")
+        {
+            let entry = entry.expect("worker log");
+            if entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".worker-log-")
+            {
+                logs.push_str(
+                    &fs::read_to_string(entry.path()).expect("read log"),
+                );
+            }
+        }
+        (fields, logs)
+    }
+
+    let (native, native_logs) = index("c");
+    let (rust, rust_logs) = index("rust");
+    assert_eq!(rust, native);
+    assert_eq!(
+        rust.iter().map(|row| row.0.as_str()).collect::<Vec<_>>(),
+        ["cafe", "later", "old"]
+    );
+    assert!(rust[0].1.contains("café"), "{rust:?}");
+    assert!(rust[2].1.contains("[String!]!"), "{rust:?}");
+    for marker in ["extract.graphql_parse_input", "extract.graphql_field_spans"]
+    {
+        assert!(!native_logs.contains(marker), "{native_logs}");
+        assert!(rust_logs.contains(marker), "{rust_logs}");
+    }
+}

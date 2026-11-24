@@ -51,6 +51,21 @@ pub use staged_graph::native::register as mori_register_staged_graph_writer;
 mod index_manifest;
 
 #[cfg(feature = "c-backend")]
+mod graphql_extract;
+
+#[cfg(feature = "c-backend")]
+pub use graphql_extract::register as mori_register_graphql_extractor;
+
+#[cfg(feature = "c-backend")]
+mod native_tree;
+
+#[cfg(feature = "c-backend")]
+mod markdown_extract;
+
+#[cfg(feature = "c-backend")]
+pub use markdown_extract::register as mori_register_markdown_extractor;
+
+#[cfg(feature = "c-backend")]
 mod source_publish;
 
 #[cfg(feature = "c-backend")]
