@@ -608,4 +608,39 @@ function total(xs: number[]): number { return sum(xs) }
         assert!(!logs.contains("msg=store.fts_rebuild"), "{logs}");
         assert_eq!(warm.fts(&project, terms), expected);
     }
+
+    let db_path = warm.db_path(&project);
+    let db = Connection::open(&db_path).unwrap();
+    db.execute_batch("DROP TABLE nodes_fts_config").unwrap();
+    drop(db);
+    let previous_generation = warm.state(&project);
+    let previous_db = fs::read(&db_path).unwrap();
+    fs::write(&path, &edited).unwrap();
+    let failed = warm.run_index(&repo);
+    let response = [failed.stdout.as_slice(), failed.stderr.as_slice()]
+        .into_iter()
+        .flat_map(|stream| stream.split(|&byte| byte == b'\n'))
+        .filter_map(|line| {
+            serde_json::from_slice::<serde_json::Value>(line).ok()
+        })
+        .find(|reply| reply["status"].is_string())
+        .unwrap_or_else(|| panic!("missing failure response: {failed:?}"));
+    assert_eq!(response["status"], "persist_failed", "{failed:?}");
+    let logs = warm.take_worker_logs();
+    assert!(
+        logs.contains("msg=incremental.route route=closure_repair"),
+        "{logs}"
+    );
+    assert!(
+        logs.lines().any(|line| {
+            line.contains("msg=publish.fts_failed")
+                && line.contains("vtable_constructor_failed:_nodes_fts")
+        }),
+        "{logs}"
+    );
+    assert_eq!(warm.state(&project), previous_generation);
+    assert!(
+        fs::read(&db_path).unwrap() == previous_db,
+        "serving DB bytes changed"
+    );
 }

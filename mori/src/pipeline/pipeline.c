@@ -3993,6 +3993,9 @@ static int publish_staged_impl(char *stage_path, const cbm_pipeline_generation_t
             cancelled = rc == CBM_STORE_CANCELLED;
             if (rc == CBM_STORE_NOT_FOUND) {
                 cbm_log_warn("delta.fts_insert_unavailable", "project", generation->project);
+            } else if (rc != CBM_STORE_OK && !cancelled) {
+                cbm_log_error("publish.fts_failed", "project", generation->project, "error",
+                              cbm_store_error(store));
             }
             ok = (rc == CBM_STORE_OK || rc == CBM_STORE_NOT_FOUND) &&
                  cbm_store_commit(store) == CBM_STORE_OK;
