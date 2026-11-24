@@ -468,6 +468,13 @@ checks through the publication lease. C owns the stage, file operations,
 and the destination prepare, rename, and rollback transaction. C remains
 the default.
 
+### GraphQL SDL Extraction
+
+Set `MORI_IMPL_GRAPHQL_EXTRACT=rust` when starting the daemon to select Rust
+for the GraphQL schema field spans and the parser input escape masking.
+Both paths use the same Tree-sitter parser and the original source bytes
+for field metadata. The worker log records both callbacks at debug level.
+
 ### Sharing a Graph With a Team
 
 `index_repository` with `persistence: true` writes

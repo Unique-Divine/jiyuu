@@ -7,6 +7,7 @@
 #include "foundation/log.h"        // cbm_log_warn -- extract.lsp.skipped
 #include "cbm.h"
 #include "arena.h"   // CBMArena, cbm_arena_init/alloc/strdup/destroy
+#include "graphql_extract.h"
 #include "doclink.h" // cbm_doclinks_extract: doc-comment references + doc-link scope
 #include "helpers.h"
 #include "lang_specs.h"
@@ -3449,6 +3450,12 @@ static gql_mask_state_t gql_mask_block(char *s, int *i, int len) {
     return GQL_MASK_BLOCK;
 }
 
+static void (*graphql_parse_masker)(char *, size_t);
+
+void cbm_graphql_set_parse_masker(void (*mask)(char *, size_t)) {
+    graphql_parse_masker = mask;
+}
+
 static const char *graphql_mask_string_escapes(CBMArena *a, CBMLanguage language,
                                                const char *source, int source_len) {
     if (language != CBM_LANG_GRAPHQL || !source || source_len <= 0 ||
@@ -3461,6 +3468,11 @@ static const char *graphql_mask_string_escapes(CBMArena *a, CBMLanguage language
     }
     memcpy(masked, source, (size_t)source_len);
     masked[source_len] = '\0';
+    if (graphql_parse_masker) {
+        graphql_parse_masker(masked, (size_t)source_len);
+        cbm_log_debug("extract.graphql_parse_input", "implementation", "rust");
+        return masked;
+    }
     gql_mask_state_t state = GQL_MASK_CODE;
     for (int i = 0; i < source_len; i++) {
         switch (state) {

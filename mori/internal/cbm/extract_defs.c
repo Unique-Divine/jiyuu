@@ -1,4 +1,5 @@
 #include "cbm.h"
+#include "graphql_extract.h"
 #include "callable_sig.h"
 #include "arena.h"   // CBMArena, cbm_arena_alloc/strdup/sprintf
 #include "doclink.h" // cbm_doclink_note_doc_line
@@ -12646,12 +12647,22 @@ static const char **graphql_field_props(CBMArena *a, TSNode field, const char *s
  * handled. GraphQL: field_definition (name)(type:named_type); Prisma:
  * column_declaration (identifier)(column_type); Smali: field_definition
  * (field_identifier)(field_type). */
+static cbm_graphql_field_spans_t (*graphql_extract_field_spans)(TSNode);
+
+void cbm_graphql_set_field_extractor(cbm_graphql_field_spans_t (*extract)(TSNode)) {
+    graphql_extract_field_spans = extract;
+}
+
 static bool extract_schema_field(CBMExtractCtx *ctx, TSNode child, const char *class_qn) {
     CBMArena *a = ctx->arena;
     TSNode name_node = {0};
     TSNode type_node = {0};
 
-    if (ctx->language == CBM_LANG_GRAPHQL) {
+    cbm_graphql_field_spans_t spans = {0};
+    if (ctx->language == CBM_LANG_GRAPHQL && graphql_extract_field_spans) {
+        spans = graphql_extract_field_spans(child);
+        cbm_log_debug("extract.graphql_field_spans", "implementation", "rust");
+    } else if (ctx->language == CBM_LANG_GRAPHQL) {
         name_node = ts_node_child_by_field_name(child, TS_FIELD("name"));
         if (ts_node_is_null(name_node)) {
             name_node = cbm_find_child_by_kind(child, "name");
@@ -12671,10 +12682,13 @@ static bool extract_schema_field(CBMExtractCtx *ctx, TSNode child, const char *c
         return false;
     }
 
-    if (ts_node_is_null(name_node)) {
+    if (!spans.name.present && ts_node_is_null(name_node)) {
         return true; // language matched but no name → nothing to emit
     }
-    char *name = cbm_node_text(a, name_node, ctx->source);
+    char *name = spans.name.present
+                     ? cbm_arena_strndup(a, ctx->source + spans.name.start,
+                                         spans.name.end - spans.name.start)
+                     : cbm_node_text(a, name_node, ctx->source);
     if (!name || !name[0]) {
         return true;
     }
@@ -12686,7 +12700,10 @@ static bool extract_schema_field(CBMExtractCtx *ctx, TSNode child, const char *c
     def.label = "Field";
     def.file_path = ctx->rel_path;
     def.parent_class = class_qn;
-    if (!ts_node_is_null(type_node)) {
+    if (spans.type.present) {
+        def.return_type = cbm_arena_strndup(a, ctx->source + spans.type.start,
+                                            spans.type.end - spans.type.start);
+    } else if (!ts_node_is_null(type_node)) {
         def.return_type = cbm_node_text(a, type_node, ctx->source);
     }
     def.start_line = ts_node_start_point(child).row + TS_LINE_OFFSET;
