@@ -6592,7 +6592,8 @@ static const char **copy_cypher_cells(const cbm_mcp_cypher_cell_t *cells, size_t
 }
 
 static bool cypher_sink_begin(void *context, const cbm_mcp_cypher_cell_t *columns,
-                              size_t column_count, size_t row_capacity, bool truncated) {
+                              size_t column_count, size_t row_capacity, bool truncated,
+                              cbm_mcp_cypher_cell_t warning) {
     cbm_cypher_result_t *result = context;
     result->columns = copy_cypher_cells(columns, column_count);
     if (!result->columns) {
@@ -6600,6 +6601,12 @@ static bool cypher_sink_begin(void *context, const cbm_mcp_cypher_cell_t *column
     }
     result->col_count = (int)column_count;
     result->truncated = truncated;
+    if (warning.len) {
+        result->warning = copy_cypher_cell(warning);
+        if (!result->warning) {
+            return false;
+        }
+    }
     if (row_capacity) {
         result->rows = calloc(row_capacity, sizeof(*result->rows));
         if (!result->rows) {
@@ -6630,11 +6637,12 @@ static bool cypher_request_cancelled(void *context) {
 
 /* The Rust evaluator receives the same read-batched connection from which
  * the query handler obtained the generation. The C handler owns pagination
- * and rendering for both evaluators. */
+ * and rendering for both evaluators. Linked builds try Rust by default;
+ * MORI_IMPL_QUERY=c keeps the native path available for comparisons. */
 static int evaluate_mcp_cypher(cbm_mcp_server_t *srv, cbm_store_t *store, const char *query,
                                const char *project, cbm_cypher_result_t *result) {
     const char *backend = cbm_runtime_getenv("MORI_IMPL_QUERY");
-    if (rust_cypher_evaluator && project && backend && strcmp(backend, "rust") == 0) {
+    if (rust_cypher_evaluator && project && (!backend || strcmp(backend, "c") != 0)) {
         const cbm_mcp_cypher_sink_t sink = {
             .context = result,
             .begin = cypher_sink_begin,

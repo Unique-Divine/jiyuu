@@ -1,18 +1,31 @@
 //! Bounded Cypher evaluator for a verified subset of query patterns.
 
 use std::borrow::Cow;
+use std::cell::Cell;
 use std::cmp::Ordering;
 use std::collections::{HashMap, hash_map::RandomState};
-use std::ffi::c_long;
+use std::ffi::{CString, c_char, c_int, c_long};
 use std::hash::BuildHasher;
-#[cfg(test)]
-use std::path::Path;
 use std::time::{Duration, Instant};
 
-#[cfg(test)]
-use rusqlite::OpenFlags;
 use rusqlite::types::ValueRef;
 use rusqlite::{Connection, Row, Statement, params};
+
+#[path = "cypher_linear/predicates.rs"]
+mod predicates;
+
+#[path = "cypher_linear/rows.rs"]
+mod rows;
+
+#[path = "cypher_linear/with_clause.rs"]
+mod with_clause;
+
+#[path = "cypher_linear/paths.rs"]
+mod paths;
+
+use predicates::{Bindings, Expr};
+use rows::Query;
+use with_clause::{ReturnGroups, WithPlan, WithRows};
 
 const ENGINE_LIMIT: usize = 100_000;
 const ORDERED_COUNT_GROUP_LIMIT: usize = 16_384;
@@ -27,26 +40,174 @@ const NODE_COLUMNS: &str = "n.id, n.label, n.name, n.qualified_name, n.file_path
 #[derive(Debug)]
 pub(crate) struct Unsupported;
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Debug, PartialEq)]
+pub(crate) enum ParseError {
+    Unsupported,
+    Depth,
+    UnexpectedOperator(usize),
+    UnsupportedProjectionFunction(String),
+    UnsupportedListIndex,
+    TrailingDelimiter {
+        offset: usize,
+        delimiter: char,
+        with_hint: bool,
+    },
+    UnsupportedWhereFunction(String),
+    ExpectedToken {
+        expected: u8,
+        actual: u8,
+        offset: usize,
+    },
+    OutOfScope {
+        name: String,
+        clause: &'static str,
+        reason: &'static str,
+    },
+    TrailingInput {
+        offset: usize,
+        word: String,
+        with_hint: bool,
+    },
+    SecondWith {
+        offset: usize,
+        word: String,
+    },
+}
+
+impl From<Unsupported> for ParseError {
+    fn from(_: Unsupported) -> Self {
+        Self::Unsupported
+    }
+}
+
+impl ParseError {
+    pub(crate) fn diagnostic(&self) -> Option<Cow<'static, str>> {
+        match self {
+            Self::Unsupported => None,
+            Self::Depth => {
+                Some("expression nested deeper than 256 levels".into())
+            }
+            Self::UnexpectedOperator(offset) => {
+                Some(format!("unexpected operator at pos {offset}").into())
+            }
+            Self::UnsupportedProjectionFunction(name) => Some(format!(
+                "unsupported function '{name}' (supported: count, sum, avg, min, max, collect, \
+                 toLower, toUpper, toString, toInteger, toFloat, toBoolean, size, length, \
+                 trim, ltrim, rtrim, reverse, labels, type, id, keys, properties)"
+            ).into()),
+            Self::UnsupportedListIndex => Some(
+                "unsupported expression: list indexing/slicing '[...]' is not supported".into()
+            ),
+            Self::TrailingDelimiter { offset, delimiter, with_hint } => {
+                let hint = if *with_hint {
+                    " Note that only one WITH clause is supported."
+                } else {
+                    ""
+                };
+                Some(format!(
+                    "unexpected input at pos {offset} ('{delimiter}') — the query was not fully parsed.{hint}"
+                ).into())
+            }
+            Self::ExpectedToken { expected, actual, offset } => Some(format!(
+                "expected token type {expected}, got {actual} at pos {offset}"
+            ).into()),
+            Self::UnsupportedWhereFunction(name) => Some(format!(
+                "unsupported function '{name}' in WHERE (supported: coalesce, substring, replace, left, right)"
+            ).into()),
+            Self::OutOfScope { name, clause, reason } => Some(
+                format!("variable '{name}' is not in scope for {clause} — {reason}").into()
+            ),
+            Self::TrailingInput { offset, word, with_hint } => {
+                let hint = if *with_hint {
+                    " Note that only one WITH clause is supported."
+                } else {
+                    ""
+                };
+                Some(format!(
+                    "unexpected input at pos {offset} ('{word}') — the query was not fully parsed.{hint}"
+                ).into())
+            }
+            Self::SecondWith { offset, word } => Some(format!(
+                "unexpected input at pos {offset} ('{word}') — the query was not fully parsed. Note that only one WITH clause is supported."
+            ).into()),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
 enum Token<'a> {
     Word(&'a str),
-    Literal(&'a str),
+    Literal(Cow<'a, [u8]>),
     Number(&'a str),
     Symbol(u8),
-    ArrowIn,
-    ArrowOut,
+    DotDot,
     NotEqual,
+    Regex,
     LessOrEqual,
     GreaterOrEqual,
 }
 
-fn tokens(mut query: &str) -> Result<Vec<Token<'_>>, Unsupported> {
+struct LocatedToken<'a> {
+    token: Token<'a>,
+    offset: usize,
+}
+
+struct Tokens<'a> {
+    items: std::iter::Peekable<std::vec::IntoIter<LocatedToken<'a>>>,
+    end: usize,
+    path_syntax: bool,
+}
+
+impl<'a> Tokens<'a> {
+    fn new(source: &'a str) -> Result<Self, Unsupported> {
+        let items = tokens(source)?;
+        let path_syntax = paths::has_path_syntax(&items);
+        Ok(Self {
+            items: items.into_iter().peekable(),
+            end: source.len(),
+            path_syntax,
+        })
+    }
+
+    fn peek(&mut self) -> Option<&Token<'a>> {
+        self.items.peek().map(|item| &item.token)
+    }
+
+    fn next(&mut self) -> Option<Token<'a>> {
+        self.items.next().map(|item| item.token)
+    }
+
+    fn next_if(
+        &mut self,
+        matches: impl FnOnce(&Token<'a>) -> bool,
+    ) -> Option<Token<'a>> {
+        self.items
+            .next_if(|item| matches(&item.token))
+            .map(|item| item.token)
+    }
+
+    fn offset(&mut self) -> usize {
+        self.items.peek().map_or(self.end, |item| item.offset)
+    }
+}
+
+fn tokens(source: &str) -> Result<Vec<LocatedToken<'_>>, Unsupported> {
+    let mut query = source;
     let mut result = Vec::new();
     while !query.is_empty() {
-        query = query.trim_start_matches(|c: char| c.is_ascii_whitespace());
+        query = query.trim_start_matches(|c| matches!(c, ' ' | '\t'..='\r'));
         let Some(&first) = query.as_bytes().first() else {
             break;
         };
+        if query.starts_with("//") || query.starts_with("--") {
+            query = query.find('\n').map_or("", |end| &query[end..]);
+            continue;
+        }
+        if let Some(comment) = query.strip_prefix("/*") {
+            let (_, tail) = comment.split_once("*/").ok_or(Unsupported)?;
+            query = tail;
+            continue;
+        }
         let (token, length) = match first {
             b'a'..=b'z' | b'A'..=b'Z' | b'_' => {
                 let length = query
@@ -55,163 +216,257 @@ fn tokens(mut query: &str) -> Result<Vec<Token<'_>>, Unsupported> {
                     .count();
                 (Token::Word(&query[..length]), length)
             }
-            b'0'..=b'9' => {
-                let length =
-                    query.bytes().take_while(u8::is_ascii_digit).count();
+            byte if byte.is_ascii_digit()
+                || byte == b'.'
+                    && query
+                        .as_bytes()
+                        .get(1)
+                        .is_some_and(u8::is_ascii_digit) =>
+            {
+                let bytes = query.as_bytes();
+                let length = bytes
+                    .iter()
+                    .enumerate()
+                    .take_while(|&(index, byte)| {
+                        byte.is_ascii_digit()
+                            || *byte == b'.'
+                                && bytes
+                                    .get(index + 1)
+                                    .is_some_and(|&next| next != b'.')
+                    })
+                    .count();
                 (Token::Number(&query[..length]), length)
             }
             b'\'' | b'"' => {
-                let length = query.as_bytes()[1..]
-                    .iter()
-                    .position(|&c| c == first)
-                    .ok_or(Unsupported)?
-                    + 1;
-                let value = &query[1..length];
-                if value.len() >= 4096
-                    || value.bytes().any(|c| c == b'\\' || c.is_ascii_control())
-                {
-                    return Err(Unsupported);
-                }
-                (Token::Literal(value), length + 1)
+                let (value, used) = string_literal(query.as_bytes(), first)?;
+                (Token::Literal(value), used)
             }
-            b'<' if query.starts_with("<-") => (Token::ArrowIn, 2),
-            b'-' if query.starts_with("->") => (Token::ArrowOut, 2),
+            b'.' if query.starts_with("..") => (Token::DotDot, 2),
+            b'=' if query.starts_with("=~") => (Token::Regex, 2),
             b'<' if query.starts_with("<=") => (Token::LessOrEqual, 2),
             b'>' if query.starts_with(">=") => (Token::GreaterOrEqual, 2),
             b'<' if query.starts_with("<>") => (Token::NotEqual, 2),
             b'!' if query.starts_with("!=") => (Token::NotEqual, 2),
             b'(' | b')' | b'[' | b']' | b'{' | b'}' | b':' | b'-' | b'<'
-            | b'>' | b'.' | b'=' | b',' | b'*' => (Token::Symbol(first), 1),
+            | b'>' | b'.' | b'=' | b',' | b'*' | b'|' => {
+                (Token::Symbol(first), 1)
+            }
             _ => return Err(Unsupported),
         };
-        result.push(token);
+        result.push(LocatedToken {
+            token,
+            offset: source.len() - query.len(),
+        });
         query = &query[length..];
     }
     Ok(result)
 }
 
+fn string_literal(
+    input: &[u8],
+    quote: u8,
+) -> Result<(Cow<'_, [u8]>, usize), Unsupported> {
+    // The native token buffer keeps the first 4095 decoded bytes.
+    const MAX_LITERAL_BYTES: usize = 4095;
+    let mut decoded = Vec::new();
+    let mut start = 1;
+    let mut pos = 1;
+    while let Some(&byte) = input.get(pos) {
+        match byte {
+            byte if byte == quote => {
+                let segment = &input[start..pos];
+                if start == 1 {
+                    let segment =
+                        &segment[..segment.len().min(MAX_LITERAL_BYTES)];
+                    return Ok((Cow::Borrowed(segment), pos + 1));
+                }
+                let remaining = MAX_LITERAL_BYTES.saturating_sub(decoded.len());
+                decoded
+                    .extend_from_slice(&segment[..segment.len().min(remaining)]);
+                return Ok((Cow::Owned(decoded), pos + 1));
+            }
+            b'\\' => {
+                let &escaped = input.get(pos + 1).ok_or(Unsupported)?;
+                let segment = &input[start..pos];
+                let remaining = MAX_LITERAL_BYTES.saturating_sub(decoded.len());
+                decoded
+                    .extend_from_slice(&segment[..segment.len().min(remaining)]);
+                if decoded.len() < MAX_LITERAL_BYTES {
+                    decoded.push(match escaped {
+                        b'n' => b'\n',
+                        b't' => b'\t',
+                        other => other,
+                    });
+                }
+                pos += 1;
+                start = pos + 1;
+            }
+            _ => {}
+        }
+        pos += 1;
+    }
+    Err(Unsupported)
+}
+
 struct Parser<'a> {
-    tokens: std::iter::Peekable<std::vec::IntoIter<Token<'a>>>,
+    tokens: Tokens<'a>,
     names: HashMap<&'a str, Binding>,
+    projected_fields: HashMap<String, usize>,
+    missing_projection: Option<&'a str>,
+    after_with: bool,
+    row_syntax: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Binding {
     Node(usize),
     Edge(usize),
-}
-
-#[derive(Debug)]
-enum Comparison<'a> {
-    Equal(&'a str),
-    NotEqual(&'a str),
-    Contains(&'a str),
-    StartsWith(&'a str),
-    EndsWith(&'a str),
-    Line(Ordering, bool, i32),
-}
-
-#[derive(Debug)]
-struct Predicate<'a> {
-    node: usize,
-    property: &'a str,
-    comparison: Comparison<'a>,
-    negated: bool,
-}
-
-impl Predicate<'_> {
-    fn is_seed_equality(&self) -> bool {
-        !self.negated && matches!(self.comparison, Comparison::Equal(_))
-    }
-
-    fn matches(&self, node: &Node) -> bool {
-        let matches = match self.comparison {
-            Comparison::Line(direction, inclusive, expected) => {
-                let actual = if self.property == "start_line" {
-                    node.start_line
-                } else {
-                    node.end_line
-                };
-                let order = actual.cmp(&expected);
-                order == direction || (inclusive && order == Ordering::Equal)
-            }
-            Comparison::Equal(expected) => {
-                node.property_bytes(self.property).as_ref()
-                    == expected.as_bytes()
-            }
-            Comparison::NotEqual(expected) => {
-                node.property_bytes(self.property).as_ref()
-                    != expected.as_bytes()
-            }
-            Comparison::StartsWith(expected) => node
-                .property_bytes(self.property)
-                .starts_with(expected.as_bytes()),
-            Comparison::EndsWith(expected) => node
-                .property_bytes(self.property)
-                .ends_with(expected.as_bytes()),
-            Comparison::Contains(expected) => {
-                expected.is_empty()
-                    || node
-                        .property_bytes(self.property)
-                        .windows(expected.len())
-                        .any(|part| part == expected.as_bytes())
-            }
-        };
-        matches != self.negated
-    }
+    Unbound,
 }
 
 #[derive(Debug)]
 struct NodePattern<'a> {
-    label: Option<&'a str>,
-    inline: Vec<(&'a str, &'a str)>,
+    named: bool,
+    labels: Vec<&'a str>,
+    inline: Vec<(&'a str, Cow<'a, [u8]>)>,
 }
 
 #[derive(Clone, Copy, Debug)]
+enum Direction {
+    Inbound,
+    Outbound,
+    Either,
+}
+
+impl Direction {
+    fn reversed(self) -> Self {
+        match self {
+            Self::Inbound => Self::Outbound,
+            Self::Outbound => Self::Inbound,
+            Self::Either => Self::Either,
+        }
+    }
+
+    fn inbound_scans(self) -> &'static [bool] {
+        match self {
+            Self::Inbound => &[true],
+            Self::Outbound => &[false],
+            Self::Either => &[false, true],
+        }
+    }
+}
+
+#[derive(Debug)]
 struct Hop<'a> {
-    kind: Option<&'a str>,
-    inbound: bool,
+    kinds: Vec<&'a str>,
+    direction: Direction,
+    range: Option<paths::HopRange>,
 }
 
 #[derive(Debug)]
 enum ProjectionExpression<'a> {
     Field(Binding, Option<&'a str>),
     NodeLabels(usize),
-    Count,
+    Id(Binding),
+    Constant(&'static [u8]),
+    Coalesce(predicates::Coalesce<'a>),
+    Substring(predicates::Substring<'a>),
+    Count(Option<Binding>),
+    CountDistinct(Binding, Option<&'a str>),
+    Collect(Binding, Option<&'a str>),
+    StarField(usize, rows::StarField),
+    NumericAggregate(with_clause::NumericAggregate, Binding, Option<&'a str>),
 }
 
 impl ProjectionExpression<'_> {
+    fn is_aggregate(&self) -> bool {
+        matches!(
+            self,
+            Self::Count(_)
+                | Self::CountDistinct(..)
+                | Self::Collect(..)
+                | Self::NumericAggregate(..)
+        )
+    }
+
     fn field_value<'a>(
         &self,
-        nodes: &[&'a Node],
-        edges: &[&'a Edge],
+        nodes: &[Option<&'a Node>],
+        edges: &[Option<&'a Edge>],
+        context: &ExpressionContext<'_>,
     ) -> Cow<'a, [u8]> {
+        let node = |index: usize| nodes.get(index).copied().flatten();
+        let edge = |index: usize| edges.get(index).copied().flatten();
         match *self {
-            Self::Field(Binding::Node(index), None) => {
-                Cow::Borrowed(&nodes[index].name)
+            Self::Field(Binding::Node(index), None) => node(index)
+                .map_or(Cow::Borrowed(b""), |node| Cow::Borrowed(&node.name)),
+            Self::Field(Binding::Node(index), Some(name)) => node(index)
+                .map_or(Cow::Borrowed(b""), |node| {
+                    node.property_bytes(name, context)
+                }),
+            Self::Field(Binding::Edge(index), None) => edge(index)
+                .map_or(Cow::Borrowed(b""), |edge| {
+                    Cow::Borrowed(&edge.properties)
+                }),
+            Self::Field(Binding::Edge(index), Some(name)) => edge(index)
+                .map_or(Cow::Borrowed(b""), |edge| {
+                    edge.property_bytes(Some(name))
+                }),
+            Self::NodeLabels(index)
+                if node(index).is_none_or(|node| node.id == 0) =>
+            {
+                Cow::Borrowed(b"[]")
             }
-            Self::Field(Binding::Node(index), Some(name)) => {
-                nodes[index].property_bytes(name)
-            }
-            Self::Field(Binding::Edge(index), None) => {
-                Cow::Borrowed(&edges[index].properties)
-            }
-            Self::Field(Binding::Edge(index), Some("type")) => {
-                Cow::Borrowed(&edges[index].kind)
-            }
-            Self::Field(Binding::Edge(index), Some(name)) => Cow::Borrowed(
-                json_property_bytes(&edges[index].properties, name),
-            ),
             Self::NodeLabels(index) => Cow::Owned(
                 b"[\""
                     .iter()
-                    .chain(&nodes[index].label)
+                    .chain(&node(index).unwrap().label)
                     .chain(b"\"]")
                     .take(PROPERTY_LIMIT)
                     .copied()
                     .collect(),
             ),
-            Self::Count => unreachable!("aggregate has no per-binding value"),
+            Self::Id(binding) => {
+                let id = match binding {
+                    Binding::Node(index) => node(index).map(|node| node.id),
+                    Binding::Edge(index) => edge(index).map(|edge| edge.id),
+                    Binding::Unbound => None,
+                };
+                id.map_or(Cow::Borrowed(b""), |id| {
+                    Cow::Owned(id.to_string().into_bytes())
+                })
+            }
+            Self::Field(Binding::Unbound, _) => Cow::Borrowed(b""),
+            Self::Constant(bytes) => Cow::Borrowed(bytes),
+            Self::Coalesce(ref call) => Cow::Owned(
+                call.value(|binding, prop| {
+                    Some(
+                        ProjectionExpression::Field(binding, prop)
+                            .field_value(nodes, edges, context),
+                    )
+                })
+                .unwrap_or_default()
+                .into_owned(),
+            ),
+            Self::Substring(ref call) => Cow::Owned(
+                call.value(|binding, prop| {
+                    Some(
+                        ProjectionExpression::Field(binding, prop)
+                            .field_value(nodes, edges, context),
+                    )
+                })
+                .unwrap_or_default(),
+            ),
+            Self::StarField(index, field) => node(index)
+                .map_or(Cow::Borrowed(b""), |node| {
+                    Cow::Borrowed(field.value(node))
+                }),
+            Self::Count(_)
+            | Self::CountDistinct(..)
+            | Self::Collect(..)
+            | Self::NumericAggregate(..) => {
+                unreachable!("aggregate has no per-binding value")
+            }
         }
     }
 }
@@ -220,6 +475,8 @@ impl ProjectionExpression<'_> {
 struct Projection<'a> {
     expression: ProjectionExpression<'a>,
     name: String,
+    source_name: String,
+    scope_name: Option<&'a str>,
 }
 
 #[derive(Debug)]
@@ -229,14 +486,18 @@ struct OrderKey {
 }
 
 #[derive(Debug)]
-pub(crate) struct Query<'a> {
+struct MatchQuery<'a> {
     nodes: Vec<NodePattern<'a>>,
     hops: Vec<Hop<'a>>,
-    filters: Vec<Predicate<'a>>,
-    any_filter: bool,
+    paths: Option<paths::Plan<'a>>,
+    filter: Option<Expr<'a>>,
+    with: Option<WithPlan<'a>>,
     projections: Vec<Projection<'a>>,
+    return_star: bool,
     distinct: bool,
     order: Vec<OrderKey>,
+    ordered: bool,
+    skip: usize,
     limit: Option<usize>,
 }
 
@@ -246,7 +507,9 @@ impl<'a> Parser<'a> {
     }
 
     fn consume(&mut self, symbol: u8) -> bool {
-        self.tokens.next_if_eq(&Token::Symbol(symbol)).is_some()
+        self.tokens
+            .next_if(|token| *token == Token::Symbol(symbol))
+            .is_some()
     }
 
     fn symbol(&mut self, symbol: u8) -> Result<(), Unsupported> {
@@ -260,40 +523,96 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn literal(&mut self) -> Result<&'a str, Unsupported> {
+    fn literal(&mut self) -> Result<Cow<'a, [u8]>, Unsupported> {
         match self.tokens.next() {
             Some(Token::Literal(value)) => Ok(value),
             _ => Err(Unsupported),
         }
     }
 
-    fn alias(&mut self, target: Binding) -> Result<(), Unsupported> {
-        if matches!(self.tokens.peek(), Some(Token::Word(_))) {
-            let name = self.name()?;
-            if self.names.insert(name, target).is_some() {
-                return Err(Unsupported);
-            }
+    fn expect_pattern_symbol(&mut self, symbol: u8) -> Result<(), ParseError> {
+        if self.consume(symbol) {
+            return Ok(());
         }
-        Ok(())
+        Err(
+            self.expected_pattern_token(native_token_id(Some(&Token::Symbol(
+                symbol,
+            )))),
+        )
     }
 
-    fn node(&mut self, index: usize) -> Result<NodePattern<'a>, Unsupported> {
-        self.symbol(b'(')?;
-        self.alias(Binding::Node(index))?;
-        let label = self.consume(b':').then(|| self.name()).transpose()?;
+    fn expected_pattern_token(&mut self, expected: u8) -> ParseError {
+        ParseError::ExpectedToken {
+            expected,
+            actual: native_token_id(self.tokens.peek()),
+            offset: self.tokens.offset(),
+        }
+    }
+
+    fn pattern_name(&mut self) -> Result<&'a str, ParseError> {
+        if native_token_id(self.tokens.peek()) != NATIVE_IDENT {
+            return Err(self.expected_pattern_token(NATIVE_IDENT));
+        }
+        Ok(self.name()?)
+    }
+
+    fn alias(&mut self, target: Binding) -> Result<bool, ParseError> {
+        if native_token_id(self.tokens.peek()) != NATIVE_IDENT {
+            return Ok(false);
+        }
+        let name = self.name()?;
+        if self.names.insert(name, target).is_some() {
+            return Err(Unsupported.into());
+        }
+        Ok(true)
+    }
+
+    fn node(
+        &mut self,
+        index: usize,
+    ) -> Result<(NodePattern<'a>, usize), ParseError> {
+        self.expect_pattern_symbol(b'(')?;
+        let named = native_token_id(self.tokens.peek()) == NATIVE_IDENT;
+        let mut slot = index;
+        if named {
+            let name = self.name()?;
+            if !self.tokens.path_syntax && self.names.contains_key(name) {
+                return Err(Unsupported.into());
+            }
+            slot = match self.names.entry(name).or_insert(Binding::Node(index)) {
+                Binding::Node(slot) => *slot,
+                _ => return Err(Unsupported.into()),
+            };
+        }
+        Ok((self.node_constraints(named)?, slot))
+    }
+
+    fn node_constraints(
+        &mut self,
+        named: bool,
+    ) -> Result<NodePattern<'a>, ParseError> {
+        let mut labels = Vec::new();
+        if self.consume(b':') {
+            let mut used = 0;
+            loop {
+                let label = self.pattern_name()?;
+                used += label.len() + usize::from(!labels.is_empty());
+                // The native label buffer truncates at 255 bytes.
+                if used >= 256 {
+                    return Err(Unsupported.into());
+                }
+                labels.push(label);
+                if !self.consume(b'|') {
+                    break;
+                }
+            }
+        }
         let mut inline = Vec::new();
         if self.consume(b'{') {
             loop {
-                let property = node_property(self.name()?)?;
+                let property = self.name()?;
                 self.symbol(b':')?;
                 let value = self.literal()?;
-                // The native inline parser interprets these characters as regex.
-                if value.contains(".*")
-                    || value.contains(".+")
-                    || value.contains(['[', '(', '|', '^', '$'])
-                {
-                    return Err(Unsupported);
-                }
                 inline.push((property, value));
                 if !self.consume(b',') {
                     break;
@@ -301,260 +620,480 @@ impl<'a> Parser<'a> {
             }
             self.symbol(b'}')?;
         }
-        self.symbol(b')')?;
-        Ok(NodePattern { label, inline })
+        self.expect_pattern_symbol(b')')?;
+        Ok(NodePattern {
+            named,
+            labels,
+            inline,
+        })
     }
 
-    fn hop(
-        &mut self,
-        index: usize,
-        inbound: bool,
-    ) -> Result<Hop<'a>, Unsupported> {
-        if !inbound {
-            self.symbol(b'-')?;
+    fn hop(&mut self, index: usize) -> Result<Hop<'a>, ParseError> {
+        let inbound = self.consume(b'<');
+        self.expect_pattern_symbol(b'-')?;
+        let mut kinds = Vec::new();
+        let mut range = None;
+        if self.consume(b'[') {
+            self.alias(Binding::Edge(index))?;
+            if self.consume(b':') {
+                kinds.push(self.pattern_name()?);
+                while self.consume(b'|') {
+                    kinds.push(self.pattern_name()?);
+                }
+            }
+            if self.consume(b'*') {
+                range = Some(paths::HopRange::parse(self)?);
+            }
+            self.expect_pattern_symbol(b']')?;
         }
-        self.symbol(b'[')?;
-        self.alias(Binding::Edge(index))?;
-        let kind = self.consume(b':').then(|| self.name()).transpose()?;
-        self.symbol(b']')?;
-        if inbound {
-            self.symbol(b'-')?;
-        } else if self.tokens.next() != Some(Token::ArrowOut) {
-            return Err(Unsupported);
-        }
-        Ok(Hop { kind, inbound })
+        self.expect_pattern_symbol(b'-')?;
+        let direction = match (inbound, self.consume(b'>')) {
+            (true, false) => Direction::Inbound,
+            (false, true) => Direction::Outbound,
+            _ => Direction::Either,
+        };
+        Ok(Hop {
+            kinds,
+            direction,
+            range,
+        })
     }
 
     fn binding(&self, name: &str) -> Result<Binding, Unsupported> {
         self.names.get(name).copied().ok_or(Unsupported)
     }
 
-    fn reference(&mut self) -> Result<(&'a str, Binding), Unsupported> {
-        let name = self.name()?;
-        Ok((name, self.binding(name)?))
+    fn projection_binding(&mut self, name: &'a str) -> Binding {
+        if let Ok(binding) = self.binding(name) {
+            return binding;
+        }
+        // Validate scope after parsing the whole statement, as native does.
+        self.missing_projection.get_or_insert(name);
+        Binding::Unbound
     }
 
-    fn named_projection(
-        &mut self,
-    ) -> Result<(ProjectionExpression<'a>, String), Unsupported> {
+    fn trailing_delimiter(&mut self) -> Option<ParseError> {
+        let offset = self.tokens.offset();
+        let Token::Symbol(delimiter @ (b'(' | b'[')) = self.tokens.peek()?
+        else {
+            return None;
+        };
+        let delimiter = char::from(*delimiter);
+        let mut starts = false;
+        let mut with_hint = false;
+        while let Some(token) = self.tokens.next() {
+            if matches!(token, Token::Word(word) if word.eq_ignore_ascii_case("WITH"))
+                && !starts
+            {
+                with_hint = true;
+                break;
+            }
+            starts = matches!(token, Token::Word(word) if word.eq_ignore_ascii_case("STARTS"));
+        }
+        Some(ParseError::TrailingDelimiter {
+            offset,
+            delimiter,
+            with_hint,
+        })
+    }
+
+    fn second_with(&mut self) -> Option<ParseError> {
+        let offset = self.tokens.offset();
+        if let Some(Token::Word(word)) = self.tokens.peek()
+            && word.eq_ignore_ascii_case("WITH")
+        {
+            return Some(ParseError::SecondWith {
+                offset,
+                word: (*word).to_owned(),
+            });
+        }
+        None
+    }
+
+    fn named_projection(&mut self) -> Result<Projection<'a>, ParseError> {
         let name = self.name()?;
         if self.consume(b'(') {
-            let (target, binding) = self.reference()?;
-            self.symbol(b')')?;
-            return match binding {
-                Binding::Edge(_) if name.eq_ignore_ascii_case("type") => Ok((
-                    ProjectionExpression::Field(binding, Some("type")),
-                    format!("type({target})"),
-                )),
-                Binding::Node(index) if name.eq_ignore_ascii_case("labels") => {
-                    Ok((
-                        ProjectionExpression::NodeLabels(index),
-                        format!("labels({target})"),
-                    ))
-                }
-                _ => Err(Unsupported),
-            };
-        }
-        let binding = self.binding(name)?;
-        let property = self.consume(b'.').then(|| self.name()).transpose()?;
-        if let (Binding::Node(_), Some(property)) = (binding, property) {
-            node_property(property)?;
-        }
-        Ok((
-            ProjectionExpression::Field(binding, property),
-            projection_name(name, property),
-        ))
-    }
-
-    fn count_name(
-        &mut self,
-        allow_property: bool,
-    ) -> Result<String, Unsupported> {
-        self.symbol(b'(')?;
-        let variable = if self.consume(b'*') {
-            "*"
-        } else {
-            let (name, _) = self.reference()?;
-            if allow_property && self.consume(b'.') {
-                // Native COUNT(var.prop) tests whether var is bound, even
-                // when the projected property is missing. Its default column
-                // name also omits the property.
-                self.name()?;
+            if !native_named_function(name) {
+                return Err(ParseError::UnsupportedProjectionFunction(
+                    name.to_owned(),
+                ));
             }
-            name
-        };
-        self.symbol(b')')?;
-        Ok(format!("COUNT({variable})"))
+            if name.eq_ignore_ascii_case("coalesce") {
+                let call = self.coalesce()?;
+                let (var, property) =
+                    call.first_reference().ok_or(Unsupported)?;
+                return Ok(Projection {
+                    expression: ProjectionExpression::Coalesce(call),
+                    name: format!("coalesce({var})"),
+                    source_name: projection_name(var, property),
+                    scope_name: None,
+                });
+            }
+            if name.eq_ignore_ascii_case("substring") {
+                let call = self.substring(true)?;
+                let reference = call.first_reference();
+                if reference.is_none() && !self.tokens.peek().is_some_and(
+                    |token| matches!(token, Token::Word(word) if word.eq_ignore_ascii_case("AS"))
+                ) {
+                    // The native column name formats a null C pointer.
+                    return Err(Unsupported.into());
+                }
+                let (var, property) = reference.unwrap_or(("", None));
+                return Ok(Projection {
+                    expression: ProjectionExpression::Substring(call),
+                    name: format!("substring({var})"),
+                    source_name: projection_name(var, property),
+                    scope_name: None,
+                });
+            }
+            let target = self.name()?;
+            let binding = self.projection_binding(target);
+            self.symbol(b')')?;
+            let (expression, canonical) = match binding {
+                Binding::Edge(_) if name.eq_ignore_ascii_case("type") => {
+                    (ProjectionExpression::Field(binding, Some("type")), "type")
+                }
+                Binding::Node(index) if name.eq_ignore_ascii_case("labels") => {
+                    (ProjectionExpression::NodeLabels(index), "labels")
+                }
+                Binding::Node(_) if name.eq_ignore_ascii_case("type") => {
+                    (ProjectionExpression::Constant(b""), "type")
+                }
+                Binding::Edge(_) if name.eq_ignore_ascii_case("labels") => {
+                    (ProjectionExpression::Constant(b"[]"), "labels")
+                }
+                _ if name.eq_ignore_ascii_case("id") => {
+                    (ProjectionExpression::Id(binding), "id")
+                }
+                Binding::Unbound if name.eq_ignore_ascii_case("labels") => {
+                    (ProjectionExpression::Constant(b"[]"), "labels")
+                }
+                Binding::Unbound if name.eq_ignore_ascii_case("type") => {
+                    (ProjectionExpression::Constant(b""), "type")
+                }
+                _ => return Err(Unsupported.into()),
+            };
+            return Ok(Projection {
+                expression,
+                name: format!("{canonical}({target})"),
+                source_name: target.to_owned(),
+                scope_name: None,
+            });
+        }
+        let binding = self.projection_binding(name);
+        let property = self.consume(b'.').then(|| self.name()).transpose()?;
+        if self.tokens.peek() == Some(&Token::Symbol(b'[')) {
+            return Err(ParseError::UnsupportedListIndex);
+        }
+        let source_name = projection_name(name, property);
+        Ok(Projection {
+            expression: ProjectionExpression::Field(binding, property),
+            name: source_name.clone(),
+            source_name,
+            scope_name: property.is_none().then_some(name),
+        })
     }
 
-    fn projection(&mut self) -> Result<Projection<'a>, Unsupported> {
-        let (expression, default_name) = if self.keyword("COUNT") {
-            (ProjectionExpression::Count, self.count_name(true)?)
+    fn order_name(&mut self) -> Result<String, Unsupported> {
+        let aggregate = if self.keyword("COUNT") {
+            Some("COUNT")
+        } else if self.keyword("COLLECT") {
+            self.consume(b'(');
+            let name = if self.consume(b'*') {
+                "*"
+            } else if native_token_id(self.tokens.peek()) == NATIVE_IDENT {
+                self.name()?
+            } else {
+                ""
+            };
+            self.consume(b')');
+            return Ok(format!("COLLECT({name})"));
+        } else {
+            with_clause::NumericAggregate::parse(self)
+                .map(with_clause::NumericAggregate::name)
+        };
+        if let Some(aggregate) = aggregate {
+            self.symbol(b'(')?;
+            let name = if self.consume(b'*') {
+                "*"
+            } else {
+                self.name()?
+            };
+            self.symbol(b')')?;
+            Ok(format!("{aggregate}({name})"))
+        } else {
+            let name = self.name()?;
+            let property =
+                self.consume(b'.').then(|| self.name()).transpose()?;
+            Ok(projection_name(name, property))
+        }
+    }
+
+    fn projection(&mut self) -> Result<Projection<'a>, ParseError> {
+        let collect = self.keyword("COLLECT");
+        let aggregate = if collect {
+            None
+        } else if self.keyword("COUNT") {
+            Some(None)
+        } else {
+            with_clause::NumericAggregate::parse(self).map(Some)
+        };
+        let mut projection = if collect {
+            self.collect_projection()?
+        } else if let Some(aggregate) = aggregate {
+            self.symbol(b'(')?;
+            let unique = self.keyword("DISTINCT");
+            let (name, argument) = if self.consume(b'*') {
+                ("*", None)
+            } else {
+                let name = self.name()?;
+                let binding = self.projection_binding(name);
+                let property =
+                    self.consume(b'.').then(|| self.name()).transpose()?;
+                (name, Some((binding, property)))
+            };
+            self.symbol(b')')?;
+            let expression = match (aggregate, unique, argument) {
+                (None, false, argument) => ProjectionExpression::Count(
+                    argument.map(|(binding, _)| binding),
+                ),
+                (None, true, Some((binding, prop))) => {
+                    ProjectionExpression::CountDistinct(binding, prop)
+                }
+                (Some(aggregate), false, Some((binding, prop))) => {
+                    ProjectionExpression::NumericAggregate(
+                        aggregate, binding, prop,
+                    )
+                }
+                _ => return Err(Unsupported.into()),
+            };
+            let function =
+                aggregate.map_or("COUNT", with_clause::NumericAggregate::name);
+            let property = argument.and_then(|(_, property)| property);
+            Projection {
+                expression,
+                name: format!("{function}({name})"),
+                source_name: projection_name(name, property),
+                scope_name: None,
+            }
         } else {
             self.named_projection()?
         };
-        let name = if self.keyword("AS") {
-            self.name()?.to_owned()
-        } else {
-            default_name
-        };
-        Ok(Projection { expression, name })
+        if self.keyword("AS") {
+            let name = self.name()?;
+            projection.name = name.to_owned();
+            projection.source_name = name.to_owned();
+            projection.scope_name = Some(name);
+        }
+        Ok(projection)
     }
 
-    fn predicate(&mut self) -> Result<Predicate<'a>, Unsupported> {
-        let negated = self.keyword("NOT");
-        let (_, Binding::Node(node)) = self.reference()? else {
+    fn projections(
+        &mut self,
+        width: usize,
+    ) -> Result<Vec<Projection<'a>>, ParseError> {
+        let mut projections = vec![self.projection()?];
+        while self.consume(b',') {
+            if projections.len() == width {
+                return Err(Unsupported.into());
+            }
+            projections.push(self.projection()?);
+        }
+        Ok(projections)
+    }
+
+    fn unsigned(&mut self, keyword: &str) -> Result<Option<usize>, Unsupported> {
+        if !self.keyword(keyword) {
+            return Ok(None);
+        }
+        self.number().map(Some)
+    }
+
+    fn return_unsigned(
+        &mut self,
+        keyword: &str,
+    ) -> Result<Option<usize>, ParseError> {
+        if !self.keyword(keyword) {
+            return Ok(None);
+        }
+        if !matches!(self.tokens.peek(), Some(Token::Number(_))) {
+            return Err(self.expected_pattern_token(87));
+        }
+        Ok(Some(self.number()?))
+    }
+
+    fn number(&mut self) -> Result<usize, Unsupported> {
+        let Some(Token::Number(number)) = self.tokens.next() else {
             return Err(Unsupported);
         };
-        self.symbol(b'.')?;
-        let property = node_property(self.name()?)?;
-        let comparison = match self.tokens.next().ok_or(Unsupported)? {
-            Token::Symbol(b'=') => Comparison::Equal(self.literal()?),
-            Token::NotEqual => Comparison::NotEqual(self.literal()?),
-            Token::Word(word) if word.eq_ignore_ascii_case("CONTAINS") => {
-                Comparison::Contains(self.literal()?)
-            }
-            Token::Word(word) if word.eq_ignore_ascii_case("STARTS") => {
-                if !self.keyword("WITH") {
-                    return Err(Unsupported);
-                }
-                Comparison::StartsWith(self.literal()?)
-            }
-            Token::Word(word) if word.eq_ignore_ascii_case("ENDS") => {
-                if !self.keyword("WITH") {
-                    return Err(Unsupported);
-                }
-                Comparison::EndsWith(self.literal()?)
-            }
-            op if matches!(property, "start_line" | "end_line") => {
-                let (direction, inclusive) = match op {
-                    Token::Symbol(b'<') => (Ordering::Less, false),
-                    Token::LessOrEqual => (Ordering::Less, true),
-                    Token::Symbol(b'>') => (Ordering::Greater, false),
-                    Token::GreaterOrEqual => (Ordering::Greater, true),
-                    _ => return Err(Unsupported),
-                };
-                let Some(Token::Number(value)) = self.tokens.next() else {
-                    return Err(Unsupported);
-                };
-                Comparison::Line(
-                    direction,
-                    inclusive,
-                    value.parse().map_err(|_| Unsupported)?,
-                )
-            }
-            _ => return Err(Unsupported),
-        };
-        Ok(Predicate {
-            node,
-            property,
-            comparison,
-            negated,
-        })
+        let integer = number.split('.').next().unwrap_or_default();
+        if integer.is_empty() {
+            return Ok(0);
+        }
+        integer
+            .parse::<i32>()
+            .map(|value| value as usize)
+            .map_err(|_| Unsupported)
+    }
+}
+
+// These IDs occur in native parser diagnostics. Keep the frozen lexer enum
+// order here while the C and Rust tool replies have to compare byte for byte.
+const NATIVE_KEYWORDS: [&str; 66] = [
+    "MATCH",
+    "WHERE",
+    "RETURN",
+    "ORDER",
+    "BY",
+    "LIMIT",
+    "AND",
+    "OR",
+    "AS",
+    "DISTINCT",
+    "COUNT",
+    "CONTAINS",
+    "STARTS",
+    "WITH",
+    "NOT",
+    "ASC",
+    "DESC",
+    "<>",
+    "ENDS",
+    "IN",
+    "IS",
+    "NULL",
+    "XOR",
+    "SKIP",
+    "UNION",
+    "UNWIND",
+    "SUM",
+    "AVG",
+    "MIN",
+    "MAX",
+    "COLLECT",
+    "TOLOWER",
+    "TOUPPER",
+    "TOSTRING",
+    "CASE",
+    "WHEN",
+    "THEN",
+    "ELSE",
+    "END",
+    "CREATE",
+    "DELETE",
+    "DETACH",
+    "SET",
+    "REMOVE",
+    "MERGE",
+    "OPTIONAL",
+    "YIELD",
+    "CALL",
+    "ALL",
+    "TRUE",
+    "FALSE",
+    "EXISTS",
+    "MANDATORY",
+    "FOREACH",
+    "ON",
+    "ADD",
+    "CONSTRAINT",
+    "DO",
+    "DROP",
+    "FOR",
+    "FROM",
+    "GRAPH",
+    "OF",
+    "REQUIRE",
+    "SCALAR",
+    "UNIQUE",
+];
+const NATIVE_IDENT: u8 = 85;
+
+fn native_token_id(token: Option<&Token<'_>>) -> u8 {
+    match token {
+        Some(Token::Word(word)) => NATIVE_KEYWORDS
+            .iter()
+            .position(|keyword| word.eq_ignore_ascii_case(keyword))
+            .map_or(NATIVE_IDENT, |index| index as u8),
+        Some(Token::Symbol(symbol)) => match symbol {
+            b'|' => 83,
+            // The first fourteen punctuation IDs are consecutive in C.
+            _ => b"()[]-><:.{}*,="
+                .iter()
+                .position(|byte| symbol == byte)
+                .map_or(88, |index| 66 + index as u8),
+        },
+        Some(Token::DotDot) => 84,
+        Some(Token::NotEqual) => 17,
+        Some(Token::Regex) => 80,
+        Some(Token::GreaterOrEqual) => 81,
+        Some(Token::LessOrEqual) => 82,
+        Some(Token::Literal(_)) => 86,
+        Some(Token::Number(_)) => 87,
+        None => 88,
     }
 }
 
 fn valid_name(name: &str) -> bool {
     // Skip reserved lexer keywords and native's generated anonymous aliases.
-    const RESERVED: &str = "MATCH OPTIONAL WHERE RETURN LIMIT AND OR XOR NOT AS IN IS NULL TRUE FALSE CONTAINS STARTS ENDS WITH ORDER BY DESC ASC SKIP DISTINCT UNWIND UNION ALL CASE WHEN THEN ELSE END EXISTS CREATE DELETE REMOVE SET MERGE CALL YIELD COUNT SUM AVG MIN MAX COLLECT TOLOWER TOUPPER TOSTRING DETACH MANDATORY FOREACH ON ADD CONSTRAINT DO DROP FOR FROM GRAPH OF REQUIRE SCALAR UNIQUE";
     name.len() < 64
         && !name.starts_with('_')
-        && !RESERVED
-            .split_ascii_whitespace()
-            .any(|word| name.eq_ignore_ascii_case(word))
+        && native_token_id(Some(&Token::Word(name))) == NATIVE_IDENT
 }
 
-fn node_property(name: &str) -> Result<&str, Unsupported> {
-    // Degree requires a separate derived read, which is outside this slice.
-    if matches!(name, "in_degree" | "out_degree") {
-        Err(Unsupported)
-    } else {
-        Ok(name)
-    }
+pub(crate) fn classify(source: &str) -> Result<Query<'_>, ParseError> {
+    rows::parse(source)
 }
 
-pub(crate) fn classify(source: &str) -> Result<Query<'_>, Unsupported> {
-    let mut parser = Parser {
-        tokens: tokens(source)?.into_iter().peekable(),
-        names: HashMap::new(),
-    };
-    if !parser.keyword("MATCH") {
-        return Err(Unsupported);
-    }
-    let mut nodes = vec![parser.node(0)?];
+fn match_query<'a>(
+    parser: &mut Parser<'a>,
+    optional: bool,
+) -> Result<(MatchQuery<'a>, Option<ParseError>), ParseError> {
+    let (first, first_slot) = parser.node(0)?;
+    let mut nodes = vec![first];
+    let mut slots = vec![first_slot];
     let mut hops = Vec::new();
-    while hops.len() < 2
-        && matches!(
-            parser.tokens.peek(),
-            Some(Token::Symbol(b'-') | Token::ArrowIn)
-        )
+    let hop_limit = if parser.tokens.path_syntax {
+        paths::EDGE_SLOTS
+    } else {
+        2
+    };
+    while hops.len() < hop_limit
+        && matches!(parser.tokens.peek(), Some(Token::Symbol(b'-' | b'<')))
     {
-        let inbound = parser.tokens.next_if_eq(&Token::ArrowIn).is_some();
-        hops.push(parser.hop(hops.len(), inbound)?);
-        nodes.push(parser.node(nodes.len())?);
+        hops.push(parser.hop(hops.len())?);
+        let (node, slot) = parser.node(nodes.len())?;
+        nodes.push(node);
+        slots.push(slot);
     }
-    if hops.len() > 1 {
-        // The head has its own synthetic name. Later anonymous endpoints
-        // reuse a single name in C, so keep multi-hop queries with two
-        // anonymous bindings on the reference path.
-        let named_nodes = parser
-            .names
-            .values()
-            .filter(|binding| matches!(binding, Binding::Node(_)))
-            .count();
-        if nodes.len() - named_nodes > 1
-            || hops.iter().any(|hop| hop.kind.is_none())
-        {
-            return Err(Unsupported);
-        }
+    let mut paths = paths::Plan::new(optional, &nodes, &hops, slots);
+    if parser.tokens.path_syntax {
+        paths.parse_clauses(parser)?;
     }
-    let mut filters = Vec::new();
-    let mut any_filter = false;
-    if parser.keyword("WHERE") {
-        let mut disjunction = None;
-        loop {
-            filters.push(parser.predicate()?);
-            let next_any = if hops.is_empty() && parser.keyword("OR") {
-                true
-            } else if parser.keyword("AND") {
-                false
-            } else {
-                break;
-            };
-            // Keep mixed operators and disjunctions over multiple bindings
-            // in C. The Graph UI emits a flat OR over one node.
-            if disjunction.is_some_and(|previous| previous != next_any) {
-                return Err(Unsupported);
-            }
-            disjunction = Some(next_any);
-        }
-        any_filter = disjunction.unwrap_or(false);
+    let filter = parser
+        .keyword("WHERE")
+        .then(|| parser.where_expr())
+        .transpose()?;
+    if parser.tokens.path_syntax {
+        paths.parse_clauses(parser)?;
     }
+    let paths = paths.into_optional()?;
+    let with = parser
+        .keyword("WITH")
+        .then(|| WithPlan::parse(parser))
+        .transpose()?;
+    let missing_with = parser.missing_projection.take();
     if !parser.keyword("RETURN") {
-        return Err(Unsupported);
+        return Err(parser.second_with().unwrap_or(ParseError::Unsupported));
     }
     let distinct = parser.keyword("DISTINCT");
-    let mut projections = Vec::new();
-    loop {
-        projections.push(parser.projection()?);
-        if !parser.consume(b',') {
-            break;
-        }
-    }
-    if projections.len() > 32 {
-        return Err(Unsupported);
-    }
-    // A single grouping field covers the common count breakdown without
-    // interpreting the native compound key's delimiter and byte truncation.
-    let field_count = projections
-        .iter()
-        .filter(|column| {
-            !matches!(column.expression, ProjectionExpression::Count)
-        })
-        .count();
-    if field_count < projections.len() && (distinct || field_count > 1) {
-        return Err(Unsupported);
-    }
+    let return_star = parser.consume(b'*');
+    parser.row_syntax |= return_star;
+    let projections = match &with {
+        Some(with) if return_star => with.return_star(),
+        None if return_star => rows::star_projections(&parser.names),
+        _ => parser.projections(32)?,
+    };
     // C can retain a pointer to an empty edge-property buffer while
     // projecting later columns. A ninth lookup can overwrite that cell.
     if projections
@@ -567,64 +1106,101 @@ pub(crate) fn classify(source: &str) -> Result<Query<'_>, Unsupported> {
         .count()
         > NATIVE_EDGE_PROPERTY_BUFFERS
     {
-        return Err(Unsupported);
+        return Err(ParseError::Unsupported);
     }
     let mut order = Vec::new();
-    if parser.keyword("ORDER") {
-        if hops.len() > 1 || !parser.keyword("BY") {
-            return Err(Unsupported);
+    let ordered = parser.keyword("ORDER");
+    if ordered {
+        if !parser.keyword("BY") {
+            return Err(ParseError::Unsupported);
         }
-        loop {
-            if order.len() == ORDER_KEYS_MAX {
-                return Err(Unsupported);
-            }
-            let name = if parser.keyword("COUNT") {
-                parser.count_name(false)?
-            } else {
-                let name = parser.name()?;
-                let property =
-                    parser.consume(b'.').then(|| parser.name()).transpose()?;
-                projection_name(name, property)
-            };
-            let column = projections
-                .iter()
-                .position(|p| p.name == name)
-                .ok_or(Unsupported)?;
+        for index in 0..ORDER_KEYS_MAX {
+            let name = parser.order_name()?;
+            let column = projections.iter().position(|p| p.name == name);
             let descending = parser.keyword("DESC");
             if !descending {
                 parser.keyword("ASC");
             }
-            order.push(OrderKey { column, descending });
+            if let Some(column) = column {
+                order.push(OrderKey { column, descending });
+            }
             if !parser.consume(b',') {
                 break;
             }
+            if index + 1 == ORDER_KEYS_MAX {
+                return Err(ParseError::Unsupported);
+            }
         }
     }
-    let limit = if parser.keyword("LIMIT") {
-        let Some(Token::Number(limit)) = parser.tokens.next() else {
-            return Err(Unsupported);
-        };
-        let n = limit.parse().map_err(|_| Unsupported)?;
-        if n > ENGINE_LIMIT {
-            return Err(Unsupported);
-        }
-        Some(n)
+    let skip = parser.return_unsigned("SKIP")?.unwrap_or_default();
+    let limit = parser.return_unsigned("LIMIT")?;
+    if with.is_none() && limit.is_some_and(|n| n > ENGINE_LIMIT) {
+        return Err(ParseError::Unsupported);
+    }
+    let scope_error = if let Some(name) = missing_with {
+        Some(ParseError::OutOfScope {
+            name: name.to_owned(),
+            clause: "WITH",
+            reason: "no pattern in this query names it",
+        })
     } else {
-        None
+        parser
+            .missing_projection
+            .map(|name| ParseError::OutOfScope {
+                name: name.to_owned(),
+                clause: "RETURN",
+                reason: if with.is_some() {
+                    "the WITH clause did not carry it through"
+                } else {
+                    "no pattern in this query names it"
+                },
+            })
     };
-    if parser.tokens.next().is_some() {
-        return Err(Unsupported);
-    }
-    Ok(Query {
-        nodes,
-        hops,
-        filters,
-        any_filter,
-        projections,
-        distinct,
-        order,
-        limit,
-    })
+    Ok((
+        MatchQuery {
+            nodes,
+            hops,
+            paths,
+            filter,
+            with,
+            projections,
+            return_star,
+            distinct,
+            order,
+            ordered,
+            skip,
+            limit,
+        },
+        scope_error,
+    ))
+}
+
+fn native_named_function(name: &str) -> bool {
+    // C routes these identifier calls to a native scalar parser. Some still
+    // use the C evaluator, while names outside the list are syntax errors.
+    [
+        "labels",
+        "type",
+        "id",
+        "keys",
+        "properties",
+        "toInteger",
+        "toFloat",
+        "toBoolean",
+        "size",
+        "length",
+        "trim",
+        "ltrim",
+        "rtrim",
+        "reverse",
+        "coalesce",
+        "substring",
+        "replace",
+        "left",
+        "right",
+    ]
+    .iter()
+    .any(|function| function.eq_ignore_ascii_case(name))
 }
 
 fn projection_name(name: &str, property: Option<&str>) -> String {
@@ -632,7 +1208,67 @@ fn projection_name(name: &str, property: Option<&str>) -> String {
         .map_or_else(|| name.to_owned(), |property| format!("{name}.{property}"))
 }
 
-#[derive(Debug)]
+const REGEX_WARNING: &str = "a =~ or property regex pattern too large to compile: reduce nested {m,n} repetition or alternation — the comparison matched nothing";
+
+struct ExpressionContext<'a> {
+    connection: &'a Connection,
+    regex_refused: Cell<bool>,
+}
+
+impl ExpressionContext<'_> {
+    fn degree(&self, id: i64, property: &str) -> i32 {
+        let sql = if property == "in_degree" {
+            "SELECT COUNT(*) FROM edges WHERE target_id = ?1 AND type = 'CALLS'"
+        } else {
+            "SELECT COUNT(*) FROM edges WHERE source_id = ?1 AND type = 'CALLS'"
+        };
+        // The native degree helper defaults to zero when SQLite cannot read it
+        // and converts COUNT with sqlite3_column_int.
+        self.connection
+            .query_row(sql, [id], |row| row.get::<_, i64>(0))
+            .unwrap_or_default() as i32
+    }
+
+    fn regex_matches(
+        &self,
+        actual: &[u8],
+        pattern: &[u8],
+        inline: bool,
+    ) -> bool {
+        unsafe extern "C" {
+            fn cbm_regex_match_extended(
+                actual: *const c_char,
+                pattern: *const c_char,
+            ) -> c_int;
+        }
+        let actual =
+            CString::new(c_string_bytes(actual)).expect("NUL-trimmed subject");
+        let pattern =
+            CString::new(c_string_bytes(pattern)).expect("NUL-trimmed pattern");
+        // SAFETY: The wrapper only reads the two NUL-terminated byte strings.
+        match unsafe {
+            cbm_regex_match_extended(actual.as_ptr(), pattern.as_ptr())
+        } {
+            1 => true,
+            0 => false,
+            status => {
+                // Inline filters compare literally after any compile failure.
+                let equal = inline && actual == pattern;
+                if status == -2 && !equal {
+                    self.regex_refused.set(true);
+                }
+                equal
+            }
+        }
+    }
+}
+
+fn looks_like_regex(value: &[u8]) -> bool {
+    value.windows(2).any(|pair| matches!(pair, b".*" | b".+"))
+        || value.iter().any(|byte| b"[(|^$".contains(byte))
+}
+
+#[derive(Clone, Debug, Default)]
 struct Node {
     id: i64,
     label: Vec<u8>,
@@ -664,7 +1300,11 @@ impl Node {
         })
     }
 
-    fn property_bytes(&self, name: &str) -> Cow<'_, [u8]> {
+    fn property_bytes(
+        &self,
+        name: &str,
+        context: &ExpressionContext<'_>,
+    ) -> Cow<'_, [u8]> {
         let value: &[u8] = match name {
             "label" => &self.label,
             "name" => &self.name,
@@ -674,6 +1314,13 @@ impl Node {
                 return self.start_line.to_string().into_bytes().into();
             }
             "end_line" => return self.end_line.to_string().into_bytes().into(),
+            "in_degree" | "out_degree" => {
+                return context
+                    .degree(self.id, name)
+                    .to_string()
+                    .into_bytes()
+                    .into();
+            }
             _ => b"",
         };
         if !value.is_empty() {
@@ -770,6 +1417,49 @@ pub(crate) struct ResultRows {
     // before rendering the response.
     pub(crate) rows: Vec<Vec<Vec<u8>>>,
     pub(crate) truncated: bool,
+    warnings: Warnings,
+}
+
+#[derive(Default, Debug, PartialEq)]
+struct Warnings {
+    depth_cap: Option<u32>,
+    traversal_exhausted: bool,
+    regex_refused: bool,
+}
+
+impl Warnings {
+    fn merge(&mut self, other: Self) {
+        self.depth_cap = other.depth_cap.or(self.depth_cap);
+        self.traversal_exhausted |= other.traversal_exhausted;
+        self.regex_refused |= other.regex_refused;
+    }
+}
+
+impl ResultRows {
+    pub(crate) fn warning(&self) -> Option<String> {
+        let mut warning = match (
+            self.warnings.depth_cap,
+            self.warnings.traversal_exhausted,
+        ) {
+            (Some(cap), true) => format!(
+                "variable-length hop range clamped to the engine ceiling ({cap}) and traversal budget was exhausted — results may be partial"
+            ),
+            (Some(cap), false) => format!(
+                "variable-length hop range clamped to the engine ceiling ({cap}) — an empty result may mean \"clamped\", not \"no such path\""
+            ),
+            (None, true) => String::from(
+                "variable-length traversal budget was exhausted — results may be partial",
+            ),
+            (None, false) => String::new(),
+        };
+        if self.warnings.regex_refused {
+            if !warning.is_empty() {
+                warning.push_str("; ");
+            }
+            warning.push_str(REGEX_WARNING);
+        }
+        (!warning.is_empty()).then_some(warning)
+    }
 }
 
 #[derive(Default)]
@@ -811,8 +1501,10 @@ impl DistinctRows {
 }
 
 enum RowCollector {
+    With(WithRows),
     All,
     Count(CountRows),
+    Aggregate(ReturnGroups),
     Distinct(DistinctRows),
 }
 
@@ -896,6 +1588,7 @@ pub(crate) struct ExecutionBudget<'a> {
     cancelled: &'a dyn Fn() -> bool,
     remaining: usize,
     ordered_count_group_limit: usize,
+    pub(crate) path_depth_cap: u32,
 }
 
 impl<'a> ExecutionBudget<'a> {
@@ -909,6 +1602,7 @@ impl<'a> ExecutionBudget<'a> {
             cancelled,
             remaining: CHECK_INTERVAL,
             ordered_count_group_limit: ORDERED_COUNT_GROUP_LIMIT,
+            path_depth_cap: 10,
         }
     }
 
@@ -940,77 +1634,72 @@ impl<'a> ExecutionBudget<'a> {
     }
 }
 
-impl Query<'_> {
-    #[cfg(test)]
-    pub(crate) fn execute(
-        &self,
-        db: &Path,
-        project: &str,
-    ) -> Result<ResultRows, ExecutionError> {
-        let connection =
-            Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        self.execute_on(&connection, project)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn execute_on(
+impl MatchQuery<'_> {
+    fn execute(
         &self,
         connection: &Connection,
         project: &str,
-    ) -> Result<ResultRows, ExecutionError> {
-        self.execute_with_budget(
-            connection,
-            project,
-            &mut ExecutionBudget::new(&Instant::now, &|| false),
-        )
-    }
-
-    /// Read from the graph and snapshot the caller has already selected.
-    pub(crate) fn execute_with_budget(
-        &self,
-        connection: &Connection,
-        project: &str,
+        standalone: bool,
         budget: &mut ExecutionBudget<'_>,
     ) -> Result<ResultRows, ExecutionError> {
         budget.check()?;
-        let reversed =
-            self.hops.len() == 1 && self.selectivity(1) > self.selectivity(0);
+        let reversed = self.paths.as_ref().is_none_or(paths::Plan::can_reverse)
+            && self.hops.len() == 1
+            && self.selectivity(1) > self.selectivity(0);
         let start_index = usize::from(reversed);
         let second_index = usize::from(!reversed);
-        let label = self.nodes[start_index].label;
-        let condition = if label.is_some() {
-            " AND n.label = ?2"
-        } else {
-            ""
+        let context = ExpressionContext {
+            connection,
+            regex_refused: Cell::new(false),
         };
-        // Use the same unordered lookup as C. Its paged scan follows this
-        // lookup's index order and uses the lookup directly for other plans.
+        // Regex refusals are observable even after RETURN fills its window.
+        let scan_for_regex = self.filter.as_ref().is_some_and(Expr::has_regex)
+            || self.nodes.iter().any(|node| {
+                node.inline.iter().any(|(_, value)| looks_like_regex(value))
+            });
+        let labels = &self.nodes[start_index].labels;
+        let condition = if labels.is_empty() {
+            ""
+        } else {
+            " AND n.label = ?2"
+        };
+        // One scan per written label in order, including repeated labels.
         let sql = format!(
             "SELECT {NODE_COLUMNS} FROM nodes n WHERE n.project = ?1{condition}"
         );
         let mut statement = connection.prepare(&sql)?;
-        let mut start_nodes = if let Some(label) = label {
-            statement.query(params![project, label])?
-        } else {
-            statement.query([project])?
-        };
-        let mut adjacency = self
-            .hops
-            .first()
-            .map(|hop| Adjacency::new(connection, hop.kind.is_some()))
+        let mut walk = self
+            .paths
+            .as_ref()
+            .map(|plan| paths::Walk::new(plan, connection, project, &context))
+            .transpose()?;
+        let mut adjacency = (walk.is_none() && !self.hops.is_empty())
+            .then(|| Adjacency::new(connection))
             .transpose()?;
         let limit = self.limit.unwrap_or(ENGINE_LIMIT);
-        let mut collector = if self.distinct {
-            let engine_cap = self.limit.is_none() || !self.order.is_empty();
+        let mut collector = if self.with.is_some() {
+            RowCollector::With(WithRows::default())
+        // A UNION needs each branch's ordered rows and truncation status
+        // before it can apply the final result ceiling.
+        } else if standalone
+            && let Some(counts) =
+                self.count_rows(budget.ordered_count_group_limit)
+        {
+            RowCollector::Count(counts)
+        } else if self
+            .projections
+            .iter()
+            .any(|item| item.expression.is_aggregate())
+        {
+            RowCollector::Aggregate(ReturnGroups::default())
+        } else if self.distinct {
+            let engine_cap =
+                self.limit.is_none() || !self.can_limit_during_scan();
             RowCollector::Distinct(DistinctRows {
                 cap: if engine_cap { ENGINE_LIMIT } else { limit },
                 engine_cap,
                 ..DistinctRows::default()
             })
-        } else if let Some(counts) =
-            self.count_rows(budget.ordered_count_group_limit)
-        {
-            RowCollector::Count(counts)
         } else {
             RowCollector::All
         };
@@ -1022,112 +1711,244 @@ impl Query<'_> {
                 .collect(),
             rows: Vec::new(),
             truncated: false,
+            warnings: Warnings::default(),
         };
-        'starts: loop {
-            if matches!(collector, RowCollector::All)
-                && adjacency.is_none()
-                && self.order.is_empty()
-                && result.rows.len() == limit
-            {
-                break;
-            }
-            let Some(row) = start_nodes.next()? else {
-                break;
-            };
-            budget.step()?;
-            let start = Node::read(row, 0)?;
-            if !self.matches_node(start_index, &start) {
-                continue;
-            }
-            let Some(adjacency) = &mut adjacency else {
-                if !self.collect_row(
-                    &mut result,
-                    &mut collector,
-                    &[&start],
-                    &[],
-                    budget,
-                )? {
-                    break;
+        let mut projection_done = false;
+        let mut collect =
+            |result: &mut ResultRows,
+             collector: &mut RowCollector,
+             nodes: &[Option<&Node>],
+             edges: &[Option<&Edge>],
+             budget: &mut ExecutionBudget<'_>| {
+                if projection_done
+                    || self.collect_row(
+                        result, collector, nodes, edges, &context, budget,
+                    )?
+                {
+                    return Ok::<bool, ExecutionError>(true);
                 }
-                continue;
+                projection_done = scan_for_regex;
+                Ok(projection_done)
             };
-            let mut hop = self.hops[0];
-            hop.inbound ^= reversed;
-            for (next, edge) in adjacency.neighbors(start.id, hop, budget)? {
+        let scans = labels.iter().copied().map(Some);
+        'starts: for label in
+            labels.is_empty().then_some(None).into_iter().chain(scans)
+        {
+            let mut start_nodes = if let Some(label) = label {
+                statement.query(params![project, label])?
+            } else {
+                statement.query([project])?
+            };
+            loop {
+                if !scan_for_regex
+                    && matches!(collector, RowCollector::All)
+                    && walk.is_none()
+                    && adjacency.is_none()
+                    && self.limit.is_some()
+                    && self.can_limit_during_scan()
+                    && result.rows.len() == limit
+                {
+                    break 'starts;
+                }
+                let Some(row) = start_nodes.next()? else {
+                    break;
+                };
                 budget.step()?;
-                if !self.matches_node(second_index, &next) {
+                let start = Node::read(row, 0)?;
+                if !self.matches_node(start_index, &start, &context) {
                     continue;
                 }
-                if let Some(&hop) = self.hops.get(1) {
-                    for (last, last_edge) in
-                        adjacency.neighbors(next.id, hop, budget)?
-                    {
-                        budget.step()?;
-                        if !self.matches_node(2, &last) {
-                            continue;
+                let mut seed = Bindings::default();
+                let seed_slot = self
+                    .paths
+                    .as_ref()
+                    .map_or(start_index, |plan| plan.first_slot(start_index));
+                seed.nodes[seed_slot] = Some(&start);
+                if !self.matches_where(&seed, &context) {
+                    continue;
+                }
+                if let Some(walk) = &mut walk {
+                    walk.expand_seed(
+                        self,
+                        &seed,
+                        reversed,
+                        budget,
+                        &mut |path, budget| {
+                            collect(
+                                &mut result,
+                                &mut collector,
+                                &path.nodes,
+                                &path.edges,
+                                budget,
+                            )?;
+                            Ok(())
+                        },
+                    )?;
+                    continue;
+                }
+                let Some(adjacency) = &mut adjacency else {
+                    if !collect(
+                        &mut result,
+                        &mut collector,
+                        &[Some(&start)],
+                        &[],
+                        budget,
+                    )? {
+                        break 'starts;
+                    }
+                    continue;
+                };
+                let hop = &self.hops[0];
+                let direction = if reversed {
+                    hop.direction.reversed()
+                } else {
+                    hop.direction
+                };
+                for (next, edge) in
+                    adjacency.neighbors(start.id, hop, direction, budget)?
+                {
+                    budget.step()?;
+                    if !self.matches_node(second_index, &next, &context) {
+                        continue;
+                    }
+                    let mut path = Bindings {
+                        nodes: seed.nodes,
+                        ..Bindings::default()
+                    };
+                    path.nodes[second_index] = Some(&next);
+                    path.edges[0] = Some(&edge);
+                    if !self.matches_where(&path, &context) {
+                        continue;
+                    }
+                    if let Some(hop) = self.hops.get(1) {
+                        for (last, last_edge) in adjacency.neighbors(
+                            next.id,
+                            hop,
+                            hop.direction,
+                            budget,
+                        )? {
+                            budget.step()?;
+                            // The native parser uses one generated binding for
+                            // each anonymous endpoint after the start node.
+                            if (!self.nodes[1].named
+                                && !self.nodes[2].named
+                                && next.id != last.id)
+                                || !self.matches_node(2, &last, &context)
+                            {
+                                continue;
+                            }
+                            let mut path = path;
+                            path.nodes[2] = Some(&last);
+                            path.edges[1] = Some(&last_edge);
+                            if !self.matches_where(&path, &context) {
+                                continue;
+                            }
+                            if !collect(
+                                &mut result,
+                                &mut collector,
+                                &path.nodes,
+                                &path.edges,
+                                budget,
+                            )? {
+                                break 'starts;
+                            }
                         }
-                        if !self.collect_row(
+                    } else {
+                        if !collect(
                             &mut result,
                             &mut collector,
-                            &[&start, &next, &last],
-                            &[&edge, &last_edge],
+                            &path.nodes,
+                            &path.edges,
                             budget,
                         )? {
                             break 'starts;
                         }
                     }
-                } else {
-                    let nodes = if reversed {
-                        [&next, &start]
-                    } else {
-                        [&start, &next]
-                    };
-                    if !self.collect_row(
-                        &mut result,
-                        &mut collector,
-                        &nodes,
-                        &[&edge],
-                        budget,
-                    )? {
-                        break 'starts;
-                    }
                 }
             }
         }
         budget.check()?;
+        if let Some(walk) = walk {
+            walk.finish(&mut result);
+        }
         match collector {
+            RowCollector::With(rows) => {
+                return self
+                    .with
+                    .as_ref()
+                    .unwrap()
+                    .finish(self, rows, result, &context, budget);
+            }
             RowCollector::Count(counts) => {
                 result.rows =
                     counts.rows(result.columns.len(), limit, budget)?;
-                if self.order.is_empty() {
-                    result.rows.truncate(limit);
-                }
             }
-            RowCollector::Distinct(distinct) => {
-                drop(distinct);
-                if limit == ENGINE_LIMIT && result.rows.len() == ENGINE_LIMIT {
-                    return Err(ExecutionError::RowCeiling);
-                }
+            RowCollector::Aggregate(groups) => {
+                groups.emit(self, &mut result, budget)?
             }
-            RowCollector::All => {}
+            RowCollector::All | RowCollector::Distinct(_) => {}
+        }
+        result.warnings.regex_refused |= context.regex_refused.get();
+        self.finish_rows(result, budget)
+    }
+
+    fn can_limit_during_scan(&self) -> bool {
+        !self.ordered && self.skip == 0
+    }
+
+    fn finish_rows(
+        &self,
+        mut result: ResultRows,
+        budget: &mut ExecutionBudget<'_>,
+    ) -> Result<ResultRows, ExecutionError> {
+        let limit = self.limit.unwrap_or(ENGINE_LIMIT);
+        if self.limit.is_none()
+            && result.rows.len().saturating_sub(self.skip) > limit
+        {
+            result.truncated = true;
         }
         if !self.order.is_empty() {
-            order_rows(&mut result.rows, &self.order, limit, budget)?;
+            order_rows(
+                &mut result.rows,
+                &self.order,
+                self.skip.saturating_add(limit),
+                budget,
+            )?;
         }
+        result.rows.drain(..self.skip.min(result.rows.len()));
+        result.rows.truncate(limit);
+        budget.check()?;
         Ok(result)
     }
 
     fn count_rows(&self, ordered_group_limit: usize) -> Option<CountRows> {
+        if self.skip != 0 || self.distinct {
+            return None;
+        }
+        let fast_count = |expression: &ProjectionExpression<'_>| {
+            matches!(expression, ProjectionExpression::Count(None))
+                || (self.paths.is_none()
+                    && matches!(expression, ProjectionExpression::Count(_)))
+        };
+        let mut fields = 0;
+        for column in &self.projections {
+            if !column.expression.is_aggregate() {
+                fields += 1;
+            } else if !fast_count(&column.expression) {
+                return None;
+            }
+        }
+        if fields > 1 {
+            return None;
+        }
         self.projections
             .iter()
-            .any(|column| {
-                matches!(column.expression, ProjectionExpression::Count)
-            })
+            .any(|column| fast_count(&column.expression))
             .then(|| {
-                if let Some(column) =
-                    self.projections.iter().position(|column| {
-                        !matches!(column.expression, ProjectionExpression::Count)
-                    })
+                if let Some(column) = self
+                    .projections
+                    .iter()
+                    .position(|column| !fast_count(&column.expression))
                 {
                     let limit = self.limit.unwrap_or(ENGINE_LIMIT);
                     // A positive ordered limit below the engine ceiling
@@ -1154,16 +1975,35 @@ impl Query<'_> {
             })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn collect_row(
         &self,
         result: &mut ResultRows,
         collector: &mut RowCollector,
-        nodes: &[&Node],
-        edges: &[&Edge],
+        nodes: &[Option<&Node>],
+        edges: &[Option<&Edge>],
+        context: &ExpressionContext<'_>,
         budget: &ExecutionBudget<'_>,
     ) -> Result<bool, ExecutionError> {
         let limit = self.limit.unwrap_or(ENGINE_LIMIT);
         match collector {
+            RowCollector::With(rows) => {
+                self.with
+                    .as_ref()
+                    .unwrap()
+                    .feed(rows, nodes, edges, context);
+                return Ok(true);
+            }
+            RowCollector::Aggregate(groups) => {
+                groups.feed(
+                    &self.projections,
+                    nodes,
+                    edges,
+                    self.paths.is_some(),
+                    context,
+                );
+                return Ok(true);
+            }
             RowCollector::Count(CountRows::Total(count)) => {
                 *count += 1;
                 return Ok(true);
@@ -1175,7 +2015,7 @@ impl Query<'_> {
                 }
                 let key = self.projections[counts.column]
                     .expression
-                    .field_value(nodes, edges);
+                    .field_value(nodes, edges, context);
                 if !counts.record(&key) {
                     budget.check()?;
                     return Err(ExecutionError::Unsupported);
@@ -1186,13 +2026,17 @@ impl Query<'_> {
                 // Native scans and checks the budget even after it stops
                 // projecting. A later read can still fail this request.
                 if !distinct.done && distinct.cap != 0 {
-                    distinct.admit(self.project_row(nodes, edges), result);
+                    distinct
+                        .admit(self.project_row(nodes, edges, context), result);
                 }
                 return Ok(true);
             }
             RowCollector::All => {}
         }
-        if self.order.is_empty() && result.rows.len() == limit {
+        if self.limit.is_some()
+            && self.can_limit_during_scan()
+            && result.rows.len() == limit
+        {
             return Ok(false);
         }
         if result.rows.len() == ENGINE_LIMIT {
@@ -1201,69 +2045,89 @@ impl Query<'_> {
             result.truncated = true;
             return Ok(false);
         }
-        result.rows.push(self.project_row(nodes, edges));
-        if result.rows.len() == ENGINE_LIMIT && limit == ENGINE_LIMIT {
-            budget.check()?;
-            return Err(ExecutionError::RowCeiling);
-        }
+        result.rows.push(self.project_row(nodes, edges, context));
         Ok(true)
     }
 
-    fn project_row(&self, nodes: &[&Node], edges: &[&Edge]) -> Vec<Vec<u8>> {
+    fn project_row(
+        &self,
+        nodes: &[Option<&Node>],
+        edges: &[Option<&Edge>],
+        context: &ExpressionContext<'_>,
+    ) -> Vec<Vec<u8>> {
         self.projections
             .iter()
             .map(|column| {
-                column.expression.field_value(nodes, edges).into_owned()
+                column
+                    .expression
+                    .field_value(nodes, edges, context)
+                    .into_owned()
             })
             .collect()
     }
 
     fn selectivity(&self, index: usize) -> u8 {
         let node = &self.nodes[index];
-        node.inline
+        let inline = node
+            .inline
             .iter()
-            .map(|(name, _)| *name)
-            .chain(
-                self.filters
-                    .iter()
-                    .filter(|filter| {
-                        filter.node == index && filter.is_seed_equality()
-                    })
-                    .map(|filter| filter.property),
-            )
-            .map(|name| {
-                if matches!(name, "name" | "qualified_name") {
-                    3
-                } else {
-                    2
-                }
-            })
+            .map(|(name, _)| property_selectivity(name))
             .max()
-            .unwrap_or(u8::from(node.label.is_some()))
+            .unwrap_or(0);
+        let filter = self.filter.as_ref().map_or(0, |expr| {
+            let slot = self
+                .paths
+                .as_ref()
+                .map_or(index, |plan| plan.first_slot(index));
+            expr.selectivity(slot)
+        });
+        inline.max(filter).max(u8::from(!node.labels.is_empty()))
     }
 
-    fn matches_node(&self, index: usize, node: &Node) -> bool {
-        let pattern = &self.nodes[index];
-        if pattern
-            .label
-            .is_some_and(|label| label.as_bytes() != node.label)
-            || !pattern.inline.iter().all(|&(name, expected)| {
-                node.property_bytes(name).as_ref() == expected.as_bytes()
+    fn matches_node(
+        &self,
+        index: usize,
+        node: &Node,
+        context: &ExpressionContext<'_>,
+    ) -> bool {
+        self.nodes[index].matches(node, context)
+    }
+
+    fn matches_where(
+        &self,
+        bindings: &Bindings<'_>,
+        context: &ExpressionContext<'_>,
+    ) -> bool {
+        self.filter
+            .as_ref()
+            .and_then(|expr| expr.evaluate(bindings, context))
+            != Some(false)
+    }
+}
+
+impl NodePattern<'_> {
+    fn matches(&self, node: &Node, context: &ExpressionContext<'_>) -> bool {
+        (self.labels.is_empty()
+            || self
+                .labels
+                .iter()
+                .any(|label| label.as_bytes() == node.label))
+            && self.inline.iter().all(|(name, expected)| {
+                let actual = node.property_bytes(name, context);
+                if looks_like_regex(expected) {
+                    context.regex_matches(&actual, expected, true)
+                } else {
+                    actual == *expected
+                }
             })
-        {
-            return false;
-        }
-        // The classifier accepts single-binding predicates. Evaluate each
-        // when its node is bound so rejected nodes never expand adjacency.
-        for predicate in
-            self.filters.iter().filter(|filter| filter.node == index)
-        {
-            let matches = predicate.matches(node);
-            if matches == self.any_filter {
-                return matches;
-            }
-        }
-        !self.any_filter
+    }
+}
+
+fn property_selectivity(name: &str) -> u8 {
+    if matches!(name, "name" | "qualified_name") {
+        3
+    } else {
+        2
     }
 }
 
@@ -1359,29 +2223,43 @@ fn native_sort_integer(cell: &[u8]) -> i32 {
 }
 
 struct Edge {
+    id: i64,
     kind: Vec<u8>,
     properties: Vec<u8>,
 }
 
+impl Edge {
+    fn property_bytes(&self, property: Option<&str>) -> Cow<'_, [u8]> {
+        Cow::Borrowed(match property {
+            Some("type") => &self.kind,
+            Some(name) => json_property_bytes(&self.properties, name),
+            None => b"",
+        })
+    }
+}
+
 struct Adjacency<'a> {
-    incoming: Statement<'a>,
-    outgoing: Statement<'a>,
+    untyped: [Statement<'a>; 2],
+    typed: [Statement<'a>; 2],
     node: Statement<'a>,
 }
 
 impl<'a> Adjacency<'a> {
-    fn new(connection: &'a Connection, typed: bool) -> rusqlite::Result<Self> {
+    fn new(connection: &'a Connection) -> rusqlite::Result<Self> {
         // Match native prepared edge lookups, then fetch endpoints by id.
         // A join can change the SQLite query plan and therefore the row order.
-        // Untyped traversal is limited to a single hop, so the SQL is fixed
-        // for all hops in a query.
         let edges = "SELECT id, project, source_id, target_id, type, properties FROM edges";
-        let filter = if typed { " AND type = ?2" } else { "" };
+        let scans = |filter| {
+            Ok::<_, rusqlite::Error>([
+                connection
+                    .prepare(&format!("{edges} WHERE source_id = ?1{filter}"))?,
+                connection
+                    .prepare(&format!("{edges} WHERE target_id = ?1{filter}"))?,
+            ])
+        };
         Ok(Self {
-            incoming: connection
-                .prepare(&format!("{edges} WHERE target_id = ?1{filter}"))?,
-            outgoing: connection
-                .prepare(&format!("{edges} WHERE source_id = ?1{filter}"))?,
+            untyped: scans("")?,
+            typed: scans(" AND type = ?2")?,
             node: connection.prepare(&format!(
                 "SELECT {NODE_COLUMNS} FROM nodes n WHERE id = ?1"
             ))?,
@@ -1391,37 +2269,64 @@ impl<'a> Adjacency<'a> {
     fn neighbors(
         &mut self,
         id: i64,
-        hop: Hop<'_>,
+        hop: &Hop<'_>,
+        direction: Direction,
         budget: &mut ExecutionBudget<'_>,
     ) -> Result<Vec<(Node, Edge)>, ExecutionError> {
-        let (statement, neighbor_column) = if hop.inbound {
-            (&mut self.incoming, 2)
-        } else {
-            (&mut self.outgoing, 3)
-        };
-        let mut edges = if let Some(kind) = hop.kind {
-            statement.query(params![id, kind])?
-        } else {
-            statement.query([id])?
-        };
         let mut neighbors = Vec::new();
-        while let Some(edge) = edges.next()? {
-            budget.step()?;
-            let neighbor: i64 = edge.get(neighbor_column)?;
-            let mut nodes = self.node.query([neighbor])?;
-            if let Some(row) = nodes.next()? {
-                neighbors.push((
-                    Node::read(row, 0)?,
-                    Edge {
-                        kind: read_text_bytes(edge, 4)?.unwrap_or_default(),
-                        properties: read_text_bytes(edge, 5)?
-                            .unwrap_or_else(|| b"{}".to_vec()),
-                    },
-                ));
+        for &inbound in direction.inbound_scans() {
+            let index = usize::from(inbound);
+            let neighbor_column = if inbound { 2 } else { 3 };
+            if hop.kinds.is_empty() {
+                let mut rows = self.untyped[index].query([id])?;
+                read_neighbors(
+                    &mut rows,
+                    &mut self.node,
+                    neighbor_column,
+                    &mut neighbors,
+                    budget,
+                )?;
+            } else {
+                for kind in &hop.kinds {
+                    let mut rows = self.typed[index].query(params![id, kind])?;
+                    read_neighbors(
+                        &mut rows,
+                        &mut self.node,
+                        neighbor_column,
+                        &mut neighbors,
+                        budget,
+                    )?;
+                }
             }
         }
         Ok(neighbors)
     }
+}
+
+fn read_neighbors(
+    rows: &mut rusqlite::Rows<'_>,
+    node: &mut Statement<'_>,
+    neighbor_column: usize,
+    neighbors: &mut Vec<(Node, Edge)>,
+    budget: &mut ExecutionBudget<'_>,
+) -> Result<(), ExecutionError> {
+    while let Some(edge) = rows.next()? {
+        budget.step()?;
+        let neighbor: i64 = edge.get(neighbor_column)?;
+        let mut nodes = node.query([neighbor])?;
+        if let Some(row) = nodes.next()? {
+            neighbors.push((
+                Node::read(row, 0)?,
+                Edge {
+                    id: edge.get(0)?,
+                    kind: read_text_bytes(edge, 4)?.unwrap_or_default(),
+                    properties: read_text_bytes(edge, 5)?
+                        .unwrap_or_else(|| b"{}".to_vec()),
+                },
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1439,6 +2344,7 @@ mod distinct_tests {
             columns: vec!["n.name".to_owned()],
             rows: Vec::new(),
             truncated: false,
+            warnings: Warnings::default(),
         };
         for name in [b"a", b"b", b"a", b"b"] {
             distinct.admit(vec![name.to_vec()], &mut result);
@@ -1464,7 +2370,7 @@ mod count_tests {
         let query =
             classify("MATCH (n) RETURN n.name, count(*) LIMIT 1").unwrap();
         let Some(CountRows::Grouped(mut counts)) =
-            query.count_rows(ORDERED_COUNT_GROUP_LIMIT)
+            query.first_branch().count_rows(ORDERED_COUNT_GROUP_LIMIT)
         else {
             panic!("expected grouped count");
         };
@@ -1487,7 +2393,7 @@ mod count_tests {
         )
         .unwrap();
         let Some(CountRows::Grouped(mut counts)) =
-            query.count_rows(ORDERED_COUNT_GROUP_LIMIT)
+            query.first_branch().count_rows(ORDERED_COUNT_GROUP_LIMIT)
         else {
             panic!("expected grouped count");
         };
