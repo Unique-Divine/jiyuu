@@ -22,6 +22,7 @@ const UNRELATED: &str = "unrelated";
 struct Fixture {
     root: PathBuf,
     cli_repair_opt_in: bool,
+    recovery_impl: Option<&'static str>,
 }
 
 impl Fixture {
@@ -37,6 +38,7 @@ impl Fixture {
         let fixture = Self {
             root,
             cli_repair_opt_in: false,
+            recovery_impl: None,
         };
         for dir in ["cache", "rt"] {
             builder
@@ -110,6 +112,9 @@ impl Fixture {
 
     fn start_daemon(&self, selector: Option<&str>, watch_project: Option<&str>) {
         let mut command = self.command();
+        if let Some(implementation) = self.recovery_impl {
+            command.env("MORI_IMPL_REPAIR_RECOVERY", implementation);
+        }
         if let Some(selector) = selector {
             command.env(selector, "1");
         }
@@ -777,7 +782,17 @@ fn startup_repairs_stale_and_reverse_pending_graphs_without_a_source_worker() {
 
 #[test]
 fn startup_retry_repairs_a_restored_provider_without_a_publication() {
-    let fixture = Fixture::new();
+    assert_startup_retry("rust");
+}
+
+#[test]
+fn native_startup_retry_repairs_a_restored_provider_without_a_publication() {
+    assert_startup_retry("c");
+}
+
+fn assert_startup_retry(implementation: &'static str) {
+    let mut fixture = Fixture::new();
+    fixture.recovery_impl = Some(implementation);
     fixture.start_daemon(None, None);
     fixture.client(CLIENT, &["first", "second"]);
     fixture.write(FIRST, "schema.graphqls", "type Query { first: String }\n");
@@ -800,6 +815,10 @@ fn startup_retry_repairs_a_restored_provider_without_a_publication() {
     fs::rename(fixture.db_path(SECOND), &offline).unwrap();
 
     fixture.start_daemon(Some("MORI_PROVIDER_REPAIR"), None);
+    fixture.wait_for_log(&[
+        "cross_repo.recovery_driver",
+        &format!("implementation={implementation}"),
+    ]);
     fixture.wait_for_log(&["cross_repo.recovery_scan_complete", "pending=1"]);
     assert_eq!(fixture.cross_status(CLIENT)["status"], "stale");
     assert_eq!(fixture.forward_targets(CLIENT), initial_links);

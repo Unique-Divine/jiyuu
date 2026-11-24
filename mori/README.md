@@ -468,6 +468,14 @@ checks through the publication lease. C owns the stage, file operations,
 and the destination prepare, rename, and rollback transaction. C remains
 the default.
 
+### Provider Repair Recovery
+
+On a permanent daemon with provider repair enabled, set
+`MORI_IMPL_REPAIR_RECOVERY=rust` at startup to opt into the Rust recovery
+scheduler. The daemon log event `cross_repo.recovery_driver` identifies
+the backend. Both schedulers use the same saved graph state, mutation
+lease, and native repair operations. The C scheduler remains the default.
+
 ### Sharing a Graph With a Team
 
 `index_repository` with `persistence: true` writes

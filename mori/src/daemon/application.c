@@ -2383,50 +2383,149 @@ static void application_recover_repair_batch(cbm_daemon_application_t *applicati
     }
 }
 
-static void *application_repair_recovery_thread(void *opaque) {
-    cbm_daemon_application_t *application = opaque;
-    yyjson_mut_doc *projects = NULL;
+typedef struct {
+    cbm_daemon_application_t *application;
+    yyjson_mut_doc *projects;
+} application_recovery_t;
+
+enum {
+    APPLICATION_RECOVERY_STOPPING = 1 << 0,
+    APPLICATION_RECOVERY_REQUESTED = 1 << 1,
+    APPLICATION_RECOVERY_SETTLED = 1 << 2,
+};
+
+static bool application_recovery_stopping(const application_recovery_t *run) {
+    return run->application->stopping;
+}
+
+static bool application_recovery_round(application_recovery_t *run, bool full_scan) {
+    if (full_scan) {
+        yyjson_mut_doc_free(run->projects);
+        run->projects = application_recovery_projects(run->application);
+    }
+    yyjson_mut_val *projects = yyjson_mut_doc_get_root(run->projects);
+    application_recover_repair_batch(run->application, projects);
+    if (full_scan && run->projects && !run->application->stopping) {
+        char pending[CBM_SZ_32];
+        snprintf(pending, sizeof(pending), "%zu", yyjson_mut_arr_size(projects));
+        cbm_log_info("cross_repo.recovery_scan_complete", "pending", pending);
+    }
+    return run->projects != NULL;
+}
+
+static uint64_t application_recovery_retry_deadline(void) {
+    return application_deadline_after(APPLICATION_REPAIR_RECOVERY_RETRY_MS);
+}
+
+/* Keep the mutex held until the driver commits its decision. If it is done,
+ * the next request must see a completed thread and start a new one. */
+static uint8_t application_recovery_begin_check(application_recovery_t *run) {
+    cbm_daemon_application_t *application = run->application;
+    cbm_mutex_lock(&application->mutex);
+    uint8_t flags = 0;
+    if (application->stopping) {
+        flags |= APPLICATION_RECOVERY_STOPPING;
+    }
+    if (application->repair_recovery_requested) {
+        flags |= APPLICATION_RECOVERY_REQUESTED;
+    }
+    if (run->projects && yyjson_mut_arr_size(yyjson_mut_doc_get_root(run->projects)) == 0) {
+        flags |= APPLICATION_RECOVERY_SETTLED;
+    }
+    application->repair_recovery_requested = false;
+    return flags;
+}
+
+static void application_recovery_free_projects(application_recovery_t *run) {
+    yyjson_mut_doc_free(run->projects);
+    run->projects = NULL;
+    cbm_mem_class_flush_thread();
+}
+
+static void application_recovery_end_check(application_recovery_t *run, bool done) {
+    if (done) {
+        application_recovery_free_projects(run);
+        run->application->repair_recovery_done = true;
+    }
+    cbm_mutex_unlock(&run->application->mutex);
+}
+
+static bool application_recovery_wait_tick(uint64_t retry_at) {
+    if (cbm_now_ms() >= retry_at) {
+        return true;
+    }
+    cbm_usleep(APPLICATION_REPAIR_LEASE_RETRY_US);
+    return false;
+}
+
+static void application_recovery_finish(application_recovery_t *run) {
+    application_recovery_free_projects(run);
+    cbm_mutex_lock(&run->application->mutex);
+    run->application->repair_recovery_done = true;
+    cbm_mutex_unlock(&run->application->mutex);
+}
+
+/* Keep in sync with RecoveryOps in the Rust binary. */
+typedef struct {
+    bool (*stopping)(const application_recovery_t *run);
+    bool (*run_batch)(application_recovery_t *run, bool full_scan);
+    uint64_t (*retry_deadline)(void);
+    uint8_t (*begin_check)(application_recovery_t *run);
+    void (*end_check)(application_recovery_t *run, bool done);
+    bool (*wait_tick)(uint64_t retry_at);
+    void (*finish)(application_recovery_t *run);
+} application_recovery_ops_t;
+
+typedef void (*application_recovery_driver_t)(application_recovery_t *run,
+                                              const application_recovery_ops_t *ops);
+
+static application_recovery_driver_t application_external_recovery;
+
+void cbm_daemon_application_set_recovery_driver(application_recovery_driver_t driver);
+void cbm_daemon_application_set_recovery_driver(application_recovery_driver_t driver) {
+    application_external_recovery = driver;
+}
+
+static void application_run_recovery_c(application_recovery_t *run) {
     bool rescan = true;
-    while (!application->stopping) {
-        bool full_scan = rescan || !projects;
-        if (full_scan) {
-            yyjson_mut_doc_free(projects);
-            projects = application_recovery_projects(application);
-        }
-        application_recover_repair_batch(application, yyjson_mut_doc_get_root(projects));
-        if (full_scan && projects && !application->stopping) {
-            char pending[CBM_SZ_32];
-            snprintf(pending, sizeof(pending), "%zu",
-                     yyjson_mut_arr_size(yyjson_mut_doc_get_root(projects)));
-            cbm_log_info("cross_repo.recovery_scan_complete", "pending", pending);
-        }
-        uint64_t retry_at = application_deadline_after(APPLICATION_REPAIR_RECOVERY_RETRY_MS);
+    while (!application_recovery_stopping(run)) {
+        application_recovery_round(run, rescan || !run->projects);
+        uint64_t retry_at = application_recovery_retry_deadline();
         for (;;) {
-            cbm_mutex_lock(&application->mutex);
-            rescan = application->repair_recovery_requested;
-            application->repair_recovery_requested = false;
-            bool done = application->stopping ||
-                        (!rescan && projects &&
-                         yyjson_mut_arr_size(yyjson_mut_doc_get_root(projects)) == 0);
+            uint8_t flags = application_recovery_begin_check(run);
+            rescan = (flags & APPLICATION_RECOVERY_REQUESTED) != 0;
+            bool done = (flags & APPLICATION_RECOVERY_STOPPING) != 0 ||
+                        (!rescan && (flags & APPLICATION_RECOVERY_SETTLED) != 0);
+            application_recovery_end_check(run, done);
             if (done) {
-                yyjson_mut_doc_free(projects);
-                cbm_mem_class_flush_thread();
-                application->repair_recovery_done = true;
-                cbm_mutex_unlock(&application->mutex);
-                return NULL;
+                return;
             }
-            cbm_mutex_unlock(&application->mutex);
-            if (rescan || cbm_now_ms() >= retry_at) {
+            if (rescan || application_recovery_wait_tick(retry_at)) {
                 break;
             }
-            cbm_usleep(APPLICATION_REPAIR_LEASE_RETRY_US);
         }
     }
-    yyjson_mut_doc_free(projects);
-    cbm_mem_class_flush_thread();
-    cbm_mutex_lock(&application->mutex);
-    application->repair_recovery_done = true;
-    cbm_mutex_unlock(&application->mutex);
+    application_recovery_finish(run);
+}
+
+static void *application_repair_recovery_thread(void *opaque) {
+    application_recovery_t run = {.application = opaque};
+    static const application_recovery_ops_t ops = {
+        .stopping = application_recovery_stopping,
+        .run_batch = application_recovery_round,
+        .retry_deadline = application_recovery_retry_deadline,
+        .begin_check = application_recovery_begin_check,
+        .end_check = application_recovery_end_check,
+        .wait_tick = application_recovery_wait_tick,
+        .finish = application_recovery_finish,
+    };
+    cbm_log_info("cross_repo.recovery_driver", "implementation",
+                 application_external_recovery ? "rust" : "c");
+    if (application_external_recovery) {
+        application_external_recovery(&run, &ops);
+    } else {
+        application_run_recovery_c(&run);
+    }
     return NULL;
 }
 
