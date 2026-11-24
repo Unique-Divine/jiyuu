@@ -71,6 +71,9 @@ mod query_cli;
 mod cli_output;
 
 #[cfg(any(feature = "c-backend", test))]
+mod config_cli;
+
+#[cfg(any(feature = "c-backend", test))]
 mod initialize;
 
 #[cfg(any(feature = "c-backend", test))]

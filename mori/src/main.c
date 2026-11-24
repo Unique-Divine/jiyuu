@@ -1380,7 +1380,11 @@ static int handle_subcommand(int argc, char **argv, cbm_project_lock_manager_t *
     case MAIN_SUBCOMMAND_UPDATE:
         return cbm_cmd_update(argc, argv);
     case MAIN_SUBCOMMAND_CONFIG:
+#ifdef CBM_AS_LIBRARY
+        return cbm_rust_config_command(argc, argv);
+#else
         return cbm_cmd_config(argc, argv);
+#endif
     case MAIN_SUBCOMMAND_NONE:
         return CBM_NOT_FOUND;
     }

@@ -8087,13 +8087,15 @@ bool cbm_config_load_index_policy(cbm_config_t *cfg, cbm_index_resource_policy_t
  * key, at exit 0) "got" an empty string, indistinguishable from a real value
  * (#1522). The defaults here mirror the runtime readers' fallbacks
  * (cbm_config_get_bool/int call sites); keep them in sync. */
+#ifndef CBM_AS_LIBRARY
 typedef struct {
     const char *key;
     const char *default_value;
     const char *help;
-} config_key_def_t;
+} cbm_config_cli_key_t;
+#endif
 
-static const config_key_def_t CONFIG_KEYS[] = {
+static const cbm_config_cli_key_t CONFIG_KEYS[] = {
     {CBM_CONFIG_AUTO_INDEX, "false", "Enable auto-indexing on MCP session start"},
     {CBM_CONFIG_AUTO_INDEX_LIMIT, "50000", "Max files for auto-indexing new projects"},
     {CBM_CONFIG_AUTO_WATCH, "true", "Register background git watcher on session connect"},
@@ -8203,7 +8205,47 @@ static int config_ui_write(const char *key, const char *value) {
     return CLI_OK;
 }
 
-static const config_key_def_t *config_key_lookup(const char *key) {
+#ifdef CBM_AS_LIBRARY
+const cbm_config_cli_key_t *cbm_config_cli_keys(size_t *count) {
+    *count = sizeof(CONFIG_KEYS) / sizeof(CONFIG_KEYS[0]);
+    return CONFIG_KEYS;
+}
+
+cbm_config_t *cbm_config_cli_open(void) {
+    char cache_dir[CLI_BUF_1K];
+    snprintf(cache_dir, sizeof(cache_dir), "%s", cbm_resolve_cache_dir());
+    return cbm_config_open(cache_dir);
+}
+
+const char *cbm_config_cli_read(cbm_config_t *cfg, const cbm_config_cli_key_t *key,
+                                char *ui_value, size_t ui_value_size) {
+    if (config_key_is_ui(key->key)) {
+        config_ui_read(key->key, ui_value, ui_value_size);
+        return ui_value;
+    }
+    return cbm_config_get(cfg, key->key, key->default_value);
+}
+
+int cbm_config_cli_write(cbm_config_t *cfg, const cbm_config_cli_key_t *key, const char *value) {
+    if (config_key_is_ui(key->key)) {
+        return config_ui_write(key->key, value ? value : key->default_value) == CLI_OK ? 1 : -1;
+    }
+    if (!value) {
+        /* Preserve the standalone command's reset behavior. */
+        cbm_config_delete(cfg, key->key);
+        return 0;
+    }
+    if (config_key_is_index_policy(key->key)) {
+        return config_index_policy_write(cfg, key->key, value) == 0 ? 0 : -1;
+    }
+    if (cbm_config_set(cfg, key->key, value) != 0) {
+        (void)fprintf(stderr, "error: failed to set %s\n", key->key);
+        return -1;
+    }
+    return 0;
+}
+#else
+static const cbm_config_cli_key_t *config_key_lookup(const char *key) {
     for (size_t i = 0; key && i < sizeof(CONFIG_KEYS) / sizeof(CONFIG_KEYS[0]); i++) {
         if (strcmp(CONFIG_KEYS[i].key, key) == 0) {
             return &CONFIG_KEYS[i];
@@ -8273,7 +8315,7 @@ int cbm_cmd_config(int argc, char **argv) {
             (void)fprintf(stderr, "Usage: config get <key>\n");
             rc = CLI_TRUE;
         } else {
-            const config_key_def_t *def = config_key_lookup(argv[CLI_SKIP_ONE]);
+            const cbm_config_cli_key_t *def = config_key_lookup(argv[CLI_SKIP_ONE]);
             if (!def) {
                 config_print_unknown_key(argv[CLI_SKIP_ONE]);
                 rc = CLI_TRUE;
@@ -8326,7 +8368,7 @@ int cbm_cmd_config(int argc, char **argv) {
             config_print_unknown_key(argv[CLI_SKIP_ONE]);
             rc = CLI_TRUE;
         } else if (config_key_is_ui(argv[CLI_SKIP_ONE])) {
-            const config_key_def_t *def = config_key_lookup(argv[CLI_SKIP_ONE]);
+            const cbm_config_cli_key_t *def = config_key_lookup(argv[CLI_SKIP_ONE]);
             if (config_ui_write(argv[CLI_SKIP_ONE], def->default_value) == CLI_OK) {
                 printf("%s reset to default\n", argv[CLI_SKIP_ONE]);
             } else {
@@ -8344,6 +8386,7 @@ int cbm_cmd_config(int argc, char **argv) {
     cbm_config_close(cfg);
     return rc;
 }
+#endif
 
 /* ── Interactive prompt ───────────────────────────────────────── */
 
