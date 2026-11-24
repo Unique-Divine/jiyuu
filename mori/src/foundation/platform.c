@@ -9,12 +9,19 @@
 #include "foundation/constants.h"
 #include "foundation/mem_core.h"
 #include "foundation/platform_internal.h"
+#include "foundation/sanitized.h"
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+
+void cbm_ffi_mark_written(const void *address, size_t size) {
+    (void)address;
+    (void)size;
+    CBM_MSAN_WRITTEN(address, size);
+}
 
 #define CBM_NSEC_PER_SEC 1000000000ULL
 

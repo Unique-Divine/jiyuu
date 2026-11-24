@@ -6,6 +6,8 @@ use std::path::Path;
 use std::ptr;
 use std::slice;
 
+use crate::ffi_output;
+
 use super::codex::{self, Failure};
 use super::config_file::ConfigFile;
 use super::managed::{self, Markers};
@@ -109,7 +111,7 @@ pub unsafe extern "C" fn cbm_toml_escape_basic_string(
         return -1;
     }
     // SAFETY: the caller provides a writable output buffer.
-    unsafe { out.write(0) };
+    unsafe { ffi_output::write(out, 0) };
     // SAFETY: the caller provides a readable C string.
     let Ok(bytes) = (unsafe { Arg(input).bytes(MAX_BYTES) }) else {
         return -1;
@@ -123,6 +125,7 @@ pub unsafe extern "C" fn cbm_toml_escape_basic_string(
     } else {
         Cow::Borrowed(bytes)
     };
+    let mut written = 1;
     let result = escape_basic_with(&input, out_size, |offset, bytes| {
         // SAFETY: escaping checks the output bounds before copying. The input
         // is disjoint from the writable range or was copied above.
@@ -133,7 +136,10 @@ pub unsafe extern "C" fn cbm_toml_escape_basic_string(
                 bytes.len(),
             )
         };
+        written = written.max(offset + bytes.len());
     });
+    // SAFETY: escape_basic_with writes a contiguous prefix within out_size.
+    unsafe { ffi_output::written(out, written) };
     if result.is_ok() { 0 } else { -1 }
 }
 
@@ -413,10 +419,10 @@ pub unsafe extern "C" fn cbm_toml_reconcile_codex_hooks_detailed(
     // SAFETY: non-NULL output pointers refer to writable C integers.
     unsafe {
         if !failure.is_null() {
-            failure.write(0);
+            ffi_output::write(failure, 0);
         }
         if !pretool_written.is_null() {
-            pretool_written.write(0);
+            ffi_output::write(pretool_written, 0);
         }
     }
     // SAFETY: forwarded under the C ABI input contract.
@@ -435,14 +441,16 @@ pub unsafe extern "C" fn cbm_toml_reconcile_codex_hooks_detailed(
         Ok(written) => {
             if !pretool_written.is_null() {
                 // SAFETY: the caller supplies a writable C integer.
-                unsafe { pretool_written.write(c_int::from(written)) };
+                unsafe {
+                    ffi_output::write(pretool_written, c_int::from(written))
+                };
             }
             0
         }
         Err(reason) => {
             if !failure.is_null() {
                 // SAFETY: the caller supplies a writable C integer.
-                unsafe { failure.write(reason as c_int) };
+                unsafe { ffi_output::write(failure, reason as c_int) };
             }
             -1
         }

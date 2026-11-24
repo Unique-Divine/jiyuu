@@ -53,7 +53,7 @@ mod test_hooks {
             };
             // SAFETY: the caller registered this hook with its context, and the
             // encoded path remains valid throughout the call.
-            unsafe { hook(path.as_ptr(), context) };
+            unsafe { hook(crate::ffi_output::c_str(&path), context) };
         }
     }
 }
