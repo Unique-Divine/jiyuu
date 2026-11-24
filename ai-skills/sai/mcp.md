@@ -112,15 +112,11 @@ the one the person confirmed. The digest covers:
 
 - Every trade: the account and the intent the arguments produce.
 - `trade_open` for a market order: also the confirmed `reference_price`.
-- `trade_margin`: also the whole margin quote computed from the position. If
-  the position changed, the quote changes and the digest no longer matches.
-- `trade_partial_close`: the collateral reduction computed from the position.
-  It does not cover the position's leverage. If leverage changes after the
-  preview and the same reduction is still valid, the digest matches and the
-  trade submits. The server also reads the position twice during the live
-  call and refuses when collateral or leverage differ between those two
-  reads, which catches a change during the call, not one since the preview.
-  Preview again right before submitting when the position may have changed.
+- `trade_margin` also binds the full margin quote, including the position's
+  starting collateral and leverage.
+- `trade_partial_close` also binds the close percentage, starting collateral
+  and leverage, and quoted closed notional in field `quote.closedNotionalUsd`.
+  Show the closed notional to the person before asking for confirmation.
 
 ### Market Opens: Quote Check and Fill Bound
 

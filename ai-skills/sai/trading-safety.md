@@ -115,16 +115,18 @@ Each preview returns `previewDigest`. A `trade_*` call must send it back as
 input `preview_digest`, and a market `trade_open` must also send the
 preview's `referencePrice` as `reference_price`. The server rebuilds the
 trade and refuses with `PREVIEW_MISMATCH` or `PRICE_MOVED` when the account,
-the intent, the margin quote, or the quoted price no longer match. Nothing is
-submitted on a refusal. Show the fresh preview from the result and ask again.
+intent, position quote, or quoted price fails the confirmation check.
+Nothing is submitted on a refusal. Show the fresh preview from the result
+and ask again.
 
 `PRICE_MOVED` is the quote check from rule 3. Passing it does not cap the
 fill at the confirmed price plus the slippage.
 
-The digest of a partial close covers the computed collateral reduction, not
-the position's leverage. Preview again right before submitting if the
-position may have changed. [mcp.md](mcp.md#preview-confirm-then-trade) lists
-what each digest covers.
+The partial-close digest covers the close percentage, starting collateral
+and leverage, and the closed notional shown in field
+`quote.closedNotionalUsd`. A leverage-only change requires a new confirmation
+even when the collateral reduction is the same.
+[mcp.md](mcp.md#preview-confirm-then-trade) lists what each digest covers.
 
 ## CLI Trade Commands
 
@@ -169,8 +171,8 @@ approval still describes the trade:
   the position doubles before submit, the live command closes 100 USDC. Ask
   the person to approve the percentage of whatever the position is at submit,
   and say so in those words. If they approve a fixed amount, use MCP tools
-  `preview_partial_close` and `trade_partial_close`, whose digest binds the
-  computed reduction.
+  `preview_partial_close` and `trade_partial_close`. Show the person the
+  collateral reduction and closed notional from the preview.
 - **Margin** takes an amount, `--direction add|remove --amount USDC`, and
   computes the target leverage from the position at submit. The dry run's
   target is a quote: adding 25 USDC to 100 USDC of collateral at 5x previews
