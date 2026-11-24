@@ -541,11 +541,11 @@ PIPELINE_SRCS = \
     src/pipeline/pass_gitdiff.c \
     src/pipeline/pass_configures.c \
     src/pipeline/pass_configlink.c \
-    src/pipeline/pass_doclinks.c \
+    src/pipeline/pass_doclinks_abi.c \
     src/pipeline/doc_links.c \
     src/pipeline/doc_links_cs.c \
     src/pipeline/doc_links_md.c \
-    src/pipeline/doc_links_pdf.c \
+    src/pipeline/doc_links_pdf_abi.c \
     src/pipeline/doc_links_rst.c \
     src/pipeline/doc_links_adoc.c \
     src/pipeline/doc_links_go.c \
