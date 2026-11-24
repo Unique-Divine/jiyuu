@@ -130,5 +130,8 @@ mod python_imports;
 #[cfg(feature = "c-backend")]
 pub use python_imports::register as mori_register_python_imports;
 
-#[cfg(all(feature = "native-engine-abi", any(not(test), feature = "c-backend")))]
+#[cfg(all(
+    feature = "native-engine-abi",
+    any(not(test), feature = "c-backend")
+))]
 mod hook_augment;
