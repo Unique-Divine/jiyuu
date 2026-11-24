@@ -601,7 +601,7 @@ GIT_SRCS = src/git/git_context.c
 CLI_SRCS = src/cli/cli.c src/cli/runtime_settings.c src/cli/progress_sink.c src/cli/hook_augment.c src/cli/client_adapter.c \
 	src/cli/agent_clients.c src/cli/agent_profiles.c \
 	src/cli/config_json_like.c src/cli/config_toml_edit.c src/cli/config_yaml_edit.c \
-	src/cli/config_text_edit.c src/cli/config_edit_path.c src/cli/activation_transaction.c
+	src/cli/config_edit_path.c src/cli/activation_transaction.c
 
 # UI module (graph visualization)
 UI_SRCS = \
