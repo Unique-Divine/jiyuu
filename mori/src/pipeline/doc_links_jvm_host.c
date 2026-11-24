@@ -1,6 +1,7 @@
 /* Native objects whose representation is private to the pipeline or allocator. */
 #include "pipeline/doc_links.h"
 
+#include "discover/discover.h"
 #include "doclink.h"
 #include "foundation/arena.h"
 #include "foundation/mem_core.h"
@@ -29,6 +30,10 @@ const char *mori_jvm_doclinks_project(const cbm_pipeline_ctx_t *ctx) {
 
 int mori_jvm_doclinks_mode(const cbm_pipeline_ctx_t *ctx) {
     return ctx->mode;
+}
+
+bool mori_jvm_doclinks_should_skip_dir(const char *name, int mode) {
+    return cbm_should_skip_dir(name, (cbm_index_mode_t)mode);
 }
 
 CBMArena *mori_jvm_doclinks_arena_new(void) {
