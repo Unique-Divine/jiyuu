@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 #[cfg(test)]
 use rusqlite::OpenFlags;
+use rusqlite::types::ValueRef;
 use rusqlite::{Connection, Row, Statement, params};
 
 const ENGINE_LIMIT: usize = 100_000;
@@ -401,37 +402,34 @@ fn projection_name(name: &str, property: Option<&str>) -> String {
 #[derive(Debug)]
 struct Node {
     id: i64,
-    label: String,
-    name: String,
-    qualified_name: String,
-    file_path: String,
+    label: Vec<u8>,
+    name: Vec<u8>,
+    qualified_name: Vec<u8>,
+    file_path: Vec<u8>,
     start_line: i32,
     end_line: i32,
-    properties: String,
+    properties: Vec<u8>,
 }
 
 impl Node {
     fn read(row: &Row<'_>, offset: usize) -> rusqlite::Result<Self> {
         Ok(Self {
             id: row.get(offset)?,
-            label: row.get(offset + 1)?,
-            name: row.get(offset + 2)?,
-            qualified_name: row.get(offset + 3)?,
-            file_path: row
-                .get::<_, Option<String>>(offset + 4)?
+            label: read_text_bytes(row, offset + 1)?.unwrap_or_default(),
+            name: read_text_bytes(row, offset + 2)?.unwrap_or_default(),
+            qualified_name: read_text_bytes(row, offset + 3)?
                 .unwrap_or_default(),
+            file_path: read_text_bytes(row, offset + 4)?.unwrap_or_default(),
             start_line: row
                 .get::<_, Option<i32>>(offset + 5)?
                 .unwrap_or_default(),
             end_line: row.get::<_, Option<i32>>(offset + 6)?.unwrap_or_default(),
-            properties: row
-                .get::<_, Option<String>>(offset + 7)?
-                .unwrap_or_default(),
+            properties: read_text_bytes(row, offset + 7)?.unwrap_or_default(),
         })
     }
 
     fn property_bytes(&self, name: &str) -> Cow<'_, [u8]> {
-        let value: &str = match name {
+        let value: &[u8] = match name {
             "label" => &self.label,
             "name" => &self.name,
             "qualified_name" | "qn" => &self.qualified_name,
@@ -440,12 +438,12 @@ impl Node {
                 return self.start_line.to_string().into_bytes().into();
             }
             "end_line" => return self.end_line.to_string().into_bytes().into(),
-            _ => "",
+            _ => b"",
         };
         if !value.is_empty() {
-            return value.as_bytes().into();
+            return value.into();
         }
-        if self.properties.starts_with('{') {
+        if self.properties.starts_with(b"{") {
             json_property_bytes(&self.properties, name).into()
         } else {
             Cow::Borrowed(b"")
@@ -453,14 +451,41 @@ impl Node {
     }
 }
 
+// SQLite's TEXT affinity leaves BLOBs intact. Like sqlite3_column_text
+// followed by strdup, copy either byte representation up to the first NUL.
+fn read_text_bytes(
+    row: &Row<'_>,
+    column: usize,
+) -> rusqlite::Result<Option<Vec<u8>>> {
+    match row.get_ref(column)? {
+        ValueRef::Null => Ok(None),
+        ValueRef::Text(bytes) | ValueRef::Blob(bytes) => {
+            Ok(Some(c_string_bytes(bytes).to_vec()))
+        }
+        value => Err(rusqlite::Error::InvalidColumnType(
+            column,
+            row.as_ref().column_name(column)?.to_owned(),
+            value.data_type(),
+        )),
+    }
+}
+
 // C compares and projects the raw extraction, including when its byte cap
 // splits UTF-8. The native result sink handles serialization.
-fn json_property_bytes<'a>(json: &'a str, name: &str) -> &'a [u8] {
-    let Some((_, tail)) = json.split_once(&format!("\"{name}\":")) else {
+fn json_property_bytes<'a>(json: &'a [u8], name: &str) -> &'a [u8] {
+    let key = format!("\"{name}\":");
+    let Some(start) = json
+        .windows(key.len())
+        .position(|bytes| bytes == key.as_bytes())
+    else {
         return b"";
     };
-    let tail = tail.trim_start_matches([' ', '\t']);
-    let bytes = tail.as_bytes();
+    let tail = &json[start + key.len()..];
+    let padding = tail
+        .iter()
+        .take_while(|&&byte| matches!(byte, b' ' | b'\t'))
+        .count();
+    let bytes = &tail[padding..];
     let (quoted, open, close, start) = match bytes.first() {
         Some(b'"') => (true, 0, 0, 1),
         Some(b'{') => (false, b'{', b'}', 0),
@@ -749,7 +774,9 @@ impl Query<'_> {
 
     fn matches_node(&self, index: usize, node: &Node) -> bool {
         let pattern = &self.nodes[index];
-        if pattern.label.is_some_and(|label| label != node.label)
+        if pattern
+            .label
+            .is_some_and(|label| label.as_bytes() != node.label)
             || !pattern.inline.iter().all(|&(name, expected)| {
                 node.property_bytes(name).as_ref() == expected.as_bytes()
             })
@@ -774,17 +801,13 @@ impl Query<'_> {
         self.projections
             .iter()
             .map(|column| match (column.binding, column.property) {
-                (Binding::Node(index), None) => {
-                    nodes[index].name.as_bytes().to_vec()
-                }
+                (Binding::Node(index), None) => nodes[index].name.clone(),
                 (Binding::Node(index), Some(name)) => {
                     nodes[index].property_bytes(name).into_owned()
                 }
-                (Binding::Edge(index), None) => {
-                    edges[index].properties.as_bytes().to_vec()
-                }
+                (Binding::Edge(index), None) => edges[index].properties.clone(),
                 (Binding::Edge(index), Some("type")) => {
-                    edges[index].kind.as_bytes().to_vec()
+                    edges[index].kind.clone()
                 }
                 (Binding::Edge(index), Some(name)) => {
                     json_property_bytes(&edges[index].properties, name).to_vec()
@@ -886,8 +909,8 @@ fn native_sort_integer(cell: &[u8]) -> i32 {
 }
 
 struct Edge {
-    kind: String,
-    properties: String,
+    kind: Vec<u8>,
+    properties: Vec<u8>,
 }
 
 struct Adjacency<'a> {
@@ -935,10 +958,9 @@ impl<'a> Adjacency<'a> {
                 neighbors.push((
                     Node::read(row, 0)?,
                     Edge {
-                        kind: edge.get(4)?,
-                        properties: edge
-                            .get::<_, Option<String>>(5)?
-                            .unwrap_or_else(|| "{}".to_owned()),
+                        kind: read_text_bytes(edge, 4)?.unwrap_or_default(),
+                        properties: read_text_bytes(edge, 5)?
+                            .unwrap_or_else(|| b"{}".to_vec()),
                     },
                 ));
             }
