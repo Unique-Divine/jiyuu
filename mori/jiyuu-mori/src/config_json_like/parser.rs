@@ -446,11 +446,16 @@ fn decode(
             Some(ch) if !value || ch != '\0' => {
                 emit(ch.encode_utf8(&mut [0; 4]).as_bytes())?
             }
-            None if !value => emit(&[
-                (0xe0 | (code >> 12)) as u8,
-                (0x80 | ((code >> 6) & 0x3f)) as u8,
-                (0x80 | (code & 0x3f)) as u8,
-            ])?,
+            None if !value => {
+                let bytes = [
+                    (0xe0 | (code >> 12)) as u8,
+                    (0x80 | ((code >> 6) & 0x3f)) as u8,
+                    (0x80 | (code & 0x3f)) as u8,
+                ];
+                // The comparison can call C memcmp on this Rust scratch space.
+                crate::ffi_output::bytes(&bytes);
+                emit(&bytes)?;
+            }
             _ => return Err(Invalid),
         }
     }

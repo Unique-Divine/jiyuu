@@ -41,15 +41,21 @@ impl Directory {
             c"."
         };
         let mut file = open_at(libc::AT_FDCWD, root, DIRECTORY_FLAGS, 0)?;
-        let mut parts = walk
-            .to_bytes()
+        let walk_bytes = walk.to_bytes();
+        let mut start = 0;
+        let mut parts = walk_bytes
             .split(|&byte| byte == b'/')
-            .filter(|part| !part.is_empty())
+            .map(|part| {
+                let end = start + part.len();
+                start = end + 1;
+                (end, part)
+            })
+            .filter(|(_, part)| !part.is_empty())
             .peekable();
         if parts.peek().is_some() && !trusted_ancestor(&file.metadata()?) {
             return Err(refused());
         }
-        while let Some(part) = parts.next() {
+        while let Some((end, part)) = parts.next() {
             if part == b"." {
                 continue;
             }
@@ -60,22 +66,24 @@ impl Directory {
                 open_at(file.as_raw_fd(), &cstring(part), DIRECTORY_FLAGS, 0)?;
             if parts.peek().is_some() {
                 let metadata = next.metadata()?;
+                let ancestor = || cstring(&walk_bytes[..end]);
                 if !trusted_ancestor(&metadata) {
                     note_mode(
                         "ancestor_directory_world_writable",
-                        &walk,
+                        &ancestor(),
                         &metadata,
                     );
                     return Err(refused());
                 }
                 if metadata.mode() & 0o020 != 0 && !root_sticky(&metadata) {
+                    let ancestor = ancestor();
                     let mode = cstring(
                         format!("{:04o}", metadata.mode() & 0o7777).as_bytes(),
                     );
                     // SAFETY: both strings remain valid through the C logger.
                     unsafe {
                         cbm_log_activation_ancestor_group_writable(
-                            ffi_output::c_str(&walk),
+                            ffi_output::c_str(&ancestor),
                             ffi_output::c_str(&mode),
                         )
                     };

@@ -1088,6 +1088,22 @@ TEST(config_json_like_top_level_array_unique_string) {
     PASS();
 }
 
+TEST(config_json_like_compares_lone_surrogate_escapes) {
+    jl_fixture_t fixture;
+    ASSERT_EQ(jl_fixture_open(&fixture), 0);
+    ASSERT_EQ(jl_write(fixture.path, "{\"\\ud800\":0,\"key\":[\"\\udc00\",\"\\u2603\"]}\n"), 0);
+
+    // Both lookups are at least three bytes, so the surrogate bytes reach
+    // the comparison rather than failing the prefix length check.
+    ASSERT_EQ(cbm_json_like_remove_string(fixture.path, "key", "\xe2\x98\x83"), 0);
+    char *content = jl_read(fixture.path);
+    ASSERT_NOT_NULL(content);
+    ASSERT_STR_EQ(content, "{\"\\ud800\":0,\"key\":[\"\\udc00\"]}\n");
+    free(content);
+    jl_fixture_close(&fixture);
+    PASS();
+}
+
 /* OpenHands profiles ship `"mcp_server_refs": null` (#1826). A null value is
  * the documented "no list yet" shape, so adding a unique string must replace
  * exactly that token with a one-element array, preserving everything around
@@ -1626,6 +1642,7 @@ SUITE(config_json_like) {
     RUN_TEST(config_json_like_removes_first_middle_last_and_only);
     RUN_TEST(config_json_like_removal_preserves_comments_and_siblings);
     RUN_TEST(config_json_like_top_level_array_unique_string);
+    RUN_TEST(config_json_like_compares_lone_surrogate_escapes);
     RUN_TEST(config_json_like_array_add_replaces_null_value_issue1826);
     RUN_TEST(config_json_like_match_object_entry_literal_shape_issue1826);
     RUN_TEST(config_json_like_single_line_array_round_trips_byte_for_byte_issue1826);
