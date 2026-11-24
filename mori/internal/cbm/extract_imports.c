@@ -5,6 +5,7 @@
 #include "tree_sitter/api.h" // TSNode, ts_node_*
 #include "foundation/constants.h"
 #include "foundation/compat.h" /* CBM_TLS */
+#include "foundation/log.h"
 #include "extract_node_stack.h"
 #include <stdint.h> // uint32_t
 #include <limits.h>
@@ -2059,7 +2060,34 @@ static void rust_import_walk(CBMExtractCtx *ctx, TSNode node, const char *prefix
     rust_import_push(ctx, full, NULL);
 }
 
+/* Rust emits temporary path bytes and C materializes the original import
+ * records, including local-name inference and duplicate suppression. */
+typedef void (*rust_use_emit_t)(void *, const char *, size_t, const char *, size_t);
+typedef bool (*rust_use_extractor_t)(TSNode, const char *, size_t, void *, rust_use_emit_t);
+static rust_use_extractor_t rust_use_extractor;
+
+void cbm_rust_set_use_extractor(rust_use_extractor_t extract);
+void cbm_rust_set_use_extractor(rust_use_extractor_t extract) {
+    rust_use_extractor = extract;
+}
+
+static void emit_rust_use_import(void *context, const char *path, size_t path_len,
+                                 const char *alias, size_t alias_len) {
+    CBMExtractCtx *ctx = context;
+    const char *module = cbm_arena_strndup(ctx->arena, path, path_len);
+    const char *local = alias_len > 0 ? cbm_arena_strndup(ctx->arena, alias, alias_len) : NULL;
+    rust_import_push(ctx, module, local);
+}
+
 static void parse_rust_imports(CBMExtractCtx *ctx) {
+    if (rust_use_extractor && ctx->source && ctx->source_len > 0 && !ts_node_is_null(ctx->root)) {
+        if (rust_use_extractor(ctx->root, ctx->source, (size_t)ctx->source_len, ctx,
+                               emit_rust_use_import)) {
+            cbm_log_debug("extract.rust_imports", "implementation", "rust", "file",
+                          ctx->rel_path ? ctx->rel_path : "");
+        }
+        return;
+    }
     TSTreeCursor cursor = ts_tree_cursor_new(ctx->root);
     if (!ts_tree_cursor_goto_first_child(&cursor)) {
         ts_tree_cursor_delete(&cursor);
