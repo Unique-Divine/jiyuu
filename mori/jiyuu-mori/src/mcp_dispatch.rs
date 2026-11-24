@@ -70,42 +70,18 @@ fn decode_tool_call(params: &str) -> serde_json::Result<ToolCall<'_>> {
     }
 }
 
-#[cfg(any(feature = "c-backend", test))]
+mod methods;
+
+#[cfg(feature = "c-backend")]
 mod linked {
-    #[cfg(all(test, feature = "c-backend"))]
+    #[cfg(test)]
     mod native_tests;
 
-    #[cfg(feature = "c-backend")]
-    use std::ffi::CString;
-    use std::ffi::{CStr, c_char};
-    #[cfg(feature = "c-backend")]
+    use std::ffi::{CStr, CString, c_char};
     use std::{panic, ptr};
 
-    /// C owns the request and its outputs. Only the C operations may
-    /// dereference this pointer, and only while dispatch is running.
-    #[repr(C)]
-    struct RequestContext {
-        _opaque: [u8; 0],
-    }
+    use super::methods::{RequestContext, RequestOps, dispatch};
 
-    type RequestOp = unsafe extern "C" fn(*mut RequestContext);
-
-    /// Mirrors mcp_request_ops_t in mcp.c.
-    #[repr(C)]
-    struct RequestOps {
-        initialize: RequestOp,
-        ping: RequestOp,
-        resources_list: RequestOp,
-        resource_templates_list: RequestOp,
-        prompts_list: RequestOp,
-        prompts_get: RequestOp,
-        tools_list: RequestOp,
-        tools_call: RequestOp,
-        cancel_notification: RequestOp,
-        unknown: unsafe extern "C" fn(*mut RequestContext, bool),
-    }
-
-    #[cfg(feature = "c-backend")]
     type Dispatch = unsafe extern "C" fn(
         method: *const c_char,
         has_id: bool,
@@ -113,55 +89,18 @@ mod linked {
         ops: *const RequestOps,
     );
 
-    #[cfg(feature = "c-backend")]
     type ToolCallDecoder = unsafe extern "C" fn(
         params: *const c_char,
         name_out: *mut *mut c_char,
         args_out: *mut *mut c_char,
     ) -> bool;
 
-    #[cfg(feature = "c-backend")]
     unsafe extern "C" {
         fn cbm_mcp_set_dispatch(dispatch: Dispatch);
         fn cbm_mcp_set_tool_call_decoder(decode: ToolCallDecoder);
         fn strdup(s: *const c_char) -> *mut c_char;
     }
 
-    unsafe extern "C" fn dispatch(
-        method: *const c_char,
-        has_id: bool,
-        ctx: *mut RequestContext,
-        ops: *const RequestOps,
-    ) {
-        // SAFETY: C supplies the parsed method, live request, and matching
-        // operation table for the duration of this synchronous callback.
-        unsafe {
-            let method = CStr::from_ptr(method).to_bytes();
-            let ops = &*ops;
-            if !has_id {
-                if method == b"notifications/cancelled" {
-                    (ops.cancel_notification)(ctx);
-                }
-                return;
-            }
-
-            match method {
-                b"initialize" => (ops.initialize)(ctx),
-                b"ping" => (ops.ping)(ctx),
-                b"resources/list" => (ops.resources_list)(ctx),
-                b"resources/templates/list" => {
-                    (ops.resource_templates_list)(ctx)
-                }
-                b"prompts/list" => (ops.prompts_list)(ctx),
-                b"prompts/get" => (ops.prompts_get)(ctx),
-                b"tools/list" => (ops.tools_list)(ctx),
-                b"tools/call" => (ops.tools_call)(ctx),
-                _ => (ops.unknown)(ctx, method == b"server/discover"),
-            }
-        }
-    }
-
-    #[cfg(feature = "c-backend")]
     unsafe extern "C" fn decode(
         params: *const c_char,
         name_out: *mut *mut c_char,
@@ -198,69 +137,11 @@ mod linked {
         true
     }
 
-    #[cfg(feature = "c-backend")]
     pub(crate) unsafe fn register() {
         // SAFETY: the caller registers once, before starting request threads.
         unsafe {
             cbm_mcp_set_dispatch(dispatch);
             cbm_mcp_set_tool_call_decoder(decode);
-        }
-    }
-
-    #[cfg(test)]
-    #[test]
-    fn dispatches_cancel_only_as_a_notification() {
-        #[derive(Debug, PartialEq)]
-        enum Operation {
-            None,
-            Cancel,
-            Unknown,
-            Unexpected,
-        }
-
-        unsafe extern "C" fn unexpected(ctx: *mut RequestContext) {
-            // SAFETY: The test passes a writable Operation as its context.
-            unsafe { *ctx.cast() = Operation::Unexpected };
-        }
-        unsafe extern "C" fn cancel(ctx: *mut RequestContext) {
-            // SAFETY: The test passes a writable Operation as its context.
-            unsafe { *ctx.cast() = Operation::Cancel };
-        }
-        unsafe extern "C" fn unknown(ctx: *mut RequestContext, _: bool) {
-            // SAFETY: The test passes a writable Operation as its context.
-            unsafe { *ctx.cast() = Operation::Unknown };
-        }
-
-        let ops = RequestOps {
-            initialize: unexpected,
-            ping: unexpected,
-            resources_list: unexpected,
-            resource_templates_list: unexpected,
-            prompts_list: unexpected,
-            prompts_get: unexpected,
-            tools_list: unexpected,
-            tools_call: unexpected,
-            cancel_notification: cancel,
-            unknown,
-        };
-        for (method, has_id, expected) in [
-            (c"notifications/cancelled", false, Operation::Cancel),
-            (c"notifications/cancelled", true, Operation::Unknown),
-            (c"initialize", false, Operation::None),
-            (c"tools/call", false, Operation::None),
-        ] {
-            let mut observed = Operation::None;
-            // SAFETY: The method and table are live, and the test operations
-            // cast the borrowed pointer back to its original type.
-            unsafe {
-                dispatch(
-                    method.as_ptr(),
-                    has_id,
-                    (&raw mut observed).cast(),
-                    &ops,
-                );
-            }
-            assert_eq!(observed, expected, "{method:?}, has_id={has_id}");
         }
     }
 }

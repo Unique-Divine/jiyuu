@@ -23336,7 +23336,8 @@ static long long mcp_elapsed_us(struct timespec start, struct timespec end) {
            ((long long)(end.tv_nsec - start.tv_nsec) / MCP_MS_TO_US);
 }
 
-/* Method selection for the C reference path. */
+#ifndef CBM_AS_LIBRARY
+/* Method selection for the standalone C reference. */
 enum {
     MCP_METHOD_UNKNOWN = 0,
     MCP_METHOD_INITIALIZE,
@@ -23351,16 +23352,7 @@ enum {
     MCP_METHOD_DISCOVER,
 };
 
-static cbm_mcp_method_selector_fn mcp_method_selector;
-
-void cbm_mcp_set_method_selector(cbm_mcp_method_selector_fn select) {
-    mcp_method_selector = select;
-}
-
 static int select_mcp_method(const char *method) {
-    if (mcp_method_selector) {
-        return mcp_method_selector(method);
-    }
     static const struct {
         const char *name;
         int kind;
@@ -23383,6 +23375,7 @@ static int select_mcp_method(const char *method) {
     }
     return MCP_METHOD_UNKNOWN;
 }
+#endif
 
 typedef struct {
     cbm_mcp_server_t *srv;
@@ -23474,6 +23467,7 @@ static void mcp_request_unknown(mcp_request_context_t *ctx, bool discover) {
     ctx->is_error = !discover;
 }
 
+#ifdef CBM_AS_LIBRARY
 /* Keep this table in sync with RequestOps in mcp_dispatch.rs. The callback
  * borrows ctx for this call only. C owns the parsed request and all outputs. */
 typedef struct {
@@ -23498,7 +23492,36 @@ void cbm_mcp_set_dispatch(mcp_dispatch_fn dispatch) {
     mcp_dispatch = dispatch;
 }
 
-static void mcp_dispatch_c(mcp_request_context_t *ctx) {
+static void mcp_dispatch_request(mcp_request_context_t *ctx) {
+    static const mcp_request_ops_t ops = {
+        .initialize = mcp_request_initialize,
+        .ping = mcp_request_ping,
+        .resources_list = mcp_request_resources_list,
+        .resource_templates_list = mcp_request_resource_templates_list,
+        .prompts_list = mcp_request_prompts_list,
+        .prompts_get = mcp_request_prompts_get,
+        .tools_list = mcp_request_tools_list,
+        .tools_call = mcp_request_tools_call,
+        .cancel_notification = mcp_request_cancel_notification,
+        .unknown = mcp_request_unknown,
+    };
+    if (!mcp_dispatch) {
+        /* Rust main registers before starting C. An uninitialized embedder
+         * must not dispatch a tool or process a cancellation. */
+        if (ctx->req.has_id) {
+            ctx->error_json =
+                heap_strdup("{\"code\":-32603,\"message\":\"MCP dispatch unavailable\"}");
+            ctx->is_error = true;
+        }
+        return;
+    }
+    const char *method = ctx->req.method ? ctx->req.method : "";
+    mcp_dispatch(method, ctx->req.has_id, ctx, &ops);
+    cbm_log_debug("mcp.dispatch", "backend", "rust", "method", method, "has_id",
+                  ctx->req.has_id ? "true" : "false");
+}
+#else
+static void mcp_dispatch_request(mcp_request_context_t *ctx) {
     int method = select_mcp_method(ctx->req.method);
     if (!ctx->req.has_id) {
         if (method == MCP_METHOD_CANCELLED) {
@@ -23537,29 +23560,7 @@ static void mcp_dispatch_c(mcp_request_context_t *ctx) {
         break;
     }
 }
-
-static void mcp_dispatch_request(mcp_request_context_t *ctx) {
-    static const mcp_request_ops_t ops = {
-        .initialize = mcp_request_initialize,
-        .ping = mcp_request_ping,
-        .resources_list = mcp_request_resources_list,
-        .resource_templates_list = mcp_request_resource_templates_list,
-        .prompts_list = mcp_request_prompts_list,
-        .prompts_get = mcp_request_prompts_get,
-        .tools_list = mcp_request_tools_list,
-        .tools_call = mcp_request_tools_call,
-        .cancel_notification = mcp_request_cancel_notification,
-        .unknown = mcp_request_unknown,
-    };
-    if (mcp_dispatch) {
-        const char *method = ctx->req.method ? ctx->req.method : "";
-        mcp_dispatch(method, ctx->req.has_id, ctx, &ops);
-        cbm_log_debug("mcp.dispatch", "backend", "rust", "method", method,
-                      "has_id", ctx->req.has_id ? "true" : "false");
-    } else {
-        mcp_dispatch_c(ctx);
-    }
-}
+#endif
 
 char *cbm_mcp_server_handle(cbm_mcp_server_t *srv, const char *line) {
     mcp_request_context_t ctx = {.srv = srv};

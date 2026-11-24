@@ -1463,9 +1463,9 @@ LIBMORI_SRCS = $(LIBMORI_PROD_SRCS) $(EXTRACTION_SRCS) $(AC_LZ4_SRCS) $(ZSTD_SRC
 LIBMORI_OBJS = $(patsubst %.c,$(LIBMORI_DIR)/%.o,$(LIBMORI_SRCS))
 LIBMORI_MAIN_OBJ = $(LIBMORI_DIR)/cbm_c_main.o
 LIBMORI_A = $(BUILD_DIR)/libmori-c.a
-LIBMORI_FRONTEND_FLAGS = $(if $(filter src/cli/cli.c,$<),-DCBM_AS_LIBRARY=1)
+LIBMORI_FRONTEND_FLAGS = $(if $(filter src/cli/cli.c src/mcp/mcp.c,$<),-DCBM_AS_LIBRARY=1)
 
-$(addprefix $(LIBMORI_DIR)/,src/cli/cli.o): Makefile.cbm
+$(addprefix $(LIBMORI_DIR)/,src/cli/cli.o src/mcp/mcp.o): Makefile.cbm
 
 $(LIBMORI_DIR)/%.o: %.c $(BUILD_DIR)/.build-config $(PROJECT_HDRS) | $(BUILD_DIR)
 	@mkdir -p $(dir $@)
