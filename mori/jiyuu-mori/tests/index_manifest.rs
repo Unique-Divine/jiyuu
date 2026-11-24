@@ -253,7 +253,7 @@ impl IndexSession {
         String::from_utf8(output.stdout).unwrap()
     }
 
-    fn fts(&self, name: &str) -> FtsContents {
+    fn fts(&self, name: &str, terms: [&str; 2]) -> FtsContents {
         let connection = Connection::open_with_flags(
             self.db_path(name),
             OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -261,6 +261,13 @@ impl IndexSession {
         .unwrap();
         connection
             .execute_batch("CREATE VIRTUAL TABLE temp.vocabulary USING fts5vocab(main, nodes_fts, instance)")
+            .unwrap();
+        let raw_terms = connection
+            .prepare("SELECT term, count(DISTINCT doc), count(*) FROM vocabulary GROUP BY term ORDER BY term")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
             .unwrap();
         let tokens = connection
             .prepare(
@@ -279,14 +286,18 @@ impl IndexSession {
                  WHERE nodes_fts MATCH ?1 ORDER BY rank, n.qualified_name",
             )
             .unwrap();
-        let rankings = ["name:value", "body:retention"].map(|term| {
+        let rankings = terms.map(|term| {
             search
                 .query_map([term], |row| Ok((row.get(0)?, row.get(1)?)))
                 .unwrap()
                 .collect::<Result<Vec<_>, _>>()
                 .unwrap()
         });
-        FtsContents { tokens, rankings }
+        FtsContents {
+            raw_terms,
+            tokens,
+            rankings,
+        }
     }
 
     fn check_adr_failure(&mut self, repo: &Path, name: &str) {
@@ -349,6 +360,7 @@ impl Drop for IndexSession {
 
 #[derive(Debug, PartialEq)]
 struct FtsContents {
+    raw_terms: Vec<(String, i64, i64)>,
     tokens: Vec<String>,
     rankings: [Vec<(String, f64)>; 2],
 }
@@ -444,10 +456,11 @@ fn default_rust_routing_preserves_native_update_paths_and_generation() {
             native.index(&repo, &step);
         let (rust_name, rust_generation, rust_routes) = rust.index(&repo, &step);
         assert_eq!(rust_name, name);
-        let native_fts = native.fts(&name);
+        let terms = ["name:value", "body:retention"];
+        let native_fts = native.fts(&name, terms);
         assert!(!native_fts.tokens.is_empty());
         assert!(native_fts.rankings.iter().all(|rows| !rows.is_empty()));
-        assert_eq!(rust.fts(&name), native_fts);
+        assert_eq!(rust.fts(&name, terms), native_fts);
         if step.decision == Some(("staged", "closure")) {
             let mut clean = IndexSession::new(
                 fixture.0.join("clean"),
@@ -497,4 +510,102 @@ fn default_rust_routing_preserves_native_update_paths_and_generation() {
     assert_eq!(fallback_routes.len(), 3);
     assert_eq!(fallback_routes, native_routes);
     assert_eq!(rust.graph(&name), native.graph(&name));
+}
+
+#[test]
+fn repeated_closure_publications_refresh_fts_from_live_nodes() {
+    let fixture = Fixture::new();
+    let repo = fixture.0.join("source");
+    fs::create_dir_all(repo.join("lib")).unwrap();
+    fs::create_dir_all(repo.join("docs")).unwrap();
+    fs::write(
+        repo.join("lib/math.ts"),
+        r#"export function add(a: number, b: number): number { return a + b }
+export function sum(xs: number[]): number { return xs.reduce(add, 0) }
+"#,
+    )
+    .unwrap();
+    fs::write(
+        repo.join("lib/stats.test.ts"),
+        "import { mean } from './stats';
+test('mean', () => { expect(mean([1, 2, 3])).toBe(2) })
+",
+    )
+    .unwrap();
+    fs::write(
+        repo.join("docs/guide.md"),
+        "# Guide
+
+## Stats
+
+Use `mean` from `lib/stats.ts`.
+
+## Math
+
+`sum` folds with `add`.
+",
+    )
+    .unwrap();
+    let original = r#"import { sum } from "./math"
+export function mean(xs: number[]): number {
+  return xs.length ? sum(xs) / xs.length : 0
+}
+export class Summary {
+  constructor(private xs: number[]) {}
+  mean(): number { return mean(this.xs) }
+}
+function total(xs: number[]): number { return sum(xs) }
+"#;
+    let edited =
+        original.replace("sum(xs) / xs.length", "total(xs) / xs.length");
+    let path = repo.join("lib/stats.ts");
+    fs::write(&path, original).unwrap();
+
+    let run = |session: &mut IndexSession| {
+        let output = session.run_index(&repo);
+        assert!(output.status.success(), "{output:?}");
+        let reply: serde_json::Value =
+            serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(reply["status"], "indexed", "{reply}");
+        (
+            reply["project"].as_str().unwrap().to_owned(),
+            session.take_worker_logs(),
+        )
+    };
+    let mut warm = IndexSession::new(fixture.0.join("warm"), None, None);
+    let (project, _) = run(&mut warm);
+    let terms = ["docs", "guide"];
+
+    for (i, source) in [edited.as_str(), original].into_iter().enumerate() {
+        fs::write(&path, source).unwrap();
+        let (_, logs) = run(&mut warm);
+        assert!(
+            logs.contains("msg=incremental.route route=closure_repair"),
+            "{logs}"
+        );
+        assert_eq!(
+            logs.matches(
+                "msg=store.fts_rebuild implementation=rust mode=closure"
+            )
+            .count(),
+            1,
+            "{logs}"
+        );
+
+        let mut clean =
+            IndexSession::new(fixture.0.join(format!("clean-{i}")), None, None);
+        let (clean_project, _) = run(&mut clean);
+        assert_eq!(project, clean_project);
+        let expected = clean.fts(&project, terms);
+        assert!(expected.rankings.iter().all(|rows| !rows.is_empty()));
+        assert_eq!(warm.fts(&project, terms), expected);
+
+        let (_, logs) = run(&mut warm);
+        assert!(
+            logs.contains("msg=incremental.noop reason=semantic_manifest_equal"),
+            "{logs}"
+        );
+        assert!(!logs.contains("msg=store.fts_rebuild"), "{logs}");
+        assert_eq!(warm.fts(&project, terms), expected);
+    }
 }

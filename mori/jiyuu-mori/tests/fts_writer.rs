@@ -27,6 +27,7 @@ unsafe extern "C" {
         project: *const c_char,
         after_id: i64,
     ) -> c_int;
+    fn cbm_store_fts_refresh_closure(store: *mut Store) -> c_int;
     fn cbm_store_error(store: *mut Store) -> *const c_char;
 }
 
@@ -42,6 +43,11 @@ impl StoreGuard {
         let project = project.map_or(std::ptr::null(), CStr::as_ptr);
         // SAFETY: The store and project string remain live during the call.
         unsafe { cbm_store_fts_rebuild(self.0.as_ptr(), project, after_id) }
+    }
+
+    fn refresh_closure(&self) -> c_int {
+        // SAFETY: The live store is owned by this test.
+        unsafe { cbm_store_fts_refresh_closure(self.0.as_ptr()) }
     }
 
     fn error(&self) -> String {
@@ -100,7 +106,7 @@ fn fts_writer_preserves_legacy_schema_and_failure_statuses() {
            UPDATE nodes SET properties = '{"docstring":"rebuildproof"}' WHERE id = 1;"#,
     )
     .unwrap();
-    assert_eq!(store.rebuild(None, 0), STORE_OK);
+    assert_eq!(store.refresh_closure(), STORE_OK);
     assert!(!db.is_autocommit());
     assert_eq!(matches(&db, "body:rebuildproof"), 1);
     assert_eq!(matches(&db, "body:retention"), 0);
@@ -127,11 +133,14 @@ fn fts_writer_preserves_legacy_schema_and_failure_statuses() {
     assert_eq!(matches(&db, "name:ledger"), 1);
     assert_eq!(matches(&db, "name:uniqueappend"), 1);
     assert_eq!(matches(&db, "name:otherappend"), 0);
+    assert_eq!(store.refresh_closure(), STORE_OK);
+    assert_eq!(matches(&db, "name:otherappend"), 1);
     db.execute_batch("ROLLBACK").unwrap();
     assert_eq!(matches(&db, "name:uniqueappend"), 0);
 
     db.execute_batch("DROP TABLE nodes_fts").unwrap();
     assert_eq!(store.rebuild(Some(c"p"), 0), STORE_NOT_FOUND);
+    assert_eq!(store.refresh_closure(), STORE_NOT_FOUND);
     assert_eq!(store.rebuild(None, 0), STORE_ERR);
     assert_eq!(store.error(), "exec: no such table: nodes_fts");
 

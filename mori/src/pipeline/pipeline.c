@@ -3491,7 +3491,7 @@ static bool promote_mode_to_existing_coverage(cbm_pipeline_t *p) {
 static char *create_staging_path(const char *final_path);
 static char *create_staging_path_impl(const char *final_path, cbm_pipeline_t *frozen);
 static int publish_staged_impl(char *path, const cbm_pipeline_generation_t *generation,
-                               bool fts_wholesale, bool healthy, cbm_pipeline_t *frozen);
+                               bool full_build, bool healthy, cbm_pipeline_t *frozen);
 static int finalize_staged_impl(char *path, const char *destination, atomic_int *cancelled,
                                 bool healthy, cbm_pipeline_t *frozen);
 
@@ -3893,12 +3893,10 @@ static int publish_doc_links(cbm_store_t *store, const cbm_pipeline_generation_t
 
 /* Complete and publish an already-materialized staging database: metadata
  * writes, FTS policy, integrity, seal, then the shared finalize leg. Takes
- * ownership of stage_path (frees it on every path). fts_wholesale selects
- * the dump path's delete-all-and-rebuild; the delta path passes false
- * because its patch step already wrote row-level FTS inserts for exactly
- * the nodes it created. */
+ * ownership of stage_path (frees it on every path). Closure repair refreshes
+ * FTS after all node mutations and still permits a graph with no FTS table. */
 static int publish_staged_impl(char *stage_path, const cbm_pipeline_generation_t *generation,
-                               bool fts_wholesale, bool destination_known_healthy,
+                               bool full_build, bool destination_known_healthy,
                                cbm_pipeline_t *frozen) {
     struct timespec t_pub;
     cbm_clock_gettime(CLOCK_MONOTONIC, &t_pub);
@@ -3979,11 +3977,21 @@ static int publish_staged_impl(char *stage_path, const cbm_pipeline_generation_t
     cbm_log_info("publish.timing", "block", "doc_links", "elapsed_ms",
                  itoa_buf((int)elapsed_ms(t_pub)));
     cbm_clock_gettime(CLOCK_MONOTONIC, &t_pub);
-    /* The column list lives in cbm_store_fts_rebuild() alone — see the delta
-     * merge, which must index the SAME columns or prose goes missing on the
-     * warm path while a full reindex looks perfect. */
-    if (fts_wholesale && cbm_store_fts_rebuild(store, NULL, 0) != CBM_STORE_OK) {
-        ok = false;
+    if (ok && full_build) {
+        ok = cbm_store_fts_rebuild(store, NULL, 0) == CBM_STORE_OK;
+    } else if (ok) {
+        ok = cbm_store_begin(store) == CBM_STORE_OK;
+        if (ok) {
+            int rc = cbm_store_fts_refresh_closure(store);
+            if (rc == CBM_STORE_NOT_FOUND) {
+                cbm_log_warn("delta.fts_insert_unavailable", "project", generation->project);
+            }
+            ok = (rc == CBM_STORE_OK || rc == CBM_STORE_NOT_FOUND) &&
+                 cbm_store_commit(store) == CBM_STORE_OK;
+            if (!ok) {
+                cbm_store_rollback(store);
+            }
+        }
     }
     cbm_log_info("publish.timing", "block", "fts", "elapsed_ms", itoa_buf((int)elapsed_ms(t_pub)));
     cbm_clock_gettime(CLOCK_MONOTONIC, &t_pub);
@@ -4024,8 +4032,8 @@ int cbm_pipeline_publish_generation(const cbm_pipeline_generation_t *generation)
 }
 
 int cbm_pipeline_publish_staged(char *path, const cbm_pipeline_generation_t *generation,
-                                bool fts_wholesale, bool healthy) {
-    return publish_staged_impl(path, generation, fts_wholesale, healthy, NULL);
+                                bool full_build, bool healthy) {
+    return publish_staged_impl(path, generation, full_build, healthy, NULL);
 }
 
 char *cbm_pipeline_create_staging_path(const char *final_path) {

@@ -607,13 +607,22 @@ static void fts_report_error(cbm_store_t *s, const char *context, const char *me
     snprintf(s->errbuf, sizeof(s->errbuf), "%s: %s", context, message ? message : "unknown");
 }
 
-int cbm_store_fts_rebuild(cbm_store_t *s, const char *project, int64_t after_id) {
+static int store_fts_rebuild(cbm_store_t *s, const char *project, int64_t after_id,
+                             bool closure_refresh) {
     if (!s || !s->db) {
         return CBM_STORE_ERR;
     }
     cbm_log_info("store.fts_rebuild", "implementation", "rust", "mode",
-                 project ? "closure" : "full");
-    return mori_fts_write(s, s->db, project, after_id, fts_report_error);
+                 closure_refresh || project ? "closure" : "full");
+    return mori_fts_write(s, s->db, project, after_id, closure_refresh, fts_report_error);
+}
+
+int cbm_store_fts_rebuild(cbm_store_t *s, const char *project, int64_t after_id) {
+    return store_fts_rebuild(s, project, after_id, false);
+}
+
+int cbm_store_fts_refresh_closure(cbm_store_t *s) {
+    return store_fts_rebuild(s, NULL, 0, true);
 }
 
 static int create_user_indexes(cbm_store_t *s) {

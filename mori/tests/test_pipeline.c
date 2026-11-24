@@ -33005,9 +33005,9 @@ TEST(pipeline_python_iris_cls_class_aware_calls) {
  * hit. It used to write nodes_fts with a hand-rolled four-column INSERT of
  * its own; with a fifth `body` column that literal leaves prose NULL for every
  * node arriving by delta, invisibly — a full reindex still looks perfect.
- * Routing the write through cbm_store_fts_rebuild() is what this test binds:
- * revert pipeline_delta.c to a four-column INSERT and it fails. */
-TEST(pipeline_delta_patch_indexes_docstring_into_fts_body) {
+ * Check that the delta patch retains the source prose for the final staged
+ * publisher's shared FTS refresh. */
+TEST(pipeline_delta_patch_preserves_docstrings_for_fts) {
     char *td = th_mktempdir("cbm_delta_fts");
     ASSERT_NOT_NULL(td);
     char dbpath[512];
@@ -33041,6 +33041,10 @@ TEST(pipeline_delta_patch_indexes_docstring_into_fts_body) {
 
     ASSERT_EQ(cbm_delta_patch(store, proj, gb, max_db_id, NULL, 0), 0);
     cbm_gbuf_free(gb);
+    ASSERT_EQ(cbm_store_begin(store), CBM_STORE_OK);
+    ASSERT_EQ(cbm_store_fts_refresh_closure(store), CBM_STORE_OK);
+    ASSERT_EQ(cbm_store_commit(store), CBM_STORE_OK);
+
 
     /* nodes_fts is contentless, so a column-filtered MATCH is the only way to
      * observe WHICH column a token landed in — and the only assertion that
@@ -35683,7 +35687,7 @@ SUITE(pipeline) {
     RUN_TEST(pipeline_ensemble_routing_attr_does_not_leak_across_items);
     RUN_TEST(pipeline_ensemble_routing_settings_targets);
     RUN_TEST(pipeline_ensemble_routing_unterminated_item_is_safe);
-    RUN_TEST(pipeline_delta_patch_indexes_docstring_into_fts_body);
+    RUN_TEST(pipeline_delta_patch_preserves_docstrings_for_fts);
     RUN_TEST(pipeline_markdown_and_config_prose_reaches_fts_body);
     RUN_TEST(pipeline_semantic_edges_no_functions);
     RUN_TEST(pipeline_semantic_batched_matches_unbatched);
