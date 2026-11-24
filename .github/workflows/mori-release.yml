@@ -204,7 +204,7 @@ jobs:
           for symbol in mori_fts_write cbm_text_upsert_managed_block \
             mori_complexity_buffer mori_complexity_stage mori_similarity_buffer \
             mori_explicit_override mori_doc_file_links_run mori_pdf_links_resolve \
-            cbm_rust_watcher_poll mori_ipc_frame_header_decode; do
+            cbm_rust_watcher_poll mori_ipc_frame_header_decode mori_daemon_job_recover; do
             if ! grep -Fxq "$symbol" <<< "$defined_symbols"; then
               echo "::error::release executable is missing $symbol"
               exit 1
@@ -212,6 +212,10 @@ jobs:
           done
           if grep -Fxq cbm_store_fts_write_reference <<< "$defined_symbols"; then
             echo "::error::release executable includes the retired C FTS writer"
+            exit 1
+          fi
+          if grep -Eq '^cbm_text_set_.*_hook_for_testing$' <<< "$defined_symbols"; then
+            echo "::error::release executable includes managed-text test hooks"
             exit 1
           fi
           {
