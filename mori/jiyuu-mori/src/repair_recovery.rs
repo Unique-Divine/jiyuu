@@ -88,8 +88,9 @@ unsafe extern "C" {
 /// The C setter must run before any thread reads the callback.
 #[cfg(not(test))]
 pub unsafe fn register() {
-    if std::env::var_os("MORI_IMPL_REPAIR_RECOVERY").as_deref()
-        == Some(OsStr::new("rust"))
+    if std::env::var_os("MORI_IMPL_REPAIR_RECOVERY")
+        .as_deref()
+        .is_none_or(|value| value == OsStr::new("rust"))
     {
         // SAFETY: the caller guarantees startup registration.
         unsafe { cbm_daemon_application_set_recovery_driver(run_recovery) };

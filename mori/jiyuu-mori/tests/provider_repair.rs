@@ -121,9 +121,7 @@ impl Fixture {
             command.env(selector, "1");
         }
         if let Some(implementation) = self.named_watch_impl {
-            command
-                .env("MORI_IMPL_NAMED_WATCH", implementation)
-                .env("CBM_LOG_LEVEL", "debug");
+            command.env("MORI_IMPL_NAMED_WATCH", implementation);
         }
         if let Some(project) = watch_project {
             let watch = self.root.join("watch.json");
@@ -133,7 +131,9 @@ impl Fixture {
                     .to_string(),
             )
             .unwrap();
-            command.env("MORI_NAMED_WATCH_FILE", watch);
+            command
+                .env("MORI_NAMED_WATCH_FILE", watch)
+                .env("CBM_LOG_LEVEL", "debug");
         }
         let output = command.args(["daemon", "start"]).output().unwrap();
         assert!(output.status.success(), "{output:?}");
@@ -335,9 +335,35 @@ fn names(items: &[&str]) -> Vec<String> {
 }
 
 #[test]
+fn native_named_watch_accepts_explicit_c_and_unrecognized_selectors() {
+    for selector in ["c", "unknown"] {
+        let mut fixture = Fixture::new();
+        fixture.named_watch_impl = Some(selector);
+        fixture.write(
+            FIRST,
+            "schema.graphqls",
+            "type Query { first: String }\n",
+        );
+        fixture.start_daemon(None, Some(FIRST));
+        fixture
+            .wait_for_log(&["daemon.named_watch.reconcile", "implementation=c"]);
+        fixture.wait_for_log(&["daemon.named_watch.applied"]);
+        fixture.wait_for_log(&[
+            "daemon.index.result",
+            "project=primary",
+            "status=indexed",
+        ]);
+        assert!(
+            !fixture
+                .log()
+                .contains("daemon.named_watch.reconcile implementation=rust")
+        );
+    }
+}
+
+#[test]
 fn published_provider_repair_preserves_other_links_without_client_sources() {
-    let mut fixture = Fixture::new();
-    fixture.named_watch_impl = Some("rust");
+    let fixture = Fixture::new();
     fixture.client(CLIENT, &["first", "second"]);
     fixture.write(
         CLIENT,
@@ -806,17 +832,17 @@ fn startup_repairs_stale_and_reverse_pending_graphs_without_a_source_worker() {
 
 #[test]
 fn startup_retry_repairs_a_restored_provider_without_a_publication() {
-    assert_startup_retry("rust");
+    assert_startup_retry(None, "rust");
 }
 
 #[test]
 fn native_startup_retry_repairs_a_restored_provider_without_a_publication() {
-    assert_startup_retry("c");
+    assert_startup_retry(Some("c"), "c");
 }
 
-fn assert_startup_retry(implementation: &'static str) {
+fn assert_startup_retry(selector: Option<&'static str>, expected: &str) {
     let mut fixture = Fixture::new();
-    fixture.recovery_impl = Some(implementation);
+    fixture.recovery_impl = selector;
     fixture.start_daemon(None, None);
     fixture.client(CLIENT, &["first", "second"]);
     fixture.write(FIRST, "schema.graphqls", "type Query { first: String }\n");
@@ -841,7 +867,7 @@ fn assert_startup_retry(implementation: &'static str) {
     fixture.start_daemon(Some("MORI_PROVIDER_REPAIR"), None);
     fixture.wait_for_log(&[
         "cross_repo.recovery_driver",
-        &format!("implementation={implementation}"),
+        &format!("implementation={expected}"),
     ]);
     fixture.wait_for_log(&["cross_repo.recovery_scan_complete", "pending=1"]);
     assert_eq!(fixture.cross_status(CLIENT)["status"], "stale");
