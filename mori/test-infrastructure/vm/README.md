@@ -25,8 +25,9 @@ seconds-fast local loop with full stderr/debugger visibility.
 Host-local config (never committed): `~/.claude/cbm-vm/config` with
 `CBM_VM_HOST=<ip>`, `CBM_VM_USER=<user>`, and the
 `CBM_VM_HOST_KEY_SHA256=<SHA256:...>` fingerprint printed by the bootstrap.
-`CBM_VM_BRANCH=<branch>` is optional; both drivers otherwise use the current
+`CBM_VM_BRANCH=<branch>` is optional. Both drivers otherwise use the current
 local Git branch, falling back to `main` only for a detached worktree.
+The Windows checkout lives at `/c/jiyuu`. The build runs in `/c/jiyuu/mori`.
 The drivers verify that fingerprint before every connection. The ssh keypair is at
 `~/.claude/cbm-vm/id_ed25519` (generate: `ssh-keygen -t ed25519 -N "" -C
 claude-cbm-vm -f ~/.claude/cbm-vm/id_ed25519`; include the public half beside
@@ -70,8 +71,8 @@ vm/win.sh test cli daemon_ipc         # run suites natively, seconds
 vm/win.sh guards                      # the Windows guard scripts
 vm/win.sh smoke-install               # managed-install E2E, stderr VISIBLE
 vm/win.sh soak 10                     # native daemon endurance gate
-vm/win.sh sh "cd /c/cbm && gdb ..."   # anything, interactively
-vm/win.sh push-file src/cli/cli.c /c/cbm/src/cli/cli.c   # WIP iteration
+vm/win.sh sh "cd /c/jiyuu/mori && gdb ..."   # anything, interactively
+vm/win.sh push-file src/cli/cli.c /c/jiyuu/mori/src/cli/cli.c   # WIP iteration
 ```
 
 `sync` requires the VM to already have the exact pushed base commit (`update`
