@@ -797,7 +797,7 @@ static int cte_windows_path_boundary(const char *path, int accepted) {
     ASSERT(cte_assert_bytes(path, after, strlen(after)));
 
     ASSERT_EQ(cte_write_bytes(path, owned, sizeof(owned) - 1U), 0);
-    ASSERT_EQ(cbm_text_remove_owned_document(path, owned), accepted ? 1 : -1);
+    ASSERT_EQ(cbm_text_remove_owned_document(path, owned), accepted ? 0 : -1);
     if (accepted) {
         ASSERT_FALSE(cbm_file_exists(path));
     } else {
