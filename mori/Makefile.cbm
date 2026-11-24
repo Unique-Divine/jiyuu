@@ -547,7 +547,7 @@ PIPELINE_SRCS = \
     src/pipeline/doc_links_rst.c \
     src/pipeline/doc_links_adoc.c \
     src/pipeline/doc_links_go.c \
-    src/pipeline/doc_links_jvm.c \
+    src/pipeline/doc_links_jvm_host.c \
     src/pipeline/doc_links_rs.c \
     src/pipeline/doc_links_perl.c \
     src/pipeline/doc_links_ts.c \
