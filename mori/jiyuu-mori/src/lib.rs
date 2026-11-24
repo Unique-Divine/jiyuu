@@ -57,7 +57,19 @@ mod graphql_extract;
 pub use graphql_extract::register as mori_register_graphql_extractor;
 
 #[cfg(feature = "c-backend")]
+mod go_imports;
+
+#[cfg(feature = "c-backend")]
+pub use go_imports::register as mori_register_go_import_extractor;
+
+#[cfg(feature = "c-backend")]
 mod native_tree;
+
+#[cfg(feature = "c-backend")]
+mod rust_use_imports;
+
+#[cfg(feature = "c-backend")]
+pub use rust_use_imports::register as mori_register_rust_use_imports;
 
 #[cfg(feature = "c-backend")]
 mod markdown_extract;
@@ -66,7 +78,19 @@ mod markdown_extract;
 pub use markdown_extract::register as mori_register_markdown_extractor;
 
 #[cfg(feature = "c-backend")]
+mod ts_static_imports;
+
+#[cfg(feature = "c-backend")]
+pub use ts_static_imports::register as mori_register_ts_static_imports;
+
+#[cfg(feature = "c-backend")]
 mod source_publish;
 
 #[cfg(feature = "c-backend")]
 pub use source_publish::register as mori_register_source_publish;
+
+#[cfg(feature = "c-backend")]
+mod python_imports;
+
+#[cfg(feature = "c-backend")]
+pub use python_imports::register as mori_register_python_imports;

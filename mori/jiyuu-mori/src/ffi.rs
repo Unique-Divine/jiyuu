@@ -574,6 +574,16 @@ pub unsafe extern "C" fn main(argc: c_int, argv: *mut *mut c_char) -> c_int {
         {
             jiyuu_mori::mori_register_graphql_extractor();
         }
+        if std::env::var_os("MORI_IMPL_GO_IMPORTS").as_deref()
+            == Some(OsStr::new("rust"))
+        {
+            jiyuu_mori::mori_register_go_import_extractor();
+        }
+        if std::env::var_os("MORI_IMPL_RUST_IMPORTS").as_deref()
+            == Some(OsStr::new("rust"))
+        {
+            jiyuu_mori::mori_register_rust_use_imports();
+        }
         if std::env::var_os("MORI_IMPL_MARKDOWN_EXTRACT").as_deref()
             == Some(OsStr::new("rust"))
         {
@@ -590,6 +600,11 @@ pub unsafe extern "C" fn main(argc: c_int, argv: *mut *mut c_char) -> c_int {
         crate::index_manifest::register();
         crate::index_route::register();
         crate::full_build_driver::register();
+        if std::env::var_os("MORI_IMPL_TS_STATIC_IMPORTS").as_deref()
+            == Some(OsStr::new("rust"))
+        {
+            jiyuu_mori::mori_register_ts_static_imports();
+        }
         if std::env::var_os("MORI_IMPL_SOURCE_PUBLISH")
             .is_none_or(|value| value == "rust")
         {
@@ -607,6 +622,11 @@ pub unsafe extern "C" fn main(argc: c_int, argv: *mut *mut c_char) -> c_int {
         crate::trace_predecessor::register();
         crate::snippet_window::register();
         crate::ingest_trace::register();
+        if std::env::var_os("MORI_IMPL_PYTHON_IMPORTS").as_deref()
+            == Some(OsStr::new("rust"))
+        {
+            jiyuu_mori::mori_register_python_imports();
+        }
     }
 
     // SAFETY: these process-wide callbacks are registered before C starts any work.

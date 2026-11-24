@@ -1,25 +1,10 @@
 //! Markdown heading text from the same Tree-sitter tree as native extraction.
 
-use std::ffi::c_void;
 use std::mem::MaybeUninit;
 
-use crate::native_tree::RawNode;
-
-#[repr(C)]
-struct RawCursor {
-    tree: *const c_void,
-    id: *const c_void,
-    context: [u32; 3],
-}
+use crate::native_tree::{RawNode, TreeCursor};
 
 unsafe extern "C" {
-    fn ts_tree_cursor_new(node: RawNode) -> RawCursor;
-    fn ts_tree_cursor_delete(cursor: *mut RawCursor);
-    fn ts_tree_cursor_current_node(cursor: *const RawCursor) -> RawNode;
-    fn ts_tree_cursor_goto_first_child(cursor: *mut RawCursor) -> bool;
-    fn ts_tree_cursor_goto_next_sibling(cursor: *mut RawCursor) -> bool;
-    fn ts_tree_cursor_goto_parent(cursor: *mut RawCursor) -> bool;
-
     fn cbm_markdown_set_heading_extractor(
         extract: unsafe extern "C" fn(
             RawNode,
@@ -29,15 +14,6 @@ unsafe extern "C" {
             usize,
         ) -> usize,
     );
-}
-
-struct Cursor(RawCursor);
-
-impl Drop for Cursor {
-    fn drop(&mut self) {
-        // SAFETY: This guard uniquely owns an initialized cursor.
-        unsafe { ts_tree_cursor_delete(&mut self.0) };
-    }
 }
 
 fn append(
@@ -69,12 +45,12 @@ unsafe fn setext(
     unsafe {
         let paragraph = node.field(c"heading_content")?;
         let content = paragraph.child_of_kind(c"inline").unwrap_or(paragraph);
-        let mut cursor = Cursor(ts_tree_cursor_new(content));
+        let mut cursor = TreeCursor::new(content);
         let span = content.range();
         let mut previous = span.start;
         let mut written = 0;
         loop {
-            let current = ts_tree_cursor_current_node(&cursor.0);
+            let current = cursor.node();
             if current.is(c"block_continuation") {
                 let marker = current.range();
                 append(
@@ -83,11 +59,11 @@ unsafe fn setext(
                     source.get(previous..marker.start)?,
                 )?;
                 previous = marker.end;
-            } else if ts_tree_cursor_goto_first_child(&mut cursor.0) {
+            } else if cursor.first_child() {
                 continue;
             }
-            while !ts_tree_cursor_goto_next_sibling(&mut cursor.0) {
-                if !ts_tree_cursor_goto_parent(&mut cursor.0) {
+            while !cursor.next_sibling() {
+                if !cursor.parent() {
                     append(
                         &mut written,
                         output,
