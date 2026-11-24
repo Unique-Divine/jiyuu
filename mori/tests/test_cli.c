@@ -14353,6 +14353,19 @@ TEST(cli_hook_augment_bash_pattern_extractor) {
 
     PASS();
 }
+TEST(cli_hook_augment_bash_overlong_token_fails_open) {
+    char word[257];
+    memset(word, 'A', sizeof(word) - 1);
+    word[sizeof(word) - 1] = '\0';
+    char input[512];
+    snprintf(input, sizeof(input),
+             "{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Bash\","
+             "\"tool_input\":{\"command\":\"rg %s .\"}}",
+             word);
+    ASSERT_TRUE(cbm_hook_augment_input_is_noop_for(input, NULL, NULL));
+    PASS();
+}
+
 TEST(cli_hook_augment_coverage_requests_machine_json) {
     char tmpdir[256];
     snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-hook-coverage-json-XXXXXX");
@@ -19587,6 +19600,7 @@ SUITE(cli) {
     RUN_TEST(cli_hook_augment_copilot_posttooluse_noop_gate);
     RUN_TEST(cli_hook_augment_drift_reminder_counts_searches);
     RUN_TEST(cli_hook_augment_bash_pattern_extractor);
+    RUN_TEST(cli_hook_augment_bash_overlong_token_fails_open);
     RUN_TEST(cli_hook_augment_coverage_requests_machine_json);
     RUN_TEST(cli_hook_augment_lifecycle_output_contract);
     RUN_TEST(cli_hook_augment_subagent_tier_router_contract);
