@@ -451,15 +451,17 @@ impl Node {
     }
 }
 
-// The C store copies SQLite TEXT as a NUL-terminated string. SQLite TEXT
-// can contain invalid UTF-8, which the native sink encodes on output.
+// SQLite's TEXT affinity leaves BLOBs intact. Like sqlite3_column_text
+// followed by strdup, copy either byte representation up to the first NUL.
 fn read_text_bytes(
     row: &Row<'_>,
     column: usize,
 ) -> rusqlite::Result<Option<Vec<u8>>> {
     match row.get_ref(column)? {
         ValueRef::Null => Ok(None),
-        ValueRef::Text(bytes) => Ok(Some(c_string_bytes(bytes).to_vec())),
+        ValueRef::Text(bytes) | ValueRef::Blob(bytes) => {
+            Ok(Some(c_string_bytes(bytes).to_vec()))
+        }
         value => Err(rusqlite::Error::InvalidColumnType(
             column,
             row.as_ref().column_name(column)?.to_owned(),

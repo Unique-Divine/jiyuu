@@ -299,6 +299,18 @@ fn node(
     db.last_insert_rowid()
 }
 
+fn fail_node_read(db: &Connection, id: i64) {
+    // Shadow the table on this connection only. SQLite raises an execution
+    // error if a scan actually reads the selected row's properties.
+    db.execute_batch(&format!(
+        "CREATE TEMP VIEW nodes AS
+         SELECT id, project, label, name, qualified_name, file_path, start_line, end_line,
+                CASE WHEN id = {id} THEN abs(-9223372036854775808) ELSE properties END AS properties
+         FROM main.nodes;"
+    ))
+    .expect("inject a SQLite read failure");
+}
+
 fn edge(
     db: &Connection,
     project: &str,
@@ -736,10 +748,12 @@ fn linear_cypher_stops_inside_high_fanout_adjacency() {
     let caller = node(&tx, CLIENT, "Caller", "a", "a", "a.py");
     let relay = node(&tx, CLIENT, "Relay", "b", "b", "b.py");
     edge(&tx, CLIENT, caller, relay, "CALLS", json!({}));
+    let mut tail = 0;
     for n in 0..2048 {
         let name = format!("target{n}");
         let target = node(&tx, CLIENT, "Other", &name, &name, "c.py");
         edge(&tx, CLIENT, relay, target, "CALLS", json!({}));
+        tail = target;
     }
     tx.commit().expect("publish fixture data");
 
@@ -751,14 +765,11 @@ fn linear_cypher_stops_inside_high_fanout_adjacency() {
 
     // If the budget were tested only after collecting adjacency, the scan
     // would return this storage error instead of the deadline or cancellation.
-    db.execute(
-        "UPDATE nodes SET properties = X'FF' WHERE name = 'target2047'",
-        [],
-    )
-    .expect("make a tail endpoint unreadable");
+    fail_node_read(&db, tail);
     assert!(matches!(
         query.execute_on(&db, CLIENT),
-        Err(ExecutionError::Storage(_))
+        Err(ExecutionError::Storage(rusqlite::Error::SqliteFailure(_, Some(message))))
+            if message == "integer overflow"
     ));
 
     let start = Instant::now();
@@ -1445,6 +1456,56 @@ fn ordered_cross_edge_queries_preserve_malformed_sqlite_text() {
 }
 
 #[test]
+fn cypher_projects_blobs_in_text_affinity_columns_like_c() {
+    const QUERY: &str = "MATCH (n:BlobSource)-[r:CALLS]->(m) WHERE n.anchor = 'visible' RETURN n.name, n.raw, n.hidden, r.note, r ORDER BY r.note";
+    let fixture = Fixture::new();
+    let db = fixture.index(CLIENT);
+    let source = node(&db, CLIENT, "BlobSource", "source", "source", "blob.py");
+    let target = node(&db, CLIENT, "Function", "target", "target", "blob.py");
+    edge(&db, CLIENT, source, target, "CALLS", json!({}));
+    db.execute(
+        "UPDATE nodes SET name = ?, properties = ? WHERE id = ?",
+        params![
+            b"n\xff\0suffix".as_slice(),
+            b"{\"anchor\":\"visible\",\"raw\":\"a\xff\"}\0{\"hidden\":\"tail\"}"
+                .as_slice(),
+            source,
+        ],
+    )
+    .unwrap();
+    db.execute(
+        "UPDATE edges SET properties = ? WHERE source_id = ? AND target_id = ?",
+        params![br#"{"note":"same"}"#.as_slice(), source, target],
+    )
+    .unwrap();
+    let storage_classes: (String, String, String) = db
+        .query_row(
+            "SELECT typeof(n.name), typeof(n.properties), typeof(e.properties)
+         FROM nodes n JOIN edges e ON e.source_id = n.id WHERE n.id = ?",
+            [source],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        storage_classes,
+        ("blob".into(), "blob".into(), "blob".into())
+    );
+    drop(db);
+
+    let pages = fixture.compare_query_pages(&[(QUERY, 0, true)]);
+    assert_eq!(
+        pages[0]["rows"],
+        json!([[
+            "@bytes:6eff",
+            "@bytes:61ff",
+            "",
+            "same",
+            "{\"note\":\"same\"}"
+        ]])
+    );
+}
+
+#[test]
 fn unordered_aliases_fall_back_for_rotating_edge_property_buffers() {
     const WIDE: &str = "MATCH (a:AliasSource)-[r:CALLS]->(b) RETURN r.one AS first, r.two, r.three, r.four, r.five, r.six, r.seven, r.eight, r.nine AS last";
     const NARROW: &str = "MATCH (a:AliasSource)-[r:CALLS]->(b) RETURN r.one AS first, r.nine AS last";
@@ -1567,18 +1628,22 @@ fn zero_hop_scan_checks_budget_and_matches_native_row_ceiling() {
 
     // All predicates miss. A budget check only at the end of the scan would
     // reach this unreadable row and report a storage error first.
-    db.execute(
-        "UPDATE nodes SET properties = X'FF' WHERE qualified_name = 'node2048'",
-        [],
-    )
-    .expect("make the tail of the scan unreadable");
+    let tail = db
+        .query_row(
+            "SELECT id FROM nodes WHERE qualified_name = 'node2048'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    fail_node_read(&db, tail);
     let query = cypher_linear::classify(
         "MATCH (n:Ceiling) WHERE n.name = 'absent' RETURN n.name LIMIT 1",
     )
     .unwrap();
     assert!(matches!(
         query.execute_on(&db, CLIENT),
-        Err(ExecutionError::Storage(_))
+        Err(ExecutionError::Storage(rusqlite::Error::SqliteFailure(_, Some(message))))
+            if message == "integer overflow"
     ));
     let checks = Cell::new(0);
     let cancelled = || {
@@ -1648,8 +1713,7 @@ fn linear_cypher_matches_the_native_result_ceiling() {
     // Reading the next start node would fail in Rust. At the ceiling the
     // result is already known, so the evaluator must stop before that read.
     let tail = node(&db, CLIENT, "Caller", "tail", "tail", "caller.py");
-    db.execute("UPDATE nodes SET properties = X'FF' WHERE id = ?", [tail])
-        .expect("add a start node with unreadable properties");
+    fail_node_read(&db, tail);
     for cypher in [&at_ceiling, MATCH] {
         let query = cypher_linear::classify(cypher).expect("classify query");
         assert!(matches!(
