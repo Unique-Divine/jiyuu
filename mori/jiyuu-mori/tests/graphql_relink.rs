@@ -1393,6 +1393,58 @@ fn ordered_aliases_keep_lexical_keys_and_raw_split_bytes() {
 }
 
 #[test]
+fn ordered_cross_edge_queries_preserve_malformed_sqlite_text() {
+    const PROJECTION: &str = "MATCH (n:RawSource)-[r:CALLS]->(m) WHERE n.anchor = 'visible' AND n.hidden = '' RETURN n, n.name, n.raw, n.hidden, m.raw, r.note, r ORDER BY r.note LIMIT 2";
+    let fixture = Fixture::new();
+    let db = fixture.index(CLIENT);
+    let source = node(&db, CLIENT, "RawSource", "source", "source", "raw.py");
+    let target = node(&db, CLIENT, "Function", "target", "target", "raw.py");
+    edge(&db, CLIENT, source, target, "CALLS", json!({}));
+    db.execute(
+        "UPDATE nodes SET name = CAST(? AS TEXT), properties = CAST(? AS TEXT) WHERE id = ?",
+        params![
+            b"n\xff\0suffix".as_slice(),
+            b"{\"anchor\":\"visible\",\"raw\":\"a\xff\"}\0{\"hidden\":\"tail\"}".as_slice(),
+            source,
+        ],
+    )
+    .unwrap();
+    db.execute(
+        "UPDATE nodes SET properties = CAST(? AS TEXT) WHERE id = ?",
+        params![b"{\"raw\":\"b\x80\"}".as_slice(), target],
+    )
+    .unwrap();
+    db.execute(
+        "UPDATE edges SET properties = CAST(? AS TEXT) WHERE source_id = ? AND target_id = ?",
+        params![b"{\"note\":\"e\xfe\"}\0ignored".as_slice(), source, target],
+    )
+    .unwrap();
+    drop(db);
+
+    let no_channel = "MATCH (n:RawSource)-[r:CROSS_CHANNEL]->(m) RETURN n.raw, r.note ORDER BY r.note LIMIT 2";
+    let no_http = "MATCH (n:RawSource)-[r:CROSS_HTTP_CALLS]->(m) RETURN n.raw, r.note ORDER BY r.note LIMIT 2";
+    let pages = fixture.compare_query_pages(&[
+        (no_channel, 0, true),
+        (no_http, 0, true),
+        (PROJECTION, 0, true),
+    ]);
+    assert_eq!(pages[0]["rows"], json!([]));
+    assert_eq!(pages[1]["rows"], json!([]));
+    assert_eq!(
+        pages[2]["rows"],
+        json!([[
+            "@bytes:6eff",
+            "@bytes:6eff",
+            "@bytes:61ff",
+            "",
+            "@bytes:6280",
+            "@bytes:65fe",
+            "@bytes:7b226e6f7465223a2265fe227d"
+        ]])
+    );
+}
+
+#[test]
 fn unordered_aliases_fall_back_for_rotating_edge_property_buffers() {
     const WIDE: &str = "MATCH (a:AliasSource)-[r:CALLS]->(b) RETURN r.one AS first, r.two, r.three, r.four, r.five, r.six, r.seven, r.eight, r.nine AS last";
     const NARROW: &str = "MATCH (a:AliasSource)-[r:CALLS]->(b) RETURN r.one AS first, r.nine AS last";
