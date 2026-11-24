@@ -124,9 +124,9 @@ const char *cbm_service_pattern_broker(const char *resolved_qn);
 bool cbm_service_pattern_graphql_operation(const char *doc, const char **op_type, char *name_buf,
                                            size_t name_sz);
 
-/* GraphQL selection signature of a client operation (field-path Routes).
- * Parses the first operation of `doc` (leading fragment definitions skipped)
- * and writes "<type>|<name>|<path>,<path>,..." to out: <type> is "query",
+/* GraphQL selection signature of a client document (field-path Routes).
+ * Writes one "<type>|<name>|<path>,<path>,..." record per operation, separated
+ * by newlines. <type> is "query",
  * "mutation" or "subscription" ("query" for the `{ ... }` shorthand), <name>
  * is empty for an anonymous operation, and each path is a root field
  * (`perp`) or a root field and one field below it (`perp.trades`). Aliases
@@ -138,6 +138,15 @@ bool cbm_service_pattern_graphql_operation(const char *doc, const char **op_type
  * keyword-less shorthand. */
 bool cbm_service_pattern_graphql_signature(const char *doc, bool require_keyword, char *out,
                                            size_t out_sz);
+
+/* Install the linked executable's encoder before starting extractor threads.
+ * The synchronous sink copies exactly len bytes and adds the trailing NUL.
+ * The standalone C reference leaves this encoder unset. */
+typedef bool (*cbm_graphql_signature_sink_t)(void *context, const char *bytes, size_t len);
+typedef bool (*cbm_graphql_document_encoder_t)(const char *doc, bool require_keyword,
+                                              size_t capacity, bool *shorthand,
+                                              cbm_graphql_signature_sink_t sink, void *context);
+void cbm_graphql_set_document_encoder(cbm_graphql_document_encoder_t encode);
 
 /* p at a JS template `${`: returns past its matching `}`, skipping braces
  * inside JS strings, nested templates and comments. */

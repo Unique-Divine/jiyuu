@@ -2705,7 +2705,7 @@ int main(int argc, char **argv) {
 #endif
     if (getenv("MORI_GRAPHQL_FIXTURE_WITNESS")) {
         /* Keep in sync with the callback bits in graphql_ffi.rs. */
-        const uint32_t required = 0x3f;
+        const uint32_t required = 0xff;
         uint32_t seen = mori_graphql_fixture_callbacks_seen();
         if ((seen & required) != required) {
             fprintf(stderr, "GraphQL Rust callbacks exercised: %#x, expected %#x\n", (unsigned)seen,
