@@ -577,8 +577,8 @@ pub unsafe extern "C" fn main(argc: c_int, argv: *mut *mut c_char) -> c_int {
         crate::index_manifest::register();
         crate::index_route::register();
         crate::full_build_driver::register();
-        if std::env::var_os("MORI_IMPL_SOURCE_PUBLISH").as_deref()
-            == Some(OsStr::new("rust"))
+        if std::env::var_os("MORI_IMPL_SOURCE_PUBLISH")
+            .is_none_or(|value| value == "rust")
         {
             jiyuu_mori::mori_register_source_publish();
         }
