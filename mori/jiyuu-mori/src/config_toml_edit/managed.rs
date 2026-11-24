@@ -163,15 +163,15 @@ fn check_table(
                     return Err(Error);
                 }
                 scope = table.key;
-            } else if !excluded && let Some(entry) = assignment(data, line)? {
-                if scope
+            } else if !excluded
+                && let Some(entry) = assignment(data, line)?
+                && scope
                     .iter()
                     .chain(&entry.key)
                     .zip(desired)
                     .all(|(existing, wanted)| existing == wanted)
-                {
-                    return Err(Error);
-                }
+            {
+                return Err(Error);
             }
         }
         strings.scan(data, line)?;

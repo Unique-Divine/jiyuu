@@ -80,12 +80,11 @@ fn finish(
     current: &mut Option<Target>,
     matched: &mut Option<Target>,
 ) -> Result<()> {
-    if let Some(current) = current.take() {
-        if current.identity_matches.ok_or(Error)?
-            && matched.replace(current).is_some()
-        {
-            return Err(Error);
-        }
+    if let Some(current) = current.take()
+        && current.identity_matches.ok_or(Error)?
+        && matched.replace(current).is_some()
+    {
+        return Err(Error);
     }
     Ok(())
 }

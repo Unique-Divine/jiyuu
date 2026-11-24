@@ -1,6 +1,8 @@
 //! C ABI declared by cli/activation_transaction.h.
 
-use std::cell::{Cell, UnsafeCell};
+#[cfg(any(test, feature = "native-engine-test-seams"))]
+use std::cell::Cell;
+use std::cell::UnsafeCell;
 #[cfg(any(test, feature = "native-engine-test-seams"))]
 use std::ffi::c_ulong;
 use std::ffi::{CStr, c_char, c_int, c_void};
@@ -9,11 +11,13 @@ use std::ptr;
 
 use super::{Candidate, State, Status, Transaction, platform};
 
+#[cfg(any(test, feature = "native-engine-test-seams"))]
 type Callback = unsafe extern "C" fn(*const c_char, *mut c_void);
 type Validator = unsafe extern "C" fn(*const c_char, *mut c_void) -> bool;
 
 thread_local! {
     static REFUSAL: UnsafeCell<[u8; 512]> = const { UnsafeCell::new([0; 512]) };
+    #[cfg(any(test, feature = "native-engine-test-seams"))]
     static BEFORE_ABSENT: Cell<(Option<Callback>, *mut c_void)> = const {
         Cell::new((None, ptr::null_mut()))
     };
@@ -55,6 +59,7 @@ pub(super) fn note(predicate: &str, detail: &str, object: Option<&CStr>) {
     });
 }
 
+#[cfg(any(test, feature = "native-engine-test-seams"))]
 pub(super) fn before_absent_publish(path: &CStr) {
     let (callback, context) = BEFORE_ABSENT.with(Cell::get);
     if let Some(callback) = callback {
@@ -296,6 +301,7 @@ extern "C" fn cbm_activation_transaction_refusal_note() -> *const c_char {
     REFUSAL.with(|buffer| buffer.get().cast())
 }
 
+#[cfg(any(test, feature = "native-engine-test-seams"))]
 #[unsafe(no_mangle)]
 extern "C" fn cbm_activation_transaction_set_before_absent_publish_for_test(
     callback: Option<Callback>,
@@ -304,6 +310,7 @@ extern "C" fn cbm_activation_transaction_set_before_absent_publish_for_test(
     BEFORE_ABSENT.with(|hook| hook.set((callback, context)));
 }
 
+#[cfg(any(test, feature = "native-engine-test-seams"))]
 #[unsafe(no_mangle)]
 extern "C" fn cbm_activation_transaction_rename_failures_set_for_test(
     count: u32,

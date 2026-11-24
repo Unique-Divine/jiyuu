@@ -271,6 +271,7 @@ impl Transaction {
             if self.original.is_some() {
                 self.publish_existing()
             } else {
+                #[cfg(any(test, feature = "native-engine-test-seams"))]
                 ffi::before_absent_publish(&self.target.path);
                 self.publish_absent()
             }

@@ -1,3 +1,4 @@
+#[cfg(any(test, feature = "native-engine-test-seams"))]
 use std::cell::Cell;
 use std::ffi::{CStr, CString, c_int, c_void};
 use std::fs::File;
@@ -73,6 +74,7 @@ const MUTATION_RIGHTS: u32 = GENERIC_ALL
     | WRITE_OWNER;
 const PREFIX: [u16; 4] = [92, 92, 63, 92];
 
+#[cfg(any(test, feature = "native-engine-test-seams"))]
 thread_local! {
     static RENAME_FAILURES: Cell<u32> = const { Cell::new(0) };
 }
@@ -227,11 +229,14 @@ impl Directory {
                 0
             };
         for attempt in 0..10 {
+            #[cfg(any(test, feature = "native-engine-test-seams"))]
             let failure = RENAME_FAILURES.with(|remaining| {
                 let count = remaining.get();
                 remaining.set(count.saturating_sub(1));
                 count > 0
             });
+            #[cfg(not(any(test, feature = "native-engine-test-seams")))]
+            let failure = false;
             let moved = if failure {
                 Err(io::Error::from_raw_os_error(ERROR_SHARING_VIOLATION as i32))
             } else {
@@ -385,6 +390,7 @@ fn os_detail(error: &io::Error) -> String {
     format!("os {}", error.raw_os_error().unwrap_or(0))
 }
 
+#[cfg(any(test, feature = "native-engine-test-seams"))]
 pub(super) fn rename_failures(count: u32) {
     RENAME_FAILURES.with(|remaining| remaining.set(count));
 }

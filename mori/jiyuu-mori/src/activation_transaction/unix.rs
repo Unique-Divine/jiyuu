@@ -424,6 +424,7 @@ pub(super) fn set_errno(error: c_int) {
     }
 }
 
+#[cfg(any(test, feature = "native-engine-test-seams"))]
 pub(super) fn rename_failures(_count: u32) {}
 
 fn current_uid() -> libc::uid_t {
