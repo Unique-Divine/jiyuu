@@ -22,6 +22,8 @@ an agent has no use for.
 ```bash
 sai --json market list
 sai --json market prices
+sai account overview
+sai --as 0xYOUR_ADDR --json account overview
 sai --json account positions 0xYOUR_ADDR
 sai --json account balances 0xYOUR_ADDR
 sai --json account history 0xYOUR_ADDR
@@ -30,6 +32,12 @@ sai --json watch price 3
 
 - `market list` returns Keeper's borrowing markets, and `market prices` the
   current indexed prices.
+- `account overview` reports Sai funds and credits, position risk and
+  unrealized PnL, orders, local trade blockers, and session expiry. It reads
+  the active account by default. Pass `--as ADDR` to read another account,
+  including one that has never connected. Check each section's `fetchedAt`,
+  source age when available, and any `error`. Other sections still return
+  data when a read fails. Queued market orders await the next oracle price.
 - `account positions ADDR` lists positions and pending orders.
   `account balances ADDR` reads one balance snapshot. `account history
   ADDR` reads trade history. These reads need no sign-in.
@@ -73,7 +81,17 @@ Once connected, commands need no prompt until the session expires.
 | `sai auth list` | Every connected account, its expiry, and which is active. |
 | `sai auth use ADDR` | Switch the active account. Only when the person asks. |
 | `sai --as ADDR ...` | Run one command as another connected account. |
+| `sai auth renew [ADDR]` | Renew a keystore session with its saved key name. Uses the active account by default and preserves the active selection. |
 | `sai auth logout [ADDR]` | Remove one account, by default the active one. |
+
+Auth status, auth list, doctor, and the overview report when a session
+has less than three days left. Doctor reports the warning and suggested
+command in its session check. In auth and overview JSON, look for
+`expiryWarning` and `renewalCommand`. Ask the person to run the renewal
+command in their own terminal if the key prompts for a password. For an
+imported session, ask them to copy a fresh Sai Web token and run
+`sai auth import`. An older keystore session without a saved key name needs
+`sai auth login NAME` once.
 
 Each sign-in adds an account and makes it active. If the person asks what the
 token is, tell them:

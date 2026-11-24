@@ -4,7 +4,8 @@ description: >-
   Trade and inspect Sai perpetuals on Nibiru with the open-source `sai` CLI
   and its MCP server, and query or reconcile Sai Perps data from live
   contracts, Sai Keeper GraphQL, and DexPal REST. Use for Sai markets, prices,
-  positions, balances, trade history, live watches, connecting a Sai account,
+  positions, balances, account overviews, trade history, live watches,
+  connecting a Sai account, session renewal,
   previewing or submitting trades, checking intents, installing or
   configuring the Sai MCP server, `sai config`, `sai doctor`, `sai update`,
   `sai logs`,
@@ -56,7 +57,7 @@ package.
 
 | Task | Page |
 | --- | --- |
-| Run `sai` commands: markets, accounts, watches, connecting an account, settings, `sai doctor`, `sai update` | [cli.md](cli.md) |
+| Run `sai` commands: markets, account overviews, watches, connecting or renewing an account, settings, `sai doctor`, `sai update` | [cli.md](cli.md) |
 | Find out what a command, MCP tool call, or trade did, from `sai logs` | [cli.md](cli.md#logs) |
 | Register the MCP server with an agent client, or use Sai MCP tools | [mcp.md](mcp.md) |
 | Anything that previews, submits, or follows a trade, through the CLI or MCP | [trading-safety.md](trading-safety.md) |
