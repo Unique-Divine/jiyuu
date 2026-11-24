@@ -71,10 +71,6 @@ pub(crate) struct Target<'a> {
 impl<'a> Target<'a> {
     pub(super) fn open(requested: &'a Path) -> io::Result<Self> {
         single_line(requested.as_os_str().as_encoded_bytes(), 32768)?;
-        #[cfg(windows)]
-        if requested.as_os_str().as_encoded_bytes().len() >= 4096 {
-            return Err(invalid("configuration path is too long"));
-        }
         Self::open_validated(requested)
     }
 

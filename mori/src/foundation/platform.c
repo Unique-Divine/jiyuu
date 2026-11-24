@@ -17,6 +17,10 @@
 #include <stdio.h>
 #include <string.h>
 
+/* Rust has no MSan parameter shadow to pass into this entry point. */
+#if __has_feature(memory_sanitizer)
+__attribute__((disable_sanitizer_instrumentation))
+#endif
 void cbm_ffi_mark_written(const void *address, size_t size) {
     (void)address;
     (void)size;

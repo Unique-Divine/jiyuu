@@ -9,6 +9,8 @@ use std::ffi::{CStr, c_char, c_int, c_void};
 use std::io;
 use std::ptr;
 
+use crate::ffi_output;
+
 #[cfg(any(test, feature = "native-engine-test-seams"))]
 use super::platform;
 use super::{Candidate, State, Status, Transaction};
@@ -66,7 +68,7 @@ pub(super) fn before_absent_publish(path: &CStr) {
     let (callback, context) = BEFORE_ABSENT.with(Cell::get);
     if let Some(callback) = callback {
         // SAFETY: the C caller registered a live callback and context for this thread.
-        unsafe { callback(path.as_ptr(), context) };
+        unsafe { callback(ffi_output::c_str(path), context) };
     }
 }
 
@@ -105,11 +107,11 @@ unsafe fn stage(
     write: impl FnOnce(&mut Transaction) -> Result<(), Status>,
 ) -> c_int {
     clear_note();
-    // SAFETY: out is null or a writable C output argument. path is a C string.
-    let Some(out) = (unsafe { out.as_mut() }) else {
+    if out.is_null() {
         return Status::InvalidArgument as c_int;
-    };
-    *out = ptr::null_mut();
+    }
+    // SAFETY: the caller supplies a writable output slot.
+    unsafe { ffi_output::write(out, ptr::null_mut()) };
     if path.is_null() {
         return Status::InvalidArgument as c_int;
     }
@@ -132,7 +134,7 @@ unsafe fn stage(
         let mut tx = Transaction::prepare(path, replace)?;
         write(&mut tx)?;
         slot.write(tx);
-        *out = Box::into_raw(slot).cast();
+        unsafe { ffi_output::write(out, Box::into_raw(slot).cast()) };
         Ok(())
     })())
 }
@@ -194,7 +196,7 @@ unsafe extern "C" fn cbm_activation_transaction_commit(
         return status as c_int;
     }
     if let Some(validator) = validator {
-        let path = unsafe { &*tx }.target.path.as_ptr();
+        let path = ffi_output::c_str(&unsafe { &*tx }.target.path);
         if !unsafe { validator(path, context) } {
             return unsafe { &mut *tx }.restore_after(Status::ValidationFailed)
                 as c_int;
@@ -241,7 +243,7 @@ unsafe extern "C" fn cbm_activation_transaction_close(
     }
     // SAFETY: close completed and the caller transfers ownership of the handle back.
     drop(unsafe { Box::from_raw(*out) });
-    *out = ptr::null_mut();
+    unsafe { ffi_output::write(out, ptr::null_mut()) };
     Status::Ok as c_int
 }
 
@@ -249,7 +251,8 @@ unsafe extern "C" fn cbm_activation_transaction_close(
 unsafe extern "C" fn cbm_activation_transaction_target_path(
     tx: *const Transaction,
 ) -> *const c_char {
-    unsafe { tx.as_ref() }.map_or(ptr::null(), |tx| tx.target.path.as_ptr())
+    unsafe { tx.as_ref() }
+        .map_or(ptr::null(), |tx| ffi_output::c_str(&tx.target.path))
 }
 
 #[unsafe(no_mangle)]
@@ -258,7 +261,7 @@ unsafe extern "C" fn cbm_activation_transaction_staged_path(
 ) -> *const c_char {
     unsafe { tx.as_ref() }
         .and_then(|tx| tx.staged.as_ref())
-        .map_or(ptr::null(), |asset| asset.entry.path.as_ptr())
+        .map_or(ptr::null(), |asset| ffi_output::c_str(&asset.entry.path))
 }
 
 #[unsafe(no_mangle)]
@@ -267,7 +270,7 @@ unsafe extern "C" fn cbm_activation_transaction_backup_path(
 ) -> *const c_char {
     unsafe { tx.as_ref() }
         .and_then(|tx| tx.backup.as_ref())
-        .map_or(ptr::null(), |asset| asset.entry.path.as_ptr())
+        .map_or(ptr::null(), |asset| ffi_output::c_str(&asset.entry.path))
 }
 
 #[unsafe(no_mangle)]
@@ -277,7 +280,7 @@ unsafe extern "C" fn cbm_activation_transaction_deferred_path(
     unsafe { tx.as_ref() }
         .filter(|tx| tx.state == State::Deferred)
         .and_then(|tx| tx.backup.as_ref())
-        .map_or(ptr::null(), |asset| asset.entry.path.as_ptr())
+        .map_or(ptr::null(), |asset| ffi_output::c_str(&asset.entry.path))
 }
 
 #[unsafe(no_mangle)]
@@ -300,7 +303,10 @@ extern "C" fn cbm_activation_transaction_status_message(
 
 #[unsafe(no_mangle)]
 extern "C" fn cbm_activation_transaction_refusal_note() -> *const c_char {
-    REFUSAL.with(|buffer| buffer.get().cast())
+    REFUSAL.with(|buffer| {
+        // SAFETY: clear_note and note always leave a terminator within the TLS buffer.
+        ffi_output::c_str(unsafe { CStr::from_ptr(buffer.get().cast()) })
+    })
 }
 
 #[cfg(any(test, feature = "native-engine-test-seams"))]
@@ -389,6 +395,6 @@ unsafe extern "C" fn cbm_activation_transaction_map_alias_for_testing(
     };
     // SAFETY: the C test releases the returned allocation through the C allocator.
     result.map_or(ptr::null_mut(), |path| unsafe {
-        libc::strdup(path.as_ptr())
+        libc::strdup(ffi_output::c_str(&path))
     })
 }

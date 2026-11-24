@@ -6,6 +6,8 @@ use std::ffi::{CStr, c_char, c_int, c_uint, c_void};
 use std::ptr;
 use std::slice;
 
+use crate::ffi_output;
+
 use super::edit::{Edit, lookup, update};
 use super::file::{Snapshot, write};
 use super::parser::{decoded_string, scan, validate_document, validate_entry};
@@ -141,6 +143,7 @@ fn owned(bytes: &[u8]) -> Result<*mut c_char> {
         }
         ptr::copy_nonoverlapping(bytes.as_ptr(), buffer, bytes.len());
         buffer.add(bytes.len()).write(0);
+        ffi_output::written(buffer, bytes.len() + 1);
         Ok(buffer.cast())
     }
 }
@@ -158,16 +161,16 @@ pub unsafe extern "C" fn cbm_json_like_read_document(
             return Err(Invalid);
         }
         unsafe {
-            *content = ptr::null_mut();
-            *length = 0;
+            ffi_output::write(content, ptr::null_mut());
+            ffi_output::write(length, 0);
         }
         let snapshot = Snapshot::read(file).map_err(|_| Invalid)?;
         let Some(bytes) = snapshot.content() else {
             return Ok(1);
         };
         unsafe {
-            *content = owned(bytes)?;
-            *length = bytes.len();
+            ffi_output::write(content, owned(bytes)?);
+            ffi_output::write(length, bytes.len());
         }
         Ok(0)
     })())
@@ -188,8 +191,8 @@ pub unsafe extern "C" fn cbm_json_like_get_raw_entry(
         }
         // SAFETY: non-null out pointers are writable and inputs follow the ABI.
         unsafe {
-            *content = ptr::null_mut();
-            *length = 0;
+            ffi_output::write(content, ptr::null_mut());
+            ffi_output::write(length, 0);
         }
         let location = unsafe { Location::new(file, path, path_len, key)? };
         let snapshot = location.load()?;
@@ -198,8 +201,8 @@ pub unsafe extern "C" fn cbm_json_like_get_raw_entry(
         };
         let bytes = &snapshot.content().ok_or(Invalid)?[range];
         unsafe {
-            *content = owned(bytes)?;
-            *length = bytes.len();
+            ffi_output::write(content, owned(bytes)?);
+            ffi_output::write(length, bytes.len());
         }
         Ok(0)
     })())
@@ -218,14 +221,14 @@ pub unsafe extern "C" fn cbm_json_like_get_string_at_path(
             return Err(Invalid);
         }
         // SAFETY: content is writable and inputs follow the ABI.
-        unsafe { *content = ptr::null_mut() };
+        unsafe { ffi_output::write(content, ptr::null_mut()) };
         let location = unsafe { Location::new(file, path, path_len, key)? };
         let snapshot = location.load()?;
         let Some(range) = location.get(&snapshot)? else {
             return Ok(1);
         };
         let value = decoded_string(&snapshot.content().ok_or(Invalid)?[range])?;
-        unsafe { *content = owned(&value)? };
+        unsafe { ffi_output::write(content, owned(&value)?) };
         Ok(0)
     })())
 }
@@ -541,7 +544,7 @@ pub unsafe extern "C" fn cbm_json_like_match_object_entry(
             return Err(Invalid);
         }
         // SAFETY: captured is writable and the inputs follow the ABI.
-        unsafe { *captured = ptr::null_mut() };
+        unsafe { ffi_output::write(captured, ptr::null_mut()) };
         if document.is_null() || length > MAX_BYTES || field_count == 0 {
             return Err(Invalid);
         }
@@ -554,7 +557,7 @@ pub unsafe extern "C" fn cbm_json_like_match_object_entry(
         let document = unsafe { input_slice(document.cast(), length)? };
         let (result, value) = match_object(document, &path, key, &fields)?;
         if let Some(value) = value {
-            unsafe { *captured = owned(&value)? };
+            unsafe { ffi_output::write(captured, owned(&value)?) };
         }
         Ok(result)
     })())
@@ -594,7 +597,7 @@ mod hooks {
         let (hook, context) = slot.get();
         if let Some(hook) = hook {
             // SAFETY: the fixture registered the callback and owns its context.
-            unsafe { hook(path.as_ptr(), context) };
+            unsafe { hook(ffi_output::c_str(path), context) };
         }
     }
 

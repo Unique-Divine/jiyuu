@@ -2,7 +2,7 @@
 
 pub mod ipc;
 
-#[cfg(any(feature = "native-engine-abi", test))]
+#[cfg(feature = "native-engine-abi")]
 mod ffi_output;
 
 #[cfg(any(feature = "native-engine-abi", test))]

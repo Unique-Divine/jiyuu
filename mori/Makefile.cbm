@@ -1513,7 +1513,8 @@ src/ui/embedded_assets.c: embed
 
 # LIBMORI_EMBED_OBJS is a wildcard, so it is read when this recipe runs,
 # after `embed` has written the objects.
-$(LIBMORI_A): $(LIBMORI_MAIN_OBJ) $(LIBMORI_OBJS) $(OBJS_VENDORED_PROD)
+# Invalidate warm archives when the source list drops a member.
+$(LIBMORI_A): $(LIBMORI_MAIN_OBJ) $(LIBMORI_OBJS) $(OBJS_VENDORED_PROD) Makefile.cbm
 	rm -f $@ $@.tmp
 	$(AR) qc $@.tmp $(LIBMORI_MAIN_OBJ) $(LIBMORI_OBJS) $(OBJS_VENDORED_PROD) \
 		$(LIBMORI_EMBED_OBJS)

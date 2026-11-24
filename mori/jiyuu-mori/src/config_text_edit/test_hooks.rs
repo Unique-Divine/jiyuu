@@ -53,7 +53,7 @@ pub(super) fn run_hook(phase: Phase, path: &Path) {
         && let Ok(path) = CString::new(path.as_os_str().as_encoded_bytes())
     {
         // SAFETY: C registered the callback and owns its context until reset.
-        unsafe { callback(path.as_ptr(), context) };
+        unsafe { callback(crate::ffi_output::c_str(&path), context) };
     }
 }
 

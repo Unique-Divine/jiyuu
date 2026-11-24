@@ -6,6 +6,8 @@ mod mapping;
 mod sequence;
 mod string_list;
 
+use crate::ffi_output;
+
 use std::{
     ffi::{CStr, c_char, c_int},
     ptr, slice,
@@ -616,7 +618,7 @@ unsafe extern "C" fn cbm_yaml_encode_double_quoted_scalar(
     if out.is_null() {
         return -1;
     }
-    unsafe { *out = ptr::null_mut() };
+    unsafe { ffi_output::write(out, ptr::null_mut()) };
     let result: Result<c_int> = (|| {
         let value = unsafe { argument(value, ITEM_MAX) }?;
         validate_item(value)?;
@@ -633,7 +635,8 @@ unsafe extern "C" fn cbm_yaml_encode_double_quoted_scalar(
                 encoded.len(),
             );
             *allocation.add(encoded.len()) = 0;
-            *out = allocation;
+            ffi_output::written(allocation, encoded.len() + 1);
+            ffi_output::write(out, allocation);
         }
         Ok(0)
     })();

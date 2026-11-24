@@ -157,7 +157,12 @@ mod hooks {
                 let hook = *self.0.lock().unwrap_or_else(|err| err.into_inner());
                 if let Some((callback, context)) = hook {
                     // Call outside the mutex. A callback may start another edit.
-                    unsafe { callback(_path.as_ptr(), context as *mut c_void) };
+                    unsafe {
+                        callback(
+                            crate::ffi_output::c_str(_path),
+                            context as *mut c_void,
+                        )
+                    };
                 }
             }
         }
