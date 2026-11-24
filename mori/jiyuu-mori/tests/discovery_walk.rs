@@ -208,7 +208,7 @@ fn mcp_auto_index_uses_the_selected_bounded_walker() {
         ] {
             let scratch = Scratch::new();
             let repo = scratch.0.join("repo");
-            fs::create_dir(&repo).unwrap();
+            fs::create_dir_all(repo.join("child")).unwrap();
             write(&repo, "main.go", "package main\nfunc main() {}\n");
             write(&repo, "child/extra.go", "package child\nfunc Extra() {}\n");
             write(&repo, ".cbmignore", "ignored.go\n");
