@@ -82,3 +82,9 @@ mod source_publish;
 
 #[cfg(feature = "c-backend")]
 pub use source_publish::register as mori_register_source_publish;
+
+#[cfg(feature = "c-backend")]
+mod python_imports;
+
+#[cfg(feature = "c-backend")]
+pub use python_imports::register as mori_register_python_imports;

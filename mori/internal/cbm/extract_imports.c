@@ -4,6 +4,7 @@
 #include "lang_specs.h"      // CBMLangSpec, CBMEmbeddedLangSpec, cbm_lang_spec, cbm_ts_language
 #include "tree_sitter/api.h" // TSNode, ts_node_*
 #include "foundation/constants.h"
+#include "foundation/log.h"
 #include "foundation/compat.h" /* CBM_TLS */
 #include "foundation/log.h"
 #include "extract_node_stack.h"
@@ -385,14 +386,73 @@ static bool py_is_type_checking_condition(CBMExtractCtx *ctx, TSNode cond) {
     return text && strcmp(text, "TYPE_CHECKING") == 0;
 }
 
+typedef struct {
+    const char *data;
+    size_t len;
+} python_import_bytes_t;
+
+typedef struct {
+    python_import_bytes_t local;
+    python_import_bytes_t prefix;
+    python_import_bytes_t member;
+    bool needs_dot;
+} python_import_row_t;
+
+typedef void (*python_import_emit_t)(void *context, const python_import_row_t *row);
+typedef void (*python_import_extractor_t)(TSNode node, const char *source, size_t source_len,
+                                           python_import_emit_t emit, void *context);
+
+static python_import_extractor_t python_import_extractor;
+
+void cbm_python_set_import_extractor(python_import_extractor_t extractor);
+void cbm_python_set_import_extractor(python_import_extractor_t extractor) {
+    python_import_extractor = extractor;
+}
+
+/* The Rust callback lends these bytes only during emission. The result stores
+ * arena-owned C strings, just as the native extractor does. */
+static void python_emit_import_row(void *context, const python_import_row_t *row) {
+    CBMExtractCtx *ctx = context;
+    CBMArena *arena = ctx->arena;
+    char *module_path = NULL;
+    if (row->prefix.len == 0 && !row->needs_dot) {
+        module_path = cbm_arena_strndup(arena, row->member.data, row->member.len);
+    } else {
+        size_t separator = row->needs_dot ? 1U : 0U;
+        size_t total = row->prefix.len + separator + row->member.len;
+        module_path = cbm_arena_alloc(arena, total + SKIP_ONE);
+        if (module_path) {
+            memcpy(module_path, row->prefix.data, row->prefix.len);
+            if (row->needs_dot) {
+                module_path[row->prefix.len] = '.';
+            }
+            memcpy(module_path + row->prefix.len + separator, row->member.data, row->member.len);
+            module_path[total] = '\0';
+        }
+    }
+    const char *local = row->prefix.len == 0 && !row->needs_dot &&
+                                row->local.data == row->member.data &&
+                                row->local.len == row->member.len
+                            ? module_path
+                            : cbm_arena_strndup(arena, row->local.data, row->local.len);
+    cbm_imports_push(&ctx->result->imports, arena,
+                     (CBMImport){.local_name = local, .module_path = module_path});
+}
+
 /* One import statement; `type_only` flags every import it records. */
 static void process_py_import_node(CBMExtractCtx *ctx, TSNode node, bool type_only) {
     const char *kind = ts_node_type(node);
     int before = ctx->result->imports.count;
-    if (strcmp(kind, "import_statement") == 0) {
+    bool direct = strcmp(kind, "import_statement") == 0;
+    bool from = strcmp(kind, "import_from_statement") == 0 ||
+                strcmp(kind, "future_import_statement") == 0;
+    if (python_import_extractor && (direct || from) && ctx->source && ctx->source_len > 0) {
+        python_import_extractor(node, ctx->source, (size_t)ctx->source_len,
+                                python_emit_import_row, ctx);
+        cbm_log_debug("extract.python_imports", "implementation", "rust");
+    } else if (direct) {
         process_py_import_stmt(ctx, node);
-    } else if (strcmp(kind, "import_from_statement") == 0 ||
-               strcmp(kind, "future_import_statement") == 0) {
+    } else if (from) {
         // `from __future__ import annotations` is a distinct node type in
         // tree-sitter-python but has the same shape (module + name list).
         process_py_import_from(ctx, node);
