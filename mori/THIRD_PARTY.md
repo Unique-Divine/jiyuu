@@ -190,9 +190,10 @@ at commit `d4881d33`, plus the macOS decommit-recommit change and one comment
 rewording). Patches must be reapplied on every upstream refresh and are
 covered by `scripts/vendored-checksums.txt`.
 
-The graph-UI HTTP server is a first-party implementation
-(`src/ui/httpd.c` + `src/ui/http_server.c`) — no third-party HTTP library
-is used.
+The Graph UI uses Tokio and socket2 for networking. Mori implements HTTP/1
+framing in `jiyuu-mori/src/ui/http_request.rs` and
+`jiyuu-mori/src/ui/http_transport.rs`. Its route handlers live in
+`src/ui/http_server.c`.
 
 ## Embedded Model Data
 

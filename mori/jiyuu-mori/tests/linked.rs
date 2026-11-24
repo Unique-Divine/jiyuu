@@ -1319,7 +1319,57 @@ fn standalone_ui_sigterm_with_full_stderr_pipe() {
             .unwrap();
             let mut response = String::new();
             conn.read_to_string(&mut response).unwrap();
-            assert!(response.starts_with("HTTP/1.1 200 "));
+            let (headers, body) = response.split_once("\r\n\r\n").unwrap();
+            assert!(headers.starts_with("HTTP/1.1 200 OK\r\n"));
+            assert!(
+                headers
+                    .contains("\r\nContent-Type: text/html; charset=utf-8\r\n")
+            );
+            assert!(
+                headers.contains(&format!(
+                    "\r\nContent-Length: {}\r\n",
+                    body.len()
+                ))
+            );
+            assert!(headers.ends_with("\r\nConnection: close"));
+
+            for (request, expected) in [
+                (
+                    "GET / HTTP/1.1\r\nHost: example.invalid\r\n\r\n".to_owned(),
+                    403,
+                ),
+                (
+                    format!(
+                        "GET / HTTP/1.1\r\nHost: {addr}\r\nOrigin: null\r\n\r\n"
+                    ),
+                    403,
+                ),
+                (
+                    format!(
+                        "POST /rpc HTTP/1.1\r\nHost: {addr}\r\nContent-Length: 1048577\r\n\r\n"
+                    ),
+                    413,
+                ),
+                (
+                    format!(
+                        "POST /api/config HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\n\r\n"
+                    ),
+                    404,
+                ),
+            ] {
+                let mut conn =
+                    TcpStream::connect_timeout(&addr, Duration::from_secs(1))
+                        .unwrap();
+                conn.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+                conn.write_all(request.as_bytes()).unwrap();
+                let mut response = String::new();
+                conn.read_to_string(&mut response).unwrap();
+                assert!(
+                    response.starts_with(&format!("HTTP/1.1 {expected} ")),
+                    "{response}"
+                );
+                assert!(!response.contains("Access-Control-Allow-Origin:"));
+            }
         }
 
         // SAFETY: the child owns this PID and is still running.

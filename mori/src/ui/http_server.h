@@ -10,7 +10,7 @@
 #ifndef CBM_UI_HTTP_SERVER_H
 #define CBM_UI_HTTP_SERVER_H
 
-#include "ui/httpd.h"
+#include "ui/http_transport.h"
 #include "foundation/sha256.h"
 
 #include <stdbool.h>
@@ -34,12 +34,6 @@
 
 typedef struct cbm_http_server cbm_http_server_t;
 struct cbm_watcher;
-
-/* Deliver one reply on the dispatch thread. Copy headers and body before
- * returning if the transport will write them later. A zero deadline selects
- * the transport default. */
-typedef void (*cbm_ui_http_reply_fn)(void *context, int status, const char *headers,
-                                     const void *body, size_t body_len, int send_deadline_ms);
 
 /* Dispatch a parsed request on the server's single run thread. A non-empty
  * request body must be NUL-terminated in addition to carrying its byte length.
