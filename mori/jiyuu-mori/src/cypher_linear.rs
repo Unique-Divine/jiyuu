@@ -14,6 +14,7 @@ use rusqlite::types::ValueRef;
 use rusqlite::{Connection, Row, Statement, params};
 
 const ENGINE_LIMIT: usize = 100_000;
+const ORDERED_COUNT_GROUP_LIMIT: usize = 16_384;
 const DEADLINE: Duration = Duration::from_secs(30);
 const CHECK_INTERVAL: usize = 1024;
 const PROPERTY_LIMIT: usize = 511;
@@ -731,19 +732,25 @@ pub(crate) struct ResultRows {
 struct CountGroups {
     column: usize,
     max_groups: usize,
+    needs_all_groups: bool,
     // Each map value records the group's first-seen position and count.
     groups: HashMap<Vec<u8>, (usize, usize)>,
 }
 
 impl CountGroups {
-    fn record(&mut self, key: &[u8]) {
+    // False means that ranking needs a group the Rust accumulator cannot keep.
+    fn record(&mut self, key: &[u8]) -> bool {
         // Native clips grouped cells before grouping and output.
         let key = c_string_bytes(key);
         let key = &key[..key.len().min(PROPERTY_LIMIT)];
         if let Some((_, count)) = self.groups.get_mut(key) {
             *count += 1;
+            true
         } else if self.groups.len() < self.max_groups {
             self.groups.insert(key.to_vec(), (self.groups.len(), 1));
+            true
+        } else {
+            !self.needs_all_groups
         }
     }
 }
@@ -783,6 +790,7 @@ impl CountRows {
 
 #[derive(Debug)]
 pub(crate) enum ExecutionError {
+    Unsupported,
     Storage(rusqlite::Error),
     RowCeiling,
     Deadline,
@@ -800,6 +808,7 @@ pub(crate) struct ExecutionBudget<'a> {
     now: &'a dyn Fn() -> Instant,
     cancelled: &'a dyn Fn() -> bool,
     remaining: usize,
+    ordered_count_group_limit: usize,
 }
 
 impl<'a> ExecutionBudget<'a> {
@@ -812,7 +821,16 @@ impl<'a> ExecutionBudget<'a> {
             now,
             cancelled,
             remaining: CHECK_INTERVAL,
+            ordered_count_group_limit: ORDERED_COUNT_GROUP_LIMIT,
         }
+    }
+
+    #[cfg(debug_assertions)]
+    pub(crate) fn set_ordered_count_group_limit_for_tests(
+        &mut self,
+        limit: usize,
+    ) {
+        self.ordered_count_group_limit = limit.min(ORDERED_COUNT_GROUP_LIMIT);
     }
 
     fn check(&self) -> Result<(), ExecutionError> {
@@ -892,7 +910,7 @@ impl Query<'_> {
         let mut adjacency = (!self.hops.is_empty())
             .then(|| Adjacency::new(connection))
             .transpose()?;
-        let mut counts = self.count_rows();
+        let mut counts = self.count_rows(budget.ordered_count_group_limit);
         let mut result = ResultRows {
             columns: self
                 .projections
@@ -987,7 +1005,7 @@ impl Query<'_> {
         Ok(result)
     }
 
-    fn count_rows(&self) -> Option<CountRows> {
+    fn count_rows(&self, ordered_group_limit: usize) -> Option<CountRows> {
         self.projections
             .iter()
             .any(|column| {
@@ -1003,18 +1021,22 @@ impl Query<'_> {
                     })
                 {
                     let limit = self.limit.unwrap_or(ENGINE_LIMIT);
-                    // A small ordered limit needs every key to rank groups.
-                    // An unordered limit keeps first-seen keys. At the
-                    // engine ceiling, extra keys cannot change the error.
-                    let max_groups =
-                        if self.order.is_empty() || limit == ENGINE_LIMIT {
-                            limit
-                        } else {
-                            usize::MAX
-                        };
+                    // A positive ordered limit below the engine ceiling
+                    // needs every key ranked. C handles queries that exceed
+                    // the Rust limit. An unordered limit needs first-seen
+                    // keys only. At the engine ceiling, more keys cannot
+                    // change the error.
+                    let needs_all_groups = !self.order.is_empty()
+                        && (1..ENGINE_LIMIT).contains(&limit);
+                    let max_groups = if needs_all_groups {
+                        ordered_group_limit
+                    } else {
+                        limit
+                    };
                     CountRows::Grouped(CountGroups {
                         column,
                         max_groups,
+                        needs_all_groups,
                         groups: HashMap::new(),
                     })
                 } else {
@@ -1037,10 +1059,17 @@ impl Query<'_> {
                 return Ok(true);
             }
             Some(CountRows::Grouped(counts)) => {
+                if counts.max_groups == 0 && !counts.needs_all_groups {
+                    // LIMIT 0 still reads the graph and checks its budget.
+                    return Ok(true);
+                }
                 let key = self.projections[counts.column]
                     .expression
                     .field_value(nodes, edges);
-                counts.record(&key);
+                if !counts.record(&key) {
+                    budget.check()?;
+                    return Err(ExecutionError::Unsupported);
+                }
                 return Ok(true);
             }
             None => {}
@@ -1279,7 +1308,9 @@ mod count_tests {
     fn unordered_count_limit_keeps_only_first_keys_and_counts_late_matches() {
         let query =
             classify("MATCH (n) RETURN n.name, count(*) LIMIT 1").unwrap();
-        let Some(CountRows::Grouped(mut counts)) = query.count_rows() else {
+        let Some(CountRows::Grouped(mut counts)) =
+            query.count_rows(ORDERED_COUNT_GROUP_LIMIT)
+        else {
             panic!("expected grouped count");
         };
         for key in [
@@ -1288,7 +1319,7 @@ mod count_tests {
             b"discarded-again",
             b"alpha",
         ] {
-            counts.record(key);
+            assert!(counts.record(key));
         }
         assert_eq!(counts.groups.len(), 1);
         assert_eq!(counts.groups.get(b"alpha".as_slice()), Some(&(0, 2)));
@@ -1300,11 +1331,13 @@ mod count_tests {
             "MATCH (n) RETURN n.name, count(*) AS total ORDER BY total",
         )
         .unwrap();
-        let Some(CountRows::Grouped(mut counts)) = query.count_rows() else {
+        let Some(CountRows::Grouped(mut counts)) =
+            query.count_rows(ORDERED_COUNT_GROUP_LIMIT)
+        else {
             panic!("expected grouped count");
         };
         for index in 0..=ENGINE_LIMIT {
-            counts.record(&index.to_string().into_bytes());
+            assert!(counts.record(&index.to_string().into_bytes()));
         }
         assert_eq!(counts.groups.len(), ENGINE_LIMIT);
         let mut budget = ExecutionBudget::new(&Instant::now, &|| true);

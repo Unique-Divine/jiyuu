@@ -148,8 +148,18 @@ impl Fixture {
     }
 
     fn start_query_daemon(&self, bin: &Path, backend: &str) {
+        self.start_query_daemon_with_env(bin, backend, &[]);
+    }
+
+    fn start_query_daemon_with_env(
+        &self,
+        bin: &Path,
+        backend: &str,
+        environment: &[(&str, &str)],
+    ) {
         let output = self
             .command(bin)
+            .envs(environment.iter().copied())
             .env("MORI_IMPL_QUERY", backend)
             .env("CBM_LOG_LEVEL", "debug")
             .args(["daemon", "start"])
@@ -199,8 +209,16 @@ impl Fixture {
     }
 
     fn compare_query_pages(&self, cases: &[(&str, usize, bool)]) -> Vec<Value> {
+        self.compare_query_pages_with_env(cases, &[])
+    }
+
+    fn compare_query_pages_with_env(
+        &self,
+        cases: &[(&str, usize, bool)],
+        environment: &[(&str, &str)],
+    ) -> Vec<Value> {
         let run = |bin: &Path, backend: &str| {
-            self.start_query_daemon(bin, backend);
+            self.start_query_daemon_with_env(bin, backend, environment);
             let mut pages = Vec::new();
             for &(query, offset, supported) in cases {
                 let before = self.rust_query_count();
@@ -1080,7 +1098,7 @@ fn zero_hop_impact_query_uses_rust_and_matches_c_pages() {
             0,
             false,
         ),
-        ("MATCH (n:Function) RETURN count(n)", 0, false),
+        ("MATCH (n:Function) RETURN count(n)", 0, true),
     ];
     let candidate = fixture.compare_query_pages(&cases);
     let page = |i: usize| &candidate[i];
@@ -1491,6 +1509,56 @@ fn bounded_count_projects_native_groups_and_empty_results_in_rust() {
     {
         assert_eq!(page["rows"], rows, "{query}");
     }
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn ordered_count_overflow_falls_back_to_rank_late_groups() {
+    use cypher_linear::{ExecutionBudget, ExecutionError};
+
+    const QUERY: &str = "MATCH (n:RankProbe) RETURN n.name, count(*) AS total ORDER BY total DESC LIMIT 1";
+    const ZERO: &str = "MATCH (n:RankProbe) RETURN n.name, count(*) AS total ORDER BY total DESC LIMIT 0";
+    let fixture = Fixture::new();
+    let db = fixture.index(CLIENT);
+    let mut tail = 0;
+    for (index, name) in ["alpha", "beta", "winner", "winner", "winner"]
+        .into_iter()
+        .enumerate()
+    {
+        tail = node(
+            &db,
+            CLIENT,
+            "RankProbe",
+            name,
+            &format!("rank.{index}"),
+            "rank.py",
+        );
+    }
+    let mut budget = ExecutionBudget::new(&Instant::now, &|| false);
+    budget.set_ordered_count_group_limit_for_tests(2);
+    let query = cypher_linear::classify(QUERY).unwrap();
+    assert!(matches!(
+        query.execute_with_budget(&db, CLIENT, &mut budget),
+        Err(ExecutionError::Unsupported)
+    ));
+    drop(db);
+
+    let pages = fixture.compare_query_pages_with_env(
+        &[(QUERY, 0, false), (ZERO, 0, true)],
+        &[("MORI_TEST_ORDERED_COUNT_GROUP_LIMIT", "2")],
+    );
+    assert_eq!(pages[0]["rows"], json!([["winner", "3"]]));
+    assert_eq!(pages[1]["rows"], json!([]));
+
+    // A later SQLite error must still be detected for LIMIT 0.
+    let db = fixture.db(CLIENT);
+    fail_node_read(&db, tail);
+    let query = cypher_linear::classify(ZERO).unwrap();
+    assert!(matches!(
+        query.execute_on(&db, CLIENT),
+        Err(ExecutionError::Storage(rusqlite::Error::SqliteFailure(_, Some(message))))
+            if message == "integer overflow"
+    ));
 }
 
 #[test]
