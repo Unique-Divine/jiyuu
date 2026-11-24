@@ -8,10 +8,10 @@ use rusqlite::{
     ffi::{sqlite3, sqlite3_stmt},
 };
 
+use crate::gqlgen::{ResolverIndex, ResolverScope, SchemaField};
 use crate::graphql_link::{
     Action, delete_stale_link, find_handler, plan_link, upsert_link,
 };
-use crate::link::RoutePlan;
 
 #[cfg(feature = "native-graphql-fixtures")]
 mod fixture_witness {
@@ -40,14 +40,36 @@ mod fixture_witness {
 #[repr(C)]
 struct GraphqlRoutePlan {
     field_index: usize,
-    resolver: *const c_void,
+    resolver_id: i64,
     ambiguous: bool,
 }
 
-type RoutePlanner =
-    unsafe extern "C" fn(*mut c_void, *const c_void, usize) -> GraphqlRoutePlan;
-type ResolverVisitor =
-    unsafe extern "C" fn(usize, *const c_void, *mut c_void) -> bool;
+type RoutePlanner = unsafe extern "C" fn(
+    *const c_void,
+    *const c_void,
+    *const c_void,
+    usize,
+) -> GraphqlRoutePlan;
+type ResolverIndexBuild = unsafe extern "C" fn(*const c_void) -> *mut c_void;
+type ResolverIndexFree = unsafe extern "C" fn(*mut c_void);
+type PackageVisitor = unsafe extern "C" fn(*mut c_void, *const c_char);
+type MethodVisitor = unsafe extern "C" fn(
+    *mut c_void,
+    *const c_char,
+    bool,
+    *const c_char,
+    *const c_char,
+    i64,
+);
+
+#[repr(C)]
+struct GraphqlRouteField {
+    owner: *const c_char,
+    name: *const c_char,
+    file_path: *const c_char,
+    resolver_pkg: *const c_char,
+    configured: bool,
+}
 
 #[repr(C)]
 struct GraphqlRouteRow {
@@ -92,6 +114,8 @@ unsafe extern "C" {
         matcher: extern "C" fn(glob: *const c_char, path: *const c_char) -> bool,
         planner: RoutePlanner,
         writer: RouteWriter,
+        build: ResolverIndexBuild,
+        release: ResolverIndexFree,
     );
     fn cbm_cross_repo_set_graphql_backend(
         policy: extern "C" fn(bool, bool, bool, bool, bool) -> Action,
@@ -113,13 +137,17 @@ unsafe extern "C" {
         ) -> GraphqlHandler,
     );
 
-    fn cbm_gqlgen_visit_route_resolvers(
-        ctx: *mut c_void,
-        first: *const c_void,
-        count: usize,
-        visit: ResolverVisitor,
-        user: *mut c_void,
+    fn cbm_gqlgen_read_resolver_evidence(
+        ctx: *const c_void,
+        package: PackageVisitor,
+        method: MethodVisitor,
+        context: *mut c_void,
     );
+    fn cbm_gqlgen_route_field_at(
+        ctx: *const c_void,
+        first: *const c_void,
+        index: usize,
+    ) -> GraphqlRouteField;
 
     fn cbm_gbuf_upsert_node(
         gb: *mut c_void,
@@ -182,40 +210,92 @@ extern "C" fn gqlgen_glob_match(
 }
 
 unsafe extern "C" fn plan_graphql_route(
-    ctx: *mut c_void,
+    index: *const c_void,
+    ctx: *const c_void,
     first: *const c_void,
     count: usize,
 ) -> GraphqlRoutePlan {
     #[cfg(feature = "native-graphql-fixtures")]
     fixture_witness::mark(fixture_witness::ROUTE_PLAN);
-    let mut plan = RoutePlan::<*const c_void>::new(count);
-    // SAFETY: C passes its initialized context and a nonempty candidate
-    // array. It visits candidates synchronously and never retains user data.
-    unsafe {
-        cbm_gqlgen_visit_route_resolvers(
-            ctx,
-            first,
-            count,
-            consider_graphql_resolver,
-            ptr::from_mut(&mut plan).cast(),
-        );
-    }
+    // SAFETY: C lends the live Rust index and the candidate array for this
+    // call. The iterator only borrows strings from that array and its context.
+    let index = unsafe { &*index.cast::<ResolverIndex>() };
+    let candidates = (0..count).map(|offset| unsafe {
+        let field = cbm_gqlgen_route_field_at(ctx, first, offset);
+        SchemaField {
+            owner: CStr::from_ptr(field.owner).to_bytes(),
+            name: CStr::from_ptr(field.name).to_bytes(),
+            file: CStr::from_ptr(field.file_path).to_bytes(),
+            scope: if field.configured {
+                ResolverScope::Configured(optional_bytes(field.resolver_pkg))
+            } else {
+                ResolverScope::Heuristic
+            },
+        }
+    });
+    let plan = index.plan(count, candidates);
     GraphqlRoutePlan {
         field_index: plan.field_index,
-        resolver: plan.resolver.unwrap_or(ptr::null()),
+        resolver_id: plan.resolver.unwrap_or(0),
         ambiguous: plan.ambiguous,
     }
 }
 
-unsafe extern "C" fn consider_graphql_resolver(
-    field_index: usize,
-    resolver: *const c_void,
-    user: *mut c_void,
-) -> bool {
-    // SAFETY: plan_graphql_route lends this stack value to the visitor for
-    // the duration of the visit, and C calls it synchronously.
-    let plan = unsafe { &mut *user.cast::<RoutePlan<*const c_void>>() };
-    plan.consider(field_index, resolver)
+// Non-null pointers must reference NUL-terminated bytes for the borrow.
+unsafe fn optional_bytes<'a>(value: *const c_char) -> Option<&'a [u8]> {
+    (!value.is_null()).then(|| unsafe { CStr::from_ptr(value).to_bytes() })
+}
+
+unsafe extern "C" fn collect_package(
+    context: *mut c_void,
+    directory: *const c_char,
+) {
+    // SAFETY: C lends the package string and calls each visitor synchronously.
+    unsafe {
+        let index = &mut *context.cast::<ResolverIndex>();
+        index.add_package(CStr::from_ptr(directory).to_bytes());
+    }
+}
+
+unsafe extern "C" fn collect_method(
+    context: *mut c_void,
+    file: *const c_char,
+    is_go: bool,
+    name: *const c_char,
+    qn: *const c_char,
+    id: i64,
+) {
+    // SAFETY: The file and any non-null name or QN live through this call.
+    unsafe {
+        let index = &mut *context.cast::<ResolverIndex>();
+        index.add_method(
+            CStr::from_ptr(file).to_bytes(),
+            is_go,
+            optional_bytes(name),
+            optional_bytes(qn),
+            id,
+        );
+    }
+}
+
+unsafe extern "C" fn build_resolver_index(ctx: *const c_void) -> *mut c_void {
+    let mut index = ResolverIndex::default();
+    // SAFETY: C lends a live route context for this call and retains no
+    // pointer to the index passed to the synchronous visitors.
+    unsafe {
+        cbm_gqlgen_read_resolver_evidence(
+            ctx,
+            collect_package,
+            collect_method,
+            ptr::from_mut(&mut index).cast(),
+        );
+    }
+    Box::into_raw(Box::new(index)).cast()
+}
+
+unsafe extern "C" fn free_resolver_index(index: *mut c_void) {
+    // SAFETY: C returns the unique handle from build_resolver_index once.
+    drop(unsafe { Box::from_raw(index.cast::<ResolverIndex>()) });
 }
 
 unsafe extern "C" fn write_graphql_route(
@@ -358,6 +438,8 @@ pub unsafe extern "C" fn mori_register_graphql_callbacks() {
             gqlgen_glob_match,
             plan_graphql_route,
             write_graphql_route,
+            build_resolver_index,
+            free_resolver_index,
         );
         cbm_cross_repo_set_graphql_backend(
             plan_link,

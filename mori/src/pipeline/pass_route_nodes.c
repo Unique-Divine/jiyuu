@@ -1453,12 +1453,6 @@ typedef struct {
     bool defined; /* holds a `schema` definition, not only extensions */
 } gql_schema_t;
 
-/* One candidate resolver method, keyed "<receiver>.<lower-case method>". */
-typedef struct {
-    const cbm_gbuf_node_t *node;
-    const char *key;
-    const char *dir; /* its Go package directory, with the trailing '/' */
-} gql_resolver_t;
 
 /* One field path a schema defines. */
 typedef struct {
@@ -1482,10 +1476,6 @@ typedef struct {
     const gql_field_t **fields_by_parent; /* fields sorted by parent_qn */
     gql_schema_t *schemas;
     int schema_count;
-    gql_resolver_t *resolvers;
-    int resolver_count;
-    const char **heuristic_dirs; /* resolver packages no config claims */
-    int heuristic_dir_count;
     gql_emit_t *emits;
     int emit_count;
     int emit_cap;
@@ -1504,11 +1494,6 @@ static bool gql_is_go_file(const char *path) {
     return path && path[0] && cbm_language_for_filename(path) == CBM_LANG_GO;
 }
 
-static bool gql_ends_with(const char *s, const char *suffix) {
-    size_t sl = strlen(s);
-    size_t xl = strlen(suffix);
-    return sl > xl && strcmp(s + sl - xl, suffix) == 0;
-}
 
 /* Length of the directory part of path, including its trailing '/'. */
 static size_t gql_dir_len(const char *path) {
@@ -1892,199 +1877,6 @@ static int gql_collect_fields(gql_ctx_t *ctx) {
     return gql_declare_extended(ctx, pending, pending_count) ? ctx->field_count : CBM_NOT_FOUND;
 }
 
-/* The receiver type of a Go method: the last segment of its QN's parent,
- * `proj.graph.resolver.perpResolver.Trades` -> `perpResolver`. */
-static const char *gql_receiver_type(CBMArena *a, const cbm_gbuf_node_t *m) {
-    const char *qn = m->qualified_name;
-    size_t qlen = strlen(qn);
-    size_t nlen = strlen(m->name);
-    if (qlen <= nlen + SKIP_ONE || qn[qlen - nlen - SKIP_ONE] != '.' ||
-        strcmp(qn + qlen - nlen, m->name) != 0) {
-        return NULL;
-    }
-    size_t end = qlen - nlen - SKIP_ONE;
-    size_t start = end;
-    while (start > 0 && qn[start - SKIP_ONE] != '.') {
-        start--;
-    }
-    return cbm_arena_strndup(a, qn + start, end - start);
-}
-
-/* A Go method name as the resolver lookup compares it: lower case. */
-static char *gql_lower_dup(CBMArena *a, const char *s) {
-    char *out = cbm_arena_strdup(a, s);
-    for (char *p = out; p && *p; p++) {
-        *p = (char)tolower((unsigned char)*p);
-    }
-    return out;
-}
-
-/* A schema field name as its generated resolver method is named, in lower
- * case. gqlgen names the method with templates.ToGo, which splits words at
- * '_' and joins them capitalized (`user_count` -> `UserCount`, `user_id` ->
- * `UserID`), but keeps one '_' of a run between two digits (`score0_1` ->
- * `Score0_1`, distinct from `score01`). Leading and trailing '_' go. Folding
- * case covers ToGo's initialisms. */
-static char *gql_field_method_dup(CBMArena *a, const char *field) {
-    char *out = cbm_arena_strdup(a, field);
-    char *w = out;
-    for (const char *p = field; out && *p;) {
-        if (*p != '_') {
-            *w++ = (char)tolower((unsigned char)*p++);
-            continue;
-        }
-        const char *run = p;
-        while (*p == '_') {
-            p++;
-        }
-        if (run > field && isdigit((unsigned char)run[-SKIP_ONE]) && isdigit((unsigned char)*p)) {
-            *w++ = '_';
-        }
-    }
-    if (w) {
-        *w = '\0';
-    }
-    return out;
-}
-
-static int gql_resolver_cmp(const void *x, const void *y) {
-    const gql_resolver_t *a = x;
-    const gql_resolver_t *b = y;
-    int c = strcmp(a->key, b->key);
-    return c != 0 ? c : strcmp(a->node->qualified_name, b->node->qualified_name);
-}
-
-static bool gql_dir_listed(const char *const *dirs, int count, const char *dir) {
-    for (int i = 0; i < count; i++) {
-        if (strcmp(dirs[i], dir) == 0) {
-            return true;
-        }
-    }
-    return false;
-}
-
-static bool gql_is_config_package(const gql_ctx_t *ctx, const char *dir) {
-    for (int i = 0; i < ctx->config_count; i++) {
-        if (ctx->configs[i].resolver_pkg && strcmp(ctx->configs[i].resolver_pkg, dir) == 0) {
-            return true;
-        }
-    }
-    return false;
-}
-
-/* The resolver packages no config claims: directories holding a gqlgen
- * `*.resolvers.go` file (follow-schema layout) or a `resolver.go` with
- * resolver methods (single-file layout). */
-static void gql_heuristic_dirs(gql_ctx_t *ctx, const cbm_gbuf_node_t **nodes, int count) {
-    ctx->heuristic_dirs = cbm_arena_alloc(&ctx->arena, (size_t)count * sizeof(char *));
-    for (int i = 0; ctx->heuristic_dirs && i < count; i++) {
-        const char *fp = nodes[i]->file_path;
-        const char *base = fp ? fp + gql_dir_len(fp) : "";
-        if (!fp || (!gql_ends_with(fp, ".resolvers.go") && strcmp(base, "resolver.go") != 0)) {
-            continue;
-        }
-        const char *dir = cbm_arena_strndup(&ctx->arena, fp, gql_dir_len(fp));
-        if (dir && !gql_is_config_package(ctx, dir) &&
-            !gql_dir_listed(ctx->heuristic_dirs, ctx->heuristic_dir_count, dir)) {
-            ctx->heuristic_dirs[ctx->heuristic_dir_count++] = dir;
-        }
-    }
-}
-
-/* Collect the Go methods that can be gqlgen resolvers: receiver type ending
- * in "Resolver", in a configured or heuristic resolver package. Sorted by
- * key. */
-static int gql_collect_resolvers(gql_ctx_t *ctx) {
-    const cbm_gbuf_node_t **nodes = NULL;
-    int count = 0;
-    if (cbm_gbuf_find_by_label(ctx->gb, "Method", &nodes, &count) != 0 || count == 0) {
-        return 0;
-    }
-    gql_heuristic_dirs(ctx, nodes, count);
-    ctx->resolvers = cbm_arena_alloc(&ctx->arena, (size_t)count * sizeof(*ctx->resolvers));
-    if (!ctx->resolvers) {
-        return CBM_NOT_FOUND;
-    }
-    for (int i = 0; i < count; i++) {
-        const cbm_gbuf_node_t *m = nodes[i];
-        if (!m->name || !m->qualified_name || !gql_is_go_file(m->file_path)) {
-            continue;
-        }
-        const char *dir = cbm_arena_strndup(&ctx->arena, m->file_path, gql_dir_len(m->file_path));
-        if (!dir || (!gql_is_config_package(ctx, dir) &&
-                     !gql_dir_listed(ctx->heuristic_dirs, ctx->heuristic_dir_count, dir))) {
-            continue;
-        }
-        const char *recv = gql_receiver_type(&ctx->arena, m);
-        if (!recv || !gql_ends_with(recv, "Resolver")) {
-            continue;
-        }
-        const char *method = gql_lower_dup(&ctx->arena, m->name);
-        const char *key = method ? cbm_arena_sprintf(&ctx->arena, "%s.%s", recv, method) : NULL;
-        if (!key) {
-            continue; /* out of memory: never publish an entry without its key */
-        }
-        ctx->resolvers[ctx->resolver_count++] = (gql_resolver_t){m, key, dir};
-    }
-    if (ctx->resolver_count > SKIP_ONE) {
-        qsort(ctx->resolvers, (size_t)ctx->resolver_count, sizeof(*ctx->resolvers),
-              gql_resolver_cmp);
-    }
-    return ctx->resolver_count;
-}
-
-/* The index of the first resolver whose key is `key`, or resolver_count. */
-static int gql_resolver_lower_bound(const gql_ctx_t *ctx, const char *key) {
-    int lo = 0;
-    int hi = ctx->resolver_count;
-    while (lo < hi) {
-        int mid = lo + ((hi - lo) / PAIR_LEN);
-        if (strcmp(ctx->resolvers[mid].key, key) < 0) {
-            lo = mid + SKIP_ONE;
-        } else {
-            hi = mid;
-        }
-    }
-    return lo;
-}
-
-/* The lookup key gqlgen's naming gives field `field` of type `type_name`:
- * `Perp`, `trades` -> "perpResolver.trades". */
-static const char *gql_resolver_key(CBMArena *a, const char *type_name, const char *field) {
-    const char *lower = gql_field_method_dup(a, field);
-    char *key = lower ? cbm_arena_sprintf(a, "%sResolver.%s", type_name, lower) : NULL;
-    if (key && key[0]) {
-        key[0] = (char)tolower((unsigned char)key[0]);
-    }
-    return key;
-}
-
-/* Does resolver r belong to the server of schema field f? A configured
- * server owns exactly its resolver package; a heuristic package owns the
- * schema files in its own directory, below it, or one level below. */
-static bool gql_owns(const gql_ctx_t *ctx, const gql_resolver_t *r, const gql_field_t *f) {
-    if (f->group != GQL_HEURISTIC) {
-        const char *pkg = ctx->configs[f->group].resolver_pkg;
-        return pkg && strcmp(pkg, r->dir) == 0;
-    }
-    if (gql_is_config_package(ctx, r->dir)) {
-        return false;
-    }
-    const char *file = f->node->file_path;
-    size_t sl = gql_dir_len(file);
-    size_t rl = strlen(r->dir);
-    bool same_or_below = rl >= sl && strncmp(r->dir, file, sl) == 0;
-    bool parent = rl == gql_parent_dir_len(file) && strncmp(r->dir, file, rl) == 0;
-    if (sl == 0) {
-        /* A schema at the repository root is "above" every package: only the
-         * root package or one directory below it (gqlgen's graph/, resolver/)
-         * is evidence enough, never another service deeper in the tree. */
-        const char *slash = strchr(r->dir, '/');
-        return !slash || slash[SKIP_ONE] == '\0';
-    }
-    return same_or_below || parent;
-}
-
 /* The fields whose parent is `parent_qn`: [*first, return). */
 static int gql_fields_of(const gql_ctx_t *ctx, const char *parent_qn, int *first) {
     int lo = 0;
@@ -2170,23 +1962,27 @@ static int gql_emit_cmp(const void *x, const void *y) {
     return c != 0 ? c : strcmp(a->field->node->qualified_name, b->field->node->qualified_name);
 }
 
-/* The decision for one Route: the emission whose field it shows, and the
- * resolver that handles it (NULL: the field does). */
-typedef struct {
-    const gql_emit_t *emit;
-    const cbm_gbuf_node_t *resolver;
-    bool ambiguous;
-} gql_pick_t;
-
 typedef struct {
     size_t field_index;
-    const cbm_gbuf_node_t *resolver;
+    int64_t resolver_id;
     bool ambiguous;
 } gql_route_plan_t;
 
-typedef gql_route_plan_t (*gql_route_planner_fn)(gql_ctx_t *ctx, const gql_emit_t *first, size_t n);
-typedef bool (*gql_resolver_visitor_fn)(size_t field_index, const cbm_gbuf_node_t *resolver,
-                                        void *context);
+typedef gql_route_plan_t (*gql_route_planner_fn)(const void *index, const gql_ctx_t *ctx,
+                                                 const gql_emit_t *first, size_t n);
+typedef void *(*gql_resolver_index_fn)(const gql_ctx_t *ctx);
+typedef void (*gql_resolver_index_free_fn)(void *index);
+typedef void (*gql_package_visitor_fn)(void *context, const char *directory);
+typedef void (*gql_method_visitor_fn)(void *context, const char *file_path, bool is_go,
+                                      const char *name, const char *qn, int64_t id);
+
+typedef struct {
+    const char *owner;
+    const char *name;
+    const char *file_path;
+    const char *resolver_pkg;
+    bool configured;
+} gql_route_field_t;
 
 /* Borrowed strings and graph IDs for the chosen schema field. */
 typedef struct {
@@ -2206,61 +2002,81 @@ typedef bool (*gql_route_writer_fn)(cbm_gbuf_t *gb, const gql_route_row_t *row);
 
 static gql_route_planner_fn gql_route_planner;
 static gql_route_writer_fn gql_route_writer;
+static gql_resolver_index_fn gql_resolver_index;
+static gql_resolver_index_free_fn gql_resolver_index_free;
 
 /* Called before C main in each linked process, including a re-execed index
  * worker, and by the native test runner. */
 void cbm_gqlgen_set_rust_backend(bool (*matcher)(const char *glob, const char *path),
-                                 gql_route_planner_fn planner, gql_route_writer_fn writer) {
+                                 gql_route_planner_fn planner, gql_route_writer_fn writer,
+                                 gql_resolver_index_fn index, gql_resolver_index_free_fn release) {
     gqlgen_glob_matcher = matcher;
     gql_route_planner = planner;
     gql_route_writer = writer;
+    gql_resolver_index = index;
+    gql_resolver_index_free = release;
 }
 
-/* Visit every eligible resolver in the order of the candidate fields, then
- * the resolver sort order. Nodes stay valid until the caller writes the
- * selected Route, and the visitor can stop at a second distinct resolver. */
-void cbm_gqlgen_visit_route_resolvers(gql_ctx_t *ctx, const gql_emit_t *first, size_t n,
-                                      gql_resolver_visitor_fn visit, void *context) {
-    for (size_t e = 0; e < n; e++) {
-        const gql_emit_t *em = &first[e];
-        const char *key = gql_resolver_key(&ctx->arena, em->type_name, em->field->node->name);
-        for (int i = key ? gql_resolver_lower_bound(ctx, key) : ctx->resolver_count;
-             i < ctx->resolver_count && strcmp(ctx->resolvers[i].key, key) == 0; i++) {
-            const gql_resolver_t *resolver = &ctx->resolvers[i];
-            if (gql_owns(ctx, resolver, em->field) && !visit(e, resolver->node, context)) {
-                return;
-            }
+/* Lend source evidence to the pass-local Rust index. The visitors copy the
+ * bytes they need before returning. */
+void cbm_gqlgen_read_resolver_evidence(const gql_ctx_t *ctx, gql_package_visitor_fn package,
+                                       gql_method_visitor_fn method, void *context) {
+    for (int i = 0; i < ctx->config_count; i++) {
+        if (ctx->configs[i].resolver_pkg) {
+            package(context, ctx->configs[i].resolver_pkg);
+        }
+    }
+    const cbm_gbuf_node_t **nodes = NULL;
+    int count = 0;
+    if (cbm_gbuf_find_by_label(ctx->gb, "Method", &nodes, &count) != 0) {
+        return;
+    }
+    for (int i = 0; i < count; i++) {
+        const cbm_gbuf_node_t *node = nodes[i];
+        if (node->file_path) {
+            method(context, node->file_path, gql_is_go_file(node->file_path), node->name,
+                   node->qualified_name, node->id);
         }
     }
 }
 
-static gql_pick_t gql_pick(gql_ctx_t *ctx, const gql_emit_t *first, int n) {
-    gql_route_plan_t plan = gql_route_planner(ctx, first, (size_t)n);
-    return (gql_pick_t){&first[plan.field_index], plan.resolver, plan.ambiguous};
+gql_route_field_t cbm_gqlgen_route_field_at(const gql_ctx_t *ctx, const gql_emit_t *first,
+                                           size_t index) {
+    const gql_emit_t *emit = &first[index];
+    const gql_field_t *field = emit->field;
+    bool configured = field->group != GQL_HEURISTIC;
+    return (gql_route_field_t){
+        .owner = emit->type_name,
+        .name = field->node->name,
+        .file_path = field->node->file_path,
+        .resolver_pkg = configured ? ctx->configs[field->group].resolver_pkg : NULL,
+        .configured = configured,
+    };
 }
 
-static void gql_emit_route(gql_ctx_t *ctx, gql_pick_t pick) {
-    const gql_field_t *field = pick.emit->field;
+static void gql_emit_route(gql_ctx_t *ctx, const gql_emit_t *first, gql_route_plan_t plan) {
+    const gql_emit_t *emit = &first[plan.field_index];
+    const gql_field_t *field = emit->field;
     const cbm_gbuf_node_t *node = field->node;
     const gql_route_row_t row = {
-        .path = pick.emit->path,
-        .qn = pick.emit->qn,
+        .path = emit->path,
+        .qn = emit->qn,
         .file_path = node->file_path,
         .return_type = field->return_type ? field->return_type : "",
         .reason = field->reason ? field->reason : "",
         .field_id = node->id,
-        .resolver_id = pick.resolver ? pick.resolver->id : 0,
+        .resolver_id = plan.resolver_id,
         .start_line = node->start_line,
         .end_line = node->end_line,
         .deprecated = field->deprecated,
-        .ambiguous = pick.ambiguous,
+        .ambiguous = plan.ambiguous,
     };
     if (!gql_route_writer(ctx->gb, &row)) {
         return;
     }
     ctx->routes++;
-    ctx->ambiguous += pick.ambiguous ? SKIP_ONE : 0;
-    if (pick.resolver) {
+    ctx->ambiguous += plan.ambiguous ? SKIP_ONE : 0;
+    if (plan.resolver_id) {
         ctx->via_resolver++;
     } else {
         ctx->via_field++;
@@ -2296,7 +2112,7 @@ static void gql_plan_and_emit(gql_ctx_t *ctx) {
         return;
     }
     gql_collect_schemas(ctx);
-    if (gql_collect_fields(ctx) <= 0 || gql_collect_resolvers(ctx) < 0) {
+    if (gql_collect_fields(ctx) <= 0) {
         return;
     }
     ctx->fields_by_parent = (const gql_field_t **)gql_sorted_index(
@@ -2313,14 +2129,20 @@ static void gql_plan_and_emit(gql_ctx_t *ctx) {
     if (ctx->emit_count > SKIP_ONE) {
         qsort(ctx->emits, (size_t)ctx->emit_count, sizeof(*ctx->emits), gql_emit_cmp);
     }
+    if (ctx->emit_count == 0) {
+        return;
+    }
+    void *resolvers = gql_resolver_index(ctx);
     for (int i = 0; i < ctx->emit_count;) {
         int n = SKIP_ONE;
         while (i + n < ctx->emit_count && strcmp(ctx->emits[i + n].qn, ctx->emits[i].qn) == 0) {
             n++;
         }
-        gql_emit_route(ctx, gql_pick(ctx, &ctx->emits[i], n));
+        const gql_emit_t *first = &ctx->emits[i];
+        gql_emit_route(ctx, first, gql_route_planner(resolvers, ctx, first, (size_t)n));
         i += n;
     }
+    gql_resolver_index_free(resolvers);
 }
 
 /* Does the index hold a GraphQL file (by language, so user extension
@@ -2344,7 +2166,8 @@ static bool gql_has_graphql_file(cbm_gbuf_t *gb) {
  * schema files, with HANDLES from gqlgen resolvers or the schema Field.
  * repo_path locates the gqlgen configs (NULL: none are read). */
 void cbm_pipeline_create_graphql_routes(cbm_gbuf_t *gb, const char *repo_path) {
-    if (!gb || !gqlgen_glob_matcher || !gql_route_planner || !gql_route_writer) {
+    if (!gb || !gqlgen_glob_matcher || !gql_route_planner || !gql_route_writer ||
+        !gql_resolver_index || !gql_resolver_index_free) {
         return;
     }
     gql_ctx_t ctx = {.gb = gb, .repo_path = repo_path};
