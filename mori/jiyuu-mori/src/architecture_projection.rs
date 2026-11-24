@@ -139,7 +139,7 @@ impl Stop {
     }
 
     fn checkpoint(&self, index: usize) -> ProjectionResult<()> {
-        if index % 256 == 0 && self.stopped() {
+        if index.is_multiple_of(256) && self.stopped() {
             return Err(ERROR);
         }
         Ok(())
