@@ -276,23 +276,22 @@ mod native {
 
     impl Write for NativeStream {
         fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            // SAFETY: C synchronously reads the supplied byte slice.
-            Ok(unsafe {
+            // Config exits with the operation status even if writing to the
+            // stream fails. C synchronously consumes this borrowed slice.
+            unsafe {
                 cbm_config_cli_output(
                     self.error_stream,
                     bytes.as_ptr(),
                     bytes.len(),
-                )
-            })
+                );
+            }
+            Ok(bytes.len())
         }
 
         fn flush(&mut self) -> io::Result<()> {
             // SAFETY: C only flushes its own standard stream.
-            if unsafe { cbm_config_cli_flush(self.error_stream) } == 0 {
-                Ok(())
-            } else {
-                Err(io::Error::last_os_error())
-            }
+            unsafe { cbm_config_cli_flush(self.error_stream) };
+            Ok(())
         }
     }
 
@@ -329,14 +328,12 @@ mod native {
             error_stream: false,
         };
         let mut error = NativeStream { error_stream: true };
-        let result =
+        let status =
             run(&args, &keys, NativeConfig::open, &mut output, &mut error)
-                .and_then(|status| {
-                    output.flush()?;
-                    error.flush()?;
-                    Ok(status)
-                });
-        result.unwrap_or(1)
+                .unwrap_or(1);
+        let _ = output.flush();
+        let _ = error.flush();
+        status
     }
 }
 
