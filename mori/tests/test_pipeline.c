@@ -5215,6 +5215,49 @@ TEST(incremental_env_edit_replaces_scoped_envvars) {
     PASS();
 }
 
+TEST(deploy_image_reference_validation_and_identity) {
+    ASSERT_TRUE(cbm_image_ref_valid("localhost:5000/team/foo__bar:_RC.1"));
+    ASSERT_TRUE(cbm_image_ref_valid("[::1]:5000/team/foo"));
+    ASSERT_TRUE(cbm_image_ref_valid("foo:tag@sha256:0123456789abcdef0123456789abcdef"));
+    ASSERT_FALSE(cbm_image_ref_valid("foo@sha256:0123"));
+    ASSERT_FALSE(cbm_image_ref_valid("foo___bar:tag"));
+    ASSERT_FALSE(cbm_image_ref_valid("foo//bar:tag"));
+    ASSERT_FALSE(cbm_image_ref_valid("<.Values.image>"));
+    ASSERT_FALSE(cbm_image_ref_valid(NULL));
+
+    char tag[4 + 129 + 1] = "foo:";
+    memset(tag + 4, 't', 129);
+    tag[4 + 128] = '\0';
+    ASSERT_TRUE(cbm_image_ref_valid(tag));
+    tag[4 + 128] = 't';
+    ASSERT_FALSE(cbm_image_ref_valid(tag));
+
+    cbm_pipeline_ctx_t ctx = {.gbuf = cbm_gbuf_new("image-ref", "/unused")};
+    ASSERT_NOT_NULL(ctx.gbuf);
+    int64_t redis = cbm_pipeline_image_node(&ctx, "registry-1.docker.io/redis:7");
+    ASSERT_GT(redis, 0);
+    ASSERT_EQ(redis, cbm_pipeline_image_node(&ctx, "index.docker.io/library/redis@sha256:0123"));
+    ASSERT_NEQ(redis, cbm_pipeline_image_node(&ctx, "redis:7"));
+    ASSERT_EQ(cbm_pipeline_image_node(&ctx, "SCRATCH"), 0);
+    const cbm_gbuf_node_t *node = cbm_gbuf_find_by_qn(ctx.gbuf, "__image__docker.io/library/redis");
+    ASSERT_NOT_NULL(node);
+    ASSERT_STR_EQ(node->properties_json,
+                  "{\"repository\":\"docker.io/library/redis\",\"registry\":\"docker.io\"}");
+
+    char long_ref[520];
+    memset(long_ref, 'x', sizeof(long_ref) - 1);
+    long_ref[sizeof(long_ref) - 1] = '\0';
+    int64_t long_image = cbm_pipeline_image_node(&ctx, long_ref);
+    ASSERT_GT(long_image, 0);
+    long_ref[511] = '\0';
+    ASSERT_EQ(long_image, cbm_pipeline_image_node(&ctx, long_ref));
+    long_ref[511] = 'x';
+    long_ref[512] = '$';
+    ASSERT_EQ(cbm_pipeline_image_node(&ctx, long_ref), 0);
+    cbm_gbuf_free(ctx.gbuf);
+    PASS();
+}
+
 /* A repository split by component (pass_docker.c P4.2b). `rename`: component
  * b becomes bee -- the split changes, and the reference in compose.run.yaml,
  * a file this run does not repair, must leave the old Image `*-b`: a closure
@@ -35729,6 +35772,7 @@ SUITE(pipeline_semantic_manifest_repro) {
     RUN_TEST(incremental_edit_keeps_retrofit_http_calls_issue2723);
     RUN_TEST(incremental_compose_edit_replaces_build_edges);
     RUN_TEST(incremental_env_edit_replaces_scoped_envvars);
+    RUN_TEST(deploy_image_reference_validation_and_identity);
     RUN_TEST(incremental_image_split_change_rebuilds);
     RUN_TEST(incremental_helm_values_edit_keeps_chart_edge);
     RUN_TEST(incremental_werf_values_edit_keeps_chart_edge);
