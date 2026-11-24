@@ -189,6 +189,28 @@ jobs:
           fi
           mkdir -p "$(dirname "$BIN")"
           cp "../target/$RUST_TARGET/release/mori" "$BIN.unstripped"
+      - name: Verify FTS retirement in the unstripped release
+        run: |
+          set -euo pipefail
+          archive_members="$(ar t build/mori-rs/libmori-c.a)"
+          if grep -Fxq fts_writer_reference.o <<< "$archive_members"; then
+            echo "::error::release archive includes the retired C FTS writer"
+            exit 1
+          fi
+          defined_symbols="$(nm "$BIN.unstripped" | awk 'NF >= 3 && $2 ~ /^[Tt]$/ {sub(/^_/, "", $NF); print $NF}')"
+          if ! grep -Fxq mori_fts_write <<< "$defined_symbols"; then
+            echo "::error::release executable is missing the Rust FTS writer"
+            exit 1
+          fi
+          if grep -Fxq cbm_store_fts_write_reference <<< "$defined_symbols"; then
+            echo "::error::release executable includes the retired C FTS writer"
+            exit 1
+          fi
+          {
+            echo "### FTS retirement on \`$RUST_TARGET\`"
+            echo "Release link includes \`mori_fts_write\` and excludes the legacy C writer."
+            shasum -a 256 "$BIN.unstripped" build/mori-rs/libmori-c.a
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Strip and check static linking (Linux)
         if: matrix.goos == 'linux'
         run: |
