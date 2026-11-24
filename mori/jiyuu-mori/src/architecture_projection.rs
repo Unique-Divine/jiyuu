@@ -3,6 +3,8 @@
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, c_char, c_int, c_void};
+use std::mem::size_of;
+use std::ops::{Deref, DerefMut};
 use std::ptr::null_mut;
 use std::slice;
 
@@ -120,7 +122,8 @@ struct PathCandidate {
 }
 
 type StopFn = unsafe extern "C" fn(*mut c_void) -> bool;
-type StoreGroupFn = unsafe extern "C" fn(*mut c_void, *const GroupRow) -> bool;
+type StoreGroupFn =
+    unsafe extern "C" fn(*mut c_void, *const GroupRow, usize, usize) -> bool;
 type RunFn = unsafe extern "C" fn(*mut c_void) -> c_int;
 type ProjectionResult<T> = Result<T, c_int>;
 
@@ -205,13 +208,72 @@ unsafe extern "C" fn mori_architecture_snapshot(
     }
 }
 
-fn reserved<T>(capacity: usize) -> ProjectionResult<Vec<T>> {
-    let mut values = Vec::new();
-    values.try_reserve_exact(capacity).map_err(|_| ERROR)?;
-    Ok(values)
+unsafe extern "C" {
+    fn mori_architecture_scratch_add(bytes: usize);
+    fn mori_architecture_scratch_remove(bytes: usize);
+    fn mori_architecture_directory_written(directory: *const u8, length: usize);
 }
 
-fn filled<T: Clone>(length: usize, value: T) -> ProjectionResult<Vec<T>> {
+#[derive(Default)]
+struct ScratchBytes(usize);
+
+impl ScratchBytes {
+    fn add(&mut self, bytes: usize) {
+        if bytes != 0 {
+            self.0 += bytes;
+            // SAFETY: The reservation succeeded and stays on this request thread.
+            unsafe { mori_architecture_scratch_add(bytes) };
+        }
+    }
+
+    // HashMap and HashSet expose usable capacity, so this charge covers the
+    // entry storage at that capacity. Spare buckets and control bytes are private.
+    fn add_table<T>(&mut self, capacity: usize) {
+        self.add(capacity * size_of::<T>());
+    }
+}
+
+impl Drop for ScratchBytes {
+    fn drop(&mut self) {
+        if self.0 != 0 {
+            // SAFETY: Each byte was charged once on the current request thread.
+            unsafe { mori_architecture_scratch_remove(self.0) };
+        }
+    }
+}
+
+struct ScratchVec<T> {
+    values: Vec<T>,
+    _charge: ScratchBytes,
+}
+
+impl<T> Deref for ScratchVec<T> {
+    type Target = Vec<T>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.values
+    }
+}
+
+impl<T> DerefMut for ScratchVec<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.values
+    }
+}
+
+fn reserved<T>(capacity: usize) -> ProjectionResult<ScratchVec<T>> {
+    let mut values = Vec::new();
+    values.try_reserve_exact(capacity).map_err(|_| ERROR)?;
+    let mut charge = ScratchBytes::default();
+    charge.add(values.capacity() * size_of::<T>());
+    // All writers fit in the initial reservation.
+    Ok(ScratchVec {
+        values,
+        _charge: charge,
+    })
+}
+
+fn filled<T: Clone>(length: usize, value: T) -> ProjectionResult<ScratchVec<T>> {
     let mut values = reserved(length)?;
     values.resize(length, value);
     Ok(values)
@@ -322,11 +384,14 @@ fn ownership(
     text: &[NodeText<'_>],
     edges: &[Edge],
     stop: &Stop,
-) -> ProjectionResult<Vec<Option<usize>>> {
+) -> ProjectionResult<ScratchVec<Option<usize>>> {
+    let mut table_bytes = ScratchBytes::default();
     let mut declarations = HashMap::new();
     let mut files = HashMap::new();
     declarations.try_reserve(nodes.len()).map_err(|_| ERROR)?;
+    table_bytes.add_table::<(&[u8], usize)>(declarations.capacity());
     files.try_reserve(nodes.len()).map_err(|_| ERROR)?;
+    table_bytes.add_table::<(&[u8], usize)>(files.capacity());
     for (index, (node, text_row)) in nodes.iter().zip(text).enumerate() {
         if node.declared {
             declarations.insert(text_row.qn, index);
@@ -394,7 +459,7 @@ fn cluster(
     edges: &[Edge],
     atoms: &[Option<usize>],
     stop: &Stop,
-) -> ProjectionResult<Vec<usize>> {
+) -> ProjectionResult<ScratchVec<usize>> {
     let length = nodes.len();
     let mut groups = reserved(length)?;
     groups.extend(0..length);
@@ -418,7 +483,7 @@ fn cluster(
     }
     pairs.sort_unstable();
     let mut offsets = filled(length + 1, 0)?;
-    for &(source, _) in &pairs {
+    for &(source, _) in pairs.iter() {
         offsets[source + 1] += 1;
     }
     for i in 0..length {
@@ -450,7 +515,7 @@ fn cluster(
             // order so subsequent nodes in the sweep see each accepted move.
             let mut best = current;
             let mut best_score = 0;
-            for &group in &touched {
+            for &group in touched.iter() {
                 if (scores[group], Reverse(group)) > (best_score, Reverse(best))
                 {
                     best = group;
@@ -487,8 +552,10 @@ fn collect_components(
     components: &mut [Component],
 ) -> ProjectionResult<(usize, usize)> {
     let mut component_of_group = filled(nodes.len(), None)?;
+    let mut table_bytes = ScratchBytes::default();
     let mut seen = HashSet::new();
     seen.try_reserve(nodes.len()).map_err(|_| ERROR)?;
+    table_bytes.add_table::<(usize, &[u8])>(seen.capacity());
     let mut component_count = 0;
     let mut accounted = 0;
     for (i, &atom) in atoms.iter().enumerate() {
@@ -601,8 +668,8 @@ impl Group<'_> {
             members: self.members,
             files: self.files,
         };
-        // SAFETY: C copies both NUL-terminated strings while they are live.
-        if !unsafe { store_group(context, &row) } {
+        // SAFETY: C copies both buffers while they are live. Lengths include NUL.
+        if !unsafe { store_group(context, &row, id.len(), label.len()) } {
             return Err(ERROR);
         }
         Ok(())
@@ -620,6 +687,7 @@ fn overview_groups(
 ) -> ProjectionResult<()> {
     // Directories are temporary. Charge the full first path for each component,
     // and charge group text on every coarsening pass, as the native budget did.
+    let mut directory_bytes = ScratchBytes::default();
     let mut directories = filled(components.len(), None::<Vec<u8>>)?;
     for (i, (node, text)) in nodes.iter().zip(text).enumerate() {
         if node.component < 0 || text.file.is_empty() {
@@ -636,14 +704,28 @@ fn overview_groups(
             common_directory(directory, path);
         } else {
             charge(&mut text_remaining, text.file.len() + 1)?;
-            let mut normalized = reserved(path.len())?;
+            let mut normalized = Vec::new();
+            normalized
+                .try_reserve_exact(path.len())
+                .map_err(|_| ERROR)?;
+            directory_bytes.add(normalized.capacity());
             normalized.extend(path.iter().copied().map(normalized_separator));
+            // SAFETY: The normalized prefix is initialized. Rust slice equality
+            // can pass it to MemorySanitizer's instrumented memcmp.
+            if !normalized.is_empty() {
+                unsafe {
+                    mori_architecture_directory_written(
+                        normalized.as_ptr(),
+                        normalized.len(),
+                    );
+                }
+            }
             *directory = Some(normalized);
         }
         stop.checkpoint(i)?;
     }
 
-    let mut groups: Vec<Group<'_>> = reserved(MAX_GROUPS)?;
+    let mut groups: ScratchVec<Group<'_>> = reserved(MAX_GROUPS)?;
     for depth in (0..=2).rev() {
         groups.clear();
         let mut retry = false;
@@ -696,8 +778,10 @@ fn overview_groups(
         }
     }
 
+    let mut table_bytes = ScratchBytes::default();
     let mut seen = HashSet::new();
     seen.try_reserve(nodes.len()).map_err(|_| ERROR)?;
+    table_bytes.add_table::<(usize, &[u8])>(seen.capacity());
     for (i, (node, text)) in nodes.iter().zip(text).enumerate() {
         if node.component < 0 || text.file.is_empty() {
             continue;
@@ -708,7 +792,7 @@ fn overview_groups(
         }
         stop.checkpoint(i)?;
     }
-    for group in &groups {
+    for group in groups.iter() {
         group.store(stop.context, store_group)?;
     }
     Ok(())
@@ -797,7 +881,7 @@ unsafe extern "C" fn mori_architecture_rank(
     let mut group_entries = [0; MAX_GROUPS];
     let mut listed = 0;
     for pass in 0..3 {
-        for &index in &rank {
+        for &index in rank.iter() {
             if listed == OVERVIEW_COMPONENTS {
                 return shown as c_int;
             }

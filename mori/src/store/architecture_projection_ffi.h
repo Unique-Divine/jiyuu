@@ -48,9 +48,13 @@ typedef struct {
 } ap_path_candidate;
 
 typedef bool (*ap_stop_fn)(void *);
-typedef bool (*ap_group_fn)(void *, const ap_overview_group *);
+/* String lengths include the terminating NUL. */
+typedef bool (*ap_group_fn)(void *, const ap_overview_group *, size_t id_bytes, size_t label_bytes);
 typedef int (*ap_snapshot_fn)(void *);
 
+void mori_architecture_scratch_add(size_t bytes);
+void mori_architecture_scratch_remove(size_t bytes);
+void mori_architecture_directory_written(const unsigned char *directory, size_t length);
 int mori_architecture_snapshot(sqlite3 *db, void *context, ap_stop_fn stop, ap_snapshot_fn run);
 int mori_architecture_partition(ap_partition *input, void *context, ap_stop_fn stop,
                                 ap_group_fn store_group);

@@ -2,6 +2,7 @@
 #include "store/architecture_projection_ffi.h"
 #include "foundation/platform.h"
 #include "foundation/mem_core.h"
+#include "foundation/sanitized.h"
 #include <sqlite3.h>
 #include <yyjson/yyjson.h>
 #include <limits.h>
@@ -228,12 +229,38 @@ static int ap_load(ap_context *c, const char *project) {
     return step == SQLITE_DONE ? CBM_STORE_OK : CBM_STORE_ERR;
 }
 
-static bool ap_store_group(void *context, const ap_overview_group *source) {
+void mori_architecture_scratch_add(size_t bytes) {
+    cbm_mem_class_add_external(CBM_MEM_CLASS_OTHER, bytes);
+}
+
+void mori_architecture_scratch_remove(size_t bytes) {
+    /* Publish even short-lived scratch before the thread-local delta nets out. */
+    cbm_mem_class_flush_thread();
+    cbm_mem_class_remove_external(CBM_MEM_CLASS_OTHER, bytes);
+}
+
+void mori_architecture_directory_written(const unsigned char *directory, size_t length) {
+    CBM_MSAN_WRITTEN(directory, length);
+    (void)directory;
+    (void)length;
+}
+
+static char *ap_copy_group_text(const char *source, size_t bytes) {
+    CBM_MSAN_WRITTEN(source, bytes);
+    char *copy = cbm_alloc(CBM_MEM_CLASS_OTHER, bytes);
+    if (copy)
+        memcpy(copy, source, bytes);
+    return copy;
+}
+
+static bool ap_store_group(void *context, const ap_overview_group *source, size_t id_bytes,
+                           size_t label_bytes) {
+    CBM_MSAN_WRITTEN(source, sizeof(*source));
     ap_context *c = context;
     ap_overview_group *group = &c->groups[c->group_count++];
     *group = *source;
-    group->id = cbm_mem_strdup(CBM_MEM_CLASS_OTHER, source->id);
-    group->label = cbm_mem_strdup(CBM_MEM_CLASS_OTHER, source->label);
+    group->id = ap_copy_group_text(source->id, id_bytes);
+    group->label = ap_copy_group_text(source->label, label_bytes);
     return group->id && group->label;
 }
 
@@ -247,6 +274,15 @@ static int ap_partition_graph(ap_context *c) {
         .text_budget = AP_TEXT_BUDGET,
     };
     int rc = mori_architecture_partition(&partition, c, ap_stopped, ap_store_group);
+    /* The output fields start at zero and can be updated before an error. */
+    CBM_MSAN_WRITTEN(&partition.component_count, sizeof(partition.component_count));
+    CBM_MSAN_WRITTEN(&partition.accounted, sizeof(partition.accounted));
+    CBM_MSAN_WRITTEN(&partition.grouping_depth, sizeof(partition.grouping_depth));
+    CBM_MSAN_WRITTEN(&partition.relationship_edges, sizeof(partition.relationship_edges));
+    if (rc == CBM_STORE_OK) {
+        CBM_MSAN_WRITTEN(c->nodes, (size_t)c->n * sizeof(*c->nodes));
+        CBM_MSAN_WRITTEN(c->components, (size_t)partition.component_count * sizeof(*c->components));
+    }
     c->component_count = partition.component_count;
     c->accounted = partition.accounted;
     c->structural = c->n - c->accounted;
@@ -727,6 +763,7 @@ static int ap_paths(ap_context *c, yyjson_mut_doc *doc, yyjson_mut_val *paths, c
                                                                 .crossings = crossings};
         }
         mori_architecture_sort_paths(candidates, candidate_count);
+        CBM_MSAN_WRITTEN(candidates, (size_t)candidate_count * sizeof(*candidates));
         if (ap_stopped(c)) {
             rc = CBM_STORE_ERR;
             goto done;
@@ -736,6 +773,7 @@ static int ap_paths(ap_context *c, yyjson_mut_doc *doc, yyjson_mut_val *paths, c
         int selection[32];
         int selected = mori_architecture_select_paths(
             candidates, candidate_count, c->options.max_paths - produced, depth, c->n, selection);
+        CBM_MSAN_WRITTEN(selection, (size_t)selected * sizeof(*selection));
         if (candidate_count > selected)
             *truncated = true;
         for (int selected_index = 0; selected_index < selected; selected_index++) {
@@ -858,6 +896,7 @@ static int ap_overview(ap_context *c, yyjson_mut_doc *doc, yyjson_mut_val *root)
             return CBM_STORE_ERR;
         int count = mori_architecture_dependencies(c->nodes, c->edges, c->m, c->components,
                                                     true, edges);
+        CBM_MSAN_WRITTEN(edges, (size_t)count * sizeof(*edges));
         for (int i = 0; i < count;) {
             int end = i + 1;
             while (end < count && edges[end].source == edges[i].source &&
@@ -1256,6 +1295,7 @@ static int ap_render(ap_context *c, const char *project, char **out_json) {
             rc = CBM_STORE_ERR;
             goto done;
         }
+        CBM_MSAN_WRITTEN(c->components, (size_t)c->component_count * sizeof(*c->components));
     }
     if (ap_overview(c, doc, root) != CBM_STORE_OK) {
         rc = CBM_STORE_ERR;
@@ -1297,6 +1337,7 @@ static int ap_render(ap_context *c, const char *project, char **out_json) {
         }
         int count = mori_architecture_dependencies(c->nodes, c->edges, c->m, c->components,
                                                     false, deps);
+        CBM_MSAN_WRITTEN(deps, (size_t)count * sizeof(*deps));
         for (int i = 0; i < count;) {
             int end = i + 1;
             while (end < count && deps[end].source == deps[i].source &&
