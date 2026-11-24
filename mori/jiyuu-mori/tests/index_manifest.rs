@@ -154,6 +154,20 @@ impl IndexSession {
             "{logs}"
         );
         assert!(logs.contains(step.log), "{logs}");
+        let importance_pass = match step.decision {
+            None | Some(("staged", "full")) => Some("pass.importance"),
+            Some(("staged", "closure")) => Some("pass.importance_store"),
+            _ => None,
+        };
+        if let Some(pass) = importance_pass {
+            assert!(
+                logs.lines().any(|line| {
+                    line.contains(&format!("msg={pass} "))
+                        && line.contains("implementation=rust")
+                }),
+                "{logs}"
+            );
+        }
         let used_rust = logs
             .contains("msg=incremental.manifest_compare implementation=rust");
         assert_eq!(
