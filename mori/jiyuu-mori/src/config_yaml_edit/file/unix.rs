@@ -1,3 +1,5 @@
+use crate::ffi_output;
+
 use super::*;
 use std::{
     ffi::{OsStr, c_int},
@@ -107,10 +109,19 @@ impl Target {
         let mut out = MaybeUninit::zeroed();
         require(
             unsafe {
-                cbm_config_edit_target_open(path.as_ptr(), out.as_mut_ptr())
+                cbm_config_edit_target_open(
+                    ffi_output::c_str(path),
+                    out.as_mut_ptr(),
+                )
             } >= 0,
         )?;
         Ok(Self(unsafe { out.assume_init() }))
+    }
+
+    fn native(&self) -> *const EditTarget {
+        // The zero-initialized arrays and scalar fields have no padding.
+        unsafe { ffi_output::written(&self.0, 1) };
+        &self.0
     }
 
     pub(super) fn path(&self) -> &CStr {
@@ -126,8 +137,8 @@ impl Target {
             let name = base_name(temp);
             let fd = unsafe {
                 cbm_config_edit_target_create_temp(
-                    &self.0,
-                    name.as_ptr(),
+                    self.native(),
+                    ffi_output::c_str(name),
                     PRIVATE_MODE,
                 )
             };
@@ -147,7 +158,10 @@ impl Target {
     pub(super) fn discard(&self, temp: &CStr) {
         if self.followed() {
             unsafe {
-                cbm_config_edit_target_unlink(&self.0, base_name(temp).as_ptr())
+                cbm_config_edit_target_unlink(
+                    self.native(),
+                    ffi_output::c_str(base_name(temp)),
+                )
             };
         } else {
             let _ = fs::remove_file(os_path(temp));
@@ -159,8 +173,8 @@ impl Target {
             return require(
                 unsafe {
                     cbm_config_edit_target_commit(
-                        &self.0,
-                        base_name(temp).as_ptr(),
+                        self.native(),
+                        ffi_output::c_str(base_name(temp)),
                     )
                 } == 0,
             );
@@ -190,7 +204,10 @@ impl Target {
 
 impl Drop for Target {
     fn drop(&mut self) {
-        unsafe { cbm_config_edit_target_close(&mut self.0) };
+        unsafe {
+            ffi_output::written(&self.0, 1);
+            cbm_config_edit_target_close(&mut self.0)
+        };
     }
 }
 

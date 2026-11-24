@@ -4,6 +4,8 @@ use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use crate::ffi_output;
+
 use super::{Invalid, MAX_BYTES, Result, parser::validate_document};
 
 #[cfg(unix)]
@@ -70,7 +72,10 @@ impl Target {
             path: [0; 4096],
         };
         // SAFETY: path is terminated and raw has the C struct layout.
-        if unsafe { cbm_config_edit_target_open(path.as_ptr(), &mut raw) } < 0 {
+        if unsafe {
+            cbm_config_edit_target_open(ffi_output::c_str(path), &mut raw)
+        } < 0
+        {
             return Err(invalid_path());
         }
         Ok(Self(raw))
@@ -79,6 +84,13 @@ impl Target {
     fn path(&self) -> &CStr {
         // SAFETY: the successful resolver terminated the path.
         unsafe { CStr::from_ptr(self.0.path.as_ptr()) }
+    }
+
+    #[cfg(unix)]
+    fn native(&self) -> *const ConfigTarget {
+        // The zero-initialized arrays and scalar fields have no padding.
+        unsafe { ffi_output::written(&self.0, 1) };
+        &self.0
     }
 
     fn followed(&self) -> bool {
@@ -94,7 +106,10 @@ impl Target {
 impl Drop for Target {
     fn drop(&mut self) {
         // SAFETY: the successful resolver initialized this target.
-        unsafe { cbm_config_edit_target_close(&mut self.0) };
+        unsafe {
+            ffi_output::written(&self.0, 1);
+            cbm_config_edit_target_close(&mut self.0)
+        };
     }
 }
 
@@ -155,7 +170,7 @@ fn publish(path: &CStr, old: &Snapshot, updated: &[u8]) -> io::Result<()> {
         let parent = parent(resolved);
         // SAFETY: parent is NUL-terminated. Bit 0 is CBM_MKDIR_FOLLOW_OWNED.
         if parent.to_bytes() != b"."
-            && !unsafe { cbm_mkdir_p_ex(parent.as_ptr(), 0o755, 1) }
+            && !unsafe { cbm_mkdir_p_ex(ffi_output::c_str(&parent), 0o755, 1) }
         {
             return Err(invalid_path());
         }

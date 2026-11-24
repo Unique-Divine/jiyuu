@@ -6,6 +6,8 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
+use crate::ffi_output;
+
 use super::{Entry, cstring, ffi, refused};
 
 const DIRECTORY_FLAGS: c_int =
@@ -15,7 +17,10 @@ const READ_FLAGS: c_int =
 
 unsafe extern "C" {
     fn cbm_macos_extended_acl_fd_is_empty(fd: c_int) -> bool;
-    fn cbm_log(level: c_int, message: *const c_char, ...);
+    fn cbm_log_activation_ancestor_group_writable(
+        path: *const c_char,
+        mode: *const c_char,
+    );
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -67,16 +72,11 @@ impl Directory {
                     let mode = cstring(
                         format!("{:04o}", metadata.mode() & 0o7777).as_bytes(),
                     );
-                    // SAFETY: all variadic entries are C string pointers, terminated by NULL.
+                    // SAFETY: both strings remain valid through the C logger.
                     unsafe {
-                        cbm_log(
-                            2,
-                            c"activation.ancestor_group_writable".as_ptr(),
-                            c"path".as_ptr(),
-                            walk.as_ptr(),
-                            c"mode".as_ptr(),
-                            mode.as_ptr(),
-                            std::ptr::null::<c_char>(),
+                        cbm_log_activation_ancestor_group_writable(
+                            ffi_output::c_str(&walk),
+                            ffi_output::c_str(&mode),
                         )
                     };
                 }
@@ -140,7 +140,7 @@ impl Directory {
         let result = unsafe {
             libc::fstatat(
                 self.fd(),
-                entry.name.as_ptr(),
+                ffi_output::c_str(&entry.name),
                 metadata.as_mut_ptr(),
                 libc::AT_SYMLINK_NOFOLLOW,
             )
@@ -244,9 +244,9 @@ impl Directory {
         retry(|| unsafe {
             libc::renameat(
                 self.fd(),
-                from.name.as_ptr(),
+                ffi_output::c_str(&from.name),
                 self.fd(),
-                to.name.as_ptr(),
+                ffi_output::c_str(&to.name),
             )
         })
     }
@@ -263,9 +263,9 @@ impl Directory {
                 libc::syscall(
                     libc::SYS_renameat2,
                     self.fd(),
-                    from.name.as_ptr(),
+                    ffi_output::c_str(&from.name),
                     self.fd(),
-                    to.name.as_ptr(),
+                    ffi_output::c_str(&to.name),
                     libc::RENAME_NOREPLACE,
                 ) as c_int
             }
@@ -276,9 +276,9 @@ impl Directory {
             unsafe {
                 libc::renameatx_np(
                     self.fd(),
-                    from.name.as_ptr(),
+                    ffi_output::c_str(&from.name),
                     self.fd(),
-                    to.name.as_ptr(),
+                    ffi_output::c_str(&to.name),
                     libc::RENAME_EXCL,
                 )
             }
@@ -307,9 +307,9 @@ impl Directory {
         retry(|| unsafe {
             libc::linkat(
                 self.fd(),
-                from.name.as_ptr(),
+                ffi_output::c_str(&from.name),
                 self.fd(),
-                to.name.as_ptr(),
+                ffi_output::c_str(&to.name),
                 0,
             )
         })
@@ -317,7 +317,9 @@ impl Directory {
 
     pub(super) fn unlink_strict(&self, entry: &Entry) -> io::Result<()> {
         // SAFETY: the directory fd and entry name remain live.
-        retry(|| unsafe { libc::unlinkat(self.fd(), entry.name.as_ptr(), 0) })
+        retry(|| unsafe {
+            libc::unlinkat(self.fd(), ffi_output::c_str(&entry.name), 0)
+        })
     }
 
     pub(super) fn unlink(
@@ -380,8 +382,9 @@ fn open_at(
     mode: libc::mode_t,
 ) -> io::Result<File> {
     // SAFETY: the path is NUL-terminated. parent is a live directory fd or AT_FDCWD.
-    let fd =
-        unsafe { libc::openat(parent, name.as_ptr(), flags, mode as c_int) };
+    let fd = unsafe {
+        libc::openat(parent, ffi_output::c_str(name), flags, mode as c_int)
+    };
     if fd < 0 {
         Err(io::Error::last_os_error())
     } else {

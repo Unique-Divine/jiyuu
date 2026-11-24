@@ -6,6 +6,8 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
+use crate::ffi_output;
+
 use super::{
     MAX_BYTES, Target, Temp, cbm_config_edit_target_commit,
     cbm_config_edit_target_create_temp, cbm_config_edit_target_unlink,
@@ -111,8 +113,8 @@ pub(super) fn create_temp(
         // SAFETY: the target owns the pinned dirfd and basename is terminated.
         let fd = unsafe {
             cbm_config_edit_target_create_temp(
-                &target.0,
-                basename(name).as_ptr(),
+                target.native(),
+                ffi_output::c_str(basename(name)),
                 0o600,
             )
         };
@@ -131,7 +133,10 @@ pub(super) fn discard(target: &Target, name: &CStr, path: &Path) {
     if target.followed() {
         // SAFETY: the target and the terminated staging basename are live.
         unsafe {
-            cbm_config_edit_target_unlink(&target.0, basename(name).as_ptr())
+            cbm_config_edit_target_unlink(
+                target.native(),
+                ffi_output::c_str(basename(name)),
+            )
         };
     } else {
         let _ = fs::remove_file(path);
@@ -147,8 +152,8 @@ pub(super) fn publish(
         // SAFETY: the target and the terminated staging basename are live.
         return status(unsafe {
             cbm_config_edit_target_commit(
-                &target.0,
-                basename(&temp.name).as_ptr(),
+                target.native(),
+                ffi_output::c_str(basename(&temp.name)),
             )
         });
     }
