@@ -455,6 +455,14 @@ more than 50 files and the effective worker count exceeds one. Frozen
 builds use one worker. The `pipeline.full_build_driver` worker log records
 Rust scheduling.
 
+
+### Full-Text Search After an Upgrade
+
+Closure repair rebuilds full-text search from the live nodes in the staged
+graph. The first closure repair or full rebuild after upgrading clears stale
+search postings left by earlier versions. If the repository is unchanged,
+reindexing can take the no-op route and keep the existing cache.
+
 C executes the passes, including extraction and resolution. Standard local
 linked builds accept `MORI_IMPL_FULL_BUILD_DRIVER=c` on a fresh daemon.
 Packaged builds contain the Rust scheduling driver. Rust scheduling also
