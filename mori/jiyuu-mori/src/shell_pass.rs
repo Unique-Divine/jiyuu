@@ -392,10 +392,9 @@ fn make_targets(
                 candidates += 1;
                 if let Some(&(_, target)) =
                     rules.get(&[file.as_slice(), b"\x1f", name].concat())
+                    && target > 0
                 {
-                    if target > 0 {
-                        return target;
-                    }
+                    return target;
                 }
             }
             0
