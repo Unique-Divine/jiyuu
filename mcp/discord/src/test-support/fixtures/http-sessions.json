@@ -1,0 +1,136 @@
+[
+  {
+    "method": "initialize",
+    "requestSession": null,
+    "responseSession": "client-a",
+    "response": {
+      "jsonrpc": "2.0",
+      "id": 0,
+      "result": {
+        "protocolVersion": "2025-06-18",
+        "capabilities": {
+          "tools": {
+            "listChanged": true
+          }
+        },
+        "serverInfo": {
+          "name": "http-session-fixture",
+          "version": "1"
+        }
+      }
+    }
+  },
+  {
+    "method": "tools/list",
+    "requestSession": "client-a",
+    "responseSession": "client-a",
+    "response": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "tools": [
+          {
+            "name": "echo",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "message": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "message"
+              ],
+              "additionalProperties": false,
+              "$schema": "http://json-schema.org/draft-07/schema#"
+            }
+          }
+        ]
+      }
+    }
+  },
+  {
+    "method": "tools/call",
+    "requestSession": "client-a",
+    "responseSession": "client-a",
+    "response": {
+      "jsonrpc": "2.0",
+      "id": 2,
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "delayed"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "method": "initialize",
+    "requestSession": null,
+    "responseSession": "client-b",
+    "response": {
+      "jsonrpc": "2.0",
+      "id": 0,
+      "result": {
+        "protocolVersion": "2025-06-18",
+        "capabilities": {
+          "tools": {
+            "listChanged": true
+          }
+        },
+        "serverInfo": {
+          "name": "http-session-fixture",
+          "version": "1"
+        }
+      }
+    }
+  },
+  {
+    "method": "tools/list",
+    "requestSession": "client-b",
+    "responseSession": "client-b",
+    "response": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "tools": [
+          {
+            "name": "echo",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "message": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "message"
+              ],
+              "additionalProperties": false,
+              "$schema": "http://json-schema.org/draft-07/schema#"
+            }
+          }
+        ]
+      }
+    }
+  },
+  {
+    "method": "tools/call",
+    "requestSession": "client-b",
+    "responseSession": "client-b",
+    "response": {
+      "jsonrpc": "2.0",
+      "id": 2,
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "immediate"
+          }
+        ]
+      }
+    }
+  }
+]

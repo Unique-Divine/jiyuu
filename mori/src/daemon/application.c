@@ -2383,50 +2383,149 @@ static void application_recover_repair_batch(cbm_daemon_application_t *applicati
     }
 }
 
-static void *application_repair_recovery_thread(void *opaque) {
-    cbm_daemon_application_t *application = opaque;
-    yyjson_mut_doc *projects = NULL;
+typedef struct {
+    cbm_daemon_application_t *application;
+    yyjson_mut_doc *projects;
+} application_recovery_t;
+
+enum {
+    APPLICATION_RECOVERY_STOPPING = 1 << 0,
+    APPLICATION_RECOVERY_REQUESTED = 1 << 1,
+    APPLICATION_RECOVERY_SETTLED = 1 << 2,
+};
+
+static bool application_recovery_stopping(const application_recovery_t *run) {
+    return run->application->stopping;
+}
+
+static bool application_recovery_round(application_recovery_t *run, bool full_scan) {
+    if (full_scan) {
+        yyjson_mut_doc_free(run->projects);
+        run->projects = application_recovery_projects(run->application);
+    }
+    yyjson_mut_val *projects = yyjson_mut_doc_get_root(run->projects);
+    application_recover_repair_batch(run->application, projects);
+    if (full_scan && run->projects && !run->application->stopping) {
+        char pending[CBM_SZ_32];
+        snprintf(pending, sizeof(pending), "%zu", yyjson_mut_arr_size(projects));
+        cbm_log_info("cross_repo.recovery_scan_complete", "pending", pending);
+    }
+    return run->projects != NULL;
+}
+
+static uint64_t application_recovery_retry_deadline(void) {
+    return application_deadline_after(APPLICATION_REPAIR_RECOVERY_RETRY_MS);
+}
+
+/* Keep the mutex held until the driver commits its decision. If it is done,
+ * the next request must see a completed thread and start a new one. */
+static uint8_t application_recovery_begin_check(application_recovery_t *run) {
+    cbm_daemon_application_t *application = run->application;
+    cbm_mutex_lock(&application->mutex);
+    uint8_t flags = 0;
+    if (application->stopping) {
+        flags |= APPLICATION_RECOVERY_STOPPING;
+    }
+    if (application->repair_recovery_requested) {
+        flags |= APPLICATION_RECOVERY_REQUESTED;
+    }
+    if (run->projects && yyjson_mut_arr_size(yyjson_mut_doc_get_root(run->projects)) == 0) {
+        flags |= APPLICATION_RECOVERY_SETTLED;
+    }
+    application->repair_recovery_requested = false;
+    return flags;
+}
+
+static void application_recovery_free_projects(application_recovery_t *run) {
+    yyjson_mut_doc_free(run->projects);
+    run->projects = NULL;
+    cbm_mem_class_flush_thread();
+}
+
+static void application_recovery_end_check(application_recovery_t *run, bool done) {
+    if (done) {
+        application_recovery_free_projects(run);
+        run->application->repair_recovery_done = true;
+    }
+    cbm_mutex_unlock(&run->application->mutex);
+}
+
+static bool application_recovery_wait_tick(uint64_t retry_at) {
+    if (cbm_now_ms() >= retry_at) {
+        return true;
+    }
+    cbm_usleep(APPLICATION_REPAIR_LEASE_RETRY_US);
+    return false;
+}
+
+static void application_recovery_finish(application_recovery_t *run) {
+    application_recovery_free_projects(run);
+    cbm_mutex_lock(&run->application->mutex);
+    run->application->repair_recovery_done = true;
+    cbm_mutex_unlock(&run->application->mutex);
+}
+
+/* Keep in sync with RecoveryOps in the Rust binary. */
+typedef struct {
+    bool (*stopping)(const application_recovery_t *run);
+    bool (*run_batch)(application_recovery_t *run, bool full_scan);
+    uint64_t (*retry_deadline)(void);
+    uint8_t (*begin_check)(application_recovery_t *run);
+    void (*end_check)(application_recovery_t *run, bool done);
+    bool (*wait_tick)(uint64_t retry_at);
+    void (*finish)(application_recovery_t *run);
+} application_recovery_ops_t;
+
+typedef void (*application_recovery_driver_t)(application_recovery_t *run,
+                                              const application_recovery_ops_t *ops);
+
+static application_recovery_driver_t application_external_recovery;
+
+void cbm_daemon_application_set_recovery_driver(application_recovery_driver_t driver);
+void cbm_daemon_application_set_recovery_driver(application_recovery_driver_t driver) {
+    application_external_recovery = driver;
+}
+
+static void application_run_recovery_c(application_recovery_t *run) {
     bool rescan = true;
-    while (!application->stopping) {
-        bool full_scan = rescan || !projects;
-        if (full_scan) {
-            yyjson_mut_doc_free(projects);
-            projects = application_recovery_projects(application);
-        }
-        application_recover_repair_batch(application, yyjson_mut_doc_get_root(projects));
-        if (full_scan && projects && !application->stopping) {
-            char pending[CBM_SZ_32];
-            snprintf(pending, sizeof(pending), "%zu",
-                     yyjson_mut_arr_size(yyjson_mut_doc_get_root(projects)));
-            cbm_log_info("cross_repo.recovery_scan_complete", "pending", pending);
-        }
-        uint64_t retry_at = application_deadline_after(APPLICATION_REPAIR_RECOVERY_RETRY_MS);
+    while (!application_recovery_stopping(run)) {
+        application_recovery_round(run, rescan || !run->projects);
+        uint64_t retry_at = application_recovery_retry_deadline();
         for (;;) {
-            cbm_mutex_lock(&application->mutex);
-            rescan = application->repair_recovery_requested;
-            application->repair_recovery_requested = false;
-            bool done = application->stopping ||
-                        (!rescan && projects &&
-                         yyjson_mut_arr_size(yyjson_mut_doc_get_root(projects)) == 0);
+            uint8_t flags = application_recovery_begin_check(run);
+            rescan = (flags & APPLICATION_RECOVERY_REQUESTED) != 0;
+            bool done = (flags & APPLICATION_RECOVERY_STOPPING) != 0 ||
+                        (!rescan && (flags & APPLICATION_RECOVERY_SETTLED) != 0);
+            application_recovery_end_check(run, done);
             if (done) {
-                yyjson_mut_doc_free(projects);
-                cbm_mem_class_flush_thread();
-                application->repair_recovery_done = true;
-                cbm_mutex_unlock(&application->mutex);
-                return NULL;
+                return;
             }
-            cbm_mutex_unlock(&application->mutex);
-            if (rescan || cbm_now_ms() >= retry_at) {
+            if (rescan || application_recovery_wait_tick(retry_at)) {
                 break;
             }
-            cbm_usleep(APPLICATION_REPAIR_LEASE_RETRY_US);
         }
     }
-    yyjson_mut_doc_free(projects);
-    cbm_mem_class_flush_thread();
-    cbm_mutex_lock(&application->mutex);
-    application->repair_recovery_done = true;
-    cbm_mutex_unlock(&application->mutex);
+    application_recovery_finish(run);
+}
+
+static void *application_repair_recovery_thread(void *opaque) {
+    application_recovery_t run = {.application = opaque};
+    static const application_recovery_ops_t ops = {
+        .stopping = application_recovery_stopping,
+        .run_batch = application_recovery_round,
+        .retry_deadline = application_recovery_retry_deadline,
+        .begin_check = application_recovery_begin_check,
+        .end_check = application_recovery_end_check,
+        .wait_tick = application_recovery_wait_tick,
+        .finish = application_recovery_finish,
+    };
+    cbm_log_info("cross_repo.recovery_driver", "implementation",
+                 application_external_recovery ? "rust" : "c");
+    if (application_external_recovery) {
+        application_external_recovery(&run, &ops);
+    } else {
+        application_run_recovery_c(&run);
+    }
     return NULL;
 }
 
@@ -4421,15 +4520,132 @@ static void application_clear_named_watch_locked(cbm_daemon_application_t *appli
     }
 }
 
+typedef struct {
+    cbm_daemon_application_t *application;
+    cbm_daemon_named_watch_t *entries;
+    size_t count;
+    bool *pending;
+} application_named_watch_run_t;
+
+typedef struct {
+    bool present;
+    bool deferred;
+    cbm_daemon_application_watch_t *added;
+} application_named_watch_stage_t;
+
 static bool application_named_watch_list_contains(const cbm_daemon_named_watch_t *entries,
-                                                  const bool *deferred, size_t count,
-                                                  const char *project) {
+                                                  const application_named_watch_stage_t *stage,
+                                                  size_t count, const char *project) {
     for (size_t i = 0; i < count; i++) {
-        if (!deferred[i] && strcmp(entries[i].project, project) == 0) {
+        if (!stage[i].deferred && strcmp(entries[i].project, project) == 0) {
             return true;
         }
     }
     return false;
+}
+
+static bool application_named_watch_check(application_named_watch_run_t *run, size_t at,
+                                          bool *present, bool *was_pending) {
+    *was_pending = run->entries[at].pending;
+    return application_named_watch_valid(run->application, run->entries, at, present);
+}
+
+static bool application_named_watch_add(application_named_watch_run_t *run, size_t at,
+                                        application_named_watch_stage_t *entry) {
+    cbm_daemon_application_t *application = run->application;
+    const cbm_daemon_named_watch_t *requested = &run->entries[at];
+    cbm_daemon_application_watch_t *watch =
+        application_find_watch_locked(application, requested->project);
+    if (watch && watch->named) {
+        return true;
+    }
+    if (!entry->present && !watch) {
+        entry->deferred = true;
+        return true;
+    }
+    if (watch) {
+        if (!cbm_watcher_set_named(application->watcher, watch->project, true)) {
+            return false;
+        }
+        watch->named = true;
+    } else {
+        watch = application_create_watch_locked(application, requested->project, requested->root,
+                                                NULL, true);
+        if (!watch) {
+            return false;
+        }
+    }
+    entry->added = watch;
+    return true;
+}
+
+static void application_named_watch_undo(application_named_watch_run_t *run,
+                                         cbm_daemon_application_watch_t *added) {
+    application_clear_named_watch_locked(run->application, added);
+}
+
+static void application_named_watch_commit(application_named_watch_run_t *run,
+                                           const application_named_watch_stage_t *stage) {
+    cbm_daemon_application_t *application = run->application;
+    for (cbm_daemon_application_watch_t *watch = application->watches; watch;) {
+        cbm_daemon_application_watch_t *next = watch->next;
+        if (!application_named_watch_list_contains(run->entries, stage, run->count, watch->project)) {
+            application_clear_named_watch_locked(application, watch);
+        }
+        watch = next;
+    }
+    for (size_t i = 0; i < run->count; i++) {
+        run->entries[i].pending = stage[i].deferred;
+        if (run->pending && stage[i].deferred) {
+            *run->pending = true;
+        }
+    }
+}
+
+/* Keep in sync with NamedWatchStage and NamedWatchOps in the Rust binary. */
+typedef struct {
+    bool (*check)(application_named_watch_run_t *run, size_t at, bool *present, bool *was_pending);
+    bool (*add)(application_named_watch_run_t *run, size_t at, application_named_watch_stage_t *entry);
+    void (*undo)(application_named_watch_run_t *run, cbm_daemon_application_watch_t *added);
+    void (*commit)(application_named_watch_run_t *run, const application_named_watch_stage_t *stage);
+} application_named_watch_ops_t;
+
+typedef bool (*application_named_watch_driver_t)(application_named_watch_run_t *run,
+                                                 const application_named_watch_ops_t *ops,
+                                                 application_named_watch_stage_t *stage,
+                                                 size_t count);
+
+static application_named_watch_driver_t application_external_named_watch;
+
+void cbm_daemon_application_set_named_watch_driver(application_named_watch_driver_t driver);
+void cbm_daemon_application_set_named_watch_driver(application_named_watch_driver_t driver) {
+    application_external_named_watch = driver;
+}
+
+static bool application_run_named_watch_c(application_named_watch_run_t *run,
+                                          application_named_watch_stage_t *stage) {
+    for (size_t i = 0; i < run->count; i++) {
+        bool was_pending;
+        if (!application_named_watch_check(run, i, &stage[i].present, &was_pending)) {
+            if (!was_pending) {
+                return false;
+            }
+            stage[i].deferred = true;
+        }
+    }
+    for (size_t i = 0; i < run->count; i++) {
+        if (!stage[i].deferred && !application_named_watch_add(run, i, &stage[i])) {
+            while (i) {
+                cbm_daemon_application_watch_t *added = stage[--i].added;
+                if (added) {
+                    application_named_watch_undo(run, added);
+                }
+            }
+            return false;
+        }
+    }
+    application_named_watch_commit(run, stage);
+    return true;
 }
 
 bool cbm_daemon_application_reconcile_named_watches(cbm_daemon_application_t *application,
@@ -4451,67 +4667,24 @@ bool cbm_daemon_application_reconcile_named_watches(cbm_daemon_application_t *ap
         cbm_mutex_unlock(&application->mutex);
         return count == 0;
     }
-    bool present[CBM_DAEMON_NAMED_WATCH_LIMIT];
-    bool deferred[CBM_DAEMON_NAMED_WATCH_LIMIT] = {0};
-    for (size_t i = 0; i < count; i++) {
-        if (!application_named_watch_valid(application, entries, i, &present[i])) {
-            if (!entries[i].pending) {
-                cbm_mutex_unlock(&application->mutex);
-                return false;
-            }
-            deferred[i] = true;
-        }
-    }
 
-    cbm_daemon_application_watch_t *added[CBM_DAEMON_NAMED_WATCH_LIMIT];
-    size_t added_count = 0;
-    for (size_t i = 0; i < count; i++) {
-        if (deferred[i]) {
-            continue;
-        }
-        cbm_daemon_application_watch_t *watch =
-            application_find_watch_locked(application, entries[i].project);
-        if (watch && watch->named) {
-            continue;
-        }
-        if (!present[i] && !watch) {
-            deferred[i] = true;
-            continue;
-        }
-        if (watch) {
-            if (cbm_watcher_set_named(application->watcher, watch->project, true)) {
-                watch->named = true;
-            } else {
-                watch = NULL;
-            }
-        } else {
-            watch = application_create_watch_locked(application, entries[i].project,
-                                                    entries[i].root, NULL, true);
-        }
-        if (!watch) {
-            while (added_count) {
-                application_clear_named_watch_locked(application, added[--added_count]);
-            }
-            cbm_mutex_unlock(&application->mutex);
-            return false;
-        }
-        added[added_count++] = watch;
-    }
-    for (cbm_daemon_application_watch_t *watch = application->watches; watch;) {
-        cbm_daemon_application_watch_t *next = watch->next;
-        if (!application_named_watch_list_contains(entries, deferred, count, watch->project)) {
-            application_clear_named_watch_locked(application, watch);
-        }
-        watch = next;
-    }
-    for (size_t i = 0; i < count; i++) {
-        entries[i].pending = deferred[i];
-        if (pending && deferred[i]) {
-            *pending = true;
-        }
-    }
+    application_named_watch_run_t run = {
+        .application = application, .entries = entries, .count = count, .pending = pending,
+    };
+    application_named_watch_stage_t stage[CBM_DAEMON_NAMED_WATCH_LIMIT] = {0};
+    static const application_named_watch_ops_t ops = {
+        .check = application_named_watch_check,
+        .add = application_named_watch_add,
+        .undo = application_named_watch_undo,
+        .commit = application_named_watch_commit,
+    };
+    cbm_log_debug("daemon.named_watch.reconcile", "implementation",
+                  application_external_named_watch ? "rust" : "c");
+    bool accepted = application_external_named_watch
+                        ? application_external_named_watch(&run, &ops, stage, count)
+                        : application_run_named_watch_c(&run, stage);
     cbm_mutex_unlock(&application->mutex);
-    return true;
+    return accepted;
 }
 
 bool cbm_daemon_application_named_watches_match(cbm_daemon_application_t *application,

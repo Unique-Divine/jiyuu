@@ -1,4 +1,5 @@
 #include "cbm.h"
+#include "graphql_extract.h"
 #include "callable_sig.h"
 #include "arena.h"   // CBMArena, cbm_arena_alloc/strdup/sprintf
 #include "doclink.h" // cbm_doclink_note_doc_line
@@ -7704,9 +7705,36 @@ static char *trim_heading_name(char *name) {
     return (name[0]) ? name : NULL;
 }
 
+typedef size_t (*markdown_heading_extractor_t)(TSNode, const char *, size_t, char *, size_t);
+static markdown_heading_extractor_t markdown_heading_extractor;
+
+void cbm_markdown_set_heading_extractor(markdown_heading_extractor_t extractor);
+void cbm_markdown_set_heading_extractor(markdown_heading_extractor_t extractor) {
+    markdown_heading_extractor = extractor;
+}
+
+static char *markdown_heading_from_rust(CBMArena *arena, TSNode node, const char *source,
+                                        size_t source_len) {
+    size_t capacity = ts_node_end_byte(node) - ts_node_start_byte(node);
+    char *output = cbm_arena_alloc(arena, capacity + SKIP_ONE);
+    if (!output) {
+        return NULL;
+    }
+    size_t written = markdown_heading_extractor(node, source, source_len, output, capacity);
+    if (written > capacity) {
+        return NULL;
+    }
+    output[written] = '\0';
+    cbm_log_debug("extract.markdown_heading", "implementation", "rust");
+    return trim_heading_name(output);
+}
+
 // Extract Markdown heading name from atx_heading or setext_heading.
 static char *extract_markdown_heading_name(CBMArena *a, TSNode node, const char *kind,
-                                           const char *source) {
+                                           const char *source, int source_len) {
+    if (markdown_heading_extractor && source_len > 0) {
+        return markdown_heading_from_rust(a, node, source, (size_t)source_len);
+    }
     char *name = NULL;
     if (strcmp(kind, "atx_heading") == 0) {
         name = extract_atx_heading_text(a, node, source);
@@ -7752,7 +7780,7 @@ static const char *md_heading_segment(CBMExtractCtx *ctx, CBMArena *a, TSNode no
     if (!is_markdown_heading_kind(kind)) {
         return NULL;
     }
-    char *name = extract_markdown_heading_name(a, node, kind, ctx->source);
+    char *name = extract_markdown_heading_name(a, node, kind, ctx->source, ctx->source_len);
     return name ? qn_safe_segment(a, name) : NULL;
 }
 
@@ -8218,7 +8246,7 @@ static bool extract_config_class_def(CBMExtractCtx *ctx, TSNode node, const char
         name = find_xml_element_name(a, node, ctx->source);
     } else if (ctx->language == CBM_LANG_MARKDOWN &&
                (strcmp(kind, "atx_heading") == 0 || strcmp(kind, "setext_heading") == 0)) {
-        name = extract_markdown_heading_name(a, node, kind, ctx->source);
+        name = extract_markdown_heading_name(a, node, kind, ctx->source, ctx->source_len);
         // A heading is a Section (a valid label), not a Class — keep the accurate
         // label rather than degrade it to match a test. The markdown repro asserts
         // "Class"; that assertion is the inaccurate side and is flagged for review.
@@ -12646,12 +12674,22 @@ static const char **graphql_field_props(CBMArena *a, TSNode field, const char *s
  * handled. GraphQL: field_definition (name)(type:named_type); Prisma:
  * column_declaration (identifier)(column_type); Smali: field_definition
  * (field_identifier)(field_type). */
+static cbm_graphql_field_spans_t (*graphql_extract_field_spans)(TSNode);
+
+void cbm_graphql_set_field_extractor(cbm_graphql_field_spans_t (*extract)(TSNode)) {
+    graphql_extract_field_spans = extract;
+}
+
 static bool extract_schema_field(CBMExtractCtx *ctx, TSNode child, const char *class_qn) {
     CBMArena *a = ctx->arena;
     TSNode name_node = {0};
     TSNode type_node = {0};
 
-    if (ctx->language == CBM_LANG_GRAPHQL) {
+    cbm_graphql_field_spans_t spans = {0};
+    if (ctx->language == CBM_LANG_GRAPHQL && graphql_extract_field_spans) {
+        spans = graphql_extract_field_spans(child);
+        cbm_log_debug("extract.graphql_field_spans", "implementation", "rust");
+    } else if (ctx->language == CBM_LANG_GRAPHQL) {
         name_node = ts_node_child_by_field_name(child, TS_FIELD("name"));
         if (ts_node_is_null(name_node)) {
             name_node = cbm_find_child_by_kind(child, "name");
@@ -12671,10 +12709,13 @@ static bool extract_schema_field(CBMExtractCtx *ctx, TSNode child, const char *c
         return false;
     }
 
-    if (ts_node_is_null(name_node)) {
+    if (!spans.name.present && ts_node_is_null(name_node)) {
         return true; // language matched but no name → nothing to emit
     }
-    char *name = cbm_node_text(a, name_node, ctx->source);
+    char *name = spans.name.present
+                     ? cbm_arena_strndup(a, ctx->source + spans.name.start,
+                                         spans.name.end - spans.name.start)
+                     : cbm_node_text(a, name_node, ctx->source);
     if (!name || !name[0]) {
         return true;
     }
@@ -12686,7 +12727,10 @@ static bool extract_schema_field(CBMExtractCtx *ctx, TSNode child, const char *c
     def.label = "Field";
     def.file_path = ctx->rel_path;
     def.parent_class = class_qn;
-    if (!ts_node_is_null(type_node)) {
+    if (spans.type.present) {
+        def.return_type = cbm_arena_strndup(a, ctx->source + spans.type.start,
+                                            spans.type.end - spans.type.start);
+    } else if (!ts_node_is_null(type_node)) {
         def.return_type = cbm_node_text(a, type_node, ctx->source);
     }
     def.start_line = ts_node_start_point(child).row + TS_LINE_OFFSET;

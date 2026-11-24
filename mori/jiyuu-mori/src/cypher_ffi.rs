@@ -79,6 +79,13 @@ unsafe extern "C" fn evaluate(
         // strings, and callbacks with contexts valid for this invocation.
         let cancelled = || unsafe { cancelled(cancel_context) };
         let mut budget = ExecutionBudget::new(&Instant::now, &cancelled);
+        #[cfg(debug_assertions)]
+        if let Some(limit) = std::env::var("MORI_TEST_ORDERED_COUNT_GROUP_LIMIT")
+            .ok()
+            .and_then(|value| value.parse().ok())
+        {
+            budget.set_ordered_count_group_limit_for_tests(limit);
+        }
         let query = unsafe { CStr::from_ptr(query) };
         let project = unsafe { CStr::from_ptr(project) };
         let Ok(source) = query.to_str() else {
@@ -99,6 +106,7 @@ unsafe extern "C" fn evaluate(
             });
         match result {
             Ok(rows) => sink.emit(&rows),
+            Err(ExecutionError::Unsupported) => Status::Unsupported,
             Err(ExecutionError::Deadline) => Status::Deadline,
             Err(ExecutionError::Cancelled) => Status::Cancelled,
             Err(ExecutionError::RowCeiling) => Status::RowCeiling,

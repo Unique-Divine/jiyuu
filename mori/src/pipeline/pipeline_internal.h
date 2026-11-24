@@ -1617,8 +1617,12 @@ typedef struct {
     bool tests_target;       /* has an incoming TESTS edge */
 } cbm_importance_inputs_t;
 
-/* THE scoring rule — single definition, shared by every route, so the two
- * gathering strategies cannot drift apart in what a score means. */
+/* Both gathering routes use the same scorer. Register a replacement before
+ * any indexing worker starts. The C build uses the native rule by default. */
+typedef double (*cbm_importance_scorer_fn)(int num_refs, int name_distinct_files,
+                                           bool private_name, bool distinctive_name,
+                                           bool test_scaffolding);
+void cbm_pipeline_set_importance_scorer(cbm_importance_scorer_fn scorer);
 double cbm_pipeline_importance_score(const cbm_importance_inputs_t *in);
 
 /* Produce a copy of `json` with the numeric "importance" key set to `score`,

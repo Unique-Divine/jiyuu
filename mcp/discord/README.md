@@ -147,30 +147,42 @@ source checkout:
 ```
 
 After `just link`, `"command": "mcp-discord"` with no arguments also works.
-Unique-Divine/dotfiles manages this link itself starting with
-[dotfiles PR #137](https://github.com/Unique-Divine/dotfiles/pull/137): its
-`just bun-sync` links `mcp-discord` to this checkout's `src/index.ts`. On a
-workstation with that change, don't also run `just link`.
-`just run` starts the same entrypoint from this directory.
+`just run` starts the same entrypoint from this directory. Dotfiles sync
+uses the published package by default.
 
 ### Streamable HTTP Transport
 
-`src/app.ts` serves MCP over HTTP at `/mcp`. It does not speak stdio.
+For a shared process, inject `DISCORD_TOKEN` into the process environment
+before running:
 
 ```sh
-DISCORD_TOKEN=your_discord_bot_token bun src/app.ts --transport http --port 3000
+bun --no-env-file x @uniquedivine/mcp-discord@latest --transport http --shared --host 127.0.0.1 --port 8123
 ```
 
-The endpoint is then `http://127.0.0.1:3000/mcp`. `src/index.ts --transport http`
-also serves HTTP, on port 8080 unless `--port` is given.
+Point clients at `http://127.0.0.1:8123/mcp`. All HTTP sessions share one
+Discord client and bot identity. The shared process takes its token from
+the environment and omits `discord_login`. `GET /healthz` returns 200 when
+the Discord client is ready and 503 while it is connecting or disconnected.
+When systemd supplies a valid `INVOCATION_ID`, readiness responses include
+`X-Discord-MCP-Invocation-ID` so the service manager can identify the instance.
+An initial login failure exits with an error so a service manager can retry.
 
-The HTTP transports have no authentication. Anyone who can reach the port can
-call every tool with the bot's permissions, including sends and deletes. Both
-entrypoints bind to `127.0.0.1` by default; keep them on loopback. `--host` or
-`HTTP_HOST` overrides the address, and the server logs a warning for any
-non-loopback host. Upstream bound to all interfaces.
+Shared HTTP only binds to loopback and trusts local processes. Anyone who
+can reach the port can call tools with the bot's permissions, including
+sends and deletes. Use it on a workstation where you trust local users.
 
-Both entrypoints also reject requests whose `Host` header is not
+Both `src/index.ts` and `src/app.ts` accept `--transport http` from a source
+checkout. Without `--shared`, HTTP retains runtime login, defaults to port
+8080, and permits an explicit non-loopback `--host` or `HTTP_HOST` with a
+warning. Both entrypoints serve the same tools. The `src/app.ts` entrypoint
+retains its original gateway intents without Server Members.
+
+HTTP clients must send the `Mcp-Session-Id` header returned by `initialize`
+on subsequent requests. The server expires sessions after 30 minutes of
+inactivity. Clients receiving HTTP 404 for a stale session should initialize
+again without a session ID, including after a service restart.
+
+Both entrypoints reject requests whose `Host` header is not
 `127.0.0.1`, `localhost` or `[::1]` on the bound port, or the explicit
 `--host`, with HTTP 403. A browser `Origin`, when sent, must match one of those
 too. This blocks DNS rebinding, where a web page points its own hostname at
@@ -182,7 +194,7 @@ wildcard bind such as `0.0.0.0` needs for remote clients.
 
 ### Basic Functions
 
-- `discord_login`: Login to Discord using the configured token
+- `discord_login`: Login to Discord from stdio or unshared HTTP
 - `discord_list_servers`: List all Discord servers the bot is a member of
 - `discord_send`: Send a message to a specified channel
 - `discord_get_server_info`: Get Discord server information

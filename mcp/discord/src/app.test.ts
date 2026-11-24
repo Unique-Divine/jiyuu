@@ -33,8 +33,36 @@ describe('app.ts HTTP entrypoint', () => {
             })
         });
         expect(res.status).toBe(400);
-        await server.waitFor(/without session ID: method="tools\/call"/);
+        expect(await res.text()).toContain("Missing MCP session ID");
         expect(server.stderr()).not.toContain(secret);
+    });
+
+    it('rejects malformed JSON without reflecting request text', async () => {
+        const sentinel = 'sensitive-fixture-value';
+        const res = await fetch(`http://127.0.0.1:${server.port}/mcp`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+            body: `{ "token": ${sentinel} }`
+        });
+        expect(res.status).toBe(400);
+        expect(await res.json()).toEqual({
+            jsonrpc: '2.0', error: { code: -32000, message: 'Invalid MCP request body' }, id: null
+        });
+        expect(server.stderr()).not.toContain(sentinel);
+    });
+
+    it('keeps the original gateway intents and listens during login', async () => {
+        const legacy = startHttpEntrypoint(join(import.meta.dir, 'app.ts'), { DISCORD_TOKEN: 'fixture' }, [], [
+            '--preload', join(import.meta.dir, 'test-support/discordLogin.ts')
+        ]);
+        try {
+            await legacy.waitFor(/listening on/);
+            await legacy.waitFor(/fixture GuildMembers intent: false/);
+            legacy.signal('SIGUSR1');
+            await legacy.waitFor(/Successfully logged in/);
+        } finally {
+            await legacy.stop();
+        }
     });
 });
 

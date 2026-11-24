@@ -14,12 +14,14 @@ use rusqlite::types::ValueRef;
 use rusqlite::{Connection, Row, Statement, params};
 
 const ENGINE_LIMIT: usize = 100_000;
+const ORDERED_COUNT_GROUP_LIMIT: usize = 16_384;
 const DEADLINE: Duration = Duration::from_secs(30);
 const CHECK_INTERVAL: usize = 1024;
 const PROPERTY_LIMIT: usize = 511;
 const ORDER_KEYS_MAX: usize = 8;
 const NATIVE_EDGE_PROPERTY_BUFFERS: usize = 8;
-const NODE_COLUMNS: &str = "n.id, n.label, n.name, n.qualified_name, n.file_path, n.start_line, n.end_line, n.properties";
+// CAST uses SQLite's integer conversion, as sqlite3_column_int does in C.
+const NODE_COLUMNS: &str = "n.id, n.label, n.name, n.qualified_name, n.file_path, CAST(n.start_line AS INTEGER), CAST(n.end_line AS INTEGER), n.properties";
 
 #[derive(Debug)]
 pub(crate) struct Unsupported;
@@ -32,6 +34,9 @@ enum Token<'a> {
     Symbol(u8),
     ArrowIn,
     ArrowOut,
+    NotEqual,
+    LessOrEqual,
+    GreaterOrEqual,
 }
 
 fn tokens(mut query: &str) -> Result<Vec<Token<'_>>, Unsupported> {
@@ -70,8 +75,12 @@ fn tokens(mut query: &str) -> Result<Vec<Token<'_>>, Unsupported> {
             }
             b'<' if query.starts_with("<-") => (Token::ArrowIn, 2),
             b'-' if query.starts_with("->") => (Token::ArrowOut, 2),
+            b'<' if query.starts_with("<=") => (Token::LessOrEqual, 2),
+            b'>' if query.starts_with(">=") => (Token::GreaterOrEqual, 2),
+            b'<' if query.starts_with("<>") => (Token::NotEqual, 2),
+            b'!' if query.starts_with("!=") => (Token::NotEqual, 2),
             b'(' | b')' | b'[' | b']' | b'{' | b'}' | b':' | b'-' | b'<'
-            | b'>' | b'.' | b'=' | b',' => (Token::Symbol(first), 1),
+            | b'>' | b'.' | b'=' | b',' | b'*' => (Token::Symbol(first), 1),
             _ => return Err(Unsupported),
         };
         result.push(token);
@@ -91,24 +100,124 @@ enum Binding {
     Edge(usize),
 }
 
-type Filter<'a> = (&'a str, &'a str);
+#[derive(Debug)]
+enum Comparison<'a> {
+    Equal(&'a str),
+    NotEqual(&'a str),
+    Contains(&'a str),
+    StartsWith(&'a str),
+    EndsWith(&'a str),
+    Line(Ordering, bool, i32),
+}
+
+#[derive(Debug)]
+struct Predicate<'a> {
+    node: usize,
+    property: &'a str,
+    comparison: Comparison<'a>,
+    negated: bool,
+}
+
+impl Predicate<'_> {
+    fn is_seed_equality(&self) -> bool {
+        !self.negated && matches!(self.comparison, Comparison::Equal(_))
+    }
+
+    fn matches(&self, node: &Node) -> bool {
+        let matches = match self.comparison {
+            Comparison::Line(direction, inclusive, expected) => {
+                let actual = if self.property == "start_line" {
+                    node.start_line
+                } else {
+                    node.end_line
+                };
+                let order = actual.cmp(&expected);
+                order == direction || (inclusive && order == Ordering::Equal)
+            }
+            Comparison::Equal(expected) => {
+                node.property_bytes(self.property).as_ref()
+                    == expected.as_bytes()
+            }
+            Comparison::NotEqual(expected) => {
+                node.property_bytes(self.property).as_ref()
+                    != expected.as_bytes()
+            }
+            Comparison::StartsWith(expected) => node
+                .property_bytes(self.property)
+                .starts_with(expected.as_bytes()),
+            Comparison::EndsWith(expected) => node
+                .property_bytes(self.property)
+                .ends_with(expected.as_bytes()),
+            Comparison::Contains(expected) => {
+                expected.is_empty()
+                    || node
+                        .property_bytes(self.property)
+                        .windows(expected.len())
+                        .any(|part| part == expected.as_bytes())
+            }
+        };
+        matches != self.negated
+    }
+}
 
 #[derive(Debug)]
 struct NodePattern<'a> {
     label: Option<&'a str>,
-    inline: Vec<Filter<'a>>,
+    inline: Vec<(&'a str, &'a str)>,
 }
 
 #[derive(Clone, Copy, Debug)]
 struct Hop<'a> {
-    kind: &'a str,
+    kind: Option<&'a str>,
     inbound: bool,
 }
 
 #[derive(Debug)]
+enum ProjectionExpression<'a> {
+    Field(Binding, Option<&'a str>),
+    NodeLabels(usize),
+    Count,
+}
+
+impl ProjectionExpression<'_> {
+    fn field_value<'a>(
+        &self,
+        nodes: &[&'a Node],
+        edges: &[&'a Edge],
+    ) -> Cow<'a, [u8]> {
+        match *self {
+            Self::Field(Binding::Node(index), None) => {
+                Cow::Borrowed(&nodes[index].name)
+            }
+            Self::Field(Binding::Node(index), Some(name)) => {
+                nodes[index].property_bytes(name)
+            }
+            Self::Field(Binding::Edge(index), None) => {
+                Cow::Borrowed(&edges[index].properties)
+            }
+            Self::Field(Binding::Edge(index), Some("type")) => {
+                Cow::Borrowed(&edges[index].kind)
+            }
+            Self::Field(Binding::Edge(index), Some(name)) => Cow::Borrowed(
+                json_property_bytes(&edges[index].properties, name),
+            ),
+            Self::NodeLabels(index) => Cow::Owned(
+                b"[\""
+                    .iter()
+                    .chain(&nodes[index].label)
+                    .chain(b"\"]")
+                    .take(PROPERTY_LIMIT)
+                    .copied()
+                    .collect(),
+            ),
+            Self::Count => unreachable!("aggregate has no per-binding value"),
+        }
+    }
+}
+
+#[derive(Debug)]
 struct Projection<'a> {
-    binding: Binding,
-    property: Option<&'a str>,
+    expression: ProjectionExpression<'a>,
     name: String,
 }
 
@@ -122,7 +231,7 @@ struct OrderKey {
 pub(crate) struct Query<'a> {
     nodes: Vec<NodePattern<'a>>,
     hops: Vec<Hop<'a>>,
-    filters: Vec<(usize, Filter<'a>)>,
+    filters: Vec<Predicate<'a>>,
     any_filter: bool,
     projections: Vec<Projection<'a>>,
     order: Vec<OrderKey>,
@@ -204,8 +313,7 @@ impl<'a> Parser<'a> {
         }
         self.symbol(b'[')?;
         self.alias(Binding::Edge(index))?;
-        self.symbol(b':')?;
-        let kind = self.name()?;
+        let kind = self.consume(b':').then(|| self.name()).transpose()?;
         self.symbol(b']')?;
         if inbound {
             self.symbol(b'-')?;
@@ -215,9 +323,132 @@ impl<'a> Parser<'a> {
         Ok(Hop { kind, inbound })
     }
 
+    fn binding(&self, name: &str) -> Result<Binding, Unsupported> {
+        self.names.get(name).copied().ok_or(Unsupported)
+    }
+
     fn reference(&mut self) -> Result<(&'a str, Binding), Unsupported> {
         let name = self.name()?;
-        Ok((name, *self.names.get(name).ok_or(Unsupported)?))
+        Ok((name, self.binding(name)?))
+    }
+
+    fn named_projection(
+        &mut self,
+    ) -> Result<(ProjectionExpression<'a>, String), Unsupported> {
+        let name = self.name()?;
+        if self.consume(b'(') {
+            let (target, binding) = self.reference()?;
+            self.symbol(b')')?;
+            return match binding {
+                Binding::Edge(_) if name.eq_ignore_ascii_case("type") => Ok((
+                    ProjectionExpression::Field(binding, Some("type")),
+                    format!("type({target})"),
+                )),
+                Binding::Node(index) if name.eq_ignore_ascii_case("labels") => {
+                    Ok((
+                        ProjectionExpression::NodeLabels(index),
+                        format!("labels({target})"),
+                    ))
+                }
+                _ => Err(Unsupported),
+            };
+        }
+        let binding = self.binding(name)?;
+        let property = self.consume(b'.').then(|| self.name()).transpose()?;
+        if let (Binding::Node(_), Some(property)) = (binding, property) {
+            node_property(property)?;
+        }
+        Ok((
+            ProjectionExpression::Field(binding, property),
+            projection_name(name, property),
+        ))
+    }
+
+    fn count_name(
+        &mut self,
+        allow_property: bool,
+    ) -> Result<String, Unsupported> {
+        self.symbol(b'(')?;
+        let variable = if self.consume(b'*') {
+            "*"
+        } else {
+            let (name, _) = self.reference()?;
+            if allow_property && self.consume(b'.') {
+                // Native COUNT(var.prop) tests whether var is bound, even
+                // when the projected property is missing. Its default column
+                // name also omits the property.
+                self.name()?;
+            }
+            name
+        };
+        self.symbol(b')')?;
+        Ok(format!("COUNT({variable})"))
+    }
+
+    fn projection(&mut self) -> Result<Projection<'a>, Unsupported> {
+        let (expression, default_name) = if self.keyword("COUNT") {
+            (ProjectionExpression::Count, self.count_name(true)?)
+        } else {
+            self.named_projection()?
+        };
+        let name = if self.keyword("AS") {
+            self.name()?.to_owned()
+        } else {
+            default_name
+        };
+        Ok(Projection { expression, name })
+    }
+
+    fn predicate(&mut self) -> Result<Predicate<'a>, Unsupported> {
+        let negated = self.keyword("NOT");
+        let (_, Binding::Node(node)) = self.reference()? else {
+            return Err(Unsupported);
+        };
+        self.symbol(b'.')?;
+        let property = node_property(self.name()?)?;
+        let comparison = match self.tokens.next().ok_or(Unsupported)? {
+            Token::Symbol(b'=') => Comparison::Equal(self.literal()?),
+            Token::NotEqual => Comparison::NotEqual(self.literal()?),
+            Token::Word(word) if word.eq_ignore_ascii_case("CONTAINS") => {
+                Comparison::Contains(self.literal()?)
+            }
+            Token::Word(word) if word.eq_ignore_ascii_case("STARTS") => {
+                if !self.keyword("WITH") {
+                    return Err(Unsupported);
+                }
+                Comparison::StartsWith(self.literal()?)
+            }
+            Token::Word(word) if word.eq_ignore_ascii_case("ENDS") => {
+                if !self.keyword("WITH") {
+                    return Err(Unsupported);
+                }
+                Comparison::EndsWith(self.literal()?)
+            }
+            op if matches!(property, "start_line" | "end_line") => {
+                let (direction, inclusive) = match op {
+                    Token::Symbol(b'<') => (Ordering::Less, false),
+                    Token::LessOrEqual => (Ordering::Less, true),
+                    Token::Symbol(b'>') => (Ordering::Greater, false),
+                    Token::GreaterOrEqual => (Ordering::Greater, true),
+                    _ => return Err(Unsupported),
+                };
+                let Some(Token::Number(value)) = self.tokens.next() else {
+                    return Err(Unsupported);
+                };
+                Comparison::Line(
+                    direction,
+                    inclusive,
+                    value.parse().map_err(|_| Unsupported)?,
+                )
+            }
+            _ => return Err(Unsupported),
+        };
+        Ok(Predicate {
+            node,
+            property,
+            comparison,
+            negated,
+        })
     }
 }
 
@@ -260,30 +491,27 @@ pub(crate) fn classify(source: &str) -> Result<Query<'_>, Unsupported> {
         hops.push(parser.hop(hops.len(), inbound)?);
         nodes.push(parser.node(nodes.len())?);
     }
-    // Native binds all anonymous targets to the same synthetic name. Support a
-    // single anonymous endpoint so we never reinterpret that implicit join.
-    if nodes.len()
-        - parser
+    if hops.len() > 1 {
+        // The head has its own synthetic name. Later anonymous endpoints
+        // reuse a single name in C, so keep multi-hop queries with two
+        // anonymous bindings on the reference path.
+        let named_nodes = parser
             .names
             .values()
-            .filter(|b| matches!(b, Binding::Node(_)))
-            .count()
-        > 1
-    {
-        return Err(Unsupported);
+            .filter(|binding| matches!(binding, Binding::Node(_)))
+            .count();
+        if nodes.len() - named_nodes > 1
+            || hops.iter().any(|hop| hop.kind.is_none())
+        {
+            return Err(Unsupported);
+        }
     }
     let mut filters = Vec::new();
     let mut any_filter = false;
     if parser.keyword("WHERE") {
         let mut disjunction = None;
         loop {
-            let (_, Binding::Node(node)) = parser.reference()? else {
-                return Err(Unsupported);
-            };
-            parser.symbol(b'.')?;
-            let property = node_property(parser.name()?)?;
-            parser.symbol(b'=')?;
-            filters.push((node, (property, parser.literal()?)));
+            filters.push(parser.predicate()?);
             let next_any = if hops.is_empty() && parser.keyword("OR") {
                 true
             } else if parser.keyword("AND") {
@@ -305,22 +533,7 @@ pub(crate) fn classify(source: &str) -> Result<Query<'_>, Unsupported> {
     }
     let mut projections = Vec::new();
     loop {
-        let (name, binding) = parser.reference()?;
-        let property =
-            parser.consume(b'.').then(|| parser.name()).transpose()?;
-        if let (Binding::Node(_), Some(property)) = (binding, property) {
-            node_property(property)?;
-        }
-        let name = if parser.keyword("AS") {
-            parser.name()?.to_owned()
-        } else {
-            projection_name(name, property)
-        };
-        projections.push(Projection {
-            binding,
-            property,
-            name,
-        });
+        projections.push(parser.projection()?);
         if !parser.consume(b',') {
             break;
         }
@@ -328,13 +541,25 @@ pub(crate) fn classify(source: &str) -> Result<Query<'_>, Unsupported> {
     if projections.len() > 32 {
         return Err(Unsupported);
     }
+    // A single grouping field covers the common count breakdown without
+    // interpreting the native compound key's delimiter and byte truncation.
+    let field_count = projections
+        .iter()
+        .filter(|column| {
+            !matches!(column.expression, ProjectionExpression::Count)
+        })
+        .count();
+    if field_count < projections.len() && field_count > 1 {
+        return Err(Unsupported);
+    }
     // C can retain a pointer to an empty edge-property buffer while
     // projecting later columns. A ninth lookup can overwrite that cell.
     if projections
         .iter()
         .filter(|p| {
-            matches!(p.binding, Binding::Edge(_))
-                && p.property.is_some_and(|name| name != "type")
+            matches!(p.expression,
+                ProjectionExpression::Field(Binding::Edge(_), Some(name)) if name != "type"
+            )
         })
         .count()
         > NATIVE_EDGE_PROPERTY_BUFFERS
@@ -350,10 +575,14 @@ pub(crate) fn classify(source: &str) -> Result<Query<'_>, Unsupported> {
             if order.len() == ORDER_KEYS_MAX {
                 return Err(Unsupported);
             }
-            let name = parser.name()?;
-            let property =
-                parser.consume(b'.').then(|| parser.name()).transpose()?;
-            let name = projection_name(name, property);
+            let name = if parser.keyword("COUNT") {
+                parser.count_name(false)?
+            } else {
+                let name = parser.name()?;
+                let property =
+                    parser.consume(b'.').then(|| parser.name()).transpose()?;
+                projection_name(name, property)
+            };
             let column = projections
                 .iter()
                 .position(|p| p.name == name)
@@ -413,6 +642,11 @@ struct Node {
 
 impl Node {
     fn read(row: &Row<'_>, offset: usize) -> rusqlite::Result<Self> {
+        // Native decodes both values as a C int, keeping the low 32 bits.
+        let line = |index| {
+            row.get::<_, Option<i64>>(index)
+                .map(|value| value.unwrap_or_default() as i32)
+        };
         Ok(Self {
             id: row.get(offset)?,
             label: read_text_bytes(row, offset + 1)?.unwrap_or_default(),
@@ -420,10 +654,8 @@ impl Node {
             qualified_name: read_text_bytes(row, offset + 3)?
                 .unwrap_or_default(),
             file_path: read_text_bytes(row, offset + 4)?.unwrap_or_default(),
-            start_line: row
-                .get::<_, Option<i32>>(offset + 5)?
-                .unwrap_or_default(),
-            end_line: row.get::<_, Option<i32>>(offset + 6)?.unwrap_or_default(),
+            start_line: line(offset + 5)?,
+            end_line: line(offset + 6)?,
             properties: read_text_bytes(row, offset + 7)?.unwrap_or_default(),
         })
     }
@@ -536,8 +768,68 @@ pub(crate) struct ResultRows {
     pub(crate) truncated: bool,
 }
 
+struct CountGroups {
+    column: usize,
+    max_groups: usize,
+    needs_all_groups: bool,
+    // Each map value records the group's first-seen position and count.
+    groups: HashMap<Vec<u8>, (usize, usize)>,
+}
+
+impl CountGroups {
+    // False means that ranking needs a group the Rust accumulator cannot keep.
+    fn record(&mut self, key: &[u8]) -> bool {
+        // Native clips grouped cells before grouping and output.
+        let key = c_string_bytes(key);
+        let key = &key[..key.len().min(PROPERTY_LIMIT)];
+        if let Some((_, count)) = self.groups.get_mut(key) {
+            *count += 1;
+            true
+        } else if self.groups.len() < self.max_groups {
+            self.groups.insert(key.to_vec(), (self.groups.len(), 1));
+            true
+        } else {
+            !self.needs_all_groups
+        }
+    }
+}
+
+enum CountRows {
+    Total(usize),
+    Grouped(CountGroups),
+}
+
+impl CountRows {
+    fn rows(
+        self,
+        columns: usize,
+        limit: usize,
+        budget: &mut ExecutionBudget<'_>,
+    ) -> Result<Vec<Vec<Vec<u8>>>, ExecutionError> {
+        match self {
+            Self::Total(count) => {
+                Ok(vec![vec![count.to_string().into_bytes(); columns]])
+            }
+            Self::Grouped(CountGroups { column, groups, .. }) => {
+                if limit == ENGINE_LIMIT && groups.len() >= ENGINE_LIMIT {
+                    return Err(ExecutionError::RowCeiling);
+                }
+                let mut rows = vec![Vec::new(); groups.len()];
+                for (key, (index, count)) in groups {
+                    budget.step()?;
+                    let mut row = vec![count.to_string().into_bytes(); columns];
+                    row[column] = key;
+                    rows[index] = row;
+                }
+                Ok(rows)
+            }
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(crate) enum ExecutionError {
+    Unsupported,
     Storage(rusqlite::Error),
     RowCeiling,
     Deadline,
@@ -555,6 +847,7 @@ pub(crate) struct ExecutionBudget<'a> {
     now: &'a dyn Fn() -> Instant,
     cancelled: &'a dyn Fn() -> bool,
     remaining: usize,
+    ordered_count_group_limit: usize,
 }
 
 impl<'a> ExecutionBudget<'a> {
@@ -567,7 +860,16 @@ impl<'a> ExecutionBudget<'a> {
             now,
             cancelled,
             remaining: CHECK_INTERVAL,
+            ordered_count_group_limit: ORDERED_COUNT_GROUP_LIMIT,
         }
+    }
+
+    #[cfg(debug_assertions)]
+    pub(crate) fn set_ordered_count_group_limit_for_tests(
+        &mut self,
+        limit: usize,
+    ) {
+        self.ordered_count_group_limit = limit.min(ORDERED_COUNT_GROUP_LIMIT);
     }
 
     fn check(&self) -> Result<(), ExecutionError> {
@@ -644,9 +946,12 @@ impl Query<'_> {
         } else {
             statement.query([project])?
         };
-        let mut adjacency = (!self.hops.is_empty())
-            .then(|| Adjacency::new(connection))
+        let mut adjacency = self
+            .hops
+            .first()
+            .map(|hop| Adjacency::new(connection, hop.kind.is_some()))
             .transpose()?;
+        let mut counts = self.count_rows(budget.ordered_count_group_limit);
         let mut result = ResultRows {
             columns: self
                 .projections
@@ -658,7 +963,8 @@ impl Query<'_> {
         };
         let limit = self.limit.unwrap_or(ENGINE_LIMIT);
         'starts: loop {
-            if adjacency.is_none()
+            if counts.is_none()
+                && adjacency.is_none()
                 && self.order.is_empty()
                 && result.rows.len() == limit
             {
@@ -673,7 +979,13 @@ impl Query<'_> {
                 continue;
             }
             let Some(adjacency) = &mut adjacency else {
-                if !self.collect_row(&mut result, &[&start], &[], budget)? {
+                if !self.collect_row(
+                    &mut result,
+                    &mut counts,
+                    &[&start],
+                    &[],
+                    budget,
+                )? {
                     break;
                 }
                 continue;
@@ -695,6 +1007,7 @@ impl Query<'_> {
                         }
                         if !self.collect_row(
                             &mut result,
+                            &mut counts,
                             &[&start, &next, &last],
                             &[&edge, &last_edge],
                             budget,
@@ -710,6 +1023,7 @@ impl Query<'_> {
                     };
                     if !self.collect_row(
                         &mut result,
+                        &mut counts,
                         &nodes,
                         &[&edge],
                         budget,
@@ -720,19 +1034,84 @@ impl Query<'_> {
             }
         }
         budget.check()?;
+        if let Some(counts) = counts {
+            result.rows = counts.rows(result.columns.len(), limit, budget)?;
+            if self.order.is_empty() {
+                result.rows.truncate(limit);
+            }
+        }
         if !self.order.is_empty() {
             order_rows(&mut result.rows, &self.order, limit, budget)?;
         }
         Ok(result)
     }
 
+    fn count_rows(&self, ordered_group_limit: usize) -> Option<CountRows> {
+        self.projections
+            .iter()
+            .any(|column| {
+                matches!(column.expression, ProjectionExpression::Count)
+            })
+            .then(|| {
+                if let Some(column) =
+                    self.projections.iter().position(|column| {
+                        !matches!(column.expression, ProjectionExpression::Count)
+                    })
+                {
+                    let limit = self.limit.unwrap_or(ENGINE_LIMIT);
+                    // A positive ordered limit below the engine ceiling
+                    // needs every key ranked. C handles queries that exceed
+                    // the Rust limit. An unordered limit needs first-seen
+                    // keys only. At the engine ceiling, more keys cannot
+                    // change the error.
+                    let needs_all_groups = !self.order.is_empty()
+                        && (1..ENGINE_LIMIT).contains(&limit);
+                    let max_groups = if needs_all_groups {
+                        ordered_group_limit
+                    } else {
+                        limit
+                    };
+                    CountRows::Grouped(CountGroups {
+                        column,
+                        max_groups,
+                        needs_all_groups,
+                        groups: HashMap::new(),
+                    })
+                } else {
+                    CountRows::Total(0)
+                }
+            })
+    }
+
     fn collect_row(
         &self,
         result: &mut ResultRows,
+        counts: &mut Option<CountRows>,
         nodes: &[&Node],
         edges: &[&Edge],
         budget: &ExecutionBudget<'_>,
     ) -> Result<bool, ExecutionError> {
+        match counts {
+            Some(CountRows::Total(count)) => {
+                *count += 1;
+                return Ok(true);
+            }
+            Some(CountRows::Grouped(counts)) => {
+                if counts.max_groups == 0 && !counts.needs_all_groups {
+                    // LIMIT 0 still reads the graph and checks its budget.
+                    return Ok(true);
+                }
+                let key = self.projections[counts.column]
+                    .expression
+                    .field_value(nodes, edges);
+                if !counts.record(&key) {
+                    budget.check()?;
+                    return Err(ExecutionError::Unsupported);
+                }
+                return Ok(true);
+            }
+            None => {}
+        }
         let limit = self.limit.unwrap_or(ENGINE_LIMIT);
         if self.order.is_empty() && result.rows.len() == limit {
             return Ok(false);
@@ -743,7 +1122,14 @@ impl Query<'_> {
             result.truncated = true;
             return Ok(false);
         }
-        result.rows.push(self.project(nodes, edges));
+        result.rows.push(
+            self.projections
+                .iter()
+                .map(|column| {
+                    column.expression.field_value(nodes, edges).into_owned()
+                })
+                .collect(),
+        );
         if result.rows.len() == ENGINE_LIMIT && limit == ENGINE_LIMIT {
             budget.check()?;
             return Err(ExecutionError::RowCeiling);
@@ -755,14 +1141,17 @@ impl Query<'_> {
         let node = &self.nodes[index];
         node.inline
             .iter()
+            .map(|(name, _)| *name)
             .chain(
                 self.filters
                     .iter()
-                    .filter(|(target, _)| *target == index)
-                    .map(|(_, filter)| filter),
+                    .filter(|filter| {
+                        filter.node == index && filter.is_seed_equality()
+                    })
+                    .map(|filter| filter.property),
             )
-            .map(|(name, _)| {
-                if matches!(*name, "name" | "qualified_name") {
+            .map(|name| {
+                if matches!(name, "name" | "qualified_name") {
                     3
                 } else {
                     2
@@ -785,35 +1174,15 @@ impl Query<'_> {
         }
         // The classifier accepts single-binding predicates. Evaluate each
         // when its node is bound so rejected nodes never expand adjacency.
-        for &(target, (property, value)) in &self.filters {
-            if target == index {
-                let matches =
-                    node.property_bytes(property).as_ref() == value.as_bytes();
-                if matches == self.any_filter {
-                    return matches;
-                }
+        for predicate in
+            self.filters.iter().filter(|filter| filter.node == index)
+        {
+            let matches = predicate.matches(node);
+            if matches == self.any_filter {
+                return matches;
             }
         }
         !self.any_filter
-    }
-
-    fn project(&self, nodes: &[&Node], edges: &[&Edge]) -> Vec<Vec<u8>> {
-        self.projections
-            .iter()
-            .map(|column| match (column.binding, column.property) {
-                (Binding::Node(index), None) => nodes[index].name.clone(),
-                (Binding::Node(index), Some(name)) => {
-                    nodes[index].property_bytes(name).into_owned()
-                }
-                (Binding::Edge(index), None) => edges[index].properties.clone(),
-                (Binding::Edge(index), Some("type")) => {
-                    edges[index].kind.clone()
-                }
-                (Binding::Edge(index), Some(name)) => {
-                    json_property_bytes(&edges[index].properties, name).to_vec()
-                }
-            })
-            .collect()
     }
 }
 
@@ -920,17 +1289,18 @@ struct Adjacency<'a> {
 }
 
 impl<'a> Adjacency<'a> {
-    fn new(connection: &'a Connection) -> rusqlite::Result<Self> {
+    fn new(connection: &'a Connection, typed: bool) -> rusqlite::Result<Self> {
         // Match native prepared edge lookups, then fetch endpoints by id.
         // A join can change the SQLite query plan and therefore the row order.
+        // Untyped traversal is limited to a single hop, so the SQL is fixed
+        // for all hops in a query.
         let edges = "SELECT id, project, source_id, target_id, type, properties FROM edges";
+        let filter = if typed { " AND type = ?2" } else { "" };
         Ok(Self {
-            incoming: connection.prepare(&format!(
-                "{edges} WHERE target_id = ?1 AND type = ?2"
-            ))?,
-            outgoing: connection.prepare(&format!(
-                "{edges} WHERE source_id = ?1 AND type = ?2"
-            ))?,
+            incoming: connection
+                .prepare(&format!("{edges} WHERE target_id = ?1{filter}"))?,
+            outgoing: connection
+                .prepare(&format!("{edges} WHERE source_id = ?1{filter}"))?,
             node: connection.prepare(&format!(
                 "SELECT {NODE_COLUMNS} FROM nodes n WHERE id = ?1"
             ))?,
@@ -948,7 +1318,11 @@ impl<'a> Adjacency<'a> {
         } else {
             (&mut self.outgoing, 3)
         };
-        let mut edges = statement.query(params![id, hop.kind])?;
+        let mut edges = if let Some(kind) = hop.kind {
+            statement.query(params![id, kind])?
+        } else {
+            statement.query([id])?
+        };
         let mut neighbors = Vec::new();
         while let Some(edge) = edges.next()? {
             budget.step()?;
@@ -966,5 +1340,55 @@ impl<'a> Adjacency<'a> {
             }
         }
         Ok(neighbors)
+    }
+}
+
+#[cfg(test)]
+mod count_tests {
+    use super::*;
+
+    #[test]
+    fn unordered_count_limit_keeps_only_first_keys_and_counts_late_matches() {
+        let query =
+            classify("MATCH (n) RETURN n.name, count(*) LIMIT 1").unwrap();
+        let Some(CountRows::Grouped(mut counts)) =
+            query.count_rows(ORDERED_COUNT_GROUP_LIMIT)
+        else {
+            panic!("expected grouped count");
+        };
+        for key in [
+            b"alpha".as_slice(),
+            b"discarded",
+            b"discarded-again",
+            b"alpha",
+        ] {
+            assert!(counts.record(key));
+        }
+        assert_eq!(counts.groups.len(), 1);
+        assert_eq!(counts.groups.get(b"alpha".as_slice()), Some(&(0, 2)));
+    }
+
+    #[test]
+    fn group_ceiling_fails_before_rendering() {
+        let query = classify(
+            "MATCH (n) RETURN n.name, count(*) AS total ORDER BY total",
+        )
+        .unwrap();
+        let Some(CountRows::Grouped(mut counts)) =
+            query.count_rows(ORDERED_COUNT_GROUP_LIMIT)
+        else {
+            panic!("expected grouped count");
+        };
+        for index in 0..=ENGINE_LIMIT {
+            assert!(counts.record(&index.to_string().into_bytes()));
+        }
+        assert_eq!(counts.groups.len(), ENGINE_LIMIT);
+        let mut budget = ExecutionBudget::new(&Instant::now, &|| true);
+        // Any rendering work would consume the next budget step.
+        budget.remaining = 1;
+        assert!(matches!(
+            CountRows::Grouped(counts).rows(2, ENGINE_LIMIT, &mut budget),
+            Err(ExecutionError::RowCeiling)
+        ));
     }
 }
