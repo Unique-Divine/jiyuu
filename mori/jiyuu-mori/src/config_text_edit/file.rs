@@ -239,14 +239,20 @@ struct Temp<'a> {
 }
 
 impl<'a> Temp<'a> {
-    fn create(target: &'a platform::Target, kind: WriteKind) -> io::Result<(Self, File)> {
+    fn create(
+        target: &'a platform::Target,
+        kind: WriteKind,
+    ) -> io::Result<(Self, File)> {
         static SEQUENCE: AtomicU32 = AtomicU32::new(1);
         for attempt in 0..64 {
             let mut name = target.path().as_os_str().to_owned();
             match kind {
                 WriteKind::Text(_) => {
                     let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
-                    name.push(format!(".cbm-text-{}-{sequence}.tmp", std::process::id()));
+                    name.push(format!(
+                        ".cbm-text-{}-{sequence}.tmp",
+                        std::process::id()
+                    ));
                 }
                 #[cfg(unix)]
                 WriteKind::Toml if target.followed() => {
@@ -254,7 +260,8 @@ impl<'a> Temp<'a> {
                 }
                 WriteKind::Toml => {
                     let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
-                    let id = std::process::id().wrapping_mul(0x9e37_79b9) ^ sequence;
+                    let id =
+                        std::process::id().wrapping_mul(0x9e37_79b9) ^ sequence;
                     name.push(format!(".{:06x}", id & 0x00ff_ffff));
                 }
             }
