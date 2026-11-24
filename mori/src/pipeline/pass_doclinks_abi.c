@@ -84,7 +84,7 @@ static doclink_source_t read_document(void *data, const char *path) {
             cbm_log_warn("doclinks.file_oversized", "path", path);
             return (doclink_source_t){0};
         }
-        uint8_t *buf = cbm_alloc(CBM_MEM_CLASS_EXTRACT, (size_t)size);
+        uint8_t *buf = cbm_alloc(CBM_MEM_CLASS_EXTRACT, (size_t)size + SKIP_ONE);
         if (buf) {
             size_t bytes = fread(buf, SKIP_ONE, (size_t)size, f);
             (void)fclose(f);
