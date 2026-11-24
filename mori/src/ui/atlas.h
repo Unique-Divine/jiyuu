@@ -111,6 +111,8 @@ char *cbm_atlas_impact_analysis_json(cbm_store_t *store, const char *project, co
 char *cbm_atlas_impact_analysis_request(cbm_store_t *store, const char *project, const char *file,
                                         int64_t node_id, const char *node_qn, bool refresh);
 void cbm_atlas_impact_analysis_shutdown(void);
+/* Interrupt the standalone impact worker's supervised reads before shutdown. */
+void cbm_atlas_impact_analysis_cancel(void);
 
 /* Attach runtime observation (observed_calls) to a trace ("path") or
  * flow-detail ("steps") JSON: observed hops gain {count, label,

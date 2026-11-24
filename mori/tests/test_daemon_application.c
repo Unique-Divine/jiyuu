@@ -19,12 +19,14 @@
 #include "foundation/workspace.h"
 #include "mcp/mcp.h"
 #include "mcp/mcp_internal.h"
+#include "pipeline/pass_cross_repo.h"
 #include "pipeline/pipeline.h"
 #include "store/graph_mem.h"
 #include "store/store.h"
 #include "ui/config.h"
 #include "watcher/watcher.h"
 
+#include <sqlite3/sqlite3.h>
 #include <stdint.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -2169,6 +2171,140 @@ static bool app_watch_race_fixture_finish(app_watch_race_fixture_t *fixture) {
     free(fixture->saved_cache);
     fixture->saved_cache = NULL;
     return stopped && restored;
+}
+
+static atomic_bool app_reverse_startup_done;
+static atomic_bool app_reverse_publish_reached;
+static atomic_bool app_reverse_publish_proceed;
+static atomic_bool app_reverse_snapshot_deferred;
+
+static void app_reverse_probe_sink(const char *line) {
+    if (strstr(line, "cross_repo.recovery_scan_complete")) {
+        atomic_store(&app_reverse_startup_done, true);
+    } else if (strstr(line, "daemon.index.result")) {
+        atomic_store(&app_reverse_publish_reached, true);
+        while (!atomic_load(&app_reverse_publish_proceed)) {
+            cbm_usleep(1000);
+        }
+    } else if (strstr(line, "cross_repo.repair_deferred") && strstr(line, "reason=own_snapshot")) {
+        atomic_store(&app_reverse_snapshot_deferred, true);
+    }
+}
+
+static bool app_wait_for_reverse_clear(const char *path, const char *project) {
+    uint64_t deadline = cbm_now_ms() + APP_TEST_TIMEOUT_MS;
+    while (cbm_now_ms() < deadline) {
+        cbm_store_t *store = cbm_store_open_path_query(path);
+        cbm_store_read_scope_t *scope = NULL;
+        bool pending = true;
+        bool read = cbm_cross_repo_open_graph_snapshot(store, &scope) && scope &&
+                    cbm_cross_repo_read_reverse_pending(store, project, &pending);
+        bool closed = cbm_store_read_scope_close(scope) == CBM_STORE_OK;
+        cbm_store_close(store);
+        if (read && closed && !pending) {
+            return true;
+        }
+        cbm_usleep(1000);
+    }
+    return false;
+}
+
+static bool app_own_reverse_probe_case(bool new_generation) {
+    const char *old_setting = getenv("MORI_PROVIDER_REPAIR");
+    char *saved_setting = old_setting ? cbm_strdup(old_setting) : NULL;
+    if ((old_setting && !saved_setting) || cbm_setenv("MORI_PROVIDER_REPAIR", "1", 1) != 0) {
+        free(saved_setting);
+        return false;
+    }
+    app_watch_race_fixture_t fixture;
+    bool ready = app_watch_race_fixture_init_with_auto_watch(&fixture, 4201, false);
+    bool restored = saved_setting ? cbm_setenv("MORI_PROVIDER_REPAIR", saved_setting, 1) == 0
+                                  : cbm_unsetenv("MORI_PROVIDER_REPAIR") == 0;
+    free(saved_setting);
+    cbm_store_t *store = ready ? cbm_store_open_path(fixture.db_path) : NULL;
+    bool seeded =
+        store && cbm_store_upsert_project(store, fixture.project, fixture.root) == CBM_STORE_OK;
+    cbm_store_close(store);
+
+    CBMLogLevel old_level = cbm_log_get_level();
+    CBMLogFormat old_format = cbm_log_get_format();
+    cbm_log_set_level(CBM_LOG_INFO);
+    cbm_log_set_format(CBM_LOG_FORMAT_TEXT);
+    atomic_store(&app_reverse_startup_done, false);
+    atomic_store(&app_reverse_publish_reached, false);
+    atomic_store(&app_reverse_publish_proceed, false);
+    atomic_store(&app_reverse_snapshot_deferred, false);
+    cbm_log_set_sink_ex(app_reverse_probe_sink, CBM_LOG_SINK_REPLACE);
+    if (seeded) {
+        cbm_daemon_application_set_permanent(fixture.application, true);
+    }
+    bool startup = seeded && app_wait_for_atomic_bool(&app_reverse_startup_done, true);
+
+    char args[APP_TEST_PATH_CAP * 2];
+    (void)snprintf(args, sizeof(args), "{\"repo_path\":\"%s\",\"name\":\"%s\"}", fixture.root,
+                   fixture.project ? fixture.project : "");
+    uint8_t *tool = NULL;
+    uint32_t length = 0;
+    bool encoded = startup && app_test_tool_request("index_repository", args, &tool, &length);
+    atomic_store(&fixture.fake.hold_destroy_attempt, 0);
+    atomic_store(&fixture.fake.allow_completion, true);
+    app_request_thread_t request = {
+        .callbacks = fixture.callbacks,
+        .session = fixture.session,
+        .request = tool,
+        .request_length = length,
+    };
+    atomic_init(&request.done, false);
+    cbm_thread_t thread;
+    bool started = encoded && cbm_thread_create(&thread, 0, app_request_thread, &request) == 0;
+    bool held = started && app_wait_for_atomic_int(&fixture.fake.destroys, 1);
+    store = held ? cbm_store_open_path(fixture.db_path) : NULL;
+    char key[APP_TEST_PATH_CAP];
+    (void)snprintf(key, sizeof(key), "cross_repo_peers:%s", fixture.project ? fixture.project : "");
+    bool staged = store && cbm_store_meta_put(store, key, "{}") == CBM_STORE_OK;
+    (void)snprintf(key, sizeof(key), "cross_repo_reverse_pending:%s",
+                   fixture.project ? fixture.project : "");
+    staged = staged && cbm_store_meta_put(store, key, "1") == CBM_STORE_OK &&
+             (!new_generation || cbm_store_generation_advance(store) == CBM_STORE_OK);
+    cbm_store_close(store);
+    atomic_store(&fixture.fake.release_destroy, true);
+    bool publishing = started && app_wait_for_atomic_bool(&app_reverse_publish_reached, true);
+    bool deferred = false;
+    bool replied = false;
+    if (staged && publishing) {
+        /* The pre-publication generation read has finished. The daemon's
+         * next own-marker open will contend on this existing SQLite seam. */
+        sqlite3_mutex *first_access = sqlite3_mutex_alloc(SQLITE_MUTEX_STATIC_APP1);
+        sqlite3_mutex_enter(first_access);
+        atomic_store(&app_reverse_publish_proceed, true);
+        deferred = app_wait_for_atomic_bool(&app_reverse_snapshot_deferred, true);
+        replied = app_wait_for_atomic_bool(&request.done, true);
+        sqlite3_mutex_leave(first_access);
+    }
+    atomic_store(&app_reverse_publish_proceed, true);
+    if (started) {
+        (void)cbm_thread_join(&thread);
+    }
+    bool indexed = replied && request.status == CBM_DAEMON_RUNTIME_APPLICATION_OK &&
+                   request.response && strstr((char *)request.response, "indexed");
+    bool repaired = deferred && app_wait_for_reverse_clear(fixture.db_path, fixture.project);
+    free(tool);
+    free(request.response);
+    bool clean = app_watch_race_fixture_finish(&fixture);
+    cbm_log_set_sink(NULL);
+    cbm_log_set_format(old_format);
+    cbm_log_set_level(old_level);
+    return restored && clean && indexed && repaired;
+}
+
+TEST(daemon_application_retries_own_reverse_snapshot_after_publication) {
+    ASSERT_TRUE(app_own_reverse_probe_case(true));
+    PASS();
+}
+
+TEST(daemon_application_retries_own_reverse_snapshot_after_noop) {
+    ASSERT_TRUE(app_own_reverse_probe_case(false));
+    PASS();
 }
 
 typedef struct {
@@ -8373,6 +8509,8 @@ SUITE(daemon_application) {
     RUN_TEST(daemon_application_mutation_does_not_block_other_project);
     RUN_TEST(daemon_application_mutation_still_owns_os_project_lock);
     RUN_TEST(daemon_application_worker_boundary_is_sole_os_project_lock_owner);
+    RUN_TEST(daemon_application_retries_own_reverse_snapshot_after_publication);
+    RUN_TEST(daemon_application_retries_own_reverse_snapshot_after_noop);
     RUN_TEST(daemon_application_worker_lock_serializes_external_mutation);
     RUN_TEST(daemon_application_final_unsubscribe_cancels_external_lock_wait);
     RUN_TEST(daemon_application_cancels_mutation_wait_without_cancelling_shared_job);

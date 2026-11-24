@@ -1,5 +1,4 @@
-//! Stream framing for the linked Mori MCP frontend. The daemon session owns
-//! JSON-RPC dispatch and request cancellation.
+//! Stream framing and input routing for the linked Mori MCP frontend.
 
 use std::io::{self, Read, Write};
 
@@ -151,25 +150,106 @@ fn write_response(
     written.and(flushed)
 }
 
-#[cfg(all(feature = "c-backend", not(test)))]
-pub(crate) mod c_transport {
+#[cfg(any(feature = "c-backend", test))]
+mod frontend_receive {
     use std::ffi::{c_char, c_int, c_void};
     use std::ptr;
+
+    use super::{Framing, Read, read_message};
+
+    #[repr(C)]
+    pub(super) struct FrontendState {
+        _opaque: [u8; 0],
+    }
+
+    /// Mirrors frontend_receive_ops_t in frontend.c.
+    #[repr(C)]
+    pub(super) struct ReceiveOps {
+        alloc_message: unsafe extern "C" fn(usize) -> *mut c_void,
+        free_message: unsafe extern "C" fn(*mut c_void),
+        route_cancellation: unsafe extern "C" fn(
+            *mut FrontendState,
+            *const c_char,
+            *mut bool,
+        ) -> bool,
+        cancel_active: unsafe extern "C" fn(*mut FrontendState) -> bool,
+        enqueue:
+            unsafe extern "C" fn(*mut FrontendState, *mut c_char, bool) -> bool,
+        stop_begin: unsafe extern "C" fn(*mut FrontendState) -> bool,
+    }
+
+    pub(super) unsafe fn receive_loop(
+        input: &mut impl Read,
+        state: *mut FrontendState,
+        ops: &ReceiveOps,
+        stop_begun: &mut bool,
+    ) -> c_int {
+        // SAFETY: The caller keeps the opaque state live for the operations.
+        unsafe {
+            loop {
+                let (bytes, framing) = match read_message(input) {
+                    Ok(None) => return 0,
+                    Ok(Some(frame)) => frame,
+                    Err(_) => return -1,
+                };
+
+                // The decoder bounds the length and rejects embedded NULs.
+                // Use the native allocator because the queue frees the copy.
+                let message = (ops.alloc_message)(bytes.len() + 1).cast::<u8>();
+                if message.is_null() {
+                    return -1;
+                }
+                ptr::copy_nonoverlapping(bytes.as_ptr(), message, bytes.len());
+                *message.add(bytes.len()) = 0;
+                drop(bytes);
+
+                // Route cancellation before enqueue can block on a full queue.
+                let mut active = false;
+                if (ops.route_cancellation)(state, message.cast(), &mut active) {
+                    (ops.free_message)(message.cast());
+                    if active && !(ops.cancel_active)(state) {
+                        *stop_begun = (ops.stop_begin)(state);
+                        return -1;
+                    }
+                    continue;
+                }
+
+                if !(ops.enqueue)(
+                    state,
+                    message.cast(),
+                    framing == Framing::ContentLength,
+                ) {
+                    (ops.free_message)(message.cast());
+                    return -1;
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests;
+}
+
+#[cfg(all(feature = "c-backend", not(test)))]
+pub(crate) mod c_transport {
+    use std::ffi::{c_int, c_void};
     use std::slice;
 
+    use super::frontend_receive::{FrontendState, ReceiveOps, receive_loop};
     use super::*;
 
     type Stream = *mut c_void;
-    type ReadMessage =
-        unsafe extern "C" fn(Stream, *mut *mut c_char, *mut bool) -> c_int;
+    type Receive = unsafe extern "C" fn(
+        Stream,
+        *mut FrontendState,
+        *const ReceiveOps,
+        *mut bool,
+    ) -> c_int;
     type WriteResponse =
         unsafe extern "C" fn(Stream, *const u8, u32, bool) -> bool;
 
     unsafe extern "C" {
-        fn cbm_daemon_frontend_set_stdio(
-            read: ReadMessage,
-            write: WriteResponse,
-        );
+        fn cbm_daemon_frontend_set_stdio(receive: Receive, write: WriteResponse);
         fn fgetc(stream: Stream) -> c_int;
         fn fread(
             buf: *mut c_void,
@@ -185,7 +265,6 @@ pub(crate) mod c_transport {
         ) -> usize;
         fn ferror(stream: Stream) -> c_int;
         fn fflush(stream: Stream) -> c_int;
-        fn malloc(size: usize) -> *mut c_void;
     }
 
     // C owns the FILE and gives each callback exclusive access for its duration.
@@ -238,35 +317,16 @@ pub(crate) mod c_transport {
         }
     }
 
-    unsafe extern "C" fn read(
+    unsafe extern "C" fn receive(
         stream: Stream,
-        message: *mut *mut c_char,
-        framed: *mut bool,
+        state: *mut FrontendState,
+        ops: *const ReceiveOps,
+        stop_begun: *mut bool,
     ) -> c_int {
-        // SAFETY: the C frontend supplies writable output arguments and a live
-        // input FILE. Initialize both outputs even on EOF and failure.
-        unsafe {
-            *message = ptr::null_mut();
-            *framed = false;
-        }
-        let (bytes, framing) = match read_message(&mut FileStream(stream)) {
-            Ok(None) => return 0,
-            Ok(Some(frame)) => frame,
-            Err(_) => return -1,
-        };
-        // SAFETY: C uses free for the message, so allocate with the same
-        // allocator. The parser caps bytes.len() and rejects embedded NULs.
-        unsafe {
-            let output = malloc(bytes.len() + 1).cast::<u8>();
-            if output.is_null() {
-                return -1;
-            }
-            ptr::copy_nonoverlapping(bytes.as_ptr(), output, bytes.len());
-            *output.add(bytes.len()) = 0;
-            *message = output.cast();
-            *framed = framing == Framing::ContentLength;
-        }
-        1
+        let mut input = FileStream(stream);
+        // SAFETY: C lends the live FILE, state, table, and writable close
+        // flag for the duration of this synchronous call.
+        unsafe { receive_loop(&mut input, state, &*ops, &mut *stop_begun) }
     }
 
     unsafe extern "C" fn write(
@@ -288,7 +348,7 @@ pub(crate) mod c_transport {
 
     pub(crate) unsafe fn register() {
         // SAFETY: caller registers once before any C frontend thread exists.
-        unsafe { cbm_daemon_frontend_set_stdio(read, write) };
+        unsafe { cbm_daemon_frontend_set_stdio(receive, write) };
     }
 }
 

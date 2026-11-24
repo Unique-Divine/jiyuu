@@ -836,9 +836,12 @@ fn mcp_queued_and_active_cancellation_match_c_through_daemon() {
                 );
                 std::thread::sleep(Duration::from_millis(10));
             }
-            // The first request is still running. Queue a different ID with
-            // the same spelling, then cancel it before releasing the worker.
+            // The first request is still running. Fill all eight queue
+            // slots, then send cancellations for the queued and active IDs.
             request(json!({"jsonrpc":"2.0","id":queued_id,"method":"ping"}));
+            for filler in 100..107 {
+                request(json!({"jsonrpc":"2.0","id":filler,"method":"ping"}));
+            }
             request(json!({
                 "jsonrpc":"2.0","method":"notifications/cancelled",
                 "params":{"requestId":queued_id},
@@ -856,6 +859,12 @@ fn mcp_queued_and_active_cancellation_match_c_through_daemon() {
             assert_eq!(queued["id"], queued_id);
             assert_eq!(queued["error"]["code"], -32800);
             assert!(queued.get("result").is_none(), "{queued}");
+            for filler in 100..107 {
+                assert_eq!(
+                    response(),
+                    json!({"jsonrpc":"2.0","id":filler,"result":{}})
+                );
+            }
             assert_eq!(
                 response(),
                 json!({"jsonrpc":"2.0","id":"after","result":{}}),
@@ -881,25 +890,62 @@ fn mcp_queued_and_active_cancellation_match_c_through_daemon() {
 
 #[test]
 fn stdio_mixed_framing_matches_c_after_input_eof() {
+    use std::fmt::Write;
+
     let initialize = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"linked-test","version":"1"}}}"#;
     let initialized =
         r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
     let call = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_projects","arguments":{}}}"#;
-    let input = format!(
+    let mut input = format!(
         "{initialize}\n{initialized}\nContent-Length: {}\r\n\r\n{call}",
         call.len()
     );
-    let reference = run_stdio(&c_binary(), "c", &[], &input);
-    let linked = run_stdio(Path::new(MORI), "rs", &[], &input);
-    assert_eq!(linked, reference);
+    for id in 3..15 {
+        writeln!(
+            input,
+            "{{\"jsonrpc\":\"2.0\",\"id\":{id},\"method\":\"ping\"}}"
+        )
+        .unwrap();
+    }
+    let reference = run_stdio_in(&c_binary(), &Scratch::new("c"), &[], &input);
+    let linked = run_stdio_in(Path::new(MORI), &Scratch::new("rs"), &[], &input);
+    assert!(reference.status.success(), "{reference:?}");
+    assert!(linked.status.success(), "{linked:?}");
+    assert_eq!(linked.stdout, reference.stdout);
+    let linked = String::from_utf8(linked.stdout).unwrap();
     let (initialize_response, framed) =
         linked.split_once('\n').expect("newline response");
     assert!(initialize_response.contains("\"id\":1"));
     assert!(initialize_response.contains("\"protocolVersion\":\"2025-06-18\""));
-    let (header, body) = framed.split_once("\r\n\r\n").expect("framed response");
-    assert_eq!(header, format!("Content-Length: {}", body.len()));
+    let (header, bytes) =
+        framed.split_once("\r\n\r\n").expect("framed response");
+    let length = header
+        .strip_prefix("Content-Length: ")
+        .unwrap()
+        .parse()
+        .unwrap();
+    let (body, tail) = bytes.split_at(length);
     assert!(body.contains("\"id\":2"));
     assert!(body.contains("projects: 0"));
+    let tail_ids: Vec<_> = tail
+        .lines()
+        .map(|line| {
+            serde_json::from_str::<serde_json::Value>(line).unwrap()["id"]
+                .as_i64()
+                .unwrap()
+        })
+        .collect();
+    assert_eq!(tail_ids, (3..15).collect::<Vec<_>>());
+}
+
+#[test]
+fn stdio_incomplete_frame_fails_through_frontend_loop() {
+    let input = "Content-Length: 20\r\n\r\n{}";
+    for bin in [c_binary(), PathBuf::from(MORI)] {
+        let output = run_stdio_in(&bin, &Scratch::new("truncated"), &[], input);
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        assert!(output.stdout.is_empty(), "{output:?}");
+    }
 }
 
 #[test]
@@ -1110,6 +1156,243 @@ fn index_fixture(
         "{result}"
     );
     result
+}
+
+struct Ui(std::process::Child);
+
+impl Drop for Ui {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+#[test]
+#[ignore = "requires an embedded UI build with MORI_WITH_UI=1"]
+fn standalone_ui_sigterm_with_full_stderr_pipe() {
+    use std::io::{ErrorKind, Read, Write, pipe};
+    use std::net::{Ipv4Addr, TcpListener, TcpStream};
+    use std::os::fd::AsRawFd;
+    use std::thread::sleep;
+    use std::time::{Duration, Instant};
+
+    for level in ["none", "info"] {
+        let scratch = Scratch::new("ui-full-stderr");
+        let (stderr_reader, mut stderr_writer) = pipe().unwrap();
+        let fd = stderr_writer.as_raw_fd();
+        // SAFETY: the writer owns this private fd. Restore blocking mode
+        // before handing it to the child.
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        assert_ne!(flags, -1);
+        assert_eq!(
+            unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) },
+            0
+        );
+        for bytes in [&[0; 4096][..], &[0][..]] {
+            loop {
+                match stderr_writer.write(bytes) {
+                    Ok(n) => assert!(n > 0),
+                    Err(err) if err.kind() == ErrorKind::WouldBlock => break,
+                    Err(err) if err.kind() == ErrorKind::Interrupted => continue,
+                    Err(err) => panic!("could not fill stderr pipe: {err}"),
+                }
+            }
+        }
+        assert_eq!(unsafe { libc::fcntl(fd, libc::F_SETFL, flags) }, 0);
+
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let mut ui = Ui(command_in(Path::new(MORI), &scratch)
+            .args(["ui", "--port", &addr.port().to_string()])
+            .env("CBM_LOG_LEVEL", level)
+            .stderr(Stdio::from(stderr_writer))
+            .spawn()
+            .unwrap());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut conn = loop {
+            if let Ok(conn) =
+                TcpStream::connect_timeout(&addr, Duration::from_millis(100))
+            {
+                break conn;
+            }
+            assert!(
+                Instant::now() < deadline && ui.0.try_wait().unwrap().is_none(),
+                "UI never listened with {level} logging"
+            );
+            sleep(Duration::from_millis(10));
+        };
+        // With request logging disabled, verify the worker serves the embedded
+        // page. At info level, test startup with no completed request to log.
+        if level == "none" {
+            conn.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            write!(
+                conn,
+                "GET / HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"
+            )
+            .unwrap();
+            let mut response = String::new();
+            conn.read_to_string(&mut response).unwrap();
+            assert!(response.starts_with("HTTP/1.1 200 "));
+        }
+
+        // SAFETY: the child owns this PID and is still running.
+        assert_eq!(
+            unsafe { libc::kill(ui.0.id() as libc::pid_t, libc::SIGTERM) },
+            0
+        );
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            if let Some(status) = ui.0.try_wait().unwrap() {
+                assert!(status.success(), "UI exited with {status}");
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "UI stuck on full stderr with {level} logging"
+            );
+            sleep(Duration::from_millis(10));
+        }
+        assert!(
+            TcpStream::connect_timeout(&addr, Duration::from_millis(100))
+                .is_err()
+        );
+        drop(stderr_reader);
+    }
+}
+
+#[test]
+#[ignore = "requires an embedded UI build with MORI_WITH_UI=1"]
+fn standalone_ui_signals_cancel_active_reads() {
+    use std::io::Write;
+    use std::net::{Ipv4Addr, TcpListener, TcpStream};
+    use std::thread::sleep;
+    use std::time::{Duration, Instant};
+
+    let bin = Path::new(MORI);
+    let writer = Scratch::new("ui-index");
+    let repo = writer.0.join("repo");
+    fs::create_dir(&repo).unwrap();
+    fs::write(repo.join("app.py"), "def main(): return 1\n").unwrap();
+    let index = index_fixture(bin, &writer, repo.to_str().unwrap());
+    let project = index["project"].as_str().unwrap();
+    let stopped = run_in(bin, &writer, &["daemon", "stop"]);
+    assert!(stopped.status.success(), "{stopped:?}");
+    let db_file = format!("{project}.db");
+    let graph_db = writer.0.join("cache").join(&db_file);
+
+    let projects = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "list_projects", "arguments": {"format": "json"}}
+    })
+    .to_string();
+    let repo_info = format!("/api/repo-info?project={project}");
+    let impact = format!("/api/impact-analysis?project={project}&file=app.py");
+
+    for (signal, method, target, body) in [
+        (libc::SIGINT, "POST", "/rpc", projects.as_str()),
+        (libc::SIGTERM, "POST", "/rpc", projects.as_str()),
+        (libc::SIGTERM, "GET", repo_info.as_str(), ""),
+        (libc::SIGTERM, "GET", impact.as_str(), ""),
+    ] {
+        let scratch = Scratch::new("ui-signal");
+        fs::copy(&graph_db, scratch.0.join("cache").join(&db_file)).unwrap();
+        let fixture_bin = scratch.0.join("bin");
+        fs::create_dir(&fixture_bin).unwrap();
+        let git = fixture_bin.join("git");
+        fs::write(
+            &git,
+            r#"#!/bin/sh
+[ "$3" = rev-parse ] || [ "$1" = --no-optional-locks ] || exit 2
+printf '%s\n' "$$" > "$MORI_TEST_GIT_ENTERED"
+exec /bin/sleep 30
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(&git, fs::Permissions::from_mode(0o700)).unwrap();
+        let entered = scratch.0.join("git-entered");
+        let log = scratch.0.join("ui.log");
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let mut ui = Ui(command_in(bin, &scratch)
+            .args(["ui", "--port", &addr.port().to_string()])
+            .env("PATH", &fixture_bin)
+            .env("CBM_LOG_LEVEL", "info")
+            .env("CBM_LOG_FORMAT", "text")
+            .env("TMPDIR", &scratch.0)
+            .env("MORI_TEST_GIT_ENTERED", &entered)
+            .stderr(fs::File::create(&log).unwrap())
+            .spawn()
+            .unwrap());
+
+        let log_text = || fs::read_to_string(&log).unwrap_or_default();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut conn = loop {
+            if let Ok(conn) = TcpStream::connect(addr) {
+                break conn;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "UI did not start: {}",
+                log_text()
+            );
+            sleep(Duration::from_millis(10));
+        };
+        write!(
+            conn,
+            "{method} {target} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\n\
+             Content-Length: {}\r\n\r\n{body}",
+            body.len(),
+        )
+        .unwrap();
+        let git_pid: libc::pid_t = loop {
+            if let Some(pid) = fs::read_to_string(&entered)
+                .ok()
+                .and_then(|marker| marker.trim().parse().ok())
+            {
+                break pid;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "Git was not entered: {}",
+                log_text()
+            );
+            sleep(Duration::from_millis(10));
+        };
+
+        // SAFETY: the child is owned by ui and has not been reaped.
+        assert_eq!(unsafe { libc::kill(ui.0.id() as libc::pid_t, signal) }, 0);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let status = loop {
+            if let Some(status) = ui.0.try_wait().unwrap() {
+                break status;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "UI did not cancel: {}",
+                log_text()
+            );
+            sleep(Duration::from_millis(10));
+        };
+        let logs = log_text();
+        assert!(status.success(), "{status}: {logs}");
+        if method == "POST" {
+            assert!(
+                logs.lines().any(|line| line.contains("tool=list_projects")
+                    && line.contains("cancelled=true")
+                    && line.contains("timed_out=false")),
+                "{logs}"
+            );
+        }
+        // SAFETY: signal 0 only probes the child PID recorded by our fixture.
+        assert_eq!(unsafe { libc::kill(git_pid, 0) }, -1, "{logs}");
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+        assert_eq!(fs::read_dir(scratch.0.join("rt")).unwrap().count(), 0);
+    }
 }
 
 #[test]
