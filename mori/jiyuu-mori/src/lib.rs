@@ -84,6 +84,12 @@ mod ts_static_imports;
 pub use ts_static_imports::register as mori_register_ts_static_imports;
 
 #[cfg(feature = "c-backend")]
+mod fts_writer;
+
+#[cfg(feature = "c-backend")]
+pub use fts_writer::register as mori_register_fts_writer;
+
+#[cfg(feature = "c-backend")]
 mod source_publish;
 
 #[cfg(feature = "c-backend")]

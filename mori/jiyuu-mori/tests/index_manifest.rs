@@ -35,6 +35,7 @@ struct IndexSession {
     root: PathBuf,
     routing_override: Option<&'static str>,
     rust_manifest: bool,
+    rust_fts: bool,
     driver_override: Option<&'static str>,
     seen_logs: HashSet<PathBuf>,
 }
@@ -53,6 +54,7 @@ impl IndexSession {
             root,
             routing_override,
             rust_manifest: false,
+            rust_fts: false,
             driver_override,
             seen_logs: HashSet::new(),
         }
@@ -74,6 +76,9 @@ impl IndexSession {
         }
         if self.rust_manifest {
             command.env("MORI_IMPL_INDEX_MANIFEST", "rust");
+        }
+        if self.rust_fts {
+            command.env("MORI_IMPL_FTS_WRITER", "rust");
         }
         if let Some(drivers) = self.driver_override {
             command
@@ -160,6 +165,20 @@ impl IndexSession {
             "{logs}"
         );
         assert!(logs.contains(step.log), "{logs}");
+        let fts_mode = match step.decision {
+            None | Some(("staged", "full")) => Some("full"),
+            Some(("staged", "closure")) => Some("closure"),
+            _ => None,
+        };
+        let fts_witness = "msg=store.fts_rebuild implementation=rust";
+        if let Some(mode) = fts_mode.filter(|_| self.rust_fts) {
+            assert!(
+                logs.contains(&format!("{fts_witness} mode={mode}")),
+                "{logs}"
+            );
+        } else {
+            assert!(!logs.contains(fts_witness), "{logs}");
+        }
         let importance_pass = match step.decision {
             None | Some(("staged", "full")) => Some("pass.importance"),
             Some(("staged", "closure")) => Some("pass.importance_store"),
@@ -232,6 +251,42 @@ impl IndexSession {
         String::from_utf8(output.stdout).unwrap()
     }
 
+    fn fts(&self, name: &str) -> FtsContents {
+        let connection = Connection::open_with_flags(
+            self.db_path(name),
+            OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        connection
+            .execute_batch("CREATE VIRTUAL TABLE temp.vocabulary USING fts5vocab(main, nodes_fts, instance)")
+            .unwrap();
+        let tokens = connection
+            .prepare(
+                "SELECT json_array(v.term, n.qualified_name, v.col, v.offset)
+                 FROM vocabulary v JOIN nodes n ON n.id=v.doc ORDER BY 1",
+            )
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let mut search = connection
+            .prepare(
+                "SELECT n.qualified_name, bm25(nodes_fts) AS rank
+                 FROM nodes_fts JOIN nodes n ON n.id=nodes_fts.rowid
+                 WHERE nodes_fts MATCH ?1 ORDER BY rank, n.qualified_name",
+            )
+            .unwrap();
+        let rankings = ["name:value", "body:retention"].map(|term| {
+            search
+                .query_map([term], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        });
+        FtsContents { tokens, rankings }
+    }
+
     fn check_adr_failure(&mut self, repo: &Path, name: &str) {
         let db_path = self.db_path(name);
         let adr_path = db_path.with_extension("db.adr.db");
@@ -290,6 +345,12 @@ impl Drop for IndexSession {
     }
 }
 
+#[derive(Debug, PartialEq)]
+struct FtsContents {
+    tokens: Vec<String>,
+    rankings: [Vec<(String, f64)>; 2],
+}
+
 #[derive(Clone, Copy)]
 struct Step {
     edit: Option<(&'static str, &'static str)>,
@@ -316,6 +377,10 @@ fn default_rust_routing_preserves_native_update_paths_and_generation() {
             "package server\ntype queryResolver struct{}\nfunc (q *queryResolver) Value() int { return 1 }\n",
         ),
         ("op.graphql", "query Operation { value }\n"),
+        (
+            "README.md",
+            "# Guide\n\nThe retention ledger remains readable.\n",
+        ),
     ] {
         fs::write(repo.join(path), contents).unwrap();
     }
@@ -357,6 +422,7 @@ fn default_rust_routing_preserves_native_update_paths_and_generation() {
     let mut native =
         IndexSession::new(fixture.0.join("control"), Some("c"), Some("c"));
     let mut rust = IndexSession::new(fixture.0.join("candidate"), None, None);
+    rust.rust_fts = true;
     let mut previous_native = String::new();
     let mut previous_rust = String::new();
     let mut project: Option<String> = None;
@@ -373,6 +439,10 @@ fn default_rust_routing_preserves_native_update_paths_and_generation() {
             native.index(&repo, &step);
         let (rust_name, rust_generation, rust_routes) = rust.index(&repo, &step);
         assert_eq!(rust_name, name);
+        let native_fts = native.fts(&name);
+        assert!(!native_fts.tokens.is_empty());
+        assert!(native_fts.rankings.iter().all(|rows| !rows.is_empty()));
+        assert_eq!(rust.fts(&name), native_fts);
         if step.decision == Some(("staged", "closure")) {
             // Unrecognized driver settings continue to select the C implementations.
             let mut clean = IndexSession::new(
