@@ -145,7 +145,7 @@
  *     than CS_MAX_OVERLOADS that would have to be compared, and a name more
  *     than CS_MAX_FOREIGN assemblies declare. The index's log line
  *     doc_links.cs.ambiguous counts the references by these causes
- *   - unparseable: a reference longer than CS_REF_BUF, with more segments
+ *   - unparseable: a reference exceeding the byte limit, with more segments
  *     than CS_MAX_SEGS or more parameters than CS_MAX_PARAMS
  * No limit decides silently: every one of them ends in one of these rows.
  */
@@ -177,7 +177,6 @@ enum {
     CS_KEY_BUF = 2048,      /* a node's qualified name */
     CS_NAME_BUF = 513,      /* one name (the scanner's CS_NAME_MAX and its terminator) */
     CS_PARAM_BUF = 256,     /* one normalized parameter type */
-    CS_REF_BUF = 1024,      /* a written reference */
     CS_ARITY_NONE = -1,
     CS_NONE = -1,
     CS_AMBIGUOUS = -2,
@@ -3309,6 +3308,8 @@ static int supers_of(const cs_index_t *ix, int ent, int *out, bool *more) {
 
 /* ── Reference syntax ────────────────────────────────────────────── */
 
+/* Keep these layouts in sync with csharp_doc_links/mod.rs. */
+
 typedef struct {
     char name[CS_NAME_BUF];
     int arity;         /* CS_ARITY_NONE: no type arguments written */
@@ -3319,7 +3320,6 @@ typedef struct {
 enum { CS_OP_NAME = 16 };
 
 typedef struct {
-    char text[CS_REF_BUF]; /* the reference, trimmed: the segments' type arguments are in it */
     cs_seg_t segs[CS_MAX_SEGS];
     int nsegs;
     bool has_params;
@@ -3343,38 +3343,6 @@ static bool is_close_bracket(char c) {
     return c == '>' || c == '}' || c == ']' || c == ')';
 }
 
-/* Index just past the bracket group opened at s[i] (< { [ ( nest together). */
-static size_t group_end(const char *s, size_t n, size_t i) {
-    int depth = 0;
-    for (size_t k = i; k < n; k++) {
-        if (is_open_bracket(s[k])) {
-            depth++;
-        } else if (is_close_bracket(s[k]) && --depth == 0) {
-            return k + SKIP_ONE;
-        }
-    }
-    return n;
-}
-
-/* Count top-level comma-separated items of s[0..n). */
-static int count_top(const char *s, size_t n) {
-    bool any = false;
-    int items = 1;
-    int depth = 0;
-    for (size_t i = 0; i < n; i++) {
-        char c = s[i];
-        if (is_open_bracket(c)) {
-            depth++;
-        } else if (is_close_bracket(c)) {
-            depth--;
-        } else if (c == ',' && depth == 0) {
-            items++;
-        }
-        any = any || !isspace((unsigned char)c);
-    }
-    return any ? items : 0;
-}
-
 /* An identifier as the scanner takes one: a letter of any script, a digit
  * after the first position, an underscore. */
 static bool ident_ok(const char *s) {
@@ -3394,392 +3362,12 @@ static bool ident_ok(const char *s) {
     return true;
 }
 
-/* One dotted segment: `Name`, `Name{T,U}`, `Name<T>`, `Name``2`. */
-static bool parse_seg(const char *s, size_t n, cs_seg_t *out) {
-    while (n > 0 && isspace((unsigned char)*s)) {
-        s++;
-        n--;
-    }
-    while (n > 0 && isspace((unsigned char)s[n - SKIP_ONE])) {
-        n--;
-    }
-    out->arity = CS_ARITY_NONE;
-    out->targs = NULL;
-    out->targs_len = 0;
-    size_t name_end = n;
-    for (size_t i = 0; i < n; i++) {
-        if (s[i] == '`') {
-            name_end = i;
-            size_t d = i;
-            while (d < n && s[d] == '`') {
-                d++;
-            }
-            out->arity = atoi(s + d);
-            break;
-        }
-        if (s[i] == '{' || s[i] == '<') {
-            name_end = i;
-            size_t e = group_end(s, n, i);
-            if (e < n) {
-                return false; /* text after the type arguments: no name */
-            }
-            size_t inner = e > i + PAIR_LEN ? e - i - PAIR_LEN : 0;
-            out->arity = count_top(s + i + SKIP_ONE, inner);
-            out->targs = s + i + SKIP_ONE;
-            out->targs_len = inner;
-            break;
-        }
-    }
-    const char *name = s;
-    if (name_end > 0 && name[0] == '@') {
-        name++;
-        name_end--;
-    }
-    if (name_end == 0 || name_end >= sizeof(out->name)) {
-        return false;
-    }
-    memcpy(out->name, name, name_end);
-    out->name[name_end] = '\0';
-    return ident_ok(out->name);
-}
-
-/* Split a dotted path (dots inside type-argument groups do not split). */
-/* A path whose brackets do not pair is not read at all: its last segment
- * would be dropped and the reference resolved by the segments before it. */
-static bool parse_path(const char *s, size_t n, cs_seg_t *segs, int *nsegs) {
-    *nsegs = 0;
-    size_t start = 0;
-    int depth = 0;
-    for (size_t i = 0; i <= n; i++) {
-        char c = i < n ? s[i] : '.';
-        if (is_open_bracket(c)) {
-            depth++;
-        } else if (is_close_bracket(c)) {
-            if (--depth < 0) {
-                return false;
-            }
-        } else if (c == '.' && depth == 0) {
-            if (*nsegs >= CS_MAX_SEGS || !parse_seg(s + start, i - start, &segs[*nsegs])) {
-                return false;
-            }
-            (*nsegs)++;
-            start = i + SKIP_ONE;
-        }
-    }
-    return depth == 0 && *nsegs > 0;
-}
-
-static const char *const CS_KEYWORD_TYPES[][2] = {
-    {"int", "Int32"},     {"string", "String"},   {"object", "Object"}, {"bool", "Boolean"},
-    {"byte", "Byte"},     {"sbyte", "SByte"},     {"short", "Int16"},   {"ushort", "UInt16"},
-    {"uint", "UInt32"},   {"long", "Int64"},      {"ulong", "UInt64"},  {"float", "Single"},
-    {"double", "Double"}, {"decimal", "Decimal"}, {"char", "Char"},     {"nint", "IntPtr"},
-    {"nuint", "UIntPtr"}, {"void", "Void"},
-};
-
-static const char *keyword_type(const char *s) {
-    for (size_t i = 0; i < sizeof(CS_KEYWORD_TYPES) / sizeof(CS_KEYWORD_TYPES[0]); i++) {
-        if (strcmp(s, CS_KEYWORD_TYPES[i][0]) == 0) {
-            return CS_KEYWORD_TYPES[i][1];
-        }
-    }
-    return NULL;
-}
-
-/* The token a metadata operator name stands for (`op_Addition` -> `+`): the
- * name the scope records an operator under. NULL for a name that is none. */
-static const char *operator_token(const char *name, size_t len) {
-    static const struct {
-        const char *meta;
-        const char *token;
-    } ops[] = {
-        {"Addition", "+"},
-        {"UnaryPlus", "+"},
-        {"Subtraction", "-"},
-        {"UnaryNegation", "-"},
-        {"Multiply", "*"},
-        {"Division", "/"},
-        {"Modulus", "%"},
-        {"BitwiseAnd", "&"},
-        {"BitwiseOr", "|"},
-        {"ExclusiveOr", "^"},
-        {"LeftShift", "<<"},
-        {"RightShift", ">>"},
-        {"UnsignedRightShift", ">>>"},
-        {"Equality", "=="},
-        {"Inequality", "!="},
-        {"LessThan", "<"},
-        {"GreaterThan", ">"},
-        {"LessThanOrEqual", "<="},
-        {"GreaterThanOrEqual", ">="},
-        {"LogicalNot", "!"},
-        {"OnesComplement", "~"},
-        {"Increment", "++"},
-        {"Decrement", "--"},
-        {"True", "true"},
-        {"False", "false"},
-        {"Implicit", "implicit"},
-        {"Explicit", "explicit"},
-        {"CheckedAddition", "+"},
-        {"CheckedSubtraction", "-"},
-        {"CheckedMultiply", "*"},
-        {"CheckedDivision", "/"},
-        {"CheckedUnaryNegation", "-"},
-        {"CheckedIncrement", "++"},
-        {"CheckedDecrement", "--"},
-        {"CheckedExplicit", "explicit"},
-    };
-    for (size_t i = 0; i < sizeof(ops) / sizeof(ops[0]); i++) {
-        if (strlen(ops[i].meta) == len && memcmp(ops[i].meta, name, len) == 0) {
-            return ops[i].token;
-        }
-    }
-    return NULL;
-}
-
-static bool starts_word(const char *s, const char *word) {
-    size_t n = strlen(word);
-    return strncmp(s, word, n) == 0 && !isalnum((unsigned char)s[n]) && s[n] != '_';
-}
-
-static const char *skip_blanks(const char *s) {
-    while (*s == ' ') {
-        s++;
-    }
-    return s;
-}
-
-/* The operator, conversion or indexer written at `q` (the start of a
- * segment): its recorded name into `name`. false when `q` starts none. */
-static bool operator_at(const char *q, char name[CS_OP_NAME]) {
-    static const char op_prefix[] = "op_";
-    q = skip_blanks(q);
-    bool implicit = starts_word(q, "implicit");
-    if (implicit || starts_word(q, "explicit")) {
-        if (!starts_word(skip_blanks(q + strlen("implicit")), "operator")) {
-            return false;
-        }
-        snprintf(name, CS_OP_NAME, "%s", implicit ? "implicit" : "explicit");
-        return true;
-    }
-    if (starts_word(q, "operator")) {
-        const char *t = skip_blanks(q + strlen("operator"));
-        if (starts_word(t, "checked")) {
-            t = skip_blanks(t + strlen("checked"));
-        }
-        size_t n = 0;
-        while (t[n] && t[n] != '(' && t[n] != ' ' && n + SKIP_ONE < CS_OP_NAME) {
-            n++;
-        }
-        snprintf(name, CS_OP_NAME, "%.*s", (int)n, n > 0 ? t : "?");
-        return true;
-    }
-    if (starts_word(q, "this")) {
-        const char *t = skip_blanks(q + strlen("this"));
-        if (*t != '[' && *t != '\0') {
-            return false;
-        }
-        snprintf(name, CS_OP_NAME, "this");
-        return true;
-    }
-    size_t pl = sizeof(op_prefix) - SKIP_ONE;
-    if (strncmp(q, op_prefix, pl) == 0 && isupper((unsigned char)q[pl])) {
-        size_t n = 0;
-        while (isalnum((unsigned char)q[pl + n])) {
-            n++;
-        }
-        const char *token = operator_token(q + pl, n);
-        if (!token) {
-            return false; /* `op_Custom`: an identifier like any other */
-        }
-        snprintf(name, CS_OP_NAME, "%s", token);
-        return true;
-    }
-    return false;
-}
-
-/* Where the reference's last segment starts an operator, a conversion or an
- * indexer: its offset in `s`, or CS_NONE. */
-static int operator_start(const char *s, char name[CS_OP_NAME]) {
-    int depth = 0;
-    for (size_t i = 0; s[i]; i++) {
-        if ((i == 0 || (s[i - SKIP_ONE] == '.' && depth == 0)) && operator_at(s + i, name)) {
-            return (int)i;
-        }
-        if (is_open_bracket(s[i])) {
-            depth++;
-        } else if (is_close_bracket(s[i])) {
-            depth--;
-        }
-    }
-    return CS_NONE;
-}
-
-/* A doc ID writes a type parameter by its position: `0 (of the type and the
- * types around it), ``0 (of the method). Such a parameter is kept as it
- * stands (without a by-reference mark): its position is what is compared. */
-static bool slot_param(const char *s, size_t n, char *out, size_t cap) {
-    while (n > 0 && isspace((unsigned char)*s)) {
-        s++;
-        n--;
-    }
-    while (n > 0 && (isspace((unsigned char)s[n - SKIP_ONE]) || s[n - SKIP_ONE] == '@')) {
-        n--;
-    }
-    size_t ticks = 0;
-    while (ticks < n && s[ticks] == '`') {
-        ticks++;
-    }
-    if (ticks == 0 || ticks > PAIR_LEN || ticks >= n || !isdigit((unsigned char)s[ticks])) {
-        return false;
-    }
-    size_t d = ticks;
-    while (d < n && isdigit((unsigned char)s[d])) {
-        d++;
-    }
-    for (size_t k = d; k < n; k++) {
-        if (!strchr("[],*", s[k])) {
-            return false;
-        }
-    }
-    if (n >= cap) {
-        return false;
-    }
-    memcpy(out, s, n);
-    out[n] = '\0';
-    return true;
-}
-
-/* The written parameter list s[from, to) into the reference: every parameter
- * normalized, and all of them as one signature. false for more parameters
- * than a reference may have. */
-static bool parse_params(cs_ref_t *r, const char *s, size_t from, size_t to) {
-    bool any = false;
-    for (size_t i = from; i < to && !any; i++) {
-        any = !isspace((unsigned char)s[i]);
-    }
-    size_t start = from;
-    int depth = 0;
-    size_t w = 0;
-    for (size_t i = from; any && i <= to; i++) {
-        char c = i < to ? s[i] : ',';
-        if (is_open_bracket(c)) {
-            depth++;
-        } else if (is_close_bracket(c)) {
-            if (--depth < 0) {
-                return false; /* a bracket that closes nothing */
-            }
-        } else if (c == ',' && depth == 0) {
-            if (r->nparams >= CS_MAX_PARAMS) {
-                return false;
-            }
-            char *p = r->params[r->nparams++];
-            if (!slot_param(s + start, i - start, p, CS_PARAM_BUF)) {
-                (void)cbm_doclink_cs_norm_type(s + start, i - start, p, CS_PARAM_BUF);
-            }
-            size_t pl = strlen(p);
-            r->sig_unknown = r->sig_unknown || strchr(p, '?') != NULL;
-            if (w > 0) {
-                r->sig[w++] = '|';
-            }
-            memcpy(r->sig + w, p, pl);
-            w += pl;
-            start = i + SKIP_ONE;
-        }
-    }
-    r->sig[w] = '\0';
-    /* a bracket left open would have swallowed the last parameter: the
-     * reference would be matched without it */
-    return depth == 0;
-}
-
-/* A written reference into its parts. false for one this code does not
- * understand -- and for one longer than CS_REF_BUF, which is never cut and
- * resolved by what is left of it. */
-static bool parse_cref(const char *raw, cs_ref_t *r) {
-    static const char global_prefix[] = "global::";
-    r->nsegs = 0;
-    r->nparams = 0;
-    r->has_params = r->sig_unknown = r->glob = r->op = r->maybe_indexer = r->keyword = false;
-    r->docid = 0;
-    r->sig[0] = '\0';
-    r->op_name[0] = '\0';
-    const char *in = raw ? raw : "";
-    while (isspace((unsigned char)*in)) {
-        in++;
-    }
-    size_t n = strlen(in);
-    while (n > 0 && isspace((unsigned char)in[n - SKIP_ONE])) {
-        n--;
-    }
-    if (n == 0 || n >= sizeof(r->text)) {
-        return false;
-    }
-    memcpy(r->text, in, n);
-    r->text[n] = '\0';
-    char *s = r->text;
-    if (n > PAIR_LEN && s[1] == ':' && strchr("TMPFENO!", s[0])) {
-        char k = s[0];
-        if (k == '!') {
-            return false; /* the compiler's error marker: it could not bind the reference */
-        }
-        s += PAIR_LEN;
-        while (isspace((unsigned char)*s)) {
-            s++;
-        }
-        if (k == 'O') { /* DocFX's overload group: a member without a signature */
-            char *paren = strchr(s, '(');
-            if (paren) {
-                *paren = '\0';
-            }
-        }
-        r->docid = k;
-        r->glob = true; /* a doc ID is a full name */
-    }
-    size_t gl = sizeof(global_prefix) - SKIP_ONE;
-    if (strncmp(s, global_prefix, gl) == 0) {
-        r->glob = true;
-        s += gl;
-    }
-    n = strlen(s);
-    int op = operator_start(s, r->op_name);
-    if (op >= 0) {
-        r->op = true;
-        return op == 0 || parse_path(s, (size_t)op - SKIP_ONE, r->segs, &r->nsegs);
-    }
-    /* `Path(params)`: the first top-level parenthesis starts the list. */
-    size_t paren = n;
-    int depth = 0;
-    for (size_t i = 0; i < n; i++) {
-        char c = s[i];
-        if (c == '<' || c == '{' || c == '[') {
-            depth++;
-        } else if (c == '>' || c == '}' || c == ']') {
-            depth--;
-        } else if (c == '(' && depth == 0) {
-            paren = i;
-            break;
-        }
-    }
-    if (!parse_path(s, paren, r->segs, &r->nsegs)) {
-        return false;
-    }
-    if (paren < n) {
-        r->has_params = true;
-        size_t close = group_end(s, n, paren);
-        bool closed = close > paren && s[close - SKIP_ONE] == ')';
-        /* a parameter list that is not closed, or text after it, is not
-         * matched by what can be read of it */
-        for (size_t k = close; closed && k < n; k++) {
-            closed = isspace((unsigned char)s[k]) != 0;
-        }
-        if (!closed || !parse_params(r, s, paren + SKIP_ONE, close - SKIP_ONE)) {
-            return false;
-        }
-    }
-    r->maybe_indexer = r->has_params && strcmp(r->segs[r->nsegs - SKIP_ONE].name, "Item") == 0;
-    return true;
-}
+/* The Rust parser borrows type argument spans from the input for the
+ * duration of the using, base, or cref lookup. */
+extern bool mori_cs_doclink_parse_name(const char *text, size_t len, cs_seg_t *segs, int *nsegs,
+                                       bool *glob);
+extern bool mori_cs_doclink_parse_cref(const char *text, cs_ref_t *ref);
+extern bool mori_cs_doclink_unparsed_keyword(const char *text);
 
 /* ── Results ─────────────────────────────────────────────────────── */
 
@@ -4503,104 +4091,6 @@ static void level_using(const cs_ctx_t *c, const cs_using_t *u, const cs_query_t
     }
 }
 
-static size_t name_scope_range(const cs_index_t *ix, const char *name, size_t *end) {
-    size_t lo = 0;
-    size_t hi = ix->nname_scopes;
-    while (lo < hi) {
-        cs_work(SKIP_ONE);
-        size_t mid = lo + (hi - lo) / PAIR_LEN;
-        if (strcmp(ix->name_scopes[mid].name, name) < 0) {
-            lo = mid + SKIP_ONE;
-        } else {
-            hi = mid;
-        }
-    }
-    size_t first = lo;
-    hi = ix->nname_scopes;
-    while (lo < hi) {
-        cs_work(SKIP_ONE);
-        size_t mid = lo + (hi - lo) / PAIR_LEN;
-        if (strcmp(ix->name_scopes[mid].name, name) <= 0) {
-            lo = mid + SKIP_ONE;
-        } else {
-            hi = mid;
-        }
-    }
-    *end = lo;
-    return first;
-}
-
-/* IDs are accumulated before any result is added: if growth fails, a full
- * scan can retry without duplicating a partially resolved candidate set. */
-enum { CS_CANDIDATE_STACK = 32 };
-typedef struct {
-    int local[CS_CANDIDATE_STACK];
-    int *ids;
-    size_t n;
-    size_t cap;
-} cs_candidate_ids_t;
-
-static bool candidate_add(cs_candidate_ids_t *ids, int id) {
-    if (ids->n == ids->cap) {
-        if (ids->cap > SIZE_MAX / PAIR_LEN / sizeof(int)) {
-            return false;
-        }
-        size_t cap = ids->cap * PAIR_LEN;
-        int *grown = NULL;
-#if defined(CBM_ENABLE_TEST_SEAMS) && CBM_ENABLE_TEST_SEAMS
-        bool fail = atomic_exchange(&cs_fail_candidate_alloc, false);
-        if (fail) {
-            atomic_store(&cs_candidate_alloc_failed, true);
-        } else
-#endif
-        {
-            grown = (int *)cbm_alloc(CBM_MEM_CLASS_OTHER, cap * sizeof(int));
-        }
-        if (!grown) {
-            return false;
-        }
-        memcpy(grown, ids->ids, ids->n * sizeof(int));
-        cs_work(ids->n);
-        if (ids->ids != ids->local) {
-            cbm_free(CBM_MEM_CLASS_OTHER, ids->ids);
-        }
-        ids->ids = grown;
-        ids->cap = cap;
-    }
-    ids->ids[ids->n++] = id;
-    return true;
-}
-
-static bool candidate_scope(const cs_using_id_t *rows, size_t n, int scope,
-                            cs_candidate_ids_t *ids) {
-    size_t lo = 0;
-    size_t hi = n;
-    while (lo < hi) {
-        cs_work(SKIP_ONE);
-        size_t mid = lo + (hi - lo) / PAIR_LEN;
-        if (rows[mid].scope < scope) {
-            lo = mid + SKIP_ONE;
-        } else {
-            hi = mid;
-        }
-    }
-    for (size_t i = lo; i < n; i++) {
-        cs_work(SKIP_ONE);
-        if (rows[i].scope != scope) {
-            break;
-        }
-        if (!candidate_add(ids, rows[i].id)) {
-            return false;
-        }
-    }
-    return true;
-}
-
-static int candidate_id_cmp(const void *a, const void *b) {
-    cs_work(SKIP_ONE);
-    return int_cmp(a, b);
-}
-
 /* The directives of a using step that give a query anything, in order (R1):
  * noted while the step is walked, for the unit memo. */
 typedef struct {
@@ -4658,55 +4148,82 @@ static bool usings_may_give(const cs_ctx_t *c, int n, const cs_using_index_t *in
     return !(indexed && !index->nentities && (!index->nnamespaces || !*a_type_name));
 }
 
+/* The candidate walk is in Rust. These callbacks keep graph lookup, memo
+ * contributions, and the memory-core allocation seam in the C index. */
+typedef struct {
+    const cs_name_scope_t *names;
+    size_t name_count;
+    const cs_using_id_t *namespaces;
+    size_t namespace_count;
+    const cs_using_id_t *entities;
+    size_t entity_count;
+} cs_using_postings_t;
+
+typedef struct {
+    bool (*visit)(void *data, int id);
+    int *(*allocate)(size_t count);
+    void (*release)(int *items);
+    void (*work)(uint64_t count);
+} cs_using_ops_t;
+
+typedef struct {
+    const cs_ctx_t *ctx;
+    const cs_using_t *usings;
+    const cs_query_t *query;
+    bool a_type_name;
+    cs_found_t *found;
+    cs_active_rec_t *record;
+} cs_using_walk_t;
+
+extern void mori_cs_doclink_visit_usings(const cs_using_postings_t *postings, const char *name,
+                                        int count, const cs_using_ops_t *ops, void *data);
+
+static bool cs_visit_using(void *data, int id) {
+    const cs_using_walk_t *walk = data;
+    using_visit(walk->ctx, walk->usings, id, walk->query, walk->a_type_name, walk->found,
+                walk->record);
+    return !found_decided(walk->found);
+}
+
+static int *cs_alloc_using_candidates(size_t count) {
+#if defined(CBM_ENABLE_TEST_SEAMS) && CBM_ENABLE_TEST_SEAMS
+    if (atomic_exchange(&cs_fail_candidate_alloc, false)) {
+        atomic_store(&cs_candidate_alloc_failed, true);
+        return NULL;
+    }
+#endif
+    return cbm_alloc(CBM_MEM_CLASS_OTHER, count * sizeof(int));
+}
+
+static void cs_free_using_candidates(int *items) {
+    cbm_free(CBM_MEM_CLASS_OTHER, items);
+}
+
 static void level_usings(const cs_ctx_t *c, const cs_using_t *us, int n,
                          const cs_using_index_t *index, const cs_query_t *q, cs_found_t *fd,
                          cs_active_rec_t *rec) {
     bool a_type_name = false;
-    if (!usings_may_give(c, n, index, q, &a_type_name)) {
+    if (found_decided(fd) || !usings_may_give(c, n, index, q, &a_type_name)) {
         return;
     }
+    static const cs_using_ops_t ops = {
+        .visit = cs_visit_using,
+        .allocate = cs_alloc_using_candidates,
+        .release = cs_free_using_candidates,
+#if defined(CBM_ENABLE_TEST_SEAMS) && CBM_ENABLE_TEST_SEAMS
+        .work = cs_work,
+#endif
+    };
+    cs_using_walk_t walk = {c, us, q, a_type_name, fd, rec};
+    cs_using_postings_t postings;
     bool indexed = index && index->ready && c->ix->name_scopes_ready;
-    size_t hi = 0;
-    size_t lo = indexed ? name_scope_range(c->ix, q->name, &hi) : 0;
-    /* A common name in a large repository must not make a small scope walk
-     * more postings than it has directives. The baseline scan stays cheap. */
-    if (!indexed || hi - lo >= (size_t)n) {
-        for (int i = 0; i < n && !found_decided(fd); i++) {
-            using_visit(c, us, i, q, a_type_name, fd, rec);
-        }
-        return;
+    if (indexed) {
+        postings = (cs_using_postings_t){
+            c->ix->name_scopes, c->ix->nname_scopes, index->namespaces, index->nnamespaces,
+            index->entities, index->nentities,
+        };
     }
-    cs_candidate_ids_t ids = {.cap = CS_CANDIDATE_STACK};
-    ids.ids = ids.local;
-    bool complete = true;
-    for (size_t i = lo; complete && i < hi; i++) {
-        cs_work(SKIP_ONE);
-        const cs_name_scope_t *row = &c->ix->name_scopes[i];
-        complete = row->top
-                       ? candidate_scope(index->namespaces, index->nnamespaces, row->scope, &ids)
-                       : candidate_scope(index->entities, index->nentities, row->scope, &ids);
-    }
-    if (complete) {
-        if (ids.n > 1) {
-            qsort(ids.ids, ids.n, sizeof(int), candidate_id_cmp);
-        }
-        for (size_t i = 0; i < ids.n && !found_decided(fd); i++) {
-            cs_work(SKIP_ONE);
-            /* Own and twin postings may select the SAME directive twice.
-             * Distinct directive IDs must still be resolved separately. */
-            if (!i || ids.ids[i] != ids.ids[i - SKIP_ONE]) {
-                using_visit(c, us, ids.ids[i], q, a_type_name, fd, rec);
-            }
-        }
-    }
-    if (ids.ids != ids.local) {
-        cbm_free(CBM_MEM_CLASS_OTHER, ids.ids);
-    }
-    if (!complete) {
-        for (int i = 0; i < n && !found_decided(fd); i++) {
-            using_visit(c, us, i, q, a_type_name, fd, rec);
-        }
-    }
+    mori_cs_doclink_visit_usings(indexed ? &postings : NULL, q->name, n, &ops, &walk);
 }
 
 /* The using step of a lookup -- what the directives of one region, and at
@@ -5741,21 +5258,6 @@ static bool line_unplaced(const cs_file_t *f, uint32_t line) {
 
 /* ── Usings and base lists ───────────────────────────────────────── */
 
-static const char CS_GLOBAL_PREFIX[] = "global::";
-
-/* A written type or namespace name into `segs`; *glob when it starts at the
- * global namespace. false for what is no dotted name (a tuple, an array, a
- * pointer, a text this code did not understand). */
-static bool parse_name(const char *s, size_t n, cs_seg_t *segs, int *nsegs, bool *glob) {
-    size_t gl = sizeof(CS_GLOBAL_PREFIX) - SKIP_ONE;
-    *glob = n >= gl && strncmp(s, CS_GLOBAL_PREFIX, gl) == 0;
-    if (*glob) {
-        s += gl;
-        n -= gl;
-    }
-    return parse_path(s, n, segs, nsegs);
-}
-
 /* What a using directive names: a namespace into u->ns, a type into u->ent
  * (CS_AMBIGUOUS for several). Both stay CS_NONE for what the repository does
  * not have. `c` is the scope the directive is resolved in. */
@@ -5766,7 +5268,7 @@ static void resolve_using(cs_using_t *u, const cs_ctx_t *c) {
     bool glob = false;
     u->ns = CS_NONE;
     u->ent = CS_NONE;
-    if (!parse_name(u->target, strlen(u->target), segs, &n, &glob)) {
+    if (!mori_cs_doclink_parse_name(u->target, strlen(u->target), segs, &n, &glob)) {
         return;
     }
     at.glob = at.glob || glob;
@@ -5861,7 +5363,7 @@ static int base_entity(const cs_ctx_t *c, const char *s, size_t n) {
     int nsegs = 0;
     cs_ctx_t at = *c;
     bool glob = false;
-    if (!parse_name(s, n, segs, &nsegs, &glob)) {
+    if (!mori_cs_doclink_parse_name(s, n, segs, &nsegs, &glob)) {
         return CS_NONE;
     }
     at.glob = glob;
@@ -6127,10 +5629,7 @@ static void undo_scope(cs_index_t *ix) {
  * bases`, `M start kind explicit type name tparams sig` and `Q name`. */
 enum {
     CS_SCOPE_Q_NAME = 1,
-    CS_SCOPE_U_KIND = 2,
-    CS_SCOPE_M_NAME = 5,
-    CS_SCOPE_T_NAME = 6,
-    CS_SCOPE_T_BASES = 8
+    CS_SCOPE_T_NAME = 6
 };
 
 static const char *delta_field(const char *line, size_t len, int idx, size_t *flen) {
@@ -6486,44 +5985,6 @@ static void *cs_build(const cbm_doclink_build_in_t *in) {
     return ix;
 }
 
-/* The reason for a reference this code does not understand: one that names a
- * keyword type in a form that is no name (`int[]`, `string?`) is the BCL's;
- * one too long to be read is never judged by its beginning. */
-static int unparsed_reason(const char *raw) {
-    const char *s = raw ? raw : "";
-    while (isspace((unsigned char)*s)) {
-        s++;
-    }
-    char head[CBM_SZ_32];
-    size_t n = strcspn(s, "({<.[?* \t");
-    if (strlen(s) >= CS_REF_BUF || n == 0 || n >= sizeof(head)) {
-        return CBM_DOCLINK_REASON_UNPARSEABLE;
-    }
-    memcpy(head, s, n);
-    head[n] = '\0';
-    return keyword_type(head) ? CBM_DOCLINK_REASON_EXTERNAL : CBM_DOCLINK_REASON_UNPARSEABLE;
-}
-
-/* A keyword alias (`int`, `string.Empty`) names its System type whatever
- * stands around the reference. */
-static void rewrite_keyword(cs_ref_t *r) {
-    static const char system_ns[] = "System";
-    if (r->docid || r->nsegs == 0 || r->nsegs >= CS_MAX_SEGS || r->segs[0].arity > 0) {
-        return;
-    }
-    const char *bcl = keyword_type(r->segs[0].name);
-    if (!bcl) {
-        return;
-    }
-    memmove(&r->segs[1], &r->segs[0], (size_t)r->nsegs * sizeof(cs_seg_t));
-    r->segs[0] = (cs_seg_t){.arity = CS_ARITY_NONE};
-    snprintf(r->segs[0].name, sizeof(r->segs[0].name), "%s", system_ns);
-    snprintf(r->segs[1].name, sizeof(r->segs[1].name), "%s", bcl);
-    r->nsegs++;
-    r->keyword = true;
-    r->glob = true;
-}
-
 /* True when the reference names a type some file declares at a place no
  * scope could be established for: it could be that declaration. */
 static bool names_quarantined(const cs_index_t *ix, const cs_file_t *f, const cs_ref_t *r) {
@@ -6567,11 +6028,12 @@ static void cs_resolve(const void *index, void *state, int run_file, const CBMDo
         return;
     }
     cs_ref_t r;
-    if (!parse_cref(link->raw, &r)) {
-        out->reason = unparsed_reason(link->raw);
+    if (!mori_cs_doclink_parse_cref(link->raw, &r)) {
+        out->reason = mori_cs_doclink_unparsed_keyword(link->raw)
+                          ? CBM_DOCLINK_REASON_EXTERNAL
+                          : CBM_DOCLINK_REASON_UNPARSEABLE;
         return;
     }
-    rewrite_keyword(&r);
     /* What could not be placed is not resolved around: a definition in the
      * part of its file where the braces stop pairing has no known scope, and
      * a name some file declares without a known namespace could be that
@@ -6612,125 +6074,17 @@ static void cs_resolve(const void *index, void *state, int run_file, const CBMDo
 
 /* ── Incremental scope rules ─────────────────────────────────────── */
 
-/* A using directive only its own file sees: one that is not `global`. */
-static bool delta_local_using(const char *line, size_t len) {
-    if (line[0] != 'U') {
-        return false;
-    }
-    size_t klen = 0;
-    const char *kind = delta_field(line, len, CS_SCOPE_U_KIND, &klen);
-    return kind && klen > 0 && !memchr(kind, 'g', klen);
-}
+extern int mori_cs_doclink_scope_delta(const char *stored, const char *fresh, bool isolated,
+                                      cbm_doclink_name_fn removed, void *ud);
 
-/* The next scope line -- with `local_usings` only the file's own using
- * directives, without it every other line; false at the end. */
-static bool delta_next_line(const char **cursor, bool local_usings, const char **line,
-                            size_t *len) {
-    for (const char *p = *cursor; p && *p;) {
-        const char *nl = strchr(p, '\n');
-        size_t n = nl ? (size_t)(nl - p) : strlen(p);
-        const char *next = nl ? nl + SKIP_ONE : p + n;
-        if (n > 0 && delta_local_using(p, n) == local_usings) {
-            *line = p;
-            *len = n;
-            *cursor = next;
-            return true;
-        }
-        p = next;
-    }
-    *cursor = NULL;
-    return false;
-}
+_Static_assert(CBM_DOCLINK_DELTA_LOCAL == 0 && CBM_DOCLINK_DELTA_GLOBAL == 1 && CBM_NOT_FOUND == -1,
+               "C# scope delta ABI");
 
-/* True when the two scopes have the same own using directives, in order. */
-static bool delta_same_usings(const char *stored, const char *fresh) {
-    const char *sl = NULL;
-    const char *fl = NULL;
-    size_t slen = 0;
-    size_t flen = 0;
-    for (;;) {
-        bool hs = delta_next_line(&stored, true, &sl, &slen);
-        bool hf = delta_next_line(&fresh, true, &fl, &flen);
-        if (!hs || !hf) {
-            return hs == hf;
-        }
-        if (slen != flen || memcmp(sl, fl, slen) != 0) {
-            return false;
-        }
-    }
-}
-
-/* True when the scope declares a type that has a base list. */
-static bool delta_has_bases(const char *scope) {
-    for (const char *p = scope; p && *p;) {
-        const char *nl = strchr(p, '\n');
-        size_t n = nl ? (size_t)(nl - p) : strlen(p);
-        size_t blen = 0;
-        if (p[0] == 'T' && delta_field(p, n, CS_SCOPE_T_BASES, &blen) && blen > 0) {
-            return true;
-        }
-        p = nl ? nl + SKIP_ONE : NULL;
-    }
-    return false;
-}
-
-/* Compare a changed file's stored and fresh scopes line by line, in order.
- * Two differences leave every other file's resolution alone:
- *   - the file's own using directives (namespace, static, alias), as long as
- *     the file declares no type with a base list: they scope the file
- *     itself, and it is re-extracted anyway. A base list is resolved through
- *     them, and what a type derives from decides how OTHER files' references
- *     to its members come out;
- *   - a member the fresh scope no longer has. Every member line is a method,
- *     constructor, property, field, event, operator, indexer or enum member,
- *     so a reference that depended on it either bound it (an edge into this
- *     file) or names it in its unresolved row: the name is reported.
- * Everything else is GLOBAL: a new or changed line (a type, a member, a
- * signature, a namespace, a global using), a removed type (it may be another
- * type's base or an alias target, which changes how references THROUGH those
- * classify), a removed namespace, global using, quarantined name or unplaced
- * range, and a changed order (same-path declarations own their node by
- * order, and a record names its type by its position).
- *
- * An MSBuild project file's blob sets the global usings of every C# file of
- * its project: any difference between two of those is GLOBAL. An edit that
- * leaves the blob as it is -- a target, a package reference -- changes
- * nobody's scope. */
 static int cs_scope_delta(const char *stored, const char *fresh, cbm_doclink_name_fn removed,
                           void *ud) {
-    /* a rejected file declares nothing: unchanged while it stays rejected */
-    if (cbm_msb_is_project_scope(stored) || cbm_msb_is_project_scope(fresh) ||
-        cs_scope_marked_rejected(stored) || cs_scope_marked_rejected(fresh)) {
-        return strcmp(stored, fresh) == 0 ? CBM_DOCLINK_DELTA_LOCAL : CBM_DOCLINK_DELTA_GLOBAL;
-    }
-    if (!delta_same_usings(stored, fresh) && (delta_has_bases(stored) || delta_has_bases(fresh))) {
-        return CBM_DOCLINK_DELTA_GLOBAL;
-    }
-    const char *sp = stored;
-    const char *fp = fresh;
-    const char *sl = NULL;
-    const char *fl = NULL;
-    size_t slen = 0;
-    size_t flen = 0;
-    bool hs = delta_next_line(&sp, false, &sl, &slen);
-    bool hf = delta_next_line(&fp, false, &fl, &flen);
-    while (hs || hf) {
-        if (hs && hf && slen == flen && memcmp(sl, fl, slen) == 0) {
-            hs = delta_next_line(&sp, false, &sl, &slen);
-            hf = delta_next_line(&fp, false, &fl, &flen);
-            continue;
-        }
-        if (!hs || sl[0] != 'M') {
-            return CBM_DOCLINK_DELTA_GLOBAL;
-        }
-        size_t nlen = 0;
-        const char *name = delta_field(sl, slen, CS_SCOPE_M_NAME, &nlen);
-        if (!name || nlen == 0 || !removed || !removed(ud, name, nlen)) {
-            return CBM_NOT_FOUND; /* not a member line this code wrote, or not recordable */
-        }
-        hs = delta_next_line(&sp, false, &sl, &slen);
-    }
-    return CBM_DOCLINK_DELTA_LOCAL;
+    bool isolated = cbm_msb_is_project_scope(stored) || cbm_msb_is_project_scope(fresh) ||
+                    cs_scope_marked_rejected(stored) || cs_scope_marked_rejected(fresh);
+    return mori_cs_doclink_scope_delta(stored, fresh, isolated, removed, ud);
 }
 
 /* XML is listed for the MSBuild project files: their scope blobs carry the C#

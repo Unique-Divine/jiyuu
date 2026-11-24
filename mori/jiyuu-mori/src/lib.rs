@@ -7,6 +7,8 @@ mod architecture_projection;
 #[cfg(any(feature = "native-engine-abi", test))]
 mod complexity;
 #[cfg(feature = "native-engine-abi")]
+mod csharp_doc_links;
+#[cfg(feature = "native-engine-abi")]
 mod doc_file_links;
 #[cfg(feature = "native-engine-abi")]
 mod docker_image;
