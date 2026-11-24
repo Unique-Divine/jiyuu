@@ -139,11 +139,10 @@ impl IndexSession {
             rust_full,
             "{logs}"
         );
-        assert_eq!(
+        assert!(
             logs.contains(
                 "msg=pipeline.source_publish implementation=rust staged_rc=0"
             ),
-            true,
             "{logs}"
         );
         assert!(logs.contains(step.log), "{logs}");
@@ -326,11 +325,10 @@ impl IndexSession {
         assert!(logs.contains("reason=adr_migrate_failed"), "{logs}");
         assert!(!logs.contains("msg=pipeline.full_build_driver"), "{logs}");
         assert!(!logs.contains("msg=pipeline.stage_publish"), "{logs}");
-        assert_eq!(
+        assert!(
             logs.contains(
                 "msg=pipeline.source_publish implementation=rust staged_rc=-2"
             ),
-            true,
             "{logs}"
         );
         assert_eq!(self.state(name), before);
