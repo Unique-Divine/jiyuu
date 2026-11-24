@@ -46,7 +46,7 @@ uv tool install git+https://github.com/SaiDotFun/open-sai
 To try it without installing:
 
 ```bash
-uvx --from git+https://github.com/SaiDotFun/open-sai sai --json market prices
+uvx --from https://github.com/SaiDotFun/open-sai/releases/download/sai-cli/v0.1.2/sai_cli-0.1.2-py3-none-any.whl sai --json market prices
 ```
 
 The package is `sai-cli`. `uv tool install sai` installs an unrelated PyPI
