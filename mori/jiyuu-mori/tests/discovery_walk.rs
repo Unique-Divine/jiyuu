@@ -191,3 +191,107 @@ fn discovery_resource_policy_keeps_the_native_walk() {
         "{logs:?}"
     );
 }
+
+#[test]
+fn mcp_auto_index_uses_the_selected_bounded_walker() {
+    use std::io::Write;
+    use std::process::Stdio;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    for (selector, expected_backend) in
+        [(None, "c"), (Some("c"), "c"), (Some("rust"), "rust")]
+    {
+        for (limit, expected_event) in [
+            ("1", "daemon.autoindex.skipped"),
+            ("2", "daemon.index.result"),
+        ] {
+            let scratch = Scratch::new();
+            let repo = scratch.0.join("repo");
+            fs::create_dir_all(repo.join("child")).unwrap();
+            write(&repo, "main.go", "package main\nfunc main() {}\n");
+            write(&repo, "child/extra.go", "package child\nfunc Extra() {}\n");
+            write(&repo, ".cbmignore", "ignored.go\n");
+            write(&repo, "ignored.go", "package main\nfunc Ignored() {}\n");
+            write(&repo, "not-source.blob", "unknown language\n");
+            std::os::unix::fs::symlink("main.go", repo.join("alias.go"))
+                .unwrap();
+            for (key, value) in
+                [("auto_index", "true"), ("auto_index_limit", limit)]
+            {
+                let config = scratch
+                    .command(None)
+                    .args(["config", "set", key, value])
+                    .output()
+                    .unwrap();
+                assert!(config.status.success(), "{config:?}");
+            }
+            let mut command = scratch.command(None);
+            command
+                .current_dir(&repo)
+                .env("CBM_ALLOWED_ROOT", &repo)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            if let Some(selector) = selector {
+                command.env("MORI_IMPL_ADMISSION", selector);
+            }
+            let mut child = command.spawn().unwrap();
+            let mut input = child.stdin.take().unwrap();
+            input
+                .write_all(concat!(
+                    r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"linked-test","version":"1"}}}"#,
+                    "\n",
+                    r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+                    "\n",
+                ).as_bytes())
+                .unwrap();
+            let log = scratch.0.join("default/cache/logs/cbm-daemon.log");
+            let deadline = Instant::now() + Duration::from_secs(30);
+            let events = loop {
+                let events: Vec<Json> = fs::read_to_string(&log)
+                    .unwrap_or_default()
+                    .lines()
+                    .filter_map(|line| serde_json::from_str(line).ok())
+                    .collect();
+                if events.iter().any(|event| event["event"] == expected_event)
+                    || Instant::now() >= deadline
+                    || child.try_wait().unwrap().is_some()
+                {
+                    break events;
+                }
+                thread::sleep(Duration::from_millis(25));
+            };
+            drop(input);
+            let output = child.wait_with_output().unwrap();
+            let stopped = scratch
+                .command(None)
+                .args(["daemon", "stop"])
+                .output()
+                .unwrap();
+            assert!(stopped.status.success(), "{stopped:?}");
+            assert!(output.status.success(), "{output:?}");
+            let reply: Json = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(reply["id"], 1, "{reply}");
+            assert!(reply.get("result").is_some(), "{reply}");
+            assert!(
+                events.iter().any(|event| {
+                    event["event"] == "discover.admission_backend"
+                        && event["implementation"] == expected_backend
+                }),
+                "{events:?}"
+            );
+            let result = events
+                .iter()
+                .find(|event| event["event"] == expected_event)
+                .unwrap_or_else(|| panic!("{events:?}"));
+            if limit == "1" {
+                assert_eq!(result["reason"], "too_many_files", "{result}");
+                assert_eq!(result["files"], "2", "{result}");
+                assert_eq!(result["limit"], "1", "{result}");
+            } else {
+                assert_eq!(result["status"], "indexed", "{result}");
+            }
+        }
+    }
+}
