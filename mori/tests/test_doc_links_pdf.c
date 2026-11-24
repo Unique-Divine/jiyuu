@@ -19,6 +19,7 @@
 #include "foundation/compat_thread.h"
 #include "mcp/mcp.h"
 #include "pdf/pdf.h"
+#include "pipeline/doc_links.h"
 #include "pipeline/pipeline.h"
 #include "pipeline/pipeline_internal.h"
 
@@ -1266,6 +1267,56 @@ TEST(pdf_snippet_is_page_text) {
     PASS();
 }
 
+/* A unique join replaces its fragments. Two different hits leave the
+ * fragments available. Use the resolver table shared by the native runner. */
+TEST(pdf_resolver_join_suppression) {
+    const char *project = "pdf-join";
+    cbm_gbuf_t *graph = cbm_gbuf_new(project, ".");
+    ASSERT_NOT_NULL(graph);
+    int64_t joined = cbm_gbuf_upsert_node(graph, "File", "joined.py",
+                                          "pdf-join.src.joined.py.__file__", "src/joined.py",
+                                          0, 0, NULL);
+    int64_t alternate = cbm_gbuf_upsert_node(graph, "File", "join-ed.py",
+                                             "pdf-join.src.join-ed.py.__file__", "src/join-ed.py",
+                                             0, 0, NULL);
+    ASSERT_GT(joined, 0);
+    ASSERT_GT(alternate, 0);
+
+    cbm_pipeline_ctx_t ctx = {.project_name = project};
+    cbm_doclink_build_in_t in = {.ctx = &ctx, .graph = graph, .file_count = 1};
+    const cbm_doclink_resolver_t *resolver = &cbm_doclink_pdf_resolver;
+    void *index = resolver->build(&in);
+    ASSERT_NOT_NULL(index);
+    const CBMDocLink links[] = {
+        {.raw = "src/joined.py", .syntax = CBM_DOCLINK_PDF_PATH},
+        {.raw = "src/joined.py\x1f" "src/not-there.py\x1e" "0",
+         .syntax = CBM_DOCLINK_PDF_PATH, .flags = CBM_DOCLINK_FLAG_JOIN},
+        {.raw = "src/join-ed.py", .syntax = CBM_DOCLINK_PDF_PATH},
+        {.raw = "src/joined.py\x1f" "src/join-ed.py\x1e" "2",
+         .syntax = CBM_DOCLINK_PDF_PATH, .flags = CBM_DOCLINK_FLAG_JOIN},
+    };
+    void *state = resolver->file_prepare(index, 0, links, sizeof(links) / sizeof(links[0]), graph);
+    ASSERT_NOT_NULL(state);
+    const int64_t targets[] = {0, joined, alternate, 0};
+    for (size_t i = 0; i < sizeof(links) / sizeof(links[0]); i++) {
+        cbm_doclink_outcome_t result = {0};
+        resolver->resolve(index, state, 0, &links[i], graph, &result);
+        if (targets[i]) {
+            ASSERT_EQ(result.kind, CBM_DOCLINK_EDGE);
+            ASSERT_NOT_NULL(result.target);
+            ASSERT_EQ(result.target->id, targets[i]);
+            ASSERT_TRUE(result.exact);
+        } else {
+            ASSERT_EQ(result.kind, CBM_DOCLINK_LOCAL);
+        }
+    }
+
+    resolver->file_end(state);
+    resolver->destroy(index);
+    cbm_gbuf_free(graph);
+    PASS();
+}
+
 TEST(pdf_links_incremental) {
     char tmp[256];
     snprintf(tmp, sizeof(tmp), "/tmp/cbm_dlpdf_inc_XXXXXX");
@@ -1316,5 +1367,6 @@ SUITE(doc_links_pdf) {
     RUN_TEST(pdf_qn_method_through_owner);
     RUN_TEST(pdf_page_doc_bounded);
     RUN_TEST(pdf_snippet_is_page_text);
+    RUN_TEST(pdf_resolver_join_suppression);
     RUN_TEST(pdf_links_incremental);
 }

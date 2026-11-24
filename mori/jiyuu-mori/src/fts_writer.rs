@@ -1,12 +1,12 @@
 //! Maintain the FTS side table on the indexer's current SQLite connection.
 
-use std::ffi::{c_char, c_int};
+use std::ffi::{CString, c_char, c_int};
 use std::ptr::null_mut;
 
 use rusqlite::ffi::{
     SQLITE_DONE, SQLITE_OK, SQLITE_TRANSIENT, sqlite3, sqlite3_bind_int64,
-    sqlite3_bind_text, sqlite3_exec, sqlite3_finalize, sqlite3_free,
-    sqlite3_prepare_v2, sqlite3_step, sqlite3_stmt,
+    sqlite3_bind_text, sqlite3_errmsg, sqlite3_exec, sqlite3_finalize,
+    sqlite3_free, sqlite3_prepare_v2, sqlite3_step, sqlite3_stmt,
 };
 
 // Mirror the native store result codes. Both pipeline callers distinguish
@@ -20,26 +20,37 @@ struct Store {
     _opaque: [u8; 0],
 }
 
-#[repr(C)]
-struct Operations {
-    build_query:
-        unsafe extern "C" fn(*mut c_char, usize, bool, bool, bool) -> bool,
-    report_exec_error: unsafe extern "C" fn(*mut Store, *const c_char),
-    report_step_error: unsafe extern "C" fn(*mut Store),
-}
+type ReportError =
+    unsafe extern "C" fn(*mut Store, *const c_char, *const c_char);
 
-type Writer = unsafe extern "C" fn(
-    *mut Store,
-    *mut sqlite3,
-    *const c_char,
-    i64,
-    *const Operations,
-    *mut c_char,
-    usize,
-) -> c_int;
+// Legacy rows can contain malformed properties. Check validity before decoding
+// docstrings and skip JSON parsing for rows without the docstring key.
+const BODY_EXPR: &str = r#", CASE WHEN properties LIKE '%"docstring"%' AND json_valid(properties) THEN json_extract(properties, '$.docstring') END"#;
 
-unsafe extern "C" {
-    fn cbm_store_set_fts_writer(writer: Writer);
+// The Macro label already supplies the token "macro". Strip the qualified-name
+// suffix to keep macros from taking over BM25 results for that token.
+const QN_EXPR: &str = "CASE WHEN label = 'Macro' AND substr(qualified_name, -6) = '#macro' \
+     THEN substr(qualified_name, 1, length(qualified_name) - 6) \
+     ELSE qualified_name END";
+
+fn insert_sql(partial: bool, body: bool, camel: bool) -> CString {
+    let body_column = if body { ", body" } else { "" };
+    let body_expression = if body { BODY_EXPR } else { "" };
+    let name = if camel {
+        "cbm_camel_split(name)"
+    } else {
+        "name"
+    };
+    let filter = if partial {
+        " WHERE project = ?1 AND id > ?2"
+    } else {
+        ""
+    };
+    CString::new(format!(
+        "INSERT INTO nodes_fts (rowid, name, qualified_name, label, file_path{body_column}) \
+         SELECT id, {name}, {QN_EXPR}, label, file_path{body_expression} FROM nodes{filter};"
+    ))
+    .expect("FTS backfill SQL consists of static fragments without NUL bytes")
 }
 
 struct Statement(*mut sqlite3_stmt);
@@ -67,20 +78,17 @@ impl Drop for Statement {
     }
 }
 
-unsafe extern "C" fn rebuild(
+#[unsafe(no_mangle)]
+unsafe extern "C" fn mori_fts_write(
     store: *mut Store,
     db: *mut sqlite3,
     project: *const c_char,
     after_id: i64,
-    operations: *const Operations,
-    sql: *mut c_char,
-    sql_capacity: usize,
+    report_error: ReportError,
 ) -> c_int {
-    // SAFETY: The native entry point lends the live connection and writable
-    // query buffer for this synchronous call. SQLite retains neither the query
-    // buffer nor the project string. The caller owns the transaction.
+    // SAFETY: The native entry point lends the live store, its connection, and
+    // an optional NUL-terminated project name. The caller owns the transaction.
     unsafe {
-        let operations = &*operations;
         let partial = !project.is_null();
         if !partial {
             let mut message = null_mut();
@@ -93,7 +101,7 @@ unsafe extern "C" fn rebuild(
                 &mut message,
             );
             if rc != SQLITE_OK {
-                (operations.report_exec_error)(store, message);
+                report_error(store, c"exec".as_ptr(), message);
                 sqlite3_free(message.cast());
                 return ERROR;
             }
@@ -112,12 +120,8 @@ unsafe extern "C" fn rebuild(
             if body && !has_body {
                 continue;
             }
-            if !(operations.build_query)(sql, sql_capacity, partial, body, camel)
-            {
-                status = ERROR;
-                continue;
-            }
-            let Some(statement) = Statement::prepare(db, sql) else {
+            let sql = insert_sql(partial, body, camel);
+            let Some(statement) = Statement::prepare(db, sql.as_ptr()) else {
                 status = NOT_FOUND;
                 continue;
             };
@@ -135,18 +139,9 @@ unsafe extern "C" fn rebuild(
                 return OK;
             }
             // Capture the error before SQLite finalizes the statement.
-            (operations.report_step_error)(store);
+            report_error(store, c"fts_backfill".as_ptr(), sqlite3_errmsg(db));
             status = ERROR;
         }
         status
     }
-}
-
-/// Install the native FTS writer callback.
-///
-/// # Safety
-/// No other thread may read or register the native writer during registration.
-pub unsafe fn register() {
-    // SAFETY: The caller guarantees exclusive startup registration.
-    unsafe { cbm_store_set_fts_writer(rebuild) };
 }

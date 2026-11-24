@@ -24,5 +24,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         zlib1g \
     && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /src
+RUN git config --system --add safe.directory /workspace
+WORKDIR /workspace/mori
 ENTRYPOINT ["bash"]

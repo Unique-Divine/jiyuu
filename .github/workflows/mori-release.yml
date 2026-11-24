@@ -1,6 +1,6 @@
 # Mori release: builds the Rust binary mori (crate mori/jiyuu-mori with the C
 # program linked in) for Linux x64 and arm64 and macOS arm64 and x64, checks
-# its CLI against the C binary codebase-memory-mcp from the same commit,
+# its CLI against codebase-memory-mcp built from a pinned C source commit,
 # replays graph fixtures against the published C 0.13.1 where available, and
 # publishes a DRAFT GitHub release for a mori/v* tag. See mori/README.md
 # "Release".
@@ -121,6 +121,9 @@ jobs:
     env:
       VERSION: ${{ needs.validate.outputs.version }}
       RUST_TARGET: ${{ matrix.rust_target }}
+      CC: ${{ matrix.goos == 'linux' && 'gcc' || 'cc' }}
+      CXX: ${{ matrix.goos == 'linux' && 'g++' || 'c++' }}
+      MACOSX_DEPLOYMENT_TARGET: "14.0"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -142,7 +145,7 @@ jobs:
         run: |
           {
             echo "BIN=$RUNNER_TEMP/selected/mori"
-            echo "C_BIN=$GITHUB_WORKSPACE/mori/build/mori-rs/codebase-memory-mcp"
+            echo "C_BIN=$RUNNER_TEMP/selected/codebase-memory-mcp"
           } >> "$GITHUB_ENV"
       - name: Install build dependencies (Linux)
         if: matrix.goos == 'linux'
@@ -160,22 +163,15 @@ jobs:
           key: mori-grammars-${{ hashFiles('mori/grammars.lock.json') }}
       - name: Fetch grammars
         run: bun scripts/grammars-fetch.ts
-      # cargo's build.rs runs `make -f Makefile.cbm libmori-c` and links the
-      # archive whole; MORI_C_REFERENCE=1 also builds codebase-memory-mcp
-      # from the same sources for the parity check. MORI_WITH_UI=1 embeds the
-      # graph UI in both, as scripts/build.sh --with-ui does. CFLAGS_EXTRA
-      # stamps CBM_VERSION into both, as scripts/build.sh --version does.
+      # Cargo's build.rs links the libmori-c archive whole. MORI_WITH_UI=1
+      # embeds the graph UI, as scripts/build.sh --with-ui does.
       # Linux links glibc statically (+crt-static), like the C release's
       # STATIC=1, so one binary runs on any distro. macOS has no static libc:
       # the binary links libSystem, libz and libc++ from the OS.
       - name: Build mori
         env:
-          MORI_C_REFERENCE: "1"
           MORI_WITHOUT_C_INDEX_DRIVERS: "1"
           MORI_WITH_UI: "1"
-          CC: ${{ matrix.goos == 'linux' && 'gcc' || 'cc' }}
-          CXX: ${{ matrix.goos == 'linux' && 'g++' || 'c++' }}
-          MACOSX_DEPLOYMENT_TARGET: "14.0"
         run: |
           set -euo pipefail
           export CFLAGS_EXTRA="-DCBM_VERSION=\"\\\"$VERSION\\\"\""
@@ -193,6 +189,43 @@ jobs:
           fi
           mkdir -p "$(dirname "$BIN")"
           cp "../target/$RUST_TARGET/release/mori" "$BIN.unstripped"
+      - name: Verify retired native implementations before stripping
+        run: |
+          set -euo pipefail
+          archive_members="$(ar t build/mori-rs/libmori-c.a)"
+          for object in fts_writer_reference.o config_text_edit.o pass_complexity.o \
+            pass_similarity.o pass_doclinks.o doc_links_pdf.o; do
+            if grep -Fxq "$object" <<< "$archive_members"; then
+              echo "::error::release archive includes retired object $object"
+              exit 1
+            fi
+          done
+          defined_symbols="$(nm "$BIN.unstripped" | awk 'NF >= 3 && $2 ~ /^[Tt]$/ {sub(/^_/, "", $NF); print $NF}')"
+          for symbol in mori_fts_write \
+            mori_complexity_buffer mori_complexity_stage mori_similarity_buffer \
+            mori_explicit_override mori_doc_file_links_run mori_pdf_links_resolve \
+            cbm_rust_watcher_poll mori_ipc_frame_header_decode mori_daemon_job_recover; do
+            if ! grep -Fxq "$symbol" <<< "$defined_symbols"; then
+              echo "::error::release executable is missing $symbol"
+              exit 1
+            fi
+          done
+          if ! grep -Eq '^cbm_text_(upsert_managed_block(_limited)?|write_owned_document(_if_unchanged)?|migrate_owned_document(_mode)?|owned_document_status)$' <<< "$defined_symbols"; then
+            echo "::error::release executable is missing the Rust managed-text editor"
+            exit 1
+          fi
+          if grep -Fxq cbm_store_fts_write_reference <<< "$defined_symbols"; then
+            echo "::error::release executable includes the retired C FTS writer"
+            exit 1
+          fi
+          if grep -Eq '^cbm_text_set_.*_hook_for_testing$' <<< "$defined_symbols"; then
+            echo "::error::release executable includes managed-text test hooks"
+            exit 1
+          fi
+          {
+            printf '### Native retirement on %s\n' "$RUST_TARGET"
+            shasum -a 256 "$BIN.unstripped" build/mori-rs/libmori-c.a
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Strip and check static linking (Linux)
         if: matrix.goos == 'linux'
         run: |
@@ -275,12 +308,32 @@ jobs:
           done
           head -c 300 "$scratch/ui.html"; echo
           grep -qi '<!doctype html>' "$scratch/ui.html"
-      # The shipped (stripped, signed) mori against the C binary built from
-      # the same commit: same commands, same output after normalization.
+      - name: Build pinned C binary for CLI parity
+        env:
+          C_REFERENCE_SHA: 8bdd8fc20327fcfea4d920138fef77a3b00ca1ef
+        run: |
+          set -euo pipefail
+          reference_dir="$(mktemp -d "$RUNNER_TEMP/mori-c-reference.XXXXXX")"
+          trap 'rm -rf "$reference_dir"' EXIT
+          git -C "$reference_dir" init --quiet
+          git -C "$reference_dir" fetch --quiet --depth=1 --no-tags \
+            https://github.com/Unique-Divine/jiyuu.git "$C_REFERENCE_SHA"
+          git -C "$reference_dir" checkout --quiet --detach FETCH_HEAD
+          test "$(git -C "$reference_dir" rev-parse HEAD)" = "$C_REFERENCE_SHA"
+          echo "C CLI reference commit $C_REFERENCE_SHA"
+          cd "$reference_dir/mori"
+          bun scripts/grammars-fetch.ts
+
+          # CLI parity compares --version, so report the candidate version.
+          export CFLAGS_EXTRA="-DCBM_VERSION=\"\\\"$VERSION\\\"\""
+          make -f Makefile.cbm -j"$(getconf _NPROCESSORS_ONLN)" cbm-with-ui \
+            BUILD_DIR=build/release-reference CC="$CC" CXX="$CXX" \
+            MEMWASTE=0 MEMWASTE_ACCESS=0 MEMWASTE_PROFILE=0 TEST_COVERAGE=0
+          cp build/release-reference/codebase-memory-mcp "$C_BIN"
       - name: CLI parity with codebase-memory-mcp
         run: bun scripts/cli-parity.ts --mori "$BIN" --c "$C_BIN"
-      # 0.13.1 had no Intel macOS archive. That target still has the native
-      # smoke and same-commit CLI comparison above.
+      # 0.13.1 had no Intel macOS archive. All targets run the smoke tests
+      # and CLI comparison with the pinned C build above.
       - name: Replay graph fixtures against the published C 0.13.1
         if: matrix.c_reference_sha256 != ''
         env:

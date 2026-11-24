@@ -20,6 +20,7 @@
 #include "pipeline/artifact.h"
 #include "store/store.h"
 #include "semantic/semantic.h"
+#include "simhash/minhash.h"
 #include "git/git_context.h"
 #include "foundation/dump_verify.h"
 #include "foundation/sha256.h"
@@ -4302,6 +4303,47 @@ static bool cx_order_first_diff(const char *want, const char *got, char *out, si
     }
     snprintf(out, cap, "line count differs");
     return true;
+}
+
+static int64_t similarity_fixture_node(cbm_gbuf_t *gbuf, const char *label, const char *name,
+                                       const char *path, const cbm_minhash_t *fp) {
+    char hex[CBM_MINHASH_HEX_BUF];
+    cbm_minhash_to_hex(fp, hex, sizeof(hex));
+    char props[CBM_MINHASH_HEX_BUF + CBM_MINHASH_JSON_OVERHEAD];
+    snprintf(props, sizeof(props), "{\"fp\":\"%s\"}", hex);
+    return cbm_gbuf_upsert_node(gbuf, label, name, name, path, 1, 3, props);
+}
+
+TEST(pipeline_similarity_emits_canonical_edge_at_threshold) {
+    cbm_gbuf_t *gbuf = cbm_gbuf_new("test-proj", "/tmp/test");
+    ASSERT_NOT_NULL(gbuf);
+    cbm_minhash_t original = {0};
+    cbm_minhash_t matches = {0};
+    cbm_minhash_t below_threshold = {0};
+    for (int i = 0; i < 3; i++) {
+        matches.values[i] = 1;
+    }
+    for (int i = CBM_MINHASH_K - 4; i < CBM_MINHASH_K; i++) {
+        below_threshold.values[i] = 2;
+    }
+    int64_t target = similarity_fixture_node(gbuf, "Method", "b", "test.py", &matches);
+    int64_t source = similarity_fixture_node(gbuf, "Function", "a", "test.py", &original);
+    similarity_fixture_node(gbuf, "Function", "c", "test.py", &below_threshold);
+    similarity_fixture_node(gbuf, "Function", "d", "test.rb", &original);
+    similarity_fixture_node(gbuf, "Class", "e", "test.py", &original);
+    cbm_pipeline_ctx_t ctx = {.gbuf = gbuf};
+    int rc = cbm_pipeline_pass_similarity(&ctx);
+    const cbm_gbuf_edge_t **edges = NULL;
+    int count = 0;
+    cbm_gbuf_find_edges_by_type(gbuf, "SIMILAR_TO", &edges, &count);
+    bool edge_matches = count == 1 && edges[0]->source_id == source &&
+                        edges[0]->target_id == target &&
+                        strcmp(edges[0]->properties_json, "{\"jaccard\":0.953,\"same_file\":true}") == 0;
+    cbm_gbuf_free(gbuf);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(count, 1);
+    ASSERT_TRUE(edge_matches);
+    PASS();
 }
 
 TEST(pipeline_complexity_props_independent_of_worker_order) {
@@ -35240,6 +35282,7 @@ SUITE(pipeline) {
     RUN_TEST(pipeline_env_access_configures_sequential_parallel_parity);
     RUN_TEST(pipeline_call_reference_sequential_parallel_edge_set_parity);
     RUN_TEST(pipeline_complexity_props_independent_of_worker_order);
+    RUN_TEST(pipeline_similarity_emits_canonical_edge_at_threshold);
     RUN_TEST(pipeline_incremental_cross_file_call_reference_matches_fresh_full);
     RUN_TEST(pipeline_registry_ranks_by_extractor_verdict_full_and_incremental);
     RUN_TEST(pipeline_registry_ranks_test_doubles_last_full_and_incremental);

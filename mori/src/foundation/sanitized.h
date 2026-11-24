@@ -57,4 +57,13 @@
 #define CBM_SANITIZED 0
 #endif
 
+/* Annotate complete output buffers from uninstrumented Rust only after a
+ * successful call. MemorySanitizer cannot see the writes across that ABI. */
+#if __has_feature(memory_sanitizer)
+#include <sanitizer/msan_interface.h>
+#define CBM_MSAN_WRITTEN(address, size) __msan_unpoison((address), (size))
+#else
+#define CBM_MSAN_WRITTEN(address, size) ((void)0)
+#endif
+
 #endif /* CBM_SANITIZED_H */

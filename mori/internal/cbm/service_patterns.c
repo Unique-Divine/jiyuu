@@ -1245,7 +1245,7 @@ bool cbm_service_pattern_graphql_operation(const char *doc, const char **op_type
     return false;
 }
 
-/* ── GraphQL selection signature (field-path Routes) ───────────── */
+/* ── Standalone C reference: GraphQL selection signature ────────── */
 
 enum {
     GQL_META_PREFIX = 2, /* "__typename", "__schema": introspection, not schema fields */
@@ -1844,10 +1844,34 @@ static bool gql_signature_into(const char *doc, bool require_keyword, gql_sig_t 
     return true;
 }
 
+static cbm_graphql_document_encoder_t graphql_document_encoder;
+
+void cbm_graphql_set_document_encoder(cbm_graphql_document_encoder_t encode) {
+    graphql_document_encoder = encode;
+}
+
+static bool graphql_copy_signature(void *context, const char *bytes, size_t len) {
+    char *out = context;
+    memcpy(out, bytes, len);
+    out[len] = '\0';
+    return true;
+}
+
+static bool graphql_alloc_signature(void *context, const char *bytes, size_t len) {
+    char **out = context;
+    *out = malloc(len + SKIP_ONE);
+    return *out && graphql_copy_signature(*out, bytes, len);
+}
+
 bool cbm_service_pattern_graphql_signature(const char *doc, bool require_keyword, char *out,
                                            size_t out_sz) {
     if (!doc || !out || out_sz == 0) {
         return false;
+    }
+    if (graphql_document_encoder) {
+        out[0] = '\0';
+        return graphql_document_encoder(doc, require_keyword, out_sz, NULL,
+                                        graphql_copy_signature, out);
     }
     gql_sig_t s = {.out = out, .cap = out_sz, .grow = false};
     bool ok = gql_signature_into(doc, require_keyword, &s, NULL);
@@ -1863,6 +1887,12 @@ char *cbm_service_pattern_graphql_signature_alloc(const char *doc, bool require_
     }
     if (!doc) {
         return NULL;
+    }
+    if (graphql_document_encoder) {
+        char *out = NULL;
+        (void)graphql_document_encoder(doc, require_keyword, SIZE_MAX, shorthand,
+                                       graphql_alloc_signature, &out);
+        return out;
     }
     gql_sig_t s = {.out = malloc(GQL_SIG_INITIAL), .cap = GQL_SIG_INITIAL, .grow = true};
     if (!s.out) {

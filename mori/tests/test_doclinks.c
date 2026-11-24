@@ -20,9 +20,10 @@
 /* ── Helpers ─────────────────────────────────────────────────────── */
 
 /* Run the pass with a minimal ctx (same shape as run_configlink). */
-static int run_doclinks(cbm_gbuf_t *gb, const char *project, const char *repo_path) {
+static int run_doclinks_with_cancel(cbm_gbuf_t *gb, const char *project, const char *repo_path,
+                                    bool cancel) {
     atomic_int cancelled;
-    atomic_init(&cancelled, 0);
+    atomic_init(&cancelled, cancel);
     cbm_pipeline_ctx_t ctx = {
         .project_name = project,
         .repo_path = repo_path,
@@ -30,6 +31,10 @@ static int run_doclinks(cbm_gbuf_t *gb, const char *project, const char *repo_pa
         .cancelled = &cancelled,
     };
     return cbm_pipeline_pass_doclinks(&ctx);
+}
+
+static int run_doclinks(cbm_gbuf_t *gb, const char *project, const char *repo_path) {
+    return run_doclinks_with_cancel(gb, project, repo_path, false);
 }
 
 /* Create a File node the way pass_structure does: QN via fqn_compute with
@@ -525,6 +530,46 @@ TEST(doclinks_fenced_code_block_bare_mention_pinned) {
     PASS();
 }
 
+TEST(doclinks_cancelled_before_first_file) {
+    dl_fix_t fx;
+    ASSERT_TRUE(dl_fix_init(&fx));
+
+    th_write_file(TH_PATH(fx.tmpdir, "README.md"), "[build](scripts/build.sh)\n");
+    add_file_node(fx.gb, fx.project, "README.md");
+    add_file_node(fx.gb, fx.project, "scripts/build.sh");
+
+    ASSERT_EQ(run_doclinks_with_cancel(fx.gb, fx.project, fx.tmpdir, true), 0);
+    ASSERT_EQ(ref_edge_count(fx.gb), 0);
+
+    dl_fix_free(&fx);
+    PASS();
+}
+
+TEST(doclinks_emits_in_file_then_target_id_order) {
+    dl_fix_t fx;
+    ASSERT_TRUE(dl_fix_init(&fx));
+
+    th_write_file(TH_PATH(fx.tmpdir, "z-first.mdx"), "[two](two.sh) [one](one.sh)\n");
+    th_write_file(TH_PATH(fx.tmpdir, "a-second.md"), "[one](one.sh)\n");
+    int64_t first = add_file_node(fx.gb, fx.project, "z-first.mdx");
+    int64_t second = add_file_node(fx.gb, fx.project, "a-second.md");
+    int64_t one = add_file_node(fx.gb, fx.project, "one.sh");
+    int64_t two = add_file_node(fx.gb, fx.project, "two.sh");
+
+    ASSERT_EQ(run_doclinks(fx.gb, fx.project, fx.tmpdir), 3);
+    const cbm_gbuf_edge_t *first_one = find_ref_edge(fx.gb, first, one);
+    const cbm_gbuf_edge_t *first_two = find_ref_edge(fx.gb, first, two);
+    const cbm_gbuf_edge_t *second_one = find_ref_edge(fx.gb, second, one);
+    ASSERT_NOT_NULL(first_one);
+    ASSERT_NOT_NULL(first_two);
+    ASSERT_NOT_NULL(second_one);
+    ASSERT_LT(first_one->id, first_two->id);
+    ASSERT_LT(first_two->id, second_one->id);
+
+    dl_fix_free(&fx);
+    PASS();
+}
+
 /* ── Suite ───────────────────────────────────────────────────────── */
 
 SUITE(doclinks) {
@@ -540,6 +585,8 @@ SUITE(doclinks) {
     RUN_TEST(doclinks_resolves_relative_to_file_dir);
     RUN_TEST(doclinks_unresolvable_target_no_edge);
     RUN_TEST(doclinks_null_repo_path_skips);
+    RUN_TEST(doclinks_cancelled_before_first_file);
+    RUN_TEST(doclinks_emits_in_file_then_target_id_order);
 
     /* Reference-kind precedence (rooted / explicit-relative / bare) */
     RUN_TEST(doclinks_rooted_reference_skips_directory_join);

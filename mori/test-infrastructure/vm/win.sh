@@ -93,17 +93,17 @@ HOST="${CBM_VM_HOST:?set CBM_VM_HOST in ~/.claude/cbm-vm/config}"
 USER_="${CBM_VM_USER:-test}"
 
 # ── Per-run checkout (the VM's last shared-state hazard) ─────────────────────
-# The VM holds ONE working tree at /c/cbm, and `update`/`sync` REPLACE it
+# The VM holds ONE working tree at /c/jiyuu, and `update`/`sync` REPLACE it
 # (`git reset --hard` + `clean -fdx`). A second session syncing its own branch
 # therefore swaps the code under a running leg — observed 2026-08-06, where a
 # gate run on main compiled another branch's files and died on a header that
 # does not exist on Windows. That is worse than a red: it is a confident wrong
 # answer about the wrong tree.
 #
-# Setting CBM_CI_RUN_ID gives this run its own checkout, cloned from /c/cbm.
+# Setting CBM_CI_RUN_ID gives this run its own checkout, cloned from /c/jiyuu.
 # A local clone hardlinks .git/objects, so it costs seconds and little disk.
 # Unset (the default) keeps the historical single-tree behaviour.
-VM_BASE_REPO="/c/cbm"
+VM_BASE_REPO="/c/jiyuu"
 VM_RUN_ENV=""
 VM_UBSAN_RUNNER_ENV=""
 VM_LOG_SETUP=""
@@ -127,7 +127,7 @@ if [ -n "${CBM_CI_RUN_ID:-}" ]; then
         echo "FATAL: isolated runs require disk and Defender preflight." >&2
         exit 2
     fi
-    VM_REPO="/c/cbm-run-${CBM_CI_RUN_ID}"
+    VM_REPO="/c/jiyuu-run-${CBM_CI_RUN_ID}"
     VM_RUN_ENV="CBM_CI_RUN_ID='$CBM_CI_RUN_ID' CBM_CI_KEEP='${CBM_CI_KEEP:-0}'"
     VM_UBSAN_RUNNER_ENV="CBM_VM_RUNNER=build/c/test-runner"
     VM_LOG_DIR="$VM_REPO/.vm-logs/$CBM_CI_RUN_ID"
@@ -142,7 +142,8 @@ if [ -n "${CBM_CI_RUN_ID:-}" ]; then
 else
     VM_REPO="$VM_BASE_REPO"
 fi
-VM_REPO_WIN="C:\\${VM_REPO#/c/}"
+VM_MORI="$VM_REPO/mori"
+VM_MORI_WIN="C:\\${VM_REPO#/c/}\\mori"
 HOST_KEY="${CBM_VM_HOST_KEY_SHA256:?set CBM_VM_HOST_KEY_SHA256 in ~/.claude/cbm-vm/config}"
 LOCAL_BRANCH="$(git -C "$ROOT" branch --show-current)"
 BRANCH="${CBM_VM_BRANCH:-${LOCAL_BRANCH:-main}}"
@@ -224,12 +225,12 @@ vm_preflight() {
     local cleanup_mode=""
     [ -z "${CBM_CI_RUN_ID:-}" ] || cleanup_mode=" -CheckOnly"
     vm_cmd "powershell -NoProfile -ExecutionPolicy Bypass -File \
-${VM_REPO_WIN}\\scripts\\ci\\clean-test-residue.ps1 -MinFreeGB ${CBM_VM_MIN_FREE_GB:-14}${cleanup_mode}"
+${VM_MORI_WIN}\\scripts\\ci\\clean-test-residue.ps1 -MinFreeGB ${CBM_VM_MIN_FREE_GB:-14}${cleanup_mode}"
     # Defender parity: every Windows venue (this VM and the GitHub runners)
     # tests with real-time protection ACTIVE — the same canonical script the
     # CI jobs run, so a drifted-off Defender fails loudly, never silently.
     vm_cmd "powershell -NoProfile -ExecutionPolicy Bypass -File \
-${VM_REPO_WIN}\\scripts\\ci\\ensure-defender.ps1"
+${VM_MORI_WIN}\\scripts\\ci\\ensure-defender.ps1"
 }
 
 cmd="${1:-status}"; shift || true
@@ -249,10 +250,16 @@ case "$cmd" in
 status | sh | push-file | pageheap | drop-run-checkout | help | -h | --help) ;;
 *) vm_preflight ;;
 esac
+# update and sync re-enter this script through build after cleaning the workspace.
+case "$cmd" in
+build | test | guards | smoke-install | smoke-artifact | soak | ubsan-build | trap-ubsan-build | test-par)
+    vm clangarm64 "cd $VM_MORI && /c/mori-tools/bun-1.4.3/bun.exe scripts/grammars-fetch.ts"
+    ;;
+esac
 case "$cmd" in
 status)
     "${SSH[@]}" "echo VM_REACHABLE & ver"
-    vm clangarm64 "cd $VM_REPO 2>/dev/null && git log --oneline -1 && ls -la build/c/codebase-memory-mcp.exe build/c/test-runner.exe 2>/dev/null || echo 'repo/build missing — run provision-windows.sh'"
+    vm clangarm64 "cd $VM_REPO 2>/dev/null && git log --oneline -1 && cd $VM_MORI && ls -la build/c/codebase-memory-mcp.exe build/c/test-runner.exe 2>/dev/null || echo 'repo/build missing — run provision-windows.sh'"
     ;;
 update)
     vm clangarm64 "cd $VM_REPO && git fetch origin ${BRANCH} && git reset --hard FETCH_HEAD && git clean -fdx && git log --oneline -1"
@@ -273,7 +280,8 @@ sync)
     WIN_MANIFEST="$(mktemp "${TMPDIR:-/tmp}/cbm-vm-manifest.XXXXXX")"
     WIN_ARCHIVE="$(mktemp "${TMPDIR:-/tmp}/cbm-vm-worktree.XXXXXX.tar")"
     WIN_PATCH="$(mktemp "${TMPDIR:-/tmp}/cbm-vm-worktree.XXXXXX.patch")"
-    git -C "$ROOT" diff --binary --full-index HEAD -- >"$WIN_PATCH"
+    workspace="$(git -C "$ROOT" rev-parse --show-toplevel)"
+    git -C "$workspace" diff --binary --full-index HEAD -- mori Cargo.toml Cargo.lock >"$WIN_PATCH"
     cbm_vm_write_untracked_manifest "$ROOT" "$WIN_MANIFEST"
     COPYFILE_DISABLE=1 tar --no-xattrs --no-mac-metadata \
         -C "$ROOT" --null -T "$WIN_MANIFEST" -cf "$WIN_ARCHIVE"
@@ -291,7 +299,7 @@ sync)
             <"$WIN_PATCH"
     fi
     if [ -s "$WIN_MANIFEST" ]; then
-        vm clangarm64 "cd '$VM_REPO' && tar -xf -" <"$WIN_ARCHIVE"
+        vm clangarm64 "cd '$VM_MORI' && tar -xf -" <"$WIN_ARCHIVE"
     fi
     vm clangarm64 "cd $VM_REPO && git status --short --branch"
     win_cleanup
@@ -304,7 +312,7 @@ build)
     # NOT via CC='ccache clang', which bypassed the verified-cache env layer.
     # The test-runner is no longer built here: the test leg (scripts/test.sh)
     # builds its own runner, same as CI's test jobs.
-    vm clangarm64 "cd $VM_REPO && ${VM_LOG_SETUP}scripts/build.sh CC=clang CXX=clang++ > '$VM_BUILD_LOG' 2>&1 && echo BUILD_OK || (echo BUILD_FAIL; tail -20 '$VM_BUILD_LOG'; exit 1)"
+    vm clangarm64 "cd $VM_MORI && ${VM_LOG_SETUP}scripts/build.sh CC=clang CXX=clang++ > '$VM_BUILD_LOG' 2>&1 && echo BUILD_OK || (echo BUILD_FAIL; tail -20 '$VM_BUILD_LOG'; exit 1)"
     ;;
 test)
     [ $# -ge 1 ] || { echo "usage: win.sh test <suite...>" >&2; exit 2; }
@@ -317,7 +325,7 @@ test)
     # before spending a leg on it — cheap insurance against a concurrent
     # session having re-synced the shared checkout.
     [ -z "${CBM_VM_EXPECT_HEAD:-}" ] || vm_assert_head "$CBM_VM_EXPECT_HEAD"
-    vm clangarm64 "cd $VM_REPO && $VM_RUN_ENV bash test-infrastructure/vm/vm-run-tests.sh $*"
+    vm clangarm64 "cd $VM_MORI && $VM_RUN_ENV bash test-infrastructure/vm/vm-run-tests.sh $*"
     [ -z "${CBM_VM_EXPECT_HEAD:-}" ] || vm_assert_head "$CBM_VM_EXPECT_HEAD"
     ;;
 guards)
@@ -331,7 +339,7 @@ guards)
     # needs the official MSVC Node.js (/c/node, from provision-windows.sh):
     # MSVC-built npm native modules cannot resolve Node-API symbols against
     # MSYS2's mingw node.
-    vm clangarm64 "export PATH=/c/node:\$PATH && cd $VM_REPO && scripts/build.sh --with-ui CC=clang CXX=clang++ SANITIZE= BUILD_DIR=build/guards"
+    vm clangarm64 "export PATH=/c/node:\$PATH && cd $VM_MORI && scripts/build.sh --with-ui CC=clang CXX=clang++ SANITIZE= BUILD_DIR=build/guards"
     # The guards themselves run through plain cmd/PowerShell, exactly like the
     # CI job: under the MSYS2 shell TMP is C:\msys64\tmp, whose ancestry
     # grants mutation rights to Authenticated Users — the daemon's
@@ -339,7 +347,7 @@ guards)
     # different environment shape than CI's profile-rooted TEMP. Python must
     # be PREPENDED: the Microsoft Store python.exe alias stub lives early in
     # the profile PATH and otherwise shadows any appended interpreter.
-    vm_cmd "cd /d ${VM_REPO_WIN} && set PATH=C:\\msys64\\clangarm64\\bin;C:\\msys64\\usr\\bin;%PATH%&& powershell -NoProfile -ExecutionPolicy Bypass -File scripts\\test-windows.ps1 -GuardsOnly -Binary build\\guards\\codebase-memory-mcp.exe -Make C:\\msys64\\usr\\bin\\make.exe"
+    vm_cmd "cd /d ${VM_MORI_WIN} && set PATH=C:\\msys64\\clangarm64\\bin;C:\\msys64\\usr\\bin;%PATH%&& powershell -NoProfile -ExecutionPolicy Bypass -File scripts\\test-windows.ps1 -GuardsOnly -Binary build\\guards\\codebase-memory-mcp.exe -Make C:\\msys64\\usr\\bin\\make.exe"
     ;;
 smoke-install)
     # EXACTLY the PR CI smoke job (pr.yml pr-smoke windows): a clean canonical
@@ -347,14 +355,14 @@ smoke-install)
     # build/c (including any test-runner) just as CI's separate jobs imply;
     # ccache keeps the rebuild to minutes — parity was the explicit user call
     # over incremental speed here.
-    vm clangarm64 "cd $VM_REPO && scripts/build.sh CC=clang CXX=clang++ && bash test-infrastructure/vm/vm-smoke.sh"
+    vm clangarm64 "cd $VM_MORI && scripts/build.sh CC=clang CXX=clang++ && bash test-infrastructure/vm/vm-smoke.sh"
     ;;
 smoke-artifact)
     # The release-archive flow with local bytes: canonical build → the ONE
     # package-release.sh → extract → vm-smoke.sh in artifact mode — the same
     # sequence _build.yml + _smoke.yml run remotely, so archive-layout bugs
     # surface here instead of in a release dry run.
-    vm clangarm64 "cd $VM_REPO && bash scripts/ci/smoke-artifact.sh windows arm64 CC=clang CXX=clang++"
+    vm clangarm64 "cd $VM_MORI && bash scripts/ci/smoke-artifact.sh windows arm64 CC=clang CXX=clang++"
     ;;
 soak)
     duration="${1:-10}"
@@ -365,7 +373,7 @@ soak)
         echo "usage: win.sh soak [positive-minutes]" >&2
         exit 2
     fi
-    vm clangarm64 "cd $VM_REPO && $VM_RUN_ENV CBM_VM_TEST_LOG='$VM_SOAK_LOG' bash \
+    vm clangarm64 "cd $VM_MORI && $VM_RUN_ENV CBM_VM_TEST_LOG='$VM_SOAK_LOG' bash \
         test-infrastructure/vm/vm-run-tests.sh --soak '$duration'"
     ;;
 sh)
@@ -382,11 +390,11 @@ ubsan-build)
     # Validated: UBSan needs no interceptors, so it builds, runs, AND reports
     # correctly under emulation. (ASan does NOT: no aarch64 runtime exists and
     # the x86_64 runtime faults in emulated process-init — ASan stays CI-only.)
-    vm clang64 "cd $VM_REPO && ${VM_LOG_SETUP}make -j${JOBS} -f Makefile.cbm CC=clang CXX=clang++ SANITIZE='-fsanitize=undefined -fno-omit-frame-pointer' build/c/test-runner > '$VM_UBSAN_BUILD_LOG' 2>&1 && echo UBSAN_BUILD_OK || (echo UBSAN_BUILD_FAIL; tail -20 '$VM_UBSAN_BUILD_LOG'; exit 1)"
+    vm clang64 "cd $VM_MORI && ${VM_LOG_SETUP}make -j${JOBS} -f Makefile.cbm CC=clang CXX=clang++ SANITIZE='-fsanitize=undefined -fno-omit-frame-pointer' build/c/test-runner > '$VM_UBSAN_BUILD_LOG' 2>&1 && echo UBSAN_BUILD_OK || (echo UBSAN_BUILD_FAIL; tail -20 '$VM_UBSAN_BUILD_LOG'; exit 1)"
     ;;
 ubsan-test)
     [ $# -ge 1 ] || { echo "usage: win.sh ubsan-test <suite...>" >&2; exit 2; }
-    vm clang64 "cd $VM_REPO && $VM_RUN_ENV $VM_UBSAN_RUNNER_ENV CBM_VM_TEST_LOG='$VM_UBSAN_TEST_LOG' bash test-infrastructure/vm/vm-run-tests.sh $*"
+    vm clang64 "cd $VM_MORI && $VM_RUN_ENV $VM_UBSAN_RUNNER_ENV CBM_VM_TEST_LOG='$VM_UBSAN_TEST_LOG' bash test-infrastructure/vm/vm-run-tests.sh $*"
     ;;
 trap-ubsan-build)
     # NATIVE ARM64 UBSan via trap mode. -fsanitize-trap=undefined needs NO
@@ -398,13 +406,13 @@ trap-ubsan-build)
     # fired, reproduce under the emulated `win.sh ubsan-build`/`ubsan-test`,
     # which carries the full runtime + message. BUILD_DIR isolated so it never
     # clobbers the plain test-runner.
-    vm clangarm64 "cd $VM_REPO && ${VM_LOG_SETUP}make -j${JOBS} -f Makefile.cbm CC='ccache clang' CXX='ccache clang++' SANITIZE='-fsanitize=undefined -fsanitize-trap=undefined -fstack-protector-strong -fno-omit-frame-pointer' BUILD_DIR=build/trap-ubsan build/trap-ubsan/test-runner > '$VM_TRAP_BUILD_LOG' 2>&1 && echo TRAP_UBSAN_BUILD_OK || (echo TRAP_UBSAN_BUILD_FAIL; tail -20 '$VM_TRAP_BUILD_LOG'; exit 1)"
+    vm clangarm64 "cd $VM_MORI && ${VM_LOG_SETUP}make -j${JOBS} -f Makefile.cbm CC='ccache clang' CXX='ccache clang++' SANITIZE='-fsanitize=undefined -fsanitize-trap=undefined -fstack-protector-strong -fno-omit-frame-pointer' BUILD_DIR=build/trap-ubsan build/trap-ubsan/test-runner > '$VM_TRAP_BUILD_LOG' 2>&1 && echo TRAP_UBSAN_BUILD_OK || (echo TRAP_UBSAN_BUILD_FAIL; tail -20 '$VM_TRAP_BUILD_LOG'; exit 1)"
     ;;
 trap-ubsan-test)
     [ $# -ge 1 ] || { echo "usage: win.sh trap-ubsan-test <suite...>" >&2; exit 2; }
     # A UB trap crashes the runner with SIGILL (exit 132); the harness reports
     # the failing suite so the emulated diagnosis loop can name the check.
-    vm clangarm64 "cd $VM_REPO && $VM_RUN_ENV CBM_VM_RUNNER=build/trap-ubsan/test-runner CBM_VM_TEST_LOG='$VM_TRAP_TEST_LOG' bash test-infrastructure/vm/vm-run-tests.sh $*"
+    vm clangarm64 "cd $VM_MORI && $VM_RUN_ENV CBM_VM_RUNNER=build/trap-ubsan/test-runner CBM_VM_TEST_LOG='$VM_TRAP_TEST_LOG' bash test-infrastructure/vm/vm-run-tests.sh $*"
     ;;
 pageheap)
     # OS-level heap verification (page-granular overflow/UAF detection) for the
@@ -428,7 +436,7 @@ test-par)
     # ran under the MSYS-shared /tmp and piped through `tail -25` — the same
     # truncated-blindness class that hid 40 Windows failures from `test`).
     [ -z "${CBM_VM_EXPECT_HEAD:-}" ] || vm_assert_head "$CBM_VM_EXPECT_HEAD"
-    vm clangarm64 "cd $VM_REPO && $VM_RUN_ENV CBM_VM_TEST_LOG='$VM_TEST_PAR_LOG' bash test-infrastructure/vm/vm-run-tests.sh --par"
+    vm clangarm64 "cd $VM_MORI && $VM_RUN_ENV CBM_VM_TEST_LOG='$VM_TEST_PAR_LOG' bash test-infrastructure/vm/vm-run-tests.sh --par"
     [ -z "${CBM_VM_EXPECT_HEAD:-}" ] || vm_assert_head "$CBM_VM_EXPECT_HEAD"
     ;;
 help | -h | --help)
