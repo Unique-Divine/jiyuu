@@ -131,9 +131,10 @@ sai config unset keeper.endpoint
 A flag overrides a variable, which overrides the file, which overrides the
 mainnet default. `config list` shows each key's value and its source: `flag`,
 `env`, `file`, `default`, `derived`, or `invalid`. `invalid` marks a `logs.*`
-value sai could not read, which turns logging off. Change settings with `sai config set`
-and `sai config unset`. Do not edit the file or an MCP client's config by
-hand.
+value sai could not read, which turns logging off. Use `sai config set`
+and `sai config unset` for routine settings changes. If doctor reports
+an invalid config file or an MCP registration that needs a manual edit,
+follow the check's `fix`.
 
 ### Switch Networks
 
