@@ -9,7 +9,9 @@ use std::ffi::{CStr, c_char, c_int, c_void};
 use std::io;
 use std::ptr;
 
-use super::{Candidate, State, Status, Transaction, platform};
+#[cfg(any(test, feature = "native-engine-test-seams"))]
+use super::platform;
+use super::{Candidate, State, Status, Transaction};
 
 #[cfg(any(test, feature = "native-engine-test-seams"))]
 type Callback = unsafe extern "C" fn(*const c_char, *mut c_void);
