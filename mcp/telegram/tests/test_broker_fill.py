@@ -52,18 +52,28 @@ def test_journal_scopes_cap_and_dispatch_identity_to_the_owner(monkeypatch, tmp_
 
 
 @pytest.mark.asyncio
-async def test_capacity_snapshot_counts_groups_after_two_thousand_direct_dialogs(monkeypatch, tmp_path):
+async def test_capacity_snapshot_counts_groups_after_two_thousand_direct_dialogs(
+    monkeypatch, tmp_path
+):
     class FakeClient:
         async def get_me(self):
             return SimpleNamespace(id=42, bot=False, premium=True)
 
         async def iter_dialogs(self, *, limit):
             dialogs = [SimpleNamespace(entity=object())] * 2100
-            dialogs.extend([
-                SimpleNamespace(entity=types.ChatForbidden(id=90, title="Old basic group")),
-                SimpleNamespace(entity=types.Channel(91, "Left channel", types.ChatPhotoEmpty(), None, left=True)),
-                SimpleNamespace(entity=types.Channel(92, "Joined channel", types.ChatPhotoEmpty(), None)),
-            ])
+            dialogs.extend(
+                [
+                    SimpleNamespace(entity=types.ChatForbidden(id=90, title="Old basic group")),
+                    SimpleNamespace(
+                        entity=types.Channel(
+                            91, "Left channel", types.ChatPhotoEmpty(), None, left=True
+                        )
+                    ),
+                    SimpleNamespace(
+                        entity=types.Channel(92, "Joined channel", types.ChatPhotoEmpty(), None)
+                    ),
+                ]
+            )
             for dialog in dialogs[:limit]:
                 yield dialog
 
@@ -99,7 +109,9 @@ async def test_capacity_scan_resumes_after_the_recorded_wait(monkeypatch, tmp_pa
                 raise errors.FloodWaitError(request=None, capture=2)
             if self.calls > 3:
                 raise StopAsyncIteration
-            return SimpleNamespace(entity=types.Channel(self.calls, "Group", types.ChatPhotoEmpty(), None))
+            return SimpleNamespace(
+                entity=types.Channel(self.calls, "Group", types.ChatPhotoEmpty(), None)
+            )
 
     class FakeClient:
         async def get_me(self):
@@ -108,7 +120,9 @@ async def test_capacity_scan_resumes_after_the_recorded_wait(monkeypatch, tmp_pa
         def iter_dialogs(self, *, limit):
             return Dialogs()
 
-    transport = PoolTransport(cast(TelegramClient, FakeClient()), fixture_state(monkeypatch, tmp_path), "42", b"")
+    transport = PoolTransport(
+        cast(TelegramClient, FakeClient()), fixture_state(monkeypatch, tmp_path), "42", b""
+    )
     assert (await transport.snapshot())["groupCount"] == 2
     assert slept == [33.0]
 
