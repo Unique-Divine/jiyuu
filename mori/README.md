@@ -468,6 +468,14 @@ checks through the publication lease. C owns the stage, file operations,
 and the destination prepare, rename, and rollback transaction. C remains
 the default.
 
+### Index Worker Recovery
+
+Set `MORI_IMPL_JOB_RECOVERY=rust` when starting the daemon to run the
+Rust worker recovery driver. It enforces the retry budget and decides
+when the daemon can attempt a partial index after a contained worker
+failure. The debug log event `daemon.index.recovery_driver` identifies
+the backend. The default driver is C.
+
 ### Named Watch Reconciliation
 
 Set `MORI_IMPL_NAMED_WATCH=rust` when starting a permanent daemon to select
