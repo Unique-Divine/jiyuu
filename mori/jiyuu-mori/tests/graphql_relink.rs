@@ -1494,6 +1494,69 @@ fn bounded_count_projects_native_groups_and_empty_results_in_rust() {
 }
 
 #[test]
+fn untyped_one_hop_and_introspection_match_native_in_rust() {
+    let fixture = Fixture::new();
+    let db = fixture.index(CLIENT);
+    let root = node(&db, CLIENT, "AdjRoot", "root", "adj.root", "adj.py");
+    let alpha = node(&db, CLIENT, "AdjLeaf", "alpha", "adj.alpha", "adj.py");
+    let beta = node(&db, CLIENT, "AdjLeaf", "beta", "adj.beta", "adj.py");
+    let peer = node(&db, CLIENT, "AdjPeer", "peer", "adj.peer", "adj.py");
+    for (from, to, kind) in [
+        (root, alpha, "CALLS"),
+        (root, alpha, "IMPORTS"),
+        (root, beta, "IMPORTS"),
+        (peer, root, "REFERENCES"),
+    ] {
+        edge(&db, CLIENT, from, to, kind, json!({}));
+    }
+    node(
+        &db,
+        CLIENT,
+        &format!("{}€", "a".repeat(508)),
+        "raw",
+        "adj.raw",
+        "adj.py",
+    );
+    drop(db);
+
+    let groups = "MATCH (:AdjRoot)-[r]->(:AdjLeaf) RETURN type(r) AS t, count(*) AS n ORDER BY t";
+    let reversed = "MATCH (a)-[r]->(b:AdjLeaf) WHERE b.qualified_name = 'adj.alpha' RETURN a.name, b.name, TYPE(r) AS t ORDER BY t";
+    let inbound = "MATCH (b:AdjRoot)<-[r]-(a) RETURN a.name, type(r)";
+    let unnamed = "MATCH (a:AdjRoot)-[]->(b) RETURN COUNT(b)";
+    let labels = "MATCH (n:AdjLeaf) RETURN LABELS(n), n.name ORDER BY n.name";
+    let label_groups = "MATCH (n:AdjLeaf) RETURN labels(n) AS l, count(*) AS n";
+    let raw = "MATCH (n) WHERE n.name = 'raw' RETURN labels(n)";
+    let cases = [
+        ((groups, 0, true), json!([["CALLS", "1"]])),
+        ((groups, 1, true), json!([["IMPORTS", "2"]])),
+        ((reversed, 0, true), json!([["root", "alpha", "CALLS"]])),
+        ((reversed, 1, true), json!([["root", "alpha", "IMPORTS"]])),
+        ((inbound, 0, true), json!([["peer", "REFERENCES"]])),
+        ((unnamed, 0, true), json!([["3"]])),
+        ((labels, 0, true), json!([["[\"AdjLeaf\"]", "alpha"]])),
+        ((label_groups, 0, true), json!([["[\"AdjLeaf\"]", "2"]])),
+        (
+            (raw, 0, true),
+            json!([[format!("@bytes:5b22{}e2", "61".repeat(508))]]),
+        ),
+    ];
+    let inputs: Vec<_> = cases.iter().map(|(case, _)| *case).collect();
+    let pages = fixture.compare_query_pages(&inputs);
+    for (page, ((query, _, _), rows)) in pages.iter().zip(cases) {
+        assert_eq!(page["rows"], rows, "{query}");
+    }
+    assert_eq!(pages[4]["columns"], json!(["a.name", "type(r)"]));
+    assert_eq!(pages[6]["columns"], json!(["labels(n)", "n.name"]));
+    // The native parser accepts an alias above, and rejects this expression.
+    assert!(
+        cypher_linear::classify(
+            "MATCH (a)-[r]->(b) RETURN type(r), count(*) ORDER BY type(r)"
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn ordered_aliases_keep_lexical_keys_and_raw_split_bytes() {
     const QUERY: &str = "MATCH (n:SortProbe) RETURN n.name AS symbol, n.value AS key ORDER BY key ASC";
     let fixture = Fixture::new();
