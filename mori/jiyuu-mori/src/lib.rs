@@ -13,6 +13,16 @@ mod pdf_doc_links;
 #[cfg(any(feature = "native-engine-abi", test))]
 mod similarity;
 
+#[cfg(any(feature = "native-engine-abi", test))]
+mod config_cli;
+
+#[cfg(any(feature = "native-engine-abi", test))]
+#[path = "mcp_dispatch/methods.rs"]
+mod mcp_methods;
+
+#[cfg(feature = "native-engine-abi")]
+pub mod startup;
+
 #[cfg(any(feature = "graphql-callbacks", test))]
 mod gqlgen;
 #[cfg(any(all(feature = "graphql-callbacks", not(test)), test))]
@@ -119,3 +129,9 @@ mod python_imports;
 
 #[cfg(feature = "c-backend")]
 pub use python_imports::register as mori_register_python_imports;
+
+#[cfg(all(
+    feature = "native-engine-abi",
+    any(not(test), feature = "c-backend")
+))]
+mod hook_augment;
