@@ -16,6 +16,8 @@ mod docker_image;
 mod ffi_output;
 #[cfg(feature = "native-engine-abi")]
 mod pdf_doc_links;
+#[cfg(feature = "native-engine-abi")]
+mod kubernetes;
 #[cfg(any(feature = "native-engine-abi", test))]
 mod similarity;
 #[cfg(feature = "native-engine-abi")]
