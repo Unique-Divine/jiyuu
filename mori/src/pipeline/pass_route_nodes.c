@@ -1444,16 +1444,6 @@ typedef struct {
     int group;
 } gql_field_t;
 
-/* One file's `schema { ... }` definition and `extend schema { ... }`
- * blocks: the root type name per operation. */
-typedef struct {
-    const char *file;
-    const char *roots[GQL_OP_COUNT];
-    int group;
-    bool defined; /* holds a `schema` definition, not only extensions */
-} gql_schema_t;
-
-
 /* One field path a schema defines. */
 typedef struct {
     const char *qn;
@@ -1474,8 +1464,6 @@ typedef struct {
     int field_count;
     const gql_class_t **classes_by_name; /* classes sorted by name */
     const gql_field_t **fields_by_parent; /* fields sorted by parent_qn */
-    gql_schema_t *schemas;
-    int schema_count;
     gql_emit_t *emits;
     int emit_count;
     int emit_cap;
@@ -1494,7 +1482,6 @@ static bool gql_is_go_file(const char *path) {
     return path && path[0] && cbm_language_for_filename(path) == CBM_LANG_GO;
 }
 
-
 /* Length of the directory part of path, including its trailing '/'. */
 static size_t gql_dir_len(const char *path) {
     const char *slash = strrchr(path, '/');
@@ -1510,16 +1497,6 @@ static size_t gql_common_dir_len(const char *a, const char *b) {
         }
     }
     return common;
-}
-
-/* Length of the parent of `path`'s directory, with its trailing '/'. */
-static size_t gql_parent_dir_len(const char *path) {
-    size_t dl = gql_dir_len(path);
-    size_t i = dl > 0 ? dl - SKIP_ONE : 0; /* the slash closing the directory */
-    while (i > 0 && path[i - SKIP_ONE] != '/') {
-        i--;
-    }
-    return i;
 }
 
 /* The named type of a declared GraphQL type: `[PerpTrade!]!` -> `PerpTrade`. */
@@ -1610,93 +1587,6 @@ static int gql_collect_classes(gql_ctx_t *ctx) {
         }
     }
     return ctx->class_count;
-}
-
-/* `schema { ... }` definitions, recorded on each schema file's Module node. */
-static void gql_collect_schemas(gql_ctx_t *ctx) {
-    const cbm_gbuf_node_t **nodes = NULL;
-    int count = 0;
-    if (cbm_gbuf_find_by_label(ctx->gb, "Module", &nodes, &count) != 0 || count == 0) {
-        return;
-    }
-    for (int i = 0; i < count; i++) {
-        const cbm_gbuf_node_t *m = nodes[i];
-        if (!gql_is_schema_file(m->file_path) || !m->properties_json ||
-            !strstr(m->properties_json, "\"graphql_schema_")) {
-            continue;
-        }
-        if (!ctx->schemas) {
-            ctx->schemas = cbm_arena_alloc(&ctx->arena, (size_t)count * sizeof(*ctx->schemas));
-            if (!ctx->schemas) {
-                return;
-            }
-        }
-        gql_schema_t *sd = &ctx->schemas[ctx->schema_count++];
-        sd->file = m->file_path;
-        sd->group = gql_group_of(ctx, m->file_path);
-        yyjson_doc *doc = yyjson_read(m->properties_json, strlen(m->properties_json),
-                                      YYJSON_READ_ALLOW_INVALID_UNICODE);
-        yyjson_val *root = yyjson_doc_get_root(doc);
-        for (int op = 0; op < GQL_OP_COUNT; op++) {
-            sd->roots[op] = gql_prop(&ctx->arena, root, gql_schema_keys[op]);
-        }
-        sd->defined = gql_prop(&ctx->arena, root, "graphql_schema_defined") != NULL;
-        yyjson_doc_free(doc);
-    }
-}
-
-/* Does schema file sd apply to class c? In a config's set, every one of the
- * set's files; in the heuristic set, those whose parent directory holds c. */
-static bool gql_schema_applies(const gql_schema_t *sd, const gql_class_t *c) {
-    if (sd->group != c->group) {
-        return false;
-    }
-    if (c->group != GQL_HEURISTIC) {
-        return true;
-    }
-    return strncmp(sd->file, c->node->file_path, gql_parent_dir_len(sd->file)) == 0;
-}
-
-/* The root type name of operation op for class c. The `schema` definitions
- * and `extend schema` blocks that apply to c merge: for each operation, the
- * first (by path) in a config's set, the nearest in the heuristic set.
- * Without any `schema` definition the default name stands for an operation
- * no extension names; with one, an unnamed operation has no root (NULL). */
-static const char *gql_root_name(const gql_ctx_t *ctx, const gql_class_t *c, int op) {
-    const gql_schema_t *best = NULL;
-    size_t best_len = 0;
-    bool defined = false;
-    for (int i = 0; i < ctx->schema_count; i++) {
-        const gql_schema_t *sd = &ctx->schemas[i];
-        if (!gql_schema_applies(sd, c)) {
-            continue;
-        }
-        defined = defined || sd->defined;
-        if (!sd->roots[op]) {
-            continue;
-        }
-        size_t len =
-            c->group == GQL_HEURISTIC ? gql_common_dir_len(sd->file, c->node->file_path) : 0;
-        if (!best || len > best_len || (len == best_len && strcmp(sd->file, best->file) < 0)) {
-            best = sd;
-            best_len = len;
-        }
-    }
-    if (best) {
-        return best->roots[op];
-    }
-    return defined ? NULL : gql_ops[op];
-}
-
-/* The operation class c is the root type of, or CBM_NOT_FOUND. */
-static int gql_root_op(const gql_ctx_t *ctx, const gql_class_t *c) {
-    for (int op = 0; op < GQL_OP_COUNT; op++) {
-        const char *root = gql_root_name(ctx, c, op);
-        if (root && strcmp(root, c->node->name) == 0) {
-            return op;
-        }
-    }
-    return CBM_NOT_FOUND;
 }
 
 static int gql_class_name_cmp(const void *x, const void *y) {
@@ -1970,11 +1860,14 @@ typedef struct {
 
 typedef gql_route_plan_t (*gql_route_planner_fn)(const void *index, const gql_ctx_t *ctx,
                                                  const gql_emit_t *first, size_t n);
-typedef void *(*gql_resolver_index_fn)(const gql_ctx_t *ctx);
-typedef void (*gql_resolver_index_free_fn)(void *index);
+typedef void *(*gql_route_evidence_fn)(const gql_ctx_t *ctx);
+typedef void (*gql_route_evidence_free_fn)(void *index);
+typedef int (*gql_root_match_fn)(const void *index, const char *file, int group, const char *name);
 typedef void (*gql_package_visitor_fn)(void *context, const char *directory);
 typedef void (*gql_method_visitor_fn)(void *context, const char *file_path, bool is_go,
                                       const char *name, const char *qn, int64_t id);
+typedef void (*gql_schema_visitor_fn)(void *context, const char *file, int group,
+                                      const char *const *roots, bool defined);
 
 typedef struct {
     const char *owner;
@@ -2002,19 +1895,49 @@ typedef bool (*gql_route_writer_fn)(cbm_gbuf_t *gb, const gql_route_row_t *row);
 
 static gql_route_planner_fn gql_route_planner;
 static gql_route_writer_fn gql_route_writer;
-static gql_resolver_index_fn gql_resolver_index;
-static gql_resolver_index_free_fn gql_resolver_index_free;
+static gql_route_evidence_fn gql_route_evidence;
+static gql_route_evidence_free_fn gql_route_evidence_free;
+static gql_root_match_fn gql_root_match;
 
 /* Called before C main in each linked process, including a re-execed index
  * worker, and by the native test runner. */
 void cbm_gqlgen_set_rust_backend(bool (*matcher)(const char *glob, const char *path),
                                  gql_route_planner_fn planner, gql_route_writer_fn writer,
-                                 gql_resolver_index_fn index, gql_resolver_index_free_fn release) {
+                                 gql_route_evidence_fn index, gql_route_evidence_free_fn release,
+                                 gql_root_match_fn root_match) {
     gqlgen_glob_matcher = matcher;
     gql_route_planner = planner;
     gql_route_writer = writer;
-    gql_resolver_index = index;
-    gql_resolver_index_free = release;
+    gql_route_evidence = index;
+    gql_route_evidence_free = release;
+    gql_root_match = root_match;
+}
+
+void cbm_gqlgen_read_schema_evidence(const gql_ctx_t *ctx, gql_schema_visitor_fn schema,
+                                      void *context) {
+    const cbm_gbuf_node_t **nodes = NULL;
+    int count = 0;
+    if (cbm_gbuf_find_by_label(ctx->gb, "Module", &nodes, &count) != 0) {
+        return;
+    }
+    for (int i = 0; i < count; i++) {
+        const cbm_gbuf_node_t *module = nodes[i];
+        const char *properties = module->properties_json;
+        if (!gql_is_schema_file(module->file_path) || !properties ||
+            !strstr(properties, "\"graphql_schema_")) {
+            continue;
+        }
+        yyjson_doc *doc =
+            yyjson_read(properties, strlen(properties), YYJSON_READ_ALLOW_INVALID_UNICODE);
+        yyjson_val *root = yyjson_doc_get_root(doc);
+        const char *roots[GQL_OP_COUNT];
+        for (int op = 0; op < GQL_OP_COUNT; op++) {
+            roots[op] = yyjson_get_str(yyjson_obj_get(root, gql_schema_keys[op]));
+        }
+        bool defined = yyjson_get_str(yyjson_obj_get(root, "graphql_schema_defined")) != NULL;
+        schema(context, module->file_path, gql_group_of(ctx, module->file_path), roots, defined);
+        yyjson_doc_free(doc);
+    }
 }
 
 /* Lend source evidence to the pass-local Rust index. The visitors copy the
@@ -2111,7 +2034,6 @@ static void gql_plan_and_emit(gql_ctx_t *ctx) {
     if (!ctx->classes_by_name) {
         return;
     }
-    gql_collect_schemas(ctx);
     if (gql_collect_fields(ctx) <= 0) {
         return;
     }
@@ -2120,29 +2042,27 @@ static void gql_plan_and_emit(gql_ctx_t *ctx) {
     if (!ctx->fields_by_parent) {
         return;
     }
+    void *evidence = gql_route_evidence(ctx);
     for (int i = 0; i < ctx->class_count; i++) {
-        int op = gql_root_op(ctx, &ctx->classes[i]);
+        const gql_class_t *type = &ctx->classes[i];
+        int op = gql_root_match(evidence, type->node->file_path, type->group, type->node->name);
         if (op >= 0) {
-            gql_plan_root(ctx, &ctx->classes[i], op);
+            gql_plan_root(ctx, type, op);
         }
     }
     if (ctx->emit_count > SKIP_ONE) {
         qsort(ctx->emits, (size_t)ctx->emit_count, sizeof(*ctx->emits), gql_emit_cmp);
     }
-    if (ctx->emit_count == 0) {
-        return;
-    }
-    void *resolvers = gql_resolver_index(ctx);
     for (int i = 0; i < ctx->emit_count;) {
         int n = SKIP_ONE;
         while (i + n < ctx->emit_count && strcmp(ctx->emits[i + n].qn, ctx->emits[i].qn) == 0) {
             n++;
         }
         const gql_emit_t *first = &ctx->emits[i];
-        gql_emit_route(ctx, first, gql_route_planner(resolvers, ctx, first, (size_t)n));
+        gql_emit_route(ctx, first, gql_route_planner(evidence, ctx, first, (size_t)n));
         i += n;
     }
-    gql_resolver_index_free(resolvers);
+    gql_route_evidence_free(evidence);
 }
 
 /* Does the index hold a GraphQL file (by language, so user extension
@@ -2167,7 +2087,7 @@ static bool gql_has_graphql_file(cbm_gbuf_t *gb) {
  * repo_path locates the gqlgen configs (NULL: none are read). */
 void cbm_pipeline_create_graphql_routes(cbm_gbuf_t *gb, const char *repo_path) {
     if (!gb || !gqlgen_glob_matcher || !gql_route_planner || !gql_route_writer ||
-        !gql_resolver_index || !gql_resolver_index_free) {
+        !gql_route_evidence || !gql_route_evidence_free || !gql_root_match) {
         return;
     }
     gql_ctx_t ctx = {.gb = gb, .repo_path = repo_path};

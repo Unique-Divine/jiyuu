@@ -8,7 +8,9 @@ use rusqlite::{
     ffi::{sqlite3, sqlite3_stmt},
 };
 
-use crate::gqlgen::{ResolverIndex, ResolverScope, SchemaField};
+use crate::gqlgen::{
+    ROOT_COUNT, ResolverIndex, ResolverScope, SchemaField, SchemaIndex,
+};
 use crate::graphql_link::{
     Action, delete_stale_link, find_handler, plan_link, upsert_link,
 };
@@ -24,6 +26,7 @@ mod fixture_witness {
     pub(super) const LINK_UPSERT: u32 = 1 << 4;
     pub(super) const LINK_DELETE: u32 = 1 << 5;
     pub(super) const DOCUMENT: u32 = 1 << 6;
+    pub(super) const ROOT_MATCH: u32 = 1 << 7;
 
     static VISITED: AtomicU32 = AtomicU32::new(0);
 
@@ -50,8 +53,21 @@ type RoutePlanner = unsafe extern "C" fn(
     *const c_void,
     usize,
 ) -> GraphqlRoutePlan;
-type ResolverIndexBuild = unsafe extern "C" fn(*const c_void) -> *mut c_void;
-type ResolverIndexFree = unsafe extern "C" fn(*mut c_void);
+type RouteEvidenceBuild = unsafe extern "C" fn(*const c_void) -> *mut c_void;
+type RouteEvidenceFree = unsafe extern "C" fn(*mut c_void);
+type RootMatch = unsafe extern "C" fn(
+    *const c_void,
+    *const c_char,
+    c_int,
+    *const c_char,
+) -> c_int;
+type SchemaVisitor = unsafe extern "C" fn(
+    *mut c_void,
+    *const c_char,
+    c_int,
+    *const *const c_char,
+    bool,
+);
 type PackageVisitor = unsafe extern "C" fn(*mut c_void, *const c_char);
 type MethodVisitor = unsafe extern "C" fn(
     *mut c_void,
@@ -69,6 +85,12 @@ struct GraphqlRouteField {
     file_path: *const c_char,
     resolver_pkg: *const c_char,
     configured: bool,
+}
+
+#[derive(Default)]
+struct RouteEvidence {
+    schemas: SchemaIndex,
+    resolvers: ResolverIndex,
 }
 
 #[repr(C)]
@@ -114,8 +136,9 @@ unsafe extern "C" {
         matcher: extern "C" fn(glob: *const c_char, path: *const c_char) -> bool,
         planner: RoutePlanner,
         writer: RouteWriter,
-        build: ResolverIndexBuild,
-        release: ResolverIndexFree,
+        build: RouteEvidenceBuild,
+        release: RouteEvidenceFree,
+        match_root: RootMatch,
     );
     fn cbm_cross_repo_set_graphql_backend(
         policy: extern "C" fn(bool, bool, bool, bool, bool) -> Action,
@@ -137,6 +160,11 @@ unsafe extern "C" {
         ) -> GraphqlHandler,
     );
 
+    fn cbm_gqlgen_read_schema_evidence(
+        ctx: *const c_void,
+        schema: SchemaVisitor,
+        context: *mut c_void,
+    );
     fn cbm_gqlgen_read_resolver_evidence(
         ctx: *const c_void,
         package: PackageVisitor,
@@ -219,7 +247,7 @@ unsafe extern "C" fn plan_graphql_route(
     fixture_witness::mark(fixture_witness::ROUTE_PLAN);
     // SAFETY: C lends the live Rust index and the candidate array for this
     // call. The iterator only borrows strings from that array and its context.
-    let index = unsafe { &*index.cast::<ResolverIndex>() };
+    let index = unsafe { &*index.cast::<RouteEvidence>() };
     let candidates = (0..count).map(|offset| unsafe {
         let field = cbm_gqlgen_route_field_at(ctx, first, offset);
         SchemaField {
@@ -233,7 +261,7 @@ unsafe extern "C" fn plan_graphql_route(
             },
         }
     });
-    let plan = index.plan(count, candidates);
+    let plan = index.resolvers.plan(count, candidates);
     GraphqlRoutePlan {
         field_index: plan.field_index,
         resolver_id: plan.resolver.unwrap_or(0),
@@ -244,6 +272,27 @@ unsafe extern "C" fn plan_graphql_route(
 // Non-null pointers must reference NUL-terminated bytes for the borrow.
 unsafe fn optional_bytes<'a>(value: *const c_char) -> Option<&'a [u8]> {
     (!value.is_null()).then(|| unsafe { CStr::from_ptr(value).to_bytes() })
+}
+
+unsafe extern "C" fn collect_schema(
+    context: *mut c_void,
+    file: *const c_char,
+    group: c_int,
+    roots: *const *const c_char,
+    defined: bool,
+) {
+    // SAFETY: The schema visitor receives a live file string and a three-entry
+    // array of optional root names. The index owns copies before returning.
+    unsafe {
+        let schemas = &mut *context.cast::<SchemaIndex>();
+        schemas.add(
+            CStr::from_ptr(file).to_bytes(),
+            usize::try_from(group).ok(),
+            (*roots.cast::<[*const c_char; ROOT_COUNT]>())
+                .map(|root| optional_bytes(root)),
+            defined,
+        );
+    }
 }
 
 unsafe extern "C" fn collect_package(
@@ -278,24 +327,55 @@ unsafe extern "C" fn collect_method(
     }
 }
 
-unsafe extern "C" fn build_resolver_index(ctx: *const c_void) -> *mut c_void {
-    let mut index = ResolverIndex::default();
+unsafe extern "C" fn build_route_evidence(ctx: *const c_void) -> *mut c_void {
+    let mut evidence = RouteEvidence::default();
     // SAFETY: C lends a live route context for this call and retains no
     // pointer to the index passed to the synchronous visitors.
     unsafe {
+        cbm_gqlgen_read_schema_evidence(
+            ctx,
+            collect_schema,
+            ptr::from_mut(&mut evidence.schemas).cast(),
+        );
         cbm_gqlgen_read_resolver_evidence(
             ctx,
             collect_package,
             collect_method,
-            ptr::from_mut(&mut index).cast(),
+            ptr::from_mut(&mut evidence.resolvers).cast(),
         );
     }
-    Box::into_raw(Box::new(index)).cast()
+    Box::into_raw(Box::new(evidence)).cast()
 }
 
-unsafe extern "C" fn free_resolver_index(index: *mut c_void) {
-    // SAFETY: C returns the unique handle from build_resolver_index once.
-    drop(unsafe { Box::from_raw(index.cast::<ResolverIndex>()) });
+unsafe extern "C" fn free_route_evidence(index: *mut c_void) {
+    // SAFETY: C returns the unique handle from build_route_evidence once.
+    drop(unsafe { Box::from_raw(index.cast::<RouteEvidence>()) });
+}
+
+unsafe extern "C" fn match_schema_root(
+    index: *const c_void,
+    file: *const c_char,
+    group: c_int,
+    name: *const c_char,
+) -> c_int {
+    #[cfg(feature = "native-graphql-fixtures")]
+    fixture_witness::mark(fixture_witness::ROOT_MATCH);
+    // SAFETY: C lends the index and the type's non-null strings for this call.
+    let (index, file, name) = unsafe {
+        (
+            &*index.cast::<RouteEvidence>(),
+            CStr::from_ptr(file),
+            CStr::from_ptr(name),
+        )
+    };
+    index
+        .schemas
+        .root_operation(
+            file.to_bytes(),
+            usize::try_from(group).ok(),
+            name.to_bytes(),
+        )
+        .map_or(-1, |operation| operation as c_int)
 }
 
 unsafe extern "C" fn write_graphql_route(
@@ -438,8 +518,9 @@ pub unsafe extern "C" fn mori_register_graphql_callbacks() {
             gqlgen_glob_match,
             plan_graphql_route,
             write_graphql_route,
-            build_resolver_index,
-            free_resolver_index,
+            build_route_evidence,
+            free_route_evidence,
+            match_schema_root,
         );
         cbm_cross_repo_set_graphql_backend(
             plan_link,

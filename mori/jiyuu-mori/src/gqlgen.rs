@@ -4,6 +4,90 @@ use std::collections::{HashMap, HashSet};
 
 use crate::link::RoutePlan;
 
+pub(crate) const ROOT_COUNT: usize = 3;
+
+#[derive(Default)]
+pub(crate) struct SchemaIndex {
+    schemas: Vec<SchemaRootEvidence>,
+}
+
+struct SchemaRootEvidence {
+    file: Vec<u8>,
+    group: Option<usize>,
+    roots: [Option<Vec<u8>>; ROOT_COUNT],
+    defined: bool,
+}
+
+impl SchemaIndex {
+    pub(crate) fn add(
+        &mut self,
+        file: &[u8],
+        group: Option<usize>,
+        roots: [Option<&[u8]>; ROOT_COUNT],
+        defined: bool,
+    ) {
+        self.schemas.push(SchemaRootEvidence {
+            file: file.to_vec(),
+            group,
+            roots: roots.map(|name| name.map(<[u8]>::to_vec)),
+            defined,
+        });
+    }
+
+    /// Match a type to the first operation it roots, in query, mutation,
+    /// subscription order. An explicit schema suppresses unnamed defaults.
+    pub(crate) fn root_operation(
+        &self,
+        file: &[u8],
+        group: Option<usize>,
+        name: &[u8],
+    ) -> Option<usize> {
+        const DEFAULTS: [&[u8]; ROOT_COUNT] =
+            [b"Query", b"Mutation", b"Subscription"];
+        let mut best = [None::<(&[u8], usize, &[u8])>; ROOT_COUNT];
+        let mut defined = false;
+        for schema in &self.schemas {
+            if schema.group != group
+                || (group.is_none()
+                    && !file.starts_with(parent_directory(&schema.file)))
+            {
+                continue;
+            }
+            defined |= schema.defined;
+            let common_directory_len = if group.is_none() {
+                file.iter()
+                    .zip(&schema.file)
+                    .take_while(|(left, right)| left == right)
+                    .enumerate()
+                    .filter_map(|(index, (&byte, _))| {
+                        (byte == b'/').then_some(index + 1)
+                    })
+                    .last()
+                    .unwrap_or(0)
+            } else {
+                0
+            };
+            for (current, root) in best.iter_mut().zip(&schema.roots) {
+                if let Some(root) = root
+                    && current.is_none_or(|(old_file, old_len, _)| {
+                        common_directory_len > old_len
+                            || (common_directory_len == old_len
+                                && schema.file.as_slice() < old_file)
+                    })
+                {
+                    *current = Some((&schema.file, common_directory_len, root));
+                }
+            }
+        }
+        best.into_iter().zip(DEFAULTS).position(|(entry, default)| {
+            let root = entry
+                .map(|(_, _, root)| root)
+                .or((!defined).then_some(default));
+            root == Some(name)
+        })
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct ResolverIndex {
     configured: HashSet<Vec<u8>>,
@@ -32,6 +116,11 @@ fn directory(path: &[u8]) -> &[u8] {
     path.iter()
         .rposition(|&byte| byte == b'/')
         .map_or(&[], |slash| &path[..=slash])
+}
+
+fn parent_directory(path: &[u8]) -> &[u8] {
+    let dir = directory(path);
+    directory(dir.strip_suffix(b"/").unwrap_or(dir))
 }
 
 fn resolver_type<'a>(qn: &'a [u8], name: &[u8]) -> Option<&'a [u8]> {
@@ -130,7 +219,7 @@ impl ResolverIndex {
                         .contains(&b'/');
                 }
                 dir.starts_with(schema_dir)
-                    || dir == directory(&schema_dir[..schema_dir.len() - 1])
+                    || dir == parent_directory(field.file)
             }
         }
     }
@@ -236,8 +325,62 @@ pub(crate) fn glob_matches(pattern: &[u8], path: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_SEGMENTS, ResolverIndex, ResolverScope, SchemaField, glob_matches,
+        MAX_SEGMENTS, ResolverIndex, ResolverScope, SchemaField, SchemaIndex,
+        glob_matches,
     };
+
+    #[test]
+    fn explicit_roots_merge_in_config_order_and_suppress_defaults() {
+        let mut schemas = SchemaIndex::default();
+        schemas.add(
+            b"z.graphql",
+            Some(0),
+            [Some(b"LaterRoot"), Some(b"Write"), None],
+            false,
+        );
+        schemas.add(b"a.graphql", Some(0), [Some(b"Read"), None, None], true);
+        schemas.add(
+            b"b.graphql",
+            Some(1),
+            [Some(b"Unrelated"), None, None],
+            true,
+        );
+        let root = |name| schemas.root_operation(b"a.graphql", Some(0), name);
+        assert_eq!(root(b"Read"), Some(0));
+        assert_eq!(root(b"Write"), Some(1));
+        assert_eq!(root(b"LaterRoot"), None);
+        assert_eq!(root(b"Unrelated"), None);
+        assert_eq!(root(b"Subscription"), None);
+    }
+
+    #[test]
+    fn heuristic_roots_use_nearest_schema_and_keep_extension_defaults() {
+        let mut schemas = SchemaIndex::default();
+        schemas.add(
+            b"global/schema.graphql",
+            None,
+            [Some(b"Global"), None, None],
+            false,
+        );
+        schemas.add(
+            b"api/b/schema.graphql",
+            None,
+            [Some(b"ApiB"), None, None],
+            false,
+        );
+        schemas.add(
+            b"api/a/schema.graphql",
+            None,
+            [Some(b"ApiA"), None, None],
+            false,
+        );
+        let root = |file, name| schemas.root_operation(file, None, name);
+        assert_eq!(root(b"api/b/types.graphql", b"ApiB"), Some(0));
+        assert_eq!(root(b"api/types.graphql", b"ApiA"), Some(0));
+        assert_eq!(root(b"api/types.graphql", b"Mutation"), Some(1));
+        assert_eq!(root(b"elsewhere/types.graphql", b"Global"), Some(0));
+        assert_eq!(root(b"elsewhere/types.graphql", b"ApiA"), None);
+    }
 
     fn query_score<'a>(
         file: &'a [u8],
