@@ -258,5 +258,7 @@ If `sai skill` answers "No such command", the installed CLI predates it. Use
 
 `trade open`, `trade close`, `trade partial-close`, `trade tpsl`, `trade
 leverage`, and `trade margin` submit intents, and `intent local` and `intent
-status` follow them. [trading-safety.md](trading-safety.md) has the commands,
-the dry-run examples, and the rules.
+status` follow them. When a keyed status check returns `outcome: pending`,
+follow the `hint` and check the same key again before trading.
+[Trading Safety](trading-safety.md) has the dry-run commands and confirmation
+rules.

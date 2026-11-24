@@ -63,6 +63,10 @@ Account reads take an optional `addr`. Without one they read the active
 account and report `addrSource` as `session`. Say so to the person, and pass
 `addr` to read any other account.
 
+To reconcile a trade, pass its key to `intent_status`. If the result has
+`outcome: pending`, follow its `hint` and check the same key again before
+trading. [Unknown and Pending Intents](trading-safety.md#unknown-and-pending-intents)
+
 ## Sign-In
 
 The server lists every tool whether or not anyone is signed in. Each
