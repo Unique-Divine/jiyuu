@@ -131,18 +131,8 @@ int cbm_watcher_watch_count(cbm_watcher_t *w);
  * hard error, reset on success) can be asserted directly rather than inferred
  * from the poll deadline it feeds.
  *
- * Memory visibility: this reads under projects_lock, but poll_project WRITES
- * the counter outside that lock — it runs against a state snapshot taken
- * while the lock was held, which is the same discipline the other
- * poll-mutated fields here already follow (last_head, last_dirty_sig,
- * interval_ms, next_poll_ns, missing_root_count). It is NOT the discipline of
- * every field: active_git is serialized by projects_lock and registered is an
- * atomic_bool. Reading concurrently with a live poll is therefore formally a
- * data race and may observe a stale value; it is a diagnostic and test
- * accessor, not a synchronisation point.
- * Single-threaded callers (the tests, and any caller between poll cycles)
- * always see the current value. Do not build scheduling decisions on it
- * without first giving the counter atomic accessors. */
+ * The Rust poll policy exposes an atomic snapshot for diagnostics. The
+ * standalone C reference requires the caller to read between poll cycles. */
 int cbm_watcher_index_failure_count(cbm_watcher_t *w, const char *project_name);
 
 #if defined(CBM_ENABLE_TEST_SEAMS) && CBM_ENABLE_TEST_SEAMS

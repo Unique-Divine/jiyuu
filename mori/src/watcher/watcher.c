@@ -24,6 +24,9 @@
  */
 #include <stdint.h>
 #include "watcher/watcher.h"
+#ifdef CBM_RUST_WATCHER
+#include "watcher/rust_poll.h"
+#endif
 #include "store/store.h"
 #include "foundation/constants.h"
 #include "foundation/log.h"
@@ -65,6 +68,10 @@ typedef struct {
     /* Published only while one supervised Git command is active. Access is
      * serialized by watcher->projects_lock; cancellation itself is atomic. */
     cbm_subprocess_t *active_git;
+#ifdef CBM_RUST_WATCHER
+    cbm_rust_watcher_state_t *poll_state;
+#else
+    /* Standalone C reference and C tests. */
     /* Room for Git's 64-hex SHA-256 object ID plus newline/NUL while reading. */
     char last_head[CBM_SZ_128]; /* git HEAD hash (committed baseline) */
     bool is_git;                /* false → tree-polled if tree_poll, else skipped */
@@ -97,6 +104,7 @@ typedef struct {
      * decays the retry cadence so "never lost" does not also mean "retried
      * forever". Reset to 0 by any successful reindex. */
     int index_failures;
+#endif
     /* Hop from root_path up to the repository root ("" when they are the same),
      * from `rev-parse --show-cdup`. Porcelain paths are repository-relative, so
      * the signature needs this to stat them. Resolved once at baseline. */
@@ -126,6 +134,9 @@ struct cbm_watcher {
     void *mutation_context;
     atomic_int stopped;
     atomic_bool running;
+#ifdef CBM_RUST_WATCHER
+    atomic_bool polling; /* Only one snapshot may refer to deferred states. */
+#endif
     /* Opt-in (#1948): poll non-git roots by tree signature. Default false —
      * non-git roots are not watched. Read at each project's baseline. */
     atomic_bool poll_non_git;
@@ -139,10 +150,11 @@ struct cbm_watcher {
 
 /* Time unit conversions */
 #define NS_PER_SEC 1000000000LL
-#define US_PER_MS 1000000LL
 
 /* Adaptive poll interval parameters (ms) */
 #define POLL_BASE_MS 5000
+#ifndef CBM_RUST_WATCHER
+#define US_PER_MS 1000000LL
 #define POLL_FILE_STEP 500 /* add 1s per this many files */
 #define POLL_MAX_MS 60000
 
@@ -171,6 +183,7 @@ struct cbm_watcher {
  * ADR), so it requires BOTH a streak of consecutive missing polls AND a
  * sustained-absence grace window measured from the streak's first miss. */
 #define MISSING_ROOT_DELETE_AFTER 3
+#endif
 #define PRUNE_GRACE_DEFAULT_S 600 /* 10 min; override: CBM_WATCHER_PRUNE_GRACE_S */
 
 /* Sleep chunk for responsive shutdown (ms) */
@@ -204,6 +217,7 @@ static int64_t now_ns(void) {
 
 /* ── Adaptive interval ──────────────────────────────────────────── */
 
+#ifndef CBM_RUST_WATCHER
 int cbm_watcher_index_backoff_ms(int interval_ms, int consecutive_failures) {
     if (interval_ms < 0) {
         interval_ms = 0;
@@ -246,6 +260,7 @@ int cbm_watcher_poll_interval_ms(int file_count) {
     }
     return ms;
 }
+#endif
 
 /* ── Git helpers ────────────────────────────────────────────────── */
 
@@ -979,7 +994,15 @@ static project_state_t *state_new(const char *name, const char *root_path, bool 
     atomic_init(&s->registered, true);
     atomic_init(&s->named, named);
     atomic_init(&s->catch_up, named);
+#ifdef CBM_RUST_WATCHER
+    s->poll_state = cbm_rust_watcher_new();
+    if (!s->poll_state) {
+        state_free(s);
+        return NULL;
+    }
+#else
     s->interval_ms = POLL_BASE_MS;
+#endif
     atomic_init(&s->status_strategy, CBM_WATCHER_STRATEGY_PENDING);
     atomic_init(&s->status_interval_ms, POLL_BASE_MS);
     atomic_init(&s->status_last_scan_s, 0);
@@ -990,6 +1013,9 @@ static void state_free(project_state_t *s) {
     if (!s) {
         return;
     }
+#ifdef CBM_RUST_WATCHER
+    cbm_rust_watcher_free(s->poll_state);
+#endif
     free(s->project_name);
     free(s->root_path);
     free(s);
@@ -1162,6 +1188,9 @@ cbm_watcher_t *cbm_watcher_new(cbm_store_t *store, cbm_index_fn index_fn, void *
     cbm_mutex_init(&w->coordination_lock);
     atomic_init(&w->stopped, 0);
     atomic_init(&w->running, false);
+#ifdef CBM_RUST_WATCHER
+    atomic_init(&w->polling, false);
+#endif
     atomic_init(&w->poll_non_git, false);
     return w;
 }
@@ -1339,7 +1368,11 @@ void cbm_watcher_touch(cbm_watcher_t *w, const char *project_name) {
     project_state_t *s = cbm_ht_get(w->projects, project_name);
     if (s) {
         /* Reset backoff — poll immediately on next cycle */
+#ifdef CBM_RUST_WATCHER
+        cbm_rust_watcher_touch(s->poll_state);
+#else
         s->next_poll_ns = 0;
+#endif
     }
     cbm_mutex_unlock(&w->projects_lock);
 }
@@ -1365,7 +1398,11 @@ int cbm_watcher_index_failure_count(cbm_watcher_t *w, const char *project_name) 
     }
     cbm_mutex_lock(&w->projects_lock);
     project_state_t *s = cbm_ht_get(w->projects, project_name);
+#ifdef CBM_RUST_WATCHER
+    int failures = s ? cbm_rust_watcher_failures(s->poll_state) : -1;
+#else
     int failures = s ? s->index_failures : -1;
+#endif
     cbm_mutex_unlock(&w->projects_lock);
     return failures;
 }
@@ -1401,6 +1438,7 @@ int cbm_watcher_watch_count(cbm_watcher_t *w) {
 
 /* ── Single poll cycle ──────────────────────────────────────────── */
 
+#ifndef CBM_RUST_WATCHER
 /* Publish what index_status reports: the strategy, the current cadence and,
  * when a check just completed, the wall-clock time of that scan. A non-git
  * root is "tree" when watch_non_git polls it (#1948), else "none". */
@@ -1579,6 +1617,7 @@ static bool check_changes(cbm_watcher_t *w, project_state_t *s, bool *changed_ou
     *changed_out = changed;
     return true;
 }
+#endif
 
 /* Context for poll_once foreach callback */
 typedef struct {
@@ -1587,7 +1626,11 @@ typedef struct {
     int reindexed;
 } poll_ctx_t;
 
+#ifdef CBM_RUST_WATCHER
+static void prune_missing_project(cbm_watcher_t *w, project_state_t *s, uint64_t first_missing_ms) {
+#else
 static void prune_missing_project(cbm_watcher_t *w, project_state_t *s) {
+#endif
     if (!w || !s || !s->project_name) {
         return;
     }
@@ -1621,8 +1664,14 @@ static void prune_missing_project(cbm_watcher_t *w, project_state_t *s) {
     uint64_t now_ms = cbm_now_ms();
     bool still_eligible =
         current == s && !atomic_load(&s->named) && strcmp(current->root_path, root_path) == 0 &&
+#ifdef CBM_RUST_WATCHER
+        !atomic_load_explicit(&w->stopped, memory_order_acquire) &&
+        now_ms >= first_missing_ms &&
+        (now_ms - first_missing_ms) / CBM_MSEC_PER_SEC >= (uint64_t)prune_grace_s() &&
+#else
         current->missing_root_count >= MISSING_ROOT_DELETE_AFTER && current->first_missing_ms > 0 &&
         now_ms - current->first_missing_ms >= (uint64_t)prune_grace_s() * CBM_MSEC_PER_SEC &&
+#endif
         root_status(root_path, &stat_errno) == ROOT_MISSING;
     if (still_eligible && defer_state_free(w, s)) {
         if (delete_cached_project_db(project_name)) {
@@ -1652,6 +1701,7 @@ static void prune_missing_project(cbm_watcher_t *w, project_state_t *s) {
     free(root_path);
 }
 
+#ifndef CBM_RUST_WATCHER
 /* After a SUCCESSFUL reindex, commit the baselines OBSERVED AT CHECK TIME —
  * the state whose reindex just succeeded. A commit/edit landing during the
  * reindex is deliberately not absorbed: the next poll sees it as a new delta
@@ -1826,6 +1876,177 @@ static void poll_project(const char *key, void *val, void *ud) {
     }
     s->next_poll_ns = anchor_ns + ((int64_t)delay_ms * US_PER_MS);
 }
+#else
+
+/* The host keeps repository I/O, diagnostics, and daemon callbacks. The Rust
+ * state belongs to this physical registration and never borrows its strings. */
+struct cbm_watcher_poll_host {
+    cbm_watcher_t *watcher;
+    project_state_t *project;
+};
+
+cbm_watcher_host_flags_t cbm_watcher_host_flags(cbm_watcher_poll_host_t *host) {
+    project_state_t *s = host->project;
+    return (cbm_watcher_host_flags_t){
+        .registered = atomic_load_explicit(&s->registered, memory_order_acquire) &&
+                      !atomic_load_explicit(&host->watcher->stopped, memory_order_acquire),
+        .named = atomic_load(&s->named),
+        .catch_up = atomic_load(&s->catch_up),
+        .poll_non_git = atomic_load_explicit(&host->watcher->poll_non_git, memory_order_acquire),
+    };
+}
+
+int64_t cbm_watcher_host_now_ns(void) {
+    return now_ns();
+}
+
+uint64_t cbm_watcher_host_now_ms(void) {
+    return cbm_now_ms();
+}
+
+int cbm_watcher_host_root(cbm_watcher_poll_host_t *host, int *stat_errno) {
+    return root_status(host->project->root_path, stat_errno);
+}
+
+int cbm_watcher_host_git_repository(cbm_watcher_poll_host_t *host) {
+    cbm_watcher_t *w = host->watcher;
+    project_state_t *s = host->project;
+    watcher_git_status_t status = git_repo_status(w, s);
+    if (status != WATCHER_GIT_OK) {
+        return status;
+    }
+    /* A directory inside a repository only inherits its Git status if
+     * it is directly rooted there or has tracked files of its own. */
+    if (!git_has_own_dot_git(s->root_path)) {
+        bool tracked = false;
+        status = git_tracks_anything_here(w, s, &tracked);
+        if (status != WATCHER_GIT_OK && status != WATCHER_GIT_COMMAND_FAILED) {
+            return status;
+        }
+        if (!tracked) {
+            cbm_log_info("watcher.nested_non_git", "project", s->project_name, "path",
+                         s->root_path);
+            return WATCHER_GIT_COMMAND_FAILED;
+        }
+    }
+    status = git_repo_cdup(w, s, s->repo_cdup, sizeof(s->repo_cdup));
+    return status == WATCHER_GIT_COMMAND_FAILED ? WATCHER_GIT_OK : status;
+}
+
+int cbm_watcher_host_head(cbm_watcher_poll_host_t *host, uint8_t *head, size_t size) {
+    return git_head(host->watcher, host->project, (char *)head, size);
+}
+
+int cbm_watcher_host_dirty_signature(cbm_watcher_poll_host_t *host, uint64_t *signature) {
+    return git_dirty_signature(host->watcher, host->project, signature);
+}
+
+int cbm_watcher_host_git_file_count(cbm_watcher_poll_host_t *host, int *count) {
+    return git_file_count(host->watcher, host->project, count);
+}
+
+bool cbm_watcher_host_tree(cbm_watcher_poll_host_t *host, uint64_t *signature, int *count) {
+    return tree_signature(host->project->root_path, signature, count);
+}
+
+void cbm_watcher_host_publish(cbm_watcher_poll_host_t *host, int strategy, int interval_ms,
+                               bool scanned) {
+    project_state_t *s = host->project;
+    atomic_store(&s->status_strategy, strategy);
+    atomic_store(&s->status_interval_ms, interval_ms);
+    if (scanned) {
+        atomic_store(&s->status_last_scan_s, (int64_t)time(NULL));
+    }
+}
+
+void cbm_watcher_host_log(cbm_watcher_poll_host_t *host, int event, int value, int extra) {
+    const char *project = host->project->project_name;
+    const char *path = host->project->root_path;
+    switch (event) {
+    case CBM_WATCH_LOG_ROOT_MISSING:
+        if (value == 0) {
+            cbm_log_warn("watcher.root_missing", "project", project, "path", path);
+        } else {
+            cbm_log_warn("watcher.root_missing", "project", project, "path", path, "polls",
+                         itoa_buf(value));
+        }
+        break;
+    case CBM_WATCH_LOG_ROOT_RESTORED:
+        cbm_log_info("watcher.root_restored", "project", project, "path", path);
+        break;
+    case CBM_WATCH_LOG_ROOT_STAT_ERROR:
+        cbm_log_warn("watcher.root_stat_error", "project", project, "path", path, "errno",
+                     itoa_buf(value));
+        break;
+    case CBM_WATCH_LOG_TREE_WALK_FAILED:
+        cbm_log_warn("watcher.tree_walk_failed", "project", project, "path", path);
+        break;
+    case CBM_WATCH_LOG_BASELINE:
+        if (value == CBM_WATCHER_STRATEGY_GIT) {
+            cbm_log_info("watcher.baseline", "project", project, "strategy", "git", "files",
+                         extra > 0 ? "yes" : "0");
+        } else {
+            cbm_log_info("watcher.baseline", "project", project, "strategy",
+                         value == CBM_WATCHER_STRATEGY_TREE ? "tree" : "none");
+        }
+        break;
+    case CBM_WATCH_LOG_INDEX_RETRY:
+        cbm_log_info("watcher.index.retry", "project", project);
+        break;
+    case CBM_WATCH_LOG_INDEX_ERROR: {
+        char rc_text[CBM_SZ_32];
+        snprintf(rc_text, sizeof(rc_text), "%d", value);
+        cbm_log_warn("watcher.index.err", "project", project, "rc", rc_text, "consecutive",
+                     itoa_buf(extra));
+        break;
+    }
+    case CBM_WATCH_LOG_SUSTAINED_FAILURE:
+        cbm_log_warn("watcher.index.sustained_failure", "project", project, "consecutive",
+                     itoa_buf(value));
+        break;
+    case CBM_WATCH_LOG_COOLDOWN:
+        cbm_log_info("watcher.cooldown", "project", project, "delay_ms", itoa_buf(value));
+        break;
+    }
+}
+
+void cbm_watcher_host_set_catch_up(cbm_watcher_poll_host_t *host, bool needed) {
+    atomic_store(&host->project->catch_up, needed);
+}
+
+bool cbm_watcher_host_index(cbm_watcher_poll_host_t *host, int strategy, int *result) {
+    cbm_watcher_t *w = host->watcher;
+    project_state_t *s = host->project;
+    if (!cbm_watcher_host_flags(host).registered) {
+        return false;
+    }
+    cbm_log_info("watcher.changed", "project", s->project_name, "strategy",
+                 strategy == CBM_WATCHER_STRATEGY_GIT ? "git" : "tree");
+    if (!w->index_fn) {
+        return false;
+    }
+    *result = w->index_fn(s->project_name, s->root_path, w->user_data);
+    return true;
+}
+
+uint64_t cbm_watcher_host_prune_grace_s(void) {
+    return (uint64_t)prune_grace_s();
+}
+
+void cbm_watcher_host_prune(cbm_watcher_poll_host_t *host, uint64_t first_missing_ms) {
+    prune_missing_project(host->watcher, host->project, first_missing_ms);
+}
+
+static void poll_project(const char *key, void *val, void *ud) {
+    (void)key;
+    poll_ctx_t *ctx = ud;
+    project_state_t *s = val;
+    cbm_watcher_poll_host_t host = {.watcher = ctx->w, .project = s};
+    if (cbm_rust_watcher_poll(s->poll_state, &host, ctx->now)) {
+        ctx->reindexed++;
+    }
+}
+#endif
 
 /* Callback to snapshot project state pointers into an array. */
 typedef struct {
@@ -1846,6 +2067,11 @@ int cbm_watcher_poll_once(cbm_watcher_t *w) {
     if (!w) {
         return 0;
     }
+#ifdef CBM_RUST_WATCHER
+    if (atomic_exchange_explicit(&w->polling, true, memory_order_acquire)) {
+        return 0;
+    }
+#endif
 
     /* Snapshot project pointers under lock, then poll without holding it.
      * This keeps the critical section small — poll_project does git I/O
@@ -1861,11 +2087,17 @@ int cbm_watcher_poll_once(cbm_watcher_t *w) {
     int n = cbm_ht_count(w->projects);
     if (n == 0) {
         cbm_mutex_unlock(&w->projects_lock);
+#ifdef CBM_RUST_WATCHER
+        atomic_store_explicit(&w->polling, false, memory_order_release);
+#endif
         return 0;
     }
     project_state_t **snap = malloc(n * sizeof(project_state_t *));
     if (!snap) {
         cbm_mutex_unlock(&w->projects_lock);
+#ifdef CBM_RUST_WATCHER
+        atomic_store_explicit(&w->polling, false, memory_order_release);
+#endif
         return 0;
     }
     snapshot_ctx_t sc = {.items = snap, .count = 0, .cap = n};
@@ -1881,6 +2113,9 @@ int cbm_watcher_poll_once(cbm_watcher_t *w) {
         poll_project(NULL, snap[i], &ctx);
     }
     free(snap);
+#ifdef CBM_RUST_WATCHER
+    atomic_store_explicit(&w->polling, false, memory_order_release);
+#endif
     return ctx.reindexed;
 }
 
@@ -1954,6 +2189,13 @@ int cbm_watcher_test_dirty_sigs(cbm_watcher_t *w, const char *project, uint64_t 
     if (!w || !project) {
         return -1;
     }
+#ifdef CBM_RUST_WATCHER
+    cbm_mutex_lock(&w->projects_lock);
+    project_state_t *s = cbm_ht_get(w->projects, project);
+    int rc = s ? cbm_rust_watcher_dirty_sigs(s->poll_state, last_out, pending_out) : -1;
+    cbm_mutex_unlock(&w->projects_lock);
+    return rc;
+#else
     project_state_t *s = cbm_ht_get(w->projects, project);
     if (!s) {
         return -1;
@@ -1965,6 +2207,7 @@ int cbm_watcher_test_dirty_sigs(cbm_watcher_t *w, const char *project, uint64_t 
         *pending_out = s->pending_dirty_sig;
     }
     return 0;
+#endif
 }
 
 int cbm_watcher_test_pending_free_count(cbm_watcher_t *w) {
@@ -1987,7 +2230,11 @@ int64_t cbm_watcher_test_next_poll_ns(cbm_watcher_t *w, const char *project) {
     }
     cbm_mutex_lock(&w->projects_lock);
     project_state_t *s = cbm_ht_get(w->projects, project);
+#ifdef CBM_RUST_WATCHER
+    int64_t next = s ? cbm_rust_watcher_next_poll_ns(s->poll_state) : -1;
+#else
     int64_t next = s ? s->next_poll_ns : -1;
+#endif
     cbm_mutex_unlock(&w->projects_lock);
     return next;
 }
