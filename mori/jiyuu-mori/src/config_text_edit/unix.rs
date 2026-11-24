@@ -1,3 +1,5 @@
+use crate::ffi_output;
+
 use std::ffi::{CStr, CString, c_char, c_int, c_uint};
 use std::fs::{self, File, OpenOptions, Permissions};
 use std::io;
@@ -112,8 +114,9 @@ impl Target {
             path: [0; 4096],
         };
         // SAFETY: path is NUL-terminated and raw has the C struct layout.
-        let status =
-            unsafe { cbm_config_edit_target_open(path.as_ptr(), &mut raw) };
+        let status = unsafe {
+            cbm_config_edit_target_open(ffi_output::c_str(&path), &mut raw)
+        };
         if status < 0 {
             return Err(invalid("configuration path was refused"));
         }
@@ -126,11 +129,17 @@ impl Target {
         })
     }
 
+    fn native(&self) -> *const ConfigTarget {
+        // The zero-initialized arrays and scalar fields have no padding.
+        unsafe { ffi_output::written(&self.raw, 1) };
+        &self.raw
+    }
+
     pub(super) fn path(&self) -> &Path {
         &self.path
     }
 
-    fn followed(&self) -> bool {
+    pub(super) fn followed(&self) -> bool {
         self.raw.status == 1
     }
 
@@ -166,8 +175,8 @@ impl Target {
             // SAFETY: the resolver owns the pinned dirfd and name is NUL-terminated.
             let fd = unsafe {
                 cbm_config_edit_target_create_temp(
-                    &self.raw,
-                    name.as_ptr(),
+                    self.native(),
+                    ffi_output::c_str(&name),
                     0o600,
                 )
             };
@@ -188,7 +197,7 @@ impl Target {
             let fd = unsafe {
                 libc::openat(
                     self.raw.dirfd,
-                    name.as_ptr(),
+                    ffi_output::c_str(&name),
                     READ_FLAGS | libc::O_CLOEXEC,
                 )
             };
@@ -203,7 +212,10 @@ impl Target {
             if let Ok(name) = basename(path) {
                 // SAFETY: dirfd is live and name is NUL-terminated.
                 unsafe {
-                    cbm_config_edit_target_unlink(&self.raw, name.as_ptr())
+                    cbm_config_edit_target_unlink(
+                        self.native(),
+                        ffi_output::c_str(&name),
+                    )
                 };
             }
         } else {
@@ -220,7 +232,10 @@ impl Target {
             let name = basename(staged)?;
             // SAFETY: dirfd is live and name is NUL-terminated.
             let rc = unsafe {
-                cbm_config_edit_target_commit(&self.raw, name.as_ptr())
+                cbm_config_edit_target_commit(
+                    self.native(),
+                    ffi_output::c_str(&name),
+                )
             };
             return if rc == 0 {
                 Ok(())
@@ -242,7 +257,10 @@ impl Target {
 impl Drop for Target {
     fn drop(&mut self) {
         // SAFETY: raw was initialized by cbm_config_edit_target_open.
-        unsafe { cbm_config_edit_target_close(&mut self.raw) };
+        unsafe {
+            ffi_output::written(&self.raw, 1);
+            cbm_config_edit_target_close(&mut self.raw)
+        };
     }
 }
 

@@ -11,6 +11,8 @@ mod doc_file_links;
 #[cfg(any(feature = "native-engine-abi", test))]
 mod explicit_override;
 #[cfg(feature = "native-engine-abi")]
+mod ffi_output;
+#[cfg(feature = "native-engine-abi")]
 mod pdf_doc_links;
 #[cfg(any(feature = "native-engine-abi", test))]
 mod similarity;
@@ -115,7 +117,15 @@ mod ts_static_imports;
 pub use ts_static_imports::register as mori_register_ts_static_imports;
 
 #[cfg(feature = "native-engine-abi")]
+mod activation_transaction;
+#[cfg(feature = "native-engine-abi")]
+mod config_json_like;
+#[cfg(feature = "native-engine-abi")]
 mod config_text_edit;
+#[cfg(feature = "native-engine-abi")]
+mod config_toml_edit;
+#[cfg(feature = "native-engine-abi")]
+mod config_yaml_edit;
 #[cfg(feature = "native-engine-abi")]
 mod fts_writer;
 #[cfg(feature = "native-engine-abi")]
