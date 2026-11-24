@@ -1495,16 +1495,17 @@ async def create_poll(
                 return f"Invalid close_date format. Use YYYY-MM-DD HH:MM:SS format."
 
         # Create the poll using InputMediaPoll with SendMediaRequest
-        from telethon.tl.types import InputMediaPoll, Poll, PollAnswer, TextWithEntities
+        from telethon.tl.types import InputMediaPoll, InputPollAnswer, Poll, TextWithEntities
         import random
 
         poll = Poll(
             id=random.randint(0, 2**63 - 1),
             question=TextWithEntities(text=question, entities=[]),
             answers=[
-                PollAnswer(text=TextWithEntities(text=option, entities=[]), option=bytes([i]))
-                for i, option in enumerate(options)
+                InputPollAnswer(text=TextWithEntities(text=option, entities=[]))
+                for option in options
             ],
+            hash=0,
             multiple_choice=multiple_choice,
             quiz=quiz_mode,
             public_voters=public_votes,

@@ -349,10 +349,11 @@ class PoolTransport:
         self.capacity_observation: tuple[float, int] | None = None
         self.capacity_scan: asyncio.Task[int] | None = None
 
-    async def identity(self) -> None:
+    async def identity(self) -> bool:
         with raise_flood_waits():
             user = await self.client.get_me()
         validate_identity(user, int(self.account))
+        return bool(getattr(user, "premium", False))
 
     async def dialogs(self, limit: int, *, wait_for_capacity: bool = False):
         method = "messages.getDialogs"
@@ -435,11 +436,12 @@ class PoolTransport:
 
     async def snapshot(self) -> dict[str, Any]:
         try:
-            await self.identity()
+            premium = await self.identity()
             groups = await self.read_capacity()
             return {
                 "accountId": self.account,
                 "groupCount": groups,
+                "telegramPremium": premium,
                 **self.journal.snapshot(now_ms()),
             }
         except BrokerError:

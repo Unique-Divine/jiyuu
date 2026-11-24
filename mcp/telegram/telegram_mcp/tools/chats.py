@@ -379,7 +379,11 @@ async def enable_forum_topics(
             title = sanitize_name(getattr(entity, "title", str(chat_id)))
             return f"Forum topics already enabled for {title}."
 
-        await cl(functions.channels.ToggleForumRequest(channel=entity, enabled=True, tabs=tabs))
+        await cl(
+            functions.channels.ToggleForumRequest(
+                channel=entity, enabled=True, tabs=tabs, sidebar=False
+            )
+        )
         # Keep the resolved entity in sync for callers/tests that reuse it.
         try:
             entity.forum = True
