@@ -4,10 +4,10 @@ use std::ffi::{CString, c_char, c_int};
 use std::ptr::null_mut;
 
 use rusqlite::ffi::{
-    SQLITE_DONE, SQLITE_ERROR, SQLITE_OK, SQLITE_TRANSIENT, sqlite3,
-    sqlite3_bind_int64, sqlite3_bind_text, sqlite3_errcode, sqlite3_errmsg,
-    sqlite3_exec, sqlite3_finalize, sqlite3_free, sqlite3_prepare_v2,
-    sqlite3_step, sqlite3_stmt,
+    SQLITE_DONE, SQLITE_INTERRUPT, SQLITE_OK, SQLITE_ROW, SQLITE_TRANSIENT,
+    sqlite3, sqlite3_bind_int64, sqlite3_bind_text, sqlite3_errcode,
+    sqlite3_errmsg, sqlite3_exec, sqlite3_finalize, sqlite3_free,
+    sqlite3_prepare_v2, sqlite3_step, sqlite3_stmt,
 };
 
 // Mirror the native store result codes. Both pipeline callers distinguish
@@ -91,19 +91,27 @@ unsafe extern "C" fn mori_fts_write(
     // SAFETY: The native entry point lends the live store, its connection, and
     // an optional NUL-terminated project name. The caller owns the transaction.
     unsafe {
-        // Closure repair has always supported a graph without FTS5.
-        if closure_refresh
-            && Statement::prepare(
-                db,
-                c"SELECT rowid FROM nodes_fts LIMIT 0;".as_ptr(),
-            )
-            .is_none()
-        {
-            if sqlite3_errcode(db) == SQLITE_ERROR {
-                return NOT_FOUND;
+        // An absent optional table is distinct from an existing virtual
+        // table whose SQLite constructor fails.
+        if closure_refresh {
+            let catalog = c"SELECT 1 FROM main.sqlite_schema WHERE name = 'nodes_fts' COLLATE NOCASE;";
+            let Some(statement) = Statement::prepare(db, catalog.as_ptr())
+            else {
+                report_error(store, c"fts_catalog".as_ptr(), sqlite3_errmsg(db));
+                return ERROR;
+            };
+            match sqlite3_step(statement.0) {
+                SQLITE_ROW => {}
+                SQLITE_DONE => return NOT_FOUND,
+                _ => {
+                    report_error(
+                        store,
+                        c"fts_catalog".as_ptr(),
+                        sqlite3_errmsg(db),
+                    );
+                    return ERROR;
+                }
             }
-            report_error(store, c"fts_prepare".as_ptr(), sqlite3_errmsg(db));
-            return ERROR;
         }
         let partial = !project.is_null();
         if !partial {
@@ -138,6 +146,9 @@ unsafe extern "C" fn mori_fts_write(
             }
             let sql = insert_sql(partial, body, camel);
             let Some(statement) = Statement::prepare(db, sql.as_ptr()) else {
+                if sqlite3_errcode(db) == SQLITE_INTERRUPT {
+                    return ERROR;
+                }
                 status = NOT_FOUND;
                 continue;
             };
@@ -151,11 +162,15 @@ unsafe extern "C" fn mori_fts_write(
                 );
                 sqlite3_bind_int64(statement.0, 2, after_id);
             }
-            if sqlite3_step(statement.0) == SQLITE_DONE {
+            let step_status = sqlite3_step(statement.0);
+            if step_status == SQLITE_DONE {
                 return OK;
             }
             // Capture the error before SQLite finalizes the statement.
             report_error(store, c"fts_backfill".as_ptr(), sqlite3_errmsg(db));
+            if step_status == SQLITE_INTERRUPT {
+                return ERROR;
+            }
             status = ERROR;
         }
         // Once delete-all succeeded, a malformed schema must fail the stage.

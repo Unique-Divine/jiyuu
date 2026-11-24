@@ -33042,7 +33042,7 @@ TEST(pipeline_delta_patch_preserves_docstrings_for_fts) {
     ASSERT_EQ(cbm_delta_patch(store, proj, gb, max_db_id, NULL, 0), 0);
     cbm_gbuf_free(gb);
     ASSERT_EQ(cbm_store_begin(store), CBM_STORE_OK);
-    ASSERT_EQ(cbm_store_fts_refresh_closure(store), CBM_STORE_OK);
+    ASSERT_EQ(cbm_store_fts_refresh_closure(store, NULL, NULL), CBM_STORE_OK);
     ASSERT_EQ(cbm_store_commit(store), CBM_STORE_OK);
 
 

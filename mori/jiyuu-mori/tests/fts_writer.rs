@@ -1,7 +1,7 @@
 //! Exercise the linked FTS writer on the store's live SQLite connection.
 #![cfg(feature = "c-backend")]
 
-use std::ffi::{CStr, c_char, c_int};
+use std::ffi::{CStr, c_char, c_int, c_void};
 use std::ptr::NonNull;
 
 use jiyuu_mori as _;
@@ -11,6 +11,7 @@ use rusqlite::ffi::sqlite3;
 const STORE_OK: c_int = 0;
 const STORE_ERR: c_int = -1;
 const STORE_NOT_FOUND: c_int = -2;
+const STORE_CANCELLED: c_int = -3;
 
 #[repr(C)]
 struct Store {
@@ -27,7 +28,11 @@ unsafe extern "C" {
         project: *const c_char,
         after_id: i64,
     ) -> c_int;
-    fn cbm_store_fts_refresh_closure(store: *mut Store) -> c_int;
+    fn cbm_store_fts_refresh_closure(
+        store: *mut Store,
+        cancel: Option<unsafe extern "C" fn(*mut c_void) -> bool>,
+        context: *mut c_void,
+    ) -> c_int;
     fn cbm_store_error(store: *mut Store) -> *const c_char;
 }
 
@@ -47,7 +52,13 @@ impl StoreGuard {
 
     fn refresh_closure(&self) -> c_int {
         // SAFETY: The live store is owned by this test.
-        unsafe { cbm_store_fts_refresh_closure(self.0.as_ptr()) }
+        unsafe {
+            cbm_store_fts_refresh_closure(
+                self.0.as_ptr(),
+                None,
+                std::ptr::null_mut(),
+            )
+        }
     }
 
     fn error(&self) -> String {
@@ -115,6 +126,38 @@ fn fts_writer_preserves_legacy_schema_and_failure_statuses() {
     assert_eq!(matches(&db, "body:retention"), 1);
 
     db.execute_batch(
+        "BEGIN;
+         WITH RECURSIVE batch(n) AS (
+             VALUES(10) UNION ALL SELECT n + 1 FROM batch WHERE n < 1009
+         )
+         INSERT INTO nodes (id, project, label, name, qualified_name)
+         SELECT n, 'p', 'Function', 'cancelled', 'p.cancelled' || n FROM batch;",
+    )
+    .unwrap();
+    let mut checks = 0u32;
+    unsafe extern "C" fn cancel_from_progress(context: *mut c_void) -> bool {
+        // SAFETY: The caller holds a counter for the whole synchronous call.
+        let checks = unsafe { &mut *context.cast::<u32>() };
+        *checks += 1;
+        *checks > 1
+    }
+    // SAFETY: Both the store and cancellation counter outlive the call.
+    let status = unsafe {
+        cbm_store_fts_refresh_closure(
+            store.0.as_ptr(),
+            Some(cancel_from_progress),
+            std::ptr::from_mut(&mut checks).cast(),
+        )
+    };
+    assert_eq!(status, STORE_CANCELLED);
+    assert!(checks >= 3, "the SQLite progress callback must have run");
+    if !db.is_autocommit() {
+        db.execute_batch("ROLLBACK").unwrap();
+    }
+    assert_eq!(matches(&db, "name:cancelled"), 0);
+    assert_eq!(matches(&db, "body:retention"), 1);
+
+    db.execute_batch(
         "DROP TABLE nodes_fts;
          CREATE VIRTUAL TABLE nodes_fts USING fts5(
              name, qualified_name, label, file_path, content='');",
@@ -162,6 +205,23 @@ fn fts_writer_preserves_legacy_schema_and_failure_statuses() {
             .get::<_, i64>(0))
             .unwrap(),
         0
+    );
+    db.execute_batch("ROLLBACK").unwrap();
+
+    db.execute_batch(
+        "DROP TABLE nodes_fts;
+         CREATE VIRTUAL TABLE nodes_fts USING fts5(
+             name, qualified_name, label, file_path, content='');
+         DROP TABLE nodes_fts_config;
+         PRAGMA writable_schema=RESET;
+         BEGIN;",
+    )
+    .unwrap();
+    assert_eq!(store.refresh_closure(), STORE_ERR);
+    assert!(
+        store
+            .error()
+            .contains("vtable constructor failed: nodes_fts")
     );
     db.execute_batch("ROLLBACK").unwrap();
 }

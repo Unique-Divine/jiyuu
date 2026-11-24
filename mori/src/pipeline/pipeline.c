@@ -3891,6 +3891,11 @@ static int publish_doc_links(cbm_store_t *store, const cbm_pipeline_generation_t
     return rc;
 }
 
+static bool staged_generation_cancelled(void *opaque) {
+    atomic_int *cancelled = opaque;
+    return cancelled && atomic_load(cancelled);
+}
+
 /* Complete and publish an already-materialized staging database: metadata
  * writes, FTS policy, integrity, seal, then the shared finalize leg. Takes
  * ownership of stage_path (frees it on every path). Closure repair refreshes
@@ -3977,12 +3982,15 @@ static int publish_staged_impl(char *stage_path, const cbm_pipeline_generation_t
     cbm_log_info("publish.timing", "block", "doc_links", "elapsed_ms",
                  itoa_buf((int)elapsed_ms(t_pub)));
     cbm_clock_gettime(CLOCK_MONOTONIC, &t_pub);
+    bool cancelled = false;
     if (ok && full_build) {
         ok = cbm_store_fts_rebuild(store, NULL, 0) == CBM_STORE_OK;
     } else if (ok) {
         ok = cbm_store_begin(store) == CBM_STORE_OK;
         if (ok) {
-            int rc = cbm_store_fts_refresh_closure(store);
+            int rc = cbm_store_fts_refresh_closure(store, staged_generation_cancelled,
+                                                   generation->cancelled);
+            cancelled = rc == CBM_STORE_CANCELLED;
             if (rc == CBM_STORE_NOT_FOUND) {
                 cbm_log_warn("delta.fts_insert_unavailable", "project", generation->project);
             }
@@ -4019,7 +4027,7 @@ static int publish_staged_impl(char *stage_path, const cbm_pipeline_generation_t
     if (!ok) {
         discard_generation_frozen(stage_path, frozen);
         free(stage_path);
-        return CBM_PIPELINE_PERSIST_FAILED;
+        return cancelled ? CBM_PIPELINE_ABORT_PRESERVE_DB : CBM_PIPELINE_PERSIST_FAILED;
     }
     int fin_rc = finalize_staged_impl(stage_path, generation->final_db_path, generation->cancelled,
                                       destination_known_healthy, frozen);
