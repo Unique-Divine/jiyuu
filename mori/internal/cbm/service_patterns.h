@@ -139,15 +139,6 @@ bool cbm_service_pattern_graphql_operation(const char *doc, const char **op_type
 bool cbm_service_pattern_graphql_signature(const char *doc, bool require_keyword, char *out,
                                            size_t out_sz);
 
-/* Install the linked executable's encoder before starting extractor threads.
- * The synchronous sink copies exactly len bytes and adds the trailing NUL.
- * The standalone C reference leaves this encoder unset. */
-typedef bool (*cbm_graphql_signature_sink_t)(void *context, const char *bytes, size_t len);
-typedef bool (*cbm_graphql_document_encoder_t)(const char *doc, bool require_keyword,
-                                              size_t capacity, bool *shorthand,
-                                              cbm_graphql_signature_sink_t sink, void *context);
-void cbm_graphql_set_document_encoder(cbm_graphql_document_encoder_t encode);
-
 /* p at a JS template `${`: returns past its matching `}`, skipping braces
  * inside JS strings, nested templates and comments. */
 const char *cbm_service_pattern_js_interpolation_end(const char *p);

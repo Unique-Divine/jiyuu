@@ -1,4 +1,4 @@
-//! GraphQL callbacks used by the linked executable and native fixture runner.
+//! GraphQL entry points used by the C engine.
 
 use std::ffi::{CStr, c_char, c_int, c_void};
 use std::ptr;
@@ -112,14 +112,6 @@ type RouteWriter =
     unsafe extern "C" fn(*mut c_void, *const GraphqlRouteRow) -> bool;
 
 type SignatureSink = unsafe extern "C" fn(*mut c_void, *const u8, usize) -> bool;
-type DocumentEncoder = unsafe extern "C" fn(
-    *const c_char,
-    bool,
-    usize,
-    *mut bool,
-    SignatureSink,
-    *mut c_void,
-) -> bool;
 
 /// ABI mirror of `cbm_graphql_handler_t` in `pass_cross_repo.h`.
 #[repr(C)]
@@ -130,8 +122,6 @@ struct GraphqlHandler {
 }
 
 unsafe extern "C" {
-    fn cbm_graphql_set_document_encoder(encode: DocumentEncoder);
-
     fn cbm_gqlgen_set_rust_backend(
         matcher: extern "C" fn(glob: *const c_char, path: *const c_char) -> bool,
         planner: RoutePlanner,
@@ -196,7 +186,9 @@ unsafe extern "C" {
     ) -> i64;
 }
 
-unsafe extern "C" fn encode_document(
+/// Encode a NUL-terminated GraphQL document and copy it via a synchronous C sink.
+#[unsafe(no_mangle)]
+unsafe extern "C" fn mori_graphql_encode_document(
     source: *const c_char,
     require_keyword: bool,
     capacity: usize,
@@ -513,7 +505,6 @@ extern "C" fn graphql_find_handler(
 pub unsafe extern "C" fn mori_register_graphql_callbacks() {
     // SAFETY: Callers register at startup before starting any graph work.
     unsafe {
-        cbm_graphql_set_document_encoder(encode_document);
         cbm_gqlgen_set_rust_backend(
             gqlgen_glob_match,
             plan_graphql_route,
