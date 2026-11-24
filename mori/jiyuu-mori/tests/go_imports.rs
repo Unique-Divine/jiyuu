@@ -2,6 +2,7 @@
 #![cfg(all(feature = "c-backend", unix))]
 
 use std::ffi::OsStr;
+use std::fmt::Write as _;
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::DirBuilderExt;
@@ -119,8 +120,7 @@ fn go_import_edges_match_native_with_single_grouped_and_recovered_imports() {
         )
         .unwrap();
     }
-    fs::write(
-        repo.join("main.go"),
+    let mut main = String::from(
         r#"package main
 
 import aliased "example.test/mori/alpha"
@@ -133,8 +133,12 @@ import (
     ""
 )
 "#,
-    )
-    .unwrap();
+    );
+    // A wide root exercises the sibling walk even with few import declarations.
+    for index in 0..2048 {
+        writeln!(main, "const decl{index} = {index}").unwrap();
+    }
+    fs::write(repo.join("main.go"), main).unwrap();
     fs::write(
         repo.join("broken.go"),
         "package main\nimport kept \"example.test/mori/recovered\"\nfunc broken() {\n",
