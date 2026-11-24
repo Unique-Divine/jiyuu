@@ -443,30 +443,32 @@ selects no-op, closure repair, full rebuild, or fatal failure. The
 `pipeline.index_route` worker log records the Rust decision. Use
 `CBM_PROFILE=1` to keep worker logs.
 
-C is the default. It owns the proofs, executes the selected route, and
-handles pass scheduling and publication. `MORI_IMPL_INDEX_MANIFEST`
-selects the exact manifest comparison independently.
+C is the default for route selection. It owns the proofs and executes
+the selected route. `MORI_IMPL_INDEX_MANIFEST` selects the exact
+manifest comparison independently.
 
 ### Full-Build Scheduling
 
-Set `MORI_IMPL_FULL_BUILD_DRIVER=rust` when starting the daemon to opt in
-to Rust scheduling of full builds. The `pipeline.full_build_driver` worker
-log records the selection. Rust schedules the top-level passes and chooses
-parallel extraction when discovery supplies more than 50 files and the
-effective worker count exceeds one. Frozen builds use one worker.
+Rust schedules the top-level full-build passes by default in the linked
+`mori` executable. It chooses parallel extraction when discovery supplies
+more than 50 files and the effective worker count exceeds one. Frozen
+builds use one worker. The `pipeline.full_build_driver` worker log records
+Rust scheduling.
 
-C owns the passes, extraction and resolution, and the final publication
-transaction. The full-build selector also works with
+C executes the passes, including extraction and resolution. Set
+`MORI_IMPL_FULL_BUILD_DRIVER=c` when starting a fresh daemon to restore C
+scheduling. Rust scheduling also works with
 `MORI_IMPL_GRAPH_WRITER=rust` when the linked build supports that writer.
 
 ### Source Publication
 
-Set `MORI_IMPL_SOURCE_PUBLISH=rust` when starting the daemon to opt in to
-Rust decisions after a staged source index. The `pipeline.source_publish`
-worker log records the selection and the staged result. Rust orders the
-checks through the publication lease. C owns the stage, file operations,
-and the destination prepare, rename, and rollback transaction. C remains
-the default.
+After source indexing stages a graph, Rust handles the publication
+decisions by default in the linked `mori` executable. The
+`pipeline.source_publish` worker log records the staged result and Rust
+selection. Rust orders the checks through the publication lease. C owns
+the stage and the file transaction, including destination preparation,
+rename, and rollback. Set `MORI_IMPL_SOURCE_PUBLISH=c` when starting a
+fresh daemon to restore C publication decisions.
 
 ### Sharing a Graph With a Team
 
