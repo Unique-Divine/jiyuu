@@ -300,27 +300,40 @@ void cbm_pipeline_importance_append_prop(cbm_gbuf_node_t *node, double score) {
  *
  * SINGLE DEFINITION, deliberately. There are two routes that score nodes —
  * the in-memory gbuf pass (full index, legacy-partial incremental) and the
- * SQL-level recompute over the staging store (closure-delta incremental) —
- * and they gather their inputs very differently. Only the GATHERING differs;
- * the rule itself lives here alone, so the two routes cannot drift apart in
- * what a score means. The equivalence test in tests/test_importance.c guards
- * the remaining freedom: that both gatherings produce the same inputs for the
- * same graph. */
+ * SQL-level recompute over the staging store (closure-delta incremental).
+ * Both use this entry point. The linked binary registers the Rust scorer,
+ * while the standalone C build keeps the reference rule. The equivalence
+ * test in tests/test_importance.c checks that both gathering routes supply
+ * the same inputs for the same graph. */
+static cbm_importance_scorer_fn importance_scorer;
+
+void cbm_pipeline_set_importance_scorer(cbm_importance_scorer_fn scorer) {
+    importance_scorer = scorer;
+}
+
 double cbm_pipeline_importance_score(const cbm_importance_inputs_t *in) {
     if (!in) {
         return 0.0;
     }
+    const bool private_name = name_is_private(in->name);
+    const bool distinctive_name = name_is_distinctive(in->name);
+    const bool test_scaffolding = cbm_is_test_path(in->file_path) || in->tests_target;
+    if (importance_scorer) {
+        return importance_scorer(in->num_refs, in->name_distinct_files, private_name,
+                                 distinctive_name, test_scaffolding);
+    }
+
     double score = sqrt((double)(in->num_refs > 0 ? in->num_refs : 0));
-    if (name_is_private(in->name)) {
+    if (private_name) {
         score *= CBM_IMPORTANCE_PRIV_MUL;
     }
     if (in->name_distinct_files >= CBM_IMPORTANCE_GENERIC_MIN_FILES) {
         score *= CBM_IMPORTANCE_GENERIC_MUL;
     }
-    if (name_is_distinctive(in->name)) {
+    if (distinctive_name) {
         score *= CBM_IMPORTANCE_DISTINCT_MUL;
     }
-    if (cbm_is_test_path(in->file_path) || in->tests_target) {
+    if (test_scaffolding) {
         score *= CBM_IMPORTANCE_TEST_MUL;
     }
     return score;
@@ -429,7 +442,8 @@ void cbm_pipeline_pass_importance(cbm_pipeline_ctx_t *ctx) {
     cbm_ht_free(ix.paths);
     cbm_ht_free(ix.counts);
     atomic_fetch_add_explicit(&g_importance_nodes, updated, memory_order_relaxed);
-    cbm_log_info("pass.importance", "symbols", itoa_imp(updated));
+    cbm_log_info("pass.importance", "symbols", itoa_imp(updated), "implementation",
+                 importance_scorer ? "rust" : "c");
 }
 
 /* ── Store-level recompute (closure-delta incremental) ────────────────
@@ -448,7 +462,8 @@ void cbm_pipeline_pass_importance(cbm_pipeline_ctx_t *ctx) {
  * WHY IT CANNOT DRIFT FROM THE IN-MEMORY PASS. The scoring rule and the JSON
  * write-back are not reimplemented here. They are registered as SQLite
  * user-defined functions that call cbm_pipeline_importance_score() and
- * cbm_pipeline_importance_set_prop() — the same C code the gbuf pass runs.
+ * cbm_pipeline_importance_set_prop() — the same scoring and write-back entry
+ * points the gbuf pass uses.
  * SQL supplies only the three aggregates (in-degree, TESTS presence, distinct
  * files per name), each one indexed GROUP BY. What remains free is the
  * GATHERING, and the full-vs-incremental equivalence test guards that.
@@ -551,6 +566,7 @@ int cbm_pipeline_importance_recompute_store(cbm_store_t *store, const char *proj
     }
     uint64_t rows = (uint64_t)(changed > 0 ? changed : 0);
     atomic_fetch_add_explicit(&g_importance_store_rows, rows, memory_order_relaxed);
-    cbm_log_info("pass.importance_store", "symbols", itoa_imp(rows));
+    cbm_log_info("pass.importance_store", "symbols", itoa_imp(rows), "implementation",
+                 importance_scorer ? "rust" : "c");
     return 0;
 }

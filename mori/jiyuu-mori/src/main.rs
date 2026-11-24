@@ -43,6 +43,15 @@ mod index_route;
 #[cfg(any(feature = "c-backend", test))]
 mod full_build_driver;
 
+#[cfg(any(feature = "c-backend", test))]
+mod importance;
+
+#[cfg(any(feature = "c-backend", test))]
+mod repair_recovery;
+
+#[cfg(any(feature = "c-backend", test))]
+mod named_watch;
+
 #[cfg(all(feature = "c-backend", not(test)))]
 mod snippet_window;
 
