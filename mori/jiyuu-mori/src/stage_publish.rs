@@ -39,15 +39,12 @@ unsafe extern "C" fn cbm_rust_stage_write(
             && (doc_candidates_in_place || (ops.doc_candidates)(run))
             && (ops.format)(run);
         (ops.mark)(run, c"writes".as_ptr());
-        // Preserve the attempted coverage and full FTS writes even if an
-        // earlier write failed. The caller discards the stage on any failure.
+        // Preserve the attempted coverage write even if an earlier write failed.
         ok = (ops.coverage)(run) && ok;
         (ops.mark)(run, c"coverage_replace".as_ptr());
         ok = ok && (ops.doc_links)(run);
         (ops.mark)(run, c"doc_links".as_ptr());
-        if full_build || ok {
-            ok = (ops.fts)(run, full_build) && ok;
-        }
+        ok = ok && (ops.fts)(run, full_build);
         (ops.mark)(run, c"fts".as_ptr());
 
         ok = ok && (ops.advance)(run);
@@ -248,17 +245,10 @@ mod tests {
     #[test]
     fn any_write_failure_prevents_success() {
         let cases: &[(&str, &[&str])] = &[
-            ("hashes", &["hashes", "coverage", "fts_full"]),
+            ("hashes", &["hashes", "coverage"]),
             (
                 "coverage",
-                &[
-                    "hashes",
-                    "surfaces",
-                    "doc_candidates",
-                    "format",
-                    "coverage",
-                    "fts_full",
-                ],
+                &["hashes", "surfaces", "doc_candidates", "format", "coverage"],
             ),
             (
                 "fts_full",
@@ -291,10 +281,10 @@ mod tests {
             assert_eq!(&trace.calls, expected);
         }
         for (fail_at, last_call) in [
-            ("surfaces", "fts_full"),
-            ("doc_candidates", "fts_full"),
-            ("format", "fts_full"),
-            ("doc_links", "fts_full"),
+            ("surfaces", "coverage"),
+            ("doc_candidates", "coverage"),
+            ("format", "coverage"),
+            ("doc_links", "doc_links"),
             ("advance", "advance"),
             ("integrity", "integrity"),
             ("seal", "seal"),
