@@ -6,6 +6,7 @@
 #include "test_helpers.h"
 
 #include "foundation/compat.h"
+#include "foundation/compat_thread.h"
 #include "foundation/mem_core.h"
 #include "pipeline/pass_cross_repo.h"
 #include "pipeline/pipeline.h"
@@ -1997,6 +1998,78 @@ TEST(cross_repo_saved_repair_rolls_back_client_and_keeps_legacy_caller) {
     PASS();
 }
 
+typedef struct {
+    atomic_bool held;
+    atomic_bool release;
+} cross_repo_first_access_t;
+
+static void *cross_repo_hold_first_access(void *opaque) {
+    cross_repo_first_access_t *lock = opaque;
+    sqlite3_mutex *first_access = sqlite3_mutex_alloc(SQLITE_MUTEX_STATIC_APP1);
+    sqlite3_mutex_enter(first_access);
+    atomic_store(&lock->held, true);
+    while (!atomic_load(&lock->release)) {
+        cbm_usleep(1000);
+    }
+    sqlite3_mutex_leave(first_access);
+    return NULL;
+}
+
+TEST(cross_repo_pending_snapshot_survives_first_access_contention) {
+    cross_repo_fixture_t fixture;
+    char live[512], stage[512];
+    bool seeded = cross_repo_fixture_begin(&fixture) &&
+                  cross_repo_seed_http_pair(&fixture, "client", "api", "/known", "a") &&
+                  cross_repo_project_path(&fixture, "client", live, sizeof(live)) &&
+                  cross_repo_project_path(&fixture, "_stage", stage, sizeof(stage));
+    if (!seeded) {
+        cross_repo_fixture_end(&fixture);
+        FAIL("cannot seed pending snapshot fixture");
+    }
+
+    const char *target = "api";
+    cbm_cross_repo_result_t linked = cbm_cross_repo_match("client", &target, 1);
+    bool staged = !linked.failed && cbm_store_backup_path(live, stage) == CBM_STORE_OK &&
+                  cbm_cross_repo_relink_stage(live, stage, "client", NULL) == CBM_STORE_OK &&
+                  cbm_store_backup_path(stage, live) == CBM_STORE_OK;
+    cbm_cross_repo_result_free(&linked);
+    cbm_store_t *source = staged ? cbm_store_open_path_query(live) : NULL;
+    cbm_store_read_scope_t *scope = NULL;
+    bool pinned = cbm_store_read_scope_open(source, NULL, NULL, &scope) == CBM_STORE_OK;
+    bool pending = false;
+    bool reopened = false;
+    bool checked = false;
+    cross_repo_first_access_t lock = {0};
+    cbm_thread_t thread;
+    bool started =
+        pinned && cbm_thread_create(&thread, 0, cross_repo_hold_first_access, &lock) == 0;
+    if (started) {
+        uint64_t deadline = cbm_now_ms() + 5000;
+        while (!atomic_load(&lock.held) && cbm_now_ms() < deadline) {
+            cbm_usleep(1000);
+        }
+        if (atomic_load(&lock.held)) {
+            reopened = cbm_cross_repo_reverse_pending("client");
+            checked = cbm_cross_repo_read_reverse_pending(source, "client", &pending);
+        }
+        atomic_store(&lock.release, true);
+        (void)cbm_thread_join(&thread);
+    }
+    cbm_store_read_scope_close(scope);
+    cbm_store_close(source);
+    bool repaired = staged && cbm_cross_repo_reconcile_published("client", NULL) &&
+                    !cbm_cross_repo_reverse_pending("client");
+    cross_repo_fixture_end(&fixture);
+
+    ASSERT_TRUE(pinned);
+    ASSERT_TRUE(started);
+    ASSERT_FALSE(reopened);
+    ASSERT_TRUE(checked);
+    ASSERT_TRUE(pending);
+    ASSERT_TRUE(repaired);
+    PASS();
+}
+
 TEST(cross_repo_saved_repair_defers_on_busy_provider_read) {
     cross_repo_fixture_t fixture;
     char provider_path[512];
@@ -2481,6 +2554,7 @@ SUITE(cross_repo) {
     RUN_TEST(cross_repo_repair_defers_on_busy_open_and_write);
     RUN_TEST(cross_repo_saved_repair_rolls_back_client_and_keeps_legacy_caller);
     RUN_TEST(cross_repo_saved_repair_defers_on_busy_provider_read);
+    RUN_TEST(cross_repo_pending_snapshot_survives_first_access_contention);
     RUN_TEST(cross_repo_saved_repair_preserves_ambiguous_legacy_channel);
     RUN_TEST(cross_repo_channel_repair_preserves_other_emitters_and_forward_link);
     RUN_TEST(cross_repo_relink_removes_provably_reverse_legacy_channel);
