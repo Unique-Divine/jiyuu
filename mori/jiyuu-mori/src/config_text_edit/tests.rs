@@ -1,41 +1,8 @@
+use super::test_hooks::{Phase, hook};
 use super::*;
-use std::cell::RefCell;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum Phase {
-    Precommit,
-    Prepublish,
-    TempClosed,
-}
-
-type Hook = (Phase, Box<dyn FnOnce(&Path)>);
-
-thread_local! {
-    static HOOK: RefCell<Option<Hook>> = const { RefCell::new(None) };
-}
-
-fn hook(phase: Phase, action: impl FnOnce(&Path) + 'static) {
-    HOOK.with(|slot| {
-        assert!(slot.replace(Some((phase, Box::new(action)))).is_none())
-    });
-}
-
-pub(super) fn run_hook(phase: Phase, path: &Path) {
-    let action = HOOK.with(|slot| {
-        let mut slot = slot.borrow_mut();
-        if slot.as_ref().is_some_and(|(at, _)| *at == phase) {
-            slot.take().map(|(_, action)| action)
-        } else {
-            None
-        }
-    });
-    if let Some(action) = action {
-        action(path);
-    }
-}
 
 struct Fixture {
     dir: PathBuf,

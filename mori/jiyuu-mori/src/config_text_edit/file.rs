@@ -116,8 +116,11 @@ impl<'a> Target<'a> {
             }
         }
         platform::close(file)?;
-        #[cfg(test)]
-        super::tests::run_hook(super::tests::Phase::TempClosed, &temp.path);
+        #[cfg(any(test, feature = "native-engine-fixtures"))]
+        super::test_hooks::run_hook(
+            super::test_hooks::Phase::TempClosed,
+            &temp.path,
+        );
         let reopened = temp.read()?;
         if !reopened
             .metadata
@@ -127,11 +130,17 @@ impl<'a> Target<'a> {
         {
             return Err(invalid("staged replacement changed after close"));
         }
-        #[cfg(test)]
-        super::tests::run_hook(super::tests::Phase::Precommit, self.requested);
+        #[cfg(any(test, feature = "native-engine-fixtures"))]
+        super::test_hooks::run_hook(
+            super::test_hooks::Phase::Precommit,
+            self.requested,
+        );
         self.revalidate(old)?;
-        #[cfg(test)]
-        super::tests::run_hook(super::tests::Phase::Prepublish, self.requested);
+        #[cfg(any(test, feature = "native-engine-fixtures"))]
+        super::test_hooks::run_hook(
+            super::test_hooks::Phase::Prepublish,
+            self.requested,
+        );
         self.revalidate(old)?;
         if temp.read()? != reopened {
             return Err(invalid(
@@ -144,11 +153,17 @@ impl<'a> Target<'a> {
     }
 
     pub(super) fn delete(&self, old: &Snapshot) -> io::Result<()> {
-        #[cfg(test)]
-        super::tests::run_hook(super::tests::Phase::Precommit, self.requested);
+        #[cfg(any(test, feature = "native-engine-fixtures"))]
+        super::test_hooks::run_hook(
+            super::test_hooks::Phase::Precommit,
+            self.requested,
+        );
         self.revalidate(old)?;
-        #[cfg(test)]
-        super::tests::run_hook(super::tests::Phase::Prepublish, self.requested);
+        #[cfg(any(test, feature = "native-engine-fixtures"))]
+        super::test_hooks::run_hook(
+            super::test_hooks::Phase::Prepublish,
+            self.requested,
+        );
         self.revalidate(old)?;
         // Legacy exact deletion removes the requested entry. For an opted-in
         // symlink, its referent provides the ownership proof and stays in place.

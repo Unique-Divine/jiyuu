@@ -4,7 +4,9 @@ use std::ffi::{CStr, c_char, c_int, c_uint};
 use std::io;
 use std::path::Path;
 
-use super::{MAX_BYTES, Markers, Ownership, Write, invalid};
+use super::{MAX_BYTES, Markers, Ownership, Write, invalid, single_line};
+
+const MAX_PATH_BYTES: usize = 32768;
 
 // SAFETY: the caller supplies a readable NUL-terminated string.
 unsafe fn bytes<'a>(value: *const c_char) -> io::Result<&'a [u8]> {
@@ -16,9 +18,7 @@ unsafe fn bytes<'a>(value: *const c_char) -> io::Result<&'a [u8]> {
 
 unsafe fn path<'a>(value: *const c_char) -> io::Result<&'a Path> {
     let value = unsafe { bytes(value) }?;
-    Ok(Path::new(
-        std::str::from_utf8(value).map_err(io::Error::other)?,
-    ))
+    Ok(Path::new(single_line(value, MAX_PATH_BYTES)?))
 }
 
 unsafe fn markers<'a>(
