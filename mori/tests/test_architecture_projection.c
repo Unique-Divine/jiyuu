@@ -202,6 +202,39 @@ TEST(projection_cancellation_deadline_and_store_reuse) {
     PASS();
 }
 
+static bool projection_cancel_after_start(void *context) {
+    int *polls = context;
+    return ++*polls > 1;
+}
+
+TEST(projection_borrows_caller_transaction) {
+    cbm_store_t *store = projection_store();
+    ASSERT_NOT_NULL(store);
+    sqlite3 *db = cbm_store_get_db(store);
+    ASSERT_EQ(sqlite3_exec(db, "BEGIN", NULL, NULL, NULL), SQLITE_OK);
+    ASSERT_GT(projection_node(store, "Function", "projection.a", "a.c", true), 0);
+
+    char *json = NULL;
+    int polls = 0;
+    cbm_architecture_projection_options_t opts = {
+        .cancel = projection_cancel_after_start, .cancel_context = &polls};
+    ASSERT_EQ(cbm_store_architecture_projection(store, "projection", &opts, &json),
+              CBM_STORE_CANCELLED);
+    ASSERT_NULL(json);
+    ASSERT_EQ(sqlite3_get_autocommit(db), 0);
+    ASSERT_EQ(cbm_store_architecture_projection(store, "projection", NULL, &json), CBM_STORE_OK);
+    yyjson_doc *doc = yyjson_read(json, strlen(json), 0);
+    ASSERT_NOT_NULL(doc);
+    ASSERT_EQ(yyjson_get_int(yyjson_obj_get(projection_field(doc, "totals"), "nodes")), 1);
+    yyjson_doc_free(doc);
+    cbm_free(CBM_MEM_CLASS_OTHER, json);
+    ASSERT_EQ(sqlite3_get_autocommit(db), 0);
+    ASSERT_EQ(sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL), SQLITE_OK);
+    ASSERT_EQ(cbm_store_count_nodes(store, "projection"), 0);
+    cbm_store_close(store);
+    PASS();
+}
+
 TEST(projection_display_caps_preserve_total_accounting) {
     cbm_store_t *store = projection_store();
     ASSERT_NOT_NULL(store);
@@ -1452,6 +1485,7 @@ SUITE(architecture_projection) {
     RUN_TEST(projection_reports_dependency_cycles_without_fabricated_execution);
     RUN_TEST(projection_graph_limits_abstain_instead_of_sampling);
     RUN_TEST(projection_cancellation_deadline_and_store_reuse);
+    RUN_TEST(projection_borrows_caller_transaction);
     RUN_TEST(projection_display_caps_preserve_total_accounting);
     RUN_TEST(projection_unknown_project_and_empty_project);
     RUN_TEST(projection_paths_depth_cap_is_explicit);
