@@ -5,6 +5,7 @@
 #include "tree_sitter/api.h" // TSNode, ts_node_*
 #include "foundation/constants.h"
 #include "foundation/compat.h" /* CBM_TLS */
+#include "foundation/log.h"
 #include "extract_node_stack.h"
 #include <stdint.h> // uint32_t
 #include <limits.h>
@@ -138,6 +139,34 @@ static const char *python_join_from_import(CBMArena *a, const char *module, cons
 // --- Go imports ---
 // import_declaration -> import_spec_list -> import_spec -> (name, path)
 
+typedef void (*CBMGoImportSink)(void *context, const char *path, size_t path_len,
+                                const char *name, size_t name_len);
+typedef void (*CBMGoImportExtractor)(TSNode root, const char *source, size_t source_len,
+                                     void *context, CBMGoImportSink sink);
+
+static CBMGoImportExtractor go_import_extractor;
+
+void cbm_go_set_import_extractor(CBMGoImportExtractor extractor);
+void cbm_go_set_import_extractor(CBMGoImportExtractor extractor) {
+    go_import_extractor = extractor;
+}
+
+/* The extractor lends both byte slices for this call. Store them in the
+ * result arena, which outlives the borrowed Tree-sitter tree and source. */
+static void store_go_import(void *context, const char *path, size_t path_len,
+                            const char *name, size_t name_len) {
+    CBMExtractCtx *ctx = context;
+    const char *module_path = cbm_arena_strndup(ctx->arena, path, path_len);
+    if (!module_path) {
+        return;
+    }
+    CBMImport import = {
+        .local_name = cbm_arena_strndup(ctx->arena, name, name_len),
+        .module_path = module_path,
+    };
+    cbm_imports_push(&ctx->result->imports, ctx->arena, import);
+}
+
 // Parse a single Go import_spec node.
 static void parse_go_import_spec(CBMExtractCtx *ctx, TSNode spec) {
     CBMArena *a = ctx->arena;
@@ -172,6 +201,13 @@ static void parse_go_import_spec(CBMExtractCtx *ctx, TSNode spec) {
 }
 
 static void parse_go_imports(CBMExtractCtx *ctx) {
+    if (go_import_extractor && ctx->source && ctx->source_len >= 0) {
+        go_import_extractor(ctx->root, ctx->source, (size_t)ctx->source_len, ctx,
+                            store_go_import);
+        cbm_log_debug("extract.go_imports", "implementation", "rust");
+        return;
+    }
+
     TSTreeCursor cursor = ts_tree_cursor_new(ctx->root);
     if (!ts_tree_cursor_goto_first_child(&cursor)) {
         ts_tree_cursor_delete(&cursor);

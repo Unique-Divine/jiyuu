@@ -57,6 +57,12 @@ mod graphql_extract;
 pub use graphql_extract::register as mori_register_graphql_extractor;
 
 #[cfg(feature = "c-backend")]
+mod go_imports;
+
+#[cfg(feature = "c-backend")]
+pub use go_imports::register as mori_register_go_import_extractor;
+
+#[cfg(feature = "c-backend")]
 mod native_tree;
 
 #[cfg(feature = "c-backend")]
