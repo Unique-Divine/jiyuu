@@ -1466,7 +1466,8 @@ LIBMORI_A = $(BUILD_DIR)/libmori-c.a
 
 $(LIBMORI_DIR)/%.o: %.c $(BUILD_DIR)/.build-config $(PROJECT_HDRS) | $(BUILD_DIR)
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS_PROD) $(LIBMORI_INDEX_DRIVER_FLAGS) -c -o $@ $<
+	$(CC) $(CFLAGS_PROD) $(LIBMORI_INDEX_DRIVER_FLAGS) \
+		$(if $(filter src/daemon/application.c,$<),-DCBM_WITH_RUST_JOB_RECOVERY=1) -c -o $@ $<
 
 $(LIBMORI_MAIN_OBJ): $(MAIN_SRC) $(BUILD_DIR)/.build-config $(PROJECT_HDRS) | $(BUILD_DIR)
 	@mkdir -p $(dir $@)
