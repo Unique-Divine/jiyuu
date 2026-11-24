@@ -4520,15 +4520,132 @@ static void application_clear_named_watch_locked(cbm_daemon_application_t *appli
     }
 }
 
+typedef struct {
+    cbm_daemon_application_t *application;
+    cbm_daemon_named_watch_t *entries;
+    size_t count;
+    bool *pending;
+} application_named_watch_run_t;
+
+typedef struct {
+    bool present;
+    bool deferred;
+    cbm_daemon_application_watch_t *added;
+} application_named_watch_stage_t;
+
 static bool application_named_watch_list_contains(const cbm_daemon_named_watch_t *entries,
-                                                  const bool *deferred, size_t count,
-                                                  const char *project) {
+                                                  const application_named_watch_stage_t *stage,
+                                                  size_t count, const char *project) {
     for (size_t i = 0; i < count; i++) {
-        if (!deferred[i] && strcmp(entries[i].project, project) == 0) {
+        if (!stage[i].deferred && strcmp(entries[i].project, project) == 0) {
             return true;
         }
     }
     return false;
+}
+
+static bool application_named_watch_check(application_named_watch_run_t *run, size_t at,
+                                          bool *present, bool *was_pending) {
+    *was_pending = run->entries[at].pending;
+    return application_named_watch_valid(run->application, run->entries, at, present);
+}
+
+static bool application_named_watch_add(application_named_watch_run_t *run, size_t at,
+                                        application_named_watch_stage_t *entry) {
+    cbm_daemon_application_t *application = run->application;
+    const cbm_daemon_named_watch_t *requested = &run->entries[at];
+    cbm_daemon_application_watch_t *watch =
+        application_find_watch_locked(application, requested->project);
+    if (watch && watch->named) {
+        return true;
+    }
+    if (!entry->present && !watch) {
+        entry->deferred = true;
+        return true;
+    }
+    if (watch) {
+        if (!cbm_watcher_set_named(application->watcher, watch->project, true)) {
+            return false;
+        }
+        watch->named = true;
+    } else {
+        watch = application_create_watch_locked(application, requested->project, requested->root,
+                                                NULL, true);
+        if (!watch) {
+            return false;
+        }
+    }
+    entry->added = watch;
+    return true;
+}
+
+static void application_named_watch_undo(application_named_watch_run_t *run,
+                                         cbm_daemon_application_watch_t *added) {
+    application_clear_named_watch_locked(run->application, added);
+}
+
+static void application_named_watch_commit(application_named_watch_run_t *run,
+                                           const application_named_watch_stage_t *stage) {
+    cbm_daemon_application_t *application = run->application;
+    for (cbm_daemon_application_watch_t *watch = application->watches; watch;) {
+        cbm_daemon_application_watch_t *next = watch->next;
+        if (!application_named_watch_list_contains(run->entries, stage, run->count, watch->project)) {
+            application_clear_named_watch_locked(application, watch);
+        }
+        watch = next;
+    }
+    for (size_t i = 0; i < run->count; i++) {
+        run->entries[i].pending = stage[i].deferred;
+        if (run->pending && stage[i].deferred) {
+            *run->pending = true;
+        }
+    }
+}
+
+/* Keep in sync with NamedWatchStage and NamedWatchOps in the Rust binary. */
+typedef struct {
+    bool (*check)(application_named_watch_run_t *run, size_t at, bool *present, bool *was_pending);
+    bool (*add)(application_named_watch_run_t *run, size_t at, application_named_watch_stage_t *entry);
+    void (*undo)(application_named_watch_run_t *run, cbm_daemon_application_watch_t *added);
+    void (*commit)(application_named_watch_run_t *run, const application_named_watch_stage_t *stage);
+} application_named_watch_ops_t;
+
+typedef bool (*application_named_watch_driver_t)(application_named_watch_run_t *run,
+                                                 const application_named_watch_ops_t *ops,
+                                                 application_named_watch_stage_t *stage,
+                                                 size_t count);
+
+static application_named_watch_driver_t application_external_named_watch;
+
+void cbm_daemon_application_set_named_watch_driver(application_named_watch_driver_t driver);
+void cbm_daemon_application_set_named_watch_driver(application_named_watch_driver_t driver) {
+    application_external_named_watch = driver;
+}
+
+static bool application_run_named_watch_c(application_named_watch_run_t *run,
+                                          application_named_watch_stage_t *stage) {
+    for (size_t i = 0; i < run->count; i++) {
+        bool was_pending;
+        if (!application_named_watch_check(run, i, &stage[i].present, &was_pending)) {
+            if (!was_pending) {
+                return false;
+            }
+            stage[i].deferred = true;
+        }
+    }
+    for (size_t i = 0; i < run->count; i++) {
+        if (!stage[i].deferred && !application_named_watch_add(run, i, &stage[i])) {
+            while (i) {
+                cbm_daemon_application_watch_t *added = stage[--i].added;
+                if (added) {
+                    application_named_watch_undo(run, added);
+                }
+            }
+            return false;
+        }
+    }
+    application_named_watch_commit(run, stage);
+    return true;
 }
 
 bool cbm_daemon_application_reconcile_named_watches(cbm_daemon_application_t *application,
@@ -4550,67 +4667,24 @@ bool cbm_daemon_application_reconcile_named_watches(cbm_daemon_application_t *ap
         cbm_mutex_unlock(&application->mutex);
         return count == 0;
     }
-    bool present[CBM_DAEMON_NAMED_WATCH_LIMIT];
-    bool deferred[CBM_DAEMON_NAMED_WATCH_LIMIT] = {0};
-    for (size_t i = 0; i < count; i++) {
-        if (!application_named_watch_valid(application, entries, i, &present[i])) {
-            if (!entries[i].pending) {
-                cbm_mutex_unlock(&application->mutex);
-                return false;
-            }
-            deferred[i] = true;
-        }
-    }
 
-    cbm_daemon_application_watch_t *added[CBM_DAEMON_NAMED_WATCH_LIMIT];
-    size_t added_count = 0;
-    for (size_t i = 0; i < count; i++) {
-        if (deferred[i]) {
-            continue;
-        }
-        cbm_daemon_application_watch_t *watch =
-            application_find_watch_locked(application, entries[i].project);
-        if (watch && watch->named) {
-            continue;
-        }
-        if (!present[i] && !watch) {
-            deferred[i] = true;
-            continue;
-        }
-        if (watch) {
-            if (cbm_watcher_set_named(application->watcher, watch->project, true)) {
-                watch->named = true;
-            } else {
-                watch = NULL;
-            }
-        } else {
-            watch = application_create_watch_locked(application, entries[i].project,
-                                                    entries[i].root, NULL, true);
-        }
-        if (!watch) {
-            while (added_count) {
-                application_clear_named_watch_locked(application, added[--added_count]);
-            }
-            cbm_mutex_unlock(&application->mutex);
-            return false;
-        }
-        added[added_count++] = watch;
-    }
-    for (cbm_daemon_application_watch_t *watch = application->watches; watch;) {
-        cbm_daemon_application_watch_t *next = watch->next;
-        if (!application_named_watch_list_contains(entries, deferred, count, watch->project)) {
-            application_clear_named_watch_locked(application, watch);
-        }
-        watch = next;
-    }
-    for (size_t i = 0; i < count; i++) {
-        entries[i].pending = deferred[i];
-        if (pending && deferred[i]) {
-            *pending = true;
-        }
-    }
+    application_named_watch_run_t run = {
+        .application = application, .entries = entries, .count = count, .pending = pending,
+    };
+    application_named_watch_stage_t stage[CBM_DAEMON_NAMED_WATCH_LIMIT] = {0};
+    static const application_named_watch_ops_t ops = {
+        .check = application_named_watch_check,
+        .add = application_named_watch_add,
+        .undo = application_named_watch_undo,
+        .commit = application_named_watch_commit,
+    };
+    cbm_log_debug("daemon.named_watch.reconcile", "implementation",
+                  application_external_named_watch ? "rust" : "c");
+    bool accepted = application_external_named_watch
+                        ? application_external_named_watch(&run, &ops, stage, count)
+                        : application_run_named_watch_c(&run, stage);
     cbm_mutex_unlock(&application->mutex);
-    return true;
+    return accepted;
 }
 
 bool cbm_daemon_application_named_watches_match(cbm_daemon_application_t *application,

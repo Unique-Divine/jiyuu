@@ -23,6 +23,7 @@ struct Fixture {
     root: PathBuf,
     cli_repair_opt_in: bool,
     recovery_impl: Option<&'static str>,
+    named_watch_impl: Option<&'static str>,
 }
 
 impl Fixture {
@@ -39,6 +40,7 @@ impl Fixture {
             root,
             cli_repair_opt_in: false,
             recovery_impl: None,
+            named_watch_impl: None,
         };
         for dir in ["cache", "rt"] {
             builder
@@ -117,6 +119,11 @@ impl Fixture {
         }
         if let Some(selector) = selector {
             command.env(selector, "1");
+        }
+        if let Some(implementation) = self.named_watch_impl {
+            command
+                .env("MORI_IMPL_NAMED_WATCH", implementation)
+                .env("CBM_LOG_LEVEL", "debug");
         }
         if let Some(project) = watch_project {
             let watch = self.root.join("watch.json");
@@ -329,7 +336,8 @@ fn names(items: &[&str]) -> Vec<String> {
 
 #[test]
 fn published_provider_repair_preserves_other_links_without_client_sources() {
-    let fixture = Fixture::new();
+    let mut fixture = Fixture::new();
+    fixture.named_watch_impl = Some("rust");
     fixture.client(CLIENT, &["first", "second"]);
     fixture.write(
         CLIENT,
@@ -342,6 +350,22 @@ fn published_provider_repair_preserves_other_links_without_client_sources() {
     fixture.client(UNRELATED, &["second"]);
 
     fixture.start_daemon(Some("MORI_PROVIDER_REPAIR"), Some(FIRST));
+    fixture
+        .wait_for_log(&["daemon.named_watch.reconcile", "implementation=rust"]);
+    fixture.wait_for_log(&["daemon.named_watch.applied"]);
+    // Reject a duplicate snapshot while keeping the previously accepted watch.
+    let repeated = json!({"project": FIRST, "root": fixture.repo(FIRST)});
+    fs::write(
+        fixture.root.join("next-watch.json"),
+        json!([repeated, repeated]).to_string(),
+    )
+    .unwrap();
+    fs::rename(
+        fixture.root.join("next-watch.json"),
+        fixture.root.join("watch.json"),
+    )
+    .unwrap();
+    fixture.wait_for_log(&["daemon.named_watch.apply_pending"]);
     for project in [CLIENT, SECOND, UNRELATED] {
         fixture.publish(project);
     }

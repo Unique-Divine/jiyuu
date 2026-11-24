@@ -468,6 +468,14 @@ checks through the publication lease. C owns the stage, file operations,
 and the destination prepare, rename, and rollback transaction. C remains
 the default.
 
+### Named Watch Reconciliation
+
+Set `MORI_IMPL_NAMED_WATCH=rust` when starting a permanent daemon to select
+the Rust reconciler for named watch snapshots. It validates the complete
+snapshot before applying it and rolls back additions if registration fails.
+The debug log event `daemon.named_watch.reconcile` identifies the backend.
+C remains the default.
+
 ### Provider Repair Recovery
 
 On a permanent daemon with provider repair enabled, set

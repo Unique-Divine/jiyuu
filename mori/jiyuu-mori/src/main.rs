@@ -47,6 +47,9 @@ mod full_build_driver;
 mod repair_recovery;
 
 #[cfg(all(feature = "c-backend", not(test)))]
+mod named_watch;
+
+#[cfg(all(feature = "c-backend", not(test)))]
 mod snippet_window;
 
 #[cfg(any(feature = "c-backend", test))]
