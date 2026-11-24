@@ -52,7 +52,8 @@ class RecordingClient:
 
 
 @pytest.mark.asyncio
-async def test_enable_forum_topics_sends_toggle_forum_request(monkeypatch):
+@pytest.mark.parametrize("tabs", [True, False])
+async def test_enable_forum_topics_sends_toggle_forum_request(monkeypatch, tabs):
     entity = _supergroup(forum=False)
     client = RecordingClient()
 
@@ -62,7 +63,7 @@ async def test_enable_forum_topics_sends_toggle_forum_request(monkeypatch):
     monkeypatch.setattr(chats, "get_client", lambda account=None: client)
     monkeypatch.setattr(chats, "resolve_entity", fake_resolve)
 
-    result = await chats.enable_forum_topics(chat_id=12345)
+    result = await chats.enable_forum_topics(chat_id=12345, tabs=tabs)
 
     assert result == "Forum topics enabled for Hermes Topics."
     assert len(client.requests) == 1
@@ -70,7 +71,8 @@ async def test_enable_forum_topics_sends_toggle_forum_request(monkeypatch):
     assert isinstance(request, functions.channels.ToggleForumRequest)
     assert request.channel is entity
     assert request.enabled is True
-    assert request.tabs is True
+    assert request.tabs is tabs
+    assert request.sidebar is False
     assert entity.forum is True
 
 
