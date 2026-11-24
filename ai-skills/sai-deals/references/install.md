@@ -30,12 +30,12 @@ replacing it.
 
 ## Choose a Reader
 
-Use [Deal Desk GraphQL](graphql.md) with `curl` and `jq` without a native
-install. To use the `sai-ops` CLI, open the `sai-ops/v0.1.0` release when it
-appears on [Jiyuu Releases](https://github.com/Unique-Divine/jiyuu/releases).
-Download the `install-sai-ops.sh` asset and run the commands below in its
-download directory. The installer fetches the release's checksum manifest
-and verifies the archive for your platform.
+Use [Deal Desk GraphQL](graphql.md) with `curl` and `jq`.
+To install the `sai-ops` CLI on Linux or macOS, download
+[`install-sai-ops.sh`](https://github.com/Unique-Divine/jiyuu/releases/download/sai-ops/v0.1.0/install-sai-ops.sh)
+from the [Sai Ops release](https://github.com/Unique-Divine/jiyuu/releases/tag/sai-ops/v0.1.0).
+Run these commands from the download directory. The installer fetches
+the release's checksum manifest and verifies the archive for your platform.
 
 ```sh
 sh ./install-sai-ops.sh 0.1.0
