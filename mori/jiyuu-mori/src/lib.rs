@@ -104,6 +104,8 @@ pub use ts_static_imports::register as mori_register_ts_static_imports;
 mod config_text_edit;
 #[cfg(feature = "native-engine-abi")]
 mod fts_writer;
+#[cfg(feature = "native-engine-abi")]
+mod store_digest;
 
 #[cfg(any(feature = "native-engine-abi", test))]
 mod full_build_driver;

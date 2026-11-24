@@ -472,7 +472,7 @@ PREPROCESSOR_SRC = $(CBM_DIR)/preprocessor.cpp
 SQLITE_WRITER_SRC = $(CBM_DIR)/sqlite_writer.c
 
 # Store module (new)
-STORE_SRCS = src/store/store.c src/store/graph_mem.c src/store/architecture_projection.c src/store/store_impact.c src/store/store_graph_digest.c src/store/store_content_digest.c
+STORE_SRCS = src/store/store.c src/store/graph_mem.c src/store/architecture_projection.c src/store/store_impact.c
 
 # Cypher module (new)
 CYPHER_SRCS = src/cypher/cypher.c
