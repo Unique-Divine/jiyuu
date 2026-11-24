@@ -6,12 +6,7 @@
 /* The writer borrows the live connection and the caller owns the transaction. */
 typedef void (*cbm_fts_report_error_fn)(cbm_store_t *s, const char *context, const char *message);
 
-#ifdef CBM_WITH_RUST_FTS_WRITER
 int mori_fts_write(cbm_store_t *s, struct sqlite3 *db, const char *project, int64_t after_id,
                    cbm_fts_report_error_fn report_error);
-#else
-int cbm_store_fts_write_reference(cbm_store_t *s, struct sqlite3 *db, const char *project,
-                                  int64_t after_id, cbm_fts_report_error_fn report_error);
-#endif
 
 #endif

@@ -611,13 +611,9 @@ int cbm_store_fts_rebuild(cbm_store_t *s, const char *project, int64_t after_id)
     if (!s || !s->db) {
         return CBM_STORE_ERR;
     }
-#ifdef CBM_WITH_RUST_FTS_WRITER
     cbm_log_info("store.fts_rebuild", "implementation", "rust", "mode",
                  project ? "closure" : "full");
     return mori_fts_write(s, s->db, project, after_id, fts_report_error);
-#else
-    return cbm_store_fts_write_reference(s, s->db, project, after_id, fts_report_error);
-#endif
 }
 
 static int create_user_indexes(cbm_store_t *s) {

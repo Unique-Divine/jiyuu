@@ -472,8 +472,7 @@ PREPROCESSOR_SRC = $(CBM_DIR)/preprocessor.cpp
 SQLITE_WRITER_SRC = $(CBM_DIR)/sqlite_writer.c
 
 # Store module (new)
-C_FTS_WRITER_SRC = src/store/fts_writer_reference.c
-STORE_SRCS = src/store/store.c $(C_FTS_WRITER_SRC) src/store/graph_mem.c src/store/architecture_projection.c src/store/store_impact.c src/store/store_graph_digest.c src/store/store_content_digest.c
+STORE_SRCS = src/store/store.c src/store/graph_mem.c src/store/architecture_projection.c src/store/store_impact.c src/store/store_graph_digest.c src/store/store_content_digest.c
 
 # Cypher module (new)
 CYPHER_SRCS = src/cypher/cypher.c
@@ -1486,15 +1485,14 @@ ifeq ($(LIBMORI_WITHOUT_C_INDEX_DRIVERS),1)
 LIBMORI_PROD_SRCS := $(filter-out $(C_INDEX_DRIVERS_SRC),$(LIBMORI_PROD_SRCS))
 LIBMORI_INDEX_DRIVER_FLAGS = $(if $(filter src/pipeline/pipeline.c,$<),-DCBM_WITHOUT_C_INDEX_DRIVERS=1)
 endif
-LIBMORI_FTS_WRITER_FLAGS = $(if $(filter src/store/store.c,$<),-DCBM_WITH_RUST_FTS_WRITER=1)
-LIBMORI_SRCS = $(filter-out $(C_FTS_WRITER_SRC),$(LIBMORI_PROD_SRCS)) $(EXTRACTION_SRCS) $(AC_LZ4_SRCS) $(ZSTD_SRCS) $(SQLITE_WRITER_SRC)
+LIBMORI_SRCS = $(LIBMORI_PROD_SRCS) $(EXTRACTION_SRCS) $(AC_LZ4_SRCS) $(ZSTD_SRCS) $(SQLITE_WRITER_SRC)
 LIBMORI_OBJS = $(patsubst %.c,$(LIBMORI_DIR)/%.o,$(LIBMORI_SRCS))
 LIBMORI_MAIN_OBJ = $(LIBMORI_DIR)/cbm_c_main.o
 LIBMORI_A = $(BUILD_DIR)/libmori-c.a
 
 $(LIBMORI_DIR)/%.o: %.c $(BUILD_DIR)/.build-config $(PROJECT_HDRS) | $(BUILD_DIR)
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS_PROD) $(LIBMORI_INDEX_DRIVER_FLAGS) $(LIBMORI_FTS_WRITER_FLAGS) -c -o $@ $<
+	$(CC) $(CFLAGS_PROD) $(LIBMORI_INDEX_DRIVER_FLAGS) -c -o $@ $<
 
 $(LIBMORI_MAIN_OBJ): $(MAIN_SRC) $(BUILD_DIR)/.build-config $(PROJECT_HDRS) | $(BUILD_DIR)
 	@mkdir -p $(dir $@)

@@ -83,7 +83,7 @@ mod ts_static_imports;
 #[cfg(feature = "c-backend")]
 pub use ts_static_imports::register as mori_register_ts_static_imports;
 
-#[cfg(feature = "c-backend")]
+#[cfg(feature = "native-engine-abi")]
 mod fts_writer;
 
 #[cfg(feature = "c-backend")]
