@@ -1,7 +1,5 @@
-//! Runs `mori` and the C `codebase-memory-mcp` from the same build directory
-//! and checks that they behave the same. Needs feature `c-backend` and the
-//! C reference binary (`MORI_C_REFERENCE=1`, set by `just check-linked`), so
-//! a pure-Rust `cargo test` compiles this file to nothing.
+//! Compares the linked `mori` executable with the standalone C reference
+//! selected by `just check-linked`. The suite requires feature `c-backend`.
 #![cfg(feature = "c-backend")]
 
 use std::ffi::OsStr;
@@ -14,17 +12,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use rusqlite::{Connection, OpenFlags};
 
+mod support;
+
 const MORI: &str = env!("CARGO_BIN_EXE_mori");
 
 fn c_binary() -> PathBuf {
-    // build.rs sets MORI_C_BUILD_DIR whenever c-backend is on.
-    let bin = Path::new(env!("MORI_C_BUILD_DIR")).join("codebase-memory-mcp");
-    assert!(
-        bin.is_file(),
-        "{} is missing; build with MORI_C_REFERENCE=1 (just check-linked)",
-        bin.display()
-    );
-    bin
+    support::c_reference_bin()
+        .expect("set MORI_C_REFERENCE_BIN or run just check-linked")
 }
 
 /// A short, mode-700 scratch directory: long runtime paths overflow the

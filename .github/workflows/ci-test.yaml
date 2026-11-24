@@ -493,12 +493,10 @@ jobs:
           path: ${{ runner.temp }}/python-types/${{ matrix.artifact }}
           if-no-files-found: error
     needs: changes
-  # Mori's C: production build plus the grammar and extraction suites. The
-  # compiler cache, not a cache of build/c, carries compiled objects between
-  # runs: the suites link ASan test objects that upstream's cbm-third-party
-  # target does not build, and make would rebuild restored objects as older
-  # than the fresh checkout. scripts/env.sh puts ccache in front of gcc with
-  # CCACHE_COMPILERCHECK=content, so a stale entry can only miss.
+  # Candidate Mori grammar and extraction suites. The compiler cache carries
+  # compiled objects between runs. These suites link ASan test objects beyond
+  # upstream's cbm-third-party target. scripts/env.sh puts ccache in front of
+  # gcc with CCACHE_COMPILERCHECK=content.
   mori-c:
     name: Mori C / ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
@@ -569,13 +567,18 @@ jobs:
       - name: Reset compiler cache statistics
         if: needs.changes.outputs.mori == 'true'
         run: ccache --zero-stats
-      - name: Build production binary
+      - name: Check native contracts and the parity harness
         if: needs.changes.outputs.mori == 'true'
-        run: just --justfile mori/justfile build
-      - name: Run grammar and extraction suites
+        working-directory: mori
+        run: |
+          bash tests/test_language_count_contract.sh
+          scripts/security-vendored.sh
+          just parity-test
+      - name: Run candidate grammar and extraction suites
         if: needs.changes.outputs.mori == 'true'
+        working-directory: mori
         run: >-
-          just --justfile mori/justfile test
+          scripts/test.sh --suites
           "edge_types_probe lang_contract cross_repo extraction graph_buffer pipeline yaml language"
       - name: Verify native fixtures exercised Rust GraphQL callbacks
         if: needs.changes.outputs.mori == 'true'
@@ -608,9 +611,9 @@ jobs:
         if: needs.changes.outputs.jiyuu_mori == 'true'
         run: just --justfile mori/jiyuu-mori/justfile check
     needs: changes
-  # jiyuu-mori with feature c-backend: links the whole C program and compares
-  # mori with the C reference binary. Shares the grammar archive cache
-  # with mori-c and falls back to its compiler cache.
+  # The linked candidate is tested against the pinned C executable. This job
+  # shares the grammar archive cache with mori-c and falls back to its compiler
+  # cache.
   jiyuu-mori-linked:
     name: jiyuu-mori linked / ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
@@ -692,11 +695,25 @@ jobs:
       - name: Reset compiler cache statistics
         if: needs.changes.outputs.mori_linked == 'true'
         run: ccache --zero-stats
+      - name: Build pinned C reference
+        if: needs.changes.outputs.mori_linked == 'true'
+        run: |
+          set -euo pipefail
+          reference="$RUNNER_TEMP/codebase-memory-mcp"
+          just --justfile mori/jiyuu-mori/justfile build-c-reference "$reference"
+          test -x "$reference"
+          printf 'MORI_C_REFERENCE_BIN=%s\n' "$reference" >> "$GITHUB_ENV"
       - name: Check linked
         if: needs.changes.outputs.mori_linked == 'true'
         run: just --justfile mori/jiyuu-mori/justfile check-linked
-      # The same CLI commands through mori and codebase-memory-mcp from the
-      # build above (mori/scripts/cli-parity.ts).
+      - name: Verify replay harness against the pinned C reference
+        if: needs.changes.outputs.mori_linked == 'true'
+        working-directory: mori
+        run: |
+          set -euo pipefail
+          args=(--bin-a "$MORI_C_REFERENCE_BIN" --bin-b "$MORI_C_REFERENCE_BIN")
+          python3 -I parity/parity.py ci "${args[@]}"
+          python3 -I parity/parity.py ci "${args[@]}" --corrupt all
       - name: CLI parity
         if: needs.changes.outputs.mori_linked == 'true'
         run: just --justfile mori/jiyuu-mori/justfile parity

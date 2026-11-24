@@ -14,6 +14,7 @@ use serde_json::{Value, json};
 
 #[path = "../src/cypher_linear.rs"]
 mod cypher_linear;
+mod support;
 
 const CLIENT: &str = "client";
 const MORI: &str = env!("CARGO_BIN_EXE_mori");
@@ -244,7 +245,9 @@ impl Fixture {
             assert!(stop.status.success(), "{stop:?}");
             pages
         };
-        let reference = run(Self::reference_binary(), "c");
+        let reference_bin = support::c_reference_bin();
+        let reference =
+            run(reference_bin.as_deref().unwrap_or(Path::new(MORI)), "c");
         let candidate = run(Path::new(MORI), "rust");
         cases
             .iter()
@@ -254,16 +257,6 @@ impl Fixture {
                 serde_json::from_slice(rust).expect("parse matched query page")
             })
             .collect()
-    }
-
-    fn reference_binary() -> &'static Path {
-        if option_env!("MORI_C_REFERENCE") == Some("1") {
-            return Path::new(concat!(
-                env!("MORI_C_BUILD_DIR"),
-                "/codebase-memory-mcp"
-            ));
-        }
-        Path::new(MORI)
     }
 
     fn cross_links(&self, project: &str) -> Vec<Value> {
@@ -676,9 +669,7 @@ RETURN rt.name, h.name, h.file_path, x.callers LIMIT 100"#;
         output
     };
     let linked = query(Path::new(MORI));
-    if option_env!("MORI_C_REFERENCE") == Some("1") {
-        let reference_bin =
-            Path::new(env!("MORI_C_BUILD_DIR")).join("codebase-memory-mcp");
+    if let Some(reference_bin) = support::c_reference_bin() {
         let reference = query(&reference_bin);
         assert_eq!(linked.stdout, reference.stdout);
         assert_eq!(linked.stderr, reference.stderr);
