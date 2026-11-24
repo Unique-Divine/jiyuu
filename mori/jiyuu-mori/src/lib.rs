@@ -4,14 +4,14 @@ pub mod ipc;
 
 #[cfg(any(feature = "native-engine-abi", test))]
 mod complexity;
-#[cfg(any(feature = "native-engine-abi", test))]
-mod explicit_override;
-#[cfg(any(feature = "native-engine-abi", test))]
-mod similarity;
 #[cfg(feature = "native-engine-abi")]
 mod doc_file_links;
+#[cfg(any(feature = "native-engine-abi", test))]
+mod explicit_override;
 #[cfg(feature = "native-engine-abi")]
 mod pdf_doc_links;
+#[cfg(any(feature = "native-engine-abi", test))]
+mod similarity;
 
 #[cfg(any(feature = "graphql-callbacks", test))]
 mod gqlgen;
@@ -108,11 +108,12 @@ mod config_text_edit;
 #[cfg(feature = "native-engine-abi")]
 mod fts_writer;
 
-#[cfg(feature = "c-backend")]
+#[cfg(any(feature = "native-engine-abi", test))]
+mod full_build_driver;
+#[cfg(feature = "native-engine-abi")]
 mod source_publish;
-
-#[cfg(feature = "c-backend")]
-pub use source_publish::register as mori_register_source_publish;
+#[cfg(any(feature = "native-engine-abi", test))]
+mod stage_publish;
 
 #[cfg(feature = "c-backend")]
 mod python_imports;

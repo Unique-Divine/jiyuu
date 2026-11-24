@@ -449,36 +449,23 @@ manifest comparison independently.
 
 ### Full-Build Scheduling
 
-Rust schedules the top-level full-build passes by default in the linked
-`mori` executable. It chooses parallel extraction when discovery supplies
-more than 50 files and the effective worker count exceeds one. Frozen
-builds use one worker. The `pipeline.full_build_driver` worker log records
-Rust scheduling.
-
-C executes the passes, including extraction and resolution. Standard local
-linked builds accept `MORI_IMPL_FULL_BUILD_DRIVER=c` on a fresh daemon.
-Packaged builds contain the Rust scheduling driver. Rust scheduling also
-works with
-`MORI_IMPL_GRAPH_WRITER=rust` when the linked build supports that writer.
+The index pipeline calls Rust to schedule full-build passes. It chooses
+parallel extraction when discovery supplies more than 50 files and the
+effective worker count exceeds one. Frozen builds use one worker. The
+`pipeline.full_build_driver` worker log records the scheduling call.
 
 ### Source Publication
 
-Full rebuilds and closure repairs use the Rust stage driver in the linked
-`mori` executable. It orders metadata writes, integrity checks, sealing,
-and the private stage rename and rollback. The
-`pipeline.stage_publish` worker log identifies a full dump or a patched
-stage. An exact live no-op skips these steps. The standalone C build
-keeps its reference sequence in `src/pipeline/index_drivers_reference.c`.
+Full rebuilds and closure repairs share the Rust stage driver. It orders
+metadata writes, integrity checks, sealing, and the private stage rename
+and rollback. The `pipeline.stage_publish` log identifies a full dump
+or a patched stage. An exact live no-op skips those steps.
 
-After source indexing stages a graph, Rust handles the publication
-decisions by default in the linked `mori` executable. The
-`pipeline.source_publish` worker log records the staged result and Rust
-selection. Rust orders the checks through the publication lease. C owns
-the stage and the file transaction, including destination preparation,
-rename, and rollback. Standard local linked builds accept
-`MORI_IMPL_SOURCE_PUBLISH=c` on a fresh daemon. Packaged builds contain the
-Rust publication decision driver. Use the prior archive to roll back both
-packaged driver changes.
+The outer Rust publication driver orders checks through the publication
+lease. C owns the open store and file operations. The
+`pipeline.source_publish` log records the staged result. Candidate native
+tests call the same Rust entry points as the linked `mori` executable.
+The standalone C comparator comes from the frozen reference commit.
 
 ### Index Worker Recovery
 

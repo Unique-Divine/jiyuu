@@ -1684,14 +1684,8 @@ typedef struct {
     int (*stage_write)(cbm_full_build_t *);
 } cbm_full_build_ops_t;
 
-typedef int (*cbm_full_build_driver_fn)(cbm_full_build_t *, const cbm_full_build_ops_t *,
-                                        int file_count, int parallel_threshold);
-
-int cbm_pipeline_full_build_reference(cbm_full_build_t *run, const cbm_full_build_ops_t *ops,
-                                      int file_count, int parallel_threshold);
-
-/* Register before any pipeline workers start. */
-void cbm_pipeline_set_full_build_driver(cbm_full_build_driver_fn driver);
+int cbm_rust_full_build(cbm_full_build_t *run, const cbm_full_build_ops_t *ops,
+                        int file_count, int parallel_threshold);
 
 /* Source publication starts after the staged run and borrows native state.
  * C owns cleanup and file operations. Commit prepares the destination and
@@ -1710,15 +1704,8 @@ typedef struct {
     int (*commit)(cbm_source_publish_t *);
 } cbm_source_publish_ops_t;
 
-typedef int (*cbm_source_publish_fn)(cbm_source_publish_t *, const cbm_source_publish_ops_t *,
-                                     int staged_rc, bool live_noop, bool final_existed);
-
-int cbm_pipeline_source_publish_reference(cbm_source_publish_t *run,
-                                          const cbm_source_publish_ops_t *ops,
-                                          int rc, bool live_noop, bool final_existed);
-
-/* Register before any pipeline workers start. */
-void cbm_pipeline_set_source_publish(cbm_source_publish_fn publish);
+int cbm_rust_source_publish(cbm_source_publish_t *run, const cbm_source_publish_ops_t *ops,
+                            int staged_rc, bool live_noop, bool final_existed);
 
 /* Full dumps and closure repairs use the same private-stage writer. These
  * synchronous callbacks borrow the stage and its generation for one call. */
@@ -1737,9 +1724,8 @@ typedef struct {
     void (*mark)(cbm_stage_write_t *, const char *block);
 } cbm_stage_write_ops_t;
 
-typedef bool (*cbm_stage_write_fn)(cbm_stage_write_t *, const cbm_stage_write_ops_t *,
-                                   bool surfaces_in_place, bool doc_candidates_in_place,
-                                   bool fts_wholesale);
+bool cbm_rust_stage_write(cbm_stage_write_t *run, const cbm_stage_write_ops_t *ops,
+                          bool surfaces_in_place, bool doc_candidates_in_place, bool fts_wholesale);
 
 /* The store is closed before finalization. Preparing the destination may
  * quarantine the old generation, so late cancellation and rename failure
@@ -1757,14 +1743,7 @@ typedef struct {
     void (*discard)(cbm_stage_finalize_t *);
 } cbm_stage_finalize_ops_t;
 
-typedef int (*cbm_stage_finalize_fn)(cbm_stage_finalize_t *, const cbm_stage_finalize_ops_t *);
-
-void cbm_pipeline_set_stage_publish(cbm_stage_write_fn write, cbm_stage_finalize_fn finalize);
-bool cbm_pipeline_stage_write_reference(cbm_stage_write_t *run, const cbm_stage_write_ops_t *ops,
-                                        bool surfaces_in_place, bool doc_candidates_in_place,
-                                        bool fts_wholesale);
-int cbm_pipeline_stage_finalize_reference(cbm_stage_finalize_t *run,
-                                          const cbm_stage_finalize_ops_t *ops);
+int cbm_rust_stage_finalize(cbm_stage_finalize_t *run, const cbm_stage_finalize_ops_t *ops);
 
 /* ── Incremental pipeline (pipeline_incremental.c) ───────────────── */
 

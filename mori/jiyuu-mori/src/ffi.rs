@@ -598,5 +598,46 @@ pub unsafe extern "C" fn main(argc: c_int, argv: *mut *mut c_char) -> c_int {
         crate::named_watch::register();
         crate::index_manifest::register();
         crate::index_route::register();
-        crate::full_build_driver::register();
-        crate::stage_publish::register();
+        if std::env::var_os("MORI_IMPL_TS_STATIC_IMPORTS").as_deref()
+            == Some(OsStr::new("rust"))
+        {
+            jiyuu_mori::mori_register_ts_static_imports();
+        }
+        crate::importance::register();
+        crate::go_results::register();
+        crate::query_cli::c_args::register();
+        crate::cli_output::register();
+        crate::initialize::c_initialize::register();
+        crate::mcp_dispatch::register();
+        crate::cypher_ffi::register();
+        crate::tool_list::c_tool_list::register();
+        crate::search::register();
+        crate::path_verdict::register();
+        crate::trace_predecessor::register();
+        crate::snippet_window::register();
+        crate::ingest_trace::register();
+        if std::env::var_os("MORI_IMPL_PYTHON_IMPORTS").as_deref()
+            == Some(OsStr::new("rust"))
+        {
+            jiyuu_mori::mori_register_python_imports();
+        }
+    }
+
+    // SAFETY: these process-wide callbacks are registered before C starts any work.
+    unsafe {
+        cbm_mcp_set_read_override(read_override, release_payload);
+        cbm_store_set_file_outline_reader(read_file_outline);
+        cbm_mcp_set_project_readers(
+            read_project_identity,
+            read_project_stats,
+            read_project_metadata,
+        );
+        cbm_mcp_set_project_page_builder(build_project_page);
+        crate::project_response::register_renderers(release_payload);
+    }
+    if command == Some(b"ui") {
+        return crate::ui::run(&args.collect::<Vec<_>>());
+    }
+    // SAFETY: the original C runtime arguments meet cbm_c_main's contract.
+    unsafe { cbm_c_main(argc, argv) }
+}

@@ -9,6 +9,8 @@ use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+const MORI: &str = env!("CARGO_BIN_EXE_mori");
+
 struct Scratch(PathBuf);
 
 impl Scratch {
@@ -31,11 +33,11 @@ impl Drop for Scratch {
 }
 
 fn index(
+    bin: &Path,
     repo: &Path,
     run_dir: &Path,
     depth: &str,
     writer: &str,
-    driver: &str,
 ) -> (Connection, String) {
     let cache = run_dir.join("cache");
     let runtime = run_dir.join("rt");
@@ -44,7 +46,7 @@ fn index(
     dirs.create(&cache).unwrap();
     dirs.create(&runtime).unwrap();
     let command = || {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_mori"));
+        let mut command = Command::new(bin);
         command
             .current_dir("/")
             .env_clear()
@@ -55,7 +57,6 @@ fn index(
             .env("CBM_PROFILE", "1")
             .env("CBM_LOG_LEVEL", "info")
             .env("MORI_IMPL_GRAPH_WRITER", writer)
-            .env("MORI_IMPL_FULL_BUILD_DRIVER", driver)
             .env("CBM_WORKERS", "2");
         command
     };
@@ -150,10 +151,11 @@ func Inspect(input string) string {
     )
     .unwrap();
 
+    let bin = Path::new(MORI);
     let (reference, _) =
-        index(&repo, &scratch.0.join("control"), "fast", "c", "c");
+        index(bin, &repo, &scratch.0.join("control"), "fast", "c");
     let (rust_graph, logs) =
-        index(&repo, &scratch.0.join("candidate"), "fast", "rust", "c");
+        index(bin, &repo, &scratch.0.join("candidate"), "fast", "rust");
     assert!(
         logs.lines().any(|line| line.contains("gbuf.dump_writer")
             && line.contains("implementation=rust")),
@@ -172,14 +174,14 @@ func Inspect(input string) string {
     }
 
     let (semantic_reference, _) = index(
+        bin,
         &repo,
         &scratch.0.join("semantic-reference"),
         "full",
         "c",
-        "c",
     );
     let (semantic, logs) =
-        index(&repo, &scratch.0.join("semantic"), "full", "rust", "rust");
+        index(bin, &repo, &scratch.0.join("semantic"), "full", "rust");
     assert!(
         logs.lines().any(|line| line.contains("gbuf.dump_writer")
             && line.contains("implementation=rust")),
@@ -201,7 +203,7 @@ func Inspect(input string) string {
 }
 
 #[test]
-fn full_build_driver_matches_c_at_the_extraction_boundary() {
+fn full_build_driver_preserves_the_extraction_boundary() {
     let scratch = Scratch::new();
     let repo = scratch.0.join("source");
     fs::create_dir(&repo).unwrap();
@@ -213,40 +215,61 @@ fn full_build_driver_matches_c_at_the_extraction_boundary() {
         .unwrap();
     }
 
-    for (count, mode) in [(50, "sequential"), (51, "parallel")] {
-        if count == 51 {
+    let reference = std::env::var_os("MORI_C_REFERENCE_BIN").map(PathBuf::from);
+    if let Some(bin) = &reference {
+        assert!(
+            bin.is_absolute() && bin.is_file(),
+            "invalid C reference {bin:?}"
+        );
+    }
+    for (files, mode) in [(50, "sequential"), (51, "parallel")] {
+        if files == 51 {
             fs::write(
                 repo.join("extra.py"),
                 "from part_0 import part_0\ndef extra():\n    return part_0()\n",
             )
             .unwrap();
         }
-        let (c, c_logs) = index(
-            &repo,
-            &scratch.0.join(format!("c-{count}")),
-            "fast",
-            "c",
-            "c",
-        );
         let (rust, rust_logs) = index(
+            Path::new(MORI),
             &repo,
-            &scratch.0.join(format!("rust-{count}")),
+            &scratch.0.join(format!("rust-{files}")),
             "fast",
             "c",
-            "rust",
         );
-        let evidence = if count == 51 {
+        let evidence = if files == 51 {
             "msg=pipeline.mode mode=parallel workers=2 files=51".to_owned()
         } else {
-            format!("msg=pipeline.mode mode={mode} files={count}")
+            format!("msg=pipeline.mode mode={mode} files={files}")
         };
+        assert!(rust_logs.contains(&evidence), "{rust_logs}");
+        assert!(rust_logs.contains(&format!("msg=pipeline.full_build_driver implementation=rust files={files}")), "{rust_logs}");
+        assert_eq!(
+            files,
+            count(&rust, "SELECT count(*) FROM nodes WHERE label='Function'")
+        );
+        assert!(
+            count(
+                &rust,
+                "SELECT CAST(v AS INTEGER) FROM store_meta WHERE k='mutation_gen'"
+            ) > 0
+        );
+        let Some(bin) = &reference else {
+            continue;
+        };
+        let (c, c_logs) = index(
+            bin,
+            &repo,
+            &scratch.0.join(format!("c-{files}")),
+            "fast",
+            "c",
+        );
         assert!(c_logs.contains(&evidence), "{c_logs}");
         assert!(
-            !c_logs.contains("msg=pipeline.full_build_driver"),
+            !c_logs
+                .contains("msg=pipeline.full_build_driver implementation=rust"),
             "{c_logs}"
         );
-        assert!(rust_logs.contains(&evidence), "{rust_logs}");
-        assert!(rust_logs.contains(&format!("msg=pipeline.full_build_driver implementation=rust files={count}")), "{rust_logs}");
         for sql in [
             "SELECT label, name, qualified_name, file_path, start_line, end_line, properties FROM nodes ORDER BY qualified_name",
             "SELECT s.qualified_name, t.qualified_name, e.type, e.properties FROM edges e JOIN nodes s ON s.id=e.source_id JOIN nodes t ON t.id=e.target_id ORDER BY 1, 2, 3, 4",

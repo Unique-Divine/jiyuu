@@ -41,12 +41,6 @@ mod index_manifest;
 mod index_route;
 
 #[cfg(any(feature = "c-backend", test))]
-mod full_build_driver;
-
-#[cfg(any(feature = "c-backend", test))]
-mod stage_publish;
-
-#[cfg(any(feature = "c-backend", test))]
 mod importance;
 
 #[cfg(any(feature = "c-backend", test))]

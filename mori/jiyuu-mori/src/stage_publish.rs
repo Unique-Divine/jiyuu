@@ -24,7 +24,8 @@ struct WriteOps {
     mark: unsafe extern "C" fn(*mut StageWrite, *const c_char),
 }
 
-unsafe extern "C" fn write_stage(
+#[cfg_attr(feature = "native-engine-abi", unsafe(no_mangle))]
+unsafe extern "C" fn cbm_rust_stage_write(
     run: *mut StageWrite,
     ops: &WriteOps,
     surfaces_in_place: bool,
@@ -78,7 +79,8 @@ struct FinalizeOps {
     discard: Cleanup,
 }
 
-unsafe extern "C" fn finalize_stage(
+#[cfg_attr(feature = "native-engine-abi", unsafe(no_mangle))]
+unsafe extern "C" fn cbm_rust_stage_finalize(
     run: *mut StageFinalize,
     ops: &FinalizeOps,
 ) -> c_int {
@@ -108,29 +110,6 @@ unsafe extern "C" fn finalize_stage(
         (ops.discard)(run);
         status
     }
-}
-
-#[cfg(not(test))]
-unsafe extern "C" {
-    fn cbm_pipeline_set_stage_publish(
-        write: unsafe extern "C" fn(
-            *mut StageWrite,
-            &WriteOps,
-            bool,
-            bool,
-            bool,
-        ) -> bool,
-        finalize: unsafe extern "C" fn(
-            *mut StageFinalize,
-            &FinalizeOps,
-        ) -> c_int,
-    );
-}
-
-#[cfg(not(test))]
-pub(crate) unsafe fn register() {
-    // SAFETY: startup registration precedes all pipeline workers.
-    unsafe { cbm_pipeline_set_stage_publish(write_stage, finalize_stage) };
 }
 
 #[cfg(test)]
@@ -243,7 +222,7 @@ mod tests {
             };
             // SAFETY: the driver and mocks borrow the live trace exclusively.
             assert!(unsafe {
-                write_stage(
+                cbm_rust_stage_write(
                     (&raw mut trace).cast(),
                     &WRITE_OPS,
                     surfaces_in_place,
@@ -290,7 +269,7 @@ mod tests {
             };
             // SAFETY: the driver and mocks borrow the live trace exclusively.
             assert!(!unsafe {
-                write_stage(
+                cbm_rust_stage_write(
                     (&raw mut trace).cast(),
                     &WRITE_OPS,
                     false,
@@ -315,7 +294,7 @@ mod tests {
             };
             // SAFETY: the driver and mocks borrow the live trace exclusively.
             assert!(!unsafe {
-                write_stage(
+                cbm_rust_stage_write(
                     (&raw mut trace).cast(),
                     &WRITE_OPS,
                     false,
@@ -501,7 +480,10 @@ mod tests {
             // SAFETY: the driver and mocks borrow the live trace exclusively.
             assert_eq!(
                 unsafe {
-                    finalize_stage((&raw mut trace).cast(), &FINALIZE_OPS)
+                    cbm_rust_stage_finalize(
+                        (&raw mut trace).cast(),
+                        &FINALIZE_OPS,
+                    )
                 },
                 status
             );

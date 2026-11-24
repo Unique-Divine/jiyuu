@@ -3964,14 +3964,6 @@ static bool stage_write_seal(cbm_stage_write_t *run) {
     return cbm_store_seal_for_atomic_publish(run->store) == CBM_STORE_OK;
 }
 
-static cbm_stage_write_fn stage_write_driver;
-static cbm_stage_finalize_fn stage_finalize_driver;
-
-void cbm_pipeline_set_stage_publish(cbm_stage_write_fn write, cbm_stage_finalize_fn finalize) {
-    stage_write_driver = write;
-    stage_finalize_driver = finalize;
-}
-
 /* Own stage_path until finalization takes over the stage file and its lock.
  * Closure repair has already patched its surfaces and row-level FTS data. */
 static int publish_staged_impl(char *stage_path, const cbm_pipeline_generation_t *generation,
@@ -3997,22 +3989,10 @@ static int publish_staged_impl(char *stage_path, const cbm_pipeline_generation_t
     run.store = cbm_store_open_path(stage_path);
     bool ok = false;
     if (run.store) {
-        cbm_stage_write_fn write = stage_write_driver;
-#ifndef CBM_WITHOUT_C_INDEX_DRIVERS
-        if (!write) {
-            write = cbm_pipeline_stage_write_reference;
-        }
-#endif
-        if (write) {
-            if (stage_write_driver) {
-                cbm_log_info("pipeline.stage_publish", "implementation", "rust", "kind",
-                             fts_wholesale ? "dump" : "patched");
-            }
-            ok = write(&run, &ops, generation->surfaces_in_place, generation->doc_candidates_in_place,
-                       fts_wholesale);
-        } else {
-            cbm_log_error("pipeline.stage_publish", "reason", "rust_driver_unavailable");
-        }
+        cbm_log_info("pipeline.stage_publish", "implementation", "rust", "kind",
+                     fts_wholesale ? "dump" : "patched");
+        ok = cbm_rust_stage_write(&run, &ops, generation->surfaces_in_place,
+                                  generation->doc_candidates_in_place, fts_wholesale);
         cbm_store_close(run.store);
     }
     int rc;
@@ -4145,16 +4125,7 @@ static int finalize_staged_impl(char *stage_path, const char *final_db_path, ato
         .frozen = frozen,
     };
     cbm_clock_gettime(CLOCK_MONOTONIC, &run.started);
-    if (stage_finalize_driver) {
-        return stage_finalize_driver(&run, &ops);
-    }
-#ifdef CBM_WITHOUT_C_INDEX_DRIVERS
-    cbm_log_error("pipeline.stage_publish", "reason", "rust_driver_unavailable");
-    stage_finalize_discard(&run);
-    return CBM_PIPELINE_PERSIST_FAILED;
-#else
-    return cbm_pipeline_stage_finalize_reference(&run, &ops);
-#endif
+    return cbm_rust_stage_finalize(&run, &ops);
 }
 
 int cbm_pipeline_finalize_staged_generation(char *path, const char *destination,
@@ -4474,12 +4445,6 @@ static int full_stage_write(cbm_full_build_t *run) {
     return rc;
 }
 
-static cbm_full_build_driver_fn full_build_driver;
-
-void cbm_pipeline_set_full_build_driver(cbm_full_build_driver_fn driver) {
-    full_build_driver = driver;
-}
-
 static int run_full_build(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files,
                           int file_count, const cbm_file_hash_t *baseline, int baseline_count) {
     static const cbm_full_build_ops_t ops = {
@@ -4503,19 +4468,9 @@ static int run_full_build(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx, const cbm_
     /* Folder and Module QNs share the same stem collisions through extraction. */
     cbm_stem_marks_init(&run.marks, p->project_name, files, file_count);
     ctx->stem_marks = &run.marks;
-    int rc;
-    if (full_build_driver) {
-        cbm_log_info("pipeline.full_build_driver", "implementation", "rust", "files",
-                     itoa_buf(file_count));
-        rc = full_build_driver(&run, &ops, file_count, MIN_FILES_FOR_PARALLEL);
-    } else {
-#ifdef CBM_WITHOUT_C_INDEX_DRIVERS
-        cbm_log_error("pipeline.full_build_driver", "reason", "rust_driver_unavailable");
-        rc = CBM_PIPELINE_ABORT_PRESERVE_DB;
-#else
-        rc = cbm_pipeline_full_build_reference(&run, &ops, file_count, MIN_FILES_FOR_PARALLEL);
-#endif
-    }
+    cbm_log_info("pipeline.full_build_driver", "implementation", "rust", "files",
+                 itoa_buf(file_count));
+    int rc = cbm_rust_full_build(&run, &ops, file_count, MIN_FILES_FOR_PARALLEL);
     full_release_stem_marks(&run); /* structure may have returned before extraction */
     return rc;
 }
@@ -5372,12 +5327,6 @@ static int source_publish_commit(cbm_source_publish_t *run) {
     return export_after_publish(p, run->final_path);
 }
 
-static cbm_source_publish_fn source_publish_driver;
-
-void cbm_pipeline_set_source_publish(cbm_source_publish_fn publish) {
-    source_publish_driver = publish;
-}
-
 static int run_source_publish(cbm_source_publish_t *run, int rc, bool live_noop) {
     static const cbm_source_publish_ops_t ops = {
         .abort_preserve_db = CBM_PIPELINE_ABORT_PRESERVE_DB,
@@ -5391,20 +5340,8 @@ static int run_source_publish(cbm_source_publish_t *run, int rc, bool live_noop)
         .claim_lease = source_publish_claim_lease,
         .commit = source_publish_commit,
     };
-    if (source_publish_driver) {
-        cbm_log_info("pipeline.source_publish", "implementation", "rust", "staged_rc",
-                     itoa_buf(rc));
-        return source_publish_driver(run, &ops, rc, live_noop, run->final_existed);
-    }
-#ifdef CBM_WITHOUT_C_INDEX_DRIVERS
-    if (rc != 0) {
-        return rc;
-    }
-    cbm_log_error("pipeline.source_publish", "reason", "rust_driver_unavailable");
-    return CBM_PIPELINE_ABORT_PRESERVE_DB;
-#else
-    return cbm_pipeline_source_publish_reference(run, &ops, rc, live_noop, run->final_existed);
-#endif
+    cbm_log_info("pipeline.source_publish", "implementation", "rust", "staged_rc", itoa_buf(rc));
+    return cbm_rust_source_publish(run, &ops, rc, live_noop, run->final_existed);
 }
 
 int cbm_pipeline_run(cbm_pipeline_t *p) {
