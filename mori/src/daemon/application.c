@@ -2109,6 +2109,34 @@ typedef struct {
 
 static void application_request_repair_recovery(cbm_daemon_application_t *application);
 
+/* A publication is expected to have a graph. An unavailable snapshot must
+ * leave the reverse marker eligible for recovery. */
+static bool application_read_publication_snapshot(const char *project, char *generation,
+                                                  size_t capacity, bool *pending) {
+    const char *cache = cbm_resolve_cache_dir();
+    if (!cache) {
+        return false;
+    }
+    char path[APPLICATION_PATH_CAP];
+    int length = snprintf(path, sizeof(path), "%s/%s.db", cache, project);
+    if (length <= 0 || (size_t)length >= sizeof(path)) {
+        return false;
+    }
+    cbm_store_t *store = cbm_store_open_path_query_nowait(path);
+    cbm_store_read_scope_t *scope = NULL;
+    bool readable =
+        cbm_cross_repo_open_graph_snapshot(store, &scope) && scope &&
+        cbm_cross_repo_read_reverse_pending(store, project, pending) &&
+        (!generation || cbm_store_generation(store, generation, capacity) == CBM_STORE_OK);
+    readable = cbm_store_read_scope_close(scope) == CBM_STORE_OK && readable;
+    cbm_store_close(store);
+    return readable;
+}
+
+static void application_log_publication_snapshot_deferred(const char *project) {
+    cbm_log_info("cross_repo.repair_deferred", "provider", project, "reason", "own_snapshot");
+}
+
 static void application_log_provider_repair(void *context, const char *client,
                                             const char *const *targets, int target_count) {
     const char *provider = context;
@@ -2451,12 +2479,15 @@ static void application_drain_repairs(cbm_daemon_application_job_t *owner) {
         }
         cbm_mutex_unlock(&application->mutex);
 
-        if (leased && cbm_cross_repo_reverse_pending(job->project_key)) {
+        bool pending = false;
+        char generation[CBM_GRAPH_COMPARE_GENERATION_SIZE];
+        bool readable = leased && !application->stopping &&
+                        application_read_publication_snapshot(job->project_key, generation,
+                                                              sizeof(generation), &pending);
+        if (readable && pending) {
             retry |= !application_reconcile_reverse(application, job->project_key);
         }
-        char generation[CBM_GRAPH_COMPARE_GENERATION_SIZE];
-        if (can_scan &&
-            cbm_cross_repo_read_generation(job->project_key, generation, sizeof(generation))) {
+        if (can_scan && readable) {
             application_repair_batch_t batch = {
                 .application = application, .provider = job->project_key, .attempted = attempted};
             bool complete = cbm_cross_repo_visit_stale_clients(job->project_key, generation,
@@ -2471,9 +2502,12 @@ static void application_drain_repairs(cbm_daemon_application_job_t *owner) {
             retry |= !complete || batch.retry;
         } else if (!application->stopping) {
             /* Recovery can retry using the saved selections and observations. */
-            const char *reason = !can_scan ? "allocation" : "generation";
-            cbm_log_warn("cross_repo.repair_deferred", "provider", job->project_key, "reason",
-                         reason);
+            if (!readable) {
+                application_log_publication_snapshot_deferred(job->project_key);
+            } else {
+                cbm_log_warn("cross_repo.repair_deferred", "provider", job->project_key, "reason",
+                             "allocation");
+            }
             retry = true;
         }
         cbm_mutex_lock(&application->mutex);
@@ -2542,20 +2576,25 @@ static void *application_job_thread(void *opaque) {
     bool source_changed =
         have_current && (!have_prior_generation || strcmp(prior_generation, current) != 0);
     bool repair_needed = automatic_repair && source_changed;
+    bool retry = automatic_repair && execution.successful && !have_current;
     if (application_job_publish(job, &execution, repair_needed)) {
         application_drain_repairs(job);
-    } else if (!repair_needed && execution.successful &&
-               cbm_cross_repo_reverse_pending(job->project_key)) {
-        bool reversed = false;
-        if (cbm_daemon_application_project_mutation_try_begin(application, "*")) {
-            reversed = application_reconcile_reverse(application, job->project_key);
-            cbm_daemon_application_project_mutation_end(application, "*");
-        }
-        if (!reversed && automatic_repair) {
-            application_request_repair_recovery(application);
+    } else if (!repair_needed && execution.successful && !application->stopping) {
+        bool pending = false;
+        bool readable = application_read_publication_snapshot(job->project_key, NULL, 0, &pending);
+        if (!readable && automatic_repair) {
+            application_log_publication_snapshot_deferred(job->project_key);
+            retry = true;
+        } else if (readable && pending) {
+            bool reversed = false;
+            if (cbm_daemon_application_project_mutation_try_begin(application, "*")) {
+                reversed = application_reconcile_reverse(application, job->project_key);
+                cbm_daemon_application_project_mutation_end(application, "*");
+            }
+            retry |= !reversed && automatic_repair;
         }
     }
-    if (automatic_repair && execution.successful && !have_current) {
+    if (retry) {
         application_request_repair_recovery(application);
     }
     if (observe_repair && source_changed) {
