@@ -238,13 +238,14 @@ fn mcp_auto_index_uses_the_selected_bounded_walker() {
             }
             let mut child = command.spawn().unwrap();
             let mut input = child.stdin.take().unwrap();
-            writeln!(
-                input,
-                "{}\n{}",
-                r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"linked-test","version":"1"}}}"#,
-                r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
-            )
-            .unwrap();
+            input
+                .write_all(concat!(
+                    r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"linked-test","version":"1"}}}"#,
+                    "\n",
+                    r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+                    "\n",
+                ).as_bytes())
+                .unwrap();
             let log = scratch.0.join("default/cache/logs/cbm-daemon.log");
             let deadline = Instant::now() + Duration::from_secs(30);
             let events = loop {
