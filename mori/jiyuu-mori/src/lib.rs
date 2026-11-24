@@ -54,12 +54,9 @@ fn rusqlite_uses_the_c_backend_sqlite() {
 #[cfg(all(feature = "c-backend", test, unix))]
 mod discovery_spike;
 
-#[cfg(all(feature = "c-backend", unix))]
+#[cfg(feature = "native-engine-abi")]
 #[path = "discovery_spike/native.rs"]
 mod discover_walk;
-
-#[cfg(all(feature = "c-backend", not(test), unix))]
-pub use discover_walk::register as mori_register_discover_walk;
 
 #[cfg(all(feature = "c-backend", unix))]
 mod staged_graph;
@@ -107,12 +104,15 @@ pub use ts_static_imports::register as mori_register_ts_static_imports;
 mod config_text_edit;
 #[cfg(feature = "native-engine-abi")]
 mod fts_writer;
+#[cfg(feature = "native-engine-abi")]
+mod store_digest;
 
-#[cfg(feature = "c-backend")]
+#[cfg(any(feature = "native-engine-abi", test))]
+mod full_build_driver;
+#[cfg(feature = "native-engine-abi")]
 mod source_publish;
-
-#[cfg(feature = "c-backend")]
-pub use source_publish::register as mori_register_source_publish;
+#[cfg(any(feature = "native-engine-abi", test))]
+mod stage_publish;
 
 #[cfg(feature = "c-backend")]
 mod python_imports;

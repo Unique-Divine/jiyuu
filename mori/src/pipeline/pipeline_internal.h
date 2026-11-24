@@ -1684,14 +1684,8 @@ typedef struct {
     int (*stage_write)(cbm_full_build_t *);
 } cbm_full_build_ops_t;
 
-typedef int (*cbm_full_build_driver_fn)(cbm_full_build_t *, const cbm_full_build_ops_t *,
-                                        int file_count, int parallel_threshold);
-
-int cbm_pipeline_full_build_reference(cbm_full_build_t *run, const cbm_full_build_ops_t *ops,
-                                      int file_count, int parallel_threshold);
-
-/* Register before any pipeline workers start. */
-void cbm_pipeline_set_full_build_driver(cbm_full_build_driver_fn driver);
+int cbm_rust_full_build(cbm_full_build_t *run, const cbm_full_build_ops_t *ops,
+                        int file_count, int parallel_threshold);
 
 /* Source publication starts after the staged run and borrows native state.
  * C owns cleanup and file operations. Commit prepares the destination and
@@ -1710,15 +1704,46 @@ typedef struct {
     int (*commit)(cbm_source_publish_t *);
 } cbm_source_publish_ops_t;
 
-typedef int (*cbm_source_publish_fn)(cbm_source_publish_t *, const cbm_source_publish_ops_t *,
-                                     int staged_rc, bool live_noop, bool final_existed);
+int cbm_rust_source_publish(cbm_source_publish_t *run, const cbm_source_publish_ops_t *ops,
+                            int staged_rc, bool live_noop, bool final_existed);
 
-int cbm_pipeline_source_publish_reference(cbm_source_publish_t *run,
-                                          const cbm_source_publish_ops_t *ops,
-                                          int rc, bool live_noop, bool final_existed);
+/* Full dumps and closure repairs use the same private-stage writer. These
+ * synchronous callbacks borrow the stage and its generation for one call. */
+typedef struct cbm_stage_write cbm_stage_write_t;
+typedef struct {
+    bool (*hashes)(cbm_stage_write_t *);
+    bool (*surfaces)(cbm_stage_write_t *);
+    bool (*doc_candidates)(cbm_stage_write_t *);
+    bool (*format)(cbm_stage_write_t *);
+    bool (*coverage)(cbm_stage_write_t *);
+    bool (*doc_links)(cbm_stage_write_t *);
+    bool (*fts)(cbm_stage_write_t *, bool full_build);
+    bool (*advance)(cbm_stage_write_t *);
+    bool (*integrity)(cbm_stage_write_t *);
+    bool (*seal)(cbm_stage_write_t *);
+    void (*mark)(cbm_stage_write_t *, const char *block);
+} cbm_stage_write_ops_t;
 
-/* Register before any pipeline workers start. */
-void cbm_pipeline_set_source_publish(cbm_source_publish_fn publish);
+bool cbm_rust_stage_write(cbm_stage_write_t *run, const cbm_stage_write_ops_t *ops,
+                          bool surfaces_in_place, bool doc_candidates_in_place, bool full_build);
+
+/* The store is closed before finalization. Preparing the destination may
+ * quarantine the old generation, so late cancellation and rename failure
+ * must roll back before discarding the stage. */
+typedef struct cbm_stage_finalize cbm_stage_finalize_t;
+typedef struct {
+    int abort_preserve_db;
+    int persist_failed;
+    bool (*remove_sidecars)(cbm_stage_finalize_t *);
+    bool (*cancelled)(cbm_stage_finalize_t *);
+    bool (*prepare)(cbm_stage_finalize_t *);
+    bool (*rollback)(cbm_stage_finalize_t *);
+    bool (*rename)(cbm_stage_finalize_t *);
+    void (*release)(cbm_stage_finalize_t *);
+    void (*discard)(cbm_stage_finalize_t *);
+} cbm_stage_finalize_ops_t;
+
+int cbm_rust_stage_finalize(cbm_stage_finalize_t *run, const cbm_stage_finalize_ops_t *ops);
 
 /* ── Incremental pipeline (pipeline_incremental.c) ───────────────── */
 
@@ -1941,8 +1966,8 @@ int cbm_pipeline_finalize_staged_generation(char *stage_path, const char *final_
                                             atomic_int *cancelled, bool destination_known_healthy);
 /* Metadata writes + FTS policy + integrity + seal + finalize for an
  * already-materialized staging DB. Takes ownership of stage_path. The dump
- * path passes fts_wholesale=true; the delta path passes false (its patch
- * wrote row-level FTS inserts). generation->gbuf is not read here. */
+ * path passes full_build=true; the closure path refreshes FTS in the stage
+ * after its last node mutation. generation->gbuf is unused here. */
 int cbm_pipeline_publish_staged(char *stage_path, const cbm_pipeline_generation_t *generation,
                                 bool full_build, bool destination_known_healthy);
 

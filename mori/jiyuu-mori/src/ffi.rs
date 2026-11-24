@@ -591,23 +591,15 @@ pub unsafe extern "C" fn main(argc: c_int, argv: *mut *mut c_char) -> c_int {
         }
         #[cfg(unix)]
         jiyuu_mori::mori_register_staged_graph_writer();
-        #[cfg(unix)]
-        jiyuu_mori::mori_register_discover_walk();
         c_transport::register();
         crate::repair_recovery::register();
         crate::named_watch::register();
         crate::index_manifest::register();
         crate::index_route::register();
-        crate::full_build_driver::register();
         if std::env::var_os("MORI_IMPL_TS_STATIC_IMPORTS").as_deref()
             == Some(OsStr::new("rust"))
         {
             jiyuu_mori::mori_register_ts_static_imports();
-        }
-        if std::env::var_os("MORI_IMPL_SOURCE_PUBLISH")
-            .is_none_or(|value| value == "rust")
-        {
-            jiyuu_mori::mori_register_source_publish();
         }
         crate::importance::register();
         crate::go_results::register();

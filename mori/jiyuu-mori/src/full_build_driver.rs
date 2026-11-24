@@ -25,7 +25,8 @@ fn status(rc: c_int) -> Result<(), c_int> {
     if rc == 0 { Ok(()) } else { Err(rc) }
 }
 
-unsafe extern "C" fn drive(
+#[cfg_attr(feature = "native-engine-abi", unsafe(no_mangle))]
+unsafe extern "C" fn cbm_rust_full_build(
     ctx: *mut FullBuild,
     ops: *const Ops,
     file_count: c_int,
@@ -51,29 +52,6 @@ unsafe extern "C" fn drive(
         })()
     };
     result.err().unwrap_or(0)
-}
-
-#[cfg(not(test))]
-unsafe extern "C" {
-    fn cbm_pipeline_set_full_build_driver(
-        driver: unsafe extern "C" fn(
-            *mut FullBuild,
-            *const Ops,
-            c_int,
-            c_int,
-        ) -> c_int,
-    );
-}
-
-#[cfg(not(test))]
-pub(crate) unsafe fn register() {
-    if std::env::var_os("MORI_IMPL_FULL_BUILD_DRIVER")
-        .is_none_or(|value| value == "rust")
-    {
-        // SAFETY: startup registration precedes all pipeline workers, and
-        // the callback has process lifetime.
-        unsafe { cbm_pipeline_set_full_build_driver(drive) };
-    }
 }
 
 #[cfg(test)]
@@ -166,8 +144,9 @@ mod tests {
                     fail_at,
                 };
                 // SAFETY: the mock callbacks borrow Trace for the call.
-                let rc =
-                    unsafe { drive((&raw mut trace).cast(), &ops, files, 50) };
+                let rc = unsafe {
+                    cbm_rust_full_build((&raw mut trace).cast(), &ops, files, 50)
+                };
                 if let Some(failure) =
                     expected.iter().position(|&op| op == fail_at)
                 {

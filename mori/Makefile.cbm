@@ -472,7 +472,7 @@ PREPROCESSOR_SRC = $(CBM_DIR)/preprocessor.cpp
 SQLITE_WRITER_SRC = $(CBM_DIR)/sqlite_writer.c
 
 # Store module (new)
-STORE_SRCS = src/store/store.c src/store/graph_mem.c src/store/architecture_projection.c src/store/store_impact.c src/store/store_graph_digest.c src/store/store_content_digest.c
+STORE_SRCS = src/store/store.c src/store/graph_mem.c src/store/architecture_projection.c src/store/store_impact.c
 
 # Cypher module (new)
 CYPHER_SRCS = src/cypher/cypher.c
@@ -517,7 +517,6 @@ DISCOVER_SRCS = \
 GRAPH_BUFFER_SRCS = src/graph_buffer/graph_buffer.c
 
 # Pipeline module (new)
-C_INDEX_DRIVERS_SRC = src/pipeline/index_drivers_reference.c
 PIPELINE_SRCS = \
     src/pipeline/fqn.c \
     src/pipeline/lsp_surface.c \
@@ -526,7 +525,6 @@ PIPELINE_SRCS = \
     src/pipeline/laravel_routing.c \
     src/pipeline/registry.c \
     src/pipeline/pipeline.c \
-    $(C_INDEX_DRIVERS_SRC) \
     src/pipeline/pipeline_incremental.c \
     src/pipeline/worker_pool.c \
     src/pipeline/pass_parallel.c \
@@ -1444,8 +1442,7 @@ MAIN_SRC = src/main.c
 # for trap debugging -- silently re-run the previously instrumented binary,
 # which during this bisect produced a "crashes without sanitizers too" result
 # that was pure artifact and sent the investigation down the wrong path.
-LIBMORI_WITHOUT_C_INDEX_DRIVERS ?= 0
-BUILD_CONFIG_SIG := TEST_SEAMS=$(TEST_SEAMS)|CFLAGS_EXTRA=$(CFLAGS_EXTRA)|SANITIZE=$(SANITIZE)|MEMWASTE=$(MEMWASTE)|MEMWASTE_ACCESS=$(MEMWASTE_ACCESS)|MEMWASTE_PROFILE=$(MEMWASTE_PROFILE)|TEST_COVERAGE=$(TEST_COVERAGE)|LIBMORI_WITH_UI=$(LIBMORI_WITH_UI)|LIBMORI_WITHOUT_C_INDEX_DRIVERS=$(LIBMORI_WITHOUT_C_INDEX_DRIVERS)
+BUILD_CONFIG_SIG := TEST_SEAMS=$(TEST_SEAMS)|CFLAGS_EXTRA=$(CFLAGS_EXTRA)|SANITIZE=$(SANITIZE)|MEMWASTE=$(MEMWASTE)|MEMWASTE_ACCESS=$(MEMWASTE_ACCESS)|MEMWASTE_PROFILE=$(MEMWASTE_PROFILE)|TEST_COVERAGE=$(TEST_COVERAGE)|LIBMORI_WITH_UI=$(LIBMORI_WITH_UI)
 .PHONY: build-config-check
 build-config-check:
 $(BUILD_DIR)/.build-config: build-config-check | $(BUILD_DIR)
@@ -1490,12 +1487,6 @@ else
 LIBMORI_PROD_SRCS = $(PROD_SRCS)
 LIBMORI_EMBED_OBJS =
 endif
-# Standalone C and its tests always keep the reference drivers.
-LIBMORI_INDEX_DRIVER_FLAGS =
-ifeq ($(LIBMORI_WITHOUT_C_INDEX_DRIVERS),1)
-LIBMORI_PROD_SRCS := $(filter-out $(C_INDEX_DRIVERS_SRC),$(LIBMORI_PROD_SRCS))
-LIBMORI_INDEX_DRIVER_FLAGS = $(if $(filter src/pipeline/pipeline.c,$<),-DCBM_WITHOUT_C_INDEX_DRIVERS=1)
-endif
 LIBMORI_SRCS = $(LIBMORI_PROD_SRCS) $(EXTRACTION_SRCS) $(AC_LZ4_SRCS) $(ZSTD_SRCS) $(SQLITE_WRITER_SRC)
 LIBMORI_OBJS = $(patsubst %.c,$(LIBMORI_DIR)/%.o,$(LIBMORI_SRCS))
 LIBMORI_MAIN_OBJ = $(LIBMORI_DIR)/cbm_c_main.o
@@ -1503,7 +1494,7 @@ LIBMORI_A = $(BUILD_DIR)/libmori-c.a
 
 $(LIBMORI_DIR)/%.o: %.c $(BUILD_DIR)/.build-config $(PROJECT_HDRS) | $(BUILD_DIR)
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS_PROD) $(LIBMORI_INDEX_DRIVER_FLAGS) -c -o $@ $<
+	$(CC) $(CFLAGS_PROD) -c -o $@ $<
 
 $(LIBMORI_MAIN_OBJ): $(MAIN_SRC) $(BUILD_DIR)/.build-config $(PROJECT_HDRS) | $(BUILD_DIR)
 	@mkdir -p $(dir $@)
