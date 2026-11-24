@@ -3647,11 +3647,14 @@ static cbm_http_server_t *http_server_new(int port, bool read_only) {
     srv->port = cbm_httpd_port(srv->listener);
     srv->listener_ok = true;
 
-    char port_str[16];
-    snprintf(port_str, sizeof(port_str), "%d", srv->port);
-    char url[64];
-    snprintf(url, sizeof(url), "http://127.0.0.1:%d", srv->port);
-    cbm_log_info("ui.serving", "url", url, "port", port_str);
+    /* Standalone startup must reach its signal wait even if stderr blocks. */
+    if (!read_only) {
+        char port_str[16];
+        snprintf(port_str, sizeof(port_str), "%d", srv->port);
+        char url[64];
+        snprintf(url, sizeof(url), "http://127.0.0.1:%d", srv->port);
+        cbm_log_info("ui.serving", "url", url, "port", port_str);
+    }
 
     return srv;
 }
