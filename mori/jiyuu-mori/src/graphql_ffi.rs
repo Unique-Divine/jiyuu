@@ -23,6 +23,7 @@ mod fixture_witness {
     pub(super) const LINK_FIND: u32 = 1 << 3;
     pub(super) const LINK_UPSERT: u32 = 1 << 4;
     pub(super) const LINK_DELETE: u32 = 1 << 5;
+    pub(super) const DOCUMENT: u32 = 1 << 6;
 
     static VISITED: AtomicU32 = AtomicU32::new(0);
 
@@ -66,6 +67,16 @@ struct GraphqlRouteRow {
 type RouteWriter =
     unsafe extern "C" fn(*mut c_void, *const GraphqlRouteRow) -> bool;
 
+type SignatureSink = unsafe extern "C" fn(*mut c_void, *const u8, usize) -> bool;
+type DocumentEncoder = unsafe extern "C" fn(
+    *const c_char,
+    bool,
+    usize,
+    *mut bool,
+    SignatureSink,
+    *mut c_void,
+) -> bool;
+
 /// ABI mirror of `cbm_graphql_handler_t` in `pass_cross_repo.h`.
 #[repr(C)]
 struct GraphqlHandler {
@@ -75,6 +86,8 @@ struct GraphqlHandler {
 }
 
 unsafe extern "C" {
+    fn cbm_graphql_set_document_encoder(encode: DocumentEncoder);
+
     fn cbm_gqlgen_set_rust_backend(
         matcher: extern "C" fn(glob: *const c_char, path: *const c_char) -> bool,
         planner: RoutePlanner,
@@ -125,6 +138,36 @@ unsafe extern "C" {
         kind: *const c_char,
         properties: *const c_char,
     ) -> i64;
+}
+
+unsafe extern "C" fn encode_document(
+    source: *const c_char,
+    require_keyword: bool,
+    capacity: usize,
+    shorthand: *mut bool,
+    sink: SignatureSink,
+    context: *mut c_void,
+) -> bool {
+    #[cfg(feature = "native-graphql-fixtures")]
+    fixture_witness::mark(fixture_witness::DOCUMENT);
+
+    // SAFETY: The C entry points check the input before lending it to Rust.
+    let source = unsafe { CStr::from_ptr(source) }.to_bytes();
+    let mut short = false;
+    let signature = crate::graphql_document::signature(
+        source,
+        require_keyword,
+        capacity,
+        &mut short,
+    );
+    // SAFETY: The optional flag is writable and the sink borrows the bytes
+    // and its context synchronously, without retaining either pointer.
+    unsafe {
+        if let Some(shorthand) = shorthand.as_mut() {
+            *shorthand = short;
+        }
+        signature.is_some_and(|bytes| sink(context, bytes.as_ptr(), bytes.len()))
+    }
 }
 
 extern "C" fn gqlgen_glob_match(
@@ -310,6 +353,7 @@ extern "C" fn graphql_find_handler(
 pub unsafe extern "C" fn mori_register_graphql_callbacks() {
     // SAFETY: Callers register at startup before starting any graph work.
     unsafe {
+        cbm_graphql_set_document_encoder(encode_document);
         cbm_gqlgen_set_rust_backend(
             gqlgen_glob_match,
             plan_graphql_route,

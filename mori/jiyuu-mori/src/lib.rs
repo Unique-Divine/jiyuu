@@ -2,6 +2,8 @@
 
 #[cfg(any(feature = "graphql-callbacks", test))]
 mod gqlgen;
+#[cfg(any(all(feature = "graphql-callbacks", not(test)), test))]
+mod graphql_document;
 #[cfg(any(feature = "graphql-callbacks", test))]
 mod graphql_link;
 #[cfg(any(feature = "graphql-callbacks", test))]
