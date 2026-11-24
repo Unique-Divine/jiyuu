@@ -1,5 +1,5 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { Client } from "discord.js";
+import { Status, type Client } from "discord.js";
 import { z } from "zod";
 import {
   CallToolRequestSchema,
@@ -65,6 +65,12 @@ import {
 
 const CLIENT_STATE_LOG_INTERVAL_MS = 5 * 60 * 1000; // was 10_000
 
+export function isDiscordReady(client: Client): boolean {
+  // The manager can remain Ready while a gateway shard reconnects.
+  return client.isReady() && client.ws.shards.size > 0
+    && client.ws.shards.every(shard => shard.status === Status.Ready);
+}
+
 export class DiscordMCPServer {
   private toolContext: ReturnType<typeof createToolContext>;
   private clientStatusInterval: NodeJS.Timeout | null = null;
@@ -120,7 +126,7 @@ export class DiscordMCPServer {
       if (this.shared && name === 'discord_login') {
         return { content: [{ type: 'text', text: 'Discord login is configured by the shared service' }], isError: true };
       }
-      if (this.shared && !this.client.isReady()) {
+      if (this.shared && !isDiscordReady(this.client)) {
         return { content: [{ type: 'text', text: 'Discord is not ready' }], isError: true };
       }
 

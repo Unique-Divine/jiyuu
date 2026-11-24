@@ -172,7 +172,8 @@ sends and deletes. Use it on a workstation where you trust local users.
 Both `src/index.ts` and `src/app.ts` accept `--transport http` from a source
 checkout. Without `--shared`, HTTP retains runtime login, defaults to port
 8080, and permits an explicit non-loopback `--host` or `HTTP_HOST` with a
-warning. The two entrypoints serve the same tools.
+warning. Both entrypoints serve the same tools. The `src/app.ts` entrypoint
+retains its original gateway intents without Server Members.
 
 HTTP clients must send the `Mcp-Session-Id` header returned by `initialize`
 on subsequent requests. The server expires sessions after 30 minutes of

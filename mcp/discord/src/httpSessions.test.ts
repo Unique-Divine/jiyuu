@@ -2,9 +2,26 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import {
+    CallToolResultSchema, InitializeResultSchema, JSONRPCRequestSchema, JSONRPCResponseSchema, ListToolsResultSchema
+} from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import { StreamableHttpTransport } from './transport.js';
 import { freePort, postInitialize } from './test-support/httpEntrypoint.js';
+
+const methods = z.enum(['initialize', 'tools/list', 'tools/call']);
+const exchangeSchema = z.object({
+    method: methods,
+    requestSession: z.string().nullable(),
+    responseSession: z.string().nullable(),
+    response: JSONRPCResponseSchema,
+});
+type Exchange = z.infer<typeof exchangeSchema>;
+const resultSchemas = {
+    initialize: InitializeResultSchema,
+    'tools/list': ListToolsResultSchema,
+    'tools/call': CallToolResultSchema,
+};
 
 describe('HTTP sessions', () => {
     const idleTimeoutMs = 180;
@@ -41,21 +58,40 @@ describe('HTTP sessions', () => {
         await transport.stop();
     });
 
-    async function connect() {
+    async function connect(recordAs?: 'client-a' | 'client-b') {
         const client = new Client({ name: 'fixture client', version: '1' });
         clients.push(client);
-        const toolIds: unknown[] = [];
+        const exchanges: Exchange[] = [];
+        let session: string | null = null;
+        function normalize(id: string | null): string | null {
+            if (id === null) return null;
+            if (id !== session || !recordAs) throw new Error('Unexpected session ID');
+            return recordAs;
+        }
         const connection = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`), {
             fetch: async (input, init) => {
-                if (typeof init?.body === 'string') {
-                    const request = JSON.parse(init.body);
-                    if (request.method === 'tools/call') toolIds.push(request.id);
+                const response = await fetch(input, init);
+                if (recordAs && typeof init?.body === 'string') {
+                    const request = JSONRPCRequestSchema.safeParse(JSON.parse(init.body));
+                    const method = methods.safeParse(request.data?.method);
+                    if (request.success && method.success) {
+                        const responseId = response.headers.get('Mcp-Session-Id');
+                        if (method.data === 'initialize') session = responseId;
+                        const rpcResponse = JSONRPCResponseSchema.parse(await response.clone().json());
+                        expect(rpcResponse.id).toBe(request.data.id);
+                        exchanges.push({
+                            method: method.data,
+                            requestSession: normalize(new Headers(init.headers).get('Mcp-Session-Id')),
+                            responseSession: normalize(responseId),
+                            response: rpcResponse,
+                        });
+                    }
                 }
-                return fetch(input, init);
+                return response;
             }
         });
         await client.connect(connection);
-        return { client, connection, toolIds };
+        return { client, connection, exchanges };
     }
 
     function echo(client: Client, message: string) {
@@ -75,20 +111,25 @@ describe('HTTP sessions', () => {
     }
 
     it('routes overlapping calls with the same client-generated ID to their own responses', async () => {
-        const { client: first, connection: firstConnection, toolIds: firstIds } = await connect();
-        const { client: second, connection: secondConnection, toolIds: secondIds } = await connect();
+        const { client: first, connection: firstConnection, exchanges: firstExchanges } = await connect('client-a');
+        const { client: second, connection: secondConnection, exchanges: secondExchanges } = await connect('client-b');
         expect(firstConnection.sessionId).toBeString();
         expect(secondConnection.sessionId).not.toBe(firstConnection.sessionId);
 
-        // Both SDK clients start at the same initial request ID and these
-        // are the first tool calls on each connection. Keep them in flight together.
+        // Both SDK clients start at the same initial request ID.
+        await first.listTools();
+        await second.listTools();
         const delayed = echo(first, 'delayed');
         await entered.promise;
         expect((await echo(second, 'immediate')).content).toEqual([{ type: 'text', text: 'immediate' }]);
         release.resolve();
         expect((await delayed).content).toEqual([{ type: 'text', text: 'delayed' }]);
-        expect(firstIds).toHaveLength(1);
-        expect(secondIds).toEqual(firstIds);
+        expect(firstExchanges.at(-1)?.response.id).toBe(secondExchanges.at(-1)?.response.id);
+        const recording = [...firstExchanges, ...secondExchanges];
+        const file = Bun.file(new URL('./test-support/fixtures/http-sessions.json', import.meta.url));
+        const replay = exchangeSchema.array().length(6).parse(await file.json());
+        for (const { method, response } of replay) resultSchemas[method].parse(response.result);
+        expect(recording).toEqual(replay);
     });
 
     it('closes one session explicitly without disrupting another', async () => {

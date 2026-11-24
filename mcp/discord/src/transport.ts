@@ -2,7 +2,7 @@ import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
-import express, { type Request, type Response } from "express";
+import express, { type ErrorRequestHandler, type Request, type Response } from "express";
 import { randomUUID } from "node:crypto";
 import type { Server as HttpServer } from "node:http";
 import { info, error } from './logger.js';
@@ -54,6 +54,13 @@ function rpcError(res: Response, status: number, message: string) {
     res.status(status).json({ jsonrpc: '2.0', error: { code: -32000, message }, id: null });
 }
 
+const rejectInvalidBody: ErrorRequestHandler = (err: unknown, _req, res, _next) => {
+    // Express's default error handler logs parser errors, including body text.
+    const status = (err as { status?: unknown } | null)?.status;
+    const badRequest = typeof status === 'number' && status >= 400 && status < 500;
+    rpcError(res, badRequest ? status : 400, 'Invalid MCP request body');
+};
+
 export class StreamableHttpTransport implements MCPTransport {
     private readonly sessions = new Map<string, HttpSession>();
     private readonly transports = new Set<StreamableHTTPServerTransport>();
@@ -74,6 +81,7 @@ export class StreamableHttpTransport implements MCPTransport {
             });
         }
         app.use(express.json());
+        app.use(rejectInvalidBody);
         app.all('/mcp', (req, res) => this.handleRequest(createServer, req, res));
 
         const warning = nonLoopbackWarning(host);

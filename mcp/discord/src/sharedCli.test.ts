@@ -62,6 +62,7 @@ describe('shared HTTP CLI', () => {
 
         try {
             await server.waitFor(/fixture login started/);
+            await server.waitFor(/fixture GuildMembers intent: true/);
             expect(await health()).toBe(503);
 
             for (const client of [first, second]) {
@@ -79,8 +80,13 @@ describe('shared HTTP CLI', () => {
             await server.waitFor(/Successfully logged in/);
             expect(await health()).toBe(200);
             server.signal('SIGUSR2');
-            await server.waitFor(/fixture disconnected/);
+            await server.waitFor(/fixture reconnecting \(client\.isReady\(\)=true\)/);
             expect(await health()).toBe(503);
+            const unavailable = await second.callTool({ name: 'discord_list_servers' });
+            expect(unavailable.content).toEqual([{ type: 'text', text: 'Discord is not ready' }]);
+            server.signal('SIGUSR2');
+            await server.waitFor(/fixture resumed \(client\.isReady\(\)=true\)/);
+            expect(await health()).toBe(200);
 
             server.signal('SIGTERM');
             expect(await server.exitCode).toBe(0);
