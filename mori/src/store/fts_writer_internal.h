@@ -7,6 +7,6 @@
 typedef void (*cbm_fts_report_error_fn)(cbm_store_t *s, const char *context, const char *message);
 
 int mori_fts_write(cbm_store_t *s, struct sqlite3 *db, const char *project, int64_t after_id,
-                   cbm_fts_report_error_fn report_error);
+                   bool closure_refresh, cbm_fts_report_error_fn report_error);
 
 #endif

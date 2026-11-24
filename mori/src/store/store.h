@@ -1443,4 +1443,9 @@ int cbm_store_exec(cbm_store_t *s, const char *sql);
  * fatal); CBM_STORE_ERR on a genuine write failure. */
 int cbm_store_fts_rebuild(cbm_store_t *s, const char *project, int64_t after_id);
 
+/* Refresh FTS from all live nodes after closure repair. The caller owns the
+ * transaction. A missing FTS table is reported as CBM_STORE_NOT_FOUND. */
+int cbm_store_fts_refresh_closure(cbm_store_t *s, cbm_store_cancel_fn cancel,
+                                  void *context);
+
 #endif /* CBM_STORE_H */
