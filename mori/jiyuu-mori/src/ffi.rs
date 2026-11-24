@@ -574,6 +574,11 @@ pub unsafe extern "C" fn main(argc: c_int, argv: *mut *mut c_char) -> c_int {
         {
             jiyuu_mori::mori_register_graphql_extractor();
         }
+        if std::env::var_os("MORI_IMPL_GO_IMPORTS").as_deref()
+            == Some(OsStr::new("rust"))
+        {
+            jiyuu_mori::mori_register_go_import_extractor();
+        }
         if std::env::var_os("MORI_IMPL_MARKDOWN_EXTRACT").as_deref()
             == Some(OsStr::new("rust"))
         {
