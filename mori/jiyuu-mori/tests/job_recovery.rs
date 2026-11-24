@@ -120,14 +120,18 @@ fn worker_recovery_preserves_the_partial_graph_with_both_drivers() {
         .expect("open the published graph");
         let mut statement = db
             .prepare(
-                "SELECT name FROM nodes WHERE label = 'Function' ORDER BY name",
+                "SELECT file_path, name FROM nodes
+                 WHERE label = 'Function' AND file_path IN ('good.py', 'crasher.py')
+                 ORDER BY file_path, name",
             )
             .expect("find retained definitions");
         let names = statement
-            .query_map([], |row| row.get::<_, String>(0))
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
             .expect("read definitions")
             .collect::<Result<Vec<_>, _>>()
             .expect("definition names");
-        assert_eq!(names, ["stays_in_graph"]);
+        assert_eq!(names, [("good.py".to_owned(), "stays_in_graph".to_owned())]);
     }
 }
