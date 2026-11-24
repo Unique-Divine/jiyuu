@@ -1861,7 +1861,7 @@ extern "C" fn cbm_git_facts_read_blob_batch(
     })
 }
 
-#[cfg(any(feature = "native-engine-fixtures", test))]
+#[cfg(any(feature = "native-engine-test-seams", test))]
 mod fixtures {
     use super::*;
 
