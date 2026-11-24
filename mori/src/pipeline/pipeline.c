@@ -5266,6 +5266,143 @@ static int finish_live_noop(cbm_pipeline_t *p, const char *final_path) {
     return rc;
 }
 
+struct cbm_source_publish {
+    cbm_pipeline_t *pipeline;
+    char *staging_path;
+    char *final_path;
+    bool final_existed;
+    bool backup_succeeded;
+    bool stage_consumed;
+};
+
+static bool source_publish_cancelled(cbm_source_publish_t *run) {
+    return check_cancel(run->pipeline) != 0;
+}
+
+static int source_publish_finish_noop(cbm_source_publish_t *run) {
+    cleanup_staging_db(run->staging_path);
+    run->stage_consumed = true;
+    return finish_live_noop(run->pipeline, run->final_path);
+}
+
+static bool source_publish_relink(cbm_source_publish_t *run) {
+    cbm_pipeline_t *p = run->pipeline;
+    return cbm_cross_repo_relink_stage(run->final_path, run->staging_path, p->project_name,
+                                       p->cancelled) == CBM_STORE_OK;
+}
+
+static bool source_publish_seal(cbm_source_publish_t *run) {
+    return seal_staging_db(run->staging_path) == 0;
+}
+
+static void source_publish_before_hook(cbm_source_publish_t *run) {
+    cbm_pipeline_t *p = run->pipeline;
+    if (p->before_publish_hook) {
+        p->before_publish_hook(p, run->staging_path, p->before_publish_hook_ctx);
+    }
+}
+
+static bool source_publish_config_matches(cbm_source_publish_t *run) {
+    cbm_pipeline_t *p = run->pipeline;
+    cbm_userconfig_t *fresh_config = cbm_userconfig_load_with_source(p->repo_path);
+    bool matches = cbm_pipeline_project_source_matches(p, fresh_config);
+    cbm_userconfig_free(fresh_config);
+    if (!matches) {
+        cbm_log_error("pipeline.err", "phase", "test_declarations_source_changed");
+    }
+    return matches;
+}
+
+static bool source_publish_claim_lease(cbm_source_publish_t *run) {
+    cbm_pipeline_t *p = run->pipeline;
+    if (p->publish_gate && !p->publish_gate(p->publish_gate_ctx)) {
+        cbm_log_warn("pipeline.publish_refused", "path", run->final_path);
+        return false;
+    }
+    return true;
+}
+
+/* Keep destination preparation and recovery together. Once preparation moves
+ * the previous generation aside, a failed rename must restore it. */
+static int source_publish_commit(cbm_source_publish_t *run) {
+    cbm_pipeline_t *p = run->pipeline;
+    cbm_replacement_prepare_t prepared = {0};
+    int rc = prepare_publish_destination(run->final_path, run->final_existed, run->backup_succeeded,
+                                         &prepared);
+    if (rc != 0) {
+        cbm_log_error("pipeline.err", "phase", "publish", "path", run->final_path);
+        return rc;
+    }
+    if ((p->rename_hook ? p->rename_hook(run->staging_path, run->final_path, p->rename_hook_ctx)
+                        : cbm_rename_replace(run->staging_path, run->final_path)) != 0) {
+        cbm_log_error("pipeline.err", "phase", "publish", "path", run->final_path);
+        (void)rollback_quarantined_generation(run->final_path, &prepared);
+        return CBM_PIPELINE_PERSIST_FAILED;
+    }
+
+    stage_owner_release(run->staging_path);
+    run->stage_consumed = true;
+    return export_after_publish(p, run->final_path);
+}
+
+static int run_source_publish_c(cbm_source_publish_t *run, int rc, bool live_noop) {
+    if (rc != 0) {
+        return rc;
+    }
+    if (source_publish_cancelled(run)) {
+        return CBM_PIPELINE_ABORT_PRESERVE_DB;
+    }
+    if (live_noop) {
+        return source_publish_finish_noop(run);
+    }
+    if (run->final_existed && !source_publish_relink(run)) {
+        return source_publish_cancelled(run) ? CBM_PIPELINE_ABORT_PRESERVE_DB
+                                             : CBM_PIPELINE_PERSIST_FAILED;
+    }
+    if (!source_publish_seal(run)) {
+        return CBM_PIPELINE_PERSIST_FAILED;
+    }
+    source_publish_before_hook(run);
+    if (source_publish_cancelled(run)) {
+        return CBM_PIPELINE_ABORT_PRESERVE_DB;
+    }
+    /* A hook can reopen SQLite in WAL mode. Install a standalone main file. */
+    if (!source_publish_seal(run)) {
+        return CBM_PIPELINE_PERSIST_FAILED;
+    }
+    if (!source_publish_config_matches(run) || !source_publish_claim_lease(run)) {
+        return CBM_PIPELINE_ABORT_PRESERVE_DB;
+    }
+    return source_publish_commit(run);
+}
+
+static cbm_source_publish_fn source_publish_driver;
+
+void cbm_pipeline_set_source_publish(cbm_source_publish_fn publish) {
+    source_publish_driver = publish;
+}
+
+static int run_source_publish(cbm_source_publish_t *run, int rc, bool live_noop) {
+    static const cbm_source_publish_ops_t ops = {
+        .abort_preserve_db = CBM_PIPELINE_ABORT_PRESERVE_DB,
+        .persist_failed = CBM_PIPELINE_PERSIST_FAILED,
+        .cancelled = source_publish_cancelled,
+        .finish_noop = source_publish_finish_noop,
+        .relink = source_publish_relink,
+        .seal = source_publish_seal,
+        .before_publish = source_publish_before_hook,
+        .source_matches = source_publish_config_matches,
+        .claim_lease = source_publish_claim_lease,
+        .commit = source_publish_commit,
+    };
+    if (source_publish_driver) {
+        cbm_log_info("pipeline.source_publish", "implementation", "rust", "staged_rc",
+                     itoa_buf(rc));
+        return source_publish_driver(run, &ops, rc, live_noop, run->final_existed);
+    }
+    return run_source_publish_c(run, rc, live_noop);
+}
+
 int cbm_pipeline_run(cbm_pipeline_t *p) {
     /* Per-index attribution: peaks and phase totals are about THIS index, not
      * the process history, so they start clean here. The first mark opens
@@ -5324,118 +5461,17 @@ int cbm_pipeline_run(cbm_pipeline_t *p) {
     p->live_noop = false;
     p->live_db_path = NULL;
 
-    /* Report WHY the run stopped. Everything below happens before the final
-     * rename, so the live database is still the previous generation and an
-     * abort is genuinely non-destructive -- a caller that cannot tell an
-     * aborted run from a failed persist cannot tell whether its data survived.
-     * The staging file is discarded on every one of these paths. */
-    if (rc != 0) {
+    cbm_source_publish_t publish = {
+        .pipeline = p,
+        .staging_path = staging_path,
+        .final_path = final_path,
+        .final_existed = final_existed,
+        .backup_succeeded = backup_succeeded,
+    };
+    rc = run_source_publish(&publish, rc, live_noop);
+    if (!publish.stage_consumed) {
         cleanup_staging_db(staging_path);
-        free(staging_path);
-        free(final_path);
-        pipeline_release_test_config(p);
-        return rc;
     }
-    /* A cancelled run and a live no-op both end here without publishing:
-     * the stage placeholder is discarded, and only the no-op goes on to
-     * finish on the live generation. */
-    bool cancelled = check_cancel(p);
-    if (cancelled || live_noop) {
-        cleanup_staging_db(staging_path);
-        free(staging_path);
-        rc = cancelled ? CBM_PIPELINE_ABORT_PRESERVE_DB : finish_live_noop(p, final_path);
-        free(final_path);
-        pipeline_release_test_config(p);
-        return rc;
-    }
-    if (final_existed && cbm_cross_repo_relink_stage(final_path, staging_path, p->project_name,
-                                                     p->cancelled) != CBM_STORE_OK) {
-        bool cancelled_during_relink = check_cancel(p);
-        cleanup_staging_db(staging_path);
-        free(staging_path);
-        free(final_path);
-        pipeline_release_test_config(p);
-        return cancelled_during_relink ? CBM_PIPELINE_ABORT_PRESERVE_DB
-                                       : CBM_PIPELINE_PERSIST_FAILED;
-    }
-    if (seal_staging_db(staging_path) != 0) {
-        cleanup_staging_db(staging_path);
-        free(staging_path);
-        free(final_path);
-        pipeline_release_test_config(p);
-        return CBM_PIPELINE_PERSIST_FAILED;
-    }
-
-    if (p->before_publish_hook) {
-        p->before_publish_hook(p, staging_path, p->before_publish_hook_ctx);
-    }
-    if (check_cancel(p)) {
-        cleanup_staging_db(staging_path);
-        free(staging_path);
-        free(final_path);
-        pipeline_release_test_config(p);
-        return CBM_PIPELINE_ABORT_PRESERVE_DB;
-    }
-
-    /* A test hook may inspect the DB through SQLite and re-enable WAL mode;
-     * seal once more before installing the standalone main file. */
-    if (seal_staging_db(staging_path) != 0) {
-        cleanup_staging_db(staging_path);
-        free(staging_path);
-        free(final_path);
-        pipeline_release_test_config(p);
-        return CBM_PIPELINE_PERSIST_FAILED;
-    }
-
-    /* Check after the before-publish hook and the final seal, while the
-     * original bytes are still owned. ERROR and absent/present changes abort. */
-    cbm_userconfig_t *fresh_config = cbm_userconfig_load_with_source(p->repo_path);
-    bool source_matches = cbm_pipeline_project_source_matches(p, fresh_config);
-    cbm_userconfig_free(fresh_config);
-    bool publish_allowed = source_matches;
-    if (!source_matches) {
-        cbm_log_error("pipeline.err", "phase", "test_declarations_source_changed");
-    } else if (p->publish_gate && !p->publish_gate(p->publish_gate_ctx)) {
-        /* Last point at which the serving database is still untouched: the
-         * destination preparation below may already move it aside. */
-        cbm_log_warn("pipeline.publish_refused", "path", final_path);
-        publish_allowed = false;
-    }
-    if (!publish_allowed) {
-        cleanup_staging_db(staging_path);
-        free(staging_path);
-        free(final_path);
-        pipeline_release_test_config(p);
-        return CBM_PIPELINE_ABORT_PRESERVE_DB;
-    }
-
-    cbm_replacement_prepare_t prepared = {0};
-    int prepare_rc =
-        prepare_publish_destination(final_path, final_existed, backup_succeeded, &prepared);
-    if (prepare_rc != 0) {
-        cbm_log_error("pipeline.err", "phase", "publish", "path", final_path);
-        cleanup_staging_db(staging_path);
-        free(staging_path);
-        free(final_path);
-        pipeline_release_test_config(p);
-        return prepare_rc;
-    }
-    if ((p->rename_hook ? p->rename_hook(staging_path, final_path, p->rename_hook_ctx)
-                        : cbm_rename_replace(staging_path, final_path)) != 0) {
-        cbm_log_error("pipeline.err", "phase", "publish", "path", final_path);
-        /* Put a quarantined destination back: the publish did not happen, so
-         * leaving the previous generation parked under .corrupt would present
-         * the caller with no database at all. */
-        (void)rollback_quarantined_generation(final_path, &prepared);
-        cleanup_staging_db(staging_path);
-        free(staging_path);
-        free(final_path);
-        pipeline_release_test_config(p);
-        return CBM_PIPELINE_PERSIST_FAILED;
-    }
-
-    stage_owner_release(staging_path);
-    rc = export_after_publish(p, final_path);
     free(staging_path);
     free(final_path);
     pipeline_release_test_config(p);

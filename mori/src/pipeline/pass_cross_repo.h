@@ -97,24 +97,39 @@ int cbm_cross_repo_relink_stage(const char *live_path, const char *stage_path, c
  * buffer. A missing, busy, or unreadable graph returns false. */
 bool cbm_cross_repo_read_generation(const char *project, char *generation, size_t capacity);
 
+/* Open a nonwaiting snapshot of a graph database. A readable DB without
+ * graph tables returns true with no scope. A read error returns false. */
+bool cbm_cross_repo_open_graph_snapshot(cbm_store_t *store, cbm_store_read_scope_t **scope);
+
 typedef void (*cbm_cross_repo_client_visitor_t)(void *context, const char *client,
                                                 const char *const *targets, int target_count);
 
 /* Visit clients with an explicit saved target set that includes this provider
  * and records an unknown or older provider generation. The visitor borrows
  * each client name and its complete targets for the duration of the call.
- * Selection is advisory. Dispatch must reread the graph under its write lease. */
-void cbm_cross_repo_visit_stale_clients(const char *provider, const char *generation,
+ * Selection is advisory. Dispatch must reread the graph under its write lease.
+ * Returns false if any client's graph could not be checked or the scan stopped. */
+bool cbm_cross_repo_visit_stale_clients(const char *provider, const char *generation,
                                         cbm_cross_repo_client_visitor_t visitor, void *context,
                                         const atomic_int *cancelled);
 
-/* Check whether this published generation still needs peer-side writes. */
+/* Check whether the graph still needs peer-side writes. */
 bool cbm_cross_repo_reverse_pending(const char *project);
 
-/* Complete peer-side writes after publication. Caller must hold the wildcard
- * project mutation lease. A cancellation rolls back the current peer write
- * and leaves the repair pending. */
+/* Read pending work through the caller's pinned graph snapshot. A false
+ * return means the state could not be read. */
+bool cbm_cross_repo_read_reverse_pending(cbm_store_t *store, const char *project, bool *pending);
+
+/* Complete peer-side writes after publication or automatic repair. Caller
+ * must hold the wildcard project mutation lease. Cancellation rolls back
+ * the current peer write and leaves the repair pending. */
 bool cbm_cross_repo_reconcile_published(const char *project, const atomic_int *cancelled);
+
+/* Refresh a client's explicit saved targets in place, preserving incoming
+ * callers and the published source generation. Caller must hold the wildcard
+ * project mutation lease. Returns false if the forward refresh rolls back or
+ * if committed forward links still have pending reverse work. */
+bool cbm_cross_repo_repair_saved(const char *project, const atomic_int *cancelled);
 
 /* Run cross-repo matching for `project` against `target_projects`.
  * If target_count == 1 and target_projects[0] == "*", matches against all

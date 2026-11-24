@@ -63,7 +63,8 @@ impl IndexSession {
             .env("CBM_LOG_LEVEL", "info")
             .env("MORI_IMPL_INDEX_MANIFEST", self.implementation)
             .env("MORI_IMPL_INDEX_ROUTE", self.implementation)
-            .env("MORI_IMPL_FULL_BUILD_DRIVER", self.implementation);
+            .env("MORI_IMPL_FULL_BUILD_DRIVER", self.implementation)
+            .env("MORI_IMPL_SOURCE_PUBLISH", self.implementation);
         command
     }
 
@@ -133,6 +134,13 @@ impl IndexSession {
         assert_eq!(
             logs.contains("msg=pipeline.full_build_driver implementation=rust"),
             rust_full,
+            "{logs}"
+        );
+        assert_eq!(
+            logs.contains(
+                "msg=pipeline.source_publish implementation=rust staged_rc=0"
+            ),
+            self.implementation == "rust",
             "{logs}"
         );
         assert!(logs.contains(step.log), "{logs}");
@@ -227,6 +235,13 @@ impl IndexSession {
         self.check_route(&logs, Some(("staged", "full")));
         assert!(logs.contains("reason=adr_migrate_failed"), "{logs}");
         assert!(!logs.contains("msg=pipeline.full_build_driver"), "{logs}");
+        assert_eq!(
+            logs.contains(
+                "msg=pipeline.source_publish implementation=rust staged_rc=-2"
+            ),
+            self.implementation == "rust",
+            "{logs}"
+        );
         assert_eq!(self.state(name), before);
         assert!(
             fs::read(&db_path).unwrap() == before_graph,

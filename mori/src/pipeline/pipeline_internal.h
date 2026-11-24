@@ -1686,6 +1686,29 @@ typedef int (*cbm_full_build_driver_fn)(cbm_full_build_t *, const cbm_full_build
 /* Register before any pipeline workers start. */
 void cbm_pipeline_set_full_build_driver(cbm_full_build_driver_fn driver);
 
+/* Source publication starts after the staged run and borrows native state.
+ * C owns cleanup and file operations. Commit prepares the destination and
+ * rolls back a failed rename; finish_noop discards the empty placeholder. */
+typedef struct cbm_source_publish cbm_source_publish_t;
+typedef struct {
+    int abort_preserve_db;
+    int persist_failed;
+    bool (*cancelled)(cbm_source_publish_t *);
+    int (*finish_noop)(cbm_source_publish_t *);
+    bool (*relink)(cbm_source_publish_t *);
+    bool (*seal)(cbm_source_publish_t *);
+    void (*before_publish)(cbm_source_publish_t *);
+    bool (*source_matches)(cbm_source_publish_t *);
+    bool (*claim_lease)(cbm_source_publish_t *);
+    int (*commit)(cbm_source_publish_t *);
+} cbm_source_publish_ops_t;
+
+typedef int (*cbm_source_publish_fn)(cbm_source_publish_t *, const cbm_source_publish_ops_t *,
+                                     int staged_rc, bool live_noop, bool final_existed);
+
+/* Register before any pipeline workers start. */
+void cbm_pipeline_set_source_publish(cbm_source_publish_fn publish);
+
 /* ── Incremental pipeline (pipeline_incremental.c) ───────────────── */
 
 typedef enum {

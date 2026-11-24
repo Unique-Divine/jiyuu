@@ -17,24 +17,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-typedef int (*frontend_read_message_fn)(FILE *in, char **message, bool *content_length_framed);
-typedef bool (*frontend_write_response_fn)(FILE *out, const uint8_t *response, uint32_t length,
-                                           bool content_length_framed);
-
-static frontend_read_message_fn frontend_read_message = cbm_mcp_read_message;
-static frontend_write_response_fn frontend_external_write;
-
-/* The linked program registers its transport once, before C main starts the
- * frontend. A successful read must supply a malloc-owned NUL-terminated
- * message. The frontend owns the message from then on. */
-void cbm_daemon_frontend_set_stdio(frontend_read_message_fn read_message,
-                                   frontend_write_response_fn write_response);
-void cbm_daemon_frontend_set_stdio(frontend_read_message_fn read_message,
-                                   frontend_write_response_fn write_response) {
-    frontend_read_message = read_message;
-    frontend_external_write = write_response;
-}
-
 enum {
     FRONTEND_QUEUE_CAPACITY = 8,
     FRONTEND_QUEUE_BYTES_MAX = 12 * 1024 * 1024,
@@ -115,6 +97,33 @@ typedef struct {
      * batch that is still making progress from a genuinely stuck request. */
     atomic_uint_fast64_t completed_items;
 } frontend_state_t;
+
+/* The Rust loop borrows the FILE, state and operations only until it returns.
+ * enqueue takes ownership on success. Otherwise the loop releases the buffer. */
+typedef struct {
+    void *(*alloc_message)(size_t size);
+    void (*free_message)(void *message);
+    bool (*route_cancellation)(frontend_state_t *, const char *, bool *active);
+    bool (*cancel_active)(frontend_state_t *);
+    bool (*enqueue)(frontend_state_t *, char *, bool content_length_framed);
+    bool (*stop_begin)(frontend_state_t *);
+} frontend_receive_ops_t;
+
+typedef int (*frontend_receive_fn)(FILE *in, frontend_state_t *, const frontend_receive_ops_t *,
+                                   bool *stop_begun);
+typedef bool (*frontend_write_response_fn)(FILE *out, const uint8_t *response, uint32_t length,
+                                           bool content_length_framed);
+static frontend_receive_fn frontend_external_receive;
+static frontend_write_response_fn frontend_external_write;
+
+/* Rust registers once, before the frontend threads start. */
+void cbm_daemon_frontend_set_stdio(frontend_receive_fn receive,
+                                   frontend_write_response_fn write_response);
+void cbm_daemon_frontend_set_stdio(frontend_receive_fn receive,
+                                   frontend_write_response_fn write_response) {
+    frontend_external_receive = receive;
+    frontend_external_write = write_response;
+}
 
 typedef struct {
     atomic_bool complete;
@@ -499,7 +508,6 @@ bool cbm_daemon_frontend_cancellation_matches_request(const char *message, int64
 }
 
 typedef enum {
-    FRONTEND_CANCELLATION_NONE = 0,
     FRONTEND_CANCELLATION_STALE = 1,
     FRONTEND_CANCELLATION_QUEUED = 2,
     FRONTEND_CANCELLATION_ACTIVE = 3,
@@ -509,11 +517,12 @@ typedef enum {
  * request routes its exact runtime token without closing the authenticated
  * session. A queued request is marked and receives a cancellation error
  * without ever reaching the daemon. Stale/invalid targets are ignored. */
-static frontend_cancellation_route_t frontend_route_cancellation(frontend_state_t *state,
-                                                                 const char *message) {
+static bool frontend_route_cancellation(frontend_state_t *state, const char *message,
+                                        bool *active) {
+    *active = false;
     cbm_jsonrpc_request_t request = {0};
     if (!frontend_parse_cancellation(message, &request)) {
-        return FRONTEND_CANCELLATION_NONE;
+        return false;
     }
 
     frontend_cancellation_route_t route = FRONTEND_CANCELLATION_STALE;
@@ -543,10 +552,11 @@ static frontend_cancellation_route_t frontend_route_cancellation(frontend_state_
                                   memory_order_release);
     }
 #endif
-    return route;
+    *active = route == FRONTEND_CANCELLATION_ACTIVE;
+    return true;
 }
 
-static cbm_daemon_runtime_cancel_result_t frontend_cancel_active(frontend_state_t *state) {
+static bool frontend_cancel_active(frontend_state_t *state) {
     cbm_mutex_lock(&state->mutex);
     cbm_daemon_runtime_cancel_result_t result = CBM_DAEMON_RUNTIME_CANCEL_STALE;
     if (state->in_request && state->active_cancelled && state->client &&
@@ -559,7 +569,7 @@ static cbm_daemon_runtime_cancel_result_t frontend_cancel_active(frontend_state_
         result = CBM_DAEMON_RUNTIME_CANCEL_ACCEPTED;
     }
     cbm_mutex_unlock(&state->mutex);
-    return result;
+    return result != CBM_DAEMON_RUNTIME_CANCEL_ERROR;
 }
 
 static bool frontend_configure_client(cbm_daemon_runtime_client_t *client,
@@ -798,6 +808,32 @@ static bool frontend_stop_begin(frontend_state_t *state) {
     return stop_begun;
 }
 
+static int frontend_receive_c(FILE *in, frontend_state_t *state, bool *stop_begun) {
+    for (;;) {
+        char *message = NULL;
+        bool framed = false;
+        int status = cbm_mcp_read_message(in, &message, &framed);
+        if (status <= 0) {
+            free(message);
+            return status;
+        }
+
+        bool active = false;
+        if (frontend_route_cancellation(state, message, &active)) {
+            free(message);
+            if (active && !frontend_cancel_active(state)) {
+                *stop_begun = frontend_stop_begin(state);
+                return -1;
+            }
+            continue;
+        }
+        if (!frontend_enqueue(state, message, framed)) {
+            free(message);
+            return -1;
+        }
+    }
+}
+
 static bool frontend_cancel_for_maintenance(void *opaque) {
     frontend_state_t *state = opaque;
     cbm_daemon_runtime_application_token_t request_token =
@@ -854,42 +890,24 @@ int cbm_daemon_frontend_mcp_run(cbm_daemon_runtime_client_t *client,
         return -1;
     }
 
-    int result = 0;
+    static const frontend_receive_ops_t receive_ops = {
+        .alloc_message = malloc,
+        .free_message = free,
+        .route_cancellation = frontend_route_cancellation,
+        .cancel_active = frontend_cancel_active,
+        .enqueue = frontend_enqueue,
+        .stop_begin = frontend_stop_begin,
+    };
     bool stop_begun = false;
-    bool clean_eof = false;
-    for (;;) {
-        char *message = NULL;
-        bool content_length_framed = false;
-        int read_status = frontend_read_message(in, &message, &content_length_framed);
-        if (read_status <= 0) {
-            result = read_status < 0 ? -1 : 0;
-            clean_eof = read_status == 0;
-            free(message);
-            break;
-        }
-        frontend_cancellation_route_t cancellation = frontend_route_cancellation(&state, message);
-        if (cancellation != FRONTEND_CANCELLATION_NONE) {
-            free(message);
-            if (cancellation == FRONTEND_CANCELLATION_ACTIVE) {
-                cbm_daemon_runtime_cancel_result_t cancelled = frontend_cancel_active(&state);
-                if (cancelled == CBM_DAEMON_RUNTIME_CANCEL_ERROR) {
-                    result = -1;
-                    stop_begun = frontend_stop_begin(&state);
-                    break;
-                }
-            }
-            /* A queued cancellation is represented on that queue item; stale
-             * and malformed targets are intentionally side-effect free. */
-            continue;
-        }
-        if (!frontend_enqueue(&state, message, content_length_framed)) {
-            free(message);
-            result = -1;
-            break;
-        }
+    int result;
+    if (frontend_external_receive) {
+        result = frontend_external_receive(in, &state, &receive_ops, &stop_begun);
+    } else {
+        result = frontend_receive_c(in, &state, &stop_begun);
     }
 
-    if (clean_eof && !stop_begun) {
+    /* Enter teardown directly. Host stderr may be blocked. */
+    if (result == 0 && !stop_begun) {
         frontend_input_closed(&state);
         /* EOF ends INPUT, not accepted work: as long as queued items keep
          * completing, every already-enqueued request still receives its
