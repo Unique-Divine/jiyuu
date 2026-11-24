@@ -135,7 +135,8 @@ mod tests {
 
     #[test]
     fn keeps_native_import_spelling_and_aliases() {
-        let cases: &[(&[u8], Option<&[u8]>, GoImport<'_>)] = &[
+        type Case<'a> = (&'a [u8], Option<&'a [u8]>, GoImport<'a>);
+        let cases: &[Case<'_>] = &[
             (
                 br#""example.net/team/lib.v2""#,
                 None,
