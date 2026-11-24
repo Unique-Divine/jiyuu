@@ -18,6 +18,8 @@ mod ffi_output;
 mod pdf_doc_links;
 #[cfg(feature = "native-engine-abi")]
 mod kubernetes;
+#[cfg(feature = "native-engine-abi")]
+mod shell_pass;
 #[cfg(any(feature = "native-engine-abi", test))]
 mod similarity;
 #[cfg(feature = "native-engine-abi")]
