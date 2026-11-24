@@ -299,7 +299,7 @@ static int pxc_go_named_types(CBMArena *arena, const pxc_span_t *el, int count,
 /* `(*T, error)` -> `*T|error`; `(t *T, err error)` -> `*T|error`;
  * `(a, b int)` -> `int|int`. NULL when raw is no result list (a single
  * result) or does not split cleanly: the caller keeps the raw text then. */
-static const char *pxc_go_result_list(CBMArena *arena, const char *raw) {
+static const char *pxc_go_result_list_c(CBMArena *arena, const char *raw) {
     pxc_span_t el[PXC_GO_MAX_RESULTS];
     int count = pxc_go_split_results(raw, el);
     if (count <= 0) {
@@ -322,6 +322,32 @@ static const char *pxc_go_result_list(CBMArena *arena, const char *raw) {
     }
     types[count] = NULL;
     return pxc_join_pipe(arena, types);
+}
+
+typedef char *(*pxc_go_results_alloc_fn)(void *context, size_t len);
+typedef const char *(*pxc_go_results_fn)(const char *raw, void *context,
+                                        pxc_go_results_alloc_fn alloc);
+
+static pxc_go_results_fn go_results_driver;
+
+void cbm_pxc_set_go_results_driver(pxc_go_results_fn driver);
+void cbm_pxc_set_go_results_driver(pxc_go_results_fn driver) {
+    go_results_driver = driver;
+}
+
+static char *pxc_go_results_arena_alloc(void *context, size_t len) {
+    return cbm_arena_alloc(context, len);
+}
+
+static const char *pxc_go_result_list(CBMArena *arena, const char *raw) {
+    if (!go_results_driver) {
+        return pxc_go_result_list_c(arena, raw);
+    }
+    const char *list = go_results_driver(raw, arena, pxc_go_results_arena_alloc);
+    if (list) {
+        cbm_log_debug("lsp.go_result_list", "implementation", "rust");
+    }
+    return list;
 }
 
 /* ── Cross-file base-class QN resolution ──────────────────────────
