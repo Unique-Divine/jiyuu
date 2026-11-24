@@ -43,7 +43,7 @@ const mockedServer = {
 };
 
 const mockedTransport = {
-  start: jest.fn(),
+  start: jest.fn((createServer: () => unknown) => { createServer(); }),
   stop: jest.fn(),
 };
 
@@ -73,6 +73,7 @@ describe('DiscordMCPServer', () => {
     mockClient = mockedClient;
 
     discordMCPServer = new DiscordMCPServer(mockClient, mockTransport, offlineInfo());
+    discordMCPServer['createServer']();
   });
 
   afterEach(() => {
@@ -620,7 +621,7 @@ describe('DiscordMCPServer', () => {
 
       await discordMCPServer.start();
 
-      expect(mockTransport.start).toHaveBeenCalledWith(mockServer);
+      expect(mockTransport.start).toHaveBeenCalledWith(expect.any(Function));
       // Upstream commit 34882e8 raised the interval from 10 s to 5 min.
       expect(setIntervalSpy).toHaveBeenCalledWith(expect.any(Function), 5 * 60 * 1000);
 
@@ -628,13 +629,6 @@ describe('DiscordMCPServer', () => {
       jest.useRealTimers();
     });
 
-    it('should add client to server context', async () => {
-      await discordMCPServer.start();
-
-      // Check that client was added to the server context
-      expect((mockServer as any)._context).toBeDefined();
-      expect((mockServer as any).client).toBeDefined();
-    });
   });
 
   describe('stop', () => {

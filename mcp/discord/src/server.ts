@@ -1,5 +1,5 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { Client } from "discord.js";
+import { Status, type Client } from "discord.js";
 import { z } from "zod";
 import {
   CallToolRequestSchema,
@@ -65,8 +65,13 @@ import {
 
 const CLIENT_STATE_LOG_INTERVAL_MS = 5 * 60 * 1000; // was 10_000
 
+export function isDiscordReady(client: Client): boolean {
+  // The manager can remain Ready while a gateway shard reconnects.
+  return client.isReady() && client.ws.shards.size > 0
+    && client.ws.shards.every(shard => shard.status === Status.Ready);
+}
+
 export class DiscordMCPServer {
-  private server: Server;
   private toolContext: ReturnType<typeof createToolContext>;
   private clientStatusInterval: NodeJS.Timeout | null = null;
 
@@ -78,11 +83,16 @@ export class DiscordMCPServer {
       fileURLToPath(new URL("..", import.meta.url)),
       ["DISCORD_"],
     ),
+    private shared = false,
   ) {
-    this.server = new Server(
+    this.toolContext = createToolContext(client);
+  }
+
+  private createServer(): Server {
+    const server = new Server(
       {
         name: "MCP-Discord",
-        version: mcpInfo.identity.version
+        version: this.mcpInfo.identity.version
       },
       {
         capabilities: {
@@ -92,30 +102,33 @@ export class DiscordMCPServer {
       }
     );
 
-    this.toolContext = createToolContext(client);
-    this.setupHandlers();
-  }
-
-  private setupHandlers() {
     // Set up the tool list
-    this.server.setRequestHandler(ListToolsRequestSchema, async () => {
+    server.setRequestHandler(ListToolsRequestSchema, async () => {
       return {
-        tools: [...toolList, MCP_INFO_TOOL]
+        tools: [...toolList.filter(tool => !this.shared || tool.name !== 'discord_login'), MCP_INFO_TOOL]
       };
     });
 
     // Handle tool execution requests. The first successful result after the
     // background update check finds a newer release carries a one-line notice.
-    this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const result = request.params.name === MCP_INFO_TOOL.name
         ? await this.mcpInfo.callTool()
         : await this.callTool(request);
       return withUpdateNotice(result, this.mcpInfo.notifier);
     });
+    return server;
   }
 
   private async callTool(request: CallToolRequest): Promise<any> {
       const { name, arguments: args } = request.params;
+
+      if (this.shared && name === 'discord_login') {
+        return { content: [{ type: 'text', text: 'Discord login is configured by the shared service' }], isError: true };
+      }
+      if (this.shared && !isDiscordReady(this.client)) {
+        return { content: [{ type: 'text', text: 'Discord is not ready' }], isError: true };
+      }
 
       try {
         let toolResponse;
@@ -355,16 +368,13 @@ export class DiscordMCPServer {
 
   async start() {
     this.mcpInfo.notifier.start();
-    // Add client to server context so transport can access it
-    (this.server as any)._context = { client: this.client };
-    (this.server as any).client = this.client;
-    
+
     // Setup periodic client state logging
     this.clientStatusInterval = setInterval(() => {
       this.logClientState("periodic check");
     }, CLIENT_STATE_LOG_INTERVAL_MS);
     
-    await this.transport.start(this.server);
+    await this.transport.start(() => this.createServer());
   }
 
   async stop() {
@@ -374,15 +384,14 @@ export class DiscordMCPServer {
       this.clientStatusInterval = null;
     }
 
-    await this.transport.stop();
-
-    // Tear down the discord.js client so its WebSocket and internal
-    // heartbeats stop pinning the event loop. Guarded so a stalled
-    // connection can't throw past shutdown.
     try {
-      await this.client.destroy();
-    } catch (err) {
-      error('Error destroying Discord client: ' + String(err));
+      await this.transport.stop();
+    } finally {
+      try {
+        await this.client.destroy();
+      } catch {
+        error('Could not destroy the Discord client');
+      }
     }
   }
-} 
+}

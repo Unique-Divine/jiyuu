@@ -1,0 +1,8 @@
+{
+  "content": [
+    {
+      "type": "text",
+      "text": "[\n  {\n    \"id\": \"100000000000000000\",\n    \"name\": \"Fixture Guild\",\n    \"icon\": \"https://cdn.discordapp.com/icons/100000000000000000/00000000000000000000000000000000.webp\"\n  }\n]"
+    }
+  ]
+}
