@@ -47,6 +47,9 @@ typedef void (*cbm_http_project_mutation_end_fn)(void *context, const char *proj
  * Returns NULL on failure (e.g. port in use). */
 cbm_http_server_t *cbm_http_server_new(int port);
 
+/* Standalone UI: serve assets, graph reads and read-only RPC on loopback. */
+cbm_http_server_t *cbm_http_server_new_read_only(int port);
+
 /* Free a quiescent HTTP server. Returns false without freeing if the run loop
  * or an index callback can still access it; callers must fail-stop rather than
  * continue cleanup in that state. */

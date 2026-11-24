@@ -40,6 +40,11 @@ bool cbm_git_is_linked_worktree(const char *path);
 bool cbm_git_same_linked_worktree(const char *a, const char *b);
 
 int cbm_git_context_resolve(const char *path, cbm_git_context_t *out);
+#ifndef _WIN32
+/* Use supervised Git capture on the calling thread until cleared with NULL.
+ * The caller owns context until the last capture returns. */
+void cbm_git_context_set_capture_cancel(bool (*cancelled)(void *), void *context);
+#endif
 /* Only the is_git and branch fields of cbm_git_context_resolve, from the same
  * two git commands it uses for them (2 git processes instead of 7). branch
  * gets "" when path is not in a git work tree; pass CBM_GIT_BRANCH_MAX bytes
