@@ -129,6 +129,55 @@ fn top_level_command_precedence_matches_c() {
 }
 
 #[test]
+fn config_cli_matches_c_with_isolated_settings() {
+    let c = c_binary();
+    let native = Scratch::new("c-config");
+    let rust = Scratch::new("rs-config");
+    for (args, status) in [
+        (&["config"][..], 0),
+        (&["config", "ls"], 0),
+        (&["config", "get", "auto_watch"], 0),
+        (&["config", "set", "auto_watch", "false"], 0),
+        (&["config", "get", "auto_watch"], 0),
+        (&["config", "reset", "auto_watch"], 0),
+        (&["config", "set", "ui_port", "08080"], 0),
+        (&["config", "get", "ui_port"], 0),
+        (&["config", "set", "ui_port", "0"], 1),
+        (&["config", "reset", "ui_port"], 0),
+        (&["config", "set", "index_max_files", "4321"], 0),
+        (&["config", "set", "index_max_files", "broken"], 1),
+        (&["config", "get", "index_max_files"], 0),
+        (&["config", "reset", "index_max_files"], 0),
+        (&["config", "get", "missing"], 1),
+        (&["config", "set", "auto_watch"], 1),
+        (&["config", "list"], 0),
+        (&["config", "unknown"], 1),
+    ] {
+        let run = |bin: &Path, scratch: &Scratch| {
+            command_in(bin, scratch)
+                .env("HOME", &scratch.0)
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        let reference = run(&c, &native);
+        let candidate = run(Path::new(MORI), &rust);
+        assert_eq!(
+            reference.status.code(),
+            Some(status),
+            "{args:?}: {reference:?}"
+        );
+        assert_eq!(
+            candidate.status.code(),
+            Some(status),
+            "{args:?}: {candidate:?}"
+        );
+        assert_eq!(reference.stdout, candidate.stdout, "stdout for {args:?}");
+        assert_eq!(reference.stderr, candidate.stderr, "stderr for {args:?}");
+    }
+}
+
+#[test]
 fn malformed_internal_roles_are_rejected_before_dispatch() {
     let fingerprint = "0123456789abcdef".repeat(4);
     let worker = [

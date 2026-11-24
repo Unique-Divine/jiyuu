@@ -1500,7 +1500,6 @@ LIBMORI_SRCS = $(LIBMORI_PROD_SRCS) $(EXTRACTION_SRCS) $(AC_LZ4_SRCS) $(ZSTD_SRC
 LIBMORI_OBJS = $(patsubst %.c,$(LIBMORI_DIR)/%.o,$(LIBMORI_SRCS))
 LIBMORI_MAIN_OBJ = $(LIBMORI_DIR)/cbm_c_main.o
 LIBMORI_A = $(BUILD_DIR)/libmori-c.a
-
 $(LIBMORI_DIR)/%.o: %.c $(BUILD_DIR)/.build-config $(PROJECT_HDRS) | $(BUILD_DIR)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS_PROD) $(LIBMORI_INDEX_DRIVER_FLAGS) -c -o $@ $<
