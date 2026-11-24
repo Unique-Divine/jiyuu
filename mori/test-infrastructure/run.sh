@@ -59,7 +59,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 # ── Per-run isolation (concurrent agents / multiple worktrees) ───────────────
 # Container names are already unique per `compose run --rm`, but the BUILD
-# volume was not: two legs running at once wrote the same /src/build, so one
+# volume was not: two legs running at once wrote the same /workspace/mori/build, so one
 # run's objects and test-logs replaced the other's — after which the parallel
 # scheduler dies reading a suite log that another run had removed. Each run now
 # gets its own build volume, keyed by a unique run id. ccache and the fixture
@@ -98,15 +98,16 @@ trap ci_cleanup EXIT
 
 COMPOSE="docker compose -f $ROOT/test-infrastructure/docker-compose.yml"
 
-# Worktree checkouts: /src/.git is a pointer file into the primary repo's
-# .git directory, which lives OUTSIDE the ..:/src mount — git inside the
+# In a worktree, /workspace/.git points at the primary repository's
+# .git directory, outside the workspace mount — git inside the
 # container then fails and every git-based contract (e.g. the line-ending
 # guard) dies with "matched no files". Mount the primary .git at the same
 # absolute path, read-only, so the pointer resolves. Plain checkouts leave
 # the variable at its compose-file default (a harmless no-op mount), and
 # container git must also trust the differently-owned mount.
 export CBM_GIT_COMMON_DIR="${CBM_GIT_COMMON_DIR:-}"
-if [ -f "$ROOT/.git" ]; then
+WORKSPACE="$(git -C "$ROOT" rev-parse --show-toplevel)"
+if [ -f "$WORKSPACE/.git" ]; then
     _git_common="$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
     if [ -n "$_git_common" ] && [ -d "$_git_common" ]; then
         export CBM_GIT_COMMON_DIR="$_git_common"

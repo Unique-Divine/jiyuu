@@ -14,6 +14,7 @@
 # Run:    see scripts/msan.sh (driven via docker-compose service test-msan)
 
 # Same pinned base as the primary test image — bump deliberately, never to a tag.
+FROM rust:1.89.0-bookworm@sha256:948f9b08a66e7fe01b03a98ef1c7568292e07ec2e4fe90d88c07bb14563c84ff AS rust-toolchain
 FROM ubuntu:noble@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90
 
 # WHY every network step below is wrapped: on a cache miss the builder's
@@ -111,5 +112,11 @@ RUN retry sh -c 'rm -rf /tmp/zlib && git clone --depth 1 --branch v1.3.1 https:/
 # libclang_rt.msan-*.a.
 ENV MSAN_SYMBOLIZER_PATH=/usr/lib/llvm-21/bin/llvm-symbolizer
 
-WORKDIR /src
+COPY --from=rust-toolchain /usr/local/cargo /usr/local/cargo
+COPY --from=rust-toolchain /usr/local/rustup /usr/local/rustup
+ENV CARGO_HOME=/usr/local/cargo RUSTUP_HOME=/usr/local/rustup
+ENV PATH="/usr/local/cargo/bin:${PATH}"
+
+RUN git config --system --add safe.directory /workspace
+WORKDIR /workspace/mori
 ENTRYPOINT ["scripts/msan.sh"]
