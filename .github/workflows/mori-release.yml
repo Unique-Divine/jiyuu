@@ -200,7 +200,7 @@ jobs:
             fi
           done
           defined_symbols="$(nm "$BIN.unstripped" | awk 'NF >= 3 && $2 ~ /^[Tt]$/ {sub(/^_/, "", $NF); print $NF}')"
-          for symbol in mori_fts_write cbm_text_upsert_managed_block \
+          for symbol in mori_fts_write \
             mori_complexity_buffer mori_complexity_stage mori_similarity_buffer \
             mori_explicit_override mori_doc_file_links_run mori_pdf_links_resolve \
             cbm_rust_watcher_poll mori_ipc_frame_header_decode mori_daemon_job_recover; do
@@ -209,6 +209,10 @@ jobs:
               exit 1
             fi
           done
+          if ! grep -Eq '^cbm_text_(upsert_managed_block(_limited)?|write_owned_document(_if_unchanged)?|migrate_owned_document(_mode)?|owned_document_status)$' <<< "$defined_symbols"; then
+            echo "::error::release executable is missing the Rust managed-text editor"
+            exit 1
+          fi
           if grep -Fxq cbm_store_fts_write_reference <<< "$defined_symbols"; then
             echo "::error::release executable includes the retired C FTS writer"
             exit 1
