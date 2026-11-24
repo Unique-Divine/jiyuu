@@ -262,11 +262,26 @@ typedef struct cbm_discover_walk cbm_discover_walk_t;
 typedef struct cbm_discover_frame cbm_discover_frame_t;
 typedef bool (*cbm_discover_walk_fn)(cbm_discover_walk_t *walk, cbm_discover_frame_t *root);
 
+typedef struct {
+    uint64_t deadline_ms;
+    int max_files; /* -1 for ordinary discovery */
+    cbm_index_limit_u64_t resource_files;
+    cbm_index_limit_u64_t resource_bytes;
+} cbm_discover_walk_limits_t;
+
+/* The callback runs only for selected source files. On refusal it may fill
+ * the diagnostic. A refusal without a resource names the bounded count limit. */
+typedef bool (*cbm_discover_admit_fn)(void *state, int64_t size,
+                                      cbm_index_resource_violation_t *violation);
+
+void cbm_discover_walk_limits(const cbm_discover_walk_t *walk, cbm_discover_walk_limits_t *limits);
 bool cbm_discover_walk_prepare(cbm_discover_walk_t *walk, cbm_discover_frame_t *frame);
 const char *cbm_discover_frame_path(const cbm_discover_frame_t *frame);
 cbm_discover_frame_t *cbm_discover_walk_entry(cbm_discover_walk_t *walk,
-                                              const cbm_discover_frame_t *frame, const char *name);
+                                              const cbm_discover_frame_t *frame, const char *name,
+                                              cbm_discover_admit_fn admit, void *state);
 void cbm_discover_frame_free(cbm_discover_frame_t *frame);
+/* Failure or refusal recorded by C. The callback polls its own deadline. */
 bool cbm_discover_walk_stopped(cbm_discover_walk_t *walk);
 
 int cbm_discover_ex2_with_walk(const char *repo_path, const cbm_discover_opts_t *opts,

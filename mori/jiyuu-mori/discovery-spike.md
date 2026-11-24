@@ -8,18 +8,42 @@ rediscovery at a stored depth use the selector. Set `CBM_LOG_LEVEL=debug` and
 event records the phase, mode, actual backend, and reason.
 
 Rust reads each directory and owns the pending directory stack. It visits
-children in reverse enumeration order after scanning their parent. Native
-code prepares the ignore rules, classifies entries, and builds the result
-arrays, including native mtimes and the ordered ignore sample. C is the
-default. It handles pipeline walks with aggregate resource limits, fresh
-semantic-manifest checks, and frozen builds that need a walk. A frozen build
-with its own file list reports `frozen_list` as the backend.
+children in reverse enumeration order after scanning their parent. C prepares
+the ignore rules, classifies entries, and builds the result arrays with
+native mtimes and the ordered ignore sample. Rust checks aggregate file and
+byte limits before C appends each selected source file.
 
-Set `MORI_IMPL_ADMISSION=rust` on the linked Unix executable to use Rust
-directory iteration for the bounded count before MCP automatic indexing.
-The daemon inherits the setting at startup. C still applies the same ignore,
-language, file count, deadline, and resource checks. The
-`discover.admission_backend` debug event records which implementation ran.
+The linked Unix executable defaults to Rust for the bounded count before MCP
+automatic indexing. Set `MORI_IMPL_ADMISSION=c` at daemon startup to run the
+reference walker. Rust checks the bounded count ceiling before the aggregate
+resource limits and polls the absolute monotonic deadline between entries.
+The `discover.admission_backend` debug event records which walker ran.
+
+## Index Runner Handoff
+
+The runner's function `pipeline_discover` still defaults to C and excludes
+resource-limited and frozen walks from the Rust selector. Use the registered
+walker by default for both initial discovery at the requested depth and
+rediscovery at the stored depth. The Rust callback accepts the same resource
+policy through the existing options and returns the exact C diagnostic through
+the options' violation field. The two fresh-manifest paths in
+`pipeline_incremental.c` call function `cbm_discover_ex2` directly and need
+the same backend selection.
+
+A frozen build with a supplied classified file list uses function
+`cbm_pipeline_frozen_listed_files` both at initial discovery and in fresh
+reconciliation. Preserve that list as the scope, including an explicitly
+empty list. Test-impact snapshots construct it from a pinned inventory. Keep
+their checkpoint and source-validation rules when moving the list reader.
+A frozen build without a list discovers the tree under the installed frozen
+language configuration. Qualify that path independently before dropping its
+C fallback.
+
+After the standalone oracle is frozen and every caller selects Rust, remove
+functions `walk_native`, `walk_push_frame`, `admit_native`, and
+`file_list_should_stop` together with the C walk stack and its counters.
+The C entry classifier, tracked paths, ignore rules, and output allocator
+still serve the Rust walker.
 
 ## Independent Prototype Comparison
 

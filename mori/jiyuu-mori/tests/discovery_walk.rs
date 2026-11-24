@@ -200,7 +200,7 @@ fn mcp_auto_index_uses_the_selected_bounded_walker() {
     use std::time::{Duration, Instant};
 
     for (selector, expected_backend) in
-        [(None, "c"), (Some("c"), "c"), (Some("rust"), "rust")]
+        [(None, "rust"), (Some("c"), "c"), (Some("rust"), "rust")]
     {
         for (limit, expected_event) in [
             ("1", "daemon.autoindex.skipped"),

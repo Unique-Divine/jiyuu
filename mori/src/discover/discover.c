@@ -648,12 +648,10 @@ static int64_t discover_stat_mtime_ns(const struct stat *st) {
 #endif
 }
 
-static void fl_add(file_list_t *fl, const char *abs_path, const char *rel_path, CBMLanguage lang,
-                   const struct stat *st) {
-    int64_t size = (int64_t)st->st_size;
+static bool admit_native(file_list_t *fl, int64_t size) {
     if (fl->max_files >= 0 && fl->count >= fl->max_files) {
         fl->limit_exceeded = true;
-        return;
+        return false;
     }
     uint64_t source_size = size > 0 ? (uint64_t)size : 0;
     bool resource_accepted = fl->resource_policy && source_size <= (uint64_t)cbm_max_file_bytes();
@@ -662,7 +660,7 @@ static void fl_add(file_list_t *fl, const char *abs_path, const char *rel_path, 
             fl->source_files >= fl->resource_policy->max_files.value) {
             file_list_resource_violation(fl, CBM_INDEX_RESOURCE_FILES, fl->source_files + 1U,
                                          fl->resource_policy->max_files.value);
-            return;
+            return false;
         }
         if (fl->resource_policy->max_source_bytes.enabled) {
             uint64_t limit = fl->resource_policy->max_source_bytes.value;
@@ -671,12 +669,17 @@ static void fl_add(file_list_t *fl, const char *abs_path, const char *rel_path, 
                                         ? UINT64_MAX
                                         : fl->source_bytes + source_size;
                 file_list_resource_violation(fl, CBM_INDEX_RESOURCE_SOURCE_BYTES, observed, limit);
-                return;
+                return false;
             }
             fl->source_bytes += source_size;
         }
         fl->source_files++;
     }
+    return true;
+}
+
+static void fl_append(file_list_t *fl, const char *abs_path, const char *rel_path, CBMLanguage lang,
+                      const struct stat *st) {
     if (fl->count_only) {
         fl->count++;
         return;
@@ -704,7 +707,7 @@ static void fl_add(file_list_t *fl, const char *abs_path, const char *rel_path, 
     fi->path = path_copy;
     fi->rel_path = relative_copy;
     fi->language = lang;
-    fi->size = size;
+    fi->size = (int64_t)st->st_size;
     fi->mtime_ns = discover_stat_mtime_ns(st);
 }
 
@@ -1147,7 +1150,8 @@ static void walk_dir_process_file(const char *abs_path, const char *rel_path, co
                                   const gitignore_link_t *ignore_chain,
                                   const cbm_gitignore_t *global_gi,
                                   const cbm_gitignore_t *cbmignore, const sphinx_suffixes_t *sphinx,
-                                  bool in_ignored_dir, const struct stat *st, file_list_t *out) {
+                                  bool in_ignored_dir, const struct stat *st, file_list_t *out,
+                                  cbm_discover_admit_fn admit, void *state) {
     const char *skip_reason =
         file_skip_reason(name, rel_path, opts, ignore_chain, global_gi, cbmignore, st->st_size,
                          tracked_has_file(out->tracked, rel_path), in_ignored_dir);
@@ -1166,7 +1170,21 @@ static void walk_dir_process_file(const char *abs_path, const char *rel_path, co
     if (lang == CBM_LANG_COUNT) {
         return;
     }
-    fl_add(out, abs_path, rel_path, lang, st);
+    if (admit) {
+        cbm_index_resource_violation_t violation = {0};
+        if (!admit(state, (int64_t)st->st_size, &violation)) {
+            if (violation.resource == CBM_INDEX_RESOURCE_NONE) {
+                out->limit_exceeded = true;
+            } else {
+                file_list_resource_violation(out, violation.resource, violation.observed,
+                                             violation.limit);
+            }
+            return;
+        }
+    } else if (!admit_native(out, (int64_t)st->st_size)) {
+        return;
+    }
+    fl_append(out, abs_path, rel_path, lang, st);
 }
 
 struct cbm_discover_frame {
@@ -1238,7 +1256,8 @@ struct cbm_discover_walk {
 
 /* Apply native per-entry policy and fill child only when it should be walked. */
 static bool walk_dir_process_entry(cbm_discover_walk_t *walk, const walk_frame_t *frame,
-                                   const char *name, walk_frame_t *child) {
+                                   const char *name, walk_frame_t *child,
+                                   cbm_discover_admit_fn admit, void *state) {
     file_list_t *out = walk->out;
     const cbm_discover_opts_t *opts = walk->opts;
     const cbm_gitignore_t *global_gi = walk->global_gi;
@@ -1301,7 +1320,7 @@ static bool walk_dir_process_entry(cbm_discover_walk_t *walk, const walk_frame_t
         }
     } else if (S_ISREG(st.st_mode)) {
         walk_dir_process_file(abs_path, rel_path, name, opts, frame->ignore_chain, global_gi,
-                              cbmignore, &frame->sphinx, frame->git_ignored, &st, out);
+                              cbmignore, &frame->sphinx, frame->git_ignored, &st, out, admit, state);
     }
     return false;
 }
@@ -1367,9 +1386,10 @@ const char *cbm_discover_frame_path(const cbm_discover_frame_t *frame) {
 }
 
 cbm_discover_frame_t *cbm_discover_walk_entry(cbm_discover_walk_t *walk,
-                                              const cbm_discover_frame_t *frame, const char *name) {
+                                              const cbm_discover_frame_t *frame, const char *name,
+                                              cbm_discover_admit_fn admit, void *state) {
     walk_frame_t child;
-    if (!walk_dir_process_entry(walk, frame, name, &child)) {
+    if (!walk_dir_process_entry(walk, frame, name, &child, admit, state)) {
         return NULL;
     }
     walk_frame_t *owned = malloc(sizeof(*owned));
@@ -1386,7 +1406,17 @@ void cbm_discover_frame_free(cbm_discover_frame_t *frame) {
 }
 
 bool cbm_discover_walk_stopped(cbm_discover_walk_t *walk) {
-    return file_list_should_stop(walk->out);
+    return walk->out->failed || walk->out->limit_exceeded;
+}
+
+void cbm_discover_walk_limits(const cbm_discover_walk_t *walk, cbm_discover_walk_limits_t *limits) {
+    const file_list_t *out = walk->out;
+    *limits = (cbm_discover_walk_limits_t){.deadline_ms = out->deadline_ms,
+                                          .max_files = out->max_files};
+    if (out->resource_policy) {
+        limits->resource_files = out->resource_policy->max_files;
+        limits->resource_bytes = out->resource_policy->max_source_bytes;
+    }
 }
 
 static bool walk_native(cbm_discover_walk_t *walk, walk_frame_t *root) {
@@ -1412,7 +1442,7 @@ static bool walk_native(cbm_discover_walk_t *walk, walk_frame_t *root) {
         cbm_dirent_t *entry;
         while (!file_list_should_stop(walk->out) && (entry = cbm_readdir(d)) != NULL) {
             walk_frame_t child;
-            if (walk_dir_process_entry(walk, &frame, entry->name, &child) &&
+            if (walk_dir_process_entry(walk, &frame, entry->name, &child, NULL, NULL) &&
                 !walk_push_frame(&ws, &child)) {
                 walk->out->failed = true;
             }

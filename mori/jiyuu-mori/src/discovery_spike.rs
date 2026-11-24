@@ -176,13 +176,21 @@ impl NativeWalk {
             resource_policy: null(),
             resource_violation: null_mut(),
         };
+        Self::run_with_options(&path, &options, walker)
+    }
+
+    fn run_with_options(
+        path: &CStr,
+        options: &Options,
+        walker: Option<Walker>,
+    ) -> (c_int, Self) {
         let mut out = Self::default();
         // SAFETY: arguments follow discover.h. On success C transfers all
         // three arrays to out. On failure C frees any partial results.
         let status = unsafe {
             cbm_discover_ex2_with_walk(
                 path.as_ptr(),
-                &options,
+                options,
                 &mut out.files,
                 &mut out.count,
                 &mut out.excluded,
@@ -930,6 +938,46 @@ fn admission_reports_resource_limit_details() {
                 (1, 1, ResourceViolation::default())
             );
         }
+    }
+}
+
+#[test]
+fn ordinary_discovery_discards_partial_results_on_resource_refusal() {
+    let scratch = Scratch::new();
+    let body = "fn entry() {}\n";
+    scratch.write("first.rs", body);
+    scratch.write("child/second.rs", body);
+    scratch.write(".cbmignore", "ignored.rs\n");
+    scratch.write("ignored.rs", body);
+    let bytes = body.len() as u64;
+    let policy = ResourcePolicy {
+        max_source_bytes: ResourceLimit {
+            enabled: true,
+            value: bytes,
+        },
+        ..ResourcePolicy::default()
+    };
+    for walker in [None, Some(discover_walk::walk as Walker)] {
+        let mut violation = ResourceViolation::default();
+        let options = Options {
+            mode: Mode::Full,
+            ignore_file: null(),
+            max_file_size: 0,
+            resource_policy: std::ptr::from_ref(&policy).cast(),
+            resource_violation: std::ptr::from_mut(&mut violation).cast(),
+        };
+        let (status, output) =
+            NativeWalk::run_with_options(&c_path(&scratch.0), &options, walker);
+        assert_eq!(status, 1);
+        assert_eq!(output.snapshot(), Snapshot::default());
+        assert_eq!(
+            violation,
+            ResourceViolation {
+                resource: 2,
+                observed: 2 * bytes,
+                limit: bytes,
+            }
+        );
     }
 }
 
