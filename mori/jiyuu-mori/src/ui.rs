@@ -1,7 +1,7 @@
 //! Foreground command for the loopback graph UI.
 
 use std::ffi::{c_char, c_int, c_void};
-use std::io::{self, Write};
+use std::io;
 use std::mem::MaybeUninit;
 use std::ptr::{self, NonNull};
 use std::thread;
@@ -35,7 +35,7 @@ impl Server {
             .ok_or_else(|| format!("could not start the UI on 127.0.0.1:{port}"))
     }
 
-    fn serve(&self, port: u16, signals: &libc::sigset_t) -> Result<(), String> {
+    fn serve(&self, signals: &libc::sigset_t) -> Result<(), String> {
         let server = self.0.as_ptr();
         // SAFETY: the freshly bound server has no running or scheduled worker.
         if !unsafe { cbm_http_server_schedule_run(server) } {
@@ -51,10 +51,6 @@ impl Server {
                 return Err(format!("could not start the HTTP loop: {error}"));
             }
 
-            let _ = writeln!(
-                io::stderr(),
-                "Mori UI listening at http://127.0.0.1:{port}"
-            );
             let mut signal = 0;
             // SAFETY: the signal set is initialized and blocked in both threads.
             let status = unsafe { libc::sigwait(signals, &mut signal) };
@@ -144,7 +140,7 @@ fn start(port: u16) -> Result<(), String> {
         cbm_alloc_init();
         cbm_log_init_from_env();
     }
-    Server::bind(port)?.serve(port, &signals)
+    Server::bind(port)?.serve(&signals)
 }
 
 enum Command {

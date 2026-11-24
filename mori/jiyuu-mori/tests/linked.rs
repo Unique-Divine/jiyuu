@@ -1158,22 +1158,116 @@ fn index_fixture(
     result
 }
 
+struct Ui(std::process::Child);
+
+impl Drop for Ui {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+#[test]
+#[ignore = "requires an embedded UI build with MORI_WITH_UI=1"]
+fn standalone_ui_sigterm_with_full_stderr_pipe() {
+    use std::io::{ErrorKind, Read, Write, pipe};
+    use std::net::{Ipv4Addr, TcpListener, TcpStream};
+    use std::os::fd::AsRawFd;
+    use std::thread::sleep;
+    use std::time::{Duration, Instant};
+
+    for level in ["none", "info"] {
+        let scratch = Scratch::new("ui-full-stderr");
+        let (stderr_reader, mut stderr_writer) = pipe().unwrap();
+        let fd = stderr_writer.as_raw_fd();
+        // SAFETY: the writer owns this private fd. Restore blocking mode
+        // before handing it to the child.
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        assert_ne!(flags, -1);
+        assert_eq!(
+            unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) },
+            0
+        );
+        for bytes in [&[0; 4096][..], &[0][..]] {
+            loop {
+                match stderr_writer.write(bytes) {
+                    Ok(n) => assert!(n > 0),
+                    Err(err) if err.kind() == ErrorKind::WouldBlock => break,
+                    Err(err) if err.kind() == ErrorKind::Interrupted => continue,
+                    Err(err) => panic!("could not fill stderr pipe: {err}"),
+                }
+            }
+        }
+        assert_eq!(unsafe { libc::fcntl(fd, libc::F_SETFL, flags) }, 0);
+
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let mut ui = Ui(command_in(Path::new(MORI), &scratch)
+            .args(["ui", "--port", &addr.port().to_string()])
+            .env("CBM_LOG_LEVEL", level)
+            .stderr(Stdio::from(stderr_writer))
+            .spawn()
+            .unwrap());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut conn = loop {
+            if let Ok(conn) =
+                TcpStream::connect_timeout(&addr, Duration::from_millis(100))
+            {
+                break conn;
+            }
+            assert!(
+                Instant::now() < deadline && ui.0.try_wait().unwrap().is_none(),
+                "UI never listened with {level} logging"
+            );
+            sleep(Duration::from_millis(10));
+        };
+        // With request logging disabled, verify the worker serves the embedded
+        // page. At info level, test startup with no completed request to log.
+        if level == "none" {
+            conn.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            write!(
+                conn,
+                "GET / HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"
+            )
+            .unwrap();
+            let mut response = String::new();
+            conn.read_to_string(&mut response).unwrap();
+            assert!(response.starts_with("HTTP/1.1 200 "));
+        }
+
+        // SAFETY: the child owns this PID and is still running.
+        assert_eq!(
+            unsafe { libc::kill(ui.0.id() as libc::pid_t, libc::SIGTERM) },
+            0
+        );
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            if let Some(status) = ui.0.try_wait().unwrap() {
+                assert!(status.success(), "UI exited with {status}");
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "UI stuck on full stderr with {level} logging"
+            );
+            sleep(Duration::from_millis(10));
+        }
+        assert!(
+            TcpStream::connect_timeout(&addr, Duration::from_millis(100))
+                .is_err()
+        );
+        drop(stderr_reader);
+    }
+}
+
 #[test]
 #[ignore = "requires an embedded UI build with MORI_WITH_UI=1"]
 fn standalone_ui_signals_cancel_active_reads() {
     use std::io::Write;
     use std::net::{Ipv4Addr, TcpListener, TcpStream};
-    use std::process::Child;
     use std::thread::sleep;
     use std::time::{Duration, Instant};
-
-    struct Ui(Child);
-    impl Drop for Ui {
-        fn drop(&mut self) {
-            let _ = self.0.kill();
-            let _ = self.0.wait();
-        }
-    }
 
     let bin = Path::new(MORI);
     let writer = Scratch::new("ui-index");
