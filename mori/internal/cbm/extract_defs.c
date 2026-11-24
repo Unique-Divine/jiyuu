@@ -7705,9 +7705,36 @@ static char *trim_heading_name(char *name) {
     return (name[0]) ? name : NULL;
 }
 
+typedef size_t (*markdown_heading_extractor_t)(TSNode, const char *, size_t, char *, size_t);
+static markdown_heading_extractor_t markdown_heading_extractor;
+
+void cbm_markdown_set_heading_extractor(markdown_heading_extractor_t extractor);
+void cbm_markdown_set_heading_extractor(markdown_heading_extractor_t extractor) {
+    markdown_heading_extractor = extractor;
+}
+
+static char *markdown_heading_from_rust(CBMArena *arena, TSNode node, const char *source,
+                                        size_t source_len) {
+    size_t capacity = ts_node_end_byte(node) - ts_node_start_byte(node);
+    char *output = cbm_arena_alloc(arena, capacity + SKIP_ONE);
+    if (!output) {
+        return NULL;
+    }
+    size_t written = markdown_heading_extractor(node, source, source_len, output, capacity);
+    if (written > capacity) {
+        return NULL;
+    }
+    output[written] = '\0';
+    cbm_log_debug("extract.markdown_heading", "implementation", "rust");
+    return trim_heading_name(output);
+}
+
 // Extract Markdown heading name from atx_heading or setext_heading.
 static char *extract_markdown_heading_name(CBMArena *a, TSNode node, const char *kind,
-                                           const char *source) {
+                                           const char *source, int source_len) {
+    if (markdown_heading_extractor && source_len > 0) {
+        return markdown_heading_from_rust(a, node, source, (size_t)source_len);
+    }
     char *name = NULL;
     if (strcmp(kind, "atx_heading") == 0) {
         name = extract_atx_heading_text(a, node, source);
@@ -7753,7 +7780,7 @@ static const char *md_heading_segment(CBMExtractCtx *ctx, CBMArena *a, TSNode no
     if (!is_markdown_heading_kind(kind)) {
         return NULL;
     }
-    char *name = extract_markdown_heading_name(a, node, kind, ctx->source);
+    char *name = extract_markdown_heading_name(a, node, kind, ctx->source, ctx->source_len);
     return name ? qn_safe_segment(a, name) : NULL;
 }
 
@@ -8219,7 +8246,7 @@ static bool extract_config_class_def(CBMExtractCtx *ctx, TSNode node, const char
         name = find_xml_element_name(a, node, ctx->source);
     } else if (ctx->language == CBM_LANG_MARKDOWN &&
                (strcmp(kind, "atx_heading") == 0 || strcmp(kind, "setext_heading") == 0)) {
-        name = extract_markdown_heading_name(a, node, kind, ctx->source);
+        name = extract_markdown_heading_name(a, node, kind, ctx->source, ctx->source_len);
         // A heading is a Section (a valid label), not a Class — keep the accurate
         // label rather than degrade it to match a test. The markdown repro asserts
         // "Class"; that assertion is the inaccurate side and is flagged for review.

@@ -475,6 +475,12 @@ for the GraphQL schema field spans and the parser input escape masking.
 Both paths use the same Tree-sitter parser and the original source bytes
 for field metadata. The worker log records both callbacks at debug level.
 
+### Markdown Heading Extraction
+
+Set `MORI_IMPL_MARKDOWN_EXTRACT=rust` to select Rust heading text extraction.
+The implementation borrows the same Tree-sitter tree to read ATX and Setext
+headings. Section identity, body extraction, and document linking are C.
+
 ### Sharing a Graph With a Team
 
 `index_repository` with `persistence: true` writes

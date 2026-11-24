@@ -1,15 +1,8 @@
 //! GraphQL SDL extraction using the parser and grammar already linked by Mori.
 
-use std::ffi::{CStr, c_char, c_void};
+use std::ffi::CStr;
 
-/// Matches the pinned Tree-sitter header. A node borrows its source tree.
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct RawNode {
-    context: [u32; 4],
-    id: *const c_void,
-    tree: *const c_void,
-}
+use crate::native_tree::RawNode;
 
 #[repr(C)]
 #[derive(Default)]
@@ -26,18 +19,6 @@ struct FieldSpans {
 }
 
 unsafe extern "C" {
-    fn ts_node_is_null(node: RawNode) -> bool;
-    fn ts_node_type(node: RawNode) -> *const c_char;
-    fn ts_node_start_byte(node: RawNode) -> u32;
-    fn ts_node_end_byte(node: RawNode) -> u32;
-    fn ts_node_child_count(node: RawNode) -> u32;
-    fn ts_node_child(node: RawNode, index: u32) -> RawNode;
-    fn ts_node_child_by_field_name(
-        node: RawNode,
-        name: *const c_char,
-        len: u32,
-    ) -> RawNode;
-
     fn cbm_graphql_set_field_extractor(
         extract: unsafe extern "C" fn(RawNode) -> FieldSpans,
     );
@@ -46,32 +27,19 @@ unsafe extern "C" {
 
 unsafe fn child_span(node: RawNode, name: &CStr) -> Span {
     // SAFETY: All nodes returned by Tree-sitter borrow the callback's live tree.
-    unsafe {
-        let child = ts_node_child_by_field_name(
-            node,
-            name.as_ptr(),
-            name.count_bytes() as u32,
-        );
-        if !ts_node_is_null(child) {
-            return Span {
-                start: ts_node_start_byte(child),
-                end: ts_node_end_byte(child),
-                present: true,
-            };
-        }
-        // The pinned GraphQL grammar has no field annotations.
-        for index in 0..ts_node_child_count(node) {
-            let child = ts_node_child(node, index);
-            if CStr::from_ptr(ts_node_type(child)) == name {
-                return Span {
-                    start: ts_node_start_byte(child),
-                    end: ts_node_end_byte(child),
-                    present: true,
-                };
-            }
-        }
+    let span = unsafe {
+        node.field(name)
+            .or_else(|| node.child_of_kind(name))
+            .map(|child| child.range())
+    };
+    match span {
+        Some(range) => Span {
+            start: range.start as u32,
+            end: range.end as u32,
+            present: true,
+        },
+        None => Span::default(),
     }
-    Span::default()
 }
 
 unsafe extern "C" fn field_spans(node: RawNode) -> FieldSpans {
