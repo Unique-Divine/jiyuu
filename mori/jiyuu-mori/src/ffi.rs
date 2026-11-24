@@ -569,19 +569,32 @@ pub unsafe extern "C" fn main(argc: c_int, argv: *mut *mut c_char) -> c_int {
     // stays valid for the process lifetime, including each worker's own main.
     unsafe {
         jiyuu_mori::mori_register_graphql_callbacks();
+        if std::env::var_os("MORI_IMPL_GRAPHQL_EXTRACT").as_deref()
+            == Some(OsStr::new("rust"))
+        {
+            jiyuu_mori::mori_register_graphql_extractor();
+        }
+        if std::env::var_os("MORI_IMPL_MARKDOWN_EXTRACT").as_deref()
+            == Some(OsStr::new("rust"))
+        {
+            jiyuu_mori::mori_register_markdown_extractor();
+        }
         #[cfg(unix)]
         jiyuu_mori::mori_register_staged_graph_writer();
         #[cfg(unix)]
         jiyuu_mori::mori_register_discover_walk();
         c_transport::register();
+        crate::repair_recovery::register();
+        crate::named_watch::register();
         crate::index_manifest::register();
         crate::index_route::register();
         crate::full_build_driver::register();
-        if std::env::var_os("MORI_IMPL_SOURCE_PUBLISH").as_deref()
-            == Some(OsStr::new("rust"))
+        if std::env::var_os("MORI_IMPL_SOURCE_PUBLISH")
+            .is_none_or(|value| value == "rust")
         {
             jiyuu_mori::mori_register_source_publish();
         }
+        crate::importance::register();
         crate::query_cli::c_args::register();
         crate::cli_output::register();
         crate::initialize::c_initialize::register();
