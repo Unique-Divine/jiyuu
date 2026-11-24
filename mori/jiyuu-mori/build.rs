@@ -19,6 +19,9 @@
 //!   `BUILD_DIR`, for the comparison test in `tests/linked.rs`.
 //! - `MORI_WITH_UI=1`: link the graph UI (make `LIBMORI_WITH_UI=1`, which
 //!   builds `graph-ui` with npm); the C reference is then `cbm-with-ui`.
+//! - `MORI_WITHOUT_C_INDEX_DRIVERS=1`: omit C scheduling and source
+//!   publication decisions from `libmori-c.a`. The standalone C reference
+//!   retains both. The linked binary requires Rust at those phases.
 //! - `CC`, `CXX`, `CFLAGS_EXTRA`, `TEST_SEAMS`: passed to make as
 //!   `scripts/build.sh` would.
 //!
@@ -48,6 +51,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=MORI_MAKE_JOBS");
     println!("cargo:rerun-if-env-changed=MORI_C_REFERENCE");
     println!("cargo:rerun-if-env-changed=MORI_WITH_UI");
+    println!("cargo:rerun-if-env-changed=MORI_WITHOUT_C_INDEX_DRIVERS");
     if env::var_os("CARGO_FEATURE_C_BACKEND").is_none() {
         return;
     }
@@ -83,6 +87,8 @@ fn build_and_link() -> Result<(), String> {
     check_grammars(&mori_dir)?;
 
     let with_ui = env::var("MORI_WITH_UI").as_deref() == Ok("1");
+    let without_c_index_drivers =
+        env::var("MORI_WITHOUT_C_INDEX_DRIVERS").as_deref() == Ok("1");
     if with_ui {
         for path in [
             "graph-ui/src",
@@ -108,6 +114,7 @@ fn build_and_link() -> Result<(), String> {
         &target_os,
         &targets,
         with_ui,
+        without_c_index_drivers,
     )?;
 
     let archive = build_dir.join("libmori-c.a");
@@ -196,6 +203,7 @@ fn run_make(
     target_os: &str,
     targets: &[&str],
     with_ui: bool,
+    without_c_index_drivers: bool,
 ) -> Result<(), String> {
     let (default_cc, default_cxx) = default_compilers(target_os);
     let cc = env::var("CC").unwrap_or_else(|_| default_cc.into());
@@ -210,6 +218,10 @@ fn run_make(
         .arg(format!("CXX={cxx}"))
         .args(PINNED_MAKE_VARS)
         .arg(format!("LIBMORI_WITH_UI={}", u8::from(with_ui)))
+        .arg(format!(
+            "LIBMORI_WITHOUT_C_INDEX_DRIVERS={}",
+            u8::from(without_c_index_drivers)
+        ))
         // Cargo's jobserver and an outer make must not change -j.
         .env_remove("MAKEFLAGS")
         .env_remove("MFLAGS")
@@ -244,9 +256,8 @@ fn run_make(
     Ok(())
 }
 
-/// Links the archive whole, so the binary holds the same objects as
-/// `codebase-memory-mcp`, and the libraries from `LDFLAGS` in
-/// `Makefile.cbm` (`-lm -lstdc++ -lpthread -lz`).
+/// Links the selected archive whole along with the libraries from
+/// `LDFLAGS` in `Makefile.cbm` (`-lm -lstdc++ -lpthread -lz`).
 ///
 /// With `-C target-feature=+crt-static` (the static Linux release, like
 /// `STATIC=1` for the C binary), zlib and libstdc++ link as archives too: a
