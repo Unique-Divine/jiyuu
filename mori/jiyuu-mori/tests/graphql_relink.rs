@@ -1625,6 +1625,99 @@ fn untyped_one_hop_and_introspection_match_native_in_rust() {
 }
 
 #[test]
+fn distinct_edge_types_labels_and_tuples_match_native_in_rust() {
+    let fixture = Fixture::new();
+    let db = fixture.index(CLIENT);
+    let root = node(
+        &db,
+        CLIENT,
+        "DistinctRoot",
+        "root",
+        "distinct.root",
+        "distinct.py",
+    );
+    for index in 0..24 {
+        let name = format!("leaf{index}");
+        let leaf =
+            node(&db, CLIENT, "DistinctLeaf", &name, &name, "distinct.py");
+        edge(&db, CLIENT, root, leaf, "CALLS", json!({}));
+        if index == 23 {
+            edge(&db, CLIENT, root, leaf, "HAS_BRANCH", json!({}));
+            edge(&db, CLIENT, root, leaf, "REFERENCES", json!({}));
+        }
+    }
+    for (index, (name, value)) in [("a", "b:c"), ("a:b", "c"), ("a", "b:c")]
+        .into_iter()
+        .enumerate()
+    {
+        let id = node(
+            &db,
+            CLIENT,
+            "DistinctTuple",
+            name,
+            &format!("tuple{index}"),
+            "tuple.py",
+        );
+        db.execute(
+            "UPDATE nodes SET properties = ? WHERE id = ?",
+            params![json!({"value": value}).to_string(), id],
+        )
+        .unwrap();
+    }
+    for (index, raw) in
+        [b"raw\xff\0one", b"raw\xff\0two"].into_iter().enumerate()
+    {
+        let id = node(
+            &db,
+            CLIENT,
+            "DistinctBytes",
+            "raw",
+            &format!("raw{index}"),
+            "raw.py",
+        );
+        db.execute(
+            "UPDATE nodes SET name = ? WHERE id = ?",
+            params![raw.as_slice(), id],
+        )
+        .unwrap();
+    }
+    drop(db);
+
+    let edge_types = "MATCH (:DistinctRoot)-[r]->(:DistinctLeaf) RETURN DISTINCT type(r) AS t LIMIT 2";
+    let ordered = "MATCH (:DistinctRoot)-[r]->(:DistinctLeaf) RETURN DISTINCT type(r) AS t ORDER BY t DESC LIMIT 2";
+    let ordered_zero = "MATCH (:DistinctRoot)-[r]->(:DistinctLeaf) RETURN DISTINCT type(r) AS t ORDER BY t LIMIT 0";
+    let labels = "MATCH (n) WHERE n.file_path = 'distinct.py' RETURN DISTINCT labels(n) AS l ORDER BY l";
+    let tuples = "MATCH (n:DistinctTuple) RETURN DISTINCT n.name AS symbol, n.value AS payload";
+    let ties = "MATCH (n:DistinctTuple) RETURN DISTINCT n.file_path AS p, n.name, n.value ORDER BY p";
+    let raw = "MATCH (n:DistinctBytes) RETURN DISTINCT n.name";
+    let skip = "MATCH (:DistinctRoot)-[r]->(:DistinctLeaf) RETURN DISTINCT type(r) AS t ORDER BY t SKIP 1 LIMIT 1";
+    let aggregate = "MATCH (n:DistinctLeaf) RETURN DISTINCT n.label, count(*)";
+    let cases = [
+        ((edge_types, 0, true), json!([["CALLS"]])),
+        ((edge_types, 1, true), json!([["HAS_BRANCH"]])),
+        ((ordered, 0, true), json!([["REFERENCES"]])),
+        ((ordered, 1, true), json!([["HAS_BRANCH"]])),
+        ((ordered_zero, 0, true), json!([])),
+        ((labels, 0, true), json!([["[\"DistinctLeaf\"]"]])),
+        ((labels, 1, true), json!([["[\"DistinctRoot\"]"]])),
+        ((tuples, 0, true), json!([["a", "b:c"]])),
+        ((tuples, 1, true), json!([["a:b", "c"]])),
+        ((raw, 0, true), json!([["@bytes:726177ff"]])),
+        ((skip, 0, false), json!([["HAS_BRANCH"]])),
+        ((aggregate, 0, false), json!([["DistinctLeaf", "24"]])),
+        ((ties, 0, true), json!([["tuple.py", "a", "b:c"]])),
+        ((ties, 1, true), json!([["tuple.py", "a:b", "c"]])),
+    ];
+    let inputs: Vec<_> = cases.iter().map(|(case, _)| *case).collect();
+    let pages = fixture.compare_query_pages(&inputs);
+    for (page, ((query, _, _), rows)) in pages.iter().zip(cases) {
+        assert_eq!(page["rows"], rows, "{query}");
+    }
+    assert_eq!(pages[1]["total_relation"], "eq");
+    assert_eq!(pages[9]["total"], 1);
+}
+
+#[test]
 fn ordered_aliases_keep_lexical_keys_and_raw_split_bytes() {
     const QUERY: &str = "MATCH (n:SortProbe) RETURN n.name AS symbol, n.value AS key ORDER BY key ASC";
     let fixture = Fixture::new();
@@ -1888,6 +1981,21 @@ fn zero_hop_scan_checks_budget_and_matches_native_row_ceiling() {
         assert_eq!(page["truncated"], true);
     }
 
+    let distinct =
+        "MATCH (n:Ceiling) RETURN DISTINCT n.name ORDER BY n.name LIMIT 3";
+    let distinct_cap = "MATCH (n:Ceiling) RETURN DISTINCT n.qualified_name ORDER BY n.qualified_name LIMIT 1";
+    let pages = fixture.compare_query_pages(&[
+        (distinct, 0, true),
+        (distinct, 2, true),
+        (distinct_cap, 0, true),
+    ]);
+    assert_eq!(pages[0]["rows"], json!([["aaa"]]));
+    assert_eq!(pages[1]["rows"], json!([["node"]]));
+    assert_eq!(pages[1]["total"], 3);
+    assert_eq!(pages[1]["total_relation"], "eq");
+    assert_eq!(pages[2]["total_relation"], "gte");
+    assert_eq!(pages[2]["truncation_reason"], "engine_limit");
+
     // All predicates miss. A budget check only at the end of the scan would
     // reach this unreadable row and report a storage error first.
     let tail = db
@@ -1898,6 +2006,15 @@ fn zero_hop_scan_checks_budget_and_matches_native_row_ceiling() {
         )
         .unwrap();
     fail_node_read(&db, tail);
+    let distinct = cypher_linear::classify(
+        "MATCH (n:Ceiling) RETURN DISTINCT n.name LIMIT 1",
+    )
+    .unwrap();
+    assert!(matches!(
+        distinct.execute_on(&db, CLIENT),
+        Err(ExecutionError::Storage(rusqlite::Error::SqliteFailure(_, Some(message))))
+            if message == "integer overflow"
+    ));
     let query = cypher_linear::classify(
         "MATCH (n:Ceiling) WHERE n.name = 'absent' RETURN n.name LIMIT 1",
     )
@@ -2029,7 +2146,9 @@ fn graphql_field_extraction_matches_c_with_escaped_schema_text() {
         fs::create_dir(&repo).expect("create schema repository");
         fs::write(
             repo.join("schema.graphqls"),
-            r#"type Query {
+            r#"schema { query: Query }
+extend schema { mutation: Mutation }
+type Query {
   old: [String!]! @deprecated(reason: "Use \"new\"")
   later: Int
 }
@@ -2054,7 +2173,7 @@ extend type Query {
         assert_eq!(response["status"], "indexed", "{response}");
         let db = fixture.db("schema");
         let mut statement = db
-            .prepare("SELECT name, properties FROM nodes WHERE label = 'Field' ORDER BY name")
+            .prepare("SELECT name, properties FROM nodes WHERE label IN ('Field', 'Module') ORDER BY name")
             .expect("select fields");
         let fields = statement
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
@@ -2084,12 +2203,20 @@ extend type Query {
     assert_eq!(rust, native);
     assert_eq!(
         rust.iter().map(|row| row.0.as_str()).collect::<Vec<_>>(),
-        ["cafe", "later", "old"]
+        ["cafe", "later", "old", "schema.graphqls"]
     );
     assert!(rust[0].1.contains("café"), "{rust:?}");
     assert!(rust[2].1.contains("[String!]!"), "{rust:?}");
-    for marker in ["extract.graphql_parse_input", "extract.graphql_field_spans"]
-    {
+    let module: Value =
+        serde_json::from_str(&rust[3].1).expect("module properties");
+    assert_eq!(module["graphql_schema_defined"], "true");
+    assert_eq!(module["graphql_schema_query"], "Query");
+    assert_eq!(module["graphql_schema_mutation"], "Mutation");
+    for marker in [
+        "extract.graphql_schema_roots",
+        "extract.graphql_parse_input",
+        "extract.graphql_field_spans",
+    ] {
         assert!(!native_logs.contains(marker), "{native_logs}");
         assert!(rust_logs.contains(marker), "{rust_logs}");
     }

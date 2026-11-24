@@ -2,8 +2,9 @@
 
 use std::borrow::Cow;
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, hash_map::RandomState};
 use std::ffi::c_long;
+use std::hash::BuildHasher;
 #[cfg(test)]
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -234,6 +235,7 @@ pub(crate) struct Query<'a> {
     filters: Vec<Predicate<'a>>,
     any_filter: bool,
     projections: Vec<Projection<'a>>,
+    distinct: bool,
     order: Vec<OrderKey>,
     limit: Option<usize>,
 }
@@ -531,6 +533,7 @@ pub(crate) fn classify(source: &str) -> Result<Query<'_>, Unsupported> {
     if !parser.keyword("RETURN") {
         return Err(Unsupported);
     }
+    let distinct = parser.keyword("DISTINCT");
     let mut projections = Vec::new();
     loop {
         projections.push(parser.projection()?);
@@ -549,7 +552,7 @@ pub(crate) fn classify(source: &str) -> Result<Query<'_>, Unsupported> {
             !matches!(column.expression, ProjectionExpression::Count)
         })
         .count();
-    if field_count < projections.len() && field_count > 1 {
+    if field_count < projections.len() && (distinct || field_count > 1) {
         return Err(Unsupported);
     }
     // C can retain a pointer to an empty edge-property buffer while
@@ -618,6 +621,7 @@ pub(crate) fn classify(source: &str) -> Result<Query<'_>, Unsupported> {
         filters,
         any_filter,
         projections,
+        distinct,
         order,
         limit,
     })
@@ -766,6 +770,50 @@ pub(crate) struct ResultRows {
     // before rendering the response.
     pub(crate) rows: Vec<Vec<Vec<u8>>>,
     pub(crate) truncated: bool,
+}
+
+#[derive(Default)]
+struct DistinctRows {
+    hash_builder: RandomState,
+    last_by_hash: HashMap<u64, usize>,
+    previous_by_row: Vec<Option<usize>>,
+    cap: usize,
+    engine_cap: bool,
+    done: bool,
+}
+
+impl DistinctRows {
+    fn admit(&mut self, mut row: Vec<Vec<u8>>, result: &mut ResultRows) {
+        for cell in &mut row {
+            cell.truncate(c_string_bytes(cell).len());
+        }
+        // Keep each admitted row once. The hash covers cell lengths, and a
+        // collision is resolved against the original result rows.
+        let hash = self.hash_builder.hash_one(&row);
+        let previous = self.last_by_hash.get(&hash).copied();
+        let mut index = previous;
+        while let Some(row_index) = index {
+            if result.rows[row_index] == row {
+                return;
+            }
+            index = self.previous_by_row[row_index];
+        }
+        if result.rows.len() == self.cap {
+            // A duplicate past the cap is not evidence of truncation.
+            result.truncated |= self.engine_cap;
+            self.done = true;
+            return;
+        }
+        self.last_by_hash.insert(hash, result.rows.len());
+        self.previous_by_row.push(previous);
+        result.rows.push(row);
+    }
+}
+
+enum RowCollector {
+    All,
+    Count(CountRows),
+    Distinct(DistinctRows),
 }
 
 struct CountGroups {
@@ -951,7 +999,21 @@ impl Query<'_> {
             .first()
             .map(|hop| Adjacency::new(connection, hop.kind.is_some()))
             .transpose()?;
-        let mut counts = self.count_rows(budget.ordered_count_group_limit);
+        let limit = self.limit.unwrap_or(ENGINE_LIMIT);
+        let mut collector = if self.distinct {
+            let engine_cap = self.limit.is_none() || !self.order.is_empty();
+            RowCollector::Distinct(DistinctRows {
+                cap: if engine_cap { ENGINE_LIMIT } else { limit },
+                engine_cap,
+                ..DistinctRows::default()
+            })
+        } else if let Some(counts) =
+            self.count_rows(budget.ordered_count_group_limit)
+        {
+            RowCollector::Count(counts)
+        } else {
+            RowCollector::All
+        };
         let mut result = ResultRows {
             columns: self
                 .projections
@@ -961,9 +1023,8 @@ impl Query<'_> {
             rows: Vec::new(),
             truncated: false,
         };
-        let limit = self.limit.unwrap_or(ENGINE_LIMIT);
         'starts: loop {
-            if counts.is_none()
+            if matches!(collector, RowCollector::All)
                 && adjacency.is_none()
                 && self.order.is_empty()
                 && result.rows.len() == limit
@@ -981,7 +1042,7 @@ impl Query<'_> {
             let Some(adjacency) = &mut adjacency else {
                 if !self.collect_row(
                     &mut result,
-                    &mut counts,
+                    &mut collector,
                     &[&start],
                     &[],
                     budget,
@@ -1007,7 +1068,7 @@ impl Query<'_> {
                         }
                         if !self.collect_row(
                             &mut result,
-                            &mut counts,
+                            &mut collector,
                             &[&start, &next, &last],
                             &[&edge, &last_edge],
                             budget,
@@ -1023,7 +1084,7 @@ impl Query<'_> {
                     };
                     if !self.collect_row(
                         &mut result,
-                        &mut counts,
+                        &mut collector,
                         &nodes,
                         &[&edge],
                         budget,
@@ -1034,11 +1095,21 @@ impl Query<'_> {
             }
         }
         budget.check()?;
-        if let Some(counts) = counts {
-            result.rows = counts.rows(result.columns.len(), limit, budget)?;
-            if self.order.is_empty() {
-                result.rows.truncate(limit);
+        match collector {
+            RowCollector::Count(counts) => {
+                result.rows =
+                    counts.rows(result.columns.len(), limit, budget)?;
+                if self.order.is_empty() {
+                    result.rows.truncate(limit);
+                }
             }
+            RowCollector::Distinct(distinct) => {
+                drop(distinct);
+                if limit == ENGINE_LIMIT && result.rows.len() == ENGINE_LIMIT {
+                    return Err(ExecutionError::RowCeiling);
+                }
+            }
+            RowCollector::All => {}
         }
         if !self.order.is_empty() {
             order_rows(&mut result.rows, &self.order, limit, budget)?;
@@ -1086,17 +1157,18 @@ impl Query<'_> {
     fn collect_row(
         &self,
         result: &mut ResultRows,
-        counts: &mut Option<CountRows>,
+        collector: &mut RowCollector,
         nodes: &[&Node],
         edges: &[&Edge],
         budget: &ExecutionBudget<'_>,
     ) -> Result<bool, ExecutionError> {
-        match counts {
-            Some(CountRows::Total(count)) => {
+        let limit = self.limit.unwrap_or(ENGINE_LIMIT);
+        match collector {
+            RowCollector::Count(CountRows::Total(count)) => {
                 *count += 1;
                 return Ok(true);
             }
-            Some(CountRows::Grouped(counts)) => {
+            RowCollector::Count(CountRows::Grouped(counts)) => {
                 if counts.max_groups == 0 && !counts.needs_all_groups {
                     // LIMIT 0 still reads the graph and checks its budget.
                     return Ok(true);
@@ -1110,9 +1182,16 @@ impl Query<'_> {
                 }
                 return Ok(true);
             }
-            None => {}
+            RowCollector::Distinct(distinct) => {
+                // Native scans and checks the budget even after it stops
+                // projecting. A later read can still fail this request.
+                if !distinct.done && distinct.cap != 0 {
+                    distinct.admit(self.project_row(nodes, edges), result);
+                }
+                return Ok(true);
+            }
+            RowCollector::All => {}
         }
-        let limit = self.limit.unwrap_or(ENGINE_LIMIT);
         if self.order.is_empty() && result.rows.len() == limit {
             return Ok(false);
         }
@@ -1122,19 +1201,21 @@ impl Query<'_> {
             result.truncated = true;
             return Ok(false);
         }
-        result.rows.push(
-            self.projections
-                .iter()
-                .map(|column| {
-                    column.expression.field_value(nodes, edges).into_owned()
-                })
-                .collect(),
-        );
+        result.rows.push(self.project_row(nodes, edges));
         if result.rows.len() == ENGINE_LIMIT && limit == ENGINE_LIMIT {
             budget.check()?;
             return Err(ExecutionError::RowCeiling);
         }
         Ok(true)
+    }
+
+    fn project_row(&self, nodes: &[&Node], edges: &[&Edge]) -> Vec<Vec<u8>> {
+        self.projections
+            .iter()
+            .map(|column| {
+                column.expression.field_value(nodes, edges).into_owned()
+            })
+            .collect()
     }
 
     fn selectivity(&self, index: usize) -> u8 {
@@ -1340,6 +1421,37 @@ impl<'a> Adjacency<'a> {
             }
         }
         Ok(neighbors)
+    }
+}
+
+#[cfg(test)]
+mod distinct_tests {
+    use super::*;
+
+    #[test]
+    fn distinct_cap_ignores_duplicates_until_another_unique_row() {
+        let mut distinct = DistinctRows {
+            cap: 2,
+            engine_cap: true,
+            ..DistinctRows::default()
+        };
+        let mut result = ResultRows {
+            columns: vec!["n.name".to_owned()],
+            rows: Vec::new(),
+            truncated: false,
+        };
+        for name in [b"a", b"b", b"a", b"b"] {
+            distinct.admit(vec![name.to_vec()], &mut result);
+        }
+        assert_eq!(result.rows, [vec![b"a".to_vec()], vec![b"b".to_vec()]]);
+        assert!(!result.truncated);
+        assert!(!distinct.done);
+
+        distinct.admit(vec![b"c".to_vec()], &mut result);
+        assert_eq!(result.rows.len(), 2);
+        assert!(result.truncated);
+        assert!(distinct.done);
+        assert_eq!(distinct.previous_by_row.len(), 2);
     }
 }
 
