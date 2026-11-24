@@ -629,8 +629,7 @@ int cbm_cmd_uninstall(int argc, char **argv);
 int cbm_cmd_update(int argc, char **argv);
 
 /* config: get/set/list/reset runtime config values. */
-#ifdef CBM_AS_LIBRARY
-int cbm_rust_config_command(int argc, char **argv);
+int cbm_cmd_config(int argc, char **argv);
 
 typedef struct {
     const char *key;
@@ -645,9 +644,9 @@ const char *cbm_config_cli_read(cbm_config_t *cfg, const cbm_config_cli_key_t *k
 /* NULL value resets the key. Returns -1 on failure (diagnostic already
  * emitted), 0 on success, or 1 on success when a daemon restart is needed. */
 int cbm_config_cli_write(cbm_config_t *cfg, const cbm_config_cli_key_t *key, const char *value);
-#else
-int cbm_cmd_config(int argc, char **argv);
-#endif
+/* Use the caller's C streams, including Windows descriptor redirection. */
+size_t cbm_config_cli_output(bool error_stream, const unsigned char *bytes, size_t len);
+int cbm_config_cli_flush(bool error_stream);
 
 /* hook-augment: stdin-driven Claude Code PreToolUse augmenter.
  * Reads the hook JSON from stdin and emits hookSpecificOutput.additionalContext

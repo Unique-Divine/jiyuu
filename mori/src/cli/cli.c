@@ -68,7 +68,6 @@ enum {
     SQL_PARAM_1 = 1,   /* sqlite3_bind parameter index 1 */
     SQL_PARAM_2 = 2,
     SEMVER_PARTS = 3, /* major.minor.patch */
-    MIN_ARGC_CMD = 3,
     /* minimum argc for subcommand with arg */ /* sqlite3_bind parameter index 2 */ /* 10 MB cap
                                                                                        factor */
     CLI_MB_FACTOR = CLI_BUF_1K * CLI_BUF_1K,
@@ -76,7 +75,6 @@ enum {
     NUM_DIRS = 4,
     DECOMP_FACTOR = 10,
     GROWTH_FACTOR = 2,
-    MIN_ARGC_GET = 2,
     AUTO_YES = 1,
     AUTO_NO = -1,
     OCTAL_BASE = 8,
@@ -8087,14 +8085,6 @@ bool cbm_config_load_index_policy(cbm_config_t *cfg, cbm_index_resource_policy_t
  * key, at exit 0) "got" an empty string, indistinguishable from a real value
  * (#1522). The defaults here mirror the runtime readers' fallbacks
  * (cbm_config_get_bool/int call sites); keep them in sync. */
-#ifndef CBM_AS_LIBRARY
-typedef struct {
-    const char *key;
-    const char *default_value;
-    const char *help;
-} cbm_config_cli_key_t;
-#endif
-
 static const cbm_config_cli_key_t CONFIG_KEYS[] = {
     {CBM_CONFIG_AUTO_INDEX, "false", "Enable auto-indexing on MCP session start"},
     {CBM_CONFIG_AUTO_INDEX_LIMIT, "50000", "Max files for auto-indexing new projects"},
@@ -8205,7 +8195,6 @@ static int config_ui_write(const char *key, const char *value) {
     return CLI_OK;
 }
 
-#ifdef CBM_AS_LIBRARY
 const cbm_config_cli_key_t *cbm_config_cli_keys(size_t *count) {
     *count = sizeof(CONFIG_KEYS) / sizeof(CONFIG_KEYS[0]);
     return CONFIG_KEYS;
@@ -8244,149 +8233,13 @@ int cbm_config_cli_write(cbm_config_t *cfg, const cbm_config_cli_key_t *key, con
     }
     return 0;
 }
-#else
-static const cbm_config_cli_key_t *config_key_lookup(const char *key) {
-    for (size_t i = 0; key && i < sizeof(CONFIG_KEYS) / sizeof(CONFIG_KEYS[0]); i++) {
-        if (strcmp(CONFIG_KEYS[i].key, key) == 0) {
-            return &CONFIG_KEYS[i];
-        }
-    }
-    return NULL;
+size_t cbm_config_cli_output(bool error_stream, const unsigned char *bytes, size_t len) {
+    return fwrite(bytes, 1, len, error_stream ? stderr : stdout);
 }
 
-static void config_print_unknown_key(const char *key) {
-    (void)fprintf(stderr, "error: unknown config key: %s\nKnown keys:", key ? key : "");
-    for (size_t i = 0; i < sizeof(CONFIG_KEYS) / sizeof(CONFIG_KEYS[0]); i++) {
-        (void)fprintf(stderr, " %s", CONFIG_KEYS[i].key);
-    }
-    (void)fprintf(stderr, "\n");
+int cbm_config_cli_flush(bool error_stream) {
+    return fflush(error_stream ? stderr : stdout);
 }
-
-int cbm_cmd_config(int argc, char **argv) {
-    /* NULL argv with a nonzero argc previously slipped past this guard (the
-     * inner `argv &&` shielded only the help comparison) and dereferenced
-     * argv[0] below -- caught by the clang-analyzer lane. */
-    if (argc == 0 || !argv || strcmp(argv[0], "--help") == 0 || strcmp(argv[0], "-h") == 0) {
-        printf("Usage: mori config <command> [args]\n\n");
-        printf("Commands:\n");
-        printf("  list             Show all config values\n");
-        printf("  get <key>        Get a config value\n");
-        printf("  set <key> <val>  Set a config value\n");
-        printf("  reset <key>      Reset a key to default\n\n");
-        printf("Config keys:\n");
-        for (size_t i = 0; i < sizeof(CONFIG_KEYS) / sizeof(CONFIG_KEYS[0]); i++) {
-            printf("  %-25s  default=%-10s  %s\n", CONFIG_KEYS[i].key, CONFIG_KEYS[i].default_value,
-                   CONFIG_KEYS[i].help);
-        }
-        return 0;
-    }
-
-    const char *home = cbm_get_home_dir();
-    if (!home) {
-        (void)fprintf(stderr, "error: HOME not set (use USERPROFILE on Windows)\n");
-        return CLI_TRUE;
-    }
-
-    char cache_dir[CLI_BUF_1K];
-    snprintf(cache_dir, sizeof(cache_dir), "%s", cbm_resolve_cache_dir());
-
-    cbm_config_t *cfg = cbm_config_open(cache_dir);
-    if (!cfg) {
-        (void)fprintf(stderr, "error: cannot open config database\n");
-        return CLI_TRUE;
-    }
-
-    int rc = 0;
-    if (strcmp(argv[0], "list") == 0 || strcmp(argv[0], "ls") == 0) {
-        printf("Configuration:\n");
-        for (size_t i = 0; i < sizeof(CONFIG_KEYS) / sizeof(CONFIG_KEYS[0]); i++) {
-            char ui_value[CLI_BUF_1K];
-            const char *shown;
-            if (config_key_is_ui(CONFIG_KEYS[i].key)) {
-                config_ui_read(CONFIG_KEYS[i].key, ui_value, sizeof(ui_value));
-                shown = ui_value;
-            } else {
-                shown = cbm_config_get(cfg, CONFIG_KEYS[i].key, CONFIG_KEYS[i].default_value);
-            }
-            printf("  %-25s = %-10s\n", CONFIG_KEYS[i].key, shown);
-        }
-    } else if (strcmp(argv[0], "get") == 0) {
-        if (argc < MIN_ARGC_GET) {
-            (void)fprintf(stderr, "Usage: config get <key>\n");
-            rc = CLI_TRUE;
-        } else {
-            const cbm_config_cli_key_t *def = config_key_lookup(argv[CLI_SKIP_ONE]);
-            if (!def) {
-                config_print_unknown_key(argv[CLI_SKIP_ONE]);
-                rc = CLI_TRUE;
-            } else {
-                /* Stored value or the key's real default — the same fallback
-                 * the runtime readers use. `""` here was #1522's bug 2: every
-                 * unset key read as empty with exit 0. */
-                if (config_key_is_ui(def->key)) {
-                    char ui_value[CLI_BUF_1K];
-                    config_ui_read(def->key, ui_value, sizeof(ui_value));
-                    printf("%s\n", ui_value);
-                } else {
-                    printf("%s\n", cbm_config_get(cfg, def->key, def->default_value));
-                }
-            }
-        }
-    } else if (strcmp(argv[0], "set") == 0) {
-        if (argc < MIN_ARGC_CMD) {
-            (void)fprintf(stderr, "Usage: config set <key> <value>\n");
-            rc = CLI_TRUE;
-        } else if (!config_key_lookup(argv[CLI_SKIP_ONE])) {
-            config_print_unknown_key(argv[CLI_SKIP_ONE]);
-            rc = CLI_TRUE;
-        } else if (config_key_is_ui(argv[CLI_SKIP_ONE])) {
-            if (config_ui_write(argv[CLI_SKIP_ONE], argv[CLI_PAIR_LEN]) == CLI_OK) {
-                printf("%s = %s\n", argv[CLI_SKIP_ONE], argv[CLI_PAIR_LEN]);
-                printf("  (restart the daemon for this to take effect)\n");
-            } else {
-                rc = CLI_TRUE;
-            }
-        } else {
-            int set_rc =
-                config_key_is_index_policy(argv[CLI_SKIP_ONE])
-                    ? config_index_policy_write(cfg, argv[CLI_SKIP_ONE], argv[CLI_PAIR_LEN])
-                    : cbm_config_set(cfg, argv[CLI_SKIP_ONE], argv[CLI_PAIR_LEN]);
-            if (set_rc == 0) {
-                printf("%s = %s\n", argv[CLI_SKIP_ONE], argv[CLI_PAIR_LEN]);
-            } else {
-                if (!config_key_is_index_policy(argv[CLI_SKIP_ONE])) {
-                    (void)fprintf(stderr, "error: failed to set %s\n", argv[CLI_SKIP_ONE]);
-                }
-                rc = CLI_TRUE;
-            }
-        }
-    } else if (strcmp(argv[0], "reset") == 0) {
-        if (argc < MIN_ARGC_GET) {
-            (void)fprintf(stderr, "Usage: config reset <key>\n");
-            rc = CLI_TRUE;
-        } else if (!config_key_lookup(argv[CLI_SKIP_ONE])) {
-            config_print_unknown_key(argv[CLI_SKIP_ONE]);
-            rc = CLI_TRUE;
-        } else if (config_key_is_ui(argv[CLI_SKIP_ONE])) {
-            const cbm_config_cli_key_t *def = config_key_lookup(argv[CLI_SKIP_ONE]);
-            if (config_ui_write(argv[CLI_SKIP_ONE], def->default_value) == CLI_OK) {
-                printf("%s reset to default\n", argv[CLI_SKIP_ONE]);
-            } else {
-                rc = CLI_TRUE;
-            }
-        } else {
-            cbm_config_delete(cfg, argv[CLI_SKIP_ONE]);
-            printf("%s reset to default\n", argv[CLI_SKIP_ONE]);
-        }
-    } else {
-        (void)fprintf(stderr, "Unknown config command: %s\n", argv[0]);
-        rc = CLI_TRUE;
-    }
-
-    cbm_config_close(cfg);
-    return rc;
-}
-#endif
 
 /* ── Interactive prompt ───────────────────────────────────────── */
 

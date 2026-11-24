@@ -1,5 +1,15 @@
 //! Rust GraphQL implementation and registration for the C graph engine.
 
+#[cfg(any(feature = "native-engine-abi", test))]
+mod config_cli;
+
+#[cfg(any(feature = "native-engine-abi", test))]
+#[path = "mcp_dispatch/methods.rs"]
+mod mcp_methods;
+
+#[cfg(feature = "native-engine-abi")]
+pub mod startup;
+
 #[cfg(any(feature = "graphql-callbacks", test))]
 mod gqlgen;
 #[cfg(any(feature = "graphql-callbacks", test))]

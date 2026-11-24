@@ -86,8 +86,8 @@ unsafe fn take_response(reply: *mut c_char) -> Option<Value> {
 
 #[test]
 fn native_cancellation_dispatch_respects_active_request_scope() {
-    // SAFETY: This is the only binary unit test that installs MCP dispatch
-    // callbacks. It owns the server and invokes all requests on this thread.
+    // SAFETY: This test owns the server and invokes all requests on this
+    // thread. It is the only binary unit test that installs the tool decoder.
     unsafe {
         // Use the embedded server's in-memory store. Other unit tests in
         // this process can already have initialized SQLite.
@@ -95,16 +95,11 @@ fn native_cancellation_dispatch_respects_active_request_scope() {
         let server = fixture.0;
         assert!(!server.is_null());
         let ping = c"{\"jsonrpc\":\"2.0\",\"id\":\"boot\",\"method\":\"ping\"}";
-        let unavailable =
-            take_response(cbm_mcp_server_handle(server, ping.as_ptr())).unwrap();
-        assert_eq!(unavailable["id"], "boot");
-        assert_eq!(unavailable["error"]["code"], -32603);
-
-        super::register();
         let ready =
             take_response(cbm_mcp_server_handle(server, ping.as_ptr())).unwrap();
         assert_eq!(ready["id"], "boot");
         assert_eq!(ready["result"], serde_json::json!({}));
+        super::register();
 
         let store = cbm_mcp_server_store(server);
         assert!(!store.is_null());

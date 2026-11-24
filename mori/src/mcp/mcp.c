@@ -23336,47 +23336,6 @@ static long long mcp_elapsed_us(struct timespec start, struct timespec end) {
            ((long long)(end.tv_nsec - start.tv_nsec) / MCP_MS_TO_US);
 }
 
-#ifndef CBM_AS_LIBRARY
-/* Method selection for the standalone C reference. */
-enum {
-    MCP_METHOD_UNKNOWN = 0,
-    MCP_METHOD_INITIALIZE,
-    MCP_METHOD_PING,
-    MCP_METHOD_RESOURCES_LIST,
-    MCP_METHOD_RESOURCE_TEMPLATES_LIST,
-    MCP_METHOD_PROMPTS_LIST,
-    MCP_METHOD_PROMPTS_GET,
-    MCP_METHOD_TOOLS_LIST,
-    MCP_METHOD_TOOLS_CALL,
-    MCP_METHOD_CANCELLED,
-    MCP_METHOD_DISCOVER,
-};
-
-static int select_mcp_method(const char *method) {
-    static const struct {
-        const char *name;
-        int kind;
-    } methods[] = {
-        {"initialize", MCP_METHOD_INITIALIZE},
-        {"ping", MCP_METHOD_PING},
-        {"resources/list", MCP_METHOD_RESOURCES_LIST},
-        {"resources/templates/list", MCP_METHOD_RESOURCE_TEMPLATES_LIST},
-        {"prompts/list", MCP_METHOD_PROMPTS_LIST},
-        {"prompts/get", MCP_METHOD_PROMPTS_GET},
-        {"tools/list", MCP_METHOD_TOOLS_LIST},
-        {"tools/call", MCP_METHOD_TOOLS_CALL},
-        {"notifications/cancelled", MCP_METHOD_CANCELLED},
-        {"server/discover", MCP_METHOD_DISCOVER},
-    };
-    for (size_t i = 0; method && i < sizeof(methods) / sizeof(methods[0]); i++) {
-        if (strcmp(method, methods[i].name) == 0) {
-            return methods[i].kind;
-        }
-    }
-    return MCP_METHOD_UNKNOWN;
-}
-#endif
-
 typedef struct {
     cbm_mcp_server_t *srv;
     cbm_jsonrpc_request_t req;
@@ -23467,8 +23426,7 @@ static void mcp_request_unknown(mcp_request_context_t *ctx, bool discover) {
     ctx->is_error = !discover;
 }
 
-#ifdef CBM_AS_LIBRARY
-/* Keep this table in sync with RequestOps in mcp_dispatch.rs. The callback
+/* Keep this table in sync with RequestOps in mcp_dispatch/methods.rs. Rust
  * borrows ctx for this call only. C owns the parsed request and all outputs. */
 typedef struct {
     void (*initialize)(mcp_request_context_t *);
@@ -23483,14 +23441,8 @@ typedef struct {
     void (*unknown)(mcp_request_context_t *, bool discover);
 } mcp_request_ops_t;
 
-typedef void (*mcp_dispatch_fn)(const char *method, bool has_id, mcp_request_context_t *,
-                                const mcp_request_ops_t *);
-static mcp_dispatch_fn mcp_dispatch;
-
-/* Rust registers before any request threads start. */
-void cbm_mcp_set_dispatch(mcp_dispatch_fn dispatch) {
-    mcp_dispatch = dispatch;
-}
+extern void cbm_rust_mcp_dispatch(const char *method, bool has_id, mcp_request_context_t *ctx,
+                                  const mcp_request_ops_t *ops);
 
 static void mcp_dispatch_request(mcp_request_context_t *ctx) {
     static const mcp_request_ops_t ops = {
@@ -23505,63 +23457,11 @@ static void mcp_dispatch_request(mcp_request_context_t *ctx) {
         .cancel_notification = mcp_request_cancel_notification,
         .unknown = mcp_request_unknown,
     };
-    if (!mcp_dispatch) {
-        /* Rust main registers before starting C. An uninitialized embedder
-         * must not dispatch a tool or process a cancellation. */
-        if (ctx->req.has_id) {
-            ctx->error_json =
-                heap_strdup("{\"code\":-32603,\"message\":\"MCP dispatch unavailable\"}");
-            ctx->is_error = true;
-        }
-        return;
-    }
     const char *method = ctx->req.method ? ctx->req.method : "";
-    mcp_dispatch(method, ctx->req.has_id, ctx, &ops);
+    cbm_rust_mcp_dispatch(method, ctx->req.has_id, ctx, &ops);
     cbm_log_debug("mcp.dispatch", "backend", "rust", "method", method, "has_id",
                   ctx->req.has_id ? "true" : "false");
 }
-#else
-static void mcp_dispatch_request(mcp_request_context_t *ctx) {
-    int method = select_mcp_method(ctx->req.method);
-    if (!ctx->req.has_id) {
-        if (method == MCP_METHOD_CANCELLED) {
-            mcp_request_cancel_notification(ctx);
-        }
-        return;
-    }
-
-    switch (method) {
-    case MCP_METHOD_INITIALIZE:
-        mcp_request_initialize(ctx);
-        break;
-    case MCP_METHOD_PING:
-        mcp_request_ping(ctx);
-        break;
-    case MCP_METHOD_RESOURCES_LIST:
-        mcp_request_resources_list(ctx);
-        break;
-    case MCP_METHOD_RESOURCE_TEMPLATES_LIST:
-        mcp_request_resource_templates_list(ctx);
-        break;
-    case MCP_METHOD_PROMPTS_LIST:
-        mcp_request_prompts_list(ctx);
-        break;
-    case MCP_METHOD_PROMPTS_GET:
-        mcp_request_prompts_get(ctx);
-        break;
-    case MCP_METHOD_TOOLS_LIST:
-        mcp_request_tools_list(ctx);
-        break;
-    case MCP_METHOD_TOOLS_CALL:
-        mcp_request_tools_call(ctx);
-        break;
-    default:
-        mcp_request_unknown(ctx, method == MCP_METHOD_DISCOVER);
-        break;
-    }
-}
-#endif
-
 char *cbm_mcp_server_handle(cbm_mcp_server_t *srv, const char *line) {
     mcp_request_context_t ctx = {.srv = srv};
     if (cbm_jsonrpc_parse(line, &ctx.req) < 0) {

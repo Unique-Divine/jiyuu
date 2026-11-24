@@ -26,7 +26,8 @@ pub(super) struct RequestOps {
     unknown: unsafe extern "C" fn(*mut RequestContext, bool),
 }
 
-pub(super) unsafe extern "C" fn dispatch(
+#[unsafe(no_mangle)]
+unsafe extern "C" fn cbm_rust_mcp_dispatch(
     method: *const c_char,
     has_id: bool,
     ctx: *mut RequestContext,
@@ -117,7 +118,12 @@ fn dispatches_cancel_only_as_a_notification() {
         // SAFETY: The method and table are live, and the test operations
         // cast the borrowed pointer back to its original type.
         unsafe {
-            dispatch(method.as_ptr(), has_id, (&raw mut observed).cast(), &ops);
+            cbm_rust_mcp_dispatch(
+                method.as_ptr(),
+                has_id,
+                (&raw mut observed).cast(),
+                &ops,
+            );
         }
         assert_eq!(observed, expected, "{method:?}, has_id={has_id}");
     }

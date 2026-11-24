@@ -70,8 +70,6 @@ fn decode_tool_call(params: &str) -> serde_json::Result<ToolCall<'_>> {
     }
 }
 
-mod methods;
-
 #[cfg(feature = "c-backend")]
 mod linked {
     #[cfg(test)]
@@ -80,15 +78,6 @@ mod linked {
     use std::ffi::{CStr, CString, c_char};
     use std::{panic, ptr};
 
-    use super::methods::{RequestContext, RequestOps, dispatch};
-
-    type Dispatch = unsafe extern "C" fn(
-        method: *const c_char,
-        has_id: bool,
-        ctx: *mut RequestContext,
-        ops: *const RequestOps,
-    );
-
     type ToolCallDecoder = unsafe extern "C" fn(
         params: *const c_char,
         name_out: *mut *mut c_char,
@@ -96,7 +85,6 @@ mod linked {
     ) -> bool;
 
     unsafe extern "C" {
-        fn cbm_mcp_set_dispatch(dispatch: Dispatch);
         fn cbm_mcp_set_tool_call_decoder(decode: ToolCallDecoder);
         fn strdup(s: *const c_char) -> *mut c_char;
     }
@@ -139,10 +127,7 @@ mod linked {
 
     pub(crate) unsafe fn register() {
         // SAFETY: the caller registers once, before starting request threads.
-        unsafe {
-            cbm_mcp_set_dispatch(dispatch);
-            cbm_mcp_set_tool_call_decoder(decode);
-        }
+        unsafe { cbm_mcp_set_tool_call_decoder(decode) };
     }
 }
 

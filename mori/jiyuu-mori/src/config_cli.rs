@@ -159,7 +159,7 @@ fn run<B: Config>(
     Ok(0)
 }
 
-#[cfg(all(feature = "c-backend", not(test)))]
+#[cfg(feature = "native-engine-abi")]
 mod native {
     use std::ffi::{c_char, c_int, c_void};
     use std::{ptr, slice};
@@ -199,6 +199,12 @@ mod native {
             key: *const NativeKey,
             value: *const c_char,
         ) -> c_int;
+        fn cbm_config_cli_output(
+            error_stream: bool,
+            bytes: *const u8,
+            len: usize,
+        ) -> usize;
+        fn cbm_config_cli_flush(error_stream: bool) -> c_int;
     }
 
     struct NativeConfig(ptr::NonNull<c_void>);
@@ -261,8 +267,37 @@ mod native {
         }
     }
 
+    // The C entry point and native test runner must use the same CRT streams.
+    // In particular, Windows _dup2 changes the CRT fd without changing the
+    // Win32 standard handle that Rust's std::io would write to.
+    struct NativeStream {
+        error_stream: bool,
+    }
+
+    impl Write for NativeStream {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            // SAFETY: C synchronously reads the supplied byte slice.
+            Ok(unsafe {
+                cbm_config_cli_output(
+                    self.error_stream,
+                    bytes.as_ptr(),
+                    bytes.len(),
+                )
+            })
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            // SAFETY: C only flushes its own standard stream.
+            if unsafe { cbm_config_cli_flush(self.error_stream) } == 0 {
+                Ok(())
+            } else {
+                Err(io::Error::last_os_error())
+            }
+        }
+    }
+
     #[unsafe(no_mangle)]
-    unsafe extern "C" fn cbm_rust_config_command(
+    unsafe extern "C" fn cbm_cmd_config(
         argc: c_int,
         argv: *const *const c_char,
     ) -> c_int {
@@ -279,20 +314,29 @@ mod native {
                         help: CStr::from_ptr(key.help),
                     })
                     .collect::<Vec<_>>();
-            let args = slice::from_raw_parts(argv, argc as usize)
+            let argv = if argc > 0 && !argv.is_null() {
+                slice::from_raw_parts(argv, argc as usize)
+            } else {
+                &[]
+            };
+            let args = argv
                 .iter()
                 .map(|&arg| CStr::from_ptr(arg))
                 .collect::<Vec<_>>();
             (args, keys)
         };
-        run(
-            &args,
-            &keys,
-            NativeConfig::open,
-            &mut io::stdout().lock(),
-            &mut io::stderr().lock(),
-        )
-        .unwrap_or(1)
+        let mut output = NativeStream {
+            error_stream: false,
+        };
+        let mut error = NativeStream { error_stream: true };
+        let result =
+            run(&args, &keys, NativeConfig::open, &mut output, &mut error)
+                .and_then(|status| {
+                    output.flush()?;
+                    error.flush()?;
+                    Ok(status)
+                });
+        result.unwrap_or(1)
     }
 }
 
