@@ -145,7 +145,7 @@ impl Fixture {
     }
 
     fn query_reference(&self, project: &str, cypher: &str) -> Value {
-        self.query(Self::reference_binary(), project, cypher)
+        self.query(&Self::reference_binary(), project, cypher)
     }
 
     fn start_query_daemon(&self, bin: &Path, backend: &str) {
@@ -245,9 +245,7 @@ impl Fixture {
             assert!(stop.status.success(), "{stop:?}");
             pages
         };
-        let reference_bin = support::c_reference_bin();
-        let reference =
-            run(reference_bin.as_deref().unwrap_or(Path::new(MORI)), "c");
+        let reference = run(&Self::query_mode_comparison_binary(), "c");
         let candidate = run(Path::new(MORI), "rust");
         cases
             .iter()
@@ -257,6 +255,16 @@ impl Fixture {
                 serde_json::from_slice(rust).expect("parse matched query page")
             })
             .collect()
+    }
+
+    fn reference_binary() -> PathBuf {
+        support::c_reference_bin()
+            .expect("set MORI_C_REFERENCE_BIN or run just check-linked")
+    }
+
+    fn query_mode_comparison_binary() -> PathBuf {
+        // The mode comparisons explicitly select the C evaluator on either binary.
+        support::c_reference_bin().unwrap_or_else(|| PathBuf::from(MORI))
     }
 
     fn cross_links(&self, project: &str) -> Vec<Value> {
@@ -950,13 +958,13 @@ fn opt_in_rust_query_preserves_cursor_and_daemon_dispatch() {
     let request = json!({"project": CLIENT, "query": QUERY, "format": "json", "max_rows": 1});
     let reference_bin = Fixture::reference_binary();
     let reference = fixture
-        .command(reference_bin)
+        .command(&reference_bin)
         .args(["cli", "--quiet", "query_graph", &request.to_string()])
         .output()
         .unwrap();
     assert!(reference.status.success(), "{reference:?}");
     let reference: Value = serde_json::from_slice(&reference.stdout).unwrap();
-    let stop = |binary| {
+    let stop = |binary: &Path| {
         let result = fixture
             .command(binary)
             .args(["daemon", "stop"])
@@ -964,7 +972,7 @@ fn opt_in_rust_query_preserves_cursor_and_daemon_dispatch() {
             .unwrap();
         assert!(result.status.success(), "{result:?}");
     };
-    stop(reference_bin);
+    stop(&reference_bin);
     let reference_ordered = fixture.query_reference(CLIENT, ORDERED);
 
     let candidate_bin = Path::new(MORI);
@@ -1240,7 +1248,7 @@ fn split_projection_uses_native_mcp_serialization_and_cursor() {
         assert!(stop.status.success(), "{stop:?}");
         [first_page, next_page, text, budget]
     };
-    let reference = run(Fixture::reference_binary(), "c");
+    let reference = run(&Fixture::query_mode_comparison_binary(), "c");
     let candidate = run(Path::new(MORI), "rust");
     assert_eq!(candidate, reference);
     let page =
@@ -1341,7 +1349,7 @@ fn ordered_graph_ui_calls_match_native_ties_limits_and_cursor_pages() {
         assert!(stop.status.success(), "{stop:?}");
         pages
     };
-    let reference = run(Fixture::reference_binary(), "c");
+    let reference = run(&Fixture::query_mode_comparison_binary(), "c");
     let candidate = run(Path::new(MORI), "rust");
     assert_eq!(candidate, reference);
     for (index, pages) in candidate.iter().enumerate() {
@@ -1905,7 +1913,7 @@ fn zero_hop_scan_checks_budget_and_matches_native_row_ceiling() {
     };
     let reference_bin = Fixture::reference_binary();
     let below = format!("{MATCH} LIMIT 99999");
-    let c = fixture.query_output(reference_bin, CLIENT, &below);
+    let c = fixture.query_output(&reference_bin, CLIENT, &below);
     let rust = candidate(&below);
     assert!(
         c.status.success() && rust.status.success(),
@@ -1916,7 +1924,7 @@ fn zero_hop_scan_checks_budget_and_matches_native_row_ceiling() {
     assert_eq!(result["total"], 99_999);
 
     for query in [MATCH, &format!("{MATCH} LIMIT 100000")] {
-        let c = fixture.query_output(reference_bin, CLIENT, query);
+        let c = fixture.query_output(&reference_bin, CLIENT, query);
         let rust = candidate(query);
         assert_eq!(c.status.code(), Some(1), "{c:?}");
         assert_eq!(rust.status.code(), c.status.code(), "{rust:?}");
@@ -2073,7 +2081,7 @@ fn linear_cypher_matches_the_native_result_ceiling() {
 
     let at_ceiling = format!("{MATCH} LIMIT 100000");
     let output =
-        fixture.query_output(Fixture::reference_binary(), CLIENT, &at_ceiling);
+        fixture.query_output(&Fixture::reference_binary(), CLIENT, &at_ceiling);
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     assert!(
         String::from_utf8_lossy(&output.stderr)

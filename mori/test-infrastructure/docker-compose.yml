@@ -19,9 +19,9 @@ services:
       dockerfile: test-infrastructure/Dockerfile
     platform: linux/arm64
     volumes:
-      - ..:/src
-      - ${CBM_GIT_COMMON_DIR:-..}:${CBM_GIT_COMMON_DIR:-/.cbm-git-noop}:ro
-      - cbm-build:/src/build
+      - ../..:/workspace
+      - ${CBM_GIT_COMMON_DIR:-../..}:${CBM_GIT_COMMON_DIR:-/.cbm-git-noop}:ro
+      - cbm-build:/workspace/mori/build
       - cbm-fixture-cache:/root/.cache/cbm-test-fixtures
       - cbm-ccache-arm64:/root/.ccache
     environment:
@@ -35,9 +35,9 @@ services:
       dockerfile: test-infrastructure/Dockerfile
     platform: linux/amd64
     volumes:
-      - ..:/src
-      - ${CBM_GIT_COMMON_DIR:-..}:${CBM_GIT_COMMON_DIR:-/.cbm-git-noop}:ro
-      - cbm-build:/src/build
+      - ../..:/workspace
+      - ${CBM_GIT_COMMON_DIR:-../..}:${CBM_GIT_COMMON_DIR:-/.cbm-git-noop}:ro
+      - cbm-build:/workspace/mori/build
       - cbm-fixture-cache:/root/.cache/cbm-test-fixtures
       - cbm-ccache-amd64:/root/.ccache
     environment:
@@ -58,9 +58,9 @@ services:
     platform: linux/arm64
     init: true
     volumes:
-      - ..:/src
-      - ${CBM_GIT_COMMON_DIR:-..}:${CBM_GIT_COMMON_DIR:-/.cbm-git-noop}:ro
-      - cbm-build:/src/build
+      - ../..:/workspace
+      - ${CBM_GIT_COMMON_DIR:-../..}:${CBM_GIT_COMMON_DIR:-/.cbm-git-noop}:ro
+      - cbm-build:/workspace/mori/build
       - cbm-fixture-cache:/root/.cache/cbm-test-fixtures
       - cbm-ccache-arm64:/root/.ccache
     environment:
@@ -81,9 +81,9 @@ services:
     # a real reaper so killed zombies do not keep process groups appearing live.
     init: true
     volumes:
-      - ..:/src
-      - ${CBM_GIT_COMMON_DIR:-..}:${CBM_GIT_COMMON_DIR:-/.cbm-git-noop}:ro
-      - cbm-build:/src/build
+      - ../..:/workspace
+      - ${CBM_GIT_COMMON_DIR:-../..}:${CBM_GIT_COMMON_DIR:-/.cbm-git-noop}:ro
+      - cbm-build:/workspace/mori/build
       - cbm-fixture-cache:/root/.cache/cbm-test-fixtures
       - cbm-ccache-arm64:/root/.ccache
     environment:
@@ -108,9 +108,9 @@ services:
     platform: linux/amd64
     init: true
     volumes:
-      - ..:/src
-      - ${CBM_GIT_COMMON_DIR:-..}:${CBM_GIT_COMMON_DIR:-/.cbm-git-noop}:ro
-      - cbm-build:/src/build
+      - ../..:/workspace
+      - ${CBM_GIT_COMMON_DIR:-../..}:${CBM_GIT_COMMON_DIR:-/.cbm-git-noop}:ro
+      - cbm-build:/workspace/mori/build
       - cbm-fixture-cache:/root/.cache/cbm-test-fixtures
       - cbm-ccache-amd64:/root/.ccache
     environment:
@@ -128,7 +128,7 @@ services:
       dockerfile: test-infrastructure/Dockerfile
     platform: linux/arm64
     volumes:
-      - ..:/src
+      - ../..:/workspace
     entrypoint: ["scripts/build.sh"]
     command: ["CC=gcc", "CXX=g++", "BUILD_DIR=build/linux-arm64"]
 
@@ -138,7 +138,7 @@ services:
       dockerfile: test-infrastructure/Dockerfile
     platform: linux/amd64
     volumes:
-      - ..:/src
+      - ../..:/workspace
     entrypoint: ["scripts/build.sh"]
     command: ["CC=gcc", "CXX=g++", "BUILD_DIR=build/linux-amd64"]
 
@@ -149,7 +149,7 @@ services:
       dockerfile: test-infrastructure/Dockerfile.mingw
     platform: linux/amd64
     volumes:
-      - ..:/src
+      - ../..:/workspace
 
   test-windows:
     build:
@@ -157,7 +157,7 @@ services:
       dockerfile: test-infrastructure/Dockerfile.mingw
     platform: linux/amd64
     volumes:
-      - ..:/src
+      - ../..:/workspace
     command: >-
       make -j4 -f Makefile.cbm clean-c BUILD_DIR=build/win-cross &&
       make -j4 -f Makefile.cbm build/win-cross/test-runner
@@ -175,7 +175,7 @@ services:
       dockerfile: test-infrastructure/Dockerfile
     platform: linux/arm64
     volumes:
-      - ..:/src
+      - ../..:/workspace
     entrypoint: ["/bin/bash", "-c"]
     command:
       - |
@@ -188,7 +188,7 @@ services:
       dockerfile: test-infrastructure/Dockerfile
     platform: linux/amd64
     volumes:
-      - ..:/src
+      - ../..:/workspace
     entrypoint: ["/bin/bash", "-c"]
     command:
       - |
@@ -206,7 +206,7 @@ services:
       dockerfile: test-infrastructure/Dockerfile
     platform: linux/arm64
     volumes:
-      - ..:/src
+      - ../..:/workspace
     entrypoint: ["/bin/bash", "-c"]
     command:
       - |
@@ -220,7 +220,7 @@ services:
       dockerfile: test-infrastructure/Dockerfile.mingw
     platform: linux/amd64
     volumes:
-      - ..:/src
+      - ../..:/workspace
     entrypoint: ["/bin/bash", "-c"]
     command:
       - |
@@ -236,8 +236,8 @@ services:
       dockerfile: test-infrastructure/Dockerfile.alpine
     platform: linux/arm64
     volumes:
-      - ..:/src
-      - ${CBM_GIT_COMMON_DIR:-..}:${CBM_GIT_COMMON_DIR:-/.cbm-git-noop}:ro
+      - ../..:/workspace
+      - ${CBM_GIT_COMMON_DIR:-../..}:${CBM_GIT_COMMON_DIR:-/.cbm-git-noop}:ro
     entrypoint: ["bash", "scripts/test.sh"]
     command: ["CC=gcc", "CXX=g++", "BUILD_DIR=build/alpine"]
 
@@ -247,7 +247,7 @@ services:
       dockerfile: test-infrastructure/Dockerfile.alpine
     platform: linux/arm64
     volumes:
-      - ..:/src
+      - ../..:/workspace
     entrypoint: ["bash", "scripts/build.sh"]
     command: ["CC=gcc", "CXX=g++", "STATIC=1", "BUILD_DIR=build/alpine"]
 
@@ -257,7 +257,7 @@ services:
       dockerfile: test-infrastructure/Dockerfile.alpine
     platform: linux/arm64
     volumes:
-      - ..:/src
+      - ../..:/workspace
     entrypoint: ["bash", "-c"]
     command:
       - |
@@ -276,7 +276,7 @@ services:
       dockerfile: test-infrastructure/Dockerfile
     platform: linux/arm64
     volumes:
-      - ..:/src
+      - ../..:/workspace
     entrypoint: ["/bin/bash", "-c"]
     command:
       - |
@@ -293,7 +293,7 @@ services:
       dockerfile: test-infrastructure/Dockerfile.glibc22
     platform: linux/arm64
     volumes:
-      - ..:/src
+      - ../..:/workspace
     entrypoint: ["/bin/bash", "-c"]
     command:
       - |
@@ -315,7 +315,7 @@ services:
       context: ..
       dockerfile: test-infrastructure/Dockerfile.lint
     volumes:
-      - ..:/src
+      - ../..:/workspace
     command: ["--ci", "CLANG_FORMAT=clang-format-20"]
 
 volumes:

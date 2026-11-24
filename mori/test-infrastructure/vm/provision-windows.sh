@@ -33,7 +33,7 @@ USER_="${CBM_VM_USER:-test}"
 HOST_KEY="${CBM_VM_HOST_KEY_SHA256:?set CBM_VM_HOST_KEY_SHA256 in ~/.claude/cbm-vm/config}"
 LOCAL_BRANCH="$(git -C "$ROOT" branch --show-current)"
 BRANCH="${CBM_VM_BRANCH:-${LOCAL_BRANCH:-main}}"
-REPO_URL="${CBM_VM_REPO:-https://github.com/DeusData/codebase-memory-mcp.git}"
+REPO_URL="${CBM_VM_REPO:-https://github.com/Unique-Divine/jiyuu.git}"
 MSYS2_SFX_URL="https://github.com/msys2/msys2-installer/releases/download/2026-06-11/msys2-base-x86_64-20260611.sfx.exe"
 MSYS2_SFX_SHA256="c105946e64e08f099ac0e4647461ce762b95333ad211777666476a9a41451d65"
 
@@ -103,17 +103,36 @@ if [ "${1:-}" != "--update" ]; then
     fi
 fi
 
-step "4/6 repo clone/update -> /c/cbm @ ${BRANCH}"
-if vm "clangarm64" "test -d /c/cbm/.git && echo REPO_PRESENT" | grep -q REPO_PRESENT; then
-    vm "clangarm64" "cd /c/cbm && git fetch origin ${BRANCH} && git reset --hard FETCH_HEAD && git clean -fdx && git log --oneline -1"
+# Install on existing VMs too. Each MSYS2 Rust package includes its target std
+# and matches the ABI of that venue's Clang.
+step "3c/6 Rust and grammar tools"
+vm "msys" "pacman -S --noconfirm --noprogressbar --needed zstd unzip \
+    mingw-w64-clang-aarch64-rust mingw-w64-clang-x86_64-rust"
+vm "clangarm64" "rustc -vV | grep -Fx 'host: aarch64-pc-windows-gnullvm' && cargo --version"
+vm "clang64" "rustc -vV | grep -Fx 'host: x86_64-pc-windows-gnullvm' && cargo --version"
+
+BUN_VERSION=1.4.3
+BUN_SHA256=5e8f142ef722cbc9f67dc068a166e46ee72be8307b38cac7186589d2face668f
+BUN_DIR="/c/mori-tools/bun-${BUN_VERSION}"
+if ! vm "msys" "test -x '${BUN_DIR}/bun.exe'"; then
+    vm "msys" "mkdir -p /c/mori-tools && cd /c/mori-tools && \
+        curl -fLsS 'https://github.com/oven-sh/bun/releases/download/bun-v${BUN_VERSION}/bun-windows-aarch64.zip' -o bun-${BUN_VERSION}.zip && \
+        printf '%s  %s\\n' '${BUN_SHA256}' 'bun-${BUN_VERSION}.zip' | sha256sum -c - && \
+        unzip -o bun-${BUN_VERSION}.zip && \
+        install -D bun-windows-aarch64/bun.exe '${BUN_DIR}/bun.exe' && rm bun-${BUN_VERSION}.zip"
+fi
+
+step "4/6 workspace clone/update -> /c/jiyuu @ ${BRANCH}"
+if vm "clangarm64" "test -d /c/jiyuu/.git && echo REPO_PRESENT" | grep -q REPO_PRESENT; then
+    vm "clangarm64" "cd /c/jiyuu && git fetch origin ${BRANCH} && git reset --hard FETCH_HEAD && git clean -fdx && git log --oneline -1"
 else
-    vm "clangarm64" "git clone --branch ${BRANCH} --single-branch --depth 200 ${REPO_URL} /c/cbm && cd /c/cbm && git log --oneline -1"
+    vm "clangarm64" "git clone --branch ${BRANCH} --single-branch --depth 200 ${REPO_URL} /c/jiyuu && cd /c/jiyuu && git log --oneline -1"
 fi
 
 step "5/6 build: native ARM64 binary + test-runner (no ASan on arm64)"
-vm "clangarm64" "cd /c/cbm && make -j${JOBS} -f Makefile.cbm CC=clang CXX=clang++ SANITIZE= cbm build/c/test-runner > /tmp/provision-build.log 2>&1 && echo BUILD_OK || (echo BUILD_FAIL; tail -15 /tmp/provision-build.log; exit 1)"
+vm "clangarm64" "cd /c/jiyuu/mori && ${BUN_DIR}/bun.exe scripts/grammars-fetch.ts && make -j${JOBS} -f Makefile.cbm CC=clang CXX=clang++ SANITIZE= cbm build/c/test-runner > /tmp/provision-build.log 2>&1 && echo BUILD_OK || (echo BUILD_FAIL; tail -15 /tmp/provision-build.log; exit 1)"
 
 step "6/6 smoke: binary + test-runner start"
-vm "clangarm64" "cd /c/cbm && ./build/c/codebase-memory-mcp.exe --version && ./build/c/test-runner --list-suites | head -3"
+vm "clangarm64" "cd /c/jiyuu/mori && ./build/c/codebase-memory-mcp.exe --version && ./build/c/test-runner --list-suites | head -3"
 
 printf '\n\033[1mPROVISION COMPLETE\033[0m — daily driving: test-infrastructure/vm/win.sh\n'

@@ -10,13 +10,14 @@
 # Pinned by digest (supply-chain: no floating tags). This is the multi-arch
 # manifest-list digest of mstorsjo/llvm-mingw:latest as of 2026-07-23; bump
 # deliberately by re-resolving the digest, never back to a bare tag.
+FROM rust:1.89.0-bookworm@sha256:948f9b08a66e7fe01b03a98ef1c7568292e07ec2e4fe90d88c07bb14563c84ff AS rust-toolchain
 FROM mstorsjo/llvm-mingw:latest@sha256:5cbf421906f889e01c8d4005787474e302df6daa197286ebf212d419024966af
 
 # curl+zstd are required (zlib sysroot fetch below). Wine is BEST-EFFORT: it
 # only runs the .exe, and its i386 packages are unavailable on an arm64 Docker
 # host (e.g. Colima on Apple Silicon), so a Wine failure must NOT abort the
 # image build - the cross-COMPILE check still works without it.
-RUN apt-get update && apt-get install -y --no-install-recommends curl zstd \
+RUN apt-get update && apt-get install -y --no-install-recommends curl git zstd \
     && rm -rf /var/lib/apt/lists/*
 RUN (dpkg --add-architecture i386 && apt-get update && \
      apt-get install -y --no-install-recommends wine64 && rm -rf /var/lib/apt/lists/*) \
@@ -54,7 +55,15 @@ RUN WINEDEBUG=-all wine64 wineboot --init 2>/dev/null || \
     WINEDEBUG=-all wine wineboot --init 2>/dev/null || \
     echo "WARN: Wine init skipped"
 
-WORKDIR /src
+COPY --from=rust-toolchain /usr/local/cargo /usr/local/cargo
+COPY --from=rust-toolchain /usr/local/rustup /usr/local/rustup
+ENV CARGO_HOME=/usr/local/cargo RUSTUP_HOME=/usr/local/rustup
+ENV PATH="/usr/local/cargo/bin:${PATH}"
+
+RUN rustup target add --toolchain 1.89.0 x86_64-pc-windows-gnullvm
+
+RUN git config --system --add safe.directory /workspace
+WORKDIR /workspace/mori
 
 ENTRYPOINT ["/bin/bash", "-c"]
 

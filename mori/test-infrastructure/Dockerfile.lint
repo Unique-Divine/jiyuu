@@ -3,7 +3,7 @@
 #   - cppcheck 2.20.0 (built from source, same as CI)
 #
 # Build:  docker build -t cbm-lint -f test-infrastructure/Dockerfile.lint test-infrastructure/
-# Run:    docker run --rm -v $(pwd):/src cbm-lint
+# Run:    docker run --rm -v $(git rev-parse --show-toplevel):/workspace cbm-lint
 
 # Pinned by digest (supply-chain: no floating tags) — multi-arch manifest-list
 # digest of ubuntu:noble as of 2026-07-23; bump deliberately, never to a tag.
@@ -28,7 +28,8 @@ RUN git clone --depth 1 --branch 2.20.0 https://github.com/danmar/cppcheck.git /
     && cmake --install /tmp/cppcheck/build \
     && rm -rf /tmp/cppcheck
 
-WORKDIR /src
+RUN git config --system --add safe.directory /workspace
+WORKDIR /workspace/mori
 
 ENTRYPOINT ["scripts/lint.sh"]
 CMD ["CLANG_FORMAT=clang-format-20"]

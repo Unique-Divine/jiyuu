@@ -1088,9 +1088,13 @@ PP_OBJ_TSAN = $(BUILD_DIR)/tsan_preprocessor.o
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
+# A nonrecursive recipe keeps make -n read-only. Cargo cannot use the
+# GNU Make pipe jobserver from this recipe, so pass an explicit worker cap.
 $(NATIVE_ENGINE_TEST_ARCHIVE): $(NATIVE_ENGINE_TEST_SOURCES) Makefile.cbm | $(BUILD_DIR)
-	+$(if $(filter yes,$(IS_APPLE_TARGET)),MACOSX_DEPLOYMENT_TARGET=$(MACOS_MIN_VERSION) )CC="$(CC)" \
-		cargo rustc --locked --manifest-path jiyuu-mori/Cargo.toml --lib --no-default-features \
+	env -u CARGO_FEATURE_C_BACKEND -u CARGO_MAKEFLAGS -u MAKEFLAGS -u MFLAGS \
+		CARGO_BUILD_JOBS="$(or $(CARGO_BUILD_JOBS),$(patsubst -j%,%,$(filter-out -j,$(filter -j%,$(MAKEFLAGS)))),2)" \
+		$(if $(filter yes,$(IS_APPLE_TARGET)),MACOSX_DEPLOYMENT_TARGET=$(MACOS_MIN_VERSION)) \
+		CC="$(CC)" cargo rustc --locked --manifest-path jiyuu-mori/Cargo.toml --lib --no-default-features \
 		--target-dir "$(NATIVE_ENGINE_TEST_TARGET_DIR)" \
 		$(if $(NATIVE_ENGINE_TEST_RUST_TARGET),--target "$(NATIVE_ENGINE_TEST_RUST_TARGET)") \
 		--features native-graphql-fixtures --crate-type staticlib
