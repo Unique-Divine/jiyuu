@@ -22,4 +22,11 @@ void cbm_graphql_set_field_extractor(cbm_graphql_field_spans_t (*extract)(TSNode
 /* Mutates an arena-owned copy, leaving byte offsets and line ends unchanged. */
 void cbm_graphql_set_parse_masker(void (*mask)(char *, size_t));
 
+typedef void (*cbm_graphql_schema_emit_t)(void *, bool, cbm_graphql_field_spans_t);
+
+/* Emit schema roots in source order. A schema definition sets the boolean
+ * without emitting a root. The context and tree are valid only for this call. */
+void cbm_graphql_set_schema_extractor(
+    void (*extract)(TSNode, cbm_graphql_schema_emit_t, void *));
+
 #endif

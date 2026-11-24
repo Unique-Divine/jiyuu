@@ -14564,13 +14564,49 @@ static void graphql_find_schema(CBMArena *a, TSNode root, const char *source, co
     }
 }
 
+static void (*graphql_extract_schema)(TSNode, cbm_graphql_schema_emit_t, void *);
+
+void cbm_graphql_set_schema_extractor(
+    void (*extract)(TSNode, cbm_graphql_schema_emit_t, void *)) {
+    graphql_extract_schema = extract;
+}
+
+typedef struct {
+    CBMExtractCtx *ctx;
+    const char **kv;
+    int *n;
+} graphql_schema_sink_t;
+
+static void graphql_schema_emit(void *opaque, bool defined, cbm_graphql_field_spans_t spans) {
+    graphql_schema_sink_t *sink = opaque;
+    CBMExtractCtx *ctx = sink->ctx;
+    if (defined) {
+        graphql_schema_kv_put(sink->kv, sink->n, "graphql_schema_defined", "true");
+        return;
+    }
+    char *name = cbm_arena_strndup(ctx->arena, ctx->source + spans.name.start,
+                                  spans.name.end - spans.name.start);
+    char *type = cbm_arena_strndup(ctx->arena, ctx->source + spans.type.start,
+                                  spans.type.end - spans.type.start);
+    if (name && type && type[0]) {
+        graphql_schema_kv_put(sink->kv, sink->n,
+                              cbm_arena_sprintf(ctx->arena, "graphql_schema_%s", name), type);
+    }
+}
+
 static const char **graphql_schema_roots(CBMExtractCtx *ctx) {
     const char **kv = cbm_arena_alloc(ctx->arena, GQL_SCHEMA_KV * sizeof(*kv));
     if (!kv) {
         return NULL;
     }
     int n = 0;
-    graphql_find_schema(ctx->arena, ctx->root, ctx->source, kv, &n);
+    if (graphql_extract_schema) {
+        graphql_schema_sink_t sink = {ctx, kv, &n};
+        graphql_extract_schema(ctx->root, graphql_schema_emit, &sink);
+        cbm_log_debug("extract.graphql_schema_roots", "implementation", "rust");
+    } else {
+        graphql_find_schema(ctx->arena, ctx->root, ctx->source, kv, &n);
+    }
     kv[n] = NULL;
     return n > 0 ? kv : NULL;
 }
