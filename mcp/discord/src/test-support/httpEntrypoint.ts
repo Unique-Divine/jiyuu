@@ -1,7 +1,7 @@
 // Starts the real HTTP entrypoints in a child process. transport.test.ts
 // mocks express and the SDK, so only a running server shows what the Host
 // and Origin guard, the bound address and the logs actually do.
-import { mkdtempSync } from 'fs';
+import { mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 
@@ -9,10 +9,12 @@ export interface RunningEntrypoint {
     port: number;
     stderr(): string;
     waitFor(pattern: RegExp, timeoutMs?: number): Promise<RegExpMatchArray>;
+    signal(signal: NodeJS.Signals): void;
+    exitCode: Promise<number>;
     stop(): Promise<void>;
 }
 
-function freePort(): number {
+export function freePort(): number {
     const probe = Bun.listen({
         hostname: '127.0.0.1', port: 0,
         socket: { data() {} }
@@ -30,12 +32,14 @@ function freePort(): number {
  */
 export function startHttpEntrypoint(
     entry: string,
-    env: Record<string, string> = {}
+    env: Record<string, string> = {},
+    args: string[] = [],
+    bunArgs: string[] = [],
 ): RunningEntrypoint {
     const workDir = mkdtempSync(join(tmpdir(), 'mcp-discord-http-'));
     const port = freePort();
     const child = Bun.spawn(
-        [process.execPath, entry, '--transport', 'http', '--port', String(port)],
+        [process.execPath, '--no-env-file', ...bunArgs, entry, '--transport', 'http', '--port', String(port), ...args],
         {
             cwd: workDir,
             env: {
@@ -61,6 +65,8 @@ export function startHttpEntrypoint(
     })();
     return {
         port,
+        signal: signal => child.kill(signal),
+        exitCode: child.exited,
         stderr: () => stderr,
         async waitFor(pattern, timeoutMs = 10000) {
             const deadline = Date.now() + timeoutMs;
@@ -77,6 +83,7 @@ export function startHttpEntrypoint(
             child.kill('SIGKILL');
             await child.exited;
             await pump.catch(() => {});
+            rmSync(workDir, { recursive: true, force: true });
         }
     };
 }

@@ -1,36 +1,10 @@
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import express, { Request, Response } from "express";
-import { toolList } from './toolList.js';
-import {
-  createToolContext,
-  loginHandler,
-  sendMessageHandler,
-  getForumChannelsHandler,
-  createForumPostHandler,
-  getForumPostHandler,
-  replyToForumHandler,
-  deleteForumPostHandler,
-  createTextChannelHandler,
-  deleteChannelHandler,
-  readMessagesHandler,
-  getServerInfoHandler,
-  addReactionHandler,
-  addMultipleReactionsHandler,
-  removeReactionHandler,
-  deleteMessageHandler,
-  createWebhookHandler,
-  sendWebhookMessageHandler,
-  editWebhookHandler,
-  deleteWebhookHandler,
-  editCategoryHandler,
-  createCategoryHandler,
-  deleteCategoryHandler,
-  listServersHandler,
-  searchMessagesHandler   
-} from './tools/tools.js';
-import { Client, GatewayIntentBits } from "discord.js";
+import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
+import express, { type ErrorRequestHandler, type Request, type Response } from "express";
+import { randomUUID } from "node:crypto";
+import type { Server as HttpServer } from "node:http";
 import { info, error } from './logger.js';
 import {
     DEFAULT_HTTP_HOST,
@@ -41,16 +15,16 @@ import {
 } from './httpHost.js';
 
 export interface MCPTransport {
-    start(server: Server): Promise<void>;
+    start(createServer: () => Server): Promise<void>;
     stop(): Promise<void>;
 }
 
 export class StdioTransport implements MCPTransport {
     private transport: StdioServerTransport | null = null;
 
-    async start(server: Server): Promise<void> {
+    async start(createServer: () => Server): Promise<void> {
         this.transport = new StdioServerTransport();
-        await server.connect(this.transport);
+        await createServer().connect(this.transport);
     }
 
     async stop(): Promise<void> {
@@ -61,117 +35,178 @@ export class StdioTransport implements MCPTransport {
     }
 }
 
+interface HttpSession {
+    transport: StreamableHTTPServerTransport;
+    lastActivity: number;
+    activePosts: number;
+}
+
+interface HttpOptions {
+    port?: number;
+    host?: string;
+    isReady?: () => boolean;
+    idleTimeoutMs?: number;
+}
+
+const IDLE_TIMEOUT_MS = 30 * 60 * 1000;
+
+function rpcError(res: Response, status: number, message: string) {
+    res.status(status).json({ jsonrpc: '2.0', error: { code: -32000, message }, id: null });
+}
+
+const rejectInvalidBody: ErrorRequestHandler = (err: unknown, _req, res, _next) => {
+    // Express's default error handler logs parser errors, including body text.
+    const status = (err as { status?: unknown } | null)?.status;
+    const badRequest = typeof status === 'number' && status >= 400 && status < 500;
+    rpcError(res, badRequest ? status : 400, 'Invalid MCP request body');
+};
+
 export class StreamableHttpTransport implements MCPTransport {
-    private app: express.Application;
-    private server: Server | null = null;
-    private httpServer: any = null;
-    private transport: StreamableHTTPServerTransport | null = null;
-    private toolContext: ReturnType<typeof createToolContext> | null = null;
-    private sessionId: string = '';
+    private readonly sessions = new Map<string, HttpSession>();
+    private readonly transports = new Set<StreamableHTTPServerTransport>();
+    private httpServer: HttpServer | null = null;
+    private idleTimer: ReturnType<typeof setInterval> | null = null;
+    private stopping = false;
 
-    constructor(
-        private port: number = 8080,
-        private host: string = DEFAULT_HTTP_HOST
-    ) {
-        this.app = express();
-        // Jiyuu: same Host and Origin guard as app.ts, before body parsing.
-        this.app.use(hostOriginGuard(
-            allowedHostKeys(host, port, extraAllowedHosts(process.env))));
-        this.app.use(express.json());
-        this.sessionId = `session_${Date.now()}_${Math.random().toString(36).substring(2, 10)}`;
-        info(`Created HTTP transport with session ID: ${this.sessionId}`);
-    }
+    constructor(private readonly options: HttpOptions = {}) {}
 
-    async start(server: Server): Promise<void> {
-        this.server = server;
-        info('Starting HTTP transport with server: ' + String(!!this.server));
-        
-        // Try to get client from the DiscordMCPServer instance
-        if (server) {
-            const anyServer = server as any;
-            let client: Client | undefined;
-            
-            if (anyServer._context?.client) {
-                client = anyServer._context.client;
-                info('Found client in server._context');
-            } 
-            else if (anyServer.client instanceof Client) {
-                client = anyServer.client;
-                info('Found client directly on server object');
-            }
-            else if (anyServer._parent?.client instanceof Client) {
-                client = anyServer._parent.client;
-                info('Found client in server._parent');
-            }
-            
-            if (client) {
-                this.toolContext = createToolContext(client);
-                info('Tool context initialized with Discord client');
-            } else {
-                info('Creating new Discord client for transport');
-                const newClient = new Client({
-                    intents: [
-                        GatewayIntentBits.Guilds,
-                        GatewayIntentBits.GuildMessages,
-                        GatewayIntentBits.MessageContent,
-                        GatewayIntentBits.GuildMessageReactions
-                    ]
-                });
-                this.toolContext = createToolContext(newClient);
-                info('Tool context initialized with new Discord client');
-            }
-        }
-        
-        // Create transport
-        this.transport = new StreamableHTTPServerTransport({
-            sessionIdGenerator: undefined // stateless
-        });
-        
-        // Connect the transport
-        await this.server.connect(this.transport);
-        info('Transport connected');
-
-        // Setup /mcp endpoint to use transport.handleRequest()
-        this.app.all('/mcp', async (req: Request, res: Response) => {
-            try {
-                await this.transport!.handleRequest(req, res, req.body);
-            } catch (err) {
-                error('Error handling MCP request: ' + String(err));
-                if (!res.headersSent) {
-                    res.status(500).json({ error: 'Internal server error' });
+    async start(createServer: () => Server): Promise<void> {
+        const { port = 8080, host = DEFAULT_HTTP_HOST, isReady, idleTimeoutMs = IDLE_TIMEOUT_MS } = this.options;
+        const app = express();
+        app.use(hostOriginGuard(allowedHostKeys(host, port, extraAllowedHosts(process.env))));
+        if (isReady) {
+            const invocationId = process.env.INVOCATION_ID;
+            app.get('/healthz', (_req, res) => {
+                res.set('Cache-Control', 'no-store');
+                if (invocationId && /^[0-9a-f]{32}$/.test(invocationId)) {
+                    res.set('X-Discord-MCP-Invocation-ID', invocationId);
                 }
-            }
-        });
+                res.sendStatus(this.stopping || !isReady() ? 503 : 200);
+            });
+        }
+        app.use(express.json());
+        app.use(rejectInvalidBody);
+        app.all('/mcp', (req, res) => this.handleRequest(createServer, req, res));
 
-        return new Promise((resolve) => {
-            const warning = nonLoopbackWarning(this.host);
-            if (warning) error(warning);
-            this.httpServer = this.app.listen(this.port, this.host, () => {
-                info(`MCP Server listening on ${this.host}:${this.port}`);
+        const warning = nonLoopbackWarning(host);
+        if (warning) error(warning);
+        const listener = app.listen(port, host);
+        this.httpServer = listener;
+        await new Promise<void>((resolve, reject) => {
+            listener.once('error', reject);
+            listener.once('listening', () => {
+                listener.off('error', reject);
                 resolve();
             });
         });
+        info(`MCP Server listening on ${host}:${port}`);
+        this.idleTimer = setInterval(() => {
+            const cutoff = Date.now() - idleTimeoutMs;
+            for (const session of this.sessions.values()) {
+                if (session.activePosts === 0 && session.lastActivity <= cutoff) {
+                    void this.closeTransport(session.transport);
+                }
+            }
+        }, Math.min(idleTimeoutMs, 60_000));
+        this.idleTimer.unref();
+    }
+
+    private async handleRequest(createServer: () => Server, req: Request, res: Response): Promise<void> {
+        if (this.stopping) {
+            rpcError(res, 503, 'Server is shutting down');
+            return;
+        }
+
+        const sessionId = req.get('Mcp-Session-Id');
+        let session = sessionId ? this.sessions.get(sessionId) : undefined;
+        if (sessionId && !session) {
+            rpcError(res, 404, 'Unknown MCP session');
+            return;
+        }
+        if (!session && (req.method !== 'POST' || !isInitializeRequest(req.body))) {
+            rpcError(res, 400, 'Missing MCP session ID');
+            return;
+        }
+
+        let newSession: HttpSession | undefined;
+        try {
+            if (!session) {
+                session = newSession = await this.createSession(createServer);
+                if (this.stopping) {
+                    rpcError(res, 503, 'Server is shutting down');
+                    return;
+                }
+            }
+
+            session.lastActivity = Date.now();
+            if (req.method === 'POST') this.trackPost(session, res);
+            await session.transport.handleRequest(req, res, req.body);
+        } catch {
+            error('Could not handle MCP request');
+            if (!res.headersSent) rpcError(res, 500, 'Internal server error');
+            else res.end();
+        } finally {
+            if (newSession && !newSession.transport.sessionId) {
+                await this.closeTransport(newSession.transport);
+            }
+        }
+    }
+
+    private async createSession(createServer: () => Server): Promise<HttpSession> {
+        const transport = new StreamableHTTPServerTransport({
+            sessionIdGenerator: randomUUID,
+            enableJsonResponse: true,
+            onsessioninitialized: (id) => { this.sessions.set(id, session); }
+        });
+        const session: HttpSession = { transport, lastActivity: Date.now(), activePosts: 0 };
+        transport.onclose = () => {
+            if (transport.sessionId) this.sessions.delete(transport.sessionId);
+            this.transports.delete(transport);
+        };
+        this.transports.add(transport);
+        try {
+            await createServer().connect(transport);
+            return session;
+        } catch (err) {
+            await this.closeTransport(transport);
+            throw err;
+        }
+    }
+
+    private trackPost(session: HttpSession, res: Response) {
+        session.activePosts += 1;
+        const finish = () => {
+            res.off('finish', finish);
+            res.off('close', finish);
+            session.activePosts -= 1;
+            session.lastActivity = Date.now();
+        };
+        res.once('finish', finish);
+        res.once('close', finish);
+    }
+
+    private async closeTransport(transport: StreamableHTTPServerTransport) {
+        try {
+            await transport.close();
+        } catch {
+            error('Could not close MCP session');
+        }
     }
 
     async stop(): Promise<void> {
-        if (this.transport) {
-            await this.transport.close();
-            this.transport = null;
+        this.stopping = true;
+        if (this.idleTimer) {
+            clearInterval(this.idleTimer);
+            this.idleTimer = null;
         }
-
-        if (this.server) {
-            await this.server.close();
-            this.server = null;
-        }
-
-        if (this.httpServer) {
-            return new Promise((resolve) => {
-                this.httpServer.close(() => {
-                    info('HTTP server closed');
-                    this.httpServer = null;
-                    resolve();
-                });
-            });
-        }
+        const listener = this.httpServer;
+        this.httpServer = null;
+        const closed = new Promise<void>((resolve) => {
+            if (!listener) return resolve();
+            listener.close(() => resolve());
+        });
+        await Promise.all([...this.transports].map(transport => this.closeTransport(transport)));
+        listener?.closeAllConnections();
+        await closed;
     }
-} 
+}
