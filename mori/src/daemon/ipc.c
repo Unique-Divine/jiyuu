@@ -2,6 +2,7 @@
  * ipc.c — Authenticated, owner-scoped local transport for the CBM daemon.
  */
 #include "daemon/ipc.h"
+#include "foundation/sanitized.h"
 #include "daemon/ipc_codec.h"
 #include "daemon/ipc_internal.h"
 
@@ -2313,9 +2314,13 @@ static bool posix_socket_record_encode(const uint8_t magic[POSIX_SOCKET_RECORD_M
         (ino_t)identity.inode != source->identity.inode) {
         return false;
     }
-    return mori_ipc_socket_record_encode(
-        magic, &identity, (const uint8_t *)source->anchor_name,
-        strnlen(source->anchor_name, POSIX_SOCKET_ANCHOR_NAME_CAP), record);
+    if (!mori_ipc_socket_record_encode(
+            magic, &identity, (const uint8_t *)source->anchor_name,
+            strnlen(source->anchor_name, POSIX_SOCKET_ANCHOR_NAME_CAP), record)) {
+        return false;
+    }
+    CBM_MSAN_WRITTEN(record, POSIX_SOCKET_RECORD_SIZE);
+    return true;
 }
 
 static bool posix_socket_record_decode(const uint8_t record[POSIX_SOCKET_RECORD_SIZE],
@@ -2326,8 +2331,12 @@ static bool posix_socket_record_decode(const uint8_t record[POSIX_SOCKET_RECORD_
     }
     mori_ipc_socket_identity_t identity;
     char anchor[POSIX_SOCKET_ANCHOR_NAME_CAP];
-    if (!mori_ipc_socket_record_decode(magic, record, &identity, anchor) ||
-        (dev_t)identity.device != identity.device || (ino_t)identity.inode != identity.inode) {
+    if (!mori_ipc_socket_record_decode(magic, record, &identity, anchor)) {
+        return false;
+    }
+    CBM_MSAN_WRITTEN(&identity, sizeof(identity));
+    CBM_MSAN_WRITTEN(anchor, sizeof(anchor));
+    if ((dev_t)identity.device != identity.device || (ino_t)identity.inode != identity.inode) {
         return false;
     }
     memset(record_out, 0, sizeof(*record_out));

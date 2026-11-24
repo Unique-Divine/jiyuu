@@ -579,7 +579,33 @@ jobs:
         working-directory: mori
         run: >-
           scripts/test.sh --suites
-          "edge_types_probe lang_contract cross_repo extraction graph_buffer pipeline yaml language"
+          "edge_types_probe lang_contract cross_repo extraction graph_buffer pipeline yaml language
+          config_text_edit doclinks doc_links_pdf watcher daemon_ipc"
+      - name: Smoke-test the candidate standalone executable
+        if: needs.changes.outputs.mori == 'true'
+        working-directory: mori
+        run: |
+          set -euo pipefail
+          scripts/build.sh BUILD_DIR=build/candidate-standalone
+          binary="$PWD/build/candidate-standalone/codebase-memory-mcp"
+          scratch="$(mktemp -d /tmp/mori-native.XXXXXX)"
+          mkdir "$scratch/home" "$scratch/rt" "$scratch/cache"
+          chmod 700 "$scratch/home" "$scratch/rt" "$scratch/cache"
+          candidate=(env -i "PATH=$PATH" "HOME=$scratch/home"
+            "CBM_RUNTIME_DIR=$scratch/rt" "CBM_CACHE_DIR=$scratch/cache" "$binary")
+          cleanup() {
+            "${candidate[@]}" daemon stop >/dev/null 2>&1 || true
+            rm -rf "$scratch"
+          }
+          trap cleanup EXIT
+          "${candidate[@]}" cli --quiet index_repository --repo_path "$PWD/tests/fixtures/parity-repo" |
+            jq -e '.status == "indexed"'
+          symbols="$(nm --defined-only "$binary")"
+          grep -Eq '[[:space:]][Tt] mori_fts_write$' <<< "$symbols"
+          if grep -Eq '[[:space:]][Tt] cbm_text_set_.*_hook_for_testing$' <<< "$symbols"; then
+            echo 'unexpected managed-text fixture hooks in standalone candidate' >&2
+            exit 1
+          fi
       - name: Verify native fixtures exercised Rust GraphQL callbacks
         if: needs.changes.outputs.mori == 'true'
         run: just --justfile mori/justfile test-graphql-rust build/c

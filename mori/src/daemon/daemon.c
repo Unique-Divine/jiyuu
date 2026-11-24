@@ -2,6 +2,7 @@
  * daemon.c — Process-local coordination and wire framing for the CBM daemon.
  */
 #include "daemon/daemon.h"
+#include "foundation/sanitized.h"
 #include "daemon/ipc_codec.h"
 
 #include "foundation/compat_thread.h"
@@ -810,7 +811,11 @@ bool cbm_daemon_should_exit(cbm_daemon_coordinator_t *coordinator, uint64_t now_
 
 bool cbm_daemon_frame_header_encode(uint8_t header[CBM_DAEMON_FRAME_HEADER_SIZE],
                                     cbm_daemon_frame_type_t type, uint16_t flags, uint32_t length) {
-    return mori_ipc_frame_header_encode(header, (int)type, flags, length);
+    if (!mori_ipc_frame_header_encode(header, (int)type, flags, length)) {
+        return false;
+    }
+    CBM_MSAN_WRITTEN(header, CBM_DAEMON_FRAME_HEADER_SIZE);
+    return true;
 }
 
 bool cbm_daemon_frame_header_decode(const uint8_t header[CBM_DAEMON_FRAME_HEADER_SIZE],
@@ -827,6 +832,9 @@ bool cbm_daemon_frame_header_decode_bounded(const uint8_t header[CBM_DAEMON_FRAM
         !mori_ipc_frame_header_decode(header, max_payload_length, &type, &flags, &length)) {
         return false;
     }
+    CBM_MSAN_WRITTEN(&type, sizeof(type));
+    CBM_MSAN_WRITTEN(&flags, sizeof(flags));
+    CBM_MSAN_WRITTEN(&length, sizeof(length));
     frame->type = (cbm_daemon_frame_type_t)type;
     frame->flags = flags;
     frame->length = length;
