@@ -171,6 +171,7 @@ jobs:
       - name: Build mori
         env:
           MORI_C_REFERENCE: "1"
+          MORI_WITHOUT_C_INDEX_DRIVERS: "1"
           MORI_WITH_UI: "1"
           CC: ${{ matrix.goos == 'linux' && 'gcc' || 'cc' }}
           CXX: ${{ matrix.goos == 'linux' && 'g++' || 'c++' }}
@@ -185,6 +186,11 @@ jobs:
           fi
           cargo build --release --locked --features c-backend \
             --target "$RUST_TARGET" --manifest-path jiyuu-mori/Cargo.toml
+          archive_members="$(ar t build/mori-rs/libmori-c.a)"
+          if grep -Fxq index_drivers_reference.o <<< "$archive_members"; then
+            echo "::error::release archive includes the retired C index drivers"
+            exit 1
+          fi
           mkdir -p "$(dirname "$BIN")"
           cp "../target/$RUST_TARGET/release/mori" "$BIN.unstripped"
       - name: Strip and check static linking (Linux)
@@ -246,10 +252,12 @@ jobs:
           export HOME="$scratch/home"
           export CBM_CACHE_DIR="$scratch/cache"
           export CBM_RUNTIME_DIR="$scratch/run"
-          "$BIN" cli index_repository --repo-path "$repo" \
+          CBM_PROFILE=1 "$BIN" cli index_repository --repo-path "$repo" \
             | tee "$scratch/index.json"
           project="$(jq -r .project "$scratch/index.json")"
           test "$(jq -r .status "$scratch/index.json")" = indexed
+          grep -F 'msg=pipeline.full_build_driver implementation=rust' "$CBM_CACHE_DIR"/logs/.worker-log-*
+          grep -F 'msg=pipeline.source_publish implementation=rust' "$CBM_CACHE_DIR"/logs/.worker-log-*
           "$BIN" cli trace_path --project "$project" --function-name greet \
             --direction outbound | tee "$scratch/trace"
           grep -q '\.app\.helper 1$' "$scratch/trace"

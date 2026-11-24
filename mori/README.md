@@ -455,9 +455,10 @@ more than 50 files and the effective worker count exceeds one. Frozen
 builds use one worker. The `pipeline.full_build_driver` worker log records
 Rust scheduling.
 
-C executes the passes, including extraction and resolution. Set
-`MORI_IMPL_FULL_BUILD_DRIVER=c` when starting a fresh daemon to restore C
-scheduling. Rust scheduling also works with
+C executes the passes, including extraction and resolution. Standard local
+linked builds accept `MORI_IMPL_FULL_BUILD_DRIVER=c` on a fresh daemon.
+Packaged builds contain the Rust scheduling driver. Rust scheduling also
+works with
 `MORI_IMPL_GRAPH_WRITER=rust` when the linked build supports that writer.
 
 ### Source Publication
@@ -467,8 +468,10 @@ decisions by default in the linked `mori` executable. The
 `pipeline.source_publish` worker log records the staged result and Rust
 selection. Rust orders the checks through the publication lease. C owns
 the stage and the file transaction, including destination preparation,
-rename, and rollback. Set `MORI_IMPL_SOURCE_PUBLISH=c` when starting a
-fresh daemon to restore C publication decisions.
+rename, and rollback. Standard local linked builds accept
+`MORI_IMPL_SOURCE_PUBLISH=c` on a fresh daemon. Packaged builds contain the
+Rust publication decision driver. Use the prior archive to roll back both
+packaged driver changes.
 
 ### Index Worker Recovery
 
