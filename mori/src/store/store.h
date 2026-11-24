@@ -1443,20 +1443,4 @@ int cbm_store_exec(cbm_store_t *s, const char *sql);
  * fatal); CBM_STORE_ERR on a genuine write failure. */
 int cbm_store_fts_rebuild(cbm_store_t *s, const char *project, int64_t after_id);
 
-/* The replacement writes to the caller's open SQLite connection on the same
- * thread and under the same transaction. SQL and error formatting are shared
- * with the native writer. The query buffer is private for the call. */
-typedef struct {
-    bool (*build_query)(char *sql, size_t capacity, bool partial, bool body, bool camel);
-    void (*report_exec_error)(cbm_store_t *s, const char *message);
-    void (*report_step_error)(cbm_store_t *s);
-} cbm_store_fts_writer_ops_t;
-
-typedef int (*cbm_store_fts_writer_fn)(cbm_store_t *s, struct sqlite3 *db, const char *project,
-                                       int64_t after_id, const cbm_store_fts_writer_ops_t *ops,
-                                       char *sql, size_t sql_capacity);
-
-/* Register at startup before any threads access the store. */
-void cbm_store_set_fts_writer(cbm_store_fts_writer_fn writer);
-
 #endif /* CBM_STORE_H */

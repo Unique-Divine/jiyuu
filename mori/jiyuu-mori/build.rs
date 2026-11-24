@@ -7,18 +7,16 @@
 //! the network: `just --justfile mori/justfile grammars` installs the
 //! grammars, and this script only compares `mori/.grammars.stamp` with
 //! `mori/grammars.lock.json` and the installed tree. `Makefile.cbm` stays the
-//! source of truth for C flags, so the C inside `mori` is compiled exactly
-//! like `codebase-memory-mcp`.
+//! source of truth for C flags. The daemon IPC codec, watcher policy, and
+//! index worker recovery call Rust in linked and native fixture builds.
 //!
 //! Environment:
 //! - `MORI_C_BUILD_DIR`: make `BUILD_DIR`, relative to `mori/` or absolute
 //!   (default `build/mori-rs`, shared by every cargo profile so the grammar
 //!   objects compile once).
 //! - `MORI_MAKE_JOBS`: make parallelism (default 4).
-//! - `MORI_C_REFERENCE=1`: also build `codebase-memory-mcp` in the same
-//!   `BUILD_DIR`, for the comparison test in `tests/linked.rs`.
 //! - `MORI_WITH_UI=1`: link the graph UI (make `LIBMORI_WITH_UI=1`, which
-//!   builds `graph-ui` with npm); the C reference is then `cbm-with-ui`.
+//!   builds `graph-ui` with npm).
 //! - `MORI_WITHOUT_C_INDEX_DRIVERS=1`: omit C scheduling and source
 //!   publication decisions from `libmori-c.a`. The standalone C reference
 //!   retains both. The linked binary requires Rust at those phases.
@@ -49,7 +47,6 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=MORI_C_BUILD_DIR");
     println!("cargo:rerun-if-env-changed=MORI_MAKE_JOBS");
-    println!("cargo:rerun-if-env-changed=MORI_C_REFERENCE");
     println!("cargo:rerun-if-env-changed=MORI_WITH_UI");
     println!("cargo:rerun-if-env-changed=MORI_WITHOUT_C_INDEX_DRIVERS");
     if env::var_os("CARGO_FEATURE_C_BACKEND").is_none() {
@@ -103,16 +100,11 @@ fn build_and_link() -> Result<(), String> {
             println!("cargo:rerun-if-changed={}", path.display());
         }
     }
-    let mut targets = vec!["libmori-c"];
-    if env::var("MORI_C_REFERENCE").as_deref() == Ok("1") {
-        targets.push(if with_ui { "cbm-with-ui" } else { "cbm" });
-    }
     run_make(
         &mori_dir,
         &build_dir_arg,
         &jobs,
         &target_os,
-        &targets,
         with_ui,
         without_c_index_drivers,
     )?;
@@ -201,7 +193,6 @@ fn run_make(
     build_dir_arg: &str,
     jobs: &str,
     target_os: &str,
-    targets: &[&str],
     with_ui: bool,
     without_c_index_drivers: bool,
 ) -> Result<(), String> {
@@ -212,7 +203,7 @@ fn run_make(
     cmd.current_dir(mori_dir)
         .args(["-f", "Makefile.cbm"])
         .arg(format!("-j{jobs}"))
-        .args(targets)
+        .arg("libmori-c")
         .arg(format!("BUILD_DIR={build_dir_arg}"))
         .arg(format!("CC={cc}"))
         .arg(format!("CXX={cxx}"))
@@ -248,8 +239,7 @@ fn run_make(
     eprint!("{}", String::from_utf8_lossy(&output.stderr));
     if !output.status.success() {
         return Err(format!(
-            "`make -f Makefile.cbm {}` failed ({}); see the output above",
-            targets.join(" "),
+            "`make -f Makefile.cbm libmori-c` failed ({}); see the output above",
             output.status
         ));
     }

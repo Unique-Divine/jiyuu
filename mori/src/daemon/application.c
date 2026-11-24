@@ -2004,40 +2004,8 @@ typedef struct {
     void (*try_partial)(application_job_recovery_t *run);
 } application_job_recovery_ops_t;
 
-typedef void (*application_job_recovery_driver_t)(application_job_recovery_t *run,
-                                                  const application_job_recovery_ops_t *ops,
-                                                  int max_attempts);
-
-static application_job_recovery_driver_t application_external_job_recovery;
-
-void cbm_daemon_application_set_job_recovery_driver(application_job_recovery_driver_t driver);
-void cbm_daemon_application_set_job_recovery_driver(application_job_recovery_driver_t driver) {
-    application_external_job_recovery = driver;
-}
-
-static void application_run_job_recovery_c(application_job_recovery_t *run, int max_attempts) {
-    for (int i = 0; i < max_attempts; i++) {
-        if (application_job_recovery_cancel_requested(run)) {
-            application_job_recovery_mark_cancelled(run);
-            break;
-        }
-        if (!application_job_recovery_clear_marker(run)) {
-            break;
-        }
-        uint8_t outcome = application_job_recovery_attempt(run);
-        if (outcome == APPLICATION_JOB_RECOVERY_CANCELLED) {
-            application_job_recovery_mark_cancelled(run);
-            break;
-        }
-        if (outcome != APPLICATION_JOB_RECOVERY_RETRY || !application_job_recovery_record(run, i)) {
-            break;
-        }
-    }
-    application_job_recovery_summary_t summary = application_job_recovery_finish_attempts(run);
-    if (!summary.has_response && !summary.unsafe_terminal && summary.quarantined) {
-        application_job_recovery_try_partial(run);
-    }
-}
+void mori_daemon_job_recover(application_job_recovery_t *run,
+                             const application_job_recovery_ops_t *ops, int max_attempts);
 
 static void application_job_recover(cbm_daemon_application_job_t *job,
                                     application_job_execution_t *execution) {
@@ -2060,13 +2028,8 @@ static void application_job_recover(cbm_daemon_application_job_t *job,
         .finish_attempts = application_job_recovery_finish_attempts,
         .try_partial = application_job_recovery_try_partial,
     };
-    cbm_log_debug("daemon.index.recovery_driver", "implementation",
-                  application_external_job_recovery ? "rust" : "c");
-    if (application_external_job_recovery) {
-        application_external_job_recovery(&run, &ops, max_attempts);
-    } else {
-        application_run_job_recovery_c(&run, max_attempts);
-    }
+    cbm_log_debug("daemon.index.recovery_driver", "implementation", "rust");
+    mori_daemon_job_recover(&run, &ops, max_attempts);
     application_recovery_files_remove(run.marker_path, run.quarantine_path);
 }
 

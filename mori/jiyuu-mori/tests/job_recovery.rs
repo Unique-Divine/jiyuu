@@ -12,9 +12,9 @@ use serde_json::{Value, json};
 struct Fixture(PathBuf);
 
 impl Fixture {
-    fn new(backend: &str) -> Self {
+    fn new() -> Self {
         let path = PathBuf::from(format!(
-            "/tmp/mori-job-recovery-{}-{backend}",
+            "/tmp/mori-job-recovery-{}",
             std::process::id()
         ));
         let mut dirs = DirBuilder::new();
@@ -56,82 +56,79 @@ impl Drop for Fixture {
 
 #[test]
 #[ignore = "requires TEST_SEAMS=1 to enable the opt-in native crash fixture"]
-fn worker_recovery_preserves_the_partial_graph_with_both_drivers() {
+fn default_rust_worker_recovery_preserves_the_partial_graph() {
     assert_eq!(option_env!("TEST_SEAMS"), Some("1"));
 
-    for backend in ["c", "rust"] {
-        let fixture = Fixture::new(backend);
-        let started = fixture
-            .command()
-            .env("MORI_IMPL_JOB_RECOVERY", backend)
-            .env("CBM_LOG_LEVEL", "debug")
-            .env("CBM_INDEX_MAX_RESTARTS", "2")
-            .env("CBM_INDEX_WORKER_TIMEOUT_S", "30")
-            .env("CBM_TEST_CRASH_ON", "crasher.py")
-            .args(["daemon", "start"])
-            .output()
-            .expect("start the isolated daemon");
-        assert!(started.status.success(), "{started:?}");
-        let args =
-            json!({"repo_path": fixture.0.join("repo"), "name": "job-recovery"});
-        let indexed = fixture
-            .command()
-            .args(["cli", "--quiet", "index_repository", &args.to_string()])
-            .output()
-            .expect("run supervised index");
-        assert!(indexed.status.success(), "{indexed:?}");
-        let response: Value =
-            serde_json::from_slice(&indexed.stdout).expect("index reply");
-        assert_eq!(response["status"], "indexed", "{response}");
-        let logs = fixture.0.join("cache/logs");
-        let daemon_log =
-            fs::read_to_string(logs.join("cbm-daemon.log")).expect("daemon log");
-        assert!(
-            daemon_log.lines().any(|line| {
-                line.contains("msg=daemon.index.recovery_driver")
-                    && line.ends_with(&format!("implementation={backend}"))
-            }),
-            "{daemon_log}"
-        );
-        assert!(
-            daemon_log.contains("msg=daemon.index.recovery_partial"),
-            "{daemon_log}"
-        );
-        assert_eq!(
-            daemon_log
-                .matches("msg=daemon.index.file_quarantined")
-                .count(),
-            1
-        );
-        assert!(
-            fs::read_dir(&logs).expect("recovery files").all(|entry| {
-                !entry
-                    .expect("entry")
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with(".daemon-index-")
-            }),
-            "temporary marker and quarantine files must be removed after recovery"
-        );
-        let db = Connection::open_with_flags(
-            fixture.0.join("cache/job-recovery.db"),
-            OpenFlags::SQLITE_OPEN_READ_ONLY,
+    let fixture = Fixture::new();
+    let started = fixture
+        .command()
+        .env("CBM_LOG_LEVEL", "debug")
+        .env("CBM_INDEX_MAX_RESTARTS", "2")
+        .env("CBM_INDEX_WORKER_TIMEOUT_S", "30")
+        .env("CBM_TEST_CRASH_ON", "crasher.py")
+        .args(["daemon", "start"])
+        .output()
+        .expect("start the isolated daemon");
+    assert!(started.status.success(), "{started:?}");
+    let args =
+        json!({"repo_path": fixture.0.join("repo"), "name": "job-recovery"});
+    let indexed = fixture
+        .command()
+        .args(["cli", "--quiet", "index_repository", &args.to_string()])
+        .output()
+        .expect("run supervised index");
+    assert!(indexed.status.success(), "{indexed:?}");
+    let response: Value =
+        serde_json::from_slice(&indexed.stdout).expect("index reply");
+    assert_eq!(response["status"], "indexed", "{response}");
+    let logs = fixture.0.join("cache/logs");
+    let daemon_log =
+        fs::read_to_string(logs.join("cbm-daemon.log")).expect("daemon log");
+    assert!(
+        daemon_log.lines().any(|line| {
+            line.contains("msg=daemon.index.recovery_driver")
+                && line.ends_with("implementation=rust")
+        }),
+        "{daemon_log}"
+    );
+    assert!(
+        daemon_log.contains("msg=daemon.index.recovery_partial"),
+        "{daemon_log}"
+    );
+    assert_eq!(
+        daemon_log
+            .matches("msg=daemon.index.file_quarantined")
+            .count(),
+        1
+    );
+    assert!(
+        fs::read_dir(&logs).expect("recovery files").all(|entry| {
+            !entry
+                .expect("entry")
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".daemon-index-")
+        }),
+        "temporary marker and quarantine files must be removed after recovery"
+    );
+    let db = Connection::open_with_flags(
+        fixture.0.join("cache/job-recovery.db"),
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .expect("open the published graph");
+    let mut statement = db
+        .prepare(
+            "SELECT file_path, name FROM nodes
+             WHERE label = 'Function' AND file_path IN ('good.py', 'crasher.py')
+             ORDER BY file_path, name",
         )
-        .expect("open the published graph");
-        let mut statement = db
-            .prepare(
-                "SELECT file_path, name FROM nodes
-                 WHERE label = 'Function' AND file_path IN ('good.py', 'crasher.py')
-                 ORDER BY file_path, name",
-            )
-            .expect("find retained definitions");
-        let names = statement
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })
-            .expect("read definitions")
-            .collect::<Result<Vec<_>, _>>()
-            .expect("definition names");
-        assert_eq!(names, [("good.py".to_owned(), "stays_in_graph".to_owned())]);
-    }
+        .expect("find retained definitions");
+    let names = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .expect("read definitions")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("definition names");
+    assert_eq!(names, [("good.py".to_owned(), "stays_in_graph".to_owned())]);
 }
