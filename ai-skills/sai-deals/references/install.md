@@ -49,22 +49,10 @@ in future sessions.
 
 ## Connect the Agent
 
-Load the issued team key into the agent process as `SAI_DEAL_DESK_TOKEN`
-through its secret store. The browser's Google sign-in and the Telegram
-requester allowlist are separate access paths.
-
-With the 1Password CLI, put the field's secret reference in a local env file.
-For example, put this line in `deal-desk.env`, replacing the placeholders
-with the actual reference.
-
-```dotenv
-SAI_DEAL_DESK_TOKEN=op://<vault>/<item>/<field>
-```
-
-Use `op run --env-file ./deal-desk.env -- <agent-command>` to start the agent.
-For a terminal read, start a shell with
-`op run --env-file ./deal-desk.env -- bash`, then run the appropriate check
-inside that shell. Keep the resolved value out of the prompt and shell history.
+Open the private [Deal Desk read-only API key](https://start.1password.com/open/i?a=D6QAZFJVPZARTO4LLHRW6HJSRU&v=cxdzhkq5sxouoaarvfzlv47dlu&i=wh3djs4crjmrme3ldop3fydjka&h=nibiru.1password.com) link in 1Password.
+Ask Unique for vault access if you can't open it. Load the key as
+`SAI_DEAL_DESK_TOKEN` in the environment where you run the agent or reader
+command. Keep it out of prompts and shell history.
 
 - Native CLI. Run `sai-ops --reader health`.
 - GraphQL. Run the [credential query](graphql.md#check-the-credential).
