@@ -294,7 +294,7 @@ unsafe extern "C" {
     ) -> *mut c_void;
     fn cbm_label_is_type_like(a0: *const c_char) -> bool;
     fn cbm_log(a0: i32, a1: *const c_char, ...);
-    fn cbm_should_skip_dir(a0: *const c_char, a1: i32) -> bool;
+    fn mori_jvm_doclinks_should_skip_dir(a0: *const c_char, a1: i32) -> bool;
 
     fn isspace(a0: i32) -> i32;
     fn isupper(a0: i32) -> i32;
@@ -3466,7 +3466,7 @@ unsafe fn not_indexed(ix: *const Index, pkg: *const c_char) -> bool {
         buf[i] = b'\0' as c_char;
         // buf: the prefix through this segment; buf + seg: the segment
         if (owned)
-            && (cbm_should_skip_dir(
+            && (mori_jvm_doclinks_should_skip_dir(
                 ((addr_of_mut!(buf).cast::<c_char>()).add(seg)) as *const c_char,
                 (*ix).mode,
             ))
