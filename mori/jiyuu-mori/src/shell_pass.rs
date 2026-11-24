@@ -1,5 +1,8 @@
 //! Graph linking for the shell, Make and CI facts collected by the native parser.
 
+use super::native_graph_buffer::{
+    Node, cbm_gbuf_find_by_label, cbm_gbuf_find_by_name,
+};
 use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::{ptr, slice};
@@ -26,19 +29,6 @@ struct Hit {
     default_of: *const c_char,
 }
 
-// Mirrors cbm_gbuf_node_t. Graph rows are read before any graph mutation.
-#[repr(C)]
-struct Node {
-    id: NodeId,
-    label: *const c_char,
-    name: *const c_char,
-    qualified_name: *const c_char,
-    file_path: *const c_char,
-    start_line: c_int,
-    end_line: c_int,
-    properties_json: *const c_char,
-}
-
 type Publish = unsafe extern "C" fn(
     *mut c_void,
     *mut c_void,
@@ -51,7 +41,7 @@ type MakeFiles = unsafe extern "C" fn(*const *const c_char, c_int, *mut c_void);
 type FindNodes = unsafe extern "C" fn(
     *const c_void,
     *const c_char,
-    *mut *const *mut Node,
+    *mut *const *const Node,
     *mut c_int,
 ) -> c_int;
 
@@ -78,18 +68,6 @@ unsafe extern "C" {
         url: *const c_char,
         file: *const c_char,
     ) -> NodeId;
-    fn cbm_gbuf_find_by_label(
-        graph: *const c_void,
-        label: *const c_char,
-        nodes: *mut *const *mut Node,
-        count: *mut c_int,
-    ) -> c_int;
-    fn cbm_gbuf_find_by_name(
-        graph: *const c_void,
-        name: *const c_char,
-        nodes: *mut *const *mut Node,
-        count: *mut c_int,
-    ) -> c_int;
     fn cbm_gbuf_upsert_node(
         graph: *mut c_void,
         label: *const c_char,
@@ -160,7 +138,7 @@ struct Graph {
 
 impl Graph {
     // Consume the native array before any call that writes to the graph.
-    fn nodes(&self, find: FindNodes, key: &CStr) -> &[*mut Node] {
+    fn nodes(&self, find: FindNodes, key: &CStr) -> &[*const Node] {
         let mut nodes = ptr::null();
         let mut count = 0;
         let rc =
@@ -172,7 +150,7 @@ impl Graph {
         }
     }
 
-    fn label(&self, label: &CStr) -> &[*mut Node] {
+    fn label(&self, label: &CStr) -> &[*const Node] {
         self.nodes(cbm_gbuf_find_by_label, label)
     }
 
@@ -721,7 +699,10 @@ fn mark_declarers(graph: &mut Graph, declarers: *const c_void) {
         };
         // The setter replaces only this node's property string.
         unsafe {
-            cbm_gbuf_node_set_properties_json(ptr, c_string(props).as_ptr())
+            cbm_gbuf_node_set_properties_json(
+                ptr.cast_mut(),
+                c_string(props).as_ptr(),
+            )
         };
     }
 }
