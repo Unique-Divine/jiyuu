@@ -1,6 +1,7 @@
 //! Markdown heading text from the same Tree-sitter tree as native extraction.
 
 use std::ffi::c_void;
+use std::mem::MaybeUninit;
 
 use crate::native_tree::RawNode;
 
@@ -39,9 +40,22 @@ impl Drop for Cursor {
     }
 }
 
-fn append(written: &mut usize, output: &mut [u8], bytes: &[u8]) -> Option<()> {
+fn append(
+    written: &mut usize,
+    output: &mut [MaybeUninit<u8>],
+    bytes: &[u8],
+) -> Option<()> {
     let end = written.checked_add(bytes.len())?;
-    output.get_mut(*written..end)?.copy_from_slice(bytes);
+    let destination = output.get_mut(*written..end)?;
+    // SAFETY: The bounded output region is disjoint from the initialized
+    // source bytes. Copy initializes exactly the written prefix.
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            bytes.as_ptr(),
+            destination.as_mut_ptr().cast::<u8>(),
+            bytes.len(),
+        );
+    }
     *written = end;
     Some(())
 }
@@ -49,7 +63,7 @@ fn append(written: &mut usize, output: &mut [u8], bytes: &[u8]) -> Option<()> {
 unsafe fn setext(
     node: RawNode,
     source: &[u8],
-    output: &mut [u8],
+    output: &mut [MaybeUninit<u8>],
 ) -> Option<usize> {
     // SAFETY: The caller lends the live tree through this synchronous call.
     unsafe {
@@ -117,7 +131,10 @@ unsafe extern "C" fn extract_heading(
     // arena allocation. The buffers outlive this synchronous callback.
     unsafe {
         let source = std::slice::from_raw_parts(source, source_len);
-        let output = std::slice::from_raw_parts_mut(output, output_len);
+        let output = std::slice::from_raw_parts_mut(
+            output.cast::<MaybeUninit<u8>>(),
+            output_len,
+        );
         if node.is(c"atx_heading") {
             let mut written = 0;
             if let Some(bytes) = atx(node, source) {
@@ -130,7 +147,13 @@ unsafe extern "C" fn extract_heading(
     }
 }
 
-pub fn register() {
+/// Install the native callback used by Markdown heading extraction.
+///
+/// # Safety
+///
+/// Call during process startup, before other threads can extract files or
+/// install callbacks.
+pub unsafe fn register() {
     // SAFETY: Registration runs before extractor threads start.
     unsafe { cbm_markdown_set_heading_extractor(extract_heading) };
 }
