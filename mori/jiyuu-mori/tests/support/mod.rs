@@ -1,13 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 pub fn c_reference_bin() -> Option<PathBuf> {
-    let bin = std::env::var_os("MORI_C_REFERENCE_BIN")
-        .map(PathBuf::from)
-        .or_else(|| {
-            (option_env!("MORI_C_REFERENCE") == Some("1")).then(|| {
-                Path::new(env!("MORI_C_BUILD_DIR")).join("codebase-memory-mcp")
-            })
-        })?;
+    let bin = PathBuf::from(std::env::var_os("MORI_C_REFERENCE_BIN")?);
     assert!(
         bin.is_absolute() && bin.is_file(),
         "C reference must be an absolute path to a binary, got {}",
