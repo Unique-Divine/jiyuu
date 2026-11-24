@@ -168,13 +168,14 @@ struct NodePattern<'a> {
 
 #[derive(Clone, Copy, Debug)]
 struct Hop<'a> {
-    kind: &'a str,
+    kind: Option<&'a str>,
     inbound: bool,
 }
 
 #[derive(Debug)]
 enum ProjectionExpression<'a> {
     Field(Binding, Option<&'a str>),
+    NodeLabels(usize),
     Count,
 }
 
@@ -199,6 +200,15 @@ impl ProjectionExpression<'_> {
             }
             Self::Field(Binding::Edge(index), Some(name)) => Cow::Borrowed(
                 json_property_bytes(&edges[index].properties, name),
+            ),
+            Self::NodeLabels(index) => Cow::Owned(
+                b"[\""
+                    .iter()
+                    .chain(&nodes[index].label)
+                    .chain(b"\"]")
+                    .take(PROPERTY_LIMIT)
+                    .copied()
+                    .collect(),
             ),
             Self::Count => unreachable!("aggregate has no per-binding value"),
         }
@@ -303,8 +313,7 @@ impl<'a> Parser<'a> {
         }
         self.symbol(b'[')?;
         self.alias(Binding::Edge(index))?;
-        self.symbol(b':')?;
-        let kind = self.name()?;
+        let kind = self.consume(b':').then(|| self.name()).transpose()?;
         self.symbol(b']')?;
         if inbound {
             self.symbol(b'-')?;
@@ -314,9 +323,45 @@ impl<'a> Parser<'a> {
         Ok(Hop { kind, inbound })
     }
 
+    fn binding(&self, name: &str) -> Result<Binding, Unsupported> {
+        self.names.get(name).copied().ok_or(Unsupported)
+    }
+
     fn reference(&mut self) -> Result<(&'a str, Binding), Unsupported> {
         let name = self.name()?;
-        Ok((name, *self.names.get(name).ok_or(Unsupported)?))
+        Ok((name, self.binding(name)?))
+    }
+
+    fn named_projection(
+        &mut self,
+    ) -> Result<(ProjectionExpression<'a>, String), Unsupported> {
+        let name = self.name()?;
+        if self.consume(b'(') {
+            let (target, binding) = self.reference()?;
+            self.symbol(b')')?;
+            return match binding {
+                Binding::Edge(_) if name.eq_ignore_ascii_case("type") => Ok((
+                    ProjectionExpression::Field(binding, Some("type")),
+                    format!("type({target})"),
+                )),
+                Binding::Node(index) if name.eq_ignore_ascii_case("labels") => {
+                    Ok((
+                        ProjectionExpression::NodeLabels(index),
+                        format!("labels({target})"),
+                    ))
+                }
+                _ => Err(Unsupported),
+            };
+        }
+        let binding = self.binding(name)?;
+        let property = self.consume(b'.').then(|| self.name()).transpose()?;
+        if let (Binding::Node(_), Some(property)) = (binding, property) {
+            node_property(property)?;
+        }
+        Ok((
+            ProjectionExpression::Field(binding, property),
+            projection_name(name, property),
+        ))
     }
 
     fn count_name(
@@ -344,16 +389,7 @@ impl<'a> Parser<'a> {
         let (expression, default_name) = if self.keyword("COUNT") {
             (ProjectionExpression::Count, self.count_name(true)?)
         } else {
-            let (name, binding) = self.reference()?;
-            let property =
-                self.consume(b'.').then(|| self.name()).transpose()?;
-            if let (Binding::Node(_), Some(property)) = (binding, property) {
-                node_property(property)?;
-            }
-            (
-                ProjectionExpression::Field(binding, property),
-                projection_name(name, property),
-            )
+            self.named_projection()?
         };
         let name = if self.keyword("AS") {
             self.name()?.to_owned()
@@ -455,17 +491,20 @@ pub(crate) fn classify(source: &str) -> Result<Query<'_>, Unsupported> {
         hops.push(parser.hop(hops.len(), inbound)?);
         nodes.push(parser.node(nodes.len())?);
     }
-    // Native binds all anonymous targets to the same synthetic name. Support a
-    // single anonymous endpoint so we never reinterpret that implicit join.
-    if nodes.len()
-        - parser
+    if hops.len() > 1 {
+        // The head has its own synthetic name. Later anonymous endpoints
+        // reuse a single name in C, so keep multi-hop queries with two
+        // anonymous bindings on the reference path.
+        let named_nodes = parser
             .names
             .values()
-            .filter(|b| matches!(b, Binding::Node(_)))
-            .count()
-        > 1
-    {
-        return Err(Unsupported);
+            .filter(|binding| matches!(binding, Binding::Node(_)))
+            .count();
+        if nodes.len() - named_nodes > 1
+            || hops.iter().any(|hop| hop.kind.is_none())
+        {
+            return Err(Unsupported);
+        }
     }
     let mut filters = Vec::new();
     let mut any_filter = false;
@@ -907,8 +946,10 @@ impl Query<'_> {
         } else {
             statement.query([project])?
         };
-        let mut adjacency = (!self.hops.is_empty())
-            .then(|| Adjacency::new(connection))
+        let mut adjacency = self
+            .hops
+            .first()
+            .map(|hop| Adjacency::new(connection, hop.kind.is_some()))
             .transpose()?;
         let mut counts = self.count_rows(budget.ordered_count_group_limit);
         let mut result = ResultRows {
@@ -1014,10 +1055,7 @@ impl Query<'_> {
             .then(|| {
                 if let Some(column) =
                     self.projections.iter().position(|column| {
-                        matches!(
-                            column.expression,
-                            ProjectionExpression::Field(..)
-                        )
+                        !matches!(column.expression, ProjectionExpression::Count)
                     })
                 {
                     let limit = self.limit.unwrap_or(ENGINE_LIMIT);
@@ -1251,17 +1289,18 @@ struct Adjacency<'a> {
 }
 
 impl<'a> Adjacency<'a> {
-    fn new(connection: &'a Connection) -> rusqlite::Result<Self> {
+    fn new(connection: &'a Connection, typed: bool) -> rusqlite::Result<Self> {
         // Match native prepared edge lookups, then fetch endpoints by id.
         // A join can change the SQLite query plan and therefore the row order.
+        // Untyped traversal is limited to a single hop, so the SQL is fixed
+        // for all hops in a query.
         let edges = "SELECT id, project, source_id, target_id, type, properties FROM edges";
+        let filter = if typed { " AND type = ?2" } else { "" };
         Ok(Self {
-            incoming: connection.prepare(&format!(
-                "{edges} WHERE target_id = ?1 AND type = ?2"
-            ))?,
-            outgoing: connection.prepare(&format!(
-                "{edges} WHERE source_id = ?1 AND type = ?2"
-            ))?,
+            incoming: connection
+                .prepare(&format!("{edges} WHERE target_id = ?1{filter}"))?,
+            outgoing: connection
+                .prepare(&format!("{edges} WHERE source_id = ?1{filter}"))?,
             node: connection.prepare(&format!(
                 "SELECT {NODE_COLUMNS} FROM nodes n WHERE id = ?1"
             ))?,
@@ -1279,7 +1318,11 @@ impl<'a> Adjacency<'a> {
         } else {
             (&mut self.outgoing, 3)
         };
-        let mut edges = statement.query(params![id, hop.kind])?;
+        let mut edges = if let Some(kind) = hop.kind {
+            statement.query(params![id, kind])?
+        } else {
+            statement.query([id])?
+        };
         let mut neighbors = Vec::new();
         while let Some(edge) = edges.next()? {
             budget.step()?;
