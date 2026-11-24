@@ -1,62 +1,49 @@
-#!/usr/bin/env bun
-import { Client, GatewayIntentBits } from "discord.js";
+#!/usr/bin/env -S bun --no-env-file
+import { Client, GatewayIntentBits } from 'discord.js';
 import { config as dotenvConfig } from 'dotenv';
 import { DiscordMCPServer } from './server.js';
 import { StdioTransport, StreamableHttpTransport } from './transport.js';
 import { info, error } from './logger.js';
-import { resolveHttpHost } from './httpHost.js';
+import { isLoopbackHost, resolveHttpHost } from './httpHost.js';
 
-// Load environment variables from .env file if exists
-dotenvConfig();
+const args = process.argv.slice(2);
+function option(name: string): string | undefined {
+    const index = args.indexOf(name);
+    return index === -1 ? undefined : args[index + 1];
+}
 
-// Configuration with priority for command line arguments
-const config = {
-    DISCORD_TOKEN: (() => {
+const transportName = (option('--transport') ?? 'stdio').toLowerCase();
+const shared = args.includes('--shared');
+if (shared && (transportName !== 'http' || args.includes('--config'))) {
+    error('--shared requires --transport http and DISCORD_TOKEN in the environment');
+    process.exit(1);
+}
+
+if (!shared) dotenvConfig();
+const configuredToken = option('--config');
+function discordToken(): string | undefined {
+    if (configuredToken !== undefined) {
         try {
-            // First try to get from command line arguments
-            const configIndex = process.argv.indexOf('--config');
-            if (configIndex !== -1 && configIndex + 1 < process.argv.length) {
-                const configArg = process.argv[configIndex + 1];
-                // Handle both string and object formats
-                if (typeof configArg === 'string') {
-                    try {
-                        const parsedConfig = JSON.parse(configArg);
-                        return parsedConfig.DISCORD_TOKEN;
-                    } catch (err) {
-                        // If not valid JSON, try using the string directly
-                        return configArg;
-                    }
-                }
-            }
-            // Then try environment variable
-            return process.env.DISCORD_TOKEN;
-        } catch (err) {
-            error('Error parsing config: ' + String(err));
-            return null;
+            return JSON.parse(configuredToken)?.DISCORD_TOKEN;
+        } catch {
+            return configuredToken;
         }
-    })(),
-    TRANSPORT: (() => {
-        // Check for transport type argument
-        const transportIndex = process.argv.indexOf('--transport');
-        if (transportIndex !== -1 && transportIndex + 1 < process.argv.length) {
-            return process.argv[transportIndex + 1];
-        }
-        // Default to stdio
-        return 'stdio';
-    })(),
-    HTTP_PORT: (() => {
-        // Check for port argument
-        const portIndex = process.argv.indexOf('--port');
-        if (portIndex !== -1 && portIndex + 1 < process.argv.length) {
-            return parseInt(process.argv[portIndex + 1]);
-        }
-        // Default port for MCP
-        return 8080;
-    })(),
-    HTTP_HOST: resolveHttpHost(process.argv, process.env)
-};
+    }
+    return process.env.DISCORD_TOKEN;
+}
 
-// Create Discord client
+const token = discordToken();
+const host = resolveHttpHost(args, process.env);
+const port = Number.parseInt(option('--port') ?? '8080', 10);
+if (shared && (!token?.trim() || !isLoopbackHost(host))) {
+    error('Shared HTTP requires DISCORD_TOKEN in the environment and a loopback host');
+    process.exit(1);
+}
+if (transportName === 'http' && (!Number.isInteger(port) || port < 1 || port > 65535)) {
+    error('HTTP port must be between 1 and 65535');
+    process.exit(1);
+}
+
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
@@ -65,103 +52,67 @@ const client = new Client({
         GatewayIntentBits.GuildMembers
     ]
 });
+const isHttp = transportName === 'http';
+if (!isHttp && transportName !== 'stdio') {
+    error(`Unknown transport type: ${transportName}. Falling back to stdio.`);
+}
+const transport = isHttp
+    ? new StreamableHttpTransport({ port, host, isReady: shared ? () => client.isReady() : undefined })
+    : new StdioTransport();
+const mcpServer = new DiscordMCPServer(client, transport, undefined, shared);
 
-// Save token to client for login handler
-if (config.DISCORD_TOKEN) {
-    client.token = config.DISCORD_TOKEN;
+let shuttingDown = false;
+async function shutdown(reason: string, exitCode = 0) {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    info(`Shutting down (${reason})`);
+    const force = setTimeout(() => process.exit(exitCode), 3000);
+    force.unref();
+    try {
+        await mcpServer.stop();
+    } catch {
+        error('Could not stop the MCP server');
+    }
+    process.exit(exitCode);
 }
 
-// Auto-login on startup if token is available
-const autoLogin = async () => {
-    const token = config.DISCORD_TOKEN;
-    if (token) {
-        try {
-            await client.login(token);
-            info('Successfully logged in to Discord');
-        } catch (err: any) {
-            if (typeof err.message === 'string' && err.message.includes('Privileged intent provided is not enabled or whitelisted')) {
-                error('Login failed: One or more privileged intents are not enabled in the Discord Developer Portal. Please enable the required intents.');
-            } else {
-                error('Auto-login failed: ' + String(err));
-            }
+process.on('SIGINT', () => void shutdown('SIGINT'));
+process.on('SIGTERM', () => void shutdown('SIGTERM'));
+if (!isHttp) {
+    process.stdin.on('close', () => void shutdown('stdin close'));
+    process.stdin.on('end', () => void shutdown('stdin end'));
+}
+
+async function login() {
+    if (!token) {
+        info('No Discord token found in config, skipping auto-login');
+        return;
+    }
+    client.token = token;
+    try {
+        await client.login(token);
+        info('Successfully logged in to Discord');
+    } catch (err) {
+        if (err instanceof Error && err.message.includes('Privileged intent provided is not enabled or whitelisted')) {
+            error('Login failed: Enable the required privileged intents in the Discord Developer Portal.');
+        } else {
+            error('Could not log in to Discord');
         }
-    } else {
-        info("No Discord token found in config, skipping auto-login");
+        if (shared) await shutdown('Discord login failed', 1);
     }
-};
-
-// Initialize transport based on configuration
-const initializeTransport = () => {
-    switch (config.TRANSPORT.toLowerCase()) {
-        case 'http':
-            info(`Initializing HTTP transport on ${config.HTTP_HOST}:${config.HTTP_PORT}`);
-            return new StreamableHttpTransport(config.HTTP_PORT, config.HTTP_HOST);
-        case 'stdio':
-            info('Initializing stdio transport');
-            return new StdioTransport();
-        default:
-            error(`Unknown transport type: ${config.TRANSPORT}. Falling back to stdio.`);
-            return new StdioTransport();
-    }
-};
-
-// Start auto-login process
-await autoLogin();
-
-// Create and start MCP server with selected transport
-const transport = initializeTransport();
-const mcpServer = new DiscordMCPServer(client, transport);
+}
 
 try {
+    // Shared HTTP stays reachable for readiness probes while Discord connects.
+    if (!shared) await login();
     await mcpServer.start();
     info('MCP server started successfully');
-    
-    // Unified shutdown, registered for every transport. In stdio mode there
-    // was previously no shutdown path at all, so the health-check interval and
-    // the discord.js client kept the event loop alive until the host SIGKILLed
-    // the process (~185s). Route every termination trigger through one
-    // idempotent, bounded shutdown.
-    let heartbeat: NodeJS.Timeout | null = null;
-    let shuttingDown = false;
-
-    const shutdown = async (reason: string) => {
-        if (shuttingDown) return;            // idempotent
-        shuttingDown = true;
-        error(`Shutting down (${reason})...`);
-
-        // Bounded: if graceful close stalls (e.g. a hung Discord WS), force exit.
-        const force = setTimeout(() => {
-            error('Graceful shutdown timed out; forcing exit.');
-            process.exit(0);
-        }, 3000);
-        force.unref();                       // don't let the backstop itself pin the loop
-
-        if (heartbeat) { clearInterval(heartbeat); heartbeat = null; }
-        try {
-            await mcpServer.stop();          // clears health interval, closes transport, destroys client
-        } catch (err) {
-            error('Error during shutdown: ' + String(err));
-        }
-        process.exit(0);
-    };
-
-    process.on('SIGINT', () => shutdown('SIGINT'));
-    process.on('SIGTERM', () => shutdown('SIGTERM'));
-    // Gateway closing the pipe: a pipe writer-close surfaces as 'close', while a
-    // plain EOF surfaces as 'end'. Handle both; shutdown() is idempotent.
-    process.stdin.on('close', () => shutdown('stdin close'));
-    process.stdin.on('end', () => shutdown('stdin end'));
-
-    // Keep the Node.js process running
-    if (config.TRANSPORT.toLowerCase() === 'http') {
-        // Send a heartbeat every 30 seconds to keep the process alive
-        heartbeat = setInterval(() => {
-            info('MCP server is running');
-        }, 30000);
-
-        info('Server running in keep-alive mode. Press Ctrl+C to stop.');
-    }
+    if (shared) await login();
 } catch (err) {
-    error('Failed to start MCP server: ' + String(err));
-    process.exit(1);
+    // Node system error codes identify bind failures without including credentials.
+    const code = (err as NodeJS.ErrnoException)?.code;
+    error(typeof code === 'string' && /^E[A-Z0-9_]+$/.test(code)
+        ? `Could not start the MCP server (${code})`
+        : 'Could not start the MCP server');
+    await shutdown('startup failed', 1);
 }

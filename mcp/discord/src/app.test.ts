@@ -33,7 +33,7 @@ describe('app.ts HTTP entrypoint', () => {
             })
         });
         expect(res.status).toBe(400);
-        await server.waitFor(/without session ID: method="tools\/call"/);
+        expect(await res.text()).toContain("Missing MCP session ID");
         expect(server.stderr()).not.toContain(secret);
     });
 });
