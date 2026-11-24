@@ -1767,7 +1767,9 @@ fn graphql_field_extraction_matches_c_with_escaped_schema_text() {
         fs::create_dir(&repo).expect("create schema repository");
         fs::write(
             repo.join("schema.graphqls"),
-            r#"type Query {
+            r#"schema { query: Query }
+extend schema { mutation: Mutation }
+type Query {
   old: [String!]! @deprecated(reason: "Use \"new\"")
   later: Int
 }
@@ -1792,7 +1794,7 @@ extend type Query {
         assert_eq!(response["status"], "indexed", "{response}");
         let db = fixture.db("schema");
         let mut statement = db
-            .prepare("SELECT name, properties FROM nodes WHERE label = 'Field' ORDER BY name")
+            .prepare("SELECT name, properties FROM nodes WHERE label IN ('Field', 'Module') ORDER BY name")
             .expect("select fields");
         let fields = statement
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
@@ -1822,12 +1824,20 @@ extend type Query {
     assert_eq!(rust, native);
     assert_eq!(
         rust.iter().map(|row| row.0.as_str()).collect::<Vec<_>>(),
-        ["cafe", "later", "old"]
+        ["cafe", "later", "old", "schema.graphqls"]
     );
     assert!(rust[0].1.contains("café"), "{rust:?}");
     assert!(rust[2].1.contains("[String!]!"), "{rust:?}");
-    for marker in ["extract.graphql_parse_input", "extract.graphql_field_spans"]
-    {
+    let module: Value =
+        serde_json::from_str(&rust[3].1).expect("module properties");
+    assert_eq!(module["graphql_schema_defined"], "true");
+    assert_eq!(module["graphql_schema_query"], "Query");
+    assert_eq!(module["graphql_schema_mutation"], "Mutation");
+    for marker in [
+        "extract.graphql_schema_roots",
+        "extract.graphql_parse_input",
+        "extract.graphql_field_spans",
+    ] {
         assert!(!native_logs.contains(marker), "{native_logs}");
         assert!(rust_logs.contains(marker), "{rust_logs}");
     }

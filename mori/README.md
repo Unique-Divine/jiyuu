@@ -471,7 +471,7 @@ the default.
 ### GraphQL SDL Extraction
 
 Set `MORI_IMPL_GRAPHQL_EXTRACT=rust` when starting the daemon to select Rust
-for the GraphQL schema field spans and the parser input escape masking.
+for GraphQL schema field spans, operation roots, and parser input escape masking.
 Both paths use the same Tree-sitter parser and the original source bytes
 for field metadata. The worker log records both callbacks at debug level.
 

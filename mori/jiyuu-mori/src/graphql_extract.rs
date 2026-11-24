@@ -1,8 +1,10 @@
 //! GraphQL SDL extraction using the parser and grammar already linked by Mori.
 
-use std::ffi::CStr;
+use std::ffi::{CStr, c_void};
 
 use crate::native_tree::RawNode;
+
+type SchemaEmit = unsafe extern "C" fn(*mut c_void, bool, FieldSpans);
 
 #[repr(C)]
 #[derive(Default)]
@@ -23,6 +25,9 @@ unsafe extern "C" {
         extract: unsafe extern "C" fn(RawNode) -> FieldSpans,
     );
     fn cbm_graphql_set_parse_masker(mask: unsafe extern "C" fn(*mut u8, usize));
+    fn cbm_graphql_set_schema_extractor(
+        extract: unsafe extern "C" fn(RawNode, SchemaEmit, *mut c_void),
+    );
 }
 
 unsafe fn child_span(node: RawNode, name: &CStr) -> Span {
@@ -50,6 +55,63 @@ unsafe extern "C" fn field_spans(node: RawNode) -> FieldSpans {
             field_type: child_span(node, c"type"),
         }
     }
+}
+
+unsafe fn schema_root_rows(
+    node: RawNode,
+    emit: SchemaEmit,
+    context: *mut c_void,
+) {
+    // SAFETY: The extractor lends the tree and emitter for a synchronous walk.
+    unsafe {
+        for child in node.named_children() {
+            if child.is(c"root_operation_type_definition") {
+                let name = child_span(child, c"operation_type");
+                let field_type = child_span(child, c"named_type");
+                if name.present && field_type.present {
+                    emit(context, false, FieldSpans { name, field_type });
+                }
+            }
+        }
+    }
+}
+
+unsafe fn walk_schema(
+    node: RawNode,
+    depth: u8,
+    emit: SchemaEmit,
+    context: *mut c_void,
+) {
+    // SAFETY: All children borrow the same live tree and emission is synchronous.
+    unsafe {
+        for child in node.named_children() {
+            if child.is(c"schema_definition") {
+                emit(
+                    context,
+                    true,
+                    FieldSpans {
+                        name: Span::default(),
+                        field_type: Span::default(),
+                    },
+                );
+                schema_root_rows(child, emit, context);
+            } else if child.is(c"schema_extension") {
+                schema_root_rows(child, emit, context);
+            } else if depth > 1 {
+                walk_schema(child, depth - 1, emit, context);
+            }
+        }
+    }
+}
+
+unsafe extern "C" fn schema_roots(
+    node: RawNode,
+    emit: SchemaEmit,
+    context: *mut c_void,
+) {
+    // SAFETY: C lends the root, emitter and context for the duration of this call.
+    // Walk source_file > document > definition > type_system_definition.
+    unsafe { walk_schema(node, 4, emit, context) };
 }
 
 #[derive(Clone, Copy)]
@@ -118,6 +180,7 @@ pub unsafe fn register() {
     unsafe {
         cbm_graphql_set_field_extractor(field_spans);
         cbm_graphql_set_parse_masker(mask_parse_input);
+        cbm_graphql_set_schema_extractor(schema_roots);
     }
 }
 
