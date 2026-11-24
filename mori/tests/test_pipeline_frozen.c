@@ -1545,6 +1545,22 @@ TEST(pipeline_frozen_indexes_exactly_the_listed_files) {
     PASS();
 }
 
+TEST(pipeline_frozen_keeps_an_explicit_empty_file_list) {
+    pf_fixture_t f;
+    cbm_pipeline_frozen_t *owner = NULL;
+    ASSERT_TRUE(pf_open(&f));
+    static const cbm_pipeline_frozen_file_t empty_list_marker = {"ignored.c", CBM_LANG_C};
+    bool built = pf_source_write(&f, "unlisted.c", pf_ordinary) &&
+                 pf_create_listed(&f, &empty_list_marker, 0, &owner) == CBM_PIPELINE_FROZEN_OK &&
+                 cbm_pipeline_frozen_build(owner) == CBM_PIPELINE_FROZEN_OK;
+    bool unlisted_absent = built && !pf_has_qn(f.db, PF_PROJECT ".unlisted.ordinary");
+    cbm_pipeline_frozen_free(owner);
+    ASSERT_TRUE(pf_close(&f));
+    ASSERT_TRUE(built);
+    ASSERT_TRUE(unlisted_absent);
+    PASS();
+}
+
 /* A listed file that is not in the source root means the root is not the
  * snapshot the list came from. */
 TEST(pipeline_frozen_missing_listed_file_is_input_changed) {
@@ -1721,6 +1737,7 @@ SUITE(pipeline_frozen) {
     RUN_TEST(pipeline_frozen_diagnostic_allocation_failures);
     RUN_TEST(pipeline_frozen_diagnostic_state_and_cancel_precedence);
     RUN_TEST(pipeline_frozen_indexes_exactly_the_listed_files);
+    RUN_TEST(pipeline_frozen_keeps_an_explicit_empty_file_list);
     RUN_TEST(pipeline_frozen_missing_listed_file_is_input_changed);
     RUN_TEST(pipeline_frozen_rejects_malformed_file_lists);
     RUN_TEST(pipeline_frozen_base_repairs_or_rebuilds_to_the_full_graph);

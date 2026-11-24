@@ -5,12 +5,10 @@ mod selection;
 
 use budget::{Budget, Limits, Violation};
 use selection::{Check, Decision};
-use std::ffi::{CStr, CString, OsStr, c_char, c_int, c_long, c_void};
-use std::fs;
+use std::borrow::Cow;
+use std::ffi::{CStr, c_char, c_int, c_long, c_void};
 use std::mem::MaybeUninit;
-use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::panic::catch_unwind;
-use std::path::Path;
 use std::ptr::NonNull;
 
 #[repr(C)]
@@ -28,8 +26,6 @@ struct Selection {
     _opaque: [u8; 0],
 }
 
-pub(super) type Walker = unsafe extern "C" fn(*mut Walk, *mut Frame) -> bool;
-
 #[repr(C)]
 struct EntryOps {
     admit: unsafe extern "C" fn(*mut c_void, i64, *mut Violation) -> bool,
@@ -39,10 +35,6 @@ struct EntryOps {
 static ENTRY_OPS: EntryOps = EntryOps { admit, select };
 
 unsafe extern "C" {
-    #[cfg(not(test))]
-    fn cbm_pipeline_set_discover_walk(walker: Walker);
-    #[cfg(not(test))]
-    fn cbm_discover_set_admission_walk(walker: Walker);
     fn cbm_discover_walk_limits(walk: *const Walk, limits: *mut Limits);
     fn cbm_discover_walk_prepare(walk: *mut Walk, frame: *mut Frame) -> bool;
     fn cbm_discover_frame_path(frame: *const Frame) -> *const c_char;
@@ -72,26 +64,11 @@ impl Drop for Child {
     }
 }
 
-/// Register the Rust walker.
-///
-/// # Safety
-///
-/// Call before the C engine starts any indexing threads.
-#[cfg(not(test))]
-pub unsafe fn register() {
-    // SAFETY: the binary calls this during process startup, and the callback
-    // lives for the process lifetime.
-    unsafe {
-        cbm_pipeline_set_discover_walk(walk);
-        if std::env::var_os("MORI_IMPL_ADMISSION").as_deref()
-            != Some(OsStr::new("c"))
-        {
-            cbm_discover_set_admission_walk(walk);
-        }
-    }
-}
-
-pub(super) unsafe extern "C" fn walk(walk: *mut Walk, root: *mut Frame) -> bool {
+#[unsafe(no_mangle)]
+pub(super) unsafe extern "C" fn mori_discover_walk(
+    walk: *mut Walk,
+    root: *mut Frame,
+) -> bool {
     // SAFETY: C lends the walk state and root until the callback returns.
     // Keep the root borrowed and release all owned children before returning.
     catch_unwind(|| unsafe {
@@ -106,8 +83,8 @@ pub(super) unsafe extern "C" fn walk(walk: *mut Walk, root: *mut Frame) -> bool 
         if !scan_directory(walk, root, &mut pending, count_only, &mut budget) {
             return false;
         }
-        // C scans the parent completely and visits children in reverse
-        // discovery order. The order determines which ignores fit in the cap.
+        // Match the reference order. Scan each parent before visiting its
+        // children in reverse discovery order. This fixes the ignore sample.
         while let Some(child) = pending.pop() {
             if budget.deadline_expired(|| cbm_now_ms()) {
                 return false;
@@ -144,10 +121,8 @@ unsafe fn scan_directory(
             return false;
         }
         let path = CStr::from_ptr(cbm_discover_frame_path(frame));
-        let path = Path::new(OsStr::from_bytes(path.to_bytes()));
-        // Bounded admission fails if a directory cannot be opened. Both
-        // native walkers stop reading the current directory on a readdir error.
-        let Ok(mut entries) = fs::read_dir(path) else {
+        // Bounded admission fails if a directory cannot be opened.
+        let Some(mut entries) = Directory::open(path) else {
             return !count_only;
         };
         loop {
@@ -157,11 +132,9 @@ unsafe fn scan_directory(
             if cbm_discover_walk_stopped(walk) {
                 break;
             }
-            let Some(Ok(entry)) = entries.next() else {
+            let Some(name) = entries.next_name() else {
                 break;
             };
-            let name = CString::new(entry.file_name().into_vec())
-                .expect("directory entry names contain no NUL");
             if let Some(child) = NonNull::new(cbm_discover_walk_entry(
                 walk,
                 frame,
@@ -178,6 +151,68 @@ unsafe fn scan_directory(
             }
         }
         true
+    }
+}
+
+#[cfg(unix)]
+struct Directory(std::fs::ReadDir);
+
+#[cfg(unix)]
+impl Directory {
+    fn open(path: &CStr) -> Option<Self> {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+        use std::path::Path;
+
+        std::fs::read_dir(Path::new(OsStr::from_bytes(path.to_bytes())))
+            .ok()
+            .map(Self)
+    }
+
+    // Like readdir in the reference, an iteration error ends this directory.
+    fn next_name(&mut self) -> Option<Cow<'_, CStr>> {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let entry = self.0.next()?.ok()?;
+        Some(Cow::Owned(
+            CString::new(entry.file_name().into_vec())
+                .expect("directory entry names contain no NUL"),
+        ))
+    }
+}
+
+#[cfg(windows)]
+struct Directory(NonNull<c_void>);
+
+#[cfg(windows)]
+unsafe extern "C" {
+    fn cbm_opendir(path: *const c_char) -> *mut c_void;
+    fn cbm_discover_dir_next(directory: *mut c_void) -> *const c_char;
+    fn cbm_closedir(directory: *mut c_void);
+}
+
+#[cfg(windows)]
+impl Directory {
+    fn open(path: &CStr) -> Option<Self> {
+        // SAFETY: cbm_opendir takes a UTF-8 C string and returns an owned
+        // enumeration handle. Keep its Win32 path and encoding behavior.
+        NonNull::new(unsafe { cbm_opendir(path.as_ptr()) }).map(Self)
+    }
+
+    fn next_name(&mut self) -> Option<Cow<'_, CStr>> {
+        // SAFETY: The name is valid until the next read or close. The borrow
+        // prevents either operation while the caller uses it.
+        let name = unsafe { cbm_discover_dir_next(self.0.as_ptr()) };
+        (!name.is_null()).then(|| Cow::Borrowed(unsafe { CStr::from_ptr(name) }))
+    }
+}
+
+#[cfg(windows)]
+impl Drop for Directory {
+    fn drop(&mut self) {
+        // SAFETY: Only this wrapper owns the enumeration handle.
+        unsafe { cbm_closedir(self.0.as_ptr()) };
     }
 }
 

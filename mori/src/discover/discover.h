@@ -253,14 +253,14 @@ int cbm_discover_ex2(const char *repo_path, const cbm_discover_opts_t *opts, cbm
                      cbm_ignored_file_t **ignored_out, int *ignored_count_out,
                      int *ignored_total_out);
 
-/* Discovery can delegate directory iteration and child scheduling.
- * The callback borrows the walk and root for its duration. Prepare each frame
+/* The Rust engine owns directory iteration and child scheduling.
+ * It borrows the walk and root for its duration. Prepare each frame
  * before reading its directory, pass each basename to walk_entry, and free
  * every non-null child it returns. A stopped walk or a false callback result
  * discards partial output through the usual discovery cleanup. */
 typedef struct cbm_discover_walk cbm_discover_walk_t;
 typedef struct cbm_discover_frame cbm_discover_frame_t;
-typedef bool (*cbm_discover_walk_fn)(cbm_discover_walk_t *walk, cbm_discover_frame_t *root);
+bool mori_discover_walk(cbm_discover_walk_t *walk, cbm_discover_frame_t *root);
 
 typedef struct {
     uint64_t deadline_ms;
@@ -325,19 +325,10 @@ void cbm_discover_frame_free(cbm_discover_frame_t *frame);
 /* Failure or refusal recorded by C. The callback polls its own deadline. */
 bool cbm_discover_walk_stopped(cbm_discover_walk_t *walk);
 
-int cbm_discover_ex2_with_walk(const char *repo_path, const cbm_discover_opts_t *opts,
-                               cbm_file_info_t **out, int *count, char ***excluded_out,
-                               int *excluded_count_out, cbm_ignored_file_t **ignored_out,
-                               int *ignored_count_out, int *ignored_total_out,
-                               cbm_discover_walk_fn walker);
-
-/* Install the bounded count walker at startup, before starting indexing
- * threads. NULL selects native directory iteration. */
-void cbm_discover_set_admission_walk(cbm_discover_walk_fn walker);
-
-cbm_discover_status_t cbm_discover_count_bounded_with_walk(
-    const char *repo_path, const cbm_discover_opts_t *opts, int max_files, uint64_t deadline_ms,
-    int *count_out, cbm_discover_walk_fn walker);
+#ifdef _WIN32
+struct cbm_dir;
+const char *cbm_discover_dir_next(struct cbm_dir *dir);
+#endif
 
 /* Free an array of file info results. NULL-safe. */
 void cbm_discover_free(cbm_file_info_t *files, int count);

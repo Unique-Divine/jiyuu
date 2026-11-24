@@ -54,12 +54,9 @@ fn rusqlite_uses_the_c_backend_sqlite() {
 #[cfg(all(feature = "c-backend", test, unix))]
 mod discovery_spike;
 
-#[cfg(all(feature = "c-backend", unix))]
+#[cfg(feature = "native-engine-abi")]
 #[path = "discovery_spike/native.rs"]
 mod discover_walk;
-
-#[cfg(all(feature = "c-backend", not(test), unix))]
-pub use discover_walk::register as mori_register_discover_walk;
 
 #[cfg(all(feature = "c-backend", unix))]
 mod staged_graph;

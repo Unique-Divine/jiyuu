@@ -1,4 +1,4 @@
-//! Compare a Rust walk to C discovery without entering the indexer.
+//! Exercise production discovery through its C ABI and compare to the prototype.
 
 use std::collections::HashSet;
 use std::ffi::{CStr, CString, OsStr, c_char, c_int, c_void};
@@ -16,7 +16,6 @@ mod admission;
 mod git_excludes;
 mod sphinx;
 
-use crate::discover_walk::{self, Walker};
 use sphinx::Suffixes;
 
 const IGNORED_CAP: usize = 2_000;
@@ -82,15 +81,14 @@ struct IgnoredFile {
 }
 
 unsafe extern "C" {
-    fn cbm_discover_count_bounded_with_walk(
+    fn cbm_discover_count_bounded(
         repo_path: *const c_char,
         opts: *const Options,
         max_files: c_int,
         deadline_ms: u64,
         count: *mut c_int,
-        walker: Option<Walker>,
     ) -> c_int;
-    fn cbm_discover_ex2_with_walk(
+    fn cbm_discover_ex2(
         repo_path: *const c_char,
         opts: *const Options,
         files: *mut *mut FileInfo,
@@ -100,7 +98,6 @@ unsafe extern "C" {
         ignored: *mut *mut IgnoredFile,
         ignored_count: *mut c_int,
         ignored_total: *mut c_int,
-        walker: Option<Walker>,
     ) -> c_int;
     fn cbm_discover_free(files: *mut FileInfo, count: c_int);
     fn cbm_discover_free_excluded(excluded: *mut *mut c_char, count: c_int);
@@ -157,17 +154,12 @@ struct NativeWalk {
 
 impl NativeWalk {
     fn run(root: &Path, mode: Mode, size_cap: u64) -> Self {
-        let (status, out) = Self::run_with(root, mode, size_cap, None);
+        let (status, out) = Self::run_with(root, mode, size_cap);
         assert_eq!(status, 0, "native discovery of {}", root.display());
         out
     }
 
-    fn run_with(
-        root: &Path,
-        mode: Mode,
-        size_cap: u64,
-        walker: Option<Walker>,
-    ) -> (c_int, Self) {
+    fn run_with(root: &Path, mode: Mode, size_cap: u64) -> (c_int, Self) {
         let path = c_path(root);
         let options = Options {
             mode,
@@ -176,19 +168,15 @@ impl NativeWalk {
             resource_policy: null(),
             resource_violation: null_mut(),
         };
-        Self::run_with_options(&path, &options, walker)
+        Self::run_with_options(&path, &options)
     }
 
-    fn run_with_options(
-        path: &CStr,
-        options: &Options,
-        walker: Option<Walker>,
-    ) -> (c_int, Self) {
+    fn run_with_options(path: &CStr, options: &Options) -> (c_int, Self) {
         let mut out = Self::default();
         // SAFETY: arguments follow discover.h. On success C transfers all
         // three arrays to out. On failure C frees any partial results.
         let status = unsafe {
-            cbm_discover_ex2_with_walk(
+            cbm_discover_ex2(
                 path.as_ptr(),
                 options,
                 &mut out.files,
@@ -198,7 +186,6 @@ impl NativeWalk {
                 &mut out.ignored,
                 &mut out.ignored_count,
                 &mut out.ignored_total,
-                walker,
             )
         };
         (status, out)
@@ -212,16 +199,6 @@ impl NativeWalk {
                 (c_text(file.path).into(), file.mtime_ns)
             })
             .collect()
-    }
-
-    fn compare_pipeline(root: &Path, mode: Mode, size_cap: u64) -> Self {
-        let native = Self::run(root, mode, size_cap);
-        let (status, rust) =
-            Self::run_with(root, mode, size_cap, Some(discover_walk::walk));
-        assert_eq!(status, 0, "Rust discovery of {}", root.display());
-        assert_eq!(native.snapshot(), rust.snapshot(), "{mode:?}");
-        assert_eq!(native.native_fields(), rust.native_fields(), "{mode:?}");
-        native
     }
 
     fn snapshot(&self) -> Snapshot {
@@ -794,7 +771,6 @@ fn linked_admission(
     mode: Mode,
     max_files: c_int,
     deadline_ms: u64,
-    walker: Option<Walker>,
     policy: Option<&ResourcePolicy>,
 ) -> (c_int, c_int, ResourceViolation) {
     let path = c_path(root);
@@ -810,35 +786,27 @@ fn linked_admission(
     let mut count = -2;
     // SAFETY: the path, options, and count remain live for the native call.
     let status = unsafe {
-        cbm_discover_count_bounded_with_walk(
+        cbm_discover_count_bounded(
             path.as_ptr(),
             &options,
             max_files,
             deadline_ms,
             &mut count,
-            walker,
         )
     };
     (status, count, violation)
 }
 
-fn compare_admission(
+fn count_admission(
     root: &Path,
     mode: Mode,
     max_files: c_int,
     deadline_ms: u64,
 ) -> (c_int, c_int) {
-    let c = linked_admission(root, mode, max_files, deadline_ms, None, None);
-    let rust = linked_admission(
-        root,
-        mode,
-        max_files,
-        deadline_ms,
-        Some(discover_walk::walk),
-        None,
-    );
-    assert_eq!(rust, c);
-    (c.0, c.1)
+    let (status, count, violation) =
+        linked_admission(root, mode, max_files, deadline_ms, None);
+    assert_eq!(violation, ResourceViolation::default());
+    (status, count)
 }
 
 #[test]
@@ -854,7 +822,7 @@ fn admission_counts_indexable_files_up_to_the_ceiling() {
     for mode in Mode::ALL {
         for (max_files, expected) in [(0, (1, 0)), (1, (1, 1)), (2, (0, 2))] {
             assert_eq!(
-                compare_admission(&scratch.0, mode, max_files, 0),
+                count_admission(&scratch.0, mode, max_files, 0),
                 expected
             );
             let count = max_files as usize;
@@ -868,7 +836,7 @@ fn admission_counts_indexable_files_up_to_the_ceiling() {
                 expected
             );
         }
-        assert_eq!(compare_admission(&scratch.0, mode, 2, 1), (-1, -1));
+        assert_eq!(count_admission(&scratch.0, mode, 2, 1), (-1, -1));
         let expired = admission::count_bounded(&scratch.0, mode, 2, 1);
         assert_eq!(expired.unwrap_err().kind(), io::ErrorKind::TimedOut);
     }
@@ -895,49 +863,33 @@ fn admission_reports_resource_limit_details() {
         },
         ..ResourcePolicy::default()
     };
-    for walker in [None, Some(discover_walk::walk as Walker)] {
-        for (policy, violation) in [
-            (
-                &max_files,
-                ResourceViolation {
-                    resource: 1,
-                    observed: 2,
-                    limit: 1,
-                },
-            ),
-            (
-                &max_source_bytes,
-                ResourceViolation {
-                    resource: 2,
-                    observed: 2 * bytes,
-                    limit: bytes,
-                },
-            ),
-        ] {
-            assert_eq!(
-                linked_admission(
-                    &scratch.0,
-                    Mode::Full,
-                    2,
-                    0,
-                    walker,
-                    Some(policy)
-                ),
-                (1, 1, violation)
-            );
-            // The admission ceiling takes precedence on the same candidate.
-            assert_eq!(
-                linked_admission(
-                    &scratch.0,
-                    Mode::Full,
-                    1,
-                    0,
-                    walker,
-                    Some(policy)
-                ),
-                (1, 1, ResourceViolation::default())
-            );
-        }
+    for (policy, violation) in [
+        (
+            &max_files,
+            ResourceViolation {
+                resource: 1,
+                observed: 2,
+                limit: 1,
+            },
+        ),
+        (
+            &max_source_bytes,
+            ResourceViolation {
+                resource: 2,
+                observed: 2 * bytes,
+                limit: bytes,
+            },
+        ),
+    ] {
+        assert_eq!(
+            linked_admission(&scratch.0, Mode::Full, 2, 0, Some(policy)),
+            (1, 1, violation)
+        );
+        // The admission ceiling takes precedence on the same candidate.
+        assert_eq!(
+            linked_admission(&scratch.0, Mode::Full, 1, 0, Some(policy)),
+            (1, 1, ResourceViolation::default())
+        );
     }
 }
 
@@ -957,28 +909,26 @@ fn ordinary_discovery_discards_partial_results_on_resource_refusal() {
         },
         ..ResourcePolicy::default()
     };
-    for walker in [None, Some(discover_walk::walk as Walker)] {
-        let mut violation = ResourceViolation::default();
-        let options = Options {
-            mode: Mode::Full,
-            ignore_file: null(),
-            max_file_size: 0,
-            resource_policy: std::ptr::from_ref(&policy).cast(),
-            resource_violation: std::ptr::from_mut(&mut violation).cast(),
-        };
-        let (status, output) =
-            NativeWalk::run_with_options(&c_path(&scratch.0), &options, walker);
-        assert_eq!(status, 1);
-        assert_eq!(output.snapshot(), Snapshot::default());
-        assert_eq!(
-            violation,
-            ResourceViolation {
-                resource: 2,
-                observed: 2 * bytes,
-                limit: bytes,
-            }
-        );
-    }
+    let mut violation = ResourceViolation::default();
+    let options = Options {
+        mode: Mode::Full,
+        ignore_file: null(),
+        max_file_size: 0,
+        resource_policy: std::ptr::from_ref(&policy).cast(),
+        resource_violation: std::ptr::from_mut(&mut violation).cast(),
+    };
+    let (status, output) =
+        NativeWalk::run_with_options(&c_path(&scratch.0), &options);
+    assert_eq!(status, 1);
+    assert_eq!(output.snapshot(), Snapshot::default());
+    assert_eq!(
+        violation,
+        ResourceViolation {
+            resource: 2,
+            observed: 2 * bytes,
+            limit: bytes,
+        }
+    );
 }
 
 #[test]
@@ -1001,10 +951,10 @@ fn admission_refuses_an_unobservable_child() {
             fs::symlink_metadata(child.join("hidden.rs")).err()
         };
         let outcomes =
-            Mode::ALL.map(|mode| compare_admission(&scratch.0, mode, 2, 0));
+            Mode::ALL.map(|mode| count_admission(&scratch.0, mode, 2, 0));
         let rust_outcomes = Mode::ALL
             .map(|mode| admission::count_bounded(&scratch.0, mode, 2, 0));
-        let native_limit = compare_admission(&scratch.0, Mode::Full, 0, 0);
+        let native_limit = count_admission(&scratch.0, Mode::Full, 0, 0);
         let rust_limit = admission::count_bounded(&scratch.0, Mode::Full, 0, 0);
         fs::set_permissions(&child, fs::Permissions::from_mode(0o700)).unwrap();
 
@@ -1031,7 +981,7 @@ fn admission_refuses_an_unobservable_child() {
 }
 
 #[test]
-fn matches_c_when_a_child_cannot_be_read_or_statted() {
+fn matches_production_when_a_child_cannot_be_read_or_statted() {
     use std::os::unix::fs::PermissionsExt;
 
     let scratch = Scratch::new();
@@ -1048,10 +998,9 @@ fn matches_c_when_a_child_cannot_be_read_or_statted() {
     let read_error = fs::read_dir(&blocked_read).err();
     let stat_error = fs::symlink_metadata(blocked_stat.join("hidden.rs")).err();
     let blocked_root = Walk::run(&blocked_read, Mode::Full, 0);
-    NativeWalk::compare_pipeline(&blocked_read, Mode::Full, 0);
+    NativeWalk::run(&blocked_read, Mode::Full, 0);
     let snapshots = Mode::ALL.map(|mode| {
-        let native =
-            NativeWalk::compare_pipeline(&scratch.0, mode, 0).snapshot();
+        let native = NativeWalk::run(&scratch.0, mode, 0).snapshot();
         (mode, native, Walk::run(&scratch.0, mode, 0))
     });
     fs::set_permissions(&blocked_read, fs::Permissions::from_mode(0o700))
@@ -1080,7 +1029,7 @@ fn matches_c_when_a_child_cannot_be_read_or_statted() {
 }
 
 #[test]
-fn matches_c_filters_in_all_modes() {
+fn matches_production_filters_in_all_modes() {
     let scratch = Scratch::new();
     scratch.write(".gitignore", "/nested/root.cpp\n*.gen.ts\n");
     scratch.write("nested/.gitignore", "/skip/\n!keep.gen.ts\n");
@@ -1110,8 +1059,7 @@ fn matches_c_filters_in_all_modes() {
     std::os::unix::fs::symlink("nested", scratch.0.join("linked-dir")).unwrap();
 
     for mode in Mode::ALL {
-        let mut native =
-            NativeWalk::compare_pipeline(&scratch.0, mode, 64).snapshot();
+        let mut native = NativeWalk::run(&scratch.0, mode, 64).snapshot();
         let mut rust = Walk::run(&scratch.0, mode, 64).unwrap();
         native.sort();
         rust.sort();
@@ -1133,7 +1081,7 @@ fn matches_c_filters_in_all_modes() {
 }
 
 #[test]
-fn matches_c_tracked_paths_and_info_exclude() {
+fn matches_production_tracked_paths_and_info_exclude() {
     let scratch = Scratch::new();
     assert!(git(&scratch.0, &["init", "-q"]).is_some());
     scratch.write(".git/info/exclude", "/cache/\n!keep.rs\n");
@@ -1157,8 +1105,7 @@ fn matches_c_tracked_paths_and_info_exclude() {
         .is_some()
     );
 
-    let mut native =
-        NativeWalk::compare_pipeline(&scratch.0, Mode::Full, 0).snapshot();
+    let mut native = NativeWalk::run(&scratch.0, Mode::Full, 0).snapshot();
     let mut rust = Walk::run(&scratch.0, Mode::Full, 0).unwrap();
     native.sort();
     rust.sort();
@@ -1170,12 +1117,12 @@ fn matches_c_tracked_paths_and_info_exclude() {
         [b"generated/keep.rs".as_slice(), b"keep.rs".as_slice()]
     );
     assert_eq!(native, rust);
-    assert_eq!(compare_admission(&scratch.0, Mode::Full, 2, 0), (0, 2));
-    assert_eq!(compare_admission(&scratch.0, Mode::Full, 1, 0), (1, 1));
+    assert_eq!(count_admission(&scratch.0, Mode::Full, 2, 0), (0, 2));
+    assert_eq!(count_admission(&scratch.0, Mode::Full, 1, 0), (1, 1));
 }
 
 #[test]
-fn matches_c_ignores_from_enclosing_repository() {
+fn matches_production_ignores_from_enclosing_repository() {
     let scratch = Scratch::new();
     assert!(git(&scratch.0, &["init", "-q"]).is_some());
     scratch.write(
@@ -1207,7 +1154,7 @@ fn matches_c_ignores_from_enclosing_repository() {
 
     let root = scratch.0.join("pkg/run");
     for mode in Mode::ALL {
-        let mut native = NativeWalk::compare_pipeline(&root, mode, 0).snapshot();
+        let mut native = NativeWalk::run(&root, mode, 0).snapshot();
         let mut rust = Walk::run(&root, mode, 0).unwrap();
         native.sort();
         rust.sort();
@@ -1244,14 +1191,17 @@ fn matches_c_ignores_from_enclosing_repository() {
 }
 
 #[test]
-fn matches_c_user_git_excludes() {
+fn matches_production_user_git_excludes() {
     const FIXTURE: &str = "MORI_DISCOVERY_USER_EXCLUDES_FIXTURE";
     let Some(root) = std::env::var_os(FIXTURE) else {
         let scratch = Scratch::new();
         // A separate process gives C and Rust the same isolated user config
         // without changing the other tests' environment.
         let result = Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "discovery_spike::matches_c_user_git_excludes"])
+            .args([
+                "--exact",
+                "discovery_spike::matches_production_user_git_excludes",
+            ])
             .env(FIXTURE, &scratch.0)
             .env("HOME", scratch.0.join("home"))
             .env("XDG_CONFIG_HOME", scratch.0.join("xdg"))
@@ -1301,8 +1251,7 @@ fn matches_c_user_git_excludes() {
         ("xdg/git/ignore", "xdg-default.rs"),
     ] {
         for mode in Mode::ALL {
-            let mut native =
-                NativeWalk::compare_pipeline(&repo, mode, 64).snapshot();
+            let mut native = NativeWalk::run(&repo, mode, 64).snapshot();
             let mut rust = Walk::run(&repo, mode, 64).unwrap();
             native.sort();
             rust.sort();
@@ -1339,7 +1288,7 @@ fn matches_c_user_git_excludes() {
 }
 
 #[test]
-fn matches_c_sphinx_suffixes() {
+fn matches_production_sphinx_suffixes() {
     let scratch = Scratch::new();
     scratch.write(
         "guide/conf.py",
@@ -1379,8 +1328,7 @@ fn matches_c_sphinx_suffixes() {
     }
 
     for mode in Mode::ALL {
-        let mut native =
-            NativeWalk::compare_pipeline(&scratch.0, mode, 0).snapshot();
+        let mut native = NativeWalk::run(&scratch.0, mode, 0).snapshot();
         let mut rust = Walk::run(&scratch.0, mode, 0).unwrap();
         native.sort();
         rust.sort();
@@ -1411,7 +1359,7 @@ fn matches_c_sphinx_suffixes() {
 
 #[test]
 fn production_walk_preserves_order_and_the_capped_ignore_sample() {
-    use std::os::unix::fs::symlink;
+    use std::os::unix::fs::{MetadataExt, symlink};
 
     let scratch = Scratch::new();
     scratch.write("root.rs", "fn root() {}");
@@ -1428,7 +1376,19 @@ fn production_walk_preserves_order_and_the_capped_ignore_sample() {
                 .unwrap();
         }
     }
-    let native = NativeWalk::compare_pipeline(&scratch.0, Mode::Full, 0);
+    let native = NativeWalk::run(&scratch.0, Mode::Full, 0);
+    let (path, mtime) = native
+        .native_fields()
+        .into_iter()
+        .find(|(path, _)| path.0.ends_with(b"/root.rs"))
+        .unwrap();
+    let root_file = scratch.0.join("root.rs");
+    let metadata = fs::metadata(&root_file).unwrap();
+    assert_eq!(path.0, root_file.as_os_str().as_bytes());
+    assert_eq!(
+        mtime,
+        metadata.mtime() * 1_000_000_000 + metadata.mtime_nsec()
+    );
     assert_eq!(native.count, 5);
     assert_eq!(native.ignored_count as usize, IGNORED_CAP);
     assert_eq!(native.ignored_total as usize, IGNORED_CAP + 1);
@@ -1457,12 +1417,9 @@ fn production_walk_preserves_failed_discovery_outputs() {
         [roots[0].clone(), roots[1].clone(), root]
     };
     for root in roots {
-        for walker in [None, Some(discover_walk::walk as Walker)] {
-            let (status, output) =
-                NativeWalk::run_with(&root, Mode::Full, 0, walker);
-            assert_eq!(status, -1);
-            assert_eq!(output.snapshot(), Snapshot::default());
-        }
+        let (status, output) = NativeWalk::run_with(&root, Mode::Full, 0);
+        assert_eq!(status, -1);
+        assert_eq!(output.snapshot(), Snapshot::default());
     }
 }
 
@@ -1487,33 +1444,23 @@ fn corpus() {
         .unwrap_or_else(|_| "compare".into());
     let start = Instant::now();
     match backend.as_str() {
-        "c" => {
+        "production" => {
             let result = NativeWalk::run(&root, mode, 0);
             eprintln!(
-                "c {mode:?} {:?} files={} excluded={} ignored={}",
+                "production {mode:?} {:?} files={} excluded={} ignored={}",
                 start.elapsed(),
                 result.count,
                 result.excluded_count,
                 result.ignored_total
             );
         }
-        "rust" => {
+        "prototype" => {
             let result = Walk::run(&root, mode, 0).unwrap();
             eprintln!(
-                "rust {mode:?} {:?} files={} excluded={} ignored={}",
+                "prototype {mode:?} {:?} files={} excluded={} ignored={}",
                 start.elapsed(),
                 result.files.len(),
                 result.excluded.len(),
-                result.ignored_total
-            );
-        }
-        "pipeline-compare" => {
-            let result = NativeWalk::compare_pipeline(&root, mode, 0);
-            eprintln!(
-                "c and Rust pipeline {mode:?} {:?} files={} excluded={} ignored={}",
-                start.elapsed(),
-                result.count,
-                result.excluded_count,
                 result.ignored_total
             );
         }
@@ -1526,7 +1473,7 @@ fn corpus() {
             report_diff("files", &native.files, &rust.files);
             report_diff("excluded subtrees", &native.excluded, &rust.excluded);
             eprintln!(
-                "ignored files: c={} rust={} (stored c={} rust={})",
+                "ignored files: production={} prototype={} (stored production={} prototype={})",
                 native.ignored_total,
                 rust.ignored_total,
                 native.ignored.len(),

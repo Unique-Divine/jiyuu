@@ -4475,37 +4475,17 @@ static int run_full_build(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx, const cbm_
     return rc;
 }
 
-static cbm_discover_walk_fn g_pipeline_discover_walk;
-
-void cbm_pipeline_set_discover_walk(cbm_discover_walk_fn walker) {
-    g_pipeline_discover_walk = walker;
-}
-
 static int pipeline_discover(cbm_pipeline_t *p, const cbm_discover_opts_t *opts, const char *phase,
                              cbm_file_info_t **files, int *file_count) {
-    const char *selector = cbm_runtime_getenv("MORI_IMPL_DISCOVERY");
-    const bool requested = selector && strcmp(selector, "rust") == 0;
     const bool listed = cbm_pipeline_frozen_has_file_list(p);
-    const char *reason = listed                      ? "frozen_file_list"
-                         : p->frozen                 ? "frozen"
-                         : opts->resource_policy     ? "resource_policy"
-                         : !requested                ? "default"
-                         : !g_pipeline_discover_walk ? "unavailable"
-                                                     : "selected";
-    cbm_discover_walk_fn walker =
-        requested && !p->frozen && !opts->resource_policy ? g_pipeline_discover_walk : NULL;
     cbm_log_debug("pipeline.discovery_backend", "phase", phase, "mode",
-                  pipeline_mode_name(opts->mode), "backend",
-                  listed   ? "frozen_list"
-                  : walker ? "rust"
-                           : "c",
-                  "reason", reason);
+                  pipeline_mode_name(opts->mode), "backend", listed ? "frozen_list" : "rust");
     if (listed) {
         return cbm_pipeline_frozen_listed_files(p, files, file_count);
     }
-    return cbm_discover_ex2_with_walk(p->repo_path, opts, files, file_count, &p->excluded_dirs,
-                                      &p->excluded_count, &p->ignored_files, &p->ignored_count,
-                                      &p->ignored_total, walker);
+    return cbm_discover_ex2(p->repo_path, opts, files, file_count, &p->excluded_dirs,
+                            &p->excluded_count, &p->ignored_files, &p->ignored_count,
+                            &p->ignored_total);
 }
 
 static int cbm_pipeline_run_staged(cbm_pipeline_t *p) {
