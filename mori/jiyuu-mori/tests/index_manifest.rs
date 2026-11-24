@@ -634,6 +634,7 @@ function total(xs: number[]): number { return sum(xs) }
     assert!(
         logs.lines().any(|line| {
             line.contains("msg=publish.fts_failed")
+                && line.contains("phase=refresh")
                 && line.contains("vtable_constructor_failed:_nodes_fts")
         }),
         "{logs}"

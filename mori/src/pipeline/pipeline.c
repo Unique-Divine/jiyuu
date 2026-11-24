@@ -3986,20 +3986,30 @@ static int publish_staged_impl(char *stage_path, const cbm_pipeline_generation_t
     if (ok && full_build) {
         ok = cbm_store_fts_rebuild(store, NULL, 0) == CBM_STORE_OK;
     } else if (ok) {
-        ok = cbm_store_begin(store) == CBM_STORE_OK;
-        if (ok) {
-            int rc = cbm_store_fts_refresh_closure(store, staged_generation_cancelled,
-                                                   generation->cancelled);
-            cancelled = rc == CBM_STORE_CANCELLED;
+        int rc = cbm_store_begin(store);
+        bool began = rc == CBM_STORE_OK;
+        const char *phase = "begin";
+        if (began) {
+            phase = "refresh";
+            rc = cbm_store_fts_refresh_closure(store, staged_generation_cancelled,
+                                               generation->cancelled);
             if (rc == CBM_STORE_NOT_FOUND) {
                 cbm_log_warn("delta.fts_insert_unavailable", "project", generation->project);
-            } else if (rc != CBM_STORE_OK && !cancelled) {
-                cbm_log_error("publish.fts_failed", "project", generation->project, "error",
-                              cbm_store_error(store));
+                rc = CBM_STORE_OK;
             }
-            ok = (rc == CBM_STORE_OK || rc == CBM_STORE_NOT_FOUND) &&
-                 cbm_store_commit(store) == CBM_STORE_OK;
-            if (!ok) {
+            if (rc == CBM_STORE_OK) {
+                phase = "commit";
+                rc = cbm_store_commit(store);
+            }
+        }
+        ok = rc == CBM_STORE_OK;
+        cancelled = rc == CBM_STORE_CANCELLED;
+        if (!ok) {
+            if (!cancelled) {
+                cbm_log_error("publish.fts_failed", "project", generation->project, "phase", phase,
+                              "error", cbm_store_error(store));
+            }
+            if (began) {
                 cbm_store_rollback(store);
             }
         }
