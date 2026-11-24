@@ -148,8 +148,18 @@ impl Fixture {
     }
 
     fn start_query_daemon(&self, bin: &Path, backend: &str) {
+        self.start_query_daemon_with_env(bin, backend, &[]);
+    }
+
+    fn start_query_daemon_with_env(
+        &self,
+        bin: &Path,
+        backend: &str,
+        environment: &[(&str, &str)],
+    ) {
         let output = self
             .command(bin)
+            .envs(environment.iter().copied())
             .env("MORI_IMPL_QUERY", backend)
             .env("CBM_LOG_LEVEL", "debug")
             .args(["daemon", "start"])
@@ -199,8 +209,16 @@ impl Fixture {
     }
 
     fn compare_query_pages(&self, cases: &[(&str, usize, bool)]) -> Vec<Value> {
+        self.compare_query_pages_with_env(cases, &[])
+    }
+
+    fn compare_query_pages_with_env(
+        &self,
+        cases: &[(&str, usize, bool)],
+        environment: &[(&str, &str)],
+    ) -> Vec<Value> {
         let run = |bin: &Path, backend: &str| {
-            self.start_query_daemon(bin, backend);
+            self.start_query_daemon_with_env(bin, backend, environment);
             let mut pages = Vec::new();
             for &(query, offset, supported) in cases {
                 let before = self.rust_query_count();
@@ -1080,7 +1098,7 @@ fn zero_hop_impact_query_uses_rust_and_matches_c_pages() {
             0,
             false,
         ),
-        ("MATCH (n:Function) RETURN count(n)", 0, false),
+        ("MATCH (n:Function) RETURN count(n)", 0, true),
     ];
     let candidate = fixture.compare_query_pages(&cases);
     let page = |i: usize| &candidate[i];
@@ -1429,6 +1447,13 @@ fn bounded_count_projects_native_groups_and_empty_results_in_rust() {
             params![json!({"bucket":bucket}).to_string(), id],
         )
         .unwrap();
+        if name == "one" {
+            db.execute(
+                "UPDATE nodes SET start_line = ?1, end_line = ?2 WHERE id = ?3",
+                params![2147483648_i64, b"17 lines".as_slice(), id],
+            )
+            .unwrap();
+        }
         edge(&db, CLIENT, first, id, "CALLS", json!({}));
     }
     // The GROUP BY cell clips direct string fields at the same boundary as
@@ -1446,6 +1471,9 @@ fn bounded_count_projects_native_groups_and_empty_results_in_rust() {
     let ties =
         "MATCH (n:CountProbe) RETURN n.bucket, COUNT(*) ORDER BY COUNT(*) DESC";
     let one_hop = "MATCH (a:SourceProbe)-[:CALLS]->(b) RETURN b.bucket AS key, count(b) AS total ORDER BY total DESC, key LIMIT 2";
+    let first_group = "MATCH (n:CountProbe) RETURN n.bucket, count(*) LIMIT 1";
+    let wide_count = "MATCH (n:CountProbe) WHERE n.name = 'one' RETURN count(*)";
+    let wide_lines = "MATCH (n:CountProbe) WHERE n.name = 'one' RETURN n.start_line, n.end_line";
     let missing_prop = "MATCH (n:CountProbe) RETURN count(n.missing)";
     let empty = "MATCH (n:MissingProbe) RETURN count(*) AS total";
     let empty_group = "MATCH (n:MissingProbe) RETURN n.label, count(*)";
@@ -1459,6 +1487,9 @@ fn bounded_count_projects_native_groups_and_empty_results_in_rust() {
         ((ties, 1, true), json!([["alpha", "2"]])),
         ((one_hop, 0, true), json!([["alpha", "2"]])),
         ((one_hop, 1, true), json!([["beta", "2"]])),
+        ((first_group, 0, true), json!([["beta", "2"]])),
+        ((wide_count, 0, true), json!([["1"]])),
+        ((wide_lines, 0, true), json!([["-2147483648", "17"]])),
         ((missing_prop, 0, true), json!([["5"]])),
         ((empty, 0, true), json!([["0"]])),
         ((empty_group, 0, true), json!([])),
@@ -1478,6 +1509,56 @@ fn bounded_count_projects_native_groups_and_empty_results_in_rust() {
     {
         assert_eq!(page["rows"], rows, "{query}");
     }
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn ordered_count_overflow_falls_back_to_rank_late_groups() {
+    use cypher_linear::{ExecutionBudget, ExecutionError};
+
+    const QUERY: &str = "MATCH (n:RankProbe) RETURN n.name, count(*) AS total ORDER BY total DESC LIMIT 1";
+    const ZERO: &str = "MATCH (n:RankProbe) RETURN n.name, count(*) AS total ORDER BY total DESC LIMIT 0";
+    let fixture = Fixture::new();
+    let db = fixture.index(CLIENT);
+    let mut tail = 0;
+    for (index, name) in ["alpha", "beta", "winner", "winner", "winner"]
+        .into_iter()
+        .enumerate()
+    {
+        tail = node(
+            &db,
+            CLIENT,
+            "RankProbe",
+            name,
+            &format!("rank.{index}"),
+            "rank.py",
+        );
+    }
+    let mut budget = ExecutionBudget::new(&Instant::now, &|| false);
+    budget.set_ordered_count_group_limit_for_tests(2);
+    let query = cypher_linear::classify(QUERY).unwrap();
+    assert!(matches!(
+        query.execute_with_budget(&db, CLIENT, &mut budget),
+        Err(ExecutionError::Unsupported)
+    ));
+    drop(db);
+
+    let pages = fixture.compare_query_pages_with_env(
+        &[(QUERY, 0, false), (ZERO, 0, true)],
+        &[("MORI_TEST_ORDERED_COUNT_GROUP_LIMIT", "2")],
+    );
+    assert_eq!(pages[0]["rows"], json!([["winner", "3"]]));
+    assert_eq!(pages[1]["rows"], json!([]));
+
+    // A later SQLite error must still be detected for LIMIT 0.
+    let db = fixture.db(CLIENT);
+    fail_node_read(&db, tail);
+    let query = cypher_linear::classify(ZERO).unwrap();
+    assert!(matches!(
+        query.execute_on(&db, CLIENT),
+        Err(ExecutionError::Storage(rusqlite::Error::SqliteFailure(_, Some(message))))
+            if message == "integer overflow"
+    ));
 }
 
 #[test]
