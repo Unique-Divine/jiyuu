@@ -206,9 +206,9 @@ int cbm_discover(const char *repo_path, const cbm_discover_opts_t *opts, cbm_fil
                  int *count);
 
 /* Apply the exact same full discovery/filter policy without retaining a file
- * array. Stops before counting more than max_files and performs no per-file
- * allocation. deadline_ms is an absolute cbm_now_ms() deadline; zero disables
- * it. Returns LIMIT_EXCEEDED when at least max_files + 1 indexable files exist,
+ * array. Stops before counting more than max_files. deadline_ms is an
+ * absolute cbm_now_ms() deadline. Zero disables it. Returns LIMIT_EXCEEDED
+ * when at least max_files + 1 indexable files exist,
  * ERROR on traversal/deadline/allocation failure, or OK with the exact count. */
 cbm_discover_status_t cbm_discover_count_bounded(const char *repo_path,
                                                  const cbm_discover_opts_t *opts, int max_files,
@@ -253,7 +253,7 @@ int cbm_discover_ex2(const char *repo_path, const cbm_discover_opts_t *opts, cbm
                      cbm_ignored_file_t **ignored_out, int *ignored_count_out,
                      int *ignored_total_out);
 
-/* Ordinary discovery can delegate directory iteration and child scheduling.
+/* Discovery can delegate directory iteration and child scheduling.
  * The callback borrows the walk and root for its duration. Prepare each frame
  * before reading its directory, pass each basename to walk_entry, and free
  * every non-null child it returns. A stopped walk or a false callback result
@@ -274,6 +274,14 @@ int cbm_discover_ex2_with_walk(const char *repo_path, const cbm_discover_opts_t 
                                int *excluded_count_out, cbm_ignored_file_t **ignored_out,
                                int *ignored_count_out, int *ignored_total_out,
                                cbm_discover_walk_fn walker);
+
+/* Install the bounded count walker at startup, before starting indexing
+ * threads. NULL selects native directory iteration. */
+void cbm_discover_set_admission_walk(cbm_discover_walk_fn walker);
+
+cbm_discover_status_t cbm_discover_count_bounded_with_walk(
+    const char *repo_path, const cbm_discover_opts_t *opts, int max_files, uint64_t deadline_ms,
+    int *count_out, cbm_discover_walk_fn walker);
 
 /* Free an array of file info results. NULL-safe. */
 void cbm_discover_free(cbm_file_info_t *files, int count);

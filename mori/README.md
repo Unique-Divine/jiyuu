@@ -435,16 +435,16 @@ mori config set auto_index_limit 50000   # skip repos with more files
 
 ### Existing-Generation Routing
 
-Set `MORI_IMPL_INDEX_ROUTE=rust` when starting the daemon, or use a fresh
-`CBM_RUNTIME_DIR` so the worker inherits the setting. Rust selects the
-existing-generation route for an ordinary reindex. An exact live match
+In the linked `mori` executable, Rust selects the existing-generation
+route for an ordinary reindex by default. An exact live match
 ends the run without a copy. After C loads the staged manifest, Rust
 selects no-op, closure repair, full rebuild, or fatal failure. The
 `pipeline.index_route` worker log records the Rust decision. Use
 `CBM_PROFILE=1` to keep worker logs.
 
-C is the default for route selection. It owns the proofs and executes
-the selected route. `MORI_IMPL_INDEX_MANIFEST` selects the exact
+Set `MORI_IMPL_INDEX_ROUTE=c` before starting the daemon to use the C
+selector. C owns the proofs and executes the selected route with either
+selector. Set `MORI_IMPL_INDEX_MANIFEST=rust` to select the Rust exact
 manifest comparison independently.
 
 ### Full-Build Scheduling
@@ -483,19 +483,17 @@ the backend. The default driver is C.
 
 ### Named Watch Reconciliation
 
-Set `MORI_IMPL_NAMED_WATCH=rust` when starting a permanent daemon to select
-the Rust reconciler for named watch snapshots. It validates the complete
-snapshot before applying it and rolls back additions if registration fails.
+The linked daemon uses Rust to reconcile named watch snapshots. It validates
+the full snapshot before applying it and rolls back additions if registration
+fails. Set `MORI_IMPL_NAMED_WATCH=c` at startup to use the C reconciler.
 The debug log event `daemon.named_watch.reconcile` identifies the backend.
-C remains the default.
 
 ### Provider Repair Recovery
 
-On a permanent daemon with provider repair enabled, set
-`MORI_IMPL_REPAIR_RECOVERY=rust` at startup to opt into the Rust recovery
-scheduler. The daemon log event `cross_repo.recovery_driver` identifies
-the backend. Both schedulers use the same saved graph state, mutation
-lease, and native repair operations. The C scheduler remains the default.
+On a permanent daemon, `MORI_PROVIDER_REPAIR=1` enables automatic provider
+repair. The linked daemon schedules recovery in Rust. Set
+`MORI_IMPL_REPAIR_RECOVERY=c` at startup to use the C scheduler.
+The log event `cross_repo.recovery_driver` identifies the backend.
 
 ### GraphQL SDL Extraction
 

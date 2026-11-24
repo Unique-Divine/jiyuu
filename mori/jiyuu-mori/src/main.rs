@@ -47,6 +47,9 @@ mod full_build_driver;
 mod importance;
 
 #[cfg(any(feature = "c-backend", test))]
+mod go_results;
+
+#[cfg(any(feature = "c-backend", test))]
 mod repair_recovery;
 
 #[cfg(any(feature = "c-backend", test))]

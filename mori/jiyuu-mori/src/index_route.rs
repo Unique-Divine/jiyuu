@@ -81,8 +81,8 @@ unsafe extern "C" {
 
 #[cfg(not(test))]
 pub(crate) unsafe fn register() {
-    if std::env::var_os("MORI_IMPL_INDEX_ROUTE").as_deref()
-        == Some(std::ffi::OsStr::new("rust"))
+    if std::env::var_os("MORI_IMPL_INDEX_ROUTE")
+        .is_none_or(|selector| selector == "rust")
     {
         // SAFETY: startup registration precedes all C workers. Both
         // callbacks stay valid for the process lifetime.
