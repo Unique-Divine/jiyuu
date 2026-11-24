@@ -4433,25 +4433,6 @@ static int full_stage_write(cbm_full_build_t *run) {
     return rc;
 }
 
-static int run_full_build_c(cbm_full_build_t *run) {
-    int rc = full_structure(run);
-    if (rc != 0)
-        return rc;
-    int workers = full_workers(run);
-    rc = full_extract(run, workers, workers > 1 && run->file_count > MIN_FILES_FOR_PARALLEL);
-    if (rc != 0)
-        return rc;
-    rc = full_tests(run);
-    if (rc != 0)
-        return rc;
-    rc = full_history(run);
-    if (rc != 0)
-        return rc;
-    full_predump(run);
-    rc = full_fence(run);
-    return rc != 0 ? rc : full_stage_write(run);
-}
-
 static cbm_full_build_driver_fn full_build_driver;
 
 void cbm_pipeline_set_full_build_driver(cbm_full_build_driver_fn driver) {
@@ -4487,7 +4468,12 @@ static int run_full_build(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx, const cbm_
                      itoa_buf(file_count));
         rc = full_build_driver(&run, &ops, file_count, MIN_FILES_FOR_PARALLEL);
     } else {
-        rc = run_full_build_c(&run);
+#ifdef CBM_WITHOUT_C_INDEX_DRIVERS
+        cbm_log_error("pipeline.full_build_driver", "reason", "rust_driver_unavailable");
+        rc = CBM_PIPELINE_ABORT_PRESERVE_DB;
+#else
+        rc = cbm_pipeline_full_build_reference(&run, &ops, file_count, MIN_FILES_FOR_PARALLEL);
+#endif
     }
     full_release_stem_marks(&run); /* structure may have returned before extraction */
     return rc;
@@ -5345,37 +5331,6 @@ static int source_publish_commit(cbm_source_publish_t *run) {
     return export_after_publish(p, run->final_path);
 }
 
-static int run_source_publish_c(cbm_source_publish_t *run, int rc, bool live_noop) {
-    if (rc != 0) {
-        return rc;
-    }
-    if (source_publish_cancelled(run)) {
-        return CBM_PIPELINE_ABORT_PRESERVE_DB;
-    }
-    if (live_noop) {
-        return source_publish_finish_noop(run);
-    }
-    if (run->final_existed && !source_publish_relink(run)) {
-        return source_publish_cancelled(run) ? CBM_PIPELINE_ABORT_PRESERVE_DB
-                                             : CBM_PIPELINE_PERSIST_FAILED;
-    }
-    if (!source_publish_seal(run)) {
-        return CBM_PIPELINE_PERSIST_FAILED;
-    }
-    source_publish_before_hook(run);
-    if (source_publish_cancelled(run)) {
-        return CBM_PIPELINE_ABORT_PRESERVE_DB;
-    }
-    /* A hook can reopen SQLite in WAL mode. Install a standalone main file. */
-    if (!source_publish_seal(run)) {
-        return CBM_PIPELINE_PERSIST_FAILED;
-    }
-    if (!source_publish_config_matches(run) || !source_publish_claim_lease(run)) {
-        return CBM_PIPELINE_ABORT_PRESERVE_DB;
-    }
-    return source_publish_commit(run);
-}
-
 static cbm_source_publish_fn source_publish_driver;
 
 void cbm_pipeline_set_source_publish(cbm_source_publish_fn publish) {
@@ -5400,7 +5355,15 @@ static int run_source_publish(cbm_source_publish_t *run, int rc, bool live_noop)
                      itoa_buf(rc));
         return source_publish_driver(run, &ops, rc, live_noop, run->final_existed);
     }
-    return run_source_publish_c(run, rc, live_noop);
+#ifdef CBM_WITHOUT_C_INDEX_DRIVERS
+    if (rc != 0) {
+        return rc;
+    }
+    cbm_log_error("pipeline.source_publish", "reason", "rust_driver_unavailable");
+    return CBM_PIPELINE_ABORT_PRESERVE_DB;
+#else
+    return cbm_pipeline_source_publish_reference(run, &ops, rc, live_noop, run->final_existed);
+#endif
 }
 
 int cbm_pipeline_run(cbm_pipeline_t *p) {

@@ -52,6 +52,9 @@ mod repair_recovery;
 #[cfg(any(feature = "c-backend", test))]
 mod named_watch;
 
+#[cfg(any(feature = "c-backend", test))]
+mod job_recovery;
+
 #[cfg(all(feature = "c-backend", not(test)))]
 mod snippet_window;
 
