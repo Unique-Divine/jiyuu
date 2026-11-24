@@ -90,8 +90,9 @@ unsafe extern "C" {
 /// Register before any daemon thread can use the callback.
 #[cfg(not(test))]
 pub unsafe fn register() {
-    if std::env::var_os("MORI_IMPL_NAMED_WATCH").as_deref()
-        == Some(OsStr::new("rust"))
+    if std::env::var_os("MORI_IMPL_NAMED_WATCH")
+        .as_deref()
+        .is_none_or(|value| value == OsStr::new("rust"))
     {
         // SAFETY: the caller guarantees startup registration.
         unsafe { cbm_daemon_application_set_named_watch_driver(reconcile) };

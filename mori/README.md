@@ -483,19 +483,17 @@ the backend. The default driver is C.
 
 ### Named Watch Reconciliation
 
-Set `MORI_IMPL_NAMED_WATCH=rust` when starting a permanent daemon to select
-the Rust reconciler for named watch snapshots. It validates the complete
-snapshot before applying it and rolls back additions if registration fails.
+The linked daemon uses Rust to reconcile named watch snapshots. It validates
+the full snapshot before applying it and rolls back additions if registration
+fails. Set `MORI_IMPL_NAMED_WATCH=c` at startup to use the C reconciler.
 The debug log event `daemon.named_watch.reconcile` identifies the backend.
-C remains the default.
 
 ### Provider Repair Recovery
 
-On a permanent daemon with provider repair enabled, set
-`MORI_IMPL_REPAIR_RECOVERY=rust` at startup to opt into the Rust recovery
-scheduler. The daemon log event `cross_repo.recovery_driver` identifies
-the backend. Both schedulers use the same saved graph state, mutation
-lease, and native repair operations. The C scheduler remains the default.
+On a permanent daemon, `MORI_PROVIDER_REPAIR=1` enables automatic provider
+repair. The linked daemon schedules recovery in Rust. Set
+`MORI_IMPL_REPAIR_RECOVERY=c` at startup to use the C scheduler.
+The log event `cross_repo.recovery_driver` identifies the backend.
 
 ### GraphQL SDL Extraction
 
