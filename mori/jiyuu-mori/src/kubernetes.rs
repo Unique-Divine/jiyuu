@@ -1,5 +1,8 @@
 //! Kubernetes pass sequencing and graph resolution over native extraction facts.
 
+use super::native_graph_buffer::{
+    Node, cbm_gbuf_find_by_id, cbm_gbuf_find_by_label,
+};
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::ptr;
@@ -77,18 +80,6 @@ struct Member {
 // cbm_gbuf_node_t. Nodes retain their addresses for the duration of the
 // resolution phases; Route upserts touch a separate label index.
 #[repr(C)]
-struct Node {
-    id: i64,
-    label: *const c_char,
-    name: *const c_char,
-    qualified_name: *const c_char,
-    file: *const c_char,
-    start_line: c_int,
-    end_line: c_int,
-    properties: *const c_char,
-}
-
-#[repr(C)]
 struct Ops {
     cancelled: unsafe extern "C" fn(*mut c_void) -> bool,
     prepare: unsafe extern "C" fn(*mut c_void, c_int, c_int),
@@ -119,13 +110,6 @@ struct Ops {
 }
 
 unsafe extern "C" {
-    fn cbm_gbuf_find_by_id(graph: *mut c_void, id: i64) -> *const Node;
-    fn cbm_gbuf_find_by_label(
-        graph: *mut c_void,
-        label: *const c_char,
-        nodes: *mut *const *const Node,
-        count: *mut c_int,
-    ) -> c_int;
     fn cbm_gbuf_insert_edge(
         graph: *mut c_void,
         source: i64,
@@ -190,7 +174,7 @@ impl Node {
 
     fn namespace(&self, deploy: bool) -> &[u8] {
         if deploy
-            && let Some(properties) = unsafe { string(self.properties) }
+            && let Some(properties) = unsafe { string(self.properties_json) }
             && let Some(key) =
                 after_marker(properties.to_bytes(), b"\"obj_key\":\"")
         {
@@ -316,7 +300,7 @@ impl Pass<'_> {
             let node = unsafe { &*raw };
             let mut one = Member::default();
             let members =
-                self.members(node.file, Scope::ExplicitBuild, &mut one);
+                self.members(node.file_path, Scope::ExplicitBuild, &mut one);
             if members.iter().all(|m| m.namespace.is_null()) {
                 continue;
             }
@@ -355,9 +339,11 @@ impl Pass<'_> {
             let Some(node) = self.node(record.id) else {
                 continue;
             };
-            for scope in
-                self.members(node.file, Scope::Build, &mut Member::default())
-            {
+            for scope in self.members(
+                node.file_path,
+                Scope::Build,
+                &mut Member::default(),
+            ) {
                 let postings = index.entry(scope.bundle).or_default();
                 for &pair in record_pairs(record) {
                     let ids =
@@ -381,12 +367,12 @@ impl Pass<'_> {
             let Some(source) = self.node(selector.id) else {
                 continue;
             };
-            let Some(source_file) = (unsafe { string(source.file) }) else {
+            let Some(source_file) = (unsafe { string(source.file_path) }) else {
                 continue;
             };
             let mut source_one = Member::default();
             let scopes =
-                self.members(source.file, Scope::Build, &mut source_one);
+                self.members(source.file_path, Scope::Build, &mut source_one);
             let wanted = record_pairs(selector);
             candidates.clear();
             for scope in scopes {
@@ -423,7 +409,7 @@ impl Pass<'_> {
                     continue;
                 };
                 let (Some(name), Some(file)) =
-                    (unsafe { (string(target.name), string(target.file)) })
+                    (unsafe { (string(target.name), string(target.file_path)) })
                 else {
                     continue;
                 };
@@ -431,8 +417,11 @@ impl Pass<'_> {
                     unsafe { CStr::from_ptr(workload.namespace.as_ptr()) }
                         .to_bytes();
                 let mut target_one = Member::default();
-                let target_scopes =
-                    self.members(target.file, Scope::Build, &mut target_one);
+                let target_scopes = self.members(
+                    target.file_path,
+                    Scope::Build,
+                    &mut target_one,
+                );
                 if share_namespace(
                     scopes,
                     target_scopes,
@@ -511,10 +500,10 @@ impl Pass<'_> {
         deploys: bool,
     ) {
         let mut one = Member::default();
-        let scopes = self.members(node.file, Scope::Build, &mut one);
+        let scopes = self.members(node.file_path, Scope::Build, &mut one);
         let mut deploy_one = Member::default();
         let deploy = if deploys {
-            self.members(node.file, Scope::Deploy, &mut deploy_one)
+            self.members(node.file_path, Scope::Deploy, &mut deploy_one)
         } else {
             &[]
         };
@@ -566,7 +555,7 @@ impl Pass<'_> {
         cluster: bool,
     ) -> bool {
         if target.id == source.id
-            || target.file.is_null()
+            || target.file_path.is_null()
             || unsafe { string(target.label) } != Some(c"Resource")
         {
             return false;
@@ -578,8 +567,8 @@ impl Pass<'_> {
             let mut src_one = Member::default();
             let mut tgt_one = Member::default();
             share_namespace(
-                self.members(source.file, scope, &mut src_one),
-                self.members(target.file, scope, &mut tgt_one),
+                self.members(source.file_path, scope, &mut src_one),
+                self.members(target.file_path, scope, &mut tgt_one),
                 source.namespace(deploy),
                 target.namespace(deploy),
                 explicit,
@@ -602,8 +591,9 @@ impl Pass<'_> {
         let mut found = Vec::new();
         let mut matches = Vec::new();
         for reference in refs {
-            let source =
-                self.node(reference.source).filter(|n| !n.file.is_null());
+            let source = self
+                .node(reference.source)
+                .filter(|n| !n.file_path.is_null());
             let from = if reference.route.is_null() {
                 reference.source
             } else {
@@ -633,15 +623,15 @@ impl Pass<'_> {
                 continue;
             };
             let name = type_key(kind, name, 1023);
-            self.find(&index, source.file, &name, true, &mut found);
+            self.find(&index, source.file_path, &name, true, &mut found);
             let cluster = unsafe { (self.ops.cluster_scoped)(reference.kind) };
-            let source_file = unsafe { CStr::from_ptr(source.file) };
+            let source_file = unsafe { CStr::from_ptr(source.file_path) };
             matches.clear();
             for target in found.iter().filter_map(|&id| self.node(id)) {
                 counts.candidates += 1;
                 if self.ref_matches(reference, source, target, cluster) {
-                    let own =
-                        unsafe { CStr::from_ptr(target.file) } == source_file;
+                    let own = unsafe { CStr::from_ptr(target.file_path) }
+                        == source_file;
                     matches.push((target.id, own));
                 }
             }
@@ -701,10 +691,10 @@ impl Pass<'_> {
             };
             let key = &key[..end.min(511)];
             let Some(every) = all.get(key) else { continue };
-            if node.file.is_null() {
+            if node.file_path.is_null() {
                 continue;
             }
-            self.find(&beside, node.file, key, false, &mut found);
+            self.find(&beside, node.file_path, key, false, &mut found);
             let candidates = if found.is_empty() { every } else { &found };
             counts.candidates += candidates.len() as u64;
             for &id in candidates {
@@ -881,10 +871,10 @@ mod tests {
             label: c"Resource".as_ptr(),
             name: c"Service/api".as_ptr(),
             qualified_name: c"repo.api::core/Service/dev/api".as_ptr(),
-            file: c"api.yaml".as_ptr(),
+            file_path: c"api.yaml".as_ptr(),
             start_line: 1,
             end_line: 5,
-            properties: c"{\"obj_key\":\"core/Service/?/api\"}".as_ptr(),
+            properties_json: c"{\"obj_key\":\"core/Service/?/api\"}".as_ptr(),
         };
         assert_eq!(node.namespace(false), b"dev");
         assert_eq!(node.namespace(true), b"");
