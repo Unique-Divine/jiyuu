@@ -47,7 +47,7 @@ mod mcp_methods;
 #[cfg(feature = "native-engine-abi")]
 pub mod startup;
 
-#[cfg(feature = "c-backend")]
+#[cfg(feature = "native-engine-abi")]
 #[path = "ui/http_transport.rs"]
 mod ui_http_transport;
 

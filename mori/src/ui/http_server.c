@@ -1,7 +1,7 @@
 /*
  * http_server.c — Routing + endpoint handlers for the graph UI.
  *
- * Transport (sockets, parsing, limits) lives in httpd.c; this file owns
+ * The Rust HTTP transport owns sockets, parsing and limits; this file owns
  * the routes and their handlers:
  *   GET /             → embedded index.html
  *   GET /assets/...   → embedded JS/CSS
@@ -10,7 +10,7 @@
  *   GET/POST /api/... → UI support endpoints (layout, index, browse, …)
  *   *                 → 404
  *
- * Runs in a background pthread. Binds to 127.0.0.1 only (see httpd.c).
+ * Runs in a background pthread. Binds to 127.0.0.1 only (see the Rust transport).
  * Has its own cbm_mcp_server_t with a separate SQLite connection (WAL reader).
  */
 #include "ui/http_server.h"
@@ -76,25 +76,6 @@
 #ifdef __FreeBSD__
 #include <sys/types.h>
 #include <sys/sysctl.h>
-#endif
-
-#ifdef CBM_UI_RUST_TRANSPORT
-#include "ui/http_transport.h"
-typedef mori_ui_http_transport_t ui_listener_t;
-#define ui_listener_bind mori_ui_http_bind
-#define ui_listener_port mori_ui_http_port
-#define ui_listener_stop mori_ui_http_stop
-#define ui_listener_free mori_ui_http_free
-#define ui_listener_activity mori_ui_http_activity
-#define ui_listener_set_receive_ms mori_ui_http_set_receive_ms
-#else
-typedef cbm_httpd_t ui_listener_t;
-#define ui_listener_bind cbm_httpd_listen
-#define ui_listener_port cbm_httpd_port
-#define ui_listener_stop cbm_httpd_interrupt
-#define ui_listener_free cbm_httpd_close
-#define ui_listener_activity cbm_httpd_activity_for_test
-#define ui_listener_set_receive_ms cbm_httpd_set_recv_deadline_ms
 #endif
 
 /* ── Constants ────────────────────────────────────────────────── */
@@ -262,7 +243,7 @@ typedef struct {
 } index_job_t;
 
 struct cbm_http_server {
-    ui_listener_t *listener;
+    mori_ui_http_transport_t *listener;
     cbm_mcp_server_t *mcp;       /* own MCP server instance (read-only) */
     struct cbm_watcher *watcher; /* external watcher ref (not owned) */
     cbm_http_index_executor_fn index_executor;
@@ -3525,8 +3506,8 @@ static cbm_http_server_t *http_server_new(int port, bool read_only) {
     cbm_mcp_server_set_background_tasks(srv->mcp, false);
     cbm_mcp_server_set_index_executor(srv->mcp, http_read_only_index_rejected, srv);
 
-    /* Both transports bind to IPv4 loopback. */
-    srv->listener = ui_listener_bind(port);
+    /* The transport binds to IPv4 loopback. */
+    srv->listener = mori_ui_http_bind(port);
     if (!srv->listener) {
         char port_str[16];
         snprintf(port_str, sizeof(port_str), "%d", port);
@@ -3537,7 +3518,7 @@ static cbm_http_server_t *http_server_new(int port, bool read_only) {
         return NULL;
     }
 
-    srv->port = ui_listener_port(srv->listener);
+    srv->port = mori_ui_http_port(srv->listener);
     srv->listener_ok = true;
 
     /* Standalone startup must reach its signal wait even if stderr blocks. */
@@ -3575,7 +3556,7 @@ bool cbm_http_server_free(cbm_http_server_t *srv) {
             srv->index_jobs[i].thread_started = false;
         }
     }
-    if (!ui_listener_free(srv->listener))
+    if (!mori_ui_http_free(srv->listener))
         return false;
     cbm_atlas_impact_analysis_shutdown();
     cbm_mcp_server_free(srv->mcp);
@@ -3592,7 +3573,7 @@ void cbm_http_server_stop(cbm_http_server_t *srv) {
             (void)cbm_mcp_server_cancel_active(srv->mcp);
             cbm_atlas_impact_analysis_cancel();
         }
-        ui_listener_stop(srv->listener);
+        mori_ui_http_stop(srv->listener);
     }
 }
 
@@ -3619,7 +3600,6 @@ static bool standalone_git_cancelled(void *context) {
 }
 #endif
 
-#ifdef CBM_UI_RUST_TRANSPORT
 static void rust_dispatch(void *context, const cbm_http_req_t *req, cbm_ui_http_reply_fn reply,
                           void *reply_context) {
     cbm_http_server_dispatch(context, req, reply, reply_context);
@@ -3633,53 +3613,6 @@ static void rust_finish_request(void *context, const cbm_http_req_t *req, int st
                              elapsed_ms, req ? req->body_len : 0, response_bytes);
     cbm_mem_class_flush_thread();
 }
-
-static void run_transport(cbm_http_server_t *srv) {
-    mori_ui_http_run(srv->listener, srv, rust_dispatch, rust_finish_request);
-}
-#else
-static void socket_reply(void *context, int status, const char *headers, const void *body,
-                         size_t body_len, int send_deadline_ms) {
-    cbm_http_conn_t *conn = context;
-    if (send_deadline_ms > 0)
-        cbm_http_conn_set_send_deadline_ms(conn, send_deadline_ms);
-    cbm_http_reply_buf(conn, status, headers, body, body_len);
-}
-
-static void run_transport(cbm_http_server_t *srv) {
-    while (!atomic_load(&srv->stop_flag)) {
-        cbm_http_conn_t *conn = cbm_httpd_accept(srv->listener, 200);
-        if (!conn)
-            continue; /* timeout — re-check stop flag */
-
-        uint64_t request_start_ms = cbm_now_ms();
-        cbm_http_req_t req;
-        int rc = cbm_httpd_read_request(conn, &req);
-        if (rc == 0) {
-            if (atomic_load(&srv->stop_flag)) {
-                cbm_http_req_free(&req);
-                cbm_httpd_conn_close(conn);
-                break;
-            }
-            cbm_http_server_dispatch(srv, &req, socket_reply, conn);
-            cbm_log_http_request("graph_ui", req.method, req.path, cbm_http_conn_status(conn),
-                                 (int64_t)(cbm_now_ms() - request_start_ms), req.body_len,
-                                 cbm_http_conn_response_bytes(conn));
-            cbm_http_req_free(&req);
-        } else if (rc > 0) {
-            /* Parse/transport error with a known HTTP status (400/408/411/413/431).
-             * No CORS reflection here — the request was never parsed. */
-            cbm_http_replyf(conn, rc, "", "bad request");
-            cbm_log_http_request("graph_ui", "", "", cbm_http_conn_status(conn),
-                                 (int64_t)(cbm_now_ms() - request_start_ms), 0,
-                                 cbm_http_conn_response_bytes(conn));
-        }
-        cbm_httpd_conn_close(conn);
-        /* Retained response caches can be released by a different thread. */
-        cbm_mem_class_flush_thread();
-    }
-}
-#endif
 
 void cbm_http_server_run(cbm_http_server_t *srv) {
     if (!srv)
@@ -3698,7 +3631,7 @@ void cbm_http_server_run(cbm_http_server_t *srv) {
     if (srv->read_only)
         cbm_git_context_set_capture_cancel(standalone_git_cancelled, srv);
 #endif
-    run_transport(srv);
+    mori_ui_http_run(srv->listener, srv, rust_dispatch, rust_finish_request);
 #ifndef _WIN32
     if (srv->read_only)
         cbm_git_context_set_capture_cancel(NULL, NULL);
@@ -3708,7 +3641,7 @@ void cbm_http_server_run(cbm_http_server_t *srv) {
 }
 
 cbm_httpd_activity_t cbm_http_server_activity_for_test(cbm_http_server_t *srv) {
-    return srv ? ui_listener_activity(srv->listener) : CBM_HTTPD_ACTIVITY_IDLE;
+    return srv ? mori_ui_http_activity(srv->listener) : CBM_HTTPD_ACTIVITY_IDLE;
 }
 
 bool cbm_http_server_is_running(const cbm_http_server_t *srv) {
@@ -3721,7 +3654,7 @@ int cbm_http_server_port(const cbm_http_server_t *srv) {
 
 void cbm_http_server_set_recv_deadline_ms(cbm_http_server_t *srv, int ms) {
     if (srv && srv->listener_ok) {
-        ui_listener_set_receive_ms(srv->listener, ms);
+        mori_ui_http_set_receive_ms(srv->listener, ms);
     }
 }
 

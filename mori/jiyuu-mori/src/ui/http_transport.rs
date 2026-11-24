@@ -25,6 +25,7 @@ const READING: c_int = 1;
 const RESPONDING: c_int = 2;
 const RECEIVE_MS: c_int = 5000;
 const SEND_MS: c_int = 1000;
+const SEND_SLICE: usize = 64 * 1024;
 
 type Reply = unsafe extern "C" fn(
     *mut c_void,
@@ -77,7 +78,7 @@ impl NativeRequest {
             } else {
                 body.as_mut_ptr().cast()
             },
-            body_len: head.content_length,
+            body_len: body.len().saturating_sub(1),
         }
     }
 }
@@ -88,6 +89,8 @@ struct Transport {
     active_socket: Mutex<Option<Socket>>,
     port: u16,
     receive_ms: AtomicI32,
+    send_buffer_bytes: AtomicI32,
+    send_ms: AtomicI32,
     activity: AtomicI32,
 }
 
@@ -102,6 +105,8 @@ impl Transport {
             let socket = TcpSocket::new_v4()?;
             #[cfg(unix)]
             socket.set_reuseaddr(true)?;
+            #[cfg(windows)]
+            set_exclusive_address_use(&socket)?;
             socket.bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port).into())?;
             socket.listen(16)?
         };
@@ -112,6 +117,8 @@ impl Transport {
             active_socket: Mutex::new(None),
             port,
             receive_ms: AtomicI32::new(RECEIVE_MS),
+            send_buffer_bytes: AtomicI32::new(0),
+            send_ms: AtomicI32::new(SEND_MS),
             activity: AtomicI32::new(IDLE),
         })
     }
@@ -143,6 +150,10 @@ impl Transport {
                 let Ok(socket) = SockRef::from(&stream).try_clone() else {
                     continue;
                 };
+                let send_buffer = self.send_buffer_bytes.load(Ordering::Relaxed);
+                if send_buffer > 0 {
+                    let _ = socket.set_send_buffer_size(send_buffer as usize);
+                }
                 {
                     let mut active = self.active_socket.lock().unwrap();
                     if *stop.borrow() {
@@ -159,6 +170,7 @@ impl Transport {
                 serve_connection(
                     &mut stream,
                     duration,
+                    millis(self.send_ms.load(Ordering::Relaxed)),
                     &mut stop,
                     &self.activity,
                     callbacks,
@@ -179,6 +191,34 @@ impl Transport {
     }
 }
 
+#[cfg(windows)]
+fn set_exclusive_address_use(socket: &TcpSocket) -> io::Result<()> {
+    use std::os::windows::io::AsRawSocket;
+    use windows_sys::Win32::Networking::WinSock::{
+        SO_EXCLUSIVEADDRUSE, SOCKET_ERROR, SOL_SOCKET, WSAGetLastError,
+        setsockopt,
+    };
+
+    // Winsock's SO_REUSEADDR permits rebinding an active listener. Require
+    // the exclusive option before binding instead, as the C transport did.
+    let enabled: c_int = 1;
+    // SAFETY: the socket is live and enabled is an initialized Winsock BOOL.
+    let result = unsafe {
+        setsockopt(
+            socket.as_raw_socket() as usize,
+            SOL_SOCKET,
+            SO_EXCLUSIVEADDRUSE,
+            ptr::from_ref(&enabled).cast(),
+            size_of::<c_int>() as c_int,
+        )
+    };
+    if result == SOCKET_ERROR {
+        // SAFETY: read the Winsock error on the thread that called setsockopt.
+        return Err(io::Error::from_raw_os_error(unsafe { WSAGetLastError() }));
+    }
+    Ok(())
+}
+
 struct Callbacks {
     context: *mut c_void,
     dispatch: Dispatch,
@@ -188,6 +228,7 @@ struct Callbacks {
 async fn serve_connection(
     stream: &mut (impl AsyncRead + AsyncWrite + Unpin),
     duration: Duration,
+    send_timeout: Duration,
     stop: &mut watch::Receiver<bool>,
     activity: &AtomicI32,
     callbacks: Callbacks,
@@ -233,7 +274,7 @@ async fn serve_connection(
         tokio::select! {
             biased;
             _ = stop.changed() => {}
-            _ = timeout(response.write_timeout, response.write(stream)) => {}
+            _ = timeout(response.write_timeout.unwrap_or(send_timeout), response.write(stream)) => {}
         }
         (response.status, response.body.len())
     } else {
@@ -305,7 +346,7 @@ struct Response {
     status: c_int,
     headers: Vec<u8>,
     body: Vec<u8>,
-    write_timeout: Duration,
+    write_timeout: Option<Duration>,
 }
 
 impl Response {
@@ -314,7 +355,7 @@ impl Response {
             status,
             headers: Vec::new(),
             body: b"bad request".to_vec(),
-            write_timeout: millis(SEND_MS),
+            write_timeout: None,
         }
     }
 
@@ -351,7 +392,12 @@ impl Response {
         head.extend_from_slice(&self.headers);
         head.extend_from_slice(last.as_bytes());
         stream.write_all(&head).await?;
-        stream.write_all(&self.body).await
+        // Bound each write so Winsock cannot queue the full body into AFD
+        // buffers before the send deadline or stop signal can be observed.
+        for chunk in self.body.chunks(SEND_SLICE) {
+            stream.write_all(chunk).await?;
+        }
+        Ok(())
     }
 }
 
@@ -377,10 +423,9 @@ unsafe extern "C" fn capture_reply(
         unsafe { std::slice::from_raw_parts(body.cast::<u8>(), body_len) }
             .to_vec()
     };
-    let write_timeout = millis(match send_deadline_ms {
-        1..=5000 => send_deadline_ms,
-        _ => SEND_MS,
-    });
+    let write_timeout = (1..=5000)
+        .contains(&send_deadline_ms)
+        .then(|| millis(send_deadline_ms));
     *response = Some(Response {
         status,
         headers,
@@ -445,6 +490,59 @@ unsafe extern "C" fn mori_ui_http_set_receive_ms(
     if ms > 0 {
         // SAFETY: the host passes the live owner returned by bind.
         unsafe { (*transport).receive_ms.store(ms, Ordering::Relaxed) };
+    }
+}
+
+/// Test entry point for the native suite's request-framing matrix.
+#[unsafe(no_mangle)]
+unsafe extern "C" fn mori_ui_http_parse_head_for_test(
+    data: *const u8,
+    len: usize,
+    request: *mut NativeRequest,
+    body_offset: *mut usize,
+    content_length: *mut usize,
+) -> c_int {
+    // SAFETY: the native test passes three live output slots and len readable
+    // bytes. Permit an empty input without creating a slice from a null pointer.
+    let data = if len == 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(data, len) }
+    };
+    unsafe {
+        body_offset.write(0);
+        content_length.write(0);
+    }
+    match HeadScanner::default()
+        .scan(data)
+        .and_then(|end| end.map(|end| parse_head(&data[..end])).transpose())
+    {
+        Ok(Some(head)) => {
+            unsafe {
+                body_offset.write(head.body_offset);
+                content_length.write(head.content_length);
+                request.write(NativeRequest::new(head, &mut []));
+            }
+            0
+        }
+        Ok(None) => -1,
+        Err(error) => error.status().into(),
+    }
+}
+
+#[unsafe(no_mangle)]
+unsafe extern "C" fn mori_ui_http_set_send_options_for_test(
+    transport: *const Transport,
+    buffer_bytes: c_int,
+    deadline_ms: c_int,
+) {
+    // SAFETY: the native test passes a live listener and configures it before run.
+    let transport = unsafe { &*transport };
+    transport
+        .send_buffer_bytes
+        .store(buffer_bytes, Ordering::Relaxed);
+    if deadline_ms > 0 {
+        transport.send_ms.store(deadline_ms, Ordering::Relaxed);
     }
 }
 
@@ -545,6 +643,7 @@ mod tests {
                     serve_connection(
                         &mut host,
                         receive_deadline,
+                        millis(SEND_MS),
                         &mut stop,
                         &activity,
                         callbacks,
@@ -618,6 +717,7 @@ mod tests {
                 let server = serve_connection(
                     &mut host,
                     Duration::from_secs(1),
+                    millis(SEND_MS),
                     &mut stop,
                     &activity,
                     callbacks,

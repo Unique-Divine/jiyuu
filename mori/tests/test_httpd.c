@@ -2,7 +2,7 @@
  * test_httpd.c — Tests for the first-party graph-UI HTTP server.
  *
  * Two layers:
- *   1. Parser/helper unit tests against httpd.h's pure functions
+ *   1. Request framing and helper tests against the Rust transport and UI router
  *      (no sockets): request-line parsing, strict CRLF, Content-Length
  *      edge cases, chunked rejection, NUL/percent-decode rules,
  *      query-param decoding, route pattern matching.
@@ -26,7 +26,8 @@
 #include "../src/ui/http_server.h"
 #include "test_framework.h"
 #include "test_helpers.h"
-#include "ui/httpd.h"
+#include "ui/http_query.h"
+#include "ui/http_routes.h"
 #include "ui/activity.h"
 #include "ui/atlas.h"
 #include "ui/layout3d.h"
@@ -220,7 +221,7 @@ TEST(httpd_parse_simple_get) {
                       "\r\n";
     cbm_http_req_t req;
     size_t body_off = 0, clen = 99;
-    int rc = cbm_http_parse_head(raw, strlen(raw), &req, &body_off, &clen);
+    int rc = mori_ui_http_parse_head_for_test(raw, strlen(raw), &req, &body_off, &clen);
     ASSERT_EQ(rc, 0);
     ASSERT_STR_EQ(req.method, "GET");
     ASSERT_STR_EQ(req.path, "/api/logs");
@@ -240,7 +241,8 @@ TEST(httpd_parse_security_headers_and_rejects_duplicates) {
                       "Content-Length: 0\r\n\r\n";
     cbm_http_req_t req;
     size_t body_off = 0, content_length = 0;
-    ASSERT_EQ(cbm_http_parse_head(raw, strlen(raw), &req, &body_off, &content_length), 0);
+    ASSERT_EQ(mori_ui_http_parse_head_for_test(raw, strlen(raw), &req, &body_off, &content_length),
+              0);
     ASSERT_STR_EQ(req.host, "127.0.0.1:9749");
     ASSERT_STR_EQ(req.content_type, "application/json");
 
@@ -251,8 +253,8 @@ TEST(httpd_parse_security_headers_and_rejects_duplicates) {
          "application/json\r\n\r\n"),
     };
     for (size_t i = 0; i < sizeof(duplicates) / sizeof(duplicates[0]); i++) {
-        ASSERT_EQ(cbm_http_parse_head(duplicates[i], strlen(duplicates[i]), &req, &body_off,
-                                      &content_length),
+        ASSERT_EQ(mori_ui_http_parse_head_for_test(duplicates[i], strlen(duplicates[i]), &req,
+                                                   &body_off, &content_length),
                   400);
     }
     PASS();
@@ -266,7 +268,7 @@ TEST(httpd_parse_post_with_body_offset) {
                       "{\"a\":1}";
     cbm_http_req_t req;
     size_t body_off = 0, clen = 0;
-    int rc = cbm_http_parse_head(raw, strlen(raw), &req, &body_off, &clen);
+    int rc = mori_ui_http_parse_head_for_test(raw, strlen(raw), &req, &body_off, &clen);
     ASSERT_EQ(rc, 0);
     ASSERT_STR_EQ(req.method, "POST");
     ASSERT_STR_EQ(req.path, "/rpc");
@@ -282,7 +284,7 @@ TEST(httpd_parse_origin_case_insensitive) {
                       "\r\n";
     cbm_http_req_t req;
     size_t body_off = 0, clen = 0;
-    ASSERT_EQ(cbm_http_parse_head(raw, strlen(raw), &req, &body_off, &clen), 0);
+    ASSERT_EQ(mori_ui_http_parse_head_for_test(raw, strlen(raw), &req, &body_off, &clen), 0);
     ASSERT_STR_EQ(req.origin, "http://127.0.0.1:9749");
     PASS();
 }
@@ -291,7 +293,7 @@ TEST(httpd_parse_rejects_bare_lf) {
     const char *raw = "GET / HTTP/1.1\nHost: x\n\n";
     cbm_http_req_t req;
     size_t body_off = 0, clen = 0;
-    ASSERT_EQ(cbm_http_parse_head(raw, strlen(raw), &req, &body_off, &clen), 400);
+    ASSERT_EQ(mori_ui_http_parse_head_for_test(raw, strlen(raw), &req, &body_off, &clen), 400);
     PASS();
 }
 
@@ -301,7 +303,7 @@ TEST(httpd_parse_rejects_chunked) {
                       "\r\n";
     cbm_http_req_t req;
     size_t body_off = 0, clen = 0;
-    ASSERT_EQ(cbm_http_parse_head(raw, strlen(raw), &req, &body_off, &clen), 411);
+    ASSERT_EQ(mori_ui_http_parse_head_for_test(raw, strlen(raw), &req, &body_off, &clen), 411);
     PASS();
 }
 
@@ -311,7 +313,7 @@ TEST(httpd_parse_rejects_oversized_content_length) {
              CBM_HTTP_MAX_BODY + 1);
     cbm_http_req_t req;
     size_t body_off = 0, clen = 0;
-    ASSERT_EQ(cbm_http_parse_head(raw, strlen(raw), &req, &body_off, &clen), 413);
+    ASSERT_EQ(mori_ui_http_parse_head_for_test(raw, strlen(raw), &req, &body_off, &clen), 413);
     PASS();
 }
 
@@ -319,10 +321,10 @@ TEST(httpd_parse_rejects_garbage_content_length) {
     const char *raw = "POST /rpc HTTP/1.1\r\nContent-Length: abc\r\n\r\n";
     cbm_http_req_t req;
     size_t body_off = 0, clen = 0;
-    ASSERT_EQ(cbm_http_parse_head(raw, strlen(raw), &req, &body_off, &clen), 400);
+    ASSERT_EQ(mori_ui_http_parse_head_for_test(raw, strlen(raw), &req, &body_off, &clen), 400);
 
     const char *neg = "POST /rpc HTTP/1.1\r\nContent-Length: -5\r\n\r\n";
-    ASSERT_EQ(cbm_http_parse_head(neg, strlen(neg), &req, &body_off, &clen), 400);
+    ASSERT_EQ(mori_ui_http_parse_head_for_test(neg, strlen(neg), &req, &body_off, &clen), 400);
     PASS();
 }
 
@@ -330,11 +332,11 @@ TEST(httpd_parse_rejects_percent00_in_target) {
     const char *raw = "GET /a%00b HTTP/1.1\r\n\r\n";
     cbm_http_req_t req;
     size_t body_off = 0, clen = 0;
-    ASSERT_EQ(cbm_http_parse_head(raw, strlen(raw), &req, &body_off, &clen), 400);
+    ASSERT_EQ(mori_ui_http_parse_head_for_test(raw, strlen(raw), &req, &body_off, &clen), 400);
 
     /* %00 hidden in the query string is rejected too */
     const char *q = "GET /ok?x=%00 HTTP/1.1\r\n\r\n";
-    ASSERT_EQ(cbm_http_parse_head(q, strlen(q), &req, &body_off, &clen), 400);
+    ASSERT_EQ(mori_ui_http_parse_head_for_test(q, strlen(q), &req, &body_off, &clen), 400);
     PASS();
 }
 
@@ -346,7 +348,7 @@ TEST(httpd_parse_rejects_raw_nul_in_head) {
     len += 13;
     cbm_http_req_t req;
     size_t body_off = 0, clen = 0;
-    ASSERT_EQ(cbm_http_parse_head(raw, len, &req, &body_off, &clen), 400);
+    ASSERT_EQ(mori_ui_http_parse_head_for_test(raw, len, &req, &body_off, &clen), 400);
     PASS();
 }
 
@@ -354,7 +356,8 @@ TEST(httpd_parse_incomplete_head_needs_more) {
     const char *raw = "GET /api/logs HTTP/1.1\r\nHost: x\r\n"; /* no CRLFCRLF yet */
     cbm_http_req_t req;
     size_t body_off = 0, clen = 0;
-    ASSERT_EQ(cbm_http_parse_head(raw, strlen(raw), &req, &body_off, &clen), CBM_HTTP_NEED_MORE);
+    ASSERT_EQ(mori_ui_http_parse_head_for_test(raw, strlen(raw), &req, &body_off, &clen),
+              CBM_HTTP_NEED_MORE);
     PASS();
 }
 
@@ -362,10 +365,10 @@ TEST(httpd_parse_rejects_missing_version) {
     const char *raw = "GET /\r\n\r\n";
     cbm_http_req_t req;
     size_t body_off = 0, clen = 0;
-    ASSERT_EQ(cbm_http_parse_head(raw, strlen(raw), &req, &body_off, &clen), 400);
+    ASSERT_EQ(mori_ui_http_parse_head_for_test(raw, strlen(raw), &req, &body_off, &clen), 400);
 
     const char *v2 = "GET / HTTP/2\r\n\r\n";
-    ASSERT_EQ(cbm_http_parse_head(v2, strlen(v2), &req, &body_off, &clen), 400);
+    ASSERT_EQ(mori_ui_http_parse_head_for_test(v2, strlen(v2), &req, &body_off, &clen), 400);
     PASS();
 }
 
@@ -378,7 +381,7 @@ TEST(httpd_parse_rejects_oversized_head) {
     memset(raw + 24, 'A', big - 24);
     cbm_http_req_t req;
     size_t body_off = 0, clen = 0;
-    int rc = cbm_http_parse_head(raw, big, &req, &body_off, &clen);
+    int rc = mori_ui_http_parse_head_for_test(raw, big, &req, &body_off, &clen);
     free(raw);
     ASSERT_EQ(rc, 431);
     PASS();
@@ -386,12 +389,12 @@ TEST(httpd_parse_rejects_oversized_head) {
 
 TEST(httpd_query_param_decode) {
     char buf[64];
-    ASSERT_TRUE(cbm_http_query_param("a=hello+world&b=%2Ffoo%2F", "a", buf, (int)sizeof(buf)));
+    ASSERT_TRUE(cbm_ui_http_query_param("a=hello+world&b=%2Ffoo%2F", "a", buf, (int)sizeof(buf)));
     ASSERT_STR_EQ(buf, "hello world");
-    ASSERT_TRUE(cbm_http_query_param("a=hello+world&b=%2Ffoo%2F", "b", buf, (int)sizeof(buf)));
+    ASSERT_TRUE(cbm_ui_http_query_param("a=hello+world&b=%2Ffoo%2F", "b", buf, (int)sizeof(buf)));
     ASSERT_STR_EQ(buf, "/foo/");
     /* uppercase + lowercase hex */
-    ASSERT_TRUE(cbm_http_query_param("p=%2fTmp%2F", "p", buf, (int)sizeof(buf)));
+    ASSERT_TRUE(cbm_ui_http_query_param("p=%2fTmp%2F", "p", buf, (int)sizeof(buf)));
     ASSERT_STR_EQ(buf, "/Tmp/");
     PASS();
 }
@@ -399,40 +402,33 @@ TEST(httpd_query_param_decode) {
 TEST(httpd_query_param_edge_cases) {
     char buf[8];
     /* missing param */
-    ASSERT_FALSE(cbm_http_query_param("a=1", "b", buf, (int)sizeof(buf)));
+    ASSERT_FALSE(cbm_ui_http_query_param("a=1", "b", buf, (int)sizeof(buf)));
     /* empty value (current server treats it as absent) */
-    ASSERT_FALSE(cbm_http_query_param("a=&b=2", "a", buf, (int)sizeof(buf)));
+    ASSERT_FALSE(cbm_ui_http_query_param("a=&b=2", "a", buf, (int)sizeof(buf)));
     /* value too large for buf */
-    ASSERT_FALSE(cbm_http_query_param("a=123456789", "a", buf, (int)sizeof(buf)));
+    ASSERT_FALSE(cbm_ui_http_query_param("a=123456789", "a", buf, (int)sizeof(buf)));
     /* decoded NUL rejected */
     char big[32];
-    ASSERT_FALSE(cbm_http_query_param("a=x%00y", "a", big, (int)sizeof(big)));
+    ASSERT_FALSE(cbm_ui_http_query_param("a=x%00y", "a", big, (int)sizeof(big)));
     /* name is a prefix of another name — must not match */
-    ASSERT_FALSE(cbm_http_query_param("abc=1", "ab", buf, (int)sizeof(buf)));
+    ASSERT_FALSE(cbm_ui_http_query_param("abc=1", "ab", buf, (int)sizeof(buf)));
     /* truncated percent escape */
-    ASSERT_FALSE(cbm_http_query_param("a=%2", "a", buf, (int)sizeof(buf)));
+    ASSERT_FALSE(cbm_ui_http_query_param("a=%2", "a", buf, (int)sizeof(buf)));
     PASS();
 }
 
 TEST(httpd_path_match_matrix) {
-    /* exact */
-    ASSERT_TRUE(cbm_http_path_match("/", "/"));
-    ASSERT_FALSE(cbm_http_path_match("/x", "/"));
-    ASSERT_TRUE(cbm_http_path_match("/rpc", "/rpc"));
-    ASSERT_FALSE(cbm_http_path_match("/rpc2", "/rpc"));
-    /* trailing-* prefix */
-    ASSERT_TRUE(cbm_http_path_match("/api/layout", "/api/layout*"));
-    ASSERT_TRUE(cbm_http_path_match("/assets/index-abc.js", "/assets/*"));
-    ASSERT_FALSE(cbm_http_path_match("/api/browse", "/api/layout*"));
-    /* raw path is matched — percent-encoded slash must NOT route */
-    ASSERT_FALSE(cbm_http_path_match("/api%2Fbrowse", "/api/browse*"));
-    ASSERT_FALSE(cbm_http_path_match("/api%2fbrowse", "/api/browse*"));
-    /* CORS origin patterns */
-    ASSERT_TRUE(cbm_http_path_match("http://localhost:5173", "http://localhost:*"));
-    ASSERT_TRUE(cbm_http_path_match("http://127.0.0.1:9749", "http://127.0.0.1:*"));
-    ASSERT_FALSE(cbm_http_path_match("http://evil.com", "http://localhost:*"));
-    ASSERT_FALSE(cbm_http_path_match("https://localhost:5173", "http://localhost:*"));
-    ASSERT_FALSE(cbm_http_path_match("http://localhost.evil.com:80", "http://localhost:*"));
+    ASSERT_EQ(cbm_ui_route_select("GET", "/", false), UI_ROUTE_HOME);
+    ASSERT_EQ(cbm_ui_route_select("GET", "/x", false), UI_ROUTE_ASSET);
+    ASSERT_EQ(cbm_ui_route_select("POST", "/rpc", false), UI_ROUTE_RPC);
+    ASSERT_EQ(cbm_ui_route_select("POST", "/rpc2", false), UI_ROUTE_ASSET);
+    ASSERT_EQ(cbm_ui_route_select("GET", "/api/layout", false), UI_ROUTE_LAYOUT);
+    ASSERT_EQ(cbm_ui_route_select("GET", "/api/layout/legacy", false), UI_ROUTE_LAYOUT);
+    ASSERT_EQ(cbm_ui_route_select("GET", "/api/layout/legacy", true), UI_ROUTE_ASSET);
+    ASSERT_EQ(cbm_ui_route_select("GET", "/assets/index-abc.js", false), UI_ROUTE_ASSET);
+    ASSERT_EQ(cbm_ui_route_select("GET", "/api/browse", false), UI_ROUTE_BROWSE);
+    ASSERT_EQ(cbm_ui_route_select("GET", "/api%2Fbrowse", false), UI_ROUTE_ASSET);
+    ASSERT_EQ(cbm_ui_route_select("GET", "/api%2fbrowse", false), UI_ROUTE_ASSET);
     PASS();
 }
 
@@ -554,38 +550,31 @@ TEST(httpd_deleted_self_spawn_path_follows_platform_ruling) {
 /* ── Transport integration (listener only) ────────────────────── */
 
 TEST(httpd_listen_ephemeral_port) {
-    cbm_httpd_t *d = cbm_httpd_listen(0);
+    mori_ui_http_transport_t *d = mori_ui_http_bind(0);
     ASSERT_NOT_NULL(d);
-    int port = cbm_httpd_port(d);
+    int port = mori_ui_http_port(d);
     ASSERT_GT(port, 0);
-    /* accept with a short timeout and no client → NULL, promptly */
-    cbm_http_conn_t *c = cbm_httpd_accept(d, 50);
-    ASSERT_NULL(c);
-    ASSERT_TRUE(cbm_httpd_close(d));
+    ASSERT_TRUE(mori_ui_http_free(d));
     PASS();
 }
 
 TEST(httpd_listen_port_collision_returns_null) {
-    cbm_httpd_t *d1 = cbm_httpd_listen(0);
+    mori_ui_http_transport_t *d1 = mori_ui_http_bind(0);
     ASSERT_NOT_NULL(d1);
-    cbm_httpd_t *d2 = cbm_httpd_listen(cbm_httpd_port(d1));
+    mori_ui_http_transport_t *d2 = mori_ui_http_bind(mori_ui_http_port(d1));
     ASSERT_NULL(d2);
-    ASSERT_TRUE(cbm_httpd_close(d1));
+    ASSERT_TRUE(mori_ui_http_free(d1));
     PASS();
 }
 
-TEST(httpd_close_refuses_while_connection_owns_listener) {
-    cbm_httpd_t *listener = cbm_httpd_listen(0);
+TEST(httpd_releases_unstarted_port) {
+    mori_ui_http_transport_t *listener = mori_ui_http_bind(0);
     ASSERT_NOT_NULL(listener);
-    th_sock_t client = th_connect(cbm_httpd_port(listener));
-    ASSERT_TRUE(client != TH_SOCK_BAD);
-    cbm_http_conn_t *connection = cbm_httpd_accept(listener, 1000);
-    ASSERT_NOT_NULL(connection);
-
-    ASSERT_FALSE(cbm_httpd_close(listener));
-    cbm_httpd_conn_close(connection);
-    th_sock_close(client);
-    ASSERT_TRUE(cbm_httpd_close(listener));
+    int port = mori_ui_http_port(listener);
+    ASSERT_TRUE(mori_ui_http_free(listener));
+    mori_ui_http_transport_t *replacement = mori_ui_http_bind(port);
+    ASSERT_NOT_NULL(replacement);
+    ASSERT_TRUE(mori_ui_http_free(replacement));
     PASS();
 }
 
@@ -686,15 +675,15 @@ static bool th_wait_http_server_activity(cbm_http_server_t *server, cbm_httpd_ac
     return cbm_http_server_activity_for_test(server) == expected;
 }
 
-static bool th_wait_httpd_activity(cbm_httpd_t *listener, cbm_httpd_activity_t expected,
-                                   uint32_t timeout_ms) {
+static bool th_wait_httpd_activity(mori_ui_http_transport_t *listener,
+                                   cbm_httpd_activity_t expected, uint32_t timeout_ms) {
     uint64_t deadline = cbm_now_ms() + timeout_ms;
     while (cbm_now_ms() < deadline) {
-        if (cbm_httpd_activity_for_test(listener) == expected)
+        if (mori_ui_http_activity(listener) == expected)
             return true;
         cbm_usleep(1000);
     }
-    return cbm_httpd_activity_for_test(listener) == expected;
+    return mori_ui_http_activity(listener) == expected;
 }
 
 typedef struct {
@@ -3258,52 +3247,66 @@ static void *th_http_stop_watchdog(void *opaque) {
 }
 
 typedef struct {
-    cbm_httpd_t *listener;
+    mori_ui_http_transport_t *listener;
     atomic_int accepted;
     atomic_int finished;
     int send_deadline_ms;
 } th_httpd_large_reply_t;
 
-static void *th_httpd_large_reply(void *opaque) {
-    th_httpd_large_reply_t *reply = opaque;
-    cbm_http_conn_t *connection = cbm_httpd_accept(reply->listener, 3000);
-    if (!connection) {
-        atomic_store(&reply->finished, 1);
-        return NULL;
-    }
+static void th_httpd_dispatch_large_reply(void *context, const cbm_http_req_t *request,
+                                          cbm_ui_http_reply_fn send, void *reply_context) {
+    (void)request;
+    th_httpd_large_reply_t *reply = context;
     atomic_store(&reply->accepted, 1);
-    if (reply->send_deadline_ms)
-        cbm_http_conn_set_send_deadline_ms(connection, reply->send_deadline_ms);
     size_t response_size = 8U * 1024U * 1024U;
     char *response = malloc(response_size);
     if (response) {
         memset(response, 'R', response_size);
-        cbm_http_reply_buf(connection, 200, "Content-Type: application/octet-stream\r\n", response,
-                           response_size);
+        send(reply_context, 200, "Content-Type: application/octet-stream\r\n", response,
+             response_size, reply->send_deadline_ms);
         free(response);
     }
-    cbm_httpd_conn_close(connection);
+}
+
+static void th_httpd_finish_large_reply(void *context, const cbm_http_req_t *request, int status,
+                                        int64_t elapsed_ms, size_t response_bytes) {
+    (void)request;
+    (void)status;
+    (void)elapsed_ms;
+    (void)response_bytes;
+    th_httpd_large_reply_t *reply = context;
     atomic_store(&reply->finished, 1);
+}
+
+static void *th_httpd_large_reply(void *opaque) {
+    th_httpd_large_reply_t *reply = opaque;
+    mori_ui_http_run(reply->listener, reply, th_httpd_dispatch_large_reply,
+                     th_httpd_finish_large_reply);
     return NULL;
 }
 
+static int th_httpd_send_large_reply_request(th_sock_t socket) {
+    const char request[] = "GET / HTTP/1.0\r\n\r\n";
+    return th_send_all(socket, request, sizeof(request) - 1);
+}
+
 TEST(httpd_interrupt_unblocks_nonreading_large_response_within_one_second) {
-    cbm_httpd_t *listener = cbm_httpd_listen(0);
+    mori_ui_http_transport_t *listener = mori_ui_http_bind(0);
     ASSERT_NOT_NULL(listener);
-    cbm_httpd_set_send_buffer_for_test(listener, 64 * 1024);
     /* Deadline pinned far out of reach: the only remaining way the blocked
      * 8 MB send can end is the interrupt, so the join itself proves
      * interrupt causality — no wall-clock discrimination needed (the old
      * elapsed<500ms check was a lottery under sanitizer slowdown). */
-    cbm_httpd_set_send_deadline_for_test(listener, 60 * 1000);
+    mori_ui_http_set_send_options_for_test(listener, 64 * 1024, 60 * 1000);
     th_httpd_large_reply_t reply = {.listener = listener};
     atomic_init(&reply.accepted, 0);
     atomic_init(&reply.finished, 0);
 
-    th_sock_t socket = th_connect_with_recv_buffer(cbm_httpd_port(listener), 1024);
+    th_sock_t socket = th_connect_with_recv_buffer(mori_ui_http_port(listener), 1024);
     ASSERT_TRUE(socket != TH_SOCK_BAD);
     cbm_thread_t reply_thread;
     ASSERT_EQ(cbm_thread_create(&reply_thread, 0, th_httpd_large_reply, &reply), 0);
+    ASSERT_EQ(th_httpd_send_large_reply_request(socket), 0);
 
     ASSERT_TRUE(th_wait_httpd_activity(listener, CBM_HTTPD_ACTIVITY_RESPONDING, 1000));
     ASSERT_EQ(atomic_load(&reply.accepted), 1);
@@ -3318,13 +3321,13 @@ TEST(httpd_interrupt_unblocks_nonreading_large_response_within_one_second) {
     cbm_thread_t watchdog_thread;
     ASSERT_EQ(cbm_thread_create(&watchdog_thread, 0, th_http_stop_watchdog, &watchdog), 0);
 
-    cbm_httpd_interrupt(listener);
+    mori_ui_http_stop(listener);
     ASSERT_EQ(cbm_thread_join(&reply_thread), 0);
     atomic_store(&watchdog.stop_finished, 1);
     ASSERT_EQ(cbm_thread_join(&watchdog_thread), 0);
     (void)th_sock_shutdown(socket);
     th_sock_close(socket);
-    ASSERT_TRUE(cbm_httpd_close(listener));
+    ASSERT_TRUE(mori_ui_http_free(listener));
 
     /* The 60 s deadline cannot have fired, so the join above is the proof
      * of interrupt delivery; the watchdog is purely a hang detector. */
@@ -3333,17 +3336,17 @@ TEST(httpd_interrupt_unblocks_nonreading_large_response_within_one_second) {
 }
 
 TEST(httpd_large_response_opt_in_survives_a_busy_reader_without_changing_default) {
-    cbm_httpd_t *listener = cbm_httpd_listen(0);
+    mori_ui_http_transport_t *listener = mori_ui_http_bind(0);
     ASSERT_NOT_NULL(listener);
-    cbm_httpd_set_send_buffer_for_test(listener, 64 * 1024);
-    cbm_httpd_set_send_deadline_for_test(listener, 100);
+    mori_ui_http_set_send_options_for_test(listener, 64 * 1024, 100);
     th_httpd_large_reply_t reply = {.listener = listener, .send_deadline_ms = 5000};
     atomic_init(&reply.accepted, 0);
     atomic_init(&reply.finished, 0);
-    th_sock_t socket = th_connect_with_recv_buffer(cbm_httpd_port(listener), 64 * 1024);
+    th_sock_t socket = th_connect_with_recv_buffer(mori_ui_http_port(listener), 64 * 1024);
     ASSERT_TRUE(socket != TH_SOCK_BAD);
     cbm_thread_t reply_thread;
     ASSERT_EQ(cbm_thread_create(&reply_thread, 0, th_httpd_large_reply, &reply), 0);
+    ASSERT_EQ(th_httpd_send_large_reply_request(socket), 0);
     ASSERT_TRUE(th_wait_httpd_activity(listener, CBM_HTTPD_ACTIVITY_RESPONDING, 1000));
     /* Deterministic backpressure spans the ordinary test deadline. The new
      * per-response opt-in must preserve the complete promised Content-Length. */
@@ -3352,9 +3355,10 @@ TEST(httpd_large_response_opt_in_survives_a_busy_reader_without_changing_default
     char *response = malloc(size + 1024);
     ASSERT_NOT_NULL(response);
     int got = th_recv_until_close(socket, response, size + 1024);
+    mori_ui_http_stop(listener);
     ASSERT_EQ(cbm_thread_join(&reply_thread), 0);
     th_sock_close(socket);
-    ASSERT_TRUE(cbm_httpd_close(listener));
+    ASSERT_TRUE(mori_ui_http_free(listener));
     ASSERT_GT(got, (int)size);
     char *body = strstr(response, "\r\n\r\n");
     ASSERT_NOT_NULL(body);
@@ -3365,17 +3369,18 @@ TEST(httpd_large_response_opt_in_survives_a_busy_reader_without_changing_default
 }
 
 TEST(httpd_nonreading_large_response_hits_send_deadline_without_interrupt) {
-    cbm_httpd_t *listener = cbm_httpd_listen(0);
+    mori_ui_http_transport_t *listener = mori_ui_http_bind(0);
     ASSERT_NOT_NULL(listener);
-    cbm_httpd_set_send_buffer_for_test(listener, 64 * 1024);
+    mori_ui_http_set_send_options_for_test(listener, 64 * 1024, 0);
     th_httpd_large_reply_t reply = {.listener = listener};
     atomic_init(&reply.accepted, 0);
     atomic_init(&reply.finished, 0);
 
-    th_sock_t socket = th_connect_with_recv_buffer(cbm_httpd_port(listener), 1024);
+    th_sock_t socket = th_connect_with_recv_buffer(mori_ui_http_port(listener), 1024);
     ASSERT_TRUE(socket != TH_SOCK_BAD);
     cbm_thread_t reply_thread;
     ASSERT_EQ(cbm_thread_create(&reply_thread, 0, th_httpd_large_reply, &reply), 0);
+    ASSERT_EQ(th_httpd_send_large_reply_request(socket), 0);
     ASSERT_TRUE(th_wait_httpd_activity(listener, CBM_HTTPD_ACTIVITY_RESPONDING, 1000));
     ASSERT_EQ(atomic_load(&reply.accepted), 1);
     ASSERT_EQ(atomic_load(&reply.finished), 0);
@@ -3390,12 +3395,15 @@ TEST(httpd_nonreading_large_response_hits_send_deadline_without_interrupt) {
     cbm_thread_t watchdog_thread;
     ASSERT_EQ(cbm_thread_create(&watchdog_thread, 0, th_http_stop_watchdog, &watchdog), 0);
 
-    ASSERT_EQ(cbm_thread_join(&reply_thread), 0);
+    while (!atomic_load(&reply.finished) && !atomic_load(&watchdog.watchdog_fired))
+        cbm_usleep(10 * 1000);
     uint64_t elapsed = cbm_now_ms() - started;
+    mori_ui_http_stop(listener);
+    ASSERT_EQ(cbm_thread_join(&reply_thread), 0);
     atomic_store(&watchdog.stop_finished, 1);
     ASSERT_EQ(cbm_thread_join(&watchdog_thread), 0);
     th_sock_close(socket);
-    ASSERT_TRUE(cbm_httpd_close(listener));
+    ASSERT_TRUE(mori_ui_http_free(listener));
 
     ASSERT_GTE(elapsed, 500);
     ASSERT_EQ(atomic_load(&watchdog.watchdog_fired), 0);
@@ -4215,7 +4223,7 @@ SUITE(httpd) {
     /* Transport */
     RUN_TEST(httpd_listen_ephemeral_port);
     RUN_TEST(httpd_listen_port_collision_returns_null);
-    RUN_TEST(httpd_close_refuses_while_connection_owns_listener);
+    RUN_TEST(httpd_releases_unstarted_port);
 
     /* Full UI server */
     RUN_TEST(ui_server_readiness_proof_is_exact_and_generation_bound);
