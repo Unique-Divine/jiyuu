@@ -34,6 +34,14 @@ sai mcp uninstall codex
 - In `mcp list`, `current` is true when the entry runs the command `install`
   would register.
 
+For a client that can no longer launch Sai, run
+`sai --json doctor --no-fix` to inspect its registration. Run
+`sai --json doctor` to repair recognized stale Sai launchers. This covers
+the retired `sai-mcp` executable and recognized `sai mcp serve` entries
+that point to a missing executable or the uv cache. Follow the check's
+`fix` when it calls for manual intervention.
+[Diagnose With `sai doctor`](cli.md#diagnose-with-sai-doctor)
+
 The server resolves its endpoints once, at start: flags after `sai mcp
 serve`, then `SAI_*` variables, then `~/.sai/config.toml`, then mainnet. To
 point it at another network, set both the Keeper and LCD endpoints as

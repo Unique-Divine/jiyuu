@@ -164,11 +164,10 @@ When a command fails in a way you cannot explain, run:
 sai --json doctor
 ```
 
-Doctor checks the install, the session, the intent ledger, and the Keeper
-HTTP, WebSocket, and LCD endpoints. It fixes what is safe to fix: file modes
-under `$SAI_HOME/trader`, the ledger schema, and unknown intents it can
-settle by reading Keeper. It never trades, never rewrites the session, and
-never prints the token.
+Doctor checks the install, configuration, MCP registrations, session,
+intent ledger, and Keeper HTTP, WebSocket, and LCD endpoints. By default it
+repairs recognized stale Sai registrations, tightens file permissions,
+migrates the ledger, and reconciles unknown intents by reading Keeper.
 
 - Each check has a `status` of `pass`, `fixed`, `warn`, `fail`, or `skipped`,
   and a `fix` command when one applies. `changes` lists what doctor changed.
@@ -176,6 +175,11 @@ never prints the token.
   their fixes.
 - `--no-fix` reports without changing anything. `--offline` skips the network
   checks.
+- Checks named `mcp.claude`, `mcp.codex`, and `mcp.cursor` report on
+  detected clients. Doctor repairs recognized stale launchers when it has a
+  stable replacement and can edit the registration. Follow the check's
+  `fix` when it requires a manual edit, and reconnect the client after a
+  repair.
 - Doctor exits 1 while any check still fails.
 
 ## Logs
@@ -232,8 +236,10 @@ sai update
 ```
 
 - `sai update` installs the latest release over the current install. The
-  `sai` path and everything under `~/.sai` stay the same, so MCP
-  registrations keep working. If a step fails, the previous version stays.
+  launcher and Sai data stay in place. If installation fails, the previous
+  version stays. After a successful install, the updater attempts the same
+  MCP repair as doctor. Read the client results in the update output or in
+  the `update.mcp_repair` log event when the updater reports repairs or failures.
 - `sai update --check` only reports the installed and latest versions.
 - sai also updates by itself. With `update.auto` at its default `true`, a
   command a person runs in a terminal starts an update in the background at
