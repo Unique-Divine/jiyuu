@@ -230,7 +230,16 @@ pub unsafe extern "C" fn cbm_toml_remove_legacy_table(
         };
         let key = parse_key(table)?;
         let file = read(path)?;
-        apply(&file, legacy::remove(file.bytes(), &key, markers)?)
+        match legacy::remove(file.bytes(), &key, markers)? {
+            None => Ok(0),
+            // The Windows writer checks the destination before its no-op check.
+            #[cfg(windows)]
+            Some(Edit::Unchanged) => {
+                file.write(file.bytes()).map_err(|_| Error)?;
+                Ok(0)
+            }
+            Some(edit) => apply(&file, edit),
+        }
     };
     result().unwrap_or(-1)
 }

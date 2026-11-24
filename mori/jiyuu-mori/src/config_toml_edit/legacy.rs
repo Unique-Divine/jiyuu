@@ -83,9 +83,10 @@ pub(super) fn remove(
     data: &[u8],
     desired: &Key,
     markers: Markers<'_>,
-) -> Result<Edit> {
+) -> Result<Option<Edit>> {
     let healed = match markers.find(data)? {
-        Span::Pair(..) => return Ok(Edit::Unchanged),
+        // A managed pair exits before the legacy writer is consulted.
+        Span::Pair(..) => return Ok(None),
         Span::Orphan(line) => {
             Some(Output::copy_without(data, line.start..line.end)?)
         }
@@ -128,13 +129,15 @@ pub(super) fn remove(
         }
     }
     strings.finish()?;
-    if foreign || current.is_some_and(|shape| shape.command != Some(true)) {
-        Ok(Edit::Foreign)
-    } else if exact_kind.is_some() {
-        Output::copy_without(scan, start..end).map(Edit::Write)
-    } else if let Some(healed) = healed {
-        Ok(Edit::Write(healed))
-    } else {
-        Ok(Edit::Unchanged)
-    }
+    let edit =
+        if foreign || current.is_some_and(|shape| shape.command != Some(true)) {
+            Edit::Foreign
+        } else if exact_kind.is_some() {
+            Edit::Write(Output::copy_without(scan, start..end)?)
+        } else if let Some(healed) = healed {
+            Edit::Write(healed)
+        } else {
+            Edit::Unchanged
+        };
+    Ok(Some(edit))
 }
