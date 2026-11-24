@@ -34,6 +34,7 @@ impl Drop for Fixture {
 struct IndexSession {
     root: PathBuf,
     routing_override: Option<&'static str>,
+    rust_manifest: bool,
     driver_override: Option<&'static str>,
     seen_logs: HashSet<PathBuf>,
 }
@@ -51,6 +52,7 @@ impl IndexSession {
         Self {
             root,
             routing_override,
+            rust_manifest: false,
             driver_override,
             seen_logs: HashSet::new(),
         }
@@ -69,7 +71,8 @@ impl IndexSession {
             .env("CBM_LOG_LEVEL", "info");
         if let Some(routing) = self.routing_override {
             command.env("MORI_IMPL_INDEX_ROUTE", routing);
-        } else {
+        }
+        if self.rust_manifest {
             command.env("MORI_IMPL_INDEX_MANIFEST", "rust");
         }
         if let Some(drivers) = self.driver_override {
@@ -175,7 +178,7 @@ impl IndexSession {
             .contains("msg=incremental.manifest_compare implementation=rust");
         assert_eq!(
             used_rust,
-            step.decision.is_some() && self.routing_override.is_none(),
+            step.decision.is_some() && self.rust_manifest,
             "{logs}"
         );
 
@@ -403,6 +406,7 @@ fn default_rust_routing_preserves_native_update_paths_and_generation() {
     let stopped = rust.command().args(["daemon", "stop"]).output().unwrap();
     assert!(stopped.status.success(), "{stopped:?}");
     rust.driver_override = Some("c");
+    rust.rust_manifest = true;
     fs::write(
         repo.join("schema.graphqls"),
         "type Query { value: Int another: Int latest: Int }\n",
