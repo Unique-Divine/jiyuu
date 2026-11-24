@@ -66,6 +66,12 @@ pub use go_imports::register as mori_register_go_import_extractor;
 mod native_tree;
 
 #[cfg(feature = "c-backend")]
+mod rust_use_imports;
+
+#[cfg(feature = "c-backend")]
+pub use rust_use_imports::register as mori_register_rust_use_imports;
+
+#[cfg(feature = "c-backend")]
 mod markdown_extract;
 
 #[cfg(feature = "c-backend")]
