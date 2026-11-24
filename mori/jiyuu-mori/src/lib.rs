@@ -2,6 +2,10 @@
 
 #[cfg(any(feature = "native-engine-abi", test))]
 mod complexity;
+#[cfg(feature = "native-engine-abi")]
+mod doc_file_links;
+#[cfg(feature = "native-engine-abi")]
+mod pdf_doc_links;
 
 #[cfg(any(feature = "graphql-callbacks", test))]
 mod gqlgen;
