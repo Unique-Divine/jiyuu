@@ -4,10 +4,11 @@
 #   - libsqlite3-dev + zlib1g-dev (same as CI "Install deps" step)
 #
 # Build:  docker build -t cbm-test test-infrastructure/
-# Run:    docker run --rm -v $(pwd):/src cbm-test
+# Run:    docker run --rm -v $(git rev-parse --show-toplevel):/workspace cbm-test
 
 # Pinned by digest (supply-chain: no floating tags) — multi-arch manifest-list
 # digest of ubuntu:noble as of 2026-07-23; bump deliberately, never to a tag.
+FROM rust:1.89.0-bookworm@sha256:948f9b08a66e7fe01b03a98ef1c7568292e07ec2e4fe90d88c07bb14563c84ff AS rust-toolchain
 FROM ubuntu:noble@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90
 
 # Minimal: gcc + zlib only. sqlite3 is vendored (compiled from source with ASan).
@@ -35,7 +36,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ENV CCACHE_COMPILERCHECK=content
 ENV PATH=/usr/lib/ccache:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
-WORKDIR /src
+COPY --from=rust-toolchain /usr/local/cargo /usr/local/cargo
+COPY --from=rust-toolchain /usr/local/rustup /usr/local/rustup
+ENV CARGO_HOME=/usr/local/cargo RUSTUP_HOME=/usr/local/rustup
+ENV PATH="/usr/local/cargo/bin:${PATH}"
+
+RUN git config --system --add safe.directory /workspace
+WORKDIR /workspace/mori
 
 # Default: run test.sh with GCC (mirrors CI exactly)
 ENTRYPOINT ["scripts/test.sh"]
