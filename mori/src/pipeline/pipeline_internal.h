@@ -1687,6 +1687,9 @@ typedef struct {
 typedef int (*cbm_full_build_driver_fn)(cbm_full_build_t *, const cbm_full_build_ops_t *,
                                         int file_count, int parallel_threshold);
 
+int cbm_pipeline_full_build_reference(cbm_full_build_t *run, const cbm_full_build_ops_t *ops,
+                                      int file_count, int parallel_threshold);
+
 /* Register before any pipeline workers start. */
 void cbm_pipeline_set_full_build_driver(cbm_full_build_driver_fn driver);
 
@@ -1709,6 +1712,10 @@ typedef struct {
 
 typedef int (*cbm_source_publish_fn)(cbm_source_publish_t *, const cbm_source_publish_ops_t *,
                                      int staged_rc, bool live_noop, bool final_existed);
+
+int cbm_pipeline_source_publish_reference(cbm_source_publish_t *run,
+                                          const cbm_source_publish_ops_t *ops,
+                                          int rc, bool live_noop, bool final_existed);
 
 /* Register before any pipeline workers start. */
 void cbm_pipeline_set_source_publish(cbm_source_publish_fn publish);
