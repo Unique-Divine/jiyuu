@@ -163,6 +163,8 @@ Point clients at `http://127.0.0.1:8123/mcp`. All HTTP sessions share one
 Discord client and bot identity. The shared process takes its token from
 the environment and omits `discord_login`. `GET /healthz` returns 200 when
 the Discord client is ready and 503 while it is connecting or disconnected.
+When systemd supplies a valid `INVOCATION_ID`, readiness responses include
+`X-Discord-MCP-Invocation-ID` so the service manager can identify the instance.
 An initial login failure exits with an error so a service manager can retry.
 
 Shared HTTP only binds to loopback and trusts local processes. Anyone who

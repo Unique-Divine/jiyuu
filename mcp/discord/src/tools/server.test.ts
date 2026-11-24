@@ -1,5 +1,7 @@
 import { describe, it, test, expect, beforeEach, afterEach, jest, mock, type Mock } from 'bun:test';
 import { Client, Guild, Collection, GuildChannelManager, REST, ChannelType } from "discord.js";
+import { CallToolResultSchema, TextContentSchema } from '@modelcontextprotocol/sdk/types.js';
+import { z } from 'zod';
 import { searchMessagesHandler, listServersHandler, getServerInfoHandler } from "./server.js";
 import type { ToolContext, ToolResponse } from "./types.js";
 import { handleDiscordError } from "../errorHandler.js";
@@ -183,20 +185,24 @@ describe("Server Handlers", () => {
       });
     });
 
-    it("should return server information when client is ready", async () => {
+    it("matches the sanitized live 1.3.10 list response", async () => {
+      // The live connector returned one MCP text block containing JSON rows.
+      // This fixture replaces all account-specific values and keeps the wire shape.
+      const file = Bun.file(new URL('../test-support/fixtures/list-servers.json', import.meta.url));
+      const envelope = CallToolResultSchema.extend({ content: z.tuple([TextContentSchema]) });
+      const rows = z.array(z.object({ id: z.string(), name: z.string(), icon: z.string().nullable() }));
+      const replay = envelope.parse(await file.json());
+      const guild = {
+        id: '100000000000000000',
+        name: 'Fixture Guild',
+        iconURL: () => 'https://cdn.discordapp.com/icons/100000000000000000/00000000000000000000000000000000.webp',
+      } satisfies Pick<Guild, 'id' | 'name' | 'iconURL'>;
+      mockClient.guilds.fetch.mockResolvedValueOnce(new Collection([[guild.id, guild]]));
       const result = await listServersHandler({}, mockContext);
-
       expect(mockClient.guilds.fetch).toHaveBeenCalled();
-      expect(result.content[0].type).toBe("text");
-
-      const parsedContent = JSON.parse(result.content[0].text);
-      expect(parsedContent).toEqual([
-        {
-          id: "123456789",
-          name: "Test Guild",
-          icon: "https://example.com/icon.png"
-        }
-      ]);
+      const actual = envelope.parse(result);
+      expect(rows.parse(JSON.parse(actual.content[0].text))).toEqual(rows.parse(JSON.parse(replay.content[0].text)));
+      expect(result).toEqual(replay);
     });
 
     it("should return message when no servers are found", async () => {

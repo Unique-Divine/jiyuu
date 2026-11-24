@@ -75,8 +75,12 @@ export class StreamableHttpTransport implements MCPTransport {
         const app = express();
         app.use(hostOriginGuard(allowedHostKeys(host, port, extraAllowedHosts(process.env))));
         if (isReady) {
+            const invocationId = process.env.INVOCATION_ID;
             app.get('/healthz', (_req, res) => {
                 res.set('Cache-Control', 'no-store');
+                if (invocationId && /^[0-9a-f]{32}$/.test(invocationId)) {
+                    res.set('X-Discord-MCP-Invocation-ID', invocationId);
+                }
                 res.sendStatus(this.stopping || !isReady() ? 503 : 200);
             });
         }

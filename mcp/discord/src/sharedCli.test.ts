@@ -50,13 +50,17 @@ describe('shared HTTP CLI', () => {
     });
 
     it('keeps one startup identity and changes readiness as the gateway connects and disconnects', async () => {
-        const server = startHttpEntrypoint(entry, { DISCORD_TOKEN: dummyToken }, ['--shared'], ['--preload', preload]);
+        const invocationId = '0123456789abcdef0123456789abcdef';
+        const server = startHttpEntrypoint(entry, {
+            DISCORD_TOKEN: dummyToken, INVOCATION_ID: invocationId
+        }, ['--shared'], ['--preload', preload]);
         const first = new Client({ name: 'first', version: '1' });
         const second = new Client({ name: 'second', version: '1' });
         const endpoint = `http://127.0.0.1:${server.port}`;
         async function health() {
             const res = await fetch(endpoint + '/healthz');
             await res.body?.cancel();
+            expect(res.headers.get('X-Discord-MCP-Invocation-ID')).toBe(invocationId);
             return res.status;
         }
 
@@ -96,6 +100,21 @@ describe('shared HTTP CLI', () => {
             expect(server.stderr()).not.toContain(dummyToken);
         } finally {
             await Promise.allSettled([first.close(), second.close()]);
+            await server.stop();
+        }
+    });
+
+    it('omits a malformed systemd invocation ID from readiness responses', async () => {
+        const server = startHttpEntrypoint(entry, {
+            DISCORD_TOKEN: dummyToken, INVOCATION_ID: 'invalid-invocation'
+        }, ['--shared'], ['--preload', preload]);
+        try {
+            await server.waitFor(/fixture login started/);
+            const res = await fetch(`http://127.0.0.1:${server.port}/healthz`);
+            await res.body?.cancel();
+            expect(res.status).toBe(503);
+            expect(res.headers.get('X-Discord-MCP-Invocation-ID')).toBeNull();
+        } finally {
             await server.stop();
         }
     });
