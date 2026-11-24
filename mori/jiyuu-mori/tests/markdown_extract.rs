@@ -58,7 +58,7 @@ fn markdown_heading_extraction_matches_c() {
         fs::write(
             repo.join("doc.md"),
             concat!(
-                "# Provider\n\n## Shared ###\n\nProvider prose.\n\n",
+                "# Provider\n\n## Shared\n\nProvider prose.\n\n## Trailing ###\n\n",
                 "# Client\n\n## Shared\n\nClient prose.\n\n",
                 "> Setext café\n> second line\n> ---------\n\n"
             ),
