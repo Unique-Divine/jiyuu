@@ -607,13 +607,18 @@ static void fts_report_error(cbm_store_t *s, const char *context, const char *me
     snprintf(s->errbuf, sizeof(s->errbuf), "%s: %s", context, message ? message : "unknown");
 }
 
-int cbm_store_fts_rebuild(cbm_store_t *s, const char *project, int64_t after_id) {
+static int store_fts_rebuild(cbm_store_t *s, const char *project, int64_t after_id,
+                             bool closure_refresh) {
     if (!s || !s->db) {
         return CBM_STORE_ERR;
     }
     cbm_log_info("store.fts_rebuild", "implementation", "rust", "mode",
-                 project ? "closure" : "full");
-    return mori_fts_write(s, s->db, project, after_id, fts_report_error);
+                 closure_refresh || project ? "closure" : "full");
+    return mori_fts_write(s, s->db, project, after_id, closure_refresh, fts_report_error);
+}
+
+int cbm_store_fts_rebuild(cbm_store_t *s, const char *project, int64_t after_id) {
+    return store_fts_rebuild(s, project, after_id, false);
 }
 
 static int create_user_indexes(cbm_store_t *s) {
@@ -1547,6 +1552,33 @@ static bool store_progress_release(cbm_store_t *s, const void *owner) {
     sqlite3_progress_handler(s->db, 0, NULL, NULL);
     s->progress_owner = NULL;
     return true;
+}
+
+struct fts_refresh_cancel {
+    cbm_store_cancel_fn check;
+    void *context;
+};
+
+static int fts_refresh_progress(void *opaque) {
+    struct fts_refresh_cancel *cancel = opaque;
+    return cancel->check(cancel->context);
+}
+
+int cbm_store_fts_refresh_closure(cbm_store_t *s, cbm_store_cancel_fn cancel,
+                                  void *context) {
+    if (!cancel) {
+        return store_fts_rebuild(s, NULL, 0, true);
+    }
+    if (cancel(context)) {
+        return CBM_STORE_CANCELLED;
+    }
+    struct fts_refresh_cancel progress = {cancel, context};
+    if (!store_progress_acquire(s, &progress, 1000, fts_refresh_progress, &progress)) {
+        return CBM_STORE_ERR;
+    }
+    int rc = store_fts_rebuild(s, NULL, 0, true);
+    (void)store_progress_release(s, &progress);
+    return cancel(context) ? CBM_STORE_CANCELLED : rc;
 }
 
 struct cbm_store_read_scope {

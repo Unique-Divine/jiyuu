@@ -1944,7 +1944,7 @@ int cbm_pipeline_finalize_staged_generation(char *stage_path, const char *final_
  * path passes fts_wholesale=true; the delta path passes false (its patch
  * wrote row-level FTS inserts). generation->gbuf is not read here. */
 int cbm_pipeline_publish_staged(char *stage_path, const cbm_pipeline_generation_t *generation,
-                                bool fts_wholesale, bool destination_known_healthy);
+                                bool full_build, bool destination_known_healthy);
 
 /* mkstemp-minted staging sibling of final_path (exported for the delta
  * executor; the dump path uses it internally). malloc'd, caller frees. */
