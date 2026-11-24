@@ -195,6 +195,7 @@ pub(super) fn parse_string(data: &[u8]) -> Result<(Vec<u8>, usize)> {
     while let Some(&byte) = data.get(pos) {
         pos += 1;
         if byte == delimiter {
+            crate::ffi_output::bytes(&decoded);
             return Ok((decoded, pos));
         }
         if decoded.len() == MAX_BYTES
@@ -268,6 +269,7 @@ pub(super) fn parse_key(mut data: &[u8]) -> Result<Key> {
         if encoded_size > MAX_BYTES {
             return Err(Error);
         }
+        crate::ffi_output::bytes(&segment);
         key.push(segment);
         data = trim_start(&data[used..]);
         if data.is_empty() {

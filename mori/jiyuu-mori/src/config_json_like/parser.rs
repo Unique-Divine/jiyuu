@@ -293,6 +293,8 @@ pub(super) fn validate_entry(text: &[u8]) -> Result<&[u8]> {
 }
 
 fn validate(text: &[u8], strict: bool) -> Result<Range<usize>> {
+    // Slice comparisons may call C memcmp from the uninstrumented Rust parser.
+    crate::ffi_output::bytes(text);
     std::str::from_utf8(text).map_err(|_| Invalid)?;
     let mut parser = Parser {
         text,

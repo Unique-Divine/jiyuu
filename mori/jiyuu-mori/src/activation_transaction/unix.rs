@@ -1,8 +1,8 @@
-use std::ffi::{CStr, CString, c_char, c_int};
+use std::ffi::{CStr, CString, OsString, c_char, c_int};
 use std::fs::{self, File, Metadata};
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
-use std::os::unix::ffi::OsStrExt;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
@@ -486,8 +486,19 @@ pub(super) fn map_alias(
     if link_owner != owner {
         return Err(refused());
     }
-    let path = Path::new(std::ffi::OsStr::from_bytes(link.to_bytes()));
-    let resolved = fs::canonicalize(path)?;
+    // Like std::fs::canonicalize, use realpath without a fixed-size buffer.
+    // Lend the existing, annotated C string instead of building a new one.
+    let resolved =
+        unsafe { libc::realpath(ffi_output::c_str(link), std::ptr::null_mut()) };
+    if resolved.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: realpath returned an allocated, NUL-terminated string.
+    let resolved = unsafe {
+        let bytes = CStr::from_ptr(resolved).to_bytes().to_vec();
+        libc::free(resolved.cast());
+        OsString::from_vec(bytes)
+    };
     let meta = fs::symlink_metadata(&resolved)?;
     if !meta.is_dir()
         || (meta.uid() != owner
@@ -495,7 +506,7 @@ pub(super) fn map_alias(
     {
         return Err(refused());
     }
-    let mut mapped = resolved.into_os_string().into_encoded_bytes();
+    let mut mapped = resolved.into_vec();
     if mapped.len().saturating_add(rest.len()) >= 4096 {
         return Err(refused());
     }

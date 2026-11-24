@@ -492,6 +492,12 @@ fn multiline(data: &[u8], colon: usize, end: usize) -> bool {
 }
 
 fn decode(raw: &[u8]) -> Result<Vec<u8>> {
+    let value = decode_value(raw)?;
+    ffi_output::bytes(&value);
+    Ok(value)
+}
+
+fn decode_value(raw: &[u8]) -> Result<Vec<u8>> {
     let start = skip_spaces(raw, 0, raw.len());
     let text = &raw[start..trim_spaces(raw, start, raw.len())];
     require(!text.is_empty() && text.len() <= ITEM_MAX)?;
