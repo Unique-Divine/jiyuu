@@ -470,6 +470,22 @@ the stage and the file transaction, including destination preparation,
 rename, and rollback. Set `MORI_IMPL_SOURCE_PUBLISH=c` when starting a
 fresh daemon to restore C publication decisions.
 
+### Named Watch Reconciliation
+
+Set `MORI_IMPL_NAMED_WATCH=rust` when starting a permanent daemon to select
+the Rust reconciler for named watch snapshots. It validates the complete
+snapshot before applying it and rolls back additions if registration fails.
+The debug log event `daemon.named_watch.reconcile` identifies the backend.
+C remains the default.
+
+### Provider Repair Recovery
+
+On a permanent daemon with provider repair enabled, set
+`MORI_IMPL_REPAIR_RECOVERY=rust` at startup to opt into the Rust recovery
+scheduler. The daemon log event `cross_repo.recovery_driver` identifies
+the backend. Both schedulers use the same saved graph state, mutation
+lease, and native repair operations. The C scheduler remains the default.
+
 ### Sharing a Graph With a Team
 
 `index_repository` with `persistence: true` writes
