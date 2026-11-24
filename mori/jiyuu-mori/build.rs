@@ -7,8 +7,8 @@
 //! the network: `just --justfile mori/justfile grammars` installs the
 //! grammars, and this script only compares `mori/.grammars.stamp` with
 //! `mori/grammars.lock.json` and the installed tree. `Makefile.cbm` stays the
-//! source of truth for C flags, so the C inside `mori` is compiled exactly
-//! like `codebase-memory-mcp`.
+//! source of truth for C flags. The linked archive uses the Rust IPC byte
+//! codecs, and the standalone C reference keeps its own codecs.
 //!
 //! Environment:
 //! - `MORI_C_BUILD_DIR`: make `BUILD_DIR`, relative to `mori/` or absolute
@@ -218,6 +218,7 @@ fn run_make(
         .arg(format!("CXX={cxx}"))
         .args(PINNED_MAKE_VARS)
         .arg(format!("LIBMORI_WITH_UI={}", u8::from(with_ui)))
+        .arg("LIBMORI_WITH_RUST_IPC=1")
         .arg(format!(
             "LIBMORI_WITHOUT_C_INDEX_DRIVERS={}",
             u8::from(without_c_index_drivers)

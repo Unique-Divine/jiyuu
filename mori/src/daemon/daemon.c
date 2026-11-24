@@ -2,6 +2,7 @@
  * daemon.c — Process-local coordination and wire framing for the CBM daemon.
  */
 #include "daemon/daemon.h"
+#include "daemon/ipc_codec.h"
 
 #include "foundation/compat_thread.h"
 
@@ -70,6 +71,7 @@ typedef struct {
     void *context;
 } cbm_daemon_callback_batch_t;
 
+#ifndef CBM_WITH_RUST_IPC
 enum {
     FRAME_MAGIC_0 = 0,
     FRAME_MAGIC_1 = 1,
@@ -88,6 +90,7 @@ enum {
 static bool frame_type_valid(cbm_daemon_frame_type_t type) {
     return type == CBM_DAEMON_FRAME_REQUEST || type == CBM_DAEMON_FRAME_RESPONSE;
 }
+#endif
 
 static char *daemon_string_dup(const char *value) {
     size_t length = strlen(value);
@@ -827,6 +830,9 @@ bool cbm_daemon_should_exit(cbm_daemon_coordinator_t *coordinator, uint64_t now_
 
 bool cbm_daemon_frame_header_encode(uint8_t header[CBM_DAEMON_FRAME_HEADER_SIZE],
                                     cbm_daemon_frame_type_t type, uint16_t flags, uint32_t length) {
+#ifdef CBM_WITH_RUST_IPC
+    return mori_ipc_frame_header_encode(header, (int)type, flags, length);
+#else
     if (!header || !frame_type_valid(type) || length > CBM_DAEMON_MAX_FRAME_SIZE) {
         return false;
     }
@@ -843,10 +849,28 @@ bool cbm_daemon_frame_header_encode(uint8_t header[CBM_DAEMON_FRAME_HEADER_SIZE]
     header[FRAME_LENGTH_1] = (uint8_t)(length >> 8);
     header[FRAME_LENGTH_0] = (uint8_t)length;
     return true;
+#endif
 }
 
 bool cbm_daemon_frame_header_decode(const uint8_t header[CBM_DAEMON_FRAME_HEADER_SIZE],
                                     cbm_daemon_frame_t *frame) {
+    return cbm_daemon_frame_header_decode_bounded(header, CBM_DAEMON_MAX_FRAME_SIZE, frame);
+}
+
+bool cbm_daemon_frame_header_decode_bounded(const uint8_t header[CBM_DAEMON_FRAME_HEADER_SIZE],
+                                           uint32_t max_payload_length, cbm_daemon_frame_t *frame) {
+#ifdef CBM_WITH_RUST_IPC
+    uint8_t type;
+    uint16_t flags;
+    uint32_t length;
+    if (!frame ||
+        !mori_ipc_frame_header_decode(header, max_payload_length, &type, &flags, &length)) {
+        return false;
+    }
+    frame->type = (cbm_daemon_frame_type_t)type;
+    frame->flags = flags;
+    frame->length = length;
+#else
     if (!header || !frame || header[FRAME_MAGIC_0] != 'C' || header[FRAME_MAGIC_1] != 'B' ||
         header[FRAME_MAGIC_2] != 'M' || header[FRAME_MAGIC_3] != 'D' ||
         header[FRAME_VERSION] != CBM_DAEMON_RENDEZVOUS_FRAME_VERSION) {
@@ -857,7 +881,8 @@ bool cbm_daemon_frame_header_decode(const uint8_t header[CBM_DAEMON_FRAME_HEADER
     uint32_t length = ((uint32_t)header[FRAME_LENGTH_3] << 24) |
                       ((uint32_t)header[FRAME_LENGTH_2] << 16) |
                       ((uint32_t)header[FRAME_LENGTH_1] << 8) | (uint32_t)header[FRAME_LENGTH_0];
-    if (!frame_type_valid(type) || length > CBM_DAEMON_MAX_FRAME_SIZE) {
+    if (!frame_type_valid(type) || length > CBM_DAEMON_MAX_FRAME_SIZE ||
+        length > max_payload_length) {
         return false;
     }
 
@@ -865,5 +890,6 @@ bool cbm_daemon_frame_header_decode(const uint8_t header[CBM_DAEMON_FRAME_HEADER
     frame->flags =
         (uint16_t)(((uint16_t)header[FRAME_FLAGS_HI] << 8) | (uint16_t)header[FRAME_FLAGS_LO]);
     frame->length = length;
+#endif
     return true;
 }

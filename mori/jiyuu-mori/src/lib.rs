@@ -1,4 +1,6 @@
-//! Rust GraphQL implementation and registration for the C graph engine.
+//! Rust implementations and registration for the C graph engine.
+
+pub mod ipc;
 
 #[cfg(any(feature = "graphql-callbacks", test))]
 mod gqlgen;
