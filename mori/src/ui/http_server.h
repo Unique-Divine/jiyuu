@@ -35,6 +35,18 @@
 typedef struct cbm_http_server cbm_http_server_t;
 struct cbm_watcher;
 
+/* Deliver one reply on the dispatch thread. Copy headers and body before
+ * returning if the transport will write them later. A zero deadline selects
+ * the transport default. */
+typedef void (*cbm_ui_http_reply_fn)(void *context, int status, const char *headers,
+                                     const void *body, size_t body_len, int send_deadline_ms);
+
+/* Dispatch a parsed request on the server's single run thread. A non-empty
+ * request body must be NUL-terminated in addition to carrying its byte length.
+ * A stopped server or a cancelled request may return without replying. */
+void cbm_http_server_dispatch(cbm_http_server_t *srv, const cbm_http_req_t *req,
+                              cbm_ui_http_reply_fn reply, void *context);
+
 /* Daemon-owned index boundary. The callback blocks until the coordinated
  * operation finishes; the HTTP server runs it on a tracked, joinable thread. */
 typedef int (*cbm_http_index_executor_fn)(void *context, const char *root_path,
