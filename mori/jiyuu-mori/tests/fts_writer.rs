@@ -1,9 +1,10 @@
-//! Check the Rust FTS writer against the native store on the same SQLite ABI.
+//! Exercise the linked FTS writer on the store's live SQLite connection.
 #![cfg(feature = "c-backend")]
 
 use std::ffi::{CStr, c_char, c_int};
 use std::ptr::NonNull;
 
+use jiyuu_mori as _;
 use rusqlite::Connection;
 use rusqlite::ffi::sqlite3;
 
@@ -68,7 +69,10 @@ fn matches(connection: &Connection, term: &str) -> i64 {
         .unwrap()
 }
 
-fn run_contract() -> (String, String) {
+#[test]
+fn fts_writer_preserves_legacy_schema_and_failure_statuses() {
+    // SAFETY: This is the sole native test in this process and no stores exist yet.
+    unsafe { cbm_alloc_init() };
     let store = StoreGuard::new();
     // SAFETY: The borrowed connection is dropped before the native store.
     // from_handle does not close the connection.
@@ -90,6 +94,19 @@ fn run_contract() -> (String, String) {
     assert_eq!(matches(&db, "name:ledger"), 1);
     assert_eq!(matches(&db, "qualified_name:macro"), 0);
     assert_eq!(matches(&db, "name:broken"), 1);
+
+    db.execute_batch(
+        r#"BEGIN;
+           UPDATE nodes SET properties = '{"docstring":"rebuildproof"}' WHERE id = 1;"#,
+    )
+    .unwrap();
+    assert_eq!(store.rebuild(None, 0), STORE_OK);
+    assert!(!db.is_autocommit());
+    assert_eq!(matches(&db, "body:rebuildproof"), 1);
+    assert_eq!(matches(&db, "body:retention"), 0);
+    db.execute_batch("ROLLBACK").unwrap();
+    assert_eq!(matches(&db, "body:rebuildproof"), 0);
+    assert_eq!(matches(&db, "body:retention"), 1);
 
     db.execute_batch(
         "DROP TABLE nodes_fts;
@@ -116,7 +133,7 @@ fn run_contract() -> (String, String) {
     db.execute_batch("DROP TABLE nodes_fts").unwrap();
     assert_eq!(store.rebuild(Some(c"p"), 0), STORE_NOT_FOUND);
     assert_eq!(store.rebuild(None, 0), STORE_ERR);
-    let delete_error = store.error();
+    assert_eq!(store.error(), "exec: no such table: nodes_fts");
 
     db.execute_batch(
         "CREATE TABLE nodes_fts (
@@ -127,7 +144,10 @@ fn run_contract() -> (String, String) {
     .unwrap();
     assert_eq!(store.rebuild(Some(c"p"), 0), STORE_ERR);
     assert!(!db.is_autocommit());
-    let step_error = store.error();
+    assert_eq!(
+        store.error(),
+        "fts_backfill: CHECK constraint failed: name = 'never matches'"
+    );
     assert_eq!(
         db.query_row("SELECT count(*) FROM nodes_fts", [], |row| row
             .get::<_, i64>(0))
@@ -135,16 +155,4 @@ fn run_contract() -> (String, String) {
         0
     );
     db.execute_batch("ROLLBACK").unwrap();
-
-    (delete_error, step_error)
-}
-
-#[test]
-fn fts_writer_preserves_legacy_schema_and_failure_statuses() {
-    // SAFETY: This is the sole native test in this process. Initialize C first,
-    // run the reference, and install the writer before opening the next store.
-    unsafe { cbm_alloc_init() };
-    let native = run_contract();
-    unsafe { jiyuu_mori::mori_register_fts_writer() };
-    assert_eq!(run_contract(), native);
 }

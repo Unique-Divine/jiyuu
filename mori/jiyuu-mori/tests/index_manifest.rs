@@ -35,7 +35,6 @@ struct IndexSession {
     root: PathBuf,
     routing_override: Option<&'static str>,
     rust_manifest: bool,
-    rust_fts: bool,
     driver_override: Option<&'static str>,
     seen_logs: HashSet<PathBuf>,
 }
@@ -54,7 +53,6 @@ impl IndexSession {
             root,
             routing_override,
             rust_manifest: false,
-            rust_fts: false,
             driver_override,
             seen_logs: HashSet::new(),
         }
@@ -76,9 +74,6 @@ impl IndexSession {
         }
         if self.rust_manifest {
             command.env("MORI_IMPL_INDEX_MANIFEST", "rust");
-        }
-        if self.rust_fts {
-            command.env("MORI_IMPL_FTS_WRITER", "rust");
         }
         if let Some(drivers) = self.driver_override {
             command
@@ -171,13 +166,20 @@ impl IndexSession {
             _ => None,
         };
         let fts_witness = "msg=store.fts_rebuild implementation=rust";
-        if let Some(mode) = fts_mode.filter(|_| self.rust_fts) {
+        let fts_witnesses: Vec<_> = logs
+            .lines()
+            .filter(|line| line.contains(fts_witness))
+            .collect();
+        assert_eq!(
+            fts_witnesses.len(),
+            usize::from(fts_mode.is_some()),
+            "{logs}"
+        );
+        if let Some(mode) = fts_mode {
             assert!(
-                logs.contains(&format!("{fts_witness} mode={mode}")),
+                fts_witnesses[0].contains(&format!("{fts_witness} mode={mode}")),
                 "{logs}"
             );
-        } else {
-            assert!(!logs.contains(fts_witness), "{logs}");
         }
         let importance_pass = match step.decision {
             None | Some(("staged", "full")) => Some("pass.importance"),
@@ -422,7 +424,6 @@ fn default_rust_routing_preserves_native_update_paths_and_generation() {
     let mut native =
         IndexSession::new(fixture.0.join("control"), Some("c"), Some("c"));
     let mut rust = IndexSession::new(fixture.0.join("candidate"), None, None);
-    rust.rust_fts = true;
     let mut previous_native = String::new();
     let mut previous_rust = String::new();
     let mut project: Option<String> = None;
