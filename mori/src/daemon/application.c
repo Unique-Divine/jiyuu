@@ -1918,55 +1918,156 @@ static void application_job_try_partial(cbm_daemon_application_job_t *job,
     }
 }
 
+typedef struct {
+    cbm_daemon_application_job_t *job;
+    application_job_execution_t *execution;
+    char marker_path[APPLICATION_PATH_CAP];
+    char quarantine_path[APPLICATION_PATH_CAP];
+    char **previous_suspects;
+    int previous_count;
+    int quarantined;
+    cbm_proc_outcome_t outcome;
+} application_job_recovery_t;
+
+/* Keep these outcomes and operations in sync with Rust job_recovery. */
+enum {
+    APPLICATION_JOB_RECOVERY_STOP = 0,
+    APPLICATION_JOB_RECOVERY_CANCELLED = 1,
+    APPLICATION_JOB_RECOVERY_RETRY = 2,
+};
+
+typedef struct {
+    bool has_response;
+    bool unsafe_terminal;
+    bool quarantined;
+} application_job_recovery_summary_t;
+
+static bool application_job_recovery_cancel_requested(application_job_recovery_t *run) {
+    return application_job_cancel_requested(run->job);
+}
+
+static void application_job_recovery_mark_cancelled(application_job_recovery_t *run) {
+    application_job_execution_cancel(run->execution);
+}
+
+static bool application_job_recovery_clear_marker(application_job_recovery_t *run) {
+    return application_truncate_file(run->marker_path);
+}
+
+static uint8_t application_job_recovery_attempt(application_job_recovery_t *run) {
+    application_attempt_t attempt;
+    application_attempt_status_t status =
+        application_job_run_attempt(run->job, run->marker_path, run->quarantine_path, &attempt);
+    if (status == APPLICATION_ATTEMPT_CANCELLED) {
+        return APPLICATION_JOB_RECOVERY_CANCELLED;
+    }
+    if (status != APPLICATION_ATTEMPT_TERMINAL) {
+        return APPLICATION_JOB_RECOVERY_STOP;
+    }
+    run->outcome = CBM_PROC_SPAWN_FAILED;
+    application_attempt_decision_t decision =
+        application_consume_attempt(run->job, &attempt, run->execution, &run->outcome);
+    return decision == APPLICATION_ATTEMPT_DECISION_RECOVERABLE
+               ? APPLICATION_JOB_RECOVERY_RETRY
+               : APPLICATION_JOB_RECOVERY_STOP;
+}
+
+static bool application_job_recovery_record(application_job_recovery_t *run, int recovery_index) {
+    return application_recovery_record_suspects(
+        run->job, run->marker_path, run->quarantine_path, run->outcome, recovery_index,
+        &run->previous_suspects, &run->previous_count, &run->quarantined, run->execution);
+}
+
+static application_job_recovery_summary_t
+application_job_recovery_finish_attempts(application_job_recovery_t *run) {
+    application_free_suspects(run->previous_suspects, run->previous_count);
+    run->previous_suspects = NULL;
+    run->previous_count = 0;
+    return (application_job_recovery_summary_t){
+        .has_response = run->execution->response != NULL,
+        .unsafe_terminal = run->execution->unsafe_terminal,
+        .quarantined = run->quarantined > 0,
+    };
+}
+
+static void application_job_recovery_try_partial(application_job_recovery_t *run) {
+    application_job_try_partial(run->job, run->quarantine_path, run->quarantined, run->execution);
+}
+
+typedef struct {
+    bool (*cancel_requested)(application_job_recovery_t *run);
+    void (*mark_cancelled)(application_job_recovery_t *run);
+    bool (*clear_marker)(application_job_recovery_t *run);
+    uint8_t (*attempt)(application_job_recovery_t *run);
+    bool (*record_suspects)(application_job_recovery_t *run, int index);
+    application_job_recovery_summary_t (*finish_attempts)(application_job_recovery_t *run);
+    void (*try_partial)(application_job_recovery_t *run);
+} application_job_recovery_ops_t;
+
+typedef void (*application_job_recovery_driver_t)(application_job_recovery_t *run,
+                                                  const application_job_recovery_ops_t *ops,
+                                                  int max_attempts);
+
+static application_job_recovery_driver_t application_external_job_recovery;
+
+void cbm_daemon_application_set_job_recovery_driver(application_job_recovery_driver_t driver);
+void cbm_daemon_application_set_job_recovery_driver(application_job_recovery_driver_t driver) {
+    application_external_job_recovery = driver;
+}
+
+static void application_run_job_recovery_c(application_job_recovery_t *run, int max_attempts) {
+    for (int i = 0; i < max_attempts; i++) {
+        if (application_job_recovery_cancel_requested(run)) {
+            application_job_recovery_mark_cancelled(run);
+            break;
+        }
+        if (!application_job_recovery_clear_marker(run)) {
+            break;
+        }
+        uint8_t outcome = application_job_recovery_attempt(run);
+        if (outcome == APPLICATION_JOB_RECOVERY_CANCELLED) {
+            application_job_recovery_mark_cancelled(run);
+            break;
+        }
+        if (outcome != APPLICATION_JOB_RECOVERY_RETRY || !application_job_recovery_record(run, i)) {
+            break;
+        }
+    }
+    application_job_recovery_summary_t summary = application_job_recovery_finish_attempts(run);
+    if (!summary.has_response && !summary.unsafe_terminal && summary.quarantined) {
+        application_job_recovery_try_partial(run);
+    }
+}
+
 static void application_job_recover(cbm_daemon_application_job_t *job,
                                     application_job_execution_t *execution) {
     if (application_job_cancel_requested(job)) {
         application_job_execution_cancel(execution);
         return;
     }
-    char marker_path[APPLICATION_PATH_CAP] = {0};
-    char quarantine_path[APPLICATION_PATH_CAP] = {0};
-    if (!application_recovery_files_create(marker_path, quarantine_path)) {
+    application_job_recovery_t run = {.job = job, .execution = execution};
+    if (!application_recovery_files_create(run.marker_path, run.quarantine_path)) {
         return;
     }
 
-    int quarantined = 0;
-    char **previous_suspects = NULL;
-    int previous_count = 0;
-    int recovery_cap = application_max_restarts();
-    for (int recovery_index = 0; recovery_index < recovery_cap; recovery_index++) {
-        if (application_job_cancel_requested(job)) {
-            application_job_execution_cancel(execution);
-            break;
-        }
-        if (!application_truncate_file(marker_path)) {
-            break;
-        }
-        application_attempt_t attempt;
-        application_attempt_status_t status =
-            application_job_run_attempt(job, marker_path, quarantine_path, &attempt);
-        if (status == APPLICATION_ATTEMPT_CANCELLED) {
-            application_job_execution_cancel(execution);
-            break;
-        }
-        if (status != APPLICATION_ATTEMPT_TERMINAL) {
-            break;
-        }
-        cbm_proc_outcome_t failure_outcome = CBM_PROC_SPAWN_FAILED;
-        application_attempt_decision_t decision =
-            application_consume_attempt(job, &attempt, execution, &failure_outcome);
-        if (decision != APPLICATION_ATTEMPT_DECISION_RECOVERABLE ||
-            !application_recovery_record_suspects(
-                job, marker_path, quarantine_path, failure_outcome, recovery_index,
-                &previous_suspects, &previous_count, &quarantined, execution)) {
-            break;
-        }
+    int max_attempts = application_max_restarts();
+    static const application_job_recovery_ops_t ops = {
+        .cancel_requested = application_job_recovery_cancel_requested,
+        .mark_cancelled = application_job_recovery_mark_cancelled,
+        .clear_marker = application_job_recovery_clear_marker,
+        .attempt = application_job_recovery_attempt,
+        .record_suspects = application_job_recovery_record,
+        .finish_attempts = application_job_recovery_finish_attempts,
+        .try_partial = application_job_recovery_try_partial,
+    };
+    cbm_log_debug("daemon.index.recovery_driver", "implementation",
+                  application_external_job_recovery ? "rust" : "c");
+    if (application_external_job_recovery) {
+        application_external_job_recovery(&run, &ops, max_attempts);
+    } else {
+        application_run_job_recovery_c(&run, max_attempts);
     }
-    application_free_suspects(previous_suspects, previous_count);
-    if (!execution->response && !execution->unsafe_terminal && quarantined > 0) {
-        application_job_try_partial(job, quarantine_path, quarantined, execution);
-    }
-    application_recovery_files_remove(marker_path, quarantine_path);
+    application_recovery_files_remove(run.marker_path, run.quarantine_path);
 }
 
 /* A capacity/cancellation conflict is resolved by the terminal publication
