@@ -373,3 +373,14 @@ void cbm_regfree(cbm_regex_t *r) {
 }
 
 #endif /* _WIN32 */
+
+int cbm_regex_match_extended(const char *subject, const char *pattern) {
+    cbm_regex_t regex;
+    int rc = cbm_regcomp(&regex, pattern, CBM_REG_EXTENDED | CBM_REG_NOSUB);
+    if (rc != CBM_REG_OK) {
+        return rc == CBM_REG_ETOOBIG ? -2 : -1;
+    }
+    rc = cbm_regexec(&regex, subject, 0, NULL, 0);
+    cbm_regfree(&regex);
+    return rc == CBM_REG_OK;
+}

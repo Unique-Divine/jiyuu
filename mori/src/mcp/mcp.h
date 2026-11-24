@@ -291,11 +291,11 @@ typedef struct {
 } cbm_mcp_cypher_cell_t;
 
 /* These callbacks copy borrowed cells into the native response owner.
- * The evaluator emits the header and engine truncation flag before the rows. */
+ * The header carries engine truncation and any warning before the rows. */
 typedef struct {
     void *context;
     bool (*begin)(void *context, const cbm_mcp_cypher_cell_t *columns, size_t column_count,
-                  size_t row_capacity, bool truncated);
+                  size_t row_capacity, bool truncated, cbm_mcp_cypher_cell_t warning);
     bool (*row)(void *context, const cbm_mcp_cypher_cell_t *cells);
     void (*storage_error)(void *context, cbm_mcp_cypher_cell_t detail);
 } cbm_mcp_cypher_sink_t;

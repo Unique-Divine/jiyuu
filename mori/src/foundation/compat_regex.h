@@ -88,4 +88,8 @@ int cbm_regexec(const cbm_regex_t *r, const char *str, int nmatch, cbm_regmatch_
 /* Free compiled regex. */
 void cbm_regfree(cbm_regex_t *r);
 
+/* Case-sensitive ERE without captures. Returns 1 for a match, 0 for no
+ * match, -1 for an invalid pattern, and -2 for a compile-budget refusal. */
+int cbm_regex_match_extended(const char *subject, const char *pattern);
+
 #endif /* CBM_COMPAT_REGEX_H */

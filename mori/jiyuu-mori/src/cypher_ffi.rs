@@ -32,6 +32,7 @@ struct Sink {
         usize,
         usize,
         bool,
+        Cell,
     ) -> bool,
     row: unsafe extern "C" fn(*mut c_void, *const Cell) -> bool,
     storage_error: unsafe extern "C" fn(*mut c_void, Cell),
@@ -58,6 +59,7 @@ type Evaluate = unsafe extern "C" fn(
 ) -> c_int;
 
 unsafe extern "C" {
+    fn cbm_cypher_max_depth() -> c_int;
     fn cbm_mcp_set_cypher_evaluator(evaluate: Evaluate);
 }
 
@@ -94,10 +96,19 @@ unsafe extern "C" fn evaluate(
         let Ok(project) = project.to_str() else {
             return Status::Unsupported;
         };
-        let Ok(query) = cypher_linear::classify(source) else {
-            return Status::Unsupported;
-        };
         let sink = unsafe { &*sink };
+        let query = match cypher_linear::classify(source) {
+            Ok(query) => query,
+            Err(error) => {
+                return if let Some(detail) = error.diagnostic() {
+                    sink.error(&detail)
+                } else {
+                    Status::Unsupported
+                };
+            }
+        };
+        // SAFETY: the native limit reader returns a positive integer.
+        budget.path_depth_cap = unsafe { cbm_cypher_max_depth() } as u32;
         // from_handle borrows the native handle without taking ownership.
         let result = unsafe { Connection::from_handle(db) }
             .map_err(ExecutionError::Storage)
@@ -113,11 +124,7 @@ unsafe extern "C" fn evaluate(
             Err(ExecutionError::Storage(error)) => {
                 let detail =
                     format!("query aborted: reading the graph failed ({error})");
-                // SAFETY: C copies the detail during the call.
-                unsafe {
-                    (sink.storage_error)(sink.context, detail.as_bytes().into())
-                };
-                Status::Error
+                sink.error(&detail)
             }
         }
     })
@@ -125,6 +132,12 @@ unsafe extern "C" fn evaluate(
 }
 
 impl Sink {
+    fn error(&self, detail: &str) -> Status {
+        // SAFETY: C copies the detail during the call.
+        unsafe { (self.storage_error)(self.context, detail.as_bytes().into()) };
+        Status::Error
+    }
+
     fn emit(&self, result: &ResultRows) -> Status {
         let mut cells: Vec<_> = result
             .columns
@@ -140,6 +153,12 @@ impl Sink {
                 cells.len(),
                 result.rows.len(),
                 result.truncated,
+                result
+                    .warning()
+                    .as_deref()
+                    .unwrap_or_default()
+                    .as_bytes()
+                    .into(),
             )
         } {
             return Status::Error;
