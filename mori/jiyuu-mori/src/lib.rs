@@ -47,6 +47,10 @@ mod mcp_methods;
 #[cfg(feature = "native-engine-abi")]
 pub mod startup;
 
+#[cfg(feature = "c-backend")]
+#[path = "ui/http_transport.rs"]
+mod ui_http_transport;
+
 #[cfg(any(feature = "graphql-callbacks", test))]
 mod gqlgen;
 #[cfg(any(all(feature = "graphql-callbacks", not(test)), test))]

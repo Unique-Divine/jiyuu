@@ -14,6 +14,7 @@
  * Has its own cbm_mcp_server_t with a separate SQLite connection (WAL reader).
  */
 #include "ui/http_server.h"
+#include "ui/http_query.h"
 #include "ui/http_routes.h"
 #include "ui/activity.h"
 #include "pipeline/pipeline.h" /* canonical project identity for job logs */
@@ -75,6 +76,25 @@
 #ifdef __FreeBSD__
 #include <sys/types.h>
 #include <sys/sysctl.h>
+#endif
+
+#ifdef CBM_UI_RUST_TRANSPORT
+#include "ui/http_transport.h"
+typedef mori_ui_http_transport_t ui_listener_t;
+#define ui_listener_bind mori_ui_http_bind
+#define ui_listener_port mori_ui_http_port
+#define ui_listener_stop mori_ui_http_stop
+#define ui_listener_free mori_ui_http_free
+#define ui_listener_activity mori_ui_http_activity
+#define ui_listener_set_receive_ms mori_ui_http_set_receive_ms
+#else
+typedef cbm_httpd_t ui_listener_t;
+#define ui_listener_bind cbm_httpd_listen
+#define ui_listener_port cbm_httpd_port
+#define ui_listener_stop cbm_httpd_interrupt
+#define ui_listener_free cbm_httpd_close
+#define ui_listener_activity cbm_httpd_activity_for_test
+#define ui_listener_set_receive_ms cbm_httpd_set_recv_deadline_ms
 #endif
 
 /* ── Constants ────────────────────────────────────────────────── */
@@ -242,7 +262,7 @@ typedef struct {
 } index_job_t;
 
 struct cbm_http_server {
-    cbm_httpd_t *listener;
+    ui_listener_t *listener;
     cbm_mcp_server_t *mcp;       /* own MCP server instance (read-only) */
     struct cbm_watcher *watcher; /* external watcher ref (not owned) */
     cbm_http_index_executor_fn index_executor;
@@ -411,7 +431,7 @@ static char *git_origin_remote_url(const char *root_path) {
  * fields are empty strings when unknown (e.g. no git remote). */
 static void handle_repo_info(ui_response_t *c, const cbm_http_req_t *req) {
     char project[256] = {0};
-    if (!cbm_http_query_param(req->query, "project", project, (int)sizeof(project)) ||
+    if (!cbm_ui_http_query_param(req->query, "project", project, (int)sizeof(project)) ||
         project[0] == '\0') {
         replyf(c, 400, c->cors_json, "{\"error\":\"missing project parameter\"}");
         return;
@@ -614,7 +634,7 @@ static bool log_query_has_key(const char *query, const char *key) {
 static void handle_logs(ui_response_t *c, const cbm_http_req_t *req) {
     char lines_str[16] = {0};
     int max_lines = 100;
-    if (cbm_http_query_param(req->query, "lines", lines_str, (int)sizeof(lines_str))) {
+    if (cbm_ui_http_query_param(req->query, "lines", lines_str, (int)sizeof(lines_str))) {
         int v = atoi(lines_str);
         if (v > 0 && v <= LOG_RING_SIZE)
             max_lines = v;
@@ -622,11 +642,11 @@ static void handle_logs(ui_response_t *c, const cbm_http_req_t *req) {
 
     char after_str[32] = {0}, severity[16] = {0};
     int64_t after = -1;
-    if (cbm_http_query_param(req->query, "after", after_str, sizeof(after_str)))
+    if (cbm_ui_http_query_param(req->query, "after", after_str, sizeof(after_str)))
         after = strtoll(after_str, NULL, 10);
     int min_level = 0;
-    if (cbm_http_query_param(req->query, "min_level", severity, sizeof(severity)) ||
-        cbm_http_query_param(req->query, "level", severity, sizeof(severity))) {
+    if (cbm_ui_http_query_param(req->query, "min_level", severity, sizeof(severity)) ||
+        cbm_ui_http_query_param(req->query, "level", severity, sizeof(severity))) {
         if (!strcmp(severity, "error"))
             min_level = 3;
         else if (!strcmp(severity, "warn"))
@@ -635,9 +655,9 @@ static void handle_logs(ui_response_t *c, const cbm_http_req_t *req) {
             min_level = 1;
     }
     char project[256] = {0}, scope[32] = {0}, query[257] = {0};
-    bool has_query = cbm_http_query_param(req->query, "q", query, sizeof(query));
-    bool has_project = cbm_http_query_param(req->query, "project", project, sizeof(project));
-    bool has_scope = cbm_http_query_param(req->query, "scope", scope, sizeof(scope));
+    bool has_query = cbm_ui_http_query_param(req->query, "q", query, sizeof(query));
+    bool has_project = cbm_ui_http_query_param(req->query, "project", project, sizeof(project));
+    bool has_scope = cbm_ui_http_query_param(req->query, "scope", scope, sizeof(scope));
     bool unattributed = has_scope && !strcmp(scope, "unattributed");
     if ((log_query_has_key(req->query, "q") && !has_query) ||
         (log_query_has_key(req->query, "project") && !has_project) ||
@@ -743,9 +763,9 @@ static void handle_agent_events(ui_response_t *c, const cbm_http_req_t *req, boo
         status = cbm_activity_ingest(db, req->body, &json);
     } else {
         char project[256] = {0}, cursor[32] = {0}, limit[16] = {0};
-        cbm_http_query_param(req->query, "project", project, sizeof(project));
-        cbm_http_query_param(req->query, "after", cursor, sizeof(cursor));
-        cbm_http_query_param(req->query, "limit", limit, sizeof(limit));
+        cbm_ui_http_query_param(req->query, "project", project, sizeof(project));
+        cbm_ui_http_query_param(req->query, "after", cursor, sizeof(cursor));
+        cbm_ui_http_query_param(req->query, "limit", limit, sizeof(limit));
         json = cbm_activity_agents(db, project, strtoll(cursor, NULL, 10), atoi(limit));
         if (!json)
             status = 503;
@@ -1102,7 +1122,7 @@ static void handle_ui_log_post(ui_response_t *c, const cbm_http_req_t *req) {
 static void handle_ui_log_get(ui_response_t *c, const cbm_http_req_t *req) {
     char lines_str[16] = {0};
     int max_lines = UI_LOG_TAIL_DEFAULT_LINES;
-    if (cbm_http_query_param(req->query, "lines", lines_str, (int)sizeof(lines_str))) {
+    if (cbm_ui_http_query_param(req->query, "lines", lines_str, (int)sizeof(lines_str))) {
         int v = atoi(lines_str);
         if (v > 0 && v <= UI_LOG_TAIL_MAX_LINES)
             max_lines = v;
@@ -1323,7 +1343,7 @@ static void append_roots_json(char *buf, size_t bufsz, int *pos) {
 static void handle_browse(ui_response_t *c, const cbm_http_req_t *req) {
     char path[1024] = {0};
     const char *home = cbm_get_home_dir();
-    if (!cbm_http_query_param(req->query, "path", path, (int)sizeof(path)) || path[0] == '\0') {
+    if (!cbm_ui_http_query_param(req->query, "path", path, (int)sizeof(path)) || path[0] == '\0') {
         /* Default to home directory */
         if (home)
             snprintf(path, sizeof(path), "%s", home);
@@ -1416,7 +1436,8 @@ static void handle_browse(ui_response_t *c, const cbm_http_req_t *req) {
 /* GET /api/adr?project=X — get ADR content for a project */
 static void handle_adr_get(ui_response_t *c, const cbm_http_req_t *req) {
     char name[256] = {0};
-    if (!cbm_http_query_param(req->query, "project", name, (int)sizeof(name)) || name[0] == '\0') {
+    if (!cbm_ui_http_query_param(req->query, "project", name, (int)sizeof(name)) ||
+        name[0] == '\0') {
         replyf(c, 400, c->cors_json, "{\"error\":\"missing project\"}");
         return;
     }
@@ -1899,7 +1920,7 @@ static void unwatch_project(cbm_http_server_t *srv, const char *name) {
 static void handle_delete_project(cbm_http_server_t *srv, ui_response_t *c,
                                   const cbm_http_req_t *req) {
     char name[256] = {0};
-    if (!cbm_http_query_param(req->query, "name", name, (int)sizeof(name)) || name[0] == '\0') {
+    if (!cbm_ui_http_query_param(req->query, "name", name, (int)sizeof(name)) || name[0] == '\0') {
         replyf(c, 400, c->cors_json, "{\"error\":\"missing name\"}");
         return;
     }
@@ -1952,7 +1973,7 @@ static void handle_delete_project(cbm_http_server_t *srv, ui_response_t *c,
 static void handle_project_health(ui_response_t *c, const cbm_http_req_t *req,
                                   cbm_http_server_t *srv) {
     char name[256] = {0};
-    if (!cbm_http_query_param(req->query, "name", name, (int)sizeof(name)) || name[0] == '\0') {
+    if (!cbm_ui_http_query_param(req->query, "name", name, (int)sizeof(name)) || name[0] == '\0') {
         replyf(c, 400, c->cors_json, "{\"error\":\"missing name\"}");
         return;
     }
@@ -2128,14 +2149,14 @@ static void handle_layout(ui_response_t *c, const cbm_http_req_t *req) {
     char max_str[32] = {0};
     char graph_str[32] = {0};
 
-    if (!cbm_http_query_param(req->query, "project", project, (int)sizeof(project)) ||
+    if (!cbm_ui_http_query_param(req->query, "project", project, (int)sizeof(project)) ||
         project[0] == '\0') {
         replyf(c, 400, c->cors_json, "{\"error\":\"missing project parameter\"}");
         return;
     }
 
     int max_nodes = 0; /* 0 → layout default budget */
-    if (cbm_http_query_param(req->query, "max_nodes", max_str, (int)sizeof(max_str))) {
+    if (cbm_ui_http_query_param(req->query, "max_nodes", max_str, (int)sizeof(max_str))) {
         int v = atoi(max_str);
         if (v > 0)
             max_nodes = v;
@@ -2146,7 +2167,7 @@ static void handle_layout(ui_response_t *c, const cbm_http_req_t *req) {
      * only files the indexer could not fully cover, as their file structure.
      * The db file still resolves from the validated base project name. */
     bool missed_graph = false;
-    if (cbm_http_query_param(req->query, "graph", graph_str, (int)sizeof(graph_str))) {
+    if (cbm_ui_http_query_param(req->query, "graph", graph_str, (int)sizeof(graph_str))) {
         missed_graph = strcmp(graph_str, "missed") == 0;
     }
     char scoped_project[320];
@@ -2175,7 +2196,7 @@ static void handle_layout(ui_response_t *c, const cbm_http_req_t *req) {
      * skeleton or cross-repo satellites; the client asks for those at finer
      * levels. */
     char level_str[32] = {0};
-    if (cbm_http_query_param(req->query, "level", level_str, (int)sizeof(level_str)) &&
+    if (cbm_ui_http_query_param(req->query, "level", level_str, (int)sizeof(level_str)) &&
         strcmp(level_str, "regions") == 0 && !missed_graph) {
         char *regions_json = cbm_layout_regions_json(store, scoped_project);
         cbm_store_close(store);
@@ -2191,7 +2212,7 @@ static void handle_layout(ui_response_t *c, const cbm_http_req_t *req) {
     /* scope=region:<id> — full-detail layout of one region's files only. */
     char scope_str[64] = {0};
     int scope_region = -1;
-    if (cbm_http_query_param(req->query, "scope", scope_str, (int)sizeof(scope_str)) &&
+    if (cbm_ui_http_query_param(req->query, "scope", scope_str, (int)sizeof(scope_str)) &&
         strncmp(scope_str, "region:", 7) == 0) {
         scope_region = atoi(scope_str + 7);
         if (scope_region < 0) {
@@ -2434,7 +2455,7 @@ static void handle_layout(ui_response_t *c, const cbm_http_req_t *req) {
  * Returns NULL after replying. */
 static cbm_store_t *atlas_open_project(ui_response_t *c, const cbm_http_req_t *req, char *project,
                                        size_t project_cap) {
-    if (!cbm_http_query_param(req->query, "project", project, (int)project_cap) ||
+    if (!cbm_ui_http_query_param(req->query, "project", project, (int)project_cap) ||
         project[0] == '\0') {
         replyf(c, 400, c->cors_json, "{\"error\":\"missing project parameter\"}");
         return NULL;
@@ -2486,23 +2507,23 @@ static bool xrepo_query_has(const char *query, const char *key) {
  * individual links behind one summary arc, paged. */
 static void handle_xrepo_links(ui_response_t *c, const cbm_http_req_t *req) {
     char from[256] = {0}, to[256] = {0}, type[64] = {0}, num[32] = {0};
-    if (!cbm_http_query_param(req->query, "from", from, (int)sizeof(from)) || !from[0]) {
+    if (!cbm_ui_http_query_param(req->query, "from", from, (int)sizeof(from)) || !from[0]) {
         replyf(c, 400, c->cors_json, "{\"error\":\"missing from parameter\"}");
         return;
     }
     /* A given to/type that does not parse (too long, bad escape) is an
      * error, not "any": widening would answer a question nobody asked. */
     if ((xrepo_query_has(req->query, "to") &&
-         !cbm_http_query_param(req->query, "to", to, (int)sizeof(to))) ||
+         !cbm_ui_http_query_param(req->query, "to", to, (int)sizeof(to))) ||
         (xrepo_query_has(req->query, "type") &&
-         !cbm_http_query_param(req->query, "type", type, (int)sizeof(type)))) {
+         !cbm_ui_http_query_param(req->query, "type", type, (int)sizeof(type)))) {
         replyf(c, 400, c->cors_json, "{\"error\":\"invalid to or type\"}");
         return;
     }
     int limit = 0, offset = 0;
-    if (cbm_http_query_param(req->query, "limit", num, (int)sizeof(num)))
+    if (cbm_ui_http_query_param(req->query, "limit", num, (int)sizeof(num)))
         limit = atoi(num);
-    if (cbm_http_query_param(req->query, "offset", num, (int)sizeof(num)))
+    if (cbm_ui_http_query_param(req->query, "offset", num, (int)sizeof(num)))
         offset = atoi(num);
     const char *dir = cbm_resolve_cache_dir();
     int status = 500;
@@ -2525,7 +2546,7 @@ static void handle_atlas_tree(ui_response_t *c, const cbm_http_req_t *req) {
     if (!store)
         return;
     char path[512] = {0};
-    cbm_http_query_param(req->query, "path", path, (int)sizeof(path));
+    cbm_ui_http_query_param(req->query, "path", path, (int)sizeof(path));
     char *json = cbm_atlas_tree_json(store, project, path);
     cbm_store_close(store);
     atlas_reply_json(c, json, 500, "{\"error\":\"tree computation failed\"}");
@@ -2542,13 +2563,13 @@ static void handle_atlas_symbol(ui_response_t *c, const cbm_http_req_t *req) {
     char limit_str[16] = {0};
     char offset_str[16] = {0};
     int64_t id = -1;
-    if (cbm_http_query_param(req->query, "id", id_str, (int)sizeof(id_str)) && id_str[0])
+    if (cbm_ui_http_query_param(req->query, "id", id_str, (int)sizeof(id_str)) && id_str[0])
         id = strtoll(id_str, NULL, 10);
-    cbm_http_query_param(req->query, "qn", qn, (int)sizeof(qn));
+    cbm_ui_http_query_param(req->query, "qn", qn, (int)sizeof(qn));
     int limit = 0, offset = 0;
-    if (cbm_http_query_param(req->query, "limit", limit_str, (int)sizeof(limit_str)))
+    if (cbm_ui_http_query_param(req->query, "limit", limit_str, (int)sizeof(limit_str)))
         limit = atoi(limit_str);
-    if (cbm_http_query_param(req->query, "offset", offset_str, (int)sizeof(offset_str)))
+    if (cbm_ui_http_query_param(req->query, "offset", offset_str, (int)sizeof(offset_str)))
         offset = atoi(offset_str);
     if (id < 0 && qn[0] == '\0') {
         cbm_store_close(store);
@@ -2586,9 +2607,9 @@ static void handle_atlas_impact_analysis(ui_response_t *c, const cbm_http_req_t 
     cbm_store_t *store = atlas_open_project(c, req, project, sizeof(project));
     if (!store)
         return;
-    cbm_http_query_param(req->query, "file", file, sizeof(file));
-    cbm_http_query_param(req->query, "node", node, sizeof(node));
-    cbm_http_query_param(req->query, "refresh", refresh, sizeof(refresh));
+    cbm_ui_http_query_param(req->query, "file", file, sizeof(file));
+    cbm_ui_http_query_param(req->query, "node", node, sizeof(node));
+    cbm_ui_http_query_param(req->query, "refresh", refresh, sizeof(refresh));
     int64_t id = node[0] == '#' ? strtoll(node + 1, NULL, 10) : -1;
     char *json = cbm_atlas_impact_analysis_request(
         store, project, file, id, node[0] && node[0] != '#' ? node : NULL, !strcmp(refresh, "1"));
@@ -2690,9 +2711,9 @@ static void handle_atlas_trace(ui_response_t *c, const cbm_http_req_t *req) {
     char from_str[1024] = {0};
     char to_str[1024] = {0};
     char mode[16] = {0};
-    cbm_http_query_param(req->query, "from", from_str, (int)sizeof(from_str));
-    cbm_http_query_param(req->query, "to", to_str, (int)sizeof(to_str));
-    cbm_http_query_param(req->query, "mode", mode, (int)sizeof(mode));
+    cbm_ui_http_query_param(req->query, "from", from_str, (int)sizeof(from_str));
+    cbm_ui_http_query_param(req->query, "to", to_str, (int)sizeof(to_str));
+    cbm_ui_http_query_param(req->query, "mode", mode, (int)sizeof(mode));
     if (!from_str[0] || !to_str[0]) {
         cbm_store_close(store);
         replyf(c, 400, c->cors_json, "{\"error\":\"missing from/to parameter\"}");
@@ -2703,7 +2724,7 @@ static void handle_atlas_trace(ui_response_t *c, const cbm_http_req_t *req) {
     char *json = cbm_atlas_trace_json(store, project, from_id, from_id < 0 ? from_str : NULL, to_id,
                                       to_id < 0 ? to_str : NULL, mode[0] ? mode : "calls");
     char wantg[8] = {0};
-    cbm_http_query_param(req->query, "guards", wantg, (int)sizeof(wantg));
+    cbm_ui_http_query_param(req->query, "guards", wantg, (int)sizeof(wantg));
     if (json && wantg[0] == '1')
         json = atlas_trace_attach_guards(store, project, json);
     json = cbm_atlas_attach_observed(store, project, json);
@@ -2814,7 +2835,7 @@ static void handle_atlas_who(ui_response_t *c, const cbm_http_req_t *req) {
     if (!store)
         return;
     char file[1024] = {0};
-    cbm_http_query_param(req->query, "file", file, (int)sizeof(file));
+    cbm_ui_http_query_param(req->query, "file", file, (int)sizeof(file));
     if (!file[0]) {
         cbm_store_close(store);
         replyf(c, 400, c->cors_json, "{\"error\":\"missing file parameter\"}");
@@ -2835,9 +2856,9 @@ static void handle_atlas_symbol_history(ui_response_t *c, const cbm_http_req_t *
     char file[1024] = {0};
     char start_str[32] = {0};
     char end_str[32] = {0};
-    cbm_http_query_param(req->query, "file", file, (int)sizeof(file));
-    cbm_http_query_param(req->query, "start", start_str, (int)sizeof(start_str));
-    cbm_http_query_param(req->query, "end", end_str, (int)sizeof(end_str));
+    cbm_ui_http_query_param(req->query, "file", file, (int)sizeof(file));
+    cbm_ui_http_query_param(req->query, "start", start_str, (int)sizeof(start_str));
+    cbm_ui_http_query_param(req->query, "end", end_str, (int)sizeof(end_str));
     long long start_line = strtoll(start_str, NULL, 10);
     long long end_line = strtoll(end_str, NULL, 10);
     if (!file[0] || start_line < 1 || end_line < start_line) {
@@ -2859,7 +2880,7 @@ static void handle_atlas_impact(ui_response_t *c, const cbm_http_req_t *req) {
     if (!store)
         return;
     char node_str[1024] = {0};
-    cbm_http_query_param(req->query, "node", node_str, (int)sizeof(node_str));
+    cbm_ui_http_query_param(req->query, "node", node_str, (int)sizeof(node_str));
     if (!node_str[0]) {
         cbm_store_close(store);
         replyf(c, 400, c->cors_json, "{\"error\":\"missing node parameter\"}");
@@ -2956,9 +2977,9 @@ static void handle_atlas_why(ui_response_t *c, const cbm_http_req_t *req) {
     char idbuf[32] = {0};
     char qn[1024] = {0};
     char dir[8] = {0};
-    cbm_http_query_param(req->query, "id", idbuf, (int)sizeof(idbuf));
-    cbm_http_query_param(req->query, "qn", qn, (int)sizeof(qn));
-    cbm_http_query_param(req->query, "dir", dir, (int)sizeof(dir));
+    cbm_ui_http_query_param(req->query, "id", idbuf, (int)sizeof(idbuf));
+    cbm_ui_http_query_param(req->query, "qn", qn, (int)sizeof(qn));
+    cbm_ui_http_query_param(req->query, "dir", dir, (int)sizeof(dir));
     if (!idbuf[0] && !qn[0]) {
         cbm_store_close(store);
         replyf(c, 400, c->cors_json, "{\"error\":\"missing id or qn parameter\"}");
@@ -2994,7 +3015,7 @@ static void handle_atlas_blast(ui_response_t *c, const cbm_http_req_t *req) {
     if (!store)
         return;
     char files[8192] = {0};
-    cbm_http_query_param(req->query, "files", files, (int)sizeof(files));
+    cbm_ui_http_query_param(req->query, "files", files, (int)sizeof(files));
     if (!files[0]) {
         cbm_store_close(store);
         replyf(c, 400, c->cors_json, "{\"error\":\"missing files parameter\"}");
@@ -3023,7 +3044,7 @@ static void handle_atlas_scent(ui_response_t *c, const cbm_http_req_t *req) {
     if (!store)
         return;
     char q[256] = {0};
-    cbm_http_query_param(req->query, "q", q, (int)sizeof(q));
+    cbm_ui_http_query_param(req->query, "q", q, (int)sizeof(q));
     if (strlen(q) < 2) {
         cbm_store_close(store);
         replyf(c, 400, c->cors_json, "{\"error\":\"q must be at least 2 characters\"}");
@@ -3053,11 +3074,11 @@ static void handle_atlas_flow(ui_response_t *c, const cbm_http_req_t *req) {
         return;
     char id_str[16] = {0};
     int id = -1;
-    if (cbm_http_query_param(req->query, "id", id_str, (int)sizeof(id_str)))
+    if (cbm_ui_http_query_param(req->query, "id", id_str, (int)sizeof(id_str)))
         id = atoi(id_str);
     char *json = cbm_atlas_flow_json(store, project, id);
     char wantg[8] = {0};
-    cbm_http_query_param(req->query, "guards", wantg, (int)sizeof(wantg));
+    cbm_ui_http_query_param(req->query, "guards", wantg, (int)sizeof(wantg));
     if (json && wantg[0] == '1')
         json = atlas_flow_attach_guards(store, project, json);
     json = cbm_atlas_attach_observed(store, project, json);
@@ -3504,8 +3525,8 @@ static cbm_http_server_t *http_server_new(int port, bool read_only) {
     cbm_mcp_server_set_background_tasks(srv->mcp, false);
     cbm_mcp_server_set_index_executor(srv->mcp, http_read_only_index_rejected, srv);
 
-    /* Bind to localhost only (httpd refuses anything else by construction) */
-    srv->listener = cbm_httpd_listen(port);
+    /* Both transports bind to IPv4 loopback. */
+    srv->listener = ui_listener_bind(port);
     if (!srv->listener) {
         char port_str[16];
         snprintf(port_str, sizeof(port_str), "%d", port);
@@ -3516,7 +3537,7 @@ static cbm_http_server_t *http_server_new(int port, bool read_only) {
         return NULL;
     }
 
-    srv->port = cbm_httpd_port(srv->listener);
+    srv->port = ui_listener_port(srv->listener);
     srv->listener_ok = true;
 
     /* Standalone startup must reach its signal wait even if stderr blocks. */
@@ -3554,7 +3575,7 @@ bool cbm_http_server_free(cbm_http_server_t *srv) {
             srv->index_jobs[i].thread_started = false;
         }
     }
-    if (!cbm_httpd_close(srv->listener))
+    if (!ui_listener_free(srv->listener))
         return false;
     cbm_atlas_impact_analysis_shutdown();
     cbm_mcp_server_free(srv->mcp);
@@ -3571,7 +3592,7 @@ void cbm_http_server_stop(cbm_http_server_t *srv) {
             (void)cbm_mcp_server_cancel_active(srv->mcp);
             cbm_atlas_impact_analysis_cancel();
         }
-        cbm_httpd_interrupt(srv->listener);
+        ui_listener_stop(srv->listener);
     }
 }
 
@@ -3598,6 +3619,25 @@ static bool standalone_git_cancelled(void *context) {
 }
 #endif
 
+#ifdef CBM_UI_RUST_TRANSPORT
+static void rust_dispatch(void *context, const cbm_http_req_t *req, cbm_ui_http_reply_fn reply,
+                          void *reply_context) {
+    cbm_http_server_dispatch(context, req, reply, reply_context);
+}
+
+static void rust_finish_request(void *context, const cbm_http_req_t *req, int status,
+                                int64_t elapsed_ms, size_t response_bytes) {
+    (void)context;
+    if (req || status > 0)
+        cbm_log_http_request("graph_ui", req ? req->method : "", req ? req->path : "", status,
+                             elapsed_ms, req ? req->body_len : 0, response_bytes);
+    cbm_mem_class_flush_thread();
+}
+
+static void run_transport(cbm_http_server_t *srv) {
+    mori_ui_http_run(srv->listener, srv, rust_dispatch, rust_finish_request);
+}
+#else
 static void socket_reply(void *context, int status, const char *headers, const void *body,
                          size_t body_len, int send_deadline_ms) {
     cbm_http_conn_t *conn = context;
@@ -3606,23 +3646,7 @@ static void socket_reply(void *context, int status, const char *headers, const v
     cbm_http_reply_buf(conn, status, headers, body, body_len);
 }
 
-void cbm_http_server_run(cbm_http_server_t *srv) {
-    if (!srv)
-        return;
-    int expected = HTTP_RUN_SCHEDULED;
-    if (!atomic_compare_exchange_strong_explicit(&srv->run_state, &expected, HTTP_RUN_RUNNING,
-                                                 memory_order_acq_rel, memory_order_acquire))
-        return;
-    if (!srv->listener_ok) {
-        cbm_mem_class_flush_thread();
-        atomic_store_explicit(&srv->run_state, HTTP_RUN_COMPLETED, memory_order_release);
-        return;
-    }
-
-#ifndef _WIN32
-    if (srv->read_only)
-        cbm_git_context_set_capture_cancel(standalone_git_cancelled, srv);
-#endif
+static void run_transport(cbm_http_server_t *srv) {
     while (!atomic_load(&srv->stop_flag)) {
         cbm_http_conn_t *conn = cbm_httpd_accept(srv->listener, 200);
         if (!conn)
@@ -3654,6 +3678,27 @@ void cbm_http_server_run(cbm_http_server_t *srv) {
         /* Retained response caches can be released by a different thread. */
         cbm_mem_class_flush_thread();
     }
+}
+#endif
+
+void cbm_http_server_run(cbm_http_server_t *srv) {
+    if (!srv)
+        return;
+    int expected = HTTP_RUN_SCHEDULED;
+    if (!atomic_compare_exchange_strong_explicit(&srv->run_state, &expected, HTTP_RUN_RUNNING,
+                                                 memory_order_acq_rel, memory_order_acquire))
+        return;
+    if (!srv->listener_ok) {
+        cbm_mem_class_flush_thread();
+        atomic_store_explicit(&srv->run_state, HTTP_RUN_COMPLETED, memory_order_release);
+        return;
+    }
+
+#ifndef _WIN32
+    if (srv->read_only)
+        cbm_git_context_set_capture_cancel(standalone_git_cancelled, srv);
+#endif
+    run_transport(srv);
 #ifndef _WIN32
     if (srv->read_only)
         cbm_git_context_set_capture_cancel(NULL, NULL);
@@ -3663,7 +3708,7 @@ void cbm_http_server_run(cbm_http_server_t *srv) {
 }
 
 cbm_httpd_activity_t cbm_http_server_activity_for_test(cbm_http_server_t *srv) {
-    return srv ? cbm_httpd_activity_for_test(srv->listener) : CBM_HTTPD_ACTIVITY_IDLE;
+    return srv ? ui_listener_activity(srv->listener) : CBM_HTTPD_ACTIVITY_IDLE;
 }
 
 bool cbm_http_server_is_running(const cbm_http_server_t *srv) {
@@ -3676,7 +3721,7 @@ int cbm_http_server_port(const cbm_http_server_t *srv) {
 
 void cbm_http_server_set_recv_deadline_ms(cbm_http_server_t *srv, int ms) {
     if (srv && srv->listener_ok) {
-        cbm_httpd_set_recv_deadline_ms(srv->listener, ms);
+        ui_listener_set_receive_ms(srv->listener, ms);
     }
 }
 
