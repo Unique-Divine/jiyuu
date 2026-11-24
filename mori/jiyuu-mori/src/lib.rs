@@ -7,8 +7,6 @@ mod architecture_projection;
 #[cfg(any(feature = "native-engine-abi", test))]
 mod complexity;
 #[cfg(feature = "native-engine-abi")]
-mod test_impact_git;
-#[cfg(feature = "native-engine-abi")]
 mod doc_file_links;
 #[cfg(any(feature = "native-engine-abi", test))]
 mod explicit_override;
@@ -16,6 +14,8 @@ mod explicit_override;
 mod pdf_doc_links;
 #[cfg(any(feature = "native-engine-abi", test))]
 mod similarity;
+#[cfg(feature = "native-engine-abi")]
+mod test_impact_git;
 
 #[cfg(any(feature = "graphql-callbacks", test))]
 mod gqlgen;
