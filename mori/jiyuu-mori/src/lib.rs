@@ -72,6 +72,12 @@ mod markdown_extract;
 pub use markdown_extract::register as mori_register_markdown_extractor;
 
 #[cfg(feature = "c-backend")]
+mod ts_static_imports;
+
+#[cfg(feature = "c-backend")]
+pub use ts_static_imports::register as mori_register_ts_static_imports;
+
+#[cfg(feature = "c-backend")]
 mod source_publish;
 
 #[cfg(feature = "c-backend")]

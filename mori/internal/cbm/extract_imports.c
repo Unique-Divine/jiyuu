@@ -1785,6 +1785,58 @@ static bool process_es_import_statement(CBMExtractCtx *ctx, TSNode node) {
     return true;
 }
 
+/* The sink receives nodes borrowed from the live tree. C keeps ownership
+ * of import rows and their strings. */
+typedef bool (*ts_static_import_emit_t)(void *, TSNode, const TSNode *, const TSNode *, bool);
+typedef bool (*ts_static_import_extractor_t)(TSNode, void *, ts_static_import_emit_t);
+static ts_static_import_extractor_t ts_static_import_extractor;
+
+void cbm_ts_set_static_import_extractor(ts_static_import_extractor_t extract);
+void cbm_ts_set_static_import_extractor(ts_static_import_extractor_t extract) {
+    ts_static_import_extractor = extract;
+}
+
+typedef struct {
+    CBMExtractCtx *ctx;
+    const char *path;
+} TSStaticImportOutput;
+
+static bool emit_ts_static_import(void *context, TSNode source, const TSNode *local,
+                                  const TSNode *member, bool is_default) {
+    TSStaticImportOutput *output = context;
+    CBMExtractCtx *ctx = output->ctx;
+    CBMArena *arena = ctx->arena;
+    if (!output->path) {
+        output->path = strip_quotes(arena, cbm_node_text(arena, source, ctx->source));
+        /* The source is shared by every binding. Decline before writing any
+         * row so the statement can fall back to native extraction. */
+        if (!output->path || !output->path[0]) {
+            return false;
+        }
+    }
+    const char *exported = member ? cbm_node_text(arena, *member, ctx->source) : NULL;
+    const char *name = local    ? cbm_node_text(arena, *local, ctx->source)
+                       : member ? exported
+                                : path_last(arena, output->path);
+    CBMImport import = {.local_name = name,
+                        .module_path = output->path,
+                        .member = exported,
+                        .is_default = is_default,
+                        .local_name_synthesized = !local && !member};
+    cbm_imports_push(&ctx->result->imports, arena, import);
+    return true;
+}
+
+static bool process_ts_static_import(CBMExtractCtx *ctx, TSNode node) {
+    TSStaticImportOutput output = {.ctx = ctx};
+    if (!ts_static_import_extractor(node, &output, emit_ts_static_import)) {
+        return false;
+    }
+    cbm_log_debug("extract.ts_static_import", "implementation", "rust", "file",
+                  ctx->rel_path ? ctx->rel_path : "");
+    return true;
+}
+
 /* The identifier a require call is bound to when no declarator holds the call
  * itself: a lazy assignment `winston = require('winston')`, or a declarator
  * over one member `const dns = require('dns').promises`. NULL otherwise. */
@@ -1883,7 +1935,7 @@ static bool process_commonjs_require(CBMExtractCtx *ctx, TSNode call) {
     return true;
 }
 
-static void walk_es_imports(CBMExtractCtx *ctx, TSNode root) {
+static void walk_es_imports(CBMExtractCtx *ctx, TSNode root, bool rust_static) {
     TSNodeStack stack;
     ts_nstack_init(&stack, ctx, CBM_SZ_512);
     ts_nstack_push(&stack, root);
@@ -1894,7 +1946,8 @@ static void walk_es_imports(CBMExtractCtx *ctx, TSNode root) {
         bool push_children = true;
 
         if (strcmp(kind, "import_statement") == 0) {
-            if (process_es_import_statement(ctx, node)) {
+            if ((rust_static && process_ts_static_import(ctx, node)) ||
+                process_es_import_statement(ctx, node)) {
                 push_children = false;
             }
         } else if (strcmp(kind, "export_statement") == 0) {
@@ -1927,7 +1980,8 @@ static void walk_es_imports(CBMExtractCtx *ctx, TSNode root) {
 }
 
 static void parse_es_imports(CBMExtractCtx *ctx) {
-    walk_es_imports(ctx, ctx->root);
+    bool typescript = ctx->language == CBM_LANG_TYPESCRIPT || ctx->language == CBM_LANG_TSX;
+    walk_es_imports(ctx, ctx->root, typescript && ts_static_import_extractor != NULL);
 }
 
 // --- Java imports ---
@@ -3141,7 +3195,7 @@ static void parse_one_embedded_block(CBMExtractCtx *ctx, const CBMEmbeddedBlock 
         .return_type_table = ctx->return_type_table,
     };
     cbm_extract_definitions_without_module(&sub_ctx);
-    walk_es_imports(&sub_ctx, sub_ctx.root);
+    walk_es_imports(&sub_ctx, sub_ctx.root, false);
     cbm_extract_unified(&sub_ctx);
 
     ts_tree_delete(tree);
