@@ -74,31 +74,40 @@ the CLI or the MCP tools. A mistake here spends the person's money.
 8. **Confirm again when anything changes.** A new price, a new size, or a new
    account needs a new confirmation. An earlier yes does not carry over.
 
-## Unknown Intents
+## Unknown and Pending Intents
 
-The CLI records each intent's identity locally before it submits. A network
-error after submission leaves the outcome unknown.
+The CLI records each intent locally before submitting it. If the response
+is lost, the local status stays `unknown`. Both `unknown` and `pending`
+block new trades for that account and Keeper endpoint.
 
-- An unknown intent blocks new trades on that account until it is resolved.
-- Resolve it with `sai --json intent status ADDR --key KEY`, or with tools
-  `intent_local` then `intent_status`.
-- To see what happened on this machine, read the logs: `sai --json logs tail
-  -n 50 --event intent` shows the intent's status changes by `intentKey`,
-  and `--event keeper.request` shows whether the `submit` request was sent
-  and what Keeper answered. [cli.md](cli.md#logs) explains the fields. The
-  logs are evidence, not the outcome: Keeper's record from `intent status`
-  still decides.
-- When Keeper has no record of the key five minutes after submission, the CLI
-  marks the intent `absent` and trading resumes. Keeper expires an unadmitted
-  intent after two minutes, so `absent` means it was not admitted.
-- An intent marked `not_sent` failed before the request left the machine. It
-  does not block.
-- Tool `trade_open` refuses with `RECENT_OPEN_PENDING` while a recent open is
-  unknown or accepted. Check those intents with `intent_status`. Pass
-  `allow_concurrent_open=true` only when the person confirms they want
-  another open position.
-- `sai doctor` settles unknown intents it can resolve by reading Keeper. It
-  never places or cancels a trade.
+- Use `sai --json intent status ADDR --key KEY` or tool `intent_status`
+  with `addr` and `key` to reconcile the local ledger. Use `intent local`
+  or tool `intent_local` to find the key.
+- Keeper reports `pending_exec` after the request transaction lands and
+  while the market order awaits a next-oracle fill or cancellation. A
+  failure step with error code `market_order_outcome_not_indexed` is also
+  provisional. When the result has `outcome: pending`, follow its `hint`
+  and check the same key again before trading.
+- A server `exec_pass` establishes success even if trade history lags. For
+  a limit order, this confirms placement. For a provisional unindexed
+  outcome or a Perp trade reported as `exec_finality_observed`, a history
+  row with the same intent key and a trade establishes success. Each
+  status check reads history at most twice. A definite Keeper failure
+  clears the block.
+- An empty Keeper read can release an `unknown` intent as `absent` after
+  five minutes. A later admission can restore the block. A `pending`
+  intent stays blocked through an empty read and clears only on a
+  terminal outcome.
+- An intent marked `not_sent` failed before the request left the machine
+  and leaves trading available. For `RECENT_OPEN_PENDING`, check the recent
+  open with `intent_status`. Use `allow_concurrent_open=true` only with the
+  person's explicit approval for another open. The account-wide block
+  still applies to unknown or pending intents.
+- Use `sai --json logs tail -n 50 --event intent` to trace local status
+  changes. Filter on `keeper.request` to see the submit transport result.
+  Use Keeper's record from `intent status` to determine the trade outcome.
+  [CLI log fields](cli.md#logs)
+- `sai doctor` reconciles unknown intents by reading Keeper.
 
 ## Digest Confirmation in MCP
 
@@ -106,16 +115,18 @@ Each preview returns `previewDigest`. A `trade_*` call must send it back as
 input `preview_digest`, and a market `trade_open` must also send the
 preview's `referencePrice` as `reference_price`. The server rebuilds the
 trade and refuses with `PREVIEW_MISMATCH` or `PRICE_MOVED` when the account,
-the intent, the margin quote, or the quoted price no longer match. Nothing is
-submitted on a refusal. Show the fresh preview from the result and ask again.
+intent, position quote, or quoted price fails the confirmation check.
+Nothing is submitted on a refusal. Show the fresh preview from the result
+and ask again.
 
 `PRICE_MOVED` is the quote check from rule 3. Passing it does not cap the
 fill at the confirmed price plus the slippage.
 
-The digest of a partial close covers the computed collateral reduction, not
-the position's leverage. Preview again right before submitting if the
-position may have changed. [mcp.md](mcp.md#preview-confirm-then-trade) lists
-what each digest covers.
+The partial-close digest covers the close percentage, starting collateral
+and leverage, and the closed notional shown in field
+`quote.closedNotionalUsd`. A leverage-only change requires a new confirmation
+even when the collateral reduction is the same.
+[mcp.md](mcp.md#preview-confirm-then-trade) lists what each digest covers.
 
 ## CLI Trade Commands
 
@@ -160,8 +171,8 @@ approval still describes the trade:
   the position doubles before submit, the live command closes 100 USDC. Ask
   the person to approve the percentage of whatever the position is at submit,
   and say so in those words. If they approve a fixed amount, use MCP tools
-  `preview_partial_close` and `trade_partial_close`, whose digest binds the
-  computed reduction.
+  `preview_partial_close` and `trade_partial_close`. Show the person the
+  collateral reduction and closed notional from the preview.
 - **Margin** takes an amount, `--direction add|remove --amount USDC`, and
   computes the target leverage from the position at submit. The dry run's
   target is a quote: adding 25 USDC to 100 USDC of collateral at 5x previews
@@ -192,9 +203,6 @@ What each command checks:
 - **Close and cancel.** `trade close ID` closes an open position. To cancel a
   pending limit or stop order, add `--cancel-order`. Without the flag the CLI
   sends a close-position intent for that ID.
-
-An executed trade stays pending locally until the CLI sees matching indexed
-trade history.
 
 ## What the Session Can Do
 

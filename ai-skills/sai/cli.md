@@ -22,6 +22,8 @@ an agent has no use for.
 ```bash
 sai --json market list
 sai --json market prices
+sai account overview
+sai --as 0xYOUR_ADDR --json account overview
 sai --json account positions 0xYOUR_ADDR
 sai --json account balances 0xYOUR_ADDR
 sai --json account history 0xYOUR_ADDR
@@ -30,6 +32,12 @@ sai --json watch price 3
 
 - `market list` returns Keeper's borrowing markets, and `market prices` the
   current indexed prices.
+- `account overview` reports Sai funds and credits, position risk and
+  unrealized PnL, orders, local trade blockers, and session expiry. It reads
+  the active account by default. Pass `--as ADDR` to read another account,
+  including one that has never connected. Check each section's `fetchedAt`,
+  source age when available, and any `error`. Other sections still return
+  data when a read fails. Queued market orders await the next oracle price.
 - `account positions ADDR` lists positions and pending orders.
   `account balances ADDR` reads one balance snapshot. `account history
   ADDR` reads trade history. These reads need no sign-in.
@@ -44,20 +52,33 @@ Sai Web.
 
 Trading needs a Sai session. When the person asks you to connect Sai:
 
-1. Ask them to copy their session token with the **Connect Sai CLI / MCP**
-   button in Sai Web. If their Sai Web has no such button, ask them to run
-   `sai auth login NAME` in their own terminal (below).
-2. Run `sai --json auth import`. Without a terminal it reads the clipboard,
-   stores the token, clears the clipboard, and prints `addr`, `expiresAt`,
-   and `endpoint`.
+1. Ask them to open the wallet menu on Sai Web Mainnet and select **Connect
+   Sai CLI / MCP** beside **Send to phone**. The button appears for the
+   selected, connected wallet with an active trading session. Ask them to
+   check the expiry and click **Copy session token**. If they can't use the
+   button, they can sign in with a Foundry keystore as described below.
+2. Run `sai --json --endpoint https://sai-keeper.nibiru.fi/query auth import`
+   without a terminal. The command reads the clipboard, stores the token,
+   and prints `addr`, `expiresAt`, and `endpoint`. It tries to clear the
+   clipboard if it still holds the token.
 3. If your commands run in a pseudo-terminal, `auth import` shows a hidden
    prompt instead. Send only an empty line, which makes it read the
    clipboard.
 4. If it reports that no clipboard command works, as over SSH, ask the person
-   to run `sai auth import` in their own terminal, then continue.
+   to run the dialog's `sai auth import` command in their own terminal. They
+   can paste the token at the hidden prompt or press Enter to read the
+   clipboard.
 
 Never ask the person to paste the token into the chat. `auth import` does not
 accept the token as an argument, environment variable, or piped input.
+
+The import command pins Mainnet for that invocation only. Check the session
+with `sai --endpoint https://sai-keeper.nibiru.fi/query auth status`. Later CLI
+commands and any MCP server using the session must target the same Keeper
+endpoint. To save Mainnet as the default, run
+`sai config set keeper.endpoint https://sai-keeper.nibiru.fi/query`.
+Update any conflicting `--endpoint` or `SAI_ENDPOINT` overrides and restart
+running MCP servers to pick up the change.
 
 A person with a Foundry keystore can run `sai auth login NAME` in their own
 terminal instead. `NAME` is a keystore in `~/.foundry/keystores`, and `cast`
@@ -73,15 +94,27 @@ Once connected, commands need no prompt until the session expires.
 | `sai auth list` | Every connected account, its expiry, and which is active. |
 | `sai auth use ADDR` | Switch the active account. Only when the person asks. |
 | `sai --as ADDR ...` | Run one command as another connected account. |
+| `sai auth renew [ADDR]` | Renew a keystore session with its saved key name. Uses the active account by default and preserves the active selection. |
 | `sai auth logout [ADDR]` | Remove one account, by default the active one. |
+
+Auth status, auth list, doctor, and the overview report when a session
+has less than three days left. Doctor reports the warning and suggested
+command in its session check. In auth and overview JSON, look for
+`expiryWarning` and `renewalCommand`. Ask the person to run the renewal
+command in their own terminal if the key prompts for a password. For an
+imported session, ask them to copy a fresh Sai Web token and run
+`sai auth import`. An older keystore session without a saved key name needs
+`sai auth login NAME` once.
 
 Each sign-in adds an account and makes it active. If the person asks what the
 token is, tell them:
 
 - It is the same session token Sai Web keeps in the browser.
 - It lasts as long as Keeper issues it, 30 days in production.
-- It authorizes all trading on the funds deposited in their Sai account.
-  Withdrawals still need their wallet.
+- Anyone with the token can trade with their Sai Balance and request
+  one-click withdrawals of idle funds. Those withdrawals can only go to
+  the wallet that owns the session. Keep the token out of clipboard sync,
+  chats, and shared notes.
 - Keeper cannot revoke it. `sai auth logout` deletes only the local copy, and
   signing out of Sai Web does not sign out the CLI.
 
@@ -113,9 +146,10 @@ sai config unset keeper.endpoint
 A flag overrides a variable, which overrides the file, which overrides the
 mainnet default. `config list` shows each key's value and its source: `flag`,
 `env`, `file`, `default`, `derived`, or `invalid`. `invalid` marks a `logs.*`
-value sai could not read, which turns logging off. Change settings with `sai config set`
-and `sai config unset`. Do not edit the file or an MCP client's config by
-hand.
+value sai could not read, which turns logging off. Use `sai config set`
+and `sai config unset` for routine settings changes. If doctor reports
+an invalid config file or an MCP registration that needs a manual edit,
+follow the check's `fix`.
 
 ### Switch Networks
 
@@ -146,11 +180,10 @@ When a command fails in a way you cannot explain, run:
 sai --json doctor
 ```
 
-Doctor checks the install, the session, the intent ledger, and the Keeper
-HTTP, WebSocket, and LCD endpoints. It fixes what is safe to fix: file modes
-under `$SAI_HOME/trader`, the ledger schema, and unknown intents it can
-settle by reading Keeper. It never trades, never rewrites the session, and
-never prints the token.
+Doctor checks the install, configuration, MCP registrations, session,
+intent ledger, and Keeper HTTP, WebSocket, and LCD endpoints. By default it
+repairs recognized stale Sai registrations, tightens file permissions,
+migrates the ledger, and reconciles unknown intents by reading Keeper.
 
 - Each check has a `status` of `pass`, `fixed`, `warn`, `fail`, or `skipped`,
   and a `fix` command when one applies. `changes` lists what doctor changed.
@@ -158,6 +191,11 @@ never prints the token.
   their fixes.
 - `--no-fix` reports without changing anything. `--offline` skips the network
   checks.
+- Checks named `mcp.claude`, `mcp.codex`, and `mcp.cursor` report on
+  detected clients. Doctor repairs recognized stale launchers when it has a
+  stable replacement and can edit the registration. Follow the check's
+  `fix` when it requires a manual edit, and reconnect the client after a
+  repair.
 - Doctor exits 1 while any check still fails.
 
 ## Logs
@@ -214,8 +252,10 @@ sai update
 ```
 
 - `sai update` installs the latest release over the current install. The
-  `sai` path and everything under `~/.sai` stay the same, so MCP
-  registrations keep working. If a step fails, the previous version stays.
+  launcher and Sai data stay in place. If installation fails, the previous
+  version stays. After a successful install, the updater attempts the same
+  MCP repair as doctor. Read the client results in the update output or in
+  the `update.mcp_repair` log event when the updater reports repairs or failures.
 - `sai update --check` only reports the installed and latest versions.
 - sai also updates by itself. With `update.auto` at its default `true`, a
   command a person runs in a terminal starts an update in the background at
@@ -258,5 +298,7 @@ If `sai skill` answers "No such command", the installed CLI predates it. Use
 
 `trade open`, `trade close`, `trade partial-close`, `trade tpsl`, `trade
 leverage`, and `trade margin` submit intents, and `intent local` and `intent
-status` follow them. [trading-safety.md](trading-safety.md) has the commands,
-the dry-run examples, and the rules.
+status` follow them. When a keyed status check returns `outcome: pending`,
+follow the `hint` and check the same key again before trading.
+[Trading Safety](trading-safety.md) has the dry-run commands and confirmation
+rules.

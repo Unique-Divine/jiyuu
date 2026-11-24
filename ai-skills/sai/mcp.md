@@ -34,6 +34,14 @@ sai mcp uninstall codex
 - In `mcp list`, `current` is true when the entry runs the command `install`
   would register.
 
+For a client that can no longer launch Sai, run
+`sai --json doctor --no-fix` to inspect its registration. Run
+`sai --json doctor` to repair recognized stale Sai launchers. This covers
+the retired `sai-mcp` executable and recognized `sai mcp serve` entries
+that point to a missing executable or the uv cache. Follow the check's
+`fix` when it calls for manual intervention.
+[Diagnose With `sai doctor`](cli.md#diagnose-with-sai-doctor)
+
 The server resolves its endpoints once, at start: flags after `sai mcp
 serve`, then `SAI_*` variables, then `~/.sai/config.toml`, then mainnet. To
 point it at another network, set both the Keeper and LCD endpoints as
@@ -54,6 +62,7 @@ logs tail --surface mcp` in a terminal reads them ([cli.md](cli.md#logs)).
 | `auth_status`, `auth_list` | The active account, and every connected account |
 | `auth_use` | Switch the active account. Also switches it for the CLI. |
 | `market_list`, `market_prices` | Markets and current indexed prices |
+| `account_overview` | Sai funds, position risk, open and queued orders, local trade blockers, and session expiry |
 | `account_positions`, `account_balances`, `account_history` | Reads for one account |
 | `intent_local`, `intent_status` | Locally recorded intents, and Keeper's record of them |
 | `preview_open`, `preview_close`, `preview_partial_close`, `preview_tpsl`, `preview_leverage`, `preview_margin` | What a trade would do. Submits nothing. |
@@ -63,10 +72,21 @@ Account reads take an optional `addr`. Without one they read the active
 account and report `addrSource` as `session`. Say so to the person, and pass
 `addr` to read any other account.
 
+For an account summary, call `account_overview`. Pass `addr` explicitly to
+read an account with no local session. Report any failed section that
+matters to the question and check source age separately from fetch time.
+
+To reconcile a trade, pass its key to `intent_status`. If the result has
+`outcome: pending`, follow its `hint` and check the same key again before
+trading. [Unknown and Pending Intents](trading-safety.md#unknown-and-pending-intents)
+
 ## Sign-In
 
 The server lists every tool whether or not anyone is signed in. Each
 `trade_*` call checks the session of the account it acts as.
+
+When `mcp_info.session.expiryWarning` is present, tell the person when
+the session expires and pass along the session's `renewalCommand`.
 
 | `mcp_info.trading.reason` | A `trade_*` call returns | Meaning |
 | --- | --- | --- |
@@ -108,15 +128,11 @@ the one the person confirmed. The digest covers:
 
 - Every trade: the account and the intent the arguments produce.
 - `trade_open` for a market order: also the confirmed `reference_price`.
-- `trade_margin`: also the whole margin quote computed from the position. If
-  the position changed, the quote changes and the digest no longer matches.
-- `trade_partial_close`: the collateral reduction computed from the position.
-  It does not cover the position's leverage. If leverage changes after the
-  preview and the same reduction is still valid, the digest matches and the
-  trade submits. The server also reads the position twice during the live
-  call and refuses when collateral or leverage differ between those two
-  reads, which catches a change during the call, not one since the preview.
-  Preview again right before submitting when the position may have changed.
+- `trade_margin` also binds the full margin quote, including the position's
+  starting collateral and leverage.
+- `trade_partial_close` also binds the close percentage, starting collateral
+  and leverage, and quoted closed notional in field `quote.closedNotionalUsd`.
+  Show the closed notional to the person before asking for confirmation.
 
 ### Market Opens: Quote Check and Fill Bound
 
