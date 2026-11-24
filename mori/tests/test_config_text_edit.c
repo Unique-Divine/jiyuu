@@ -763,6 +763,28 @@ TEST(config_text_managed_block_status_reports_foreign_module) {
     PASS();
 }
 
+#ifndef _WIN32
+TEST(config_text_rejects_invalid_path_bytes) {
+    char dir[CTE_PATH_CAP], path[CTE_PATH_CAP];
+    ASSERT_EQ(cte_fixture(dir, sizeof(dir), path, sizeof(path)), 0);
+    static const char *const rejected[] = {
+        "config-\xff.md",
+        "config-\n.md",
+        "config-\xc2\x85.md",
+        "config-\xef\xbb\xbf.md",
+    };
+    for (size_t i = 0; i < sizeof(rejected) / sizeof(rejected[0]); i++) {
+        int len = snprintf(path, sizeof(path), "%s/%s", dir, rejected[i]);
+        ASSERT_TRUE(len > 0 && (size_t)len < sizeof(path));
+        ASSERT_EQ(cbm_text_upsert_managed_block(path, CTE_BEGIN, CTE_END, "owned"), -1);
+        ASSERT_EQ(cbm_text_managed_block_status(path, CTE_BEGIN, CTE_END), -1);
+        ASSERT_EQ(access(path, F_OK), -1);
+    }
+    th_cleanup(dir);
+    PASS();
+}
+#endif
+
 SUITE(config_text_edit) {
     RUN_TEST(config_text_managed_insert_preserves_bom_comments_and_is_idempotent);
     RUN_TEST(config_text_managed_replace_preserves_crlf_surroundings);
@@ -777,6 +799,7 @@ SUITE(config_text_edit) {
     RUN_TEST(config_text_rejects_oversized_existing_file);
     RUN_TEST(config_text_rejects_non_regular_paths);
 #ifndef _WIN32
+    RUN_TEST(config_text_rejects_invalid_path_bytes);
     RUN_TEST(config_text_rejects_links_privileged_mode_and_preserves_metadata);
     RUN_TEST(config_text_follows_user_owned_symlink_in_place);
     RUN_TEST(config_text_owned_document_mode_publishes_exact_bytes_atomically);

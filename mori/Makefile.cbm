@@ -1050,8 +1050,11 @@ NATIVE_ENGINE_TEST_DEFAULT_TARGET := $(addsuffix -unknown-linux-$(NATIVE_ENGINE_
 NATIVE_ENGINE_TEST_SYSTEM_LIBS += -ldl -lrt -lutil
 endif
 NATIVE_ENGINE_TEST_RUST_TARGET ?= $(NATIVE_ENGINE_TEST_DEFAULT_TARGET)
-NATIVE_ENGINE_TEST_TARGET_DIR := $(abspath $(BUILD_DIR))/native-engine-cargo
-NATIVE_ENGINE_TEST_ARCHIVE := $(NATIVE_ENGINE_TEST_TARGET_DIR)/$(if $(NATIVE_ENGINE_TEST_RUST_TARGET),$(NATIVE_ENGINE_TEST_RUST_TARGET)/)debug/libjiyuu_mori.a
+NATIVE_ENGINE_TARGET_DIR := $(abspath $(BUILD_DIR))/native-engine-cargo
+NATIVE_ENGINE_TEST_TARGET_DIR := $(abspath $(BUILD_DIR))/native-engine-test-cargo
+NATIVE_ENGINE_ARCHIVE_PATH := $(if $(NATIVE_ENGINE_TEST_RUST_TARGET),$(NATIVE_ENGINE_TEST_RUST_TARGET)/)debug/libjiyuu_mori.a
+NATIVE_ENGINE_ARCHIVE := $(NATIVE_ENGINE_TARGET_DIR)/$(NATIVE_ENGINE_ARCHIVE_PATH)
+NATIVE_ENGINE_TEST_ARCHIVE := $(NATIVE_ENGINE_TEST_TARGET_DIR)/$(NATIVE_ENGINE_ARCHIVE_PATH)
 NATIVE_ENGINE_TEST_SOURCES := jiyuu-mori/Cargo.toml jiyuu-mori/build.rs ../Cargo.lock ../Cargo.toml \
                               $(shell find jiyuu-mori/src -name '*.rs' -type f)
 
@@ -1090,17 +1093,22 @@ $(BUILD_DIR):
 
 # A nonrecursive recipe keeps make -n read-only. Cargo cannot use the
 # GNU Make pipe jobserver from this recipe, so pass an explicit worker cap.
-$(NATIVE_ENGINE_TEST_ARCHIVE): $(NATIVE_ENGINE_TEST_SOURCES) Makefile.cbm | $(BUILD_DIR)
+$(NATIVE_ENGINE_ARCHIVE): NATIVE_ENGINE_CARGO_DIR := $(NATIVE_ENGINE_TARGET_DIR)
+$(NATIVE_ENGINE_ARCHIVE): NATIVE_ENGINE_CARGO_FEATURES := native-engine-abi
+$(NATIVE_ENGINE_TEST_ARCHIVE): NATIVE_ENGINE_CARGO_DIR := $(NATIVE_ENGINE_TEST_TARGET_DIR)
+$(NATIVE_ENGINE_TEST_ARCHIVE): NATIVE_ENGINE_CARGO_FEATURES := native-engine-fixtures
+$(NATIVE_ENGINE_ARCHIVE) $(NATIVE_ENGINE_TEST_ARCHIVE): $(NATIVE_ENGINE_TEST_SOURCES) Makefile.cbm | $(BUILD_DIR)
 	env -u CARGO_FEATURE_C_BACKEND -u CARGO_MAKEFLAGS -u MAKEFLAGS -u MFLAGS \
 		CARGO_BUILD_JOBS="$(or $(CARGO_BUILD_JOBS),$(patsubst -j%,%,$(filter-out -j,$(filter -j%,$(MAKEFLAGS)))),2)" \
 		$(if $(filter yes,$(IS_APPLE_TARGET)),MACOSX_DEPLOYMENT_TARGET=$(MACOS_MIN_VERSION)) \
 		CC="$(CC)" cargo rustc --locked --manifest-path jiyuu-mori/Cargo.toml --lib --no-default-features \
-		--target-dir "$(NATIVE_ENGINE_TEST_TARGET_DIR)" \
+		--target-dir "$(NATIVE_ENGINE_CARGO_DIR)" \
 		$(if $(NATIVE_ENGINE_TEST_RUST_TARGET),--target "$(NATIVE_ENGINE_TEST_RUST_TARGET)") \
-		--features native-graphql-fixtures --crate-type staticlib
+		--features "$(NATIVE_ENGINE_CARGO_FEATURES)" --crate-type staticlib
 	@test -f "$@" && touch "$@"
 
-.PHONY: native-engine-test-archive
+.PHONY: native-engine-archive native-engine-test-archive
+native-engine-archive: $(NATIVE_ENGINE_ARCHIVE)
 native-engine-test-archive: $(NATIVE_ENGINE_TEST_ARCHIVE)
 
 # ── Foundation-only test (fast, no extraction) ───────────────────
@@ -1446,11 +1454,11 @@ $(BUILD_DIR)/.build-config: build-config-check | $(BUILD_DIR)
 	else mv -f $@.tmp $@; rm -f $(BUILD_DIR)/codebase-memory-mcp; \
 	echo "=== build config changed -> full rebuild: $(BUILD_CONFIG_SIG) ==="; fi
 
-$(BUILD_DIR)/codebase-memory-mcp: $(MAIN_SRC) $(PROD_SRCS) $(EXTRACTION_SRCS) $(AC_LZ4_SRCS) $(ZSTD_SRCS) $(SQLITE_WRITER_SRC) $(OBJS_VENDORED_PROD) $(BUILD_DIR)/.build-config $(PROJECT_HDRS) $(NATIVE_ENGINE_TEST_ARCHIVE) | $(BUILD_DIR)
+$(BUILD_DIR)/codebase-memory-mcp: $(MAIN_SRC) $(PROD_SRCS) $(EXTRACTION_SRCS) $(AC_LZ4_SRCS) $(ZSTD_SRCS) $(SQLITE_WRITER_SRC) $(OBJS_VENDORED_PROD) $(BUILD_DIR)/.build-config $(PROJECT_HDRS) $(NATIVE_ENGINE_ARCHIVE) | $(BUILD_DIR)
 	$(CC) $(CFLAGS_PROD) -o $@ \
 		$(MAIN_SRC) $(PROD_SRCS) \
 		$(EXTRACTION_SRCS) $(AC_LZ4_SRCS) $(ZSTD_SRCS) $(SQLITE_WRITER_SRC) \
-		$(OBJS_VENDORED_PROD) $(NATIVE_ENGINE_TEST_ARCHIVE) \
+		$(OBJS_VENDORED_PROD) $(NATIVE_ENGINE_ARCHIVE) \
 		$(LDFLAGS) $(NATIVE_ENGINE_TEST_SYSTEM_LIBS)
 
 cbm: $(BUILD_DIR)/codebase-memory-mcp
@@ -1534,12 +1542,12 @@ frontend:
 embed: frontend
 	scripts/embed-frontend.sh graph-ui/dist $(BUILD_DIR)/embedded
 
-cbm-with-ui: embed $(OBJS_VENDORED_PROD) $(NATIVE_ENGINE_TEST_ARCHIVE)
+cbm-with-ui: embed $(OBJS_VENDORED_PROD) $(NATIVE_ENGINE_ARCHIVE)
 	$(CC) $(CFLAGS_PROD) -o $(BUILD_DIR)/codebase-memory-mcp \
 		$(MAIN_SRC) $(PROD_SRCS_WITH_ASSETS) \
 		$(EXTRACTION_SRCS) $(AC_LZ4_SRCS) $(ZSTD_SRCS) $(SQLITE_WRITER_SRC) \
 		$(OBJS_VENDORED_PROD) \
-		$(wildcard $(BUILD_DIR)/embedded/embed_*.o) $(NATIVE_ENGINE_TEST_ARCHIVE) \
+		$(wildcard $(BUILD_DIR)/embedded/embed_*.o) $(NATIVE_ENGINE_ARCHIVE) \
 		$(LDFLAGS) $(NATIVE_ENGINE_TEST_SYSTEM_LIBS)
 	@echo "Built with UI: $(BUILD_DIR)/codebase-memory-mcp"
 

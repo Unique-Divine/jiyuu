@@ -26,6 +26,7 @@ c-backend = ["native-engine-abi"]
 native-engine-abi = ["graphql-callbacks", "dep:libc", "dep:serde", "dep:serde_json", "dep:sha2"]
 graphql-callbacks = ["dep:rusqlite"]
 native-graphql-fixtures = ["native-engine-abi"]
+native-engine-fixtures = ["native-graphql-fixtures"]
 
 [dependencies]
 libc = { version = "0.2", optional = true }
