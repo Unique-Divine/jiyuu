@@ -33,7 +33,7 @@ impl Drop for Fixture {
 
 struct IndexSession {
     root: PathBuf,
-    routing: &'static str,
+    routing_override: Option<&'static str>,
     driver_override: Option<&'static str>,
     seen_logs: HashSet<PathBuf>,
 }
@@ -41,7 +41,7 @@ struct IndexSession {
 impl IndexSession {
     fn new(
         root: PathBuf,
-        routing: &'static str,
+        routing_override: Option<&'static str>,
         driver_override: Option<&'static str>,
     ) -> Self {
         let mut dirs = fs::DirBuilder::new();
@@ -50,7 +50,7 @@ impl IndexSession {
         dirs.create(root.join("rt")).unwrap();
         Self {
             root,
-            routing,
+            routing_override,
             driver_override,
             seen_logs: HashSet::new(),
         }
@@ -66,9 +66,12 @@ impl IndexSession {
             .env("CBM_CACHE_DIR", self.root.join("cache"))
             .env("CBM_RUNTIME_DIR", self.root.join("rt"))
             .env("CBM_PROFILE", "1")
-            .env("CBM_LOG_LEVEL", "info")
-            .env("MORI_IMPL_INDEX_MANIFEST", self.routing)
-            .env("MORI_IMPL_INDEX_ROUTE", self.routing);
+            .env("CBM_LOG_LEVEL", "info");
+        if let Some(routing) = self.routing_override {
+            command.env("MORI_IMPL_INDEX_ROUTE", routing);
+        } else {
+            command.env("MORI_IMPL_INDEX_MANIFEST", "rust");
+        }
         if let Some(drivers) = self.driver_override {
             command
                 .env("MORI_IMPL_FULL_BUILD_DRIVER", drivers)
@@ -109,7 +112,7 @@ impl IndexSession {
             })
             .collect();
         if let Some((generation, decision)) =
-            outcome.filter(|_| self.routing == "rust")
+            outcome.filter(|_| self.routing_override.is_none())
         {
             assert_eq!(witnesses.len(), 1, "{logs}");
             assert!(
@@ -172,7 +175,7 @@ impl IndexSession {
             .contains("msg=incremental.manifest_compare implementation=rust");
         assert_eq!(
             used_rust,
-            step.decision.is_some() && self.routing == "rust",
+            step.decision.is_some() && self.routing_override.is_none(),
             "{logs}"
         );
 
@@ -273,7 +276,7 @@ impl IndexSession {
         );
         eprintln!(
             "{} route kept the serving generation after ADR migration failed",
-            self.routing
+            self.routing_override.unwrap_or("default")
         );
     }
 }
@@ -294,7 +297,7 @@ struct Step {
 }
 
 #[test]
-fn rust_routing_preserves_native_update_paths_and_generation() {
+fn default_rust_routing_preserves_native_update_paths_and_generation() {
     let fixture = Fixture::new();
     let repo = fixture.0.join("source");
     fs::create_dir_all(repo.join("server")).unwrap();
@@ -349,8 +352,8 @@ fn rust_routing_preserves_native_update_paths_and_generation() {
     ];
 
     let mut native =
-        IndexSession::new(fixture.0.join("control"), "c", Some("c"));
-    let mut rust = IndexSession::new(fixture.0.join("candidate"), "rust", None);
+        IndexSession::new(fixture.0.join("control"), Some("c"), Some("c"));
+    let mut rust = IndexSession::new(fixture.0.join("candidate"), None, None);
     let mut previous_native = String::new();
     let mut previous_rust = String::new();
     let mut project: Option<String> = None;
@@ -371,11 +374,13 @@ fn rust_routing_preserves_native_update_paths_and_generation() {
             // Unrecognized driver settings continue to select the C implementations.
             let mut clean = IndexSession::new(
                 fixture.0.join("clean"),
-                "c",
+                Some("unrecognized"),
                 Some("unrecognized"),
             );
-            let (clean_name, _, _) = clean.index(&repo, &fresh);
+            let (clean_name, clean_generation, _) = clean.index(&repo, &fresh);
             assert_eq!(clean_name, name);
+            let (_, clean_after_noop, _) = clean.index(&repo, &steps[1]);
+            assert_eq!(clean_after_noop, clean_generation);
             let expected = clean.graph(&name);
             assert_eq!(native.graph(&name), expected);
             assert_eq!(rust.graph(&name), expected);
