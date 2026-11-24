@@ -1741,9 +1741,17 @@ static int cte_windows_legacy_remove(const char *path, const char *before, int r
     }
     ASSERT_EQ(cbm_toml_remove_legacy_table(path, "mcp_servers.cbm", CTE_BEGIN, CTE_END), result);
     if (expected) {
+        FILE *file = cbm_fopen(path, "rb");
+        ASSERT_NOT_NULL(file);
         char actual[256];
-        ASSERT_EQ(cte_read(path, actual, sizeof(actual)), 0);
-        ASSERT_STR_EQ(actual, expected);
+        size_t count = fread(actual, 1U, sizeof(actual), file);
+        int read_error = ferror(file);
+        int close_error = fclose(file);
+        size_t expected_length = strlen(expected);
+        ASSERT_EQ(read_error, 0);
+        ASSERT_EQ(close_error, 0);
+        ASSERT_EQ(count, expected_length);
+        ASSERT_MEM_EQ(actual, expected, expected_length);
     } else {
         ASSERT_FALSE(cbm_file_exists(path));
     }

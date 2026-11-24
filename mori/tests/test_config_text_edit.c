@@ -788,11 +788,12 @@ TEST(config_text_rejects_invalid_path_bytes) {
 #ifdef _WIN32
 static int cte_windows_path_boundary(const char *path, int accepted) {
     const char owned[] = "owned\n";
-    const char updated[] = "owned\n" CTE_BEGIN "\nnew\n" CTE_END "\n";
-    ASSERT_EQ(cte_write_bytes(path, owned, sizeof(owned) - 1U), 0);
+    const char original[] = "keep\n" CTE_BEGIN "\nold\n" CTE_END "\n";
+    const char updated[] = "keep\n" CTE_BEGIN "\nnew\n" CTE_END "\n";
+    ASSERT_EQ(cte_write_bytes(path, original, sizeof(original) - 1U), 0);
     ASSERT_EQ(cbm_text_managed_block_status(path, CTE_BEGIN, CTE_END), accepted ? 0 : -1);
     ASSERT_EQ(cbm_text_upsert_managed_block(path, CTE_BEGIN, CTE_END, "new\n"), accepted ? 0 : -1);
-    const char *after = accepted ? updated : owned;
+    const char *after = accepted ? updated : original;
     ASSERT(cte_assert_bytes(path, after, strlen(after)));
 
     ASSERT_EQ(cte_write_bytes(path, owned, sizeof(owned) - 1U), 0);
