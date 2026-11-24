@@ -17,6 +17,8 @@ unsafe extern "C" {
     fn ts_node_start_byte(node: RawNode) -> u32;
     fn ts_node_end_byte(node: RawNode) -> u32;
     fn ts_node_child_count(node: RawNode) -> u32;
+    fn ts_node_named_child_count(node: RawNode) -> u32;
+    fn ts_node_named_child(node: RawNode, index: u32) -> RawNode;
     fn ts_node_child(node: RawNode, index: u32) -> RawNode;
     fn ts_node_child_by_field_name(
         node: RawNode,
@@ -43,6 +45,12 @@ impl RawNode {
         // SAFETY: The caller keeps the borrowed tree live throughout iteration.
         let count = unsafe { ts_node_child_count(self) };
         (0..count).map(move |index| unsafe { ts_node_child(self, index) })
+    }
+
+    pub(crate) unsafe fn named_children(self) -> impl Iterator<Item = Self> {
+        // SAFETY: The caller keeps the borrowed tree live throughout iteration.
+        let count = unsafe { ts_node_named_child_count(self) };
+        (0..count).map(move |index| unsafe { ts_node_named_child(self, index) })
     }
 
     pub(crate) unsafe fn child_of_kind(self, name: &CStr) -> Option<Self> {
