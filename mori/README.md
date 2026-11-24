@@ -435,16 +435,16 @@ mori config set auto_index_limit 50000   # skip repos with more files
 
 ### Existing-Generation Routing
 
-Set `MORI_IMPL_INDEX_ROUTE=rust` when starting the daemon, or use a fresh
-`CBM_RUNTIME_DIR` so the worker inherits the setting. Rust selects the
-existing-generation route for an ordinary reindex. An exact live match
+In the linked `mori` executable, Rust selects the existing-generation
+route for an ordinary reindex by default. An exact live match
 ends the run without a copy. After C loads the staged manifest, Rust
 selects no-op, closure repair, full rebuild, or fatal failure. The
 `pipeline.index_route` worker log records the Rust decision. Use
 `CBM_PROFILE=1` to keep worker logs.
 
-C is the default for route selection. It owns the proofs and executes
-the selected route. `MORI_IMPL_INDEX_MANIFEST` selects the exact
+Set `MORI_IMPL_INDEX_ROUTE=c` before starting the daemon to use the C
+selector. C owns the proofs and executes the selected route with either
+selector. Set `MORI_IMPL_INDEX_MANIFEST=rust` to select the Rust exact
 manifest comparison independently.
 
 ### Full-Build Scheduling
