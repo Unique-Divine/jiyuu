@@ -17,7 +17,7 @@ struct WriteOps {
     format: WriteOp,
     coverage: WriteOp,
     doc_links: WriteOp,
-    fts: WriteOp,
+    fts: unsafe extern "C" fn(*mut StageWrite, bool) -> bool,
     advance: WriteOp,
     integrity: WriteOp,
     seal: WriteOp,
@@ -30,7 +30,7 @@ unsafe extern "C" fn cbm_rust_stage_write(
     ops: &WriteOps,
     surfaces_in_place: bool,
     doc_candidates_in_place: bool,
-    fts_wholesale: bool,
+    full_build: bool,
 ) -> bool {
     // SAFETY: C lends the stage and its matching callbacks for this call.
     unsafe {
@@ -45,7 +45,9 @@ unsafe extern "C" fn cbm_rust_stage_write(
         (ops.mark)(run, c"coverage_replace".as_ptr());
         ok = ok && (ops.doc_links)(run);
         (ops.mark)(run, c"doc_links".as_ptr());
-        ok = (!fts_wholesale || (ops.fts)(run)) && ok;
+        if full_build || ok {
+            ok = (ops.fts)(run, full_build) && ok;
+        }
         (ops.mark)(run, c"fts".as_ptr());
 
         ok = ok && (ops.advance)(run);
@@ -139,11 +141,23 @@ mod tests {
         format,
         coverage,
         doc_links,
-        fts,
+        fts_full,
+        fts_closure,
         advance,
         integrity,
         seal,
     );
+
+    unsafe extern "C" fn fts(run: *mut StageWrite, full_build: bool) -> bool {
+        // SAFETY: both callbacks borrow the same live trace as the caller.
+        unsafe {
+            if full_build {
+                fts_full(run)
+            } else {
+                fts_closure(run)
+            }
+        }
+    }
 
     unsafe extern "C" fn ignore_mark(_: *mut StageWrite, _: *const c_char) {}
 
@@ -163,12 +177,7 @@ mod tests {
 
     #[test]
     fn writes_full_and_closure_metadata_before_sealing() {
-        for (
-            surfaces_in_place,
-            doc_candidates_in_place,
-            fts_wholesale,
-            expected,
-        ) in [
+        for (surfaces_in_place, doc_candidates_in_place, full_build, expected) in [
             (
                 false,
                 false,
@@ -180,7 +189,7 @@ mod tests {
                     "format",
                     "coverage",
                     "doc_links",
-                    "fts",
+                    "fts_full",
                     "advance",
                     "integrity",
                     "seal",
@@ -195,6 +204,7 @@ mod tests {
                     "format",
                     "coverage",
                     "doc_links",
+                    "fts_closure",
                     "advance",
                     "integrity",
                     "seal",
@@ -210,6 +220,7 @@ mod tests {
                     "format",
                     "coverage",
                     "doc_links",
+                    "fts_closure",
                     "advance",
                     "integrity",
                     "seal",
@@ -227,7 +238,7 @@ mod tests {
                     &WRITE_OPS,
                     surfaces_in_place,
                     doc_candidates_in_place,
-                    fts_wholesale,
+                    full_build,
                 )
             });
             assert_eq!(trace.calls, expected);
@@ -237,7 +248,7 @@ mod tests {
     #[test]
     fn any_write_failure_prevents_success() {
         let cases: &[(&str, &[&str])] = &[
-            ("hashes", &["hashes", "coverage", "fts"]),
+            ("hashes", &["hashes", "coverage", "fts_full"]),
             (
                 "coverage",
                 &[
@@ -246,11 +257,11 @@ mod tests {
                     "doc_candidates",
                     "format",
                     "coverage",
-                    "fts",
+                    "fts_full",
                 ],
             ),
             (
-                "fts",
+                "fts_full",
                 &[
                     "hashes",
                     "surfaces",
@@ -258,7 +269,7 @@ mod tests {
                     "format",
                     "coverage",
                     "doc_links",
-                    "fts",
+                    "fts_full",
                 ],
             ),
         ];
@@ -280,10 +291,10 @@ mod tests {
             assert_eq!(&trace.calls, expected);
         }
         for (fail_at, last_call) in [
-            ("surfaces", "fts"),
-            ("doc_candidates", "fts"),
-            ("format", "fts"),
-            ("doc_links", "fts"),
+            ("surfaces", "fts_full"),
+            ("doc_candidates", "fts_full"),
+            ("format", "fts_full"),
+            ("doc_links", "fts_full"),
             ("advance", "advance"),
             ("integrity", "integrity"),
             ("seal", "seal"),
@@ -378,6 +389,29 @@ mod tests {
         release,
         discard,
     };
+
+    #[test]
+    fn closure_refresh_runs_only_after_metadata_succeeds() {
+        for (fail_at, last_call) in
+            [("doc_links", "doc_links"), ("fts_closure", "fts_closure")]
+        {
+            let mut trace = WriteTrace {
+                calls: Vec::new(),
+                fail_at,
+            };
+            // SAFETY: the driver and mocks borrow the live trace exclusively.
+            assert!(!unsafe {
+                cbm_rust_stage_write(
+                    (&raw mut trace).cast(),
+                    &WRITE_OPS,
+                    true,
+                    true,
+                    false,
+                )
+            });
+            assert_eq!(trace.calls.last(), Some(&last_call));
+        }
+    }
 
     #[test]
     fn finalization_rolls_back_only_after_destination_preparation() {

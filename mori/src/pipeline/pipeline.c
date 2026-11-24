@@ -3491,7 +3491,7 @@ static bool promote_mode_to_existing_coverage(cbm_pipeline_t *p) {
 static char *create_staging_path(const char *final_path);
 static char *create_staging_path_impl(const char *final_path, cbm_pipeline_t *frozen);
 static int publish_staged_impl(char *path, const cbm_pipeline_generation_t *generation,
-                               bool fts_wholesale, bool healthy, cbm_pipeline_t *frozen);
+                               bool full_build, bool healthy, cbm_pipeline_t *frozen);
 static int finalize_staged_impl(char *path, const char *destination, atomic_int *cancelled,
                                 bool healthy, cbm_pipeline_t *frozen);
 
@@ -3895,6 +3895,7 @@ struct cbm_stage_write {
     cbm_store_t *store;
     const cbm_pipeline_generation_t *generation;
     struct timespec started;
+    bool cancelled;
 };
 
 static bool stage_write_hashes(cbm_stage_write_t *run) {
@@ -3948,8 +3949,47 @@ static bool stage_write_doc_links(cbm_stage_write_t *run) {
     return publish_doc_links(run->store, run->generation) == CBM_STORE_OK;
 }
 
-static bool stage_write_fts(cbm_stage_write_t *run) {
-    return cbm_store_fts_rebuild(run->store, NULL, 0) == CBM_STORE_OK;
+static bool staged_generation_cancelled(void *opaque) {
+    atomic_int *cancelled = opaque;
+    return cancelled && atomic_load(cancelled);
+}
+
+static bool stage_write_fts(cbm_stage_write_t *run, bool full_build) {
+    cbm_store_t *store = run->store;
+    const cbm_pipeline_generation_t *generation = run->generation;
+    if (full_build) {
+        return cbm_store_fts_rebuild(store, NULL, 0) == CBM_STORE_OK;
+    }
+
+    int rc = cbm_store_begin(store);
+    bool began = rc == CBM_STORE_OK;
+    const char *phase = "begin";
+    if (began) {
+        phase = "refresh";
+        rc = cbm_store_fts_refresh_closure(store, staged_generation_cancelled,
+                                           generation->cancelled);
+        if (rc == CBM_STORE_NOT_FOUND) {
+            cbm_log_warn("delta.fts_insert_unavailable", "project", generation->project);
+            rc = CBM_STORE_OK;
+        }
+        if (rc == CBM_STORE_OK) {
+            phase = "commit";
+            rc = cbm_store_commit(store);
+        }
+    }
+    if (rc == CBM_STORE_OK) {
+        return true;
+    }
+
+    run->cancelled = rc == CBM_STORE_CANCELLED;
+    if (!run->cancelled) {
+        cbm_log_error("publish.fts_failed", "project", generation->project, "phase", phase,
+                      "error", cbm_store_error(store));
+    }
+    if (began) {
+        cbm_store_rollback(store);
+    }
+    return false;
 }
 
 static bool stage_write_advance(cbm_stage_write_t *run) {
@@ -3965,9 +4005,9 @@ static bool stage_write_seal(cbm_stage_write_t *run) {
 }
 
 /* Own stage_path until finalization takes over the stage file and its lock.
- * Closure repair has already patched its surfaces and row-level FTS data. */
+ * Closure repair refreshes FTS after all node mutations. */
 static int publish_staged_impl(char *stage_path, const cbm_pipeline_generation_t *generation,
-                               bool fts_wholesale, bool destination_known_healthy,
+                               bool full_build, bool destination_known_healthy,
                                cbm_pipeline_t *frozen) {
     static const cbm_stage_write_ops_t ops = {
         .hashes = stage_write_hashes,
@@ -3990,9 +4030,9 @@ static int publish_staged_impl(char *stage_path, const cbm_pipeline_generation_t
     bool ok = false;
     if (run.store) {
         cbm_log_info("pipeline.stage_publish", "implementation", "rust", "kind",
-                     fts_wholesale ? "dump" : "patched");
+                     full_build ? "dump" : "patched");
         ok = cbm_rust_stage_write(&run, &ops, generation->surfaces_in_place,
-                                  generation->doc_candidates_in_place, fts_wholesale);
+                                  generation->doc_candidates_in_place, full_build);
         cbm_store_close(run.store);
     }
     int rc;
@@ -4001,7 +4041,7 @@ static int publish_staged_impl(char *stage_path, const cbm_pipeline_generation_t
                                   destination_known_healthy, frozen);
     } else {
         discard_generation_frozen(stage_path, frozen);
-        rc = CBM_PIPELINE_PERSIST_FAILED;
+        rc = run.cancelled ? CBM_PIPELINE_ABORT_PRESERVE_DB : CBM_PIPELINE_PERSIST_FAILED;
     }
     free(stage_path);
     return rc;
@@ -4012,8 +4052,8 @@ int cbm_pipeline_publish_generation(const cbm_pipeline_generation_t *generation)
 }
 
 int cbm_pipeline_publish_staged(char *path, const cbm_pipeline_generation_t *generation,
-                                bool fts_wholesale, bool healthy) {
-    return publish_staged_impl(path, generation, fts_wholesale, healthy, NULL);
+                                bool full_build, bool healthy) {
+    return publish_staged_impl(path, generation, full_build, healthy, NULL);
 }
 
 char *cbm_pipeline_create_staging_path(const char *final_path) {

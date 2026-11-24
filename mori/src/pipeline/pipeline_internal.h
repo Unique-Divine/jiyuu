@@ -1717,7 +1717,7 @@ typedef struct {
     bool (*format)(cbm_stage_write_t *);
     bool (*coverage)(cbm_stage_write_t *);
     bool (*doc_links)(cbm_stage_write_t *);
-    bool (*fts)(cbm_stage_write_t *);
+    bool (*fts)(cbm_stage_write_t *, bool full_build);
     bool (*advance)(cbm_stage_write_t *);
     bool (*integrity)(cbm_stage_write_t *);
     bool (*seal)(cbm_stage_write_t *);
@@ -1725,7 +1725,7 @@ typedef struct {
 } cbm_stage_write_ops_t;
 
 bool cbm_rust_stage_write(cbm_stage_write_t *run, const cbm_stage_write_ops_t *ops,
-                          bool surfaces_in_place, bool doc_candidates_in_place, bool fts_wholesale);
+                          bool surfaces_in_place, bool doc_candidates_in_place, bool full_build);
 
 /* The store is closed before finalization. Preparing the destination may
  * quarantine the old generation, so late cancellation and rename failure
@@ -1966,10 +1966,10 @@ int cbm_pipeline_finalize_staged_generation(char *stage_path, const char *final_
                                             atomic_int *cancelled, bool destination_known_healthy);
 /* Metadata writes + FTS policy + integrity + seal + finalize for an
  * already-materialized staging DB. Takes ownership of stage_path. The dump
- * path passes fts_wholesale=true; the delta path passes false (its patch
- * wrote row-level FTS inserts). generation->gbuf is not read here. */
+ * path passes full_build=true; the closure path refreshes FTS in the stage
+ * after its last node mutation. generation->gbuf is unused here. */
 int cbm_pipeline_publish_staged(char *stage_path, const cbm_pipeline_generation_t *generation,
-                                bool fts_wholesale, bool destination_known_healthy);
+                                bool full_build, bool destination_known_healthy);
 
 /* mkstemp-minted staging sibling of final_path (exported for the delta
  * executor; the dump path uses it internally). malloc'd, caller frees. */

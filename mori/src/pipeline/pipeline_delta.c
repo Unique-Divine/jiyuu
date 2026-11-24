@@ -10,23 +10,14 @@
  * primitives exist only for the closure orchestration in
  * pipeline_incremental.c.
  *
- * Id discipline carries the design: node ids are AUTOINCREMENT and never
- * reused, the small in-RAM gbuf is pre-seeded with PROXY nodes carrying
- * their real database ids, and fresh nodes are numbered above the previous
- * generation's MAX(id) — so "id > max_db_id" is the complete, marker-free
- * definition of what the patch inserts, and every edge endpoint id is
- * database-valid by construction.
+ * The in-memory buffer is pre-seeded with proxies carrying their live
+ * database IDs. Nodes with IDs above the surviving maximum are candidates
+ * for insertion. The patch remaps candidates back to an existing row when
+ * their qualified name already survived.
  *
- * FTS policy: the nodes_fts table is contentless, so purged rows cannot be
- * deleted individually on existing databases; their rowids can never alias
- * a live node again (AUTOINCREMENT), so dead entries simply drop out of the
- * rowid join at query time. The patch inserts rows for exactly the new
- * nodes through cbm_store_fts_rebuild() — the SAME writer the wholesale
- * rebuild uses, so the two paths cannot index different column sets. This
- * path is the one most users actually hit: a hand-written INSERT here that
- * named only the identifier columns would leave nodes_fts.body NULL for
- * every node arriving by delta merge, invisibly, while a full reindex
- * looked perfect (#518/#519).
+ * The staged publisher rebuilds FTS after the patch and all later node
+ * pruning. Contentless indexes can retain postings for removed rows and
+ * those postings can affect both matches and corpus scores.
  */
 #include "foundation/constants.h"
 #include "pipeline/pipeline_internal.h"
@@ -1041,19 +1032,6 @@ int cbm_delta_patch(cbm_store_t *store, const char *project, cbm_gbuf_t *gbuf, i
     if (!ctx.failed && snapshot_count > 0 &&
         !delta_relink_snapshot(db, project, snapshot, snapshot_count)) {
         ctx.failed = true;
-    }
-
-    /* Row-level FTS for exactly the new nodes, through the shared writer —
-     * same columns, same tokenizer, same prose backfill as the wholesale
-     * rebuild. NOT_FOUND means the index could not be written at all (FTS5
-     * compiled out); search then runs without it, matching the dump path. */
-    if (!ctx.failed) {
-        int fts_rc = cbm_store_fts_rebuild(store, project, max_db_id);
-        if (fts_rc == CBM_STORE_NOT_FOUND) {
-            cbm_log_warn("delta.fts_insert_unavailable", "project", project);
-        } else if (fts_rc != CBM_STORE_OK) {
-            ctx.failed = true;
-        }
     }
 
     if (ctx.failed) {

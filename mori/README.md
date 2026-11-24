@@ -461,6 +461,10 @@ metadata writes, integrity checks, sealing, and the private stage rename
 and rollback. The `pipeline.stage_publish` log identifies a full dump
 or a patched stage. An exact live no-op skips those steps.
 
+Closure repair rebuilds full-text search from the live nodes in the staged
+graph. The first closure repair or full rebuild after upgrading clears stale
+search postings left by earlier versions.
+
 The outer Rust publication driver orders checks through the publication
 lease. C owns the open store and file operations. The
 `pipeline.source_publish` log records the staged result. Candidate native
