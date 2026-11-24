@@ -1,5 +1,8 @@
 //! Rust GraphQL implementation and registration for the C graph engine.
 
+#[cfg(any(feature = "native-engine-abi", test))]
+mod complexity;
+
 #[cfg(any(feature = "graphql-callbacks", test))]
 mod gqlgen;
 #[cfg(any(feature = "graphql-callbacks", test))]

@@ -572,7 +572,7 @@ PIPELINE_SRCS = \
     src/pipeline/pass_ci.c \
     src/pipeline/pass_similarity.c \
     src/pipeline/pass_semantic_edges.c \
-    src/pipeline/pass_complexity.c \
+    src/pipeline/pass_complexity_bridge.c \
     src/pipeline/pass_importance.c \
     src/pipeline/pass_cross_repo.c \
     src/pipeline/artifact.c \
@@ -1459,10 +1459,9 @@ cbm: $(BUILD_DIR)/codebase-memory-mcp
 # under -DCBM_AS_LIBRARY so its main is named cbm_c_main (and with
 # CBM_PROGRAM_NAME "mori", so `mori --version` prints `mori <version>`).
 # mori/jiyuu-mori's build.rs runs this target and links the archive whole
-# (+whole-archive). The archive omits the standalone C FTS writer because
-# Rust implements it. The binary rule compiles first-party code in one
-# compiler call; the library needs one object per source, so those get their
-# own rule here under LIBMORI_DIR.
+# (+whole-archive). The binary rule compiles first-party code in one compiler
+# call. The library needs one object per source, so those get their own rule
+# here under LIBMORI_DIR.
 # Members are appended with `ar q`, which keeps two members of the same base
 # name, and the archive is rebuilt from scratch so no stale member survives.
 #
