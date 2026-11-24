@@ -165,6 +165,22 @@ impl IndexSession {
             Some(("staged", "closure")) => Some("closure"),
             _ => None,
         };
+        let mut staged = logs.lines().filter(|line| {
+            line.contains("msg=pipeline.stage_publish implementation=rust")
+        });
+        if let Some(kind) = fts_mode.map(|mode| {
+            if mode == "full" {
+                "kind=dump"
+            } else {
+                "kind=patched"
+            }
+        }) {
+            assert!(
+                staged.next().is_some_and(|line| line.contains(kind)),
+                "{logs}"
+            );
+        }
+        assert!(staged.next().is_none(), "{logs}");
         let fts_witness = "msg=store.fts_rebuild implementation=rust";
         let fts_witnesses: Vec<_> = logs
             .lines()
@@ -322,6 +338,7 @@ impl IndexSession {
         self.check_route(&logs, Some(("staged", "full")));
         assert!(logs.contains("reason=adr_migrate_failed"), "{logs}");
         assert!(!logs.contains("msg=pipeline.full_build_driver"), "{logs}");
+        assert!(!logs.contains("msg=pipeline.stage_publish"), "{logs}");
         assert_eq!(
             logs.contains(
                 "msg=pipeline.source_publish implementation=rust staged_rc=-2"

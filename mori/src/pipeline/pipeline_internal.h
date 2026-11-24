@@ -1720,6 +1720,52 @@ int cbm_pipeline_source_publish_reference(cbm_source_publish_t *run,
 /* Register before any pipeline workers start. */
 void cbm_pipeline_set_source_publish(cbm_source_publish_fn publish);
 
+/* Full dumps and closure repairs use the same private-stage writer. These
+ * synchronous callbacks borrow the stage and its generation for one call. */
+typedef struct cbm_stage_write cbm_stage_write_t;
+typedef struct {
+    bool (*hashes)(cbm_stage_write_t *);
+    bool (*surfaces)(cbm_stage_write_t *);
+    bool (*doc_candidates)(cbm_stage_write_t *);
+    bool (*format)(cbm_stage_write_t *);
+    bool (*coverage)(cbm_stage_write_t *);
+    bool (*doc_links)(cbm_stage_write_t *);
+    bool (*fts)(cbm_stage_write_t *);
+    bool (*advance)(cbm_stage_write_t *);
+    bool (*integrity)(cbm_stage_write_t *);
+    bool (*seal)(cbm_stage_write_t *);
+    void (*mark)(cbm_stage_write_t *, const char *block);
+} cbm_stage_write_ops_t;
+
+typedef bool (*cbm_stage_write_fn)(cbm_stage_write_t *, const cbm_stage_write_ops_t *,
+                                   bool surfaces_in_place, bool doc_candidates_in_place,
+                                   bool fts_wholesale);
+
+/* The store is closed before finalization. Preparing the destination may
+ * quarantine the old generation, so late cancellation and rename failure
+ * must roll back before discarding the stage. */
+typedef struct cbm_stage_finalize cbm_stage_finalize_t;
+typedef struct {
+    int abort_preserve_db;
+    int persist_failed;
+    bool (*remove_sidecars)(cbm_stage_finalize_t *);
+    bool (*cancelled)(cbm_stage_finalize_t *);
+    bool (*prepare)(cbm_stage_finalize_t *);
+    bool (*rollback)(cbm_stage_finalize_t *);
+    bool (*rename)(cbm_stage_finalize_t *);
+    void (*release)(cbm_stage_finalize_t *);
+    void (*discard)(cbm_stage_finalize_t *);
+} cbm_stage_finalize_ops_t;
+
+typedef int (*cbm_stage_finalize_fn)(cbm_stage_finalize_t *, const cbm_stage_finalize_ops_t *);
+
+void cbm_pipeline_set_stage_publish(cbm_stage_write_fn write, cbm_stage_finalize_fn finalize);
+bool cbm_pipeline_stage_write_reference(cbm_stage_write_t *run, const cbm_stage_write_ops_t *ops,
+                                        bool surfaces_in_place, bool doc_candidates_in_place,
+                                        bool fts_wholesale);
+int cbm_pipeline_stage_finalize_reference(cbm_stage_finalize_t *run,
+                                          const cbm_stage_finalize_ops_t *ops);
+
 /* ── Incremental pipeline (pipeline_incremental.c) ───────────────── */
 
 typedef enum {

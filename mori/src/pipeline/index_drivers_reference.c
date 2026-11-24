@@ -56,3 +56,52 @@ int cbm_pipeline_source_publish_reference(cbm_source_publish_t *run,
     }
     return ops->commit(run);
 }
+
+bool cbm_pipeline_stage_write_reference(cbm_stage_write_t *run, const cbm_stage_write_ops_t *ops,
+                                        bool surfaces_in_place, bool doc_candidates_in_place,
+                                        bool fts_wholesale) {
+    bool ok = ops->hashes(run) && (surfaces_in_place || ops->surfaces(run)) &&
+              (doc_candidates_in_place || ops->doc_candidates(run)) && ops->format(run);
+    ops->mark(run, "writes");
+    ok = ops->coverage(run) && ok;
+    ops->mark(run, "coverage_replace");
+    ok = ok && ops->doc_links(run);
+    ops->mark(run, "doc_links");
+    ok = (!fts_wholesale || ops->fts(run)) && ok;
+    ops->mark(run, "fts");
+    ok = ok && ops->advance(run);
+    ops->mark(run, "generation");
+    ok = ok && ops->integrity(run);
+    ops->mark(run, "integrity");
+    ok = ok && ops->seal(run);
+    ops->mark(run, "seal");
+    return ok;
+}
+
+int cbm_pipeline_stage_finalize_reference(cbm_stage_finalize_t *run,
+                                          const cbm_stage_finalize_ops_t *ops) {
+    if (!ops->remove_sidecars(run)) {
+        ops->discard(run);
+        return ops->persist_failed;
+    }
+    if (ops->cancelled(run)) {
+        ops->discard(run);
+        return ops->abort_preserve_db;
+    }
+    if (!ops->prepare(run)) {
+        ops->discard(run);
+        return ops->persist_failed;
+    }
+    if (ops->cancelled(run)) {
+        bool restored = ops->rollback(run);
+        ops->discard(run);
+        return restored ? ops->abort_preserve_db : ops->persist_failed;
+    }
+    if (!ops->rename(run)) {
+        (void)ops->rollback(run);
+        ops->discard(run);
+        return ops->persist_failed;
+    }
+    ops->release(run);
+    return 0;
+}

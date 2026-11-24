@@ -463,6 +463,13 @@ works with
 
 ### Source Publication
 
+Full rebuilds and closure repairs use the Rust stage driver in the linked
+`mori` executable. It orders metadata writes, integrity checks, sealing,
+and the private stage rename and rollback. The
+`pipeline.stage_publish` worker log identifies a full dump or a patched
+stage. An exact live no-op skips these steps. The standalone C build
+keeps its reference sequence in `src/pipeline/index_drivers_reference.c`.
+
 After source indexing stages a graph, Rust handles the publication
 decisions by default in the linked `mori` executable. The
 `pipeline.source_publish` worker log records the staged result and Rust
