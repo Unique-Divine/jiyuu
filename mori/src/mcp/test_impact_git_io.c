@@ -5,6 +5,7 @@
 #include "foundation/compat.h"
 #include "foundation/compat_fs.h"
 #include "foundation/platform.h"
+#include "foundation/sanitized.h"
 #include "foundation/secure_random.h"
 #include "foundation/subprocess.h"
 
@@ -669,6 +670,13 @@ bool mori_git_io_history_file(const char *path, cbm_git_facts_error_t *error);
 size_t mori_git_io_output_budget(const cbm_git_facts_t *facts, size_t *remaining);
 bool mori_git_io_begin_batch(cbm_git_facts_t *facts, gf_batch_budget_t *budget);
 void mori_git_io_end_batch(cbm_git_facts_t *facts, const cbm_git_facts_error_t *error);
+void mori_git_io_msan_written(const void *address, size_t size);
+
+void mori_git_io_msan_written(const void *address, size_t size) {
+    (void)address;
+    (void)size;
+    CBM_MSAN_WRITTEN(address, size);
+}
 
 gf_projection_t *mori_git_io_projection(cbm_git_facts_t *facts) {
     return &facts->projection;

@@ -204,18 +204,33 @@ unsafe extern "C" {
         budget: *mut BatchBudget,
     ) -> bool;
     fn mori_git_io_end_batch(facts: *mut Facts, error: *mut Error);
+    fn mori_git_io_msan_written(address: *const std::ffi::c_void, size: usize);
 }
 
 fn success(ok: bool) -> Checked<()> {
     if ok { Ok(()) } else { Err(()) }
 }
 
-fn clear_error(error: &mut Error) {
-    *error = Error {
-        status: 0,
-        exit_code: -1,
-        diagnostic: [0; 512],
-    };
+// The native MSan build links an uninstrumented Rust archive. Mark only the
+// initialized region before handing it to C.
+unsafe fn mark_written<T>(address: *const T, count: usize) {
+    if count != 0 {
+        unsafe {
+            mori_git_io_msan_written(address.cast(), size_of::<T>() * count)
+        };
+    }
+}
+
+unsafe fn write_output<T>(out: *mut T, value: T) {
+    unsafe {
+        ptr::write(out, value);
+        mark_written(out, 1);
+    }
+}
+
+fn oid_argument(oid: &Oid, width: usize) -> *const c_char {
+    unsafe { mark_written(oid.as_ptr(), width + 1) };
+    oid.as_ptr().cast()
 }
 
 // The native contract serializes calls on one owner and excludes callback
@@ -245,6 +260,7 @@ impl Request {
                 error.diagnostic.fill(0);
                 let message = message.to_bytes();
                 error.diagnostic[..message.len()].copy_from_slice(message);
+                mark_written(error.diagnostic.as_ptr(), error.diagnostic.len());
             }
         }
         Err(())
@@ -278,13 +294,18 @@ impl Request {
         input: Option<Bytes>,
     ) -> Checked<Capture> {
         let mut capture = MaybeUninit::uninit();
+        let input = input.as_ref().map_or(null(), ptr::from_ref);
         success(unsafe {
+            mark_written(args.as_ptr(), args.len());
+            if !input.is_null() {
+                mark_written(input, 1);
+            }
             mori_git_io_run(
                 self.facts,
                 args.as_ptr(),
                 args.len() as c_int,
                 allow_one,
-                input.as_ref().map_or(null(), ptr::from_ref),
+                input,
                 capture.as_mut_ptr(),
                 self.error,
             )
@@ -350,6 +371,7 @@ impl Request {
         if self.in_batch {
             self.gate()?;
         }
+        unsafe { mark_written(copy, size) };
         Ok(copy.cast())
     }
 
@@ -494,14 +516,14 @@ impl Request {
             return self.fail(INVALID, c"Git root must be a worktree top-level");
         }
         let root = self.metadata(c"--show-toplevel", true)?;
-        unsafe { (*p).identity.root = root };
+        unsafe { write_output(&raw mut (*p).identity.root, root) };
         let git_dir = self.metadata(c"--absolute-git-dir", true)?;
         unsafe {
-            (*p).identity.git_dir = git_dir;
-            (*p).command_git_dir = git_dir;
+            write_output(&raw mut (*p).identity.git_dir, git_dir);
+            write_output(&raw mut (*p).command_git_dir, git_dir);
         }
         let common_dir = self.metadata(c"--git-common-dir", true)?;
-        unsafe { (*p).identity.common_dir = common_dir };
+        unsafe { write_output(&raw mut (*p).identity.common_dir, common_dir) };
         for (i, dir) in [git_dir, common_dir].into_iter().enumerate() {
             let dir = unsafe { CStr::from_ptr(dir) }.to_bytes();
             unsafe {
@@ -531,7 +553,7 @@ impl Request {
                 return self.fail(UNSUPPORTED, c"Unsupported Git object format");
             }
         };
-        unsafe { (*p).identity.oid_hex_length = width };
+        unsafe { write_output(&raw mut (*p).identity.oid_hex_length, width) };
         let shallow = self.metadata(c"--is-shallow-repository", false)?;
         if unsafe { CStr::from_ptr(shallow) } != c"false" {
             return self
@@ -540,8 +562,8 @@ impl Request {
         let head = self.resolve(c"HEAD")?;
         let base = self.resolve(base_ref)?;
         unsafe {
-            (*p).identity.head = head;
-            (*p).identity.base = base;
+            write_output(&raw mut (*p).identity.head, head);
+            write_output(&raw mut (*p).identity.base, base);
         }
         self.history_guard()?;
         if let Some(expected) = expected_head {
@@ -556,14 +578,14 @@ impl Request {
                 );
             }
         }
-        unsafe { (*p).command_git_dir = common_dir };
+        unsafe { write_output(&raw mut (*p).command_git_dir, common_dir) };
         self.history_guard()?;
         let result = self.run(
             &[
                 c"merge-base".as_ptr(),
                 c"--all".as_ptr(),
-                base.as_ptr().cast(),
-                head.as_ptr().cast(),
+                oid_argument(&base, width as usize),
+                oid_argument(&head, width as usize),
             ],
             true,
             None,
@@ -597,7 +619,9 @@ impl Request {
                 c"Multiple common ancestors are unsupported",
             );
         }
-        unsafe { (*p).identity.merge_base = first.unwrap() };
+        unsafe {
+            write_output(&raw mut (*p).identity.merge_base, first.unwrap())
+        };
         self.gate()
     }
 }
@@ -650,13 +674,18 @@ fn with_request<T>(
     error: *mut Error,
     operation: impl FnOnce(&Request) -> T,
 ) -> T {
-    let mut local = Error {
+    let mut local = MaybeUninit::uninit();
+    let error = if error.is_null() {
+        local.as_mut_ptr()
+    } else {
+        error
+    };
+    let cleared = Error {
         status: 0,
         exit_code: -1,
         diagnostic: [0; 512],
     };
-    let error = unsafe { error.as_mut() }.unwrap_or(&mut local);
-    clear_error(error);
+    unsafe { write_output(error, cleared) };
     operation(&Request {
         facts,
         error,
@@ -833,6 +862,7 @@ impl Request {
                 }
             }
             self.gate()?;
+            unsafe { mark_written(entries, count) };
         }
         self.topology_guard()?;
         Ok(Inventory { entries, count })
@@ -936,7 +966,8 @@ impl Request {
         else {
             return self.fail(COMMAND, c"Malformed Git tree object type");
         };
-        let Some(oid) = oid(&header[type_end + 1..], self.width()) else {
+        let width = self.width();
+        let Some(oid) = oid(&header[type_end + 1..], width) else {
             return self.fail(COMMAND, c"Invalid Git blob identity");
         };
         if &header[7..type_end] != b"blob" || !regular_mode(mode) {
@@ -946,7 +977,11 @@ impl Request {
             );
         }
         let result = self.run(
-            &[c"cat-file".as_ptr(), c"-s".as_ptr(), oid.as_ptr().cast()],
+            &[
+                c"cat-file".as_ptr(),
+                c"-s".as_ptr(),
+                oid_argument(&oid, width),
+            ],
             false,
             None,
         )?;
@@ -963,7 +998,11 @@ impl Request {
             );
         }
         let result = self.run(
-            &[c"cat-file".as_ptr(), c"blob".as_ptr(), oid.as_ptr().cast()],
+            &[
+                c"cat-file".as_ptr(),
+                c"blob".as_ptr(),
+                oid_argument(&oid, width),
+            ],
             false,
             None,
         )?;
@@ -1056,7 +1095,7 @@ impl Request {
             &[
                 c"merge-base".as_ptr(),
                 c"--is-ancestor".as_ptr(),
-                ancestor.as_ptr().cast(),
+                oid_argument(ancestor, self.width()),
                 descendant,
             ],
             true,
@@ -1105,7 +1144,7 @@ impl Request {
                 return Ok(None);
             }
         }
-        let names = self.names(ancestor.as_ptr().cast())?;
+        let names = self.names(oid_argument(ancestor, self.width()))?;
         if names.length != 0 && names.data.is_null() {
             return self.fail(COMMAND, c"Missing ancestor changed-path capture");
         }
@@ -1117,7 +1156,11 @@ impl Request {
 
     fn require_commit(&self, oid: &Oid) -> Checked<()> {
         let result = self.run(
-            &[c"cat-file".as_ptr(), c"-t".as_ptr(), oid.as_ptr().cast()],
+            &[
+                c"cat-file".as_ptr(),
+                c"-t".as_ptr(),
+                oid_argument(oid, self.width()),
+            ],
             false,
             None,
         )?;
@@ -1182,7 +1225,7 @@ extern "C" fn cbm_git_facts_inventory(
         let Ok(inventory) = request.inventory(revision) else {
             return false;
         };
-        unsafe { out.write(inventory) };
+        unsafe { write_output(out, inventory) };
         true
     })
 }
@@ -1191,7 +1234,10 @@ extern "C" fn cbm_git_facts_inventory(
 // which all-zero is valid. Clear all bytes before validating other arguments.
 fn clear_output<T>(out: *mut T) {
     if !out.is_null() {
-        unsafe { out.write_bytes(0, 1) };
+        unsafe {
+            out.write_bytes(0, 1);
+            mark_written(out, 1);
+        }
     }
 }
 
@@ -1227,7 +1273,7 @@ extern "C" fn cbm_git_facts_read_blob(
         })();
         match result {
             Ok(Some(blob)) => {
-                unsafe { out.write(blob) };
+                unsafe { write_output(out, blob) };
                 1
             }
             Ok(None) => 0,
@@ -1255,7 +1301,7 @@ extern "C" fn cbm_git_facts_diff(
         let Ok(diff) = request.diff() else {
             return false;
         };
-        unsafe { out.write(diff) };
+        unsafe { write_output(out, diff) };
         true
     })
 }
@@ -1294,8 +1340,10 @@ extern "C" fn cbm_git_facts_is_ancestor(
                     .fail(INVALID, c"Ancestry requires two full object IDs");
             };
             request.history_guard()?;
-            let result =
-                request.ancestry(&ancestor, descendant.as_ptr().cast())?;
+            let result = request.ancestry(
+                &ancestor,
+                oid_argument(&descendant, request.width()),
+            )?;
             request.history_guard()?;
             if result.out.length != 0 {
                 return request.fail(COMMAND, c"Unexpected ancestry stdout");
@@ -1332,7 +1380,7 @@ extern "C" fn cbm_git_facts_ancestor_changes(
         };
         match check() {
             Ok(Some(names)) => {
-                unsafe { out.write(names) };
+                unsafe { write_output(out, names) };
                 1
             }
             Ok(None) => 0,
@@ -1687,6 +1735,7 @@ impl Request {
             next += 1;
         }
         self.gate()?;
+        unsafe { mark_written(lines, input_len) };
         Ok(BatchPlan {
             objects: unsafe { slice::from_raw_parts_mut(objects, unique) },
             lines: unsafe { slice::from_raw_parts(lines, input_len) },
@@ -1737,6 +1786,7 @@ impl Request {
         }
         self.history_guard()?;
         self.gate()?;
+        unsafe { mark_written(items, count) };
         Ok(Batch {
             revision,
             commit,
@@ -1792,7 +1842,11 @@ extern "C" fn cbm_git_facts_read_blob_batch(
             input_limit: limits.max_input_bytes,
             input_used: 0,
         };
-        if !unsafe { mori_git_io_begin_batch(facts, &mut budget) } {
+        let budget = &raw mut budget;
+        if !unsafe {
+            mark_written(budget, 1);
+            mori_git_io_begin_batch(facts, budget)
+        } {
             return invalid();
         }
         let batch_call = Request {
@@ -1802,7 +1856,7 @@ extern "C" fn cbm_git_facts_read_blob_batch(
         let result = batch_call.blob_batch(request, limits);
         unsafe { mori_git_io_end_batch(facts, call.error) };
         let Ok(batch) = result else { return false };
-        unsafe { out.write(batch) };
+        unsafe { write_output(out, batch) };
         true
     })
 }
@@ -1857,8 +1911,8 @@ mod fixtures {
                 return false;
             };
             unsafe {
-                size.write(n);
-                length.write(header);
+                write_output(size, n);
+                write_output(length, header);
             }
             true
         })
