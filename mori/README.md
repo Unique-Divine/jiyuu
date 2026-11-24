@@ -481,6 +481,13 @@ Set `MORI_IMPL_MARKDOWN_EXTRACT=rust` to select Rust heading text extraction.
 The implementation borrows the same Tree-sitter tree to read ATX and Setext
 headings. Section identity, body extraction, and document linking are C.
 
+### Python Import Extraction
+
+Set `MORI_IMPL_PYTHON_IMPORTS=rust` when starting the daemon to read Python
+import statements through Rust. The worker debug event
+`extract.python_imports` identifies the backend. C emits the arena rows,
+applies the annotation-only import rules, and resolves names across files.
+
 ### Sharing a Graph With a Team
 
 `index_repository` with `persistence: true` writes
